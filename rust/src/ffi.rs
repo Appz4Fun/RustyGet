@@ -1036,11 +1036,6 @@ pub struct FeedItemCallbacks {
     pub field: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char, *mut *const c_char, *mut i64)>,
     /// GetSeason (0) or GetEpisode (1) after the title is parsed
     pub season_episode: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int) -> *const c_char>,
-    /// RegEx(pattern, bufSize): a handle
-    pub regex_new: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int) -> usize>,
-    /// RegEx::Match: -1 when it doesn't match, else GetMatchCount, with up to
-    /// `capacity` (start, length) pairs written
-    pub regex_match: Option<unsafe extern "C" fn(*mut std::ffi::c_void, usize, *const c_char, *mut [c_int; 2], c_int) -> c_int>,
     pub apply: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const FeedOptions)>,
     pub set_match: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, c_int)>,
 }
@@ -1092,18 +1087,6 @@ impl crate::feedfilter::Item for CItem<'_> {
 
     fn season_episode(&mut self, episode: bool) -> Option<Vec<u8>> {
         unsafe { c_text((self.cb.season_episode.expect("callbacks validated"))(self.cb.user, episode as c_int)) }
-    }
-
-    fn regex_new(&mut self, pattern: &[u8], buf_size: i32) -> usize {
-        let p = std::ffi::CString::new(pattern).unwrap_or_default();
-        unsafe { (self.cb.regex_new.expect("callbacks validated"))(self.cb.user, p.as_ptr(), buf_size) }
-    }
-
-    fn regex_match(&mut self, handle: usize, text: &[u8]) -> Option<Vec<(i32, i32)>> {
-        let t = std::ffi::CString::new(text).unwrap_or_default();
-        let mut groups = [[0 as c_int; 2]; 100];
-        let n = unsafe { (self.cb.regex_match.expect("callbacks validated"))(self.cb.user, handle, t.as_ptr(), groups.as_mut_ptr(), 100) };
-        (n >= 0).then(|| groups[..(n as usize).min(100)].iter().map(|g| (g[0], g[1])).collect())
     }
 
     fn apply(&mut self, o: &crate::feedfilter::Applied<'_>) {
@@ -1184,8 +1167,7 @@ pub unsafe extern "C" fn nzbget_rs_feed_filter_match(filter: *mut crate::feedfil
         return;
     }
     let cb = &*item;
-    if cb.field.is_none() || cb.season_episode.is_none() || cb.regex_new.is_none()
-        || cb.regex_match.is_none() || cb.apply.is_none() || cb.set_match.is_none()
+    if cb.field.is_none() || cb.season_episode.is_none() || cb.apply.is_none() || cb.set_match.is_none()
     {
         return;
     }
@@ -2074,177 +2056,6 @@ pub struct RsStr {
 
 fn rs_str(v: &[u8]) -> RsStr {
     RsStr { data: v.as_ptr().cast(), len: v.len() }
-}
-
-const NO_STR: RsStr = RsStr { data: std::ptr::null(), len: 0 };
-
-/// ExtensionLoader::V1's parsing of a script file's `len` bytes. Owns the
-/// result independently of the input. Null input is empty regardless of len;
-/// a missing classifier or unrepresentable length returns null.
-///
-/// # Safety
-/// Nonnull `data` is readable for `len` bytes (at most isize::MAX).
-/// `right_space` classifies a byte as C++ Util::TrimRight does and must not
-/// unwind. Rust panics abort rather than crossing the ABI.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_v1_parse(
-    data: *const c_char, len: usize, right_space: Option<extern "C" fn(c_int) -> c_int>,
-) -> *mut crate::extload::Script {
-    let Some(space) = right_space else { return std::ptr::null_mut() };
-    if len > isize::MAX as usize { return std::ptr::null_mut() }
-    ext_handle(crate::extload::parse(span(data, len), &|b| space(b as c_int) != 0))
-}
-
-fn ext_handle(script: Option<crate::extload::Script>) -> *mut crate::extload::Script {
-    script.map_or(std::ptr::null_mut(), |s| Box::into_raw(Box::new(s)))
-}
-
-/// Streaming variant: next returns 1 for a line, 0 for EOF, -1 for failure.
-/// A failure discards the partial parse. It is never called after the header
-/// terminator. Null callbacks return null.
-///
-/// # Safety
-/// `next` must not unwind. Its output is null (empty), or readable for len
-/// bytes (<= isize::MAX) until the next call. It may mutate only its context
-/// and the supplied output, not Rust-owned memory. `context` is passed through
-/// untouched. The classifier has the same contract as ext_v1_parse.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_v1_read(
-    next: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut RsStr) -> c_int>,
-    context: *mut std::ffi::c_void,
-    right_space: Option<extern "C" fn(c_int) -> c_int>,
-) -> *mut crate::extload::Script {
-    let (Some(next), Some(space)) = (next, right_space) else { return std::ptr::null_mut() };
-    let mut failed = false;
-    let mut lines = std::iter::from_fn(|| {
-        let mut line = NO_STR;
-        match next(context, &mut line) {
-            0 => None,
-            1 if line.len <= isize::MAX as usize => Some(span(line.data, line.len).to_vec()),
-            _ => { failed = true; None }
-        }
-    });
-    let script = crate::extload::parse_lines(&mut lines, &|b| space(b as c_int) != 0);
-    if failed { std::ptr::null_mut() } else { ext_handle(script) }
-}
-
-/// Frees a handle from nzbget_rs_ext_v1_parse.
-///
-/// # Safety
-/// `h` is null or a handle not yet freed.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_v1_free(h: *mut crate::extload::Script) {
-    if !h.is_null() {
-        drop(Box::from_raw(h));
-    }
-}
-
-/// The script kind bits (1 post-processing, 2 scan, 4 queue, 8 scheduler, 16 feed).
-///
-/// # Safety
-/// `h` is null (0) or a live handle.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_v1_kind(h: *const crate::extload::Script) -> c_int {
-    h.as_ref().map_or(0, |s| s.kind)
-}
-
-/// Script texts: 0 about (untrimmed), 1 queue events, 2 task time; script
-/// lists: 3 description line `i`, 4 requirement `i`. Borrowed from the handle.
-///
-/// # Safety
-/// `h` is null (empty) or a live handle.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_v1_text(h: *const crate::extload::Script, which: c_int, i: usize) -> RsStr {
-    let Some(s) = h.as_ref() else { return NO_STR };
-    match which {
-        0 => rs_str(&s.about),
-        1 => rs_str(&s.queue_events),
-        2 => rs_str(&s.task_time),
-        3 => s.description.get(i).map_or(NO_STR, |v| rs_str(v)),
-        4 => s.requirements.get(i).map_or(NO_STR, |v| rs_str(v)),
-        _ => NO_STR,
-    }
-}
-
-/// Counts: 0 description lines, 1 requirements, 2 options, 3 commands.
-///
-/// # Safety
-/// `h` is null (0) or a live handle.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_v1_count(h: *const crate::extload::Script, which: c_int) -> usize {
-    let Some(s) = h.as_ref() else { return 0 };
-    match which {
-        0 => s.description.len(),
-        1 => s.requirements.len(),
-        2 => s.options.len(),
-        3 => s.commands.len(),
-        _ => 0,
-    }
-}
-
-fn ext_item(s: &crate::extload::Script, command: c_int, i: usize) -> Option<&crate::extload::Item> {
-    if command != 0 { s.commands.get(i) } else { s.options.get(i) }
-}
-
-/// Option (`command` 0) or command (1) `i`: its texts - 0 section name, 1
-/// section prefix, 2 name, 3 action (commands), 4 description line `j` -
-/// borrowed from the handle.
-///
-/// # Safety
-/// `h` is null (empty) or a live handle.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_v1_item_text(h: *const crate::extload::Script, command: c_int, i: usize, field: c_int, j: usize) -> RsStr {
-    let Some(item) = h.as_ref().and_then(|s| ext_item(s, command, i)) else { return NO_STR };
-    match field {
-        0 => rs_str(&item.section.name),
-        1 => rs_str(&item.section.prefix),
-        2 => rs_str(&item.name),
-        3 => rs_str(&item.action),
-        4 => item.description.get(j).map_or(NO_STR, |v| rs_str(v)),
-        _ => NO_STR,
-    }
-}
-
-/// Option or command `i`: 0 whether its section is multi, 1 its description
-/// line count, 2 its select value count (options).
-///
-/// # Safety
-/// `h` is null (0) or a live handle.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_v1_item_count(h: *const crate::extload::Script, command: c_int, i: usize, which: c_int) -> usize {
-    let Some(item) = h.as_ref().and_then(|s| ext_item(s, command, i)) else { return 0 };
-    match which {
-        0 => item.section.multi as usize,
-        1 => item.description.len(),
-        2 => item.select.len(),
-        _ => 0,
-    }
-}
-
-/// Option `i`'s value (`j` == SIZE_MAX) or select value `j`: 1 with the
-/// number in `*num`, 0 with the text in `*text` (borrowed), -1 if none.
-///
-/// # Safety
-/// `h` is null or a live handle; `num` and `text` are null or writable,
-/// aligned, and disjoint from the handle and each other. A null required
-/// output returns -1; other outputs are left untouched. Borrowed text remains
-/// valid until the handle is freed and must not be mutated or freed.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_v1_select(h: *const crate::extload::Script, i: usize, j: usize, num: *mut f64, text: *mut RsStr) -> c_int {
-    use crate::extload::Select;
-    let Some(item) = h.as_ref().and_then(|s| s.options.get(i)) else { return -1 };
-    let value = if j == usize::MAX { Some(&item.value) } else { item.select.get(j) };
-    match value {
-        Some(Select::Num(n)) if !num.is_null() => {
-            *num = *n;
-            1
-        }
-        Some(Select::Str(t)) if !text.is_null() => {
-            *text = rs_str(t);
-            0
-        }
-        _ => -1,
-    }
 }
 
 /// NzbgetRsHttpResponse: WebDownloader::CheckResponse's decision.
@@ -3321,128 +3132,6 @@ pub unsafe extern "C" fn nzbget_rs_direct_need_rename_pars(pars: *const ParName,
         ((!p.filename.is_null()).then(|| CStr::from_ptr(p.filename)), if p.set_id.is_null() { c"" } else { CStr::from_ptr(p.set_id) })
     }).collect();
     crate::directrenamer::need_rename_pars(&pars) as c_int
-}
-
-/// NzbgetRsManifestSection.
-#[repr(C)]
-pub struct ManifestSection {
-    pub multi: c_int,
-    pub name: RsStr,
-    pub prefix: RsStr,
-}
-
-/// NzbgetRsManifestSelect: a number, or a string when is_string.
-#[repr(C)]
-pub struct ManifestSelect {
-    pub is_string: c_int,
-    pub number: f64,
-    pub string: RsStr,
-}
-
-/// NzbgetRsManifestOption.
-#[repr(C)]
-pub struct ManifestOptionOut {
-    pub section: ManifestSection,
-    pub name: RsStr,
-    pub display_name: RsStr,
-    pub description: *const RsStr,
-    pub description_count: usize,
-    pub value: ManifestSelect,
-    pub select: *const ManifestSelect,
-    pub select_count: usize,
-}
-
-/// NzbgetRsManifestCommand.
-#[repr(C)]
-pub struct ManifestCommandOut {
-    pub section: ManifestSection,
-    pub name: RsStr,
-    pub display_name: RsStr,
-    pub action: RsStr,
-    pub description: *const RsStr,
-    pub description_count: usize,
-}
-
-/// NzbgetRsManifest: the string fields in the order of manifest::FIELDS
-/// (`has` says which are set), the texts, options and commands.
-#[repr(C)]
-pub struct ManifestOut {
-    pub fields: [RsStr; 12],
-    pub has: [c_int; 12],
-    pub description: *const RsStr,
-    pub description_count: usize,
-    pub requirements: *const RsStr,
-    pub requirements_count: usize,
-    pub options: *const ManifestOptionOut,
-    pub option_count: usize,
-    pub commands: *const ManifestCommandOut,
-    pub command_count: usize,
-    pub sections: *const ManifestSection,
-    pub section_count: usize,
-}
-
-fn rs_strs(v: &[Vec<u8>]) -> Vec<RsStr> {
-    v.iter().map(|s| rs_str(s)).collect()
-}
-
-fn manifest_section(s: &crate::manifest::Section) -> ManifestSection {
-    ManifestSection { multi: s.multi as c_int, name: rs_str(&s.name), prefix: rs_str(&s.prefix) }
-}
-
-fn manifest_select(s: &crate::manifest::Select) -> ManifestSelect {
-    match s {
-        crate::manifest::Select::Number(n) => ManifestSelect { is_string: 0, number: *n, string: rs_str(b"") },
-        crate::manifest::Select::String(s) => ManifestSelect { is_string: 1, number: 0.0, string: rs_str(s) },
-    }
-}
-
-/// ManifestFile::Load on the text the C++ read: 1 loaded (`loaded` was
-/// called), 0 refused, -1 a syntax error, -2 not a JSON object, -3 an option,
-/// command or section that isn't an object. On 0 and -3 the callback receives
-/// the partial writes preceding the failure, as in the original C++.
-///
-/// # Safety
-/// `text` is null (empty) or `len` readable bytes (at most isize::MAX).
-/// `loaded` (null: not called) gets a manifest borrowed only for the call
-/// and must not unwind. Rust panics abort rather than crossing the ABI.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_manifest_load(text: *const c_char, len: usize, limits: crate::json::Limits, ctx: *mut std::ffi::c_void,
-    loaded: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const ManifestOut)>) -> c_int {
-    use crate::manifest::Outcome;
-    let (manifest, status) = match crate::manifest::load(bytes_arg(text.cast(), len), limits) {
-        Outcome::Loaded(m) => (m, 1),
-        Outcome::Refused(m) => (m, 0),
-        Outcome::Syntax => return -1,
-        Outcome::NotObject => return -2,
-        Outcome::ElementNotObject(m) => (m, -3),
-    };
-    let Some(loaded) = loaded else { return status };
-    let description = rs_strs(&manifest.description);
-    let requirements = rs_strs(&manifest.requirements);
-    let option_texts: Vec<(Vec<RsStr>, Vec<ManifestSelect>)> = manifest.options.iter()
-        .map(|o| (rs_strs(&o.description), o.select.iter().map(manifest_select).collect())).collect();
-    let options: Vec<ManifestOptionOut> = manifest.options.iter().zip(&option_texts).map(|(o, (d, s))| ManifestOptionOut {
-        section: manifest_section(&o.section), name: rs_str(&o.name), display_name: rs_str(&o.display_name),
-        description: d.as_ptr(), description_count: d.len(), value: manifest_select(&o.value),
-        select: s.as_ptr(), select_count: s.len(),
-    }).collect();
-    let command_texts: Vec<Vec<RsStr>> = manifest.commands.iter().map(|c| rs_strs(&c.description)).collect();
-    let commands: Vec<ManifestCommandOut> = manifest.commands.iter().zip(&command_texts).map(|(c, d)| ManifestCommandOut {
-        section: manifest_section(&c.section), name: rs_str(&c.name), display_name: rs_str(&c.display_name),
-        action: rs_str(&c.action), description: d.as_ptr(), description_count: d.len(),
-    }).collect();
-    let sections: Vec<ManifestSection> = manifest.sections.iter().map(manifest_section).collect();
-    let out = ManifestOut {
-        fields: std::array::from_fn(|i| rs_str(manifest.fields[i].as_deref().unwrap_or(b""))),
-        has: std::array::from_fn(|i| manifest.fields[i].is_some() as c_int),
-        description: description.as_ptr(), description_count: description.len(),
-        requirements: requirements.as_ptr(), requirements_count: requirements.len(),
-        options: options.as_ptr(), option_count: options.len(),
-        commands: commands.as_ptr(), command_count: commands.len(),
-        sections: sections.as_ptr(), section_count: sections.len(),
-    };
-    loaded(ctx, &out);
-    status
 }
 
 /// NzbgetRsTestServerParams.
@@ -4799,26 +4488,6 @@ mod tests {
     }
 
     #[test]
-    fn manifest_nulls_and_partial_borrowed_view() {
-        use std::ptr::{null, null_mut};
-        unsafe extern "C" fn copy_author(ctx: *mut std::ffi::c_void, view: *const ManifestOut) {
-            let view = &*view;
-            let author = &view.fields[0];
-            *ctx.cast::<Vec<u8>>() = std::slice::from_raw_parts(author.data.cast(), author.len).to_vec();
-        }
-        unsafe {
-            assert_eq!(nzbget_rs_manifest_load(null(), usize::MAX, crate::json::TEST_LIMITS, null_mut(), None), -1);
-            let text = br#"{"author":"copied\u0000discarded"}"#;
-            let mut author = Vec::<u8>::new();
-            assert_eq!(nzbget_rs_manifest_load(text.as_ptr().cast(), text.len(), crate::json::TEST_LIMITS,
-                (&mut author as *mut Vec<u8>).cast(), Some(copy_author)), 0);
-            // The callback's copy is still owned after all borrowed storage is freed.
-            assert_eq!(author, b"copied");
-            assert_eq!(nzbget_rs_manifest_load(text.as_ptr().cast(), text.len(), crate::json::TEST_LIMITS, null_mut(), None), 0);
-        }
-    }
-
-    #[test]
     fn rarrenamer_nulls_and_borrowed_callback_strings() {
         use std::ptr::{null, null_mut};
         unsafe extern "C" fn progress(ctx: *mut std::ffi::c_void, label: *const c_char, stage: c_int) -> c_int {
@@ -5066,76 +4735,6 @@ mod tests {
             assert_eq!(std::slice::from_raw_parts(buf.data.cast::<u8>(), buf.len), b"http://h:81/a/next");
             assert_eq!(*buf.data.add(buf.len), 0);
             nzbget_rs_free(buf);
-        }
-    }
-
-    extern "C" fn ext_space(b: c_int) -> c_int {
-        i32::from((b as u8).is_ascii_whitespace())
-    }
-
-    #[test]
-    fn extload_owned_handle_borrowed_bytes_and_nulls() {
-        unsafe {
-            let null = std::ptr::null();
-            assert!(nzbget_rs_ext_v1_parse(null, usize::MAX, Some(ext_space)).is_null());
-            assert!(nzbget_rs_ext_v1_parse(null, 0, None).is_null());
-            nzbget_rs_ext_v1_free(std::ptr::null_mut());
-            let null = std::ptr::null();
-            assert_eq!(nzbget_rs_ext_v1_kind(null), 0);
-            assert_eq!(nzbget_rs_ext_v1_count(null, 2), 0);
-            assert_eq!(nzbget_rs_ext_v1_text(null, 0, 0).len, 0);
-            assert_eq!(nzbget_rs_ext_v1_item_text(null, 0, 0, 0, 0).len, 0);
-            assert_eq!(nzbget_rs_ext_v1_item_count(null, 0, 0, 0), 0);
-            assert_eq!(nzbget_rs_ext_v1_select(null, 0, 0, std::ptr::null_mut(), std::ptr::null_mut()), -1);
-            let input = b"### NZBGET SCAN SCRIPT\n### OPTIONS\n# Range (1-2).\n#N=1.5\n#S=a\0b\n#Cmd@go\n".to_vec();
-            let h = nzbget_rs_ext_v1_parse(input.as_ptr().cast(), input.len(), Some(ext_space));
-            drop(input);
-            assert!(!h.is_null());
-            assert_eq!(nzbget_rs_ext_v1_kind(h), 2);
-            assert_eq!(nzbget_rs_ext_v1_count(h, 2), 2);
-            assert_eq!(nzbget_rs_ext_v1_count(h, -1), 0);
-            assert_eq!(nzbget_rs_ext_v1_item_text(h, 0, usize::MAX, 0, 0).len, 0);
-            assert_eq!(nzbget_rs_ext_v1_item_text(h, 0, 0, 4, usize::MAX).len, 0);
-            assert_eq!(nzbget_rs_ext_v1_item_count(h, 1, usize::MAX, 0), 0);
-            let mut number = 77.0;
-            let mut text = NO_STR;
-            assert_eq!(nzbget_rs_ext_v1_select(h, 0, usize::MAX, &mut number, &mut text), 1);
-            assert_eq!(number, 1.5);
-            assert!(text.data.is_null());
-            assert_eq!(nzbget_rs_ext_v1_select(h, 0, usize::MAX, std::ptr::null_mut(), &mut text), -1);
-            assert_eq!(nzbget_rs_ext_v1_select(h, 1, usize::MAX, &mut number, &mut text), 0);
-            assert_eq!(span(text.data, text.len), b"a\0b");
-            assert_eq!(number, 1.5);
-            assert_eq!(nzbget_rs_ext_v1_select(h, 1, usize::MAX, &mut number, std::ptr::null_mut()), -1);
-            assert_eq!(nzbget_rs_ext_v1_select(h, usize::MAX, 0, &mut number, &mut text), -1);
-            assert_eq!(span(text.data, text.len), b"a\0b");
-            assert_eq!(nzbget_rs_ext_v1_select(h, 0, 99, &mut number, &mut text), -1);
-            nzbget_rs_ext_v1_free(h);
-        }
-    }
-
-    #[test]
-    fn extload_reader_stops_and_discards_failed_parse() {
-        struct Reader { index: usize, fail_at: usize }
-        unsafe extern "C" fn next(context: *mut std::ffi::c_void, out: *mut RsStr) -> c_int {
-            let r = &mut *context.cast::<Reader>();
-            if r.index == r.fail_at { return -1 }
-            let lines: [&[u8]; 4] = [b"### NZBGET SCAN SCRIPT", b"### OPTIONS", b"#N=x", b" SCRIPT"];
-            let Some(line) = lines.get(r.index) else { return -1 };
-            r.index += 1;
-            *out = rs_str(line);
-            1
-        }
-        unsafe {
-            assert!(nzbget_rs_ext_v1_read(None, std::ptr::null_mut(), Some(ext_space)).is_null());
-            assert!(nzbget_rs_ext_v1_read(Some(next), std::ptr::null_mut(), None).is_null());
-            for fail_at in 0..=4 {
-                let mut r = Reader { index: 0, fail_at };
-                let h = nzbget_rs_ext_v1_read(Some(next), (&mut r as *mut Reader).cast(), Some(ext_space));
-                assert_eq!(r.index, fail_at);
-                assert_eq!(h.is_null(), fail_at < 4);
-                nzbget_rs_ext_v1_free(h);
-            }
         }
     }
 
@@ -5622,8 +5221,6 @@ mod tests {
             probe(user).events.push(format!("season {episode}"));
             c"02".as_ptr()
         }
-        unsafe extern "C" fn regex_new(_: *mut c_void, _: *const c_char, _: c_int) -> usize { 0 }
-        unsafe extern "C" fn regex_match(_: *mut c_void, _: usize, _: *const c_char, _: *mut [c_int; 2], _: c_int) -> c_int { -1 }
         unsafe extern "C" fn apply(user: *mut c_void, o: *const FeedOptions) {
             let p = probe(user);
             let o = &*o;
@@ -5639,7 +5236,7 @@ mod tests {
         let mut p = Probe::default();
         let cb = FeedItemCallbacks {
             user: (&mut p as *mut Probe).cast(), field: Some(field),
-            season_episode: Some(season), regex_new: Some(regex_new), regex_match: Some(regex_match),
+            season_episode: Some(season),
             apply: Some(apply), set_match: Some(set_match),
         };
         unsafe {
@@ -5659,14 +5256,12 @@ mod tests {
             // must be representable and rejected without invoking anything.
             let zero: FeedItemCallbacks = std::mem::zeroed();
             nzbget_rs_feed_filter_match(filter, &zero);
-            for missing in 0..6 {
+            for missing in 0..4 {
                 let mut bad = FeedItemCallbacks { ..cb };
                 match missing {
                     0 => bad.field = None,
                     1 => bad.season_episode = None,
-                    2 => bad.regex_new = None,
-                    3 => bad.regex_match = None,
-                    4 => bad.apply = None,
+                    2 => bad.apply = None,
                     _ => bad.set_match = None,
                 }
                 nzbget_rs_feed_filter_match(filter, &bad);
@@ -14398,20 +13993,24 @@ pub unsafe extern "C" fn nzbget_rs_snh_http_get_calc_watchdog_wait(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_http_client_find_header_colon(
-    line: *const c_char,
-    len: usize,
-    out_colon_pos: *mut usize,
+pub unsafe extern "C" fn nzbget_rs_http_client_parse_response(
+    raw_resp: *const c_char,
+    raw_resp_len: usize,
+    out_status_code: *mut u32,
+    out_body: *mut RsBuf,
 ) -> c_int {
-    let s = if line.is_null() || len == 0 {
+    let s = if raw_resp.is_null() || raw_resp_len == 0 {
         &[][..]
     } else {
-        std::slice::from_raw_parts(line.cast::<u8>(), len)
+        std::slice::from_raw_parts(raw_resp.cast::<u8>(), raw_resp_len)
     };
-    match crate::webdownload::http_client_find_header_colon(s) {
-        Some(pos) => {
-            if !out_colon_pos.is_null() {
-                *out_colon_pos = pos;
+    match crate::webdownload::http_client_parse_response(s) {
+        Some((status, body)) => {
+            if !out_status_code.is_null() {
+                *out_status_code = status;
+            }
+            if !out_body.is_null() {
+                *out_body = into_buf(body);
             }
             1
         }
@@ -19502,38 +19101,6 @@ pub unsafe extern "C" fn nzbget_rs_ufs_util_resolve_path_from_env(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_script_kind(
-    line_ptr: *const c_char,
-    line_len: usize,
-) -> i32 {
-    let slice = if line_ptr.is_null() || line_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(line_ptr.cast::<u8>(), line_len)
-    };
-    crate::extload::script_kind(slice)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_ext_sort_indices(
-    names: *const *const c_char,
-    count: usize,
-    order_str: *const c_char,
-    out_indices: *mut usize,
-) {
-    if names.is_null() || count == 0 || out_indices.is_null() {
-        return;
-    }
-    let mut name_slices: Vec<&[u8]> = Vec::with_capacity(count);
-    for i in 0..count {
-        name_slices.push(input(*names.add(i)));
-    }
-    let sorted = crate::extension::ext_sort_indices(&name_slices, input(order_str));
-    let out = std::slice::from_raw_parts_mut(out_indices, count);
-    out.copy_from_slice(&sorted);
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupesearch_parse_cooldown_line(
     line_ptr: *const c_char,
     line_len: usize,
@@ -19616,23 +19183,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fleet_visit_pipe_names(
     crate::dupesearch_nzb::fleet_visit_pipe_names(slice, |part| {
         cb(ctx, part.as_ptr().cast::<c_char>(), part.len());
     });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_http_client_validate_version(
-    version_ptr: *const c_char,
-    version_len: usize,
-    stream_ok: i32,
-) -> i32 {
-    let slice = if version_ptr.is_null() || version_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(version_ptr.cast::<u8>(), version_len)
-    };
-    i32::from(crate::webdownload::http_client_validate_version(
-        slice,
-        stream_ok != 0,
-    ))
 }
 
 #[no_mangle]
@@ -22109,18 +21659,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_is_cipher_list(
         std::slice::from_raw_parts(cipher as *const u8, cipher_len)
     };
     i32::from(crate::tlscipher::tls_is_cipher_list(s))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_extract_version_after_space(
-    text: *const c_char,
-) -> RsBuf {
-    let s = if text.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(text).to_bytes()
-    };
-    into_buf(crate::systemhealth::sysinfo_extract_version_after_space(s))
 }
 
 #[no_mangle]
@@ -30699,622 +30237,95 @@ pub unsafe extern "C" fn nzbget_rs_alloc_buf(data: *const c_char, len: usize) ->
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn build_extension_script_view_from_ffi(
-    entry_ptr: *const c_char,
-    entry_len: usize,
-    loc_ptr: *const c_char,
-    loc_len: usize,
-    root_ptr: *const c_char,
-    root_len: usize,
-    name_ptr: *const c_char,
-    name_len: usize,
-    disp_ptr: *const c_char,
-    disp_len: usize,
-    about_ptr: *const c_char,
-    about_len: usize,
-    author_ptr: *const c_char,
-    author_len: usize,
-    home_ptr: *const c_char,
-    home_len: usize,
-    lic_ptr: *const c_char,
-    lic_len: usize,
-    ver_ptr: *const c_char,
-    ver_len: usize,
-    min_ver_ptr: *const c_char,
-    min_ver_len: usize,
-    post_script: c_int,
-    scan_script: c_int,
-    queue_script: c_int,
-    sched_script: c_int,
-    feed_script: c_int,
-    qevents_ptr: *const c_char,
-    qevents_len: usize,
-    task_time_ptr: *const c_char,
-    task_time_len: usize,
-    desc_ptrs: *const *const c_char,
-    desc_lens: *const usize,
-    desc_count: usize,
-    req_ptrs: *const *const c_char,
-    req_lens: *const usize,
-    req_count: usize,
-    opt_count: usize,
-    cmd_count: usize,
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ext_mgr_load_extensions(
+    script_dir: *const c_char,
+    script_order: *const c_char,
+    path_sep: c_char,
     ctx: *mut std::ffi::c_void,
-    get_opt_cb: Option<
+    on_error: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+    on_extension: Option<
         unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut f64,
-            *mut usize,
-            *mut usize,
+            ctx: *mut std::ffi::c_void,
+            entry: *const c_char,
+            entry_len: usize,
+            location: *const c_char,
+            location_len: usize,
+            root_dir: *const c_char,
+            root_dir_len: usize,
+            name: *const c_char,
+            name_len: usize,
+            display_name: *const c_char,
+            display_name_len: usize,
+            queue_events: *const c_char,
+            queue_events_len: usize,
+            task_time: *const c_char,
+            task_time_len: usize,
+            post_script: c_int,
+            scan_script: c_int,
+            queue_script: c_int,
+            scheduler_script: c_int,
+            feed_script: c_int,
+            json_ptr: *const c_char,
+            json_len: usize,
+            xml_ptr: *const c_char,
+            xml_len: usize,
         ),
     >,
-    get_opt_desc_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-        ),
-    >,
-    get_opt_sel_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut f64,
-        ),
-    >,
-    get_cmd_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut usize,
-        ),
-    >,
-    get_cmd_desc_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-        ),
-    >,
-) -> crate::extension::ExtensionScriptView {
-    let mut description = Vec::with_capacity(desc_count);
-    for i in 0..desc_count {
-        if !desc_ptrs.is_null() && !desc_lens.is_null() {
-            description.push(bytes(*desc_ptrs.add(i), *desc_lens.add(i)).to_vec());
-        }
-    }
-    let mut requirements = Vec::with_capacity(req_count);
-    for i in 0..req_count {
-        if !req_ptrs.is_null() && !req_lens.is_null() {
-            requirements.push(bytes(*req_ptrs.add(i), *req_lens.add(i)).to_vec());
-        }
-    }
-    let mut options = Vec::with_capacity(opt_count);
-    if let Some(ocb) = get_opt_cb {
-        for i in 0..opt_count {
-            let mut on_ptr: *const c_char = std::ptr::null();
-            let mut on_len: usize = 0;
-            let mut od_ptr: *const c_char = std::ptr::null();
-            let mut od_len: usize = 0;
-            let mut os_ptr: *const c_char = std::ptr::null();
-            let mut os_len: usize = 0;
-            let mut omulti: c_int = 0;
-            let mut op_ptr: *const c_char = std::ptr::null();
-            let mut op_len: usize = 0;
-            let mut val_is_num: c_int = 0;
-            let mut vs_ptr: *const c_char = std::ptr::null();
-            let mut vs_len: usize = 0;
-            let mut vnum: f64 = 0.0;
-            let mut odesc_cnt: usize = 0;
-            let mut osel_cnt: usize = 0;
-            ocb(
+) -> RsBuf {
+    let dir_bytes = input(script_dir);
+    let order_bytes = input(script_order);
+    let loaded = match crate::extension::ext_mgr_load_extensions_with(
+        dir_bytes,
+        order_bytes,
+        path_sep as u8,
+        |err_msg| {
+            if let Some(cb) = on_error {
+                let c_msg = nul(err_msg);
+                cb(ctx, c_msg.as_ptr().cast());
+            }
+        },
+    ) {
+        Ok(list) => list,
+        Err(err) => return into_buf(err.into_bytes()),
+    };
+    if let Some(cb) = on_extension {
+        for ext in &loaded {
+            let json = crate::extension::extension_to_json(ext);
+            let xml = crate::extension::extension_to_xml(ext);
+            cb(
                 ctx,
-                i,
-                &mut on_ptr,
-                &mut on_len,
-                &mut od_ptr,
-                &mut od_len,
-                &mut os_ptr,
-                &mut os_len,
-                &mut omulti,
-                &mut op_ptr,
-                &mut op_len,
-                &mut val_is_num,
-                &mut vs_ptr,
-                &mut vs_len,
-                &mut vnum,
-                &mut odesc_cnt,
-                &mut osel_cnt,
+                ext.entry.as_ptr().cast(),
+                ext.entry.len(),
+                ext.location.as_ptr().cast(),
+                ext.location.len(),
+                ext.root_dir.as_ptr().cast(),
+                ext.root_dir.len(),
+                ext.name.as_ptr().cast(),
+                ext.name.len(),
+                ext.display_name.as_ptr().cast(),
+                ext.display_name.len(),
+                ext.queue_events.as_ptr().cast(),
+                ext.queue_events.len(),
+                ext.task_time.as_ptr().cast(),
+                ext.task_time.len(),
+                i32::from(ext.post_script),
+                i32::from(ext.scan_script),
+                i32::from(ext.queue_script),
+                i32::from(ext.scheduler_script),
+                i32::from(ext.feed_script),
+                json.as_ptr().cast(),
+                json.len(),
+                xml.as_ptr().cast(),
+                xml.len(),
             );
-            let mut opt_desc = Vec::with_capacity(odesc_cnt);
-            if let Some(dcb) = get_opt_desc_cb {
-                for j in 0..odesc_cnt {
-                    let mut dp: *const c_char = std::ptr::null();
-                    let mut dl: usize = 0;
-                    dcb(ctx, i, j, &mut dp, &mut dl);
-                    opt_desc.push(bytes(dp, dl).to_vec());
-                }
-            }
-            let mut opt_sel = Vec::with_capacity(osel_cnt);
-            if let Some(scb) = get_opt_sel_cb {
-                for j in 0..osel_cnt {
-                    let mut sin: c_int = 0;
-                    let mut sp: *const c_char = std::ptr::null();
-                    let mut sl: usize = 0;
-                    let mut sn: f64 = 0.0;
-                    scb(ctx, i, j, &mut sin, &mut sp, &mut sl, &mut sn);
-                    if sin != 0 {
-                        opt_sel.push(crate::extension::ExtensionSelectVal::Num(sn));
-                    } else {
-                        opt_sel.push(crate::extension::ExtensionSelectVal::Str(
-                            bytes(sp, sl).to_vec(),
-                        ));
-                    }
-                }
-            }
-            let value = if val_is_num != 0 {
-                crate::extension::ExtensionSelectVal::Num(vnum)
-            } else {
-                crate::extension::ExtensionSelectVal::Str(bytes(vs_ptr, vs_len).to_vec())
-            };
-            options.push(crate::extension::ExtensionOptionView {
-                name: bytes(on_ptr, on_len).to_vec(),
-                display_name: bytes(od_ptr, od_len).to_vec(),
-                description: opt_desc,
-                value,
-                select: opt_sel,
-                section: crate::extension::ExtensionSectionView {
-                    multi: omulti != 0,
-                    name: bytes(os_ptr, os_len).to_vec(),
-                    prefix: bytes(op_ptr, op_len).to_vec(),
-                },
-            });
         }
     }
-
-    let mut commands = Vec::with_capacity(cmd_count);
-    if let Some(ccb) = get_cmd_cb {
-        for i in 0..cmd_count {
-            let mut cn_ptr: *const c_char = std::ptr::null();
-            let mut cn_len: usize = 0;
-            let mut cd_ptr: *const c_char = std::ptr::null();
-            let mut cd_len: usize = 0;
-            let mut ca_ptr: *const c_char = std::ptr::null();
-            let mut ca_len: usize = 0;
-            let mut cs_ptr: *const c_char = std::ptr::null();
-            let mut cs_len: usize = 0;
-            let mut cmulti: c_int = 0;
-            let mut cp_ptr: *const c_char = std::ptr::null();
-            let mut cp_len: usize = 0;
-            let mut cdesc_cnt: usize = 0;
-            ccb(
-                ctx,
-                i,
-                &mut cn_ptr,
-                &mut cn_len,
-                &mut cd_ptr,
-                &mut cd_len,
-                &mut ca_ptr,
-                &mut ca_len,
-                &mut cs_ptr,
-                &mut cs_len,
-                &mut cmulti,
-                &mut cp_ptr,
-                &mut cp_len,
-                &mut cdesc_cnt,
-            );
-            let mut cmd_desc = Vec::with_capacity(cdesc_cnt);
-            if let Some(dcb) = get_cmd_desc_cb {
-                for j in 0..cdesc_cnt {
-                    let mut dp: *const c_char = std::ptr::null();
-                    let mut dl: usize = 0;
-                    dcb(ctx, i, j, &mut dp, &mut dl);
-                    cmd_desc.push(bytes(dp, dl).to_vec());
-                }
-            }
-            commands.push(crate::extension::ExtensionCommandView {
-                name: bytes(cn_ptr, cn_len).to_vec(),
-                display_name: bytes(cd_ptr, cd_len).to_vec(),
-                action: bytes(ca_ptr, ca_len).to_vec(),
-                description: cmd_desc,
-                section: crate::extension::ExtensionSectionView {
-                    multi: cmulti != 0,
-                    name: bytes(cs_ptr, cs_len).to_vec(),
-                    prefix: bytes(cp_ptr, cp_len).to_vec(),
-                },
-            });
-        }
+    RsBuf {
+        data: std::ptr::null_mut(),
+        len: 0,
+        cap: 0,
     }
-
-    crate::extension::ExtensionScriptView {
-        entry: bytes(entry_ptr, entry_len).to_vec(),
-        location: bytes(loc_ptr, loc_len).to_vec(),
-        root_dir: bytes(root_ptr, root_len).to_vec(),
-        name: bytes(name_ptr, name_len).to_vec(),
-        display_name: bytes(disp_ptr, disp_len).to_vec(),
-        about: bytes(about_ptr, about_len).to_vec(),
-        author: bytes(author_ptr, author_len).to_vec(),
-        homepage: bytes(home_ptr, home_len).to_vec(),
-        license: bytes(lic_ptr, lic_len).to_vec(),
-        version: bytes(ver_ptr, ver_len).to_vec(),
-        nzbget_min_version: bytes(min_ver_ptr, min_ver_len).to_vec(),
-        post_script: post_script != 0,
-        scan_script: scan_script != 0,
-        queue_script: queue_script != 0,
-        scheduler_script: sched_script != 0,
-        feed_script: feed_script != 0,
-        queue_events: bytes(qevents_ptr, qevents_len).to_vec(),
-        task_time: bytes(task_time_ptr, task_time_len).to_vec(),
-        description,
-        requirements,
-        options,
-        commands,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_extension_to_json(
-    entry_ptr: *const c_char,
-    entry_len: usize,
-    loc_ptr: *const c_char,
-    loc_len: usize,
-    root_ptr: *const c_char,
-    root_len: usize,
-    name_ptr: *const c_char,
-    name_len: usize,
-    disp_ptr: *const c_char,
-    disp_len: usize,
-    about_ptr: *const c_char,
-    about_len: usize,
-    author_ptr: *const c_char,
-    author_len: usize,
-    home_ptr: *const c_char,
-    home_len: usize,
-    lic_ptr: *const c_char,
-    lic_len: usize,
-    ver_ptr: *const c_char,
-    ver_len: usize,
-    min_ver_ptr: *const c_char,
-    min_ver_len: usize,
-    post_script: c_int,
-    scan_script: c_int,
-    queue_script: c_int,
-    sched_script: c_int,
-    feed_script: c_int,
-    qevents_ptr: *const c_char,
-    qevents_len: usize,
-    task_time_ptr: *const c_char,
-    task_time_len: usize,
-    desc_ptrs: *const *const c_char,
-    desc_lens: *const usize,
-    desc_count: usize,
-    req_ptrs: *const *const c_char,
-    req_lens: *const usize,
-    req_count: usize,
-    opt_count: usize,
-    cmd_count: usize,
-    ctx: *mut std::ffi::c_void,
-    get_opt_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut f64,
-            *mut usize,
-            *mut usize,
-        ),
-    >,
-    get_opt_desc_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-        ),
-    >,
-    get_opt_sel_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut f64,
-        ),
-    >,
-    get_cmd_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut usize,
-        ),
-    >,
-    get_cmd_desc_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-        ),
-    >,
-) -> RsBuf {
-    let view = build_extension_script_view_from_ffi(
-        entry_ptr,
-        entry_len,
-        loc_ptr,
-        loc_len,
-        root_ptr,
-        root_len,
-        name_ptr,
-        name_len,
-        disp_ptr,
-        disp_len,
-        about_ptr,
-        about_len,
-        author_ptr,
-        author_len,
-        home_ptr,
-        home_len,
-        lic_ptr,
-        lic_len,
-        ver_ptr,
-        ver_len,
-        min_ver_ptr,
-        min_ver_len,
-        post_script,
-        scan_script,
-        queue_script,
-        sched_script,
-        feed_script,
-        qevents_ptr,
-        qevents_len,
-        task_time_ptr,
-        task_time_len,
-        desc_ptrs,
-        desc_lens,
-        desc_count,
-        req_ptrs,
-        req_lens,
-        req_count,
-        opt_count,
-        cmd_count,
-        ctx,
-        get_opt_cb,
-        get_opt_desc_cb,
-        get_opt_sel_cb,
-        get_cmd_cb,
-        get_cmd_desc_cb,
-    );
-    into_buf(crate::extension::extension_to_json(&view))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_extension_to_xml(
-    entry_ptr: *const c_char,
-    entry_len: usize,
-    loc_ptr: *const c_char,
-    loc_len: usize,
-    root_ptr: *const c_char,
-    root_len: usize,
-    name_ptr: *const c_char,
-    name_len: usize,
-    disp_ptr: *const c_char,
-    disp_len: usize,
-    about_ptr: *const c_char,
-    about_len: usize,
-    author_ptr: *const c_char,
-    author_len: usize,
-    home_ptr: *const c_char,
-    home_len: usize,
-    lic_ptr: *const c_char,
-    lic_len: usize,
-    ver_ptr: *const c_char,
-    ver_len: usize,
-    min_ver_ptr: *const c_char,
-    min_ver_len: usize,
-    post_script: c_int,
-    scan_script: c_int,
-    queue_script: c_int,
-    sched_script: c_int,
-    feed_script: c_int,
-    qevents_ptr: *const c_char,
-    qevents_len: usize,
-    task_time_ptr: *const c_char,
-    task_time_len: usize,
-    desc_ptrs: *const *const c_char,
-    desc_lens: *const usize,
-    desc_count: usize,
-    req_ptrs: *const *const c_char,
-    req_lens: *const usize,
-    req_count: usize,
-    opt_count: usize,
-    cmd_count: usize,
-    ctx: *mut std::ffi::c_void,
-    get_opt_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut f64,
-            *mut usize,
-            *mut usize,
-        ),
-    >,
-    get_opt_desc_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-        ),
-    >,
-    get_opt_sel_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut f64,
-        ),
-    >,
-    get_cmd_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut *const c_char,
-            *mut usize,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-            *mut usize,
-        ),
-    >,
-    get_cmd_desc_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-        ),
-    >,
-) -> RsBuf {
-    let view = build_extension_script_view_from_ffi(
-        entry_ptr,
-        entry_len,
-        loc_ptr,
-        loc_len,
-        root_ptr,
-        root_len,
-        name_ptr,
-        name_len,
-        disp_ptr,
-        disp_len,
-        about_ptr,
-        about_len,
-        author_ptr,
-        author_len,
-        home_ptr,
-        home_len,
-        lic_ptr,
-        lic_len,
-        ver_ptr,
-        ver_len,
-        min_ver_ptr,
-        min_ver_len,
-        post_script,
-        scan_script,
-        queue_script,
-        sched_script,
-        feed_script,
-        qevents_ptr,
-        qevents_len,
-        task_time_ptr,
-        task_time_len,
-        desc_ptrs,
-        desc_lens,
-        desc_count,
-        req_ptrs,
-        req_lens,
-        req_count,
-        opt_count,
-        cmd_count,
-        ctx,
-        get_opt_cb,
-        get_opt_desc_cb,
-        get_opt_sel_cb,
-        get_cmd_cb,
-        get_cmd_desc_cb,
-    );
-    into_buf(crate::extension::extension_to_xml(&view))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_mgr_get_extension_name(
-    filename_ptr: *const c_char,
-    filename_len: usize,
-) -> RsBuf {
-    into_buf(crate::extension::ext_mgr_get_extension_name(bytes(
-        filename_ptr,
-        filename_len,
-    )))
 }
 
 #[no_mangle]
@@ -31341,206 +30352,32 @@ pub unsafe extern "C" fn nzbget_rs_ext_mgr_resolve_extension_path(
     into_buf(resolved.to_vec())
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cpu_detect_info(
-    raw_uts_machine: *const c_char,
-    raw_uts_machine_len: usize,
-    out_model: *mut RsBuf,
-    out_arch: *mut RsBuf,
-) {
-    let (model, arch) =
-        crate::systemhealth::cpu_detect_info(bytes(raw_uts_machine, raw_uts_machine_len));
-    if !out_model.is_null() {
-        *out_model = into_buf(model);
-    }
-    if !out_arch.is_null() {
-        *out_arch = into_buf(arch);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_os_detect_info(
-    fallback_sysname: *const c_char,
-    fallback_sysname_len: usize,
-    fallback_release: *const c_char,
-    fallback_release_len: usize,
-    out_name: *mut RsBuf,
-    out_version: *mut RsBuf,
-) {
-    let (name, version) = crate::systemhealth::os_detect_info(
-        bytes(fallback_sysname, fallback_sysname_len),
-        bytes(fallback_release, fallback_release_len),
-    );
-    if !out_name.is_null() {
-        *out_name = into_buf(name);
-    }
-    if !out_version.is_null() {
-        *out_version = into_buf(version);
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_system_info_to_json(
-    os_name_ptr: *const c_char,
-    os_name_len: usize,
-    os_ver_ptr: *const c_char,
-    os_ver_len: usize,
-    cpu_model_ptr: *const c_char,
-    cpu_model_len: usize,
-    cpu_arch_ptr: *const c_char,
-    cpu_arch_len: usize,
+pub unsafe extern "C" fn nzbget_rs_system_info_format(
+    mode: c_int,
+    uts_sysname: *const c_char,
+    uts_release: *const c_char,
+    uts_machine: *const c_char,
+    ssl_lib_name: *const c_char,
+    ssl_raw_version: *const c_char,
+    ssl_extract_after_space: c_int,
     pub_ip_ptr: *const c_char,
     pub_ip_len: usize,
     priv_ip_ptr: *const c_char,
     priv_ip_len: usize,
-    tool_names: *const *const c_char,
-    tool_name_lens: *const usize,
-    tool_vers: *const *const c_char,
-    tool_ver_lens: *const usize,
-    tool_paths: *const *const c_char,
-    tool_path_lens: *const usize,
-    tool_count: usize,
-    lib_names: *const *const c_char,
-    lib_name_lens: *const usize,
-    lib_vers: *const *const c_char,
-    lib_ver_lens: *const usize,
-    lib_count: usize,
 ) -> RsBuf {
-    let mut tools = Vec::with_capacity(tool_count);
-    for i in 0..tool_count {
-        tools.push(crate::systemhealth::SystemToolView {
-            name: bytes(*tool_names.add(i), *tool_name_lens.add(i)),
-            version: bytes(*tool_vers.add(i), *tool_ver_lens.add(i)),
-            path: bytes(*tool_paths.add(i), *tool_path_lens.add(i)),
-        });
-    }
-    let mut libs = Vec::with_capacity(lib_count);
-    for i in 0..lib_count {
-        libs.push(crate::systemhealth::SystemLibraryView {
-            name: bytes(*lib_names.add(i), *lib_name_lens.add(i)),
-            version: bytes(*lib_vers.add(i), *lib_ver_lens.add(i)),
-        });
-    }
-    let view = crate::systemhealth::SystemInfoView {
-        os_name: bytes(os_name_ptr, os_name_len),
-        os_version: bytes(os_ver_ptr, os_ver_len),
-        cpu_model: bytes(cpu_model_ptr, cpu_model_len),
-        cpu_arch: bytes(cpu_arch_ptr, cpu_arch_len),
-        public_ip: bytes(pub_ip_ptr, pub_ip_len),
-        private_ip: bytes(priv_ip_ptr, priv_ip_len),
-        tools: &tools,
-        libraries: &libs,
-    };
-    into_buf(crate::systemhealth::system_info_to_json(&view))
-}
-
-#[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_system_info_to_xml(
-    os_name_ptr: *const c_char,
-    os_name_len: usize,
-    os_ver_ptr: *const c_char,
-    os_ver_len: usize,
-    cpu_model_ptr: *const c_char,
-    cpu_model_len: usize,
-    cpu_arch_ptr: *const c_char,
-    cpu_arch_len: usize,
-    pub_ip_ptr: *const c_char,
-    pub_ip_len: usize,
-    priv_ip_ptr: *const c_char,
-    priv_ip_len: usize,
-    tool_names: *const *const c_char,
-    tool_name_lens: *const usize,
-    tool_vers: *const *const c_char,
-    tool_ver_lens: *const usize,
-    tool_paths: *const *const c_char,
-    tool_path_lens: *const usize,
-    tool_count: usize,
-    lib_names: *const *const c_char,
-    lib_name_lens: *const usize,
-    lib_vers: *const *const c_char,
-    lib_ver_lens: *const usize,
-    lib_count: usize,
-) -> RsBuf {
-    let mut tools = Vec::with_capacity(tool_count);
-    for i in 0..tool_count {
-        tools.push(crate::systemhealth::SystemToolView {
-            name: bytes(*tool_names.add(i), *tool_name_lens.add(i)),
-            version: bytes(*tool_vers.add(i), *tool_ver_lens.add(i)),
-            path: bytes(*tool_paths.add(i), *tool_path_lens.add(i)),
-        });
-    }
-    let mut libs = Vec::with_capacity(lib_count);
-    for i in 0..lib_count {
-        libs.push(crate::systemhealth::SystemLibraryView {
-            name: bytes(*lib_names.add(i), *lib_name_lens.add(i)),
-            version: bytes(*lib_vers.add(i), *lib_ver_lens.add(i)),
-        });
-    }
-    let view = crate::systemhealth::SystemInfoView {
-        os_name: bytes(os_name_ptr, os_name_len),
-        os_version: bytes(os_ver_ptr, os_ver_len),
-        cpu_model: bytes(cpu_model_ptr, cpu_model_len),
-        cpu_arch: bytes(cpu_arch_ptr, cpu_arch_len),
-        public_ip: bytes(pub_ip_ptr, pub_ip_len),
-        private_ip: bytes(priv_ip_ptr, priv_ip_len),
-        tools: &tools,
-        libraries: &libs,
-    };
-    into_buf(crate::systemhealth::system_info_to_xml(&view))
-}
-
-#[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_system_info_to_display_text(
-    os_name_ptr: *const c_char,
-    os_name_len: usize,
-    os_ver_ptr: *const c_char,
-    os_ver_len: usize,
-    cpu_model_ptr: *const c_char,
-    cpu_model_len: usize,
-    cpu_arch_ptr: *const c_char,
-    cpu_arch_len: usize,
-    tool_names: *const *const c_char,
-    tool_name_lens: *const usize,
-    tool_vers: *const *const c_char,
-    tool_ver_lens: *const usize,
-    tool_paths: *const *const c_char,
-    tool_path_lens: *const usize,
-    tool_count: usize,
-    lib_names: *const *const c_char,
-    lib_name_lens: *const usize,
-    lib_vers: *const *const c_char,
-    lib_ver_lens: *const usize,
-    lib_count: usize,
-) -> RsBuf {
-    let mut tools = Vec::with_capacity(tool_count);
-    for i in 0..tool_count {
-        tools.push(crate::systemhealth::SystemToolView {
-            name: bytes(*tool_names.add(i), *tool_name_lens.add(i)),
-            version: bytes(*tool_vers.add(i), *tool_ver_lens.add(i)),
-            path: bytes(*tool_paths.add(i), *tool_path_lens.add(i)),
-        });
-    }
-    let mut libs = Vec::with_capacity(lib_count);
-    for i in 0..lib_count {
-        libs.push(crate::systemhealth::SystemLibraryView {
-            name: bytes(*lib_names.add(i), *lib_name_lens.add(i)),
-            version: bytes(*lib_vers.add(i), *lib_ver_lens.add(i)),
-        });
-    }
-    let view = crate::systemhealth::SystemInfoView {
-        os_name: bytes(os_name_ptr, os_name_len),
-        os_version: bytes(os_ver_ptr, os_ver_len),
-        cpu_model: bytes(cpu_model_ptr, cpu_model_len),
-        cpu_arch: bytes(cpu_arch_ptr, cpu_arch_len),
-        public_ip: b"",
-        private_ip: b"",
-        tools: &tools,
-        libraries: &libs,
-    };
-    into_buf(crate::systemhealth::system_info_to_display_text(&view))
+    into_buf(crate::systemhealth::system_info_format(
+        mode,
+        input(uts_sysname),
+        input(uts_release),
+        input(uts_machine),
+        input(ssl_lib_name),
+        input(ssl_raw_version),
+        ssl_extract_after_space != 0,
+        bytes(pub_ip_ptr, pub_ip_len),
+        bytes(priv_ip_ptr, priv_ip_len),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

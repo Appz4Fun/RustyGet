@@ -28,10 +28,232 @@
 #include "Thread.h"
 #include "WebDownloader.h"
 #include "DownloadInfo.h"
-#include "FeedFile.h"
 #include "FeedInfo.h"
 #include "Observer.h"
 #include "Util.h"
+#include "nzbget_rs.h"
+
+struct NzbgetRsFeedFileParser;
+
+// rust/src/feed.rs
+class FeedFile
+{
+public:
+	FeedFile(const char* filename, const char* infoName)
+		: m_feedItems(std::make_unique<FeedItemList>())
+		, m_fileName(filename ? filename : "")
+		, m_infoName(infoName ? infoName : "")
+	{
+		debug("Creating FeedFile");
+	}
+
+	~FeedFile()
+	{
+		nzbget_rs_feed_file_parser_free(m_parser);
+	}
+
+	bool Parse()
+	{
+		nzbget_rs_feed_file_parser_free(m_parser);
+		m_parser = nzbget_rs_feed_file_parser_parse_file(m_fileName.c_str());
+		if (!m_parser)
+		{
+			error("Failed to parse rss feed %s", m_infoName.c_str());
+			return false;
+		}
+
+		size_t count = nzbget_rs_feed_file_parser_finalize(m_parser);
+		for (size_t i = 0; i < count; ++i)
+		{
+			NzbgetRsParsedFeedItemView view{};
+			if (nzbget_rs_feed_file_parser_get_item(m_parser, i, &view) == 0)
+			{
+				continue;
+			}
+			m_feedItems->emplace_back();
+			FeedItemInfo& item = m_feedItems->back();
+			item.SetTitle(view.title);
+			item.SetFilename(view.filename);
+			item.SetUrl(view.url);
+			item.SetCategory(view.category);
+			item.SetDescription(view.description);
+			if (view.has_season != 0)
+			{
+				item.SetSeason(view.season);
+			}
+			if (view.has_episode != 0)
+			{
+				item.SetEpisode(view.episode);
+			}
+			item.SetTime((time_t)view.time);
+			item.SetSize(view.size);
+			item.SetImdbId(view.imdb_id);
+			item.SetRageId(view.rage_id);
+			item.SetTvdbId(view.tvdb_id);
+			item.SetTvmazeId(view.tvmaze_id);
+			for (size_t k = 0; k < view.attr_count; ++k)
+			{
+				item.GetAttributes()->emplace_back(view.attr_names[k], view.attr_values[k]);
+			}
+		}
+
+		nzbget_rs_feed_file_parser_free(m_parser);
+		m_parser = nullptr;
+		return true;
+	}
+
+	std::unique_ptr<FeedItemList> DetachFeedItems() { return std::move(m_feedItems); }
+
+	void LogDebugInfo()
+	{
+		info(" FeedFile %s", m_fileName.c_str());
+	}
+
+private:
+	std::unique_ptr<FeedItemList> m_feedItems;
+	std::string m_fileName;
+	std::string m_infoName;
+	NzbgetRsFeedFileParser* m_parser = nullptr;
+};
+
+// rust/src/feedfilter.rs
+class FeedFilter
+{
+public:
+	FeedFilter(const char* filter) :
+		m_filter(nzbget_rs_feed_filter_new(filter))
+	{
+	}
+
+	~FeedFilter()
+	{
+		nzbget_rs_feed_filter_free(m_filter);
+	}
+
+	FeedFilter(const FeedFilter&) = delete;
+	FeedFilter& operator=(const FeedFilter&) = delete;
+
+	void Match(FeedItemInfo& feedItemInfo)
+	{
+		NzbgetRsFeedItem item{};
+		item.user = &feedItemInfo;
+		item.field = Field;
+		item.seasonEpisode = SeasonEpisode;
+		item.apply = Apply;
+		item.setMatch = SetMatch;
+		nzbget_rs_feed_filter_match(m_filter, &item);
+	}
+
+private:
+	NzbgetRsFeedFilter* m_filter;
+
+	// Allocation failures and helper exceptions must not unwind through Rust.
+	static void Field(void* user, int field, const char* attr, const char** str, long long* num) noexcept
+	{
+		FeedItemInfo* item = static_cast<FeedItemInfo*>(user);
+		*str = nullptr;
+		*num = 0;
+		switch (field)
+		{
+			case 0: *str = item->GetTitle(); break;
+			case 1: *str = item->GetFilename(); break;
+			case 2: *str = item->GetCategory(); break;
+			case 3: *str = item->GetUrl(); break;
+			case 4: *num = item->GetSize(); break;
+			case 5:
+				*num = static_cast<time_t>(
+					static_cast<uint64_t>(Util::CurrentTime()) - static_cast<uint64_t>(item->GetTime()));
+				break;
+			case 6: *num = item->GetImdbId(); break;
+			case 7: *num = item->GetRageId(); break;
+			case 8: *num = item->GetTvdbId(); break;
+			case 9: *num = item->GetTvmazeId(); break;
+			case 10: *str = item->GetDescription(); break;
+			case 11: *num = item->GetSeasonNum(); break;
+			case 12: *num = item->GetEpisodeNum(); break;
+			case 13: *num = item->GetPriority(); break;
+			case 14: *str = item->GetDupeKey(); break;
+			case 15: *num = item->GetDupeScore(); break;
+			case 16: *str = item->GetDupeStatus(); break;
+			case 17:
+			{
+				FeedItemInfo::Attr* a = item->GetAttributes()->Find(attr);
+				*str = a ? a->GetValue() : nullptr;
+				break;
+			}
+		}
+	}
+
+	static const char* SeasonEpisode(void* user, int episode) noexcept
+	{
+		FeedItemInfo* item = static_cast<FeedItemInfo*>(user);
+		// GetSeasonNum/GetEpisodeNum parse the title
+		if (episode)
+		{
+			item->GetEpisodeNum();
+			return item->GetEpisode();
+		}
+		item->GetSeasonNum();
+		return item->GetSeason();
+	}
+
+	static void Apply(void* user, const struct NzbgetRsFeedOptions* o) noexcept
+	{
+		FeedItemInfo* item = static_cast<FeedItemInfo*>(user);
+		if (o->hasPause)
+		{
+			item->SetPauseNzb(o->pause != 0);
+		}
+		if (o->hasCategory)
+		{
+			item->SetAddCategory(o->category);
+		}
+		if (o->hasPriority)
+		{
+			item->SetPriority(o->priority);
+		}
+		if (o->hasAddPriority)
+		{
+			item->SetPriority(static_cast<int>(
+				static_cast<uint32_t>(item->GetPriority()) + static_cast<uint32_t>(o->addPriority)));
+		}
+		if (o->hasDupeScore)
+		{
+			item->SetDupeScore(o->dupeScore);
+		}
+		if (o->hasAddDupeScore)
+		{
+			item->SetDupeScore(static_cast<int>(
+				static_cast<uint32_t>(item->GetDupeScore()) + static_cast<uint32_t>(o->addDupeScore)));
+		}
+		if (o->hasBuildDupeKey)
+		{
+			item->BuildDupeKey(o->ids[0], o->ids[1], o->ids[2], o->ids[3]);
+		}
+		if (o->hasDupeKey)
+		{
+			item->SetDupeKey(o->dupeKey);
+		}
+		if (o->hasAddDupeKey)
+		{
+			item->AppendDupeKey(o->addDupeKey);
+		}
+		if (o->hasDupeMode)
+		{
+			item->SetDupeMode(static_cast<EDupeMode>(o->dupeMode));
+		}
+	}
+
+	static void SetMatch(void* user, int status, int rule) noexcept
+	{
+		FeedItemInfo* item = static_cast<FeedItemInfo*>(user);
+		item->SetMatchStatus(
+			status == 1 ? FeedItemInfo::msAccepted :
+			status == 2 ? FeedItemInfo::msRejected :
+			FeedItemInfo::msIgnored);
+		item->SetMatchRule(rule);
+	}
+};
 
 
 class FeedDownloader;
@@ -124,10 +346,7 @@ private:
 	class FilterHelper : public FeedFilterHelper
 	{
 	public:
-		virtual std::unique_ptr<RegEx>& GetRegEx(int id);
 		virtual void CalcDupeStatus(const char* title, const char* dupeKey, char* statusBuf, int bufLen);
-	private:
-		std::vector<std::unique_ptr<RegEx>> m_regExes;
 	};
 
 	typedef std::list<FeedCacheItem> FeedCache;
@@ -175,7 +394,6 @@ private:
 #include "Options.h"
 #include "WorkState.h"
 #include "FileSystem.h"
-#include "FeedFilter.h"
 #include "FeedScript.h"
 #include "DiskState.h"
 #include "DupeCoordinator.h"
@@ -226,12 +444,6 @@ inline std::unique_ptr<NzbInfo> NzbInfoCreator::Create(const FeedInfo& feedInfo,
 	nzbInfo->SetMaxTime(feedItemInfo.GetTime());
 
 	return nzbInfo;
-}
-
-inline std::unique_ptr<RegEx>& FeedCoordinator::FilterHelper::GetRegEx(int id)
-{
-	m_regExes.resize(id);
-	return m_regExes[id - 1];
 }
 
 inline void FeedCoordinator::FilterHelper::CalcDupeStatus(const char* title, const char* dupeKey, char* statusBuf, int bufLen)

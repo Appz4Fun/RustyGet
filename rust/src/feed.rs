@@ -145,6 +145,27 @@ pub fn format_season_episode(season_num: i32, ep_raw: &[u8]) -> (Vec<u8>, Vec<u8
     (season, episode)
 }
 
+/// Parses season and episode from `title` matching `FeedItemInfo::ParseSeasonEpisode`
+/// (`"[^[:alnum:]]s?([0-9]+)[ex]([0-9]+(-?e[0-9]+)?)[^[:alnum:]]"`).
+pub fn parse_season_episode(title: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut rx = crate::util::PosixRegEx::compile(
+        c"[^[:alnum:]]s?([0-9]+)[ex]([0-9]+(-?e[0-9]+)?)[^[:alnum:]]",
+        10,
+    );
+    let cstr = std::ffi::CString::new(title).ok()?;
+    if !rx.match_cstr(&cstr) {
+        return None;
+    }
+    let s1_start = rx.match_start(1).max(0) as usize;
+    let s2_start = rx.match_start(2).max(0) as usize;
+    let s2_len = rx.match_len(2).max(0) as usize;
+    let season_slice = title.get(s1_start..)?;
+    let season_num = crate::util::util_str_to_i64_checked(season_slice, i32::MIN as i64, i32::MAX as i64)
+        .unwrap_or(0) as i32;
+    let ep_slice = title.get(s2_start..s2_start.saturating_add(s2_len))?;
+    Some(format_season_episode(season_num, ep_slice))
+}
+
 /// Evaluates whether a feed item has any series identifier (`series`, `rageid`, `tvdbid`, or `tvmazeid`).
 pub fn has_any_series_id(
     series: &[u8],
@@ -1057,25 +1078,22 @@ pub unsafe extern "C" fn nzbget_rs_feed_build_dupe_key(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_format_season_episode(
-    season_num: c_int,
-    ep_raw: *const c_char,
-    ep_raw_len: usize,
+pub unsafe extern "C" fn nzbget_rs_feed_parse_season_episode(
+    title: *const c_char,
     out_season: *mut crate::ffi::RsBuf,
     out_episode: *mut crate::ffi::RsBuf,
-) {
-    let ep_slice = if ep_raw.is_null() || ep_raw_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(ep_raw as *const u8, ep_raw_len)
+) -> c_int {
+    let title_slice = crate::diskstate_format::cstr_to_bytes(title);
+    let Some((season, episode)) = parse_season_episode(title_slice) else {
+        return 0;
     };
-    let (season, episode) = format_season_episode(season_num, ep_slice);
     if !out_season.is_null() {
         *out_season = crate::ffi::into_buf(season);
     }
     if !out_episode.is_null() {
         *out_episode = crate::ffi::into_buf(episode);
     }
+    1
 }
 
 #[no_mangle]

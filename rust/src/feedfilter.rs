@@ -169,10 +169,6 @@ pub trait Item {
     /// The item's season or episode text (GetSeason/GetEpisode after the
     /// title is parsed).
     fn season_episode(&mut self, episode: bool) -> Option<Vec<u8>>;
-    /// RegEx(pattern, buffer size) for a term: a handle.
-    fn regex_new(&mut self, pattern: &[u8], buf_size: i32) -> usize;
-    /// RegEx::Match, and when matched GetMatchCount/Start/Len.
-    fn regex_match(&mut self, handle: usize, text: &[u8]) -> Option<Vec<(i32, i32)>>;
     /// FeedItemInfo's setters, as ApplyOptions calls them.
     fn apply(&mut self, options: &Applied<'_>);
     /// SetMatchStatus/SetMatchRule: 0 ignored, 1 accepted, 2 rejected.
@@ -219,7 +215,7 @@ struct Term {
     is_float: bool,
     /// the rule wants reference values (${1}...)
     refs: bool,
-    regex: Option<usize>,
+    regex: Option<crate::util::PosixRegEx>,
 }
 
 const WORD_SEPARATORS: &[u8] = b" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
@@ -369,7 +365,7 @@ impl Term {
         let (fl, fp, ip) = (self.is_float, self.float_param, self.int_param);
         match self.cmd {
             Cmd::Text => self.match_text(item, s.as_deref().unwrap_or_default(), refs),
-            Cmd::Regex => self.match_regex(item, s.as_deref().unwrap_or_default(), refs),
+            Cmd::Regex => self.match_regex(s.as_deref().unwrap_or_default(), refs),
             Cmd::Equal => if fl { float_value == fp } else { int_value == ip },
             Cmd::Less => if fl { float_value < fp } else { int_value < ip },
             Cmd::LessEqual => if fl { float_value <= fp } else { int_value <= ip },
@@ -416,16 +412,23 @@ impl Term {
         }
     }
 
-    fn match_regex(&mut self, item: &mut dyn Item, value: &[u8], refs: &mut Vec<Vec<u8>>) -> bool {
-        let handle = *self.regex.get_or_insert_with(|| item.regex_new(&self.param, if self.refs { 100 } else { 0 }));
-        match item.regex_match(handle, value) {
-            Some(groups) => {
-                if self.refs {
-                    refs.extend(groups.iter().skip(1).map(|&(s, l)| ref_value(value, s, l)));
+    fn match_regex(&mut self, value: &[u8], refs: &mut Vec<Vec<u8>>) -> bool {
+        let cap = if self.refs { 100 } else { 0 };
+        let rx = self.regex.get_or_insert_with(|| {
+            let pat = std::ffi::CString::new(self.param.as_slice()).unwrap_or_default();
+            crate::util::PosixRegEx::compile(&pat, cap)
+        });
+        let text = std::ffi::CString::new(value).unwrap_or_default();
+        if rx.match_cstr(&text) {
+            if self.refs {
+                let count = rx.match_count().min(100);
+                for i in 1..count {
+                    refs.push(ref_value(value, rx.match_start(i), rx.match_len(i)));
                 }
-                true
             }
-            None => false,
+            true
+        } else {
+            false
         }
     }
 }
@@ -801,7 +804,6 @@ mod tests {
         dupe_key: Vec<u8>,
         match_status: i32,
         match_rule: i32,
-        patterns: Vec<Vec<u8>>,
     }
 
     impl Item for MockFeedItem {
@@ -834,41 +836,6 @@ mod tests {
             } else {
                 self.season.clone()
             })
-        }
-
-        fn regex_new(&mut self, pattern: &[u8], _buf_size: i32) -> usize {
-            self.patterns.push(pattern.to_vec());
-            self.patterns.len()
-        }
-
-        fn regex_match(&mut self, handle: usize, text: &[u8]) -> Option<Vec<(i32, i32)>> {
-            let pat = self.patterns.get(handle.checked_sub(1)?)?;
-            let text_lower: Vec<u8> = text.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if pat == b"game.*\\.s02e[0-9]*\\..*" {
-                if text_lower.starts_with(b"game") && text_lower.windows(7).any(|w| w == b".s02e06") {
-                    return Some(vec![(0, text.len() as i32)]);
-                }
-                return None;
-            }
-            if pat == b".+S([0-9]{1,2})E([0-9]{1,2})" {
-                for i in 1..text_lower.len().saturating_sub(5) {
-                    if text_lower[i] == b's'
-                        && text_lower[i + 1].is_ascii_digit()
-                        && text_lower[i + 2].is_ascii_digit()
-                        && text_lower[i + 3] == b'e'
-                        && text_lower[i + 4].is_ascii_digit()
-                        && text_lower[i + 5].is_ascii_digit()
-                    {
-                        return Some(vec![
-                            (0, (i + 6) as i32),
-                            ((i + 1) as i32, 2),
-                            ((i + 4) as i32, 2),
-                        ]);
-                    }
-                }
-                return None;
-            }
-            None
         }
 
         fn apply(&mut self, options: &Applied<'_>) {

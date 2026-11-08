@@ -161,7 +161,6 @@ typedef std::deque<std::unique_ptr<FeedInfo>> Feeds;
 class FeedFilterHelper
 {
 public:
-	virtual std::unique_ptr<RegEx>& GetRegEx(int id) = 0;
 	virtual void CalcDupeStatus(const char* title, const char* dupeKey, char* statusBuf, int bufLen) = 0;
 };
 
@@ -368,28 +367,15 @@ private:
 
 		m_seasonEpisodeParsed = true;
 
-		const char* pattern = "[^[:alnum:]]s?([0-9]+)[ex]([0-9]+(-?e[0-9]+)?)[^[:alnum:]]";
-
-		std::unique_ptr<RegEx>& regEx = m_feedFilterHelper->GetRegEx(1);
-		if (!regEx)
+		NzbgetRsBuf seasonBuf{};
+		NzbgetRsBuf episodeBuf{};
+		if (nzbget_rs_feed_parse_season_episode(m_title.c_str(), &seasonBuf, &episodeBuf) != 0)
 		{
-			regEx = std::make_unique<RegEx>(pattern, 10);
-		}
-
-		if (regEx->Match(m_title.c_str()))
-		{
-			const char* season = m_title.c_str() + regEx->GetMatchStart(1);
-			int seasonNum = Util::StrToNum<int>(season).value_or(0);
-			const char* val = m_title.c_str() + regEx->GetMatchStart(2);
-			size_t valLen = (size_t)regEx->GetMatchLen(2);
-			NzbgetRsBuf seasonBuf{};
-			NzbgetRsBuf episodeBuf{};
-			nzbget_rs_feed_format_season_episode(seasonNum, val, valLen, &seasonBuf, &episodeBuf);
 			SetSeason(seasonBuf.data ? seasonBuf.data : "");
 			SetEpisode(episodeBuf.data ? episodeBuf.data : "");
-			nzbget_rs_free(seasonBuf);
-			nzbget_rs_free(episodeBuf);
 		}
+		nzbget_rs_free(seasonBuf);
+		nzbget_rs_free(episodeBuf);
 	}
 };
 

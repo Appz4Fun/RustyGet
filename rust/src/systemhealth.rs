@@ -3216,6 +3216,85 @@ pub fn system_info_to_display_text(view: &SystemInfoView<'_>) -> Vec<u8> {
     out
 }
 
+/// Formats `System::SystemInfo` as display text (`mode == 0`), JSON (`mode == 1`), or XML (`mode == 2`),
+/// detecting OS and CPU info directly in Rust and building the default built-in tools and libraries lists.
+pub fn system_info_format(
+    mode: i32,
+    uts_sysname: &[u8],
+    uts_release: &[u8],
+    uts_machine: &[u8],
+    ssl_lib_name: &[u8],
+    ssl_raw_version: &[u8],
+    ssl_extract_after_space: bool,
+    public_ip: &[u8],
+    private_ip: &[u8],
+) -> Vec<u8> {
+    let (os_name, os_version) = os_detect_info(uts_sysname, uts_release);
+    let (cpu_model, cpu_arch) = cpu_detect_info(uts_machine);
+    let tools = [
+        SystemToolView {
+            name: b"UnRAR / 7-Zip / Archive Engine",
+            version: b"Built-in",
+            path: b"zipfast + zipview + native Rust decoders",
+        },
+        SystemToolView {
+            name: b"Parity Verification & Repair",
+            version: b"Built-in",
+            path: b"par-rs (streaming + post-download)",
+        },
+        SystemToolView {
+            name: b"Extended Unpacker & Permission Fixer",
+            version: b"Built-in",
+            path: b"First-class native pipeline",
+        },
+        SystemToolView {
+            name: b"yEnc SIMD Decoder",
+            version: b"Built-in",
+            path: b"nntmux-yenc",
+        },
+    ];
+    let ssl_ver_extracted;
+    let mut libraries = vec![
+        SystemLibraryView { name: b"zipfast", version: b"0.1.0" },
+        SystemLibraryView { name: b"zipview", version: b"0.1.0" },
+        SystemLibraryView { name: b"par-rs", version: b"0.2.0" },
+        SystemLibraryView { name: b"nntmux-yenc", version: b"0.1.0 (SIMD)" },
+        SystemLibraryView { name: b"flate2 (zlib-rs)", version: b"1.1.11" },
+        SystemLibraryView { name: b"zstd", version: b"0.14.0" },
+        SystemLibraryView { name: b"bzip2", version: b"0.6.1" },
+        SystemLibraryView { name: b"crc32fast", version: b"1.5.2" },
+        SystemLibraryView { name: b"quick-xml", version: b"0.41.0" },
+        SystemLibraryView { name: b"md-5", version: b"0.11.0" },
+    ];
+    if !ssl_lib_name.is_empty() {
+        let ver = if ssl_extract_after_space {
+            ssl_ver_extracted = sysinfo_extract_version_after_space(ssl_raw_version);
+            ssl_ver_extracted.as_slice()
+        } else {
+            ssl_raw_version
+        };
+        libraries.push(SystemLibraryView {
+            name: ssl_lib_name,
+            version: ver,
+        });
+    }
+    let view = SystemInfoView {
+        os_name: &os_name,
+        os_version: &os_version,
+        cpu_model: &cpu_model,
+        cpu_arch: &cpu_arch,
+        public_ip,
+        private_ip,
+        tools: &tools,
+        libraries: &libraries,
+    };
+    match mode {
+        1 => system_info_to_json(&view),
+        2 => system_info_to_xml(&view),
+        _ => system_info_to_display_text(&view),
+    }
+}
+
 /// Formats a single `<struct><member>...</member></struct>` XML node matching `Xml::CreateStructNode` + `Xml::AddNewNode` + `Xml::Serialize`.
 pub fn xml_serialize_struct_member(name: &[u8], tag: &[u8], value: &[u8]) -> Vec<u8> {
     let mut out = Vec::from(&b"<struct>"[..]);
@@ -4632,6 +4711,54 @@ mod tests {
         let xml_out = String::from_utf8(diagnose_system_health(&input, 2, |_, _| {})).unwrap();
         assert!(xml_out.starts_with("<value><struct><member><name>Alerts</name>"));
         assert!(xml_out.contains("<string>Invalid hour: 25</string>"));
+    }
+
+    #[test]
+    fn test_system_info_format() {
+        let disp = String::from_utf8(system_info_format(
+            0,
+            b"Darwin",
+            b"24.0.0",
+            b"arm64",
+            b"OpenSSL",
+            b"OpenSSL 3.3.1 4 Jun 2024",
+            true,
+            b"",
+            b"",
+        ))
+        .unwrap();
+        assert!(disp.contains("UnRAR / 7-Zip / Archive Engine Built-in"));
+        assert!(disp.contains("OpenSSL 3.3.1"));
+
+        let json = String::from_utf8(system_info_format(
+            1,
+            b"Darwin",
+            b"24.0.0",
+            b"arm64",
+            b"OpenSSL",
+            b"3.3.1",
+            false,
+            b"1.2.3.4",
+            b"192.168.1.10",
+        ))
+        .unwrap();
+        assert!(json.contains("\"PublicIP\":\"1.2.3.4\""));
+        assert!(json.contains("\"PrivateIP\":\"192.168.1.10\""));
+        assert!(json.contains("\"Name\":\"OpenSSL\",\"Version\":\"3.3.1\""));
+
+        let xml = String::from_utf8(system_info_format(
+            2,
+            b"Darwin",
+            b"24.0.0",
+            b"arm64",
+            b"",
+            b"",
+            false,
+            b"1.2.3.4",
+            b"192.168.1.10",
+        ))
+        .unwrap();
+        assert!(xml.contains("<Network><member><name>PublicIP</name><value><string>1.2.3.4</string></value></member>"));
     }
 }
 

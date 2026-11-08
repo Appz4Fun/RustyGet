@@ -198,6 +198,42 @@ pub fn http_client_build_headers(
     headers
 }
 
+/// Parses a raw HTTP response (`HttpClient::GET` in `daemon/connect/HttpClient.h`),
+/// returning `Some((status_code, trimmed_body))` on a valid HTTP status line and header boundary.
+pub fn http_client_parse_response(raw_resp: &[u8]) -> Option<(u32, Vec<u8>)> {
+    let header_end = raw_resp.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let header_part = &raw_resp[..header_end + 2];
+    let first_line_end = header_part
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(header_part.len());
+    let first_line = &header_part[..first_line_end];
+    let mut tokens = first_line
+        .split(|&b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+        .filter(|t| !t.is_empty());
+    let http_version = tokens.next()?;
+    let status_tok = tokens.next()?;
+    let status_str = std::str::from_utf8(status_tok).ok()?;
+    let status_code: u32 = status_str.parse().ok()?;
+    if !http_client_validate_version(http_version, true) {
+        return None;
+    }
+    let mut body = &raw_resp[header_end + 4..];
+    while let Some((&b, rest)) = body.split_first() {
+        if b == 0 || b > b' ' {
+            break;
+        }
+        body = rest;
+    }
+    while let Some((&b, rest)) = body.split_last() {
+        if b == 0 || b > b' ' {
+            break;
+        }
+        body = rest;
+    }
+    Some((status_code, body.to_vec()))
+}
+
 /// Port of `SpeedTest::CalculateSpeedInMbps`.
 pub fn speed_test_calc_mbps(bytes: u32, time_sec: f64) -> f64 {
     let bits = (bytes as f64) * 8.0;
@@ -600,5 +636,15 @@ mod tests {
             err.unwrap_err(),
             "No speed data was collected during the network speed test"
         );
+    }
+
+    #[test]
+    fn test_http_client_parse_response() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n  203.0.113.42\r\n";
+        let (status, body) = http_client_parse_response(raw).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, b"203.0.113.42");
+        assert!(http_client_parse_response(b"INVALID\r\n\r\nbody").is_none());
+        assert!(http_client_parse_response(b"HTTP/1.1 200 OK\r\nno-double-crlf").is_none());
     }
 }

@@ -29,11 +29,81 @@
 #include <functional>
 #include "FileSystem.h"
 #include "WebDownloader.h"
-#include "Extension.h"
 #include "Util.h"
-#include "ExtensionLoader.h"
 #include "Options.h"
 #include "nzbget_rs.h"
+
+namespace Extension
+{
+	struct Kind
+	{
+		bool post = false;
+		bool scan = false;
+		bool queue = false;
+		bool scheduler = false;
+		bool feed = false;
+	};
+
+	class Script final
+	{
+	public:
+		Script() = default;
+		~Script() = default;
+
+		Script& operator=(const Script&) = delete;
+		Script(const Script&) = delete;
+
+		Script(Script&& other) = default;
+		Script& operator=(Script&& other) = default;
+
+		void SetEntry(std::string entry) { m_entry = std::move(entry); }
+		const char* GetEntry() const { return m_entry.c_str(); }
+		void SetLocation(std::string location) { m_location = std::move(location); }
+		const char* GetLocation() const { return m_location.c_str(); }
+		void SetRootDir(std::string dir) { m_rootDir = std::move(dir); }
+		const char* GetRootDir() const { return m_rootDir.c_str(); }
+		void SetName(std::string name) { m_name = std::move(name); }
+		const char* GetName() const { return m_name.c_str(); }
+		void SetDisplayName(std::string displayName) { m_displayName = std::move(displayName); }
+		const char* GetDisplayName() const { return m_displayName.c_str(); }
+		void SetKind(Kind kind) { m_kind = std::move(kind); }
+		bool GetPostScript() const { return m_kind.post; }
+		bool GetScanScript() const { return m_kind.scan; }
+		bool GetQueueScript() const { return m_kind.queue; }
+		bool GetSchedulerScript() const { return m_kind.scheduler; }
+		bool GetFeedScript() const { return m_kind.feed; }
+		void SetQueueEvents(std::string queueEvents) { m_queueEvents = std::move(queueEvents); }
+		const char* GetQueueEvents() const { return m_queueEvents.c_str(); }
+		void SetTaskTime(std::string taskTime) { m_taskTime = std::move(taskTime); }
+		const char* GetTaskTime() const { return m_taskTime.c_str(); }
+		void SetJsonStr(std::string json) { m_json = std::move(json); }
+		const std::string& GetJsonStr() const { return m_json; }
+		void SetXmlStr(std::string xml) { m_xml = std::move(xml); }
+		const std::string& GetXmlStr() const { return m_xml; }
+
+	private:
+		Kind m_kind;
+		std::string m_entry;
+		std::string m_location;
+		std::string m_rootDir;
+		std::string m_name;
+		std::string m_displayName;
+		std::string m_queueEvents;
+		std::string m_taskTime;
+		std::string m_json;
+		std::string m_xml;
+	};
+
+	inline std::string ToJsonStr(const Script& script)
+	{
+		return script.GetJsonStr();
+	}
+
+	inline std::string ToXmlStr(const Script& script)
+	{
+		return script.GetXmlStr();
+	}
+}
 
 namespace ExtensionManager
 {
@@ -189,13 +259,56 @@ namespace ExtensionManager
 
 			m_extensions.clear();
 
-			Tokenizer tokDir(scriptDir, ",;");
-			while (const char* extensionDir = tokDir.Next())
+			NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_load_extensions(
+				scriptDir,
+				g_Options->GetScriptOrder(),
+				PATH_SEPARATOR,
+				this,
+				[](void*, const char* msg)
+				{
+					error("%s", msg ? msg : "");
+				},
+				[](
+					void* ctx,
+					const char* entryPtr, size_t entryLen,
+					const char* locPtr, size_t locLen,
+					const char* rootPtr, size_t rootLen,
+					const char* namePtr, size_t nameLen,
+					const char* dispPtr, size_t dispLen,
+					const char* qeventsPtr, size_t qeventsLen,
+					const char* taskTimePtr, size_t taskTimeLen,
+					int postScript, int scanScript, int queueScript, int schedScript, int feedScript,
+					const char* jsonPtr, size_t jsonLen,
+					const char* xmlPtr, size_t xmlLen)
+				{
+					auto* mgr = static_cast<Manager*>(ctx);
+					Extension::Script ext;
+					ext.SetEntry(std::string(entryPtr ? entryPtr : "", entryLen));
+					ext.SetLocation(std::string(locPtr ? locPtr : "", locLen));
+					ext.SetRootDir(std::string(rootPtr ? rootPtr : "", rootLen));
+					ext.SetName(std::string(namePtr ? namePtr : "", nameLen));
+					ext.SetDisplayName(std::string(dispPtr ? dispPtr : "", dispLen));
+					ext.SetKind({
+						postScript != 0,
+						scanScript != 0,
+						queueScript != 0,
+						schedScript != 0,
+						feedScript != 0
+					});
+					ext.SetQueueEvents(std::string(qeventsPtr ? qeventsPtr : "", qeventsLen));
+					ext.SetTaskTime(std::string(taskTimePtr ? taskTimePtr : "", taskTimeLen));
+					ext.SetJsonStr(std::string(jsonPtr ? jsonPtr : "", jsonLen));
+					ext.SetXmlStr(std::string(xmlPtr ? xmlPtr : "", xmlLen));
+					mgr->m_extensions.emplace_back(std::make_shared<Extension::Script>(std::move(ext)));
+				});
+			if (errBuf.data)
 			{
-				LoadExtensionDir(extensionDir, false, extensionDir);
+				std::string err(errBuf.data, errBuf.len);
+				nzbget_rs_free(errBuf);
+				return err;
 			}
+			nzbget_rs_free(errBuf);
 
-			Sort(g_Options->GetScriptOrder());
 			CreateTasks();
 			m_extensions.shrink_to_fit();
 
@@ -249,51 +362,6 @@ namespace ExtensionManager
 		}
 
 	private:
-		void LoadExtensionDir(const char* directory, bool isSubDir, const char* rootDir)
-		{
-			Extension::Script extension;
-
-			if (ExtensionLoader::V2::Load(extension, directory, rootDir)) {
-				if (!Exists(extension.GetName()))
-				{
-					m_extensions.emplace_back(std::make_shared<Extension::Script>(std::move(extension)));
-					return;
-				}
-			}
-
-			DirBrowser dir(directory);
-			while (const char* filename = dir.Next())
-			{
-				if (filename[0] == '.' || filename[0] == '_')
-					continue;
-
-				NzbgetRsBuf entryBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					directory, PATH_SEPARATOR, filename);
-				const std::string entry(entryBuf.data ? entryBuf.data : "", entryBuf.len);
-				nzbget_rs_free(entryBuf);
-				if (!FileSystem::DirectoryExists(entry.c_str()))
-				{
-					std::string name = GetExtensionName(filename);
-					if (Exists(name))
-					{
-						continue;
-					}
-
-					const char* location = isSubDir ? directory : entry.c_str();
-					extension.SetEntry(entry);
-					extension.SetName(std::move(name));
-					if (ExtensionLoader::V1::Load(extension, location, rootDir))
-					{
-						m_extensions.emplace_back(std::make_shared<Extension::Script>(std::move(extension)));
-					}
-				}
-				else if (!isSubDir)
-				{
-					LoadExtensionDir(entry.c_str(), true, rootDir);
-				}
-			}
-		}
-
 		void CreateTasks() const
 		{
 			for (const auto& extension : m_extensions)
@@ -323,44 +391,6 @@ namespace ExtensionManager
 					return ext->GetName() == name;
 				}
 			);
-		}
-
-		bool Exists(const std::string& name) const
-		{
-			return GetByName(name) != std::end(m_extensions);
-		}
-
-		void Sort(const char* orderStr)
-		{
-			if (m_extensions.empty())
-			{
-				return;
-			}
-
-			size_t count = m_extensions.size();
-			std::vector<const char*> names(count);
-			for (size_t i = 0; i < count; ++i)
-			{
-				names[i] = m_extensions[i]->GetName();
-			}
-			std::vector<size_t> sortedIndices(count);
-			nzbget_rs_feh_ext_sort_indices(names.data(), count, orderStr ? orderStr : "", sortedIndices.data());
-
-			Extensions sorted;
-			sorted.reserve(count);
-			for (size_t idx : sortedIndices)
-			{
-				sorted.push_back(std::move(m_extensions[idx]));
-			}
-			m_extensions = std::move(sorted);
-		}
-
-		std::string GetExtensionName(const std::string& fileName) const
-		{
-			NzbgetRsBuf buf = nzbget_rs_ext_mgr_get_extension_name(fileName.data(), fileName.size());
-			std::string res(buf.data ? buf.data : "", buf.len);
-			nzbget_rs_free(buf);
-			return res;
 		}
 
 		std::optional<std::string>

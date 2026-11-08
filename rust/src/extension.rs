@@ -2488,22 +2488,56 @@ fn join_path_sep(directory: &[u8], path_sep: u8, name: &[u8]) -> Vec<u8> {
     out
 }
 
+fn format_manifest_parse_error(path: &[u8], suffix: &[u8]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(16 + path.len() + suffix.len());
+    msg.extend_from_slice(b"Failed to parse ");
+    msg.extend_from_slice(path);
+    msg.extend_from_slice(suffix);
+    msg
+}
+
 /// Loads a V2 extension from `directory` (`ExtensionLoader::V2::Load`).
 pub fn ext_loader_v2_load_from_dir(
     directory: &[u8],
     root_dir: &[u8],
     path_sep: u8,
 ) -> Option<ExtensionScriptView> {
+    ext_loader_v2_load_from_dir_with_error(directory, root_dir, path_sep, &mut |_| {})
+}
+
+/// Loads a V2 extension from `directory` (`ExtensionLoader::V2::Load`), reporting manifest errors via `on_error`.
+pub fn ext_loader_v2_load_from_dir_with_error(
+    directory: &[u8],
+    root_dir: &[u8],
+    path_sep: u8,
+    on_error: &mut impl FnMut(&[u8]),
+) -> Option<ExtensionScriptView> {
     let manifest_file_bytes = join_path_sep(directory, path_sep, b"manifest.json");
     let path = bytes_to_path(&manifest_file_bytes);
     let raw = std::fs::read(&path).ok()?;
     let limits = crate::json::Limits {
-        string: usize::MAX,
-        array: usize::MAX,
-        object: usize::MAX,
+        string: 0x7ffffffe,
+        array: 0x7fffffff / 24,
+        object: 0x3fffffff,
     };
-    let crate::manifest::Outcome::Loaded(m) = crate::manifest::load(&raw, limits) else {
-        return None;
+    let m = match crate::manifest::load(&raw, limits) {
+        crate::manifest::Outcome::Loaded(m) => m,
+        crate::manifest::Outcome::Syntax => {
+            on_error(&format_manifest_parse_error(&manifest_file_bytes, b". Syntax error."));
+            return None;
+        }
+        crate::manifest::Outcome::NotObject => {
+            on_error(&format_manifest_parse_error(
+                &manifest_file_bytes,
+                b". The manifest isn't a JSON object.",
+            ));
+            return None;
+        }
+        crate::manifest::Outcome::ElementNotObject(_) => {
+            on_error(&format_manifest_parse_error(&manifest_file_bytes, b": not an object"));
+            return None;
+        }
+        crate::manifest::Outcome::Refused(_) => return None,
     };
     let get_field = |idx: usize| m.fields[idx].clone().unwrap_or_default();
     let main_file = get_field(1);
@@ -2606,14 +2640,14 @@ pub fn ext_loader_v1_load_from_file(
 ) -> Option<ExtensionScriptView> {
     let path = bytes_to_path(entry);
     let raw = std::fs::read(&path).ok()?;
-    let parsed = crate::extload::parse(&raw, &|b| b.is_ascii_whitespace())?;
+    let parsed = crate::extload::parse(&raw, &|b| matches!(b, b' ' | b'\t'..=b'\r'))?;
 
     let stripped = crate::unpack::unpack_ctrl_strip_last_extension(name);
     let base_off = crate::paths::base_file_name(&stripped);
     let display_name = stripped[base_off..].to_vec();
 
     let mut about = parsed.about;
-    while about.last().is_some_and(|&b| b.is_ascii_whitespace()) {
+    while about.last().is_some_and(|&b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
         about.pop();
     }
 
@@ -2692,8 +2726,11 @@ fn load_extension_dir_recursive(
     root_dir: &[u8],
     path_sep: u8,
     extensions: &mut Vec<std::sync::Arc<ExtensionScriptView>>,
+    on_error: &mut impl FnMut(&[u8]),
 ) {
-    if let Some(v2_ext) = ext_loader_v2_load_from_dir(directory, root_dir, path_sep) {
+    if let Some(v2_ext) =
+        ext_loader_v2_load_from_dir_with_error(directory, root_dir, path_sep, on_error)
+    {
         if !extensions.iter().any(|e| e.name == v2_ext.name) {
             extensions.push(std::sync::Arc::new(v2_ext));
             return;
@@ -2722,9 +2759,40 @@ fn load_extension_dir_recursive(
                 extensions.push(std::sync::Arc::new(v1_ext));
             }
         } else if !is_sub_dir {
-            load_extension_dir_recursive(&entry, true, root_dir, path_sep, extensions);
+            load_extension_dir_recursive(&entry, true, root_dir, path_sep, extensions, on_error);
         }
     }
+}
+
+/// Loads and sorts all V1 and V2 extensions in `script_dir` (`ExtensionManager::Manager::LoadExtensions`),
+/// reporting any V2 manifest parse errors via `on_error`.
+pub fn ext_mgr_load_extensions_with(
+    script_dir: &[u8],
+    script_order: &[u8],
+    path_sep: u8,
+    mut on_error: impl FnMut(&[u8]),
+) -> Result<Vec<std::sync::Arc<ExtensionScriptView>>, String> {
+    if script_dir.is_empty() || script_dir.iter().all(|&b| b <= b' ') {
+        return Err("\"ScriptDir\" is not specified".to_string());
+    }
+    let mut loaded = Vec::new();
+    for raw_dir in script_dir.split(|&b| b == b',' || b == b';') {
+        let dir = trim_ascii_spaces(raw_dir);
+        if dir.is_empty() {
+            continue;
+        }
+        load_extension_dir_recursive(dir, false, dir, path_sep, &mut loaded, &mut on_error);
+    }
+    if !loaded.is_empty() {
+        let names: Vec<&[u8]> = loaded.iter().map(|e| e.name.as_slice()).collect();
+        let sorted_indices = ext_sort_indices(&names, script_order);
+        let mut sorted = Vec::with_capacity(loaded.len());
+        for idx in sorted_indices {
+            sorted.push(std::sync::Arc::clone(&loaded[idx]));
+        }
+        loaded = sorted;
+    }
+    Ok(loaded)
 }
 
 /// Pure-Rust `ExtensionManager` (`daemon/extension/ExtensionManager.cpp`).
@@ -2751,26 +2819,7 @@ impl RsExtensionManager {
         script_order: &[u8],
         path_sep: u8,
     ) -> Result<(), String> {
-        if script_dir.is_empty() {
-            return Err("\"ScriptDir\" is not specified".to_string());
-        }
-        let mut loaded = Vec::new();
-        for raw_dir in script_dir.split(|&b| b == b',' || b == b';') {
-            let dir = trim_ascii_spaces(raw_dir);
-            if dir.is_empty() {
-                continue;
-            }
-            load_extension_dir_recursive(dir, false, dir, path_sep, &mut loaded);
-        }
-        if !loaded.is_empty() {
-            let names: Vec<&[u8]> = loaded.iter().map(|e| e.name.as_slice()).collect();
-            let sorted_indices = ext_sort_indices(&names, script_order);
-            let mut sorted = Vec::with_capacity(loaded.len());
-            for idx in sorted_indices {
-                sorted.push(std::sync::Arc::clone(&loaded[idx]));
-            }
-            loaded = sorted;
-        }
+        let loaded = ext_mgr_load_extensions_with(script_dir, script_order, path_sep, |_| {})?;
         *self.extensions.write().unwrap() = loaded;
         Ok(())
     }

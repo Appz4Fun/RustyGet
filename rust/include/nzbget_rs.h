@@ -189,8 +189,6 @@ typedef struct NzbgetRsFeedItem
 	void* user;
 	void (*field)(void* user, int field, const char* attr, const char** str, long long* num);
 	const char* (*seasonEpisode)(void* user, int episode);
-	size_t (*regexNew)(void* user, const char* pattern, int bufSize);
-	int (*regexMatch)(void* user, size_t regex, const char* text, int (*groups)[2], int capacity);
 	void (*apply)(void* user, const NzbgetRsFeedOptions* options);
 	void (*setMatch)(void* user, int status, int rule);
 } NzbgetRsFeedItem;
@@ -418,45 +416,11 @@ void nzbget_rs_convert_old_option(const char* option, const char* value, NzbgetR
 int nzbget_rs_has_script(const char* list, const char* name);
 int nzbget_rs_parse_category_source(const char* value);
 
-// ExtensionLoader::V1 (rust/src/extload.rs): a pre-manifest script's header.
-// parse returns a handle (free with ext_v1_free) or NULL when the file isn't
-// an extension script. Strings are borrowed from the handle (not NUL-
-// terminated). text: 0 about (untrimmed), 1 queue events, 2 task time,
-// 3 description line i, 4 requirement i. count: 0 description lines,
-// 1 requirements, 2 options, 3 commands. item_text (command 0 option, 1
-// command): 0 section name, 1 section prefix, 2 name, 3 action, 4 description
-// line j. item_count: 0 section multi, 1 description lines, 2 select values.
-// select: option i's value (j == SIZE_MAX) or select value j: 1 a number in
-// *num, 0 a text in *text, -1 none.
 typedef struct NzbgetRsStr
 {
 	const char* data;
 	size_t len;
 } NzbgetRsStr;
-typedef struct NzbgetRsExtV1 NzbgetRsExtV1;
-// data is borrowed for this call; NULL is empty. The result owns its bytes.
-// rightSpace classifies byte 0..255 as Util::TrimRight does in the caller's
-// current C locale and char signedness. It must not throw. NULL returns NULL.
-// All returned strings are length-delimited, may contain NUL, are immutable,
-// and remain valid until free(h); never free them separately. Free accepts NULL.
-// Invalid indexes/fields and NULL handles return empty/zero (select: -1).
-// select outputs may be NULL: if the required output is NULL, returns -1;
-// otherwise writes only that output. Outputs must not overlap the handle.
-// Rust panics abort; no exception may unwind through these functions.
-NzbgetRsExtV1* nzbget_rs_ext_v1_parse(const char* data, size_t len, int (*rightSpace)(int));
-// next returns one std::getline line (without '\n'): 1 line, 0 EOF, -1 error.
-// Its bytes remain readable until next is called again. On error parsing
-// returns NULL. next must catch all C++ exceptions; rethrow after read returns.
-// NULL callbacks return NULL. No callback is retained after this call.
-typedef int (*NzbgetRsExtV1Next)(void* context, NzbgetRsStr* line);
-NzbgetRsExtV1* nzbget_rs_ext_v1_read(NzbgetRsExtV1Next next, void* context, int (*rightSpace)(int));
-void nzbget_rs_ext_v1_free(NzbgetRsExtV1* h);
-int nzbget_rs_ext_v1_kind(const NzbgetRsExtV1* h);
-NzbgetRsStr nzbget_rs_ext_v1_text(const NzbgetRsExtV1* h, int which, size_t i);
-size_t nzbget_rs_ext_v1_count(const NzbgetRsExtV1* h, int which);
-NzbgetRsStr nzbget_rs_ext_v1_item_text(const NzbgetRsExtV1* h, int command, size_t i, int field, size_t j);
-size_t nzbget_rs_ext_v1_item_count(const NzbgetRsExtV1* h, int command, size_t i, int which);
-int nzbget_rs_ext_v1_select(const NzbgetRsExtV1* h, size_t i, size_t j, double* num, NzbgetRsStr* text);
 
 // WebDownloader's HTTP decisions (rust/src/webdownload.rs). check_response:
 // result 0 running, 1 running a redirect, 2 connect error, 3 not found,
@@ -705,65 +669,6 @@ typedef struct NzbgetRsParName
 } NzbgetRsParName;
 int nzbget_rs_direct_need_rename_pars(const NzbgetRsParName* pars, size_t count);
 
-// ManifestFile::Load (rust/src/manifest.rs, rust/src/json.rs: Boost.JSON's
-// parse with the default options) on the manifest text the C++ read: 1 when
-// loaded, after loaded got the manifest; 0 refused (a required key missing
-// or of another kind); -1 a syntax error; -2 not a JSON object; -3 an
-// option, command or section that isn't an object. On 0 and -3, loaded gets
-// the partial writes preceding failure. Texts/options/commands are appended; sections apply
-// to both existing and appended entries. The manifest and every
-// string in it are borrowed for the loaded call only; strings are not
-// NUL-terminated. fields are author, main, homepage, about, version, name,
-// displayName, kind, license, taskTime, queueEvents, nzbgetMinVersion; has[i]
-// says whether fields[i] was assigned before validation stopped. NULL text is empty; NULL loaded
-// is not called. loaded must not throw; panics abort.
-typedef struct NzbgetRsManifestSection
-{
-	int multi;
-	NzbgetRsStr name;
-	NzbgetRsStr prefix;
-} NzbgetRsManifestSection;
-typedef struct NzbgetRsManifestSelect
-{
-	int isString;
-	double number;
-	NzbgetRsStr string;
-} NzbgetRsManifestSelect;
-typedef struct NzbgetRsManifestOption
-{
-	NzbgetRsManifestSection section;
-	NzbgetRsStr name;
-	NzbgetRsStr displayName;
-	const NzbgetRsStr* description;
-	size_t descriptionCount;
-	NzbgetRsManifestSelect value;
-	const NzbgetRsManifestSelect* select;
-	size_t selectCount;
-} NzbgetRsManifestOption;
-typedef struct NzbgetRsManifestCommand
-{
-	NzbgetRsManifestSection section;
-	NzbgetRsStr name;
-	NzbgetRsStr displayName;
-	NzbgetRsStr action;
-	const NzbgetRsStr* description;
-	size_t descriptionCount;
-} NzbgetRsManifestCommand;
-typedef struct NzbgetRsManifest
-{
-	NzbgetRsStr fields[12];
-	int has[12];
-	const NzbgetRsStr* description;
-	size_t descriptionCount;
-	const NzbgetRsStr* requirements;
-	size_t requirementsCount;
-	const NzbgetRsManifestOption* options;
-	size_t optionCount;
-	const NzbgetRsManifestCommand* commands;
-	size_t commandCount;
-	const NzbgetRsManifestSection* sections;
-	size_t sectionCount;
-} NzbgetRsManifest;
 // Limits from this build of Boost.JSON, in decoded bytes / input elements.
 typedef struct NzbgetRsJsonLimits
 {
@@ -771,8 +676,6 @@ typedef struct NzbgetRsJsonLimits
 	size_t arraySize;
 	size_t objectSize;
 } NzbgetRsJsonLimits;
-int nzbget_rs_manifest_load(const char* text, size_t len, NzbgetRsJsonLimits limits, void* ctx,
-	void (*loaded)(void* ctx, const NzbgetRsManifest* manifest));
 
 // TestServerXmlCommand's JSON body (rust/src/rpcparams.rs with the parser
 // above): 1 when parsed, after parsed got the parameters (strings borrowed
@@ -2285,8 +2188,8 @@ int nzbget_rs_snh_http_get_calc_watchdog_wait(
     int64_t deadline_ms, int64_t now_ms, int64_t file_size, size_t max_bytes,
     int64_t* out_wait_ms);
 
-int nzbget_rs_snh_http_client_find_header_colon(
-    const char* line, size_t len, size_t* out_colon_pos);
+int nzbget_rs_http_client_parse_response(
+    const char* raw_ptr, size_t raw_len, uint32_t* out_status, NzbgetRsBuf* out_body);
 int nzbget_rs_network_speed_test_run(
     void* ctx,
     int (*execute_iter_cb)(
@@ -3672,9 +3575,6 @@ size_t nzbget_rs_queue_coord_find_dupe_file_indices(
 NzbgetRsBuf nzbget_rs_ufs_util_resolve_path_from_env(
     const char* path_ptr, size_t path_len, const char* env_path);
 
-int32_t nzbget_rs_ext_script_kind(const char* line_ptr, size_t line_len);
-void nzbget_rs_feh_ext_sort_indices(
-    const char* const* names, size_t count, const char* order_str, size_t* out_indices);
 int32_t nzbget_rs_dupesearch_parse_cooldown_line(
     const char* line_ptr, size_t line_len, int64_t now_sec,
     NzbgetRsBuf* out_indexer, int64_t* out_when);
@@ -3685,8 +3585,6 @@ void nzbget_rs_dqh_fleet_visit_pipe_names(
     const char* names_ptr, size_t names_len, void* ctx,
     void (*visit)(void* ctx, const char* part_ptr, size_t part_len));
 
-int32_t nzbget_rs_snh_http_client_validate_version(
-    const char* version_ptr, size_t version_len, int32_t stream_ok);
 NzbgetRsBuf nzbget_rs_snh_http_client_build_headers(
     const char* method_ptr, size_t method_len,
     const char* host_ptr, size_t host_len,
@@ -4028,7 +3926,6 @@ void nzbget_rs_dqh_log_parse_rotated_date_fields(
     int* out_year, int* out_mon, int* out_mday);
 int nzbget_rs_dqh_mem_slices_equal(const void* a, const void* b, size_t len);
 int nzbget_rs_dqh_tls_is_cipher_list(const char* cipher, size_t cipher_len);
-NzbgetRsBuf nzbget_rs_dqh_sysinfo_extract_version_after_space(const char* text);
 int nzbget_rs_dqh_dupe_util_trim_bounds(
     const char* text, size_t text_len, const char* chars,
     size_t* out_start, size_t* out_len);
@@ -4715,9 +4612,8 @@ NzbgetRsBuf nzbget_rs_feed_build_dupe_key(
     const char* rage_id, const char* tvdb_id, const char* tvmaze_id, const char* series,
     int item_rage_id, int item_tvdb_id, int item_tvmaze_id, int item_imdb_id,
     int season_num, int episode_num, const char* season, const char* episode);
-void nzbget_rs_feed_format_season_episode(
-    int season_num, const char* ep_raw, size_t ep_raw_len,
-    NzbgetRsBuf* out_season, NzbgetRsBuf* out_episode);
+int nzbget_rs_feed_parse_season_episode(
+    const char* title, NzbgetRsBuf* out_season, NzbgetRsBuf* out_episode);
 
 NzbgetRsFeedFileParser* nzbget_rs_feed_file_parser_parse_file(const char* filename);
 void nzbget_rs_feed_file_parser_free(NzbgetRsFeedFileParser* parser);
@@ -5418,160 +5314,35 @@ void nzbget_rs_article_batch_fetcher_cancel_remaining(void* handle);
 void nzbget_rs_article_batch_fetcher_stop(void* handle);
 NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
 
-NzbgetRsBuf nzbget_rs_extension_to_json(
-    const char* entry_ptr, size_t entry_len,
-    const char* loc_ptr, size_t loc_len,
-    const char* root_ptr, size_t root_len,
-    const char* name_ptr, size_t name_len,
-    const char* disp_ptr, size_t disp_len,
-    const char* about_ptr, size_t about_len,
-    const char* author_ptr, size_t author_len,
-    const char* home_ptr, size_t home_len,
-    const char* lic_ptr, size_t lic_len,
-    const char* ver_ptr, size_t ver_len,
-    const char* min_ver_ptr, size_t min_ver_len,
-    int post_script, int scan_script, int queue_script, int sched_script, int feed_script,
-    const char* qevents_ptr, size_t qevents_len,
-    const char* task_time_ptr, size_t task_time_len,
-    const char* const* desc_ptrs, const size_t* desc_lens, size_t desc_count,
-    const char* const* req_ptrs, const size_t* req_lens, size_t req_count,
-    size_t opt_count, size_t cmd_count, void* ctx,
-    void (*get_opt_cb)(
-        void* ctx, size_t idx,
-        const char** out_name_ptr, size_t* out_name_len,
-        const char** out_disp_ptr, size_t* out_disp_len,
-        const char** out_sec_ptr, size_t* out_sec_len,
-        int* out_multi,
-        const char** out_pref_ptr, size_t* out_pref_len,
-        int* out_val_is_num,
-        const char** out_val_str_ptr, size_t* out_val_str_len,
-        double* out_val_num,
-        size_t* out_desc_cnt, size_t* out_sel_cnt),
-    void (*get_opt_desc_cb)(
-        void* ctx, size_t opt_idx, size_t desc_idx,
-        const char** out_ptr, size_t* out_len),
-    void (*get_opt_sel_cb)(
-        void* ctx, size_t opt_idx, size_t sel_idx,
-        int* out_is_num,
-        const char** out_str_ptr, size_t* out_str_len,
-        double* out_num),
-    void (*get_cmd_cb)(
-        void* ctx, size_t idx,
-        const char** out_name_ptr, size_t* out_name_len,
-        const char** out_disp_ptr, size_t* out_disp_len,
-        const char** out_act_ptr, size_t* out_act_len,
-        const char** out_sec_ptr, size_t* out_sec_len,
-        int* out_multi,
-        const char** out_pref_ptr, size_t* out_pref_len,
-        size_t* out_desc_cnt),
-    void (*get_cmd_desc_cb)(
-        void* ctx, size_t cmd_idx, size_t desc_idx,
-        const char** out_ptr, size_t* out_len));
-
-NzbgetRsBuf nzbget_rs_extension_to_xml(
-    const char* entry_ptr, size_t entry_len,
-    const char* loc_ptr, size_t loc_len,
-    const char* root_ptr, size_t root_len,
-    const char* name_ptr, size_t name_len,
-    const char* disp_ptr, size_t disp_len,
-    const char* about_ptr, size_t about_len,
-    const char* author_ptr, size_t author_len,
-    const char* home_ptr, size_t home_len,
-    const char* lic_ptr, size_t lic_len,
-    const char* ver_ptr, size_t ver_len,
-    const char* min_ver_ptr, size_t min_ver_len,
-    int post_script, int scan_script, int queue_script, int sched_script, int feed_script,
-    const char* qevents_ptr, size_t qevents_len,
-    const char* task_time_ptr, size_t task_time_len,
-    const char* const* desc_ptrs, const size_t* desc_lens, size_t desc_count,
-    const char* const* req_ptrs, const size_t* req_lens, size_t req_count,
-    size_t opt_count, size_t cmd_count, void* ctx,
-    void (*get_opt_cb)(
-        void* ctx, size_t idx,
-        const char** out_name_ptr, size_t* out_name_len,
-        const char** out_disp_ptr, size_t* out_disp_len,
-        const char** out_sec_ptr, size_t* out_sec_len,
-        int* out_multi,
-        const char** out_pref_ptr, size_t* out_pref_len,
-        int* out_val_is_num,
-        const char** out_val_str_ptr, size_t* out_val_str_len,
-        double* out_val_num,
-        size_t* out_desc_cnt, size_t* out_sel_cnt),
-    void (*get_opt_desc_cb)(
-        void* ctx, size_t opt_idx, size_t desc_idx,
-        const char** out_ptr, size_t* out_len),
-    void (*get_opt_sel_cb)(
-        void* ctx, size_t opt_idx, size_t sel_idx,
-        int* out_is_num,
-        const char** out_str_ptr, size_t* out_str_len,
-        double* out_num),
-    void (*get_cmd_cb)(
-        void* ctx, size_t idx,
-        const char** out_name_ptr, size_t* out_name_len,
-        const char** out_disp_ptr, size_t* out_disp_len,
-        const char** out_act_ptr, size_t* out_act_len,
-        const char** out_sec_ptr, size_t* out_sec_len,
-        int* out_multi,
-        const char** out_pref_ptr, size_t* out_pref_len,
-        size_t* out_desc_cnt),
-    void (*get_cmd_desc_cb)(
-        void* ctx, size_t cmd_idx, size_t desc_idx,
-        const char** out_ptr, size_t* out_len));
-
-NzbgetRsBuf nzbget_rs_ext_mgr_get_extension_name(
-    const char* filename_ptr, size_t filename_len);
+NzbgetRsBuf nzbget_rs_ext_mgr_load_extensions(
+    const char* script_dir, const char* script_order, char path_sep, void* ctx,
+    void (*on_error)(void* ctx, const char* msg),
+    void (*on_extension)(
+        void* ctx,
+        const char* entry_ptr, size_t entry_len,
+        const char* loc_ptr, size_t loc_len,
+        const char* root_ptr, size_t root_len,
+        const char* name_ptr, size_t name_len,
+        const char* disp_ptr, size_t disp_len,
+        const char* qevents_ptr, size_t qevents_len,
+        const char* task_time_ptr, size_t task_time_len,
+        int post_script, int scan_script, int queue_script, int sched_script, int feed_script,
+        const char* json_ptr, size_t json_len,
+        const char* xml_ptr, size_t xml_len));
 NzbgetRsBuf nzbget_rs_ext_mgr_resolve_extension_path(
     const char* ext_loc_ptr, size_t ext_loc_len,
     const char* ext_entry_ptr, size_t ext_entry_len,
     const char* const* all_locs_ptrs, const size_t* all_locs_lens, size_t all_locs_count);
-
-void nzbget_rs_cpu_detect_info(
-    const char* raw_uts_machine, size_t raw_uts_machine_len,
-    NzbgetRsBuf* out_model, NzbgetRsBuf* out_arch);
-void nzbget_rs_os_detect_info(
-    const char* fallback_sysname, size_t fallback_sysname_len,
-    const char* fallback_release, size_t fallback_release_len,
-    NzbgetRsBuf* out_name, NzbgetRsBuf* out_version);
-NzbgetRsBuf nzbget_rs_system_info_to_json(
-    const char* os_name_ptr, size_t os_name_len,
-    const char* os_ver_ptr, size_t os_ver_len,
-    const char* cpu_model_ptr, size_t cpu_model_len,
-    const char* cpu_arch_ptr, size_t cpu_arch_len,
+NzbgetRsBuf nzbget_rs_system_info_format(
+    int mode,
+    const char* uts_sysname,
+    const char* uts_release,
+    const char* uts_machine,
+    const char* ssl_lib_name,
+    const char* ssl_raw_version,
+    int ssl_extract_after_space,
     const char* pub_ip_ptr, size_t pub_ip_len,
-    const char* priv_ip_ptr, size_t priv_ip_len,
-    const char* const* tool_names, const size_t* tool_name_lens,
-    const char* const* tool_vers, const size_t* tool_ver_lens,
-    const char* const* tool_paths, const size_t* tool_path_lens,
-    size_t tool_count,
-    const char* const* lib_names, const size_t* lib_name_lens,
-    const char* const* lib_vers, const size_t* lib_ver_lens,
-    size_t lib_count);
-NzbgetRsBuf nzbget_rs_system_info_to_xml(
-    const char* os_name_ptr, size_t os_name_len,
-    const char* os_ver_ptr, size_t os_ver_len,
-    const char* cpu_model_ptr, size_t cpu_model_len,
-    const char* cpu_arch_ptr, size_t cpu_arch_len,
-    const char* pub_ip_ptr, size_t pub_ip_len,
-    const char* priv_ip_ptr, size_t priv_ip_len,
-    const char* const* tool_names, const size_t* tool_name_lens,
-    const char* const* tool_vers, const size_t* tool_ver_lens,
-    const char* const* tool_paths, const size_t* tool_path_lens,
-    size_t tool_count,
-    const char* const* lib_names, const size_t* lib_name_lens,
-    const char* const* lib_vers, const size_t* lib_ver_lens,
-    size_t lib_count);
-NzbgetRsBuf nzbget_rs_system_info_to_display_text(
-    const char* os_name_ptr, size_t os_name_len,
-    const char* os_ver_ptr, size_t os_ver_len,
-    const char* cpu_model_ptr, size_t cpu_model_len,
-    const char* cpu_arch_ptr, size_t cpu_arch_len,
-    const char* const* tool_names, const size_t* tool_name_lens,
-    const char* const* tool_vers, const size_t* tool_ver_lens,
-    const char* const* tool_paths, const size_t* tool_path_lens,
-    size_t tool_count,
-    const char* const* lib_names, const size_t* lib_name_lens,
-    const char* const* lib_vers, const size_t* lib_ver_lens,
-    size_t lib_count);
+    const char* priv_ip_ptr, size_t priv_ip_len);
 
 int nzbget_rs_server_pool_select_connection(
     int start_level,

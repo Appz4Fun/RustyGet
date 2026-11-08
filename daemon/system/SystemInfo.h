@@ -20,30 +20,194 @@
 #ifndef SYSTEM_INFO_H
 #define SYSTEM_INFO_H
 
+#include <cstring>
+#include <exception>
 #include <functional>
 #include <ostream>
+#include <stdexcept>
 #include <string>
-#include <vector>
-#include "OS.h"
-#include "CPU.h"
-#include "Network.h"
+#include <sys/utsname.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include "Log.h"
+#include "Util.h"
 #include "OpenSSL.h"
+#include "TlsSocket.h"
 #include "nzbget_rs.h"
 
 namespace System
 {
-	struct Library
+	inline const char* IP_SERVICE = "ip.nzbget.com";
+
+	struct Network
 	{
-		std::string name;
-		std::string version;
+		std::string publicIP;
+		std::string privateIP;
 	};
 
-	struct Tool
+	inline Network GetNetwork()
 	{
-		std::string name;
-		std::string version;
-		std::string path;
-	};
+		Network network;
+
+		try
+		{
+			std::string host = IP_SERVICE;
+			addrinfo hints{};
+			hints.ai_family = AF_UNSPEC;
+			hints.ai_socktype = SOCK_STREAM;
+			addrinfo* res = nullptr;
+#ifndef DISABLE_TLS
+			const char* port = "443";
+#else
+			const char* port = "80";
+#endif
+			if (getaddrinfo(host.c_str(), port, &hints, &res) != 0 || !res)
+			{
+				throw std::runtime_error("Failed to resolve host: " + host);
+			}
+
+			int fd = -1;
+			for (addrinfo* p = res; p != nullptr; p = p->ai_next)
+			{
+				fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+				if (fd < 0) continue;
+
+				timeval tv{10, 0};
+				setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+				setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+				if (connect(fd, p->ai_addr, p->ai_addrlen) == 0)
+				{
+					break;
+				}
+				close(fd);
+				fd = -1;
+			}
+			freeaddrinfo(res);
+
+			if (fd < 0)
+			{
+				throw std::runtime_error("Failed to connect to host: " + host);
+			}
+
+			std::string localIP;
+			sockaddr_storage localAddr{};
+			socklen_t addrLen = sizeof(localAddr);
+			if (getsockname(fd, reinterpret_cast<sockaddr*>(&localAddr), &addrLen) == 0)
+			{
+				char ipStr[INET6_ADDRSTRLEN] = {0};
+				if (localAddr.ss_family == AF_INET)
+				{
+					inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&localAddr)->sin_addr, ipStr, sizeof(ipStr));
+				}
+				else if (localAddr.ss_family == AF_INET6)
+				{
+					inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&localAddr)->sin6_addr, ipStr, sizeof(ipStr));
+				}
+				localIP = ipStr;
+			}
+
+#ifndef DISABLE_GZIP
+			int includeGzip = 1;
+#else
+			int includeGzip = 0;
+#endif
+			NzbgetRsBuf reqBuf = nzbget_rs_snh_http_client_build_headers(
+				"GET", 3, host.data(), host.size(), Util::VersionRevision(), includeGzip);
+			std::string req(reqBuf.data ? reqBuf.data : "", reqBuf.len);
+			nzbget_rs_free(reqBuf);
+
+			std::string rawResp;
+#ifndef DISABLE_TLS
+			SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+			if (!ctx)
+			{
+				close(fd);
+				throw std::runtime_error("Failed to create SSL_CTX");
+			}
+			SSL_CTX_set_default_verify_paths(ctx);
+			SSL* ssl = SSL_new(ctx);
+			if (!ssl)
+			{
+				SSL_CTX_free(ctx);
+				close(fd);
+				throw std::runtime_error("Failed to create SSL");
+			}
+			SSL_set_fd(ssl, fd);
+			SSL_set_tlsext_host_name(ssl, host.c_str());
+			if (SSL_connect(ssl) != 1)
+			{
+				SSL_free(ssl);
+				SSL_CTX_free(ctx);
+				close(fd);
+				OpenSSL::StopSSLThread();
+				throw std::runtime_error("TLS handshake failed");
+			}
+
+			size_t written = 0;
+			while (written < req.size())
+			{
+				int n = SSL_write(ssl, req.data() + written, static_cast<int>(req.size() - written));
+				if (n <= 0) break;
+				written += static_cast<size_t>(n);
+			}
+
+			char chunk[4096];
+			for (;;)
+			{
+				int n = SSL_read(ssl, chunk, sizeof(chunk));
+				if (n <= 0) break;
+				rawResp.append(chunk, static_cast<size_t>(n));
+			}
+
+			SSL_shutdown(ssl);
+			SSL_free(ssl);
+			SSL_CTX_free(ctx);
+			close(fd);
+			OpenSSL::StopSSLThread();
+#else
+			size_t written = 0;
+			while (written < req.size())
+			{
+				ssize_t n = send(fd, req.data() + written, req.size() - written, 0);
+				if (n <= 0) break;
+				written += static_cast<size_t>(n);
+			}
+
+			char chunk[4096];
+			for (;;)
+			{
+				ssize_t n = recv(fd, chunk, sizeof(chunk), 0);
+				if (n <= 0) break;
+				rawResp.append(chunk, static_cast<size_t>(n));
+			}
+			close(fd);
+#endif
+
+			uint32_t statusCode = 0;
+			NzbgetRsBuf bodyBuf{nullptr, 0, 0};
+			if (!nzbget_rs_http_client_parse_response(rawResp.data(), rawResp.size(), &statusCode, &bodyBuf))
+			{
+				throw std::runtime_error("Invalid HTTP response");
+			}
+			std::string body(bodyBuf.data ? bodyBuf.data : "", bodyBuf.len);
+			nzbget_rs_free(bodyBuf);
+
+			if (statusCode == 200)
+			{
+				network.publicIP = std::move(body);
+				network.privateIP = std::move(localIP);
+			}
+		}
+		catch (const std::exception& e)
+		{
+			detail("Failed to get public and private IP: %s", e.what());
+		}
+
+		return network;
+	}
 
 	class SystemInfo final
 	{
@@ -51,239 +215,83 @@ namespace System
 		SystemInfo(std::function<Network()> networkFetcher = GetNetwork)
 			: m_networkFetcher{std::move(networkFetcher)}
 		{
-			InitLibsInfo();
+			utsname uts{};
+			if (uname(&uts) == 0)
+			{
+				m_sysname = uts.sysname;
+				m_release = uts.release;
+				m_machine = uts.machine;
+			}
+#ifndef DISABLE_TLS
+#ifdef LIBRESSL_VERSION_TEXT
+			m_sslLibName = "LibreSSL";
+			m_sslRawVersion = LIBRESSL_VERSION_TEXT;
+			m_sslExtractAfterSpace = true;
+#elif defined(OPENSSL_FULL_VERSION_STR)
+			m_sslLibName = "OpenSSL";
+			m_sslRawVersion = OPENSSL_FULL_VERSION_STR;
+			m_sslExtractAfterSpace = false;
+#else
+			m_sslLibName = "OpenSSL";
+			m_sslRawVersion = OPENSSL_VERSION_TEXT;
+			m_sslExtractAfterSpace = true;
+#endif
+#endif
 		}
 
 		~SystemInfo() = default;
-
-		std::vector<Tool> GetTools() const
-		{
-			return {
-				{ "UnRAR / 7-Zip / Archive Engine", "Built-in", "zipfast + zipview + native Rust decoders" },
-				{ "Parity Verification & Repair", "Built-in", "par-rs (streaming + post-download)" },
-				{ "Extended Unpacker & Permission Fixer", "Built-in", "First-class native pipeline" },
-				{ "yEnc SIMD Decoder", "Built-in", "nntmux-yenc" },
-			};
-		}
 
 		Network GetNetworkInfo() const
 		{
 			return m_networkFetcher();
 		}
 
-		const std::vector<Library>& GetLibraries() const
+		std::string Format(int mode, bool withNetwork) const
 		{
-			return m_libraries;
-		}
-
-		const CPU& GetCPUInfo() const
-		{
-			return m_cpu;
-		}
-
-		const OS& GetOSInfo() const
-		{
-			return m_os;
+			Network net = withNetwork ? GetNetworkInfo() : Network{};
+			NzbgetRsBuf buf = nzbget_rs_system_info_format(
+				mode,
+				m_sysname.c_str(),
+				m_release.c_str(),
+				m_machine.c_str(),
+				m_sslLibName.c_str(),
+				m_sslRawVersion.c_str(),
+				m_sslExtractAfterSpace ? 1 : 0,
+				net.publicIP.data(), net.publicIP.size(),
+				net.privateIP.data(), net.privateIP.size());
+			std::string result(buf.data ? buf.data : "", buf.len);
+			nzbget_rs_free(buf);
+			return result;
 		}
 
 		friend std::ostream& operator<<(std::ostream& os, const SystemInfo& sysinfo)
 		{
-			const auto& osInfo = sysinfo.GetOSInfo();
-			const auto& cpu = sysinfo.GetCPUInfo();
-			const auto tools = sysinfo.GetTools();
-			const auto& libraries = sysinfo.GetLibraries();
-
-			std::vector<const char*> tNames(tools.size()), tVers(tools.size()), tPaths(tools.size());
-			std::vector<size_t> tNameLens(tools.size()), tVerLens(tools.size()), tPathLens(tools.size());
-			for (size_t i = 0; i < tools.size(); ++i)
+			std::string text = sysinfo.Format(0, false);
+			if (!text.empty())
 			{
-				tNames[i] = tools[i].name.data();
-				tNameLens[i] = tools[i].name.size();
-				tVers[i] = tools[i].version.data();
-				tVerLens[i] = tools[i].version.size();
-				tPaths[i] = tools[i].path.data();
-				tPathLens[i] = tools[i].path.size();
+				os.write(text.data(), static_cast<std::streamsize>(text.size()));
 			}
-
-			std::vector<const char*> lNames(libraries.size()), lVers(libraries.size());
-			std::vector<size_t> lNameLens(libraries.size()), lVerLens(libraries.size());
-			for (size_t i = 0; i < libraries.size(); ++i)
-			{
-				lNames[i] = libraries[i].name.data();
-				lNameLens[i] = libraries[i].name.size();
-				lVers[i] = libraries[i].version.data();
-				lVerLens[i] = libraries[i].version.size();
-			}
-
-			NzbgetRsBuf buf = nzbget_rs_system_info_to_display_text(
-				osInfo.GetName().data(), osInfo.GetName().size(),
-				osInfo.GetVersion().data(), osInfo.GetVersion().size(),
-				cpu.GetModel().data(), cpu.GetModel().size(),
-				cpu.GetArch().data(), cpu.GetArch().size(),
-				tNames.empty() ? nullptr : tNames.data(),
-				tNameLens.empty() ? nullptr : tNameLens.data(),
-				tVers.empty() ? nullptr : tVers.data(),
-				tVerLens.empty() ? nullptr : tVerLens.data(),
-				tPaths.empty() ? nullptr : tPaths.data(),
-				tPathLens.empty() ? nullptr : tPathLens.data(),
-				tools.size(),
-				lNames.empty() ? nullptr : lNames.data(),
-				lNameLens.empty() ? nullptr : lNameLens.data(),
-				lVers.empty() ? nullptr : lVers.data(),
-				lVerLens.empty() ? nullptr : lVerLens.data(),
-				libraries.size());
-			if (buf.data && buf.len > 0)
-			{
-				os.write(buf.data, static_cast<std::streamsize>(buf.len));
-			}
-			nzbget_rs_free(buf);
 			return os;
 		}
 
 	private:
-		void InitLibsInfo()
-		{
-			m_libraries.reserve(11);
-			m_libraries.push_back({ "zipfast", "0.1.0" });
-			m_libraries.push_back({ "zipview", "0.1.0" });
-			m_libraries.push_back({ "par-rs", "0.2.0" });
-			m_libraries.push_back({ "nntmux-yenc", "0.1.0 (SIMD)" });
-			m_libraries.push_back({ "flate2 (zlib-rs)", "1.1.11" });
-			m_libraries.push_back({ "zstd", "0.14.0" });
-			m_libraries.push_back({ "bzip2", "0.6.1" });
-			m_libraries.push_back({ "crc32fast", "1.5.2" });
-			m_libraries.push_back({ "quick-xml", "0.41.0" });
-			m_libraries.push_back({ "md-5", "0.11.0" });
-
-#ifndef DISABLE_TLS
-#ifdef LIBRESSL_VERSION_TEXT
-			NzbgetRsBuf verStrBuf = nzbget_rs_dqh_sysinfo_extract_version_after_space(LIBRESSL_VERSION_TEXT);
-			m_libraries.push_back({ "LibreSSL", std::string(verStrBuf.data ? verStrBuf.data : "", verStrBuf.len) });
-			nzbget_rs_free(verStrBuf);
-#elif defined(OPENSSL_FULL_VERSION_STR)
-			m_libraries.push_back({ "OpenSSL", OPENSSL_FULL_VERSION_STR });
-#else
-			NzbgetRsBuf verStrBuf = nzbget_rs_dqh_sysinfo_extract_version_after_space(OPENSSL_VERSION_TEXT);
-			m_libraries.push_back({ "OpenSSL", std::string(verStrBuf.data ? verStrBuf.data : "", verStrBuf.len) });
-			nzbget_rs_free(verStrBuf);
-#endif
-#endif
-
-			m_libraries.shrink_to_fit();
-		}
-
-		CPU m_cpu;
-		OS m_os;
-		std::vector<Library> m_libraries;
+		std::string m_sysname;
+		std::string m_release;
+		std::string m_machine;
+		std::string m_sslLibName;
+		std::string m_sslRawVersion;
+		bool m_sslExtractAfterSpace = false;
 		std::function<Network()> m_networkFetcher;
 	};
 
 	inline std::string ToJsonStr(const SystemInfo& sysInfo)
 	{
-		const auto& os = sysInfo.GetOSInfo();
-		const auto network = sysInfo.GetNetworkInfo();
-		const auto& cpu = sysInfo.GetCPUInfo();
-		const auto tools = sysInfo.GetTools();
-		const auto& libraries = sysInfo.GetLibraries();
-
-		std::vector<const char*> tNames(tools.size()), tVers(tools.size()), tPaths(tools.size());
-		std::vector<size_t> tNameLens(tools.size()), tVerLens(tools.size()), tPathLens(tools.size());
-		for (size_t i = 0; i < tools.size(); ++i)
-		{
-			tNames[i] = tools[i].name.data();
-			tNameLens[i] = tools[i].name.size();
-			tVers[i] = tools[i].version.data();
-			tVerLens[i] = tools[i].version.size();
-			tPaths[i] = tools[i].path.data();
-			tPathLens[i] = tools[i].path.size();
-		}
-
-		std::vector<const char*> lNames(libraries.size()), lVers(libraries.size());
-		std::vector<size_t> lNameLens(libraries.size()), lVerLens(libraries.size());
-		for (size_t i = 0; i < libraries.size(); ++i)
-		{
-			lNames[i] = libraries[i].name.data();
-			lNameLens[i] = libraries[i].name.size();
-			lVers[i] = libraries[i].version.data();
-			lVerLens[i] = libraries[i].version.size();
-		}
-
-		NzbgetRsBuf buf = nzbget_rs_system_info_to_json(
-			os.GetName().data(), os.GetName().size(),
-			os.GetVersion().data(), os.GetVersion().size(),
-			cpu.GetModel().data(), cpu.GetModel().size(),
-			cpu.GetArch().data(), cpu.GetArch().size(),
-			network.publicIP.data(), network.publicIP.size(),
-			network.privateIP.data(), network.privateIP.size(),
-			tNames.empty() ? nullptr : tNames.data(),
-			tNameLens.empty() ? nullptr : tNameLens.data(),
-			tVers.empty() ? nullptr : tVers.data(),
-			tVerLens.empty() ? nullptr : tVerLens.data(),
-			tPaths.empty() ? nullptr : tPaths.data(),
-			tPathLens.empty() ? nullptr : tPathLens.data(),
-			tools.size(),
-			lNames.empty() ? nullptr : lNames.data(),
-			lNameLens.empty() ? nullptr : lNameLens.data(),
-			lVers.empty() ? nullptr : lVers.data(),
-			lVerLens.empty() ? nullptr : lVerLens.data(),
-			libraries.size());
-		std::string result(buf.data ? buf.data : "", buf.len);
-		nzbget_rs_free(buf);
-		return result;
+		return sysInfo.Format(1, true);
 	}
 
 	inline std::string ToXmlStr(const SystemInfo& sysInfo)
 	{
-		const auto& os = sysInfo.GetOSInfo();
-		const auto network = sysInfo.GetNetworkInfo();
-		const auto& cpu = sysInfo.GetCPUInfo();
-		const auto tools = sysInfo.GetTools();
-		const auto& libraries = sysInfo.GetLibraries();
-
-		std::vector<const char*> tNames(tools.size()), tVers(tools.size()), tPaths(tools.size());
-		std::vector<size_t> tNameLens(tools.size()), tVerLens(tools.size()), tPathLens(tools.size());
-		for (size_t i = 0; i < tools.size(); ++i)
-		{
-			tNames[i] = tools[i].name.data();
-			tNameLens[i] = tools[i].name.size();
-			tVers[i] = tools[i].version.data();
-			tVerLens[i] = tools[i].version.size();
-			tPaths[i] = tools[i].path.data();
-			tPathLens[i] = tools[i].path.size();
-		}
-
-		std::vector<const char*> lNames(libraries.size()), lVers(libraries.size());
-		std::vector<size_t> lNameLens(libraries.size()), lVerLens(libraries.size());
-		for (size_t i = 0; i < libraries.size(); ++i)
-		{
-			lNames[i] = libraries[i].name.data();
-			lNameLens[i] = libraries[i].name.size();
-			lVers[i] = libraries[i].version.data();
-			lVerLens[i] = libraries[i].version.size();
-		}
-
-		NzbgetRsBuf buf = nzbget_rs_system_info_to_xml(
-			os.GetName().data(), os.GetName().size(),
-			os.GetVersion().data(), os.GetVersion().size(),
-			cpu.GetModel().data(), cpu.GetModel().size(),
-			cpu.GetArch().data(), cpu.GetArch().size(),
-			network.publicIP.data(), network.publicIP.size(),
-			network.privateIP.data(), network.privateIP.size(),
-			tNames.empty() ? nullptr : tNames.data(),
-			tNameLens.empty() ? nullptr : tNameLens.data(),
-			tVers.empty() ? nullptr : tVers.data(),
-			tVerLens.empty() ? nullptr : tVerLens.data(),
-			tPaths.empty() ? nullptr : tPaths.data(),
-			tPathLens.empty() ? nullptr : tPathLens.data(),
-			tools.size(),
-			lNames.empty() ? nullptr : lNames.data(),
-			lNameLens.empty() ? nullptr : lNameLens.data(),
-			lVers.empty() ? nullptr : lVers.data(),
-			lVerLens.empty() ? nullptr : lVerLens.data(),
-			libraries.size());
-		std::string result(buf.data ? buf.data : "", buf.len);
-		nzbget_rs_free(buf);
-		return result;
+		return sysInfo.Format(2, true);
 	}
 }
 

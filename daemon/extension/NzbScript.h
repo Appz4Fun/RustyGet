@@ -23,7 +23,6 @@
 
 #include "ScriptController.h"
 #include "DownloadInfo.h"
-#include "Extension.h"
 #include "ExtensionManager.h"
 #include "Options.h"
 #include "Log.h"

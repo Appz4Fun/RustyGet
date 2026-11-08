@@ -30,7 +30,6 @@
 #include "ParChecker.h"
 #include "TwinCheck.h"
 #include "ArticleFetcher.h"
-#include "DupeMatcher.h"
 #endif
 
 class RepairController : public Thread, public ScriptController
@@ -95,19 +94,6 @@ private:
 		int m_downloadSec;
 
 		friend class RepairController;
-	};
-
-	class PostDupeMatcher: public DupeMatcher
-	{
-	public:
-		PostDupeMatcher(PostInfo* postInfo):
-			DupeMatcher(postInfo->GetNzbInfo()->GetDestDir(),
-				postInfo->GetNzbInfo()->GetSize() - postInfo->GetNzbInfo()->GetParSize()),
-			m_postInfo(postInfo) {}
-	protected:
-		virtual void PrintMessage(Message::EKind kind, const char* format, ...) PRINTF_SYNTAX(3);
-	private:
-		PostInfo* m_postInfo;
 	};
 
 	struct BlockInfo
@@ -297,26 +283,31 @@ inline void RepairController::PostParChecker::RequestDupeSources(DupeSourceList*
 
 	if (!dupeList.empty())
 	{
-		PostDupeMatcher dupeMatcher(m_postInfo);
-		PrintMessage(Message::mkInfo, "Checking %s for dupe scan usability", m_postInfo->GetNzbInfo()->GetName());
-		bool sizeComparisonPossible = dupeMatcher.Prepare();
-		for (NzbInfo* dupeNzbInfo : dupeList)
+		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+		std::vector<const char*> dupeDirs(dupeList.size());
+		for (size_t i = 0; i < dupeList.size(); i++)
 		{
-			if (sizeComparisonPossible)
-			{
-				PrintMessage(Message::mkInfo, "Checking %s for dupe scan usability", FileSystem::BaseFileName(dupeNzbInfo->GetDestDir()));
-			}
-			bool useDupe = !sizeComparisonPossible ||
-				dupeMatcher.MatchDupeContent(dupeNzbInfo->GetDestDir());
-			if (useDupe)
-			{
-				PrintMessage(Message::mkInfo, "Adding %s to dupe scan sources", FileSystem::BaseFileName(dupeNzbInfo->GetDestDir()));
-				dupeSourceList->emplace_back(dupeNzbInfo->GetId(), dupeNzbInfo->GetDestDir());
-			}
+			dupeDirs[i] = dupeList[i]->GetDestDir();
 		}
-		if (dupeSourceList->empty())
+		std::vector<size_t> usableIndices(dupeList.size());
+		size_t usableCount = nzbget_rs_dupematcher_filter_dupe_sources(
+			nzbInfo->GetName(),
+			nzbInfo->GetDestDir(),
+			nzbInfo->GetSize() - nzbInfo->GetParSize(),
+			g_Options->GetUnrarCmd(),
+			dupeDirs.data(),
+			dupeDirs.size(),
+			usableIndices.data(),
+			[](void* ctx, int kind, const char* msg)
+			{
+				auto* self = static_cast<PostParChecker*>(ctx);
+				self->PrintMessage(kind == 3 ? Message::mkDetail : Message::mkInfo, "%s", msg ? msg : "");
+			},
+			this);
+		for (size_t i = 0; i < usableCount; i++)
 		{
-			PrintMessage(Message::mkInfo, "No usable dupe scan sources found");
+			NzbInfo* dupeNzbInfo = dupeList[usableIndices[i]];
+			dupeSourceList->emplace_back(dupeNzbInfo->GetId(), dupeNzbInfo->GetDestDir());
 		}
 	}
 }
@@ -591,19 +582,6 @@ inline void RepairController::PostParChecker::StatDupeSources(DupeSourceList* du
 	}
 
 	m_postInfo->GetNzbInfo()->SetExtraParBlocks(m_postInfo->GetNzbInfo()->GetExtraParBlocks() + totalExtraParBlocks);
-}
-
-
-inline void RepairController::PostDupeMatcher::PrintMessage(Message::EKind kind, const char* format, ...)
-{
-	char text[1024];
-	va_list args;
-	va_start(args, format);
-	vsnprintf(text, 1024, format, args);
-	va_end(args);
-	text[1024-1] = '\0';
-
-	m_postInfo->GetNzbInfo()->AddMessage(kind, text);
 }
 
 #endif

@@ -9545,24 +9545,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_intersects_any(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_estimate_donor_ranges(
-    article_sizes: *const c_int,
-    count: usize,
-    target_file_size: i64,
-    out_ranges: *mut crate::dupefallback::NzbgetRsByteRange,
-) -> usize {
-    if count == 0 || article_sizes.is_null() {
-        return 0;
-    }
-    let sizes = std::slice::from_raw_parts(article_sizes, count);
-    let ranges = crate::streamrepair::estimate_donor_ranges(sizes, target_file_size);
-    if !out_ranges.is_null() && !ranges.is_empty() {
-        std::ptr::copy_nonoverlapping(ranges.as_ptr(), out_ranges, ranges.len());
-    }
-    ranges.len()
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_stream_select_probe_parts(
     donor_ranges: *const crate::dupefallback::NzbgetRsByteRange,
     donor_count: usize,
@@ -9609,16 +9591,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_subtract_covered(
         std::ptr::copy_nonoverlapping(rem.as_ptr(), out_holes, n);
     }
     rem.len()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_volume_set_key(filename: *const c_char) -> RsBuf {
-    let bytes = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    into_buf(crate::streamrepair::volume_set_key(bytes))
 }
 
 #[no_mangle]
@@ -14616,88 +14588,6 @@ pub unsafe extern "C" fn nzbget_rs_euh_benchmark_limit_by_free_space(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_benchmark_calc_write_chunk(
-    block_size: usize,
-    max_bytes: u64,
-    write_bytes: u64,
-) -> usize {
-    crate::util::benchmark_calc_write_chunk(block_size, max_bytes, write_bytes)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_unrar_overwrite_switch(mode: c_int) -> *const c_char {
-    crate::unpack::unrar_overwrite_switch(mode).as_ptr()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_unrar_is_supported(
-    path: *const c_char,
-    len: usize,
-) -> c_int {
-    let s = if path.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(path.cast::<u8>(), len)
-    };
-    i32::from(crate::unpack::unrar_is_supported(s))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_sevenzip_is_supported(
-    path: *const c_char,
-    len: usize,
-) -> c_int {
-    let s = if path.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(path.cast::<u8>(), len)
-    };
-    i32::from(crate::unpack::sevenzip_is_supported(s))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_extractor_make_password(
-    password: *const c_char,
-    len: usize,
-) -> RsBuf {
-    let s = if password.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(password.cast::<u8>(), len)
-    };
-    into_buf(crate::unpack::extractor_make_password(s))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_unrar_decode_exit_code(
-    ec: c_int,
-    out_msg: *mut *const c_char,
-) -> c_int {
-    let (ok, msg) = crate::unpack::unrar_decode_exit_code(ec);
-    if !out_msg.is_null() {
-        *out_msg = msg.as_ptr();
-    }
-    i32::from(ok)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_sevenzip_overwrite_switch(mode: c_int) -> *const c_char {
-    crate::unpack::sevenzip_overwrite_switch(mode).as_ptr()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_sevenzip_decode_exit_code(
-    ec: c_int,
-    out_msg: *mut *const c_char,
-) -> c_int {
-    let (ok, msg) = crate::unpack::sevenzip_decode_exit_code(ec);
-    if !out_msg.is_null() {
-        *out_msg = msg.as_ptr();
-    }
-    i32::from(ok)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_euh_service_should_work_now(
     service_interval: c_int,
     service_now: c_int,
@@ -19103,151 +18993,6 @@ pub unsafe extern "C" fn nzbget_rs_binrpc_group_listing_from_wire(
 
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_stream_select_whole_file_donor(
-    target_filename: *const c_char,
-    target_encoded_size: i64,
-    target_article_count: c_int,
-    target_steps_hash: u64,
-    donor_set: *const c_char,
-    donor_filenames: *const *const c_char,
-    donor_sizes: *const i64,
-    donor_is_par: *const u8,
-    donor_has_articles: *const u8,
-    donor_is_claimed: *const u8,
-    donor_steps_hashes: *const u64,
-    donor_count: usize,
-) -> c_int {
-    if donor_count == 0
-        || donor_filenames.is_null()
-        || donor_sizes.is_null()
-        || donor_is_par.is_null()
-        || donor_has_articles.is_null()
-        || donor_is_claimed.is_null()
-        || donor_steps_hashes.is_null()
-    {
-        return -1;
-    }
-    let mut names = Vec::with_capacity(donor_count);
-    for i in 0..donor_count {
-        names.push(input(*donor_filenames.add(i)));
-    }
-    crate::streamrepair::select_whole_file_donor(
-        input(target_filename),
-        target_encoded_size,
-        target_article_count,
-        target_steps_hash,
-        input(donor_set),
-        &names,
-        std::slice::from_raw_parts(donor_sizes, donor_count),
-        std::slice::from_raw_parts(donor_is_par, donor_count),
-        std::slice::from_raw_parts(donor_has_articles, donor_count),
-        std::slice::from_raw_parts(donor_is_claimed, donor_count),
-        std::slice::from_raw_parts(donor_steps_hashes, donor_count),
-    )
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_stream_select_donor_candidates(
-    target_filename: *const c_char,
-    target_decoded_file_size: i64,
-    positional_rank: c_int,
-    positional_window: c_int,
-    max_candidates: c_int,
-    target_steps_hash: u64,
-    donor_filenames: *const *const c_char,
-    donor_sizes: *const i64,
-    donor_is_par: *const u8,
-    donor_has_articles: *const u8,
-    donor_is_claimed: *const u8,
-    donor_steps_hashes: *const u64,
-    donor_count: usize,
-    out_indices: *mut i32,
-    out_cap: usize,
-) -> usize {
-    if donor_count == 0
-        || donor_filenames.is_null()
-        || donor_sizes.is_null()
-        || donor_is_par.is_null()
-        || donor_has_articles.is_null()
-        || donor_is_claimed.is_null()
-        || donor_steps_hashes.is_null()
-        || out_indices.is_null()
-        || out_cap == 0
-    {
-        return 0;
-    }
-    let mut names = Vec::with_capacity(donor_count);
-    for i in 0..donor_count {
-        names.push(input(*donor_filenames.add(i)));
-    }
-    let cands = crate::streamrepair::select_donor_candidates(
-        input(target_filename),
-        target_decoded_file_size,
-        positional_rank,
-        positional_window,
-        max_candidates,
-        target_steps_hash,
-        &names,
-        std::slice::from_raw_parts(donor_sizes, donor_count),
-        std::slice::from_raw_parts(donor_is_par, donor_count),
-        std::slice::from_raw_parts(donor_has_articles, donor_count),
-        std::slice::from_raw_parts(donor_is_claimed, donor_count),
-        std::slice::from_raw_parts(donor_steps_hashes, donor_count),
-    );
-    let n = cands.len().min(out_cap);
-    std::ptr::copy_nonoverlapping(cands.as_ptr(), out_indices, n);
-    n
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_stream_select_intact_proof_candidates(
-    intact_basename: *const c_char,
-    intact_size: i64,
-    donor_set: *const c_char,
-    stand_in_index: c_int,
-    max_candidates: c_int,
-    donor_filenames: *const *const c_char,
-    donor_sizes: *const i64,
-    donor_has_articles: *const u8,
-    donor_is_claimed: *const u8,
-    donor_count: usize,
-    out_indices: *mut i32,
-    out_cap: usize,
-) -> usize {
-    if donor_count == 0
-        || donor_filenames.is_null()
-        || donor_sizes.is_null()
-        || donor_has_articles.is_null()
-        || donor_is_claimed.is_null()
-        || out_indices.is_null()
-        || out_cap == 0
-    {
-        return 0;
-    }
-    let mut names = Vec::with_capacity(donor_count);
-    for i in 0..donor_count {
-        names.push(input(*donor_filenames.add(i)));
-    }
-    let cands = crate::streamrepair::select_intact_proof_candidates(
-        input(intact_basename),
-        intact_size,
-        input(donor_set),
-        stand_in_index,
-        max_candidates,
-        &names,
-        std::slice::from_raw_parts(donor_sizes, donor_count),
-        std::slice::from_raw_parts(donor_has_articles, donor_count),
-        std::slice::from_raw_parts(donor_is_claimed, donor_count),
-    );
-    let n = cands.len().min(out_cap);
-    std::ptr::copy_nonoverlapping(cands.as_ptr(), out_indices, n);
-    n
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn nzbget_rs_stream_select_verify_donor_probes(
     donor_ranges: *const crate::dupefallback::NzbgetRsByteRange,
     donor_count: usize,
@@ -20258,31 +20003,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_order_donor_indices(
     let n = order.len().min(count);
     std::ptr::copy_nonoverlapping(order.as_ptr(), out_indices_ptr, n);
     n
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_is_intact_proof_member_eligible(
-    base_name: *const c_char,
-    member_name: *const c_char,
-    target_set: *const c_char,
-    target_filenames_ptr: *const *const c_char,
-    target_count: usize,
-) -> i32 {
-    let mut targets: Vec<&[u8]> = Vec::with_capacity(target_count);
-    if !target_filenames_ptr.is_null() {
-        let ptrs = std::slice::from_raw_parts(target_filenames_ptr, target_count);
-        for &p in ptrs {
-            targets.push(input(p));
-        }
-    }
-    i32::from(
-        crate::streamrepair::stream_repair_is_intact_proof_member_eligible(
-            input(base_name),
-            input(member_name),
-            input(target_set),
-            &targets,
-        ),
-    )
 }
 
 #[no_mangle]
@@ -24925,74 +24645,6 @@ pub unsafe extern "C" fn nzbget_rs_post_renamer_run(
     )
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_archive_processor_handle_extract_failure(
-    archive_file: *const c_char,
-    unpack_dir: *const c_char,
-    broken_dir: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-) {
-    let archive_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(archive_file));
-    let unpack_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(unpack_dir));
-    let broken_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(broken_dir));
-
-    crate::cleanup::archive_handle_extract_failure(
-        &archive_path,
-        &unpack_path,
-        &broken_path,
-        |kind, msg| {
-            if let Some(cb) = log_cb {
-                let c_msg = bytes_to_cstr_buf(msg);
-                cb(ctx, kind as c_int, c_msg.as_ptr() as *const c_char);
-            }
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_archive_processor_finish(
-    archive_file: *const c_char,
-    unpack_dir: *const c_char,
-    dest_dir: *const c_char,
-    processed_dir: *const c_char,
-    config_action: c_int,
-    ctx: *mut std::ffi::c_void,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-    moved_nzb_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-) {
-    let archive_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(archive_file));
-    let unpack_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(unpack_dir));
-    let dest_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
-    let processed_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(processed_dir));
-
-    crate::cleanup::archive_finish_extracted(
-        &archive_path,
-        &unpack_path,
-        &dest_path,
-        &processed_path,
-        config_action,
-        |kind, msg| {
-            if let Some(cb) = log_cb {
-                let c_msg = bytes_to_cstr_buf(msg);
-                cb(ctx, kind as c_int, c_msg.as_ptr() as *const c_char);
-            }
-        },
-        |moved_path| {
-            if let Some(cb) = moved_nzb_cb {
-                let c_path = bytes_to_cstr_buf(moved_path);
-                cb(ctx, c_path.as_ptr() as *const c_char);
-            }
-        },
-    );
-}
-
 // ============================================================================
 // SystemHealth (`rust/src/systemhealth.rs`)
 // ============================================================================
@@ -26045,22 +25697,36 @@ pub unsafe extern "C" fn nzbget_rs_ext_mgr_delete_extension(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_mgr_install_error(
+pub unsafe extern "C" fn nzbget_rs_ext_mgr_install_extension(
     file_path: *const c_char,
-    os_err: *const c_char,
-    kind: c_int,
+    dest_path: *const c_char,
+    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+    log_ctx: *mut std::ffi::c_void,
 ) -> RsBuf {
     let fp = if file_path.is_null() {
         &[][..]
     } else {
         CStr::from_ptr(file_path).to_bytes()
     };
-    let oe = if os_err.is_null() {
-        None
+    let dp = if dest_path.is_null() {
+        &[][..]
     } else {
-        Some(CStr::from_ptr(os_err).to_bytes())
+        CStr::from_ptr(dest_path).to_bytes()
     };
-    into_buf(crate::extension::ext_mgr_install_error(fp, oe, kind))
+    match crate::extension::ext_mgr_install_extension(fp, dp, |kind, msg| {
+        if let Some(cb) = log_cb {
+            let mut buf: Vec<u8> = msg.bytes().filter(|&b| b != 0).collect();
+            buf.push(0);
+            cb(log_ctx, kind, buf.as_ptr().cast::<c_char>());
+        }
+    }) {
+        Some(err) => into_buf(err),
+        None => RsBuf {
+            data: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        },
+    }
 }
 
 pub type NzbScriptSetEnvSpecialCb = Option<
@@ -29284,32 +28950,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_is_par2_job_or_file(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_eval_donor_outcome_bail(
-    outcome: c_int,
-    ro_productive: c_int,
-    ro_unproductive: c_int,
-    donor_proven: c_int,
-    cur_consecutive_failures: c_int,
-    donor_failure_bail: c_int,
-    unproven_donor_bail: c_int,
-    out_new_consecutive_failures: *mut c_int,
-) -> c_int {
-    let (next, bail) = crate::streamrepair::eval_donor_outcome_bail(
-        outcome,
-        ro_productive,
-        ro_unproductive,
-        donor_proven != 0,
-        cur_consecutive_failures,
-        donor_failure_bail,
-        unproven_donor_bail,
-    );
-    if !out_new_consecutive_failures.is_null() {
-        *out_new_consecutive_failures = next;
-    }
-    i32::from(bail)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_stream_select_probe_replacements(
     missing: c_int,
     reserve: *const c_int,
@@ -29862,67 +29502,45 @@ pub unsafe extern "C" fn nzbget_rs_qhp_rename_completed_file(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupematcher_prepare(
+pub unsafe extern "C" fn nzbget_rs_dupematcher_filter_dupe_sources(
+    nzb_name: *const c_char,
     dest_dir: *const c_char,
-    unrar_cmd: *const c_char,
     expected_size: i64,
-    out_max_size: *mut i64,
-    out_compressed: *mut c_int,
-    on_detail_log: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    unrar_cmd: *const c_char,
+    dupe_dirs: *const *const c_char,
+    dupe_count: usize,
+    out_indices: *mut usize,
+    on_message: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
     ctx: *mut c_void,
-) -> c_int {
-    if dest_dir.is_null() || out_max_size.is_null() || out_compressed.is_null() {
+) -> usize {
+    if dest_dir.is_null() || dupe_dirs.is_null() || out_indices.is_null() || dupe_count == 0 {
         return 0;
     }
     let dir_path = cstr_to_path_buf(dest_dir);
+    let nzb_name_bytes = input(nzb_name);
     let unrar_bytes = input(unrar_cmd);
-    let mut max_size = *out_max_size;
-    let mut compressed = *out_compressed != 0;
-    let ok = crate::pardamage::dupe_matcher_prepare(
-        &dir_path,
-        unrar_bytes,
-        expected_size,
-        &mut max_size,
-        &mut compressed,
-        |msg| {
-            if let Some(log_cb) = on_detail_log {
-                let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
-                log_cb(ctx, c_msg.as_ptr());
-            }
-        },
-    );
-    *out_max_size = max_size;
-    *out_compressed = i32::from(compressed);
-    i32::from(ok)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupematcher_match_dupe_content(
-    dupe_dir: *const c_char,
-    unrar_cmd: *const c_char,
-    max_size: i64,
-    compressed: c_int,
-    on_detail_log: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
-    ctx: *mut c_void,
-) -> c_int {
-    if dupe_dir.is_null() {
-        return 0;
+    let mut dirs_vec = Vec::with_capacity(dupe_count);
+    for &ptr in std::slice::from_raw_parts(dupe_dirs, dupe_count) {
+        dirs_vec.push(input(ptr));
     }
-    let dir_path = cstr_to_path_buf(dupe_dir);
-    let unrar_bytes = input(unrar_cmd);
-    let ok = crate::pardamage::dupe_matcher_match_dupe_content(
+    let usable = crate::pardamage::dupe_matcher_filter_dupe_sources(
+        nzb_name_bytes,
         &dir_path,
+        expected_size,
         unrar_bytes,
-        max_size,
-        compressed != 0,
-        |msg| {
-            if let Some(log_cb) = on_detail_log {
-                let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
-                log_cb(ctx, c_msg.as_ptr());
+        &dirs_vec,
+        |kind, msg| {
+            if let Some(log_cb) = on_message {
+                let c_msg = cstring_lossy(msg);
+                log_cb(ctx, kind, c_msg.as_ptr());
             }
         },
     );
-    i32::from(ok)
+    let n = usable.len().min(dupe_count);
+    if n > 0 {
+        std::ptr::copy_nonoverlapping(usable.as_ptr(), out_indices, n);
+    }
+    n
 }
 
 #[no_mangle]
@@ -29934,9 +29552,6 @@ pub unsafe extern "C" fn nzbget_rs_archive_processor_process(
     broken_dir: *const c_char,
     config_action: c_int,
     ctx: *mut c_void,
-    extract_cb: Option<
-        unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *mut c_int) -> c_int,
-    >,
     log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
     moved_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
 ) -> c_int {
@@ -29953,13 +29568,27 @@ pub unsafe extern "C" fn nzbget_rs_archive_processor_process(
         &processed_path,
         &broken_path,
         config_action,
-        |_, _| {
-            let Some(ext_fn) = extract_cb else {
-                return (false, false);
-            };
-            let mut extracted: c_int = 0;
-            let supported = ext_fn(ctx, archive_file, unpack_dir, &mut extracted);
-            (supported != 0, extracted != 0)
+        |arc_path, _| {
+            if let Some(cb) = log_cb {
+                let archive_name = arc_path
+                    .file_name()
+                    .map(crate::cleanup::os_str_to_bytes)
+                    .unwrap_or(b"");
+                let ext = arc_path
+                    .extension()
+                    .map(crate::cleanup::os_str_to_bytes)
+                    .unwrap_or(b"");
+                let mut msg = b"Unpack: Could not process '".to_vec();
+                msg.extend_from_slice(archive_name);
+                msg.extend_from_slice(b"': Unsupported archive format: ");
+                if !ext.is_empty() {
+                    msg.push(b'.');
+                    msg.extend_from_slice(ext);
+                }
+                let c_msg = cstring_lossy(&msg);
+                cb(ctx, crate::cleanup::CleanupLogKind::Error as c_int, c_msg.as_ptr());
+            }
+            (false, false)
         },
         |kind, msg| {
             if let Some(cb) = log_cb {
@@ -34049,23 +33678,47 @@ type DonorNextArticleFn = Option<
     ) -> c_int,
 >;
 
-struct FfiDonorBatchClient {
+type DonorBeginMemberBatchFn =
+    Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const i32, usize)>;
+
+struct FfiM1DonorEnv {
     ctx: *mut std::ffi::c_void,
     is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
+    refresh_live_name_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> *const c_char>,
+    begin_member_batch_cb: DonorBeginMemberBatchFn,
     next_article_cb: DonorNextArticleFn,
     cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    add_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
+    add_recovered_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
+    emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
 }
 
-impl crate::streamrepair::DonorBatchClient for FfiDonorBatchClient {
+impl crate::streamrepair::M1DonorEnv for FfiM1DonorEnv {
     fn is_stopped(&self) -> bool {
         self.is_stopped_cb
             .is_some_and(|cb| unsafe { cb(self.ctx) != 0 })
     }
 
-    fn begin_batch(&mut self, part_indices: &[i32]) {
-        if let Some(cb) = self.begin_batch_cb {
-            unsafe { cb(self.ctx, part_indices.as_ptr(), part_indices.len()) };
+    fn refresh_live_target_name(&mut self, target_index: usize) -> Option<Vec<u8>> {
+        let cb = self.refresh_live_name_cb?;
+        let ptr = unsafe { cb(self.ctx, target_index) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { input(ptr).to_vec() })
+        }
+    }
+
+    fn begin_member_batch(&mut self, donor_file_index: i32, part_indices: &[i32]) {
+        if let Some(cb) = self.begin_member_batch_cb {
+            unsafe {
+                cb(
+                    self.ctx,
+                    donor_file_index,
+                    part_indices.as_ptr(),
+                    part_indices.len(),
+                );
+            }
         }
     }
 
@@ -34107,35 +33760,15 @@ impl crate::streamrepair::DonorBatchClient for FfiDonorBatchClient {
             unsafe { cb(self.ctx) };
         }
     }
-}
 
-struct FfiTargetFileCallbacks {
-    ctx: *mut std::ffi::c_void,
-    read_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *mut u8, i64) -> c_int>,
-    write_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *const u8, i64) -> c_int>,
-    add_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
-    emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
-}
-
-impl crate::streamrepair::TargetFileReader for FfiTargetFileCallbacks {
-    fn read_range(&mut self, offset: i64, buf: &mut [u8]) -> bool {
-        let Some(cb) = self.read_cb else {
-            return false;
-        };
-        unsafe { cb(self.ctx, offset, buf.as_mut_ptr(), buf.len() as i64) != 0 }
-    }
-}
-
-impl crate::streamrepair::TargetFilePatcher for FfiTargetFileCallbacks {
-    fn write_range(&mut self, offset: i64, data: &[u8]) -> bool {
-        let Some(cb) = self.write_cb else {
-            return false;
-        };
-        unsafe { cb(self.ctx, offset, data.as_ptr(), data.len() as i64) != 0 }
-    }
-
-    fn add_progress(&mut self, bytes: i64) {
+    fn add_progress_bytes(&mut self, bytes: i64) {
         if let Some(cb) = self.add_progress_cb {
+            unsafe { cb(self.ctx, bytes) };
+        }
+    }
+
+    fn add_recovered_bytes(&mut self, bytes: i64) {
+        if let Some(cb) = self.add_recovered_cb {
             unsafe { cb(self.ctx, bytes) };
         }
     }
@@ -34146,164 +33779,189 @@ impl crate::streamrepair::TargetFilePatcher for FfiTargetFileCallbacks {
         };
         let mut buf: Vec<u8> = text.iter().copied().filter(|&b| b != 0).collect();
         buf.push(0);
-        unsafe { cb(self.ctx, kind as i32, buf.as_ptr() as *const c_char) };
+        unsafe { cb(self.ctx, kind as i32, buf.as_ptr().cast::<c_char>()) };
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_verify_donor_file(
-    target_decoded_size: i64,
-    target_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    target_hole_count: usize,
-    donor_ranges: *const crate::dupefallback::NzbgetRsByteRange,
-    donor_range_count: usize,
+pub unsafe extern "C" fn nzbget_rs_stream_repair_process_donor(
+    dest_dir: *const c_char,
+    live_mode: c_int,
+    member_names: *const *const c_char,
+    member_count: usize,
+    target_filenames: *const *const c_char,
+    target_encoded_sizes: *const i64,
+    target_decoded_sizes: *const i64,
+    target_article_counts: *const c_int,
+    target_positional_ranks: *const c_int,
+    target_positional_windows: *const c_int,
+    target_steps_hashes: *const u64,
+    target_patch_eligible: *const u8,
+    target_hole_counts: *const usize,
+    target_holes_flat: *const crate::dupefallback::NzbgetRsByteRange,
+    target_count: usize,
+    donor_info_name: *const c_char,
+    donor_file_names: *const *const c_char,
+    donor_file_sizes: *const i64,
+    donor_file_is_par: *const u8,
+    donor_file_steps_hashes: *const u64,
+    donor_article_counts: *const usize,
+    donor_article_sizes_flat: *const i32,
+    donor_file_count: usize,
     ctx: *mut std::ffi::c_void,
     is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
-    next_article_cb: DonorNextArticleFn,
-    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    read_target_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *mut u8, i64) -> c_int>,
-) -> c_int {
-    let holes = if target_holes.is_null() || target_hole_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(target_holes, target_hole_count)
-    };
-    let donors = if donor_ranges.is_null() || donor_range_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(donor_ranges, donor_range_count)
-    };
-    let mut batch_client = FfiDonorBatchClient {
-        ctx,
-        is_stopped_cb,
-        begin_batch_cb,
-        next_article_cb,
-        cancel_batch_cb,
-    };
-    let mut target_reader = FfiTargetFileCallbacks {
-        ctx,
-        read_cb: read_target_cb,
-        write_cb: None,
-        add_progress_cb: None,
-        emit_message_cb: None,
-    };
-    c_int::from(crate::streamrepair::verify_donor_file(
-        target_decoded_size,
-        holes,
-        donors,
-        &mut batch_client,
-        &mut target_reader,
-    ))
-}
-
-#[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_patch_from_donor_file(
-    target_filename: *const c_char,
-    target_decoded_size: i64,
-    target_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    target_hole_count: usize,
-    donor_ranges: *const crate::dupefallback::NzbgetRsByteRange,
-    donor_range_count: usize,
-    donor_name: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
-    next_article_cb: DonorNextArticleFn,
-    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    write_target_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i64, *const u8, i64) -> c_int,
+    refresh_live_name_cb: Option<
+        unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> *const c_char,
     >,
+    begin_member_batch_cb: DonorBeginMemberBatchFn,
+    next_article_cb: DonorNextArticleFn,
+    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
     add_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
-    emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
-    update_holes_cb: Option<
+    add_recovered_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
+    sync_target_cb: Option<
         unsafe extern "C" fn(
             *mut std::ffi::c_void,
+            usize,
+            *const c_char,
+            i64,
+            c_int,
             *const crate::dupefallback::NzbgetRsByteRange,
             usize,
         ),
     >,
-    out_recovered_bytes: *mut i64,
-    out_credit_recovery: *mut c_int,
-) -> c_int {
-    let mut holes_vec = if target_holes.is_null() || target_hole_count == 0 {
-        Vec::new()
-    } else {
-        std::slice::from_raw_parts(target_holes, target_hole_count).to_vec()
-    };
-    let donors = if donor_ranges.is_null() || donor_range_count == 0 {
+    emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
+) {
+    let mut member_names_vec = Vec::with_capacity(member_count);
+    if !member_names.is_null() && member_count > 0 {
+        for &ptr in std::slice::from_raw_parts(member_names, member_count) {
+            member_names_vec.push(input(ptr));
+        }
+    }
+    let mut targets_vec = Vec::with_capacity(target_count);
+    if target_count > 0
+        && !target_filenames.is_null()
+        && !target_encoded_sizes.is_null()
+        && !target_decoded_sizes.is_null()
+        && !target_article_counts.is_null()
+        && !target_positional_ranks.is_null()
+        && !target_positional_windows.is_null()
+        && !target_steps_hashes.is_null()
+        && !target_patch_eligible.is_null()
+        && !target_hole_counts.is_null()
+    {
+        let fnames = std::slice::from_raw_parts(target_filenames, target_count);
+        let esizes = std::slice::from_raw_parts(target_encoded_sizes, target_count);
+        let dsizes = std::slice::from_raw_parts(target_decoded_sizes, target_count);
+        let acounts = std::slice::from_raw_parts(target_article_counts, target_count);
+        let pranks = std::slice::from_raw_parts(target_positional_ranks, target_count);
+        let pwindows = std::slice::from_raw_parts(target_positional_windows, target_count);
+        let shashes = std::slice::from_raw_parts(target_steps_hashes, target_count);
+        let peligible = std::slice::from_raw_parts(target_patch_eligible, target_count);
+        let hcounts = std::slice::from_raw_parts(target_hole_counts, target_count);
+        let total_holes: usize = hcounts.iter().copied().sum();
+        let flat = if target_holes_flat.is_null() || total_holes == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(target_holes_flat, total_holes)
+        };
+        let mut cursor = 0usize;
+        for t in 0..target_count {
+            let cnt = hcounts[t];
+            let end = cursor.saturating_add(cnt).min(flat.len());
+            targets_vec.push(crate::streamrepair::M1RepairTarget {
+                filename: input(fnames[t]).to_vec(),
+                decoded_file_size: dsizes[t],
+                holes: flat[cursor..end].to_vec(),
+                encoded_size: esizes[t],
+                article_count: acounts[t],
+                recreated: false,
+                donor_set: Vec::new(),
+                patch_eligible: peligible[t] != 0,
+                positional_rank: pranks[t],
+                positional_window: pwindows[t],
+                steps_hash: shashes[t],
+            });
+            cursor = end;
+        }
+    }
+
+    let mut donor_names_vec = Vec::with_capacity(donor_file_count);
+    if !donor_file_names.is_null() && donor_file_count > 0 {
+        for &ptr in std::slice::from_raw_parts(donor_file_names, donor_file_count) {
+            donor_names_vec.push(input(ptr));
+        }
+    }
+    let donor_sizes_slice = if donor_file_sizes.is_null() || donor_file_count == 0 {
         &[]
     } else {
-        std::slice::from_raw_parts(donor_ranges, donor_range_count)
+        std::slice::from_raw_parts(donor_file_sizes, donor_file_count)
     };
-    let target_name_bytes = input(target_filename);
-    let donor_name_bytes = input(donor_name);
-    let mut batch_client = FfiDonorBatchClient {
+    let donor_is_par_slice = if donor_file_is_par.is_null() || donor_file_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(donor_file_is_par, donor_file_count)
+    };
+    let donor_hashes_slice = if donor_file_steps_hashes.is_null() || donor_file_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(donor_file_steps_hashes, donor_file_count)
+    };
+    let mut donor_articles_vec = Vec::with_capacity(donor_file_count);
+    if !donor_article_counts.is_null() && donor_file_count > 0 {
+        let counts = std::slice::from_raw_parts(donor_article_counts, donor_file_count);
+        let total_arts: usize = counts.iter().copied().sum();
+        let flat = if donor_article_sizes_flat.is_null() || total_arts == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(donor_article_sizes_flat, total_arts)
+        };
+        let mut cursor = 0usize;
+        for &cnt in counts {
+            let end = cursor.saturating_add(cnt).min(flat.len());
+            donor_articles_vec.push(flat[cursor..end].to_vec());
+            cursor = end;
+        }
+    }
+
+    let mut env = FfiM1DonorEnv {
         ctx,
         is_stopped_cb,
-        begin_batch_cb,
+        refresh_live_name_cb,
+        begin_member_batch_cb,
         next_article_cb,
         cancel_batch_cb,
-    };
-    let mut target_patcher = FfiTargetFileCallbacks {
-        ctx,
-        read_cb: None,
-        write_cb: write_target_cb,
         add_progress_cb,
+        add_recovered_cb,
         emit_message_cb,
     };
-    let result = crate::streamrepair::patch_from_donor_file(
-        target_name_bytes,
-        target_decoded_size,
-        &mut holes_vec,
-        donors,
-        donor_name_bytes,
-        &mut batch_client,
-        &mut target_patcher,
+    crate::streamrepair::process_m1_donor(
+        input(dest_dir),
+        live_mode != 0,
+        &mut targets_vec,
+        &member_names_vec,
+        input(donor_info_name),
+        &donor_names_vec,
+        donor_sizes_slice,
+        donor_is_par_slice,
+        donor_hashes_slice,
+        &donor_articles_vec,
+        &mut env,
     );
-    if let Some(cb) = update_holes_cb {
-        cb(ctx, holes_vec.as_ptr(), holes_vec.len());
-    }
-    if !out_recovered_bytes.is_null() {
-        *out_recovered_bytes = result.recovered_bytes;
-    }
-    if !out_credit_recovery.is_null() {
-        *out_credit_recovery = c_int::from(result.credit_recovery);
-    }
-    result.recovered_parts
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_probe_whole_file_donor_size(
-    article_count: usize,
-    target_encoded_size: i64,
-    ctx: *mut std::ffi::c_void,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
-    next_article_cb: DonorNextArticleFn,
-    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    out_file_size: *mut i64,
-) -> c_int {
-    let mut batch_client = FfiDonorBatchClient {
-        ctx,
-        is_stopped_cb,
-        begin_batch_cb,
-        next_article_cb,
-        cancel_batch_cb,
-    };
-    if let Some(sz) = crate::streamrepair::probe_whole_file_donor_size(
-        article_count,
-        target_encoded_size,
-        &mut batch_client,
-    ) {
-        if !out_file_size.is_null() {
-            *out_file_size = sz;
+    if let Some(cb) = sync_target_cb {
+        for (idx, t) in targets_vec.iter().enumerate() {
+            let mut fn_buf: Vec<u8> = t.filename.iter().copied().filter(|&b| b != 0).collect();
+            fn_buf.push(0);
+            cb(
+                ctx,
+                idx,
+                fn_buf.as_ptr().cast::<c_char>(),
+                t.decoded_file_size,
+                c_int::from(t.recreated),
+                t.holes.as_ptr(),
+                t.holes.len(),
+            );
         }
-        1
-    } else {
-        0
     }
 }
 
@@ -34321,9 +33979,6 @@ type DonorFetchMemberPartFn = Option<
         *mut usize,
     ) -> c_int,
 >;
-
-type DonorBeginMemberBatchFn =
-    Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const i32, usize)>;
 
 struct FfiCrossPackDonorEnv {
     ctx: *mut std::ffi::c_void,

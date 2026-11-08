@@ -4821,6 +4821,7 @@ pub enum TargetMessageKind {
     Info = 0,
     Warning = 1,
     Error = 2,
+    Detail = 3,
 }
 
 /// Target member files opened read-write on demand (`TargetSetFiles` in `StreamRepair.h`).
@@ -7855,6 +7856,809 @@ impl CrossPackRepairSession {
             env_cell
                 .borrow_mut()
                 .emit_message_bytes(TargetMessageKind::Info, &msg);
+        }
+    }
+}
+
+/// M1 per-file repair target state (`StreamRepairController::RepairTarget` in `StreamRepair.h`).
+#[derive(Clone, Debug)]
+pub struct M1RepairTarget {
+    pub filename: Vec<u8>,
+    pub decoded_file_size: i64,
+    pub holes: Vec<NzbgetRsByteRange>,
+    pub encoded_size: i64,
+    pub article_count: i32,
+    pub recreated: bool,
+    pub donor_set: Vec<u8>,
+    pub patch_eligible: bool,
+    pub positional_rank: i32,
+    pub positional_window: i32,
+    pub steps_hash: u64,
+}
+
+impl M1RepairTarget {
+    #[inline]
+    pub fn needs_repair(&self) -> bool {
+        !self.holes.is_empty() || self.decoded_file_size <= 0
+    }
+}
+
+/// Outcome of one donor's attempt at repairing a single target file (`ERepairOutcome`).
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum M1RepairOutcome {
+    NoCost = 0,
+    Unproductive = 1,
+    Productive = 2,
+}
+
+/// Callback environment for M1 same-bytes donor repair (`StreamRepairController::ExecRepair`).
+pub trait M1DonorEnv {
+    fn is_stopped(&self) -> bool;
+    fn refresh_live_target_name(&mut self, target_index: usize) -> Option<Vec<u8>>;
+    fn begin_member_batch(&mut self, donor_file_index: i32, part_indices: &[i32]);
+    fn next_article(&mut self) -> Option<FetchedDonorArticle>;
+    fn cancel_remaining(&mut self);
+    fn add_progress_bytes(&mut self, bytes: i64);
+    fn add_recovered_bytes(&mut self, bytes: i64);
+    fn emit_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]);
+}
+
+struct M1MemberBatchClient<'a> {
+    env: &'a mut dyn M1DonorEnv,
+    donor_file_index: i32,
+}
+
+impl DonorBatchClient for M1MemberBatchClient<'_> {
+    fn is_stopped(&self) -> bool {
+        self.env.is_stopped()
+    }
+
+    fn begin_batch(&mut self, part_indices: &[i32]) {
+        self.env
+            .begin_member_batch(self.donor_file_index, part_indices);
+    }
+
+    fn next_article(&mut self) -> Option<FetchedDonorArticle> {
+        self.env.next_article()
+    }
+
+    fn cancel_remaining(&mut self) {
+        self.env.cancel_remaining()
+    }
+}
+
+struct DiskTargetFileReader<'a> {
+    file: &'a mut std::fs::File,
+}
+
+impl TargetFileReader for DiskTargetFileReader<'_> {
+    fn read_range(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+        use std::io::{Read, Seek, SeekFrom};
+        if offset < 0 {
+            return false;
+        }
+        let Ok(pos) = self.file.seek(SeekFrom::Start(offset as u64)) else {
+            return false;
+        };
+        if pos != offset as u64 {
+            return false;
+        }
+        if buf.is_empty() {
+            return true;
+        }
+        self.file.read_exact(buf).is_ok()
+    }
+}
+
+const M1_MAX_DONOR_CANDIDATES: i32 = 4;
+const M1_MAX_SIBLING_CANDIDATES: i32 = 32;
+const M1_MAX_INTACT_PROOF_FILES: i32 = 2;
+const M1_DONOR_FAILURE_BAIL: i32 = 5;
+const M1_UNPROVEN_DONOR_BAIL: i32 = 2;
+
+#[allow(clippy::too_many_arguments)]
+fn patch_disk_file_from_donor(
+    file: &mut std::fs::File,
+    target_filename: &[u8],
+    target_decoded_size: i64,
+    target_holes: &mut Vec<NzbgetRsByteRange>,
+    donor_file_index: i32,
+    donor_ranges: &[NzbgetRsByteRange],
+    donor_name: &[u8],
+    env: &mut dyn M1DonorEnv,
+) -> i32 {
+    struct EnvCellAdapter<'a, 'b, 'e> {
+        env: &'a std::cell::RefCell<&'b mut (dyn M1DonorEnv + 'e)>,
+        donor_file_index: i32,
+    }
+    impl DonorBatchClient for EnvCellAdapter<'_, '_, '_> {
+        fn is_stopped(&self) -> bool {
+            self.env.borrow().is_stopped()
+        }
+        fn begin_batch(&mut self, part_indices: &[i32]) {
+            self.env
+                .borrow_mut()
+                .begin_member_batch(self.donor_file_index, part_indices);
+        }
+        fn next_article(&mut self) -> Option<FetchedDonorArticle> {
+            self.env.borrow_mut().next_article()
+        }
+        fn cancel_remaining(&mut self) {
+            self.env.borrow_mut().cancel_remaining()
+        }
+    }
+
+    struct DiskPatcherAdapter<'a, 'b, 'e> {
+        file: &'a mut std::fs::File,
+        target_filename: &'a [u8],
+        env: &'a std::cell::RefCell<&'b mut (dyn M1DonorEnv + 'e)>,
+    }
+    impl TargetFilePatcher for DiskPatcherAdapter<'_, '_, '_> {
+        fn write_range(&mut self, offset: i64, data: &[u8]) -> bool {
+            use std::io::{Seek, SeekFrom, Write};
+            if offset < 0 {
+                return false;
+            }
+            let io_res = self
+                .file
+                .seek(SeekFrom::Start(offset as u64))
+                .and_then(|pos| {
+                    if pos != offset as u64 {
+                        Err(std::io::Error::other("seek mismatch"))
+                    } else {
+                        self.file.write_all(data).and_then(|()| self.file.flush())
+                    }
+                });
+            if let Err(err) = io_res {
+                let err_msg = write_error_message_bytes(&err);
+                let mut msg = b"Could not write to ".to_vec();
+                msg.extend_from_slice(self.target_filename);
+                msg.extend_from_slice(b" during stream repair: ");
+                msg.extend_from_slice(&err_msg);
+                self.env
+                    .borrow_mut()
+                    .emit_message_bytes(TargetMessageKind::Error, &msg);
+                return false;
+            }
+            true
+        }
+
+        fn add_progress(&mut self, bytes: i64) {
+            self.env.borrow_mut().add_progress_bytes(bytes);
+        }
+
+        fn emit_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]) {
+            self.env.borrow_mut().emit_message_bytes(kind, text);
+        }
+    }
+
+    let env_cell = std::cell::RefCell::new(env);
+    let mut batch_client = EnvCellAdapter {
+        env: &env_cell,
+        donor_file_index,
+    };
+    let mut patcher = DiskPatcherAdapter {
+        file,
+        target_filename,
+        env: &env_cell,
+    };
+    let res = patch_from_donor_file(
+        target_filename,
+        target_decoded_size,
+        target_holes,
+        donor_ranges,
+        donor_name,
+        &mut batch_client,
+        &mut patcher,
+    );
+    if res.credit_recovery && res.recovered_parts > 0 {
+        env_cell
+            .borrow_mut()
+            .add_recovered_bytes(res.recovered_bytes);
+    }
+    res.recovered_parts
+}
+
+/// `StreamRepairController::ProveDonorOnIntactFile` (`StreamRepair.h`).
+#[allow(clippy::too_many_arguments)]
+pub fn prove_donor_on_intact_file(
+    dest_dir: &[u8],
+    whole_target_idx: usize,
+    targets: &[M1RepairTarget],
+    member_names: &[&[u8]],
+    donor_name: &[u8],
+    donor_file_names: &[&[u8]],
+    donor_file_sizes: &[i64],
+    donor_file_is_par: &[u8],
+    donor_has_articles: &[u8],
+    donor_steps_hashes: &[u64],
+    donor_article_sizes: &[Vec<i32>],
+    claimed: &mut [u8],
+    donor_set: &[u8],
+    env: &mut dyn M1DonorEnv,
+) -> bool {
+    let whole_target = &targets[whole_target_idx];
+    let target_set = volume_set_key(&whole_target.filename);
+    let stand_in_idx = select_whole_file_donor(
+        base_file_name(&whole_target.filename),
+        whole_target.encoded_size,
+        whole_target.article_count,
+        whole_target.steps_hash,
+        donor_set,
+        donor_file_names,
+        donor_file_sizes,
+        donor_file_is_par,
+        donor_has_articles,
+        claimed,
+        donor_steps_hashes,
+    );
+    if target_set.is_empty() || donor_set.is_empty() || stand_in_idx < 0 {
+        return false;
+    }
+
+    let target_filenames: Vec<&[u8]> = targets.iter().map(|t| t.filename.as_slice()).collect();
+    let mut tried = 0;
+
+    for &member_name in member_names {
+        if env.is_stopped() || tried >= M1_MAX_INTACT_PROOF_FILES {
+            break;
+        }
+        let base_name = base_file_name(member_name);
+        if !stream_repair_is_intact_proof_member_eligible(
+            base_name,
+            member_name,
+            &target_set,
+            &target_filenames,
+        ) {
+            continue;
+        }
+
+        let path_bytes = crate::artwritercore::article_writer_format_dest_file_path(
+            dest_dir,
+            std::path::MAIN_SEPARATOR as u8,
+            member_name,
+        );
+        let size = file_size_bytes(&path_bytes);
+        if size <= 0 {
+            continue;
+        }
+        let Ok(mut file) = std::fs::File::open(crate::fsops::path(&path_bytes)) else {
+            continue;
+        };
+        tried += 1;
+
+        let cand_indices = select_intact_proof_candidates(
+            base_name,
+            size,
+            donor_set,
+            stand_in_idx,
+            M1_MAX_DONOR_CANDIDATES,
+            donor_file_names,
+            donor_file_sizes,
+            donor_has_articles,
+            claimed,
+        );
+        for cand_idx in cand_indices {
+            if env.is_stopped() {
+                break;
+            }
+            let cand_usize = cand_idx as usize;
+            let donor_ranges = estimate_donor_ranges(&donor_article_sizes[cand_usize], size);
+            if donor_ranges.is_empty() {
+                continue;
+            }
+            let ok = {
+                let mut batch_client = M1MemberBatchClient {
+                    env,
+                    donor_file_index: cand_idx,
+                };
+                let mut reader = DiskTargetFileReader { file: &mut file };
+                verify_donor_file(size, &[], &donor_ranges, &mut batch_client, &mut reader)
+            };
+            if ok {
+                claimed[cand_usize] = 1;
+                let mut msg = b"Duplicate ".to_vec();
+                msg.extend_from_slice(donor_name);
+                msg.extend_from_slice(
+                    b" is byte-identical to this release (verified on intact file ",
+                );
+                msg.extend_from_slice(member_name);
+                msg.push(b')');
+                env.emit_message_bytes(TargetMessageKind::Info, &msg);
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `StreamRepairController::RepairWholeFile` (`StreamRepair.h`).
+#[allow(clippy::too_many_arguments)]
+pub fn repair_whole_file(
+    dest_dir: &[u8],
+    target: &mut M1RepairTarget,
+    donor_name: &[u8],
+    donor_file_names: &[&[u8]],
+    donor_file_sizes: &[i64],
+    donor_file_is_par: &[u8],
+    donor_has_articles: &[u8],
+    donor_steps_hashes: &[u64],
+    donor_article_sizes: &[Vec<i32>],
+    claimed: &mut [u8],
+    donor_proven: bool,
+    env: &mut dyn M1DonorEnv,
+) -> M1RepairOutcome {
+    if !donor_proven {
+        return M1RepairOutcome::NoCost;
+    }
+    let donor_idx = select_whole_file_donor(
+        base_file_name(&target.filename),
+        target.encoded_size,
+        target.article_count,
+        target.steps_hash,
+        &target.donor_set,
+        donor_file_names,
+        donor_file_sizes,
+        donor_file_is_par,
+        donor_has_articles,
+        claimed,
+        donor_steps_hashes,
+    );
+    if donor_idx < 0 || donor_article_sizes[donor_idx as usize].is_empty() {
+        return M1RepairOutcome::NoCost;
+    }
+
+    let donor_usize = donor_idx as usize;
+    let donor_filename = donor_file_names[donor_usize];
+    let sized = {
+        let mut batch_client = M1MemberBatchClient {
+            env,
+            donor_file_index: donor_idx,
+        };
+        probe_whole_file_donor_size(
+            donor_article_sizes[donor_usize].len(),
+            target.encoded_size,
+            &mut batch_client,
+        )
+    };
+    if env.is_stopped() {
+        return M1RepairOutcome::NoCost;
+    }
+    let Some(decoded_file_size) = sized else {
+        let mut msg = b"Skipping file ".to_vec();
+        msg.extend_from_slice(donor_filename);
+        msg.extend_from_slice(b" of duplicate ");
+        msg.extend_from_slice(donor_name);
+        msg.extend_from_slice(b" for ");
+        msg.extend_from_slice(&target.filename);
+        msg.extend_from_slice(b": could not learn the file size from it");
+        env.emit_message_bytes(TargetMessageKind::Detail, &msg);
+        return M1RepairOutcome::Unproductive;
+    };
+
+    let file_path = crate::artwritercore::article_writer_format_dest_file_path(
+        dest_dir,
+        std::path::MAIN_SEPARATOR as u8,
+        &target.filename,
+    );
+    let os_path = crate::fsops::path(&file_path);
+    if std::fs::metadata(os_path).is_ok() {
+        let existing = file_size_bytes(&file_path);
+        if existing != decoded_file_size && existing != 0 {
+            let mut msg = b"Could not recreate ".to_vec();
+            msg.extend_from_slice(&file_path);
+            msg.extend_from_slice(b": file already exists");
+            env.emit_message_bytes(TargetMessageKind::Warning, &msg);
+            return M1RepairOutcome::NoCost;
+        }
+        let mut msg = b"Recreating ".to_vec();
+        msg.extend_from_slice(&file_path);
+        msg.extend_from_slice(b" again: an earlier recreation was cut short");
+        env.emit_message_bytes(TargetMessageKind::Info, &msg);
+        let _ = std::fs::remove_file(os_path);
+    }
+
+    let mut c_path_buf = file_path.clone();
+    c_path_buf.push(0);
+    let mut errmsg = Vec::new();
+    let alloc_ok = std::ffi::CStr::from_bytes_with_nul(&c_path_buf)
+        .ok()
+        .is_some_and(|c_path| crate::fsops::allocate_file(c_path, decoded_file_size, &mut errmsg));
+    if !alloc_ok {
+        let mut msg = b"Could not recreate ".to_vec();
+        msg.extend_from_slice(&file_path);
+        msg.extend_from_slice(b": ");
+        msg.extend_from_slice(&errmsg);
+        env.emit_message_bytes(TargetMessageKind::Warning, &msg);
+        return M1RepairOutcome::NoCost;
+    }
+
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(os_path)
+    {
+        Ok(f) => f,
+        Err(err) => {
+            let errno = err
+                .raw_os_error()
+                .unwrap_or_else(crate::fsops::last_errno);
+            let err_msg = crate::fsops::error_message(errno);
+            let mut msg = b"Could not open ".to_vec();
+            msg.extend_from_slice(&file_path);
+            msg.extend_from_slice(b" for stream repair: ");
+            msg.extend_from_slice(&err_msg);
+            env.emit_message_bytes(TargetMessageKind::Warning, &msg);
+            let _ = std::fs::remove_file(os_path);
+            return M1RepairOutcome::NoCost;
+        }
+    };
+
+    {
+        let mut msg = b"Recreating ".to_vec();
+        msg.extend_from_slice(&target.filename);
+        msg.extend_from_slice(b" (no article of the file was available) from file ");
+        msg.extend_from_slice(donor_filename);
+        msg.extend_from_slice(b" of duplicate ");
+        msg.extend_from_slice(donor_name);
+        env.emit_message_bytes(TargetMessageKind::Info, &msg);
+    }
+
+    target.decoded_file_size = decoded_file_size;
+    target.holes = vec![NzbgetRsByteRange {
+        offset: 0,
+        size: decoded_file_size,
+    }];
+    claimed[donor_usize] = 1;
+
+    let donor_ranges = estimate_donor_ranges(&donor_article_sizes[donor_usize], decoded_file_size);
+    let recovered_parts = patch_disk_file_from_donor(
+        &mut file,
+        &target.filename,
+        decoded_file_size,
+        &mut target.holes,
+        donor_idx,
+        &donor_ranges,
+        donor_name,
+        env,
+    );
+    drop(file);
+
+    if recovered_parts == 0 {
+        let _ = std::fs::remove_file(os_path);
+        target.decoded_file_size = 0;
+        target.holes.clear();
+        return M1RepairOutcome::Unproductive;
+    }
+
+    target.recreated = true;
+    M1RepairOutcome::Productive
+}
+
+/// `StreamRepairController::RepairFile` (`StreamRepair.h`).
+#[allow(clippy::too_many_arguments)]
+pub fn repair_file(
+    dest_dir: &[u8],
+    live_mode: bool,
+    target_idx: usize,
+    targets: &mut [M1RepairTarget],
+    donor_name: &[u8],
+    donor_file_names: &[&[u8]],
+    donor_file_sizes: &[i64],
+    donor_file_is_par: &[u8],
+    donor_has_articles: &[u8],
+    donor_steps_hashes: &[u64],
+    donor_article_sizes: &[Vec<i32>],
+    claimed: &mut [u8],
+    verified: &mut bool,
+    donor_proven: bool,
+    env: &mut dyn M1DonorEnv,
+) -> M1RepairOutcome {
+    if targets[target_idx].decoded_file_size <= 0 {
+        return repair_whole_file(
+            dest_dir,
+            &mut targets[target_idx],
+            donor_name,
+            donor_file_names,
+            donor_file_sizes,
+            donor_file_is_par,
+            donor_has_articles,
+            donor_steps_hashes,
+            donor_article_sizes,
+            claimed,
+            donor_proven,
+            env,
+        );
+    }
+
+    if live_mode {
+        if let Some(refreshed) = env.refresh_live_target_name(target_idx) {
+            if !refreshed.is_empty() {
+                targets[target_idx].filename = refreshed;
+            }
+        }
+    }
+
+    let file_path = crate::artwritercore::article_writer_format_dest_file_path(
+        dest_dir,
+        std::path::MAIN_SEPARATOR as u8,
+        &targets[target_idx].filename,
+    );
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(crate::fsops::path(&file_path))
+    {
+        Ok(f) => f,
+        Err(err) => {
+            let errno = err
+                .raw_os_error()
+                .unwrap_or_else(crate::fsops::last_errno);
+            let err_msg = crate::fsops::error_message(errno);
+            let mut msg = b"Could not open ".to_vec();
+            msg.extend_from_slice(&file_path);
+            msg.extend_from_slice(b" for stream repair: ");
+            msg.extend_from_slice(&err_msg);
+            env.emit_message_bytes(TargetMessageKind::Warning, &msg);
+            return M1RepairOutcome::NoCost;
+        }
+    };
+
+    let candidates = {
+        let target = &targets[target_idx];
+        select_donor_candidates(
+            base_file_name(&target.filename),
+            target.decoded_file_size,
+            target.positional_rank,
+            target.positional_window,
+            M1_MAX_SIBLING_CANDIDATES,
+            target.steps_hash,
+            donor_file_names,
+            donor_file_sizes,
+            donor_file_is_par,
+            donor_has_articles,
+            claimed,
+            donor_steps_hashes,
+        )
+    };
+
+    let mut patched = false;
+    let mut spent_fetches = false;
+    let mut probed = 0i32;
+
+    for cand_idx in candidates {
+        if env.is_stopped() || targets[target_idx].holes.is_empty() {
+            break;
+        }
+        if *verified && probed >= M1_MAX_DONOR_CANDIDATES {
+            break;
+        }
+
+        let cand_usize = cand_idx as usize;
+        let decoded_file_size = targets[target_idx].decoded_file_size;
+        let donor_ranges =
+            estimate_donor_ranges(&donor_article_sizes[cand_usize], decoded_file_size);
+        if donor_ranges.is_empty() {
+            continue;
+        }
+        spent_fetches = true;
+        probed += 1;
+
+        let ok = {
+            let mut batch_client = M1MemberBatchClient {
+                env,
+                donor_file_index: cand_idx,
+            };
+            let mut reader = DiskTargetFileReader { file: &mut file };
+            verify_donor_file(
+                decoded_file_size,
+                &targets[target_idx].holes,
+                &donor_ranges,
+                &mut batch_client,
+                &mut reader,
+            )
+        };
+        if !ok {
+            let kind = if probed <= M1_MAX_DONOR_CANDIDATES {
+                TargetMessageKind::Info
+            } else {
+                TargetMessageKind::Detail
+            };
+            let mut msg = b"Skipping file ".to_vec();
+            msg.extend_from_slice(donor_file_names[cand_usize]);
+            msg.extend_from_slice(b" of duplicate ");
+            msg.extend_from_slice(donor_name);
+            msg.extend_from_slice(b" for ");
+            msg.extend_from_slice(&targets[target_idx].filename);
+            msg.extend_from_slice(b": content identity not confirmed");
+            env.emit_message_bytes(kind, &msg);
+            continue;
+        }
+
+        *verified = true;
+        claimed[cand_usize] = 1;
+        let target = &mut targets[target_idx];
+        let recovered_parts = patch_disk_file_from_donor(
+            &mut file,
+            &target.filename,
+            target.decoded_file_size,
+            &mut target.holes,
+            cand_idx,
+            &donor_ranges,
+            donor_name,
+            env,
+        );
+        patched |= recovered_parts > 0;
+    }
+
+    if patched {
+        M1RepairOutcome::Productive
+    } else if spent_fetches {
+        M1RepairOutcome::Unproductive
+    } else {
+        M1RepairOutcome::NoCost
+    }
+}
+
+/// Runs the two-round M1 same-bytes donor pass across `targets` for one duplicate posting
+/// (`StreamRepairController::ExecRepair` in `StreamRepair.h`).
+#[allow(clippy::too_many_arguments)]
+pub fn process_m1_donor(
+    dest_dir: &[u8],
+    live_mode: bool,
+    targets: &mut [M1RepairTarget],
+    member_names: &[&[u8]],
+    donor_info_name: &[u8],
+    donor_file_names: &[&[u8]],
+    donor_file_sizes: &[i64],
+    donor_file_is_par: &[u8],
+    donor_file_steps_hashes: &[u64],
+    donor_article_sizes: &[Vec<i32>],
+    env: &mut dyn M1DonorEnv,
+) {
+    let donor_has_articles: Vec<u8> = donor_article_sizes
+        .iter()
+        .map(|a| u8::from(!a.is_empty()))
+        .collect();
+    let mut claimed = vec![0u8; donor_file_names.len()];
+    let mut proven_sets = std::collections::BTreeSet::<(Vec<u8>, Vec<u8>)>::new();
+    let mut disproven_sets = std::collections::BTreeSet::<(Vec<u8>, Vec<u8>)>::new();
+    let mut consecutive_failures = 0i32;
+    let mut donor_proven = false;
+
+    for round in 0..2 {
+        for target_idx in 0..targets.len() {
+            if env.is_stopped() {
+                break;
+            }
+            let whole_file = targets[target_idx].decoded_file_size <= 0;
+            if !targets[target_idx].patch_eligible
+                || !targets[target_idx].needs_repair()
+                || (whole_file != (round == 1))
+            {
+                continue;
+            }
+
+            let mut set_proven = false;
+            if whole_file {
+                let our_set = volume_set_key(&targets[target_idx].filename);
+                let mut donor_sets = std::collections::BTreeSet::<Vec<u8>>::new();
+                for &df_name in donor_file_names {
+                    let key = volume_set_key(df_name);
+                    if !key.is_empty() {
+                        donor_sets.insert(key);
+                    }
+                }
+                for their_set in donor_sets {
+                    if our_set.is_empty() || env.is_stopped() {
+                        break;
+                    }
+                    if select_whole_file_donor(
+                        base_file_name(&targets[target_idx].filename),
+                        targets[target_idx].encoded_size,
+                        targets[target_idx].article_count,
+                        targets[target_idx].steps_hash,
+                        &their_set,
+                        donor_file_names,
+                        donor_file_sizes,
+                        donor_file_is_par,
+                        &donor_has_articles,
+                        &claimed,
+                        donor_file_steps_hashes,
+                    ) < 0
+                    {
+                        continue;
+                    }
+                    let pair = (our_set.clone(), their_set.clone());
+                    if disproven_sets.contains(&pair) {
+                        continue;
+                    }
+                    if proven_sets.contains(&pair)
+                        || prove_donor_on_intact_file(
+                            dest_dir,
+                            target_idx,
+                            targets,
+                            member_names,
+                            donor_info_name,
+                            donor_file_names,
+                            donor_file_sizes,
+                            donor_file_is_par,
+                            &donor_has_articles,
+                            donor_file_steps_hashes,
+                            donor_article_sizes,
+                            &mut claimed,
+                            &their_set,
+                            env,
+                        )
+                    {
+                        proven_sets.insert(pair);
+                        targets[target_idx].donor_set = their_set;
+                        set_proven = true;
+                        break;
+                    }
+                    disproven_sets.insert(pair);
+                }
+                if !set_proven {
+                    continue;
+                }
+            }
+
+            let claimed_before = claimed.clone();
+            let mut verified = false;
+            let outcome = repair_file(
+                dest_dir,
+                live_mode,
+                target_idx,
+                targets,
+                donor_info_name,
+                donor_file_names,
+                donor_file_sizes,
+                donor_file_is_par,
+                &donor_has_articles,
+                donor_file_steps_hashes,
+                donor_article_sizes,
+                &mut claimed,
+                &mut verified,
+                set_proven,
+                env,
+            );
+            donor_proven |= verified;
+            if verified {
+                let our_set = volume_set_key(&targets[target_idx].filename);
+                if !our_set.is_empty() {
+                    for (m_idx, &is_c) in claimed.iter().enumerate() {
+                        if is_c != 0 && claimed_before[m_idx] == 0 {
+                            let their_set = volume_set_key(donor_file_names[m_idx]);
+                            if !their_set.is_empty() {
+                                proven_sets.insert((our_set.clone(), their_set));
+                            }
+                        }
+                    }
+                }
+            }
+            let (new_failures, should_bail) = eval_donor_outcome_bail(
+                outcome as i32,
+                M1RepairOutcome::Productive as i32,
+                M1RepairOutcome::Unproductive as i32,
+                donor_proven,
+                consecutive_failures,
+                M1_DONOR_FAILURE_BAIL,
+                M1_UNPROVEN_DONOR_BAIL,
+            );
+            consecutive_failures = new_failures;
+            if should_bail {
+                let mut msg = b"Skipping remaining files for duplicate ".to_vec();
+                msg.extend_from_slice(donor_info_name);
+                msg.extend_from_slice(
+                    format!(
+                        " ({consecutive_failures} consecutive files without a byte-identical match)"
+                    )
+                    .as_bytes(),
+                );
+                env.emit_message_bytes(TargetMessageKind::Info, &msg);
+                return;
+            }
         }
     }
 }
@@ -13138,12 +13942,7 @@ mod tests {
                 0
             );
 
-            let vol_set = crate::ffi::nzbget_rs_stream_volume_set_key(c"Show.part01.rar".as_ptr());
-            assert_eq!(
-                std::slice::from_raw_parts(vol_set.data.cast::<u8>(), vol_set.len),
-                b"show.part#.rar"
-            );
-            crate::ffi::nzbget_rs_free(vol_set);
+            assert_eq!(volume_set_key(b"Show.part01.rar"), b"show.part#.rar");
 
             let vol_key = crate::ffi::nzbget_rs_stream_volume_key(c"Show.part01.rar".as_ptr());
             assert_eq!(
@@ -13184,16 +13983,7 @@ mod tests {
             assert_eq!(out_holes[0], br(100, 100));
 
             let adv_sizes = [150i32, 150];
-            let mut est = [br(0, 0); 2];
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_estimate_donor_ranges(
-                    adv_sizes.as_ptr(),
-                    2,
-                    300,
-                    est.as_mut_ptr()
-                ),
-                2
-            );
+            assert_eq!(estimate_donor_ranges(&adv_sizes, 300).len(), 2);
 
             let mut probes = [0i32; 2];
             assert!(

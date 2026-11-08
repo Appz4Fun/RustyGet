@@ -93,10 +93,7 @@ extern PrePostProcessor* g_PrePostProcessor;
 #include "NzbFile.h"
 #include "QueueScript.h"
 #include "ParParser.h"
-#include "ParRenamer.h"
 #include "DirectUnpack.h"
-#include "PostUnpackRenamer.h"
-#include "PostDownloadRenamer.h"
 #include "ParDamage.h"
 #include <mutex>
 #include "nzbget_rs.h"
@@ -1046,7 +1043,7 @@ static inline bool ParCannotCover(NzbInfo* nzbInfo)
 	}
 
 	std::vector<std::string> parredFiles;
-	if (parFileSize < 0 || !ParRenamer::ListParredFiles(parPath.c_str(), parredFiles))
+	if (parFileSize < 0 || !ParParser::ListParredFiles(parPath.c_str(), parredFiles))
 	{
 		return false;
 	}
@@ -1401,12 +1398,12 @@ inline void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* p
 	else if (postDownloadRenaming)
 	{
 		EnterStage(downloadQueue, postInfo, PostInfo::ptPostDownloadRenaming);
-		PostDownloadRenamer::Controller::StartJob(postInfo);
+		PostRenamerController::StartJob(postInfo, false);
 	}
 	else if (postUnpackRenaming)
 	{
 		EnterStage(downloadQueue, postInfo, PostInfo::ptPostUnpackRenaming);
-		PostUnpackRenamer::Controller::StartJob(postInfo);
+		PostRenamerController::StartJob(postInfo, true);
 	}
 	else
 	{

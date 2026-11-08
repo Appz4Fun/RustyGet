@@ -698,6 +698,80 @@ where
     ok
 }
 
+/// Filters candidate duplicate directories for PAR dupe-scan usability
+/// (`RepairController::PostParChecker::RequestDupeSources` in `Repair.h`).
+/// `on_message` receives `(kind, text)` where `0 = mkInfo` and `3 = mkDetail`.
+pub fn dupe_matcher_filter_dupe_sources<M>(
+    nzb_name: &[u8],
+    dest_dir: &Path,
+    expected_size: i64,
+    unrar_cmd: &[u8],
+    dupe_dirs: &[&[u8]],
+    mut on_message: M,
+) -> Vec<usize>
+where
+    M: FnMut(i32, &[u8]),
+{
+    if dupe_dirs.is_empty() {
+        return Vec::new();
+    }
+
+    let mut check_msg = b"Checking ".to_vec();
+    check_msg.extend_from_slice(nzb_name);
+    check_msg.extend_from_slice(b" for dupe scan usability");
+    on_message(0, &check_msg);
+
+    let mut max_size: i64 = -1;
+    let mut compressed = false;
+    let size_comparison_possible = dupe_matcher_prepare(
+        dest_dir,
+        unrar_cmd,
+        expected_size,
+        &mut max_size,
+        &mut compressed,
+        |msg| on_message(3, msg),
+    );
+
+    let mut usable = Vec::new();
+    for (idx, &dupe_dir) in dupe_dirs.iter().enumerate() {
+        let base_name = base_file_name(dupe_dir);
+        if size_comparison_possible {
+            let mut msg = b"Checking ".to_vec();
+            msg.extend_from_slice(base_name);
+            msg.extend_from_slice(b" for dupe scan usability");
+            on_message(0, &msg);
+        }
+        #[cfg(unix)]
+        let dupe_path = Path::new(bytes_to_os_str(dupe_dir));
+        #[cfg(not(unix))]
+        let dupe_path_buf = bytes_to_path_buf(dupe_dir);
+        #[cfg(not(unix))]
+        let dupe_path = dupe_path_buf.as_path();
+
+        let use_dupe = !size_comparison_possible
+            || dupe_matcher_match_dupe_content(
+                dupe_path,
+                unrar_cmd,
+                max_size,
+                compressed,
+                |msg| on_message(3, msg),
+            );
+        if use_dupe {
+            let mut msg = b"Adding ".to_vec();
+            msg.extend_from_slice(base_name);
+            msg.extend_from_slice(b" to dupe scan sources");
+            on_message(0, &msg);
+            usable.push(idx);
+        }
+    }
+
+    if usable.is_empty() {
+        on_message(0, b"No usable dupe scan sources found");
+    }
+
+    usable
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

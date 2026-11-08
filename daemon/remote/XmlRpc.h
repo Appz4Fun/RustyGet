@@ -161,7 +161,6 @@ protected:
 #include "Benchmark.h"
 #include "NetworkSpeedTest.h"
 #include "Xml.h"
-#include "Unpack.h"
 #include "SystemHealth.h"
 #include "TlsCipherBackend.h"
 
@@ -1840,7 +1839,7 @@ inline void DownloadXmlCommand::Execute()
 	{
 		int len = WebUtil::DecodeBase64(content, 0, content);
 		content[len] = '\0';
-		if (Unpack::IsArchive(filename))
+		if (nzbget_rs_unpack_can_extract_with_zipfast(filename) != 0)
 		{
 			const auto status = g_Scanner->AddArchive(
 				filename,

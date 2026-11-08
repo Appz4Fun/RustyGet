@@ -1086,6 +1086,46 @@ pub fn ext_mgr_install_error(file_path: &[u8], os_err: Option<&[u8]>, kind: i32)
     }
 }
 
+/// Installs an extension archive `file_path` into `dest_path` (`ExtensionManager::Manager::InstallExtension`).
+pub fn ext_mgr_install_extension(
+    file_path: &[u8],
+    dest_path: &[u8],
+    mut on_log: impl FnMut(i32, &str),
+) -> Option<Vec<u8>> {
+    let file_p = crate::fsops::path(file_path);
+    let dest_p = crate::fsops::path(dest_path);
+    if !crate::unpack::can_extract_with_zipfast(file_p) {
+        let name = file_p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let ext = file_p
+            .extension()
+            .map(|e| format!(".{}", e.to_string_lossy()))
+            .unwrap_or_default();
+        on_log(
+            1,
+            &format!("Unpack: Could not process '{name}': Unsupported archive format: {ext}"),
+        );
+        return Some(ext_mgr_install_error(file_path, None, 0));
+    }
+
+    if crate::unpack::extract_archive_with_zipfast(file_p, dest_p, "", 1, &mut on_log).is_err() {
+        return Some(ext_mgr_install_error(file_path, None, 1));
+    }
+
+    if let Err(err) = std::fs::remove_file(file_p) {
+        let err_msg = err.to_string();
+        return Some(ext_mgr_install_error(
+            file_path,
+            Some(err_msg.as_bytes()),
+            2,
+        ));
+    }
+
+    None
+}
+
 /// End-to-end implementation of `NzbScriptController::PrepareEnvScript` and
 /// `NzbScriptController::PrepareEnvParameters`.
 pub fn nzb_script_prepare_env(

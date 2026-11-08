@@ -1422,9 +1422,6 @@ size_t nzbget_rs_stream_compute_holes(
 int64_t nzbget_rs_stream_total_size(const NzbgetRsByteRange* ranges, size_t count);
 int nzbget_rs_stream_intersects_any(
     NzbgetRsByteRange range, const NzbgetRsByteRange* ranges, size_t count);
-size_t nzbget_rs_stream_estimate_donor_ranges(
-    const int* article_sizes, size_t count, int64_t target_file_size,
-    NzbgetRsByteRange* out_ranges);
 size_t nzbget_rs_stream_select_probe_parts(
     const NzbgetRsByteRange* donor_ranges, size_t donor_count,
     const NzbgetRsByteRange* holes, size_t hole_count, int count,
@@ -1432,7 +1429,6 @@ size_t nzbget_rs_stream_select_probe_parts(
 size_t nzbget_rs_stream_subtract_covered(
     const NzbgetRsByteRange* holes, size_t hole_count, NzbgetRsByteRange covered,
     NzbgetRsByteRange* out_holes, size_t cap);
-NzbgetRsBuf nzbget_rs_stream_volume_set_key(const char* filename);
 int nzbget_rs_stream_decoded_size_plausible(int64_t decoded_size, int64_t encoded_size);
 NzbgetRsBuf nzbget_rs_stream_suffix_key(const char* filename);
 NzbgetRsBuf nzbget_rs_stream_volume_key(const char* filename);
@@ -2310,15 +2306,6 @@ double nzbget_rs_euh_data_analytics_percentile(
     const double* sorted, size_t len, double percentile);
 uint64_t nzbget_rs_euh_benchmark_limit_by_free_space(
     uint64_t requested, uint64_t available, uint64_t reserve);
-size_t nzbget_rs_euh_benchmark_calc_write_chunk(
-    size_t block_size, uint64_t max_bytes, uint64_t write_bytes);
-const char* nzbget_rs_euh_unrar_overwrite_switch(int mode);
-int nzbget_rs_euh_unrar_is_supported(const char* path, size_t len);
-int nzbget_rs_euh_sevenzip_is_supported(const char* path, size_t len);
-NzbgetRsBuf nzbget_rs_euh_extractor_make_password(const char* password, size_t len);
-int nzbget_rs_euh_unrar_decode_exit_code(int ec, const char** out_msg);
-const char* nzbget_rs_euh_sevenzip_overwrite_switch(int mode);
-int nzbget_rs_euh_sevenzip_decode_exit_code(int ec, const char** out_msg);
 int nzbget_rs_euh_service_should_work_now(
     int service_interval, int service_now, int64_t cur_time, int64_t last_work);
 void nzbget_rs_euh_service_calc_remaining_wait(
@@ -3597,27 +3584,6 @@ NzbgetRsBuf nzbget_rs_binrpc_group_listing_from_wire(
     const char* data, size_t len, uint32_t nr_nzb, uint32_t nr_ppp,
     uint32_t nr_files, int has_pattern);
 
-int nzbget_rs_stream_select_whole_file_donor(
-    const char* target_filename, int64_t target_encoded_size, int target_article_count,
-    uint64_t target_steps_hash, const char* donor_set,
-    const char* const* donor_filenames, const int64_t* donor_sizes,
-    const uint8_t* donor_is_par, const uint8_t* donor_has_articles,
-    const uint8_t* donor_is_claimed, const uint64_t* donor_steps_hashes,
-    size_t donor_count);
-size_t nzbget_rs_stream_select_donor_candidates(
-    const char* target_filename, int64_t target_decoded_file_size,
-    int positional_rank, int positional_window, int max_candidates,
-    uint64_t target_steps_hash,
-    const char* const* donor_filenames, const int64_t* donor_sizes,
-    const uint8_t* donor_is_par, const uint8_t* donor_has_articles,
-    const uint8_t* donor_is_claimed, const uint64_t* donor_steps_hashes,
-    size_t donor_count, int32_t* out_indices, size_t out_cap);
-size_t nzbget_rs_stream_select_intact_proof_candidates(
-    const char* intact_basename, int64_t intact_size, const char* donor_set,
-    int stand_in_index, int max_candidates,
-    const char* const* donor_filenames, const int64_t* donor_sizes,
-    const uint8_t* donor_has_articles, const uint8_t* donor_is_claimed,
-    size_t donor_count, int32_t* out_indices, size_t out_cap);
 void nzbget_rs_stream_select_verify_donor_probes(
     const NzbgetRsByteRange* donor_ranges, size_t donor_count,
     const NzbgetRsByteRange* holes, size_t hole_count,
@@ -3776,9 +3742,6 @@ NzbgetRsBuf nzbget_rs_stream_content_mapper_split_inner_name(
 size_t nzbget_rs_stream_order_donor_indices(
     const int32_t* dupe_scores_ptr, const int32_t* ids_ptr,
     size_t count, size_t* out_indices_ptr);
-int32_t nzbget_rs_stream_is_intact_proof_member_eligible(
-    const char* base_name, const char* member_name, const char* target_set,
-    const char* const* target_filenames_ptr, size_t target_count);
 void nzbget_rs_dqh_donor_health_accum_health(
     int32_t* checked, int32_t* present, int32_t* missing, int32_t* error,
     int32_t* body_checked, int32_t* body_bad,
@@ -4432,23 +4395,6 @@ int nzbget_rs_post_renamer_run(
     void (*log_cb)(void* ctx, int kind, const char* msg),
     void (*rename_cb)(void* ctx, const char* old_name, const char* new_name));
 
-void nzbget_rs_archive_processor_handle_extract_failure(
-    const char* archive_file,
-    const char* unpack_dir,
-    const char* broken_dir,
-    void* ctx,
-    void (*log_cb)(void* ctx, int kind, const char* msg));
-
-void nzbget_rs_archive_processor_finish(
-    const char* archive_file,
-    const char* unpack_dir,
-    const char* dest_dir,
-    const char* processed_dir,
-    int config_action,
-    void* ctx,
-    void (*log_cb)(void* ctx, int kind, const char* msg),
-    void (*moved_nzb_cb)(void* ctx, const char* moved_path));
-
 typedef void (*NzbgetRsHealthOptionEmitCb)(
     void* ctx, const char* name_ptr, size_t name_len,
     int severity, const char* msg_ptr, size_t msg_len);
@@ -4598,8 +4544,9 @@ NzbgetRsBuf nzbget_rs_ext_mgr_delete_extension(
     const char* ext_name, int found, int64_t use_count,
     const char* target_path);
 
-NzbgetRsBuf nzbget_rs_ext_mgr_install_error(
-    const char* file_path, const char* os_err, int kind);
+NzbgetRsBuf nzbget_rs_ext_mgr_install_extension(
+    const char* file_path, const char* dest_path,
+    void (*log_cb)(void* ctx, int kind, const char* msg), void* log_ctx);
 
 void nzbget_rs_nzb_script_prepare_env(
     const char* script_name, int has_parameters,
@@ -5167,10 +5114,6 @@ int nzbget_rs_stream_watchdog_eval_tick(
     NzbgetRsBuf* out_reason);
 NzbgetRsBuf nzbget_rs_stream_format_whole_files_suffix(int unsized_count);
 int nzbget_rs_stream_is_par2_job_or_file(int is_par_file, const char* filename);
-int nzbget_rs_stream_eval_donor_outcome_bail(
-    int outcome, int ro_productive, int ro_unproductive, int donor_proven,
-    int cur_consecutive_failures, int donor_failure_bail, int unproven_donor_bail,
-    int* out_new_consecutive_failures);
 size_t nzbget_rs_stream_select_probe_replacements(
     int missing, const int* reserve, size_t reserve_len, int max_probe_fetches,
     size_t attempted_len, int* out_batch, size_t max_out);
@@ -5233,17 +5176,14 @@ int nzbget_rs_qhp_rename_completed_file(
     void (*get_cb)(void* ctx, size_t idx, const char** out_filename, const char** out_origname),
     void (*set_cb)(void* ctx, size_t idx, const char* new_filename, const char* new_origname));
 
-int nzbget_rs_dupematcher_prepare(
-    const char* dest_dir, const char* unrar_cmd, int64_t expected_size, int64_t* out_max_size, int* out_compressed,
-    void (*on_detail_log)(void* ctx, const char* msg), void* ctx);
-int nzbget_rs_dupematcher_match_dupe_content(
-    const char* dupe_dir, const char* unrar_cmd, int64_t max_size, int compressed,
-    void (*on_detail_log)(void* ctx, const char* msg), void* ctx);
+size_t nzbget_rs_dupematcher_filter_dupe_sources(
+    const char* nzb_name, const char* dest_dir, int64_t expected_size, const char* unrar_cmd,
+    const char* const* dupe_dirs, size_t dupe_count, size_t* out_indices,
+    void (*on_message)(void* ctx, int kind, const char* msg), void* ctx);
 
 int nzbget_rs_archive_processor_process(
     const char* archive_file, const char* unpack_dir, const char* dest_dir,
     const char* processed_dir, const char* broken_dir, int config_action, void* ctx,
-    int (*extract_cb)(void* ctx, const char* archive_file, const char* unpack_dir, int* out_extracted),
     void (*log_cb)(void* ctx, int kind, const char* msg),
     void (*moved_cb)(void* ctx, const char* moved_path));
 
@@ -5955,15 +5895,34 @@ void nzbget_rs_direct_unpack_cleanup(
     void* ctx,
     void (*log_cb)(void* ctx, int kind, const char* msg));
 
-int nzbget_rs_stream_verify_donor_file(
-    int64_t target_decoded_size,
-    const NzbgetRsByteRange* target_holes,
-    size_t target_hole_count,
-    const NzbgetRsByteRange* donor_ranges,
-    size_t donor_range_count,
+void nzbget_rs_stream_repair_process_donor(
+    const char* dest_dir,
+    int live_mode,
+    const char* const* member_names,
+    size_t member_count,
+    const char* const* target_filenames,
+    const int64_t* target_encoded_sizes,
+    const int64_t* target_decoded_sizes,
+    const int* target_article_counts,
+    const int* target_positional_ranks,
+    const int* target_positional_windows,
+    const uint64_t* target_steps_hashes,
+    const uint8_t* target_patch_eligible,
+    const size_t* target_hole_counts,
+    const NzbgetRsByteRange* target_holes_flat,
+    size_t target_count,
+    const char* donor_info_name,
+    const char* const* donor_file_names,
+    const int64_t* donor_file_sizes,
+    const uint8_t* donor_file_is_par,
+    const uint64_t* donor_file_steps_hashes,
+    const size_t* donor_article_counts,
+    const int32_t* donor_article_sizes_flat,
+    size_t donor_file_count,
     void* ctx,
     int (*is_stopped_cb)(void* ctx),
-    void (*begin_batch_cb)(void* ctx, const int32_t* part_indices, size_t count),
+    const char* (*refresh_live_name_cb)(void* ctx, size_t target_index),
+    void (*begin_member_batch_cb)(void* ctx, int32_t member_index, const int32_t* part_indices, size_t count),
     int (*next_article_cb)(
         void* ctx,
         int* out_success,
@@ -5972,49 +5931,17 @@ int nzbget_rs_stream_verify_donor_file(
         const uint8_t** out_data,
         size_t* out_data_len),
     void (*cancel_batch_cb)(void* ctx),
-    int (*read_target_cb)(void* ctx, int64_t offset, uint8_t* buf, int64_t size));
-
-int nzbget_rs_stream_patch_from_donor_file(
-    const char* target_filename,
-    int64_t target_decoded_size,
-    const NzbgetRsByteRange* target_holes,
-    size_t target_hole_count,
-    const NzbgetRsByteRange* donor_ranges,
-    size_t donor_range_count,
-    const char* donor_name,
-    void* ctx,
-    int (*is_stopped_cb)(void* ctx),
-    void (*begin_batch_cb)(void* ctx, const int32_t* part_indices, size_t count),
-    int (*next_article_cb)(
-        void* ctx,
-        int* out_success,
-        int64_t* out_offset,
-        int64_t* out_file_size,
-        const uint8_t** out_data,
-        size_t* out_data_len),
-    void (*cancel_batch_cb)(void* ctx),
-    int (*write_target_cb)(void* ctx, int64_t offset, const uint8_t* data, int64_t size),
     void (*add_progress_cb)(void* ctx, int64_t bytes),
-    void (*emit_message_cb)(void* ctx, int32_t kind, const char* text),
-    void (*update_holes_cb)(void* ctx, const NzbgetRsByteRange* holes, size_t hole_count),
-    int64_t* out_recovered_bytes,
-    int* out_credit_recovery);
-
-int nzbget_rs_stream_probe_whole_file_donor_size(
-    size_t article_count,
-    int64_t target_encoded_size,
-    void* ctx,
-    int (*is_stopped_cb)(void* ctx),
-    void (*begin_batch_cb)(void* ctx, const int32_t* part_indices, size_t count),
-    int (*next_article_cb)(
+    void (*add_recovered_cb)(void* ctx, int64_t bytes),
+    void (*sync_target_cb)(
         void* ctx,
-        int* out_success,
-        int64_t* out_offset,
-        int64_t* out_file_size,
-        const uint8_t** out_data,
-        size_t* out_data_len),
-    void (*cancel_batch_cb)(void* ctx),
-    int64_t* out_file_size);
+        size_t target_index,
+        const char* filename,
+        int64_t decoded_file_size,
+        int recreated,
+        const NzbgetRsByteRange* holes,
+        size_t hole_count),
+    void (*emit_message_cb)(void* ctx, int32_t kind, const char* text));
 
 typedef struct NzbgetRsCrossPackSession NzbgetRsCrossPackSession;
 

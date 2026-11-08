@@ -55,6 +55,23 @@ public:
 	{
 		return nzbget_rs_same_par_collection(filename1, filename2, confirmedFilenames) != 0;
 	}
+
+	static constexpr int64 MaxIndexParSize = 16 * 1024 * 1024;
+
+	static bool ListParredFiles(const char* parFilename, std::vector<std::string>& filenames)
+	{
+		return nzbget_rs_par_renamer_list_parred_files(
+			parFilename,
+			MaxIndexParSize,
+			&filenames,
+			+[](void* rawCtx, const char* name) noexcept
+			{
+				if (name)
+				{
+					static_cast<std::vector<std::string>*>(rawCtx)->emplace_back(name);
+				}
+			}) != 0;
+	}
 };
 
 #endif

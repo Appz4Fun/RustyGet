@@ -88,9 +88,6 @@ private:
 		int ArticleCount = 0;
 		// a whole-file target that was allocated on disk in this pass
 		bool Recreated = false;
-		// the duplicate's archive set proven for a whole-file target (the
-		// stand-in member is chosen from it)
-		std::string DonorSet;
 		// the file's ENCODED failed size and par2 flag, captured from the
 		// StreamRepairJob (the source of truth). When this target is FULLY
 		// repaired its FailedSize is credited back to health, exactly reversing
@@ -184,19 +181,6 @@ private:
 	bool m_hasParFiles = false;
 	std::vector<RepairTarget> m_targets;
 
-	// a donor whose files keep failing identity verification is almost
-	// certainly not a byte-identical repost: stop trying it after this many
-	// consecutive unproductive files instead of burning fetches on the rest
-	static constexpr int DonorFailureBail = 5;
-	// the same before any member of the donor verified byte-identical: its
-	// indistinguishable siblings are probed exhaustively, so a duplicate that
-	// is merely a different packing must be given up on sooner
-	static constexpr int UnprovenDonorBail = 2;
-	// intact files of the collection probed to prove a donor for whole-file
-	// recreation (each costs at most MaxProbeFetches article fetches per
-	// candidate member)
-	static constexpr int MaxIntactProofFiles = 2;
-
 	void RunLive();
 	void RepairCompletedLive(std::vector<RepairTarget>& targets);
 	void RefreshLiveNames(std::vector<RepairTarget>& targets,
@@ -208,41 +192,8 @@ private:
 		const std::vector<CString>& memberNames);
 	void CollectDonors(DownloadQueue* downloadQueue, NzbInfo* nzbInfo,
 		std::vector<DonorSource>& donors);
-	// how a donor's attempt at one file ended: only attempts that actually
-	// spent fetches may advance the donor circuit breaker
-	enum ERepairOutcome
-	{
-		roNoCost,		// nothing fetched (file unopenable, no candidates)
-		roUnproductive,	// fetches spent, nothing written
-		roProductive	// bytes written
-	};
-
 	void ExecRepair(const char* destDir, std::vector<RepairTarget>& targets,
 		std::vector<DonorSource>& donors, const std::vector<CString>& memberNames);
-	/* Proves a duplicate byte-identical for the whole-file target on an
-	 * intact (undamaged) volume of the same archive set, when no damaged file
-	 * of this pass could: a release missing one volume entirely and nothing
-	 * else, or one whose other damage an earlier live pass already repaired.
-	 * Only sibling volumes count on both sides (DupeStreamRepair::
-	 * VolumeSetKey): an .nfo or a sample identical across two packings of a
-	 * release proves nothing about their archive volumes. */
-	bool ProveDonorOnIntactFile(const char* destDir, const RepairTarget& wholeTarget,
-		const std::vector<RepairTarget>& targets, const std::vector<CString>& memberNames,
-		NzbInfo* donorNzb, const char* donorName, std::set<FileInfo*>& claimed,
-		const std::string& donorSet);
-	// verified: set when a donor member proved byte-identical to the target;
-	// donorProven: the duplicate's archive set that stands in for a whole-file
-	// target was proven byte-identical to the target's own archive set, on a
-	// damaged or an intact sibling volume (the only identity evidence a
-	// whole-file target can rely on)
-	ERepairOutcome RepairFile(const char* destDir, RepairTarget& target, NzbInfo* donorNzb,
-		const char* donorName, std::set<FileInfo*>& claimed, bool& verified, bool donorProven);
-	/* Recreates a file none of whose articles arrived from the donor member
-	 * SelectWholeFileDonor pairs it with: the decoded size comes from that
-	 * member's first article, the file is allocated and every part is
-	 * patched in. Only for a donor proven on another file of the collection. */
-	ERepairOutcome RepairWholeFile(const char* destDir, RepairTarget& target, NzbInfo* donorNzb,
-		const char* donorName, std::set<FileInfo*>& claimed, bool donorProven);
 	/* Marks the completed-file record of a recreated whole-file target as
 	 * partially downloaded, so later stages read it from disk. */
 	static void MarkRecreated(NzbInfo* nzbInfo, const RepairTarget& target);
@@ -251,12 +202,6 @@ private:
 	 * collection's health: a later "retry failed articles" must neither
 	 * download it again nor subtract that failed size a second time. */
 	static void MarkRepaired(NzbInfo* nzbInfo, const RepairTarget& target);
-	static std::vector<FileInfo*> FindDonorFiles(const RepairTarget& target, NzbInfo* donorNzb,
-		const std::set<FileInfo*>& claimed);
-	bool VerifyDonor(DiskFile& file, const RepairTarget& target, FileInfo* donorFile,
-		const StreamRangeList& donorRanges);
-	int PatchFromDonor(DiskFile& file, RepairTarget& target, FileInfo* donorFile,
-		const StreamRangeList& donorRanges, const char* donorName);
 
 	// cross-packing (M2/M3) and decompression-assisted donor extraction (M4):
 	// repairs holes through Rust inner-content maps after the per-member
@@ -290,17 +235,6 @@ private:
 
 namespace
 {
-	// a short write to a full disk may leave errno unset
-	CString WriteErrorMessage()
-	{
-		CString message = FileSystem::GetLastErrorMessage();
-		if (message.Empty())
-		{
-			return "incomplete write (disk full?)";
-		}
-		return message;
-	}
-
 	template <typename Ctx, typename R, typename F>
 	R RepairMapCall(void* rawCtx, R failed, F f) noexcept
 	{
@@ -1050,474 +984,229 @@ inline void StreamRepairController::ExecRepair(const char* destDir,
 			m_postInfo->SetStageProgress(0);
 		}
 
-		int consecutiveFailures = 0;
-		bool donorProven = false;
-		// donor members already proven identical to a target: one member
-		// cannot be another target's twin, so they are never probed again
-		std::set<FileInfo*> claimed;
-
-		// archive sets of this release proven byte-identical to an archive set
-		// of the duplicate: (VolumeSetKey of ours, VolumeSetKey of theirs).
-		// A whole volume is recreated only from a set proven this way - an
-		// identical sample or .nfo proves nothing about the archive volumes
-		// of two different packings
-		std::set<std::pair<std::string, std::string>> provenSets;
-		// pairs an intact-volume proof already failed for: every further
-		// missing volume of the set would only repeat the same probe fetches
-		std::set<std::pair<std::string, std::string>> disprovenSets;
-
-		// whole-file targets wait for the end of the donor's pass: only the
-		// other targets can prove the donor is a repost of this release
-		for (int round = 0; round < 2; round++)
+		std::vector<const char*> memberNamePtrs(memberNames.size());
+		for (size_t i = 0; i < memberNames.size(); i++)
 		{
-			for (RepairTarget& target : targets)
+			memberNamePtrs[i] = *memberNames[i];
+		}
+
+		std::vector<const char*> targetFilenames(targets.size());
+		std::vector<int64_t> targetEncodedSizes(targets.size());
+		std::vector<int64_t> targetDecodedSizes(targets.size());
+		std::vector<int> targetArticleCounts(targets.size());
+		std::vector<int> targetPositionalRanks(targets.size());
+		std::vector<int> targetPositionalWindows(targets.size());
+		std::vector<uint64_t> targetStepsHashes(targets.size());
+		std::vector<uint8_t> targetPatchEligible(targets.size());
+		std::vector<size_t> targetHoleCounts(targets.size());
+		std::vector<NzbgetRsByteRange> targetHolesFlat;
+		for (size_t t = 0; t < targets.size(); t++)
+		{
+			targetFilenames[t] = *targets[t].Filename;
+			targetEncodedSizes[t] = targets[t].EncodedSize;
+			targetDecodedSizes[t] = targets[t].DecodedFileSize;
+			targetArticleCounts[t] = targets[t].ArticleCount;
+			targetPositionalRanks[t] = targets[t].PositionalRank;
+			targetPositionalWindows[t] = targets[t].PositionalWindow;
+			targetStepsHashes[t] = targets[t].StepsHash;
+			targetPatchEligible[t] = targets[t].PatchEligible ? 1 : 0;
+			targetHoleCounts[t] = targets[t].Holes.size();
+			for (const StreamRange& h : targets[t].Holes)
 			{
-				if (IsStopped())
-				{
-					break;
-				}
-				bool wholeFile = target.DecodedFileSize <= 0;
-				if (!target.PatchEligible || !target.NeedsRepair() || (wholeFile != (round == 1)))
-				{
-					continue;
-				}
-				bool setProven = false;
-				if (wholeFile)
-				{
-					// each archive set of the duplicate in turn: the missing
-					// volume pairs only within one set, and only a set proven
-					// against the volume's own set may stand in for it
-					std::string ourSet = DupeStreamRepair::VolumeSetKey(target.Filename);
-					std::set<std::string> donorSets;
-					for (FileInfo* donorFile : donorNzb->GetFileList())
-					{
-						std::string key = DupeStreamRepair::VolumeSetKey(donorFile->GetFilename());
-						if (!key.empty())
-						{
-							donorSets.insert(key);
-						}
-					}
-					for (const std::string& theirSet : donorSets)
-					{
-						if (ourSet.empty() || IsStopped())
-						{
-							break;
-						}
-						if (!DupeStreamRepair::SelectWholeFileDonor(FileSystem::BaseFileName(target.Filename),
-							target.EncodedSize, target.ArticleCount, target.StepsHash, donorNzb.get(),
-							&claimed, theirSet))
-						{
-							continue;
-						}
-						if (disprovenSets.count({ourSet, theirSet}))
-						{
-							continue;
-						}
-						if (provenSets.count({ourSet, theirSet}) ||
-							ProveDonorOnIntactFile(destDir, target, targets, memberNames,
-								donorNzb.get(), donor.InfoName, claimed, theirSet))
-						{
-							provenSets.insert({ourSet, theirSet});
-							target.DonorSet = theirSet;
-							setProven = true;
-							break;
-						}
-						disprovenSets.insert({ourSet, theirSet});
-					}
-					if (!setProven)
-					{
-						continue;
-					}
-				}
-				std::set<FileInfo*> claimedBefore = claimed;
-				bool verified = false;
-				ERepairOutcome outcome = RepairFile(destDir, target, donorNzb.get(), donor.InfoName,
-					claimed, verified, setProven);
-				// a byte-identical twin proves the donor is a repost of this
-				// release even when it misses the same articles as the target
-				donorProven |= verified;
-				if (verified)
-				{
-					std::string ourSet = DupeStreamRepair::VolumeSetKey(target.Filename);
-					for (FileInfo* member : claimed)
-					{
-						std::string theirSet = DupeStreamRepair::VolumeSetKey(member->GetFilename());
-						if (!claimedBefore.count(member) && !ourSet.empty() && !theirSet.empty())
-						{
-							provenSets.insert({ourSet, theirSet});
-						}
-					}
-				}
-				if (nzbget_rs_stream_eval_donor_outcome_bail(
-					(int)outcome, (int)roProductive, (int)roUnproductive,
-					donorProven ? 1 : 0, consecutiveFailures,
-					DonorFailureBail, UnprovenDonorBail, &consecutiveFailures) != 0)
-				{
-					PrintMessage(Message::mkInfo,
-						"Skipping remaining files for duplicate %s (%i consecutive files without a byte-identical match)",
-						*donor.InfoName, consecutiveFailures);
-					round = 2;
-					break;
-				}
+				targetHolesFlat.push_back({h.Offset, h.Size});
 			}
 		}
-	}
-}
 
-inline StreamRepairController::ERepairOutcome StreamRepairController::RepairFile(const char* destDir,
-	RepairTarget& target, NzbInfo* donorNzb, const char* donorName, std::set<FileInfo*>& claimed,
-	bool& verified, bool donorProven)
-{
-	if (target.DecodedFileSize <= 0)
-	{
-		return RepairWholeFile(destDir, target, donorNzb, donorName, claimed, donorProven);
-	}
-
-	if (m_liveMode)
-	{
-		// direct rename can rename the completed file while this pass runs;
-		// opening a stale name would consume the job's one live attempt with
-		// zero work, so re-resolve it right before the open
-		RefreshLiveTargetName(target);
-	}
-
-	NzbgetRsBuf filePathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		destDir, PATH_SEPARATOR, *target.Filename);
-	BString<1024> filePath;
-	filePath.Set(filePathBuf.data ? filePathBuf.data : "", (int)filePathBuf.len);
-	nzbget_rs_free(filePathBuf);
-
-	DiskFile file;
-	if (!file.Open(filePath, DiskFile::omReadWrite))
-	{
-		PrintMessage(Message::mkWarning, "Could not open %s for stream repair: %s",
-			*filePath, *FileSystem::GetLastErrorMessage());
-		return roNoCost;
-	}
-
-	bool patched = false;
-	bool spentFetches = false;
-	int probed = 0;
-
-	for (FileInfo* donorFile : FindDonorFiles(target, donorNzb, claimed))
-	{
-		if (IsStopped() || target.Holes.empty())
-		{
-			break;
-		}
-		// the wide sibling search is only for finding the target's twin; once
-		// one member verified, further members get the usual small budget
-		if (verified && probed >= DupeStreamRepair::MaxDonorCandidates)
-		{
-			break;
-		}
-
-		StreamRangeList donorRanges = DupeStreamRepair::EstimateDonorRanges(
-			donorFile, target.DecodedFileSize);
-		if (donorRanges.empty())
-		{
-			continue;
-		}
-		spentFetches = true;
-		probed++;
-
-		if (!VerifyDonor(file, target, donorFile, donorRanges))
-		{
-			// mkInfo on purpose: a rejected donor is the safety net firing -
-			// the user (and the e2e decoy test) should see it in the log; the
-			// sibling search past the usual budget would flood it, so detail
-			PrintMessage(
-				probed <= DupeStreamRepair::MaxDonorCandidates ? Message::mkInfo : Message::mkDetail,
-				"Skipping file %s of duplicate %s for %s: content identity not confirmed",
-				donorFile->GetFilename(), donorName, *target.Filename);
-			continue;
-		}
-
-		verified = true;
-		claimed.insert(donorFile);
-		patched |= PatchFromDonor(file, target, donorFile, donorRanges, donorName) > 0;
-	}
-
-	file.Close();
-	return patched ? roProductive : (spentFetches ? roUnproductive : roNoCost);
-}
-
-inline bool StreamRepairController::ProveDonorOnIntactFile(const char* destDir,
-	const RepairTarget& wholeTarget, const std::vector<RepairTarget>& targets,
-	const std::vector<CString>& memberNames, NzbInfo* donorNzb, const char* donorName,
-	std::set<FileInfo*>& claimed, const std::string& donorSet)
-{
-	// the proof has to come from the same archive set on both sides: a
-	// sibling volume of the missing one, and a sibling of the donor member
-	// that would stand in for it
-	std::string targetSet = DupeStreamRepair::VolumeSetKey(wholeTarget.Filename);
-	FileInfo* standIn = DupeStreamRepair::SelectWholeFileDonor(FileSystem::BaseFileName(wholeTarget.Filename),
-		wholeTarget.EncodedSize, wholeTarget.ArticleCount, wholeTarget.StepsHash, donorNzb, &claimed, donorSet);
-	if (targetSet.empty() || donorSet.empty() || !standIn)
-	{
-		return false;
-	}
-
-	std::vector<const char*> targetFilenames;
-	targetFilenames.reserve(targets.size());
-	for (const RepairTarget& target : targets)
-	{
-		targetFilenames.push_back(target.Filename);
-	}
-
-	int tried = 0;
-	for (const CString& memberName : memberNames)
-	{
-		if (IsStopped() || tried >= MaxIntactProofFiles)
-		{
-			break;
-		}
-		const char* baseName = FileSystem::BaseFileName(memberName);
-		if (nzbget_rs_stream_is_intact_proof_member_eligible(
-			baseName, memberName, targetSet.c_str(),
-			targetFilenames.data(), targetFilenames.size()) == 0)
-		{
-			continue;
-		}
-
-		NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			destDir, PATH_SEPARATOR, *memberName);
-		BString<1024> path;
-		path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
-		nzbget_rs_free(pathBuf);
-		int64 size = FileSystem::FileSize(path);
-		if (size <= 0)
-		{
-			continue;
-		}
-		DiskFile file;
-		if (!file.Open(path, DiskFile::omRead))
-		{
-			continue;
-		}
-		tried++;
-
-		// an intact file has no holes: every probe compares fully present bytes
-		RepairTarget probe;
-		probe.FileId = 0;
-		probe.Filename = *memberName;
-		probe.DecodedFileSize = size;
-		// candidates from the donor set only: the member with the intact
-		// file's volume number first, then the set's other members of a
-		// similar size (a renamed repost may number differently)
 		std::vector<FileInfo*> donorFiles;
-		std::vector<const char*> donorNames;
-		std::vector<int64_t> donorSizes;
-		std::vector<uint8_t> donorHasArticles;
-		std::vector<uint8_t> donorIsClaimed;
-		int standInIndex = -1;
-		for (FileInfo* donorFile : donorNzb->GetFileList())
+		std::vector<const char*> donorFileNames;
+		std::vector<int64_t> donorFileSizes;
+		std::vector<uint8_t> donorFileIsPar;
+		std::vector<uint64_t> donorFileStepsHashes;
+		std::vector<size_t> donorArticleCounts;
+		std::vector<int32_t> donorArticleSizesFlat;
+		std::vector<std::shared_ptr<std::vector<CString>>> donorGroupsCache;
+		for (FileInfo* df : donorNzb->GetFileList())
 		{
-			if (donorFile == standIn)
+			donorFiles.push_back(df);
+			donorFileNames.push_back(df->GetFilename());
+			donorFileSizes.push_back(df->GetSize());
+			donorFileIsPar.push_back(df->GetParFile() ? 1 : 0);
+			donorArticleCounts.push_back(df->GetArticles()->size());
+			for (const std::unique_ptr<ArticleInfo>& a : *df->GetArticles())
 			{
-				standInIndex = (int)donorFiles.size();
+				donorArticleSizesFlat.push_back(a->GetSize());
 			}
-			donorFiles.push_back(donorFile);
-			donorNames.push_back(donorFile->GetFilename());
-			donorSizes.push_back(donorFile->GetSize());
-			donorHasArticles.push_back(!donorFile->GetArticles()->empty() ? 1 : 0);
-			donorIsClaimed.push_back(claimed.count(donorFile) ? 1 : 0);
-		}
-		std::vector<int32_t> candIndices(donorFiles.size());
-		size_t candCount = nzbget_rs_stream_select_intact_proof_candidates(
-			baseName, size, donorSet.c_str(), standInIndex, DupeStreamRepair::MaxDonorCandidates,
-			donorNames.data(), donorSizes.data(), donorHasArticles.data(), donorIsClaimed.data(),
-			donorFiles.size(), candIndices.data(), candIndices.size());
-		std::vector<FileInfo*> candidates;
-		candidates.reserve(candCount);
-		for (size_t c = 0; c < candCount; c++)
-		{
-			candidates.push_back(donorFiles[candIndices[c]]);
-		}
-		for (FileInfo* donorFile : candidates)
-		{
-			if (IsStopped())
+			const std::vector<int32_t>& artSizes = donorArticleCounts.back() > 0
+				? std::vector<int32_t>(
+					donorArticleSizesFlat.end() - (ptrdiff_t)donorArticleCounts.back(),
+					donorArticleSizesFlat.end())
+				: std::vector<int32_t>{};
+			donorFileStepsHashes.push_back(
+				nzbget_rs_dupe_fallback_steps_hash(artSizes.data(), artSizes.size()));
+			auto grp = std::make_shared<std::vector<CString>>();
+			for (const CString& g : *df->GetGroups())
 			{
-				break;
+				grp->emplace_back(*g);
 			}
-			StreamRangeList donorRanges = DupeStreamRepair::EstimateDonorRanges(donorFile, size);
-			if (!donorRanges.empty() && VerifyDonor(file, probe, donorFile, donorRanges))
-			{
-				claimed.insert(donorFile);
-				PrintMessage(Message::mkInfo,
-					"Duplicate %s is byte-identical to this release (verified on intact file %s)",
-					donorName, *memberName);
-				return true;
-			}
+			donorGroupsCache.push_back(std::move(grp));
 		}
-	}
-	return false;
-}
 
-inline StreamRepairController::ERepairOutcome StreamRepairController::RepairWholeFile(const char* destDir,
-	RepairTarget& target, NzbInfo* donorNzb, const char* donorName, std::set<FileInfo*>& claimed,
-	bool donorProven)
-{
-	// nothing of the file was downloaded, so no byte of it can confirm a
-	// donor: only a donor already proven byte-identical on another file of
-	// this collection, and a member identified by the file's own nzb entry
-	// (not by size alone), may stand in for it
-	if (!donorProven)
-	{
-		return roNoCost;
-	}
-	FileInfo* donorFile = DupeStreamRepair::SelectWholeFileDonor(
-		FileSystem::BaseFileName(target.Filename), target.EncodedSize, target.ArticleCount,
-		target.StepsHash, donorNzb, &claimed, target.DonorSet);
-	if (!donorFile || donorFile->GetArticles()->empty())
-	{
-		return roNoCost;
-	}
-
-	// the decoded size: every yEnc article declares the size of its file, so
-	// the first article that arrives sizes it (a repost may miss its start)
-	auto donorGroups = std::make_shared<std::vector<CString>>();
-	for (const CString& group : *donorFile->GetGroups())
-	{
-		donorGroups->emplace_back(*group);
-	}
-	ArticleList* donorArticles = donorFile->GetArticles();
-	struct SizeProbeCtx
-	{
-		StreamRepairController* Controller;
-		FileInfo* DonorFile;
-		std::shared_ptr<std::vector<CString>> DonorGroups;
-		ArticleFetcher::FetchedArticle CurrentFetched;
-		std::exception_ptr Error;
-	} probeCtx{this, donorFile, std::move(donorGroups), {}, nullptr};
-
-	int64 decodedFileSize = 0;
-	bool sized = nzbget_rs_stream_probe_whole_file_donor_size(
-		donorArticles->size(),
-		target.EncodedSize,
-		&probeCtx,
-		[](void* rawCtx) -> int
+		struct M1DonorCtx
 		{
-			return RepairMapCall<SizeProbeCtx>(rawCtx, 1, [](SizeProbeCtx* c)
+			StreamRepairController* Controller;
+			std::vector<RepairTarget>* Targets;
+			std::vector<FileInfo*>* DonorFiles;
+			std::vector<std::shared_ptr<std::vector<CString>>>* DonorGroupsCache;
+			ArticleFetcher::FetchedArticle CurrentFetched;
+			std::exception_ptr Error;
+		} donorCtx{this, &targets, &donorFiles, &donorGroupsCache, {}, nullptr};
+
+		nzbget_rs_stream_repair_process_donor(
+			destDir,
+			m_liveMode ? 1 : 0,
+			memberNamePtrs.data(),
+			memberNamePtrs.size(),
+			targetFilenames.data(),
+			targetEncodedSizes.data(),
+			targetDecodedSizes.data(),
+			targetArticleCounts.data(),
+			targetPositionalRanks.data(),
+			targetPositionalWindows.data(),
+			targetStepsHashes.data(),
+			targetPatchEligible.data(),
+			targetHoleCounts.data(),
+			targetHolesFlat.data(),
+			targets.size(),
+			*donor.InfoName,
+			donorFileNames.data(),
+			donorFileSizes.data(),
+			donorFileIsPar.data(),
+			donorFileStepsHashes.data(),
+			donorArticleCounts.data(),
+			donorArticleSizesFlat.data(),
+			donorFiles.size(),
+			&donorCtx,
+			[](void* rawCtx) -> int
 			{
-				return c->Controller->IsStopped() ? 1 : 0;
-			});
-		},
-		[](void* rawCtx, const int32_t* partIndices, size_t count)
-		{
-			RepairMapCallVoid<SizeProbeCtx>(rawCtx, [=](SizeProbeCtx* c)
-			{
-				std::vector<ArticleBatchFetcher::Request> requests;
-				requests.reserve(count);
-				for (size_t i = 0; i < count; i++)
+				return RepairMapCall<M1DonorCtx>(rawCtx, 1, [](M1DonorCtx* c)
 				{
-					ArticleInfo* article = (*c->DonorFile->GetArticles())[partIndices[i]].get();
-					requests.push_back({article->GetMessageId(), c->DonorGroups});
-				}
-				c->Controller->m_batchFetcher.Begin(std::move(requests));
-			});
-		},
-		[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
-			const uint8_t** outData, size_t* outDataLen) -> int
-		{
-			return RepairMapCall<SizeProbeCtx>(rawCtx, 0, [=](SizeProbeCtx* c)
+					return c->Controller->IsStopped() ? 1 : 0;
+				});
+			},
+			[](void* rawCtx, size_t targetIdx) -> const char*
 			{
-				c->CurrentFetched = ArticleFetcher::FetchedArticle();
-				if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
+				return RepairMapCall<M1DonorCtx>(rawCtx, static_cast<const char*>(nullptr), [=](M1DonorCtx* c) -> const char*
 				{
-					return 0;
-				}
-				*outSuccess = c->CurrentFetched.Success ? 1 : 0;
-				*outOffset = c->CurrentFetched.Offset;
-				*outFileSize = c->CurrentFetched.FileSize;
-				*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
-				*outDataLen = c->CurrentFetched.Data.size();
-				return 1;
-			});
-		},
-		[](void* rawCtx)
-		{
-			RepairMapCallVoid<SizeProbeCtx>(rawCtx, [](SizeProbeCtx* c)
+					if (targetIdx >= c->Targets->size())
+					{
+						return nullptr;
+					}
+					c->Controller->RefreshLiveTargetName((*c->Targets)[targetIdx]);
+					return *(*c->Targets)[targetIdx].Filename;
+				});
+			},
+			[](void* rawCtx, int32_t memberIndex, const int32_t* partIndices, size_t count)
 			{
-				c->Controller->m_batchFetcher.CancelRemaining();
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
+				{
+					if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
+					{
+						return;
+					}
+					FileInfo* df = (*c->DonorFiles)[memberIndex];
+					const auto& grp = (*c->DonorGroupsCache)[memberIndex];
+					std::vector<ArticleBatchFetcher::Request> requests;
+					requests.reserve(count);
+					for (size_t i = 0; i < count; i++)
+					{
+						int32_t pi = partIndices[i];
+						if (pi >= 0 && (size_t)pi < df->GetArticles()->size())
+						{
+							ArticleInfo* article = (*df->GetArticles())[pi].get();
+							requests.push_back({article->GetMessageId(), grp});
+						}
+					}
+					c->Controller->m_batchFetcher.Begin(std::move(requests));
+				});
+			},
+			[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
+				const uint8_t** outData, size_t* outDataLen) -> int
+			{
+				return RepairMapCall<M1DonorCtx>(rawCtx, 0, [=](M1DonorCtx* c)
+				{
+					c->CurrentFetched = ArticleFetcher::FetchedArticle();
+					if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
+					{
+						return 0;
+					}
+					*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+					*outOffset = c->CurrentFetched.Offset;
+					*outFileSize = c->CurrentFetched.FileSize;
+					*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+					*outDataLen = c->CurrentFetched.Data.size();
+					return 1;
+				});
+			},
+			[](void* rawCtx)
+			{
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [](M1DonorCtx* c)
+				{
+					c->Controller->m_batchFetcher.CancelRemaining();
+				});
+			},
+			[](void* rawCtx, int64_t bytes)
+			{
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [bytes](M1DonorCtx* c)
+				{
+					c->Controller->m_progressBytes += bytes;
+				});
+			},
+			[](void* rawCtx, int64_t bytes)
+			{
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [bytes](M1DonorCtx* c)
+				{
+					c->Controller->m_recoveredBytes += bytes;
+				});
+			},
+			[](void* rawCtx, size_t targetIdx, const char* filename, int64_t decodedFileSize,
+				int recreated, const NzbgetRsByteRange* holes, size_t holeCount)
+			{
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
+				{
+					if (targetIdx >= c->Targets->size())
+					{
+						return;
+					}
+					RepairTarget& target = (*c->Targets)[targetIdx];
+					if (filename && *filename)
+					{
+						target.Filename = filename;
+					}
+					target.DecodedFileSize = decodedFileSize;
+					if (recreated != 0)
+					{
+						target.Recreated = true;
+					}
+					target.Holes.assign(
+						reinterpret_cast<const StreamRange*>(holes),
+						reinterpret_cast<const StreamRange*>(holes) + holeCount);
+				});
+			},
+			[](void* rawCtx, int32_t kind, const char* text)
+			{
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
+				{
+					Message::EKind msgKind = kind == 3 ? Message::mkDetail :
+						kind == 2 ? Message::mkError :
+						kind == 1 ? Message::mkWarning : Message::mkInfo;
+					c->Controller->PrintMessage(msgKind, "%s", text);
+				});
 			});
-		},
-		&decodedFileSize) != 0;
-	if (probeCtx.Error)
-	{
-		std::rethrow_exception(probeCtx.Error);
-	}
-	if (IsStopped())
-	{
-		return roNoCost;
-	}
-	if (!sized)
-	{
-		PrintMessage(Message::mkDetail,
-			"Skipping file %s of duplicate %s for %s: could not learn the file size from it",
-			donorFile->GetFilename(), donorName, *target.Filename);
-		return roUnproductive;
-	}
-
-	NzbgetRsBuf filePathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		destDir, PATH_SEPARATOR, *target.Filename);
-	BString<1024> filePath;
-	filePath.Set(filePathBuf.data ? filePathBuf.data : "", (int)filePathBuf.len);
-	nzbget_rs_free(filePathBuf);
-	if (FileSystem::FileExists(filePath))
-	{
-		// None of the file's own articles arrived, so a file of its name and of the
-		// recreated size is an earlier recreation a shutdown cut short (its job state
-		// not written back): it is started over. Refused, it stayed a sparse, partly
-		// zero file that every later pass reported as "no duplicate could supply"
-		int64 existing = FileSystem::FileSize(filePath);
-		if (existing != decodedFileSize && existing != 0)
+		if (donorCtx.Error)
 		{
-			PrintMessage(Message::mkWarning, "Could not recreate %s: file already exists", *filePath);
-			return roNoCost;
+			std::rethrow_exception(donorCtx.Error);
 		}
-		PrintMessage(Message::mkInfo, "Recreating %s again: an earlier recreation was cut short", *filePath);
-		FileSystem::DeleteFile(filePath);
 	}
-	CString errmsg;
-	if (!FileSystem::AllocateFile(filePath, decodedFileSize, true, errmsg))
-	{
-		PrintMessage(Message::mkWarning, "Could not recreate %s: %s", *filePath, *errmsg);
-		return roNoCost;
-	}
-	DiskFile file;
-	if (!file.Open(filePath, DiskFile::omReadWrite))
-	{
-		PrintMessage(Message::mkWarning, "Could not open %s for stream repair: %s",
-			*filePath, *FileSystem::GetLastErrorMessage());
-		FileSystem::DeleteFile(filePath);
-		return roNoCost;
-	}
-
-	PrintMessage(Message::mkInfo,
-		"Recreating %s (no article of the file was available) from file %s of duplicate %s",
-		*target.Filename, donorFile->GetFilename(), donorName);
-
-	target.DecodedFileSize = decodedFileSize;
-	target.Holes = { {0, decodedFileSize} };
-	claimed.insert(donorFile);
-
-	StreamRangeList donorRanges = DupeStreamRepair::EstimateDonorRanges(donorFile, decodedFileSize);
-	int recoveredParts = PatchFromDonor(file, target, donorFile, donorRanges, donorName);
-	file.Close();
-
-	if (recoveredParts == 0)
-	{
-		// nothing arrived: leave no empty file behind, another duplicate may
-		// still carry the file
-		FileSystem::DeleteFile(filePath);
-		target.DecodedFileSize = 0;
-		target.Holes.clear();
-		return roUnproductive;
-	}
-
-	target.Recreated = true;
-	return roProductive;
 }
 
 inline void StreamRepairController::MarkRepaired(NzbInfo* nzbInfo, const RepairTarget& target)
@@ -1549,241 +1238,6 @@ inline void StreamRepairController::MarkRecreated(NzbInfo* nzbInfo, const Repair
 			break;
 		}
 	}
-}
-
-inline std::vector<FileInfo*> StreamRepairController::FindDonorFiles(const RepairTarget& target,
-	NzbInfo* donorNzb, const std::set<FileInfo*>& claimed)
-{
-	// donor NZBs list flat names, while a par-renamed target may carry a path
-	// relative to the destination directory (e.g. "BDMV/STREAM/00000.m2ts")
-	return DupeStreamRepair::SelectDonorCandidates(FileSystem::BaseFileName(target.Filename),
-		target.DecodedFileSize,
-		target.PositionalRank, target.PositionalWindow, donorNzb,
-		DupeStreamRepair::MaxSiblingCandidates, target.StepsHash, &claimed);
-}
-
-inline bool StreamRepairController::VerifyDonor(DiskFile& file, const RepairTarget& target,
-	FileInfo* donorFile, const StreamRangeList& donorRanges)
-{
-	auto donorGroups = std::make_shared<std::vector<CString>>();
-	for (const CString& group : *donorFile->GetGroups())
-	{
-		donorGroups->emplace_back(*group);
-	}
-
-	struct VerifyFileCtx
-	{
-		StreamRepairController* Controller;
-		DiskFile* File;
-		FileInfo* DonorFile;
-		std::shared_ptr<std::vector<CString>> DonorGroups;
-		ArticleFetcher::FetchedArticle CurrentFetched;
-		std::exception_ptr Error;
-	} ctx{this, &file, donorFile, std::move(donorGroups), {}, nullptr};
-
-	bool ok = nzbget_rs_stream_verify_donor_file(
-		target.DecodedFileSize,
-		reinterpret_cast<const NzbgetRsByteRange*>(target.Holes.data()),
-		target.Holes.size(),
-		reinterpret_cast<const NzbgetRsByteRange*>(donorRanges.data()),
-		donorRanges.size(),
-		&ctx,
-		[](void* rawCtx) -> int
-		{
-			return RepairMapCall<VerifyFileCtx>(rawCtx, 1, [](VerifyFileCtx* c)
-			{
-				return c->Controller->IsStopped() ? 1 : 0;
-			});
-		},
-		[](void* rawCtx, const int32_t* partIndices, size_t count)
-		{
-			RepairMapCallVoid<VerifyFileCtx>(rawCtx, [=](VerifyFileCtx* c)
-			{
-				std::vector<ArticleBatchFetcher::Request> requests;
-				requests.reserve(count);
-				for (size_t i = 0; i < count; i++)
-				{
-					ArticleInfo* article = (*c->DonorFile->GetArticles())[partIndices[i]].get();
-					requests.push_back({article->GetMessageId(), c->DonorGroups});
-				}
-				c->Controller->m_batchFetcher.Begin(std::move(requests));
-			});
-		},
-		[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
-			const uint8_t** outData, size_t* outDataLen) -> int
-		{
-			return RepairMapCall<VerifyFileCtx>(rawCtx, 0, [=](VerifyFileCtx* c)
-			{
-				c->CurrentFetched = ArticleFetcher::FetchedArticle();
-				if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
-				{
-					return 0;
-				}
-				*outSuccess = c->CurrentFetched.Success ? 1 : 0;
-				*outOffset = c->CurrentFetched.Offset;
-				*outFileSize = c->CurrentFetched.FileSize;
-				*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
-				*outDataLen = c->CurrentFetched.Data.size();
-				return 1;
-			});
-		},
-		[](void* rawCtx)
-		{
-			RepairMapCallVoid<VerifyFileCtx>(rawCtx, [](VerifyFileCtx* c)
-			{
-				c->Controller->m_batchFetcher.CancelRemaining();
-			});
-		},
-		[](void* rawCtx, int64_t offset, uint8_t* buf, int64_t size) -> int
-		{
-			return RepairMapCall<VerifyFileCtx>(rawCtx, 0, [=](VerifyFileCtx* c)
-			{
-				c->File->Seek(offset);
-				if (c->File->Position() != offset ||
-					(size > 0 && c->File->Read(buf, size) != size))
-				{
-					return 0;
-				}
-				return 1;
-			});
-		}) != 0;
-	if (ctx.Error)
-	{
-		std::rethrow_exception(ctx.Error);
-	}
-	return ok;
-}
-
-inline int StreamRepairController::PatchFromDonor(DiskFile& file, RepairTarget& target,
-	FileInfo* donorFile, const StreamRangeList& donorRanges, const char* donorName)
-{
-	auto donorGroups = std::make_shared<std::vector<CString>>();
-	for (const CString& group : *donorFile->GetGroups())
-	{
-		donorGroups->emplace_back(*group);
-	}
-
-	struct PatchFileCtx
-	{
-		StreamRepairController* Controller;
-		DiskFile* File;
-		RepairTarget* Target;
-		FileInfo* DonorFile;
-		std::shared_ptr<std::vector<CString>> DonorGroups;
-		ArticleFetcher::FetchedArticle CurrentFetched;
-		std::exception_ptr Error;
-	} ctx{this, &file, &target, donorFile, std::move(donorGroups), {}, nullptr};
-
-	int64 recoveredBytes = 0;
-	int creditRecovery = 0;
-	int recoveredParts = nzbget_rs_stream_patch_from_donor_file(
-		target.Filename,
-		target.DecodedFileSize,
-		reinterpret_cast<const NzbgetRsByteRange*>(target.Holes.data()),
-		target.Holes.size(),
-		reinterpret_cast<const NzbgetRsByteRange*>(donorRanges.data()),
-		donorRanges.size(),
-		donorName,
-		&ctx,
-		[](void* rawCtx) -> int
-		{
-			return RepairMapCall<PatchFileCtx>(rawCtx, 1, [](PatchFileCtx* c)
-			{
-				return c->Controller->IsStopped() ? 1 : 0;
-			});
-		},
-		[](void* rawCtx, const int32_t* partIndices, size_t count)
-		{
-			RepairMapCallVoid<PatchFileCtx>(rawCtx, [=](PatchFileCtx* c)
-			{
-				std::vector<ArticleBatchFetcher::Request> requests;
-				requests.reserve(count);
-				for (size_t i = 0; i < count; i++)
-				{
-					ArticleInfo* article = (*c->DonorFile->GetArticles())[partIndices[i]].get();
-					requests.push_back({article->GetMessageId(), c->DonorGroups});
-				}
-				c->Controller->m_batchFetcher.Begin(std::move(requests));
-			});
-		},
-		[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
-			const uint8_t** outData, size_t* outDataLen) -> int
-		{
-			return RepairMapCall<PatchFileCtx>(rawCtx, 0, [=](PatchFileCtx* c)
-			{
-				c->CurrentFetched = ArticleFetcher::FetchedArticle();
-				if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
-				{
-					return 0;
-				}
-				*outSuccess = c->CurrentFetched.Success ? 1 : 0;
-				*outOffset = c->CurrentFetched.Offset;
-				*outFileSize = c->CurrentFetched.FileSize;
-				*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
-				*outDataLen = c->CurrentFetched.Data.size();
-				return 1;
-			});
-		},
-		[](void* rawCtx)
-		{
-			RepairMapCallVoid<PatchFileCtx>(rawCtx, [](PatchFileCtx* c)
-			{
-				c->Controller->m_batchFetcher.CancelRemaining();
-			});
-		},
-		[](void* rawCtx, int64_t offset, const uint8_t* data, int64_t size) -> int
-		{
-			return RepairMapCall<PatchFileCtx>(rawCtx, 0, [=](PatchFileCtx* c)
-			{
-				c->File->Seek(offset);
-				if (c->File->Position() != offset ||
-					c->File->Write(data, size) != size ||
-					!c->File->Flush())
-				{
-					c->Controller->PrintMessage(Message::mkError,
-						"Could not write to %s during stream repair: %s",
-						*c->Target->Filename, *WriteErrorMessage());
-					return 0;
-				}
-				return 1;
-			});
-		},
-		[](void* rawCtx, int64_t bytes)
-		{
-			RepairMapCallVoid<PatchFileCtx>(rawCtx, [bytes](PatchFileCtx* c)
-			{
-				c->Controller->m_progressBytes += bytes;
-			});
-		},
-		[](void* rawCtx, int32_t kind, const char* text)
-		{
-			RepairMapCallVoid<PatchFileCtx>(rawCtx, [=](PatchFileCtx* c)
-			{
-				Message::EKind msgKind = kind == 2 ? Message::mkError :
-					kind == 1 ? Message::mkWarning : Message::mkInfo;
-				c->Controller->PrintMessage(msgKind, "%s", text);
-			});
-		},
-		[](void* rawCtx, const NzbgetRsByteRange* holes, size_t holeCount)
-		{
-			RepairMapCallVoid<PatchFileCtx>(rawCtx, [=](PatchFileCtx* c)
-			{
-				c->Target->Holes.assign(
-					reinterpret_cast<const StreamRange*>(holes),
-					reinterpret_cast<const StreamRange*>(holes) + holeCount);
-			});
-		},
-		&recoveredBytes,
-		&creditRecovery);
-	if (ctx.Error)
-	{
-		std::rethrow_exception(ctx.Error);
-	}
-	if (creditRecovery && recoveredParts > 0)
-	{
-		m_recoveredBytes += recoveredBytes;
-	}
-	return recoveredParts;
 }
 
 inline void StreamRepairController::ReportRemainingHoles(std::vector<RepairTarget>& targets)

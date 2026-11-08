@@ -90,7 +90,6 @@ private:
 };
 
 #include <algorithm>
-#include "Unpack.h"
 #include "Options.h"
 #include "WorkState.h"
 #include "Util.h"
@@ -416,7 +415,7 @@ inline void UrlCoordinator::UrlCompleted(UrlDownloader* urlDownloader)
 			? nzbInfo->GetCategory() : urlDownloader->GetCategory();
 
 		Scanner::EAddStatus addStatus;
-		if (Unpack::IsArchive(name))
+		if (nzbget_rs_unpack_can_extract_with_zipfast(name) != 0)
 		{
 			addStatus = g_Scanner->AddArchive(
 				name,

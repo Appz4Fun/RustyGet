@@ -31,7 +31,6 @@
 #include "WebDownloader.h"
 #include "Extension.h"
 #include "Util.h"
-#include "Unpack.h"
 #include "ExtensionLoader.h"
 #include "Options.h"
 #include "nzbget_rs.h"
@@ -56,37 +55,38 @@ namespace ExtensionManager
 		std::optional<std::string> 
 		InstallExtension(const fs::path& file, const fs::path& dest)
 		{
-			const auto extractor =
-				Unpack::MakeExtractor(file, dest, "", Unpack::OverwriteMode::Overwrite);
 			std::string fileStr = fs::u8string(file);
-
-			if (!extractor)
+			std::string destStr = fs::u8string(dest);
+			NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_install_extension(
+				fileStr.c_str(),
+				destStr.c_str(),
+				[](void*, int kind, const char* msg) {
+					const char* text = msg ? msg : "";
+					if (kind == 1)
+					{
+						error("%s", text);
+					}
+					else if (kind == 2)
+					{
+						warn("%s", text);
+					}
+					else if (kind == 0)
+					{
+						info("%s", text);
+					}
+					else
+					{
+						detail("%s", text);
+					}
+				},
+				nullptr);
+			if (errBuf.data)
 			{
-				NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_install_error(fileStr.c_str(), nullptr, 0);
-				std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
+				std::string err(errBuf.data, errBuf.len);
 				nzbget_rs_free(errBuf);
 				return err;
 			}
-
-			if (!extractor->Extract())
-			{
-				NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_install_error(fileStr.c_str(), nullptr, 1);
-				std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
-				nzbget_rs_free(errBuf);
-				return err;
-			}
-
-			fs::error_code ec;
-			fs::remove(file, ec);
-			if (ec)
-			{
-				std::string ecMsg = ec.message();
-				NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_install_error(fileStr.c_str(), ecMsg.c_str(), 2);
-				std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
-				nzbget_rs_free(errBuf);
-				return err;
-			}
-
+			nzbget_rs_free(errBuf);
 			return std::nullopt;
 		}
 

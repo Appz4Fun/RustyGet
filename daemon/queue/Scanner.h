@@ -27,7 +27,6 @@
 #include <string>
 #include "FileSystem.h"
 #include "DownloadInfo.h"
-#include "ArchiveProcessor.h"
 #include "Options.h"
 #include "Service.h"
 #include "NzbFile.h"
@@ -194,6 +193,7 @@ private:
 	void CheckIncomingArchives(const fs::path& dir, bool checkStat);
 	std::vector<fs::path> FindArchives(const fs::path& dir, bool checkStat);
 	void UnpackArchives(const std::vector<fs::path>& archives);
+	std::optional<std::vector<fs::path>> ProcessArchive(const fs::path& archiveFile, const fs::path& destDir);
 	void CleanupStaleUnpackDir();
 	void CheckIncomingNzbs(const char* directory, const char* category, bool checkStat);
 	bool ShouldSkipItem(std::string_view filename);
@@ -242,6 +242,7 @@ extern Scanner* g_Scanner;
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 
 #include "Options.h"
 #include "WorkState.h"
@@ -250,7 +251,6 @@ extern Scanner* g_Scanner;
 #include "ScanScript.h"
 #include "Util.h"
 #include "FileSystem.h"
-#include "Unpack.h"
 #include "nzbget_rs.h"
 
 
@@ -412,7 +412,9 @@ inline std::vector<fs::path> Scanner::FindArchives(const fs::path& dir, bool che
 
 		// like an nzb, an archive is taken once it stopped changing: one
 		// still being copied in failed to extract and was moved aside for good
-		if (Unpack::IsArchive(path) && CanProcessFile(fs::u8string(path).c_str(), checkStat))
+		const std::string pathStr = fs::u8string(path);
+		if (nzbget_rs_unpack_can_extract_with_zipfast(pathStr.c_str()) != 0 &&
+			CanProcessFile(pathStr.c_str(), checkStat))
 		{
 			archives.push_back(path);
 		}
@@ -426,20 +428,64 @@ inline std::vector<fs::path> Scanner::FindArchives(const fs::path& dir, bool che
 	return archives;
 }
 
+inline std::optional<std::vector<fs::path>> Scanner::ProcessArchive(const fs::path& archiveFile, const fs::path& destDir)
+{
+	const auto unpackDir = (g_Options->GetTempDirPath() / UNPACK_DIR) / fs::make_unique_filename();
+	std::vector<fs::path> to;
+	const std::string archiveStr = fs::u8string(archiveFile);
+	const std::string unpackStr = fs::u8string(unpackDir);
+	const std::string destStr = fs::u8string(destDir);
+	const std::string processedStr = fs::u8string(g_Options->GetNzbDirPath() / PROCESSED_DIR);
+	const std::string brokenStr = fs::u8string(g_Options->GetNzbDirPath() / BROKEN_DIR);
+
+	if (!nzbget_rs_archive_processor_process(
+		archiveStr.c_str(),
+		unpackStr.c_str(),
+		destStr.c_str(),
+		processedStr.c_str(),
+		brokenStr.c_str(),
+		(int)g_Options->GetNzbDirArchiveAction(),
+		&to,
+		[](void* /*ctx*/, int kind, const char* msg) {
+			const char* text = msg ? msg : "";
+			if (kind == 1)
+			{
+				warn("%s", text);
+			}
+			else if (kind == 2)
+			{
+				error("%s", text);
+			}
+			else if (kind == 3)
+			{
+				detail("%s", text);
+			}
+			else
+			{
+				info("%s", text);
+			}
+		},
+		[](void* rawCtx, const char* movedPath) {
+			auto* out = static_cast<std::vector<fs::path>*>(rawCtx);
+			if (movedPath)
+			{
+				out->push_back(fs::u8path(movedPath));
+			}
+		}))
+	{
+		return std::nullopt;
+	}
+
+	return to;
+}
+
 inline void Scanner::UnpackArchives(const std::vector<fs::path>& archives)
 {
 	if (archives.empty()) return;
 
-	const auto processor = Incoming::ArchiveProcessor({
-		g_Options->GetTempDirPath() / UNPACK_DIR,
-		g_Options->GetNzbDirPath() / PROCESSED_DIR,
-		g_Options->GetNzbDirPath() / BROKEN_DIR,
-		g_Options->GetNzbDirArchiveAction()
-	});
-
 	for (const auto& archive : archives)
 	{
-		processor.Process(archive, archive.parent_path());
+		ProcessArchive(archive, archive.parent_path());
 	}
 }
 
@@ -1026,14 +1072,7 @@ inline Scanner::EAddStatus Scanner::AddArchive(const char* filename, const char*
 	{
 		std::lock_guard<std::mutex> guard{m_scanMutex};
 
-		const auto processor = Incoming::ArchiveProcessor({
-			g_Options->GetTempDirPath() / UNPACK_DIR,
-			g_Options->GetNzbDirPath() / PROCESSED_DIR,
-			g_Options->GetNzbDirPath() / BROKEN_DIR,
-			g_Options->GetNzbDirArchiveAction()
-		});
-
-		auto nzbFiles = processor.Process(archiveFilePath, g_Options->GetNzbDirPath());
+		auto nzbFiles = ProcessArchive(archiveFilePath, g_Options->GetNzbDirPath());
 		if (!nzbFiles)
 		{
 			return EAddStatus::asFailed;

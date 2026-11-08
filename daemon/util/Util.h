@@ -22124,8 +22124,6 @@ extern ExtensionManager::Manager* g_ExtensionManager;
 #ifndef SCRIPTCONTROLLER_H
 #define SCRIPTCONTROLLER_H
 
-#include <atomic>
-
 class EnvironmentStrings
 {
 public:
@@ -22210,8 +22208,6 @@ private:
 	inline static RunningScripts m_runningScripts{};
 	inline static Mutex m_runningMutex{};
 };
-
-#include "nzbget_rs.h"
 
 // System global variable holding environments variables
 extern char** environ;
@@ -23186,9 +23182,6 @@ private:
 
 extern QueueScriptCoordinator* g_QueueScriptCoordinator;
 
-#include <algorithm>
-#include "nzbget_rs.h"
-
 class QueueScriptController : public Thread, public NzbScriptController
 {
 public:
@@ -23654,13 +23647,6 @@ inline int QueueScriptCoordinator::GetQueueSize()
 
 #ifndef DISABLE_PARCHECK
 
-#include <atomic>
-#include <deque>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <vector>
-
 
 class Repairer;
 
@@ -23857,11 +23843,6 @@ private:
 #endif
 
 #ifndef DISABLE_PARCHECK
-
-#include <vector>
-#include <string>
-#include <algorithm>
-#include "nzbget_rs.h"
 
 class Repairer final
 {
@@ -25130,11 +25111,7 @@ private:
 	void RepairCompleted();
 };
 
-#include <algorithm>
-#include <chrono>
-#include <exception>
 #include <new>
-#include <mutex>
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
  *
@@ -25230,8 +25207,6 @@ private:
 #endif
 	bool WillRetryWithPass();
 };
-
-#include "nzbget_rs.h"
 
 inline UnpackController::~UnpackController()
 {
@@ -25965,8 +25940,6 @@ inline bool UnpackController::HasCompletedArchiveFiles(NzbInfo* nzbInfo)
 #ifndef DIRECTUNPACK_H
 #define DIRECTUNPACK_H
 
-#include <atomic>
-
 class DirectUnpack final : public Thread, public ScriptController
 {
 public:
@@ -26027,9 +26000,6 @@ private:
 	void SetProgressLabel(NzbInfo* nzbInfo, const char* progressLabel);
 	void AddExtraTime(NzbInfo* nzbInfo);
 };
-
-#include <iterator>
-#include "nzbget_rs.h"
 
 inline void DirectUnpack::StartJob(NzbInfo* nzbInfo)
 {
@@ -26532,8 +26502,6 @@ inline bool DirectUnpack::IsArchiveFilename(const char* filename)
 #endif
 
 #endif
-
-#include "nzbget_rs.h"
 
 #ifndef DISABLE_PARCHECK
 inline bool RepairController::PostParChecker::RequestMorePars(int blockNeeded, int* blockFound)

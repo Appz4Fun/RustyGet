@@ -5998,6 +5998,7 @@ int nzbget_rs_feed_is_url_and_filter_updated(
     const char* existing_filter, const char* preview_filter, int64_t existing_last_update);
 
 NzbgetRsBuf nzbget_rs_xmlrpc_encode_str(int is_json, const char* str_ptr);
+void nzbget_rs_xmlrpc_decode_str(int is_json, char* str_ptr);
 
 #include "nzbget_tls_cipher.h"
 

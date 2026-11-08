@@ -2610,6 +2610,34 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_encode_str(
     into_buf(xmlrpc_encode_str(is_json != 0, unsafe { input(str_ptr) }))
 }
 
+/// Decodes `buf` in place using JSON unescaping when `is_json` is true or XML entity
+/// decoding otherwise (`XmlCommand::DecodeStr`), returning the decoded byte length.
+pub fn xmlrpc_decode_str(is_json: bool, buf: &mut [u8]) -> usize {
+    if is_json {
+        crate::decode::json_decode(buf)
+    } else {
+        crate::text::xml_decode(buf, &|c| c.to_ascii_lowercase() as c_int)
+    }
+}
+
+/// # Safety
+/// `str_ptr` must be null or point to a writable NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_xmlrpc_decode_str(
+    is_json: c_int,
+    str_ptr: *mut c_char,
+) {
+    if str_ptr.is_null() {
+        return;
+    }
+    let len = unsafe { CStr::from_ptr(str_ptr).to_bytes().len() };
+    let buf = unsafe { std::slice::from_raw_parts_mut(str_ptr.cast::<u8>(), len) };
+    let n = xmlrpc_decode_str(is_json != 0, buf);
+    unsafe {
+        *str_ptr.add(n) = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2654,6 +2682,15 @@ mod tests {
             assert_eq!(buf_to_string(nzbget_rs_xmlrpc_encode_str(1, std::ptr::null())), "");
             assert_eq!(buf_to_string(nzbget_rs_xmlrpc_encode_str(1, msg.as_ptr())), "Bad <param> \\\"x\\\"");
             assert_eq!(buf_to_string(nzbget_rs_xmlrpc_encode_str(0, msg.as_ptr())), "Bad &lt;param&gt; &quot;x&quot;");
+
+            nzbget_rs_xmlrpc_decode_str(1, std::ptr::null_mut());
+            let mut json_buf = b"Bad <param> \\\"x\\\"\0".to_vec();
+            nzbget_rs_xmlrpc_decode_str(1, json_buf.as_mut_ptr().cast());
+            assert_eq!(CStr::from_ptr(json_buf.as_ptr().cast()).to_bytes(), b"Bad <param> \"x\"");
+
+            let mut xml_buf = b"Bad &lt;param&gt; &quot;x&quot;\0".to_vec();
+            nzbget_rs_xmlrpc_decode_str(0, xml_buf.as_mut_ptr().cast());
+            assert_eq!(CStr::from_ptr(xml_buf.as_ptr().cast()).to_bytes(), b"Bad <param> \"x\"");
         }
     }
 

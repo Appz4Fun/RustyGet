@@ -914,56 +914,19 @@ public:
 	static int64 JoinInt64(uint32 Hi, uint32 Lo);
 	static void SplitInt64(int64 Int64, uint32* Hi, uint32* Lo);
 
-	static std::optional<double> StrToFloatChecked(std::string_view str, double minVal, double maxVal);
-	static std::optional<int64_t> StrToSignedChecked(std::string_view str, int64_t minVal, int64_t maxVal);
-	static std::optional<uint64_t> StrToUnsignedChecked(std::string_view str, uint64_t maxVal);
 	static int64_t SafeCastSignedToSigned(int64_t num, int64_t minTo, int64_t maxTo) noexcept;
 	static int64_t SafeCastUnsignedToSigned(uint64_t num, uint64_t maxTo) noexcept;
 	static uint64_t SafeCastSignedToUnsigned(int64_t num, uint64_t maxTo) noexcept;
 	static uint64_t SafeCastUnsignedToUnsigned(uint64_t num, uint64_t maxTo) noexcept;
-
-	template <typename T>
-	static std::optional<T> StrToNum(std::string_view str)
-	{
-		static_assert(std::is_arithmetic_v<T>, "T must be an arithmetic type");
-
-		if constexpr (std::is_floating_point_v<T>)
-		{
-			auto v = StrToFloatChecked(
-				str,
-				static_cast<double>(std::numeric_limits<T>::lowest()),
-				static_cast<double>(std::numeric_limits<T>::max()));
-			return v ? std::optional<T>(static_cast<T>(*v)) : std::nullopt;
-		}
-		else if constexpr (std::is_signed_v<T>)
-		{
-			auto v = StrToSignedChecked(
-				str,
-				static_cast<int64_t>(std::numeric_limits<T>::min()),
-				static_cast<int64_t>(std::numeric_limits<T>::max()));
-			return v ? std::optional<T>(static_cast<T>(*v)) : std::nullopt;
-		}
-		else
-		{
-			auto v = StrToUnsignedChecked(
-				str,
-				static_cast<uint64_t>(std::numeric_limits<T>::max()));
-			return v ? std::optional<T>(static_cast<T>(*v)) : std::nullopt;
-		}
-	}
 
 	static void TrimRight(char* str);
 	static void TrimRight(std::string& str);
 	static void TrimLeft(std::string& str);
 	static char* Trim(char* str);
 	static void Trim(std::string& str);
-	static bool IsControlChar(char c) noexcept;
-	static void SanitizeLine(std::string& str);
 	static bool EmptyStr(const char* str) { return !str || !*str; }
-	static std::vector<CString> SplitStr(const char* str, const char* separators);
 	static bool EndsWith(std::string_view str, std::string_view suffix, bool caseSensitive);
 	static bool EndsWith(const char* str, const char* suffix, bool caseSensitive);
-	static bool AlphaNum(const char* str);
 
 	template<typename T, typename U>
 	static constexpr bool CmpEqual(T t, U u) noexcept
@@ -1058,26 +1021,16 @@ public:
 	/* replace all occurences of szFrom to szTo in string szStr with a limitation that szTo must be shorter than szFrom */
 	static char* ReduceStr(char* str, const char* from, const char* to);
 
-	/* Calculate Hash using Bob Jenkins (1996) algorithm */
-	static uint32 HashBJ96(const char* buffer, int bufSize, uint32 initValue);
-
 	static void SetStandByMode(bool standBy);
 
 	static time_t CurrentTime();
 	static int64 CurrentTicks();
 	static void Sleep(int milliseconds);
 
-	/* cross platform version of GNU timegm, which is similar to mktime but takes an UTC time as parameter */
-	static time_t Timegm(tm const *t);
-
-	static bool StrCaseCmp(std::string_view a, std::string_view b);
-
 	static void FormatTime(time_t timeSec, char* buffer, int bufsize);
 	static CString FormatTime(time_t timeSec);
 
-	static CString FormatSpeed(int64 bytesPerSecond);
 	static CString FormatSize(int64 fileSize);
-	static CString FormatBuffer(const char* buf, int len);
 
 	/*
 	* Returns program version and revision number as string formatted like "0.7.0-r295".
@@ -1123,18 +1076,6 @@ public:
 	static bool XmlParseTagValue(const char* xml, const char* tag, char* valueBuf, int valueBufSize, const char** tagEnd);
 
 	/*
-	* Replaces all tags with spaces effectively providing the text content only.
-	* The string is transformed in-place overwriting the previous content.
-	*/
-	static void XmlStripTags(char* xml);
-
-	/*
-	* Replaces all entities with spaces.
-	* The string is transformed in-place overwriting the previous content.
-	*/
-	static void XmlRemoveEntities(char* raw);
-
-	/*
 	* Creates JSON-string by replace the certain characters with escape-sequences.
 	*/
 	static CString JsonEncode(const char* raw);
@@ -1146,24 +1087,6 @@ public:
 	static void JsonDecode(char* raw);
 
 	/*
-	* Returns pointer to field-content and length of content in iValueLength
-	* The returned pointer points to the part of source-string, no additional strings are allocated.
-	*/
-	static const char* JsonFindField(const char* jsonText, const char* fieldName, int* valueLength);
-
-	/*
-	* Returns pointer to field-content and length of content in iValueLength
-	* The returned pointer points to the part of source-string, no additional strings are allocated.
-	*/
-	static const char* JsonNextValue(const char* jsonText, int* valueLength);
-
-	/*
-	* Unquote http quoted string.
-	* The string is decoded on the place overwriting the content of raw-data.
-	*/
-	static void HttpUnquote(char* raw);
-
-	/*
 	* Extracts file name from the value of "Content-Disposition" HTTP header (RFC 6266).
 	* The extended parameter "filename*" (RFC 5987) takes precedence over "filename".
 	* Returns an empty string if the header doesn't contain a file name.
@@ -1171,22 +1094,9 @@ public:
 	static CString ParseContentDispositionFilename(const char* contentDisposition);
 
 	/*
-	* Decodes URL-string.
-	* The string is decoded on the place overwriting the content of raw-data.
-	*/
-	static void UrlDecode(char* raw);
-
-	/*
 	* Makes valid URL by replacing of spaces with "%20".
 	*/
 	static CString UrlEncode(const char* raw);
-
-	/*
-	* Converts ISO-8859-1 (aka Latin-1) into UTF-8.
-	*/
-	static CString Latin1ToUtf8(const char* str);
-
-	static time_t ParseRfc822DateTime(const char* dateTimeStr);
 };
 
 class URL
@@ -1325,7 +1235,6 @@ public:
 	void Reset();
 	void Append(uchar* block, uint32 length);
 	uint32 Finish();
-	static uint32 Combine(uint32 crc1, uint32 crc2, uint32 len2);
 
 private:
 	alignas(16) uint32_t m_state[4 * 5]; // = YEncode::crc_state
@@ -1382,36 +1291,6 @@ inline void Util::SplitInt64(int64 Int64, uint32* Hi, uint32* Lo)
 	nzbget_rs_ufs_util_split_int64(Int64, Hi, Lo);
 }
 
-inline std::optional<double> Util::StrToFloatChecked(std::string_view str, double minVal, double maxVal)
-{
-	double out = 0.0;
-	if (nzbget_rs_util_str_to_f64_checked(str.data(), str.size(), minVal, maxVal, &out) != 0)
-	{
-		return out;
-	}
-	return std::nullopt;
-}
-
-inline std::optional<int64_t> Util::StrToSignedChecked(std::string_view str, int64_t minVal, int64_t maxVal)
-{
-	int64_t out = 0;
-	if (nzbget_rs_util_str_to_i64_checked(str.data(), str.size(), minVal, maxVal, &out) != 0)
-	{
-		return out;
-	}
-	return std::nullopt;
-}
-
-inline std::optional<uint64_t> Util::StrToUnsignedChecked(std::string_view str, uint64_t maxVal)
-{
-	uint64_t out = 0;
-	if (nzbget_rs_util_str_to_u64_checked(str.data(), str.size(), maxVal, &out) != 0)
-	{
-		return out;
-	}
-	return std::nullopt;
-}
-
 inline int64_t Util::SafeCastSignedToSigned(int64_t num, int64_t minTo, int64_t maxTo) noexcept
 {
 	return nzbget_rs_util_safe_int_cast_i64_to_i64(num, minTo, maxTo);
@@ -1432,24 +1311,10 @@ inline uint64_t Util::SafeCastUnsignedToUnsigned(uint64_t num, uint64_t maxTo) n
 	return nzbget_rs_util_safe_int_cast_u64_to_u64(num, maxTo);
 }
 
-inline bool Util::IsControlChar(char c) noexcept
-{
-	return nzbget_rs_util_is_control_char(static_cast<uint8_t>(c)) != 0;
-}
-
 inline CString Util::FormatSize(int64 fileSize)
 {
 	// rust/src/util.rs
 	NzbgetRsBuf buf = nzbget_rs_format_size(fileSize);
-	CString result(buf.data, static_cast<int>(buf.len));
-	nzbget_rs_free(buf);
-	return result;
-}
-
-inline CString Util::FormatSpeed(int64 bytesPerSecond)
-{
-	// rust/src/util.rs
-	NzbgetRsBuf buf = nzbget_rs_format_speed(bytesPerSecond);
 	CString result(buf.data, static_cast<int>(buf.len));
 	nzbget_rs_free(buf);
 	return result;
@@ -1465,15 +1330,6 @@ inline CString Util::FormatTime(time_t timeSec)
 	CString result;
 	result.Reserve(50);
 	FormatTime(timeSec, result, 50);
-	return result;
-}
-
-inline CString Util::FormatBuffer(const char* buf, int len)
-{
-	// rust/src/util.rs
-	NzbgetRsBuf out = nzbget_rs_format_buffer(buf, len);
-	CString result(out.data, static_cast<int>(out.len));
-	nzbget_rs_free(out);
 	return result;
 }
 
@@ -1579,30 +1435,11 @@ inline void Util::Trim(std::string& str)
 	TrimRight(str);
 }
 
-inline void Util::SanitizeLine(std::string& str)
-{
-	// rust/src/util.rs
-	size_t start;
-	str.resize(nzbget_rs_trim_string(str.data(), str.size(), 1, 1, 1, &start, TextRightSpace));
-	str.erase(0, start);
-}
-
 inline char* Util::ReduceStr(char* str, const char* from, const char* to)
 {
 	// rust/src/util.rs
 	nzbget_rs_reduce_str(str, from, to);
 	return str;
-}
-
-inline std::vector<CString> Util::SplitStr(const char* str, const char* separators)
-{
-	std::vector<CString> result;
-	Tokenizer tok(str, separators);
-	while (const char* substr = tok.Next())
-	{
-		result.emplace_back(substr);
-	}
-	return result;
 }
 
 inline bool Util::EndsWith(std::string_view str, std::string_view suffix, bool caseSensitive)
@@ -1624,33 +1461,9 @@ inline bool Util::EndsWith(const char* str, const char* suffix, bool caseSensiti
 	return EndsWith(std::string_view(str), std::string_view(suffix), caseSensitive);
 }
 
-inline bool Util::AlphaNum(const char* str)
-{
-	// rust/src/util.rs
-	return nzbget_rs_alpha_num(str) != 0;
-}
-
-inline uint32 Util::HashBJ96(const char* buffer, int bufSize, uint32 initValue)
-{
-	// rust/src/util.rs
-	return nzbget_rs_hash_bj96(buffer, bufSize, initValue);
-}
-
 inline time_t Util::CurrentTime()
 {
 	return ::time(nullptr);
-}
-
-inline time_t Util::Timegm(tm const *t)
-{
-	return (time_t)nzbget_rs_ufs_util_internal_timegm(
-		t->tm_year, t->tm_mon, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
-}
-
-inline bool Util::StrCaseCmp(std::string_view a, std::string_view b)
-{
-	return nzbget_rs_dqh_slice_eq_ignore_case(
-		a.data(), a.size(), b.data(), b.size()) != 0;
 }
 
 // prevent PC from going to sleep
@@ -1738,35 +1551,6 @@ inline bool WebUtil::XmlParseTagValue(const char* xml, const char* tag, char* va
 	return true;
 }
 
-inline void WebUtil::XmlStripTags(char* xml)
-{
-	// rust/src/text.rs
-	nzbget_rs_xml_strip_tags(xml);
-}
-
-namespace
-{
-	// Classify the byte as the caller's char, preserving glibc's legacy
-	// negative-byte entries (in particular, EOF is distinct from byte 255).
-	int XmlEntityAlpha(int byte)
-	{
-		int ch = static_cast<char>(byte);
-#ifdef __GLIBC__
-		return (*__ctype_b_loc())[ch] & _ISalpha;
-#else
-		// Darwin and musl do not classify negative chars as alphabetic.
-		// Avoid passing them outside the standard isalpha domain.
-		return ch < 0 ? 0 : isalpha(ch);
-#endif
-	}
-}
-
-inline void WebUtil::XmlRemoveEntities(char* raw)
-{
-	// rust/src/text.rs
-	nzbget_rs_xml_remove_entities(raw, XmlEntityAlpha);
-}
-
 inline CString WebUtil::JsonEncode(const char* raw)
 {
 	// rust/src/escape.rs
@@ -1786,24 +1570,6 @@ inline void WebUtil::JsonDecode(char* raw)
 {
 	// rust/src/decode.rs
 	nzbget_rs_json_decode(raw);
-}
-
-inline const char* WebUtil::JsonFindField(const char* jsonText, const char* fieldName, int* valueLength)
-{
-	// rust/src/webutil.rs
-	return nzbget_rs_json_find_field(jsonText, fieldName, valueLength);
-}
-
-inline const char* WebUtil::JsonNextValue(const char* jsonText, int* valueLength)
-{
-	// rust/src/decode.rs
-	return nzbget_rs_json_next_value(jsonText, valueLength);
-}
-
-inline void WebUtil::HttpUnquote(char* raw)
-{
-	// rust/src/text.rs
-	nzbget_rs_http_unquote(raw);
 }
 
 namespace
@@ -1839,12 +1605,6 @@ inline CString WebUtil::ParseContentDispositionFilename(const char* contentDispo
 	return result;
 }
 
-inline void WebUtil::UrlDecode(char* raw)
-{
-	// rust/src/text.rs
-	nzbget_rs_url_decode(raw);
-}
-
 inline CString WebUtil::UrlEncode(const char* raw)
 {
 	// rust/src/text.rs
@@ -1857,58 +1617,6 @@ inline CString WebUtil::UrlEncode(const char* raw)
 	CString result(buf.data, static_cast<int>(buf.len));
 	nzbget_rs_free(buf);
 	return result;
-}
-
-namespace
-{
-	// Caller-owned bounded encodings; Reserve allocates bound+1 bytes and
-	// the final NUL supplies CString's logical Length().
-	template <class Write>
-	CString RustEncodedKnownResult(size_t inputLen, size_t expansion, Write write)
-	{
-		if (inputLen > (static_cast<size_t>(std::numeric_limits<int>::max()) - 1) / expansion)
-		{
-			std::abort();
-		}
-		size_t bound = inputLen * expansion;
-		CString result;
-		result.Reserve(static_cast<int>(bound));
-		char* output = static_cast<char*>(result);
-		if (!output || write(output, bound + 1) > bound)
-		{
-			// Includes SIZE_MAX rejection; never request an unbounded retry.
-			std::abort();
-		}
-		return result;
-	}
-
-}
-
-inline CString WebUtil::Latin1ToUtf8(const char* str)
-{
-	// rust/src/text.rs
-	size_t inputLen = str ? strlen(str) : 0;
-	return RustEncodedKnownResult(inputLen, 2, [str, inputLen](char* out, size_t cap) {
-		return nzbget_rs_latin1_to_utf8_n(str, inputLen, out, cap);
-	});
-}
-
-/*
- The date/time can be formatted according to RFC822 in different ways. Examples:
-   Wed, 26 Jun 2013 01:02:54 -0600
-   Wed, 26 Jun 2013 01:02:54 GMT
-   26 Jun 2013 01:02:54 -0600
-   26 Jun 2013 01:02 -0600
-   26 Jun 2013 01:02 A
- The day name and the seconds are optional; the zone is an offset (+hhmm or
- -hhmm) or a name (UT, GMT, UTC, Z and the US zones). Military zones and
- unknown names count as UTC. Only the first format was read before: the others
- (GMT is common in feeds) gave no time at all.
-*/
-inline time_t WebUtil::ParseRfc822DateTime(const char* dateTimeStr)
-{
-	// rust/src/util.rs
-	return static_cast<time_t>(nzbget_rs_parse_rfc822_date_time(dateTimeStr));
 }
 
 
@@ -2196,12 +1904,6 @@ inline uint32 Crc32::Finish()
 	return *currentCrc;
 }
 
-inline uint32 Crc32::Combine(uint32 crc1, uint32 crc2, uint32 len2)
-{
-	// rust/src/crc.rs
-	return nzbget_rs_crc32_combine(crc1, crc2, len2);
-}
-
 
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
@@ -2260,13 +1962,6 @@ inline path make_unique_filename()
 fs::path make_unique_filename(const fs::path& targetPath);
 
 void move_file(const fs::path& src, const fs::path& dest, fs::error_code& ec) noexcept;
-
-inline void move_file(const fs::path& src, const fs::path& dest)
-{
-	error_code ec;
-	move_file(src, dest, ec);
-	if (ec) throw std::runtime_error(ec.message());
-}
 }
 
 class FileSystem
@@ -2288,22 +1983,12 @@ public:
 	static bool SaveBufferIntoFile(const char* filename, const char* buffer, int bufLen);
 	static bool AllocateFile(const char* filename, int64 size, bool sparse, CString& errmsg);
 	static CString MakeValidFilename(const char* filename, bool allowSlashes = false);
-	static std::string SanitizePathSegment(std::string_view name);
-	static std::string SanitizeRelativePath(std::string_view path);
-	static bool ReservedChar(char ch);
 	static CString MakeUniqueFilename(const char* destDir, const char* basename);
 	static bool MoveFile(const char* srcFilename, const char* dstFilename);
-	static bool CopyFile(const char* srcFilename, const char* dstFilename);
 	static bool DeleteFile(const char* filename);
 	static bool FileExists(const char* filename);
 	static bool DirectoryExists(const char* dirFilename);
-	// a symbolic link (or a reparse point on Windows), not followed
-	static bool IsLink(const char* filename);
 	static bool CreateDirectory(const char* dirFilename);
-	static bool CreateDirectoryExclusive(const char* dirFilename);
-	static std::string ExtractFilePathFromCmd(const std::string& path);
-	static std::string EscapePathForShell(const std::string& path);
-	static std::optional<std::string> GetFileExtension(std::string_view filename);
 
 	/* Delete empty directory */
 	static bool RemoveDirectory(const char* dirFilename);
@@ -2321,10 +2006,6 @@ public:
 	static bool RenameBak(const char* filename, const char* bakPart, bool removeOldExtension, CString& newName);
 	static CString ExpandHomePath(const char* filename);
 	static void FixExecPermission(const char* filename);
-	static bool RestoreFileOrDirPermissions(const char* filename);
-	static bool RestoreFilePermissions(const char* filename);
-	static bool RestoreDirPermissions(const char* filename);
-	static bool RestorePermissions(const char* filename, mode_t mode);
 	static mode_t uMask;
 	static CString ExpandFileName(const char* filename);
 	static CString GetExeFileName(const char* argv0);
@@ -2385,7 +2066,6 @@ public:
 	int64 Write(const void* buffer, int64 size);
 	int64 Position();
 	bool Seek(int64 position, ESeekOrigin origin = soSet);
-	bool Eof();
 	bool Error();
 	int64 Print(const char* format, ...) PRINTF_SYNTAX(2);
 	virtual char* ReadLine(char* buffer, int64 size);
@@ -2547,12 +2227,6 @@ inline std::pair<std::string, std::string> FileSystem::SplitPathAndFilename(cons
 	return std::make_pair(fullPath.substr(0, slash), fullPath.substr(slash + 1));
 }
 
-inline bool FileSystem::ReservedChar(char ch)
-{
-	// rust/src/paths.rs
-	return nzbget_rs_reserved_char(ch) != 0;
-}
-
 //replace bad chars in filename
 inline CString FileSystem::MakeValidFilename(const char* filename, bool allowSlashes)
 {
@@ -2561,18 +2235,6 @@ inline CString FileSystem::MakeValidFilename(const char* filename, bool allowSla
 	CString result(buf.data, static_cast<int>(buf.len));
 	nzbget_rs_free(buf);
 	return result;
-}
-
-inline std::string FileSystem::SanitizePathSegment(std::string_view name)
-{
-	// rust/src/paths.rs
-	return CopyRustPathText(nzbget_rs_path_text(1, name.data(), name.size(), 0));
-}
-
-inline std::string FileSystem::SanitizeRelativePath(std::string_view path)
-{
-	// rust/src/paths.rs
-	return CopyRustPathText(nzbget_rs_path_text(2, path.data(), path.size(), 0));
 }
 
 inline CString FileSystem::MakeUniqueFilename(const char* destDir, const char* basename)
@@ -2607,11 +2269,6 @@ inline bool FileSystem::MoveFile(const char* srcFilename, const char* dstFilenam
 	return nzbget_rs_fs_move_file(srcFilename, dstFilename) != 0;
 }
 
-inline bool FileSystem::CopyFile(const char* srcFilename, const char* dstFilename)
-{
-	return nzbget_rs_fs_copy_file(srcFilename, dstFilename) != 0;
-}
-
 inline bool FileSystem::DeleteFile(const char* filename)
 {
 	return nzbget_rs_fs_delete_file(filename) != 0;
@@ -2635,37 +2292,9 @@ inline bool FileSystem::CreateDirectory(const char* dirFilename)
 	return DirectoryExists(dirFilename);
 }
 
-inline bool FileSystem::CreateDirectoryExclusive(const char* dirFilename)
-{
-	return nzbget_rs_fs_create_directory_exclusive(dirFilename) != 0;
-}
-
 inline bool FileSystem::RemoveDirectory(const char* dirFilename)
 {
 	return nzbget_rs_fs_remove_directory(dirFilename) != 0;
-}
-
-
-inline std::string FileSystem::ExtractFilePathFromCmd(const std::string& path)
-{
-	// rust/src/paths.rs
-	return path.substr(0, nzbget_rs_path_position(2, path.data(), path.size()));
-}
-
-inline std::string FileSystem::EscapePathForShell(const std::string& path)
-{
-	// rust/src/paths.rs
-	return CopyRustPathText(nzbget_rs_path_text(3, path.data(), path.size(), 0));
-}
-
-inline std::optional<std::string> FileSystem::GetFileExtension(std::string_view filename)
-{
-	// rust/src/fsdelete.rs
-	ptrdiff_t extIdx = nzbget_rs_file_extension(filename.data(), filename.size());
-	if (extIdx < 0)
-		return std::nullopt;
-
-	return std::string(filename.substr(extIdx));
 }
 
 namespace
@@ -2793,12 +2422,6 @@ private:
 		}
 	}
 };
-}
-
-inline bool FileSystem::IsLink(const char* filename)
-{
-	PathType type = GetPathTypeNoFollow(filename);
-	return type == PathType::Link || type == PathType::DirectoryLink;
 }
 
 /* Delete directory which is empty or contains only hidden files or directories (whose names start with dot) */
@@ -2932,27 +2555,6 @@ inline mode_t FileSystem::uMask;
 inline void FileSystem::FixExecPermission(const char* filename)
 {
 	nzbget_rs_fs_fix_exec_permission(filename);
-}
-
-inline bool FileSystem::RestoreFileOrDirPermissions(const char* filename)
-{
-	return nzbget_rs_fs_restore_file_or_dir_permissions(filename, static_cast<uint32_t>(FileSystem::uMask)) != 0;
-}
-
-inline bool FileSystem::RestoreFilePermissions(const char* filepath)
-{
-	return RestorePermissions(filepath, 0666);
-}
-
-inline bool FileSystem::RestoreDirPermissions(const char* filename)
-{
-	return RestorePermissions(filename, 0777);
-}
-
-inline bool FileSystem::RestorePermissions(const char* filename, mode_t mode)
-{
-	return nzbget_rs_fs_restore_permissions(
-		filename, static_cast<uint32_t>(mode), static_cast<uint32_t>(FileSystem::uMask)) != 0;
 }
 
 inline CString FileSystem::MakeExtendedPath(const char* path, [[maybe_unused]] bool force)
@@ -3096,11 +2698,6 @@ inline bool DiskFile::Seek(int64 position, ESeekOrigin origin)
 			(int)origin, (int)soCur, (int)soEnd, SEEK_SET, SEEK_CUR, SEEK_END)) == 0;
 }
 
-inline bool DiskFile::Eof()
-{
-	return feof(m_file) != 0;
-}
-
 inline bool DiskFile::Error()
 {
 	return ferror(m_file) != 0;
@@ -3190,7 +2787,6 @@ public:
 	void UnregisterDebuggable(Debuggable* debuggable);
 	void LogDebugInfo();
 	void IntervalCheck();
-	std::string GetLogFilename() const;
 	fs::path GetLogFilePath() const;
 	void UpdateLogPath(const char* newPath);
 
@@ -4946,12 +4542,6 @@ inline void Log::UnregisterDebuggable(Debuggable* debuggable)
 	m_debuggables.remove(debuggable);
 }
 
-inline std::string Log::GetLogFilename() const
-{
-	std::lock_guard<std::mutex> guard(m_pathMutex);
-	return m_logFilename;
-}
-
 inline fs::path Log::GetLogFilePath() const
 {
 	std::lock_guard<std::mutex> guard(m_pathMutex);
@@ -6383,79 +5973,6 @@ public:
 	void InitOptions()
 	{
 		InitConfigTemplates();
-	}
-
-	bool LoadConfig(Options::OptEntries* optEntries)
-	{
-		if (!optEntries || !g_Options || !g_Options->GetConfigFilename())
-		{
-			return false;
-		}
-		return nzbget_rs_script_config_load(
-			g_Options->GetConfigFilename(),
-			optEntries,
-			[](void* ctx, const char* name, const char* value)
-			{
-				try
-				{
-					static_cast<Options::OptEntries*>(ctx)->emplace_back(name, value);
-				}
-				catch (...)
-				{
-				}
-			}) != 0;
-	}
-
-	bool SaveConfig(Options::OptEntries* optEntries, const char* cipherBaseline = nullptr, bool* conflict = nullptr)
-	{
-		if (conflict) *conflict = false;
-		if (!optEntries || !g_Options || !g_Options->GetConfigFilename())
-		{
-			return false;
-		}
-		std::vector<const char*> names;
-		std::vector<const char*> values;
-		names.reserve(optEntries->size());
-		values.reserve(optEntries->size());
-		for (const auto& entry : *optEntries)
-		{
-			if (entry.GetName() && entry.GetValue())
-			{
-				names.push_back(entry.GetName());
-				values.push_back(entry.GetValue());
-			}
-		}
-		int conflictFlag = 0;
-		int saved = nzbget_rs_script_config_save(
-			g_Options->GetConfigFilename(),
-			names.data(),
-			values.data(),
-			names.size(),
-			cipherBaseline,
-			&conflictFlag);
-		if (conflict)
-		{
-			*conflict = conflictFlag != 0;
-		}
-		return saved != 0;
-	}
-
-	static std::string CipherBaseline(const Options::OptEntries& optEntries)
-	{
-		std::vector<const char*> names;
-		std::vector<const char*> values;
-		names.reserve(optEntries.size());
-		values.reserve(optEntries.size());
-		for (const auto& entry : optEntries)
-		{
-			if (!entry.GetName() || !entry.GetValue()) continue;
-			names.push_back(entry.GetName());
-			values.push_back(entry.GetValue());
-		}
-		NzbgetRsBuf buf = nzbget_rs_sus_build_cipher_baseline(names.data(), values.data(), names.size());
-		std::string token(buf.data ? buf.data : "", buf.len);
-		nzbget_rs_free(buf);
-		return token;
 	}
 
 	enum class CipherCommit { Saved, Unchanged, Conflict, Cancelled, Failed };
@@ -19095,17 +18612,6 @@ public:
 		nzbget_rs_par_damage_forget(nzbId);
 		nzbget_rs_streaming_par_forget(nzbId);
 	}
-
-	static int BlocksTouched(const StreamRangeList& holes, uint64 blockSize)
-	{
-		static_assert(sizeof(StreamRange) == sizeof(NzbgetRsByteRange) &&
-			offsetof(StreamRange, Offset) == offsetof(NzbgetRsByteRange, offset) &&
-			offsetof(StreamRange, Size) == offsetof(NzbgetRsByteRange, size),
-			"StreamRange layout must match NzbgetRsByteRange");
-		return nzbget_rs_par_damage_blocks_touched(
-			holes.empty() ? nullptr : reinterpret_cast<const NzbgetRsByteRange*>(holes.data()),
-			holes.size(), blockSize);
-	}
 };
 
 class TwinCheck : public Service
@@ -19166,7 +18672,6 @@ public:
 	TwinCheck();
 	~TwinCheck() override;
 
-	static void Nudge();
 	static void NudgeLocked();
 
 protected:
@@ -20247,12 +19752,6 @@ inline TwinCheck::~TwinCheck()
 inline int TwinCheck::ServiceInterval()
 {
 	return TwinCheckDetail::g_nudged ? 1000 : 15000;
-}
-
-inline void TwinCheck::Nudge()
-{
-	Guard guard(TwinCheckDetail::g_mutex);
-	NudgeLocked();
 }
 
 inline void TwinCheck::NudgeLocked()
@@ -34205,30 +33704,14 @@ public:
 		int bodyBad = 0;		// ... for which no server delivered valid data
 
 		int Answered() const { return present + missing + error; }
-		/* the present share of the answered articles; -1 when too few were
-		 * answered to judge. Errors count as not present: a live article still
-		 * gets a hit from another server, while a server that errors would
-		 * otherwise hide every dead article. */
-		double Alive() const;
-		Health& operator+=(const Health& other);
 	};
 
 	// answered articles needed before a posting is judged
 	static constexpr int MinKnown = 5;
-	static constexpr int ServerGiveUp = 3;
-	static constexpr int PipelineStart = 4;
-	static constexpr int PipelineMax = 16;
 
 	/* a probe proves a posting dead only with nothing found and enough
 	 * definitive misses (an outage, where every answer is an error, never does) */
 	static bool DeadProbe(const Health& health);
-
-	struct Item
-	{
-		std::string messageId;
-		bool body = false;
-		std::shared_ptr<std::vector<std::string>> groups;
-	};
 
 	struct SampleOptions
 	{
@@ -34239,13 +33722,6 @@ public:
 		int maxBody = 20;		// ... at most this many
 		unsigned seed = 0;
 	};
-
-	/* the articles to check: percent of the ids, at least minimum, at most
-	 * maximum (deterministic), about bodyPercent of them marked for a body check */
-	static std::vector<std::string> Sample(const std::vector<std::string>& ids, int percent, int minimum,
-		int maximum, unsigned seed);
-	static std::vector<Item> Plan(const std::vector<std::string>& ids,
-		const std::shared_ptr<std::vector<std::string>>& groups, const SampleOptions& options);
 
 	struct BodyGate
 	{
@@ -34281,7 +33757,6 @@ public:
 		virtual ~Server();
 
 		int Cap() const;
-		bool Paused() const;
 		void* RustHandle() const { return m_rust; }
 
 	protected:
@@ -34347,71 +33822,9 @@ inline long long DonorHealth::NowMs()
 	return (long long)nzbget_rs_donor_now_ms();
 }
 
-inline double DonorHealth::Health::Alive() const
-{
-	return nzbget_rs_df_donor_health_alive(present, missing, error, MinKnown);
-}
-
-inline DonorHealth::Health& DonorHealth::Health::operator+=(const Health& other)
-{
-	nzbget_rs_dqh_donor_health_accum_health(
-		&checked, &present, &missing, &error, &bodyChecked, &bodyBad,
-		other.checked, other.present, other.missing, other.error, other.bodyChecked, other.bodyBad);
-	return *this;
-}
-
 inline bool DonorHealth::DeadProbe(const Health& health)
 {
 	return nzbget_rs_df_donor_health_dead_probe(health.present, health.missing, MinKnown) != 0;
-}
-
-inline std::vector<std::string> DonorHealth::Sample(const std::vector<std::string>& ids, int percent, int minimum,
-	int maximum, unsigned seed)
-{
-	std::vector<const char*> ptrs(ids.size());
-	std::vector<size_t> lens(ids.size());
-	for (size_t i = 0; i < ids.size(); i++)
-	{
-		ptrs[i] = ids[i].data();
-		lens[i] = ids[i].size();
-	}
-	std::vector<std::string> out;
-	nzbget_rs_donor_sample(
-		ptrs.data(), lens.data(), ids.size(), percent, minimum, maximum, seed, &out,
-		[](void* rawCtx, const char* idPtr, size_t idLen) {
-			static_cast<std::vector<std::string>*>(rawCtx)->emplace_back(idPtr ? idPtr : "", idLen);
-		});
-	return out;
-}
-
-inline std::vector<DonorHealth::Item> DonorHealth::Plan(const std::vector<std::string>& ids,
-	const std::shared_ptr<std::vector<std::string>>& groups, const SampleOptions& options)
-{
-	std::vector<const char*> ptrs(ids.size());
-	std::vector<size_t> lens(ids.size());
-	for (size_t i = 0; i < ids.size(); i++)
-	{
-		ptrs[i] = ids[i].data();
-		lens[i] = ids[i].size();
-	}
-	struct PlanCtx
-	{
-		const std::shared_ptr<std::vector<std::string>>& groups;
-		std::vector<Item> items;
-	} ctx{ groups, {} };
-	nzbget_rs_donor_plan(
-		ptrs.data(), lens.data(), ids.size(),
-		options.percent, options.minimum, options.maximum, options.bodyPercent, options.maxBody,
-		options.seed, &ctx,
-		[](void* rawCtx, const char* idPtr, size_t idLen, int body) {
-			auto* c = static_cast<PlanCtx*>(rawCtx);
-			Item item;
-			item.messageId.assign(idPtr ? idPtr : "", idLen);
-			item.groups = c->groups;
-			item.body = body != 0;
-			c->items.push_back(std::move(item));
-		});
-	return ctx.items;
 }
 
 inline bool DonorHealth::BodyGate::Done()
@@ -34434,7 +33847,6 @@ inline DonorHealth::Server::~Server()
 }
 
 inline int DonorHealth::Server::Cap() const { return nzbget_rs_donor_server_cap(m_rust); }
-inline bool DonorHealth::Server::Paused() const { return nzbget_rs_donor_server_paused(m_rust) != 0; }
 
 inline int DonorHealth::Server::ExchangeTrampoline(
 	void* cppServer, size_t count, const char* const* msgIds, const size_t* msgLens,
@@ -35101,11 +34513,6 @@ public:
 				r.indexer.assign(reinterpret_cast<const char*>(indexerPtr), indexerLen);
 				out->items.push_back(std::move(r));
 			}) != 0;
-	}
-
-	static time_t ParseDate(const std::string& text)
-	{
-		return (time_t)nzbget_rs_df_parse_newznab_date(text.data(), text.size());
 	}
 
 	static std::vector<Params> BuildQueries(const std::string& title, const std::string& imdb,
@@ -35863,12 +35270,6 @@ public:
 		return last;
 	}
 
-	bool IsRefused(const std::string& indexer)
-	{
-		return nzbget_rs_nzb_fetcher_is_refused(
-			m_rust, indexer.data(), indexer.size(), (int64_t)Util::CurrentTime()) != 0;
-	}
-
 private:
 	void* m_rust = nullptr;
 	FetchFunc m_fetch;
@@ -36039,16 +35440,10 @@ class DonorScore
 {
 public:
 	static constexpr int Dead = 1;
-	static constexpr int Top = 90;
 
 	static int Base(int pickScore)
 	{
 		return nzbget_rs_donorscore_base(pickScore);
-	}
-
-	static int Target(double alive, bool twin)
-	{
-		return nzbget_rs_donorscore_target(alive, twin ? 1 : 0);
 	}
 
 	class Ranks
@@ -36101,26 +35496,6 @@ public:
 		explicit operator bool() const { return bytes != 0 && !extension.empty(); }
 	};
 	using FetchFunc = std::function<ArticleFetcher::FetchedArticle(const std::string&, const std::vector<CString>&)>;
-
-	static Identity FromArticle(const std::vector<char>& data, const std::string& name,
-		unsigned long long total, unsigned long long minimum)
-	{
-		Identity identity;
-		NzbgetRsBuf raw = nzbget_rs_dupe_inner(data.data(), data.size(), name.data(), name.size(), total, minimum);
-		uint64_t bytes = 0;
-		size_t extensionSize = 0;
-		size_t nameOffset = 0;
-		size_t nameLen = 0;
-		if (nzbget_rs_dupe_identity_decode_inner_buf(
-			raw.data, raw.len, &bytes, &extensionSize, &nameOffset, &nameLen) != 0)
-		{
-			identity.bytes = bytes;
-			identity.extension.assign(raw.data + 12, extensionSize);
-			identity.name.assign(raw.data + nameOffset, nameLen);
-		}
-		nzbget_rs_free(raw);
-		return identity;
-	}
 
 	static ArticleFetcher::FetchedArticle FetchArticle(const NzbSummary::Head& head,
 		const std::vector<std::string>& names, time_t deadline, const FetchFunc& fetch = FetchFunc())

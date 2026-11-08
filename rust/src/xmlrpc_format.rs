@@ -2585,6 +2585,31 @@ pub fn xmlrpc_classify_start_script_param_mode(
     }
 }
 
+/// Encodes `raw` using JSON escaping when `is_json` is true or XML entity escaping otherwise
+/// (`XmlCommand::EncodeStr`).
+pub fn xmlrpc_encode_str(is_json: bool, raw: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    if is_json {
+        crate::escape::json_encode(raw, &mut v);
+    } else {
+        crate::escape::xml_encode(raw, &mut v);
+    }
+    v
+}
+
+/// # Safety
+/// `str_ptr` must be null or point to a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_xmlrpc_encode_str(
+    is_json: c_int,
+    str_ptr: *const c_char,
+) -> RsBuf {
+    if str_ptr.is_null() {
+        return into_buf(Vec::new());
+    }
+    into_buf(xmlrpc_encode_str(is_json != 0, unsafe { input(str_ptr) }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2625,6 +2650,10 @@ mod tests {
             let err_xml = buf_to_string(nzbget_rs_xmlrpc_format_error(0, 2, msg.as_ptr()));
             assert!(err_xml.contains("<i4>2</i4>"));
             assert!(err_xml.contains("&lt;param&gt;"));
+
+            assert_eq!(buf_to_string(nzbget_rs_xmlrpc_encode_str(1, std::ptr::null())), "");
+            assert_eq!(buf_to_string(nzbget_rs_xmlrpc_encode_str(1, msg.as_ptr())), "Bad <param> \\\"x\\\"");
+            assert_eq!(buf_to_string(nzbget_rs_xmlrpc_encode_str(0, msg.as_ptr())), "Bad &lt;param&gt; &quot;x&quot;");
         }
     }
 

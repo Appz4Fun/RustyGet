@@ -23,7 +23,7 @@
 
 #include "TestFramework.h"
 #include "Util.h"
-#include "QueueCoordinator.h"
+#include "Util.h"
 #include "Util.h"
 #include "nzbget_rs.h"
 

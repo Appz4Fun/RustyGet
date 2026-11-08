@@ -1,15 +1,7 @@
 //! FileSystem's path text functions: NormalizePathSeparators, BaseFileName,
 //! SplitPathAndFilename, ReservedChar, MakeValidFilename,
 //! SanitizePathSegment, SanitizeRelativePath, ExtractFilePathFromCmd and
-//! EscapePathForShell. They match the C++ code; reserved device names
-//! compare as the C library's strncasecmp (current locale).
-
-use std::ffi::{c_char, c_int};
-
-extern "C" {
-    #[cfg_attr(windows, link_name = "_strnicmp")]
-    fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
-}
+//! EscapePathForShell.
 
 #[cfg(windows)]
 pub const PATH_SEPARATOR: u8 = b'\\';
@@ -20,9 +12,9 @@ pub const PATH_SEPARATOR: u8 = b'/';
 #[cfg(not(windows))]
 pub const ALT_PATH_SEPARATOR: u8 = b'\\';
 
-const RESERVED_DEVICE_NAMES: [&std::ffi::CStr; 22] = [
-    c"CON", c"PRN", c"AUX", c"NUL", c"COM1", c"COM2", c"COM3", c"COM4", c"COM5", c"COM6", c"COM7", c"COM8", c"COM9",
-    c"LPT1", c"LPT2", c"LPT3", c"LPT4", c"LPT5", c"LPT6", c"LPT7", c"LPT8", c"LPT9",
+const RESERVED_DEVICE_NAMES: [&[u8]; 22] = [
+    b"CON", b"PRN", b"AUX", b"NUL", b"COM1", b"COM2", b"COM3", b"COM4", b"COM5", b"COM6", b"COM7", b"COM8", b"COM9",
+    b"LPT1", b"LPT2", b"LPT3", b"LPT4", b"LPT5", b"LPT6", b"LPT7", b"LPT8", b"LPT9",
 ];
 
 /// FileSystem::NormalizePathSeparators, in place.
@@ -80,17 +72,12 @@ pub fn make_valid_filename(name: &[u8], allow_slashes: bool) -> Vec<u8> {
     while matches!(r.last(), Some(b'.' | b' ')) {
         r.pop();
     }
-    // compared as C strings: the name NUL-terminated once, the reserved names static
-    r.push(0);
-    let reserved = RESERVED_DEVICE_NAMES.iter().any(|reserved| {
-        let len = reserved.to_bytes().len();
-        // Check the required boundary first to avoid libc calls for ordinary
-        // names. This byte check is locale-independent; case folding is not.
-        // result[len]: the NUL at the end counts.
-        matches!(r.get(len), Some(b'.' | 0))
-            && unsafe { strncasecmp(r.as_ptr().cast(), reserved.as_ptr(), len) } == 0
+    let reserved = RESERVED_DEVICE_NAMES.iter().any(|&reserved| {
+        let len = reserved.len();
+        r.len() >= len
+            && matches!(r.get(len), None | Some(b'.'))
+            && r[..len].eq_ignore_ascii_case(reserved)
     });
-    r.pop();
     if reserved {
         r.insert(0, b'_');
     }

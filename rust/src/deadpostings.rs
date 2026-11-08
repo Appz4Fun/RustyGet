@@ -6,11 +6,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-unsafe extern "C" {
-    #[link_name = "isspace"]
-    fn c_isspace(value: std::ffi::c_int) -> std::ffi::c_int;
-}
-
 // strto* uses C-string termination, accepts leading space and a sign, and the
 // caller ignores errno. Keep those rules without creating temporary C strings.
 fn decimal(field: &[u8]) -> Option<(bool, u64, bool)> {
@@ -19,12 +14,7 @@ fn decimal(field: &[u8]) -> Option<(bool, u64, bool)> {
     if text.is_empty() { return Some((false, 0, false)); }
     let mut i = 0;
     while let Some(&byte) = text.get(i) {
-        // Decimal digits and signs are not locale whitespace. Avoid a libc call
-        // on the normal saved format, while querying C's current LC_CTYPE for
-        // every possible leading whitespace byte (including extended bytes).
-        if byte.is_ascii_digit() || matches!(byte, b'+' | b'-') { break; }
-        // ctype requires EOF or an unsigned-char value; u8 -> int is always valid.
-        if unsafe { c_isspace(i32::from(byte)) } == 0 { break; }
+        if !matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) { break; }
         i += 1;
     }
     let negative = text.get(i) == Some(&b'-');

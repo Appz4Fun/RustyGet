@@ -7,6 +7,9 @@ if [ ! -d /downloads ]; then
 fi
 
 # delete lock file if found
+if [ -f /downloads/rustyget.lock ]; then
+    rm /downloads/rustyget.lock
+fi
 if [ -f /downloads/nzbget.lock ]; then
     rm /downloads/nzbget.lock
 fi
@@ -22,21 +25,25 @@ if [ "$PUID" != "$(id -u user)" ]; then
 fi
 
 # create default config if not exist
-if [ ! -f /config/nzbget.conf ]; then
-    cp /app/nzbget/share/nzbget/nzbget.conf /config/nzbget.conf
+if [ ! -f /config/rustyget.conf ]; then
+    if [ -f /config/nzbget.conf ]; then
+        cp /config/nzbget.conf /config/rustyget.conf
+    else
+        cp /app/rustyget/share/rustyget/rustyget.conf /config/rustyget.conf
+    fi
 fi
 
 # parse env vars to options
 OPTIONS=""
-if [ ! -z "${NZBGET_USER}" ]; then
-    OPTIONS="${OPTIONS}-o ControlUsername=${NZBGET_USER} "
+if [ ! -z "${RUSTYGET_USER:-${NZBGET_USER}}" ]; then
+    OPTIONS="${OPTIONS}-o ControlUsername=${RUSTYGET_USER:-${NZBGET_USER}} "
 fi
-if [ ! -z "${NZBGET_PASS}" ]; then
-    OPTIONS="${OPTIONS}-o ControlPassword=${NZBGET_PASS} "
+if [ ! -z "${RUSTYGET_PASS:-${NZBGET_PASS}}" ]; then
+    OPTIONS="${OPTIONS}-o ControlPassword=${RUSTYGET_PASS:-${NZBGET_PASS}} "
 fi
 
 if [ "$(id -u)" -eq 0 ]; then
-    chown user:users /config/nzbget.conf
+    chown user:users /config/rustyget.conf
 
     chown user:users /config || CONFIG_CHOWN_STATUS=$?
     if [ ! -z $CONFIG_CHOWN_STATUS ]; then
@@ -48,7 +55,7 @@ if [ "$(id -u)" -eq 0 ]; then
         echo "*** Could not set permissions on /downloads ; this container may not work as expected ***"
     fi
 
-    exec su-exec user:users /app/nzbget/nzbget -s -c /config/nzbget.conf -o OutputMode=log ${OPTIONS}
+    exec su-exec user:users /app/rustyget/rustyget -s -c /config/rustyget.conf -o OutputMode=log ${OPTIONS}
 else
-    exec /app/nzbget/nzbget -s -c /config/nzbget.conf -o OutputMode=log ${OPTIONS}
+    exec /app/rustyget/rustyget -s -c /config/rustyget.conf -o OutputMode=log ${OPTIONS}
 fi

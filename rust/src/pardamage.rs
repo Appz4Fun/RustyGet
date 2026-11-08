@@ -200,18 +200,14 @@ pub fn has_damage(nzb_id: i32) -> bool {
 }
 
 /// Evaluates `ParDamage::Judge` for download `nzb_id`.
-pub fn judge<F>(
+pub fn judge(
     nzb_id: i32,
     dest_dir: &Path,
     nzb_size: i64,
     nzb_par_size: i64,
     queued: &[QueuedParCandidate<'_>],
     completed: &[CompletedParCandidate<'_>],
-    lower: &F,
-) -> ParDamageVerdictC
-where
-    F: Fn(u8) -> u8 + ?Sized,
-{
+) -> ParDamageVerdictC {
     let mut verdict = ParDamageVerdictC::default();
     let mut guard = STATES.lock().unwrap_or_else(|e| e.into_inner());
     let Some(state) = guard.get_mut(&nzb_id) else {
@@ -267,7 +263,7 @@ where
 
     let block_size = verdict.block_size;
     for q in queued {
-        if let Some((_, blocks)) = crate::parparser::parse_par_filename(q.filename, q.confirmed, lower) {
+        if let Some((_, blocks)) = crate::parparser::parse_par_filename(q.filename, q.confirmed) {
             verdict.recovery_blocks += calc_queued_volume_blocks(blocks, q.size, block_size);
         }
     }
@@ -275,7 +271,7 @@ where
         if !c.not_failed {
             continue;
         }
-        if let Some((_, mut blocks)) = crate::parparser::parse_par_filename(c.filename, true, lower) {
+        if let Some((_, mut blocks)) = crate::parparser::parse_par_filename(c.filename, true) {
             if blocks < 0 {
                 #[cfg(unix)]
                 let full_path = dest_dir.join(bytes_to_os_str(c.filename));
@@ -744,7 +740,6 @@ mod tests {
             2_000,
             &[],
             &[],
-            &|b: u8| b.to_ascii_lowercase(),
         );
         assert_eq!(v.known, 0);
 

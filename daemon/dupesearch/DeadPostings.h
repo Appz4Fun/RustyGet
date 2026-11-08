@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2026 Denis <denis@nzbget.com>
  *
@@ -24,33 +24,58 @@
 #include <ctime>
 #include <string>
 #include "Posting.h"
+#include "Log.h"
+#include "Util.h"
+#include "nzbget_rs.h"
 
 struct NzbgetRsDeadPostingsStore;
 
-/*
- * Postings found dead (their articles are gone from the news servers), by
- * sketch, kept for DeadTtlSec: taken-down articles don't come back, and
- * checking the same posting again on every search would cost a grab and
- * server load for nothing. A near-identical re-listing of a dead posting
- * (the same articles with one re-uploaded) counts as the same posting.
- * Kept across restarts in a file that is replaced atomically.
- */
 class DeadPostings
 {
 public:
 	static constexpr int DeadTtlSec = 3 * 24 * 3600;
 
-	DeadPostings();
-	~DeadPostings();
+	DeadPostings()
+		: m_store(nzbget_rs_deadpostings_store_new())
+	{
+	}
+
+	~DeadPostings()
+	{
+		nzbget_rs_deadpostings_store_free(m_store);
+	}
+
 	DeadPostings(const DeadPostings&) = delete;
 	DeadPostings& operator=(const DeadPostings&) = delete;
 
-	void SetStatePath(const std::string& path);
-	void Load();
+	void SetStatePath(const std::string& path)
+	{
+		m_statePath = path;
+		nzbget_rs_deadpostings_store_set_state_path(
+			m_store, reinterpret_cast<const uint8_t*>(path.data()), path.size());
+	}
 
-	bool IsDead(const Posting::Sketch& sketch, time_t now = 0);
-	/* save false: counts from now on, but is never written (a dry run's verdicts) */
-	void Add(const Posting::Sketch& sketch, time_t now = 0, bool save = true);
+	void Load()
+	{
+		nzbget_rs_deadpostings_store_load(m_store, (int64_t)Util::CurrentTime());
+	}
+
+	bool IsDead(const Posting::Sketch& sketch, time_t now = 0)
+	{
+		now = now ? now : Util::CurrentTime();
+		return nzbget_rs_deadpostings_store_is_dead(
+			m_store, sketch.data(), sketch.size(), (int64_t)now) != 0;
+	}
+
+	void Add(const Posting::Sketch& sketch, time_t now = 0, bool save = true)
+	{
+		now = now ? now : Util::CurrentTime();
+		if (nzbget_rs_deadpostings_store_add(
+			m_store, sketch.data(), sketch.size(), (int64_t)now, save ? 1 : 0) == 0)
+		{
+			warn("Could not save the DupeSearch dead postings to %s", m_statePath.c_str());
+		}
+	}
 
 private:
 	NzbgetRsDeadPostingsStore* m_store;

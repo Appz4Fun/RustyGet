@@ -98,25 +98,28 @@ On 2026-10-09 the NZBGet maintainers closed it without merging, along with the r
 ## A rewrite, not a fork
 
 - **Left the fork network.** This repository is standalone on GitHub. It no longer tracks NZBGet's development or sends changes back as pull requests.
-- **Rewriting in Rust.** The C++ moves to Rust one module at a time. Each port matches the C++ output byte for byte, proven by differential tests against the old code under sanitizers, and the C++ stays as a fallback for builds without Rust. Some ports are much faster, such as CRC combination at 135 times the speed. See [Rust port status](https://appz4fun.github.io/RustyGet/rust-port.html).
-- **API compatibility may change.** Today RustyGet answers NZBGet's API, so Sonarr, Radarr, the Kodi add-on, and NZBGet extensions work unchanged. Future versions may break NZBGet API compatibility where the old behavior is unsafe or in the way, and may add a SABnzbd-compatible API.
+- **Rewriting in Rust with zero external helper binaries.** RustyGet rolls its own 7-Zip, unrar, yEnc, compression, XML, terminal UI, and parity engines directly into the Rust source:
+  - **Built-in unrar & 7-Zip (`zipfast` & `zipview`):** archive inspection and extraction for RAR (RAR 1.5/2.0/2.9/4.x/5.0, multi-volume `.partNN.rar` and `.rNN`, password-encrypted data and headers), 7-Zip (`.7z` and split `.7z.001`), ZIP, TAR, Gzip, Bzip2, XZ, and Zstandard run 100% in-process in Rust without external `unrar` or `7z` executables.
+  - **First-class Extended Unpacker, Extended Unrar, and Permission Fixer:** recursive extraction of nested archives, obfuscated archive header-magic detection, and POSIX permission normalization (`0644` for files, `0755` for directories) are built directly into the core unpack pipeline rather than relying on external Python extension scripts or an Extension Manager.
+  - **Built-in SIMD yEnc & Compression (`nntmux-yenc`, `crc32fast`, `flate2`):** uses Atlas's SIMD yEnc crate (`nntmux-yenc`), `crc32fast`, `flate2` (`zlib-rs`), and `quick-xml` instead of legacy C/C++ `rapidyenc`, `zlib`, `libxml2`, `ncurses`, or `Boost`.
+  - **Built-in Parity (`par-rs`):** purpose-built Rust PAR2 verification, repair-while-downloading (`StreamingParSession`), post-download Reed-Solomon repair (`Par2Repairer`), and deobfuscation rename (`ParRenamer`) engine rolled directly into RustyGet (replacing `par2-turbo` and `rust-par2`).
+- **Target platforms.** RustyGet targets macOS (Apple Silicon and Intel) and x86_64 Linux with tuned, zero-warning default settings out of the box.
+- **API compatibility may change.** Today RustyGet answers NZBGet's API, so Sonarr, Radarr, and the Kodi add-on work unchanged. Future versions may break NZBGet API compatibility where the old behavior is unsafe or in the way, and may add a SABnzbd-compatible API.
 - **New name.** The project is RustyGet. During the move, the binary and the configuration file keep NZBGet's names, `nzbget` and `nzbget.conf`, so existing setups keep working.
 
 ## Build and run
 
-RustyGet runs on Linux and macOS. It has no release packages yet, so build it from source with CMake, a C++20 compiler, and Rust. The repository pins Rust 1.99.0, and rustup installs it on the first build.
+RustyGet runs on Linux and macOS. It has no release packages yet, so build it from source with `just`, a C++20 compiler, and Rust. The repository pins Rust 1.99.0, and rustup installs it on the first build.
 
 ```bash
 git clone https://github.com/Appz4Fun/RustyGet.git rustyget
 cd rustyget
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j 8
-sudo cmake --install build
-[ -e ~/.nzbget ] || install -m 600 /usr/local/share/nzbget/nzbget.conf ~/.nzbget
-nzbget -D
+just build
+[ -e ~/.rustyget ] || install -m 600 rustyget.conf ~/.rustyget
+build/release/rustyget -c ~/.rustyget -o WebDir="$PWD/webui" -o ConfigTemplate="$PWD/rustyget.conf" -D
 ```
 
-`~/.nzbget` is the first place RustyGet looks for its configuration, and the web interface saves your settings there. The test keeps an existing copy when you run these steps again to upgrade. Then open `http://<host>:6789`. The default login is `nzbget` with the password `tegbzn6789`. Change it first. See [Install and build](https://appz4fun.github.io/RustyGet/install.html) for the libraries each platform needs, and [Quick start](https://appz4fun.github.io/RustyGet/quick-start.html) for the first settings.
+`~/.rustyget` is where RustyGet saves your configuration, and the web interface writes your settings there. The test keeps an existing copy when you run these steps again to upgrade. Then open `http://<host>:6789`. The default login is `rustyget` with the password `tegbzn6789`. Change it first. See [Install and build](https://appz4fun.github.io/RustyGet/install.html) for the libraries each platform needs, and [Quick start](https://appz4fun.github.io/RustyGet/quick-start.html) for the first settings.
 
 To move from NZBGet, stop it, back up the queue directory and `nzbget.conf`, and start RustyGet with the same configuration file.
 

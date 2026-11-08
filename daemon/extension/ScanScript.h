@@ -23,6 +23,19 @@
 #define SCANSCRIPT_H
 
 #include "NzbScript.h"
+#include "Scanner.h"
+#include "Options.h"
+#include "Log.h"
+#include "FileSystem.h"
+#include "nzbget_rs.h"
+
+class ScanScriptCheck : public NzbScriptController
+{
+protected:
+	virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script) { has |= script->GetScanScript(); }
+	bool has = false;
+	friend class ScanScriptController;
+};
 
 class ScanScriptController : public NzbScriptController
 {
@@ -56,12 +69,129 @@ public:
 		bool* addPaused,
 		std::string& dupeKey,
 		int* dupeScore,
-		EDupeMode* dupeMode);
-	static bool HasScripts();
+		EDupeMode* dupeMode)
+	{
+		if (nzbInfo && nzbInfo->GetSkipScriptProcessing())
+		{
+			return;
+		}
+
+		ScanScriptController scriptController(nzbName, category, dupeKey);
+		scriptController.m_nzbFilename = nzbFilename;
+		scriptController.m_url = nzbInfo ? nzbInfo->GetUrl() : "";
+		scriptController.m_directory = directory;
+		scriptController.m_parameters = parameters;
+		scriptController.m_priority = priority;
+		scriptController.m_addTop = addTop;
+		scriptController.m_addPaused = addPaused;
+		scriptController.m_dupeScore = dupeScore;
+		scriptController.m_dupeMode = dupeMode;
+		scriptController.m_prefixLen = 0;
+
+		const char* extensions = g_Options->GetExtensions();
+
+		if (!category.empty())
+		{
+			Options::Category* categoryObj = g_Options->FindCategory(category.c_str(), false);
+			if (categoryObj && !Util::EmptyStr(categoryObj->GetExtensions()))
+			{
+				extensions = categoryObj->GetExtensions();
+			}
+		}
+
+		scriptController.ExecuteScriptList(extensions);
+	}
+
+	static bool HasScripts()
+	{
+		ScanScriptCheck check;
+		check.ExecuteScriptList(g_Options->GetExtensions());
+		// a category's extensions replace the global ones for its nzbs
+		for (Options::Category& category : g_Options->GetCategories())
+		{
+			check.ExecuteScriptList(category.GetExtensions());
+		}
+		return check.has;
+	}
 
 protected:
-	void ExecuteScript(std::shared_ptr<const Extension::Script> script) override;
-	void AddMessage(Message::EKind kind, const char* text) override;
+	void ExecuteScript(std::shared_ptr<const Extension::Script> script) override
+	{
+		if (!script->GetScanScript() || !FileSystem::FileExists(m_nzbFilename))
+		{
+			return;
+		}
+
+		PrintMessage(Message::mkInfo, "Executing scan-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
+
+		SetArgs({script->GetEntry()});
+
+		BString<1024> infoName("scan-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
+		SetInfoName(infoName);
+
+		SetLogPrefix(script->GetDisplayName());
+		m_prefixLen = static_cast<int>(strlen(script->GetDisplayName())) + 2; // 2 = strlen(": ");
+		PrepareParams(script->GetName());
+
+		Execute();
+
+		SetLogPrefix(nullptr);
+	}
+
+	void AddMessage(Message::EKind kind, const char* text) override
+	{
+		const char* msgText = text + m_prefixLen;
+
+		NzbgetRsScanScriptCmd cmd{};
+		int cmdKind = nzbget_rs_sus_parse_scan_script_cmd(msgText, &cmd);
+		if (cmdKind != 0)
+		{
+			debug("Command %s detected", msgText + 6);
+			switch (cmdKind)
+			{
+				case 1:
+					m_nzbName = msgText + cmd.val_offset;
+					break;
+				case 2:
+					m_category = msgText + cmd.val_offset;
+					g_Scanner->InitPPParameters(m_category.c_str(), m_parameters, true);
+					break;
+				case 3:
+				{
+					std::string param(msgText + cmd.key_offset, cmd.key_len);
+					m_parameters->SetParameter(param.c_str(), msgText + cmd.val_offset);
+					break;
+				}
+				case 4:
+					*m_priority = cmd.int_val;
+					break;
+				case 5:
+					*m_addTop = cmd.int_val != 0;
+					break;
+				case 6:
+					*m_addPaused = cmd.int_val != 0;
+					break;
+				case 7:
+					m_dupeKey = msgText + cmd.val_offset;
+					break;
+				case 8:
+					*m_dupeScore = cmd.int_val;
+					break;
+				case 9:
+					*m_dupeMode = cmd.int_val == 1 ? dmAll : (cmd.int_val == 2 ? dmForce : dmScore);
+					break;
+				case -2:
+					error("Invalid value \"%s\" for command \"DUPEMODE\" received from %s",
+						msgText + cmd.val_offset, GetInfoName());
+					break;
+				default:
+					error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
+					break;
+			}
+			return;
+		}
+		ScriptController::AddMessage(kind, text);
+	}
 
 	void SetPriority(int* priority) { m_priority = priority; }
 	void SetDupeScore(int* dupeScore) { m_dupeScore = dupeScore; }
@@ -85,7 +215,36 @@ private:
 	NzbParameterList* m_parameters;
 	int m_prefixLen = 0;
 
-	void PrepareParams(const char* scriptName);
+	void PrepareParams(const char* scriptName)
+	{
+		ResetEnv();
+
+		nzbget_rs_scan_script_prepare_env(
+			m_nzbFilename,
+			FileSystem::BaseFileName(m_nzbFilename),
+			m_url,
+			m_nzbName.c_str(),
+			m_category.c_str(),
+			*m_priority,
+			*m_addTop ? 1 : 0,
+			*m_addPaused ? 1 : 0,
+			m_dupeKey.c_str(),
+			*m_dupeScore,
+			static_cast<int>(*m_dupeMode),
+			m_directory,
+			PATH_SEPARATOR,
+			this,
+			[](void* ctx, const char* name, const char* value)
+			{
+				static_cast<ScanScriptController*>(ctx)->SetEnvVar(name, value);
+			},
+			[](void* ctx, const char* name, int value)
+			{
+				static_cast<ScanScriptController*>(ctx)->SetIntEnvVar(name, value);
+			});
+
+		PrepareEnvScript(m_parameters, scriptName);
+	}
 };
 
 #endif

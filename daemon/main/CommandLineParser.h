@@ -22,7 +22,15 @@
 #ifndef COMMANDLINEPARSER_H
 #define COMMANDLINEPARSER_H
 
+#include <exception>
+#include <stdexcept>
 #include "NString.h"
+#include "Log.h"
+#include "MessageBase.h"
+#include "DownloadInfo.h"
+#include "FileSystem.h"
+#include "Util.h"
+#include "nzbget_rs.h"
 
 class CommandLineParser
 {
@@ -64,8 +72,52 @@ public:
 	typedef std::vector<int> IdList;
 	typedef std::vector<CString> NameList;
 
-	CommandLineParser(int argc, const char* argv[]);
-	void PrintUsage(const char* com);
+	CommandLineParser(int argc, const char* argv[])
+	{
+		if (argc < 1 || !argv)
+		{
+			throw std::invalid_argument("Invalid command line");
+		}
+		m_args.reserve(argc);
+		for (int i = 0; i < argc; i++)
+		{
+			m_args.emplace_back(argv[i]);
+		}
+
+		std::vector<char*> args;
+		args.reserve(static_cast<size_t>(argc) + 1);
+		for (CString& arg : m_args) args.push_back(arg);
+		args.push_back(nullptr);
+		RsSink sink{this, args.data(), nullptr};
+		NzbgetRsCmdlineSink rsSink{nullptr, &sink, RsSetInt, RsSetStr, RsSteal, RsPushOption, RsPushId, RsPushName, RsError};
+#ifdef HAVE_GETOPT_LONG
+		const int useLong = 1;
+#else
+		const int useLong = 0;
+#endif
+		int result = nzbget_rs_cmdline_parse(argc, args.data(), useLong, &rsSink);
+		sink.SyncArgs();
+		if (sink.error)
+		{
+			std::rethrow_exception(sink.error);
+		}
+		if (result != 0)
+		{
+			throw std::runtime_error("Command line parsing failed");
+		}
+	}
+
+	void PrintUsage(const char* com)
+	{
+		NzbgetRsBuf buf = nzbget_rs_cmdline_format_usage(
+			FileSystem::BaseFileName(com), PATH_SEPARATOR, 1);
+		if (buf.data)
+		{
+			printf("%s", buf.data);
+		}
+		nzbget_rs_free(buf);
+	}
+
 	bool GetErrors() { return m_errors; }
 	bool GetNoConfig() { return m_noConfig; }
 	const char* GetConfigFilename() { return m_configFilename; }
@@ -154,16 +206,144 @@ private:
 	bool m_pauseDownload = false;
 
 	std::vector<CString> m_args;
-	void ReportError(const char* errMessage);
-	// the fields as rust/src/cmdline.rs sets them (NzbgetRsCmdlineSink)
-	struct RsSink;
-	static int RsSetInt(void* ctx, int field, int value);
-	static int RsSetStr(void* ctx, int field, const char* value);
-	static int RsSteal(void* ctx, int field, int index);
-	static int RsPushOption(void* ctx, const char* value);
-	static int RsPushId(void* ctx, int id);
-	static int RsPushName(void* ctx, const char* value);
-	static int RsError(void* ctx, const char* msg);
+	void ReportError(const char* errMessage)
+	{
+		m_errors = true;
+		printf("%s\n", errMessage);
+	}
+
+	struct RsSink
+	{
+		CommandLineParser* parser;
+		char** argv;
+		std::exception_ptr error;
+
+		void SyncArgs() noexcept
+		{
+			for (CString& arg : parser->m_args) arg.Unbind();
+			for (size_t i = 0; i < parser->m_args.size(); i++) parser->m_args[i].Bind(argv[i]);
+		}
+
+		template <typename F>
+		static int Call(void* ctx, F f) noexcept
+		{
+			RsSink* sink = static_cast<RsSink*>(ctx);
+			try
+			{
+				f(sink->parser);
+				return 0;
+			}
+			catch (...)
+			{
+				sink->error = std::current_exception();
+				return -1;
+			}
+		}
+	};
+
+	static int RsSetInt(void* ctx, int field, int value)
+	{
+		static const int EDIT_ACTIONS[] = {
+			DownloadQueue::eaPostDelete, DownloadQueue::eaHistoryDelete, DownloadQueue::eaHistoryReturn,
+			DownloadQueue::eaHistoryProcess, DownloadQueue::eaHistoryRedownload, DownloadQueue::eaHistoryRetryFailed,
+			DownloadQueue::eaHistorySetParameter, DownloadQueue::eaHistoryMarkBad, DownloadQueue::eaHistoryMarkGood,
+			DownloadQueue::eaHistoryMarkSuccess, DownloadQueue::eaGroupMoveTop, DownloadQueue::eaFileMoveTop,
+			DownloadQueue::eaGroupMoveBottom, DownloadQueue::eaFileMoveBottom, DownloadQueue::eaGroupPause,
+			DownloadQueue::eaFilePause, DownloadQueue::eaGroupPauseAllPars, DownloadQueue::eaFilePauseAllPars,
+			DownloadQueue::eaGroupPauseExtraPars, DownloadQueue::eaFilePauseExtraPars, DownloadQueue::eaGroupResume,
+			DownloadQueue::eaFileResume, DownloadQueue::eaGroupDelete, DownloadQueue::eaFileDelete,
+			DownloadQueue::eaGroupParkDelete, DownloadQueue::eaGroupSortFiles, DownloadQueue::eaGroupApplyCategory,
+			DownloadQueue::eaGroupSetCategory, DownloadQueue::eaGroupSetName, DownloadQueue::eaGroupMerge,
+			DownloadQueue::eaFileSplit, DownloadQueue::eaGroupSetParameter, DownloadQueue::eaGroupSetPriority,
+			DownloadQueue::eaGroupMoveOffset, DownloadQueue::eaFileMoveOffset};
+		static const int DUPE_MODES[] = {dmScore, dmAll, dmForce};
+		static const int LOG_KINDS[] = {(int)Message::mkInfo, (int)Message::mkWarning, (int)Message::mkError,
+			(int)Message::mkDetail, (int)Message::mkDebug};
+		return RsSink::Call(ctx, [field, value](CommandLineParser* p)
+		{
+			switch (field)
+			{
+				case 0: p->m_noConfig = value; break;
+				case 1: p->m_printUsage = value; break;
+				case 2: p->m_printVersion = value; break;
+				case 3: p->m_printOptions = value; break;
+				case 4: p->m_serverMode = value; break;
+				case 5: p->m_daemonMode = value; break;
+				case 6: p->m_remoteClientMode = value; break;
+				case 7: p->m_clientOperation = (EClientOperation)value; break;
+				case 8: p->m_addTop = value; break;
+				case 9: p->m_addPaused = value; break;
+				case 10: p->m_addPriority = value; break;
+				case 11: p->m_addDupeScore = value; break;
+				case 12: p->m_addDupeMode = DUPE_MODES[value]; break;
+				case 13: p->m_matchMode = (EMatchMode)value; break;
+				case 15: p->m_testBacktrace = value; break;
+				case 16: p->m_webGet = value; break;
+				case 17: p->m_sigVerify = value; break;
+				case 18: p->m_logLines = value; break;
+				case 19: p->m_editQueueAction = EDIT_ACTIONS[value]; break;
+				case 20: p->m_editQueueOffset = value; break;
+				case 21: p->m_writeLogKind = LOG_KINDS[value]; break;
+				case 22: p->m_pauseDownload = value; break;
+				case 23: p->m_errors = value; break;
+			}
+		});
+	}
+
+	static int RsSetStr(void* ctx, int field, const char* value)
+	{
+		return RsSink::Call(ctx, [field, value](CommandLineParser* p)
+		{
+			switch (field)
+			{
+				case 30: p->m_configFilename = value; break;
+				case 31: p->m_webGetFilename = value; break;
+				case 32: p->m_pubKeyFilename = value; break;
+				case 33: p->m_sigFilename = value; break;
+				case 34: p->SetAddCategory(value); break;
+				case 35: p->m_lastArg = value; break;
+				case 36: p->m_argFilename = value; break;
+				case 40: p->m_setRate = (int)(atof(value) * 1024); break;
+			}
+		});
+	}
+
+	static int RsSteal(void* ctx, int field, int index)
+	{
+		return RsSink::Call(ctx, [ctx, field, index](CommandLineParser* p)
+		{
+			RsSink* sink = static_cast<RsSink*>(ctx);
+			sink->SyncArgs();
+			CString& arg = p->m_args[index];
+			switch (field)
+			{
+				case 37: p->m_addNzbFilename = std::move(arg); break;
+				case 38: p->m_addDupeKey = std::move(arg); break;
+				case 39: p->m_editQueueText = std::move(arg); break;
+			}
+			sink->argv[index] = arg;
+		});
+	}
+
+	static int RsPushOption(void* ctx, const char* value)
+	{
+		return RsSink::Call(ctx, [value](CommandLineParser* p) { p->m_optionList.push_back(value); });
+	}
+
+	static int RsPushId(void* ctx, int id)
+	{
+		return RsSink::Call(ctx, [id](CommandLineParser* p) { p->m_editQueueIdList.push_back(id); });
+	}
+
+	static int RsPushName(void* ctx, const char* value)
+	{
+		return RsSink::Call(ctx, [value](CommandLineParser* p) { p->m_editQueueNameList.push_back(value); });
+	}
+
+	static int RsError(void* ctx, const char* msg)
+	{
+		return RsSink::Call(ctx, [msg](CommandLineParser* p) { p->ReportError(msg); });
+	}
 };
 
 #endif

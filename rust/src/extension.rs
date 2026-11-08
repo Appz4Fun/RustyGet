@@ -271,6 +271,7 @@ mod cipher_atomic {
 
     pub const O_RDONLY: c_int = 0;
     pub const O_WRONLY: c_int = 1;
+    #[cfg(test)]
     pub const O_ACCMODE: c_int = 3;
 
     #[cfg(target_os = "macos")]
@@ -285,9 +286,9 @@ mod cipher_atomic {
     pub const O_DIRECTORY: c_int = 0x100000;
     #[cfg(target_os = "macos")]
     pub const O_CLOEXEC: c_int = 0x1000000;
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", test))]
     pub const ENOTSUP: i32 = 45;
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", test))]
     pub const EOPNOTSUPP: i32 = 102;
 
     #[cfg(target_os = "linux")]
@@ -430,6 +431,7 @@ mod cipher_atomic {
         Some((output, before))
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub fn copy_cipher_xattrs_with(
         source: c_int,
         target: c_int,

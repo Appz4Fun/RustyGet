@@ -9,6 +9,8 @@ use std::ffi::c_int;
 /// tolower result of the byte as the caller's char in its current locale (EOF
 /// stays distinct from 255).
 pub enum Lower<'a> {
+    /// Standard ASCII case-insensitive folding (`u8::to_ascii_lowercase`).
+    Ascii,
     /// glibc's tolower table for the calling thread's locale (what tolower
     /// itself reads), stored in order for char values -128..=255, and whether
     /// that char is signed (a compiler setting, so the C++ side says).
@@ -23,6 +25,7 @@ impl Lower<'_> {
     #[inline]
     fn get(&self, b: u8) -> c_int {
         match *self {
+            Lower::Ascii => c_int::from(b.to_ascii_lowercase()),
             Lower::Table(t, signed) => t[(if signed { b as i8 as i32 } else { b as i32 } + 128) as usize],
             Lower::Fold(f) => f(b),
         }

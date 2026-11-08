@@ -82,7 +82,7 @@ Use `Unpack` to override archive extraction for that category. Choose `Extension
 
 Click **Close** after editing to check the summary, then save all changes.
 
-Key options: [`CategoryN.Name`](options.md#categoryn-name), [`CategoryN.DestDir`](options.md#categoryn-destdir), [`CategoryN.Unpack`](options.md#categoryn-unpack), [`CategoryN.Extensions`](options.md#categoryn-extensions), [`CategoryN.Aliases`](options.md#categoryn-aliases).
+Key options: [`CategoryN.Name`](options.md#categoryn-name), [`CategoryN.DestDir`](options.md#categoryn-destdir), [`CategoryN.Unpack`](options.md#categoryn-unpack), [`CategoryN.Aliases`](options.md#categoryn-aliases).
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/category-edit.jpg" aria-label="Open full-size picture: Category editor showing name, destination, unpacking, extensions, and aliases"><img src="assets/settings/category-edit.jpg" width="1280" height="938" loading="lazy" alt="Category editor showing name, destination, unpacking, extensions, and aliases"></a>

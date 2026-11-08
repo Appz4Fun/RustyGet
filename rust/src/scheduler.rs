@@ -155,10 +155,6 @@ pub fn check_tasks(
     r
 }
 
-extern "C" {
-    fn strcasecmp(a: *const std::ffi::c_char, b: *const std::ffi::c_char) -> std::ffi::c_int;
-}
-
 /// `Scheduler::FirstCheck`:
 /// Comparator ordering scheduler tasks by `(hours, minutes)`.
 #[inline]
@@ -202,7 +198,9 @@ pub unsafe fn scheduler_matches_server_ref(
     if server_name.is_null() || server_ref.is_null() {
         return false;
     }
-    strcasecmp(server_name, server_ref) == 0
+    std::ffi::CStr::from_ptr(server_name)
+        .to_bytes()
+        .eq_ignore_ascii_case(std::ffi::CStr::from_ptr(server_ref).to_bytes())
 }
 
 /// `Scheduler::FetchFeed`:
@@ -221,9 +219,13 @@ pub unsafe fn scheduler_matches_feed_ref(
     if feed_ref.is_null() {
         return (feed_id == id, feed_id);
     }
-    let is_zero = strcasecmp(c"0".as_ptr(), feed_ref) == 0;
+    let ref_bytes = std::ffi::CStr::from_ptr(feed_ref).to_bytes();
+    let is_zero = ref_bytes == b"0";
     let matched = feed_id == id
-        || (!feed_name.is_null() && strcasecmp(feed_name, feed_ref) == 0)
+        || (!feed_name.is_null()
+            && std::ffi::CStr::from_ptr(feed_name)
+                .to_bytes()
+                .eq_ignore_ascii_case(ref_bytes))
         || is_zero;
     let target_id = if is_zero { 0 } else { feed_id };
     (matched, target_id)

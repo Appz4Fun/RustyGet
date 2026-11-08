@@ -106,20 +106,65 @@ private:
 class Thread
 {
 public:
-	Thread();
+	Thread() = default;
 	Thread(const Thread&) = delete;
-	virtual ~Thread();
+	virtual ~Thread() = default;
 
-	virtual void Start();
-	virtual void Stop();
-	virtual void Resume();
-	bool Kill();
+	virtual void Start()
+	{
+		m_running = true;
+
+		// NOTE: "m_threadMutex" ensures that "t" lives until the very end of the function
+		std::lock_guard<std::mutex> guard(m_threadMutex);
+
+		// start the new thread
+		std::thread t([&]{
+			{
+				// trying to lock "m_threadMutex", this will wait until function "Start()" is completed
+				// and "t" is detached.
+				std::lock_guard<std::mutex> threadGuard(m_threadMutex);
+			}
+
+			thread_handler();
+		});
+
+		// save the native handle to be able to cancel (Kill) the thread and then detach
+		m_threadObj = t.native_handle();
+		t.detach();
+	}
+
+	virtual void Stop()
+	{
+		m_stopped = true;
+	}
+
+	virtual void Resume()
+	{
+		m_stopped = false;
+	}
+
+	bool Kill()
+	{
+		std::lock_guard<std::mutex> guard(m_threadMutex);
+
+#ifdef HAVE_PTHREAD_CANCEL
+		bool terminated = pthread_cancel(m_threadObj) == 0;
+#else
+		bool terminated = false;
+#endif
+
+		if (terminated)
+		{
+			--m_threadCount;
+		}
+		return terminated;
+	}
 
 	bool IsStopped() { return m_stopped; };
 	bool IsRunning() const { return m_running; }
 	bool GetAutoDestroy() { return m_autoDestroy; }
 	void SetAutoDestroy(bool autoDestroy) { m_autoDestroy = autoDestroy; }
-	static int GetThreadCount();
+	static int GetThreadCount() { return m_threadCount; }
 
 protected:
 	virtual void Run() {} // Virtual function - override in derivatives
@@ -132,7 +177,25 @@ private:
 	std::atomic<bool> m_stopped{false};
 	std::atomic<bool> m_autoDestroy{false};
 
-	void thread_handler();
+	void thread_handler()
+	{
+		++m_threadCount;
+
+		Run();
+
+		// read before m_running goes false: an owner waiting for that may destroy
+		// the object right away
+		const bool autoDestroy = m_autoDestroy;
+
+		--m_threadCount;
+
+		m_running = false;
+
+		if (autoDestroy)
+		{
+			delete this;
+		}
+	}
 };
 
 #endif

@@ -4,40 +4,18 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::{c_char, c_int, CStr};
 
-extern "C" {
-    fn tolower(c: c_int) -> c_int;
-    fn strtod(nptr: *const c_char, endptr: *mut *mut c_char) -> f64;
-    fn atoll(nptr: *const c_char) -> i64;
-}
-
-#[inline]
-fn c_lower(b: u8) -> u8 {
-    unsafe { tolower(b as c_int) as u8 }
-}
-
 // ============================================================================
-// Locale-aware case-insensitive comparison helpers (matching C strcasecmp/strncasecmp)
+// Case-insensitive comparison helpers
 // ============================================================================
 
 #[inline]
 pub fn strcasecmp_bytes(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .all(|(&x, &y)| c_lower(x) == c_lower(y))
+    a.eq_ignore_ascii_case(b)
 }
 
 #[inline]
 pub fn strncasecmp_prefix(haystack: &[u8], prefix: &[u8]) -> bool {
-    if haystack.len() < prefix.len() {
-        return false;
-    }
-    haystack[..prefix.len()]
-        .iter()
-        .zip(prefix.iter())
-        .all(|(&x, &y)| c_lower(x) == c_lower(y))
+    haystack.len() >= prefix.len() && haystack[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
 #[inline]
@@ -121,16 +99,7 @@ pub fn failover_warranted(item_score: i32, health: i32, backup_score: i32) -> bo
 
 /// `DupeCoordinator::AlivePermille` string value parser
 pub unsafe fn parse_alive_permille_cstr(value: *const c_char) -> i32 {
-    if value.is_null() {
-        return -1;
-    }
-    let mut end: *mut c_char = std::ptr::null_mut();
-    let percent = strtod(value, &mut end);
-    if end == value as *mut c_char || percent.is_nan() {
-        return -1;
-    }
-    let clamped = percent.clamp(0.0, 100.0);
-    (clamped * 10.0).round() as i32
+    crate::dupecoord::parse_alive_permille_cstr(value)
 }
 
 /// `DupeCoordinator::FailsOver`
@@ -399,7 +368,7 @@ pub unsafe fn parse_rar_lister_line_cstr(
         action = RAR_LISTER_NAME;
     } else if strncasecmp_prefix(bytes, b"        Size: ") {
         *last_size_max = 0;
-        let size = atoll(text.add(14));
+        let size = crate::feed::c_atoll_bytes(&bytes[14..]);
         if size > *max_size {
             *max_size = size;
             *last_size_max = 1;

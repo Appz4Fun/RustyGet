@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2025-2026 Denis <denis@nzbget.com>
  *
@@ -14,16 +14,18 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef UNPACK_H
 #define UNPACK_H
 
 #include <memory>
-#include <string_view>
-#include "ScriptController.h"
+#include <string>
 #include "FileSystem.h"
+#include "Log.h"
+#include "Options.h"
+#include "nzbget_rs.h"
 
 namespace Unpack
 {
@@ -38,94 +40,62 @@ class Extractor
 {
 public:
 	virtual bool Extract() = 0;
-	virtual ~Extractor();
-};
-
-class ExtractorBase : public Extractor
-{
-public:
-	ExtractorBase(fs::path tool, fs::path archive,
-		fs::path outputDir, std::string password, OverwriteMode mode);
-	bool Extract() final;
-
-protected:
-	virtual ScriptController::ArgList MakeArgs() const = 0;
-	virtual std::string MakePassword() const;
-	virtual bool DecodeExitCode(int ec) const = 0;
-
-	const fs::path m_tool;
-	const fs::path m_archive;
-	const fs::path m_outputDir;
-	const std::string m_password;
-	const OverwriteMode m_mode;
-
-private:
-	bool CheckPrerequisites() const;
-};
-
-class SevenZip final : public ExtractorBase
-{
-public:
-	enum ExitCode
-	{
-		Success = 0,
-		Warning = 1,
-		FatalError = 2,
-		CmdLineError = 7,
-		NotEnoughMemoryError = 8,
-		CanceledByUser = 255
-	};
-
-	using ExtractorBase::ExtractorBase;
-	SevenZip() = delete;
-	SevenZip(const SevenZip&) = delete;
-	SevenZip operator=(const SevenZip&) = delete;
-
-	static bool IsSupported(const fs::path& path);
-private:
-	ScriptController::ArgList MakeArgs() const override;
-	bool DecodeExitCode(int ec) const override;
-};
-
-class Unrar final : public ExtractorBase
-{
-public:
-	using Extensions = std::array<std::string_view, 8>;
-
-	enum ExitCode
-	{
-		Success = 0,
-		NonFatalError = 1,
-		FatalError = 2,
-		InvalidChecksum = 3,
-		LockedArchive = 4,
-		WriteError = 5,
-		FileOpenError = 6,
-		CommandLineError = 7,
-		NotEnoughMemory = 8,
-		FileCreateError = 9,
-		NoFilesFound = 10,
-		WrongPassword = 11
-	};
-
-	using ExtractorBase::ExtractorBase;
-	Unrar() = delete;
-	Unrar(const Unrar&) = delete;
-	Unrar operator=(const Unrar&) = delete;
-
-	static bool IsSupported(const fs::path& path);
-private:
-	ScriptController::ArgList MakeArgs() const override;
-	bool DecodeExitCode(int ec) const override;
+	virtual ~Extractor() = default;
 };
 
 class ZipFastExtractor final : public Extractor
 {
 public:
 	ZipFastExtractor(fs::path archive, fs::path outputDir,
-		std::string password, OverwriteMode mode);
-	bool Extract() override;
-	static bool IsSupported(const fs::path& path);
+		std::string password, OverwriteMode mode)
+		: m_archive(std::move(archive)),
+		  m_outputDir(std::move(outputDir)),
+		  m_password(std::move(password)),
+		  m_mode(mode)
+	{
+	}
+
+	bool Extract() override
+	{
+		auto archiveStr = fs::u8string(m_archive);
+		auto outputStr = fs::u8string(m_outputDir);
+		auto logCb = +[](void* /*ctx*/, int kind, const char* msg)
+		{
+			if (!msg) return;
+			switch (kind)
+			{
+				case 0:
+					info("%s", msg);
+					break;
+				case 1:
+					error("%s", msg);
+					break;
+				case 2:
+					warn("%s", msg);
+					break;
+				default:
+					detail("%s", msg);
+					break;
+			}
+		};
+		return nzbget_rs_unpack_extract_with_zipfast(
+			archiveStr.c_str(),
+			outputStr.c_str(),
+			m_password.c_str(),
+			static_cast<int>(m_mode),
+			-1,
+			logCb,
+			nullptr,
+			nullptr) != 0;
+	}
+
+	static bool IsSupported(const fs::path& path)
+	{
+		auto s = fs::u8string(path);
+		return nzbget_rs_unpack_can_extract_with_zipfast(s.c_str()) != 0 ||
+			nzbget_rs_euh_sevenzip_is_supported(s.data(), s.size()) != 0 ||
+			nzbget_rs_euh_unrar_is_supported(s.data(), s.size()) != 0;
+	}
 
 private:
 	const fs::path m_archive;
@@ -135,9 +105,26 @@ private:
 };
 
 using ExtractorPtr = std::unique_ptr<Extractor>;
-ExtractorPtr MakeExtractor(fs::path archive, fs::path outputDir,
-						std::string password, OverwriteMode mode);
-bool IsArchive(const fs::path& file);
+
+inline bool IsArchive(const fs::path& file)
+{
+	return ZipFastExtractor::IsSupported(file);
+}
+
+inline ExtractorPtr MakeExtractor(fs::path archive, fs::path outputDir,
+						   std::string password, OverwriteMode mode)
+{
+	const std::string archiveName = fs::u8string(archive.filename());
+
+	if (ZipFastExtractor::IsSupported(archive))
+	{
+		return std::make_unique<ZipFastExtractor>(std::move(archive), std::move(outputDir),
+												  std::move(password), mode);
+	}
+
+	error("Unpack: Could not process '%s': Unsupported archive format: %s", archiveName.c_str(), fs::u8string(archive.extension()).c_str());
+	return nullptr;
+}
 }  // namespace Unpack
 
 #endif

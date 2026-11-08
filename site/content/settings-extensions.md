@@ -12,7 +12,7 @@ Choose the global `Extensions` list and review `ScriptOrder`. Extensions can run
 
 `ScriptPauseQueue` controls queue behavior during script work. `ShellOverride` selects interpreters for scripts that need them. Read the extension's requirements before changing those controls.
 
-Key options: [`Extensions`](options.md#extensions), [`ScriptOrder`](options.md#scriptorder), [`ScriptPauseQueue`](options.md#scriptpausequeue), [`ShellOverride`](options.md#shelloverride), [`EventInterval`](options.md#eventinterval).
+Key options: `Extensions`, `ScriptOrder`, `ScriptPauseQueue`, `ShellOverride`, `EventInterval`.
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/extension-scripts.jpg" aria-label="Open full-size picture: Global extension list, script ordering, and execution controls"><img src="assets/settings/extension-scripts.jpg" width="1280" height="938" loading="lazy" alt="Global extension list, script ordering, and execution controls"></a>

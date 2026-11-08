@@ -193,9 +193,6 @@ typedef struct NzbgetRsFeedItem
 	int (*regexMatch)(void* user, size_t regex, const char* text, int (*groups)[2], int capacity);
 	void (*apply)(void* user, const NzbgetRsFeedOptions* options);
 	void (*setMatch)(void* user, int status, int rule);
-	const int* lowerTable; // *__ctype_tolower_loc() or NULL for fold
-	int charSigned;
-	int (*fold)(int);
 } NzbgetRsFeedItem;
 typedef struct NzbgetRsFeedFilter NzbgetRsFeedFilter;
 // Copies filter (NULL means empty). The opaque handle is owned by Rust and
@@ -203,9 +200,7 @@ typedef struct NzbgetRsFeedFilter NzbgetRsFeedFilter;
 NzbgetRsFeedFilter* nzbget_rs_feed_filter_new(const char* filter);
 void nzbget_rs_feed_filter_free(NzbgetRsFeedFilter* filter);
 // NULL filter/item or missing callbacks are a no-op. All callbacks are
-// required except fold when lowerTable is supplied. lowerTable points to
-// entry zero of a valid int table spanning indices -128..255.
-// Matching requires exclusive access to the filter and its regex handles.
+// required. Matching requires exclusive access to the filter and its regex handles.
 void nzbget_rs_feed_filter_match(NzbgetRsFeedFilter* filter, const NzbgetRsFeedItem* item);
 
 // Deobfuscation (rust/src/deobfuscation.rs): text as pointer and length.
@@ -581,12 +576,10 @@ NzbgetRsBuf nzbget_rs_expand_home_path(const char* filename, const char* home);
 // No ownership transfer or allocation crosses the ABI; panics abort.
 // table: glibc's tolower table (*__ctype_tolower_loc()) read for a char of
 // the given signedness instead of calling fold per byte; NULL calls fold.
-int nzbget_rs_parse_par_filename(const char* name, int confirmed, int* baseLen, int* blocks,
-	const int* table, int charSigned, int (*fold)(int));
-int nzbget_rs_same_par_collection(const char* name1, const char* name2, int confirmed,
-	const int* table, int charSigned, int (*fold)(int));
-int nzbget_rs_find_main_pars(const char* path, int collect, const int* table, int charSigned,
-	int (*fold)(int), void (*addFile)(void* ctx, const char* name, size_t len), void* ctx);
+int nzbget_rs_parse_par_filename(const char* name, int confirmed, int* baseLen, int* blocks);
+int nzbget_rs_same_par_collection(const char* name1, const char* name2, int confirmed);
+int nzbget_rs_find_main_pars(const char* path, int collect,
+	void (*addFile)(void* ctx, const char* name, size_t len), void* ctx);
 
 // RarVolume's header parsing (rust/src/rarreader.rs). rar_read parses the
 // content source into *state (read and written back) and calls addFile for each
@@ -716,7 +709,7 @@ typedef struct NzbgetRsParName
 	const char* filename;
 	const char* setId;
 } NzbgetRsParName;
-int nzbget_rs_direct_need_rename_pars(const NzbgetRsParName* pars, size_t count, int (*fold)(int));
+int nzbget_rs_direct_need_rename_pars(const NzbgetRsParName* pars, size_t count);
 
 // ManifestFile::Load (rust/src/manifest.rs, rust/src/json.rs: Boost.JSON's
 // parse with the default options) on the manifest text the C++ read: 1 when
@@ -1349,6 +1342,26 @@ int nzbget_rs_dupe_fallback_resolve_structural_or_filename_match(
     size_t structural_matches_len);
 int nzbget_rs_dupe_fallback_classify_first_head(
     const uint8_t* head_ptr, size_t head_len);
+
+typedef struct {
+    const char* filename;
+    const char* subject;
+    int32_t total_articles;
+    int64_t size;
+    int32_t is_par_file;
+    const int32_t* parts;
+    const int32_t* sizes;
+    size_t article_count;
+} NzbgetRsDonorFileSpec;
+
+ptrdiff_t nzbget_rs_dupe_fallback_match_donor_file(
+    const NzbgetRsDonorFileSpec* target,
+    const char* target_nzb_filename,
+    const char* by_content,
+    int twin_allowed,
+    int twin_only,
+    const NzbgetRsDonorFileSpec* donor_files,
+    size_t donor_count);
 int nzbget_rs_par2_range_covered(
     const NzbgetRsByteRange* ranges, size_t count, int64_t from, int64_t to);
 void nzbget_rs_par2_scan_file(
@@ -1619,6 +1632,108 @@ int nzbget_rs_parchecker_smart_calc_range_crc(
     void* ctx, int (*dumb_calc_cb)(void* ctx, int64_t start, int64_t end, uint32_t* out_crc),
     uint32_t* out_crc);
 int nzbget_rs_parchecker_classify_streambuf_line(const char* msg, size_t* out_offset);
+
+typedef struct NzbgetRsParRepairer NzbgetRsParRepairer;
+
+enum NzbgetRsParResult {
+    NZBGET_RS_PAR_RESULT_SUCCESS = 0,
+    NZBGET_RS_PAR_RESULT_REPAIR_POSSIBLE = 1,
+    NZBGET_RS_PAR_RESULT_REPAIR_NOT_POSSIBLE = 2,
+    NZBGET_RS_PAR_RESULT_INVALID_ARGS = 3,
+    NZBGET_RS_PAR_RESULT_INSUFFICIENT_CRITICAL_DATA = 4,
+    NZBGET_RS_PAR_RESULT_REPAIR_FAILED = 5,
+    NZBGET_RS_PAR_RESULT_FILE_IO_ERROR = 6,
+    NZBGET_RS_PAR_RESULT_LOGIC_ERROR = 7,
+    NZBGET_RS_PAR_RESULT_MEMORY_ERROR = 8,
+};
+
+typedef struct NzbgetRsParCallbacks {
+    void* ctx;
+    void (*on_filename)(void* ctx, const char* name);
+    void (*on_progress)(void* ctx, int progress);
+    void (*on_done)(void* ctx, const char* name, int available, int total, int target_exists, int is_complete);
+    int (*on_quick_verify)(
+        void* ctx,
+        const char* name,
+        uint32_t* out_crc,
+        const NzbgetRsParSegment** out_segs,
+        size_t* out_seg_len);
+    void (*on_quick_verified_inc)(void* ctx);
+} NzbgetRsParCallbacks;
+
+NzbgetRsParRepairer* nzbget_rs_par_repairer_new(
+    const char* base_dir,
+    int threads_to_use,
+    int mem_to_use_mb,
+    int par_quick,
+    int par_scan_full,
+    const char* par_ignore_ext);
+void nzbget_rs_par_repairer_free(NzbgetRsParRepairer* handle);
+void nzbget_rs_par_repairer_cancel(const NzbgetRsParRepairer* handle);
+int nzbget_rs_par_repairer_preprocess(
+    NzbgetRsParRepairer* handle,
+    const char* par_filename,
+    const NzbgetRsParCallbacks* cbs);
+int nzbget_rs_par_repairer_process(
+    NzbgetRsParRepairer* handle,
+    int do_repair,
+    const NzbgetRsParCallbacks* cbs);
+int nzbget_rs_par_repairer_load_extra_par2_file(
+    NzbgetRsParRepairer* handle,
+    const char* path,
+    const NzbgetRsParCallbacks* cbs);
+int nzbget_rs_par_repairer_verify_extra_file(
+    NzbgetRsParRepairer* handle,
+    const char* path,
+    int is_split_fragment,
+    const NzbgetRsParCallbacks* cbs);
+uint32_t nzbget_rs_par_repairer_missing_file_count(const NzbgetRsParRepairer* handle);
+uint32_t nzbget_rs_par_repairer_damaged_file_count(const NzbgetRsParRepairer* handle);
+uint32_t nzbget_rs_par_repairer_missing_block_count(const NzbgetRsParRepairer* handle);
+uint32_t nzbget_rs_par_repairer_recovery_block_count(const NzbgetRsParRepairer* handle);
+int64_t nzbget_rs_par_repairer_block_size(const NzbgetRsParRepairer* handle);
+NzbgetRsBuf nzbget_rs_par_repairer_creator(const NzbgetRsParRepairer* handle);
+size_t nzbget_rs_par_repairer_source_file_count(const NzbgetRsParRepairer* handle);
+int nzbget_rs_par_repairer_source_file_info(
+    const NzbgetRsParRepairer* handle,
+    size_t idx,
+    NzbgetRsBuf* out_target_filename,
+    NzbgetRsBuf* out_target_path,
+    int* out_target_exists,
+    int* out_is_complete_target,
+    uint32_t* out_block_count,
+    uint32_t* out_available_blocks);
+size_t nzbget_rs_par_repairer_leftover_count(const NzbgetRsParRepairer* handle);
+NzbgetRsBuf nzbget_rs_par_repairer_leftover_path(const NzbgetRsParRepairer* handle, size_t idx);
+
+int nzbget_rs_streaming_par_has_session(int nzb_id);
+int nzbget_rs_streaming_par_start(int nzb_id, const char* par2_path, const char* base_dir);
+int nzbget_rs_streaming_par_register_queued_volume(
+    int nzb_id, uint64_t volume_id, int blocks, int paused);
+int nzbget_rs_streaming_par_on_article_finished_by_name(
+    int nzb_id,
+    const char* name,
+    uint64_t offset,
+    uint64_t size,
+    uint32_t crc32,
+    const uint8_t* bytes,
+    size_t bytes_len);
+int nzbget_rs_streaming_par_on_article_failed_permanently_by_name(
+    int nzb_id,
+    const char* name,
+    uint64_t offset,
+    uint64_t size);
+int nzbget_rs_streaming_par_on_recovery_volume_arrived(
+    int nzb_id,
+    const char* path,
+    uint64_t queued_id,
+    int has_queued_id);
+int64_t nzbget_rs_streaming_par_blocks_needed_now(int nzb_id);
+size_t nzbget_rs_streaming_par_take_unpause_ids(
+    int nzb_id,
+    uint64_t* out_ids,
+    size_t max_ids);
+void nzbget_rs_streaming_par_forget(int nzb_id);
 
 int nzbget_rs_unpack_detect_rar_signature(const uint8_t* sig_bytes, size_t sig_len);
 int nzbget_rs_unpack_check_joinable_fragments(
@@ -4264,9 +4379,6 @@ void nzbget_rs_par_damage_judge(
     size_t queued_count,
     const NzbgetRsParDamageCompletedFile* completed,
     size_t completed_count,
-    const int* tolower_table,
-    int char_is_signed,
-    int (*fold)(int),
     NzbgetRsParDamageVerdict* out_verdict);
 
 int nzbget_rs_par_damage_first_report(int nzb_id);
@@ -5762,8 +5874,9 @@ int nzbget_rs_unpack_is_zipfast_supported_extension(const char* archive_path);
 int nzbget_rs_unpack_can_extract_with_zipfast(const char* archive_path);
 int nzbget_rs_unpack_extract_with_zipfast(
     const char* archive_path, const char* output_dir, const char* password,
-    int overwrite_mode,
-    void (*log_cb)(void* ctx, int kind, const char* msg), void* log_ctx);
+    int overwrite_mode, int cleanup_disk,
+    void (*log_cb)(void* ctx, int kind, const char* msg), void* log_ctx,
+    int (*is_stopped_cb)(void* ctx));
 int nzbget_rs_zipview_inspect_file(
     const char* archive_path, int* out_kind, size_t* out_file_count,
     uint64_t* out_total_uncompressed, int* out_has_encrypted,
@@ -6124,6 +6237,25 @@ int nzbget_rs_stream_materialize_donor_set(
     void (*cancel_batch_cb)(void* ctx),
     void (*update_progress_cb)(void* ctx, const char* label, int32_t stage_progress),
     void (*emit_message_cb)(void* ctx, int32_t kind, const char* text));
+
+uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
+uint32_t nzbget_rs_gzip_len(int input_len);
+uint32_t nzbget_rs_gzip_compress(
+    const uint8_t* in_buf, int in_len, uint8_t* out_buf, int out_len);
+typedef struct RsGUnzipStream RsGUnzipStream;
+RsGUnzipStream* nzbget_rs_gunzip_new(int buf_size);
+void nzbget_rs_gunzip_free(RsGUnzipStream* stream);
+void nzbget_rs_gunzip_write(RsGUnzipStream* stream, const uint8_t* in_buf, int in_len);
+int nzbget_rs_gunzip_read(RsGUnzipStream* stream, const void** out_ptr, int* out_len);
+
+int nzbget_rs_term_init(void);
+void nzbget_rs_term_shutdown(void);
+void nzbget_rs_term_get_size(int* rows, int* cols);
+void nzbget_rs_term_clear(void);
+void nzbget_rs_term_plot_text(
+    const char* text, int row, int col, int use_color, int color_pair, int blink);
+void nzbget_rs_term_refresh(int row, int col);
+int nzbget_rs_term_read_key(void);
 
 #include "nzbget_tls_cipher.h"
 

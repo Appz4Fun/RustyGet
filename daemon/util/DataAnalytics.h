@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2025 Denis <denis@nzbget.com>
  *
@@ -17,7 +17,11 @@
  *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#ifndef DATAANALYTICS_H
+#define DATAANALYTICS_H
+
 #include <vector>
+#include "nzbget_rs.h"
 
 class DataAnalytics final
 {
@@ -25,19 +29,38 @@ public:
 	DataAnalytics() = default;
 	~DataAnalytics() = default;
 
-	double GetMin() const;
-	double GetMax() const;
-	double GetAvg() const;
-	double GetMedian() const;
-	double GetPercentile25() const;
-	double GetPercentile75() const;
-	double GetPercentile90() const;
+	double GetMin() const { return m_min; }
+	double GetMax() const { return m_max; }
+	double GetAvg() const { return m_avg; }
+	double GetMedian() const { return m_median; }
+	double GetPercentile25() const { return m_percentile25; }
+	double GetPercentile75() const { return m_percentile75; }
+	double GetPercentile90() const { return m_percentile90; }
 
-	void Compute();
-	void AddMeasurement(double measuremen);
+	void Compute()
+	{
+		if (m_measurements.empty())
+		{
+			return;
+		}
+
+		nzbget_rs_euh_data_analytics_compute(
+			m_measurements.data(), m_measurements.size(),
+			&m_min, &m_max, &m_avg, &m_median,
+			&m_percentile25, &m_percentile75, &m_percentile90);
+	}
+
+	void AddMeasurement(double measurement)
+	{
+		m_measurements.push_back(measurement);
+	}
 
 private:
-	double CalculatePercentile(double percentile);
+	double CalculatePercentile(double percentile)
+	{
+		return nzbget_rs_euh_data_analytics_percentile(
+			m_measurements.data(), m_measurements.size(), percentile);
+	}
 
 	double m_min = 0.0;
 	double m_max = 0.0;
@@ -48,3 +71,5 @@ private:
 	double m_percentile90 = 0.0;
 	std::vector<double> m_measurements;
 };
+
+#endif

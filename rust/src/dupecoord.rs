@@ -6,38 +6,71 @@
 //! (`format_dupe_skip_message`), and status classification (`status_from_text`).
 
 use std::collections::BTreeSet;
-use std::ffi::{c_char, c_int};
+use std::ffi::{c_char, CStr};
 use std::path::Path;
 
-extern "C" {
-    fn tolower(c: c_int) -> c_int;
-    fn strtod(nptr: *const c_char, endptr: *mut *mut c_char) -> f64;
-}
-
-#[inline]
-fn c_lower(b: u8) -> u8 {
-    unsafe { tolower(b as c_int) as u8 }
+pub(crate) fn parse_f64_prefix(bytes: &[u8]) -> Option<f64> {
+    let mut i = 0;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let start = i;
+    let mut neg = false;
+    if bytes[i] == b'-' {
+        neg = true;
+        i += 1;
+    } else if bytes[i] == b'+' {
+        i += 1;
+    }
+    let rest = &bytes[i..];
+    if rest.len() >= 3 && rest[..3].eq_ignore_ascii_case(b"inf") {
+        return Some(if neg { f64::NEG_INFINITY } else { f64::INFINITY });
+    }
+    if rest.len() >= 3 && rest[..3].eq_ignore_ascii_case(b"nan") {
+        return Some(f64::NAN);
+    }
+    let mut has_digits = false;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        has_digits = true;
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            has_digits = true;
+            i += 1;
+        }
+    }
+    if !has_digits {
+        return None;
+    }
+    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+        let mut exp_i = i + 1;
+        if exp_i < bytes.len() && (bytes[exp_i] == b'+' || bytes[exp_i] == b'-') {
+            exp_i += 1;
+        }
+        let exp_digits_start = exp_i;
+        while exp_i < bytes.len() && bytes[exp_i].is_ascii_digit() {
+            exp_i += 1;
+        }
+        if exp_i > exp_digits_start {
+            i = exp_i;
+        }
+    }
+    std::str::from_utf8(&bytes[start..i]).ok()?.parse::<f64>().ok()
 }
 
 #[inline]
 pub fn strcasecmp_bytes(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .all(|(&x, &y)| c_lower(x) == c_lower(y))
+    a.eq_ignore_ascii_case(b)
 }
 
 #[inline]
 pub fn strncasecmp_prefix(haystack: &[u8], prefix: &[u8]) -> bool {
-    if haystack.len() < prefix.len() {
-        return false;
-    }
-    haystack[..prefix.len()]
-        .iter()
-        .zip(prefix.iter())
-        .all(|(&x, &y)| c_lower(x) == c_lower(y))
+    haystack.len() >= prefix.len() && haystack[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
 pub const DUPE_MODE_SCORE: i32 = 0;
@@ -158,9 +191,10 @@ pub unsafe fn parse_alive_permille_cstr(value: *const c_char) -> i32 {
     if value.is_null() {
         return -1;
     }
-    let mut end: *mut c_char = std::ptr::null_mut();
-    let percent = strtod(value, &mut end);
-    if end == value as *mut c_char || percent.is_nan() {
+    let Some(percent) = parse_f64_prefix(CStr::from_ptr(value).to_bytes()) else {
+        return -1;
+    };
+    if percent.is_nan() {
         return -1;
     }
     let clamped = percent.clamp(0.0, 100.0);

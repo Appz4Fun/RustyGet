@@ -4,32 +4,22 @@
 //! locale) and the regular expressions, written out by hand, the ASCII ones
 //! std::regex used (classic locale).
 
-use std::ffi::c_int;
-
 use crate::filetypes::{file_extension, is_parity_ext, is_rar_ext, is_rar_volume_ext, is_seven_zip_ext};
 
-extern "C" {
-    fn isalpha(c: c_int) -> c_int;
-    fn isalnum(c: c_int) -> c_int;
-    fn isdigit(c: c_int) -> c_int;
-    fn isupper(c: c_int) -> c_int;
-    fn islower(c: c_int) -> c_int;
-}
-
 fn alpha(b: u8) -> bool {
-    unsafe { isalpha(b as c_int) != 0 }
+    b.is_ascii_alphabetic()
 }
 fn alnum(b: u8) -> bool {
-    unsafe { isalnum(b as c_int) != 0 }
+    b.is_ascii_alphanumeric()
 }
 fn digit(b: u8) -> bool {
-    unsafe { isdigit(b as c_int) != 0 }
+    b.is_ascii_digit()
 }
 fn upper(b: u8) -> bool {
-    unsafe { isupper(b as c_int) != 0 }
+    b.is_ascii_uppercase()
 }
 fn lower(b: u8) -> bool {
-    unsafe { islower(b as c_int) != 0 }
+    b.is_ascii_lowercase()
 }
 
 const MAX_TITLE_LEN: usize = 32;

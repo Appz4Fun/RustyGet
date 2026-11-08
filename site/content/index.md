@@ -14,7 +14,7 @@ facts = ["NZBGet API today", "Rust, one module at a time", "Borrowed articles ch
 ## Start here
 
 <div class="cards">
-<a class="card" href="install.html"><p class="eyebrow">Get started</p><h3>Install and build</h3><p>Build from source with CMake and the pinned Rust toolchain, then run it as a service.</p></a>
+<a class="card" href="install.html"><p class="eyebrow">Get started</p><h3>Install and build</h3><p>Compile from source with Just and the pinned Rust toolchain, then run it as a service.</p></a>
 <a class="card" href="quick-start.html"><p class="eyebrow">Get started</p><h3>Quick start</h3><p>Five settings to start downloading, and five more to turn on duplicate fleets.</p></a>
 <a class="card" href="duplicate-fleets.html"><p class="eyebrow">Features</p><h3>Duplicate fleets</h3><p>Article fallback, twins and alts, par2 from a twin, stream repair, and early failover.</p></a>
 <a class="card" href="kodi.html"><p class="eyebrow">Features</p><h3>Streaming with Kodi</h3><p>How the NeNeTeePee Stream add-on finds every copy through NZBHydra2 and hands the fleet to RustyGet.</p></a>

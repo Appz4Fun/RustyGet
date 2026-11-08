@@ -10,30 +10,21 @@
 //! are called through libc here too.
 
 use std::collections::BTreeSet;
-use std::ffi::c_int;
-
-extern "C" {
-    fn isalnum(c: c_int) -> c_int;
-    fn isalpha(c: c_int) -> c_int;
-    fn isdigit(c: c_int) -> c_int;
-    fn isspace(c: c_int) -> c_int;
-    fn tolower(c: c_int) -> c_int;
-}
 
 fn c_alnum(b: u8) -> bool {
-    unsafe { isalnum(b as c_int) != 0 }
+    b.is_ascii_alphanumeric()
 }
 fn c_alpha(b: u8) -> bool {
-    unsafe { isalpha(b as c_int) != 0 }
+    b.is_ascii_alphabetic()
 }
 fn c_digit(b: u8) -> bool {
-    unsafe { isdigit(b as c_int) != 0 }
+    b.is_ascii_digit()
 }
 fn c_space(b: u8) -> bool {
-    unsafe { isspace(b as c_int) != 0 }
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 pub(crate) fn c_lower(b: u8) -> u8 {
-    unsafe { tolower(b as c_int) as u8 }
+    b.to_ascii_lowercase()
 }
 
 /// Longer input is cut before any pattern sees it.

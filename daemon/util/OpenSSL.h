@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2007-2017 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *  Copyright (C) 2025 Denis <denis@nzbget.com>
@@ -23,6 +23,7 @@
 
 #include <memory>
 #include <openssl/ssl.h>
+#include <openssl/err.h>
 #include <openssl/ec.h>
 #include <openssl/x509v3.h>
 
@@ -35,7 +36,12 @@ namespace OpenSSL
 	using SSLCtxPtr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
 	using SSLSessionPtr = std::unique_ptr<SSL, decltype(&SSL_free)>;
 
-	void StopSSLThread();
+	inline void StopSSLThread()
+	{
+#if !defined(DISABLE_TLS) && !defined(LIBRESSL_VERSION_NUMBER)
+		OPENSSL_thread_stop();
+#endif
+	}
 }
 
 #endif

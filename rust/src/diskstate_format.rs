@@ -1372,11 +1372,6 @@ pub fn diskstate_can_store_volume_slot(
     has_volume_array && index >= 0 && (index as usize) < array_size
 }
 
-extern "C" {
-    fn strtol(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> std::os::raw::c_long;
-    fn strtoul(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> std::os::raw::c_ulong;
-}
-
 /// Convert a C string pointer safely to a byte slice.
 pub unsafe fn cstr_to_bytes<'a>(ptr: *const c_char) -> &'a [u8] {
     if ptr.is_null() {
@@ -1432,7 +1427,7 @@ pub fn c_atoi(bytes: &[u8]) -> i32 {
     }
 }
 
-/// Parse `%i` style integer (base 10, `0x` hex, or `0` octal) like `sscanf("%i")` / `strtol(..., 0)`.
+/// Parse `%i` style integer (base 10, `0x` hex, or `0` octal).
 fn parse_scanf_i32(bytes: &[u8]) -> Option<(i32, usize)> {
     let mut i = 0;
     while i < bytes.len() && is_c_space(bytes[i]) {
@@ -1441,17 +1436,63 @@ fn parse_scanf_i32(bytes: &[u8]) -> Option<(i32, usize)> {
     if i >= bytes.len() {
         return None;
     }
-    let mut cbuf = Vec::with_capacity(bytes.len() - i + 1);
-    cbuf.extend_from_slice(&bytes[i..]);
-    cbuf.push(0);
-    let start_ptr = cbuf.as_ptr() as *const c_char;
-    let mut end_ptr: *mut c_char = std::ptr::null_mut();
-    let val = unsafe { strtol(start_ptr, &mut end_ptr, 0) };
-    let consumed = unsafe { end_ptr.offset_from(start_ptr) as usize };
-    if consumed == 0 {
+    let mut neg = false;
+    if bytes[i] == b'-' {
+        neg = true;
+        i += 1;
+    } else if bytes[i] == b'+' {
+        i += 1;
+    }
+    if i >= bytes.len() {
         return None;
     }
-    Some((val as i32, i + consumed))
+    let (radix, mut digits_start) = if bytes[i] == b'0' {
+        if i + 2 <= bytes.len()
+            && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X')
+            && i + 2 < bytes.len()
+            && bytes[i + 2].is_ascii_hexdigit()
+        {
+            (16u64, i + 2)
+        } else {
+            (8u64, i)
+        }
+    } else {
+        (10u64, i)
+    };
+    let start_digits = digits_start;
+    let mut acc: u64 = 0;
+    let mut overflow = false;
+    while digits_start < bytes.len() {
+        let d = match bytes[digits_start] {
+            b'0'..=b'7' => (bytes[digits_start] - b'0') as u64,
+            b'8'..=b'9' if radix >= 10 => (bytes[digits_start] - b'0') as u64,
+            b'a'..=b'f' if radix == 16 => (bytes[digits_start] - b'a' + 10) as u64,
+            b'A'..=b'F' if radix == 16 => (bytes[digits_start] - b'A' + 10) as u64,
+            _ => break,
+        };
+        if let Some(next) = acc.checked_mul(radix).and_then(|v| v.checked_add(d)) {
+            acc = next;
+        } else {
+            overflow = true;
+        }
+        digits_start += 1;
+    }
+    if digits_start == start_digits {
+        return None;
+    }
+    let val: i64 = if neg {
+        let max_neg = (i64::MAX as u64) + 1;
+        if overflow || acc >= max_neg {
+            i64::MIN
+        } else {
+            -(acc as i64)
+        }
+    } else if overflow || acc > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        acc as i64
+    };
+    Some((val as i32, digits_start))
 }
 
 const FORMATVERSION_SIGNATURE: &[u8] = b"nzbget diskstate file version ";
@@ -2185,7 +2226,7 @@ pub fn check_queue_format_version(
     }
 }
 
-/// Parse `%u` style integer (base 10) like `sscanf("%u")` / `strtoul(..., 10)`.
+/// Parse `%u` style integer (base 10).
 fn parse_scanf_u32(bytes: &[u8]) -> Option<(u32, &[u8])> {
     let mut i = 0;
     while i < bytes.len() && is_c_space(bytes[i]) {
@@ -2194,17 +2235,25 @@ fn parse_scanf_u32(bytes: &[u8]) -> Option<(u32, &[u8])> {
     if i >= bytes.len() {
         return None;
     }
-    let mut cbuf = Vec::with_capacity(bytes.len() - i + 1);
-    cbuf.extend_from_slice(&bytes[i..]);
-    cbuf.push(0);
-    let start_ptr = cbuf.as_ptr() as *const c_char;
-    let mut end_ptr: *mut c_char = std::ptr::null_mut();
-    let val = unsafe { strtoul(start_ptr, &mut end_ptr, 10) };
-    let consumed = unsafe { end_ptr.offset_from(start_ptr) as usize };
-    if consumed == 0 {
+    let mut neg = false;
+    if bytes[i] == b'-' {
+        neg = true;
+        i += 1;
+    } else if bytes[i] == b'+' {
+        i += 1;
+    }
+    let start_digits = i;
+    let mut acc: u64 = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        let d = (bytes[i] - b'0') as u64;
+        acc = acc.saturating_mul(10).saturating_add(d);
+        i += 1;
+    }
+    if i == start_digits {
         return None;
     }
-    Some((val as u32, &bytes[i + consumed..]))
+    let val = if neg { acc.wrapping_neg() } else { acc };
+    Some((val as u32, &bytes[i..]))
 }
 
 /// `DiskState::LoadFileState` (`DiskState.cpp`):

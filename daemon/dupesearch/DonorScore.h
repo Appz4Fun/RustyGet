@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2026 Denis <denis@nzbget.com>
  *
@@ -23,35 +23,34 @@
 
 #include <set>
 #include <vector>
+#include "nzbget_rs.h"
 
-/*
- * The DupeScore of a duplicate the search queues. nzbget tries duplicates by
- * the highest score first, so the most whole posting must score highest:
- * below the pick (which keeps its score), above the dead ones (base + 1).
- * Scores are offsets from a base (the pick's score minus 1000), so they
- * stay below the pick however high a client scored it.
- */
 class DonorScore
 {
 public:
-	// the score of a posting known dead
 	static constexpr int Dead = 1;
 	static constexpr int Top = 90;
 
-	/* the base of the donor scores under a pick with this score */
-	static int Base(int pickScore);
+	static int Base(int pickScore)
+	{
+		return nzbget_rs_donorscore_base(pickScore);
+	}
 
-	/* the offset for a posting alive by this share (negative: unknown, taken
-	 * as whole): 9 + 80 * share, one more for a byte-identical twin of the
-	 * pick (it wins a tie: borrowing articles and recreating whole files
-	 * work best with it), at most Top */
-	static int Target(double alive, bool twin);
+	static int Target(double alive, bool twin)
+	{
+		return nzbget_rs_donorscore_target(alive, twin ? 1 : 0);
+	}
 
-	/* unique offsets: a taken one counts down (90, 89, ...) */
 	class Ranks
 	{
 	public:
-		int Take(double alive, bool twin);
+		int Take(double alive, bool twin)
+		{
+			std::vector<int32_t> used(m_used.begin(), m_used.end());
+			int score = nzbget_rs_donorscore_take_rank(alive, twin ? 1 : 0, used.data(), used.size());
+			m_used.insert(score);
+			return score;
+		}
 		void Release(int score) { m_used.erase(score); }
 		void Use(int score) { m_used.insert(score); }
 	private:
@@ -67,11 +66,18 @@ public:
 		int grabs = 0;
 	};
 
-	/* the offsets for the live entries once every check is in: most alive
-	 * first (whole percent), then twin, closest to pickBytes, most grabbed;
-	 * strictly falling, each at most its Target. Entries scored Dead keep
-	 * their score. Parallel to the entries. */
-	static std::vector<int> Rerank(const std::vector<Entry>& entries, long long pickBytes);
+	static std::vector<int> Rerank(const std::vector<Entry>& entries, long long pickBytes)
+	{
+		std::vector<NzbgetRsDonorEntry> raw;
+		raw.reserve(entries.size());
+		for (const Entry& e : entries)
+		{
+			raw.push_back({e.score, e.alive, e.twin ? 1 : 0, (int64_t)e.bytes, e.grabs});
+		}
+		std::vector<int> scores(entries.size());
+		nzbget_rs_donorscore_rerank(raw.data(), raw.size(), (int64_t)pickBytes, scores.data());
+		return scores;
+	}
 };
 
 #endif

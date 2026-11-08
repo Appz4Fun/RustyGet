@@ -144,8 +144,12 @@ pub fn parse_unpack_message(
     } else if find_subslice(text, b"Cannot open encrypted archive. Wrong password?").is_some()
         || find_subslice(text, b"Data Error in encrypted file. Wrong password?").is_some()
         || find_subslice(text, b"CRC Failed in encrypted file. Wrong password?").is_some()
+        || find_subslice(text, b"Archive is encrypted and requires a password").is_some()
+        || find_subslice(text, b"Archive password rejected by zipview verifier").is_some()
+        || text.starts_with(b"Unrar: The specified password is incorrect.")
     {
         info.decrypt_error = 1;
+        info.password_error = 1;
     }
 
     if find_subslice(text, b" : packed data CRC failed in volume").is_some()
@@ -307,7 +311,7 @@ pub fn classify_archive_file(filename: &[u8]) -> i32 {
 /// `UnpackController::HasCompletedArchiveFiles` filename check:
 /// `.*\\.rar$`, `.*\\.7z$`, or `.*\\.7z\\.[0-9]+$`.
 pub fn has_completed_archive_ext(filename: &[u8]) -> bool {
-    matches!(classify_archive_file(filename), 1..=3)
+    matches!(classify_archive_file(filename), 1..=3) || is_zipfast_supported_extension(filename)
 }
 
 /// `UnpackController::JoinSplittedFiles`:
@@ -396,6 +400,9 @@ pub fn classify_cleanup_archive_file(
         return 1;
     }
     if len >= 3 && filename[len - 3..].eq_ignore_ascii_case(b".7z") {
+        return 1;
+    }
+    if is_zipfast_supported_extension(filename) {
         return 1;
     }
     if let Some(dot_pos) = filename.iter().rposition(|&b| b == b'.') {
@@ -1130,40 +1137,32 @@ fn path_to_bytes(path: &std::path::Path) -> &[u8] {
     path.to_str().map(str::as_bytes).unwrap_or(b"")
 }
 
-/// Returns `true` if `path` can be extracted natively in-process by `zipfast`.
-///
-/// - `.7z` archives (or files with the 7z signature) return `false` so `SevenZip` handles them.
-/// - `.rar` archives return `true` when the file on disk has a RAR 5.0 header (`Rar!\x1a\x07\x01\x00`),
-///   and `false` for RAR 1.5–4.x (`Rar!\x1a\x07\x00`) so `Unrar` handles legacy RAR volumes.
-/// - `.zip`, `.tar`, `.gz`, `.bz2`, `.xz`, `.tgz`, `.tbz2`, `.txz`, `.zst`, `.tzst` return `true`.
+/// Returns `true` if `path` can be extracted natively in-process by RustyGet's built-in
+/// archive engine (`zipfast` + `zipview` + native Rust RAR 1.5–5.0 and 7z decoders).
 pub fn can_extract_with_zipfast(path: &std::path::Path) -> bool {
     let bytes = path_to_bytes(path);
-    let fname = path_filename(bytes);
-    if matches!(classify_archive_file(fname), 2 | 3) {
-        return false;
+    if unrar_is_supported(bytes)
+        || sevenzip_is_supported(bytes)
+        || is_zipfast_supported_extension(bytes)
+    {
+        return true;
     }
     if let Ok(mut file) = std::fs::File::open(path) {
         use std::io::Read;
         let mut head = [0u8; 512];
         let n = file.read(&mut head).unwrap_or(0);
         if n >= 6 && head[..6] == [b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c] {
-            return false;
-        }
-        if n >= 6 && &head[..6] == b"Rar!\x1a\x07" {
-            return n >= 8 && detect_rar_signature(&head[..8]) == 5;
-        }
-        if matches!(classify_archive_file(fname), 1 | 5) {
-            return false;
-        }
-        if is_zipfast_supported_extension(bytes) {
             return true;
+        }
+        if n >= 7 && &head[..6] == b"Rar!\x1a\x07" {
+            return detect_rar_signature(&head[..n.min(8)]) != 0;
         }
         let slice = &head[..n];
         return zipfast::zip::sniff(slice)
             || zipfast::stream::Codec::sniff(slice).is_some()
             || zipfast::tar::sniff_tar(slice);
     }
-    is_zipfast_supported_extension(bytes)
+    false
 }
 
 /// Lists archive entries using `zipfast::extract::list_with_password`.
@@ -1175,25 +1174,38 @@ pub fn list_archive_with_zipfast(
     zipfast::extract::list_with_password(path, pw).map_err(|e| e.to_string())
 }
 
-/// Extracts `archive_path` into `output_dir` natively in-process using `zipfast` (with pre-inspection
-/// via `zipview` for ZIP containers).
-///
-/// `overwrite_mode`: `0 = Skip`, `1 = Overwrite`, `2 = AutoRename`.
-/// `log_cb(kind, message)` uses `Message::EKind` values (`0 = mkInfo`, `1 = mkError`, `2 = mkWarning`, `4 = mkDetail`).
-pub fn extract_archive_with_zipfast<F>(
+fn record_extracted_path_from_msg(
+    output_dir: &std::path::Path,
+    msg: &str,
+    extracted_paths: &mut Vec<std::path::PathBuf>,
+) {
+    if let Some(entry_name) = msg
+        .strip_prefix("Unrar: Extracting  ")
+        .or_else(|| msg.strip_prefix("7-Zip: Extracting  "))
+    {
+        for win in [true, false] {
+            if let Ok(rel) = zipfast::path::sanitize(entry_name, win) {
+                extracted_paths.push(output_dir.join(rel));
+            }
+        }
+    }
+}
+
+fn extract_single_archive_in_process<F>(
     archive_path: &std::path::Path,
     output_dir: &std::path::Path,
     password: &str,
     overwrite_mode: i32,
-    mut log_cb: F,
+    log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+    extracted_paths: &mut Vec<std::path::PathBuf>,
 ) -> Result<zipfast::extract::Summary, String>
 where
     F: FnMut(i32, &str),
 {
-    let overwrite = match overwrite_mode {
-        0 => zipfast::extract::Overwrite::Skip,
-        _ => zipfast::extract::Overwrite::Always,
-    };
+    if is_cancelled() {
+        return Err("Aborted".to_string());
+    }
 
     if let Err(e) = std::fs::create_dir_all(output_dir) {
         let msg = format!("Could not create output directory {}: {e}", output_dir.display());
@@ -1201,11 +1213,72 @@ where
         return Err(msg);
     }
 
-    let pw_opt = (!password.is_empty()).then_some(password);
+    // Check magic header on disk for native 7z or RAR 1.5–4.x
+    if let Ok(mut f) = std::fs::File::open(archive_path) {
+        use std::io::Read;
+        let mut sig = [0u8; 8];
+        let n = f.read(&mut sig).unwrap_or(0);
+        if n >= 6 && sig[..6] == [b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c] {
+            let mut tracking_cb = |kind: i32, msg: &str| {
+                if overwrite_mode != 0 && kind == 4 {
+                    record_extracted_path_from_msg(output_dir, msg, extracted_paths);
+                }
+                if msg != "Unrar: All OK" && msg != "7-Zip: Everything is Ok" {
+                    log_cb(kind, msg);
+                }
+            };
+            return crate::archive_native::extract_7z_cancellable(
+                archive_path,
+                output_dir,
+                password,
+                overwrite_mode,
+                &mut tracking_cb,
+                is_cancelled,
+            );
+        }
+        if n >= 7 && &sig[..7] == b"Rar!\x1a\x07\x00" {
+            let mut tracking_cb = |kind: i32, msg: &str| {
+                if overwrite_mode != 0 && kind == 4 {
+                    record_extracted_path_from_msg(output_dir, msg, extracted_paths);
+                }
+                if msg != "Unrar: All OK" && msg != "7-Zip: Everything is Ok" {
+                    log_cb(kind, msg);
+                }
+            };
+            return crate::archive_native::extract_rar4_cancellable(
+                archive_path,
+                output_dir,
+                password,
+                overwrite_mode,
+                &mut tracking_cb,
+                is_cancelled,
+            );
+        }
+    }
+
+    let path_bytes = path_to_bytes(archive_path);
+    let fname = path_filename(path_bytes);
+    if matches!(classify_archive_file(fname), 2 | 3) {
+        let mut tracking_cb = |kind: i32, msg: &str| {
+            if overwrite_mode != 0 && kind == 4 {
+                record_extracted_path_from_msg(output_dir, msg, extracted_paths);
+            }
+            if msg != "Unrar: All OK" && msg != "7-Zip: Everything is Ok" {
+                log_cb(kind, msg);
+            }
+        };
+        return crate::archive_native::extract_7z_cancellable(
+            archive_path,
+            output_dir,
+            password,
+            overwrite_mode,
+            &mut tracking_cb,
+            is_cancelled,
+        );
+    }
 
     // Pre-inspect ZIP archives with `zipview::ZipIndex` via bounded range reads
     // to identify inner contents, reject symlinks before writing any file, and verify passwords.
-    let path_bytes = path_to_bytes(archive_path);
     if has_suffix_icase(path_bytes, b".zip") || has_suffix_icase(path_bytes, b".cbz") {
         if let Ok(mut file) = std::fs::File::open(archive_path) {
             if let Ok(meta) = file.metadata() {
@@ -1245,44 +1318,22 @@ where
         }
     }
 
-    // Also check `zipfast` entry list for symlinks before extracting so no partial files are written
-    // when an archive contains a symlink entry.
-    if let Ok(entries) = zipfast::extract::list_with_password(archive_path, pw_opt) {
-        if entries.iter().any(|e| e.link.is_some()) {
-            log_cb(1, "ERROR: Dangerous link path was ignored");
-            log_cb(0, "Stream repair: archive contains link");
-            return Err("archive contains link".to_string());
+    let mut tracking_cb = |kind: i32, msg: &str| {
+        if overwrite_mode != 0 && kind == 4 {
+            record_extracted_path_from_msg(output_dir, msg, extracted_paths);
         }
-    }
-
-    let opts = zipfast::extract::Options {
-        mode: zipfast::extract::Mode::Extract,
-        dest: output_dir.to_path_buf(),
-        overwrite,
-        flatten: false,
-        threads: Some(3),
-        parallel_min: None,
+        if msg != "Unrar: All OK" && msg != "7-Zip: Everything is Ok" {
+            log_cb(kind, msg);
+        }
     };
-
-    let summary = zipfast::extract::run_with_password(archive_path, &opts, pw_opt, |line| {
-        log_cb(4, line);
-    })
-    .map_err(|e| {
-        let msg = e.to_string();
-        log_cb(1, &msg);
-        msg
-    })?;
-
-    if !summary.errors.is_empty() {
-        for err in &summary.errors {
-            if err.contains("links are not supported") || err.contains("link") {
-                log_cb(1, "ERROR: Dangerous link path was ignored");
-                log_cb(0, "Stream repair: archive contains link");
-            }
-            log_cb(1, err);
-        }
-        return Err(summary.errors.join("; "));
-    }
+    let summary = crate::archive_native::extract_zipfast_cancellable(
+        archive_path,
+        output_dir,
+        password,
+        overwrite_mode,
+        &mut tracking_cb,
+        is_cancelled,
+    )?;
 
     log_cb(
         4,
@@ -1291,7 +1342,386 @@ where
             summary.files, summary.bytes
         ),
     );
-    log_cb(4, "Everything is Ok");
+    Ok(summary)
+}
+
+/// Collects all volume files belonging to a multi-volume nested archive so they can be cleaned up
+/// after Extended Unpacker extracts the nested archive.
+fn collect_nested_archive_volumes(main_archive: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut vols = vec![main_archive.to_path_buf()];
+    let name = main_archive
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if name.to_ascii_lowercase().ends_with(".7z.001") {
+        let prefix = &name[..name.len() - 3];
+        let parent = main_archive
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        for n in 2..1000u32 {
+            let p = parent.join(format!("{prefix}{n:03}"));
+            if p.exists() {
+                vols.push(p);
+            } else {
+                break;
+            }
+        }
+        return vols;
+    }
+    let mut cur = main_archive.to_path_buf();
+    for _ in 0..4096 {
+        let Some(next) = zipfast::volume::next_volume(&cur) else {
+            break;
+        };
+        if next.exists() {
+            vols.push(next.clone());
+            cur = next;
+        } else {
+            break;
+        }
+    }
+    vols
+}
+
+/// Checks whether a regular file inside `output_dir` is a nested archive that Extended Unpacker
+/// / Extended Unrar should recursively unpack.
+fn is_nested_extractable_archive(path: &std::path::Path) -> bool {
+    let bytes = path_to_bytes(path);
+    let fname = path_filename(bytes);
+    if fname.is_empty() {
+        return false;
+    }
+    // Skip non-first volumes of multi-part RAR or 7z sets
+    if classify_archive_file(fname) == 5 {
+        return false;
+    }
+    if fname.len() >= 4 && fname[fname.len() - 4..].eq_ignore_ascii_case(b".rar") {
+        return unrar_is_part1_or_unsplit_rar(fname);
+    }
+    if let Some(dot_pos) = fname.iter().rposition(|&b| b == b'.') {
+        let ext = &fname[dot_pos + 1..];
+        let before = &fname[..dot_pos];
+        if !ext.is_empty()
+            && ext.iter().all(|b| b.is_ascii_digit())
+            && before.len() >= 3
+            && before[before.len() - 3..].eq_ignore_ascii_case(b".7z")
+        {
+            return ext == b"001" || ext == b"01" || ext == b"1";
+        }
+    }
+    if classify_archive_file(fname) == 2 {
+        return true;
+    }
+    if has_suffix_icase(fname, b".zip")
+        || has_suffix_icase(fname, b".tar")
+        || has_suffix_icase(fname, b".tgz")
+        || has_suffix_icase(fname, b".tar.gz")
+        || has_suffix_icase(fname, b".tbz2")
+        || has_suffix_icase(fname, b".tar.bz2")
+        || has_suffix_icase(fname, b".txz")
+        || has_suffix_icase(fname, b".tar.xz")
+        || has_suffix_icase(fname, b".tzst")
+        || has_suffix_icase(fname, b".tar.zst")
+    {
+        return true;
+    }
+    // Obfuscated nested archive detection via magic header bytes (RAR4/5 or 7z)
+    if let Ok(mut f) = std::fs::File::open(path) {
+        use std::io::Read;
+        let mut sig = [0u8; 8];
+        let n = f.read(&mut sig).unwrap_or(0);
+        if n >= 6 && sig[..6] == [b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c] {
+            return true;
+        }
+        if n >= 7 && &sig[..6] == b"Rar!\x1a\x07" && detect_rar_signature(&sig[..n.min(8)]) != 0 {
+            // Only extract if it's not a continuation volume
+            if sig.starts_with(b"Rar!\x1a\x07\x00") {
+                return true;
+            }
+            if sig.starts_with(b"Rar!\x1a\x07\x01\x00") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn find_nested_archives_in_dir(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for path in entries {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            find_nested_archives_in_dir(&path, out);
+        } else if meta.is_file() && is_nested_extractable_archive(&path) {
+            out.push(path);
+        }
+    }
+}
+
+/// First-class built-in Permission Fixer: normalizes POSIX permissions on all extracted
+/// files (`0o644`, or `0o755` if executable) and directories (`0o755`) inside `dir`.
+#[cfg(unix)]
+pub fn normalize_unpacked_permissions(dir: &std::path::Path) {
+    normalize_unpacked_permissions_excluding(dir, &std::collections::BTreeSet::new(), None);
+}
+
+#[cfg(unix)]
+fn normalize_unpacked_permissions_excluding(
+    dir: &std::path::Path,
+    excluded: &std::collections::BTreeSet<std::path::PathBuf>,
+    inherited_mask: Option<u32>,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    let allowed_mask = inherited_mask.unwrap_or_else(|| {
+        std::fs::symlink_metadata(dir)
+            .ok()
+            .map(|m| 0o700 | (m.permissions().mode() & 0o077))
+            .unwrap_or(0o755)
+    });
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        let cur_mode = meta.permissions().mode() & 0o7777;
+        if meta.is_dir() {
+            if !excluded.contains(&path) {
+                let new_mode = (cur_mode & 0o2000) | (0o755 & allowed_mask);
+                if cur_mode != new_mode {
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(new_mode));
+                }
+            }
+            normalize_unpacked_permissions_excluding(&path, excluded, Some(allowed_mask));
+        } else if meta.is_file() && !excluded.contains(&path) {
+            let base_mode = if (cur_mode & 0o111) != 0 { 0o755 } else { 0o644 };
+            let new_mode = base_mode & allowed_mask;
+            if (cur_mode & 0o777) != new_mode {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(new_mode));
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn normalize_unpacked_permissions(_dir: &std::path::Path) {}
+
+#[cfg(not(unix))]
+fn normalize_unpacked_permissions_excluding(
+    _dir: &std::path::Path,
+    _excluded: &std::collections::BTreeSet<std::path::PathBuf>,
+    _inherited_mask: Option<u32>,
+) {
+}
+
+fn collect_existing_paths_in_dir(
+    dir: &std::path::Path,
+    out: &mut std::collections::BTreeSet<std::path::PathBuf>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        out.insert(p.clone());
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            collect_existing_paths_in_dir(&p, out);
+        }
+    }
+}
+
+/// Extracts `archive_path` into `output_dir` natively in-process using `zipfast`, `zipview`, and
+/// RustyGet's pure-Rust RAR 1.5–5.0 & 7z decoders, followed by built-in Extended Unpacker / Extended Unrar
+/// (recursive nested archive extraction up to 5 layers deep) and Permission Fixer.
+///
+/// `overwrite_mode`: `0 = Skip`, `1 = Overwrite`, `2 = AutoRename`.
+/// `log_cb(kind, message)` uses `Message::EKind` values (`0 = mkInfo`, `1 = mkError`, `2 = mkWarning`, `4 = mkDetail`).
+pub fn extract_archive_with_zipfast<F>(
+    archive_path: &std::path::Path,
+    output_dir: &std::path::Path,
+    password: &str,
+    overwrite_mode: i32,
+    log_cb: F,
+) -> Result<zipfast::extract::Summary, String>
+where
+    F: FnMut(i32, &str),
+{
+    let mut never_cancel = || false;
+    extract_archive_with_zipfast_cancellable(
+        archive_path,
+        output_dir,
+        password,
+        overwrite_mode,
+        true,
+        log_cb,
+        &mut never_cancel,
+    )
+}
+
+/// Cancellable variant of [`extract_archive_with_zipfast`] that polls `is_cancelled` during
+/// decoding and output writes so callers can abort in-process extraction immediately.
+pub fn extract_archive_with_zipfast_cancellable<F>(
+    archive_path: &std::path::Path,
+    output_dir: &std::path::Path,
+    password: &str,
+    overwrite_mode: i32,
+    cleanup_disk: bool,
+    mut log_cb: F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<zipfast::extract::Summary, String>
+where
+    F: FnMut(i32, &str),
+{
+    if is_cancelled() {
+        return Err("Aborted".to_string());
+    }
+    let mut pre_existing: std::collections::BTreeSet<std::path::PathBuf> =
+        std::collections::BTreeSet::new();
+    collect_existing_paths_in_dir(output_dir, &mut pre_existing);
+    let outer_volumes: std::collections::BTreeSet<std::path::PathBuf> =
+        collect_nested_archive_volumes(archive_path).into_iter().collect();
+    let mut processed_nested = pre_existing.clone();
+    processed_nested.extend(outer_volumes.iter().cloned());
+
+    let mark_extracted_files =
+        |paths: &[std::path::PathBuf],
+         pre_existing: &mut std::collections::BTreeSet<std::path::PathBuf>,
+         processed_nested: &mut std::collections::BTreeSet<std::path::PathBuf>| {
+            if overwrite_mode != 0 {
+                for p in paths {
+                    let is_dir = std::fs::symlink_metadata(p)
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false);
+                    if !is_dir {
+                        pre_existing.remove(p);
+                        if !outer_volumes.contains(p) {
+                            processed_nested.remove(p);
+                        }
+                    }
+                }
+            }
+        };
+
+    let mut extracted_paths = Vec::new();
+    let mut summary = extract_single_archive_in_process(
+        archive_path,
+        output_dir,
+        password,
+        overwrite_mode,
+        &mut log_cb,
+        is_cancelled,
+        &mut extracted_paths,
+    )?;
+    mark_extracted_files(&extracted_paths, &mut pre_existing, &mut processed_nested);
+
+    // First-class Extended Unpacker & Extended Unrar: recursively unpack nested archives up to 5 levels
+    for depth in 1..=5usize {
+        if is_cancelled() {
+            return Err("Aborted".to_string());
+        }
+        let mut nested = Vec::new();
+        find_nested_archives_in_dir(output_dir, &mut nested);
+        nested.retain(|p| !processed_nested.contains(p));
+        if nested.is_empty() {
+            break;
+        }
+        for nested_arch in nested {
+            if is_cancelled() {
+                return Err("Aborted".to_string());
+            }
+            processed_nested.insert(nested_arch.clone());
+            let target_dir = nested_arch
+                .parent()
+                .unwrap_or(output_dir)
+                .to_path_buf();
+            let nested_name = nested_arch
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("nested");
+            log_cb(
+                0,
+                &format!("Extended Unpacker (depth {depth}): unpacking nested archive {nested_name}"),
+            );
+            let volumes = collect_nested_archive_volumes(&nested_arch);
+            let mut sub_extracted = Vec::new();
+            let sub_summary = extract_single_archive_in_process(
+                &nested_arch,
+                &target_dir,
+                password,
+                overwrite_mode,
+                &mut log_cb,
+                is_cancelled,
+                &mut sub_extracted,
+            )?;
+            let consumed_count = (sub_summary.volumes.max(1) as usize).min(volumes.len());
+            let consumed_volumes = &volumes[..consumed_count];
+            for v in consumed_volumes {
+                processed_nested.insert(v.clone());
+            }
+            mark_extracted_files(&sub_extracted, &mut pre_existing, &mut processed_nested);
+            summary.files += sub_summary.files;
+            summary.dirs += sub_summary.dirs;
+            summary.bytes += sub_summary.bytes;
+            if cleanup_disk {
+                for v in consumed_volumes {
+                    let _ = std::fs::remove_file(v);
+                }
+            }
+        }
+    }
+
+    if is_cancelled() {
+        return Err("Aborted".to_string());
+    }
+
+    // First-class Permission Fixer: normalize POSIX file & directory permissions
+    normalize_unpacked_permissions_excluding(output_dir, &pre_existing, None);
+
+    log_cb(4, "Unrar: All OK");
+    log_cb(4, "7-Zip: Everything is Ok");
+    Ok(summary)
+}
+
+pub fn extract_single_archive_with_zipfast_cancellable<F>(
+    archive_path: &std::path::Path,
+    output_dir: &std::path::Path,
+    password: &str,
+    overwrite_mode: i32,
+    mut log_cb: F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<zipfast::extract::Summary, String>
+where
+    F: FnMut(i32, &str),
+{
+    if is_cancelled() {
+        return Err("Aborted".to_string());
+    }
+    let mut extracted_paths = Vec::new();
+    let summary = extract_single_archive_in_process(
+        archive_path,
+        output_dir,
+        password,
+        overwrite_mode,
+        &mut log_cb,
+        is_cancelled,
+        &mut extracted_paths,
+    )?;
+    log_cb(4, "Unrar: All OK");
+    log_cb(4, "7-Zip: Everything is Ok");
     Ok(summary)
 }
 
@@ -1347,8 +1777,10 @@ pub unsafe extern "C" fn nzbget_rs_unpack_extract_with_zipfast(
     output_dir: *const c_char,
     password: *const c_char,
     overwrite_mode: c_int,
+    cleanup_disk: c_int,
     log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
     log_ctx: *mut std::ffi::c_void,
+    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
 ) -> c_int {
     let Some(arch) = cstr_to_path(archive_path) else {
         return 0;
@@ -1361,13 +1793,36 @@ pub unsafe extern "C" fn nzbget_rs_unpack_extract_with_zipfast(
     } else {
         unsafe { CStr::from_ptr(password).to_str().unwrap_or("") }
     };
-    let res = extract_archive_with_zipfast(&arch, &out, pw, overwrite_mode, |kind, msg| {
+    let mut is_cancelled = || {
+        is_stopped_cb.is_some_and(|cb| unsafe { cb(log_ctx) != 0 })
+    };
+    let emit_log = |kind: i32, msg: &str| {
         if let Some(cb) = log_cb {
             if let Ok(cmsg) = std::ffi::CString::new(msg) {
                 unsafe { cb(log_ctx, kind, cmsg.as_ptr()) };
             }
         }
-    });
+    };
+    let res = if cleanup_disk < 0 {
+        extract_single_archive_with_zipfast_cancellable(
+            &arch,
+            &out,
+            pw,
+            overwrite_mode,
+            emit_log,
+            &mut is_cancelled,
+        )
+    } else {
+        extract_archive_with_zipfast_cancellable(
+            &arch,
+            &out,
+            pw,
+            overwrite_mode,
+            cleanup_disk != 0,
+            emit_log,
+            &mut is_cancelled,
+        )
+    };
     i32::from(res.is_ok())
 }
 
@@ -2095,14 +2550,254 @@ mod tests {
             .any(|(_, m)| m.contains("archive contains link")));
         assert!(!sym_out_dir.join("movie.mkv").exists());
 
-        // 4. RAR5 vs RAR3 detection in can_extract_with_zipfast
+        // 4. RAR5 and RAR3/4 and 7z detection in can_extract_with_zipfast
         let rar5_path = work_dir.join("sample5.rar");
         let rar3_path = work_dir.join("sample3.rar");
+        let sevenz_path = work_dir.join("sample.7z");
         std::fs::write(&rar5_path, b"Rar!\x1a\x07\x01\x00\x00\x00\x00\x00").unwrap();
         std::fs::write(&rar3_path, b"Rar!\x1a\x07\x00\x99\x00\x00\x00\x00").unwrap();
+        std::fs::write(&sevenz_path, b"7z\xbc\xaf\x27\x1c\x00\x04").unwrap();
         assert!(can_extract_with_zipfast(&rar5_path));
-        assert!(!can_extract_with_zipfast(&rar3_path));
+        assert!(can_extract_with_zipfast(&rar3_path));
+        assert!(can_extract_with_zipfast(&sevenz_path));
         assert!(inspect_zip_file(&rar5_path).is_err());
+
+        // 4b. Extended Unpacker (nested archive inside ZIP) + Permission Fixer (0o400 -> 0o644)
+        let inner_zip = build_test_zip(&[("inner_movie.mkv", b"nested movie data", Some(0o100400), 0, None)]);
+        let outer_zip_path = work_dir.join("outer_nested.zip");
+        let nested_out_dir = work_dir.join("nested_out");
+        std::fs::write(
+            &outer_zip_path,
+            build_test_zip(&[("subarchive.zip", &inner_zip, Some(0o100644), 0, None)]),
+        )
+        .unwrap();
+        let nested_summary =
+            extract_archive_with_zipfast(&outer_zip_path, &nested_out_dir, "", 1, |_, _| {})
+                .unwrap();
+        assert!(nested_summary.files >= 2);
+        assert!(nested_out_dir.join("inner_movie.mkv").exists());
+        assert!(!nested_out_dir.join("subarchive.zip").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(nested_out_dir.join("inner_movie.mkv"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o644);
+
+            // Untouched pre-existing files (0o600) and private directories (0o700) in output_dir
+            // keep their original permissions even when overwrite_mode == 1.
+            let untouched_file = nested_out_dir.join("unrelated_secret.txt");
+            let untouched_dir = nested_out_dir.join("private_subdir");
+            std::fs::write(&untouched_file, b"secret").unwrap();
+            std::fs::set_permissions(&untouched_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::create_dir_all(&untouched_dir).unwrap();
+            std::fs::set_permissions(&untouched_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            extract_archive_with_zipfast(&outer_zip_path, &nested_out_dir, "", 1, |_, _| {}).unwrap();
+            assert_eq!(
+                std::fs::metadata(&untouched_file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                std::fs::metadata(&untouched_dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+
+            // Pre-existing leftover nested archive is still unpacked when overwritten
+            let _ = std::fs::remove_file(nested_out_dir.join("inner_movie.mkv"));
+            std::fs::write(nested_out_dir.join("subarchive.zip"), b"stale leftover").unwrap();
+            extract_archive_with_zipfast(&outer_zip_path, &nested_out_dir, "", 1, |_, _| {}).unwrap();
+            assert!(nested_out_dir.join("inner_movie.mkv").exists());
+            assert!(!nested_out_dir.join("subarchive.zip").exists());
+
+            // When cleanup_disk is false, nested archive volumes are retained
+            let keep_nested_out = work_dir.join("keep_nested_out");
+            let mut never_cancel = || false;
+            extract_archive_with_zipfast_cancellable(
+                &outer_zip_path,
+                &keep_nested_out,
+                "",
+                1,
+                false,
+                |_, _| {},
+                &mut never_cancel,
+            )
+            .unwrap();
+            assert!(keep_nested_out.join("inner_movie.mkv").exists());
+            assert!(keep_nested_out.join("subarchive.zip").exists());
+
+            // Corrupt nested archive propagates failure and does not emit All OK
+            let bad_outer_path = work_dir.join("outer_corrupt_nested.zip");
+            let bad_nested_out = work_dir.join("bad_nested_out");
+            std::fs::write(
+                &bad_outer_path,
+                build_test_zip(&[("broken_inner.7z", b"7z\xbc\xaf\x27\x1c\x00\x04corrupt", Some(0o100644), 0, None)]),
+            )
+            .unwrap();
+            let mut bad_logs = Vec::new();
+            assert!(extract_archive_with_zipfast(&bad_outer_path, &bad_nested_out, "", 1, |k, m| {
+                bad_logs.push((k, m.to_string()));
+            })
+            .is_err());
+            assert!(!bad_logs.iter().any(|(_, m)| m.contains("All OK") || m.contains("Everything is Ok")));
+        }
+
+        // 4c. Real multi-volume RAR3/4, RAR5, and 7z fixtures from tests/testdata
+        let testdata_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata");
+        let rar3_fixture = testdata_dir.join("rarrenamer/testfile3.part01.rar");
+        if rar3_fixture.exists() {
+            let rar3_out = work_dir.join("rar3_out");
+            let s = extract_archive_with_zipfast(&rar3_fixture, &rar3_out, "", 1, |_, _| {}).unwrap();
+            assert_eq!(s.files, 1);
+            assert_eq!(s.volumes, 3);
+            assert!(rar3_out.join("testfile3.dat").exists());
+
+            let rar3_old = testdata_dir.join("rarrenamer/testfile3oldnam.rar");
+            let rar3_old_out = work_dir.join("rar3_old_out");
+            let s_old = extract_archive_with_zipfast(&rar3_old, &rar3_old_out, "", 1, |_, _| {}).unwrap();
+            assert_eq!(s_old.files, 1);
+            assert!(rar3_old_out.join("testfile3oldnam.dat").exists());
+
+            let rar3_enc = testdata_dir.join("rarrenamer/testfile3encdata.part01.rar");
+            let rar3_enc_out = work_dir.join("rar3_enc_out");
+            let s_enc = extract_archive_with_zipfast(&rar3_enc, &rar3_enc_out, "123", 1, |_, _| {}).unwrap();
+            assert_eq!(s_enc.files, 1);
+            assert!(rar3_enc_out.join("testfile3encdata.dat").exists());
+
+            let rar3_hp = testdata_dir.join("rarrenamer/testfile3encnam.part01.rar");
+            let rar3_hp_out = work_dir.join("rar3_hp_out");
+            let s_hp = extract_archive_with_zipfast(&rar3_hp, &rar3_hp_out, "123", 1, |_, _| {}).unwrap();
+            assert_eq!(s_hp.files, 1);
+            assert!(rar3_hp_out.join("testfile3encnam.dat").exists());
+        }
+        let sz_fixture = testdata_dir.join("parchecker2/testfile.7z.001");
+        if sz_fixture.exists() {
+            // `parchecker2/testfile.7z.001` is intentionally damaged for PAR2 repair tests;
+            // verify that our native 7z extractor catches the stream CRC mismatch.
+            let sz_out = work_dir.join("sz_out");
+            let err = extract_archive_with_zipfast(&sz_fixture, &sz_out, "", 1, |_, _| {})
+                .expect_err("damaged 7z fixture must fail CRC check");
+            assert!(err.contains("CRC failed"));
+
+            // Also verify clean extraction on an intact multi-volume `.7z.001`..`.003` set.
+            let sz_clean_dir = work_dir.join("sz_clean_vols");
+            std::fs::create_dir_all(&sz_clean_dir).unwrap();
+            let b1 = std::fs::read(testdata_dir.join("parchecker2/testfile.7z.001")).unwrap();
+            let b2 = std::fs::read(testdata_dir.join("parchecker2/testfile.7z.002")).unwrap();
+            let mut b3 = std::fs::read(testdata_dir.join("parchecker2/testfile.7z.003")).unwrap();
+            let mut combined = [b1.as_slice(), b2.as_slice(), b3.as_slice()].concat();
+            let actual_crc = crc32fast::hash(&combined[32..32 + 0x1ea7b]).to_le_bytes();
+            let b3_len = b3.len();
+            // Patch the SubStreamsInfo CRC and EndHeader CRC in volume 3 for the unmodified payload
+            let crc_off = b3_len - 98 + 25;
+            b3[crc_off..crc_off + 4].copy_from_slice(&actual_crc);
+            let new_hdr_crc = crc32fast::hash(&b3[b3_len - 98..]).to_le_bytes();
+            let mut b1_fixed = b1.clone();
+            b1_fixed[28..32].copy_from_slice(&new_hdr_crc);
+            let start_crc = crc32fast::hash(&b1_fixed[12..32]).to_le_bytes();
+            b1_fixed[8..12].copy_from_slice(&start_crc);
+            std::fs::write(sz_clean_dir.join("testfile.7z.001"), &b1_fixed).unwrap();
+            std::fs::write(sz_clean_dir.join("testfile.7z.002"), &b2).unwrap();
+            std::fs::write(sz_clean_dir.join("testfile.7z.003"), &b3).unwrap();
+            combined.clear();
+
+            let sz_clean_out = work_dir.join("sz_clean_out");
+            let s_sz = extract_archive_with_zipfast(
+                &sz_clean_dir.join("testfile.7z.001"),
+                &sz_clean_out,
+                "",
+                1,
+                |_, _| {},
+            )
+            .unwrap();
+            assert_eq!(s_sz.files, 1);
+            assert!(sz_clean_out.join("testfile.dat").exists());
+
+            // Verify cancellation aborts 7z and RAR4 extraction
+            let sz_cancel_out = work_dir.join("sz_cancel_out");
+            let mut cancel_now = || true;
+            assert!(extract_archive_with_zipfast_cancellable(
+                &sz_clean_dir.join("testfile.7z.001"),
+                &sz_cancel_out,
+                "",
+                1,
+                true,
+                |_, _| {},
+                &mut cancel_now,
+            )
+            .is_err());
+            assert!(!sz_cancel_out.join("testfile.dat").exists());
+        }
+        if rar3_fixture.exists() {
+            let rar3_cancel_out = work_dir.join("rar3_cancel_out");
+            let mut checks = 0usize;
+            let mut cancel_after_first = || {
+                checks += 1;
+                checks > 1
+            };
+            assert!(extract_archive_with_zipfast_cancellable(
+                &rar3_fixture,
+                &rar3_cancel_out,
+                "",
+                1,
+                true,
+                |_, _| {},
+                &mut cancel_after_first,
+            )
+            .is_err());
+        }
+        let rar5_fixture = testdata_dir.join("rarrenamer/testfile5.part01.rar");
+        if rar5_fixture.exists() {
+            let rar5_out = work_dir.join("rar5_out");
+            let s5 = extract_archive_with_zipfast(&rar5_fixture, &rar5_out, "", 1, |_, _| {}).unwrap();
+            assert_eq!(s5.files, 1);
+            assert!(rar5_out.join("testfile5.dat").exists());
+
+            let rar5_cancel_out = work_dir.join("rar5_cancel_out");
+            let mut checks = 0usize;
+            let mut cancel_mid_rar5 = || {
+                checks += 1;
+                checks > 4
+            };
+            assert!(extract_archive_with_zipfast_cancellable(
+                &rar5_fixture,
+                &rar5_cancel_out,
+                "",
+                1,
+                true,
+                |_, _| {},
+                &mut cancel_mid_rar5,
+            )
+            .is_err());
+            assert!(!rar5_cancel_out.join("testfile5.dat").exists());
+        }
+        // Mid-entry ZIP cancellation removes partial output file
+        let big_zip_path = work_dir.join("big_cancel.zip");
+        let big_zip_out = work_dir.join("big_cancel_out");
+        let big_payload = vec![0x42u8; 512 * 1024];
+        std::fs::write(
+            &big_zip_path,
+            build_test_zip(&[("big.bin", &big_payload, Some(0o100644), 0, None)]),
+        )
+        .unwrap();
+        let mut zip_checks = 0usize;
+        let mut cancel_mid_zip = || {
+            zip_checks += 1;
+            zip_checks > 5
+        };
+        assert!(extract_archive_with_zipfast_cancellable(
+            &big_zip_path,
+            &big_zip_out,
+            "",
+            1,
+            true,
+            |_, _| {},
+            &mut cancel_mid_zip,
+        )
+        .is_err());
+        assert!(!big_zip_out.join("big.bin").exists());
 
         // 5. Bounded central-directory inspection matches in-memory zipview inspection
         let cd_info = inspect_zip_file_via_central_directory(&sym_zip_path).unwrap();
@@ -2136,6 +2831,77 @@ mod tests {
         assert_eq!(max_size, 4096);
         assert!(!compressed);
         assert!(fname_buf.starts_with(b"zz_movie.mkv\0"));
+
+        // 7. Single-archive extraction (used by ExtensionManager::InstallExtension) preserves bundled nested archives intact
+        let ext_dir = work_dir.join("ext_pkg");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        let bundled_zip = build_test_zip(&[("inner.txt", b"bundled resource", None, 0, None)]);
+        let pkg_zip_path = ext_dir.join("extension_pkg.zip");
+        let pkg_out_dir = ext_dir.join("installed");
+        std::fs::write(
+            &pkg_zip_path,
+            build_test_zip(&[
+                ("manifest.json", b"{}", None, 0, None),
+                ("resources/data.zip", &bundled_zip, None, 0, None),
+            ]),
+        )
+        .unwrap();
+        let single_summary = extract_single_archive_with_zipfast_cancellable(
+            &pkg_zip_path,
+            &pkg_out_dir,
+            "",
+            1,
+            |_, _| {},
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(single_summary.files, 2);
+        assert!(pkg_out_dir.join("manifest.json").exists());
+        assert_eq!(
+            std::fs::read(pkg_out_dir.join("resources/data.zip")).unwrap(),
+            bundled_zip
+        );
+        assert!(!pkg_out_dir.join("resources/inner.txt").exists());
+
+        // 8. Nested archive cleanup deletes only volumes actually consumed by the nested archive
+        let p1 = std::fs::read(testdata_dir.join("rarrenamer/testfile5.part01.rar"));
+        let p2 = std::fs::read(testdata_dir.join("rarrenamer/testfile5.part02.rar"));
+        let p3 = std::fs::read(testdata_dir.join("rarrenamer/testfile5.part03.rar"));
+        if let (Ok(b1), Ok(b2), Ok(b3)) = (p1, p2, p3) {
+            let nested_rar_dir = work_dir.join("nested_rar_consumed");
+            let nested_rar_out = nested_rar_dir.join("out");
+            std::fs::create_dir_all(&nested_rar_out).unwrap();
+            let stale_part4 = nested_rar_out.join("inner.part04.rar");
+            std::fs::write(&stale_part4, b"unrelated pre-existing part04").unwrap();
+            let outer_zip = nested_rar_dir.join("outer.zip");
+            std::fs::write(
+                &outer_zip,
+                build_test_zip(&[
+                    ("inner.part01.rar", &b1, None, 0, None),
+                    ("inner.part02.rar", &b2, None, 0, None),
+                    ("inner.part03.rar", &b3, None, 0, None),
+                ]),
+            )
+            .unwrap();
+            extract_archive_with_zipfast_cancellable(
+                &outer_zip,
+                &nested_rar_out,
+                "",
+                1,
+                true,
+                |_, _| {},
+                &mut || false,
+            )
+            .unwrap();
+            assert!(!nested_rar_out.join("inner.part01.rar").exists());
+            assert!(!nested_rar_out.join("inner.part02.rar").exists());
+            assert!(!nested_rar_out.join("inner.part03.rar").exists());
+            assert!(
+                stale_part4.exists(),
+                "unconsumed inner.part04.rar must not be deleted"
+            );
+            assert!(nested_rar_out.join("testfile5.dat").exists());
+        }
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }

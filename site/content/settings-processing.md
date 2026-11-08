@@ -29,7 +29,7 @@ Turn `Unpack` on when you want archive extraction. Check that `UnrarCmd` and `Se
 
 A category can override the global unpack setting. For nested archives, see the optional extension examples in [Extensions](settings-extensions.md).
 
-Key options: [`Unpack`](options.md#unpack), [`DirectUnpack`](options.md#directunpack), [`UseTempUnpackDir`](options.md#usetempunpackdir), [`UnrarCmd`](options.md#unrarcmd), [`SevenZipCmd`](options.md#sevenzipcmd), [`UnpackCleanupDisk`](options.md#unpackcleanupdisk), [`UnpackIgnoreExt`](options.md#unpackignoreext).
+Key options: [`Unpack`](options.md#unpack), [`DirectUnpack`](options.md#directunpack), [`UseTempUnpackDir`](options.md#usetempunpackdir), [`UnpackCleanupDisk`](options.md#unpackcleanupdisk), [`UnpackIgnoreExt`](options.md#unpackignoreext).
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/unpack.jpg" aria-label="Open full-size picture: Archive extraction and cleanup settings"><img src="assets/settings/unpack.jpg" width="1280" height="938" loading="lazy" alt="Archive extraction and cleanup settings"></a>

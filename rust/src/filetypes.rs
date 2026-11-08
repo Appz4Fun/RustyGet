@@ -1,23 +1,16 @@
 //! FileTypes: file and directory names and contents classified (archives,
 //! parity, video, audio, subtitles, books, images, disc structures, samples,
-//! clutter) and a file's type sniffed from its first bytes. It matches the
-//! C++ FileTypes; names compare as Util::StrCaseCmp (the C library's tolower
-//! in the current locale).
+//! clutter) and a file's type sniffed from its first bytes.
 
-use std::ffi::{c_int, CStr};
-
-extern "C" {
-    fn tolower(c: c_int) -> c_int;
-    fn isdigit(c: c_int) -> c_int;
-}
+use std::ffi::CStr;
 
 fn digit(b: u8) -> bool {
-    unsafe { isdigit(b as c_int) != 0 }
+    b.is_ascii_digit()
 }
 
-/// Util::StrCaseCmp.
+/// ASCII case-insensitive equality (`Util::StrCaseCmp`).
 pub fn str_case_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| unsafe { tolower(x as c_int) == tolower(y as c_int) })
+    a.eq_ignore_ascii_case(b)
 }
 
 fn matches_any_ext(ext: &[u8], formats: &[&str]) -> bool {
@@ -58,8 +51,8 @@ pub fn is_rar_volume_ext(ext: &[u8]) -> bool {
     if ext.len() != 4 || ext[0] != b'.' {
         return false;
     }
-    let l = unsafe { tolower(ext[1] as c_int) };
-    (b'r' as c_int..=b'z' as c_int).contains(&l) && digit(ext[2]) && digit(ext[3])
+    let l = ext[1].to_ascii_lowercase();
+    (b'r'..=b'z').contains(&l) && digit(ext[2]) && digit(ext[3])
 }
 
 pub fn is_all_digits_ext(ext: &[u8]) -> bool {

@@ -1,106 +1,61 @@
 # build stage
 FROM alpine:3.22.2 AS build
 
-# args
-ARG UNRAR7_NATIVE=false
-ARG MAKE_JOBS=1
+ARG MAKE_JOBS=3
 ARG TARGETPLATFORM
-ARG CMAKE_BUILD_TYPE=Release
 
-#install build packages
+# install build packages
 RUN \
   echo "**** install build packages ****" && \
-  apk add --no-cache g++ gcc git libxml2-dev libxslt-dev make ncurses-dev openssl-dev boost-dev curl cmake
+  apk add --no-cache bash python3 pkgconf g++ gcc git just cargo rust openssl-dev curl
 
-#install archive packages
-COPY unpackers.env /tmp/unpackers.env
+# build rustyget
+COPY ./ /rustyget
 RUN \
-  . /tmp/unpackers.env && \
-  echo "**** install unrar7 from source ****" && \
-  mkdir /tmp/unrar7 && \
-  curl -o /tmp/unrar7.tar.gz -L "https://www.rarlab.com/rar/unrarsrc-${UNRAR_SRC_VERSION}.tar.gz" && \
-  tar xf /tmp/unrar7.tar.gz -C /tmp/unrar7 --strip-components=1 && \
-  cd /tmp/unrar7 && \
-  if [ "${UNRAR7_NATIVE}" != "true" ] && [ "${TARGETPLATFORM}" = "linux/amd64" ]; \
-    then sed -i "s|CXXFLAGS=-march=native|CXXFLAGS=-march=x86-64-v2|" makefile; fi && \
-  if [ "${UNRAR7_NATIVE}" != "true" ] && [ "${TARGETPLATFORM}" = "linux/arm64" ]; \
-    then sed -i "s|CXXFLAGS=-march=native|CXXFLAGS=-march=armv8-a+crypto+crc|" makefile; fi && \
-  if [ "${UNRAR7_NATIVE}" != "true" ] && [ "${TARGETPLATFORM}" = "linux/arm/v7" ]; \
-    then sed -i "s|CXXFLAGS=-march=native|CXXFLAGS=-march=armv7-a|" makefile; fi && \
-  make -j ${MAKE_JOBS} && \
-  install -v -m755 unrar /usr/bin/unrar7 && \
-  echo "**** install unrar6 from source ****" && \
-  mkdir /tmp/unrar6 && \
-  curl -o /tmp/unrar6.tar.gz -L "https://www.rarlab.com/rar/unrarsrc-${UNRAR6_SRC_VERSION}.tar.gz" && \
-  tar xf /tmp/unrar6.tar.gz -C /tmp/unrar6 --strip-components=1 && \
-  cd /tmp/unrar6 && \
-  make -j ${MAKE_JOBS} && \
-  install -v -m755 unrar /usr/bin/ && \
-  echo "**** install 7zip from source ****" && \
-  mkdir /tmp/7z && \
-  curl -o /tmp/7z/7z.tar.xz -lL https://github.com/ip7z/7zip/releases/download/${ZIP7_VERSION}/7z${ZIP7_VERSION//./}-src.tar.xz && \
-  cd /tmp/7z && \
-  tar xf 7z.tar.xz && \
-  cd CPP/7zip/Bundles/Alone && \
-  make -j ${MAKE_JOBS} -f makefile.gcc && \
-  install -v -m755 _o/7za /usr/bin/7z
+  echo "**** build rustyget ****" && \
+  mkdir -p /app/rustyget && \
+  cd /rustyget && \
+  just release "${MAKE_JOBS}" && \
+  install -v -m755 /rustyget/build/release/rustyget /app/rustyget/rustyget && \
+  ln -sf /app/rustyget/rustyget /app/rustyget/nzbget && \
+  cp -r /rustyget/webui /app/rustyget/webui && \
+  cp /rustyget/nzbget.conf /app/rustyget/webui/rustyget.conf.template && \
+  cp /rustyget/nzbget.conf /app/rustyget/webui/nzbget.conf.template && \
+  mkdir -p /app/rustyget/share/rustyget && \
+  cp /rustyget/nzbget.conf /app/rustyget/share/rustyget/rustyget.conf && \
+  cp /rustyget/pubkey.pem /app/rustyget/pubkey.pem && \
+  curl -o /app/rustyget/cacert.pem -L "https://curl.se/ca/cacert.pem"
 
-#build nzbget
-COPY ./ /nzbget
-RUN \
-  echo "**** build nzbget ****" && \
-  mkdir -p /app/nzbget && \
-  mkdir -p /nzbget/build && \
-  cd /nzbget/build && \
-  cmake .. -DCMAKE_INSTALL_PREFIX=/app/nzbget -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} && \
-  cmake --build . -j ${MAKE_JOBS} && \
-  cmake --install . && \
-  cmake --build . --target install-conf && \
-  mv /app/nzbget/bin/nzbget /app/nzbget/ && \
-  rm -rf /app/nzbget/bin/ && \
-  rm -rf /app/nzbget/etc/ && \
-  mv /app/nzbget/share/nzbget/webui /app/nzbget/ && \
-  cp /app/nzbget/share/nzbget/nzbget.conf /app/nzbget/webui/nzbget.conf.template && \
-  cp /nzbget/pubkey.pem /app/nzbget/pubkey.pem && \
-  curl -o /app/nzbget/cacert.pem -L "https://curl.se/ca/cacert.pem"
-
-#change default configvalues
+# change default config values
 RUN \
   sed -i \
     -e "s|^MainDir=.*|MainDir=/downloads|g" \
-    -e "s|^ScriptDir=.*|ScriptDir=$\{MainDir\}/scripts|g" \
     -e "s|^WebDir=.*|WebDir=$\{AppDir\}/webui|g" \
-    -e "s|^ConfigTemplate=.*|ConfigTemplate=$\{AppDir\}/webui/nzbget.conf.template|g" \
-    -e "s|^UnrarCmd=.*|UnrarCmd=unrar|g" \
-    -e "s|^SevenZipCmd=.*|SevenZipCmd=7z|g" \
+    -e "s|^ConfigTemplate=.*|ConfigTemplate=$\{AppDir\}/webui/rustyget.conf.template|g" \
     -e "s|^CertStore=.*|CertStore=$\{AppDir\}/cacert.pem|g" \
     -e "s|^CertCheck=.*|CertCheck=yes|g" \
     -e "s|^DestDir=.*|DestDir=$\{MainDir\}/completed|g" \
     -e "s|^InterDir=.*|InterDir=$\{MainDir\}/intermediate|g" \
-    -e "s|^LogFile=.*|LogFile=$\{MainDir\}/nzbget.log|g" \
+    -e "s|^LogFile=.*|LogFile=$\{MainDir\}/rustyget.log|g" \
     -e "s|^AuthorizedIP=.*|AuthorizedIP=127.0.0.1|g" \
-  /app/nzbget/share/nzbget/nzbget.conf
+  /app/rustyget/share/rustyget/rustyget.conf && \
+  cp /app/rustyget/share/rustyget/rustyget.conf /app/rustyget/webui/rustyget.conf.template && \
+  cp /app/rustyget/share/rustyget/rustyget.conf /app/rustyget/webui/nzbget.conf.template
 
 # runtime stage
 FROM alpine:3.22.2
-ARG NZBGET_RELEASE=develop
+ARG RUSTYGET_RELEASE=develop
 
 # labels
-LABEL org.opencontainers.image.description="NZBGet from nzbget.com"
-LABEL org.opencontainers.image.source="https://github.com/nzbgetcom/nzbget"
-LABEL maintainer="nzbget@nzbget.com"
+LABEL org.opencontainers.image.description="RustyGet"
+LABEL org.opencontainers.image.source="https://github.com/Appz4Fun/RustyGet"
 
 ENV TERM=linux
-COPY --from=build /usr/bin/unrar /usr/bin/unrar
-COPY --from=build /usr/bin/unrar7 /usr/bin/unrar7
-COPY --from=build /usr/bin/7z /usr/bin/7z
-COPY --from=build /app/nzbget/ /app/nzbget/
+COPY --from=build /app/rustyget/ /app/rustyget/
 RUN \
   echo "**** install packages ****" && \
-  apk add --no-cache --update shadow su-exec libxml2 libxslt openssl python3 boost1.84-json boost1.84-filesystem tzdata && \
-  ln -sf /usr/bin/python3 /usr/bin/python && \
-  ln -s /usr/bin/7z /app/nzbget/7za && \
-  ln -s /usr/bin/unrar /app/nzbget/unrar && \
+  apk add --no-cache --update libstdc++ libgcc shadow su-exec openssl tzdata && \
+  ln -sf /app/rustyget /app/nzbget && \
   echo "**** cleanup ****" && \
   rm -rf /root/.cache /root/.cargo /tmp/*
 COPY docker/entrypoint.sh /entrypoint.sh

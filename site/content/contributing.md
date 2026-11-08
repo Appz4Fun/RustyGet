@@ -41,19 +41,18 @@ Prefer porting a whole module over a single small function.
 The inherited build and test workflows are turned off in the repository's Actions tab while the test suite is rebuilt for the rewrite. Until then, run the tests locally:
 
 ```bash
-cmake -B build -DENABLE_TESTS=ON
-cmake --build build -j 8
-(cd build && ctest)
+just test
 ```
 
 The duplicate-fleet features have a functional harness in `tests/functional/dupefallback/`, which runs real downloads against a local test news server. Point it at a copy of the binary, so a rebuild during the run can't change it:
 
 ```bash
-cp build/nzbget /tmp/nzbget-under-test
-python3 tests/functional/dupefallback/harness.py --nzbget /tmp/nzbget-under-test --scenario all
+just build
+cp build/release/rustyget /tmp/rustyget-under-test
+python3 tests/functional/dupefallback/harness.py --nzbget /tmp/rustyget-under-test --scenario all
 ```
 
-Check the pass count, not just the exit code: a build without `-DENABLE_TESTS=ON` runs no unit tests and still exits with `0`.
+Check the pass count, not just the exit code.
 
 `--fallback-mode live` or `--fallback-mode stream` runs the scenarios written for a lower `DupeArticleFallback` mode under that one. The daemon gates its features on the order `no`, `article`, `stream`, `live`, so whatever passes under a mode must pass under every higher one. The scenario `dupesearchrealindexer` searches a real NZBHydra2 when `NZBHYDRA2_URL` and `NZBHYDRA2_APIKEY` are set, in the environment or in a `.env` file in the repository root, and is skipped without them. Every nzb-file it fetches counts as a grab at your indexers, so run it on purpose. See [Functional testing](https://github.com/Appz4Fun/RustyGet/blob/main/docs/FUNCTIONAL_TESTING.md) for the details.
 

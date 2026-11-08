@@ -110,6 +110,6 @@ RustyGet fixes about 100 inherited bugs. 96 of them are [reported to the NZBGet 
 
 ## Build
 
-- `rust/rust-toolchain.toml` pins Rust 1.99.0. CMake finds Cargo and builds the crate into the binary; without Rust, the C++ fallbacks build instead.
-- The par2 parsing for twins uses the `rust-par2` crate.
+- `rust/rust-toolchain.toml` pins Rust 1.99.0, and `just build` compiles the Rust crate and links the `rustyget` binary.
+- PAR2 verification, streaming repair, post-download repair, and par-renaming use the built-in `par-rs` crate, and archive extraction uses the built-in `zipfast` and `zipview` crates.
 - The inherited GitHub workflows for builds, packages, and tests are turned off in the Actions tab while the tests are rebuilt. Only the documentation workflow runs.

@@ -1220,6 +1220,240 @@ pub fn remote_client_is_empty_edit_target(id_count: usize, name_count: usize) ->
     id_count == 0 && name_count == 0
 }
 
+// ---- Pure-Rust POSIX Terminal / ANSI TUI Backend (replacing C ncurses) ----
+
+struct TermState {
+    saved_termios: Option<libc::termios>,
+    frame_buf: Vec<u8>,
+    input_buf: Vec<u8>,
+    esc_started_at: Option<std::time::Instant>,
+}
+
+static TERM_STATE: std::sync::Mutex<TermState> = std::sync::Mutex::new(TermState {
+    saved_termios: None,
+    frame_buf: Vec::new(),
+    input_buf: Vec::new(),
+    esc_started_at: None,
+});
+
+/// Initializes the terminal for raw/non-blocking TUI mode and enters alternate screen.
+/// Returns `1` if ANSI colors are supported, `0` if monochrome, or `-1` on error.
+pub fn term_init() -> i32 {
+    let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        if libc::isatty(libc::STDIN_FILENO) != 0 {
+            let mut orig: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut orig) == 0 {
+                let mut raw = orig;
+                raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+                raw.c_cc[libc::VMIN] = 0;
+                raw.c_cc[libc::VTIME] = 0;
+                let _ = libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
+                guard.saved_termios = Some(orig);
+            }
+        }
+        let init_seq = b"\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H";
+        let _ = libc::write(
+            libc::STDOUT_FILENO,
+            init_seq.as_ptr().cast(),
+            init_seq.len(),
+        );
+    }
+    guard.frame_buf.clear();
+    guard.input_buf.clear();
+    guard.esc_started_at = None;
+    let term_env = std::env::var("TERM").unwrap_or_default();
+    if term_env.is_empty() || term_env == "dumb" {
+        0
+    } else {
+        1
+    }
+}
+
+/// Restores terminal state and exits alternate screen.
+pub fn term_shutdown() {
+    let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        let exit_seq = b"\x1b[0m\x1b[?25h\x1b[?1049l";
+        let _ = libc::write(
+            libc::STDOUT_FILENO,
+            exit_seq.as_ptr().cast(),
+            exit_seq.len(),
+        );
+        if let Some(orig) = guard.saved_termios.take() {
+            let _ = libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &orig);
+        }
+    }
+    guard.frame_buf.clear();
+    guard.input_buf.clear();
+    guard.esc_started_at = None;
+}
+
+/// Queries terminal `(rows, cols)` via `TIOCGWINSZ`, defaulting to `(24, 80)`.
+pub fn term_get_size() -> (i32, i32) {
+    unsafe {
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0
+            && ws.ws_row > 0
+            && ws.ws_col > 0
+        {
+            return (ws.ws_row as i32, ws.ws_col as i32);
+        }
+    }
+    (24, 80)
+}
+
+/// Appends a screen clear sequence to the current frame buffer.
+pub fn term_clear() {
+    let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    guard.frame_buf.extend_from_slice(b"\x1b[2J\x1b[H");
+}
+
+fn ansi_color_pair_escape(color_pair: i32) -> &'static [u8] {
+    match color_pair {
+        1 | 5 => b"\x1b[37;40m", // WHITE on BLACK
+        2 | 6 => b"\x1b[32;40m", // GREEN on BLACK
+        3 => b"\x1b[35;40m",     // MAGENTA on BLACK
+        4 => b"\x1b[31;40m",     // RED on BLACK
+        7 => b"\x1b[34;47m",     // BLUE on WHITE (status)
+        8 | 9 => b"\x1b[37;44m", // WHITE on BLUE (keybar / infoline)
+        10 => b"\x1b[30;46m",    // BLACK on CYAN (highlight)
+        11 => b"\x1b[30;43m",    // BLACK on YELLOW (cursor)
+        12 => b"\x1b[37;41m",    // WHITE on RED (hint)
+        _ => b"\x1b[0m",
+    }
+}
+
+/// Appends positioned, colored text to the frame buffer, sanitizing control bytes in `text`.
+pub fn term_plot_text(text: &[u8], row: i32, col: i32, use_color: bool, color_pair: i32, blink: bool) {
+    let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let r = (row.max(0) + 1) as u32;
+    let c = (col.max(0) + 1) as u32;
+    guard.frame_buf.extend_from_slice(format!("\x1b[{r};{c}H").as_bytes());
+    if use_color {
+        guard.frame_buf.extend_from_slice(ansi_color_pair_escape(color_pair));
+        if blink {
+            guard.frame_buf.extend_from_slice(b"\x1b[5m");
+        }
+    }
+    for &b in text {
+        guard
+            .frame_buf
+            .push(if b < 0x20 || b == 0x7f { b' ' } else { b });
+    }
+    if use_color {
+        guard.frame_buf.extend_from_slice(b"\x1b[0m");
+    }
+}
+
+/// Positions the cursor and flushes the accumulated frame buffer to stdout.
+pub fn term_refresh(row: i32, col: i32) {
+    let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let r = (row.max(0) + 1) as u32;
+    let c = (col.max(0) + 1) as u32;
+    guard.frame_buf.extend_from_slice(format!("\x1b[{r};{c}H").as_bytes());
+    if !guard.frame_buf.is_empty() {
+        unsafe {
+            let _ = libc::write(
+                libc::STDOUT_FILENO,
+                guard.frame_buf.as_ptr().cast(),
+                guard.frame_buf.len(),
+            );
+        }
+        guard.frame_buf.clear();
+    }
+}
+
+const TERM_ESC_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn decode_next_term_key(
+    input_buf: &mut Vec<u8>,
+    esc_started_at: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> i32 {
+    if input_buf.is_empty() {
+        *esc_started_at = None;
+        return -1;
+    }
+    let b0 = input_buf[0];
+    if b0 == 0x7f || b0 == 0x08 {
+        input_buf.drain(..1);
+        *esc_started_at = None;
+        return 263; // KEY_BACKSPACE
+    }
+    if b0 == 0x1b {
+        const SEQS: &[(&[u8], i32)] = &[
+            (b"\x1b[B", 258),
+            (b"\x1bOB", 258),
+            (b"\x1b[A", 259),
+            (b"\x1bOA", 259),
+            (b"\x1b[H", 262),
+            (b"\x1bOH", 262),
+            (b"\x1b[1~", 262),
+            (b"\x1b[7~", 262),
+            (b"\x1b[F", 360),
+            (b"\x1bOF", 360),
+            (b"\x1b[4~", 360),
+            (b"\x1b[8~", 360),
+            (b"\x1b[5~", 339),
+            (b"\x1b[6~", 338),
+        ];
+        for &(seq, code) in SEQS {
+            if input_buf.starts_with(seq) {
+                input_buf.drain(..seq.len());
+                *esc_started_at = None;
+                return code;
+            }
+        }
+        // If input is a prefix of a known escape sequence, retain it across polls until timeout.
+        if SEQS
+            .iter()
+            .any(|(seq, _)| seq.len() > input_buf.len() && seq.starts_with(input_buf))
+        {
+            let started = *esc_started_at.get_or_insert(now);
+            if now.saturating_duration_since(started) < TERM_ESC_TIMEOUT {
+                return -1;
+            }
+        }
+        input_buf.drain(..1);
+        *esc_started_at = None;
+        return 27;
+    }
+    input_buf.drain(..1);
+    *esc_started_at = None;
+    b0 as i32
+}
+
+fn poll_read_fd_nonblocking(fd: libc::c_int, input_buf: &mut Vec<u8>) {
+    unsafe {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if libc::poll(&mut pfd, 1, 0) > 0 && (pfd.revents & libc::POLLIN) != 0 {
+            let mut b = [0u8; 64];
+            let n = libc::read(fd, b.as_mut_ptr().cast(), b.len());
+            if n > 0 {
+                input_buf.extend_from_slice(&b[..n as usize]);
+            }
+        }
+    }
+}
+
+/// Reads a single key or ANSI escape sequence from non-blocking stdin, retaining buffered input.
+/// Returns `-1` when no key is available.
+pub fn term_read_key() -> i32 {
+    let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    poll_read_fd_nonblocking(libc::STDIN_FILENO, &mut guard.input_buf);
+    let state = &mut *guard;
+    decode_next_term_key(
+        &mut state.input_buf,
+        &mut state.esc_started_at,
+        std::time::Instant::now(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1337,5 +1571,81 @@ mod tests {
 
         let plain_info = format_log_message_line(false, 0, b"started");
         assert_eq!(plain_info, b"[INFO] started\n");
+    }
+
+    #[test]
+    fn test_decode_next_term_key_retains_incomplete_escape_sequences_across_polls() {
+        let mut buf = Vec::new();
+        let mut esc_started = None;
+        let t0 = std::time::Instant::now();
+
+        // Poll 1: only ESC arrives -> retained, returns -1
+        buf.extend_from_slice(b"\x1b");
+        assert_eq!(decode_next_term_key(&mut buf, &mut esc_started, t0), -1);
+        assert_eq!(buf, b"\x1b");
+        assert!(esc_started.is_some());
+
+        // Poll 2 (10 ms later): '[' arrives -> still incomplete prefix `\x1b[`, returns -1
+        buf.extend_from_slice(b"[");
+        assert_eq!(
+            decode_next_term_key(
+                &mut buf,
+                &mut esc_started,
+                t0 + std::time::Duration::from_millis(10)
+            ),
+            -1
+        );
+        assert_eq!(buf, b"\x1b[");
+
+        // Poll 3 (20 ms later): 'A' arrives -> complete KEY_UP (259)
+        buf.extend_from_slice(b"A");
+        assert_eq!(
+            decode_next_term_key(
+                &mut buf,
+                &mut esc_started,
+                t0 + std::time::Duration::from_millis(20)
+            ),
+            259
+        );
+        assert!(buf.is_empty());
+        assert!(esc_started.is_none());
+
+        // Bare ESC: retained before timeout, emitted as 27 once timeout elapses
+        buf.extend_from_slice(b"\x1b");
+        assert_eq!(decode_next_term_key(&mut buf, &mut esc_started, t0), -1);
+        assert_eq!(
+            decode_next_term_key(
+                &mut buf,
+                &mut esc_started,
+                t0 + TERM_ESC_TIMEOUT + std::time::Duration::from_millis(1)
+            ),
+            27
+        );
+        assert!(buf.is_empty());
+        assert!(esc_started.is_none());
+    }
+
+    #[test]
+    fn test_poll_read_fd_nonblocking_on_idle_pipe() {
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let mut buf = Vec::new();
+        // Idle open pipe must return immediately without blocking
+        poll_read_fd_nonblocking(fds[0], &mut buf);
+        assert!(buf.is_empty());
+
+        // Write a byte to the pipe and verify it is read
+        let msg = b"q";
+        assert_eq!(
+            unsafe { libc::write(fds[1], msg.as_ptr().cast(), msg.len()) },
+            1
+        );
+        poll_read_fd_nonblocking(fds[0], &mut buf);
+        assert_eq!(buf, b"q");
+
+        unsafe {
+            let _ = libc::close(fds[0]);
+            let _ = libc::close(fds[1]);
+        }
     }
 }

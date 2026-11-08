@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2013-2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *  Copyright (C) 2025-2026 Denis <denis@nzbget.com>
@@ -22,8 +22,11 @@
 #ifndef FEEDFILE_H
 #define FEEDFILE_H
 
+#include <memory>
 #include <string>
 #include "FeedInfo.h"
+#include "Log.h"
+#include "nzbget_rs.h"
 
 struct NzbgetRsFeedFileParser;
 
@@ -31,12 +34,75 @@ struct NzbgetRsFeedFileParser;
 class FeedFile
 {
 public:
-	FeedFile(const char* fileName, const char* infoName);
-	~FeedFile();
-	bool Parse();
+	FeedFile(const char* filename, const char* infoName)
+		: m_feedItems(std::make_unique<FeedItemList>())
+		, m_fileName(filename ? filename : "")
+		, m_infoName(infoName ? infoName : "")
+	{
+		debug("Creating FeedFile");
+	}
+
+	~FeedFile()
+	{
+		nzbget_rs_feed_file_parser_free(m_parser);
+	}
+
+	bool Parse()
+	{
+		nzbget_rs_feed_file_parser_free(m_parser);
+		m_parser = nzbget_rs_feed_file_parser_parse_file(m_fileName.c_str());
+		if (!m_parser)
+		{
+			error("Failed to parse rss feed %s", m_infoName.c_str());
+			return false;
+		}
+
+		size_t count = nzbget_rs_feed_file_parser_finalize(m_parser);
+		for (size_t i = 0; i < count; ++i)
+		{
+			NzbgetRsParsedFeedItemView view{};
+			if (nzbget_rs_feed_file_parser_get_item(m_parser, i, &view) == 0)
+			{
+				continue;
+			}
+			m_feedItems->emplace_back();
+			FeedItemInfo& item = m_feedItems->back();
+			item.SetTitle(view.title);
+			item.SetFilename(view.filename);
+			item.SetUrl(view.url);
+			item.SetCategory(view.category);
+			item.SetDescription(view.description);
+			if (view.has_season != 0)
+			{
+				item.SetSeason(view.season);
+			}
+			if (view.has_episode != 0)
+			{
+				item.SetEpisode(view.episode);
+			}
+			item.SetTime((time_t)view.time);
+			item.SetSize(view.size);
+			item.SetImdbId(view.imdb_id);
+			item.SetRageId(view.rage_id);
+			item.SetTvdbId(view.tvdb_id);
+			item.SetTvmazeId(view.tvmaze_id);
+			for (size_t k = 0; k < view.attr_count; ++k)
+			{
+				item.GetAttributes()->emplace_back(view.attr_names[k], view.attr_values[k]);
+			}
+		}
+
+		nzbget_rs_feed_file_parser_free(m_parser);
+		m_parser = nullptr;
+		return true;
+	}
+
 	std::unique_ptr<FeedItemList> DetachFeedItems() { return std::move(m_feedItems); }
 
-	void LogDebugInfo();
+	void LogDebugInfo()
+	{
+		info(" FeedFile %s", m_fileName.c_str());
+	}
 
 private:
 	std::unique_ptr<FeedItemList> m_feedItems;

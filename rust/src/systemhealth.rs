@@ -663,7 +663,7 @@ pub fn validate_paths_section(
     emit_if_not_ok(&mut emit, "TempDir", temp_status);
 
     let script_status = if input.script_dirs.is_empty() {
-        HealthStatus::warning("'ScriptDir' is empty. Extensions cannot be found or installed")
+        HealthStatus::ok()
     } else {
         let mut status = HealthStatus::ok();
         for &dir in input.script_dirs {
@@ -1137,23 +1137,7 @@ pub fn validate_unpack_section(
             b"'UnpackPauseQueue' has no effect because Unpack is disabled",
         );
     }
-    if unpack {
-        let unrar_status = if unrar_path.as_os_str().is_empty() {
-            HealthStatus::warning("'UnrarCmd' is not configured. RAR archives cannot be unpacked")
-        } else {
-            file_exists(unrar_path).and_then(|| file_executable(unrar_path))
-        };
-        emit_if_not_ok(&mut emit, "UnrarCmd", unrar_status);
-
-        let sevenzip_status = if sevenzip_path.as_os_str().is_empty() {
-            HealthStatus::warning(
-                "'SevenZipCmd' is not configured. This prevents unpacking 7z archives and installing extensions",
-            )
-        } else {
-            file_exists(sevenzip_path).and_then(|| file_executable(sevenzip_path))
-        };
-        emit_if_not_ok(&mut emit, "SevenZipCmd", sevenzip_status);
-    }
+    let _ = (unrar_path, sevenzip_path);
     if ext_cleanup_disk.len() > 512 {
         emit(
             "ExtCleanupDisk",
@@ -1737,11 +1721,11 @@ pub fn validate_security_section(
             Severity::Info,
             b"Using an empty username is not recommended for security reasons",
         );
-    } else if input.control_username == b"nzbget" {
+    } else if input.control_username == b"nzbget" || input.control_username == b"rustyget" {
         emit(
             "ControlUsername",
             Severity::Info,
-            b"Using default username 'nzbget' is not recommended for security reasons",
+            b"Using default username 'rustyget' is not recommended for security reasons",
         );
     }
 
@@ -1751,11 +1735,13 @@ pub fn validate_security_section(
         validate_control_password(input.control_password),
     );
 
-    if !input.restricted_username.is_empty() && input.control_username == b"nzbget" {
+    if !input.restricted_username.is_empty()
+        && (input.control_username == b"nzbget" || input.control_username == b"rustyget")
+    {
         emit(
             "RestrictedUsername",
             Severity::Warning,
-            b"'RestrictedUsername' is enabled while 'ControlUsername' is still set to the default 'nzbget'",
+            b"'RestrictedUsername' is enabled while 'ControlUsername' is still set to the default 'rustyget'",
         );
     }
 
@@ -1773,11 +1759,13 @@ pub fn validate_security_section(
         );
     }
 
-    if !input.add_username.is_empty() && input.control_username == b"nzbget" {
+    if !input.add_username.is_empty()
+        && (input.control_username == b"nzbget" || input.control_username == b"rustyget")
+    {
         emit(
             "AddUsername",
             Severity::Warning,
-            b"'AddUsername' is enabled while 'ControlUsername' is still set to the default 'nzbget'",
+            b"'AddUsername' is enabled while 'ControlUsername' is still set to the default 'rustyget'",
         );
     }
 
@@ -2157,6 +2145,10 @@ pub fn validate_news_servers_group(
         .min(actives.len())
         .min(max_conns.len())
         .min(levels.len());
+    if n == 1 && hosts[0] == b"my.newsserver.com" && actives[0] == 0 {
+        emit_issue(Severity::Info, b"No news servers are configured yet");
+        return;
+    }
     if n == 0 || (n == 1 && hosts[0] == b"my.newsserver.com") {
         emit_issue(Severity::Error, b"No servers are configured");
     }

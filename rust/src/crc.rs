@@ -9,22 +9,6 @@
 /// The reflected CRC-32 polynomial.
 const POLY: u32 = 0xedb8_8320;
 
-const CRC32_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut c = i as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            c = if c & 1 != 0 { (c >> 1) ^ POLY } else { c >> 1 };
-            bit += 1;
-        }
-        table[i] = c;
-        i += 1;
-    }
-    table
-};
-
 /// Incremental IEEE 802.3 CRC-32 accumulator matching C++ `Crc32`.
 #[derive(Debug, Clone, Copy)]
 pub struct Crc32 {
@@ -43,16 +27,19 @@ impl Crc32 {
     }
 
     pub fn append(&mut self, data: &[u8]) {
-        let mut c = self.state;
-        for &b in data {
-            c = CRC32_TABLE[((c as u8) ^ b) as usize] ^ (c >> 8);
-        }
-        self.state = c;
+        self.state = !crc32_append(data, !self.state);
     }
 
     pub const fn finish(&self) -> u32 {
         !self.state
     }
+}
+
+/// Hardware-accelerated IEEE 802.3 CRC-32 update matching `rapidyenc_crc`.
+pub fn crc32_append(data: &[u8], init: u32) -> u32 {
+    let mut hasher = crc32fast::Hasher::new_with_initial(init);
+    hasher.update(data);
+    hasher.finalize()
 }
 
 /// a * b modulo POLY (bit-reflected: bit 31 is x^0).

@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2004 Sven Henkel <sidddy@users.sourceforge.net>
  *  Copyright (C) 2007-2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
@@ -22,24 +22,41 @@
 #ifndef OBSERVER_H
 #define OBSERVER_H
 
-class Observer;
+#include <algorithm>
+#include <vector>
 
-class Subject
-{
-public:
-	void Attach(Observer* observer);
-	void Detach(Observer* observer);
-	void Notify(void* aspect);
-
-private:
-	std::vector<Observer*> m_observers;
-};
+class Subject;
 
 class Observer
 {
 protected:
 	virtual void Update(Subject* caller, void* aspect) = 0;
 	friend class Subject;
+};
+
+class Subject
+{
+public:
+	void Attach(Observer* observer)
+	{
+		m_observers.push_back(observer);
+	}
+
+	void Detach(Observer* observer)
+	{
+		m_observers.erase(std::remove(m_observers.begin(), m_observers.end(), observer), m_observers.end());
+	}
+
+	void Notify(void* aspect)
+	{
+		for (Observer* observer : m_observers)
+		{
+			observer->Update(this, aspect);
+		}
+	}
+
+private:
+	std::vector<Observer*> m_observers;
 };
 
 #endif

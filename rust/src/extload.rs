@@ -1,17 +1,7 @@
 //! ExtensionLoader::V1 (ExtensionLoader.cpp): the header of a pre-manifest
 //! extension script - its kind, about text, queue events, task time,
 //! description, requirements, and the options and commands of its OPTIONS
-//! section with their select values - parsed as the C++ did: lines as
-//! std::getline splits them, prefix and substring tests that stop at a NUL
-//! where the C++ used strncmp/strstr, std::string positions elsewhere, the
-//! locale's isspace for trims and strtod for numbers.
-
-use std::ffi::{c_char, c_int, CString};
-
-extern "C" {
-    fn isspace(c: c_int) -> c_int;
-    fn strtod(s: *const c_char, end: *mut *mut c_char) -> f64;
-}
+//! section with their select values.
 
 /// A select value or an option value: ManifestFile::SelectOption.
 #[derive(Clone, Debug, PartialEq)]
@@ -82,7 +72,7 @@ fn substr(s: &[u8], pos: usize, count: usize) -> Vec<u8> {
 }
 
 fn space_left(b: u8) -> bool {
-    unsafe { isspace(b as c_int) != 0 }
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
 // The caller supplies right-space classification because C++ can override
@@ -131,15 +121,15 @@ fn lines(data: &[u8]) -> impl Iterator<Item = Vec<u8>> + '_ {
     })
 }
 
-/// GetSelectOpt: a number (strtod, finite or NaN) when it can be one.
+/// GetSelectOpt: a finite number when it can be one.
 fn select_opt(val: &[u8], can_be_num: bool) -> Select {
     if !can_be_num {
         return Select::Str(val.to_vec());
     }
-    let cs = CString::new(c(val)).expect("no NUL");
-    let mut end: *mut c_char = std::ptr::null_mut();
-    let value = unsafe { strtod(cs.as_ptr(), &mut end) };
-    if value < f64::MIN || value > f64::MAX || end.cast_const() == cs.as_ptr() {
+    let Some(value) = crate::dupecoord::parse_f64_prefix(c(val)) else {
+        return Select::Str(val.to_vec());
+    };
+    if value < f64::MIN || value > f64::MAX {
         return Select::Str(val.to_vec());
     }
     Select::Num(value)

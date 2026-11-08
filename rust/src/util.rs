@@ -5,49 +5,18 @@
 use crate::wildmask::Lower;
 use std::ffi::{c_char, c_int, CStr};
 
-// Use the process C runtime, just as CString::Format does. Rust's formatter
-// ignores LC_NUMERIC and the C floating-point rounding mode. Keep raw bytes:
-// a locale's decimal separator need not be UTF-8.
-extern "C" {
-    fn snprintf(buf: *mut c_char, size: usize, format: *const c_char, ...) -> c_int;
-    fn sscanf(s: *const c_char, format: *const c_char, ...) -> c_int;
-    fn isspace(c: c_int) -> c_int;
-    fn isalpha(c: c_int) -> c_int;
-    fn isdigit(c: c_int) -> c_int;
-    fn tolower(c: c_int) -> c_int;
-    fn atoi(s: *const c_char) -> c_int;
-    fn strtod(nptr: *const c_char, endptr: *mut *mut c_char) -> f64;
-    fn strtoll(
-        nptr: *const c_char,
-        endptr: *mut *mut c_char,
-        base: c_int,
-    ) -> std::ffi::c_longlong;
-    fn strtoull(
-        nptr: *const c_char,
-        endptr: *mut *mut c_char,
-        base: c_int,
-    ) -> std::ffi::c_ulonglong;
-    fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
-    fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
+const fn c_is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
 fn decimal(value: f64, precision: c_int, suffix: &[u8]) -> Vec<u8> {
-    let mut buf = vec![0u8; 64];
-    loop {
-        // The fixed format and promoted varargs types agree; snprintf writes
-        // at most buf.len() bytes, including its terminator.
-        let n = unsafe { snprintf(buf.as_mut_ptr().cast(), buf.len(), c"%.*f".as_ptr(), precision, value) };
-        if n < 0 {
-            return Vec::new();
-        }
-        let n = n as usize;
-        if n < buf.len() {
-            buf.truncate(n);
-            buf.extend_from_slice(suffix);
-            return buf;
-        }
-        buf.resize(n + 1, 0);
+    if precision < 0 {
+        return Vec::new();
     }
+    let prec = precision as usize;
+    let mut buf = format!("{value:.prec$}").into_bytes();
+    buf.extend_from_slice(suffix);
+    buf
 }
 
 /// A byte Vec's amortized doubling would exceed its allocation limit.
@@ -68,25 +37,16 @@ pub(crate) fn reserve_bytes(out: &mut Vec<u8>, additional: usize) {
     }
 }
 
-/// `decimal`'s text added to `out`; the value is formatted on the stack.
+/// `decimal`'s text added to `out`.
 fn decimal_into(out: &mut Vec<u8>, value: f64, precision: c_int, suffix: &[u8]) {
-    let mut stack = [0u8; 64];
-    // The fixed format and promoted varargs types agree; snprintf writes at
-    // most stack.len() bytes, including its terminator.
-    let n = unsafe { snprintf(stack.as_mut_ptr().cast(), stack.len(), c"%.*f".as_ptr(), precision, value) };
-    if n < 0 {
+    if precision < 0 {
         return;
     }
-    let n = n as usize;
-    reserve_bytes(out, n.saturating_add(suffix.len()));
-    if n < stack.len() {
-        out.extend_from_slice(&stack[..n]);
-    } else {
-        let mut buf = vec![0u8; n + 1];
-        // the same call into a buffer of the length it asked for
-        unsafe { snprintf(buf.as_mut_ptr().cast(), buf.len(), c"%.*f".as_ptr(), precision, value) };
-        out.extend_from_slice(&buf[..n]);
-    }
+    let prec = precision as usize;
+    let formatted = format!("{value:.prec$}");
+    let bytes = formatted.as_bytes();
+    reserve_bytes(out, bytes.len().saturating_add(suffix.len()));
+    out.extend_from_slice(bytes);
     out.extend_from_slice(suffix);
 }
 
@@ -328,11 +288,9 @@ pub fn trim_line(s: &[u8]) -> (usize, usize) {
     (s[..end].iter().take_while(|&&c| line_space(c)).count(), end)
 }
 
-/// Util::Trim(std::string&): (start, end) without the locale's isspace around:
-/// TrimLeft tests unsigned bytes; the caller classifies TrimRight's C++ char
-/// (whose signedness can differ from Rust's c_char with compiler flags).
+/// Util::Trim(std::string&): (start, end) without ASCII whitespace around.
 pub fn trim_string(s: &[u8], left: bool, right: bool, right_space: impl Fn(u8) -> bool) -> (usize, usize) {
-    let start = if left { s.iter().take_while(|&&c| unsafe { isspace(c as c_int) } != 0).count() } else { 0 };
+    let start = if left { s.iter().take_while(|&&c| c_is_space(c)).count() } else { 0 };
     let mut end = s.len();
     if right {
         while end > start && right_space(s[end - 1]) {
@@ -355,7 +313,7 @@ pub fn sanitize_line(s: &mut [u8], right_space: impl Fn(u8) -> bool) -> (usize, 
 }
 
 /// Util::EndsWith (std::string_view): `suffix` ends `s`, case-insensitively
-/// with the locale's tolower of unsigned bytes unless `case_sensitive`.
+/// unless `case_sensitive`.
 pub fn ends_with(s: &[u8], suffix: &[u8], case_sensitive: bool) -> bool {
     if suffix.is_empty() {
         return true;
@@ -367,7 +325,7 @@ pub fn ends_with(s: &[u8], suffix: &[u8], case_sensitive: bool) -> bool {
     if case_sensitive {
         return tail == suffix;
     }
-    tail.iter().zip(suffix).all(|(&a, &b)| unsafe { tolower(a as c_int) == tolower(b as c_int) })
+    tail.eq_ignore_ascii_case(suffix)
 }
 
 /// Util::FormatBuffer: each byte as `%02x `.
@@ -395,16 +353,50 @@ fn timegm_c(year: i32, mon: i32, mday: i32, hour: i32, min: i32, sec: i32) -> i6
     86400i64 * days as i64 + 3600i32.wrapping_mul(hour) as i64 + 60i32.wrapping_mul(min) as i64 + sec as i64
 }
 
+fn scan_signed_i32(bytes: &[u8], mut p: usize) -> Option<(i32, usize)> {
+    while p < bytes.len() && c_is_space(bytes[p]) {
+        p += 1;
+    }
+    if p >= bytes.len() {
+        return None;
+    }
+    let mut neg = false;
+    if bytes[p] == b'-' {
+        neg = true;
+        p += 1;
+    } else if bytes[p] == b'+' {
+        p += 1;
+    }
+    let start = p;
+    let mut acc: u64 = 0;
+    while p < bytes.len() && bytes[p].is_ascii_digit() {
+        acc = acc
+            .saturating_mul(10)
+            .saturating_add(u64::from(bytes[p] - b'0'));
+        p += 1;
+    }
+    if p == start {
+        return None;
+    }
+    let val = if neg {
+        let max_neg = (i64::MAX as u64) + 1;
+        let v = if acc >= max_neg { i64::MIN } else { -(acc as i64) };
+        v as i32
+    } else {
+        (acc.min(i64::MAX as u64) as i64) as i32
+    };
+    Some((val, p))
+}
+
 /// WebUtil::ParseRfc822DateTime: `[Day,] DD Mon YYYY HH:MM[:SS] [zone]` as a
-/// Unix time, 0 if it doesn't parse. Numbers are read by the C library
-/// (sscanf, atoi) and names compared in the current locale, as before.
+/// Unix time, 0 if it doesn't parse.
 pub fn parse_rfc822_date_time(s: &CStr) -> i64 {
     let bytes = s.to_bytes_with_nul();
     let mut p = 0;
     while bytes[p] == b' ' {
         p += 1;
     }
-    if unsafe { isalpha(bytes[p] as c_int) } != 0 {
+    if bytes[p].is_ascii_alphabetic() {
         while bytes[p] != 0 && bytes[p] != b',' && bytes[p] != b' ' {
             p += 1;
         }
@@ -412,55 +404,66 @@ pub fn parse_rfc822_date_time(s: &CStr) -> i64 {
             p += 1;
         }
     }
-    let at = |p: usize| bytes[p..].as_ptr().cast::<c_char>();
-    let mut month = [0 as c_char; 4];
-    let (mut day, mut year, mut hours, mut minutes, mut seconds, mut len): (c_int, c_int, c_int, c_int, c_int, c_int) =
-        (0, 0, 0, 0, 0, 0);
-    // the format's conversions and the argument types agree; %3s writes at most 4 bytes
-    let n = unsafe {
-        sscanf(
-            at(p),
-            c"%d %3s %d %d:%d%n".as_ptr(),
-            &mut day as *mut c_int,
-            month.as_mut_ptr(),
-            &mut year as *mut c_int,
-            &mut hours as *mut c_int,
-            &mut minutes as *mut c_int,
-            &mut len as *mut c_int,
-        )
+    let Some((day, next_p)) = scan_signed_i32(bytes, p) else {
+        return 0;
     };
-    if n != 5 {
+    p = next_p;
+    while p < bytes.len() && c_is_space(bytes[p]) {
+        p += 1;
+    }
+    let m_start = p;
+    while p < bytes.len() && p - m_start < 3 && bytes[p] != 0 && !c_is_space(bytes[p]) {
+        p += 1;
+    }
+    if p == m_start {
         return 0;
     }
-    p += len as usize;
+    let month = &bytes[m_start..p];
+    let Some((year, next_p)) = scan_signed_i32(bytes, p) else {
+        return 0;
+    };
+    let Some((hours, next_p)) = scan_signed_i32(bytes, next_p) else {
+        return 0;
+    };
+    p = next_p;
+    if p >= bytes.len() || bytes[p] != b':' {
+        return 0;
+    }
+    let Some((minutes, next_p)) = scan_signed_i32(bytes, p + 1) else {
+        return 0;
+    };
+    p = next_p;
+    let mut seconds: i32 = 0;
     if bytes[p] == b':' {
-        let mut sec_len: c_int = 0;
-        if unsafe { sscanf(at(p + 1), c"%d%n".as_ptr(), &mut seconds as *mut c_int, &mut sec_len as *mut c_int) } != 1 {
+        let Some((sec, next_p)) = scan_signed_i32(bytes, p + 1) else {
             return 0;
-        }
-        p += 1 + sec_len as usize;
+        };
+        seconds = sec;
+        p = next_p;
     }
     while bytes[p] == b' ' {
         p += 1;
     }
     let mut zone_offset: i32 = 0; // minutes east of UTC
-    if (bytes[p] == b'+' || bytes[p] == b'-') && unsafe { isdigit(bytes[p + 1] as c_int) } != 0 {
-        let zone = unsafe { atoi(at(p + 1)) };
+    if (bytes[p] == b'+' || bytes[p] == b'-') && bytes[p + 1].is_ascii_digit() {
+        let zone = parse_c_atoi(&bytes[p + 1..]);
         zone_offset = (zone / 100).wrapping_mul(60).wrapping_add(zone % 100);
         if bytes[p] == b'-' {
             zone_offset = zone_offset.wrapping_neg();
         }
     } else {
-        const ZONES: [(&CStr, i32); 8] = [
-            (c"EST", -5), (c"EDT", -4), (c"CST", -6), (c"CDT", -5),
-            (c"MST", -7), (c"MDT", -6), (c"PST", -8), (c"PDT", -7),
+        const ZONES: [(&[u8], i32); 8] = [
+            (b"EST", -5), (b"EDT", -4), (b"CST", -6), (b"CDT", -5),
+            (b"MST", -7), (b"MDT", -6), (b"PST", -8), (b"PDT", -7),
         ];
-        if let Some((_, hours)) = ZONES.iter().find(|(name, _)| unsafe { strncasecmp(at(p), name.as_ptr(), 3) } == 0) {
-            zone_offset = hours * 60;
+        if p + 3 <= bytes.len() {
+            if let Some((_, hours)) = ZONES.iter().find(|(name, _)| bytes[p..p + 3].eq_ignore_ascii_case(name)) {
+                zone_offset = hours * 60;
+            }
         }
     }
-    const MONTHS: [&CStr; 12] = [c"Jan", c"Feb", c"Mar", c"Apr", c"May", c"Jun", c"Jul", c"Aug", c"Sep", c"Oct", c"Nov", c"Dec"];
-    let mon = MONTHS.iter().position(|m| unsafe { strcasecmp(month.as_ptr(), m.as_ptr()) } == 0).unwrap_or(0) as i32;
+    const MONTHS: [&[u8]; 12] = [b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec"];
+    let mon = MONTHS.iter().position(|m| month.eq_ignore_ascii_case(m)).unwrap_or(0) as i32;
     timegm_c(year, mon, day, hours, minutes, seconds) - zone_offset.wrapping_mul(60) as i64
 }
 
@@ -1296,21 +1299,14 @@ pub const fn util_is_control_char(c: u8) -> bool {
     c < 32 || c == 127
 }
 
-fn c_terminated(s: &[u8]) -> Vec<c_char> {
-    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
-    let mut out = Vec::with_capacity(end + 1);
-    out.extend(s[..end].iter().map(|&b| b as c_char));
-    out.push(0);
-    out
+fn truncate_nul(s: &[u8]) -> &[u8] {
+    &s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())]
 }
 
 /// Port of `Util::StrToNum<T>` for floating-point types.
 pub fn util_str_to_f64_checked(s: &[u8], min_val: f64, max_val: f64) -> Option<f64> {
-    let cbuf = c_terminated(s);
-    let start = cbuf.as_ptr();
-    let mut end: *mut c_char = std::ptr::null_mut();
-    let val = unsafe { strtod(start, &mut end) };
-    if end.cast_const() == start || val < min_val || val > max_val || val.is_nan() {
+    let val = crate::dupecoord::parse_f64_prefix(truncate_nul(s))?;
+    if val < min_val || val > max_val || val.is_nan() {
         None
     } else {
         Some(val)
@@ -1319,11 +1315,42 @@ pub fn util_str_to_f64_checked(s: &[u8], min_val: f64, max_val: f64) -> Option<f
 
 /// Port of `Util::StrToNum<T>` for signed integral types.
 pub fn util_str_to_i64_checked(s: &[u8], min_val: i64, max_val: i64) -> Option<i64> {
-    let cbuf = c_terminated(s);
-    let start = cbuf.as_ptr();
-    let mut end: *mut c_char = std::ptr::null_mut();
-    let val = unsafe { strtoll(start, &mut end, 10) } as i64;
-    if end.cast_const() == start || val < min_val || val > max_val {
+    let bytes = truncate_nul(s);
+    let mut i = 0;
+    while i < bytes.len() && c_is_space(bytes[i]) {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < bytes.len() {
+        if bytes[i] == b'-' {
+            neg = true;
+            i += 1;
+        } else if bytes[i] == b'+' {
+            i += 1;
+        }
+    }
+    let start = i;
+    let mut acc: u64 = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        acc = acc
+            .saturating_mul(10)
+            .saturating_add(u64::from(bytes[i] - b'0'));
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    let val = if neg {
+        let max_neg = (i64::MAX as u64) + 1;
+        if acc >= max_neg {
+            i64::MIN
+        } else {
+            -(acc as i64)
+        }
+    } else {
+        acc.min(i64::MAX as u64) as i64
+    };
+    if val < min_val || val > max_val {
         None
     } else {
         Some(val)
@@ -1332,11 +1359,45 @@ pub fn util_str_to_i64_checked(s: &[u8], min_val: i64, max_val: i64) -> Option<i
 
 /// Port of `Util::StrToNum<T>` for unsigned integral types.
 pub fn util_str_to_u64_checked(s: &[u8], max_val: u64) -> Option<u64> {
-    let cbuf = c_terminated(s);
-    let start = cbuf.as_ptr();
-    let mut end: *mut c_char = std::ptr::null_mut();
-    let val = unsafe { strtoull(start, &mut end, 10) } as u64;
-    if end.cast_const() == start || val > max_val {
+    let bytes = truncate_nul(s);
+    let mut i = 0;
+    while i < bytes.len() && c_is_space(bytes[i]) {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < bytes.len() {
+        if bytes[i] == b'-' {
+            neg = true;
+            i += 1;
+        } else if bytes[i] == b'+' {
+            i += 1;
+        }
+    }
+    let start = i;
+    let mut acc: u64 = 0;
+    let mut overflow = false;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        let digit = u64::from(bytes[i] - b'0');
+        match acc.checked_mul(10).and_then(|v| v.checked_add(digit)) {
+            Some(v) => acc = v,
+            None => {
+                overflow = true;
+                acc = u64::MAX;
+            }
+        }
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    let val = if overflow {
+        u64::MAX
+    } else if neg {
+        acc.wrapping_neg()
+    } else {
+        acc
+    };
+    if val > max_val {
         None
     } else {
         Some(val)

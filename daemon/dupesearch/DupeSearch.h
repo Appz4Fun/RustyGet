@@ -33,10 +33,7 @@
 #include <mutex>
 #include <set>
 #include <string>
-#include "Newznab.h"
-#include "NzbReader.h"
-#include "Posting.h"
-#include "HttpGet.h"
+#include "DonorHealth.h"
 #include "Log.h"
 #include "Util.h"
 #include "nzbget_rs.h"
@@ -457,15 +454,9 @@ extern DupeSearch* g_DupeSearch;
 #include <sstream>
 #include "ArticleFetcher.h"
 #include "DonorHealth.h"
-#include "NntpHealthServer.h"
 #include "Scanner.h"
-#include "HttpGet.h"
-#include "Newznab.h"
-#include "NzbReader.h"
-#include "Posting.h"
 #include <algorithm>
 #include <thread>
-#include "ReleaseName.h"
 #include "FileSystem.h"
 #include "Log.h"
 #include "Options.h"

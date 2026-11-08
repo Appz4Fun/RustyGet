@@ -21,16 +21,40 @@
 #ifndef TLSSOCKET_H
 #define TLSSOCKET_H
 
+#include <chrono>
+#include <functional>
+#include <cstdint>
+#include "nzbget_rs.h"
+
+struct SocketDeadline
+{
+	std::chrono::steady_clock::time_point end;
+	std::function<bool()> cancelled;
+	bool Stopped() const { return std::chrono::steady_clock::now() >= end || (cancelled && cancelled()); }
+	bool Wait(SOCKET socket, bool read, bool write) const
+	{
+		return nzbget_rs_socket_deadline_wait(
+			(int)socket,
+			read ? 1 : 0,
+			write ? 1 : 0,
+			const_cast<SocketDeadline*>(this),
+			+[](void* ctx) noexcept -> int64_t
+			{
+				const auto* self = static_cast<const SocketDeadline*>(ctx);
+				if (self->Stopped()) return -1;
+				return std::chrono::duration_cast<std::chrono::milliseconds>(
+					self->end - std::chrono::steady_clock::now()).count();
+			}) != 0;
+	}
+};
+
 #ifndef DISABLE_TLS
 
 #include <string_view>
 #include <openssl/sslerr.h>
-#include "OpenSSL.h"
-#include "SocketDeadline.h"
 #include "Log.h"
 #include "Util.h"
 #include "Options.h"
-#include "nzbget_rs.h"
 
 class TlsSocket
 {

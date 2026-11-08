@@ -10,7 +10,6 @@
 #include <poll.h>
 #include <stdexcept>
 #include <csignal>
-#include "OpenSSL.h"
 #endif
 
 BOOST_AUTO_TEST_SUITE(ConnectTest)

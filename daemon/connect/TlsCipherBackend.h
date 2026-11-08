@@ -7,7 +7,6 @@
 #include "ScriptConfig.h"
 #include "TlsSocket.h"
 #include "NntpConnection.h"
-#include "OpenSSL.h"
 #include <openssl/rand.h>
 #include <array>
 #include <limits>

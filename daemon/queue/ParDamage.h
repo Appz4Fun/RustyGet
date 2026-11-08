@@ -19,10 +19,28 @@
 #ifndef PARDAMAGE_H
 #define PARDAMAGE_H
 
+#include <algorithm>
+#include <set>
 #include <string>
 #include <vector>
 #include "DownloadInfo.h"
 #include "nzbget_rs.h"
+
+class DupeStreamRepair
+{
+public:
+	static constexpr int StreamFetchWorkers = 4;
+	static constexpr int MaxStreamFetchWorkers = 16;
+	static int StreamFetchWorkerCount(int primaryConnections)
+	{
+		return std::clamp(primaryConnections / 4, StreamFetchWorkers, MaxStreamFetchWorkers);
+	}
+
+	static StreamRangeList ComputeHoles(FileInfo* fileInfo);
+	static int64 TotalSize(const StreamRangeList& ranges);
+	static bool BuildRepairJob(FileInfo* fileInfo, const char* diskBasename);
+	static std::string BuildDonorKey(NzbInfo* donorNzb, const char* password);
+};
 
 /*
  * The par2 blocks a download's failed articles spoil, against the recovery
@@ -86,9 +104,146 @@ public:
 	}
 };
 
-#include "DupeStreamRepair.h"
 #include "DupeArticleFallback.h"
+#include "Options.h"
 #include "ParParser.h"
+
+inline StreamRangeList DupeStreamRepair::ComputeHoles(FileInfo* fileInfo)
+{
+	int64 fileSize = fileInfo->GetDecodedFileSize();
+	if (fileSize <= 0)
+	{
+		return StreamRangeList();
+	}
+
+	std::vector<NzbgetRsByteRange> covered;
+	covered.reserve(fileInfo->GetArticles()->size());
+	for (ArticleInfo* article : fileInfo->GetArticles())
+	{
+		if (article->GetStatus() == ArticleInfo::aiFinished && article->GetSegmentSize() > 0)
+		{
+			covered.push_back({article->GetSegmentOffset(), article->GetSegmentSize()});
+		}
+	}
+	std::vector<NzbgetRsByteRange> rsHoles(covered.size() + 1);
+	size_t count = nzbget_rs_stream_compute_holes(
+		covered.data(), covered.size(), fileSize, rsHoles.data(), rsHoles.size());
+	StreamRangeList holes;
+	holes.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		holes.push_back({rsHoles[i].offset, rsHoles[i].size});
+	}
+	return holes;
+}
+
+inline int64 DupeStreamRepair::TotalSize(const StreamRangeList& ranges)
+{
+	return nzbget_rs_stream_total_size(
+		reinterpret_cast<const NzbgetRsByteRange*>(ranges.data()), ranges.size());
+}
+
+inline bool DupeStreamRepair::BuildRepairJob(FileInfo* fileInfo, const char* diskBasename)
+{
+	NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
+	int jobMode = nzbget_rs_stream_eval_build_repair_job(
+		(int)g_Options->GetDupeArticleFallback(),
+		(int)Options::dafStream,
+		g_Options->GetRawArticle() ? 1 : 0,
+		DupeArticleFallback::IsParFile(fileInfo) ? 1 : 0,
+		diskBasename,
+		nzbInfo ? 1 : 0,
+		nzbInfo ? (int)nzbInfo->GetDeleteStatus() : 0,
+		(int)NzbInfo::dsNone,
+		(int)NzbInfo::dsHealth,
+		nzbInfo && nzbInfo->GetDeleting() ? 1 : 0,
+		nzbInfo && nzbInfo->GetParking() ? 1 : 0,
+		nzbInfo && nzbInfo->GetPostInfo() != nullptr ? 1 : 0,
+		fileInfo->GetArticles()->empty() ? 1 : 0,
+		fileInfo->GetSuccessArticles(),
+		fileInfo->GetSize(),
+		fileInfo->GetDecodedFileSize());
+	if (jobMode == 0)
+	{
+		return false;
+	}
+
+	if (jobMode == 1)
+	{
+		nzbInfo->GetStreamRepairJobs()->emplace_back(fileInfo->GetId(), diskBasename,
+			0, fileInfo->GetFailedSize(), fileInfo->GetMissedSize(),
+			fileInfo->GetFailedArticles() + fileInfo->GetMissedArticles(), fileInfo->GetParFile(),
+			StreamRangeList(), DupeArticleFallback::ArticleSizeStepsHash(fileInfo));
+		return true;
+	}
+
+	StreamRangeList holes = ComputeHoles(fileInfo);
+	if (holes.empty())
+	{
+		return false;
+	}
+
+	nzbInfo->GetStreamRepairJobs()->emplace_back(fileInfo->GetId(), diskBasename,
+		fileInfo->GetDecodedFileSize(), fileInfo->GetFailedSize(), fileInfo->GetMissedSize(),
+		fileInfo->GetFailedArticles() + fileInfo->GetMissedArticles(), fileInfo->GetParFile(),
+		std::move(holes), DupeArticleFallback::ArticleSizeStepsHash(fileInfo));
+
+	return true;
+}
+
+inline std::string DupeStreamRepair::BuildDonorKey(NzbInfo* donorNzb, const char* password)
+{
+	size_t fileCount = donorNzb->GetFileList()->size();
+	std::vector<const char*> fileNames;
+	std::vector<int64_t> fileSizes;
+	std::vector<uint8_t> fileIsPar;
+	std::vector<size_t> fileGroupCounts;
+	std::vector<const char*> groups;
+	std::vector<size_t> fileArticleCounts;
+	std::vector<int32_t> artPartNumbers;
+	std::vector<int32_t> artSizes;
+	std::vector<const char*> artMessageIds;
+	fileNames.reserve(fileCount);
+	fileSizes.reserve(fileCount);
+	fileIsPar.reserve(fileCount);
+	fileGroupCounts.reserve(fileCount);
+	fileArticleCounts.reserve(fileCount);
+	for (FileInfo* file : donorNzb->GetFileList())
+	{
+		fileNames.push_back(file->GetFilename());
+		fileSizes.push_back(file->GetSize());
+		fileIsPar.push_back(file->GetParFile() ? 1 : 0);
+		fileGroupCounts.push_back(file->GetGroups()->size());
+		for (const CString& group : *file->GetGroups())
+		{
+			groups.push_back(*group);
+		}
+		fileArticleCounts.push_back(file->GetArticles()->size());
+		for (const std::unique_ptr<ArticleInfo>& article : *file->GetArticles())
+		{
+			artPartNumbers.push_back(article->GetPartNumber());
+			artSizes.push_back(article->GetSize());
+			artMessageIds.push_back(article->GetMessageId());
+		}
+	}
+	NzbgetRsBuf buf = nzbget_rs_stream_build_donor_key(
+		password,
+		fileNames.data(),
+		fileSizes.data(),
+		fileIsPar.data(),
+		fileGroupCounts.data(),
+		fileCount,
+		groups.data(),
+		groups.size(),
+		fileArticleCounts.data(),
+		artPartNumbers.data(),
+		artSizes.data(),
+		artMessageIds.data(),
+		artMessageIds.size());
+	std::string key(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return key;
+}
 
 inline void ParDamage::FileCompleted(NzbInfo* nzbInfo, FileInfo* fileInfo, const std::string& filename)
 {

@@ -33,7 +33,6 @@
 #include <unistd.h>
 #include "Log.h"
 #include "Util.h"
-#include "OpenSSL.h"
 #include "TlsSocket.h"
 #include "nzbget_rs.h"
 

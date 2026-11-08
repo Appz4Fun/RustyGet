@@ -14092,17 +14092,6 @@ pub unsafe extern "C" fn nzbget_rs_euh_disk_service_interval(
     )
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_disk_service_is_low_space(
-    available_bytes: i64,
-    disk_space_mb: c_int,
-) -> c_int {
-    i32::from(crate::util::disk_service_is_low_space(
-        available_bytes,
-        disk_space_mb,
-    ))
-}
-
 // ============================================================================
 // Consolidated ArticleDownloader & ServerPool Hot-Path FFI (`rust/src/nntp.rs`)
 // ============================================================================
@@ -21082,11 +21071,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_format_rotated_path(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbget_format_pid_line(pid: c_int) -> RsBuf {
-    into_buf(crate::systemhealth::nzbget_format_pid_line(pid))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_format_plot_line(
     text: *const c_char,
     screen_width: c_int,
@@ -21312,18 +21296,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_options_should_expand_home_value(
         v,
         no_disk_access != 0,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbget_is_backward_compat_root_user(
-    username: *const c_char,
-) -> c_int {
-    let u = if username.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(username).to_bytes()
-    };
-    c_int::from(crate::systemhealth::nzbget_is_backward_compat_root_user(u))
 }
 
 #[no_mangle]
@@ -22435,31 +22407,6 @@ pub extern "C" fn nzbget_rs_dqh_disk_service_should_check_disk_space(
             is_downloading != 0,
         ),
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_disk_service_eval_missing_required_dir(
-    file_exists: c_int,
-    dir_exists: c_int,
-    was_waiting_reported: c_int,
-    cur_waiting_reported: c_int,
-    out_should_log_waiting: *mut c_int,
-    out_next_waiting_reported: *mut c_int,
-) -> c_int {
-    let (missing, should_log, next_reported) =
-        crate::systemhealth::disk_service_eval_missing_required_dir(
-            file_exists != 0,
-            dir_exists != 0,
-            was_waiting_reported != 0,
-            cur_waiting_reported != 0,
-        );
-    if !out_should_log_waiting.is_null() {
-        *out_should_log_waiting = i32::from(should_log);
-    }
-    if !out_next_waiting_reported.is_null() {
-        *out_next_waiting_reported = i32::from(next_reported);
-    }
-    i32::from(missing)
 }
 
 #[no_mangle]
@@ -32662,6 +32609,146 @@ pub unsafe extern "C" fn nzbget_rs_cross_pack_session_process_donor(
         allow_decompress != 0,
         &mut env,
     );
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_enable_core_dump() {
+    crate::lifecycle::enable_core_dump();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_socket_deadline_wait(
+    fd: c_int,
+    read: c_int,
+    write: c_int,
+    ctx: *mut c_void,
+    remaining_ms_or_stopped_cb: Option<unsafe extern "C" fn(*mut c_void) -> i64>,
+) -> c_int {
+    let Some(cb) = remaining_ms_or_stopped_cb else {
+        return 0;
+    };
+    c_int::from(crate::lifecycle::socket_deadline_wait(
+        fd,
+        read != 0,
+        write != 0,
+        || cb(ctx),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_daemonize_setup(
+    lock_file: *const c_char,
+    daemon_username: *const c_char,
+    out_lock_owned: *mut c_int,
+    out_warn_truncate: *mut c_int,
+) -> c_int {
+    let lock_cstr = if lock_file.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(lock_file)
+    };
+    let user_cstr = if daemon_username.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(daemon_username)
+    };
+    match crate::lifecycle::daemonize_setup(lock_cstr, user_cstr) {
+        Ok((owned, warn_truncate)) => {
+            if !out_lock_owned.is_null() {
+                *out_lock_owned = c_int::from(owned);
+            }
+            if !out_warn_truncate.is_null() {
+                *out_warn_truncate = c_int::from(warn_truncate);
+            }
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_disk_service_check_disk_space(
+    dest_dir: *const c_char,
+    inter_dir: *const c_char,
+    disk_space_mb: c_int,
+    out_dest_low: *mut c_int,
+    out_inter_low: *mut c_int,
+) {
+    let dest_cstr = if dest_dir.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(dest_dir)
+    };
+    let inter_cstr = if inter_dir.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(inter_dir))
+    };
+    let (dest_low, inter_low) =
+        crate::fsops::disk_service_check_disk_space(dest_cstr, inter_cstr, disk_space_mb);
+    if !out_dest_low.is_null() {
+        *out_dest_low = c_int::from(dest_low);
+    }
+    if !out_inter_low.is_null() {
+        *out_inter_low = c_int::from(inter_low);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_disk_service_check_required_dirs(
+    required_dir: *const c_char,
+    waiting_reported: c_int,
+    out_next_waiting_reported: *mut c_int,
+    ctx: *mut c_void,
+    on_missing_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+) -> c_int {
+    let req_bytes = if required_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(required_dir).to_bytes()
+    };
+    let (all_exist, next_reported) = crate::fsops::disk_service_check_required_dirs(
+        req_bytes,
+        waiting_reported != 0,
+        |dir_cstr| {
+            if let Some(cb) = on_missing_cb {
+                cb(ctx, dir_cstr.as_ptr());
+            }
+        },
+    );
+    if !out_next_waiting_reported.is_null() {
+        *out_next_waiting_reported = c_int::from(next_reported);
+    }
+    c_int::from(all_exist)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_http_get_read_and_delete(
+    path: *const c_char,
+    path_len: usize,
+    max_bytes: usize,
+    read_body: c_int,
+    out_ok: *mut c_int,
+) -> RsBuf {
+    let path_slice = if path.is_null() || path_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(path as *const u8, path_len)
+    };
+    match crate::dupesearch_nzb::http_get_read_and_delete(path_slice, max_bytes, read_body != 0) {
+        Some(body) => {
+            if !out_ok.is_null() {
+                *out_ok = 1;
+            }
+            into_buf(body)
+        }
+        None => {
+            if !out_ok.is_null() {
+                *out_ok = 0;
+            }
+            into_buf(Vec::new())
+        }
+    }
 }
 
 

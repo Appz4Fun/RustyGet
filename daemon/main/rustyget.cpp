@@ -29,7 +29,6 @@
 #include "NzbFile.h"
 #include "Options.h"
 #include "WorkState.h"
-#include "CommandLineParser.h"
 #include "ScriptConfig.h"
 #include "Thread.h"
 #include "Frontend.h"
@@ -37,7 +36,6 @@
 #include "QueueCoordinator.h"
 #include "UrlCoordinator.h"
 #include "DupeSearch.h"
-#include "RemoteServer.h"
 #include "WebServer.h"
 #include "RemoteClient.h"
 #include "MessageBase.h"
@@ -50,14 +48,12 @@
 #include "Scanner.h"
 #include "FeedCoordinator.h"
 #include "Service.h"
-#include "DiskService.h"
 #include "Maintenance.h"
 #include "ArticleWriter.h"
 #include "StatMeter.h"
 #include "QueueScript.h"
 #include "Util.h"
 #include "FileSystem.h"
-#include "StackTrace.h"
 #include "CommandScript.h"
 #include "ExtensionManager.h"
 #include "SystemInfo.h"
@@ -101,6 +97,543 @@ SystemHealth::Service* g_SystemHealth;
 int g_ArgumentCount;
 char* (*g_EnvironmentVariables)[] = nullptr;
 char* (*g_Arguments)[] = nullptr;
+
+extern void ExitProc();
+extern void Reload();
+std::atomic<bool> g_SigHupPending{false};
+std::atomic<bool> g_SigExitPending{false};
+static std::atomic<bool> s_shutdownInitiated{false};
+
+#ifdef DEBUG
+typedef void(*sighandler)(int);
+inline std::vector<sighandler> SignalProcList;
+#endif
+
+static void PrintBacktrace()
+{
+#ifdef HAVE_BACKTRACE
+	printf("Segmentation fault, tracing...\n");
+
+	void *array[100];
+	size_t size = backtrace(array, 100);
+	char **strings = backtrace_symbols(array, size);
+
+	printf("Obtained %zu stack frames\n", size);
+	for (size_t i = 0; i < size; i++)
+	{
+		printf("%s\n", strings[i]);
+	}
+
+	error("Segmentation fault, tracing...");
+	error("Obtained %zd stack frames", size);
+	for (size_t i = 0; i < size; i++)
+	{
+		error("Stacktrace: %s", strings[i]);
+	}
+
+	free(strings);
+#else
+	error("Segmentation fault");
+#endif
+}
+
+static void SignalProc(int signum)
+{
+	switch (signum)
+	{
+#ifdef SIGHUP
+		case SIGHUP:
+			if (s_shutdownInitiated.load(std::memory_order_relaxed))
+			{
+				return;
+			}
+			g_SigHupPending.store(true, std::memory_order_seq_cst);
+			nzbget_rs_signal_notify(signum);
+			break;
+#endif
+
+		case SIGINT:
+		case SIGTERM:
+		{
+			if (s_shutdownInitiated.exchange(true, std::memory_order_seq_cst))
+			{
+				return;
+			}
+			signal(SIGINT, SIG_IGN);
+			signal(SIGTERM, SIG_IGN);
+#ifdef SIGHUP
+			signal(SIGHUP, SIG_IGN);
+#endif
+			g_SigExitPending.store(true, std::memory_order_seq_cst);
+			nzbget_rs_signal_notify(signum);
+			break;
+		}
+
+		case SIGCHLD:
+			break;
+
+#ifdef DEBUG
+		case SIGSEGV:
+			signal(SIGSEGV, SIG_DFL);
+			PrintBacktrace();
+			break;
+#endif
+	}
+}
+
+static void InstallErrorHandler()
+{
+	if (g_Options->GetCrashDump())
+	{
+		nzbget_rs_enable_core_dump();
+	}
+
+	bool exitPending = g_SigExitPending.load(std::memory_order_seq_cst);
+	s_shutdownInitiated.store(exitPending, std::memory_order_seq_cst);
+	g_SigHupPending.store(false, std::memory_order_seq_cst);
+
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SignalProc;
+	sigemptyset(&sa.sa_mask);
+	sigaddset(&sa.sa_mask, SIGINT);
+	sigaddset(&sa.sa_mask, SIGTERM);
+#ifdef SIGHUP
+	sigaddset(&sa.sa_mask, SIGHUP);
+#endif
+	sa.sa_flags = SA_RESTART;
+
+	sigaction(SIGINT, &sa, nullptr);
+	sigaction(SIGTERM, &sa, nullptr);
+#ifdef SIGHUP
+	sigaction(SIGHUP, &sa, nullptr);
+#endif
+	signal(SIGPIPE, SIG_IGN);
+#ifdef DEBUG
+	if (g_Options->GetCrashTrace())
+	{
+		signal(SIGSEGV, SignalProc);
+	}
+#endif
+#ifdef SIGCHLD_HANDLER
+	signal(SIGCHLD, SignalProc);
+#endif
+}
+
+#ifdef DEBUG
+static void TestSegFault()
+{
+	char* N = nullptr;
+	*N = '\0';
+}
+#endif
+
+class DiskService : public Service, public Observer
+{
+public:
+	DiskService()
+	{
+		g_WorkState->Attach(this);
+	}
+
+protected:
+	int ServiceInterval() override
+	{
+		return nzbget_rs_euh_disk_service_interval(
+			m_waitingRequiredDir ? 1 : 0,
+			g_Options->GetDiskSpace(),
+			g_WorkState->GetDownloading() ? 1 : 0,
+			Service::Sleep);
+	}
+
+	void ServiceWork() override
+	{
+		debug("Disk service work");
+
+		if (nzbget_rs_dqh_disk_service_should_check_disk_space(
+			g_Options->GetDiskSpace(), g_WorkState->GetDownloading() ? 1 : 0) != 0)
+		{
+			CheckDiskSpace();
+		}
+
+		if (m_waitingRequiredDir)
+		{
+			CheckRequiredDir();
+		}
+	}
+
+	void Update(Subject* caller, void* aspect) override
+	{
+		(void)caller; (void)aspect;
+		WakeUp();
+	}
+
+private:
+	bool m_waitingRequiredDir = true;
+	bool m_waitingReported = false;
+
+	void CheckDiskSpace()
+	{
+		debug("Disk service work: check disk space");
+		int destLow = 0;
+		int interLow = 0;
+		nzbget_rs_disk_service_check_disk_space(
+			g_Options->GetDestDir(),
+			g_Options->GetInterDir(),
+			g_Options->GetDiskSpace(),
+			&destLow,
+			&interLow);
+		if (destLow != 0)
+		{
+			warn("Low disk space on %s. Pausing download", g_Options->GetDestDir());
+			g_WorkState->SetPauseDownload(true);
+		}
+		if (interLow != 0)
+		{
+			warn("Low disk space on %s. Pausing download", g_Options->GetInterDir());
+			g_WorkState->SetPauseDownload(true);
+		}
+	}
+
+	void CheckRequiredDir()
+	{
+		debug("Disk service work: check required dir");
+		int nextWaitingReported = m_waitingReported ? 1 : 0;
+		int allExist = nzbget_rs_disk_service_check_required_dirs(
+			g_Options->GetRequiredDir(),
+			m_waitingReported ? 1 : 0,
+			&nextWaitingReported,
+			nullptr,
+			+[](void*, const char* dir)
+			{
+				info("Waiting for required directory %s", dir);
+			});
+		m_waitingReported = nextWaitingReported != 0;
+		if (!allExist)
+		{
+			return;
+		}
+		if (m_waitingReported)
+		{
+			info("All required directories available");
+		}
+		g_WorkState->SetTempPauseDownload(false);
+		g_WorkState->SetTempPausePostprocess(false);
+		m_waitingRequiredDir = false;
+	}
+};
+
+class CommandLineParser
+{
+public:
+	enum EClientOperation
+	{
+		opClientNoOperation,
+		opClientRequestDownload,
+		opClientRequestListFiles,
+		opClientRequestListGroups,
+		opClientRequestListStatus,
+		opClientRequestSetRate,
+		opClientRequestDumpDebug,
+		opClientRequestEditQueue,
+		opClientRequestLog,
+		opClientRequestShutdown,
+		opClientRequestReload,
+		opClientRequestVersion,
+		opClientRequestPostQueue,
+		opClientRequestWriteLog,
+		opClientRequestScanSync,
+		opClientRequestScanAsync,
+		opClientRequestDownloadPause,
+		opClientRequestDownloadUnpause,
+		opClientRequestPostPause,
+		opClientRequestPostUnpause,
+		opClientRequestScanPause,
+		opClientRequestScanUnpause,
+		opClientRequestHistory,
+		opClientRequestHistoryAll
+	};
+	enum EMatchMode
+	{
+		mmId = 1,
+		mmName,
+		mmRegEx
+	};
+
+	typedef std::vector<int> IdList;
+	typedef std::vector<CString> NameList;
+
+	CommandLineParser(int argc, const char* argv[])
+	{
+		if (argc < 1 || !argv)
+		{
+			throw std::invalid_argument("Invalid command line");
+		}
+		m_args.reserve(argc);
+		for (int i = 0; i < argc; i++)
+		{
+			m_args.emplace_back(argv[i]);
+		}
+
+		std::vector<char*> args;
+		args.reserve(static_cast<size_t>(argc) + 1);
+		for (CString& arg : m_args) args.push_back(arg);
+		args.push_back(nullptr);
+		RsSink sink{this, args.data(), nullptr};
+		NzbgetRsCmdlineSink rsSink{nullptr, &sink, RsSetInt, RsSetStr, RsSteal, RsPushOption, RsPushId, RsPushName, RsError};
+#ifdef HAVE_GETOPT_LONG
+		const int useLong = 1;
+#else
+		const int useLong = 0;
+#endif
+		int result = nzbget_rs_cmdline_parse(argc, args.data(), useLong, &rsSink);
+		sink.SyncArgs();
+		if (sink.error)
+		{
+			std::rethrow_exception(sink.error);
+		}
+		if (result != 0)
+		{
+			throw std::runtime_error("Command line parsing failed");
+		}
+	}
+
+	void PrintUsage(const char* com)
+	{
+		NzbgetRsBuf buf = nzbget_rs_cmdline_format_usage(
+			FileSystem::BaseFileName(com), PATH_SEPARATOR, 1);
+		if (buf.data)
+		{
+			printf("%s", buf.data);
+		}
+		nzbget_rs_free(buf);
+	}
+
+	bool GetErrors() { return m_errors; }
+	bool GetNoConfig() { return m_noConfig; }
+	const char* GetConfigFilename() { return m_configFilename; }
+	bool GetServerMode() { return m_serverMode; }
+	bool GetDaemonMode() { return m_daemonMode; }
+	bool GetRemoteClientMode() { return m_remoteClientMode; }
+	EClientOperation GetClientOperation() { return m_clientOperation; }
+	NameList* GetOptionList() { return &m_optionList; }
+	int GetEditQueueAction() { return m_editQueueAction; }
+	int GetEditQueueOffset() { return m_editQueueOffset; }
+	IdList* GetEditQueueIdList() { return &m_editQueueIdList; }
+	NameList* GetEditQueueNameList() { return &m_editQueueNameList; }
+	EMatchMode GetMatchMode() { return m_matchMode; }
+	const char* GetEditQueueText() { return m_editQueueText; }
+	const char* GetArgFilename() { return m_argFilename; }
+	const char* GetAddCategory() { return m_addCategory; }
+	bool GetAutoCategory() const { return m_autoCategory; }
+	bool GetAddPaused() { return m_addPaused; }
+	const char* GetLastArg() { return m_lastArg; }
+	int GetAddPriority() { return m_addPriority; }
+	const char* GetAddNzbFilename() { return m_addNzbFilename; }
+	bool GetAddTop() { return m_addTop; }
+	const char* GetAddDupeKey() { return m_addDupeKey; }
+	int GetAddDupeScore() { return m_addDupeScore; }
+	int GetAddDupeMode() { return m_addDupeMode; }
+	int GetSetRate() { return m_setRate; }
+	int GetLogLines() { return m_logLines; }
+	int GetWriteLogKind() { return m_writeLogKind; }
+	bool GetTestBacktrace() { return m_testBacktrace; }
+	bool GetWebGet() { return m_webGet; }
+	const char* GetWebGetFilename() { return m_webGetFilename; }
+	bool GetSigVerify() { return m_sigVerify; }
+	const char* GetPubKeyFilename() { return m_pubKeyFilename; }
+	const char* GetSigFilename() { return m_sigFilename; }
+	bool GetPrintOptions() { return m_printOptions; }
+	bool GetPrintVersion() { return m_printVersion; }
+	bool GetPrintUsage() { return m_printUsage; }
+	bool GetPauseDownload() const { return m_pauseDownload; }
+
+private:
+	void SetAddCategory(const char* category)
+	{
+		m_addCategory = category;
+		m_autoCategory = false;
+	}
+
+	bool m_noConfig = false;
+	CString m_configFilename;
+	bool m_errors = false;
+	bool m_printVersion = false;
+	bool m_printUsage = false;
+	bool m_serverMode = false;
+	bool m_daemonMode = false;
+	bool m_remoteClientMode = false;
+	EClientOperation m_clientOperation;
+	NameList m_optionList;
+	int m_editQueueAction = 0;
+	int m_editQueueOffset = 0;
+	IdList m_editQueueIdList;
+	NameList m_editQueueNameList;
+	EMatchMode m_matchMode = mmId;
+	CString m_editQueueText;
+	CString m_argFilename;
+	CString m_addCategory;
+	bool m_autoCategory = true;
+	int m_addPriority = 0;
+	bool m_addPaused = false;
+	CString m_addNzbFilename;
+	CString m_lastArg;
+	bool m_printOptions = false;
+	bool m_addTop = false;
+	CString m_addDupeKey;
+	int m_addDupeScore = 0;
+	int m_addDupeMode = 0;
+	int m_setRate = 0;
+	int m_logLines = 0;
+	int m_writeLogKind = 0;
+	bool m_testBacktrace = false;
+	bool m_webGet = false;
+	CString m_webGetFilename;
+	bool m_sigVerify = false;
+	CString m_pubKeyFilename;
+	CString m_sigFilename;
+	bool m_pauseDownload = false;
+
+	std::vector<CString> m_args;
+	void ReportError(const char* errMessage)
+	{
+		m_errors = true;
+		printf("%s\n", errMessage);
+	}
+
+	struct RsSink
+	{
+		CommandLineParser* parser;
+		char** argv;
+		std::exception_ptr error;
+
+		void SyncArgs() noexcept
+		{
+			for (CString& arg : parser->m_args) arg.Unbind();
+			for (size_t i = 0; i < parser->m_args.size(); i++) parser->m_args[i].Bind(argv[i]);
+		}
+
+		template <typename F>
+		static int Call(void* ctx, F f) noexcept
+		{
+			RsSink* sink = static_cast<RsSink*>(ctx);
+			try
+			{
+				f(sink->parser);
+				return 0;
+			}
+			catch (...)
+			{
+				sink->error = std::current_exception();
+				return -1;
+			}
+		}
+	};
+
+	static int RsSetInt(void* ctx, int field, int value)
+	{
+		static const int EDIT_ACTIONS[] = {
+			DownloadQueue::eaPostDelete, DownloadQueue::eaHistoryDelete, DownloadQueue::eaHistoryReturn,
+			DownloadQueue::eaHistoryProcess, DownloadQueue::eaHistoryRedownload, DownloadQueue::eaHistoryRetryFailed,
+			DownloadQueue::eaHistorySetParameter, DownloadQueue::eaHistoryMarkBad, DownloadQueue::eaHistoryMarkGood,
+			DownloadQueue::eaHistoryMarkSuccess, DownloadQueue::eaGroupMoveTop, DownloadQueue::eaFileMoveTop,
+			DownloadQueue::eaGroupMoveBottom, DownloadQueue::eaFileMoveBottom, DownloadQueue::eaGroupPause,
+			DownloadQueue::eaFilePause, DownloadQueue::eaGroupPauseAllPars, DownloadQueue::eaFilePauseAllPars,
+			DownloadQueue::eaGroupPauseExtraPars, DownloadQueue::eaFilePauseExtraPars, DownloadQueue::eaGroupResume,
+			DownloadQueue::eaFileResume, DownloadQueue::eaGroupDelete, DownloadQueue::eaFileDelete,
+			DownloadQueue::eaGroupParkDelete, DownloadQueue::eaGroupSortFiles, DownloadQueue::eaGroupApplyCategory,
+			DownloadQueue::eaGroupSetCategory, DownloadQueue::eaGroupSetName, DownloadQueue::eaGroupMerge,
+			DownloadQueue::eaFileSplit, DownloadQueue::eaGroupSetParameter, DownloadQueue::eaGroupSetPriority,
+			DownloadQueue::eaGroupMoveOffset, DownloadQueue::eaFileMoveOffset};
+		static const int DUPE_MODES[] = {dmScore, dmAll, dmForce};
+		static const int LOG_KINDS[] = {(int)Message::mkInfo, (int)Message::mkWarning, (int)Message::mkError,
+			(int)Message::mkDetail, (int)Message::mkDebug};
+		return RsSink::Call(ctx, [field, value](CommandLineParser* p)
+		{
+			switch (field)
+			{
+				case 0: p->m_noConfig = value; break;
+				case 1: p->m_printUsage = value; break;
+				case 2: p->m_printVersion = value; break;
+				case 3: p->m_printOptions = value; break;
+				case 4: p->m_serverMode = value; break;
+				case 5: p->m_daemonMode = value; break;
+				case 6: p->m_remoteClientMode = value; break;
+				case 7: p->m_clientOperation = (EClientOperation)value; break;
+				case 8: p->m_addTop = value; break;
+				case 9: p->m_addPaused = value; break;
+				case 10: p->m_addPriority = value; break;
+				case 11: p->m_addDupeScore = value; break;
+				case 12: p->m_addDupeMode = DUPE_MODES[value]; break;
+				case 13: p->m_matchMode = (EMatchMode)value; break;
+				case 15: p->m_testBacktrace = value; break;
+				case 16: p->m_webGet = value; break;
+				case 17: p->m_sigVerify = value; break;
+				case 18: p->m_logLines = value; break;
+				case 19: p->m_editQueueAction = EDIT_ACTIONS[value]; break;
+				case 20: p->m_editQueueOffset = value; break;
+				case 21: p->m_writeLogKind = LOG_KINDS[value]; break;
+				case 22: p->m_pauseDownload = value; break;
+				case 23: p->m_errors = value; break;
+			}
+		});
+	}
+
+	static int RsSetStr(void* ctx, int field, const char* value)
+	{
+		return RsSink::Call(ctx, [field, value](CommandLineParser* p)
+		{
+			switch (field)
+			{
+				case 30: p->m_configFilename = value; break;
+				case 31: p->m_webGetFilename = value; break;
+				case 32: p->m_pubKeyFilename = value; break;
+				case 33: p->m_sigFilename = value; break;
+				case 34: p->SetAddCategory(value); break;
+				case 35: p->m_lastArg = value; break;
+				case 36: p->m_argFilename = value; break;
+				case 40: p->m_setRate = (int)(atof(value) * 1024); break;
+			}
+		});
+	}
+
+	static int RsSteal(void* ctx, int field, int index)
+	{
+		return RsSink::Call(ctx, [ctx, field, index](CommandLineParser* p)
+		{
+			RsSink* sink = static_cast<RsSink*>(ctx);
+			sink->SyncArgs();
+			CString& arg = p->m_args[index];
+			switch (field)
+			{
+				case 37: p->m_addNzbFilename = std::move(arg); break;
+				case 38: p->m_addDupeKey = std::move(arg); break;
+				case 39: p->m_editQueueText = std::move(arg); break;
+			}
+			sink->argv[index] = arg;
+		});
+	}
+
+	static int RsPushOption(void* ctx, const char* value)
+	{
+		return RsSink::Call(ctx, [value](CommandLineParser* p) { p->m_optionList.push_back(value); });
+	}
+
+	static int RsPushId(void* ctx, int id)
+	{
+		return RsSink::Call(ctx, [id](CommandLineParser* p) { p->m_editQueueIdList.push_back(id); });
+	}
+
+	static int RsPushName(void* ctx, const char* value)
+	{
+		return RsSink::Call(ctx, [value](CommandLineParser* p) { p->m_editQueueNameList.push_back(value); });
+	}
+
+	static int RsError(void* ctx, const char* msg)
+	{
+		return RsSink::Call(ctx, [msg](CommandLineParser* p) { p->ReportError(msg); });
+	}
+};
 
 class RustyGet final : public Options::Extender
 {
@@ -639,11 +1172,6 @@ void RustyGet::StartFrontend()
 	}
 }
 
-extern void ExitProc();
-extern void Reload();
-std::atomic<bool> g_SigHupPending{false};
-std::atomic<bool> g_SigExitPending{false};
-
 void RustyGet::StopFrontend()
 {
 	if (m_frontend)
@@ -1102,109 +1630,48 @@ void RustyGet::Daemonize()
 	if (f > 0) exit(0); /* parent exits */
 
 	/* child (daemon) continues */
-
-	// obtain a new process group
 	setsid();
 
-	// handle standart I/O
-	int d = open("/dev/null", O_RDWR);
-	dup2(d, 0);
-	dup2(d, 1);
-	dup2(d, 2);
-	close(d);
-
-	// set up lock-file
-	int lfp = -1;
-	if (!Util::EmptyStr(m_options->GetLockFile()))
+	int lockOwned = 0;
+	int warnTruncate = 0;
+	int err = nzbget_rs_daemonize_setup(
+		m_options->GetLockFile(),
+		m_options->GetDaemonUsername(),
+		&lockOwned,
+		&warnTruncate);
+	if (err == 1)
 	{
-		int flags = O_RDWR | O_CREAT;
-#ifdef O_NOFOLLOW
-		flags |= O_NOFOLLOW;
-#endif
-#ifdef O_CLOEXEC
-		flags |= O_CLOEXEC;
-#endif
-		lfp = open(m_options->GetLockFile(), flags, 0640);
-		if (lfp < 0)
-		{
-			error("Starting daemon failed: could not create lock-file %s", m_options->GetLockFile());
-			exit(1);
-		}
-
-		struct stat lockFileStat;
-		if (fstat(lfp, &lockFileStat) != 0 || !S_ISREG(lockFileStat.st_mode))
-		{
-			error("Starting daemon failed: lock-file %s is not a regular file", m_options->GetLockFile());
-			close(lfp);
-			exit(1);
-		}
-
-#ifdef HAVE_LOCKF
-		if (lockf(lfp, F_TLOCK, 0) < 0)
-#else
-		if (flock(lfp, LOCK_EX) < 0)
-#endif
-		{
-			error("Starting daemon failed: could not acquire lock on lock-file %s", m_options->GetLockFile());
-			exit(1);
-		}
+		error("Starting daemon failed: could not create lock-file %s", m_options->GetLockFile());
+		exit(1);
+	}
+	if (err == 2)
+	{
+		error("Starting daemon failed: lock-file %s is not a regular file", m_options->GetLockFile());
+		exit(1);
+	}
+	if (err == 3)
+	{
+		error("Starting daemon failed: could not acquire lock on lock-file %s", m_options->GetLockFile());
+		exit(1);
+	}
+	if (err == 4)
+	{
+		error("Starting daemon failed: invalid DaemonUsername");
+		exit(1);
+	}
+	if (err == 5)
+	{
+		error("Starting daemon failed: could not drop privileges");
+		exit(1);
+	}
+	if (lockOwned != 0)
+	{
 		g_LockFileOwned = true;
-
-		// the pid of an earlier daemon may be longer than ours
-		if (ftruncate(lfp, 0) != 0)
-		{
-			warn("Could not truncate lock-file %s", m_options->GetLockFile());
-		}
 	}
-
-	/* Backward compatibility with QNAP which doesn't have a "root" user,
-	but for historical reasons in nzbget.conf we use "root" as the default value in DaemonUsername
-	which causes problems when running nzbget as a daemon on QNAP. */
-	bool backwardCompRoot = nzbget_rs_dqh_nzbget_is_backward_compat_root_user(
-		m_options->GetDaemonUsername()) != 0;
-
-	/* Drop user if there is one, and we were run as root */
-	if (!backwardCompRoot && (getuid() == 0 || geteuid() == 0))
+	if (warnTruncate != 0)
 	{
-		struct passwd *pw = getpwnam(m_options->GetDaemonUsername());
-		if (pw == nullptr)
-		{
-			error("Starting daemon failed: invalid DaemonUsername");
-			exit(1);
-		}
-
-		if (lfp > -1)
-		{
-			fchown(lfp, pw->pw_uid, pw->pw_gid);
-		}
-
-		// Set aux groups to null, configure primary and aux groups, and then assign uid
-		if (setgroups(0, (const gid_t*)0) ||
-				setgid(pw->pw_gid) ||
-				initgroups(m_options->GetDaemonUsername(), pw->pw_gid) ||
-				setuid(pw->pw_uid))
-		{
-			error("Starting daemon failed: could not drop privileges");
-			exit(1);
-		}
+		warn("Could not truncate lock-file %s", m_options->GetLockFile());
 	}
-
-	// record pid to lockfile
-	if (lfp > -1)
-	{
-		NzbgetRsBuf pidBuf = nzbget_rs_dqh_nzbget_format_pid_line((int32_t)getpid());
-		if (pidBuf.data && pidBuf.len > 0)
-		{
-			write(lfp, pidBuf.data, pidBuf.len);
-		}
-		nzbget_rs_free(pidBuf);
-	}
-
-	// ignore unwanted signals
-	signal(SIGCHLD, SIG_IGN);
-	signal(SIGTSTP, SIG_IGN);
-	signal(SIGTTOU, SIG_IGN);
-	signal(SIGTTIN, SIG_IGN);
 }
 
 void RustyGet::AddNewsServer(int id, bool active, const char* name, const char* host,

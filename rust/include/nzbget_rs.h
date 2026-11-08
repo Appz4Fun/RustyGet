@@ -2212,7 +2212,6 @@ void nzbget_rs_euh_service_calc_remaining_wait(
     int* out_wait_interval);
 int nzbget_rs_euh_disk_service_interval(
     int waiting_required_dir, int disk_space_mb, int downloading, int sleep_val);
-int nzbget_rs_euh_disk_service_is_low_space(int64_t available_bytes, int disk_space_mb);
 
 int nzbget_rs_nntp_article_dl_is_retention_failure(
     int retention_days, int64_t file_time, int64_t cur_time, int* out_age_days);
@@ -3846,7 +3845,6 @@ NzbgetRsBuf nzbget_rs_dqh_log_format_deleting_old_msg(const char* filename);
 NzbgetRsBuf nzbget_rs_dqh_log_format_rotated_path(
     const char* directory, char sep, const char* base_name,
     int32_t year, int32_t month, int32_t mday, const char* base_ext);
-NzbgetRsBuf nzbget_rs_dqh_nzbget_format_pid_line(int32_t pid);
 NzbgetRsBuf nzbget_rs_dqh_ncurses_format_plot_line(
     const char* text, int32_t screen_width, int32_t pos, int32_t max_screen_width);
 NzbgetRsBuf nzbget_rs_dqh_fs_format_expanded_rel_path(
@@ -3872,7 +3870,6 @@ int nzbget_rs_dqh_nntp_conn_is_already_in_group(
     const char* active_group, const char* grp);
 int nzbget_rs_dqh_options_should_expand_home_value(
     const char* value, int no_disk_access);
-int nzbget_rs_dqh_nzbget_is_backward_compat_root_user(const char* username);
 int nzbget_rs_dqh_xmlrpc_is_multicall_post(
     const char* method_name, int is_xmlrpc_proto, int is_http_post);
 int nzbget_rs_dqh_webserver_is_html_content_type(const char* content_type);
@@ -4027,9 +4024,6 @@ int nzbget_rs_dqh_ncurses_enter_edit_queue_win_pct(
 int nzbget_rs_dqh_ncurses_last_queue_index(int queue_size);
 int nzbget_rs_dqh_disk_service_should_check_disk_space(
     int disk_space_mb, int is_downloading);
-int nzbget_rs_dqh_disk_service_eval_missing_required_dir(
-    int file_exists, int dir_exists, int was_waiting_reported, int cur_waiting_reported,
-    int* out_should_log_waiting, int* out_next_waiting_reported);
 int nzbget_rs_dqh_maintenance_has_update_info(int len);
 int nzbget_rs_dqh_options_update_config_line_on_get(int line_no, int cur_config_line);
 int nzbget_rs_dqh_nzbget_should_run_system_health_check(
@@ -5905,6 +5899,22 @@ void nzbget_rs_par_repairer_find_and_sort_extra_files(
     void* ctx,
     int (*is_parred_cb)(void* ctx, const char* filename),
     void (*add_extra_cb)(void* ctx, const char* full_path));
+
+void nzbget_rs_enable_core_dump(void);
+int nzbget_rs_socket_deadline_wait(
+    int fd, int read, int write, void* ctx,
+    int64_t (*remaining_ms_or_stopped_cb)(void* ctx));
+int nzbget_rs_daemonize_setup(
+    const char* lock_file, const char* daemon_username,
+    int* out_lock_owned, int* out_warn_truncate);
+void nzbget_rs_disk_service_check_disk_space(
+    const char* dest_dir, const char* inter_dir, int disk_space_mb,
+    int* out_dest_low, int* out_inter_low);
+int nzbget_rs_disk_service_check_required_dirs(
+    const char* required_dir, int waiting_reported, int* out_next_waiting_reported,
+    void* ctx, void (*on_missing_cb)(void* ctx, const char* dir));
+NzbgetRsBuf nzbget_rs_http_get_read_and_delete(
+    const char* path, size_t path_len, size_t max_bytes, int read_body, int* out_ok);
 
 #include "nzbget_tls_cipher.h"
 

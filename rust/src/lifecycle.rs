@@ -311,6 +311,164 @@ impl LifecycleManager {
     }
 }
 
+/// Enables core dumps on Linux (`setrlimit(RLIMIT_CORE, RLIM_INFINITY)` + `prctl(PR_SET_DUMPABLE, 1)`).
+pub fn enable_core_dump() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let rlim = libc::rlimit {
+            rlim_cur: libc::RLIM_INFINITY,
+            rlim_max: libc::RLIM_INFINITY,
+        };
+        let _ = libc::setrlimit(libc::RLIMIT_CORE, &rlim);
+        let _ = libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
+    }
+}
+
+/// Polls `fd` in bounded 1..=50 ms intervals while `remaining_ms_or_stopped() >= 0`.
+/// Returns `true` when the socket is ready and the deadline has not elapsed.
+pub fn socket_deadline_wait(
+    fd: c_int,
+    read: bool,
+    write: bool,
+    mut remaining_ms_or_stopped: impl FnMut() -> i64,
+) -> bool {
+    #[cfg(unix)]
+    {
+        loop {
+            let remaining = remaining_ms_or_stopped();
+            if remaining < 0 {
+                return false;
+            }
+            let milliseconds = remaining.clamp(1, 50) as c_int;
+            let events = (if read { libc::POLLIN } else { 0 })
+                | (if write { libc::POLLOUT } else { 0 });
+            let mut descriptor = libc::pollfd {
+                fd,
+                events,
+                revents: 0,
+            };
+            let result = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+            if result < 0 {
+                let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                if err != libc::EINTR {
+                    return false;
+                }
+            } else if result > 0 {
+                return remaining_ms_or_stopped() >= 0;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (fd, read, write, &mut remaining_ms_or_stopped);
+        false
+    }
+}
+
+/// Performs post-`fork` / post-`setsid` POSIX daemonization setup (`RustyGet::Daemonize`):
+/// redirects stdio to `/dev/null`, creates/validates/locks/truncates `lock_file` (keeping the
+/// locked descriptor open for the lifetime of the daemon), drops privileges to `daemon_username`
+/// when running as root (unless backward-compat `"root"`), writes `<pid>\n` to the lock-file,
+/// and ignores `SIGCHLD`, `SIGTSTP`, `SIGTTOU`, and `SIGTTIN`.
+///
+/// Returns `Ok((lock_file_owned, truncate_failed))` on success, or `Err(error_code)` where:
+/// - `1`: could not create lock-file
+/// - `2`: lock-file is not a regular file
+/// - `3`: could not acquire lock on lock-file
+/// - `4`: invalid `DaemonUsername`
+/// - `5`: could not drop privileges
+pub fn daemonize_setup(
+    lock_file: &std::ffi::CStr,
+    daemon_username: &std::ffi::CStr,
+) -> Result<(bool, bool), i32> {
+    #[cfg(unix)]
+    unsafe {
+        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+        if devnull >= 0 {
+            let _ = libc::dup2(devnull, 0);
+            let _ = libc::dup2(devnull, 1);
+            let _ = libc::dup2(devnull, 2);
+            if devnull > 2 {
+                let _ = libc::close(devnull);
+            }
+        }
+
+        let mut lfp: c_int = -1;
+        let mut lock_file_owned = false;
+        let mut truncate_failed = false;
+
+        if !lock_file.to_bytes().is_empty() {
+            let flags = libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+            lfp = libc::open(lock_file.as_ptr(), flags, 0o640 as libc::c_uint);
+            if lfp < 0 {
+                return Err(1);
+            }
+
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstat(lfp, &mut st) != 0 || (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
+                let _ = libc::close(lfp);
+                return Err(2);
+            }
+
+            if libc::lockf(lfp, libc::F_TLOCK, 0) < 0 {
+                let _ = libc::close(lfp);
+                return Err(3);
+            }
+            lock_file_owned = true;
+
+            if libc::ftruncate(lfp, 0) != 0 {
+                truncate_failed = true;
+            }
+        }
+
+        let backward_compat_root =
+            crate::systemhealth::nzbget_is_backward_compat_root_user(daemon_username.to_bytes());
+
+        if !backward_compat_root && (libc::getuid() == 0 || libc::geteuid() == 0) {
+            let pw = libc::getpwnam(daemon_username.as_ptr());
+            if pw.is_null() {
+                return Err(4);
+            }
+            let uid = (*pw).pw_uid;
+            let gid = (*pw).pw_gid;
+
+            if lfp > -1 {
+                let _ = libc::fchown(lfp, uid, gid);
+            }
+
+            #[cfg(target_os = "macos")]
+            let initgroups_gid = gid as c_int;
+            #[cfg(not(target_os = "macos"))]
+            let initgroups_gid = gid;
+
+            if libc::setgroups(0, std::ptr::null()) != 0
+                || libc::setgid(gid) != 0
+                || libc::initgroups(daemon_username.as_ptr(), initgroups_gid) != 0
+                || libc::setuid(uid) != 0
+            {
+                return Err(5);
+            }
+        }
+
+        if lfp > -1 {
+            let pid_line = format!("{}\n", libc::getpid());
+            let _ = libc::write(lfp, pid_line.as_ptr().cast(), pid_line.len());
+        }
+
+        let _ = libc::signal(libc::SIGCHLD, libc::SIG_IGN);
+        let _ = libc::signal(libc::SIGTSTP, libc::SIG_IGN);
+        let _ = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        let _ = libc::signal(libc::SIGTTIN, libc::SIG_IGN);
+
+        Ok((lock_file_owned, truncate_failed))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (lock_file, daemon_username);
+        Ok((false, false))
+    }
+}
+
 #[cfg(test)]
 pub(crate) static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -532,5 +690,67 @@ mod tests {
         // Ran 2 full cycles (4 calls each = 8 calls)
         assert_eq!(MOCK_CALL_COUNT.load(Ordering::SeqCst), 8);
         assert_eq!(MOCK_UNPACK_COUNT.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_socket_deadline_wait_and_disk_service_and_http_get_helpers() {
+        let mut fds = [0i32; 2];
+        unsafe {
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+        }
+        // Write end is immediately writable
+        assert!(socket_deadline_wait(fds[1], false, true, || 50));
+        // Stopped callback returns false immediately
+        assert!(!socket_deadline_wait(fds[0], true, false, || -1));
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "rustyget_batch154_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let existing_sub = tmp_dir.join("existing");
+        std::fs::create_dir_all(&existing_sub).unwrap();
+        let missing_sub = tmp_dir.join("missing");
+
+        let req_spec = format!(
+            "{};{}",
+            existing_sub.display(),
+            missing_sub.display()
+        );
+        let mut logged = Vec::new();
+        let (all_exist, next_reported) = crate::fsops::disk_service_check_required_dirs(
+            req_spec.as_bytes(),
+            false,
+            |dir_cstr| logged.push(dir_cstr.to_string_lossy().into_owned()),
+        );
+        assert!(!all_exist);
+        assert!(next_reported);
+        assert_eq!(logged, vec![missing_sub.display().to_string()]);
+
+        std::fs::create_dir_all(&missing_sub).unwrap();
+        let (all_exist2, _) = crate::fsops::disk_service_check_required_dirs(
+            req_spec.as_bytes(),
+            true,
+            |_| unreachable!(),
+        );
+        assert!(all_exist2);
+
+        let tmp_file = tmp_dir.join("http_body.tmp");
+        std::fs::write(&tmp_file, b"hello world").unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        let body = crate::dupesearch_nzb::http_get_read_and_delete(
+            tmp_file.as_os_str().as_bytes(),
+            1024,
+            true,
+        );
+        assert_eq!(body.as_deref(), Some(&b"hello world"[..]));
+        assert!(!tmp_file.exists());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

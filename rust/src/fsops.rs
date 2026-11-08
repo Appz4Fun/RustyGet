@@ -803,6 +803,67 @@ pub unsafe extern "C" fn nzbget_rs_fs_restore_file_or_dir_permissions(
     c_int::from(restore_file_or_dir_permissions(bytes, umask))
 }
 
+/// Checks `dest_dir` and (when non-empty) `inter_dir` free disk space against `disk_space_mb`.
+/// Returns `(dest_low, inter_low)`.
+pub fn disk_service_check_disk_space(
+    dest_dir: &CStr,
+    inter_dir: Option<&CStr>,
+    disk_space_mb: i32,
+) -> (bool, bool) {
+    if disk_space_mb < 0 {
+        return (false, false);
+    }
+    let dest_low = get_disk_state(dest_dir)
+        .is_some_and(|(avail, _)| crate::util::disk_service_is_low_space(avail, disk_space_mb));
+    let inter_low = inter_dir
+        .filter(|s| !s.to_bytes().is_empty())
+        .and_then(get_disk_state)
+        .is_some_and(|(avail, _)| crate::util::disk_service_is_low_space(avail, disk_space_mb));
+    (dest_low, inter_low)
+}
+
+/// Splits `required_dir` on `','` and `';'` (`DiskService::CheckRequiredDir`), checks each path
+/// for file or directory existence, invokes `on_missing` when a directory is missing and
+/// `waiting_reported` was false, and returns `(all_exist, next_waiting_reported)`.
+pub fn disk_service_check_required_dirs(
+    required_dir: &[u8],
+    waiting_reported: bool,
+    mut on_missing: impl FnMut(&CStr),
+) -> (bool, bool) {
+    if required_dir.is_empty() {
+        return (true, waiting_reported);
+    }
+    let mut all_exist = true;
+    let was_waiting_reported = waiting_reported;
+    let mut cur_waiting_reported = waiting_reported;
+    let mut rest = required_dir;
+    while let Some((tok_start, tok_end, next_pos)) =
+        crate::util::tokenizer_find_next_token(rest, b",;")
+    {
+        let token = &rest[tok_start..tok_end];
+        rest = &rest[next_pos..];
+        let f_exists = file_exists(token, &posix_stat);
+        let d_exists = directory_exists(token, &posix_stat);
+        let (is_missing, should_log, next_reported) =
+            crate::systemhealth::disk_service_eval_missing_required_dir(
+                f_exists,
+                d_exists,
+                was_waiting_reported,
+                cur_waiting_reported,
+            );
+        if is_missing {
+            if should_log {
+                if let Ok(c_dir) = std::ffi::CString::new(token) {
+                    on_missing(&c_dir);
+                }
+            }
+            cur_waiting_reported = next_reported;
+            all_exist = false;
+        }
+    }
+    (all_exist, cur_waiting_reported)
+}
+
 pub(crate) struct PosixFsOps;
 
 impl crate::fsdelete::Ops for PosixFsOps {

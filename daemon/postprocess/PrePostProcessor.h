@@ -81,13 +81,10 @@ extern PrePostProcessor* g_PrePostProcessor;
 #include "Log.h"
 #include "HistoryCoordinator.h"
 #include "DupeCoordinator.h"
-#include "DupeStreamRepair.h"
 #include "ExtensionManager.h"
 #include "Util.h"
 #include "FileSystem.h"
 #include "UnpackController.h"
-#include "Cleanup.h"
-#include "Rename.h"
 #include "Repair.h"
 #include "StreamRepair.h"
 #include "NzbFile.h"
@@ -95,8 +92,600 @@ extern PrePostProcessor* g_PrePostProcessor;
 #include "ParParser.h"
 #include "DirectUnpack.h"
 #include "ParDamage.h"
+#include <exception>
+#include <new>
 #include <mutex>
 #include "nzbget_rs.h"
+
+class MoveController : public Thread, public ScriptController
+{
+public:
+	void Run() override
+	{
+		BString<1024> nzbName;
+		{
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			nzbName = m_postInfo->GetNzbInfo()->GetName();
+			m_interDir = fs::u8path(m_postInfo->GetNzbInfo()->GetDestDir());
+			m_destDir = fs::u8path(m_postInfo->GetNzbInfo()->GetFinalDir());
+			if (m_destDir.empty())
+			{
+				m_destDir = fs::u8path(m_postInfo->GetNzbInfo()->BuildFinalDirName().Str());
+			}
+		}
+
+		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("move", *nzbName);
+		BString<1024> infoName;
+		infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+		nzbget_rs_free(infoNameBuf);
+		SetInfoName(*infoName);
+		PrintMessage(Message::mkInfo, "Moving completed files for %s", *nzbName);
+
+		bool ok = MoveFiles();
+
+		nzbget_rs_dqh_post_capitalize_first_ascii(*infoName);
+
+		if (ok)
+		{
+			RemoveStaleHardlinks(*m_postInfo->GetNzbInfo(), m_destDir);
+		}
+
+		{
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			if (m_postInfo && m_postInfo->GetNzbInfo())
+			{
+				int moveStatus = 0;
+				int outcome = nzbget_rs_move_controller_decide_outcome(
+					ok ? 1 : 0, IsStopped() ? 1 : 0, &moveStatus);
+				if (outcome == 1)
+				{
+					PrintMessage(Message::mkInfo, "%s successful", *infoName);
+					m_postInfo->GetNzbInfo()->SetDestDir(fs::u8string(m_destDir).c_str());
+					m_postInfo->GetNzbInfo()->SetFinalDir("");
+					m_postInfo->GetNzbInfo()->SetMoveStatus((NzbInfo::EMoveStatus)moveStatus);
+				}
+				else if (outcome == 2)
+				{
+					PrintMessage(Message::mkInfo, "%s interrupted, resumes after the restart", *infoName);
+				}
+				else
+				{
+					PrintMessage(Message::mkError, "%s failed", *infoName);
+					m_postInfo->GetNzbInfo()->SetMoveStatus((NzbInfo::EMoveStatus)moveStatus);
+				}
+				m_postInfo->SetWorking(false);
+			}
+		}
+	}
+
+	static void StartJob(PostInfo* postInfo)
+	{
+		MoveController* moveController = new MoveController();
+		moveController->m_postInfo = postInfo;
+		moveController->SetAutoDestroy(false);
+
+		postInfo->SetPostThread(moveController);
+
+		moveController->Start();
+	}
+
+	static Message::EKind ToMessageKind(int kind)
+	{
+		switch (kind)
+		{
+		case 1:
+			return Message::mkWarning;
+		case 2:
+			return Message::mkError;
+		default:
+			return Message::mkInfo;
+		}
+	}
+
+protected:
+	void AddMessage(Message::EKind kind, const char* text) override
+	{
+		m_postInfo->GetNzbInfo()->AddMessage(kind, text);
+	}
+
+	bool MoveFiles()
+	{
+		const std::string interStr = fs::u8string(m_interDir);
+		const std::string destStr = fs::u8string(m_destDir);
+		return nzbget_rs_move_controller_move_files(
+			interStr.c_str(),
+			destStr.c_str(),
+			this,
+			[](void* rawCtx) -> int {
+				return static_cast<MoveController*>(rawCtx)->IsStopped() ? 1 : 0;
+			},
+			[](void* rawCtx, int kind, const char* msg) {
+				static_cast<MoveController*>(rawCtx)->PrintMessage(
+					ToMessageKind(kind), "%s", msg ? msg : "");
+			},
+			[](void* rawCtx, const char* oldRelName, const char* newRelName) {
+				auto* self = static_cast<MoveController*>(rawCtx);
+				GuardedDownloadQueue guard = DownloadQueue::Guard();
+				if (self->m_postInfo && self->m_postInfo->GetNzbInfo())
+				{
+					self->m_postInfo->GetNzbInfo()->RenameCompletedFile(
+						oldRelName ? oldRelName : "", newRelName ? newRelName : "");
+				}
+			}) != 0;
+	}
+
+	void RemoveStaleHardlinks(NzbInfo& nzbInfo, const fs::path& destDir)
+	{
+		const auto& hardLinkPath = nzbInfo.GetHardLinkPath();
+		if (hardLinkPath.empty()) return;
+
+		const std::string destStr = fs::u8string(destDir);
+		nzbget_rs_move_controller_remove_stale_hardlinks(
+			hardLinkPath.c_str(),
+			destStr.c_str(),
+			this,
+			[](void* rawCtx, int kind, const char* msg) {
+				static_cast<MoveController*>(rawCtx)->PrintMessage(
+					ToMessageKind(kind), "%s", msg ? msg : "");
+			});
+	}
+
+private:
+	PostInfo* m_postInfo = nullptr;
+	fs::path m_interDir;
+	fs::path m_destDir;
+};
+
+class CleanupController : public Thread, public ScriptController
+{
+public:
+	void Run() override
+	{
+		BString<1024> nzbName;
+		CString destDir;
+		CString finalDir;
+		{
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			nzbName = m_postInfo->GetNzbInfo()->GetName();
+			destDir = m_postInfo->GetNzbInfo()->GetDestDir();
+			finalDir = m_postInfo->GetNzbInfo()->GetFinalDir();
+		}
+
+		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("cleanup", *nzbName);
+		BString<1024> infoName;
+		infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+		nzbget_rs_free(infoNameBuf);
+		SetInfoName(*infoName);
+
+		PrintMessage(Message::mkInfo, "Cleaning up %s", *nzbName);
+
+		int cleanupStatus = 0;
+		int cleanupOutcome = nzbget_rs_cleanup_controller_run(
+			destDir ? *destDir : "",
+			finalDir ? *finalDir : "",
+			g_Options->GetExtCleanupDisk(),
+			this,
+			[](void* rawCtx, int kind, const char* msg) {
+				static_cast<CleanupController*>(rawCtx)->PrintMessage(
+					MoveController::ToMessageKind(kind), "%s", msg ? msg : "");
+			},
+			&cleanupStatus);
+
+		nzbget_rs_dqh_post_capitalize_first_ascii(*infoName);
+
+		if (cleanupOutcome == 1)
+		{
+			PrintMessage(Message::mkInfo, "%s successful", *infoName);
+		}
+		else if (cleanupOutcome == 2)
+		{
+			PrintMessage(Message::mkInfo, "Nothing to cleanup for %s", *nzbName);
+		}
+		else
+		{
+			PrintMessage(Message::mkError, "%s failed", *infoName);
+		}
+		m_postInfo->GetNzbInfo()->SetCleanupStatus((NzbInfo::ECleanupStatus)cleanupStatus);
+
+		m_postInfo->SetWorking(false);
+	}
+
+	static void StartJob(PostInfo* postInfo)
+	{
+		CleanupController* cleanupController = new CleanupController();
+		cleanupController->m_postInfo = postInfo;
+		cleanupController->SetAutoDestroy(false);
+
+		postInfo->SetPostThread(cleanupController);
+
+		cleanupController->Start();
+	}
+
+protected:
+	void AddMessage(Message::EKind kind, const char* text) override
+	{
+		m_postInfo->GetNzbInfo()->AddMessage(kind, text);
+	}
+
+private:
+	PostInfo* m_postInfo;
+	CString m_destDir;
+	CString m_finalDir;
+};
+
+class RenameController : public Thread, public ScriptController
+{
+public:
+	enum EJobKind
+	{
+		jkPar,
+		jkRar
+	};
+
+	RenameController()
+		: m_postInfo(nullptr)
+		, m_kind(jkPar)
+	{
+		debug("Creating RenameController");
+	}
+
+	virtual void Run()
+	{
+		BString<1024> nzbName;
+		CString destDir;
+		CString finalDir;
+		{
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			nzbName = m_postInfo->GetNzbInfo()->GetName();
+			destDir = m_postInfo->GetNzbInfo()->GetDestDir();
+			finalDir = m_postInfo->GetNzbInfo()->GetFinalDir();
+		}
+
+		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("rename", *nzbName);
+		BString<1024> infoName;
+		infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+		nzbget_rs_free(infoNameBuf);
+		SetInfoName(infoName);
+
+		const char* archiveKindPrefix = nzbget_rs_rename_controller_archive_kind_prefix(
+			(int)m_kind, (int)jkRar);
+		PrintMessage(Message::mkInfo, "Checking renamed %sfiles for %s",
+			archiveKindPrefix, *nzbName);
+
+		ExecRename(destDir, finalDir, nzbName);
+
+		int runOutcome = nzbget_rs_rename_controller_classify_run_outcome(
+			IsStopped() ? 1 : 0, m_renamedCount);
+		if (runOutcome == 1)
+		{
+			PrintMessage(Message::mkWarning, "Renaming cancelled for %s", *nzbName);
+		}
+		else if (runOutcome == 2)
+		{
+			PrintMessage(Message::mkInfo, "Successfully renamed %i %sfile(s) for %s",
+				m_renamedCount, archiveKindPrefix, *nzbName);
+		}
+		else
+		{
+			PrintMessage(Message::mkInfo, "No renamed %sfiles found for %s",
+				archiveKindPrefix, *nzbName);
+		}
+
+		RenameCompleted(nzbName);
+	}
+
+	static void StartJob(PostInfo* postInfo, EJobKind kind)
+	{
+		RenameController* renameController = new RenameController();
+		renameController->m_postInfo = postInfo;
+		renameController->m_kind = kind;
+		renameController->SetAutoDestroy(false);
+
+		postInfo->SetPostThread(renameController);
+
+		renameController->Start();
+	}
+
+protected:
+	virtual void AddMessage(Message::EKind kind, const char* text)
+	{
+		m_postInfo->GetNzbInfo()->AddMessage(kind, text);
+	}
+
+private:
+	PostInfo* m_postInfo;
+	int m_renamedCount = 0;
+	bool m_hasMissedFiles = false;
+	bool m_hasDamagedParFiles = false;
+	EJobKind m_kind;
+
+	void UpdateProgress(const char* label, int stage)
+	{
+		GuardedDownloadQueue guard = DownloadQueue::Guard();
+
+		m_postInfo->SetProgressLabel(label ? label : "");
+		m_postInfo->SetStageProgress(stage);
+	}
+
+	void ExecRename(const char* destDir, const char* finalDir, const char* nzbName)
+	{
+		if (m_kind == jkPar)
+		{
+#ifndef DISABLE_PARCHECK
+			int detectMissingInt = 0;
+			bool useFinal = nzbget_rs_rename_controller_eval_par_config(
+				(int)m_postInfo->GetNzbInfo()->GetUnpackStatus(),
+				(int)NzbInfo::usSuccess,
+				(int)NzbInfo::usNone,
+				Util::EmptyStr(finalDir) ? 1 : 0,
+				&detectMissingInt) != 0;
+			int renamedCount = 0;
+			int hasMissedFiles = 0;
+			int hasDamagedParFiles = 0;
+			nzbget_rs_par_renamer_execute(
+				nzbName ? nzbName : "",
+				(useFinal ? finalDir : destDir) ? (useFinal ? finalDir : destDir) : "",
+				g_Options ? g_Options->GetParIgnoreExt() : "",
+				detectMissingInt,
+				PATH_SEPARATOR,
+				this,
+				+[](void* rawCtx) noexcept -> int
+				{
+					return static_cast<RenameController*>(rawCtx)->IsStopped() ? 1 : 0;
+				},
+				+[](void* rawCtx, const char* label, int stage) noexcept
+				{
+					static_cast<RenameController*>(rawCtx)->UpdateProgress(label, stage);
+				},
+				+[](void* rawCtx, int kind, const char* text) noexcept
+				{
+					auto* self = static_cast<RenameController*>(rawCtx);
+					Message::EKind msgKind = kind == 0 ? Message::mkInfo : kind == 1 ? Message::mkWarning : Message::mkError;
+					self->PrintMessage(msgKind, "%s", text ? text : "");
+				},
+				+[](void* rawCtx, const char* name) noexcept
+				{
+					static_cast<RenameController*>(rawCtx)->m_postInfo->GetParredFiles()->push_back(name ? name : "");
+				},
+				+[](void* rawCtx, const char* oldRel, const char* newRel) noexcept
+				{
+					static_cast<RenameController*>(rawCtx)->RegisterRenamedFile(
+						oldRel ? oldRel : "", newRel ? newRel : "");
+				},
+				&renamedCount,
+				&hasMissedFiles,
+				&hasDamagedParFiles);
+			m_hasMissedFiles = hasMissedFiles != 0;
+			m_hasDamagedParFiles = hasDamagedParFiles != 0;
+#endif
+		}
+		else if (m_kind == jkRar)
+		{
+			const char* password = "";
+			NzbParameter* parameter = m_postInfo->GetNzbInfo()->GetParameters()->Find("*Unpack:Password");
+			if (parameter)
+			{
+				password = parameter->GetValue();
+			}
+
+			struct Context
+			{
+				RenameController* self;
+				std::exception_ptr error;
+
+				int Fail()
+				{
+					error = std::current_exception();
+					return -1;
+				}
+			} context{this, nullptr};
+
+			NzbgetRsRarRenamerRunEnv env{};
+			env.ctx = &context;
+			env.stopped = +[](void* ctx) noexcept -> int
+			{
+				Context& c = *static_cast<Context*>(ctx);
+				if (c.error) return -1;
+				try { return c.self->IsStopped() ? 1 : 0; } catch (...) { return c.Fail(); }
+			};
+			env.progress = +[](void* ctx, const char* label, int stage) noexcept -> int
+			{
+				Context& c = *static_cast<Context*>(ctx);
+				if (c.error) return -1;
+				try { c.self->UpdateProgress(label, stage); return 0; } catch (...) { return c.Fail(); }
+			};
+			env.message = +[](void* ctx, int kind, const char* text) noexcept -> int
+			{
+				Context& c = *static_cast<Context*>(ctx);
+				if (c.error) return -1;
+				try
+				{
+					c.self->PrintMessage(
+						kind == 0 ? Message::mkInfo : kind == 1 ? Message::mkWarning : Message::mkError,
+						"%s", text ? text : "");
+					return 0;
+				}
+				catch (...) { return c.Fail(); }
+			};
+			env.registerRenamed = +[](void* ctx, const char* oldBase, const char* newBase) noexcept -> int
+			{
+				Context& c = *static_cast<Context*>(ctx);
+				if (c.error) return -1;
+				try { c.self->RegisterRenamedFile(oldBase, newBase); return 0; } catch (...) { return c.Fail(); }
+			};
+
+#ifndef DISABLE_TLS
+			const int tlsEnabled = 1;
+#else
+			const int tlsEnabled = 0;
+#endif
+			int renamedCount = 0;
+			nzbget_rs_rar_renamer_execute(
+				&env, destDir ? destDir : "", nzbName ? nzbName : "", password,
+				g_Options ? g_Options->GetUnpackIgnoreExt() : "", tlsEnabled, &renamedCount);
+			if (context.error)
+			{
+				std::rethrow_exception(context.error);
+			}
+		}
+	}
+
+	void RenameCompleted(const char* nzbName)
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+		int reqExtraPars = 0;
+		int reqParCheck = 0;
+#ifndef DISABLE_PARCHECK
+		int hasDamagedParFiles = m_hasDamagedParFiles ? 1 : 0;
+		int hasMissedFiles = m_hasMissedFiles ? 1 : 0;
+#else
+		int hasDamagedParFiles = 0;
+		int hasMissedFiles = 0;
+#endif
+		int initialStatus = nzbget_rs_rename_controller_complete_action(
+			(int)m_kind, m_renamedCount,
+			hasDamagedParFiles,
+			m_postInfo->GetNzbInfo()->GetRemainingParCount(),
+			hasMissedFiles,
+			(int)m_postInfo->GetNzbInfo()->GetParStatus(),
+			&reqExtraPars, &reqParCheck);
+		if (m_kind == jkPar)
+		{
+			m_postInfo->GetNzbInfo()->SetParRenameStatus((NzbInfo::EPostRenameStatus)initialStatus);
+#ifndef DISABLE_PARCHECK
+			if (reqExtraPars)
+			{
+				PrintMessage(Message::mkInfo, "Requesting extra par2-files for %s to perform par-rename", nzbName ? nzbName : "");
+				downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupResume, nullptr);
+				downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
+				if (nzbget_rs_rename_controller_should_reset_par_status(
+					m_postInfo->GetNzbInfo()->GetRemainingSize()) != 0)
+				{
+					m_postInfo->GetNzbInfo()->SetParRenameStatus(NzbInfo::rsNone);
+				}
+			}
+#endif
+		}
+		else if (m_kind == jkRar)
+		{
+			m_postInfo->GetNzbInfo()->SetRarRenameStatus((NzbInfo::EPostRenameStatus)initialStatus);
+		}
+#ifndef DISABLE_PARCHECK
+		if (reqParCheck)
+		{
+			PrintMessage(Message::mkInfo, "Requesting par-check/repair for %s to restore missing files ", nzbName ? nzbName : "");
+			m_postInfo->SetRequestParCheck(true);
+		}
+#endif
+
+		m_postInfo->SetWorking(false);
+	}
+
+	void RegisterRenamedFile(const char* oldFilename, const char* newFilename)
+	{
+		bool found;
+		{
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			found = m_postInfo->GetNzbInfo()->RenameCompletedFile(oldFilename, newFilename);
+		}
+		if (!found)
+		{
+			PrintMessage(Message::mkWarning,
+				"Could not find completed-file entry for %s while renaming to %s",
+				oldFilename, newFilename);
+		}
+		++m_renamedCount;
+	}
+};
+
+class PostRenamerController final : public Thread, public ScriptController
+{
+public:
+	static void StartJob(PostInfo* postInfo, bool postUnpack)
+	{
+		PostRenamerController* controller = new (std::nothrow) PostRenamerController();
+		if (!controller)
+		{
+			error("Failed to allocate memory for PostRenamerController");
+			return;
+		}
+		controller->m_postInfo = postInfo;
+		controller->m_postUnpack = postUnpack;
+		controller->SetAutoDestroy(false);
+		postInfo->SetPostThread(controller);
+		controller->Start();
+	}
+
+	void Run() override
+	{
+		std::string metaName;
+		std::string nzbName;
+		std::string dstDir;
+		{
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+			metaName = nzbInfo->GetMetaName();
+			nzbName = nzbInfo->GetName() ? nzbInfo->GetName() : "";
+			dstDir = nzbInfo->GetDestDir() ? nzbInfo->GetDestDir() : "";
+		}
+
+		int status = nzbget_rs_post_renamer_run(
+			m_postUnpack ? 1 : 0,
+			metaName.c_str(),
+			nzbName.c_str(),
+			dstDir.c_str(),
+			g_Options->GetRenameIgnoreExt(),
+			this,
+			+[](void* rawCtx, const char* infoName) {
+				static_cast<PostRenamerController*>(rawCtx)->SetInfoName(infoName ? infoName : "");
+			},
+			+[](void* rawCtx) -> int {
+				return static_cast<PostRenamerController*>(rawCtx)->IsStopped() ? 1 : 0;
+			},
+			+[](void* rawCtx, int kind, const char* msg) {
+				auto* self = static_cast<PostRenamerController*>(rawCtx);
+				Message::EKind msgKind = kind == 1
+					? Message::mkWarning
+					: kind == 2
+						? Message::mkError
+						: Message::mkInfo;
+				self->PrintMessage(msgKind, "%s", msg ? msg : "");
+			},
+			+[](void* rawCtx, const char* oldName, const char* newName) {
+				auto* self = static_cast<PostRenamerController*>(rawCtx);
+				GuardedDownloadQueue guard = DownloadQueue::Guard();
+				if (self->m_postInfo && self->m_postInfo->GetNzbInfo())
+				{
+					self->m_postInfo->GetNzbInfo()->RenameCompletedFile(
+						oldName ? oldName : "", newName ? newName : "");
+				}
+			});
+
+		GuardedDownloadQueue guard = DownloadQueue::Guard();
+		if (m_postUnpack)
+		{
+			m_postInfo->GetNzbInfo()->SetPostUnpackRenamingStatus(
+				static_cast<NzbInfo::PostUnpackRenamingStatus>(status));
+		}
+		else
+		{
+			m_postInfo->GetNzbInfo()->SetPostDownloadRenamingStatus(
+				static_cast<NzbInfo::PostDownloadRenamingStatus>(status));
+		}
+		m_postInfo->SetWorking(false);
+	}
+
+protected:
+	void AddMessage(Message::EKind kind, const char* text) override
+	{
+		m_postInfo->GetNzbInfo()->AddMessage(kind, text);
+	}
+
+private:
+	PostInfo* m_postInfo = nullptr;
+	bool m_postUnpack = false;
+};
 
 class PostScriptController : public Thread, public NzbScriptController
 {

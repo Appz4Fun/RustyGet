@@ -659,4 +659,961 @@ inline void DonorHealth::CheckPostings(const ServerList& servers, const std::vec
 		});
 }
 
+#include <algorithm>
+#include <cstdint>
+#include <ctime>
+#include <map>
+#include <set>
+#include <thread>
+#include <utility>
+#include "ArticleFetcher.h"
+#include "WebDownloader.h"
+#include "FileSystem.h"
+#include "NewsServer.h"
+#include "NntpConnection.h"
+#include "ServerPool.h"
+#include "Options.h"
+#include "Log.h"
+#include "Util.h"
+#include "nzbget_rs.h"
+
+class ReleaseName
+{
+public:
+	static constexpr size_t MaxNameLength = 512;
+	struct Attrs
+	{
+		std::set<std::string> resolution;
+		std::set<std::string> quality;
+		std::set<std::string> codec;
+		std::set<std::string> bitDepth;
+		std::set<std::string> audio;
+		std::set<std::string> channels;
+		std::set<std::string> network;
+		std::set<std::string> edition;
+		std::set<std::string> hdr;
+		std::string title;
+		std::string group;
+		std::vector<int> seasons;
+		std::vector<int> episodes;
+		int year = 0;
+		bool repack = false;
+		bool proper = false;
+	};
+
+	static std::string Clean(const std::string& name)
+	{
+		return Take(nzbget_rs_releasename_clean(name.data(), name.size()));
+	}
+
+	static std::string Normalize(const std::string& name)
+	{
+		return Take(nzbget_rs_releasename_normalize(name.data(), name.size()));
+	}
+
+	static std::string ShortQuery(const std::string& title)
+	{
+		return Take(nzbget_rs_releasename_short_query(title.data(), title.size()));
+	}
+
+	static Attrs Parse(const std::string& name)
+	{
+		std::string raw = Take(nzbget_rs_releasename_parse(name.data(), name.size()));
+		struct Reader
+		{
+			const char* p;
+			const char* end;
+			uint32_t U32()
+			{
+				if (end - p < 4) { p = end; return 0; }
+				const unsigned char* b = (const unsigned char*)p;
+				p += 4;
+				return (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+			}
+			std::string Str() { uint32_t n = U32(); n = std::min<uint32_t>(n, end - p); std::string s(p, n); p += n; return s; }
+			int I32() { return (int)U32(); }
+			bool Byte() { return p < end ? *p++ != 0 : false; }
+		} in{raw.data(), raw.data() + raw.size()};
+
+		Attrs attrs;
+		for (std::set<std::string>* set : {&attrs.resolution, &attrs.quality, &attrs.codec, &attrs.bitDepth, &attrs.audio,
+			&attrs.channels, &attrs.network, &attrs.edition, &attrs.hdr})
+		{
+			for (uint32_t n = in.U32(); n > 0 && in.p < in.end; n--)
+			{
+				set->insert(in.Str());
+			}
+		}
+		attrs.title = in.Str();
+		attrs.group = in.Str();
+		for (std::vector<int>* list : {&attrs.seasons, &attrs.episodes})
+		{
+			for (uint32_t n = in.U32(); n > 0 && in.p < in.end; n--)
+			{
+				list->push_back(in.I32());
+			}
+		}
+		attrs.year = in.I32();
+		attrs.repack = in.Byte();
+		attrs.proper = in.Byte();
+		return attrs;
+	}
+
+	static bool Readable(const std::string& name)
+	{
+		return nzbget_rs_releasename_readable(name.data(), name.size()) != 0;
+	}
+
+	static bool SameRelease(const std::string& aName, const std::string& bName)
+	{
+		return nzbget_rs_releasename_same_release(aName.data(), aName.size(), bName.data(), bName.size()) != 0;
+	}
+
+private:
+	static std::string Take(NzbgetRsBuf buf)
+	{
+		std::string out(buf.data, buf.len);
+		nzbget_rs_free(buf);
+		return out;
+	}
+};
+
+namespace DupeUtil
+{
+	inline bool WriteAtomic(const std::string& path, const std::string& data)
+	{
+		return nzbget_rs_dupe_util_write_atomic(path.data(), path.size(), data.data(), data.size()) != 0;
+	}
+
+	inline std::string Lower(std::string text)
+	{
+		NzbgetRsBuf buf = nzbget_rs_dqh_dupe_util_lower(text.data(), text.size());
+		std::string out(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return out;
+	}
+
+	inline std::string ReadAll(const std::string& path)
+	{
+		NzbgetRsBuf buf = nzbget_rs_dupe_util_read_all(path.data(), path.size());
+		std::string out(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return out;
+	}
+}
+
+struct NzbSummary
+{
+	struct Head
+	{
+		std::string name;
+		std::string messageId;
+		long long bytes = 0;
+	};
+	int files = 0;
+	long long totalBytes = 0;
+	std::set<std::string> filenames;
+	std::string poster;
+	std::vector<std::string> messageIds;
+	std::vector<std::string> groups;
+	std::map<std::string, std::string> meta;
+	std::string mainName;
+	uint64_t listedParts = 0;
+	uint64_t declaredParts = 0;
+	uint64_t articleBytes = 0;
+	Head parIndex;
+	std::vector<uint64_t> recoveryBytes;
+	long long dataBytes = 0;
+	int dataFiles = 0;
+	std::vector<Head> heads;
+	std::vector<std::string> dataMessageIds;
+	uint64_t dataListedParts = 0;
+	uint64_t dataDeclaredParts = 0;
+
+	std::string Fingerprint() const
+	{
+		std::vector<const char*> ptrs;
+		std::vector<size_t> lens;
+		ptrs.reserve(messageIds.size());
+		lens.reserve(messageIds.size());
+		for (const std::string& id : messageIds)
+		{
+			ptrs.push_back(id.data());
+			lens.push_back(id.size());
+		}
+		char buffer[17] = {};
+		nzbget_rs_dupesearch_fnv1a_fingerprint(ptrs.data(), lens.data(), ptrs.size(), buffer);
+		return std::string(buffer, 16);
+	}
+};
+
+class NzbReader
+{
+public:
+	static bool Parse(const std::string& data, NzbSummary& summary)
+	{
+		summary = NzbSummary();
+		RsNzbSummaryScalars scalars{};
+		int ok = nzbget_rs_nzb_reader_parse(
+			reinterpret_cast<const uint8_t*>(data.data()),
+			data.size(),
+			&scalars,
+			&summary,
+			NzbReader::OnStrings,
+			NzbReader::OnSlice,
+			NzbReader::OnRecoveryBytes);
+		if (ok == 0)
+		{
+			summary = NzbSummary();
+			return false;
+		}
+		ApplyScalars(summary, scalars);
+		return true;
+	}
+
+	static void OnStrings(void* ctx,
+		const uint8_t* posterPtr, size_t posterLen,
+		const uint8_t* mainNamePtr, size_t mainNameLen,
+		const uint8_t* parNamePtr, size_t parNameLen,
+		const uint8_t* parIdPtr, size_t parIdLen,
+		int64_t parBytes)
+	{
+		NzbSummary* s = static_cast<NzbSummary*>(ctx);
+		s->poster.assign(reinterpret_cast<const char*>(posterPtr), posterLen);
+		s->mainName.assign(reinterpret_cast<const char*>(mainNamePtr), mainNameLen);
+		s->parIndex.name.assign(reinterpret_cast<const char*>(parNamePtr), parNameLen);
+		s->parIndex.messageId.assign(reinterpret_cast<const char*>(parIdPtr), parIdLen);
+		s->parIndex.bytes = parBytes;
+	}
+
+	static void OnSlice(void* ctx, int kind,
+		const uint8_t* ptr1, size_t len1,
+		const uint8_t* ptr2, size_t len2,
+		int64_t bytes)
+	{
+		NzbSummary* s = static_cast<NzbSummary*>(ctx);
+		const char* c1 = reinterpret_cast<const char*>(ptr1);
+		const char* c2 = reinterpret_cast<const char*>(ptr2);
+		switch (kind)
+		{
+			case 1:
+				s->groups.emplace_back(c1, len1);
+				break;
+			case 2:
+				s->meta.emplace(std::string(c1, len1), std::string(c2, len2));
+				break;
+			case 3:
+				s->filenames.emplace(c1, len1);
+				break;
+			case 4:
+				s->messageIds.emplace_back(c1, len1);
+				break;
+			case 5:
+				s->dataMessageIds.emplace_back(c1, len1);
+				break;
+			case 6:
+				s->heads.push_back({std::string(c1, len1), std::string(c2, len2), bytes});
+				break;
+		}
+	}
+
+	static void OnRecoveryBytes(void* ctx, const uint64_t* ptr, size_t len)
+	{
+		NzbSummary* s = static_cast<NzbSummary*>(ctx);
+		s->recoveryBytes.assign(ptr, ptr + len);
+	}
+
+	static void ApplyScalars(NzbSummary& summary, const RsNzbSummaryScalars& scalars)
+	{
+		summary.files = scalars.files;
+		summary.totalBytes = scalars.total_bytes;
+		summary.dataFiles = scalars.data_files;
+		summary.dataBytes = scalars.data_bytes;
+		summary.listedParts = scalars.listed_parts;
+		summary.declaredParts = scalars.declared_parts;
+		summary.dataListedParts = scalars.data_listed_parts;
+		summary.dataDeclaredParts = scalars.data_declared_parts;
+		summary.articleBytes = scalars.article_bytes;
+	}
+};
+
+class HttpGet
+{
+public:
+	struct Reply
+	{
+		bool ok = false;
+		int status = 0;
+		std::string body;
+	};
+
+	static Reply Fetch(const std::string& url, const std::string& infoName, size_t maxBytes,
+		long long deadlineMs = 0)
+	{
+		Reply reply;
+		if (g_stopped)
+		{
+			return reply;
+		}
+
+		NzbgetRsBuf pathBuf = nzbget_rs_dqh_http_get_format_temp_path(
+			g_Options->GetTempDir(), PATH_SEPARATOR, (int)Util::CurrentTime(), ++g_counter);
+		std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
+		nzbget_rs_free(pathBuf);
+
+		WebDownloader downloader;
+		downloader.SetUrl(url.c_str());
+		downloader.SetInfoName(infoName.c_str());
+		downloader.SetOutputFilename(path.c_str());
+		downloader.SetForce(true);
+		downloader.SetRetry(false);
+
+		{
+			Guard guard(g_mutex);
+			if (g_stopped)
+			{
+				return reply;
+			}
+			g_active.insert(&downloader);
+		}
+		std::mutex doneMutex;
+		std::condition_variable doneCond;
+		bool done = false;
+		std::thread watchdog([&]()
+			{
+				std::unique_lock<std::mutex> lock(doneMutex);
+				while (!done)
+				{
+					int64_t waitMs = 250;
+					if (nzbget_rs_snh_http_get_calc_watchdog_wait(
+						deadlineMs, DonorHealth::NowMs(), FileSystem::FileSize(path.c_str()), maxBytes, &waitMs))
+					{
+						downloader.Stop();
+						return;
+					}
+					doneCond.wait_for(lock, std::chrono::milliseconds(waitMs), [&]() { return done; });
+				}
+			});
+		WebDownloader::EStatus status = downloader.DownloadWithRedirects(5);
+		if (watchdog.joinable())
+		{
+			{
+				std::lock_guard<std::mutex> lock(doneMutex);
+				done = true;
+			}
+			doneCond.notify_all();
+			watchdog.join();
+		}
+		{
+			Guard guard(g_mutex);
+			g_active.erase(&downloader);
+		}
+
+		reply.status = downloader.GetHttpStatus();
+		int readOk = 0;
+		NzbgetRsBuf bodyBuf = nzbget_rs_http_get_read_and_delete(
+			path.data(), path.size(), maxBytes, status == WebDownloader::adFinished ? 1 : 0, &readOk);
+		if (readOk != 0)
+		{
+			reply.body.assign(bodyBuf.data ? bodyBuf.data : "", bodyBuf.len);
+			reply.ok = true;
+		}
+		nzbget_rs_free(bodyBuf);
+		return reply;
+	}
+
+	static void StopAll()
+	{
+		Guard guard(g_mutex);
+		g_stopped = true;
+		for (WebDownloader* downloader : g_active)
+		{
+			downloader->Stop();
+		}
+	}
+
+	static void Reset()
+	{
+		g_stopped = false;
+	}
+
+	static bool Stopped()
+	{
+		return g_stopped;
+	}
+
+private:
+	inline static Mutex g_mutex;
+	inline static std::set<WebDownloader*> g_active;
+	inline static std::atomic<bool> g_stopped{false};
+	inline static std::atomic<int> g_counter{0};
+};
+
+class Newznab
+{
+public:
+	struct Result
+	{
+		std::string title;
+		std::string link;
+		long long size = 0;
+		int grabs = 0;
+		time_t date = 0;
+		std::string indexer;
+	};
+
+	struct Page
+	{
+		std::vector<Result> items;
+		bool error = false;
+		int errorCode = 0;
+		std::string errorText;
+	};
+
+	using Params = std::vector<std::pair<std::string, std::string>>;
+
+	static constexpr int PageSize = 100;
+	static constexpr int MaxPages = 5;
+	static constexpr int Parallel = 4;
+
+	static bool ParseResponse(const std::string& xml, Page& page)
+	{
+		page = Page();
+		return nzbget_rs_newznab_parse_response(
+			reinterpret_cast<const uint8_t*>(xml.data()),
+			xml.size(),
+			&page,
+			[](void* ctx, int errorCode, const uint8_t* errorTextPtr, size_t errorTextLen) noexcept
+			{
+				auto* out = static_cast<Page*>(ctx);
+				out->error = true;
+				out->errorCode = errorCode;
+				out->errorText.assign(reinterpret_cast<const char*>(errorTextPtr), errorTextLen);
+			},
+			[](void* ctx, const uint8_t* titlePtr, size_t titleLen,
+			   const uint8_t* linkPtr, size_t linkLen, int64_t size, int32_t grabs,
+			   int64_t date, const uint8_t* indexerPtr, size_t indexerLen) noexcept
+			{
+				auto* out = static_cast<Page*>(ctx);
+				Result r;
+				r.title.assign(reinterpret_cast<const char*>(titlePtr), titleLen);
+				r.link.assign(reinterpret_cast<const char*>(linkPtr), linkLen);
+				r.size = (long long)size;
+				r.grabs = grabs;
+				r.date = (time_t)date;
+				r.indexer.assign(reinterpret_cast<const char*>(indexerPtr), indexerLen);
+				out->items.push_back(std::move(r));
+			}) != 0;
+	}
+
+	static time_t ParseDate(const std::string& text)
+	{
+		return (time_t)nzbget_rs_df_parse_newznab_date(text.data(), text.size());
+	}
+
+	static std::vector<Params> BuildQueries(const std::string& title, const std::string& imdb,
+		const std::string& tvdb)
+	{
+		std::vector<Params> queries;
+		nzbget_rs_df_build_newznab_queries(
+			title.data(), title.size(),
+			imdb.data(), imdb.size(),
+			tvdb.data(), tvdb.size(),
+			&queries,
+			[](void* ctx, const char* const* keys, const size_t* keyLens,
+			   const char* const* vals, const size_t* valLens, size_t count) noexcept
+			{
+				auto* out = static_cast<std::vector<Params>*>(ctx);
+				Params p;
+				p.reserve(count);
+				for (size_t i = 0; i < count; i++)
+				{
+					p.emplace_back(std::string(keys[i], keyLens[i]), std::string(vals[i], valLens[i]));
+				}
+				out->push_back(std::move(p));
+			});
+		return queries;
+	}
+
+	static std::string BuildUrl(const std::string& base, const Params& params, const std::string& apiKey)
+	{
+		std::vector<const char*> keys(params.size());
+		std::vector<const char*> vals(params.size());
+		for (size_t i = 0; i < params.size(); i++)
+		{
+			keys[i] = params[i].first.c_str();
+			vals[i] = params[i].second.c_str();
+		}
+		NzbgetRsBuf buf = nzbget_rs_df_build_newznab_url(
+			base.c_str(), keys.data(), vals.data(), params.size(), apiKey.c_str());
+		std::string out(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return out;
+	}
+
+	static std::string Mask(const std::string& text)
+	{
+		NzbgetRsBuf buf = nzbget_rs_df_mask_newznab_text(text.data(), text.size());
+		std::string out(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return out;
+	}
+
+	struct SearchStats
+	{
+		int queries = 0;
+		int failed = 0;
+		int pages = 0;
+	};
+
+	static std::vector<Result> Search(const std::string& base, const std::string& apiKey,
+		const std::vector<Params>& queries, time_t deadline, SearchStats* stats)
+	{
+		std::vector<std::vector<Result>> found(queries.size());
+		std::atomic<size_t> next{0};
+		std::atomic<int> failed{0};
+		std::atomic<int> pages{0};
+
+		auto worker = [&]()
+		{
+			for (size_t index = next++; index < queries.size(); index = next++)
+			{
+				std::vector<const char*> lKeys;
+				std::vector<const char*> lVals;
+				lKeys.reserve(queries[index].size());
+				lVals.reserve(queries[index].size());
+				for (const auto& param : queries[index])
+				{
+					lKeys.push_back(param.first.c_str());
+					lVals.push_back(param.second.c_str());
+				}
+				NzbgetRsBuf lblBuf = nzbget_rs_dqh_newznab_format_query_label(
+					lKeys.data(), lVals.data(), lKeys.size());
+				std::string label(lblBuf.data ? lblBuf.data : "", lblBuf.len);
+				nzbget_rs_free(lblBuf);
+
+				for (int page = 0; page < MaxPages; page++)
+				{
+					if (Util::CurrentTime() >= deadline)
+					{
+						detail("DupeSearch: no time left for the search %s", label.c_str());
+						break;
+					}
+
+					Params params = queries[index];
+					NzbgetRsBuf limBuf = nzbget_rs_dqh_conn_format_port_str(PageSize);
+					params.emplace_back("limit", std::string(limBuf.data ? limBuf.data : "", limBuf.len));
+					nzbget_rs_free(limBuf);
+					NzbgetRsBuf offBuf = nzbget_rs_dqh_conn_format_port_str(page * PageSize);
+					params.emplace_back("offset", std::string(offBuf.data ? offBuf.data : "", offBuf.len));
+					nzbget_rs_free(offBuf);
+					NzbgetRsBuf infoBuf = nzbget_rs_dqh_newznab_format_search_info_name(label.c_str(), page + 1);
+					std::string infoName(infoBuf.data ? infoBuf.data : "", infoBuf.len);
+					nzbget_rs_free(infoBuf);
+					long long pageDeadlineMs = std::max(1LL, DonorHealth::NowMs() + (long long)(deadline - Util::CurrentTime()) * 1000LL);
+					HttpGet::Reply reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
+						pageDeadlineMs);
+					if (!reply.ok && reply.status == 0 && !HttpGet::Stopped() && Util::CurrentTime() < deadline)
+					{
+						reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
+							pageDeadlineMs);
+					}
+					pages++;
+
+					Page result;
+					if (!reply.ok)
+					{
+						warn("DupeSearch: the search %s failed (HTTP %i)", label.c_str(), reply.status);
+						failed++;
+						break;
+					}
+					if (!ParseResponse(reply.body, result))
+					{
+						warn("DupeSearch: the answer to the search %s isn't XML (is option DupeSearchUrl the "
+							"indexer's api address, like http://host:5076/api?)", label.c_str());
+						failed++;
+						break;
+					}
+					if (result.error)
+					{
+						warn("DupeSearch: the indexer answered the search %s with error %i: %s",
+							label.c_str(), result.errorCode, Mask(result.errorText).c_str());
+						failed++;
+						break;
+					}
+
+					found[index].insert(found[index].end(), result.items.begin(), result.items.end());
+					if ((int)result.items.size() < PageSize)
+					{
+						break;
+					}
+				}
+			}
+		};
+
+		std::vector<std::thread> threads;
+		size_t count = std::min(queries.size(), (size_t)Parallel);
+		for (size_t i = 0; i < count; i++)
+		{
+			threads.emplace_back(worker);
+		}
+		for (std::thread& thread : threads)
+		{
+			thread.join();
+		}
+
+		std::vector<Result> merged;
+		std::set<std::string> links;
+		for (const std::vector<Result>& results : found)
+		{
+			for (const Result& result : results)
+			{
+				if (!result.link.empty() && links.insert(result.link).second)
+				{
+					merged.push_back(result);
+				}
+			}
+		}
+
+		if (stats)
+		{
+			stats->queries = (int)queries.size();
+			stats->failed = failed;
+			stats->pages = pages;
+		}
+		return merged;
+	}
+};
+
+class Posting
+{
+public:
+	static constexpr int RelistWindowSec = 120;
+	static constexpr double SamePostingShare = 0.01;
+	static constexpr size_t SketchSize = 64;
+	static constexpr double ListingMismatchShare = 0.02;
+
+	using Sketch = std::vector<uint32_t>;
+	using Group = std::vector<Newznab::Result>;
+
+	static Sketch MakeSketch(const std::vector<std::string>& messageIds)
+	{
+		Strings ids(messageIds);
+		Sketch sketch(SketchSize);
+		size_t len = 0;
+		nzbget_rs_posting_sketch(ids.data.data(), ids.lens.data(), ids.data.size(), sketch.data(), &len);
+		sketch.resize(len);
+		return sketch;
+	}
+
+	static bool SameSketch(const Sketch& a, const Sketch& b)
+	{
+		return nzbget_rs_posting_same_sketch(a.data(), a.size(), b.data(), b.size()) != 0;
+	}
+
+	static bool SketchOfFile(const std::string& path, Sketch& sketch)
+	{
+		sketch.assign(SketchSize, 0);
+		size_t len = 0;
+		if (!nzbget_rs_posting_sketch_of_file(path.c_str(), sketch.data(), SketchSize, &len))
+		{
+			sketch.clear();
+			return false;
+		}
+		sketch.resize(len);
+		return true;
+	}
+
+	static bool SamePosting(const std::vector<std::string>& a, const std::vector<std::string>& b)
+	{
+		Strings x(a), y(b);
+		return nzbget_rs_posting_same_posting(x.data.data(), x.lens.data(), x.data.size(), y.data.data(), y.lens.data(),
+			y.data.size()) != 0;
+	}
+
+	static std::vector<Group> GroupListings(std::vector<Newznab::Result> results)
+	{
+		std::vector<NzbgetRsListing> raw = Listings(results);
+		std::vector<size_t> indices(raw.size()), sizes(raw.size());
+		size_t count = 0;
+		nzbget_rs_posting_group(raw.data(), raw.size(), indices.data(), sizes.data(), &count);
+		return Groups(results, indices, sizes, count);
+	}
+
+	static bool ListingMismatch(const Newznab::Result& listing, long long nzbBytes)
+	{
+		return nzbget_rs_posting_listing_mismatch((int64_t)listing.size, (int64_t)nzbBytes) != 0;
+	}
+
+	static std::vector<Group> OrderPostings(const std::vector<Newznab::Result>& candidates,
+		long long pickBytes, int maxPostings)
+	{
+		std::vector<NzbgetRsListing> raw = Listings(candidates);
+		std::vector<size_t> indices(raw.size()), sizes(raw.size());
+		size_t count = 0;
+		nzbget_rs_posting_order(raw.data(), raw.size(), (int64_t)pickBytes, maxPostings, indices.data(), sizes.data(), &count);
+		return Groups(candidates, indices, sizes, count);
+	}
+
+private:
+	struct Strings
+	{
+		std::vector<const char*> data;
+		std::vector<size_t> lens;
+		explicit Strings(const std::vector<std::string>& texts)
+		{
+			for (const std::string& t : texts) { data.push_back(t.data()); lens.push_back(t.size()); }
+		}
+	};
+
+	static std::vector<NzbgetRsListing> Listings(const std::vector<Newznab::Result>& results)
+	{
+		std::vector<NzbgetRsListing> raw;
+		for (const Newznab::Result& r : results)
+		{
+			raw.push_back({r.link.data(), r.link.size(), (int64_t)r.size, (int32_t)r.grabs, (int64_t)r.date});
+		}
+		return raw;
+	}
+
+	static std::vector<Group> Groups(const std::vector<Newznab::Result>& results, const std::vector<size_t>& indices,
+		const std::vector<size_t>& sizes, size_t count)
+	{
+		std::vector<Group> groups;
+		size_t at = 0;
+		for (size_t g = 0; g < count; g++)
+		{
+			Group group;
+			for (size_t k = 0; k < sizes[g]; k++) group.push_back(results[indices[at++]]);
+			groups.push_back(std::move(group));
+		}
+		return groups;
+	}
+};
+
+class NntpHealthServer : public DonorHealth::Server
+{
+public:
+	static constexpr int MaxCap = 20;
+	static constexpr int ConnectionWaitSec = 10;
+
+	NntpHealthServer(int serverId, int cap) : Server(cap), m_serverId(serverId) {}
+
+	int ServerId() const { return m_serverId; }
+
+	static int CapFor(int connections)
+	{
+		return nzbget_rs_snh_nntp_health_cap_for(connections, MaxCap);
+	}
+
+	static DonorHealth::ServerList Servers()
+	{
+		static std::mutex mutex;
+		static std::map<int, std::shared_ptr<NntpHealthServer>> known;
+
+		std::lock_guard<std::mutex> guard(mutex);
+		DonorHealth::ServerList list;
+		std::set<int> groups;
+		for (NewsServer* server : g_ServerPool->GetServers())
+		{
+			if (!server->GetActive() || server->GetMaxConnections() == 0)
+			{
+				continue;
+			}
+			if (server->GetGroup() > 0 && !groups.insert(server->GetGroup()).second)
+			{
+				continue;
+			}
+			std::shared_ptr<NntpHealthServer>& entry = known[server->GetId()];
+			int wantedCap = CapFor(server->GetMaxConnections());
+			if (!entry || entry->Cap() != wantedCap)
+			{
+				entry = std::make_shared<NntpHealthServer>(server->GetId(), wantedCap);
+			}
+			list.push_back(entry);
+		}
+		return list;
+	}
+
+protected:
+	std::vector<DonorHealth::Answer> Exchange(const std::vector<DonorHealth::Request>& batch) override
+	{
+		using Answer = DonorHealth::Answer;
+
+		NewsServer* server = g_ServerPool->GetServerById(m_serverId);
+		if (!server)
+		{
+			throw DonorHealth::ExchangeError();
+		}
+
+		NntpConnection* connection = nullptr;
+		time_t waitStart = Util::CurrentTime();
+		while (!connection && !HttpGet::Stopped() && Util::CurrentTime() - waitStart <= ConnectionWaitSec)
+		{
+			connection = g_ServerPool->GetConnection(server->GetNormLevel(), server, nullptr);
+			if (!connection)
+			{
+				Util::Sleep(20);
+			}
+		}
+		if (!connection)
+		{
+			DonorHealth::ExchangeError busy;
+			busy.busy = true;
+			throw busy;
+		}
+
+		struct Release
+		{
+			NntpConnection* connection;
+			bool broken = false;
+			~Release()
+			{
+				if (broken)
+				{
+					connection->Disconnect();
+				}
+				g_ServerPool->FreeConnection(connection, true);
+			}
+		} release{ connection };
+
+		if (!connection->Connect())
+		{
+			release.broken = true;
+			throw DonorHealth::ExchangeError();
+		}
+
+		if (server->GetJoinGroup() && batch.front().groups)
+		{
+			const char* joined = nullptr;
+			for (const std::string& group : *batch.front().groups)
+			{
+				joined = connection->JoinGroup(group.c_str());
+				if (joined && joined[0] == '2')
+				{
+					break;
+				}
+			}
+			if (!joined || joined[0] != '2')
+			{
+				release.broken = !joined;
+				throw DonorHealth::ExchangeError();
+			}
+		}
+
+		std::vector<const char*> statIds;
+		std::vector<size_t> statLens;
+		statIds.reserve(batch.size());
+		statLens.reserve(batch.size());
+		for (const DonorHealth::Request& request : batch)
+		{
+			statIds.push_back(request.messageId.data());
+			statLens.push_back(request.messageId.size());
+		}
+		NzbgetRsBuf cmdBuf = nzbget_rs_dqh_nntp_health_format_stat_batch(
+			statIds.data(), statLens.data(), statIds.size());
+		std::string commands(cmdBuf.data ? cmdBuf.data : "", cmdBuf.len);
+		nzbget_rs_free(cmdBuf);
+		if (!connection->Send(commands.c_str(), (int)commands.size()))
+		{
+			release.broken = true;
+			throw DonorHealth::ExchangeError();
+		}
+
+		std::vector<Answer> answers;
+		for (size_t i = 0; i < batch.size(); i++)
+		{
+			if (HttpGet::Stopped() || DonorHealth::Stopping())
+			{
+				release.broken = true;
+				DonorHealth::ExchangeError error;
+				error.answers = answers;
+				throw error;
+			}
+			char line[1024];
+			int length = 0;
+			if (!connection->ReadLine(line, sizeof(line), &length))
+			{
+				release.broken = true;
+				DonorHealth::ExchangeError error;
+				error.answers = answers;
+				throw error;
+			}
+			int statReply = nzbget_rs_snh_nntp_health_classify_stat_reply(line);
+			answers.push_back(statReply == 0 ? Answer::Present : statReply == 1 ? Answer::Missing : Answer::Error);
+		}
+
+		for (size_t i = 0; i < batch.size(); i++)
+		{
+			if (HttpGet::Stopped() || DonorHealth::Stopping())
+			{
+				release.broken = true;
+				DonorHealth::ExchangeError error;
+				error.answers = answers;
+				for (size_t j = i; j < batch.size(); j++)
+					if (batch[j].gate && error.answers[j] == Answer::Present)
+						error.answers[j] = Answer::Error;
+				throw error;
+			}
+			if (!batch[i].gate || answers[i] != Answer::Present)
+			{
+				continue;
+			}
+			try
+			{
+				answers[i] = BodyOnce(batch[i].gate, [&]() -> Answer
+					{
+						std::vector<CString> groups;
+						if (batch[i].groups)
+						{
+							for (const std::string& group : *batch[i].groups)
+							{
+								groups.emplace_back(group.c_str());
+							}
+						}
+						ArticleFetcher fetcher;
+						ArticleFetcher::FetchedArticle article = fetcher.FetchFromConnection(connection, Bracketed(batch[i].messageId).c_str(), groups);
+						int throwError = 0;
+						int classified = nzbget_rs_nntp_health_classify_body_fetch_result(
+							article.Success ? 1 : 0, article.Transient ? 1 : 0,
+							(int)Answer::Present, (int)Answer::BodyBad, &throwError);
+						if (throwError != 0)
+						{
+							throw DonorHealth::ExchangeError();
+						}
+						return (Answer)classified;
+					});
+			}
+			catch (DonorHealth::ExchangeError&)
+			{
+				release.broken = true;
+				DonorHealth::ExchangeError error;
+				error.answers = answers;
+				error.answers[i] = Answer::Error;
+				for (size_t j = i + 1; j < batch.size(); j++)
+				{
+					if (batch[j].gate && answers[j] == Answer::Present)
+					{
+						error.answers[j] = Answer::Error;
+					}
+				}
+				throw error;
+			}
+		}
+		return answers;
+	}
+
+private:
+	int m_serverId;
+
+	static std::string Bracketed(const std::string& messageId)
+	{
+		NzbgetRsBuf buf = nzbget_rs_dqh_nntp_health_format_bracketed_id(
+			messageId.data(), messageId.size());
+		std::string out(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return out;
+	}
+};
+
 #endif

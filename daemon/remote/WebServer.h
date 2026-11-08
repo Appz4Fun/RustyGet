@@ -688,4 +688,324 @@ inline const char* WebProcessor::DetectContentType(const char* filename)
 	return nzbget_rs_sus_web_detect_content_type(filename);
 }
 
+#include <system_error>
+#include "Thread.h"
+#include "Observer.h"
+#include "BinRpc.h"
+
+class RequestProcessor : public Thread, public Subject
+{
+public:
+	~RequestProcessor()
+	{
+		m_connection->Disconnect();
+
+#ifndef DISABLE_TLS
+		OpenSSL::StopSSLThread();
+#endif
+	}
+
+	void Run() override
+	{
+		Execute();
+		Notify(nullptr);
+	}
+
+	void Stop() override
+	{
+		Thread::Stop();
+		m_connection->Cancel();
+	}
+
+	void SetTls(bool tls) { m_tls = tls; }
+	void SetConnection(std::unique_ptr<Connection>&& connection) { m_connection = std::move(connection); }
+
+private:
+	bool m_tls;
+	std::unique_ptr<Connection> m_connection;
+
+	bool ServWebRequest(const char* signature)
+	{
+		char buffer[1024];
+		if (!m_connection->ReadLine(buffer, sizeof(buffer), nullptr))
+		{
+			return false;
+		}
+
+		WebProcessor::EHttpMethod httpMethod = WebProcessor::hmGet;
+		char* url = buffer;
+		int rsMethod = 0;
+		size_t urlOffset = 0;
+		size_t urlLen = 0;
+		if (!nzbget_rs_rco_remote_parse_web_request_line(
+			signature, buffer, &rsMethod, &urlOffset, &urlLen))
+		{
+			return false;
+		}
+		httpMethod = (WebProcessor::EHttpMethod)rsMethod;
+		url = buffer + urlOffset;
+		url[urlLen] = '\0';
+
+		debug("url: %s", url);
+
+		WebProcessor processor;
+		processor.SetConnection(m_connection.get());
+		processor.SetUrl(url);
+		processor.SetHttpMethod(httpMethod);
+		processor.Execute();
+
+		return processor.GetKeepAlive();
+	}
+
+	void Execute()
+	{
+		bool ok = false;
+		m_connection->SetSuppressErrors(true);
+
+#ifndef DISABLE_TLS
+		if (m_tls && !m_connection->StartTls(false, g_Options->GetSecureCert(), g_Options->GetSecureKey()))
+		{
+			debug("Could not establish secure connection to web-client: Start TLS failed");
+			return;
+		}
+#endif
+
+		uint32 signature = 0;
+		if (!m_connection->Recv((char*)&signature, 4))
+		{
+			debug("Could not read request signature");
+			return;
+		}
+
+		int sigKind = nzbget_rs_rco_remote_classify_signature(
+			(const char*)&signature, (uint32)NZBMESSAGE_SIGNATURE);
+		if (sigKind == 1)
+		{
+			ok = true;
+			BinRpcProcessor processor;
+			processor.SetConnection(m_connection.get());
+			processor.Execute();
+		}
+		else if (sigKind == 2)
+		{
+			ok = true;
+			while (ServWebRequest((char*)&signature))
+			{
+				if (!m_connection->Recv((char*)&signature, 4))
+				{
+					debug("Could not read request signature");
+					break;
+				}
+			}
+
+			m_connection->SetGracefull(true);
+			m_connection->Disconnect();
+		}
+
+		if (!ok)
+		{
+			int warnPort = nzbget_rs_ntw_remote_server_select_port(
+				m_tls ? 1 : 0, g_Options->GetSecurePort(), g_Options->GetControlPort());
+			warn("Non-RustyGet request received on port %i from %s", warnPort, m_connection->GetRemoteAddr());
+		}
+	}
+};
+
+class RemoteServer : public Thread, public Observer
+{
+public:
+	RemoteServer(bool tls) : m_tls(tls) {}
+
+	~RemoteServer()
+	{
+#ifndef DISABLE_TLS
+		OpenSSL::StopSSLThread();
+#endif
+	}
+
+	void Run() override
+	{
+		debug("Entering RemoteServer-loop");
+
+#ifndef DISABLE_TLS
+		if (m_tls)
+		{
+			if (nzbget_rs_dqh_remote_server_is_cert_or_key_missing(
+				g_Options->GetSecureCert(),
+				FileSystem::FileExists(g_Options->GetSecureCert()) ? 1 : 0) != 0)
+			{
+				error("Could not initialize TLS, secure certificate is not configured or the cert-file was not found. Check option <SecureCert>");
+				return;
+			}
+
+			if (nzbget_rs_dqh_remote_server_is_cert_or_key_missing(
+				g_Options->GetSecureKey(),
+				FileSystem::FileExists(g_Options->GetSecureKey()) ? 1 : 0) != 0)
+			{
+				error("Could not initialize TLS, secure key is not configured or the key-file was not found. Check option <SecureKey>");
+				return;
+			}
+		}
+#endif
+
+		while (!IsStopped())
+		{
+			bool bind = true;
+
+			if (!m_connection)
+			{
+				int listenPort = nzbget_rs_ntw_remote_server_select_port(
+					m_tls ? 1 : 0, g_Options->GetSecurePort(), g_Options->GetControlPort());
+				m_connection = std::make_unique<Connection>(g_Options->GetControlIp(),
+					listenPort,
+					m_tls);
+				m_connection->SetTimeout(g_Options->GetRemoteTimeout());
+				m_connection->SetSuppressErrors(false);
+				bind = m_connection->Bind();
+				if (IsStopped())
+				{
+					break;
+				}
+			}
+
+			std::unique_ptr<Connection> acceptedConnection;
+			if (bind)
+			{
+				acceptedConnection = m_connection->Accept();
+			}
+			if (bind && !acceptedConnection && m_connection && m_connection->GetAcceptBusy() && !IsStopped())
+			{
+				Util::Sleep(200);
+				continue;
+			}
+			if (nzbget_rs_dqh_remote_server_should_reset_listener(
+				bind ? 1 : 0, acceptedConnection != nullptr ? 1 : 0) != 0)
+			{
+				if (IsStopped())
+				{
+					break;
+				}
+				m_connection.reset();
+				Util::Sleep(500);
+				continue;
+			}
+
+			if (!IsStopped())
+			{
+				Guard guard(m_processorsMutex);
+				time_t now = Util::CurrentTime();
+				int shouldWarn = 0;
+				if (nzbget_rs_ntw_remote_server_should_warn_cap(
+					(int)m_activeProcessors.size(), MaxProcessors,
+					(int64_t)now, (int64_t)m_lastCapWarning, &shouldWarn) != 0)
+				{
+					if (shouldWarn)
+					{
+						m_lastCapWarning = now;
+						warn("Too many connections to the web interface/API (%i); refusing new ones", MaxProcessors);
+					}
+					continue;
+				}
+				RequestProcessor* commandThread = new RequestProcessor();
+				commandThread->SetAutoDestroy(true);
+				commandThread->SetConnection(std::move(acceptedConnection));
+#ifndef DISABLE_TLS
+				commandThread->SetTls(m_tls);
+#endif
+				m_activeProcessors.push_back(commandThread);
+				commandThread->Attach(this);
+				try
+				{
+					commandThread->Start();
+				}
+				catch (const std::system_error& e)
+				{
+					m_activeProcessors.pop_back();
+					commandThread->Detach(this);
+					delete commandThread;
+					warn("Could not start a thread for a web interface/API connection: %s", e.what());
+					Util::Sleep(200);
+				}
+			}
+		}
+
+		if (m_connection)
+		{
+			m_connection->Disconnect();
+		}
+
+		debug("RemoteServer: waiting for request processor to complete");
+		bool completed = false;
+		while (!completed)
+		{
+			{
+				Guard guard(m_processorsMutex);
+				completed = m_activeProcessors.size() == 0;
+			}
+			Util::Sleep(100);
+		}
+		debug("RemoteServer: request processor are completed");
+
+		debug("Exiting RemoteServer-loop");
+	}
+
+	void Stop() override
+	{
+		Thread::Stop();
+		if (m_connection)
+		{
+			m_connection->SetSuppressErrors(true);
+			m_connection->SetForceClose(true);
+			m_connection->Cancel();
+		}
+
+		debug("Stopping RequestProcessors");
+		{
+			Guard guard(m_processorsMutex);
+			for (RequestProcessor* requestProcessor : m_activeProcessors)
+			{
+				requestProcessor->Stop();
+			}
+		}
+		debug("RequestProcessors are notified");
+		debug("RemoteServer stop end");
+	}
+
+	void ForceStop()
+	{
+		debug("Killing RequestProcessors");
+		Guard guard(m_processorsMutex);
+		for (RequestProcessor* requestProcessor : m_activeProcessors)
+		{
+			requestProcessor->Kill();
+		}
+		m_activeProcessors.clear();
+		debug("RequestProcessors are killed");
+	}
+
+	void Update(Subject* caller, void* aspect) override
+	{
+		(void)aspect;
+		debug("Notification from RequestProcessor received");
+
+		RequestProcessor* requestProcessor = (RequestProcessor*)caller;
+		Guard guard(m_processorsMutex);
+		auto it = std::find(m_activeProcessors.begin(), m_activeProcessors.end(), requestProcessor);
+		if (it != m_activeProcessors.end())
+		{
+			m_activeProcessors.erase(it);
+		}
+	}
+
+private:
+	typedef std::deque<RequestProcessor*> RequestProcessors;
+
+	bool m_tls;
+	std::unique_ptr<Connection> m_connection;
+	RequestProcessors m_activeProcessors;
+	Mutex m_processorsMutex;
+	time_t m_lastCapWarning = 0;
+	static const int MaxProcessors = 256;
+};
+
 #endif

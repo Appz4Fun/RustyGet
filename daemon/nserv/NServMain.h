@@ -31,10 +31,6 @@
 #include "Options.h"
 #include "nzbget_rs.h"
 
-#ifndef DISABLE_TLS
-#include "OpenSSL.h"
-#endif
-
 class NzbGenerator
 {
 public:

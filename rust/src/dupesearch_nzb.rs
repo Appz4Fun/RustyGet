@@ -4498,6 +4498,23 @@ pub unsafe extern "C" fn nzbget_rs_nzb_reader_parse(
     1
 }
 
+/// Reads a temporary HTTP response file if its size is `<= max_bytes`, and deletes the file
+/// unconditionally (`HttpGet::Fetch`).
+pub fn http_get_read_and_delete(path: &[u8], max_bytes: usize, read_body: bool) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    let fs_path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
+    let result = if read_body {
+        match std::fs::metadata(fs_path) {
+            Ok(meta) if meta.len() <= max_bytes as u64 => std::fs::read(fs_path).ok(),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let _ = std::fs::remove_file(fs_path);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

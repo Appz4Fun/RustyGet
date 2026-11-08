@@ -28,10 +28,7 @@
 #include <memory>
 #include <vector>
 #include "NString.h"
-#include "SocketDeadline.h"
-#ifndef DISABLE_TLS
 #include "TlsSocket.h"
-#endif
 
 class Connection
 {

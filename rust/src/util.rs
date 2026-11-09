@@ -1624,42 +1624,15 @@ pub struct PosixRegEx {
     valid: bool,
     match_buf_size: usize,
     matches: Vec<(i32, i32)>,
-    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-    raw_ctx: Option<Box<[u64; 16]>>,
+    #[cfg(unix)]
+    raw_ctx: Option<Box<libc::regex_t>>,
 }
 
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct RawRegMatch {
-    #[cfg(target_os = "macos")]
-    rm_so: i64,
-    #[cfg(target_os = "macos")]
-    rm_eo: i64,
-    #[cfg(not(target_os = "macos"))]
-    rm_so: c_int,
-    #[cfg(not(target_os = "macos"))]
-    rm_eo: c_int,
-}
-
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
-extern "C" {
-    fn regcomp(preg: *mut u64, pattern: *const c_char, cflags: c_int) -> c_int;
-    fn regexec(
-        preg: *const u64,
-        string: *const c_char,
-        nmatch: usize,
-        pmatch: *mut RawRegMatch,
-        eflags: c_int,
-    ) -> c_int;
-    fn regfree(preg: *mut u64);
-}
-
-#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+#[cfg(unix)]
 impl Drop for PosixRegEx {
     fn drop(&mut self) {
         if let Some(ref mut ctx) = self.raw_ctx {
-            unsafe { regfree(ctx.as_mut_ptr()) };
+            unsafe { libc::regfree(ctx.as_mut()) };
         }
     }
 }
@@ -1675,47 +1648,47 @@ impl PosixRegEx {
             valid,
             match_buf_size: cap,
             matches: vec![(-1, -1); cap],
-            #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+            #[cfg(unix)]
             raw_ctx: None,
         }
     }
 
-    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(unix)]
     pub fn compile(pattern: &CStr, match_buf_size: i32) -> Self {
-        const REG_EXTENDED: c_int = 1;
-        const REG_ICASE: c_int = 2;
-        #[cfg(target_os = "macos")]
-        const REG_NOSUB: c_int = 4;
-        #[cfg(not(target_os = "macos"))]
-        const REG_NOSUB: c_int = 8;
-
-        let mut ctx = Box::new([0u64; 16]);
-        let flags = REG_EXTENDED | REG_ICASE | if match_buf_size > 0 { 0 } else { REG_NOSUB };
-        let rc = unsafe { regcomp(ctx.as_mut_ptr(), pattern.as_ptr(), flags) };
+        let mut ctx = Box::new(unsafe { std::mem::zeroed::<libc::regex_t>() });
+        let flags = libc::REG_EXTENDED
+            | libc::REG_ICASE
+            | if match_buf_size > 0 {
+                0
+            } else {
+                libc::REG_NOSUB
+            };
+        let rc = unsafe { libc::regcomp(ctx.as_mut(), pattern.as_ptr(), flags) };
         let valid = rc == 0;
         let mut rx = Self::new_with(valid, match_buf_size);
         if valid {
             rx.raw_ctx = Some(ctx);
         } else {
-            unsafe { regfree(ctx.as_mut_ptr()) };
+            unsafe { libc::regfree(ctx.as_mut()) };
         }
         rx
     }
 
-    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(unix)]
     pub fn match_cstr(&mut self, text: &CStr) -> bool {
-        let Some(ctx_ptr) = self.raw_ctx.as_ref().map(|b| b.as_ptr()) else {
+        let Some(ctx_ptr) = self.raw_ctx.as_ref().map(|b| b.as_ref() as *const libc::regex_t)
+        else {
             return false;
         };
         let nmatch = self.match_buf_size;
         self.exec_with(|matches| {
-            let mut raw = vec![RawRegMatch::default(); nmatch];
+            let mut raw = vec![unsafe { std::mem::zeroed::<libc::regmatch_t>() }; nmatch];
             let pmatch = if nmatch > 0 {
                 raw.as_mut_ptr()
             } else {
                 std::ptr::null_mut()
             };
-            let ok = unsafe { regexec(ctx_ptr, text.as_ptr(), nmatch, pmatch, 0) == 0 };
+            let ok = unsafe { libc::regexec(ctx_ptr, text.as_ptr(), nmatch, pmatch, 0) == 0 };
             if ok {
                 for (i, slot) in matches.iter_mut().enumerate() {
                     *slot = (raw[i].rm_so as i32, raw[i].rm_eo as i32);
@@ -2177,7 +2150,7 @@ mod tests {
         assert_eq!(failed_caps, vec![(0, 1)]);
 
         // 10. RegExTest (PosixRegEx)
-        #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(unix)]
         {
             let mut rx_rar = PosixRegEx::compile(c".*\\.rar$", 100);
             let mut rx_rar_seq = PosixRegEx::compile(c".*\\.[r-z][0-9][0-9]$", 100);

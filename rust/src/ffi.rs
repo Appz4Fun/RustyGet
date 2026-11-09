@@ -25807,11 +25807,11 @@ pub unsafe extern "C" fn nzbget_rs_regex_new(
     let rx = if pattern.is_null() {
         crate::util::PosixRegEx::new_with(false, match_buf_size)
     } else {
-        #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(unix)]
         {
             crate::util::PosixRegEx::compile(CStr::from_ptr(pattern), match_buf_size)
         }
-        #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+        #[cfg(not(unix))]
         {
             crate::util::PosixRegEx::new_with(false, match_buf_size)
         }
@@ -25844,11 +25844,11 @@ pub unsafe extern "C" fn nzbget_rs_regex_match(
         return 0;
     }
     let rx = &mut *handle.cast::<crate::util::PosixRegEx>();
-    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(unix)]
     {
         c_int::from(rx.match_cstr(CStr::from_ptr(str_ptr)))
     }
-    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    #[cfg(not(unix))]
     {
         let _ = rx;
         0

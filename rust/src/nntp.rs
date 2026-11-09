@@ -707,39 +707,6 @@ pub fn article_fetcher_is_server_eligible_on_level(
     true
 }
 
-/// Evaluates whether a transient failure on a reused connection should retry immediately
-/// without consuming a transient attempt (`ArticleFetcher::Fetch`).
-pub fn article_fetcher_is_reused_stale_within_max(
-    reused: bool,
-    stale_count_after_inc: i32,
-    max_connections: i32,
-) -> bool {
-    reused && stale_count_after_inc <= max_connections
-}
-
-/// Evaluates whether `ArticleFetcher::FetchFromConnection` has a known valid declared yEnc range.
-pub fn article_fetcher_is_declared_range_known(
-    begin_pos: i64,
-    end_pos: i64,
-    size: i64,
-) -> bool {
-    begin_pos > 0 && end_pos >= begin_pos && size > 0
-}
-
-/// Evaluates whether `ArticleFetcher::FetchFromConnection` should throttle bandwidth.
-pub fn article_fetcher_should_throttle_bandwidth(
-    stopped: bool,
-    quota_reached: bool,
-    speed_limit: i64,
-    cur_speed: i64,
-    momentary_speed: i64,
-) -> bool {
-    !stopped
-        && !quota_reached
-        && speed_limit > 0
-        && (cur_speed > speed_limit || momentary_speed > speed_limit)
-}
-
 /// Computes the read buffer capacity (`read_buf_size + 1 + decode_slack`) for `Connection::Connection`.
 pub fn conn_calc_read_buffer_cap(read_buf_size: i32, decode_slack: i32) -> i32 {
     read_buf_size.saturating_add(1).saturating_add(decode_slack)
@@ -817,27 +784,6 @@ pub fn nntp_health_format_stat_batch(ids: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// Returns true when `ArticleFetcher::Fetch` should clear the unreachable flag for the server.
-pub fn article_fetcher_should_clear_unreachable(success: bool, transient: bool) -> bool {
-    success || !transient
-}
-
-/// Returns true when `ArticleFetcher::Fetch` should evaluate transient retry on an answering/reachable server.
-pub fn article_fetcher_can_attempt_transient_retry(
-    transient: bool,
-    server_unreachable: bool,
-) -> bool {
-    transient && !server_unreachable
-}
-
-/// Returns true when `ArticleFetcher::Fetch` has remaining transient retry attempts (`attempt < max_transient_attempts`).
-pub fn article_fetcher_has_more_transient_attempts(
-    attempt: i32,
-    max_transient_attempts: i32,
-) -> bool {
-    attempt < max_transient_attempts
-}
-
 /// Returns true when `ArticleBatchFetcher::StoreResult` should accept and store the fetched result.
 pub fn article_batch_can_store_result(
     batch_id: i32,
@@ -897,29 +843,6 @@ pub fn nntp_conn_classify_handshake_result(result: i32) -> i32 {
     } else {
         -1
     }
-}
-
-/// Returns true when `ArticleFetcher::WaitBeforeRetry` should keep sleeping (`waited < seconds * 10 && !is_stopped`).
-pub fn article_fetcher_should_keep_waiting_retry(
-    waited: i32,
-    seconds: i32,
-    is_stopped: bool,
-) -> bool {
-    waited < seconds.saturating_mul(10) && !is_stopped
-}
-
-/// Returns true when `ArticleFetcher::ReleaseConnection` should disconnect the connection (`!keep_connected || conn_status == cs_cancelled`).
-pub fn article_fetcher_should_disconnect_on_release(
-    keep_connected: bool,
-    conn_status: i32,
-    cs_cancelled: i32,
-) -> bool {
-    !keep_connected || conn_status == cs_cancelled
-}
-
-/// Returns true when `ArticleFetcher::FetchFromConnection` should treat a failed group join as transient and disconnect (`!has_response`).
-pub fn article_fetcher_is_join_group_failure_transient(has_response: bool) -> bool {
-    !has_response
 }
 
 /// Returns true when `ArticleBatchFetcher::Begin` should call `EnsureWorkers()` (`worker_count > 0 && !is_stopped`).

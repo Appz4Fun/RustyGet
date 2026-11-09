@@ -13531,6 +13531,7 @@ private:
 	Mutex m_contentMutex;
 	bool m_flushing = false;
 
+	size_t GetEffectiveLimit() const;
 	bool CheckFlush(bool flushEverything);
 };
 
@@ -13600,8 +13601,7 @@ public:
 			if (interval < 100) interval = 100;
 
 			int slept = 0;
-			while (nzbget_rs_dqh_memory_monitor_should_keep_sleeping(
-				IsStopped() ? 1 : 0, slept, interval) != 0)
+			while (!IsStopped() && slept < interval)
 			{
 				Util::Sleep(50);
 				slept += 50;
@@ -13619,14 +13619,14 @@ public:
 	NzbgetRsPressureTier GetTier() const { return (NzbgetRsPressureTier)m_tier.load(std::memory_order_acquire); }
 	const char* GetTierName() const
 	{
-		return nzbget_rs_awc_memory_monitor_tier_name(
-			(int)GetTier(), (int)NZBGET_RS_PRESSURE_CONSTRAINED, (int)NZBGET_RS_PRESSURE_CRITICAL);
+		NzbgetRsPressureTier tier = GetTier();
+		return tier == NZBGET_RS_PRESSURE_CRITICAL ? "CRITICAL" :
+			tier == NZBGET_RS_PRESSURE_CONSTRAINED ? "CONSTRAINED" : "NORMAL";
 	}
 
 	size_t GetEffectiveArticleCacheBytes() const
 	{
-		return nzbget_rs_tpr_article_cache_mb_to_bytes(
-			(int)m_effectiveCacheMB.load(std::memory_order_acquire));
+		return (size_t)std::max(0, (int)m_effectiveCacheMB.load(std::memory_order_acquire)) * 1024 * 1024;
 	}
 	int GetEffectiveArticleCacheMB() const
 	{
@@ -13635,19 +13635,22 @@ public:
 	int GetEffectiveParBufferMB(int configuredMB) const
 	{
 		int tier = m_tier.load(std::memory_order_acquire);
-		int mb = 0;
-		if (nzbget_rs_awc_memory_monitor_calc_critical_or_normal_par_buffer(
-			tier, configuredMB, (int)NZBGET_RS_PRESSURE_CRITICAL, (int)NZBGET_RS_PRESSURE_NORMAL, &mb) != 0)
+		if (tier == NZBGET_RS_PRESSURE_CRITICAL)
 		{
-			return mb;
+			return configuredMB == 0 ? 0 : std::max(8, std::min(16, configuredMB));
+		}
+		if (tier == NZBGET_RS_PRESSURE_NORMAL)
+		{
+			return configuredMB;
 		}
 		return (int)nzbget_rs_memory_pressure_effective_par_buffer((uint32_t)configuredMB);
 	}
 	int GetEffectiveDownloadsLimit(int configuredLimit) const
 	{
 		int tier = m_tier.load(std::memory_order_acquire);
-		return nzbget_rs_awc_memory_monitor_effective_downloads_limit(
-			tier, configuredLimit, (int)NZBGET_RS_PRESSURE_CONSTRAINED, (int)NZBGET_RS_PRESSURE_CRITICAL);
+		return tier == NZBGET_RS_PRESSURE_CRITICAL ? std::max(1, configuredLimit / 4) :
+			tier == NZBGET_RS_PRESSURE_CONSTRAINED ? std::max(2, configuredLimit / 2) :
+			configuredLimit;
 	}
 
 	static void TrimHeap()
@@ -13671,29 +13674,10 @@ private:
 			rawSample, currentTier, &m_candidateTier, &m_consecutiveSamples, &nextTier) != 0;
 
 		uint32_t cfgCache = g_Options ? (uint32_t)g_Options->GetArticleCache() : 0;
-		uint32_t cfgPar = g_Options ? (uint32_t)g_Options->GetParBuffer() : 0;
-		uint32_t cfgLimit = 20;
-		uint32_t rsEffCache = (nextTier != NZBGET_RS_PRESSURE_CRITICAL &&
-			nextTier != NZBGET_RS_PRESSURE_NORMAL && rawSample == nextTier) ?
-			nzbget_rs_memory_pressure_effective_cache(cfgCache) : 0;
-		uint32_t rsEffPar = (nextTier != NZBGET_RS_PRESSURE_CRITICAL &&
-			nextTier != NZBGET_RS_PRESSURE_NORMAL && rawSample == nextTier) ?
-			nzbget_rs_memory_pressure_effective_par_buffer(cfgPar) : 0;
-		uint32_t effCache = 0, effPar = 0, effLimit = 0;
-		nzbget_rs_awc_memory_monitor_resolve_tier_limits(
-			nextTier,
-			rawSample,
-			cfgCache,
-			cfgPar,
-			cfgLimit,
-			(int)NZBGET_RS_PRESSURE_NORMAL,
-			(int)NZBGET_RS_PRESSURE_CONSTRAINED,
-			(int)NZBGET_RS_PRESSURE_CRITICAL,
-			rsEffCache,
-			rsEffPar,
-			&effCache,
-			&effPar,
-			&effLimit);
+		uint32_t effCache = nextTier == NZBGET_RS_PRESSURE_CRITICAL ? 0 :
+			nextTier == NZBGET_RS_PRESSURE_NORMAL ? cfgCache :
+			rawSample == nextTier ? nzbget_rs_memory_pressure_effective_cache(cfgCache) :
+			cfgCache / 2;
 		m_effectiveCacheMB.store(effCache, std::memory_order_release);
 
 		if (transitioned)
@@ -13705,12 +13689,7 @@ private:
 
 	void ApplyTierTransition(NzbgetRsPressureTier oldTier, NzbgetRsPressureTier newTier)
 	{
-		int action = nzbget_rs_awc_memory_monitor_classify_tier_transition_action(
-			(int)oldTier, (int)newTier,
-			(int)NZBGET_RS_PRESSURE_NORMAL,
-			(int)NZBGET_RS_PRESSURE_CONSTRAINED,
-			(int)NZBGET_RS_PRESSURE_CRITICAL);
-		if (action == 1)
+		if (newTier == NZBGET_RS_PRESSURE_CRITICAL)
 		{
 			warn("System memory pressure CRITICAL (>=90%%): shedding article cache and throttling downloads");
 			if (g_ArticleCache)
@@ -13719,7 +13698,7 @@ private:
 			}
 			TrimHeap();
 		}
-		else if (action == 2)
+		else if (newTier == NZBGET_RS_PRESSURE_CONSTRAINED)
 		{
 			detail("System memory pressure CONSTRAINED: shrinking article cache ceiling");
 			if (g_ArticleCache)
@@ -13727,7 +13706,7 @@ private:
 				g_ArticleCache->WakeupFlush();
 			}
 		}
-		else if (action == 3)
+		else if (newTier == NZBGET_RS_PRESSURE_NORMAL && oldTier != NZBGET_RS_PRESSURE_NORMAL)
 		{
 			detail("System memory pressure returned to NORMAL: restoring cache and download capacity");
 			TrimHeap();
@@ -13737,14 +13716,19 @@ private:
 
 inline MemoryMonitor* g_MemoryMonitor = nullptr;
 
+inline size_t ArticleCache::GetEffectiveLimit() const
+{
+	return g_MemoryMonitor ?
+		g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
+		(size_t)std::max(0, g_Options->GetArticleCache()) * 1024 * 1024;
+}
+
 inline CachedSegmentData ArticleCache::Alloc(int size)
 {
 	std::lock_guard<std::mutex> guard(m_allocMutex);
 
 	void* p = nullptr;
-	size_t effectiveLimit = g_MemoryMonitor ?
-		g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
-		nzbget_rs_tpr_article_cache_mb_to_bytes(g_Options->GetArticleCache());
+	size_t effectiveLimit = GetEffectiveLimit();
 
 	int wasEmpty = 0;
 	if (nzbget_rs_awc_article_cache_can_alloc(effectiveLimit, m_allocated, (size_t)size, &wasEmpty) != 0)
@@ -13752,10 +13736,8 @@ inline CachedSegmentData ArticleCache::Alloc(int size)
 		p = malloc(size);
 		if (p)
 		{
-			if (nzbget_rs_dqh_article_cache_should_write_cache_flag(
-				wasEmpty, g_Options->GetServerMode() ? 1 : 0,
-				g_Options->GetContinuePartial() ? 1 : 0,
-				g_Options->GetSkipWrite() ? 1 : 0) != 0)
+			if (wasEmpty && g_Options->GetServerMode() &&
+				g_Options->GetContinuePartial() && !g_Options->GetSkipWrite())
 			{
 				g_DiskState->WriteCacheFlag();
 			}
@@ -13775,13 +13757,9 @@ inline void ArticleCache::Run()
 {
 	int resetCounter = 0;
 	bool justFlushed = false;
-	while (nzbget_rs_dqh_article_cache_should_continue_run_loop(
-		IsStopped() ? 1 : 0, m_allocated) != 0)
+	while (!IsStopped() || m_allocated > 0)
 	{
-		size_t effectiveLimit = g_MemoryMonitor ?
-			g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
-			nzbget_rs_tpr_article_cache_mb_to_bytes(g_Options->GetArticleCache());
-
+		size_t effectiveLimit = GetEffectiveLimit();
 		int tier = g_MemoryMonitor ? (int)g_MemoryMonitor->GetTier() : (int)NZBGET_RS_PRESSURE_NORMAL;
 		int flushEverything = 0;
 		int needEmergencyFlush = 0;
@@ -13793,13 +13771,11 @@ inline void ArticleCache::Run()
 			justFlushed = CheckFlush(flushEverything != 0);
 			resetCounter = 0;
 
-			int postFlushAction = nzbget_rs_dqh_article_cache_post_flush_action(
-				needEmergencyFlush, m_allocated, justFlushed ? 1 : 0, IsStopped() ? 1 : 0);
-			if (postFlushAction == 1)
+			if (needEmergencyFlush && m_allocated == 0)
 			{
 				MemoryMonitor::TrimHeap();
 			}
-			else if (postFlushAction == 2)
+			else if (!justFlushed && !IsStopped())
 			{
 				Util::Sleep(5);
 			}
@@ -13947,7 +13923,7 @@ public:
 			if (!m_outFile.Open(outFilename, directWrite ? DiskFile::omReadWrite : DiskFile::omWrite))
 			{
 				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-					"Could not %s file %s: %s", nzbget_rs_dqh_article_writer_open_verb(directWrite ? 1 : 0), outFilename,
+					"Could not %s file %s: %s", directWrite ? "open" : "create", outFilename,
 					*FileSystem::GetLastErrorMessage());
 				return false;
 			}
@@ -14399,8 +14375,7 @@ public:
 				// has accepted the article's final geometry; never let an unvalidated
 				// donor overwrite the shared output during download.
 				DiskFile infile;
-				if (!nzbget_rs_dqh_article_writer_validate_staged_dupe_size(
-					FileSystem::FileSize(pa->GetResultFilename()), pa->GetSegmentSize()))
+				if (FileSystem::FileSize(pa->GetResultFilename()) != pa->GetSegmentSize())
 				{
 					m_commitError = true;
 					m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
@@ -14431,8 +14406,7 @@ public:
 						}
 						copied += cnt;
 					}
-					if (!nzbget_rs_dqh_article_writer_validate_staged_dupe_size(
-						copied, pa->GetSegmentSize()))
+					if (copied != pa->GetSegmentSize())
 					{
 						m_commitError = true;
 					}
@@ -14459,12 +14433,8 @@ public:
 				}
 				else
 				{
-					int32_t newFailed = 0, newSuccess = 0;
-					nzbget_rs_dqh_article_writer_apply_missing_part_counters(
-						m_fileInfo->GetFailedArticles(), m_fileInfo->GetSuccessArticles(),
-						&newFailed, &newSuccess);
-					m_fileInfo->SetFailedArticles(newFailed);
-					m_fileInfo->SetSuccessArticles(newSuccess);
+					m_fileInfo->SetFailedArticles(m_fileInfo->GetFailedArticles() + 1);
+					m_fileInfo->SetSuccessArticles(m_fileInfo->GetSuccessArticles() - 1);
 					m_fileInfo->GetNzbInfo()->PrintMessage(
 						Message::mkError, "Could not find file %s for %s [%i/%zu]",
 						pa->GetResultFilename(), infoFilename.data(),
@@ -14508,16 +14478,14 @@ public:
 
 		bool flushed = outfile.Flush();
 		bool closed = outfile.Close();
-		int commitAction = nzbget_rs_dqh_article_writer_eval_commit_post_close(
-			flushed ? 1 : 0, closed ? 1 : 0, directWrite ? 1 : 0);
-		if (commitAction < 0)
+		if (!flushed || !closed)
 		{
 			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
 				"Could not flush completed output file %s", finalOutputPath.data());
 			return false;
 		}
 
-		if (commitAction == 1)
+		if (!directWrite)
 		{
 			// a failed rename leaves the complete data under its temporary name
 			// (as it always has): it is not a data-commit failure, and failing the
@@ -14645,8 +14613,7 @@ public:
 		else if (completionKind == 2)
 		{
 			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkWarning, "%i of %i article downloads failed for \"%s\"",
-				nzbget_rs_dqh_article_writer_calc_total_failed_articles(
-					m_fileInfo->GetMissedArticles(), m_fileInfo->GetFailedArticles()),
+				m_fileInfo->GetMissedArticles() + m_fileInfo->GetFailedArticles(),
 				m_fileInfo->GetTotalArticles(), infoFilename.data());
 		}
 		else
@@ -14665,8 +14632,7 @@ public:
 		m_fileInfo->SetOutputFilename(currentPath.data());
 
 		// 1. Rename if file was renamed during completion
-		if (nzbget_rs_dqh_article_writer_was_renamed_during_completion(
-			m_fileInfo->GetFilename(), originalFilename.data(), originalFilename.size()) != 0)
+		if (originalFilename != m_fileInfo->GetFilename())
 		{
 			CString newOfn = FileSystem::MakeUniqueFilename(nzbDestDir.data(), m_fileInfo->GetFilename());
 			if (!FileSystem::MoveFile(m_fileInfo->GetOutputFilename().c_str(), *newOfn))
@@ -14678,9 +14644,7 @@ public:
 		}
 
 		// 2. Handle Hardlinks
-		if (nzbget_rs_dqh_article_writer_should_delete_hardlinked_without_interdir(
-			m_fileInfo->IsHardLinked() ? 1 : 0,
-			Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0) != 0)
+		if (m_fileInfo->IsHardLinked() && Util::EmptyStr(g_Options->GetInterDir()))
 		{
 			if (FileSystem::DeleteFile(m_outputFilename.c_str()))
 			{
@@ -14694,8 +14658,7 @@ public:
 		}
 
 		// 3. Move Completed Files (if destination changed)
-		if (nzbget_rs_dqh_article_writer_did_dest_dir_change(
-			m_fileInfo->GetNzbInfo()->GetDestDir(), nzbDestDir.data(), nzbDestDir.size()) != 0)
+		if (nzbDestDir != m_fileInfo->GetNzbInfo()->GetDestDir())
 		{
 			MoveCompletedFiles(m_fileInfo->GetNzbInfo(), nzbDestDir.data());
 		}
@@ -14948,9 +14911,7 @@ public:
 private:
 	bool IsDupeFallbackArticle() const
 	{
-		return nzbget_rs_dqh_article_writer_is_dupe_fallback_article(
-			m_articleInfo ? 1 : 0,
-			m_articleInfo ? m_articleInfo->GetDupeFallbackRound() : 0) != 0;
+		return m_articleInfo && m_articleInfo->GetDupeFallbackRound() > 0;
 	}
 
 	bool GetSkipDiskWrite()
@@ -14962,18 +14923,13 @@ private:
 	/* creates output file and subdirectores */
 	bool CreateOutputFile(int64 size)
 	{
-		bool outExists = FileSystem::FileExists(m_outputFilename.c_str());
-		int existingStatus = nzbget_rs_dqh_article_writer_check_existing_output_file(
-			outExists ? 1 : 0,
-			outExists ? FileSystem::FileSize(m_outputFilename.c_str()) : 0,
-			size);
-		if (existingStatus == 1)
+		if (FileSystem::FileExists(m_outputFilename.c_str()))
 		{
-			// keep existing old file from previous program session
-			return true;
-		}
-		if (existingStatus == 2)
-		{
+			if (FileSystem::FileSize(m_outputFilename.c_str()) == size)
+			{
+				// keep existing old file from previous program session
+				return true;
+			}
 			// delete existing old file from previous program session
 			FileSystem::DeleteFile(m_outputFilename.c_str());
 		}
@@ -15272,8 +15228,7 @@ public:
 			NewsServer* server = connection->GetNewsServer();
 			ReleaseConnection(connection, true);
 
-			if (nzbget_rs_dqh_article_fetcher_should_clear_unreachable(
-				result.Success ? 1 : 0, result.Transient ? 1 : 0) != 0)
+			if (result.Success || !result.Transient)
 			{
 				SetServerUnreachable(server, false);	// it answered
 			}
@@ -15289,17 +15244,14 @@ public:
 				}
 				continue;
 			}
-			if (nzbget_rs_dqh_article_fetcher_can_attempt_transient_retry(
-				result.Transient ? 1 : 0, ServerUnreachable(server) ? 1 : 0) != 0)
+			if (result.Transient && !ServerUnreachable(server))
 			{
-				if (reused && nzbget_rs_tpr_article_fetcher_is_reused_stale_within_max(
-					reused ? 1 : 0, ++staleConnections[server], server->GetMaxConnections()) != 0)
+				if (reused && ++staleConnections[server] <= server->GetMaxConnections())
 				{
 					continue;
 				}
 				int attempt = ++transientAttempts[server];
-				if (nzbget_rs_dqh_article_fetcher_has_more_transient_attempts(
-					attempt, MaxTransientAttempts) != 0)
+				if (attempt < MaxTransientAttempts)
 				{
 					if (WaitBeforeRetry(TransientRetryDelay(attempt)))
 					{
@@ -15347,8 +15299,7 @@ public:
 			{
 				detail("Stream repair: could not join groups on %s for %s",
 					connection->GetNewsServer()->GetName(), messageId);
-				result.Transient = nzbget_rs_dqh_article_fetcher_is_join_group_failure_transient(
-					response ? 1 : 0) != 0;
+				result.Transient = !response;
 				if (result.Transient)
 				{
 					connection->Disconnect();
@@ -15393,12 +15344,10 @@ public:
 				result.Retry = true;
 				return result;
 			}
-			while (nzbget_rs_tpr_article_fetcher_should_throttle_bandwidth(
-				m_stopped ? 1 : 0,
-				g_WorkState->GetQuotaReached() ? 1 : 0,
-				g_WorkState->GetSpeedLimit(),
-				g_StatMeter->CalcCurrentDownloadSpeed(),
-				g_StatMeter->CalcMomentaryDownloadSpeed()) != 0)
+			while (!m_stopped && !g_WorkState->GetQuotaReached() &&
+				g_WorkState->GetSpeedLimit() > 0 &&
+				(g_StatMeter->CalcCurrentDownloadSpeed() > g_WorkState->GetSpeedLimit() ||
+				 g_StatMeter->CalcMomentaryDownloadSpeed() > g_WorkState->GetSpeedLimit()))
 			{
 				Util::Sleep(10);
 			}
@@ -15442,8 +15391,8 @@ public:
 			}
 
 			int decodedLen = decoder.DecodeBuffer(buffer, len);
-			bool declaredRangeKnown = nzbget_rs_tpr_article_fetcher_is_declared_range_known(
-				decoder.GetBeginPos(), decoder.GetEndPos(), decoder.GetSize()) != 0;
+			bool declaredRangeKnown = decoder.GetBeginPos() > 0 &&
+				decoder.GetEndPos() >= decoder.GetBeginPos() && decoder.GetSize() > 0;
 			if (!limits.HeaderWithinLimit(declaredRangeKnown))
 			{
 				detail("Stream repair: article %s from %s exceeded the yEnc-header limit",
@@ -15534,10 +15483,7 @@ private:
 
 	bool WaitBeforeRetry(int seconds)
 	{
-		for (int waited = 0;
-			nzbget_rs_dqh_article_fetcher_should_keep_waiting_retry(
-				waited, seconds, m_stopped ? 1 : 0) != 0;
-			waited++)
+		for (int waited = 0; waited < seconds * 10 && !m_stopped; waited++)
 		{
 			Util::Sleep(100);
 		}
@@ -15548,8 +15494,7 @@ private:
 	{
 		Guard guard(m_connectionMutex);
 		AddServerStats(connection);
-		if (nzbget_rs_dqh_article_fetcher_should_disconnect_on_release(
-			keepConnected ? 1 : 0, (int)connection->GetStatus(), (int)Connection::csCancelled) != 0)
+		if (!keepConnected || connection->GetStatus() == Connection::csCancelled)
 		{
 			connection->Disconnect();
 		}
@@ -16650,21 +16595,7 @@ private:
 			int files = known ? nzbget_rs_twin_parse_fingerprint_files(fingerprint.c_str()) : 0;
 
 			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			NzbInfo* nzbInfo = nullptr;
-			for (NzbInfo* queued : downloadQueue->GetQueue())
-			{
-				if (queued->GetId() == m_nzbId)
-				{
-					nzbInfo = queued;
-				}
-			}
-			for (std::unique_ptr<HistoryInfo>& historyInfo : *downloadQueue->GetHistory())
-			{
-				if (!nzbInfo && historyInfo->GetKind() == HistoryInfo::hkNzb && historyInfo->GetNzbInfo()->GetId() == m_nzbId)
-				{
-					nzbInfo = historyInfo->GetNzbInfo();
-				}
-			}
+			NzbInfo* nzbInfo = FindNzbInQueueOrHistory(downloadQueue);
 			if (nzbInfo)
 			{
 				nzbInfo->GetParameters()->SetParameter(TwinCheck::FilesParam, fingerprint.c_str());
@@ -16685,25 +16616,26 @@ private:
 		ArticleFetcher m_fetcher;
 		bool m_stored = false;
 
-		void Store(const char* name, const char* value, const char* name2 = nullptr, const char* value2 = nullptr)
+		NzbInfo* FindNzbInQueueOrHistory(DownloadQueue* downloadQueue) const
 		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			NzbInfo* nzbInfo = nullptr;
-			for (NzbInfo* queued : downloadQueue->GetQueue())
+			if (NzbInfo* queued = downloadQueue->GetQueue()->Find(m_nzbId))
 			{
-				if (queued->GetId() == m_nzbId)
-				{
-					nzbInfo = queued;
-				}
+				return queued;
 			}
 			for (std::unique_ptr<HistoryInfo>& historyInfo : *downloadQueue->GetHistory())
 			{
-				if (!nzbInfo && historyInfo->GetKind() == HistoryInfo::hkNzb && historyInfo->GetNzbInfo()->GetId() == m_nzbId)
+				if (historyInfo->GetKind() == HistoryInfo::hkNzb && historyInfo->GetNzbInfo()->GetId() == m_nzbId)
 				{
-					nzbInfo = historyInfo->GetNzbInfo();
+					return historyInfo->GetNzbInfo();
 				}
 			}
-			if (nzbInfo)
+			return nullptr;
+		}
+
+		void Store(const char* name, const char* value, const char* name2 = nullptr, const char* value2 = nullptr)
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			if (NzbInfo* nzbInfo = FindNzbInQueueOrHistory(downloadQueue))
 			{
 				nzbInfo->GetParameters()->SetParameter(name, value);
 				if (name2)
@@ -16763,28 +16695,23 @@ private:
 			std::vector<TwinCheck::NzbEntry> dupe = dataFiles(m_nzbFilename);
 			std::string primaryId = std::to_string(m_primaryId);
 
-			std::vector<size_t> pSegCounts;
-			std::vector<int64> pSegBytes;
-			pSegCounts.reserve(primary.size());
-			for (const TwinCheck::NzbEntry& e : primary)
-			{
-				pSegCounts.push_back(e.segments.size());
-				for (const auto& seg : e.segments)
+			auto flattenSegments = [](const std::vector<TwinCheck::NzbEntry>& entries,
+				std::vector<size_t>& segCounts, std::vector<int64>& segBytes)
 				{
-					pSegBytes.push_back(seg.first);
-				}
-			}
-			std::vector<size_t> dSegCounts;
-			std::vector<int64> dSegBytes;
-			dSegCounts.reserve(dupe.size());
-			for (const TwinCheck::NzbEntry& e : dupe)
-			{
-				dSegCounts.push_back(e.segments.size());
-				for (const auto& seg : e.segments)
-				{
-					dSegBytes.push_back(seg.first);
-				}
-			}
+					segCounts.reserve(entries.size());
+					for (const TwinCheck::NzbEntry& e : entries)
+					{
+						segCounts.push_back(e.segments.size());
+						for (const auto& seg : e.segments)
+						{
+							segBytes.push_back(seg.first);
+						}
+					}
+				};
+			std::vector<size_t> pSegCounts, dSegCounts;
+			std::vector<int64> pSegBytes, dSegBytes;
+			flattenSegments(primary, pSegCounts, pSegBytes);
+			flattenSegments(dupe, dSegCounts, dSegBytes);
 			std::vector<size_t> sampleFileIdx(TwinCheck::SampleCount, 0);
 			std::vector<size_t> sampleSegIdx(TwinCheck::SampleCount, 0);
 			if (!nzbget_rs_twin_sample_indices(
@@ -18595,8 +18522,7 @@ public:
 				}
 			}
 
-			if (nzbget_rs_dqh_article_dl_is_terminal_loop_status(
-				(int)status, (int)adFinished, (int)adFatalError) != 0)
+			if (status == adFinished || status == adFatalError)
 			{
 				break;
 			}
@@ -18610,9 +18536,7 @@ public:
 				break;
 			}
 
-			if (nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
-				wantServer ? 1 : 0,
-				m_fileInfo->GetNzbInfo()->HasDesiredServer() ? 1 : 0) != 0)
+			if (!wantServer && m_fileInfo->GetNzbInfo()->HasDesiredServer())
 			{
 				status = adFailed;
 				break;
@@ -18641,11 +18565,9 @@ public:
 					candIds[ci] = candidateServer->GetId();
 					candLevels[ci] = candidateServer->GetNormLevel();
 					candGroups[ci] = candidateServer->GetGroup();
-					candAvail[ci] = (uint8_t)nzbget_rs_dqh_article_dl_is_server_available(
-						candidateServer->GetActive() ? 1 : 0,
-						candidateServer->GetMaxConnections(),
-						candidateServer->GetOptional() ? 1 : 0,
-						(candidateServer->GetOptional() && g_ServerPool->IsServerBlocked(candidateServer)) ? 1 : 0);
+					candAvail[ci] = (candidateServer->GetActive() &&
+						candidateServer->GetMaxConnections() != 0 &&
+						!(candidateServer->GetOptional() && g_ServerPool->IsServerBlocked(candidateServer))) ? 1 : 0;
 					++ci;
 				}
 				size_t failCount = failedServers.size();
@@ -18812,8 +18734,7 @@ private:
 		int readChunk = g_Options->GetArticleReadChunkSize();
 		CharBuffer lineBuf(readChunk + 128);
 
-		while (nzbget_rs_dqh_article_dl_should_continue_read_loop(
-			IsStopped() ? 1 : 0, m_decoder.GetEof() ? 1 : 0) != 0)
+		while (!IsStopped() && !m_decoder.GetEof())
 		{
 			if (!IsStopped() && !m_articleWriter.HasCachedBuffer() &&
 				g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL &&
@@ -18883,8 +18804,7 @@ private:
 			status = adFailed;
 		}
 
-		if (nzbget_rs_dqh_article_dl_should_run_decode_check(
-			(int)status, (int)adRunning) != 0)
+		if (status == adRunning)
 		{
 			FreeConnection(true);
 			status = DecodeCheck();
@@ -19022,9 +18942,8 @@ private:
 				}
 				if (isYenc)
 				{
-					m_articleInfo->SetCrc(nzbget_rs_dqh_article_dl_select_yenc_crc(
-						g_Options->GetCrcCheck() ? 1 : 0,
-						m_decoder.GetCalculatedCrc(), m_decoder.GetExpectedCrc()));
+					m_articleInfo->SetCrc(g_Options->GetCrcCheck() ?
+						m_decoder.GetCalculatedCrc() : m_decoder.GetExpectedCrc());
 				}
 				return adFinished;
 			case 2:
@@ -19516,6 +19435,61 @@ private:
 		RenameCompleted(downloadQueue, nzbInfo);
 	}
 
+	std::string ResolveNewName(const char* filename, bool parFile, const char* parSetId,
+		const char* hash16k, const char* destDir, FileHashList* parHashes, bool needRenamePars, int& vol)
+	{
+		std::string newName;
+		if (parFile && needRenamePars)
+		{
+			newName = BuildNewParName(filename, destDir, parSetId, vol);
+		}
+		else if (!parFile)
+		{
+			newName = BuildNewRegularName(filename, parHashes, hash16k);
+		}
+		if (newName.empty() && !parFile && g_Options->GetHardLinking())
+		{
+			newName = filename;
+		}
+		return newName;
+	}
+
+	void TryCreateHardLink(NzbInfo* nzbInfo, FileInfo* fileInfo, const char* filename,
+		const std::string& oldOutputFilename, const std::string& newName, const char* phaseLabel)
+	{
+		fs::error_code ec;
+		if (!fs::exists(oldOutputFilename, ec))
+		{
+			nzbInfo->PrintMessage(Message::mkDetail,
+				"Skipping hardlink for %s: file not assembled yet", filename);
+			return;
+		}
+
+		std::string nzbFinalDir = nzbInfo->BuildFinalDirName().Str();
+		NzbgetRsBuf finalOutBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			nzbFinalDir.c_str(), PATH_SEPARATOR, newName.c_str());
+		std::string finalOutputFilename(finalOutBuf.data ? finalOutBuf.data : "", finalOutBuf.len);
+		nzbget_rs_free(finalOutBuf);
+
+		nzbInfo->PrintMessage(Message::mkInfo,
+			"HardLinking %s file %s to %s", phaseLabel, filename, newName.c_str());
+
+		CString errmsg;
+		if (FileSystem::CreateHardLink(oldOutputFilename.c_str(), finalOutputFilename.c_str(), errmsg))
+		{
+			if (fileInfo)
+			{
+				fileInfo->SetHardLinkPath(std::move(finalOutputFilename));
+				nzbInfo->SetHardLinkPath(std::move(nzbFinalDir));
+			}
+		}
+		else
+		{
+			nzbInfo->PrintMessage(Message::mkError,
+				"Could not create hardlink %s to %s: %s", filename, newName.c_str(), *errmsg);
+		}
+	}
+
 	/**
 	 * @brief Renames (metadata only) partially downloaded files using info from PAR files.
 	 * Doesn't rename the files themselves. The actual renaming happens only when the download is complete.
@@ -19527,26 +19501,12 @@ private:
 
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
-			std::string newName;
-			if (fileInfo->GetParFile() && needRenamePars)
-			{
-				newName = BuildNewParName(fileInfo->GetFilename(), nzbInfo->GetDestDir(), fileInfo->GetParSetId(), vol);
-			}
-			else if (!fileInfo->GetParFile())
-			{
-				newName = BuildNewRegularName(fileInfo->GetFilename(), parHashes, fileInfo->GetHash16k());
-			}
-
+			std::string newName = ResolveNewName(fileInfo->GetFilename(), fileInfo->GetParFile(),
+				fileInfo->GetParSetId(), fileInfo->GetHash16k(), nzbInfo->GetDestDir(),
+				parHashes, needRenamePars, vol);
 			if (newName.empty())
 			{
-				if (!fileInfo->GetParFile() && g_Options->GetHardLinking())
-				{
-					newName = fileInfo->GetFilename();
-				}
-				else
-				{
-					continue;
-				}
+				continue;
 			}
 
 			const std::string& currOutputFilename = fileInfo->GetOutputFilename();
@@ -19565,41 +19525,8 @@ private:
 			if (g_Options->GetHardLinking() &&
 				!Util::MatchFileExt(newName.c_str(), g_Options->GetHardLinkingIgnoreExt(), ","))
 			{
-				fs::error_code ec;
-				if (!fs::exists(oldOutputFilename, ec))
-				{
-					nzbInfo->PrintMessage(Message::mkDetail,
-						"Skipping hardlink for %s: file not assembled yet",
-						fileInfo->GetFilename()
-					);
-				}
-				else
-				{
-					std::string nzbFinalDir = fileInfo->GetNzbInfo()->BuildFinalDirName().Str();
-					NzbgetRsBuf finalOutBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-						nzbFinalDir.c_str(), PATH_SEPARATOR, newName.c_str());
-					std::string finalOutputFilename(finalOutBuf.data ? finalOutBuf.data : "", finalOutBuf.len);
-					nzbget_rs_free(finalOutBuf);
-
-					nzbInfo->PrintMessage(Message::mkInfo,
-						"HardLinking in-progress file %s to %s",
-						fileInfo->GetFilename(), newName.c_str()
-					);
-
-					CString errmsg;
-					if (FileSystem::CreateHardLink(oldOutputFilename.c_str(), finalOutputFilename.c_str(), errmsg))
-					{
-						fileInfo->SetHardLinkPath(std::move(finalOutputFilename));
-						nzbInfo->SetHardLinkPath(std::move(nzbFinalDir));
-					}
-					else
-					{
-						nzbInfo->PrintMessage(Message::mkError,
-							"Could not create hardlink %s to %s: %s",
-							fileInfo->GetFilename(), newName.c_str(), *errmsg
-						);
-					}
-				}
+				TryCreateHardLink(nzbInfo, fileInfo, fileInfo->GetFilename(),
+					oldOutputFilename, newName, "in-progress");
 			}
 
 			if (Util::EmptyStr(fileInfo->GetOrigname()))
@@ -19622,26 +19549,12 @@ private:
 
 		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 		{
-			std::string newName;
-			if (completedFile.GetParFile() && needRenamePars)
-			{
-				newName = BuildNewParName(completedFile.GetFilename(), nzbInfo->GetDestDir(), completedFile.GetParSetId(), vol);
-			}
-			else if (!completedFile.GetParFile())
-			{
-				newName = BuildNewRegularName(completedFile.GetFilename(), parHashes, completedFile.GetHash16k());
-			}
-
+			std::string newName = ResolveNewName(completedFile.GetFilename(), completedFile.GetParFile(),
+				completedFile.GetParSetId(), completedFile.GetHash16k(), nzbInfo->GetDestDir(),
+				parHashes, needRenamePars, vol);
 			if (newName.empty())
 			{
-				if (!completedFile.GetParFile() && g_Options->GetHardLinking())
-				{
-					newName = completedFile.GetFilename();
-				}
-				else
-				{
-					continue;
-				}
+				continue;
 			}
 
 			const std::string destDir = nzbInfo->GetDestDir();
@@ -19663,36 +19576,8 @@ private:
 				g_Options->GetHardLinking() &&
 				!Util::MatchFileExt(newName.c_str(), g_Options->GetHardLinkingIgnoreExt(), ","))
 			{
-				fs::error_code ec;
-				if (!fs::exists(oldOutputFilename, ec))
-				{
-					nzbInfo->PrintMessage(Message::mkDetail,
-						"Skipping hardlink for %s: file not assembled yet",
-						completedFile.GetFilename()
-					);
-				}
-				else
-				{
-					const std::string finalDir = nzbInfo->BuildFinalDirName().Str();
-					NzbgetRsBuf finalOutBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-						finalDir.c_str(), PATH_SEPARATOR, newName.c_str());
-					const std::string finalOutputFilename(finalOutBuf.data ? finalOutBuf.data : "", finalOutBuf.len);
-					nzbget_rs_free(finalOutBuf);
-
-					nzbInfo->PrintMessage(Message::mkInfo,
-						"HardLinking completed file %s to %s",
-						completedFile.GetFilename(), newName.c_str()
-					);
-
-					CString errmsg;
-					if (!FileSystem::CreateHardLink(oldOutputFilename.c_str(), finalOutputFilename.c_str(), errmsg))
-					{
-						nzbInfo->PrintMessage(Message::mkError,
-							"Could not create hardlink %s to %s: %s",
-							completedFile.GetFilename(), newName.c_str(), *errmsg
-						);
-					}
-				}
+				TryCreateHardLink(nzbInfo, nullptr, completedFile.GetFilename(),
+					oldOutputFilename, newName, "completed");
 			}
 
 			if (RenameFile(nzbInfo, oldOutputFilename, outputFilename))

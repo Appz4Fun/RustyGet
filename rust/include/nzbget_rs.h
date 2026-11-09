@@ -1825,20 +1825,6 @@ int nzbget_rs_awc_article_cache_can_flush_file(
     int cached_articles, int active_downloads, int skip_disk_write, int flush_everything);
 int nzbget_rs_awc_article_cache_can_alloc(
     size_t effective_limit, size_t allocated, size_t size, int* out_was_empty);
-const char* nzbget_rs_awc_memory_monitor_tier_name(
-    int tier, int constrained, int critical);
-int nzbget_rs_awc_memory_monitor_effective_downloads_limit(
-    int tier, int configured_limit, int constrained, int critical);
-int nzbget_rs_awc_memory_monitor_calc_critical_or_normal_par_buffer(
-    int tier, int configured_mb, int tier_critical, int tier_normal, int* out_mb);
-void nzbget_rs_awc_memory_monitor_resolve_tier_limits(
-    int next_tier, int raw_sample, uint32_t cfg_cache, uint32_t cfg_par,
-    uint32_t cfg_limit, int tier_normal, int tier_constrained, int tier_critical,
-    uint32_t rs_eff_cache, uint32_t rs_eff_par,
-    uint32_t* out_eff_cache, uint32_t* out_eff_par, uint32_t* out_eff_limit);
-int nzbget_rs_awc_memory_monitor_classify_tier_transition_action(
-    int old_tier, int new_tier, int tier_normal, int tier_constrained,
-    int tier_critical);
 
 int nzbget_rs_ccm_conn_select_ai_family(
     int ip_version, int ip_v4, int ip_v6,
@@ -2986,17 +2972,7 @@ int32_t nzbget_rs_tpr_article_fetcher_is_server_eligible_on_level(
     int32_t server_id, int32_t server_group,
     const int32_t* failed_ids_ptr, const int32_t* failed_groups_ptr,
     const int32_t* failed_levels_ptr, size_t failed_count);
-int32_t nzbget_rs_tpr_article_fetcher_is_reused_stale_within_max(
-    int32_t reused, int32_t stale_count_after_inc, int32_t max_connections);
-int32_t nzbget_rs_tpr_article_fetcher_is_declared_range_known(
-    int64_t begin_pos, int64_t end_pos, int64_t size);
-int32_t nzbget_rs_tpr_article_fetcher_should_throttle_bandwidth(
-    int32_t stopped, int32_t quota_reached, int64_t speed_limit,
-    int64_t cur_speed, int64_t momentary_speed);
 double nzbget_rs_dqh_stream_repair_bytes_to_mb(int64_t bytes);
-int32_t nzbget_rs_dqh_article_dl_is_server_available(
-    int32_t active, int32_t max_connections, int32_t optional,
-    int32_t is_blocked);
 uint32_t nzbget_rs_tpr_binrpc_calc_elapsed_sec(
     int64_t cur_time, int64_t start_time);
 int32_t nzbget_rs_tpr_ncurses_map_file_to_group_action(int32_t action);
@@ -3021,19 +2997,11 @@ NzbgetRsBuf nzbget_rs_dqh_article_dl_format_connection_name(
     const char* server_name, const char* host);
 NzbgetRsBuf nzbget_rs_dqh_article_dl_format_fetch_command(
     int32_t raw_article, const char* message_id);
-uint32_t nzbget_rs_dqh_article_dl_select_yenc_crc(
-    int32_t crc_check, uint32_t calculated_crc, uint32_t expected_crc);
-const char* nzbget_rs_dqh_article_writer_open_verb(int32_t direct_write);
 NzbgetRsBuf nzbget_rs_dqh_article_writer_format_info_path(
     const char* nzb_name, char sep, const char* filename);
-void nzbget_rs_dqh_article_writer_apply_missing_part_counters(
-    int32_t failed_articles, int32_t success_articles,
-    int32_t* out_failed_articles, int32_t* out_success_articles);
 NzbgetRsBuf nzbget_rs_dqh_article_writer_format_raw_part_dest(
     const char* final_output_path, size_t final_output_path_len,
     char sep, int32_t part_number);
-int32_t nzbget_rs_dqh_article_writer_calc_total_failed_articles(
-    int32_t missed_articles, int32_t failed_articles);
 void nzbget_rs_dqh_statmeter_calc_debug_speed_and_timediff(
     int32_t current_download_speed, int32_t cur_time,
     int32_t speed_start_time, int32_t slot_size,
@@ -3089,7 +3057,6 @@ const char* nzbget_rs_dqh_scheduler_server_action_str(int32_t active);
 NzbgetRsBuf nzbget_rs_tpr_article_writer_format_dest_file_path(
     const char* dest_dir, char sep, const char* filename);
 NzbgetRsBuf nzbget_rs_tpr_article_writer_format_tmp_path(const char* base_path);
-size_t nzbget_rs_tpr_article_cache_mb_to_bytes(int32_t mb);
 size_t nzbget_rs_tpr_server_volume_required_day_len(int32_t day_slot, size_t current_len);
 NzbgetRsBuf nzbget_rs_dqh_diskstate_format_new_path(const char* base_path);
 const char* nzbget_rs_dqh_diskstate_legacy_suffix_str(int32_t suffix_kind);
@@ -3232,22 +3199,6 @@ NzbgetRsBuf nzbget_rs_dqh_nntp_health_format_bracketed_id(
     const char* message_id, size_t len);
 NzbgetRsBuf nzbget_rs_dqh_nntp_health_format_stat_batch(
     const char* const* ids, const size_t* lens, size_t count);
-int nzbget_rs_dqh_article_writer_check_existing_output_file(
-    int exists, int64_t existing_size, int64_t target_size);
-int nzbget_rs_dqh_article_writer_validate_staged_dupe_size(
-    int64_t actual_size, int segment_size);
-int nzbget_rs_dqh_article_writer_eval_commit_post_close(
-    int flushed, int closed, int direct_write);
-int nzbget_rs_dqh_article_cache_should_write_cache_flag(
-    int was_empty, int server_mode, int continue_partial, int skip_write);
-int nzbget_rs_dqh_article_cache_post_flush_action(
-    int need_emergency_flush, size_t allocated, int just_flushed, int is_stopped);
-int nzbget_rs_dqh_article_fetcher_should_clear_unreachable(
-    int success, int transient);
-int nzbget_rs_dqh_article_fetcher_can_attempt_transient_retry(
-    int transient, int server_unreachable);
-int nzbget_rs_dqh_article_fetcher_has_more_transient_attempts(
-    int attempt, int max_transient_attempts);
 int nzbget_rs_dqh_webserver_classify_pre_parse_method(
     int http_method, int hm_post, int hm_options, int content_len);
 int nzbget_rs_dqh_binrpc_classify_history_entry_fields(
@@ -3273,32 +3224,10 @@ int nzbget_rs_dqh_log_classify_init_logfile_action(
 int nzbget_rs_dqh_script_ctrl_is_terminate_ok(
     int child_pid, int kill_res, int completed);
 int nzbget_rs_dqh_script_ctrl_can_send_break(int pid, int completed);
-int nzbget_rs_dqh_article_dl_is_terminal_loop_status(
-    int status, int ad_finished, int ad_fatal_error);
-int nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
-    int has_want_server, int has_desired_server);
-int nzbget_rs_dqh_article_dl_should_continue_read_loop(int is_stopped, int decoder_eof);
-int nzbget_rs_dqh_article_dl_should_run_decode_check(int status, int ad_running);
 int nzbget_rs_dqh_server_pool_should_disconnect_idle_level_conn(
     int conn_norm_level, int level, int conn_status, int cs_connected);
 int nzbget_rs_dqh_statmeter_has_any_quota_configured(int daily_quota, int monthly_quota);
 int nzbget_rs_dqh_nntp_conn_classify_handshake_result(int result);
-int nzbget_rs_dqh_article_fetcher_should_keep_waiting_retry(
-    int waited, int seconds, int is_stopped);
-int nzbget_rs_dqh_article_fetcher_should_disconnect_on_release(
-    int keep_connected, int conn_status, int cs_cancelled);
-int nzbget_rs_dqh_article_fetcher_is_join_group_failure_transient(int has_response);
-int nzbget_rs_dqh_article_writer_is_dupe_fallback_article(
-    int has_article_info, int dupe_fallback_round);
-int nzbget_rs_dqh_article_writer_was_renamed_during_completion(
-    const char* cur_filename, const char* orig_filename, size_t orig_len);
-int nzbget_rs_dqh_article_writer_should_delete_hardlinked_without_interdir(
-    int is_hard_linked, int inter_dir_empty);
-int nzbget_rs_dqh_article_writer_did_dest_dir_change(
-    const char* cur_dest_dir, const char* orig_dest_dir, size_t orig_len);
-int nzbget_rs_dqh_article_cache_should_continue_run_loop(int is_stopped, size_t allocated);
-int nzbget_rs_dqh_memory_monitor_should_keep_sleeping(
-    int is_stopped, int slept, int interval);
 int nzbget_rs_dqh_webdl_should_continue_retry_loop(
     int is_stopped, int remained_download_retries, int remained_connect_retries);
 int nzbget_rs_dqh_webdl_should_keep_waiting_retry_interval(

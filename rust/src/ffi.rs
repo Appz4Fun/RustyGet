@@ -12981,108 +12981,6 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_cache_can_alloc(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_memory_monitor_tier_name(
-    tier: c_int,
-    constrained: c_int,
-    critical: c_int,
-) -> *const c_char {
-    crate::artwritercore::memory_monitor_tier_name(tier, constrained, critical).as_ptr()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_memory_monitor_effective_downloads_limit(
-    tier: c_int,
-    configured_limit: c_int,
-    constrained: c_int,
-    critical: c_int,
-) -> c_int {
-    crate::artwritercore::memory_monitor_effective_downloads_limit(
-        tier,
-        configured_limit,
-        constrained,
-        critical,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_memory_monitor_calc_critical_or_normal_par_buffer(
-    tier: c_int,
-    configured_mb: c_int,
-    tier_critical: c_int,
-    tier_normal: c_int,
-    out_mb: *mut c_int,
-) -> c_int {
-    let (handled, mb) =
-        crate::artwritercore::memory_monitor_calc_critical_or_normal_par_buffer(
-            tier,
-            configured_mb,
-            tier_critical,
-            tier_normal,
-        );
-    if !out_mb.is_null() {
-        *out_mb = mb;
-    }
-    i32::from(handled)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_memory_monitor_resolve_tier_limits(
-    next_tier: c_int,
-    raw_sample: c_int,
-    cfg_cache: u32,
-    cfg_par: u32,
-    cfg_limit: u32,
-    tier_normal: c_int,
-    tier_constrained: c_int,
-    tier_critical: c_int,
-    rs_eff_cache: u32,
-    rs_eff_par: u32,
-    out_eff_cache: *mut u32,
-    out_eff_par: *mut u32,
-    out_eff_limit: *mut u32,
-) {
-    let (eff_cache, eff_par, eff_limit) =
-        crate::artwritercore::memory_monitor_resolve_tier_limits(
-            next_tier,
-            raw_sample,
-            cfg_cache,
-            cfg_par,
-            cfg_limit,
-            tier_normal,
-            tier_constrained,
-            tier_critical,
-            rs_eff_cache,
-            rs_eff_par,
-        );
-    if !out_eff_cache.is_null() {
-        *out_eff_cache = eff_cache;
-    }
-    if !out_eff_par.is_null() {
-        *out_eff_par = eff_par;
-    }
-    if !out_eff_limit.is_null() {
-        *out_eff_limit = eff_limit;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_awc_memory_monitor_classify_tier_transition_action(
-    old_tier: c_int,
-    new_tier: c_int,
-    tier_normal: c_int,
-    tier_constrained: c_int,
-    tier_critical: c_int,
-) -> c_int {
-    crate::artwritercore::memory_monitor_classify_tier_transition_action(
-        old_tier,
-        new_tier,
-        tier_normal,
-        tier_constrained,
-        tier_critical,
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_ccm_conn_select_ai_family(
     ip_version: c_int,
     ip_v4: c_int,
@@ -16566,79 +16464,8 @@ pub unsafe extern "C" fn nzbget_rs_tpr_article_fetcher_is_server_eligible_on_lev
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_article_fetcher_is_reused_stale_within_max(
-    reused: i32,
-    stale_count_after_inc: i32,
-    max_connections: i32,
-) -> i32 {
-    if crate::nntp::article_fetcher_is_reused_stale_within_max(
-        reused != 0,
-        stale_count_after_inc,
-        max_connections,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_article_fetcher_is_declared_range_known(
-    begin_pos: i64,
-    end_pos: i64,
-    size: i64,
-) -> i32 {
-    if crate::nntp::article_fetcher_is_declared_range_known(begin_pos, end_pos, size)
-    {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_article_fetcher_should_throttle_bandwidth(
-    stopped: i32,
-    quota_reached: i32,
-    speed_limit: i64,
-    cur_speed: i64,
-    momentary_speed: i64,
-) -> i32 {
-    if crate::nntp::article_fetcher_should_throttle_bandwidth(
-        stopped != 0,
-        quota_reached != 0,
-        speed_limit,
-        cur_speed,
-        momentary_speed,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_stream_repair_bytes_to_mb(bytes: i64) -> f64 {
     crate::streamrepair::stream_repair_bytes_to_mb(bytes)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_dl_is_server_available(
-    active: i32,
-    max_connections: i32,
-    optional: i32,
-    is_blocked: i32,
-) -> i32 {
-    if crate::artwritercore::article_dl_is_server_available(
-        active != 0,
-        max_connections,
-        optional != 0,
-        is_blocked != 0,
-    ) {
-        1
-    } else {
-        0
-    }
 }
 
 #[no_mangle]
@@ -16805,27 +16632,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_dl_format_fetch_command(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_article_dl_select_yenc_crc(
-    crc_check: i32,
-    calculated_crc: u32,
-    expected_crc: u32,
-) -> u32 {
-    crate::artwritercore::article_dl_select_yenc_crc(
-        crc_check != 0,
-        calculated_crc,
-        expected_crc,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_open_verb(
-    direct_write: i32,
-) -> *const c_char {
-    crate::artwritercore::article_writer_open_verb(direct_write != 0).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_format_info_path(
     nzb_name: *const c_char,
     sep: c_char,
@@ -16847,25 +16653,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_format_info_path(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_apply_missing_part_counters(
-    failed_articles: i32,
-    success_articles: i32,
-    out_failed_articles: *mut i32,
-    out_success_articles: *mut i32,
-) {
-    let (failed, success) = crate::artwritercore::article_writer_apply_missing_part_counters(
-        failed_articles,
-        success_articles,
-    );
-    if !out_failed_articles.is_null() {
-        *out_failed_articles = failed;
-    }
-    if !out_success_articles.is_null() {
-        *out_success_articles = success;
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_format_raw_part_dest(
     final_output_path: *const c_char,
     final_output_path_len: usize,
@@ -16879,17 +16666,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_format_raw_part_dest(
     };
     into_buf(
         crate::artwritercore::article_writer_format_raw_part_dest(p, sep as u8, part_number),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_calc_total_failed_articles(
-    missed_articles: i32,
-    failed_articles: i32,
-) -> i32 {
-    crate::artwritercore::article_writer_calc_total_failed_articles(
-        missed_articles,
-        failed_articles,
     )
 }
 
@@ -17382,11 +17158,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_article_writer_format_tmp_path(
         CStr::from_ptr(base_path).to_bytes()
     };
     into_buf(crate::artwritercore::article_writer_format_tmp_path(bp))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_article_cache_mb_to_bytes(mb: i32) -> usize {
-    crate::artwritercore::article_cache_mb_to_bytes(mb)
 }
 
 #[no_mangle]
@@ -18540,116 +18311,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nntp_health_format_stat_batch(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_writer_check_existing_output_file(
-    exists: c_int,
-    existing_size: i64,
-    target_size: i64,
-) -> c_int {
-    crate::artwritercore::article_writer_check_existing_output_file(
-        exists != 0,
-        existing_size,
-        target_size,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_writer_validate_staged_dupe_size(
-    actual_size: i64,
-    segment_size: c_int,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::article_writer_validate_staged_dupe_size(
-            actual_size,
-            segment_size,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_writer_eval_commit_post_close(
-    flushed: c_int,
-    closed: c_int,
-    direct_write: c_int,
-) -> c_int {
-    crate::artwritercore::article_writer_eval_commit_post_close(
-        flushed != 0,
-        closed != 0,
-        direct_write != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_cache_should_write_cache_flag(
-    was_empty: c_int,
-    server_mode: c_int,
-    continue_partial: c_int,
-    skip_write: c_int,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::article_cache_should_write_cache_flag(
-            was_empty != 0,
-            server_mode != 0,
-            continue_partial != 0,
-            skip_write != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_cache_post_flush_action(
-    need_emergency_flush: c_int,
-    allocated: usize,
-    just_flushed: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    crate::artwritercore::article_cache_post_flush_action(
-        need_emergency_flush != 0,
-        allocated,
-        just_flushed != 0,
-        is_stopped != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_fetcher_should_clear_unreachable(
-    success: c_int,
-    transient: c_int,
-) -> c_int {
-    i32::from(
-        crate::nntp::article_fetcher_should_clear_unreachable(
-            success != 0,
-            transient != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_fetcher_can_attempt_transient_retry(
-    transient: c_int,
-    server_unreachable: c_int,
-) -> c_int {
-    i32::from(
-        crate::nntp::article_fetcher_can_attempt_transient_retry(
-            transient != 0,
-            server_unreachable != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_fetcher_has_more_transient_attempts(
-    attempt: c_int,
-    max_transient_attempts: c_int,
-) -> c_int {
-    i32::from(
-        crate::nntp::article_fetcher_has_more_transient_attempts(
-            attempt,
-            max_transient_attempts,
-        ),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_webserver_classify_pre_parse_method(
     http_method: c_int,
     hm_post: c_int,
@@ -18847,57 +18508,6 @@ pub extern "C" fn nzbget_rs_dqh_script_ctrl_can_send_break(pid: c_int, completed
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_dl_is_terminal_loop_status(
-    status: c_int,
-    ad_finished: c_int,
-    ad_fatal_error: c_int,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::article_dl_is_terminal_loop_status(
-            status,
-            ad_finished,
-            ad_fatal_error,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
-    has_want_server: c_int,
-    has_desired_server: c_int,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::article_dl_should_fail_for_desired_server(
-            has_want_server != 0,
-            has_desired_server != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_dl_should_continue_read_loop(
-    is_stopped: c_int,
-    decoder_eof: c_int,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::article_dl_should_continue_read_loop(
-            is_stopped != 0,
-            decoder_eof != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_dl_should_run_decode_check(
-    status: c_int,
-    ad_running: c_int,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::article_dl_should_run_decode_check(status, ad_running),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_server_pool_should_disconnect_idle_level_conn(
     conn_norm_level: c_int,
     level: c_int,
@@ -18930,141 +18540,6 @@ pub extern "C" fn nzbget_rs_dqh_statmeter_has_any_quota_configured(
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_nntp_conn_classify_handshake_result(result: c_int) -> c_int {
     crate::nntp::nntp_conn_classify_handshake_result(result)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_fetcher_should_keep_waiting_retry(
-    waited: c_int,
-    seconds: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(
-        crate::nntp::article_fetcher_should_keep_waiting_retry(
-            waited,
-            seconds,
-            is_stopped != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_fetcher_should_disconnect_on_release(
-    keep_connected: c_int,
-    conn_status: c_int,
-    cs_cancelled: c_int,
-) -> c_int {
-    i32::from(
-        crate::nntp::article_fetcher_should_disconnect_on_release(
-            keep_connected != 0,
-            conn_status,
-            cs_cancelled,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_fetcher_is_join_group_failure_transient(
-    has_response: c_int,
-) -> c_int {
-    i32::from(
-        crate::nntp::article_fetcher_is_join_group_failure_transient(
-            has_response != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_writer_is_dupe_fallback_article(
-    has_article_info: c_int,
-    dupe_fallback_round: c_int,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::article_writer_is_dupe_fallback_article(
-            has_article_info != 0,
-            dupe_fallback_round,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_was_renamed_during_completion(
-    cur_filename: *const c_char,
-    orig_filename: *const c_char,
-    orig_len: usize,
-) -> c_int {
-    let cur = if cur_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(cur_filename).to_bytes()
-    };
-    let orig = if orig_filename.is_null() || orig_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(orig_filename as *const u8, orig_len)
-    };
-    i32::from(
-        crate::artwritercore::article_writer_was_renamed_during_completion(cur, orig),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_writer_should_delete_hardlinked_without_interdir(
-    is_hard_linked: c_int,
-    inter_dir_empty: c_int,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::article_writer_should_delete_hardlinked_without_interdir(
-            is_hard_linked != 0,
-            inter_dir_empty != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_did_dest_dir_change(
-    cur_dest_dir: *const c_char,
-    orig_dest_dir: *const c_char,
-    orig_len: usize,
-) -> c_int {
-    let cur = if cur_dest_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(cur_dest_dir).to_bytes()
-    };
-    let orig = if orig_dest_dir.is_null() || orig_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(orig_dest_dir as *const u8, orig_len)
-    };
-    i32::from(crate::artwritercore::article_writer_did_dest_dir_change(cur, orig))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_cache_should_continue_run_loop(
-    is_stopped: c_int,
-    allocated: usize,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::article_cache_should_continue_run_loop(
-            is_stopped != 0,
-            allocated,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_memory_monitor_should_keep_sleeping(
-    is_stopped: c_int,
-    slept: c_int,
-    interval: c_int,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::memory_monitor_should_keep_sleeping(
-            is_stopped != 0,
-            slept,
-            interval,
-        ),
-    )
 }
 
 #[no_mangle]

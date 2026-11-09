@@ -121,35 +121,6 @@ pub unsafe extern "C" fn nzbget_rs_json_encode(raw: *const c_char) -> RsBuf {
     into_buf(v)
 }
 
-type EncoderSpans<'a> = (&'a [u8], &'a mut [std::mem::MaybeUninit<u8>]);
-
-/// Validate all representability/endpoints/overlap before creating borrows.
-///
-/// # Safety
-/// For accepted ranges, raw is readable through its first NUL at input_len,
-/// and non-null out is writable for cap bytes. Empty/null ranges are handled
-/// without constructing null slices.
-unsafe fn known_encoder_spans<'a, const EXPANSION: usize>(raw: *const c_char, input_len: usize, out: *mut c_char, cap: usize) -> Option<EncoderSpans<'a>> {
-    if input_len > (isize::MAX as usize - 1) / EXPANSION || raw.is_null() && input_len != 0 {
-        return None;
-    }
-    let source_range = if raw.is_null() { None } else {
-        Some((raw as usize, (raw as usize).checked_add(input_len + 1)?))
-    };
-    if !out.is_null() {
-        if cap > isize::MAX as usize { return None; }
-        let begin = out as usize;
-        let end = begin.checked_add(cap)?;
-        if cap != 0 && source_range.is_some_and(|(s, e)| begin < e && s < end) { return None; }
-    }
-    let source = if input_len == 0 { &[] } else { std::slice::from_raw_parts(raw.cast::<u8>(), input_len) };
-    let output = if out.is_null() || cap == 0 { &mut [] } else {
-        std::slice::from_raw_parts_mut(out.cast::<std::mem::MaybeUninit<u8>>(), cap)
-    };
-    Some((source, output))
-}
-
-
 /// # Safety
 /// `raw` is null or a valid NUL-terminated string.
 #[no_mangle]
@@ -337,66 +308,6 @@ pub unsafe extern "C" fn nzbget_rs_free(buf: RsBuf) {
     if !buf.data.is_null() {
         drop(Vec::from_raw_parts(buf.data as *mut u8, buf.len + 1, buf.cap));
     }
-}
-
-/// Both fields are meaningful on failure, too: the legacy matcher retains
-/// partial captures. Count can exceed capacity after backtracking.
-#[repr(C)]
-pub struct WildResult {
-    pub matched: c_int,
-    pub count: usize,
-}
-
-/// Match, folding case with glibc's tolower table `table` (indexed -128..=255)
-/// when it isn't null, else with the caller's `fold` (tolower of a byte in the
-/// current locale). Writes up to capacity
-/// pairs and returns the total count; retry with that capacity if needed.
-/// NULL positions disables capture collection, irrespective of capacity.
-///
-/// # Safety
-/// `pattern` and `text` are null (empty) or valid NUL-terminated strings.
-/// `table` is null or valid for indexes -128..=255 (`char_signed`: whether the
-/// caller's char is signed, which picks the index of bytes from 0x80); `fold`,
-/// when supplied, takes a byte value 0..=255 and must not unwind. A null `fold`
-/// is ignored when a table is supplied; with neither, the result is (0, 0).
-/// `positions` is null or points to
-/// `capacity` writable pairs of C ints, disjoint from all the input storage.
-/// All buffers remain caller-owned. Panics abort rather than crossing the ABI.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_wild_match(
-    pattern: *const c_char,
-    text: *const c_char,
-    positions: *mut [c_int; 2],
-    capacity: usize,
-    table: *const c_int,
-    char_signed: c_int,
-    fold: Option<extern "C" fn(c_int) -> c_int>,
-) -> WildResult {
-    if table.is_null() && fold.is_none() {
-        return WildResult { matched: 0, count: 0 };
-    }
-    let call = |b: u8| fold.expect("callback checked above")(b as c_int);
-    let lower = if table.is_null() {
-        crate::wildmask::Lower::Fold(&call)
-    } else {
-        // SAFETY: the caller supplies entries -128..=255, with `table`
-        // pointing at entry zero. Keep raw-pointer handling at the FFI edge.
-        crate::wildmask::Lower::Table(&*table.sub(128).cast::<[c_int; 384]>(), char_signed != 0)
-    };
-    let mut v = Vec::new();
-    let matched = crate::wildmask::wild_match(
-        &lower, input(pattern), input(text),
-        if positions.is_null() { None } else { Some(&mut v) },
-    );
-    let count = v.len();
-    // Avoid even constructing a slice from NULL for zero-length output.
-    if !positions.is_null() && capacity != 0 && count != 0 {
-        let out = std::slice::from_raw_parts_mut(positions, count.min(capacity));
-        for (slot, (start, len)) in out.iter_mut().zip(v) {
-            *slot = [start, len];
-        }
-    }
-    WildResult { matched: matched.into(), count }
 }
 
 /// Base64-decodes `input` into `output` (WebUtil::DecodeBase64); a length of
@@ -693,56 +604,10 @@ unsafe fn in_place(raw: *mut c_char, f: impl FnOnce(&mut [u8]) -> usize) {
 /// WebUtil::XmlDecode, in place (rust/src/text.rs).
 ///
 /// # Safety
-/// `raw` is null or a writable NUL-terminated string. `lower`, if supplied,
-/// takes an ASCII hex letter and returns the caller's tolower result; it must
-/// not unwind or access `raw`. A null callback leaves the buffer unchanged.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xml_decode(raw: *mut c_char, lower: Option<extern "C" fn(c_int) -> c_int>) {
-    let Some(lower) = lower else { return };
-    in_place(raw, |b| crate::text::xml_decode(b, &|c| lower(c as c_int)))
-}
-
-/// WebUtil::XmlStripTags, in place.
-///
-/// # Safety
 /// `raw` is null or a writable NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xml_strip_tags(raw: *mut c_char) {
-    in_place(raw, |b| {
-        crate::text::xml_strip_tags(b);
-        b.len()
-    })
-}
-
-/// WebUtil::XmlRemoveEntities, in place; `is_alpha` takes a byte in 0..=255
-/// and classifies it in the caller's locale and char signedness.
-/// A null callback leaves the buffer unchanged.
-///
-/// # Safety
-/// `raw` is null or a writable NUL-terminated string; `is_alpha`, if supplied,
-/// doesn't unwind or access `raw`.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xml_remove_entities(raw: *mut c_char, is_alpha: Option<extern "C" fn(c_int) -> c_int>) {
-    let Some(is_alpha) = is_alpha else { return };
-    in_place(raw, |b| crate::text::xml_remove_entities(b, &|c| is_alpha(c as c_int) != 0))
-}
-
-/// WebUtil::HttpUnquote, in place.
-///
-/// # Safety
-/// `raw` is null or a writable NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_http_unquote(raw: *mut c_char) {
-    in_place(raw, crate::text::http_unquote)
-}
-
-/// WebUtil::UrlDecode, in place.
-///
-/// # Safety
-/// `raw` is null or a writable NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_url_decode(raw: *mut c_char) {
-    in_place(raw, crate::text::url_decode)
+pub unsafe extern "C" fn nzbget_rs_xml_decode(raw: *mut c_char) {
+    in_place(raw, |b| crate::text::xml_decode(b, &crate::util::byte_tolower_locale))
 }
 
 /// WebUtil::UrlEncode; free the result with nzbget_rs_free.
@@ -754,33 +619,6 @@ pub unsafe extern "C" fn nzbget_rs_url_encode(raw: *const c_char) -> RsBuf {
     let mut v = Vec::new();
     crate::text::url_encode(input(raw), &mut v);
     into_buf(v)
-}
-
-/// WebUtil::Latin1ToUtf8; free the result with nzbget_rs_free.
-///
-/// # Safety
-/// `raw` is null or a NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_latin1_to_utf8(raw: *const c_char) -> RsBuf {
-    let mut v = Vec::new();
-    crate::text::latin1_to_utf8(input(raw), &mut v);
-    into_buf(v)
-}
-
-/// Latin1 into caller-owned potentially uninitialized storage. Returns required
-/// bytes excluding NUL, or SIZE_MAX for rejected bounds or overlap. If n < cap,
-/// result and NUL are initialized; otherwise retry with n + 1. Null output
-/// measures with cap ignored. Rust never allocates or frees caller storage.
-///
-/// # Safety
-/// Source is null only at input_len zero, otherwise readable through its first
-/// NUL exactly at input_len. Non-null output is writable for cap bytes.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_latin1_to_utf8_n(raw: *const c_char, input_len: usize, out: *mut c_char, cap: usize) -> usize {
-    let Some((source, output)) = known_encoder_spans::<2>(raw, input_len, out, cap) else { return usize::MAX };
-    let capacity = output.len();
-    let dst = if capacity == 0 { std::ptr::null_mut() } else { output.as_mut_ptr().cast() };
-    crate::text::latin1_known_into(source, raw.cast(), dst, capacity)
 }
 
 /// WebUtil::XmlFindTag: a pointer into `xml` and the value length, or null
@@ -823,29 +661,16 @@ pub unsafe extern "C" fn nzbget_rs_json_find_field(text: *const c_char, field: *
 }
 
 /// WebUtil::ParseContentDispositionFilename; `data` is null for no file name
-/// (the C++ null CString). Case folds as strncasecmp: glibc's tolower `table`
-/// (entries -128..=255, pointing at entry zero) indexed by unsigned byte, or
-/// `fold` (tolower of a byte 0..=255) when `table` is null.
+/// (the C++ null CString).
 ///
 /// # Safety
-/// `cd` is null or NUL-terminated; `table` is null or as described; `fold`
-/// doesn't unwind.
+/// `cd` is null or NUL-terminated.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_content_disposition_filename(
     cd: *const c_char,
-    table: *const c_int,
-    fold: Option<extern "C" fn(c_int) -> c_int>,
 ) -> RsBuf {
     let none = RsBuf { data: std::ptr::null_mut(), len: 0, cap: 0 };
-    if table.is_null() && fold.is_none() {
-        return none;
-    }
-    let call = |b: u8| fold.expect("callback checked above")(b as c_int);
-    let lower = if table.is_null() {
-        crate::wildmask::Lower::Fold(&call)
-    } else {
-        crate::wildmask::Lower::Table(&*table.sub(128).cast::<[c_int; 384]>(), false)
-    };
+    let lower = crate::wildmask::Lower::Fold(&crate::util::byte_tolower_locale);
     match crate::webutil::content_disposition_filename(input(cd), &lower) {
         Some(v) => into_buf(v),
         None => none,
@@ -896,39 +721,21 @@ pub unsafe extern "C" fn nzbget_rs_reduce_str(s: *mut c_char, from: *const c_cha
     crate::util::reduce_str(s, from, to)
 }
 
-/// Util::MatchFileExt. Case folding: glibc's tolower `table` (entries
-/// -128..=255, pointing at entry zero) when not null, indexed by unsigned
-/// byte for the extension compare (strcasecmp) and as the C++ char
-/// (`char_signed`) for wildcard extensions (WildMask); else the callbacks
-/// `case_fold` (a byte 0..=255) and `mask_fold` (as WildMask's).
+/// Util::MatchFileExt.
 ///
 /// # Safety
-/// The strings are null or NUL-terminated; `table` is null or as described;
-/// the callbacks don't unwind or mutate inputs. Callbacks may be null when
-/// a table is supplied.
+/// The strings are null or NUL-terminated.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_match_file_ext(
     filename: *const c_char,
     list: *const c_char,
     separators: *const c_char,
-    table: *const c_int,
-    char_signed: c_int,
-    case_fold: Option<extern "C" fn(c_int) -> c_int>,
-    mask_fold: Option<extern "C" fn(c_int) -> c_int>,
 ) -> c_int {
-    use crate::wildmask::Lower;
-    if table.is_null() && (case_fold.is_none() || mask_fold.is_none()) {
-        return 0;
-    }
-    let case_call = |b: u8| case_fold.expect("callback checked above")(b as c_int);
-    let mask_call = |b: u8| mask_fold.expect("callback checked above")(b as c_int);
-    let (case_lower, mask_lower) = if table.is_null() {
-        (Lower::Fold(&case_call), Lower::Fold(&mask_call))
-    } else {
-        let t = &*table.sub(128).cast::<[c_int; 384]>();
-        (Lower::Table(t, false), Lower::Table(t, char_signed != 0))
-    };
-    crate::util::match_file_ext(input(filename), input(list), input(separators), &case_lower, &mask_lower) as c_int
+    c_int::from(crate::util::match_file_ext_locale(
+        input(filename),
+        input(list),
+        input(separators),
+    ))
 }
 
 /// URL::ParseUrl's result: each part as a start and length in the address,
@@ -1199,14 +1006,6 @@ pub unsafe extern "C" fn nzbget_rs_normalize_path_separators(path: *mut c_char) 
     })
 }
 
-unsafe fn lower_of<'f>(table: *const c_int, char_signed: c_int, call: &'f dyn Fn(u8) -> c_int) -> crate::wildmask::Lower<'f> {
-    if table.is_null() {
-        crate::wildmask::Lower::Fold(call)
-    } else {
-        crate::wildmask::Lower::Table(&*table.sub(128).cast::<[c_int; 384]>(), char_signed != 0)
-    }
-}
-
 /// WebProcessor::ParseHeaders for one line (rust/src/webserver.rs): the kind
 /// (0 other, 1 Content-Length, 2 credentials, 3 credentials too long,
 /// 4 Accept-Encoding, 5 Origin, 6 Auth-Token cookie, 7 X-Forwarded-For,
@@ -1301,9 +1100,6 @@ pub struct WebCredentialsC {
     pub auth_info: *const c_char,
     pub auth_token: *const c_char,
     pub server_tokens: [*const c_char; 3],
-    pub lower_table: *const c_int,
-    pub char_signed: c_int,
-    pub fold: Option<extern "C" fn(c_int) -> c_int>,
 }
 
 /// CheckCredentials' result.
@@ -1324,9 +1120,8 @@ unsafe fn opt(p: *const c_char) -> Option<&'static [u8]> {
 /// WebProcessor::CheckCredentials.
 ///
 /// # Safety
-/// `input` is null or readable; its strings are null or NUL-terminated;
-/// `lower_table` as for WildMask; `fold` doesn't unwind. `out` is null or
-/// writable and disjoint from all input storage. Null input denies access.
+/// `input` is null or readable; its strings are null or NUL-terminated.
+/// `out` is null or writable and disjoint from all input storage. Null input denies access.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_web_check_credentials(input: *const WebCredentialsC, out: *mut WebCheckC) {
     if out.is_null() {
@@ -1337,12 +1132,7 @@ pub unsafe extern "C" fn nzbget_rs_web_check_credentials(input: *const WebCreden
         return;
     }
     let i = &*input;
-    let fold = i.fold;
-    let call = move |b: u8| fold.map_or(b as c_int, |f| f(b as c_int));
-    if i.lower_table.is_null() && fold.is_none() {
-        return;
-    }
-    let lower = lower_of(i.lower_table, i.char_signed, &call);
+    let lower = crate::wildmask::Lower::Fold(&crate::util::wild_mask_fold_locale);
     let o = crate::webserver::Credentials {
         control_username: opt(i.users[0]),
         control_password: opt(i.users[1]),
@@ -1367,27 +1157,6 @@ pub unsafe extern "C" fn nzbget_rs_web_check_credentials(input: *const WebCreden
         auth_cut: r.auth_cut.map_or(-1, |k| k as isize),
         warn: r.warn as c_int,
     };
-}
-
-/// WebProcessor::IsAuthorizedIp.
-///
-/// # Safety
-/// The strings are null or NUL-terminated; `table` as for WildMask; `fold`
-/// doesn't unwind.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_web_authorized_ip(
-    option: *const c_char,
-    remote: *const c_char,
-    table: *const c_int,
-    char_signed: c_int,
-    fold: Option<extern "C" fn(c_int) -> c_int>,
-) -> c_int {
-    if table.is_null() && fold.is_none() {
-        return 0;
-    }
-    let call = move |b: u8| fold.map_or(b as c_int, |f| f(b as c_int));
-    let lower = lower_of(table, char_signed, &call);
-    crate::webserver::is_authorized_ip(input(option), input(remote), &lower) as c_int
 }
 
 /// Decoder (rust/src/decoder.rs) with built-in Rust `nntmux-yenc` + `crc32fast` (or custom callbacks).
@@ -2336,69 +2105,6 @@ mod cmdline_tests {
             *(*ctx.cast::<Calls>()).argv.add(index as usize) = std::ptr::null_mut();
         }
         result
-    }
-
-    // One test owns getopt globals throughout; no parallel parser tests.
-    type KnownEncoder = unsafe extern "C" fn(*const c_char, usize, *mut c_char, usize) -> usize;
-
-    #[test]
-    fn known_encoders_capacity_nul_and_retry() {
-        let inputs = [b"".as_slice(), b"plain", b" a\"b\\c/d\n\t ", b"\x80\xbf\xc0\xff",
-            b"\xc0\x80", b"\xf7\xbf\xbf\xbf", b"a\xe2\x82", "😀é".as_bytes()];
-        for input in inputs {
-            let source = [input, &[0]].concat();
-            for (encode, expansion) in [(nzbget_rs_latin1_to_utf8_n as KnownEncoder, 2)] {
-                let mut expected = Vec::new();
-                crate::text::latin1_to_utf8(input, &mut expected);
-                assert!(expected.len() <= expansion * input.len());
-                for cap in 0..=expansion * input.len() + 2 {
-                    let mut storage = vec![std::mem::MaybeUninit::<u8>::uninit(); cap + 2];
-                    storage[0].write(0x55); storage[cap + 1].write(0xaa);
-                    let n = unsafe { encode(source.as_ptr().cast(), input.len(), storage.as_mut_ptr().add(1).cast(), cap) };
-                    assert_eq!(n, expected.len());
-                    assert_eq!(unsafe { storage[0].assume_init() }, 0x55);
-                    assert_eq!(unsafe { storage[cap + 1].assume_init() }, 0xaa);
-                    if n < cap {
-                        let result = unsafe { std::slice::from_raw_parts(storage.as_ptr().add(1).cast::<u8>(), n + 1) };
-                        assert_eq!(&result[..n], expected); assert_eq!(result[n], 0);
-                    }
-                    assert_eq!(&source[..input.len()], input);
-                }
-                let n = unsafe { encode(source.as_ptr().cast(), input.len(), std::ptr::null_mut(), usize::MAX) };
-                assert_eq!(n, expected.len());
-                let mut exact = vec![0x55u8; n + 1];
-                assert_eq!(unsafe { encode(source.as_ptr().cast(), input.len(), exact.as_mut_ptr().cast(), exact.len()) }, n);
-                assert_eq!(&exact[..n], expected); assert_eq!(exact[n], 0);
-                let mut empty = [0x55u8];
-                assert_eq!(unsafe { encode(std::ptr::null(), 0, empty.as_mut_ptr().cast(), 1) }, 0);
-                assert_eq!(empty, [0]);
-                assert_eq!(unsafe { encode(std::ptr::null(), 0, std::ptr::null_mut(), 0) }, 0);
-            }
-        }
-
-    }
-
-    #[test]
-    fn known_encoders_reject_overlap_and_arithmetic_before_writes() {
-        for (encode, expansion) in [(nzbget_rs_latin1_to_utf8_n as KnownEncoder, 2)] {
-            let mut data = [b'#'; 48]; data[8..12].copy_from_slice(b"a b\0");
-            let original = data;
-            for (start, cap) in [(8, 8), (0, 10), (11, 8)] {
-                assert_eq!(unsafe { encode(data.as_ptr().add(8).cast(), 3, data.as_mut_ptr().add(start).cast(), cap) }, usize::MAX);
-                assert_eq!(data, original);
-            }
-            // Empty output ranges may measure even at the source address.
-            assert_ne!(unsafe { encode(data.as_ptr().add(8).cast(), 3, data.as_mut_ptr().add(8).cast(), 0) }, usize::MAX);
-            let output = data.as_mut_ptr().cast();
-            for input_len in [usize::MAX, (isize::MAX as usize - 1) / expansion + 1] {
-                assert_eq!(unsafe { encode(c"x".as_ptr(), input_len, output, 1) }, usize::MAX);
-            }
-            assert_eq!(unsafe { encode(std::ptr::null(), 1, output, 1) }, usize::MAX);
-            assert_eq!(unsafe { encode(c"x".as_ptr(), 1, output, usize::MAX) }, usize::MAX);
-            assert_eq!(unsafe { encode(usize::MAX as *const c_char, 0, output, 1) }, usize::MAX);
-            assert_eq!(unsafe { encode(c"x".as_ptr(), 1, usize::MAX as *mut c_char, 1) }, usize::MAX);
-            assert_eq!(data, original);
-        }
     }
 
     #[test]
@@ -4883,7 +4589,6 @@ mod tests {
             let (mut start, mut len, mut number) = (99, 99, 99);
             assert_eq!(nzbget_rs_web_header(std::ptr::null(), 42, 1, &mut start, &mut len, &mut number), 10);
             assert_eq!((start, len, number), (0, 0, 0));
-            assert_eq!(nzbget_rs_web_authorized_ip(std::ptr::null(), std::ptr::null(), std::ptr::null(), 1, None), 0);
         }
     }
 
@@ -5056,26 +4761,11 @@ mod tests {
                 assert_eq!(std::slice::from_raw_parts(first.data.cast::<u8>(), first.len + 1), expected);
                 nzbget_rs_free(first);
             }
-            let mut table = [0; 384];
-            for (i, entry) in table.iter_mut().enumerate() {
-                *entry = if i >= 128 { ((i - 128) as u8).to_ascii_lowercase() as c_int } else { i as c_int - 128 };
-            }
             for list in [c".NZB", c"*.NZ?"] {
-                assert_eq!(nzbget_rs_match_file_ext(c"a.nzb".as_ptr(), list.as_ptr(), c",".as_ptr(),
-                    table.as_ptr().add(128), 1, None, None), 1);
+                assert_eq!(nzbget_rs_match_file_ext(c"a.nzb".as_ptr(), list.as_ptr(), c",".as_ptr()), 1);
             }
-            assert_eq!(nzbget_rs_match_file_ext(std::ptr::null(), std::ptr::null(), std::ptr::null(),
-                std::ptr::null(), 1, None, None), 0);
+            assert_eq!(nzbget_rs_match_file_ext(std::ptr::null(), std::ptr::null(), std::ptr::null()), 0);
         }
-    }
-
-    extern "C" fn entity_alpha(byte: c_int) -> c_int {
-        assert!((0..=255).contains(&byte));
-        (byte == b'@' as c_int || byte == 0xe9 || (byte as u8).is_ascii_alphabetic()) as c_int
-    }
-
-    extern "C" fn digit_lower(byte: c_int) -> c_int {
-        (byte as u8).to_ascii_lowercase() as c_int
     }
 
     #[test]
@@ -5099,14 +4789,12 @@ mod tests {
             assert_eq!(nzbget_rs_json_find_field(json.as_ptr(), c"x".as_ptr(), &mut length), json.as_ptr().add(5));
             assert_eq!(length, 3);
 
-            for fold in [None, Some(digit_lower as extern "C" fn(c_int) -> c_int)] {
-                let result = nzbget_rs_content_disposition_filename(std::ptr::null(), std::ptr::null(), fold);
-                assert!(result.data.is_null());
-                nzbget_rs_free(result);
-            }
+            let result = nzbget_rs_content_disposition_filename(std::ptr::null());
+            assert!(result.data.is_null());
+            nzbget_rs_free(result);
             for (mut raw, expected) in [(b"filename=\"\"\0".to_vec(), &b"\0"[..]),
                                          (b"FILENAME=abc\0".to_vec(), &b"abc\0"[..])] {
-                let result = nzbget_rs_content_disposition_filename(raw.as_ptr().cast(), std::ptr::null(), Some(digit_lower));
+                let result = nzbget_rs_content_disposition_filename(raw.as_ptr().cast());
                 raw.fill(b'!');
                 assert!(!result.data.is_null());
                 assert_eq!(result.len, expected.len() - 1);
@@ -5119,57 +4807,28 @@ mod tests {
     #[test]
     fn text_null_inputs_and_callback() {
         unsafe {
-            for f in [nzbget_rs_xml_strip_tags,
-                      nzbget_rs_http_unquote, nzbget_rs_url_decode] {
-                f(std::ptr::null_mut());
-            }
-            nzbget_rs_xml_decode(std::ptr::null_mut(), Some(digit_lower));
-            nzbget_rs_xml_decode(std::ptr::null_mut(), None);
+            nzbget_rs_xml_decode(std::ptr::null_mut());
             let mut xml = *b"&#xA;\0tail";
-            nzbget_rs_xml_decode(xml.as_mut_ptr().cast(), None);
-            assert_eq!(&xml, b"&#xA;\0tail");
-            nzbget_rs_xml_remove_entities(std::ptr::null_mut(), Some(entity_alpha));
-            nzbget_rs_xml_remove_entities(std::ptr::null_mut(), None);
-            let mut raw = *b"&amp;\0tail";
-            nzbget_rs_xml_remove_entities(raw.as_mut_ptr().cast(), None);
-            assert_eq!(&raw, b"&amp;\0tail");
-            for f in [nzbget_rs_url_encode, nzbget_rs_latin1_to_utf8] {
-                let result = f(std::ptr::null());
-                assert_eq!(result.len, 0);
-                assert!(!result.data.is_null());
-                assert_eq!(*result.data, 0);
-                nzbget_rs_free(result);
-            }
-        }
-    }
-
-    #[test]
-    fn text_locale_callback_and_embedded_nuls() {
-        unsafe {
-            let mut raw = *b"&@;&\xe9;&#12;\0tail";
-            nzbget_rs_xml_remove_entities(raw.as_mut_ptr().cast(), Some(entity_alpha));
-            assert_eq!(&raw[..4], b"   \0");
-            assert_eq!(&raw[11..], b"\0tail");
-            let mut url = *b"%00a%41\0tail";
-            nzbget_rs_url_decode(url.as_mut_ptr().cast());
-            assert_eq!(&url, b"\0aA\0%41\0tail");
+            nzbget_rs_xml_decode(xml.as_mut_ptr().cast());
+            assert_eq!(&xml[..2], b"\n\0");
+            let result = nzbget_rs_url_encode(std::ptr::null());
+            assert_eq!(result.len, 0);
+            assert!(!result.data.is_null());
+            assert_eq!(*result.data, 0);
+            nzbget_rs_free(result);
         }
     }
 
     #[test]
     fn text_encoders_return_independently_owned_buffers() {
         unsafe {
-            for (f, expected) in [
-                (nzbget_rs_url_encode as unsafe extern "C" fn(*const c_char) -> RsBuf, &b"\xe9%20x\0"[..]),
-                (nzbget_rs_latin1_to_utf8, &b"\xc3\xa9 x\0"[..]),
-            ] {
-                let mut raw = *b"\xe9 x\0ignored";
-                let result = f(raw.as_ptr().cast());
-                raw.fill(b'!');
-                assert_eq!(result.len, expected.len() - 1);
-                assert_eq!(std::slice::from_raw_parts(result.data.cast::<u8>(), result.len + 1), expected);
-                nzbget_rs_free(result);
-            }
+            let expected = &b"\xe9%20x\0"[..];
+            let mut raw = *b"\xe9 x\0ignored";
+            let result = nzbget_rs_url_encode(raw.as_ptr().cast());
+            raw.fill(b'!');
+            assert_eq!(result.len, expected.len() - 1);
+            assert_eq!(std::slice::from_raw_parts(result.data.cast::<u8>(), result.len + 1), expected);
+            nzbget_rs_free(result);
         }
     }
 
@@ -5204,87 +4863,6 @@ mod tests {
             let mut length = -7;
             assert_eq!(nzbget_rs_json_next_value(text.as_ptr().cast(), &mut length), text.as_ptr().add(2).cast());
             assert_eq!(length, 6);
-        }
-    }
-
-    extern "C" fn lower(b: c_int) -> c_int {
-        (b as u8).to_ascii_lowercase() as c_int
-    }
-
-    #[test]
-    fn wildcard_null_callback() {
-        let mut table = [0; 384];
-        for (i, slot) in table.iter_mut().enumerate() {
-            *slot = lower((i as c_int - 128) as u8 as c_int);
-        }
-        let mut positions = [[-99; 2]; 2];
-        unsafe {
-            let result = nzbget_rs_wild_match(
-                b"A?\0".as_ptr().cast(), b"ab\0".as_ptr().cast(),
-                positions.as_mut_ptr(), positions.len(), table.as_ptr().add(128), 1, None,
-            );
-            assert_eq!((result.matched, result.count), (1, 1));
-            assert_eq!(positions, [[1, 1], [-99; 2]]);
-            let result = nzbget_rs_wild_match(
-                b"A?\0".as_ptr().cast(), b"ab\0".as_ptr().cast(),
-                positions.as_mut_ptr(), positions.len(), std::ptr::null(), 1, None,
-            );
-            assert_eq!((result.matched, result.count), (0, 0));
-            assert_eq!(positions, [[1, 1], [-99; 2]]);
-        }
-    }
-
-    #[test]
-    fn wildcard_null_inputs_and_output() {
-        unsafe {
-            let result = nzbget_rs_wild_match(
-                std::ptr::null(), std::ptr::null(), std::ptr::null_mut(), usize::MAX, std::ptr::null(), 1, Some(lower),
-            );
-            assert_eq!((result.matched, result.count), (1, 0));
-            let result = nzbget_rs_wild_match(
-                b"?\0".as_ptr().cast(), std::ptr::null(), std::ptr::null_mut(), 0, std::ptr::null(), 1, Some(lower),
-            );
-            assert_eq!((result.matched, result.count), (0, 0));
-        }
-    }
-
-    #[test]
-    fn wildcard_failure_preserves_partial_positions() {
-        let mut positions = [[-99; 2]; 3];
-        unsafe {
-            let result = nzbget_rs_wild_match(
-                b"?x\0".as_ptr().cast(), b"ay\0".as_ptr().cast(),
-                positions.as_mut_ptr(), positions.len(), std::ptr::null(), 1, Some(lower),
-            );
-            assert_eq!((result.matched, result.count), (0, 1));
-            assert_eq!(positions, [[0, 1], [-99; 2], [-99; 2]]);
-        }
-    }
-
-    #[test]
-    fn wildcard_reports_untruncated_count_without_overwriting_capacity() {
-        let mut positions = [[-99; 2]; 2];
-        unsafe {
-            let result = nzbget_rs_wild_match(
-                b"*?ab\0".as_ptr().cast(), b"aaaaaaaaab\0".as_ptr().cast(),
-                positions.as_mut_ptr(), 1, std::ptr::null(), 1, Some(lower),
-            );
-            assert_eq!(result.matched, 1);
-            assert!(result.count > 5);
-            assert_eq!(positions[1], [-99; 2]);
-            let mut full = vec![[0; 2]; result.count];
-            let retried = nzbget_rs_wild_match(
-                b"*?ab\0".as_ptr().cast(), b"aaaaaaaaab\0".as_ptr().cast(),
-                full.as_mut_ptr(), full.len(), std::ptr::null(), 1, Some(lower),
-            );
-            assert_eq!((retried.matched, retried.count), (1, result.count));
-            assert_eq!(full[0], positions[0]);
-            let zero = nzbget_rs_wild_match(
-                b"*?ab\0".as_ptr().cast(), b"aaaaaaaaab\0".as_ptr().cast(),
-                positions.as_mut_ptr(), 0, std::ptr::null(), 1, Some(lower),
-            );
-            assert_eq!(zero.count, result.count);
-            assert_eq!(positions[1], [-99; 2]);
         }
     }
 
@@ -18325,36 +17903,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_format_debug_line(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_log_format_rotate_mask(
-    base_name: *const c_char,
-    base_ext: *const c_char,
-) -> RsBuf {
-    let n = if base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_name).to_bytes()
-    };
-    let e = if base_ext.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_ext).to_bytes()
-    };
-    into_buf(crate::systemhealth::log_format_rotate_mask(n, e))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_log_format_deleting_old_msg(
-    filename: *const c_char,
-) -> RsBuf {
-    let f = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    into_buf(crate::systemhealth::log_format_deleting_old_msg(f))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_format_plot_line(
     text: *const c_char,
     screen_width: c_int,
@@ -18582,23 +18130,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_scanner_find_last_char_pos(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_log_split_basename_and_ext(
-    base_name: *const c_char,
-    out_ext: *mut RsBuf,
-) -> RsBuf {
-    let b = if base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_name).to_bytes()
-    };
-    let (stem, ext) = crate::systemhealth::log_split_basename_and_ext(b);
-    if !out_ext.is_null() {
-        *out_ext = into_buf(ext);
-    }
-    into_buf(stem)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_bytes_equal(
     a: *const c_char,
     b: *const c_char,
@@ -18705,50 +18236,36 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_log_should_delete_rotated_file_by_name(
-    filename: *const c_char,
-    year_off: usize,
-    mon_off: usize,
-    mday_off: usize,
+pub unsafe extern "C" fn nzbget_rs_log_rotate_log_file(
+    log_file: *const c_char,
+    sep: c_char,
     cur_time: i64,
     rotate_log: c_int,
-) -> c_int {
-    let f = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    i32::from(crate::systemhealth::log_should_delete_rotated_file_by_name(
-        f, year_off, mon_off, mday_off, cur_time, rotate_log,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_log_format_rotated_path_for_time(
-    directory: *const c_char,
-    sep: c_char,
-    base_name: *const c_char,
-    cur_time: i64,
-    base_ext: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    on_info_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
 ) -> RsBuf {
-    let dir = if directory.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(directory).to_bytes()
-    };
-    let base = if base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_name).to_bytes()
-    };
-    let ext = if base_ext.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_ext).to_bytes()
-    };
-    into_buf(crate::systemhealth::log_format_rotated_path_for_time(
-        dir, sep as u8, base, cur_time, ext,
-    ))
+    let path = input(log_file);
+    #[cfg(unix)]
+    {
+        into_buf(crate::systemhealth::log_rotate_log_file(
+            path,
+            sep as u8,
+            cur_time,
+            rotate_log,
+            |msg| {
+                if let Some(cb) = on_info_cb {
+                    let mut cstr = msg.to_vec();
+                    cstr.push(0);
+                    cb(ctx, cstr.as_ptr().cast());
+                }
+            },
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (sep, cur_time, rotate_log, ctx, on_info_cb);
+        into_buf(path.to_vec())
+    }
 }
 
 #[no_mangle]

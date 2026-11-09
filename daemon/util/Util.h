@@ -777,65 +777,12 @@ static inline std::string CopyRustPathText(NzbgetRsBuf buf)
 	return std::string(buf.data, buf.len);
 }
 
-namespace
-{
-	// tolower as strcasecmp applies it (an unsigned byte), and as WildMask's
-	// C++ code did (a char, signed or not)
-	int FileExtCaseFold(int byte)
-	{
-		return tolower(byte);
-	}
-
-	int FileExtMaskFold(int byte)
-	{
-		int ch = static_cast<char>(byte);
-#ifdef __GLIBC__
-		return tolower(ch);
-#else
-		return ch < 0 ? ch : tolower(ch);
-#endif
-	}
-
-	// Numeric XML references use the caller's locale-specific case mapping.
-	int XmlDigitLower(int byte)
-	{
-		return tolower(byte);
-	}
-
-	// tolower as strncasecmp applies it: to an unsigned byte
-	int CaseFold(int byte)
-	{
-		return tolower(byte);
-	}
-
-	// tolower of a byte as WildMask's C++ code saw it: a char (signed or not, as
-	// on the platform) in the current locale, EOF kept distinct from 255
-	int WildMaskFold(int byte)
-	{
-		int ch = static_cast<char>(byte);
-#ifdef __GLIBC__
-		// glibc supports negative signed chars for legacy programs
-		return tolower(ch);
-#else
-		// Darwin and musl leave negative characters unchanged; don't pass them
-		// outside the standard tolower domain
-		return ch < 0 ? ch : tolower(ch);
-#endif
-	}
-}
-
 class Util
 {
 public:
 	static bool MatchFileExt(const char* filename, const char* extensionList, const char* listSeparator)
 	{
-#ifdef __GLIBC__
-		const int* table = reinterpret_cast<const int*>(*__ctype_tolower_loc());
-#else
-		const int* table = nullptr;
-#endif
-		return nzbget_rs_match_file_ext(filename, extensionList, listSeparator, table, CHAR_MIN < 0,
-			FileExtCaseFold, FileExtMaskFold) != 0;
+		return nzbget_rs_match_file_ext(filename, extensionList, listSeparator) != 0;
 	}
 
 	static std::optional<std::string>
@@ -997,7 +944,7 @@ public:
 		return result;
 	}
 
-	static void XmlDecode(char* raw) { nzbget_rs_xml_decode(raw, XmlDigitLower); }
+	static void XmlDecode(char* raw) { nzbget_rs_xml_decode(raw); }
 
 	static const char* XmlFindTag(const char* xml, const char* tag, int* valueLength)
 	{
@@ -1039,12 +986,7 @@ public:
 
 	static CString ParseContentDispositionFilename(const char* contentDisposition)
 	{
-#ifdef __GLIBC__
-		const int* table = reinterpret_cast<const int*>(*__ctype_tolower_loc());
-#else
-		const int* table = nullptr;
-#endif
-		NzbgetRsBuf buf = nzbget_rs_content_disposition_filename(contentDisposition, table, CaseFold);
+		NzbgetRsBuf buf = nzbget_rs_content_disposition_filename(contentDisposition);
 		if (!buf.data)
 		{
 			return CString();
@@ -1144,65 +1086,6 @@ public:
 
 private:
 	void* m_rsRegex = nullptr;
-};
-
-class WildMask
-{
-public:
-	WildMask(const char* pattern, bool wantsPositions = false):
-		m_pattern(pattern), m_wantsPositions(wantsPositions), m_wildCount(0) {}
-	bool Match(const char* text)
-	{
-#ifdef __GLIBC__
-		const int* table = reinterpret_cast<const int*>(*__ctype_tolower_loc());
-#else
-		const int* table = nullptr;
-#endif
-		m_wildCount = 0;
-		m_wildStart.clear();
-		m_wildLen.clear();
-		if (!m_wantsPositions)
-		{
-			return nzbget_rs_wild_match(m_pattern, text, nullptr, 0, table, CHAR_MIN < 0, WildMaskFold).matched != 0;
-		}
-
-		size_t capacity = 100;
-		std::unique_ptr<int[][2]> positions(new int[capacity][2]);
-		auto match = [&]() {
-			return nzbget_rs_wild_match(m_pattern, text,
-				positions.get(), capacity, table, CHAR_MIN < 0, WildMaskFold);
-		};
-		auto result = match();
-		if (result.count > capacity)
-		{
-			capacity = result.count;
-			positions.reset(new int[capacity][2]);
-			result = match();
-		}
-		if (result.count > static_cast<size_t>(INT_MAX))
-		{
-			throw std::length_error("Too many wildcard captures");
-		}
-		m_wildCount = static_cast<int>(result.count);
-		m_wildStart.resize(m_wildCount);
-		m_wildLen.resize(m_wildCount);
-		for (int i = 0; i < m_wildCount; i++)
-		{
-			m_wildStart[i] = positions[i][0];
-			m_wildLen[i] = positions[i][1];
-		}
-		return result.matched != 0;
-	}
-	int GetMatchStart(int index) { return m_wildStart[index]; }
-
-private:
-	typedef std::vector<int> IntList;
-
-	CString m_pattern;
-	bool m_wantsPositions;
-	int m_wildCount;
-	IntList m_wildStart;
-	IntList m_wildLen;
 };
 
 #ifndef DISABLE_GZIP
@@ -2584,43 +2467,43 @@ public:
 	const char* GetConfigTemplate() const { return m_configTemplate; }
 	const char* GetScriptDir() const { return m_scriptDir; }
 	const char* GetRequiredDir() const { return m_requiredDir; }
-	bool GetSystemHealthCheck() const { return m_systemHealthCheck; }
-	bool GetNzbLog() const { return m_nzbLog; }
-	EMessageTarget GetInfoTarget() const { return m_infoTarget; }
-	EMessageTarget GetWarningTarget() const { return m_warningTarget; }
-	EMessageTarget GetErrorTarget() const { return m_errorTarget; }
-	EMessageTarget GetDebugTarget() const { return m_debugTarget; }
-	EMessageTarget GetDetailTarget() const { return m_detailTarget; }
-	int GetArticleTimeout() const { return m_articleTimeout; }
-	int GetArticleReadChunkSize() const { return m_articleReadChunkSize; }
-	int GetUrlTimeout() const { return m_urlTimeout; }
-	int GetRemoteTimeout() const { return m_remoteTimeout; }
-	bool GetRawArticle() const { return m_rawArticle; }
-	bool GetSkipWrite() const { return m_skipWrite; }
-	bool GetAppendCategoryDir() const { return m_appendCategoryDir; }
-	bool GetContinuePartial() const { return m_continuePartial; }
-	int GetArticleRetries() const { return m_articleRetries; }
-	int GetArticleInterval() const { return m_articleInterval; }
-	int GetUrlRetries() const { return m_urlRetries; }
-	int GetUrlInterval() const { return m_urlInterval; }
-	bool GetFlushQueue() const { return m_flushQueue; }
-	bool GetDupeCheck() const { return m_dupeCheck; }
-	EDupeArticleFallback GetDupeArticleFallback() const { return m_dupeArticleFallback; }
-	bool GetDupeStreamDecompress() const { return m_dupeStreamDecompress; }
-	int GetDupeStreamTimeout() const { return m_dupeStreamTimeout; }
-	bool GetDupeSearch() const { return m_dupeSearch; }
-	bool GetDupeSearchDryRun() const { return m_dupeSearchDryRun; }
+	bool GetSystemHealthCheck() const { return m_scalars.system_health_check != 0; }
+	bool GetNzbLog() const { return m_scalars.nzb_log != 0; }
+	EMessageTarget GetInfoTarget() const { return (EMessageTarget)m_scalars.info_target; }
+	EMessageTarget GetWarningTarget() const { return (EMessageTarget)m_scalars.warning_target; }
+	EMessageTarget GetErrorTarget() const { return (EMessageTarget)m_scalars.error_target; }
+	EMessageTarget GetDebugTarget() const { return (EMessageTarget)m_scalars.debug_target; }
+	EMessageTarget GetDetailTarget() const { return (EMessageTarget)m_scalars.detail_target; }
+	int GetArticleTimeout() const { return m_scalars.article_timeout; }
+	int GetArticleReadChunkSize() const { return m_scalars.article_read_chunk_size; }
+	int GetUrlTimeout() const { return m_scalars.url_timeout; }
+	int GetRemoteTimeout() const { return m_scalars.remote_timeout; }
+	bool GetRawArticle() const { return m_scalars.raw_article != 0; }
+	bool GetSkipWrite() const { return m_scalars.skip_write != 0; }
+	bool GetAppendCategoryDir() const { return m_scalars.append_category_dir != 0; }
+	bool GetContinuePartial() const { return m_scalars.continue_partial != 0; }
+	int GetArticleRetries() const { return m_scalars.article_retries; }
+	int GetArticleInterval() const { return m_scalars.article_interval; }
+	int GetUrlRetries() const { return m_scalars.url_retries; }
+	int GetUrlInterval() const { return m_scalars.url_interval; }
+	bool GetFlushQueue() const { return m_scalars.flush_queue != 0; }
+	bool GetDupeCheck() const { return m_scalars.dupe_check != 0; }
+	EDupeArticleFallback GetDupeArticleFallback() const { return (EDupeArticleFallback)m_scalars.dupe_article_fallback; }
+	bool GetDupeStreamDecompress() const { return m_scalars.dupe_stream_decompress != 0; }
+	int GetDupeStreamTimeout() const { return m_scalars.dupe_stream_timeout; }
+	bool GetDupeSearch() const { return m_scalars.dupe_search != 0; }
+	bool GetDupeSearchDryRun() const { return m_scalars.dupe_search_dry_run != 0; }
 	const char* GetDupeSearchUrl() const { return m_dupeSearchUrl; }
 	const char* GetDupeSearchApiKey() const { return m_dupeSearchApiKey; }
-	int GetDupeSearchDelay() const { return m_dupeSearchDelay; }
-	int GetDupeSearchMaxDonors() const { return m_dupeSearchMaxDonors; }
-	int GetDupeHealthPercent() const { return m_dupeHealthPercent; }
-	int GetDupeHealthMin() const { return m_dupeHealthMin; }
-	int GetDupeHealthMax() const { return m_dupeHealthMax; }
-	int GetDupeBodyChecks() const { return m_dupeBodyChecks; }
-	int GetDupeHealthBudget() const { return m_dupeHealthBudget; }
-	int GetDupeMinAlive() const { return m_dupeMinAlive; }
-	int GetDupeFastDonors() const { return m_dupeFastDonors; }
+	int GetDupeSearchDelay() const { return m_scalars.dupe_search_delay; }
+	int GetDupeSearchMaxDonors() const { return m_scalars.dupe_search_max_donors; }
+	int GetDupeHealthPercent() const { return m_scalars.dupe_health_percent; }
+	int GetDupeHealthMin() const { return m_scalars.dupe_health_min; }
+	int GetDupeHealthMax() const { return m_scalars.dupe_health_max; }
+	int GetDupeBodyChecks() const { return m_scalars.dupe_body_checks; }
+	int GetDupeHealthBudget() const { return m_scalars.dupe_health_budget; }
+	int GetDupeMinAlive() const { return m_scalars.dupe_min_alive; }
+	int GetDupeFastDonors() const { return m_scalars.dupe_fast_donors; }
 	const char* GetControlIp() const { return m_controlIp; }
 	const char* GetControlUsername() const { return m_controlUsername; }
 	const char* GetControlPassword() const { return m_controlPassword; }
@@ -2628,87 +2511,87 @@ public:
 	const char* GetRestrictedPassword() const { return m_restrictedPassword; }
 	const char* GetAddUsername() const { return m_addUsername; }
 	const char* GetAddPassword() const { return m_addPassword; }
-	int GetControlPort() const { return m_controlPort; }
-	bool GetFormAuth() const { return m_formAuth; }
-	bool GetJsonP() const { return m_jsonP; }
-	bool GetSecureControl() const { return m_secureControl; }
-	int GetSecurePort() const { return m_securePort; }
+	int GetControlPort() const { return m_scalars.control_port; }
+	bool GetFormAuth() const { return m_scalars.form_auth != 0; }
+	bool GetJsonP() const { return m_scalars.json_p != 0; }
+	bool GetSecureControl() const { return m_scalars.secure_control != 0; }
+	int GetSecurePort() const { return m_scalars.secure_port; }
 	const char* GetSecureCert() const { return m_secureCert; }
 	const char* GetSecureKey() const { return m_secureKey; }
 	const char* GetCertStore() const { return m_certStore; }
-	bool GetCertCheck() const { return m_certCheck; }
+	bool GetCertCheck() const { return m_scalars.cert_check != 0; }
 	const char* GetAuthorizedIp() const { return m_authorizedIp; }
 	const char* GetLockFile() const { return m_lockFile; }
 	const char* GetDaemonUsername() const { return m_daemonUsername; }
-	EOutputMode GetOutputMode() const { return m_outputMode; }
-	int GetUrlConnections() const { return m_urlConnections; }
-	int GetLogBuffer() const { return m_logBuffer; }
-	EWriteLog GetWriteLog() const { return m_writeLog; }
+	EOutputMode GetOutputMode() const { return (EOutputMode)m_scalars.output_mode; }
+	int GetUrlConnections() const { return m_scalars.url_connections; }
+	int GetLogBuffer() const { return m_scalars.log_buffer; }
+	EWriteLog GetWriteLog() const { return (EWriteLog)m_scalars.write_log; }
 	const char* GetLogFile() const { return m_logFile; }
-	int GetRotateLog() const { return m_rotateLog; }
-	EParCheck GetParCheck() const { return m_parCheck; }
-	bool GetParRepair() const { return m_parRepair; }
-	EParScan GetParScan() const { return m_parScan; }
-	bool GetParQuick() const { return m_parQuick; }
-	EPostStrategy GetPostStrategy() const { return m_postStrategy; }
-	bool GetParRename() const { return m_parRename; }
-	int GetParBuffer() const { return m_parBuffer; }
-	int GetParThreads() const { return m_parThreads; }
-	bool GetRarRename() const { return m_rarRename; }
-	EHealthCheck GetHealthCheck() const { return m_healthCheck; }
+	int GetRotateLog() const { return m_scalars.rotate_log; }
+	EParCheck GetParCheck() const { return (EParCheck)m_scalars.par_check; }
+	bool GetParRepair() const { return m_scalars.par_repair != 0; }
+	EParScan GetParScan() const { return (EParScan)m_scalars.par_scan; }
+	bool GetParQuick() const { return m_scalars.par_quick != 0; }
+	EPostStrategy GetPostStrategy() const { return (EPostStrategy)m_scalars.post_strategy; }
+	bool GetParRename() const { return m_scalars.par_rename != 0; }
+	int GetParBuffer() const { return m_scalars.par_buffer; }
+	int GetParThreads() const { return m_scalars.par_threads; }
+	bool GetRarRename() const { return m_scalars.rar_rename != 0; }
+	EHealthCheck GetHealthCheck() const { return (EHealthCheck)m_scalars.health_check; }
 	const char* GetScriptOrder() const { return m_scriptOrder; }
 	const char* GetExtensions() const { return m_extensions; }
-	int GetUMask() const { return m_umask; }
-	int GetUpdateInterval() const { return m_updateInterval; }
-	bool GetCursesNzbName() const { return m_cursesNzbName; }
-	bool GetCursesTime() const { return m_cursesTime; }
-	bool GetCursesGroup() const { return m_cursesGroup; }
-	bool GetCrcCheck() const { return m_crcCheck; }
-	bool GetDirectWrite() const { return m_directWrite; }
-	int GetWriteBuffer() const { return m_writeBuffer; }
-	int GetNzbDirInterval() const { return m_nzbDirInterval; }
-	int GetNzbDirFileAge() const { return m_nzbDirFileAge; }
-	bool GetNzbDirArchiveScan() const { return m_nzbDirArchiveScan; }
-	ENzbDirArchiveAction GetNzbDirArchiveAction() const { return m_nzbDirArchiveAction; }
-	int GetDiskSpace() const { return m_diskSpace; }
-	bool GetCrashTrace() const { return m_crashTrace; }
-	bool GetCrashDump() const { return m_crashDump; }
-	bool GetParPauseQueue() const { return m_parPauseQueue; }
-	bool GetScriptPauseQueue() const { return m_scriptPauseQueue; }
-	bool GetNzbCleanupDisk() const { return m_nzbCleanupDisk; }
-	int GetParTimeLimit() const { return m_parTimeLimit; }
-	int GetKeepHistory() const { return m_keepHistory; }
-	bool GetUnpack() const { return m_unpack; }
-	bool GetDirectUnpack() const { return m_directUnpack; }
-	bool GetUseTempUnpackDir() const { return m_useTempUnpackDir; }
-	bool GetUnpackCleanupDisk() const { return m_unpackCleanupDisk; }
+	int GetUMask() const { return m_scalars.umask; }
+	int GetUpdateInterval() const { return m_scalars.update_interval; }
+	bool GetCursesNzbName() const { return m_scalars.curses_nzb_name != 0; }
+	bool GetCursesTime() const { return m_scalars.curses_time != 0; }
+	bool GetCursesGroup() const { return m_scalars.curses_group != 0; }
+	bool GetCrcCheck() const { return m_scalars.crc_check != 0; }
+	bool GetDirectWrite() const { return m_scalars.direct_write != 0; }
+	int GetWriteBuffer() const { return m_scalars.write_buffer; }
+	int GetNzbDirInterval() const { return m_scalars.nzb_dir_interval; }
+	int GetNzbDirFileAge() const { return m_scalars.nzb_dir_file_age; }
+	bool GetNzbDirArchiveScan() const { return m_scalars.nzb_dir_archive_scan != 0; }
+	ENzbDirArchiveAction GetNzbDirArchiveAction() const { return (ENzbDirArchiveAction)m_scalars.nzb_dir_archive_action; }
+	int GetDiskSpace() const { return m_scalars.disk_space; }
+	bool GetCrashTrace() const { return m_scalars.crash_trace != 0; }
+	bool GetCrashDump() const { return m_scalars.crash_dump != 0; }
+	bool GetParPauseQueue() const { return m_scalars.par_pause_queue != 0; }
+	bool GetScriptPauseQueue() const { return m_scalars.script_pause_queue != 0; }
+	bool GetNzbCleanupDisk() const { return m_scalars.nzb_cleanup_disk != 0; }
+	int GetParTimeLimit() const { return m_scalars.par_time_limit; }
+	int GetKeepHistory() const { return m_scalars.keep_history; }
+	bool GetUnpack() const { return m_scalars.unpack != 0; }
+	bool GetDirectUnpack() const { return m_scalars.direct_unpack != 0; }
+	bool GetUseTempUnpackDir() const { return m_scalars.use_temp_unpack_dir != 0; }
+	bool GetUnpackCleanupDisk() const { return m_scalars.unpack_cleanup_disk != 0; }
 	const char* GetUnrarCmd() const { return m_unrarCmd; }
 	const char* GetUnpackPassFile() const { return m_unpackPassFile; }
-	bool GetUnpackPauseQueue() const { return m_unpackPauseQueue; }
+	bool GetUnpackPauseQueue() const { return m_scalars.unpack_pause_queue != 0; }
 	const char* GetExtCleanupDisk() const { return m_extCleanupDisk; }
 	const char* GetParIgnoreExt() const { return m_parIgnoreExt; }
-	bool GetPostDownloadRename() const { return m_postDownloadRename; }
-	bool GetRenameAfterUnpack() const { return m_renameAfterUnpack; }
+	bool GetPostDownloadRename() const { return m_scalars.post_download_rename != 0; }
+	bool GetRenameAfterUnpack() const { return m_scalars.rename_after_unpack != 0; }
 	const char* GetRenameIgnoreExt() const { return m_renameIgnoreExt; }
 	const char* GetUnpackIgnoreExt() const { return m_unpackIgnoreExt; }
-	int GetFeedHistory() const { return m_feedHistory; }
-	bool GetUrlForce() const { return m_urlForce; }
-	int GetTimeCorrection() const { return m_timeCorrection; }
-	int GetPropagationDelay() const { return m_propagationDelay; }
-	int GetArticleCache() const { return m_articleCache; }
-	int GetEventInterval() const { return m_eventInterval; }
-	int GetMemoryPressureInterval() const { return m_memoryPressureInterval; }
+	int GetFeedHistory() const { return m_scalars.feed_history; }
+	bool GetUrlForce() const { return m_scalars.url_force != 0; }
+	int GetTimeCorrection() const { return m_scalars.time_correction; }
+	int GetPropagationDelay() const { return m_scalars.propagation_delay; }
+	int GetArticleCache() const { return m_scalars.article_cache; }
+	int GetEventInterval() const { return m_scalars.event_interval; }
+	int GetMemoryPressureInterval() const { return m_scalars.memory_pressure_interval; }
 	const char* GetMemoryPressurePath() const { return m_memoryPressurePath; }
 	const std::string& GetShellOverride() const { return m_shellOverride; }
-	int GetMonthlyQuota() const { return m_monthlyQuota; }
-	int GetQuotaStartDay() const { return m_quotaStartDay; }
-	int GetDailyQuota() const { return m_dailyQuota; }
-	bool GetDirectRename() const { return m_directRename; }
-	bool GetHardLinking() const { return m_hardLinking; }
+	int GetMonthlyQuota() const { return m_scalars.monthly_quota; }
+	int GetQuotaStartDay() const { return m_scalars.quota_start_day; }
+	int GetDailyQuota() const { return m_scalars.daily_quota; }
+	bool GetDirectRename() const { return m_scalars.direct_rename != 0; }
+	bool GetHardLinking() const { return m_scalars.hard_linking != 0; }
 	const char* GetHardLinkingIgnoreExt() const { return m_hardLinkingIgnoreExt; }
-	bool GetReorderFiles() const { return m_reorderFiles; }
-	EFileNaming GetFileNaming() const { return m_fileNaming; }
-	int GetDownloadRate() const { return m_downloadRate; }
+	bool GetReorderFiles() const { return m_scalars.reorder_files != 0; }
+	EFileNaming GetFileNaming() const { return (EFileNaming)m_scalars.file_naming; }
+	int GetDownloadRate() const { return m_scalars.download_rate; }
 
 	Categories* GetCategories() { return &m_categories; }
 	const Categories* GetCategories() const { return &m_categories; }
@@ -2793,43 +2676,8 @@ private:
 	CString m_configTemplate;
 	CString m_scriptDir;
 	CString m_requiredDir;
-	EMessageTarget m_infoTarget = mtScreen;
-	EMessageTarget m_warningTarget = mtScreen;
-	EMessageTarget m_errorTarget = mtScreen;
-	EMessageTarget m_debugTarget = mtNone;
-	EMessageTarget m_detailTarget = mtScreen;
-	bool m_skipWrite = false;
-	bool m_rawArticle = false;
-	bool m_nzbLog = false;
-	bool m_systemHealthCheck = true;
-	int m_articleTimeout = 0;
-	int m_articleReadChunkSize = 4;
-	int m_urlTimeout = 0;
-	int m_remoteTimeout = 0;
-	bool m_appendCategoryDir = false;
-	bool m_continuePartial = false;
-	int m_articleRetries = 0;
-	int m_articleInterval = 0;
-	int m_urlRetries = 0;
-	int m_urlInterval = 0;
-	bool m_flushQueue = false;
-	bool m_dupeCheck = false;
-	EDupeArticleFallback m_dupeArticleFallback = dafNone;
-	bool m_dupeStreamDecompress = false;
-	int m_dupeStreamTimeout = 60;
-	bool m_dupeSearch = false;
-	bool m_dupeSearchDryRun = false;
 	CString m_dupeSearchUrl;
 	CString m_dupeSearchApiKey;
-	int m_dupeSearchDelay = 20;
-	int m_dupeSearchMaxDonors = 0;
-	int m_dupeHealthPercent = 5;
-	int m_dupeHealthMin = 50;
-	int m_dupeHealthMax = 1000;
-	int m_dupeBodyChecks = 20;
-	int m_dupeHealthBudget = 120;
-	int m_dupeMinAlive = 50;
-	int m_dupeFastDonors = 5;
 	CString m_controlIp;
 	CString m_controlUsername;
 	CString m_controlPassword;
@@ -2837,89 +2685,26 @@ private:
 	CString m_restrictedPassword;
 	CString m_addUsername;
 	CString m_addPassword;
-	bool m_formAuth = false;
-	bool m_jsonP = false;
-	int m_controlPort = 0;
-	bool m_secureControl = false;
-	int m_securePort = 0;
 	CString m_secureCert;
 	CString m_secureKey;
 	CString m_certStore;
-	bool m_certCheck = false;
 	CString m_authorizedIp;
 	CString m_lockFile;
 	CString m_daemonUsername;
-	EOutputMode m_outputMode = omLoggable;
-	int m_urlConnections = 0;
-	int m_logBuffer = 0;
-	EWriteLog m_writeLog = wlAppend;
-	int m_rotateLog = 0;
 	CString m_logFile;
-	EParCheck m_parCheck = pcManual;
-	bool m_parRepair = false;
-	EParScan m_parScan = psLimited;
-	bool m_parQuick = true;
-	EPostStrategy m_postStrategy = ppSequential;
-	bool m_parRename = false;
-	int m_parBuffer = 0;
-	int m_parThreads = 0;
-	bool m_rarRename = false;
-	bool m_directRename = false;
-	bool m_hardLinking = false;
 	CString m_hardLinkingIgnoreExt;
-	EHealthCheck m_healthCheck = hcNone;
 	CString m_extensions;
 	CString m_scriptOrder;
-	int m_umask = 0;
-	int m_updateInterval = 0;
-	bool m_cursesNzbName = false;
-	bool m_cursesTime = false;
-	bool m_cursesGroup = false;
-	bool m_crcCheck = false;
-	bool m_directWrite = false;
-	int m_writeBuffer = 0;
-	int m_nzbDirInterval = 0;
-	int m_nzbDirFileAge = 0;
-	bool m_nzbDirArchiveScan = true;
-	ENzbDirArchiveAction m_nzbDirArchiveAction = ENzbDirArchiveAction::Move;
-	int m_diskSpace = 0;
-	bool m_tls = false;
-	bool m_crashTrace = false;
-	bool m_crashDump = false;
-	bool m_parPauseQueue = false;
-	bool m_scriptPauseQueue = false;
-	bool m_nzbCleanupDisk = false;
-	int m_parTimeLimit = 0;
-	int m_keepHistory = 0;
-	bool m_unpack = false;
-	bool m_directUnpack = false;
-	bool m_useTempUnpackDir = true;
-	bool m_unpackCleanupDisk = false;
 	CString m_unrarCmd;
 	CString m_sevenZipCmd;
 	CString m_unpackPassFile;
-	bool m_unpackPauseQueue;
 	CString m_extCleanupDisk;
 	CString m_parIgnoreExt;
 	CString m_unpackIgnoreExt;
-	int m_feedHistory = 0;
-	bool m_urlForce = false;
-	int m_timeCorrection = 0;
-	int m_propagationDelay = 0;
-	int m_articleCache = 0;
-	int m_eventInterval = 0;
-	int m_memoryPressureInterval = 500;
 	CString m_memoryPressurePath;
 	std::string m_shellOverride;
-	int m_monthlyQuota = 0;
-	int m_quotaStartDay = 0;
-	int m_dailyQuota = 0;
-	bool m_reorderFiles = false;
-	EFileNaming m_fileNaming = nfArticle;
-	bool m_postDownloadRename = true;
-	bool m_renameAfterUnpack = true;
 	CString m_renameIgnoreExt;
-	int m_downloadRate = 0;
+	NzbgetRsParsedOptions m_scalars = DefaultScalars();
 
 	// Application mode
 	bool m_serverMode = false;
@@ -3115,212 +2900,40 @@ private:
 		return host;
 	}
 
-	NzbgetRsParsedOptions ExportParsedScalars() const
+	static NzbgetRsParsedOptions DefaultScalars()
 	{
 		NzbgetRsParsedOptions s{};
-		s.download_rate = m_downloadRate;
-		s.article_timeout = m_articleTimeout;
-		s.article_read_chunk_size = m_articleReadChunkSize;
-		s.url_timeout = m_urlTimeout;
-		s.remote_timeout = m_remoteTimeout;
-		s.article_retries = m_articleRetries;
-		s.article_interval = m_articleInterval;
-		s.url_retries = m_urlRetries;
-		s.url_interval = m_urlInterval;
-		s.control_port = m_controlPort;
-		s.secure_port = m_securePort;
-		s.url_connections = m_urlConnections;
-		s.log_buffer = m_logBuffer;
-		s.rotate_log = m_rotateLog;
-		s.umask = m_umask;
-		s.update_interval = m_updateInterval;
-		s.write_buffer = m_writeBuffer;
-		s.nzb_dir_interval = m_nzbDirInterval;
-		s.nzb_dir_file_age = m_nzbDirFileAge;
-		s.nzb_dir_archive_scan = m_nzbDirArchiveScan ? 1 : 0;
-		s.nzb_dir_archive_action = (int)m_nzbDirArchiveAction;
-		s.disk_space = m_diskSpace;
-		s.par_time_limit = m_parTimeLimit;
-		s.keep_history = m_keepHistory;
-		s.feed_history = m_feedHistory;
-		s.time_correction = m_timeCorrection;
-		s.propagation_delay = m_propagationDelay;
-		s.article_cache = m_articleCache;
-		s.memory_pressure_interval = m_memoryPressureInterval;
-		s.event_interval = m_eventInterval;
-		s.par_buffer = m_parBuffer;
-		s.par_threads = m_parThreads;
-		s.monthly_quota = m_monthlyQuota;
-		s.quota_start_day = m_quotaStartDay;
-		s.daily_quota = m_dailyQuota;
-		s.system_health_check = m_systemHealthCheck ? 1 : 0;
-		s.nzb_log = m_nzbLog ? 1 : 0;
-		s.append_category_dir = m_appendCategoryDir ? 1 : 0;
-		s.continue_partial = m_continuePartial ? 1 : 0;
-		s.flush_queue = m_flushQueue ? 1 : 0;
-		s.dupe_check = m_dupeCheck ? 1 : 0;
-		s.par_repair = m_parRepair ? 1 : 0;
-		s.par_quick = m_parQuick ? 1 : 0;
-		s.par_rename = m_parRename ? 1 : 0;
-		s.rar_rename = m_rarRename ? 1 : 0;
-		s.direct_rename = m_directRename ? 1 : 0;
-		s.hard_linking = m_hardLinking ? 1 : 0;
-		s.curses_nzb_name = m_cursesNzbName ? 1 : 0;
-		s.curses_time = m_cursesTime ? 1 : 0;
-		s.curses_group = m_cursesGroup ? 1 : 0;
-		s.crc_check = m_crcCheck ? 1 : 0;
-		s.direct_write = m_directWrite ? 1 : 0;
-		s.raw_article = m_rawArticle ? 1 : 0;
-		s.skip_write = m_skipWrite ? 1 : 0;
-		s.crash_trace = m_crashTrace ? 1 : 0;
-		s.crash_dump = m_crashDump ? 1 : 0;
-		s.par_pause_queue = m_parPauseQueue ? 1 : 0;
-		s.script_pause_queue = m_scriptPauseQueue ? 1 : 0;
-		s.nzb_cleanup_disk = m_nzbCleanupDisk ? 1 : 0;
-		s.form_auth = m_formAuth ? 1 : 0;
-		s.json_p = m_jsonP ? 1 : 0;
-		s.secure_control = m_secureControl ? 1 : 0;
-		s.unpack = m_unpack ? 1 : 0;
-		s.direct_unpack = m_directUnpack ? 1 : 0;
-		s.use_temp_unpack_dir = m_useTempUnpackDir ? 1 : 0;
-		s.unpack_cleanup_disk = m_unpackCleanupDisk ? 1 : 0;
-		s.unpack_pause_queue = m_unpackPauseQueue ? 1 : 0;
-		s.url_force = m_urlForce ? 1 : 0;
-		s.cert_check = m_certCheck ? 1 : 0;
-		s.reorder_files = m_reorderFiles ? 1 : 0;
-		s.post_download_rename = m_postDownloadRename ? 1 : 0;
-		s.rename_after_unpack = m_renameAfterUnpack ? 1 : 0;
-		s.output_mode = (int)m_outputMode;
-		s.par_check = (int)m_parCheck;
-		s.par_scan = (int)m_parScan;
-		s.dupe_article_fallback = (int)m_dupeArticleFallback;
-		s.dupe_stream_decompress = m_dupeStreamDecompress ? 1 : 0;
-		s.dupe_stream_timeout = m_dupeStreamTimeout;
-		s.dupe_search = m_dupeSearch ? 1 : 0;
-		s.dupe_search_dry_run = m_dupeSearchDryRun ? 1 : 0;
-		s.dupe_search_delay = m_dupeSearchDelay;
-		s.dupe_search_max_donors = m_dupeSearchMaxDonors;
-		s.dupe_health_percent = m_dupeHealthPercent;
-		s.dupe_health_min = m_dupeHealthMin;
-		s.dupe_health_max = m_dupeHealthMax;
-		s.dupe_body_checks = m_dupeBodyChecks;
-		s.dupe_health_budget = m_dupeHealthBudget;
-		s.dupe_min_alive = m_dupeMinAlive;
-		s.dupe_fast_donors = m_dupeFastDonors;
-		s.post_strategy = (int)m_postStrategy;
-		s.file_naming = (int)m_fileNaming;
-		s.health_check = (int)m_healthCheck;
-		s.info_target = (int)m_infoTarget;
-		s.warning_target = (int)m_warningTarget;
-		s.error_target = (int)m_errorTarget;
-		s.debug_target = (int)m_debugTarget;
-		s.detail_target = (int)m_detailTarget;
-		s.write_log = (int)m_writeLog;
-		s.tls = m_tls ? 1 : 0;
+		s.info_target = mtScreen;
+		s.warning_target = mtScreen;
+		s.error_target = mtScreen;
+		s.debug_target = mtNone;
+		s.detail_target = mtScreen;
+		s.system_health_check = 1;
+		s.article_read_chunk_size = 4;
+		s.dupe_stream_timeout = 60;
+		s.dupe_search_delay = 20;
+		s.dupe_health_percent = 5;
+		s.dupe_health_min = 50;
+		s.dupe_health_max = 1000;
+		s.dupe_body_checks = 20;
+		s.dupe_health_budget = 120;
+		s.dupe_min_alive = 50;
+		s.dupe_fast_donors = 5;
+		s.output_mode = omLoggable;
+		s.write_log = wlAppend;
+		s.par_check = pcManual;
+		s.par_scan = psLimited;
+		s.par_quick = 1;
+		s.post_strategy = ppSequential;
+		s.health_check = hcNone;
+		s.nzb_dir_archive_scan = 1;
+		s.nzb_dir_archive_action = (int)ENzbDirArchiveAction::Move;
+		s.use_temp_unpack_dir = 1;
+		s.memory_pressure_interval = 500;
+		s.file_naming = nfArticle;
+		s.post_download_rename = 1;
+		s.rename_after_unpack = 1;
 		return s;
-	}
-
-	void ApplyParsedScalars(const NzbgetRsParsedOptions& s)
-	{
-		m_downloadRate = s.download_rate;
-		m_articleTimeout = s.article_timeout;
-		m_articleReadChunkSize = s.article_read_chunk_size;
-		m_urlTimeout = s.url_timeout;
-		m_remoteTimeout = s.remote_timeout;
-		m_articleRetries = s.article_retries;
-		m_articleInterval = s.article_interval;
-		m_urlRetries = s.url_retries;
-		m_urlInterval = s.url_interval;
-		m_controlPort = s.control_port;
-		m_securePort = s.secure_port;
-		m_urlConnections = s.url_connections;
-		m_logBuffer = s.log_buffer;
-		m_rotateLog = s.rotate_log;
-		m_umask = s.umask;
-		m_updateInterval = s.update_interval;
-		m_writeBuffer = s.write_buffer;
-		m_nzbDirInterval = s.nzb_dir_interval;
-		m_nzbDirFileAge = s.nzb_dir_file_age;
-		m_nzbDirArchiveScan = s.nzb_dir_archive_scan != 0;
-		m_nzbDirArchiveAction = (ENzbDirArchiveAction)s.nzb_dir_archive_action;
-		m_diskSpace = s.disk_space;
-		m_parTimeLimit = s.par_time_limit;
-		m_keepHistory = s.keep_history;
-		m_feedHistory = s.feed_history;
-		m_timeCorrection = s.time_correction;
-		m_propagationDelay = s.propagation_delay;
-		m_articleCache = s.article_cache;
-		m_memoryPressureInterval = s.memory_pressure_interval;
-		m_eventInterval = s.event_interval;
-		m_parBuffer = s.par_buffer;
-		m_parThreads = s.par_threads;
-		m_monthlyQuota = s.monthly_quota;
-		m_quotaStartDay = s.quota_start_day;
-		m_dailyQuota = s.daily_quota;
-		m_systemHealthCheck = s.system_health_check != 0;
-		m_nzbLog = s.nzb_log != 0;
-		m_appendCategoryDir = s.append_category_dir != 0;
-		m_continuePartial = s.continue_partial != 0;
-		m_flushQueue = s.flush_queue != 0;
-		m_dupeCheck = s.dupe_check != 0;
-		m_parRepair = s.par_repair != 0;
-		m_parQuick = s.par_quick != 0;
-		m_parRename = s.par_rename != 0;
-		m_rarRename = s.rar_rename != 0;
-		m_directRename = s.direct_rename != 0;
-		m_hardLinking = s.hard_linking != 0;
-		m_cursesNzbName = s.curses_nzb_name != 0;
-		m_cursesTime = s.curses_time != 0;
-		m_cursesGroup = s.curses_group != 0;
-		m_crcCheck = s.crc_check != 0;
-		m_directWrite = s.direct_write != 0;
-		m_rawArticle = s.raw_article != 0;
-		m_skipWrite = s.skip_write != 0;
-		m_crashTrace = s.crash_trace != 0;
-		m_crashDump = s.crash_dump != 0;
-		m_parPauseQueue = s.par_pause_queue != 0;
-		m_scriptPauseQueue = s.script_pause_queue != 0;
-		m_nzbCleanupDisk = s.nzb_cleanup_disk != 0;
-		m_formAuth = s.form_auth != 0;
-		m_jsonP = s.json_p != 0;
-		m_secureControl = s.secure_control != 0;
-		m_unpack = s.unpack != 0;
-		m_directUnpack = s.direct_unpack != 0;
-		m_useTempUnpackDir = s.use_temp_unpack_dir != 0;
-		m_unpackCleanupDisk = s.unpack_cleanup_disk != 0;
-		m_unpackPauseQueue = s.unpack_pause_queue != 0;
-		m_urlForce = s.url_force != 0;
-		m_certCheck = s.cert_check != 0;
-		m_reorderFiles = s.reorder_files != 0;
-		m_postDownloadRename = s.post_download_rename != 0;
-		m_renameAfterUnpack = s.rename_after_unpack != 0;
-		m_outputMode = (EOutputMode)s.output_mode;
-		m_parCheck = (EParCheck)s.par_check;
-		m_parScan = (EParScan)s.par_scan;
-		m_dupeArticleFallback = (EDupeArticleFallback)s.dupe_article_fallback;
-		m_dupeStreamDecompress = s.dupe_stream_decompress != 0;
-		m_dupeStreamTimeout = s.dupe_stream_timeout;
-		m_dupeSearch = s.dupe_search != 0;
-		m_dupeSearchDryRun = s.dupe_search_dry_run != 0;
-		m_dupeSearchDelay = s.dupe_search_delay;
-		m_dupeSearchMaxDonors = s.dupe_search_max_donors;
-		m_dupeHealthPercent = s.dupe_health_percent;
-		m_dupeHealthMin = s.dupe_health_min;
-		m_dupeHealthMax = s.dupe_health_max;
-		m_dupeBodyChecks = s.dupe_body_checks;
-		m_dupeHealthBudget = s.dupe_health_budget;
-		m_dupeMinAlive = s.dupe_min_alive;
-		m_dupeFastDonors = s.dupe_fast_donors;
-		m_postStrategy = (EPostStrategy)s.post_strategy;
-		m_fileNaming = (EFileNaming)s.file_naming;
-		m_healthCheck = (EHealthCheck)s.health_check;
-		m_infoTarget = (EMessageTarget)s.info_target;
-		m_warningTarget = (EMessageTarget)s.warning_target;
-		m_errorTarget = (EMessageTarget)s.error_target;
-		m_debugTarget = (EMessageTarget)s.debug_target;
-		m_detailTarget = (EMessageTarget)s.detail_target;
-		m_writeLog = (EWriteLog)s.write_log;
-		m_tls = s.tls != 0;
 	}
 
 	void ConfigError(const char* msg, ...)
@@ -3512,11 +3125,10 @@ private:
 		m_renameIgnoreExt 	    = GetOption(RENAMEIGNOREEXT.data());
 
 		NzbgetRsOptionsHost host = MakeHost();
-		NzbgetRsParsedOptions scalars{};
 		int hasMemPath = 0, hasHlExt = 0, hasDupeUrl = 0, hasDupeKey = 0, warnDupeNoUrl = 0;
 		NzbgetRsBuf memPathBuf{}, hlExtBuf{}, dupeUrlBuf{}, dupeKeyBuf{};
 		nzbget_rs_options_init_scalars(
-			&host, &scalars,
+			&host, &m_scalars,
 			&hasMemPath, &memPathBuf,
 			&hasHlExt, &hlExtBuf,
 			&hasDupeUrl, &dupeUrlBuf,
@@ -3530,7 +3142,6 @@ private:
 		nzbget_rs_free(hlExtBuf);
 		nzbget_rs_free(dupeUrlBuf);
 		nzbget_rs_free(dupeKeyBuf);
-		ApplyParsedScalars(scalars);
 
 		if (warnDupeNoUrl)
 		{
@@ -3603,14 +3214,12 @@ private:
 	void InitServers()
 	{
 		NzbgetRsOptionsHost host = MakeHost();
-		NzbgetRsParsedOptions scalars = ExportParsedScalars();
 #ifdef DISABLE_TLS
 		int disableTls = 1;
 #else
 		int disableTls = 0;
 #endif
-		nzbget_rs_options_init_servers(&host, disableTls, &scalars);
-		ApplyParsedScalars(scalars);
+		nzbget_rs_options_init_servers(&host, disableTls, &m_scalars);
 	}
 
 	void InitCategories()
@@ -3721,7 +3330,6 @@ private:
 	void CheckOptions()
 	{
 		NzbgetRsOptionsHost host = MakeHost();
-		NzbgetRsParsedOptions scalars = ExportParsedScalars();
 #ifdef DISABLE_PARCHECK
 		int disableParcheck = 1;
 #else
@@ -3744,7 +3352,7 @@ private:
 #endif
 		int ctChanged = 0;
 		NzbgetRsBuf ctBuf = nzbget_rs_options_check_options(
-			&host, &scalars,
+			&host, &m_scalars,
 			m_noDiskAccess ? 1 : 0,
 			sizeof(void*) == 4 ? 1 : 0,
 			disableParcheck, disableCurses, disableTls, haveX509CheckHost,
@@ -3758,7 +3366,6 @@ private:
 			m_configTemplate.Set(ctBuf.data ? ctBuf.data : "", (int)ctBuf.len);
 		}
 		nzbget_rs_free(ctBuf);
-		ApplyParsedScalars(scalars);
 	}
 };
 
@@ -3998,72 +3605,44 @@ private:
 		}
 	}
 
+	static void RotateInfoCallback(void*, const char* msg)
+	{
+		if (g_Log && msg)
+		{
+			g_Log->AddMessage(Message::mkInfo, msg);
+		}
+	}
+
 	void RotateLog()
 	{
-		BString<1024> directory = g_Options->GetLogFile();
-
-		char* baseName = FileSystem::BaseFileName(directory);
-		if (baseName > directory)
-		{
-			baseName[-1] = '\0';
-		}
-
-		NzbgetRsBuf extBuf{};
-		NzbgetRsBuf stemBuf = nzbget_rs_dqh_log_split_basename_and_ext(baseName, &extBuf);
-		BString<1024> baseExt;
-		baseExt.Set(extBuf.data ? extBuf.data : "", (int)extBuf.len);
-		nzbget_rs_free(extBuf);
-		if (stemBuf.data)
-		{
-			memcpy(baseName, stemBuf.data, stemBuf.len);
-			baseName[stemBuf.len] = '\0';
-		}
-		nzbget_rs_free(stemBuf);
-
-		NzbgetRsBuf maskBuf = nzbget_rs_dqh_log_format_rotate_mask(baseName, *baseExt);
-		BString<1024> fileMask;
-		fileMask.Set(maskBuf.data ? maskBuf.data : "", (int)maskBuf.len);
-		nzbget_rs_free(maskBuf);
-
 		time_t curTime = Util::CurrentTime() + g_Options->GetTimeCorrection();
-		BString<1024> fullFilename;
-
-		WildMask mask(fileMask, true);
-		DirBrowser dir(directory);
-		while (const char* filename = dir.Next())
-		{
-			if (mask.Match(filename))
-			{
-				NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					*directory, PATH_SEPARATOR, filename);
-				fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-				nzbget_rs_free(fullFnBuf);
-
-				if (nzbget_rs_log_should_delete_rotated_file_by_name(
-					filename,
-					(size_t)mask.GetMatchStart(0),
-					(size_t)mask.GetMatchStart(1),
-					(size_t)mask.GetMatchStart(2),
-					static_cast<int64_t>(curTime),
-					g_Options->GetRotateLog()))
-				{
-					NzbgetRsBuf delMsgBuf = nzbget_rs_dqh_log_format_deleting_old_msg(filename);
-					BString<1024> message;
-					message.Set(delMsgBuf.data ? delMsgBuf.data : "", (int)delMsgBuf.len);
-					nzbget_rs_free(delMsgBuf);
-					g_Log->AddMessage(Message::mkInfo, message);
-
-					FileSystem::DeleteFile(fullFilename);
-				}
-			}
-		}
-
-		NzbgetRsBuf rotBuf = nzbget_rs_log_format_rotated_path_for_time(
-			*directory, PATH_SEPARATOR, baseName, static_cast<int64_t>(curTime), *baseExt);
-		fullFilename.Set(rotBuf.data ? rotBuf.data : "", (int)rotBuf.len);
+		NzbgetRsBuf rotBuf = nzbget_rs_log_rotate_log_file(
+			g_Options->GetLogFile(),
+			PATH_SEPARATOR,
+			static_cast<int64_t>(curTime),
+			g_Options->GetRotateLog(),
+			nullptr,
+			&Log::RotateInfoCallback);
+		UpdateLogPath(rotBuf.data ? rotBuf.data : "");
 		nzbget_rs_free(rotBuf);
+	}
 
-		UpdateLogPath(*fullFilename);
+	void EmitV(Message::EKind kind, const char* prefix, Options::EMessageTarget target, const char* msg, va_list ap)
+	{
+		char tmp2[1024];
+		vsnprintf(tmp2, 1024, msg, ap);
+		tmp2[1024 - 1] = '\0';
+
+		Guard guard(m_logMutex);
+
+		if (target == Options::mtScreen || target == Options::mtBoth)
+		{
+			AddMessage(kind, tmp2);
+		}
+		if (target == Options::mtLog || target == Options::mtBoth)
+		{
+			Filelog("%s\t%s", prefix, tmp2);
+		}
 	}
 
 	friend void error(const char* msg, ...);
@@ -4155,94 +3734,34 @@ inline void debug(const char* msg, ...)
 
 inline void error(const char* msg, ...)
 {
-	char tmp2[1024];
-
 	va_list ap;
 	va_start(ap, msg);
-	vsnprintf(tmp2, 1024, msg, ap);
-	tmp2[1024-1] = '\0';
+	g_Log->EmitV(Message::mkError, "ERROR", g_Options ? g_Options->GetErrorTarget() : Options::mtBoth, msg, ap);
 	va_end(ap);
-
-	Guard guard(g_Log->m_logMutex);
-
-	Options::EMessageTarget messageTarget = g_Options ? g_Options->GetErrorTarget() : Options::mtBoth;
-	if (messageTarget == Options::mtScreen || messageTarget == Options::mtBoth)
-	{
-		g_Log->AddMessage(Message::mkError, tmp2);
-	}
-	if (messageTarget == Options::mtLog || messageTarget == Options::mtBoth)
-	{
-		g_Log->Filelog("ERROR\t%s", tmp2);
-	}
 }
 
 inline void warn(const char* msg, ...)
 {
-	char tmp2[1024];
-
 	va_list ap;
 	va_start(ap, msg);
-	vsnprintf(tmp2, 1024, msg, ap);
-	tmp2[1024-1] = '\0';
+	g_Log->EmitV(Message::mkWarning, "WARNING", g_Options ? g_Options->GetWarningTarget() : Options::mtScreen, msg, ap);
 	va_end(ap);
-
-	Guard guard(g_Log->m_logMutex);
-
-	Options::EMessageTarget messageTarget = g_Options ? g_Options->GetWarningTarget() : Options::mtScreen;
-	if (messageTarget == Options::mtScreen || messageTarget == Options::mtBoth)
-	{
-		g_Log->AddMessage(Message::mkWarning, tmp2);
-	}
-	if (messageTarget == Options::mtLog || messageTarget == Options::mtBoth)
-	{
-		g_Log->Filelog("WARNING\t%s", tmp2);
-	}
 }
 
 inline void info(const char* msg, ...)
 {
-	char tmp2[1024];
-
 	va_list ap;
 	va_start(ap, msg);
-	vsnprintf(tmp2, 1024, msg, ap);
-	tmp2[1024-1] = '\0';
+	g_Log->EmitV(Message::mkInfo, "INFO", g_Options ? g_Options->GetInfoTarget() : Options::mtScreen, msg, ap);
 	va_end(ap);
-
-	Guard guard(g_Log->m_logMutex);
-
-	Options::EMessageTarget messageTarget = g_Options ? g_Options->GetInfoTarget() : Options::mtScreen;
-	if (messageTarget == Options::mtScreen || messageTarget == Options::mtBoth)
-	{
-		g_Log->AddMessage(Message::mkInfo, tmp2);
-	}
-	if (messageTarget == Options::mtLog || messageTarget == Options::mtBoth)
-	{
-		g_Log->Filelog("INFO\t%s", tmp2);
-	}
 }
 
 inline void detail(const char* msg, ...)
 {
-	char tmp2[1024];
-
 	va_list ap;
 	va_start(ap, msg);
-	vsnprintf(tmp2, 1024, msg, ap);
-	tmp2[1024-1] = '\0';
+	g_Log->EmitV(Message::mkDetail, "DETAIL", g_Options ? g_Options->GetDetailTarget() : Options::mtScreen, msg, ap);
 	va_end(ap);
-
-	Guard guard(g_Log->m_logMutex);
-
-	Options::EMessageTarget messageTarget = g_Options ? g_Options->GetDetailTarget() : Options::mtScreen;
-	if (messageTarget == Options::mtScreen || messageTarget == Options::mtBoth)
-	{
-		g_Log->AddMessage(Message::mkDetail, tmp2);
-	}
-	if (messageTarget == Options::mtLog || messageTarget == Options::mtBoth)
-	{
-		g_Log->Filelog("DETAIL\t%s", tmp2);
-	}
 }
 
 #ifdef DEBUG
@@ -47057,17 +46576,6 @@ private:
 		}
 	}
 
-	// tolower as WildMask's C++ code did: on a char, signed or not
-	static int WebFold(int byte)
-	{
-		int ch = static_cast<char>(byte);
-#ifdef __GLIBC__
-		return tolower(ch);
-#else
-		return ch < 0 ? ch : tolower(ch);
-#endif
-	}
-
 	void ParseHeaders()
 	{
 		// Keep the entire initialized buffer: in unusual locales strncasecmp can
@@ -47173,11 +46681,6 @@ private:
 		{
 			input.serverTokens[j] = m_serverAuthToken[j];
 		}
-#ifdef __GLIBC__
-		input.lowerTable = reinterpret_cast<const int*>(*__ctype_tolower_loc());
-#endif
-		input.charSigned = CHAR_MIN < 0;
-		input.fold = WebFold;
 
 		NzbgetRsWebCheck check{};
 		nzbget_rs_web_check_credentials(&input, &check);

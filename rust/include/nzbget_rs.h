@@ -45,25 +45,6 @@ NzbgetRsBuf nzbget_rs_twin_match(int own, const char* ownPrint, const char* targ
 // is also accepted. Copy the bytes before freeing if they must outlive the result.
 void nzbget_rs_free(NzbgetRsBuf buf);
 
-typedef struct
-{
-	int matched;
-	size_t count;
-} NzbgetRsWildResult;
-
-// NULL pattern/text mean empty strings; otherwise they must be NUL-terminated.
-// table: glibc's tolower table of the calling thread (*__ctype_tolower_loc(),
-// valid for indexes -128..255; char_signed: CHAR_MIN < 0 of the caller), or NULL to use fold(byte 0..255), which returns
-// tolower of that byte as the caller's char in the current locale.
-// fold may be NULL when table is supplied. If both are NULL, returns {0, 0}
-// without writing positions.
-// positions is caller-owned writable storage for capacity pairs, disjoint from
-// the inputs. NULL disables positions. Both result fields are valid on failure.
-// count is the TOTAL capture count, even if only capacity pairs could be written;
-// retry with count pairs if needed. Panics abort; no unwinding crosses the ABI.
-NzbgetRsWildResult nzbget_rs_wild_match(const char* pattern, const char* text,
-	int (*positions)[2], size_t capacity, const int* table, int char_signed, int (*fold)(int));
-
 // RPC request decoders (rust/src/decode.rs), as WebUtil's:
 // All buffers remain caller-owned; these functions allocate no result buffers.
 // Base64: NULL input returns 0. Otherwise input is readable for length bytes,
@@ -76,9 +57,7 @@ void nzbget_rs_json_decode(char* raw);
 
 // WebUtil's text helpers (rust/src/text.rs): the in-place ones take NULL (no-op)
 // or a caller-owned writable NUL-terminated string. Panics abort.
-// lower receives an ASCII hex letter and returns the caller's tolower result.
-// It must not unwind or access raw. NULL lower is a no-op.
-void nzbget_rs_xml_decode(char* raw, int (*lower)(int));
+void nzbget_rs_xml_decode(char* raw);
 // NULL input means empty. Results are Rust-owned NUL-terminated buffers:
 // copy before freeing with nzbget_rs_free, never with the C allocator.
 NzbgetRsBuf nzbget_rs_url_encode(const char* raw);
@@ -87,10 +66,7 @@ NzbgetRsBuf nzbget_rs_url_encode(const char* raw);
 // value length, or NULL with valueLength untouched
 const char* nzbget_rs_xml_find_tag(const char* xml, const char* tag, int* valueLength);
 // WebUtil::ParseContentDispositionFilename: data is NULL for no file name.
-// Case folding as strncasecmp: glibc's tolower table (*__ctype_tolower_loc(),
-// entries -128..255) indexed by unsigned byte, or fold(byte 0..255) when NULL.
-NzbgetRsBuf nzbget_rs_content_disposition_filename(const char* contentDisposition,
-	const int* table, int (*fold)(int));
+NzbgetRsBuf nzbget_rs_content_disposition_filename(const char* contentDisposition);
 
 // Util's string helpers (rust/src/util.rs). Format results are Rust-owned;
 // copy and release with nzbget_rs_free. Numeric formatting uses LC_NUMERIC.
@@ -100,13 +76,8 @@ NzbgetRsBuf nzbget_rs_format_size(long long size);
 // may point into str. Any NULL argument is a no-op. Empty patterns and growing
 // replacements are no-ops; equal-length replacements retain C++ truncation.
 void nzbget_rs_reduce_str(char* str, const char* from, const char* to);
-// case folding: glibc's tolower table (*__ctype_tolower_loc()) or NULL for
-// the callbacks: caseFold(byte 0..255) as strcasecmp, maskFold as WildMask's.
-// Callbacks must not unwind or mutate input storage. They may both be NULL
-// with a table; without a table either NULL callback returns false.
 // NULL strings are empty; non-NULL strings must be readable and NUL-terminated.
-int nzbget_rs_match_file_ext(const char* filename, const char* extensionList, const char* listSeparator,
-	const int* table, int charSigned, int (*caseFold)(int), int (*maskFold)(int));
+int nzbget_rs_match_file_ext(const char* filename, const char* extensionList, const char* listSeparator);
 
 // URL::ParseUrl (rust/src/url.rs): parts (protocol, user, password, host,
 // resource) as {start, length} in the address, start -1 when not set; a valid
@@ -200,9 +171,6 @@ typedef struct
 	const char* authInfo;
 	const char* authToken;
 	const char* serverTokens[3];
-	const int* lowerTable; // as for WildMask
-	int charSigned;
-	int (*fold)(int);
 } NzbgetRsWebCredentials;
 typedef struct
 {
@@ -3202,9 +3170,6 @@ NzbgetRsBuf nzbget_rs_dqh_script_ctrl_format_prefixed_varname(
     const char* prefix, const char* name);
 NzbgetRsBuf nzbget_rs_dqh_log_format_debug_line(
     const char* msg, const char* base_filename, int32_t line_nr, const char* funcname);
-NzbgetRsBuf nzbget_rs_dqh_log_format_rotate_mask(
-    const char* base_name, const char* base_ext);
-NzbgetRsBuf nzbget_rs_dqh_log_format_deleting_old_msg(const char* filename);
 NzbgetRsBuf nzbget_rs_dqh_ncurses_format_plot_line(
     const char* text, int32_t screen_width, int32_t pos, int32_t max_screen_width);
 NzbgetRsBuf nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
@@ -3228,8 +3193,6 @@ int nzbget_rs_dqh_xmlrpc_is_multicall_post(
 int nzbget_rs_dqh_webserver_is_html_content_type(const char* content_type);
 int nzbget_rs_dqh_scanner_find_last_char_pos(
     const char* text, char ch, size_t* out_pos);
-NzbgetRsBuf nzbget_rs_dqh_log_split_basename_and_ext(
-    const char* base_name, NzbgetRsBuf* out_ext);
 int nzbget_rs_dqh_bytes_equal(const char* a, const char* b);
 int nzbget_rs_dqh_bytes_eq_ignore_case(const char* a, const char* b);
 int nzbget_rs_newznab_parse_response(
@@ -5177,11 +5140,9 @@ int nzbget_rs_unpack_controller_eval_completed_failure(
     int has_password, int has_unpack_pass_file, int pass_list_tried,
     int* out_force_repair, int* out_unpack_status);
 
-int nzbget_rs_log_should_delete_rotated_file_by_name(
-    const char* filename, size_t year_off, size_t mon_off, size_t mday_off,
-    int64_t cur_time, int rotate_log);
-NzbgetRsBuf nzbget_rs_log_format_rotated_path_for_time(
-    const char* directory, char sep, const char* base_name, int64_t cur_time, const char* base_ext);
+NzbgetRsBuf nzbget_rs_log_rotate_log_file(
+    const char* log_file, char sep, int64_t cur_time, int rotate_log,
+    void* ctx, void (*on_info_cb)(void*, const char*));
 NzbgetRsBuf nzbget_rs_options_find_default_config_file(
     const char* app_dir, char sep, void* ctx,
     int (*file_exists_cb)(void*, const char*), int* out_found);

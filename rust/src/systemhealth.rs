@@ -2549,6 +2549,52 @@ pub fn log_format_rotated_path_for_time(
     log_format_rotated_path(directory, sep, base_name, year as i32, month, mday, base_ext)
 }
 
+/// Executes `Log::RotateLog`: scans the log directory for rotated log files matching
+/// `<stem>-####-##-##<ext>`, deletes expired files while emitting `"Deleting old log-file <name>\n"`
+/// via `on_info`, and returns the rotated log path for `cur_time`.
+#[cfg(unix)]
+pub fn log_rotate_log_file(
+    log_file: &[u8],
+    sep: u8,
+    cur_time: i64,
+    rotate_log: i32,
+    mut on_info: impl FnMut(&[u8]),
+) -> Vec<u8> {
+    let pos = crate::paths::base_file_name(log_file);
+    let raw_base = &log_file[pos..];
+    let (stem, base_ext) = log_split_basename_and_ext(raw_base);
+    let directory: &[u8] = if pos > 0 { &log_file[..pos - 1] } else { &stem };
+    let file_mask = log_format_rotate_mask(&stem, &base_ext);
+    let lower = crate::wildmask::Lower::Fold(&crate::util::wild_mask_fold_locale);
+    let mut captures = Vec::new();
+    let dir_cstr = std::ffi::CString::new(directory).ok();
+    let mut dir = crate::fsops::PosixDirBrowser::new(dir_cstr.as_deref(), true);
+    loop {
+        let ptr = dir.next_ptr();
+        if ptr.is_null() {
+            break;
+        }
+        let filename = unsafe { std::ffi::CStr::from_ptr(ptr).to_bytes() };
+        captures.clear();
+        if crate::wildmask::wild_match(&lower, &file_mask, filename, Some(&mut captures)) {
+            let full_filename = [directory, &[sep], filename].concat();
+            let m0 = captures.first().map_or(0, |&(s, _)| s.max(0) as usize);
+            let m1 = captures.get(1).map_or(0, |&(s, _)| s.max(0) as usize);
+            let m2 = captures.get(2).map_or(0, |&(s, _)| s.max(0) as usize);
+            if log_should_delete_rotated_file_by_name(
+                filename, m0, m1, m2, cur_time, rotate_log,
+            ) {
+                let msg = log_format_deleting_old_msg(filename);
+                on_info(&msg);
+                if let Ok(full_cstr) = std::ffi::CString::new(full_filename) {
+                    let _ = crate::fsops::delete_file(&full_cstr);
+                }
+            }
+        }
+    }
+    log_format_rotated_path_for_time(directory, sep, &stem, cur_time, &base_ext)
+}
+
 /// Extracts the substring after the first ASCII space in `text` (or `text` if no space exists),
 /// for `SystemInfo::InitLibraries`.
 pub fn sysinfo_extract_version_after_space(text: &[u8]) -> Vec<u8> {
@@ -4906,6 +4952,32 @@ mod tests {
         let fname = b"rustyget-2026-03-05.log";
         assert!(log_should_delete_rotated_file_by_name(fname, 9, 14, 17, cur_time, 3));
         assert!(!log_should_delete_rotated_file_by_name(fname, 9, 14, 17, cur_time, 10));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let tmp = TempDir::new("log_rotate");
+            let old_log = tmp.path.join("rustyget-2026-03-05.log");
+            let recent_log = tmp.path.join("rustyget-2026-03-09.log");
+            std::fs::write(&old_log, b"old").unwrap();
+            std::fs::write(&recent_log, b"recent").unwrap();
+            let base_log = tmp.path.join("rustyget.log");
+            let mut info_msgs = Vec::new();
+            let rotated = log_rotate_log_file(
+                base_log.as_os_str().as_bytes(),
+                b'/',
+                cur_time,
+                3,
+                |msg| info_msgs.push(msg.to_vec()),
+            );
+            assert_eq!(
+                rotated,
+                tmp.path.join("rustyget-2026-03-10.log").as_os_str().as_bytes()
+            );
+            assert!(!old_log.exists());
+            assert!(recent_log.exists());
+            assert_eq!(info_msgs, vec![b"Deleting old log-file rustyget-2026-03-05.log\n".to_vec()]);
+        }
     }
 }
 

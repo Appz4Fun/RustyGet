@@ -26853,9 +26853,10 @@ pub unsafe extern "C" fn nzbget_rs_options_check_options(
     } else {
         Some(CStr::from_ptr(unpack_pass_file))
     };
+    let mut local_scalars = *scalars;
     crate::options::check_options_host(
         &mut adapter,
-        &mut *scalars,
+        &mut local_scalars,
         no_disk_access != 0,
         is_32bit != 0,
         disable_parcheck != 0,
@@ -26867,6 +26868,7 @@ pub unsafe extern "C" fn nzbget_rs_options_check_options(
         &mut ct_opt,
         upf_opt,
     );
+    *scalars = local_scalars;
     if ct_opt != orig_ct {
         if !out_ct_changed.is_null() {
             *out_ct_changed = 1;
@@ -26890,7 +26892,9 @@ pub unsafe extern "C" fn nzbget_rs_options_init_servers(
         return;
     }
     let mut adapter = FfiOptionsHost(&*host);
-    crate::options::init_servers_host(&mut adapter, disable_tls != 0, &mut *scalars);
+    let mut local_scalars = *scalars;
+    crate::options::init_servers_host(&mut adapter, disable_tls != 0, &mut local_scalars);
+    *scalars = local_scalars;
 }
 
 #[no_mangle]

@@ -3219,7 +3219,9 @@ private:
 #else
 		int disableTls = 0;
 #endif
-		nzbget_rs_options_init_servers(&host, disableTls, &m_scalars);
+		NzbgetRsParsedOptions scalars = m_scalars;
+		nzbget_rs_options_init_servers(&host, disableTls, &scalars);
+		m_scalars = scalars;
 	}
 
 	void InitCategories()
@@ -3351,8 +3353,9 @@ private:
 		int haveX509CheckHost = 0;
 #endif
 		int ctChanged = 0;
+		NzbgetRsParsedOptions scalars = m_scalars;
 		NzbgetRsBuf ctBuf = nzbget_rs_options_check_options(
-			&host, &m_scalars,
+			&host, &scalars,
 			m_noDiskAccess ? 1 : 0,
 			sizeof(void*) == 4 ? 1 : 0,
 			disableParcheck, disableCurses, disableTls, haveX509CheckHost,
@@ -3361,6 +3364,7 @@ private:
 			m_configTemplate ? *m_configTemplate : nullptr,
 			m_unpackPassFile ? *m_unpackPassFile : nullptr,
 			&ctChanged);
+		m_scalars = scalars;
 		if (ctChanged)
 		{
 			m_configTemplate.Set(ctBuf.data ? ctBuf.data : "", (int)ctBuf.len);

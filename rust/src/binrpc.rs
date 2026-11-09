@@ -1400,18 +1400,6 @@ pub fn group_listing_from_wire(
     group_listing(&groups, has_pattern)
 }
 
-/// Validates a BinRPC response header (`RemoteClient::ReceiveBoolResponse`, `RequestServerList`,
-/// `RequestServerLog`, `RequestPostQueue`, `RequestHistory`).
-pub fn binrpc_is_valid_response_header(
-    read_ok: bool,
-    host_signature: i32,
-    expected_signature: i32,
-    host_struct_size: u32,
-    expected_struct_size: u32,
-) -> bool {
-    read_ok && host_signature == expected_signature && host_struct_size == expected_struct_size
-}
-
 /// Computes elapsed seconds from `start_time` to `cur_time` when `start_time != 0`
 /// (`PostQueueBinCommand::Execute`).
 pub fn binrpc_calc_elapsed_sec(cur_time: i64, start_time: i64) -> u32 {
@@ -1420,15 +1408,6 @@ pub fn binrpc_calc_elapsed_sec(cur_time: i64, start_time: i64) -> u32 {
     } else {
         0
     }
-}
-
-/// Evaluates whether a history item should be included in `HistoryBinCommand::Execute`.
-pub fn binrpc_should_include_history_entry(
-    kind: i32,
-    hk_dup: i32,
-    show_hidden: bool,
-) -> bool {
-    kind != hk_dup || show_hidden
 }
 
 /// Formats `DownloadBinCommand::Execute` response message (`"Collection %s added to queue"` vs `"Download Request failed for %s"`).
@@ -1445,15 +1424,6 @@ pub fn binrpc_format_download_response_msg(ok: bool, base_filename: &[u8]) -> Ve
         out.extend_from_slice(base_filename);
         out
     }
-}
-
-/// Evaluates `ListBinCommand::Execute` NZB group regex match flag (`matchGroup && (!regEx || regEx->Match(...))`).
-pub fn binrpc_eval_nzb_group_match(
-    match_group: bool,
-    has_regex: bool,
-    regex_matched: bool,
-) -> u32 {
-    u32::from(match_group && (!has_regex || regex_matched))
 }
 
 /// Formats `ListBinCommand::Execute` file regex match target (`"%s/%s"`, `nzb_name`, `base_filename`).
@@ -1484,7 +1454,8 @@ pub fn binrpc_scan_response_msg(sync_mode: bool) -> &'static [u8] {
 }
 
 /// Classifies which history entry fields to populate in `HistoryBinCommand::Execute`:
-/// `1` = NZB fields, `2` = Dup size fields, `3` = URL status field, `0` = none.
+/// `-1` = skip hidden duplicate entry, `1` = NZB fields, `2` = Dup size fields,
+/// `3` = URL status field, `0` = none.
 pub fn binrpc_classify_history_entry_fields(
     kind: i32,
     hk_nzb: i32,
@@ -1492,25 +1463,17 @@ pub fn binrpc_classify_history_entry_fields(
     hk_url: i32,
     show_hidden: bool,
 ) -> i32 {
-    if kind == hk_nzb {
+    if kind == hk_dup && !show_hidden {
+        -1
+    } else if kind == hk_nzb {
         1
-    } else if kind == hk_dup && show_hidden {
+    } else if kind == hk_dup {
         2
     } else if kind == hk_url {
         3
     } else {
         0
     }
-}
-
-/// Returns true when `ListBinCommand::Execute` must scan the queue for an unusual file owner (`!same_nzb_ptr`).
-pub fn binrpc_should_lookup_unusual_file_owner(same_nzb_ptr: bool) -> bool {
-    !same_nzb_ptr
-}
-
-/// Returns true when `ListBinCommand::Execute` should evaluate the regex against an individual file (`has_regex && !match_group`).
-pub fn binrpc_should_match_file_regex(has_regex: bool, match_group: bool) -> bool {
-    has_regex && !match_group
 }
 
 #[cfg(test)]
@@ -2367,11 +2330,6 @@ pub unsafe fn roc_remote_client_calc_group_unpaused_remaining(
         unsafe { *out_threads_plural = if active_downloads > 1 { 1 } else { 0 } };
     }
     remaining_size - paused_size
-}
-
-/// Checks whether `nzb_content` starts with `"http:/"` or `"https:/"`.
-pub fn remote_client_is_http_url(nzb_content: &[u8]) -> bool {
-    is_url(nzb_content)
 }
 
 /// Calculates the file completion percentage in `RemoteClient::RequestServerList` and

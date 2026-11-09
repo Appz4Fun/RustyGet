@@ -2452,66 +2452,14 @@ pub fn xmlrpc_calc_schedule_resume_time(
     }
 }
 
-/// Steps the `(post_job_count, url_count)` accumulators in `StatusXmlCommand::Execute`.
-pub fn xmlrpc_accum_queue_job_counts(
-    has_post_info: bool,
-    kind: i32,
-    nk_url: i32,
-    cur_post_count: i32,
-    cur_url_count: i32,
-) -> (i32, i32) {
-    (
-        cur_post_count.saturating_add(i32::from(has_post_info)),
-        cur_url_count.saturating_add(i32::from(kind == nk_url)),
-    )
-}
-
 /// Returns true when `AppendFleetXmlCommand::Execute` has reached or exceeded `max_members`.
 pub fn xmlrpc_is_fleet_member_limit_reached(current_count: usize, max_members: i32) -> bool {
     (current_count as i32) >= max_members
 }
 
-/// Classifies a history entry kind in `HistoryXmlCommand::Execute` and `HistoryXmlCommand::DetectStatus`:
-/// `1` = `hkNzb` or `hkUrl`, `2` = `hkDup`, `0` = other.
-pub fn xmlrpc_classify_history_entry_kind(
-    kind: i32,
-    hk_nzb: i32,
-    hk_url: i32,
-    hk_dup: i32,
-) -> i32 {
-    if kind == hk_nzb || kind == hk_url {
-        1
-    } else if kind == hk_dup {
-        2
-    } else {
-        0
-    }
-}
-
-/// Returns true when a server matches the target ID in `EditServerXmlCommand::Execute`.
-pub fn xmlrpc_matches_edit_server_id(server_id: i32, target_id: i32) -> bool {
-    server_id == target_id
-}
-
-/// Returns true when a server volume slot matches `server_id` in `ResetServerVolumeXmlCommand::Execute`.
-pub fn xmlrpc_matches_reset_server_volume(index: i32, server_id: i32) -> bool {
-    index == server_id || server_id == -1
-}
-
 /// Returns true when `certVerifLevel` is within `[0, count)` in `TestServerXmlCommand::Execute`.
 pub fn xmlrpc_is_valid_cert_verif_level(level: i32, count: i32) -> bool {
     level >= 0 && level < count
-}
-
-/// Selects the response string for `TestServerXmlCommand::Execute`.
-pub fn xmlrpc_select_test_server_err_text(ok: bool, err_text: &[u8]) -> &[u8] {
-    if ok {
-        b""
-    } else if err_text.is_empty() {
-        b"Unknown error"
-    } else {
-        err_text
-    }
 }
 
 /// Checks individual argument bounds in `TestDiskSpeedXmlCommand::Execute`:
@@ -2544,32 +2492,6 @@ pub fn xmlrpc_should_skip_to_json_post_params(
     hm_post: i32,
 ) -> bool {
     is_json && http_method == hm_post
-}
-
-/// Returns true when `ListGroupsXmlCommand::DetectStatus` should check `QueueScriptCoordinator::HasJob` (`has_post_info && post_stage == pt_queued`).
-pub fn xmlrpc_should_check_queue_script_job(
-    has_post_info: bool,
-    post_stage: i32,
-    pt_queued: i32,
-) -> bool {
-    has_post_info && post_stage == pt_queued
-}
-
-/// Classifies how `DownloadXmlCommand::Execute` formats the result of `AddExternalFile`:
-/// `1` = `BuildIntResponse(nzb_id)` (`v13`), `2` = `BuildBoolResponse(true)` (`!v13 && nzb_id > 0`), `0` = `BuildBoolResponse(false)`.
-pub fn xmlrpc_classify_append_result_mode(v13: bool, nzb_id: i32) -> i32 {
-    if v13 {
-        1
-    } else if nzb_id > 0 {
-        2
-    } else {
-        0
-    }
-}
-
-/// Returns true when `LoadExtensionsXmlCommand::Execute` should emit a leading comma before an item (`is_json && index > 0`).
-pub fn xmlrpc_should_emit_json_array_comma(is_json: bool, index: i32) -> bool {
-    is_json && index > 0
 }
 
 /// Returns true when `TestServerXmlCommand::Execute` should parse JSON-RPC POST parameters via `nzbget_rs_test_server_params` (`is_json && has_request && http_method == hm_post`).
@@ -3281,19 +3203,6 @@ pub unsafe fn roc_xmlrpc_list_groups_calc_mb(
     }
     if !out_paused_mb.is_null() {
         unsafe { *out_paused_mb = (paused_size / 1024 / 1024) as c_int };
-    }
-}
-
-/// Returns 1 when a `HistoryInfo` entry of kind `hkDup` should be skipped because `dup` is false.
-pub fn roc_xmlrpc_history_should_skip_dup(
-    kind: c_int,
-    hk_dup: c_int,
-    include_dup: c_int,
-) -> c_int {
-    if kind == hk_dup && include_dup == 0 {
-        1
-    } else {
-        0
     }
 }
 

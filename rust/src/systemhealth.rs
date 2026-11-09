@@ -2648,11 +2648,6 @@ pub fn disk_service_eval_missing_required_dir(
     }
 }
 
-/// Returns true when `Maintenance::CheckUpdates` received non-empty update info output.
-pub fn maintenance_has_update_info(len: i32) -> bool {
-    len > 0
-}
-
 /// Returns true when `NZBGet::Phase1_Init` should run the system health check.
 pub fn nzbget_should_run_system_health_check(
     server_mode: bool,

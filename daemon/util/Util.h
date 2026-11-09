@@ -43089,21 +43089,13 @@ private:
 	NzbgetRsBuf RunDiagnose(int formatMode) const
 	{
 		auto sv = [](const char* s) -> std::string_view { return s ? s : ""; };
-		std::string_view mainDir = sv(m_options.GetMainDir());
-		std::string_view destDir = sv(m_options.GetDestDir());
-		std::string_view interDir = sv(m_options.GetInterDir());
-		std::string_view nzbDir = sv(m_options.GetNzbDir());
-		std::string_view queueDir = sv(m_options.GetQueueDir());
-		std::string_view webDir = sv(m_options.GetWebDir());
-		std::string_view tempDir = sv(m_options.GetTempDir());
-		std::string_view configTemplate = sv(m_options.GetConfigTemplate());
-		std::string_view configFile = sv(m_options.GetConfigFilename());
+		auto setStr = [](const char* s, const char*& outPtr, size_t& outLen) {
+			std::string_view v = s ? s : "";
+			outPtr = v.data();
+			outLen = v.size();
+		};
 		std::string logFile = m_log.GetLogFilename();
-		std::string_view optionsLogFile = sv(m_options.GetLogFile());
 		std::string_view certStore = sv(m_options.GetCertStore());
-		std::string_view lockFile = sv(m_options.GetLockFile());
-		std::string_view unrarPath = sv(m_options.GetUnrarPath());
-		std::string_view sevenZipPath = sv(m_options.GetSevenZipPath());
 
 		const auto& scriptDirPaths = m_options.GetScriptDirPaths();
 		std::vector<std::string> scriptDirStrs;
@@ -43123,11 +43115,11 @@ private:
 		servers.reserve(m_servers.size());
 		for (const auto& server : m_servers)
 		{
-			std::string_view name = server->GetName();
-			std::string_view host = server->GetHost();
-			std::string_view user = server->GetUser();
-			std::string_view pass = server->GetPassword();
-			std::string_view cipher = server->GetCipher();
+			std::string_view name = sv(server->GetName());
+			std::string_view host = sv(server->GetHost());
+			std::string_view user = sv(server->GetUser());
+			std::string_view pass = sv(server->GetPassword());
+			std::string_view cipher = sv(server->GetCipher());
 			servers.push_back(NzbgetRsHealthServerInput{
 				server->GetId(),
 				server->GetActive() ? 1 : 0,
@@ -43166,7 +43158,7 @@ private:
 			categories.reserve(cats->size());
 			for (const auto& cat : *cats)
 			{
-				std::string_view name = cat.GetName();
+				std::string_view name = sv(cat.GetName());
 				categories.push_back(NzbgetRsHealthCategoryInput{
 					name.data(), name.size(),
 					cat.GetUnpack() ? 1 : 0
@@ -43178,8 +43170,8 @@ private:
 		feeds.reserve(m_feeds.size());
 		for (const auto& feed : m_feeds)
 		{
-			std::string_view name = feed->GetName();
-			std::string_view url = feed->GetUrl();
+			std::string_view name = sv(feed->GetName());
+			std::string_view url = sv(feed->GetUrl());
 			feeds.push_back(NzbgetRsHealthFeedInput{
 				feed->GetId(),
 				name.data(), name.size(),
@@ -43189,52 +43181,27 @@ private:
 			});
 		}
 
-		std::string_view controlIp = m_options.GetControlIp();
-		std::string_view controlUser = m_options.GetControlUsername();
-		std::string_view controlPass = m_options.GetControlPassword();
-		std::string_view restrictedUser = m_options.GetRestrictedUsername();
-		std::string_view restrictedPass = m_options.GetRestrictedPassword();
-		std::string_view addUser = m_options.GetAddUsername();
-		std::string_view addPass = m_options.GetAddPassword();
-		std::string_view secureCert = m_options.GetSecureCert();
-		std::string_view secureKey = m_options.GetSecureKey();
-		std::string_view daemonUser = m_options.GetDaemonUsername();
-		std::string_view extCleanup = m_options.GetExtCleanupDisk();
-		std::string_view unpackPassFile = m_options.GetUnpackPassFile();
-		std::string_view unpackIgnoreExt = m_options.GetUnpackIgnoreExt();
-
 		NzbgetRsSystemHealthConfig cfg{};
-		cfg.main_dir = mainDir.data();
-		cfg.main_dir_len = mainDir.size();
-		cfg.dest_dir = destDir.data();
-		cfg.dest_dir_len = destDir.size();
-		cfg.inter_dir = interDir.data();
-		cfg.inter_dir_len = interDir.size();
-		cfg.nzb_dir = nzbDir.data();
-		cfg.nzb_dir_len = nzbDir.size();
-		cfg.queue_dir = queueDir.data();
-		cfg.queue_dir_len = queueDir.size();
-		cfg.web_dir = webDir.data();
-		cfg.web_dir_len = webDir.size();
-		cfg.temp_dir = tempDir.data();
-		cfg.temp_dir_len = tempDir.size();
+		setStr(m_options.GetMainDir(), cfg.main_dir, cfg.main_dir_len);
+		setStr(m_options.GetDestDir(), cfg.dest_dir, cfg.dest_dir_len);
+		setStr(m_options.GetInterDir(), cfg.inter_dir, cfg.inter_dir_len);
+		setStr(m_options.GetNzbDir(), cfg.nzb_dir, cfg.nzb_dir_len);
+		setStr(m_options.GetQueueDir(), cfg.queue_dir, cfg.queue_dir_len);
+		setStr(m_options.GetWebDir(), cfg.web_dir, cfg.web_dir_len);
+		setStr(m_options.GetTempDir(), cfg.temp_dir, cfg.temp_dir_len);
 		cfg.script_dir_ptrs = scriptDirPtrs.data();
 		cfg.script_dir_lens = scriptDirLens.data();
 		cfg.script_dir_count = scriptDirPaths.size();
-		cfg.config_template = configTemplate.data();
-		cfg.config_template_len = configTemplate.size();
+		setStr(m_options.GetConfigTemplate(), cfg.config_template, cfg.config_template_len);
 		cfg.log_file = logFile.data();
 		cfg.log_file_len = logFile.size();
-		cfg.options_log_file = optionsLogFile.data();
-		cfg.options_log_file_len = optionsLogFile.size();
+		setStr(m_options.GetLogFile(), cfg.options_log_file, cfg.options_log_file_len);
 		cfg.cert_store = certStore.data();
 		cfg.cert_store_len = certStore.size();
 		cfg.cert_store_path = certStore.data();
 		cfg.cert_store_path_len = certStore.size();
-		cfg.config_file = configFile.data();
-		cfg.config_file_len = configFile.size();
-		cfg.lock_file = lockFile.data();
-		cfg.lock_file_len = lockFile.size();
+		setStr(m_options.GetConfigFilename(), cfg.config_file, cfg.config_file_len);
+		setStr(m_options.GetLockFile(), cfg.lock_file, cfg.lock_file_len);
 		cfg.write_log = static_cast<int>(m_options.GetWriteLog());
 		cfg.cert_check = m_options.GetCertCheck() ? 1 : 0;
 		cfg.daemon_mode = m_options.GetDaemonMode() ? 1 : 0;
@@ -43278,31 +43245,21 @@ private:
 		cfg.feed_history = m_options.GetFeedHistory();
 		cfg.skip_write = m_options.GetSkipWrite() ? 1 : 0;
 		cfg.raw_article = m_options.GetRawArticle() ? 1 : 0;
-		cfg.control_ip = controlIp.data();
-		cfg.control_ip_len = controlIp.size();
+		setStr(m_options.GetControlIp(), cfg.control_ip, cfg.control_ip_len);
 		cfg.control_port = m_options.GetControlPort();
-		cfg.control_username = controlUser.data();
-		cfg.control_username_len = controlUser.size();
-		cfg.control_password = controlPass.data();
-		cfg.control_password_len = controlPass.size();
-		cfg.restricted_username = restrictedUser.data();
-		cfg.restricted_username_len = restrictedUser.size();
-		cfg.restricted_password = restrictedPass.data();
-		cfg.restricted_password_len = restrictedPass.size();
-		cfg.add_username = addUser.data();
-		cfg.add_username_len = addUser.size();
-		cfg.add_password = addPass.data();
-		cfg.add_password_len = addPass.size();
+		setStr(m_options.GetControlUsername(), cfg.control_username, cfg.control_username_len);
+		setStr(m_options.GetControlPassword(), cfg.control_password, cfg.control_password_len);
+		setStr(m_options.GetRestrictedUsername(), cfg.restricted_username, cfg.restricted_username_len);
+		setStr(m_options.GetRestrictedPassword(), cfg.restricted_password, cfg.restricted_password_len);
+		setStr(m_options.GetAddUsername(), cfg.add_username, cfg.add_username_len);
+		setStr(m_options.GetAddPassword(), cfg.add_password, cfg.add_password_len);
 		cfg.form_auth = m_options.GetFormAuth() ? 1 : 0;
 		cfg.secure_control = m_options.GetSecureControl() ? 1 : 0;
-		cfg.secure_cert = secureCert.data();
-		cfg.secure_cert_len = secureCert.size();
-		cfg.secure_key = secureKey.data();
-		cfg.secure_key_len = secureKey.size();
+		setStr(m_options.GetSecureCert(), cfg.secure_cert, cfg.secure_cert_len);
+		setStr(m_options.GetSecureKey(), cfg.secure_key, cfg.secure_key_len);
 		cfg.secure_port = m_options.GetSecurePort();
 		cfg.cert_store_path_empty = certStore.empty() ? 1 : 0;
-		cfg.daemon_username = daemonUser.data();
-		cfg.daemon_username_len = daemonUser.size();
+		setStr(m_options.GetDaemonUsername(), cfg.daemon_username, cfg.daemon_username_len);
 		cfg.umask = m_options.GetUMask();
 		cfg.append_category_dir = m_options.GetAppendCategoryDir() ? 1 : 0;
 		cfg.nzb_dir_interval = m_options.GetNzbDirInterval();
@@ -43324,16 +43281,11 @@ private:
 		cfg.unpack = m_options.GetUnpack() ? 1 : 0;
 		cfg.direct_unpack = m_options.GetDirectUnpack() ? 1 : 0;
 		cfg.unpack_pause_queue = m_options.GetUnpackPauseQueue() ? 1 : 0;
-		cfg.unrar_path = unrarPath.data();
-		cfg.unrar_path_len = unrarPath.size();
-		cfg.seven_zip_path = sevenZipPath.data();
-		cfg.seven_zip_path_len = sevenZipPath.size();
-		cfg.ext_cleanup_disk = extCleanup.data();
-		cfg.ext_cleanup_disk_len = extCleanup.size();
-		cfg.unpack_pass_file = unpackPassFile.data();
-		cfg.unpack_pass_file_len = unpackPassFile.size();
-		cfg.unpack_ignore_ext = unpackIgnoreExt.data();
-		cfg.unpack_ignore_ext_len = unpackIgnoreExt.size();
+		setStr(m_options.GetUnrarPath(), cfg.unrar_path, cfg.unrar_path_len);
+		setStr(m_options.GetSevenZipPath(), cfg.seven_zip_path, cfg.seven_zip_path_len);
+		setStr(m_options.GetExtCleanupDisk(), cfg.ext_cleanup_disk, cfg.ext_cleanup_disk_len);
+		setStr(m_options.GetUnpackPassFile(), cfg.unpack_pass_file, cfg.unpack_pass_file_len);
+		setStr(m_options.GetUnpackIgnoreExt(), cfg.unpack_ignore_ext, cfg.unpack_ignore_ext_len);
 		cfg.tasks = tasks.data();
 		cfg.task_count = tasks.size();
 		cfg.categories = categories.data();
@@ -43509,21 +43461,7 @@ public:
 
 		InfoController scriptController;
 		scriptController.SetArgs({*updateInfoScript});
-
-		{
-			NzbgetRsBuf infoBuf = nzbget_rs_dqh_maintenance_format_script_info_name(1, baseScript);
-			scriptController.SetInfoName(infoBuf.data ? infoBuf.data : "");
-			nzbget_rs_free(infoBuf);
-		}
-
-		size_t prefixLen = 0;
-		{
-			NzbgetRsBuf lpBuf = nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len(
-				baseScript, 1023, &prefixLen);
-			scriptController.SetLogPrefix(lpBuf.data ? lpBuf.data : "");
-			nzbget_rs_free(lpBuf);
-		}
-		scriptController.m_prefixLen = (int)prefixLen;
+		scriptController.m_prefixLen = InitScriptInfoAndLogPrefix(scriptController, 1, baseScript, 1023);
 
 		scriptController.Execute();
 
@@ -43532,7 +43470,7 @@ public:
 			updateInfo = scriptController.m_updateInfo;
 		}
 
-		return nzbget_rs_dqh_maintenance_has_update_info(updateInfo.Length()) != 0;
+		return !updateInfo.Empty();
 	}
 
 	static bool VerifySignature(const char* inFilename, const char* sigFilename, const char* pubKeyFilename)
@@ -43577,6 +43515,20 @@ public:
 	}
 
 private:
+	static int InitScriptInfoAndLogPrefix(ScriptController& sc, int isInfoScript, const char* baseScript, size_t maxPrefixLen)
+	{
+		NzbgetRsBuf infoBuf = nzbget_rs_dqh_maintenance_format_script_info_name(isInfoScript, baseScript);
+		sc.SetInfoName(infoBuf.data ? infoBuf.data : "");
+		nzbget_rs_free(infoBuf);
+
+		size_t prefixLen = 0;
+		NzbgetRsBuf lpBuf = nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len(
+			baseScript, maxPrefixLen, &prefixLen);
+		sc.SetLogPrefix(lpBuf.data ? lpBuf.data : "");
+		nzbget_rs_free(lpBuf);
+		return (int)prefixLen;
+	}
+
 	class UpdateScriptController : public Thread, public ScriptController
 	{
 	public:
@@ -43587,12 +43539,8 @@ private:
 			m_prefixLen = 0;
 			PrintMessage(Message::mkInfo, "Executing update-script %s", GetScript());
 
-			{
-				NzbgetRsBuf infoBuf = nzbget_rs_dqh_maintenance_format_script_info_name(
-					0, FileSystem::BaseFileName(GetScript()));
-				SetInfoName(infoBuf.data ? infoBuf.data : "");
-				nzbget_rs_free(infoBuf);
-			}
+			const char* baseScript = FileSystem::BaseFileName(GetScript());
+			m_prefixLen = InitScriptInfoAndLogPrefix(*this, 0, baseScript, 99);
 
 			SetEnvVar("NZBUP_BRANCH", nzbget_rs_dqh_maintenance_branch_name((int)m_branch));
 
@@ -43612,16 +43560,6 @@ private:
 				SetEnvVar("NZBUP_PROCESSID", pidBuf.data ? pidBuf.data : "");
 				nzbget_rs_free(pidBuf);
 			}
-
-			const char* baseScript = FileSystem::BaseFileName(GetScript());
-			size_t prefixLen = 0;
-			{
-				NzbgetRsBuf lpBuf = nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len(
-					baseScript, 99, &prefixLen);
-				SetLogPrefix(lpBuf.data ? lpBuf.data : "");
-				nzbget_rs_free(lpBuf);
-			}
-			m_prefixLen = (int)prefixLen;
 
 			Execute();
 
@@ -43801,8 +43739,7 @@ public:
 
 		void PrepareParams()
 		{
-			if (nzbget_rs_dqh_xmlrpc_should_skip_to_json_post_params(
-				IsJson() ? 1 : 0, (int)m_httpMethod, (int)XmlRpcProcessor::hmPost) != 0)
+			if (IsJson() && m_httpMethod == XmlRpcProcessor::hmPost)
 			{
 				// without "params" the request is emptied: no parameters follow
 				m_requestPtr = nzbget_rs_rpc_skip_to_params(m_requestPtr);
@@ -43902,10 +43839,7 @@ public:
 
 		bool IsJson()
 		{
-			return nzbget_rs_dqh_xmlrpc_is_json_protocol(
-				(int)m_protocol,
-				(int)XmlRpcProcessor::rpJsonRpc,
-				(int)XmlRpcProcessor::rpJsonPRpc) != 0;
+			return m_protocol == XmlRpcProcessor::rpJsonRpc || m_protocol == XmlRpcProcessor::rpJsonPRpc;
 		}
 
 		void AppendResponse(const char* part)
@@ -44075,12 +44009,8 @@ void ExecuteStatus()
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 		{
-			nzbget_rs_dqh_xmlrpc_accum_queue_job_counts(
-				nzbInfo->GetPostInfo() != nullptr ? 1 : 0,
-				(int)nzbInfo->GetKind(),
-				(int)NzbInfo::nkUrl,
-				&postJobCount,
-				&urlCount);
+			postJobCount += nzbInfo->GetPostInfo() != nullptr ? 1 : 0;
+			urlCount += nzbInfo->GetKind() == NzbInfo::nkUrl ? 1 : 0;
 		}
 		downloadQueue->CalcRemainingSize(&remainingSize, &forcedSize);
 	}
@@ -44105,24 +44035,20 @@ void ExecuteStatus()
 
 	if (!Util::EmptyStr(g_Options->GetDestDir()))
 	{
-		auto res = FileSystem::GetDiskState(g_Options->GetDestDir());
-		if (res.has_value())
+		if (auto res = FileSystem::GetDiskState(g_Options->GetDestDir()))
 		{
-			const auto& value = res.value();
-			freeDiskSpace = value.available;
-			totalDiskSpace = value.total;
+			freeDiskSpace = res->available;
+			totalDiskSpace = res->total;
 		}
 	}
 
 	bool interDirEmpty = Util::EmptyStr(g_Options->GetInterDir());
 	if (!interDirEmpty)
 	{
-		auto res = FileSystem::GetDiskState(g_Options->GetInterDir());
-		if (res.has_value())
+		if (auto res = FileSystem::GetDiskState(g_Options->GetInterDir()))
 		{
-			const auto& value = res.value();
-			freeInterDiskSpace = value.available;
-			totalInterDiskSpace = value.total;
+			freeInterDiskSpace = res->available;
+			totalInterDiskSpace = res->total;
 		}
 	}
 
@@ -44504,8 +44430,7 @@ const char* DetectGroupStatus(NzbInfo* nzbInfo)
 	bool hasPostInfo = nzbInfo->GetPostInfo() != nullptr;
 	int postStage = hasPostInfo ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
 	bool queueScriptActive = false;
-	bool hasQueueScriptJob = nzbget_rs_dqh_xmlrpc_should_check_queue_script_job(
-		hasPostInfo ? 1 : 0, postStage, (int)PostInfo::ptQueued) != 0 &&
+	bool hasQueueScriptJob = hasPostInfo && postStage == (int)PostInfo::ptQueued &&
 		g_QueueScriptCoordinator->HasJob(nzbInfo->GetId(), &queueScriptActive);
 	return nzbget_rs_rco_rpc_detect_group_status(
 		hasPostInfo ? 1 : 0,
@@ -44738,15 +44663,13 @@ void ExecuteDownload()
 				&nzbId
 			);
 
-			int appendMode = nzbget_rs_dqh_xmlrpc_classify_append_result_mode(
-				v13 ? 1 : 0, nzbId);
-			if (appendMode == 1)
+			if (v13)
 			{
 				BuildIntResponse(nzbId);
 			}
 			else
 			{
-				BuildBoolResponse(appendMode == 2);
+				BuildBoolResponse(nzbId > 0);
 			}
 		}
 	}
@@ -44852,24 +44775,16 @@ void ExecuteHistory()
 	GuardedDownloadQueue guard = DownloadQueue::Guard();
 	for (HistoryInfo* historyInfo : guard->GetHistory())
 	{
-		if (nzbget_rs_roc_xmlrpc_history_should_skip_dup(
-			(int)historyInfo->GetKind(), (int)HistoryInfo::hkDup, dup ? 1 : 0))
+		if (historyInfo->GetKind() == HistoryInfo::hkDup && !dup)
 		{
 			continue;
 		}
 
-		NzbInfo* nzbInfo = nullptr;
-		const char* status = DetectHistoryStatus(historyInfo);
 		int hasComma = index++ > 0 ? 1 : 0;
-		int entryKind = nzbget_rs_dqh_xmlrpc_classify_history_entry_kind(
-			(int)historyInfo->GetKind(),
-			(int)HistoryInfo::hkNzb,
-			(int)HistoryInfo::hkUrl,
-			(int)HistoryInfo::hkDup);
-
-		if (entryKind == 1)
+		if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
 		{
-			nzbInfo = historyInfo->GetNzbInfo();
+			NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
+			const char* status = nzbInfo->MakeTextStatus(false);
 
 			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_history_nzb_start(
 				IsJson() ? 1 : 0,
@@ -44880,10 +44795,12 @@ void ExecuteHistory()
 				!nzbInfo->GetCompletedFiles()->empty() ? 1 : 0,
 				(int)historyInfo->GetTime(),
 				status));
+			AppendNzbInfoFields(nzbInfo);
 		}
-		else if (entryKind == 2)
+		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
 		{
 			DupInfo* dupInfo = historyInfo->GetDupInfo();
+			const char* status = nzbget_rs_rco_rpc_detect_history_dup_status((int)dupInfo->GetStatus());
 
 			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_history_dup_item(
 				IsJson() ? 1 : 0,
@@ -44899,38 +44816,10 @@ void ExecuteHistory()
 				status));
 		}
 
-		if (nzbInfo)
-		{
-			AppendNzbInfoFields(nzbInfo);
-		}
-
 		AppendResponse(IsJson() ? "}" : "</struct></value>");
 	}
 
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
-}
-
-const char* DetectHistoryStatus(HistoryInfo* historyInfo)
-{
-	const char* status = "FAILURE/INTERNAL_ERROR";
-	int entryKind = nzbget_rs_dqh_xmlrpc_classify_history_entry_kind(
-		(int)historyInfo->GetKind(),
-		(int)HistoryInfo::hkNzb,
-		(int)HistoryInfo::hkUrl,
-		(int)HistoryInfo::hkDup);
-
-	if (entryKind == 1)
-	{
-		NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-		status = nzbInfo->MakeTextStatus(false);
-	}
-	else if (entryKind == 2)
-	{
-		DupInfo* dupInfo = historyInfo->GetDupInfo();
-		status = nzbget_rs_rco_rpc_detect_history_dup_status((int)dupInfo->GetStatus());
-	}
-
-	return status;
 }
 
 // Deprecated in v13
@@ -45028,8 +44917,7 @@ void ExecuteLoadExtensions()
 				? Extension::ToJsonStr(*extension)
 				: Extension::ToXmlStr(*extension);
 
-			AppendCondResponse(",\n", nzbget_rs_dqh_xmlrpc_should_emit_json_array_comma(
-				isJson ? 1 : 0, index++) != 0);
+			AppendCondResponse(",\n", isJson && index++ > 0);
 			AppendResponse(response.c_str());
 		}
 	);
@@ -45039,17 +44927,11 @@ void ExecuteLoadExtensions()
 
 void ExecuteDownloadExtension()
 {
-	char* url;
-	if (!NextParamAsStr(&url, true))
+	char* url = nullptr;
+	char* extName = nullptr;
+	if (!NextParamAsStr(&url, true) || !NextParamAsStr(&extName, true))
 	{
-		BuildErrorResponse(2, "Invalid parameter (URL)");
-		return;
-	}
-
-	char* extName;
-	if (!NextParamAsStr(&extName, true))
-	{
-		BuildErrorResponse(2, "Invalid parameter (Extension name)");
+		BuildErrorResponse(2, url ? "Invalid parameter (Extension name)" : "Invalid parameter (URL)");
 		return;
 	}
 
@@ -45059,8 +44941,7 @@ void ExecuteDownloadExtension()
 		return;
 	}
 
-	const auto result = g_ExtensionManager->DownloadExtension(url, extName);
-	const auto& filename = std::get<1>(result);
+	const auto [status, filename] = g_ExtensionManager->DownloadExtension(url, extName);
 	// the downloaded archive stayed in TempDir whenever the install didn't
 	// happen (a successful install removes it)
 	auto removeDownload = [&filename]()
@@ -45068,8 +44949,7 @@ void ExecuteDownloadExtension()
 			fs::error_code ec;
 			fs::remove(filename, ec);
 		};
-	bool ok = std::get<0>(result) == WebDownloader::adFinished;
-	if (!ok)
+	if (status != WebDownloader::adFinished)
 	{
 		removeDownload();
 		BuildErrorResponse(3, "Failed to read URL");
@@ -45083,8 +44963,7 @@ void ExecuteDownloadExtension()
 		return;
 	}
 
-	const auto error = g_ExtensionManager->InstallExtension(filename, g_Options->GetScriptDirPaths().front());
-	if (error)
+	if (const auto error = g_ExtensionManager->InstallExtension(filename, g_Options->GetScriptDirPaths().front()))
 	{
 		removeDownload();
 		BuildErrorResponse(3, "%s", error.value().c_str());
@@ -45096,34 +44975,25 @@ void ExecuteDownloadExtension()
 
 void ExecuteUpdateExtension()
 {
-	char* url;
-	if (!NextParamAsStr(&url, true))
+	char* url = nullptr;
+	char* extName = nullptr;
+	if (!NextParamAsStr(&url, true) || !NextParamAsStr(&extName, true))
 	{
-		BuildErrorResponse(2, "Invalid parameter (URL)");
+		BuildErrorResponse(2, url ? "Invalid parameter (Extension name)" : "Invalid parameter (URL)");
 		return;
 	}
 
-	char* extName;
-	if (!NextParamAsStr(&extName, true))
-	{
-		BuildErrorResponse(2, "Invalid parameter (Extension name)");
-		return;
-	}
-
-	const auto result = g_ExtensionManager->DownloadExtension(url, extName);
-	bool ok = std::get<0>(result) == WebDownloader::adFinished;
-	if (!ok)
+	const auto [status, filename] = g_ExtensionManager->DownloadExtension(url, extName);
+	if (status != WebDownloader::adFinished)
 	{
 		// a partly downloaded archive stayed in TempDir
 		fs::error_code ec;
-		fs::remove(std::get<1>(result), ec);
+		fs::remove(filename, ec);
 		BuildErrorResponse(3, "Failed to read URL");
 		return;
 	}
 
-	const auto filename = std::get<1>(result);
-	const auto error = g_ExtensionManager->UpdateExtension(filename, extName);
-	if (error)
+	if (const auto error = g_ExtensionManager->UpdateExtension(filename, extName))
 	{
 		BuildErrorResponse(3, "%s", error.value().c_str());
 		return;
@@ -45361,7 +45231,7 @@ void ExecuteEditServer()
 
 		for (NewsServer* server : g_ServerPool->GetServers())
 		{
-			if (nzbget_rs_dqh_xmlrpc_matches_edit_server_id(server->GetId(), id) != 0)
+			if (server->GetId() == id)
 			{
 				server->SetActive(active);
 				ok = true;
@@ -45575,7 +45445,7 @@ void ExecuteResetServerVolume()
 	int index = 0;
 	for (ServerVolume& serverVolume : g_StatMeter->GuardServerVolumes())
 	{
-		if (nzbget_rs_dqh_xmlrpc_matches_reset_server_volume(index, serverId) != 0)
+		if (index == serverId || serverId == -1)
 		{
 			if (reset)
 				serverVolume.Reset();
@@ -45675,7 +45545,7 @@ void ExecuteTestServer()
 
 	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(
 		IsJson() ? 1 : 0,
-		nzbget_rs_dqh_xmlrpc_select_test_server_err_text(ok ? 1 : 0, *m_testServerErrText),
+		ok ? "" : (m_testServerErrText.Empty() ? "Unknown error" : *m_testServerErrText),
 		1,
 		1023));
 }
@@ -46548,10 +46418,8 @@ private:
 		}
 	}
 
-	void SendAuthResponse()
+	void SendHeaderBuf(NzbgetRsBuf hdr)
 	{
-		NzbgetRsBuf hdr = nzbget_rs_web_format_auth_response(
-			g_Options->GetFormAuth() ? 1 : 0, m_keepAlive ? 1 : 0, Util::VersionRevision());
 		debug("ResponseHeader=%s", hdr.data ? hdr.data : "");
 		if (hdr.data)
 		{
@@ -46560,16 +46428,16 @@ private:
 		nzbget_rs_free(hdr);
 	}
 
+	void SendAuthResponse()
+	{
+		SendHeaderBuf(nzbget_rs_web_format_auth_response(
+			g_Options->GetFormAuth() ? 1 : 0, m_keepAlive ? 1 : 0, Util::VersionRevision()));
+	}
+
 	void SendOptionsResponse()
 	{
-		NzbgetRsBuf hdr = nzbget_rs_web_format_options_response(
-			m_keepAlive ? 1 : 0, m_origin.Str(), Util::VersionRevision());
-		debug("ResponseHeader=%s", hdr.data ? hdr.data : "");
-		if (hdr.data)
-		{
-			m_connection->Send(hdr.data, (int)hdr.len);
-		}
-		nzbget_rs_free(hdr);
+		SendHeaderBuf(nzbget_rs_web_format_options_response(
+			m_keepAlive ? 1 : 0, m_origin.Str(), Util::VersionRevision()));
 	}
 
 	void SendErrorResponse(const char* errCode, bool printWarning)
@@ -46596,14 +46464,8 @@ private:
 
 	void SendRedirectResponse(const char* url)
 	{
-		NzbgetRsBuf hdr = nzbget_rs_web_format_redirect_response(
-			url, m_keepAlive ? 1 : 0, Util::VersionRevision());
-		debug("ResponseHeader=%s", hdr.data ? hdr.data : "");
-		if (hdr.data)
-		{
-			m_connection->Send(hdr.data, (int)hdr.len);
-		}
-		nzbget_rs_free(hdr);
+		SendHeaderBuf(nzbget_rs_web_format_redirect_response(
+			url, m_keepAlive ? 1 : 0, Util::VersionRevision()));
 	}
 
 	void SendBodyResponse(const char* body, int bodyLen, const char* contentType, bool cachable)
@@ -47106,7 +46968,7 @@ public:
 		// Read the file into the buffer
 		CharBuffer buffer;
 		int length = 0;
-		bool isUrl = nzbget_rs_ccm_remote_client_is_http_url(nzbContent) != 0;
+		bool isUrl = nzbget_rs_binrpc_is_url(nzbContent);
 		if (isUrl)
 		{
 			length = strlen(nzbContent) + 1;
@@ -47271,8 +47133,7 @@ public:
 	bool RequestServerEditQueue(DownloadQueue::EEditAction action, int offset, const char* text,
 		IdList* idList, NameList* nameList, ERemoteMatchMode matchMode)
 	{
-		if (nzbget_rs_dqh_remote_client_is_empty_edit_target(
-			idList ? idList->size() : 0, nameList ? nameList->size() : 0) != 0)
+		if ((!idList || idList->empty()) && (!nameList || nameList->empty()))
 		{
 			printf("File(s) not specified\n");
 			return false;
@@ -47628,12 +47489,12 @@ private:
 		printf("Request sent\n");
 
 		bool read = m_connection->Recv((char*)&resp, sizeof(resp));
-		if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
+		if (!nzbget_rs_sfw_rpc_is_response_header_valid(
 			read ? 1 : 0,
-			(int)ntohl(resp.m_messageBase.m_signature),
-			(int)NZBMESSAGE_SIGNATURE,
-			(uint32)ntohl(resp.m_messageBase.m_structSize),
-			(uint32)sizeof(resp)))
+			ntohl(resp.m_messageBase.m_signature),
+			(uint32_t)NZBMESSAGE_SIGNATURE,
+			ntohl(resp.m_messageBase.m_structSize),
+			(uint32_t)sizeof(resp)))
 		{
 			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 			return false;
@@ -47661,12 +47522,12 @@ private:
 		memset(&BoolResponse, 0, sizeof(BoolResponse));
 
 		bool read = m_connection->Recv((char*)&BoolResponse, sizeof(BoolResponse));
-		if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
+		if (!nzbget_rs_sfw_rpc_is_response_header_valid(
 			read ? 1 : 0,
-			(int)ntohl(BoolResponse.m_messageBase.m_signature),
-			(int)NZBMESSAGE_SIGNATURE,
-			(uint32)ntohl(BoolResponse.m_messageBase.m_structSize),
-			(uint32)sizeof(BoolResponse)))
+			ntohl(BoolResponse.m_messageBase.m_signature),
+			(uint32_t)NZBMESSAGE_SIGNATURE,
+			ntohl(BoolResponse.m_messageBase.m_structSize),
+			(uint32_t)sizeof(BoolResponse)))
 		{
 			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 			return false;
@@ -47757,8 +47618,7 @@ protected:
 			{
 				return false;
 			}
-			if (!RequestMessages() || (nzbget_rs_dqh_frontend_should_request_file_list(
-				m_summary ? 1 : 0, m_fileList ? 1 : 0) != 0 && !RequestFileList()))
+			if (!RequestMessages() || ((m_summary || m_fileList) && !RequestFileList()))
 			{
 				const char* controlIp = nzbget_rs_dqh_frontend_resolve_control_ip(g_Options->GetControlIp());
 				printf("\nUnable to send request to RustyGet server at %s (port %i)    \n", controlIp, g_Options->GetControlPort());
@@ -47895,45 +47755,31 @@ private:
 	MessageList m_remoteMessages;
 	WorkStateObserver m_workStateObserver;
 
-	bool RequestMessages()
+	template <typename Req, typename Resp>
+	bool ExchangeRemoteRequest(const Req& req, Resp& resp, CharBuffer& buf)
 	{
 		const char* controlIp = nzbget_rs_dqh_frontend_resolve_control_ip(g_Options->GetControlIp());
 		Connection connection(controlIp, g_Options->GetControlPort(), false);
 
-		bool OK = connection.Connect();
-		if (!OK)
+		if (!connection.Connect() || !connection.Send((char*)(&req), sizeof(req)))
 		{
 			return false;
 		}
 
-		SNzbLogRequest LogRequest = {};
-		InitMessageBase(&LogRequest.m_messageBase, rrLog, sizeof(LogRequest));
-		LogRequest.m_lines = htonl(m_neededLogEntries);
-		LogRequest.m_idFrom = htonl(nzbget_rs_sfw_frontend_resolve_log_id_from(
-			m_neededLogEntries, m_neededLogFirstId));
-
-		if (!connection.Send((char*)(&LogRequest), sizeof(LogRequest)))
-		{
-			return false;
-		}
-
-		// Now listen for the returned log
-		SNzbLogResponse LogResponse;
-		bool read = connection.Recv((char*) &LogResponse, sizeof(LogResponse));
+		bool read = connection.Recv((char*) &resp, sizeof(resp));
 		if (!nzbget_rs_sfw_rpc_is_response_header_valid(
 			read ? 1 : 0,
-			ntohl(LogResponse.m_messageBase.m_signature),
+			ntohl(resp.m_messageBase.m_signature),
 			(uint32_t)NZBMESSAGE_SIGNATURE,
-			ntohl(LogResponse.m_messageBase.m_structSize),
-			(uint32_t)sizeof(LogResponse)))
+			ntohl(resp.m_messageBase.m_structSize),
+			(uint32_t)sizeof(resp)))
 		{
 			return false;
 		}
 
-		CharBuffer buf;
-		if (ntohl(LogResponse.m_trailingDataLength) > 0)
+		if (ntohl(resp.m_trailingDataLength) > 0)
 		{
-			buf.Reserve(ntohl(LogResponse.m_trailingDataLength));
+			buf.Reserve(ntohl(resp.m_trailingDataLength));
 			if (!connection.Recv(buf, buf.Size()))
 			{
 				return false;
@@ -47941,6 +47787,23 @@ private:
 		}
 
 		connection.Disconnect();
+		return true;
+	}
+
+	bool RequestMessages()
+	{
+		SNzbLogRequest LogRequest = {};
+		InitMessageBase(&LogRequest.m_messageBase, rrLog, sizeof(LogRequest));
+		LogRequest.m_lines = htonl(m_neededLogEntries);
+		LogRequest.m_idFrom = htonl(nzbget_rs_sfw_frontend_resolve_log_id_from(
+			m_neededLogEntries, m_neededLogFirstId));
+
+		SNzbLogResponse LogResponse;
+		CharBuffer buf;
+		if (!ExchangeRemoteRequest(LogRequest, LogResponse, buf))
+		{
+			return false;
+		}
 
 		if (ntohl(LogResponse.m_trailingDataLength) > 0)
 		{
@@ -47960,49 +47823,17 @@ private:
 
 	bool RequestFileList()
 	{
-		const char* controlIp = nzbget_rs_dqh_frontend_resolve_control_ip(g_Options->GetControlIp());
-		Connection connection(controlIp, g_Options->GetControlPort(), false);
-
-		bool OK = connection.Connect();
-		if (!OK)
-		{
-			return false;
-		}
-
 		SNzbListRequest ListRequest = {};
 		InitMessageBase(&ListRequest.m_messageBase, rrList, sizeof(ListRequest));
 		ListRequest.m_fileList = htonl(m_fileList);
 		ListRequest.m_serverState = htonl(m_summary);
 
-		if (!connection.Send((char*)(&ListRequest), sizeof(ListRequest)))
-		{
-			return false;
-		}
-
-		// Now listen for the returned list
 		SNzbListResponse ListResponse;
-		bool read = connection.Recv((char*) &ListResponse, sizeof(ListResponse));
-		if (!nzbget_rs_sfw_rpc_is_response_header_valid(
-			read ? 1 : 0,
-			ntohl(ListResponse.m_messageBase.m_signature),
-			(uint32_t)NZBMESSAGE_SIGNATURE,
-			ntohl(ListResponse.m_messageBase.m_structSize),
-			(uint32_t)sizeof(ListResponse)))
+		CharBuffer buf;
+		if (!ExchangeRemoteRequest(ListRequest, ListResponse, buf))
 		{
 			return false;
 		}
-
-		CharBuffer buf;
-		if (ntohl(ListResponse.m_trailingDataLength) > 0)
-		{
-			buf.Reserve(ntohl(ListResponse.m_trailingDataLength));
-			if (!connection.Recv(buf, buf.Size()))
-			{
-				return false;
-			}
-		}
-
-		connection.Disconnect();
 
 		if (m_summary)
 		{
@@ -48018,8 +47849,7 @@ private:
 			m_allBytes = Util::JoinInt64(ntohl(ListResponse.m_downloadedBytesHi), ntohl(ListResponse.m_downloadedBytesLo));
 		}
 
-		if (nzbget_rs_dqh_frontend_should_build_remote_file_list(
-			m_fileList ? 1 : 0, ntohl(ListResponse.m_trailingDataLength)) != 0)
+		if (m_fileList && ntohl(ListResponse.m_trailingDataLength) > 0)
 		{
 			RemoteClient client;
 			client.SetVerbose(false);
@@ -48348,14 +48178,10 @@ private:
 			CalcWindowSizes();
 		}
 
-		if (m_inputMode == editQueue)
+		if (m_inputMode == editQueue && CalcQueueSize() == 0)
 		{
-			int queueSize = CalcQueueSize();
-			if (nzbget_rs_dqh_ncurses_should_reset_empty_edit_queue(1, queueSize) != 0)
-			{
-				m_selectedQueueEntry = 0;
-				m_inputMode = normal;
-			}
+			m_selectedQueueEntry = 0;
+			m_inputMode = normal;
 		}
 
 		//------------------------------------------
@@ -48610,6 +48436,11 @@ private:
 		}
 	}
 
+	bool IsRowInScrollWindow(int index) const
+	{
+		return index >= m_queueScrollOffset && index < m_queueScrollOffset + m_queueWinHeight - 1;
+	}
+
 	void PrintFileQueue()
 	{
 		int lineNr = m_queueWinTop + 1;
@@ -48623,41 +48454,31 @@ private:
 		{
 			for (FileInfo* fileInfo : nzbInfo->GetFileList())
 			{
-				if (nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
-					fileNum, m_queueScrollOffset, m_queueWinHeight) != 0)
+				if (IsRowInScrollWindow(fileNum))
 				{
 					PrintFilename(fileInfo, lineNr++, fileNum == m_selectedQueueEntry);
 				}
 				fileNum++;
 
-				nzbget_rs_dqh_ncurses_accum_file_queue_stats(
-					fileInfo->GetPaused() ? 1 : 0,
-					fileInfo->GetRemainingSize(),
-					&remaining,
-					&paused,
-					&pausedFiles);
+				remaining += fileInfo->GetRemainingSize();
+				if (fileInfo->GetPaused())
+				{
+					paused += fileInfo->GetRemainingSize();
+					pausedFiles++;
+				}
 			}
 		}
 
 		NzbgetRsBuf headerBuf = nzbget_rs_ncurses_format_file_queue_header(
 			m_useColor ? 1 : 0, fileNum, pausedFiles, remaining, paused);
-		if (fileNum > 0)
+		if (headerBuf.data)
 		{
-			if (headerBuf.data)
-			{
-				PrintTopHeader(headerBuf.data, m_queueWinTop, true);
-			}
-			nzbget_rs_free(headerBuf);
+			PrintTopHeader(headerBuf.data, m_queueWinTop, true);
 		}
-		else
+		nzbget_rs_free(headerBuf);
+		if (fileNum == 0)
 		{
-			lineNr--;
-			if (headerBuf.data)
-			{
-				PrintTopHeader(headerBuf.data, lineNr++, true);
-			}
-			nzbget_rs_free(headerBuf);
-			PlotLine("Ready to receive nzb-job", lineNr++, 0, NCURSES_COLORPAIR_TEXT);
+			PlotLine("Ready to receive nzb-job", lineNr, 0, NCURSES_COLORPAIR_TEXT);
 		}
 	}
 
@@ -48727,8 +48548,7 @@ private:
 			int i = 0;
 			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 			{
-				if (nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
-					i, m_queueScrollOffset, m_queueWinHeight) != 0)
+				if (IsRowInScrollWindow(i))
 				{
 					PrintGroupname(nzbInfo, calcLineNr++, false, true);
 				}
@@ -48740,17 +48560,13 @@ private:
 			i = 0;
 			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 			{
-				if (nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
-					i, m_queueScrollOffset, m_queueWinHeight) != 0)
+				if (IsRowInScrollWindow(i))
 				{
 					PrintGroupname(nzbInfo, lineNr++, i == m_selectedQueueEntry, false);
 				}
 				i++;
-				nzbget_rs_dqh_ncurses_accum_group_queue_stats(
-					nzbInfo->GetRemainingSize(),
-					nzbInfo->GetPausedSize(),
-					&remaining,
-					&paused);
+				remaining += nzbInfo->GetRemainingSize();
+				paused += nzbInfo->GetPausedSize();
 			}
 
 			NzbgetRsBuf headerBuf = nzbget_rs_ncurses_format_group_queue_header(
@@ -48924,17 +48740,16 @@ private:
 				case 'e':
 				case 10: // return
 				case 13: // enter
-				{
-					int nextWinPct = m_queueWindowPercentage;
-					if (nzbget_rs_dqh_ncurses_enter_edit_queue_win_pct(
-						queueSize, m_queueWindowPercentage, &nextWinPct) != 0)
+					if (queueSize > 0)
 					{
 						m_inputMode = editQueue;
-						m_queueWindowPercentage = nextWinPct;
+						if (m_queueWindowPercentage == 0)
+						{
+							m_queueWindowPercentage = 50;
+						}
 						return;
 					}
 					break;
-				}
 				case 'r':
 					// Download rate
 					m_inputMode = downloadRate;
@@ -48988,7 +48803,7 @@ private:
 					SetCurrentQueueEntry(0);
 					break;
 				case KEY_END:
-					SetCurrentQueueEntry(nzbget_rs_dqh_ncurses_last_queue_index(queueSize));
+					SetCurrentQueueEntry(queueSize > 0 ? queueSize - 1 : 0);
 					break;
 				case 'p':
 					// Key 'p' for pause
@@ -49025,7 +48840,7 @@ private:
 				case 'b':
 					if (EditQueue(DownloadQueue::eaFileMoveBottom, 0))
 					{
-						SetCurrentQueueEntry(nzbget_rs_dqh_ncurses_last_queue_index(queueSize));
+						SetCurrentQueueEntry(queueSize > 0 ? queueSize - 1 : 0);
 					}
 					break;
 				}
@@ -49265,6 +49080,24 @@ private:
 		}
 	}
 
+	template <typename Resp>
+	static Resp InitTableResponse(uint32 entryWireSize)
+	{
+		Resp resp{};
+		resp.m_messageBase.m_signature = htonl(NZBMESSAGE_SIGNATURE);
+		resp.m_messageBase.m_structSize = htonl(sizeof(Resp));
+		resp.m_entrySize = htonl(entryWireSize);
+		return resp;
+	}
+
+	template <typename Resp>
+	void SendTableResponse(Resp& resp, RsBytes& entries)
+	{
+		resp.m_trailingDataLength = htonl(entries.Size());
+		m_connection->Send((char*)&resp, sizeof(resp));
+		entries.Send(m_connection);
+	}
+
 	void SendBoolResponse(bool success, const char* text)
 	{
 		// rust/src/binrpc.rs: the response, then the text and its NUL
@@ -49440,12 +49273,7 @@ private:
 			return;
 		}
 
-		SNzbListResponse ListResponse;
-		memset(&ListResponse, 0, sizeof(ListResponse));
-		ListResponse.m_messageBase.m_signature = htonl(NZBMESSAGE_SIGNATURE);
-		ListResponse.m_messageBase.m_structSize = htonl(sizeof(ListResponse));
-		ListResponse.m_entrySize = htonl(NZBLIST_FILE_ENTRY_WIRE_SIZE);
-		ListResponse.m_regExValid = 0;
+		SNzbListResponse ListResponse = InitTableResponse<SNzbListResponse>(NZBLIST_FILE_ENTRY_WIRE_SIZE);
 
 		RsBytes entries;
 
@@ -49483,46 +49311,33 @@ private:
 			pppEntries.reserve(pppCount);
 			fileEntries.reserve(fileCount);
 
-			// nzb entries
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				uint32 sizeHi, sizeLo, remainingSizeHi, remainingSizeLo, pausedSizeHi, pausedSizeLo;
-				Util::SplitInt64(nzbInfo->GetSize(), &sizeHi, &sizeLo);
-				Util::SplitInt64(nzbInfo->GetRemainingSize(), &remainingSizeHi, &remainingSizeLo);
-				Util::SplitInt64(nzbInfo->GetPausedSize(), &pausedSizeHi, &pausedSizeLo);
-				nzbEntries.push_back({(uint32)nzbInfo->GetId(), (uint32)nzbInfo->GetKind(), sizeLo, sizeHi, remainingSizeLo,
-					remainingSizeHi, pausedSizeLo, pausedSizeHi, (uint32)nzbInfo->GetPausedFileCount(),
-					(uint32)nzbInfo->GetRemainingParCount(), (uint32)nzbInfo->GetPriority(),
-					nzbget_rs_tpr_binrpc_eval_nzb_group_match(
-						matchGroup ? 1 : 0, regEx ? 1 : 0,
-						(matchGroup && regEx && regEx->Match(nzbInfo->GetName())) ? 1 : 0),
-					RsText(nzbInfo->GetFilename()), RsText(nzbInfo->GetName()), RsText(nzbInfo->GetDestDir()),
-					RsText(nzbInfo->GetCategory()), RsText(nzbInfo->GetQueuedFilename())});
-			}
-
-			// ppp entries
-			int nzbIndex = 0;
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				nzbIndex++;
-				for (NzbParameter& nzbParameter : nzbInfo->GetParameters())
-				{
-					pppEntries.push_back({(uint32)nzbIndex, RsText(nzbParameter.GetName()), RsText(nzbParameter.GetValue())});
-					nrPPPEntries++;
-				}
-			}
-
-			// file entries: the usual owner is already known from this walk.
 			int ownerIndex = 0;
 			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 			{
 				ownerIndex++;
+				uint32 sizeHi, sizeLo, remainingSizeHi, remainingSizeLo, pausedSizeHi, pausedSizeLo;
+				Util::SplitInt64(nzbInfo->GetSize(), &sizeHi, &sizeLo);
+				Util::SplitInt64(nzbInfo->GetRemainingSize(), &remainingSizeHi, &remainingSizeLo);
+				Util::SplitInt64(nzbInfo->GetPausedSize(), &pausedSizeHi, &pausedSizeLo);
+				uint32 groupMatched = (matchGroup && (!regEx || regEx->Match(nzbInfo->GetName()))) ? 1 : 0;
+				nzbEntries.push_back({(uint32)nzbInfo->GetId(), (uint32)nzbInfo->GetKind(), sizeLo, sizeHi, remainingSizeLo,
+					remainingSizeHi, pausedSizeLo, pausedSizeHi, (uint32)nzbInfo->GetPausedFileCount(),
+					(uint32)nzbInfo->GetRemainingParCount(), (uint32)nzbInfo->GetPriority(),
+					groupMatched,
+					RsText(nzbInfo->GetFilename()), RsText(nzbInfo->GetName()), RsText(nzbInfo->GetDestDir()),
+					RsText(nzbInfo->GetCategory()), RsText(nzbInfo->GetQueuedFilename())});
+
+				for (NzbParameter& nzbParameter : nzbInfo->GetParameters())
+				{
+					pppEntries.push_back({(uint32)ownerIndex, RsText(nzbParameter.GetName()), RsText(nzbParameter.GetValue())});
+					nrPPPEntries++;
+				}
+
 				for (FileInfo* fileInfo : nzbInfo->GetFileList())
 				{
 					nrFileEntries++;
 					int nzbIndex = ownerIndex;
-					if (nzbget_rs_dqh_binrpc_should_lookup_unusual_file_owner(
-						fileInfo->GetNzbInfo() == nzbInfo ? 1 : 0) != 0)
+					if (fileInfo->GetNzbInfo() != nzbInfo)
 					{
 						// Retain the first-match behavior for an unusual parent.
 						nzbIndex = 0;
@@ -49537,8 +49352,7 @@ private:
 					}
 
 					bool match = false;
-					if (nzbget_rs_dqh_binrpc_should_match_file_regex(
-						regEx ? 1 : 0, matchGroup ? 1 : 0) != 0)
+					if (regEx && !matchGroup)
 					{
 						NzbgetRsBuf matchNameBuf = nzbget_rs_tpr_binrpc_format_file_match_name(
 							fileInfo->GetNzbInfo()->GetName(), FileSystem::BaseFileName(fileInfo->GetFilename()));
@@ -49546,11 +49360,11 @@ private:
 						nzbget_rs_free(matchNameBuf);
 					}
 
-					uint32 fileSizeHi, fileSizeLo, remainingSizeHi, remainingSizeLo;
+					uint32 fileSizeHi, fileSizeLo, fileRemHi, fileRemLo;
 					Util::SplitInt64(fileInfo->GetSize(), &fileSizeHi, &fileSizeLo);
-					Util::SplitInt64(fileInfo->GetRemainingSize(), &remainingSizeHi, &remainingSizeLo);
-					fileEntries.push_back({(uint32)fileInfo->GetId(), (uint32)nzbIndex, fileSizeLo, fileSizeHi, remainingSizeLo,
-						remainingSizeHi, (uint32)fileInfo->GetPaused(), (uint32)fileInfo->GetFilenameConfirmed(),
+					Util::SplitInt64(fileInfo->GetRemainingSize(), &fileRemHi, &fileRemLo);
+					fileEntries.push_back({(uint32)fileInfo->GetId(), (uint32)nzbIndex, fileSizeLo, fileSizeHi, fileRemLo,
+						fileRemHi, (uint32)fileInfo->GetPaused(), (uint32)fileInfo->GetFilenameConfirmed(),
 						(uint32)fileInfo->GetActiveDownloads(), (uint32)match,
 						RsText(fileInfo->GetSubject()), RsText(fileInfo->GetFilename())});
 				}
@@ -49562,7 +49376,6 @@ private:
 			ListResponse.m_nrTrailingNzbEntries = htonl(nrNzbEntries);
 			ListResponse.m_nrTrailingPPPEntries = htonl(nrPPPEntries);
 			ListResponse.m_nrTrailingFileEntries = htonl(nrFileEntries);
-			ListResponse.m_trailingDataLength = htonl(entries.Size());
 		}
 
 		if (htonl(ListRequest.m_serverState))
@@ -49603,11 +49416,7 @@ private:
 			ListResponse.m_downloadedBytesLo = htonl(sizeLo);
 		}
 
-		// Send the request answer
-		m_connection->Send((char*) &ListResponse, sizeof(ListResponse));
-
-		// Send the data
-		entries.Send(m_connection);
+		SendTableResponse(ListResponse, entries);
 	}
 
 	void ExecuteLog()
@@ -49620,7 +49429,6 @@ private:
 
 		RsBytes entries;
 		int nrEntries;
-		int bufsize;
 
 		{
 			GuardedMessageList messages = g_Log->GuardMessages();
@@ -49646,24 +49454,11 @@ private:
 					RsText(message.GetText())});
 			}
 			entries = nzbget_rs_binrpc_encode_log_into(log.data(), log.size(), entries.Scratch(), entries.Capacity());
-			bufsize = entries.Size();
 		}
 
-		SNzbLogResponse LogResponse;
-		LogResponse.m_messageBase.m_signature = htonl(NZBMESSAGE_SIGNATURE);
-		LogResponse.m_messageBase.m_structSize = htonl(sizeof(LogResponse));
-		LogResponse.m_entrySize = htonl(NZBLOG_ENTRY_WIRE_SIZE);
+		SNzbLogResponse LogResponse = InitTableResponse<SNzbLogResponse>(NZBLOG_ENTRY_WIRE_SIZE);
 		LogResponse.m_nrTrailingEntries = htonl(nrEntries);
-		LogResponse.m_trailingDataLength = htonl(bufsize);
-
-		// Send the request answer
-		m_connection->Send((char*) &LogResponse, sizeof(LogResponse));
-
-		// Send the data
-		if (bufsize > 0)
-		{
-			entries.Send(m_connection);
-		}
+		SendTableResponse(LogResponse, entries);
 	}
 
 	void ExecuteEditQueue()
@@ -49760,11 +49555,7 @@ private:
 
 	void ExecutePostQueue()
 	{
-		SNzbPostQueueResponse PostQueueResponse;
-		memset(&PostQueueResponse, 0, sizeof(PostQueueResponse));
-		PostQueueResponse.m_messageBase.m_signature = htonl(NZBMESSAGE_SIGNATURE);
-		PostQueueResponse.m_messageBase.m_structSize = htonl(sizeof(PostQueueResponse));
-		PostQueueResponse.m_entrySize = htonl(NZBPOSTQUEUE_ENTRY_WIRE_SIZE);
+		SNzbPostQueueResponse PostQueueResponse = InitTableResponse<SNzbPostQueueResponse>(NZBPOSTQUEUE_ENTRY_WIRE_SIZE);
 
 		RsBytes entries;
 
@@ -49799,14 +49590,9 @@ private:
 			entries = nzbget_rs_binrpc_encode_post_queue_into(jobs.data(), jobs.size(), entries.Scratch(), entries.Capacity());
 
 			PostQueueResponse.m_nrTrailingEntries = htonl(NrEntries);
-			PostQueueResponse.m_trailingDataLength = htonl(entries.Size());
 		}
 
-		// Send the request answer
-		m_connection->Send((char*) &PostQueueResponse, sizeof(PostQueueResponse));
-
-		// Send the data
-		entries.Send(m_connection);
+		SendTableResponse(PostQueueResponse, entries);
 	}
 
 	void ExecuteWriteLog()
@@ -49871,11 +49657,7 @@ private:
 
 		bool showHidden = ntohl(HistoryRequest.m_hidden);
 
-		SNzbHistoryResponse HistoryResponse;
-		memset(&HistoryResponse, 0, sizeof(HistoryResponse));
-		HistoryResponse.m_messageBase.m_signature = htonl(NZBMESSAGE_SIGNATURE);
-		HistoryResponse.m_messageBase.m_structSize = htonl(sizeof(HistoryResponse));
-		HistoryResponse.m_entrySize = htonl(NZBHISTORY_ENTRY_WIRE_SIZE);
+		SNzbHistoryResponse HistoryResponse = InitTableResponse<SNzbHistoryResponse>(NZBHISTORY_ENTRY_WIRE_SIZE);
 
 		RsBytes entries;
 
@@ -49888,51 +49670,46 @@ private:
 			history.reserve(downloadQueue->GetHistory()->size());
 			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 			{
-				if (nzbget_rs_tpr_binrpc_should_include_history_entry(
-					(int)historyInfo->GetKind(), (int)HistoryInfo::hkDup, showHidden ? 1 : 0))
+				int histFieldKind = nzbget_rs_dqh_binrpc_classify_history_entry_fields(
+					(int)historyInfo->GetKind(),
+					(int)HistoryInfo::hkNzb,
+					(int)HistoryInfo::hkDup,
+					(int)HistoryInfo::hkUrl,
+					showHidden ? 1 : 0);
+				if (histFieldKind < 0)
 				{
-					nrEntries++;
-					// fields a kind doesn't set are 0
-					uint32 sizeHi = 0, sizeLo = 0, fileCount = 0, parStatus = 0, scriptStatus = 0, urlStatus = 0;
-					int histFieldKind = nzbget_rs_dqh_binrpc_classify_history_entry_fields(
-						(int)historyInfo->GetKind(),
-						(int)HistoryInfo::hkNzb,
-						(int)HistoryInfo::hkDup,
-						(int)HistoryInfo::hkUrl,
-						showHidden ? 1 : 0);
-					if (histFieldKind == 1)
-					{
-						NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-						Util::SplitInt64(nzbInfo->GetSize(), &sizeHi, &sizeLo);
-						fileCount = nzbInfo->GetFileCount();
-						parStatus = nzbInfo->GetParStatus();
-						scriptStatus = nzbInfo->GetScriptStatuses()->CalcTotalStatus();
-					}
-					else if (histFieldKind == 2)
-					{
-						DupInfo* dupInfo = historyInfo->GetDupInfo();
-						Util::SplitInt64(dupInfo->GetSize(), &sizeHi, &sizeLo);
-					}
-					else if (histFieldKind == 3)
-					{
-						NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-						urlStatus = nzbInfo->GetUrlStatus();
-					}
-					history.push_back({(uint32)historyInfo->GetId(), (uint32)historyInfo->GetKind(), (uint32)(int)historyInfo->GetTime(),
-						sizeLo, sizeHi, fileCount, parStatus, scriptStatus, urlStatus, RsText(historyInfo->GetName())});
+					continue;
 				}
+				nrEntries++;
+				// fields a kind doesn't set are 0
+				uint32 sizeHi = 0, sizeLo = 0, fileCount = 0, parStatus = 0, scriptStatus = 0, urlStatus = 0;
+				if (histFieldKind == 1)
+				{
+					NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
+					Util::SplitInt64(nzbInfo->GetSize(), &sizeHi, &sizeLo);
+					fileCount = nzbInfo->GetFileCount();
+					parStatus = nzbInfo->GetParStatus();
+					scriptStatus = nzbInfo->GetScriptStatuses()->CalcTotalStatus();
+				}
+				else if (histFieldKind == 2)
+				{
+					DupInfo* dupInfo = historyInfo->GetDupInfo();
+					Util::SplitInt64(dupInfo->GetSize(), &sizeHi, &sizeLo);
+				}
+				else if (histFieldKind == 3)
+				{
+					NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
+					urlStatus = nzbInfo->GetUrlStatus();
+				}
+				history.push_back({(uint32)historyInfo->GetId(), (uint32)historyInfo->GetKind(), (uint32)(int)historyInfo->GetTime(),
+					sizeLo, sizeHi, fileCount, parStatus, scriptStatus, urlStatus, RsText(historyInfo->GetName())});
 			}
 			entries = nzbget_rs_binrpc_encode_history_into(history.data(), history.size(), entries.Scratch(), entries.Capacity());
 
 			HistoryResponse.m_nrTrailingEntries = htonl(nrEntries);
-			HistoryResponse.m_trailingDataLength = htonl(entries.Size());
 		}
 
-		// Send the request answer
-		m_connection->Send((char*) &HistoryResponse, sizeof(HistoryResponse));
-
-		// Send the data
-		entries.Send(m_connection);
+		SendTableResponse(HistoryResponse, entries);
 	}
 };
 

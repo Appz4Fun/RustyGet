@@ -9394,81 +9394,3466 @@ private:
 };
 
 
-class ServerVolume;
+class ServerVolume
+{
+public:
+	struct Articles
+	{
+		uint32 failed;
+		uint32 success;
+	};
+	struct Stats
+	{
+		uint32 bytes;
+		Articles articles;
+	};
+
+	using VolumeArray = std::vector<int64>;
+	using ArticlesArray = std::vector<Articles>;
+
+	VolumeArray* BytesPerSeconds() { return &m_bytesPerSeconds; }
+	VolumeArray* BytesPerMinutes() { return &m_bytesPerMinutes; }
+	VolumeArray* BytesPerHours() { return &m_bytesPerHours; }
+	VolumeArray* BytesPerDays() { return &m_bytesPerDays; }
+
+	const ArticlesArray& GetArticlesPerDays() const { return m_articlesPerDays; }
+	void SetArticlesPerDays(ArticlesArray articles) { m_articlesPerDays = std::move(articles); }
+	void SetFirstDay(int firstDay) { m_firstDay = firstDay; }
+	int GetFirstDay() { return m_firstDay; }
+	void SetTotalBytes(int64 totalBytes) { m_totalBytes = totalBytes; }
+	int64 GetTotalBytes() { return m_totalBytes; }
+	void SetCustomBytes(int64 customBytes) { m_customBytes = customBytes; }
+	int64 GetCustomBytes() { return m_customBytes; }
+	int GetSecSlot() { return m_secSlot; }
+	int GetMinSlot() { return m_minSlot; }
+	int GetHourSlot() { return m_hourSlot; }
+	int GetDaySlot() { return m_daySlot; }
+	time_t GetDataTime() { return m_dataTime; }
+	void SetDataTime(time_t dataTime) { m_dataTime = dataTime; }
+	time_t GetCustomTime() { return m_customTime; }
+	void SetCustomTime(time_t customTime) { m_customTime = customTime; }
+	time_t GetCountersResetTime() { return m_countersResetTime; }
+	void SetCountersResetTime(time_t time) { m_countersResetTime = time; }
+
+	void CalcSlots(time_t locCurTime)
+	{
+		NzbgetRsVolumeSlots slots;
+		nzbget_rs_volume_calc_slots(locCurTime, &m_firstDay, &slots);
+		m_secSlot = slots.sec;
+		m_minSlot = slots.min;
+		m_hourSlot = slots.hour;
+		m_daySlot = slots.day;
+		if (slots.inRange)
+		{
+			size_t newBytesDaysLen = nzbget_rs_tpr_server_volume_required_day_len(
+				m_daySlot, m_bytesPerDays.size());
+			if (newBytesDaysLen > 0)
+			{
+				m_bytesPerDays.resize(newBytesDaysLen);
+			}
+
+			size_t newArtDaysLen = nzbget_rs_tpr_server_volume_required_day_len(
+				m_daySlot, m_articlesPerDays.size());
+			if (newArtDaysLen > 0)
+			{
+				m_articlesPerDays.resize(newArtDaysLen);
+			}
+		}
+	}
+
+	void AddStats(Stats stats)
+	{
+		time_t curTime = Util::CurrentTime();
+		time_t locCurTime = curTime + g_WorkState->GetLocalTimeOffset();
+		time_t locDataTime = m_dataTime + g_WorkState->GetLocalTimeOffset();
+
+		int lastMinSlot = m_minSlot;
+		int lastHourSlot = m_hourSlot;
+
+		CalcSlots(locCurTime);
+
+		int64 bytes = static_cast<int64>(stats.bytes);
+		NzbgetRsVolumeSlots slots{m_secSlot, m_minSlot, m_hourSlot, m_daySlot, 0};
+		nzbget_rs_volume_add(m_bytesPerSeconds.data(), m_bytesPerSeconds.size(), m_bytesPerMinutes.data(),
+			m_bytesPerMinutes.size(), m_bytesPerHours.data(), m_bytesPerHours.size(), &slots, lastMinSlot,
+			lastHourSlot, locCurTime, locDataTime, bytes);
+		size_t daySlotIdx = m_daySlot >= 0 ? static_cast<size_t>(m_daySlot) : 0;
+		int64 curDayBytes = m_daySlot >= 0 ? m_bytesPerDays[daySlotIdx] : 0;
+		int curDayFailed = m_daySlot >= 0 ? m_articlesPerDays[daySlotIdx].failed : 0;
+		int curDaySuccess = m_daySlot >= 0 ? m_articlesPerDays[daySlotIdx].success : 0;
+		int updateDay = 0;
+		int64 newDayBytes = 0, newTotalBytes = 0, newCustomBytes = 0;
+		int newDayFailed = 0, newDaySuccess = 0;
+		nzbget_rs_statmeter_accum_day_and_total_volume(
+			m_daySlot, curDayBytes, curDayFailed, curDaySuccess,
+			m_totalBytes, m_customBytes, bytes, stats.articles.failed, stats.articles.success,
+			&updateDay, &newDayBytes, &newDayFailed, &newDaySuccess, &newTotalBytes, &newCustomBytes);
+		if (updateDay != 0)
+		{
+			m_bytesPerDays[daySlotIdx] = newDayBytes;
+			m_articlesPerDays[daySlotIdx].failed = newDayFailed;
+			m_articlesPerDays[daySlotIdx].success = newDaySuccess;
+		}
+		m_totalBytes = newTotalBytes;
+		m_customBytes = newCustomBytes;
+
+		m_dataTime = curTime;
+	}
+
+	void Reset()
+	{
+		m_totalBytes = 0;
+		m_dataTime = 0;
+		m_firstDay = 0;
+		m_countersResetTime = Util::CurrentTime();
+
+		ResetVolume(m_bytesPerSeconds);
+		ResetVolume(m_bytesPerMinutes);
+		ResetVolume(m_bytesPerHours);
+		ResetVolume(m_bytesPerDays);
+
+		ResetArticles();
+		ResetCustom();
+	}
+
+	void ResetCustom()
+	{
+		m_customBytes = 0;
+		m_customTime = Util::CurrentTime();
+	}
+
+	void LogDebugInfo()
+	{
+		info("   ---------- ServerVolume");
+
+		NzbgetRsBuf secsBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
+			0, m_bytesPerSeconds.data(), m_bytesPerSeconds.size());
+		info("Secs: %s", secsBuf.data ? secsBuf.data : "");
+		nzbget_rs_free(secsBuf);
+
+		NzbgetRsBuf minsBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
+			0, m_bytesPerMinutes.data(), m_bytesPerMinutes.size());
+		info("Mins: %s", minsBuf.data ? minsBuf.data : "");
+		nzbget_rs_free(minsBuf);
+
+		NzbgetRsBuf hoursBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
+			0, m_bytesPerHours.data(), m_bytesPerHours.size());
+		info("Hours: %s", hoursBuf.data ? hoursBuf.data : "");
+		nzbget_rs_free(hoursBuf);
+
+		NzbgetRsBuf daysBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
+			m_firstDay, m_bytesPerDays.data(), m_bytesPerDays.size());
+		info("Days: %s", daysBuf.data ? daysBuf.data : "");
+		nzbget_rs_free(daysBuf);
+	}
+
+private:
+	void ResetVolume(VolumeArray& volume)
+	{
+		for (int64& size : volume)
+		{
+			size = 0;
+		}
+	}
+
+	void ResetArticles()
+	{
+		for (Articles& articles : m_articlesPerDays)
+		{
+			articles.failed = 0;
+			articles.success = 0;
+		}
+	}
+
+	VolumeArray m_bytesPerSeconds = VolumeArray(60);
+	VolumeArray m_bytesPerMinutes = VolumeArray(60);
+	VolumeArray m_bytesPerHours = VolumeArray(24);
+	VolumeArray m_bytesPerDays;
+	ArticlesArray m_articlesPerDays;
+
+	int m_firstDay = 0;
+	int64 m_totalBytes = 0;
+	int64 m_customBytes = 0;
+
+	/** Date/time when the data was last updated (time is in C/Unix format) */
+	time_t m_dataTime = 0;
+
+	/** Date/time of the last reset of custom counter (time is in C/Unix format) */
+	time_t m_customTime = Util::CurrentTime();
+
+	/** Date/time of the last reset of all counters (time is in C/Unix format) */
+	time_t m_countersResetTime = Util::CurrentTime();
+
+	int m_secSlot = 0;
+	int m_minSlot = 0;
+	int m_hourSlot = 0;
+	int m_daySlot = 0;
+};
+
 using ServerVolumes = std::vector<ServerVolume>;
-class StateDiskFile;
+
+static const char* FORMATVERSION_SIGNATURE = "nzbget diskstate file version ";
+// The queue, history and file-state files are written in upstream nzbget's formats
+// (64 and 7), so that an nzbget without duplicate repair still reads them: it ignores
+// the trailer that carries this build's own data (stream-repair jobs, recovery
+// counters, decoded file sizes). Earlier builds of this branch wrote that data inline
+// as formats 65/66 and 8/9: those are still read, once, and rewritten in the new form.
+inline const int DISKSTATE_QUEUE_VERSION = 64;
+inline const int DISKSTATE_QUEUE_LEGACY_VERSION = 66;
+inline const int DISKSTATE_FILE_VERSION = 7;
+inline const int DISKSTATE_FILE_LEGACY_VERSION = 9;
+// the line that starts this build's data after upstream's in a queue, history or progress file
+inline const char* DUPESTATE_TRAILER = "#dupestate 1";
+inline const char* UNPACKSTATE_TRAILER = "#unpackstate 1";
+inline const int DISKSTATE_STATS_VERSION = 4;
+inline const int DISKSTATE_FEEDS_VERSION = 3;
+
+class StateDiskFile : public DiskFile
+{
+public:
+	int64 PrintLine(const char* format, ...) PRINTF_SYNTAX(2)
+	{
+		// a line of any length: one of 1,024 characters or more (a long url sent with
+		// appendurl) was written past a fixed buffer, onto the stack, and the state file
+		// got garbage (unreadable at the next start) or nzbget crashed (SIGSEGV). The
+		// reader cuts a longer line to its buffer.
+		va_list ap;
+		va_start(ap, format);
+		va_list ap2;
+		va_copy(ap2, ap);
+		int len = vsnprintf(nullptr, 0, format, ap);
+		va_end(ap);
+		if (len < 0)
+		{
+			va_end(ap2);
+			return 0;
+		}
+		std::vector<char> str(len + 1);
+		vsnprintf(str.data(), str.size(), format, ap2);
+		va_end(ap2);
+
+		// a line break inside a value (a name, key or url sent through the API) split
+		// the record over two lines, and the whole file was set aside as unreadable at
+		// the next start: it is kept as a space
+		nzbget_rs_dsp_sanitize_line_breaks(str.data(), (size_t)len);
+
+		// replacing terminating <NULL> with <LF>
+		str[len++] = '\n';
+
+		Write(str.data(), len);
+
+		return len;
+	}
+
+	char* ReadLine(char* buffer, int64 size)
+	{
+		if (!DiskFile::ReadLine(buffer, size))
+		{
+			return nullptr;
+		}
+
+		// remove traling '\n'
+		int needsScroll = 0;
+		size_t newLen = 0;
+		if (nzbget_rs_dsp_inspect_read_line(buffer, &needsScroll, &newLen) != 0)
+		{
+			if (needsScroll != 0)
+			{
+				// the line is longer than "size", scroll file position to the end of the line
+				for (char skipbuf[1024]; DiskFile::ReadLine(skipbuf, 1024); )
+				{
+					int skipScroll = 0;
+					if (nzbget_rs_dsp_inspect_read_line(skipbuf, &skipScroll, nullptr) == 0 || skipScroll == 0)
+					{
+						break;
+					}
+				}
+			}
+
+			buffer[newLen] = 0;
+		}
+
+		return buffer;
+	}
+
+	/*
+	* Standard "fscanf" scans beoynd current line if the next line is empty.
+	* This wrapper fixes that.
+	*/
+	int ScanLine(const char* format, ...) SCANF_SYNTAX(2)
+	{
+		char line[1024];
+		if (!ReadLine(line, sizeof(line)))
+		{
+			return 0;
+		}
+
+		va_list ap;
+		va_start(ap, format);
+		int res = vsscanf(line, format, ap);
+		va_end(ap);
+
+		return res;
+	}
+};
+
+static inline void WriteRsBuf(StateDiskFile& outfile, NzbgetRsBuf buf)
+{
+	if (buf.data && buf.len > 0)
+	{
+		outfile.Write(buf.data, buf.len);
+	}
+	nzbget_rs_free(buf);
+}
+
+class StateFile
+{
+public:
+	/* readVersion: the newest version read (default: the one written) */
+	StateFile(const char* filename, int formatVersion, bool transactional, int readVersion = 0) :
+		m_formatVersion(formatVersion),
+		m_readVersion(nzbget_rs_dqh_diskstate_resolve_read_version(readVersion, formatVersion)),
+		m_transactional(transactional)
+	{
+		NzbgetRsBuf destBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, filename ? filename : "");
+		m_destFilename = destBuf.data ? destBuf.data : "";
+		nzbget_rs_free(destBuf);
+		if (m_transactional)
+		{
+			NzbgetRsBuf tempBuf = nzbget_rs_dqh_diskstate_format_new_path(*m_destFilename);
+			m_tempFilename = tempBuf.data ? tempBuf.data : "";
+			nzbget_rs_free(tempBuf);
+		}
+		else
+		{
+			m_tempFilename = *m_destFilename;
+		}
+	}
+
+	void Discard()
+	{
+		FileSystem::DeleteFile(m_destFilename);
+		// a temp file left from an interrupted write would be "restored" at the next
+		// start as if the write had finished (a partial file, all state set aside)
+		if (m_transactional)
+		{
+			FileSystem::DeleteFile(m_tempFilename);
+		}
+	}
+
+	void SetFlush(bool flush) { m_flush = flush; }
+
+	bool FileExists()
+	{
+		return nzbget_rs_dqh_diskstate_state_file_exists(
+			FileSystem::FileExists(m_destFilename) ? 1 : 0,
+			m_transactional ? 1 : 0,
+			m_transactional && FileSystem::FileExists(m_tempFilename) ? 1 : 0) != 0;
+	}
+
+	StateDiskFile* BeginWrite()
+	{
+		if (!m_file.Open(m_tempFilename, StateDiskFile::omWrite))
+		{
+			error("Error saving diskstate: Could not create file %s: %s", *m_tempFilename,
+				*FileSystem::GetLastErrorMessage());
+			return nullptr;
+		}
+
+		m_file.PrintLine("%s%i", FORMATVERSION_SIGNATURE, m_formatVersion);
+
+		return &m_file;
+	}
+
+	bool FinishWrite()
+	{
+		if (!m_transactional)
+		{
+			m_file.Close();
+			return true;
+		}
+
+		// flush file content before renaming
+		if (nzbget_rs_dqh_diskstate_should_flush_queue_file(
+			m_flush ? 1 : 0, g_Options->GetFlushQueue() ? 1 : 0) != 0)
+		{
+			debug("Flushing data for file %s", FileSystem::BaseFileName(m_tempFilename));
+			m_file.Flush();
+			CString errmsg;
+			if (!m_file.Sync(errmsg))
+			{
+				warn("Could not flush file %s into disk: %s", *m_tempFilename, *errmsg);
+			}
+		}
+
+		m_file.Close();
+
+		// now rename to dest file name
+		FileSystem::DeleteFile(m_destFilename);
+		if (!FileSystem::MoveFile(m_tempFilename, m_destFilename))
+		{
+			error("Error saving diskstate: Could not rename file %s to %s: %s",
+				*m_tempFilename, *m_destFilename, *FileSystem::GetLastErrorMessage());
+			return false;
+		}
+
+		// flush directory buffer after renaming
+		if (nzbget_rs_dqh_diskstate_should_flush_queue_file(
+			m_flush ? 1 : 0, g_Options->GetFlushQueue() ? 1 : 0) != 0)
+		{
+			debug("Flushing directory for file %s", FileSystem::BaseFileName(m_destFilename));
+			CString errmsg;
+			if (!FileSystem::FlushDirBuffers(m_destFilename, errmsg))
+			{
+				warn("Could not flush directory buffers for file %s into disk: %s", *m_destFilename, *errmsg);
+			}
+		}
+
+		return true;
+	}
+
+	StateDiskFile* BeginRead()
+	{
+		// with the dest-file there, a temp-file is what an interrupted write left (the
+		// dest-file is deleted only right before the temp-file takes its place)
+		int recoveryMode = nzbget_rs_dqh_diskstate_classify_begin_read_recovery(
+			m_transactional ? 1 : 0,
+			FileSystem::FileExists(m_destFilename) ? 1 : 0,
+			FileSystem::FileExists(m_tempFilename) ? 1 : 0);
+		if (recoveryMode == 1)
+		{
+			FileSystem::DeleteFile(m_tempFilename);
+		}
+		else if (recoveryMode == 2)
+		{
+			// disaster recovery: temp-file exists but the dest-file doesn't
+			warn("Restoring diskstate file %s from %s", FileSystem::BaseFileName(m_destFilename), FileSystem::BaseFileName(m_tempFilename));
+			if (!FileSystem::MoveFile(m_tempFilename, m_destFilename))
+			{
+				error("Error restoring diskstate: Could not rename file %s to %s: %s",
+					*m_tempFilename, *m_destFilename, *FileSystem::GetLastErrorMessage());
+				return nullptr;
+			}
+		}
+
+		if (!m_file.Open(m_destFilename, StateDiskFile::omRead))
+		{
+			error("Error reading diskstate: could not open file %s: %s", *m_destFilename,
+				*FileSystem::GetLastErrorMessage());
+			return nullptr;
+		}
+
+		char FileSignatur[128];
+		m_file.ReadLine(FileSignatur, sizeof(FileSignatur));
+		m_fileVersion = nzbget_rs_dsp_parse_format_version(FileSignatur);
+		if (nzbget_rs_dqh_diskstate_is_file_version_unsupported(m_fileVersion, m_readVersion) != 0)
+		{
+			error("Could not load diskstate file %s due to file version mismatch", *m_destFilename);
+			m_file.Close();
+			return nullptr;
+		}
+
+		return &m_file;
+	}
+
+	int GetFileVersion() { return m_fileVersion; }
+
+private:
+	BString<1024> m_destFilename;
+	BString<1024> m_tempFilename;
+	int m_formatVersion;
+	int m_readVersion;
+	bool m_transactional;
+	bool m_flush = true;
+	int m_fileVersion = 0;
+	StateDiskFile m_file;
+};
+
 
 class DiskState
 {
 public:
-	bool DownloadQueueExists();
-	bool SaveDownloadQueue(DownloadQueue* downloadQueue, bool saveHistory);
-	bool LoadDownloadQueue(DownloadQueue* downloadQueue, Servers* servers);
 	/* the last load read a queue, history or progress file an earlier build of the
 	 * branch wrote (formats 65/66): saving it again writes the upstream format */
 	bool LegacyQueueRead() { return m_legacyQueueRead; }
-	bool SaveDownloadProgress(DownloadQueue* downloadQueue);
-	bool SaveFile(FileInfo* fileInfo, bool replace = false);
-	bool LoadFile(FileInfo* fileInfo, bool fileSummary, bool articles);
-	bool SaveAllFileInfos(DownloadQueue* downloadQueue);
-	bool SaveFileState(FileInfo* fileInfo, bool completed, bool replace = false);
-	bool LoadFileState(FileInfo* fileInfo, Servers* servers, bool completed);
-	bool LoadArticles(FileInfo* fileInfo);
-	void DiscardDownloadQueue();
-	void DiscardFile(int fileId, bool deleteData, bool deletePartialState, bool deleteCompletedState);
-	void DiscardFiles(NzbInfo* nzbInfo, bool deleteLog = true);
-	bool SaveFeeds(Feeds* feeds, FeedHistory* feedHistory);
-	bool LoadFeeds(Feeds* feeds, FeedHistory* feedHistory);
-	bool SaveStats(Servers* servers, ServerVolumes* serverVolumes);
-	bool LoadStats(Servers* servers, ServerVolumes* serverVolumes, bool* perfectMatch);
-	void CleanupTempDir(DownloadQueue* downloadQueue);
-	void WriteCacheFlag();
-	void DeleteCacheFlag();
-	void AppendNzbMessage(int nzbId, Message::EKind kind, const char* text);
-	void LoadNzbMessages(int nzbId, MessageList* messages);
+
+	bool SaveDownloadQueue(DownloadQueue* downloadQueue, bool saveHistory)
+	{
+		debug("Saving queue and history to disk");
+
+		bool ok = true;
+
+		{
+			StateFile stateFile("queue", DISKSTATE_QUEUE_VERSION, true);
+			if (!downloadQueue->GetQueue()->empty())
+			{
+				StateDiskFile* outfile = stateFile.BeginWrite();
+				if (!outfile)
+				{
+					return false;
+				}
+
+				// save nzb-infos
+				SaveQueue(downloadQueue->GetQueue(), *outfile);
+
+				// now rename to dest file name
+				ok = stateFile.FinishWrite();
+			}
+			else
+			{
+				stateFile.Discard();
+			}
+		}
+
+		if (saveHistory)
+		{
+			StateFile stateFile("history", DISKSTATE_QUEUE_VERSION, true);
+			if (!downloadQueue->GetHistory()->empty())
+			{
+				StateDiskFile* outfile = stateFile.BeginWrite();
+				if (!outfile)
+				{
+					return false;
+				}
+
+				// save history
+				SaveHistory(downloadQueue->GetHistory(), *outfile);
+
+				// now rename to dest file name
+				ok &= stateFile.FinishWrite();
+			}
+			else
+			{
+				stateFile.Discard();
+			}
+		}
+
+		// progress-file isn't needed after saving of full queue data
+		StateFile progressStateFile("progress", DISKSTATE_QUEUE_VERSION, true);
+		progressStateFile.Discard();
+
+		SaveIdFloor();
+
+
+
+		return ok;
+	}
+
+	bool LoadDownloadQueue(DownloadQueue* downloadQueue, Servers* servers)
+	{
+		debug("Loading queue from disk");
+
+		bool ok = false;
+		bool queueFilesFailed = false;
+		bool fileInfosLoaded = false;
+		int formatVersion = 0;
+
+		// formats 65/66 are read as an earlier build of this branch wrote them (it may
+		// run again after this one); a file that doesn't read so, or of a newer format,
+		// is set aside below rather than lost to the next save
+		int queueReadVersion = DISKSTATE_QUEUE_LEGACY_VERSION;
+
+		{
+			StateFile stateFile("queue", DISKSTATE_QUEUE_VERSION, true, queueReadVersion);
+			if (stateFile.FileExists())
+			{
+				StateDiskFile* infile = stateFile.BeginRead();
+				if (!infile)
+				{
+					{ queueFilesFailed = true; goto error; }
+				}
+
+				formatVersion = stateFile.GetFileVersion();
+				int isLegacy = 0;
+				int loadInlineHistory = 0;
+				int verStatus = nzbget_rs_dsp_check_queue_format_version(
+					formatVersion, DISKSTATE_QUEUE_VERSION, &isLegacy, &loadInlineHistory);
+				m_legacyQueueRead |= isLegacy != 0;
+				if (verStatus == 1)
+				{
+					error("Failed to read queue: diskstate file is corrupted");
+					{ queueFilesFailed = true; goto error; }
+				}
+				else if (verStatus == 2)
+				{
+					error("Failed to read queue and history data. Only queue and history from NZBGet v13 or newer can be converted by this RustyGet version. "
+						"Old queue and history data still can be converted using NZBGet v16 as an intermediate version.");
+					{ queueFilesFailed = true; goto error; }
+				}
+
+				if (!LoadQueue(downloadQueue->GetQueue(), servers, *infile, formatVersion)) { queueFilesFailed = true; goto error; }
+
+				if (loadInlineHistory != 0)
+				{
+					if (!LoadHistory(downloadQueue->GetHistory(), servers, *infile, formatVersion)) { queueFilesFailed = true; goto error; }
+				}
+			}
+		}
+
+		{
+			StateFile stateFile("progress", DISKSTATE_QUEUE_VERSION, true, queueReadVersion);
+			if (stateFile.FileExists())
+			{
+				StateDiskFile* infile = stateFile.BeginRead();
+				if (!infile)
+				{
+					{ queueFilesFailed = true; goto error; }
+				}
+
+				if (stateFile.GetFileVersion() <= 0)
+				{
+					error("Failed to read queue: diskstate file is corrupted");
+					{ queueFilesFailed = true; goto error; }
+				}
+
+				m_legacyQueueRead |= stateFile.GetFileVersion() != DISKSTATE_QUEUE_VERSION;
+				if (!LoadProgress(downloadQueue->GetQueue(), servers, *infile, stateFile.GetFileVersion())) { queueFilesFailed = true; goto error; }
+			}
+		}
+
+		if (nzbget_rs_dqh_diskstate_should_load_separate_history_file(formatVersion) != 0)
+		{
+			StateFile stateFile("history", DISKSTATE_QUEUE_VERSION, true, queueReadVersion);
+			if (stateFile.FileExists())
+			{
+				StateDiskFile* infile = stateFile.BeginRead();
+				if (!infile)
+				{
+					{ queueFilesFailed = true; goto error; }
+				}
+
+				if (stateFile.GetFileVersion() <= 0)
+				{
+					error("Failed to read queue: diskstate file is corrupted");
+					{ queueFilesFailed = true; goto error; }
+				}
+
+				m_legacyQueueRead |= stateFile.GetFileVersion() != DISKSTATE_QUEUE_VERSION;
+				if (!LoadHistory(downloadQueue->GetHistory(), servers, *infile, stateFile.GetFileVersion())) { queueFilesFailed = true; goto error; }
+			}
+		}
+
+		LoadAllFileInfos(downloadQueue);
+		fileInfosLoaded = true;
+
+		CleanupQueueDir(downloadQueue);
+
+		if (!LoadAllFileStates(downloadQueue, servers)) goto error;
+
+		// file states an earlier build of this branch wrote (formats 8/9) are rewritten
+		// in the upstream format, history items' too, which are otherwise only rewritten
+		// when touched: after a downgrade upstream could not retry such an item
+		ConvertLegacyFileStates(servers);
+
+		ok = true;
+
+	error:
+
+		if (!ok)
+		{
+			error("Error reading diskstate for download queue and history");
+		}
+		if (nzbget_rs_dqh_diskstate_should_reload_fallback_file_infos(
+			fileInfosLoaded ? 1 : 0, downloadQueue->GetQueue()->empty() ? 1 : 0) != 0)
+		{
+			// the downloads that did load keep running: with only the stubs the queue
+			// file holds (no name, size or groups) they showed blank and the next save
+			// wrote the stubs over their file infos
+			LoadAllFileInfos(downloadQueue);
+		}
+		if (queueFilesFailed)
+		{
+			// the next save would overwrite them: kept under another name instead
+			SetAsideQueueFiles();
+		}
+		RaiseIdsPastQueueDir();
+
+		NzbInfo::ResetGenId(true);
+		FileInfo::ResetGenId(true);
+
+		CalcFileStats(downloadQueue, formatVersion);
+
+		return ok;
+	}
+
+	bool SaveDownloadProgress(DownloadQueue* downloadQueue)
+	{
+		int count = 0;
+		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+		{
+			count += nzbInfo->GetChanged() ? 1 : 0;
+		}
+
+		debug("Saving queue progress to disk");
+
+		bool ok = true;
+
+		{
+			StateFile stateFile("progress", DISKSTATE_QUEUE_VERSION, true);
+			if (count > 0)
+			{
+				StateDiskFile* outfile = stateFile.BeginWrite();
+				if (!outfile)
+				{
+					return false;
+				}
+
+				SaveProgress(downloadQueue->GetQueue(), *outfile, count);
+
+				// now rename to dest file name
+				ok = stateFile.FinishWrite();
+			}
+			else
+			{
+				stateFile.Discard();
+			}
+		}
+
+		return ok;
+	}
+
+	bool SaveFile(FileInfo* fileInfo, bool replace = false)
+	{
+		debug("Saving FileInfo %i to disk", fileInfo->GetId());
+
+		NzbgetRsBuf fnBuf = nzbget_rs_dqh_conn_format_port_str(fileInfo->GetId());
+		BString<100> filename = fnBuf.data ? fnBuf.data : "";
+		nzbget_rs_free(fnBuf);
+		StateFile stateFile(filename, DISKSTATE_FILE_VERSION, replace);
+		stateFile.SetFlush(!replace);
+
+		StateDiskFile* outfile = stateFile.BeginWrite();
+		if (!outfile)
+		{
+			return false;
+		}
+
+		return SaveFileInfo(fileInfo, *outfile, true) && stateFile.FinishWrite();
+	}
+
+	bool LoadArticles(FileInfo* fileInfo)
+	{
+		return LoadFile(fileInfo, false, true);
+	}
+
+	bool LoadFile(FileInfo* fileInfo, bool fileSummary, bool articles)
+	{
+		debug("Loading FileInfo %i from disk", fileInfo->GetId());
+
+		NzbgetRsBuf fnBuf = nzbget_rs_dqh_conn_format_port_str(fileInfo->GetId());
+		BString<100> filename = fnBuf.data ? fnBuf.data : "";
+		nzbget_rs_free(fnBuf);
+		StateFile stateFile(filename, DISKSTATE_FILE_VERSION, false, DISKSTATE_FILE_LEGACY_VERSION);
+
+		StateDiskFile* infile = stateFile.BeginRead();
+		if (!infile)
+		{
+			return false;
+		}
+
+		return LoadFileInfo(fileInfo, *infile, stateFile.GetFileVersion(), fileSummary, articles);
+	}
+
+	bool SaveFileState(FileInfo* fileInfo, bool completed, bool replace = false)
+	{
+		debug("Saving FileState %i to disk", fileInfo->GetId());
+
+		NzbgetRsBuf fnBuf = nzbget_rs_dqh_diskstate_format_file_state_name(
+			fileInfo->GetId(), completed ? 1 : 0);
+		BString<100> filename = fnBuf.data ? fnBuf.data : "";
+		nzbget_rs_free(fnBuf);
+		StateFile stateFile(filename, DISKSTATE_FILE_VERSION, replace);
+		stateFile.SetFlush(!replace);
+
+		StateDiskFile* outfile = stateFile.BeginWrite();
+		if (!outfile)
+		{
+			return false;
+		}
+
+		return SaveFileState(fileInfo, *outfile, completed) && stateFile.FinishWrite();
+	}
+
+	bool LoadFileState(FileInfo* fileInfo, Servers* servers, bool completed)
+	{
+		debug("Loading FileInfo %i from disk", fileInfo->GetId());
+
+		NzbgetRsBuf fnBuf = nzbget_rs_dqh_diskstate_format_file_state_name(
+			fileInfo->GetId(), completed ? 1 : 0);
+		BString<100> filename = fnBuf.data ? fnBuf.data : "";
+		nzbget_rs_free(fnBuf);
+		StateFile stateFile(filename, DISKSTATE_FILE_VERSION, false, DISKSTATE_FILE_LEGACY_VERSION);
+
+		StateDiskFile* infile = stateFile.BeginRead();
+		if (!infile)
+		{
+			return false;
+		}
+
+		m_lastFileStateVersion = stateFile.GetFileVersion();
+		return LoadFileState(fileInfo, servers, *infile, stateFile.GetFileVersion(), completed);
+	}
+
+	void DiscardFiles(NzbInfo* nzbInfo, bool deleteLog = true)
+	{
+		for (FileInfo* fileInfo : nzbInfo->GetFileList())
+		{
+			DiscardFile(fileInfo->GetId(), true, true, true);
+		}
+
+		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+		{
+			if (completedFile.GetStatus() != CompletedFile::cfSuccess)
+			{
+				DiscardFile(completedFile.GetId(), true, true, true);
+			}
+		}
+
+		if (deleteLog)
+		{
+			NzbgetRsBuf logBuf = nzbget_rs_dqh_diskstate_format_nzb_log_path(
+				g_Options->GetQueueDir(), PATH_SEPARATOR, nzbInfo->GetId());
+			FileSystem::DeleteFile(logBuf.data ? logBuf.data : "");
+			nzbget_rs_free(logBuf);
+		}
+	}
+
+	void DiscardDownloadQueue()
+	{
+		debug("Discarding queue");
+
+		for (const char* name : { "queue", "history" })
+		{
+			NzbgetRsBuf qBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				g_Options->GetQueueDir(), PATH_SEPARATOR, name);
+			FileSystem::DeleteFile(qBuf.data ? qBuf.data : "");
+			nzbget_rs_free(qBuf);
+		}
+
+		DirBrowser dir(g_Options->GetQueueDir());
+		while (const char* filename = dir.Next())
+		{
+			// delete all files whose names have only characters '0'..'9'
+			bool onlyNums = true;
+			for (const char* p = filename; *p; p++)
+			{
+				if (*p < '0' || *p > '9')
+				{
+					onlyNums = false;
+					break;
+				}
+			}
+			if (onlyNums)
+			{
+				for (char suffix : { '\0', 's', 'c' })
+				{
+					NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_file_state_path(
+						g_Options->GetQueueDir(), PATH_SEPARATOR, filename, suffix);
+					FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
+					nzbget_rs_free(fBuf);
+				}
+			}
+		}
+	}
+
+	bool DownloadQueueExists()
+	{
+		debug("Checking if a saved queue exists on disk");
+
+		// An empty queue still has saved state: the IDs handed out before its entries
+		// were deleted. Load it so both generators continue past those IDs.
+		for (const char* name : { "queue", "history", "ids" })
+		{
+			NzbgetRsBuf qBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				g_Options->GetQueueDir(), PATH_SEPARATOR, name);
+			bool exists = FileSystem::FileExists(qBuf.data ? qBuf.data : "");
+			nzbget_rs_free(qBuf);
+			if (exists)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void DiscardFile(int fileId, bool deleteData, bool deletePartialState, bool deleteCompletedState)
+	{
+		// info and articles file
+		if (deleteData)
+		{
+			NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_id_state_path(
+				g_Options->GetQueueDir(), PATH_SEPARATOR, fileId, '\0');
+			FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
+			nzbget_rs_free(fBuf);
+		}
+
+		// partial state file
+		if (deletePartialState)
+		{
+			NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_id_state_path(
+				g_Options->GetQueueDir(), PATH_SEPARATOR, fileId, 's');
+			FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
+			nzbget_rs_free(fBuf);
+		}
+
+		// completed state file
+		if (deleteCompletedState)
+		{
+			NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_id_state_path(
+				g_Options->GetQueueDir(), PATH_SEPARATOR, fileId, 'c');
+			FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
+			nzbget_rs_free(fBuf);
+		}
+	}
+
+	void CleanupTempDir(DownloadQueue* downloadQueue)
+	{
+		DirBrowser dir(g_Options->GetTempDir());
+		while (const char* filename = dir.Next())
+		{
+			int id = 0, part = 0;
+			int kind = nzbget_rs_dsp_classify_temp_file(filename, &id, &part);
+			bool garbage = kind == 1;
+			if (kind == 2)
+			{
+				garbage = true;
+				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+				{
+					if (nzbInfo->GetFileList()->Find(id))
+					{
+						garbage = false;
+						break;
+					}
+				}
+			}
+
+			if (garbage)
+			{
+				NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					g_Options->GetTempDir(), PATH_SEPARATOR, filename);
+				FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
+				nzbget_rs_free(fullFnBuf);
+			}
+		}
+	}
+
+	bool SaveFeeds(Feeds* feeds, FeedHistory* feedHistory)
+	{
+		debug("Saving feeds state to disk");
+
+		StateFile stateFile("feeds", DISKSTATE_FEEDS_VERSION, true);
+
+		if (nzbget_rs_dqh_diskstate_should_discard_feeds_file(
+			feeds->empty() ? 1 : 0, feedHistory->empty() ? 1 : 0) != 0)
+		{
+			stateFile.Discard();
+			return true;
+		}
+
+		StateDiskFile* outfile = stateFile.BeginWrite();
+		if (!outfile)
+		{
+			return false;
+		}
+
+		// save status
+		SaveFeedStatus(feeds, *outfile);
+
+		// save history
+		SaveFeedHistory(feedHistory, *outfile);
+
+		// now rename to dest file name
+		return stateFile.FinishWrite();
+	}
+
+	bool LoadFeeds(Feeds* feeds, FeedHistory* feedHistory)
+	{
+		debug("Loading feeds state from disk");
+
+		StateFile stateFile("feeds", DISKSTATE_FEEDS_VERSION, true);
+
+		if (!stateFile.FileExists())
+		{
+			return true;
+		}
+
+		StateDiskFile* infile = stateFile.BeginRead();
+		if (!infile)
+		{
+			return false;
+		}
+
+		bool ok = false;
+		int formatVersion = stateFile.GetFileVersion();
+
+		// load feed status
+		if (!LoadFeedStatus(feeds, *infile, formatVersion)) goto error;
+
+		// load feed history
+		if (!LoadFeedHistory(feedHistory, *infile, formatVersion)) goto error;
+
+		ok = true;
+
+	error:
+
+		if (!ok)
+		{
+			error("Error reading diskstate for feeds");
+		}
+
+		return ok;
+	}
+
+	bool SaveAllFileInfos(DownloadQueue* downloadQueue)
+	{
+		bool ok = true;
+		StateFile stateFile("files", DISKSTATE_FILE_VERSION, true);
+		if (!downloadQueue->GetQueue()->empty())
+		{
+			StateDiskFile* outfile = stateFile.BeginWrite();
+			if (!outfile)
+			{
+				return false;
+			}
+
+			// save file-infos
+
+			int fileCount = 0;
+			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+			{
+				fileCount += nzbInfo->GetFileList()->size();
+			}
+			outfile->PrintLine("%i", fileCount);
+
+			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+			{
+				for (FileInfo* fileInfo : nzbInfo->GetFileList())
+				{
+					outfile->PrintLine("%i", fileInfo->GetId());
+					SaveFileInfo(fileInfo, *outfile, false);
+				}
+			}
+
+			// now rename to dest file name
+			ok = stateFile.FinishWrite();
+		}
+		else
+		{
+			stateFile.Discard();
+		}
+
+		return ok;
+	}
+
+	bool SaveStats(Servers* servers, ServerVolumes* serverVolumes)
+	{
+		debug("Saving stats to disk");
+
+		StateFile stateFile("stats", DISKSTATE_STATS_VERSION, true);
+
+		if (servers->empty())
+		{
+			stateFile.Discard();
+			return true;
+		}
+
+		StateDiskFile* outfile = stateFile.BeginWrite();
+		if (!outfile)
+		{
+			return false;
+		}
+
+		// save server names
+		SaveServerInfo(servers, *outfile);
+
+		// save stat
+		SaveVolumeStat(serverVolumes, *outfile);
+
+		// now rename to dest file name
+		return stateFile.FinishWrite();
+	}
+
+	bool LoadStats(Servers* servers, ServerVolumes* serverVolumes, bool* perfectMatch)
+	{
+		debug("Loading stats from disk");
+
+		StateFile stateFile("stats", DISKSTATE_STATS_VERSION, true);
+
+		if (!stateFile.FileExists())
+		{
+			return true;
+		}
+
+		StateDiskFile* infile = stateFile.BeginRead();
+		if (!infile)
+		{
+			return false;
+		}
+
+		bool ok = false;
+		int formatVersion = stateFile.GetFileVersion();
+
+		if (!LoadServerInfo(servers, *infile, formatVersion, perfectMatch)) goto error;
+
+		if (formatVersion >=2)
+		{
+			if (!LoadVolumeStat(servers, serverVolumes, *infile, formatVersion)) goto error;
+		}
+
+		ok = true;
+
+	error:
+
+		if (!ok)
+		{
+			error("Error reading diskstate for statistics");
+		}
+
+		return ok;
+	}
+
+	void WriteCacheFlag()
+	{
+		NzbgetRsBuf flagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
+		BString<1024> flagFilename = flagBuf.data ? flagBuf.data : "";
+		nzbget_rs_free(flagBuf);
+
+		StateDiskFile outfile;
+		if (!outfile.Open(flagFilename, StateDiskFile::omWrite))
+		{
+			error("Error saving diskstate: Could not create file %s", *flagFilename);
+			return;
+		}
+
+		outfile.Close();
+	}
+
+	void DeleteCacheFlag()
+	{
+		NzbgetRsBuf flagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
+		FileSystem::DeleteFile(flagBuf.data ? flagBuf.data : "");
+		nzbget_rs_free(flagBuf);
+	}
+
+	void AppendNzbMessage(int nzbId, Message::EKind kind, const char* text)
+	{
+		NzbgetRsBuf logBuf = nzbget_rs_dqh_diskstate_format_nzb_log_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
+		BString<1024> logFilename = logBuf.data ? logBuf.data : "";
+		nzbget_rs_free(logBuf);
+
+		StateDiskFile outfile;
+		if (!outfile.Open(logFilename, StateDiskFile::omAppend))
+		{
+			error("Error saving log: Could not create file %s", *logFilename);
+			return;
+		}
+
+		time_t tm = Util::CurrentTime();
+		time_t rawtime = tm + g_Options->GetTimeCorrection();
+
+		BString<100> time;
+		Util::FormatTime(rawtime, time, 100);
+
+		WriteRsBuf(outfile, nzbget_rs_diskstate_format_nzb_message_line(
+			*time, (int)tm, (int)kind, text, LINE_ENDING));
+
+		outfile.Close();
+	}
+
+	void LoadNzbMessages(int nzbId, MessageList* messages)
+	{
+		// Important:
+		//   - Other threads may be writing into the log-file at any time;
+		//   - The log-file may also be deleted from another thread;
+
+		NzbgetRsBuf logBuf = nzbget_rs_dqh_diskstate_format_nzb_log_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
+		BString<1024> logFilename = logBuf.data ? logBuf.data : "";
+		nzbget_rs_free(logBuf);
+
+		if (!FileSystem::FileExists(logFilename))
+		{
+			return;
+		}
+
+		StateDiskFile infile;
+		if (!infile.Open(logFilename, StateDiskFile::omRead))
+		{
+			error("Error reading log: could not open file %s", *logFilename);
+			return;
+		}
+
+		int id = 0;
+		char line[1024];
+		while (infile.ReadLine(line, sizeof(line)))
+		{
+			Util::TrimRight(line);
+
+			int time = 0;
+			int kindInt = (int)Message::mkError;
+			size_t textOffset = 0;
+			if (!nzbget_rs_dsp_parse_log_line(line, &time, &kindInt, &textOffset)) goto exit;
+			messages->emplace_back(++id, (Message::EKind)kindInt, (time_t)time, line + textOffset);
+		}
+
+	exit:
+		infile.Close();
+		return;
+	}
 
 private:
 	// the format version of the file state LoadFileState read last
 	int m_lastFileStateVersion = 0;
-	bool SaveFileInfo(FileInfo* fileInfo, StateDiskFile& outfile, bool articles);
-	bool LoadFileInfo(FileInfo* fileInfo, StateDiskFile& outfile, int formatVersion, bool fileSummary, bool articles);
-	bool SaveFileState(FileInfo* fileInfo, StateDiskFile& outfile, bool completed);
-	bool LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFile& infile, int formatVersion, bool completed);
-	void SaveQueue(NzbList* queue, StateDiskFile& outfile);
-	bool LoadQueue(NzbList* queue, Servers* servers, StateDiskFile& infile, int formatVersion);
-	void SaveProgress(NzbList* queue, StateDiskFile& outfile, int changedCount);
-	bool LoadProgress(NzbList* queue, Servers* servers, StateDiskFile& infile, int formatVersion);
-	/* a queue, history or progress file that couldn't be read is renamed
-	 * "<name>.unreadable-<time>": the next save would overwrite it */
-	void SetAsideQueueFiles();
-	void RaiseIdsPastQueueDir();
-	void SaveIdFloor();
-	void ConvertLegacyFileStates(Servers* servers);
 	bool m_legacyQueueRead = false;
-	void SaveNzbInfo(NzbInfo* nzbInfo, StateDiskFile& outfile);
-	// this build's own data (duplicate repair) after upstream's in a queue file
-	void SaveDupeExtras(NzbInfo* nzbInfo, StateDiskFile& outfile);
-	bool LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int formatVersion);
-	void SaveDupeTrailer(const std::vector<NzbInfo*>& nzbs, StateDiskFile& outfile);
-	bool LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateDiskFile& infile);
-	bool LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& infile, int formatVersion);
-	void SaveDupInfo(DupInfo* dupInfo, StateDiskFile& outfile);
-	bool LoadDupInfo(DupInfo* dupInfo, StateDiskFile& infile, int formatVersion);
-	void SaveHistory(HistoryList* history, StateDiskFile& outfile);
-	bool LoadHistory(HistoryList* history, Servers* servers, StateDiskFile& infile, int formatVersion);
-	bool SaveFeedStatus(Feeds* feeds, StateDiskFile& outfile);
-	bool LoadFeedStatus(Feeds* feeds, StateDiskFile& infile, int formatVersion);
-	bool SaveFeedHistory(FeedHistory* feedHistory, StateDiskFile& outfile);
-	bool LoadFeedHistory(FeedHistory* feedHistory, StateDiskFile& infile, int formatVersion);
-	bool SaveServerInfo(Servers* servers, StateDiskFile& outfile);
-	bool LoadServerInfo(Servers* servers, StateDiskFile& infile, int formatVersion, bool* perfectMatch);
-	bool SaveVolumeStat(ServerVolumes* serverVolumes, StateDiskFile& outfile);
-	bool LoadVolumeStat(Servers* servers, ServerVolumes* serverVolumes, StateDiskFile& infile, int formatVersion);
-	void CalcFileStats(DownloadQueue* downloadQueue, int formatVersion);
-	bool LoadAllFileInfos(DownloadQueue* downloadQueue);
-	bool LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers);
-	bool LoadServerStats(ServerStatList* serverStatList, Servers* servers, StateDiskFile& infile);
-	void CleanupQueueDir(DownloadQueue* downloadQueue);
+
+	void RaiseIdsPastQueueDir()
+	{
+		// the last ids handed out: a download deleted for good leaves no file behind,
+		// and without them its id went to the next download after a restart (a client
+		// that still knew the old id then edited or deleted the new download)
+		CharBuffer ids;
+		NzbgetRsBuf idsPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, "ids");
+		BString<1024> idsFilename = idsPathBuf.data ? idsPathBuf.data : "";
+		nzbget_rs_free(idsPathBuf);
+		if (FileSystem::FileExists(idsFilename) && FileSystem::LoadFileIntoBuffer(idsFilename, ids, true))
+		{
+			int nzbId = 0;
+			int fileId = 0;
+			if (nzbget_rs_dsp_parse_ids_file(ids, &nzbId, &fileId))
+			{
+				NzbInfo::RaiseIdFloor(nzbId);
+				FileInfo::RaiseIdFloor(fileId);
+			}
+		}
+
+		DirBrowser dir(g_Options->GetQueueDir());
+		while (const char* filename = dir.Next())
+		{
+			int isNzbLog = 0;
+			int id = nzbget_rs_dsp_classify_queue_dir_id(filename, &isNzbLog);
+			if (id > 0)
+			{
+				if (isNzbLog)
+				{
+					NzbInfo::RaiseIdFloor(id);
+				}
+				else
+				{
+					FileInfo::RaiseIdFloor(id);
+				}
+			}
+		}
+	}
+
+	void SaveIdFloor()
+	{
+		nzbget_rs_diskstate_save_id_floor(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, NzbInfo::LastGenId(), FileInfo::LastGenId());
+	}
+
+	void ConvertLegacyFileStates(Servers* servers)
+	{
+		// "<id>" (file info), "<id>s" (partial state), "<id>c" (state of a completed file)
+		std::vector<std::pair<int, std::string>> legacy;
+		DirBrowser dir(g_Options->GetQueueDir());
+		while (const char* filename = dir.Next())
+		{
+			if (nzbget_rs_dqh_diskstate_is_candidate_queue_file_name(filename) == 0)
+			{
+				continue;
+			}
+			NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
+			BString<1024> path = pathBuf.data ? pathBuf.data : "";
+			nzbget_rs_free(pathBuf);
+			DiskFile file;
+			char header[100] = {0};
+			if (!file.Open(path, DiskFile::omRead) || !file.ReadLine(header, sizeof(header)))
+			{
+				continue;
+			}
+			file.Close();
+			int legacyId = 0;
+			int suffixKind = 0;
+			if (nzbget_rs_dsp_classify_legacy_file_state(
+				filename, header, DISKSTATE_FILE_VERSION, DISKSTATE_FILE_LEGACY_VERSION, &legacyId, &suffixKind))
+			{
+				legacy.emplace_back(legacyId, nzbget_rs_dqh_diskstate_legacy_suffix_str(suffixKind));
+			}
+		}
+		if (legacy.empty())
+		{
+			return;
+		}
+
+		// each file is written anew and renamed over the old one: a file that another user
+		// owns (an earlier nzbget run under another account) can't be opened for writing,
+		// but in a writable QueueDir it can be replaced. Not flushed one by one: thousands
+		// of syncs would hold up the start for minutes.
+		int converted = 0;
+		for (const auto& entry : legacy)
+		{
+			FileInfo fileInfo;
+			fileInfo.SetId(entry.first);
+			bool ok;
+			if (entry.second.empty())
+			{
+				ok = LoadFile(&fileInfo, true, true) && SaveFile(&fileInfo, true);
+			}
+			else
+			{
+				bool completed = entry.second == "c";
+				ok = LoadFile(&fileInfo, false, true) && LoadFileState(&fileInfo, servers, completed) &&
+					SaveFileState(&fileInfo, completed, true);
+			}
+			converted += ok ? 1 : 0;
+		}
+		info("Converted %i of %i file state(s) of an earlier build to the upstream format", converted, (int)legacy.size());
+	}
+
+	void SetAsideQueueFiles()
+	{
+		time_t now = Util::CurrentTime();
+		for (const char* name : { "queue", "history", "progress" })
+		{
+			NzbgetRsBuf fnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				g_Options->GetQueueDir(), PATH_SEPARATOR, name);
+			BString<1024> filename = fnBuf.data ? fnBuf.data : "";
+			nzbget_rs_free(fnBuf);
+			if (FileSystem::FileExists(filename))
+			{
+				NzbgetRsBuf keptBuf = nzbget_rs_dqh_diskstate_format_unreadable_path(*filename, (int64)now);
+				BString<1024> keptName = keptBuf.data ? keptBuf.data : "";
+				nzbget_rs_free(keptBuf);
+				if (FileSystem::MoveFile(filename, keptName))
+				{
+					error("Diskstate file %s could not be read; it is kept as %s", name,
+						FileSystem::BaseFileName(keptName));
+				}
+			}
+		}
+	}
+
+	void SaveQueue(NzbList* queue, StateDiskFile& outfile)
+	{
+		debug("Saving nzb list to disk");
+
+		outfile.PrintLine("%i", (int)queue->size());
+		for (NzbInfo* nzbInfo : queue)
+		{
+			SaveNzbInfo(nzbInfo, outfile);
+		}
+
+		std::vector<NzbInfo*> nzbs;
+		for (NzbInfo* nzbInfo : queue)
+		{
+			nzbs.push_back(nzbInfo);
+		}
+		SaveDupeTrailer(nzbs, outfile);
+	}
+
+	bool LoadQueue(NzbList* queue, Servers* servers, StateDiskFile& infile, int formatVersion)
+	{
+		debug("Loading nzb list from disk");
+
+		// load nzb-infos
+		int size;
+		if (infile.ScanLine("%i", &size) != 1) goto error;
+		for (int i = 0; i < size; i++)
+		{
+			std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
+			if (!LoadNzbInfo(nzbInfo.get(), servers, infile, formatVersion)) goto error;
+			queue->push_back(std::move(nzbInfo));
+		}
+
+		// (before format 57 the history follows in the same file: no trailer there)
+		if (formatVersion >= 57 && formatVersion <= DISKSTATE_QUEUE_VERSION &&
+			!LoadDupeTrailer([queue](int id) { return queue->Find(id); }, infile)) goto error;
+
+		return true;
+
+	error:
+		error("Error reading nzb list from disk");
+		return false;
+	}
+
+	void SaveProgress(NzbList* queue, StateDiskFile& outfile, int changedCount)
+	{
+		debug("Saving nzb progress to disk");
+
+		outfile.PrintLine("%i", changedCount);
+		for (NzbInfo* nzbInfo : queue)
+		{
+			if (nzbInfo->GetChanged())
+			{
+				outfile.PrintLine("%i", nzbInfo->GetId());
+				SaveNzbInfo(nzbInfo, outfile);
+			}
+		}
+
+		std::vector<NzbInfo*> changed;
+		for (NzbInfo* nzbInfo : queue)
+		{
+			if (nzbInfo->GetChanged())
+			{
+				changed.push_back(nzbInfo);
+			}
+		}
+		SaveDupeTrailer(changed, outfile);
+	}
+
+	bool LoadProgress(NzbList* queue, Servers* servers, StateDiskFile& infile, int formatVersion)
+	{
+		debug("Loading nzb progress from disk");
+
+		// load nzb-infos
+		int size;
+		if (infile.ScanLine("%i", &size) != 1) goto error;
+		for (int i = 0; i < size; i++)
+		{
+			int id;
+			if (infile.ScanLine("%i", &id) != 1) goto error;
+
+			NzbInfo* nzbInfo = queue->Find(id);
+			if (!nzbInfo)
+			{
+				// a progress record of a collection no longer queued (the queue was saved,
+				// then nzbget stopped before the progress file was discarded): read past it.
+				// It aborted the whole load, and queue and history were set aside
+				warn("Skipping saved progress of NZB with id %i, which is no longer queued", id);
+				NzbInfo stale;
+				if (!LoadNzbInfo(&stale, servers, infile, formatVersion)) goto error;
+				continue;
+			}
+
+			if (!LoadNzbInfo(nzbInfo, servers, infile, formatVersion)) goto error;
+		}
+
+		if (formatVersion <= DISKSTATE_QUEUE_VERSION &&
+			!LoadDupeTrailer([queue](int id) { return queue->Find(id); }, infile)) goto error;
+
+		return true;
+
+	error:
+		error("Error reading nzb progress from disk");
+		return false;
+	}
+
+	void SaveDupeExtras(NzbInfo* nzbInfo, StateDiskFile& outfile)
+	{
+		const StreamRepairJobList* repairJobs = nzbInfo->GetStreamRepairJobs();
+		std::vector<NzbgetRsDiskStreamHole> allHoles;
+		std::vector<NzbgetRsDiskRepairJob> jobs;
+		jobs.reserve(repairJobs->size());
+		size_t totalHoles = 0;
+		for (const StreamRepairJob& job : *repairJobs)
+		{
+			totalHoles += job.GetHoles()->size();
+		}
+		allHoles.reserve(totalHoles);
+
+		for (const StreamRepairJob& job : *repairJobs)
+		{
+			const StreamRangeList* holes = job.GetHoles();
+			size_t startIdx = allHoles.size();
+			for (const StreamRange& hole : *holes)
+			{
+				allHoles.push_back(NzbgetRsDiskStreamHole{ hole.Offset, hole.Size });
+			}
+			jobs.push_back(NzbgetRsDiskRepairJob{
+				job.GetFileId(),
+				job.GetDecodedFileSize(),
+				job.GetFailedSize(),
+				job.GetMissedSize(),
+				job.GetParFile() ? 1 : 0,
+				job.GetFailedArticles(),
+				job.GetStepsHash(),
+				job.GetFilename(),
+				holes->empty() ? nullptr : &allHoles[startIdx],
+				holes->size()
+			});
+		}
+
+		WriteRsBuf(outfile, nzbget_rs_diskstate_format_dupe_extras(
+			nzbInfo->GetDupeRecoveredArticles(),
+			nzbInfo->GetDupeRecoveredBytes(),
+			nzbInfo->GetDupeRecoveredHoles(),
+			jobs.data(),
+			jobs.size()));
+	}
+
+	bool LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int formatVersion)
+	{
+		char buf[1024];
+		uint32 recoveredHigh = 0, recoveredLow = 0;
+		int recoveredArticles = 0, recoveredHoles = 0;
+		int headerScanCnt;
+		headerScanCnt = infile.ScanLine("%i,%u,%u,%i", &recoveredArticles, &recoveredHigh, &recoveredLow,
+			&recoveredHoles);
+		if (headerScanCnt != 4 || !nzbget_rs_dsp_validate_dupe_extras_header(
+			headerScanCnt, recoveredArticles, recoveredHoles)) goto error;
+		nzbInfo->SetDupeRecoveredArticles(recoveredArticles);
+		nzbInfo->SetDupeRecoveredBytes(Util::JoinInt64(recoveredHigh, recoveredLow));
+		nzbInfo->SetDupeRecoveredHoles(recoveredHoles);
+
+		int repairCount;
+		{
+			repairCount = 0;
+			int repairScanCnt = infile.ScanLine("%i", &repairCount);
+			if (repairScanCnt != 1 || repairCount < 0 || repairCount > 100000) goto error;
+		}
+		for (int i = 0; i < repairCount; i++)
+		{
+			int fileId = 0, parFile = 0, failedArticles = 0;
+			uint32 decodedHigh = 0, decodedLow = 0, failedHigh = 0, failedLow = 0, missedHigh = 0, missedLow = 0;
+			uint32 stepsHigh = 0, stepsLow = 0;
+			int expectedJobFields = nzbget_rs_dqh_diskstate_expected_repair_job_fields(formatVersion);
+			int jobScanCnt = expectedJobFields == 11 ?
+				infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i,%u,%u", &fileId, &decodedHigh,
+					&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
+					&failedArticles, &stepsHigh, &stepsLow) :
+				infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i", &fileId, &decodedHigh,
+					&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
+					&failedArticles);
+			if (jobScanCnt != expectedJobFields || !nzbget_rs_dsp_validate_repair_job_header(
+				jobScanCnt, expectedJobFields, fileId, parFile, failedArticles)) goto error;
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			int holeCount;
+			{
+				holeCount = 0;
+				int holeScanCnt = infile.ScanLine("%i", &holeCount);
+				if (holeScanCnt != 1 || holeCount < 0 || holeCount > 1000000) goto error;
+			}
+			int64 decodedSize = Util::JoinInt64(decodedHigh, decodedLow);
+			StreamRangeList holes;
+			holes.reserve(holeCount);
+			for (int j = 0; j < holeCount; j++)
+			{
+				uint32 offsetHigh, offsetLow, sizeHigh, sizeLow;
+				if (infile.ScanLine("%u,%u,%u,%u", &offsetHigh, &offsetLow, &sizeHigh, &sizeLow) != 4) goto error;
+				int64 offset = 0;
+				int64 size = 0;
+				if (!nzbget_rs_dsp_validate_repair_hole(offsetHigh, offsetLow, sizeHigh, sizeLow, decodedSize, &offset, &size)) goto error;
+				holes.push_back({offset, size});
+			}
+			nzbInfo->GetStreamRepairJobs()->emplace_back(fileId, buf, decodedSize,
+				Util::JoinInt64(failedHigh, failedLow), Util::JoinInt64(missedHigh, missedLow),
+				failedArticles, parFile != 0, std::move(holes),
+				(uint64)Util::JoinInt64(stepsHigh, stepsLow));
+		}
+
+
+		return true;
+
+	error:
+		return false;
+	}
+
+	void SaveDupeTrailer(const std::vector<NzbInfo*>& nzbs, StateDiskFile& outfile)
+	{
+		std::vector<NzbInfo*> withExtras;
+		for (NzbInfo* nzbInfo : nzbs)
+		{
+			if (nzbget_rs_dsp_has_dupe_extras(
+				nzbInfo->GetDupeRecoveredArticles(),
+				nzbInfo->GetDupeRecoveredBytes(),
+				nzbInfo->GetDupeRecoveredHoles(),
+				nzbInfo->GetStreamRepairJobs()->size()))
+			{
+				withExtras.push_back(nzbInfo);
+			}
+		}
+		outfile.PrintLine("%s", DUPESTATE_TRAILER);
+		outfile.PrintLine("%i", (int)withExtras.size());
+		for (NzbInfo* nzbInfo : withExtras)
+		{
+			outfile.PrintLine("%i", nzbInfo->GetId());
+			SaveDupeExtras(nzbInfo, outfile);
+		}
+
+		outfile.PrintLine("%s", UNPACKSTATE_TRAILER);
+		outfile.PrintLine("%i", (int)nzbs.size());
+		for (NzbInfo* nzbInfo : nzbs)
+		{
+			std::vector<const char*> archivePtrs;
+			std::vector<CString>* archives = nzbInfo->GetExtractedArchives();
+			if (archives)
+			{
+				archivePtrs.reserve(archives->size());
+				for (const CString& arc : *archives)
+				{
+					archivePtrs.push_back(*arc ? *arc : "");
+				}
+			}
+			WriteRsBuf(outfile, nzbget_rs_diskstate_format_unpack_trailer_item(
+				nzbInfo->GetId(),
+				static_cast<int>(nzbInfo->GetDirectUnpackStatus()),
+				nzbInfo->GetUnpackTried() ? 1 : 0,
+				nzbInfo->GetParRepaired() ? 1 : 0,
+				nzbInfo->GetLastUnpackStatus(),
+				archivePtrs.data(),
+				archivePtrs.size()));
+		}
+	}
+
+	bool LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateDiskFile& infile)
+	{
+		char buf[1024];
+		if (!infile.ReadLine(buf, sizeof(buf)) || !nzbget_rs_dqh_bytes_equal(buf, DUPESTATE_TRAILER))
+		{
+			return true;	// a file upstream nzbget wrote, or one without any
+		}
+		int count = 0;
+		int countScanCnt = infile.ScanLine("%i", &count);
+		if (nzbget_rs_dqh_diskstate_is_nonneg_count_scan_invalid(countScanCnt, count) != 0) goto error;
+		for (int i = 0; i < count; i++)
+		{
+			int id;
+			if (infile.ScanLine("%i", &id) != 1) goto error;
+			NzbInfo* nzbInfo = find(id);
+			NzbInfo unknown;	// an nzb no longer listed: its extras are read and dropped
+			if (!LoadDupeExtras(nzbInfo ? nzbInfo : &unknown, infile, DISKSTATE_QUEUE_LEGACY_VERSION)) goto error;
+		}
+		if (infile.ReadLine(buf, sizeof(buf)) && nzbget_rs_dqh_bytes_equal(buf, UNPACKSTATE_TRAILER))
+		{
+			int unpackCount = 0;
+			int unpackScanCnt = infile.ScanLine("%i", &unpackCount);
+			if (nzbget_rs_dqh_diskstate_is_nonneg_count_scan_invalid(unpackScanCnt, unpackCount) != 0) goto error;
+			for (int i = 0; i < unpackCount; i++)
+			{
+				int id = 0;
+				if (infile.ScanLine("%i", &id) != 1) goto error;
+				NzbInfo* nzbInfo = find(id);
+				NzbInfo unknown;
+				NzbInfo* target = nzbInfo ? nzbInfo : &unknown;
+
+				if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+				char line2[1024];
+				char line3[1024];
+				if (!infile.ReadLine(line2, sizeof(line2))) goto error;
+				if (!infile.ReadLine(line3, sizeof(line3))) goto error;
+				int directUnpackStatus = 0, unpackTriedBool = 0, parRepairedBool = 0, lastUnpackStatus = 0;
+				if (!nzbget_rs_dsp_parse_unpack_state_lines(
+					buf, line2, line3,
+					static_cast<int>(NzbInfo::nsRunning), static_cast<int>(NzbInfo::nsNone),
+					&directUnpackStatus, &unpackTriedBool, &parRepairedBool, &lastUnpackStatus)) goto error;
+				target->SetDirectUnpackStatus(static_cast<NzbInfo::EDirectUnpackStatus>(directUnpackStatus));
+				target->SetUnpackTried(unpackTriedBool != 0);
+				target->SetParRepaired(parRepairedBool != 0);
+				target->SetLastUnpackStatus(lastUnpackStatus);
+
+				std::vector<char> largeBuf(65536);
+				if (!infile.ReadLine(largeBuf.data(), largeBuf.size())) goto error;
+				char* archivesStr = largeBuf.data();
+				if (!strncmp(archivesStr, "ExtractedArchives=", 18))
+				{
+					archivesStr += 18;
+				}
+				std::vector<CString>* archives = target->GetExtractedArchives();
+				if (archives)
+				{
+					archives->clear();
+					size_t cursor = 0, tokStart = 0, tokLen = 0;
+					while (nzbget_rs_dqh_diskstate_next_comma_token(
+						archivesStr, cursor, &tokStart, &tokLen, &cursor))
+					{
+						archives->emplace_back(archivesStr + tokStart, (int)tokLen);
+					}
+				}
+			}
+		}
+		return true;
+
+	error:
+		error("Error reading duplicate repair state from disk");
+		return false;
+	}
+
+	void SaveNzbInfo(NzbInfo* nzbInfo, StateDiskFile& outfile)
+	{
+		NzbgetRsDiskNzbInfoInput fields{};
+		fields.id = nzbInfo->GetId();
+		fields.kind = static_cast<int>(nzbInfo->GetKind());
+		fields.url = nzbInfo->GetUrl();
+		fields.filename = nzbInfo->GetFilename();
+		fields.dest_dir = nzbInfo->GetDestDir();
+		fields.final_dir = nzbInfo->GetFinalDir();
+		fields.hard_link_path = nzbInfo->GetHardLinkPath().c_str();
+		fields.meta_name = nzbInfo->GetMetaName().c_str();
+		fields.queued_filename = nzbInfo->GetQueuedFilename();
+		fields.name = nzbInfo->GetName();
+		fields.category = nzbInfo->GetCategory();
+		fields.priority = (int)nzbInfo->GetPriority();
+		fields.has_post_info = nzbInfo->GetPostInfo() ? 1 : 0;
+		fields.post_stage = nzbInfo->GetPostInfo() ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
+		fields.delete_paused = (int)nzbInfo->GetDeletePaused();
+		fields.many_dupe_files = (int)nzbInfo->GetManyDupeFiles();
+		fields.feed_id = nzbInfo->GetFeedId();
+		fields.par_status = (int)nzbInfo->GetParStatus();
+		fields.unpack_status = (int)nzbInfo->GetUnpackStatus();
+		fields.move_status = (int)nzbInfo->GetMoveStatus();
+		fields.par_rename_status = (int)nzbInfo->GetParRenameStatus();
+		fields.rar_rename_status = (int)nzbInfo->GetRarRenameStatus();
+		fields.direct_rename_status = (int)nzbInfo->GetDirectRenameStatus();
+		fields.delete_status = (int)nzbInfo->GetDeleteStatus();
+		fields.mark_status = (int)nzbInfo->GetMarkStatus();
+		fields.url_status = (int)nzbInfo->GetUrlStatus();
+		fields.unpack_cleaned_up_disk = (int)nzbInfo->GetUnpackCleanedUpDisk();
+		fields.health_paused = (int)nzbInfo->GetHealthPaused();
+		fields.add_url_paused = (int)nzbInfo->GetAddUrlPaused();
+		fields.file_count = nzbInfo->GetFileCount();
+		fields.parked_file_count = nzbInfo->GetParkedFileCount();
+		fields.message_count = nzbInfo->GetMessageCount();
+		fields.min_time = (int)nzbInfo->GetMinTime();
+		fields.max_time = (int)nzbInfo->GetMaxTime();
+		fields.par_full = (int)nzbInfo->GetParFull();
+		fields.force_par_full = nzbInfo->GetPostInfo() ? (int)nzbInfo->GetPostInfo()->GetForceParFull() : 0;
+		fields.force_repair = nzbInfo->GetPostInfo() ? (int)nzbInfo->GetPostInfo()->GetForceRepair() : 0;
+		fields.extra_par_blocks = nzbInfo->GetExtraParBlocks();
+		fields.full_content_hash = nzbInfo->GetFullContentHash();
+		fields.filtered_content_hash = nzbInfo->GetFilteredContentHash();
+		fields.size = nzbInfo->GetSize();
+		fields.success_size = nzbInfo->GetSuccessSize();
+		fields.failed_size = nzbInfo->GetFailedSize();
+		fields.par_size = nzbInfo->GetParSize();
+		fields.par_success_size = nzbInfo->GetParSuccessSize();
+		fields.par_failed_size = nzbInfo->GetParFailedSize();
+		fields.total_articles = nzbInfo->GetTotalArticles();
+		fields.success_articles = nzbInfo->GetSuccessArticles();
+		fields.failed_articles = nzbInfo->GetFailedArticles();
+		fields.dupe_key = nzbInfo->GetDupeKey();
+		fields.dupe_mode = (int)nzbInfo->GetDupeMode();
+		fields.dupe_score = nzbInfo->GetDupeScore();
+		fields.dupe_hint = (int)nzbInfo->GetDupeHint();
+		fields.downloaded_size = nzbInfo->GetDownloadedSize();
+		fields.download_sec = nzbInfo->GetDownloadSec();
+		fields.post_total_sec = nzbInfo->GetPostTotalSec();
+		fields.par_sec = nzbInfo->GetParSec();
+		fields.repair_sec = nzbInfo->GetRepairSec();
+		fields.unpack_sec = nzbInfo->GetUnpackSec();
+		fields.skip_script_processing = static_cast<int>(nzbInfo->GetSkipScriptProcessing());
+		fields.skip_disk_write = static_cast<int>(nzbInfo->GetSkipDiskWrite());
+		fields.desired_server_id = nzbInfo->GetDesiredServerId();
+
+		std::vector<NzbgetRsDiskCompletedFile> completedFiles;
+		completedFiles.reserve(nzbInfo->GetCompletedFiles()->size());
+		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+		{
+			completedFiles.push_back(NzbgetRsDiskCompletedFile{
+				completedFile.GetId(),
+				(int)completedFile.GetStatus(),
+				completedFile.GetCrc(),
+				(int)completedFile.GetParFile(),
+				completedFile.GetHash16k(),
+				completedFile.GetParSetId(),
+				completedFile.GetFilename(),
+				completedFile.GetOrigname()
+			});
+		}
+
+		std::vector<NzbgetRsDiskParam> params;
+		params.reserve(nzbInfo->GetParameters()->size());
+		for (NzbParameter& parameter : nzbInfo->GetParameters())
+		{
+			params.push_back(NzbgetRsDiskParam{ parameter.GetName(), parameter.GetValue() });
+		}
+
+		std::vector<NzbgetRsDiskScriptStatus> scripts;
+		scripts.reserve(nzbInfo->GetScriptStatuses()->size());
+		for (ScriptStatus& scriptStatus : nzbInfo->GetScriptStatuses())
+		{
+			scripts.push_back(NzbgetRsDiskScriptStatus{ (int)scriptStatus.GetStatus(), scriptStatus.GetName() });
+		}
+
+		std::vector<NzbgetRsDiskServerStat> stats;
+		stats.reserve(nzbInfo->GetServerStats()->size());
+		for (ServerStat& serverStat : nzbInfo->GetServerStats())
+		{
+			stats.push_back(NzbgetRsDiskServerStat{
+				serverStat.GetServerId(),
+				serverStat.GetSuccessArticles(),
+				serverStat.GetFailedArticles()
+			});
+		}
+
+		std::vector<NzbgetRsDiskFileStub> fileEntries;
+		fileEntries.reserve(nzbInfo->GetFileList()->size());
+		for (FileInfo* fileInfo : nzbInfo->GetFileList())
+		{
+			if (!fileInfo->GetDeleted())
+			{
+				fileEntries.push_back(NzbgetRsDiskFileStub{
+					fileInfo->GetId(),
+					(int)fileInfo->GetPaused(),
+					(int)fileInfo->GetExtraPriority()
+				});
+			}
+		}
+
+		WriteRsBuf(outfile, nzbget_rs_diskstate_format_nzb_info(
+			&fields,
+			completedFiles.data(), completedFiles.size(),
+			params.data(), params.size(),
+			scripts.data(), scripts.size(),
+			stats.data(), stats.size(),
+			fileEntries.data(), fileEntries.size()));
+	}
+
+	bool LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& infile, int formatVersion)
+	{
+		char buf[10240];
+		int parameterCount = 0;
+		int skipScriptProcessing = 0;
+		int skipDiskWrite = 0;
+		int desiredServerId = 0;
+		int numItems = 0;
+
+		int id;
+		if (infile.ScanLine("%i", &id) != 1) goto error;
+		nzbInfo->SetId(id);
+
+		int kind;
+		if (infile.ScanLine("%i", &kind) != 1) goto error;
+		nzbInfo->SetKind((NzbInfo::EKind)kind);
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		nzbInfo->SetUrl(buf);
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		nzbInfo->SetFilename(buf);
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		nzbInfo->SetDestDir(buf);
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		nzbInfo->SetFinalDir(buf);
+
+		if (formatVersion >= 63) 
+		{
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			nzbInfo->SetHardLinkPath(buf);
+		}
+
+		// format 65 was written only by pre-release DupeArticleFallback builds,
+		// which had the stream-repair state below but not the meta name
+		if (nzbget_rs_dqh_diskstate_has_meta_name_field(formatVersion) != 0)
+		{
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			nzbInfo->SetMetaName(buf);
+		}
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		nzbInfo->SetQueuedFilename(buf);
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		if (!Util::EmptyStr(buf))
+		{
+			nzbInfo->SetName(buf);
+		}
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		nzbInfo->SetCategory(buf);
+
+		int priority, postStage, deletePaused, manyDupeFiles, feedId;
+		if (formatVersion >= 54)
+		{
+			if (infile.ScanLine("%i,%i,%i,%i,%i", &priority, &postStage, &deletePaused, &manyDupeFiles, &feedId) != 5) goto error;
+		}
+		else
+		{
+			if (infile.ScanLine("%i,%i,%i,%i", &priority, &postStage, &deletePaused, &manyDupeFiles) != 4) goto error;
+			feedId = 0;
+		}
+		nzbInfo->SetPriority(priority);
+		nzbInfo->SetDeletePaused((bool)deletePaused);
+		nzbInfo->SetManyDupeFiles((bool)manyDupeFiles);
+		if (postStage > 0)
+		{
+			nzbInfo->EnterPostProcess();
+			postStage = nzbget_rs_dsp_normalize_post_stage(postStage, formatVersion, (int)PostInfo::ptFinished);
+			nzbInfo->GetPostInfo()->SetStage((PostInfo::EStage)postStage);
+		}
+		nzbInfo->SetFeedId(feedId);
+
+		int parStatus, unpackStatus, moveStatus, parRenameStatus, rarRenameStatus,
+			directRenameStatus, deleteStatus, markStatus, urlStatus;
+		if (formatVersion >= 60)
+		{
+			if (infile.ScanLine("%i,%i,%i,%i,%i,%i,%i,%i,%i", &parStatus,
+				&unpackStatus, &moveStatus, &parRenameStatus, &rarRenameStatus, &directRenameStatus,
+				&deleteStatus, &markStatus, &urlStatus) != 9) goto error;
+		}
+		else if (formatVersion >= 58)
+		{
+			directRenameStatus = 0;
+			if (infile.ScanLine("%i,%i,%i,%i,%i,%i,%i,%i", &parStatus,
+				&unpackStatus, &moveStatus, &parRenameStatus, &rarRenameStatus, &deleteStatus,
+				&markStatus, &urlStatus) != 8) goto error;
+		}
+		else
+		{
+			rarRenameStatus = directRenameStatus = 0;
+			if (infile.ScanLine("%i,%i,%i,%i,%i,%i,%i", &parStatus, &unpackStatus, &moveStatus,
+				&parRenameStatus, &deleteStatus, &markStatus, &urlStatus) != 7) goto error;
+		}
+		nzbInfo->SetParStatus((NzbInfo::EParStatus)parStatus);
+		nzbInfo->SetUnpackStatus((NzbInfo::EPostUnpackStatus)unpackStatus);
+		nzbInfo->SetMoveStatus((NzbInfo::EMoveStatus)moveStatus);
+		nzbInfo->SetParRenameStatus((NzbInfo::EPostRenameStatus)parRenameStatus);
+		nzbInfo->SetRarRenameStatus((NzbInfo::EPostRenameStatus)rarRenameStatus);
+		nzbInfo->SetDirectRenameStatus((NzbInfo::EDirectRenameStatus)directRenameStatus);
+		nzbInfo->SetDeleteStatus((NzbInfo::EDeleteStatus)deleteStatus);
+		nzbInfo->SetMarkStatus((NzbInfo::EMarkStatus)markStatus);
+		if (nzbInfo->GetKind() == NzbInfo::nkNzb || (NzbInfo::EUrlStatus)urlStatus >= NzbInfo::lsFailed)
+		{
+			nzbInfo->SetUrlStatus((NzbInfo::EUrlStatus)urlStatus);
+		}
+
+		int unpackCleanedUpDisk, healthPaused, addUrlPaused;
+		if (infile.ScanLine("%i,%i,%i", &unpackCleanedUpDisk, &healthPaused, &addUrlPaused) != 3) goto error;
+		nzbInfo->SetUnpackCleanedUpDisk((bool)unpackCleanedUpDisk);
+		nzbInfo->SetHealthPaused((bool)healthPaused);
+		nzbInfo->SetAddUrlPaused((bool)addUrlPaused);
+
+		int fileCount, parkedFileCount, messageCount;
+		if (formatVersion >= 52)
+		{
+			if (infile.ScanLine("%i,%i,%i", &fileCount, &parkedFileCount, &messageCount) != 3) goto error;
+		}
+		else
+		{
+			if (infile.ScanLine("%i,%i", &fileCount, &parkedFileCount) != 2) goto error;
+			messageCount = 0;
+		}
+		nzbInfo->SetFileCount(fileCount);
+		nzbInfo->SetParkedFileCount(parkedFileCount);
+		nzbInfo->SetMessageCount(messageCount);
+
+		int minTime, maxTime;
+		if (infile.ScanLine("%i,%i", &minTime, &maxTime) != 2) goto error;
+		nzbInfo->SetMinTime((time_t)minTime);
+		nzbInfo->SetMaxTime((time_t)maxTime);
+
+		if (formatVersion >= 51)
+		{
+			int parFull, forceParFull, forceRepair, extraParBlocks = 0;
+			if (formatVersion >= 55)
+			{
+				if (infile.ScanLine("%i,%i,%i,%i", &parFull, &forceParFull, &forceRepair, &extraParBlocks) != 4) goto error;
+			}
+			else
+			{
+				if (infile.ScanLine("%i,%i,%i", &parFull, &forceParFull, &forceRepair) != 3) goto error;
+			}
+			nzbInfo->SetParFull((bool)parFull);
+			nzbInfo->SetExtraParBlocks(extraParBlocks);
+			if (nzbInfo->GetPostInfo())
+			{
+				nzbInfo->GetPostInfo()->SetForceParFull((bool)forceParFull);
+				nzbInfo->GetPostInfo()->SetForceRepair((bool)forceRepair);
+			}
+		}
+
+		uint32 fullContentHash, filteredContentHash;
+		if (infile.ScanLine("%u,%u", &fullContentHash, &filteredContentHash) != 2) goto error;
+		nzbInfo->SetFullContentHash(fullContentHash);
+		nzbInfo->SetFilteredContentHash(filteredContentHash);
+
+		uint32 High1, Low1, High2, Low2, High3, Low3;
+		if (infile.ScanLine("%u,%u,%u,%u,%u,%u", &High1, &Low1, &High2, &Low2, &High3, &Low3) != 6) goto error;
+		nzbInfo->SetSize(Util::JoinInt64(High1, Low1));
+		nzbInfo->SetSuccessSize(Util::JoinInt64(High2, Low2));
+		nzbInfo->SetFailedSize(Util::JoinInt64(High3, Low3));
+		nzbInfo->SetCurrentSuccessSize(nzbInfo->GetSuccessSize());
+		nzbInfo->SetCurrentFailedSize(nzbInfo->GetFailedSize());
+
+		if (infile.ScanLine("%u,%u,%u,%u,%u,%u", &High1, &Low1, &High2, &Low2, &High3, &Low3) != 6) goto error;
+		nzbInfo->SetParSize(Util::JoinInt64(High1, Low1));
+		nzbInfo->SetParSuccessSize(Util::JoinInt64(High2, Low2));
+		nzbInfo->SetParFailedSize(Util::JoinInt64(High3, Low3));
+		nzbInfo->SetParCurrentSuccessSize(nzbInfo->GetParSuccessSize());
+		nzbInfo->SetParCurrentFailedSize(nzbInfo->GetParFailedSize());
+
+		int totalArticles, successArticles, failedArticles;
+		if (infile.ScanLine("%i,%i,%i", &totalArticles, &successArticles, &failedArticles) != 3) goto error;
+		nzbInfo->SetTotalArticles(totalArticles);
+		nzbInfo->SetSuccessArticles(successArticles);
+		nzbInfo->SetFailedArticles(failedArticles);
+		nzbInfo->SetCurrentSuccessArticles(successArticles);
+		nzbInfo->SetCurrentFailedArticles(failedArticles);
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		nzbInfo->SetDupeKey(buf);
+
+		int dupeMode, dupeScore, dupeHint;
+		dupeHint = 0; //clang requires initialization in a separate line (due to goto statements)
+		if (formatVersion >= 61)
+		{
+			if (infile.ScanLine("%i,%i,%i", &dupeMode, &dupeScore, &dupeHint) != 3) goto error;
+		}
+		else
+		{
+			if (infile.ScanLine("%i,%i", &dupeMode, &dupeScore) != 2) goto error;
+		}
+		nzbInfo->SetDupeMode((EDupeMode)dupeMode);
+		nzbInfo->SetDupeScore(dupeScore);
+		// (the hint went into the mode: every item came back from a restart with its
+		// mode replaced by its hint - FORCE and ALL read SCORE)
+		nzbInfo->SetDupeHint((NzbInfo::EDupeHint)dupeHint);
+
+		if (formatVersion >= 48)
+		{
+			uint32 High4, Low4, downloadSec, postTotalSec, parSec, repairSec, unpackSec;
+			if (infile.ScanLine("%u,%u,%i,%i,%i,%i,%i", &High4, &Low4, &downloadSec, &postTotalSec, &parSec, &repairSec, &unpackSec) != 7) goto error;
+			nzbInfo->SetDownloadedSize(Util::JoinInt64(High4, Low4));
+			nzbInfo->SetDownloadSec(downloadSec);
+			nzbInfo->SetPostTotalSec(postTotalSec);
+			nzbInfo->SetParSec(parSec);
+			nzbInfo->SetRepairSec(repairSec);
+			nzbInfo->SetUnpackSec(unpackSec);
+		}
+
+		nzbInfo->GetCompletedFiles()->clear();
+		if (infile.ScanLine("%i", &fileCount) != 1) goto error;
+		for (int i = 0; i < fileCount; i++)
+		{
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+
+			int id = 0;
+			const char* fileName = buf;
+			int status = 0;
+			uint32 crc = 0;
+			int parFile = 0;
+			const char* hash16k = nullptr;
+			const char* parSetId = nullptr;
+			char filenameBuf[1024];
+			char origName[1024] = {};
+
+			if (!nzbget_rs_diskstate_parse_completed_file_line(
+				buf, formatVersion, &id, &status, &crc, &parFile, &hash16k, &parSetId, &fileName))
+			{
+				goto error;
+			}
+			if (formatVersion >= 62)
+			{
+				if (!infile.ReadLine(filenameBuf, sizeof(filenameBuf))) goto error;
+				fileName = filenameBuf;
+				if (!infile.ReadLine(origName, sizeof(origName))) goto error;
+			}
+
+			nzbInfo->GetCompletedFiles()->emplace_back(
+				id, 
+				Util::EmptyStr(fileName) ? "" : fileName,
+				Util::EmptyStr(origName) ? "" : origName,
+				static_cast<CompletedFile::EStatus>(status), 
+				crc, 
+				static_cast<bool>(parFile),
+				Util::EmptyStr(hash16k) ? "" : hash16k,
+				Util::EmptyStr(parSetId) ? "" : parSetId);
+		}
+
+		nzbInfo->GetParameters()->clear();
+
+		numItems = infile.ScanLine("%i,%i,%i,%i", 
+			&parameterCount, 
+			&skipScriptProcessing, 
+			&skipDiskWrite,
+			&desiredServerId);
+
+		{
+			if (numItems != 1 && numItems != 4) goto error;
+			if (numItems == 4)
+			{
+				nzbInfo->SetSkipScriptProcessing(static_cast<bool>(skipScriptProcessing));
+				nzbInfo->SetSkipDiskWrite(static_cast<bool>(skipDiskWrite));
+				nzbInfo->SetDesiredServerId(desiredServerId);
+			}
+		}
+
+		for (int i = 0; i < parameterCount; i++)
+		{
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+
+			size_t eqPos = 0;
+			if (nzbget_rs_dqh_diskstate_find_char_pos(buf, '=', &eqPos) != 0)
+			{
+				buf[eqPos] = '\0';
+				nzbInfo->GetParameters()->SetParameter(buf, buf + eqPos + 1);
+			}
+		}
+
+		nzbInfo->GetScriptStatuses()->clear();
+		int scriptCount;
+		if (infile.ScanLine("%i", &scriptCount) != 1) goto error;
+		for (int i = 0; i < scriptCount; i++)
+		{
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+
+			size_t commaPos = 0;
+			if (nzbget_rs_dqh_diskstate_find_char_pos(buf, ',', &commaPos) != 0)
+			{
+				const char* scriptName = buf + commaPos + 1;
+				int status = atoi(buf);
+				if (status > 1 && formatVersion < 25) status--;
+				nzbInfo->GetScriptStatuses()->emplace_back(scriptName, (ScriptStatus::EStatus)status);
+			}
+		}
+
+		if (!LoadServerStats(nzbInfo->GetServerStats(), servers, infile)) goto error;
+		nzbInfo->GetCurrentServerStats()->ListOp(nzbInfo->GetServerStats(), ServerStatList::soSet);
+
+		if (formatVersion < 52)
+		{
+			int logCount;
+			if (infile.ScanLine("%i", &logCount) != 1) goto error;
+			for (int i = 0; i < logCount; i++)
+			{
+				if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			}
+		}
+
+		nzbInfo->GetFileList()->clear();
+		if (infile.ScanLine("%i", &fileCount) != 1) goto error;
+		for (int i = 0; i < fileCount; i++)
+		{
+			uint32 id, paused, time;
+			int extraPriority;
+
+			if (formatVersion >= 56)
+			{
+				if (infile.ScanLine("%i,%i,%i", &id, &paused, &extraPriority) != 3) goto error;
+			}
+			else
+			{
+				if (infile.ScanLine("%i,%i,%i,%i", &id, &paused, &time, &extraPriority) != 4) goto error;
+			}
+
+			std::unique_ptr<FileInfo> fileInfo = std::make_unique<FileInfo>();
+			fileInfo->SetId(id);
+			fileInfo->SetPaused(paused);
+			if (formatVersion < 56)
+			{
+				fileInfo->SetTime(time);
+			}
+			fileInfo->SetExtraPriority((bool)extraPriority);
+			fileInfo->SetNzbInfo(nzbInfo);
+			nzbInfo->GetFileList()->Add(std::move(fileInfo));
+		}
+
+		nzbInfo->GetStreamRepairJobs()->clear();
+		// earlier builds of this branch wrote it inline (formats 65 and 66); the trailer
+		// of the queue file carries it since
+		if ((formatVersion == 65 || formatVersion == 66) &&
+			!LoadDupeExtras(nzbInfo, infile, formatVersion)) goto error;
+
+		// restore unpack state (R3)
+		if (formatVersion >= 67)
+		{
+			char line2[1024];
+			char line3[1024];
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			if (!infile.ReadLine(line2, sizeof(line2))) goto error;
+			if (!infile.ReadLine(line3, sizeof(line3))) goto error;
+			int directUnpackStatus = 0, unpackTriedBool = 0, parRepairedBool = 0, lastUnpackStatus = 0;
+			if (!nzbget_rs_dsp_parse_unpack_state_lines(
+				buf, line2, line3,
+				static_cast<int>(NzbInfo::nsRunning), static_cast<int>(NzbInfo::nsNone),
+				&directUnpackStatus, &unpackTriedBool, &parRepairedBool, &lastUnpackStatus)) goto error;
+			nzbInfo->SetDirectUnpackStatus(static_cast<NzbInfo::EDirectUnpackStatus>(directUnpackStatus));
+			nzbInfo->SetUnpackTried(unpackTriedBool != 0);
+			nzbInfo->SetParRepaired(parRepairedBool != 0);
+			nzbInfo->SetLastUnpackStatus(lastUnpackStatus);
+
+			std::vector<char> largeBuf(65536);
+			if (!infile.ReadLine(largeBuf.data(), largeBuf.size())) goto error;
+			char* archivesStr = largeBuf.data();
+			if (!strncmp(archivesStr, "ExtractedArchives=", 18))
+			{
+				archivesStr += 18;
+			}
+			std::vector<CString>* archives = nzbInfo->GetExtractedArchives();
+			if (archives)
+			{
+				archives->clear();
+				size_t cursor = 0, tokStart = 0, tokLen = 0;
+				while (nzbget_rs_dqh_diskstate_next_comma_token(
+					archivesStr, cursor, &tokStart, &tokLen, &cursor))
+				{
+					archives->emplace_back(archivesStr + tokStart, (int)tokLen);
+				}
+			}
+		}
+
+		return true;
+
+	error:
+		error("Error reading nzb info from disk");
+		return false;
+	}
+
+	bool LoadServerStats(ServerStatList* serverStatList, Servers* servers, StateDiskFile& infile)
+	{
+		int statCount;
+		if (infile.ScanLine("%i", &statCount) != 1) goto error;
+		for (int i = 0; i < statCount; i++)
+		{
+			int serverId, successArticles, failedArticles;
+			if (infile.ScanLine("%i,%i,%i", &serverId, &successArticles, &failedArticles) != 3) goto error;
+
+			if (servers)
+			{
+				// find server (id could change if config file was edited)
+				for (NewsServer* newsServer : servers)
+				{
+					if (nzbget_rs_dqh_diskstate_matches_server_state_id(
+						newsServer->GetStateId(), serverId) != 0)
+					{
+						serverStatList->StatOp(newsServer->GetId(), successArticles, failedArticles, ServerStatList::soSet);
+					}
+				}
+			}
+		}
+
+		return true;
+
+	error:
+		error("Error reading server stats from disk");
+		return false;
+	}
+
+	bool SaveFileInfo(FileInfo* fileInfo, StateDiskFile& outfile, bool articles)
+	{
+		NzbgetRsDiskFileInfoInput fields{};
+		fields.subject = fileInfo->GetSubject();
+		fields.filename = fileInfo->GetFilename();
+		fields.origname = fileInfo->GetOrigname() ? fileInfo->GetOrigname() : "";
+		fields.output_filename = fileInfo->GetOutputFilename().c_str();
+		fields.filename_confirmed = (int)fileInfo->GetFilenameConfirmed();
+		fields.time = (int)fileInfo->GetTime();
+		fields.output_initialized = (int)fileInfo->GetOutputInitialized();
+		fields.size = fileInfo->GetSize();
+		fields.missed_size = fileInfo->GetMissedSize();
+		fields.par_file = (int)fileInfo->GetParFile();
+		fields.total_articles = fileInfo->GetTotalArticles();
+		fields.missed_articles = fileInfo->GetMissedArticles();
+
+		std::vector<const char*> groups;
+		groups.reserve(fileInfo->GetGroups()->size());
+		for (CString& group : fileInfo->GetGroups())
+		{
+			groups.push_back(*group);
+		}
+
+		std::vector<NzbgetRsDiskArticleInfo> articleEntries;
+		if (articles)
+		{
+			articleEntries.reserve(fileInfo->GetArticles()->size());
+			for (ArticleInfo* articleInfo : fileInfo->GetArticles())
+			{
+				articleEntries.push_back(NzbgetRsDiskArticleInfo{
+					articleInfo->GetPartNumber(),
+					articleInfo->GetSize(),
+					nzbget_rs_dqh_diskstate_select_original_or_current_msg_id(
+						articleInfo->GetDupeOriginalMessageId(),
+						articleInfo->GetMessageId())
+				});
+			}
+		}
+
+		WriteRsBuf(outfile, nzbget_rs_diskstate_format_file_info(
+			&fields,
+			groups.data(), groups.size(),
+			articles ? 1 : 0,
+			articleEntries.data(), articleEntries.size()));
+
+		return true;
+	}
+
+	bool LoadFileInfo(FileInfo* fileInfo, StateDiskFile& infile, int formatVersion, bool fileSummary, bool articles)
+	{
+		char buf[1024];
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		if (fileSummary && !Util::EmptyStr(buf)) fileInfo->SetSubject(buf);
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		if (fileSummary && !Util::EmptyStr(buf)) fileInfo->SetFilename(buf);
+
+		if (formatVersion >= 6)
+		{
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			if (fileSummary && !Util::EmptyStr(buf)) fileInfo->SetOrigname(buf);
+		}
+
+		if (formatVersion >= 7)
+		{
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			if (!Util::EmptyStr(buf))
+			{
+				fileInfo->SetOutputFilename(buf);
+			}
+		}
+
+		if (formatVersion >= 5)
+		{
+			int time = 0, filenameConfirmed = 0, outputInitialized = 0;
+			int cnt = infile.ScanLine("%i,%i,%i", &filenameConfirmed, &time, &outputInitialized);
+			if (cnt < 2) goto error;
+			if (fileSummary) fileInfo->SetFilenameConfirmed(static_cast<bool>(filenameConfirmed));
+			if (fileSummary) fileInfo->SetTime(static_cast<time_t>(time));
+			if (fileSummary && cnt >= 3)
+			{
+				bool directWriteOpt = g_Options && g_Options->GetDirectWrite();
+				bool forceDirectWrite = fileInfo->GetForceDirectWrite();
+				bool hasOwnOutFile = false;
+				bool hasOutTmp = false;
+				bool hasForceDest = false;
+				if (nzbget_rs_dqh_diskstate_should_probe_direct_write_files(
+					outputInitialized, directWriteOpt ? 1 : 0, forceDirectWrite ? 1 : 0) != 0)
+				{
+					const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
+					hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
+						FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
+					if (destDir && !Util::EmptyStr(destDir))
+					{
+						NzbgetRsBuf outTmpBuf = nzbget_rs_dqh_diskstate_format_out_tmp_path(
+							destDir, PATH_SEPARATOR, fileInfo->GetId());
+						hasOutTmp = FileSystem::FileExists(outTmpBuf.data ? outTmpBuf.data : "");
+						nzbget_rs_free(outTmpBuf);
+					}
+					if (forceDirectWrite && destDir && !Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()))
+					{
+						NzbgetRsBuf forceDestBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+							destDir, PATH_SEPARATOR, fileInfo->GetFilename());
+						hasForceDest = FileSystem::FileExists(forceDestBuf.data ? forceDestBuf.data : "");
+						nzbget_rs_free(forceDestBuf);
+					}
+				}
+				bool restoredOutputInit = nzbget_rs_dsp_eval_restored_output_init(
+					outputInitialized,
+					directWriteOpt ? 1 : 0,
+					forceDirectWrite ? 1 : 0,
+					hasOwnOutFile ? 1 : 0,
+					hasOutTmp ? 1 : 0,
+					hasForceDest ? 1 : 0) != 0;
+				fileInfo->SetOutputInitialized(restoredOutputInit);
+			}
+		}
+		else if (formatVersion >= 4)
+		{
+			int time;
+			if (infile.ScanLine("%i", &time) != 1) goto error;
+			if (fileSummary) fileInfo->SetTime(static_cast<time_t>(time));
+		}
+
+		uint32 High, Low;
+		if (infile.ScanLine("%u,%u", &High, &Low) != 2) goto error;
+		if (fileSummary) fileInfo->SetSize(Util::JoinInt64(High, Low));
+		if (fileSummary) fileInfo->SetRemainingSize(fileInfo->GetSize());
+
+		if (infile.ScanLine("%u,%u", &High, &Low) != 2) goto error;
+		if (fileSummary) fileInfo->SetMissedSize(Util::JoinInt64(High, Low));
+		if (fileSummary) fileInfo->SetRemainingSize(fileInfo->GetSize() - fileInfo->GetMissedSize());
+
+		int parFile;
+		if (infile.ScanLine("%i", &parFile) != 1) goto error;
+		if (fileSummary) fileInfo->SetParFile(static_cast<bool>(parFile));
+
+		int totalArticles, missedArticles;
+		if (infile.ScanLine("%i,%i", &totalArticles, &missedArticles) != 2) goto error;
+		if (fileSummary) fileInfo->SetTotalArticles(totalArticles);
+		if (fileSummary) fileInfo->SetMissedArticles(missedArticles);
+
+		int size;
+		if (infile.ScanLine("%i", &size) != 1) goto error;
+		for (int i = 0; i < size; i++)
+		{
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			if (fileSummary && !Util::EmptyStr(buf)) fileInfo->GetGroups()->push_back(buf);
+		}
+
+		if (articles)
+		{
+			if (infile.ScanLine("%i", &size) != 1) goto error;
+			for (int i = 0; i < size; i++)
+			{
+				int PartNumber, PartSize;
+				if (infile.ScanLine("%i,%i", &PartNumber, &PartSize) != 2) goto error;
+
+				if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+
+				std::unique_ptr<ArticleInfo> articleInfo = std::make_unique<ArticleInfo>();
+				articleInfo->SetPartNumber(PartNumber);
+				articleInfo->SetSize(PartSize);
+				articleInfo->SetMessageId(buf);
+				fileInfo->GetArticles()->push_back(std::move(articleInfo));
+			}
+		}
+
+		return true;
+
+	error:
+		error("Error reading diskstate for file %i", fileInfo->GetId());
+		return false;
+	}
+
+	bool SaveFileState(FileInfo* fileInfo, StateDiskFile& outfile, bool completed)
+	{
+		NzbgetRsDiskFileStateInput fields{};
+		fields.success_articles = fileInfo->GetSuccessArticles();
+		fields.failed_articles = fileInfo->GetFailedArticles();
+		fields.remaining_size = fileInfo->GetRemainingSize();
+		fields.success_size = fileInfo->GetSuccessSize();
+		fields.failed_size = fileInfo->GetFailedSize();
+		fields.filename = fileInfo->GetFilename();
+		fields.hash16k = fileInfo->GetHash16k() ? fileInfo->GetHash16k() : "";
+		fields.par_set_id = fileInfo->GetParSetId() ? fileInfo->GetParSetId() : "";
+		fields.par_file = (int)fileInfo->GetParFile();
+		fields.decoded_file_size = fileInfo->GetDecodedFileSize();
+		fields.output_initialized = (int)fileInfo->GetOutputInitialized();
+
+		std::vector<NzbgetRsDiskServerStat> stats;
+		stats.reserve(fileInfo->GetServerStats()->size());
+		for (ServerStat& serverStat : fileInfo->GetServerStats())
+		{
+			stats.push_back(NzbgetRsDiskServerStat{
+				serverStat.GetServerId(),
+				serverStat.GetSuccessArticles(),
+				serverStat.GetFailedArticles()
+			});
+		}
+
+		std::vector<NzbgetRsDiskArticleState> articles;
+		articles.reserve(fileInfo->GetArticles()->size());
+		for (ArticleInfo* articleInfo : fileInfo->GetArticles())
+		{
+			int savedStatus = 0;
+			int stagedFallback = nzbget_rs_dsp_calc_staged_fallback(
+				completed ? 1 : 0,
+				(int)articleInfo->GetStatus(),
+				(int)ArticleInfo::aiFinished,
+				articleInfo->GetDupeFallbackRound(),
+				articleInfo->GetResultFilename() ? 1 : 0,
+				(int)ArticleInfo::aiUndefined,
+				&savedStatus);
+			articles.push_back(NzbgetRsDiskArticleState{
+				savedStatus,
+				articleInfo->GetSegmentOffset(),
+				articleInfo->GetSegmentSize(),
+				articleInfo->GetCrc(),
+				stagedFallback
+			});
+		}
+
+		WriteRsBuf(outfile, nzbget_rs_diskstate_format_file_state(
+			&fields,
+			stats.data(), stats.size(),
+			articles.data(), articles.size()));
+
+		outfile.Close();
+		return true;
+	}
+
+	bool LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFile& infile, int formatVersion, bool completed)
+	{
+		bool hasArticles = !fileInfo->GetArticles()->empty();
+
+		int successArticles, failedArticles;
+		if (infile.ScanLine("%i,%i", &successArticles, &failedArticles) != 2) goto error;
+		fileInfo->SetSuccessArticles(successArticles);
+		fileInfo->SetFailedArticles(failedArticles);
+
+		uint32 High1, Low1, High2, Low2, High3, Low3;
+		if (infile.ScanLine("%u,%u,%u,%u,%u,%u", &High1, &Low1, &High2, &Low2, &High3, &Low3) != 6) goto error;
+		fileInfo->SetRemainingSize(Util::JoinInt64(High1, Low1));
+		fileInfo->SetSuccessSize(Util::JoinInt64(High2, Low2));
+		fileInfo->SetFailedSize(Util::JoinInt64(High3, Low3));
+		if (formatVersion >= 8)
+		{
+			uint32 decodedHigh, decodedLow;
+			if (infile.ScanLine("%u,%u", &decodedHigh, &decodedLow) != 2) goto error;
+			fileInfo->SetDecodedFileSize(Util::JoinInt64(decodedHigh, decodedLow));
+		}
+
+		char buf[1024];
+
+		if (formatVersion >= 4)
+		{
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			if (!Util::EmptyStr(buf)) fileInfo->SetFilename(buf);
+		}
+
+		if (formatVersion >= 5)
+		{
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			fileInfo->SetHash16k(*buf ? buf : nullptr);
+			if (formatVersion >= 6)
+			{
+				if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+				fileInfo->SetParSetId(*buf ? buf : nullptr);
+			}
+			int parFile = 0;
+			if (infile.ScanLine("%i", &parFile) != 1) goto error;
+			fileInfo->SetParFile((bool)parFile);
+		}
+
+		if (!LoadServerStats(fileInfo->GetServerStats(), servers, infile)) goto error;
+
+		int completedArticles;
+		completedArticles = 0; //clang requires initialization in a separate line (due to goto statements)
+
+		int size;
+		if (infile.ScanLine("%i", &size) != 1) goto error;
+		// the state of a file with its articles loaded can't list more (a stale or
+		// damaged state file did: at() threw out of the queue coordinator). Fewer is
+		// fine, as upstream has it: older queues saved some states with none
+		if (!nzbget_rs_dsp_validate_article_count(
+			size, hasArticles ? 1 : 0, (int)fileInfo->GetArticles()->size()))
+		{
+			goto error;
+		}
+		for (int i = 0; i < size; i++)
+		{
+			if (!hasArticles)
+			{
+				fileInfo->GetArticles()->push_back(std::make_unique<ArticleInfo>());
+			}
+			std::unique_ptr<ArticleInfo>& pa = fileInfo->GetArticles()->at(i);
+
+			int statusInt = 0;
+
+			int64 segmentOffset = 0;
+			uint32 crc = 0;
+			int segmentSize = 0;
+			int stagedFallback = 0;
+			int fields = 0;
+			if (formatVersion >= 2)
+			{
+				fields = infile.ScanLine("%i,%" PRIi64 ",%i,%u,%i", &statusInt, &segmentOffset,
+					&segmentSize, &crc, &stagedFallback);
+			}
+			else
+			{
+				fields = infile.ScanLine("%i", &statusInt);
+			}
+			bool needStagedCheck = nzbget_rs_dsp_need_staged_file_check(
+				completed ? 1 : 0,
+				formatVersion,
+				statusInt,
+				(int)ArticleInfo::aiFinished,
+				segmentOffset,
+				segmentSize,
+				stagedFallback,
+				pa->GetPartNumber(),
+				g_Options->GetDirectWrite() ? 1 : 0,
+				fileInfo->GetForceDirectWrite() ? 1 : 0) != 0;
+			bool stagedFileExists = false;
+			if (needStagedCheck)
+			{
+				NzbgetRsBuf stagedBuf = nzbget_rs_dqh_diskstate_format_staged_part_path(
+					g_Options->GetTempDir(), PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber());
+				stagedFileExists = FileSystem::FileExists(stagedBuf.data ? stagedBuf.data : "");
+				nzbget_rs_free(stagedBuf);
+			}
+			NzbgetRsArticleLoadEval eval{};
+			if (!nzbget_rs_dsp_eval_article_load_state(
+				formatVersion,
+				completed ? 1 : 0,
+				fields,
+				statusInt,
+				segmentOffset,
+				segmentSize,
+				stagedFallback,
+				pa->GetPartNumber(),
+				stagedFileExists ? 1 : 0,
+				g_Options->GetDirectWrite() ? 1 : 0,
+				fileInfo->GetForceDirectWrite() ? 1 : 0,
+				pa->GetResultFilename() ? 1 : 0,
+				completedArticles,
+				size,
+				&eval))
+			{
+				goto error;
+			}
+			if (formatVersion >= 2)
+			{
+				pa->SetSegmentOffset(eval.segment_offset);
+				pa->SetSegmentSize(eval.segment_size);
+				pa->SetCrc(crc);
+			}
+			pa->SetDupeFallbackRound(eval.dupe_fallback_round);
+			if (eval.need_result_filename)
+			{
+				NzbgetRsBuf resBuf = nzbget_rs_dqh_diskstate_format_staged_part_path(
+					g_Options->GetTempDir(), PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber());
+				pa->SetResultFilename(resBuf.data ? resBuf.data : "");
+				nzbget_rs_free(resBuf);
+			}
+			completedArticles = eval.completed_articles;
+			pa->SetStatus((ArticleInfo::EStatus)eval.status);
+		}
+
+		fileInfo->SetCompletedArticles(completedArticles);
+
+		if (formatVersion < 8)
+		{
+			// data after upstream's data, where this build wrote it
+			char trailer[1024];
+			while (infile.ReadLine(trailer, sizeof(trailer)))
+			{
+				int64 decodedSize = 0;
+				int outputInit = 0;
+				int trailerKind = nzbget_rs_dsp_parse_legacy_file_state_trailer(
+					trailer, &decodedSize, &outputInit);
+				if (trailerKind == 1)
+				{
+					fileInfo->SetDecodedFileSize(decodedSize);
+				}
+				else if (trailerKind == 2)
+				{
+					fileInfo->SetOutputInitialized(outputInit != 0);
+				}
+			}
+		}
+
+		// Validate or recover DirectWrite OutputInitialized against the actual on-disk direct-write output file
+		if (g_Options && (g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()))
+		{
+			const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
+			bool hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
+				FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
+			bool hasOutTmp = false;
+			if (destDir && !Util::EmptyStr(destDir))
+			{
+				NzbgetRsBuf outTmpBuf = nzbget_rs_dqh_diskstate_format_out_tmp_path(
+					destDir, PATH_SEPARATOR, fileInfo->GetId());
+				hasOutTmp = FileSystem::FileExists(outTmpBuf.data ? outTmpBuf.data : "");
+				nzbget_rs_free(outTmpBuf);
+			}
+			bool hasCompletedDest = false;
+			if (nzbget_rs_dqh_diskstate_can_check_completed_dest_file(
+				completed ? 1 : 0,
+				fileInfo->GetForceDirectWrite() ? 1 : 0,
+				Util::EmptyStr(destDir) ? 1 : 0,
+				Util::EmptyStr(fileInfo->GetFilename()) ? 1 : 0) != 0)
+			{
+				NzbgetRsBuf compDestBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					destDir, PATH_SEPARATOR, fileInfo->GetFilename());
+				hasCompletedDest = FileSystem::FileExists(compDestBuf.data ? compDestBuf.data : "");
+				nzbget_rs_free(compDestBuf);
+			}
+			bool hasDirectWriteOutput = hasOwnOutFile || hasOutTmp || hasCompletedDest;
+
+			int newOutputInitialized = 0;
+			int pickPathKind = 0;
+			nzbget_rs_dsp_reconcile_direct_write_output(
+				fileInfo->GetOutputInitialized() ? 1 : 0,
+				hasOwnOutFile ? 1 : 0,
+				hasOutTmp ? 1 : 0,
+				hasCompletedDest ? 1 : 0,
+				fileInfo->GetSuccessArticles(),
+				completed ? 1 : 0,
+				fileInfo->GetOutputFilename().empty() ? 1 : 0,
+				&newOutputInitialized,
+				&pickPathKind);
+			fileInfo->SetOutputInitialized(newOutputInitialized != 0);
+			if (pickPathKind != 0)
+			{
+				NzbgetRsBuf pickedBuf = pickPathKind == 1 ?
+					nzbget_rs_dqh_diskstate_format_out_tmp_path(destDir, PATH_SEPARATOR, fileInfo->GetId()) :
+					nzbget_rs_tpr_article_writer_format_dest_file_path(destDir, PATH_SEPARATOR, fileInfo->GetFilename());
+				fileInfo->SetOutputFilename(pickedBuf.data ? pickedBuf.data : "");
+				nzbget_rs_free(pickedBuf);
+			}
+		}
+
+		infile.Close();
+		return true;
+
+	error:
+		infile.Close();
+		error("Error reading diskstate for file %i", fileInfo->GetId());
+		return false;
+	}
+
+	void SaveDupInfo(DupInfo* dupInfo, StateDiskFile& outfile)
+	{
+		WriteRsBuf(outfile, nzbget_rs_diskstate_format_dup_info(
+			(int)dupInfo->GetStatus(),
+			dupInfo->GetSize(),
+			dupInfo->GetFullContentHash(),
+			dupInfo->GetFilteredContentHash(),
+			dupInfo->GetDupeScore(),
+			(int)dupInfo->GetDupeMode(),
+			dupInfo->GetName(),
+			dupInfo->GetDupeKey()));
+	}
+
+	bool LoadDupInfo(DupInfo* dupInfo, StateDiskFile& infile, int formatVersion)
+	{
+		char buf[1024];
+
+		int status;
+		uint32 High, Low;
+		uint32 fullContentHash, filteredContentHash = 0;
+		int dupeScore, dupeMode;
+		if (infile.ScanLine("%i,%u,%u,%u,%u,%i,%i", &status, &High, &Low, &fullContentHash, &filteredContentHash, &dupeScore, &dupeMode) != 7) goto error;
+
+		dupInfo->SetStatus((DupInfo::EStatus)status);
+		dupInfo->SetFullContentHash(fullContentHash);
+		dupInfo->SetFilteredContentHash(filteredContentHash);
+		dupInfo->SetSize(Util::JoinInt64(High, Low));
+		dupInfo->SetDupeScore(dupeScore);
+		dupInfo->SetDupeMode((EDupeMode)dupeMode);
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		dupInfo->SetName(buf);
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		dupInfo->SetDupeKey(buf);
+
+		return true;
+
+	error:
+		return false;
+	}
+
+	void SaveHistory(HistoryList* history, StateDiskFile& outfile)
+	{
+		debug("Saving history to disk");
+
+		outfile.PrintLine("%i", (int)history->size());
+		for (HistoryInfo* historyInfo : history)
+		{
+			outfile.PrintLine("%i,%i,%i", historyInfo->GetId(), (int)historyInfo->GetKind(), (int)historyInfo->GetTime());
+
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
+			{
+				SaveNzbInfo(historyInfo->GetNzbInfo(), outfile);
+			}
+			else if (historyInfo->GetKind() == HistoryInfo::hkDup)
+			{
+				SaveDupInfo(historyInfo->GetDupInfo(), outfile);
+			}
+		}
+
+		std::vector<NzbInfo*> nzbs;
+		for (HistoryInfo* historyInfo : history)
+		{
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
+			{
+				nzbs.push_back(historyInfo->GetNzbInfo());
+			}
+		}
+		SaveDupeTrailer(nzbs, outfile);
+	}
+
+	bool LoadHistory(HistoryList* history, Servers* servers, StateDiskFile& infile, int formatVersion)
+	{
+		debug("Loading history from disk");
+
+		int size;
+		if (infile.ScanLine("%i", &size) != 1) goto error;
+		for (int i = 0; i < size; i++)
+		{
+			std::unique_ptr<HistoryInfo> historyInfo;
+			HistoryInfo::EKind kind = HistoryInfo::hkNzb;
+			int id = 0;
+			int time;
+
+			int kindval = 0;
+			if (infile.ScanLine("%i,%i,%i", &id, &kindval, &time) != 3) goto error;
+			kind = (HistoryInfo::EKind)kindval;
+
+			if (kind == HistoryInfo::hkNzb)
+			{
+				std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
+				if (!LoadNzbInfo(nzbInfo.get(), servers, infile, formatVersion)) goto error;
+				nzbInfo->LeavePostProcess();
+				historyInfo = std::make_unique<HistoryInfo>(std::move(nzbInfo));
+			}
+			else if (kind == HistoryInfo::hkUrl)
+			{
+				std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
+				if (!LoadNzbInfo(nzbInfo.get(), servers, infile, formatVersion)) goto error;
+				historyInfo = std::make_unique<HistoryInfo>(std::move(nzbInfo));
+			}
+			else if (kind == HistoryInfo::hkDup)
+			{
+				std::unique_ptr<DupInfo> dupInfo = std::make_unique<DupInfo>();
+				if (!LoadDupInfo(dupInfo.get(), infile, formatVersion)) goto error;
+				dupInfo->SetId(id);
+				historyInfo = std::make_unique<HistoryInfo>(std::move(dupInfo));
+			}
+			else
+			{
+				// a kind no version writes (a damaged record): the file can't be read on
+				error("Unknown history record kind %i", kindval);
+				goto error;
+			}
+
+			historyInfo->SetTime((time_t)time);
+
+			history->push_back(std::move(historyInfo));
+		}
+
+		if (formatVersion >= 57 && formatVersion <= DISKSTATE_QUEUE_VERSION &&
+			!LoadDupeTrailer([history](int id) -> NzbInfo*
+				{
+					for (HistoryInfo* historyInfo : history)
+					{
+						if (nzbget_rs_dqh_diskstate_matches_history_nzb_id(
+							(int)historyInfo->GetKind(),
+							(int)HistoryInfo::hkNzb,
+							(int)HistoryInfo::hkUrl,
+							(historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl) ?
+								historyInfo->GetNzbInfo()->GetId() : 0,
+							id) != 0)
+						{
+							return historyInfo->GetNzbInfo();
+						}
+					}
+					return nullptr;
+				}, infile)) goto error;
+
+		return true;
+
+	error:
+		error("Error reading diskstate for history");
+		return false;
+	}
+
+	void CleanupQueueDir(DownloadQueue* downloadQueue)
+	{
+		// Prepare sorted id lists for faster search
+
+		std::vector<int> nzbIdList;
+		std::vector<int> fileIdList;
+
+		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+		{
+			nzbIdList.push_back(nzbInfo->GetId());
+
+			for (FileInfo* fileInfo : nzbInfo->GetFileList())
+			{
+				fileIdList.push_back(fileInfo->GetId());
+			}
+
+			for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+			{
+				fileIdList.push_back(completedFile.GetId());
+			}
+		}
+
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb ||
+				historyInfo->GetKind() == HistoryInfo::hkUrl)
+			{
+				NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
+				nzbIdList.push_back(nzbInfo->GetId());
+
+				for (FileInfo* fileInfo : nzbInfo->GetFileList())
+				{
+					fileIdList.push_back(fileInfo->GetId());
+				}
+
+				for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+				{
+					fileIdList.push_back(completedFile.GetId());
+				}
+			}
+		}
+
+		std::sort(nzbIdList.begin(), nzbIdList.end());
+		std::sort(fileIdList.begin(), fileIdList.end());
+
+		// Do cleanup
+
+		int deletedFiles = 0;
+
+		DirBrowser dir(g_Options->GetQueueDir());
+		while (const char* filename = dir.Next())
+		{
+			bool del = nzbget_rs_dsp_is_orphan_queue_file(
+				filename,
+				fileIdList.data(), fileIdList.size(),
+				nzbIdList.data(), nzbIdList.size()) != 0;
+
+			if (del)
+			{
+				NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
+				detail("Deleting orphaned diskstate file %s", filename);
+				FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
+				nzbget_rs_free(fullFnBuf);
+				deletedFiles++;
+			}
+		}
+
+		if (deletedFiles > 0)
+		{
+			info("Deleted %i orphaned diskstate file(s)", deletedFiles);
+		}
+	}
+
+	bool SaveFeedStatus(Feeds* feeds, StateDiskFile& outfile)
+	{
+		debug("Saving feed status to disk");
+
+		std::vector<const char*> urls;
+		std::vector<uint32_t> filterHashes;
+		std::vector<int> lastUpdates;
+		urls.reserve(feeds->size());
+		filterHashes.reserve(feeds->size());
+		lastUpdates.reserve(feeds->size());
+		for (FeedInfo* feedInfo : feeds)
+		{
+			urls.push_back(feedInfo->GetUrl());
+			filterHashes.push_back(feedInfo->GetFilterHash());
+			lastUpdates.push_back((int)feedInfo->GetLastUpdate());
+		}
+		WriteRsBuf(outfile, nzbget_rs_diskstate_format_feed_status(
+			urls.data(), filterHashes.data(), lastUpdates.data(), urls.size()));
+
+		return true;
+	}
+
+	bool LoadFeedStatus(Feeds* feeds, StateDiskFile& infile, int formatVersion)
+	{
+		debug("Loading feed status from disk");
+
+		int size;
+		if (infile.ScanLine("%i", &size) != 1) goto error;
+		for (int i = 0; i < size; i++)
+		{
+			char url[1024];
+			if (!infile.ReadLine(url, sizeof(url))) goto error;
+
+			char filter[1024];
+			if (formatVersion == 2)
+			{
+				if (!infile.ReadLine(filter, sizeof(filter))) goto error;
+			}
+
+			uint32 filterHash = 0;
+			if (formatVersion >= 3)
+			{
+				if (infile.ScanLine("%u", &filterHash) != 1) goto error;
+			}
+
+			int lastUpdate = 0;
+			if (infile.ScanLine("%i", &lastUpdate) != 1) goto error;
+
+			for (FeedInfo* feedInfo : feeds)
+			{
+				if (nzbget_rs_dsp_feed_status_matches(
+					feedInfo->GetUrl(),
+					url,
+					formatVersion,
+					formatVersion == 2 ? feedInfo->GetFilter() : "",
+					formatVersion == 2 ? filter : "",
+					feedInfo->GetFilterHash(),
+					filterHash) != 0)
+				{
+					feedInfo->SetLastUpdate((time_t)lastUpdate);
+				}
+			}
+		}
+
+		return true;
+
+	error:
+		error("Error reading feed status from disk");
+		return false;
+	}
+
+	bool SaveFeedHistory(FeedHistory* feedHistory, StateDiskFile& outfile)
+	{
+		debug("Saving feed history to disk");
+
+		std::vector<int> statuses;
+		std::vector<int> lastSeens;
+		std::vector<const char*> urls;
+		statuses.reserve(feedHistory->size());
+		lastSeens.reserve(feedHistory->size());
+		urls.reserve(feedHistory->size());
+		for (FeedHistoryInfo& feedHistoryInfo : feedHistory)
+		{
+			statuses.push_back((int)feedHistoryInfo.GetStatus());
+			lastSeens.push_back((int)feedHistoryInfo.GetLastSeen());
+			urls.push_back(feedHistoryInfo.GetUrl());
+		}
+		WriteRsBuf(outfile, nzbget_rs_diskstate_format_feed_history(
+			statuses.data(), lastSeens.data(), urls.data(), urls.size()));
+
+		return true;
+	}
+
+	bool LoadFeedHistory(FeedHistory* feedHistory, StateDiskFile& infile, int formatVersion)
+	{
+		debug("Loading feed history from disk");
+
+		int size;
+		if (infile.ScanLine("%i", &size) != 1) goto error;
+		for (int i = 0; i < size; i++)
+		{
+			int status = 0;
+			int lastSeen = 0;
+			int r = infile.ScanLine("%i,%i", &status, &lastSeen);
+			if (r != 2) goto error;
+
+			char url[1024];
+			if (!infile.ReadLine(url, sizeof(url))) goto error;
+
+			feedHistory->emplace_back(url, (FeedHistoryInfo::EStatus)(status), (time_t)(lastSeen));
+		}
+
+		return true;
+
+	error:
+		error("Error reading feed history from disk");
+		return false;
+	}
+
+	void CalcFileStats(DownloadQueue* downloadQueue, int formatVersion)
+	{
+		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+		{
+			nzbInfo->UpdateCurrentStats();
+		}
+	}
+
+	bool LoadAllFileInfos(DownloadQueue* downloadQueue)
+	{
+		if (downloadQueue->GetQueue()->empty())
+		{
+			return true;
+		}
+
+		StateFile stateFile("files", DISKSTATE_FILE_VERSION, false, DISKSTATE_FILE_LEGACY_VERSION);
+		StateDiskFile* infile = nullptr;
+		bool useHibernate = false;
+
+		if (stateFile.FileExists())
+		{
+			infile = stateFile.BeginRead();
+			useHibernate = infile != nullptr;
+			if (useHibernate)
+			{
+				int fileCount = 0;
+				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+				{
+					fileCount += nzbInfo->GetFileList()->size();
+				}
+				int size = 0;
+				int scanCnt = infile->ScanLine("%i", &size);
+				useHibernate = scanCnt == 1 && size == fileCount;
+			}
+			if (!useHibernate)
+			{
+				stateFile.Discard();
+			}
+		}
+
+		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+		{
+			RawFileList brokenFileInfos;
+
+			for (FileInfo* fileInfo : nzbInfo->GetFileList())
+			{
+				bool res = false;
+				if (useHibernate)
+				{
+					int id = 0;
+					infile->ScanLine("%i", &id);
+					if (id == fileInfo->GetId())
+					{
+						res = LoadFileInfo(fileInfo, *infile, stateFile.GetFileVersion(), true, false);
+					}
+				}
+				if (!res)
+				{
+					res = LoadFile(fileInfo, true, false);
+				}
+				if (!res)
+				{
+					brokenFileInfos.push_back(fileInfo);
+				}
+			}
+
+			for (FileInfo* fileInfo : brokenFileInfos)
+			{
+				nzbInfo->GetFileList()->Remove(fileInfo);
+			}
+		}
+
+		return true;
+	}
+
+	bool LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers)
+	{
+		NzbgetRsBuf cacheFlagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
+		bool cacheWasActive = FileSystem::FileExists(cacheFlagBuf.data ? cacheFlagBuf.data : "");
+		nzbget_rs_free(cacheFlagBuf);
+
+		DirBrowser dir(g_Options->GetQueueDir());
+		while (const char* filename = dir.Next())
+		{
+			int id = 0;
+			char suffix = '\0';
+			if (nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(filename, &id, &suffix) != 0)
+			{
+				if (suffix == 'c' || (g_Options->GetContinuePartial() && !cacheWasActive))
+				{
+					for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+					{
+						for (FileInfo* fileInfo : nzbInfo->GetFileList())
+						{
+							if (fileInfo->GetId() == id)
+							{
+								// a damaged state file (cut short by a power loss: partial states
+								// are written in place) costs only its own progress: the load left
+								// blank articles behind, which then downloaded nothing, and the rest
+								// of the queue dir's states weren't read
+								int successArticles = fileInfo->GetSuccessArticles();
+								int failedArticles = fileInfo->GetFailedArticles();
+								int64 remainingSize = fileInfo->GetRemainingSize();
+								int64 successSize = fileInfo->GetSuccessSize();
+								int64 failedSize = fileInfo->GetFailedSize();
+								if (!LoadFileState(fileInfo, servers, suffix == 'c'))
+								{
+									warn("Discarding damaged download state %s", filename);
+									fileInfo->GetArticles()->clear();
+									fileInfo->SetSuccessArticles(successArticles);
+									fileInfo->SetFailedArticles(failedArticles);
+									fileInfo->SetRemainingSize(remainingSize);
+									fileInfo->SetSuccessSize(successSize);
+									fileInfo->SetFailedSize(failedSize);
+									NzbgetRsBuf dmgFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+										g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
+									FileSystem::DeleteFile(dmgFnBuf.data ? dmgFnBuf.data : "");
+									nzbget_rs_free(dmgFnBuf);
+									goto next;
+								}
+								if (m_lastFileStateVersion > DISKSTATE_FILE_VERSION)
+								{
+									// an earlier build of this branch wrote it: rewritten in the
+									// format an nzbget without duplicate repair reads too
+									SaveFileState(fileInfo, suffix == 'c');
+								}
+								fileInfo->GetArticles()->clear();
+								fileInfo->SetPartialState(suffix == 'c' ? FileInfo::psCompleted : FileInfo::psPartial);
+								goto next;
+							}
+						}
+					}
+				}
+				else
+				{
+					NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+						g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
+					FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
+					nzbget_rs_free(fullFnBuf);
+				}
+			}
+			next:;
+		}
+
+		return true;
+	}
+
+	bool SaveServerInfo(Servers* servers, StateDiskFile& outfile)
+	{
+		debug("Saving server info to disk");
+
+		std::vector<const char*> names;
+		std::vector<const char*> hosts;
+		std::vector<int> ports;
+		std::vector<const char*> users;
+		names.reserve(servers->size());
+		hosts.reserve(servers->size());
+		ports.reserve(servers->size());
+		users.reserve(servers->size());
+		for (NewsServer* newsServer : servers)
+		{
+			names.push_back(newsServer->GetName());
+			hosts.push_back(newsServer->GetHost());
+			ports.push_back(newsServer->GetPort());
+			users.push_back(newsServer->GetUser());
+		}
+		WriteRsBuf(outfile, nzbget_rs_diskstate_format_server_info(
+			names.data(), hosts.data(), ports.data(), users.data(), names.size()));
+
+		return true;
+	}
+
+	bool LoadServerInfo(Servers* servers, StateDiskFile& infile, int formatVersion, bool* perfectMatch)
+	{
+		debug("Loading server info from disk");
+
+		*perfectMatch = true;
+
+		int size = 0;
+		std::vector<int> refIds;
+		std::vector<CString> refNameStrs;
+		std::vector<CString> refHostStrs;
+		std::vector<int> refPorts;
+		std::vector<CString> refUserStrs;
+		if (infile.ScanLine("%i", &size) != 1 || size < 0) goto error;
+		refIds.reserve(size);
+		refNameStrs.reserve(size);
+		refHostStrs.reserve(size);
+		refPorts.reserve(size);
+		refUserStrs.reserve(size);
+		for (int i = 0; i < size; i++)
+		{
+			char name[1024];
+			if (!infile.ReadLine(name, sizeof(name))) goto error;
+
+			char host[200];
+			if (!infile.ReadLine(host, sizeof(host))) goto error;
+
+			int port;
+			if (infile.ScanLine("%i", &port) != 1) goto error;
+
+			char user[100];
+			if (!infile.ReadLine(user, sizeof(user))) goto error;
+
+			refIds.push_back(i + 1);
+			refNameStrs.emplace_back(name);
+			refHostStrs.emplace_back(host);
+			refPorts.push_back(port);
+			refUserStrs.emplace_back(user);
+		}
+
+		{
+			std::vector<const char*> srvNames;
+			std::vector<const char*> srvHosts;
+			std::vector<int> srvPorts;
+			std::vector<const char*> srvUsers;
+			srvNames.reserve(servers->size());
+			srvHosts.reserve(servers->size());
+			srvPorts.reserve(servers->size());
+			srvUsers.reserve(servers->size());
+			for (NewsServer* newsServer : servers)
+			{
+				srvNames.push_back(newsServer->GetName());
+				srvHosts.push_back(newsServer->GetHost());
+				srvPorts.push_back(newsServer->GetPort());
+				srvUsers.push_back(newsServer->GetUser());
+			}
+
+			std::vector<const char*> refNames;
+			std::vector<const char*> refHosts;
+			std::vector<const char*> refUsers;
+			refNames.reserve(refNameStrs.size());
+			refHosts.reserve(refHostStrs.size());
+			refUsers.reserve(refUserStrs.size());
+			for (size_t i = 0; i < refNameStrs.size(); i++)
+			{
+				refNames.push_back(*refNameStrs[i]);
+				refHosts.push_back(*refHostStrs[i]);
+				refUsers.push_back(*refUserStrs[i]);
+			}
+
+			std::vector<int> outStateIds(servers->size(), 0);
+			*perfectMatch = nzbget_rs_dsp_match_servers(
+				srvNames.data(), srvHosts.data(), srvPorts.data(), srvUsers.data(), servers->size(),
+				refIds.data(), refNames.data(), refHosts.data(), refPorts.data(), refUsers.data(), refIds.size(),
+				outStateIds.data()) != 0;
+
+			size_t idx = 0;
+			for (NewsServer* newsServer : servers)
+			{
+				newsServer->SetStateId(outStateIds[idx++]);
+			}
+		}
+
+		debug("******** MATCHING NEWS-SERVERS **********");
+		for (NewsServer* newsServer : servers)
+		{
+			*perfectMatch = *perfectMatch && newsServer->GetStateId();
+			debug("Server %i -> %i", newsServer->GetId(), newsServer->GetStateId());
+			debug("Server %i.Name: %s", newsServer->GetId(), newsServer->GetName());
+			debug("Server %i.Host: %s:%i", newsServer->GetId(), newsServer->GetHost(), newsServer->GetPort());
+		}
+
+		debug("All servers perfectly matched: %s", *perfectMatch ? "yes" : "no");
+
+		return true;
+
+	error:
+		error("Error reading server info from disk");
+
+		return false;
+	}
+
+	bool SaveVolumeStat(ServerVolumes* serverVolumes, StateDiskFile& outfile)
+	{
+		debug("Saving volume stats to disk");
+
+		outfile.PrintLine("%i", (int)serverVolumes->size());
+		for (ServerVolume& serverVolume : serverVolumes)
+		{
+			const auto& articlesPerDays = serverVolume.GetArticlesPerDays();
+			std::vector<NzbgetRsRpcArticlePair> articleEntries;
+			articleEntries.reserve(articlesPerDays.size());
+			for (const ServerVolume::Articles& articles : articlesPerDays)
+			{
+				articleEntries.push_back(NzbgetRsRpcArticlePair{ articles.failed, articles.success });
+			}
+
+			const ServerVolume::VolumeArray* bps = serverVolume.BytesPerSeconds();
+			const ServerVolume::VolumeArray* bpm = serverVolume.BytesPerMinutes();
+			const ServerVolume::VolumeArray* bph = serverVolume.BytesPerHours();
+			const ServerVolume::VolumeArray* bpd = serverVolume.BytesPerDays();
+
+			NzbgetRsDiskVolumeStatInput volInput{
+				serverVolume.GetFirstDay(),
+				static_cast<int>(serverVolume.GetDataTime()),
+				static_cast<int>(serverVolume.GetCustomTime()),
+				static_cast<int>(serverVolume.GetCountersResetTime()),
+				serverVolume.GetTotalBytes(),
+				serverVolume.GetCustomBytes(),
+				bps->data(), bps->size(),
+				bpm->data(), bpm->size(),
+				bph->data(), bph->size(),
+				bpd->data(), bpd->size(),
+				articleEntries.data(), articleEntries.size()
+			};
+			WriteRsBuf(outfile, nzbget_rs_diskstate_format_volume_stat_item(&volInput));
+		}
+
+		return true;
+	}
+
+	bool LoadVolumeStat(Servers* servers, ServerVolumes* serverVolumes, StateDiskFile& infile, int formatVersion)
+	{
+		debug("Loading volume stats from disk");
+
+		int size;
+		std::vector<int32_t> srvStateIds;
+		std::vector<int32_t> srvIds;
+		if (infile.ScanLine("%i", &size) != 1) goto error;
+		srvStateIds.reserve(servers->size());
+		srvIds.reserve(servers->size());
+		for (NewsServer* newsServer : servers)
+		{
+			srvStateIds.push_back(newsServer->GetStateId());
+			srvIds.push_back(newsServer->GetId());
+		}
+		for (int i = 0; i < size; i++)
+		{
+			ServerVolume* serverVolume = nullptr;
+
+			int slotIdx = nzbget_rs_dqh_diskstate_select_volume_server_slot(
+				i, srvStateIds.data(), srvIds.data(), srvStateIds.size());
+			if (slotIdx >= 0)
+			{
+				serverVolume = &serverVolumes->at(slotIdx);
+			}
+
+			int firstDay, dataTime, customTime, countersResetTime;
+			uint32 High1, Low1, High2 = 0, Low2 = 0;
+			if (formatVersion >= 4)
+			{
+				if (infile.ScanLine("%i,%i,%i,%i", &firstDay, &dataTime,&customTime, &countersResetTime) != 4) goto error;
+				if (infile.ScanLine("%u,%u,%u,%u", &High1, &Low1, &High2, &Low2) != 4) goto error;
+
+				if (serverVolume)
+				{
+					serverVolume->SetCustomTime(static_cast<time_t>(customTime));
+					serverVolume->SetCountersResetTime(static_cast<time_t>(countersResetTime));
+				}
+			}
+			else if (formatVersion == 3)
+			{
+				if (infile.ScanLine("%i,%i,%i", &firstDay, &dataTime,&customTime) != 3) goto error;
+				if (infile.ScanLine("%u,%u,%u,%u", &High1, &Low1, &High2, &Low2) != 4) goto error;
+
+				if (serverVolume)
+				{
+					serverVolume->SetCustomTime(static_cast<time_t>(customTime));
+					time_t firstDayTime = static_cast<time_t>(firstDay * 86400);
+					serverVolume->SetCountersResetTime(firstDayTime);
+				}
+			}
+			else
+			{
+				if (infile.ScanLine("%i,%i", &firstDay, &dataTime) != 2) goto error;
+				if (infile.ScanLine("%u,%u", &High1, &Low1) != 2) goto error;
+			}
+			if (serverVolume) serverVolume->SetFirstDay(firstDay);
+			if (serverVolume) serverVolume->SetDataTime((time_t)dataTime);
+			if (serverVolume) serverVolume->SetTotalBytes(Util::JoinInt64(High1, Low1));
+			if (serverVolume) serverVolume->SetCustomBytes(Util::JoinInt64(High2, Low2));
+
+			ServerVolume::VolumeArray* VolumeArrays[] = { 
+				serverVolume ? serverVolume->BytesPerSeconds() : nullptr,
+				serverVolume ? serverVolume->BytesPerMinutes() : nullptr,
+				serverVolume ? serverVolume->BytesPerHours() : nullptr,
+				serverVolume ? serverVolume->BytesPerDays() : nullptr };
+			for (int k=0; k < 4; k++)
+			{
+				ServerVolume::VolumeArray* volumeArray = VolumeArrays[k];
+
+				// the seconds, minutes and hours arrays have fixed sizes (the counters
+				// index them by the clock), the days one grows: a count from the file
+				// sized them, and a wrong one (damaged file) threw at every start or
+				// left them too short for the counters
+				int arrSize;
+				if (infile.ScanLine("%i", &arrSize) != 1) goto error;
+				int targetVolumeSize = 0;
+				if (!nzbget_rs_dsp_calc_volume_slot_size(k, arrSize, &targetVolumeSize)) goto error;
+				if (volumeArray) volumeArray->assign(targetVolumeSize, 0);
+
+				for (int j = 0; j < arrSize; j++)
+				{
+					if (infile.ScanLine("%u,%u", &High1, &Low1) != 2) goto error;
+					if (nzbget_rs_dqh_diskstate_can_store_volume_slot(
+						volumeArray != nullptr ? 1 : 0,
+						j,
+						volumeArray ? volumeArray->size() : 0) != 0)
+					{
+						(*volumeArray)[j] = Util::JoinInt64(High1, Low1);
+					}
+				}
+			}
+
+			if (formatVersion >= 4)
+			{
+				uint32 arrSize;
+				if (infile.ScanLine("%u", &arrSize) != 1) goto error;
+				if (arrSize > 100000) goto error;
+
+				ServerVolume::ArticlesArray articlesArr;
+				articlesArr.reserve(arrSize);
+
+				ServerVolume::Articles articles;
+				while (arrSize--)
+				{
+					if (infile.ScanLine("%u,%u", &articles.failed, &articles.success) != 2) goto error;
+					articlesArr.push_back(articles);
+				}
+
+				if (serverVolume) serverVolume->SetArticlesPerDays(std::move(articlesArr));
+			}
+		}
+
+		return true;
+
+	error:
+		error("Error reading volume stats from disk");
+
+		return false;
+	}
 };
 
 extern DiskState* g_DiskState;
@@ -10419,203 +13804,6 @@ namespace TlsCipherBackend
 #ifndef STATMETER_H
 #define STATMETER_H
 
-class ServerVolume
-{
-public:
-	struct Articles
-	{
-		uint32 failed;
-		uint32 success;
-	};
-	struct Stats
-	{
-		uint32 bytes;
-		Articles articles;
-	};
-
-	using VolumeArray = std::vector<int64>;
-	using ArticlesArray = std::vector<Articles>;
-
-	VolumeArray* BytesPerSeconds() { return &m_bytesPerSeconds; }
-	VolumeArray* BytesPerMinutes() { return &m_bytesPerMinutes; }
-	VolumeArray* BytesPerHours() { return &m_bytesPerHours; }
-	VolumeArray* BytesPerDays() { return &m_bytesPerDays; }
-
-	const ArticlesArray& GetArticlesPerDays() const { return m_articlesPerDays; }
-	void SetArticlesPerDays(ArticlesArray articles) { m_articlesPerDays = std::move(articles); }
-	void SetFirstDay(int firstDay) { m_firstDay = firstDay; }
-	int GetFirstDay() { return m_firstDay; }
-	void SetTotalBytes(int64 totalBytes) { m_totalBytes = totalBytes; }
-	int64 GetTotalBytes() { return m_totalBytes; }
-	void SetCustomBytes(int64 customBytes) { m_customBytes = customBytes; }
-	int64 GetCustomBytes() { return m_customBytes; }
-	int GetSecSlot() { return m_secSlot; }
-	int GetMinSlot() { return m_minSlot; }
-	int GetHourSlot() { return m_hourSlot; }
-	int GetDaySlot() { return m_daySlot; }
-	time_t GetDataTime() { return m_dataTime; }
-	void SetDataTime(time_t dataTime) { m_dataTime = dataTime; }
-	time_t GetCustomTime() { return m_customTime; }
-	void SetCustomTime(time_t customTime) { m_customTime = customTime; }
-	time_t GetCountersResetTime() { return m_countersResetTime; }
-	void SetCountersResetTime(time_t time) { m_countersResetTime = time; }
-
-	void CalcSlots(time_t locCurTime)
-	{
-		NzbgetRsVolumeSlots slots;
-		nzbget_rs_volume_calc_slots(locCurTime, &m_firstDay, &slots);
-		m_secSlot = slots.sec;
-		m_minSlot = slots.min;
-		m_hourSlot = slots.hour;
-		m_daySlot = slots.day;
-		if (slots.inRange)
-		{
-			size_t newBytesDaysLen = nzbget_rs_tpr_server_volume_required_day_len(
-				m_daySlot, m_bytesPerDays.size());
-			if (newBytesDaysLen > 0)
-			{
-				m_bytesPerDays.resize(newBytesDaysLen);
-			}
-
-			size_t newArtDaysLen = nzbget_rs_tpr_server_volume_required_day_len(
-				m_daySlot, m_articlesPerDays.size());
-			if (newArtDaysLen > 0)
-			{
-				m_articlesPerDays.resize(newArtDaysLen);
-			}
-		}
-	}
-
-	void AddStats(Stats stats)
-	{
-		time_t curTime = Util::CurrentTime();
-		time_t locCurTime = curTime + g_WorkState->GetLocalTimeOffset();
-		time_t locDataTime = m_dataTime + g_WorkState->GetLocalTimeOffset();
-
-		int lastMinSlot = m_minSlot;
-		int lastHourSlot = m_hourSlot;
-
-		CalcSlots(locCurTime);
-
-		int64 bytes = static_cast<int64>(stats.bytes);
-		NzbgetRsVolumeSlots slots{m_secSlot, m_minSlot, m_hourSlot, m_daySlot, 0};
-		nzbget_rs_volume_add(m_bytesPerSeconds.data(), m_bytesPerSeconds.size(), m_bytesPerMinutes.data(),
-			m_bytesPerMinutes.size(), m_bytesPerHours.data(), m_bytesPerHours.size(), &slots, lastMinSlot,
-			lastHourSlot, locCurTime, locDataTime, bytes);
-		size_t daySlotIdx = m_daySlot >= 0 ? static_cast<size_t>(m_daySlot) : 0;
-		int64 curDayBytes = m_daySlot >= 0 ? m_bytesPerDays[daySlotIdx] : 0;
-		int curDayFailed = m_daySlot >= 0 ? m_articlesPerDays[daySlotIdx].failed : 0;
-		int curDaySuccess = m_daySlot >= 0 ? m_articlesPerDays[daySlotIdx].success : 0;
-		int updateDay = 0;
-		int64 newDayBytes = 0, newTotalBytes = 0, newCustomBytes = 0;
-		int newDayFailed = 0, newDaySuccess = 0;
-		nzbget_rs_statmeter_accum_day_and_total_volume(
-			m_daySlot, curDayBytes, curDayFailed, curDaySuccess,
-			m_totalBytes, m_customBytes, bytes, stats.articles.failed, stats.articles.success,
-			&updateDay, &newDayBytes, &newDayFailed, &newDaySuccess, &newTotalBytes, &newCustomBytes);
-		if (updateDay != 0)
-		{
-			m_bytesPerDays[daySlotIdx] = newDayBytes;
-			m_articlesPerDays[daySlotIdx].failed = newDayFailed;
-			m_articlesPerDays[daySlotIdx].success = newDaySuccess;
-		}
-		m_totalBytes = newTotalBytes;
-		m_customBytes = newCustomBytes;
-
-		m_dataTime = curTime;
-	}
-
-	void Reset()
-	{
-		m_totalBytes = 0;
-		m_dataTime = 0;
-		m_firstDay = 0;
-		m_countersResetTime = Util::CurrentTime();
-
-		ResetVolume(m_bytesPerSeconds);
-		ResetVolume(m_bytesPerMinutes);
-		ResetVolume(m_bytesPerHours);
-		ResetVolume(m_bytesPerDays);
-
-		ResetArticles();
-		ResetCustom();
-	}
-
-	void ResetCustom()
-	{
-		m_customBytes = 0;
-		m_customTime = Util::CurrentTime();
-	}
-
-	void LogDebugInfo()
-	{
-		info("   ---------- ServerVolume");
-
-		NzbgetRsBuf secsBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
-			0, m_bytesPerSeconds.data(), m_bytesPerSeconds.size());
-		info("Secs: %s", secsBuf.data ? secsBuf.data : "");
-		nzbget_rs_free(secsBuf);
-
-		NzbgetRsBuf minsBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
-			0, m_bytesPerMinutes.data(), m_bytesPerMinutes.size());
-		info("Mins: %s", minsBuf.data ? minsBuf.data : "");
-		nzbget_rs_free(minsBuf);
-
-		NzbgetRsBuf hoursBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
-			0, m_bytesPerHours.data(), m_bytesPerHours.size());
-		info("Hours: %s", hoursBuf.data ? hoursBuf.data : "");
-		nzbget_rs_free(hoursBuf);
-
-		NzbgetRsBuf daysBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
-			m_firstDay, m_bytesPerDays.data(), m_bytesPerDays.size());
-		info("Days: %s", daysBuf.data ? daysBuf.data : "");
-		nzbget_rs_free(daysBuf);
-	}
-
-private:
-	void ResetVolume(VolumeArray& volume)
-	{
-		for (int64& size : volume)
-		{
-			size = 0;
-		}
-	}
-
-	void ResetArticles()
-	{
-		for (Articles& articles : m_articlesPerDays)
-		{
-			articles.failed = 0;
-			articles.success = 0;
-		}
-	}
-
-	VolumeArray m_bytesPerSeconds = VolumeArray(60);
-	VolumeArray m_bytesPerMinutes = VolumeArray(60);
-	VolumeArray m_bytesPerHours = VolumeArray(24);
-	VolumeArray m_bytesPerDays;
-	ArticlesArray m_articlesPerDays;
-
-	int m_firstDay = 0;
-	int64 m_totalBytes = 0;
-	int64 m_customBytes = 0;
-
-	/** Date/time when the data was last updated (time is in C/Unix format) */
-	time_t m_dataTime = 0;
-
-	/** Date/time of the last reset of custom counter (time is in C/Unix format) */
-	time_t m_customTime = Util::CurrentTime();
-
-	/** Date/time of the last reset of all counters (time is in C/Unix format) */
-	time_t m_countersResetTime = Util::CurrentTime();
-
-	int m_secSlot = 0;
-	int m_minSlot = 0;
-	int m_hourSlot = 0;
-	int m_daySlot = 0;
-};
-
-using ServerVolumes = std::vector<ServerVolume>;
 using GuardedServerVolumes = GuardedPtr<ServerVolumes>;
 
 class StatMeter : public Debuggable
@@ -13336,3282 +16524,6 @@ private:
 };
 
 #endif
-
-static const char* FORMATVERSION_SIGNATURE = "nzbget diskstate file version ";
-// The queue, history and file-state files are written in upstream nzbget's formats
-// (64 and 7), so that an nzbget without duplicate repair still reads them: it ignores
-// the trailer that carries this build's own data (stream-repair jobs, recovery
-// counters, decoded file sizes). Earlier builds of this branch wrote that data inline
-// as formats 65/66 and 8/9: those are still read, once, and rewritten in the new form.
-inline const int DISKSTATE_QUEUE_VERSION = 64;
-inline const int DISKSTATE_QUEUE_LEGACY_VERSION = 66;
-inline const int DISKSTATE_FILE_VERSION = 7;
-inline const int DISKSTATE_FILE_LEGACY_VERSION = 9;
-// the line that starts this build's data after upstream's in a queue, history or progress file
-inline const char* DUPESTATE_TRAILER = "#dupestate 1";
-inline const char* UNPACKSTATE_TRAILER = "#unpackstate 1";
-inline const int DISKSTATE_STATS_VERSION = 4;
-inline const int DISKSTATE_FEEDS_VERSION = 3;
-
-class StateDiskFile : public DiskFile
-{
-public:
-	int64 PrintLine(const char* format, ...) PRINTF_SYNTAX(2)
-	{
-		// a line of any length: one of 1,024 characters or more (a long url sent with
-		// appendurl) was written past a fixed buffer, onto the stack, and the state file
-		// got garbage (unreadable at the next start) or nzbget crashed (SIGSEGV). The
-		// reader cuts a longer line to its buffer.
-		va_list ap;
-		va_start(ap, format);
-		va_list ap2;
-		va_copy(ap2, ap);
-		int len = vsnprintf(nullptr, 0, format, ap);
-		va_end(ap);
-		if (len < 0)
-		{
-			va_end(ap2);
-			return 0;
-		}
-		std::vector<char> str(len + 1);
-		vsnprintf(str.data(), str.size(), format, ap2);
-		va_end(ap2);
-
-		// a line break inside a value (a name, key or url sent through the API) split
-		// the record over two lines, and the whole file was set aside as unreadable at
-		// the next start: it is kept as a space
-		nzbget_rs_dsp_sanitize_line_breaks(str.data(), (size_t)len);
-
-		// replacing terminating <NULL> with <LF>
-		str[len++] = '\n';
-
-		Write(str.data(), len);
-
-		return len;
-	}
-
-	char* ReadLine(char* buffer, int64 size)
-	{
-		if (!DiskFile::ReadLine(buffer, size))
-		{
-			return nullptr;
-		}
-
-		// remove traling '\n'
-		int needsScroll = 0;
-		size_t newLen = 0;
-		if (nzbget_rs_dsp_inspect_read_line(buffer, &needsScroll, &newLen) != 0)
-		{
-			if (needsScroll != 0)
-			{
-				// the line is longer than "size", scroll file position to the end of the line
-				for (char skipbuf[1024]; DiskFile::ReadLine(skipbuf, 1024); )
-				{
-					int skipScroll = 0;
-					if (nzbget_rs_dsp_inspect_read_line(skipbuf, &skipScroll, nullptr) == 0 || skipScroll == 0)
-					{
-						break;
-					}
-				}
-			}
-
-			buffer[newLen] = 0;
-		}
-
-		return buffer;
-	}
-
-	/*
-	* Standard "fscanf" scans beoynd current line if the next line is empty.
-	* This wrapper fixes that.
-	*/
-	int ScanLine(const char* format, ...) SCANF_SYNTAX(2)
-	{
-		char line[1024];
-		if (!ReadLine(line, sizeof(line)))
-		{
-			return 0;
-		}
-
-		va_list ap;
-		va_start(ap, format);
-		int res = vsscanf(line, format, ap);
-		va_end(ap);
-
-		return res;
-	}
-};
-
-static inline void WriteRsBuf(StateDiskFile& outfile, NzbgetRsBuf buf)
-{
-	if (buf.data && buf.len > 0)
-	{
-		outfile.Write(buf.data, buf.len);
-	}
-	nzbget_rs_free(buf);
-}
-
-class StateFile
-{
-public:
-	/* readVersion: the newest version read (default: the one written) */
-	StateFile(const char* filename, int formatVersion, bool transactional, int readVersion = 0) :
-		m_formatVersion(formatVersion),
-		m_readVersion(nzbget_rs_dqh_diskstate_resolve_read_version(readVersion, formatVersion)),
-		m_transactional(transactional)
-	{
-		NzbgetRsBuf destBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, filename ? filename : "");
-		m_destFilename = destBuf.data ? destBuf.data : "";
-		nzbget_rs_free(destBuf);
-		if (m_transactional)
-		{
-			NzbgetRsBuf tempBuf = nzbget_rs_dqh_diskstate_format_new_path(*m_destFilename);
-			m_tempFilename = tempBuf.data ? tempBuf.data : "";
-			nzbget_rs_free(tempBuf);
-		}
-		else
-		{
-			m_tempFilename = *m_destFilename;
-		}
-	}
-
-	void Discard()
-	{
-		FileSystem::DeleteFile(m_destFilename);
-		// a temp file left from an interrupted write would be "restored" at the next
-		// start as if the write had finished (a partial file, all state set aside)
-		if (m_transactional)
-		{
-			FileSystem::DeleteFile(m_tempFilename);
-		}
-	}
-
-	void SetFlush(bool flush) { m_flush = flush; }
-
-	bool FileExists()
-	{
-		return nzbget_rs_dqh_diskstate_state_file_exists(
-			FileSystem::FileExists(m_destFilename) ? 1 : 0,
-			m_transactional ? 1 : 0,
-			m_transactional && FileSystem::FileExists(m_tempFilename) ? 1 : 0) != 0;
-	}
-
-	StateDiskFile* BeginWrite()
-	{
-		if (!m_file.Open(m_tempFilename, StateDiskFile::omWrite))
-		{
-			error("Error saving diskstate: Could not create file %s: %s", *m_tempFilename,
-				*FileSystem::GetLastErrorMessage());
-			return nullptr;
-		}
-
-		m_file.PrintLine("%s%i", FORMATVERSION_SIGNATURE, m_formatVersion);
-
-		return &m_file;
-	}
-
-	bool FinishWrite()
-	{
-		if (!m_transactional)
-		{
-			m_file.Close();
-			return true;
-		}
-
-		// flush file content before renaming
-		if (nzbget_rs_dqh_diskstate_should_flush_queue_file(
-			m_flush ? 1 : 0, g_Options->GetFlushQueue() ? 1 : 0) != 0)
-		{
-			debug("Flushing data for file %s", FileSystem::BaseFileName(m_tempFilename));
-			m_file.Flush();
-			CString errmsg;
-			if (!m_file.Sync(errmsg))
-			{
-				warn("Could not flush file %s into disk: %s", *m_tempFilename, *errmsg);
-			}
-		}
-
-		m_file.Close();
-
-		// now rename to dest file name
-		FileSystem::DeleteFile(m_destFilename);
-		if (!FileSystem::MoveFile(m_tempFilename, m_destFilename))
-		{
-			error("Error saving diskstate: Could not rename file %s to %s: %s",
-				*m_tempFilename, *m_destFilename, *FileSystem::GetLastErrorMessage());
-			return false;
-		}
-
-		// flush directory buffer after renaming
-		if (nzbget_rs_dqh_diskstate_should_flush_queue_file(
-			m_flush ? 1 : 0, g_Options->GetFlushQueue() ? 1 : 0) != 0)
-		{
-			debug("Flushing directory for file %s", FileSystem::BaseFileName(m_destFilename));
-			CString errmsg;
-			if (!FileSystem::FlushDirBuffers(m_destFilename, errmsg))
-			{
-				warn("Could not flush directory buffers for file %s into disk: %s", *m_destFilename, *errmsg);
-			}
-		}
-
-		return true;
-	}
-
-	StateDiskFile* BeginRead()
-	{
-		// with the dest-file there, a temp-file is what an interrupted write left (the
-		// dest-file is deleted only right before the temp-file takes its place)
-		int recoveryMode = nzbget_rs_dqh_diskstate_classify_begin_read_recovery(
-			m_transactional ? 1 : 0,
-			FileSystem::FileExists(m_destFilename) ? 1 : 0,
-			FileSystem::FileExists(m_tempFilename) ? 1 : 0);
-		if (recoveryMode == 1)
-		{
-			FileSystem::DeleteFile(m_tempFilename);
-		}
-		else if (recoveryMode == 2)
-		{
-			// disaster recovery: temp-file exists but the dest-file doesn't
-			warn("Restoring diskstate file %s from %s", FileSystem::BaseFileName(m_destFilename), FileSystem::BaseFileName(m_tempFilename));
-			if (!FileSystem::MoveFile(m_tempFilename, m_destFilename))
-			{
-				error("Error restoring diskstate: Could not rename file %s to %s: %s",
-					*m_tempFilename, *m_destFilename, *FileSystem::GetLastErrorMessage());
-				return nullptr;
-			}
-		}
-
-		if (!m_file.Open(m_destFilename, StateDiskFile::omRead))
-		{
-			error("Error reading diskstate: could not open file %s: %s", *m_destFilename,
-				*FileSystem::GetLastErrorMessage());
-			return nullptr;
-		}
-
-		char FileSignatur[128];
-		m_file.ReadLine(FileSignatur, sizeof(FileSignatur));
-		m_fileVersion = nzbget_rs_dsp_parse_format_version(FileSignatur);
-		if (nzbget_rs_dqh_diskstate_is_file_version_unsupported(m_fileVersion, m_readVersion) != 0)
-		{
-			error("Could not load diskstate file %s due to file version mismatch", *m_destFilename);
-			m_file.Close();
-			return nullptr;
-		}
-
-		return &m_file;
-	}
-
-	int GetFileVersion() { return m_fileVersion; }
-
-private:
-	BString<1024> m_destFilename;
-	BString<1024> m_tempFilename;
-	int m_formatVersion;
-	int m_readVersion;
-	bool m_transactional;
-	bool m_flush = true;
-	int m_fileVersion = 0;
-	StateDiskFile m_file;
-};
-
-
-/* Save Download Queue to Disk.
- * The Disk State consists of file "queue", which contains the order of files,
- * and of one diskstate-file for each file in download queue.
- * This function saves file "queue" and files with NZB-info. It does not
- * save file-infos.
- */
-inline bool DiskState::SaveDownloadQueue(DownloadQueue* downloadQueue, bool saveHistory)
-{
-	debug("Saving queue and history to disk");
-
-	bool ok = true;
-
-	{
-		StateFile stateFile("queue", DISKSTATE_QUEUE_VERSION, true);
-		if (!downloadQueue->GetQueue()->empty())
-		{
-			StateDiskFile* outfile = stateFile.BeginWrite();
-			if (!outfile)
-			{
-				return false;
-			}
-
-			// save nzb-infos
-			SaveQueue(downloadQueue->GetQueue(), *outfile);
-
-			// now rename to dest file name
-			ok = stateFile.FinishWrite();
-		}
-		else
-		{
-			stateFile.Discard();
-		}
-	}
-
-	if (saveHistory)
-	{
-		StateFile stateFile("history", DISKSTATE_QUEUE_VERSION, true);
-		if (!downloadQueue->GetHistory()->empty())
-		{
-			StateDiskFile* outfile = stateFile.BeginWrite();
-			if (!outfile)
-			{
-				return false;
-			}
-
-			// save history
-			SaveHistory(downloadQueue->GetHistory(), *outfile);
-
-			// now rename to dest file name
-			ok &= stateFile.FinishWrite();
-		}
-		else
-		{
-			stateFile.Discard();
-		}
-	}
-
-	// progress-file isn't needed after saving of full queue data
-	StateFile progressStateFile("progress", DISKSTATE_QUEUE_VERSION, true);
-	progressStateFile.Discard();
-
-	SaveIdFloor();
-
-
-
-	return ok;
-}
-
-inline bool DiskState::LoadDownloadQueue(DownloadQueue* downloadQueue, Servers* servers)
-{
-	debug("Loading queue from disk");
-
-	bool ok = false;
-	bool queueFilesFailed = false;
-	bool fileInfosLoaded = false;
-	int formatVersion = 0;
-
-	// formats 65/66 are read as an earlier build of this branch wrote them (it may
-	// run again after this one); a file that doesn't read so, or of a newer format,
-	// is set aside below rather than lost to the next save
-	int queueReadVersion = DISKSTATE_QUEUE_LEGACY_VERSION;
-
-	{
-		StateFile stateFile("queue", DISKSTATE_QUEUE_VERSION, true, queueReadVersion);
-		if (stateFile.FileExists())
-		{
-			StateDiskFile* infile = stateFile.BeginRead();
-			if (!infile)
-			{
-				{ queueFilesFailed = true; goto error; }
-			}
-
-			formatVersion = stateFile.GetFileVersion();
-			int isLegacy = 0;
-			int loadInlineHistory = 0;
-			int verStatus = nzbget_rs_dsp_check_queue_format_version(
-				formatVersion, DISKSTATE_QUEUE_VERSION, &isLegacy, &loadInlineHistory);
-			m_legacyQueueRead |= isLegacy != 0;
-			if (verStatus == 1)
-			{
-				error("Failed to read queue: diskstate file is corrupted");
-				{ queueFilesFailed = true; goto error; }
-			}
-			else if (verStatus == 2)
-			{
-				error("Failed to read queue and history data. Only queue and history from NZBGet v13 or newer can be converted by this RustyGet version. "
-					"Old queue and history data still can be converted using NZBGet v16 as an intermediate version.");
-				{ queueFilesFailed = true; goto error; }
-			}
-
-			if (!LoadQueue(downloadQueue->GetQueue(), servers, *infile, formatVersion)) { queueFilesFailed = true; goto error; }
-
-			if (loadInlineHistory != 0)
-			{
-				if (!LoadHistory(downloadQueue->GetHistory(), servers, *infile, formatVersion)) { queueFilesFailed = true; goto error; }
-			}
-		}
-	}
-
-	{
-		StateFile stateFile("progress", DISKSTATE_QUEUE_VERSION, true, queueReadVersion);
-		if (stateFile.FileExists())
-		{
-			StateDiskFile* infile = stateFile.BeginRead();
-			if (!infile)
-			{
-				{ queueFilesFailed = true; goto error; }
-			}
-
-			if (stateFile.GetFileVersion() <= 0)
-			{
-				error("Failed to read queue: diskstate file is corrupted");
-				{ queueFilesFailed = true; goto error; }
-			}
-
-			m_legacyQueueRead |= stateFile.GetFileVersion() != DISKSTATE_QUEUE_VERSION;
-			if (!LoadProgress(downloadQueue->GetQueue(), servers, *infile, stateFile.GetFileVersion())) { queueFilesFailed = true; goto error; }
-		}
-	}
-
-	if (nzbget_rs_dqh_diskstate_should_load_separate_history_file(formatVersion) != 0)
-	{
-		StateFile stateFile("history", DISKSTATE_QUEUE_VERSION, true, queueReadVersion);
-		if (stateFile.FileExists())
-		{
-			StateDiskFile* infile = stateFile.BeginRead();
-			if (!infile)
-			{
-				{ queueFilesFailed = true; goto error; }
-			}
-
-			if (stateFile.GetFileVersion() <= 0)
-			{
-				error("Failed to read queue: diskstate file is corrupted");
-				{ queueFilesFailed = true; goto error; }
-			}
-
-			m_legacyQueueRead |= stateFile.GetFileVersion() != DISKSTATE_QUEUE_VERSION;
-			if (!LoadHistory(downloadQueue->GetHistory(), servers, *infile, stateFile.GetFileVersion())) { queueFilesFailed = true; goto error; }
-		}
-	}
-
-	LoadAllFileInfos(downloadQueue);
-	fileInfosLoaded = true;
-
-	CleanupQueueDir(downloadQueue);
-
-	if (!LoadAllFileStates(downloadQueue, servers)) goto error;
-
-	// file states an earlier build of this branch wrote (formats 8/9) are rewritten
-	// in the upstream format, history items' too, which are otherwise only rewritten
-	// when touched: after a downgrade upstream could not retry such an item
-	ConvertLegacyFileStates(servers);
-
-	ok = true;
-
-error:
-
-	if (!ok)
-	{
-		error("Error reading diskstate for download queue and history");
-	}
-	if (nzbget_rs_dqh_diskstate_should_reload_fallback_file_infos(
-		fileInfosLoaded ? 1 : 0, downloadQueue->GetQueue()->empty() ? 1 : 0) != 0)
-	{
-		// the downloads that did load keep running: with only the stubs the queue
-		// file holds (no name, size or groups) they showed blank and the next save
-		// wrote the stubs over their file infos
-		LoadAllFileInfos(downloadQueue);
-	}
-	if (queueFilesFailed)
-	{
-		// the next save would overwrite them: kept under another name instead
-		SetAsideQueueFiles();
-	}
-	RaiseIdsPastQueueDir();
-
-	NzbInfo::ResetGenId(true);
-	FileInfo::ResetGenId(true);
-
-	CalcFileStats(downloadQueue, formatVersion);
-
-	return ok;
-}
-
-/*
- * The ids the queue dir holds files for: new ids are counted on past them. With the
- * queue and history set aside as unreadable, the ids restarted at the few items that
- * loaded: new items got the ids of old ones and took over their logs, file states
- * and dupe-search state (P0-c).
- */
-inline void DiskState::RaiseIdsPastQueueDir()
-{
-	// the last ids handed out: a download deleted for good leaves no file behind,
-	// and without them its id went to the next download after a restart (a client
-	// that still knew the old id then edited or deleted the new download)
-	CharBuffer ids;
-	NzbgetRsBuf idsPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		g_Options->GetQueueDir(), PATH_SEPARATOR, "ids");
-	BString<1024> idsFilename = idsPathBuf.data ? idsPathBuf.data : "";
-	nzbget_rs_free(idsPathBuf);
-	if (FileSystem::FileExists(idsFilename) && FileSystem::LoadFileIntoBuffer(idsFilename, ids, true))
-	{
-		int nzbId = 0;
-		int fileId = 0;
-		if (nzbget_rs_dsp_parse_ids_file(ids, &nzbId, &fileId))
-		{
-			NzbInfo::RaiseIdFloor(nzbId);
-			FileInfo::RaiseIdFloor(fileId);
-		}
-	}
-
-	DirBrowser dir(g_Options->GetQueueDir());
-	while (const char* filename = dir.Next())
-	{
-		int isNzbLog = 0;
-		int id = nzbget_rs_dsp_classify_queue_dir_id(filename, &isNzbLog);
-		if (id > 0)
-		{
-			if (isNzbLog)
-			{
-				NzbInfo::RaiseIdFloor(id);
-			}
-			else
-			{
-				FileInfo::RaiseIdFloor(id);
-			}
-		}
-	}
-}
-
-/*
- * Keeps the last ids handed out in the queue dir (file "ids", which older
- * versions ignore), for RaiseIdsPastQueueDir.
- */
-inline void DiskState::SaveIdFloor()
-{
-	nzbget_rs_diskstate_save_id_floor(
-		g_Options->GetQueueDir(), PATH_SEPARATOR, NzbInfo::LastGenId(), FileInfo::LastGenId());
-}
-
-inline bool DiskState::SaveDownloadProgress(DownloadQueue* downloadQueue)
-{
-	int count = 0;
-	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-	{
-		count += nzbInfo->GetChanged() ? 1 : 0;
-	}
-
-	debug("Saving queue progress to disk");
-
-	bool ok = true;
-
-	{
-		StateFile stateFile("progress", DISKSTATE_QUEUE_VERSION, true);
-		if (count > 0)
-		{
-			StateDiskFile* outfile = stateFile.BeginWrite();
-			if (!outfile)
-			{
-				return false;
-			}
-
-			SaveProgress(downloadQueue->GetQueue(), *outfile, count);
-
-			// now rename to dest file name
-			ok = stateFile.FinishWrite();
-		}
-		else
-		{
-			stateFile.Discard();
-		}
-	}
-
-	return ok;
-}
-
-inline void DiskState::ConvertLegacyFileStates(Servers* servers)
-{
-	// "<id>" (file info), "<id>s" (partial state), "<id>c" (state of a completed file)
-	std::vector<std::pair<int, std::string>> legacy;
-	DirBrowser dir(g_Options->GetQueueDir());
-	while (const char* filename = dir.Next())
-	{
-		if (nzbget_rs_dqh_diskstate_is_candidate_queue_file_name(filename) == 0)
-		{
-			continue;
-		}
-		NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-		BString<1024> path = pathBuf.data ? pathBuf.data : "";
-		nzbget_rs_free(pathBuf);
-		DiskFile file;
-		char header[100] = {0};
-		if (!file.Open(path, DiskFile::omRead) || !file.ReadLine(header, sizeof(header)))
-		{
-			continue;
-		}
-		file.Close();
-		int legacyId = 0;
-		int suffixKind = 0;
-		if (nzbget_rs_dsp_classify_legacy_file_state(
-			filename, header, DISKSTATE_FILE_VERSION, DISKSTATE_FILE_LEGACY_VERSION, &legacyId, &suffixKind))
-		{
-			legacy.emplace_back(legacyId, nzbget_rs_dqh_diskstate_legacy_suffix_str(suffixKind));
-		}
-	}
-	if (legacy.empty())
-	{
-		return;
-	}
-
-	// each file is written anew and renamed over the old one: a file that another user
-	// owns (an earlier nzbget run under another account) can't be opened for writing,
-	// but in a writable QueueDir it can be replaced. Not flushed one by one: thousands
-	// of syncs would hold up the start for minutes.
-	int converted = 0;
-	for (const auto& entry : legacy)
-	{
-		FileInfo fileInfo;
-		fileInfo.SetId(entry.first);
-		bool ok;
-		if (entry.second.empty())
-		{
-			ok = LoadFile(&fileInfo, true, true) && SaveFile(&fileInfo, true);
-		}
-		else
-		{
-			bool completed = entry.second == "c";
-			ok = LoadFile(&fileInfo, false, true) && LoadFileState(&fileInfo, servers, completed) &&
-				SaveFileState(&fileInfo, completed, true);
-		}
-		converted += ok ? 1 : 0;
-	}
-	info("Converted %i of %i file state(s) of an earlier build to the upstream format", converted, (int)legacy.size());
-}
-
-inline void DiskState::SetAsideQueueFiles()
-{
-	time_t now = Util::CurrentTime();
-	for (const char* name : { "queue", "history", "progress" })
-	{
-		NzbgetRsBuf fnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, name);
-		BString<1024> filename = fnBuf.data ? fnBuf.data : "";
-		nzbget_rs_free(fnBuf);
-		if (FileSystem::FileExists(filename))
-		{
-			NzbgetRsBuf keptBuf = nzbget_rs_dqh_diskstate_format_unreadable_path(*filename, (int64)now);
-			BString<1024> keptName = keptBuf.data ? keptBuf.data : "";
-			nzbget_rs_free(keptBuf);
-			if (FileSystem::MoveFile(filename, keptName))
-			{
-				error("Diskstate file %s could not be read; it is kept as %s", name,
-					FileSystem::BaseFileName(keptName));
-			}
-		}
-	}
-}
-
-inline void DiskState::SaveQueue(NzbList* queue, StateDiskFile& outfile)
-{
-	debug("Saving nzb list to disk");
-
-	outfile.PrintLine("%i", (int)queue->size());
-	for (NzbInfo* nzbInfo : queue)
-	{
-		SaveNzbInfo(nzbInfo, outfile);
-	}
-
-	std::vector<NzbInfo*> nzbs;
-	for (NzbInfo* nzbInfo : queue)
-	{
-		nzbs.push_back(nzbInfo);
-	}
-	SaveDupeTrailer(nzbs, outfile);
-}
-
-inline bool DiskState::LoadQueue(NzbList* queue, Servers* servers, StateDiskFile& infile, int formatVersion)
-{
-	debug("Loading nzb list from disk");
-
-	// load nzb-infos
-	int size;
-	if (infile.ScanLine("%i", &size) != 1) goto error;
-	for (int i = 0; i < size; i++)
-	{
-		std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
-		if (!LoadNzbInfo(nzbInfo.get(), servers, infile, formatVersion)) goto error;
-		queue->push_back(std::move(nzbInfo));
-	}
-
-	// (before format 57 the history follows in the same file: no trailer there)
-	if (formatVersion >= 57 && formatVersion <= DISKSTATE_QUEUE_VERSION &&
-		!LoadDupeTrailer([queue](int id) { return queue->Find(id); }, infile)) goto error;
-
-	return true;
-
-error:
-	error("Error reading nzb list from disk");
-	return false;
-}
-
-inline void DiskState::SaveProgress(NzbList* queue, StateDiskFile& outfile, int changedCount)
-{
-	debug("Saving nzb progress to disk");
-
-	outfile.PrintLine("%i", changedCount);
-	for (NzbInfo* nzbInfo : queue)
-	{
-		if (nzbInfo->GetChanged())
-		{
-			outfile.PrintLine("%i", nzbInfo->GetId());
-			SaveNzbInfo(nzbInfo, outfile);
-		}
-	}
-
-	std::vector<NzbInfo*> changed;
-	for (NzbInfo* nzbInfo : queue)
-	{
-		if (nzbInfo->GetChanged())
-		{
-			changed.push_back(nzbInfo);
-		}
-	}
-	SaveDupeTrailer(changed, outfile);
-}
-
-inline bool DiskState::LoadProgress(NzbList* queue, Servers* servers, StateDiskFile& infile, int formatVersion)
-{
-	debug("Loading nzb progress from disk");
-
-	// load nzb-infos
-	int size;
-	if (infile.ScanLine("%i", &size) != 1) goto error;
-	for (int i = 0; i < size; i++)
-	{
-		int id;
-		if (infile.ScanLine("%i", &id) != 1) goto error;
-
-		NzbInfo* nzbInfo = queue->Find(id);
-		if (!nzbInfo)
-		{
-			// a progress record of a collection no longer queued (the queue was saved,
-			// then nzbget stopped before the progress file was discarded): read past it.
-			// It aborted the whole load, and queue and history were set aside
-			warn("Skipping saved progress of NZB with id %i, which is no longer queued", id);
-			NzbInfo stale;
-			if (!LoadNzbInfo(&stale, servers, infile, formatVersion)) goto error;
-			continue;
-		}
-
-		if (!LoadNzbInfo(nzbInfo, servers, infile, formatVersion)) goto error;
-	}
-
-	if (formatVersion <= DISKSTATE_QUEUE_VERSION &&
-		!LoadDupeTrailer([queue](int id) { return queue->Find(id); }, infile)) goto error;
-
-	return true;
-
-error:
-	error("Error reading nzb progress from disk");
-	return false;
-}
-
-inline void DiskState::SaveDupeExtras(NzbInfo* nzbInfo, StateDiskFile& outfile)
-{
-	const StreamRepairJobList* repairJobs = nzbInfo->GetStreamRepairJobs();
-	std::vector<NzbgetRsDiskStreamHole> allHoles;
-	std::vector<NzbgetRsDiskRepairJob> jobs;
-	jobs.reserve(repairJobs->size());
-	size_t totalHoles = 0;
-	for (const StreamRepairJob& job : *repairJobs)
-	{
-		totalHoles += job.GetHoles()->size();
-	}
-	allHoles.reserve(totalHoles);
-
-	for (const StreamRepairJob& job : *repairJobs)
-	{
-		const StreamRangeList* holes = job.GetHoles();
-		size_t startIdx = allHoles.size();
-		for (const StreamRange& hole : *holes)
-		{
-			allHoles.push_back(NzbgetRsDiskStreamHole{ hole.Offset, hole.Size });
-		}
-		jobs.push_back(NzbgetRsDiskRepairJob{
-			job.GetFileId(),
-			job.GetDecodedFileSize(),
-			job.GetFailedSize(),
-			job.GetMissedSize(),
-			job.GetParFile() ? 1 : 0,
-			job.GetFailedArticles(),
-			job.GetStepsHash(),
-			job.GetFilename(),
-			holes->empty() ? nullptr : &allHoles[startIdx],
-			holes->size()
-		});
-	}
-
-	WriteRsBuf(outfile, nzbget_rs_diskstate_format_dupe_extras(
-		nzbInfo->GetDupeRecoveredArticles(),
-		nzbInfo->GetDupeRecoveredBytes(),
-		nzbInfo->GetDupeRecoveredHoles(),
-		jobs.data(),
-		jobs.size()));
-}
-
-inline bool DiskState::LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int formatVersion)
-{
-	char buf[1024];
-	uint32 recoveredHigh = 0, recoveredLow = 0;
-	int recoveredArticles = 0, recoveredHoles = 0;
-	int headerScanCnt;
-	headerScanCnt = infile.ScanLine("%i,%u,%u,%i", &recoveredArticles, &recoveredHigh, &recoveredLow,
-		&recoveredHoles);
-	if (headerScanCnt != 4 || !nzbget_rs_dsp_validate_dupe_extras_header(
-		headerScanCnt, recoveredArticles, recoveredHoles)) goto error;
-	nzbInfo->SetDupeRecoveredArticles(recoveredArticles);
-	nzbInfo->SetDupeRecoveredBytes(Util::JoinInt64(recoveredHigh, recoveredLow));
-	nzbInfo->SetDupeRecoveredHoles(recoveredHoles);
-
-	int repairCount;
-	{
-		repairCount = 0;
-		int repairScanCnt = infile.ScanLine("%i", &repairCount);
-		if (repairScanCnt != 1 || repairCount < 0 || repairCount > 100000) goto error;
-	}
-	for (int i = 0; i < repairCount; i++)
-	{
-		int fileId = 0, parFile = 0, failedArticles = 0;
-		uint32 decodedHigh = 0, decodedLow = 0, failedHigh = 0, failedLow = 0, missedHigh = 0, missedLow = 0;
-		uint32 stepsHigh = 0, stepsLow = 0;
-		int expectedJobFields = nzbget_rs_dqh_diskstate_expected_repair_job_fields(formatVersion);
-		int jobScanCnt = expectedJobFields == 11 ?
-			infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i,%u,%u", &fileId, &decodedHigh,
-				&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
-				&failedArticles, &stepsHigh, &stepsLow) :
-			infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i", &fileId, &decodedHigh,
-				&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
-				&failedArticles);
-		if (jobScanCnt != expectedJobFields || !nzbget_rs_dsp_validate_repair_job_header(
-			jobScanCnt, expectedJobFields, fileId, parFile, failedArticles)) goto error;
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		int holeCount;
-		{
-			holeCount = 0;
-			int holeScanCnt = infile.ScanLine("%i", &holeCount);
-			if (holeScanCnt != 1 || holeCount < 0 || holeCount > 1000000) goto error;
-		}
-		int64 decodedSize = Util::JoinInt64(decodedHigh, decodedLow);
-		StreamRangeList holes;
-		holes.reserve(holeCount);
-		for (int j = 0; j < holeCount; j++)
-		{
-			uint32 offsetHigh, offsetLow, sizeHigh, sizeLow;
-			if (infile.ScanLine("%u,%u,%u,%u", &offsetHigh, &offsetLow, &sizeHigh, &sizeLow) != 4) goto error;
-			int64 offset = 0;
-			int64 size = 0;
-			if (!nzbget_rs_dsp_validate_repair_hole(offsetHigh, offsetLow, sizeHigh, sizeLow, decodedSize, &offset, &size)) goto error;
-			holes.push_back({offset, size});
-		}
-		nzbInfo->GetStreamRepairJobs()->emplace_back(fileId, buf, decodedSize,
-			Util::JoinInt64(failedHigh, failedLow), Util::JoinInt64(missedHigh, missedLow),
-			failedArticles, parFile != 0, std::move(holes),
-			(uint64)Util::JoinInt64(stepsHigh, stepsLow));
-	}
-
-
-	return true;
-
-error:
-	return false;
-}
-
-// this build's data after upstream's: the extras of the nzbs that have any
-inline void DiskState::SaveDupeTrailer(const std::vector<NzbInfo*>& nzbs, StateDiskFile& outfile)
-{
-	std::vector<NzbInfo*> withExtras;
-	for (NzbInfo* nzbInfo : nzbs)
-	{
-		if (nzbget_rs_dsp_has_dupe_extras(
-			nzbInfo->GetDupeRecoveredArticles(),
-			nzbInfo->GetDupeRecoveredBytes(),
-			nzbInfo->GetDupeRecoveredHoles(),
-			nzbInfo->GetStreamRepairJobs()->size()))
-		{
-			withExtras.push_back(nzbInfo);
-		}
-	}
-	outfile.PrintLine("%s", DUPESTATE_TRAILER);
-	outfile.PrintLine("%i", (int)withExtras.size());
-	for (NzbInfo* nzbInfo : withExtras)
-	{
-		outfile.PrintLine("%i", nzbInfo->GetId());
-		SaveDupeExtras(nzbInfo, outfile);
-	}
-
-	outfile.PrintLine("%s", UNPACKSTATE_TRAILER);
-	outfile.PrintLine("%i", (int)nzbs.size());
-	for (NzbInfo* nzbInfo : nzbs)
-	{
-		std::vector<const char*> archivePtrs;
-		std::vector<CString>* archives = nzbInfo->GetExtractedArchives();
-		if (archives)
-		{
-			archivePtrs.reserve(archives->size());
-			for (const CString& arc : *archives)
-			{
-				archivePtrs.push_back(*arc ? *arc : "");
-			}
-		}
-		WriteRsBuf(outfile, nzbget_rs_diskstate_format_unpack_trailer_item(
-			nzbInfo->GetId(),
-			static_cast<int>(nzbInfo->GetDirectUnpackStatus()),
-			nzbInfo->GetUnpackTried() ? 1 : 0,
-			nzbInfo->GetParRepaired() ? 1 : 0,
-			nzbInfo->GetLastUnpackStatus(),
-			archivePtrs.data(),
-			archivePtrs.size()));
-	}
-}
-
-inline bool DiskState::LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateDiskFile& infile)
-{
-	char buf[1024];
-	if (!infile.ReadLine(buf, sizeof(buf)) || !nzbget_rs_dqh_bytes_equal(buf, DUPESTATE_TRAILER))
-	{
-		return true;	// a file upstream nzbget wrote, or one without any
-	}
-	int count = 0;
-	int countScanCnt = infile.ScanLine("%i", &count);
-	if (nzbget_rs_dqh_diskstate_is_nonneg_count_scan_invalid(countScanCnt, count) != 0) goto error;
-	for (int i = 0; i < count; i++)
-	{
-		int id;
-		if (infile.ScanLine("%i", &id) != 1) goto error;
-		NzbInfo* nzbInfo = find(id);
-		NzbInfo unknown;	// an nzb no longer listed: its extras are read and dropped
-		if (!LoadDupeExtras(nzbInfo ? nzbInfo : &unknown, infile, DISKSTATE_QUEUE_LEGACY_VERSION)) goto error;
-	}
-	if (infile.ReadLine(buf, sizeof(buf)) && nzbget_rs_dqh_bytes_equal(buf, UNPACKSTATE_TRAILER))
-	{
-		int unpackCount = 0;
-		int unpackScanCnt = infile.ScanLine("%i", &unpackCount);
-		if (nzbget_rs_dqh_diskstate_is_nonneg_count_scan_invalid(unpackScanCnt, unpackCount) != 0) goto error;
-		for (int i = 0; i < unpackCount; i++)
-		{
-			int id = 0;
-			if (infile.ScanLine("%i", &id) != 1) goto error;
-			NzbInfo* nzbInfo = find(id);
-			NzbInfo unknown;
-			NzbInfo* target = nzbInfo ? nzbInfo : &unknown;
-
-			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-			char line2[1024];
-			char line3[1024];
-			if (!infile.ReadLine(line2, sizeof(line2))) goto error;
-			if (!infile.ReadLine(line3, sizeof(line3))) goto error;
-			int directUnpackStatus = 0, unpackTriedBool = 0, parRepairedBool = 0, lastUnpackStatus = 0;
-			if (!nzbget_rs_dsp_parse_unpack_state_lines(
-				buf, line2, line3,
-				static_cast<int>(NzbInfo::nsRunning), static_cast<int>(NzbInfo::nsNone),
-				&directUnpackStatus, &unpackTriedBool, &parRepairedBool, &lastUnpackStatus)) goto error;
-			target->SetDirectUnpackStatus(static_cast<NzbInfo::EDirectUnpackStatus>(directUnpackStatus));
-			target->SetUnpackTried(unpackTriedBool != 0);
-			target->SetParRepaired(parRepairedBool != 0);
-			target->SetLastUnpackStatus(lastUnpackStatus);
-
-			std::vector<char> largeBuf(65536);
-			if (!infile.ReadLine(largeBuf.data(), largeBuf.size())) goto error;
-			char* archivesStr = largeBuf.data();
-			if (!strncmp(archivesStr, "ExtractedArchives=", 18))
-			{
-				archivesStr += 18;
-			}
-			std::vector<CString>* archives = target->GetExtractedArchives();
-			if (archives)
-			{
-				archives->clear();
-				size_t cursor = 0, tokStart = 0, tokLen = 0;
-				while (nzbget_rs_dqh_diskstate_next_comma_token(
-					archivesStr, cursor, &tokStart, &tokLen, &cursor))
-				{
-					archives->emplace_back(archivesStr + tokStart, (int)tokLen);
-				}
-			}
-		}
-	}
-	return true;
-
-error:
-	error("Error reading duplicate repair state from disk");
-	return false;
-}
-
-inline void DiskState::SaveNzbInfo(NzbInfo* nzbInfo, StateDiskFile& outfile)
-{
-	NzbgetRsDiskNzbInfoInput fields{};
-	fields.id = nzbInfo->GetId();
-	fields.kind = static_cast<int>(nzbInfo->GetKind());
-	fields.url = nzbInfo->GetUrl();
-	fields.filename = nzbInfo->GetFilename();
-	fields.dest_dir = nzbInfo->GetDestDir();
-	fields.final_dir = nzbInfo->GetFinalDir();
-	fields.hard_link_path = nzbInfo->GetHardLinkPath().c_str();
-	fields.meta_name = nzbInfo->GetMetaName().c_str();
-	fields.queued_filename = nzbInfo->GetQueuedFilename();
-	fields.name = nzbInfo->GetName();
-	fields.category = nzbInfo->GetCategory();
-	fields.priority = (int)nzbInfo->GetPriority();
-	fields.has_post_info = nzbInfo->GetPostInfo() ? 1 : 0;
-	fields.post_stage = nzbInfo->GetPostInfo() ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
-	fields.delete_paused = (int)nzbInfo->GetDeletePaused();
-	fields.many_dupe_files = (int)nzbInfo->GetManyDupeFiles();
-	fields.feed_id = nzbInfo->GetFeedId();
-	fields.par_status = (int)nzbInfo->GetParStatus();
-	fields.unpack_status = (int)nzbInfo->GetUnpackStatus();
-	fields.move_status = (int)nzbInfo->GetMoveStatus();
-	fields.par_rename_status = (int)nzbInfo->GetParRenameStatus();
-	fields.rar_rename_status = (int)nzbInfo->GetRarRenameStatus();
-	fields.direct_rename_status = (int)nzbInfo->GetDirectRenameStatus();
-	fields.delete_status = (int)nzbInfo->GetDeleteStatus();
-	fields.mark_status = (int)nzbInfo->GetMarkStatus();
-	fields.url_status = (int)nzbInfo->GetUrlStatus();
-	fields.unpack_cleaned_up_disk = (int)nzbInfo->GetUnpackCleanedUpDisk();
-	fields.health_paused = (int)nzbInfo->GetHealthPaused();
-	fields.add_url_paused = (int)nzbInfo->GetAddUrlPaused();
-	fields.file_count = nzbInfo->GetFileCount();
-	fields.parked_file_count = nzbInfo->GetParkedFileCount();
-	fields.message_count = nzbInfo->GetMessageCount();
-	fields.min_time = (int)nzbInfo->GetMinTime();
-	fields.max_time = (int)nzbInfo->GetMaxTime();
-	fields.par_full = (int)nzbInfo->GetParFull();
-	fields.force_par_full = nzbInfo->GetPostInfo() ? (int)nzbInfo->GetPostInfo()->GetForceParFull() : 0;
-	fields.force_repair = nzbInfo->GetPostInfo() ? (int)nzbInfo->GetPostInfo()->GetForceRepair() : 0;
-	fields.extra_par_blocks = nzbInfo->GetExtraParBlocks();
-	fields.full_content_hash = nzbInfo->GetFullContentHash();
-	fields.filtered_content_hash = nzbInfo->GetFilteredContentHash();
-	fields.size = nzbInfo->GetSize();
-	fields.success_size = nzbInfo->GetSuccessSize();
-	fields.failed_size = nzbInfo->GetFailedSize();
-	fields.par_size = nzbInfo->GetParSize();
-	fields.par_success_size = nzbInfo->GetParSuccessSize();
-	fields.par_failed_size = nzbInfo->GetParFailedSize();
-	fields.total_articles = nzbInfo->GetTotalArticles();
-	fields.success_articles = nzbInfo->GetSuccessArticles();
-	fields.failed_articles = nzbInfo->GetFailedArticles();
-	fields.dupe_key = nzbInfo->GetDupeKey();
-	fields.dupe_mode = (int)nzbInfo->GetDupeMode();
-	fields.dupe_score = nzbInfo->GetDupeScore();
-	fields.dupe_hint = (int)nzbInfo->GetDupeHint();
-	fields.downloaded_size = nzbInfo->GetDownloadedSize();
-	fields.download_sec = nzbInfo->GetDownloadSec();
-	fields.post_total_sec = nzbInfo->GetPostTotalSec();
-	fields.par_sec = nzbInfo->GetParSec();
-	fields.repair_sec = nzbInfo->GetRepairSec();
-	fields.unpack_sec = nzbInfo->GetUnpackSec();
-	fields.skip_script_processing = static_cast<int>(nzbInfo->GetSkipScriptProcessing());
-	fields.skip_disk_write = static_cast<int>(nzbInfo->GetSkipDiskWrite());
-	fields.desired_server_id = nzbInfo->GetDesiredServerId();
-
-	std::vector<NzbgetRsDiskCompletedFile> completedFiles;
-	completedFiles.reserve(nzbInfo->GetCompletedFiles()->size());
-	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-	{
-		completedFiles.push_back(NzbgetRsDiskCompletedFile{
-			completedFile.GetId(),
-			(int)completedFile.GetStatus(),
-			completedFile.GetCrc(),
-			(int)completedFile.GetParFile(),
-			completedFile.GetHash16k(),
-			completedFile.GetParSetId(),
-			completedFile.GetFilename(),
-			completedFile.GetOrigname()
-		});
-	}
-
-	std::vector<NzbgetRsDiskParam> params;
-	params.reserve(nzbInfo->GetParameters()->size());
-	for (NzbParameter& parameter : nzbInfo->GetParameters())
-	{
-		params.push_back(NzbgetRsDiskParam{ parameter.GetName(), parameter.GetValue() });
-	}
-
-	std::vector<NzbgetRsDiskScriptStatus> scripts;
-	scripts.reserve(nzbInfo->GetScriptStatuses()->size());
-	for (ScriptStatus& scriptStatus : nzbInfo->GetScriptStatuses())
-	{
-		scripts.push_back(NzbgetRsDiskScriptStatus{ (int)scriptStatus.GetStatus(), scriptStatus.GetName() });
-	}
-
-	std::vector<NzbgetRsDiskServerStat> stats;
-	stats.reserve(nzbInfo->GetServerStats()->size());
-	for (ServerStat& serverStat : nzbInfo->GetServerStats())
-	{
-		stats.push_back(NzbgetRsDiskServerStat{
-			serverStat.GetServerId(),
-			serverStat.GetSuccessArticles(),
-			serverStat.GetFailedArticles()
-		});
-	}
-
-	std::vector<NzbgetRsDiskFileStub> fileEntries;
-	fileEntries.reserve(nzbInfo->GetFileList()->size());
-	for (FileInfo* fileInfo : nzbInfo->GetFileList())
-	{
-		if (!fileInfo->GetDeleted())
-		{
-			fileEntries.push_back(NzbgetRsDiskFileStub{
-				fileInfo->GetId(),
-				(int)fileInfo->GetPaused(),
-				(int)fileInfo->GetExtraPriority()
-			});
-		}
-	}
-
-	WriteRsBuf(outfile, nzbget_rs_diskstate_format_nzb_info(
-		&fields,
-		completedFiles.data(), completedFiles.size(),
-		params.data(), params.size(),
-		scripts.data(), scripts.size(),
-		stats.data(), stats.size(),
-		fileEntries.data(), fileEntries.size()));
-}
-
-inline bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& infile, int formatVersion)
-{
-	char buf[10240];
-	int parameterCount = 0;
-	int skipScriptProcessing = 0;
-	int skipDiskWrite = 0;
-	int desiredServerId = 0;
-	int numItems = 0;
-
-	int id;
-	if (infile.ScanLine("%i", &id) != 1) goto error;
-	nzbInfo->SetId(id);
-
-	int kind;
-	if (infile.ScanLine("%i", &kind) != 1) goto error;
-	nzbInfo->SetKind((NzbInfo::EKind)kind);
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	nzbInfo->SetUrl(buf);
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	nzbInfo->SetFilename(buf);
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	nzbInfo->SetDestDir(buf);
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	nzbInfo->SetFinalDir(buf);
-
-	if (formatVersion >= 63) 
-	{
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		nzbInfo->SetHardLinkPath(buf);
-	}
-
-	// format 65 was written only by pre-release DupeArticleFallback builds,
-	// which had the stream-repair state below but not the meta name
-	if (nzbget_rs_dqh_diskstate_has_meta_name_field(formatVersion) != 0)
-	{
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		nzbInfo->SetMetaName(buf);
-	}
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	nzbInfo->SetQueuedFilename(buf);
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	if (!Util::EmptyStr(buf))
-	{
-		nzbInfo->SetName(buf);
-	}
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	nzbInfo->SetCategory(buf);
-
-	int priority, postStage, deletePaused, manyDupeFiles, feedId;
-	if (formatVersion >= 54)
-	{
-		if (infile.ScanLine("%i,%i,%i,%i,%i", &priority, &postStage, &deletePaused, &manyDupeFiles, &feedId) != 5) goto error;
-	}
-	else
-	{
-		if (infile.ScanLine("%i,%i,%i,%i", &priority, &postStage, &deletePaused, &manyDupeFiles) != 4) goto error;
-		feedId = 0;
-	}
-	nzbInfo->SetPriority(priority);
-	nzbInfo->SetDeletePaused((bool)deletePaused);
-	nzbInfo->SetManyDupeFiles((bool)manyDupeFiles);
-	if (postStage > 0)
-	{
-		nzbInfo->EnterPostProcess();
-		postStage = nzbget_rs_dsp_normalize_post_stage(postStage, formatVersion, (int)PostInfo::ptFinished);
-		nzbInfo->GetPostInfo()->SetStage((PostInfo::EStage)postStage);
-	}
-	nzbInfo->SetFeedId(feedId);
-
-	int parStatus, unpackStatus, moveStatus, parRenameStatus, rarRenameStatus,
-		directRenameStatus, deleteStatus, markStatus, urlStatus;
-	if (formatVersion >= 60)
-	{
-		if (infile.ScanLine("%i,%i,%i,%i,%i,%i,%i,%i,%i", &parStatus,
-			&unpackStatus, &moveStatus, &parRenameStatus, &rarRenameStatus, &directRenameStatus,
-			&deleteStatus, &markStatus, &urlStatus) != 9) goto error;
-	}
-	else if (formatVersion >= 58)
-	{
-		directRenameStatus = 0;
-		if (infile.ScanLine("%i,%i,%i,%i,%i,%i,%i,%i", &parStatus,
-			&unpackStatus, &moveStatus, &parRenameStatus, &rarRenameStatus, &deleteStatus,
-			&markStatus, &urlStatus) != 8) goto error;
-	}
-	else
-	{
-		rarRenameStatus = directRenameStatus = 0;
-		if (infile.ScanLine("%i,%i,%i,%i,%i,%i,%i", &parStatus, &unpackStatus, &moveStatus,
-			&parRenameStatus, &deleteStatus, &markStatus, &urlStatus) != 7) goto error;
-	}
-	nzbInfo->SetParStatus((NzbInfo::EParStatus)parStatus);
-	nzbInfo->SetUnpackStatus((NzbInfo::EPostUnpackStatus)unpackStatus);
-	nzbInfo->SetMoveStatus((NzbInfo::EMoveStatus)moveStatus);
-	nzbInfo->SetParRenameStatus((NzbInfo::EPostRenameStatus)parRenameStatus);
-	nzbInfo->SetRarRenameStatus((NzbInfo::EPostRenameStatus)rarRenameStatus);
-	nzbInfo->SetDirectRenameStatus((NzbInfo::EDirectRenameStatus)directRenameStatus);
-	nzbInfo->SetDeleteStatus((NzbInfo::EDeleteStatus)deleteStatus);
-	nzbInfo->SetMarkStatus((NzbInfo::EMarkStatus)markStatus);
-	if (nzbInfo->GetKind() == NzbInfo::nkNzb || (NzbInfo::EUrlStatus)urlStatus >= NzbInfo::lsFailed)
-	{
-		nzbInfo->SetUrlStatus((NzbInfo::EUrlStatus)urlStatus);
-	}
-
-	int unpackCleanedUpDisk, healthPaused, addUrlPaused;
-	if (infile.ScanLine("%i,%i,%i", &unpackCleanedUpDisk, &healthPaused, &addUrlPaused) != 3) goto error;
-	nzbInfo->SetUnpackCleanedUpDisk((bool)unpackCleanedUpDisk);
-	nzbInfo->SetHealthPaused((bool)healthPaused);
-	nzbInfo->SetAddUrlPaused((bool)addUrlPaused);
-
-	int fileCount, parkedFileCount, messageCount;
-	if (formatVersion >= 52)
-	{
-		if (infile.ScanLine("%i,%i,%i", &fileCount, &parkedFileCount, &messageCount) != 3) goto error;
-	}
-	else
-	{
-		if (infile.ScanLine("%i,%i", &fileCount, &parkedFileCount) != 2) goto error;
-		messageCount = 0;
-	}
-	nzbInfo->SetFileCount(fileCount);
-	nzbInfo->SetParkedFileCount(parkedFileCount);
-	nzbInfo->SetMessageCount(messageCount);
-
-	int minTime, maxTime;
-	if (infile.ScanLine("%i,%i", &minTime, &maxTime) != 2) goto error;
-	nzbInfo->SetMinTime((time_t)minTime);
-	nzbInfo->SetMaxTime((time_t)maxTime);
-
-	if (formatVersion >= 51)
-	{
-		int parFull, forceParFull, forceRepair, extraParBlocks = 0;
-		if (formatVersion >= 55)
-		{
-			if (infile.ScanLine("%i,%i,%i,%i", &parFull, &forceParFull, &forceRepair, &extraParBlocks) != 4) goto error;
-		}
-		else
-		{
-			if (infile.ScanLine("%i,%i,%i", &parFull, &forceParFull, &forceRepair) != 3) goto error;
-		}
-		nzbInfo->SetParFull((bool)parFull);
-		nzbInfo->SetExtraParBlocks(extraParBlocks);
-		if (nzbInfo->GetPostInfo())
-		{
-			nzbInfo->GetPostInfo()->SetForceParFull((bool)forceParFull);
-			nzbInfo->GetPostInfo()->SetForceRepair((bool)forceRepair);
-		}
-	}
-
-	uint32 fullContentHash, filteredContentHash;
-	if (infile.ScanLine("%u,%u", &fullContentHash, &filteredContentHash) != 2) goto error;
-	nzbInfo->SetFullContentHash(fullContentHash);
-	nzbInfo->SetFilteredContentHash(filteredContentHash);
-
-	uint32 High1, Low1, High2, Low2, High3, Low3;
-	if (infile.ScanLine("%u,%u,%u,%u,%u,%u", &High1, &Low1, &High2, &Low2, &High3, &Low3) != 6) goto error;
-	nzbInfo->SetSize(Util::JoinInt64(High1, Low1));
-	nzbInfo->SetSuccessSize(Util::JoinInt64(High2, Low2));
-	nzbInfo->SetFailedSize(Util::JoinInt64(High3, Low3));
-	nzbInfo->SetCurrentSuccessSize(nzbInfo->GetSuccessSize());
-	nzbInfo->SetCurrentFailedSize(nzbInfo->GetFailedSize());
-
-	if (infile.ScanLine("%u,%u,%u,%u,%u,%u", &High1, &Low1, &High2, &Low2, &High3, &Low3) != 6) goto error;
-	nzbInfo->SetParSize(Util::JoinInt64(High1, Low1));
-	nzbInfo->SetParSuccessSize(Util::JoinInt64(High2, Low2));
-	nzbInfo->SetParFailedSize(Util::JoinInt64(High3, Low3));
-	nzbInfo->SetParCurrentSuccessSize(nzbInfo->GetParSuccessSize());
-	nzbInfo->SetParCurrentFailedSize(nzbInfo->GetParFailedSize());
-
-	int totalArticles, successArticles, failedArticles;
-	if (infile.ScanLine("%i,%i,%i", &totalArticles, &successArticles, &failedArticles) != 3) goto error;
-	nzbInfo->SetTotalArticles(totalArticles);
-	nzbInfo->SetSuccessArticles(successArticles);
-	nzbInfo->SetFailedArticles(failedArticles);
-	nzbInfo->SetCurrentSuccessArticles(successArticles);
-	nzbInfo->SetCurrentFailedArticles(failedArticles);
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	nzbInfo->SetDupeKey(buf);
-
-	int dupeMode, dupeScore, dupeHint;
-	dupeHint = 0; //clang requires initialization in a separate line (due to goto statements)
-	if (formatVersion >= 61)
-	{
-		if (infile.ScanLine("%i,%i,%i", &dupeMode, &dupeScore, &dupeHint) != 3) goto error;
-	}
-	else
-	{
-		if (infile.ScanLine("%i,%i", &dupeMode, &dupeScore) != 2) goto error;
-	}
-	nzbInfo->SetDupeMode((EDupeMode)dupeMode);
-	nzbInfo->SetDupeScore(dupeScore);
-	// (the hint went into the mode: every item came back from a restart with its
-	// mode replaced by its hint - FORCE and ALL read SCORE)
-	nzbInfo->SetDupeHint((NzbInfo::EDupeHint)dupeHint);
-
-	if (formatVersion >= 48)
-	{
-		uint32 High4, Low4, downloadSec, postTotalSec, parSec, repairSec, unpackSec;
-		if (infile.ScanLine("%u,%u,%i,%i,%i,%i,%i", &High4, &Low4, &downloadSec, &postTotalSec, &parSec, &repairSec, &unpackSec) != 7) goto error;
-		nzbInfo->SetDownloadedSize(Util::JoinInt64(High4, Low4));
-		nzbInfo->SetDownloadSec(downloadSec);
-		nzbInfo->SetPostTotalSec(postTotalSec);
-		nzbInfo->SetParSec(parSec);
-		nzbInfo->SetRepairSec(repairSec);
-		nzbInfo->SetUnpackSec(unpackSec);
-	}
-
-	nzbInfo->GetCompletedFiles()->clear();
-	if (infile.ScanLine("%i", &fileCount) != 1) goto error;
-	for (int i = 0; i < fileCount; i++)
-	{
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-
-		int id = 0;
-		const char* fileName = buf;
-		int status = 0;
-		uint32 crc = 0;
-		int parFile = 0;
-		const char* hash16k = nullptr;
-		const char* parSetId = nullptr;
-		char filenameBuf[1024];
-		char origName[1024] = {};
-
-		if (!nzbget_rs_diskstate_parse_completed_file_line(
-			buf, formatVersion, &id, &status, &crc, &parFile, &hash16k, &parSetId, &fileName))
-		{
-			goto error;
-		}
-		if (formatVersion >= 62)
-		{
-			if (!infile.ReadLine(filenameBuf, sizeof(filenameBuf))) goto error;
-			fileName = filenameBuf;
-			if (!infile.ReadLine(origName, sizeof(origName))) goto error;
-		}
-
-		nzbInfo->GetCompletedFiles()->emplace_back(
-			id, 
-			Util::EmptyStr(fileName) ? "" : fileName,
-			Util::EmptyStr(origName) ? "" : origName,
-			static_cast<CompletedFile::EStatus>(status), 
-			crc, 
-			static_cast<bool>(parFile),
-			Util::EmptyStr(hash16k) ? "" : hash16k,
-			Util::EmptyStr(parSetId) ? "" : parSetId);
-	}
-
-	nzbInfo->GetParameters()->clear();
-
-	numItems = infile.ScanLine("%i,%i,%i,%i", 
-		&parameterCount, 
-		&skipScriptProcessing, 
-		&skipDiskWrite,
-		&desiredServerId);
-
-	{
-		if (numItems != 1 && numItems != 4) goto error;
-		if (numItems == 4)
-		{
-			nzbInfo->SetSkipScriptProcessing(static_cast<bool>(skipScriptProcessing));
-			nzbInfo->SetSkipDiskWrite(static_cast<bool>(skipDiskWrite));
-			nzbInfo->SetDesiredServerId(desiredServerId);
-		}
-	}
-
-	for (int i = 0; i < parameterCount; i++)
-	{
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-
-		size_t eqPos = 0;
-		if (nzbget_rs_dqh_diskstate_find_char_pos(buf, '=', &eqPos) != 0)
-		{
-			buf[eqPos] = '\0';
-			nzbInfo->GetParameters()->SetParameter(buf, buf + eqPos + 1);
-		}
-	}
-
-	nzbInfo->GetScriptStatuses()->clear();
-	int scriptCount;
-	if (infile.ScanLine("%i", &scriptCount) != 1) goto error;
-	for (int i = 0; i < scriptCount; i++)
-	{
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-
-		size_t commaPos = 0;
-		if (nzbget_rs_dqh_diskstate_find_char_pos(buf, ',', &commaPos) != 0)
-		{
-			const char* scriptName = buf + commaPos + 1;
-			int status = atoi(buf);
-			if (status > 1 && formatVersion < 25) status--;
-			nzbInfo->GetScriptStatuses()->emplace_back(scriptName, (ScriptStatus::EStatus)status);
-		}
-	}
-
-	if (!LoadServerStats(nzbInfo->GetServerStats(), servers, infile)) goto error;
-	nzbInfo->GetCurrentServerStats()->ListOp(nzbInfo->GetServerStats(), ServerStatList::soSet);
-
-	if (formatVersion < 52)
-	{
-		int logCount;
-		if (infile.ScanLine("%i", &logCount) != 1) goto error;
-		for (int i = 0; i < logCount; i++)
-		{
-			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		}
-	}
-
-	nzbInfo->GetFileList()->clear();
-	if (infile.ScanLine("%i", &fileCount) != 1) goto error;
-	for (int i = 0; i < fileCount; i++)
-	{
-		uint32 id, paused, time;
-		int extraPriority;
-
-		if (formatVersion >= 56)
-		{
-			if (infile.ScanLine("%i,%i,%i", &id, &paused, &extraPriority) != 3) goto error;
-		}
-		else
-		{
-			if (infile.ScanLine("%i,%i,%i,%i", &id, &paused, &time, &extraPriority) != 4) goto error;
-		}
-
-		std::unique_ptr<FileInfo> fileInfo = std::make_unique<FileInfo>();
-		fileInfo->SetId(id);
-		fileInfo->SetPaused(paused);
-		if (formatVersion < 56)
-		{
-			fileInfo->SetTime(time);
-		}
-		fileInfo->SetExtraPriority((bool)extraPriority);
-		fileInfo->SetNzbInfo(nzbInfo);
-		nzbInfo->GetFileList()->Add(std::move(fileInfo));
-	}
-
-	nzbInfo->GetStreamRepairJobs()->clear();
-	// earlier builds of this branch wrote it inline (formats 65 and 66); the trailer
-	// of the queue file carries it since
-	if ((formatVersion == 65 || formatVersion == 66) &&
-		!LoadDupeExtras(nzbInfo, infile, formatVersion)) goto error;
-
-	// restore unpack state (R3)
-	if (formatVersion >= 67)
-	{
-		char line2[1024];
-		char line3[1024];
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		if (!infile.ReadLine(line2, sizeof(line2))) goto error;
-		if (!infile.ReadLine(line3, sizeof(line3))) goto error;
-		int directUnpackStatus = 0, unpackTriedBool = 0, parRepairedBool = 0, lastUnpackStatus = 0;
-		if (!nzbget_rs_dsp_parse_unpack_state_lines(
-			buf, line2, line3,
-			static_cast<int>(NzbInfo::nsRunning), static_cast<int>(NzbInfo::nsNone),
-			&directUnpackStatus, &unpackTriedBool, &parRepairedBool, &lastUnpackStatus)) goto error;
-		nzbInfo->SetDirectUnpackStatus(static_cast<NzbInfo::EDirectUnpackStatus>(directUnpackStatus));
-		nzbInfo->SetUnpackTried(unpackTriedBool != 0);
-		nzbInfo->SetParRepaired(parRepairedBool != 0);
-		nzbInfo->SetLastUnpackStatus(lastUnpackStatus);
-
-		std::vector<char> largeBuf(65536);
-		if (!infile.ReadLine(largeBuf.data(), largeBuf.size())) goto error;
-		char* archivesStr = largeBuf.data();
-		if (!strncmp(archivesStr, "ExtractedArchives=", 18))
-		{
-			archivesStr += 18;
-		}
-		std::vector<CString>* archives = nzbInfo->GetExtractedArchives();
-		if (archives)
-		{
-			archives->clear();
-			size_t cursor = 0, tokStart = 0, tokLen = 0;
-			while (nzbget_rs_dqh_diskstate_next_comma_token(
-				archivesStr, cursor, &tokStart, &tokLen, &cursor))
-			{
-				archives->emplace_back(archivesStr + tokStart, (int)tokLen);
-			}
-		}
-	}
-
-	return true;
-
-error:
-	error("Error reading nzb info from disk");
-	return false;
-}
-
-inline bool DiskState::LoadServerStats(ServerStatList* serverStatList, Servers* servers, StateDiskFile& infile)
-{
-	int statCount;
-	if (infile.ScanLine("%i", &statCount) != 1) goto error;
-	for (int i = 0; i < statCount; i++)
-	{
-		int serverId, successArticles, failedArticles;
-		if (infile.ScanLine("%i,%i,%i", &serverId, &successArticles, &failedArticles) != 3) goto error;
-
-		if (servers)
-		{
-			// find server (id could change if config file was edited)
-			for (NewsServer* newsServer : servers)
-			{
-				if (nzbget_rs_dqh_diskstate_matches_server_state_id(
-					newsServer->GetStateId(), serverId) != 0)
-				{
-					serverStatList->StatOp(newsServer->GetId(), successArticles, failedArticles, ServerStatList::soSet);
-				}
-			}
-		}
-	}
-
-	return true;
-
-error:
-	error("Error reading server stats from disk");
-	return false;
-}
-
-inline bool DiskState::SaveFile(FileInfo* fileInfo, bool replace)
-{
-	debug("Saving FileInfo %i to disk", fileInfo->GetId());
-
-	NzbgetRsBuf fnBuf = nzbget_rs_dqh_conn_format_port_str(fileInfo->GetId());
-	BString<100> filename = fnBuf.data ? fnBuf.data : "";
-	nzbget_rs_free(fnBuf);
-	StateFile stateFile(filename, DISKSTATE_FILE_VERSION, replace);
-	stateFile.SetFlush(!replace);
-
-	StateDiskFile* outfile = stateFile.BeginWrite();
-	if (!outfile)
-	{
-		return false;
-	}
-
-	return SaveFileInfo(fileInfo, *outfile, true) && stateFile.FinishWrite();
-}
-
-inline bool DiskState::SaveFileInfo(FileInfo* fileInfo, StateDiskFile& outfile, bool articles)
-{
-	NzbgetRsDiskFileInfoInput fields{};
-	fields.subject = fileInfo->GetSubject();
-	fields.filename = fileInfo->GetFilename();
-	fields.origname = fileInfo->GetOrigname() ? fileInfo->GetOrigname() : "";
-	fields.output_filename = fileInfo->GetOutputFilename().c_str();
-	fields.filename_confirmed = (int)fileInfo->GetFilenameConfirmed();
-	fields.time = (int)fileInfo->GetTime();
-	fields.output_initialized = (int)fileInfo->GetOutputInitialized();
-	fields.size = fileInfo->GetSize();
-	fields.missed_size = fileInfo->GetMissedSize();
-	fields.par_file = (int)fileInfo->GetParFile();
-	fields.total_articles = fileInfo->GetTotalArticles();
-	fields.missed_articles = fileInfo->GetMissedArticles();
-
-	std::vector<const char*> groups;
-	groups.reserve(fileInfo->GetGroups()->size());
-	for (CString& group : fileInfo->GetGroups())
-	{
-		groups.push_back(*group);
-	}
-
-	std::vector<NzbgetRsDiskArticleInfo> articleEntries;
-	if (articles)
-	{
-		articleEntries.reserve(fileInfo->GetArticles()->size());
-		for (ArticleInfo* articleInfo : fileInfo->GetArticles())
-		{
-			articleEntries.push_back(NzbgetRsDiskArticleInfo{
-				articleInfo->GetPartNumber(),
-				articleInfo->GetSize(),
-				nzbget_rs_dqh_diskstate_select_original_or_current_msg_id(
-					articleInfo->GetDupeOriginalMessageId(),
-					articleInfo->GetMessageId())
-			});
-		}
-	}
-
-	WriteRsBuf(outfile, nzbget_rs_diskstate_format_file_info(
-		&fields,
-		groups.data(), groups.size(),
-		articles ? 1 : 0,
-		articleEntries.data(), articleEntries.size()));
-
-	return true;
-}
-
-inline bool DiskState::LoadArticles(FileInfo* fileInfo)
-{
-	return LoadFile(fileInfo, false, true);
-}
-
-inline bool DiskState::LoadFile(FileInfo* fileInfo, bool fileSummary, bool articles)
-{
-	debug("Loading FileInfo %i from disk", fileInfo->GetId());
-
-	NzbgetRsBuf fnBuf = nzbget_rs_dqh_conn_format_port_str(fileInfo->GetId());
-	BString<100> filename = fnBuf.data ? fnBuf.data : "";
-	nzbget_rs_free(fnBuf);
-	StateFile stateFile(filename, DISKSTATE_FILE_VERSION, false, DISKSTATE_FILE_LEGACY_VERSION);
-
-	StateDiskFile* infile = stateFile.BeginRead();
-	if (!infile)
-	{
-		return false;
-	}
-
-	return LoadFileInfo(fileInfo, *infile, stateFile.GetFileVersion(), fileSummary, articles);
-}
-
-inline bool DiskState::LoadFileInfo(FileInfo* fileInfo, StateDiskFile& infile, int formatVersion, bool fileSummary, bool articles)
-{
-	char buf[1024];
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	if (fileSummary && !Util::EmptyStr(buf)) fileInfo->SetSubject(buf);
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	if (fileSummary && !Util::EmptyStr(buf)) fileInfo->SetFilename(buf);
-
-	if (formatVersion >= 6)
-	{
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		if (fileSummary && !Util::EmptyStr(buf)) fileInfo->SetOrigname(buf);
-	}
-
-	if (formatVersion >= 7)
-	{
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		if (!Util::EmptyStr(buf))
-		{
-			fileInfo->SetOutputFilename(buf);
-		}
-	}
-
-	if (formatVersion >= 5)
-	{
-		int time = 0, filenameConfirmed = 0, outputInitialized = 0;
-		int cnt = infile.ScanLine("%i,%i,%i", &filenameConfirmed, &time, &outputInitialized);
-		if (cnt < 2) goto error;
-		if (fileSummary) fileInfo->SetFilenameConfirmed(static_cast<bool>(filenameConfirmed));
-		if (fileSummary) fileInfo->SetTime(static_cast<time_t>(time));
-		if (fileSummary && cnt >= 3)
-		{
-			bool directWriteOpt = g_Options && g_Options->GetDirectWrite();
-			bool forceDirectWrite = fileInfo->GetForceDirectWrite();
-			bool hasOwnOutFile = false;
-			bool hasOutTmp = false;
-			bool hasForceDest = false;
-			if (nzbget_rs_dqh_diskstate_should_probe_direct_write_files(
-				outputInitialized, directWriteOpt ? 1 : 0, forceDirectWrite ? 1 : 0) != 0)
-			{
-				const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
-				hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
-					FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
-				if (destDir && !Util::EmptyStr(destDir))
-				{
-					NzbgetRsBuf outTmpBuf = nzbget_rs_dqh_diskstate_format_out_tmp_path(
-						destDir, PATH_SEPARATOR, fileInfo->GetId());
-					hasOutTmp = FileSystem::FileExists(outTmpBuf.data ? outTmpBuf.data : "");
-					nzbget_rs_free(outTmpBuf);
-				}
-				if (forceDirectWrite && destDir && !Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()))
-				{
-					NzbgetRsBuf forceDestBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-						destDir, PATH_SEPARATOR, fileInfo->GetFilename());
-					hasForceDest = FileSystem::FileExists(forceDestBuf.data ? forceDestBuf.data : "");
-					nzbget_rs_free(forceDestBuf);
-				}
-			}
-			bool restoredOutputInit = nzbget_rs_dsp_eval_restored_output_init(
-				outputInitialized,
-				directWriteOpt ? 1 : 0,
-				forceDirectWrite ? 1 : 0,
-				hasOwnOutFile ? 1 : 0,
-				hasOutTmp ? 1 : 0,
-				hasForceDest ? 1 : 0) != 0;
-			fileInfo->SetOutputInitialized(restoredOutputInit);
-		}
-	}
-	else if (formatVersion >= 4)
-	{
-		int time;
-		if (infile.ScanLine("%i", &time) != 1) goto error;
-		if (fileSummary) fileInfo->SetTime(static_cast<time_t>(time));
-	}
-
-	uint32 High, Low;
-	if (infile.ScanLine("%u,%u", &High, &Low) != 2) goto error;
-	if (fileSummary) fileInfo->SetSize(Util::JoinInt64(High, Low));
-	if (fileSummary) fileInfo->SetRemainingSize(fileInfo->GetSize());
-
-	if (infile.ScanLine("%u,%u", &High, &Low) != 2) goto error;
-	if (fileSummary) fileInfo->SetMissedSize(Util::JoinInt64(High, Low));
-	if (fileSummary) fileInfo->SetRemainingSize(fileInfo->GetSize() - fileInfo->GetMissedSize());
-
-	int parFile;
-	if (infile.ScanLine("%i", &parFile) != 1) goto error;
-	if (fileSummary) fileInfo->SetParFile(static_cast<bool>(parFile));
-
-	int totalArticles, missedArticles;
-	if (infile.ScanLine("%i,%i", &totalArticles, &missedArticles) != 2) goto error;
-	if (fileSummary) fileInfo->SetTotalArticles(totalArticles);
-	if (fileSummary) fileInfo->SetMissedArticles(missedArticles);
-
-	int size;
-	if (infile.ScanLine("%i", &size) != 1) goto error;
-	for (int i = 0; i < size; i++)
-	{
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		if (fileSummary && !Util::EmptyStr(buf)) fileInfo->GetGroups()->push_back(buf);
-	}
-
-	if (articles)
-	{
-		if (infile.ScanLine("%i", &size) != 1) goto error;
-		for (int i = 0; i < size; i++)
-		{
-			int PartNumber, PartSize;
-			if (infile.ScanLine("%i,%i", &PartNumber, &PartSize) != 2) goto error;
-
-			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-
-			std::unique_ptr<ArticleInfo> articleInfo = std::make_unique<ArticleInfo>();
-			articleInfo->SetPartNumber(PartNumber);
-			articleInfo->SetSize(PartSize);
-			articleInfo->SetMessageId(buf);
-			fileInfo->GetArticles()->push_back(std::move(articleInfo));
-		}
-	}
-
-	return true;
-
-error:
-	error("Error reading diskstate for file %i", fileInfo->GetId());
-	return false;
-}
-
-inline bool DiskState::SaveFileState(FileInfo* fileInfo, bool completed, bool replace)
-{
-	debug("Saving FileState %i to disk", fileInfo->GetId());
-
-	NzbgetRsBuf fnBuf = nzbget_rs_dqh_diskstate_format_file_state_name(
-		fileInfo->GetId(), completed ? 1 : 0);
-	BString<100> filename = fnBuf.data ? fnBuf.data : "";
-	nzbget_rs_free(fnBuf);
-	StateFile stateFile(filename, DISKSTATE_FILE_VERSION, replace);
-	stateFile.SetFlush(!replace);
-
-	StateDiskFile* outfile = stateFile.BeginWrite();
-	if (!outfile)
-	{
-		return false;
-	}
-
-	return SaveFileState(fileInfo, *outfile, completed) && stateFile.FinishWrite();
-}
-
-inline bool DiskState::SaveFileState(FileInfo* fileInfo, StateDiskFile& outfile, bool completed)
-{
-	NzbgetRsDiskFileStateInput fields{};
-	fields.success_articles = fileInfo->GetSuccessArticles();
-	fields.failed_articles = fileInfo->GetFailedArticles();
-	fields.remaining_size = fileInfo->GetRemainingSize();
-	fields.success_size = fileInfo->GetSuccessSize();
-	fields.failed_size = fileInfo->GetFailedSize();
-	fields.filename = fileInfo->GetFilename();
-	fields.hash16k = fileInfo->GetHash16k() ? fileInfo->GetHash16k() : "";
-	fields.par_set_id = fileInfo->GetParSetId() ? fileInfo->GetParSetId() : "";
-	fields.par_file = (int)fileInfo->GetParFile();
-	fields.decoded_file_size = fileInfo->GetDecodedFileSize();
-	fields.output_initialized = (int)fileInfo->GetOutputInitialized();
-
-	std::vector<NzbgetRsDiskServerStat> stats;
-	stats.reserve(fileInfo->GetServerStats()->size());
-	for (ServerStat& serverStat : fileInfo->GetServerStats())
-	{
-		stats.push_back(NzbgetRsDiskServerStat{
-			serverStat.GetServerId(),
-			serverStat.GetSuccessArticles(),
-			serverStat.GetFailedArticles()
-		});
-	}
-
-	std::vector<NzbgetRsDiskArticleState> articles;
-	articles.reserve(fileInfo->GetArticles()->size());
-	for (ArticleInfo* articleInfo : fileInfo->GetArticles())
-	{
-		int savedStatus = 0;
-		int stagedFallback = nzbget_rs_dsp_calc_staged_fallback(
-			completed ? 1 : 0,
-			(int)articleInfo->GetStatus(),
-			(int)ArticleInfo::aiFinished,
-			articleInfo->GetDupeFallbackRound(),
-			articleInfo->GetResultFilename() ? 1 : 0,
-			(int)ArticleInfo::aiUndefined,
-			&savedStatus);
-		articles.push_back(NzbgetRsDiskArticleState{
-			savedStatus,
-			articleInfo->GetSegmentOffset(),
-			articleInfo->GetSegmentSize(),
-			articleInfo->GetCrc(),
-			stagedFallback
-		});
-	}
-
-	WriteRsBuf(outfile, nzbget_rs_diskstate_format_file_state(
-		&fields,
-		stats.data(), stats.size(),
-		articles.data(), articles.size()));
-
-	outfile.Close();
-	return true;
-}
-
-inline bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, bool completed)
-{
-	debug("Loading FileInfo %i from disk", fileInfo->GetId());
-
-	NzbgetRsBuf fnBuf = nzbget_rs_dqh_diskstate_format_file_state_name(
-		fileInfo->GetId(), completed ? 1 : 0);
-	BString<100> filename = fnBuf.data ? fnBuf.data : "";
-	nzbget_rs_free(fnBuf);
-	StateFile stateFile(filename, DISKSTATE_FILE_VERSION, false, DISKSTATE_FILE_LEGACY_VERSION);
-
-	StateDiskFile* infile = stateFile.BeginRead();
-	if (!infile)
-	{
-		return false;
-	}
-
-	m_lastFileStateVersion = stateFile.GetFileVersion();
-	return LoadFileState(fileInfo, servers, *infile, stateFile.GetFileVersion(), completed);
-}
-
-inline bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFile& infile, int formatVersion, bool completed)
-{
-	bool hasArticles = !fileInfo->GetArticles()->empty();
-
-	int successArticles, failedArticles;
-	if (infile.ScanLine("%i,%i", &successArticles, &failedArticles) != 2) goto error;
-	fileInfo->SetSuccessArticles(successArticles);
-	fileInfo->SetFailedArticles(failedArticles);
-
-	uint32 High1, Low1, High2, Low2, High3, Low3;
-	if (infile.ScanLine("%u,%u,%u,%u,%u,%u", &High1, &Low1, &High2, &Low2, &High3, &Low3) != 6) goto error;
-	fileInfo->SetRemainingSize(Util::JoinInt64(High1, Low1));
-	fileInfo->SetSuccessSize(Util::JoinInt64(High2, Low2));
-	fileInfo->SetFailedSize(Util::JoinInt64(High3, Low3));
-	if (formatVersion >= 8)
-	{
-		uint32 decodedHigh, decodedLow;
-		if (infile.ScanLine("%u,%u", &decodedHigh, &decodedLow) != 2) goto error;
-		fileInfo->SetDecodedFileSize(Util::JoinInt64(decodedHigh, decodedLow));
-	}
-
-	char buf[1024];
-
-	if (formatVersion >= 4)
-	{
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		if (!Util::EmptyStr(buf)) fileInfo->SetFilename(buf);
-	}
-
-	if (formatVersion >= 5)
-	{
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		fileInfo->SetHash16k(*buf ? buf : nullptr);
-		if (formatVersion >= 6)
-		{
-			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-			fileInfo->SetParSetId(*buf ? buf : nullptr);
-		}
-		int parFile = 0;
-		if (infile.ScanLine("%i", &parFile) != 1) goto error;
-		fileInfo->SetParFile((bool)parFile);
-	}
-
-	if (!LoadServerStats(fileInfo->GetServerStats(), servers, infile)) goto error;
-
-	int completedArticles;
-	completedArticles = 0; //clang requires initialization in a separate line (due to goto statements)
-
-	int size;
-	if (infile.ScanLine("%i", &size) != 1) goto error;
-	// the state of a file with its articles loaded can't list more (a stale or
-	// damaged state file did: at() threw out of the queue coordinator). Fewer is
-	// fine, as upstream has it: older queues saved some states with none
-	if (!nzbget_rs_dsp_validate_article_count(
-		size, hasArticles ? 1 : 0, (int)fileInfo->GetArticles()->size()))
-	{
-		goto error;
-	}
-	for (int i = 0; i < size; i++)
-	{
-		if (!hasArticles)
-		{
-			fileInfo->GetArticles()->push_back(std::make_unique<ArticleInfo>());
-		}
-		std::unique_ptr<ArticleInfo>& pa = fileInfo->GetArticles()->at(i);
-
-		int statusInt = 0;
-
-		int64 segmentOffset = 0;
-		uint32 crc = 0;
-		int segmentSize = 0;
-		int stagedFallback = 0;
-		int fields = 0;
-		if (formatVersion >= 2)
-		{
-			fields = infile.ScanLine("%i,%" PRIi64 ",%i,%u,%i", &statusInt, &segmentOffset,
-				&segmentSize, &crc, &stagedFallback);
-		}
-		else
-		{
-			fields = infile.ScanLine("%i", &statusInt);
-		}
-		bool needStagedCheck = nzbget_rs_dsp_need_staged_file_check(
-			completed ? 1 : 0,
-			formatVersion,
-			statusInt,
-			(int)ArticleInfo::aiFinished,
-			segmentOffset,
-			segmentSize,
-			stagedFallback,
-			pa->GetPartNumber(),
-			g_Options->GetDirectWrite() ? 1 : 0,
-			fileInfo->GetForceDirectWrite() ? 1 : 0) != 0;
-		bool stagedFileExists = false;
-		if (needStagedCheck)
-		{
-			NzbgetRsBuf stagedBuf = nzbget_rs_dqh_diskstate_format_staged_part_path(
-				g_Options->GetTempDir(), PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber());
-			stagedFileExists = FileSystem::FileExists(stagedBuf.data ? stagedBuf.data : "");
-			nzbget_rs_free(stagedBuf);
-		}
-		NzbgetRsArticleLoadEval eval{};
-		if (!nzbget_rs_dsp_eval_article_load_state(
-			formatVersion,
-			completed ? 1 : 0,
-			fields,
-			statusInt,
-			segmentOffset,
-			segmentSize,
-			stagedFallback,
-			pa->GetPartNumber(),
-			stagedFileExists ? 1 : 0,
-			g_Options->GetDirectWrite() ? 1 : 0,
-			fileInfo->GetForceDirectWrite() ? 1 : 0,
-			pa->GetResultFilename() ? 1 : 0,
-			completedArticles,
-			size,
-			&eval))
-		{
-			goto error;
-		}
-		if (formatVersion >= 2)
-		{
-			pa->SetSegmentOffset(eval.segment_offset);
-			pa->SetSegmentSize(eval.segment_size);
-			pa->SetCrc(crc);
-		}
-		pa->SetDupeFallbackRound(eval.dupe_fallback_round);
-		if (eval.need_result_filename)
-		{
-			NzbgetRsBuf resBuf = nzbget_rs_dqh_diskstate_format_staged_part_path(
-				g_Options->GetTempDir(), PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber());
-			pa->SetResultFilename(resBuf.data ? resBuf.data : "");
-			nzbget_rs_free(resBuf);
-		}
-		completedArticles = eval.completed_articles;
-		pa->SetStatus((ArticleInfo::EStatus)eval.status);
-	}
-
-	fileInfo->SetCompletedArticles(completedArticles);
-
-	if (formatVersion < 8)
-	{
-		// data after upstream's data, where this build wrote it
-		char trailer[1024];
-		while (infile.ReadLine(trailer, sizeof(trailer)))
-		{
-			int64 decodedSize = 0;
-			int outputInit = 0;
-			int trailerKind = nzbget_rs_dsp_parse_legacy_file_state_trailer(
-				trailer, &decodedSize, &outputInit);
-			if (trailerKind == 1)
-			{
-				fileInfo->SetDecodedFileSize(decodedSize);
-			}
-			else if (trailerKind == 2)
-			{
-				fileInfo->SetOutputInitialized(outputInit != 0);
-			}
-		}
-	}
-
-	// Validate or recover DirectWrite OutputInitialized against the actual on-disk direct-write output file
-	if (g_Options && (g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()))
-	{
-		const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
-		bool hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
-			FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
-		bool hasOutTmp = false;
-		if (destDir && !Util::EmptyStr(destDir))
-		{
-			NzbgetRsBuf outTmpBuf = nzbget_rs_dqh_diskstate_format_out_tmp_path(
-				destDir, PATH_SEPARATOR, fileInfo->GetId());
-			hasOutTmp = FileSystem::FileExists(outTmpBuf.data ? outTmpBuf.data : "");
-			nzbget_rs_free(outTmpBuf);
-		}
-		bool hasCompletedDest = false;
-		if (nzbget_rs_dqh_diskstate_can_check_completed_dest_file(
-			completed ? 1 : 0,
-			fileInfo->GetForceDirectWrite() ? 1 : 0,
-			Util::EmptyStr(destDir) ? 1 : 0,
-			Util::EmptyStr(fileInfo->GetFilename()) ? 1 : 0) != 0)
-		{
-			NzbgetRsBuf compDestBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				destDir, PATH_SEPARATOR, fileInfo->GetFilename());
-			hasCompletedDest = FileSystem::FileExists(compDestBuf.data ? compDestBuf.data : "");
-			nzbget_rs_free(compDestBuf);
-		}
-		bool hasDirectWriteOutput = hasOwnOutFile || hasOutTmp || hasCompletedDest;
-
-		int newOutputInitialized = 0;
-		int pickPathKind = 0;
-		nzbget_rs_dsp_reconcile_direct_write_output(
-			fileInfo->GetOutputInitialized() ? 1 : 0,
-			hasOwnOutFile ? 1 : 0,
-			hasOutTmp ? 1 : 0,
-			hasCompletedDest ? 1 : 0,
-			fileInfo->GetSuccessArticles(),
-			completed ? 1 : 0,
-			fileInfo->GetOutputFilename().empty() ? 1 : 0,
-			&newOutputInitialized,
-			&pickPathKind);
-		fileInfo->SetOutputInitialized(newOutputInitialized != 0);
-		if (pickPathKind != 0)
-		{
-			NzbgetRsBuf pickedBuf = pickPathKind == 1 ?
-				nzbget_rs_dqh_diskstate_format_out_tmp_path(destDir, PATH_SEPARATOR, fileInfo->GetId()) :
-				nzbget_rs_tpr_article_writer_format_dest_file_path(destDir, PATH_SEPARATOR, fileInfo->GetFilename());
-			fileInfo->SetOutputFilename(pickedBuf.data ? pickedBuf.data : "");
-			nzbget_rs_free(pickedBuf);
-		}
-	}
-
-	infile.Close();
-	return true;
-
-error:
-	infile.Close();
-	error("Error reading diskstate for file %i", fileInfo->GetId());
-	return false;
-}
-
-inline void DiskState::DiscardFiles(NzbInfo* nzbInfo, bool deleteLog)
-{
-	for (FileInfo* fileInfo : nzbInfo->GetFileList())
-	{
-		DiscardFile(fileInfo->GetId(), true, true, true);
-	}
-
-	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-	{
-		if (completedFile.GetStatus() != CompletedFile::cfSuccess)
-		{
-			DiscardFile(completedFile.GetId(), true, true, true);
-		}
-	}
-
-	if (deleteLog)
-	{
-		NzbgetRsBuf logBuf = nzbget_rs_dqh_diskstate_format_nzb_log_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, nzbInfo->GetId());
-		FileSystem::DeleteFile(logBuf.data ? logBuf.data : "");
-		nzbget_rs_free(logBuf);
-	}
-}
-
-inline void DiskState::SaveDupInfo(DupInfo* dupInfo, StateDiskFile& outfile)
-{
-	WriteRsBuf(outfile, nzbget_rs_diskstate_format_dup_info(
-		(int)dupInfo->GetStatus(),
-		dupInfo->GetSize(),
-		dupInfo->GetFullContentHash(),
-		dupInfo->GetFilteredContentHash(),
-		dupInfo->GetDupeScore(),
-		(int)dupInfo->GetDupeMode(),
-		dupInfo->GetName(),
-		dupInfo->GetDupeKey()));
-}
-
-inline bool DiskState::LoadDupInfo(DupInfo* dupInfo, StateDiskFile& infile, int formatVersion)
-{
-	char buf[1024];
-
-	int status;
-	uint32 High, Low;
-	uint32 fullContentHash, filteredContentHash = 0;
-	int dupeScore, dupeMode;
-	if (infile.ScanLine("%i,%u,%u,%u,%u,%i,%i", &status, &High, &Low, &fullContentHash, &filteredContentHash, &dupeScore, &dupeMode) != 7) goto error;
-
-	dupInfo->SetStatus((DupInfo::EStatus)status);
-	dupInfo->SetFullContentHash(fullContentHash);
-	dupInfo->SetFilteredContentHash(filteredContentHash);
-	dupInfo->SetSize(Util::JoinInt64(High, Low));
-	dupInfo->SetDupeScore(dupeScore);
-	dupInfo->SetDupeMode((EDupeMode)dupeMode);
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	dupInfo->SetName(buf);
-
-	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	dupInfo->SetDupeKey(buf);
-
-	return true;
-
-error:
-	return false;
-}
-
-inline void DiskState::SaveHistory(HistoryList* history, StateDiskFile& outfile)
-{
-	debug("Saving history to disk");
-
-	outfile.PrintLine("%i", (int)history->size());
-	for (HistoryInfo* historyInfo : history)
-	{
-		outfile.PrintLine("%i,%i,%i", historyInfo->GetId(), (int)historyInfo->GetKind(), (int)historyInfo->GetTime());
-
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
-		{
-			SaveNzbInfo(historyInfo->GetNzbInfo(), outfile);
-		}
-		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
-		{
-			SaveDupInfo(historyInfo->GetDupInfo(), outfile);
-		}
-	}
-
-	std::vector<NzbInfo*> nzbs;
-	for (HistoryInfo* historyInfo : history)
-	{
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
-		{
-			nzbs.push_back(historyInfo->GetNzbInfo());
-		}
-	}
-	SaveDupeTrailer(nzbs, outfile);
-}
-
-inline bool DiskState::LoadHistory(HistoryList* history, Servers* servers, StateDiskFile& infile, int formatVersion)
-{
-	debug("Loading history from disk");
-
-	int size;
-	if (infile.ScanLine("%i", &size) != 1) goto error;
-	for (int i = 0; i < size; i++)
-	{
-		std::unique_ptr<HistoryInfo> historyInfo;
-		HistoryInfo::EKind kind = HistoryInfo::hkNzb;
-		int id = 0;
-		int time;
-
-		int kindval = 0;
-		if (infile.ScanLine("%i,%i,%i", &id, &kindval, &time) != 3) goto error;
-		kind = (HistoryInfo::EKind)kindval;
-
-		if (kind == HistoryInfo::hkNzb)
-		{
-			std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
-			if (!LoadNzbInfo(nzbInfo.get(), servers, infile, formatVersion)) goto error;
-			nzbInfo->LeavePostProcess();
-			historyInfo = std::make_unique<HistoryInfo>(std::move(nzbInfo));
-		}
-		else if (kind == HistoryInfo::hkUrl)
-		{
-			std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
-			if (!LoadNzbInfo(nzbInfo.get(), servers, infile, formatVersion)) goto error;
-			historyInfo = std::make_unique<HistoryInfo>(std::move(nzbInfo));
-		}
-		else if (kind == HistoryInfo::hkDup)
-		{
-			std::unique_ptr<DupInfo> dupInfo = std::make_unique<DupInfo>();
-			if (!LoadDupInfo(dupInfo.get(), infile, formatVersion)) goto error;
-			dupInfo->SetId(id);
-			historyInfo = std::make_unique<HistoryInfo>(std::move(dupInfo));
-		}
-		else
-		{
-			// a kind no version writes (a damaged record): the file can't be read on
-			error("Unknown history record kind %i", kindval);
-			goto error;
-		}
-
-		historyInfo->SetTime((time_t)time);
-
-		history->push_back(std::move(historyInfo));
-	}
-
-	if (formatVersion >= 57 && formatVersion <= DISKSTATE_QUEUE_VERSION &&
-		!LoadDupeTrailer([history](int id) -> NzbInfo*
-			{
-				for (HistoryInfo* historyInfo : history)
-				{
-					if (nzbget_rs_dqh_diskstate_matches_history_nzb_id(
-						(int)historyInfo->GetKind(),
-						(int)HistoryInfo::hkNzb,
-						(int)HistoryInfo::hkUrl,
-						(historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl) ?
-							historyInfo->GetNzbInfo()->GetId() : 0,
-						id) != 0)
-					{
-						return historyInfo->GetNzbInfo();
-					}
-				}
-				return nullptr;
-			}, infile)) goto error;
-
-	return true;
-
-error:
-	error("Error reading diskstate for history");
-	return false;
-}
-
-/*
- * Deletes whole download queue including history.
- */
-inline void DiskState::DiscardDownloadQueue()
-{
-	debug("Discarding queue");
-
-	for (const char* name : { "queue", "history" })
-	{
-		NzbgetRsBuf qBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, name);
-		FileSystem::DeleteFile(qBuf.data ? qBuf.data : "");
-		nzbget_rs_free(qBuf);
-	}
-
-	DirBrowser dir(g_Options->GetQueueDir());
-	while (const char* filename = dir.Next())
-	{
-		// delete all files whose names have only characters '0'..'9'
-		bool onlyNums = true;
-		for (const char* p = filename; *p; p++)
-		{
-			if (*p < '0' || *p > '9')
-			{
-				onlyNums = false;
-				break;
-			}
-		}
-		if (onlyNums)
-		{
-			for (char suffix : { '\0', 's', 'c' })
-			{
-				NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_file_state_path(
-					g_Options->GetQueueDir(), PATH_SEPARATOR, filename, suffix);
-				FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
-				nzbget_rs_free(fBuf);
-			}
-		}
-	}
-}
-
-inline bool DiskState::DownloadQueueExists()
-{
-	debug("Checking if a saved queue exists on disk");
-
-	// An empty queue still has saved state: the IDs handed out before its entries
-	// were deleted. Load it so both generators continue past those IDs.
-	for (const char* name : { "queue", "history", "ids" })
-	{
-		NzbgetRsBuf qBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, name);
-		bool exists = FileSystem::FileExists(qBuf.data ? qBuf.data : "");
-		nzbget_rs_free(qBuf);
-		if (exists)
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
-inline void DiskState::DiscardFile(int fileId, bool deleteData, bool deletePartialState, bool deleteCompletedState)
-{
-	// info and articles file
-	if (deleteData)
-	{
-		NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_id_state_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, fileId, '\0');
-		FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
-		nzbget_rs_free(fBuf);
-	}
-
-	// partial state file
-	if (deletePartialState)
-	{
-		NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_id_state_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, fileId, 's');
-		FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
-		nzbget_rs_free(fBuf);
-	}
-
-	// completed state file
-	if (deleteCompletedState)
-	{
-		NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_id_state_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, fileId, 'c');
-		FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
-		nzbget_rs_free(fBuf);
-	}
-}
-
-inline void DiskState::CleanupTempDir(DownloadQueue* downloadQueue)
-{
-	DirBrowser dir(g_Options->GetTempDir());
-	while (const char* filename = dir.Next())
-	{
-		int id = 0, part = 0;
-		int kind = nzbget_rs_dsp_classify_temp_file(filename, &id, &part);
-		bool garbage = kind == 1;
-		if (kind == 2)
-		{
-			garbage = true;
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				if (nzbInfo->GetFileList()->Find(id))
-				{
-					garbage = false;
-					break;
-				}
-			}
-		}
-
-		if (garbage)
-		{
-			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				g_Options->GetTempDir(), PATH_SEPARATOR, filename);
-			FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
-			nzbget_rs_free(fullFnBuf);
-		}
-	}
-}
-
-inline void DiskState::CleanupQueueDir(DownloadQueue* downloadQueue)
-{
-	// Prepare sorted id lists for faster search
-
-	std::vector<int> nzbIdList;
-	std::vector<int> fileIdList;
-
-	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-	{
-		nzbIdList.push_back(nzbInfo->GetId());
-
-		for (FileInfo* fileInfo : nzbInfo->GetFileList())
-		{
-			fileIdList.push_back(fileInfo->GetId());
-		}
-
-		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-		{
-			fileIdList.push_back(completedFile.GetId());
-		}
-	}
-
-	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-	{
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb ||
-			historyInfo->GetKind() == HistoryInfo::hkUrl)
-		{
-			NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-			nzbIdList.push_back(nzbInfo->GetId());
-
-			for (FileInfo* fileInfo : nzbInfo->GetFileList())
-			{
-				fileIdList.push_back(fileInfo->GetId());
-			}
-
-			for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-			{
-				fileIdList.push_back(completedFile.GetId());
-			}
-		}
-	}
-
-	std::sort(nzbIdList.begin(), nzbIdList.end());
-	std::sort(fileIdList.begin(), fileIdList.end());
-
-	// Do cleanup
-
-	int deletedFiles = 0;
-
-	DirBrowser dir(g_Options->GetQueueDir());
-	while (const char* filename = dir.Next())
-	{
-		bool del = nzbget_rs_dsp_is_orphan_queue_file(
-			filename,
-			fileIdList.data(), fileIdList.size(),
-			nzbIdList.data(), nzbIdList.size()) != 0;
-
-		if (del)
-		{
-			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-			detail("Deleting orphaned diskstate file %s", filename);
-			FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
-			nzbget_rs_free(fullFnBuf);
-			deletedFiles++;
-		}
-	}
-
-	if (deletedFiles > 0)
-	{
-		info("Deleted %i orphaned diskstate file(s)", deletedFiles);
-	}
-}
-
-/* For safety:
- * - first save to temp-file (feeds.new)
- * - then delete feeds
- * - then rename feeds.new to feeds
- */
-inline bool DiskState::SaveFeeds(Feeds* feeds, FeedHistory* feedHistory)
-{
-	debug("Saving feeds state to disk");
-
-	StateFile stateFile("feeds", DISKSTATE_FEEDS_VERSION, true);
-
-	if (nzbget_rs_dqh_diskstate_should_discard_feeds_file(
-		feeds->empty() ? 1 : 0, feedHistory->empty() ? 1 : 0) != 0)
-	{
-		stateFile.Discard();
-		return true;
-	}
-
-	StateDiskFile* outfile = stateFile.BeginWrite();
-	if (!outfile)
-	{
-		return false;
-	}
-
-	// save status
-	SaveFeedStatus(feeds, *outfile);
-
-	// save history
-	SaveFeedHistory(feedHistory, *outfile);
-
-	// now rename to dest file name
-	return stateFile.FinishWrite();
-}
-
-inline bool DiskState::LoadFeeds(Feeds* feeds, FeedHistory* feedHistory)
-{
-	debug("Loading feeds state from disk");
-
-	StateFile stateFile("feeds", DISKSTATE_FEEDS_VERSION, true);
-
-	if (!stateFile.FileExists())
-	{
-		return true;
-	}
-
-	StateDiskFile* infile = stateFile.BeginRead();
-	if (!infile)
-	{
-		return false;
-	}
-
-	bool ok = false;
-	int formatVersion = stateFile.GetFileVersion();
-
-	// load feed status
-	if (!LoadFeedStatus(feeds, *infile, formatVersion)) goto error;
-
-	// load feed history
-	if (!LoadFeedHistory(feedHistory, *infile, formatVersion)) goto error;
-
-	ok = true;
-
-error:
-
-	if (!ok)
-	{
-		error("Error reading diskstate for feeds");
-	}
-
-	return ok;
-}
-
-inline bool DiskState::SaveFeedStatus(Feeds* feeds, StateDiskFile& outfile)
-{
-	debug("Saving feed status to disk");
-
-	std::vector<const char*> urls;
-	std::vector<uint32_t> filterHashes;
-	std::vector<int> lastUpdates;
-	urls.reserve(feeds->size());
-	filterHashes.reserve(feeds->size());
-	lastUpdates.reserve(feeds->size());
-	for (FeedInfo* feedInfo : feeds)
-	{
-		urls.push_back(feedInfo->GetUrl());
-		filterHashes.push_back(feedInfo->GetFilterHash());
-		lastUpdates.push_back((int)feedInfo->GetLastUpdate());
-	}
-	WriteRsBuf(outfile, nzbget_rs_diskstate_format_feed_status(
-		urls.data(), filterHashes.data(), lastUpdates.data(), urls.size()));
-
-	return true;
-}
-
-inline bool DiskState::LoadFeedStatus(Feeds* feeds, StateDiskFile& infile, int formatVersion)
-{
-	debug("Loading feed status from disk");
-
-	int size;
-	if (infile.ScanLine("%i", &size) != 1) goto error;
-	for (int i = 0; i < size; i++)
-	{
-		char url[1024];
-		if (!infile.ReadLine(url, sizeof(url))) goto error;
-
-		char filter[1024];
-		if (formatVersion == 2)
-		{
-			if (!infile.ReadLine(filter, sizeof(filter))) goto error;
-		}
-
-		uint32 filterHash = 0;
-		if (formatVersion >= 3)
-		{
-			if (infile.ScanLine("%u", &filterHash) != 1) goto error;
-		}
-
-		int lastUpdate = 0;
-		if (infile.ScanLine("%i", &lastUpdate) != 1) goto error;
-
-		for (FeedInfo* feedInfo : feeds)
-		{
-			if (nzbget_rs_dsp_feed_status_matches(
-				feedInfo->GetUrl(),
-				url,
-				formatVersion,
-				formatVersion == 2 ? feedInfo->GetFilter() : "",
-				formatVersion == 2 ? filter : "",
-				feedInfo->GetFilterHash(),
-				filterHash) != 0)
-			{
-				feedInfo->SetLastUpdate((time_t)lastUpdate);
-			}
-		}
-	}
-
-	return true;
-
-error:
-	error("Error reading feed status from disk");
-	return false;
-}
-
-inline bool DiskState::SaveFeedHistory(FeedHistory* feedHistory, StateDiskFile& outfile)
-{
-	debug("Saving feed history to disk");
-
-	std::vector<int> statuses;
-	std::vector<int> lastSeens;
-	std::vector<const char*> urls;
-	statuses.reserve(feedHistory->size());
-	lastSeens.reserve(feedHistory->size());
-	urls.reserve(feedHistory->size());
-	for (FeedHistoryInfo& feedHistoryInfo : feedHistory)
-	{
-		statuses.push_back((int)feedHistoryInfo.GetStatus());
-		lastSeens.push_back((int)feedHistoryInfo.GetLastSeen());
-		urls.push_back(feedHistoryInfo.GetUrl());
-	}
-	WriteRsBuf(outfile, nzbget_rs_diskstate_format_feed_history(
-		statuses.data(), lastSeens.data(), urls.data(), urls.size()));
-
-	return true;
-}
-
-inline bool DiskState::LoadFeedHistory(FeedHistory* feedHistory, StateDiskFile& infile, int formatVersion)
-{
-	debug("Loading feed history from disk");
-
-	int size;
-	if (infile.ScanLine("%i", &size) != 1) goto error;
-	for (int i = 0; i < size; i++)
-	{
-		int status = 0;
-		int lastSeen = 0;
-		int r = infile.ScanLine("%i,%i", &status, &lastSeen);
-		if (r != 2) goto error;
-
-		char url[1024];
-		if (!infile.ReadLine(url, sizeof(url))) goto error;
-
-		feedHistory->emplace_back(url, (FeedHistoryInfo::EStatus)(status), (time_t)(lastSeen));
-	}
-
-	return true;
-
-error:
-	error("Error reading feed history from disk");
-	return false;
-}
-
-inline void DiskState::CalcFileStats(DownloadQueue* downloadQueue, int formatVersion)
-{
-	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-	{
-		nzbInfo->UpdateCurrentStats();
-	}
-}
-
-inline bool DiskState::SaveAllFileInfos(DownloadQueue* downloadQueue)
-{
-	bool ok = true;
-	StateFile stateFile("files", DISKSTATE_FILE_VERSION, true);
-	if (!downloadQueue->GetQueue()->empty())
-	{
-		StateDiskFile* outfile = stateFile.BeginWrite();
-		if (!outfile)
-		{
-			return false;
-		}
-
-		// save file-infos
-
-		int fileCount = 0;
-		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-		{
-			fileCount += nzbInfo->GetFileList()->size();
-		}
-		outfile->PrintLine("%i", fileCount);
-
-		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-		{
-			for (FileInfo* fileInfo : nzbInfo->GetFileList())
-			{
-				outfile->PrintLine("%i", fileInfo->GetId());
-				SaveFileInfo(fileInfo, *outfile, false);
-			}
-		}
-
-		// now rename to dest file name
-		ok = stateFile.FinishWrite();
-	}
-	else
-	{
-		stateFile.Discard();
-	}
-
-	return ok;
-}
-
-inline bool DiskState::LoadAllFileInfos(DownloadQueue* downloadQueue)
-{
-	if (downloadQueue->GetQueue()->empty())
-	{
-		return true;
-	}
-
-	StateFile stateFile("files", DISKSTATE_FILE_VERSION, false, DISKSTATE_FILE_LEGACY_VERSION);
-	StateDiskFile* infile = nullptr;
-	bool useHibernate = false;
-
-	if (stateFile.FileExists())
-	{
-		infile = stateFile.BeginRead();
-		useHibernate = infile != nullptr;
-		if (useHibernate)
-		{
-			int fileCount = 0;
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				fileCount += nzbInfo->GetFileList()->size();
-			}
-			int size = 0;
-			int scanCnt = infile->ScanLine("%i", &size);
-			useHibernate = scanCnt == 1 && size == fileCount;
-		}
-		if (!useHibernate)
-		{
-			stateFile.Discard();
-		}
-	}
-
-	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-	{
-		RawFileList brokenFileInfos;
-
-		for (FileInfo* fileInfo : nzbInfo->GetFileList())
-		{
-			bool res = false;
-			if (useHibernate)
-			{
-				int id = 0;
-				infile->ScanLine("%i", &id);
-				if (id == fileInfo->GetId())
-				{
-					res = LoadFileInfo(fileInfo, *infile, stateFile.GetFileVersion(), true, false);
-				}
-			}
-			if (!res)
-			{
-				res = LoadFile(fileInfo, true, false);
-			}
-			if (!res)
-			{
-				brokenFileInfos.push_back(fileInfo);
-			}
-		}
-
-		for (FileInfo* fileInfo : brokenFileInfos)
-		{
-			nzbInfo->GetFileList()->Remove(fileInfo);
-		}
-	}
-
-	return true;
-}
-
-inline bool DiskState::LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers)
-{
-	NzbgetRsBuf cacheFlagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
-	bool cacheWasActive = FileSystem::FileExists(cacheFlagBuf.data ? cacheFlagBuf.data : "");
-	nzbget_rs_free(cacheFlagBuf);
-
-	DirBrowser dir(g_Options->GetQueueDir());
-	while (const char* filename = dir.Next())
-	{
-		int id = 0;
-		char suffix = '\0';
-		if (nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(filename, &id, &suffix) != 0)
-		{
-			if (suffix == 'c' || (g_Options->GetContinuePartial() && !cacheWasActive))
-			{
-				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-				{
-					for (FileInfo* fileInfo : nzbInfo->GetFileList())
-					{
-						if (fileInfo->GetId() == id)
-						{
-							// a damaged state file (cut short by a power loss: partial states
-							// are written in place) costs only its own progress: the load left
-							// blank articles behind, which then downloaded nothing, and the rest
-							// of the queue dir's states weren't read
-							int successArticles = fileInfo->GetSuccessArticles();
-							int failedArticles = fileInfo->GetFailedArticles();
-							int64 remainingSize = fileInfo->GetRemainingSize();
-							int64 successSize = fileInfo->GetSuccessSize();
-							int64 failedSize = fileInfo->GetFailedSize();
-							if (!LoadFileState(fileInfo, servers, suffix == 'c'))
-							{
-								warn("Discarding damaged download state %s", filename);
-								fileInfo->GetArticles()->clear();
-								fileInfo->SetSuccessArticles(successArticles);
-								fileInfo->SetFailedArticles(failedArticles);
-								fileInfo->SetRemainingSize(remainingSize);
-								fileInfo->SetSuccessSize(successSize);
-								fileInfo->SetFailedSize(failedSize);
-								NzbgetRsBuf dmgFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-									g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-								FileSystem::DeleteFile(dmgFnBuf.data ? dmgFnBuf.data : "");
-								nzbget_rs_free(dmgFnBuf);
-								goto next;
-							}
-							if (m_lastFileStateVersion > DISKSTATE_FILE_VERSION)
-							{
-								// an earlier build of this branch wrote it: rewritten in the
-								// format an nzbget without duplicate repair reads too
-								SaveFileState(fileInfo, suffix == 'c');
-							}
-							fileInfo->GetArticles()->clear();
-							fileInfo->SetPartialState(suffix == 'c' ? FileInfo::psCompleted : FileInfo::psPartial);
-							goto next;
-						}
-					}
-				}
-			}
-			else
-			{
-				NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-				FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
-				nzbget_rs_free(fullFnBuf);
-			}
-		}
-		next:;
-	}
-
-	return true;
-}
-
-inline bool DiskState::SaveStats(Servers* servers, ServerVolumes* serverVolumes)
-{
-	debug("Saving stats to disk");
-
-	StateFile stateFile("stats", DISKSTATE_STATS_VERSION, true);
-
-	if (servers->empty())
-	{
-		stateFile.Discard();
-		return true;
-	}
-
-	StateDiskFile* outfile = stateFile.BeginWrite();
-	if (!outfile)
-	{
-		return false;
-	}
-
-	// save server names
-	SaveServerInfo(servers, *outfile);
-
-	// save stat
-	SaveVolumeStat(serverVolumes, *outfile);
-
-	// now rename to dest file name
-	return stateFile.FinishWrite();
-}
-
-inline bool DiskState::LoadStats(Servers* servers, ServerVolumes* serverVolumes, bool* perfectMatch)
-{
-	debug("Loading stats from disk");
-
-	StateFile stateFile("stats", DISKSTATE_STATS_VERSION, true);
-
-	if (!stateFile.FileExists())
-	{
-		return true;
-	}
-
-	StateDiskFile* infile = stateFile.BeginRead();
-	if (!infile)
-	{
-		return false;
-	}
-
-	bool ok = false;
-	int formatVersion = stateFile.GetFileVersion();
-
-	if (!LoadServerInfo(servers, *infile, formatVersion, perfectMatch)) goto error;
-
-	if (formatVersion >=2)
-	{
-		if (!LoadVolumeStat(servers, serverVolumes, *infile, formatVersion)) goto error;
-	}
-
-	ok = true;
-
-error:
-
-	if (!ok)
-	{
-		error("Error reading diskstate for statistics");
-	}
-
-	return ok;
-}
-
-inline bool DiskState::SaveServerInfo(Servers* servers, StateDiskFile& outfile)
-{
-	debug("Saving server info to disk");
-
-	std::vector<const char*> names;
-	std::vector<const char*> hosts;
-	std::vector<int> ports;
-	std::vector<const char*> users;
-	names.reserve(servers->size());
-	hosts.reserve(servers->size());
-	ports.reserve(servers->size());
-	users.reserve(servers->size());
-	for (NewsServer* newsServer : servers)
-	{
-		names.push_back(newsServer->GetName());
-		hosts.push_back(newsServer->GetHost());
-		ports.push_back(newsServer->GetPort());
-		users.push_back(newsServer->GetUser());
-	}
-	WriteRsBuf(outfile, nzbget_rs_diskstate_format_server_info(
-		names.data(), hosts.data(), ports.data(), users.data(), names.size()));
-
-	return true;
-}
-
-inline bool DiskState::LoadServerInfo(Servers* servers, StateDiskFile& infile, int formatVersion, bool* perfectMatch)
-{
-	debug("Loading server info from disk");
-
-	*perfectMatch = true;
-
-	int size = 0;
-	std::vector<int> refIds;
-	std::vector<CString> refNameStrs;
-	std::vector<CString> refHostStrs;
-	std::vector<int> refPorts;
-	std::vector<CString> refUserStrs;
-	if (infile.ScanLine("%i", &size) != 1 || size < 0) goto error;
-	refIds.reserve(size);
-	refNameStrs.reserve(size);
-	refHostStrs.reserve(size);
-	refPorts.reserve(size);
-	refUserStrs.reserve(size);
-	for (int i = 0; i < size; i++)
-	{
-		char name[1024];
-		if (!infile.ReadLine(name, sizeof(name))) goto error;
-
-		char host[200];
-		if (!infile.ReadLine(host, sizeof(host))) goto error;
-
-		int port;
-		if (infile.ScanLine("%i", &port) != 1) goto error;
-
-		char user[100];
-		if (!infile.ReadLine(user, sizeof(user))) goto error;
-
-		refIds.push_back(i + 1);
-		refNameStrs.emplace_back(name);
-		refHostStrs.emplace_back(host);
-		refPorts.push_back(port);
-		refUserStrs.emplace_back(user);
-	}
-
-	{
-		std::vector<const char*> srvNames;
-		std::vector<const char*> srvHosts;
-		std::vector<int> srvPorts;
-		std::vector<const char*> srvUsers;
-		srvNames.reserve(servers->size());
-		srvHosts.reserve(servers->size());
-		srvPorts.reserve(servers->size());
-		srvUsers.reserve(servers->size());
-		for (NewsServer* newsServer : servers)
-		{
-			srvNames.push_back(newsServer->GetName());
-			srvHosts.push_back(newsServer->GetHost());
-			srvPorts.push_back(newsServer->GetPort());
-			srvUsers.push_back(newsServer->GetUser());
-		}
-
-		std::vector<const char*> refNames;
-		std::vector<const char*> refHosts;
-		std::vector<const char*> refUsers;
-		refNames.reserve(refNameStrs.size());
-		refHosts.reserve(refHostStrs.size());
-		refUsers.reserve(refUserStrs.size());
-		for (size_t i = 0; i < refNameStrs.size(); i++)
-		{
-			refNames.push_back(*refNameStrs[i]);
-			refHosts.push_back(*refHostStrs[i]);
-			refUsers.push_back(*refUserStrs[i]);
-		}
-
-		std::vector<int> outStateIds(servers->size(), 0);
-		*perfectMatch = nzbget_rs_dsp_match_servers(
-			srvNames.data(), srvHosts.data(), srvPorts.data(), srvUsers.data(), servers->size(),
-			refIds.data(), refNames.data(), refHosts.data(), refPorts.data(), refUsers.data(), refIds.size(),
-			outStateIds.data()) != 0;
-
-		size_t idx = 0;
-		for (NewsServer* newsServer : servers)
-		{
-			newsServer->SetStateId(outStateIds[idx++]);
-		}
-	}
-
-	debug("******** MATCHING NEWS-SERVERS **********");
-	for (NewsServer* newsServer : servers)
-	{
-		*perfectMatch = *perfectMatch && newsServer->GetStateId();
-		debug("Server %i -> %i", newsServer->GetId(), newsServer->GetStateId());
-		debug("Server %i.Name: %s", newsServer->GetId(), newsServer->GetName());
-		debug("Server %i.Host: %s:%i", newsServer->GetId(), newsServer->GetHost(), newsServer->GetPort());
-	}
-
-	debug("All servers perfectly matched: %s", *perfectMatch ? "yes" : "no");
-
-	return true;
-
-error:
-	error("Error reading server info from disk");
-
-	return false;
-}
-
-inline bool DiskState::SaveVolumeStat(ServerVolumes* serverVolumes, StateDiskFile& outfile)
-{
-	debug("Saving volume stats to disk");
-
-	outfile.PrintLine("%i", (int)serverVolumes->size());
-	for (ServerVolume& serverVolume : serverVolumes)
-	{
-		const auto& articlesPerDays = serverVolume.GetArticlesPerDays();
-		std::vector<NzbgetRsRpcArticlePair> articleEntries;
-		articleEntries.reserve(articlesPerDays.size());
-		for (const ServerVolume::Articles& articles : articlesPerDays)
-		{
-			articleEntries.push_back(NzbgetRsRpcArticlePair{ articles.failed, articles.success });
-		}
-
-		const ServerVolume::VolumeArray* bps = serverVolume.BytesPerSeconds();
-		const ServerVolume::VolumeArray* bpm = serverVolume.BytesPerMinutes();
-		const ServerVolume::VolumeArray* bph = serverVolume.BytesPerHours();
-		const ServerVolume::VolumeArray* bpd = serverVolume.BytesPerDays();
-
-		NzbgetRsDiskVolumeStatInput volInput{
-			serverVolume.GetFirstDay(),
-			static_cast<int>(serverVolume.GetDataTime()),
-			static_cast<int>(serverVolume.GetCustomTime()),
-			static_cast<int>(serverVolume.GetCountersResetTime()),
-			serverVolume.GetTotalBytes(),
-			serverVolume.GetCustomBytes(),
-			bps->data(), bps->size(),
-			bpm->data(), bpm->size(),
-			bph->data(), bph->size(),
-			bpd->data(), bpd->size(),
-			articleEntries.data(), articleEntries.size()
-		};
-		WriteRsBuf(outfile, nzbget_rs_diskstate_format_volume_stat_item(&volInput));
-	}
-
-	return true;
-}
-
-inline bool DiskState::LoadVolumeStat(Servers* servers, ServerVolumes* serverVolumes, StateDiskFile& infile, int formatVersion)
-{
-	debug("Loading volume stats from disk");
-
-	int size;
-	std::vector<int32_t> srvStateIds;
-	std::vector<int32_t> srvIds;
-	if (infile.ScanLine("%i", &size) != 1) goto error;
-	srvStateIds.reserve(servers->size());
-	srvIds.reserve(servers->size());
-	for (NewsServer* newsServer : servers)
-	{
-		srvStateIds.push_back(newsServer->GetStateId());
-		srvIds.push_back(newsServer->GetId());
-	}
-	for (int i = 0; i < size; i++)
-	{
-		ServerVolume* serverVolume = nullptr;
-
-		int slotIdx = nzbget_rs_dqh_diskstate_select_volume_server_slot(
-			i, srvStateIds.data(), srvIds.data(), srvStateIds.size());
-		if (slotIdx >= 0)
-		{
-			serverVolume = &serverVolumes->at(slotIdx);
-		}
-
-		int firstDay, dataTime, customTime, countersResetTime;
-		uint32 High1, Low1, High2 = 0, Low2 = 0;
-		if (formatVersion >= 4)
-		{
-			if (infile.ScanLine("%i,%i,%i,%i", &firstDay, &dataTime,&customTime, &countersResetTime) != 4) goto error;
-			if (infile.ScanLine("%u,%u,%u,%u", &High1, &Low1, &High2, &Low2) != 4) goto error;
-
-			if (serverVolume)
-			{
-				serverVolume->SetCustomTime(static_cast<time_t>(customTime));
-				serverVolume->SetCountersResetTime(static_cast<time_t>(countersResetTime));
-			}
-		}
-		else if (formatVersion == 3)
-		{
-			if (infile.ScanLine("%i,%i,%i", &firstDay, &dataTime,&customTime) != 3) goto error;
-			if (infile.ScanLine("%u,%u,%u,%u", &High1, &Low1, &High2, &Low2) != 4) goto error;
-
-			if (serverVolume)
-			{
-				serverVolume->SetCustomTime(static_cast<time_t>(customTime));
-				time_t firstDayTime = static_cast<time_t>(firstDay * 86400);
-				serverVolume->SetCountersResetTime(firstDayTime);
-			}
-		}
-		else
-		{
-			if (infile.ScanLine("%i,%i", &firstDay, &dataTime) != 2) goto error;
-			if (infile.ScanLine("%u,%u", &High1, &Low1) != 2) goto error;
-		}
-		if (serverVolume) serverVolume->SetFirstDay(firstDay);
-		if (serverVolume) serverVolume->SetDataTime((time_t)dataTime);
-		if (serverVolume) serverVolume->SetTotalBytes(Util::JoinInt64(High1, Low1));
-		if (serverVolume) serverVolume->SetCustomBytes(Util::JoinInt64(High2, Low2));
-
-		ServerVolume::VolumeArray* VolumeArrays[] = { 
-			serverVolume ? serverVolume->BytesPerSeconds() : nullptr,
-			serverVolume ? serverVolume->BytesPerMinutes() : nullptr,
-			serverVolume ? serverVolume->BytesPerHours() : nullptr,
-			serverVolume ? serverVolume->BytesPerDays() : nullptr };
-		for (int k=0; k < 4; k++)
-		{
-			ServerVolume::VolumeArray* volumeArray = VolumeArrays[k];
-
-			// the seconds, minutes and hours arrays have fixed sizes (the counters
-			// index them by the clock), the days one grows: a count from the file
-			// sized them, and a wrong one (damaged file) threw at every start or
-			// left them too short for the counters
-			int arrSize;
-			if (infile.ScanLine("%i", &arrSize) != 1) goto error;
-			int targetVolumeSize = 0;
-			if (!nzbget_rs_dsp_calc_volume_slot_size(k, arrSize, &targetVolumeSize)) goto error;
-			if (volumeArray) volumeArray->assign(targetVolumeSize, 0);
-
-			for (int j = 0; j < arrSize; j++)
-			{
-				if (infile.ScanLine("%u,%u", &High1, &Low1) != 2) goto error;
-				if (nzbget_rs_dqh_diskstate_can_store_volume_slot(
-					volumeArray != nullptr ? 1 : 0,
-					j,
-					volumeArray ? volumeArray->size() : 0) != 0)
-				{
-					(*volumeArray)[j] = Util::JoinInt64(High1, Low1);
-				}
-			}
-		}
-
-		if (formatVersion >= 4)
-		{
-			uint32 arrSize;
-			if (infile.ScanLine("%u", &arrSize) != 1) goto error;
-			if (arrSize > 100000) goto error;
-
-			ServerVolume::ArticlesArray articlesArr;
-			articlesArr.reserve(arrSize);
-
-			ServerVolume::Articles articles;
-			while (arrSize--)
-			{
-				if (infile.ScanLine("%u,%u", &articles.failed, &articles.success) != 2) goto error;
-				articlesArr.push_back(articles);
-			}
-
-			if (serverVolume) serverVolume->SetArticlesPerDays(std::move(articlesArr));
-		}
-	}
-
-	return true;
-
-error:
-	error("Error reading volume stats from disk");
-
-	return false;
-}
-
-inline void DiskState::WriteCacheFlag()
-{
-	NzbgetRsBuf flagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
-	BString<1024> flagFilename = flagBuf.data ? flagBuf.data : "";
-	nzbget_rs_free(flagBuf);
-
-	StateDiskFile outfile;
-	if (!outfile.Open(flagFilename, StateDiskFile::omWrite))
-	{
-		error("Error saving diskstate: Could not create file %s", *flagFilename);
-		return;
-	}
-
-	outfile.Close();
-}
-
-inline void DiskState::DeleteCacheFlag()
-{
-	NzbgetRsBuf flagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
-	FileSystem::DeleteFile(flagBuf.data ? flagBuf.data : "");
-	nzbget_rs_free(flagBuf);
-}
-
-inline void DiskState::AppendNzbMessage(int nzbId, Message::EKind kind, const char* text)
-{
-	NzbgetRsBuf logBuf = nzbget_rs_dqh_diskstate_format_nzb_log_path(
-		g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
-	BString<1024> logFilename = logBuf.data ? logBuf.data : "";
-	nzbget_rs_free(logBuf);
-
-	StateDiskFile outfile;
-	if (!outfile.Open(logFilename, StateDiskFile::omAppend))
-	{
-		error("Error saving log: Could not create file %s", *logFilename);
-		return;
-	}
-
-	time_t tm = Util::CurrentTime();
-	time_t rawtime = tm + g_Options->GetTimeCorrection();
-
-	BString<100> time;
-	Util::FormatTime(rawtime, time, 100);
-
-	WriteRsBuf(outfile, nzbget_rs_diskstate_format_nzb_message_line(
-		*time, (int)tm, (int)kind, text, LINE_ENDING));
-
-	outfile.Close();
-}
-
-inline void DiskState::LoadNzbMessages(int nzbId, MessageList* messages)
-{
-	// Important:
-	//   - Other threads may be writing into the log-file at any time;
-	//   - The log-file may also be deleted from another thread;
-
-	NzbgetRsBuf logBuf = nzbget_rs_dqh_diskstate_format_nzb_log_path(
-		g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
-	BString<1024> logFilename = logBuf.data ? logBuf.data : "";
-	nzbget_rs_free(logBuf);
-
-	if (!FileSystem::FileExists(logFilename))
-	{
-		return;
-	}
-
-	StateDiskFile infile;
-	if (!infile.Open(logFilename, StateDiskFile::omRead))
-	{
-		error("Error reading log: could not open file %s", *logFilename);
-		return;
-	}
-
-	int id = 0;
-	char line[1024];
-	while (infile.ReadLine(line, sizeof(line)))
-	{
-		Util::TrimRight(line);
-
-		int time = 0;
-		int kindInt = (int)Message::mkError;
-		size_t textOffset = 0;
-		if (!nzbget_rs_dsp_parse_log_line(line, &time, &kindInt, &textOffset)) goto exit;
-		messages->emplace_back(++id, (Message::EKind)kindInt, (time_t)time, line + textOffset);
-	}
-
-exit:
-	infile.Close();
-	return;
-}
 
 #ifndef NZBFILE_H
 #define NZBFILE_H
@@ -20307,53 +20219,7 @@ extern DupeCoordinator* g_DupeCoordinator;
 #ifndef PREPOSTPROCESSOR_H
 #define PREPOSTPROCESSOR_H
 
-class PrePostProcessor : public Thread, public Observer
-{
-public:
-	PrePostProcessor();
-	void Run() override;
-	void Stop() override;
-	bool HasMoreJobs() { return m_queuedJobs > 0; }
-	bool HasActiveUnpack(bool includeWaitingVolume = true);
-	bool HasActiveUnpack(DownloadQueue* downloadQueue, bool includeWaitingVolume = true);
-	bool EditList(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action,
-		const char* args);
-	void NzbAdded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
-	void NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
-	// A late rename or a draining paused PAR request can make the collection
-	// ready without completing another file. Requires the download-queue lock.
-	void CheckDownloadCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
-
-protected:
-	void Update(Subject*, void* aspect) override { DownloadQueueUpdate(aspect); }
-
-private:
-	int m_queuedJobs = 0;
-	RawNzbList m_activeJobs;
-	std::recursive_mutex m_activeJobsMutex;
-	std::mutex m_waitMutex;
-	std::condition_variable m_waitCond;
-
-	void CheckPostQueue();
-	void CheckRequestPar(DownloadQueue* downloadQueue);
-	void CleanupJobs(DownloadQueue* downloadQueue);
-	bool CanRunMoreJobs(bool* allowPar);
-	NzbInfo* PickNextJob(DownloadQueue* downloadQueue, bool allowPar);
-	void StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo, bool allowPar);
-	void EnterStage(DownloadQueue* downloadQueue, PostInfo* postInfo, PostInfo::EStage stage);
-	void SanitisePostQueue();
-	void UpdatePauseState();
-	void NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
-	void NzbDeleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
-	void NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, bool saveQueue);
-	void JobCompleted(DownloadQueue* downloadQueue, PostInfo* postInfo);
-	bool PostQueueDelete(DownloadQueue* downloadQueue, IdList* idList);
-	void DownloadQueueUpdate(void* aspect);
-	void DeleteCleanup(NzbInfo* nzbInfo);
-	void WaitJobs();
-	void FileDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, FileInfo* fileInfo);
-};
-
+class PrePostProcessor;
 extern PrePostProcessor* g_PrePostProcessor;
 
 /*
@@ -23379,19 +23245,304 @@ private:
 class RepairController : public Thread, public ScriptController
 {
 public:
-	RepairController();
-	virtual void Stop();
+	RepairController()
+	{
+		debug("Creating RepairController");
+
+	#ifndef DISABLE_PARCHECK
+		m_parChecker.m_owner = this;
+	#endif
+	}
+
+	virtual void Stop()
+	{
+		debug("Stopping RepairController");
+		Thread::Stop();
+	#ifndef DISABLE_PARCHECK
+		m_parChecker.Cancel();
+	#endif
+	}
 
 #ifndef DISABLE_PARCHECK
-	virtual void Run();
-	static void StartJob(PostInfo* postInfo);
-	bool AddPar(FileInfo* fileInfo, bool deleted);
+	static void StartJob(PostInfo* postInfo)
+	{
+		RepairController* repairController = new RepairController();
+		repairController->m_postInfo = postInfo;
+		repairController->SetAutoDestroy(false);
+
+		postInfo->SetPostThread(repairController);
+
+		repairController->Start();
+	}
+
+	virtual void Run()
+	{
+		BString<1024> nzbName;
+		CString destDir;
+		bool dupeRepaired = false;
+		{
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			nzbName = m_postInfo->GetNzbInfo()->GetName();
+			destDir = m_postInfo->GetNzbInfo()->GetDestDir();
+			dupeRepaired = m_postInfo->GetNzbInfo()->GetDupeRecoveredBytes() > 0;
+		}
+
+		m_parChecker.SetPostInfo(m_postInfo);
+		m_parChecker.SetDestDir(destDir);
+		m_parChecker.SetNzbName(nzbName);
+		m_parChecker.SetParTime(Util::CurrentTime());
+		m_parChecker.SetDownloadSec(m_postInfo->GetNzbInfo()->GetDownloadSec());
+		m_parChecker.SetParQuick(nzbget_rs_repair_should_use_par_quick(
+			g_Options->GetParQuick() ? 1 : 0,
+			m_postInfo->GetForceParFull() ? 1 : 0,
+			dupeRepaired ? 1 : 0) != 0);
+		m_parChecker.SetForceRepair(m_postInfo->GetForceRepair());
+
+		m_parChecker.PrintMessage(Message::mkInfo, "Checking pars for %s", *nzbName);
+
+		m_parChecker.Execute();
+	}
+
+	bool AddPar(FileInfo* fileInfo, bool deleted)
+	{
+		bool sameCollection = fileInfo->GetNzbInfo() == m_parChecker.GetPostInfo()->GetNzbInfo();
+		if (sameCollection && !deleted)
+		{
+			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
+			BString<1024> fullFilename;
+			fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+			nzbget_rs_free(fullFnBuf);
+			m_parChecker.AddParFile(fullFilename);
+		}
+		else
+		{
+			m_parChecker.QueueChanged();
+		}
+		return sameCollection;
+	}
 
 protected:
-	void UpdateParCheckProgress();
-	void ParCheckCompleted();
-	void CheckPauseState(PostInfo* postInfo);
-	bool RequestMorePars(NzbInfo* nzbInfo, const char* parFilename, int blockNeeded, int* blockFound);
+	void ParCheckCompleted()
+	{
+		m_parChecker.DeleteTwinFiles();
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+		PostInfo* postInfo = m_parChecker.GetPostInfo();
+
+		int rawParStatus = 0, setParRepaired = 0, parRepairedVal = 0, waitTime = 0, parSec = 0;
+		nzbget_rs_repair_complete_par_check(
+			(int)m_parChecker.GetStatus(),
+			(int)postInfo->GetNzbInfo()->GetParStatus(),
+			(int)ParChecker::psRepaired, (int)ParChecker::psRepairNotNeeded, (int)ParChecker::psRepairPossible,
+			(int)NzbInfo::psSkipped, (int)NzbInfo::psSuccess, (int)NzbInfo::psRepairPossible, (int)NzbInfo::psFailure,
+			postInfo->GetNzbInfo()->GetDownloadSec(),
+			m_parChecker.GetDownloadSec(),
+			(int64_t)Util::CurrentTime(),
+			(int64_t)m_parChecker.GetParTime(),
+			&rawParStatus, &setParRepaired, &parRepairedVal, &waitTime, &parSec);
+		postInfo->GetNzbInfo()->SetParStatus((NzbInfo::EParStatus)rawParStatus);
+		if (setParRepaired)
+		{
+			postInfo->SetParRepaired(parRepairedVal != 0);
+		}
+		postInfo->SetStartTime(postInfo->GetStartTime() + (time_t)waitTime);
+		postInfo->GetNzbInfo()->SetParSec(postInfo->GetNzbInfo()->GetParSec() + parSec);
+
+		postInfo->GetNzbInfo()->SetParFull(m_parChecker.GetParFull());
+
+		postInfo->SetWorking(false);
+	}
+
+	bool RequestMorePars(NzbInfo* nzbInfo, const char* parFilename, int blockNeeded, int* blockFoundOut)
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+		Blocks availableBlocks;
+		Blocks selectedBlocks;
+		int blockFound = 0;
+		int curBlockFound = 0;
+
+		FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, true, true, &curBlockFound);
+		blockFound += curBlockFound;
+		if (blockFound < blockNeeded)
+		{
+			FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, true, false, &curBlockFound);
+			blockFound += curBlockFound;
+		}
+		if (blockFound < blockNeeded)
+		{
+			FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, false, false, &curBlockFound);
+			blockFound += curBlockFound;
+		}
+
+		std::sort(availableBlocks.begin(), availableBlocks.end(),
+			[](const BlockInfo& block1, const BlockInfo& block2)
+			{
+				return block1.m_blockCount < block2.m_blockCount;
+			});
+
+		if (blockFound >= blockNeeded)
+		{
+			std::vector<int> sortedCounts;
+			sortedCounts.reserve(availableBlocks.size());
+			for (const BlockInfo& b : availableBlocks)
+			{
+				sortedCounts.push_back(b.m_blockCount);
+			}
+			std::vector<size_t> selectedIdx(availableBlocks.size());
+			int remNeeded = blockNeeded;
+			size_t selCount = nzbget_rs_repair_select_more_pars(
+				sortedCounts.data(), sortedCounts.size(), blockNeeded,
+				selectedIdx.data(), selectedIdx.size(), &remNeeded);
+			blockNeeded = remNeeded;
+			for (size_t i = 0; i < selCount && i < selectedIdx.size(); ++i)
+			{
+				selectedBlocks.push_back(availableBlocks[selectedIdx[i]]);
+			}
+
+			for (BlockInfo& blockInfo : selectedBlocks)
+			{
+				if (blockInfo.m_fileInfo->GetPaused())
+				{
+					m_parChecker.PrintMessage(Message::mkInfo, "Unpausing %s%c%s for par-recovery", nzbInfo->GetName(), PATH_SEPARATOR, blockInfo.m_fileInfo->GetFilename());
+					blockInfo.m_fileInfo->SetPaused(false);
+					blockInfo.m_fileInfo->SetExtraPriority(true);
+				}
+			}
+		}
+
+		bool hasUnpausedParFiles = false;
+		for (FileInfo* fileInfo : nzbInfo->GetFileList())
+		{
+			if (fileInfo->GetParFile() && !fileInfo->GetPaused())
+			{
+				hasUnpausedParFiles = true;
+				break;
+			}
+		}
+
+		if (blockFoundOut)
+		{
+			*blockFoundOut = blockFound;
+		}
+
+		return blockNeeded <= 0 || hasUnpausedParFiles;
+	}
+
+	void UpdateParCheckProgress()
+	{
+		PostInfo* postInfo;
+
+		{
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+
+			postInfo = m_parChecker.GetPostInfo();
+			if (m_parChecker.GetFileProgress() == 0)
+			{
+				postInfo->SetProgressLabel(m_parChecker.GetProgressLabel());
+			}
+			postInfo->SetFileProgress(m_parChecker.GetFileProgress());
+			postInfo->SetStageProgress(m_parChecker.GetStageProgress());
+			time_t current = Util::CurrentTime();
+
+			int rawStage = (int)postInfo->GetStage();
+			int setRepairTime = 0;
+			int newRepairSec = postInfo->GetNzbInfo()->GetRepairSec();
+			if (nzbget_rs_repair_eval_par_progress_update(
+				(int)postInfo->GetStage(),
+				(int)m_parChecker.GetStage(),
+				(int)PostInfo::ptLoadingPars,
+				(int)PostInfo::ptVerifyingSources,
+				(int)PostInfo::ptRepairing,
+				(int)PostInfo::ptVerifyingRepaired,
+				(int64)current,
+				(int64)m_parChecker.GetRepairTime(),
+				newRepairSec,
+				&rawStage,
+				&setRepairTime,
+				&newRepairSec) != 0)
+			{
+				postInfo->SetStage((PostInfo::EStage)rawStage);
+				postInfo->SetStageTime(current);
+				if (setRepairTime)
+				{
+					m_parChecker.SetRepairTime(current);
+				}
+				else if (postInfo->GetStage() == PostInfo::ptVerifyingRepaired)
+				{
+					postInfo->GetNzbInfo()->SetRepairSec(newRepairSec);
+				}
+			}
+
+			bool parCancel = false;
+			if (!IsStopped())
+			{
+				int estimatedRepairTime = 0;
+				if (nzbget_rs_repair_check_par_time_limit(
+					g_Options->GetParTimeLimit(),
+					m_parChecker.GetStage() == PostParChecker::ptRepairing ? 1 : 0,
+					(int64)(current - postInfo->GetStageTime()),
+					postInfo->GetStageProgress(),
+					&estimatedRepairTime) != 0)
+				{
+					debug("Estimated repair time %i seconds", estimatedRepairTime);
+					m_parChecker.PrintMessage(Message::mkWarning, "Cancelling par-repair for %s, estimated repair time (%i minutes) exceeds allowed repair time",
+						m_parChecker.GetInfoName(),
+						estimatedRepairTime / 60);
+					parCancel = true;
+				}
+			}
+
+			if (parCancel)
+			{
+				Stop();
+			}
+		}
+
+		CheckPauseState(postInfo);
+	}
+
+	void CheckPauseState(PostInfo* postInfo)
+	{
+		if (g_WorkState->GetPausePostProcess() && !postInfo->GetNzbInfo()->GetForcePriority())
+		{
+			time_t stageTime = postInfo->GetStageTime();
+			time_t startTime = postInfo->GetStartTime();
+			time_t parTime = m_parChecker.GetParTime();
+			time_t repairTime = m_parChecker.GetRepairTime();
+			time_t waitTime = Util::CurrentTime();
+
+			while (g_WorkState->GetPausePostProcess() &&
+				!postInfo->GetNzbInfo()->GetForcePriority() &&
+				!IsStopped())
+			{
+				Util::Sleep(50);
+
+				int64 newStage = 0, newStart = 0, newPar = 0, newRepair = 0;
+				nzbget_rs_repair_calc_paused_timestamps(
+					(int64)Util::CurrentTime(), (int64)waitTime,
+					(int64)stageTime, (int64)startTime, (int64)parTime, (int64)repairTime,
+					&newStage, &newStart, &newPar, &newRepair);
+				if (stageTime > 0)
+				{
+					postInfo->SetStageTime((time_t)newStage);
+				}
+				if (startTime > 0)
+				{
+					postInfo->SetStartTime((time_t)newStart);
+				}
+				if (parTime > 0)
+				{
+					m_parChecker.SetParTime((time_t)newPar);
+				}
+				if (repairTime > 0)
+				{
+					m_parChecker.SetRepairTime((time_t)newRepair);
+				}
+			}
+		}
+	}
 
 private:
 	class PostParChecker final : public ParChecker
@@ -23405,23 +23556,421 @@ private:
 		void SetRepairTime(time_t repairTime) { m_repairTime = repairTime; }
 		int GetDownloadSec() { return m_downloadSec; }
 		void SetDownloadSec(int downloadSec) { m_downloadSec = downloadSec; }
+		void DeleteTwinFiles()
+		{
+			for (const std::string& path : m_twinFiles)
+			{
+				FileSystem::DeleteFile(path.c_str());
+			}
+			m_twinFiles.clear();
+			m_twinEntries.clear();
+			m_twinName.clear();
+			m_twinIndex.clear();
+			m_twinBlockSize = 0;
+		}
 	protected:
-		bool RequestMorePars(int blockNeeded, int* blockFound) override;
-		void UpdateProgress() override;
 		bool IsStopped() override { return m_owner->IsStopped(); };
 		void Completed() override { m_owner->ParCheckCompleted(); }
-		void PrintMessage(Message::EKind kind, const char* format, ...) override PRINTF_SYNTAX(3);
-		void RegisterParredFile(const char* filename) override;
-		void RegisterVerifiedFile(const char* filename) override;
-		bool IsParredFile(const char* filename) override;
-		EFileStatus FindFileCrc(const char* filename, uint32* crc, SegmentList* segments) override;
-		const char* FindFileOrigname(const char* filename) override;
-		void RequestDupeSources(DupeSourceList* dupeSourceList) override;
-		void StatDupeSources(DupeSourceList* dupeSourceList) override;
-		std::string RequestTwinIndex() override;
-		std::vector<std::string> RequestTwinVolumes(int blockNeeded) override;
-	public:
-		void DeleteTwinFiles();
+
+		bool RequestMorePars(int blockNeeded, int* blockFound) override
+		{
+			return m_owner->RequestMorePars(m_postInfo->GetNzbInfo(), GetParFilename(), blockNeeded, blockFound);
+		}
+
+		void UpdateProgress() override
+		{
+			m_owner->UpdateParCheckProgress();
+		}
+
+		void PrintMessage(Message::EKind kind, const char* format, ...) override PRINTF_SYNTAX(3)
+		{
+			char text[1024];
+			va_list args;
+			va_start(args, format);
+			vsnprintf(text, 1024, format, args);
+			va_end(args);
+			text[1024-1] = '\0';
+
+			m_postInfo->GetNzbInfo()->AddMessage(kind, text);
+		}
+
+		void RegisterParredFile(const char* filename) override
+		{
+			m_postInfo->GetParredFiles()->push_back(filename);
+		}
+
+		void RegisterVerifiedFile(const char* filename) override
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+			StreamRepairJobList* jobs = nzbInfo->GetStreamRepairJobs();
+			std::string verifiedPath = FileSystem::GetRealPath(filename).value_or(filename);
+			size_t previousSize = jobs->size();
+			jobs->erase(std::remove_if(jobs->begin(), jobs->end(),
+				[nzbInfo, &verifiedPath](const StreamRepairJob& job)
+				{
+					std::string currentName = job.GetFilename();
+					for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+					{
+						if (completedFile.GetId() == job.GetFileId())
+						{
+							currentName = completedFile.GetFilename();
+							break;
+						}
+					}
+					NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+						nzbInfo->GetDestDir(), PATH_SEPARATOR, currentName.c_str());
+					std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
+					nzbget_rs_free(pathBuf);
+					path = FileSystem::GetRealPath(path).value_or(path);
+					return FileSystem::SameFilename(path.c_str(), verifiedPath.c_str());
+				}), jobs->end());
+			if (jobs->size() != previousSize)
+			{
+				nzbInfo->SetChanged(true);
+			}
+		}
+
+		bool IsParredFile(const char* filename) override
+		{
+			for (CString& parredFile : m_postInfo->GetParredFiles())
+			{
+				if (nzbget_rs_repair_filename_eq_ignore_case(parredFile, filename) != 0)
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		EFileStatus FindFileCrc(const char* filename, uint32* crc, SegmentList* segments) override
+		{
+			int id = 0;
+			CompletedFile::EStatus status;
+			bool reprocess;
+			{
+				GuardedDownloadQueue guard = DownloadQueue::Guard();
+				CompletedFile* completedFile = nullptr;
+				for (CompletedFile& completedFile2 : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
+				{
+					if (nzbget_rs_repair_filename_eq_ignore_case(completedFile2.GetFilename(), filename) != 0)
+					{
+						completedFile = &completedFile2;
+						break;
+					}
+				}
+				if (!completedFile)
+				{
+					return ParChecker::fsUnknown;
+				}
+				id = completedFile->GetId();
+				*crc = completedFile->GetCrc();
+				status = completedFile->GetStatus();
+				reprocess = m_postInfo->GetNzbInfo()->GetReprocess();
+			}
+
+			debug("Found completed file: %s, CRC: %.8x, Status: %i", filename, *crc, (int)status);
+
+			if (nzbget_rs_repair_should_load_partial_segments(
+				(int)status, (int)CompletedFile::cfPartial, id, reprocess ? 1 : 0) != 0)
+			{
+				FileInfo tmpFileInfo(id);
+
+				if (!g_DiskState->LoadFileState(&tmpFileInfo, nullptr, true))
+				{
+					return ParChecker::fsUnknown;
+				}
+
+				for (ArticleInfo* pa : tmpFileInfo.GetArticles())
+				{
+					segments->emplace_back(pa->GetStatus() == ArticleInfo::aiFinished,
+						pa->GetSegmentOffset(), pa->GetSegmentSize(), pa->GetCrc());
+				}
+			}
+
+			return (ParChecker::EFileStatus)nzbget_rs_repair_classify_file_crc_status(
+				(int)status, reprocess ? 1 : 0, !segments->empty() ? 1 : 0,
+				(int)CompletedFile::cfSuccess, (int)CompletedFile::cfFailure, (int)CompletedFile::cfPartial,
+				(int)ParChecker::fsSuccess, (int)ParChecker::fsFailure, (int)ParChecker::fsPartial,
+				(int)ParChecker::fsUnknown);
+		}
+
+		const char* FindFileOrigname(const char* filename) override
+		{
+			thread_local std::string origname;
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			for (CompletedFile& completedFile : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
+			{
+				if (nzbget_rs_repair_filename_eq_ignore_case(completedFile.GetFilename(), filename) != 0)
+				{
+					if (!completedFile.GetOrigname())
+					{
+						return nullptr;
+					}
+					origname = completedFile.GetOrigname();
+					return origname.c_str();
+				}
+			}
+
+			return nullptr;
+		}
+
+		void RequestDupeSources(DupeSourceList* dupeSourceList) override
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+			RawNzbList dupeList = g_DupeCoordinator->ListHistoryDupes(downloadQueue, m_postInfo->GetNzbInfo());
+
+			if (!dupeList.empty())
+			{
+				NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+				std::vector<const char*> dupeDirs(dupeList.size());
+				for (size_t i = 0; i < dupeList.size(); i++)
+				{
+					dupeDirs[i] = dupeList[i]->GetDestDir();
+				}
+				std::vector<size_t> usableIndices(dupeList.size());
+				size_t usableCount = nzbget_rs_dupematcher_filter_dupe_sources(
+					nzbInfo->GetName(),
+					nzbInfo->GetDestDir(),
+					nzbInfo->GetSize() - nzbInfo->GetParSize(),
+					g_Options->GetUnrarCmd(),
+					dupeDirs.data(),
+					dupeDirs.size(),
+					usableIndices.data(),
+					[](void* ctx, int kind, const char* msg)
+					{
+						auto* self = static_cast<PostParChecker*>(ctx);
+						self->PrintMessage(kind == 3 ? Message::mkDetail : Message::mkInfo, "%s", msg ? msg : "");
+					},
+					this);
+				for (size_t i = 0; i < usableCount; i++)
+				{
+					NzbInfo* dupeNzbInfo = dupeList[usableIndices[i]];
+					dupeSourceList->emplace_back(dupeNzbInfo->GetId(), dupeNzbInfo->GetDestDir());
+				}
+			}
+		}
+
+		std::string RequestTwinIndex() override
+		{
+			std::vector<TwinCheck::FileSig> own;
+			{
+				CharBuffer parBuf;
+				if (FileSystem::LoadFileIntoBuffer(GetParFilename(), parBuf, false))
+				{
+					own = TwinCheck::ParsePar2(parBuf, parBuf.Size());
+				}
+			}
+			std::string ownPrint = TwinCheck::Fingerprint(own);
+			if (ownPrint.empty())
+			{
+				return "";
+			}
+
+			struct Candidate
+			{
+				std::string name;
+				std::string nzbFilename;
+				bool known;
+			};
+			std::vector<Candidate> candidates;
+			{
+				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+				NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+				auto consider = [&](NzbInfo* other)
+					{
+						bool sameNameOrKey = other != nzbInfo && other->GetKind() == NzbInfo::nkNzb &&
+							DupeCoordinator::SameNameOrKey(other->GetName(), other->GetDupeKey(),
+								nzbInfo->GetName(), nzbInfo->GetDupeKey());
+						NzbParameter* print = sameNameOrKey ? other->GetParameters()->Find(TwinCheck::FilesParam) : nullptr;
+						if (!nzbget_rs_repair_should_consider_twin_candidate(
+							other == nzbInfo ? 1 : 0,
+							(int)other->GetKind(),
+							(int)NzbInfo::nkNzb,
+							sameNameOrKey ? 1 : 0,
+							other->GetQueuedFilename(),
+							print != nullptr ? 1 : 0,
+							(print && ownPrint == print->GetValue()) ? 1 : 0) ||
+							!FileSystem::FileExists(other->GetQueuedFilename()))
+						{
+							return;
+						}
+						candidates.push_back({other->GetName(), other->GetQueuedFilename(), print != nullptr});
+					};
+				for (NzbInfo* queued : downloadQueue->GetQueue())
+				{
+					consider(queued);
+				}
+				for (std::unique_ptr<HistoryInfo>& historyInfo : *downloadQueue->GetHistory())
+				{
+					if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+					{
+						consider(historyInfo->GetNzbInfo());
+					}
+				}
+			}
+			std::stable_sort(candidates.begin(), candidates.end(),
+				[](const Candidate& a, const Candidate& b) { return a.known > b.known; });
+
+			std::vector<const char*> ownNames;
+			std::vector<const char*> ownMd5s;
+			ownNames.reserve(own.size());
+			ownMd5s.reserve(own.size());
+			for (const TwinCheck::FileSig& sig : own)
+			{
+				ownNames.push_back(sig.name.c_str());
+				ownMd5s.push_back(sig.md5.c_str());
+			}
+
+			for (const Candidate& candidate : candidates)
+			{
+				if (IsStopped())
+				{
+					break;
+				}
+				std::vector<TwinCheck::NzbEntry> entries = TwinCheck::ReadNzbEntries(candidate.nzbFilename.c_str());
+				std::vector<uint8_t> entryPar2(entries.size());
+				std::vector<int64_t> entrySizes(entries.size());
+				for (size_t i = 0; i < entries.size(); i++)
+				{
+					entryPar2[i] = entries[i].par2 ? 1 : 0;
+					entrySizes[i] = entries[i].size;
+				}
+				ptrdiff_t bestIdx = nzbget_rs_repair_select_best_twin_par2_index(
+					entryPar2.data(), entrySizes.data(), entries.size(), TwinCheck::MaxIndexSize);
+				if (bestIdx < 0 || (size_t)bestIdx >= entries.size())
+				{
+					continue;
+				}
+				const TwinCheck::NzbEntry* index = &entries[(size_t)bestIdx];
+
+				std::vector<char> data;
+				std::string path = FetchTwinFile(*index, &data);
+				if (path.empty())
+				{
+					continue;
+				}
+				int cmp = nzbget_rs_twin_compare_par2_data(
+					ownNames.data(), ownMd5s.data(), own.size(),
+					ownPrint.c_str(),
+					reinterpret_cast<const uint8_t*>(data.data()), data.size());
+				if (cmp != 0)
+				{
+					PrintMessage(Message::mkDetail, "%s: its par2 set %s", candidate.name.c_str(),
+						nzbget_rs_repair_twin_par2_reject_reason(cmp));
+					FileSystem::DeleteFile(path.c_str());
+					m_twinFiles.pop_back();
+					continue;
+				}
+
+				m_twinName = candidate.name;
+				m_twinEntries = std::move(entries);
+				m_twinIndex = index->filename;
+				m_twinBlockSize = TwinCheck::BlockSize(data.data(), data.size());
+				PrintMessage(Message::mkInfo, "Trying the par2 set of twin %s (blocks of %.1f MB)",
+					m_twinName.c_str(), nzbget_rs_dqh_stream_repair_bytes_to_mb(m_twinBlockSize));
+				return path;
+			}
+			return "";
+		}
+
+		std::vector<std::string> RequestTwinVolumes(int blockNeeded) override
+		{
+			struct Volume
+			{
+				const TwinCheck::NzbEntry* entry;
+				int blocks;
+			};
+			std::vector<Volume> volumes;
+			for (const TwinCheck::NzbEntry& entry : m_twinEntries)
+			{
+				if (nzbget_rs_repair_should_skip_twin_volume_entry(
+					entry.par2 ? 1 : 0, entry.filename.c_str(), m_twinIndex.c_str()) != 0)
+				{
+					continue;
+				}
+				int blocks = TwinCheck::VolumeBlocks(entry.filename);
+				if (blocks < 0 && m_twinBlockSize > 0)
+				{
+					blocks = nzbget_rs_repair_estimate_twin_vol_blocks(entry.size, m_twinBlockSize);
+				}
+				if (blocks > 0)
+				{
+					volumes.push_back({&entry, blocks});
+				}
+			}
+			std::sort(volumes.begin(), volumes.end(), [](const Volume& a, const Volume& b) { return a.blocks < b.blocks; });
+
+			int available = 0;
+			std::vector<int> allVolBlocks;
+			allVolBlocks.reserve(volumes.size());
+			for (const Volume& volume : volumes)
+			{
+				allVolBlocks.push_back(volume.blocks);
+			}
+			bool hasEnoughTwinBlocks = nzbget_rs_repair_sum_and_check_twin_blocks(
+				allVolBlocks.data(), allVolBlocks.size(), blockNeeded, &available) != 0;
+			std::vector<std::string> paths;
+			if (!hasEnoughTwinBlocks)
+			{
+				PrintMessage(Message::mkInfo, "Twin %s holds %i par-block(s), %i needed: not fetched",
+					m_twinName.c_str(), available, blockNeeded);
+				return paths;
+			}
+
+			int left = blockNeeded;
+			while (left > 0 && !volumes.empty() && !IsStopped())
+			{
+				std::vector<int> volBlocks;
+				volBlocks.reserve(volumes.size());
+				for (const Volume& v : volumes)
+				{
+					volBlocks.push_back(v.blocks);
+				}
+				ptrdiff_t idx = nzbget_rs_repair_pick_twin_volume(volBlocks.data(), volBlocks.size(), left);
+				if (idx < 0 || (size_t)idx >= volumes.size())
+				{
+					break;
+				}
+				auto it = volumes.begin() + idx;
+				PrintMessage(Message::mkInfo, "Fetching %s of twin %s for par-repair (%i block(s))",
+					it->entry->filename.c_str(), m_twinName.c_str(), it->blocks);
+				std::string path = FetchTwinFile(*it->entry);
+				if (!path.empty())
+				{
+					paths.push_back(path);
+					left -= it->blocks;
+				}
+				volumes.erase(it);
+			}
+			return paths;
+		}
+
+		void StatDupeSources(DupeSourceList* dupeSourceList) override
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+			int totalExtraParBlocks = 0;
+			for (DupeSource& dupeSource : *dupeSourceList)
+			{
+				if (dupeSource.m_usedBlocks > 0)
+				{
+					for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+					{
+						if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
+							historyInfo->GetNzbInfo()->GetId() == dupeSource.m_id)
+						{
+							historyInfo->GetNzbInfo()->SetExtraParBlocks(
+								historyInfo->GetNzbInfo()->GetExtraParBlocks() - dupeSource.m_usedBlocks);
+						}
+					}
+				}
+				totalExtraParBlocks += dupeSource.m_usedBlocks;
+			}
+
+			m_postInfo->GetNzbInfo()->SetExtraParBlocks(m_postInfo->GetNzbInfo()->GetExtraParBlocks() + totalExtraParBlocks);
+		}
 	private:
 		std::vector<TwinCheck::NzbEntry> m_twinEntries;
 		std::string m_twinName;
@@ -23429,7 +23978,33 @@ private:
 		uint64 m_twinBlockSize = 0;
 		std::vector<std::string> m_twinFiles;
 		ArticleFetcher m_twinFetcher;
-		std::string FetchTwinFile(const TwinCheck::NzbEntry& entry, std::vector<char>* keep = nullptr);
+		std::string FetchTwinFile(const TwinCheck::NzbEntry& entry, std::vector<char>* keep = nullptr)
+		{
+			std::vector<char> data;
+			if (!TwinCheck::FetchEntry(m_twinFetcher, entry, 1024LL * 1024 * 1024, [this]() { return IsStopped(); }, data))
+			{
+				return "";
+			}
+			NzbgetRsBuf nameBuf = nzbget_rs_repair_build_twin_filename(
+				entry.filename.c_str(), m_twinFiles.size());
+			std::string name(nameBuf.data ? nameBuf.data : "", nameBuf.len);
+			nzbget_rs_free(nameBuf);
+			NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				GetDestDir(), PATH_SEPARATOR, name.c_str());
+			BString<1024> path;
+			path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+			nzbget_rs_free(pathBuf);
+			if (!FileSystem::SaveBufferIntoFile(*path, data.empty() ? "" : data.data(), data.size()))
+			{
+				return "";
+			}
+			m_twinFiles.push_back(*path);
+			if (keep)
+			{
+				*keep = std::move(data);
+			}
+			return *path;
+		}
 		RepairController* m_owner;
 		PostInfo* m_postInfo;
 		time_t m_parTime;
@@ -23452,21 +24027,221 @@ private:
 	PostInfo* m_postInfo;
 	PostParChecker m_parChecker;
 
-	void FindPars(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* parFilename,
-		Blocks& blocks, bool strictParName, bool exactParName, int* blockFound);
+	void FindPars(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* parFilename, Blocks& blocks, bool strictParName, bool exactParName, int* blockFound)
+	{
+		*blockFound = 0;
+
+		char* baseParFilename = FileSystem::BaseFileName(parFilename);
+		int mainBaseLen = 0;
+		if (!ParParser::ParseParFilename(baseParFilename, true, &mainBaseLen, nullptr))
+		{
+			nzbInfo->PrintMessage(Message::mkError, "Internal error: could not parse filename %s", baseParFilename);
+			return;
+		}
+		BString<1024> mainBaseFilename;
+		if (mainBaseLen > 0)
+		{
+			mainBaseFilename.Set(baseParFilename, mainBaseLen);
+		}
+
+		for (FileInfo* fileInfo : nzbInfo->GetFileList())
+		{
+			int parsedBlocks = 0;
+			bool parsed = ParParser::ParseParFilename(fileInfo->GetFilename(), fileInfo->GetFilenameConfirmed(), nullptr, &parsedBlocks);
+			bool sameCollection = !exactParName ||
+				ParParser::SameParCollection(fileInfo->GetFilename(),
+					FileSystem::BaseFileName(parFilename), fileInfo->GetFilenameConfirmed());
+			int blockCount = 0;
+			if (nzbget_rs_repair_eval_find_pars_candidate(
+				sameCollection ? 1 : 0,
+				0,
+				(!exactParName && strictParName) ? 1 : 0,
+				fileInfo->GetFilename(),
+				mainBaseFilename,
+				parsed ? 1 : 0,
+				parsedBlocks,
+				fileInfo->GetSize(),
+				m_parChecker.GetBlockSize(),
+				&blockCount))
+			{
+				bool alreadyAdded = false;
+				for (BlockInfo& blockInfo : blocks)
+				{
+					if (blockInfo.m_fileInfo == fileInfo)
+					{
+						alreadyAdded = true;
+						break;
+					}
+				}
+
+				if (!alreadyAdded)
+				{
+					blocks.emplace_back(fileInfo, blockCount);
+					*blockFound += blockCount;
+				}
+			}
+		}
+	}
 #endif
 };
+
+namespace
+{
+	template <typename Ctx, typename R, typename F>
+	R RepairMapCall(void* rawCtx, R failed, F f) noexcept
+	{
+		Ctx* c = static_cast<Ctx*>(rawCtx);
+		if (c->Error)
+		{
+			return failed;
+		}
+		try
+		{
+			return f(c);
+		}
+		catch (...)
+		{
+			c->Error = std::current_exception();
+			return failed;
+		}
+	}
+
+	template <typename Ctx, typename F>
+	void RepairMapCallVoid(void* rawCtx, F f) noexcept
+	{
+		Ctx* c = static_cast<Ctx*>(rawCtx);
+		if (c->Error)
+		{
+			return;
+		}
+		try
+		{
+			f(c);
+		}
+		catch (...)
+		{
+			c->Error = std::current_exception();
+		}
+	}
+}
+
 
 class StreamRepairController : public Thread, public ScriptController
 {
 public:
-	virtual void Run();
-	virtual void Stop();
-	static void StartJob(PostInfo* postInfo);
-	static void StartLive(NzbInfo* nzbInfo);
+	static void StartJob(PostInfo* postInfo)
+	{
+		StreamRepairController* streamRepairController = new StreamRepairController();
+		streamRepairController->m_postInfo = postInfo;
+		streamRepairController->SetAutoDestroy(false);
+
+		postInfo->SetPostThread(streamRepairController);
+
+		streamRepairController->Start();
+	}
+
+	static void StartLive(NzbInfo* nzbInfo)
+	{
+		if (DupeArticleFallback::ShouldDeferToPar(nzbInfo))
+		{
+			return;
+		}
+
+		StreamRepairController* streamRepairController = new StreamRepairController();
+		streamRepairController->m_liveMode = true;
+		streamRepairController->m_nzbId = nzbInfo->GetId();
+		streamRepairController->SetAutoDestroy(true);
+
+		nzbInfo->SetLiveRepairThread(streamRepairController);
+
+		streamRepairController->Start();
+	}
+
+	virtual void Run()
+	{
+		if (m_liveMode)
+		{
+			RunLive();
+			return;
+		}
+
+		BString<1024> nzbName;
+		CString destDir;
+		std::vector<RepairTarget> targets;
+		std::vector<DonorSource> donors;
+		std::vector<CString> memberNames;
+
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+			nzbName = nzbInfo->GetName();
+			destDir = nzbInfo->GetDestDir();
+			CollectTargets(nzbInfo, targets, memberNames);
+			CollectDonors(downloadQueue, nzbInfo, donors);
+			m_postInfo->SetProgressLabel("Repairing files from duplicates");
+		}
+
+		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("stream repair", *nzbName);
+		BString<1024> infoName;
+		infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+		nzbget_rs_free(infoNameBuf);
+		SetInfoName(infoName);
+
+		if (targets.empty())
+		{
+			PrintMessage(Message::mkInfo, "Nothing to stream-repair for %s", *nzbName);
+		}
+		else if (donors.empty())
+		{
+			PrintMessage(Message::mkInfo,
+				"No duplicate collections found for stream repair of %s", *nzbName);
+		}
+		else
+		{
+			StartWatchdog(targets);
+			ComputePositionalRanks(destDir, targets, memberNames);
+			ExecRepair(destDir, targets, donors, memberNames);
+
+			bool anyHoles = false;
+			for (RepairTarget& target : targets)
+			{
+				anyHoles |= target.NeedsRepair();
+			}
+			if (anyHoles && !IsStopped())
+			{
+				ExecCrossPackRepair(destDir, targets, donors, memberNames);
+			}
+			StopWatchdog(nzbName, targets);
+		}
+
+		ReportRemainingHoles(targets);
+		m_targets = std::move(targets);
+		RepairCompleted();
+	}
+
+	virtual void Stop()
+	{
+		m_batchFetcher.Stop();
+		m_fetcher.Stop();
+		Thread::Stop();
+	}
 
 protected:
-	virtual void AddMessage(Message::EKind kind, const char* text);
+	virtual void AddMessage(Message::EKind kind, const char* text)
+	{
+		if (m_liveMode)
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+			if (nzbInfo)
+			{
+				nzbInfo->AddMessage(kind, text);
+			}
+			return;
+		}
+
+		m_postInfo->GetNzbInfo()->AddMessage(kind, text);
+	}
 
 private:
 	struct RepairTarget
@@ -23515,9 +24290,6 @@ private:
 	std::atomic<int> m_checkingDonor{0};
 	std::atomic<int> m_materializing{0};
 	std::atomic<int> m_waitingForConnection{0};
-	bool DonorDead(const DonorSource& donor, NzbInfo* donorNzb);
-	void StartWatchdog(const std::vector<RepairTarget>& targets);
-	void StopWatchdog(const char* nzbName, const std::vector<RepairTarget>& targets);
 	bool Interrupted() { return IsStopped() && !m_timedOut; }
 	ArticleFetcher m_fetcher;
 	ArticleBatchFetcher m_batchFetcher;
@@ -23531,25 +24303,1341 @@ private:
 	bool m_hasParFiles = false;
 	std::vector<RepairTarget> m_targets;
 
-	void RunLive();
-	void RepairCompletedLive(std::vector<RepairTarget>& targets);
-	void RefreshLiveNames(std::vector<RepairTarget>& targets,
-		std::vector<CString>& memberNames);
-	void RefreshLiveTargetName(RepairTarget& target);
-	void CollectTargets(NzbInfo* nzbInfo, std::vector<RepairTarget>& targets,
-		std::vector<CString>& memberNames);
-	void ComputePositionalRanks(const char* destDir, std::vector<RepairTarget>& targets,
-		const std::vector<CString>& memberNames);
-	void CollectDonors(DownloadQueue* downloadQueue, NzbInfo* nzbInfo,
-		std::vector<DonorSource>& donors);
-	void ExecRepair(const char* destDir, std::vector<RepairTarget>& targets,
-		std::vector<DonorSource>& donors, const std::vector<CString>& memberNames);
-	static void MarkRecreated(NzbInfo* nzbInfo, const RepairTarget& target);
-	static void MarkRepaired(NzbInfo* nzbInfo, const RepairTarget& target);
-	void ExecCrossPackRepair(const char* destDir, std::vector<RepairTarget>& targets,
-		std::vector<DonorSource>& donors, const std::vector<CString>& memberNames);
-	void ReportRemainingHoles(std::vector<RepairTarget>& targets);
-	void RepairCompleted();
+
+	void RunLive()
+	{
+		BString<1024> nzbName;
+		CString destDir;
+		std::vector<RepairTarget> targets;
+		std::vector<DonorSource> donors;
+		std::vector<CString> memberNames;
+
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+			if (!nzbInfo || nzbInfo->GetLiveRepairThread() != this)
+			{
+				return;
+			}
+			nzbName = nzbInfo->GetName();
+			destDir = nzbInfo->GetDestDir();
+			CollectTargets(nzbInfo, targets, memberNames);
+			CollectDonors(downloadQueue, nzbInfo, donors);
+
+			for (RepairTarget& target : targets)
+			{
+				for (StreamRepairJob& job : *nzbInfo->GetStreamRepairJobs())
+				{
+					if (job.GetFileId() == target.FileId)
+					{
+						target.PatchEligible = !job.GetLiveAttempted();
+						job.SetLiveAttempted(true);
+						break;
+					}
+				}
+			}
+		}
+
+		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("live stream repair", *nzbName);
+		BString<1024> infoName;
+		infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+		nzbget_rs_free(infoNameBuf);
+		SetInfoName(infoName);
+
+		bool anyEligible = false;
+		for (RepairTarget& target : targets)
+		{
+			anyEligible |= target.PatchEligible && target.NeedsRepair();
+		}
+
+		if (anyEligible && !donors.empty())
+		{
+			PrintMessage(Message::mkInfo, "Starting live stream repair for %s", *nzbName);
+
+			StartWatchdog(targets);
+			ComputePositionalRanks(destDir, targets, memberNames);
+			ExecRepair(destDir, targets, donors, memberNames);
+
+			bool anyHoles = false;
+			for (RepairTarget& target : targets)
+			{
+				anyHoles |= target.PatchEligible && target.NeedsRepair();
+			}
+			if (anyHoles && !IsStopped())
+			{
+				RefreshLiveNames(targets, memberNames);
+				ExecCrossPackRepair(destDir, targets, donors, memberNames);
+			}
+			StopWatchdog(nzbName, targets);
+		}
+
+		RepairCompletedLive(targets);
+	}
+
+	void RefreshLiveNames(std::vector<RepairTarget>& targets, std::vector<CString>& memberNames)
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+		if (!nzbInfo || nzbInfo->GetLiveRepairThread() != this)
+		{
+			return;
+		}
+
+		for (RepairTarget& target : targets)
+		{
+			for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+			{
+				if (completedFile.GetId() == target.FileId)
+				{
+					target.Filename = completedFile.GetFilename();
+					target.IsParFile = target.IsParFile || completedFile.GetParFile();
+					break;
+				}
+			}
+		}
+
+		memberNames.clear();
+		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+		{
+			memberNames.emplace_back(completedFile.GetFilename());
+		}
+	}
+
+	void RefreshLiveTargetName(RepairTarget& target)
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+		if (!nzbInfo || nzbInfo->GetLiveRepairThread() != this)
+		{
+			return;
+		}
+
+		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+		{
+			if (completedFile.GetId() == target.FileId)
+			{
+				target.Filename = completedFile.GetFilename();
+				break;
+			}
+		}
+	}
+
+	void RepairCompletedLive(std::vector<RepairTarget>& targets)
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+		if (!nzbInfo)
+		{
+			return;
+		}
+		if (nzbInfo->GetLiveRepairThread() != this)
+		{
+			nzbInfo->SetDupeRecoveredBytes(nzbInfo->GetDupeRecoveredBytes() + m_recoveredBytes);
+			return;
+		}
+
+		if (m_recoveredBytes > 0 || m_recoveredHoles > 0)
+		{
+			nzbInfo->SetDupeRecoveredBytes(nzbInfo->GetDupeRecoveredBytes() + m_recoveredBytes);
+			nzbInfo->SetDupeRecoveredHoles(nzbInfo->GetDupeRecoveredHoles() + m_recoveredHoles);
+		}
+
+		for (RepairTarget& target : targets)
+		{
+			if (!target.PatchEligible)
+			{
+				continue;
+			}
+			for (StreamRepairJob& job : *nzbInfo->GetStreamRepairJobs())
+			{
+				if (job.GetFileId() == target.FileId)
+				{
+					if (target.Recreated)
+					{
+						job.SetDecodedFileSize(target.DecodedFileSize);
+						MarkRecreated(nzbInfo, target);
+					}
+					job.SetHoles(std::move(target.Holes));
+					break;
+				}
+			}
+		}
+
+		nzbInfo->SetLiveRepairThread(nullptr);
+		if (nzbInfo->GetPostInfo() && !nzbInfo->GetUnpackThread())
+		{
+			nzbInfo->GetPostInfo()->SetWorking(false);
+		}
+
+		downloadQueue->Save();
+	}
+
+	bool DonorDead(const DonorSource& donor, NzbInfo* donorNzb)
+	{
+		auto it = m_donorDead.find(*donor.QueuedFilename);
+		if (it != m_donorDead.end())
+		{
+			return it->second;
+		}
+
+		std::vector<FileInfo*> files;
+		for (int pass = 0; pass < 2 && files.empty(); pass++)
+		{
+			for (FileInfo* fileInfo : donorNzb->GetFileList())
+			{
+				if (fileInfo->GetTotalArticles() > 0 && (pass == 1 || !fileInfo->GetParFile()))
+				{
+					files.push_back(fileInfo);
+				}
+			}
+		}
+		bool dead = false;
+		std::vector<DupeProbe::Sample> samples = DupeProbe::SamplesOf(files);
+		if ((int)samples.size() >= DupeProbe::MinArticles && !IsStopped())
+		{
+			m_checkingDonor++;
+			DupeProbe::Verdict verdict = DupeProbe::Check(std::move(samples), DonorCheckSec);
+			m_checkingDonor--;
+			dead = verdict.Dead();
+			if (dead)
+			{
+				PrintMessage(Message::mkInfo,
+					"Skipping duplicate %s for stream repair: none of %i sampled articles exists on any server",
+					*donor.InfoName, DupeProbe::SampleCount);
+			}
+		}
+		m_donorDead[*donor.QueuedFilename] = dead;
+		return dead;
+	}
+
+	void StartWatchdog(const std::vector<RepairTarget>& targets)
+	{
+		m_fetcher.SetWaitCounter(&m_waitingForConnection);
+		m_batchFetcher.SetWaitCounter(&m_waitingForConnection);
+		int timeout = g_Options->GetDupeStreamTimeout();
+		if (timeout <= 0)
+		{
+			return;
+		}
+
+		m_missingBytes = 0;
+		for (const RepairTarget& target : targets)
+		{
+			m_missingBytes += target.DecodedFileSize > 0
+				? DupeStreamRepair::TotalSize(target.Holes)
+				: target.EncodedSize;
+		}
+
+		int upTimeSec = 0, downloadTimeSec = 0;
+		int64 allBytes = 0;
+		bool standBy = false;
+		g_StatMeter->CalcTotalStat(&upTimeSec, &downloadTimeSec, &allBytes, &standBy);
+		int64 downloadRate = downloadTimeSec > 0 ? allBytes / downloadTimeSec : 0;
+
+		m_watchdog = std::thread([this, timeout, downloadRate]()
+			{
+				std::unique_lock<std::mutex> lock(m_watchdogMutex);
+				int64 startProgress = m_progressBytes;
+				int64 progress = startProgress;
+				auto start = std::chrono::steady_clock::now();
+				auto begun = start;
+				auto lastProgress = start;
+				auto lastTick = start;
+				auto waiting = [this]() { return m_waitingForConnection > 0 || m_checkingDonor > 0; };
+				while (!m_watchdogDone)
+				{
+					m_watchdogCond.wait_for(lock, std::chrono::milliseconds(500));
+					if (m_watchdogDone)
+					{
+						break;
+					}
+					auto now = std::chrono::steady_clock::now();
+					if (waiting())
+					{
+						start += now - lastTick;
+					}
+					lastTick = now;
+					int64 sinceLastProgressSec =
+						std::chrono::duration_cast<std::chrono::seconds>(now - lastProgress).count();
+					int64 sinceBegunSec =
+						std::chrono::duration_cast<std::chrono::seconds>(now - begun).count();
+					int64 sinceStartSec =
+						std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
+					double elapsedSec = std::chrono::duration<double>(now - start).count();
+					int64 newProgress = progress;
+					int resetLastProgress = 0;
+					NzbgetRsBuf reasonBuf{nullptr, 0, 0};
+					int shouldStop = nzbget_rs_stream_watchdog_eval_tick(
+						m_progressBytes, progress, waiting() ? 1 : 0, m_materializing.load(),
+						sinceLastProgressSec, sinceBegunSec, sinceStartSec, elapsedSec,
+						timeout, MaxRunFactor, MaxConnectionWaitSec, SlowRepairFactor,
+						downloadRate, startProgress, m_missingBytes,
+						&newProgress, &resetLastProgress, &reasonBuf);
+					progress = newProgress;
+					if (resetLastProgress)
+					{
+						lastProgress = now;
+					}
+					if (shouldStop && reasonBuf.data && reasonBuf.len > 0)
+					{
+						m_slowReason.Set(reasonBuf.data, (int)reasonBuf.len);
+						nzbget_rs_free(reasonBuf);
+						break;
+					}
+					nzbget_rs_free(reasonBuf);
+				}
+				if (!m_watchdogDone)
+				{
+					m_timedOut = true;
+					lock.unlock();
+					Stop();
+				}
+			});
+	}
+
+	void StopWatchdog(const char* nzbName, const std::vector<RepairTarget>& targets)
+	{
+		if (!m_watchdog.joinable())
+		{
+			return;
+		}
+		{
+			std::lock_guard<std::mutex> lock(m_watchdogMutex);
+			m_watchdogDone = true;
+		}
+		m_watchdogCond.notify_all();
+		m_watchdog.join();
+		if (m_timedOut)
+		{
+			int64 missing = 0;
+			int unsized = 0;
+			for (const RepairTarget& target : targets)
+			{
+				missing += DupeStreamRepair::TotalSize(target.Holes);
+				unsized += target.DecodedFileSize <= 0 ? 1 : 0;
+			}
+			NzbgetRsBuf wholeFilesBuf = nzbget_rs_stream_format_whole_files_suffix(unsized);
+			PrintMessage(Message::mkWarning,
+				"Stream repair of %s stopped: %s (option DupeStreamTimeout); %.1f MB recovered, %.1f MB%s still missing",
+				nzbName, *m_slowReason,
+				nzbget_rs_dqh_stream_repair_bytes_to_mb(m_recoveredBytes),
+				nzbget_rs_dqh_stream_repair_bytes_to_mb(missing),
+				wholeFilesBuf.data ? wholeFilesBuf.data : "");
+			nzbget_rs_free(wholeFilesBuf);
+		}
+	}
+
+	void CollectTargets(NzbInfo* nzbInfo, std::vector<RepairTarget>& targets, std::vector<CString>& memberNames)
+	{
+		m_hasParFiles = nzbInfo->GetParSize() > 0;
+
+		NzbParameter* parameter = nzbInfo->GetParameters()->Find("*Unpack:Password");
+		if (parameter)
+		{
+			m_targetPassword = parameter->GetValue();
+		}
+
+		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+		{
+			memberNames.emplace_back(completedFile.GetFilename());
+		}
+
+		for (StreamRepairJob& job : *nzbInfo->GetStreamRepairJobs())
+		{
+			if (nzbget_rs_stream_is_par2_job_or_file(
+				job.GetParFile() ? 1 : 0, job.GetFilename()) != 0)
+			{
+				continue;
+			}
+			RepairTarget target;
+			target.FileId = job.GetFileId();
+			target.Filename = job.GetFilename();
+			target.DecodedFileSize = job.GetDecodedFileSize();
+			target.FailedSize = job.GetFailedSize();
+			target.MissedSize = job.GetMissedSize();
+			target.FailedArticles = job.GetFailedArticles();
+			target.IsParFile = job.GetParFile();
+			target.Holes = *job.GetHoles();
+			target.StepsHash = job.GetStepsHash();
+			target.EncodedSize = job.GetFailedSize() + job.GetMissedSize();
+			target.ArticleCount = job.GetFailedArticles();
+
+			for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+			{
+				if (completedFile.GetId() == target.FileId)
+				{
+					target.Filename = completedFile.GetFilename();
+					target.IsParFile = target.IsParFile || completedFile.GetParFile();
+					break;
+				}
+			}
+
+			if (nzbget_rs_stream_is_par2_job_or_file(
+				target.IsParFile ? 1 : 0, target.Filename))
+			{
+				continue;
+			}
+			targets.push_back(std::move(target));
+		}
+	}
+
+	void ComputePositionalRanks(const char* destDir, std::vector<RepairTarget>& targets, const std::vector<CString>& memberNames)
+	{
+		std::vector<const char*> names;
+		std::vector<int64_t> sizes;
+		names.reserve(memberNames.size());
+		sizes.reserve(memberNames.size());
+		for (const CString& memberName : memberNames)
+		{
+			NzbgetRsBuf memberPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				destDir, PATH_SEPARATOR, *memberName);
+			BString<1024> memberPath;
+			memberPath.Set(memberPathBuf.data ? memberPathBuf.data : "", (int)memberPathBuf.len);
+			nzbget_rs_free(memberPathBuf);
+			names.push_back(*memberName);
+			sizes.push_back(FileSystem::FileSize(memberPath));
+		}
+		for (RepairTarget& target : targets)
+		{
+			int rank = -1;
+			int windowSize = 0;
+			nzbget_rs_stream_compute_positional_rank(
+				names.data(), sizes.data(), names.size(),
+				target.Filename, target.DecodedFileSize, &rank, &windowSize);
+			target.PositionalRank = rank;
+			target.PositionalWindow = windowSize;
+		}
+	}
+
+	void CollectDonors(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, std::vector<DonorSource>& donors)
+	{
+		RawNzbList donorNzbs;
+
+		for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
+		{
+			if (queuedNzbInfo != nzbInfo &&
+				queuedNzbInfo->GetKind() == NzbInfo::nkNzb &&
+				queuedNzbInfo->GetDupeMode() != dmForce &&
+				DupeCoordinator::SameNameOrKey(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
+					nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+			{
+				donorNzbs.push_back(queuedNzbInfo);
+			}
+		}
+
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
+				historyInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
+				DupeCoordinator::SameNameOrKey(historyInfo->GetNzbInfo()->GetName(),
+					historyInfo->GetNzbInfo()->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+			{
+				donorNzbs.push_back(historyInfo->GetNzbInfo());
+			}
+		}
+
+		if (!donorNzbs.empty())
+		{
+			std::vector<int32_t> dupeScores;
+			std::vector<int32_t> donorIds;
+			std::vector<size_t> order(donorNzbs.size());
+			dupeScores.reserve(donorNzbs.size());
+			donorIds.reserve(donorNzbs.size());
+			for (NzbInfo* d : donorNzbs)
+			{
+				dupeScores.push_back(d->GetDupeScore());
+				donorIds.push_back(d->GetId());
+			}
+			size_t n = nzbget_rs_stream_order_donor_indices(
+				dupeScores.data(), donorIds.data(), donorNzbs.size(), order.data());
+			RawNzbList sortedDonors;
+			sortedDonors.reserve(n);
+			for (size_t i = 0; i < n; i++)
+			{
+				sortedDonors.push_back(donorNzbs[order[i]]);
+			}
+			donorNzbs = std::move(sortedDonors);
+		}
+
+		for (NzbInfo* donorNzbInfo : donorNzbs)
+		{
+			if ((nzbInfo->GetFullContentHash() > 0 &&
+					nzbInfo->GetFullContentHash() == donorNzbInfo->GetFullContentHash()) ||
+				Util::EmptyStr(donorNzbInfo->GetQueuedFilename()))
+			{
+				continue;
+			}
+			{
+				DonorSource donor;
+				donor.QueuedFilename = donorNzbInfo->GetQueuedFilename();
+				donor.InfoName = donorNzbInfo->GetName();
+				NzbParameter* parameter = donorNzbInfo->GetParameters()->Find("*Unpack:Password");
+				if (parameter)
+				{
+					donor.Password = parameter->GetValue();
+				}
+				donors.push_back(std::move(donor));
+			}
+		}
+	}
+
+	void ExecRepair(const char* destDir, std::vector<RepairTarget>& targets, std::vector<DonorSource>& donors, const std::vector<CString>& memberNames)
+	{
+		int primaryConnections = 0;
+		for (NewsServer* server : g_ServerPool->GetServers())
+		{
+			if (server->GetActive() && server->GetNormLevel() == 0)
+			{
+				primaryConnections += server->GetMaxConnections();
+			}
+		}
+		m_batchFetcher.SetWorkerCount(m_liveMode ? 0 :
+			DupeStreamRepair::StreamFetchWorkerCount(primaryConnections));
+		std::set<std::string> triedPostings;
+
+		for (DonorSource& donor : donors)
+		{
+			if (IsStopped())
+			{
+				break;
+			}
+
+			bool anyHoles = false;
+			for (RepairTarget& target : targets)
+			{
+				anyHoles |= target.PatchEligible && target.NeedsRepair();
+			}
+			if (!anyHoles)
+			{
+				break;
+			}
+
+			std::unique_ptr<NzbInfo> donorNzb = DupeArticleFallback::ParseDonorNzb(donor.QueuedFilename);
+			if (!donorNzb)
+			{
+				continue;
+			}
+			if (!triedPostings.insert(DupeStreamRepair::BuildDonorKey(
+				donorNzb.get(), donor.Password)).second)
+			{
+				PrintMessage(Message::mkInfo,
+					"Skipping another copy of duplicate posting %s", *donor.InfoName);
+				continue;
+			}
+			if (DonorDead(donor, donorNzb.get()))
+			{
+				continue;
+			}
+
+			if (m_postInfo)
+			{
+				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+				m_postInfo->SetProgressLabel(BString<1024>("Repairing from duplicate %s", *donor.InfoName));
+				m_postInfo->SetStageProgress(0);
+			}
+
+			std::vector<const char*> memberNamePtrs(memberNames.size());
+			for (size_t i = 0; i < memberNames.size(); i++)
+			{
+				memberNamePtrs[i] = *memberNames[i];
+			}
+
+			std::vector<const char*> targetFilenames(targets.size());
+			std::vector<int64_t> targetEncodedSizes(targets.size());
+			std::vector<int64_t> targetDecodedSizes(targets.size());
+			std::vector<int> targetArticleCounts(targets.size());
+			std::vector<int> targetPositionalRanks(targets.size());
+			std::vector<int> targetPositionalWindows(targets.size());
+			std::vector<uint64_t> targetStepsHashes(targets.size());
+			std::vector<uint8_t> targetPatchEligible(targets.size());
+			std::vector<size_t> targetHoleCounts(targets.size());
+			std::vector<NzbgetRsByteRange> targetHolesFlat;
+			for (size_t t = 0; t < targets.size(); t++)
+			{
+				targetFilenames[t] = *targets[t].Filename;
+				targetEncodedSizes[t] = targets[t].EncodedSize;
+				targetDecodedSizes[t] = targets[t].DecodedFileSize;
+				targetArticleCounts[t] = targets[t].ArticleCount;
+				targetPositionalRanks[t] = targets[t].PositionalRank;
+				targetPositionalWindows[t] = targets[t].PositionalWindow;
+				targetStepsHashes[t] = targets[t].StepsHash;
+				targetPatchEligible[t] = targets[t].PatchEligible ? 1 : 0;
+				targetHoleCounts[t] = targets[t].Holes.size();
+				for (const StreamRange& h : targets[t].Holes)
+				{
+					targetHolesFlat.push_back({h.Offset, h.Size});
+				}
+			}
+
+			std::vector<FileInfo*> donorFiles;
+			std::vector<const char*> donorFileNames;
+			std::vector<int64_t> donorFileSizes;
+			std::vector<uint8_t> donorFileIsPar;
+			std::vector<uint64_t> donorFileStepsHashes;
+			std::vector<size_t> donorArticleCounts;
+			std::vector<int32_t> donorArticleSizesFlat;
+			std::vector<std::shared_ptr<std::vector<CString>>> donorGroupsCache;
+			for (FileInfo* df : donorNzb->GetFileList())
+			{
+				donorFiles.push_back(df);
+				donorFileNames.push_back(df->GetFilename());
+				donorFileSizes.push_back(df->GetSize());
+				donorFileIsPar.push_back(df->GetParFile() ? 1 : 0);
+				donorArticleCounts.push_back(df->GetArticles()->size());
+				for (const std::unique_ptr<ArticleInfo>& a : *df->GetArticles())
+				{
+					donorArticleSizesFlat.push_back(a->GetSize());
+				}
+				const std::vector<int32_t>& artSizes = donorArticleCounts.back() > 0
+					? std::vector<int32_t>(
+						donorArticleSizesFlat.end() - (ptrdiff_t)donorArticleCounts.back(),
+						donorArticleSizesFlat.end())
+					: std::vector<int32_t>{};
+				donorFileStepsHashes.push_back(
+					nzbget_rs_dupe_fallback_steps_hash(artSizes.data(), artSizes.size()));
+				auto grp = std::make_shared<std::vector<CString>>();
+				for (const CString& g : *df->GetGroups())
+				{
+					grp->emplace_back(*g);
+				}
+				donorGroupsCache.push_back(std::move(grp));
+			}
+
+			struct M1DonorCtx
+			{
+				StreamRepairController* Controller;
+				std::vector<RepairTarget>* Targets;
+				std::vector<FileInfo*>* DonorFiles;
+				std::vector<std::shared_ptr<std::vector<CString>>>* DonorGroupsCache;
+				ArticleFetcher::FetchedArticle CurrentFetched;
+				std::exception_ptr Error;
+			} donorCtx{this, &targets, &donorFiles, &donorGroupsCache, {}, nullptr};
+
+			nzbget_rs_stream_repair_process_donor(
+				destDir,
+				m_liveMode ? 1 : 0,
+				memberNamePtrs.data(),
+				memberNamePtrs.size(),
+				targetFilenames.data(),
+				targetEncodedSizes.data(),
+				targetDecodedSizes.data(),
+				targetArticleCounts.data(),
+				targetPositionalRanks.data(),
+				targetPositionalWindows.data(),
+				targetStepsHashes.data(),
+				targetPatchEligible.data(),
+				targetHoleCounts.data(),
+				targetHolesFlat.data(),
+				targets.size(),
+				*donor.InfoName,
+				donorFileNames.data(),
+				donorFileSizes.data(),
+				donorFileIsPar.data(),
+				donorFileStepsHashes.data(),
+				donorArticleCounts.data(),
+				donorArticleSizesFlat.data(),
+				donorFiles.size(),
+				&donorCtx,
+				[](void* rawCtx) -> int
+				{
+					return RepairMapCall<M1DonorCtx>(rawCtx, 1, [](M1DonorCtx* c)
+					{
+						return c->Controller->IsStopped() ? 1 : 0;
+					});
+				},
+				[](void* rawCtx, size_t targetIdx) -> const char*
+				{
+					return RepairMapCall<M1DonorCtx>(rawCtx, static_cast<const char*>(nullptr), [=](M1DonorCtx* c) -> const char*
+					{
+						if (targetIdx >= c->Targets->size())
+						{
+							return nullptr;
+						}
+						c->Controller->RefreshLiveTargetName((*c->Targets)[targetIdx]);
+						return *(*c->Targets)[targetIdx].Filename;
+					});
+				},
+				[](void* rawCtx, int32_t memberIndex, const int32_t* partIndices, size_t count)
+				{
+					RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
+					{
+						if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
+						{
+							return;
+						}
+						FileInfo* df = (*c->DonorFiles)[memberIndex];
+						const auto& grp = (*c->DonorGroupsCache)[memberIndex];
+						std::vector<ArticleBatchFetcher::Request> requests;
+						requests.reserve(count);
+						for (size_t i = 0; i < count; i++)
+						{
+							int32_t pi = partIndices[i];
+							if (pi >= 0 && (size_t)pi < df->GetArticles()->size())
+							{
+								ArticleInfo* article = (*df->GetArticles())[pi].get();
+								requests.push_back({article->GetMessageId(), grp});
+							}
+						}
+						c->Controller->m_batchFetcher.Begin(std::move(requests));
+					});
+				},
+				[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
+					const uint8_t** outData, size_t* outDataLen) -> int
+				{
+					return RepairMapCall<M1DonorCtx>(rawCtx, 0, [=](M1DonorCtx* c)
+					{
+						c->CurrentFetched = ArticleFetcher::FetchedArticle();
+						if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
+						{
+							return 0;
+						}
+						*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+						*outOffset = c->CurrentFetched.Offset;
+						*outFileSize = c->CurrentFetched.FileSize;
+						*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+						*outDataLen = c->CurrentFetched.Data.size();
+						return 1;
+					});
+				},
+				[](void* rawCtx)
+				{
+					RepairMapCallVoid<M1DonorCtx>(rawCtx, [](M1DonorCtx* c)
+					{
+						c->Controller->m_batchFetcher.CancelRemaining();
+					});
+				},
+				[](void* rawCtx, int64_t bytes)
+				{
+					RepairMapCallVoid<M1DonorCtx>(rawCtx, [bytes](M1DonorCtx* c)
+					{
+						c->Controller->m_progressBytes += bytes;
+					});
+				},
+				[](void* rawCtx, int64_t bytes)
+				{
+					RepairMapCallVoid<M1DonorCtx>(rawCtx, [bytes](M1DonorCtx* c)
+					{
+						c->Controller->m_recoveredBytes += bytes;
+					});
+				},
+				[](void* rawCtx, size_t targetIdx, const char* filename, int64_t decodedFileSize,
+					int recreated, const NzbgetRsByteRange* holes, size_t holeCount)
+				{
+					RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
+					{
+						if (targetIdx >= c->Targets->size())
+						{
+							return;
+						}
+						RepairTarget& target = (*c->Targets)[targetIdx];
+						if (filename && *filename)
+						{
+							target.Filename = filename;
+						}
+						target.DecodedFileSize = decodedFileSize;
+						if (recreated != 0)
+						{
+							target.Recreated = true;
+						}
+						target.Holes.assign(
+							reinterpret_cast<const StreamRange*>(holes),
+							reinterpret_cast<const StreamRange*>(holes) + holeCount);
+					});
+				},
+				[](void* rawCtx, int32_t kind, const char* text)
+				{
+					RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
+					{
+						Message::EKind msgKind = kind == 3 ? Message::mkDetail :
+							kind == 2 ? Message::mkError :
+							kind == 1 ? Message::mkWarning : Message::mkInfo;
+						c->Controller->PrintMessage(msgKind, "%s", text);
+					});
+				});
+			if (donorCtx.Error)
+			{
+				std::rethrow_exception(donorCtx.Error);
+			}
+		}
+	}
+
+	static void MarkRepaired(NzbInfo* nzbInfo, const RepairTarget& target)
+	{
+		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+		{
+			if (completedFile.GetId() == target.FileId &&
+				completedFile.GetStatus() != CompletedFile::cfSuccess)
+			{
+				completedFile.SetStatus(CompletedFile::cfSuccess);
+				g_DiskState->DiscardFile(target.FileId, true, true, true);
+				break;
+			}
+		}
+	}
+
+	static void MarkRecreated(NzbInfo* nzbInfo, const RepairTarget& target)
+	{
+		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+		{
+			if (completedFile.GetId() == target.FileId &&
+				completedFile.GetStatus() == CompletedFile::cfFailure)
+			{
+				completedFile.SetStatus(CompletedFile::cfPartial);
+				break;
+			}
+		}
+	}
+
+	void ReportRemainingHoles(std::vector<RepairTarget>& targets)
+	{
+		bool interrupted = Interrupted();
+		if (interrupted)
+		{
+			int unfinished = (int)std::count_if(targets.begin(), targets.end(),
+				[](const RepairTarget& target)
+				{
+					return target.DecodedFileSize <= 0 || !target.Holes.empty();
+				});
+			m_holesRemain |= unfinished > 0;
+			PrintMessage(Message::mkInfo, "Stream repair interrupted with %i file(s) still incomplete", unfinished);
+		}
+
+		const char* parDisposition = m_hasParFiles ? "left to par-repair" : "no par2 files to repair it";
+		for (RepairTarget& target : targets)
+		{
+			int targetStatus = nzbget_rs_stream_classify_remaining_hole_target(
+				interrupted ? 1 : 0, target.DecodedFileSize, target.Holes.empty() ? 1 : 0,
+				target.IsParFile ? 1 : 0, target.FailedArticles, target.FailedSize, target.MissedSize,
+				&m_recoveredArticles, &m_recoveredFailedSize, &m_recoveredFailedParSize);
+			if (targetStatus == 1)
+			{
+				continue;
+			}
+			if (targetStatus == 2)
+			{
+				m_holesRemain = true;
+				PrintMessage(Message::mkInfo,
+					"Stream repair of %s: no duplicate could supply the file (%s)",
+					*target.Filename, parDisposition);
+			}
+			else if (targetStatus == 3)
+			{
+				m_holesRemain = true;
+				int64 missing = DupeStreamRepair::TotalSize(target.Holes);
+				PrintMessage(Message::mkInfo,
+					"Stream repair of %s: %.1f MB still missing after stream repair (%s)",
+					*target.Filename, nzbget_rs_dqh_stream_repair_bytes_to_mb(missing),
+					parDisposition);
+				if (nzbget_rs_stream_is_incomplete_nzb_hole(missing, target.EncodedSize) != 0)
+				{
+					PrintMessage(Message::mkWarning,
+						"%s is %.1f MB according to its articles, but the nzb's articles cover only "
+						"%.1f MB of it: the nzb is incomplete",
+						*target.Filename, nzbget_rs_dqh_stream_repair_bytes_to_mb(target.DecodedFileSize),
+						nzbget_rs_dqh_stream_repair_bytes_to_mb(target.DecodedFileSize - missing));
+				}
+			}
+		}
+	}
+
+	void ExecCrossPackRepair(const char* destDir, std::vector<RepairTarget>& targets, std::vector<DonorSource>& donors, const std::vector<CString>& memberNames)
+	{
+		std::vector<const char*> memberNamePtrs(memberNames.size());
+		for (size_t i = 0; i < memberNames.size(); i++)
+		{
+			memberNamePtrs[i] = *memberNames[i];
+		}
+
+		std::vector<const char*> targetFilenames(targets.size());
+		std::vector<int64_t> targetDecodedSizes(targets.size());
+		std::vector<uint8_t> targetPatchEligible(targets.size());
+		std::vector<size_t> targetHoleCounts(targets.size());
+		std::vector<NzbgetRsByteRange> targetHolesFlat;
+		for (size_t t = 0; t < targets.size(); t++)
+		{
+			targetFilenames[t] = *targets[t].Filename;
+			targetDecodedSizes[t] = targets[t].DecodedFileSize;
+			targetPatchEligible[t] = targets[t].PatchEligible ? 1 : 0;
+			targetHoleCounts[t] = targets[t].Holes.size();
+			for (const StreamRange& h : targets[t].Holes)
+			{
+				targetHolesFlat.push_back({h.Offset, h.Size});
+			}
+		}
+
+		struct InitCtx
+		{
+			StreamRepairController* Controller;
+			std::exception_ptr Error;
+		} initCtx{this, nullptr};
+
+		NzbgetRsCrossPackSession* session = nzbget_rs_cross_pack_session_new(
+			destDir,
+			memberNamePtrs.data(),
+			memberNamePtrs.size(),
+			targetFilenames.data(),
+			targetDecodedSizes.data(),
+			targetPatchEligible.data(),
+			targetHoleCounts.data(),
+			targetHolesFlat.data(),
+			targets.size(),
+			m_targetPassword.Empty() ? nullptr : *m_targetPassword,
+			&initCtx,
+			[](void* rawCtx) -> int
+			{
+				return RepairMapCall<InitCtx>(rawCtx, 1, [](InitCtx* c)
+				{
+					return c->Controller->IsStopped() ? 1 : 0;
+				});
+			},
+			[](void* rawCtx, int32_t kind, const char* text)
+			{
+				RepairMapCallVoid<InitCtx>(rawCtx, [=](InitCtx* c)
+				{
+					Message::EKind msgKind = kind == 2 ? Message::mkError :
+						kind == 1 ? Message::mkWarning : Message::mkInfo;
+					c->Controller->PrintMessage(msgKind, "%s", text);
+				});
+			},
+	#ifdef DEBUG
+			[](void* rawCtx, const char* text)
+			{
+				RepairMapCallVoid<InitCtx>(rawCtx, [=](InitCtx*)
+				{
+					debug("%s", text ? text : "");
+				});
+			}
+	#else
+			nullptr
+	#endif
+		);
+		if (initCtx.Error)
+		{
+			nzbget_rs_cross_pack_session_free(session);
+			std::rethrow_exception(initCtx.Error);
+		}
+		if (!session)
+		{
+			return;
+		}
+		struct SessionGuard
+		{
+			NzbgetRsCrossPackSession* Ptr;
+			~SessionGuard() { nzbget_rs_cross_pack_session_free(Ptr); }
+		} sessionGuard{session};
+
+		std::set<std::string> triedPostings;
+
+		for (DonorSource& donor : donors)
+		{
+			if (IsStopped() || !nzbget_rs_cross_pack_session_has_inner_holes(session))
+			{
+				break;
+			}
+
+			std::unique_ptr<NzbInfo> donorNzb =
+				DupeArticleFallback::ParseDonorNzb(donor.QueuedFilename);
+			if (!donorNzb)
+			{
+				continue;
+			}
+			if (!triedPostings.insert(DupeStreamRepair::BuildDonorKey(
+				donorNzb.get(), donor.Password)).second)
+			{
+				PrintMessage(Message::mkInfo,
+					"Skipping another copy of duplicate posting %s", *donor.InfoName);
+				continue;
+			}
+			if (DonorDead(donor, donorNzb.get()))
+			{
+				continue;
+			}
+
+			std::vector<FileInfo*> donorFiles;
+			std::vector<const char*> donorFileNames;
+			std::vector<int64_t> donorFileSizes;
+			std::vector<size_t> donorArticleCounts;
+			std::vector<int32_t> donorArticleSizesFlat;
+			for (FileInfo* fileInfo : donorNzb->GetFileList())
+			{
+				donorFiles.push_back(fileInfo);
+				donorFileNames.push_back(fileInfo->GetFilename());
+				donorFileSizes.push_back(fileInfo->GetSize());
+				size_t artCount = fileInfo->GetArticles() ? fileInfo->GetArticles()->size() : 0;
+				donorArticleCounts.push_back(artCount);
+				if (fileInfo->GetArticles())
+				{
+					for (ArticleInfo* article : fileInfo->GetArticles())
+					{
+						donorArticleSizesFlat.push_back(article->GetSize());
+					}
+				}
+			}
+
+			bool allowDecompress = !m_liveMode && g_Options->GetDupeStreamDecompress();
+
+			struct DonorCtx
+			{
+				StreamRepairController* Controller;
+				const std::vector<FileInfo*>* DonorFiles;
+				std::vector<RepairTarget>* Targets;
+				ArticleFetcher::FetchedArticle CurrentFetched;
+				std::exception_ptr Error;
+			} donorCtx{this, &donorFiles, &targets, {}, nullptr};
+
+			nzbget_rs_cross_pack_session_process_donor(
+				session,
+				*donor.QueuedFilename,
+				*donor.InfoName,
+				donor.Password.Empty() ? "" : *donor.Password,
+				donorFileNames.data(),
+				donorFileSizes.data(),
+				donorArticleCounts.data(),
+				donorArticleSizesFlat.data(),
+				donorFiles.size(),
+				allowDecompress ? 1 : 0,
+				&donorCtx,
+				[](void* rawCtx) -> int
+				{
+					return RepairMapCall<DonorCtx>(rawCtx, 1, [](DonorCtx* c)
+					{
+						return c->Controller->IsStopped() ? 1 : 0;
+					});
+				},
+				[](void* rawCtx, int32_t memberIndex, int32_t partIndex, int* outSuccess,
+					int64_t* outOffset, int64_t* outFileSize, const uint8_t** outData, size_t* outDataLen) -> int
+				{
+					return RepairMapCall<DonorCtx>(rawCtx, 0, [=](DonorCtx* c)
+					{
+						if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
+						{
+							return 0;
+						}
+						FileInfo* donorFile = (*c->DonorFiles)[memberIndex];
+						if (!donorFile || !donorFile->GetArticles() || partIndex < 0 ||
+							(size_t)partIndex >= donorFile->GetArticles()->size())
+						{
+							return 0;
+						}
+						ArticleInfo* article = (*donorFile->GetArticles())[partIndex].get();
+						c->CurrentFetched = c->Controller->m_fetcher.Fetch(
+							article->GetMessageId(), *donorFile->GetGroups());
+						*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+						*outOffset = c->CurrentFetched.Offset;
+						*outFileSize = c->CurrentFetched.FileSize;
+						*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+						*outDataLen = c->CurrentFetched.Data.size();
+						return 1;
+					});
+				},
+				[](void* rawCtx, int32_t memberIndex, const int32_t* partIndices, size_t count)
+				{
+					RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
+					{
+						if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
+						{
+							return;
+						}
+						FileInfo* donorFile = (*c->DonorFiles)[memberIndex];
+						if (!donorFile || !donorFile->GetArticles())
+						{
+							return;
+						}
+						auto groups = std::make_shared<std::vector<CString>>();
+						for (const CString& group : *donorFile->GetGroups())
+						{
+							groups->emplace_back(*group);
+						}
+						std::vector<ArticleBatchFetcher::Request> requests;
+						requests.reserve(count);
+						for (size_t i = 0; i < count; i++)
+						{
+							int partIndex = partIndices[i];
+							if (partIndex >= 0 && (size_t)partIndex < donorFile->GetArticles()->size())
+							{
+								requests.push_back({
+									(*donorFile->GetArticles())[partIndex]->GetMessageId(),
+									groups
+								});
+							}
+						}
+						c->Controller->m_batchFetcher.Begin(std::move(requests));
+					});
+				},
+				[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
+					const uint8_t** outData, size_t* outDataLen) -> int
+				{
+					return RepairMapCall<DonorCtx>(rawCtx, 0, [=](DonorCtx* c)
+					{
+						c->CurrentFetched = ArticleFetcher::FetchedArticle();
+						if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
+						{
+							return 0;
+						}
+						*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+						*outOffset = c->CurrentFetched.Offset;
+						*outFileSize = c->CurrentFetched.FileSize;
+						*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+						*outDataLen = c->CurrentFetched.Data.size();
+						return 1;
+					});
+				},
+				[](void* rawCtx)
+				{
+					RepairMapCallVoid<DonorCtx>(rawCtx, [](DonorCtx* c)
+					{
+						c->Controller->m_batchFetcher.CancelRemaining();
+					});
+				},
+				[](void* rawCtx, int32_t memberIndex)
+				{
+					RepairMapCallVoid<DonorCtx>(rawCtx, [memberIndex](DonorCtx* c)
+					{
+						if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
+						{
+							return;
+						}
+						FileInfo* donorFile = (*c->DonorFiles)[memberIndex];
+						if (!donorFile || !donorFile->GetArticles())
+						{
+							return;
+						}
+						auto donorGroups = std::make_shared<std::vector<CString>>();
+						for (const CString& group : *donorFile->GetGroups())
+						{
+							donorGroups->emplace_back(*group);
+						}
+						std::vector<ArticleBatchFetcher::Request> requests;
+						requests.reserve(donorFile->GetArticles()->size());
+						for (std::unique_ptr<ArticleInfo>& article : *donorFile->GetArticles())
+						{
+							requests.push_back({article->GetMessageId(), donorGroups});
+						}
+						c->Controller->m_batchFetcher.Begin(std::move(requests));
+					});
+				},
+				[](void* rawCtx, const char* label, int32_t stageProgress)
+				{
+					RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
+					{
+						if (c->Controller->m_postInfo)
+						{
+							GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+							c->Controller->m_postInfo->SetProgressLabel(label ? label : "");
+							c->Controller->m_postInfo->SetStageProgress(stageProgress);
+						}
+					});
+				},
+				[](void* rawCtx, int32_t delta)
+				{
+					RepairMapCallVoid<DonorCtx>(rawCtx, [delta](DonorCtx* c)
+					{
+						c->Controller->m_materializing += delta;
+					});
+				},
+				[](void* rawCtx, int64_t bytes, int32_t holes)
+				{
+					RepairMapCallVoid<DonorCtx>(rawCtx, [bytes, holes](DonorCtx* c)
+					{
+						c->Controller->m_recoveredBytes += bytes;
+						c->Controller->m_progressBytes += bytes;
+						c->Controller->m_recoveredHoles += holes;
+					});
+				},
+				[](void* rawCtx, const size_t* updatedCounts, const NzbgetRsByteRange* updatedFlat, size_t)
+				{
+					RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
+					{
+						size_t cursor = 0;
+						for (size_t t = 0; t < c->Targets->size(); t++)
+						{
+							size_t cnt = updatedCounts ? updatedCounts[t] : 0;
+							(*c->Targets)[t].Holes.assign(
+								reinterpret_cast<const StreamRange*>(updatedFlat + cursor),
+								reinterpret_cast<const StreamRange*>(updatedFlat + cursor + cnt));
+							cursor += cnt;
+						}
+					});
+				},
+				[](void* rawCtx, int32_t kind, const char* text)
+				{
+					RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
+					{
+						Message::EKind msgKind = kind == 2 ? Message::mkError :
+							kind == 1 ? Message::mkWarning : Message::mkInfo;
+						c->Controller->PrintMessage(msgKind, "%s", text);
+					});
+				},
+				[](void* rawCtx, int32_t kind, const char* msg)
+				{
+					RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx*)
+					{
+						if (!msg) return;
+						switch (kind)
+						{
+							case 0:
+								info("%s", msg);
+								break;
+							case 1:
+								error("%s", msg);
+								break;
+							case 2:
+								warn("%s", msg);
+								break;
+							default:
+								detail("%s", msg);
+								break;
+						}
+					});
+				},
+	#ifdef DEBUG
+				[](void* rawCtx, const char* text)
+				{
+					RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx*)
+					{
+						debug("%s", text ? text : "");
+					});
+				}
+	#else
+				nullptr
+	#endif
+			);
+			if (donorCtx.Error)
+			{
+				std::rethrow_exception(donorCtx.Error);
+			}
+		}
+	}
+
+	void RepairCompleted()
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+
+		for (const RepairTarget& target : m_targets)
+		{
+			if (target.DecodedFileSize > 0 && target.Holes.empty())
+			{
+				MarkRepaired(nzbInfo, target);
+			}
+			else if (target.Recreated)
+			{
+				MarkRecreated(nzbInfo, target);
+			}
+		}
+
+		if (m_recoveredArticles > 0 || m_recoveredBytes > 0 || m_recoveredHoles > 0)
+		{
+			nzbInfo->SetDupeRecoveredArticles(nzbInfo->GetDupeRecoveredArticles() + m_recoveredArticles);
+			nzbInfo->SetDupeRecoveredBytes(nzbInfo->GetDupeRecoveredBytes() + m_recoveredBytes);
+			nzbInfo->SetDupeRecoveredHoles(nzbInfo->GetDupeRecoveredHoles() + m_recoveredHoles);
+		}
+
+		if (m_recoveredFailedSize > 0)
+		{
+			int64 failedSize = nzbInfo->GetFailedSize();
+			int64 successSize = nzbInfo->GetSuccessSize();
+			int64 curFailedSize = nzbInfo->GetCurrentFailedSize();
+			int64 curSuccessSize = nzbInfo->GetCurrentSuccessSize();
+			int64 parFailedSize = nzbInfo->GetParFailedSize();
+			int64 parSuccessSize = nzbInfo->GetParSuccessSize();
+			int64 parCurFailedSize = nzbInfo->GetParCurrentFailedSize();
+			int64 parCurSuccessSize = nzbInfo->GetParCurrentSuccessSize();
+			nzbget_rs_stream_credit_repaired_sizes(
+				m_recoveredFailedSize, m_recoveredFailedParSize,
+				&failedSize, &successSize, &curFailedSize, &curSuccessSize,
+				&parFailedSize, &parSuccessSize, &parCurFailedSize, &parCurSuccessSize);
+			nzbInfo->SetFailedSize(failedSize);
+			nzbInfo->SetSuccessSize(successSize);
+			nzbInfo->SetCurrentFailedSize(curFailedSize);
+			nzbInfo->SetCurrentSuccessSize(curSuccessSize);
+			nzbInfo->SetParFailedSize(parFailedSize);
+			nzbInfo->SetParSuccessSize(parSuccessSize);
+			nzbInfo->SetParCurrentFailedSize(parCurFailedSize);
+			nzbInfo->SetParCurrentSuccessSize(parCurSuccessSize);
+		}
+
+		for (auto it = nzbInfo->GetStreamRepairJobs()->begin();
+			it != nzbInfo->GetStreamRepairJobs()->end(); )
+		{
+			if (!Interrupted())
+			{
+				it = nzbInfo->GetStreamRepairJobs()->erase(it);
+				continue;
+			}
+			bool matched = false;
+			for (const RepairTarget& target : m_targets)
+			{
+				if (target.FileId == it->GetFileId())
+				{
+					matched = true;
+					if (target.Holes.empty() && target.DecodedFileSize > 0)
+					{
+						it = nzbInfo->GetStreamRepairJobs()->erase(it);
+					}
+					else
+					{
+						if (it->GetDecodedFileSize() <= 0 && target.DecodedFileSize > 0)
+						{
+							it->SetDecodedFileSize(target.DecodedFileSize);
+						}
+						it->SetHoles(target.Holes);
+						++it;
+					}
+					break;
+				}
+			}
+			if (!matched)
+			{
+				++it;
+			}
+		}
+
+		bool recovered = m_recoveredBytes > 0;
+		m_postInfo->SetStreamRepairDone(true);
+		m_postInfo->SetStreamRepairRecovered(recovered);
+
+		{
+			int resetParRename = 0, setParStatus = 0, newParStatus = 0;
+			int forceParFull = 0, setReqParCheckFalse = 0, checkMainPars = 0;
+			nzbget_rs_stream_resolve_completion_par_action(
+				m_recoveredBytes, m_holesRemain ? 1 : 0,
+				(int)nzbInfo->GetParRenameStatus(), (int)NzbInfo::rsNone,
+				(int)nzbInfo->GetParStatus(), (int)NzbInfo::psSkipped,
+				(int)g_Options->GetParCheck(), (int)Options::pcManual,
+				(int)NzbInfo::psManual, (int)NzbInfo::psNone,
+				&resetParRename, &setParStatus, &newParStatus,
+				&forceParFull, &setReqParCheckFalse, &checkMainPars);
+			if (resetParRename)
+			{
+				nzbInfo->SetParRenameStatus(NzbInfo::rsNone);
+			}
+			if (setParStatus)
+			{
+				nzbInfo->SetParStatus((NzbInfo::EParStatus)newParStatus);
+			}
+			if (checkMainPars && ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+			{
+				m_postInfo->SetRequestParCheck(true);
+			}
+			if (forceParFull)
+			{
+				m_postInfo->SetForceParFull(true);
+			}
+			if (setReqParCheckFalse)
+			{
+				m_postInfo->SetRequestParCheck(false);
+			}
+		}
+
+		downloadQueue->Save();
+
+		m_postInfo->SetWorking(false);
+	}
 };
 
 #include <new>
@@ -24519,49 +26607,7 @@ public:
 		debug("Exiting DirectUnpack-loop for %i", m_nzbId);
 	}
 
-	void Stop(DownloadQueue* /*downloadQueue*/, NzbInfo* nzbInfo)
-	{
-		debug("Stopping %s", *m_infoName);
-		if (!(g_PrePostProcessor && g_PrePostProcessor->IsStopped()))
-		{
-			m_cancelled = true;
-		}
-		if (m_processed)
-		{
-			if (nzbInfo)
-			{
-				nzbInfo->AddMessage(Message::mkWarning, BString<1024>("Cancelling %s", *m_infoName));
-			}
-			else
-			{
-				warn("Cancelling %s", *m_infoName);
-			}
-		}
-		if (nzbInfo)
-		{
-			AddExtraTime(nzbInfo);
-			if (nzbInfo->GetPostInfo() && !nzbInfo->GetLiveRepairThread())
-			{
-				nzbInfo->GetPostInfo()->SetWorking(false);
-			}
-		}
-		Thread::Stop();
-		bool isExecThread = std::this_thread::get_id() == m_execThreadId.load();
-		if (m_unpacking)
-		{
-			if (!isExecThread && !m_cancelled && HasActiveProcess() && Break())
-			{
-				for (int i = 0; i < 50 && m_unpacking && HasActiveProcess(); ++i)
-				{
-					Util::Sleep(100);
-				}
-			}
-			if (m_unpacking)
-			{
-				Terminate();
-			}
-		}
-	}
+	void Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
 
 	void FileDownloaded(DownloadQueue* downloadQueue, FileInfo* fileInfo)
 	{
@@ -24873,2305 +26919,6 @@ private:
 #endif
 
 #endif
-
-#ifndef DISABLE_PARCHECK
-inline bool RepairController::PostParChecker::RequestMorePars(int blockNeeded, int* blockFound)
-{
-	return m_owner->RequestMorePars(m_postInfo->GetNzbInfo(), GetParFilename(), blockNeeded, blockFound);
-}
-
-inline void RepairController::PostParChecker::UpdateProgress()
-{
-	m_owner->UpdateParCheckProgress();
-}
-
-inline void RepairController::PostParChecker::PrintMessage(Message::EKind kind, const char* format, ...)
-{
-	char text[1024];
-	va_list args;
-	va_start(args, format);
-	vsnprintf(text, 1024, format, args);
-	va_end(args);
-	text[1024-1] = '\0';
-
-	m_postInfo->GetNzbInfo()->AddMessage(kind, text);
-}
-
-inline void RepairController::PostParChecker::RegisterParredFile(const char* filename)
-{
-	m_postInfo->GetParredFiles()->push_back(filename);
-}
-
-inline void RepairController::PostParChecker::RegisterVerifiedFile(const char* filename)
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
-	StreamRepairJobList* jobs = nzbInfo->GetStreamRepairJobs();
-	std::string verifiedPath = FileSystem::GetRealPath(filename).value_or(filename);
-	size_t previousSize = jobs->size();
-	jobs->erase(std::remove_if(jobs->begin(), jobs->end(),
-		[nzbInfo, &verifiedPath](const StreamRepairJob& job)
-		{
-			std::string currentName = job.GetFilename();
-			for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-			{
-				if (completedFile.GetId() == job.GetFileId())
-				{
-					currentName = completedFile.GetFilename();
-					break;
-				}
-			}
-			NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				nzbInfo->GetDestDir(), PATH_SEPARATOR, currentName.c_str());
-			std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
-			nzbget_rs_free(pathBuf);
-			path = FileSystem::GetRealPath(path).value_or(path);
-			return FileSystem::SameFilename(path.c_str(), verifiedPath.c_str());
-		}), jobs->end());
-	if (jobs->size() != previousSize)
-	{
-		nzbInfo->SetChanged(true);
-	}
-}
-
-inline bool RepairController::PostParChecker::IsParredFile(const char* filename)
-{
-	for (CString& parredFile : m_postInfo->GetParredFiles())
-	{
-		if (nzbget_rs_repair_filename_eq_ignore_case(parredFile, filename) != 0)
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
-inline ParChecker::EFileStatus RepairController::PostParChecker::FindFileCrc(const char* filename,
-	uint32* crc, SegmentList* segments)
-{
-	int id = 0;
-	CompletedFile::EStatus status;
-	bool reprocess;
-	{
-		GuardedDownloadQueue guard = DownloadQueue::Guard();
-		CompletedFile* completedFile = nullptr;
-		for (CompletedFile& completedFile2 : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
-		{
-			if (nzbget_rs_repair_filename_eq_ignore_case(completedFile2.GetFilename(), filename) != 0)
-			{
-				completedFile = &completedFile2;
-				break;
-			}
-		}
-		if (!completedFile)
-		{
-			return ParChecker::fsUnknown;
-		}
-		id = completedFile->GetId();
-		*crc = completedFile->GetCrc();
-		status = completedFile->GetStatus();
-		reprocess = m_postInfo->GetNzbInfo()->GetReprocess();
-	}
-
-	debug("Found completed file: %s, CRC: %.8x, Status: %i", filename, *crc, (int)status);
-
-	if (nzbget_rs_repair_should_load_partial_segments(
-		(int)status, (int)CompletedFile::cfPartial, id, reprocess ? 1 : 0) != 0)
-	{
-		FileInfo tmpFileInfo(id);
-
-		if (!g_DiskState->LoadFileState(&tmpFileInfo, nullptr, true))
-		{
-			return ParChecker::fsUnknown;
-		}
-
-		for (ArticleInfo* pa : tmpFileInfo.GetArticles())
-		{
-			segments->emplace_back(pa->GetStatus() == ArticleInfo::aiFinished,
-				pa->GetSegmentOffset(), pa->GetSegmentSize(), pa->GetCrc());
-		}
-	}
-
-	return (ParChecker::EFileStatus)nzbget_rs_repair_classify_file_crc_status(
-		(int)status, reprocess ? 1 : 0, !segments->empty() ? 1 : 0,
-		(int)CompletedFile::cfSuccess, (int)CompletedFile::cfFailure, (int)CompletedFile::cfPartial,
-		(int)ParChecker::fsSuccess, (int)ParChecker::fsFailure, (int)ParChecker::fsPartial,
-		(int)ParChecker::fsUnknown);
-}
-
-inline const char* RepairController::PostParChecker::FindFileOrigname(const char* filename)
-{
-	thread_local std::string origname;
-	GuardedDownloadQueue guard = DownloadQueue::Guard();
-	for (CompletedFile& completedFile : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
-	{
-		if (nzbget_rs_repair_filename_eq_ignore_case(completedFile.GetFilename(), filename) != 0)
-		{
-			if (!completedFile.GetOrigname())
-			{
-				return nullptr;
-			}
-			origname = completedFile.GetOrigname();
-			return origname.c_str();
-		}
-	}
-
-	return nullptr;
-}
-
-inline void RepairController::PostParChecker::RequestDupeSources(DupeSourceList* dupeSourceList)
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	RawNzbList dupeList = g_DupeCoordinator->ListHistoryDupes(downloadQueue, m_postInfo->GetNzbInfo());
-
-	if (!dupeList.empty())
-	{
-		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
-		std::vector<const char*> dupeDirs(dupeList.size());
-		for (size_t i = 0; i < dupeList.size(); i++)
-		{
-			dupeDirs[i] = dupeList[i]->GetDestDir();
-		}
-		std::vector<size_t> usableIndices(dupeList.size());
-		size_t usableCount = nzbget_rs_dupematcher_filter_dupe_sources(
-			nzbInfo->GetName(),
-			nzbInfo->GetDestDir(),
-			nzbInfo->GetSize() - nzbInfo->GetParSize(),
-			g_Options->GetUnrarCmd(),
-			dupeDirs.data(),
-			dupeDirs.size(),
-			usableIndices.data(),
-			[](void* ctx, int kind, const char* msg)
-			{
-				auto* self = static_cast<PostParChecker*>(ctx);
-				self->PrintMessage(kind == 3 ? Message::mkDetail : Message::mkInfo, "%s", msg ? msg : "");
-			},
-			this);
-		for (size_t i = 0; i < usableCount; i++)
-		{
-			NzbInfo* dupeNzbInfo = dupeList[usableIndices[i]];
-			dupeSourceList->emplace_back(dupeNzbInfo->GetId(), dupeNzbInfo->GetDestDir());
-		}
-	}
-}
-
-inline std::string RepairController::PostParChecker::FetchTwinFile(const TwinCheck::NzbEntry& entry, std::vector<char>* keep)
-{
-	std::vector<char> data;
-	if (!TwinCheck::FetchEntry(m_twinFetcher, entry, 1024LL * 1024 * 1024, [this]() { return IsStopped(); }, data))
-	{
-		return "";
-	}
-	NzbgetRsBuf nameBuf = nzbget_rs_repair_build_twin_filename(
-		entry.filename.c_str(), m_twinFiles.size());
-	std::string name(nameBuf.data ? nameBuf.data : "", nameBuf.len);
-	nzbget_rs_free(nameBuf);
-	NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		GetDestDir(), PATH_SEPARATOR, name.c_str());
-	BString<1024> path;
-	path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
-	nzbget_rs_free(pathBuf);
-	if (!FileSystem::SaveBufferIntoFile(*path, data.empty() ? "" : data.data(), data.size()))
-	{
-		return "";
-	}
-	m_twinFiles.push_back(*path);
-	if (keep)
-	{
-		*keep = std::move(data);
-	}
-	return *path;
-}
-
-inline std::string RepairController::PostParChecker::RequestTwinIndex()
-{
-	std::vector<TwinCheck::FileSig> own;
-	{
-		CharBuffer parBuf;
-		if (FileSystem::LoadFileIntoBuffer(GetParFilename(), parBuf, false))
-		{
-			own = TwinCheck::ParsePar2(parBuf, parBuf.Size());
-		}
-	}
-	std::string ownPrint = TwinCheck::Fingerprint(own);
-	if (ownPrint.empty())
-	{
-		return "";
-	}
-
-	struct Candidate
-	{
-		std::string name;
-		std::string nzbFilename;
-		bool known;
-	};
-	std::vector<Candidate> candidates;
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
-		auto consider = [&](NzbInfo* other)
-			{
-				bool sameNameOrKey = other != nzbInfo && other->GetKind() == NzbInfo::nkNzb &&
-					DupeCoordinator::SameNameOrKey(other->GetName(), other->GetDupeKey(),
-						nzbInfo->GetName(), nzbInfo->GetDupeKey());
-				NzbParameter* print = sameNameOrKey ? other->GetParameters()->Find(TwinCheck::FilesParam) : nullptr;
-				if (!nzbget_rs_repair_should_consider_twin_candidate(
-					other == nzbInfo ? 1 : 0,
-					(int)other->GetKind(),
-					(int)NzbInfo::nkNzb,
-					sameNameOrKey ? 1 : 0,
-					other->GetQueuedFilename(),
-					print != nullptr ? 1 : 0,
-					(print && ownPrint == print->GetValue()) ? 1 : 0) ||
-					!FileSystem::FileExists(other->GetQueuedFilename()))
-				{
-					return;
-				}
-				candidates.push_back({other->GetName(), other->GetQueuedFilename(), print != nullptr});
-			};
-		for (NzbInfo* queued : downloadQueue->GetQueue())
-		{
-			consider(queued);
-		}
-		for (std::unique_ptr<HistoryInfo>& historyInfo : *downloadQueue->GetHistory())
-		{
-			if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-			{
-				consider(historyInfo->GetNzbInfo());
-			}
-		}
-	}
-	std::stable_sort(candidates.begin(), candidates.end(),
-		[](const Candidate& a, const Candidate& b) { return a.known > b.known; });
-
-	std::vector<const char*> ownNames;
-	std::vector<const char*> ownMd5s;
-	ownNames.reserve(own.size());
-	ownMd5s.reserve(own.size());
-	for (const TwinCheck::FileSig& sig : own)
-	{
-		ownNames.push_back(sig.name.c_str());
-		ownMd5s.push_back(sig.md5.c_str());
-	}
-
-	for (const Candidate& candidate : candidates)
-	{
-		if (IsStopped())
-		{
-			break;
-		}
-		std::vector<TwinCheck::NzbEntry> entries = TwinCheck::ReadNzbEntries(candidate.nzbFilename.c_str());
-		std::vector<uint8_t> entryPar2(entries.size());
-		std::vector<int64_t> entrySizes(entries.size());
-		for (size_t i = 0; i < entries.size(); i++)
-		{
-			entryPar2[i] = entries[i].par2 ? 1 : 0;
-			entrySizes[i] = entries[i].size;
-		}
-		ptrdiff_t bestIdx = nzbget_rs_repair_select_best_twin_par2_index(
-			entryPar2.data(), entrySizes.data(), entries.size(), TwinCheck::MaxIndexSize);
-		if (bestIdx < 0 || (size_t)bestIdx >= entries.size())
-		{
-			continue;
-		}
-		const TwinCheck::NzbEntry* index = &entries[(size_t)bestIdx];
-
-		std::vector<char> data;
-		std::string path = FetchTwinFile(*index, &data);
-		if (path.empty())
-		{
-			continue;
-		}
-		int cmp = nzbget_rs_twin_compare_par2_data(
-			ownNames.data(), ownMd5s.data(), own.size(),
-			ownPrint.c_str(),
-			reinterpret_cast<const uint8_t*>(data.data()), data.size());
-		if (cmp != 0)
-		{
-			PrintMessage(Message::mkDetail, "%s: its par2 set %s", candidate.name.c_str(),
-				nzbget_rs_repair_twin_par2_reject_reason(cmp));
-			FileSystem::DeleteFile(path.c_str());
-			m_twinFiles.pop_back();
-			continue;
-		}
-
-		m_twinName = candidate.name;
-		m_twinEntries = std::move(entries);
-		m_twinIndex = index->filename;
-		m_twinBlockSize = TwinCheck::BlockSize(data.data(), data.size());
-		PrintMessage(Message::mkInfo, "Trying the par2 set of twin %s (blocks of %.1f MB)",
-			m_twinName.c_str(), nzbget_rs_dqh_stream_repair_bytes_to_mb(m_twinBlockSize));
-		return path;
-	}
-	return "";
-}
-
-inline std::vector<std::string> RepairController::PostParChecker::RequestTwinVolumes(int blockNeeded)
-{
-	struct Volume
-	{
-		const TwinCheck::NzbEntry* entry;
-		int blocks;
-	};
-	std::vector<Volume> volumes;
-	for (const TwinCheck::NzbEntry& entry : m_twinEntries)
-	{
-		if (nzbget_rs_repair_should_skip_twin_volume_entry(
-			entry.par2 ? 1 : 0, entry.filename.c_str(), m_twinIndex.c_str()) != 0)
-		{
-			continue;
-		}
-		int blocks = TwinCheck::VolumeBlocks(entry.filename);
-		if (blocks < 0 && m_twinBlockSize > 0)
-		{
-			blocks = nzbget_rs_repair_estimate_twin_vol_blocks(entry.size, m_twinBlockSize);
-		}
-		if (blocks > 0)
-		{
-			volumes.push_back({&entry, blocks});
-		}
-	}
-	std::sort(volumes.begin(), volumes.end(), [](const Volume& a, const Volume& b) { return a.blocks < b.blocks; });
-
-	int available = 0;
-	std::vector<int> allVolBlocks;
-	allVolBlocks.reserve(volumes.size());
-	for (const Volume& volume : volumes)
-	{
-		allVolBlocks.push_back(volume.blocks);
-	}
-	bool hasEnoughTwinBlocks = nzbget_rs_repair_sum_and_check_twin_blocks(
-		allVolBlocks.data(), allVolBlocks.size(), blockNeeded, &available) != 0;
-	std::vector<std::string> paths;
-	if (!hasEnoughTwinBlocks)
-	{
-		PrintMessage(Message::mkInfo, "Twin %s holds %i par-block(s), %i needed: not fetched",
-			m_twinName.c_str(), available, blockNeeded);
-		return paths;
-	}
-
-	int left = blockNeeded;
-	while (left > 0 && !volumes.empty() && !IsStopped())
-	{
-		std::vector<int> volBlocks;
-		volBlocks.reserve(volumes.size());
-		for (const Volume& v : volumes)
-		{
-			volBlocks.push_back(v.blocks);
-		}
-		ptrdiff_t idx = nzbget_rs_repair_pick_twin_volume(volBlocks.data(), volBlocks.size(), left);
-		if (idx < 0 || (size_t)idx >= volumes.size())
-		{
-			break;
-		}
-		auto it = volumes.begin() + idx;
-		PrintMessage(Message::mkInfo, "Fetching %s of twin %s for par-repair (%i block(s))",
-			it->entry->filename.c_str(), m_twinName.c_str(), it->blocks);
-		std::string path = FetchTwinFile(*it->entry);
-		if (!path.empty())
-		{
-			paths.push_back(path);
-			left -= it->blocks;
-		}
-		volumes.erase(it);
-	}
-	return paths;
-}
-
-inline void RepairController::PostParChecker::DeleteTwinFiles()
-{
-	for (const std::string& path : m_twinFiles)
-	{
-		FileSystem::DeleteFile(path.c_str());
-	}
-	m_twinFiles.clear();
-	m_twinEntries.clear();
-	m_twinName.clear();
-	m_twinIndex.clear();
-	m_twinBlockSize = 0;
-}
-
-inline void RepairController::PostParChecker::StatDupeSources(DupeSourceList* dupeSourceList)
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	int totalExtraParBlocks = 0;
-	for (DupeSource& dupeSource : *dupeSourceList)
-	{
-		if (dupeSource.m_usedBlocks > 0)
-		{
-			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-			{
-				if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
-					historyInfo->GetNzbInfo()->GetId() == dupeSource.m_id)
-				{
-					historyInfo->GetNzbInfo()->SetExtraParBlocks(
-						historyInfo->GetNzbInfo()->GetExtraParBlocks() - dupeSource.m_usedBlocks);
-				}
-			}
-		}
-		totalExtraParBlocks += dupeSource.m_usedBlocks;
-	}
-
-	m_postInfo->GetNzbInfo()->SetExtraParBlocks(m_postInfo->GetNzbInfo()->GetExtraParBlocks() + totalExtraParBlocks);
-}
-
-#endif
-
-inline RepairController::RepairController()
-{
-	debug("Creating RepairController");
-
-#ifndef DISABLE_PARCHECK
-	m_parChecker.m_owner = this;
-#endif
-}
-
-inline void RepairController::Stop()
-{
-	debug("Stopping RepairController");
-	Thread::Stop();
-#ifndef DISABLE_PARCHECK
-	m_parChecker.Cancel();
-#endif
-}
-
-#ifndef DISABLE_PARCHECK
-
-inline void RepairController::StartJob(PostInfo* postInfo)
-{
-	RepairController* repairController = new RepairController();
-	repairController->m_postInfo = postInfo;
-	repairController->SetAutoDestroy(false);
-
-	postInfo->SetPostThread(repairController);
-
-	repairController->Start();
-}
-
-inline void RepairController::Run()
-{
-	BString<1024> nzbName;
-	CString destDir;
-	bool dupeRepaired = false;
-	{
-		GuardedDownloadQueue guard = DownloadQueue::Guard();
-		nzbName = m_postInfo->GetNzbInfo()->GetName();
-		destDir = m_postInfo->GetNzbInfo()->GetDestDir();
-		dupeRepaired = m_postInfo->GetNzbInfo()->GetDupeRecoveredBytes() > 0;
-	}
-
-	m_parChecker.SetPostInfo(m_postInfo);
-	m_parChecker.SetDestDir(destDir);
-	m_parChecker.SetNzbName(nzbName);
-	m_parChecker.SetParTime(Util::CurrentTime());
-	m_parChecker.SetDownloadSec(m_postInfo->GetNzbInfo()->GetDownloadSec());
-	m_parChecker.SetParQuick(nzbget_rs_repair_should_use_par_quick(
-		g_Options->GetParQuick() ? 1 : 0,
-		m_postInfo->GetForceParFull() ? 1 : 0,
-		dupeRepaired ? 1 : 0) != 0);
-	m_parChecker.SetForceRepair(m_postInfo->GetForceRepair());
-
-	m_parChecker.PrintMessage(Message::mkInfo, "Checking pars for %s", *nzbName);
-
-	m_parChecker.Execute();
-}
-
-inline bool RepairController::AddPar(FileInfo* fileInfo, bool deleted)
-{
-	bool sameCollection = fileInfo->GetNzbInfo() == m_parChecker.GetPostInfo()->GetNzbInfo();
-	if (sameCollection && !deleted)
-	{
-		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
-		BString<1024> fullFilename;
-		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-		nzbget_rs_free(fullFnBuf);
-		m_parChecker.AddParFile(fullFilename);
-	}
-	else
-	{
-		m_parChecker.QueueChanged();
-	}
-	return sameCollection;
-}
-
-inline void RepairController::ParCheckCompleted()
-{
-	m_parChecker.DeleteTwinFiles();
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	PostInfo* postInfo = m_parChecker.GetPostInfo();
-
-	int rawParStatus = 0, setParRepaired = 0, parRepairedVal = 0, waitTime = 0, parSec = 0;
-	nzbget_rs_repair_complete_par_check(
-		(int)m_parChecker.GetStatus(),
-		(int)postInfo->GetNzbInfo()->GetParStatus(),
-		(int)ParChecker::psRepaired, (int)ParChecker::psRepairNotNeeded, (int)ParChecker::psRepairPossible,
-		(int)NzbInfo::psSkipped, (int)NzbInfo::psSuccess, (int)NzbInfo::psRepairPossible, (int)NzbInfo::psFailure,
-		postInfo->GetNzbInfo()->GetDownloadSec(),
-		m_parChecker.GetDownloadSec(),
-		(int64_t)Util::CurrentTime(),
-		(int64_t)m_parChecker.GetParTime(),
-		&rawParStatus, &setParRepaired, &parRepairedVal, &waitTime, &parSec);
-	postInfo->GetNzbInfo()->SetParStatus((NzbInfo::EParStatus)rawParStatus);
-	if (setParRepaired)
-	{
-		postInfo->SetParRepaired(parRepairedVal != 0);
-	}
-	postInfo->SetStartTime(postInfo->GetStartTime() + (time_t)waitTime);
-	postInfo->GetNzbInfo()->SetParSec(postInfo->GetNzbInfo()->GetParSec() + parSec);
-
-	postInfo->GetNzbInfo()->SetParFull(m_parChecker.GetParFull());
-
-	postInfo->SetWorking(false);
-}
-
-inline bool RepairController::RequestMorePars(NzbInfo* nzbInfo, const char* parFilename, int blockNeeded, int* blockFoundOut)
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	Blocks availableBlocks;
-	Blocks selectedBlocks;
-	int blockFound = 0;
-	int curBlockFound = 0;
-
-	FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, true, true, &curBlockFound);
-	blockFound += curBlockFound;
-	if (blockFound < blockNeeded)
-	{
-		FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, true, false, &curBlockFound);
-		blockFound += curBlockFound;
-	}
-	if (blockFound < blockNeeded)
-	{
-		FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, false, false, &curBlockFound);
-		blockFound += curBlockFound;
-	}
-
-	std::sort(availableBlocks.begin(), availableBlocks.end(),
-		[](const BlockInfo& block1, const BlockInfo& block2)
-		{
-			return block1.m_blockCount < block2.m_blockCount;
-		});
-
-	if (blockFound >= blockNeeded)
-	{
-		std::vector<int> sortedCounts;
-		sortedCounts.reserve(availableBlocks.size());
-		for (const BlockInfo& b : availableBlocks)
-		{
-			sortedCounts.push_back(b.m_blockCount);
-		}
-		std::vector<size_t> selectedIdx(availableBlocks.size());
-		int remNeeded = blockNeeded;
-		size_t selCount = nzbget_rs_repair_select_more_pars(
-			sortedCounts.data(), sortedCounts.size(), blockNeeded,
-			selectedIdx.data(), selectedIdx.size(), &remNeeded);
-		blockNeeded = remNeeded;
-		for (size_t i = 0; i < selCount && i < selectedIdx.size(); ++i)
-		{
-			selectedBlocks.push_back(availableBlocks[selectedIdx[i]]);
-		}
-
-		for (BlockInfo& blockInfo : selectedBlocks)
-		{
-			if (blockInfo.m_fileInfo->GetPaused())
-			{
-				m_parChecker.PrintMessage(Message::mkInfo, "Unpausing %s%c%s for par-recovery", nzbInfo->GetName(), PATH_SEPARATOR, blockInfo.m_fileInfo->GetFilename());
-				blockInfo.m_fileInfo->SetPaused(false);
-				blockInfo.m_fileInfo->SetExtraPriority(true);
-			}
-		}
-	}
-
-	bool hasUnpausedParFiles = false;
-	for (FileInfo* fileInfo : nzbInfo->GetFileList())
-	{
-		if (fileInfo->GetParFile() && !fileInfo->GetPaused())
-		{
-			hasUnpausedParFiles = true;
-			break;
-		}
-	}
-
-	if (blockFoundOut)
-	{
-		*blockFoundOut = blockFound;
-	}
-
-	return blockNeeded <= 0 || hasUnpausedParFiles;
-}
-
-inline void RepairController::FindPars(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* parFilename,
-	Blocks& blocks, bool strictParName, bool exactParName, int* blockFound)
-{
-	*blockFound = 0;
-
-	char* baseParFilename = FileSystem::BaseFileName(parFilename);
-	int mainBaseLen = 0;
-	if (!ParParser::ParseParFilename(baseParFilename, true, &mainBaseLen, nullptr))
-	{
-		nzbInfo->PrintMessage(Message::mkError, "Internal error: could not parse filename %s", baseParFilename);
-		return;
-	}
-	BString<1024> mainBaseFilename;
-	if (mainBaseLen > 0)
-	{
-		mainBaseFilename.Set(baseParFilename, mainBaseLen);
-	}
-
-	for (FileInfo* fileInfo : nzbInfo->GetFileList())
-	{
-		int parsedBlocks = 0;
-		bool parsed = ParParser::ParseParFilename(fileInfo->GetFilename(), fileInfo->GetFilenameConfirmed(), nullptr, &parsedBlocks);
-		bool sameCollection = !exactParName ||
-			ParParser::SameParCollection(fileInfo->GetFilename(),
-				FileSystem::BaseFileName(parFilename), fileInfo->GetFilenameConfirmed());
-		int blockCount = 0;
-		if (nzbget_rs_repair_eval_find_pars_candidate(
-			sameCollection ? 1 : 0,
-			0,
-			(!exactParName && strictParName) ? 1 : 0,
-			fileInfo->GetFilename(),
-			mainBaseFilename,
-			parsed ? 1 : 0,
-			parsedBlocks,
-			fileInfo->GetSize(),
-			m_parChecker.GetBlockSize(),
-			&blockCount))
-		{
-			bool alreadyAdded = false;
-			for (BlockInfo& blockInfo : blocks)
-			{
-				if (blockInfo.m_fileInfo == fileInfo)
-				{
-					alreadyAdded = true;
-					break;
-				}
-			}
-
-			if (!alreadyAdded)
-			{
-				blocks.emplace_back(fileInfo, blockCount);
-				*blockFound += blockCount;
-			}
-		}
-	}
-}
-
-inline void RepairController::UpdateParCheckProgress()
-{
-	PostInfo* postInfo;
-
-	{
-		GuardedDownloadQueue guard = DownloadQueue::Guard();
-
-		postInfo = m_parChecker.GetPostInfo();
-		if (m_parChecker.GetFileProgress() == 0)
-		{
-			postInfo->SetProgressLabel(m_parChecker.GetProgressLabel());
-		}
-		postInfo->SetFileProgress(m_parChecker.GetFileProgress());
-		postInfo->SetStageProgress(m_parChecker.GetStageProgress());
-		time_t current = Util::CurrentTime();
-
-		int rawStage = (int)postInfo->GetStage();
-		int setRepairTime = 0;
-		int newRepairSec = postInfo->GetNzbInfo()->GetRepairSec();
-		if (nzbget_rs_repair_eval_par_progress_update(
-			(int)postInfo->GetStage(),
-			(int)m_parChecker.GetStage(),
-			(int)PostInfo::ptLoadingPars,
-			(int)PostInfo::ptVerifyingSources,
-			(int)PostInfo::ptRepairing,
-			(int)PostInfo::ptVerifyingRepaired,
-			(int64)current,
-			(int64)m_parChecker.GetRepairTime(),
-			newRepairSec,
-			&rawStage,
-			&setRepairTime,
-			&newRepairSec) != 0)
-		{
-			postInfo->SetStage((PostInfo::EStage)rawStage);
-			postInfo->SetStageTime(current);
-			if (setRepairTime)
-			{
-				m_parChecker.SetRepairTime(current);
-			}
-			else if (postInfo->GetStage() == PostInfo::ptVerifyingRepaired)
-			{
-				postInfo->GetNzbInfo()->SetRepairSec(newRepairSec);
-			}
-		}
-
-		bool parCancel = false;
-		if (!IsStopped())
-		{
-			int estimatedRepairTime = 0;
-			if (nzbget_rs_repair_check_par_time_limit(
-				g_Options->GetParTimeLimit(),
-				m_parChecker.GetStage() == PostParChecker::ptRepairing ? 1 : 0,
-				(int64)(current - postInfo->GetStageTime()),
-				postInfo->GetStageProgress(),
-				&estimatedRepairTime) != 0)
-			{
-				debug("Estimated repair time %i seconds", estimatedRepairTime);
-				m_parChecker.PrintMessage(Message::mkWarning, "Cancelling par-repair for %s, estimated repair time (%i minutes) exceeds allowed repair time",
-					m_parChecker.GetInfoName(),
-					estimatedRepairTime / 60);
-				parCancel = true;
-			}
-		}
-
-		if (parCancel)
-		{
-			Stop();
-		}
-	}
-
-	CheckPauseState(postInfo);
-}
-
-inline void RepairController::CheckPauseState(PostInfo* postInfo)
-{
-	if (g_WorkState->GetPausePostProcess() && !postInfo->GetNzbInfo()->GetForcePriority())
-	{
-		time_t stageTime = postInfo->GetStageTime();
-		time_t startTime = postInfo->GetStartTime();
-		time_t parTime = m_parChecker.GetParTime();
-		time_t repairTime = m_parChecker.GetRepairTime();
-		time_t waitTime = Util::CurrentTime();
-
-		while (g_WorkState->GetPausePostProcess() &&
-			!postInfo->GetNzbInfo()->GetForcePriority() &&
-			!IsStopped())
-		{
-			Util::Sleep(50);
-
-			int64 newStage = 0, newStart = 0, newPar = 0, newRepair = 0;
-			nzbget_rs_repair_calc_paused_timestamps(
-				(int64)Util::CurrentTime(), (int64)waitTime,
-				(int64)stageTime, (int64)startTime, (int64)parTime, (int64)repairTime,
-				&newStage, &newStart, &newPar, &newRepair);
-			if (stageTime > 0)
-			{
-				postInfo->SetStageTime((time_t)newStage);
-			}
-			if (startTime > 0)
-			{
-				postInfo->SetStartTime((time_t)newStart);
-			}
-			if (parTime > 0)
-			{
-				m_parChecker.SetParTime((time_t)newPar);
-			}
-			if (repairTime > 0)
-			{
-				m_parChecker.SetRepairTime((time_t)newRepair);
-			}
-		}
-	}
-}
-
-#endif
-
-namespace
-{
-	template <typename Ctx, typename R, typename F>
-	R RepairMapCall(void* rawCtx, R failed, F f) noexcept
-	{
-		Ctx* c = static_cast<Ctx*>(rawCtx);
-		if (c->Error)
-		{
-			return failed;
-		}
-		try
-		{
-			return f(c);
-		}
-		catch (...)
-		{
-			c->Error = std::current_exception();
-			return failed;
-		}
-	}
-
-	template <typename Ctx, typename F>
-	void RepairMapCallVoid(void* rawCtx, F f) noexcept
-	{
-		Ctx* c = static_cast<Ctx*>(rawCtx);
-		if (c->Error)
-		{
-			return;
-		}
-		try
-		{
-			f(c);
-		}
-		catch (...)
-		{
-			c->Error = std::current_exception();
-		}
-	}
-}
-
-inline void StreamRepairController::StartJob(PostInfo* postInfo)
-{
-	StreamRepairController* streamRepairController = new StreamRepairController();
-	streamRepairController->m_postInfo = postInfo;
-	streamRepairController->SetAutoDestroy(false);
-
-	postInfo->SetPostThread(streamRepairController);
-
-	streamRepairController->Start();
-}
-
-inline void StreamRepairController::StartLive(NzbInfo* nzbInfo)
-{
-	if (DupeArticleFallback::ShouldDeferToPar(nzbInfo))
-	{
-		return;
-	}
-
-	StreamRepairController* streamRepairController = new StreamRepairController();
-	streamRepairController->m_liveMode = true;
-	streamRepairController->m_nzbId = nzbInfo->GetId();
-	streamRepairController->SetAutoDestroy(true);
-
-	nzbInfo->SetLiveRepairThread(streamRepairController);
-
-	streamRepairController->Start();
-}
-
-inline void StreamRepairController::Run()
-{
-	if (m_liveMode)
-	{
-		RunLive();
-		return;
-	}
-
-	BString<1024> nzbName;
-	CString destDir;
-	std::vector<RepairTarget> targets;
-	std::vector<DonorSource> donors;
-	std::vector<CString> memberNames;
-
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
-		nzbName = nzbInfo->GetName();
-		destDir = nzbInfo->GetDestDir();
-		CollectTargets(nzbInfo, targets, memberNames);
-		CollectDonors(downloadQueue, nzbInfo, donors);
-		m_postInfo->SetProgressLabel("Repairing files from duplicates");
-	}
-
-	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("stream repair", *nzbName);
-	BString<1024> infoName;
-	infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
-	nzbget_rs_free(infoNameBuf);
-	SetInfoName(infoName);
-
-	if (targets.empty())
-	{
-		PrintMessage(Message::mkInfo, "Nothing to stream-repair for %s", *nzbName);
-	}
-	else if (donors.empty())
-	{
-		PrintMessage(Message::mkInfo,
-			"No duplicate collections found for stream repair of %s", *nzbName);
-	}
-	else
-	{
-		StartWatchdog(targets);
-		ComputePositionalRanks(destDir, targets, memberNames);
-		ExecRepair(destDir, targets, donors, memberNames);
-
-		bool anyHoles = false;
-		for (RepairTarget& target : targets)
-		{
-			anyHoles |= target.NeedsRepair();
-		}
-		if (anyHoles && !IsStopped())
-		{
-			ExecCrossPackRepair(destDir, targets, donors, memberNames);
-		}
-		StopWatchdog(nzbName, targets);
-	}
-
-	ReportRemainingHoles(targets);
-	m_targets = std::move(targets);
-	RepairCompleted();
-}
-
-inline void StreamRepairController::RunLive()
-{
-	BString<1024> nzbName;
-	CString destDir;
-	std::vector<RepairTarget> targets;
-	std::vector<DonorSource> donors;
-	std::vector<CString> memberNames;
-
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
-		if (!nzbInfo || nzbInfo->GetLiveRepairThread() != this)
-		{
-			return;
-		}
-		nzbName = nzbInfo->GetName();
-		destDir = nzbInfo->GetDestDir();
-		CollectTargets(nzbInfo, targets, memberNames);
-		CollectDonors(downloadQueue, nzbInfo, donors);
-
-		for (RepairTarget& target : targets)
-		{
-			for (StreamRepairJob& job : *nzbInfo->GetStreamRepairJobs())
-			{
-				if (job.GetFileId() == target.FileId)
-				{
-					target.PatchEligible = !job.GetLiveAttempted();
-					job.SetLiveAttempted(true);
-					break;
-				}
-			}
-		}
-	}
-
-	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("live stream repair", *nzbName);
-	BString<1024> infoName;
-	infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
-	nzbget_rs_free(infoNameBuf);
-	SetInfoName(infoName);
-
-	bool anyEligible = false;
-	for (RepairTarget& target : targets)
-	{
-		anyEligible |= target.PatchEligible && target.NeedsRepair();
-	}
-
-	if (anyEligible && !donors.empty())
-	{
-		PrintMessage(Message::mkInfo, "Starting live stream repair for %s", *nzbName);
-
-		StartWatchdog(targets);
-		ComputePositionalRanks(destDir, targets, memberNames);
-		ExecRepair(destDir, targets, donors, memberNames);
-
-		bool anyHoles = false;
-		for (RepairTarget& target : targets)
-		{
-			anyHoles |= target.PatchEligible && target.NeedsRepair();
-		}
-		if (anyHoles && !IsStopped())
-		{
-			RefreshLiveNames(targets, memberNames);
-			ExecCrossPackRepair(destDir, targets, donors, memberNames);
-		}
-		StopWatchdog(nzbName, targets);
-	}
-
-	RepairCompletedLive(targets);
-}
-
-inline void StreamRepairController::RefreshLiveNames(std::vector<RepairTarget>& targets,
-	std::vector<CString>& memberNames)
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
-	if (!nzbInfo || nzbInfo->GetLiveRepairThread() != this)
-	{
-		return;
-	}
-
-	for (RepairTarget& target : targets)
-	{
-		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-		{
-			if (completedFile.GetId() == target.FileId)
-			{
-				target.Filename = completedFile.GetFilename();
-				target.IsParFile = target.IsParFile || completedFile.GetParFile();
-				break;
-			}
-		}
-	}
-
-	memberNames.clear();
-	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-	{
-		memberNames.emplace_back(completedFile.GetFilename());
-	}
-}
-
-inline void StreamRepairController::RefreshLiveTargetName(RepairTarget& target)
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
-	if (!nzbInfo || nzbInfo->GetLiveRepairThread() != this)
-	{
-		return;
-	}
-
-	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-	{
-		if (completedFile.GetId() == target.FileId)
-		{
-			target.Filename = completedFile.GetFilename();
-			break;
-		}
-	}
-}
-
-inline void StreamRepairController::RepairCompletedLive(std::vector<RepairTarget>& targets)
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
-	if (!nzbInfo)
-	{
-		return;
-	}
-	if (nzbInfo->GetLiveRepairThread() != this)
-	{
-		nzbInfo->SetDupeRecoveredBytes(nzbInfo->GetDupeRecoveredBytes() + m_recoveredBytes);
-		return;
-	}
-
-	if (m_recoveredBytes > 0 || m_recoveredHoles > 0)
-	{
-		nzbInfo->SetDupeRecoveredBytes(nzbInfo->GetDupeRecoveredBytes() + m_recoveredBytes);
-		nzbInfo->SetDupeRecoveredHoles(nzbInfo->GetDupeRecoveredHoles() + m_recoveredHoles);
-	}
-
-	for (RepairTarget& target : targets)
-	{
-		if (!target.PatchEligible)
-		{
-			continue;
-		}
-		for (StreamRepairJob& job : *nzbInfo->GetStreamRepairJobs())
-		{
-			if (job.GetFileId() == target.FileId)
-			{
-				if (target.Recreated)
-				{
-					job.SetDecodedFileSize(target.DecodedFileSize);
-					MarkRecreated(nzbInfo, target);
-				}
-				job.SetHoles(std::move(target.Holes));
-				break;
-			}
-		}
-	}
-
-	nzbInfo->SetLiveRepairThread(nullptr);
-	if (nzbInfo->GetPostInfo() && !nzbInfo->GetUnpackThread())
-	{
-		nzbInfo->GetPostInfo()->SetWorking(false);
-	}
-
-	downloadQueue->Save();
-}
-
-inline bool StreamRepairController::DonorDead(const DonorSource& donor, NzbInfo* donorNzb)
-{
-	auto it = m_donorDead.find(*donor.QueuedFilename);
-	if (it != m_donorDead.end())
-	{
-		return it->second;
-	}
-
-	std::vector<FileInfo*> files;
-	for (int pass = 0; pass < 2 && files.empty(); pass++)
-	{
-		for (FileInfo* fileInfo : donorNzb->GetFileList())
-		{
-			if (fileInfo->GetTotalArticles() > 0 && (pass == 1 || !fileInfo->GetParFile()))
-			{
-				files.push_back(fileInfo);
-			}
-		}
-	}
-	bool dead = false;
-	std::vector<DupeProbe::Sample> samples = DupeProbe::SamplesOf(files);
-	if ((int)samples.size() >= DupeProbe::MinArticles && !IsStopped())
-	{
-		m_checkingDonor++;
-		DupeProbe::Verdict verdict = DupeProbe::Check(std::move(samples), DonorCheckSec);
-		m_checkingDonor--;
-		dead = verdict.Dead();
-		if (dead)
-		{
-			PrintMessage(Message::mkInfo,
-				"Skipping duplicate %s for stream repair: none of %i sampled articles exists on any server",
-				*donor.InfoName, DupeProbe::SampleCount);
-		}
-	}
-	m_donorDead[*donor.QueuedFilename] = dead;
-	return dead;
-}
-
-inline void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targets)
-{
-	m_fetcher.SetWaitCounter(&m_waitingForConnection);
-	m_batchFetcher.SetWaitCounter(&m_waitingForConnection);
-	int timeout = g_Options->GetDupeStreamTimeout();
-	if (timeout <= 0)
-	{
-		return;
-	}
-
-	m_missingBytes = 0;
-	for (const RepairTarget& target : targets)
-	{
-		m_missingBytes += target.DecodedFileSize > 0
-			? DupeStreamRepair::TotalSize(target.Holes)
-			: target.EncodedSize;
-	}
-
-	int upTimeSec = 0, downloadTimeSec = 0;
-	int64 allBytes = 0;
-	bool standBy = false;
-	g_StatMeter->CalcTotalStat(&upTimeSec, &downloadTimeSec, &allBytes, &standBy);
-	int64 downloadRate = downloadTimeSec > 0 ? allBytes / downloadTimeSec : 0;
-
-	m_watchdog = std::thread([this, timeout, downloadRate]()
-		{
-			std::unique_lock<std::mutex> lock(m_watchdogMutex);
-			int64 startProgress = m_progressBytes;
-			int64 progress = startProgress;
-			auto start = std::chrono::steady_clock::now();
-			auto begun = start;
-			auto lastProgress = start;
-			auto lastTick = start;
-			auto waiting = [this]() { return m_waitingForConnection > 0 || m_checkingDonor > 0; };
-			while (!m_watchdogDone)
-			{
-				m_watchdogCond.wait_for(lock, std::chrono::milliseconds(500));
-				if (m_watchdogDone)
-				{
-					break;
-				}
-				auto now = std::chrono::steady_clock::now();
-				if (waiting())
-				{
-					start += now - lastTick;
-				}
-				lastTick = now;
-				int64 sinceLastProgressSec =
-					std::chrono::duration_cast<std::chrono::seconds>(now - lastProgress).count();
-				int64 sinceBegunSec =
-					std::chrono::duration_cast<std::chrono::seconds>(now - begun).count();
-				int64 sinceStartSec =
-					std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
-				double elapsedSec = std::chrono::duration<double>(now - start).count();
-				int64 newProgress = progress;
-				int resetLastProgress = 0;
-				NzbgetRsBuf reasonBuf{nullptr, 0, 0};
-				int shouldStop = nzbget_rs_stream_watchdog_eval_tick(
-					m_progressBytes, progress, waiting() ? 1 : 0, m_materializing.load(),
-					sinceLastProgressSec, sinceBegunSec, sinceStartSec, elapsedSec,
-					timeout, MaxRunFactor, MaxConnectionWaitSec, SlowRepairFactor,
-					downloadRate, startProgress, m_missingBytes,
-					&newProgress, &resetLastProgress, &reasonBuf);
-				progress = newProgress;
-				if (resetLastProgress)
-				{
-					lastProgress = now;
-				}
-				if (shouldStop && reasonBuf.data && reasonBuf.len > 0)
-				{
-					m_slowReason.Set(reasonBuf.data, (int)reasonBuf.len);
-					nzbget_rs_free(reasonBuf);
-					break;
-				}
-				nzbget_rs_free(reasonBuf);
-			}
-			if (!m_watchdogDone)
-			{
-				m_timedOut = true;
-				lock.unlock();
-				Stop();
-			}
-		});
-}
-
-inline void StreamRepairController::StopWatchdog(const char* nzbName, const std::vector<RepairTarget>& targets)
-{
-	if (!m_watchdog.joinable())
-	{
-		return;
-	}
-	{
-		std::lock_guard<std::mutex> lock(m_watchdogMutex);
-		m_watchdogDone = true;
-	}
-	m_watchdogCond.notify_all();
-	m_watchdog.join();
-	if (m_timedOut)
-	{
-		int64 missing = 0;
-		int unsized = 0;
-		for (const RepairTarget& target : targets)
-		{
-			missing += DupeStreamRepair::TotalSize(target.Holes);
-			unsized += target.DecodedFileSize <= 0 ? 1 : 0;
-		}
-		NzbgetRsBuf wholeFilesBuf = nzbget_rs_stream_format_whole_files_suffix(unsized);
-		PrintMessage(Message::mkWarning,
-			"Stream repair of %s stopped: %s (option DupeStreamTimeout); %.1f MB recovered, %.1f MB%s still missing",
-			nzbName, *m_slowReason,
-			nzbget_rs_dqh_stream_repair_bytes_to_mb(m_recoveredBytes),
-			nzbget_rs_dqh_stream_repair_bytes_to_mb(missing),
-			wholeFilesBuf.data ? wholeFilesBuf.data : "");
-		nzbget_rs_free(wholeFilesBuf);
-	}
-}
-
-inline void StreamRepairController::Stop()
-{
-	m_batchFetcher.Stop();
-	m_fetcher.Stop();
-	Thread::Stop();
-}
-
-inline void StreamRepairController::CollectTargets(NzbInfo* nzbInfo, std::vector<RepairTarget>& targets,
-	std::vector<CString>& memberNames)
-{
-	m_hasParFiles = nzbInfo->GetParSize() > 0;
-
-	NzbParameter* parameter = nzbInfo->GetParameters()->Find("*Unpack:Password");
-	if (parameter)
-	{
-		m_targetPassword = parameter->GetValue();
-	}
-
-	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-	{
-		memberNames.emplace_back(completedFile.GetFilename());
-	}
-
-	for (StreamRepairJob& job : *nzbInfo->GetStreamRepairJobs())
-	{
-		if (nzbget_rs_stream_is_par2_job_or_file(
-			job.GetParFile() ? 1 : 0, job.GetFilename()) != 0)
-		{
-			continue;
-		}
-		RepairTarget target;
-		target.FileId = job.GetFileId();
-		target.Filename = job.GetFilename();
-		target.DecodedFileSize = job.GetDecodedFileSize();
-		target.FailedSize = job.GetFailedSize();
-		target.MissedSize = job.GetMissedSize();
-		target.FailedArticles = job.GetFailedArticles();
-		target.IsParFile = job.GetParFile();
-		target.Holes = *job.GetHoles();
-		target.StepsHash = job.GetStepsHash();
-		target.EncodedSize = job.GetFailedSize() + job.GetMissedSize();
-		target.ArticleCount = job.GetFailedArticles();
-
-		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-		{
-			if (completedFile.GetId() == target.FileId)
-			{
-				target.Filename = completedFile.GetFilename();
-				target.IsParFile = target.IsParFile || completedFile.GetParFile();
-				break;
-			}
-		}
-
-		if (nzbget_rs_stream_is_par2_job_or_file(
-			target.IsParFile ? 1 : 0, target.Filename))
-		{
-			continue;
-		}
-		targets.push_back(std::move(target));
-	}
-}
-
-inline void StreamRepairController::ComputePositionalRanks(const char* destDir,
-	std::vector<RepairTarget>& targets, const std::vector<CString>& memberNames)
-{
-	std::vector<const char*> names;
-	std::vector<int64_t> sizes;
-	names.reserve(memberNames.size());
-	sizes.reserve(memberNames.size());
-	for (const CString& memberName : memberNames)
-	{
-		NzbgetRsBuf memberPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			destDir, PATH_SEPARATOR, *memberName);
-		BString<1024> memberPath;
-		memberPath.Set(memberPathBuf.data ? memberPathBuf.data : "", (int)memberPathBuf.len);
-		nzbget_rs_free(memberPathBuf);
-		names.push_back(*memberName);
-		sizes.push_back(FileSystem::FileSize(memberPath));
-	}
-	for (RepairTarget& target : targets)
-	{
-		int rank = -1;
-		int windowSize = 0;
-		nzbget_rs_stream_compute_positional_rank(
-			names.data(), sizes.data(), names.size(),
-			target.Filename, target.DecodedFileSize, &rank, &windowSize);
-		target.PositionalRank = rank;
-		target.PositionalWindow = windowSize;
-	}
-}
-
-inline void StreamRepairController::CollectDonors(DownloadQueue* downloadQueue, NzbInfo* nzbInfo,
-	std::vector<DonorSource>& donors)
-{
-	RawNzbList donorNzbs;
-
-	for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
-	{
-		if (queuedNzbInfo != nzbInfo &&
-			queuedNzbInfo->GetKind() == NzbInfo::nkNzb &&
-			queuedNzbInfo->GetDupeMode() != dmForce &&
-			DupeCoordinator::SameNameOrKey(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
-				nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-		{
-			donorNzbs.push_back(queuedNzbInfo);
-		}
-	}
-
-	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-	{
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
-			historyInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
-			DupeCoordinator::SameNameOrKey(historyInfo->GetNzbInfo()->GetName(),
-				historyInfo->GetNzbInfo()->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-		{
-			donorNzbs.push_back(historyInfo->GetNzbInfo());
-		}
-	}
-
-	if (!donorNzbs.empty())
-	{
-		std::vector<int32_t> dupeScores;
-		std::vector<int32_t> donorIds;
-		std::vector<size_t> order(donorNzbs.size());
-		dupeScores.reserve(donorNzbs.size());
-		donorIds.reserve(donorNzbs.size());
-		for (NzbInfo* d : donorNzbs)
-		{
-			dupeScores.push_back(d->GetDupeScore());
-			donorIds.push_back(d->GetId());
-		}
-		size_t n = nzbget_rs_stream_order_donor_indices(
-			dupeScores.data(), donorIds.data(), donorNzbs.size(), order.data());
-		RawNzbList sortedDonors;
-		sortedDonors.reserve(n);
-		for (size_t i = 0; i < n; i++)
-		{
-			sortedDonors.push_back(donorNzbs[order[i]]);
-		}
-		donorNzbs = std::move(sortedDonors);
-	}
-
-	for (NzbInfo* donorNzbInfo : donorNzbs)
-	{
-		if ((nzbInfo->GetFullContentHash() > 0 &&
-				nzbInfo->GetFullContentHash() == donorNzbInfo->GetFullContentHash()) ||
-			Util::EmptyStr(donorNzbInfo->GetQueuedFilename()))
-		{
-			continue;
-		}
-		{
-			DonorSource donor;
-			donor.QueuedFilename = donorNzbInfo->GetQueuedFilename();
-			donor.InfoName = donorNzbInfo->GetName();
-			NzbParameter* parameter = donorNzbInfo->GetParameters()->Find("*Unpack:Password");
-			if (parameter)
-			{
-				donor.Password = parameter->GetValue();
-			}
-			donors.push_back(std::move(donor));
-		}
-	}
-}
-
-inline void StreamRepairController::ExecRepair(const char* destDir,
-	std::vector<RepairTarget>& targets, std::vector<DonorSource>& donors,
-	const std::vector<CString>& memberNames)
-{
-	int primaryConnections = 0;
-	for (NewsServer* server : g_ServerPool->GetServers())
-	{
-		if (server->GetActive() && server->GetNormLevel() == 0)
-		{
-			primaryConnections += server->GetMaxConnections();
-		}
-	}
-	m_batchFetcher.SetWorkerCount(m_liveMode ? 0 :
-		DupeStreamRepair::StreamFetchWorkerCount(primaryConnections));
-	std::set<std::string> triedPostings;
-
-	for (DonorSource& donor : donors)
-	{
-		if (IsStopped())
-		{
-			break;
-		}
-
-		bool anyHoles = false;
-		for (RepairTarget& target : targets)
-		{
-			anyHoles |= target.PatchEligible && target.NeedsRepair();
-		}
-		if (!anyHoles)
-		{
-			break;
-		}
-
-		std::unique_ptr<NzbInfo> donorNzb = DupeArticleFallback::ParseDonorNzb(donor.QueuedFilename);
-		if (!donorNzb)
-		{
-			continue;
-		}
-		if (!triedPostings.insert(DupeStreamRepair::BuildDonorKey(
-			donorNzb.get(), donor.Password)).second)
-		{
-			PrintMessage(Message::mkInfo,
-				"Skipping another copy of duplicate posting %s", *donor.InfoName);
-			continue;
-		}
-		if (DonorDead(donor, donorNzb.get()))
-		{
-			continue;
-		}
-
-		if (m_postInfo)
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			m_postInfo->SetProgressLabel(BString<1024>("Repairing from duplicate %s", *donor.InfoName));
-			m_postInfo->SetStageProgress(0);
-		}
-
-		std::vector<const char*> memberNamePtrs(memberNames.size());
-		for (size_t i = 0; i < memberNames.size(); i++)
-		{
-			memberNamePtrs[i] = *memberNames[i];
-		}
-
-		std::vector<const char*> targetFilenames(targets.size());
-		std::vector<int64_t> targetEncodedSizes(targets.size());
-		std::vector<int64_t> targetDecodedSizes(targets.size());
-		std::vector<int> targetArticleCounts(targets.size());
-		std::vector<int> targetPositionalRanks(targets.size());
-		std::vector<int> targetPositionalWindows(targets.size());
-		std::vector<uint64_t> targetStepsHashes(targets.size());
-		std::vector<uint8_t> targetPatchEligible(targets.size());
-		std::vector<size_t> targetHoleCounts(targets.size());
-		std::vector<NzbgetRsByteRange> targetHolesFlat;
-		for (size_t t = 0; t < targets.size(); t++)
-		{
-			targetFilenames[t] = *targets[t].Filename;
-			targetEncodedSizes[t] = targets[t].EncodedSize;
-			targetDecodedSizes[t] = targets[t].DecodedFileSize;
-			targetArticleCounts[t] = targets[t].ArticleCount;
-			targetPositionalRanks[t] = targets[t].PositionalRank;
-			targetPositionalWindows[t] = targets[t].PositionalWindow;
-			targetStepsHashes[t] = targets[t].StepsHash;
-			targetPatchEligible[t] = targets[t].PatchEligible ? 1 : 0;
-			targetHoleCounts[t] = targets[t].Holes.size();
-			for (const StreamRange& h : targets[t].Holes)
-			{
-				targetHolesFlat.push_back({h.Offset, h.Size});
-			}
-		}
-
-		std::vector<FileInfo*> donorFiles;
-		std::vector<const char*> donorFileNames;
-		std::vector<int64_t> donorFileSizes;
-		std::vector<uint8_t> donorFileIsPar;
-		std::vector<uint64_t> donorFileStepsHashes;
-		std::vector<size_t> donorArticleCounts;
-		std::vector<int32_t> donorArticleSizesFlat;
-		std::vector<std::shared_ptr<std::vector<CString>>> donorGroupsCache;
-		for (FileInfo* df : donorNzb->GetFileList())
-		{
-			donorFiles.push_back(df);
-			donorFileNames.push_back(df->GetFilename());
-			donorFileSizes.push_back(df->GetSize());
-			donorFileIsPar.push_back(df->GetParFile() ? 1 : 0);
-			donorArticleCounts.push_back(df->GetArticles()->size());
-			for (const std::unique_ptr<ArticleInfo>& a : *df->GetArticles())
-			{
-				donorArticleSizesFlat.push_back(a->GetSize());
-			}
-			const std::vector<int32_t>& artSizes = donorArticleCounts.back() > 0
-				? std::vector<int32_t>(
-					donorArticleSizesFlat.end() - (ptrdiff_t)donorArticleCounts.back(),
-					donorArticleSizesFlat.end())
-				: std::vector<int32_t>{};
-			donorFileStepsHashes.push_back(
-				nzbget_rs_dupe_fallback_steps_hash(artSizes.data(), artSizes.size()));
-			auto grp = std::make_shared<std::vector<CString>>();
-			for (const CString& g : *df->GetGroups())
-			{
-				grp->emplace_back(*g);
-			}
-			donorGroupsCache.push_back(std::move(grp));
-		}
-
-		struct M1DonorCtx
-		{
-			StreamRepairController* Controller;
-			std::vector<RepairTarget>* Targets;
-			std::vector<FileInfo*>* DonorFiles;
-			std::vector<std::shared_ptr<std::vector<CString>>>* DonorGroupsCache;
-			ArticleFetcher::FetchedArticle CurrentFetched;
-			std::exception_ptr Error;
-		} donorCtx{this, &targets, &donorFiles, &donorGroupsCache, {}, nullptr};
-
-		nzbget_rs_stream_repair_process_donor(
-			destDir,
-			m_liveMode ? 1 : 0,
-			memberNamePtrs.data(),
-			memberNamePtrs.size(),
-			targetFilenames.data(),
-			targetEncodedSizes.data(),
-			targetDecodedSizes.data(),
-			targetArticleCounts.data(),
-			targetPositionalRanks.data(),
-			targetPositionalWindows.data(),
-			targetStepsHashes.data(),
-			targetPatchEligible.data(),
-			targetHoleCounts.data(),
-			targetHolesFlat.data(),
-			targets.size(),
-			*donor.InfoName,
-			donorFileNames.data(),
-			donorFileSizes.data(),
-			donorFileIsPar.data(),
-			donorFileStepsHashes.data(),
-			donorArticleCounts.data(),
-			donorArticleSizesFlat.data(),
-			donorFiles.size(),
-			&donorCtx,
-			[](void* rawCtx) -> int
-			{
-				return RepairMapCall<M1DonorCtx>(rawCtx, 1, [](M1DonorCtx* c)
-				{
-					return c->Controller->IsStopped() ? 1 : 0;
-				});
-			},
-			[](void* rawCtx, size_t targetIdx) -> const char*
-			{
-				return RepairMapCall<M1DonorCtx>(rawCtx, static_cast<const char*>(nullptr), [=](M1DonorCtx* c) -> const char*
-				{
-					if (targetIdx >= c->Targets->size())
-					{
-						return nullptr;
-					}
-					c->Controller->RefreshLiveTargetName((*c->Targets)[targetIdx]);
-					return *(*c->Targets)[targetIdx].Filename;
-				});
-			},
-			[](void* rawCtx, int32_t memberIndex, const int32_t* partIndices, size_t count)
-			{
-				RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
-				{
-					if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
-					{
-						return;
-					}
-					FileInfo* df = (*c->DonorFiles)[memberIndex];
-					const auto& grp = (*c->DonorGroupsCache)[memberIndex];
-					std::vector<ArticleBatchFetcher::Request> requests;
-					requests.reserve(count);
-					for (size_t i = 0; i < count; i++)
-					{
-						int32_t pi = partIndices[i];
-						if (pi >= 0 && (size_t)pi < df->GetArticles()->size())
-						{
-							ArticleInfo* article = (*df->GetArticles())[pi].get();
-							requests.push_back({article->GetMessageId(), grp});
-						}
-					}
-					c->Controller->m_batchFetcher.Begin(std::move(requests));
-				});
-			},
-			[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
-				const uint8_t** outData, size_t* outDataLen) -> int
-			{
-				return RepairMapCall<M1DonorCtx>(rawCtx, 0, [=](M1DonorCtx* c)
-				{
-					c->CurrentFetched = ArticleFetcher::FetchedArticle();
-					if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
-					{
-						return 0;
-					}
-					*outSuccess = c->CurrentFetched.Success ? 1 : 0;
-					*outOffset = c->CurrentFetched.Offset;
-					*outFileSize = c->CurrentFetched.FileSize;
-					*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
-					*outDataLen = c->CurrentFetched.Data.size();
-					return 1;
-				});
-			},
-			[](void* rawCtx)
-			{
-				RepairMapCallVoid<M1DonorCtx>(rawCtx, [](M1DonorCtx* c)
-				{
-					c->Controller->m_batchFetcher.CancelRemaining();
-				});
-			},
-			[](void* rawCtx, int64_t bytes)
-			{
-				RepairMapCallVoid<M1DonorCtx>(rawCtx, [bytes](M1DonorCtx* c)
-				{
-					c->Controller->m_progressBytes += bytes;
-				});
-			},
-			[](void* rawCtx, int64_t bytes)
-			{
-				RepairMapCallVoid<M1DonorCtx>(rawCtx, [bytes](M1DonorCtx* c)
-				{
-					c->Controller->m_recoveredBytes += bytes;
-				});
-			},
-			[](void* rawCtx, size_t targetIdx, const char* filename, int64_t decodedFileSize,
-				int recreated, const NzbgetRsByteRange* holes, size_t holeCount)
-			{
-				RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
-				{
-					if (targetIdx >= c->Targets->size())
-					{
-						return;
-					}
-					RepairTarget& target = (*c->Targets)[targetIdx];
-					if (filename && *filename)
-					{
-						target.Filename = filename;
-					}
-					target.DecodedFileSize = decodedFileSize;
-					if (recreated != 0)
-					{
-						target.Recreated = true;
-					}
-					target.Holes.assign(
-						reinterpret_cast<const StreamRange*>(holes),
-						reinterpret_cast<const StreamRange*>(holes) + holeCount);
-				});
-			},
-			[](void* rawCtx, int32_t kind, const char* text)
-			{
-				RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
-				{
-					Message::EKind msgKind = kind == 3 ? Message::mkDetail :
-						kind == 2 ? Message::mkError :
-						kind == 1 ? Message::mkWarning : Message::mkInfo;
-					c->Controller->PrintMessage(msgKind, "%s", text);
-				});
-			});
-		if (donorCtx.Error)
-		{
-			std::rethrow_exception(donorCtx.Error);
-		}
-	}
-}
-
-inline void StreamRepairController::MarkRepaired(NzbInfo* nzbInfo, const RepairTarget& target)
-{
-	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-	{
-		if (completedFile.GetId() == target.FileId &&
-			completedFile.GetStatus() != CompletedFile::cfSuccess)
-		{
-			completedFile.SetStatus(CompletedFile::cfSuccess);
-			g_DiskState->DiscardFile(target.FileId, true, true, true);
-			break;
-		}
-	}
-}
-
-inline void StreamRepairController::MarkRecreated(NzbInfo* nzbInfo, const RepairTarget& target)
-{
-	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-	{
-		if (completedFile.GetId() == target.FileId &&
-			completedFile.GetStatus() == CompletedFile::cfFailure)
-		{
-			completedFile.SetStatus(CompletedFile::cfPartial);
-			break;
-		}
-	}
-}
-
-inline void StreamRepairController::ReportRemainingHoles(std::vector<RepairTarget>& targets)
-{
-	bool interrupted = Interrupted();
-	if (interrupted)
-	{
-		int unfinished = (int)std::count_if(targets.begin(), targets.end(),
-			[](const RepairTarget& target)
-			{
-				return target.DecodedFileSize <= 0 || !target.Holes.empty();
-			});
-		m_holesRemain |= unfinished > 0;
-		PrintMessage(Message::mkInfo, "Stream repair interrupted with %i file(s) still incomplete", unfinished);
-	}
-
-	const char* parDisposition = m_hasParFiles ? "left to par-repair" : "no par2 files to repair it";
-	for (RepairTarget& target : targets)
-	{
-		int targetStatus = nzbget_rs_stream_classify_remaining_hole_target(
-			interrupted ? 1 : 0, target.DecodedFileSize, target.Holes.empty() ? 1 : 0,
-			target.IsParFile ? 1 : 0, target.FailedArticles, target.FailedSize, target.MissedSize,
-			&m_recoveredArticles, &m_recoveredFailedSize, &m_recoveredFailedParSize);
-		if (targetStatus == 1)
-		{
-			continue;
-		}
-		if (targetStatus == 2)
-		{
-			m_holesRemain = true;
-			PrintMessage(Message::mkInfo,
-				"Stream repair of %s: no duplicate could supply the file (%s)",
-				*target.Filename, parDisposition);
-		}
-		else if (targetStatus == 3)
-		{
-			m_holesRemain = true;
-			int64 missing = DupeStreamRepair::TotalSize(target.Holes);
-			PrintMessage(Message::mkInfo,
-				"Stream repair of %s: %.1f MB still missing after stream repair (%s)",
-				*target.Filename, nzbget_rs_dqh_stream_repair_bytes_to_mb(missing),
-				parDisposition);
-			if (nzbget_rs_stream_is_incomplete_nzb_hole(missing, target.EncodedSize) != 0)
-			{
-				PrintMessage(Message::mkWarning,
-					"%s is %.1f MB according to its articles, but the nzb's articles cover only "
-					"%.1f MB of it: the nzb is incomplete",
-					*target.Filename, nzbget_rs_dqh_stream_repair_bytes_to_mb(target.DecodedFileSize),
-					nzbget_rs_dqh_stream_repair_bytes_to_mb(target.DecodedFileSize - missing));
-			}
-		}
-	}
-}
-
-inline void StreamRepairController::ExecCrossPackRepair(const char* destDir,
-	std::vector<RepairTarget>& targets, std::vector<DonorSource>& donors,
-	const std::vector<CString>& memberNames)
-{
-	std::vector<const char*> memberNamePtrs(memberNames.size());
-	for (size_t i = 0; i < memberNames.size(); i++)
-	{
-		memberNamePtrs[i] = *memberNames[i];
-	}
-
-	std::vector<const char*> targetFilenames(targets.size());
-	std::vector<int64_t> targetDecodedSizes(targets.size());
-	std::vector<uint8_t> targetPatchEligible(targets.size());
-	std::vector<size_t> targetHoleCounts(targets.size());
-	std::vector<NzbgetRsByteRange> targetHolesFlat;
-	for (size_t t = 0; t < targets.size(); t++)
-	{
-		targetFilenames[t] = *targets[t].Filename;
-		targetDecodedSizes[t] = targets[t].DecodedFileSize;
-		targetPatchEligible[t] = targets[t].PatchEligible ? 1 : 0;
-		targetHoleCounts[t] = targets[t].Holes.size();
-		for (const StreamRange& h : targets[t].Holes)
-		{
-			targetHolesFlat.push_back({h.Offset, h.Size});
-		}
-	}
-
-	struct InitCtx
-	{
-		StreamRepairController* Controller;
-		std::exception_ptr Error;
-	} initCtx{this, nullptr};
-
-	NzbgetRsCrossPackSession* session = nzbget_rs_cross_pack_session_new(
-		destDir,
-		memberNamePtrs.data(),
-		memberNamePtrs.size(),
-		targetFilenames.data(),
-		targetDecodedSizes.data(),
-		targetPatchEligible.data(),
-		targetHoleCounts.data(),
-		targetHolesFlat.data(),
-		targets.size(),
-		m_targetPassword.Empty() ? nullptr : *m_targetPassword,
-		&initCtx,
-		[](void* rawCtx) -> int
-		{
-			return RepairMapCall<InitCtx>(rawCtx, 1, [](InitCtx* c)
-			{
-				return c->Controller->IsStopped() ? 1 : 0;
-			});
-		},
-		[](void* rawCtx, int32_t kind, const char* text)
-		{
-			RepairMapCallVoid<InitCtx>(rawCtx, [=](InitCtx* c)
-			{
-				Message::EKind msgKind = kind == 2 ? Message::mkError :
-					kind == 1 ? Message::mkWarning : Message::mkInfo;
-				c->Controller->PrintMessage(msgKind, "%s", text);
-			});
-		},
-#ifdef DEBUG
-		[](void* rawCtx, const char* text)
-		{
-			RepairMapCallVoid<InitCtx>(rawCtx, [=](InitCtx*)
-			{
-				debug("%s", text ? text : "");
-			});
-		}
-#else
-		nullptr
-#endif
-	);
-	if (initCtx.Error)
-	{
-		nzbget_rs_cross_pack_session_free(session);
-		std::rethrow_exception(initCtx.Error);
-	}
-	if (!session)
-	{
-		return;
-	}
-	struct SessionGuard
-	{
-		NzbgetRsCrossPackSession* Ptr;
-		~SessionGuard() { nzbget_rs_cross_pack_session_free(Ptr); }
-	} sessionGuard{session};
-
-	std::set<std::string> triedPostings;
-
-	for (DonorSource& donor : donors)
-	{
-		if (IsStopped() || !nzbget_rs_cross_pack_session_has_inner_holes(session))
-		{
-			break;
-		}
-
-		std::unique_ptr<NzbInfo> donorNzb =
-			DupeArticleFallback::ParseDonorNzb(donor.QueuedFilename);
-		if (!donorNzb)
-		{
-			continue;
-		}
-		if (!triedPostings.insert(DupeStreamRepair::BuildDonorKey(
-			donorNzb.get(), donor.Password)).second)
-		{
-			PrintMessage(Message::mkInfo,
-				"Skipping another copy of duplicate posting %s", *donor.InfoName);
-			continue;
-		}
-		if (DonorDead(donor, donorNzb.get()))
-		{
-			continue;
-		}
-
-		std::vector<FileInfo*> donorFiles;
-		std::vector<const char*> donorFileNames;
-		std::vector<int64_t> donorFileSizes;
-		std::vector<size_t> donorArticleCounts;
-		std::vector<int32_t> donorArticleSizesFlat;
-		for (FileInfo* fileInfo : donorNzb->GetFileList())
-		{
-			donorFiles.push_back(fileInfo);
-			donorFileNames.push_back(fileInfo->GetFilename());
-			donorFileSizes.push_back(fileInfo->GetSize());
-			size_t artCount = fileInfo->GetArticles() ? fileInfo->GetArticles()->size() : 0;
-			donorArticleCounts.push_back(artCount);
-			if (fileInfo->GetArticles())
-			{
-				for (ArticleInfo* article : fileInfo->GetArticles())
-				{
-					donorArticleSizesFlat.push_back(article->GetSize());
-				}
-			}
-		}
-
-		bool allowDecompress = !m_liveMode && g_Options->GetDupeStreamDecompress();
-
-		struct DonorCtx
-		{
-			StreamRepairController* Controller;
-			const std::vector<FileInfo*>* DonorFiles;
-			std::vector<RepairTarget>* Targets;
-			ArticleFetcher::FetchedArticle CurrentFetched;
-			std::exception_ptr Error;
-		} donorCtx{this, &donorFiles, &targets, {}, nullptr};
-
-		nzbget_rs_cross_pack_session_process_donor(
-			session,
-			*donor.QueuedFilename,
-			*donor.InfoName,
-			donor.Password.Empty() ? "" : *donor.Password,
-			donorFileNames.data(),
-			donorFileSizes.data(),
-			donorArticleCounts.data(),
-			donorArticleSizesFlat.data(),
-			donorFiles.size(),
-			allowDecompress ? 1 : 0,
-			&donorCtx,
-			[](void* rawCtx) -> int
-			{
-				return RepairMapCall<DonorCtx>(rawCtx, 1, [](DonorCtx* c)
-				{
-					return c->Controller->IsStopped() ? 1 : 0;
-				});
-			},
-			[](void* rawCtx, int32_t memberIndex, int32_t partIndex, int* outSuccess,
-				int64_t* outOffset, int64_t* outFileSize, const uint8_t** outData, size_t* outDataLen) -> int
-			{
-				return RepairMapCall<DonorCtx>(rawCtx, 0, [=](DonorCtx* c)
-				{
-					if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
-					{
-						return 0;
-					}
-					FileInfo* donorFile = (*c->DonorFiles)[memberIndex];
-					if (!donorFile || !donorFile->GetArticles() || partIndex < 0 ||
-						(size_t)partIndex >= donorFile->GetArticles()->size())
-					{
-						return 0;
-					}
-					ArticleInfo* article = (*donorFile->GetArticles())[partIndex].get();
-					c->CurrentFetched = c->Controller->m_fetcher.Fetch(
-						article->GetMessageId(), *donorFile->GetGroups());
-					*outSuccess = c->CurrentFetched.Success ? 1 : 0;
-					*outOffset = c->CurrentFetched.Offset;
-					*outFileSize = c->CurrentFetched.FileSize;
-					*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
-					*outDataLen = c->CurrentFetched.Data.size();
-					return 1;
-				});
-			},
-			[](void* rawCtx, int32_t memberIndex, const int32_t* partIndices, size_t count)
-			{
-				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
-				{
-					if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
-					{
-						return;
-					}
-					FileInfo* donorFile = (*c->DonorFiles)[memberIndex];
-					if (!donorFile || !donorFile->GetArticles())
-					{
-						return;
-					}
-					auto groups = std::make_shared<std::vector<CString>>();
-					for (const CString& group : *donorFile->GetGroups())
-					{
-						groups->emplace_back(*group);
-					}
-					std::vector<ArticleBatchFetcher::Request> requests;
-					requests.reserve(count);
-					for (size_t i = 0; i < count; i++)
-					{
-						int partIndex = partIndices[i];
-						if (partIndex >= 0 && (size_t)partIndex < donorFile->GetArticles()->size())
-						{
-							requests.push_back({
-								(*donorFile->GetArticles())[partIndex]->GetMessageId(),
-								groups
-							});
-						}
-					}
-					c->Controller->m_batchFetcher.Begin(std::move(requests));
-				});
-			},
-			[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
-				const uint8_t** outData, size_t* outDataLen) -> int
-			{
-				return RepairMapCall<DonorCtx>(rawCtx, 0, [=](DonorCtx* c)
-				{
-					c->CurrentFetched = ArticleFetcher::FetchedArticle();
-					if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
-					{
-						return 0;
-					}
-					*outSuccess = c->CurrentFetched.Success ? 1 : 0;
-					*outOffset = c->CurrentFetched.Offset;
-					*outFileSize = c->CurrentFetched.FileSize;
-					*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
-					*outDataLen = c->CurrentFetched.Data.size();
-					return 1;
-				});
-			},
-			[](void* rawCtx)
-			{
-				RepairMapCallVoid<DonorCtx>(rawCtx, [](DonorCtx* c)
-				{
-					c->Controller->m_batchFetcher.CancelRemaining();
-				});
-			},
-			[](void* rawCtx, int32_t memberIndex)
-			{
-				RepairMapCallVoid<DonorCtx>(rawCtx, [memberIndex](DonorCtx* c)
-				{
-					if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
-					{
-						return;
-					}
-					FileInfo* donorFile = (*c->DonorFiles)[memberIndex];
-					if (!donorFile || !donorFile->GetArticles())
-					{
-						return;
-					}
-					auto donorGroups = std::make_shared<std::vector<CString>>();
-					for (const CString& group : *donorFile->GetGroups())
-					{
-						donorGroups->emplace_back(*group);
-					}
-					std::vector<ArticleBatchFetcher::Request> requests;
-					requests.reserve(donorFile->GetArticles()->size());
-					for (std::unique_ptr<ArticleInfo>& article : *donorFile->GetArticles())
-					{
-						requests.push_back({article->GetMessageId(), donorGroups});
-					}
-					c->Controller->m_batchFetcher.Begin(std::move(requests));
-				});
-			},
-			[](void* rawCtx, const char* label, int32_t stageProgress)
-			{
-				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
-				{
-					if (c->Controller->m_postInfo)
-					{
-						GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-						c->Controller->m_postInfo->SetProgressLabel(label ? label : "");
-						c->Controller->m_postInfo->SetStageProgress(stageProgress);
-					}
-				});
-			},
-			[](void* rawCtx, int32_t delta)
-			{
-				RepairMapCallVoid<DonorCtx>(rawCtx, [delta](DonorCtx* c)
-				{
-					c->Controller->m_materializing += delta;
-				});
-			},
-			[](void* rawCtx, int64_t bytes, int32_t holes)
-			{
-				RepairMapCallVoid<DonorCtx>(rawCtx, [bytes, holes](DonorCtx* c)
-				{
-					c->Controller->m_recoveredBytes += bytes;
-					c->Controller->m_progressBytes += bytes;
-					c->Controller->m_recoveredHoles += holes;
-				});
-			},
-			[](void* rawCtx, const size_t* updatedCounts, const NzbgetRsByteRange* updatedFlat, size_t)
-			{
-				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
-				{
-					size_t cursor = 0;
-					for (size_t t = 0; t < c->Targets->size(); t++)
-					{
-						size_t cnt = updatedCounts ? updatedCounts[t] : 0;
-						(*c->Targets)[t].Holes.assign(
-							reinterpret_cast<const StreamRange*>(updatedFlat + cursor),
-							reinterpret_cast<const StreamRange*>(updatedFlat + cursor + cnt));
-						cursor += cnt;
-					}
-				});
-			},
-			[](void* rawCtx, int32_t kind, const char* text)
-			{
-				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
-				{
-					Message::EKind msgKind = kind == 2 ? Message::mkError :
-						kind == 1 ? Message::mkWarning : Message::mkInfo;
-					c->Controller->PrintMessage(msgKind, "%s", text);
-				});
-			},
-			[](void* rawCtx, int32_t kind, const char* msg)
-			{
-				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx*)
-				{
-					if (!msg) return;
-					switch (kind)
-					{
-						case 0:
-							info("%s", msg);
-							break;
-						case 1:
-							error("%s", msg);
-							break;
-						case 2:
-							warn("%s", msg);
-							break;
-						default:
-							detail("%s", msg);
-							break;
-					}
-				});
-			},
-#ifdef DEBUG
-			[](void* rawCtx, const char* text)
-			{
-				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx*)
-				{
-					debug("%s", text ? text : "");
-				});
-			}
-#else
-			nullptr
-#endif
-		);
-		if (donorCtx.Error)
-		{
-			std::rethrow_exception(donorCtx.Error);
-		}
-	}
-}
-
-inline void StreamRepairController::RepairCompleted()
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
-
-	for (const RepairTarget& target : m_targets)
-	{
-		if (target.DecodedFileSize > 0 && target.Holes.empty())
-		{
-			MarkRepaired(nzbInfo, target);
-		}
-		else if (target.Recreated)
-		{
-			MarkRecreated(nzbInfo, target);
-		}
-	}
-
-	if (m_recoveredArticles > 0 || m_recoveredBytes > 0 || m_recoveredHoles > 0)
-	{
-		nzbInfo->SetDupeRecoveredArticles(nzbInfo->GetDupeRecoveredArticles() + m_recoveredArticles);
-		nzbInfo->SetDupeRecoveredBytes(nzbInfo->GetDupeRecoveredBytes() + m_recoveredBytes);
-		nzbInfo->SetDupeRecoveredHoles(nzbInfo->GetDupeRecoveredHoles() + m_recoveredHoles);
-	}
-
-	if (m_recoveredFailedSize > 0)
-	{
-		int64 failedSize = nzbInfo->GetFailedSize();
-		int64 successSize = nzbInfo->GetSuccessSize();
-		int64 curFailedSize = nzbInfo->GetCurrentFailedSize();
-		int64 curSuccessSize = nzbInfo->GetCurrentSuccessSize();
-		int64 parFailedSize = nzbInfo->GetParFailedSize();
-		int64 parSuccessSize = nzbInfo->GetParSuccessSize();
-		int64 parCurFailedSize = nzbInfo->GetParCurrentFailedSize();
-		int64 parCurSuccessSize = nzbInfo->GetParCurrentSuccessSize();
-		nzbget_rs_stream_credit_repaired_sizes(
-			m_recoveredFailedSize, m_recoveredFailedParSize,
-			&failedSize, &successSize, &curFailedSize, &curSuccessSize,
-			&parFailedSize, &parSuccessSize, &parCurFailedSize, &parCurSuccessSize);
-		nzbInfo->SetFailedSize(failedSize);
-		nzbInfo->SetSuccessSize(successSize);
-		nzbInfo->SetCurrentFailedSize(curFailedSize);
-		nzbInfo->SetCurrentSuccessSize(curSuccessSize);
-		nzbInfo->SetParFailedSize(parFailedSize);
-		nzbInfo->SetParSuccessSize(parSuccessSize);
-		nzbInfo->SetParCurrentFailedSize(parCurFailedSize);
-		nzbInfo->SetParCurrentSuccessSize(parCurSuccessSize);
-	}
-
-	for (auto it = nzbInfo->GetStreamRepairJobs()->begin();
-		it != nzbInfo->GetStreamRepairJobs()->end(); )
-	{
-		if (!Interrupted())
-		{
-			it = nzbInfo->GetStreamRepairJobs()->erase(it);
-			continue;
-		}
-		bool matched = false;
-		for (const RepairTarget& target : m_targets)
-		{
-			if (target.FileId == it->GetFileId())
-			{
-				matched = true;
-				if (target.Holes.empty() && target.DecodedFileSize > 0)
-				{
-					it = nzbInfo->GetStreamRepairJobs()->erase(it);
-				}
-				else
-				{
-					if (it->GetDecodedFileSize() <= 0 && target.DecodedFileSize > 0)
-					{
-						it->SetDecodedFileSize(target.DecodedFileSize);
-					}
-					it->SetHoles(target.Holes);
-					++it;
-				}
-				break;
-			}
-		}
-		if (!matched)
-		{
-			++it;
-		}
-	}
-
-	bool recovered = m_recoveredBytes > 0;
-	m_postInfo->SetStreamRepairDone(true);
-	m_postInfo->SetStreamRepairRecovered(recovered);
-
-	{
-		int resetParRename = 0, setParStatus = 0, newParStatus = 0;
-		int forceParFull = 0, setReqParCheckFalse = 0, checkMainPars = 0;
-		nzbget_rs_stream_resolve_completion_par_action(
-			m_recoveredBytes, m_holesRemain ? 1 : 0,
-			(int)nzbInfo->GetParRenameStatus(), (int)NzbInfo::rsNone,
-			(int)nzbInfo->GetParStatus(), (int)NzbInfo::psSkipped,
-			(int)g_Options->GetParCheck(), (int)Options::pcManual,
-			(int)NzbInfo::psManual, (int)NzbInfo::psNone,
-			&resetParRename, &setParStatus, &newParStatus,
-			&forceParFull, &setReqParCheckFalse, &checkMainPars);
-		if (resetParRename)
-		{
-			nzbInfo->SetParRenameStatus(NzbInfo::rsNone);
-		}
-		if (setParStatus)
-		{
-			nzbInfo->SetParStatus((NzbInfo::EParStatus)newParStatus);
-		}
-		if (checkMainPars && ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
-		{
-			m_postInfo->SetRequestParCheck(true);
-		}
-		if (forceParFull)
-		{
-			m_postInfo->SetForceParFull(true);
-		}
-		if (setReqParCheckFalse)
-		{
-			m_postInfo->SetRequestParCheck(false);
-		}
-	}
-
-	downloadQueue->Save();
-
-	m_postInfo->SetWorking(false);
-}
-
-inline void StreamRepairController::AddMessage(Message::EKind kind, const char* text)
-{
-	if (m_liveMode)
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
-		if (nzbInfo)
-		{
-			nzbInfo->AddMessage(kind, text);
-		}
-		return;
-	}
-
-	m_postInfo->GetNzbInfo()->AddMessage(kind, text);
-}
 
 class MoveController : public Thread, public ScriptController
 {
@@ -28054,901 +27801,6 @@ private:
 	}
 };
 
-inline PrePostProcessor::PrePostProcessor()
-{
-	debug("Creating PrePostProcessor");
-
-	DownloadQueue::Guard()->Attach(this);
-}
-
-inline void PrePostProcessor::Run()
-{
-	debug("Entering PrePostProcessor-loop");
-
-	while (!DownloadQueue::IsLoaded())
-	{
-		Util::Sleep(20);
-	}
-
-	if (g_Options->GetServerMode())
-	{
-		SanitisePostQueue();
-	}
-
-	while (!IsStopped())
-	{
-		if (g_WorkState->GetTempPausePostprocess())
-		{
-			// Postprocess is paused: just wait and loop
-			Util::Sleep(200);
-			continue;
-		}
-
-		if (m_queuedJobs)
-		{
-			// check post-queue every 200 msec
-			CheckPostQueue();
-			Util::Sleep(200);
-		}
-		else
-		{
-			// Wait until we get the stop signal or more jobs in the queue
-			std::unique_lock<std::mutex> lk(m_waitMutex);
-			m_waitCond.wait(lk, [&]{ return m_queuedJobs || IsStopped(); });
-		}
-	}
-
-	WaitJobs();
-
-	debug("Exiting PrePostProcessor-loop");
-}
-
-inline void PrePostProcessor::WaitJobs()
-{
-	debug("PrePostProcessor: waiting for jobs to complete");
-
-	// wait 5 seconds until all post-processing jobs gracefully finish
-	time_t waitStart = Util::CurrentTime();
-	while (Util::CurrentTime() - waitStart < 5)
-	{
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-			if (m_activeJobs.empty())
-			{
-				break;
-			}
-		}
-		CheckPostQueue();
-		Util::Sleep(200);
-	}
-
-	// kill remaining post-processing jobs; not safe but we can't wait any longer
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-		for (NzbInfo* postJob : m_activeJobs)
-		{
-			if (postJob->GetPostInfo() && postJob->GetPostInfo()->GetPostThread())
-			{
-				Thread* thread = postJob->GetPostInfo()->GetPostThread();
-				postJob->GetPostInfo()->SetPostThread(nullptr);
-				warn("Terminating active post-process job for %s", postJob->GetName());
-				thread->Kill();
-				delete thread;
-			}
-		}
-	}
-
-	// wait 5 seconds until direct unpack and live repair threads gracefully finish
-	waitStart = Util::CurrentTime();
-	while (Util::CurrentTime() - waitStart < 5)
-	{
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			if (std::find_if(downloadQueue->GetQueue()->begin(),
-				downloadQueue->GetQueue()->end(),
-				[](const std::unique_ptr<NzbInfo>& nzbInfo)
-				{
-					return nzbInfo->GetUnpackThread() != nullptr ||
-						nzbInfo->GetLiveRepairThread() != nullptr;
-				}) == downloadQueue->GetQueue()->end())
-			{
-				break;
-			}
-		}
-		Util::Sleep(200);
-	}
-
-	// disconnect remaining direct unpack and live repair jobs
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-		{
-			nzbInfo->SetUnpackThread(nullptr);
-			nzbInfo->SetLiveRepairThread(nullptr);
-		}
-	}
-
-	debug("PrePostProcessor: Jobs are completed");
-}
-
-inline void PrePostProcessor::Stop()
-{
-	Thread::Stop();
-
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-
-		for (NzbInfo* postJob : m_activeJobs)
-		{
-			if (postJob->GetPostInfo() && postJob->GetPostInfo()->GetPostThread())
-			{
-				postJob->GetPostInfo()->GetPostThread()->Stop();
-			}
-		}
-
-		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-		{
-			if (nzbInfo->GetUnpackThread())
-			{
-				((DirectUnpack*)nzbInfo->GetUnpackThread())->Stop(downloadQueue, nzbInfo);
-			}
-			if (nzbInfo->GetLiveRepairThread())
-			{
-				nzbInfo->GetLiveRepairThread()->Stop();
-			}
-		}
-	}
-
-	// Resume Run() to exit it
-	std::lock_guard<std::mutex> guard(m_waitMutex);
-	m_waitCond.notify_all();
-}
-
-inline bool PrePostProcessor::HasActiveUnpack(bool includeWaitingVolume)
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	return HasActiveUnpack(downloadQueue, includeWaitingVolume);
-}
-
-inline bool PrePostProcessor::HasActiveUnpack(DownloadQueue* downloadQueue, bool includeWaitingVolume)
-{
-	// Check post-processing active jobs for UnpackController
-	{
-		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-		for (NzbInfo* postJob : m_activeJobs)
-		{
-			if (postJob->GetPostInfo() && postJob->GetPostInfo()->GetStage() == PostInfo::ptUnpacking)
-			{
-				return true;
-			}
-		}
-	}
-
-	// Check direct unpack jobs: does a direct unpack own the unpack slot / actively extract?
-	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-	{
-		if (nzbInfo->GetUnpackThread())
-		{
-			DirectUnpack* directUnpack = (DirectUnpack*)nzbInfo->GetUnpackThread();
-			if (includeWaitingVolume ||
-				(directUnpack->IsUnpacking() && !directUnpack->IsWaitingVolume()))
-			{
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
-
-/**
- * Reset the state of items after reloading from disk and
- * delete items which could not be resumed.
- * Also count the number of post-jobs.
- */
-inline void PrePostProcessor::SanitisePostQueue()
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-	{
-		if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsRunning && !nzbInfo->GetUnpackThread())
-		{
-			nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
-		}
-		PostInfo* postInfo = nzbInfo->GetPostInfo();
-		if (!postInfo && nzbInfo->GetKind() == NzbInfo::nkNzb &&
-			!nzbInfo->GetCompletedFiles()->empty() &&
-			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
-			nzbInfo->IsDownloadCompleted(true))
-		{
-			// its last file finished while the program stopped (a reload, a
-			// shutdown): the event that queues it for post-processing was
-			// dropped then, and only paused par2-files are left, so nothing
-			// else would ever start it
-			nzbInfo->PrintMessage(Message::mkInfo,
-				"Collection %s completely downloaded", nzbInfo->GetName());
-			g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDownloaded);
-			NzbDownloaded(downloadQueue, nzbInfo);
-			postInfo = nzbInfo->GetPostInfo();
-			if (postInfo)
-			{
-				m_queuedJobs--;	// counted again below
-			}
-		}
-		if (postInfo)
-		{
-			m_queuedJobs++;
-			int nextStage = 0;
-			int reqParCheck = 0;
-			nzbget_rs_prepost_sanitise_post_stage(
-				(int)postInfo->GetStage(),
-				(int)PostInfo::ptExecutingScript,
-				(int)PostInfo::ptFinished,
-				(int)PostInfo::ptQueued,
-				FileSystem::DirectoryExists(nzbInfo->GetDestDir()) ? 1 : 0,
-				nzbInfo->GetUnpackTried() ? 1 : 0,
-				(int)nzbInfo->GetParStatus(),
-				(int)NzbInfo::psSkipped,
-				&nextStage,
-				&reqParCheck);
-			postInfo->SetStage((PostInfo::EStage)nextStage);
-			if (reqParCheck)
-			{
-				postInfo->SetRequestParCheck(true);
-			}
-			postInfo->SetWorking(false);
-		}
-	}
-}
-
-inline void PrePostProcessor::DownloadQueueUpdate(void* aspect)
-{
-	if (IsStopped())
-	{
-		return;
-	}
-
-	DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
-	if (queueAspect->action == DownloadQueue::eaNzbFound ||
-		queueAspect->action == DownloadQueue::eaUrlFound)
-	{
-		NzbFound(queueAspect->downloadQueue, queueAspect->nzbInfo);
-	}
-	else if (queueAspect->action == DownloadQueue::eaNzbAdded ||
-		queueAspect->action == DownloadQueue::eaUrlAdded)
-	{
-		NzbAdded(queueAspect->downloadQueue, queueAspect->nzbInfo);
-	}
-	else if (queueAspect->action == DownloadQueue::eaNzbNamed)
-	{
-		g_QueueScriptCoordinator->EnqueueScript(queueAspect->nzbInfo, QueueScriptCoordinator::qeNzbNamed);
-		CheckDownloadCompleted(queueAspect->downloadQueue, queueAspect->nzbInfo);
-	}
-	else if (queueAspect->action == DownloadQueue::eaNzbDeleted &&
-		queueAspect->nzbInfo->GetDeleting() &&
-		!queueAspect->nzbInfo->GetPostInfo() &&
-		queueAspect->nzbInfo->GetFileList()->empty())
-	{
-		// the deleting of nzbs is usually handled via eaFileDeleted-event, but when deleting nzb without
-		// any files left the eaFileDeleted-event is not fired and we need to process eaNzbDeleted-event instead
-		queueAspect->nzbInfo->PrintMessage(Message::mkInfo,
-			"Collection %s deleted from queue", queueAspect->nzbInfo->GetName());
-		NzbDeleted(queueAspect->downloadQueue, queueAspect->nzbInfo);
-	}
-	else if (queueAspect->action == DownloadQueue::eaUrlDeleted)
-	{
-		NzbDeleted(queueAspect->downloadQueue, queueAspect->nzbInfo);
-	}
-	else if (queueAspect->action == DownloadQueue::eaUrlFailed)
-	{
-		NzbCompleted(queueAspect->downloadQueue, queueAspect->nzbInfo, true);
-	}
-	else if (queueAspect->action == DownloadQueue::eaFileCompleted ||
-		queueAspect->action == DownloadQueue::eaFileDeleted)
-	{
-		if (queueAspect->action == DownloadQueue::eaFileCompleted)
-		{
-			FileDownloaded(queueAspect->downloadQueue, queueAspect->nzbInfo, queueAspect->fileInfo);
-		}
-
-#ifndef DISABLE_PARCHECK
-		{
-			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-			for (NzbInfo* postJob : m_activeJobs)
-			{
-				PostInfo* pjInfo = postJob ? postJob->GetPostInfo() : nullptr;
-				if (postJob &&
-					queueAspect->fileInfo->GetNzbInfo() == postJob &&
-					pjInfo &&
-					pjInfo->GetPostThread() &&
-					pjInfo->GetStage() >= PostInfo::ptLoadingPars &&
-					pjInfo->GetStage() <= PostInfo::ptVerifyingRepaired &&
-					((RepairController*)pjInfo->GetPostThread())->AddPar(
-						queueAspect->fileInfo, queueAspect->action == DownloadQueue::eaFileDeleted))
-				{
-					return;
-				}
-			}
-		}
-#endif
-
-		int eventAction = nzbget_rs_prepost_classify_file_event(
-			queueAspect->action == DownloadQueue::eaFileCompleted ? 1 : 0,
-			queueAspect->action == DownloadQueue::eaFileDeleted ? 1 : 0,
-			queueAspect->fileInfo->GetDupeDeleted() ? 1 : 0,
-			(int)queueAspect->fileInfo->GetNzbInfo()->GetDeleteStatus(),
-			(int)NzbInfo::dsNone,
-			(int)NzbInfo::dsHealth,
-			queueAspect->nzbInfo->GetPostInfo() ? 1 : 0,
-			queueAspect->nzbInfo->IsDownloadCompleted(true) ? 1 : 0,
-			queueAspect->nzbInfo->IsDownloadCompleted(false) ? 1 : 0);
-		if (eventAction == 1)
-		{
-			queueAspect->nzbInfo->PrintMessage(Message::mkInfo,
-				"Collection %s completely downloaded", queueAspect->nzbInfo->GetName());
-			g_QueueScriptCoordinator->EnqueueScript(queueAspect->nzbInfo, QueueScriptCoordinator::qeNzbDownloaded);
-			NzbDownloaded(queueAspect->downloadQueue, queueAspect->nzbInfo);
-		}
-		else if (eventAction == 2)
-		{
-			queueAspect->nzbInfo->PrintMessage(Message::mkInfo,
-				"Collection %s deleted from queue", queueAspect->nzbInfo->GetName());
-			NzbDeleted(queueAspect->downloadQueue, queueAspect->nzbInfo);
-		}
-	}
-}
-
-inline void PrePostProcessor::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	if (g_Options->GetDupeCheck() && nzbInfo->GetDupeMode() != dmForce)
-	{
-		g_DupeCoordinator->NzbFound(downloadQueue, nzbInfo);
-	}
-}
-
-inline void PrePostProcessor::NzbAdded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	if (g_Options->GetParCheck() != Options::pcForce)
-	{
-		downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
-	}
-
-	if (g_Options->GetReorderFiles() && nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
-	{
-		nzbInfo->PrintMessage(Message::mkInfo, "Reordering files for %s", nzbInfo->GetName());
-		downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupSortFiles, nullptr);
-	}
-
-	if (nzbInfo->GetDeleteStatus() == NzbInfo::dsDupe ||
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsCopy ||
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsGood ||
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsScan)
-	{
-		NzbCompleted(downloadQueue, nzbInfo, false);
-	}
-	else
-	{
-		g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbAdded);
-	}
-}
-
-inline void PrePostProcessor::CheckDownloadCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	// Direct rename can pause the last PAR volumes after the data files
-	// finished. Their in-flight articles may still be draining; the last
-	// such request does not complete a file, so check both transitions.
-	if (nzbget_rs_prepost_should_complete_after_direct_rename(
-		IsStopped() ? 1 : 0,
-		(int)nzbInfo->GetDirectRenameStatus(),
-		(int)NzbInfo::tsSuccess,
-		nzbInfo->GetPostInfo() ? 1 : 0,
-		(int)nzbInfo->GetDeleteStatus(),
-		(int)NzbInfo::dsNone,
-		!nzbInfo->GetCompletedFiles()->empty() ? 1 : 0,
-		nzbInfo->IsDownloadCompleted(true) ? 1 : 0,
-		g_Options->GetRawArticle() ? 1 : 0,
-		g_Options->GetSkipWrite() ? 1 : 0,
-		nzbInfo->GetSkipDiskWrite() ? 1 : 0) != 0)
-	{
-		nzbInfo->PrintMessage(Message::mkInfo,
-			"Collection %s completely downloaded", nzbInfo->GetName());
-		g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDownloaded);
-		NzbDownloaded(downloadQueue, nzbInfo);
-	}
-}
-
-inline void PrePostProcessor::NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	if (!nzbInfo)
-	{
-		return;
-	}
-
-	int enqueueDeleted = 0;
-	int setParSkipped = 0;
-	int dlRoute = nzbget_rs_prepost_classify_nzb_downloaded_entry(
-		nzbInfo->GetSkipScriptProcessing() ? 1 : 0,
-		nzbInfo->GetSkipDiskWrite() ? 1 : 0,
-		g_Options->GetSkipWrite() ? 1 : 0,
-		(int)nzbInfo->GetDeleteStatus(),
-		(int)NzbInfo::dsHealth,
-		(int)NzbInfo::dsBad,
-		nzbInfo->GetPostInfo() != nullptr ? 1 : 0,
-		g_Options->GetRawArticle() ? 1 : 0,
-		(int)nzbInfo->GetParStatus(),
-		(int)NzbInfo::psNone,
-		(int)g_Options->GetParCheck(),
-		(int)Options::pcAlways,
-		(int)Options::pcForce,
-		&enqueueDeleted,
-		&setParSkipped);
-	if (dlRoute == 1)
-	{
-		if (nzbInfo->GetLiveRepairThread())
-		{
-			Thread* liveRepairThread = nzbInfo->GetLiveRepairThread();
-			nzbInfo->SetLiveRepairThread(nullptr);
-			liveRepairThread->Stop();
-		}
-		nzbInfo->SetCleanupDisk(true);
-		DeleteCleanup(nzbInfo);
-		NzbCompleted(downloadQueue, nzbInfo, true);
-		return;
-	}
-	if (enqueueDeleted)
-	{
-		g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDeleted);
-	}
-	if (dlRoute == 2)
-	{
-		nzbInfo->PrintMessage(Message::mkInfo, "Queueing %s for post-processing", nzbInfo->GetName());
-
-		nzbInfo->EnterPostProcess();
-
-		if (setParSkipped)
-		{
-			nzbInfo->SetParStatus(NzbInfo::psSkipped);
-		}
-
-		if (nzbInfo->GetUnpackThread())
-		{
-			nzbInfo->GetPostInfo()->SetWorking(true);
-			{
-				std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-				m_activeJobs.push_back(nzbInfo);
-			}
-			((DirectUnpack*)nzbInfo->GetUnpackThread())->NzbDownloaded(downloadQueue, nzbInfo);
-		}
-
-		if (nzbInfo->GetLiveRepairThread())
-		{
-			nzbInfo->GetPostInfo()->SetWorking(true);
-			if (!nzbInfo->GetUnpackThread())
-			{
-				std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-				m_activeJobs.push_back(nzbInfo);
-			}
-		}
-
-		nzbInfo->SetChanged(true);
-		downloadQueue->SaveChanged();
-
-		std::lock_guard<std::mutex> guard(m_waitMutex);
-		m_queuedJobs++;
-		m_waitCond.notify_all();
-	}
-	else
-	{
-		if (nzbInfo->GetUnpackThread())
-		{
-			((DirectUnpack*)nzbInfo->GetUnpackThread())->NzbDownloaded(downloadQueue, nzbInfo);
-		}
-
-		if (nzbInfo->GetLiveRepairThread())
-		{
-			Thread* liveRepairThread = nzbInfo->GetLiveRepairThread();
-			nzbInfo->SetLiveRepairThread(nullptr);
-			liveRepairThread->Stop();
-		}
-
-		NzbCompleted(downloadQueue, nzbInfo, true);
-	}
-}
-
-inline void PrePostProcessor::NzbDeleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	if (nzbInfo->GetUnpackThread())
-	{
-		((DirectUnpack*)nzbInfo->GetUnpackThread())->NzbDeleted(downloadQueue, nzbInfo);
-	}
-
-	if (nzbInfo->GetLiveRepairThread())
-	{
-		// detach FIRST: the live pass re-checks attachment at every locked
-		// touchpoint and aborts without writing anything back
-		Thread* liveRepairThread = nzbInfo->GetLiveRepairThread();
-		nzbInfo->SetLiveRepairThread(nullptr);
-		liveRepairThread->Stop();
-	}
-
-	if (nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
-	{
-		nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
-	}
-	bool callDownloaded = nzbInfo->GetDeleteStatus() == NzbInfo::dsHealth ||
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsBad;
-	nzbInfo->SetDeleting(false);
-
-	DeleteCleanup(nzbInfo);
-
-	if (callDownloaded)
-	{
-		NzbDownloaded(downloadQueue, nzbInfo);
-	}
-	else
-	{
-		NzbCompleted(downloadQueue, nzbInfo, true);
-	}
-}
-
-inline void PrePostProcessor::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, bool saveQueue)
-{
-	int addToHistoryInt = 0, callDupeCompletedInt = 0, enqueueDeletedScriptInt = 0, needSaveInt = 0;
-	nzbget_rs_prepost_eval_nzb_completed(
-		(int)nzbInfo->GetDupeHint(),
-		(int)NzbInfo::dhRedownloadAuto,
-		g_Options->GetKeepHistory(),
-		nzbInfo->GetAvoidHistory() ? 1 : 0,
-		g_Options->GetDupeCheck() ? 1 : 0,
-		(int)nzbInfo->GetDupeMode(),
-		(int)dmForce,
-		DupeCoordinator::FailsOver(nzbInfo) ? 1 : 0,
-		(int)nzbInfo->GetDeleteStatus(),
-		(int)NzbInfo::dsNone,
-		(int)NzbInfo::dsHealth,
-		(int)NzbInfo::dsBad,
-		(int)NzbInfo::dsScan,
-		(int)NzbInfo::dsCopy,
-		&addToHistoryInt,
-		&callDupeCompletedInt,
-		&enqueueDeletedScriptInt,
-		&needSaveInt);
-	bool addToHistory = addToHistoryInt != 0;
-	if (addToHistory)
-	{
-		g_HistoryCoordinator->AddToHistory(downloadQueue, nzbInfo);
-	}
-	nzbInfo->SetAvoidHistory(false);
-	bool needSave = needSaveInt != 0;
-	if (callDupeCompletedInt)
-	{
-		g_DupeCoordinator->NzbCompleted(downloadQueue, nzbInfo);
-		needSave = true;
-	}
-	if (enqueueDeletedScriptInt)
-	{
-		g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDeleted);
-	}
-
-	if (!addToHistory)
-	{
-		g_HistoryCoordinator->DeleteDiskFiles(nzbInfo);
-		ParDamage::Forget(nzbInfo->GetId());
-		downloadQueue->GetQueue()->Remove(nzbInfo);
-		// the removal must reach the disk: the saved queue may hold the download
-		// with its files already flagged deleted, which a restart before the next
-		// save brought back as a queued download without files (B42)
-		needSave = true;
-	}
-
-	if (saveQueue && needSave)
-	{
-		downloadQueue->Save();
-	}
-}
-
-inline void PrePostProcessor::DeleteCleanup(NzbInfo* nzbInfo)
-{
-	int cleanupMode = nzbget_rs_prepost_classify_delete_cleanup_mode(
-		nzbInfo->GetCleanupDisk() ? 1 : 0,
-		(int)nzbInfo->GetDeleteStatus(),
-		(int)NzbInfo::dsDupe,
-		nzbInfo->GetParking() ? 1 : 0,
-		nzbInfo->GetSkipDiskWrite() ? 1 : 0,
-		g_Options->GetSkipWrite() ? 1 : 0);
-	if (cleanupMode != 0)
-	{
-		if (cleanupMode == 1)
-		{
-			if (FileSystem::DirectoryExists(nzbInfo->GetDestDir()))
-			{
-				CString errmsg;
-				detail("Deleting dir %s", nzbInfo->GetDestDir());
-				if (!FileSystem::DeleteDirectoryWithContent(nzbInfo->GetDestDir(), errmsg))
-				{
-					error("Could not delete directory %s: %s", nzbInfo->GetDestDir(), *errmsg);
-				}
-			}
-			return;
-		}
-
-		// download was cancelled, deleting already downloaded files from disk
-		for (CompletedFile& completedFile: nzbInfo->GetCompletedFiles())
-		{
-			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
-			BString<1024> fullFileName;
-			fullFileName.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-			nzbget_rs_free(fullFnBuf);
-			if (FileSystem::FileExists(fullFileName))
-			{
-				detail("Deleting file %s", completedFile.GetFilename());
-				FileSystem::DeleteFile(fullFileName);
-			}
-		}
-
-		// delete .out.tmp-files
-		DirBrowser dir(nzbInfo->GetDestDir());
-		while (const char* filename = dir.Next())
-		{
-			size_t fnLen = strlen(filename);
-			if (fnLen >= 8 && !strcmp(filename + fnLen - 8, ".out.tmp"))
-			{
-				NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					nzbInfo->GetDestDir(), PATH_SEPARATOR, filename);
-				BString<1024> fullFilename;
-				fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-				nzbget_rs_free(fullFnBuf);
-				detail("Deleting file %s", filename);
-				FileSystem::DeleteFile(fullFilename);
-			}
-		}
-
-		// delete old directory (if empty)
-		FileSystem::DeleteDirectory(nzbInfo->GetDestDir());
-
-		// delete final directory (if empty)
-		const auto finalDir = nzbInfo->BuildFinalDirName();
-		if (nzbInfo->GetDestDir() != finalDir && FileSystem::DirectoryExists(finalDir))
-		{
-			FileSystem::DeleteDirectory(finalDir);
-		}
-	}
-}
-
-inline void PrePostProcessor::CheckRequestPar(DownloadQueue* downloadQueue)
-{
-#ifndef DISABLE_PARCHECK
-	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-	for (NzbInfo* postJob : m_activeJobs)
-	{
-		PostInfo* postInfo = postJob->GetPostInfo();
-
-		int newForceParFull = postInfo->GetForceParFull() ? 1 : 0;
-		int reqAction = nzbget_rs_prepost_classify_request_par_action(
-			postInfo->GetRequestParCheck() ? 1 : 0,
-			(int)postInfo->GetNzbInfo()->GetParStatus(),
-			(int)NzbInfo::psSkipped,
-			postInfo->GetForceRepair() ? 1 : 0,
-			postInfo->GetNzbInfo()->GetParFull() ? 1 : 0,
-			(int)g_Options->GetParCheck(),
-			(int)Options::pcManual,
-			newForceParFull,
-			postInfo->GetNzbInfo()->GetFileList()->empty() ? 1 : 0,
-			&newForceParFull);
-		if (reqAction == 1)
-		{
-			postInfo->SetForceParFull(newForceParFull != 0);
-			postInfo->GetNzbInfo()->SetParStatus(NzbInfo::psNone);
-			postInfo->SetRequestParCheck(false);
-			postInfo->GetNzbInfo()->GetScriptStatuses()->clear();
-			postInfo->SetStage(PostInfo::ptQueued);
-			postInfo->SetWorking(false);
-		}
-		else if (reqAction == 2 || reqAction == 3)
-		{
-			postInfo->SetRequestParCheck(false);
-			postInfo->GetNzbInfo()->SetParStatus(NzbInfo::psManual);
-
-			if (reqAction == 2)
-			{
-				postInfo->GetNzbInfo()->PrintMessage(Message::mkInfo,
-					"Downloading all remaining files for manual par-check for %s", postInfo->GetNzbInfo()->GetName());
-				downloadQueue->EditEntry(postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupResume, nullptr);
-				postInfo->SetStage(PostInfo::ptFinished);
-			}
-			else
-			{
-				postInfo->GetNzbInfo()->PrintMessage(Message::mkInfo,
-					"There are no par-files remain for download for %s", postInfo->GetNzbInfo()->GetName());
-			}
-			postInfo->SetWorking(false);
-		}
-	}
-#endif
-}
-
-inline void PrePostProcessor::CleanupJobs(DownloadQueue* downloadQueue)
-{
-	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-	m_activeJobs.erase(std::remove_if(m_activeJobs.begin(), m_activeJobs.end(),
-		[processor = this, downloadQueue](NzbInfo* postJob)
-		{
-			PostInfo* postInfo = postJob->GetPostInfo();
-			bool hasRunningThread = postInfo->GetPostThread() && postInfo->GetPostThread()->IsRunning();
-			int64_t curTime = (!postInfo->GetWorking() && !hasRunningThread && postInfo->GetStartTime() > 0)
-				? (int64_t)Util::CurrentTime()
-				: 0;
-			int updateTotalSec = 0;
-			int isCompleted = 0;
-			int newTotalSec = postJob->GetPostTotalSec();
-			if (nzbget_rs_prepost_eval_cleanup_job_state(
-				postInfo->GetWorking() ? 1 : 0,
-				hasRunningThread ? 1 : 0,
-				(int)postInfo->GetStage(),
-				(int)PostInfo::ptFinished,
-				postInfo->GetDeleted() ? 1 : 0,
-				(int64_t)postInfo->GetStartTime(),
-				curTime,
-				postJob->GetPostTotalSec(),
-				&updateTotalSec,
-				&isCompleted,
-				&newTotalSec) != 0)
-			{
-				delete postInfo->GetPostThread();
-				postInfo->SetPostThread(nullptr);
-
-				postInfo->SetStageTime(0);
-				postInfo->SetStageProgress(0);
-				postInfo->SetFileProgress(0);
-				postInfo->SetProgressLabel("");
-
-				if (updateTotalSec != 0)
-				{
-					postJob->SetPostTotalSec(newTotalSec);
-					postInfo->SetStartTime(0);
-				}
-
-				if (isCompleted != 0)
-				{
-					processor->JobCompleted(downloadQueue, postInfo);
-				}
-				else
-				{
-					postInfo->SetStage(PostInfo::ptQueued);
-				}
-				return true;
-			}
-			return false;
-		}),
-		m_activeJobs.end());
-}
-
-inline bool PrePostProcessor::CanRunMoreJobs(bool* allowPar)
-{
-	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-	std::vector<int> stages;
-	stages.reserve(m_activeJobs.size());
-	for (NzbInfo* postJob : m_activeJobs)
-	{
-		stages.push_back((int)postJob->GetPostInfo()->GetStage());
-	}
-	int allowParInt = 0;
-	int canRun = nzbget_rs_prepost_can_run_more_jobs(
-		stages.data(),
-		stages.size(),
-		(int)PostInfo::ptLoadingPars,
-		(int)PostInfo::ptVerifyingRepaired,
-		(int)PostInfo::ptRepairing,
-		(int)g_Options->GetPostStrategy(),
-		&allowParInt);
-	*allowPar = allowParInt != 0;
-	return canRun != 0;
-}
-
-inline NzbInfo* PrePostProcessor::PickNextJob(DownloadQueue* downloadQueue, bool allowPar)
-{
-	NzbInfo* nzbInfo = nullptr;
-	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-
-	bool hasActiveUnpack = HasActiveUnpack(downloadQueue);
-
-	std::vector<NzbInfo*> items;
-	std::vector<NzbgetRsPostJobCandidate> candidates;
-	items.reserve(downloadQueue->GetQueue()->size());
-	candidates.reserve(downloadQueue->GetQueue()->size());
-	for (NzbInfo* nzbInfo1 : downloadQueue->GetQueue())
-	{
-		items.push_back(nzbInfo1);
-		NzbgetRsPostJobCandidate c{};
-		PostInfo* pi = nzbInfo1->GetPostInfo();
-		c.has_post_info = pi ? 1 : 0;
-		c.working = (pi && pi->GetWorking()) ? 1 : 0;
-		c.direct_unpack_running = nzbInfo1->GetDirectUnpackStatus() == NzbInfo::nsRunning ? 1 : 0;
-		c.has_live_repair_thread = nzbInfo1->GetLiveRepairThread() != nullptr ? 1 : 0;
-		c.priority = nzbInfo1->GetPriority();
-		c.force_priority = nzbInfo1->GetForcePriority() ? 1 : 0;
-		c.need_par_check = (pi && pi->GetNeedParCheck()) ? 1 : 0;
-		c.need_unpack = (pi && pi->GetNeedUnpack()) ? 1 : 0;
-		if (pi && !pi->GetWorking() && !c.direct_unpack_running && !c.has_live_repair_thread)
-		{
-			c.has_queue_script_job = g_QueueScriptCoordinator->HasJob(nzbInfo1->GetId(), nullptr) ? 1 : 0;
-			c.in_active_jobs = std::find(m_activeJobs.begin(), m_activeJobs.end(), nzbInfo1) != m_activeJobs.end() ? 1 : 0;
-			c.download_completed = nzbInfo1->IsDownloadCompleted(true) ? 1 : 0;
-		}
-		candidates.push_back(c);
-	}
-	int picked = nzbget_rs_prepost_pick_next_post_job(
-		candidates.data(),
-		candidates.size(),
-		allowPar ? 1 : 0,
-		hasActiveUnpack ? 1 : 0,
-		g_WorkState->GetPausePostProcess() ? 1 : 0);
-	if (picked >= 0 && (size_t)picked < items.size())
-	{
-		nzbInfo = items[(size_t)picked];
-	}
-
-	return nzbInfo;
-}
-
-inline void PrePostProcessor::CheckPostQueue()
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	size_t countBefore;
-	{
-		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-		countBefore = m_activeJobs.size();
-	}
-	CheckRequestPar(downloadQueue);
-	CleanupJobs(downloadQueue);
-	bool changed;
-	{
-		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-		changed = m_activeJobs.size() != countBefore;
-	}
-
-	bool allowPar;
-	while (CanRunMoreJobs(&allowPar) && !IsStopped())
-	{
-		NzbInfo* postJob = PickNextJob(downloadQueue, allowPar);
-		if (!postJob)
-		{
-			break;
-		}
-
-		{
-			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-			m_activeJobs.push_back(postJob);
-		}
-
-		PostInfo* postInfo = postJob->GetPostInfo();
-		if (postInfo->GetStage() == PostInfo::ptQueued &&
-			(!g_WorkState->GetPausePostProcess() || postInfo->GetNzbInfo()->GetForcePriority()))
-		{
-			StartJob(downloadQueue, postInfo, allowPar);
-			CheckRequestPar(downloadQueue);
-			CleanupJobs(downloadQueue);
-			changed = true;
-		}
-	}
-
-	if (changed)
-	{
-		downloadQueue->Save();
-		UpdatePauseState();
-	}
-
-	{
-		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-		Util::SetStandByMode(m_activeJobs.empty());
-	}
-}
-
 #ifndef DISABLE_PARCHECK
 // The collection's par2 files provably cannot cover its damage: the bytes
 // still missing from the files they protect exceed all par2 data still
@@ -29057,496 +27909,1445 @@ static inline bool HasDupeScanSources(DownloadQueue* downloadQueue, NzbInfo* nzb
 }
 #endif
 
-inline void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo, bool allowPar)
+
+class PrePostProcessor : public Thread, public Observer
 {
-	NzbInfo* nzbInfo = postInfo->GetNzbInfo();
+public:
+	bool HasMoreJobs() { return m_queuedJobs > 0; }
 
-	if (!postInfo->GetStartTime())
+	PrePostProcessor()
 	{
-		postInfo->SetStartTime(Util::CurrentTime());
-	}
-	postInfo->SetStageTime(Util::CurrentTime());
-	postInfo->SetStageProgress(0);
-	postInfo->SetFileProgress(0);
-	postInfo->SetProgressLabel("");
+		debug("Creating PrePostProcessor");
 
-	if (nzbInfo->GetParRenameStatus() == NzbInfo::rsNone &&
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
-		g_Options->GetParRename())
-	{
-		EnterStage(downloadQueue, postInfo, PostInfo::ptParRenaming);
-		RenameController::StartJob(postInfo, RenameController::jkPar);
-		return;
+		DownloadQueue::Guard()->Attach(this);
 	}
 
-	bool streamRepair = g_Options->GetDupeArticleFallback() >= Options::dafStream &&
-		!nzbInfo->GetStreamRepairJobs()->empty() &&
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone;
-
-	// stream repair is the last option (B78): it can take longer than downloading
-	// a good backup whole, so with HealthCheck=dupe and a backup still untried in
-	// history the download fails over instead (par2 still gets its turn)
-	if (streamRepair && !postInfo->GetStreamRepairDone() &&
-		g_Options->GetHealthCheck() == Options::hcDupe &&
-		DupeCoordinator::FailsOver(nzbInfo) &&
-		g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+	void Run() override
 	{
-		nzbInfo->PrintMessage(Message::mkInfo,
-			"Not repairing %s from duplicates: a backup in history is tried first", nzbInfo->GetName());
-		streamRepair = false;
-	}
+		debug("Entering PrePostProcessor-loop");
 
-#ifndef DISABLE_PARCHECK
-	// A par-check that cannot succeed still reads the whole collection (and
-	// waits for every remaining par2-file): recover from duplicates first,
-	// par-check afterwards only if that wrote anything
-	if (streamRepair && !postInfo->GetStreamRepairDone() &&
-		nzbInfo->GetParStatus() == NzbInfo::psSkipped &&
-		g_Options->GetParCheck() == Options::pcAuto &&
-		ParCannotCover(nzbInfo) &&
-		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
-	{
-		nzbInfo->PrintMessage(Message::mkInfo,
-			"Par2 files of %s cannot cover its damage (health %.1f%%, critical %.1f%%), "
-			"recovering from duplicates before par-check",
-			nzbInfo->GetName(),
-			nzbInfo->CalcHealth() / 10.0,
-			nzbInfo->CalcCriticalHealth(false) / 10.0);
-		postInfo->SetParCannotCover(true);
-		EnterStage(downloadQueue, postInfo, PostInfo::ptStreamRepairing);
-		StreamRepairController::StartJob(postInfo);
-		return;
-	}
-
-	// Duplicates recovered nothing, so the damage is still beyond the par2
-	// files: report the failure instead of verifying a collection that
-	// cannot be repaired. Any byte ever recovered from duplicates (a live
-	// pass, or a pass interrupted by a restart) may have brought the damage
-	// within reach, so then par-check still runs.
-	if (postInfo->GetParCannotCover() && postInfo->GetStreamRepairDone() &&
-		!postInfo->GetStreamRepairRecovered() &&
-		nzbInfo->GetDupeRecoveredBytes() <= 0 &&
-		g_Options->GetParCheck() == Options::pcAuto &&
-		nzbInfo->GetParStatus() <= NzbInfo::psNone &&
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
-		!HasDupeScanSources(downloadQueue, nzbInfo) &&
-		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
-	{
-		nzbInfo->PrintMessage(Message::mkWarning,
-			"Skipping par-check for %s: its par2 files cannot cover the damage "
-			"(health %.1f%%, critical %.1f%%) and duplicates recovered nothing",
-			nzbInfo->GetName(),
-			nzbInfo->CalcHealth() / 10.0,
-			nzbInfo->CalcCriticalHealth(false) / 10.0);
-		nzbInfo->SetParStatus(NzbInfo::psFailure);
-		return;
-	}
-
-	// Captured holes are a fallback, not evidence that donor data is needed.
-	// Let the current PAR set verify and repair first, including auto mode
-	// which initially marks the check as skipped until damage is known.
-	if (streamRepair && nzbInfo->GetParStatus() == NzbInfo::psSkipped &&
-		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
-	{
-		postInfo->SetRequestParCheck(true);
-		return;
-	}
-
-	// damaged, and the par2-files downloaded so far all failed (a lost index file):
-	// any par2-volume carries the set's description too, so the smallest one held
-	// back is fetched, and the job waits for it (it isn't picked while files download)
-	if ((nzbInfo->GetParStatus() == NzbInfo::psNone || nzbInfo->GetParStatus() == NzbInfo::psSkipped) &&
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
-		nzbInfo->CalcHealth() < 1000 &&
-		!ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
-	{
-		FileInfo* smallest = nullptr;
-		for (FileInfo* fileInfo : nzbInfo->GetFileList())
+		while (!DownloadQueue::IsLoaded())
 		{
-			if (fileInfo->GetParFile() && fileInfo->GetPaused() && !fileInfo->GetDeleted() &&
-				(!smallest || fileInfo->GetSize() < smallest->GetSize()))
+			Util::Sleep(20);
+		}
+
+		if (g_Options->GetServerMode())
+		{
+			SanitisePostQueue();
+		}
+
+		while (!IsStopped())
+		{
+			if (g_WorkState->GetTempPausePostprocess())
 			{
-				smallest = fileInfo;
+				// Postprocess is paused: just wait and loop
+				Util::Sleep(200);
+				continue;
+			}
+
+			if (m_queuedJobs)
+			{
+				// check post-queue every 200 msec
+				CheckPostQueue();
+				Util::Sleep(200);
+			}
+			else
+			{
+				// Wait until we get the stop signal or more jobs in the queue
+				std::unique_lock<std::mutex> lk(m_waitMutex);
+				m_waitCond.wait(lk, [&]{ return m_queuedJobs || IsStopped(); });
 			}
 		}
-		if (smallest)
+
+		WaitJobs();
+
+		debug("Exiting PrePostProcessor-loop");
+	}
+
+	void Stop() override
+	{
+		Thread::Stop();
+
 		{
-			nzbInfo->PrintMessage(Message::mkInfo,
-				"No par2-file of %s on disk to check it with: unpausing %s", nzbInfo->GetName(), smallest->GetFilename());
-			smallest->SetPaused(false);
-			smallest->SetExtraPriority(true);
-			nzbInfo->SetChanged(true);
-			downloadQueue->SaveChanged();
-			return;
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+
+			for (NzbInfo* postJob : m_activeJobs)
+			{
+				if (postJob->GetPostInfo() && postJob->GetPostInfo()->GetPostThread())
+				{
+					postJob->GetPostInfo()->GetPostThread()->Stop();
+				}
+			}
+
+			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+			{
+				if (nzbInfo->GetUnpackThread())
+				{
+					((DirectUnpack*)nzbInfo->GetUnpackThread())->Stop(downloadQueue, nzbInfo);
+				}
+				if (nzbInfo->GetLiveRepairThread())
+				{
+					nzbInfo->GetLiveRepairThread()->Stop();
+				}
+			}
+		}
+
+		// Resume Run() to exit it
+		std::lock_guard<std::mutex> guard(m_waitMutex);
+		m_waitCond.notify_all();
+	}
+
+	bool HasActiveUnpack(bool includeWaitingVolume = true)
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		return HasActiveUnpack(downloadQueue, includeWaitingVolume);
+	}
+
+	bool HasActiveUnpack(DownloadQueue* downloadQueue, bool includeWaitingVolume = true)
+	{
+		// Check post-processing active jobs for UnpackController
+		{
+			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+			for (NzbInfo* postJob : m_activeJobs)
+			{
+				if (postJob->GetPostInfo() && postJob->GetPostInfo()->GetStage() == PostInfo::ptUnpacking)
+				{
+					return true;
+				}
+			}
+		}
+
+		// Check direct unpack jobs: does a direct unpack own the unpack slot / actively extract?
+		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+		{
+			if (nzbInfo->GetUnpackThread())
+			{
+				DirectUnpack* directUnpack = (DirectUnpack*)nzbInfo->GetUnpackThread();
+				if (includeWaitingVolume ||
+					(directUnpack->IsUnpacking() && !directUnpack->IsWaitingVolume()))
+				{
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	void NzbAdded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+	{
+		if (g_Options->GetParCheck() != Options::pcForce)
+		{
+			downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
+		}
+
+		if (g_Options->GetReorderFiles() && nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
+		{
+			nzbInfo->PrintMessage(Message::mkInfo, "Reordering files for %s", nzbInfo->GetName());
+			downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupSortFiles, nullptr);
+		}
+
+		if (nzbInfo->GetDeleteStatus() == NzbInfo::dsDupe ||
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsCopy ||
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsGood ||
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsScan)
+		{
+			NzbCompleted(downloadQueue, nzbInfo, false);
+		}
+		else
+		{
+			g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbAdded);
 		}
 	}
 
-	if (nzbInfo->GetParStatus() == NzbInfo::psNone &&
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
+	void CheckDownloadCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	{
-		if (ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+		// Direct rename can pause the last PAR volumes after the data files
+		// finished. Their in-flight articles may still be draining; the last
+		// such request does not complete a file, so check both transitions.
+		if (nzbget_rs_prepost_should_complete_after_direct_rename(
+			IsStopped() ? 1 : 0,
+			(int)nzbInfo->GetDirectRenameStatus(),
+			(int)NzbInfo::tsSuccess,
+			nzbInfo->GetPostInfo() ? 1 : 0,
+			(int)nzbInfo->GetDeleteStatus(),
+			(int)NzbInfo::dsNone,
+			!nzbInfo->GetCompletedFiles()->empty() ? 1 : 0,
+			nzbInfo->IsDownloadCompleted(true) ? 1 : 0,
+			g_Options->GetRawArticle() ? 1 : 0,
+			g_Options->GetSkipWrite() ? 1 : 0,
+			nzbInfo->GetSkipDiskWrite() ? 1 : 0) != 0)
 		{
-			if (!allowPar)
+			nzbInfo->PrintMessage(Message::mkInfo,
+				"Collection %s completely downloaded", nzbInfo->GetName());
+			g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDownloaded);
+			NzbDownloaded(downloadQueue, nzbInfo);
+		}
+	}
+
+	void NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+	{
+		if (!nzbInfo)
+		{
+			return;
+		}
+
+		int enqueueDeleted = 0;
+		int setParSkipped = 0;
+		int dlRoute = nzbget_rs_prepost_classify_nzb_downloaded_entry(
+			nzbInfo->GetSkipScriptProcessing() ? 1 : 0,
+			nzbInfo->GetSkipDiskWrite() ? 1 : 0,
+			g_Options->GetSkipWrite() ? 1 : 0,
+			(int)nzbInfo->GetDeleteStatus(),
+			(int)NzbInfo::dsHealth,
+			(int)NzbInfo::dsBad,
+			nzbInfo->GetPostInfo() != nullptr ? 1 : 0,
+			g_Options->GetRawArticle() ? 1 : 0,
+			(int)nzbInfo->GetParStatus(),
+			(int)NzbInfo::psNone,
+			(int)g_Options->GetParCheck(),
+			(int)Options::pcAlways,
+			(int)Options::pcForce,
+			&enqueueDeleted,
+			&setParSkipped);
+		if (dlRoute == 1)
+		{
+			if (nzbInfo->GetLiveRepairThread())
 			{
-				postInfo->SetNeedParCheck(true);
+				Thread* liveRepairThread = nzbInfo->GetLiveRepairThread();
+				nzbInfo->SetLiveRepairThread(nullptr);
+				liveRepairThread->Stop();
+			}
+			nzbInfo->SetCleanupDisk(true);
+			DeleteCleanup(nzbInfo);
+			NzbCompleted(downloadQueue, nzbInfo, true);
+			return;
+		}
+		if (enqueueDeleted)
+		{
+			g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDeleted);
+		}
+		if (dlRoute == 2)
+		{
+			nzbInfo->PrintMessage(Message::mkInfo, "Queueing %s for post-processing", nzbInfo->GetName());
+
+			nzbInfo->EnterPostProcess();
+
+			if (setParSkipped)
+			{
+				nzbInfo->SetParStatus(NzbInfo::psSkipped);
+			}
+
+			if (nzbInfo->GetUnpackThread())
+			{
+				nzbInfo->GetPostInfo()->SetWorking(true);
+				{
+					std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+					m_activeJobs.push_back(nzbInfo);
+				}
+				((DirectUnpack*)nzbInfo->GetUnpackThread())->NzbDownloaded(downloadQueue, nzbInfo);
+			}
+
+			if (nzbInfo->GetLiveRepairThread())
+			{
+				nzbInfo->GetPostInfo()->SetWorking(true);
+				if (!nzbInfo->GetUnpackThread())
+				{
+					std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+					m_activeJobs.push_back(nzbInfo);
+				}
+			}
+
+			nzbInfo->SetChanged(true);
+			downloadQueue->SaveChanged();
+
+			std::lock_guard<std::mutex> guard(m_waitMutex);
+			m_queuedJobs++;
+			m_waitCond.notify_all();
+		}
+		else
+		{
+			if (nzbInfo->GetUnpackThread())
+			{
+				((DirectUnpack*)nzbInfo->GetUnpackThread())->NzbDownloaded(downloadQueue, nzbInfo);
+			}
+
+			if (nzbInfo->GetLiveRepairThread())
+			{
+				Thread* liveRepairThread = nzbInfo->GetLiveRepairThread();
+				nzbInfo->SetLiveRepairThread(nullptr);
+				liveRepairThread->Stop();
+			}
+
+			NzbCompleted(downloadQueue, nzbInfo, true);
+		}
+	}
+
+	bool EditList(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action, const char* args)
+	{
+		debug("Edit-command for post-processor received");
+		switch (action)
+		{
+			case DownloadQueue::eaPostDelete:
+				return PostQueueDelete(downloadQueue, idList);
+
+			default:
+				return false;
+		}
+	}
+
+protected:
+	void Update(Subject*, void* aspect) override { DownloadQueueUpdate(aspect); }
+
+private:
+	int m_queuedJobs = 0;
+	RawNzbList m_activeJobs;
+	std::recursive_mutex m_activeJobsMutex;
+	std::mutex m_waitMutex;
+	std::condition_variable m_waitCond;
+
+	void WaitJobs()
+	{
+		debug("PrePostProcessor: waiting for jobs to complete");
+
+		// wait 5 seconds until all post-processing jobs gracefully finish
+		time_t waitStart = Util::CurrentTime();
+		while (Util::CurrentTime() - waitStart < 5)
+		{
+			{
+				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+				std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+				if (m_activeJobs.empty())
+				{
+					break;
+				}
+			}
+			CheckPostQueue();
+			Util::Sleep(200);
+		}
+
+		// kill remaining post-processing jobs; not safe but we can't wait any longer
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+			for (NzbInfo* postJob : m_activeJobs)
+			{
+				if (postJob->GetPostInfo() && postJob->GetPostInfo()->GetPostThread())
+				{
+					Thread* thread = postJob->GetPostInfo()->GetPostThread();
+					postJob->GetPostInfo()->SetPostThread(nullptr);
+					warn("Terminating active post-process job for %s", postJob->GetName());
+					thread->Kill();
+					delete thread;
+				}
+			}
+		}
+
+		// wait 5 seconds until direct unpack and live repair threads gracefully finish
+		waitStart = Util::CurrentTime();
+		while (Util::CurrentTime() - waitStart < 5)
+		{
+			{
+				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+				if (std::find_if(downloadQueue->GetQueue()->begin(),
+					downloadQueue->GetQueue()->end(),
+					[](const std::unique_ptr<NzbInfo>& nzbInfo)
+					{
+						return nzbInfo->GetUnpackThread() != nullptr ||
+							nzbInfo->GetLiveRepairThread() != nullptr;
+					}) == downloadQueue->GetQueue()->end())
+				{
+					break;
+				}
+			}
+			Util::Sleep(200);
+		}
+
+		// disconnect remaining direct unpack and live repair jobs
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+			{
+				nzbInfo->SetUnpackThread(nullptr);
+				nzbInfo->SetLiveRepairThread(nullptr);
+			}
+		}
+
+		debug("PrePostProcessor: Jobs are completed");
+	}
+
+	void SanitisePostQueue()
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+		{
+			if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsRunning && !nzbInfo->GetUnpackThread())
+			{
+				nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
+			}
+			PostInfo* postInfo = nzbInfo->GetPostInfo();
+			if (!postInfo && nzbInfo->GetKind() == NzbInfo::nkNzb &&
+				!nzbInfo->GetCompletedFiles()->empty() &&
+				nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
+				nzbInfo->IsDownloadCompleted(true))
+			{
+				// its last file finished while the program stopped (a reload, a
+				// shutdown): the event that queues it for post-processing was
+				// dropped then, and only paused par2-files are left, so nothing
+				// else would ever start it
+				nzbInfo->PrintMessage(Message::mkInfo,
+					"Collection %s completely downloaded", nzbInfo->GetName());
+				g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDownloaded);
+				NzbDownloaded(downloadQueue, nzbInfo);
+				postInfo = nzbInfo->GetPostInfo();
+				if (postInfo)
+				{
+					m_queuedJobs--;	// counted again below
+				}
+			}
+			if (postInfo)
+			{
+				m_queuedJobs++;
+				int nextStage = 0;
+				int reqParCheck = 0;
+				nzbget_rs_prepost_sanitise_post_stage(
+					(int)postInfo->GetStage(),
+					(int)PostInfo::ptExecutingScript,
+					(int)PostInfo::ptFinished,
+					(int)PostInfo::ptQueued,
+					FileSystem::DirectoryExists(nzbInfo->GetDestDir()) ? 1 : 0,
+					nzbInfo->GetUnpackTried() ? 1 : 0,
+					(int)nzbInfo->GetParStatus(),
+					(int)NzbInfo::psSkipped,
+					&nextStage,
+					&reqParCheck);
+				postInfo->SetStage((PostInfo::EStage)nextStage);
+				if (reqParCheck)
+				{
+					postInfo->SetRequestParCheck(true);
+				}
+				postInfo->SetWorking(false);
+			}
+		}
+	}
+
+	void DownloadQueueUpdate(void* aspect)
+	{
+		if (IsStopped())
+		{
+			return;
+		}
+
+		DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
+		if (queueAspect->action == DownloadQueue::eaNzbFound ||
+			queueAspect->action == DownloadQueue::eaUrlFound)
+		{
+			NzbFound(queueAspect->downloadQueue, queueAspect->nzbInfo);
+		}
+		else if (queueAspect->action == DownloadQueue::eaNzbAdded ||
+			queueAspect->action == DownloadQueue::eaUrlAdded)
+		{
+			NzbAdded(queueAspect->downloadQueue, queueAspect->nzbInfo);
+		}
+		else if (queueAspect->action == DownloadQueue::eaNzbNamed)
+		{
+			g_QueueScriptCoordinator->EnqueueScript(queueAspect->nzbInfo, QueueScriptCoordinator::qeNzbNamed);
+			CheckDownloadCompleted(queueAspect->downloadQueue, queueAspect->nzbInfo);
+		}
+		else if (queueAspect->action == DownloadQueue::eaNzbDeleted &&
+			queueAspect->nzbInfo->GetDeleting() &&
+			!queueAspect->nzbInfo->GetPostInfo() &&
+			queueAspect->nzbInfo->GetFileList()->empty())
+		{
+			// the deleting of nzbs is usually handled via eaFileDeleted-event, but when deleting nzb without
+			// any files left the eaFileDeleted-event is not fired and we need to process eaNzbDeleted-event instead
+			queueAspect->nzbInfo->PrintMessage(Message::mkInfo,
+				"Collection %s deleted from queue", queueAspect->nzbInfo->GetName());
+			NzbDeleted(queueAspect->downloadQueue, queueAspect->nzbInfo);
+		}
+		else if (queueAspect->action == DownloadQueue::eaUrlDeleted)
+		{
+			NzbDeleted(queueAspect->downloadQueue, queueAspect->nzbInfo);
+		}
+		else if (queueAspect->action == DownloadQueue::eaUrlFailed)
+		{
+			NzbCompleted(queueAspect->downloadQueue, queueAspect->nzbInfo, true);
+		}
+		else if (queueAspect->action == DownloadQueue::eaFileCompleted ||
+			queueAspect->action == DownloadQueue::eaFileDeleted)
+		{
+			if (queueAspect->action == DownloadQueue::eaFileCompleted)
+			{
+				FileDownloaded(queueAspect->downloadQueue, queueAspect->nzbInfo, queueAspect->fileInfo);
+			}
+
+	#ifndef DISABLE_PARCHECK
+			{
+				std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+				for (NzbInfo* postJob : m_activeJobs)
+				{
+					PostInfo* pjInfo = postJob ? postJob->GetPostInfo() : nullptr;
+					if (postJob &&
+						queueAspect->fileInfo->GetNzbInfo() == postJob &&
+						pjInfo &&
+						pjInfo->GetPostThread() &&
+						pjInfo->GetStage() >= PostInfo::ptLoadingPars &&
+						pjInfo->GetStage() <= PostInfo::ptVerifyingRepaired &&
+						((RepairController*)pjInfo->GetPostThread())->AddPar(
+							queueAspect->fileInfo, queueAspect->action == DownloadQueue::eaFileDeleted))
+					{
+						return;
+					}
+				}
+			}
+	#endif
+
+			int eventAction = nzbget_rs_prepost_classify_file_event(
+				queueAspect->action == DownloadQueue::eaFileCompleted ? 1 : 0,
+				queueAspect->action == DownloadQueue::eaFileDeleted ? 1 : 0,
+				queueAspect->fileInfo->GetDupeDeleted() ? 1 : 0,
+				(int)queueAspect->fileInfo->GetNzbInfo()->GetDeleteStatus(),
+				(int)NzbInfo::dsNone,
+				(int)NzbInfo::dsHealth,
+				queueAspect->nzbInfo->GetPostInfo() ? 1 : 0,
+				queueAspect->nzbInfo->IsDownloadCompleted(true) ? 1 : 0,
+				queueAspect->nzbInfo->IsDownloadCompleted(false) ? 1 : 0);
+			if (eventAction == 1)
+			{
+				queueAspect->nzbInfo->PrintMessage(Message::mkInfo,
+					"Collection %s completely downloaded", queueAspect->nzbInfo->GetName());
+				g_QueueScriptCoordinator->EnqueueScript(queueAspect->nzbInfo, QueueScriptCoordinator::qeNzbDownloaded);
+				NzbDownloaded(queueAspect->downloadQueue, queueAspect->nzbInfo);
+			}
+			else if (eventAction == 2)
+			{
+				queueAspect->nzbInfo->PrintMessage(Message::mkInfo,
+					"Collection %s deleted from queue", queueAspect->nzbInfo->GetName());
+				NzbDeleted(queueAspect->downloadQueue, queueAspect->nzbInfo);
+			}
+		}
+	}
+
+	void NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+	{
+		if (g_Options->GetDupeCheck() && nzbInfo->GetDupeMode() != dmForce)
+		{
+			g_DupeCoordinator->NzbFound(downloadQueue, nzbInfo);
+		}
+	}
+
+	void NzbDeleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+	{
+		if (nzbInfo->GetUnpackThread())
+		{
+			((DirectUnpack*)nzbInfo->GetUnpackThread())->NzbDeleted(downloadQueue, nzbInfo);
+		}
+
+		if (nzbInfo->GetLiveRepairThread())
+		{
+			// detach FIRST: the live pass re-checks attachment at every locked
+			// touchpoint and aborts without writing anything back
+			Thread* liveRepairThread = nzbInfo->GetLiveRepairThread();
+			nzbInfo->SetLiveRepairThread(nullptr);
+			liveRepairThread->Stop();
+		}
+
+		if (nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
+		{
+			nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
+		}
+		bool callDownloaded = nzbInfo->GetDeleteStatus() == NzbInfo::dsHealth ||
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsBad;
+		nzbInfo->SetDeleting(false);
+
+		DeleteCleanup(nzbInfo);
+
+		if (callDownloaded)
+		{
+			NzbDownloaded(downloadQueue, nzbInfo);
+		}
+		else
+		{
+			NzbCompleted(downloadQueue, nzbInfo, true);
+		}
+	}
+
+	void NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, bool saveQueue)
+	{
+		int addToHistoryInt = 0, callDupeCompletedInt = 0, enqueueDeletedScriptInt = 0, needSaveInt = 0;
+		nzbget_rs_prepost_eval_nzb_completed(
+			(int)nzbInfo->GetDupeHint(),
+			(int)NzbInfo::dhRedownloadAuto,
+			g_Options->GetKeepHistory(),
+			nzbInfo->GetAvoidHistory() ? 1 : 0,
+			g_Options->GetDupeCheck() ? 1 : 0,
+			(int)nzbInfo->GetDupeMode(),
+			(int)dmForce,
+			DupeCoordinator::FailsOver(nzbInfo) ? 1 : 0,
+			(int)nzbInfo->GetDeleteStatus(),
+			(int)NzbInfo::dsNone,
+			(int)NzbInfo::dsHealth,
+			(int)NzbInfo::dsBad,
+			(int)NzbInfo::dsScan,
+			(int)NzbInfo::dsCopy,
+			&addToHistoryInt,
+			&callDupeCompletedInt,
+			&enqueueDeletedScriptInt,
+			&needSaveInt);
+		bool addToHistory = addToHistoryInt != 0;
+		if (addToHistory)
+		{
+			g_HistoryCoordinator->AddToHistory(downloadQueue, nzbInfo);
+		}
+		nzbInfo->SetAvoidHistory(false);
+		bool needSave = needSaveInt != 0;
+		if (callDupeCompletedInt)
+		{
+			g_DupeCoordinator->NzbCompleted(downloadQueue, nzbInfo);
+			needSave = true;
+		}
+		if (enqueueDeletedScriptInt)
+		{
+			g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDeleted);
+		}
+
+		if (!addToHistory)
+		{
+			g_HistoryCoordinator->DeleteDiskFiles(nzbInfo);
+			ParDamage::Forget(nzbInfo->GetId());
+			downloadQueue->GetQueue()->Remove(nzbInfo);
+			// the removal must reach the disk: the saved queue may hold the download
+			// with its files already flagged deleted, which a restart before the next
+			// save brought back as a queued download without files (B42)
+			needSave = true;
+		}
+
+		if (saveQueue && needSave)
+		{
+			downloadQueue->Save();
+		}
+	}
+
+	void DeleteCleanup(NzbInfo* nzbInfo)
+	{
+		int cleanupMode = nzbget_rs_prepost_classify_delete_cleanup_mode(
+			nzbInfo->GetCleanupDisk() ? 1 : 0,
+			(int)nzbInfo->GetDeleteStatus(),
+			(int)NzbInfo::dsDupe,
+			nzbInfo->GetParking() ? 1 : 0,
+			nzbInfo->GetSkipDiskWrite() ? 1 : 0,
+			g_Options->GetSkipWrite() ? 1 : 0);
+		if (cleanupMode != 0)
+		{
+			if (cleanupMode == 1)
+			{
+				if (FileSystem::DirectoryExists(nzbInfo->GetDestDir()))
+				{
+					CString errmsg;
+					detail("Deleting dir %s", nzbInfo->GetDestDir());
+					if (!FileSystem::DeleteDirectoryWithContent(nzbInfo->GetDestDir(), errmsg))
+					{
+						error("Could not delete directory %s: %s", nzbInfo->GetDestDir(), *errmsg);
+					}
+				}
 				return;
 			}
 
-			EnterStage(downloadQueue, postInfo, PostInfo::ptLoadingPars);
-			postInfo->SetNeedParCheck(false);
-			RepairController::StartJob(postInfo);
-		}
-		else
-		{
-			nzbInfo->PrintMessage(Message::mkInfo,
-				"Nothing to par-check for %s", nzbInfo->GetName());
-			nzbInfo->SetParStatus(NzbInfo::psSkipped);
-		}
-		return;
-	}
-	
-	int skippedParAction = nzbget_rs_prepost_classify_skipped_par_health(
-		(int)nzbInfo->GetParStatus(),
-		(int)NzbInfo::psSkipped,
-		(int)g_Options->GetParScan(),
-		(int)Options::psDupe,
-		nzbInfo->CalcHealth(),
-		nzbInfo->CalcCriticalHealth(false),
-		nzbInfo->GetFailedSize(),
-		nzbInfo->GetParFailedSize());
-	if ((skippedParAction == 1 || skippedParAction == 2) &&
-		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
-	{
-		if (skippedParAction == 1)
-		{
-			nzbInfo->PrintMessage(Message::mkWarning,
-				"Skipping par-check for %s due to health 0%%", nzbInfo->GetName());
-		}
-		else
-		{
-			nzbInfo->PrintMessage(Message::mkWarning,
-				"Skipping par-check for %s due to health %.1f%% below critical %.1f%%",
-				nzbInfo->GetName(),
-				nzbInfo->CalcHealth() / 10.0,
-				nzbInfo->CalcCriticalHealth(false) / 10.0);
-		}
-		nzbInfo->SetParStatus(NzbInfo::psFailure);
-		return;
-	}
-	if (skippedParAction == 3 &&
-		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
-	{
-		nzbInfo->PrintMessage(Message::mkInfo,
-			"Collection %s with health %.1f%% needs par-check",
-			nzbInfo->GetName(),
-			nzbInfo->CalcHealth() / 10.0);
-		postInfo->SetRequestParCheck(true);
-		return;
-	}
-#endif
-
-	// Successful PAR sets remove the holes they actually protect. Remaining
-	// jobs may belong to unprotected files, or to a set that could not repair.
-	// Manual repair and sufficient parity with ParRepair=no remain user choices.
-	if (streamRepair &&
-		nzbInfo->GetParStatus() != NzbInfo::psRepairPossible &&
-		nzbInfo->GetParStatus() != NzbInfo::psManual)
-	{
-		EnterStage(downloadQueue, postInfo, PostInfo::ptStreamRepairing);
-		StreamRepairController::StartJob(postInfo);
-		return;
-	}
-
-	NzbParameter* unpackParameter = nzbInfo->GetParameters()->Find("*Unpack:");
-	int wantUnpackInt = 0;
-	int unpackInt = 0;
-	bool startRarRename = nzbget_rs_prepost_eval_want_unpack_and_rar_rename(
-		unpackParameter != nullptr ? 1 : 0,
-		unpackParameter ? unpackParameter->GetValue() : "",
-		(int)nzbInfo->GetUnpackStatus(),
-		(int)NzbInfo::usNone,
-		(int)nzbInfo->GetDeleteStatus(),
-		(int)NzbInfo::dsNone,
-		(int)nzbInfo->GetRarRenameStatus(),
-		(int)NzbInfo::rsNone,
-		g_Options->GetRarRename() ? 1 : 0,
-		&wantUnpackInt,
-		&unpackInt) != 0;
-	bool wantUnpack = wantUnpackInt != 0;
-	bool unpack = unpackInt != 0;
-	if (startRarRename)
-	{
-		EnterStage(downloadQueue, postInfo, PostInfo::ptRarRenaming);
-		RenameController::StartJob(postInfo, RenameController::jkRar);
-		return;
-	}
-
-#ifndef DISABLE_PARCHECK
-	if (nzbInfo->GetParStatus() == NzbInfo::psSkipped &&
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
-		g_Options->GetParCheck() == Options::pcAuto &&
-		!UnpackController::HasCompletedArchiveFiles(nzbInfo) &&
-		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
-	{
-		nzbInfo->PrintMessage(Message::mkInfo,
-			"Requesting par-check for collection %s without archive files",
-			nzbInfo->GetName());
-		postInfo->SetRequestParCheck(true);
-		return;
-	}
-#endif
-
-	NzbgetRsPostStageDecision stageDec{};
-	nzbget_rs_prepost_eval_post_stages(
-		wantUnpack ? 1 : 0,
-		(int)nzbInfo->GetUnpackStatus(),
-		(int)nzbInfo->GetDeleteStatus(),
-		(int)nzbInfo->GetParStatus(),
-		(int)nzbInfo->GetCleanupStatus(),
-		!Util::EmptyStr(g_Options->GetExtCleanupDisk()) ? 1 : 0,
-		nzbInfo->CalcHealth(),
-		(int)nzbInfo->GetMoveStatus(),
-		nzbInfo->GetDestDir(),
-		g_Options->GetInterDir(),
-		PATH_SEPARATOR,
-		(int)nzbInfo->GetDirectUnpackStatus(),
-		g_Options->GetPostDownloadRename() ? 1 : 0,
-		(int)nzbInfo->GetPostDownloadRenamingStatus(),
-		!Util::EmptyStr(nzbInfo->GetDestDir()) ? 1 : 0,
-		!Util::EmptyStr(nzbInfo->GetName()) ? 1 : 0,
-		g_Options->GetRenameAfterUnpack() ? 1 : 0,
-		(int)nzbInfo->GetPostUnpackRenamingStatus(),
-		&stageDec);
-	if (stageDec.skip_unpack_due_to_par)
-	{
-		nzbInfo->PrintMessage(Message::mkWarning,
-			"Skipping unpack for %s due to %s", nzbInfo->GetName(),
-			nzbInfo->GetParStatus() == NzbInfo::psManual ? "required par-repair" : "par-failure");
-		nzbInfo->SetUnpackStatus(NzbInfo::usSkipped);
-	}
-	unpack = stageDec.unpack != 0;
-	bool cleanup = stageDec.cleanup != 0;
-	bool moveInter = stageDec.move_inter != 0;
-	bool postDownloadRenaming = stageDec.post_download_renaming != 0;
-	bool postUnpackRenaming = stageDec.post_unpack_renaming != 0;
-
-	if (unpack)
-	{
-		if (HasActiveUnpack(downloadQueue))
-		{
-			postInfo->SetNeedUnpack(true);
-			return;
-		}
-		postInfo->SetNeedUnpack(false);
-		EnterStage(downloadQueue, postInfo, PostInfo::ptUnpacking);
-		UnpackController::StartJob(postInfo);
-	}
-	else if (cleanup)
-	{
-		EnterStage(downloadQueue, postInfo, PostInfo::ptCleaningUp);
-		CleanupController::StartJob(postInfo);
-	}
-	else if (moveInter)
-	{
-		EnterStage(downloadQueue, postInfo, PostInfo::ptMoving);
-		MoveController::StartJob(postInfo);
-	}
-	else if (postDownloadRenaming)
-	{
-		EnterStage(downloadQueue, postInfo, PostInfo::ptPostDownloadRenaming);
-		PostRenamerController::StartJob(postInfo, false);
-	}
-	else if (postUnpackRenaming)
-	{
-		EnterStage(downloadQueue, postInfo, PostInfo::ptPostUnpackRenaming);
-		PostRenamerController::StartJob(postInfo, true);
-	}
-	else
-	{
-		EnterStage(downloadQueue, postInfo, PostInfo::ptExecutingScript);
-		PostScriptController::StartJob(postInfo);
-	}
-}
-
-inline void PrePostProcessor::EnterStage(DownloadQueue* downloadQueue, PostInfo* postInfo, PostInfo::EStage stage)
-{
-	postInfo->SetWorking(true);
-	postInfo->SetStage(stage);
-}
-
-inline void PrePostProcessor::JobCompleted(DownloadQueue* downloadQueue, PostInfo* postInfo)
-{
-	NzbInfo* nzbInfo = postInfo->GetNzbInfo();
-
-	nzbInfo->LeavePostProcess();
-
-	if (nzbInfo->IsDownloadCompleted(true))
-	{
-		NzbCompleted(downloadQueue, nzbInfo, false);
-	}
-
-	std::lock_guard<std::mutex> guard(m_waitMutex);
-	m_queuedJobs--;
-}
-
-inline void PrePostProcessor::UpdatePauseState()
-{
-	bool needPause = false;
-	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-	std::vector<int> stages;
-	stages.reserve(m_activeJobs.size());
-	for (NzbInfo* postJob : m_activeJobs)
-	{
-		stages.push_back((int)postJob->GetPostInfo()->GetStage());
-	}
-	needPause = nzbget_rs_prepost_calc_post_pause_state(
-		stages.data(),
-		stages.size(),
-		g_Options->GetParPauseQueue() ? 1 : 0,
-		g_Options->GetUnpackPauseQueue() ? 1 : 0,
-		g_Options->GetScriptPauseQueue() ? 1 : 0) != 0;
-
-	if (needPause && !g_WorkState->GetTempPauseDownload())
-	{
-		info("Pausing download before post-processing");
-	}
-	else if (!needPause && g_WorkState->GetTempPauseDownload())
-	{
-		info("Unpausing download after post-processing");
-	}
-
-	g_WorkState->SetTempPauseDownload(needPause);
-}
-
-inline bool PrePostProcessor::EditList(DownloadQueue* downloadQueue, IdList* idList,
-	DownloadQueue::EEditAction action, const char* args)
-{
-	debug("Edit-command for post-processor received");
-	switch (action)
-	{
-		case DownloadQueue::eaPostDelete:
-			return PostQueueDelete(downloadQueue, idList);
-
-		default:
-			return false;
-	}
-}
-
-inline bool PrePostProcessor::PostQueueDelete(DownloadQueue* downloadQueue, IdList* idList)
-{
-	bool ok = false;
-
-	for (int id : *idList)
-	{
-		for (NzbInfo* nzbInfo: downloadQueue->GetQueue())
-		{
-			PostInfo* postInfo = nzbInfo->GetPostInfo();
-			if (postInfo && nzbInfo->GetId() == id)
+			// download was cancelled, deleting already downloaded files from disk
+			for (CompletedFile& completedFile: nzbInfo->GetCompletedFiles())
 			{
-				if (postInfo->GetWorking())
+				NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
+				BString<1024> fullFileName;
+				fullFileName.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+				nzbget_rs_free(fullFnBuf);
+				if (FileSystem::FileExists(fullFileName))
+				{
+					detail("Deleting file %s", completedFile.GetFilename());
+					FileSystem::DeleteFile(fullFileName);
+				}
+			}
+
+			// delete .out.tmp-files
+			DirBrowser dir(nzbInfo->GetDestDir());
+			while (const char* filename = dir.Next())
+			{
+				size_t fnLen = strlen(filename);
+				if (fnLen >= 8 && !strcmp(filename + fnLen - 8, ".out.tmp"))
+				{
+					NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+						nzbInfo->GetDestDir(), PATH_SEPARATOR, filename);
+					BString<1024> fullFilename;
+					fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+					nzbget_rs_free(fullFnBuf);
+					detail("Deleting file %s", filename);
+					FileSystem::DeleteFile(fullFilename);
+				}
+			}
+
+			// delete old directory (if empty)
+			FileSystem::DeleteDirectory(nzbInfo->GetDestDir());
+
+			// delete final directory (if empty)
+			const auto finalDir = nzbInfo->BuildFinalDirName();
+			if (nzbInfo->GetDestDir() != finalDir && FileSystem::DirectoryExists(finalDir))
+			{
+				FileSystem::DeleteDirectory(finalDir);
+			}
+		}
+	}
+
+	void CheckRequestPar(DownloadQueue* downloadQueue)
+	{
+	#ifndef DISABLE_PARCHECK
+		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+		for (NzbInfo* postJob : m_activeJobs)
+		{
+			PostInfo* postInfo = postJob->GetPostInfo();
+
+			int newForceParFull = postInfo->GetForceParFull() ? 1 : 0;
+			int reqAction = nzbget_rs_prepost_classify_request_par_action(
+				postInfo->GetRequestParCheck() ? 1 : 0,
+				(int)postInfo->GetNzbInfo()->GetParStatus(),
+				(int)NzbInfo::psSkipped,
+				postInfo->GetForceRepair() ? 1 : 0,
+				postInfo->GetNzbInfo()->GetParFull() ? 1 : 0,
+				(int)g_Options->GetParCheck(),
+				(int)Options::pcManual,
+				newForceParFull,
+				postInfo->GetNzbInfo()->GetFileList()->empty() ? 1 : 0,
+				&newForceParFull);
+			if (reqAction == 1)
+			{
+				postInfo->SetForceParFull(newForceParFull != 0);
+				postInfo->GetNzbInfo()->SetParStatus(NzbInfo::psNone);
+				postInfo->SetRequestParCheck(false);
+				postInfo->GetNzbInfo()->GetScriptStatuses()->clear();
+				postInfo->SetStage(PostInfo::ptQueued);
+				postInfo->SetWorking(false);
+			}
+			else if (reqAction == 2 || reqAction == 3)
+			{
+				postInfo->SetRequestParCheck(false);
+				postInfo->GetNzbInfo()->SetParStatus(NzbInfo::psManual);
+
+				if (reqAction == 2)
 				{
 					postInfo->GetNzbInfo()->PrintMessage(Message::mkInfo,
-						"Deleting active post-job %s", postInfo->GetNzbInfo()->GetName());
-					postInfo->SetDeleted(true);
-					if (postInfo->GetPostThread())
-					{
-						debug("Terminating post-process thread for %s", postInfo->GetNzbInfo()->GetName());
-						postInfo->GetPostThread()->Stop();
-						ok = true;
-					}
-					else if (postInfo->GetNzbInfo()->GetUnpackThread())
-					{
-						((DirectUnpack*)postInfo->GetNzbInfo()->GetUnpackThread())->NzbDeleted(downloadQueue, postInfo->GetNzbInfo());
-						ok = true;
-					}
-					else if (postInfo->GetNzbInfo()->GetLiveRepairThread())
-					{
-						// the job is waiting for a live stream-repair pass:
-						// detach first (the pass aborts at its next locked
-						// touchpoint without writing back), stop its fetches
-						// and release the job
-						Thread* liveRepairThread = postInfo->GetNzbInfo()->GetLiveRepairThread();
-						postInfo->GetNzbInfo()->SetLiveRepairThread(nullptr);
-						liveRepairThread->Stop();
-						postInfo->SetWorking(false);
-						ok = true;
-					}
-					else
-					{
-						error("Internal error in PrePostProcessor::QueueDelete");
-					}
+						"Downloading all remaining files for manual par-check for %s", postInfo->GetNzbInfo()->GetName());
+					downloadQueue->EditEntry(postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupResume, nullptr);
+					postInfo->SetStage(PostInfo::ptFinished);
 				}
 				else
 				{
 					postInfo->GetNzbInfo()->PrintMessage(Message::mkInfo,
-						"Deleting queued post-job %s", postInfo->GetNzbInfo()->GetName());
+						"There are no par-files remain for download for %s", postInfo->GetNzbInfo()->GetName());
+				}
+				postInfo->SetWorking(false);
+			}
+		}
+	#endif
+	}
 
-					JobCompleted(downloadQueue, postInfo);
+	void CleanupJobs(DownloadQueue* downloadQueue)
+	{
+		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+		m_activeJobs.erase(std::remove_if(m_activeJobs.begin(), m_activeJobs.end(),
+			[processor = this, downloadQueue](NzbInfo* postJob)
+			{
+				PostInfo* postInfo = postJob->GetPostInfo();
+				bool hasRunningThread = postInfo->GetPostThread() && postInfo->GetPostThread()->IsRunning();
+				int64_t curTime = (!postInfo->GetWorking() && !hasRunningThread && postInfo->GetStartTime() > 0)
+					? (int64_t)Util::CurrentTime()
+					: 0;
+				int updateTotalSec = 0;
+				int isCompleted = 0;
+				int newTotalSec = postJob->GetPostTotalSec();
+				if (nzbget_rs_prepost_eval_cleanup_job_state(
+					postInfo->GetWorking() ? 1 : 0,
+					hasRunningThread ? 1 : 0,
+					(int)postInfo->GetStage(),
+					(int)PostInfo::ptFinished,
+					postInfo->GetDeleted() ? 1 : 0,
+					(int64_t)postInfo->GetStartTime(),
+					curTime,
+					postJob->GetPostTotalSec(),
+					&updateTotalSec,
+					&isCompleted,
+					&newTotalSec) != 0)
+				{
+					delete postInfo->GetPostThread();
+					postInfo->SetPostThread(nullptr);
 
+					postInfo->SetStageTime(0);
+					postInfo->SetStageProgress(0);
+					postInfo->SetFileProgress(0);
+					postInfo->SetProgressLabel("");
+
+					if (updateTotalSec != 0)
 					{
-						std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-						m_activeJobs.erase(std::remove_if(m_activeJobs.begin(), m_activeJobs.end(),
-							[postInfo](NzbInfo* postJob)
-							{
-								return postInfo == postJob->GetPostInfo();
-							}),
-							m_activeJobs.end());
+						postJob->SetPostTotalSec(newTotalSec);
+						postInfo->SetStartTime(0);
 					}
 
-					ok = true;
+					if (isCompleted != 0)
+					{
+						processor->JobCompleted(downloadQueue, postInfo);
+					}
+					else
+					{
+						postInfo->SetStage(PostInfo::ptQueued);
+					}
+					return true;
 				}
+				return false;
+			}),
+			m_activeJobs.end());
+	}
+
+	bool CanRunMoreJobs(bool* allowPar)
+	{
+		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+		std::vector<int> stages;
+		stages.reserve(m_activeJobs.size());
+		for (NzbInfo* postJob : m_activeJobs)
+		{
+			stages.push_back((int)postJob->GetPostInfo()->GetStage());
+		}
+		int allowParInt = 0;
+		int canRun = nzbget_rs_prepost_can_run_more_jobs(
+			stages.data(),
+			stages.size(),
+			(int)PostInfo::ptLoadingPars,
+			(int)PostInfo::ptVerifyingRepaired,
+			(int)PostInfo::ptRepairing,
+			(int)g_Options->GetPostStrategy(),
+			&allowParInt);
+		*allowPar = allowParInt != 0;
+		return canRun != 0;
+	}
+
+	NzbInfo* PickNextJob(DownloadQueue* downloadQueue, bool allowPar)
+	{
+		NzbInfo* nzbInfo = nullptr;
+		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+
+		bool hasActiveUnpack = HasActiveUnpack(downloadQueue);
+
+		std::vector<NzbInfo*> items;
+		std::vector<NzbgetRsPostJobCandidate> candidates;
+		items.reserve(downloadQueue->GetQueue()->size());
+		candidates.reserve(downloadQueue->GetQueue()->size());
+		for (NzbInfo* nzbInfo1 : downloadQueue->GetQueue())
+		{
+			items.push_back(nzbInfo1);
+			NzbgetRsPostJobCandidate c{};
+			PostInfo* pi = nzbInfo1->GetPostInfo();
+			c.has_post_info = pi ? 1 : 0;
+			c.working = (pi && pi->GetWorking()) ? 1 : 0;
+			c.direct_unpack_running = nzbInfo1->GetDirectUnpackStatus() == NzbInfo::nsRunning ? 1 : 0;
+			c.has_live_repair_thread = nzbInfo1->GetLiveRepairThread() != nullptr ? 1 : 0;
+			c.priority = nzbInfo1->GetPriority();
+			c.force_priority = nzbInfo1->GetForcePriority() ? 1 : 0;
+			c.need_par_check = (pi && pi->GetNeedParCheck()) ? 1 : 0;
+			c.need_unpack = (pi && pi->GetNeedUnpack()) ? 1 : 0;
+			if (pi && !pi->GetWorking() && !c.direct_unpack_running && !c.has_live_repair_thread)
+			{
+				c.has_queue_script_job = g_QueueScriptCoordinator->HasJob(nzbInfo1->GetId(), nullptr) ? 1 : 0;
+				c.in_active_jobs = std::find(m_activeJobs.begin(), m_activeJobs.end(), nzbInfo1) != m_activeJobs.end() ? 1 : 0;
+				c.download_completed = nzbInfo1->IsDownloadCompleted(true) ? 1 : 0;
+			}
+			candidates.push_back(c);
+		}
+		int picked = nzbget_rs_prepost_pick_next_post_job(
+			candidates.data(),
+			candidates.size(),
+			allowPar ? 1 : 0,
+			hasActiveUnpack ? 1 : 0,
+			g_WorkState->GetPausePostProcess() ? 1 : 0);
+		if (picked >= 0 && (size_t)picked < items.size())
+		{
+			nzbInfo = items[(size_t)picked];
+		}
+
+		return nzbInfo;
+	}
+
+	void CheckPostQueue()
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+		size_t countBefore;
+		{
+			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+			countBefore = m_activeJobs.size();
+		}
+		CheckRequestPar(downloadQueue);
+		CleanupJobs(downloadQueue);
+		bool changed;
+		{
+			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+			changed = m_activeJobs.size() != countBefore;
+		}
+
+		bool allowPar;
+		while (CanRunMoreJobs(&allowPar) && !IsStopped())
+		{
+			NzbInfo* postJob = PickNextJob(downloadQueue, allowPar);
+			if (!postJob)
+			{
 				break;
 			}
-		}
-	}
 
-	if (ok)
-	{
-		downloadQueue->Save();
-	}
-
-	return ok;
-}
-
-inline void PrePostProcessor::FileDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, FileInfo* fileInfo)
-{
-	if (!nzbInfo->GetPostInfo())
-	{
-		g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeFileDownloaded);
-	}
-
-	int duAction = nzbget_rs_prepost_classify_file_downloaded_direct_unpack(
-		g_Options->GetDirectUnpack() ? 1 : 0,
-		g_Options->GetRawArticle() ? 1 : 0,
-		g_Options->GetSkipWrite() ? 1 : 0,
-		nzbInfo->GetSkipDiskWrite() ? 1 : 0,
-		(int)nzbInfo->GetDirectUnpackStatus(),
-		(int)NzbInfo::nsNone,
-		(int)NzbInfo::nsRunning,
-		(int)nzbInfo->GetDirectRenameStatus(),
-		(int)NzbInfo::tsRunning,
-		nzbInfo->GetUnpackThread() != nullptr ? 1 : 0);
-	if (duAction == 1)
-	{
-		bool allowPar;
-		if (DirectUnpack::IsArchiveFilename(fileInfo->GetFilename()) &&
-			CanRunMoreJobs(&allowPar) &&
-			!HasActiveUnpack(downloadQueue))
-		{
-			NzbParameter* unpackParameter = nzbInfo->GetParameters()->Find("*Unpack:");
-			bool wantUnpack = !unpackParameter || !strcasecmp(unpackParameter->GetValue(), "yes");
-			if (wantUnpack && nzbInfo->GetFailedArticles() == 0)
 			{
-				DirectUnpack::StartJob(nzbInfo);
+				std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+				m_activeJobs.push_back(postJob);
+			}
+
+			PostInfo* postInfo = postJob->GetPostInfo();
+			if (postInfo->GetStage() == PostInfo::ptQueued &&
+				(!g_WorkState->GetPausePostProcess() || postInfo->GetNzbInfo()->GetForcePriority()))
+			{
+				StartJob(downloadQueue, postInfo, allowPar);
+				CheckRequestPar(downloadQueue);
+				CleanupJobs(downloadQueue);
+				changed = true;
 			}
 		}
+
+		if (changed)
+		{
+			downloadQueue->Save();
+			UpdatePauseState();
+		}
+
+		{
+			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+			Util::SetStandByMode(m_activeJobs.empty());
+		}
 	}
-	else if (duAction == 2)
+
+	void StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo, bool allowPar)
 	{
-		((DirectUnpack*)nzbInfo->GetUnpackThread())->FileDownloaded(downloadQueue, fileInfo);
+		NzbInfo* nzbInfo = postInfo->GetNzbInfo();
+
+		if (!postInfo->GetStartTime())
+		{
+			postInfo->SetStartTime(Util::CurrentTime());
+		}
+		postInfo->SetStageTime(Util::CurrentTime());
+		postInfo->SetStageProgress(0);
+		postInfo->SetFileProgress(0);
+		postInfo->SetProgressLabel("");
+
+		if (nzbInfo->GetParRenameStatus() == NzbInfo::rsNone &&
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
+			g_Options->GetParRename())
+		{
+			EnterStage(downloadQueue, postInfo, PostInfo::ptParRenaming);
+			RenameController::StartJob(postInfo, RenameController::jkPar);
+			return;
+		}
+
+		bool streamRepair = g_Options->GetDupeArticleFallback() >= Options::dafStream &&
+			!nzbInfo->GetStreamRepairJobs()->empty() &&
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone;
+
+		// stream repair is the last option (B78): it can take longer than downloading
+		// a good backup whole, so with HealthCheck=dupe and a backup still untried in
+		// history the download fails over instead (par2 still gets its turn)
+		if (streamRepair && !postInfo->GetStreamRepairDone() &&
+			g_Options->GetHealthCheck() == Options::hcDupe &&
+			DupeCoordinator::FailsOver(nzbInfo) &&
+			g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+		{
+			nzbInfo->PrintMessage(Message::mkInfo,
+				"Not repairing %s from duplicates: a backup in history is tried first", nzbInfo->GetName());
+			streamRepair = false;
+		}
+
+	#ifndef DISABLE_PARCHECK
+		// A par-check that cannot succeed still reads the whole collection (and
+		// waits for every remaining par2-file): recover from duplicates first,
+		// par-check afterwards only if that wrote anything
+		if (streamRepair && !postInfo->GetStreamRepairDone() &&
+			nzbInfo->GetParStatus() == NzbInfo::psSkipped &&
+			g_Options->GetParCheck() == Options::pcAuto &&
+			ParCannotCover(nzbInfo) &&
+			ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+		{
+			nzbInfo->PrintMessage(Message::mkInfo,
+				"Par2 files of %s cannot cover its damage (health %.1f%%, critical %.1f%%), "
+				"recovering from duplicates before par-check",
+				nzbInfo->GetName(),
+				nzbInfo->CalcHealth() / 10.0,
+				nzbInfo->CalcCriticalHealth(false) / 10.0);
+			postInfo->SetParCannotCover(true);
+			EnterStage(downloadQueue, postInfo, PostInfo::ptStreamRepairing);
+			StreamRepairController::StartJob(postInfo);
+			return;
+		}
+
+		// Duplicates recovered nothing, so the damage is still beyond the par2
+		// files: report the failure instead of verifying a collection that
+		// cannot be repaired. Any byte ever recovered from duplicates (a live
+		// pass, or a pass interrupted by a restart) may have brought the damage
+		// within reach, so then par-check still runs.
+		if (postInfo->GetParCannotCover() && postInfo->GetStreamRepairDone() &&
+			!postInfo->GetStreamRepairRecovered() &&
+			nzbInfo->GetDupeRecoveredBytes() <= 0 &&
+			g_Options->GetParCheck() == Options::pcAuto &&
+			nzbInfo->GetParStatus() <= NzbInfo::psNone &&
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
+			!HasDupeScanSources(downloadQueue, nzbInfo) &&
+			ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+		{
+			nzbInfo->PrintMessage(Message::mkWarning,
+				"Skipping par-check for %s: its par2 files cannot cover the damage "
+				"(health %.1f%%, critical %.1f%%) and duplicates recovered nothing",
+				nzbInfo->GetName(),
+				nzbInfo->CalcHealth() / 10.0,
+				nzbInfo->CalcCriticalHealth(false) / 10.0);
+			nzbInfo->SetParStatus(NzbInfo::psFailure);
+			return;
+		}
+
+		// Captured holes are a fallback, not evidence that donor data is needed.
+		// Let the current PAR set verify and repair first, including auto mode
+		// which initially marks the check as skipped until damage is known.
+		if (streamRepair && nzbInfo->GetParStatus() == NzbInfo::psSkipped &&
+			ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+		{
+			postInfo->SetRequestParCheck(true);
+			return;
+		}
+
+		// damaged, and the par2-files downloaded so far all failed (a lost index file):
+		// any par2-volume carries the set's description too, so the smallest one held
+		// back is fetched, and the job waits for it (it isn't picked while files download)
+		if ((nzbInfo->GetParStatus() == NzbInfo::psNone || nzbInfo->GetParStatus() == NzbInfo::psSkipped) &&
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
+			nzbInfo->CalcHealth() < 1000 &&
+			!ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+		{
+			FileInfo* smallest = nullptr;
+			for (FileInfo* fileInfo : nzbInfo->GetFileList())
+			{
+				if (fileInfo->GetParFile() && fileInfo->GetPaused() && !fileInfo->GetDeleted() &&
+					(!smallest || fileInfo->GetSize() < smallest->GetSize()))
+				{
+					smallest = fileInfo;
+				}
+			}
+			if (smallest)
+			{
+				nzbInfo->PrintMessage(Message::mkInfo,
+					"No par2-file of %s on disk to check it with: unpausing %s", nzbInfo->GetName(), smallest->GetFilename());
+				smallest->SetPaused(false);
+				smallest->SetExtraPriority(true);
+				nzbInfo->SetChanged(true);
+				downloadQueue->SaveChanged();
+				return;
+			}
+		}
+
+		if (nzbInfo->GetParStatus() == NzbInfo::psNone &&
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
+		{
+			if (ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+			{
+				if (!allowPar)
+				{
+					postInfo->SetNeedParCheck(true);
+					return;
+				}
+
+				EnterStage(downloadQueue, postInfo, PostInfo::ptLoadingPars);
+				postInfo->SetNeedParCheck(false);
+				RepairController::StartJob(postInfo);
+			}
+			else
+			{
+				nzbInfo->PrintMessage(Message::mkInfo,
+					"Nothing to par-check for %s", nzbInfo->GetName());
+				nzbInfo->SetParStatus(NzbInfo::psSkipped);
+			}
+			return;
+		}
+	
+		int skippedParAction = nzbget_rs_prepost_classify_skipped_par_health(
+			(int)nzbInfo->GetParStatus(),
+			(int)NzbInfo::psSkipped,
+			(int)g_Options->GetParScan(),
+			(int)Options::psDupe,
+			nzbInfo->CalcHealth(),
+			nzbInfo->CalcCriticalHealth(false),
+			nzbInfo->GetFailedSize(),
+			nzbInfo->GetParFailedSize());
+		if ((skippedParAction == 1 || skippedParAction == 2) &&
+			ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+		{
+			if (skippedParAction == 1)
+			{
+				nzbInfo->PrintMessage(Message::mkWarning,
+					"Skipping par-check for %s due to health 0%%", nzbInfo->GetName());
+			}
+			else
+			{
+				nzbInfo->PrintMessage(Message::mkWarning,
+					"Skipping par-check for %s due to health %.1f%% below critical %.1f%%",
+					nzbInfo->GetName(),
+					nzbInfo->CalcHealth() / 10.0,
+					nzbInfo->CalcCriticalHealth(false) / 10.0);
+			}
+			nzbInfo->SetParStatus(NzbInfo::psFailure);
+			return;
+		}
+		if (skippedParAction == 3 &&
+			ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+		{
+			nzbInfo->PrintMessage(Message::mkInfo,
+				"Collection %s with health %.1f%% needs par-check",
+				nzbInfo->GetName(),
+				nzbInfo->CalcHealth() / 10.0);
+			postInfo->SetRequestParCheck(true);
+			return;
+		}
+	#endif
+
+		// Successful PAR sets remove the holes they actually protect. Remaining
+		// jobs may belong to unprotected files, or to a set that could not repair.
+		// Manual repair and sufficient parity with ParRepair=no remain user choices.
+		if (streamRepair &&
+			nzbInfo->GetParStatus() != NzbInfo::psRepairPossible &&
+			nzbInfo->GetParStatus() != NzbInfo::psManual)
+		{
+			EnterStage(downloadQueue, postInfo, PostInfo::ptStreamRepairing);
+			StreamRepairController::StartJob(postInfo);
+			return;
+		}
+
+		NzbParameter* unpackParameter = nzbInfo->GetParameters()->Find("*Unpack:");
+		int wantUnpackInt = 0;
+		int unpackInt = 0;
+		bool startRarRename = nzbget_rs_prepost_eval_want_unpack_and_rar_rename(
+			unpackParameter != nullptr ? 1 : 0,
+			unpackParameter ? unpackParameter->GetValue() : "",
+			(int)nzbInfo->GetUnpackStatus(),
+			(int)NzbInfo::usNone,
+			(int)nzbInfo->GetDeleteStatus(),
+			(int)NzbInfo::dsNone,
+			(int)nzbInfo->GetRarRenameStatus(),
+			(int)NzbInfo::rsNone,
+			g_Options->GetRarRename() ? 1 : 0,
+			&wantUnpackInt,
+			&unpackInt) != 0;
+		bool wantUnpack = wantUnpackInt != 0;
+		bool unpack = unpackInt != 0;
+		if (startRarRename)
+		{
+			EnterStage(downloadQueue, postInfo, PostInfo::ptRarRenaming);
+			RenameController::StartJob(postInfo, RenameController::jkRar);
+			return;
+		}
+
+	#ifndef DISABLE_PARCHECK
+		if (nzbInfo->GetParStatus() == NzbInfo::psSkipped &&
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
+			g_Options->GetParCheck() == Options::pcAuto &&
+			!UnpackController::HasCompletedArchiveFiles(nzbInfo) &&
+			ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+		{
+			nzbInfo->PrintMessage(Message::mkInfo,
+				"Requesting par-check for collection %s without archive files",
+				nzbInfo->GetName());
+			postInfo->SetRequestParCheck(true);
+			return;
+		}
+	#endif
+
+		NzbgetRsPostStageDecision stageDec{};
+		nzbget_rs_prepost_eval_post_stages(
+			wantUnpack ? 1 : 0,
+			(int)nzbInfo->GetUnpackStatus(),
+			(int)nzbInfo->GetDeleteStatus(),
+			(int)nzbInfo->GetParStatus(),
+			(int)nzbInfo->GetCleanupStatus(),
+			!Util::EmptyStr(g_Options->GetExtCleanupDisk()) ? 1 : 0,
+			nzbInfo->CalcHealth(),
+			(int)nzbInfo->GetMoveStatus(),
+			nzbInfo->GetDestDir(),
+			g_Options->GetInterDir(),
+			PATH_SEPARATOR,
+			(int)nzbInfo->GetDirectUnpackStatus(),
+			g_Options->GetPostDownloadRename() ? 1 : 0,
+			(int)nzbInfo->GetPostDownloadRenamingStatus(),
+			!Util::EmptyStr(nzbInfo->GetDestDir()) ? 1 : 0,
+			!Util::EmptyStr(nzbInfo->GetName()) ? 1 : 0,
+			g_Options->GetRenameAfterUnpack() ? 1 : 0,
+			(int)nzbInfo->GetPostUnpackRenamingStatus(),
+			&stageDec);
+		if (stageDec.skip_unpack_due_to_par)
+		{
+			nzbInfo->PrintMessage(Message::mkWarning,
+				"Skipping unpack for %s due to %s", nzbInfo->GetName(),
+				nzbInfo->GetParStatus() == NzbInfo::psManual ? "required par-repair" : "par-failure");
+			nzbInfo->SetUnpackStatus(NzbInfo::usSkipped);
+		}
+		unpack = stageDec.unpack != 0;
+		bool cleanup = stageDec.cleanup != 0;
+		bool moveInter = stageDec.move_inter != 0;
+		bool postDownloadRenaming = stageDec.post_download_renaming != 0;
+		bool postUnpackRenaming = stageDec.post_unpack_renaming != 0;
+
+		if (unpack)
+		{
+			if (HasActiveUnpack(downloadQueue))
+			{
+				postInfo->SetNeedUnpack(true);
+				return;
+			}
+			postInfo->SetNeedUnpack(false);
+			EnterStage(downloadQueue, postInfo, PostInfo::ptUnpacking);
+			UnpackController::StartJob(postInfo);
+		}
+		else if (cleanup)
+		{
+			EnterStage(downloadQueue, postInfo, PostInfo::ptCleaningUp);
+			CleanupController::StartJob(postInfo);
+		}
+		else if (moveInter)
+		{
+			EnterStage(downloadQueue, postInfo, PostInfo::ptMoving);
+			MoveController::StartJob(postInfo);
+		}
+		else if (postDownloadRenaming)
+		{
+			EnterStage(downloadQueue, postInfo, PostInfo::ptPostDownloadRenaming);
+			PostRenamerController::StartJob(postInfo, false);
+		}
+		else if (postUnpackRenaming)
+		{
+			EnterStage(downloadQueue, postInfo, PostInfo::ptPostUnpackRenaming);
+			PostRenamerController::StartJob(postInfo, true);
+		}
+		else
+		{
+			EnterStage(downloadQueue, postInfo, PostInfo::ptExecutingScript);
+			PostScriptController::StartJob(postInfo);
+		}
+	}
+
+	void EnterStage(DownloadQueue* downloadQueue, PostInfo* postInfo, PostInfo::EStage stage)
+	{
+		postInfo->SetWorking(true);
+		postInfo->SetStage(stage);
+	}
+
+	void JobCompleted(DownloadQueue* downloadQueue, PostInfo* postInfo)
+	{
+		NzbInfo* nzbInfo = postInfo->GetNzbInfo();
+
+		nzbInfo->LeavePostProcess();
+
+		if (nzbInfo->IsDownloadCompleted(true))
+		{
+			NzbCompleted(downloadQueue, nzbInfo, false);
+		}
+
+		std::lock_guard<std::mutex> guard(m_waitMutex);
+		m_queuedJobs--;
+	}
+
+	void UpdatePauseState()
+	{
+		bool needPause = false;
+		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+		std::vector<int> stages;
+		stages.reserve(m_activeJobs.size());
+		for (NzbInfo* postJob : m_activeJobs)
+		{
+			stages.push_back((int)postJob->GetPostInfo()->GetStage());
+		}
+		needPause = nzbget_rs_prepost_calc_post_pause_state(
+			stages.data(),
+			stages.size(),
+			g_Options->GetParPauseQueue() ? 1 : 0,
+			g_Options->GetUnpackPauseQueue() ? 1 : 0,
+			g_Options->GetScriptPauseQueue() ? 1 : 0) != 0;
+
+		if (needPause && !g_WorkState->GetTempPauseDownload())
+		{
+			info("Pausing download before post-processing");
+		}
+		else if (!needPause && g_WorkState->GetTempPauseDownload())
+		{
+			info("Unpausing download after post-processing");
+		}
+
+		g_WorkState->SetTempPauseDownload(needPause);
+	}
+
+	bool PostQueueDelete(DownloadQueue* downloadQueue, IdList* idList)
+	{
+		bool ok = false;
+
+		for (int id : *idList)
+		{
+			for (NzbInfo* nzbInfo: downloadQueue->GetQueue())
+			{
+				PostInfo* postInfo = nzbInfo->GetPostInfo();
+				if (postInfo && nzbInfo->GetId() == id)
+				{
+					if (postInfo->GetWorking())
+					{
+						postInfo->GetNzbInfo()->PrintMessage(Message::mkInfo,
+							"Deleting active post-job %s", postInfo->GetNzbInfo()->GetName());
+						postInfo->SetDeleted(true);
+						if (postInfo->GetPostThread())
+						{
+							debug("Terminating post-process thread for %s", postInfo->GetNzbInfo()->GetName());
+							postInfo->GetPostThread()->Stop();
+							ok = true;
+						}
+						else if (postInfo->GetNzbInfo()->GetUnpackThread())
+						{
+							((DirectUnpack*)postInfo->GetNzbInfo()->GetUnpackThread())->NzbDeleted(downloadQueue, postInfo->GetNzbInfo());
+							ok = true;
+						}
+						else if (postInfo->GetNzbInfo()->GetLiveRepairThread())
+						{
+							// the job is waiting for a live stream-repair pass:
+							// detach first (the pass aborts at its next locked
+							// touchpoint without writing back), stop its fetches
+							// and release the job
+							Thread* liveRepairThread = postInfo->GetNzbInfo()->GetLiveRepairThread();
+							postInfo->GetNzbInfo()->SetLiveRepairThread(nullptr);
+							liveRepairThread->Stop();
+							postInfo->SetWorking(false);
+							ok = true;
+						}
+						else
+						{
+							error("Internal error in PrePostProcessor::QueueDelete");
+						}
+					}
+					else
+					{
+						postInfo->GetNzbInfo()->PrintMessage(Message::mkInfo,
+							"Deleting queued post-job %s", postInfo->GetNzbInfo()->GetName());
+
+						JobCompleted(downloadQueue, postInfo);
+
+						{
+							std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+							m_activeJobs.erase(std::remove_if(m_activeJobs.begin(), m_activeJobs.end(),
+								[postInfo](NzbInfo* postJob)
+								{
+									return postInfo == postJob->GetPostInfo();
+								}),
+								m_activeJobs.end());
+						}
+
+						ok = true;
+					}
+					break;
+				}
+			}
+		}
+
+		if (ok)
+		{
+			downloadQueue->Save();
+		}
+
+		return ok;
+	}
+
+	void FileDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, FileInfo* fileInfo)
+	{
+		if (!nzbInfo->GetPostInfo())
+		{
+			g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeFileDownloaded);
+		}
+
+		int duAction = nzbget_rs_prepost_classify_file_downloaded_direct_unpack(
+			g_Options->GetDirectUnpack() ? 1 : 0,
+			g_Options->GetRawArticle() ? 1 : 0,
+			g_Options->GetSkipWrite() ? 1 : 0,
+			nzbInfo->GetSkipDiskWrite() ? 1 : 0,
+			(int)nzbInfo->GetDirectUnpackStatus(),
+			(int)NzbInfo::nsNone,
+			(int)NzbInfo::nsRunning,
+			(int)nzbInfo->GetDirectRenameStatus(),
+			(int)NzbInfo::tsRunning,
+			nzbInfo->GetUnpackThread() != nullptr ? 1 : 0);
+		if (duAction == 1)
+		{
+			bool allowPar;
+			if (DirectUnpack::IsArchiveFilename(fileInfo->GetFilename()) &&
+				CanRunMoreJobs(&allowPar) &&
+				!HasActiveUnpack(downloadQueue))
+			{
+				NzbParameter* unpackParameter = nzbInfo->GetParameters()->Find("*Unpack:");
+				bool wantUnpack = !unpackParameter || !strcasecmp(unpackParameter->GetValue(), "yes");
+				if (wantUnpack && nzbInfo->GetFailedArticles() == 0)
+				{
+					DirectUnpack::StartJob(nzbInfo);
+				}
+			}
+		}
+		else if (duAction == 2)
+		{
+			((DirectUnpack*)nzbInfo->GetUnpackThread())->FileDownloaded(downloadQueue, fileInfo);
+		}
+	}
+};
+
+inline void DirectUnpack::Stop(DownloadQueue* /*downloadQueue*/, NzbInfo* nzbInfo)
+{
+	debug("Stopping %s", *m_infoName);
+	if (!(g_PrePostProcessor && g_PrePostProcessor->IsStopped()))
+	{
+		m_cancelled = true;
+	}
+	if (m_processed)
+	{
+		if (nzbInfo)
+		{
+			nzbInfo->AddMessage(Message::mkWarning, BString<1024>("Cancelling %s", *m_infoName));
+		}
+		else
+		{
+			warn("Cancelling %s", *m_infoName);
+		}
+	}
+	if (nzbInfo)
+	{
+		AddExtraTime(nzbInfo);
+		if (nzbInfo->GetPostInfo() && !nzbInfo->GetLiveRepairThread())
+		{
+			nzbInfo->GetPostInfo()->SetWorking(false);
+		}
+	}
+	Thread::Stop();
+	bool isExecThread = std::this_thread::get_id() == m_execThreadId.load();
+	if (m_unpacking)
+	{
+		if (!isExecThread && !m_cancelled && HasActiveProcess() && Break())
+		{
+			for (int i = 0; i < 50 && m_unpacking && HasActiveProcess(); ++i)
+			{
+				Util::Sleep(100);
+			}
+		}
+		if (m_unpacking)
+		{
+			Terminate();
+		}
 	}
 }
-
 #endif
 
 class Scanner;

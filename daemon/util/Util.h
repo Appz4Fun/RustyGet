@@ -19079,20 +19079,15 @@ public:
 		adFatalError
 	};
 
-	ArticleDownloader();
-	virtual ~ArticleDownloader();
+
 	void SetFileInfo(FileInfo* fileInfo) { m_fileInfo = fileInfo; }
 	FileInfo* GetFileInfo() { return m_fileInfo; }
 	void SetArticleInfo(ArticleInfo* articleInfo) { m_articleInfo = articleInfo; }
 	ArticleInfo* GetArticleInfo() { return m_articleInfo; }
 	EStatus GetStatus() { return m_status; }
 	ServerStatList* GetServerStats() { return &m_serverStats; }
-	void Run() override;
-	void Stop() override;
 	time_t GetLastUpdateTime() { return m_lastUpdateTime; }
-	void SetLastUpdateTimeNow();
 	const char* GetArticleFilename() { return m_articleFilename; }
-	void SetInfoName(const char* infoName);
 	const char* GetInfoName() { return m_infoName; }
 	const char* GetConnectionName() { return m_connectionName; }
 	void SetConnection(NntpConnection* connection) { m_connection = connection; }
@@ -19102,7 +19097,400 @@ public:
 	void SetContentAnalyzer(std::unique_ptr<ArticleContentAnalyzer> contentAnalyzer) { m_contentAnalyzer = std::move(contentAnalyzer); }
 	ArticleContentAnalyzer* GetContentAnalyzer() { return m_contentAnalyzer.get(); }
 
-	void LogDebugInfo();
+	ArticleDownloader() : m_fileInfo(nullptr) , m_articleInfo(nullptr) , m_writingStarted(false)
+	{
+		debug("Creating ArticleDownloader");
+
+		SetLastUpdateTimeNow();
+	}
+
+	virtual ~ArticleDownloader()
+	{
+		debug("Destroying ArticleDownloader");
+
+	#ifndef DISABLE_TLS
+		OpenSSL::StopSSLThread();
+	#endif
+	}
+
+	void SetInfoName(const char* infoName)
+	{
+		m_infoName = infoName;
+		m_articleWriter.SetInfoName(m_infoName);
+	}
+
+	void Run() override
+	{
+		debug("Entering ArticleDownloader-loop");
+
+		SetStatus(adRunning);
+
+		m_articleWriter.SetFileInfo(m_fileInfo);
+		m_articleWriter.SetArticleInfo(m_articleInfo);
+		m_articleWriter.Prepare();
+
+		EStatus status = adFailed;
+		int retries = g_Options->GetArticleRetries() > 0 ? g_Options->GetArticleRetries() : 1;
+		int remainedRetries = retries;
+		std::unique_ptr<NzbgetRsTransientRetries, decltype(&nzbget_rs_transient_retries_free)> transientRetries(
+			nzbget_rs_transient_retries_new(retries, g_Options->GetArticleInterval()),
+			nzbget_rs_transient_retries_free);
+		ServerPool::RawServerList failedServers;
+		failedServers.reserve(g_ServerPool->GetServers()->size());
+		NewsServer* wantServer = nullptr;
+		NewsServer* lastServer = nullptr;
+		int level = 0;
+		int serverConfigGeneration = g_ServerPool->GetGeneration();
+		bool force = m_fileInfo->GetNzbInfo()->GetForcePriority();
+
+		while (!IsStopped())
+		{
+			status = adFailed;
+
+			SetStatus(adWaiting);
+			while (!m_connection && !IsStopped() && serverConfigGeneration == g_ServerPool->GetGeneration())
+			{
+				if (nzbget_rs_transient_retries_is_empty(transientRetries.get()) != 0)
+				{
+					m_connection = g_ServerPool->GetConnection(level, wantServer, &failedServers);
+				}
+				else
+				{
+					ServerPool::RawServerList ignoreServers = failedServers;
+					std::vector<uintptr_t> waitingPtrs(g_ServerPool->GetServers()->size());
+					size_t waitingCount = nzbget_rs_transient_retries_waiting_servers(
+						transientRetries.get(), (int64)Util::CurrentTime(),
+						waitingPtrs.data(), waitingPtrs.size());
+					bool wantServerWaiting = false;
+					for (size_t wi = 0; wi < waitingCount; ++wi)
+					{
+						NewsServer* waitingServer = reinterpret_cast<NewsServer*>(waitingPtrs[wi]);
+						ignoreServers.push_back(waitingServer);
+						if (waitingServer == wantServer)
+						{
+							wantServerWaiting = true;
+						}
+					}
+					if (!wantServerWaiting)
+					{
+						m_connection = g_ServerPool->GetConnection(level, wantServer, &ignoreServers);
+					}
+				}
+				Util::Sleep(5);
+			}
+			SetLastUpdateTimeNow();
+			SetStatus(adRunning);
+
+			if (IsStopped() ||
+				((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
+				(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
+				serverConfigGeneration != g_ServerPool->GetGeneration())
+			{
+				status = adRetry;
+				break;
+			}
+
+			lastServer = m_connection->GetNewsServer();
+			level = lastServer->GetNormLevel();
+			remainedRetries = nzbget_rs_transient_retries_remained_retries(
+				transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer));
+
+			m_connection->SetSuppressErrors(false);
+
+	#ifndef DISABLE_TLS
+			m_connection->SetCertVerifLevel(lastServer->GetCertVerificationLevel());
+	#endif
+
+			{
+				NzbgetRsBuf connNameBuf = nzbget_rs_dqh_article_dl_format_connection_name(
+					m_connection->GetNewsServer()->GetName(), m_connection->GetHost());
+				m_connectionName.Set(connNameBuf.data ? connNameBuf.data : "", (int)connNameBuf.len);
+				nzbget_rs_free(connNameBuf);
+			}
+
+			// check server retention
+			int fileAgeDays = 0;
+			bool retentionFailure = nzbget_rs_nntp_article_dl_is_retention_failure(
+				m_connection->GetNewsServer()->GetRetention(),
+				(int64)m_fileInfo->GetTime(),
+				(int64)Util::CurrentTime(),
+				&fileAgeDays) != 0;
+			if (retentionFailure)
+			{
+				detail("Article %s @ %s failed: out of server retention (file age: %i, configured retention: %i)",
+					*m_infoName, *m_connectionName, fileAgeDays,
+					m_connection->GetNewsServer()->GetRetention());
+				status = adFailed;
+				FreeConnection(true);
+			}
+
+			if (m_connection && !IsStopped())
+			{
+				detail("Downloading %s @ %s", *m_infoName, *m_connectionName);
+			}
+
+			// test connection
+			bool connected = m_connection && m_connection->Connect();
+			bool transientRetryScheduled = false;
+			bool authRejected = false;
+			if (!connected && m_connection && m_connection->GetAuthRejected())
+			{
+				if (nzbget_rs_transient_retries_register(
+					transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer), (int64)Util::CurrentTime()) != 0)
+				{
+					transientRetryScheduled = true;
+				}
+				else
+				{
+					authRejected = true;
+				}
+			}
+			if (connected && !IsStopped())
+			{
+				NewsServer* newsServer = m_connection->GetNewsServer();
+
+				// Download article
+				status = Download();
+
+				if (status == adTransientError)
+				{
+					if (nzbget_rs_transient_retries_register(
+						transientRetries.get(), reinterpret_cast<uintptr_t>(newsServer), (int64)Util::CurrentTime()) != 0)
+					{
+						status = adConnectError;
+						transientRetryScheduled = true;
+					}
+					else
+					{
+						status = adFailed;
+						remainedRetries = 0;
+					}
+				}
+
+				int success = 0, failed = 0;
+				if (nzbget_rs_nntp_article_dl_classify_attempt_stat(
+					(int)status,
+					(int)adFinished,
+					(int)adFailed,
+					(int)adNotFound,
+					(int)adCrcError,
+					&success,
+					&failed) != 0)
+				{
+					int serverId = newsServer->GetId();
+					m_serverStats.StatOp(serverId, success, failed, ServerStatList::soSet);
+					ServerVolume::Stats stats;
+					stats.bytes = 0;
+					stats.articles.failed = failed;
+					stats.articles.success = success;
+					g_StatMeter->AddServerStats(stats, serverId);
+				}
+			}
+
+			if (m_connection)
+			{
+				AddServerStats();
+			}
+
+			{
+				int shouldBreak = 0;
+				int statusInt = (int)status;
+				int crInt = m_contentRejected ? 1 : 0;
+				if (nzbget_rs_nntp_article_dl_handle_content_rejected(
+					crInt,
+					m_articleInfo->GetDupeFallbackRound(),
+					statusInt,
+					(int)adFailed,
+					remainedRetries,
+					&shouldBreak,
+					&statusInt,
+					&crInt,
+					&remainedRetries) != 0)
+				{
+					FreeConnection(false);
+					status = (EStatus)statusInt;
+					if (shouldBreak != 0)
+					{
+						break;
+					}
+					m_contentRejected = crInt != 0;
+				}
+			}
+
+			if (!connected && m_connection)
+			{
+				detail("Article %s @ %s failed: could not establish connection", *m_infoName, *m_connectionName);
+			}
+
+			int connInt = connected ? 1 : 0;
+			int statusInt = (int)status;
+			nzbget_rs_nntp_article_dl_normalize_connect_and_decrement_retries(
+				connInt, statusInt, (int)adConnectError, (int)adFailed, remainedRetries,
+				&connInt, &statusInt, &remainedRetries);
+			connected = connInt != 0;
+			status = (EStatus)statusInt;
+			nzbget_rs_transient_retries_set_remained_retries(
+				transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer), remainedRetries);
+
+			bool optionalBlocked = false;
+			if (!connected && m_connection && !IsStopped())
+			{
+				g_ServerPool->BlockServer(lastServer);
+				optionalBlocked = lastServer->GetOptional();
+			}
+
+			wantServer = nullptr;
+			if (connected && status == adFailed && remainedRetries > 0 && !retentionFailure)
+			{
+				wantServer = lastServer;
+			}
+			else
+			{
+				FreeConnection(status == adFinished || status == adNotFound);
+				if (transientRetryScheduled && m_fileInfo->GetNzbInfo()->HasDesiredServer())
+				{
+					wantServer = lastServer;
+				}
+			}
+
+			if (nzbget_rs_dqh_article_dl_is_terminal_loop_status(
+				(int)status, (int)adFinished, (int)adFatalError) != 0)
+			{
+				break;
+			}
+
+			if (IsStopped() ||
+				((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
+				(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
+				serverConfigGeneration != g_ServerPool->GetGeneration())
+			{
+				status = adRetry;
+				break;
+			}
+
+			if (nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
+				wantServer ? 1 : 0,
+				m_fileInfo->GetNzbInfo()->HasDesiredServer() ? 1 : 0) != 0)
+			{
+				status = adFailed;
+				break;
+			}
+
+			int pushFailedServer = 0;
+			if (nzbget_rs_nntp_article_dl_should_advance_server_list(
+				wantServer ? 1 : 0,
+				connected ? 1 : 0,
+				retentionFailure ? 1 : 0,
+				optionalBlocked ? 1 : 0,
+				authRejected ? 1 : 0,
+				&pushFailedServer) != 0)
+			{
+				if (pushFailedServer)
+				{
+					failedServers.push_back(lastServer);
+				}
+
+				size_t candCount = g_ServerPool->GetServers()->size();
+				std::vector<int32_t> candIds(candCount), candLevels(candCount), candGroups(candCount);
+				std::vector<uint8_t> candAvail(candCount);
+				size_t ci = 0;
+				for (NewsServer* candidateServer : g_ServerPool->GetServers())
+				{
+					candIds[ci] = candidateServer->GetId();
+					candLevels[ci] = candidateServer->GetNormLevel();
+					candGroups[ci] = candidateServer->GetGroup();
+					candAvail[ci] = (uint8_t)nzbget_rs_dqh_article_dl_is_server_available(
+						candidateServer->GetActive() ? 1 : 0,
+						candidateServer->GetMaxConnections(),
+						candidateServer->GetOptional() ? 1 : 0,
+						(candidateServer->GetOptional() && g_ServerPool->IsServerBlocked(candidateServer)) ? 1 : 0);
+					++ci;
+				}
+				size_t failCount = failedServers.size();
+				std::vector<int32_t> failIds(failCount), failLevels(failCount), failGroups(failCount);
+				for (size_t fi = 0; fi < failCount; ++fi)
+				{
+					failIds[fi] = failedServers[fi]->GetId();
+					failLevels[fi] = failedServers[fi]->GetNormLevel();
+					failGroups[fi] = failedServers[fi]->GetGroup();
+				}
+				bool allServersOnLevelFailed = nzbget_rs_nntp_article_dl_all_servers_on_level_failed(
+					level, candIds.data(), candLevels.data(), candGroups.data(), candAvail.data(), candCount,
+					failIds.data(), failLevels.data(), failGroups.data(), failCount) != 0;
+
+				int advanceLevel = 0;
+				int newLevel = level;
+				int breakAllFailed = 0;
+				nzbget_rs_nntp_article_dl_eval_level_exhaustion(
+					allServersOnLevelFailed ? 1 : 0, level, g_ServerPool->GetMaxNormLevel(),
+					&advanceLevel, &newLevel, &breakAllFailed);
+				if (advanceLevel != 0)
+				{
+					detail("Article %s @ all level %i servers failed, increasing level", *m_infoName, level);
+					level = newLevel;
+				}
+				else if (breakAllFailed != 0)
+				{
+					detail("Article %s @ all servers failed", *m_infoName);
+					status = adFailed;
+					break;
+				}
+
+				remainedRetries = retries;
+			}
+		}
+
+		FreeConnection(status == adFinished);
+
+		bool stopped = IsStopped();
+		status = (EStatus)nzbget_rs_nntp_article_dl_resolve_final_status(
+			(int)status,
+			m_articleWriter.GetDuplicate() ? 1 : 0,
+			stopped ? 1 : 0,
+			(int)adFinished, (int)adFailed, (int)adRetry, (int)adFatalError);
+		if (stopped)
+		{
+			detail("Download %s cancelled", *m_infoName);
+		}
+
+		if (status == adFailed && nzbget_rs_transient_retries_is_exhausted(transientRetries.get()) != 0)
+		{
+			detail("Download %s failed: temporary server errors outlasted all attempts, the article may still exist", *m_infoName);
+		}
+		else if (status == adFailed)
+		{
+			detail("Download %s failed", *m_infoName);
+		}
+
+		SetStatus(status);
+		Notify(nullptr);
+
+		debug("Exiting ArticleDownloader-loop");
+	}
+
+	void SetLastUpdateTimeNow()
+	{
+		m_lastUpdateTime = Util::CurrentTime();
+	}
+
+	void LogDebugInfo()
+	{
+		info("      Download: status=%i, LastUpdateTime=%s, InfoName=%s", m_status,
+			 *Util::FormatTime(m_lastUpdateTime.load()), *m_infoName);
+	}
+
+	void Stop() override
+	{
+		debug("Trying to stop ArticleDownloader");
+		Thread::Stop();
+		Guard guard(m_connectionMutex);
+		if (m_connection)
+		{
+			m_connection->SetSuppressErrors(true);
+			m_connection->Cancel();
+		}
+		debug("ArticleDownloader stopped successfully");
+	}
 
 private:
 	FileInfo* m_fileInfo;
@@ -19126,15 +19514,326 @@ private:
 	int64 m_decodedFileSize = 0;
 	std::unique_ptr<ArticleContentAnalyzer> m_contentAnalyzer;
 
-	EStatus Download();
-	EStatus DecodeCheck();
-	void FreeConnection(bool keepConnected);
-	EStatus CheckResponse(const char* response, const char* comment);
 	void SetStatus(EStatus status) { m_status = status; }
-	bool Write(char* buffer, int len);
-	void AddServerStats();
-};
 
+	EStatus Download()
+	{
+		const char* response = nullptr;
+		EStatus status = adRunning;
+		m_writingStarted = false;
+		m_localWriteError = false;
+		m_contentRejected = false;
+		m_articleInfo->SetCrc(0);
+
+		if (m_contentAnalyzer)
+		{
+			m_contentAnalyzer->Reset();
+		}
+
+		if (m_connection->GetNewsServer()->GetJoinGroup() && !m_fileInfo->GetGroups()->empty())
+		{
+			for (CString& group : m_fileInfo->GetGroups())
+			{
+				response = m_connection->JoinGroup(group);
+				if (nzbget_rs_nntp_article_dl_is_join_group_ok(response) != 0)
+				{
+					break;
+				}
+			}
+
+			status = CheckResponse(response, "could not join group");
+			if (status != adFinished)
+			{
+				return status;
+			}
+		}
+
+		// retrieve article
+		{
+			NzbgetRsBuf cmdBuf = nzbget_rs_dqh_article_dl_format_fetch_command(
+				g_Options->GetRawArticle() ? 1 : 0, m_articleInfo->GetMessageId());
+			response = m_connection->Request(cmdBuf.data ? cmdBuf.data : "");
+			nzbget_rs_free(cmdBuf);
+		}
+
+		status = CheckResponse(response, "could not fetch article");
+		if (status != adFinished)
+		{
+			return status;
+		}
+
+		m_decoder.Clear();
+		m_decoder.SetCrcCheck(g_Options->GetCrcCheck());
+		m_decoder.SetRawMode(g_Options->GetRawArticle());
+
+		status = adRunning;
+		int readChunk = g_Options->GetArticleReadChunkSize();
+		CharBuffer lineBuf(readChunk + 128);
+
+		while (nzbget_rs_dqh_article_dl_should_continue_read_loop(
+			IsStopped() ? 1 : 0, m_decoder.GetEof() ? 1 : 0) != 0)
+		{
+			if (!IsStopped() && !m_articleWriter.HasCachedBuffer() &&
+				g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL &&
+				g_ArticleCache && g_ArticleCache->GetFlushing())
+			{
+				Util::Sleep(10);
+			}
+
+			// throttle the bandwidth
+			while (!IsStopped() && (g_WorkState->GetSpeedLimit() > 0.0f) &&
+				(g_StatMeter->CalcCurrentDownloadSpeed() > g_WorkState->GetSpeedLimit() ||
+				 g_StatMeter->CalcMomentaryDownloadSpeed() > g_WorkState->GetSpeedLimit()))
+			{
+				SetLastUpdateTimeNow();
+				Util::Sleep(10);
+			}
+
+			char* buffer;
+			int len;
+			m_connection->ReadBuffer(&buffer, &len);
+			if (len == 0)
+			{
+				len = m_connection->TryRecv(lineBuf, readChunk);
+				buffer = lineBuf;
+			}
+
+			// have we encountered a timeout?
+			if (len <= 0)
+			{
+				if (!IsStopped())
+				{
+					detail("Article %s @ %s failed: Unexpected end of article", *m_infoName, *m_connectionName);
+				}
+				m_connection->SetBroken();
+				m_connection->Disconnect();
+				status = adFailed;
+				break;
+			}
+
+			g_StatMeter->AddSpeedReading(len);
+			time_t oldTime = m_lastUpdateTime;
+			SetLastUpdateTimeNow();
+			if (oldTime != m_lastUpdateTime)
+			{
+				AddServerStats();
+			}
+
+			// decode article data
+			len = m_decoder.DecodeBuffer(buffer, len);
+
+			// write to output file
+			if (len > 0 && !Write(buffer, len))
+			{
+				int crInt = 0;
+				status = (EStatus)nzbget_rs_nntp_article_dl_classify_write_failure(
+					m_localWriteError ? 1 : 0, (int)adFatalError, (int)adFailed, &crInt);
+				if (crInt != 0)
+				{
+					m_contentRejected = true;
+				}
+				break;
+			}
+		}
+
+		if (IsStopped())
+		{
+			status = adFailed;
+		}
+
+		if (nzbget_rs_dqh_article_dl_should_run_decode_check(
+			(int)status, (int)adRunning) != 0)
+		{
+			FreeConnection(true);
+			status = DecodeCheck();
+		}
+
+		if (m_writingStarted)
+		{
+			m_articleWriter.Finish(status == adFinished);
+		}
+
+		if (status == adFinished)
+		{
+			detail("Successfully downloaded %s", *m_infoName);
+		}
+
+		return status;
+	}
+
+	EStatus CheckResponse(const char* response, const char* comment)
+	{
+		EStatus status = (EStatus)nzbget_rs_article_downloader_check_response(
+			response, m_connection->GetAuthError() ? 1 : 0);
+		if (status != adFinished)
+		{
+			if (!response)
+			{
+				if (!IsStopped())
+				{
+					detail("Article %s @ %s failed, %s: Connection closed by remote host",
+						*m_infoName, *m_connectionName, comment);
+				}
+			}
+			else
+			{
+				detail("Article %s @ %s failed, %s: %s", *m_infoName, *m_connectionName, comment, response);
+			}
+		}
+		return status;
+	}
+
+	bool Write(char* buffer, int len)
+	{
+		const char* articleFilename = nullptr;
+		int64 articleFileSize = 0;
+		int64 articleOffset = 0;
+		int articleSize = 0;
+
+		if (!m_writingStarted)
+		{
+			if (!g_Options->GetRawArticle())
+			{
+				articleFilename = m_decoder.GetArticleFilename();
+				if (m_decoder.GetFormat() == Decoder::efYenc)
+				{
+					int64 beginPos = m_decoder.GetBeginPos();
+					int64 endPos = m_decoder.GetEndPos();
+					articleFileSize = m_decoder.GetSize();
+					int64 expectedFileSize = m_fileInfo->GetDecodedFileSize();
+					int64 dupeExpectedOffset = m_articleInfo->GetDupeExpectedOffset();
+					int64 dupeExpectedEnd = m_articleInfo->GetDupeExpectedEnd();
+					int rc = nzbget_rs_article_downloader_validate_yenc(
+						beginPos, endPos, articleFileSize, expectedFileSize,
+						m_articleInfo->GetDupeFallbackRound(), dupeExpectedOffset, dupeExpectedEnd,
+						&articleOffset, &articleSize);
+					if (rc == 1)
+					{
+						return false;
+					}
+					if (rc == 2)
+					{
+						warn("Malformed article %s: range %lli-%lli out of range (file size %lli)", *m_infoName,
+							(long long)beginPos, (long long)endPos, (long long)articleFileSize);
+						return false;
+					}
+					m_decodedFileSize = articleFileSize;
+					if (rc == 3)
+					{
+						detail("Discarding article %s from duplicate: file size mismatch (%lli vs %lli)",
+							*m_infoName, (long long)articleFileSize, (long long)expectedFileSize);
+						return false;
+					}
+					if (rc == 4)
+					{
+						detail("Discarding article %s from duplicate: decoded offset mismatch (%lli vs %lli)",
+							*m_infoName, (long long)(beginPos - 1), (long long)dupeExpectedOffset);
+						return false;
+					}
+					if (rc == 5)
+					{
+						detail("Discarding article %s from duplicate: decoded end mismatch (%lli vs %lli)",
+							*m_infoName, (long long)endPos, (long long)dupeExpectedEnd);
+						return false;
+					}
+				}
+			}
+
+			if (!m_articleWriter.Start(m_decoder.GetFormat(), articleFilename, articleFileSize, articleOffset, articleSize))
+			{
+				m_localWriteError = true;
+				return false;
+			}
+			m_writingStarted = true;
+		}
+
+		bool ok = m_articleWriter.Write(buffer, len);
+		if (!ok)
+		{
+			m_localWriteError = true;
+		}
+
+		if (m_contentAnalyzer)
+		{
+			m_contentAnalyzer->Append(buffer, len);
+		}
+
+		return ok;
+	}
+
+	EStatus DecodeCheck()
+	{
+		bool rawArticle = g_Options->GetRawArticle();
+		if (rawArticle)
+		{
+			return adFinished;
+		}
+		Decoder::EStatus status = m_decoder.Check();
+		bool isYenc = m_decoder.GetFormat() == Decoder::efYenc;
+		switch (nzbget_rs_nntp_article_dl_classify_decode_status(
+			0, (int)status, isYenc ? 1 : 0, m_articleWriter.GetRangeExceeded() ? 1 : 0))
+		{
+			case 1:
+				if (m_decoder.GetArticleFilename())
+				{
+					m_articleFilename = m_decoder.GetArticleFilename();
+				}
+				if (isYenc)
+				{
+					m_articleInfo->SetCrc(nzbget_rs_dqh_article_dl_select_yenc_crc(
+						g_Options->GetCrcCheck() ? 1 : 0,
+						m_decoder.GetCalculatedCrc(), m_decoder.GetExpectedCrc()));
+				}
+				return adFinished;
+			case 2:
+				detail("Decoding %s failed: more data than its range", *m_infoName);
+				return adFailed;
+			case 3:
+				detail("Decoding %s failed: CRC-Error", *m_infoName);
+				return adCrcError;
+			case 4:
+				detail("Decoding %s failed: article incomplete", *m_infoName);
+				return adFailed;
+			case 5:
+				detail("Decoding %s failed: size mismatch", *m_infoName);
+				return adFailed;
+			case 6:
+				detail("Decoding %s failed: no binary data found", *m_infoName);
+				return adFailed;
+			default:
+				detail("Decoding %s failed", *m_infoName);
+				return adFailed;
+		}
+	}
+
+	void FreeConnection(bool keepConnected)
+	{
+		if (m_connection)
+		{
+			debug("Releasing connection");
+			Guard guard(m_connectionMutex);
+			if (!keepConnected || m_connection->GetStatus() == Connection::csCancelled)
+			{
+				m_connection->Disconnect();
+			}
+			AddServerStats();
+			g_ServerPool->FreeConnection(m_connection, true);
+			m_connection = nullptr;
+		}
+	}
+
+	void AddServerStats()
+	{
+		int serverId = m_connection->GetNewsServer()->GetId();
+		int bytesRead = m_connection->FetchTotalBytesRead();
+		ServerVolume::Stats stats;
+		stats.bytes = Util::SafeIntCast<int, uint32>(bytesRead);
+		stats.articles.failed = 0;
+		stats.articles.success = 0;
+		g_StatMeter->AddServerStats(stats, serverId);
+		m_downloadedSize += bytesRead;
+	}
+};
 #endif
 
 #ifndef DIRECTRENAMER_H
@@ -19895,90 +20594,6 @@ private:
 	friend class GroupSorter;
 };
 
-class DupeProbe : public Thread
-{
-public:
-	struct Sample
-	{
-		CString MessageId;
-		std::shared_ptr<std::vector<CString>> Groups;
-	};
-
-	enum EAnswer
-	{
-		daExists,
-		daMissing,
-		daUnknown
-	};
-
-	static constexpr int SampleCount = 10;
-	static constexpr int MinArticles = 4;
-	static constexpr int MinAliveSamples = 2;
-	static constexpr int RecentBlockSec = 60;
-
-	static std::vector<size_t> SampleIndexes(size_t total, int count);
-	static EAnswer Classify(const char* response);
-	static bool IsDead(int existing, int definitiveServers, int activeServers);
-	static std::vector<Sample> SamplesOf(const std::vector<FileInfo*>& files,
-		const std::function<void(FileInfo*)>& loadArticles = nullptr);
-	static void Start(int nzbId, std::vector<Sample> samples, int recoveredAtStart = 0);
-
-	struct Verdict
-	{
-		int Existing = 0;
-		int MissingServers = 0;
-		std::string FoundOn;
-		int ActiveServers = 0;
-		int UnreachableServers = 0;
-		int ReachedServers = 0;
-		bool Finished = true;
-		bool Dead() const { return Finished && IsDead(Existing, MissingServers, ActiveServers); }
-	};
-
-	static Verdict Check(std::vector<Sample> samples, int limitSec);
-	static void StartRecheck(int nzbId, std::vector<Sample> samples);
-	static constexpr int RecheckSampleCount = 10;
-	static constexpr int RecheckLimitSec = 60;
-
-	static void StopAll();
-	static int ProbingFor(int nzbId);
-	static void WaitAll();
-	static void Reset();
-
-protected:
-	void Run() override;
-
-private:
-	DupeProbe(int nzbId, std::vector<Sample> samples) :
-		m_nzbId(nzbId), m_samples(std::move(samples)), m_found(m_samples.size(), 0) {}
-
-	struct ServerResult
-	{
-		int Exists = 0;
-		int Missing = 0;
-		int Unknown = 0;
-		bool Unreachable = false;
-	};
-
-	int m_nzbId;
-	time_t m_started = 0;
-	int m_recoveredAtStart = 0;
-	std::vector<Sample> m_samples;
-	bool m_countAll = false;
-	std::vector<char> m_found;
-	std::string m_foundOn;
-	NntpConnection* m_connection = nullptr;
-
-	bool ProbeServer(int serverId, std::set<int>& probed, ServerResult& result);
-	void Note(Message::EKind kind, const char* format, ...);
-	Verdict Measure(int limitSec);
-	void Recheck();
-	bool Register();
-	void Unregister();
-	void Cancel();
-	void Abandon(int missingServers, int activeServers);
-};
-
 class QueueCoordinator : public Thread, public Observer, public Debuggable
 {
 public:
@@ -20105,35 +20720,8 @@ extern QueueCoordinator* g_QueueCoordinator;
 
 #ifndef HISTORYCOORDINATOR_H
 #define HISTORYCOORDINATOR_H
-class HistoryCoordinator : public Service
-{
-public:
-	void AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
-	void RecheckFailedArticles(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
-	bool EditList(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action, const char* args);
-	void DeleteDiskFiles(NzbInfo* nzbInfo);
-	void HistoryHide(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, int rindex);
-	void Redownload(DownloadQueue* downloadQueue, HistoryInfo* historyInfo);
 
-protected:
-	virtual int ServiceInterval() { return 60 * 60; }
-	virtual void ServiceWork();
-
-private:
-	void HistoryDelete(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool final);
-	void HistoryReturn(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo);
-	void HistoryProcess(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo);
-	void HistoryRedownload(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool restorePauseState);
-	void HistoryRetry(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool resetFailed, bool reprocess);
-	bool HistorySetParameter(HistoryInfo* historyInfo, const char* text);
-	void HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQueue::EEditAction action, const char* text);
-	bool HistorySetCategory(HistoryInfo* historyInfo, const char* text);
-	bool HistorySetName(HistoryInfo* historyInfo, const char* text);
-	void MoveToQueue(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool reprocess);
-	void PrepareEdit(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action);
-	void ResetArticles(FileInfo* fileInfo, bool allFailed, bool resetFailed);
-};
-
+class HistoryCoordinator;
 extern HistoryCoordinator* g_HistoryCoordinator;
 
 class DupeCoordinator
@@ -20149,42 +20737,1882 @@ public:
 		dsFailure = 16
 	};
 
-	void NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
+
+	static bool SameNameOrKey(const char* name1, const char* dupeKey1, const char* name2, const char* dupeKey2)
+	{
+		return nzbget_rs_dupecoord_same_name_or_key(name1, dupeKey1, name2, dupeKey2) != 0;
+	}
+
+	static bool FilesOnDisk(NzbInfo* nzbInfo)
+	{
+		return nzbget_rs_dupecoord_files_on_disk(
+			nzbInfo->GetFinalDir(),
+			nzbInfo->GetDestDir(),
+			g_Options->GetExtCleanupDisk()) != 0;
+	}
+
+	static NzbInfo* DownloadedOnDisk(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+	{
+		const int healthCheck = (int)g_Options->GetHealthCheck();
+		const char* targetDupeKey = nzbInfo->GetDupeKey();
+		const char* extCleanupDisk = g_Options->GetExtCleanupDisk();
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			if (historyInfo->GetKind() != HistoryInfo::hkNzb)
+			{
+				continue;
+			}
+			NzbInfo* item = historyInfo->GetNzbInfo();
+			if (nzbget_rs_dupecoord_is_downloaded_on_disk_candidate(
+				healthCheck,
+				targetDupeKey,
+				item == nzbInfo ? 1 : 0,
+				(int)item->GetDeleteStatus(),
+				item->IsDupeSuccess() ? 1 : 0,
+				(int)item->GetMarkStatus(),
+				item->GetDupeKey(),
+				item->GetFinalDir(),
+				item->GetDestDir(),
+				extCleanupDisk) != 0)
+			{
+				return item;
+			}
+		}
+		return nullptr;
+	}
+
 	void NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
+
+	void NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
+
+	std::string NoBackupReason(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+	{
+		std::vector<HistoryInfo*> historyItems;
+		std::vector<NzbgetRsDupeHistoryCandidate> historyCandidates;
+		historyItems.reserve(downloadQueue->GetHistory()->size());
+		historyCandidates.reserve(downloadQueue->GetHistory()->size());
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			historyItems.push_back(historyInfo);
+			NzbgetRsDupeHistoryCandidate c{};
+			c.kind = (int)historyInfo->GetKind();
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+			{
+				NzbInfo* item = historyInfo->GetNzbInfo();
+				c.dupe_mode = (int)item->GetDupeMode();
+				c.mark_status = (int)item->GetMarkStatus();
+				c.delete_status = (int)item->GetDeleteStatus();
+				c.alive_permille = AlivePermille(item);
+				c.health = item->CalcHealth();
+				c.critical_health = item->CalcCriticalHealth(true);
+				c.same_name_or_key = (item != nzbInfo &&
+					SameNameOrKey(item->GetName(), item->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey())) ? 1 : 0;
+			}
+			historyCandidates.push_back(c);
+		}
+
+		auto fileExistsCb = [](void* ctx, size_t idx) -> int {
+			auto* items = static_cast<std::vector<HistoryInfo*>*>(ctx);
+			return FileSystem::FileExists((*items)[idx]->GetNzbInfo()->GetQueuedFilename()) ? 1 : 0;
+		};
+
+		NzbgetRsBuf buf = nzbget_rs_dupecoord_no_backup_reason(
+			FailsOver(nzbInfo) ? 1 : 0,
+			(int)nzbInfo->GetDupeMode(),
+			historyCandidates.data(),
+			historyCandidates.size(),
+			&historyItems,
+			fileExistsCb);
+		std::string out(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return out;
+	}
+
+	static bool FailsOver(NzbInfo* nzbInfo)
+	{
+		return nzbget_rs_dupecoord_fails_over(
+			g_Options->GetDupeCheck() ? 1 : 0, (int)nzbInfo->GetDupeMode(), (int)g_Options->GetHealthCheck()) != 0;
+	}
+
+	HistoryInfo* FindDupeBackup(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* nzbName, const char* dupeKey)
+	{
+		std::vector<HistoryInfo*> historyItems;
+		std::vector<NzbgetRsDupeHistoryCandidate> historyCandidates;
+		historyItems.reserve(downloadQueue->GetHistory()->size());
+		historyCandidates.reserve(downloadQueue->GetHistory()->size());
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			historyItems.push_back(historyInfo);
+			NzbgetRsDupeHistoryCandidate c{};
+			c.kind = (int)historyInfo->GetKind();
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
+			{
+				NzbInfo* item = historyInfo->GetNzbInfo();
+				c.dupe_mode = (int)item->GetDupeMode();
+				c.dupe_score = item->GetDupeScore();
+				c.is_dupe_success = item->IsDupeSuccess() ? 1 : 0;
+				c.mark_status = (int)item->GetMarkStatus();
+				c.delete_status = (int)item->GetDeleteStatus();
+				c.full_content_hash = item->GetFullContentHash();
+				c.alive_permille = AlivePermille(item);
+				c.health = item->CalcHealth();
+				c.critical_health = item->CalcCriticalHealth(true);
+				c.same_name_or_key = SameNameOrKey(item->GetName(), item->GetDupeKey(), nzbName, dupeKey) ? 1 : 0;
+			}
+			else if (historyInfo->GetKind() == HistoryInfo::hkDup)
+			{
+				DupInfo* dup = historyInfo->GetDupInfo();
+				c.dupe_mode = (int)dup->GetDupeMode();
+				c.dupe_score = dup->GetDupeScore();
+				c.dup_status = (int)dup->GetStatus();
+				c.same_name_or_key = SameNameOrKey(dup->GetName(), dup->GetDupeKey(), nzbName, dupeKey) ? 1 : 0;
+			}
+			historyCandidates.push_back(c);
+		}
+
+		std::vector<NzbgetRsDupeQueueCandidate> queueCandidates;
+		queueCandidates.reserve(downloadQueue->GetQueue()->size());
+		for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
+		{
+			NzbgetRsDupeQueueCandidate q{};
+			q.is_self = (queuedNzbInfo == nzbInfo) ? 1 : 0;
+			q.is_nzb_kind = (queuedNzbInfo->GetKind() == NzbInfo::nkNzb) ? 1 : 0;
+			q.dupe_mode = (int)queuedNzbInfo->GetDupeMode();
+			q.dupe_score = queuedNzbInfo->GetDupeScore();
+			q.same_name_or_key = SameNameOrKey(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(), nzbName, dupeKey) ? 1 : 0;
+			queueCandidates.push_back(q);
+		}
+
+		auto fileExistsCb = [](void* ctx, size_t idx) -> int {
+			auto* items = static_cast<std::vector<HistoryInfo*>*>(ctx);
+			return FileSystem::FileExists((*items)[idx]->GetNzbInfo()->GetQueuedFilename()) ? 1 : 0;
+		};
+
+		int winner = nzbget_rs_dupecoord_select_dupe_backup(
+			nzbInfo != nullptr ? 1 : 0,
+			nzbInfo ? nzbInfo->GetFullContentHash() : 0,
+			g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0,
+			historyCandidates.data(),
+			historyCandidates.size(),
+			queueCandidates.data(),
+			queueCandidates.size(),
+			&historyItems,
+			fileExistsCb);
+
+		return winner >= 0 && (size_t)winner < historyItems.size() ? historyItems[(size_t)winner] : nullptr;
+	}
+
+	static bool DupeFailoverWarranted(int itemScore, int health, int backupScore)
+	{
+		return nzbget_rs_dupecoord_failover_warranted(itemScore, health, backupScore) != 0;
+	}
+
 	void HistoryMark(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, NzbInfo::EMarkStatus markStatus);
-	EDupeStatus GetDupeStatus(DownloadQueue* downloadQueue, const char* name, const char* dupeKey);
-	RawNzbList ListHistoryDupes(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
-	static bool SameNameOrKey(const char* name1, const char* dupeKey1, const char* name2, const char* dupeKey2);
-	/* The dupe-backup in history ReturnBestDupe would move to the queue for
-	 * this title (nullptr if none, or if a good-duplicate already exists). */
-	HistoryInfo* FindDupeBackup(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* nzbName, const char* dupeKey);
-	/* Whether a queued item at the given health (permille) and duplicate score
-	 * should be abandoned early for a backup with the given score (option
-	 * <HealthCheck> value "dupe"): the backup's score must not fall below the
-	 * score the item still warrants at its remaining health. */
-	static bool DupeFailoverWarranted(int itemScore, int health, int backupScore);
-	/* a dupe tool's health check of a duplicate (parameter <name>, in percent,
-	 * fractions allowed) in per-mille, clamped to 0..1000; -1 if not set or not a number */
-	static int AlivePermille(NzbInfo* nzbInfo, const char* name = "DupeAlive");
-	/* the download gets a duplicate in its place when it fails or turns out dead:
-	 * DupeMode score; with HealthCheck=dupe a forced one too - it never fails
-	 * outright while a viable duplicate waits (B46) */
-	static bool FailsOver(NzbInfo* nzbInfo);
-	/* With HealthCheck=dupe: a successful item of the same (non-empty) duplicate key
-	 * whose files are still on disk, or nullptr (B70, B77). Within DownloadQueue-lock. */
-	static NzbInfo* DownloadedOnDisk(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
-	/* the item's final (or destination) directory holds a file other than a side file */
-	static bool FilesOnDisk(NzbInfo* nzbInfo);
-	/* why no duplicate in history can take the download's place, for the log */
-	std::string NoBackupReason(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
+
+	EDupeStatus GetDupeStatus(DownloadQueue* downloadQueue, const char* name, const char* dupeKey)
+	{
+		int statuses = (int)dsNone;
+
+		// find duplicates in download queue
+		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+		{
+			statuses = nzbget_rs_dupecoord_accumulate_queue_dupe_status(
+				statuses,
+				name,
+				dupeKey,
+				nzbInfo->GetName(),
+				nzbInfo->GetDupeKey(),
+				nzbInfo->GetSuccessArticles(),
+				nzbInfo->GetFailedArticles());
+		}
+
+		// find duplicates in history
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+			{
+				NzbInfo* item = historyInfo->GetNzbInfo();
+				statuses = nzbget_rs_dupecoord_accumulate_history_dupe_status(
+					statuses,
+					(int)HistoryInfo::hkNzb,
+					name,
+					dupeKey,
+					item->GetName(),
+					item->GetDupeKey(),
+					item->MakeTextStatus(true),
+					0);
+			}
+			else if (historyInfo->GetKind() == HistoryInfo::hkDup)
+			{
+				DupInfo* dup = historyInfo->GetDupInfo();
+				statuses = nzbget_rs_dupecoord_accumulate_history_dupe_status(
+					statuses,
+					(int)HistoryInfo::hkDup,
+					name,
+					dupeKey,
+					dup->GetName(),
+					dup->GetDupeKey(),
+					nullptr,
+					(int)dup->GetStatus());
+			}
+		}
+
+		return (EDupeStatus)statuses;
+	}
+
+	RawNzbList ListHistoryDupes(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+	{
+		RawNzbList dupeList;
+
+		// find duplicates in history
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			NzbInfo* item = historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo() : nullptr;
+			if (item && nzbget_rs_dupecoord_should_list_history_dupe(
+				(int)nzbInfo->GetDupeMode(),
+				(int)historyInfo->GetKind(),
+				(int)item->GetDupeMode(),
+				item->GetName(),
+				item->GetDupeKey(),
+				nzbInfo->GetName(),
+				nzbInfo->GetDupeKey()) != 0)
+			{
+				dupeList.push_back(item);
+			}
+		}
+
+		return dupeList;
+	}
+
+	static int AlivePermille(NzbInfo* nzbInfo, const char* name = "DupeAlive")
+	{
+		NzbParameter* parameter = nzbInfo->GetParameters()->Find(name);
+		if (!parameter || !parameter->GetValue())
+		{
+			return -1;
+		}
+		return nzbget_rs_dupecoord_parse_alive_permille(parameter->GetValue());
+	}
 
 private:
 	void ReturnBestDupe(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* nzbName, const char* dupeKey);
+
 	void HistoryCleanup(DownloadQueue* downloadQueue, HistoryInfo* markHistoryInfo);
 };
 
 extern DupeCoordinator* g_DupeCoordinator;
 
+class DupeProbe;
+namespace DupeProbeDetail
+{
+	inline constexpr int ConnectionWaitSec = 10;
+	inline constexpr int ProbeLimitSec = 90;
+
+	inline Mutex g_probeMutex;
+	inline std::set<DupeProbe*> g_probes;
+	inline std::atomic<int> g_probeCount{0};
+	inline bool g_probesStopping = false;
+}
+
+
+class DupeProbe : public Thread
+{
+public:
+	struct Sample
+	{
+		CString MessageId;
+		std::shared_ptr<std::vector<CString>> Groups;
+	};
+
+	enum EAnswer
+	{
+		daExists,
+		daMissing,
+		daUnknown
+	};
+
+	static constexpr int SampleCount = 10;
+	static constexpr int MinArticles = 4;
+	static constexpr int MinAliveSamples = 2;
+	static constexpr int RecentBlockSec = 60;
+
+	struct Verdict
+	{
+		int Existing = 0;
+		int MissingServers = 0;
+		std::string FoundOn;
+		int ActiveServers = 0;
+		int UnreachableServers = 0;
+		int ReachedServers = 0;
+		bool Finished = true;
+		bool Dead() const { return Finished && IsDead(Existing, MissingServers, ActiveServers); }
+	};
+
+	static constexpr int RecheckSampleCount = 10;
+	static constexpr int RecheckLimitSec = 60;
+
+	static std::vector<size_t> SampleIndexes(size_t total, int count)
+	{
+		std::vector<size_t> indexes;
+		if (total == 0 || count <= 0)
+		{
+			return indexes;
+		}
+
+		size_t wanted = std::min(total, (size_t)count);
+		indexes.resize(wanted);
+		nzbget_rs_dupe_probe_sample_indexes(total, count, indexes.data(), indexes.size());
+		return indexes;
+	}
+
+	static EAnswer Classify(const char* response)
+	{
+		return (EAnswer)nzbget_rs_dupe_probe_classify(response);
+	}
+
+	static bool IsDead(int existing, int definitiveServers, int activeServers)
+	{
+		return nzbget_rs_dupe_probe_is_dead(existing, definitiveServers, activeServers) != 0;
+	}
+
+	static void Start(int nzbId, std::vector<Sample> samples, int recoveredAtStart = 0)
+	{
+		DupeProbe* probe = new DupeProbe(nzbId, std::move(samples));
+		probe->m_recoveredAtStart = recoveredAtStart;
+		if (!probe->Register())
+		{
+			delete probe;
+			return;
+		}
+		probe->SetAutoDestroy(true);
+		probe->Thread::Start();
+	}
+
+	static Verdict Check(std::vector<Sample> samples, int limitSec)
+	{
+		DupeProbe probe(0, std::move(samples));
+		if (!probe.Register())
+		{
+			Verdict stopping;
+			stopping.Finished = false;
+			return stopping;
+		}
+		Verdict verdict = probe.Measure(limitSec);
+		probe.Unregister();
+		return verdict;
+	}
+
+	static void Reset()
+	{
+		using namespace DupeProbeDetail;
+		Guard guard(g_probeMutex);
+		g_probesStopping = false;
+	}
+
+	static int ProbingFor(int nzbId)
+	{
+		using namespace DupeProbeDetail;
+		Guard guard(g_probeMutex);
+		for (DupeProbe* probe : g_probes)
+		{
+			if (probe->m_nzbId == nzbId && !probe->m_countAll)
+			{
+				return std::max(0, (int)(Util::CurrentTime() - probe->m_started));
+			}
+		}
+		return -1;
+	}
+
+	static std::vector<Sample> SamplesOf(const std::vector<FileInfo*>& files, const std::function<void(FileInfo*)>& loadArticles = nullptr)
+	{
+		size_t total = 0;
+		for (FileInfo* fileInfo : files)
+		{
+			total += fileInfo->GetTotalArticles();
+		}
+
+		std::vector<Sample> samples;
+		for (size_t position : SampleIndexes(total, SampleCount))
+		{
+			size_t offset = 0;
+			for (FileInfo* fileInfo : files)
+			{
+				size_t count = fileInfo->GetTotalArticles();
+				if (position >= offset + count)
+				{
+					offset += count;
+					continue;
+				}
+				size_t index = position - offset;
+
+				if (fileInfo->GetArticles()->empty() && loadArticles)
+				{
+					loadArticles(fileInfo);
+				}
+				if (index < fileInfo->GetArticles()->size())
+				{
+					Sample sample;
+					sample.MessageId = fileInfo->GetArticles()->at(index)->GetMessageId();
+					sample.Groups = std::make_shared<std::vector<CString>>();
+					for (const CString& group : *fileInfo->GetGroups())
+					{
+						sample.Groups->emplace_back(*group);
+					}
+					samples.push_back(std::move(sample));
+				}
+				break;
+			}
+		}
+		return samples;
+	}
+
+	static void StopAll()
+	{
+		using namespace DupeProbeDetail;
+		Guard guard(g_probeMutex);
+		g_probesStopping = true;
+		for (DupeProbe* probe : g_probes)
+		{
+			probe->Thread::Stop();
+			probe->Cancel();
+		}
+	}
+
+	static void WaitAll()
+	{
+		using namespace DupeProbeDetail;
+		while (g_probeCount > 0)
+		{
+			Util::Sleep(20);
+		}
+	}
+
+	static void StartRecheck(int nzbId, std::vector<Sample> samples)
+	{
+		DupeProbe* probe = new DupeProbe(nzbId, std::move(samples));
+		probe->m_countAll = true;
+		probe->m_found.assign(probe->m_samples.size(), 0);
+		if (!probe->Register())
+		{
+			delete probe;
+			return;
+		}
+		probe->SetAutoDestroy(true);
+		probe->Thread::Start();
+	}
+
+protected:
+	void Run() override
+	{
+		using namespace DupeProbeDetail;
+		if (m_countAll)
+		{
+			Recheck();
+			Unregister();
+			return;
+		}
+
+		Verdict verdict = Measure(ProbeLimitSec);
+		if (IsStopped())
+		{
+			Unregister();
+			return;
+		}
+
+		int sampled = (int)m_samples.size();
+		int outcome = 0;
+		NzbgetRsBuf msgBuf = nzbget_rs_dupe_probe_eval_run_outcome(
+			verdict.Existing,
+			sampled,
+			verdict.MissingServers,
+			verdict.ActiveServers,
+			verdict.UnreachableServers,
+			verdict.ReachedServers,
+			verdict.Finished ? 1 : 0,
+			verdict.FoundOn.c_str(),
+			&outcome);
+		std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
+		nzbget_rs_free(msgBuf);
+
+		if (outcome == 1)
+		{
+			Note(Message::mkInfo, "%s", message.c_str());
+			Abandon(verdict.MissingServers, verdict.ActiveServers);
+		}
+		else if (outcome == 2)
+		{
+			Note(Message::mkInfo, "%s", message.c_str());
+		}
+		else if (outcome == 3)
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+			if (nzbInfo)
+			{
+				nzbInfo->SetDeadPickProbed(false);
+				nzbInfo->PrintMessage(Message::mkDetail, "%s", message.c_str());
+			}
+		}
+		else if (outcome == 4)
+		{
+			Note(Message::mkInfo, "%s", message.c_str());
+		}
+
+		Unregister();
+	}
+
+private:
+	DupeProbe(int nzbId, std::vector<Sample> samples) :
+		m_nzbId(nzbId), m_samples(std::move(samples)), m_found(m_samples.size(), 0) {}
+
+	struct ServerResult
+	{
+		int Exists = 0;
+		int Missing = 0;
+		int Unknown = 0;
+		bool Unreachable = false;
+	};
+
+	int m_nzbId;
+	time_t m_started = 0;
+	int m_recoveredAtStart = 0;
+	std::vector<Sample> m_samples;
+	bool m_countAll = false;
+	std::vector<char> m_found;
+	std::string m_foundOn;
+	NntpConnection* m_connection = nullptr;
+
+
+	bool Register()
+	{
+		using namespace DupeProbeDetail;
+		Guard guard(g_probeMutex);
+		if (g_probesStopping)
+		{
+			return false;
+		}
+		m_started = Util::CurrentTime();
+		g_probes.insert(this);
+		g_probeCount++;
+		return true;
+	}
+
+	void Unregister()
+	{
+		using namespace DupeProbeDetail;
+		Guard guard(g_probeMutex);
+		g_probes.erase(this);
+		g_probeCount--;
+	}
+
+	void Cancel()
+	{
+		if (m_connection)
+		{
+			m_connection->SetSuppressErrors(true);
+			m_connection->Cancel();
+		}
+	}
+
+	bool ProbeServer(int serverId, std::set<int>& probed, ServerResult& result)
+	{
+		using namespace DupeProbeDetail;
+		NewsServer* wanted = g_ServerPool->GetServerById(serverId);
+		if (!wanted)
+		{
+			return false;
+		}
+
+		NntpConnection* connection = nullptr;
+		time_t waitStart = Util::CurrentTime();
+		while (!connection && !IsStopped() && Util::CurrentTime() - waitStart <= ConnectionWaitSec)
+		{
+			connection = g_ServerPool->GetConnection(wanted->GetNormLevel(), wanted, nullptr);
+			if (!connection)
+			{
+				Util::Sleep(50);
+			}
+		}
+		if (!connection)
+		{
+			time_t blockTime = wanted->GetBlockTime();
+			result.Unreachable = g_ServerPool->IsServerBlocked(wanted) ||
+				(blockTime > 0 && Util::CurrentTime() - blockTime < RecentBlockSec);
+			return false;
+		}
+
+		NewsServer* server = connection->GetNewsServer();
+		bool fresh = probed.insert(server->GetId()).second;
+		bool probedServer = false;
+		if (fresh)
+		{
+			{
+				Guard guard(g_probeMutex);
+				m_connection = connection;
+			}
+
+			int remaining = (int)m_samples.size();
+			for (size_t index = 0; index < m_samples.size(); index++)
+			{
+				const Sample& sample = m_samples[index];
+				if (IsStopped())
+				{
+					break;
+				}
+				remaining--;
+				if (m_found[index])
+				{
+					continue;
+				}
+
+				if (!connection->Connect())
+				{
+					result.Unknown += remaining + 1;
+					result.Unreachable = result.Exists + result.Missing == 0;
+					break;
+				}
+
+				if (server->GetJoinGroup())
+				{
+					const char* joined = nullptr;
+					for (const CString& group : *sample.Groups)
+					{
+						joined = connection->JoinGroup(group);
+						if (joined && !strncmp(joined, "2", 1))
+						{
+							break;
+						}
+					}
+					if (!joined || strncmp(joined, "2", 1))
+					{
+						result.Unknown += remaining + 1;
+						if (!joined)
+						{
+							connection->Disconnect();
+						}
+						break;
+					}
+				}
+
+				BString<1024> statCmd("STAT %s\r\n", *sample.MessageId);
+				const char* response = connection->Request(statCmd);
+				if (!response)
+				{
+					connection->Disconnect();
+					result.Unknown += remaining + 1;
+					break;
+				}
+
+				switch (Classify(response))
+				{
+					case daExists:
+						result.Exists++;
+						m_found[index] = 1;
+						if (m_foundOn.empty())
+						{
+							m_foundOn = std::string(server->GetName()) + " (" + *sample.MessageId + ")";
+						}
+						break;
+					case daMissing:
+						result.Missing++;
+						break;
+					case daUnknown:
+						result.Unknown++;
+						break;
+				}
+
+				int foundCount = (int)std::count(m_found.begin(), m_found.end(), 1);
+				if (!m_countAll && foundCount >= MinAliveSamples)
+				{
+					break;
+				}
+			}
+			probedServer = true;
+		}
+
+		{
+			Guard guard(g_probeMutex);
+			m_connection = nullptr;
+		}
+		if (IsStopped() || connection->GetStatus() == Connection::csCancelled)
+		{
+			connection->Disconnect();
+		}
+		g_ServerPool->FreeConnection(connection, true);
+		return probedServer;
+	}
+
+	Verdict Measure(int limitSec)
+	{
+		Verdict verdict;
+		Servers* servers = g_ServerPool->GetServers();
+		std::vector<uint8_t> srvActive;
+		std::vector<int32_t> srvGroups;
+		std::vector<int32_t> srvLevels;
+		std::vector<int32_t> srvIds;
+		srvActive.reserve(servers->size());
+		srvGroups.reserve(servers->size());
+		srvLevels.reserve(servers->size());
+		srvIds.reserve(servers->size());
+		for (NewsServer* server : servers)
+		{
+			srvActive.push_back(server->GetActive() ? 1 : 0);
+			srvGroups.push_back(server->GetGroup());
+			srvLevels.push_back(server->GetNormLevel());
+			srvIds.push_back(server->GetId());
+		}
+		std::vector<int32_t> order(servers->size());
+		size_t orderLen = nzbget_rs_dupe_probe_select_server_order(
+			srvActive.data(), srvGroups.data(), srvLevels.data(), srvIds.data(),
+			servers->size(), order.data(), order.size());
+		order.resize(orderLen);
+		verdict.ActiveServers = (int)orderLen;
+
+		std::set<int> probed;
+		time_t start = Util::CurrentTime();
+
+		for (int serverId : order)
+		{
+			if (IsStopped() || Util::CurrentTime() - start > limitSec)
+			{
+				verdict.Finished = false;
+				break;
+			}
+
+			ServerResult result;
+			bool reached = ProbeServer(serverId, probed, result);
+			if (result.Unreachable)
+			{
+				verdict.ActiveServers--;
+				verdict.UnreachableServers++;
+			}
+			if (!reached)
+			{
+				continue;
+			}
+			verdict.ReachedServers++;
+
+			verdict.Existing = (int)std::count(m_found.begin(), m_found.end(), 1);
+			verdict.FoundOn = m_foundOn;
+			if (m_countAll)
+			{
+				if (verdict.Existing == (int)m_samples.size())
+				{
+					break;
+				}
+				continue;
+			}
+			if (verdict.Existing >= MinAliveSamples)
+			{
+				break;
+			}
+			if (result.Unknown == 0 && result.Exists + result.Missing > 0)
+			{
+				verdict.MissingServers++;
+			}
+		}
+		if (IsStopped())
+		{
+			verdict.Finished = false;
+		}
+		return verdict;
+	}
+
+	void Recheck()
+	{
+		Verdict verdict = Measure(RecheckLimitSec);
+		if (IsStopped() || !verdict.Finished)
+		{
+			return;
+		}
+
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			if (historyInfo->GetKind() != HistoryInfo::hkNzb || historyInfo->GetNzbInfo()->GetId() != m_nzbId)
+			{
+				continue;
+			}
+			NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
+			int sampled = (int)m_samples.size();
+			const char* duplicateQueuedName = "";
+			if (verdict.ReachedServers > 0 && verdict.Existing * 2 >= sampled)
+			{
+				for (NzbInfo* queued : downloadQueue->GetQueue())
+				{
+					if (DupeCoordinator::SameNameOrKey(queued->GetName(), queued->GetDupeKey(),
+						nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+					{
+						duplicateQueuedName = queued->GetName();
+						break;
+					}
+				}
+			}
+
+			int outcome = 0;
+			NzbgetRsBuf msgBuf = nzbget_rs_dupe_probe_eval_recheck_outcome(
+				verdict.Existing, sampled, verdict.ReachedServers, duplicateQueuedName, &outcome);
+			std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
+			nzbget_rs_free(msgBuf);
+
+			nzbInfo->PrintMessage(Message::mkInfo, "%s", message.c_str());
+			if (outcome == 1)
+			{
+				nzbInfo->GetParameters()->SetParameter("*DupeRecheck", nullptr);
+				return;
+			}
+			if (outcome == 2)
+			{
+				return;
+			}
+			if (outcome == 3)
+			{
+				IdList ids = { historyInfo->GetId() };
+				downloadQueue->EditList(&ids, nullptr, DownloadQueue::mmId, DownloadQueue::eaHistoryRetryFailed, nullptr);
+			}
+			break;
+		}
+	}
+
+	void Note(Message::EKind kind, const char* format, ...)
+	{
+		char text[1024];
+		va_list args;
+		va_start(args, format);
+		vsnprintf(text, sizeof(text), format, args);
+		va_end(args);
+
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+		if (nzbInfo)
+		{
+			nzbInfo->PrintMessage(kind, "%s", text);
+		}
+		else
+		{
+			detail("Dupe probe of download %i: %s", m_nzbId, text);
+		}
+	}
+
+	void Abandon(int missingServers, int activeServers)
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		g_QueueCoordinator->FailOverDeadPick(downloadQueue, m_nzbId, (int)m_samples.size(),
+			missingServers, activeServers, m_recoveredAtStart);
+	}
+};
+
+class HistoryCoordinator : public Service
+{
+public:
+	void DeleteDiskFiles(NzbInfo* nzbInfo)
+	{
+		if (g_Options->GetServerMode())
+		{
+			// delete parked files
+			g_DiskState->DiscardFiles(nzbInfo);
+		}
+		nzbInfo->GetFileList()->clear();
+
+		// delete nzb-file
+		if (!g_Options->GetNzbCleanupDisk())
+		{
+			return;
+		}
+
+		// QueuedFile may contain one filename or several filenames separated
+		// with "|"-character (for merged groups)
+		const char* filename = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
+		Tokenizer tok(filename, "|");
+		while (const char* name1 = tok.Next())
+		{
+			if (FileSystem::FileExists(name1))
+			{
+				info("Deleting file %s", name1);
+				FileSystem::DeleteFile(name1);
+			}
+		}
+	}
+
+	void AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+	{
+		// catch-all for every path into history: a still-attached live
+		// stream-repair thread (option <DupeArticleFallback> value "live") could
+		// never find this collection by id again (the pass searches the QUEUE),
+		// so it would self-destruct and leave this slot a dangling pointer
+		if (nzbInfo->GetLiveRepairThread())
+		{
+			Thread* liveRepairThread = nzbInfo->GetLiveRepairThread();
+			nzbInfo->SetLiveRepairThread(nullptr);
+			liveRepairThread->Stop();
+		}
+
+		std::unique_ptr<NzbInfo> oldNzbInfo = downloadQueue->GetQueue()->Remove(nzbInfo);
+		std::unique_ptr<HistoryInfo> historyInfo = std::make_unique<HistoryInfo>(std::move(oldNzbInfo));
+		historyInfo->SetTime(Util::CurrentTime());
+		downloadQueue->GetHistory()->Add(std::move(historyInfo), true);
+		downloadQueue->HistoryChanged();
+
+		// park remaining files
+		for (FileInfo* fileInfo : nzbInfo->GetFileList())
+		{
+			nzbInfo->UpdateCompletedStats(fileInfo);
+			nzbInfo->GetCompletedFiles()->emplace_back(
+				fileInfo->GetId(),
+				fileInfo->GetFilename(),
+				fileInfo->GetOrigname() ? fileInfo->GetOrigname() : "",
+				CompletedFile::cfNone,
+				0,
+				fileInfo->GetParFile(),
+				fileInfo->GetHash16k() ? fileInfo->GetHash16k() : "",
+				fileInfo->GetParSetId() ? fileInfo->GetParSetId() : ""
+			);
+		}
+
+		// Cleaning up parked files if par-check was successful or unpack was successful or
+		// health is 100% (if unpack and par-check were not performed) or if deleted
+		bool cleanupParkedFiles = nzbget_rs_qhp_should_cleanup_parked_files(
+			(int32_t)nzbInfo->GetParStatus(),
+			(int32_t)nzbInfo->GetUnpackStatus(),
+			nzbInfo->GetFailedSize(),
+			nzbInfo->GetParFailedSize(),
+			(int32_t)nzbInfo->GetDeleteStatus(),
+			nzbInfo->GetParking() ? 1 : 0,
+			nzbInfo->GetUnpackCleanedUpDisk() ? 1 : 0
+		) != 0;
+
+		if (cleanupParkedFiles)
+		{
+			g_DiskState->DiscardFiles(nzbInfo, false);
+			nzbInfo->GetCompletedFiles()->clear();
+		}
+
+		nzbInfo->SetParkedFileCount(0);
+		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+		{
+			bool isLast = &completedFile == &*nzbInfo->GetCompletedFiles()->rbegin();
+			if (nzbget_rs_history_coord_should_park_completed_file(
+				(int)completedFile.GetStatus(),
+				(int)CompletedFile::cfNone,
+				(int)CompletedFile::cfPartial,
+				isLast ? 1 : 0) != 0)
+			{
+				nzbInfo->PrintMessage(Message::mkDetail, "Parking file %s", completedFile.GetFilename());
+				nzbInfo->SetParkedFileCount(nzbInfo->GetParkedFileCount() + 1);
+			}
+		}
+
+		nzbInfo->GetFileList()->clear();
+		nzbInfo->SetRemainingParCount(0);
+		nzbInfo->SetParking(false);
+
+		if (nzbInfo->GetDirectRenameStatus() == NzbInfo::tsRunning)
+		{
+			nzbInfo->SetDirectRenameStatus(NzbInfo::tsFailure);
+		}
+		if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsRunning)
+		{
+			nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
+		}
+
+		nzbInfo->SetDupeHint(NzbInfo::dhNone);
+
+		nzbInfo->PrintMessage(Message::mkInfo, "Collection %s added to history", nzbInfo->GetName());
+
+		RecheckFailedArticles(downloadQueue, nzbInfo);
+		ParDamage::Forget(nzbInfo->GetId());
+	}
+
+	void RecheckFailedArticles(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+	{
+		if (nzbget_rs_history_coord_should_recheck_failed_articles(
+			g_Options->GetDupeArticleFallback() == Options::dafNone ? 1 : 0,
+			g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0,
+			nzbInfo->GetKind() == NzbInfo::nkNzb ? 1 : 0,
+			nzbInfo->GetFailedArticles(),
+			nzbInfo->MakeTextStatus(true),
+			nzbInfo->GetParameters()->Find("*DupeRecheck") != nullptr ? 1 : 0) == 0)
+		{
+			return;
+		}
+		for (NzbInfo* queued : downloadQueue->GetQueue())
+		{
+			if (DupeCoordinator::SameNameOrKey(queued->GetName(), queued->GetDupeKey(),
+				nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+			{
+				return;	// a duplicate downloads in its place
+			}
+		}
+		// a duplicate waits in history: nzbget fetches it in its place (B39)
+		if (g_Options->GetDupeCheck() &&
+			nzbInfo->GetDupeMode() == dmScore &&
+			g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+		{
+			return;
+		}
+		// once per download
+		nzbInfo->GetParameters()->SetParameter("*DupeRecheck", "1");
+
+		std::vector<DupeProbe::Sample> failed;
+		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+		{
+			if ((completedFile.GetStatus() != CompletedFile::cfPartial &&
+				 completedFile.GetStatus() != CompletedFile::cfFailure) ||
+				completedFile.GetId() <= 0)
+			{
+				continue;
+			}
+			bool partial = completedFile.GetStatus() == CompletedFile::cfPartial;
+			FileInfo fileInfo(completedFile.GetId());
+			if (!g_DiskState->LoadFile(&fileInfo, false, true) ||
+				(partial && !g_DiskState->LoadFileState(&fileInfo, g_ServerPool->GetServers(), true)))
+			{
+				continue;
+			}
+			auto groups = std::make_shared<std::vector<CString>>();
+			for (const CString& group : *fileInfo.GetGroups())
+			{
+				groups->emplace_back(*group);
+			}
+			for (ArticleInfo* article : fileInfo.GetArticles())
+			{
+				if ((!partial || article->GetStatus() == ArticleInfo::aiFailed) &&
+					!Util::EmptyStr(article->GetMessageId()))
+				{
+					DupeProbe::Sample sample;
+					sample.MessageId = article->GetMessageId();
+					sample.Groups = groups;
+					failed.push_back(std::move(sample));
+				}
+			}
+		}
+		if (failed.size() < 2)
+		{
+			return;
+		}
+
+		std::vector<DupeProbe::Sample> samples;
+		for (size_t index : DupeProbe::SampleIndexes(failed.size(), DupeProbe::RecheckSampleCount))
+		{
+			samples.push_back(std::move(failed[index]));	// the indexes are distinct
+		}
+		DupeProbe::StartRecheck(nzbInfo->GetId(), std::move(samples));
+	}
+
+	void HistoryHide(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, int rindex)
+	{
+		// replace history element
+		std::unique_ptr<DupInfo> dupInfo = std::make_unique<DupInfo>();
+		dupInfo->SetId(historyInfo->GetNzbInfo()->GetId());
+		dupInfo->SetName(historyInfo->GetNzbInfo()->GetName());
+		dupInfo->SetDupeKey(historyInfo->GetNzbInfo()->GetDupeKey());
+		dupInfo->SetDupeScore(historyInfo->GetNzbInfo()->GetDupeScore());
+		dupInfo->SetDupeMode(historyInfo->GetNzbInfo()->GetDupeMode());
+		dupInfo->SetSize(historyInfo->GetNzbInfo()->GetSize());
+		dupInfo->SetFullContentHash(historyInfo->GetNzbInfo()->GetFullContentHash());
+		dupInfo->SetFilteredContentHash(historyInfo->GetNzbInfo()->GetFilteredContentHash());
+
+		dupInfo->SetStatus((DupInfo::EStatus)nzbget_rs_qhp_classify_dup_status(
+			(int32_t)historyInfo->GetNzbInfo()->GetMarkStatus(),
+			(int32_t)historyInfo->GetNzbInfo()->GetDeleteStatus(),
+			historyInfo->GetNzbInfo()->IsDupeSuccess() ? 1 : 0
+		));
+
+		std::unique_ptr<HistoryInfo> newHistoryInfo = std::make_unique<HistoryInfo>(std::move(dupInfo));
+		newHistoryInfo->SetTime(historyInfo->GetTime());
+
+		DeleteDiskFiles(historyInfo->GetNzbInfo());
+
+		info("Collection %s removed from history", historyInfo->GetName());
+
+		(*downloadQueue->GetHistory())[downloadQueue->GetHistory()->size() - 1 - rindex] = std::move(newHistoryInfo);
+	}
+
+	bool EditList(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action, const char* args)
+	{
+		bool ok = false;
+		PrepareEdit(downloadQueue, idList, action);
+
+		for (int id : *idList)
+		{
+			for (HistoryList::iterator itHistory = downloadQueue->GetHistory()->begin(); itHistory != downloadQueue->GetHistory()->end(); ++itHistory)
+			{
+				HistoryInfo* historyInfo = (*itHistory).get();
+				if (historyInfo->GetId() == id)
+				{
+					// one item's edit failing doesn't undo (or leave unsaved) the
+					// others: the list counts as edited when any item was
+					bool done = true;
+
+					switch (action)
+					{
+						case DownloadQueue::eaHistoryDelete:
+						case DownloadQueue::eaHistoryFinalDelete:
+							HistoryDelete(downloadQueue, itHistory, historyInfo, action == DownloadQueue::eaHistoryFinalDelete);
+							break;
+
+						case DownloadQueue::eaHistoryReturn:
+							HistoryReturn(downloadQueue, itHistory, historyInfo);
+							break;
+
+						case DownloadQueue::eaHistoryProcess:
+							HistoryProcess(downloadQueue, itHistory, historyInfo);
+							break;
+
+						case DownloadQueue::eaHistoryRedownload:
+							HistoryRedownload(downloadQueue, itHistory, historyInfo, false);
+							break;
+
+						case DownloadQueue::eaHistoryRetryFailed:
+							HistoryRetry(downloadQueue, itHistory, historyInfo, true, false);
+							break;
+
+						case DownloadQueue::eaHistorySetParameter:
+							done = HistorySetParameter(historyInfo, args);
+							break;
+
+	 					case DownloadQueue::eaHistorySetCategory:
+							done = HistorySetCategory(historyInfo, args);
+							break;
+
+	 					case DownloadQueue::eaHistorySetName:
+							done = HistorySetName(historyInfo, args);
+							break;
+
+						case DownloadQueue::eaHistorySetDupeKey:
+						case DownloadQueue::eaHistorySetDupeScore:
+						case DownloadQueue::eaHistorySetDupeMode:
+						case DownloadQueue::eaHistorySetDupeBackup:
+							HistorySetDupeParam(historyInfo, action, args);
+							break;
+
+						case DownloadQueue::eaHistoryMarkBad:
+							g_DupeCoordinator->HistoryMark(downloadQueue, historyInfo, NzbInfo::ksBad);
+							break;
+
+						case DownloadQueue::eaHistoryMarkGood:
+							g_DupeCoordinator->HistoryMark(downloadQueue, historyInfo, NzbInfo::ksGood);
+							break;
+
+						case DownloadQueue::eaHistoryMarkSuccess:
+							g_DupeCoordinator->HistoryMark(downloadQueue, historyInfo, NzbInfo::ksSuccess);
+							break;
+
+						default:
+							// nothing, just to avoid compiler warning
+							break;
+					}
+
+					ok = ok || done;
+					break;
+				}
+			}
+		}
+
+		if (ok)
+		{
+			downloadQueue->HistoryChanged();
+			downloadQueue->Save();
+		}
+
+		return ok;
+	}
+
+	void Redownload(DownloadQueue* downloadQueue, HistoryInfo* historyInfo)
+	{
+		HistoryList::iterator it = downloadQueue->GetHistory()->Find(historyInfo);
+		HistoryRedownload(downloadQueue, it, historyInfo, true);
+	}
+
+protected:
+	virtual int ServiceInterval() { return 60 * 60; }
+
+	virtual void ServiceWork()
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+		// in 64 bits: past 24,855 days the int product went negative, and every item was
+		// hidden as too old
+		time_t minTime = (time_t)nzbget_rs_history_coord_calc_min_time(
+			(int64)Util::CurrentTime(), g_Options->GetKeepHistory());
+		bool changed = false;
+		int index = 0;
+
+		// traversing in a reverse order to delete items in order they were added to history
+		// (just to produce the log-messages in a more logical order)
+		for (HistoryList::reverse_iterator it = downloadQueue->GetHistory()->rbegin(); it != downloadQueue->GetHistory()->rend(); )
+		{
+			HistoryInfo* historyInfo = (*it).get();
+			int action = nzbget_rs_history_coord_classify_service_work_item(
+				(int)historyInfo->GetKind(),
+				(int)HistoryInfo::hkDup,
+				(int)HistoryInfo::hkNzb,
+				(int64)historyInfo->GetTime(),
+				(int64)minTime,
+				g_Options->GetDupeCheck() ? 1 : 0);
+			if (action != 0)
+			{
+				if (action == 1)
+				{
+					HistoryHide(downloadQueue, historyInfo, index);
+					index++;
+				}
+				else
+				{
+					if (action == 2)
+					{
+						DeleteDiskFiles(historyInfo->GetNzbInfo());
+					}
+					info("Collection %s removed from history", historyInfo->GetName());
+
+					downloadQueue->GetHistory()->erase(downloadQueue->GetHistory()->end() - 1 - index);
+				}
+
+				it = downloadQueue->GetHistory()->rbegin() + index;
+				changed = true;
+			}
+			else
+			{
+				++it;
+				index++;
+			}
+		}
+
+		if (changed)
+		{
+			downloadQueue->HistoryChanged();
+			downloadQueue->Save();
+		}
+	}
+
+private:
+	void PrepareEdit(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action)
+	{
+		// First pass: when marking multiple items - mark them bad without performing the mark-logic,
+		// this will later (on second step) avoid moving other items to download queue, if they are marked bad too.
+		for (int id : *idList)
+		{
+			HistoryInfo* historyInfo = downloadQueue->GetHistory()->Find(id);
+			if (action == DownloadQueue::eaHistoryMarkBad &&
+				historyInfo && historyInfo->GetKind() == HistoryInfo::hkNzb)
+			{
+				historyInfo->GetNzbInfo()->SetMarkStatus(NzbInfo::ksBad);
+			}
+		}
+	}
+
+	void HistoryDelete(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool final)
+	{
+		info("Deleting %s from history", historyInfo->GetName());
+
+		if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+		{
+			DeleteDiskFiles(historyInfo->GetNzbInfo());
+		}
+
+		bool isNzb = historyInfo->GetKind() == HistoryInfo::hkNzb;
+		if (isNzb && nzbget_rs_history_coord_should_delete_dest_dir(
+			1,
+			(int)historyInfo->GetNzbInfo()->GetDeleteStatus(), (int)NzbInfo::dsNone,
+			(int)historyInfo->GetNzbInfo()->GetParStatus(), (int)NzbInfo::psFailure,
+			(int)historyInfo->GetNzbInfo()->GetUnpackStatus(), (int)NzbInfo::usFailure,
+			(int)NzbInfo::usPassword,
+			FileSystem::DirectoryExists(historyInfo->GetNzbInfo()->GetDestDir()) ? 1 : 0) != 0)
+		{
+			info("Deleting %s", historyInfo->GetNzbInfo()->GetDestDir());
+			CString errmsg;
+			if (!FileSystem::DeleteDirectoryWithContent(historyInfo->GetNzbInfo()->GetDestDir(), errmsg))
+			{
+				error("Could not delete directory %s: %s", historyInfo->GetNzbInfo()->GetDestDir(), *errmsg);
+			}
+		}
+
+		if (final || !g_Options->GetDupeCheck() || historyInfo->GetKind() == HistoryInfo::hkUrl)
+		{
+			downloadQueue->GetHistory()->erase(itHistory);
+		}
+		else if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+		{
+			// replace history element
+			int rindex = (int)downloadQueue->GetHistory()->size() - 1 - (int)(itHistory - downloadQueue->GetHistory()->begin());
+			HistoryHide(downloadQueue, historyInfo, rindex);
+		}
+	}
+
+	void MoveToQueue(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool reprocess);
+
+	void HistoryRedownload(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool restorePauseState);
+
+	void HistoryReturn(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo);
+
+	void HistoryProcess(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo);
+
+	void HistoryRetry(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool resetFailed, bool reprocess);
+
+	void ResetArticles(FileInfo* fileInfo, bool allFailed, bool resetFailed)
+	{
+		NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
+		ArticleList* articles = fileInfo->GetArticles();
+		std::vector<int> artStatuses;
+		std::vector<int> artSizes;
+		std::vector<uint8_t> resetFlags(articles->size(), 0);
+		artStatuses.reserve(articles->size());
+		artSizes.reserve(articles->size());
+		for (ArticleInfo* pa : articles)
+		{
+			artStatuses.push_back((int)pa->GetStatus());
+			artSizes.push_back(pa->GetSize());
+		}
+
+		int64 fileFailedSize = fileInfo->GetFailedSize();
+		int fileFailedArticles = fileInfo->GetFailedArticles();
+		int64 fileRemainingSize = fileInfo->GetRemainingSize();
+		int fileCompletedArticles = fileInfo->GetCompletedArticles();
+		int64 fileSuccessSize = fileInfo->GetSuccessSize();
+		int fileSuccessArticles = fileInfo->GetSuccessArticles();
+		int64 nzbFailedSize = nzbInfo->GetFailedSize();
+		int64 nzbSuccessSize = nzbInfo->GetSuccessSize();
+		int nzbFailedArticles = nzbInfo->GetFailedArticles();
+		int nzbSuccessArticles = nzbInfo->GetSuccessArticles();
+		int64 nzbParFailedSize = nzbInfo->GetParFailedSize();
+		int64 nzbParSuccessSize = nzbInfo->GetParSuccessSize();
+
+		nzbget_rs_history_coord_reset_articles_batch(
+			allFailed ? 1 : 0,
+			resetFailed ? 1 : 0,
+			fileInfo->GetParFile() ? 1 : 0,
+			(int)fileInfo->GetPartialState(),
+			fileInfo->GetSize(),
+			fileInfo->GetMissedSize(),
+			fileInfo->GetTotalArticles(),
+			fileInfo->GetMissedArticles(),
+			&fileFailedSize,
+			&fileFailedArticles,
+			&fileRemainingSize,
+			&fileCompletedArticles,
+			&fileSuccessSize,
+			&fileSuccessArticles,
+			&nzbFailedSize,
+			&nzbSuccessSize,
+			&nzbFailedArticles,
+			&nzbSuccessArticles,
+			&nzbParFailedSize,
+			&nzbParSuccessSize,
+			artStatuses.data(),
+			artSizes.data(),
+			resetFlags.data(),
+			articles->size());
+
+		nzbInfo->GetServerStats()->ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
+		nzbInfo->SetFailedSize(nzbFailedSize);
+		nzbInfo->SetSuccessSize(nzbSuccessSize);
+		nzbInfo->SetFailedArticles(nzbFailedArticles);
+		nzbInfo->SetSuccessArticles(nzbSuccessArticles);
+		if (fileInfo->GetParFile())
+		{
+			nzbInfo->SetParFailedSize(nzbParFailedSize);
+			nzbInfo->SetParSuccessSize(nzbParSuccessSize);
+		}
+		fileInfo->SetFailedSize(fileFailedSize);
+		fileInfo->SetFailedArticles(fileFailedArticles);
+		fileInfo->SetRemainingSize(fileRemainingSize);
+		fileInfo->SetCompletedArticles(fileCompletedArticles);
+		fileInfo->SetSuccessSize(fileSuccessSize);
+		fileInfo->SetSuccessArticles(fileSuccessArticles);
+
+		for (size_t i = 0; i < articles->size(); ++i)
+		{
+			if (resetFlags[i])
+			{
+				ArticleInfo* pa = (*articles)[i].get();
+				pa->SetStatus((ArticleInfo::EStatus)artStatuses[i]);
+				pa->SetCrc(0);
+				pa->SetSegmentOffset(0);
+				pa->SetSegmentSize(0);
+				pa->SetDupeExpectedOffset(-1);
+				pa->SetDupeExpectedEnd(-1);
+			}
+		}
+	}
+
+	bool HistorySetParameter(HistoryInfo* historyInfo, const char* text)
+	{
+		debug("Setting post-process-parameter '%s' for '%s'", text, historyInfo->GetName());
+
+		if (historyInfo->GetKind() != HistoryInfo::hkNzb && historyInfo->GetKind() != HistoryInfo::hkUrl)
+		{
+			error("Could not set post-process-parameter for %s: history item has wrong type", historyInfo->GetName());
+			return false;
+		}
+
+		size_t nameLen = 0;
+		const char* val = nzbget_rs_history_coord_split_param_assignment(text, &nameLen);
+		if (val)
+		{
+			std::string name(text, nameLen);
+			historyInfo->GetNzbInfo()->GetParameters()->SetParameter(name.c_str(), val);
+		}
+		else
+		{
+			error("Could not set post-process-parameter for %s: invalid argument: %s", historyInfo->GetNzbInfo()->GetName(), text);
+		}
+
+		return true;
+	}
+
+	bool HistorySetCategory(HistoryInfo* historyInfo, const char* text)
+	{
+		debug("Setting category '%s' for '%s'", text, historyInfo->GetName());
+
+		if (historyInfo->GetKind() != HistoryInfo::hkNzb && historyInfo->GetKind() != HistoryInfo::hkUrl)
+		{
+			error("Could not set category for %s: history item has wrong type", historyInfo->GetName());
+			return false;
+		}
+
+		historyInfo->GetNzbInfo()->SetCategory(text);
+
+		return true;
+	}
+
+	bool HistorySetName(HistoryInfo* historyInfo, const char* text);
+
+	void HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQueue::EEditAction action, const char* text);
+};
+
+inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+{
+	debug("Checking duplicates for %s", nzbInfo->GetName());
+
+	// the release is already downloaded and on disk: another posting of it isn't
+	// needed (B70: Knife Edge S02E01 - asked again after its success, a different
+	// posting of the same release, scored higher, downloaded a second copy). Kept
+	// in history as a backup, in case the download on disk is deleted or marked bad.
+	if (nzbInfo->GetKind() == NzbInfo::nkNzb && nzbInfo->GetDupeMode() != dmForce)
+	{
+		if (NzbInfo* downloaded = DownloadedOnDisk(downloadQueue, nzbInfo))
+		{
+			nzbInfo->PrintMessage(Message::mkInfo, "Not downloading %s: %s is downloaded and on disk",
+				nzbInfo->GetName(), downloaded->GetName());
+			nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
+			return;
+		}
+	}
+
+	// find duplicates in download queue with exactly same content
+	for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
+	{
+		bool sameContent = nzbget_rs_dupecoord_same_content_hash(
+			nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
+			queuedNzbInfo->GetFullContentHash(), queuedNzbInfo->GetFilteredContentHash()) != 0;
+
+		// if there is a duplicate with exactly same content (via hash-check)
+		// in queue - the new item is skipped
+		if (queuedNzbInfo != nzbInfo && sameContent && nzbInfo->GetKind() == NzbInfo::nkNzb)
+		{
+			NzbgetRsBuf msgBuf = nzbget_rs_dupecoord_format_dupe_skip_message(
+				nzbInfo->GetName(), queuedNzbInfo->GetName(), 0, 1, 0);
+			std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
+			nzbget_rs_free(msgBuf);
+
+			if (nzbInfo->GetFeedId())
+			{
+				warn("%s", message.c_str());
+				// Flag saying QueueCoordinator to skip nzb-file
+				nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
+				g_HistoryCoordinator->DeleteDiskFiles(nzbInfo);
+			}
+			else
+			{
+				nzbInfo->SetDeleteStatus(NzbInfo::dsCopy);
+				nzbInfo->AddMessage(Message::mkWarning, message.c_str());
+			}
+
+			return;
+		}
+	}
+
+	// if download has empty dupekey and empty dupescore - check if download queue
+	// or history have an item with the same name and non empty dupekey or dupescore and
+	// take these properties from this item
+	if (Util::EmptyStr(nzbInfo->GetDupeKey()) && nzbInfo->GetDupeScore() == 0)
+	{
+		for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
+		{
+			if (nzbget_rs_dupecoord_should_inherit_dupe_props(
+				nzbInfo->GetName(), queuedNzbInfo->GetName(),
+				queuedNzbInfo->GetDupeKey(), queuedNzbInfo->GetDupeScore()) != 0)
+			{
+				nzbInfo->SetDupeKey(queuedNzbInfo->GetDupeKey());
+				nzbInfo->SetDupeScore(queuedNzbInfo->GetDupeScore());
+				info("Assigning dupekey %s and dupescore %i to %s from existing queue item with the same name",
+					 nzbInfo->GetDupeKey(), nzbInfo->GetDupeScore(), nzbInfo->GetName());
+				break;
+			}
+		}
+	}
+	if (Util::EmptyStr(nzbInfo->GetDupeKey()) && nzbInfo->GetDupeScore() == 0)
+	{
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
+				nzbget_rs_dupecoord_should_inherit_dupe_props(
+					nzbInfo->GetName(), historyInfo->GetNzbInfo()->GetName(),
+					historyInfo->GetNzbInfo()->GetDupeKey(), historyInfo->GetNzbInfo()->GetDupeScore()) != 0)
+			{
+				nzbInfo->SetDupeKey(historyInfo->GetNzbInfo()->GetDupeKey());
+				nzbInfo->SetDupeScore(historyInfo->GetNzbInfo()->GetDupeScore());
+				info("Assigning dupekey %s and dupescore %i to %s from existing history item with the same name",
+					 nzbInfo->GetDupeKey(), nzbInfo->GetDupeScore(), nzbInfo->GetName());
+				break;
+			}
+			if (historyInfo->GetKind() == HistoryInfo::hkDup &&
+				nzbget_rs_dupecoord_should_inherit_dupe_props(
+					nzbInfo->GetName(), historyInfo->GetDupInfo()->GetName(),
+					historyInfo->GetDupInfo()->GetDupeKey(), historyInfo->GetDupInfo()->GetDupeScore()) != 0)
+			{
+				nzbInfo->SetDupeKey(historyInfo->GetDupInfo()->GetDupeKey());
+				nzbInfo->SetDupeScore(historyInfo->GetDupInfo()->GetDupeScore());
+				info("Assigning dupekey %s and dupescore %i to %s from existing history item with the same name",
+					 nzbInfo->GetDupeKey(), nzbInfo->GetDupeScore(), nzbInfo->GetName());
+				break;
+			}
+		}
+	}
+
+	// find duplicates in history
+
+	bool skip = false;
+	bool good = false;
+	bool sameContent = false;
+	const char* dupeName = nullptr;
+
+	// find duplicates in history having exactly same content
+	// also: nzb-files having duplicates marked as good are skipped
+	// also (only in score mode): nzb-files having success-duplicates in dup-history but not having duplicates in recent history are skipped
+	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+	{
+		int outSameContent = 0;
+		int outGood = 0;
+		if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+		{
+			NzbInfo* item = historyInfo->GetNzbInfo();
+			if (nzbget_rs_dupecoord_eval_history_dupe_match(
+				(int)HistoryInfo::hkNzb,
+				nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
+				(int)nzbInfo->GetDupeMode(), nzbInfo->GetDupeScore(),
+				nzbInfo->GetName(), nzbInfo->GetDupeKey(),
+				item->GetFullContentHash(), item->GetFilteredContentHash(),
+				(int)item->GetDupeMode(), (int)item->GetMarkStatus(), 0, item->GetDupeScore(),
+				item->GetName(), item->GetDupeKey(),
+				&outSameContent, &outGood) != 0)
+			{
+				skip = true;
+				sameContent = outSameContent != 0;
+				good = outGood != 0;
+				dupeName = item->GetName();
+				break;
+			}
+		}
+		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
+		{
+			DupInfo* dup = historyInfo->GetDupInfo();
+			if (nzbget_rs_dupecoord_eval_history_dupe_match(
+				(int)HistoryInfo::hkDup,
+				nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
+				(int)nzbInfo->GetDupeMode(), nzbInfo->GetDupeScore(),
+				nzbInfo->GetName(), nzbInfo->GetDupeKey(),
+				dup->GetFullContentHash(), dup->GetFilteredContentHash(),
+				(int)dup->GetDupeMode(), 0, (int)dup->GetStatus(), dup->GetDupeScore(),
+				dup->GetName(), dup->GetDupeKey(),
+				&outSameContent, &outGood) != 0)
+			{
+				skip = true;
+				sameContent = outSameContent != 0;
+				good = outGood != 0;
+				dupeName = dup->GetName();
+				break;
+			}
+		}
+	}
+
+	// With HealthCheck=dupe (B43) the same content in history decides by what became
+	// of it: only untried backups (and items the user deleted) - the nzb-file is
+	// downloaded as sent, not skipped as a copy (a client re-sending it would get
+	// nothing); a success - skipped, as before; a failure - skipped too (the same dead
+	// posting), but the best viable backup is fetched in its place when nothing of the
+	// key is queued, so the re-send still leads to a download
+	bool returnBackup = false;
+	if (skip && sameContent &&
+		g_Options->GetHealthCheck() == Options::hcDupe &&
+		nzbInfo->GetKind() == NzbInfo::nkNzb &&
+		nzbInfo->GetDupeHint() == NzbInfo::dhNone)
+	{
+		int succeeded = 0;
+		int failed = 0;
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+			{
+				NzbInfo* item = historyInfo->GetNzbInfo();
+				nzbget_rs_dupecoord_accum_hc_dupe_same_content_outcome(
+					(int)HistoryInfo::hkNzb,
+					nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
+					item->GetFullContentHash(), item->GetFilteredContentHash(),
+					(int)item->GetDeleteStatus(), item->IsDupeSuccess() ? 1 : 0, 0,
+					&succeeded, &failed);
+			}
+			else if (historyInfo->GetKind() == HistoryInfo::hkDup)
+			{
+				DupInfo* dup = historyInfo->GetDupInfo();
+				nzbget_rs_dupecoord_accum_hc_dupe_same_content_outcome(
+					(int)HistoryInfo::hkDup,
+					nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
+					dup->GetFullContentHash(), dup->GetFilteredContentHash(),
+					0, 0, (int)dup->GetStatus(),
+					&succeeded, &failed);
+			}
+		}
+		if (!succeeded && !failed)
+		{
+			info("Adding %s: the same content waits in history only as an untried backup", nzbInfo->GetName());
+			skip = false;
+			sameContent = false;
+		}
+		else if (failed && !succeeded)
+		{
+			returnBackup = !std::any_of(downloadQueue->GetQueue()->begin(), downloadQueue->GetQueue()->end(),
+				[nzbInfo](std::unique_ptr<NzbInfo>& queued)
+				{
+					return queued.get() != nzbInfo &&
+						queued->GetDeleteStatus() == NzbInfo::dsNone &&
+						SameNameOrKey(queued->GetName(), queued->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey());
+				});
+		}
+	}
+
+	if (!sameContent && nzbInfo->GetDupeHint() != NzbInfo::dhNone)
+	{
+		// dupe check when "download again" URLs: checking same content only
+		return;
+	}
+
+	if (!sameContent && !good && nzbInfo->GetDupeMode() == dmScore)
+	{
+		// nzb-files having success-duplicates in recent history (with different content) are added to history for backup
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			if ((historyInfo->GetKind() == HistoryInfo::hkNzb ||
+				 historyInfo->GetKind() == HistoryInfo::hkUrl) &&
+				nzbget_rs_dupecoord_should_skip_recent_history_score_dupe(
+					sameContent ? 1 : 0, good ? 1 : 0,
+					(int)nzbInfo->GetDupeMode(), nzbInfo->GetDupeScore(),
+					nzbInfo->GetName(), nzbInfo->GetDupeKey(),
+					(int)historyInfo->GetKind(),
+					(int)historyInfo->GetNzbInfo()->GetDupeMode(),
+					historyInfo->GetNzbInfo()->GetDupeScore(),
+					historyInfo->GetNzbInfo()->IsDupeSuccess() ? 1 : 0,
+					historyInfo->GetNzbInfo()->GetName(),
+					historyInfo->GetNzbInfo()->GetDupeKey()) != 0)
+			{
+				// Flag saying QueueCoordinator to skip nzb-file
+				nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
+				info("Collection %s is a duplicate to %s", nzbInfo->GetName(), historyInfo->GetNzbInfo()->GetName());
+				return;
+			}
+		}
+	}
+
+	if (skip)
+	{
+		NzbgetRsBuf msgBuf = nzbget_rs_dupecoord_format_dupe_skip_message(
+			nzbInfo->GetName(), dupeName, 1, sameContent ? 1 : 0, good ? 1 : 0);
+		std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
+		nzbget_rs_free(msgBuf);
+
+		if (nzbInfo->GetFeedId() && nzbInfo->GetDupeHint() == NzbInfo::dhNone)
+		{
+			nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
+			warn("%s", message.c_str());
+			g_HistoryCoordinator->DeleteDiskFiles(nzbInfo);
+		}
+		else
+		{
+			nzbInfo->SetDeleteStatus(sameContent ? NzbInfo::dsCopy : NzbInfo::dsGood);
+			nzbInfo->AddMessage(Message::mkWarning, message.c_str());
+		}
+
+		if (returnBackup)
+		{
+			info("%s is the same posting as a failed download: fetching the best backup instead", nzbInfo->GetName());
+			ReturnBestDupe(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey());
+		}
+
+		return;
+	}
+
+	// find duplicates in download queue and post-queue and handle both items according to their scores:
+	// only one item remains in queue and another one is moved to history as dupe-backup
+	if (nzbInfo->GetDupeMode() == dmScore)
+	{
+		// find duplicates in download queue
+		int index = 0;
+		for (NzbList::iterator it = downloadQueue->GetQueue()->begin(); it != downloadQueue->GetQueue()->end(); index++)
+		{
+			NzbInfo* queuedNzbInfo = (*it++).get();
+			int action = nzbget_rs_dupecoord_eval_queue_score_dupe(
+				queuedNzbInfo == nzbInfo ? 1 : 0,
+				(int)queuedNzbInfo->GetDeleteStatus(),
+				queuedNzbInfo->GetKind() == NzbInfo::nkNzb ? 1 : 0,
+				(queuedNzbInfo->GetKind() == NzbInfo::nkUrl && nzbInfo->GetKind() == NzbInfo::nkUrl) ? 1 : 0,
+				(int)queuedNzbInfo->GetDupeMode(),
+				queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
+				nzbInfo->GetName(), nzbInfo->GetDupeKey(),
+				nzbInfo->GetDupeScore(), queuedNzbInfo->GetDupeScore(),
+				(int)g_Options->GetHealthCheck(),
+				queuedNzbInfo->GetDupeHint() == NzbInfo::dhRedownloadAuto ? 1 : 0,
+				queuedNzbInfo->GetCurrentSuccessArticles(),
+				queuedNzbInfo->CalcHealth(),
+				queuedNzbInfo->CalcCriticalHealth(true),
+				queuedNzbInfo->GetPostInfo() != nullptr ? 1 : 0);
+			if (action == 1)
+			{
+				// Flag saying QueueCoordinator to skip nzb-file
+				nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
+				info("Collection %s is a duplicate to %s", nzbInfo->GetName(), queuedNzbInfo->GetName());
+				return;
+			}
+			else if (action == 2)
+			{
+				// the existing queue item is moved to history as dupe-backup
+				info("Moving collection %s with lower duplicate score to history", queuedNzbInfo->GetName());
+				queuedNzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
+				int oldSize = downloadQueue->GetQueue()->size();
+				downloadQueue->EditEntry(queuedNzbInfo->GetId(),
+					DownloadQueue::eaGroupDelete, nullptr);
+				int newSize = downloadQueue->GetQueue()->size();
+				if (oldSize == newSize)
+				{
+					index++;
+				}
+				it = downloadQueue->GetQueue()->begin() + index;
+				index--;
+			}
+		}
+	}
+}
+
+inline void DupeCoordinator::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+{
+	debug("Processing duplicates for %s", nzbInfo->GetName());
+
+	if (FailsOver(nzbInfo) && !nzbInfo->IsDupeSuccess())
+	{
+		ReturnBestDupe(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey());
+	}
+
+	// one copy is downloaded and on disk: the others of its key still downloading,
+	// repairing or checking are stopped and kept as backups (B77: Sugar S01E01 - a
+	// copy kept repairing for minutes after another one had succeeded, then failed)
+	bool dupeHealth = g_Options->GetHealthCheck() == Options::hcDupe ||
+		g_Options->GetHealthCheck() == Options::hcPark;
+	if (dupeHealth && !Util::EmptyStr(nzbInfo->GetDupeKey()) &&
+		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
+		nzbInfo->IsDupeSuccess() && FilesOnDisk(nzbInfo))
+	{
+		DownloadQueue::EEditAction deleteAction = g_Options->GetHealthCheck() == Options::hcPark
+			? DownloadQueue::eaGroupParkDelete
+			: DownloadQueue::eaGroupDupeDelete;
+		std::vector<std::pair<int, bool>> others;	// id, in post-processing
+		for (NzbInfo* queued : downloadQueue->GetQueue())
+		{
+			if (nzbget_rs_dupecoord_is_other_to_stop_on_completed(
+				queued == nzbInfo ? 1 : 0,
+				queued->GetKind() == NzbInfo::nkNzb ? 1 : 0,
+				queued->GetDeleting() ? 1 : 0,
+				(int)queued->GetDeleteStatus(),
+				(int)queued->GetDupeMode(),
+				queued->GetDupeKey(),
+				nzbInfo->GetDupeKey()) != 0)
+			{
+				queued->PrintMessage(Message::mkInfo, "Stopping %s: %s is downloaded and on disk",
+					queued->GetName(), nzbInfo->GetName());
+				queued->SetDeleteStatus(NzbInfo::dsDupe);
+				others.emplace_back(queued->GetId(), queued->GetPostInfo() != nullptr);
+			}
+		}
+		for (const auto& other : others)
+		{
+			downloadQueue->EditEntry(other.first,
+				other.second ? DownloadQueue::eaPostDelete : deleteAction,
+				nullptr);
+		}
+	}
+}
+
+inline void DupeCoordinator::ReturnBestDupe(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* nzbName, const char* dupeKey)
+{
+	HistoryInfo* historyDupe = FindDupeBackup(downloadQueue, nzbInfo, nzbName, dupeKey);
+
+	// move that dupe-backup from history to download queue
+	if (historyDupe)
+	{
+		info("Found duplicate %s for %s", historyDupe->GetNzbInfo()->GetName(), nzbName);
+		historyDupe->GetNzbInfo()->SetDupeHint(NzbInfo::dhRedownloadAuto);
+		g_HistoryCoordinator->Redownload(downloadQueue, historyDupe);
+	}
+}
+
+inline void DupeCoordinator::HistoryCleanup(DownloadQueue* downloadQueue, HistoryInfo* markHistoryInfo)
+{
+	const char* dupeKey = markHistoryInfo->GetKind() == HistoryInfo::hkNzb ? markHistoryInfo->GetNzbInfo()->GetDupeKey() :
+		markHistoryInfo->GetKind() == HistoryInfo::hkDup ? markHistoryInfo->GetDupInfo()->GetDupeKey() :
+		nullptr;
+	const char* nzbName = markHistoryInfo->GetKind() == HistoryInfo::hkNzb ? markHistoryInfo->GetNzbInfo()->GetName() :
+		markHistoryInfo->GetKind() == HistoryInfo::hkDup ? markHistoryInfo->GetDupInfo()->GetName() :
+		nullptr;
+	bool changed = false;
+	int index = 0;
+
+	// traversing in a reverse order to delete items in order they were added to history
+	// (just to produce the log-messages in a more logical order)
+	for (HistoryList::reverse_iterator it = downloadQueue->GetHistory()->rbegin(); it != downloadQueue->GetHistory()->rend(); )
+	{
+		HistoryInfo* historyInfo = (*it).get();
+		NzbInfo* nzbInfo = (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
+			? historyInfo->GetNzbInfo()
+			: nullptr;
+
+		if (nzbInfo && nzbget_rs_dupecoord_should_cleanup_history_dupe(
+			(int)historyInfo->GetKind(),
+			(int)nzbInfo->GetDupeMode(),
+			(int)nzbInfo->GetDeleteStatus(),
+			historyInfo == markHistoryInfo ? 1 : 0,
+			nzbInfo->GetName(),
+			nzbInfo->GetDupeKey(),
+			nzbName,
+			dupeKey) != 0)
+		{
+			g_HistoryCoordinator->HistoryHide(downloadQueue, historyInfo, index);
+			index++;
+			it = downloadQueue->GetHistory()->rbegin() + index;
+			changed = true;
+		}
+		else
+		{
+			++it;
+			index++;
+		}
+	}
+
+	if (changed)
+	{
+		downloadQueue->HistoryChanged();
+		downloadQueue->Save();
+	}
+}
+
+#endif
 
 
 
@@ -22075,6 +24503,49 @@ private:
 };
 
 using QueueScriptController = QueueScriptCoordinator::QueueScriptController;
+
+inline void DupeCoordinator::HistoryMark(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, NzbInfo::EMarkStatus markStatus)
+{
+	int itemDupeMode = historyInfo->GetKind() == HistoryInfo::hkNzb ? (int)historyInfo->GetNzbInfo()->GetDupeMode() :
+		historyInfo->GetKind() == HistoryInfo::hkDup ? (int)historyInfo->GetDupInfo()->GetDupeMode() : 0;
+	int dupStatus = 0;
+	int postAction = 0;
+	const char* markStatusName = nzbget_rs_dupecoord_resolve_history_mark(
+		(int)markStatus,
+		g_Options->GetDupeCheck() ? 1 : 0,
+		(int)historyInfo->GetKind(),
+		itemDupeMode,
+		&dupStatus,
+		&postAction);
+	info("Marking %s as %s", historyInfo->GetName(), markStatusName);
+
+	if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+	{
+		historyInfo->GetNzbInfo()->SetMarkStatus(markStatus);
+		g_QueueScriptCoordinator->EnqueueScript(historyInfo->GetNzbInfo(), QueueScriptCoordinator::qeNzbMarked);
+	}
+	else if (historyInfo->GetKind() == HistoryInfo::hkDup)
+	{
+		historyInfo->GetDupInfo()->SetStatus((DupInfo::EStatus)dupStatus);
+	}
+	else
+	{
+		error("Could not mark %s as bad: history item has wrong type", historyInfo->GetName());
+		return;
+	}
+
+	if (postAction == 1)
+	{
+		HistoryCleanup(downloadQueue, historyInfo);
+	}
+	else if (postAction == 2)
+	{
+		const char* dupeKey = historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo()->GetDupeKey() :
+			historyInfo->GetKind() == HistoryInfo::hkDup ? historyInfo->GetDupInfo()->GetDupeKey() :
+			nullptr;
+		ReturnBestDupe(downloadQueue, nullptr, historyInfo->GetName(), dupeKey);
+	}
+}
 
 #endif
 
@@ -31262,7 +33733,10 @@ public:
 
 	/* a probe proves a posting dead only with nothing found and enough
 	 * definitive misses (an outage, where every answer is an error, never does) */
-	static bool DeadProbe(const Health& health);
+	static bool DeadProbe(const Health& health)
+	{
+		return nzbget_rs_df_donor_health_dead_probe(health.present, health.missing, MinKnown) != 0;
+	}
 
 	struct SampleOptions
 	{
@@ -31280,7 +33754,14 @@ public:
 		std::mutex lock;
 		std::atomic<bool> ok{false};
 		std::function<bool()> settled;
-		bool Done();
+		bool Done()
+		{
+			if (rustGate)
+			{
+				return nzbget_rs_donor_body_gate_done(rustGate) != 0;
+			}
+			return ok || (settled && settled());
+		}
 	};
 
 	struct Request
@@ -31304,10 +33785,16 @@ public:
 	class Server
 	{
 	public:
-		explicit Server(int cap);
-		virtual ~Server();
+		explicit Server(int cap)
+		{
+			m_rust = nzbget_rs_donor_server_new(this, cap, &Server::ExchangeTrampoline);
+		}
+		virtual ~Server()
+		{
+			nzbget_rs_donor_server_free(m_rust);
+		}
 
-		int Cap() const;
+		int Cap() const { return nzbget_rs_donor_server_cap(m_rust); }
 		void* RustHandle() const { return m_rust; }
 
 	protected:
@@ -31317,15 +33804,102 @@ public:
 		virtual std::vector<Answer> Exchange(const std::vector<Request>& batch) = 0;
 
 		/* one server at a time downloads a gated article's body, and only until one delivered */
-		static Answer BodyOnce(BodyGate* gate, const std::function<Answer()>& download);
+		static Answer BodyOnce(BodyGate* gate, const std::function<Answer()>& download)
+		{
+			if (gate && gate->rustGate)
+			{
+				struct BodyOnceCtx
+				{
+					const std::function<Answer()>* download;
+					std::exception_ptr error;
+				} ctx{&download, nullptr};
+				int ans = nzbget_rs_donor_body_once(
+					gate->rustGate,
+					&ctx,
+					[](void* rawCtx) -> int {
+						auto* c = static_cast<BodyOnceCtx*>(rawCtx);
+						try
+						{
+							return c->download && *c->download ? (int)(*c->download)() : (int)Answer::Error;
+						}
+						catch (...)
+						{
+							c->error = std::current_exception();
+							return -1;
+						}
+					});
+				if (ctx.error)
+				{
+					std::rethrow_exception(ctx.error);
+				}
+				return static_cast<Answer>(ans);
+			}
+			std::lock_guard<std::mutex> guard(gate->lock);
+			if (gate->Done())
+			{
+				return Answer::Present;
+			}
+			Answer answer = download();
+			gate->ok = answer == Answer::Present;
+			return answer;
+		}
 
 	private:
 		void* m_rust = nullptr;
-		static int ExchangeTrampoline(
-			void* cppServer, size_t count, const char* const* msgIds, const size_t* msgLens,
-			void* const* rustGates, const char* const* const* groupPtrs,
-			const size_t* const* groupLens, const size_t* groupCounts,
-			int* outAnswers, size_t* outCount, int* outBusy);
+		static int ExchangeTrampoline( void* cppServer, size_t count, const char* const* msgIds, const size_t* msgLens, void* const* rustGates, const char* const* const* groupPtrs, const size_t* const* groupLens, const size_t* groupCounts, int* outAnswers, size_t* outCount, int* outBusy)
+		{
+			auto* self = static_cast<Server*>(cppServer);
+			std::vector<BodyGate> gates(count);
+			std::vector<Request> batch(count);
+			for (size_t i = 0; i < count; i++)
+			{
+				batch[i].messageId.assign(msgIds[i] ? msgIds[i] : "", msgLens[i]);
+				if (rustGates[i])
+				{
+					gates[i].rustGate = rustGates[i];
+					batch[i].gate = &gates[i];
+				}
+				if (groupCounts && groupCounts[i] > 0 && groupPtrs && groupPtrs[i] && groupLens && groupLens[i])
+				{
+					auto g = std::make_shared<std::vector<std::string>>();
+					g->reserve(groupCounts[i]);
+					for (size_t j = 0; j < groupCounts[i]; j++)
+					{
+						g->emplace_back(groupPtrs[i][j] ? groupPtrs[i][j] : "", groupLens[i][j]);
+					}
+					batch[i].groups = std::move(g);
+				}
+			}
+			try
+			{
+				std::vector<Answer> answers = self->Exchange(batch);
+				size_t n = std::min(count, answers.size());
+				for (size_t i = 0; i < n; i++)
+				{
+					outAnswers[i] = (int)answers[i];
+				}
+				*outCount = n;
+				*outBusy = 0;
+				return 0;
+			}
+			catch (ExchangeError& error)
+			{
+				size_t n = std::min(count, error.answers.size());
+				for (size_t i = 0; i < n; i++)
+				{
+					outAnswers[i] = (int)error.answers[i];
+				}
+				*outCount = n;
+				*outBusy = error.busy ? 1 : 0;
+				return 1;
+			}
+			catch (...)
+			{
+				*outCount = 0;
+				*outBusy = 0;
+				return 1;
+			}
+		}
 	};
 
 	using ServerList = std::vector<std::shared_ptr<Server>>;
@@ -31340,8 +33914,46 @@ public:
 
 	/* a posting: a probe first; unless that proves it dead (and full is set)
 	 * the rest of the sample */
-	static Health CheckPosting(const ServerList& servers, const std::vector<std::string>& ids,
-		const std::shared_ptr<std::vector<std::string>>& groups, const Options& options, bool full);
+	static Health CheckPosting(const ServerList& servers, const std::vector<std::string>& ids, const std::shared_ptr<std::vector<std::string>>& groups, const Options& options, bool full)
+	{
+		std::vector<void*> handles(servers.size());
+		for (size_t i = 0; i < servers.size(); i++)
+		{
+			handles[i] = servers[i] ? servers[i]->RustHandle() : nullptr;
+		}
+		auto* keepalive = new ServerList(servers);
+		std::vector<const char*> idPtrs(ids.size());
+		std::vector<size_t> idLens(ids.size());
+		for (size_t i = 0; i < ids.size(); i++)
+		{
+			idPtrs[i] = ids[i].data();
+			idLens[i] = ids[i].size();
+		}
+		std::vector<const char*> groupPtrs;
+		std::vector<size_t> groupLens;
+		if (groups)
+		{
+			groupPtrs.resize(groups->size());
+			groupLens.resize(groups->size());
+			for (size_t i = 0; i < groups->size(); i++)
+			{
+				groupPtrs[i] = (*groups)[i].data();
+				groupLens[i] = (*groups)[i].size();
+			}
+		}
+		Health health;
+		nzbget_rs_donor_check_posting(
+			handles.data(), handles.size(),
+			keepalive, [](void* p) { delete static_cast<ServerList*>(p); },
+			idPtrs.data(), idLens.data(), ids.size(),
+			groupPtrs.data(), groupLens.data(), groupPtrs.size(),
+			options.sample.percent, options.sample.minimum, options.sample.maximum,
+			options.sample.bodyPercent, options.sample.maxBody, options.sample.seed,
+			options.probe, options.budgetMs, (int64_t)options.deadlineMs, full ? 1 : 0,
+			&health.checked, &health.present, &health.missing, &health.error,
+			&health.bodyChecked, &health.bodyBad);
+		return health;
+	}
 
 	/* postings checked concurrently, each reported as its check finishes */
 	struct Posting
@@ -31350,280 +33962,97 @@ public:
 		std::vector<std::string> ids;
 		std::shared_ptr<std::vector<std::string>> groups;
 	};
-	static void CheckPostings(const ServerList& servers, const std::vector<Posting>& postings,
-		const Options& options, bool full, int concurrency,
-		const std::function<void(const std::string& key, const Health&)>& emit);
-
-	static long long NowMs();
-
-	/* shutdown: the walkers of every check stop asking and end; WaitAll returns
-	 * when they did (before the server pool goes away). Reset allows checks again */
-	static void StopAll();
-	static void WaitAll();
-	static void Reset();
-	static bool Stopping();
-};
-
-inline long long DonorHealth::NowMs()
-{
-	return (long long)nzbget_rs_donor_now_ms();
-}
-
-inline bool DonorHealth::DeadProbe(const Health& health)
-{
-	return nzbget_rs_df_donor_health_dead_probe(health.present, health.missing, MinKnown) != 0;
-}
-
-inline bool DonorHealth::BodyGate::Done()
-{
-	if (rustGate)
+	static void CheckPostings(const ServerList& servers, const std::vector<Posting>& postings, const Options& options, bool full, int concurrency, const std::function<void(const std::string&, const Health&)>& emit)
 	{
-		return nzbget_rs_donor_body_gate_done(rustGate) != 0;
-	}
-	return ok || (settled && settled());
-}
-
-inline DonorHealth::Server::Server(int cap)
-{
-	m_rust = nzbget_rs_donor_server_new(this, cap, &Server::ExchangeTrampoline);
-}
-
-inline DonorHealth::Server::~Server()
-{
-	nzbget_rs_donor_server_free(m_rust);
-}
-
-inline int DonorHealth::Server::Cap() const { return nzbget_rs_donor_server_cap(m_rust); }
-
-inline int DonorHealth::Server::ExchangeTrampoline(
-	void* cppServer, size_t count, const char* const* msgIds, const size_t* msgLens,
-	void* const* rustGates, const char* const* const* groupPtrs,
-	const size_t* const* groupLens, const size_t* groupCounts,
-	int* outAnswers, size_t* outCount, int* outBusy)
-{
-	auto* self = static_cast<Server*>(cppServer);
-	std::vector<BodyGate> gates(count);
-	std::vector<Request> batch(count);
-	for (size_t i = 0; i < count; i++)
-	{
-		batch[i].messageId.assign(msgIds[i] ? msgIds[i] : "", msgLens[i]);
-		if (rustGates[i])
+		std::vector<void*> handles(servers.size());
+		for (size_t i = 0; i < servers.size(); i++)
 		{
-			gates[i].rustGate = rustGates[i];
-			batch[i].gate = &gates[i];
+			handles[i] = servers[i] ? servers[i]->RustHandle() : nullptr;
 		}
-		if (groupCounts && groupCounts[i] > 0 && groupPtrs && groupPtrs[i] && groupLens && groupLens[i])
+		auto* keepalive = new ServerList(servers);
+		size_t pcount = postings.size();
+		std::vector<const char*> keyPtrs(pcount);
+		std::vector<size_t> keyLens(pcount);
+		std::vector<std::vector<const char*>> idStrs(pcount);
+		std::vector<std::vector<size_t>> idLens(pcount);
+		std::vector<const char* const*> idPtrsOuter(pcount, nullptr);
+		std::vector<const size_t*> idLensOuter(pcount, nullptr);
+		std::vector<size_t> idCounts(pcount, 0);
+		std::vector<std::vector<const char*>> groupStrs(pcount);
+		std::vector<std::vector<size_t>> groupLens(pcount);
+		std::vector<const char* const*> groupPtrsOuter(pcount, nullptr);
+		std::vector<const size_t*> groupLensOuter(pcount, nullptr);
+		std::vector<size_t> groupCounts(pcount, 0);
+
+		for (size_t i = 0; i < pcount; i++)
 		{
-			auto g = std::make_shared<std::vector<std::string>>();
-			g->reserve(groupCounts[i]);
-			for (size_t j = 0; j < groupCounts[i]; j++)
+			keyPtrs[i] = postings[i].key.data();
+			keyLens[i] = postings[i].key.size();
+			idStrs[i].resize(postings[i].ids.size());
+			idLens[i].resize(postings[i].ids.size());
+			for (size_t j = 0; j < postings[i].ids.size(); j++)
 			{
-				g->emplace_back(groupPtrs[i][j] ? groupPtrs[i][j] : "", groupLens[i][j]);
+				idStrs[i][j] = postings[i].ids[j].data();
+				idLens[i][j] = postings[i].ids[j].size();
 			}
-			batch[i].groups = std::move(g);
-		}
-	}
-	try
-	{
-		std::vector<Answer> answers = self->Exchange(batch);
-		size_t n = std::min(count, answers.size());
-		for (size_t i = 0; i < n; i++)
-		{
-			outAnswers[i] = (int)answers[i];
-		}
-		*outCount = n;
-		*outBusy = 0;
-		return 0;
-	}
-	catch (ExchangeError& error)
-	{
-		size_t n = std::min(count, error.answers.size());
-		for (size_t i = 0; i < n; i++)
-		{
-			outAnswers[i] = (int)error.answers[i];
-		}
-		*outCount = n;
-		*outBusy = error.busy ? 1 : 0;
-		return 1;
-	}
-	catch (...)
-	{
-		*outCount = 0;
-		*outBusy = 0;
-		return 1;
-	}
-}
+			idPtrsOuter[i] = idStrs[i].data();
+			idLensOuter[i] = idLens[i].data();
+			idCounts[i] = postings[i].ids.size();
 
-inline DonorHealth::Answer DonorHealth::Server::BodyOnce(BodyGate* gate, const std::function<Answer()>& download)
-{
-	if (gate && gate->rustGate)
-	{
-		struct BodyOnceCtx
-		{
-			const std::function<Answer()>* download;
-			std::exception_ptr error;
-		} ctx{&download, nullptr};
-		int ans = nzbget_rs_donor_body_once(
-			gate->rustGate,
-			&ctx,
-			[](void* rawCtx) -> int {
-				auto* c = static_cast<BodyOnceCtx*>(rawCtx);
-				try
+			if (postings[i].groups && !postings[i].groups->empty())
+			{
+				const auto& g = *postings[i].groups;
+				groupStrs[i].resize(g.size());
+				groupLens[i].resize(g.size());
+				for (size_t j = 0; j < g.size(); j++)
 				{
-					return c->download && *c->download ? (int)(*c->download)() : (int)Answer::Error;
+					groupStrs[i][j] = g[j].data();
+					groupLens[i][j] = g[j].size();
 				}
-				catch (...)
+				groupPtrsOuter[i] = groupStrs[i].data();
+				groupLensOuter[i] = groupLens[i].data();
+				groupCounts[i] = g.size();
+			}
+		}
+
+		nzbget_rs_donor_check_postings(
+			handles.data(), handles.size(),
+			keepalive, [](void* p) { delete static_cast<ServerList*>(p); },
+			pcount, keyPtrs.data(), keyLens.data(),
+			idPtrsOuter.data(), idLensOuter.data(), idCounts.data(),
+			groupPtrsOuter.data(), groupLensOuter.data(), groupCounts.data(),
+			options.sample.percent, options.sample.minimum, options.sample.maximum,
+			options.sample.bodyPercent, options.sample.maxBody, options.sample.seed,
+			options.probe, options.budgetMs, (int64_t)options.deadlineMs,
+			full ? 1 : 0, concurrency,
+			const_cast<std::function<void(const std::string&, const Health&)>*>(&emit),
+			[](void* rawCtx, const char* keyPtr, size_t keyLen,
+				int checked, int present, int missing, int error, int bodyChecked, int bodyBad) {
+				auto* fn = static_cast<const std::function<void(const std::string&, const Health&)>*>(rawCtx);
+				if (fn && *fn)
 				{
-					c->error = std::current_exception();
-					return -1;
+					Health h;
+					h.checked = checked;
+					h.present = present;
+					h.missing = missing;
+					h.error = error;
+					h.bodyChecked = bodyChecked;
+					h.bodyBad = bodyBad;
+					(*fn)(std::string(keyPtr ? keyPtr : "", keyLen), h);
 				}
 			});
-		if (ctx.error)
-		{
-			std::rethrow_exception(ctx.error);
-		}
-		return static_cast<Answer>(ans);
 	}
-	std::lock_guard<std::mutex> guard(gate->lock);
-	if (gate->Done())
+
+	static long long NowMs()
 	{
-		return Answer::Present;
-	}
-	Answer answer = download();
-	gate->ok = answer == Answer::Present;
-	return answer;
-}
-
-inline void DonorHealth::StopAll() { nzbget_rs_donor_stop_all(); }
-inline void DonorHealth::Reset() { nzbget_rs_donor_reset(); }
-inline bool DonorHealth::Stopping() { return nzbget_rs_donor_stopping() != 0; }
-inline void DonorHealth::WaitAll() { nzbget_rs_donor_wait_all(); }
-
-inline DonorHealth::Health DonorHealth::CheckPosting(const ServerList& servers, const std::vector<std::string>& ids,
-	const std::shared_ptr<std::vector<std::string>>& groups, const Options& options, bool full)
-{
-	std::vector<void*> handles(servers.size());
-	for (size_t i = 0; i < servers.size(); i++)
-	{
-		handles[i] = servers[i] ? servers[i]->RustHandle() : nullptr;
-	}
-	auto* keepalive = new ServerList(servers);
-	std::vector<const char*> idPtrs(ids.size());
-	std::vector<size_t> idLens(ids.size());
-	for (size_t i = 0; i < ids.size(); i++)
-	{
-		idPtrs[i] = ids[i].data();
-		idLens[i] = ids[i].size();
-	}
-	std::vector<const char*> groupPtrs;
-	std::vector<size_t> groupLens;
-	if (groups)
-	{
-		groupPtrs.resize(groups->size());
-		groupLens.resize(groups->size());
-		for (size_t i = 0; i < groups->size(); i++)
-		{
-			groupPtrs[i] = (*groups)[i].data();
-			groupLens[i] = (*groups)[i].size();
-		}
-	}
-	Health health;
-	nzbget_rs_donor_check_posting(
-		handles.data(), handles.size(),
-		keepalive, [](void* p) { delete static_cast<ServerList*>(p); },
-		idPtrs.data(), idLens.data(), ids.size(),
-		groupPtrs.data(), groupLens.data(), groupPtrs.size(),
-		options.sample.percent, options.sample.minimum, options.sample.maximum,
-		options.sample.bodyPercent, options.sample.maxBody, options.sample.seed,
-		options.probe, options.budgetMs, (int64_t)options.deadlineMs, full ? 1 : 0,
-		&health.checked, &health.present, &health.missing, &health.error,
-		&health.bodyChecked, &health.bodyBad);
-	return health;
-}
-
-inline void DonorHealth::CheckPostings(const ServerList& servers, const std::vector<Posting>& postings,
-	const Options& options, bool full, int concurrency,
-	const std::function<void(const std::string&, const Health&)>& emit)
-{
-	std::vector<void*> handles(servers.size());
-	for (size_t i = 0; i < servers.size(); i++)
-	{
-		handles[i] = servers[i] ? servers[i]->RustHandle() : nullptr;
-	}
-	auto* keepalive = new ServerList(servers);
-	size_t pcount = postings.size();
-	std::vector<const char*> keyPtrs(pcount);
-	std::vector<size_t> keyLens(pcount);
-	std::vector<std::vector<const char*>> idStrs(pcount);
-	std::vector<std::vector<size_t>> idLens(pcount);
-	std::vector<const char* const*> idPtrsOuter(pcount, nullptr);
-	std::vector<const size_t*> idLensOuter(pcount, nullptr);
-	std::vector<size_t> idCounts(pcount, 0);
-	std::vector<std::vector<const char*>> groupStrs(pcount);
-	std::vector<std::vector<size_t>> groupLens(pcount);
-	std::vector<const char* const*> groupPtrsOuter(pcount, nullptr);
-	std::vector<const size_t*> groupLensOuter(pcount, nullptr);
-	std::vector<size_t> groupCounts(pcount, 0);
-
-	for (size_t i = 0; i < pcount; i++)
-	{
-		keyPtrs[i] = postings[i].key.data();
-		keyLens[i] = postings[i].key.size();
-		idStrs[i].resize(postings[i].ids.size());
-		idLens[i].resize(postings[i].ids.size());
-		for (size_t j = 0; j < postings[i].ids.size(); j++)
-		{
-			idStrs[i][j] = postings[i].ids[j].data();
-			idLens[i][j] = postings[i].ids[j].size();
-		}
-		idPtrsOuter[i] = idStrs[i].data();
-		idLensOuter[i] = idLens[i].data();
-		idCounts[i] = postings[i].ids.size();
-
-		if (postings[i].groups && !postings[i].groups->empty())
-		{
-			const auto& g = *postings[i].groups;
-			groupStrs[i].resize(g.size());
-			groupLens[i].resize(g.size());
-			for (size_t j = 0; j < g.size(); j++)
-			{
-				groupStrs[i][j] = g[j].data();
-				groupLens[i][j] = g[j].size();
-			}
-			groupPtrsOuter[i] = groupStrs[i].data();
-			groupLensOuter[i] = groupLens[i].data();
-			groupCounts[i] = g.size();
-		}
+		return (long long)nzbget_rs_donor_now_ms();
 	}
 
-	nzbget_rs_donor_check_postings(
-		handles.data(), handles.size(),
-		keepalive, [](void* p) { delete static_cast<ServerList*>(p); },
-		pcount, keyPtrs.data(), keyLens.data(),
-		idPtrsOuter.data(), idLensOuter.data(), idCounts.data(),
-		groupPtrsOuter.data(), groupLensOuter.data(), groupCounts.data(),
-		options.sample.percent, options.sample.minimum, options.sample.maximum,
-		options.sample.bodyPercent, options.sample.maxBody, options.sample.seed,
-		options.probe, options.budgetMs, (int64_t)options.deadlineMs,
-		full ? 1 : 0, concurrency,
-		const_cast<std::function<void(const std::string&, const Health&)>*>(&emit),
-		[](void* rawCtx, const char* keyPtr, size_t keyLen,
-			int checked, int present, int missing, int error, int bodyChecked, int bodyBad) {
-			auto* fn = static_cast<const std::function<void(const std::string&, const Health&)>*>(rawCtx);
-			if (fn && *fn)
-			{
-				Health h;
-				h.checked = checked;
-				h.present = present;
-				h.missing = missing;
-				h.error = error;
-				h.bodyChecked = bodyChecked;
-				h.bodyBad = bodyBad;
-				(*fn)(std::string(keyPtr ? keyPtr : "", keyLen), h);
-			}
-		});
-}
-
+	static void StopAll() { nzbget_rs_donor_stop_all(); }
+	static void WaitAll() { nzbget_rs_donor_wait_all(); }
+	static void Reset() { nzbget_rs_donor_reset(); }
+	static bool Stopping() { return nzbget_rs_donor_stopping() != 0; }
+};
 class ReleaseName
 {
 public:
@@ -32728,143 +35157,6 @@ private:
  * across restarts, and a restart looks at the queue once for downloads whose
  * add event it missed.
  */
-class DupeSearch : public Thread
-{
-public:
-	DupeSearch();
-	~DupeSearch() override;
-	void Run() override;
-	void Stop() override;
-    void NotifyNameChanged(int nzbId);
-
-	// a pick still in post-processing when its search is due is asked again this much later
-	static constexpr int PostProcessRetrySec = 30;
-	// a pick that failed this recently is searched from history at start (B64)
-	static constexpr int RecentFailureSec = 3600;
-	// keys are forgotten after this long
-	static constexpr int StateTtlSec = 30 * 24 * 3600;
-	// the score of a managed pick, and the room below it for donors
-	static constexpr int BasePickScore = 1000000;
-	// search and fetch of one pick are meant to fit in this long
-	static constexpr int SearchDeadlineSec = 60;
-
-	// parameters of the duplicates this search queued: a marker, and the
-	// share of the posting found alive (percent)
-	static constexpr const char* DonorParam = "DupeSearch";
-	static constexpr const char* AliveParam = "DupeAlive";
-	// the measured share alive (percent) of a duplicate in history this search
-	// ranked but didn't add (a client's own backup, an earlier donor)
-	static constexpr const char* HealthParam = "DupeHealth";
-    static constexpr const char* OwnedKeyParam = "DupeSearchOwnedKey";
-
-	/* "dupes:" + the normalized title: the duplicate key of a download that has none */
-	static std::string MakeDupeKey(const std::string& name);
-
-	/* has this search queued the nzb itself, or has the nzbget-dupe-proxy
-	 * (it marks its duplicates with DupeAlive)? */
-	static bool IsDonor(NzbInfo* nzbInfo);
-
-private:
-	class DownloadQueueObserver final : public Observer
-	{
-	public:
-		DupeSearch* m_owner;
-		void Update(Subject* caller, void* aspect) override { m_owner->DownloadQueueUpdate(static_cast<DownloadQueue*>(caller), aspect); }
-	};
-
-	struct Searched
-	{
-		int score = 0;
-		time_t time = 0;
-		std::string title;
-		bool retryable = false;
-        std::string rawName; // Runtime-only normalization cache; never inferred from disk.
-	};
-
-	struct Job
-	{
-		int nzbId = 0;
-		bool failed = false;
-		bool rankOnly = false;
-		std::string name;
-		std::string dupeKey;
-		std::string category;
-		std::string imdb;	// from the nzb-file's meta data
-		std::string tvdb;
-		std::string queuedFile;	// the nzb-file of the pick
-		std::vector<std::string> knownFiles;	// the nzb-files nzbget keeps for this release (queue and history)
-		// the duplicates of the key nzbget keeps in history (DELETED/DUPE),
-		// whoever sent them: id and the item's own nzb-file
-		std::vector<std::pair<int, std::string>> members;
-		std::vector<int> memberScores;	// their scores when the search began
-		int score = 0;
-	};
-
-	// postings fetched at the same time
-	static constexpr int FetchParallel = 4;
-
-	DownloadQueueObserver m_observer;
-	NzbFetcher m_fetcher;
-	DeadPostings m_dead;
-	std::mutex m_mutex;
-	std::condition_variable m_cond;
-	std::set<int> m_rankPending;
-	std::map<int, time_t> m_pending;			// nzb id -> when to look at it
-	std::map<std::string, Searched> m_searched;	// lowercase dupe key -> last search
-    std::map<std::pair<std::string, std::string>, Searched> m_titleSearched;
-	// pick id -> fingerprints its search queued; per pick, not per key: a pick sent
-	// again after the user deleted it and its duplicates gets them back (B41)
-	std::map<int, std::set<std::string>> m_sent;
-
-	void DownloadQueueUpdate(DownloadQueue* downloadQueue, void* aspect);
-	void Schedule(int nzbId, time_t due);
-	void ScanQueue();
-	bool Prepare(DownloadQueue* downloadQueue, int nzbId, Job& job);
-	bool PrepareNative(DownloadQueue* downloadQueue, int nzbId, Job& job);
-	void Expand(const Job& job, const NzbSummary& pick, const std::vector<Newznab::Result>& prior,
-        const std::vector<Posting::Sketch>& known, time_t deadline, NzbFetcher::Budget& budget,
-		std::vector<NzbFetcher::Fetched>& fetched, std::set<std::string>& attempted, NzbFetcher::Stats& stats, Newznab::SearchStats& queryStats,
-		int& results, int& candidates, int& postings);
-	void Search(const Job& job);
-	/* health checks, adds and ranks the verified postings and the key's duplicates in history */
-	void Place(const Job& job, const NzbSummary& pick, std::vector<NzbFetcher::Fetched>& verified,
-		std::map<std::string, int>& rejected, int results, int candidates, int postings);
-	void Collect(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, Job& job);
-
-	/*
-	 * A search in progress survives a restart: QueueDir/dupesearch-pending/<nzb id>/
-	 * holds a phase file ("searching", then "fetched" once the fetched nzb-files
-	 * are saved beside it as <n>.nzb and <n>.meta). At startup a fetched search
-	 * resumes from the saved files (no search, no fetch: grabs are scarce); one
-	 * still searching is searched again; one whose pick is gone is dropped.
-	 */
-	/* a line of the search of pick <nzbId>: in the pick's own log and the global log */
-	void Note(int nzbId, Message::EKind kind, const char* format, ...) PRINTF_SYNTAX(4);
-	std::string PendingDir(int nzbId);
-	void MarkSearching(const Job& job);
-	void SavePending(const Job& job, const NzbSummary& pick, const std::vector<NzbFetcher::Fetched>& verified);
-	void RemovePending(int nzbId);
-	void ResumePending();
-	/* why the search may no longer add duplicates for the pick (deleted by the user,
-	 * another duplicate key), empty while it may */
-	std::string PickGone(const Job& job);
-	/* queues a posting as a duplicate of the pick; the download id, 0 when not added */
-	int AddDonor(const Job& job, const NzbSummary& pick, const NzbFetcher::Fetched& posting, int score, double alive);
-	/* the DupeScore (and a parameter "Name=Value") of a duplicate that sits in history or in the queue */
-	bool SetScore(int id, int score, const std::vector<std::string>& params);
-	void LoadState();
-	bool SaveState();
-	// the key may be searched again (a search that learned nothing)
-    // Callers hold m_mutex; the flat map is only the latest-name cache.
-    Searched* FindSearch(const std::string& lowerKey, const std::string& title);
-    void RecordSearch(const std::string& lowerKey, const Searched& searched);
-    void SetRetryable(const std::string& lowerKey, const std::string& title, bool retryable);
-	bool ForgetSearch(const std::string& dupeKey, const std::string& title = "");
-	std::string StatePath();
-};
-
-extern DupeSearch* g_DupeSearch;
-
 class DonorScore
 {
 public:
@@ -33096,7 +35388,6 @@ public:
 	}
 };
 
-inline DupeSearch* g_DupeSearch = nullptr;
 
 namespace
 {
@@ -33138,7 +35429,7 @@ bool PlacementAvailable(DownloadQueue* queue, NzbInfo* pick, NzbInfo* backup, bo
     bool queuedFileExists = needDiskAndHealth && FileSystem::FileExists(backup->GetQueuedFilename());
     int health = (needDiskAndHealth && queuedFileExists && wholeBackup) ? backup->CalcHealth() : 0;
     int critHealth = (needDiskAndHealth && queuedFileExists && wholeBackup) ? backup->CalcCriticalHealth(true) : 0;
-    NzbParameter* markedAlive = backup->GetParameters()->Find(DupeSearch::AliveParam);
+    NzbParameter* markedAlive = backup->GetParameters()->Find("DupeAlive");
     return nzbget_rs_df_placement_available(
         1, 1, 0, (int)backup->GetDeleteStatus(),
         (int)NzbInfo::dsNone, (int)NzbInfo::dsManual, (int)NzbInfo::dsDupe, (int)NzbInfo::dsCopy,
@@ -33168,682 +35459,1794 @@ std::string EffectiveKey(NzbInfo* nzbInfo)
 	{
 		return nzbInfo->GetDupeKey();
 	}
-	return DupeSearch::MakeDupeKey(nzbInfo->GetName());
+	return "dupes:" + ReleaseName::Normalize(nzbInfo->GetName());
 }
 
-}
 
-inline std::string DupeSearch::MakeDupeKey(const std::string& name)
+void RemoveDir(const std::string& dir)
 {
-	return "dupes:" + ReleaseName::Normalize(name);
+	CString errmsg;
+	FileSystem::DeleteDirectoryWithContent(dir.c_str(), errmsg);
+}
 }
 
-inline bool DupeSearch::IsDonor(NzbInfo* nzbInfo)
+class DupeSearch : public Thread
 {
-	return nzbInfo->GetParameters()->Find(DonorParam) || nzbInfo->GetParameters()->Find(AliveParam);
-}
+public:
+	static constexpr int PostProcessRetrySec = 30;
+	// a pick that failed this recently is searched from history at start (B64)
+	static constexpr int RecentFailureSec = 3600;
+	// keys are forgotten after this long
+	static constexpr int StateTtlSec = 30 * 24 * 3600;
+	// the score of a managed pick, and the room below it for donors
+	static constexpr int BasePickScore = 1000000;
+	// search and fetch of one pick are meant to fit in this long
+	static constexpr int SearchDeadlineSec = 60;
 
-inline DupeSearch::DupeSearch()
-{
-	HttpGet::Reset();
-	DonorHealth::Reset();
-	m_observer.m_owner = this;
-	DownloadQueue::Guard()->Attach(&m_observer);
-}
+	// parameters of the duplicates this search queued: a marker, and the
+	// share of the posting found alive (percent)
+	static constexpr const char* DonorParam = "DupeSearch";
+	static constexpr const char* AliveParam = "DupeAlive";
+	// the measured share alive (percent) of a duplicate in history this search
+	// ranked but didn't add (a client's own backup, an earlier donor)
+	static constexpr const char* HealthParam = "DupeHealth";
+    static constexpr const char* OwnedKeyParam = "DupeSearchOwnedKey";
 
-inline DupeSearch::~DupeSearch()
-{
-	debug("Destroying DupeSearch");
-	// the queue (QueueCoordinator's) outlives this, and would notify freed memory
-	DownloadQueue::Guard()->Detach(&m_observer);
-}
+	/* "dupes:" + the normalized title: the duplicate key of a download that has none */
 
-inline void DupeSearch::Stop()
-{
-	Thread::Stop();
-	HttpGet::StopAll();
-	DonorHealth::StopAll();
-	std::lock_guard<std::mutex> guard(m_mutex);
-	m_cond.notify_all();
-}
-
-inline void DupeSearch::NotifyNameChanged(int nzbId)
-{
-    if (g_Options->GetDupeSearch() && !IsStopped())
-        Schedule(nzbId, Util::CurrentTime() + g_Options->GetDupeSearchDelay());
-}
-
-inline void DupeSearch::DownloadQueueUpdate(DownloadQueue* downloadQueue, void* aspect)
-{
-	DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
-	if ((queueAspect->action == DownloadQueue::eaNzbAdded || queueAspect->action == DownloadQueue::eaNzbNamed) &&
-		queueAspect->nzbInfo && g_Options->GetDupeSearch() && !IsStopped())
+	static std::string MakeDupeKey(const std::string& name)
 	{
-		Schedule(queueAspect->nzbInfo->GetId(), Util::CurrentTime() + g_Options->GetDupeSearchDelay());
-        // An external lower-scored backup can arrive after the initial search.
-        // Queue notifications run under the queue lock; only schedule work here.
-        NzbInfo* added = queueAspect->nzbInfo;
-        if (nzbget_rs_dqh_dupesearch_should_check_added_for_parent_rank(
-            (int)queueAspect->action,
-            (int)DownloadQueue::eaNzbAdded,
-            IsDonor(added) ? 1 : 0,
-            (int)added->GetDupeMode(),
-            (int)dmScore,
-            added->GetParameters()->Find("DupeFleet") != nullptr ? 1 : 0) != 0)
-        {
-            NzbInfo* parent = nullptr;
-            std::string addedKey = LowerKey(EffectiveKey(added));
-            for (NzbInfo* item : downloadQueue->GetQueue())
-            {
-                bool sameLowerKey = item != added && LowerKey(EffectiveKey(item)) == addedKey;
-                if (nzbget_rs_dqh_dupesearch_is_better_parent_candidate(
-                    item == added ? 1 : 0,
-                    (int)item->GetKind(),
-                    (int)NzbInfo::nkNzb,
-                    item->GetDeleting() ? 1 : 0,
-                    (int)item->GetDeleteStatus(),
-                    (int)NzbInfo::dsNone,
-                    item->GetPostInfo() != nullptr ? 1 : 0,
-                    sameLowerKey ? 1 : 0,
-                    item->GetDupeScore(),
-                    added->GetDupeScore(),
-                    parent != nullptr ? 1 : 0,
-                    parent ? parent->GetDupeScore() : 0) != 0)
-                {
-                    parent = item;
-                }
-            }
-            if (parent)
-            {
-                std::lock_guard<std::mutex> guard(m_mutex);
-                m_rankPending.insert(parent->GetId());
-                m_pending[parent->GetId()] = Util::CurrentTime() + g_Options->GetDupeSearchDelay();
-                m_cond.notify_all();
-            }
-        }
+		return "dupes:" + ReleaseName::Normalize(name);
 	}
-}
 
-inline void DupeSearch::Schedule(int nzbId, time_t due)
-{
-	std::lock_guard<std::mutex> guard(m_mutex);
-	m_pending[nzbId] = due;
-	m_cond.notify_all();
-}
-
-// an event isn't fired for a download that was queued before a restart; nor for
-// a pick that failed over while nzbget was stopping or starting (B64): one that
-// failed lately is asked again (Prepare searches it from history once, unless
-// its key was searched already)
-inline void DupeSearch::ScanQueue()
-{
-	std::vector<int> ids;
+	static bool IsDonor(NzbInfo* nzbInfo)
 	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+		return nzbInfo->GetParameters()->Find(DonorParam) || nzbInfo->GetParameters()->Find(AliveParam);
+	}
+
+	DupeSearch()
+	{
+		HttpGet::Reset();
+		DonorHealth::Reset();
+		m_observer.m_owner = this;
+		DownloadQueue::Guard()->Attach(&m_observer);
+	}
+
+	~DupeSearch() override
+	{
+		debug("Destroying DupeSearch");
+		// the queue (QueueCoordinator's) outlives this, and would notify freed memory
+		DownloadQueue::Guard()->Detach(&m_observer);
+	}
+
+	void Stop() override
+	{
+		Thread::Stop();
+		HttpGet::StopAll();
+		DonorHealth::StopAll();
+		std::lock_guard<std::mutex> guard(m_mutex);
+		m_cond.notify_all();
+	}
+
+	void NotifyNameChanged(int nzbId)
+	{
+	    if (g_Options->GetDupeSearch() && !IsStopped())
+	        Schedule(nzbId, Util::CurrentTime() + g_Options->GetDupeSearchDelay());
+	}
+
+	void Run() override
+	{
+		debug("Entering DupeSearch-loop");
+
+		while (!DownloadQueue::IsLoaded() && !IsStopped())
 		{
-			if (nzbInfo->GetKind() == NzbInfo::nkNzb)
-			{
-				ids.push_back(nzbInfo->GetId());
-			}
+			Util::Sleep(20);
 		}
-		time_t recent = Util::CurrentTime() - RecentFailureSec;
-		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-		{
-			if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
-				historyInfo->GetTime() >= recent &&
-				!historyInfo->GetNzbInfo()->IsDupeSuccess())
-			{
-				ids.push_back(historyInfo->GetNzbInfo()->GetId());
-			}
-		}
-	}
-	for (int id : ids)
-	{
-		Schedule(id, Util::CurrentTime() + g_Options->GetDupeSearchDelay());
-	}
-}
-
-inline void DupeSearch::Run()
-{
-	debug("Entering DupeSearch-loop");
-
-	while (!DownloadQueue::IsLoaded() && !IsStopped())
-	{
-		Util::Sleep(20);
-	}
-	if (IsStopped())
-	{
-		return;
-	}
-
-	LoadState();
-	m_fetcher.SetStatePath(std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "dupesearch-indexers");
-	m_fetcher.Load();
-	m_dead.SetStatePath(std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "dupesearch-dead");
-	m_dead.Load();
-	if (g_Options->GetDupeSearch())
-	{
-		ResumePending();
-		ScanQueue();
-	}
-
-	while (!IsStopped())
-	{
-		std::vector<int> due;
-		{
-			std::unique_lock<std::mutex> lock(m_mutex);
-			m_cond.wait_for(lock, std::chrono::milliseconds(500));
-			time_t now = Util::CurrentTime();
-			for (auto it = m_pending.begin(); it != m_pending.end();)
-			{
-				if (it->second <= now)
-				{
-					due.push_back(it->first);
-					it = m_pending.erase(it);
-				}
-				else
-				{
-					++it;
-				}
-			}
-		}
-
-		for (int nzbId : due)
-		{
-			if (IsStopped())
-			{
-				break;
-			}
-			Job job;
-			bool search;
-			{
-				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-				search = Prepare(downloadQueue, nzbId, job);
-			}
-			if (search)
-			{
-				MarkSearching(job);
-				Search(job);
-			}
-		}
-	}
-
-	// a health check's walkers may still be in a request: they end before this
-	// thread does, so before the server pool goes away
-	DonorHealth::WaitAll();
-	debug("Exiting DupeSearch-loop");
-}
-
-/*
- * Decides whether a download is searched now. Runs under the queue lock.
- */
-inline bool DupeSearch::Prepare(DownloadQueue* downloadQueue, int nzbId, Job& job)
-{
-    return PrepareNative(downloadQueue, nzbId, job);
-}
-
-inline bool DupeSearch::PrepareNative(DownloadQueue* downloadQueue, int nzbId, Job& job)
-{
-    if (!g_Options->GetDupeSearch() || !g_Options->GetDupeCheck()) return false;
-    NzbInfo* pick = FindNzb(downloadQueue, nzbId);
-    if (!pick) { std::lock_guard<std::mutex> guard(m_mutex); m_rankPending.erase(nzbId); return false; }
-    bool history = downloadQueue->GetQueue()->Find(nzbId) != pick;
-    std::string key = EffectiveKey(pick);
-    std::string lowerKey = LowerKey(key);
-    const std::string ownerPrefix = std::to_string(nzbId) + ":";
-    NzbParameter* owner = pick->GetParameters()->Find(OwnedKeyParam);
-    bool generatedKey = nzbget_rs_dqh_dupesearch_is_generated_key(
-        Util::EmptyStr(pick->GetDupeKey()) ? 1 : 0,
-        owner != nullptr ? 1 : 0,
-        owner ? owner->GetValue() : nullptr,
-        nzbId,
-        key.c_str()) != 0;
-    std::string title;
-    Searched previous;
-    bool havePrevious = false, changedIdentity = false, rankOnly = false, cachedName = false, rankRequested = false;
-    {
-        std::lock_guard<std::mutex> guard(m_mutex);
-        auto found = m_searched.find(lowerKey);
-        if (found != m_searched.end()) {
-            previous = found->second;
-            havePrevious = true;
-            // Missing legacy title is ambiguous unless this exact NZB carries
-            // the persisted marker written when native discovery generated it.
-            if (previous.title.empty() && generatedKey && key.compare(0, 6, "dupes:")==0)
-                previous.title = key.substr(6);
-            cachedName = !previous.title.empty() && previous.rawName == pick->GetName();
-        }
-        rankRequested = m_rankPending.erase(nzbId) != 0;
-    }
-    title = cachedName ? previous.title :
-        Util::EmptyStr(pick->GetDupeKey()) ? key.substr(6) : ReleaseName::Normalize(pick->GetName());
-    changedIdentity = havePrevious && !previous.title.empty() && previous.title != title;
-    bool ownedKeyChanged = false;
-    // Only rewrite a key this search previously generated; explicit client keys stay.
-    if (generatedKey && !Util::EmptyStr(pick->GetDupeKey()) &&
-        key.compare(0, 6, "dupes:") == 0 && key != "dupes:" + title)
-    {
-        key = "dupes:" + title;
-        lowerKey = LowerKey(key);
-        ownedKeyChanged = true;
-        havePrevious = false;
-    }
-    {
-        std::lock_guard<std::mutex> guard(m_mutex);
-        if (Searched* found = FindSearch(lowerKey, title))
-        {
-            previous = *found;
-            havePrevious = true;
-            changedIdentity = false;
-            if (!previous.title.empty()) previous.rawName = pick->GetName();
-            cachedName = !previous.title.empty();
-            *found = previous;
-            m_searched[lowerKey] = previous;
-            rankOnly = rankRequested && previous.title == title;
-        }
-        else { havePrevious = false; cachedName = false; rankOnly = false; }
-    }
-    if (ownedKeyChanged)
-    {
-        rankOnly = false;
-        if (!g_Options->GetDupeSearchDryRun())
-        {
-            pick->SetDupeKey(key.c_str());
-            pick->GetParameters()->SetParameter(OwnedKeyParam, (ownerPrefix + key).c_str());
-            pick->SetChanged(true);
-            if (history) { downloadQueue->HistoryChanged(); downloadQueue->Save(); }
-            else downloadQueue->SaveChanged();
-        }
-    }
-    auto flags = [&](NzbInfo* item, bool inHistory) -> uint32_t {
-        return nzbget_rs_dupe_watch_build_item_flags(
-            (int)item->GetKind(),
-            inHistory ? 1 : 0,
-            item->IsDupeSuccess() ? 1 : 0,
-            item->GetDeleting() ? 1 : 0,
-            (int)item->GetDeleteStatus(),
-            item->GetPostInfo() ? 1 : 0,
-            (int)item->GetDupeMode(),
-            IsDonor(item) ? 1 : 0,
-            (int)item->GetDupeHint(),
-            item->GetParameters()->Find("DupeFleet") ? 1 : 0);
-    };
-    uint32_t pickFlags = flags(pick, history);
-    time_t now = Util::CurrentTime();
-    const uint32_t preliminaryFlags = pickFlags;
-    int preliminary = -1;
-    if (cachedName && havePrevious && !previous.retryable && !rankOnly)
-    {
-        // A known unchanged title can be suppressed before building snapshots.
-        // Any higher peer/fleet could only suppress it too; a Search still needs
-        // the complete peer check below. Post-process retry precedes peer rules.
-        preliminary = nzbget_rs_dupe_watch_stamped(pickFlags, pick->GetDupeScore(),
-            (int64_t)now, previous.score, (int64_t)previous.time);
-        if (preliminary == 0) return false;
-        if (preliminary == 1) {
-            Schedule(nzbId, now + std::max(PostProcessRetrySec, g_Options->GetDupeSearchDelay()));
-            return false;
-        }
-    }
-    NzbgetRsDupeWatchPeer snapshot{ nzbId, pick->GetDupeScore(), pickFlags, lowerKey.data(), lowerKey.size() };
-    std::vector<NzbInfo*> others;
-    std::vector<bool> histories;
-    auto retain = [&](NzbInfo* item, bool inHistory) {
-        // Lower/equal ordinary peers cannot affect the Rust highest-score rule.
-        // Fleet markers still matter at any score, including history entries.
-        if (nzbget_rs_dqh_dupesearch_should_retain_peer(
-            item == pick ? 1 : 0,
-            item->GetDupeScore(),
-            pick->GetDupeScore(),
-            item->GetParameters()->Find("DupeFleet") != nullptr ? 1 : 0) != 0)
-        { others.push_back(item); histories.push_back(inHistory); }
-    };
-    for (NzbInfo* item : downloadQueue->GetQueue()) retain(item, false);
-    for (HistoryInfo* item : downloadQueue->GetHistory()) if (item->GetKind() == HistoryInfo::hkNzb)
-        retain(item->GetNzbInfo(), true);
-    std::vector<std::string> keys;
-    keys.reserve(others.size());
-    for (NzbInfo* other : others) keys.push_back(LowerKey(EffectiveKey(other)));
-    std::vector<NzbgetRsDupeWatchPeer> peers;
-    for (size_t i = 0; i < others.size(); i++)
-    {
-        uint32_t f = flags(others[i], histories[i]);
-        // Only a live eligible fleet member represents current management;
-        // retired history/deleting entries must not poison future plain picks.
-        if (nzbget_rs_dupe_watch_is_live_fleet_peer(
-            keys[i].data(), keys[i].size(), lowerKey.data(), lowerKey.size(), f))
-            pickFlags |= rsDupeManagedFleet;
-        peers.push_back({ others[i]->GetId(), others[i]->GetDupeScore(), f, keys[i].data(), keys[i].size() });
-    }
-    snapshot.flags = pickFlags;
-    // With no retained peers the snapshot is unchanged: the accepted early
-    // decision already checked the exact same stamp, time and identity.
-    int decision = preliminary == 2 && peers.empty() && snapshot.flags == preliminaryFlags ? preliminary :
-        nzbget_rs_dupe_watch(&snapshot, peers.data(), peers.size(), (int64_t)now,
-        previous.score, (int64_t)previous.time, havePrevious && !previous.retryable && !rankOnly, changedIdentity);
-    if (decision == 1) {
-        if (rankOnly) { std::lock_guard<std::mutex> guard(m_mutex); m_rankPending.insert(nzbId); }
-        Schedule(nzbId, now + std::max(PostProcessRetrySec, g_Options->GetDupeSearchDelay()));
-        return false;
-    }
-    if (decision != 2) return false;
-    int score = std::max(pick->GetDupeScore(), BasePickScore);
-    {
-        std::lock_guard<std::mutex> guard(m_mutex);
-        if (!rankOnly) RecordSearch(lowerKey, { score, now, title, false, pick->GetName() });
-    }
-    if (!g_Options->GetDupeSearchDryRun() && !rankOnly) SaveState();
-    bool edit = !g_Options->GetDupeSearchDryRun() && !history;
-    if (edit)
-    {
-        pick->SetDupeKey(key.c_str());
-        pick->GetParameters()->SetParameter(OwnedKeyParam, generatedKey ? (ownerPrefix + key).c_str() : nullptr);
-        if (pick->GetDupeScore() < BasePickScore) pick->SetDupeScore(BasePickScore);
-        pick->SetChanged(true);
-        downloadQueue->SaveChanged();
-    }
-    job.rankOnly = rankOnly;
-    Collect(downloadQueue, pick, job);
-    job.dupeKey = key;
-    job.score = score;
-    job.failed = history;
-    job.rankOnly = rankOnly;
-    pick->PrintMessage(Message::mkInfo, "DupeSearch: searching duplicates of %s (key %s)%s",
-        pick->GetName(), key.c_str(),
-        nzbget_rs_dqh_dupesearch_prepare_status_suffix(rankOnly ? 1 : 0, history ? 1 : 0));
-    return true;
-}
-
-/*
- * What a search of a pick needs to know of the queue and history. Runs under the queue lock.
- */
-inline void DupeSearch::Collect(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, Job& job)
-{
-	std::string key = EffectiveKey(nzbInfo);
-	std::string lowerKey = LowerKey(key);
-	job.nzbId = nzbInfo->GetId();
-	job.name = nzbInfo->GetName();
-	job.dupeKey = key;
-	job.category = nzbInfo->GetCategory();
-	job.queuedFile = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
-
-	// the nzb-files nzbget keeps for this release: queue and history items
-	// with this duplicate key, or whose name is the same release
-	auto addKnown = [&](NzbInfo* item)
-	{
-		// one the user deleted is no duplicate nzbget would fetch: its posting may
-		// be found and added again (B41)
-		if (item->GetKind() != NzbInfo::nkNzb ||
-			Util::EmptyStr(item->GetQueuedFilename()) ||
-			item->GetDeleteStatus() == NzbInfo::dsManual)
+		if (IsStopped())
 		{
 			return;
 		}
-		if (LowerKey(EffectiveKey(item)) == lowerKey || ReleaseName::SameRelease(nzbInfo->GetName(), item->GetName()))
+
+		LoadState();
+		m_fetcher.SetStatePath(std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "dupesearch-indexers");
+		m_fetcher.Load();
+		m_dead.SetStatePath(std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "dupesearch-dead");
+		m_dead.Load();
+		if (g_Options->GetDupeSearch())
 		{
-			// the file of a merged group names several, separated by "|"
-			const char* qf = item->GetQueuedFilename() ? item->GetQueuedFilename() : "";
-			nzbget_rs_dqh_fleet_visit_pipe_names(qf, strlen(qf), &job.knownFiles,
-				[](void* ctx, const char* namePtr, size_t nameLen)
-				{
-					static_cast<std::vector<std::string>*>(ctx)->emplace_back(namePtr, nameLen);
-				});
+			ResumePending();
+			ScanQueue();
 		}
-	};
-	for (NzbInfo* item : downloadQueue->GetQueue())
-	{
-		addKnown(item);
-        // Zero-delay ranking can precede asynchronous duplicate filing. The
-        // score editor handles either live or history IDs, so include that
-        // snapshot rather than losing the only add notification.
-        if (nzbget_rs_dupesearch_is_rank_only_queued_member(
-            job.rankOnly ? 1 : 0,
-            item == nzbInfo ? 1 : 0,
-            (int)item->GetKind(),
-            (int)NzbInfo::nkNzb,
-            (int)item->GetDupeMode(),
-            (int)dmScore,
-            item->GetPostInfo() != nullptr ? 1 : 0,
-            (int)item->GetDeleteStatus(),
-            (int)NzbInfo::dsNone,
-            (int)NzbInfo::dsDupe,
-            item->GetDupeScore(),
-            nzbInfo->GetDupeScore()) != 0 &&
-            LowerKey(EffectiveKey(item))==lowerKey &&
-            ReleaseName::SameRelease(nzbInfo->GetName(),item->GetName()) &&
-            !Util::EmptyStr(item->GetQueuedFilename()) &&
-            strchr(item->GetQueuedFilename(), '|') == nullptr)
-        {
-            job.members.emplace_back(item->GetId(),item->GetQueuedFilename());
-            job.memberScores.push_back(item->GetDupeScore());
-        }
-	}
-	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-	{
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+
+		while (!IsStopped())
 		{
-			NzbInfo* item = historyInfo->GetNzbInfo();
-			addKnown(item);
-			// the same release only: a client's key can be broad (one key for two editions);
-			// a copy (an nzb-file sent again) too, unless it is a copy of the pick
-			bool backup = SavedHistoryBackup(nzbInfo, item);
-			if (item != nzbInfo && backup && LowerKey(EffectiveKey(item)) == lowerKey &&
-				ReleaseName::SameRelease(nzbInfo->GetName(), item->GetName()) &&
-				!Util::EmptyStr(item->GetQueuedFilename()) &&
-				strchr(item->GetQueuedFilename(), '|') == nullptr)
+			std::vector<int> due;
 			{
-				job.members.emplace_back(item->GetId(), item->GetQueuedFilename());
-				job.memberScores.push_back(item->GetDupeScore());
+				std::unique_lock<std::mutex> lock(m_mutex);
+				m_cond.wait_for(lock, std::chrono::milliseconds(500));
+				time_t now = Util::CurrentTime();
+				for (auto it = m_pending.begin(); it != m_pending.end();)
+				{
+					if (it->second <= now)
+					{
+						due.push_back(it->first);
+						it = m_pending.erase(it);
+					}
+					else
+					{
+						++it;
+					}
+				}
+			}
+
+			for (int nzbId : due)
+			{
+				if (IsStopped())
+				{
+					break;
+				}
+				Job job;
+				bool search;
+				{
+					GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+					search = Prepare(downloadQueue, nzbId, job);
+				}
+				if (search)
+				{
+					MarkSearching(job);
+					Search(job);
+				}
+			}
+		}
+
+		// a health check's walkers may still be in a request: they end before this
+		// thread does, so before the server pool goes away
+		DonorHealth::WaitAll();
+		debug("Exiting DupeSearch-loop");
+	}
+
+private:
+	class DownloadQueueObserver final : public Observer
+	{
+	public:
+		DupeSearch* m_owner;
+		void Update(Subject* caller, void* aspect) override { m_owner->DownloadQueueUpdate(static_cast<DownloadQueue*>(caller), aspect); }
+	};
+
+	struct Searched
+	{
+		int score = 0;
+		time_t time = 0;
+		std::string title;
+		bool retryable = false;
+        std::string rawName; // Runtime-only normalization cache; never inferred from disk.
+	};
+
+	struct Job
+	{
+		int nzbId = 0;
+		bool failed = false;
+		bool rankOnly = false;
+		std::string name;
+		std::string dupeKey;
+		std::string category;
+		std::string imdb;	// from the nzb-file's meta data
+		std::string tvdb;
+		std::string queuedFile;	// the nzb-file of the pick
+		std::vector<std::string> knownFiles;	// the nzb-files nzbget keeps for this release (queue and history)
+		// the duplicates of the key nzbget keeps in history (DELETED/DUPE),
+		// whoever sent them: id and the item's own nzb-file
+		std::vector<std::pair<int, std::string>> members;
+		std::vector<int> memberScores;	// their scores when the search began
+		int score = 0;
+	};
+
+	// postings fetched at the same time
+	static constexpr int FetchParallel = 4;
+
+	DownloadQueueObserver m_observer;
+	NzbFetcher m_fetcher;
+	DeadPostings m_dead;
+	std::mutex m_mutex;
+	std::condition_variable m_cond;
+	std::set<int> m_rankPending;
+	std::map<int, time_t> m_pending;			// nzb id -> when to look at it
+	std::map<std::string, Searched> m_searched;	// lowercase dupe key -> last search
+    std::map<std::pair<std::string, std::string>, Searched> m_titleSearched;
+	// pick id -> fingerprints its search queued; per pick, not per key: a pick sent
+	// again after the user deleted it and its duplicates gets them back (B41)
+	std::map<int, std::set<std::string>> m_sent;
+
+
+	void DownloadQueueUpdate(DownloadQueue* downloadQueue, void* aspect)
+	{
+		DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
+		if ((queueAspect->action == DownloadQueue::eaNzbAdded || queueAspect->action == DownloadQueue::eaNzbNamed) &&
+			queueAspect->nzbInfo && g_Options->GetDupeSearch() && !IsStopped())
+		{
+			Schedule(queueAspect->nzbInfo->GetId(), Util::CurrentTime() + g_Options->GetDupeSearchDelay());
+	        // An external lower-scored backup can arrive after the initial search.
+	        // Queue notifications run under the queue lock; only schedule work here.
+	        NzbInfo* added = queueAspect->nzbInfo;
+	        if (nzbget_rs_dqh_dupesearch_should_check_added_for_parent_rank(
+	            (int)queueAspect->action,
+	            (int)DownloadQueue::eaNzbAdded,
+	            IsDonor(added) ? 1 : 0,
+	            (int)added->GetDupeMode(),
+	            (int)dmScore,
+	            added->GetParameters()->Find("DupeFleet") != nullptr ? 1 : 0) != 0)
+	        {
+	            NzbInfo* parent = nullptr;
+	            std::string addedKey = LowerKey(EffectiveKey(added));
+	            for (NzbInfo* item : downloadQueue->GetQueue())
+	            {
+	                bool sameLowerKey = item != added && LowerKey(EffectiveKey(item)) == addedKey;
+	                if (nzbget_rs_dqh_dupesearch_is_better_parent_candidate(
+	                    item == added ? 1 : 0,
+	                    (int)item->GetKind(),
+	                    (int)NzbInfo::nkNzb,
+	                    item->GetDeleting() ? 1 : 0,
+	                    (int)item->GetDeleteStatus(),
+	                    (int)NzbInfo::dsNone,
+	                    item->GetPostInfo() != nullptr ? 1 : 0,
+	                    sameLowerKey ? 1 : 0,
+	                    item->GetDupeScore(),
+	                    added->GetDupeScore(),
+	                    parent != nullptr ? 1 : 0,
+	                    parent ? parent->GetDupeScore() : 0) != 0)
+	                {
+	                    parent = item;
+	                }
+	            }
+	            if (parent)
+	            {
+	                std::lock_guard<std::mutex> guard(m_mutex);
+	                m_rankPending.insert(parent->GetId());
+	                m_pending[parent->GetId()] = Util::CurrentTime() + g_Options->GetDupeSearchDelay();
+	                m_cond.notify_all();
+	            }
+	        }
+		}
+	}
+
+	void Schedule(int nzbId, time_t due)
+	{
+		std::lock_guard<std::mutex> guard(m_mutex);
+		m_pending[nzbId] = due;
+		m_cond.notify_all();
+	}
+
+	void ScanQueue()
+	{
+		std::vector<int> ids;
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+			{
+				if (nzbInfo->GetKind() == NzbInfo::nkNzb)
+				{
+					ids.push_back(nzbInfo->GetId());
+				}
+			}
+			time_t recent = Util::CurrentTime() - RecentFailureSec;
+			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+			{
+				if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
+					historyInfo->GetTime() >= recent &&
+					!historyInfo->GetNzbInfo()->IsDupeSuccess())
+				{
+					ids.push_back(historyInfo->GetNzbInfo()->GetId());
+				}
+			}
+		}
+		for (int id : ids)
+		{
+			Schedule(id, Util::CurrentTime() + g_Options->GetDupeSearchDelay());
+		}
+	}
+
+	bool Prepare(DownloadQueue* downloadQueue, int nzbId, Job& job)
+	{
+	    return PrepareNative(downloadQueue, nzbId, job);
+	}
+
+	bool PrepareNative(DownloadQueue* downloadQueue, int nzbId, Job& job)
+	{
+	    if (!g_Options->GetDupeSearch() || !g_Options->GetDupeCheck()) return false;
+	    NzbInfo* pick = FindNzb(downloadQueue, nzbId);
+	    if (!pick) { std::lock_guard<std::mutex> guard(m_mutex); m_rankPending.erase(nzbId); return false; }
+	    bool history = downloadQueue->GetQueue()->Find(nzbId) != pick;
+	    std::string key = EffectiveKey(pick);
+	    std::string lowerKey = LowerKey(key);
+	    const std::string ownerPrefix = std::to_string(nzbId) + ":";
+	    NzbParameter* owner = pick->GetParameters()->Find(OwnedKeyParam);
+	    bool generatedKey = nzbget_rs_dqh_dupesearch_is_generated_key(
+	        Util::EmptyStr(pick->GetDupeKey()) ? 1 : 0,
+	        owner != nullptr ? 1 : 0,
+	        owner ? owner->GetValue() : nullptr,
+	        nzbId,
+	        key.c_str()) != 0;
+	    std::string title;
+	    Searched previous;
+	    bool havePrevious = false, changedIdentity = false, rankOnly = false, cachedName = false, rankRequested = false;
+	    {
+	        std::lock_guard<std::mutex> guard(m_mutex);
+	        auto found = m_searched.find(lowerKey);
+	        if (found != m_searched.end()) {
+	            previous = found->second;
+	            havePrevious = true;
+	            // Missing legacy title is ambiguous unless this exact NZB carries
+	            // the persisted marker written when native discovery generated it.
+	            if (previous.title.empty() && generatedKey && key.compare(0, 6, "dupes:")==0)
+	                previous.title = key.substr(6);
+	            cachedName = !previous.title.empty() && previous.rawName == pick->GetName();
+	        }
+	        rankRequested = m_rankPending.erase(nzbId) != 0;
+	    }
+	    title = cachedName ? previous.title :
+	        Util::EmptyStr(pick->GetDupeKey()) ? key.substr(6) : ReleaseName::Normalize(pick->GetName());
+	    changedIdentity = havePrevious && !previous.title.empty() && previous.title != title;
+	    bool ownedKeyChanged = false;
+	    // Only rewrite a key this search previously generated; explicit client keys stay.
+	    if (generatedKey && !Util::EmptyStr(pick->GetDupeKey()) &&
+	        key.compare(0, 6, "dupes:") == 0 && key != "dupes:" + title)
+	    {
+	        key = "dupes:" + title;
+	        lowerKey = LowerKey(key);
+	        ownedKeyChanged = true;
+	        havePrevious = false;
+	    }
+	    {
+	        std::lock_guard<std::mutex> guard(m_mutex);
+	        if (Searched* found = FindSearch(lowerKey, title))
+	        {
+	            previous = *found;
+	            havePrevious = true;
+	            changedIdentity = false;
+	            if (!previous.title.empty()) previous.rawName = pick->GetName();
+	            cachedName = !previous.title.empty();
+	            *found = previous;
+	            m_searched[lowerKey] = previous;
+	            rankOnly = rankRequested && previous.title == title;
+	        }
+	        else { havePrevious = false; cachedName = false; rankOnly = false; }
+	    }
+	    if (ownedKeyChanged)
+	    {
+	        rankOnly = false;
+	        if (!g_Options->GetDupeSearchDryRun())
+	        {
+	            pick->SetDupeKey(key.c_str());
+	            pick->GetParameters()->SetParameter(OwnedKeyParam, (ownerPrefix + key).c_str());
+	            pick->SetChanged(true);
+	            if (history) { downloadQueue->HistoryChanged(); downloadQueue->Save(); }
+	            else downloadQueue->SaveChanged();
+	        }
+	    }
+	    auto flags = [&](NzbInfo* item, bool inHistory) -> uint32_t {
+	        return nzbget_rs_dupe_watch_build_item_flags(
+	            (int)item->GetKind(),
+	            inHistory ? 1 : 0,
+	            item->IsDupeSuccess() ? 1 : 0,
+	            item->GetDeleting() ? 1 : 0,
+	            (int)item->GetDeleteStatus(),
+	            item->GetPostInfo() ? 1 : 0,
+	            (int)item->GetDupeMode(),
+	            IsDonor(item) ? 1 : 0,
+	            (int)item->GetDupeHint(),
+	            item->GetParameters()->Find("DupeFleet") ? 1 : 0);
+	    };
+	    uint32_t pickFlags = flags(pick, history);
+	    time_t now = Util::CurrentTime();
+	    const uint32_t preliminaryFlags = pickFlags;
+	    int preliminary = -1;
+	    if (cachedName && havePrevious && !previous.retryable && !rankOnly)
+	    {
+	        // A known unchanged title can be suppressed before building snapshots.
+	        // Any higher peer/fleet could only suppress it too; a Search still needs
+	        // the complete peer check below. Post-process retry precedes peer rules.
+	        preliminary = nzbget_rs_dupe_watch_stamped(pickFlags, pick->GetDupeScore(),
+	            (int64_t)now, previous.score, (int64_t)previous.time);
+	        if (preliminary == 0) return false;
+	        if (preliminary == 1) {
+	            Schedule(nzbId, now + std::max(PostProcessRetrySec, g_Options->GetDupeSearchDelay()));
+	            return false;
+	        }
+	    }
+	    NzbgetRsDupeWatchPeer snapshot{ nzbId, pick->GetDupeScore(), pickFlags, lowerKey.data(), lowerKey.size() };
+	    std::vector<NzbInfo*> others;
+	    std::vector<bool> histories;
+	    auto retain = [&](NzbInfo* item, bool inHistory) {
+	        // Lower/equal ordinary peers cannot affect the Rust highest-score rule.
+	        // Fleet markers still matter at any score, including history entries.
+	        if (nzbget_rs_dqh_dupesearch_should_retain_peer(
+	            item == pick ? 1 : 0,
+	            item->GetDupeScore(),
+	            pick->GetDupeScore(),
+	            item->GetParameters()->Find("DupeFleet") != nullptr ? 1 : 0) != 0)
+	        { others.push_back(item); histories.push_back(inHistory); }
+	    };
+	    for (NzbInfo* item : downloadQueue->GetQueue()) retain(item, false);
+	    for (HistoryInfo* item : downloadQueue->GetHistory()) if (item->GetKind() == HistoryInfo::hkNzb)
+	        retain(item->GetNzbInfo(), true);
+	    std::vector<std::string> keys;
+	    keys.reserve(others.size());
+	    for (NzbInfo* other : others) keys.push_back(LowerKey(EffectiveKey(other)));
+	    std::vector<NzbgetRsDupeWatchPeer> peers;
+	    for (size_t i = 0; i < others.size(); i++)
+	    {
+	        uint32_t f = flags(others[i], histories[i]);
+	        // Only a live eligible fleet member represents current management;
+	        // retired history/deleting entries must not poison future plain picks.
+	        if (nzbget_rs_dupe_watch_is_live_fleet_peer(
+	            keys[i].data(), keys[i].size(), lowerKey.data(), lowerKey.size(), f))
+	            pickFlags |= rsDupeManagedFleet;
+	        peers.push_back({ others[i]->GetId(), others[i]->GetDupeScore(), f, keys[i].data(), keys[i].size() });
+	    }
+	    snapshot.flags = pickFlags;
+	    // With no retained peers the snapshot is unchanged: the accepted early
+	    // decision already checked the exact same stamp, time and identity.
+	    int decision = preliminary == 2 && peers.empty() && snapshot.flags == preliminaryFlags ? preliminary :
+	        nzbget_rs_dupe_watch(&snapshot, peers.data(), peers.size(), (int64_t)now,
+	        previous.score, (int64_t)previous.time, havePrevious && !previous.retryable && !rankOnly, changedIdentity);
+	    if (decision == 1) {
+	        if (rankOnly) { std::lock_guard<std::mutex> guard(m_mutex); m_rankPending.insert(nzbId); }
+	        Schedule(nzbId, now + std::max(PostProcessRetrySec, g_Options->GetDupeSearchDelay()));
+	        return false;
+	    }
+	    if (decision != 2) return false;
+	    int score = std::max(pick->GetDupeScore(), BasePickScore);
+	    {
+	        std::lock_guard<std::mutex> guard(m_mutex);
+	        if (!rankOnly) RecordSearch(lowerKey, { score, now, title, false, pick->GetName() });
+	    }
+	    if (!g_Options->GetDupeSearchDryRun() && !rankOnly) SaveState();
+	    bool edit = !g_Options->GetDupeSearchDryRun() && !history;
+	    if (edit)
+	    {
+	        pick->SetDupeKey(key.c_str());
+	        pick->GetParameters()->SetParameter(OwnedKeyParam, generatedKey ? (ownerPrefix + key).c_str() : nullptr);
+	        if (pick->GetDupeScore() < BasePickScore) pick->SetDupeScore(BasePickScore);
+	        pick->SetChanged(true);
+	        downloadQueue->SaveChanged();
+	    }
+	    job.rankOnly = rankOnly;
+	    Collect(downloadQueue, pick, job);
+	    job.dupeKey = key;
+	    job.score = score;
+	    job.failed = history;
+	    job.rankOnly = rankOnly;
+	    pick->PrintMessage(Message::mkInfo, "DupeSearch: searching duplicates of %s (key %s)%s",
+	        pick->GetName(), key.c_str(),
+	        nzbget_rs_dqh_dupesearch_prepare_status_suffix(rankOnly ? 1 : 0, history ? 1 : 0));
+	    return true;
+	}
+
+	void Collect(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, Job& job)
+	{
+		std::string key = EffectiveKey(nzbInfo);
+		std::string lowerKey = LowerKey(key);
+		job.nzbId = nzbInfo->GetId();
+		job.name = nzbInfo->GetName();
+		job.dupeKey = key;
+		job.category = nzbInfo->GetCategory();
+		job.queuedFile = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
+
+		// the nzb-files nzbget keeps for this release: queue and history items
+		// with this duplicate key, or whose name is the same release
+		auto addKnown = [&](NzbInfo* item)
+		{
+			// one the user deleted is no duplicate nzbget would fetch: its posting may
+			// be found and added again (B41)
+			if (item->GetKind() != NzbInfo::nkNzb ||
+				Util::EmptyStr(item->GetQueuedFilename()) ||
+				item->GetDeleteStatus() == NzbInfo::dsManual)
+			{
+				return;
+			}
+			if (LowerKey(EffectiveKey(item)) == lowerKey || ReleaseName::SameRelease(nzbInfo->GetName(), item->GetName()))
+			{
+				// the file of a merged group names several, separated by "|"
+				const char* qf = item->GetQueuedFilename() ? item->GetQueuedFilename() : "";
+				nzbget_rs_dqh_fleet_visit_pipe_names(qf, strlen(qf), &job.knownFiles,
+					[](void* ctx, const char* namePtr, size_t nameLen)
+					{
+						static_cast<std::vector<std::string>*>(ctx)->emplace_back(namePtr, nameLen);
+					});
+			}
+		};
+		for (NzbInfo* item : downloadQueue->GetQueue())
+		{
+			addKnown(item);
+	        // Zero-delay ranking can precede asynchronous duplicate filing. The
+	        // score editor handles either live or history IDs, so include that
+	        // snapshot rather than losing the only add notification.
+	        if (nzbget_rs_dupesearch_is_rank_only_queued_member(
+	            job.rankOnly ? 1 : 0,
+	            item == nzbInfo ? 1 : 0,
+	            (int)item->GetKind(),
+	            (int)NzbInfo::nkNzb,
+	            (int)item->GetDupeMode(),
+	            (int)dmScore,
+	            item->GetPostInfo() != nullptr ? 1 : 0,
+	            (int)item->GetDeleteStatus(),
+	            (int)NzbInfo::dsNone,
+	            (int)NzbInfo::dsDupe,
+	            item->GetDupeScore(),
+	            nzbInfo->GetDupeScore()) != 0 &&
+	            LowerKey(EffectiveKey(item))==lowerKey &&
+	            ReleaseName::SameRelease(nzbInfo->GetName(),item->GetName()) &&
+	            !Util::EmptyStr(item->GetQueuedFilename()) &&
+	            strchr(item->GetQueuedFilename(), '|') == nullptr)
+	        {
+	            job.members.emplace_back(item->GetId(),item->GetQueuedFilename());
+	            job.memberScores.push_back(item->GetDupeScore());
+	        }
+		}
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+			{
+				NzbInfo* item = historyInfo->GetNzbInfo();
+				addKnown(item);
+				// the same release only: a client's key can be broad (one key for two editions);
+				// a copy (an nzb-file sent again) too, unless it is a copy of the pick
+				bool backup = SavedHistoryBackup(nzbInfo, item);
+				if (item != nzbInfo && backup && LowerKey(EffectiveKey(item)) == lowerKey &&
+					ReleaseName::SameRelease(nzbInfo->GetName(), item->GetName()) &&
+					!Util::EmptyStr(item->GetQueuedFilename()) &&
+					strchr(item->GetQueuedFilename(), '|') == nullptr)
+				{
+					job.members.emplace_back(item->GetId(), item->GetQueuedFilename());
+					job.memberScores.push_back(item->GetDupeScore());
+				}
 			}
 		}
 	}
-}
 
-inline void DupeSearch::Expand(const Job& job, const NzbSummary& pick, const std::vector<Newznab::Result>& prior,
-    const std::vector<Posting::Sketch>& known, time_t deadline, NzbFetcher::Budget& budget, std::vector<NzbFetcher::Fetched>& fetched,
-    std::set<std::string>& attempted, NzbFetcher::Stats& stats, Newznab::SearchStats& queryStats, int& results, int& candidates, int& postings)
-{
-    if (IsStopped() || Util::CurrentTime() >= deadline || budget.Spent() || pick.messageIds.empty()) return;
-    auto servers=NntpHealthServer::Servers();
-    if (servers.empty()) return;
-    auto healthOptions = [&]() {
-        DonorHealth::Options options;
-        options.sample.percent=g_Options->GetDupeHealthPercent();
-        options.sample.minimum=g_Options->GetDupeHealthMin();
-        options.sample.maximum=g_Options->GetDupeHealthMax();
-        options.sample.maxBody=g_Options->GetDupeBodyChecks();
-        options.budgetMs=nzbget_rs_dupesearch_calc_expand_budget_ms(
-            g_Options->GetDupeHealthBudget(), (int64_t)deadline, (int64_t)Util::CurrentTime());
-        return options;
-    };
-    auto check = [&](const NzbSummary& info) {
-        return DonorHealth::CheckPosting(servers,info.messageIds,
-            std::make_shared<std::vector<std::string>>(info.groups),healthOptions(),true);
-    };
-    DonorHealth::Health health;
-    double alive=-1;
-    bool doomed=false;
-    int missing=0;
-    if (!job.failed)
-    {
-        health=check(pick);
-        alive=DupeIdentity::Alive(health,pick);
-        long long combined=(long long)health.missing+DupeIdentity::UnlistedMissing(health,pick);
-        missing=(int)std::min(combined,(long long)std::numeric_limits<int>::max());
-        if (alive >= 0.85 && !pick.dataMessageIds.empty() &&
-            !pick.parIndex.messageId.empty() && !pick.recoveryBytes.empty())
-        {
-            // Recovery articles are capacity, never evidence that source data
-            // exists. Sample only retained data IDs for damaged-block estimates.
-            NzbSummary data = pick;
-            data.messageIds = pick.dataMessageIds;
-            data.listedParts = pick.dataListedParts;
-            data.declaredParts = pick.dataDeclaredParts;
-            auto dataHealth = check(data);
-            double dataAlive = DupeIdentity::Alive(dataHealth, data);
-            long long dataMissing = (long long)dataHealth.missing + DupeIdentity::UnlistedMissing(dataHealth, data);
-            if (dataAlive >= 0.0 && dataMissing >= DonorHealth::MinKnown)
-                doomed = DupeIdentity::ParDoomed(pick, dataAlive, deadline);
-        }
-    }
-    if (!nzbget_rs_dupe_should_expand(alive,missing,job.failed || doomed,false)) return;
-    // Do not spend indexer grabs when a usable whole backup already exists.
-    std::set<std::string> probed;
-    auto whole=[&](const NzbSummary& info) {
-        // A failed pick is not its own backup, even if all of its articles exist.
-        // Match the same-posting rejection used later before adding donors.
-        if (info.Fingerprint()==pick.Fingerprint() || Posting::SamePosting(pick.messageIds,info.messageIds)) return false;
-        if (Util::CurrentTime()>=deadline || IsStopped() || !probed.insert(info.Fingerprint()).second) return false;
-        auto h=check(info);
-        return DupeIdentity::Alive(h,info)>=0.999;
-    };
-    for (const auto& posting : fetched)
-    {
-        // Anything rejected as already held or known-dead later cannot be a
-        // newly usable backup. Eligible held backups are checked below.
-        Posting::Sketch sketch=Posting::MakeSketch(posting.info.messageIds);
-        if (m_dead.IsDead(sketch) || std::any_of(known.begin(),known.end(),
-            [&](const Posting::Sketch& k) { return Posting::SameSketch(sketch,k); })) continue;
-        if ((!ReleaseName::Readable(posting.info.mainName) || ReleaseName::SameRelease(job.name,posting.info.mainName)) && whole(posting.info)) return;
-    }
-    auto memberAvailable = [&](int id) {
-        GuardedDownloadQueue queue = DownloadQueue::Guard();
-        NzbInfo* currentPick = FindNzb(queue, job.nzbId);
-        return currentPick && PlacementAvailable(queue, currentPick, FindNzb(queue, id), true);
-    };
-    for (const auto& member : job.members)
-    {
-        // Ineligible members must not consume the posting's probe slot. Queue
-        // ownership can change during parsing or NNTP, so check it again after.
-        if (!memberAvailable(member.first)) continue;
-        NzbSummary info;
-        if (NzbReader::Parse(DupeUtil::ReadAll(member.second),info) && whole(info))
-        {
-            if (memberAvailable(member.first)) return;
-            probed.erase(info.Fingerprint());
-        }
-    }
-    if (IsStopped() || budget.Spent() || Util::CurrentTime()>=deadline) return;
-    std::vector<Newznab::Params> queries;
-    auto strict=Newznab::BuildQueries(job.name,pick.meta.count("imdb")?pick.meta.at("imdb"):"",pick.meta.count("tvdb")?pick.meta.at("tvdb"):"");
-    struct ExpandQueryCtx
-    {
-        std::vector<Newznab::Params>& queries;
-        const std::vector<Newznab::Params>& strict;
-    } expandCtx{queries, strict};
-    nzbget_rs_dqh_dupesearch_visit_expand_queries(
-        job.name.data(), job.name.size(), &expandCtx,
-        [](void* ctx, const char* qPtr, size_t qLen)
-        {
-            auto* c = static_cast<ExpandQueryCtx*>(ctx);
-            std::string q(qPtr, qLen);
-            bool duplicate = std::any_of(c->strict.begin(), c->strict.end(), [&](const Newznab::Params& params) {
-                return std::any_of(params.begin(), params.end(), [&](const auto& p) { return p.first == "q" && p.second == q; });
-            });
-            if (!duplicate)
-            {
-                c->queries.push_back({{"t", "search"}, {"q", q}});
-            }
-        });
-    Newznab::SearchStats searchStats;
-    auto wider=Newznab::Search(g_Options->GetDupeSearchUrl(),g_Options->GetDupeSearchApiKey(),queries,deadline,&searchStats);
-    queryStats.queries += searchStats.queries;
-    queryStats.failed += searchStats.failed;
-    queryStats.pages += searchStats.pages;
-    std::vector<Newznab::Result> all=prior;
-    std::set<std::string> seen;
-    for (const auto& r:prior) seen.insert(r.link);
-    for (auto& r:wider) if (seen.insert(r.link).second) { results++;all.push_back(std::move(r)); }
-    unsigned long long estimate=DupeIdentity::WholeBytes(pick);
-    long long bytes=(long long)std::min(estimate,(unsigned long long)std::numeric_limits<long long>::max());
-    std::vector<Newznab::Result> accepted;
-    for (const auto& r:all)
-        if (!attempted.count(r.link) && DupeIdentity::Candidate(job.name,bytes,r.title,r.size)) accepted.push_back(r);
-    candidates+=(int)accepted.size();
-    auto order=Posting::OrderPostings(accepted,bytes,g_Options->GetDupeSearchMaxDonors());
-    postings+=(int)order.size();
-    Note(job.nzbId,Message::mkInfo,"DupeSearch: %s: failing pick has no whole backup; broader discovery (%i candidate(s))",job.name.c_str(),(int)accepted.size());
-    DupeIdentity::Identity mine;
-    bool readMine=false;
-    for (const auto& group:order)
-    {
-        if (IsStopped() || budget.Spent() || Util::CurrentTime()>=deadline) break;
-        for (const auto& r:group) attempted.insert(r.link);
-        NzbFetcher::Stats counts;
-        auto posting=m_fetcher.FetchPosting(group,deadline,counts,&budget);
-        stats.Add(counts);
-        if (posting.reason!=NzbFetcher::frOk || !DupeIdentity::OuterCompatible(job.name,posting.info.mainName)) continue;
-        // Known-release names retain the strict path. Everything else needs inner proof or a fully matching readable data name.
-        if (ReleaseName::SameRelease(job.name,posting.listing.title) &&
-            (!ReleaseName::Readable(posting.info.mainName) || ReleaseName::SameRelease(job.name,posting.info.mainName)))
-        { fetched.push_back(std::move(posting));continue; }
-        if (!readMine) { mine=DupeIdentity::Read(pick,deadline);readMine=true; }
-        auto theirs=DupeIdentity::Read(posting.info,deadline);
-        if (!DupeIdentity::Matches(job.name,posting.info.mainName,mine,theirs)) continue;
-        posting.lenient=true;
-        posting.sameInner=mine && theirs && mine.bytes==theirs.bytes && mine.extension==theirs.extension;
-        fetched.push_back(std::move(posting));
-    }
-}
-
-inline void DupeSearch::Search(const Job& job)
-{
-	// search and fetch together are meant to fit in about this long
-	time_t deadline = Util::CurrentTime() + SearchDeadlineSec;
-
-	// The pick's ids narrow the search. Infer its whole size when a truncated
-    // NZB declares unlisted parts, so complete postings rank before partial relists.
-	NzbSummary pick;
-	if (!job.queuedFile.empty())
+	void Expand(const Job& job, const NzbSummary& pick, const std::vector<Newznab::Result>& prior, const std::vector<Posting::Sketch>& known, time_t deadline, NzbFetcher::Budget& budget, std::vector<NzbFetcher::Fetched>& fetched, std::set<std::string>& attempted, NzbFetcher::Stats& stats, Newznab::SearchStats& queryStats, int& results, int& candidates, int& postings)
 	{
-		if (!NzbReader::Parse(DupeUtil::ReadAll(job.queuedFile), pick))
-		{
-			Note(job.nzbId, Message::mkDetail, "DupeSearch: could not read the nzb-file of %s", job.name.c_str());
-		}
-	}
-    if (job.rankOnly)
-    {
-        std::vector<NzbFetcher::Fetched> verified;
-        std::map<std::string,int> rejected;
-        Place(job,pick,verified,rejected,0,0,0);
-        return;
-    }
-    NzbFetcher::Budget budget(g_Options->GetDupeSearchMaxDonors());
-    std::set<std::string> attempted;
-	std::string imdb = pick.meta.count("imdb") ? pick.meta["imdb"] : "";
-	std::string tvdb = pick.meta.count("tvdb") ? pick.meta["tvdb"] : "";
-
-	std::vector<Newznab::Params> queries = Newznab::BuildQueries(job.name, imdb, tvdb);
-	Newznab::SearchStats stats;
-	std::vector<Newznab::Result> results = Newznab::Search(g_Options->GetDupeSearchUrl(),
-		g_Options->GetDupeSearchApiKey(), queries, deadline, &stats);
-
-	// the same release by name; the size isn't a criterion (postings of one
-	// release differ by gigabytes in par2 and packaging)
-	std::vector<Newznab::Result> candidates;
-	for (const Newznab::Result& result : results)
-	{
-		if (ReleaseName::SameRelease(job.name, result.title))
-		{
-			candidates.push_back(result);
-		}
+	    if (IsStopped() || Util::CurrentTime() >= deadline || budget.Spent() || pick.messageIds.empty()) return;
+	    auto servers=NntpHealthServer::Servers();
+	    if (servers.empty()) return;
+	    auto healthOptions = [&]() {
+	        DonorHealth::Options options;
+	        options.sample.percent=g_Options->GetDupeHealthPercent();
+	        options.sample.minimum=g_Options->GetDupeHealthMin();
+	        options.sample.maximum=g_Options->GetDupeHealthMax();
+	        options.sample.maxBody=g_Options->GetDupeBodyChecks();
+	        options.budgetMs=nzbget_rs_dupesearch_calc_expand_budget_ms(
+	            g_Options->GetDupeHealthBudget(), (int64_t)deadline, (int64_t)Util::CurrentTime());
+	        return options;
+	    };
+	    auto check = [&](const NzbSummary& info) {
+	        return DonorHealth::CheckPosting(servers,info.messageIds,
+	            std::make_shared<std::vector<std::string>>(info.groups),healthOptions(),true);
+	    };
+	    DonorHealth::Health health;
+	    double alive=-1;
+	    bool doomed=false;
+	    int missing=0;
+	    if (!job.failed)
+	    {
+	        health=check(pick);
+	        alive=DupeIdentity::Alive(health,pick);
+	        long long combined=(long long)health.missing+DupeIdentity::UnlistedMissing(health,pick);
+	        missing=(int)std::min(combined,(long long)std::numeric_limits<int>::max());
+	        if (alive >= 0.85 && !pick.dataMessageIds.empty() &&
+	            !pick.parIndex.messageId.empty() && !pick.recoveryBytes.empty())
+	        {
+	            // Recovery articles are capacity, never evidence that source data
+	            // exists. Sample only retained data IDs for damaged-block estimates.
+	            NzbSummary data = pick;
+	            data.messageIds = pick.dataMessageIds;
+	            data.listedParts = pick.dataListedParts;
+	            data.declaredParts = pick.dataDeclaredParts;
+	            auto dataHealth = check(data);
+	            double dataAlive = DupeIdentity::Alive(dataHealth, data);
+	            long long dataMissing = (long long)dataHealth.missing + DupeIdentity::UnlistedMissing(dataHealth, data);
+	            if (dataAlive >= 0.0 && dataMissing >= DonorHealth::MinKnown)
+	                doomed = DupeIdentity::ParDoomed(pick, dataAlive, deadline);
+	        }
+	    }
+	    if (!nzbget_rs_dupe_should_expand(alive,missing,job.failed || doomed,false)) return;
+	    // Do not spend indexer grabs when a usable whole backup already exists.
+	    std::set<std::string> probed;
+	    auto whole=[&](const NzbSummary& info) {
+	        // A failed pick is not its own backup, even if all of its articles exist.
+	        // Match the same-posting rejection used later before adding donors.
+	        if (info.Fingerprint()==pick.Fingerprint() || Posting::SamePosting(pick.messageIds,info.messageIds)) return false;
+	        if (Util::CurrentTime()>=deadline || IsStopped() || !probed.insert(info.Fingerprint()).second) return false;
+	        auto h=check(info);
+	        return DupeIdentity::Alive(h,info)>=0.999;
+	    };
+	    for (const auto& posting : fetched)
+	    {
+	        // Anything rejected as already held or known-dead later cannot be a
+	        // newly usable backup. Eligible held backups are checked below.
+	        Posting::Sketch sketch=Posting::MakeSketch(posting.info.messageIds);
+	        if (m_dead.IsDead(sketch) || std::any_of(known.begin(),known.end(),
+	            [&](const Posting::Sketch& k) { return Posting::SameSketch(sketch,k); })) continue;
+	        if ((!ReleaseName::Readable(posting.info.mainName) || ReleaseName::SameRelease(job.name,posting.info.mainName)) && whole(posting.info)) return;
+	    }
+	    auto memberAvailable = [&](int id) {
+	        GuardedDownloadQueue queue = DownloadQueue::Guard();
+	        NzbInfo* currentPick = FindNzb(queue, job.nzbId);
+	        return currentPick && PlacementAvailable(queue, currentPick, FindNzb(queue, id), true);
+	    };
+	    for (const auto& member : job.members)
+	    {
+	        // Ineligible members must not consume the posting's probe slot. Queue
+	        // ownership can change during parsing or NNTP, so check it again after.
+	        if (!memberAvailable(member.first)) continue;
+	        NzbSummary info;
+	        if (NzbReader::Parse(DupeUtil::ReadAll(member.second),info) && whole(info))
+	        {
+	            if (memberAvailable(member.first)) return;
+	            probed.erase(info.Fingerprint());
+	        }
+	    }
+	    if (IsStopped() || budget.Spent() || Util::CurrentTime()>=deadline) return;
+	    std::vector<Newznab::Params> queries;
+	    auto strict=Newznab::BuildQueries(job.name,pick.meta.count("imdb")?pick.meta.at("imdb"):"",pick.meta.count("tvdb")?pick.meta.at("tvdb"):"");
+	    struct ExpandQueryCtx
+	    {
+	        std::vector<Newznab::Params>& queries;
+	        const std::vector<Newznab::Params>& strict;
+	    } expandCtx{queries, strict};
+	    nzbget_rs_dqh_dupesearch_visit_expand_queries(
+	        job.name.data(), job.name.size(), &expandCtx,
+	        [](void* ctx, const char* qPtr, size_t qLen)
+	        {
+	            auto* c = static_cast<ExpandQueryCtx*>(ctx);
+	            std::string q(qPtr, qLen);
+	            bool duplicate = std::any_of(c->strict.begin(), c->strict.end(), [&](const Newznab::Params& params) {
+	                return std::any_of(params.begin(), params.end(), [&](const auto& p) { return p.first == "q" && p.second == q; });
+	            });
+	            if (!duplicate)
+	            {
+	                c->queries.push_back({{"t", "search"}, {"q", q}});
+	            }
+	        });
+	    Newznab::SearchStats searchStats;
+	    auto wider=Newznab::Search(g_Options->GetDupeSearchUrl(),g_Options->GetDupeSearchApiKey(),queries,deadline,&searchStats);
+	    queryStats.queries += searchStats.queries;
+	    queryStats.failed += searchStats.failed;
+	    queryStats.pages += searchStats.pages;
+	    std::vector<Newznab::Result> all=prior;
+	    std::set<std::string> seen;
+	    for (const auto& r:prior) seen.insert(r.link);
+	    for (auto& r:wider) if (seen.insert(r.link).second) { results++;all.push_back(std::move(r)); }
+	    unsigned long long estimate=DupeIdentity::WholeBytes(pick);
+	    long long bytes=(long long)std::min(estimate,(unsigned long long)std::numeric_limits<long long>::max());
+	    std::vector<Newznab::Result> accepted;
+	    for (const auto& r:all)
+	        if (!attempted.count(r.link) && DupeIdentity::Candidate(job.name,bytes,r.title,r.size)) accepted.push_back(r);
+	    candidates+=(int)accepted.size();
+	    auto order=Posting::OrderPostings(accepted,bytes,g_Options->GetDupeSearchMaxDonors());
+	    postings+=(int)order.size();
+	    Note(job.nzbId,Message::mkInfo,"DupeSearch: %s: failing pick has no whole backup; broader discovery (%i candidate(s))",job.name.c_str(),(int)accepted.size());
+	    DupeIdentity::Identity mine;
+	    bool readMine=false;
+	    for (const auto& group:order)
+	    {
+	        if (IsStopped() || budget.Spent() || Util::CurrentTime()>=deadline) break;
+	        for (const auto& r:group) attempted.insert(r.link);
+	        NzbFetcher::Stats counts;
+	        auto posting=m_fetcher.FetchPosting(group,deadline,counts,&budget);
+	        stats.Add(counts);
+	        if (posting.reason!=NzbFetcher::frOk || !DupeIdentity::OuterCompatible(job.name,posting.info.mainName)) continue;
+	        // Known-release names retain the strict path. Everything else needs inner proof or a fully matching readable data name.
+	        if (ReleaseName::SameRelease(job.name,posting.listing.title) &&
+	            (!ReleaseName::Readable(posting.info.mainName) || ReleaseName::SameRelease(job.name,posting.info.mainName)))
+	        { fetched.push_back(std::move(posting));continue; }
+	        if (!readMine) { mine=DupeIdentity::Read(pick,deadline);readMine=true; }
+	        auto theirs=DupeIdentity::Read(posting.info,deadline);
+	        if (!DupeIdentity::Matches(job.name,posting.info.mainName,mine,theirs)) continue;
+	        posting.lenient=true;
+	        posting.sameInner=mine && theirs && mine.bytes==theirs.bytes && mine.extension==theirs.extension;
+	        fetched.push_back(std::move(posting));
+	    }
 	}
 
-	Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: %i result(s) from %i search(es) (%i failed, %i page(s)), %i of them the same release",
-		job.name.c_str(), (int)results.size(), stats.queries, stats.failed, stats.pages, (int)candidates.size());
+	void Search(const Job& job)
+	{
+		// search and fetch together are meant to fit in about this long
+		time_t deadline = Util::CurrentTime() + SearchDeadlineSec;
 
-	// the postings to fetch, best first: fetching each costs a grab of an indexer
-    unsigned long long wholeBytes = DupeIdentity::WholeBytes(pick);
-    long long orderBytes = (long long)std::min(wholeBytes,
-        (unsigned long long)std::numeric_limits<long long>::max());
-	std::vector<Posting::Group> order = Posting::OrderPostings(candidates, orderBytes,
-		g_Options->GetDupeSearchMaxDonors());
-
-	// the sketches of what nzbget already holds, read beside the fetches
-	std::vector<Posting::Sketch> known;
-	std::thread knownReader([&]()
+		// The pick's ids narrow the search. Infer its whole size when a truncated
+	    // NZB declares unlisted parts, so complete postings rank before partial relists.
+		NzbSummary pick;
+		if (!job.queuedFile.empty())
 		{
+			if (!NzbReader::Parse(DupeUtil::ReadAll(job.queuedFile), pick))
+			{
+				Note(job.nzbId, Message::mkDetail, "DupeSearch: could not read the nzb-file of %s", job.name.c_str());
+			}
+		}
+	    if (job.rankOnly)
+	    {
+	        std::vector<NzbFetcher::Fetched> verified;
+	        std::map<std::string,int> rejected;
+	        Place(job,pick,verified,rejected,0,0,0);
+	        return;
+	    }
+	    NzbFetcher::Budget budget(g_Options->GetDupeSearchMaxDonors());
+	    std::set<std::string> attempted;
+		std::string imdb = pick.meta.count("imdb") ? pick.meta["imdb"] : "";
+		std::string tvdb = pick.meta.count("tvdb") ? pick.meta["tvdb"] : "";
+
+		std::vector<Newznab::Params> queries = Newznab::BuildQueries(job.name, imdb, tvdb);
+		Newznab::SearchStats stats;
+		std::vector<Newznab::Result> results = Newznab::Search(g_Options->GetDupeSearchUrl(),
+			g_Options->GetDupeSearchApiKey(), queries, deadline, &stats);
+
+		// the same release by name; the size isn't a criterion (postings of one
+		// release differ by gigabytes in par2 and packaging)
+		std::vector<Newznab::Result> candidates;
+		for (const Newznab::Result& result : results)
+		{
+			if (ReleaseName::SameRelease(job.name, result.title))
+			{
+				candidates.push_back(result);
+			}
+		}
+
+		Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: %i result(s) from %i search(es) (%i failed, %i page(s)), %i of them the same release",
+			job.name.c_str(), (int)results.size(), stats.queries, stats.failed, stats.pages, (int)candidates.size());
+
+		// the postings to fetch, best first: fetching each costs a grab of an indexer
+	    unsigned long long wholeBytes = DupeIdentity::WholeBytes(pick);
+	    long long orderBytes = (long long)std::min(wholeBytes,
+	        (unsigned long long)std::numeric_limits<long long>::max());
+		std::vector<Posting::Group> order = Posting::OrderPostings(candidates, orderBytes,
+			g_Options->GetDupeSearchMaxDonors());
+
+		// the sketches of what nzbget already holds, read beside the fetches
+		std::vector<Posting::Sketch> known;
+		std::thread knownReader([&]()
+			{
+				for (const std::string& path : job.knownFiles)
+				{
+					Posting::Sketch sketch;
+					if (Posting::SketchOfFile(path, sketch))
+					{
+						known.push_back(std::move(sketch));
+					}
+				}
+			});
+
+		NzbFetcher::Stats fetchStats;
+		std::vector<NzbFetcher::Fetched> fetched;
+		int notTried = 0;
+		size_t parallel = g_Options->GetDupeSearchMaxDonors() > 0 ? 1 : (size_t)FetchParallel;
+	    for (size_t from = 0; from < order.size(); from += parallel)
+		{
+			if (IsStopped() || Util::CurrentTime() >= deadline || budget.Spent())
+			{
+				notTried = (int)(order.size() - from);
+				break;
+			}
+
+			size_t count = std::min(parallel, order.size() - from);
+			std::vector<NzbFetcher::Fetched> chunk(count);
+			std::vector<NzbFetcher::Stats> chunkStats(count);
+			std::vector<std::thread> threads;
+			for (size_t i = 0; i < count; i++)
+			{
+	            for (const Newznab::Result& listing : order[from+i]) attempted.insert(listing.link);
+				threads.emplace_back([&, i]()
+					{ chunk[i] = m_fetcher.FetchPosting(order[from + i], deadline, chunkStats[i], &budget); });
+			}
+			for (std::thread& thread : threads)
+			{
+				thread.join();
+			}
+			for (size_t i = 0; i < count; i++)
+			{
+				fetchStats.Add(chunkStats[i]);
+				if (chunk[i].reason == NzbFetcher::frOk)
+				{
+					fetched.push_back(std::move(chunk[i]));
+				}
+			}
+		}
+
+		knownReader.join();
+	    int resultCount=(int)results.size(), candidateCount=(int)candidates.size(), postingCount=(int)order.size();
+	    Expand(job,pick,results,known,deadline,budget,fetched,attempted,fetchStats,stats,resultCount,candidateCount,postingCount);
+
+		// what is worth keeping, in this order: another release (by the name of
+		// its largest data file, when that name is readable), a posting nzbget
+		// already holds, one found dead before, one that shares articles with
+		// the pick or an accepted duplicate
+		std::vector<std::vector<std::string>> postings;
+		postings.push_back(pick.messageIds);
+		std::vector<NzbFetcher::Fetched> verified;
+		std::map<std::string, int> rejected;
+		for (NzbFetcher::Fetched& posting : fetched)
+		{
+			Posting::Sketch sketch = Posting::MakeSketch(posting.info.messageIds);
+			const std::vector<std::string>& ids = posting.info.messageIds;
+			bool mainReadable = !posting.lenient && ReleaseName::Readable(posting.info.mainName);
+			bool sameRel = mainReadable && ReleaseName::SameRelease(job.name, posting.info.mainName);
+			if (mainReadable && !sameRel)
+			{
+				rejected["other-release"]++;
+			}
+			else if (std::any_of(known.begin(), known.end(), [&](const Posting::Sketch& k) { return Posting::SameSketch(sketch, k); }))
+			{
+				rejected["in-nzbget"]++;
+			}
+			else if (m_dead.IsDead(sketch))
+			{
+				rejected["known-dead"]++;
+			}
+			else if (std::any_of(postings.begin(), postings.end(), [&](const std::vector<std::string>& p) { return Posting::SamePosting(ids, p); }))
+			{
+				rejected["same-posting"]++;
+			}
+			else
+			{
+				postings.push_back(ids);
+				verified.push_back(std::move(posting));
+			}
+		}
+		rejected["listing-mismatch"] += fetchStats.listingMismatch;
+		rejected["refused"] += fetchStats.refused;
+		rejected["relisted"] += fetchStats.relisted;
+		rejected["fetch"] += fetchStats.fetch;
+		rejected["parse"] += fetchStats.parse;
+		rejected["deadline"] += notTried;
+	    rejected["budget"] += fetchStats.budget;
+
+		// a search that learned nothing - a query failed and nothing came back, or no
+		// posting could be fetched (indexers refusing, the deadline) - doesn't hold the
+		// key for SearchWindowSec: the next add of the key, or a restart, searches it again
+		int retryReason = nzbget_rs_dupesearch_classify_search_retry_reason(
+			stats.queries, stats.failed, verified.empty() ? 1 : 0, fetched.empty() ? 1 : 0,
+			fetchStats.refused, fetchStats.fetch, notTried);
+		if (retryReason > 0)
+		{
+			ForgetSearch(job.dupeKey, ReleaseName::Normalize(job.name));
+			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: %s, the key may be searched again", job.name.c_str(),
+				retryReason == 1 ? "no indexer answered" : retryReason == 2 ? "an indexer query failed and nothing came back" :
+				"no posting could be fetched");
+		}
+
+		// what was fetched is kept until it is placed: a restart resumes from it
+		// without fetching again (every fetch costs a grab)
+		SavePending(job, pick, verified);
+		Place(job, pick, verified, rejected, resultCount, candidateCount, postingCount);
+	}
+
+	void Place(const Job& job, const NzbSummary& pick, std::vector<NzbFetcher::Fetched>& verified, std::map<std::string, int>& rejected, int results, int candidates, int postings)
+	{
+		// closest size first: the likeliest byte-identical repost; then the most grabbed
+		long long pickBytes = (long long)std::min(DupeIdentity::WholeBytes(pick),
+	        (unsigned long long)std::numeric_limits<long long>::max());
+		if (verified.size() > 1)
+		{
+			std::vector<int64_t> totalBytes(verified.size());
+			std::vector<int> grabs(verified.size());
+			std::vector<int64_t> dates(verified.size());
+			std::vector<size_t> orderIdx(verified.size());
+			for (size_t i = 0; i < verified.size(); i++)
+			{
+				totalBytes[i] = verified[i].info.totalBytes;
+				grabs[i] = verified[i].listing.grabs;
+				dates[i] = (int64_t)verified[i].listing.date;
+			}
+			nzbget_rs_df_sort_verified_postings(
+				totalBytes.data(), grabs.data(), dates.data(), verified.size(), pickBytes, orderIdx.data());
+			std::vector<NzbFetcher::Fetched> sorted;
+			sorted.reserve(verified.size());
+			for (size_t idx : orderIdx)
+			{
+				sorted.push_back(std::move(verified[idx]));
+			}
+			verified = std::move(sorted);
+		}
+
+		DonorHealth::ServerList servers;
+		if (!verified.empty() || !job.members.empty())
+		{
+			servers = NntpHealthServer::Servers();
+			if (servers.empty())
+			{
+				Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: no active news servers, the postings are added unchecked", job.name.c_str());
+			}
+		}
+		DonorHealth::Options healthOptions;
+		healthOptions.sample.percent = g_Options->GetDupeHealthPercent();
+		healthOptions.sample.minimum = g_Options->GetDupeHealthMin();
+		healthOptions.sample.maximum = g_Options->GetDupeHealthMax();
+		healthOptions.sample.maxBody = g_Options->GetDupeBodyChecks();
+		healthOptions.budgetMs = g_Options->GetDupeHealthBudget() * 1000;
+
+		auto groupsOf = [](const NzbSummary& summary)
+			{ return std::make_shared<std::vector<std::string>>(summary.groups); };
+
+		// the pick's own posting: found dead, it is remembered (the dead-pick probe of
+		// the queue is what swaps it out)
+		std::thread pickCheck;
+		if (!servers.empty() && !pick.messageIds.empty())
+		{
+			pickCheck = std::thread([&]()
+				{
+					DonorHealth::Health health = DonorHealth::CheckPosting(servers, pick.messageIds,
+						groupsOf(pick), healthOptions, false);
+					if (DonorHealth::DeadProbe(health))
+					{
+						m_dead.Add(Posting::MakeSketch(pick.messageIds), 0, !g_Options->GetDupeSearchDryRun());
+						Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: the pick is dead (%i of %i probe articles on no server)",
+							job.name.c_str(), health.missing, health.Answered());
+					}
+				});
+		}
+
+		int dead = 0;
+		int overCap = 0;
+		int rescoreFailed = 0;
+		int added = 0;
+		int cap = g_Options->GetDupeSearchMaxDonors();
+		std::mutex placeMutex;
+		std::map<size_t, DonorHealth::Health> probe;
+
+		// the quick probe of every posting
+		if (!servers.empty())
+		{
+			std::vector<DonorHealth::Posting> list;
+			for (size_t i = 0; i < verified.size(); i++)
+			{
+				NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(i);
+				std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
+				nzbget_rs_free(keyBuf);
+				list.push_back({ std::move(keyStr), verified[i].info.messageIds, groupsOf(verified[i].info) });
+			}
+			DonorHealth::CheckPostings(servers, list, healthOptions, false, FetchParallel,
+				[&](const std::string& key, const DonorHealth::Health& health)
+				{
+					std::lock_guard<std::mutex> guard(placeMutex);
+					probe[(size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str())] = health;
+				});
+		}
+
+		std::vector<size_t> live;
+		for (size_t i = 0; i < verified.size(); i++)
+		{
+			auto it = probe.find(i);
+			if (it != probe.end() && DonorHealth::DeadProbe(it->second))
+			{
+				m_dead.Add(Posting::MakeSketch(verified[i].info.messageIds), 0, !g_Options->GetDupeSearchDryRun());
+				dead++;
+				Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: dropping dead posting %s [%s] after the probe: %i of %i probe articles on no server",
+					job.name.c_str(), verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(),
+					it->second.missing, it->second.Answered());
+				continue;
+			}
+			live.push_back(i);
+		}
+
+		struct Placed
+		{
+			int id;
+			DonorScore::Entry entry;
+			std::string title;
+			bool member = false;	// a duplicate that was already in history: always rescored
+	        bool valid = true; // Final score/parameter update must still succeed.
+			int oldScore = 0;		// a member's score before: never raised unless it is whole
+		};
+		std::map<size_t, Placed> placed;
+	    std::map<size_t, double> deferred;
+	    auto slotsUsed = [&]() {
+	        GuardedDownloadQueue queue = DownloadQueue::Guard();
+	        NzbInfo* currentPick = FindNzb(queue, job.nzbId);
+	        return (int)std::count_if(placed.begin(), placed.end(), [&](const auto& item) {
+	            bool avail = !item.second.member && item.second.valid &&
+	                item.second.entry.score > DonorScore::Dead && item.second.id >= 0 &&
+	                PlacementAvailable(queue, currentPick, FindNzb(queue, item.second.id));
+	            return nzbget_rs_dupesearch_slot_counts_as_used(
+	                item.second.member ? 1 : 0, item.second.valid ? 1 : 0,
+	                item.second.entry.score, DonorScore::Dead, item.second.id,
+	                g_Options->GetDupeSearchDryRun() ? 1 : 0, avail ? 1 : 0) != 0;
+	        });
+	    };
+		DonorScore::Ranks ranks;
+		int base = DonorScore::Base(job.score);
+
+		auto twinOf = [&](const NzbFetcher::Fetched& f)
+			{ return DupeIdentity::SameData(pick, f.info); };
+		auto aliveOf = [&](const DonorHealth::Health& health, const NzbSummary& summary) { return DupeIdentity::Alive(health, summary); };
+	    auto cacheableLoss = [&](DonorHealth::Health health) {
+	        // Only confirmed article loss may invalidate overlapping postings.
+	        // Structural gaps and provider errors belong to this NZB's score.
+	        health.error=0;
+	        return DupeIdentity::IsDead(health,NzbSummary{},g_Options->GetDupeMinAlive());
+	    };
+		auto entryOf = [&](size_t i, int score, double alive)
+			{
+				DonorScore::Entry entry;
+				entry.score = score;
+				entry.alive = alive;
+				entry.twin = twinOf(verified[i]);
+				entry.bytes = verified[i].info.totalBytes;
+				entry.grabs = verified[i].listing.grabs;
+				return entry;
+			};
+		// nzbget shuts down: a check cut short knows nothing, and adding a duplicate now
+		// would wait for the stopped scanner for good (B37). The search keeps its saved
+		// postings and resumes after the restart.
+		auto interrupted = [&]()
+			{
+				if (!IsStopped())
+				{
+					return false;
+				}
+				if (pickCheck.joinable())
+				{
+					pickCheck.join();
+				}
+				Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: RustyGet shuts down, the search resumes after the restart",
+					job.name.c_str());
+				return true;
+			};
+		auto place = [&](size_t i, double alive, const char* how)
+			{
+				int score = ranks.Take(alive, twinOf(verified[i]));
+				int id = AddDonor(job, pick, verified[i], base + score, alive);
+				if (id == 0)
+				{
+					ranks.Release(score);
+					return;
+				}
+				added++;
+				placed[i] = { id, entryOf(i, score, alive), verified[i].listing.title };
+				Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: added %s [%s] score=%i alive=%i%% (%s)", job.name.c_str(),
+					verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(), base + score,
+					nzbget_rs_dupesearch_alive_to_percent(alive), how);
+			};
+
+		// the probe-alive postings go in at once, then each is rescored when its
+		// full sample lands; the rest are added as their samples finish
+		size_t fast = nzbget_rs_dupesearch_calc_fast_donor_count(
+			g_Options->GetDupeFastDonors(), live.size(), cap);
+		std::set<size_t> fastSet;
+		for (size_t n = 0; n < fast; n++)
+		{
+			auto it = probe.find(live[n]);
+			place(live[n], it == probe.end() ? -1.0 : aliveOf(it->second, verified[live[n]].info), "fast");
+			fastSet.insert(live[n]);
+		}
+
+		std::set<size_t> todo(live.begin(), live.end());
+		if (!servers.empty() && !todo.empty())
+		{
+			std::vector<DonorHealth::Posting> list;
+			for (size_t i : todo)
+			{
+				NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(i);
+				std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
+				nzbget_rs_free(keyBuf);
+				list.push_back({ std::move(keyStr), verified[i].info.messageIds, groupsOf(verified[i].info) });
+			}
+			DonorHealth::CheckPostings(servers, list, healthOptions, true, FetchParallel,
+				[&](const std::string& key, const DonorHealth::Health& health)
+				{
+					std::lock_guard<std::mutex> guard(placeMutex);
+					size_t i = (size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str());
+					if (IsStopped() || !todo.erase(i))
+					{
+						return;
+					}
+					double alive = aliveOf(health, verified[i].info);
+					bool isDead = DupeIdentity::IsDead(health, verified[i].info, g_Options->GetDupeMinAlive());
+					Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: %s [%s]: alive=%i%% (%i of %i articles)", job.name.c_str(),
+						verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(),
+						nzbget_rs_dupesearch_alive_to_percent(alive), health.present, health.Answered());
+
+					auto it = placed.find(i);
+					if (it != placed.end())
+					{
+						// a fast donor: its real health moves its score
+						Placed& donor = it->second;
+						ranks.Release(donor.entry.score);
+						int score = isDead ? DonorScore::Dead : ranks.Take(alive, donor.entry.twin);
+						NzbgetRsBuf paramBuf = nzbget_rs_dqh_dupesearch_format_key_val_param(
+							AliveParam,
+							nzbget_rs_dupesearch_fast_donor_alive_param(isDead ? 1 : 0, alive));
+						std::string param(paramBuf.data ? paramBuf.data : "", paramBuf.len);
+						nzbget_rs_free(paramBuf);
+						if (alive < 0 || SetScore(donor.id, base + score,
+							param.empty() ? std::vector<std::string>() : std::vector<std::string>{ param }))
+						{
+							if (alive < 0)
+							{
+								// inconclusive: the donor keeps its score, and the rank taken for
+								// the new one is given back (F19: it stayed taken, the old one free)
+								ranks.Release(score);
+								ranks.Use(donor.entry.score);
+							}
+							else
+							{
+								donor.entry.score = score;
+							}
+							donor.entry.alive = alive;
+							if (isDead)
+							{
+								if (cacheableLoss(health)) m_dead.Add(Posting::MakeSketch(verified[i].info.messageIds), 0, !g_Options->GetDupeSearchDryRun());
+								dead++;
+							}
+						}
+						else
+						{
+							ranks.Release(score);
+							ranks.Use(donor.entry.score);
+							rescoreFailed++;
+	                        donor.valid = false;
+							Note(job.nzbId, Message::mkWarning, "DupeSearch: could not rescore %s: keeps score %i", verified[i].listing.title.c_str(),
+								base + donor.entry.score);
+						}
+					}
+					else if (isDead)
+					{
+						if (cacheableLoss(health)) m_dead.Add(Posting::MakeSketch(verified[i].info.messageIds), 0, !g_Options->GetDupeSearchDryRun());
+						dead++;
+						Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: dropping dead posting %s: alive=%i%%", job.name.c_str(),
+							verified[i].listing.title.c_str(), (int)std::lround(100 * alive));
+					}
+					else
+					{
+	                    // A healthy answer may arrive before a fast donor's dead
+	                    // answer. Retain it until all checks settle the cap slots.
+	                    if (cap > 0 && slotsUsed() >= cap) deferred[i] = alive;
+	                    else place(i, alive, "checked");
+					}
+				});
+		}
+
+		if (interrupted())
+		{
+			return;
+		}
+
+	    for (auto it = deferred.begin(); it != deferred.end();)
+	    {
+	        if (cap > 0 && slotsUsed() >= cap) { ++it; continue; }
+	        auto entry = *it;
+	        it = deferred.erase(it);
+	        place(entry.first, entry.second, "checked");
+	    }
+
+		// whatever no check reported on (no servers, a failed check) is added unchecked
+		for (size_t i : std::set<size_t>(todo))
+		{
+			todo.erase(i);
+			if (placed.count(i))
+			{
+				continue;
+			}
+			if (cap > 0 && slotsUsed() >= cap)
+			{
+				overCap++;
+				continue;
+			}
+			place(i, -1.0, "unchecked");
+		}
+
+		// the duplicates nzbget already kept for the key (a client's own backups,
+		// earlier searches' donors) are measured the same way and ranked with the
+		// new ones: nzbget tries them by score, whoever sent them. Each is read
+		// from its own nzb-file, never matched by size: two postings can have one size.
+		std::set<size_t> uncheckedMembers;
+		if (!job.members.empty() && (!servers.empty() || job.rankOnly))
+		{
+			std::vector<NzbSummary> summaries(job.members.size());
+			std::vector<DonorHealth::Posting> list;
+			std::map<size_t, size_t> sameAs;	// a member whose posting another member already is
+			for (size_t m = 0; m < job.members.size(); m++)
+			{
+				uncheckedMembers.insert(m);
+				if (!NzbReader::Parse(DupeUtil::ReadAll(job.members[m].second), summaries[m]))
+				{
+					continue;
+				}
+	            if (Posting::SamePosting(summaries[m].messageIds, pick.messageIds))
+	            {
+	                uncheckedMembers.erase(m);
+	                continue;
+	            }
+				// each posting is checked once: the client's copies of it share the answer
+				auto first = std::find_if(list.begin(), list.end(), [&](const DonorHealth::Posting& posting)
+					{ return Posting::SamePosting(summaries[m].messageIds, posting.ids); });
+				if (first != list.end())
+				{
+					sameAs[m] = (size_t)nzbget_rs_dqh_parse_c_atoi(first->key.c_str());
+					continue;
+				}
+				NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(m);
+				std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
+				nzbget_rs_free(keyBuf);
+				list.push_back({ std::move(keyStr), summaries[m].messageIds, groupsOf(summaries[m]) });
+			}
+			std::map<size_t, DonorHealth::Health> measured;
+			if (!servers.empty()) DonorHealth::CheckPostings(servers, list, healthOptions, true, FetchParallel,
+				[&](const std::string& key, const DonorHealth::Health& health)
+				{
+					std::lock_guard<std::mutex> guard(placeMutex);
+					measured[(size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str())] = health;
+				});
+			for (const auto& alias : sameAs)
+			{
+				auto health = measured.find(alias.second);
+				if (health != measured.end())
+				{
+					measured[alias.first] = health->second;
+				}
+			}
+			for (const auto& entry : measured)
+			{
+				const NzbSummary& summary = summaries[entry.first];
+				double alive = aliveOf(entry.second, summary);
+				if (alive < 0)
+				{
+					continue;	// too few answers to judge: its score stays
+				}
+				bool isDead = DupeIdentity::IsDead(entry.second, summary, g_Options->GetDupeMinAlive());
+				if (isDead)
+				{
+					if (cacheableLoss(entry.second)) m_dead.Add(Posting::MakeSketch(summary.messageIds), 0, !g_Options->GetDupeSearchDryRun());
+				}
+				Placed member;
+				member.id = job.members[entry.first].first;
+				member.title = FileSystem::BaseFileName(job.members[entry.first].second.c_str());
+				member.member = true;
+				member.oldScore = entry.first < job.memberScores.size() ? job.memberScores[entry.first] : 0;
+				member.entry.score = isDead ? DonorScore::Dead : DonorScore::Dead + 1;
+				member.entry.alive = alive;
+				member.entry.twin = DupeIdentity::SameData(pick, summary);
+				member.entry.bytes = summary.totalBytes;
+				placed[verified.size() + entry.first] = member;
+				Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: duplicate %s in history: alive=%i%% (%i of %i articles)%s", job.name.c_str(),
+					member.title.c_str(), (int)std::lround(100 * alive), entry.second.present, entry.second.Answered(),
+					isDead ? ", dead" : "");
+			}
+		}
+
+		if (interrupted())
+		{
+			return;
+		}
+
+	    auto rerank = [&]() {
+		// once every check is in, the scores in order of wholeness
+		std::vector<size_t> order2;
+		std::vector<DonorScore::Entry> entries;
+		for (auto& entry : placed)
+		{
+	        if (!entry.second.valid) continue;
+			order2.push_back(entry.first);
+			entries.push_back(entry.second.entry);
+		}
+		std::vector<int> wanted = DonorScore::Rerank(entries, pickBytes);
+		// with every one of them dead there is nothing to order: scores stay, the dead are marked
+		bool allDead = std::all_of(wanted.begin(), wanted.end(), [](int score) { return score == DonorScore::Dead; });
+		for (size_t n = 0; n < order2.size(); n++)
+		{
+			Placed& donor = placed[order2[n]];
+			if (wanted[n] == donor.entry.score && !donor.member)
+			{
+				continue;
+			}
+			std::vector<std::string> params;
+			int score = base + wanted[n];
+			if (donor.member)
+			{
+				int percent = 0;
+				int addAliveZero = 0;
+				nzbget_rs_df_eval_member_rerank(
+					base, wanted[n], DonorScore::Dead, donor.oldScore, donor.entry.alive, allDead ? 1 : 0,
+					&score, &percent, &addAliveZero);
+				NzbgetRsBuf hpBuf = nzbget_rs_dqh_dupesearch_format_key_val_param(HealthParam, percent);
+				params.emplace_back(hpBuf.data ? hpBuf.data : "", hpBuf.len);
+				nzbget_rs_free(hpBuf);
+				if (addAliveZero)
+				{
+					params.push_back(std::string(AliveParam) + "=0");
+				}
+			}
+			if (SetScore(donor.id, score, params))
+			{
+	            if (donor.member) uncheckedMembers.erase(order2[n] - verified.size());
+				Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: reranked %s: score %i", job.name.c_str(), donor.title.c_str(), score);
+				donor.entry.score = wanted[n];
+			}
+			else
+			{
+	            donor.valid = false;
+				rescoreFailed++;
+			}
+		}
+
+	    };
+	    rerank();
+	    // A final failed score edit can invalidate another occupied slot. Keep
+	    // measured candidates until that decision and attempt each at most once.
+	    while (!deferred.empty() && (cap <= 0 || slotsUsed() < cap))
+	    {
+	        auto entry = *deferred.begin();
+	        deferred.erase(deferred.begin());
+	        place(entry.first, entry.second, "checked");
+	        rerank();
+	    }
+	    overCap += (int)deferred.size();
+
+		if (pickCheck.joinable())
+		{
+			pickCheck.join();
+		}
+
+		rejected["dead"] += dead;
+		rejected["over-cap"] += overCap;
+		rejected["rescore"] += rescoreFailed;
+		std::vector<const char*> rejKeys;
+		std::vector<int> rejCounts;
+		rejKeys.reserve(rejected.size());
+		rejCounts.reserve(rejected.size());
+		for (const auto& entry : rejected)
+		{
+			rejKeys.push_back(entry.first.c_str());
+			rejCounts.push_back(entry.second);
+		}
+		NzbgetRsBuf outcomeBuf = nzbget_rs_dqh_dupesearch_format_rejected_outcome(
+			rejKeys.data(), rejCounts.data(), rejected.size());
+		std::string outcome(outcomeBuf.data ? outcomeBuf.data : "", outcomeBuf.len);
+		nzbget_rs_free(outcomeBuf);
+		Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: results=%i candidates=%i postings=%i verified=%i added=%i rejected={%s}",
+			job.name.c_str(), results, candidates, postings, (int)verified.size(), added, outcome.c_str());
+		RemovePending(job.nzbId);
+		{
+			std::lock_guard<std::mutex> guard(m_mutex);
+			m_sent.erase(job.nzbId);
+		}
+	    // Without a usable whole backup discovery remains retryable while the
+	    // pick is queued, even if a fast-added donor was later declared dead.
+	    bool usableBackup = false;
+	    {
+	        GuardedDownloadQueue queue = DownloadQueue::Guard();
+	        NzbInfo* currentPick = FindNzb(queue, job.nzbId);
+	        usableBackup=std::any_of(placed.begin(),placed.end(),[&](const auto& item) {
+	            bool avail = item.second.id >= 0 && item.second.valid &&
+	                item.second.entry.score > DonorScore::Dead && item.second.entry.alive >= 0.999 &&
+	                PlacementAvailable(queue, currentPick, FindNzb(queue, item.second.id), true);
+	            return nzbget_rs_dupesearch_is_usable_whole_backup(
+	                item.second.valid ? 1 : 0, item.second.entry.score, DonorScore::Dead,
+	                item.second.entry.alive, item.second.id,
+	                g_Options->GetDupeSearchDryRun() ? 1 : 0, avail ? 1 : 0) != 0;
+	        });
+	    }
+	    bool stateRetryable = false;
+	    if (job.rankOnly)
+	    {
+	        std::lock_guard<std::mutex> guard(m_mutex);
+	        Searched* state = FindSearch(LowerKey(job.dupeKey), ReleaseName::Normalize(job.name));
+	        stateRetryable = state && state->retryable;
+	    }
+	    if (usableBackup)
+	    {
+	        { std::lock_guard<std::mutex> guard(m_mutex);
+	          SetRetryable(LowerKey(job.dupeKey), ReleaseName::Normalize(job.name), false); }
+	        if (!g_Options->GetDupeSearchDryRun()) SaveState();
+	    }
+	    int retryDiscoveryInt = 0;
+	    int rankIncompleteInt = 0;
+	    nzbget_rs_dupesearch_eval_post_place_retry(
+	        job.rankOnly ? 1 : 0, stateRetryable ? 1 : 0, usableBackup ? 1 : 0,
+	        uncheckedMembers.size(), &retryDiscoveryInt, &rankIncompleteInt);
+	    bool rankIncomplete = rankIncompleteInt != 0;
+	    bool retryDiscovery = retryDiscoveryInt != 0;
+	    // A rename/deletion may make this pick ineligible for scheduling, but must
+	    // not falsely complete the original title's unfulfilled discovery stamp.
+	    if (retryDiscovery && !IsStopped()) ForgetSearch(job.dupeKey, ReleaseName::Normalize(job.name));
+	    if ((retryDiscovery || rankIncomplete) && !IsStopped())
+	    {
+	        GuardedDownloadQueue queue=DownloadQueue::Guard();
+	        NzbInfo* current=queue->GetQueue()->Find(job.nzbId);
+	        if (current && !current->GetDeleting() && current->GetDeleteStatus() == NzbInfo::dsNone &&
+	            !current->GetPostInfo() &&
+	            LowerKey(EffectiveKey(current))==LowerKey(job.dupeKey) &&
+	            ReleaseName::Normalize(current->GetName())==ReleaseName::Normalize(job.name))
+	        {
+	            if (retryDiscovery)
+	            {
+	                // An owed discovery retry takes priority over ranking an
+	                // inconclusive backup; otherwise rank-only retries can starve it.
+	                { std::lock_guard<std::mutex> guard(m_mutex);
+	                  m_rankPending.erase(job.nzbId); }
+	            }
+	            else
+	            {
+	                // Retain the completed search stamp: only recheck existing
+	                // backups, without repeating indexer searches or paid grabs.
+	                std::lock_guard<std::mutex> guard(m_mutex);
+	                m_rankPending.insert(job.nzbId);
+	            }
+	            if (!retryDiscovery) MarkSearching(job);
+	            Schedule(job.nzbId,Util::CurrentTime()+900);
+	            if (!retryDiscovery)
+	                current->PrintMessage(Message::mkInfo, "DupeSearch: %s: retrying backup health in 15 minutes", job.name.c_str());
+	        }
+	    }
+	}
+
+	std::string PickGone(const Job& job)
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		// in history after a download or a failure it still wants its duplicates;
+		// deleted by the user it doesn't: the first duplicate would download
+		NzbInfo* pick = FindNzb(downloadQueue, job.nzbId);
+		if (!pick || pick->GetDeleting() || pick->GetDeleteStatus() == NzbInfo::dsManual)
+		{
+			return "the pick was deleted";
+		}
+		std::string pickEffKey = EffectiveKey(pick);
+		std::string pickNormName = ReleaseName::Normalize(pick->GetName());
+		std::string jobNormName = ReleaseName::Normalize(job.name);
+		int reason = nzbget_rs_df_eval_pick_gone(
+			1, 0, (int)pick->GetDeleteStatus(), (int)NzbInfo::dsManual,
+			pickEffKey.c_str(), job.dupeKey.c_str(), pickNormName.c_str(), jobNormName.c_str());
+		switch (reason)
+		{
+			case 1: return "the pick was deleted";
+			case 2: return "the duplicate key of the pick changed";
+			case 3: return "the name of the pick changed";
+			default: return "";
+		}
+	}
+
+	int AddDonor(const Job& job, const NzbSummary& pick, const NzbFetcher::Fetched& posting, int score, double alive)
+	{
+		if (IsStopped())
+		{
+			return 0;
+		}
+		std::string gone = PickGone(job);
+		if (!gone.empty())
+		{
+			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: not adding %s [%s]: %s", job.name.c_str(),
+				posting.listing.title.c_str(), posting.listing.indexer.c_str(), gone.c_str());
+			return 0;
+		}
+		if (g_Options->GetDupeSearchDryRun())
+		{
+			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: dry run, would add %s [%s] score=%i alive=%i%%", job.name.c_str(),
+				posting.listing.title.c_str(), posting.listing.indexer.c_str(), score,
+				nzbget_rs_dupesearch_alive_to_percent(alive));
+			return -1;
+		}
+		std::string fingerprint = posting.info.Fingerprint();
+		{
+			std::lock_guard<std::mutex> guard(m_mutex);
+			if (!m_sent[job.nzbId].insert(fingerprint).second)
+			{
+				return 0;
+			}
+		}
+
+		NzbParameterList parameters;
+		parameters.SetParameter(DonorParam, "yes");
+		for (const std::string& hint : DupeIdentity::Hints(pick, posting.info, posting.sameInner))
+		{
+			size_t nameLen = 0, valOff = 0;
+			if (nzbget_rs_tpr_split_param_assignment(hint.c_str(), &nameLen, &valOff) != 0)
+			{
+				parameters.SetParameter(hint.substr(0, nameLen).c_str(), hint.c_str() + valOff);
+			}
+		}
+		if (alive >= 0)
+		{
+			NzbgetRsBuf aliveBuf = nzbget_rs_dqh_conn_format_port_str(
+				nzbget_rs_dupesearch_alive_to_percent(alive));
+			parameters.SetParameter(AliveParam, aliveBuf.data ? aliveBuf.data : "0");
+			nzbget_rs_free(aliveBuf);
+		}
+		std::string name = posting.listing.title;
+		if (nzbget_rs_dupesearch_needs_nzb_ext(name.data(), name.size()) != 0)
+		{
+			name += ".nzb";
+		}
+
+		int nzbId = 0;
+		Scanner::EAddStatus status = g_Scanner->AddExternalFile(name.c_str(), job.category.c_str(), false, 0,
+			job.dupeKey.c_str(), score, dmScore, &parameters, false, false, nullptr, nullptr,
+			posting.data.data(), (int)posting.data.size(), &nzbId);
+		if (status != Scanner::asSuccess || nzbId == 0)
+		{
+			std::lock_guard<std::mutex> guard(m_mutex);
+			m_sent[job.nzbId].erase(fingerprint);
+			return 0;
+		}
+
+		// the pick may have been deleted, or have got another key, while the add ran
+		// (it takes the queue lock itself, after PickGone let it go): the new duplicate
+		// goes again (B33)
+		gone = PickGone(job);
+		if (!gone.empty())
+		{
+			{
+				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+				IdList ids{ nzbId };
+				bool queued = downloadQueue->GetQueue()->Find(nzbId) != nullptr;
+				downloadQueue->EditList(&ids, nullptr, DownloadQueue::mmId,
+					queued ? DownloadQueue::eaGroupFinalDelete : DownloadQueue::eaHistoryFinalDelete, nullptr);
+			}
+			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: removed the duplicate %s just added: %s",
+				job.name.c_str(), posting.listing.title.c_str(), gone.c_str());
+			return 0;
+		}
+
+		// remembered with the search in progress: a resume after a restart must not add
+		// it again, even when the user deleted it meanwhile (then nzbget keeps only a
+		// hidden duplicate record, which the resume can't recognize)
+		std::string sentPath = PendingDir(job.nzbId) + PATH_SEPARATOR + "sent";
+		if (FileSystem::DirectoryExists(PendingDir(job.nzbId).c_str()))
+		{
+			std::ofstream sent(fs::u8path(sentPath), std::ios::app);
+			sent << fingerprint << "\n";
+		}
+		return nzbId;
+	}
+
+	bool SetScore(int id, int score, const std::vector<std::string>& params)
+	{
+		if (g_Options->GetDupeSearchDryRun() || id < 0)
+		{
+			std::string text;
+			for (const std::string& param : params)
+			{
+				text += " " + param;
+			}
+			info("DupeSearch: dry run, would set the score of download %i to %i%s", id, score, text.c_str());
+			return true;
+		}
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		// a duplicate the user deleted is kept as a hidden record (hkDup): its score
+		// edit succeeds but means nothing, so it counts as gone
+		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+		{
+			if (historyInfo->GetId() == id && historyInfo->GetKind() == HistoryInfo::hkDup)
+			{
+				return false;
+			}
+		}
+		IdList ids{ id };
+		NzbgetRsBuf scoreBuf = nzbget_rs_dqh_conn_format_port_str(score);
+		std::string text(scoreBuf.data ? scoreBuf.data : "", scoreBuf.len);
+		nzbget_rs_free(scoreBuf);
+		const std::pair<DownloadQueue::EEditAction, DownloadQueue::EEditAction> kinds[] = {
+			{ DownloadQueue::eaHistorySetDupeScore, DownloadQueue::eaHistorySetParameter },
+			{ DownloadQueue::eaGroupSetDupeScore, DownloadQueue::eaGroupSetParameter } };
+		for (const auto& kind : kinds)
+		{
+			if (downloadQueue->EditList(&ids, nullptr, DownloadQueue::mmId, kind.first, text.c_str()))
+			{
+				for (const std::string& param : params)
+				{
+					downloadQueue->EditList(&ids, nullptr, DownloadQueue::mmId, kind.second, param.c_str());
+				}
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void Note(int nzbId, Message::EKind kind, const char* format, ...) PRINTF_SYNTAX(4)
+	{
+		char text[1024];
+		va_list ap;
+		va_start(ap, format);
+		vsnprintf(text, sizeof(text), format, ap);
+		va_end(ap);
+
+		// into the pick's own log as well (with InfoTarget=log and no log file,
+		// the global log keeps no info lines); the global log alone once it's gone
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		NzbInfo* nzbInfo = FindNzb(downloadQueue, nzbId);
+		if (nzbInfo)
+		{
+			nzbInfo->AddMessage(kind, text);
+			return;
+		}
+		switch (kind)
+		{
+			case Message::mkWarning: warn("%s", text); break;
+			case Message::mkDetail: detail("%s", text); break;
+			default: info("%s", text); break;
+		}
+	}
+
+	std::string PendingDir(int nzbId)
+	{
+		NzbgetRsBuf dirBuf = nzbget_rs_dqh_dupesearch_format_pending_dir(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
+		std::string dir(dirBuf.data ? dirBuf.data : "", dirBuf.len);
+		nzbget_rs_free(dirBuf);
+		return dir;
+	}
+
+	void MarkSearching(const Job& job)
+	{
+		if (g_Options->GetDupeSearchDryRun())
+		{
+			return;
+		}
+		std::string dir = PendingDir(job.nzbId);
+		RemoveDir(dir);
+		CString errmsg;
+		if (!FileSystem::ForceDirectories(dir.c_str(), errmsg) ||
+	        !DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "pick-title", ReleaseName::Normalize(job.name)) ||
+	        !DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "pick-key", LowerKey(job.dupeKey)) ||
+	        !DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "phase", job.rankOnly ? "ranking\n" : "searching\n"))
+		{
+			warn("Could not save the DupeSearch state to %s", dir.c_str());
+		}
+	}
+
+	void SavePending(const Job& job, const NzbSummary& pick, const std::vector<NzbFetcher::Fetched>& verified)
+	{
+		if (g_Options->GetDupeSearchDryRun())
+		{
+			return;
+		}
+		std::string dir = PendingDir(job.nzbId);
+	    bool ok = DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "pick-title", ReleaseName::Normalize(job.name)) &&
+	        DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "pick-key", LowerKey(job.dupeKey)) &&
+	        DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "pick-posting", pick.Fingerprint());
+		for (size_t i = 0; i < verified.size() && ok; i++)
+		{
+			const Newznab::Result& listing = verified[i].listing;
+			NzbgetRsBuf baseBuf = nzbget_rs_dqh_dupesearch_format_indexed_base_path(
+				dir.c_str(), PATH_SEPARATOR, i);
+			std::string base(baseBuf.data ? baseBuf.data : "", baseBuf.len);
+			nzbget_rs_free(baseBuf);
+			NzbgetRsBuf metaBuf = nzbget_rs_df_format_pending_meta(
+				listing.title.c_str(), listing.indexer.c_str(), listing.grabs, listing.size, (int64_t)listing.date);
+			std::string metaStr(metaBuf.data ? metaBuf.data : "", metaBuf.len);
+			nzbget_rs_free(metaBuf);
+			ok = DupeUtil::WriteAtomic(base + ".nzb", verified[i].data) && DupeUtil::WriteAtomic(base + ".meta", metaStr) &&
+	            DupeUtil::WriteAtomic(base + ".inner", verified[i].sameInner ? "1\n" : "0\n");
+		}
+		if (!ok || !DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "phase", "fetched\n"))
+		{
+			warn("Could not save the DupeSearch state to %s", dir.c_str());
+		}
+	}
+
+	void RemovePending(int nzbId)
+	{
+		if (IsStopped())
+		{
+			return;	// interrupted: resumed after the restart
+		}
+		RemoveDir(PendingDir(nzbId));
+	}
+
+	void ResumePending()
+	{
+		std::vector<int> ids;
+		DirBrowser dirBrowser(PendingDir(0).c_str());
+		while (const char* name = dirBrowser.Next())
+		{
+			int parsedId = nzbget_rs_dqh_dupesearch_parse_pending_dir_id(name);
+			if (parsedId > 0)
+			{
+				ids.push_back(parsedId);
+			}
+		}
+
+		for (int nzbId : ids)
+		{
+			if (IsStopped())
+			{
+				return;
+			}
+			std::string dir = PendingDir(nzbId);
+	        std::string phase = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "phase");
+			int fetchedInt = 0;
+			int rankingInt = 0;
+			nzbget_rs_dupesearch_classify_pending_phase(
+				phase.data(), phase.size(), &fetchedInt, &rankingInt);
+			bool fetched = fetchedInt != 0;
+	        bool ranking = rankingInt != 0;
+
+			Job job;
+	        bool stateErased = false;
+			{
+				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+				NzbInfo* nzbInfo = FindNzb(downloadQueue, nzbId);
+				if (nzbInfo && fetched)
+				{
+					Collect(downloadQueue, nzbInfo, job);
+					job.score = std::max(nzbInfo->GetDupeScore(), BasePickScore);
+				}
+				else if (nzbInfo && ranking)
+	            {
+	                std::string key = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key");
+	                std::string title = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title");
+	                std::lock_guard<std::mutex> guard(m_mutex);
+	                if (key == LowerKey(EffectiveKey(nzbInfo)) && title == ReleaseName::Normalize(nzbInfo->GetName()))
+	                    if (Searched* stamp = FindSearch(key, title))
+	                        if (stamp->title == title) m_rankPending.insert(nzbId);
+	                m_pending[nzbId] = Util::CurrentTime() + g_Options->GetDupeSearchDelay();
+	                m_cond.notify_all();
+	            }
+				else if (nzbInfo)
+				{
+					// the search itself was cut off: it runs again
+					std::lock_guard<std::mutex> guard(m_mutex);
+	                // A rename/key edit during the interrupted search must not
+	                // invalidate another edition's completed suppression stamp.
+	                std::string key = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key");
+	                std::string title = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title");
+	                if (!key.empty() && !title.empty())
+	                    stateErased = m_titleSearched.erase({key, title}) != 0;
+	                // Unknown old checkpoints cannot name an edition to invalidate.
+	                std::string cacheKey = key.empty() ? LowerKey(EffectiveKey(nzbInfo)) : key;
+	                auto latest = m_searched.find(cacheKey);
+	                if (latest != m_searched.end() && (latest->second.title.empty() ||
+	                    (!key.empty() && !title.empty() && latest->second.title == title)))
+	                { m_searched.erase(latest); stateErased = true; }
+				}
+			}
+	        if (stateErased && !g_Options->GetDupeSearchDryRun() && !SaveState()) continue;
+			if (!fetched || job.nzbId == 0)
+			{
+				RemoveDir(dir);
+				continue;
+			}
+
+			Note(job.nzbId, Message::mkInfo, "DupeSearch: resuming the search of %s after a restart", job.name.c_str());
+			NzbSummary pick;
+			NzbReader::Parse(DupeUtil::ReadAll(job.queuedFile), pick);
+	        // Proof belongs to the original pick. Old state without that binding is
+	        // searched again rather than assigning its donors to an unknown release.
+	        bool titleExists = FileSystem::FileExists((dir + PATH_SEPARATOR + "pick-title").c_str());
+	        std::string savedTitle = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title") : std::string();
+	        std::string savedKey = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key") : std::string();
+	        std::string savedPosting = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-posting") : std::string();
+	        std::string currentTitle = ReleaseName::Normalize(job.name);
+	        std::string currentKey = LowerKey(job.dupeKey);
+	        std::string currentPosting = pick.Fingerprint();
+	        if (nzbget_rs_dqh_dupesearch_pending_identity_matches(
+	            titleExists ? 1 : 0,
+	            (const uint8_t*)savedTitle.data(), savedTitle.size(),
+	            (const uint8_t*)currentTitle.data(), currentTitle.size(),
+	            (const uint8_t*)savedKey.data(), savedKey.size(),
+	            (const uint8_t*)currentKey.data(), currentKey.size(),
+	            (const uint8_t*)savedPosting.data(), savedPosting.size(),
+	            (const uint8_t*)currentPosting.data(), currentPosting.size()) == 0)
+	        {
+	            Note(job.nzbId, Message::mkInfo, "DupeSearch: saved search identity changed; searching the current pick again");
+	            std::string oldKey = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key");
+	            std::string oldTitle = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title");
+	            if (!oldKey.empty() && !oldTitle.empty())
+	            {
+	                if (!ForgetSearch(oldKey, oldTitle)) continue;
+	            }
+	            else
+	            {
+	                bool erased = false;
+	                { std::lock_guard<std::mutex> guard(m_mutex);
+	                  auto latest = m_searched.find(LowerKey(job.dupeKey));
+	                  if (latest != m_searched.end() && latest->second.title.empty())
+	                  { m_searched.erase(latest); erased = true; } }
+	                if (erased && !g_Options->GetDupeSearchDryRun() && !SaveState()) continue;
+	            }
+	            RemoveDir(dir);
+	            Schedule(job.nzbId, Util::CurrentTime() + g_Options->GetDupeSearchDelay());
+	            continue;
+	        }
+			std::vector<Posting::Sketch> known;
 			for (const std::string& path : job.knownFiles)
 			{
 				Posting::Sketch sketch;
@@ -33852,1211 +37255,159 @@ inline void DupeSearch::Search(const Job& job)
 					known.push_back(std::move(sketch));
 				}
 			}
-		});
 
-	NzbFetcher::Stats fetchStats;
-	std::vector<NzbFetcher::Fetched> fetched;
-	int notTried = 0;
-	size_t parallel = g_Options->GetDupeSearchMaxDonors() > 0 ? 1 : (size_t)FetchParallel;
-    for (size_t from = 0; from < order.size(); from += parallel)
-	{
-		if (IsStopped() || Util::CurrentTime() >= deadline || budget.Spent())
-		{
-			notTried = (int)(order.size() - from);
-			break;
-		}
-
-		size_t count = std::min(parallel, order.size() - from);
-		std::vector<NzbFetcher::Fetched> chunk(count);
-		std::vector<NzbFetcher::Stats> chunkStats(count);
-		std::vector<std::thread> threads;
-		for (size_t i = 0; i < count; i++)
-		{
-            for (const Newznab::Result& listing : order[from+i]) attempted.insert(listing.link);
-			threads.emplace_back([&, i]()
-				{ chunk[i] = m_fetcher.FetchPosting(order[from + i], deadline, chunkStats[i], &budget); });
-		}
-		for (std::thread& thread : threads)
-		{
-			thread.join();
-		}
-		for (size_t i = 0; i < count; i++)
-		{
-			fetchStats.Add(chunkStats[i]);
-			if (chunk[i].reason == NzbFetcher::frOk)
+			std::set<std::string> sent;
 			{
-				fetched.push_back(std::move(chunk[i]));
-			}
-		}
-	}
-
-	knownReader.join();
-    int resultCount=(int)results.size(), candidateCount=(int)candidates.size(), postingCount=(int)order.size();
-    Expand(job,pick,results,known,deadline,budget,fetched,attempted,fetchStats,stats,resultCount,candidateCount,postingCount);
-
-	// what is worth keeping, in this order: another release (by the name of
-	// its largest data file, when that name is readable), a posting nzbget
-	// already holds, one found dead before, one that shares articles with
-	// the pick or an accepted duplicate
-	std::vector<std::vector<std::string>> postings;
-	postings.push_back(pick.messageIds);
-	std::vector<NzbFetcher::Fetched> verified;
-	std::map<std::string, int> rejected;
-	for (NzbFetcher::Fetched& posting : fetched)
-	{
-		Posting::Sketch sketch = Posting::MakeSketch(posting.info.messageIds);
-		const std::vector<std::string>& ids = posting.info.messageIds;
-		bool mainReadable = !posting.lenient && ReleaseName::Readable(posting.info.mainName);
-		bool sameRel = mainReadable && ReleaseName::SameRelease(job.name, posting.info.mainName);
-		if (mainReadable && !sameRel)
-		{
-			rejected["other-release"]++;
-		}
-		else if (std::any_of(known.begin(), known.end(), [&](const Posting::Sketch& k) { return Posting::SameSketch(sketch, k); }))
-		{
-			rejected["in-nzbget"]++;
-		}
-		else if (m_dead.IsDead(sketch))
-		{
-			rejected["known-dead"]++;
-		}
-		else if (std::any_of(postings.begin(), postings.end(), [&](const std::vector<std::string>& p) { return Posting::SamePosting(ids, p); }))
-		{
-			rejected["same-posting"]++;
-		}
-		else
-		{
-			postings.push_back(ids);
-			verified.push_back(std::move(posting));
-		}
-	}
-	rejected["listing-mismatch"] += fetchStats.listingMismatch;
-	rejected["refused"] += fetchStats.refused;
-	rejected["relisted"] += fetchStats.relisted;
-	rejected["fetch"] += fetchStats.fetch;
-	rejected["parse"] += fetchStats.parse;
-	rejected["deadline"] += notTried;
-    rejected["budget"] += fetchStats.budget;
-
-	// a search that learned nothing - a query failed and nothing came back, or no
-	// posting could be fetched (indexers refusing, the deadline) - doesn't hold the
-	// key for SearchWindowSec: the next add of the key, or a restart, searches it again
-	int retryReason = nzbget_rs_dupesearch_classify_search_retry_reason(
-		stats.queries, stats.failed, verified.empty() ? 1 : 0, fetched.empty() ? 1 : 0,
-		fetchStats.refused, fetchStats.fetch, notTried);
-	if (retryReason > 0)
-	{
-		ForgetSearch(job.dupeKey, ReleaseName::Normalize(job.name));
-		Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: %s, the key may be searched again", job.name.c_str(),
-			retryReason == 1 ? "no indexer answered" : retryReason == 2 ? "an indexer query failed and nothing came back" :
-			"no posting could be fetched");
-	}
-
-	// what was fetched is kept until it is placed: a restart resumes from it
-	// without fetching again (every fetch costs a grab)
-	SavePending(job, pick, verified);
-	Place(job, pick, verified, rejected, resultCount, candidateCount, postingCount);
-}
-
-inline void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFetcher::Fetched>& verified,
-	std::map<std::string, int>& rejected, int results, int candidates, int postings)
-{
-	// closest size first: the likeliest byte-identical repost; then the most grabbed
-	long long pickBytes = (long long)std::min(DupeIdentity::WholeBytes(pick),
-        (unsigned long long)std::numeric_limits<long long>::max());
-	if (verified.size() > 1)
-	{
-		std::vector<int64_t> totalBytes(verified.size());
-		std::vector<int> grabs(verified.size());
-		std::vector<int64_t> dates(verified.size());
-		std::vector<size_t> orderIdx(verified.size());
-		for (size_t i = 0; i < verified.size(); i++)
-		{
-			totalBytes[i] = verified[i].info.totalBytes;
-			grabs[i] = verified[i].listing.grabs;
-			dates[i] = (int64_t)verified[i].listing.date;
-		}
-		nzbget_rs_df_sort_verified_postings(
-			totalBytes.data(), grabs.data(), dates.data(), verified.size(), pickBytes, orderIdx.data());
-		std::vector<NzbFetcher::Fetched> sorted;
-		sorted.reserve(verified.size());
-		for (size_t idx : orderIdx)
-		{
-			sorted.push_back(std::move(verified[idx]));
-		}
-		verified = std::move(sorted);
-	}
-
-	DonorHealth::ServerList servers;
-	if (!verified.empty() || !job.members.empty())
-	{
-		servers = NntpHealthServer::Servers();
-		if (servers.empty())
-		{
-			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: no active news servers, the postings are added unchecked", job.name.c_str());
-		}
-	}
-	DonorHealth::Options healthOptions;
-	healthOptions.sample.percent = g_Options->GetDupeHealthPercent();
-	healthOptions.sample.minimum = g_Options->GetDupeHealthMin();
-	healthOptions.sample.maximum = g_Options->GetDupeHealthMax();
-	healthOptions.sample.maxBody = g_Options->GetDupeBodyChecks();
-	healthOptions.budgetMs = g_Options->GetDupeHealthBudget() * 1000;
-
-	auto groupsOf = [](const NzbSummary& summary)
-		{ return std::make_shared<std::vector<std::string>>(summary.groups); };
-
-	// the pick's own posting: found dead, it is remembered (the dead-pick probe of
-	// the queue is what swaps it out)
-	std::thread pickCheck;
-	if (!servers.empty() && !pick.messageIds.empty())
-	{
-		pickCheck = std::thread([&]()
-			{
-				DonorHealth::Health health = DonorHealth::CheckPosting(servers, pick.messageIds,
-					groupsOf(pick), healthOptions, false);
-				if (DonorHealth::DeadProbe(health))
+				std::stringstream lines(DupeUtil::ReadAll(dir + PATH_SEPARATOR + "sent"));
+				for (std::string line; std::getline(lines, line);)
 				{
-					m_dead.Add(Posting::MakeSketch(pick.messageIds), 0, !g_Options->GetDupeSearchDryRun());
-					Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: the pick is dead (%i of %i probe articles on no server)",
-						job.name.c_str(), health.missing, health.Answered());
+					sent.insert(line);
 				}
-			});
-	}
-
-	int dead = 0;
-	int overCap = 0;
-	int rescoreFailed = 0;
-	int added = 0;
-	int cap = g_Options->GetDupeSearchMaxDonors();
-	std::mutex placeMutex;
-	std::map<size_t, DonorHealth::Health> probe;
-
-	// the quick probe of every posting
-	if (!servers.empty())
-	{
-		std::vector<DonorHealth::Posting> list;
-		for (size_t i = 0; i < verified.size(); i++)
-		{
-			NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(i);
-			std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
-			nzbget_rs_free(keyBuf);
-			list.push_back({ std::move(keyStr), verified[i].info.messageIds, groupsOf(verified[i].info) });
-		}
-		DonorHealth::CheckPostings(servers, list, healthOptions, false, FetchParallel,
-			[&](const std::string& key, const DonorHealth::Health& health)
-			{
-				std::lock_guard<std::mutex> guard(placeMutex);
-				probe[(size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str())] = health;
-			});
-	}
-
-	std::vector<size_t> live;
-	for (size_t i = 0; i < verified.size(); i++)
-	{
-		auto it = probe.find(i);
-		if (it != probe.end() && DonorHealth::DeadProbe(it->second))
-		{
-			m_dead.Add(Posting::MakeSketch(verified[i].info.messageIds), 0, !g_Options->GetDupeSearchDryRun());
-			dead++;
-			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: dropping dead posting %s [%s] after the probe: %i of %i probe articles on no server",
-				job.name.c_str(), verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(),
-				it->second.missing, it->second.Answered());
-			continue;
-		}
-		live.push_back(i);
-	}
-
-	struct Placed
-	{
-		int id;
-		DonorScore::Entry entry;
-		std::string title;
-		bool member = false;	// a duplicate that was already in history: always rescored
-        bool valid = true; // Final score/parameter update must still succeed.
-		int oldScore = 0;		// a member's score before: never raised unless it is whole
-	};
-	std::map<size_t, Placed> placed;
-    std::map<size_t, double> deferred;
-    auto slotsUsed = [&]() {
-        GuardedDownloadQueue queue = DownloadQueue::Guard();
-        NzbInfo* currentPick = FindNzb(queue, job.nzbId);
-        return (int)std::count_if(placed.begin(), placed.end(), [&](const auto& item) {
-            bool avail = !item.second.member && item.second.valid &&
-                item.second.entry.score > DonorScore::Dead && item.second.id >= 0 &&
-                PlacementAvailable(queue, currentPick, FindNzb(queue, item.second.id));
-            return nzbget_rs_dupesearch_slot_counts_as_used(
-                item.second.member ? 1 : 0, item.second.valid ? 1 : 0,
-                item.second.entry.score, DonorScore::Dead, item.second.id,
-                g_Options->GetDupeSearchDryRun() ? 1 : 0, avail ? 1 : 0) != 0;
-        });
-    };
-	DonorScore::Ranks ranks;
-	int base = DonorScore::Base(job.score);
-
-	auto twinOf = [&](const NzbFetcher::Fetched& f)
-		{ return DupeIdentity::SameData(pick, f.info); };
-	auto aliveOf = [&](const DonorHealth::Health& health, const NzbSummary& summary) { return DupeIdentity::Alive(health, summary); };
-    auto cacheableLoss = [&](DonorHealth::Health health) {
-        // Only confirmed article loss may invalidate overlapping postings.
-        // Structural gaps and provider errors belong to this NZB's score.
-        health.error=0;
-        return DupeIdentity::IsDead(health,NzbSummary{},g_Options->GetDupeMinAlive());
-    };
-	auto entryOf = [&](size_t i, int score, double alive)
-		{
-			DonorScore::Entry entry;
-			entry.score = score;
-			entry.alive = alive;
-			entry.twin = twinOf(verified[i]);
-			entry.bytes = verified[i].info.totalBytes;
-			entry.grabs = verified[i].listing.grabs;
-			return entry;
-		};
-	// nzbget shuts down: a check cut short knows nothing, and adding a duplicate now
-	// would wait for the stopped scanner for good (B37). The search keeps its saved
-	// postings and resumes after the restart.
-	auto interrupted = [&]()
-		{
-			if (!IsStopped())
-			{
-				return false;
 			}
-			if (pickCheck.joinable())
-			{
-				pickCheck.join();
-			}
-			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: RustyGet shuts down, the search resumes after the restart",
-				job.name.c_str());
-			return true;
-		};
-	auto place = [&](size_t i, double alive, const char* how)
-		{
-			int score = ranks.Take(alive, twinOf(verified[i]));
-			int id = AddDonor(job, pick, verified[i], base + score, alive);
-			if (id == 0)
-			{
-				ranks.Release(score);
-				return;
-			}
-			added++;
-			placed[i] = { id, entryOf(i, score, alive), verified[i].listing.title };
-			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: added %s [%s] score=%i alive=%i%% (%s)", job.name.c_str(),
-				verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(), base + score,
-				nzbget_rs_dupesearch_alive_to_percent(alive), how);
-		};
 
-	// the probe-alive postings go in at once, then each is rescored when its
-	// full sample lands; the rest are added as their samples finish
-	size_t fast = nzbget_rs_dupesearch_calc_fast_donor_count(
-		g_Options->GetDupeFastDonors(), live.size(), cap);
-	std::set<size_t> fastSet;
-	for (size_t n = 0; n < fast; n++)
-	{
-		auto it = probe.find(live[n]);
-		place(live[n], it == probe.end() ? -1.0 : aliveOf(it->second, verified[live[n]].info), "fast");
-		fastSet.insert(live[n]);
-	}
-
-	std::set<size_t> todo(live.begin(), live.end());
-	if (!servers.empty() && !todo.empty())
-	{
-		std::vector<DonorHealth::Posting> list;
-		for (size_t i : todo)
-		{
-			NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(i);
-			std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
-			nzbget_rs_free(keyBuf);
-			list.push_back({ std::move(keyStr), verified[i].info.messageIds, groupsOf(verified[i].info) });
-		}
-		DonorHealth::CheckPostings(servers, list, healthOptions, true, FetchParallel,
-			[&](const std::string& key, const DonorHealth::Health& health)
+			std::vector<NzbFetcher::Fetched> verified;
+			std::map<std::string, int> rejected;
+			for (int i = 0;; i++)
 			{
-				std::lock_guard<std::mutex> guard(placeMutex);
-				size_t i = (size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str());
-				if (IsStopped() || !todo.erase(i))
+				NzbgetRsBuf baseBuf = nzbget_rs_dqh_dupesearch_format_indexed_base_path(
+					dir.c_str(), PATH_SEPARATOR, (size_t)i);
+				std::string base(baseBuf.data ? baseBuf.data : "", baseBuf.len);
+				nzbget_rs_free(baseBuf);
+				if (!FileSystem::FileExists((base + ".meta").c_str()))
 				{
-					return;
+					break;
 				}
-				double alive = aliveOf(health, verified[i].info);
-				bool isDead = DupeIdentity::IsDead(health, verified[i].info, g_Options->GetDupeMinAlive());
-				Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: %s [%s]: alive=%i%% (%i of %i articles)", job.name.c_str(),
-					verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(),
-					nzbget_rs_dupesearch_alive_to_percent(alive), health.present, health.Answered());
-
-				auto it = placed.find(i);
-				if (it != placed.end())
+				NzbFetcher::Fetched posting;
+				std::string metaRaw = DupeUtil::ReadAll(base + ".meta");
+				NzbgetRsPendingMetaView view{};
+				nzbget_rs_df_parse_pending_meta(metaRaw.data(), metaRaw.size(), &view);
+				posting.listing.title.assign(metaRaw.data() + view.title_offset, view.title_len);
+				posting.listing.indexer.assign(metaRaw.data() + view.indexer_offset, view.indexer_len);
+				posting.listing.grabs = view.grabs;
+				posting.listing.size = view.size;
+				posting.listing.date = (time_t)view.date;
+				posting.data = DupeUtil::ReadAll(base + ".nzb");
+				if (!NzbReader::Parse(posting.data, posting.info))
 				{
-					// a fast donor: its real health moves its score
-					Placed& donor = it->second;
-					ranks.Release(donor.entry.score);
-					int score = isDead ? DonorScore::Dead : ranks.Take(alive, donor.entry.twin);
-					NzbgetRsBuf paramBuf = nzbget_rs_dqh_dupesearch_format_key_val_param(
-						AliveParam,
-						nzbget_rs_dupesearch_fast_donor_alive_param(isDead ? 1 : 0, alive));
-					std::string param(paramBuf.data ? paramBuf.data : "", paramBuf.len);
-					nzbget_rs_free(paramBuf);
-					if (alive < 0 || SetScore(donor.id, base + score,
-						param.empty() ? std::vector<std::string>() : std::vector<std::string>{ param }))
-					{
-						if (alive < 0)
-						{
-							// inconclusive: the donor keeps its score, and the rank taken for
-							// the new one is given back (F19: it stayed taken, the old one free)
-							ranks.Release(score);
-							ranks.Use(donor.entry.score);
-						}
-						else
-						{
-							donor.entry.score = score;
-						}
-						donor.entry.alive = alive;
-						if (isDead)
-						{
-							if (cacheableLoss(health)) m_dead.Add(Posting::MakeSketch(verified[i].info.messageIds), 0, !g_Options->GetDupeSearchDryRun());
-							dead++;
-						}
-					}
-					else
-					{
-						ranks.Release(score);
-						ranks.Use(donor.entry.score);
-						rescoreFailed++;
-                        donor.valid = false;
-						Note(job.nzbId, Message::mkWarning, "DupeSearch: could not rescore %s: keeps score %i", verified[i].listing.title.c_str(),
-							base + donor.entry.score);
-					}
+					continue;
 				}
-				else if (isDead)
+				posting.reason = NzbFetcher::frOk;
+	            posting.sameInner = DupeUtil::ReadAll(base + ".inner") == "1\n";
+				// the postings added before the restart are in nzbget now (ranked with
+				// the key's other duplicates), or were deleted by the user since
+				Posting::Sketch sketch = Posting::MakeSketch(posting.info.messageIds);
+				if (sent.count(posting.info.Fingerprint()))
 				{
-					if (cacheableLoss(health)) m_dead.Add(Posting::MakeSketch(verified[i].info.messageIds), 0, !g_Options->GetDupeSearchDryRun());
-					dead++;
-					Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: dropping dead posting %s: alive=%i%%", job.name.c_str(),
-						verified[i].listing.title.c_str(), (int)std::lround(100 * alive));
+					rejected["already-sent"]++;
+					continue;
 				}
-				else
+				if (std::any_of(known.begin(), known.end(), [&](const Posting::Sketch& k) { return Posting::SameSketch(sketch, k); }))
 				{
-                    // A healthy answer may arrive before a fast donor's dead
-                    // answer. Retain it until all checks settle the cap slots.
-                    if (cap > 0 && slotsUsed() >= cap) deferred[i] = alive;
-                    else place(i, alive, "checked");
+					rejected["in-nzbget"]++;
+					continue;
 				}
-			});
-	}
-
-	if (interrupted())
-	{
-		return;
-	}
-
-    for (auto it = deferred.begin(); it != deferred.end();)
-    {
-        if (cap > 0 && slotsUsed() >= cap) { ++it; continue; }
-        auto entry = *it;
-        it = deferred.erase(it);
-        place(entry.first, entry.second, "checked");
-    }
-
-	// whatever no check reported on (no servers, a failed check) is added unchecked
-	for (size_t i : std::set<size_t>(todo))
-	{
-		todo.erase(i);
-		if (placed.count(i))
-		{
-			continue;
-		}
-		if (cap > 0 && slotsUsed() >= cap)
-		{
-			overCap++;
-			continue;
-		}
-		place(i, -1.0, "unchecked");
-	}
-
-	// the duplicates nzbget already kept for the key (a client's own backups,
-	// earlier searches' donors) are measured the same way and ranked with the
-	// new ones: nzbget tries them by score, whoever sent them. Each is read
-	// from its own nzb-file, never matched by size: two postings can have one size.
-	std::set<size_t> uncheckedMembers;
-	if (!job.members.empty() && (!servers.empty() || job.rankOnly))
-	{
-		std::vector<NzbSummary> summaries(job.members.size());
-		std::vector<DonorHealth::Posting> list;
-		std::map<size_t, size_t> sameAs;	// a member whose posting another member already is
-		for (size_t m = 0; m < job.members.size(); m++)
-		{
-			uncheckedMembers.insert(m);
-			if (!NzbReader::Parse(DupeUtil::ReadAll(job.members[m].second), summaries[m]))
-			{
-				continue;
+				verified.push_back(std::move(posting));
 			}
-            if (Posting::SamePosting(summaries[m].messageIds, pick.messageIds))
-            {
-                uncheckedMembers.erase(m);
-                continue;
-            }
-			// each posting is checked once: the client's copies of it share the answer
-			auto first = std::find_if(list.begin(), list.end(), [&](const DonorHealth::Posting& posting)
-				{ return Posting::SamePosting(summaries[m].messageIds, posting.ids); });
-			if (first != list.end())
-			{
-				sameAs[m] = (size_t)nzbget_rs_dqh_parse_c_atoi(first->key.c_str());
-				continue;
-			}
-			NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(m);
-			std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
-			nzbget_rs_free(keyBuf);
-			list.push_back({ std::move(keyStr), summaries[m].messageIds, groupsOf(summaries[m]) });
-		}
-		std::map<size_t, DonorHealth::Health> measured;
-		if (!servers.empty()) DonorHealth::CheckPostings(servers, list, healthOptions, true, FetchParallel,
-			[&](const std::string& key, const DonorHealth::Health& health)
-			{
-				std::lock_guard<std::mutex> guard(placeMutex);
-				measured[(size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str())] = health;
-			});
-		for (const auto& alias : sameAs)
-		{
-			auto health = measured.find(alias.second);
-			if (health != measured.end())
-			{
-				measured[alias.first] = health->second;
-			}
-		}
-		for (const auto& entry : measured)
-		{
-			const NzbSummary& summary = summaries[entry.first];
-			double alive = aliveOf(entry.second, summary);
-			if (alive < 0)
-			{
-				continue;	// too few answers to judge: its score stays
-			}
-			bool isDead = DupeIdentity::IsDead(entry.second, summary, g_Options->GetDupeMinAlive());
-			if (isDead)
-			{
-				if (cacheableLoss(entry.second)) m_dead.Add(Posting::MakeSketch(summary.messageIds), 0, !g_Options->GetDupeSearchDryRun());
-			}
-			Placed member;
-			member.id = job.members[entry.first].first;
-			member.title = FileSystem::BaseFileName(job.members[entry.first].second.c_str());
-			member.member = true;
-			member.oldScore = entry.first < job.memberScores.size() ? job.memberScores[entry.first] : 0;
-			member.entry.score = isDead ? DonorScore::Dead : DonorScore::Dead + 1;
-			member.entry.alive = alive;
-			member.entry.twin = DupeIdentity::SameData(pick, summary);
-			member.entry.bytes = summary.totalBytes;
-			placed[verified.size() + entry.first] = member;
-			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: duplicate %s in history: alive=%i%% (%i of %i articles)%s", job.name.c_str(),
-				member.title.c_str(), (int)std::lround(100 * alive), entry.second.present, entry.second.Answered(),
-				isDead ? ", dead" : "");
+			Place(job, pick, verified, rejected, 0, 0, 0);
 		}
 	}
 
-	if (interrupted())
+	std::string StatePath()
 	{
-		return;
+		return std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "dupesearch";
 	}
 
-    auto rerank = [&]() {
-	// once every check is in, the scores in order of wholeness
-	std::vector<size_t> order2;
-	std::vector<DonorScore::Entry> entries;
-	for (auto& entry : placed)
+	void LoadState()
 	{
-        if (!entry.second.valid) continue;
-		order2.push_back(entry.first);
-		entries.push_back(entry.second.entry);
-	}
-	std::vector<int> wanted = DonorScore::Rerank(entries, pickBytes);
-	// with every one of them dead there is nothing to order: scores stay, the dead are marked
-	bool allDead = std::all_of(wanted.begin(), wanted.end(), [](int score) { return score == DonorScore::Dead; });
-	for (size_t n = 0; n < order2.size(); n++)
-	{
-		Placed& donor = placed[order2[n]];
-		if (wanted[n] == donor.entry.score && !donor.member)
-		{
-			continue;
-		}
-		std::vector<std::string> params;
-		int score = base + wanted[n];
-		if (donor.member)
-		{
-			int percent = 0;
-			int addAliveZero = 0;
-			nzbget_rs_df_eval_member_rerank(
-				base, wanted[n], DonorScore::Dead, donor.oldScore, donor.entry.alive, allDead ? 1 : 0,
-				&score, &percent, &addAliveZero);
-			NzbgetRsBuf hpBuf = nzbget_rs_dqh_dupesearch_format_key_val_param(HealthParam, percent);
-			params.emplace_back(hpBuf.data ? hpBuf.data : "", hpBuf.len);
-			nzbget_rs_free(hpBuf);
-			if (addAliveZero)
-			{
-				params.push_back(std::string(AliveParam) + "=0");
-			}
-		}
-		if (SetScore(donor.id, score, params))
-		{
-            if (donor.member) uncheckedMembers.erase(order2[n] - verified.size());
-			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: reranked %s: score %i", job.name.c_str(), donor.title.c_str(), score);
-			donor.entry.score = wanted[n];
-		}
-		else
-		{
-            donor.valid = false;
-			rescoreFailed++;
-		}
-	}
-
-    };
-    rerank();
-    // A final failed score edit can invalidate another occupied slot. Keep
-    // measured candidates until that decision and attempt each at most once.
-    while (!deferred.empty() && (cap <= 0 || slotsUsed() < cap))
-    {
-        auto entry = *deferred.begin();
-        deferred.erase(deferred.begin());
-        place(entry.first, entry.second, "checked");
-        rerank();
-    }
-    overCap += (int)deferred.size();
-
-	if (pickCheck.joinable())
-	{
-		pickCheck.join();
-	}
-
-	rejected["dead"] += dead;
-	rejected["over-cap"] += overCap;
-	rejected["rescore"] += rescoreFailed;
-	std::vector<const char*> rejKeys;
-	std::vector<int> rejCounts;
-	rejKeys.reserve(rejected.size());
-	rejCounts.reserve(rejected.size());
-	for (const auto& entry : rejected)
-	{
-		rejKeys.push_back(entry.first.c_str());
-		rejCounts.push_back(entry.second);
-	}
-	NzbgetRsBuf outcomeBuf = nzbget_rs_dqh_dupesearch_format_rejected_outcome(
-		rejKeys.data(), rejCounts.data(), rejected.size());
-	std::string outcome(outcomeBuf.data ? outcomeBuf.data : "", outcomeBuf.len);
-	nzbget_rs_free(outcomeBuf);
-	Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: results=%i candidates=%i postings=%i verified=%i added=%i rejected={%s}",
-		job.name.c_str(), results, candidates, postings, (int)verified.size(), added, outcome.c_str());
-	RemovePending(job.nzbId);
-	{
-		std::lock_guard<std::mutex> guard(m_mutex);
-		m_sent.erase(job.nzbId);
-	}
-    // Without a usable whole backup discovery remains retryable while the
-    // pick is queued, even if a fast-added donor was later declared dead.
-    bool usableBackup = false;
-    {
-        GuardedDownloadQueue queue = DownloadQueue::Guard();
-        NzbInfo* currentPick = FindNzb(queue, job.nzbId);
-        usableBackup=std::any_of(placed.begin(),placed.end(),[&](const auto& item) {
-            bool avail = item.second.id >= 0 && item.second.valid &&
-                item.second.entry.score > DonorScore::Dead && item.second.entry.alive >= 0.999 &&
-                PlacementAvailable(queue, currentPick, FindNzb(queue, item.second.id), true);
-            return nzbget_rs_dupesearch_is_usable_whole_backup(
-                item.second.valid ? 1 : 0, item.second.entry.score, DonorScore::Dead,
-                item.second.entry.alive, item.second.id,
-                g_Options->GetDupeSearchDryRun() ? 1 : 0, avail ? 1 : 0) != 0;
-        });
-    }
-    bool stateRetryable = false;
-    if (job.rankOnly)
-    {
-        std::lock_guard<std::mutex> guard(m_mutex);
-        Searched* state = FindSearch(LowerKey(job.dupeKey), ReleaseName::Normalize(job.name));
-        stateRetryable = state && state->retryable;
-    }
-    if (usableBackup)
-    {
-        { std::lock_guard<std::mutex> guard(m_mutex);
-          SetRetryable(LowerKey(job.dupeKey), ReleaseName::Normalize(job.name), false); }
-        if (!g_Options->GetDupeSearchDryRun()) SaveState();
-    }
-    int retryDiscoveryInt = 0;
-    int rankIncompleteInt = 0;
-    nzbget_rs_dupesearch_eval_post_place_retry(
-        job.rankOnly ? 1 : 0, stateRetryable ? 1 : 0, usableBackup ? 1 : 0,
-        uncheckedMembers.size(), &retryDiscoveryInt, &rankIncompleteInt);
-    bool rankIncomplete = rankIncompleteInt != 0;
-    bool retryDiscovery = retryDiscoveryInt != 0;
-    // A rename/deletion may make this pick ineligible for scheduling, but must
-    // not falsely complete the original title's unfulfilled discovery stamp.
-    if (retryDiscovery && !IsStopped()) ForgetSearch(job.dupeKey, ReleaseName::Normalize(job.name));
-    if ((retryDiscovery || rankIncomplete) && !IsStopped())
-    {
-        GuardedDownloadQueue queue=DownloadQueue::Guard();
-        NzbInfo* current=queue->GetQueue()->Find(job.nzbId);
-        if (current && !current->GetDeleting() && current->GetDeleteStatus() == NzbInfo::dsNone &&
-            !current->GetPostInfo() &&
-            LowerKey(EffectiveKey(current))==LowerKey(job.dupeKey) &&
-            ReleaseName::Normalize(current->GetName())==ReleaseName::Normalize(job.name))
-        {
-            if (retryDiscovery)
-            {
-                // An owed discovery retry takes priority over ranking an
-                // inconclusive backup; otherwise rank-only retries can starve it.
-                { std::lock_guard<std::mutex> guard(m_mutex);
-                  m_rankPending.erase(job.nzbId); }
-            }
-            else
-            {
-                // Retain the completed search stamp: only recheck existing
-                // backups, without repeating indexer searches or paid grabs.
-                std::lock_guard<std::mutex> guard(m_mutex);
-                m_rankPending.insert(job.nzbId);
-            }
-            if (!retryDiscovery) MarkSearching(job);
-            Schedule(job.nzbId,Util::CurrentTime()+900);
-            if (!retryDiscovery)
-                current->PrintMessage(Message::mkInfo, "DupeSearch: %s: retrying backup health in 15 minutes", job.name.c_str());
-        }
-    }
-}
-
-inline std::string DupeSearch::PickGone(const Job& job)
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	// in history after a download or a failure it still wants its duplicates;
-	// deleted by the user it doesn't: the first duplicate would download
-	NzbInfo* pick = FindNzb(downloadQueue, job.nzbId);
-	if (!pick || pick->GetDeleting() || pick->GetDeleteStatus() == NzbInfo::dsManual)
-	{
-		return "the pick was deleted";
-	}
-	std::string pickEffKey = EffectiveKey(pick);
-	std::string pickNormName = ReleaseName::Normalize(pick->GetName());
-	std::string jobNormName = ReleaseName::Normalize(job.name);
-	int reason = nzbget_rs_df_eval_pick_gone(
-		1, 0, (int)pick->GetDeleteStatus(), (int)NzbInfo::dsManual,
-		pickEffKey.c_str(), job.dupeKey.c_str(), pickNormName.c_str(), jobNormName.c_str());
-	switch (reason)
-	{
-		case 1: return "the pick was deleted";
-		case 2: return "the duplicate key of the pick changed";
-		case 3: return "the name of the pick changed";
-		default: return "";
-	}
-}
-
-inline int DupeSearch::AddDonor(const Job& job, const NzbSummary& pick, const NzbFetcher::Fetched& posting, int score, double alive)
-{
-	if (IsStopped())
-	{
-		return 0;
-	}
-	std::string gone = PickGone(job);
-	if (!gone.empty())
-	{
-		Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: not adding %s [%s]: %s", job.name.c_str(),
-			posting.listing.title.c_str(), posting.listing.indexer.c_str(), gone.c_str());
-		return 0;
-	}
-	if (g_Options->GetDupeSearchDryRun())
-	{
-		Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: dry run, would add %s [%s] score=%i alive=%i%%", job.name.c_str(),
-			posting.listing.title.c_str(), posting.listing.indexer.c_str(), score,
-			nzbget_rs_dupesearch_alive_to_percent(alive));
-		return -1;
-	}
-	std::string fingerprint = posting.info.Fingerprint();
-	{
-		std::lock_guard<std::mutex> guard(m_mutex);
-		if (!m_sent[job.nzbId].insert(fingerprint).second)
-		{
-			return 0;
-		}
-	}
-
-	NzbParameterList parameters;
-	parameters.SetParameter(DonorParam, "yes");
-	for (const std::string& hint : DupeIdentity::Hints(pick, posting.info, posting.sameInner))
-	{
-		size_t nameLen = 0, valOff = 0;
-		if (nzbget_rs_tpr_split_param_assignment(hint.c_str(), &nameLen, &valOff) != 0)
-		{
-			parameters.SetParameter(hint.substr(0, nameLen).c_str(), hint.c_str() + valOff);
-		}
-	}
-	if (alive >= 0)
-	{
-		NzbgetRsBuf aliveBuf = nzbget_rs_dqh_conn_format_port_str(
-			nzbget_rs_dupesearch_alive_to_percent(alive));
-		parameters.SetParameter(AliveParam, aliveBuf.data ? aliveBuf.data : "0");
-		nzbget_rs_free(aliveBuf);
-	}
-	std::string name = posting.listing.title;
-	if (nzbget_rs_dupesearch_needs_nzb_ext(name.data(), name.size()) != 0)
-	{
-		name += ".nzb";
-	}
-
-	int nzbId = 0;
-	Scanner::EAddStatus status = g_Scanner->AddExternalFile(name.c_str(), job.category.c_str(), false, 0,
-		job.dupeKey.c_str(), score, dmScore, &parameters, false, false, nullptr, nullptr,
-		posting.data.data(), (int)posting.data.size(), &nzbId);
-	if (status != Scanner::asSuccess || nzbId == 0)
-	{
-		std::lock_guard<std::mutex> guard(m_mutex);
-		m_sent[job.nzbId].erase(fingerprint);
-		return 0;
-	}
-
-	// the pick may have been deleted, or have got another key, while the add ran
-	// (it takes the queue lock itself, after PickGone let it go): the new duplicate
-	// goes again (B33)
-	gone = PickGone(job);
-	if (!gone.empty())
-	{
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			IdList ids{ nzbId };
-			bool queued = downloadQueue->GetQueue()->Find(nzbId) != nullptr;
-			downloadQueue->EditList(&ids, nullptr, DownloadQueue::mmId,
-				queued ? DownloadQueue::eaGroupFinalDelete : DownloadQueue::eaHistoryFinalDelete, nullptr);
-		}
-		Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: removed the duplicate %s just added: %s",
-			job.name.c_str(), posting.listing.title.c_str(), gone.c_str());
-		return 0;
-	}
-
-	// remembered with the search in progress: a resume after a restart must not add
-	// it again, even when the user deleted it meanwhile (then nzbget keeps only a
-	// hidden duplicate record, which the resume can't recognize)
-	std::string sentPath = PendingDir(job.nzbId) + PATH_SEPARATOR + "sent";
-	if (FileSystem::DirectoryExists(PendingDir(job.nzbId).c_str()))
-	{
-		std::ofstream sent(fs::u8path(sentPath), std::ios::app);
-		sent << fingerprint << "\n";
-	}
-	return nzbId;
-}
-
-inline bool DupeSearch::SetScore(int id, int score, const std::vector<std::string>& params)
-{
-	if (g_Options->GetDupeSearchDryRun() || id < 0)
-	{
-		std::string text;
-		for (const std::string& param : params)
-		{
-			text += " " + param;
-		}
-		info("DupeSearch: dry run, would set the score of download %i to %i%s", id, score, text.c_str());
-		return true;
-	}
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	// a duplicate the user deleted is kept as a hidden record (hkDup): its score
-	// edit succeeds but means nothing, so it counts as gone
-	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-	{
-		if (historyInfo->GetId() == id && historyInfo->GetKind() == HistoryInfo::hkDup)
-		{
-			return false;
-		}
-	}
-	IdList ids{ id };
-	NzbgetRsBuf scoreBuf = nzbget_rs_dqh_conn_format_port_str(score);
-	std::string text(scoreBuf.data ? scoreBuf.data : "", scoreBuf.len);
-	nzbget_rs_free(scoreBuf);
-	const std::pair<DownloadQueue::EEditAction, DownloadQueue::EEditAction> kinds[] = {
-		{ DownloadQueue::eaHistorySetDupeScore, DownloadQueue::eaHistorySetParameter },
-		{ DownloadQueue::eaGroupSetDupeScore, DownloadQueue::eaGroupSetParameter } };
-	for (const auto& kind : kinds)
-	{
-		if (downloadQueue->EditList(&ids, nullptr, DownloadQueue::mmId, kind.first, text.c_str()))
-		{
-			for (const std::string& param : params)
-			{
-				downloadQueue->EditList(&ids, nullptr, DownloadQueue::mmId, kind.second, param.c_str());
-			}
-			return true;
-		}
-	}
-	return false;
-}
-
-inline void DupeSearch::Note(int nzbId, Message::EKind kind, const char* format, ...)
-{
-	char text[1024];
-	va_list ap;
-	va_start(ap, format);
-	vsnprintf(text, sizeof(text), format, ap);
-	va_end(ap);
-
-	// into the pick's own log as well (with InfoTarget=log and no log file,
-	// the global log keeps no info lines); the global log alone once it's gone
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	NzbInfo* nzbInfo = FindNzb(downloadQueue, nzbId);
-	if (nzbInfo)
-	{
-		nzbInfo->AddMessage(kind, text);
-		return;
-	}
-	switch (kind)
-	{
-		case Message::mkWarning: warn("%s", text); break;
-		case Message::mkDetail: detail("%s", text); break;
-		default: info("%s", text); break;
-	}
-}
-
-inline std::string DupeSearch::PendingDir(int nzbId)
-{
-	NzbgetRsBuf dirBuf = nzbget_rs_dqh_dupesearch_format_pending_dir(
-		g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
-	std::string dir(dirBuf.data ? dirBuf.data : "", dirBuf.len);
-	nzbget_rs_free(dirBuf);
-	return dir;
-}
-
-namespace
-{
-
-void RemoveDir(const std::string& dir)
-{
-	CString errmsg;
-	FileSystem::DeleteDirectoryWithContent(dir.c_str(), errmsg);
-}
-
-
-}
-
-inline void DupeSearch::MarkSearching(const Job& job)
-{
-	if (g_Options->GetDupeSearchDryRun())
-	{
-		return;
-	}
-	std::string dir = PendingDir(job.nzbId);
-	RemoveDir(dir);
-	CString errmsg;
-	if (!FileSystem::ForceDirectories(dir.c_str(), errmsg) ||
-        !DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "pick-title", ReleaseName::Normalize(job.name)) ||
-        !DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "pick-key", LowerKey(job.dupeKey)) ||
-        !DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "phase", job.rankOnly ? "ranking\n" : "searching\n"))
-	{
-		warn("Could not save the DupeSearch state to %s", dir.c_str());
-	}
-}
-
-inline void DupeSearch::SavePending(const Job& job, const NzbSummary& pick, const std::vector<NzbFetcher::Fetched>& verified)
-{
-	if (g_Options->GetDupeSearchDryRun())
-	{
-		return;
-	}
-	std::string dir = PendingDir(job.nzbId);
-    bool ok = DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "pick-title", ReleaseName::Normalize(job.name)) &&
-        DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "pick-key", LowerKey(job.dupeKey)) &&
-        DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "pick-posting", pick.Fingerprint());
-	for (size_t i = 0; i < verified.size() && ok; i++)
-	{
-		const Newznab::Result& listing = verified[i].listing;
-		NzbgetRsBuf baseBuf = nzbget_rs_dqh_dupesearch_format_indexed_base_path(
-			dir.c_str(), PATH_SEPARATOR, i);
-		std::string base(baseBuf.data ? baseBuf.data : "", baseBuf.len);
-		nzbget_rs_free(baseBuf);
-		NzbgetRsBuf metaBuf = nzbget_rs_df_format_pending_meta(
-			listing.title.c_str(), listing.indexer.c_str(), listing.grabs, listing.size, (int64_t)listing.date);
-		std::string metaStr(metaBuf.data ? metaBuf.data : "", metaBuf.len);
-		nzbget_rs_free(metaBuf);
-		ok = DupeUtil::WriteAtomic(base + ".nzb", verified[i].data) && DupeUtil::WriteAtomic(base + ".meta", metaStr) &&
-            DupeUtil::WriteAtomic(base + ".inner", verified[i].sameInner ? "1\n" : "0\n");
-	}
-	if (!ok || !DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "phase", "fetched\n"))
-	{
-		warn("Could not save the DupeSearch state to %s", dir.c_str());
-	}
-}
-
-inline void DupeSearch::RemovePending(int nzbId)
-{
-	if (IsStopped())
-	{
-		return;	// interrupted: resumed after the restart
-	}
-	RemoveDir(PendingDir(nzbId));
-}
-
-inline void DupeSearch::ResumePending()
-{
-	std::vector<int> ids;
-	DirBrowser dirBrowser(PendingDir(0).c_str());
-	while (const char* name = dirBrowser.Next())
-	{
-		int parsedId = nzbget_rs_dqh_dupesearch_parse_pending_dir_id(name);
-		if (parsedId > 0)
-		{
-			ids.push_back(parsedId);
-		}
-	}
-
-	for (int nzbId : ids)
-	{
-		if (IsStopped())
-		{
-			return;
-		}
-		std::string dir = PendingDir(nzbId);
-        std::string phase = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "phase");
-		int fetchedInt = 0;
-		int rankingInt = 0;
-		nzbget_rs_dupesearch_classify_pending_phase(
-			phase.data(), phase.size(), &fetchedInt, &rankingInt);
-		bool fetched = fetchedInt != 0;
-        bool ranking = rankingInt != 0;
-
-		Job job;
-        bool stateErased = false;
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			NzbInfo* nzbInfo = FindNzb(downloadQueue, nzbId);
-			if (nzbInfo && fetched)
-			{
-				Collect(downloadQueue, nzbInfo, job);
-				job.score = std::max(nzbInfo->GetDupeScore(), BasePickScore);
-			}
-			else if (nzbInfo && ranking)
-            {
-                std::string key = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key");
-                std::string title = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title");
-                std::lock_guard<std::mutex> guard(m_mutex);
-                if (key == LowerKey(EffectiveKey(nzbInfo)) && title == ReleaseName::Normalize(nzbInfo->GetName()))
-                    if (Searched* stamp = FindSearch(key, title))
-                        if (stamp->title == title) m_rankPending.insert(nzbId);
-                m_pending[nzbId] = Util::CurrentTime() + g_Options->GetDupeSearchDelay();
-                m_cond.notify_all();
-            }
-			else if (nzbInfo)
-			{
-				// the search itself was cut off: it runs again
-				std::lock_guard<std::mutex> guard(m_mutex);
-                // A rename/key edit during the interrupted search must not
-                // invalidate another edition's completed suppression stamp.
-                std::string key = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key");
-                std::string title = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title");
-                if (!key.empty() && !title.empty())
-                    stateErased = m_titleSearched.erase({key, title}) != 0;
-                // Unknown old checkpoints cannot name an edition to invalidate.
-                std::string cacheKey = key.empty() ? LowerKey(EffectiveKey(nzbInfo)) : key;
-                auto latest = m_searched.find(cacheKey);
-                if (latest != m_searched.end() && (latest->second.title.empty() ||
-                    (!key.empty() && !title.empty() && latest->second.title == title)))
-                { m_searched.erase(latest); stateErased = true; }
-			}
-		}
-        if (stateErased && !g_Options->GetDupeSearchDryRun() && !SaveState()) continue;
-		if (!fetched || job.nzbId == 0)
-		{
-			RemoveDir(dir);
-			continue;
-		}
-
-		Note(job.nzbId, Message::mkInfo, "DupeSearch: resuming the search of %s after a restart", job.name.c_str());
-		NzbSummary pick;
-		NzbReader::Parse(DupeUtil::ReadAll(job.queuedFile), pick);
-        // Proof belongs to the original pick. Old state without that binding is
-        // searched again rather than assigning its donors to an unknown release.
-        bool titleExists = FileSystem::FileExists((dir + PATH_SEPARATOR + "pick-title").c_str());
-        std::string savedTitle = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title") : std::string();
-        std::string savedKey = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key") : std::string();
-        std::string savedPosting = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-posting") : std::string();
-        std::string currentTitle = ReleaseName::Normalize(job.name);
-        std::string currentKey = LowerKey(job.dupeKey);
-        std::string currentPosting = pick.Fingerprint();
-        if (nzbget_rs_dqh_dupesearch_pending_identity_matches(
-            titleExists ? 1 : 0,
-            (const uint8_t*)savedTitle.data(), savedTitle.size(),
-            (const uint8_t*)currentTitle.data(), currentTitle.size(),
-            (const uint8_t*)savedKey.data(), savedKey.size(),
-            (const uint8_t*)currentKey.data(), currentKey.size(),
-            (const uint8_t*)savedPosting.data(), savedPosting.size(),
-            (const uint8_t*)currentPosting.data(), currentPosting.size()) == 0)
-        {
-            Note(job.nzbId, Message::mkInfo, "DupeSearch: saved search identity changed; searching the current pick again");
-            std::string oldKey = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key");
-            std::string oldTitle = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title");
-            if (!oldKey.empty() && !oldTitle.empty())
-            {
-                if (!ForgetSearch(oldKey, oldTitle)) continue;
-            }
-            else
-            {
-                bool erased = false;
-                { std::lock_guard<std::mutex> guard(m_mutex);
-                  auto latest = m_searched.find(LowerKey(job.dupeKey));
-                  if (latest != m_searched.end() && latest->second.title.empty())
-                  { m_searched.erase(latest); erased = true; } }
-                if (erased && !g_Options->GetDupeSearchDryRun() && !SaveState()) continue;
-            }
-            RemoveDir(dir);
-            Schedule(job.nzbId, Util::CurrentTime() + g_Options->GetDupeSearchDelay());
-            continue;
-        }
-		std::vector<Posting::Sketch> known;
-		for (const std::string& path : job.knownFiles)
-		{
-			Posting::Sketch sketch;
-			if (Posting::SketchOfFile(path, sketch))
-			{
-				known.push_back(std::move(sketch));
-			}
-		}
-
-		std::set<std::string> sent;
-		{
-			std::stringstream lines(DupeUtil::ReadAll(dir + PATH_SEPARATOR + "sent"));
-			for (std::string line; std::getline(lines, line);)
-			{
-				sent.insert(line);
-			}
-		}
-
-		std::vector<NzbFetcher::Fetched> verified;
-		std::map<std::string, int> rejected;
-		for (int i = 0;; i++)
-		{
-			NzbgetRsBuf baseBuf = nzbget_rs_dqh_dupesearch_format_indexed_base_path(
-				dir.c_str(), PATH_SEPARATOR, (size_t)i);
-			std::string base(baseBuf.data ? baseBuf.data : "", baseBuf.len);
-			nzbget_rs_free(baseBuf);
-			if (!FileSystem::FileExists((base + ".meta").c_str()))
-			{
-				break;
-			}
-			NzbFetcher::Fetched posting;
-			std::string metaRaw = DupeUtil::ReadAll(base + ".meta");
-			NzbgetRsPendingMetaView view{};
-			nzbget_rs_df_parse_pending_meta(metaRaw.data(), metaRaw.size(), &view);
-			posting.listing.title.assign(metaRaw.data() + view.title_offset, view.title_len);
-			posting.listing.indexer.assign(metaRaw.data() + view.indexer_offset, view.indexer_len);
-			posting.listing.grabs = view.grabs;
-			posting.listing.size = view.size;
-			posting.listing.date = (time_t)view.date;
-			posting.data = DupeUtil::ReadAll(base + ".nzb");
-			if (!NzbReader::Parse(posting.data, posting.info))
-			{
-				continue;
-			}
-			posting.reason = NzbFetcher::frOk;
-            posting.sameInner = DupeUtil::ReadAll(base + ".inner") == "1\n";
-			// the postings added before the restart are in nzbget now (ranked with
-			// the key's other duplicates), or were deleted by the user since
-			Posting::Sketch sketch = Posting::MakeSketch(posting.info.messageIds);
-			if (sent.count(posting.info.Fingerprint()))
-			{
-				rejected["already-sent"]++;
-				continue;
-			}
-			if (std::any_of(known.begin(), known.end(), [&](const Posting::Sketch& k) { return Posting::SameSketch(sketch, k); }))
-			{
-				rejected["in-nzbget"]++;
-				continue;
-			}
-			verified.push_back(std::move(posting));
-		}
-		Place(job, pick, verified, rejected, 0, 0, 0);
-	}
-}
-
-inline std::string DupeSearch::StatePath()
-{
-	return std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "dupesearch";
-}
-
-inline void DupeSearch::LoadState()
-{
-	std::ifstream file(fs::u8path(StatePath()));
-	std::string line;
-	time_t now = Util::CurrentTime();
-	std::lock_guard<std::mutex> guard(m_mutex);
-	while (std::getline(file, line))
-	{
-		NzbgetRsDupeSearchStateLine parsed{};
-		if (nzbget_rs_df_parse_dupesearch_state_line(line.data(), line.size(), (int64_t)now, StateTtlSec, &parsed))
-		{
-			if (parsed.within_ttl)
-			{
-				std::string key(line.data() + parsed.key_offset, parsed.key_len);
-				Searched searched;
-				searched.score = parsed.score;
-				searched.time = (time_t)parsed.time;
-				searched.title.assign(line.data() + parsed.title_offset, parsed.title_len);
-				searched.retryable = parsed.retryable != 0;
-				RecordSearch(key, searched);
-			}
-		}
-	}
-}
-
-inline DupeSearch::Searched* DupeSearch::FindSearch(const std::string& lowerKey, const std::string& title)
-{
-    auto exact = m_titleSearched.find({lowerKey, title});
-    if (exact != m_titleSearched.end()) return &exact->second;
-    auto latest = m_searched.find(lowerKey);
-    return latest != m_searched.end() && (latest->second.title.empty() || latest->second.title == title) ?
-        &latest->second : nullptr;
-}
-
-inline void DupeSearch::RecordSearch(const std::string& lowerKey, const Searched& searched)
-{
-    m_searched[lowerKey] = searched;
-    if (!searched.title.empty()) m_titleSearched[{lowerKey, searched.title}] = searched;
-}
-
-inline void DupeSearch::SetRetryable(const std::string& lowerKey, const std::string& title, bool retryable)
-{
-    if (Searched* searched = FindSearch(lowerKey, title)) searched->retryable = retryable;
-    auto latest = m_searched.find(lowerKey);
-    if (latest != m_searched.end() && (latest->second.title.empty() || latest->second.title == title))
-        latest->second.retryable = retryable;
-}
-
-inline bool DupeSearch::ForgetSearch(const std::string& dupeKey, const std::string& title)
-{
-	{
-		std::lock_guard<std::mutex> guard(m_mutex);
-        std::string lowerKey = LowerKey(dupeKey);
-        auto latest = m_searched.find(lowerKey);
-        SetRetryable(lowerKey, title.empty() && latest != m_searched.end() ? latest->second.title : title, true);
-	}
-	if (!g_Options->GetDupeSearchDryRun())
-	{
-		return SaveState();
-	}
-    return true;
-}
-
-inline bool DupeSearch::SaveState()
-{
-	std::ostringstream text;
-	{
-		std::lock_guard<std::mutex> guard(m_mutex);
+		std::ifstream file(fs::u8path(StatePath()));
+		std::string line;
 		time_t now = Util::CurrentTime();
-        auto append = [&](const std::string& key, const Searched& searched) {
-            NzbgetRsBuf line = nzbget_rs_dupe_watch_format_searched_state_line(
-                (int64_t)now, StateTtlSec, key.c_str(), searched.score,
-                (int64_t)searched.time, searched.title.c_str(), searched.retryable ? 1 : 0);
-            if (line.data && line.len > 0)
-                text.write(line.data, (std::streamsize)line.len);
-            nzbget_rs_free(line);
-        };
-        for (const auto& entry : m_titleSearched) append(entry.first.first, entry.second);
-        for (const auto& entry : m_searched)
-            if (!m_titleSearched.count({entry.first, entry.second.title})) append(entry.first, entry.second);
+		std::lock_guard<std::mutex> guard(m_mutex);
+		while (std::getline(file, line))
+		{
+			NzbgetRsDupeSearchStateLine parsed{};
+			if (nzbget_rs_df_parse_dupesearch_state_line(line.data(), line.size(), (int64_t)now, StateTtlSec, &parsed))
+			{
+				if (parsed.within_ttl)
+				{
+					std::string key(line.data() + parsed.key_offset, parsed.key_len);
+					Searched searched;
+					searched.score = parsed.score;
+					searched.time = (time_t)parsed.time;
+					searched.title.assign(line.data() + parsed.title_offset, parsed.title_len);
+					searched.retryable = parsed.retryable != 0;
+					RecordSearch(key, searched);
+				}
+			}
+		}
 	}
-	if (!DupeUtil::WriteAtomic(StatePath(), text.str()))
-	{
-		warn("Could not save the DupeSearch state to %s", StatePath().c_str());
-        return false;
-	}
-    return true;
-}
 
+	Searched* FindSearch(const std::string& lowerKey, const std::string& title)
+	{
+	    auto exact = m_titleSearched.find({lowerKey, title});
+	    if (exact != m_titleSearched.end()) return &exact->second;
+	    auto latest = m_searched.find(lowerKey);
+	    return latest != m_searched.end() && (latest->second.title.empty() || latest->second.title == title) ?
+	        &latest->second : nullptr;
+	}
+
+	void RecordSearch(const std::string& lowerKey, const Searched& searched)
+	{
+	    m_searched[lowerKey] = searched;
+	    if (!searched.title.empty()) m_titleSearched[{lowerKey, searched.title}] = searched;
+	}
+
+	void SetRetryable(const std::string& lowerKey, const std::string& title, bool retryable)
+	{
+	    if (Searched* searched = FindSearch(lowerKey, title)) searched->retryable = retryable;
+	    auto latest = m_searched.find(lowerKey);
+	    if (latest != m_searched.end() && (latest->second.title.empty() || latest->second.title == title))
+	        latest->second.retryable = retryable;
+	}
+
+	bool ForgetSearch(const std::string& dupeKey, const std::string& title = "")
+	{
+		{
+			std::lock_guard<std::mutex> guard(m_mutex);
+	        std::string lowerKey = LowerKey(dupeKey);
+	        auto latest = m_searched.find(lowerKey);
+	        SetRetryable(lowerKey, title.empty() && latest != m_searched.end() ? latest->second.title : title, true);
+		}
+		if (!g_Options->GetDupeSearchDryRun())
+		{
+			return SaveState();
+		}
+	    return true;
+	}
+
+	bool SaveState()
+	{
+		std::ostringstream text;
+		{
+			std::lock_guard<std::mutex> guard(m_mutex);
+			time_t now = Util::CurrentTime();
+	        auto append = [&](const std::string& key, const Searched& searched) {
+	            NzbgetRsBuf line = nzbget_rs_dupe_watch_format_searched_state_line(
+	                (int64_t)now, StateTtlSec, key.c_str(), searched.score,
+	                (int64_t)searched.time, searched.title.c_str(), searched.retryable ? 1 : 0);
+	            if (line.data && line.len > 0)
+	                text.write(line.data, (std::streamsize)line.len);
+	            nzbget_rs_free(line);
+	        };
+	        for (const auto& entry : m_titleSearched) append(entry.first.first, entry.second);
+	        for (const auto& entry : m_searched)
+	            if (!m_titleSearched.count({entry.first, entry.second.title})) append(entry.first, entry.second);
+		}
+		if (!DupeUtil::WriteAtomic(StatePath(), text.str()))
+		{
+			warn("Could not save the DupeSearch state to %s", StatePath().c_str());
+	        return false;
+		}
+	    return true;
+	}
+};
+
+inline DupeSearch* g_DupeSearch = nullptr;
 
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
@@ -35091,6 +37442,43 @@ inline bool DupeSearch::SaveState()
  * the key running, a fleet only adds backups, below it; a posting the key
  * holds already isn't added again. A member is dead below option DupeMinAlive.
  */
+namespace FleetDetail
+{
+	inline constexpr size_t MaxNzbBytes = 64 * 1024 * 1024;
+	inline constexpr int MaxParallel = 16;
+	inline constexpr int FleetSampleMax = 200;
+	inline constexpr long long FinishReserveMs = 2000;
+
+	struct Candidate
+	{
+		size_t index;
+		NzbSummary summary;
+		DonorHealth::Health health;
+		bool checked = false;
+		int alive = -1;
+		bool dead = false;
+		int sameAs = -1;
+		int existingId = 0;
+		std::string error;
+	};
+
+	inline std::timed_mutex g_checkMutex;
+	inline std::mutex g_keyLocksMutex;
+	inline std::map<std::string, std::shared_ptr<std::timed_mutex>> g_keyLocks;
+
+	inline std::shared_ptr<std::timed_mutex> KeyLock(const std::string& key)
+	{
+		std::lock_guard<std::mutex> guard(g_keyLocksMutex);
+		std::shared_ptr<std::timed_mutex>& lock = g_keyLocks[DupeUtil::Lower(key)];
+		if (!lock)
+		{
+			lock = std::make_shared<std::timed_mutex>();
+		}
+		return lock;
+	}
+}
+
+
 class Fleet
 {
 public:
@@ -35140,925 +37528,446 @@ public:
 	static constexpr const char* FleetParam = "DupeFleet";
 
 	/* checks, ranks and adds the members; blocks for up to request.timeoutSec */
-	static Result Append(Request request);
-};
-
-namespace FleetDetail
-{
-	inline constexpr size_t MaxNzbBytes = 64 * 1024 * 1024;
-	inline constexpr int MaxParallel = 16;
-	inline constexpr int FleetSampleMax = 200;
-	inline constexpr long long FinishReserveMs = 2000;
-
-	struct Candidate
+	static Result Append(Request request)
 	{
-		size_t index;
-		NzbSummary summary;
-		DonorHealth::Health health;
-		bool checked = false;
-		int alive = -1;
-		bool dead = false;
-		int sameAs = -1;
-		int existingId = 0;
-		std::string error;
-	};
-
-	inline std::timed_mutex g_checkMutex;
-	inline std::mutex g_keyLocksMutex;
-	inline std::map<std::string, std::shared_ptr<std::timed_mutex>> g_keyLocks;
-
-	inline std::shared_ptr<std::timed_mutex> KeyLock(const std::string& key)
-	{
-		std::lock_guard<std::mutex> guard(g_keyLocksMutex);
-		std::shared_ptr<std::timed_mutex>& lock = g_keyLocks[DupeUtil::Lower(key)];
-		if (!lock)
+		using namespace FleetDetail;
+		Result result;
+		request.timeoutSec = nzbget_rs_dqh_fleet_clamp_timeout_sec(
+			request.timeoutSec, (int)MaxTimeoutSec);
+		if (request.members.empty())
 		{
-			lock = std::make_shared<std::timed_mutex>();
+			result.reason = "NO_MEMBERS";
+			return result;
 		}
-		return lock;
-	}
-}
+		if (request.dupeKey.empty())
+		{
+			request.dupeKey = DupeSearch::MakeDupeKey(request.members[0].name);
+		}
+		long long deadlineMs = DonorHealth::NowMs() + request.timeoutSec * 1000LL;
+		std::shared_ptr<std::timed_mutex> keyLock = KeyLock(request.dupeKey);
+		std::unique_lock<std::timed_mutex> keyGuard(*keyLock, std::defer_lock);
+		if (!keyGuard.try_lock_for(std::chrono::milliseconds(std::max(0LL,
+			deadlineMs - DonorHealth::NowMs() - FinishReserveMs))))
+		{
+			result.reason = "KEY_BUSY";
+			result.complete = false;
+			return result;
+		}
 
-inline Fleet::Result Fleet::Append(Request request)
-{
-	using namespace FleetDetail;
-	Result result;
-	request.timeoutSec = nzbget_rs_dqh_fleet_clamp_timeout_sec(
-		request.timeoutSec, (int)MaxTimeoutSec);
-	if (request.members.empty())
-	{
-		result.reason = "NO_MEMBERS";
-		return result;
-	}
-	if (request.dupeKey.empty())
-	{
-		request.dupeKey = DupeSearch::MakeDupeKey(request.members[0].name);
-	}
-	long long deadlineMs = DonorHealth::NowMs() + request.timeoutSec * 1000LL;
-	std::shared_ptr<std::timed_mutex> keyLock = KeyLock(request.dupeKey);
-	std::unique_lock<std::timed_mutex> keyGuard(*keyLock, std::defer_lock);
-	if (!keyGuard.try_lock_for(std::chrono::milliseconds(std::max(0LL,
-		deadlineMs - DonorHealth::NowMs() - FinishReserveMs))))
-	{
-		result.reason = "KEY_BUSY";
-		result.complete = false;
-		return result;
-	}
+		std::vector<HttpGet::Reply> fetched(request.members.size());
+		{
+			std::vector<std::thread> fetchers;
+			for (size_t i = 0; i < request.members.size(); i++)
+			{
+				if (!request.members[i].url.empty())
+				{
+					fetchers.emplace_back([&, i]()
+						{
+							fetched[i] = HttpGet::Fetch(request.members[i].url, "fleet member " + request.members[i].name,
+								MaxNzbBytes, deadlineMs - FinishReserveMs);
+						});
+				}
+			}
+			for (std::thread& fetcher : fetchers)
+			{
+				fetcher.join();
+			}
+		}
 
-	std::vector<HttpGet::Reply> fetched(request.members.size());
-	{
-		std::vector<std::thread> fetchers;
+		std::vector<Candidate> candidates(request.members.size());
 		for (size_t i = 0; i < request.members.size(); i++)
 		{
-			if (!request.members[i].url.empty())
+			Member& member = request.members[i];
+			Candidate& candidate = candidates[i];
+			candidate.index = i;
+			if (!member.url.empty())
 			{
-				fetchers.emplace_back([&, i]()
-					{
-						fetched[i] = HttpGet::Fetch(request.members[i].url, "fleet member " + request.members[i].name,
-							MaxNzbBytes, deadlineMs - FinishReserveMs);
-					});
+				HttpGet::Reply& reply = fetched[i];
+				if (!reply.ok)
+				{
+					NzbgetRsBuf errBuf = nzbget_rs_dqh_fleet_format_fetch_error(reply.status);
+					candidate.error.assign(errBuf.data ? errBuf.data : "", errBuf.len);
+					nzbget_rs_free(errBuf);
+					continue;
+				}
+				member.data = std::move(reply.body);
 			}
-		}
-		for (std::thread& fetcher : fetchers)
-		{
-			fetcher.join();
-		}
-	}
-
-	std::vector<Candidate> candidates(request.members.size());
-	for (size_t i = 0; i < request.members.size(); i++)
-	{
-		Member& member = request.members[i];
-		Candidate& candidate = candidates[i];
-		candidate.index = i;
-		if (!member.url.empty())
-		{
-			HttpGet::Reply& reply = fetched[i];
-			if (!reply.ok)
+			if (!NzbReader::Parse(member.data, candidate.summary) || candidate.summary.messageIds.empty())
 			{
-				NzbgetRsBuf errBuf = nzbget_rs_dqh_fleet_format_fetch_error(reply.status);
-				candidate.error.assign(errBuf.data ? errBuf.data : "", errBuf.len);
-				nzbget_rs_free(errBuf);
+				candidate.error = "the nzb-file is unreadable";
 				continue;
 			}
-			member.data = std::move(reply.body);
-		}
-		if (!NzbReader::Parse(member.data, candidate.summary) || candidate.summary.messageIds.empty())
-		{
-			candidate.error = "the nzb-file is unreadable";
-			continue;
-		}
-		for (size_t j = 0; j < i; j++)
-		{
-			if (candidates[j].error.empty() && candidates[j].sameAs < 0 &&
-				Posting::SamePosting(candidates[j].summary.messageIds, candidate.summary.messageIds))
+			for (size_t j = 0; j < i; j++)
 			{
-				candidate.sameAs = (int)j;
-				break;
+				if (candidates[j].error.empty() && candidates[j].sameAs < 0 &&
+					Posting::SamePosting(candidates[j].summary.messageIds, candidate.summary.messageIds))
+				{
+					candidate.sameAs = (int)j;
+					break;
+				}
 			}
 		}
-	}
 
-	long long top = DupeSearch::BasePickScore;
-	int runningId = 0;
-	int runningScore = 0;
-	int lowest = 0;
-	bool any = false;
-	std::vector<std::pair<int, std::string>> existing;
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		auto consider = [&](NzbInfo* nzbInfo, bool queued)
-			{
-				if (nzbInfo->GetKind() != NzbInfo::nkNzb ||
-					!nzbget_rs_dqh_bytes_eq_ignore_case(nzbInfo->GetDupeKey(), request.dupeKey.c_str()))
+		long long top = DupeSearch::BasePickScore;
+		int runningId = 0;
+		int runningScore = 0;
+		int lowest = 0;
+		bool any = false;
+		std::vector<std::pair<int, std::string>> existing;
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			auto consider = [&](NzbInfo* nzbInfo, bool queued)
 				{
-					return;
+					if (nzbInfo->GetKind() != NzbInfo::nkNzb ||
+						!nzbget_rs_dqh_bytes_eq_ignore_case(nzbInfo->GetDupeKey(), request.dupeKey.c_str()))
+					{
+						return;
+					}
+					int64_t newTop = top;
+					nzbget_rs_dqh_fleet_update_key_score_bounds(
+						top, lowest, any ? 1 : 0, queued ? 1 : 0,
+						nzbInfo->GetDeleting() ? 1 : 0,
+						(int)nzbInfo->GetDeleteStatus(),
+						(int)NzbInfo::dsNone,
+						runningId, runningScore,
+						nzbInfo->GetId(), nzbInfo->GetDupeScore(),
+						&newTop, &lowest, &runningId, &runningScore);
+					top = newTop;
+					any = true;
+					std::string names = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
+					struct PipeCtx
+					{
+						std::vector<std::pair<int, std::string>>& existing;
+						int id;
+					} pipeCtx{existing, nzbInfo->GetId()};
+					nzbget_rs_dqh_fleet_visit_pipe_names(
+						names.data(), names.size(), &pipeCtx,
+						[](void* ctx, const char* partPtr, size_t partLen)
+						{
+							auto* c = static_cast<PipeCtx*>(ctx);
+							c->existing.emplace_back(c->id, std::string(partPtr, partLen));
+						});
+				};
+			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+			{
+				consider(nzbInfo, true);
+			}
+			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+			{
+				if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+				{
+					consider(historyInfo->GetNzbInfo(), false);
 				}
-				int64_t newTop = top;
-				nzbget_rs_dqh_fleet_update_key_score_bounds(
-					top, lowest, any ? 1 : 0, queued ? 1 : 0,
-					nzbInfo->GetDeleting() ? 1 : 0,
-					(int)nzbInfo->GetDeleteStatus(),
+			}
+		}
+		for (const auto& item : existing)
+		{
+			NzbSummary summary;
+			if (!NzbReader::Parse(DupeUtil::ReadAll(item.second), summary))
+			{
+				continue;
+			}
+			for (Candidate& candidate : candidates)
+			{
+				if (candidate.error.empty() && candidate.sameAs < 0 && !candidate.existingId &&
+					Posting::SamePosting(summary.messageIds, candidate.summary.messageIds))
+				{
+					candidate.existingId = item.first;
+				}
+			}
+		}
+		{
+			std::vector<Candidate*> ranked;
+			for (Candidate& candidate : candidates)
+			{
+				ranked.push_back(&candidate);
+			}
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+			{
+				NzbInfo* item = historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo() : nullptr;
+				if (!item || nzbget_rs_dqh_fleet_is_already_downloaded_history_item(
+					item != nullptr ? 1 : 0,
+					(int)item->GetDeleteStatus(),
 					(int)NzbInfo::dsNone,
-					runningId, runningScore,
-					nzbInfo->GetId(), nzbInfo->GetDupeScore(),
-					&newTop, &lowest, &runningId, &runningScore);
-				top = newTop;
-				any = true;
-				std::string names = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
-				struct PipeCtx
+					item->IsDupeSuccess() ? 1 : 0,
+					(int)item->GetMarkStatus(),
+					(int)NzbInfo::ksBad) == 0 ||
+					!ReleaseName::Readable(item->GetName()))
 				{
-					std::vector<std::pair<int, std::string>>& existing;
-					int id;
-				} pipeCtx{existing, nzbInfo->GetId()};
-				nzbget_rs_dqh_fleet_visit_pipe_names(
-					names.data(), names.size(), &pipeCtx,
-					[](void* ctx, const char* partPtr, size_t partLen)
+					continue;
+				}
+				bool same = std::any_of(ranked.begin(), ranked.end(), [&](const Candidate* c)
 					{
-						auto* c = static_cast<PipeCtx*>(ctx);
-						c->existing.emplace_back(c->id, std::string(partPtr, partLen));
+						const std::string& name = request.members[c->index].name;
+						return c->error.empty() && ReleaseName::Readable(name) &&
+							ReleaseName::SameRelease(name, item->GetName());
 					});
-			};
-		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-		{
-			consider(nzbInfo, true);
-		}
-		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-		{
-			if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-			{
-				consider(historyInfo->GetNzbInfo(), false);
+				if (same && DupeCoordinator::FilesOnDisk(item))
+				{
+					result.reason = "ALREADY_DOWNLOADED";
+					result.chosen = 0;
+					int rank = 0;
+					for (Candidate* candidate : ranked)
+					{
+						Entry entry;
+						entry.name = request.members[candidate->index].name;
+						entry.rank = ++rank;
+						entry.alive = candidate->alive;
+						entry.status = candidate->error.empty() ? "SKIPPED" : "ERROR";
+						entry.reason = candidate->error.empty() ? "downloaded as " + std::string(item->GetName()) : candidate->error;
+						result.members.push_back(entry);
+					}
+					info("Fleet for %s: %s is downloaded already", request.dupeKey.c_str(), item->GetName());
+					return result;
+				}
 			}
 		}
-	}
-	for (const auto& item : existing)
-	{
-		NzbSummary summary;
-		if (!NzbReader::Parse(DupeUtil::ReadAll(item.second), summary))
+
+		std::vector<DonorHealth::Posting> postings;
+		for (Candidate& candidate : candidates)
 		{
-			continue;
+			if (candidate.error.empty() && candidate.sameAs < 0 && !candidate.existingId)
+			{
+				NzbgetRsBuf idxBuf = nzbget_rs_dqh_conn_format_port_str(candidate.index);
+				std::string idxStr(idxBuf.data ? idxBuf.data : "", idxBuf.len);
+				nzbget_rs_free(idxBuf);
+				postings.push_back({ std::move(idxStr), candidate.summary.messageIds,
+					std::make_shared<std::vector<std::string>>(candidate.summary.groups) });
+			}
+		}
+		DonorHealth::ServerList servers = NntpHealthServer::Servers();
+		std::unique_lock<std::timed_mutex> checkGuard(g_checkMutex, std::defer_lock);
+		bool mayCheck = !servers.empty() && !postings.empty() && checkGuard.try_lock_for(
+			std::chrono::milliseconds(nzbget_rs_dqh_fleet_calc_check_lock_wait_ms(
+				deadlineMs, DonorHealth::NowMs(), FinishReserveMs)));
+		if (!servers.empty() && !postings.empty() && !mayCheck)
+		{
+			result.complete = false;
+		}
+		if (mayCheck)
+		{
+			DonorHealth::Options options;
+			options.sample.percent = g_Options->GetDupeHealthPercent();
+			options.sample.minimum = g_Options->GetDupeHealthMin();
+			options.sample.maxBody = g_Options->GetDupeBodyChecks();
+			long long checkStart = DonorHealth::NowMs();
+			int64_t checkDeadlineMs = 0;
+			nzbget_rs_dqh_fleet_calc_check_budget_and_deadline(
+				g_Options->GetDupeHealthMax(), FleetSampleMax,
+				deadlineMs, checkStart, FinishReserveMs,
+				&options.sample.maximum, &options.budgetMs, &checkDeadlineMs);
+			options.deadlineMs = checkDeadlineMs;
+			std::mutex mutex;
+			{
+				g_WorkState->HoldDownloadForFleet(true);
+				struct HoldRelease
+				{
+					~HoldRelease() { g_WorkState->HoldDownloadForFleet(false); }
+				} holdRelease;
+				DonorHealth::CheckPostings(servers, postings, options, true,
+					std::min((int)postings.size(), MaxParallel),
+					[&](const std::string& key, const DonorHealth::Health& health)
+					{
+						std::lock_guard<std::mutex> guard(mutex);
+						Candidate& candidate = candidates[(size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str())];
+						candidate.health = health;
+						candidate.checked = true;
+					});
+			}
+			result.complete = DonorHealth::NowMs() - checkStart < options.budgetMs;
 		}
 		for (Candidate& candidate : candidates)
 		{
-			if (candidate.error.empty() && candidate.sameAs < 0 && !candidate.existingId &&
-				Posting::SamePosting(summary.messageIds, candidate.summary.messageIds))
+			if (!candidate.error.empty() || candidate.sameAs >= 0)
 			{
-				candidate.existingId = item.first;
+				continue;
+			}
+			int alivePct = -1, isDead = 0, memberComplete = 0;
+			nzbget_rs_df_eval_fleet_member_health(
+				candidate.checked ? 1 : 0, result.complete ? 1 : 0,
+				candidate.health.present, candidate.health.missing, candidate.health.error,
+				DonorHealth::MinKnown, g_Options->GetDupeMinAlive(),
+				&alivePct, &isDead, &memberComplete);
+			candidate.alive = alivePct;
+			candidate.dead = isDead != 0;
+			result.complete &= memberComplete != 0;
+		}
+		for (Candidate& candidate : candidates)
+		{
+			if (candidate.sameAs >= 0)
+			{
+				candidate.alive = candidates[candidate.sameAs].alive;
+				candidate.dead = candidates[candidate.sameAs].dead;
 			}
 		}
-	}
-	{
+
+		std::vector<uint8_t> hasError(candidates.size());
+		std::vector<int> sameAs(candidates.size());
+		std::vector<uint8_t> isDeadArr(candidates.size());
+		std::vector<int> aliveArr(candidates.size());
+		std::vector<int64_t> totalBytesArr(candidates.size());
+		std::vector<size_t> rankedIdx(candidates.size());
+		for (size_t i = 0; i < candidates.size(); i++)
+		{
+			hasError[i] = candidates[i].error.empty() ? 0 : 1;
+			sameAs[i] = candidates[i].sameAs;
+			isDeadArr[i] = candidates[i].dead ? 1 : 0;
+			aliveArr[i] = candidates[i].alive;
+			totalBytesArr[i] = candidates[i].summary.totalBytes;
+		}
+		size_t rankedCount = nzbget_rs_df_rank_fleet_candidates(
+			hasError.data(), sameAs.data(), isDeadArr.data(), aliveArr.data(), totalBytesArr.data(),
+			candidates.size(), rankedIdx.data());
+		std::vector<Candidate*> order;
 		std::vector<Candidate*> ranked;
-		for (Candidate& candidate : candidates)
+		ranked.reserve(rankedCount);
+		for (size_t i = 0; i < rankedCount; i++)
 		{
-			ranked.push_back(&candidate);
-		}
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-		{
-			NzbInfo* item = historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo() : nullptr;
-			if (!item || nzbget_rs_dqh_fleet_is_already_downloaded_history_item(
-				item != nullptr ? 1 : 0,
-				(int)item->GetDeleteStatus(),
-				(int)NzbInfo::dsNone,
-				item->IsDupeSuccess() ? 1 : 0,
-				(int)item->GetMarkStatus(),
-				(int)NzbInfo::ksBad) == 0 ||
-				!ReleaseName::Readable(item->GetName()))
+			Candidate* c = &candidates[rankedIdx[i]];
+			ranked.push_back(c);
+			if (c->sameAs < 0)
 			{
-				continue;
-			}
-			bool same = std::any_of(ranked.begin(), ranked.end(), [&](const Candidate* c)
-				{
-					const std::string& name = request.members[c->index].name;
-					return c->error.empty() && ReleaseName::Readable(name) &&
-						ReleaseName::SameRelease(name, item->GetName());
-				});
-			if (same && DupeCoordinator::FilesOnDisk(item))
-			{
-				result.reason = "ALREADY_DOWNLOADED";
-				result.chosen = 0;
-				int rank = 0;
-				for (Candidate* candidate : ranked)
-				{
-					Entry entry;
-					entry.name = request.members[candidate->index].name;
-					entry.rank = ++rank;
-					entry.alive = candidate->alive;
-					entry.status = candidate->error.empty() ? "SKIPPED" : "ERROR";
-					entry.reason = candidate->error.empty() ? "downloaded as " + std::string(item->GetName()) : candidate->error;
-					result.members.push_back(entry);
-				}
-				info("Fleet for %s: %s is downloaded already", request.dupeKey.c_str(), item->GetName());
-				return result;
+				order.push_back(c);
 			}
 		}
-	}
-
-	std::vector<DonorHealth::Posting> postings;
-	for (Candidate& candidate : candidates)
-	{
-		if (candidate.error.empty() && candidate.sameAs < 0 && !candidate.existingId)
+		auto tier = [](const Candidate& c)
 		{
-			NzbgetRsBuf idxBuf = nzbget_rs_dqh_conn_format_port_str(candidate.index);
-			std::string idxStr(idxBuf.data ? idxBuf.data : "", idxBuf.len);
-			nzbget_rs_free(idxBuf);
-			postings.push_back({ std::move(idxStr), candidate.summary.messageIds,
-				std::make_shared<std::vector<std::string>>(candidate.summary.groups) });
-		}
-	}
-	DonorHealth::ServerList servers = NntpHealthServer::Servers();
-	std::unique_lock<std::timed_mutex> checkGuard(g_checkMutex, std::defer_lock);
-	bool mayCheck = !servers.empty() && !postings.empty() && checkGuard.try_lock_for(
-		std::chrono::milliseconds(nzbget_rs_dqh_fleet_calc_check_lock_wait_ms(
-			deadlineMs, DonorHealth::NowMs(), FinishReserveMs)));
-	if (!servers.empty() && !postings.empty() && !mayCheck)
-	{
-		result.complete = false;
-	}
-	if (mayCheck)
-	{
-		DonorHealth::Options options;
-		options.sample.percent = g_Options->GetDupeHealthPercent();
-		options.sample.minimum = g_Options->GetDupeHealthMin();
-		options.sample.maxBody = g_Options->GetDupeBodyChecks();
-		long long checkStart = DonorHealth::NowMs();
-		int64_t checkDeadlineMs = 0;
-		nzbget_rs_dqh_fleet_calc_check_budget_and_deadline(
-			g_Options->GetDupeHealthMax(), FleetSampleMax,
-			deadlineMs, checkStart, FinishReserveMs,
-			&options.sample.maximum, &options.budgetMs, &checkDeadlineMs);
-		options.deadlineMs = checkDeadlineMs;
-		std::mutex mutex;
-		{
-			g_WorkState->HoldDownloadForFleet(true);
-			struct HoldRelease
-			{
-				~HoldRelease() { g_WorkState->HoldDownloadForFleet(false); }
-			} holdRelease;
-			DonorHealth::CheckPostings(servers, postings, options, true,
-				std::min((int)postings.size(), MaxParallel),
-				[&](const std::string& key, const DonorHealth::Health& health)
-				{
-					std::lock_guard<std::mutex> guard(mutex);
-					Candidate& candidate = candidates[(size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str())];
-					candidate.health = health;
-					candidate.checked = true;
-				});
-		}
-		result.complete = DonorHealth::NowMs() - checkStart < options.budgetMs;
-	}
-	for (Candidate& candidate : candidates)
-	{
-		if (!candidate.error.empty() || candidate.sameAs >= 0)
-		{
-			continue;
-		}
-		int alivePct = -1, isDead = 0, memberComplete = 0;
-		nzbget_rs_df_eval_fleet_member_health(
-			candidate.checked ? 1 : 0, result.complete ? 1 : 0,
-			candidate.health.present, candidate.health.missing, candidate.health.error,
-			DonorHealth::MinKnown, g_Options->GetDupeMinAlive(),
-			&alivePct, &isDead, &memberComplete);
-		candidate.alive = alivePct;
-		candidate.dead = isDead != 0;
-		result.complete &= memberComplete != 0;
-	}
-	for (Candidate& candidate : candidates)
-	{
-		if (candidate.sameAs >= 0)
-		{
-			candidate.alive = candidates[candidate.sameAs].alive;
-			candidate.dead = candidates[candidate.sameAs].dead;
-		}
-	}
-
-	std::vector<uint8_t> hasError(candidates.size());
-	std::vector<int> sameAs(candidates.size());
-	std::vector<uint8_t> isDeadArr(candidates.size());
-	std::vector<int> aliveArr(candidates.size());
-	std::vector<int64_t> totalBytesArr(candidates.size());
-	std::vector<size_t> rankedIdx(candidates.size());
-	for (size_t i = 0; i < candidates.size(); i++)
-	{
-		hasError[i] = candidates[i].error.empty() ? 0 : 1;
-		sameAs[i] = candidates[i].sameAs;
-		isDeadArr[i] = candidates[i].dead ? 1 : 0;
-		aliveArr[i] = candidates[i].alive;
-		totalBytesArr[i] = candidates[i].summary.totalBytes;
-	}
-	size_t rankedCount = nzbget_rs_df_rank_fleet_candidates(
-		hasError.data(), sameAs.data(), isDeadArr.data(), aliveArr.data(), totalBytesArr.data(),
-		candidates.size(), rankedIdx.data());
-	std::vector<Candidate*> order;
-	std::vector<Candidate*> ranked;
-	ranked.reserve(rankedCount);
-	for (size_t i = 0; i < rankedCount; i++)
-	{
-		Candidate* c = &candidates[rankedIdx[i]];
-		ranked.push_back(c);
-		if (c->sameAs < 0)
-		{
-			order.push_back(c);
-		}
-	}
-	auto tier = [](const Candidate& c)
-	{
-		return nzbget_rs_dqh_fleet_candidate_tier(
-			!c.error.empty() ? 1 : 0, c.dead ? 1 : 0, c.alive);
-	};
-
-	if (DonorHealth::Stopping() || HttpGet::Stopped())
-	{
-		result.reason = "SHUTDOWN";
-		result.complete = false;
-		return result;
-	}
-
-	bool anyAlive = std::any_of(order.begin(), order.end(),
-		[&](const Candidate* c) { return tier(*c) <= 1; });
-	std::vector<int> added(candidates.size(), 0);
-	int rank = 0;
-	for (Candidate* candidate : ranked)
-	{
-		Member& member = request.members[candidate->index];
-		Entry entry;
-		entry.member = (int)candidate->index;
-		entry.name = member.name;
-		entry.rank = ++rank;
-		entry.alive = candidate->alive;
-		if (!candidate->error.empty())
-		{
-			entry.status = "ERROR";
-			entry.reason = candidate->error;
-		}
-		else if (candidate->sameAs >= 0 || candidate->existingId)
-		{
-			entry.status = "SAME_POSTING";
-			entry.sameAs = candidate->existingId ? candidate->existingId : added[candidate->sameAs];
-			for (const Entry& other : result.members)
-			{
-				if (!candidate->existingId && other.member == candidate->sameAs)
-				{
-					entry.sameAsRank = other.rank;
-				}
-			}
-		}
-		else if (!anyAlive)
-		{
-			entry.status = "DEAD";
-		}
-		else
-		{
-			NzbParameterList parameters;
-			NzbgetRsBuf rankBuf = nzbget_rs_dqh_conn_format_port_str(entry.rank);
-			parameters.SetParameter(FleetParam, rankBuf.data ? rankBuf.data : "0");
-			nzbget_rs_free(rankBuf);
-			if (candidate->alive >= 0)
-			{
-				NzbgetRsBuf aliveBuf = nzbget_rs_dqh_conn_format_port_str(
-					candidate->dead ? 0 : candidate->alive);
-				parameters.SetParameter(DupeSearch::AliveParam, aliveBuf.data ? aliveBuf.data : "0");
-				nzbget_rs_free(aliveBuf);
-			}
-			int nzbId = 0;
-			NzbgetRsBuf nameBuf = nzbget_rs_dqh_fleet_ensure_nzb_ext(member.name.data(), member.name.size());
-			std::string name(nameBuf.data ? nameBuf.data : "", nameBuf.len);
-			nzbget_rs_free(nameBuf);
-			int memberScore = nzbget_rs_dqh_fleet_calc_member_add_score(
-				runningId, lowest, top, entry.rank);
-			Scanner::EAddStatus status = g_Scanner->AddExternalFile(name.c_str(), request.category.c_str(),
-				false, request.priority, request.dupeKey.c_str(),
-				memberScore, dmScore, &parameters,
-				false, false, nullptr, nullptr, member.data.data(), (int)member.data.size(), &nzbId);
-			entry.nzbId = status == Scanner::asSuccess ? nzbId : 0;
-			added[candidate->index] = entry.nzbId;
-			entry.status = entry.nzbId == 0 ? "ERROR" : candidate->dead ? "DEAD" : "BACKUP";
-			if (entry.nzbId == 0)
-			{
-				entry.reason = "RustyGet could not add the nzb-file";
-			}
-		}
-		result.members.push_back(entry);
-	}
-
-	bool onDisk = false;
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		if (runningId && downloadQueue->GetQueue()->Find(runningId))
-		{
-			result.chosen = runningId;
-			result.reason = "ALREADY_QUEUED";
-		}
-		for (Entry& entry : result.members)
-		{
-			if (!runningId && !result.chosen && entry.nzbId > 0 && downloadQueue->GetQueue()->Find(entry.nzbId))
-			{
-				entry.status = "QUEUED";
-				result.chosen = entry.nzbId;
-			}
-		}
-		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-		{
-			if (historyInfo->GetKind() != HistoryInfo::hkNzb ||
-				historyInfo->GetNzbInfo()->GetDeleteStatus() != NzbInfo::dsCopy)
-			{
-				continue;
-			}
-			for (Entry& entry : result.members)
-			{
-				if (entry.nzbId == historyInfo->GetNzbInfo()->GetId())
-				{
-					entry.status = "COPY";
-					entry.reason = "the same nzb-file as an item RustyGet has already";
-				}
-			}
-		}
-		NzbInfo probe;
-		probe.SetDupeKey(request.dupeKey.c_str());
-		onDisk = DupeCoordinator::DownloadedOnDisk(downloadQueue, &probe) != nullptr;
-	}
-	if (result.chosen == 0 && result.reason.empty())
-	{
-		bool anyUsable = std::any_of(candidates.begin(), candidates.end(),
-			[](const Candidate& c) { return c.error.empty(); });
-		bool anyUnknown = std::any_of(order.begin(), order.end(),
-			[&](const Candidate* c) { return c->error.empty() && c->alive < 0; });
-		int reasonCode = nzbget_rs_df_eval_fleet_outcome_reason(
-			anyUsable ? 1 : 0, anyAlive ? 1 : 0, anyUnknown ? 1 : 0, onDisk ? 1 : 0);
-		static const char* const kReasons[] = {
-			"NO_USABLE_MEMBERS", "INCOMPLETE", "ALL_DEAD", "ALREADY_DOWNLOADED", "NOT_QUEUED"
+			return nzbget_rs_dqh_fleet_candidate_tier(
+				!c.error.empty() ? 1 : 0, c.dead ? 1 : 0, c.alive);
 		};
-		result.reason = kReasons[(reasonCode >= 0 && reasonCode < 5) ? reasonCode : 4];
-	}
-	NzbgetRsBuf sumBuf = nzbget_rs_dqh_fleet_format_summary_log(
-		(int)request.members.size(), request.dupeKey.c_str(),
-		result.chosen, result.reason.c_str(), result.complete ? 1 : 0);
-	info("%s", sumBuf.data ? sumBuf.data : "");
-	nzbget_rs_free(sumBuf);
-	return result;
-}
 
-#endif
-
-#endif
-
-/**
- * Removes old entries from (recent) history
- */
-inline void HistoryCoordinator::ServiceWork()
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	// in 64 bits: past 24,855 days the int product went negative, and every item was
-	// hidden as too old
-	time_t minTime = (time_t)nzbget_rs_history_coord_calc_min_time(
-		(int64)Util::CurrentTime(), g_Options->GetKeepHistory());
-	bool changed = false;
-	int index = 0;
-
-	// traversing in a reverse order to delete items in order they were added to history
-	// (just to produce the log-messages in a more logical order)
-	for (HistoryList::reverse_iterator it = downloadQueue->GetHistory()->rbegin(); it != downloadQueue->GetHistory()->rend(); )
-	{
-		HistoryInfo* historyInfo = (*it).get();
-		int action = nzbget_rs_history_coord_classify_service_work_item(
-			(int)historyInfo->GetKind(),
-			(int)HistoryInfo::hkDup,
-			(int)HistoryInfo::hkNzb,
-			(int64)historyInfo->GetTime(),
-			(int64)minTime,
-			g_Options->GetDupeCheck() ? 1 : 0);
-		if (action != 0)
+		if (DonorHealth::Stopping() || HttpGet::Stopped())
 		{
-			if (action == 1)
+			result.reason = "SHUTDOWN";
+			result.complete = false;
+			return result;
+		}
+
+		bool anyAlive = std::any_of(order.begin(), order.end(),
+			[&](const Candidate* c) { return tier(*c) <= 1; });
+		std::vector<int> added(candidates.size(), 0);
+		int rank = 0;
+		for (Candidate* candidate : ranked)
+		{
+			Member& member = request.members[candidate->index];
+			Entry entry;
+			entry.member = (int)candidate->index;
+			entry.name = member.name;
+			entry.rank = ++rank;
+			entry.alive = candidate->alive;
+			if (!candidate->error.empty())
 			{
-				HistoryHide(downloadQueue, historyInfo, index);
-				index++;
+				entry.status = "ERROR";
+				entry.reason = candidate->error;
+			}
+			else if (candidate->sameAs >= 0 || candidate->existingId)
+			{
+				entry.status = "SAME_POSTING";
+				entry.sameAs = candidate->existingId ? candidate->existingId : added[candidate->sameAs];
+				for (const Entry& other : result.members)
+				{
+					if (!candidate->existingId && other.member == candidate->sameAs)
+					{
+						entry.sameAsRank = other.rank;
+					}
+				}
+			}
+			else if (!anyAlive)
+			{
+				entry.status = "DEAD";
 			}
 			else
 			{
-				if (action == 2)
+				NzbParameterList parameters;
+				NzbgetRsBuf rankBuf = nzbget_rs_dqh_conn_format_port_str(entry.rank);
+				parameters.SetParameter(FleetParam, rankBuf.data ? rankBuf.data : "0");
+				nzbget_rs_free(rankBuf);
+				if (candidate->alive >= 0)
 				{
-					DeleteDiskFiles(historyInfo->GetNzbInfo());
+					NzbgetRsBuf aliveBuf = nzbget_rs_dqh_conn_format_port_str(
+						candidate->dead ? 0 : candidate->alive);
+					parameters.SetParameter(DupeSearch::AliveParam, aliveBuf.data ? aliveBuf.data : "0");
+					nzbget_rs_free(aliveBuf);
 				}
-				info("Collection %s removed from history", historyInfo->GetName());
-
-				downloadQueue->GetHistory()->erase(downloadQueue->GetHistory()->end() - 1 - index);
-			}
-
-			it = downloadQueue->GetHistory()->rbegin() + index;
-			changed = true;
-		}
-		else
-		{
-			++it;
-			index++;
-		}
-	}
-
-	if (changed)
-	{
-		downloadQueue->HistoryChanged();
-		downloadQueue->Save();
-	}
-}
-
-inline void HistoryCoordinator::DeleteDiskFiles(NzbInfo* nzbInfo)
-{
-	if (g_Options->GetServerMode())
-	{
-		// delete parked files
-		g_DiskState->DiscardFiles(nzbInfo);
-	}
-	nzbInfo->GetFileList()->clear();
-
-	// delete nzb-file
-	if (!g_Options->GetNzbCleanupDisk())
-	{
-		return;
-	}
-
-	// QueuedFile may contain one filename or several filenames separated
-	// with "|"-character (for merged groups)
-	const char* filename = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
-	Tokenizer tok(filename, "|");
-	while (const char* name1 = tok.Next())
-	{
-		if (FileSystem::FileExists(name1))
-		{
-			info("Deleting file %s", name1);
-			FileSystem::DeleteFile(name1);
-		}
-	}
-}
-
-inline void HistoryCoordinator::AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	// catch-all for every path into history: a still-attached live
-	// stream-repair thread (option <DupeArticleFallback> value "live") could
-	// never find this collection by id again (the pass searches the QUEUE),
-	// so it would self-destruct and leave this slot a dangling pointer
-	if (nzbInfo->GetLiveRepairThread())
-	{
-		Thread* liveRepairThread = nzbInfo->GetLiveRepairThread();
-		nzbInfo->SetLiveRepairThread(nullptr);
-		liveRepairThread->Stop();
-	}
-
-	std::unique_ptr<NzbInfo> oldNzbInfo = downloadQueue->GetQueue()->Remove(nzbInfo);
-	std::unique_ptr<HistoryInfo> historyInfo = std::make_unique<HistoryInfo>(std::move(oldNzbInfo));
-	historyInfo->SetTime(Util::CurrentTime());
-	downloadQueue->GetHistory()->Add(std::move(historyInfo), true);
-	downloadQueue->HistoryChanged();
-
-	// park remaining files
-	for (FileInfo* fileInfo : nzbInfo->GetFileList())
-	{
-		nzbInfo->UpdateCompletedStats(fileInfo);
-		nzbInfo->GetCompletedFiles()->emplace_back(
-			fileInfo->GetId(),
-			fileInfo->GetFilename(),
-			fileInfo->GetOrigname() ? fileInfo->GetOrigname() : "",
-			CompletedFile::cfNone,
-			0,
-			fileInfo->GetParFile(),
-			fileInfo->GetHash16k() ? fileInfo->GetHash16k() : "",
-			fileInfo->GetParSetId() ? fileInfo->GetParSetId() : ""
-		);
-	}
-
-	// Cleaning up parked files if par-check was successful or unpack was successful or
-	// health is 100% (if unpack and par-check were not performed) or if deleted
-	bool cleanupParkedFiles = nzbget_rs_qhp_should_cleanup_parked_files(
-		(int32_t)nzbInfo->GetParStatus(),
-		(int32_t)nzbInfo->GetUnpackStatus(),
-		nzbInfo->GetFailedSize(),
-		nzbInfo->GetParFailedSize(),
-		(int32_t)nzbInfo->GetDeleteStatus(),
-		nzbInfo->GetParking() ? 1 : 0,
-		nzbInfo->GetUnpackCleanedUpDisk() ? 1 : 0
-	) != 0;
-
-	if (cleanupParkedFiles)
-	{
-		g_DiskState->DiscardFiles(nzbInfo, false);
-		nzbInfo->GetCompletedFiles()->clear();
-	}
-
-	nzbInfo->SetParkedFileCount(0);
-	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-	{
-		bool isLast = &completedFile == &*nzbInfo->GetCompletedFiles()->rbegin();
-		if (nzbget_rs_history_coord_should_park_completed_file(
-			(int)completedFile.GetStatus(),
-			(int)CompletedFile::cfNone,
-			(int)CompletedFile::cfPartial,
-			isLast ? 1 : 0) != 0)
-		{
-			nzbInfo->PrintMessage(Message::mkDetail, "Parking file %s", completedFile.GetFilename());
-			nzbInfo->SetParkedFileCount(nzbInfo->GetParkedFileCount() + 1);
-		}
-	}
-
-	nzbInfo->GetFileList()->clear();
-	nzbInfo->SetRemainingParCount(0);
-	nzbInfo->SetParking(false);
-
-	if (nzbInfo->GetDirectRenameStatus() == NzbInfo::tsRunning)
-	{
-		nzbInfo->SetDirectRenameStatus(NzbInfo::tsFailure);
-	}
-	if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsRunning)
-	{
-		nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
-	}
-
-	nzbInfo->SetDupeHint(NzbInfo::dhNone);
-
-	nzbInfo->PrintMessage(Message::mkInfo, "Collection %s added to history", nzbInfo->GetName());
-
-	RecheckFailedArticles(downloadQueue, nzbInfo);
-	ParDamage::Forget(nzbInfo->GetId());
-}
-
-/*
- * A download that failed with articles missing gets its failed articles asked of
- * the servers once (DupeProbe::StartRecheck): when most of them exist after all,
- * a timeout or a dropped connection lost them, and they are retried. Only where
- * duplicate handling judges downloads by their article results (option
- * <DupeArticleFallback>, HealthCheck=dupe), only from files whose state was kept,
- * and not while a duplicate downloads in its place.
- */
-inline void HistoryCoordinator::RecheckFailedArticles(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	if (nzbget_rs_history_coord_should_recheck_failed_articles(
-		g_Options->GetDupeArticleFallback() == Options::dafNone ? 1 : 0,
-		g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0,
-		nzbInfo->GetKind() == NzbInfo::nkNzb ? 1 : 0,
-		nzbInfo->GetFailedArticles(),
-		nzbInfo->MakeTextStatus(true),
-		nzbInfo->GetParameters()->Find("*DupeRecheck") != nullptr ? 1 : 0) == 0)
-	{
-		return;
-	}
-	for (NzbInfo* queued : downloadQueue->GetQueue())
-	{
-		if (DupeCoordinator::SameNameOrKey(queued->GetName(), queued->GetDupeKey(),
-			nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-		{
-			return;	// a duplicate downloads in its place
-		}
-	}
-	// a duplicate waits in history: nzbget fetches it in its place (B39)
-	if (g_Options->GetDupeCheck() &&
-		nzbInfo->GetDupeMode() == dmScore &&
-		g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-	{
-		return;
-	}
-	// once per download
-	nzbInfo->GetParameters()->SetParameter("*DupeRecheck", "1");
-
-	std::vector<DupeProbe::Sample> failed;
-	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-	{
-		if ((completedFile.GetStatus() != CompletedFile::cfPartial &&
-			 completedFile.GetStatus() != CompletedFile::cfFailure) ||
-			completedFile.GetId() <= 0)
-		{
-			continue;
-		}
-		bool partial = completedFile.GetStatus() == CompletedFile::cfPartial;
-		FileInfo fileInfo(completedFile.GetId());
-		if (!g_DiskState->LoadFile(&fileInfo, false, true) ||
-			(partial && !g_DiskState->LoadFileState(&fileInfo, g_ServerPool->GetServers(), true)))
-		{
-			continue;
-		}
-		auto groups = std::make_shared<std::vector<CString>>();
-		for (const CString& group : *fileInfo.GetGroups())
-		{
-			groups->emplace_back(*group);
-		}
-		for (ArticleInfo* article : fileInfo.GetArticles())
-		{
-			if ((!partial || article->GetStatus() == ArticleInfo::aiFailed) &&
-				!Util::EmptyStr(article->GetMessageId()))
-			{
-				DupeProbe::Sample sample;
-				sample.MessageId = article->GetMessageId();
-				sample.Groups = groups;
-				failed.push_back(std::move(sample));
-			}
-		}
-	}
-	if (failed.size() < 2)
-	{
-		return;
-	}
-
-	std::vector<DupeProbe::Sample> samples;
-	for (size_t index : DupeProbe::SampleIndexes(failed.size(), DupeProbe::RecheckSampleCount))
-	{
-		samples.push_back(std::move(failed[index]));	// the indexes are distinct
-	}
-	DupeProbe::StartRecheck(nzbInfo->GetId(), std::move(samples));
-}
-
-inline void HistoryCoordinator::HistoryHide(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, int rindex)
-{
-	// replace history element
-	std::unique_ptr<DupInfo> dupInfo = std::make_unique<DupInfo>();
-	dupInfo->SetId(historyInfo->GetNzbInfo()->GetId());
-	dupInfo->SetName(historyInfo->GetNzbInfo()->GetName());
-	dupInfo->SetDupeKey(historyInfo->GetNzbInfo()->GetDupeKey());
-	dupInfo->SetDupeScore(historyInfo->GetNzbInfo()->GetDupeScore());
-	dupInfo->SetDupeMode(historyInfo->GetNzbInfo()->GetDupeMode());
-	dupInfo->SetSize(historyInfo->GetNzbInfo()->GetSize());
-	dupInfo->SetFullContentHash(historyInfo->GetNzbInfo()->GetFullContentHash());
-	dupInfo->SetFilteredContentHash(historyInfo->GetNzbInfo()->GetFilteredContentHash());
-
-	dupInfo->SetStatus((DupInfo::EStatus)nzbget_rs_qhp_classify_dup_status(
-		(int32_t)historyInfo->GetNzbInfo()->GetMarkStatus(),
-		(int32_t)historyInfo->GetNzbInfo()->GetDeleteStatus(),
-		historyInfo->GetNzbInfo()->IsDupeSuccess() ? 1 : 0
-	));
-
-	std::unique_ptr<HistoryInfo> newHistoryInfo = std::make_unique<HistoryInfo>(std::move(dupInfo));
-	newHistoryInfo->SetTime(historyInfo->GetTime());
-
-	DeleteDiskFiles(historyInfo->GetNzbInfo());
-
-	info("Collection %s removed from history", historyInfo->GetName());
-
-	(*downloadQueue->GetHistory())[downloadQueue->GetHistory()->size() - 1 - rindex] = std::move(newHistoryInfo);
-}
-
-inline void HistoryCoordinator::PrepareEdit(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action)
-{
-	// First pass: when marking multiple items - mark them bad without performing the mark-logic,
-	// this will later (on second step) avoid moving other items to download queue, if they are marked bad too.
-	for (int id : *idList)
-	{
-		HistoryInfo* historyInfo = downloadQueue->GetHistory()->Find(id);
-		if (action == DownloadQueue::eaHistoryMarkBad &&
-			historyInfo && historyInfo->GetKind() == HistoryInfo::hkNzb)
-		{
-			historyInfo->GetNzbInfo()->SetMarkStatus(NzbInfo::ksBad);
-		}
-	}
-}
-
-inline bool HistoryCoordinator::EditList(DownloadQueue* downloadQueue, IdList* idList,
-	DownloadQueue::EEditAction action, const char* args)
-{
-	bool ok = false;
-	PrepareEdit(downloadQueue, idList, action);
-
-	for (int id : *idList)
-	{
-		for (HistoryList::iterator itHistory = downloadQueue->GetHistory()->begin(); itHistory != downloadQueue->GetHistory()->end(); ++itHistory)
-		{
-			HistoryInfo* historyInfo = (*itHistory).get();
-			if (historyInfo->GetId() == id)
-			{
-				// one item's edit failing doesn't undo (or leave unsaved) the
-				// others: the list counts as edited when any item was
-				bool done = true;
-
-				switch (action)
+				int nzbId = 0;
+				NzbgetRsBuf nameBuf = nzbget_rs_dqh_fleet_ensure_nzb_ext(member.name.data(), member.name.size());
+				std::string name(nameBuf.data ? nameBuf.data : "", nameBuf.len);
+				nzbget_rs_free(nameBuf);
+				int memberScore = nzbget_rs_dqh_fleet_calc_member_add_score(
+					runningId, lowest, top, entry.rank);
+				Scanner::EAddStatus status = g_Scanner->AddExternalFile(name.c_str(), request.category.c_str(),
+					false, request.priority, request.dupeKey.c_str(),
+					memberScore, dmScore, &parameters,
+					false, false, nullptr, nullptr, member.data.data(), (int)member.data.size(), &nzbId);
+				entry.nzbId = status == Scanner::asSuccess ? nzbId : 0;
+				added[candidate->index] = entry.nzbId;
+				entry.status = entry.nzbId == 0 ? "ERROR" : candidate->dead ? "DEAD" : "BACKUP";
+				if (entry.nzbId == 0)
 				{
-					case DownloadQueue::eaHistoryDelete:
-					case DownloadQueue::eaHistoryFinalDelete:
-						HistoryDelete(downloadQueue, itHistory, historyInfo, action == DownloadQueue::eaHistoryFinalDelete);
-						break;
-
-					case DownloadQueue::eaHistoryReturn:
-						HistoryReturn(downloadQueue, itHistory, historyInfo);
-						break;
-
-					case DownloadQueue::eaHistoryProcess:
-						HistoryProcess(downloadQueue, itHistory, historyInfo);
-						break;
-
-					case DownloadQueue::eaHistoryRedownload:
-						HistoryRedownload(downloadQueue, itHistory, historyInfo, false);
-						break;
-
-					case DownloadQueue::eaHistoryRetryFailed:
-						HistoryRetry(downloadQueue, itHistory, historyInfo, true, false);
-						break;
-
-					case DownloadQueue::eaHistorySetParameter:
-						done = HistorySetParameter(historyInfo, args);
-						break;
-
- 					case DownloadQueue::eaHistorySetCategory:
-						done = HistorySetCategory(historyInfo, args);
-						break;
-
- 					case DownloadQueue::eaHistorySetName:
-						done = HistorySetName(historyInfo, args);
-						break;
-
-					case DownloadQueue::eaHistorySetDupeKey:
-					case DownloadQueue::eaHistorySetDupeScore:
-					case DownloadQueue::eaHistorySetDupeMode:
-					case DownloadQueue::eaHistorySetDupeBackup:
-						HistorySetDupeParam(historyInfo, action, args);
-						break;
-
-					case DownloadQueue::eaHistoryMarkBad:
-						g_DupeCoordinator->HistoryMark(downloadQueue, historyInfo, NzbInfo::ksBad);
-						break;
-
-					case DownloadQueue::eaHistoryMarkGood:
-						g_DupeCoordinator->HistoryMark(downloadQueue, historyInfo, NzbInfo::ksGood);
-						break;
-
-					case DownloadQueue::eaHistoryMarkSuccess:
-						g_DupeCoordinator->HistoryMark(downloadQueue, historyInfo, NzbInfo::ksSuccess);
-						break;
-
-					default:
-						// nothing, just to avoid compiler warning
-						break;
+					entry.reason = "RustyGet could not add the nzb-file";
 				}
-
-				ok = ok || done;
-				break;
 			}
+			result.members.push_back(entry);
 		}
-	}
 
-	if (ok)
-	{
-		downloadQueue->HistoryChanged();
-		downloadQueue->Save();
-	}
-
-	return ok;
-}
-
-inline void HistoryCoordinator::HistoryDelete(DownloadQueue* downloadQueue, HistoryList::iterator itHistory,
-	HistoryInfo* historyInfo, bool final)
-{
-	info("Deleting %s from history", historyInfo->GetName());
-
-	if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-	{
-		DeleteDiskFiles(historyInfo->GetNzbInfo());
-	}
-
-	bool isNzb = historyInfo->GetKind() == HistoryInfo::hkNzb;
-	if (isNzb && nzbget_rs_history_coord_should_delete_dest_dir(
-		1,
-		(int)historyInfo->GetNzbInfo()->GetDeleteStatus(), (int)NzbInfo::dsNone,
-		(int)historyInfo->GetNzbInfo()->GetParStatus(), (int)NzbInfo::psFailure,
-		(int)historyInfo->GetNzbInfo()->GetUnpackStatus(), (int)NzbInfo::usFailure,
-		(int)NzbInfo::usPassword,
-		FileSystem::DirectoryExists(historyInfo->GetNzbInfo()->GetDestDir()) ? 1 : 0) != 0)
-	{
-		info("Deleting %s", historyInfo->GetNzbInfo()->GetDestDir());
-		CString errmsg;
-		if (!FileSystem::DeleteDirectoryWithContent(historyInfo->GetNzbInfo()->GetDestDir(), errmsg))
+		bool onDisk = false;
 		{
-			error("Could not delete directory %s: %s", historyInfo->GetNzbInfo()->GetDestDir(), *errmsg);
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			if (runningId && downloadQueue->GetQueue()->Find(runningId))
+			{
+				result.chosen = runningId;
+				result.reason = "ALREADY_QUEUED";
+			}
+			for (Entry& entry : result.members)
+			{
+				if (!runningId && !result.chosen && entry.nzbId > 0 && downloadQueue->GetQueue()->Find(entry.nzbId))
+				{
+					entry.status = "QUEUED";
+					result.chosen = entry.nzbId;
+				}
+			}
+			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+			{
+				if (historyInfo->GetKind() != HistoryInfo::hkNzb ||
+					historyInfo->GetNzbInfo()->GetDeleteStatus() != NzbInfo::dsCopy)
+				{
+					continue;
+				}
+				for (Entry& entry : result.members)
+				{
+					if (entry.nzbId == historyInfo->GetNzbInfo()->GetId())
+					{
+						entry.status = "COPY";
+						entry.reason = "the same nzb-file as an item RustyGet has already";
+					}
+				}
+			}
+			NzbInfo probe;
+			probe.SetDupeKey(request.dupeKey.c_str());
+			onDisk = DupeCoordinator::DownloadedOnDisk(downloadQueue, &probe) != nullptr;
 		}
+		if (result.chosen == 0 && result.reason.empty())
+		{
+			bool anyUsable = std::any_of(candidates.begin(), candidates.end(),
+				[](const Candidate& c) { return c.error.empty(); });
+			bool anyUnknown = std::any_of(order.begin(), order.end(),
+				[&](const Candidate* c) { return c->error.empty() && c->alive < 0; });
+			int reasonCode = nzbget_rs_df_eval_fleet_outcome_reason(
+				anyUsable ? 1 : 0, anyAlive ? 1 : 0, anyUnknown ? 1 : 0, onDisk ? 1 : 0);
+			static const char* const kReasons[] = {
+				"NO_USABLE_MEMBERS", "INCOMPLETE", "ALL_DEAD", "ALREADY_DOWNLOADED", "NOT_QUEUED"
+			};
+			result.reason = kReasons[(reasonCode >= 0 && reasonCode < 5) ? reasonCode : 4];
+		}
+		NzbgetRsBuf sumBuf = nzbget_rs_dqh_fleet_format_summary_log(
+			(int)request.members.size(), request.dupeKey.c_str(),
+			result.chosen, result.reason.c_str(), result.complete ? 1 : 0);
+		info("%s", sumBuf.data ? sumBuf.data : "");
+		nzbget_rs_free(sumBuf);
+		return result;
 	}
-
-	if (final || !g_Options->GetDupeCheck() || historyInfo->GetKind() == HistoryInfo::hkUrl)
-	{
-		downloadQueue->GetHistory()->erase(itHistory);
-	}
-	else if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-	{
-		// replace history element
-		int rindex = (int)downloadQueue->GetHistory()->size() - 1 - (int)(itHistory - downloadQueue->GetHistory()->begin());
-		HistoryHide(downloadQueue, historyInfo, rindex);
-	}
-}
+};
 
 inline void HistoryCoordinator::MoveToQueue(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool reprocess)
 {
@@ -36475,132 +38384,6 @@ inline void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, Histo
 	}
 }
 
-inline void HistoryCoordinator::ResetArticles(FileInfo* fileInfo, bool allFailed, bool resetFailed)
-{
-	NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
-	ArticleList* articles = fileInfo->GetArticles();
-	std::vector<int> artStatuses;
-	std::vector<int> artSizes;
-	std::vector<uint8_t> resetFlags(articles->size(), 0);
-	artStatuses.reserve(articles->size());
-	artSizes.reserve(articles->size());
-	for (ArticleInfo* pa : articles)
-	{
-		artStatuses.push_back((int)pa->GetStatus());
-		artSizes.push_back(pa->GetSize());
-	}
-
-	int64 fileFailedSize = fileInfo->GetFailedSize();
-	int fileFailedArticles = fileInfo->GetFailedArticles();
-	int64 fileRemainingSize = fileInfo->GetRemainingSize();
-	int fileCompletedArticles = fileInfo->GetCompletedArticles();
-	int64 fileSuccessSize = fileInfo->GetSuccessSize();
-	int fileSuccessArticles = fileInfo->GetSuccessArticles();
-	int64 nzbFailedSize = nzbInfo->GetFailedSize();
-	int64 nzbSuccessSize = nzbInfo->GetSuccessSize();
-	int nzbFailedArticles = nzbInfo->GetFailedArticles();
-	int nzbSuccessArticles = nzbInfo->GetSuccessArticles();
-	int64 nzbParFailedSize = nzbInfo->GetParFailedSize();
-	int64 nzbParSuccessSize = nzbInfo->GetParSuccessSize();
-
-	nzbget_rs_history_coord_reset_articles_batch(
-		allFailed ? 1 : 0,
-		resetFailed ? 1 : 0,
-		fileInfo->GetParFile() ? 1 : 0,
-		(int)fileInfo->GetPartialState(),
-		fileInfo->GetSize(),
-		fileInfo->GetMissedSize(),
-		fileInfo->GetTotalArticles(),
-		fileInfo->GetMissedArticles(),
-		&fileFailedSize,
-		&fileFailedArticles,
-		&fileRemainingSize,
-		&fileCompletedArticles,
-		&fileSuccessSize,
-		&fileSuccessArticles,
-		&nzbFailedSize,
-		&nzbSuccessSize,
-		&nzbFailedArticles,
-		&nzbSuccessArticles,
-		&nzbParFailedSize,
-		&nzbParSuccessSize,
-		artStatuses.data(),
-		artSizes.data(),
-		resetFlags.data(),
-		articles->size());
-
-	nzbInfo->GetServerStats()->ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
-	nzbInfo->SetFailedSize(nzbFailedSize);
-	nzbInfo->SetSuccessSize(nzbSuccessSize);
-	nzbInfo->SetFailedArticles(nzbFailedArticles);
-	nzbInfo->SetSuccessArticles(nzbSuccessArticles);
-	if (fileInfo->GetParFile())
-	{
-		nzbInfo->SetParFailedSize(nzbParFailedSize);
-		nzbInfo->SetParSuccessSize(nzbParSuccessSize);
-	}
-	fileInfo->SetFailedSize(fileFailedSize);
-	fileInfo->SetFailedArticles(fileFailedArticles);
-	fileInfo->SetRemainingSize(fileRemainingSize);
-	fileInfo->SetCompletedArticles(fileCompletedArticles);
-	fileInfo->SetSuccessSize(fileSuccessSize);
-	fileInfo->SetSuccessArticles(fileSuccessArticles);
-
-	for (size_t i = 0; i < articles->size(); ++i)
-	{
-		if (resetFlags[i])
-		{
-			ArticleInfo* pa = (*articles)[i].get();
-			pa->SetStatus((ArticleInfo::EStatus)artStatuses[i]);
-			pa->SetCrc(0);
-			pa->SetSegmentOffset(0);
-			pa->SetSegmentSize(0);
-			pa->SetDupeExpectedOffset(-1);
-			pa->SetDupeExpectedEnd(-1);
-		}
-	}
-}
-
-inline bool HistoryCoordinator::HistorySetParameter(HistoryInfo* historyInfo, const char* text)
-{
-	debug("Setting post-process-parameter '%s' for '%s'", text, historyInfo->GetName());
-
-	if (historyInfo->GetKind() != HistoryInfo::hkNzb && historyInfo->GetKind() != HistoryInfo::hkUrl)
-	{
-		error("Could not set post-process-parameter for %s: history item has wrong type", historyInfo->GetName());
-		return false;
-	}
-
-	size_t nameLen = 0;
-	const char* val = nzbget_rs_history_coord_split_param_assignment(text, &nameLen);
-	if (val)
-	{
-		std::string name(text, nameLen);
-		historyInfo->GetNzbInfo()->GetParameters()->SetParameter(name.c_str(), val);
-	}
-	else
-	{
-		error("Could not set post-process-parameter for %s: invalid argument: %s", historyInfo->GetNzbInfo()->GetName(), text);
-	}
-
-	return true;
-}
-
-inline bool HistoryCoordinator::HistorySetCategory(HistoryInfo* historyInfo, const char* text)
-{
-	debug("Setting category '%s' for '%s'", text, historyInfo->GetName());
-
-	if (historyInfo->GetKind() != HistoryInfo::hkNzb && historyInfo->GetKind() != HistoryInfo::hkUrl)
-	{
-		error("Could not set category for %s: history item has wrong type", historyInfo->GetName());
-		return false;
-	}
-
-	historyInfo->GetNzbInfo()->SetCategory(text);
-
-	return true;
-}
-
 inline bool HistoryCoordinator::HistorySetName(HistoryInfo* historyInfo, const char* text)
 {
 	debug("Setting name '%s' for '%s'", text, historyInfo->GetName());
@@ -36707,1460 +38490,10 @@ inline void HistoryCoordinator::HistorySetDupeParam(HistoryInfo* historyInfo, Do
 		}
 	}
 }
-
-inline void HistoryCoordinator::Redownload(DownloadQueue* downloadQueue, HistoryInfo* historyInfo)
-{
-	HistoryList::iterator it = downloadQueue->GetHistory()->Find(historyInfo);
-	HistoryRedownload(downloadQueue, it, historyInfo, true);
-}
-
-#
-inline bool DupeCoordinator::SameNameOrKey(const char* name1, const char* dupeKey1,
-	const char* name2, const char* dupeKey2)
-{
-	return nzbget_rs_dupecoord_same_name_or_key(name1, dupeKey1, name2, dupeKey2) != 0;
-}
-
-inline bool DupeCoordinator::FilesOnDisk(NzbInfo* nzbInfo)
-{
-	return nzbget_rs_dupecoord_files_on_disk(
-		nzbInfo->GetFinalDir(),
-		nzbInfo->GetDestDir(),
-		g_Options->GetExtCleanupDisk()) != 0;
-}
-
-inline NzbInfo* DupeCoordinator::DownloadedOnDisk(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	const int healthCheck = (int)g_Options->GetHealthCheck();
-	const char* targetDupeKey = nzbInfo->GetDupeKey();
-	const char* extCleanupDisk = g_Options->GetExtCleanupDisk();
-	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-	{
-		if (historyInfo->GetKind() != HistoryInfo::hkNzb)
-		{
-			continue;
-		}
-		NzbInfo* item = historyInfo->GetNzbInfo();
-		if (nzbget_rs_dupecoord_is_downloaded_on_disk_candidate(
-			healthCheck,
-			targetDupeKey,
-			item == nzbInfo ? 1 : 0,
-			(int)item->GetDeleteStatus(),
-			item->IsDupeSuccess() ? 1 : 0,
-			(int)item->GetMarkStatus(),
-			item->GetDupeKey(),
-			item->GetFinalDir(),
-			item->GetDestDir(),
-			extCleanupDisk) != 0)
-		{
-			return item;
-		}
-	}
-	return nullptr;
-}
-
-inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	debug("Checking duplicates for %s", nzbInfo->GetName());
-
-	// the release is already downloaded and on disk: another posting of it isn't
-	// needed (B70: Knife Edge S02E01 - asked again after its success, a different
-	// posting of the same release, scored higher, downloaded a second copy). Kept
-	// in history as a backup, in case the download on disk is deleted or marked bad.
-	if (nzbInfo->GetKind() == NzbInfo::nkNzb && nzbInfo->GetDupeMode() != dmForce)
-	{
-		if (NzbInfo* downloaded = DownloadedOnDisk(downloadQueue, nzbInfo))
-		{
-			nzbInfo->PrintMessage(Message::mkInfo, "Not downloading %s: %s is downloaded and on disk",
-				nzbInfo->GetName(), downloaded->GetName());
-			nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
-			return;
-		}
-	}
-
-	// find duplicates in download queue with exactly same content
-	for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
-	{
-		bool sameContent = nzbget_rs_dupecoord_same_content_hash(
-			nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
-			queuedNzbInfo->GetFullContentHash(), queuedNzbInfo->GetFilteredContentHash()) != 0;
-
-		// if there is a duplicate with exactly same content (via hash-check)
-		// in queue - the new item is skipped
-		if (queuedNzbInfo != nzbInfo && sameContent && nzbInfo->GetKind() == NzbInfo::nkNzb)
-		{
-			NzbgetRsBuf msgBuf = nzbget_rs_dupecoord_format_dupe_skip_message(
-				nzbInfo->GetName(), queuedNzbInfo->GetName(), 0, 1, 0);
-			std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
-			nzbget_rs_free(msgBuf);
-
-			if (nzbInfo->GetFeedId())
-			{
-				warn("%s", message.c_str());
-				// Flag saying QueueCoordinator to skip nzb-file
-				nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
-				g_HistoryCoordinator->DeleteDiskFiles(nzbInfo);
-			}
-			else
-			{
-				nzbInfo->SetDeleteStatus(NzbInfo::dsCopy);
-				nzbInfo->AddMessage(Message::mkWarning, message.c_str());
-			}
-
-			return;
-		}
-	}
-
-	// if download has empty dupekey and empty dupescore - check if download queue
-	// or history have an item with the same name and non empty dupekey or dupescore and
-	// take these properties from this item
-	if (Util::EmptyStr(nzbInfo->GetDupeKey()) && nzbInfo->GetDupeScore() == 0)
-	{
-		for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
-		{
-			if (nzbget_rs_dupecoord_should_inherit_dupe_props(
-				nzbInfo->GetName(), queuedNzbInfo->GetName(),
-				queuedNzbInfo->GetDupeKey(), queuedNzbInfo->GetDupeScore()) != 0)
-			{
-				nzbInfo->SetDupeKey(queuedNzbInfo->GetDupeKey());
-				nzbInfo->SetDupeScore(queuedNzbInfo->GetDupeScore());
-				info("Assigning dupekey %s and dupescore %i to %s from existing queue item with the same name",
-					 nzbInfo->GetDupeKey(), nzbInfo->GetDupeScore(), nzbInfo->GetName());
-				break;
-			}
-		}
-	}
-	if (Util::EmptyStr(nzbInfo->GetDupeKey()) && nzbInfo->GetDupeScore() == 0)
-	{
-		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-		{
-			if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
-				nzbget_rs_dupecoord_should_inherit_dupe_props(
-					nzbInfo->GetName(), historyInfo->GetNzbInfo()->GetName(),
-					historyInfo->GetNzbInfo()->GetDupeKey(), historyInfo->GetNzbInfo()->GetDupeScore()) != 0)
-			{
-				nzbInfo->SetDupeKey(historyInfo->GetNzbInfo()->GetDupeKey());
-				nzbInfo->SetDupeScore(historyInfo->GetNzbInfo()->GetDupeScore());
-				info("Assigning dupekey %s and dupescore %i to %s from existing history item with the same name",
-					 nzbInfo->GetDupeKey(), nzbInfo->GetDupeScore(), nzbInfo->GetName());
-				break;
-			}
-			if (historyInfo->GetKind() == HistoryInfo::hkDup &&
-				nzbget_rs_dupecoord_should_inherit_dupe_props(
-					nzbInfo->GetName(), historyInfo->GetDupInfo()->GetName(),
-					historyInfo->GetDupInfo()->GetDupeKey(), historyInfo->GetDupInfo()->GetDupeScore()) != 0)
-			{
-				nzbInfo->SetDupeKey(historyInfo->GetDupInfo()->GetDupeKey());
-				nzbInfo->SetDupeScore(historyInfo->GetDupInfo()->GetDupeScore());
-				info("Assigning dupekey %s and dupescore %i to %s from existing history item with the same name",
-					 nzbInfo->GetDupeKey(), nzbInfo->GetDupeScore(), nzbInfo->GetName());
-				break;
-			}
-		}
-	}
-
-	// find duplicates in history
-
-	bool skip = false;
-	bool good = false;
-	bool sameContent = false;
-	const char* dupeName = nullptr;
-
-	// find duplicates in history having exactly same content
-	// also: nzb-files having duplicates marked as good are skipped
-	// also (only in score mode): nzb-files having success-duplicates in dup-history but not having duplicates in recent history are skipped
-	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-	{
-		int outSameContent = 0;
-		int outGood = 0;
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-		{
-			NzbInfo* item = historyInfo->GetNzbInfo();
-			if (nzbget_rs_dupecoord_eval_history_dupe_match(
-				(int)HistoryInfo::hkNzb,
-				nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
-				(int)nzbInfo->GetDupeMode(), nzbInfo->GetDupeScore(),
-				nzbInfo->GetName(), nzbInfo->GetDupeKey(),
-				item->GetFullContentHash(), item->GetFilteredContentHash(),
-				(int)item->GetDupeMode(), (int)item->GetMarkStatus(), 0, item->GetDupeScore(),
-				item->GetName(), item->GetDupeKey(),
-				&outSameContent, &outGood) != 0)
-			{
-				skip = true;
-				sameContent = outSameContent != 0;
-				good = outGood != 0;
-				dupeName = item->GetName();
-				break;
-			}
-		}
-		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
-		{
-			DupInfo* dup = historyInfo->GetDupInfo();
-			if (nzbget_rs_dupecoord_eval_history_dupe_match(
-				(int)HistoryInfo::hkDup,
-				nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
-				(int)nzbInfo->GetDupeMode(), nzbInfo->GetDupeScore(),
-				nzbInfo->GetName(), nzbInfo->GetDupeKey(),
-				dup->GetFullContentHash(), dup->GetFilteredContentHash(),
-				(int)dup->GetDupeMode(), 0, (int)dup->GetStatus(), dup->GetDupeScore(),
-				dup->GetName(), dup->GetDupeKey(),
-				&outSameContent, &outGood) != 0)
-			{
-				skip = true;
-				sameContent = outSameContent != 0;
-				good = outGood != 0;
-				dupeName = dup->GetName();
-				break;
-			}
-		}
-	}
-
-	// With HealthCheck=dupe (B43) the same content in history decides by what became
-	// of it: only untried backups (and items the user deleted) - the nzb-file is
-	// downloaded as sent, not skipped as a copy (a client re-sending it would get
-	// nothing); a success - skipped, as before; a failure - skipped too (the same dead
-	// posting), but the best viable backup is fetched in its place when nothing of the
-	// key is queued, so the re-send still leads to a download
-	bool returnBackup = false;
-	if (skip && sameContent &&
-		g_Options->GetHealthCheck() == Options::hcDupe &&
-		nzbInfo->GetKind() == NzbInfo::nkNzb &&
-		nzbInfo->GetDupeHint() == NzbInfo::dhNone)
-	{
-		int succeeded = 0;
-		int failed = 0;
-		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-		{
-			if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-			{
-				NzbInfo* item = historyInfo->GetNzbInfo();
-				nzbget_rs_dupecoord_accum_hc_dupe_same_content_outcome(
-					(int)HistoryInfo::hkNzb,
-					nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
-					item->GetFullContentHash(), item->GetFilteredContentHash(),
-					(int)item->GetDeleteStatus(), item->IsDupeSuccess() ? 1 : 0, 0,
-					&succeeded, &failed);
-			}
-			else if (historyInfo->GetKind() == HistoryInfo::hkDup)
-			{
-				DupInfo* dup = historyInfo->GetDupInfo();
-				nzbget_rs_dupecoord_accum_hc_dupe_same_content_outcome(
-					(int)HistoryInfo::hkDup,
-					nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
-					dup->GetFullContentHash(), dup->GetFilteredContentHash(),
-					0, 0, (int)dup->GetStatus(),
-					&succeeded, &failed);
-			}
-		}
-		if (!succeeded && !failed)
-		{
-			info("Adding %s: the same content waits in history only as an untried backup", nzbInfo->GetName());
-			skip = false;
-			sameContent = false;
-		}
-		else if (failed && !succeeded)
-		{
-			returnBackup = !std::any_of(downloadQueue->GetQueue()->begin(), downloadQueue->GetQueue()->end(),
-				[nzbInfo](std::unique_ptr<NzbInfo>& queued)
-				{
-					return queued.get() != nzbInfo &&
-						queued->GetDeleteStatus() == NzbInfo::dsNone &&
-						SameNameOrKey(queued->GetName(), queued->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey());
-				});
-		}
-	}
-
-	if (!sameContent && nzbInfo->GetDupeHint() != NzbInfo::dhNone)
-	{
-		// dupe check when "download again" URLs: checking same content only
-		return;
-	}
-
-	if (!sameContent && !good && nzbInfo->GetDupeMode() == dmScore)
-	{
-		// nzb-files having success-duplicates in recent history (with different content) are added to history for backup
-		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-		{
-			if ((historyInfo->GetKind() == HistoryInfo::hkNzb ||
-				 historyInfo->GetKind() == HistoryInfo::hkUrl) &&
-				nzbget_rs_dupecoord_should_skip_recent_history_score_dupe(
-					sameContent ? 1 : 0, good ? 1 : 0,
-					(int)nzbInfo->GetDupeMode(), nzbInfo->GetDupeScore(),
-					nzbInfo->GetName(), nzbInfo->GetDupeKey(),
-					(int)historyInfo->GetKind(),
-					(int)historyInfo->GetNzbInfo()->GetDupeMode(),
-					historyInfo->GetNzbInfo()->GetDupeScore(),
-					historyInfo->GetNzbInfo()->IsDupeSuccess() ? 1 : 0,
-					historyInfo->GetNzbInfo()->GetName(),
-					historyInfo->GetNzbInfo()->GetDupeKey()) != 0)
-			{
-				// Flag saying QueueCoordinator to skip nzb-file
-				nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
-				info("Collection %s is a duplicate to %s", nzbInfo->GetName(), historyInfo->GetNzbInfo()->GetName());
-				return;
-			}
-		}
-	}
-
-	if (skip)
-	{
-		NzbgetRsBuf msgBuf = nzbget_rs_dupecoord_format_dupe_skip_message(
-			nzbInfo->GetName(), dupeName, 1, sameContent ? 1 : 0, good ? 1 : 0);
-		std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
-		nzbget_rs_free(msgBuf);
-
-		if (nzbInfo->GetFeedId() && nzbInfo->GetDupeHint() == NzbInfo::dhNone)
-		{
-			nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
-			warn("%s", message.c_str());
-			g_HistoryCoordinator->DeleteDiskFiles(nzbInfo);
-		}
-		else
-		{
-			nzbInfo->SetDeleteStatus(sameContent ? NzbInfo::dsCopy : NzbInfo::dsGood);
-			nzbInfo->AddMessage(Message::mkWarning, message.c_str());
-		}
-
-		if (returnBackup)
-		{
-			info("%s is the same posting as a failed download: fetching the best backup instead", nzbInfo->GetName());
-			ReturnBestDupe(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey());
-		}
-
-		return;
-	}
-
-	// find duplicates in download queue and post-queue and handle both items according to their scores:
-	// only one item remains in queue and another one is moved to history as dupe-backup
-	if (nzbInfo->GetDupeMode() == dmScore)
-	{
-		// find duplicates in download queue
-		int index = 0;
-		for (NzbList::iterator it = downloadQueue->GetQueue()->begin(); it != downloadQueue->GetQueue()->end(); index++)
-		{
-			NzbInfo* queuedNzbInfo = (*it++).get();
-			int action = nzbget_rs_dupecoord_eval_queue_score_dupe(
-				queuedNzbInfo == nzbInfo ? 1 : 0,
-				(int)queuedNzbInfo->GetDeleteStatus(),
-				queuedNzbInfo->GetKind() == NzbInfo::nkNzb ? 1 : 0,
-				(queuedNzbInfo->GetKind() == NzbInfo::nkUrl && nzbInfo->GetKind() == NzbInfo::nkUrl) ? 1 : 0,
-				(int)queuedNzbInfo->GetDupeMode(),
-				queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
-				nzbInfo->GetName(), nzbInfo->GetDupeKey(),
-				nzbInfo->GetDupeScore(), queuedNzbInfo->GetDupeScore(),
-				(int)g_Options->GetHealthCheck(),
-				queuedNzbInfo->GetDupeHint() == NzbInfo::dhRedownloadAuto ? 1 : 0,
-				queuedNzbInfo->GetCurrentSuccessArticles(),
-				queuedNzbInfo->CalcHealth(),
-				queuedNzbInfo->CalcCriticalHealth(true),
-				queuedNzbInfo->GetPostInfo() != nullptr ? 1 : 0);
-			if (action == 1)
-			{
-				// Flag saying QueueCoordinator to skip nzb-file
-				nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
-				info("Collection %s is a duplicate to %s", nzbInfo->GetName(), queuedNzbInfo->GetName());
-				return;
-			}
-			else if (action == 2)
-			{
-				// the existing queue item is moved to history as dupe-backup
-				info("Moving collection %s with lower duplicate score to history", queuedNzbInfo->GetName());
-				queuedNzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
-				int oldSize = downloadQueue->GetQueue()->size();
-				downloadQueue->EditEntry(queuedNzbInfo->GetId(),
-					DownloadQueue::eaGroupDelete, nullptr);
-				int newSize = downloadQueue->GetQueue()->size();
-				if (oldSize == newSize)
-				{
-					index++;
-				}
-				it = downloadQueue->GetQueue()->begin() + index;
-				index--;
-			}
-		}
-	}
-}
-
-inline void DupeCoordinator::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	debug("Processing duplicates for %s", nzbInfo->GetName());
-
-	if (FailsOver(nzbInfo) && !nzbInfo->IsDupeSuccess())
-	{
-		ReturnBestDupe(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey());
-	}
-
-	// one copy is downloaded and on disk: the others of its key still downloading,
-	// repairing or checking are stopped and kept as backups (B77: Sugar S01E01 - a
-	// copy kept repairing for minutes after another one had succeeded, then failed)
-	bool dupeHealth = g_Options->GetHealthCheck() == Options::hcDupe ||
-		g_Options->GetHealthCheck() == Options::hcPark;
-	if (dupeHealth && !Util::EmptyStr(nzbInfo->GetDupeKey()) &&
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
-		nzbInfo->IsDupeSuccess() && FilesOnDisk(nzbInfo))
-	{
-		DownloadQueue::EEditAction deleteAction = g_Options->GetHealthCheck() == Options::hcPark
-			? DownloadQueue::eaGroupParkDelete
-			: DownloadQueue::eaGroupDupeDelete;
-		std::vector<std::pair<int, bool>> others;	// id, in post-processing
-		for (NzbInfo* queued : downloadQueue->GetQueue())
-		{
-			if (nzbget_rs_dupecoord_is_other_to_stop_on_completed(
-				queued == nzbInfo ? 1 : 0,
-				queued->GetKind() == NzbInfo::nkNzb ? 1 : 0,
-				queued->GetDeleting() ? 1 : 0,
-				(int)queued->GetDeleteStatus(),
-				(int)queued->GetDupeMode(),
-				queued->GetDupeKey(),
-				nzbInfo->GetDupeKey()) != 0)
-			{
-				queued->PrintMessage(Message::mkInfo, "Stopping %s: %s is downloaded and on disk",
-					queued->GetName(), nzbInfo->GetName());
-				queued->SetDeleteStatus(NzbInfo::dsDupe);
-				others.emplace_back(queued->GetId(), queued->GetPostInfo() != nullptr);
-			}
-		}
-		for (const auto& other : others)
-		{
-			downloadQueue->EditEntry(other.first,
-				other.second ? DownloadQueue::eaPostDelete : deleteAction,
-				nullptr);
-		}
-	}
-}
-
-inline std::string DupeCoordinator::NoBackupReason(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	std::vector<HistoryInfo*> historyItems;
-	std::vector<NzbgetRsDupeHistoryCandidate> historyCandidates;
-	historyItems.reserve(downloadQueue->GetHistory()->size());
-	historyCandidates.reserve(downloadQueue->GetHistory()->size());
-	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-	{
-		historyItems.push_back(historyInfo);
-		NzbgetRsDupeHistoryCandidate c{};
-		c.kind = (int)historyInfo->GetKind();
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-		{
-			NzbInfo* item = historyInfo->GetNzbInfo();
-			c.dupe_mode = (int)item->GetDupeMode();
-			c.mark_status = (int)item->GetMarkStatus();
-			c.delete_status = (int)item->GetDeleteStatus();
-			c.alive_permille = AlivePermille(item);
-			c.health = item->CalcHealth();
-			c.critical_health = item->CalcCriticalHealth(true);
-			c.same_name_or_key = (item != nzbInfo &&
-				SameNameOrKey(item->GetName(), item->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey())) ? 1 : 0;
-		}
-		historyCandidates.push_back(c);
-	}
-
-	auto fileExistsCb = [](void* ctx, size_t idx) -> int {
-		auto* items = static_cast<std::vector<HistoryInfo*>*>(ctx);
-		return FileSystem::FileExists((*items)[idx]->GetNzbInfo()->GetQueuedFilename()) ? 1 : 0;
-	};
-
-	NzbgetRsBuf buf = nzbget_rs_dupecoord_no_backup_reason(
-		FailsOver(nzbInfo) ? 1 : 0,
-		(int)nzbInfo->GetDupeMode(),
-		historyCandidates.data(),
-		historyCandidates.size(),
-		&historyItems,
-		fileExistsCb);
-	std::string out(buf.data ? buf.data : "", buf.len);
-	nzbget_rs_free(buf);
-	return out;
-}
-
-inline bool DupeCoordinator::FailsOver(NzbInfo* nzbInfo)
-{
-	return nzbget_rs_dupecoord_fails_over(
-		g_Options->GetDupeCheck() ? 1 : 0, (int)nzbInfo->GetDupeMode(), (int)g_Options->GetHealthCheck()) != 0;
-}
-
-inline void DupeCoordinator::ReturnBestDupe(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* nzbName, const char* dupeKey)
-{
-	HistoryInfo* historyDupe = FindDupeBackup(downloadQueue, nzbInfo, nzbName, dupeKey);
-
-	// move that dupe-backup from history to download queue
-	if (historyDupe)
-	{
-		info("Found duplicate %s for %s", historyDupe->GetNzbInfo()->GetName(), nzbName);
-		historyDupe->GetNzbInfo()->SetDupeHint(NzbInfo::dhRedownloadAuto);
-		g_HistoryCoordinator->Redownload(downloadQueue, historyDupe);
-	}
-}
-
-inline HistoryInfo* DupeCoordinator::FindDupeBackup(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* nzbName, const char* dupeKey)
-{
-	std::vector<HistoryInfo*> historyItems;
-	std::vector<NzbgetRsDupeHistoryCandidate> historyCandidates;
-	historyItems.reserve(downloadQueue->GetHistory()->size());
-	historyCandidates.reserve(downloadQueue->GetHistory()->size());
-	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-	{
-		historyItems.push_back(historyInfo);
-		NzbgetRsDupeHistoryCandidate c{};
-		c.kind = (int)historyInfo->GetKind();
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
-		{
-			NzbInfo* item = historyInfo->GetNzbInfo();
-			c.dupe_mode = (int)item->GetDupeMode();
-			c.dupe_score = item->GetDupeScore();
-			c.is_dupe_success = item->IsDupeSuccess() ? 1 : 0;
-			c.mark_status = (int)item->GetMarkStatus();
-			c.delete_status = (int)item->GetDeleteStatus();
-			c.full_content_hash = item->GetFullContentHash();
-			c.alive_permille = AlivePermille(item);
-			c.health = item->CalcHealth();
-			c.critical_health = item->CalcCriticalHealth(true);
-			c.same_name_or_key = SameNameOrKey(item->GetName(), item->GetDupeKey(), nzbName, dupeKey) ? 1 : 0;
-		}
-		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
-		{
-			DupInfo* dup = historyInfo->GetDupInfo();
-			c.dupe_mode = (int)dup->GetDupeMode();
-			c.dupe_score = dup->GetDupeScore();
-			c.dup_status = (int)dup->GetStatus();
-			c.same_name_or_key = SameNameOrKey(dup->GetName(), dup->GetDupeKey(), nzbName, dupeKey) ? 1 : 0;
-		}
-		historyCandidates.push_back(c);
-	}
-
-	std::vector<NzbgetRsDupeQueueCandidate> queueCandidates;
-	queueCandidates.reserve(downloadQueue->GetQueue()->size());
-	for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
-	{
-		NzbgetRsDupeQueueCandidate q{};
-		q.is_self = (queuedNzbInfo == nzbInfo) ? 1 : 0;
-		q.is_nzb_kind = (queuedNzbInfo->GetKind() == NzbInfo::nkNzb) ? 1 : 0;
-		q.dupe_mode = (int)queuedNzbInfo->GetDupeMode();
-		q.dupe_score = queuedNzbInfo->GetDupeScore();
-		q.same_name_or_key = SameNameOrKey(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(), nzbName, dupeKey) ? 1 : 0;
-		queueCandidates.push_back(q);
-	}
-
-	auto fileExistsCb = [](void* ctx, size_t idx) -> int {
-		auto* items = static_cast<std::vector<HistoryInfo*>*>(ctx);
-		return FileSystem::FileExists((*items)[idx]->GetNzbInfo()->GetQueuedFilename()) ? 1 : 0;
-	};
-
-	int winner = nzbget_rs_dupecoord_select_dupe_backup(
-		nzbInfo != nullptr ? 1 : 0,
-		nzbInfo ? nzbInfo->GetFullContentHash() : 0,
-		g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0,
-		historyCandidates.data(),
-		historyCandidates.size(),
-		queueCandidates.data(),
-		queueCandidates.size(),
-		&historyItems,
-		fileExistsCb);
-
-	return winner >= 0 && (size_t)winner < historyItems.size() ? historyItems[(size_t)winner] : nullptr;
-}
-
-inline bool DupeCoordinator::DupeFailoverWarranted(int itemScore, int health, int backupScore)
-{
-	return nzbget_rs_dupecoord_failover_warranted(itemScore, health, backupScore) != 0;
-}
-
-inline void DupeCoordinator::HistoryMark(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, NzbInfo::EMarkStatus markStatus)
-{
-	int itemDupeMode = historyInfo->GetKind() == HistoryInfo::hkNzb ? (int)historyInfo->GetNzbInfo()->GetDupeMode() :
-		historyInfo->GetKind() == HistoryInfo::hkDup ? (int)historyInfo->GetDupInfo()->GetDupeMode() : 0;
-	int dupStatus = 0;
-	int postAction = 0;
-	const char* markStatusName = nzbget_rs_dupecoord_resolve_history_mark(
-		(int)markStatus,
-		g_Options->GetDupeCheck() ? 1 : 0,
-		(int)historyInfo->GetKind(),
-		itemDupeMode,
-		&dupStatus,
-		&postAction);
-	info("Marking %s as %s", historyInfo->GetName(), markStatusName);
-
-	if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-	{
-		historyInfo->GetNzbInfo()->SetMarkStatus(markStatus);
-		g_QueueScriptCoordinator->EnqueueScript(historyInfo->GetNzbInfo(), QueueScriptCoordinator::qeNzbMarked);
-	}
-	else if (historyInfo->GetKind() == HistoryInfo::hkDup)
-	{
-		historyInfo->GetDupInfo()->SetStatus((DupInfo::EStatus)dupStatus);
-	}
-	else
-	{
-		error("Could not mark %s as bad: history item has wrong type", historyInfo->GetName());
-		return;
-	}
-
-	if (postAction == 1)
-	{
-		HistoryCleanup(downloadQueue, historyInfo);
-	}
-	else if (postAction == 2)
-	{
-		const char* dupeKey = historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo()->GetDupeKey() :
-			historyInfo->GetKind() == HistoryInfo::hkDup ? historyInfo->GetDupInfo()->GetDupeKey() :
-			nullptr;
-		ReturnBestDupe(downloadQueue, nullptr, historyInfo->GetName(), dupeKey);
-	}
-}
-
-inline void DupeCoordinator::HistoryCleanup(DownloadQueue* downloadQueue, HistoryInfo* markHistoryInfo)
-{
-	const char* dupeKey = markHistoryInfo->GetKind() == HistoryInfo::hkNzb ? markHistoryInfo->GetNzbInfo()->GetDupeKey() :
-		markHistoryInfo->GetKind() == HistoryInfo::hkDup ? markHistoryInfo->GetDupInfo()->GetDupeKey() :
-		nullptr;
-	const char* nzbName = markHistoryInfo->GetKind() == HistoryInfo::hkNzb ? markHistoryInfo->GetNzbInfo()->GetName() :
-		markHistoryInfo->GetKind() == HistoryInfo::hkDup ? markHistoryInfo->GetDupInfo()->GetName() :
-		nullptr;
-	bool changed = false;
-	int index = 0;
-
-	// traversing in a reverse order to delete items in order they were added to history
-	// (just to produce the log-messages in a more logical order)
-	for (HistoryList::reverse_iterator it = downloadQueue->GetHistory()->rbegin(); it != downloadQueue->GetHistory()->rend(); )
-	{
-		HistoryInfo* historyInfo = (*it).get();
-		NzbInfo* nzbInfo = (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
-			? historyInfo->GetNzbInfo()
-			: nullptr;
-
-		if (nzbInfo && nzbget_rs_dupecoord_should_cleanup_history_dupe(
-			(int)historyInfo->GetKind(),
-			(int)nzbInfo->GetDupeMode(),
-			(int)nzbInfo->GetDeleteStatus(),
-			historyInfo == markHistoryInfo ? 1 : 0,
-			nzbInfo->GetName(),
-			nzbInfo->GetDupeKey(),
-			nzbName,
-			dupeKey) != 0)
-		{
-			g_HistoryCoordinator->HistoryHide(downloadQueue, historyInfo, index);
-			index++;
-			it = downloadQueue->GetHistory()->rbegin() + index;
-			changed = true;
-		}
-		else
-		{
-			++it;
-			index++;
-		}
-	}
-
-	if (changed)
-	{
-		downloadQueue->HistoryChanged();
-		downloadQueue->Save();
-	}
-}
-
-inline DupeCoordinator::EDupeStatus DupeCoordinator::GetDupeStatus(DownloadQueue* downloadQueue,
-	const char* name, const char* dupeKey)
-{
-	int statuses = (int)dsNone;
-
-	// find duplicates in download queue
-	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-	{
-		statuses = nzbget_rs_dupecoord_accumulate_queue_dupe_status(
-			statuses,
-			name,
-			dupeKey,
-			nzbInfo->GetName(),
-			nzbInfo->GetDupeKey(),
-			nzbInfo->GetSuccessArticles(),
-			nzbInfo->GetFailedArticles());
-	}
-
-	// find duplicates in history
-	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-	{
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-		{
-			NzbInfo* item = historyInfo->GetNzbInfo();
-			statuses = nzbget_rs_dupecoord_accumulate_history_dupe_status(
-				statuses,
-				(int)HistoryInfo::hkNzb,
-				name,
-				dupeKey,
-				item->GetName(),
-				item->GetDupeKey(),
-				item->MakeTextStatus(true),
-				0);
-		}
-		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
-		{
-			DupInfo* dup = historyInfo->GetDupInfo();
-			statuses = nzbget_rs_dupecoord_accumulate_history_dupe_status(
-				statuses,
-				(int)HistoryInfo::hkDup,
-				name,
-				dupeKey,
-				dup->GetName(),
-				dup->GetDupeKey(),
-				nullptr,
-				(int)dup->GetStatus());
-		}
-	}
-
-	return (EDupeStatus)statuses;
-}
-
-inline RawNzbList DupeCoordinator::ListHistoryDupes(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-{
-	RawNzbList dupeList;
-
-	// find duplicates in history
-	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-	{
-		NzbInfo* item = historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo() : nullptr;
-		if (item && nzbget_rs_dupecoord_should_list_history_dupe(
-			(int)nzbInfo->GetDupeMode(),
-			(int)historyInfo->GetKind(),
-			(int)item->GetDupeMode(),
-			item->GetName(),
-			item->GetDupeKey(),
-			nzbInfo->GetName(),
-			nzbInfo->GetDupeKey()) != 0)
-		{
-			dupeList.push_back(item);
-		}
-	}
-
-	return dupeList;
-}
-
-inline int DupeCoordinator::AlivePermille(NzbInfo* nzbInfo, const char* name)
-{
-	NzbParameter* parameter = nzbInfo->GetParameters()->Find(name);
-	if (!parameter || !parameter->GetValue())
-	{
-		return -1;
-	}
-	return nzbget_rs_dupecoord_parse_alive_permille(parameter->GetValue());
-}
-
-
-#endif /* HISTORYCOORDINATOR_H */
-
-
-inline ArticleDownloader::ArticleDownloader()
-	: m_fileInfo(nullptr)
-	, m_articleInfo(nullptr)
-	, m_writingStarted(false)
-{
-	debug("Creating ArticleDownloader");
-
-	SetLastUpdateTimeNow();
-}
-
-inline ArticleDownloader::~ArticleDownloader()
-{
-	debug("Destroying ArticleDownloader");
-
-#ifndef DISABLE_TLS
-	OpenSSL::StopSSLThread();
-#endif
-}
-
-inline void ArticleDownloader::SetInfoName(const char* infoName)
-{
-	m_infoName = infoName;
-	m_articleWriter.SetInfoName(m_infoName);
-}
-
-inline void ArticleDownloader::Run()
-{
-	debug("Entering ArticleDownloader-loop");
-
-	SetStatus(adRunning);
-
-	m_articleWriter.SetFileInfo(m_fileInfo);
-	m_articleWriter.SetArticleInfo(m_articleInfo);
-	m_articleWriter.Prepare();
-
-	EStatus status = adFailed;
-	int retries = g_Options->GetArticleRetries() > 0 ? g_Options->GetArticleRetries() : 1;
-	int remainedRetries = retries;
-	std::unique_ptr<NzbgetRsTransientRetries, decltype(&nzbget_rs_transient_retries_free)> transientRetries(
-		nzbget_rs_transient_retries_new(retries, g_Options->GetArticleInterval()),
-		nzbget_rs_transient_retries_free);
-	ServerPool::RawServerList failedServers;
-	failedServers.reserve(g_ServerPool->GetServers()->size());
-	NewsServer* wantServer = nullptr;
-	NewsServer* lastServer = nullptr;
-	int level = 0;
-	int serverConfigGeneration = g_ServerPool->GetGeneration();
-	bool force = m_fileInfo->GetNzbInfo()->GetForcePriority();
-
-	while (!IsStopped())
-	{
-		status = adFailed;
-
-		SetStatus(adWaiting);
-		while (!m_connection && !IsStopped() && serverConfigGeneration == g_ServerPool->GetGeneration())
-		{
-			if (nzbget_rs_transient_retries_is_empty(transientRetries.get()) != 0)
-			{
-				m_connection = g_ServerPool->GetConnection(level, wantServer, &failedServers);
-			}
-			else
-			{
-				ServerPool::RawServerList ignoreServers = failedServers;
-				std::vector<uintptr_t> waitingPtrs(g_ServerPool->GetServers()->size());
-				size_t waitingCount = nzbget_rs_transient_retries_waiting_servers(
-					transientRetries.get(), (int64)Util::CurrentTime(),
-					waitingPtrs.data(), waitingPtrs.size());
-				bool wantServerWaiting = false;
-				for (size_t wi = 0; wi < waitingCount; ++wi)
-				{
-					NewsServer* waitingServer = reinterpret_cast<NewsServer*>(waitingPtrs[wi]);
-					ignoreServers.push_back(waitingServer);
-					if (waitingServer == wantServer)
-					{
-						wantServerWaiting = true;
-					}
-				}
-				if (!wantServerWaiting)
-				{
-					m_connection = g_ServerPool->GetConnection(level, wantServer, &ignoreServers);
-				}
-			}
-			Util::Sleep(5);
-		}
-		SetLastUpdateTimeNow();
-		SetStatus(adRunning);
-
-		if (IsStopped() ||
-			((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
-			(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
-			serverConfigGeneration != g_ServerPool->GetGeneration())
-		{
-			status = adRetry;
-			break;
-		}
-
-		lastServer = m_connection->GetNewsServer();
-		level = lastServer->GetNormLevel();
-		remainedRetries = nzbget_rs_transient_retries_remained_retries(
-			transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer));
-
-		m_connection->SetSuppressErrors(false);
-
-#ifndef DISABLE_TLS
-		m_connection->SetCertVerifLevel(lastServer->GetCertVerificationLevel());
 #endif
 
-		{
-			NzbgetRsBuf connNameBuf = nzbget_rs_dqh_article_dl_format_connection_name(
-				m_connection->GetNewsServer()->GetName(), m_connection->GetHost());
-			m_connectionName.Set(connNameBuf.data ? connNameBuf.data : "", (int)connNameBuf.len);
-			nzbget_rs_free(connNameBuf);
-		}
+#endif
 
-		// check server retention
-		int fileAgeDays = 0;
-		bool retentionFailure = nzbget_rs_nntp_article_dl_is_retention_failure(
-			m_connection->GetNewsServer()->GetRetention(),
-			(int64)m_fileInfo->GetTime(),
-			(int64)Util::CurrentTime(),
-			&fileAgeDays) != 0;
-		if (retentionFailure)
-		{
-			detail("Article %s @ %s failed: out of server retention (file age: %i, configured retention: %i)",
-				*m_infoName, *m_connectionName, fileAgeDays,
-				m_connection->GetNewsServer()->GetRetention());
-			status = adFailed;
-			FreeConnection(true);
-		}
-
-		if (m_connection && !IsStopped())
-		{
-			detail("Downloading %s @ %s", *m_infoName, *m_connectionName);
-		}
-
-		// test connection
-		bool connected = m_connection && m_connection->Connect();
-		bool transientRetryScheduled = false;
-		bool authRejected = false;
-		if (!connected && m_connection && m_connection->GetAuthRejected())
-		{
-			if (nzbget_rs_transient_retries_register(
-				transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer), (int64)Util::CurrentTime()) != 0)
-			{
-				transientRetryScheduled = true;
-			}
-			else
-			{
-				authRejected = true;
-			}
-		}
-		if (connected && !IsStopped())
-		{
-			NewsServer* newsServer = m_connection->GetNewsServer();
-
-			// Download article
-			status = Download();
-
-			if (status == adTransientError)
-			{
-				if (nzbget_rs_transient_retries_register(
-					transientRetries.get(), reinterpret_cast<uintptr_t>(newsServer), (int64)Util::CurrentTime()) != 0)
-				{
-					status = adConnectError;
-					transientRetryScheduled = true;
-				}
-				else
-				{
-					status = adFailed;
-					remainedRetries = 0;
-				}
-			}
-
-			int success = 0, failed = 0;
-			if (nzbget_rs_nntp_article_dl_classify_attempt_stat(
-				(int)status,
-				(int)adFinished,
-				(int)adFailed,
-				(int)adNotFound,
-				(int)adCrcError,
-				&success,
-				&failed) != 0)
-			{
-				int serverId = newsServer->GetId();
-				m_serverStats.StatOp(serverId, success, failed, ServerStatList::soSet);
-				ServerVolume::Stats stats;
-				stats.bytes = 0;
-				stats.articles.failed = failed;
-				stats.articles.success = success;
-				g_StatMeter->AddServerStats(stats, serverId);
-			}
-		}
-
-		if (m_connection)
-		{
-			AddServerStats();
-		}
-
-		{
-			int shouldBreak = 0;
-			int statusInt = (int)status;
-			int crInt = m_contentRejected ? 1 : 0;
-			if (nzbget_rs_nntp_article_dl_handle_content_rejected(
-				crInt,
-				m_articleInfo->GetDupeFallbackRound(),
-				statusInt,
-				(int)adFailed,
-				remainedRetries,
-				&shouldBreak,
-				&statusInt,
-				&crInt,
-				&remainedRetries) != 0)
-			{
-				FreeConnection(false);
-				status = (EStatus)statusInt;
-				if (shouldBreak != 0)
-				{
-					break;
-				}
-				m_contentRejected = crInt != 0;
-			}
-		}
-
-		if (!connected && m_connection)
-		{
-			detail("Article %s @ %s failed: could not establish connection", *m_infoName, *m_connectionName);
-		}
-
-		int connInt = connected ? 1 : 0;
-		int statusInt = (int)status;
-		nzbget_rs_nntp_article_dl_normalize_connect_and_decrement_retries(
-			connInt, statusInt, (int)adConnectError, (int)adFailed, remainedRetries,
-			&connInt, &statusInt, &remainedRetries);
-		connected = connInt != 0;
-		status = (EStatus)statusInt;
-		nzbget_rs_transient_retries_set_remained_retries(
-			transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer), remainedRetries);
-
-		bool optionalBlocked = false;
-		if (!connected && m_connection && !IsStopped())
-		{
-			g_ServerPool->BlockServer(lastServer);
-			optionalBlocked = lastServer->GetOptional();
-		}
-
-		wantServer = nullptr;
-		if (connected && status == adFailed && remainedRetries > 0 && !retentionFailure)
-		{
-			wantServer = lastServer;
-		}
-		else
-		{
-			FreeConnection(status == adFinished || status == adNotFound);
-			if (transientRetryScheduled && m_fileInfo->GetNzbInfo()->HasDesiredServer())
-			{
-				wantServer = lastServer;
-			}
-		}
-
-		if (nzbget_rs_dqh_article_dl_is_terminal_loop_status(
-			(int)status, (int)adFinished, (int)adFatalError) != 0)
-		{
-			break;
-		}
-
-		if (IsStopped() ||
-			((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
-			(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
-			serverConfigGeneration != g_ServerPool->GetGeneration())
-		{
-			status = adRetry;
-			break;
-		}
-
-		if (nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
-			wantServer ? 1 : 0,
-			m_fileInfo->GetNzbInfo()->HasDesiredServer() ? 1 : 0) != 0)
-		{
-			status = adFailed;
-			break;
-		}
-
-		int pushFailedServer = 0;
-		if (nzbget_rs_nntp_article_dl_should_advance_server_list(
-			wantServer ? 1 : 0,
-			connected ? 1 : 0,
-			retentionFailure ? 1 : 0,
-			optionalBlocked ? 1 : 0,
-			authRejected ? 1 : 0,
-			&pushFailedServer) != 0)
-		{
-			if (pushFailedServer)
-			{
-				failedServers.push_back(lastServer);
-			}
-
-			size_t candCount = g_ServerPool->GetServers()->size();
-			std::vector<int32_t> candIds(candCount), candLevels(candCount), candGroups(candCount);
-			std::vector<uint8_t> candAvail(candCount);
-			size_t ci = 0;
-			for (NewsServer* candidateServer : g_ServerPool->GetServers())
-			{
-				candIds[ci] = candidateServer->GetId();
-				candLevels[ci] = candidateServer->GetNormLevel();
-				candGroups[ci] = candidateServer->GetGroup();
-				candAvail[ci] = (uint8_t)nzbget_rs_dqh_article_dl_is_server_available(
-					candidateServer->GetActive() ? 1 : 0,
-					candidateServer->GetMaxConnections(),
-					candidateServer->GetOptional() ? 1 : 0,
-					(candidateServer->GetOptional() && g_ServerPool->IsServerBlocked(candidateServer)) ? 1 : 0);
-				++ci;
-			}
-			size_t failCount = failedServers.size();
-			std::vector<int32_t> failIds(failCount), failLevels(failCount), failGroups(failCount);
-			for (size_t fi = 0; fi < failCount; ++fi)
-			{
-				failIds[fi] = failedServers[fi]->GetId();
-				failLevels[fi] = failedServers[fi]->GetNormLevel();
-				failGroups[fi] = failedServers[fi]->GetGroup();
-			}
-			bool allServersOnLevelFailed = nzbget_rs_nntp_article_dl_all_servers_on_level_failed(
-				level, candIds.data(), candLevels.data(), candGroups.data(), candAvail.data(), candCount,
-				failIds.data(), failLevels.data(), failGroups.data(), failCount) != 0;
-
-			int advanceLevel = 0;
-			int newLevel = level;
-			int breakAllFailed = 0;
-			nzbget_rs_nntp_article_dl_eval_level_exhaustion(
-				allServersOnLevelFailed ? 1 : 0, level, g_ServerPool->GetMaxNormLevel(),
-				&advanceLevel, &newLevel, &breakAllFailed);
-			if (advanceLevel != 0)
-			{
-				detail("Article %s @ all level %i servers failed, increasing level", *m_infoName, level);
-				level = newLevel;
-			}
-			else if (breakAllFailed != 0)
-			{
-				detail("Article %s @ all servers failed", *m_infoName);
-				status = adFailed;
-				break;
-			}
-
-			remainedRetries = retries;
-		}
-	}
-
-	FreeConnection(status == adFinished);
-
-	bool stopped = IsStopped();
-	status = (EStatus)nzbget_rs_nntp_article_dl_resolve_final_status(
-		(int)status,
-		m_articleWriter.GetDuplicate() ? 1 : 0,
-		stopped ? 1 : 0,
-		(int)adFinished, (int)adFailed, (int)adRetry, (int)adFatalError);
-	if (stopped)
-	{
-		detail("Download %s cancelled", *m_infoName);
-	}
-
-	if (status == adFailed && nzbget_rs_transient_retries_is_exhausted(transientRetries.get()) != 0)
-	{
-		detail("Download %s failed: temporary server errors outlasted all attempts, the article may still exist", *m_infoName);
-	}
-	else if (status == adFailed)
-	{
-		detail("Download %s failed", *m_infoName);
-	}
-
-	SetStatus(status);
-	Notify(nullptr);
-
-	debug("Exiting ArticleDownloader-loop");
-}
-
-inline ArticleDownloader::EStatus ArticleDownloader::Download()
-{
-	const char* response = nullptr;
-	EStatus status = adRunning;
-	m_writingStarted = false;
-	m_localWriteError = false;
-	m_contentRejected = false;
-	m_articleInfo->SetCrc(0);
-
-	if (m_contentAnalyzer)
-	{
-		m_contentAnalyzer->Reset();
-	}
-
-	if (m_connection->GetNewsServer()->GetJoinGroup() && !m_fileInfo->GetGroups()->empty())
-	{
-		for (CString& group : m_fileInfo->GetGroups())
-		{
-			response = m_connection->JoinGroup(group);
-			if (nzbget_rs_nntp_article_dl_is_join_group_ok(response) != 0)
-			{
-				break;
-			}
-		}
-
-		status = CheckResponse(response, "could not join group");
-		if (status != adFinished)
-		{
-			return status;
-		}
-	}
-
-	// retrieve article
-	{
-		NzbgetRsBuf cmdBuf = nzbget_rs_dqh_article_dl_format_fetch_command(
-			g_Options->GetRawArticle() ? 1 : 0, m_articleInfo->GetMessageId());
-		response = m_connection->Request(cmdBuf.data ? cmdBuf.data : "");
-		nzbget_rs_free(cmdBuf);
-	}
-
-	status = CheckResponse(response, "could not fetch article");
-	if (status != adFinished)
-	{
-		return status;
-	}
-
-	m_decoder.Clear();
-	m_decoder.SetCrcCheck(g_Options->GetCrcCheck());
-	m_decoder.SetRawMode(g_Options->GetRawArticle());
-
-	status = adRunning;
-	int readChunk = g_Options->GetArticleReadChunkSize();
-	CharBuffer lineBuf(readChunk + 128);
-
-	while (nzbget_rs_dqh_article_dl_should_continue_read_loop(
-		IsStopped() ? 1 : 0, m_decoder.GetEof() ? 1 : 0) != 0)
-	{
-		if (!IsStopped() && !m_articleWriter.HasCachedBuffer() &&
-			g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL &&
-			g_ArticleCache && g_ArticleCache->GetFlushing())
-		{
-			Util::Sleep(10);
-		}
-
-		// throttle the bandwidth
-		while (!IsStopped() && (g_WorkState->GetSpeedLimit() > 0.0f) &&
-			(g_StatMeter->CalcCurrentDownloadSpeed() > g_WorkState->GetSpeedLimit() ||
-			 g_StatMeter->CalcMomentaryDownloadSpeed() > g_WorkState->GetSpeedLimit()))
-		{
-			SetLastUpdateTimeNow();
-			Util::Sleep(10);
-		}
-
-		char* buffer;
-		int len;
-		m_connection->ReadBuffer(&buffer, &len);
-		if (len == 0)
-		{
-			len = m_connection->TryRecv(lineBuf, readChunk);
-			buffer = lineBuf;
-		}
-
-		// have we encountered a timeout?
-		if (len <= 0)
-		{
-			if (!IsStopped())
-			{
-				detail("Article %s @ %s failed: Unexpected end of article", *m_infoName, *m_connectionName);
-			}
-			m_connection->SetBroken();
-			m_connection->Disconnect();
-			status = adFailed;
-			break;
-		}
-
-		g_StatMeter->AddSpeedReading(len);
-		time_t oldTime = m_lastUpdateTime;
-		SetLastUpdateTimeNow();
-		if (oldTime != m_lastUpdateTime)
-		{
-			AddServerStats();
-		}
-
-		// decode article data
-		len = m_decoder.DecodeBuffer(buffer, len);
-
-		// write to output file
-		if (len > 0 && !Write(buffer, len))
-		{
-			int crInt = 0;
-			status = (EStatus)nzbget_rs_nntp_article_dl_classify_write_failure(
-				m_localWriteError ? 1 : 0, (int)adFatalError, (int)adFailed, &crInt);
-			if (crInt != 0)
-			{
-				m_contentRejected = true;
-			}
-			break;
-		}
-	}
-
-	if (IsStopped())
-	{
-		status = adFailed;
-	}
-
-	if (nzbget_rs_dqh_article_dl_should_run_decode_check(
-		(int)status, (int)adRunning) != 0)
-	{
-		FreeConnection(true);
-		status = DecodeCheck();
-	}
-
-	if (m_writingStarted)
-	{
-		m_articleWriter.Finish(status == adFinished);
-	}
-
-	if (status == adFinished)
-	{
-		detail("Successfully downloaded %s", *m_infoName);
-	}
-
-	return status;
-}
-
-inline ArticleDownloader::EStatus ArticleDownloader::CheckResponse(const char* response, const char* comment)
-{
-	EStatus status = (EStatus)nzbget_rs_article_downloader_check_response(
-		response, m_connection->GetAuthError() ? 1 : 0);
-	if (status != adFinished)
-	{
-		if (!response)
-		{
-			if (!IsStopped())
-			{
-				detail("Article %s @ %s failed, %s: Connection closed by remote host",
-					*m_infoName, *m_connectionName, comment);
-			}
-		}
-		else
-		{
-			detail("Article %s @ %s failed, %s: %s", *m_infoName, *m_connectionName, comment, response);
-		}
-	}
-	return status;
-}
-
-inline bool ArticleDownloader::Write(char* buffer, int len)
-{
-	const char* articleFilename = nullptr;
-	int64 articleFileSize = 0;
-	int64 articleOffset = 0;
-	int articleSize = 0;
-
-	if (!m_writingStarted)
-	{
-		if (!g_Options->GetRawArticle())
-		{
-			articleFilename = m_decoder.GetArticleFilename();
-			if (m_decoder.GetFormat() == Decoder::efYenc)
-			{
-				int64 beginPos = m_decoder.GetBeginPos();
-				int64 endPos = m_decoder.GetEndPos();
-				articleFileSize = m_decoder.GetSize();
-				int64 expectedFileSize = m_fileInfo->GetDecodedFileSize();
-				int64 dupeExpectedOffset = m_articleInfo->GetDupeExpectedOffset();
-				int64 dupeExpectedEnd = m_articleInfo->GetDupeExpectedEnd();
-				int rc = nzbget_rs_article_downloader_validate_yenc(
-					beginPos, endPos, articleFileSize, expectedFileSize,
-					m_articleInfo->GetDupeFallbackRound(), dupeExpectedOffset, dupeExpectedEnd,
-					&articleOffset, &articleSize);
-				if (rc == 1)
-				{
-					return false;
-				}
-				if (rc == 2)
-				{
-					warn("Malformed article %s: range %lli-%lli out of range (file size %lli)", *m_infoName,
-						(long long)beginPos, (long long)endPos, (long long)articleFileSize);
-					return false;
-				}
-				m_decodedFileSize = articleFileSize;
-				if (rc == 3)
-				{
-					detail("Discarding article %s from duplicate: file size mismatch (%lli vs %lli)",
-						*m_infoName, (long long)articleFileSize, (long long)expectedFileSize);
-					return false;
-				}
-				if (rc == 4)
-				{
-					detail("Discarding article %s from duplicate: decoded offset mismatch (%lli vs %lli)",
-						*m_infoName, (long long)(beginPos - 1), (long long)dupeExpectedOffset);
-					return false;
-				}
-				if (rc == 5)
-				{
-					detail("Discarding article %s from duplicate: decoded end mismatch (%lli vs %lli)",
-						*m_infoName, (long long)endPos, (long long)dupeExpectedEnd);
-					return false;
-				}
-			}
-		}
-
-		if (!m_articleWriter.Start(m_decoder.GetFormat(), articleFilename, articleFileSize, articleOffset, articleSize))
-		{
-			m_localWriteError = true;
-			return false;
-		}
-		m_writingStarted = true;
-	}
-
-	bool ok = m_articleWriter.Write(buffer, len);
-	if (!ok)
-	{
-		m_localWriteError = true;
-	}
-
-	if (m_contentAnalyzer)
-	{
-		m_contentAnalyzer->Append(buffer, len);
-	}
-
-	return ok;
-}
-
-inline ArticleDownloader::EStatus ArticleDownloader::DecodeCheck()
-{
-	bool rawArticle = g_Options->GetRawArticle();
-	if (rawArticle)
-	{
-		return adFinished;
-	}
-	Decoder::EStatus status = m_decoder.Check();
-	bool isYenc = m_decoder.GetFormat() == Decoder::efYenc;
-	switch (nzbget_rs_nntp_article_dl_classify_decode_status(
-		0, (int)status, isYenc ? 1 : 0, m_articleWriter.GetRangeExceeded() ? 1 : 0))
-	{
-		case 1:
-			if (m_decoder.GetArticleFilename())
-			{
-				m_articleFilename = m_decoder.GetArticleFilename();
-			}
-			if (isYenc)
-			{
-				m_articleInfo->SetCrc(nzbget_rs_dqh_article_dl_select_yenc_crc(
-					g_Options->GetCrcCheck() ? 1 : 0,
-					m_decoder.GetCalculatedCrc(), m_decoder.GetExpectedCrc()));
-			}
-			return adFinished;
-		case 2:
-			detail("Decoding %s failed: more data than its range", *m_infoName);
-			return adFailed;
-		case 3:
-			detail("Decoding %s failed: CRC-Error", *m_infoName);
-			return adCrcError;
-		case 4:
-			detail("Decoding %s failed: article incomplete", *m_infoName);
-			return adFailed;
-		case 5:
-			detail("Decoding %s failed: size mismatch", *m_infoName);
-			return adFailed;
-		case 6:
-			detail("Decoding %s failed: no binary data found", *m_infoName);
-			return adFailed;
-		default:
-			detail("Decoding %s failed", *m_infoName);
-			return adFailed;
-	}
-}
-
-inline void ArticleDownloader::SetLastUpdateTimeNow()
-{
-	m_lastUpdateTime = Util::CurrentTime();
-}
-
-inline void ArticleDownloader::LogDebugInfo()
-{
-	info("      Download: status=%i, LastUpdateTime=%s, InfoName=%s", m_status,
-		 *Util::FormatTime(m_lastUpdateTime.load()), *m_infoName);
-}
-
-inline void ArticleDownloader::Stop()
-{
-	debug("Trying to stop ArticleDownloader");
-	Thread::Stop();
-	Guard guard(m_connectionMutex);
-	if (m_connection)
-	{
-		m_connection->SetSuppressErrors(true);
-		m_connection->Cancel();
-	}
-	debug("ArticleDownloader stopped successfully");
-}
-
-inline void ArticleDownloader::FreeConnection(bool keepConnected)
-{
-	if (m_connection)
-	{
-		debug("Releasing connection");
-		Guard guard(m_connectionMutex);
-		if (!keepConnected || m_connection->GetStatus() == Connection::csCancelled)
-		{
-			m_connection->Disconnect();
-		}
-		AddServerStats();
-		g_ServerPool->FreeConnection(m_connection, true);
-		m_connection = nullptr;
-	}
-}
-
-inline void ArticleDownloader::AddServerStats()
-{
-	int serverId = m_connection->GetNewsServer()->GetId();
-	int bytesRead = m_connection->FetchTotalBytesRead();
-	ServerVolume::Stats stats;
-	stats.bytes = Util::SafeIntCast<int, uint32>(bytesRead);
-	stats.articles.failed = 0;
-	stats.articles.success = 0;
-	g_StatMeter->AddServerStats(stats, serverId);
-	m_downloadedSize += bytesRead;
-}
 
 static const int MAX_ID = 1000000000;
 
@@ -39179,545 +39512,6 @@ inline void QueueEditor::SortGroupFiles(NzbInfo* nzbInfo)
 inline bool QueueEditor::DeleteUrl(NzbInfo* nzbInfo, DownloadQueue::EEditAction action)
 {
 	return g_UrlCoordinator->DeleteQueueEntry(m_downloadQueue, nzbInfo, action == DownloadQueue::eaGroupFinalDelete);
-}
-
-namespace DupeProbeDetail
-{
-	inline constexpr int ConnectionWaitSec = 10;
-	inline constexpr int ProbeLimitSec = 90;
-
-	inline Mutex g_probeMutex;
-	inline std::set<DupeProbe*> g_probes;
-	inline std::atomic<int> g_probeCount{0};
-	inline bool g_probesStopping = false;
-}
-
-inline std::vector<size_t> DupeProbe::SampleIndexes(size_t total, int count)
-{
-	std::vector<size_t> indexes;
-	if (total == 0 || count <= 0)
-	{
-		return indexes;
-	}
-
-	size_t wanted = std::min(total, (size_t)count);
-	indexes.resize(wanted);
-	nzbget_rs_dupe_probe_sample_indexes(total, count, indexes.data(), indexes.size());
-	return indexes;
-}
-
-inline DupeProbe::EAnswer DupeProbe::Classify(const char* response)
-{
-	return (EAnswer)nzbget_rs_dupe_probe_classify(response);
-}
-
-inline bool DupeProbe::IsDead(int existing, int definitiveServers, int activeServers)
-{
-	return nzbget_rs_dupe_probe_is_dead(existing, definitiveServers, activeServers) != 0;
-}
-
-inline void DupeProbe::Start(int nzbId, std::vector<Sample> samples, int recoveredAtStart)
-{
-	DupeProbe* probe = new DupeProbe(nzbId, std::move(samples));
-	probe->m_recoveredAtStart = recoveredAtStart;
-	if (!probe->Register())
-	{
-		delete probe;
-		return;
-	}
-	probe->SetAutoDestroy(true);
-	probe->Thread::Start();
-}
-
-inline DupeProbe::Verdict DupeProbe::Check(std::vector<Sample> samples, int limitSec)
-{
-	DupeProbe probe(0, std::move(samples));
-	if (!probe.Register())
-	{
-		Verdict stopping;
-		stopping.Finished = false;
-		return stopping;
-	}
-	Verdict verdict = probe.Measure(limitSec);
-	probe.Unregister();
-	return verdict;
-}
-
-inline void DupeProbe::Reset()
-{
-	using namespace DupeProbeDetail;
-	Guard guard(g_probeMutex);
-	g_probesStopping = false;
-}
-
-inline int DupeProbe::ProbingFor(int nzbId)
-{
-	using namespace DupeProbeDetail;
-	Guard guard(g_probeMutex);
-	for (DupeProbe* probe : g_probes)
-	{
-		if (probe->m_nzbId == nzbId && !probe->m_countAll)
-		{
-			return std::max(0, (int)(Util::CurrentTime() - probe->m_started));
-		}
-	}
-	return -1;
-}
-
-inline bool DupeProbe::Register()
-{
-	using namespace DupeProbeDetail;
-	Guard guard(g_probeMutex);
-	if (g_probesStopping)
-	{
-		return false;
-	}
-	m_started = Util::CurrentTime();
-	g_probes.insert(this);
-	g_probeCount++;
-	return true;
-}
-
-inline void DupeProbe::Unregister()
-{
-	using namespace DupeProbeDetail;
-	Guard guard(g_probeMutex);
-	g_probes.erase(this);
-	g_probeCount--;
-}
-
-inline std::vector<DupeProbe::Sample> DupeProbe::SamplesOf(const std::vector<FileInfo*>& files,
-	const std::function<void(FileInfo*)>& loadArticles)
-{
-	size_t total = 0;
-	for (FileInfo* fileInfo : files)
-	{
-		total += fileInfo->GetTotalArticles();
-	}
-
-	std::vector<Sample> samples;
-	for (size_t position : SampleIndexes(total, SampleCount))
-	{
-		size_t offset = 0;
-		for (FileInfo* fileInfo : files)
-		{
-			size_t count = fileInfo->GetTotalArticles();
-			if (position >= offset + count)
-			{
-				offset += count;
-				continue;
-			}
-			size_t index = position - offset;
-
-			if (fileInfo->GetArticles()->empty() && loadArticles)
-			{
-				loadArticles(fileInfo);
-			}
-			if (index < fileInfo->GetArticles()->size())
-			{
-				Sample sample;
-				sample.MessageId = fileInfo->GetArticles()->at(index)->GetMessageId();
-				sample.Groups = std::make_shared<std::vector<CString>>();
-				for (const CString& group : *fileInfo->GetGroups())
-				{
-					sample.Groups->emplace_back(*group);
-				}
-				samples.push_back(std::move(sample));
-			}
-			break;
-		}
-	}
-	return samples;
-}
-
-inline void DupeProbe::StopAll()
-{
-	using namespace DupeProbeDetail;
-	Guard guard(g_probeMutex);
-	g_probesStopping = true;
-	for (DupeProbe* probe : g_probes)
-	{
-		probe->Thread::Stop();
-		probe->Cancel();
-	}
-}
-
-inline void DupeProbe::WaitAll()
-{
-	using namespace DupeProbeDetail;
-	while (g_probeCount > 0)
-	{
-		Util::Sleep(20);
-	}
-}
-
-inline void DupeProbe::Cancel()
-{
-	if (m_connection)
-	{
-		m_connection->SetSuppressErrors(true);
-		m_connection->Cancel();
-	}
-}
-
-inline bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& result)
-{
-	using namespace DupeProbeDetail;
-	NewsServer* wanted = g_ServerPool->GetServerById(serverId);
-	if (!wanted)
-	{
-		return false;
-	}
-
-	NntpConnection* connection = nullptr;
-	time_t waitStart = Util::CurrentTime();
-	while (!connection && !IsStopped() && Util::CurrentTime() - waitStart <= ConnectionWaitSec)
-	{
-		connection = g_ServerPool->GetConnection(wanted->GetNormLevel(), wanted, nullptr);
-		if (!connection)
-		{
-			Util::Sleep(50);
-		}
-	}
-	if (!connection)
-	{
-		time_t blockTime = wanted->GetBlockTime();
-		result.Unreachable = g_ServerPool->IsServerBlocked(wanted) ||
-			(blockTime > 0 && Util::CurrentTime() - blockTime < RecentBlockSec);
-		return false;
-	}
-
-	NewsServer* server = connection->GetNewsServer();
-	bool fresh = probed.insert(server->GetId()).second;
-	bool probedServer = false;
-	if (fresh)
-	{
-		{
-			Guard guard(g_probeMutex);
-			m_connection = connection;
-		}
-
-		int remaining = (int)m_samples.size();
-		for (size_t index = 0; index < m_samples.size(); index++)
-		{
-			const Sample& sample = m_samples[index];
-			if (IsStopped())
-			{
-				break;
-			}
-			remaining--;
-			if (m_found[index])
-			{
-				continue;
-			}
-
-			if (!connection->Connect())
-			{
-				result.Unknown += remaining + 1;
-				result.Unreachable = result.Exists + result.Missing == 0;
-				break;
-			}
-
-			if (server->GetJoinGroup())
-			{
-				const char* joined = nullptr;
-				for (const CString& group : *sample.Groups)
-				{
-					joined = connection->JoinGroup(group);
-					if (joined && !strncmp(joined, "2", 1))
-					{
-						break;
-					}
-				}
-				if (!joined || strncmp(joined, "2", 1))
-				{
-					result.Unknown += remaining + 1;
-					if (!joined)
-					{
-						connection->Disconnect();
-					}
-					break;
-				}
-			}
-
-			BString<1024> statCmd("STAT %s\r\n", *sample.MessageId);
-			const char* response = connection->Request(statCmd);
-			if (!response)
-			{
-				connection->Disconnect();
-				result.Unknown += remaining + 1;
-				break;
-			}
-
-			switch (Classify(response))
-			{
-				case daExists:
-					result.Exists++;
-					m_found[index] = 1;
-					if (m_foundOn.empty())
-					{
-						m_foundOn = std::string(server->GetName()) + " (" + *sample.MessageId + ")";
-					}
-					break;
-				case daMissing:
-					result.Missing++;
-					break;
-				case daUnknown:
-					result.Unknown++;
-					break;
-			}
-
-			int foundCount = (int)std::count(m_found.begin(), m_found.end(), 1);
-			if (!m_countAll && foundCount >= MinAliveSamples)
-			{
-				break;
-			}
-		}
-		probedServer = true;
-	}
-
-	{
-		Guard guard(g_probeMutex);
-		m_connection = nullptr;
-	}
-	if (IsStopped() || connection->GetStatus() == Connection::csCancelled)
-	{
-		connection->Disconnect();
-	}
-	g_ServerPool->FreeConnection(connection, true);
-	return probedServer;
-}
-
-inline DupeProbe::Verdict DupeProbe::Measure(int limitSec)
-{
-	Verdict verdict;
-	Servers* servers = g_ServerPool->GetServers();
-	std::vector<uint8_t> srvActive;
-	std::vector<int32_t> srvGroups;
-	std::vector<int32_t> srvLevels;
-	std::vector<int32_t> srvIds;
-	srvActive.reserve(servers->size());
-	srvGroups.reserve(servers->size());
-	srvLevels.reserve(servers->size());
-	srvIds.reserve(servers->size());
-	for (NewsServer* server : servers)
-	{
-		srvActive.push_back(server->GetActive() ? 1 : 0);
-		srvGroups.push_back(server->GetGroup());
-		srvLevels.push_back(server->GetNormLevel());
-		srvIds.push_back(server->GetId());
-	}
-	std::vector<int32_t> order(servers->size());
-	size_t orderLen = nzbget_rs_dupe_probe_select_server_order(
-		srvActive.data(), srvGroups.data(), srvLevels.data(), srvIds.data(),
-		servers->size(), order.data(), order.size());
-	order.resize(orderLen);
-	verdict.ActiveServers = (int)orderLen;
-
-	std::set<int> probed;
-	time_t start = Util::CurrentTime();
-
-	for (int serverId : order)
-	{
-		if (IsStopped() || Util::CurrentTime() - start > limitSec)
-		{
-			verdict.Finished = false;
-			break;
-		}
-
-		ServerResult result;
-		bool reached = ProbeServer(serverId, probed, result);
-		if (result.Unreachable)
-		{
-			verdict.ActiveServers--;
-			verdict.UnreachableServers++;
-		}
-		if (!reached)
-		{
-			continue;
-		}
-		verdict.ReachedServers++;
-
-		verdict.Existing = (int)std::count(m_found.begin(), m_found.end(), 1);
-		verdict.FoundOn = m_foundOn;
-		if (m_countAll)
-		{
-			if (verdict.Existing == (int)m_samples.size())
-			{
-				break;
-			}
-			continue;
-		}
-		if (verdict.Existing >= MinAliveSamples)
-		{
-			break;
-		}
-		if (result.Unknown == 0 && result.Exists + result.Missing > 0)
-		{
-			verdict.MissingServers++;
-		}
-	}
-	if (IsStopped())
-	{
-		verdict.Finished = false;
-	}
-	return verdict;
-}
-
-inline void DupeProbe::StartRecheck(int nzbId, std::vector<Sample> samples)
-{
-	DupeProbe* probe = new DupeProbe(nzbId, std::move(samples));
-	probe->m_countAll = true;
-	probe->m_found.assign(probe->m_samples.size(), 0);
-	if (!probe->Register())
-	{
-		delete probe;
-		return;
-	}
-	probe->SetAutoDestroy(true);
-	probe->Thread::Start();
-}
-
-inline void DupeProbe::Recheck()
-{
-	Verdict verdict = Measure(RecheckLimitSec);
-	if (IsStopped() || !verdict.Finished)
-	{
-		return;
-	}
-
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-	{
-		if (historyInfo->GetKind() != HistoryInfo::hkNzb || historyInfo->GetNzbInfo()->GetId() != m_nzbId)
-		{
-			continue;
-		}
-		NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-		int sampled = (int)m_samples.size();
-		const char* duplicateQueuedName = "";
-		if (verdict.ReachedServers > 0 && verdict.Existing * 2 >= sampled)
-		{
-			for (NzbInfo* queued : downloadQueue->GetQueue())
-			{
-				if (DupeCoordinator::SameNameOrKey(queued->GetName(), queued->GetDupeKey(),
-					nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-				{
-					duplicateQueuedName = queued->GetName();
-					break;
-				}
-			}
-		}
-
-		int outcome = 0;
-		NzbgetRsBuf msgBuf = nzbget_rs_dupe_probe_eval_recheck_outcome(
-			verdict.Existing, sampled, verdict.ReachedServers, duplicateQueuedName, &outcome);
-		std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
-		nzbget_rs_free(msgBuf);
-
-		nzbInfo->PrintMessage(Message::mkInfo, "%s", message.c_str());
-		if (outcome == 1)
-		{
-			nzbInfo->GetParameters()->SetParameter("*DupeRecheck", nullptr);
-			return;
-		}
-		if (outcome == 2)
-		{
-			return;
-		}
-		if (outcome == 3)
-		{
-			IdList ids = { historyInfo->GetId() };
-			downloadQueue->EditList(&ids, nullptr, DownloadQueue::mmId, DownloadQueue::eaHistoryRetryFailed, nullptr);
-		}
-		break;
-	}
-}
-
-inline void DupeProbe::Run()
-{
-	using namespace DupeProbeDetail;
-	if (m_countAll)
-	{
-		Recheck();
-		Unregister();
-		return;
-	}
-
-	Verdict verdict = Measure(ProbeLimitSec);
-	if (IsStopped())
-	{
-		Unregister();
-		return;
-	}
-
-	int sampled = (int)m_samples.size();
-	int outcome = 0;
-	NzbgetRsBuf msgBuf = nzbget_rs_dupe_probe_eval_run_outcome(
-		verdict.Existing,
-		sampled,
-		verdict.MissingServers,
-		verdict.ActiveServers,
-		verdict.UnreachableServers,
-		verdict.ReachedServers,
-		verdict.Finished ? 1 : 0,
-		verdict.FoundOn.c_str(),
-		&outcome);
-	std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
-	nzbget_rs_free(msgBuf);
-
-	if (outcome == 1)
-	{
-		Note(Message::mkInfo, "%s", message.c_str());
-		Abandon(verdict.MissingServers, verdict.ActiveServers);
-	}
-	else if (outcome == 2)
-	{
-		Note(Message::mkInfo, "%s", message.c_str());
-	}
-	else if (outcome == 3)
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
-		if (nzbInfo)
-		{
-			nzbInfo->SetDeadPickProbed(false);
-			nzbInfo->PrintMessage(Message::mkDetail, "%s", message.c_str());
-		}
-	}
-	else if (outcome == 4)
-	{
-		Note(Message::mkInfo, "%s", message.c_str());
-	}
-
-	Unregister();
-}
-
-inline void DupeProbe::Note(Message::EKind kind, const char* format, ...)
-{
-	char text[1024];
-	va_list args;
-	va_start(args, format);
-	vsnprintf(text, sizeof(text), format, args);
-	va_end(args);
-
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
-	if (nzbInfo)
-	{
-		nzbInfo->PrintMessage(kind, "%s", text);
-	}
-	else
-	{
-		detail("Dupe probe of download %i: %s", m_nzbId, text);
-	}
-}
-
-inline void DupeProbe::Abandon(int missingServers, int activeServers)
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	g_QueueCoordinator->FailOverDeadPick(downloadQueue, m_nzbId, (int)m_samples.size(),
-		missingServers, activeServers, m_recoveredAtStart);
 }
 
 inline bool QueueCoordinator::CoordinatorDownloadQueue::EditEntry(

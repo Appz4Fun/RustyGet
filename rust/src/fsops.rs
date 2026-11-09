@@ -35,7 +35,11 @@ pub(crate) fn posix_stat(p: &[u8]) -> i32 {
         Ok(m) if m.is_file() => 1,
         Ok(m) if m.is_dir() => 2,
         Ok(_) => 0,
-        Err(e) => -e.raw_os_error().unwrap_or(1),
+        Err(e) => {
+            let err = e.raw_os_error().unwrap_or(1);
+            set_last_errno(err);
+            -err
+        }
     }
 }
 
@@ -606,7 +610,7 @@ pub fn copy_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
     target_os = "openbsd",
     target_os = "netbsd"
 ))]
-fn set_last_errno(err: i32) {
+pub(crate) fn set_last_errno(err: i32) {
     unsafe { *sys::__error() = err };
 }
 
@@ -617,7 +621,7 @@ fn set_last_errno(err: i32) {
     target_os = "openbsd",
     target_os = "netbsd"
 )))]
-fn set_last_errno(err: i32) {
+pub(crate) fn set_last_errno(err: i32) {
     unsafe { *sys::__errno_location() = err };
 }
 
@@ -1178,6 +1182,91 @@ impl crate::fsdelete::Ops for PosixFsOps {
     fn too_long(&mut self) -> crate::fsdelete::R<()> {
         set_last_errno(sys::ENAMETOOLONG);
         Ok(())
+    }
+}
+
+/// `DirBrowser` (`daemon/util/FileSystem.h`):
+/// Iterates directory entries (skipping `"."` and `".."`), either from a pre-read
+/// snapshot (`snapshot == true`) or directly from `opendir`/`readdir` (`snapshot == false`).
+pub struct PosixDirBrowser {
+    #[cfg(unix)]
+    dir: *mut libc::DIR,
+    snapshot: bool,
+    snapshot_files: Vec<std::ffi::CString>,
+    snapshot_index: usize,
+}
+
+impl PosixDirBrowser {
+    pub fn new(path: Option<&CStr>, snapshot: bool) -> Self {
+        if snapshot {
+            let mut inner = Self::new(path, false);
+            let mut files = Vec::new();
+            loop {
+                let ptr = inner.next_ptr();
+                if ptr.is_null() {
+                    break;
+                }
+                let cstr = unsafe { CStr::from_ptr(ptr) };
+                files.push(cstr.to_owned());
+            }
+            drop(inner);
+            Self {
+                #[cfg(unix)]
+                dir: std::ptr::null_mut(),
+                snapshot: true,
+                snapshot_files: files,
+                snapshot_index: 0,
+            }
+        } else {
+            #[cfg(unix)]
+            let dir = match path {
+                Some(p) => unsafe { libc::opendir(p.as_ptr()) },
+                None => std::ptr::null_mut(),
+            };
+            Self {
+                #[cfg(unix)]
+                dir,
+                snapshot: false,
+                snapshot_files: Vec::new(),
+                snapshot_index: 0,
+            }
+        }
+    }
+
+    pub fn next_ptr(&mut self) -> *const c_char {
+        if self.snapshot {
+            if self.snapshot_index >= self.snapshot_files.len() {
+                return std::ptr::null();
+            }
+            let ptr = self.snapshot_files[self.snapshot_index].as_ptr();
+            self.snapshot_index += 1;
+            return ptr;
+        }
+        #[cfg(unix)]
+        if !self.dir.is_null() {
+            loop {
+                let entry = unsafe { libc::readdir(self.dir) };
+                if entry.is_null() {
+                    return std::ptr::null();
+                }
+                let ptr = unsafe { (*entry).d_name.as_ptr() };
+                let name = unsafe { CStr::from_ptr(ptr).to_bytes() };
+                if crate::util::dir_browser_is_dot_or_dotdot(name) == 0 {
+                    return ptr;
+                }
+            }
+        }
+        std::ptr::null()
+    }
+}
+
+impl Drop for PosixDirBrowser {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if !self.dir.is_null() {
+            unsafe { libc::closedir(self.dir) };
+            self.dir = std::ptr::null_mut();
+        }
     }
 }
 

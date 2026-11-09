@@ -456,19 +456,15 @@ int nzbget_rs_cmdline_parse(int argc, char** argv, int useLong, const NzbgetRsCm
 // to a 1024-byte buffer; NULL is a no-op. Buffers returned by these functions
 // are Rust-owned and must be freed with nzbget_rs_free, never free/delete.
 // Panics abort; they do not unwind across the ABI.
-// stat: borrowed for the call, takes a borrowed NUL-terminated path and returns
-// -errno on failure, 1 for a regular file, 2 for a directory, 0 otherwise.
-// It follows symlinks, uses the caller's stat ABI, and must not throw/unwind.
-typedef int (*NzbgetRsFsStat)(const char* path);
 void nzbget_rs_error_message(int errnum, char* buf);
-// NULL paths or callbacks return 0.
-int nzbget_rs_file_exists(const char* path, NzbgetRsFsStat stat);
-int nzbget_rs_directory_exists(const char* path, NzbgetRsFsStat stat);
+// NULL paths return 0.
+int nzbget_rs_file_exists(const char* path);
+int nzbget_rs_directory_exists(const char* path);
 // 1 on success, 0 on failure; every non-NULL errmsg is initialized (empty on
 // success or invalid NULL arguments). errmsg must not overlap the input.
-int nzbget_rs_force_directories(const char* path, NzbgetRsBuf* errmsg, NzbgetRsFsStat stat);
-// NULL dir/basename mean empty strings; a NULL stat reports no collisions.
-NzbgetRsBuf nzbget_rs_make_unique_filename(const char* dir, const char* basename, NzbgetRsFsStat stat);
+int nzbget_rs_force_directories(const char* path, NzbgetRsBuf* errmsg);
+// NULL dir/basename mean empty strings.
+NzbgetRsBuf nzbget_rs_make_unique_filename(const char* dir, const char* basename);
 
 // ParParser's name checks (rust/src/parparser.rs).
 // Names are borrowed and read only through the first NUL or 1023 bytes.
@@ -600,25 +596,9 @@ int nzbget_rs_par_renamer_load_par_entries(
 // must not hold an allocation needing release. Callbacks must not unwind;
 // sink and add/set are valid only during their list/lastError call. Strings
 // passed to add/set are copied before that function returns.
-typedef struct NzbgetRsFsOps
-{
-	void* ctx;
-	int (*pathType)(void* ctx, const char* path);
-	int (*removeDir)(void* ctx, const char* path);
-	int (*deleteFile)(void* ctx, const char* path);
-	int (*deleteLink)(void* ctx, const char* path, int type);
-	int (*list)(void* ctx, const char* dir, void* sink, void (*add)(void* sink, const char* name));
-	int (*fileExists)(void* ctx, const char* path);
-	int (*dirExists)(void* ctx, const char* path);
-	int (*moveFile)(void* ctx, const char* from, const char* to);
-	int (*lastError)(void* ctx, void* sink, void (*set)(void* sink, const char* text));
-	// sets errno to ENAMETOOLONG: delete roots (without trailing separators or
-	// "." components) and paths below them longer than 1023 bytes are refused
-	int (*tooLong)(void* ctx);
-} NzbgetRsFsOps;
-int nzbget_rs_delete_directory(const NzbgetRsFsOps* ops, const char* dir, char separator);
-int nzbget_rs_delete_directory_with_content(const NzbgetRsFsOps* ops, const char* dir, char separator, NzbgetRsBuf* errmsg);
-int nzbget_rs_rename_bak(const NzbgetRsFsOps* ops, const char* filename, const char* bakPart, int removeOldExtension,
+int nzbget_rs_delete_directory(const char* dir, char separator);
+int nzbget_rs_delete_directory_with_content(const char* dir, char separator, NzbgetRsBuf* errmsg);
+int nzbget_rs_rename_bak(const char* filename, const char* bakPart, int removeOldExtension,
 	NzbgetRsBuf* newName);
 // FileSystem::GetFileExtension: the offset of the last '.', or -1.
 ptrdiff_t nzbget_rs_file_extension(const char* name, size_t len);
@@ -2151,7 +2131,6 @@ void nzbget_rs_ufs_util_split_int64(
     int64_t int64_val, uint32_t* out_hi, uint32_t* out_lo);
 int nzbget_rs_ufs_webutil_xml_calc_copy_len(int value_len, int value_buf_size);
 int nzbget_rs_ufs_tokenizer_fits_short_string(int len, int capacity);
-int nzbget_rs_ufs_dir_browser_is_dot_or_dotdot(const char* filename);
 int nzbget_rs_ufs_disk_file_select_seek_origin(
     int origin, int so_cur, int so_end, int seek_set, int seek_cur, int seek_end);
 int nzbget_rs_ufs_script_ctrl_matches_env_prefix(
@@ -3230,7 +3209,6 @@ NzbgetRsBuf nzbget_rs_dqh_ncurses_format_plot_line(
     const char* text, int32_t screen_width, int32_t pos, int32_t max_screen_width);
 NzbgetRsBuf nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
     int32_t first_idx, const int64_t* values, size_t count);
-NzbgetRsBuf nzbget_rs_dqh_fs_format_null_delete_errmsg(const char* last_err);
 NzbgetRsBuf nzbget_rs_dqh_fs_extract_parent_dir_path(const char* filename, char sep);
 int nzbget_rs_dqh_diskstate_is_candidate_queue_file_name(const char* filename);
 int nzbget_rs_dqh_diskstate_find_char_pos(
@@ -4502,12 +4480,14 @@ int64_t nzbget_rs_util_safe_int_cast_u64_to_i64(uint64_t num, uint64_t max_to);
 uint64_t nzbget_rs_util_safe_int_cast_i64_to_u64(int64_t num, uint64_t max_to);
 uint64_t nzbget_rs_util_safe_int_cast_u64_to_u64(uint64_t num, uint64_t max_to);
 
-void* nzbget_rs_regex_new(int valid, int match_buf_size);
+void* nzbget_rs_regex_new(const char* pattern, int match_buf_size);
 void nzbget_rs_regex_free(void* handle);
 int nzbget_rs_regex_is_valid(const void* handle);
-int nzbget_rs_regex_match(
-    void* handle, void* ctx,
-    int (*exec_cb)(void* ctx, int32_t* out_so, int32_t* out_eo, size_t nmatch));
+int nzbget_rs_regex_match(void* handle, const char* str_ptr);
+
+void* nzbget_rs_dir_browser_new(const char* path, int snapshot);
+const char* nzbget_rs_dir_browser_next(void* handle);
+void nzbget_rs_dir_browser_free(void* handle);
 
 void* nzbget_rs_article_batch_fetcher_new(
     void* ctx,
@@ -4610,7 +4590,6 @@ int nzbget_rs_fs_move_file(const char* src_filename, const char* dst_filename);
 int nzbget_rs_fs_move_file_no_overwrite(const char* src_filename, const char* dst_filename);
 int nzbget_rs_fs_get_disk_state(
     const char* path,
-    int (*statvfs_cb)(const char*, uint64_t*, uint64_t*, uint64_t*),
     int64_t* out_available,
     int64_t* out_total);
 
@@ -4621,7 +4600,6 @@ int nzbget_rs_bstring_format(
 int nzbget_rs_cstring_eq(const char* a, const char* b);
 void nzbget_rs_cstring_clear(char** m_data);
 void nzbget_rs_cstring_bind(char** m_data, char* str_ptr);
-char* nzbget_rs_cstring_unbind(char** m_data);
 void nzbget_rs_cstring_set(char** m_data, const char* str_ptr, int len);
 int nzbget_rs_cstring_format(
     char** m_data, int new_len_no_nul, void* ctx, int (*fmt_cb)(void*, char*, size_t));
@@ -5137,9 +5115,9 @@ int nzbget_rs_util_find_executor_program(
 void nzbget_rs_util_format_time(int64_t time_sec, char* buffer, int bufsize);
 NzbgetRsBuf nzbget_rs_fs_make_unique_path(const char* target_path);
 int nzbget_rs_fs_create_hard_link(
-    const char* from, const char* to, NzbgetRsFsStat stat, NzbgetRsBuf* errmsg);
+    const char* from, const char* to, NzbgetRsBuf* errmsg);
 int nzbget_rs_fs_load_file_into_buffer(
-    const char* filename, int add_trailing_null, NzbgetRsFsStat stat,
+    const char* filename, int add_trailing_null,
     void* ctx, uint8_t* (*reserve_cb)(void* ctx, int buf_size));
 NzbgetRsBuf nzbget_rs_fs_expand_home_path(const char* filename);
 int nzbget_rs_fs_get_real_path(

@@ -665,10 +665,6 @@ public:
 	{
 		nzbget_rs_cstring_bind(&m_data, str);
 	}
-	char* Unbind()
-	{
-		return nzbget_rs_cstring_unbind(&m_data);
-	}
 	void Set(const char* str, int len = 0)
 	{
 		nzbget_rs_cstring_set(&m_data, str, len);
@@ -1133,59 +1129,20 @@ class RegEx
 {
 public:
 	RegEx(const char *pattern, int matchBufSize = 100)
+		: m_rsRegex(nzbget_rs_regex_new(pattern, matchBufSize))
 	{
-#ifdef HAVE_REGEX_H
-		bool valid = regcomp(&m_context, pattern, REG_EXTENDED | REG_ICASE | (matchBufSize > 0 ? 0 : REG_NOSUB)) == 0;
-#else
-		bool valid = false;
-#endif
-		m_rsRegex = nzbget_rs_regex_new(valid ? 1 : 0, matchBufSize);
 	}
 	~RegEx()
 	{
 		nzbget_rs_regex_free(m_rsRegex);
 		m_rsRegex = nullptr;
-#ifdef HAVE_REGEX_H
-		regfree(&m_context);
-#endif
 	}
+	RegEx(const RegEx&) = delete;
+	RegEx& operator=(const RegEx&) = delete;
 	bool IsValid() { return nzbget_rs_regex_is_valid(m_rsRegex) != 0; }
-	bool Match(const char* str)
-	{
-#ifdef HAVE_REGEX_H
-		struct ExecCtx
-		{
-			regex_t* context;
-			const char* str;
-		} ctx{&m_context, str};
-
-		return nzbget_rs_regex_match(
-			m_rsRegex, &ctx,
-			[](void* raw, int32_t* outSo, int32_t* outEo, size_t nmatch) -> int {
-				auto* c = static_cast<ExecCtx*>(raw);
-				std::vector<regmatch_t> matches(nmatch);
-				regmatch_t* pmatch = nmatch > 0 ? matches.data() : nullptr;
-				if (regexec(c->context, c->str, nmatch, pmatch, 0) != 0)
-				{
-					return 0;
-				}
-				for (size_t i = 0; i < nmatch; i++)
-				{
-					outSo[i] = static_cast<int32_t>(matches[i].rm_so);
-					outEo[i] = static_cast<int32_t>(matches[i].rm_eo);
-				}
-				return 1;
-			}) != 0;
-#else
-		(void)str;
-		return false;
-#endif
-	}
+	bool Match(const char* str) { return nzbget_rs_regex_match(m_rsRegex, str) != 0; }
 
 private:
-#ifdef HAVE_REGEX_H
-	regex_t m_context;
-#endif
 	void* m_rsRegex = nullptr;
 };
 
@@ -1396,94 +1353,29 @@ inline void move_file(const fs::path& src, const fs::path& dest, fs::error_code&
 }
 }
 
-// Keep the platform's stat ABI and errno behavior (Rust metadata can use
-// statx, whose availability probe changes errno, and different time widths).
-static inline int RustStat(const char* path)
-{
-	struct stat buffer;
-	if (stat(path, &buffer) != 0)
-	{
-		return -errno;
-	}
-	return S_ISREG(buffer.st_mode) ? 1 : S_ISDIR(buffer.st_mode) ? 2 : 0;
-}
-
-static inline int RustStatvfs(const char* path, uint64_t* bavail, uint64_t* blocks, uint64_t* frsize)
-{
-	struct statvfs diskdata;
-	if (statvfs(path, &diskdata) != 0)
-	{
-		return 0;
-	}
-	*bavail = static_cast<uint64_t>(diskdata.f_bavail);
-	*blocks = static_cast<uint64_t>(diskdata.f_blocks);
-	*frsize = static_cast<uint64_t>(diskdata.f_frsize);
-	return 1;
-}
-
 class DirBrowser
 {
 public:
-	DirBrowser(const char* path, bool snapshot = true) : m_snapshot(snapshot)
+	DirBrowser(const char* path, bool snapshot = true)
+		: m_rsBrowser(nzbget_rs_dir_browser_new(path, snapshot ? 1 : 0))
 	{
-		if (m_snapshot)
-		{
-			DirBrowser dir(path, false);
-			while (const char* filename = dir.Next())
-			{
-				m_snapshotFiles.emplace_back(filename);
-			}
-			m_snapshotIter = m_snapshotFiles.begin();
-		}
-		else
-		{
-			m_dir = opendir(path);
-		}
 	}
 
 	~DirBrowser()
 	{
-		if (m_dir)
-		{
-			closedir(m_dir);
-		}
+		nzbget_rs_dir_browser_free(m_rsBrowser);
 	}
+
+	DirBrowser(const DirBrowser&) = delete;
+	DirBrowser& operator=(const DirBrowser&) = delete;
 
 	const char* Next()
 	{
-		const char* filename = nullptr;
-		for (filename = InternNext(); filename && nzbget_rs_ufs_dir_browser_is_dot_or_dotdot(filename) != 0; )
-		{
-			filename = InternNext();
-		}
-		return filename;
+		return nzbget_rs_dir_browser_next(m_rsBrowser);
 	}
 
 private:
-	DIR* m_dir = nullptr;
-	struct dirent* m_findData;
-
-	bool m_snapshot;
-	typedef std::deque<CString> FileList;
-	FileList m_snapshotFiles;
-	FileList::iterator m_snapshotIter;
-
-	const char* InternNext()
-	{
-		if (m_snapshot)
-		{
-			return m_snapshotIter == m_snapshotFiles.end() ? nullptr : **m_snapshotIter++;
-		}
-		if (m_dir)
-		{
-			m_findData = readdir(m_dir);
-			if (m_findData)
-			{
-				return m_findData->d_name;
-			}
-		}
-		return nullptr;
-	}
+	void* m_rsBrowser = nullptr;
 };
 
 class FileSystem
@@ -1492,121 +1384,6 @@ class FileSystem
 	{
 		int64 available;
 		int64 total;
-	};
-
-	enum class PathType
-	{
-		Error,
-		File,
-		Directory,
-		Link,
-		DirectoryLink
-	};
-
-	static PathType GetPathTypeNoFollow(const char* filename)
-	{
-		struct stat buffer;
-		if (lstat(filename, &buffer) != 0)
-		{
-			return PathType::Error;
-		}
-		if (S_ISLNK(buffer.st_mode))
-		{
-			return PathType::Link;
-		}
-		return S_ISDIR(buffer.st_mode) ? PathType::Directory : PathType::File;
-	}
-
-	class RsFsOps
-	{
-	public:
-		NzbgetRsFsOps ops{};
-
-		RsFsOps() : m_errno(errno)
-		{
-			ops.ctx = this;
-			ops.pathType = [](void* ctx, const char* path) noexcept -> int
-			{
-				return Call(ctx, [&] { return static_cast<int>(GetPathTypeNoFollow(path)); });
-			};
-			ops.removeDir = [](void* ctx, const char* path) noexcept -> int
-			{
-				return Call(ctx, [&] { return FileSystem::RemoveDirectory(path) ? 1 : 0; });
-			};
-			ops.deleteFile = [](void* ctx, const char* path) noexcept -> int
-			{
-				return Call(ctx, [&] { return FileSystem::DeleteFile(path) ? 1 : 0; });
-			};
-			ops.deleteLink = [](void* ctx, const char* path, [[maybe_unused]] int type) noexcept -> int
-			{
-				return Call(ctx, [&] { return FileSystem::DeleteFile(path) ? 1 : 0; });
-			};
-			ops.list = [](void* ctx, const char* dir, void* sink, void (*add)(void*, const char*)) noexcept -> int
-			{
-				return Call(ctx, [&]
-				{
-					DirBrowser browser(dir);
-					while (const char* filename = browser.Next())
-					{
-						add(sink, filename);
-					}
-					return 0;
-				});
-			};
-			ops.fileExists = [](void* ctx, const char* path) noexcept -> int
-			{
-				return Call(ctx, [&] { return FileSystem::FileExists(path) ? 1 : 0; });
-			};
-			ops.dirExists = [](void* ctx, const char* path) noexcept -> int
-			{
-				return Call(ctx, [&] { return FileSystem::DirectoryExists(path) ? 1 : 0; });
-			};
-			ops.moveFile = [](void* ctx, const char* from, const char* to) noexcept -> int
-			{
-				return Call(ctx, [&] { return FileSystem::MoveFile(from, to) ? 1 : 0; });
-			};
-			ops.lastError = [](void* ctx, void* sink, void (*set)(void*, const char*)) noexcept -> int
-			{
-				return Call(ctx, [&] { set(sink, FileSystem::GetLastErrorMessage()); return 0; });
-			};
-			ops.tooLong = [](void* ctx) noexcept -> int
-			{
-				return Call(ctx, [&] { errno = ENAMETOOLONG; return 0; });
-			};
-		}
-
-		int Finish(int result)
-		{
-			errno = m_errno;
-			if (m_error)
-			{
-				std::rethrow_exception(m_error);
-			}
-			return result;
-		}
-
-	private:
-		int m_errno;
-		std::exception_ptr m_error;
-
-		template <class F>
-		static int Call(void* ctx, F f) noexcept
-		{
-			RsFsOps& self = *static_cast<RsFsOps*>(ctx);
-			errno = self.m_errno;
-			try
-			{
-				int result = f();
-				self.m_errno = errno;
-				return result;
-			}
-			catch (...)
-			{
-				self.m_errno = errno;
-				self.m_error = std::current_exception();
-				return -1;
-			}
-		}
 	};
 
 public:
@@ -1655,7 +1432,6 @@ public:
 		return nzbget_rs_fs_load_file_into_buffer(
 			filename,
 			addTrailingNull ? 1 : 0,
-			RustStat,
 			&buffer,
 			[](void* ctx, int bufSize) -> uint8_t* {
 				auto* b = static_cast<CharBuffer*>(ctx);
@@ -1696,7 +1472,7 @@ public:
 
 	static CString MakeUniqueFilename(const char* destDir, const char* basename)
 	{
-		NzbgetRsBuf buf = nzbget_rs_make_unique_filename(destDir, basename, RustStat);
+		NzbgetRsBuf buf = nzbget_rs_make_unique_filename(destDir, basename);
 		CString result(buf.data, static_cast<int>(buf.len));
 		nzbget_rs_free(buf);
 		return result;
@@ -1708,8 +1484,8 @@ public:
 	}
 
 	static bool DeleteFile(const char* filename) { return nzbget_rs_fs_delete_file(filename) != 0; }
-	static bool FileExists(const char* filename) { return nzbget_rs_file_exists(filename, RustStat) != 0; }
-	static bool DirectoryExists(const char* dirFilename) { return nzbget_rs_directory_exists(dirFilename, RustStat) != 0; }
+	static bool FileExists(const char* filename) { return nzbget_rs_file_exists(filename) != 0; }
+	static bool DirectoryExists(const char* dirFilename) { return nzbget_rs_directory_exists(dirFilename) != 0; }
 
 	static bool CreateDirectory(const char* dirFilename)
 	{
@@ -1724,29 +1500,13 @@ public:
 
 	static bool DeleteDirectory(const char* dirFilename)
 	{
-		if (!dirFilename)
-		{
-			errno = EFAULT;
-			return false;
-		}
-		RsFsOps ops;
-		return ops.Finish(nzbget_rs_delete_directory(&ops.ops, dirFilename, PATH_SEPARATOR)) == 1;
+		return nzbget_rs_delete_directory(dirFilename, PATH_SEPARATOR) == 1;
 	}
 
 	static bool DeleteDirectoryWithContent(const char* dirFilename, CString& errmsg)
 	{
-		if (!dirFilename)
-		{
-			errmsg.Clear();
-			errno = EFAULT;
-			NzbgetRsBuf errBuf = nzbget_rs_dqh_fs_format_null_delete_errmsg(*GetLastErrorMessage());
-			errmsg.Set(errBuf.data ? errBuf.data : "", (int)errBuf.len);
-			nzbget_rs_free(errBuf);
-			return false;
-		}
-		RsFsOps ops;
 		NzbgetRsBuf text{};
-		int result = nzbget_rs_delete_directory_with_content(&ops.ops, dirFilename, PATH_SEPARATOR, &text);
+		int result = nzbget_rs_delete_directory_with_content(dirFilename, PATH_SEPARATOR, &text);
 		if (text.len == 0)
 		{
 			errmsg.Clear();
@@ -1756,13 +1516,13 @@ public:
 			errmsg.Set(text.data, (int)text.len);
 		}
 		nzbget_rs_free(text);
-		return ops.Finish(result) == 1;
+		return result == 1;
 	}
 
 	static bool ForceDirectories(const char* path, CString& errmsg)
 	{
 		NzbgetRsBuf msg{};
-		bool ok = nzbget_rs_force_directories(path, &msg, RustStat) != 0;
+		bool ok = nzbget_rs_force_directories(path, &msg) != 0;
 		errmsg.Clear();
 		if (!ok)
 		{
@@ -1775,7 +1535,7 @@ public:
 	static bool CreateHardLink(const char *from, const char *to, CString& errmsg)
 	{
 		NzbgetRsBuf msg{};
-		bool ok = nzbget_rs_fs_create_hard_link(from, to, RustStat, &msg) != 0;
+		bool ok = nzbget_rs_fs_create_hard_link(from, to, &msg) != 0;
 		errmsg.Clear();
 		if (!ok)
 		{
@@ -1799,7 +1559,7 @@ public:
 	{
 		int64 available = 0;
 		int64 total = 0;
-		if (nzbget_rs_fs_get_disk_state(path, RustStatvfs, &available, &total) != 0)
+		if (nzbget_rs_fs_get_disk_state(path, &available, &total) != 0)
 		{
 			return DiskState{ available, total };
 		}
@@ -1818,12 +1578,11 @@ public:
 		{
 			return false;
 		}
-		RsFsOps ops;
 		NzbgetRsBuf name{};
-		int result = nzbget_rs_rename_bak(&ops.ops, filename, bakPart, removeOldExtension, &name);
+		int result = nzbget_rs_rename_bak(filename, bakPart, removeOldExtension, &name);
 		newName.Set(name.data, (int)name.len);
 		nzbget_rs_free(name);
-		return ops.Finish(result) == 1;
+		return result == 1;
 	}
 
 	static CString ExpandHomePath(const char* filename)

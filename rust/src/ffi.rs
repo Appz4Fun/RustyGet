@@ -2471,38 +2471,24 @@ pub unsafe extern "C" fn nzbget_rs_error_message(errnum: c_int, buf: *mut c_char
     *buf.add(msg.len()) = 0;
 }
 
-/// Borrowed native stat callback; see nzbget_rs.h. It must not unwind.
-#[cfg(unix)]
-pub type FsStat = unsafe extern "C" fn(*const c_char) -> c_int;
-
-#[cfg(unix)]
-fn fs_stat(stat: Option<FsStat>, path: &[u8]) -> i32 {
-    let Some(stat) = stat else { return -22 }; // EINVAL
-    let mut path = path.to_vec();
-    path.push(0);
-    unsafe { stat(path.as_ptr().cast()) }
-}
-
 /// FileSystem::FileExists (0 for null).
 ///
 /// # Safety
-/// `path` is null or NUL-terminated. `stat`, when present, follows the
-/// FsStat contract and must not unwind.
+/// `path` is null or NUL-terminated.
 #[cfg(unix)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_file_exists(path: *const c_char, stat: Option<FsStat>) -> c_int {
-    (!path.is_null() && crate::fsops::file_exists(input(path), &|_| stat.map_or(-22, |f| f(path)))) as c_int
+pub unsafe extern "C" fn nzbget_rs_file_exists(path: *const c_char) -> c_int {
+    (!path.is_null() && crate::fsops::file_exists(input(path), &crate::fsops::posix_stat)) as c_int
 }
 
 /// FileSystem::DirectoryExists (0 for null).
 ///
 /// # Safety
-/// `path` is null or NUL-terminated. `stat`, when present, follows the
-/// FsStat contract and must not unwind.
+/// `path` is null or NUL-terminated.
 #[cfg(unix)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_directory_exists(path: *const c_char, stat: Option<FsStat>) -> c_int {
-    (!path.is_null() && crate::fsops::directory_exists(input(path), &|_| stat.map_or(-22, |f| f(path)))) as c_int
+pub unsafe extern "C" fn nzbget_rs_directory_exists(path: *const c_char) -> c_int {
+    (!path.is_null() && crate::fsops::directory_exists(input(path), &crate::fsops::posix_stat)) as c_int
 }
 
 /// FileSystem::ForceDirectories: 1 created or there, else 0 with the message
@@ -2511,19 +2497,18 @@ pub unsafe extern "C" fn nzbget_rs_directory_exists(path: *const c_char, stat: O
 /// # Safety
 /// `path` is null or NUL-terminated; `errmsg` is null or writable and disjoint
 /// from the input. Every non-null output is initialized, including on failure.
-/// `stat`, when present, follows the FsStat contract and must not unwind.
 #[cfg(unix)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_force_directories(path: *const c_char, errmsg: *mut RsBuf, stat: Option<FsStat>) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_force_directories(path: *const c_char, errmsg: *mut RsBuf) -> c_int {
     if errmsg.is_null() {
         return 0;
     }
-    if path.is_null() || stat.is_none() {
+    if path.is_null() {
         errmsg.write(into_buf(Vec::new()));
         return 0;
     }
     let mut msg = Vec::new();
-    let ok = crate::fsops::force_directories(input(path), &mut msg, &|p| fs_stat(stat, p));
+    let ok = crate::fsops::force_directories(input(path), &mut msg, &crate::fsops::posix_stat);
     errmsg.write(into_buf(msg));
     ok as c_int
 }
@@ -2531,13 +2516,12 @@ pub unsafe extern "C" fn nzbget_rs_force_directories(path: *const c_char, errmsg
 /// FileSystem::MakeUniqueFilename; free with nzbget_rs_free.
 ///
 /// # Safety
-/// `dir` and `basename` are null (empty) or NUL-terminated. `stat`, when
-/// present, follows the FsStat contract and must not unwind.
+/// `dir` and `basename` are null (empty) or NUL-terminated.
 #[cfg(unix)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_make_unique_filename(dir: *const c_char, basename: *const c_char, stat: Option<FsStat>) -> RsBuf {
+pub unsafe extern "C" fn nzbget_rs_make_unique_filename(dir: *const c_char, basename: *const c_char) -> RsBuf {
     let as_c = |p: *const c_char| if p.is_null() { c"" } else { CStr::from_ptr(p) };
-    into_buf(crate::fsops::make_unique_filename(as_c(dir), as_c(basename), &|p| fs_stat(stat, p)))
+    into_buf(crate::fsops::make_unique_filename(as_c(dir), as_c(basename), &crate::fsops::posix_stat))
 }
 
 /// FileSystem::ExpandHomePath with the home directory the C++ looked up
@@ -3110,10 +3094,6 @@ fn nul(s: &[u8]) -> Vec<u8> {
     v
 }
 
-unsafe extern "C" fn par_renamer_add_name(sink: *mut std::ffi::c_void, name: *const c_char) {
-    (*sink.cast::<Vec<Vec<u8>>>()).push(input(name).to_vec());
-}
-
 /// Runs `ParRenamer::Execute` end-to-end on the filesystem in Rust.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_par_renamer_execute(
@@ -3257,154 +3237,86 @@ pub unsafe extern "C" fn nzbget_rs_par_renamer_load_par_entries(
     1
 }
 
-/// NzbgetRsFsOps: FileSystem's calls for the deletes and RenameBak. Strings
-/// are borrowed NUL-terminated paths; -1 reports a C++ exception.
-#[repr(C)]
-pub struct FsOps {
-    pub ctx: *mut std::ffi::c_void,
-    pub path_type: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub remove_dir: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub delete_file: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub delete_link: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int) -> c_int>,
-    pub list: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut std::ffi::c_void,
-        unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)) -> c_int>,
-    pub file_exists: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub dir_exists: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub move_file: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char) -> c_int>,
-    pub last_error: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void,
-        unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)) -> c_int>,
-    pub too_long: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-}
-
-struct FsOpsFfi<'a>(&'a FsOps);
-
-unsafe extern "C" fn fs_ops_set(sink: *mut std::ffi::c_void, text: *const c_char) {
-    *sink.cast::<Vec<u8>>() = input(text).to_vec();
-}
-
-impl FsOpsFfi<'_> {
-    fn int(r: c_int) -> crate::fsdelete::R<c_int> {
-        if r < 0 { Err(crate::fsdelete::Abort) } else { Ok(r) }
-    }
-    fn path(&self, f: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>, path: &[u8]) -> crate::fsdelete::R<c_int> {
-        let Some(f) = f else { return Ok(0) };
-        let path = nul(path);
-        Self::int(unsafe { f(self.0.ctx, path.as_ptr().cast()) })
-    }
-}
-
-fn path_type_from(t: c_int) -> crate::fsdelete::PathType {
-    use crate::fsdelete::PathType::*;
-    match t { 1 => File, 2 => Directory, 3 => Link, 4 => DirectoryLink, _ => Error }
-}
-
-impl crate::fsdelete::Ops for FsOpsFfi<'_> {
-    fn path_type(&mut self, path: &[u8]) -> crate::fsdelete::R<crate::fsdelete::PathType> {
-        Ok(path_type_from(self.path(self.0.path_type, path)?))
-    }
-    fn remove_dir(&mut self, path: &[u8]) -> crate::fsdelete::R<bool> {
-        Ok(self.path(self.0.remove_dir, path)? != 0)
-    }
-    fn delete_file(&mut self, path: &[u8]) -> crate::fsdelete::R<bool> {
-        Ok(self.path(self.0.delete_file, path)? != 0)
-    }
-    fn delete_link(&mut self, path: &[u8], kind: crate::fsdelete::PathType) -> crate::fsdelete::R<bool> {
-        let Some(f) = self.0.delete_link else { return Ok(false) };
-        let path = nul(path);
-        let kind = match kind { crate::fsdelete::PathType::DirectoryLink => 4, _ => 3 };
-        Ok(Self::int(unsafe { f(self.0.ctx, path.as_ptr().cast(), kind) })? != 0)
-    }
-    fn list(&mut self, dir: &[u8]) -> crate::fsdelete::R<Vec<Vec<u8>>> {
-        let mut names: Vec<Vec<u8>> = Vec::new();
-        if let Some(f) = self.0.list {
-            let dir = nul(dir);
-            Self::int(unsafe { f(self.0.ctx, dir.as_ptr().cast(), (&mut names as *mut Vec<Vec<u8>>).cast(), par_renamer_add_name) })?;
-        }
-        Ok(names)
-    }
-    fn file_exists(&mut self, path: &[u8]) -> crate::fsdelete::R<bool> {
-        Ok(self.path(self.0.file_exists, path)? != 0)
-    }
-    fn dir_exists(&mut self, path: &[u8]) -> crate::fsdelete::R<bool> {
-        Ok(self.path(self.0.dir_exists, path)? != 0)
-    }
-    fn move_file(&mut self, from: &[u8], to: &[u8]) -> crate::fsdelete::R<bool> {
-        let Some(f) = self.0.move_file else { return Ok(false) };
-        let (from, to) = (nul(from), nul(to));
-        Ok(Self::int(unsafe { f(self.0.ctx, from.as_ptr().cast(), to.as_ptr().cast()) })? != 0)
-    }
-    fn last_error(&mut self) -> crate::fsdelete::R<Vec<u8>> {
-        let mut text = Vec::new();
-        if let Some(f) = self.0.last_error {
-            Self::int(unsafe { f(self.0.ctx, (&mut text as *mut Vec<u8>).cast(), fs_ops_set) })?;
-        }
-        Ok(text)
-    }
-    fn too_long(&mut self) -> crate::fsdelete::R<()> {
-        let Some(f) = self.0.too_long else { return Ok(()) };
-        Self::int(unsafe { f(self.0.ctx) }).map(drop)
-    }
-}
-
-/// FileSystem::DeleteDirectory: 1 removed, 0 not, -1 a callback's exception.
+/// FileSystem::DeleteDirectory: 1 removed, 0 not.
 ///
 /// # Safety
-/// `ops` is null (returns 0) or valid with callbacks that don't unwind;
-/// `dir` is null (empty) or NUL-terminated.
+/// `dir` is null (sets `errno = EFAULT` and returns 0) or NUL-terminated.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_delete_directory(ops: *const FsOps, dir: *const c_char, separator: c_char) -> c_int {
-    let Some(ops) = ops.as_ref() else { return 0 };
-    match crate::fsdelete::delete_directory(&mut FsOpsFfi(ops), input(dir), separator as u8) {
-        Ok(done) => done as c_int,
-        Err(_) => -1,
+pub unsafe extern "C" fn nzbget_rs_delete_directory(dir: *const c_char, separator: c_char) -> c_int {
+    if dir.is_null() {
+        crate::fsops::set_last_errno(libc::EFAULT);
+        return 0;
     }
+    crate::fsdelete::delete_directory(&mut crate::fsops::PosixFsOps, input(dir), separator as u8)
+        .unwrap_or(false) as c_int
 }
 
-/// FileSystem::DeleteDirectoryWithContent: 1 all deleted, 0 not, -1 a
-/// callback's exception. `errmsg` (null: not written) gets the error, empty
-/// when cleared; free it with nzbget_rs_free.
+/// FileSystem::DeleteDirectoryWithContent: 1 all deleted, 0 not.
+/// `errmsg` (null: not written) gets the error, empty when cleared; free it
+/// with nzbget_rs_free.
 ///
 /// # Safety
-/// As nzbget_rs_delete_directory; `errmsg` is null or writable.
+/// `dir` is null or NUL-terminated; `errmsg` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_delete_directory_with_content(ops: *const FsOps, dir: *const c_char, separator: c_char,
-    errmsg: *mut RsBuf) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_delete_directory_with_content(
+    dir: *const c_char,
+    separator: c_char,
+    errmsg: *mut RsBuf,
+) -> c_int {
+    if dir.is_null() {
+        crate::fsops::set_last_errno(libc::EFAULT);
+        if !errmsg.is_null() {
+            let last_err = crate::fsops::error_message(libc::EFAULT);
+            errmsg.write(into_buf(crate::util::fs_format_null_delete_errmsg(&last_err)));
+        }
+        return 0;
+    }
     let mut text = Vec::new();
-    let result = match ops.as_ref() {
-        Some(ops) => crate::fsdelete::delete_directory_with_content(&mut FsOpsFfi(ops), input(dir), separator as u8, &mut text),
-        None => Ok(false),
-    };
+    let done = crate::fsdelete::delete_directory_with_content(
+        &mut crate::fsops::PosixFsOps,
+        input(dir),
+        separator as u8,
+        &mut text,
+    )
+    .unwrap_or(false);
     if !errmsg.is_null() {
         errmsg.write(into_buf(text));
     }
-    match result {
-        Ok(done) => done as c_int,
-        Err(_) => -1,
-    }
+    done as c_int
 }
 
-/// FileSystem::RenameBak: 1 moved, 0 not, -1 a callback's exception.
+/// FileSystem::RenameBak: 1 moved, 0 not.
 /// `new_name` (null: not written) gets the name tried last; free it with
 /// nzbget_rs_free.
 ///
 /// # Safety
-/// As nzbget_rs_delete_directory; `filename`/`bak_part` are null (empty) or
-/// NUL-terminated; `new_name` is null or writable.
+/// `filename`/`bak_part` are null or NUL-terminated; `new_name` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rename_bak(ops: *const FsOps, filename: *const c_char, bak_part: *const c_char,
-    remove_old_extension: c_int, new_name: *mut RsBuf) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_rename_bak(
+    filename: *const c_char,
+    bak_part: *const c_char,
+    remove_old_extension: c_int,
+    new_name: *mut RsBuf,
+) -> c_int {
+    if filename.is_null() || bak_part.is_null() {
+        if !new_name.is_null() {
+            new_name.write(into_buf(Vec::new()));
+        }
+        return 0;
+    }
     let mut name = Vec::new();
-    let result = match ops.as_ref() {
-        Some(ops) => crate::fsdelete::rename_bak(&mut FsOpsFfi(ops), input(filename), input(bak_part), remove_old_extension != 0, &mut name),
-        None => Ok(false),
-    };
+    let done = crate::fsdelete::rename_bak(
+        &mut crate::fsops::PosixFsOps,
+        input(filename),
+        input(bak_part),
+        remove_old_extension != 0,
+        &mut name,
+    )
+    .unwrap_or(false);
     if !new_name.is_null() {
         new_name.write(into_buf(name));
     }
-    match result {
-        Ok(done) => done as c_int,
-        Err(_) => -1,
-    }
+    done as c_int
 }
 
 /// FileSystem::GetFileExtension: the offset of the last '.', or -1.
@@ -4262,121 +4174,50 @@ mod tests {
     }
 
     #[test]
-    fn fsdelete_null_ops_initialize_outputs() {
+    fn fsdelete_null_inputs_initialize_outputs() {
         use std::ptr::{null, null_mut};
         // Poison rather than zero the output: a caller need not initialize
         // an out parameter, even when the operation fails.
         let poison = || RsBuf { data: null_mut(), len: usize::MAX, cap: usize::MAX };
         unsafe {
             let mut error = poison();
-            assert_eq!(nzbget_rs_delete_directory_with_content(null(), null(), b'/' as c_char, &mut error), 0);
-            assert_eq!(error.len, 0);
-            assert_eq!(input(error.data), b"");
+            assert_eq!(nzbget_rs_delete_directory_with_content(null(), b'/' as c_char, &mut error), 0);
+            assert!(input(error.data).starts_with(b"could not delete (null): "));
             nzbget_rs_free(error);
             let mut name = poison();
-            assert_eq!(nzbget_rs_rename_bak(null(), null(), null(), 0, &mut name), 0);
+            assert_eq!(nzbget_rs_rename_bak(null(), null(), 0, &mut name), 0);
             assert_eq!(name.len, 0);
             assert_eq!(input(name.data), b"");
             nzbget_rs_free(name);
-            assert_eq!(nzbget_rs_delete_directory(null(), null(), b'/' as c_char), 0);
-            assert_eq!(nzbget_rs_delete_directory_with_content(null(), null(), 0, null_mut()), 0);
-            assert_eq!(nzbget_rs_rename_bak(null(), null(), null(), 0, null_mut()), 0);
+            assert_eq!(nzbget_rs_delete_directory(null(), b'/' as c_char), 0);
+            assert_eq!(nzbget_rs_delete_directory_with_content(null(), 0, null_mut()), 0);
+            assert_eq!(nzbget_rs_rename_bak(null(), null(), 0, null_mut()), 0);
             assert_eq!(nzbget_rs_file_extension(null(), 0), -1);
             assert_eq!(nzbget_rs_file_extension(b"a.\0b.c".as_ptr().cast(), 6), 4);
         }
     }
 
+    #[cfg(unix)]
     #[test]
-    fn fsdelete_long_callback_and_abort() {
-        unsafe extern "C" fn too_long(ctx: *mut std::ffi::c_void) -> c_int {
-            let calls = &mut *ctx.cast::<i32>();
-            *calls += 1;
-            if *calls < 0 { -1 } else { 0 }
-        }
-        let mut calls = 0;
-        let ops = FsOps {
-            ctx: (&mut calls as *mut i32).cast(), path_type: None, remove_dir: None,
-            delete_file: None, delete_link: None, list: None, file_exists: None,
-            dir_exists: None, move_file: None, last_error: None, too_long: Some(too_long),
-        };
-        let path = nul(&vec![b'a'; 1024]);
+    fn dir_browser_and_regex_ffi_roundtrip() {
+        use std::ptr::null;
         unsafe {
-            let mut error = std::mem::MaybeUninit::uninit();
-            assert_eq!(nzbget_rs_delete_directory_with_content(&ops, path.as_ptr().cast(), b'/' as c_char, error.as_mut_ptr()), 0);
-            let error = error.assume_init();
-            assert_eq!(input(error.data), [&b"could not delete "[..], &path[..1024], b": "].concat());
-            assert!(calls > 0);
-            nzbget_rs_free(error);
-            calls = -2;
-            assert_eq!(nzbget_rs_delete_directory(&ops, path.as_ptr().cast(), b'/' as c_char), -1);
-            assert_eq!(calls, -1);
-            calls = -2;
-            let mut aborted = std::mem::MaybeUninit::uninit();
-            assert_eq!(nzbget_rs_delete_directory_with_content(&ops, path.as_ptr().cast(), b'/' as c_char, aborted.as_mut_ptr()), -1);
-            let aborted = aborted.assume_init();
-            assert_eq!(calls, -1);
-            assert_eq!(aborted.len, 0);
-            nzbget_rs_free(aborted);
-        }
-    }
+            let null_browser = nzbget_rs_dir_browser_new(null(), 1);
+            assert!(nzbget_rs_dir_browser_next(null_browser).is_null());
+            nzbget_rs_dir_browser_free(null_browser);
 
-    #[test]
-    fn fsdelete_borrowed_buffers_and_callback_abort() {
-        use std::ptr::{null, null_mut};
-        struct State { calls: Vec<Vec<u8>>, abort: bool }
-        unsafe extern "C" fn kind(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int {
-            let st = &mut *ctx.cast::<State>();
-            st.calls.push(input(path).to_vec());
-            if input(path) == b"root" { 2 } else if st.abort { -1 } else { 1 }
-        }
-        unsafe extern "C" fn list(_: *mut std::ffi::c_void, _: *const c_char,
-            sink: *mut std::ffi::c_void, add: unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)) -> c_int {
-            let mut name = b"file\0".to_vec();
-            add(sink, name.as_ptr().cast());
-            name.fill(b'x'); // the callback's buffer may immediately be reused
-            0
-        }
-        unsafe extern "C" fn last_error(_: *mut std::ffi::c_void, sink: *mut std::ffi::c_void,
-            set: unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)) -> c_int {
-            let mut text = b"failure\0".to_vec();
-            set(sink, text.as_ptr().cast());
-            text.fill(b'x');
-            0
-        }
-        unsafe extern "C" fn fail(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int {
-            (*ctx.cast::<State>()).calls.push(input(path).to_vec());
-            0
-        }
-        let mut st = State { calls: Vec::new(), abort: false };
-        let mut ops = FsOps {
-            ctx: (&mut st as *mut State).cast(), path_type: Some(kind), remove_dir: Some(fail),
-            delete_file: Some(fail), delete_link: None, list: Some(list),
-            file_exists: None, dir_exists: None, move_file: None, last_error: Some(last_error), too_long: None,
-        };
-        unsafe {
-            let mut error = std::mem::MaybeUninit::uninit();
-            assert_eq!(nzbget_rs_delete_directory_with_content(&ops, c"root".as_ptr(), b'/' as c_char, error.as_mut_ptr()), 0);
-            let error = error.assume_init();
-            assert_eq!(input(error.data), b"could not delete root/file: failure");
-            assert_eq!(st.calls, [b"root".to_vec(), b"root/file".to_vec(), b"root/file".to_vec(), b"root".to_vec()]);
-            st.calls.clear();
-            st.abort = true;
-            let mut aborted = std::mem::MaybeUninit::uninit();
-            assert_eq!(nzbget_rs_delete_directory_with_content(&ops, c"root".as_ptr(), b'/' as c_char, aborted.as_mut_ptr()), -1);
-            let aborted = aborted.assume_init();
-            assert_eq!(aborted.len, 0);
-            assert_eq!(st.calls, [b"root".to_vec(), b"root/file".to_vec()]);
-            // An independent call cannot invalidate a previously returned buffer.
-            assert_eq!(input(error.data), b"could not delete root/file: failure");
-            nzbget_rs_free(error);
-            nzbget_rs_free(aborted);
-            ops.path_type = None;
-            assert_eq!(nzbget_rs_delete_directory_with_content(&ops, null(), 0, null_mut()), 0);
-            let mut name = std::mem::MaybeUninit::uninit();
-            assert_eq!(nzbget_rs_rename_bak(&ops, null(), null(), 0, name.as_mut_ptr()), 0);
-            let name = name.assume_init();
-            assert_eq!(input(name.data), b".");
-            nzbget_rs_free(name);
+            let dot_browser = nzbget_rs_dir_browser_new(c".".as_ptr(), 1);
+            let first = nzbget_rs_dir_browser_next(dot_browser);
+            assert!(!first.is_null());
+            let first_bytes = CStr::from_ptr(first).to_bytes();
+            assert!(!first_bytes.is_empty() && first_bytes != b"." && first_bytes != b"..");
+            nzbget_rs_dir_browser_free(dot_browser);
+
+            let rx = nzbget_rs_regex_new(c"^foo([0-9]+)$".as_ptr(), 10);
+            assert_eq!(nzbget_rs_regex_is_valid(rx), 1);
+            assert_eq!(nzbget_rs_regex_match(rx, c"FOO42".as_ptr()), 1);
+            assert_eq!(nzbget_rs_regex_match(rx, c"bar".as_ptr()), 0);
+            nzbget_rs_regex_free(rx);
         }
     }
 
@@ -4550,17 +4391,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fsops_null_outputs_and_ownership() {
-        unsafe extern "C" fn directory(_: *const c_char) -> c_int { 2 }
         unsafe {
             let mut msg = std::mem::MaybeUninit::uninit();
-            assert_eq!(nzbget_rs_force_directories(std::ptr::null(), msg.as_mut_ptr(), Some(directory)), 0);
+            assert_eq!(nzbget_rs_force_directories(std::ptr::null(), msg.as_mut_ptr()), 0);
             let msg = msg.assume_init();
             assert_eq!(msg.len, 0);
             assert_eq!(CStr::from_ptr(msg.data), c"");
             nzbget_rs_free(msg);
-            assert_eq!(nzbget_rs_force_directories(c".".as_ptr(), std::ptr::null_mut(), Some(directory)), 0);
-            assert_eq!(nzbget_rs_file_exists(std::ptr::null(), Some(directory)), 0);
-            assert_eq!(nzbget_rs_directory_exists(c".".as_ptr(), None), 0);
+            assert_eq!(nzbget_rs_force_directories(c".".as_ptr(), std::ptr::null_mut()), 0);
+            assert_eq!(nzbget_rs_file_exists(std::ptr::null()), 0);
+            assert_eq!(nzbget_rs_directory_exists(std::ptr::null()), 0);
+            assert_eq!(nzbget_rs_directory_exists(c".".as_ptr()), 1);
             let mut source = b"~/x\0".to_vec();
             let expanded = nzbget_rs_expand_home_path(source.as_ptr().cast(), c"".as_ptr());
             source[2] = b'y';
@@ -15192,13 +15033,6 @@ pub extern "C" fn nzbget_rs_ufs_tokenizer_fits_short_string(len: c_int, capacity
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ufs_dir_browser_is_dot_or_dotdot(
-    filename: *const c_char,
-) -> c_int {
-    crate::util::dir_browser_is_dot_or_dotdot(crate::queuecoord::cstr_to_bytes(filename))
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_ufs_disk_file_select_seek_origin(
     origin: c_int,
     so_cur: c_int,
@@ -18552,18 +18386,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
         std::slice::from_raw_parts(values, count)
     };
     into_buf(crate::statmeter::statmeter_format_indexed_bytes_line(first_idx, slice))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_fs_format_null_delete_errmsg(
-    last_err: *const c_char,
-) -> RsBuf {
-    let e = if last_err.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(last_err).to_bytes()
-    };
-    into_buf(crate::util::fs_format_null_delete_errmsg(e))
 }
 
 #[no_mangle]
@@ -25979,14 +25801,22 @@ pub unsafe extern "C" fn nzbget_rs_util_safe_int_cast_u64_to_u64(num: u64, max_t
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_regex_new(
-    valid: c_int,
+    pattern: *const c_char,
     match_buf_size: c_int,
 ) -> *mut std::ffi::c_void {
-    Box::into_raw(Box::new(crate::util::PosixRegEx::new_with(
-        valid != 0,
-        match_buf_size,
-    )))
-    .cast()
+    let rx = if pattern.is_null() {
+        crate::util::PosixRegEx::new_with(false, match_buf_size)
+    } else {
+        #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+        {
+            crate::util::PosixRegEx::compile(CStr::from_ptr(pattern), match_buf_size)
+        }
+        #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+        {
+            crate::util::PosixRegEx::new_with(false, match_buf_size)
+        }
+    };
+    Box::into_raw(Box::new(rx)).cast()
 }
 
 #[no_mangle]
@@ -26008,29 +25838,51 @@ pub unsafe extern "C" fn nzbget_rs_regex_is_valid(handle: *const std::ffi::c_voi
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_regex_match(
     handle: *mut std::ffi::c_void,
-    ctx: *mut std::ffi::c_void,
-    exec_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut i32, *mut i32, usize) -> c_int>,
+    str_ptr: *const c_char,
 ) -> c_int {
-    if handle.is_null() {
+    if handle.is_null() || str_ptr.is_null() {
         return 0;
     }
     let rx = &mut *handle.cast::<crate::util::PosixRegEx>();
-    let matched = rx.exec_with(|matches| {
-        let Some(cb) = exec_cb else {
-            return false;
-        };
-        let n = matches.len();
-        let mut so = vec![-1i32; n];
-        let mut eo = vec![-1i32; n];
-        let ok = unsafe { cb(ctx, so.as_mut_ptr(), eo.as_mut_ptr(), n) != 0 };
-        if ok {
-            for i in 0..n {
-                matches[i] = (so[i], eo[i]);
-            }
-        }
-        ok
-    });
-    if matched { 1 } else { 0 }
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    {
+        c_int::from(rx.match_cstr(CStr::from_ptr(str_ptr)))
+    }
+    #[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+    {
+        let _ = rx;
+        0
+    }
+}
+
+#[cfg(unix)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dir_browser_new(
+    path: *const c_char,
+    snapshot: c_int,
+) -> *mut std::ffi::c_void {
+    let p = (!path.is_null()).then(|| CStr::from_ptr(path));
+    Box::into_raw(Box::new(crate::fsops::PosixDirBrowser::new(p, snapshot != 0))).cast()
+}
+
+#[cfg(unix)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dir_browser_next(
+    handle: *mut std::ffi::c_void,
+) -> *const c_char {
+    if handle.is_null() {
+        return std::ptr::null();
+    }
+    let browser = &mut *handle.cast::<crate::fsops::PosixDirBrowser>();
+    browser.next_ptr()
+}
+
+#[cfg(unix)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dir_browser_free(handle: *mut std::ffi::c_void) {
+    if !handle.is_null() {
+        drop(Box::from_raw(handle.cast::<crate::fsops::PosixDirBrowser>()));
+    }
 }
 
 #[no_mangle]
@@ -26772,7 +26624,6 @@ pub unsafe extern "C" fn nzbget_rs_fs_move_file_no_overwrite(
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_fs_get_disk_state(
     path: *const c_char,
-    statvfs_cb: Option<unsafe extern "C" fn(*const c_char, *mut u64, *mut u64, *mut u64) -> c_int>,
     out_available: *mut i64,
     out_total: *mut i64,
 ) -> c_int {
@@ -26780,20 +26631,7 @@ pub unsafe extern "C" fn nzbget_rs_fs_get_disk_state(
         return 0;
     }
     let c_path = CStr::from_ptr(path);
-    let state = match statvfs_cb {
-        Some(cb) => crate::fsops::get_disk_state_with(c_path, &|p| {
-            let mut bavail = 0u64;
-            let mut blocks = 0u64;
-            let mut frsize = 0u64;
-            if cb(p.as_ptr(), &mut bavail, &mut blocks, &mut frsize) != 0 {
-                Some((bavail, blocks, frsize))
-            } else {
-                None
-            }
-        }),
-        None => crate::fsops::get_disk_state(c_path),
-    };
-    match state {
+    match crate::fsops::get_disk_state(c_path) {
         Some((avail, total)) => {
             if !out_available.is_null() {
                 *out_available = avail;
@@ -26853,11 +26691,6 @@ pub unsafe extern "C" fn nzbget_rs_cstring_clear(m_data: *mut *mut c_char) {
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_cstring_bind(m_data: *mut *mut c_char, str_ptr: *mut c_char) {
     crate::nstring::cstring_bind_raw(m_data, str_ptr);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cstring_unbind(m_data: *mut *mut c_char) -> *mut c_char {
-    crate::nstring::cstring_unbind_raw(m_data)
 }
 
 #[no_mangle]
@@ -29006,10 +28839,9 @@ pub unsafe extern "C" fn nzbget_rs_fs_make_unique_path(target_path: *const c_cha
 pub unsafe extern "C" fn nzbget_rs_fs_create_hard_link(
     from: *const c_char,
     to: *const c_char,
-    stat: Option<FsStat>,
     errmsg: *mut RsBuf,
 ) -> c_int {
-    if from.is_null() || to.is_null() || stat.is_none() {
+    if from.is_null() || to.is_null() {
         if !errmsg.is_null() {
             *errmsg = into_buf(Vec::new());
         }
@@ -29019,7 +28851,7 @@ pub unsafe extern "C" fn nzbget_rs_fs_create_hard_link(
     let ok = crate::fsops::create_hard_link(
         CStr::from_ptr(from),
         CStr::from_ptr(to),
-        &|p| fs_stat(stat, p),
+        &crate::fsops::posix_stat,
         &mut msg,
     );
     if !errmsg.is_null() {
@@ -29033,17 +28865,16 @@ pub unsafe extern "C" fn nzbget_rs_fs_create_hard_link(
 pub unsafe extern "C" fn nzbget_rs_fs_load_file_into_buffer(
     filename: *const c_char,
     add_trailing_null: c_int,
-    stat: Option<FsStat>,
     ctx: *mut c_void,
     reserve_cb: Option<unsafe extern "C" fn(ctx: *mut c_void, buf_size: c_int) -> *mut u8>,
 ) -> c_int {
-    let (Some(reserve), false, true) = (reserve_cb, filename.is_null(), stat.is_some()) else {
+    let (Some(reserve), false) = (reserve_cb, filename.is_null()) else {
         return 0;
     };
     c_int::from(crate::fsops::load_file_into_buffer(
         CStr::from_ptr(filename),
         add_trailing_null != 0,
-        &|p| fs_stat(stat, p),
+        &crate::fsops::posix_stat,
         |sz| reserve(ctx, sz),
     ))
 }

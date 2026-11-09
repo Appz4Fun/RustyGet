@@ -2291,7 +2291,6 @@ public:
 			: m_name(name ? name : ""),
 			  m_destDir(destDir ? destDir : ""),
 			  m_extensions(extensions ? extensions : ""),
-			  m_destDirPath(m_destDir),
 			  m_unpack(unpack)
 		{
 		}
@@ -2305,7 +2304,6 @@ public:
 		const std::string m_name;
 		const std::string m_destDir;
 		const std::string m_extensions;
-		const fs::path m_destDirPath;
 		NameList m_aliases;
 		const bool m_unpack;
 	};
@@ -2458,6 +2456,7 @@ public:
 	const char* GetConfigFilename() const { return m_configFilename; }
 	bool GetConfigErrors() const { return m_configErrors; }
 	const char* GetAppDir() const { return m_appDir; }
+	const char* GetMainDir() const { return m_mainDir; }
 	const char* GetDestDir() const { return m_destDir; }
 	const char* GetInterDir() const { return m_interDir; }
 	const char* GetTempDir() const { return m_tempDir; }
@@ -2618,21 +2617,10 @@ public:
 	void SetDirectClientMode(bool directClientMode) { m_directClientMode = directClientMode; }
 	bool GetDirectClientMode() const { return m_directClientMode; }
 
-	const fs::path& GetConfigFilePath() const { return m_configFilePath; }
-	const fs::path& GetMainDirPath() const { return m_mainDirPath; }
-	const fs::path& GetDestDirPath() const { return m_destDirPath; }
-	const fs::path& GetInterDirPath() const { return m_interDirPath; }
 	const fs::path& GetTempDirPath() const { return m_tempDirPath; }
-	const fs::path& GetQueueDirPath() const { return m_queueDirPath; }
 	const fs::path& GetNzbDirPath() const { return m_nzbDirPath; }
-	const fs::path& GetWebDirPath() const { return m_webDirPath; }
-	const fs::path& GetConfigTemplatePath() const { return m_configTemplatePath; }
-	const fs::path& GetCertStorePath() const { return m_certStorePath; }
-	const fs::path& GetLockFilePath() const { return m_lockFilePath; }
-	const fs::path& GetLogFilePath() const { return m_logFilePath; }
-	const fs::path& GetUnpackPassFilePath() const { return m_unpackPassFilePath; }
-	const fs::path& GetUnrarPath() const { return m_unrarPath; }
-	const fs::path& GetSevenZipPath() const { return m_sevenZipPath; }
+	const char* GetUnrarPath() const { return m_unrarPath ? *m_unrarPath : ""; }
+	const char* GetSevenZipPath() const { return m_sevenZipPath ? *m_sevenZipPath : ""; }
 	const std::vector<fs::path>& GetScriptDirPaths() const { return m_scriptDirPaths; }
 
 private:
@@ -2645,21 +2633,8 @@ private:
 	Extender* m_extender;
 
 	// Options
-	fs::path m_configFilePath;
-	fs::path m_mainDirPath;
-	fs::path m_destDirPath;
-	fs::path m_interDirPath;
 	fs::path m_tempDirPath;
-	fs::path m_queueDirPath;
 	fs::path m_nzbDirPath;
-	fs::path m_webDirPath;
-	fs::path m_configTemplatePath;
-	fs::path m_certStorePath;
-	fs::path m_lockFilePath;
-	fs::path m_logFilePath;
-	fs::path m_unpackPassFilePath;
-	fs::path m_unrarPath;
-	fs::path m_sevenZipPath;
 	std::vector<fs::path> m_scriptDirPaths;
 
 	bool m_configErrors = false;
@@ -2697,6 +2672,8 @@ private:
 	CString m_scriptOrder;
 	CString m_unrarCmd;
 	CString m_sevenZipCmd;
+	CString m_unrarPath;
+	CString m_sevenZipPath;
 	CString m_unpackPassFile;
 	CString m_extCleanupDisk;
 	CString m_parIgnoreExt;
@@ -3010,7 +2987,6 @@ private:
 			filename = FileSystem::ExpandHomePath(filename);
 
 			m_configFilename = *filename;
-			m_configFilePath = fs::u8path(*m_configFilename);
 
 			SetOption(CONFIGFILE.data(), m_configFilename);
 
@@ -3066,20 +3042,13 @@ private:
 		CheckScriptDir();
 		CheckDir(m_nzbDir, NZBDIR.data(), m_mainDir, false, true);
 
-		m_mainDirPath = fs::u8path(*m_mainDir);
-		m_destDirPath = fs::u8path(*m_destDir);
-		m_interDirPath = fs::u8path(*m_interDir);
 		m_tempDirPath = fs::u8path(*m_tempDir);
-		m_queueDirPath = fs::u8path(*m_queueDir);
-		m_webDirPath = fs::u8path(*m_webDir);
 		m_nzbDirPath = fs::u8path(*m_nzbDir);
 
 		Tokenizer tokDir(g_Options->GetScriptDir(), ",;");
 		while (const char* scriptDir = tokDir.Next())
 		{
-			fs::path path;
-			path = fs::u8path(scriptDir);
-			m_scriptDirPaths.push_back(std::move(path));
+			m_scriptDirPaths.push_back(fs::u8path(scriptDir));
 		}
 	}
 
@@ -3111,13 +3080,8 @@ private:
 		m_parIgnoreExt			= GetOption(PARIGNOREEXT.data());
 		m_unpackIgnoreExt		= GetOption(UNPACKIGNOREEXT.data());
 
-		m_configTemplatePath = fs::u8path(*m_configTemplate);
-		m_certStorePath = fs::u8path(*m_certStore);
-		m_lockFilePath = fs::u8path(*m_lockFile);
-		m_logFilePath = fs::u8path(*m_logFile);
-		m_unpackPassFilePath = fs::u8path(*m_unpackPassFile);
-		SetToolPathOption(m_unrarPath, *m_unrarCmd);
-		SetToolPathOption(m_sevenZipPath, *m_sevenZipCmd);
+		SetToolPathOption(m_unrarPath, m_unrarCmd ? *m_unrarCmd : "");
+		SetToolPathOption(m_sevenZipPath, m_sevenZipCmd ? *m_sevenZipCmd : "");
 
 		const char* shellOverride = GetOption(SHELLOVERRIDE.data());
 		m_shellOverride	= shellOverride ? shellOverride : "";
@@ -3188,15 +3152,13 @@ private:
 		optEntry->SetValue(curvalue);
 	}
 
-	void SetToolPathOption(fs::path& pathOpt, std::string_view value)
+	void SetToolPathOption(CString& pathOpt, std::string_view value)
 	{
 		if (value.empty()) return;
 
 		NzbgetRsBuf resolved = nzbget_rs_options_resolve_tool_path(value.data(), value.size());
-		std::string_view sv(resolved.data ? resolved.data : "", resolved.len);
-		fs::path directPath = fs::u8path(sv);
+		pathOpt.Set(resolved.data ? resolved.data : "", (int)resolved.len);
 		nzbget_rs_free(resolved);
-		pathOpt.swap(directPath);
 	}
 
 	OptEntry* FindOption(const char* optname)
@@ -3499,17 +3461,16 @@ public:
 		}
 	}
 
-	fs::path GetLogFilePath() const
+	std::string GetLogFilename() const
 	{
 		std::lock_guard<std::mutex> guard(m_pathMutex);
-		return m_logFilePath;
+		return m_logFilename;
 	}
 
 	void UpdateLogPath(const char* newPath)
 	{
 		std::lock_guard<std::mutex> guard(m_pathMutex);
 		m_logFilename = newPath;
-		m_logFilePath = fs::u8path(m_logFilename);
 	}
 
 private:
@@ -3521,7 +3482,6 @@ private:
 	MessageList m_messages;
 	Debuggables m_debuggables;
 	std::string m_logFilename;
-	fs::path m_logFilePath;
 	std::unique_ptr<DiskFile> m_logFile;
 	uint32 m_idGen = 0;
 	std::atomic<time_t> m_lastWritten{0};
@@ -31200,7 +31160,7 @@ protected:
 		if (!IsStopped() && (m_unpackDecryptError || m_unpackPasswordError || info.crc_or_volume_error))
 		{
 			if (m_postInfo && !((m_unpackDecryptError || m_unpackPasswordError) &&
-				m_password.Empty() && !g_Options->GetUnpackPassFilePath().empty()))
+				m_password.Empty() && !Util::EmptyStr(g_Options->GetUnpackPassFile())))
 			{
 				m_postInfo->GetNzbInfo()->AddMessage(
 					Message::mkWarning,
@@ -43128,22 +43088,22 @@ public:
 private:
 	NzbgetRsBuf RunDiagnose(int formatMode) const
 	{
-		std::string mainDir = m_options.GetMainDirPath().string();
-		std::string destDir = m_options.GetDestDirPath().string();
-		std::string interDir = m_options.GetInterDirPath().string();
-		std::string nzbDir = m_options.GetNzbDirPath().string();
-		std::string queueDir = m_options.GetQueueDirPath().string();
-		std::string webDir = m_options.GetWebDirPath().string();
-		std::string tempDir = m_options.GetTempDirPath().string();
-		std::string configTemplate = m_options.GetConfigTemplatePath().string();
-		std::string configFile = m_options.GetConfigFilePath().string();
-		std::string logFile = m_log.GetLogFilePath().string();
-		std::string optionsLogFile = m_options.GetLogFilePath().string();
-		std::string_view certStore = m_options.GetCertStore();
-		std::string certStorePath = m_options.GetCertStorePath().string();
-		std::string lockFile = m_options.GetLockFilePath().string();
-		std::string unrarPath = m_options.GetUnrarPath().string();
-		std::string sevenZipPath = m_options.GetSevenZipPath().string();
+		auto sv = [](const char* s) -> std::string_view { return s ? s : ""; };
+		std::string_view mainDir = sv(m_options.GetMainDir());
+		std::string_view destDir = sv(m_options.GetDestDir());
+		std::string_view interDir = sv(m_options.GetInterDir());
+		std::string_view nzbDir = sv(m_options.GetNzbDir());
+		std::string_view queueDir = sv(m_options.GetQueueDir());
+		std::string_view webDir = sv(m_options.GetWebDir());
+		std::string_view tempDir = sv(m_options.GetTempDir());
+		std::string_view configTemplate = sv(m_options.GetConfigTemplate());
+		std::string_view configFile = sv(m_options.GetConfigFilename());
+		std::string logFile = m_log.GetLogFilename();
+		std::string_view optionsLogFile = sv(m_options.GetLogFile());
+		std::string_view certStore = sv(m_options.GetCertStore());
+		std::string_view lockFile = sv(m_options.GetLockFile());
+		std::string_view unrarPath = sv(m_options.GetUnrarPath());
+		std::string_view sevenZipPath = sv(m_options.GetSevenZipPath());
 
 		const auto& scriptDirPaths = m_options.GetScriptDirPaths();
 		std::vector<std::string> scriptDirStrs;
@@ -43269,8 +43229,8 @@ private:
 		cfg.options_log_file_len = optionsLogFile.size();
 		cfg.cert_store = certStore.data();
 		cfg.cert_store_len = certStore.size();
-		cfg.cert_store_path = certStorePath.data();
-		cfg.cert_store_path_len = certStorePath.size();
+		cfg.cert_store_path = certStore.data();
+		cfg.cert_store_path_len = certStore.size();
 		cfg.config_file = configFile.data();
 		cfg.config_file_len = configFile.size();
 		cfg.lock_file = lockFile.data();
@@ -43340,7 +43300,7 @@ private:
 		cfg.secure_key = secureKey.data();
 		cfg.secure_key_len = secureKey.size();
 		cfg.secure_port = m_options.GetSecurePort();
-		cfg.cert_store_path_empty = m_options.GetCertStorePath().empty() ? 1 : 0;
+		cfg.cert_store_path_empty = certStore.empty() ? 1 : 0;
 		cfg.daemon_username = daemonUser.data();
 		cfg.daemon_username_len = daemonUser.size();
 		cfg.umask = m_options.GetUMask();
@@ -46390,23 +46350,18 @@ private:
 
 		m_contentType = nzbget_rs_dqh_xmlrpc_response_content_type(xmlRpc ? 1 : 0);
 	}
-	void BuildErrorResponse(int errCode, const char* errText)
+	void BuildErrorResponse(int errCode, const char* errText, const char* callbackFunc = "", const char* requestId = nullptr)
 	{
-		XmlCommand command(errCode, errText);
-		command.SetProtocol(m_protocol);
-		command.Execute();
-		BuildResponse(command.GetResponse(), "", command.GetFault(), nullptr);
+		NzbgetRsBuf errBuf = nzbget_rs_xmlrpc_format_error(
+			m_protocol != rpXmlRpc ? 1 : 0, errCode, errText ? errText : "Invalid procedure");
+		BuildResponse(errBuf.data ? errBuf.data : "", callbackFunc, true, requestId);
+		nzbget_rs_free(errBuf);
 	}
 	void BuildJsonPRefusal(XmlCommand* command, int errCode, const char* errText, const char* requestId)
 	{
-		XmlCommand refusal(errCode, errText);
-		refusal.SetProtocol(m_protocol);
-		refusal.Execute();
-		BuildResponse(refusal.GetResponse(), command->GetCallbackFunc(), refusal.GetFault(), requestId);
+		BuildErrorResponse(errCode, errText, command->GetCallbackFunc(), requestId);
 	}
 };
-
-using XmlCommand = XmlRpcProcessor::XmlCommand;
 
 class WebProcessor
 {
@@ -47387,41 +47342,27 @@ public:
 			length = buffer.Size();
 		}
 
-		bool OK = InitConnection();
-		if (OK)
-		{
-			SNzbDownloadRequest DownloadRequest;
-			nzbget_rs_binrpc_init_download_request(
-				(uint8_t*)&DownloadRequest,
-				g_Options->GetControlUsername(),
-				g_Options->GetControlPassword(),
-				nzbFilename,
-				nzbContent,
-				isUrl ? 1 : 0,
-				category,
-				addFirst ? 1 : 0,
-				addPaused ? 1 : 0,
-				priority,
-				dupeScore,
-				dupeMode,
-				dupeKey,
-				length,
-				autoCategory ? 1 : 0);
+		if (!InitConnection()) return false;
 
-			if (!m_connection->Send((char*)(&DownloadRequest), sizeof(DownloadRequest)))
-			{
-				perror("m_pConnection->Send");
-				OK = false;
-			}
-			else
-			{
-				m_connection->Send(isUrl ? nzbContent : buffer, length);
-				OK = ReceiveBoolResponse();
-				m_connection->Disconnect();
-			}
-		}
+		SNzbDownloadRequest DownloadRequest;
+		nzbget_rs_binrpc_init_download_request(
+			(uint8_t*)&DownloadRequest,
+			g_Options->GetControlUsername(),
+			g_Options->GetControlPassword(),
+			nzbFilename,
+			nzbContent,
+			isUrl ? 1 : 0,
+			category,
+			addFirst ? 1 : 0,
+			addPaused ? 1 : 0,
+			priority,
+			dupeScore,
+			dupeMode,
+			dupeKey,
+			length,
+			autoCategory ? 1 : 0);
 
-		return OK;
+		return SendRequestAndReceiveBool(DownloadRequest, isUrl ? nzbContent : *buffer, length);
 	}
 
 	bool RequestServerList(bool files, bool groups, const char* pattern)
@@ -47440,39 +47381,12 @@ public:
 			ListRequest.m_pattern[NZBREQUESTFILENAMESIZE-1] = '\0';
 		}
 
-		if (!m_connection->Send((char*)(&ListRequest), sizeof(ListRequest)))
-		{
-			perror("m_pConnection->Send");
-			return false;
-		}
-
-		printf("Request sent\n");
-
-		// Now listen for the returned list
 		SNzbListResponse ListResponse;
-		bool read = m_connection->Recv((char*) &ListResponse, sizeof(ListResponse));
-		if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
-			read ? 1 : 0,
-			(int)ntohl(ListResponse.m_messageBase.m_signature),
-			(int)NZBMESSAGE_SIGNATURE,
-			(uint32)ntohl(ListResponse.m_messageBase.m_structSize),
-			(uint32)sizeof(ListResponse)))
+		CharBuffer buf;
+		if (!ExchangeTrailingResponse(ListRequest, ListResponse, buf))
 		{
-			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 			return false;
 		}
-
-		CharBuffer buf;
-		if (ntohl(ListResponse.m_trailingDataLength) > 0)
-		{
-			buf.Reserve(ntohl(ListResponse.m_trailingDataLength));
-			if (!m_connection->Recv(buf, buf.Size()))
-			{
-				return false;
-			}
-		}
-
-		m_connection->Disconnect();
 
 		if (pattern && !ListResponse.m_regExValid)
 		{
@@ -47561,17 +47475,7 @@ public:
 		PauseUnpauseRequest.m_pause = htonl(pause);
 		PauseUnpauseRequest.m_action = htonl(action);
 
-		if (!m_connection->Send((char*)(&PauseUnpauseRequest), sizeof(PauseUnpauseRequest)))
-		{
-			perror("m_pConnection->Send");
-			m_connection->Disconnect();
-			return false;
-		}
-
-		bool OK = ReceiveBoolResponse();
-		m_connection->Disconnect();
-
-		return OK;
+		return SendRequestAndReceiveBool(PauseUnpauseRequest);
 	}
 
 	bool RequestServerSetDownloadRate(int rate)
@@ -47582,17 +47486,7 @@ public:
 		InitMessageBase(&SetDownloadRateRequest.m_messageBase, rrSetDownloadRate, sizeof(SetDownloadRateRequest));
 		SetDownloadRateRequest.m_downloadRate = htonl(rate);
 
-		if (!m_connection->Send((char*)(&SetDownloadRateRequest), sizeof(SetDownloadRateRequest)))
-		{
-			perror("m_pConnection->Send");
-			m_connection->Disconnect();
-			return false;
-		}
-
-		bool OK = ReceiveBoolResponse();
-		m_connection->Disconnect();
-
-		return OK;
+		return SendRequestAndReceiveBool(SetDownloadRateRequest);
 	}
 
 	bool RequestServerEditQueue(DownloadQueue::EEditAction action, int offset, const char* text,
@@ -47640,23 +47534,8 @@ public:
 		EditQueueRequest.m_trailingNameEntriesLen = htonl(nameLength);
 		EditQueueRequest.m_trailingDataLength = htonl(length);
 
-		bool OK = false;
-		if (!m_connection->Send((char*)(&EditQueueRequest), sizeof(EditQueueRequest)))
-		{
-			perror("m_pConnection->Send");
-		}
-		else
-		{
-			if (length > 0 && trailingBuf.data)
-			{
-				m_connection->Send(trailingBuf.data, length);
-			}
-			OK = ReceiveBoolResponse();
-			m_connection->Disconnect();
-		}
-
+		bool OK = SendRequestAndReceiveBool(EditQueueRequest, trailingBuf.data, length);
 		nzbget_rs_free(trailingBuf);
-		m_connection->Disconnect();
 		return OK;
 	}
 
@@ -47669,39 +47548,12 @@ public:
 		LogRequest.m_lines = htonl(lines);
 		LogRequest.m_idFrom = 0;
 
-		if (!m_connection->Send((char*)(&LogRequest), sizeof(LogRequest)))
-		{
-			perror("m_pConnection->Send");
-			return false;
-		}
-
-		printf("Request sent\n");
-
-		// Now listen for the returned log
 		SNzbLogResponse LogResponse;
-		bool read = m_connection->Recv((char*) &LogResponse, sizeof(LogResponse));
-		if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
-			read ? 1 : 0,
-			(int)ntohl(LogResponse.m_messageBase.m_signature),
-			(int)NZBMESSAGE_SIGNATURE,
-			(uint32)ntohl(LogResponse.m_messageBase.m_structSize),
-			(uint32)sizeof(LogResponse)))
+		CharBuffer buf;
+		if (!ExchangeTrailingResponse(LogRequest, LogResponse, buf))
 		{
-			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 			return false;
 		}
-
-		CharBuffer buf;
-		if (ntohl(LogResponse.m_trailingDataLength) > 0)
-		{
-			buf.Reserve(ntohl(LogResponse.m_trailingDataLength));
-			if (!m_connection->Recv(buf, buf.Size()))
-			{
-				return false;
-			}
-		}
-
-		m_connection->Disconnect();
 
 		if (LogResponse.m_trailingDataLength == 0)
 		{
@@ -47730,39 +47582,12 @@ public:
 		SNzbRequestBase PostQueueRequest = {};
 		InitMessageBase(&PostQueueRequest, rrPostQueue, sizeof(PostQueueRequest));
 
-		if (!m_connection->Send((char*)(&PostQueueRequest), sizeof(PostQueueRequest)))
-		{
-			perror("m_pConnection->Send");
-			return false;
-		}
-
-		printf("Request sent\n");
-
-		// Now listen for the returned list
 		SNzbPostQueueResponse PostQueueResponse;
-		bool read = m_connection->Recv((char*) &PostQueueResponse, sizeof(PostQueueResponse));
-		if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
-			read ? 1 : 0,
-			(int)ntohl(PostQueueResponse.m_messageBase.m_signature),
-			(int)NZBMESSAGE_SIGNATURE,
-			(uint32)ntohl(PostQueueResponse.m_messageBase.m_structSize),
-			(uint32)sizeof(PostQueueResponse)))
+		CharBuffer buf;
+		if (!ExchangeTrailingResponse(PostQueueRequest, PostQueueResponse, buf))
 		{
-			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 			return false;
 		}
-
-		CharBuffer buf;
-		if (ntohl(PostQueueResponse.m_trailingDataLength) > 0)
-		{
-			buf.Reserve(ntohl(PostQueueResponse.m_trailingDataLength));
-			if (!m_connection->Recv(buf, buf.Size()))
-			{
-				return false;
-			}
-		}
-
-		m_connection->Disconnect();
 
 		if (ntohl(PostQueueResponse.m_trailingDataLength) == 0)
 		{
@@ -47794,16 +47619,7 @@ public:
 		int length = strlen(text) + 1;
 		WriteLogRequest.m_trailingDataLength = htonl(length);
 
-		if (!m_connection->Send((char*)(&WriteLogRequest), sizeof(WriteLogRequest)))
-		{
-			perror("m_pConnection->Send");
-			return false;
-		}
-
-		m_connection->Send(text, length);
-		bool OK = ReceiveBoolResponse();
-		m_connection->Disconnect();
-		return OK;
+		return SendRequestAndReceiveBool(WriteLogRequest, text, length);
 	}
 
 	bool RequestScan(bool syncMode)
@@ -47812,21 +47628,9 @@ public:
 
 		SNzbScanRequest ScanRequest = {};
 		InitMessageBase(&ScanRequest.m_messageBase, rrScan, sizeof(ScanRequest));
-
 		ScanRequest.m_syncMode = htonl(syncMode);
 
-		bool OK = m_connection->Send((char*)(&ScanRequest), sizeof(ScanRequest));
-		if (OK)
-		{
-			OK = ReceiveBoolResponse();
-		}
-		else
-		{
-			perror("m_pConnection->Send");
-		}
-
-		m_connection->Disconnect();
-		return OK;
+		return SendRequestAndReceiveBool(ScanRequest);
 	}
 
 	bool RequestHistory(bool withHidden)
@@ -47837,39 +47641,12 @@ public:
 		InitMessageBase(&HistoryRequest.m_messageBase, rrHistory, sizeof(HistoryRequest));
 		HistoryRequest.m_hidden = htonl(withHidden);
 
-		if (!m_connection->Send((char*)(&HistoryRequest), sizeof(HistoryRequest)))
-		{
-			perror("m_pConnection->Send");
-			return false;
-		}
-
-		printf("Request sent\n");
-
-		// Now listen for the returned list
 		SNzbHistoryResponse HistoryResponse;
-		bool read = m_connection->Recv((char*) &HistoryResponse, sizeof(HistoryResponse));
-		if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
-			read ? 1 : 0,
-			(int)ntohl(HistoryResponse.m_messageBase.m_signature),
-			(int)NZBMESSAGE_SIGNATURE,
-			(uint32)ntohl(HistoryResponse.m_messageBase.m_structSize),
-			(uint32)sizeof(HistoryResponse)))
+		CharBuffer buf;
+		if (!ExchangeTrailingResponse(HistoryRequest, HistoryResponse, buf))
 		{
-			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 			return false;
 		}
-
-		CharBuffer buf;
-		if (ntohl(HistoryResponse.m_trailingDataLength) > 0)
-		{
-			buf.Reserve(ntohl(HistoryResponse.m_trailingDataLength));
-			if (!m_connection->Recv(buf, buf.Size()))
-			{
-				return false;
-			}
-		}
-
-		m_connection->Disconnect();
 
 		if (ntohl(HistoryResponse.m_trailingDataLength) == 0)
 		{
@@ -47899,18 +47676,7 @@ public:
 		SNzbRequestBase req = {};
 		InitMessageBase(&req, request, sizeof(req));
 
-		bool OK = m_connection->Send((char*)(&req), sizeof(req));
-		if (OK)
-		{
-			OK = ReceiveBoolResponse();
-		}
-		else
-		{
-			perror("m_pConnection->Send");
-		}
-
-		m_connection->Disconnect();
-		return OK;
+		return SendRequestAndReceiveBool(req);
 	}
 
 	void BuildFileList(SNzbListResponse* listResponse, const char* trailingData, DownloadQueue* downloadQueue)
@@ -48049,6 +47815,62 @@ private:
 			size,
 			g_Options->GetControlUsername(),
 			g_Options->GetControlPassword());
+	}
+
+	template <typename Req>
+	bool SendRequestAndReceiveBool(const Req& req, const char* trailing = nullptr, int trailingLen = 0)
+	{
+		bool OK = m_connection->Send((char*)&req, sizeof(req));
+		if (!OK)
+		{
+			perror("m_pConnection->Send");
+		}
+		else
+		{
+			if (trailingLen > 0 && trailing)
+			{
+				m_connection->Send(trailing, trailingLen);
+			}
+			OK = ReceiveBoolResponse();
+		}
+		m_connection->Disconnect();
+		return OK;
+	}
+
+	template <typename Req, typename Resp>
+	bool ExchangeTrailingResponse(const Req& req, Resp& resp, CharBuffer& buf)
+	{
+		if (!m_connection->Send((char*)&req, sizeof(req)))
+		{
+			perror("m_pConnection->Send");
+			return false;
+		}
+
+		printf("Request sent\n");
+
+		bool read = m_connection->Recv((char*)&resp, sizeof(resp));
+		if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
+			read ? 1 : 0,
+			(int)ntohl(resp.m_messageBase.m_signature),
+			(int)NZBMESSAGE_SIGNATURE,
+			(uint32)ntohl(resp.m_messageBase.m_structSize),
+			(uint32)sizeof(resp)))
+		{
+			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
+			return false;
+		}
+
+		if (ntohl(resp.m_trailingDataLength) > 0)
+		{
+			buf.Reserve(ntohl(resp.m_trailingDataLength));
+			if (!m_connection->Recv(buf, buf.Size()))
+			{
+				return false;
+			}
+		}
+
+		m_connection->Disconnect();
+		return true;
 	}
 
 	bool ReceiveBoolResponse()
@@ -49542,54 +49364,6 @@ public:
 	void SetConnection(Connection* connection) { m_connection = connection; }
 
 private:
-	// The entries of one kind of a list response, collected under the locks as
-	// plain structs (the first Inline of them on the stack, the strings pointing
-	// into the queue or log): rust/src/binrpc.rs encodes them all in one call
-	template <class T, size_t Inline>
-	class RsBatch
-	{
-	public:
-		RsBatch() : m_data(m_inline), m_capacity(Inline) {}
-		RsBatch(const RsBatch&) = delete;
-
-		// room for a count of entries known beforehand
-		void Reserve(size_t count)
-		{
-			if (count > m_capacity)
-			{
-				Grow(count);
-			}
-		}
-
-		void Add(const T& entry)
-		{
-			if (m_size == m_capacity)
-			{
-				Grow(m_capacity * 2);
-			}
-			m_data[m_size++] = entry;
-		}
-
-		const T* Data() const { return m_data; }
-		size_t Size() const { return m_size; }
-
-	private:
-		T m_inline[Inline]; // not initialized: the entries are plain structs
-		std::unique_ptr<T[]> m_heap;
-		T* m_data;
-		size_t m_capacity;
-		size_t m_size = 0;
-
-		void Grow(size_t capacity)
-		{
-			std::unique_ptr<T[]> heap(new T[capacity]);
-			memcpy(static_cast<void*>(heap.get()), m_data, m_size * sizeof(T));
-			m_heap = std::move(heap);
-			m_data = m_heap.get();
-			m_capacity = capacity;
-		}
-	};
-
 	// The trailing data of a list response, encoded by rust/src/binrpc.rs
 	class RsBytes
 	{
@@ -49917,18 +49691,18 @@ private:
 			int nrFileEntries = 0;
 
 			// the entries, collected under the lock for rust/src/binrpc.rs
-			RsBatch<NzbgetRsBinNzb, 16> nzbEntries;
-			RsBatch<NzbgetRsBinParam, 32> pppEntries;
-			RsBatch<NzbgetRsBinFile, 32> fileEntries;
+			std::vector<NzbgetRsBinNzb> nzbEntries;
+			std::vector<NzbgetRsBinParam> pppEntries;
+			std::vector<NzbgetRsBinFile> fileEntries;
 			size_t pppCount = 0, fileCount = 0;
 			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 			{
 				pppCount += nzbInfo->GetParameters()->size();
 				fileCount += nzbInfo->GetFileList()->size();
 			}
-			nzbEntries.Reserve(nrNzbEntries);
-			pppEntries.Reserve(pppCount);
-			fileEntries.Reserve(fileCount);
+			nzbEntries.reserve(nrNzbEntries);
+			pppEntries.reserve(pppCount);
+			fileEntries.reserve(fileCount);
 
 			// nzb entries
 			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
@@ -49937,7 +49711,7 @@ private:
 				Util::SplitInt64(nzbInfo->GetSize(), &sizeHi, &sizeLo);
 				Util::SplitInt64(nzbInfo->GetRemainingSize(), &remainingSizeHi, &remainingSizeLo);
 				Util::SplitInt64(nzbInfo->GetPausedSize(), &pausedSizeHi, &pausedSizeLo);
-				nzbEntries.Add({(uint32)nzbInfo->GetId(), (uint32)nzbInfo->GetKind(), sizeLo, sizeHi, remainingSizeLo,
+				nzbEntries.push_back({(uint32)nzbInfo->GetId(), (uint32)nzbInfo->GetKind(), sizeLo, sizeHi, remainingSizeLo,
 					remainingSizeHi, pausedSizeLo, pausedSizeHi, (uint32)nzbInfo->GetPausedFileCount(),
 					(uint32)nzbInfo->GetRemainingParCount(), (uint32)nzbInfo->GetPriority(),
 					nzbget_rs_tpr_binrpc_eval_nzb_group_match(
@@ -49954,7 +49728,7 @@ private:
 				nzbIndex++;
 				for (NzbParameter& nzbParameter : nzbInfo->GetParameters())
 				{
-					pppEntries.Add({(uint32)nzbIndex, RsText(nzbParameter.GetName()), RsText(nzbParameter.GetValue())});
+					pppEntries.push_back({(uint32)nzbIndex, RsText(nzbParameter.GetName()), RsText(nzbParameter.GetValue())});
 					nrPPPEntries++;
 				}
 			}
@@ -49996,15 +49770,15 @@ private:
 					uint32 fileSizeHi, fileSizeLo, remainingSizeHi, remainingSizeLo;
 					Util::SplitInt64(fileInfo->GetSize(), &fileSizeHi, &fileSizeLo);
 					Util::SplitInt64(fileInfo->GetRemainingSize(), &remainingSizeHi, &remainingSizeLo);
-					fileEntries.Add({(uint32)fileInfo->GetId(), (uint32)nzbIndex, fileSizeLo, fileSizeHi, remainingSizeLo,
+					fileEntries.push_back({(uint32)fileInfo->GetId(), (uint32)nzbIndex, fileSizeLo, fileSizeHi, remainingSizeLo,
 						remainingSizeHi, (uint32)fileInfo->GetPaused(), (uint32)fileInfo->GetFilenameConfirmed(),
 						(uint32)fileInfo->GetActiveDownloads(), (uint32)match,
 						RsText(fileInfo->GetSubject()), RsText(fileInfo->GetFilename())});
 				}
 			}
 
-			entries = nzbget_rs_binrpc_encode_list_into(nzbEntries.Data(), nzbEntries.Size(), pppEntries.Data(), pppEntries.Size(),
-				fileEntries.Data(), fileEntries.Size(), entries.Scratch(), entries.Capacity());
+			entries = nzbget_rs_binrpc_encode_list_into(nzbEntries.data(), nzbEntries.size(), pppEntries.data(), pppEntries.size(),
+				fileEntries.data(), fileEntries.size(), entries.Scratch(), entries.Capacity());
 
 			ListResponse.m_nrTrailingNzbEntries = htonl(nrNzbEntries);
 			ListResponse.m_nrTrailingPPPEntries = htonl(nrPPPEntries);
@@ -50081,18 +49855,18 @@ private:
 				&start, &nrEntries);
 
 			// the messages from start on, collected under the lock for rust/src/binrpc.rs
-			RsBatch<NzbgetRsBinLog, 32> log;
+			std::vector<NzbgetRsBinLog> log;
 			if ((size_t)start < messages->size())
 			{
-				log.Reserve(messages->size() - (size_t)start);
+				log.reserve(messages->size() - (size_t)start);
 			}
 			for (uint32 i = (uint32)start; i < messages->size(); i++)
 			{
 				Message& message = messages->at(i);
-				log.Add({(uint32)message.GetId(), (uint32)message.GetKind(), (uint32)(int)message.GetTime(),
+				log.push_back({(uint32)message.GetId(), (uint32)message.GetKind(), (uint32)(int)message.GetTime(),
 					RsText(message.GetText())});
 			}
-			entries = nzbget_rs_binrpc_encode_log_into(log.Data(), log.Size(), entries.Scratch(), entries.Capacity());
+			entries = nzbget_rs_binrpc_encode_log_into(log.data(), log.size(), entries.Scratch(), entries.Capacity());
 			bufsize = entries.Size();
 		}
 
@@ -50224,8 +49998,8 @@ private:
 			int NrEntries = 0;
 			time_t curTime = Util::CurrentTime();
 			// collected under the lock for rust/src/binrpc.rs
-			RsBatch<NzbgetRsBinPost, 16> jobs;
-			jobs.Reserve(nzbList->size());
+			std::vector<NzbgetRsBinPost> jobs;
+			jobs.reserve(nzbList->size());
 
 			for (NzbInfo* nzbInfo : nzbList)
 			{
@@ -50236,14 +50010,14 @@ private:
 				}
 
 				NrEntries++;
-				jobs.Add({(uint32)nzbInfo->GetId(), (uint32)postInfo->GetStage(), (uint32)postInfo->GetStageProgress(),
+				jobs.push_back({(uint32)nzbInfo->GetId(), (uint32)postInfo->GetStage(), (uint32)postInfo->GetStageProgress(),
 					(uint32)postInfo->GetFileProgress(),
 					nzbget_rs_tpr_binrpc_calc_elapsed_sec((int64_t)curTime, (int64_t)postInfo->GetStartTime()),
 					nzbget_rs_tpr_binrpc_calc_elapsed_sec((int64_t)curTime, (int64_t)postInfo->GetStageTime()),
 					RsText(postInfo->GetNzbInfo()->GetFilename()), RsText(postInfo->GetNzbInfo()->GetName()),
 					RsText(postInfo->GetNzbInfo()->GetDestDir()), RsText(postInfo->GetProgressLabel())});
 			}
-			entries = nzbget_rs_binrpc_encode_post_queue_into(jobs.Data(), jobs.Size(), entries.Scratch(), entries.Capacity());
+			entries = nzbget_rs_binrpc_encode_post_queue_into(jobs.data(), jobs.size(), entries.Scratch(), entries.Capacity());
 
 			PostQueueResponse.m_nrTrailingEntries = htonl(NrEntries);
 			PostQueueResponse.m_trailingDataLength = htonl(entries.Size());
@@ -50331,8 +50105,8 @@ private:
 
 			int nrEntries = 0;
 			// collected under the lock for rust/src/binrpc.rs
-			RsBatch<NzbgetRsBinHistory, 32> history;
-			history.Reserve(downloadQueue->GetHistory()->size());
+			std::vector<NzbgetRsBinHistory> history;
+			history.reserve(downloadQueue->GetHistory()->size());
 			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 			{
 				if (nzbget_rs_tpr_binrpc_should_include_history_entry(
@@ -50365,11 +50139,11 @@ private:
 						NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
 						urlStatus = nzbInfo->GetUrlStatus();
 					}
-					history.Add({(uint32)historyInfo->GetId(), (uint32)historyInfo->GetKind(), (uint32)(int)historyInfo->GetTime(),
+					history.push_back({(uint32)historyInfo->GetId(), (uint32)historyInfo->GetKind(), (uint32)(int)historyInfo->GetTime(),
 						sizeLo, sizeHi, fileCount, parStatus, scriptStatus, urlStatus, RsText(historyInfo->GetName())});
 				}
 			}
-			entries = nzbget_rs_binrpc_encode_history_into(history.Data(), history.Size(), entries.Scratch(), entries.Capacity());
+			entries = nzbget_rs_binrpc_encode_history_into(history.data(), history.size(), entries.Scratch(), entries.Capacity());
 
 			HistoryResponse.m_nrTrailingEntries = htonl(nrEntries);
 			HistoryResponse.m_trailingDataLength = htonl(entries.Size());

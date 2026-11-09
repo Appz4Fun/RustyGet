@@ -523,24 +523,6 @@ pub fn split_param_assignment(text: &[u8]) -> Option<(&[u8], &[u8])> {
         .map(|eq| (&text[..eq], &text[eq + 1..]))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_history_coord_split_param_assignment(
-    text: *const std::os::raw::c_char,
-    out_name_len: *mut usize,
-) -> *const std::os::raw::c_char {
-    if text.is_null() {
-        return std::ptr::null();
-    }
-    let bytes = unsafe { std::ffi::CStr::from_ptr(text).to_bytes() };
-    let Some((name, _)) = split_param_assignment(bytes) else {
-        return std::ptr::null();
-    };
-    if !out_name_len.is_null() {
-        unsafe { *out_name_len = name.len() };
-    }
-    unsafe { text.add(name.len() + 1) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

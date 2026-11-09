@@ -807,41 +807,6 @@ pub fn resolve_history_mark(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dupecoord_same_content_hash(
-    full1: u32,
-    filtered1: u32,
-    full2: u32,
-    filtered2: u32,
-) -> i32 {
-    i32::from(same_content_hash(full1, filtered1, full2, filtered2))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupecoord_should_inherit_dupe_props(
-    self_name: *const c_char,
-    other_name: *const c_char,
-    other_key: *const c_char,
-    other_score: i32,
-) -> i32 {
-    let s_name = if self_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(self_name).to_bytes()
-    };
-    let o_name = if other_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(other_name).to_bytes()
-    };
-    let o_key = if other_key.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(other_key).to_bytes()
-    };
-    i32::from(should_inherit_dupe_props(s_name, o_name, o_key, other_score))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupecoord_eval_history_dupe_match(
     kind: i32,
     self_full_hash: u32,
@@ -947,57 +912,6 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_accum_hc_dupe_same_content_outcome(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupecoord_should_skip_recent_history_score_dupe(
-    same_content: i32,
-    good: i32,
-    self_dupe_mode: i32,
-    self_dupe_score: i32,
-    self_name: *const c_char,
-    self_dupe_key: *const c_char,
-    kind: i32,
-    item_dupe_mode: i32,
-    item_dupe_score: i32,
-    item_is_dupe_success: i32,
-    item_name: *const c_char,
-    item_dupe_key: *const c_char,
-) -> i32 {
-    let s_name = if self_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(self_name).to_bytes()
-    };
-    let s_key = if self_dupe_key.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(self_dupe_key).to_bytes()
-    };
-    let i_name = if item_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(item_name).to_bytes()
-    };
-    let i_key = if item_dupe_key.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(item_dupe_key).to_bytes()
-    };
-    i32::from(should_skip_recent_history_score_dupe(
-        same_content != 0,
-        good != 0,
-        self_dupe_mode,
-        self_dupe_score,
-        s_name,
-        s_key,
-        kind,
-        item_dupe_mode,
-        item_dupe_score,
-        item_is_dupe_success != 0,
-        i_name,
-        i_key,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupecoord_eval_queue_score_dupe(
     is_self: i32,
     queued_delete_status: i32,
@@ -1056,37 +970,6 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_eval_queue_score_dupe(
         queued_crit_health,
         queued_has_post_info != 0,
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupecoord_is_other_to_stop_on_completed(
-    is_self: i32,
-    queued_is_nzb: i32,
-    queued_deleting: i32,
-    queued_delete_status: i32,
-    queued_dupe_mode: i32,
-    queued_dupe_key: *const c_char,
-    self_dupe_key: *const c_char,
-) -> i32 {
-    let q_key = if queued_dupe_key.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(queued_dupe_key).to_bytes()
-    };
-    let s_key = if self_dupe_key.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(self_dupe_key).to_bytes()
-    };
-    i32::from(is_other_to_stop_on_completed(
-        is_self != 0,
-        queued_is_nzb != 0,
-        queued_deleting != 0,
-        queued_delete_status,
-        queued_dupe_mode,
-        q_key,
-        s_key,
-    ))
 }
 
 #[no_mangle]

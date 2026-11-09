@@ -10568,51 +10568,6 @@ pub unsafe extern "C" fn nzbget_rs_rco_rpc_parse_update_branch(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_remote_classify_signature(
-    sig_ptr: *const c_char,
-    nzb_magic_be: u32,
-) -> c_int {
-    if sig_ptr.is_null() {
-        return 0;
-    }
-    let slice = std::slice::from_raw_parts(sig_ptr.cast::<u8>(), 4);
-    let arr: [u8; 4] = [slice[0], slice[1], slice[2], slice[3]];
-    crate::webserver::remote_classify_signature(&arr, nzb_magic_be)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_remote_parse_web_request_line(
-    sig_ptr: *const c_char,
-    line: *const c_char,
-    out_http_method: *mut c_int,
-    out_url_offset: *mut usize,
-    out_url_len: *mut usize,
-) -> c_int {
-    if sig_ptr.is_null() || line.is_null() {
-        return 0;
-    }
-    let slice = std::slice::from_raw_parts(sig_ptr.cast::<u8>(), 4);
-    let arr: [u8; 4] = [slice[0], slice[1], slice[2], slice[3]];
-    let line_bytes = crate::diskstate_format::cstr_to_bytes(line);
-    if let Some((method, offset, len)) =
-        crate::webserver::remote_parse_web_request_line(&arr, line_bytes)
-    {
-        if !out_http_method.is_null() {
-            *out_http_method = method;
-        }
-        if !out_url_offset.is_null() {
-            *out_url_offset = offset;
-        }
-        if !out_url_len.is_null() {
-            *out_url_len = len;
-        }
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_rco_conn_read_line_chunk(
     buf_ptr: *const c_char,
     buf_avail: c_int,
@@ -10743,131 +10698,6 @@ pub unsafe extern "C" fn nzbget_rs_rco_log_init_message_disposition(
 // ============================================================================
 // Frontend, NCurses, Maintenance, ExtensionManager, NntpServer & SystemHealth FFI
 // ============================================================================
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_frontend_calc_log_start_index(
-    needed_first_id: c_int,
-    first_msg_id: c_int,
-    out_skip: *mut c_int,
-) -> c_int {
-    let (start, skip) =
-        crate::ncurses_format::frontend_calc_log_start_index(needed_first_id, first_msg_id);
-    if !out_skip.is_null() {
-        *out_skip = c_int::from(skip);
-    }
-    start
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_ncurses_calc_window_sizes(
-    nr_rows: c_int,
-    nr_columns: c_int,
-    max_screen_width: c_int,
-    queue_win_pct: c_int,
-    queue_size: c_int,
-    out_clamped_cols: *mut c_int,
-    out_queue_win_height: *mut c_int,
-    out_queue_win_client_height: *mut c_int,
-    out_messages_win_top: *mut c_int,
-    out_messages_win_height: *mut c_int,
-    out_messages_win_client_height: *mut c_int,
-) {
-    let (cols, qh, qch, mtop, mh, mch) = crate::ncurses_format::ncurses_calc_window_sizes(
-        nr_rows,
-        nr_columns,
-        max_screen_width,
-        queue_win_pct,
-        queue_size,
-    );
-    if !out_clamped_cols.is_null() {
-        *out_clamped_cols = cols;
-    }
-    if !out_queue_win_height.is_null() {
-        *out_queue_win_height = qh;
-    }
-    if !out_queue_win_client_height.is_null() {
-        *out_queue_win_client_height = qch;
-    }
-    if !out_messages_win_top.is_null() {
-        *out_messages_win_top = mtop;
-    }
-    if !out_messages_win_height.is_null() {
-        *out_messages_win_height = mh;
-    }
-    if !out_messages_win_client_height.is_null() {
-        *out_messages_win_client_height = mch;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_ncurses_calc_scroll_and_selection(
-    entry: c_int,
-    queue_size: c_int,
-    scroll_offset: c_int,
-    client_height: c_int,
-    out_selected_entry: *mut c_int,
-    out_scroll_offset: *mut c_int,
-) {
-    let (sel, off) = crate::ncurses_format::ncurses_calc_scroll_and_selection(
-        entry,
-        queue_size,
-        scroll_offset,
-        client_height,
-    );
-    if !out_selected_entry.is_null() {
-        *out_selected_entry = sel;
-    }
-    if !out_scroll_offset.is_null() {
-        *out_scroll_offset = off;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_ncurses_resolve_group_pause_action(
-    action: c_int,
-    remaining_size: i64,
-    paused_size: i64,
-    remaining_par_count: c_int,
-    last_pause_pars: c_int,
-    last_edit_entry: c_int,
-    selected_entry: c_int,
-    out_last_pause_pars: *mut c_int,
-) -> c_int {
-    let (resolved, new_last) = crate::ncurses_format::ncurses_resolve_group_pause_action(
-        action,
-        remaining_size,
-        paused_size,
-        remaining_par_count,
-        last_pause_pars != 0,
-        last_edit_entry,
-        selected_entry,
-    );
-    if !out_last_pause_pars.is_null() {
-        *out_last_pause_pars = c_int::from(new_last);
-    }
-    resolved
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_ncurses_step_rate_input(
-    key: c_int,
-    key_backspace: c_int,
-    inout_index: *mut c_int,
-    inout_value: *mut c_int,
-) -> c_int {
-    if inout_index.is_null() || inout_value.is_null() {
-        return 0;
-    }
-    let (step, new_idx, new_val) = crate::ncurses_format::ncurses_step_rate_input(
-        key,
-        key_backspace,
-        *inout_index,
-        *inout_value,
-    );
-    *inout_index = new_idx;
-    *inout_value = new_val;
-    step
-}
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_feh_maintenance_classify_update_message(
@@ -12144,52 +11974,6 @@ pub extern "C" fn nzbget_rs_ccm_nzbget_sigverify_exit_code(ok: c_int) -> c_int {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ccm_ncurses_calc_msg_lines(
-    text_len: c_int,
-    screen_width: c_int,
-    out_win_width: *mut c_int,
-    out_msg_lines: *mut c_int,
-) {
-    let (ww, ml) = crate::ncurses_format::ncurses_calc_msg_lines(text_len, screen_width);
-    if !out_win_width.is_null() {
-        *out_win_width = ww;
-    }
-    if !out_msg_lines.is_null() {
-        *out_msg_lines = ml;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ccm_ncurses_sanitize_message_chars(
-    buf: *mut c_char,
-    len: usize,
-) {
-    if buf.is_null() || len == 0 {
-        return;
-    }
-    let slice = std::slice::from_raw_parts_mut(buf.cast::<u8>(), len);
-    crate::ncurses_format::ncurses_sanitize_message_chars(slice);
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_ncurses_select_edit_queue_keybar(
-    selected_entry: c_int,
-    queue_size: c_int,
-) -> *const c_char {
-    crate::ncurses_format::ncurses_select_edit_queue_keybar(selected_entry, queue_size)
-        .as_ptr()
-        .cast::<c_char>()
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_ncurses_next_queue_win_pct(
-    cur_pct: c_int,
-    is_edit_queue: c_int,
-) -> c_int {
-    crate::ncurses_format::ncurses_next_queue_win_pct(cur_pct, is_edit_queue != 0)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_ntw_nntp_map_ip_version(
     ip_version: c_int,
     ip_v4: c_int,
@@ -12331,35 +12115,6 @@ pub extern "C" fn nzbget_rs_ntw_server_pool_calc_remaining_block_sec(
     cur_time: i64,
 ) -> c_int {
     crate::nntp::server_pool_calc_remaining_block_sec(block_time, retry_interval, cur_time)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ntw_remote_server_select_port(
-    tls: c_int,
-    secure_port: c_int,
-    control_port: c_int,
-) -> c_int {
-    crate::webserver::remote_server_select_port(tls != 0, secure_port, control_port)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ntw_remote_server_should_warn_cap(
-    active_count: c_int,
-    max_processors: c_int,
-    now: i64,
-    last_warn: i64,
-    out_should_warn: *mut c_int,
-) -> c_int {
-    let (at_cap, should_warn) = crate::webserver::remote_server_should_warn_cap(
-        active_count,
-        max_processors,
-        now,
-        last_warn,
-    );
-    if !out_should_warn.is_null() {
-        *out_should_warn = i32::from(should_warn);
-    }
-    i32::from(at_cap)
 }
 
 #[no_mangle]
@@ -12866,14 +12621,6 @@ pub extern "C" fn nzbget_rs_statmeter_calc_resumed_download_start(
 // ============================================================================
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_frontend_resolve_log_id_from(
-    needed_log_entries: u32,
-    needed_log_first_id: u32,
-) -> u32 {
-    crate::ncurses_format::frontend_resolve_log_id_from(needed_log_entries, needed_log_first_id)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_sfw_rpc_is_response_header_valid(
     read_ok: c_int,
     resp_sig_host: u32,
@@ -12888,41 +12635,6 @@ pub extern "C" fn nzbget_rs_sfw_rpc_is_response_header_valid(
         resp_struct_size_host,
         expected_struct_size,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sfw_ncurses_decide_loop_update(
-    key_pressed: c_int,
-    update_next_time: *mut c_int,
-    data_update_pos: c_int,
-) -> c_int {
-    if update_next_time.is_null() {
-        return 0;
-    }
-    let (update_now, new_next) = crate::ncurses_format::ncurses_decide_loop_update(
-        key_pressed != 0,
-        *update_next_time != 0,
-        data_update_pos,
-    );
-    *update_next_time = i32::from(new_next);
-    i32::from(update_now)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_ncurses_select_sleep_interval(is_normal_mode: c_int) -> c_int {
-    crate::ncurses_format::ncurses_select_sleep_interval(is_normal_mode != 0)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_ncurses_is_hint_active(time: i64, start_hint: i64) -> c_int {
-    i32::from(crate::ncurses_format::ncurses_is_hint_active(
-        time, start_hint,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_ncurses_select_normal_keybar(group_files: c_int) -> *const c_char {
-    crate::ncurses_format::ncurses_select_normal_keybar(group_files != 0).as_ptr()
 }
 
 #[no_mangle]
@@ -13316,33 +13028,6 @@ pub extern "C" fn nzbget_rs_roc_nzbget_reload_clamp_debounce_ms(
         debounce_delay_ms,
         max_burst_delay_ms,
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_log_slice_bounds(
-    lines: c_int,
-    id_from: u32,
-    messages_len: usize,
-    first_msg_id: u32,
-    out_start: *mut c_int,
-    out_nr_entries: *mut c_int,
-) {
-    let (start, nr_entries) = crate::binrpc::log_slice_bounds(
-        lines,
-        id_from,
-        messages_len,
-        first_msg_id,
-    );
-    if !out_start.is_null() {
-        unsafe {
-            *out_start = start;
-        }
-    }
-    if !out_nr_entries.is_null() {
-        unsafe {
-            *out_nr_entries = nr_entries;
-        }
-    }
 }
 
 // ============================================================================
@@ -14906,61 +14591,6 @@ pub extern "C" fn nzbget_rs_dqh_stream_repair_bytes_to_mb(bytes: i64) -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_binrpc_calc_elapsed_sec(cur_time: i64, start_time: i64) -> u32 {
-    crate::binrpc::binrpc_calc_elapsed_sec(cur_time, start_time)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_ncurses_map_file_to_group_action(action: i32) -> i32 {
-    crate::ncurses_format::ncurses_map_file_to_group_action(action)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_ncurses_resolve_file_pause_action(
-    action: i32,
-    ea_file_pause: i32,
-    ea_file_resume: i32,
-    file_paused: i32,
-) -> i32 {
-    crate::ncurses_format::ncurses_resolve_file_pause_action(
-        action,
-        ea_file_pause,
-        ea_file_resume,
-        file_paused != 0,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_calc_page_nav(
-    is_page_down: i32,
-    selected: i32,
-    queue_size: i32,
-    scroll_offset: i32,
-    win_height: i32,
-    out_scroll_offset: *mut i32,
-    out_entry: *mut i32,
-) -> i32 {
-    match crate::ncurses_format::ncurses_calc_page_nav(
-        is_page_down != 0,
-        selected,
-        queue_size,
-        scroll_offset,
-        win_height,
-    ) {
-        Some((new_scroll, new_entry)) => {
-            if !out_scroll_offset.is_null() {
-                *out_scroll_offset = new_scroll;
-            }
-            if !out_entry.is_null() {
-                *out_entry = new_entry;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tpr_script_resolve_single_arg_executor(
     has_found: i32,
     found_executor: *const c_char,
@@ -15133,41 +14763,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_calc_debug_speed_and_timediff(
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_bytes_to_mb_i32(bytes: i64) -> i32 {
     crate::statmeter::statmeter_bytes_to_mb_i32(bytes)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_binrpc_format_download_response_msg(
-    ok: i32,
-    base_filename: *const c_char,
-) -> RsBuf {
-    let b = if base_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_filename).to_bytes()
-    };
-    into_buf(
-        crate::binrpc::binrpc_format_download_response_msg(ok != 0, b),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_binrpc_format_file_match_name(
-    nzb_name: *const c_char,
-    base_filename: *const c_char,
-) -> RsBuf {
-    let n = if nzb_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(nzb_name).to_bytes()
-    };
-    let b = if base_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_filename).to_bytes()
-    };
-    into_buf(crate::binrpc::binrpc_format_file_match_name(
-        n, b,
-    ))
 }
 
 #[no_mangle]
@@ -15415,54 +15010,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_webdl_format_host_header(
         h,
         port,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_webdl_kb_to_bytes(kb: i32) -> i32 {
-    crate::webdownload::webdl_kb_to_bytes(kb)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_format_messages_header(
-    use_color: i32,
-) -> *const c_char {
-    crate::ncurses_format::ncurses_format_messages_header(use_color != 0).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_format_timestamp_message(
-    time_str: *const c_char,
-    msg_text: *const c_char,
-) -> RsBuf {
-    let ts = if time_str.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(time_str).to_bytes()
-    };
-    let mt = if msg_text.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(msg_text).to_bytes()
-    };
-    into_buf(
-        crate::ncurses_format::ncurses_format_timestamp_message(ts, mt),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_format_download_rate_hint(
-    input_val: i32,
-) -> RsBuf {
-    into_buf(crate::ncurses_format::ncurses_format_download_rate_hint(input_val))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_pause_log_msg(
-    pause_download: i32,
-) -> *const c_char {
-    crate::ncurses_format::ncurses_pause_log_msg(pause_download != 0).as_ptr()
-        as *const c_char
 }
 
 #[no_mangle]
@@ -15937,26 +15484,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_format_debug_line(
     };
     into_buf(crate::systemhealth::log_format_debug_line(
         m, b, line_nr, f,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_format_plot_line(
-    text: *const c_char,
-    screen_width: c_int,
-    pos: c_int,
-    max_screen_width: c_int,
-) -> RsBuf {
-    let t = if text.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(text).to_bytes()
-    };
-    into_buf(crate::ncurses_format::ncurses_format_plot_line(
-        t,
-        screen_width,
-        pos,
-        max_screen_width,
     ))
 }
 
@@ -16539,34 +16066,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tokenizer_next(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_frontend_resolve_control_ip(
-    control_ip: *const c_char,
-) -> *const c_char {
-    if control_ip.is_null() {
-        return b"\0".as_ptr() as *const c_char;
-    }
-    let ip = CStr::from_ptr(control_ip).to_bytes();
-    match crate::ncurses_format::frontend_resolve_control_ip(ip) {
-        Some(resolved) => resolved.as_ptr() as *const c_char,
-        None => control_ip,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_ncurses_message_type_label(
-    kind: c_int,
-    first_line: c_int,
-) -> *const c_char {
-    crate::ncurses_format::ncurses_message_type_label(kind, first_line != 0).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_ncurses_message_color_pair(kind: c_int) -> c_int {
-    crate::ncurses_format::ncurses_message_color_pair(kind)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_xmlrpc_response_content_type(
     is_xml_rpc: c_int,
 ) -> *const c_char {
@@ -16580,16 +16079,6 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_test_server_speed_err_msg(
 ) -> *const c_char {
     crate::xmlrpc_format::xmlrpc_test_server_speed_err_msg(server_err).as_ptr()
         as *const c_char
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_binrpc_write_log_response_msg(ok: c_int) -> *const c_char {
-    crate::binrpc::binrpc_write_log_response_msg(ok != 0).as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_binrpc_scan_response_msg(sync_mode: c_int) -> *const c_char {
-    crate::binrpc::binrpc_scan_response_msg(sync_mode != 0).as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -16735,23 +16224,6 @@ pub extern "C" fn nzbget_rs_dqh_webserver_classify_pre_parse_method(
         hm_post,
         hm_options,
         content_len,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_binrpc_classify_history_entry_fields(
-    kind: c_int,
-    hk_nzb: c_int,
-    hk_dup: c_int,
-    hk_url: c_int,
-    show_hidden: c_int,
-) -> c_int {
-    crate::binrpc::binrpc_classify_history_entry_fields(
-        kind,
-        hk_nzb,
-        hk_dup,
-        hk_url,
-        show_hidden != 0,
     )
 }
 
@@ -17521,37 +16993,6 @@ pub extern "C" fn nzbget_rs_dqh_tls_cipher_classify_probe_deadline_override(
         current_result,
         is_cancelled != 0,
         deadline_expired != 0,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_remote_server_is_cert_or_key_missing(
-    path: *const c_char,
-    file_exists: c_int,
-) -> c_int {
-    let p = if path.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(path).to_bytes()
-    };
-    i32::from(
-        crate::webserver::remote_server_is_cert_or_key_missing(
-            p,
-            file_exists != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_remote_server_should_reset_listener(
-    bind_ok: c_int,
-    has_accepted_conn: c_int,
-) -> c_int {
-    i32::from(
-        crate::webserver::remote_server_should_reset_listener(
-            bind_ok != 0,
-            has_accepted_conn != 0,
-        ),
     )
 }
 

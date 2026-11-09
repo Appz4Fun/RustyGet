@@ -507,12 +507,6 @@ pub fn webdl_format_host_header(
     out
 }
 
-/// Converts kilobytes to bytes (`kb * 1024`) for `WebDownloader::PrepareFile`
-/// and `NCursesFrontend::UpdateInput`.
-pub fn webdl_kb_to_bytes(kb: i32) -> i32 {
-    kb.wrapping_mul(1024)
-}
-
 /// Returns true when `WebDownloader::Run` should continue its retry loop (`!is_stopped && remained_download_retries > 0 && remained_connect_retries > 0`).
 pub fn webdl_should_continue_retry_loop(
     is_stopped: bool,

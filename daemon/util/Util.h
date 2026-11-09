@@ -6409,7 +6409,7 @@ private:
 		}
 		if (g_Options->GetWriteBuffer() > 0)
 		{
-			m_outFile.SetWriteBuffer(nzbget_rs_tpr_webdl_kb_to_bytes(g_Options->GetWriteBuffer()));
+			m_outFile.SetWriteBuffer(g_Options->GetWriteBuffer() * 1024);
 		}
 
 		return true;
@@ -47002,7 +47002,7 @@ private:
 
 	bool InitConnection()
 	{
-		const char* controlIp = nzbget_rs_dqh_frontend_resolve_control_ip(g_Options->GetControlIp());
+		const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
 
 		// Create a connection to the server (retry briefly if server is mid-reload)
 		bool OK = false;
@@ -47196,7 +47196,7 @@ protected:
 			}
 			if (!RequestMessages() || ((m_summary || m_fileList) && !RequestFileList()))
 			{
-				const char* controlIp = nzbget_rs_dqh_frontend_resolve_control_ip(g_Options->GetControlIp());
+				const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
 				printf("\nUnable to send request to RustyGet server at %s (port %i)    \n", controlIp, g_Options->GetControlPort());
 				Stop();
 				return false;
@@ -47334,7 +47334,7 @@ private:
 	template <typename Req, typename Resp>
 	bool ExchangeRemoteRequest(const Req& req, Resp& resp, CharBuffer& buf)
 	{
-		const char* controlIp = nzbget_rs_dqh_frontend_resolve_control_ip(g_Options->GetControlIp());
+		const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
 		Connection connection(controlIp, g_Options->GetControlPort(), false);
 
 		if (!connection.Connect() || !connection.Send((char*)(&req), sizeof(req)))
@@ -47371,8 +47371,7 @@ private:
 		SNzbLogRequest LogRequest = {};
 		InitMessageBase(&LogRequest.m_messageBase, rrLog, sizeof(LogRequest));
 		LogRequest.m_lines = htonl(m_neededLogEntries);
-		LogRequest.m_idFrom = htonl(nzbget_rs_sfw_frontend_resolve_log_id_from(
-			m_neededLogEntries, m_neededLogFirstId));
+		LogRequest.m_idFrom = htonl(m_neededLogEntries == 0 ? (m_neededLogFirstId > 0 ? m_neededLogFirstId : 1) : 0);
 
 		SNzbLogResponse LogResponse;
 		CharBuffer buf;
@@ -47485,12 +47484,11 @@ protected:
 			if (!messages->empty())
 			{
 				Message& firstMessage = messages->front();
-				int skip = 0;
-				int start = nzbget_rs_feh_frontend_calc_log_start_index(
-					m_neededLogFirstId, firstMessage.GetId(), &skip);
-				if (skip)
+				int start = m_neededLogFirstId - firstMessage.GetId() + 1;
+				if (start < 0)
 				{
 					PrintSkip();
+					start = 0;
 				}
 				for (uint32 i = (uint32)start; i < messages->size(); i++)
 				{
@@ -47665,10 +47663,21 @@ protected:
 			bool updateNow = false;
 			int key = ReadConsoleKey();
 
-			int updateNext = m_updateNextTime ? 1 : 0;
-			updateNow = nzbget_rs_sfw_ncurses_decide_loop_update(
-				key != READKEY_EMPTY ? 1 : 0, &updateNext, m_dataUpdatePos) != 0;
-			m_updateNextTime = updateNext != 0;
+			if (key != READKEY_EMPTY)
+			{
+				updateNow = true;
+				m_updateNextTime = true;
+			}
+			else if (m_updateNextTime)
+			{
+				updateNow = true;
+				m_updateNextTime = false;
+			}
+			else if (m_dataUpdatePos <= 0)
+			{
+				updateNow = true;
+				m_updateNextTime = false;
+			}
 
 			if (updateNow)
 			{
@@ -47681,7 +47690,7 @@ protected:
 			}
 
 			// update more often (sleep shorter) if need faster reaction on user input
-			int sleepInterval = nzbget_rs_sfw_ncurses_select_sleep_interval(m_inputMode == normal ? 1 : 0);
+			int sleepInterval = m_inputMode == normal ? 100 : 10;
 			Wait(sleepInterval);
 			m_dataUpdatePos -= sleepInterval;
 		}
@@ -47792,10 +47801,7 @@ private:
 		// the line buffers hold MAX_SCREEN_WIDTH columns (a wider terminal wrote past
 		// them), and messages wrap at the width less 8 (a divisor of zero at 8)
 		int queueSize = CalcQueueSize();
-		int qh = 0, qch = 0, mtop = 0, mh = 0, mch = 0;
-		nzbget_rs_feh_ncurses_calc_window_sizes(
-			nrRows, nrColumns, MAX_SCREEN_WIDTH, m_queueWindowPercentage, queueSize,
-			&nrColumns, &qh, &qch, &mtop, &mh, &mch);
+		nrColumns = std::clamp(nrColumns, 9, MAX_SCREEN_WIDTH);
 		if (nrRows != m_screenHeight || nrColumns != m_screenWidth)
 		{
 			curses_clear();
@@ -47803,11 +47809,15 @@ private:
 			m_screenWidth = nrColumns;
 		}
 		m_queueWinTop = 0;
-		m_queueWinHeight = qh;
-		m_queueWinClientHeight = qch;
-		m_messagesWinTop = mtop;
-		m_messagesWinHeight = mh;
-		m_messagesWinClientHeight = mch;
+		m_queueWinHeight = (nrRows - 2) * m_queueWindowPercentage / 100;
+		if (m_queueWinHeight - 1 > queueSize)
+		{
+			m_queueWinHeight = queueSize > 0 ? queueSize + 1 : 2;
+		}
+		m_queueWinClientHeight = std::max(0, m_queueWinHeight - 1);
+		m_messagesWinTop = m_queueWinHeight;
+		m_messagesWinHeight = nrRows - m_queueWinHeight - 2;
+		m_messagesWinClientHeight = std::max(0, m_messagesWinHeight - 1);
 	}
 
 	int CalcQueueSize()
@@ -47830,10 +47840,26 @@ private:
 
 	void PlotLine(const char* str, int row, int pos, int colorPair)
 	{
-		NzbgetRsBuf lineBuf = nzbget_rs_dqh_ncurses_format_plot_line(
-			str, m_screenWidth, pos, MAX_SCREEN_WIDTH);
-		PlotText(lineBuf.data ? lineBuf.data : "", row, pos, colorPair, false);
-		nzbget_rs_free(lineBuf);
+		int w = std::clamp(m_screenWidth, 0, MAX_SCREEN_WIDTH);
+		char lineBuf[MAX_SCREEN_WIDTH + 1];
+		size_t textLen = str ? strlen(str) : 0;
+		size_t copyLen = std::min(textLen, (size_t)w);
+		if (copyLen > 0)
+		{
+			memcpy(lineBuf, str, copyLen);
+		}
+		if ((int)copyLen < w)
+		{
+			memset(lineBuf + copyLen, ' ', w - copyLen);
+		}
+		int targetLen = w;
+		int rem = m_screenWidth - pos;
+		if (w + 1 > rem && rem < MAX_SCREEN_WIDTH)
+		{
+			targetLen = std::clamp(rem, 0, w);
+		}
+		lineBuf[targetLen] = '\0';
+		PlotText(lineBuf, row, pos, colorPair, false);
 	}
 
 	void PlotText(const char * string, int row, int pos, int colorPair, bool blink)
@@ -47850,8 +47876,7 @@ private:
 	{
 		int lineNr = m_messagesWinTop;
 
-		PlotLine(
-			nzbget_rs_tpr_ncurses_format_messages_header(m_useColor ? 1 : 0),
+		PlotLine(m_useColor ? " Messages" : "***  Messages",
 			lineNr++, 0, NCURSES_COLORPAIR_INFOLINE);
 
 		int line = lineNr + m_messagesWinClientHeight - 1;
@@ -47892,10 +47917,7 @@ private:
 		if (m_showTimestamp)
 		{
 			time_t rawtime = msg.GetTime() + g_Options->GetTimeCorrection();
-			NzbgetRsBuf tsBuf = nzbget_rs_tpr_ncurses_format_timestamp_message(
-				*Util::FormatTime(rawtime), msg.GetText());
-			text = tsBuf.data ? tsBuf.data : "";
-			nzbget_rs_free(tsBuf);
+			text.Format("%s - %s", *Util::FormatTime(rawtime), msg.GetText());
 		}
 		else
 		{
@@ -47904,9 +47926,19 @@ private:
 
 		// replace some special characters with spaces
 		int len = (int)strlen(text);
-		nzbget_rs_ccm_ncurses_sanitize_message_chars((char*)text, (size_t)len);
-		int winWidth = 0, msgLines = 0;
-		nzbget_rs_ccm_ncurses_calc_msg_lines(len, m_screenWidth, &winWidth, &msgLines);
+		for (int i = 0; i < len; i++)
+		{
+			if (text[i] == '\n' || text[i] == '\r' || text[i] == '\b')
+			{
+				text[i] = ' ';
+			}
+		}
+		int winWidth = m_screenWidth - 8;
+		int msgLines = winWidth > 0 ? (len / winWidth) + (len % winWidth > 0 ? 1 : 0) : 0;
+
+		static const char* msgTypes[] = { "INFO    ", "WARNING ", "ERROR   ", "DEBUG   ", "DETAIL  " };
+		int kind = (int)msg.GetKind();
+		int colorPair = (kind >= 0 && kind < 5) ? (kind + 2) : NCURSES_COLORPAIR_TEXT;
 
 		int lines = 0;
 		for (int i = msgLines - 1; i >= 0 && lines < maxLines; i--)
@@ -47914,10 +47946,8 @@ private:
 			int r = row - msgLines + i + 1;
 			PlotLine(text + winWidth * i, r, 8, NCURSES_COLORPAIR_TEXT);
 			PlotText(
-				nzbget_rs_dqh_ncurses_message_type_label((int)msg.GetKind(), i == 0 ? 1 : 0),
-				r, 0,
-				nzbget_rs_dqh_ncurses_message_color_pair((int)msg.GetKind()),
-				false);
+				(i == 0 && kind >= 0 && kind < 5) ? msgTypes[kind] : "        ",
+				r, 0, colorPair, false);
 			lines++;
 		}
 
@@ -47955,7 +47985,7 @@ private:
 		if (!m_hint.empty())
 		{
 			time_t time = Util::CurrentTime();
-			if (nzbget_rs_sfw_ncurses_is_hint_active((int64_t)time, (int64_t)m_startHint) != 0)
+			if (time - m_startHint < 5)
 			{
 				PlotLine(m_hint.c_str(), inputBarRow, 0, NCURSES_COLORPAIR_HINT);
 				return;
@@ -47970,22 +48000,24 @@ private:
 		{
 		case normal:
 			PlotLine(
-				nzbget_rs_sfw_ncurses_select_normal_keybar(m_groupFiles ? 1 : 0),
+				m_groupFiles ? "(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime" :
+				"(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime | n(Z)b",
 				inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
 			break;
 		case editQueue:
 		{
-			const char* status = nzbget_rs_ccm_ncurses_select_edit_queue_keybar(
-				m_selectedQueueEntry, queueSize);
+			const char* status =
+				(m_selectedQueueEntry > 0 && queueSize > 1 && m_selectedQueueEntry == queueSize - 1) ? "(Q)uit | (E)xit | (P)ause | (D)elete | (U)p/(T)op" :
+				(queueSize > 1 && m_selectedQueueEntry == 0) ? "(Q)uit | (E)xit | (P)ause | (D)elete | dow(N)/(B)ottom" :
+				(queueSize > 1) ? "(Q)uit | (E)xit | (P)ause | (D)elete | (U)p/dow(N)/(T)op/(B)ottom" :
+				"(Q)uit | (E)xit | (P)ause | (D)elete";
 
 			PlotLine(status, inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
 			break;
 		}
 		case downloadRate:
 		{
-			NzbgetRsBuf hintBuf = nzbget_rs_tpr_ncurses_format_download_rate_hint(m_inputValue);
-			PlotLine(hintBuf.data ? hintBuf.data : "", inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
-			nzbget_rs_free(hintBuf);
+			PlotLine(BString<100>("Download rate: %i", m_inputValue), inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
 
 			// Print the cursor
 			PlotText(" ", inputBarRow, 15 + m_inputNumberIndex, NCURSES_COLORPAIR_CURSOR, true);
@@ -48206,16 +48238,38 @@ private:
 			{
 				std::unique_ptr<NzbInfo>& nzbInfo = downloadQueue->GetQueue()->at(m_selectedQueueEntry);
 				ID = nzbInfo->GetId();
-				int newLastPausePars = m_lastPausePars ? 1 : 0;
-				action = (DownloadQueue::EEditAction)nzbget_rs_feh_ncurses_resolve_group_pause_action(
-					(int)action, nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(),
-					nzbInfo->GetRemainingParCount(), m_lastPausePars ? 1 : 0,
-					m_lastEditEntry, m_selectedQueueEntry, &newLastPausePars);
-				m_lastPausePars = newLastPausePars != 0;
+				if (action == DownloadQueue::eaFilePause)
+				{
+					if (nzbInfo->GetRemainingSize() == nzbInfo->GetPausedSize())
+					{
+						action = DownloadQueue::eaFileResume;
+					}
+					else if (nzbInfo->GetPausedSize() == 0 && nzbInfo->GetRemainingParCount() > 0 &&
+						!(m_lastPausePars && m_lastEditEntry == m_selectedQueueEntry))
+					{
+						action = DownloadQueue::eaFilePauseExtraPars;
+						m_lastPausePars = true;
+					}
+					else
+					{
+						m_lastPausePars = false;
+					}
+				}
 			}
 
 			// map file-edit-actions to group-edit-actions
-			action = (DownloadQueue::EEditAction)nzbget_rs_tpr_ncurses_map_file_to_group_action((int)action);
+			switch (action)
+			{
+			case DownloadQueue::eaFileMoveOffset: action = DownloadQueue::eaGroupMoveOffset; break;
+			case DownloadQueue::eaFileMoveTop: action = DownloadQueue::eaGroupMoveTop; break;
+			case DownloadQueue::eaFileMoveBottom: action = DownloadQueue::eaGroupMoveBottom; break;
+			case DownloadQueue::eaFilePause: action = DownloadQueue::eaGroupPause; break;
+			case DownloadQueue::eaFileResume: action = DownloadQueue::eaGroupResume; break;
+			case DownloadQueue::eaFileDelete: action = DownloadQueue::eaGroupDelete; break;
+			case DownloadQueue::eaFilePauseAllPars: action = DownloadQueue::eaGroupPauseAllPars; break;
+			case DownloadQueue::eaFilePauseExtraPars: action = DownloadQueue::eaGroupPauseExtraPars; break;
+			default: action = (DownloadQueue::EEditAction)0; break;
+			}
 		}
 		else
 		{
@@ -48228,9 +48282,10 @@ private:
 					if (m_selectedQueueEntry == fileNum)
 					{
 						ID = fileInfo->GetId();
-						action = (DownloadQueue::EEditAction)nzbget_rs_tpr_ncurses_resolve_file_pause_action(
-							(int)action, (int)DownloadQueue::eaFilePause,
-							(int)DownloadQueue::eaFileResume, fileInfo->GetPaused() ? 1 : 0);
+						if (action == DownloadQueue::eaFilePause && fileInfo->GetPaused())
+						{
+							action = DownloadQueue::eaFileResume;
+						}
 					}
 					fileNum++;
 				}
@@ -48254,10 +48309,39 @@ private:
 	void SetCurrentQueueEntry(int entry)
 	{
 		int queueSize = CalcQueueSize();
+		if (entry < 0)
+		{
+			entry = 0;
+		}
+		else if (entry > queueSize - 1)
+		{
+			entry = queueSize - 1;
+		}
 
-		nzbget_rs_feh_ncurses_calc_scroll_and_selection(
-			entry, queueSize, m_queueScrollOffset, m_queueWinClientHeight,
-			&m_selectedQueueEntry, &m_queueScrollOffset);
+		if (entry > m_queueScrollOffset + m_queueWinClientHeight ||
+			entry < m_queueScrollOffset - m_queueWinClientHeight)
+		{
+			m_queueScrollOffset = entry - m_queueWinClientHeight / 2;
+		}
+		else if (entry < m_queueScrollOffset)
+		{
+			m_queueScrollOffset -= m_queueWinClientHeight;
+		}
+		else if (entry >= m_queueScrollOffset + m_queueWinClientHeight)
+		{
+			m_queueScrollOffset += m_queueWinClientHeight;
+		}
+
+		if (m_queueScrollOffset > queueSize - m_queueWinClientHeight)
+		{
+			m_queueScrollOffset = queueSize - m_queueWinClientHeight;
+		}
+		if (m_queueScrollOffset < 0)
+		{
+			m_queueScrollOffset = 0;
+		}
+
+		m_selectedQueueEntry = entry;
 	}
 
 	/*
@@ -48286,8 +48370,8 @@ private:
 					break;
 				case 'w':
 					// swicth window sizes
-					m_queueWindowPercentage = nzbget_rs_ccm_ncurses_next_queue_win_pct(
-						m_queueWindowPercentage, m_inputMode == editQueue ? 1 : 0);
+					m_queueWindowPercentage = m_queueWindowPercentage == 50 ? 100 :
+						(m_queueWindowPercentage == 100 && m_inputMode != editQueue) ? 0 : 50;
 					CalcWindowSizes();
 					SetCurrentQueueEntry(m_selectedQueueEntry);
 					break;
@@ -48309,7 +48393,7 @@ private:
 					// Key 'p' for pause
 					if (!IsRemoteMode())
 					{
-						info("%s", nzbget_rs_tpr_ncurses_pause_log_msg(m_pauseDownload ? 1 : 0));
+						info("%s", m_pauseDownload ? "Unpausing download" : "Pausing download");
 					}
 					ServerPauseUnpause(!m_pauseDownload);
 					break;
@@ -48362,19 +48446,34 @@ private:
 					}
 					break;
 				case KEY_PPAGE:
-				case KEY_NPAGE:
-				{
-					int newScroll = m_queueScrollOffset;
-					int newEntry = m_selectedQueueEntry;
-					if (nzbget_rs_tpr_ncurses_calc_page_nav(
-						key == KEY_NPAGE ? 1 : 0, m_selectedQueueEntry, queueSize,
-						m_queueScrollOffset, m_queueWinClientHeight, &newScroll, &newEntry))
+					if (m_selectedQueueEntry > 0)
 					{
-						m_queueScrollOffset = newScroll;
-						SetCurrentQueueEntry(newEntry);
+						if (m_selectedQueueEntry == m_queueScrollOffset)
+						{
+							m_queueScrollOffset -= m_queueWinClientHeight;
+							SetCurrentQueueEntry(m_selectedQueueEntry - m_queueWinClientHeight);
+						}
+						else
+						{
+							SetCurrentQueueEntry(m_queueScrollOffset);
+						}
 					}
 					break;
-				}
+				case KEY_NPAGE:
+					if (m_selectedQueueEntry < queueSize - 1)
+					{
+						int bottom = m_queueScrollOffset + m_queueWinClientHeight - 1;
+						if (m_selectedQueueEntry == bottom)
+						{
+							m_queueScrollOffset += m_queueWinClientHeight;
+							SetCurrentQueueEntry(m_selectedQueueEntry + m_queueWinClientHeight);
+						}
+						else
+						{
+							SetCurrentQueueEntry(bottom);
+						}
+					}
+					break;
 				case KEY_HOME:
 					SetCurrentQueueEntry(0);
 					break;
@@ -48425,18 +48524,26 @@ private:
 			// Edit download rate input mode
 			if (m_inputMode == downloadRate)
 			{
-				int rateStep = nzbget_rs_feh_ncurses_step_rate_input(
-					key, KEY_BACKSPACE, &m_inputNumberIndex, &m_inputValue);
-				if (rateStep == 1)
+				if (m_inputNumberIndex < 5 && key >= '0' && key <= '9')
 				{
-					ServerSetDownloadRate(nzbget_rs_tpr_webdl_kb_to_bytes(m_inputValue));
+					m_inputValue = (m_inputValue * 10) + (key - '0');
+					m_inputNumberIndex++;
+				}
+				else if (key == 10 || key == 13)
+				{
+					ServerSetDownloadRate(m_inputValue * 1024);
 					m_inputMode = normal;
 					return;
 				}
-				else if (rateStep == 2)
+				else if (key == 27)
 				{
 					m_inputMode = normal;
 					return;
+				}
+				else if (m_inputNumberIndex > 0 && key == KEY_BACKSPACE)
+				{
+					m_inputValue = (m_inputValue - (m_inputValue % 10)) / 10;
+					m_inputNumberIndex--;
 				}
 			}
 
@@ -48833,12 +48940,9 @@ private:
 			) != Scanner::asFailed;
 		}
 
-		{
-			NzbgetRsBuf msgBuf = nzbget_rs_tpr_binrpc_format_download_response_msg(
-				ok ? 1 : 0, FileSystem::BaseFileName(DownloadRequest.m_nzbFilename));
-			SendBoolResponse(ok, msgBuf.data ? msgBuf.data : "");
-			nzbget_rs_free(msgBuf);
-		}
+		SendBoolResponse(ok, BString<1024>(
+			ok ? "Collection %s added to queue" : "Download Request failed for %s",
+			FileSystem::BaseFileName(DownloadRequest.m_nzbFilename)));
 	}
 
 	void ExecuteList()
@@ -48930,10 +49034,8 @@ private:
 					bool match = false;
 					if (regEx && !matchGroup)
 					{
-						NzbgetRsBuf matchNameBuf = nzbget_rs_tpr_binrpc_format_file_match_name(
-							fileInfo->GetNzbInfo()->GetName(), FileSystem::BaseFileName(fileInfo->GetFilename()));
-						match = regEx->Match(matchNameBuf.data ? matchNameBuf.data : "");
-						nzbget_rs_free(matchNameBuf);
+						match = regEx->Match(CString::FormatStr("%s/%s",
+							fileInfo->GetNzbInfo()->GetName(), FileSystem::BaseFileName(fileInfo->GetFilename())));
 					}
 
 					uint32 fileSizeHi, fileSizeLo, fileRemHi, fileRemLo;
@@ -49009,13 +49111,24 @@ private:
 		{
 			GuardedMessageList messages = g_Log->GuardMessages();
 
-			int start = 0;
-			nzbget_rs_binrpc_log_slice_bounds(
-				ntohl(LogRequest.m_lines),
-				ntohl(LogRequest.m_idFrom),
-				messages->size(),
-				messages->empty() ? 0 : (uint32)messages->front().GetId(),
-				&start, &nrEntries);
+			int msgCount = (int)messages->size();
+			int lines = (int)ntohl(LogRequest.m_lines);
+			nrEntries = lines < 0 ? 0 : lines;
+			int start = msgCount;
+			if (nrEntries > 0)
+			{
+				if (nrEntries > msgCount)
+				{
+					nrEntries = msgCount;
+				}
+				start = msgCount - nrEntries;
+			}
+			uint32 idFrom = ntohl(LogRequest.m_idFrom);
+			if (idFrom > 0 && !messages->empty())
+			{
+				start = std::max(0, (int)(idFrom - (uint32)messages->front().GetId()));
+				nrEntries = std::max(0, msgCount - start);
+			}
 
 			// the messages from start on, collected under the lock for rust/src/binrpc.rs
 			std::vector<NzbgetRsBinLog> log;
@@ -49158,8 +49271,8 @@ private:
 				NrEntries++;
 				jobs.push_back({(uint32)nzbInfo->GetId(), (uint32)postInfo->GetStage(), (uint32)postInfo->GetStageProgress(),
 					(uint32)postInfo->GetFileProgress(),
-					nzbget_rs_tpr_binrpc_calc_elapsed_sec((int64_t)curTime, (int64_t)postInfo->GetStartTime()),
-					nzbget_rs_tpr_binrpc_calc_elapsed_sec((int64_t)curTime, (int64_t)postInfo->GetStageTime()),
+					postInfo->GetStartTime() ? (uint32)(curTime - postInfo->GetStartTime()) : 0,
+					postInfo->GetStageTime() ? (uint32)(curTime - postInfo->GetStageTime()) : 0,
 					RsText(postInfo->GetNzbInfo()->GetFilename()), RsText(postInfo->GetNzbInfo()->GetName()),
 					RsText(postInfo->GetNzbInfo()->GetDestDir()), RsText(postInfo->GetProgressLabel())});
 			}
@@ -49206,7 +49319,7 @@ private:
 			default:
 				OK = false;
 		}
-		SendBoolResponse(OK, nzbget_rs_dqh_binrpc_write_log_response_msg(OK ? 1 : 0));
+		SendBoolResponse(OK, OK ? "Message added to log" : "Invalid message-kind");
 	}
 
 	void ExecuteScan()
@@ -49220,7 +49333,7 @@ private:
 		bool syncMode = ntohl(ScanRequest.m_syncMode);
 
 		g_Scanner->ScanNzbDir(syncMode);
-		SendBoolResponse(true, nzbget_rs_dqh_binrpc_scan_response_msg(syncMode ? 1 : 0));
+		SendBoolResponse(true, syncMode ? "Scan-Command completed" : "Scan-Command scheduled successfully");
 	}
 
 	void ExecuteHistory()
@@ -49246,20 +49359,14 @@ private:
 			history.reserve(downloadQueue->GetHistory()->size());
 			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 			{
-				int histFieldKind = nzbget_rs_dqh_binrpc_classify_history_entry_fields(
-					(int)historyInfo->GetKind(),
-					(int)HistoryInfo::hkNzb,
-					(int)HistoryInfo::hkDup,
-					(int)HistoryInfo::hkUrl,
-					showHidden ? 1 : 0);
-				if (histFieldKind < 0)
+				if (historyInfo->GetKind() == HistoryInfo::hkDup && !showHidden)
 				{
 					continue;
 				}
 				nrEntries++;
 				// fields a kind doesn't set are 0
 				uint32 sizeHi = 0, sizeLo = 0, fileCount = 0, parStatus = 0, scriptStatus = 0, urlStatus = 0;
-				if (histFieldKind == 1)
+				if (historyInfo->GetKind() == HistoryInfo::hkNzb)
 				{
 					NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
 					Util::SplitInt64(nzbInfo->GetSize(), &sizeHi, &sizeLo);
@@ -49267,12 +49374,12 @@ private:
 					parStatus = nzbInfo->GetParStatus();
 					scriptStatus = nzbInfo->GetScriptStatuses()->CalcTotalStatus();
 				}
-				else if (histFieldKind == 2)
+				else if (historyInfo->GetKind() == HistoryInfo::hkDup)
 				{
 					DupInfo* dupInfo = historyInfo->GetDupInfo();
 					Util::SplitInt64(dupInfo->GetSize(), &sizeHi, &sizeLo);
 				}
-				else if (histFieldKind == 3)
+				else if (historyInfo->GetKind() == HistoryInfo::hkUrl)
 				{
 					NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
 					urlStatus = nzbInfo->GetUrlStatus();
@@ -49333,17 +49440,29 @@ private:
 
 		WebProcessor::EHttpMethod httpMethod = WebProcessor::hmGet;
 		char* url = buffer;
-		int rsMethod = 0;
-		size_t urlOffset = 0;
-		size_t urlLen = 0;
-		if (!nzbget_rs_rco_remote_parse_web_request_line(
-			signature, buffer, &rsMethod, &urlOffset, &urlLen))
+		if (!strncmp(signature, "POST", 4))
+		{
+			if (buffer[0] == '\0')
+			{
+				return false;
+			}
+			httpMethod = WebProcessor::hmPost;
+			url++;
+		}
+		else if (!strncmp(signature, "OPTI", 4) && strlen(url) > 4)
+		{
+			httpMethod = WebProcessor::hmOptions;
+			url += 4;
+		}
+		else if (strncmp(signature, "GET ", 4))
 		{
 			return false;
 		}
-		httpMethod = (WebProcessor::EHttpMethod)rsMethod;
-		url = buffer + urlOffset;
-		url[urlLen] = '\0';
+
+		if (char* p = strchr(url, ' '))
+		{
+			*p = '\0';
+		}
 
 		debug("url: %s", url);
 
@@ -49376,16 +49495,16 @@ private:
 			return;
 		}
 
-		int sigKind = nzbget_rs_rco_remote_classify_signature(
-			(const char*)&signature, (uint32)NZBMESSAGE_SIGNATURE);
-		if (sigKind == 1)
+		if ((int)ntohl(signature) == (int)NZBMESSAGE_SIGNATURE)
 		{
 			ok = true;
 			BinRpcProcessor processor;
 			processor.SetConnection(m_connection.get());
 			processor.Execute();
 		}
-		else if (sigKind == 2)
+		else if (!strncmp((char*)&signature, "POST", 4) ||
+			!strncmp((char*)&signature, "GET ", 4) ||
+			!strncmp((char*)&signature, "OPTI", 4))
 		{
 			ok = true;
 			while (ServWebRequest((char*)&signature))
@@ -49403,9 +49522,9 @@ private:
 
 		if (!ok)
 		{
-			int warnPort = nzbget_rs_ntw_remote_server_select_port(
-				m_tls ? 1 : 0, g_Options->GetSecurePort(), g_Options->GetControlPort());
-			warn("Non-RustyGet request received on port %i from %s", warnPort, m_connection->GetRemoteAddr());
+			warn("Non-RustyGet request received on port %i from %s",
+				m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort(),
+				m_connection->GetRemoteAddr());
 		}
 	}
 };
@@ -49429,17 +49548,13 @@ public:
 #ifndef DISABLE_TLS
 		if (m_tls)
 		{
-			if (nzbget_rs_dqh_remote_server_is_cert_or_key_missing(
-				g_Options->GetSecureCert(),
-				FileSystem::FileExists(g_Options->GetSecureCert()) ? 1 : 0) != 0)
+			if (Util::EmptyStr(g_Options->GetSecureCert()) || !FileSystem::FileExists(g_Options->GetSecureCert()))
 			{
 				error("Could not initialize TLS, secure certificate is not configured or the cert-file was not found. Check option <SecureCert>");
 				return;
 			}
 
-			if (nzbget_rs_dqh_remote_server_is_cert_or_key_missing(
-				g_Options->GetSecureKey(),
-				FileSystem::FileExists(g_Options->GetSecureKey()) ? 1 : 0) != 0)
+			if (Util::EmptyStr(g_Options->GetSecureKey()) || !FileSystem::FileExists(g_Options->GetSecureKey()))
 			{
 				error("Could not initialize TLS, secure key is not configured or the key-file was not found. Check option <SecureKey>");
 				return;
@@ -49453,10 +49568,8 @@ public:
 
 			if (!m_connection)
 			{
-				int listenPort = nzbget_rs_ntw_remote_server_select_port(
-					m_tls ? 1 : 0, g_Options->GetSecurePort(), g_Options->GetControlPort());
 				m_connection = std::make_unique<Connection>(g_Options->GetControlIp(),
-					listenPort,
+					m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort(),
 					m_tls);
 				m_connection->SetTimeout(g_Options->GetRemoteTimeout());
 				m_connection->SetSuppressErrors(false);
@@ -49477,8 +49590,7 @@ public:
 				Util::Sleep(200);
 				continue;
 			}
-			if (nzbget_rs_dqh_remote_server_should_reset_listener(
-				bind ? 1 : 0, acceptedConnection != nullptr ? 1 : 0) != 0)
+			if (!bind || !acceptedConnection)
 			{
 				if (IsStopped())
 				{
@@ -49492,13 +49604,10 @@ public:
 			if (!IsStopped())
 			{
 				Guard guard(m_processorsMutex);
-				time_t now = Util::CurrentTime();
-				int shouldWarn = 0;
-				if (nzbget_rs_ntw_remote_server_should_warn_cap(
-					(int)m_activeProcessors.size(), MaxProcessors,
-					(int64_t)now, (int64_t)m_lastCapWarning, &shouldWarn) != 0)
+				if ((int)m_activeProcessors.size() >= MaxProcessors)
 				{
-					if (shouldWarn)
+					time_t now = Util::CurrentTime();
+					if (now - m_lastCapWarning >= 60)
 					{
 						m_lastCapWarning = now;
 						warn("Too many connections to the web interface/API (%i); refusing new ones", MaxProcessors);

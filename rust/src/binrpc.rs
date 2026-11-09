@@ -456,36 +456,6 @@ pub unsafe fn encode<E: Entry>(entries: &[E], out: &mut [MaybeUninit<u8>]) -> us
 /// The largest response (an int, as the C++ counted it).
 pub const MAX_RESPONSE: u64 = i32::MAX as u64;
 
-/// Computes `(start, nr_entries)` for a binary RPC log slice request (`LogBinCommand::Execute`).
-#[inline]
-pub fn log_slice_bounds(
-    lines: i32,
-    id_from: u32,
-    messages_len: usize,
-    first_msg_id: u32,
-) -> (i32, i32) {
-    let msg_count = messages_len as i32;
-    let mut nr_entries = if lines < 0 { 0 } else { lines };
-    let mut start = msg_count;
-    if nr_entries > 0 {
-        if nr_entries > msg_count {
-            nr_entries = msg_count;
-        }
-        start = msg_count - nr_entries;
-    }
-    if id_from > 0 && messages_len > 0 {
-        start = id_from.wrapping_sub(first_msg_id) as i32;
-        if start < 0 {
-            start = 0;
-        }
-        nr_entries = msg_count.wrapping_sub(start);
-        if nr_entries < 0 {
-            nr_entries = 0;
-        }
-    }
-    (start, nr_entries)
-}
-
 /// EditQueue's check of the client's counts and lengths against each other
 /// and the trailing data's length (64-bit sums).
 pub fn edit_sizes_ok(ids: i32, names: i32, names_len: i32, text_len: i32, data_len: u32) -> bool {
@@ -1398,82 +1368,6 @@ pub fn group_listing_from_wire(
         })
         .collect();
     group_listing(&groups, has_pattern)
-}
-
-/// Computes elapsed seconds from `start_time` to `cur_time` when `start_time != 0`
-/// (`PostQueueBinCommand::Execute`).
-pub fn binrpc_calc_elapsed_sec(cur_time: i64, start_time: i64) -> u32 {
-    if start_time != 0 {
-        (cur_time.wrapping_sub(start_time) as i32) as u32
-    } else {
-        0
-    }
-}
-
-/// Formats `DownloadBinCommand::Execute` response message (`"Collection %s added to queue"` vs `"Download Request failed for %s"`).
-pub fn binrpc_format_download_response_msg(ok: bool, base_filename: &[u8]) -> Vec<u8> {
-    if ok {
-        let mut out = Vec::with_capacity(base_filename.len() + 27);
-        out.extend_from_slice(b"Collection ");
-        out.extend_from_slice(base_filename);
-        out.extend_from_slice(b" added to queue");
-        out
-    } else {
-        let mut out = Vec::with_capacity(base_filename.len() + 28);
-        out.extend_from_slice(b"Download Request failed for ");
-        out.extend_from_slice(base_filename);
-        out
-    }
-}
-
-/// Formats `ListBinCommand::Execute` file regex match target (`"%s/%s"`, `nzb_name`, `base_filename`).
-pub fn binrpc_format_file_match_name(nzb_name: &[u8], base_filename: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(nzb_name.len() + 1 + base_filename.len());
-    out.extend_from_slice(nzb_name);
-    out.push(b'/');
-    out.extend_from_slice(base_filename);
-    out
-}
-
-/// Returns the NUL-terminated response message for `WriteLogBinCommand::Execute`.
-pub fn binrpc_write_log_response_msg(ok: bool) -> &'static [u8] {
-    if ok {
-        b"Message added to log\0"
-    } else {
-        b"Invalid message-kind\0"
-    }
-}
-
-/// Returns the NUL-terminated response message for `ScanBinCommand::Execute`.
-pub fn binrpc_scan_response_msg(sync_mode: bool) -> &'static [u8] {
-    if sync_mode {
-        b"Scan-Command completed\0"
-    } else {
-        b"Scan-Command scheduled successfully\0"
-    }
-}
-
-/// Classifies which history entry fields to populate in `HistoryBinCommand::Execute`:
-/// `-1` = skip hidden duplicate entry, `1` = NZB fields, `2` = Dup size fields,
-/// `3` = URL status field, `0` = none.
-pub fn binrpc_classify_history_entry_fields(
-    kind: i32,
-    hk_nzb: i32,
-    hk_dup: i32,
-    hk_url: i32,
-    show_hidden: bool,
-) -> i32 {
-    if kind == hk_dup && !show_hidden {
-        -1
-    } else if kind == hk_nzb {
-        1
-    } else if kind == hk_dup {
-        2
-    } else if kind == hk_url {
-        3
-    } else {
-        0
-    }
 }
 
 #[cfg(test)]

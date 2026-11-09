@@ -405,28 +405,6 @@ pub unsafe fn web_proc_is_etag_unchanged(
     CStr::from_ptr(old_etag).to_bytes() == CStr::from_ptr(new_etag).to_bytes()
 }
 
-/// Selects `SecurePort` when `tls` is enabled, otherwise `ControlPort`.
-pub fn remote_server_select_port(tls: bool, secure_port: i32, control_port: i32) -> i32 {
-    if tls {
-        secure_port
-    } else {
-        control_port
-    }
-}
-
-/// Evaluates whether `RemoteServer::Run` has reached the active request processor cap
-/// and whether the rate-limited warning should be logged (`now - last_warn >= 60`).
-pub fn remote_server_should_warn_cap(
-    active_count: i32,
-    max_processors: i32,
-    now: i64,
-    last_warn: i64,
-) -> (bool, bool) {
-    let at_cap = active_count >= max_processors;
-    let should_warn = at_cap && now.saturating_sub(last_warn) >= 60;
-    (at_cap, should_warn)
-}
-
 /// Returns the maximum allowed HTTP POST `Content-Length` for `WebProcessor::Execute`.
 pub fn web_proc_max_post_content_len(authorized: bool) -> i32 {
     if authorized {
@@ -457,41 +435,6 @@ pub fn web_proc_default_resource(url: &[u8]) -> &'static [u8] {
     } else {
         b"\0"
     }
-}
-
-/// Classifies the 4-byte connection signature in `RequestProcessor::Execute`.
-pub fn remote_classify_signature(sig_bytes: &[u8; 4], nzb_magic_be: u32) -> i32 {
-    if u32::from_be_bytes(*sig_bytes) == nzb_magic_be {
-        1
-    } else if sig_bytes == b"POST" || sig_bytes == b"GET " || sig_bytes == b"OPTI" {
-        2
-    } else {
-        0
-    }
-}
-
-/// Parses the HTTP method and URL slice from the remaining request line after the 4-byte
-/// signature in `RequestProcessor::ServWebRequest`.
-pub fn remote_parse_web_request_line(
-    sig_bytes: &[u8; 4],
-    line: &[u8],
-) -> Option<(i32, usize, usize)> {
-    let (http_method, start_offset) = if sig_bytes == b"POST" {
-        if line.is_empty() {
-            return None;
-        }
-        (0, 1usize)
-    } else if sig_bytes == b"OPTI" && line.len() > 4 {
-        (2, 4usize)
-    } else if sig_bytes == b"GET " {
-        (1, 0usize)
-    } else {
-        return None;
-    };
-
-    let rest = &line[start_offset..];
-    let url_len = rest.iter().position(|&b| b == b' ').unwrap_or(rest.len());
-    Some((http_method, start_offset, url_len))
 }
 
 /// Validates URL characters in `WebProcessor::Dispatch`:
@@ -631,16 +574,6 @@ pub fn webserver_classify_pre_parse_method(
     } else {
         0
     }
-}
-
-/// Returns true when `RemoteServer::Run` detects a missing TLS cert or key file (`path.is_empty() || !file_exists`).
-pub fn remote_server_is_cert_or_key_missing(path: &[u8], file_exists: bool) -> bool {
-    path.is_empty() || !file_exists
-}
-
-/// Returns true when `RemoteServer::Run` should reset the listener and retry after a failed bind or accept (`!bind_ok || !has_accepted_conn`).
-pub fn remote_server_should_reset_listener(bind_ok: bool, has_accepted_conn: bool) -> bool {
-    !bind_ok || !has_accepted_conn
 }
 
 /// Returns true when `WebProcessor::Dispatch` routes a GET request to an extension resource (`get_route == 1 || get_route == 2`).

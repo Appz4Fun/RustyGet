@@ -215,7 +215,7 @@ pub fn next_bool(buf: &mut [u8], kind: Kind, json: bool) -> (usize, Option<bool>
 }
 
 /// next_bool on a buffer that ends with its first NUL.
-fn next_bool_terminated(buf: &mut [u8], kind: Kind, json: bool) -> (usize, Option<bool>) {
+pub(crate) fn next_bool_terminated(buf: &mut [u8], kind: Kind, json: bool) -> (usize, Option<bool>) {
     match kind {
         Kind::Get => {
             let (pos, param) = next_str_terminated(buf, kind);

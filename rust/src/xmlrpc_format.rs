@@ -4030,6 +4030,23 @@ impl<'a> ParamCursor<'a> {
         Some(v)
     }
 
+    fn next_bool(&mut self, is_json: bool) -> Option<bool> {
+        let (step, val) = match self.kind {
+            crate::rpcparams::Kind::Get | crate::rpcparams::Kind::Json => unsafe {
+                self.raw.add(self.cur_off).next_bool(self.kind, is_json)
+            },
+            crate::rpcparams::Kind::Xml => {
+                let xml = self.xml_buf.as_deref_mut()?;
+                if self.cur_off >= xml.len() {
+                    return None;
+                }
+                crate::rpcparams::next_bool_terminated(&mut xml[self.cur_off..], self.kind, is_json)
+            }
+        };
+        self.cur_off += step;
+        val
+    }
+
     fn raw_at(&self, val_off: usize) -> &[u8] {
         unsafe { self.raw.bytes_at(val_off) }
     }
@@ -4549,6 +4566,500 @@ pub(crate) unsafe fn xmlrpc_parse_test_disk_speed_raw(
 ) -> Result<(usize, Vec<u8>, usize, u64, i32), (usize, &'static CStr)> {
     let cur = ParamCursor::from_raw(raw, is_get, is_json);
     xmlrpc_parse_test_disk_speed_cursor(cur, is_json)
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ParsedAppendFleet {
+    pub dupe_key: Vec<u8>,
+    pub category: Vec<u8>,
+    pub priority: i32,
+    pub timeout_sec: i32,
+    pub members: Vec<(Vec<u8>, bool, Vec<u8>)>,
+}
+
+fn xmlrpc_parse_append_fleet_cursor(
+    mut cur: ParamCursor<'_>,
+    is_json: bool,
+    max_members: i32,
+) -> Result<(usize, ParsedAppendFleet), (usize, Vec<u8>)> {
+    if !is_json {
+        return Err((cur.cur_off, b"appendfleet needs JSON-RPC".to_vec()));
+    }
+    let Some(dupe_key_off) = cur.next_str() else {
+        return Err((cur.cur_off, b"Invalid parameter (DupeKey)".to_vec()));
+    };
+    let Some(category_off) = cur.next_str() else {
+        return Err((cur.cur_off, b"Invalid parameter (Category)".to_vec()));
+    };
+    let Some(priority) = cur.next_int() else {
+        return Err((cur.cur_off, b"Invalid parameter (Priority)".to_vec()));
+    };
+    let Some(timeout_sec) = cur.next_int() else {
+        return Err((cur.cur_off, b"Invalid parameter (Timeout)".to_vec()));
+    };
+    let dupe_key = cur.decode_at(dupe_key_off, is_json);
+    let category = cur.decode_at(category_off, is_json);
+
+    let mut members = Vec::new();
+    while let Some(name_off) = cur.next_str() {
+        let Some(content_off) = cur.next_str() else {
+            let mut msg = b"Invalid parameter (Content of ".to_vec();
+            msg.extend_from_slice(cur.raw_at(name_off));
+            msg.push(b')');
+            return Err((cur.cur_off, msg));
+        };
+        if xmlrpc_is_fleet_member_limit_reached(members.len(), max_members) {
+            return Err((
+                cur.cur_off,
+                format!("Too many members (at most {max_members})").into_bytes(),
+            ));
+        }
+        let name = cur.decode_at(name_off, is_json);
+        let mut content = cur.decode_at(content_off, is_json);
+        let is_url = xmlrpc_is_http_url(&content);
+        if !is_url {
+            let decoded_len = unsafe {
+                crate::decode::base64_in_place(
+                    content.as_ptr(),
+                    content.len(),
+                    content.as_mut_ptr(),
+                )
+            };
+            content.truncate(decoded_len);
+        }
+        members.push((name, is_url, content));
+    }
+
+    Ok((
+        cur.cur_off,
+        ParsedAppendFleet {
+            dupe_key,
+            category,
+            priority,
+            timeout_sec,
+            members,
+        },
+    ))
+}
+
+pub fn xmlrpc_parse_append_fleet(
+    buf: &mut [u8],
+    is_get: bool,
+    is_json: bool,
+    max_members: i32,
+) -> Result<(usize, ParsedAppendFleet), (usize, Vec<u8>)> {
+    if !is_json {
+        return Err((0, b"appendfleet needs JSON-RPC".to_vec()));
+    }
+    let Some(cur) = ParamCursor::from_slice(buf, is_get, is_json) else {
+        return Err((0, b"Invalid parameter (DupeKey)".to_vec()));
+    };
+    xmlrpc_parse_append_fleet_cursor(cur, is_json, max_members)
+}
+
+pub(crate) unsafe fn xmlrpc_parse_append_fleet_raw(
+    raw: crate::rpcparams::Raw,
+    is_get: bool,
+    is_json: bool,
+    max_members: i32,
+) -> Result<(usize, ParsedAppendFleet), (usize, Vec<u8>)> {
+    let cur = ParamCursor::from_raw(raw, is_get, is_json);
+    xmlrpc_parse_append_fleet_cursor(cur, is_json, max_members)
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ParsedDownload {
+    pub v13: bool,
+    pub filename: Vec<u8>,
+    pub category: Vec<u8>,
+    pub priority: i32,
+    pub add_top: bool,
+    pub is_url: bool,
+    pub content: Vec<u8>,
+    pub add_paused: bool,
+    pub dupe_key: Option<Vec<u8>>,
+    pub dupe_score: i32,
+    pub dupe_mode: i32,
+    pub auto_category: bool,
+    pub params: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+fn xmlrpc_parse_download_cursor(
+    mut cur: ParamCursor<'_>,
+    is_json: bool,
+    dm_score: i32,
+    dm_all: i32,
+    dm_force: i32,
+) -> Result<(usize, ParsedDownload), (usize, &'static CStr)> {
+    let Some(filename_off) = cur.next_str() else {
+        return Err((cur.cur_off, c"Invalid parameter (Filename)"));
+    };
+    let Some(mut content_off) = cur.next_str() else {
+        return Err((cur.cur_off, c"Invalid parameter (Content)"));
+    };
+    let (v13, category_off) = match cur.next_str() {
+        Some(cat_off) => (true, cat_off),
+        None => (false, content_off),
+    };
+    let filename = cur.decode_at(filename_off, is_json);
+    let category = cur.decode_at(category_off, is_json);
+
+    let priority = cur.next_int().unwrap_or(0);
+
+    let Some(add_top) = cur.next_bool(is_json) else {
+        return Err((cur.cur_off, c"Invalid parameter (AddTop)"));
+    };
+
+    if !v13 {
+        let Some(c_off) = cur.next_str() else {
+            return Err((cur.cur_off, c"Invalid parameter (FileContent)"));
+        };
+        content_off = c_off;
+    }
+    let mut content = cur.decode_at(content_off, is_json);
+
+    let mut add_paused = false;
+    let mut dupe_key = None;
+    let mut dupe_score = 0;
+    let mut auto_category = false;
+    let mut dupe_mode = dm_score;
+    if let Some(ap) = cur.next_bool(is_json) {
+        add_paused = ap;
+        let Some(dk_off) = cur.next_str() else {
+            return Err((cur.cur_off, c"Invalid parameter (DupeKey)"));
+        };
+        dupe_key = Some(cur.decode_at(dk_off, is_json));
+        let Some(ds) = cur.next_int() else {
+            return Err((cur.cur_off, c"Invalid parameter (DupeScore)"));
+        };
+        dupe_score = ds;
+        let parsed_dm = cur.next_str().map_or(-1, |dm_off| {
+            xmlrpc_parse_dupe_mode(cur.raw_at(dm_off), dm_score, dm_all, dm_force)
+        });
+        if parsed_dm < 0 {
+            return Err((cur.cur_off, c"Invalid parameter (DupeMode)"));
+        }
+        dupe_mode = parsed_dm;
+        if let Some(ac) = cur.next_bool(is_json) {
+            auto_category = ac;
+        }
+    } else if v13 {
+        return Err((cur.cur_off, c"Invalid parameter (AddPaused)"));
+    }
+
+    let mut params = Vec::new();
+    if v13 {
+        while let Some(pname_off) = cur.next_str() {
+            let Some(pval_off) = cur.next_str() else {
+                return Err((cur.cur_off, c"Invalid parameter (Parameters)"));
+            };
+            let pname = cur.decode_at(pname_off, is_json);
+            let pval = cur.decode_at(pval_off, is_json);
+            params.push((pname, pval));
+        }
+    }
+
+    let is_url = xmlrpc_is_http_url(&content);
+    if !is_url {
+        let decoded_len = unsafe {
+            crate::decode::base64_in_place(
+                content.as_ptr(),
+                content.len(),
+                content.as_mut_ptr(),
+            )
+        };
+        content.truncate(decoded_len);
+    }
+
+    Ok((
+        cur.cur_off,
+        ParsedDownload {
+            v13,
+            filename,
+            category,
+            priority,
+            add_top,
+            is_url,
+            content,
+            add_paused,
+            dupe_key,
+            dupe_score,
+            dupe_mode,
+            auto_category,
+            params,
+        },
+    ))
+}
+
+pub fn xmlrpc_parse_download(
+    buf: &mut [u8],
+    is_get: bool,
+    is_json: bool,
+    dm_score: i32,
+    dm_all: i32,
+    dm_force: i32,
+) -> Result<(usize, ParsedDownload), (usize, &'static CStr)> {
+    let Some(cur) = ParamCursor::from_slice(buf, is_get, is_json) else {
+        return Err((0, c"Invalid parameter (Filename)"));
+    };
+    xmlrpc_parse_download_cursor(cur, is_json, dm_score, dm_all, dm_force)
+}
+
+pub(crate) unsafe fn xmlrpc_parse_download_raw(
+    raw: crate::rpcparams::Raw,
+    is_get: bool,
+    is_json: bool,
+    dm_score: i32,
+    dm_all: i32,
+    dm_force: i32,
+) -> Result<(usize, ParsedDownload), (usize, &'static CStr)> {
+    let cur = ParamCursor::from_raw(raw, is_get, is_json);
+    xmlrpc_parse_download_cursor(cur, is_json, dm_score, dm_all, dm_force)
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ParsedViewFeed {
+    pub id: i32,
+    pub include_non_matching: bool,
+    pub name: Vec<u8>,
+    pub url: Vec<u8>,
+    pub filter: Vec<u8>,
+    pub backlog: bool,
+    pub pause_nzb: bool,
+    pub category: Vec<u8>,
+    pub category_source: i32,
+    pub priority: i32,
+    pub interval: i32,
+    pub feed_filter: Option<Vec<u8>>,
+    pub cache_time_sec: i32,
+    pub cache_id: Vec<u8>,
+}
+
+fn xmlrpc_parse_view_feed_cursor(
+    mut cur: ParamCursor<'_>,
+    is_json: bool,
+    preview: bool,
+    cs_nzb_file: i32,
+    cs_feed_file: i32,
+    cs_auto: i32,
+) -> Option<(usize, ParsedViewFeed)> {
+    if !preview {
+        let id = cur.next_int()?;
+        let include_non_matching = cur.next_bool(is_json)?;
+        return Some((
+            cur.cur_off,
+            ParsedViewFeed {
+                id,
+                include_non_matching,
+                name: Vec::new(),
+                url: Vec::new(),
+                filter: Vec::new(),
+                backlog: true,
+                pause_nzb: false,
+                category: Vec::new(),
+                category_source: cs_nzb_file,
+                priority: 0,
+                interval: 0,
+                feed_filter: None,
+                cache_time_sec: 0,
+                cache_id: Vec::new(),
+            },
+        ));
+    }
+
+    let id_opt = cur.next_int();
+    let v16 = id_opt.is_some();
+    let id = id_opt.unwrap_or(0);
+
+    let name_off = cur.next_str()?;
+    let url_off = cur.next_str()?;
+    let filter_off = cur.next_str()?;
+    let backlog = if v16 { cur.next_bool(is_json)? } else { true };
+    let pause_nzb = cur.next_bool(is_json)?;
+    let category_off = cur.next_str()?;
+    let priority = cur.next_int()?;
+    let (interval, feed_filter) = if v16 {
+        let iv = cur.next_int()?;
+        let ff_off = cur.next_str()?;
+        (iv, Some(cur.raw_at(ff_off).to_vec()))
+    } else {
+        (0, None)
+    };
+    let include_non_matching = cur.next_bool(is_json)?;
+    let cache_time_sec = cur.next_int()?;
+    let cache_id_off = cur.next_str()?;
+
+    let category_source = match cur.next_str() {
+        Some(cs_off) => {
+            xmlrpc_parse_category_source(cur.raw_at(cs_off), cs_nzb_file, cs_feed_file, cs_auto)
+        }
+        None => cs_nzb_file,
+    };
+
+    let name = cur.decode_at(name_off, is_json);
+    let url = cur.decode_at(url_off, is_json);
+    let filter = cur.decode_at(filter_off, is_json);
+    let cache_id = cur.decode_at(cache_id_off, is_json);
+    let category = cur.decode_at(category_off, is_json);
+
+    Some((
+        cur.cur_off,
+        ParsedViewFeed {
+            id,
+            include_non_matching,
+            name,
+            url,
+            filter,
+            backlog,
+            pause_nzb,
+            category,
+            category_source,
+            priority,
+            interval,
+            feed_filter,
+            cache_time_sec,
+            cache_id,
+        },
+    ))
+}
+
+pub fn xmlrpc_parse_view_feed(
+    buf: &mut [u8],
+    is_get: bool,
+    is_json: bool,
+    preview: bool,
+    cs_nzb_file: i32,
+    cs_feed_file: i32,
+    cs_auto: i32,
+) -> Option<(usize, ParsedViewFeed)> {
+    let cur = ParamCursor::from_slice(buf, is_get, is_json)?;
+    xmlrpc_parse_view_feed_cursor(cur, is_json, preview, cs_nzb_file, cs_feed_file, cs_auto)
+}
+
+pub(crate) unsafe fn xmlrpc_parse_view_feed_raw(
+    raw: crate::rpcparams::Raw,
+    is_get: bool,
+    is_json: bool,
+    preview: bool,
+    cs_nzb_file: i32,
+    cs_feed_file: i32,
+    cs_auto: i32,
+) -> Option<(usize, ParsedViewFeed)> {
+    let cur = ParamCursor::from_raw(raw, is_get, is_json);
+    xmlrpc_parse_view_feed_cursor(cur, is_json, preview, cs_nzb_file, cs_feed_file, cs_auto)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn xmlrpc_parse_test_server_cursor(
+    request_body: Option<&[u8]>,
+    cur: Option<ParamCursor<'_>>,
+    is_json: bool,
+    http_method: i32,
+    hm_post: i32,
+    cert_verif_count: i32,
+    limits: crate::json::Limits,
+) -> Result<(usize, crate::rpcparams::ServerParams), (usize, &'static CStr)> {
+    let (new_off, params) = if xmlrpc_should_parse_json_post_test_server(
+        is_json,
+        request_body.is_some(),
+        http_method,
+        hm_post,
+    ) {
+        match crate::rpcparams::test_server_params(request_body.unwrap_or(&[]), limits) {
+            Ok(p) => (0, p),
+            Err(crate::rpcparams::ServerParamsError::Json) => return Err((0, c"Invalid JSON")),
+            Err(crate::rpcparams::ServerParamsError::Params) => {
+                return Err((0, c"Invalid parameters"))
+            }
+        }
+    } else {
+        let Some(mut cur) = cur else {
+            return Err((0, c"Invalid parameter"));
+        };
+        let parsed = (|| {
+            let host_off = cur.next_str()?;
+            let port = cur.next_int()?;
+            let user_off = cur.next_str()?;
+            let pass_off = cur.next_str()?;
+            let encryption = cur.next_bool(is_json)?;
+            let cipher_off = cur.next_str()?;
+            let timeout = cur.next_int()?;
+            let cert_verif_level = cur.next_int()?;
+            let host = cur.decode_at(host_off, is_json);
+            let username = cur.decode_at(user_off, is_json);
+            let password = cur.decode_at(pass_off, is_json);
+            let cipher = cur.decode_at(cipher_off, is_json);
+            Some(crate::rpcparams::ServerParams {
+                host,
+                port,
+                username,
+                password,
+                encryption,
+                cipher,
+                timeout,
+                cert_verif_level,
+            })
+        })();
+        match parsed {
+            Some(p) => (cur.cur_off, p),
+            None => return Err((cur.cur_off, c"Invalid parameter")),
+        }
+    };
+
+    if !xmlrpc_is_valid_cert_verif_level(params.cert_verif_level, cert_verif_count) {
+        return Err((
+            new_off,
+            c"Invalid parameter (Certificate Verification Level).",
+        ));
+    }
+
+    Ok((new_off, params))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn xmlrpc_parse_test_server(
+    request_body: Option<&[u8]>,
+    buf: Option<&mut [u8]>,
+    is_get: bool,
+    is_json: bool,
+    http_method: i32,
+    hm_post: i32,
+    cert_verif_count: i32,
+    limits: crate::json::Limits,
+) -> Result<(usize, crate::rpcparams::ServerParams), (usize, &'static CStr)> {
+    let cur = buf.and_then(|b| ParamCursor::from_slice(b, is_get, is_json));
+    xmlrpc_parse_test_server_cursor(
+        request_body,
+        cur,
+        is_json,
+        http_method,
+        hm_post,
+        cert_verif_count,
+        limits,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn xmlrpc_parse_test_server_raw(
+    request_body: Option<&[u8]>,
+    raw: Option<crate::rpcparams::Raw>,
+    is_get: bool,
+    is_json: bool,
+    http_method: i32,
+    hm_post: i32,
+    cert_verif_count: i32,
+    limits: crate::json::Limits,
+) -> Result<(usize, crate::rpcparams::ServerParams), (usize, &'static CStr)> {
+    let cur = raw.map(|r| ParamCursor::from_raw(r, is_get, is_json));
+    xmlrpc_parse_test_server_cursor(
+        request_body,
+        cur,
+        is_json,
+        http_method,
+        hm_post,
+        cert_verif_count,
+        limits,
+    )
 }
 
 #[cfg(test)]
@@ -5315,6 +5826,84 @@ mod remote_xmlrpc_tests {
             entries,
             vec![(b"ControlPassword".to_vec(), b"secret".to_vec())]
         );
+
+        // AppendFleet JSON-RPC POST
+        let fleet_req = br#"{"method":"appendfleet","params":["dupe1","movies",50,60,"a.nzb","aGVsbG8=","b.nzb","https://example.com/b.nzb"],"id":1}"#;
+        let mut fcmd = RustXmlCommand::new(fleet_req, RP_JSON_RPC, HM_POST);
+        fcmd.prepare_params();
+        let (_, fleet) =
+            xmlrpc_parse_append_fleet(&mut fcmd.buf[fcmd.pos..], false, true, 16).unwrap();
+        assert_eq!(fleet.dupe_key, b"dupe1");
+        assert_eq!(fleet.category, b"movies");
+        assert_eq!(fleet.priority, 50);
+        assert_eq!(fleet.timeout_sec, 60);
+        assert_eq!(
+            fleet.members,
+            vec![
+                (b"a.nzb".to_vec(), false, b"hello".to_vec()),
+                (b"b.nzb".to_vec(), true, b"https://example.com/b.nzb".to_vec()),
+            ]
+        );
+
+        // Download v13 JSON-RPC POST
+        let dl_req = br#"{"method":"append","params":["test.nzb","aGVsbG8=","tv",10,true,false,"k1",100,"FORCE",true,"*Unpack:Password","p\"w"],"id":1}"#;
+        let mut dlcmd = RustXmlCommand::new(dl_req, RP_JSON_RPC, HM_POST);
+        dlcmd.prepare_params();
+        let (_, dl) =
+            xmlrpc_parse_download(&mut dlcmd.buf[dlcmd.pos..], false, true, 0, 1, 2).unwrap();
+        assert!(dl.v13);
+        assert_eq!(dl.filename, b"test.nzb");
+        assert_eq!(dl.category, b"tv");
+        assert_eq!(dl.priority, 10);
+        assert!(dl.add_top);
+        assert!(!dl.is_url);
+        assert_eq!(dl.content, b"hello");
+        assert!(!dl.add_paused);
+        assert_eq!(dl.dupe_key.as_deref(), Some(&b"k1"[..]));
+        assert_eq!(dl.dupe_score, 100);
+        assert_eq!(dl.dupe_mode, 2);
+        assert!(dl.auto_category);
+        assert_eq!(dl.params, vec![(b"*Unpack:Password".to_vec(), b"p\"w".to_vec())]);
+
+        // ViewFeed & PreviewFeed v16 JSON-RPC POST
+        let vf_req = br#"{"method":"previewfeed","params":[2,"Feed2","https://feed.invalid","A*",false,true,"movies",25,15,"Filter.py",true,300,"cid1","Auto"],"id":1}"#;
+        let mut vfcmd = RustXmlCommand::new(vf_req, RP_JSON_RPC, HM_POST);
+        vfcmd.prepare_params();
+        let (_, vf) =
+            xmlrpc_parse_view_feed(&mut vfcmd.buf[vfcmd.pos..], false, true, true, 0, 1, 2)
+                .unwrap();
+        assert_eq!(vf.id, 2);
+        assert_eq!(vf.name, b"Feed2");
+        assert_eq!(vf.url, b"https://feed.invalid");
+        assert_eq!(vf.filter, b"A*");
+        assert!(!vf.backlog);
+        assert!(vf.pause_nzb);
+        assert_eq!(vf.category, b"movies");
+        assert_eq!(vf.category_source, 2);
+        assert_eq!(vf.priority, 25);
+        assert_eq!(vf.interval, 15);
+        assert_eq!(vf.feed_filter.as_deref(), Some(&b"Filter.py"[..]));
+        assert!(vf.include_non_matching);
+        assert_eq!(vf.cache_time_sec, 300);
+        assert_eq!(vf.cache_id, b"cid1");
+
+        // TestServer JSON-RPC POST + certVerifLevel validation
+        let ts_req = br#"{"method":"testserver","params":["news.example.com",563,"u","p",true,"AES128",30,1],"id":1}"#;
+        let (_, ts) = xmlrpc_parse_test_server(
+            Some(ts_req),
+            None,
+            false,
+            true,
+            HM_POST,
+            HM_POST,
+            3,
+            crate::json::TEST_LIMITS,
+        )
+        .unwrap();
+        assert_eq!(ts.host, b"news.example.com");
+        assert_eq!(ts.port, 563);
+        assert!(ts.encryption);
+        assert_eq!(ts.cert_verif_level, 1);
     }
 }
 

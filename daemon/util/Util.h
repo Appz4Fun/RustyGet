@@ -43799,18 +43799,6 @@ public:
 		bool IsSafeMethod() { return nzbget_rs_xmlrpc_is_safe_command(m_cmdId) != 0; }
 		bool IsError() { return m_cmdId == 0; }
 
-		struct ServerParams
-		{
-			std::string host;
-			std::string username;
-			std::string password;
-			std::string cipher;
-			int port;
-			int timeout;
-			int certVerifLevel;
-			bool encryption;
-		};
-
 		void PrepareParams()
 		{
 			if (nzbget_rs_dqh_xmlrpc_should_skip_to_json_post_params(
@@ -43828,9 +43816,9 @@ public:
 
 		void PrintTestServerError(const char* errMsg)
 		{
-			if (m_testServerErrText.Empty())
+			if (m_testServerErrText.Empty() && errMsg)
 			{
-				m_testServerErrText = EncodeStr(errMsg);
+				m_testServerErrText = errMsg;
 			}
 		}
 
@@ -43974,40 +43962,24 @@ public:
 			return true;
 		}
 
-		bool NextParamAsStr(char** value)
+		bool NextParamAsStr(char** value, bool decode = false)
 		{
-			return nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 2, nullptr, value);
-		}
-
-		CString EncodeStr(const char* str)
-		{
-			if (!str)
+			if (!nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 2, nullptr, value))
 			{
-				return "";
+				return false;
 			}
-
-			CString result;
-			if (IsJson())
+			if (decode)
 			{
-				result = WebUtil::JsonEncode(str);
+				if (IsJson())
+				{
+					WebUtil::JsonDecode(*value);
+				}
+				else
+				{
+					WebUtil::XmlDecode(*value);
+				}
 			}
-			else
-			{
-				result = WebUtil::XmlEncode(str);
-			}
-			return result;
-		}
-
-		void DecodeStr(char* str)
-		{
-			if (IsJson())
-			{
-				WebUtil::JsonDecode(str);
-			}
-			else
-			{
-				WebUtil::XmlDecode(str);
-			}
+			return true;
 		}
 
 void ExecutePauseUnpause(bool pause, int pauseAction)
@@ -44598,69 +44570,43 @@ void ExecuteEditQueue()
 // a content is the nzb-file in base64 or its url; see Fleet
 void ExecuteAppendFleet()
 {
-	if (!IsJson())
-	{
-		BuildErrorResponse(2, "appendfleet needs JSON-RPC");
-		return;
-	}
 	Fleet::Request request;
-	char* dupeKey = nullptr;
-	char* category = nullptr;
-	// an empty key is derived from the first member's name (Fleet)
-	if (!NextParamAsStr(&dupeKey))
+	NzbgetRsBuf errBuf{nullptr, 0};
+	if (!nzbget_rs_xmlrpc_parse_append_fleet(
+		&m_requestPtr,
+		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
+		IsJson() ? 1 : 0,
+		Fleet::MaxMembers,
+		&request,
+		[](void* ctx, const char* dupeKey, const char* category, int priority, int timeoutSec)
+		{
+			Fleet::Request& req = *static_cast<Fleet::Request*>(ctx);
+			req.dupeKey = dupeKey ? dupeKey : "";
+			req.category = category ? category : "";
+			req.priority = priority;
+			req.timeoutSec = timeoutSec;
+		},
+		[](void* ctx, const char* name, int isUrl, const char* data, size_t dataLen)
+		{
+			Fleet::Member member;
+			member.name = name ? name : "";
+			if (isUrl)
+			{
+				member.url.assign(data, dataLen);
+			}
+			else
+			{
+				member.data.assign(data, dataLen);
+			}
+			static_cast<Fleet::Request*>(ctx)->members.push_back(std::move(member));
+		},
+		&errBuf))
 	{
-		BuildErrorResponse(2, "Invalid parameter (DupeKey)");
+		BuildErrorResponse(2, "%s", errBuf.data ? errBuf.data : "Invalid parameter");
+		nzbget_rs_free(errBuf);
 		return;
 	}
-	if (!NextParamAsStr(&category))
-	{
-		BuildErrorResponse(2, "Invalid parameter (Category)");
-		return;
-	}
-	if (!NextParamAsInt(&request.priority))
-	{
-		BuildErrorResponse(2, "Invalid parameter (Priority)");
-		return;
-	}
-	if (!NextParamAsInt(&request.timeoutSec))
-	{
-		BuildErrorResponse(2, "Invalid parameter (Timeout)");
-		return;
-	}
-	DecodeStr(dupeKey);
-	DecodeStr(category);
-	request.dupeKey = dupeKey;
-	request.category = category;
-	char* name = nullptr;
-	while (NextParamAsStr(&name))
-	{
-		char* content = nullptr;
-		if (!NextParamAsStr(&content))
-		{
-			BuildErrorResponse(2, "Invalid parameter (Content of %s)", name);
-			return;
-		}
-		if (nzbget_rs_dqh_xmlrpc_is_fleet_member_limit_reached(
-			request.members.size(), Fleet::MaxMembers) != 0)
-		{
-			BuildErrorResponse(2, "Too many members (at most %i)", Fleet::MaxMembers);
-			return;
-		}
-		DecodeStr(name);
-		DecodeStr(content);
-		Fleet::Member member;
-		member.name = name;
-		if (nzbget_rs_ntw_xmlrpc_is_http_url(content) != 0)
-		{
-			member.url = content;
-		}
-		else
-		{
-			int len = WebUtil::DecodeBase64(content, 0, content);
-			member.data.assign(content, len);
-		}
-		request.members.push_back(std::move(member));
-	}
+	nzbget_rs_free(errBuf);
 
 	Fleet::Result result = Fleet::Append(std::move(request));
 
@@ -44687,112 +44633,39 @@ void ExecuteAppendFleet()
 
 void ExecuteDownload()
 {
-	bool v13 = true;
-
-	char* filename;
-	if (!NextParamAsStr(&filename))
+	NzbgetRsParsedDownload dl{};
+	NzbParameterList Params;
+	const char* errMsg = nullptr;
+	if (!nzbget_rs_xmlrpc_parse_download(
+		&m_requestPtr,
+		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
+		IsJson() ? 1 : 0,
+		(int)dmScore, (int)dmAll, (int)dmForce,
+		&dl,
+		&Params,
+		[](void* ctx, const char* name, const char* val)
+		{
+			static_cast<NzbParameterList*>(ctx)->SetParameter(name, val);
+		},
+		&errMsg))
 	{
-		BuildErrorResponse(2, "Invalid parameter (Filename)");
+		BuildErrorResponse(2, "%s", errMsg ? errMsg : "Invalid parameter");
 		return;
 	}
 
-	char* content;
-	if (!NextParamAsStr(&content))
-	{
-		BuildErrorResponse(2, "Invalid parameter (Content)");
-		return;
-	}
-
-	char* category;
-	if (!NextParamAsStr(&category))
-	{
-		v13 = false;
-		category = content;
-	}
-
-	DecodeStr(filename);
-	DecodeStr(category);
+	const char* filename = dl.filename.data ? dl.filename.data : "";
+	const char* category = dl.category.data ? dl.category.data : "";
+	const char* content = dl.content.data ? dl.content.data : "";
+	const char* dupeKey = dl.has_dupe_key ? (dl.dupe_key.data ? dl.dupe_key.data : "") : nullptr;
+	bool v13 = dl.v13 != 0;
+	bool addTop = dl.add_top != 0;
+	bool addPaused = dl.add_paused != 0;
+	bool autoCategory = dl.auto_category != 0;
+	EDupeMode dupeMode = (EDupeMode)dl.dupe_mode;
 
 	debug("FileName=%s", filename);
 
-	// For backward compatibility with 0.8 parameter "Priority" is optional (error checking omitted)
-	int priority = 0;
-	NextParamAsInt(&priority);
-
-	bool addTop;
-	if (!NextParamAsBool(&addTop))
-	{
-		BuildErrorResponse(2, "Invalid parameter (AddTop)");
-		return;
-	}
-
-	if (!v13 && !NextParamAsStr(&content))
-	{
-		BuildErrorResponse(2, "Invalid parameter (FileContent)");
-		return;
-	}
-
-	DecodeStr(content);
-
-	bool addPaused = false;
-	char* dupeKey = nullptr;
-	int dupeScore = 0;
-	bool autoCategory = false;
-	EDupeMode dupeMode = dmScore;
-	if (NextParamAsBool(&addPaused))
-	{
-		if (!NextParamAsStr(&dupeKey))
-		{
-			BuildErrorResponse(2, "Invalid parameter (DupeKey)");
-			return;
-		}
-		DecodeStr(dupeKey);
-		if (!NextParamAsInt(&dupeScore))
-		{
-			BuildErrorResponse(2, "Invalid parameter (DupeScore)");
-			return;
-		}
-		char* dupeModeStr = nullptr;
-		int parsedDupeMode = NextParamAsStr(&dupeModeStr)
-			? nzbget_rs_ntw_xmlrpc_parse_dupe_mode(
-				dupeModeStr, (int)dmScore, (int)dmAll, (int)dmForce)
-			: -1;
-		if (parsedDupeMode < 0)
-		{
-			BuildErrorResponse(2, "Invalid parameter (DupeMode)");
-			return;
-		}
-		dupeMode = (EDupeMode)parsedDupeMode;
-
-		NextParamAsBool(&autoCategory);
-	}
-	else if (v13)
-	{
-		BuildErrorResponse(2, "Invalid parameter (AddPaused)");
-		return;
-	}
-
-	NzbParameterList Params;
-	if (v13)
-	{
-		char* paramName = nullptr;
-		char* paramValue = nullptr;
-		while (NextParamAsStr(&paramName))
-		{
-			if (!NextParamAsStr(&paramValue))
-			{
-				BuildErrorResponse(2, "Invalid parameter (Parameters)");
-				return;
-			}
-			// decoded like every other string: a password with a quote or a
-			// backslash was stored escaped, and unpacking failed
-			DecodeStr(paramName);
-			DecodeStr(paramValue);
-			Params.SetParameter(paramName, paramValue);
-		}
-	}
-
-	if (nzbget_rs_ntw_xmlrpc_is_http_url(content) != 0)
+	if (dl.is_url != 0)
 	{
 		// add url
 		std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
@@ -44801,10 +44674,10 @@ void ExecuteDownload()
 		nzbInfo->SetFilename(filename);
 		nzbInfo->SetCategory(category);
 		nzbInfo->SetAutoCategory(autoCategory);
-		nzbInfo->SetPriority(priority);
+		nzbInfo->SetPriority(dl.priority);
 		nzbInfo->SetAddUrlPaused(addPaused);
 		nzbInfo->SetDupeKey(dupeKey ? dupeKey : "");
-		nzbInfo->SetDupeScore(dupeScore);
+		nzbInfo->SetDupeScore(dl.dupe_score);
 		nzbInfo->SetDupeMode(dupeMode);
 		nzbInfo->GetParameters()->CopyFrom(&Params);
 		int nzbId = nzbInfo->GetId();
@@ -44824,17 +44697,16 @@ void ExecuteDownload()
 	}
 	else
 	{
-		int len = WebUtil::DecodeBase64(content, 0, content);
-		content[len] = '\0';
+		int len = (int)dl.content.len;
 		if (nzbget_rs_unpack_can_extract_with_zipfast(filename) != 0)
 		{
 			const auto status = g_Scanner->AddArchive(
 				filename,
 				category,
 				autoCategory,
-				priority,
+				dl.priority,
 				dupeKey,
-				dupeScore,
+				dl.dupe_score,
 				dupeMode,
 				Params.empty() ? nullptr : &Params,
 				addTop,
@@ -44852,9 +44724,9 @@ void ExecuteDownload()
 				filename,
 				category,
 				autoCategory,
-				priority,
+				dl.priority,
 				dupeKey,
-				dupeScore,
+				dl.dupe_score,
 				dupeMode,
 				Params.empty() ? nullptr : &Params,
 				addTop,
@@ -44878,6 +44750,11 @@ void ExecuteDownload()
 			}
 		}
 	}
+
+	nzbget_rs_free(dl.filename);
+	nzbget_rs_free(dl.category);
+	nzbget_rs_free(dl.content);
+	nzbget_rs_free(dl.dupe_key);
 }
 
 // deprecated
@@ -44921,13 +44798,11 @@ void ExecuteWriteLog()
 {
 	char* kind;
 	char* text;
-	if (!NextParamAsStr(&kind) || !NextParamAsStr(&text))
+	if (!NextParamAsStr(&kind) || !NextParamAsStr(&text, true))
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
 	}
-
-	DecodeStr(text);
 
 	debug("Kind=%s, Text=%s", kind, text);
 
@@ -45165,20 +45040,18 @@ void ExecuteLoadExtensions()
 void ExecuteDownloadExtension()
 {
 	char* url;
-	if (!NextParamAsStr(&url))
+	if (!NextParamAsStr(&url, true))
 	{
 		BuildErrorResponse(2, "Invalid parameter (URL)");
 		return;
 	}
-	DecodeStr(url);
 
 	char* extName;
-	if (!NextParamAsStr(&extName))
+	if (!NextParamAsStr(&extName, true))
 	{
 		BuildErrorResponse(2, "Invalid parameter (Extension name)");
 		return;
 	}
-	DecodeStr(extName);
 
 	if (Util::EmptyStr(g_Options->GetTempDir()))
 	{
@@ -45224,20 +45097,18 @@ void ExecuteDownloadExtension()
 void ExecuteUpdateExtension()
 {
 	char* url;
-	if (!NextParamAsStr(&url))
+	if (!NextParamAsStr(&url, true))
 	{
 		BuildErrorResponse(2, "Invalid parameter (URL)");
 		return;
 	}
-	DecodeStr(url);
 
 	char* extName;
-	if (!NextParamAsStr(&extName))
+	if (!NextParamAsStr(&extName, true))
 	{
 		BuildErrorResponse(2, "Invalid parameter (Extension name)");
 		return;
 	}
-	DecodeStr(extName);
 
 	const auto result = g_ExtensionManager->DownloadExtension(url, extName);
 	bool ok = std::get<0>(result) == WebDownloader::adFinished;
@@ -45264,12 +45135,11 @@ void ExecuteUpdateExtension()
 void ExecuteDeleteExtension()
 {
 	char* extName;
-	if (!NextParamAsStr(&extName))
+	if (!NextParamAsStr(&extName, true))
 	{
 		BuildErrorResponse(2, "Invalid parameter (Extension name)");
 		return;
 	}
-	DecodeStr(extName);
 
 	const auto error = g_ExtensionManager->DeleteExtension(extName);
 	if (error)
@@ -45284,12 +45154,11 @@ void ExecuteDeleteExtension()
 void ExecuteTestExtension()
 {
 	char* extEntryFileName;
-	if (!NextParamAsStr(&extEntryFileName))
+	if (!NextParamAsStr(&extEntryFileName, true))
 	{
 		BuildErrorResponse(2, "Invalid parameter (Extension entry file name)");
 		return;
 	}
-	DecodeStr(extEntryFileName);
 
 	const auto found = Util::FindExecutorProgram(extEntryFileName, g_Options->GetShellOverride());
 	if (!found)
@@ -45355,88 +45224,65 @@ void ExecuteConfigTemplates()
 //		int priority, int interval, string feedfilter, bool includeNonMatching, int cacheTimeSec, string cacheId)
 void ExecuteViewFeed(bool preview)
 {
-	bool includeNonMatching = false;
+	NzbgetRsParsedViewFeed vf{};
+	if (!nzbget_rs_xmlrpc_parse_view_feed(
+		&m_requestPtr,
+		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
+		IsJson() ? 1 : 0,
+		preview ? 1 : 0,
+		(int)FeedInfo::CategorySource::NZBFile,
+		(int)FeedInfo::CategorySource::FeedFile,
+		(int)FeedInfo::CategorySource::Auto,
+		&vf))
+	{
+		BuildErrorResponse(2, "Invalid parameter");
+		return;
+	}
+
+	bool includeNonMatching = vf.include_non_matching != 0;
 	std::shared_ptr<FeedItemList> feedItems;
 
 	if (preview)
 	{
-		int id = 0;
-		char* name;
-		char* url;
-		char* filter;
-		bool backlog = true;
-		bool pauseNzb;
-		char* category;
-		char* categorySourceStr = nullptr;	// optional: unset when not sent
-		auto categorySource = FeedInfo::CategorySource::NZBFile;
-		int interval = 0;
-		int priority;
-		char* feedFilter = nullptr;
-		char* cacheId;
-		int cacheTimeSec;
-
-		// if the first parameter is int then it's the v16 signature
-		bool v16 = NextParamAsInt(&id);
-
-		if (!NextParamAsStr(&name) || !NextParamAsStr(&url) || !NextParamAsStr(&filter) ||
-			(v16 && !NextParamAsBool(&backlog)) || !NextParamAsBool(&pauseNzb) ||
-			!NextParamAsStr(&category) || !NextParamAsInt(&priority) ||
-			(v16 && (!NextParamAsInt(&interval) || !NextParamAsStr(&feedFilter))) ||
-			!NextParamAsBool(&includeNonMatching) || !NextParamAsInt(&cacheTimeSec) ||
-			!NextParamAsStr(&cacheId))
-		{
-			BuildErrorResponse(2, "Invalid parameter");
-			return;
-		}
-
-		NextParamAsStr(&categorySourceStr);
-		if (categorySourceStr)
-		{
-			categorySource = (FeedInfo::CategorySource)nzbget_rs_ntw_xmlrpc_parse_category_source(
-				categorySourceStr,
-				(int)FeedInfo::CategorySource::NZBFile,
-				(int)FeedInfo::CategorySource::FeedFile,
-				(int)FeedInfo::CategorySource::Auto);
-		}
-
-		DecodeStr(name);
-		DecodeStr(url);
-		DecodeStr(filter);
-		DecodeStr(cacheId);
-		DecodeStr(category);
+		const char* name = vf.name.data ? vf.name.data : "";
+		const char* url = vf.url.data ? vf.url.data : "";
+		const char* filter = vf.filter.data ? vf.filter.data : "";
+		const char* category = vf.category.data ? vf.category.data : "";
+		const char* feedFilter = vf.has_feed_filter ? (vf.feed_filter.data ? vf.feed_filter.data : "") : nullptr;
+		const char* cacheId = vf.cache_id.data ? vf.cache_id.data : "";
 
 		debug("Url=%s", url);
 		debug("Filter=%s", filter);
 
 		feedItems = g_FeedCoordinator->PreviewFeed(
-			id,
+			vf.id,
 			name,
 			url,
 			filter,
-			backlog,
-			pauseNzb,
+			vf.backlog != 0,
+			vf.pause_nzb != 0,
 			category,
-			categorySource,
-			priority,
-			interval,
+			(FeedInfo::CategorySource)vf.category_source,
+			vf.priority,
+			vf.interval,
 			feedFilter,
-			cacheTimeSec,
+			vf.cache_time_sec,
 			cacheId
 		);
 	}
 	else
 	{
-		int id = 0;
-		if (!NextParamAsInt(&id) || !NextParamAsBool(&includeNonMatching))
-		{
-			BuildErrorResponse(2, "Invalid parameter");
-			return;
-		}
+		debug("ID=%i", vf.id);
 
-		debug("ID=%i", id);
-
-		feedItems = g_FeedCoordinator->ViewFeed(id);
+		feedItems = g_FeedCoordinator->ViewFeed(vf.id);
 	}
+
+	nzbget_rs_free(vf.name);
+	nzbget_rs_free(vf.url);
+	nzbget_rs_free(vf.filter);
+	nzbget_rs_free(vf.category);
+	nzbget_rs_free(vf.feed_filter);
+	nzbget_rs_free(vf.cache_id);
 
 	if (!feedItems)
 	{
@@ -45541,20 +45387,18 @@ void ExecuteEditServer()
 void ExecuteReadUrl()
 {
 	char* url;
-	if (!NextParamAsStr(&url))
+	if (!NextParamAsStr(&url, true))
 	{
 		BuildErrorResponse(2, "Invalid parameter (URL)");
 		return;
 	}
-	DecodeStr(url);
 
 	char* infoName;
-	if (!NextParamAsStr(&infoName))
+	if (!NextParamAsStr(&infoName, true))
 	{
 		BuildErrorResponse(2, "Invalid parameter (InfoName)");
 		return;
 	}
-	DecodeStr(infoName);
 
 	// generate temp file name
 	BString<1024> tempFileName;
@@ -45615,12 +45459,11 @@ void ExecuteCheckUpdates()
 void ExecuteStartUpdate()
 {
 	char* branchName;
-	if (!NextParamAsStr(&branchName))
+	if (!NextParamAsStr(&branchName, true))
 	{
 		BuildErrorResponse(2, "Invalid parameter (Branch)");
 		return;
 	}
-	DecodeStr(branchName);
 
 	Maintenance::EBranch branch;
 	int branchCode = nzbget_rs_rco_rpc_parse_update_branch(branchName);
@@ -45756,90 +45599,22 @@ void ExecuteResetServerVolume()
 // string testserver(string host, int port, string username, string password, bool encryption, string cipher, int timeout, int certVerifLevel);
 void ExecuteTestServer()
 {
-	ServerParams params;
-	char* host;
-	int port;
-	char* username;
-	char* password;
-	bool encryption;
-	char* cipher;
-	int timeout;
-	int certVerifLevel;
-
-	// a JSON body only with POST: over GET (JSON-P) m_request is the query string
-	if (nzbget_rs_dqh_xmlrpc_should_parse_json_post_test_server(
-		IsJson() ? 1 : 0, m_request != nullptr ? 1 : 0,
-		(int)m_httpMethod, (int)XmlRpcProcessor::hmPost) != 0)
+	const NzbgetRsJsonLimits limits{0x7ffffffeu, 0x7fffffffu / 24u, 0x3fffffffu};
+	NzbgetRsParsedTestServer ts{};
+	const char* errMsg = nullptr;
+	if (!nzbget_rs_xmlrpc_parse_test_server(
+		m_request,
+		&m_requestPtr,
+		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
+		IsJson() ? 1 : 0,
+		(int)m_httpMethod,
+		(int)XmlRpcProcessor::hmPost,
+		(int)Options::ECertVerifLevel::Count,
+		limits,
+		&ts,
+		&errMsg))
 	{
-		// rust/src/rpcparams.rs; a std::exception while copying the strings
-		// gives "Invalid parameters", as in ParseRequestParams
-		struct Context
-		{
-			ServerParams* params;
-			bool failed;
-		} context{&params, false};
-		const NzbgetRsJsonLimits limits{0x7ffffffeu, 0x7fffffffu / 24u, 0x3fffffffu};
-		int parsed = nzbget_rs_test_server_params(m_request, limits, &context,
-			[](void* ctx, const NzbgetRsTestServerParams* from) noexcept
-			{
-				Context& context = *static_cast<Context*>(ctx);
-				try
-				{
-					ServerParams p;
-					p.host.assign(from->host.data, from->host.len);
-					p.port = from->port;
-					p.username.assign(from->username.data, from->username.len);
-					p.password.assign(from->password.data, from->password.len);
-					p.encryption = from->encryption != 0;
-					p.cipher.assign(from->cipher.data, from->cipher.len);
-					p.timeout = from->timeout;
-					p.certVerifLevel = from->certVerifLevel;
-					*context.params = std::move(p);
-				}
-				catch (const std::exception&)
-				{
-					context.failed = true;
-				}
-			});
-		if (parsed == 0)
-		{
-			BuildErrorResponse(2, "Invalid JSON");
-			return;
-		}
-		if (parsed < 0 || context.failed)
-		{
-			BuildErrorResponse(2, "Invalid parameters");
-			return;
-		}
-	}
-	else if (!NextParamAsStr(&host) || !NextParamAsInt(&port) || !NextParamAsStr(&username) ||
-		!NextParamAsStr(&password) || !NextParamAsBool(&encryption) ||
-		!NextParamAsStr(&cipher) || !NextParamAsInt(&timeout) ||
-		!NextParamAsInt(&certVerifLevel))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-	else
-	{
-		DecodeStr(host);
-		DecodeStr(username);
-		DecodeStr(password);
-		DecodeStr(cipher);
-		params.host = host;
-		params.port = port;
-		params.username = username;
-		params.password = password;
-		params.encryption = encryption;
-		params.cipher = cipher;
-		params.timeout = timeout;
-		params.certVerifLevel = certVerifLevel;
-	}
-
-	if (!nzbget_rs_dqh_xmlrpc_is_valid_cert_verif_level(
-		params.certVerifLevel, (int)Options::ECertVerifLevel::Count))
-	{
-		BuildErrorResponse(2, "Invalid parameter (Certificate Verification Level).");
+		BuildErrorResponse(2, "%s", errMsg ? errMsg : "Invalid parameter");
 		return;
 	}
 
@@ -45847,21 +45622,26 @@ void ExecuteTestServer()
 		0,
 		true,
 		"test server",
-		params.host.c_str(),
-		params.port,
+		ts.host.data ? ts.host.data : "",
+		ts.port,
 		0,
-		params.username.c_str(),
-		params.password.c_str(),
+		ts.username.data ? ts.username.data : "",
+		ts.password.data ? ts.password.data : "",
 		false,
-		params.encryption,
-		params.cipher.c_str(),
+		ts.encryption != 0,
+		ts.cipher.data ? ts.cipher.data : "",
 		1,
 		0,
 		0,
 		0,
 		false,
-		params.certVerifLevel
+		ts.cert_verif_level
 	);
+	nzbget_rs_free(ts.host);
+	nzbget_rs_free(ts.username);
+	nzbget_rs_free(ts.password);
+	nzbget_rs_free(ts.cipher);
+
 	class TestConnection final : public NntpConnection
 	{
 	public:
@@ -45873,7 +45653,7 @@ void ExecuteTestServer()
 	};
 	TestConnection connection(&server, this);
 	connection.SetTimeout(nzbget_rs_rol_xmlrpc_test_server_effective_timeout(
-		params.timeout, g_Options->GetArticleTimeout()));
+		ts.timeout, g_Options->GetArticleTimeout()));
 	connection.SetSuppressErrors(false);
 
 	bool ok = connection.Connect();
@@ -45896,7 +45676,7 @@ void ExecuteTestServer()
 	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(
 		IsJson() ? 1 : 0,
 		nzbget_rs_dqh_xmlrpc_select_test_server_err_text(ok ? 1 : 0, *m_testServerErrText),
-		0,
+		1,
 		1023));
 }
 
@@ -45928,12 +45708,11 @@ void ExecuteTlsCipher(int operation)
 void ExecuteTestServerSpeed()
 {
 	char* nzbFileUrl;
-	if (!NextParamAsStr(&nzbFileUrl))
+	if (!NextParamAsStr(&nzbFileUrl, true))
 	{
 		BuildErrorResponse(2, "Invalid parameter: NZB file url");
 		return;
 	}
-	DecodeStr(nzbFileUrl);
 
 	int serverId;
 	if (!NextParamAsInt(&serverId))

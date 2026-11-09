@@ -330,12 +330,6 @@ void nzbget_rs_volume_add(int64_t* seconds, size_t secondsLen, int64_t* minutes,
 int nzbget_rs_validate_option_name(const char* name, int (*predefined)(void* ctx, const char* name), void* ctx);
 int nzbget_rs_option_restricted(const char* name, int signedChar);
 
-typedef struct NzbgetRsStr
-{
-	const char* data;
-	size_t len;
-} NzbgetRsStr;
-
 // WebDownloader's HTTP decisions (rust/src/webdownload.rs). check_response:
 // result 0 running, 1 running a redirect, 2 connect error, 3 not found,
 // 4 failed; setStatus/httpStatus the status code read; warn 0 none,
@@ -512,25 +506,6 @@ typedef struct NzbgetRsJsonLimits
 	size_t arraySize;
 	size_t objectSize;
 } NzbgetRsJsonLimits;
-
-// TestServerXmlCommand's JSON body (rust/src/rpcparams.rs with the parser
-// above): 1 when parsed, after parsed got the parameters (strings borrowed
-// for the call only, whole - NULs included - and not NUL-terminated); 0 not
-// JSON ("Invalid JSON"); -1 "Invalid parameters". NULL request is empty;
-// NULL parsed is not called. parsed must not throw; panics abort.
-typedef struct NzbgetRsTestServerParams
-{
-	NzbgetRsStr host;
-	NzbgetRsStr username;
-	NzbgetRsStr password;
-	NzbgetRsStr cipher;
-	int port;
-	int timeout;
-	int certVerifLevel;
-	int encryption;
-} NzbgetRsTestServerParams;
-int nzbget_rs_test_server_params(const char* request, NzbgetRsJsonLimits limits, void* ctx,
-	void (*parsed)(void* ctx, const NzbgetRsTestServerParams* params));
 
 // ParRenamer::Execute, ParRenamer::ListParredFiles, and DirectParLoader::LoadParFile
 // (rust/src/parrenamer.rs).
@@ -1929,11 +1904,6 @@ const char* nzbget_rs_ntw_web_proc_default_resource(const char* url);
 double nzbget_rs_ntw_xmlrpc_mib_per_sec(uint64_t bytes, double ms);
 int nzbget_rs_ntw_xmlrpc_check_user_access_denied(
     int user_access, int ua_add, int ua_restricted, const char* method_name);
-int nzbget_rs_ntw_xmlrpc_parse_dupe_mode(
-    const char* dupe_mode_str, int dm_score, int dm_all, int dm_force);
-int nzbget_rs_ntw_xmlrpc_is_http_url(const char* content);
-int nzbget_rs_ntw_xmlrpc_parse_category_source(
-    const char* cat_src_str, int cs_nzb_file, int cs_feed_file, int cs_auto);
 int nzbget_rs_ntw_xmlrpc_validate_reset_counter(const char* counter);
 
 int nzbget_rs_queue_coord_should_skip_health_check(
@@ -3302,13 +3272,10 @@ int nzbget_rs_dqh_xmlrpc_calc_schedule_resume_time(
 void nzbget_rs_dqh_xmlrpc_accum_queue_job_counts(
     int has_post_info, int kind, int nk_url,
     int* inout_post_count, int* inout_url_count);
-int nzbget_rs_dqh_xmlrpc_is_fleet_member_limit_reached(
-    size_t current_count, int max_members);
 int nzbget_rs_dqh_xmlrpc_classify_history_entry_kind(
     int kind, int hk_nzb, int hk_url, int hk_dup);
 int nzbget_rs_dqh_xmlrpc_matches_edit_server_id(int server_id, int target_id);
 int nzbget_rs_dqh_xmlrpc_matches_reset_server_volume(int index, int server_id);
-int nzbget_rs_dqh_xmlrpc_is_valid_cert_verif_level(int level, int count);
 const char* nzbget_rs_dqh_xmlrpc_select_test_server_err_text(
     int ok, const char* err_text);
 int nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
@@ -3470,8 +3437,6 @@ int nzbget_rs_dqh_xmlrpc_classify_append_result_mode(
     int v13, int nzb_id);
 int nzbget_rs_dqh_xmlrpc_should_emit_json_array_comma(
     int is_json, int index);
-int nzbget_rs_dqh_xmlrpc_should_parse_json_post_test_server(
-    int is_json, int has_request, int http_method, int hm_post);
 
 typedef struct NzbgetRsParDamageQueuedFile {
     const char* filename;
@@ -4779,6 +4744,79 @@ int nzbget_rs_xmlrpc_parse_test_disk_speed(
     char** request, int is_get, int is_json,
     NzbgetRsBuf* out_dir_path, size_t* out_buffer_bytes, uint64_t* out_max_file_bytes,
     int* out_timeout_sec, const char** out_err_msg);
+
+int nzbget_rs_xmlrpc_parse_append_fleet(
+    char** request, int is_get, int is_json, int max_members,
+    void* ctx,
+    void (*header_cb)(void* ctx, const char* dupe_key, const char* category, int priority, int timeout_sec),
+    void (*member_cb)(void* ctx, const char* name, int is_url, const char* data, size_t data_len),
+    NzbgetRsBuf* out_err);
+
+typedef struct NzbgetRsParsedDownload
+{
+    int v13;
+    NzbgetRsBuf filename;
+    NzbgetRsBuf category;
+    int priority;
+    int add_top;
+    int is_url;
+    NzbgetRsBuf content;
+    int add_paused;
+    int has_dupe_key;
+    NzbgetRsBuf dupe_key;
+    int dupe_score;
+    int dupe_mode;
+    int auto_category;
+} NzbgetRsParsedDownload;
+
+int nzbget_rs_xmlrpc_parse_download(
+    char** request, int is_get, int is_json,
+    int dm_score, int dm_all, int dm_force,
+    NzbgetRsParsedDownload* out_dl,
+    void* param_ctx, void (*add_param_cb)(void* ctx, const char* name, const char* val),
+    const char** out_err_msg);
+
+typedef struct NzbgetRsParsedViewFeed
+{
+    int id;
+    int include_non_matching;
+    NzbgetRsBuf name;
+    NzbgetRsBuf url;
+    NzbgetRsBuf filter;
+    int backlog;
+    int pause_nzb;
+    NzbgetRsBuf category;
+    int category_source;
+    int priority;
+    int interval;
+    int has_feed_filter;
+    NzbgetRsBuf feed_filter;
+    int cache_time_sec;
+    NzbgetRsBuf cache_id;
+} NzbgetRsParsedViewFeed;
+
+int nzbget_rs_xmlrpc_parse_view_feed(
+    char** request, int is_get, int is_json, int preview,
+    int cs_nzb_file, int cs_feed_file, int cs_auto,
+    NzbgetRsParsedViewFeed* out_vf);
+
+typedef struct NzbgetRsParsedTestServer
+{
+    NzbgetRsBuf host;
+    NzbgetRsBuf username;
+    NzbgetRsBuf password;
+    NzbgetRsBuf cipher;
+    int port;
+    int timeout;
+    int cert_verif_level;
+    int encryption;
+} NzbgetRsParsedTestServer;
+
+int nzbget_rs_xmlrpc_parse_test_server(
+    const char* request_body, char** request_ptr,
+    int is_get, int is_json, int http_method, int hm_post, int cert_verif_count,
+    NzbgetRsJsonLimits limits,
+    NzbgetRsParsedTestServer* out_ts, const char** out_err_msg);
 
 int nzbget_rs_unpack_can_extract_with_zipfast(const char* archive_path);
 int nzbget_rs_unpack_extract_with_zipfast(

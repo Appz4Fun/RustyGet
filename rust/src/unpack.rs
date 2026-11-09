@@ -2921,18 +2921,6 @@ pub fn eval_unpack_completed_failure(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_is_space_error(
-    is_error_kind: c_int,
-    text: *const c_char,
-) -> c_int {
-    if text.is_null() {
-        return 0;
-    }
-    let bytes = unsafe { CStr::from_ptr(text).to_bytes() };
-    c_int::from(is_unpack_space_error(is_error_kind != 0, bytes))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_unpack_controller_try_password_file(
     path: *const c_char,
     ctx: *mut std::ffi::c_void,
@@ -2957,56 +2945,6 @@ pub unsafe extern "C" fn nzbget_rs_unpack_controller_try_password_file(
         &mut should_continue,
         &mut try_pw,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_controller_eval_completed_failure(
-    parcheck_enabled: c_int,
-    unpack_ok: c_int,
-    par_status: c_int,
-    ps_skipped: c_int,
-    par_full: c_int,
-    unpack_start_error: c_int,
-    unpack_space_error: c_int,
-    unpack_password_error: c_int,
-    unpack_decrypt_error: c_int,
-    terminated: c_int,
-    stopped: c_int,
-    auto_terminated: c_int,
-    has_par_files: c_int,
-    has_password: c_int,
-    has_unpack_pass_file: c_int,
-    pass_list_tried: c_int,
-    out_force_repair: *mut c_int,
-    out_unpack_status: *mut c_int,
-) -> c_int {
-    let (req_par, force_repair, status) = eval_unpack_completed_failure(
-        parcheck_enabled != 0,
-        unpack_ok != 0,
-        par_status,
-        ps_skipped,
-        par_full != 0,
-        unpack_start_error != 0,
-        unpack_space_error != 0,
-        unpack_password_error != 0,
-        unpack_decrypt_error != 0,
-        terminated != 0,
-        stopped != 0,
-        auto_terminated != 0,
-        has_par_files != 0,
-        has_password != 0,
-        has_unpack_pass_file != 0,
-        pass_list_tried != 0,
-    );
-    unsafe {
-        if !out_force_repair.is_null() {
-            *out_force_repair = c_int::from(force_repair);
-        }
-        if !out_unpack_status.is_null() {
-            *out_unpack_status = status;
-        }
-    }
-    c_int::from(req_par)
 }
 
 #[cfg(test)]

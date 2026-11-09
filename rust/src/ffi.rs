@@ -3132,27 +3132,6 @@ pub unsafe extern "C" fn nzbget_rs_url_dnzb_header(line: *const c_char, start: *
     }
 }
 
-/// UrlCoordinator::UrlCompleted's statuses: reads and writes `url_status`
-/// and `delete_status`, writes `retry`.
-///
-/// # Safety
-/// The pointers are null (not read or written) or valid.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_url_completed(downloader: c_int, deleting: c_int, url_status: *mut c_int,
-    delete_status: *mut c_int, retry: *mut c_int) {
-    let read = |p: *mut c_int| if p.is_null() { 0 } else { *p };
-    let (url, delete, again) = crate::urlcoord::completed(downloader, deleting != 0, read(url_status), read(delete_status));
-    if !url_status.is_null() {
-        *url_status = url;
-    }
-    if !delete_status.is_null() {
-        *delete_status = delete;
-    }
-    if !retry.is_null() {
-        *retry = again as c_int;
-    }
-}
-
 /// A response of `total` bytes (and a NUL after them for the C string
 /// functions) written by `fill`, which gets room for them and returns the
 /// bytes it wrote; an empty buffer for no bytes or more than an int's range.
@@ -9651,118 +9630,6 @@ pub unsafe extern "C" fn nzbget_rs_dsp_parse_log_line(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_scanner_next_pass(
-    nzb_dir_interval: c_int,
-    nzb_dir_file_age: c_int,
-    has_scan_script: c_int,
-    current_pass: c_int,
-    out_next_interval: *mut c_int,
-    out_next_pass: *mut c_int,
-) {
-    let (next_int, next_pass) = crate::scanner::next_pass(
-        nzb_dir_interval,
-        nzb_dir_file_age,
-        has_scan_script != 0,
-        current_pass,
-    );
-    if !out_next_interval.is_null() {
-        *out_next_interval = next_int;
-    }
-    if !out_next_pass.is_null() {
-        *out_next_pass = next_pass;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_can_process_extension(
-    full_filename: *const c_char,
-) -> c_int {
-    if crate::scanner::can_process_extension(crate::diskstate_format::cstr_to_bytes(full_filename)) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_eval_file_age(
-    old_size: i64,
-    new_size: i64,
-    last_change: i64,
-    current_time: i64,
-    file_age: c_int,
-    out_size: *mut i64,
-    out_last_change: *mut i64,
-) -> c_int {
-    let (can_proc, sz, lc) = crate::scanner::eval_file_age(
-        old_size,
-        new_size,
-        last_change,
-        current_time,
-        file_age,
-    );
-    if !out_size.is_null() {
-        *out_size = sz;
-    }
-    if !out_last_change.is_null() {
-        *out_last_change = lc;
-    }
-    if can_proc {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_should_drop_scan_file(
-    last_change: i64,
-    current_time: i64,
-    nzb_dir_interval: c_int,
-    nzb_dir_file_age: c_int,
-) -> c_int {
-    if crate::scanner::should_drop_scan_file(
-        last_change,
-        current_time,
-        nzb_dir_interval,
-        nzb_dir_file_age,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_classify_missed_articles(
-    missed_articles: c_int,
-    total_articles: c_int,
-    is_cut_short: c_int,
-) -> c_int {
-    crate::scanner::classify_missed_articles(
-        missed_articles,
-        total_articles,
-        is_cut_short != 0,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_is_nzb_xml_prefix(
-    buf: *const u8,
-    len: usize,
-) -> c_int {
-    if buf.is_null() || len == 0 {
-        return 0;
-    }
-    let slice = std::slice::from_raw_parts(buf, len);
-    if crate::scanner::is_nzb_xml_prefix(slice) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dsp_normalize_external_nzb_name(
     nzb_name: *const c_char,
     valid_name: *const c_char,
@@ -12999,78 +12866,6 @@ pub extern "C" fn nzbget_rs_statmeter_calc_resumed_download_start(
 // ============================================================================
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_scheduler_task_less(
-    hours1: c_int,
-    minutes1: c_int,
-    hours2: c_int,
-    minutes2: c_int,
-) -> c_int {
-    i32::from(crate::scheduler::scheduler_task_less(
-        hours1, minutes1, hours2, minutes2,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_scheduler_should_execute_process(
-    execute_process: c_int,
-    task_hours: c_int,
-    startup_task: c_int,
-) -> c_int {
-    i32::from(crate::scheduler::scheduler_should_execute_process(
-        execute_process != 0,
-        task_hours,
-        startup_task,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_scheduler_calc_speed_limit_bytes(kb_per_sec: c_int) -> c_int {
-    crate::scheduler::scheduler_calc_speed_limit_bytes(kb_per_sec)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sfw_scheduler_matches_server_ref(
-    id: c_int,
-    server_id: c_int,
-    server_name: *const c_char,
-    server_ref: *const c_char,
-) -> c_int {
-    i32::from(crate::scheduler::scheduler_matches_server_ref(
-        id,
-        server_id,
-        server_name,
-        server_ref,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sfw_scheduler_matches_feed_ref(
-    id: c_int,
-    feed_id: c_int,
-    feed_name: *const c_char,
-    feed_ref: *const c_char,
-    out_target_id: *mut c_int,
-) -> c_int {
-    let (matched, target_id) =
-        crate::scheduler::scheduler_matches_feed_ref(id, feed_id, feed_name, feed_ref);
-    if !out_target_id.is_null() {
-        *out_target_id = target_id;
-    }
-    i32::from(matched)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_scheduler_should_autoresume(
-    resume_time: i64,
-    current_time: i64,
-) -> c_int {
-    i32::from(crate::scheduler::scheduler_should_autoresume(
-        resume_time,
-        current_time,
-    ))
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_sfw_frontend_resolve_log_id_from(
     needed_log_entries: u32,
     needed_log_first_id: u32,
@@ -15749,25 +15544,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_scheduler_bytes_to_kb(bytes: i32) -> i32 {
-    crate::scheduler::scheduler_bytes_to_kb(bytes)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_scheduler_pause_action_str(
-    paused: i32,
-) -> *const c_char {
-    crate::scheduler::scheduler_pause_action_str(paused != 0).as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_scheduler_server_action_str(
-    active: i32,
-) -> *const c_char {
-    crate::scheduler::scheduler_server_action_str(active != 0).as_ptr() as *const c_char
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tpr_article_writer_format_dest_file_path(
     dest_dir: *const c_char,
     sep: c_char,
@@ -16760,11 +16536,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tokenizer_next(
             std::ptr::null_mut()
         }
     }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_scheduler_command_name(command: c_int) -> *const c_char {
-    crate::scheduler::scheduler_command_name(command).as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -19246,67 +19017,6 @@ pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_get_file(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_url_coord_select_next_url(
-    kinds: *const c_int,
-    url_statuses: *const c_int,
-    delete_statuses: *const c_int,
-    priorities: *const c_int,
-    count: usize,
-    nk_url: c_int,
-    ls_none: c_int,
-    ds_none: c_int,
-) -> c_int {
-    if count == 0
-        || kinds.is_null()
-        || url_statuses.is_null()
-        || delete_statuses.is_null()
-        || priorities.is_null()
-    {
-        return -1;
-    }
-    crate::urlcoord::select_next_url(
-        std::slice::from_raw_parts(kinds, count),
-        std::slice::from_raw_parts(url_statuses, count),
-        std::slice::from_raw_parts(delete_statuses, count),
-        std::slice::from_raw_parts(priorities, count),
-        nk_url,
-        ls_none,
-        ds_none,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_url_coord_is_hanging_download(
-    now: i64,
-    last_update_time: i64,
-    url_timeout: c_int,
-    status: c_int,
-    ad_running: c_int,
-) -> c_int {
-    c_int::from(crate::urlcoord::is_hanging_url_download(
-        now,
-        last_update_time,
-        url_timeout,
-        status,
-        ad_running,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_url_coord_format_temp_path(
-    temp_dir: *const c_char,
-    sep: c_char,
-    id: i32,
-) -> RsBuf {
-    let td = if temp_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(temp_dir).to_bytes()
-    };
-    into_buf(crate::urlcoord::format_temp_url_path(td, sep as u8, id))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_direct_renamer_eval_article(
     article_size: c_int,
     article_count: usize,
@@ -20059,25 +19769,6 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_accumulate_history_dupe_status(
 // ============================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_use_inter_dir(
-    dest_dir: *const c_char,
-    inter_dir: *const c_char,
-    sep: c_char,
-) -> c_int {
-    let d = if dest_dir.is_null() {
-        b""
-    } else {
-        CStr::from_ptr(dest_dir).to_bytes()
-    };
-    let i = if inter_dir.is_null() {
-        b""
-    } else {
-        CStr::from_ptr(inter_dir).to_bytes()
-    };
-    crate::unpack::use_inter_dir(d, i, sep as u8) as c_int
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_unpack_has_completed_archive_ext(
     filename: *const c_char,
 ) -> c_int {
@@ -20087,55 +19778,6 @@ pub unsafe extern "C" fn nzbget_rs_unpack_has_completed_archive_ext(
         CStr::from_ptr(filename).to_bytes()
     };
     crate::unpack::has_completed_archive_ext(f) as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_scanner_should_skip_item(
-    filename: *const c_char,
-    processed_dir: *const c_char,
-    broken_dir: *const c_char,
-) -> c_int {
-    crate::scanner::should_skip_item(input(filename), input(processed_dir), input(broken_dir))
-        as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_scanner_classify_incoming_extension(
-    ran_scan_script: c_int,
-    exists: c_int,
-    extension: *const c_char,
-    out_rename_to_processed: *mut c_int,
-) -> c_int {
-    let (rename, action) = crate::scanner::classify_incoming_extension(
-        ran_scan_script != 0,
-        exists != 0,
-        input(extension),
-    );
-    if !out_rename_to_processed.is_null() {
-        *out_rename_to_processed = rename as c_int;
-    }
-    action
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_scanner_resolve_archive_add_status(
-    has_url_info: c_int,
-    statuses: *const c_int,
-    len: usize,
-    as_success: c_int,
-    as_skipped: c_int,
-) -> c_int {
-    let slice = if statuses.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(statuses, len)
-    };
-    crate::scanner::resolve_archive_add_status(has_url_info != 0, slice, as_success, as_skipped)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_scanner_is_absolute_nzb_name(nzb_name: *const c_char) -> c_int {
-    crate::scanner::is_absolute_nzb_name(input(nzb_name)) as c_int
 }
 
 #[no_mangle]
@@ -25678,60 +25320,6 @@ pub unsafe extern "C" fn nzbget_rs_fs_get_real_path(
 #[no_mangle]
 pub extern "C" fn nzbget_rs_fs_get_current_directory() -> RsBuf {
     into_buf(crate::fsops::get_current_directory())
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_feed_is_download_hanging(
-    cur_time: i64,
-    last_update_time: i64,
-    url_timeout: c_int,
-    status: c_int,
-    running_status: c_int,
-) -> c_int {
-    c_int::from(crate::feed::is_feed_download_hanging(
-        cur_time,
-        last_update_time,
-        url_timeout,
-        status,
-        running_status,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_is_url_and_filter_updated(
-    existing_url: *const c_char,
-    preview_url: *const c_char,
-    existing_filter: *const c_char,
-    preview_filter: *const c_char,
-    existing_last_update: i64,
-) -> c_int {
-    let e_url = if existing_url.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(existing_url).to_bytes()
-    };
-    let p_url = if preview_url.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(preview_url).to_bytes()
-    };
-    let e_filt = if existing_filter.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(existing_filter).to_bytes()
-    };
-    let p_filt = if preview_filter.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(preview_filter).to_bytes()
-    };
-    c_int::from(crate::feed::is_feed_url_and_filter_updated(
-        e_url,
-        p_url,
-        e_filt,
-        p_filt,
-        existing_last_update,
-    ))
 }
 
 

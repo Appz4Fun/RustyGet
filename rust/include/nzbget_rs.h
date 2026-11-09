@@ -1061,50 +1061,6 @@ int nzbget_rs_dupecoord_select_dupe_backup(
     const NzbgetRsDupeQueueCandidate* queue, size_t queue_count,
     void* ctx, int (*file_exists_cb)(void* ctx, size_t history_index));
 
-size_t nzbget_rs_repair_select_more_pars(
-    const int* sorted_block_counts, size_t count, int block_needed,
-    size_t* out_indices, size_t cap, int* out_remaining_needed);
-ptrdiff_t nzbget_rs_repair_pick_twin_volume(
-    const int* sorted_volume_blocks, size_t count, int left);
-int nzbget_rs_repair_check_par_time_limit(
-    int par_time_limit_min, int is_repairing_stage, int64_t elapsed_sec,
-    int stage_progress, int* out_estimated_sec);
-
-void nzbget_rs_parchecker_calc_repairer_resources(
-    int par_threads, int cpu_cores, int has_memory_monitor, int monitor_mem_mb,
-    int configured_par_buffer_mb, int* out_threads, int* out_mem);
-const char* nzbget_rs_parchecker_cmdline_err_str(int res);
-const char* nzbget_rs_parchecker_stage_message(int stage);
-int nzbget_rs_parchecker_eval_post_verify_action(
-    int res, int e_success, int e_repair_possible, int has_damaged_files,
-    int par_repair, int ps_failed, int ps_repair_not_needed, int ps_repair_possible,
-    int* out_action_code);
-int nzbget_rs_parchecker_eval_cancel_or_fail_outcome(
-    int is_stopped, int stage, int pt_repairing, int cur_status,
-    int ps_failed, int ps_repair_possible, int err_msg_empty, int res,
-    int* out_outcome_kind, int* out_use_cmd_err);
-NzbgetRsBuf nzbget_rs_parchecker_format_not_enough_blocks_errmsg(
-    int32_t missing_blocks, int32_t block_found);
-NzbgetRsBuf nzbget_rs_parchecker_format_twin_err_msg(
-    int res, int e_repair_not_possible, const char* own_err_msg);
-int nzbget_rs_parchecker_calc_dupe_blocks_delta(
-    int prev_used_blocks, uint32_t was_blocks_missing2,
-    uint32_t blocks_missing2, uint32_t was_blocks_missing_total,
-    uint32_t* out_total_found);
-int nzbget_rs_parchecker_eval_extra_file_step(
-    uint32_t was_files_missing, uint32_t now_files_missing,
-    uint32_t was_blocks_missing, uint32_t now_blocks_missing,
-    int external_dir, int prev_files_added, int only_missing,
-    int* out_file_added, int* out_block_added,
-    uint32_t* out_blocks_delta, int* out_register_parred, int* out_abort_reason);
-int nzbget_rs_parchecker_calc_stage_progress(
-    int stage, int file_progress, int processed_count, int files_to_repair,
-    int source_files_count, int extra_files, int quick_files);
-int nzbget_rs_parchecker_eval_signal_done(
-    int stage, int pt_verifying_sources, int available, int total,
-    int verifying_extra_files, int ignore, int prev_has_damaged_files,
-    int* out_has_damaged_files, int* out_bad_blocks);
-
 typedef struct NzbgetRsParRepairer NzbgetRsParRepairer;
 
 enum NzbgetRsParResult {
@@ -1290,29 +1246,6 @@ typedef struct NzbgetRsArticleLoadEval {
     int32_t completed_articles;
 } NzbgetRsArticleLoadEval;
 
-typedef struct NzbgetRsPostJobCandidate {
-    uint8_t has_post_info;
-    uint8_t working;
-    uint8_t has_queue_script_job;
-    uint8_t direct_unpack_running;
-    uint8_t has_live_repair_thread;
-    int32_t priority;
-    uint8_t force_priority;
-    uint8_t need_par_check;
-    uint8_t need_unpack;
-    uint8_t in_active_jobs;
-    uint8_t download_completed;
-} NzbgetRsPostJobCandidate;
-
-typedef struct NzbgetRsPostStageDecision {
-    int32_t unpack;
-    int32_t skip_unpack_due_to_par;
-    int32_t cleanup;
-    int32_t move_inter;
-    int32_t post_download_renaming;
-    int32_t post_unpack_renaming;
-} NzbgetRsPostStageDecision;
-
 int nzbget_rs_dsp_parse_format_version(const char* format_signature);
 void nzbget_rs_dsp_sanitize_line_breaks(char* buf, size_t len);
 int nzbget_rs_dsp_parse_ids_file(const char* text, int* out_nzb_id, int* out_file_id);
@@ -1350,68 +1283,6 @@ int nzbget_rs_dsp_match_servers(
     int* out_server_state_ids);
 int nzbget_rs_dsp_parse_log_line(
     const char* line, int* out_time, int* out_kind, size_t* out_text_offset);
-
-void nzbget_rs_prepost_sanitise_post_stage(
-    int stage, int pt_executing_script, int pt_finished, int pt_queued, int dest_dir_exists,
-    int unpack_tried, int par_status, int ps_skipped, int* out_stage, int* out_request_par_check);
-int nzbget_rs_prepost_classify_file_event(
-    int is_file_completed, int is_file_deleted, int dupe_deleted, int delete_status,
-    int ds_none, int ds_health, int has_post_info, int download_completed_ignore_paused,
-    int download_completed_all);
-int nzbget_rs_prepost_should_complete_after_direct_rename(
-    int is_stopped, int direct_rename_status, int ts_success, int has_post_info,
-    int delete_status, int ds_none, int completed_not_empty, int download_completed,
-    int raw_article, int skip_write, int skip_disk_write);
-int nzbget_rs_prepost_classify_nzb_downloaded_entry(
-    int skip_script_processing, int skip_disk_write, int opt_skip_write,
-    int delete_status, int ds_health, int ds_bad, int has_post_info,
-    int opt_raw_article, int par_status, int ps_none, int par_check_opt,
-    int pc_always, int pc_force,
-    int* out_enqueue_deleted_script, int* out_set_par_skipped);
-void nzbget_rs_prepost_eval_nzb_completed(
-    int dupe_hint, int dh_redownload_auto, int keep_history, int avoid_history, int dupe_check,
-    int dupe_mode, int dm_force, int fails_over, int delete_status, int ds_none, int ds_health,
-    int ds_bad, int ds_scan, int ds_copy, int* out_add_to_history, int* out_call_dupe_completed,
-    int* out_enqueue_deleted_script, int* out_need_save);
-int nzbget_rs_prepost_classify_delete_cleanup_mode(
-    int cleanup_disk, int delete_status, int ds_dupe, int parking,
-    int skip_disk_write, int opt_skip_write);
-int nzbget_rs_prepost_classify_request_par_action(
-    int request_par_check, int par_status, int ps_skipped, int force_repair,
-    int par_full, int par_check_opt, int pc_manual, int cur_force_par_full,
-    int file_list_empty, int* out_new_force_par_full);
-int nzbget_rs_prepost_eval_cleanup_job_state(
-    int working, int has_running_thread, int stage, int pt_finished, int deleted,
-    int64_t start_time, int64_t cur_time, int prev_post_total_sec,
-    int* out_update_total_sec, int* out_is_completed, int* out_new_total_sec);
-int nzbget_rs_prepost_can_run_more_jobs(
-    const int* job_stages, size_t job_count, int pt_loading_pars, int pt_verifying_repaired,
-    int pt_repairing, int post_strategy, int* out_allow_par);
-int nzbget_rs_prepost_pick_next_post_job(
-    const NzbgetRsPostJobCandidate* candidates, size_t count, int allow_par,
-    int has_active_unpack, int pause_post_process);
-int nzbget_rs_prepost_classify_skipped_par_health(
-    int par_status, int ps_skipped, int par_scan_opt, int ps_dupe,
-    int health, int critical_health, int64_t failed_size, int64_t par_failed_size);
-int nzbget_rs_prepost_eval_want_unpack_and_rar_rename(
-    int has_unpack_param, const char* unpack_param_val,
-    int unpack_status, int us_none, int delete_status, int ds_none,
-    int rar_rename_status, int rs_none, int opt_rar_rename,
-    int* out_want_unpack, int* out_unpack);
-void nzbget_rs_prepost_eval_post_stages(
-    int want_unpack, int unpack_status, int delete_status, int par_status, int cleanup_status,
-    int has_ext_cleanup_disk, int health, int move_status,
-    const char* dest_dir, const char* inter_dir, char sep,
-    int direct_unpack_status, int opt_post_download_rename, int post_download_renaming_status,
-    int has_dest_dir, int has_name, int opt_rename_after_unpack, int post_unpack_renaming_status,
-    NzbgetRsPostStageDecision* out_decision);
-int nzbget_rs_prepost_calc_post_pause_state(
-    const int* job_stages, size_t job_count, int par_pause_queue, int unpack_pause_queue,
-    int script_pause_queue);
-int nzbget_rs_prepost_classify_file_downloaded_direct_unpack(
-    int opt_direct_unpack, int opt_raw_article, int opt_skip_write,
-    int skip_disk_write, int direct_unpack_status, int ns_none, int ns_running,
-    int direct_rename_status, int ts_running, int has_unpack_thread);
 
 void nzbget_rs_dsp_scanner_next_pass(
     int nzb_dir_interval, int nzb_dir_file_age, int has_scan_script, int current_pass,
@@ -3290,9 +3161,6 @@ void nzbget_rs_move_controller_remove_stale_hardlinks(
     void* ctx,
     void (*log_cb)(void* ctx, int kind, const char* msg));
 
-int nzbget_rs_move_controller_decide_outcome(
-    int ok, int is_stopped, int* out_move_status);
-
 int nzbget_rs_cleanup_controller_run(
     const char* dest_dir,
     const char* final_dir,
@@ -3300,17 +3168,6 @@ int nzbget_rs_cleanup_controller_run(
     void* ctx,
     void (*log_cb)(void* ctx, int kind, const char* msg),
     int* out_cleanup_status);
-
-const char* nzbget_rs_rename_controller_archive_kind_prefix(int kind, int jk_rar);
-int nzbget_rs_rename_controller_classify_run_outcome(int is_stopped, int renamed_count);
-int nzbget_rs_rename_controller_eval_par_config(
-    int unpack_status, int us_success, int us_none, int final_dir_empty,
-    int* out_detect_missing);
-int nzbget_rs_rename_controller_complete_action(
-    int kind, int renamed_count, int has_damaged_pars, int remaining_par_count,
-    int has_missed_files, int par_status,
-    int* out_request_extra_pars, int* out_request_par_check);
-int nzbget_rs_rename_controller_should_reset_par_status(int64_t remaining_size);
 
 int nzbget_rs_post_renamer_run(
     int is_post_unpack,
@@ -3925,50 +3782,6 @@ void nzbget_rs_history_coord_reset_articles_batch(
     size_t articles_len);
 int nzbget_rs_diskstate_save_id_floor(
     const char* queue_dir, char sep, int nzb_id, int file_id);
-
-int nzbget_rs_repair_filename_eq_ignore_case(const char* a, const char* b);
-int nzbget_rs_repair_should_load_partial_segments(
-    int status, int cf_partial, int id, int reprocess);
-int nzbget_rs_repair_classify_file_crc_status(
-    int cf_status, int reprocess, int has_segments,
-    int cf_success, int cf_failure, int cf_partial,
-    int fs_success, int fs_failure, int fs_partial, int fs_unknown);
-NzbgetRsBuf nzbget_rs_repair_build_twin_filename(
-    const char* entry_filename, size_t twin_files_count);
-int nzbget_rs_repair_should_consider_twin_candidate(
-    int is_self, int kind, int nk_nzb, int same_name_or_key,
-    const char* queued_filename, int has_print, int own_print_matches);
-ptrdiff_t nzbget_rs_repair_select_best_twin_par2_index(
-    const uint8_t* is_par2_ptr, const int64_t* sizes_ptr, size_t len, int64_t max_index_size);
-const char* nzbget_rs_repair_twin_par2_reject_reason(int cmp);
-int nzbget_rs_repair_should_skip_twin_volume_entry(
-    int is_par2, const char* entry_filename, const char* twin_index);
-int nzbget_rs_repair_estimate_twin_vol_blocks(int64_t entry_size, uint64_t twin_block_size);
-int nzbget_rs_repair_sum_and_check_twin_blocks(
-    const int* vol_blocks_ptr, size_t vol_blocks_len, int block_needed, int* out_available);
-int nzbget_rs_repair_should_use_par_quick(
-    int par_quick_opt, int force_par_full, int dupe_repaired);
-void nzbget_rs_repair_complete_par_check(
-    int checker_status, int cur_par_status,
-    int ps_repaired, int ps_repair_not_needed, int ps_repair_possible,
-    int nzb_ps_skipped, int nzb_ps_success, int nzb_ps_repair_possible, int nzb_ps_failure,
-    int cur_dl_sec, int start_dl_sec, int64_t cur_time, int64_t par_time,
-    int* out_par_status, int* out_set_par_repaired, int* out_par_repaired_val,
-    int* out_wait_time, int* out_par_sec);
-int nzbget_rs_repair_eval_find_pars_candidate(
-    int same_collection, int deleted, int strict_par_name,
-    const char* filename, const char* main_base,
-    int parsed_ok, int parsed_blocks, int64_t file_size, int64_t block_size,
-    int* out_blocks);
-int nzbget_rs_repair_eval_par_progress_update(
-    int cur_post_stage, int checker_stage,
-    int pt_loading_pars, int pt_verifying_sources, int pt_repairing, int pt_verifying_repaired,
-    int64_t current_time, int64_t repair_time, int cur_repair_sec,
-    int* out_new_post_stage, int* out_set_repair_time, int* out_new_repair_sec);
-void nzbget_rs_repair_calc_paused_timestamps(
-    int64_t cur_time, int64_t wait_time,
-    int64_t stage_time, int64_t start_time, int64_t par_time, int64_t repair_time,
-    int64_t* out_stage, int64_t* out_start, int64_t* out_par, int64_t* out_repair);
 
 ptrdiff_t nzbget_rs_twin_select_min_par2_index(
     const uint8_t* is_par2_ptr, const int64_t* sizes_ptr, size_t len, int64_t max_index_size);
@@ -4790,10 +4603,6 @@ void nzbget_rs_term_plot_text(
 void nzbget_rs_term_refresh(int row, int col);
 int nzbget_rs_term_read_key(void);
 
-int nzbget_rs_parchecker_is_processed_file(
-    const char* filename,
-    const char* const* processed_files,
-    size_t processed_len);
 void nzbget_rs_par_repairer_delete_leftovers(
     const NzbgetRsParRepairer* handle,
     void* ctx,

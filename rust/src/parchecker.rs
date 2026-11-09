@@ -1768,20 +1768,6 @@ unsafe fn collect_cstr_slice<'a>(ptrs: *const *const c_char, len: usize) -> Vec<
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_parchecker_is_processed_file(
-    filename: *const c_char,
-    processed_files: *const *const c_char,
-    processed_len: usize,
-) -> c_int {
-    if filename.is_null() {
-        return 0;
-    }
-    let fname = unsafe { std::ffi::CStr::from_ptr(filename).to_bytes() };
-    let processed = unsafe { collect_cstr_slice(processed_files, processed_len) };
-    c_int::from(is_processed_file(fname, &processed))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_par_repairer_delete_leftovers(
     handle: *const RustParRepairer,
     ctx: *mut c_void,

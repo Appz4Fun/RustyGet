@@ -27473,74 +27473,83 @@ private:
 
 		status = psFailed;
 
-		int postVerifyAction = 0;
-		status = (EStatus)nzbget_rs_parchecker_eval_post_verify_action(
-			res, NZBGET_RS_PAR_RESULT_SUCCESS, NZBGET_RS_PAR_RESULT_REPAIR_POSSIBLE,
-			m_hasDamagedFiles ? 1 : 0, g_Options->GetParRepair() ? 1 : 0,
-			(int)psFailed, (int)psRepairNotNeeded, (int)psRepairPossible,
-			&postVerifyAction);
-		if (postVerifyAction == 0)
+		if (res == NZBGET_RS_PAR_RESULT_SUCCESS || !m_hasDamagedFiles)
 		{
 			PrintMessage(Message::mkInfo, "Repair not needed for %s", m_infoName.c_str());
+			status = psRepairNotNeeded;
 		}
-		else if (postVerifyAction == 1)
+		else if (res == NZBGET_RS_PAR_RESULT_REPAIR_POSSIBLE)
 		{
-			PrintMessage(Message::mkInfo, "Repairing %s", m_infoName.c_str());
-
-			m_progressLabel = std::string("Repairing ") + m_infoName;
-			m_fileProgress = 0;
-			m_stageProgress = 0;
-			m_processedCount = 0;
-			m_stage = ptRepairing;
-			m_filesToRepair = static_cast<int>(nzbget_rs_par_repairer_damaged_file_count(m_repairer) +
-				nzbget_rs_par_repairer_missing_file_count(m_repairer));
-			UpdateProgress();
-
-			res = ProcessRepairer(true);
-			if (res == NZBGET_RS_PAR_RESULT_SUCCESS)
+			status = psRepairPossible;
+			if (g_Options->GetParRepair())
 			{
-				PrintMessage(Message::mkInfo, "Successfully repaired %s", m_infoName.c_str());
-				status = psRepaired;
-				StatDupeSources(&m_dupeSources);
-				nzbget_rs_par_repairer_delete_leftovers(
-					m_repairer,
-					this,
-					[](void* rawCtx, const char* msg)
-					{
-						static_cast<ParChecker*>(rawCtx)->PrintMessage(Message::mkInfo, "%s", msg);
-					});
+				PrintMessage(Message::mkInfo, "Repairing %s", m_infoName.c_str());
+
+				m_progressLabel = std::string("Repairing ") + m_infoName;
+				m_fileProgress = 0;
+				m_stageProgress = 0;
+				m_processedCount = 0;
+				m_stage = ptRepairing;
+				m_filesToRepair = static_cast<int>(nzbget_rs_par_repairer_damaged_file_count(m_repairer) +
+					nzbget_rs_par_repairer_missing_file_count(m_repairer));
+				UpdateProgress();
+
+				res = ProcessRepairer(true);
+				if (res == NZBGET_RS_PAR_RESULT_SUCCESS)
+				{
+					PrintMessage(Message::mkInfo, "Successfully repaired %s", m_infoName.c_str());
+					status = psRepaired;
+					StatDupeSources(&m_dupeSources);
+					nzbget_rs_par_repairer_delete_leftovers(
+						m_repairer,
+						this,
+						[](void* rawCtx, const char* msg)
+						{
+							static_cast<ParChecker*>(rawCtx)->PrintMessage(Message::mkInfo, "%s", msg);
+						});
+				}
+				else
+				{
+					status = psFailed;
+				}
 			}
 			else
 			{
+				PrintMessage(Message::mkInfo, "Repair possible for %s", m_infoName.c_str());
+			}
+		}
+
+		if (IsStopped())
+		{
+			if (m_stage >= ptRepairing)
+			{
+				PrintMessage(Message::mkWarning, "Repair cancelled for %s", m_infoName.c_str());
+				m_errMsg = "repair cancelled";
+				status = psRepairPossible;
+			}
+			else
+			{
+				PrintMessage(Message::mkWarning, "Par-check cancelled for %s", m_infoName.c_str());
+				m_errMsg = "par-check cancelled";
 				status = psFailed;
 			}
 		}
-		else if (postVerifyAction == 2)
+		else if (status == psFailed)
 		{
-			PrintMessage(Message::mkInfo, "Repair possible for %s", m_infoName.c_str());
-		}
-
-		int outcomeKind = 0;
-		int useCmdErr = 0;
-		status = (EStatus)nzbget_rs_parchecker_eval_cancel_or_fail_outcome(
-			IsStopped() ? 1 : 0, (int)m_stage, (int)ptRepairing, (int)status,
-			(int)psFailed, (int)psRepairPossible, m_errMsg.empty() ? 1 : 0, res,
-			&outcomeKind, &useCmdErr);
-		if (outcomeKind == 1)
-		{
-			PrintMessage(Message::mkWarning, "Repair cancelled for %s", m_infoName.c_str());
-			m_errMsg = "repair cancelled";
-		}
-		else if (outcomeKind == 2)
-		{
-			PrintMessage(Message::mkWarning, "Par-check cancelled for %s", m_infoName.c_str());
-			m_errMsg = "par-check cancelled";
-		}
-		else if (outcomeKind == 3)
-		{
-			if (useCmdErr != 0)
+			if (m_errMsg.empty() && res >= 0 && res <= 8)
 			{
-				m_errMsg = nzbget_rs_parchecker_cmdline_err_str(res);
+				static const char* const Par2CmdLineErrStr[] = {
+					"OK",
+					"data files are damaged and there is enough recovery data available to repair them",
+					"data files are damaged and there is insufficient recovery data available to be able to repair them",
+					"there was something wrong with the command line arguments",
+					"the PAR2 files did not contain sufficient information about the data files to be able to verify them",
+					"repair completed but the data files still appear to be damaged",
+					"an error occurred when accessing files",
+					"internal error occurred",
+					"out of memory"
+				};
+				m_errMsg = Par2CmdLineErrStr[res];
 			}
 			PrintMessage(Message::mkError, "Repair failed for %s: %s. Recovery files created by: %s",
 				m_infoName.c_str(), m_errMsg.c_str(), creator.empty() ? "unknown" : creator.c_str());
@@ -27578,11 +27587,13 @@ private:
 			{
 				std::lock_guard guard{ m_repairerMtx };
 				int configuredParBuffer = g_Options->GetParBuffer();
-				int monitorMem = g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveParBufferMB(configuredParBuffer) : 0;
-				nzbget_rs_parchecker_calc_repairer_resources(
-					g_Options->GetParThreads(), Util::NumberOfCpuCores(),
-					g_MemoryMonitor != nullptr ? 1 : 0, monitorMem, configuredParBuffer,
-					&m_threadsToUse, &m_memToUse);
+				int effectiveMem = g_MemoryMonitor
+					? g_MemoryMonitor->GetEffectiveParBufferMB(configuredParBuffer)
+					: (configuredParBuffer > 0 ? configuredParBuffer : 16);
+				int parThreads = g_Options->GetParThreads();
+				int rawThreads = parThreads > 0 ? parThreads : Util::NumberOfCpuCores();
+				m_threadsToUse = rawThreads > 0 ? rawThreads : 1;
+				m_memToUse = std::max(16, effectiveMem);
 				m_repairer = nzbget_rs_par_repairer_new(
 					m_destDir.c_str(),
 					m_threadsToUse,
@@ -27731,10 +27742,8 @@ private:
 
 				if (!requested && !hasMorePars)
 				{
-					NzbgetRsBuf errBuf = nzbget_rs_parchecker_format_not_enough_blocks_errmsg(
+					m_errMsg = *BString<1024>("not enough par-blocks, %i block(s) needed, but %i block(s) available",
 						missingblockcount, blockFound);
-					m_errMsg = errBuf.data ? std::string(errBuf.data, errBuf.len) : std::string();
-					nzbget_rs_free(errBuf);
 					break;
 				}
 
@@ -27832,12 +27841,11 @@ private:
 			}
 		}
 
-		NzbgetRsBuf twinErrBuf = nzbget_rs_parchecker_format_twin_err_msg(
-			res, NZBGET_RS_PAR_RESULT_REPAIR_NOT_POSSIBLE, ownErrMsg.c_str());
-		if (twinErrBuf.data)
+		if (res == NZBGET_RS_PAR_RESULT_REPAIR_NOT_POSSIBLE)
 		{
-			m_errMsg.assign(twinErrBuf.data, twinErrBuf.len);
-			nzbget_rs_free(twinErrBuf);
+			m_errMsg = ownErrMsg.empty()
+				? "not enough par-blocks, the twin's included"
+				: ownErrMsg + "; the twin's didn't do either";
 		}
 		return res;
 	}
@@ -27923,9 +27931,8 @@ private:
 						bool oneAdded = AddExtraFiles(false, true, dupeSource.m_directory.c_str());
 						added |= oneAdded;
 						uint32_t blocksMissing2 = nzbget_rs_par_repairer_missing_block_count(m_repairer);
-						dupeSource.m_usedBlocks = nzbget_rs_parchecker_calc_dupe_blocks_delta(
-							dupeSource.m_usedBlocks, wasBlocksMissing2, blocksMissing2,
-							wasBlocksMissing, &totalExtraBlocksFound);
+						dupeSource.m_usedBlocks += (int)(wasBlocksMissing2 - blocksMissing2);
+						totalExtraBlocksFound = blocksMissing2 < wasBlocksMissing ? wasBlocksMissing - blocksMissing2 : 0;
 					}
 				}
 
@@ -28003,32 +28010,27 @@ private:
 
 				VerifyExtraFiles({ extraFile }, false);
 
-				int fileAdded = 0;
-				int blockAdded = 0;
-				uint32_t blocksDelta = 0;
-				int registerParred = 0;
-				int abortReason = 0;
-				filesAdded = nzbget_rs_parchecker_eval_extra_file_step(
-					wasFilesMissing, nzbget_rs_par_repairer_missing_file_count(m_repairer),
-					wasBlocksMissing, nzbget_rs_par_repairer_missing_block_count(m_repairer),
-					externalDir ? 1 : 0, filesAdded ? 1 : 0, onlyMissing ? 1 : 0,
-					&fileAdded, &blockAdded, &blocksDelta, &registerParred, &abortReason) != 0;
-				if (registerParred != 0)
+				uint32_t nowFilesMissing = nzbget_rs_par_repairer_missing_file_count(m_repairer);
+				uint32_t nowBlocksMissing = nzbget_rs_par_repairer_missing_block_count(m_repairer);
+				bool fileAdded = wasFilesMissing > nowFilesMissing;
+				bool blockAdded = wasBlocksMissing > nowBlocksMissing;
+				filesAdded = filesAdded || fileAdded || blockAdded;
+				if (fileAdded && !externalDir)
 				{
 					PrintMessage(Message::mkInfo, "Found missing file %s", FileSystem::BaseFileName(extraFile.c_str()));
 					RegisterParredFile(FileSystem::BaseFileName(extraFile.c_str()));
 				}
-				else if (blockAdded != 0)
+				else if (blockAdded)
 				{
-					PrintMessage(Message::mkInfo, "Found %u missing blocks", blocksDelta);
+					PrintMessage(Message::mkInfo, "Found %u missing blocks", wasBlocksMissing - nowBlocksMissing);
 				}
 
-				if (abortReason == 1)
+				if (onlyMissing && nowFilesMissing == 0)
 				{
 					PrintMessage(Message::mkInfo, "All missing files found, aborting par-scan");
 					break;
 				}
-				if (abortReason == 2)
+				if (!onlyMissing && nowBlocksMissing == 0)
 				{
 					PrintMessage(Message::mkInfo, "All missing blocks found, aborting par-scan");
 					break;
@@ -28043,16 +28045,14 @@ private:
 
 	bool IsProcessedFile(const char* filename)
 	{
-		std::vector<const char*> processedPtrs;
-		processedPtrs.reserve(m_processedFiles.size());
 		for (const std::string& p : m_processedFiles)
 		{
-			processedPtrs.push_back(p.c_str());
+			if (!strcasecmp(FileSystem::BaseFileName(p.c_str()), filename))
+			{
+				return true;
+			}
 		}
-		return nzbget_rs_parchecker_is_processed_file(
-			filename,
-			processedPtrs.empty() ? nullptr : processedPtrs.data(),
-			processedPtrs.size()) != 0;
+		return false;
 	}
 
 	void SignalFilename(std::string str)
@@ -28066,7 +28066,8 @@ private:
 
 		// don't print progress messages when verifying repaired files in quick verification mode,
 		// because repaired files are not verified in this mode
-		const char* stageMsg = nzbget_rs_parchecker_stage_message((int)m_stage);
+		static const char* const Par2StageMessage[] = { "Loading file", "Verifying file", "Repairing file", "Verifying repaired file" };
+		const char* stageMsg = (m_stage >= 0 && m_stage <= 3) ? Par2StageMessage[m_stage] : "Verifying file";
 		if (!(m_stage == ptVerifyingRepaired && m_parQuick))
 		{
 			PrintMessage(Message::mkInfo, "%s %s", stageMsg, str.c_str());
@@ -28089,12 +28090,39 @@ private:
 
 		m_fileProgress = progress;
 
-		int sourceFilesCount = (m_stage == ptRepairing || m_stage == ptVerifyingRepaired)
-			? 0
-			: static_cast<int>(nzbget_rs_par_repairer_source_file_count(m_repairer));
-		m_stageProgress = nzbget_rs_parchecker_calc_stage_progress(
-			(int)m_stage, m_fileProgress, m_processedCount, m_filesToRepair,
-			sourceFilesCount, m_extraFiles, m_quickFiles);
+		if (m_stage == ptRepairing)
+		{
+			m_stageProgress = m_fileProgress;
+		}
+		else
+		{
+			int totalFiles = 0;
+			int processedFiles = m_processedCount;
+			if (m_stage == ptVerifyingRepaired)
+			{
+				totalFiles = m_filesToRepair;
+			}
+			else
+			{
+				totalFiles = static_cast<int>(nzbget_rs_par_repairer_source_file_count(m_repairer)) + m_extraFiles;
+				if (m_extraFiles > 0)
+				{
+					totalFiles -= m_quickFiles;
+					processedFiles -= m_quickFiles;
+				}
+			}
+			if (totalFiles > 0)
+			{
+				m_stageProgress = (m_fileProgress < 1000
+					? processedFiles * 1000 + m_fileProgress
+					: processedFiles * 1000) / totalFiles;
+			}
+			else
+			{
+				m_stageProgress = 0;
+			}
+		}
+		m_stageProgress = std::clamp(m_stageProgress, 0, 1000);
 		debug("Current-progress: %i, Total-progress: %i", m_fileProgress, m_stageProgress);
 
 		UpdateProgress();
@@ -28106,17 +28134,10 @@ private:
 
 		++m_processedCount;
 
-		bool ignore = (m_stage == ptVerifyingSources && available < total && !m_verifyingExtraFiles)
-			? Util::MatchFileExt(fileName.c_str(), g_Options->GetParIgnoreExt(), ",;")
-			: false;
-		int newHasDamaged = m_hasDamagedFiles ? 1 : 0;
-		int badBlocks = 0;
-		if (nzbget_rs_parchecker_eval_signal_done(
-			(int)m_stage, (int)ptVerifyingSources, available, total,
-			m_verifyingExtraFiles ? 1 : 0, ignore ? 1 : 0,
-			m_hasDamagedFiles ? 1 : 0, &newHasDamaged, &badBlocks) != 0)
+		if (m_stage == ptVerifyingSources && available < total && !m_verifyingExtraFiles)
 		{
-			m_hasDamagedFiles = newHasDamaged != 0;
+			bool ignore = Util::MatchFileExt(fileName.c_str(), g_Options->GetParIgnoreExt(), ",;");
+			m_hasDamagedFiles = m_hasDamagedFiles || !ignore;
 			bool fileExists = nzbget_rs_par_repairer_target_file_exists_by_basename(
 				m_repairer, fileName.c_str()) != 0;
 
@@ -28124,7 +28145,7 @@ private:
 			if (fileExists)
 			{
 				PrintMessage(Message::mkWarning, "File %s has %i bad block(s) of total %i block(s)%s",
-					fileName.c_str(), badBlocks, total, ignoreSuffix);
+					fileName.c_str(), total - available, total, ignoreSuffix);
 			}
 			else
 			{
@@ -28197,10 +28218,7 @@ public:
 		m_parChecker.SetNzbName(nzbName);
 		m_parChecker.SetParTime(Util::CurrentTime());
 		m_parChecker.SetDownloadSec(m_postInfo->GetNzbInfo()->GetDownloadSec());
-		m_parChecker.SetParQuick(nzbget_rs_repair_should_use_par_quick(
-			g_Options->GetParQuick() ? 1 : 0,
-			m_postInfo->GetForceParFull() ? 1 : 0,
-			dupeRepaired ? 1 : 0) != 0);
+		m_parChecker.SetParQuick(g_Options->GetParQuick() && !m_postInfo->GetForceParFull() && !dupeRepaired);
 		m_parChecker.SetForceRepair(m_postInfo->GetForceRepair());
 
 		m_parChecker.PrintMessage(Message::mkInfo, "Checking pars for %s", *nzbName);
@@ -28234,27 +28252,31 @@ protected:
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 
 		PostInfo* postInfo = m_parChecker.GetPostInfo();
+		NzbInfo* nzbInfo = postInfo->GetNzbInfo();
 
-		int rawParStatus = 0, setParRepaired = 0, parRepairedVal = 0, waitTime = 0, parSec = 0;
-		nzbget_rs_repair_complete_par_check(
-			(int)m_parChecker.GetStatus(),
-			(int)postInfo->GetNzbInfo()->GetParStatus(),
-			(int)ParChecker::psRepaired, (int)ParChecker::psRepairNotNeeded, (int)ParChecker::psRepairPossible,
-			(int)NzbInfo::psSkipped, (int)NzbInfo::psSuccess, (int)NzbInfo::psRepairPossible, (int)NzbInfo::psFailure,
-			postInfo->GetNzbInfo()->GetDownloadSec(),
-			m_parChecker.GetDownloadSec(),
-			(int64_t)Util::CurrentTime(),
-			(int64_t)m_parChecker.GetParTime(),
-			&rawParStatus, &setParRepaired, &parRepairedVal, &waitTime, &parSec);
-		postInfo->GetNzbInfo()->SetParStatus((NzbInfo::EParStatus)rawParStatus);
-		if (setParRepaired)
+		if ((m_parChecker.GetStatus() == ParChecker::psRepaired ||
+			m_parChecker.GetStatus() == ParChecker::psRepairNotNeeded) &&
+			nzbInfo->GetParStatus() <= NzbInfo::psSkipped)
 		{
-			postInfo->SetParRepaired(parRepairedVal != 0);
+			nzbInfo->SetParStatus(NzbInfo::psSuccess);
+			postInfo->SetParRepaired(m_parChecker.GetStatus() == ParChecker::psRepaired);
 		}
-		postInfo->SetStartTime(postInfo->GetStartTime() + (time_t)waitTime);
-		postInfo->GetNzbInfo()->SetParSec(postInfo->GetNzbInfo()->GetParSec() + parSec);
+		else if (m_parChecker.GetStatus() == ParChecker::psRepairPossible &&
+			nzbInfo->GetParStatus() != NzbInfo::psFailure)
+		{
+			nzbInfo->SetParStatus(NzbInfo::psRepairPossible);
+		}
+		else
+		{
+			nzbInfo->SetParStatus(NzbInfo::psFailure);
+		}
 
-		postInfo->GetNzbInfo()->SetParFull(m_parChecker.GetParFull());
+		int waitTime = nzbInfo->GetDownloadSec() - m_parChecker.GetDownloadSec();
+		int parSec = (int)(Util::CurrentTime() - m_parChecker.GetParTime()) - waitTime;
+		postInfo->SetStartTime(postInfo->GetStartTime() + (time_t)waitTime);
+		nzbInfo->SetParSec(nzbInfo->GetParSec() + parSec);
+
+		nzbInfo->SetParFull(m_parChecker.GetParFull());
 
 		postInfo->SetWorking(false);
 	}
@@ -28289,21 +28311,27 @@ protected:
 
 		if (blockFound >= blockNeeded)
 		{
-			std::vector<int> sortedCounts;
-			sortedCounts.reserve(availableBlocks.size());
-			for (const BlockInfo& b : availableBlocks)
+			for (BlockInfo& block : availableBlocks)
 			{
-				sortedCounts.push_back(b.m_blockCount);
+				if (blockNeeded <= 0)
+				{
+					break;
+				}
+				selectedBlocks.push_front(block);
+				blockNeeded -= block.m_blockCount;
 			}
-			std::vector<size_t> selectedIdx(availableBlocks.size());
-			int remNeeded = blockNeeded;
-			size_t selCount = nzbget_rs_repair_select_more_pars(
-				sortedCounts.data(), sortedCounts.size(), blockNeeded,
-				selectedIdx.data(), selectedIdx.size(), &remNeeded);
-			blockNeeded = remNeeded;
-			for (size_t i = 0; i < selCount && i < selectedIdx.size(); ++i)
+
+			for (auto it = selectedBlocks.begin(); it != selectedBlocks.end(); )
 			{
-				selectedBlocks.push_back(availableBlocks[selectedIdx[i]]);
+				if (blockNeeded + it->m_blockCount <= 0)
+				{
+					blockNeeded += it->m_blockCount;
+					it = selectedBlocks.erase(it);
+				}
+				else
+				{
+					++it;
+				}
 			}
 
 			for (BlockInfo& blockInfo : selectedBlocks)
@@ -28351,51 +28379,45 @@ protected:
 			postInfo->SetStageProgress(m_parChecker.GetStageProgress());
 			time_t current = Util::CurrentTime();
 
-			int rawStage = (int)postInfo->GetStage();
-			int setRepairTime = 0;
-			int newRepairSec = postInfo->GetNzbInfo()->GetRepairSec();
-			if (nzbget_rs_repair_eval_par_progress_update(
-				(int)postInfo->GetStage(),
-				(int)m_parChecker.GetStage(),
-				(int)PostInfo::ptLoadingPars,
-				(int)PostInfo::ptVerifyingSources,
-				(int)PostInfo::ptRepairing,
-				(int)PostInfo::ptVerifyingRepaired,
-				(int64)current,
-				(int64)m_parChecker.GetRepairTime(),
-				newRepairSec,
-				&rawStage,
-				&setRepairTime,
-				&newRepairSec) != 0)
+			PostInfo::EStage newStage = PostInfo::ptLoadingPars;
+			switch (m_parChecker.GetStage())
 			{
-				postInfo->SetStage((PostInfo::EStage)rawStage);
+				case ParChecker::ptLoadingPars: newStage = PostInfo::ptLoadingPars; break;
+				case ParChecker::ptVerifyingSources: newStage = PostInfo::ptVerifyingSources; break;
+				case ParChecker::ptRepairing: newStage = PostInfo::ptRepairing; break;
+				case ParChecker::ptVerifyingRepaired: newStage = PostInfo::ptVerifyingRepaired; break;
+			}
+			if (postInfo->GetStage() != newStage)
+			{
+				postInfo->SetStage(newStage);
 				postInfo->SetStageTime(current);
-				if (setRepairTime)
+				if (newStage == PostInfo::ptRepairing)
 				{
 					m_parChecker.SetRepairTime(current);
 				}
-				else if (postInfo->GetStage() == PostInfo::ptVerifyingRepaired)
+				else if (newStage == PostInfo::ptVerifyingRepaired)
 				{
-					postInfo->GetNzbInfo()->SetRepairSec(newRepairSec);
+					postInfo->GetNzbInfo()->SetRepairSec(
+						postInfo->GetNzbInfo()->GetRepairSec() + (int)(current - m_parChecker.GetRepairTime()));
 				}
 			}
 
 			bool parCancel = false;
-			if (!IsStopped())
+			int parTimeLimit = g_Options->GetParTimeLimit();
+			if (!IsStopped() && parTimeLimit > 0 && m_parChecker.GetStage() == PostParChecker::ptRepairing)
 			{
-				int estimatedRepairTime = 0;
-				if (nzbget_rs_repair_check_par_time_limit(
-					g_Options->GetParTimeLimit(),
-					m_parChecker.GetStage() == PostParChecker::ptRepairing ? 1 : 0,
-					(int64)(current - postInfo->GetStageTime()),
-					postInfo->GetStageProgress(),
-					&estimatedRepairTime) != 0)
+				int64 elapsed = current - postInfo->GetStageTime();
+				if ((parTimeLimit > 5 && elapsed > 5 * 60) || (parTimeLimit <= 5 && elapsed > 60))
 				{
-					debug("Estimated repair time %i seconds", estimatedRepairTime);
-					m_parChecker.PrintMessage(Message::mkWarning, "Cancelling par-repair for %s, estimated repair time (%i minutes) exceeds allowed repair time",
-						m_parChecker.GetInfoName(),
-						estimatedRepairTime / 60);
-					parCancel = true;
+					int estimatedRepairTime = (int)(elapsed * 1000 / std::max(1, postInfo->GetStageProgress()));
+					if (estimatedRepairTime > parTimeLimit * 60)
+					{
+						debug("Estimated repair time %i seconds", estimatedRepairTime);
+						m_parChecker.PrintMessage(Message::mkWarning, "Cancelling par-repair for %s, estimated repair time (%i minutes) exceeds allowed repair time",
+							m_parChecker.GetInfoName(),
+							estimatedRepairTime / 60);
+						parCancel = true;
+					}
 				}
 			}
 
@@ -28424,26 +28446,22 @@ protected:
 			{
 				Util::Sleep(50);
 
-				int64 newStage = 0, newStart = 0, newPar = 0, newRepair = 0;
-				nzbget_rs_repair_calc_paused_timestamps(
-					(int64)Util::CurrentTime(), (int64)waitTime,
-					(int64)stageTime, (int64)startTime, (int64)parTime, (int64)repairTime,
-					&newStage, &newStart, &newPar, &newRepair);
+				time_t delta = Util::CurrentTime() - waitTime;
 				if (stageTime > 0)
 				{
-					postInfo->SetStageTime((time_t)newStage);
+					postInfo->SetStageTime(stageTime + delta);
 				}
 				if (startTime > 0)
 				{
-					postInfo->SetStartTime((time_t)newStart);
+					postInfo->SetStartTime(startTime + delta);
 				}
 				if (parTime > 0)
 				{
-					m_parChecker.SetParTime((time_t)newPar);
+					m_parChecker.SetParTime(parTime + delta);
 				}
 				if (repairTime > 0)
 				{
-					m_parChecker.SetRepairTime((time_t)newRepair);
+					m_parChecker.SetRepairTime(repairTime + delta);
 				}
 			}
 		}
@@ -28540,7 +28558,7 @@ private:
 		{
 			for (CString& parredFile : m_postInfo->GetParredFiles())
 			{
-				if (nzbget_rs_repair_filename_eq_ignore_case(parredFile, filename) != 0)
+				if (!strcasecmp(parredFile, filename))
 				{
 					return true;
 				}
@@ -28558,7 +28576,7 @@ private:
 				CompletedFile* completedFile = nullptr;
 				for (CompletedFile& completedFile2 : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
 				{
-					if (nzbget_rs_repair_filename_eq_ignore_case(completedFile2.GetFilename(), filename) != 0)
+					if (!strcasecmp(completedFile2.GetFilename(), filename))
 					{
 						completedFile = &completedFile2;
 						break;
@@ -28576,8 +28594,7 @@ private:
 
 			debug("Found completed file: %s, CRC: %.8x, Status: %i", filename, *crc, (int)status);
 
-			if (nzbget_rs_repair_should_load_partial_segments(
-				(int)status, (int)CompletedFile::cfPartial, id, reprocess ? 1 : 0) != 0)
+			if (status == CompletedFile::cfPartial && id > 0 && !reprocess)
 			{
 				FileInfo tmpFileInfo(id);
 
@@ -28593,11 +28610,19 @@ private:
 				}
 			}
 
-			return (ParChecker::EFileStatus)nzbget_rs_repair_classify_file_crc_status(
-				(int)status, reprocess ? 1 : 0, !segments->empty() ? 1 : 0,
-				(int)CompletedFile::cfSuccess, (int)CompletedFile::cfFailure, (int)CompletedFile::cfPartial,
-				(int)ParChecker::fsSuccess, (int)ParChecker::fsFailure, (int)ParChecker::fsPartial,
-				(int)ParChecker::fsUnknown);
+			if (status == CompletedFile::cfSuccess)
+			{
+				return ParChecker::fsSuccess;
+			}
+			if (status == CompletedFile::cfFailure && !reprocess)
+			{
+				return ParChecker::fsFailure;
+			}
+			if (status == CompletedFile::cfPartial && !segments->empty() && !reprocess)
+			{
+				return ParChecker::fsPartial;
+			}
+			return ParChecker::fsUnknown;
 		}
 
 		const char* FindFileOrigname(const char* filename) override
@@ -28606,7 +28631,7 @@ private:
 			GuardedDownloadQueue guard = DownloadQueue::Guard();
 			for (CompletedFile& completedFile : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
 			{
-				if (nzbget_rs_repair_filename_eq_ignore_case(completedFile.GetFilename(), filename) != 0)
+				if (!strcasecmp(completedFile.GetFilename(), filename))
 				{
 					if (!completedFile.GetOrigname())
 					{
@@ -28689,14 +28714,9 @@ private:
 							DupeCoordinator::SameNameOrKey(other->GetName(), other->GetDupeKey(),
 								nzbInfo->GetName(), nzbInfo->GetDupeKey());
 						NzbParameter* print = sameNameOrKey ? other->GetParameters()->Find(TwinCheck::FilesParam) : nullptr;
-						if (!nzbget_rs_repair_should_consider_twin_candidate(
-							other == nzbInfo ? 1 : 0,
-							(int)other->GetKind(),
-							(int)NzbInfo::nkNzb,
-							sameNameOrKey ? 1 : 0,
-							other->GetQueuedFilename(),
-							print != nullptr ? 1 : 0,
-							(print && ownPrint == print->GetValue()) ? 1 : 0) ||
+						if (!sameNameOrKey ||
+							strchr(other->GetQueuedFilename(), '|') != nullptr ||
+							(print && ownPrint != print->GetValue()) ||
 							!FileSystem::FileExists(other->GetQueuedFilename()))
 						{
 							return;
@@ -28735,20 +28755,19 @@ private:
 					break;
 				}
 				std::vector<TwinCheck::NzbEntry> entries = TwinCheck::ReadNzbEntries(candidate.nzbFilename.c_str());
-				std::vector<uint8_t> entryPar2(entries.size());
-				std::vector<int64_t> entrySizes(entries.size());
-				for (size_t i = 0; i < entries.size(); i++)
+				const TwinCheck::NzbEntry* index = nullptr;
+				for (const TwinCheck::NzbEntry& entry : entries)
 				{
-					entryPar2[i] = entries[i].par2 ? 1 : 0;
-					entrySizes[i] = entries[i].size;
+					if (entry.par2 && entry.size <= TwinCheck::MaxIndexSize &&
+						(!index || entry.size < index->size))
+					{
+						index = &entry;
+					}
 				}
-				ptrdiff_t bestIdx = nzbget_rs_repair_select_best_twin_par2_index(
-					entryPar2.data(), entrySizes.data(), entries.size(), TwinCheck::MaxIndexSize);
-				if (bestIdx < 0 || (size_t)bestIdx >= entries.size())
+				if (!index)
 				{
 					continue;
 				}
-				const TwinCheck::NzbEntry* index = &entries[(size_t)bestIdx];
 
 				std::vector<char> data;
 				std::string path = FetchTwinFile(*index, &data);
@@ -28763,7 +28782,7 @@ private:
 				if (cmp != 0)
 				{
 					PrintMessage(Message::mkDetail, "%s: its par2 set %s", candidate.name.c_str(),
-						nzbget_rs_repair_twin_par2_reject_reason(cmp));
+						cmp == 1 ? "describes other files" : "names the files otherwise");
 					FileSystem::DeleteFile(path.c_str());
 					m_twinFiles.pop_back();
 					continue;
@@ -28790,15 +28809,14 @@ private:
 			std::vector<Volume> volumes;
 			for (const TwinCheck::NzbEntry& entry : m_twinEntries)
 			{
-				if (nzbget_rs_repair_should_skip_twin_volume_entry(
-					entry.par2 ? 1 : 0, entry.filename.c_str(), m_twinIndex.c_str()) != 0)
+				if (!entry.par2 || entry.filename == m_twinIndex)
 				{
 					continue;
 				}
 				int blocks = TwinCheck::VolumeBlocks(entry.filename);
 				if (blocks < 0 && m_twinBlockSize > 0)
 				{
-					blocks = nzbget_rs_repair_estimate_twin_vol_blocks(entry.size, m_twinBlockSize);
+					blocks = (int)((entry.size * 100 / 102) / (int64)(m_twinBlockSize + 68));
 				}
 				if (blocks > 0)
 				{
@@ -28808,16 +28826,12 @@ private:
 			std::sort(volumes.begin(), volumes.end(), [](const Volume& a, const Volume& b) { return a.blocks < b.blocks; });
 
 			int available = 0;
-			std::vector<int> allVolBlocks;
-			allVolBlocks.reserve(volumes.size());
 			for (const Volume& volume : volumes)
 			{
-				allVolBlocks.push_back(volume.blocks);
+				available += volume.blocks;
 			}
-			bool hasEnoughTwinBlocks = nzbget_rs_repair_sum_and_check_twin_blocks(
-				allVolBlocks.data(), allVolBlocks.size(), blockNeeded, &available) != 0;
 			std::vector<std::string> paths;
-			if (!hasEnoughTwinBlocks)
+			if (available < blockNeeded)
 			{
 				PrintMessage(Message::mkInfo, "Twin %s holds %i par-block(s), %i needed: not fetched",
 					m_twinName.c_str(), available, blockNeeded);
@@ -28827,18 +28841,12 @@ private:
 			int left = blockNeeded;
 			while (left > 0 && !volumes.empty() && !IsStopped())
 			{
-				std::vector<int> volBlocks;
-				volBlocks.reserve(volumes.size());
-				for (const Volume& v : volumes)
+				auto it = std::find_if(volumes.begin(), volumes.end(),
+					[left](const Volume& v) { return v.blocks >= left; });
+				if (it == volumes.end())
 				{
-					volBlocks.push_back(v.blocks);
+					it = volumes.end() - 1;
 				}
-				ptrdiff_t idx = nzbget_rs_repair_pick_twin_volume(volBlocks.data(), volBlocks.size(), left);
-				if (idx < 0 || (size_t)idx >= volumes.size())
-				{
-					break;
-				}
-				auto it = volumes.begin() + idx;
 				PrintMessage(Message::mkInfo, "Fetching %s of twin %s for par-repair (%i block(s))",
 					it->entry->filename.c_str(), m_twinName.c_str(), it->blocks);
 				std::string path = FetchTwinFile(*it->entry);
@@ -28890,10 +28898,9 @@ private:
 			{
 				return "";
 			}
-			NzbgetRsBuf nameBuf = nzbget_rs_repair_build_twin_filename(
-				entry.filename.c_str(), m_twinFiles.size());
-			std::string name(nameBuf.data ? nameBuf.data : "", nameBuf.len);
-			nzbget_rs_free(nameBuf);
+			std::string name = "_twin." + (entry.filename.empty()
+				? std::to_string(m_twinFiles.size()) + ".par2"
+				: entry.filename);
 			NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
 				GetDestDir(), PATH_SEPARATOR, name.c_str());
 			BString<1024> path;
@@ -28951,23 +28958,21 @@ private:
 
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
-			int parsedBlocks = 0;
-			bool parsed = ParParser::ParseParFilename(fileInfo->GetFilename(), fileInfo->GetFilenameConfirmed(), nullptr, &parsedBlocks);
+			int blockCount = 0;
+			bool parsed = ParParser::ParseParFilename(fileInfo->GetFilename(), fileInfo->GetFilenameConfirmed(), nullptr, &blockCount);
+			if (parsed && blockCount < 0)
+			{
+				blockCount = m_parChecker.GetBlockSize() > 0
+					? (int)std::max((int64)1, fileInfo->GetSize() / (m_parChecker.GetBlockSize() + 68))
+					: 1;
+			}
 			bool sameCollection = !exactParName ||
 				ParParser::SameParCollection(fileInfo->GetFilename(),
 					FileSystem::BaseFileName(parFilename), fileInfo->GetFilenameConfirmed());
-			int blockCount = 0;
-			if (nzbget_rs_repair_eval_find_pars_candidate(
-				sameCollection ? 1 : 0,
-				0,
-				(!exactParName && strictParName) ? 1 : 0,
-				fileInfo->GetFilename(),
-				mainBaseFilename,
-				parsed ? 1 : 0,
-				parsedBlocks,
-				fileInfo->GetSize(),
-				m_parChecker.GetBlockSize(),
-				&blockCount))
+			if (sameCollection && parsed && blockCount > 0 &&
+				(exactParName || !strictParName ||
+				 strcasestr(fileInfo->GetFilename(), BString<1024>("%s.par2", *mainBaseFilename)) ||
+				 strcasestr(fileInfo->GetFilename(), BString<1024>("%s.vol", *mainBaseFilename))))
 			{
 				bool alreadyAdded = false;
 				for (BlockInfo& blockInfo : blocks)
@@ -31834,11 +31839,11 @@ public:
 		{
 			GuardedDownloadQueue guard = DownloadQueue::Guard();
 			nzbName = m_postInfo->GetNzbInfo()->GetName();
-			m_interDir = fs::u8path(m_postInfo->GetNzbInfo()->GetDestDir());
-			m_destDir = fs::u8path(m_postInfo->GetNzbInfo()->GetFinalDir());
+			m_interDir = m_postInfo->GetNzbInfo()->GetDestDir();
+			m_destDir = m_postInfo->GetNzbInfo()->GetFinalDir();
 			if (m_destDir.empty())
 			{
-				m_destDir = fs::u8path(m_postInfo->GetNzbInfo()->BuildFinalDirName().Str());
+				m_destDir = m_postInfo->GetNzbInfo()->BuildFinalDirName().Str();
 			}
 		}
 
@@ -31862,24 +31867,21 @@ public:
 			GuardedDownloadQueue guard = DownloadQueue::Guard();
 			if (m_postInfo && m_postInfo->GetNzbInfo())
 			{
-				int moveStatus = 0;
-				int outcome = nzbget_rs_move_controller_decide_outcome(
-					ok ? 1 : 0, IsStopped() ? 1 : 0, &moveStatus);
-				if (outcome == 1)
+				if (ok)
 				{
 					PrintMessage(Message::mkInfo, "%s successful", *infoName);
-					m_postInfo->GetNzbInfo()->SetDestDir(fs::u8string(m_destDir).c_str());
+					m_postInfo->GetNzbInfo()->SetDestDir(m_destDir.c_str());
 					m_postInfo->GetNzbInfo()->SetFinalDir("");
-					m_postInfo->GetNzbInfo()->SetMoveStatus((NzbInfo::EMoveStatus)moveStatus);
+					m_postInfo->GetNzbInfo()->SetMoveStatus(NzbInfo::msSuccess);
 				}
-				else if (outcome == 2)
+				else if (IsStopped())
 				{
 					PrintMessage(Message::mkInfo, "%s interrupted, resumes after the restart", *infoName);
 				}
 				else
 				{
 					PrintMessage(Message::mkError, "%s failed", *infoName);
-					m_postInfo->GetNzbInfo()->SetMoveStatus((NzbInfo::EMoveStatus)moveStatus);
+					m_postInfo->GetNzbInfo()->SetMoveStatus(NzbInfo::msFailure);
 				}
 				m_postInfo->SetWorking(false);
 			}
@@ -31918,11 +31920,9 @@ protected:
 
 	bool MoveFiles()
 	{
-		const std::string interStr = fs::u8string(m_interDir);
-		const std::string destStr = fs::u8string(m_destDir);
 		return nzbget_rs_move_controller_move_files(
-			interStr.c_str(),
-			destStr.c_str(),
+			m_interDir.c_str(),
+			m_destDir.c_str(),
 			this,
 			[](void* rawCtx) -> int {
 				return static_cast<MoveController*>(rawCtx)->IsStopped() ? 1 : 0;
@@ -31942,15 +31942,14 @@ protected:
 			}) != 0;
 	}
 
-	void RemoveStaleHardlinks(NzbInfo& nzbInfo, const fs::path& destDir)
+	void RemoveStaleHardlinks(NzbInfo& nzbInfo, const std::string& destDir)
 	{
 		const auto& hardLinkPath = nzbInfo.GetHardLinkPath();
 		if (hardLinkPath.empty()) return;
 
-		const std::string destStr = fs::u8string(destDir);
 		nzbget_rs_move_controller_remove_stale_hardlinks(
 			hardLinkPath.c_str(),
-			destStr.c_str(),
+			destDir.c_str(),
 			this,
 			[](void* rawCtx, int kind, const char* msg) {
 				static_cast<MoveController*>(rawCtx)->PrintMessage(
@@ -31960,8 +31959,8 @@ protected:
 
 private:
 	PostInfo* m_postInfo = nullptr;
-	fs::path m_interDir;
-	fs::path m_destDir;
+	std::string m_interDir;
+	std::string m_destDir;
 };
 
 class CleanupController : public Thread, public ScriptController
@@ -32073,20 +32072,17 @@ public:
 		nzbget_rs_free(infoNameBuf);
 		SetInfoName(infoName);
 
-		const char* archiveKindPrefix = nzbget_rs_rename_controller_archive_kind_prefix(
-			(int)m_kind, (int)jkRar);
+		const char* archiveKindPrefix = m_kind == jkRar ? "archive " : "";
 		PrintMessage(Message::mkInfo, "Checking renamed %sfiles for %s",
 			archiveKindPrefix, *nzbName);
 
 		ExecRename(destDir, finalDir, nzbName);
 
-		int runOutcome = nzbget_rs_rename_controller_classify_run_outcome(
-			IsStopped() ? 1 : 0, m_renamedCount);
-		if (runOutcome == 1)
+		if (IsStopped())
 		{
 			PrintMessage(Message::mkWarning, "Renaming cancelled for %s", *nzbName);
 		}
-		else if (runOutcome == 2)
+		else if (m_renamedCount > 0)
 		{
 			PrintMessage(Message::mkInfo, "Successfully renamed %i %sfile(s) for %s",
 				m_renamedCount, archiveKindPrefix, *nzbName);
@@ -32138,13 +32134,9 @@ private:
 		if (m_kind == jkPar)
 		{
 #ifndef DISABLE_PARCHECK
-			int detectMissingInt = 0;
-			bool useFinal = nzbget_rs_rename_controller_eval_par_config(
-				(int)m_postInfo->GetNzbInfo()->GetUnpackStatus(),
-				(int)NzbInfo::usSuccess,
-				(int)NzbInfo::usNone,
-				Util::EmptyStr(finalDir) ? 1 : 0,
-				&detectMissingInt) != 0;
+			NzbInfo::EPostUnpackStatus unpackStatus = m_postInfo->GetNzbInfo()->GetUnpackStatus();
+			bool useFinal = unpackStatus == NzbInfo::usSuccess && !Util::EmptyStr(finalDir);
+			int detectMissingInt = unpackStatus == NzbInfo::usNone ? 1 : 0;
 			int renamedCount = 0;
 			int hasMissedFiles = 0;
 			int hasDamagedParFiles = 0;
@@ -32260,45 +32252,30 @@ private:
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 
-		int reqExtraPars = 0;
-		int reqParCheck = 0;
-#ifndef DISABLE_PARCHECK
-		int hasDamagedParFiles = m_hasDamagedParFiles ? 1 : 0;
-		int hasMissedFiles = m_hasMissedFiles ? 1 : 0;
-#else
-		int hasDamagedParFiles = 0;
-		int hasMissedFiles = 0;
-#endif
-		int initialStatus = nzbget_rs_rename_controller_complete_action(
-			(int)m_kind, m_renamedCount,
-			hasDamagedParFiles,
-			m_postInfo->GetNzbInfo()->GetRemainingParCount(),
-			hasMissedFiles,
-			(int)m_postInfo->GetNzbInfo()->GetParStatus(),
-			&reqExtraPars, &reqParCheck);
+		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+		NzbInfo::EPostRenameStatus initialStatus = m_renamedCount > 0 ? NzbInfo::rsSuccess : NzbInfo::rsNothing;
 		if (m_kind == jkPar)
 		{
-			m_postInfo->GetNzbInfo()->SetParRenameStatus((NzbInfo::EPostRenameStatus)initialStatus);
+			nzbInfo->SetParRenameStatus(initialStatus);
 #ifndef DISABLE_PARCHECK
-			if (reqExtraPars)
+			if (m_renamedCount == 0 && m_hasDamagedParFiles && nzbInfo->GetRemainingParCount() > 0)
 			{
 				PrintMessage(Message::mkInfo, "Requesting extra par2-files for %s to perform par-rename", nzbName ? nzbName : "");
-				downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupResume, nullptr);
-				downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
-				if (nzbget_rs_rename_controller_should_reset_par_status(
-					m_postInfo->GetNzbInfo()->GetRemainingSize()) != 0)
+				downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupResume, nullptr);
+				downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
+				if (nzbInfo->GetRemainingSize() > 0)
 				{
-					m_postInfo->GetNzbInfo()->SetParRenameStatus(NzbInfo::rsNone);
+					nzbInfo->SetParRenameStatus(NzbInfo::rsNone);
 				}
 			}
 #endif
 		}
 		else if (m_kind == jkRar)
 		{
-			m_postInfo->GetNzbInfo()->SetRarRenameStatus((NzbInfo::EPostRenameStatus)initialStatus);
+			nzbInfo->SetRarRenameStatus(initialStatus);
 		}
 #ifndef DISABLE_PARCHECK
-		if (reqParCheck)
+		if (m_hasMissedFiles && nzbInfo->GetParStatus() <= NzbInfo::psSkipped)
 		{
 			PrintMessage(Message::mkInfo, "Requesting par-check/repair for %s to restore missing files ", nzbName ? nzbName : "");
 			m_postInfo->SetRequestParCheck(true);
@@ -32971,18 +32948,15 @@ public:
 		// Direct rename can pause the last PAR volumes after the data files
 		// finished. Their in-flight articles may still be draining; the last
 		// such request does not complete a file, so check both transitions.
-		if (nzbget_rs_prepost_should_complete_after_direct_rename(
-			IsStopped() ? 1 : 0,
-			(int)nzbInfo->GetDirectRenameStatus(),
-			(int)NzbInfo::tsSuccess,
-			nzbInfo->GetPostInfo() ? 1 : 0,
-			(int)nzbInfo->GetDeleteStatus(),
-			(int)NzbInfo::dsNone,
-			!nzbInfo->GetCompletedFiles()->empty() ? 1 : 0,
-			nzbInfo->IsDownloadCompleted(true) ? 1 : 0,
-			g_Options->GetRawArticle() ? 1 : 0,
-			g_Options->GetSkipWrite() ? 1 : 0,
-			nzbInfo->GetSkipDiskWrite() ? 1 : 0) != 0)
+		if (!IsStopped() &&
+			nzbInfo->GetDirectRenameStatus() == NzbInfo::tsSuccess &&
+			!nzbInfo->GetPostInfo() &&
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
+			!nzbInfo->GetCompletedFiles()->empty() &&
+			nzbInfo->IsDownloadCompleted(true) &&
+			!g_Options->GetRawArticle() &&
+			!g_Options->GetSkipWrite() &&
+			!nzbInfo->GetSkipDiskWrite())
 		{
 			nzbInfo->PrintMessage(Message::mkInfo,
 				"Collection %s completely downloaded", nzbInfo->GetName());
@@ -32998,25 +32972,8 @@ public:
 			return;
 		}
 
-		int enqueueDeleted = 0;
-		int setParSkipped = 0;
-		int dlRoute = nzbget_rs_prepost_classify_nzb_downloaded_entry(
-			nzbInfo->GetSkipScriptProcessing() ? 1 : 0,
-			nzbInfo->GetSkipDiskWrite() ? 1 : 0,
-			g_Options->GetSkipWrite() ? 1 : 0,
-			(int)nzbInfo->GetDeleteStatus(),
-			(int)NzbInfo::dsHealth,
-			(int)NzbInfo::dsBad,
-			nzbInfo->GetPostInfo() != nullptr ? 1 : 0,
-			g_Options->GetRawArticle() ? 1 : 0,
-			(int)nzbInfo->GetParStatus(),
-			(int)NzbInfo::psNone,
-			(int)g_Options->GetParCheck(),
-			(int)Options::pcAlways,
-			(int)Options::pcForce,
-			&enqueueDeleted,
-			&setParSkipped);
-		if (dlRoute == 1)
+		if (nzbInfo->GetSkipScriptProcessing() &&
+			(nzbInfo->GetSkipDiskWrite() || g_Options->GetSkipWrite()))
 		{
 			if (nzbInfo->GetLiveRepairThread())
 			{
@@ -33029,17 +32986,23 @@ public:
 			NzbCompleted(downloadQueue, nzbInfo, true);
 			return;
 		}
-		if (enqueueDeleted)
+		if (nzbInfo->GetDeleteStatus() == NzbInfo::dsHealth ||
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsBad)
 		{
 			g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDeleted);
 		}
-		if (dlRoute == 2)
+		if (!nzbInfo->GetPostInfo() &&
+			!g_Options->GetRawArticle() &&
+			!g_Options->GetSkipWrite() &&
+			!nzbInfo->GetSkipDiskWrite())
 		{
 			nzbInfo->PrintMessage(Message::mkInfo, "Queueing %s for post-processing", nzbInfo->GetName());
 
 			nzbInfo->EnterPostProcess();
 
-			if (setParSkipped)
+			if (nzbInfo->GetParStatus() == NzbInfo::psNone &&
+				g_Options->GetParCheck() != Options::pcAlways &&
+				g_Options->GetParCheck() != Options::pcForce)
 			{
 				nzbInfo->SetParStatus(NzbInfo::psSkipped);
 			}
@@ -33214,23 +33177,18 @@ private:
 			if (postInfo)
 			{
 				m_queuedJobs++;
-				int nextStage = 0;
-				int reqParCheck = 0;
-				nzbget_rs_prepost_sanitise_post_stage(
-					(int)postInfo->GetStage(),
-					(int)PostInfo::ptExecutingScript,
-					(int)PostInfo::ptFinished,
-					(int)PostInfo::ptQueued,
-					FileSystem::DirectoryExists(nzbInfo->GetDestDir()) ? 1 : 0,
-					nzbInfo->GetUnpackTried() ? 1 : 0,
-					(int)nzbInfo->GetParStatus(),
-					(int)NzbInfo::psSkipped,
-					&nextStage,
-					&reqParCheck);
-				postInfo->SetStage((PostInfo::EStage)nextStage);
-				if (reqParCheck)
+				if (postInfo->GetStage() == PostInfo::ptExecutingScript ||
+					!FileSystem::DirectoryExists(nzbInfo->GetDestDir()))
 				{
-					postInfo->SetRequestParCheck(true);
+					postInfo->SetStage(PostInfo::ptFinished);
+				}
+				else
+				{
+					postInfo->SetStage(PostInfo::ptQueued);
+					if (nzbInfo->GetUnpackTried() && nzbInfo->GetParStatus() <= NzbInfo::psSkipped)
+					{
+						postInfo->SetRequestParCheck(true);
+					}
 				}
 				postInfo->SetWorking(false);
 			}
@@ -33308,24 +33266,22 @@ private:
 			}
 	#endif
 
-			int eventAction = nzbget_rs_prepost_classify_file_event(
-				queueAspect->action == DownloadQueue::eaFileCompleted ? 1 : 0,
-				queueAspect->action == DownloadQueue::eaFileDeleted ? 1 : 0,
-				queueAspect->fileInfo->GetDupeDeleted() ? 1 : 0,
-				(int)queueAspect->fileInfo->GetNzbInfo()->GetDeleteStatus(),
-				(int)NzbInfo::dsNone,
-				(int)NzbInfo::dsHealth,
-				queueAspect->nzbInfo->GetPostInfo() ? 1 : 0,
-				queueAspect->nzbInfo->IsDownloadCompleted(true) ? 1 : 0,
-				queueAspect->nzbInfo->IsDownloadCompleted(false) ? 1 : 0);
-			if (eventAction == 1)
+			bool isFileCompleted = queueAspect->action == DownloadQueue::eaFileCompleted;
+			bool isFileDeleted = queueAspect->action == DownloadQueue::eaFileDeleted;
+			NzbInfo::EDeleteStatus deleteStatus = queueAspect->fileInfo->GetNzbInfo()->GetDeleteStatus();
+			if ((isFileCompleted || queueAspect->fileInfo->GetDupeDeleted()) &&
+				deleteStatus != NzbInfo::dsHealth &&
+				!queueAspect->nzbInfo->GetPostInfo() &&
+				queueAspect->nzbInfo->IsDownloadCompleted(true))
 			{
 				queueAspect->nzbInfo->PrintMessage(Message::mkInfo,
 					"Collection %s completely downloaded", queueAspect->nzbInfo->GetName());
 				g_QueueScriptCoordinator->EnqueueScript(queueAspect->nzbInfo, QueueScriptCoordinator::qeNzbDownloaded);
 				NzbDownloaded(queueAspect->downloadQueue, queueAspect->nzbInfo);
 			}
-			else if (eventAction == 2)
+			else if ((isFileDeleted || (isFileCompleted && deleteStatus > NzbInfo::dsNone)) &&
+				!queueAspect->nzbInfo->GetPostInfo() &&
+				queueAspect->nzbInfo->IsDownloadCompleted(false))
 			{
 				queueAspect->nzbInfo->PrintMessage(Message::mkInfo,
 					"Collection %s deleted from queue", queueAspect->nzbInfo->GetName());
@@ -33380,39 +33336,28 @@ private:
 
 	void NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, bool saveQueue)
 	{
-		int addToHistoryInt = 0, callDupeCompletedInt = 0, enqueueDeletedScriptInt = 0, needSaveInt = 0;
-		nzbget_rs_prepost_eval_nzb_completed(
-			(int)nzbInfo->GetDupeHint(),
-			(int)NzbInfo::dhRedownloadAuto,
-			g_Options->GetKeepHistory(),
-			nzbInfo->GetAvoidHistory() ? 1 : 0,
-			g_Options->GetDupeCheck() ? 1 : 0,
-			(int)nzbInfo->GetDupeMode(),
-			(int)dmForce,
-			DupeCoordinator::FailsOver(nzbInfo) ? 1 : 0,
-			(int)nzbInfo->GetDeleteStatus(),
-			(int)NzbInfo::dsNone,
-			(int)NzbInfo::dsHealth,
-			(int)NzbInfo::dsBad,
-			(int)NzbInfo::dsScan,
-			(int)NzbInfo::dsCopy,
-			&addToHistoryInt,
-			&callDupeCompletedInt,
-			&enqueueDeletedScriptInt,
-			&needSaveInt);
-		bool addToHistory = addToHistoryInt != 0;
+		bool downloadDupe = nzbInfo->GetDupeHint() == NzbInfo::dhRedownloadAuto;
+		bool addToHistory = g_Options->GetKeepHistory() > 0 && !nzbInfo->GetAvoidHistory();
 		if (addToHistory)
 		{
 			g_HistoryCoordinator->AddToHistory(downloadQueue, nzbInfo);
 		}
 		nzbInfo->SetAvoidHistory(false);
-		bool needSave = needSaveInt != 0;
-		if (callDupeCompletedInt)
+		bool needSave = true;
+		NzbInfo::EDeleteStatus deleteStatus = nzbInfo->GetDeleteStatus();
+		if (g_Options->GetDupeCheck() &&
+			(nzbInfo->GetDupeMode() != dmForce || DupeCoordinator::FailsOver(nzbInfo)) &&
+			(deleteStatus == NzbInfo::dsNone ||
+				deleteStatus == NzbInfo::dsHealth ||
+				deleteStatus == NzbInfo::dsBad ||
+				deleteStatus == NzbInfo::dsScan ||
+				(deleteStatus == NzbInfo::dsCopy && downloadDupe)))
 		{
 			g_DupeCoordinator->NzbCompleted(downloadQueue, nzbInfo);
-			needSave = true;
 		}
-		if (enqueueDeletedScriptInt)
+		if (deleteStatus > NzbInfo::dsNone &&
+			deleteStatus != NzbInfo::dsHealth &&
+			deleteStatus != NzbInfo::dsBad)
 		{
 			g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDeleted);
 		}
@@ -33436,16 +33381,10 @@ private:
 
 	void DeleteCleanup(NzbInfo* nzbInfo)
 	{
-		int cleanupMode = nzbget_rs_prepost_classify_delete_cleanup_mode(
-			nzbInfo->GetCleanupDisk() ? 1 : 0,
-			(int)nzbInfo->GetDeleteStatus(),
-			(int)NzbInfo::dsDupe,
-			nzbInfo->GetParking() ? 1 : 0,
-			nzbInfo->GetSkipDiskWrite() ? 1 : 0,
-			g_Options->GetSkipWrite() ? 1 : 0);
-		if (cleanupMode != 0)
+		if (nzbInfo->GetCleanupDisk() ||
+			(nzbInfo->GetDeleteStatus() == NzbInfo::dsDupe && !nzbInfo->GetParking()))
 		{
-			if (cleanupMode == 1)
+			if (nzbInfo->GetSkipDiskWrite() || g_Options->GetSkipWrite())
 			{
 				if (FileSystem::DirectoryExists(nzbInfo->GetDestDir()))
 				{
@@ -33510,44 +33449,38 @@ private:
 		for (NzbInfo* postJob : m_activeJobs)
 		{
 			PostInfo* postInfo = postJob->GetPostInfo();
+			NzbInfo* nzbInfo = postInfo->GetNzbInfo();
 
-			int newForceParFull = postInfo->GetForceParFull() ? 1 : 0;
-			int reqAction = nzbget_rs_prepost_classify_request_par_action(
-				postInfo->GetRequestParCheck() ? 1 : 0,
-				(int)postInfo->GetNzbInfo()->GetParStatus(),
-				(int)NzbInfo::psSkipped,
-				postInfo->GetForceRepair() ? 1 : 0,
-				postInfo->GetNzbInfo()->GetParFull() ? 1 : 0,
-				(int)g_Options->GetParCheck(),
-				(int)Options::pcManual,
-				newForceParFull,
-				postInfo->GetNzbInfo()->GetFileList()->empty() ? 1 : 0,
-				&newForceParFull);
-			if (reqAction == 1)
+			if (postInfo->GetRequestParCheck() &&
+				(nzbInfo->GetParStatus() <= NzbInfo::psSkipped ||
+					(postInfo->GetForceRepair() && !nzbInfo->GetParFull())) &&
+				g_Options->GetParCheck() != Options::pcManual)
 			{
-				postInfo->SetForceParFull(newForceParFull != 0);
-				postInfo->GetNzbInfo()->SetParStatus(NzbInfo::psNone);
+				postInfo->SetForceParFull(postInfo->GetForceParFull() || nzbInfo->GetParStatus() > NzbInfo::psSkipped);
+				nzbInfo->SetParStatus(NzbInfo::psNone);
 				postInfo->SetRequestParCheck(false);
-				postInfo->GetNzbInfo()->GetScriptStatuses()->clear();
+				nzbInfo->GetScriptStatuses()->clear();
 				postInfo->SetStage(PostInfo::ptQueued);
 				postInfo->SetWorking(false);
 			}
-			else if (reqAction == 2 || reqAction == 3)
+			else if (postInfo->GetRequestParCheck() &&
+				nzbInfo->GetParStatus() <= NzbInfo::psSkipped &&
+				g_Options->GetParCheck() == Options::pcManual)
 			{
 				postInfo->SetRequestParCheck(false);
-				postInfo->GetNzbInfo()->SetParStatus(NzbInfo::psManual);
+				nzbInfo->SetParStatus(NzbInfo::psManual);
 
-				if (reqAction == 2)
+				if (!nzbInfo->GetFileList()->empty())
 				{
-					postInfo->GetNzbInfo()->PrintMessage(Message::mkInfo,
-						"Downloading all remaining files for manual par-check for %s", postInfo->GetNzbInfo()->GetName());
-					downloadQueue->EditEntry(postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupResume, nullptr);
+					nzbInfo->PrintMessage(Message::mkInfo,
+						"Downloading all remaining files for manual par-check for %s", nzbInfo->GetName());
+					downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupResume, nullptr);
 					postInfo->SetStage(PostInfo::ptFinished);
 				}
 				else
 				{
-					postInfo->GetNzbInfo()->PrintMessage(Message::mkInfo,
-						"There are no par-files remain for download for %s", postInfo->GetNzbInfo()->GetName());
+					nzbInfo->PrintMessage(Message::mkInfo,
+						"There are no par-files remain for download for %s", nzbInfo->GetName());
 				}
 				postInfo->SetWorking(false);
 			}
@@ -33562,25 +33495,8 @@ private:
 			[processor = this, downloadQueue](NzbInfo* postJob)
 			{
 				PostInfo* postInfo = postJob->GetPostInfo();
-				bool hasRunningThread = postInfo->GetPostThread() && postInfo->GetPostThread()->IsRunning();
-				int64_t curTime = (!postInfo->GetWorking() && !hasRunningThread && postInfo->GetStartTime() > 0)
-					? (int64_t)Util::CurrentTime()
-					: 0;
-				int updateTotalSec = 0;
-				int isCompleted = 0;
-				int newTotalSec = postJob->GetPostTotalSec();
-				if (nzbget_rs_prepost_eval_cleanup_job_state(
-					postInfo->GetWorking() ? 1 : 0,
-					hasRunningThread ? 1 : 0,
-					(int)postInfo->GetStage(),
-					(int)PostInfo::ptFinished,
-					postInfo->GetDeleted() ? 1 : 0,
-					(int64_t)postInfo->GetStartTime(),
-					curTime,
-					postJob->GetPostTotalSec(),
-					&updateTotalSec,
-					&isCompleted,
-					&newTotalSec) != 0)
+				if (!postInfo->GetWorking() &&
+					!(postInfo->GetPostThread() && postInfo->GetPostThread()->IsRunning()))
 				{
 					delete postInfo->GetPostThread();
 					postInfo->SetPostThread(nullptr);
@@ -33590,13 +33506,14 @@ private:
 					postInfo->SetFileProgress(0);
 					postInfo->SetProgressLabel("");
 
-					if (updateTotalSec != 0)
+					if (postInfo->GetStartTime() > 0)
 					{
-						postJob->SetPostTotalSec(newTotalSec);
+						postJob->SetPostTotalSec(postJob->GetPostTotalSec() +
+							(int)(Util::CurrentTime() - postInfo->GetStartTime()));
 						postInfo->SetStartTime(0);
 					}
 
-					if (isCompleted != 0)
+					if (postInfo->GetStage() == PostInfo::ptFinished || postInfo->GetDeleted())
 					{
 						processor->JobCompleted(downloadQueue, postInfo);
 					}
@@ -33614,23 +33531,42 @@ private:
 	bool CanRunMoreJobs(bool* allowPar)
 	{
 		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-		std::vector<int> stages;
-		stages.reserve(m_activeJobs.size());
+		int totalJobs = (int)m_activeJobs.size();
+		int parJobs = 0;
+		int otherJobs = 0;
+		bool repairJobs = false;
 		for (NzbInfo* postJob : m_activeJobs)
 		{
-			stages.push_back((int)postJob->GetPostInfo()->GetStage());
+			PostInfo::EStage stage = postJob->GetPostInfo()->GetStage();
+			bool parJob = stage >= PostInfo::ptLoadingPars && stage <= PostInfo::ptVerifyingRepaired;
+			repairJobs |= stage == PostInfo::ptRepairing;
+			if (parJob)
+			{
+				parJobs++;
+			}
+			else
+			{
+				otherJobs++;
+			}
 		}
-		int allowParInt = 0;
-		int canRun = nzbget_rs_prepost_can_run_more_jobs(
-			stages.data(),
-			stages.size(),
-			(int)PostInfo::ptLoadingPars,
-			(int)PostInfo::ptVerifyingRepaired,
-			(int)PostInfo::ptRepairing,
-			(int)g_Options->GetPostStrategy(),
-			&allowParInt);
-		*allowPar = allowParInt != 0;
-		return canRun != 0;
+
+		switch (g_Options->GetPostStrategy())
+		{
+			case Options::ppSequential:
+				*allowPar = true;
+				return totalJobs == 0;
+			case Options::ppBalanced:
+				*allowPar = parJobs == 0;
+				return otherJobs == 0 && (parJobs == 0 || repairJobs);
+			case Options::ppAggressive:
+				*allowPar = parJobs < 1;
+				return totalJobs < 3;
+			case Options::ppRocket:
+				*allowPar = parJobs < 2;
+				return totalJobs < 6;
+		}
+		*allowPar = false;
+		return false;
 	}
 
 	NzbInfo* PickNextJob(DownloadQueue* downloadQueue, bool allowPar)
@@ -33639,41 +33575,24 @@ private:
 		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
 
 		bool hasActiveUnpack = HasActiveUnpack(downloadQueue);
+		bool pausePostProcess = g_WorkState->GetPausePostProcess();
 
-		std::vector<NzbInfo*> items;
-		std::vector<NzbgetRsPostJobCandidate> candidates;
-		items.reserve(downloadQueue->GetQueue()->size());
-		candidates.reserve(downloadQueue->GetQueue()->size());
 		for (NzbInfo* nzbInfo1 : downloadQueue->GetQueue())
 		{
-			items.push_back(nzbInfo1);
-			NzbgetRsPostJobCandidate c{};
 			PostInfo* pi = nzbInfo1->GetPostInfo();
-			c.has_post_info = pi ? 1 : 0;
-			c.working = (pi && pi->GetWorking()) ? 1 : 0;
-			c.direct_unpack_running = nzbInfo1->GetDirectUnpackStatus() == NzbInfo::nsRunning ? 1 : 0;
-			c.has_live_repair_thread = nzbInfo1->GetLiveRepairThread() != nullptr ? 1 : 0;
-			c.priority = nzbInfo1->GetPriority();
-			c.force_priority = nzbInfo1->GetForcePriority() ? 1 : 0;
-			c.need_par_check = (pi && pi->GetNeedParCheck()) ? 1 : 0;
-			c.need_unpack = (pi && pi->GetNeedUnpack()) ? 1 : 0;
-			if (pi && !pi->GetWorking() && !c.direct_unpack_running && !c.has_live_repair_thread)
+			if (pi && !pi->GetWorking() &&
+				nzbInfo1->GetDirectUnpackStatus() != NzbInfo::nsRunning &&
+				!nzbInfo1->GetLiveRepairThread() &&
+				(!nzbInfo || nzbInfo1->GetPriority() > nzbInfo->GetPriority()) &&
+				(!pausePostProcess || nzbInfo1->GetForcePriority()) &&
+				(allowPar || !pi->GetNeedParCheck()) &&
+				(!hasActiveUnpack || !pi->GetNeedUnpack()) &&
+				!g_QueueScriptCoordinator->HasJob(nzbInfo1->GetId(), nullptr) &&
+				std::find(m_activeJobs.begin(), m_activeJobs.end(), nzbInfo1) == m_activeJobs.end() &&
+				nzbInfo1->IsDownloadCompleted(true))
 			{
-				c.has_queue_script_job = g_QueueScriptCoordinator->HasJob(nzbInfo1->GetId(), nullptr) ? 1 : 0;
-				c.in_active_jobs = std::find(m_activeJobs.begin(), m_activeJobs.end(), nzbInfo1) != m_activeJobs.end() ? 1 : 0;
-				c.download_completed = nzbInfo1->IsDownloadCompleted(true) ? 1 : 0;
+				nzbInfo = nzbInfo1;
 			}
-			candidates.push_back(c);
-		}
-		int picked = nzbget_rs_prepost_pick_next_post_job(
-			candidates.data(),
-			candidates.size(),
-			allowPar ? 1 : 0,
-			hasActiveUnpack ? 1 : 0,
-			g_WorkState->GetPausePostProcess() ? 1 : 0);
-		if (picked >= 0 && (size_t)picked < items.size())
-		{
-			nzbInfo = items[(size_t)picked];
 		}
 
 		return nzbInfo;
@@ -33881,43 +33800,41 @@ private:
 			return;
 		}
 	
-		int skippedParAction = nzbget_rs_prepost_classify_skipped_par_health(
-			(int)nzbInfo->GetParStatus(),
-			(int)NzbInfo::psSkipped,
-			(int)g_Options->GetParScan(),
-			(int)Options::psDupe,
-			nzbInfo->CalcHealth(),
-			nzbInfo->CalcCriticalHealth(false),
-			nzbInfo->GetFailedSize(),
-			nzbInfo->GetParFailedSize());
-		if ((skippedParAction == 1 || skippedParAction == 2) &&
-			ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+		if (nzbInfo->GetParStatus() == NzbInfo::psSkipped)
 		{
-			if (skippedParAction == 1)
+			int health = nzbInfo->CalcHealth();
+			int criticalHealth = nzbInfo->CalcCriticalHealth(false);
+			if (((g_Options->GetParScan() != Options::psDupe &&
+				health < criticalHealth && criticalHealth < 1000) ||
+				health == 0) &&
+				ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
 			{
-				nzbInfo->PrintMessage(Message::mkWarning,
-					"Skipping par-check for %s due to health 0%%", nzbInfo->GetName());
+				if (health == 0)
+				{
+					nzbInfo->PrintMessage(Message::mkWarning,
+						"Skipping par-check for %s due to health 0%%", nzbInfo->GetName());
+				}
+				else
+				{
+					nzbInfo->PrintMessage(Message::mkWarning,
+						"Skipping par-check for %s due to health %.1f%% below critical %.1f%%",
+						nzbInfo->GetName(),
+						health / 10.0,
+						criticalHealth / 10.0);
+				}
+				nzbInfo->SetParStatus(NzbInfo::psFailure);
+				return;
 			}
-			else
+			if (nzbInfo->GetFailedSize() - nzbInfo->GetParFailedSize() > 0 &&
+				ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
 			{
-				nzbInfo->PrintMessage(Message::mkWarning,
-					"Skipping par-check for %s due to health %.1f%% below critical %.1f%%",
+				nzbInfo->PrintMessage(Message::mkInfo,
+					"Collection %s with health %.1f%% needs par-check",
 					nzbInfo->GetName(),
-					nzbInfo->CalcHealth() / 10.0,
-					nzbInfo->CalcCriticalHealth(false) / 10.0);
+					health / 10.0);
+				postInfo->SetRequestParCheck(true);
+				return;
 			}
-			nzbInfo->SetParStatus(NzbInfo::psFailure);
-			return;
-		}
-		if (skippedParAction == 3 &&
-			ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
-		{
-			nzbInfo->PrintMessage(Message::mkInfo,
-				"Collection %s with health %.1f%% needs par-check",
-				nzbInfo->GetName(),
-				nzbInfo->CalcHealth() / 10.0);
-			postInfo->SetRequestParCheck(true);
-			return;
 		}
 	#endif
 
@@ -33934,23 +33851,13 @@ private:
 		}
 
 		NzbParameter* unpackParameter = nzbInfo->GetParameters()->Find("*Unpack:");
-		int wantUnpackInt = 0;
-		int unpackInt = 0;
-		bool startRarRename = nzbget_rs_prepost_eval_want_unpack_and_rar_rename(
-			unpackParameter != nullptr ? 1 : 0,
-			unpackParameter ? unpackParameter->GetValue() : "",
-			(int)nzbInfo->GetUnpackStatus(),
-			(int)NzbInfo::usNone,
-			(int)nzbInfo->GetDeleteStatus(),
-			(int)NzbInfo::dsNone,
-			(int)nzbInfo->GetRarRenameStatus(),
-			(int)NzbInfo::rsNone,
-			g_Options->GetRarRename() ? 1 : 0,
-			&wantUnpackInt,
-			&unpackInt) != 0;
-		bool wantUnpack = wantUnpackInt != 0;
-		bool unpack = unpackInt != 0;
-		if (startRarRename)
+		bool wantUnpack = !(unpackParameter && !strcasecmp(unpackParameter->GetValue(), "no"));
+		bool unpack = wantUnpack &&
+			nzbInfo->GetUnpackStatus() == NzbInfo::usNone &&
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone;
+		if (nzbInfo->GetRarRenameStatus() == NzbInfo::rsNone &&
+			unpack &&
+			g_Options->GetRarRename())
 		{
 			EnterStage(downloadQueue, postInfo, PostInfo::ptRarRenaming);
 			RenameController::StartJob(postInfo, RenameController::jkRar);
@@ -33972,39 +33879,76 @@ private:
 		}
 	#endif
 
-		NzbgetRsPostStageDecision stageDec{};
-		nzbget_rs_prepost_eval_post_stages(
-			wantUnpack ? 1 : 0,
-			(int)nzbInfo->GetUnpackStatus(),
-			(int)nzbInfo->GetDeleteStatus(),
-			(int)nzbInfo->GetParStatus(),
-			(int)nzbInfo->GetCleanupStatus(),
-			!Util::EmptyStr(g_Options->GetExtCleanupDisk()) ? 1 : 0,
-			nzbInfo->CalcHealth(),
-			(int)nzbInfo->GetMoveStatus(),
-			nzbInfo->GetDestDir(),
-			g_Options->GetInterDir(),
-			PATH_SEPARATOR,
-			(int)nzbInfo->GetDirectUnpackStatus(),
-			g_Options->GetPostDownloadRename() ? 1 : 0,
-			(int)nzbInfo->GetPostDownloadRenamingStatus(),
-			!Util::EmptyStr(nzbInfo->GetDestDir()) ? 1 : 0,
-			!Util::EmptyStr(nzbInfo->GetName()) ? 1 : 0,
-			g_Options->GetRenameAfterUnpack() ? 1 : 0,
-			(int)nzbInfo->GetPostUnpackRenamingStatus(),
-			&stageDec);
-		if (stageDec.skip_unpack_due_to_par)
+		NzbInfo::EParStatus parStatus = nzbInfo->GetParStatus();
+		NzbInfo::EPostUnpackStatus unpackStatus = nzbInfo->GetUnpackStatus();
+		int health = nzbInfo->CalcHealth();
+		bool parFailed = parStatus == NzbInfo::psFailure ||
+			parStatus == NzbInfo::psRepairPossible ||
+			parStatus == NzbInfo::psManual;
+
+		bool cleanup = !unpack &&
+			wantUnpack &&
+			nzbInfo->GetCleanupStatus() == NzbInfo::csNone &&
+			!Util::EmptyStr(g_Options->GetExtCleanupDisk()) &&
+			((parStatus == NzbInfo::psSuccess &&
+				unpackStatus != NzbInfo::usFailure &&
+				unpackStatus != NzbInfo::usSpace &&
+				unpackStatus != NzbInfo::usPassword) ||
+				(unpackStatus == NzbInfo::usSuccess && parStatus != NzbInfo::psFailure) ||
+				((unpackStatus == NzbInfo::usNone || unpackStatus == NzbInfo::usSkipped) &&
+					(parStatus == NzbInfo::psNone || parStatus == NzbInfo::psSkipped) &&
+					health == 1000));
+
+		const char* destDir = nzbInfo->GetDestDir();
+		const char* interDir = g_Options->GetInterDir();
+		size_t interLen = strlen(interDir);
+		bool inInterDir = interLen > 0 &&
+			strlen(destDir) > interLen &&
+			!strncmp(destDir, interDir, interLen) &&
+			destDir[interLen] == PATH_SEPARATOR;
+
+		bool moveInter = !unpack &&
+			nzbInfo->GetMoveStatus() == NzbInfo::msNone &&
+			unpackStatus != NzbInfo::usFailure &&
+			unpackStatus != NzbInfo::usSpace &&
+			unpackStatus != NzbInfo::usPassword &&
+			parStatus != NzbInfo::psFailure &&
+			parStatus != NzbInfo::psManual &&
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
+			!((unpackStatus == NzbInfo::usNone || unpackStatus == NzbInfo::usSkipped) &&
+				(parStatus == NzbInfo::psNone || parStatus == NzbInfo::psSkipped) &&
+				health < 1000) &&
+			inInterDir;
+
+		if (unpack && parFailed && nzbInfo->GetDirectUnpackStatus() != NzbInfo::nsSuccess)
 		{
 			nzbInfo->PrintMessage(Message::mkWarning,
 				"Skipping unpack for %s due to %s", nzbInfo->GetName(),
-				nzbInfo->GetParStatus() == NzbInfo::psManual ? "required par-repair" : "par-failure");
+				parStatus == NzbInfo::psManual ? "required par-repair" : "par-failure");
 			nzbInfo->SetUnpackStatus(NzbInfo::usSkipped);
+			unpackStatus = NzbInfo::usSkipped;
+			unpack = false;
 		}
-		unpack = stageDec.unpack != 0;
-		bool cleanup = stageDec.cleanup != 0;
-		bool moveInter = stageDec.move_inter != 0;
-		bool postDownloadRenaming = stageDec.post_download_renaming != 0;
-		bool postUnpackRenaming = stageDec.post_unpack_renaming != 0;
+
+		bool hasDestAndName = !Util::EmptyStr(destDir) && !Util::EmptyStr(nzbInfo->GetName());
+		NzbInfo::EMoveStatus moveStatus = nzbInfo->GetMoveStatus();
+		bool moveDoneOrSkipped = !moveInter &&
+			(moveStatus == NzbInfo::msSuccess || moveStatus == NzbInfo::msNone);
+		bool parNotFailedOrManual = parStatus != NzbInfo::psFailure && parStatus != NzbInfo::psManual;
+
+		bool postDownloadRenaming = g_Options->GetPostDownloadRename() &&
+			nzbInfo->GetPostDownloadRenamingStatus() == NzbInfo::PostDownloadRenamingStatus::None &&
+			hasDestAndName &&
+			(unpackStatus == NzbInfo::usNone || unpackStatus == NzbInfo::usSkipped) &&
+			parNotFailedOrManual &&
+			moveDoneOrSkipped;
+
+		bool postUnpackRenaming = g_Options->GetRenameAfterUnpack() &&
+			nzbInfo->GetPostUnpackRenamingStatus() == NzbInfo::PostUnpackRenamingStatus::None &&
+			hasDestAndName &&
+			unpackStatus == NzbInfo::usSuccess &&
+			parNotFailedOrManual &&
+			moveDoneOrSkipped;
 
 		if (unpack)
 		{
@@ -34069,18 +34013,24 @@ private:
 	{
 		bool needPause = false;
 		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
-		std::vector<int> stages;
-		stages.reserve(m_activeJobs.size());
 		for (NzbInfo* postJob : m_activeJobs)
 		{
-			stages.push_back((int)postJob->GetPostInfo()->GetStage());
+			PostInfo::EStage stage = postJob->GetPostInfo()->GetStage();
+			if ((stage >= PostInfo::ptLoadingPars && stage <= PostInfo::ptParRenaming) ||
+				stage == PostInfo::ptStreamRepairing)
+			{
+				needPause |= g_Options->GetParPauseQueue();
+			}
+			else if ((stage >= PostInfo::ptRarRenaming && stage <= PostInfo::ptPostUnpackRenaming) ||
+				stage == PostInfo::ptPostDownloadRenaming)
+			{
+				needPause |= g_Options->GetUnpackPauseQueue();
+			}
+			else if (stage == PostInfo::ptExecutingScript)
+			{
+				needPause |= g_Options->GetScriptPauseQueue();
+			}
 		}
-		needPause = nzbget_rs_prepost_calc_post_pause_state(
-			stages.data(),
-			stages.size(),
-			g_Options->GetParPauseQueue() ? 1 : 0,
-			g_Options->GetUnpackPauseQueue() ? 1 : 0,
-			g_Options->GetScriptPauseQueue() ? 1 : 0) != 0;
 
 		if (needPause && !g_WorkState->GetTempPauseDownload())
 		{
@@ -34177,18 +34127,15 @@ private:
 			g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeFileDownloaded);
 		}
 
-		int duAction = nzbget_rs_prepost_classify_file_downloaded_direct_unpack(
-			g_Options->GetDirectUnpack() ? 1 : 0,
-			g_Options->GetRawArticle() ? 1 : 0,
-			g_Options->GetSkipWrite() ? 1 : 0,
-			nzbInfo->GetSkipDiskWrite() ? 1 : 0,
-			(int)nzbInfo->GetDirectUnpackStatus(),
-			(int)NzbInfo::nsNone,
-			(int)NzbInfo::nsRunning,
-			(int)nzbInfo->GetDirectRenameStatus(),
-			(int)NzbInfo::tsRunning,
-			nzbInfo->GetUnpackThread() != nullptr ? 1 : 0);
-		if (duAction == 1)
+		if (!g_Options->GetDirectUnpack() ||
+			g_Options->GetRawArticle() ||
+			g_Options->GetSkipWrite() ||
+			nzbInfo->GetSkipDiskWrite())
+		{
+			return;
+		}
+		if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsNone &&
+			nzbInfo->GetDirectRenameStatus() != NzbInfo::tsRunning)
 		{
 			bool allowPar;
 			if (DirectUnpack::IsArchiveFilename(fileInfo->GetFilename()) &&
@@ -34203,7 +34150,8 @@ private:
 				}
 			}
 		}
-		else if (duAction == 2)
+		else if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsRunning &&
+			nzbInfo->GetUnpackThread())
 		{
 			((DirectUnpack*)nzbInfo->GetUnpackThread())->FileDownloaded(downloadQueue, fileInfo);
 		}

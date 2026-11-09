@@ -5667,6 +5667,66 @@ extern System::SystemInfo* g_SystemInfo;
 #endif
 
 
+// sockets aren't inherited by the scripts nzbget starts: a script that outlived
+// the program kept the control port listening, and copies of client sockets kept
+// connections from closing
+#ifdef SOCK_CLOEXEC
+#define SOCKET_CLOEXEC SOCK_CLOEXEC
+#else
+#define SOCKET_CLOEXEC 0
+#endif
+
+// a socket is close-on-exec, so that the scripts nzbget starts don't inherit
+// its connections and listeners. socket() takes the flag where SOCK_CLOEXEC
+// exists, accept4() on Linux; elsewhere (macOS has neither) it is set afterwards
+static inline void SetCloseOnExec(SOCKET socket)
+{
+	if (socket != INVALID_SOCKET)
+	{
+		fcntl(socket, F_SETFD, fcntl(socket, F_GETFD, 0) | FD_CLOEXEC);
+	}
+}
+
+#include <poll.h>
+
+static const int CONNECTION_READBUFFER_SIZE = 1024;
+// past the data read into a buffer: a decoder writing into it (uuencoded lines) may
+// write up to one line's worth more than it was given
+static const int DECODE_SLACK = 128;
+
+inline void closesocket_gracefully(SOCKET socket)
+{
+	char buf[1024];
+	struct linger linger;
+
+	// Set linger option to avoid socket hanging out after close. This prevent
+	// ephemeral port exhaust problem under high QPS.
+	linger.l_onoff = 1;
+	linger.l_linger = 1;
+	setsockopt(socket, SOL_SOCKET, SO_LINGER, (char *) &linger, sizeof(linger));
+
+	// Send FIN to the client
+	shutdown(socket, SHUT_WR);
+
+	// Set non-blocking mode
+	int flags;
+	flags = fcntl(socket, F_GETFL, 0);
+	fcntl(socket, F_SETFL, flags | O_NONBLOCK);
+
+	// Read and discard pending incoming data. If we do not do that and close the
+	// socket, the data in the send buffer may be discarded. This
+	// behaviour is seen on Windows, when client keeps sending data
+	// when server decides to close the connection; then when client
+	// does recv() it gets no data back.
+	int n;
+	do {
+		n = recv(socket, buf, sizeof(buf), 0);
+	} while (n > 0);
+
+	// Now we know that our FIN is ACK-ed, safe to close
+	closesocket(socket);
+}
+
 class Connection
 {
 public:
@@ -5686,22 +5746,486 @@ public:
 		ipV6 = 6
 	};
 
-	Connection(const char* host, int port, bool tls);
-	Connection(SOCKET socket, bool tls);
-	virtual ~Connection();
-	static void Init();
-	static void Final();
-	virtual bool Connect();
-	virtual bool Disconnect();
-	bool Bind();
-	bool Send(const char* buffer, int size);
-	bool Recv(char* buffer, int size);
-	int TryRecv(char* buffer, int size);
-	char* ReadLine(char* buffer, int size, int* bytesRead);
-	void ReadBuffer(char** buffer, int *bufLen);
-	int WriteLine(const char* buffer);
-	std::unique_ptr<Connection> Accept();
-	void Cancel();
+	static void Init()
+	{
+		debug("Initializing global connection data");
+	}
+
+	static void Final()
+	{
+	}
+
+	Connection(const char* host, int port, bool tls) :
+		m_host(host ? host : ""), m_port(port), m_tls(tls)
+	{
+		debug("Creating Connection");
+
+		m_readBuf.Reserve(nzbget_rs_dqh_conn_calc_read_buffer_cap(
+			CONNECTION_READBUFFER_SIZE, DECODE_SLACK));
+#ifndef DISABLE_TLS
+		m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
+#endif
+	}
+
+	Connection(SOCKET socket, bool tls)
+	{
+		debug("Creating Connection");
+
+		m_port = 0;
+		m_tls = tls;
+		m_status = csConnected;
+		m_socket = socket;
+		m_host = GetRemoteAddr();
+		m_bufAvail = 0;
+		m_timeout = 60;
+		m_suppressErrors = true;
+		m_readBuf.Reserve(nzbget_rs_dqh_conn_calc_read_buffer_cap(
+			CONNECTION_READBUFFER_SIZE, DECODE_SLACK));
+#ifndef DISABLE_TLS
+		m_tlsSocket = nullptr;
+		m_tlsError = false;
+		m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
+#endif
+	}
+
+	virtual ~Connection()
+	{
+		debug("Destroying Connection");
+
+		Connection::Disconnect();
+	}
+
+	void SetSuppressErrors(bool suppressErrors)
+	{
+		m_suppressErrors = suppressErrors;
+#ifndef DISABLE_TLS
+		if (m_tlsSocket)
+		{
+			m_tlsSocket->SetSuppressErrors(suppressErrors);
+		}
+#endif
+	}
+
+	virtual bool Connect()
+	{
+		debug("Connecting");
+
+		if (m_status == csConnected)
+		{
+			return true;
+		}
+
+		bool res = DoConnect();
+
+		if (res)
+		{
+			m_status = csConnected;
+		}
+		else
+		{
+			DoDisconnect();
+		}
+
+		return res;
+	}
+
+	virtual bool Disconnect()
+	{
+		debug("Disconnecting");
+
+		if (m_status == csDisconnected)
+		{
+			return true;
+		}
+
+		DoDisconnect();
+
+		m_status = csDisconnected;
+		m_socket = INVALID_SOCKET;
+		m_bufAvail = 0;
+
+		return true;
+	}
+
+	bool Bind()
+	{
+		debug("Binding");
+
+		if (m_status == csListening)
+		{
+			return true;
+		}
+
+		int errcode = 0;
+
+		if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
+		{
+			struct sockaddr_un addr;
+			addr.sun_family = AF_UNIX;
+			if (nzbget_rs_dqh_conn_is_unix_path_too_long(m_host.size(), sizeof(addr.sun_path)) != 0)
+			{
+				ReportError("Binding socket failed for %s: name too long\n", m_host.c_str(), false);
+				return false;
+			}
+			strcpy(addr.sun_path, m_host.c_str());
+
+			m_socket = socket(PF_UNIX, SOCK_STREAM | SOCKET_CLOEXEC, 0);
+#ifndef SOCK_CLOEXEC
+			SetCloseOnExec(m_socket);
+#endif
+			if (m_socket == INVALID_SOCKET)
+			{
+				ReportError("Socket creation failed for %s", m_host.c_str(), true);
+				return false;
+			}
+
+			unlink(m_host.c_str());
+
+			if (bind(m_socket, (struct sockaddr *)&addr, sizeof(addr)) == -1)
+			{
+				// Connection failed
+				closesocket(m_socket);
+				m_socket = INVALID_SOCKET;
+			}
+		}
+		else
+		{
+#ifdef HAVE_GETADDRINFO
+			struct addrinfo addr_hints, *addr_list, *addr;
+
+			memset(&addr_hints, 0, sizeof(addr_hints));
+			addr_hints.ai_family = nzbget_rs_ccm_conn_select_ai_family(
+				(int)m_ipVersion, (int)ipV4, (int)ipV6, AF_INET, AF_INET6, AF_UNSPEC);
+			addr_hints.ai_socktype = SOCK_STREAM;
+			addr_hints.ai_flags = AI_PASSIVE;    // For wildcard IP address
+
+			NzbgetRsBuf portStrBuf = nzbget_rs_dqh_conn_format_port_str(m_port);
+			BString<100> portStr("%s", portStrBuf.data ? portStrBuf.data : "0");
+			nzbget_rs_free(portStrBuf);
+
+			int res = getaddrinfo(m_host.c_str(), portStr, &addr_hints, &addr_list);
+			if (res != 0)
+			{
+				int gaiErr = nzbget_rs_dqh_conn_resolve_gai_report_err_code(res, EAI_SYSTEM);
+				ReportError("Could not resolve hostname %s", m_host.c_str(), true,
+					gaiErr,
+					gaiErr != 0 ? gai_strerror(res) : nullptr);
+				return false;
+			}
+
+			m_socket = INVALID_SOCKET;
+			for (addr = addr_list; addr != nullptr; addr = addr->ai_next)
+			{
+				m_socket = socket(addr->ai_family, addr->ai_socktype | SOCKET_CLOEXEC, addr->ai_protocol);
+#ifndef SOCK_CLOEXEC
+				SetCloseOnExec(m_socket);
+#endif
+				if (m_socket != INVALID_SOCKET)
+				{
+					int opt = 1;
+					setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
+					res = bind(m_socket, addr->ai_addr, addr->ai_addrlen);
+					if (res != -1)
+					{
+						// Connection established
+						break;
+					}
+					// Connection failed
+					errcode = GetLastNetworkError();
+					closesocket(m_socket);
+					m_socket = INVALID_SOCKET;
+				}
+			}
+
+			freeaddrinfo(addr_list);
+
+#else
+
+			struct sockaddr_in	sSocketAddress;
+			memset(&sSocketAddress, 0, sizeof(sSocketAddress));
+			sSocketAddress.sin_family = AF_INET;
+			if (m_host.empty())
+			{
+				sSocketAddress.sin_addr.s_addr = htonl(INADDR_ANY);
+			}
+			else
+			{
+				sSocketAddress.sin_addr.s_addr = ResolveHostAddr(m_host.c_str());
+				if (sSocketAddress.sin_addr.s_addr == INADDR_NONE)
+				{
+					return false;
+				}
+			}
+			sSocketAddress.sin_port = htons(m_port);
+
+			m_socket = socket(PF_INET, SOCK_STREAM | SOCKET_CLOEXEC, 0);
+#ifndef SOCK_CLOEXEC
+			SetCloseOnExec(m_socket);
+#endif
+			if (m_socket == INVALID_SOCKET)
+			{
+				ReportError("Socket creation failed for %s", m_host.c_str(), true);
+				return false;
+			}
+
+			int opt = 1;
+			setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
+
+			int res = bind(m_socket, (struct sockaddr *) &sSocketAddress, sizeof(sSocketAddress));
+			if (res == -1)
+			{
+				// Connection failed
+				errcode = GetLastNetworkError();
+				closesocket(m_socket);
+				m_socket = INVALID_SOCKET;
+			}
+#endif
+		}
+
+		if (m_socket == INVALID_SOCKET)
+		{
+			ReportError("Binding socket failed for %s", m_host.c_str(), true, errcode);
+			return false;
+		}
+
+		if (listen(m_socket, 100) < 0)
+		{
+			ReportError("Listen on socket failed for %s", m_host.c_str(), true);
+			closesocket(m_socket);
+			m_socket = INVALID_SOCKET;
+			return false;
+		}
+
+		m_status = csListening;
+
+		return true;
+	}
+
+	int WriteLine(const char* buffer)
+	{
+		//debug("Connection::WriteLine");
+
+		if (m_status != csConnected)
+		{
+			return -1;
+		}
+
+		int res = send(m_socket, buffer, strlen(buffer), 0);
+		if (res <= 0)
+		{
+			m_status = csBroken;
+		}
+
+		return res;
+	}
+
+	bool Send(const char* buffer, int size)
+	{
+		debug("Sending data");
+
+		if (m_status != csConnected)
+		{
+			return false;
+		}
+
+		int bytesSent = 0;
+		while (bytesSent < size)
+		{
+			int res = send(m_socket, buffer + bytesSent, size-bytesSent, 0);
+			if (res <= 0)
+			{
+				m_status = csBroken;
+				return false;
+			}
+			bytesSent += res;
+		}
+
+		return true;
+	}
+
+	char* ReadLine(char* buffer, int size, int* bytesReadOut)
+	{
+		if (m_status != csConnected)
+		{
+			return nullptr;
+		}
+
+		char* inpBuffer = buffer;
+		size--; // for trailing '0'
+		int bytesRead = 0;
+		int bufAvail = m_bufAvail; // local variable is faster
+		char* bufPtr = m_bufPtr; // local variable is faster
+		while (size)
+		{
+			if (!bufAvail)
+			{
+				bufAvail = recv(m_socket, m_readBuf, CONNECTION_READBUFFER_SIZE, 0);
+				if (bufAvail < 0)
+				{
+					ReportError("Could not receive data on socket from %s", m_host.c_str(), true);
+					m_status = csBroken;
+					break;
+				}
+				else if (bufAvail == 0)
+				{
+					break;
+				}
+				else
+				{
+					m_totalBytesRead += bufAvail;
+				}
+				bufPtr = m_readBuf;
+				m_readBuf[bufAvail] = '\0';
+			}
+
+			int foundNewline = 0;
+			int len = nzbget_rs_rco_conn_read_line_chunk(bufPtr, bufAvail, size, &foundNewline);
+
+			memcpy(inpBuffer, bufPtr, len);
+			inpBuffer += len;
+			bufPtr += len;
+			bufAvail -= len;
+			bytesRead += len;
+			size -= len;
+
+			if (foundNewline)
+			{
+				break;
+			}
+		}
+		*inpBuffer = '\0';
+
+		m_bufAvail = nzbget_rs_dqh_conn_clamp_buf_avail(bufAvail); // copy back to member
+		m_bufPtr = bufPtr; // copy back to member
+
+		if (bytesReadOut)
+		{
+			*bytesReadOut = bytesRead;
+		}
+
+		if (inpBuffer == buffer)
+		{
+			return nullptr;
+		}
+
+		return buffer;
+	}
+
+	std::unique_ptr<Connection> Accept()
+	{
+		debug("Accepting connection");
+
+		if (m_status != csListening)
+		{
+			return nullptr;
+		}
+
+		m_acceptBusy = false;
+		SOCKET socket;
+		for (;;)
+		{
+#if defined(__linux__) && defined(SOCK_CLOEXEC)
+			socket = accept4(m_socket, nullptr, nullptr, SOCK_CLOEXEC);
+#else
+			socket = accept(m_socket, nullptr, nullptr);
+			SetCloseOnExec(socket);
+#endif
+			if (socket == INVALID_SOCKET && m_status != csCancelled)
+			{
+				// a connection that failed before it was taken: take the next one
+				// (the listener was torn down and rebound for each of these)
+				int err = errno;
+				int enonetVal = 0;
+#ifdef ENONET
+				enonetVal = ENONET;
+#endif
+				int acceptClass = nzbget_rs_rco_conn_classify_accept_errno(
+					err, EINTR, ECONNABORTED, EPROTO, ENETDOWN,
+					ENOPROTOOPT, EHOSTDOWN, EHOSTUNREACH, EOPNOTSUPP,
+					ENETUNREACH, enonetVal, EMFILE, ENFILE, ENOBUFS, ENOMEM);
+				if (acceptClass == 1)
+				{
+					continue;
+				}
+				m_acceptBusy = (acceptClass == 2);
+			}
+			break;
+		}
+		if (socket == INVALID_SOCKET && m_status != csCancelled)
+		{
+			ReportError("Could not accept connection for %s", m_host.c_str(), true);
+		}
+		if (socket == INVALID_SOCKET)
+		{
+			return nullptr;
+		}
+
+		InitSocketOpts(socket);
+
+		// InitSocketOpts() applied the listener's timeout to the new socket:
+		// keep the Connection's own idea of it (used by the poll/select waits)
+		// in step instead of the constructor's default
+		auto acceptedConnection = std::make_unique<Connection>(socket, m_tls);
+		acceptedConnection->SetTimeout(m_timeout);
+		return acceptedConnection;
+	}
+
+	int TryRecv(char* buffer, int size)
+	{
+		//debug("Receiving data");
+
+		memset(buffer, 0, size);
+
+		int received = recv(m_socket, buffer, size, 0);
+
+		if (received < 0)
+		{
+			ReportError("Could not receive data on socket from %s", m_host.c_str(), true);
+		}
+		else
+		{
+			m_totalBytesRead += received;
+		}
+
+		return received;
+	}
+
+	bool Recv(char * buffer, int size)
+	{
+		//debug("Receiving data (full buffer)");
+
+		memset(buffer, 0, size);
+
+		char* bufPtr = (char*)buffer;
+		int NeedBytes = size;
+
+		if (m_bufAvail > 0)
+		{
+			int len = nzbget_rs_ccm_conn_recv_buffered_chunk_len(size, m_bufAvail);
+			memcpy(bufPtr, m_bufPtr, len);
+			bufPtr += len;
+			m_bufPtr += len;
+			m_bufAvail -= len;
+			NeedBytes -= len;
+		}
+
+		// Read from the socket until nothing remains
+		while (NeedBytes > 0)
+		{
+			int received = recv(m_socket, bufPtr, NeedBytes, 0);
+			// Did the recv succeed?
+			if (received <= 0)
+			{
+				ReportError("Could not receive data on socket from %s", m_host.c_str(), true);
+				return false;
+			}
+			bufPtr += received;
+			NeedBytes -= received;
+			m_totalBytesRead += received;
+		}
+		return true;
+	}
+
 	const char* GetHost() const { return m_host.c_str(); }
 	void SetCipher(const char* cipher) { m_cipher = cipher ? cipher : ""; }
 	void SetTimeout(int timeout) { m_timeout = timeout; }
@@ -5719,15 +6243,78 @@ public:
 	// the peer can't be relied on any more (a timeout mid-reply): Disconnect sends
 	// nothing and waits for nothing
 	void SetBroken() { m_status = csBroken; }
-	void SetSuppressErrors(bool suppressErrors);
-	const char* GetRemoteAddr();
 	void SetGracefull(bool gracefull) { m_gracefull = gracefull; }
 	void SetForceClose(bool forceClose) { m_forceClose = forceClose; }
 #ifndef DISABLE_TLS
-	bool StartTls(bool isClient, const char* certFile, const char* keyFile);
 	void SetCertVerifLevel(unsigned int level) { m_certVerifLevel = level; }
+	bool StartTls(bool isClient, const char* certFile, const char* keyFile)
+	{
+		debug("Starting TLS");
+
+		m_tlsSocket = std::make_unique<TlsSocket>(m_socket, isClient, m_host.c_str(), certFile, keyFile, m_cipher.c_str(), m_certVerifLevel);
+		m_tlsSocket->SetSuppressErrors(m_suppressErrors);
+		m_tlsSocket->SetDeadline(m_deadline);
+
+		bool started = m_tlsSocket->Start();
+		m_tlsProbeFailure = m_tlsSocket->GetProbeFailure();
+		return started;
+	}
 #endif
-	int FetchTotalBytesRead();
+	const char* GetRemoteAddr()
+	{
+		if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
+		{
+			return "-";
+		}
+
+		m_remoteAddr.Clear();
+
+		char peerName[1024];
+		int peerNameLength = sizeof(peerName);
+		if (getpeername(m_socket, (sockaddr*)&peerName, (SOCKLEN_T*)&peerNameLength) >= 0)
+		{
+			inet_ntop(((sockaddr_in*)&peerName)->sin_family,
+				((sockaddr_in*)&peerName)->sin_family == AF_INET6 ?
+				(void*)&((sockaddr_in6*)&peerName)->sin6_addr :
+				(void*)&((sockaddr_in*)&peerName)->sin_addr,
+				m_remoteAddr, m_remoteAddr.Capacity());
+			m_remoteAddr[m_remoteAddr.Capacity() - 1] = '\0';
+		}
+
+		return m_remoteAddr;
+	}
+	int FetchTotalBytesRead()
+	{
+		int total = m_totalBytesRead;
+		m_totalBytesRead = 0;
+		return total;
+	}
+	void Cancel()
+	{
+		debug("Cancelling connection");
+		if (m_socket != INVALID_SOCKET)
+		{
+			m_status = csCancelled;
+
+			if (m_forceClose)
+			{
+				SOCKET socket = m_socket;
+				m_socket = INVALID_SOCKET;
+				shutdown(socket, SHUT_RDWR);
+				closesocket(socket);
+			}
+			else
+			{
+				shutdown(m_socket, SHUT_RDWR);
+			}
+		}
+	}
+	void ReadBuffer(char** buffer, int *bufLen)
+	{
+		*bufLen = m_bufAvail;
+		*buffer = m_bufPtr;
+		m_bufAvail = 0;
+	}
 
 protected:
 	std::string m_host;
@@ -5773,1126 +6360,486 @@ protected:
 #endif
 #endif
 
-	void ReportError(const char* msgPrefix, const char* msgArg, bool printErrCode, int errCode = 0,
-		const char* errMsg = nullptr);
-	virtual void PrintError(const char* errMsg);
-	int GetLastNetworkError();
-	bool DoConnect();
-	void DoDisconnect();
-	bool InitSocketOpts(SOCKET socket);
-	bool ConnectWithTimeout(void* address, int address_len);
-#ifndef HAVE_GETADDRINFO
-	in_addr_t ResolveHostAddr(const char* host);
-#endif
-#ifndef DISABLE_TLS
-	int recv(SOCKET s, char* buf, int len, int flags);
-	int send(SOCKET s, const char* buf, int len, int flags);
-	void CloseTls();
-#endif
-};
-
-// sockets aren't inherited by the scripts nzbget starts: a script that outlived
-// the program kept the control port listening, and copies of client sockets kept
-// connections from closing
-#ifdef SOCK_CLOEXEC
-#define SOCKET_CLOEXEC SOCK_CLOEXEC
-#else
-#define SOCKET_CLOEXEC 0
-#endif
-
-// a socket is close-on-exec, so that the scripts nzbget starts don't inherit
-// its connections and listeners. socket() takes the flag where SOCK_CLOEXEC
-// exists, accept4() on Linux; elsewhere (macOS has neither) it is set afterwards
-static inline void SetCloseOnExec(SOCKET socket)
-{
-	if (socket != INVALID_SOCKET)
+	virtual bool DoConnect()
 	{
-		fcntl(socket, F_SETFD, fcntl(socket, F_GETFD, 0) | FD_CLOEXEC);
-	}
-}
-
-#include <poll.h>
-
-
-static const int CONNECTION_READBUFFER_SIZE = 1024;
-// past the data read into a buffer: a decoder writing into it (uuencoded lines) may
-// write up to one line's worth more than it was given
-static const int DECODE_SLACK = 128;
-
-inline void closesocket_gracefully(SOCKET socket)
-{
-	char buf[1024];
-	struct linger linger;
-
-	// Set linger option to avoid socket hanging out after close. This prevent
-	// ephemeral port exhaust problem under high QPS.
-	linger.l_onoff = 1;
-	linger.l_linger = 1;
-	setsockopt(socket, SOL_SOCKET, SO_LINGER, (char *) &linger, sizeof(linger));
-
-	// Send FIN to the client
-	shutdown(socket, SHUT_WR);
-
-	// Set non-blocking mode
-	int flags;
-	flags = fcntl(socket, F_GETFL, 0);
-	fcntl(socket, F_SETFL, flags | O_NONBLOCK);
-
-	// Read and discard pending incoming data. If we do not do that and close the
-	// socket, the data in the send buffer may be discarded. This
-	// behaviour is seen on Windows, when client keeps sending data
-	// when server decides to close the connection; then when client
-	// does recv() it gets no data back.
-	int n;
-	do {
-		n = recv(socket, buf, sizeof(buf), 0);
-	} while (n > 0);
-
-	// Now we know that our FIN is ACK-ed, safe to close
-	closesocket(socket);
-}
-
-inline void Connection::Init()
-{
-	debug("Initializing global connection data");
-}
-
-inline void Connection::Final()
-{
-}
-
-inline Connection::Connection(const char* host, int port, bool tls) :
-	m_host(host ? host : ""), m_port(port), m_tls(tls)
-{
-	debug("Creating Connection");
-
-	m_readBuf.Reserve(nzbget_rs_dqh_conn_calc_read_buffer_cap(
-		CONNECTION_READBUFFER_SIZE, DECODE_SLACK));
-#ifndef DISABLE_TLS
-	m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
-#endif
-}
-
-inline Connection::Connection(SOCKET socket, bool tls)
-{
-	debug("Creating Connection");
-
-	m_port = 0;
-	m_tls = tls;
-	m_status = csConnected;
-	m_socket = socket;
-	m_host = GetRemoteAddr();
-	m_bufAvail = 0;
-	m_timeout = 60;
-	m_suppressErrors = true;
-	m_readBuf.Reserve(nzbget_rs_dqh_conn_calc_read_buffer_cap(
-		CONNECTION_READBUFFER_SIZE, DECODE_SLACK));
-#ifndef DISABLE_TLS
-	m_tlsSocket = nullptr;
-	m_tlsError = false;
-	m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
-#endif
-}
-
-inline Connection::~Connection()
-{
-	debug("Destroying Connection");
-
-	Connection::Disconnect();
-}
-
-inline void Connection::SetSuppressErrors(bool suppressErrors)
-{
-	m_suppressErrors = suppressErrors;
-#ifndef DISABLE_TLS
-	if (m_tlsSocket)
-	{
-		m_tlsSocket->SetSuppressErrors(suppressErrors);
-	}
-#endif
-}
-
-inline bool Connection::Connect()
-{
-	debug("Connecting");
-
-	if (m_status == csConnected)
-	{
-		return true;
-	}
-
-	bool res = DoConnect();
-
-	if (res)
-	{
-		m_status = csConnected;
-	}
-	else
-	{
-		DoDisconnect();
-	}
-
-	return res;
-}
-
-inline bool Connection::Disconnect()
-{
-	debug("Disconnecting");
-
-	if (m_status == csDisconnected)
-	{
-		return true;
-	}
-
-	DoDisconnect();
-
-	m_status = csDisconnected;
-	m_socket = INVALID_SOCKET;
-	m_bufAvail = 0;
-
-	return true;
-}
-
-inline bool Connection::Bind()
-{
-	debug("Binding");
-
-	if (m_status == csListening)
-	{
-		return true;
-	}
-
-	int errcode = 0;
-
-	if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
-	{
-		struct sockaddr_un addr;
-		addr.sun_family = AF_UNIX;
-		if (nzbget_rs_dqh_conn_is_unix_path_too_long(m_host.size(), sizeof(addr.sun_path)) != 0)
-		{
-			ReportError("Binding socket failed for %s: name too long\n", m_host.c_str(), false);
-			return false;
-		}
-		strcpy(addr.sun_path, m_host.c_str());
-
-		m_socket = socket(PF_UNIX, SOCK_STREAM | SOCKET_CLOEXEC, 0);
-#ifndef SOCK_CLOEXEC
-		SetCloseOnExec(m_socket);
-#endif
-		if (m_socket == INVALID_SOCKET)
-		{
-			ReportError("Socket creation failed for %s", m_host.c_str(), true);
-			return false;
-		}
-
-		unlink(m_host.c_str());
-
-		if (bind(m_socket, (struct sockaddr *)&addr, sizeof(addr)) == -1)
-		{
-			// Connection failed
-			closesocket(m_socket);
-			m_socket = INVALID_SOCKET;
-		}
-	}
-	else
-	{
-#ifdef HAVE_GETADDRINFO
-		struct addrinfo addr_hints, *addr_list, *addr;
-
-		memset(&addr_hints, 0, sizeof(addr_hints));
-		addr_hints.ai_family = nzbget_rs_ccm_conn_select_ai_family(
-			(int)m_ipVersion, (int)ipV4, (int)ipV6, AF_INET, AF_INET6, AF_UNSPEC);
-		addr_hints.ai_socktype = SOCK_STREAM;
-		addr_hints.ai_flags = AI_PASSIVE;    // For wildcard IP address
-
-		NzbgetRsBuf portStrBuf = nzbget_rs_dqh_conn_format_port_str(m_port);
-		BString<100> portStr("%s", portStrBuf.data ? portStrBuf.data : "0");
-		nzbget_rs_free(portStrBuf);
-
-		int res = getaddrinfo(m_host.c_str(), portStr, &addr_hints, &addr_list);
-		if (res != 0)
-		{
-			int gaiErr = nzbget_rs_dqh_conn_resolve_gai_report_err_code(res, EAI_SYSTEM);
-			ReportError("Could not resolve hostname %s", m_host.c_str(), true,
-				gaiErr,
-				gaiErr != 0 ? gai_strerror(res) : nullptr);
-			return false;
-		}
+		debug("Do connecting");
+		if (m_deadline && m_deadline->Stopped()) return false;
 
 		m_socket = INVALID_SOCKET;
-		for (addr = addr_list; addr != nullptr; addr = addr->ai_next)
+
+		if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
 		{
-			m_socket = socket(addr->ai_family, addr->ai_socktype | SOCKET_CLOEXEC, addr->ai_protocol);
-#ifndef SOCK_CLOEXEC
-			SetCloseOnExec(m_socket);
-#endif
-			if (m_socket != INVALID_SOCKET)
+			struct sockaddr_un addr;
+			addr.sun_family = AF_UNIX;
+			if (nzbget_rs_dqh_conn_is_unix_path_too_long(m_host.size(), sizeof(addr.sun_path)) != 0)
 			{
-				int opt = 1;
-				setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
-				res = bind(m_socket, addr->ai_addr, addr->ai_addrlen);
-				if (res != -1)
-				{
-					// Connection established
-					break;
-				}
-				// Connection failed
-				errcode = GetLastNetworkError();
-				closesocket(m_socket);
-				m_socket = INVALID_SOCKET;
-			}
-		}
-
-		freeaddrinfo(addr_list);
-
-#else
-
-		struct sockaddr_in	sSocketAddress;
-		memset(&sSocketAddress, 0, sizeof(sSocketAddress));
-		sSocketAddress.sin_family = AF_INET;
-		if (m_host.empty())
-		{
-			sSocketAddress.sin_addr.s_addr = htonl(INADDR_ANY);
-		}
-		else
-		{
-			sSocketAddress.sin_addr.s_addr = ResolveHostAddr(m_host.c_str());
-			if (sSocketAddress.sin_addr.s_addr == INADDR_NONE)
-			{
+				ReportError("Connection to %s failed: name too long\n", m_host.c_str(), false);
 				return false;
 			}
-		}
-		sSocketAddress.sin_port = htons(m_port);
+			strcpy(addr.sun_path, m_host.c_str());
 
-		m_socket = socket(PF_INET, SOCK_STREAM | SOCKET_CLOEXEC, 0);
-#ifndef SOCK_CLOEXEC
-		SetCloseOnExec(m_socket);
-#endif
-		if (m_socket == INVALID_SOCKET)
-		{
-			ReportError("Socket creation failed for %s", m_host.c_str(), true);
-			return false;
-		}
-
-		int opt = 1;
-		setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
-
-		int res = bind(m_socket, (struct sockaddr *) &sSocketAddress, sizeof(sSocketAddress));
-		if (res == -1)
-		{
-			// Connection failed
-			errcode = GetLastNetworkError();
-			closesocket(m_socket);
-			m_socket = INVALID_SOCKET;
-		}
-#endif
-	}
-
-	if (m_socket == INVALID_SOCKET)
-	{
-		ReportError("Binding socket failed for %s", m_host.c_str(), true, errcode);
-		return false;
-	}
-
-	if (listen(m_socket, 100) < 0)
-	{
-		ReportError("Listen on socket failed for %s", m_host.c_str(), true);
-		closesocket(m_socket);
-		m_socket = INVALID_SOCKET;
-		return false;
-	}
-
-	m_status = csListening;
-
-	return true;
-}
-
-inline int Connection::WriteLine(const char* buffer)
-{
-	//debug("Connection::WriteLine");
-
-	if (m_status != csConnected)
-	{
-		return -1;
-	}
-
-	int res = send(m_socket, buffer, strlen(buffer), 0);
-	if (res <= 0)
-	{
-		m_status = csBroken;
-	}
-
-	return res;
-}
-
-inline bool Connection::Send(const char* buffer, int size)
-{
-	debug("Sending data");
-
-	if (m_status != csConnected)
-	{
-		return false;
-	}
-
-	int bytesSent = 0;
-	while (bytesSent < size)
-	{
-		int res = send(m_socket, buffer + bytesSent, size-bytesSent, 0);
-		if (res <= 0)
-		{
-			m_status = csBroken;
-			return false;
-		}
-		bytesSent += res;
-	}
-
-	return true;
-}
-
-inline char* Connection::ReadLine(char* buffer, int size, int* bytesReadOut)
-{
-	if (m_status != csConnected)
-	{
-		return nullptr;
-	}
-
-	char* inpBuffer = buffer;
-	size--; // for trailing '0'
-	int bytesRead = 0;
-	int bufAvail = m_bufAvail; // local variable is faster
-	char* bufPtr = m_bufPtr; // local variable is faster
-	while (size)
-	{
-		if (!bufAvail)
-		{
-			bufAvail = recv(m_socket, m_readBuf, CONNECTION_READBUFFER_SIZE, 0);
-			if (bufAvail < 0)
-			{
-				ReportError("Could not receive data on socket from %s", m_host.c_str(), true);
-				m_status = csBroken;
-				break;
-			}
-			else if (bufAvail == 0)
-			{
-				break;
-			}
-			else
-			{
-				m_totalBytesRead += bufAvail;
-			}
-			bufPtr = m_readBuf;
-			m_readBuf[bufAvail] = '\0';
-		}
-
-		int foundNewline = 0;
-		int len = nzbget_rs_rco_conn_read_line_chunk(bufPtr, bufAvail, size, &foundNewline);
-
-		memcpy(inpBuffer, bufPtr, len);
-		inpBuffer += len;
-		bufPtr += len;
-		bufAvail -= len;
-		bytesRead += len;
-		size -= len;
-
-		if (foundNewline)
-		{
-			break;
-		}
-	}
-	*inpBuffer = '\0';
-
-	m_bufAvail = nzbget_rs_dqh_conn_clamp_buf_avail(bufAvail); // copy back to member
-	m_bufPtr = bufPtr; // copy back to member
-
-	if (bytesReadOut)
-	{
-		*bytesReadOut = bytesRead;
-	}
-
-	if (inpBuffer == buffer)
-	{
-		return nullptr;
-	}
-
-	return buffer;
-}
-
-inline std::unique_ptr<Connection> Connection::Accept()
-{
-	debug("Accepting connection");
-
-	if (m_status != csListening)
-	{
-		return nullptr;
-	}
-
-	m_acceptBusy = false;
-	SOCKET socket;
-	for (;;)
-	{
-#if defined(__linux__) && defined(SOCK_CLOEXEC)
-		socket = accept4(m_socket, nullptr, nullptr, SOCK_CLOEXEC);
-#else
-		socket = accept(m_socket, nullptr, nullptr);
-		SetCloseOnExec(socket);
-#endif
-		if (socket == INVALID_SOCKET && m_status != csCancelled)
-		{
-			// a connection that failed before it was taken: take the next one
-			// (the listener was torn down and rebound for each of these)
-			int err = errno;
-			int enonetVal = 0;
-#ifdef ENONET
-			enonetVal = ENONET;
-#endif
-			int acceptClass = nzbget_rs_rco_conn_classify_accept_errno(
-				err, EINTR, ECONNABORTED, EPROTO, ENETDOWN,
-				ENOPROTOOPT, EHOSTDOWN, EHOSTUNREACH, EOPNOTSUPP,
-				ENETUNREACH, enonetVal, EMFILE, ENFILE, ENOBUFS, ENOMEM);
-			if (acceptClass == 1)
-			{
-				continue;
-			}
-			m_acceptBusy = (acceptClass == 2);
-		}
-		break;
-	}
-	if (socket == INVALID_SOCKET && m_status != csCancelled)
-	{
-		ReportError("Could not accept connection for %s", m_host.c_str(), true);
-	}
-	if (socket == INVALID_SOCKET)
-	{
-		return nullptr;
-	}
-
-	InitSocketOpts(socket);
-
-	// InitSocketOpts() applied the listener's timeout to the new socket:
-	// keep the Connection's own idea of it (used by the poll/select waits)
-	// in step instead of the constructor's default
-	auto acceptedConnection = std::make_unique<Connection>(socket, m_tls);
-	acceptedConnection->SetTimeout(m_timeout);
-	return acceptedConnection;
-}
-
-inline int Connection::TryRecv(char* buffer, int size)
-{
-	//debug("Receiving data");
-
-	memset(buffer, 0, size);
-
-	int received = recv(m_socket, buffer, size, 0);
-
-	if (received < 0)
-	{
-		ReportError("Could not receive data on socket from %s", m_host.c_str(), true);
-	}
-	else
-	{
-		m_totalBytesRead += received;
-	}
-
-	return received;
-}
-
-inline bool Connection::Recv(char * buffer, int size)
-{
-	//debug("Receiving data (full buffer)");
-
-	memset(buffer, 0, size);
-
-	char* bufPtr = (char*)buffer;
-	int NeedBytes = size;
-
-	if (m_bufAvail > 0)
-	{
-		int len = nzbget_rs_ccm_conn_recv_buffered_chunk_len(size, m_bufAvail);
-		memcpy(bufPtr, m_bufPtr, len);
-		bufPtr += len;
-		m_bufPtr += len;
-		m_bufAvail -= len;
-		NeedBytes -= len;
-	}
-
-	// Read from the socket until nothing remains
-	while (NeedBytes > 0)
-	{
-		int received = recv(m_socket, bufPtr, NeedBytes, 0);
-		// Did the recv succeed?
-		if (received <= 0)
-		{
-			ReportError("Could not receive data on socket from %s", m_host.c_str(), true);
-			return false;
-		}
-		bufPtr += received;
-		NeedBytes -= received;
-		m_totalBytesRead += received;
-	}
-	return true;
-}
-
-inline bool Connection::DoConnect()
-{
-	debug("Do connecting");
-	if (m_deadline && m_deadline->Stopped()) return false;
-
-	m_socket = INVALID_SOCKET;
-
-	if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
-	{
-		struct sockaddr_un addr;
-		addr.sun_family = AF_UNIX;
-		if (nzbget_rs_dqh_conn_is_unix_path_too_long(m_host.size(), sizeof(addr.sun_path)) != 0)
-		{
-			ReportError("Connection to %s failed: name too long\n", m_host.c_str(), false);
-			return false;
-		}
-		strcpy(addr.sun_path, m_host.c_str());
-
-		m_socket = socket(PF_UNIX, SOCK_STREAM | SOCKET_CLOEXEC, 0);
-#ifndef SOCK_CLOEXEC
-		SetCloseOnExec(m_socket);
-#endif
-		if (m_socket == INVALID_SOCKET)
-		{
-			ReportError("Socket creation failed for %s", m_host.c_str(), true);
-			return false;
-		}
-
-		if (!ConnectWithTimeout(&addr, sizeof(addr)))
-		{
-			ReportError("Connection to %s failed", m_host.c_str(), true);
-			closesocket(m_socket);
-			m_socket = INVALID_SOCKET;
-			return false;
-		}
-	}
-	else
-	{
-#ifdef HAVE_GETADDRINFO
-		struct addrinfo addr_hints, *addr_list, *addr;
-
-		memset(&addr_hints, 0, sizeof(addr_hints));
-		addr_hints.ai_family = nzbget_rs_ccm_conn_select_ai_family(
-			(int)m_ipVersion, (int)ipV4, (int)ipV6, AF_INET, AF_INET6, AF_UNSPEC);
-		addr_hints.ai_socktype = SOCK_STREAM;
-
-		NzbgetRsBuf portStrBuf = nzbget_rs_dqh_conn_format_port_str(m_port);
-		BString<100> portStr("%s", portStrBuf.data ? portStrBuf.data : "0");
-		nzbget_rs_free(portStrBuf);
-
-		// Optimizer probes resolve in a bounded owned child, preserving m_host
-		// for TLS SNI/certificate validation. AI_NUMERICHOST never queries DNS.
-		std::vector<std::unique_ptr<addrinfo, decltype(&freeaddrinfo)>> resolvedLists;
-		std::vector<addrinfo> resolvedItems;
-		int res;
-		if (!m_resolvedAddresses.empty())
-		{
-			addr_hints.ai_flags |= AI_NUMERICHOST;
-			addr_list = nullptr;
-			for (const auto& numeric : m_resolvedAddresses)
-			{
-				addrinfo* list = nullptr;
-				if (getaddrinfo(numeric.c_str(), portStr, &addr_hints, &list) == 0 && list)
-				{
-					resolvedLists.emplace_back(list, &freeaddrinfo);
-					for (addrinfo* item = list; item; item = item->ai_next) resolvedItems.push_back(*item);
-				}
-			}
-			for (size_t i = 0; i < resolvedItems.size(); ++i)
-				resolvedItems[i].ai_next = i + 1 < resolvedItems.size() ? &resolvedItems[i + 1] : nullptr;
-			addr_list = resolvedItems.empty() ? nullptr : &resolvedItems.front();
-			res = addr_list ? 0 : EAI_NONAME;
-		}
-		else if (m_deadline)
-		{
-			return false; // Probe DNS must never fall back to blocking resolution.
-		}
-		else res = getaddrinfo(m_host.c_str(), portStr, &addr_hints, &addr_list);
-		debug("getaddrinfo for %s: %i", m_host.c_str(), res);
-
-		if (res != 0)
-		{
-			int gaiErr = nzbget_rs_dqh_conn_resolve_gai_report_err_code(res, EAI_SYSTEM);
-			ReportError("Could not resolve hostname %s", m_host.c_str(), true,
-						gaiErr,
-						gaiErr != 0 ? gai_strerror(res) : nullptr);
-			return false;
-		}
-
-		std::vector<SockAddr> triedAddr;
-		bool connected = false;
-
-		for (addr = addr_list; addr != nullptr; addr = addr->ai_next)
-		{
-			if (m_deadline && m_deadline->Stopped()) break;
-			// don't try the same combinations of ai_family, ai_socktype, ai_protocol multiple times
-			SockAddr sa = { addr->ai_family, addr->ai_socktype, addr->ai_protocol };
-			if (!m_deadline && std::find(triedAddr.begin(), triedAddr.end(), sa) != triedAddr.end())
-			{
-				continue;
-			}
-			triedAddr.push_back(sa);
-
-			if (m_socket != INVALID_SOCKET)
-			{
-				closesocket(m_socket);
-			}
-
-			m_socket = socket(addr->ai_family, addr->ai_socktype | SOCKET_CLOEXEC, addr->ai_protocol);
+			m_socket = socket(PF_UNIX, SOCK_STREAM | SOCKET_CLOEXEC, 0);
 #ifndef SOCK_CLOEXEC
 			SetCloseOnExec(m_socket);
 #endif
 			if (m_socket == INVALID_SOCKET)
 			{
-				// try another addr/family/protocol
-				continue;
+				ReportError("Socket creation failed for %s", m_host.c_str(), true);
+				return false;
 			}
 
-			if (ConnectWithTimeout(addr->ai_addr, addr->ai_addrlen))
+			if (!ConnectWithTimeout(&addr, sizeof(addr)))
 			{
-				// Connection established
-				connected = true;
-				break;
+				ReportError("Connection to %s failed", m_host.c_str(), true);
+				closesocket(m_socket);
+				m_socket = INVALID_SOCKET;
+				return false;
 			}
 		}
-
-		if (nzbget_rs_dqh_conn_should_report_socket_create_failed(
-			m_socket == INVALID_SOCKET ? 1 : 0, addr_list ? 1 : 0) != 0)
+		else
 		{
-			ReportError("Socket creation failed for %s", m_host.c_str(), true);
-		}
+#ifdef HAVE_GETADDRINFO
+			struct addrinfo addr_hints, *addr_list, *addr;
 
-		if (nzbget_rs_dqh_conn_should_cleanup_unconnected_socket(
-			connected ? 1 : 0, m_socket == INVALID_SOCKET ? 1 : 0) != 0)
-		{
-			ReportError("Connection to %s failed", m_host.c_str(), true);
-			closesocket(m_socket);
-			m_socket = INVALID_SOCKET;
-		}
+			memset(&addr_hints, 0, sizeof(addr_hints));
+			addr_hints.ai_family = nzbget_rs_ccm_conn_select_ai_family(
+				(int)m_ipVersion, (int)ipV4, (int)ipV6, AF_INET, AF_INET6, AF_UNSPEC);
+			addr_hints.ai_socktype = SOCK_STREAM;
 
-		if (resolvedLists.empty()) freeaddrinfo(addr_list);
+			NzbgetRsBuf portStrBuf = nzbget_rs_dqh_conn_format_port_str(m_port);
+			BString<100> portStr("%s", portStrBuf.data ? portStrBuf.data : "0");
+			nzbget_rs_free(portStrBuf);
 
-		if (m_socket == INVALID_SOCKET)
-		{
-			return false;
-		}
+			// Optimizer probes resolve in a bounded owned child, preserving m_host
+			// for TLS SNI/certificate validation. AI_NUMERICHOST never queries DNS.
+			std::vector<std::unique_ptr<addrinfo, decltype(&freeaddrinfo)>> resolvedLists;
+			std::vector<addrinfo> resolvedItems;
+			int res;
+			if (!m_resolvedAddresses.empty())
+			{
+				addr_hints.ai_flags |= AI_NUMERICHOST;
+				addr_list = nullptr;
+				for (const auto& numeric : m_resolvedAddresses)
+				{
+					addrinfo* list = nullptr;
+					if (getaddrinfo(numeric.c_str(), portStr, &addr_hints, &list) == 0 && list)
+					{
+						resolvedLists.emplace_back(list, &freeaddrinfo);
+						for (addrinfo* item = list; item; item = item->ai_next) resolvedItems.push_back(*item);
+					}
+				}
+				for (size_t i = 0; i < resolvedItems.size(); ++i)
+					resolvedItems[i].ai_next = i + 1 < resolvedItems.size() ? &resolvedItems[i + 1] : nullptr;
+				addr_list = resolvedItems.empty() ? nullptr : &resolvedItems.front();
+				res = addr_list ? 0 : EAI_NONAME;
+			}
+			else if (m_deadline)
+			{
+				return false; // Probe DNS must never fall back to blocking resolution.
+			}
+			else res = getaddrinfo(m_host.c_str(), portStr, &addr_hints, &addr_list);
+			debug("getaddrinfo for %s: %i", m_host.c_str(), res);
+
+			if (res != 0)
+			{
+				int gaiErr = nzbget_rs_dqh_conn_resolve_gai_report_err_code(res, EAI_SYSTEM);
+				ReportError("Could not resolve hostname %s", m_host.c_str(), true,
+							gaiErr,
+							gaiErr != 0 ? gai_strerror(res) : nullptr);
+				return false;
+			}
+
+			std::vector<SockAddr> triedAddr;
+			bool connected = false;
+
+			for (addr = addr_list; addr != nullptr; addr = addr->ai_next)
+			{
+				if (m_deadline && m_deadline->Stopped()) break;
+				// don't try the same combinations of ai_family, ai_socktype, ai_protocol multiple times
+				SockAddr sa = { addr->ai_family, addr->ai_socktype, addr->ai_protocol };
+				if (!m_deadline && std::find(triedAddr.begin(), triedAddr.end(), sa) != triedAddr.end())
+				{
+					continue;
+				}
+				triedAddr.push_back(sa);
+
+				if (m_socket != INVALID_SOCKET)
+				{
+					closesocket(m_socket);
+				}
+
+				m_socket = socket(addr->ai_family, addr->ai_socktype | SOCKET_CLOEXEC, addr->ai_protocol);
+#ifndef SOCK_CLOEXEC
+				SetCloseOnExec(m_socket);
+#endif
+				if (m_socket == INVALID_SOCKET)
+				{
+					// try another addr/family/protocol
+					continue;
+				}
+
+				if (ConnectWithTimeout(addr->ai_addr, addr->ai_addrlen))
+				{
+					// Connection established
+					connected = true;
+					break;
+				}
+			}
+
+			if (nzbget_rs_dqh_conn_should_report_socket_create_failed(
+				m_socket == INVALID_SOCKET ? 1 : 0, addr_list ? 1 : 0) != 0)
+			{
+				ReportError("Socket creation failed for %s", m_host.c_str(), true);
+			}
+
+			if (nzbget_rs_dqh_conn_should_cleanup_unconnected_socket(
+				connected ? 1 : 0, m_socket == INVALID_SOCKET ? 1 : 0) != 0)
+			{
+				ReportError("Connection to %s failed", m_host.c_str(), true);
+				closesocket(m_socket);
+				m_socket = INVALID_SOCKET;
+			}
+
+			if (resolvedLists.empty()) freeaddrinfo(addr_list);
+
+			if (m_socket == INVALID_SOCKET)
+			{
+				return false;
+			}
 
 #else
 
-		struct sockaddr_in	sSocketAddress;
-		memset(&sSocketAddress, 0, sizeof(sSocketAddress));
-		sSocketAddress.sin_family = AF_INET;
-		sSocketAddress.sin_port = htons(m_port);
-		sSocketAddress.sin_addr.s_addr = ResolveHostAddr(m_host.c_str());
-		if (sSocketAddress.sin_addr.s_addr == INADDR_NONE)
-		{
-			return false;
-		}
+			struct sockaddr_in	sSocketAddress;
+			memset(&sSocketAddress, 0, sizeof(sSocketAddress));
+			sSocketAddress.sin_family = AF_INET;
+			sSocketAddress.sin_port = htons(m_port);
+			sSocketAddress.sin_addr.s_addr = ResolveHostAddr(m_host.c_str());
+			if (sSocketAddress.sin_addr.s_addr == INADDR_NONE)
+			{
+				return false;
+			}
 
-		m_socket = socket(PF_INET, SOCK_STREAM | SOCKET_CLOEXEC, 0);
+			m_socket = socket(PF_INET, SOCK_STREAM | SOCKET_CLOEXEC, 0);
 #ifndef SOCK_CLOEXEC
-		SetCloseOnExec(m_socket);
+			SetCloseOnExec(m_socket);
 #endif
-		if (m_socket == INVALID_SOCKET)
-		{
-			ReportError("Socket creation failed for %s", m_host.c_str(), true);
-			return false;
+			if (m_socket == INVALID_SOCKET)
+			{
+				ReportError("Socket creation failed for %s", m_host.c_str(), true);
+				return false;
+			}
+
+			if (!ConnectWithTimeout(&sSocketAddress, sizeof(sSocketAddress)))
+			{
+				ReportError("Connection to %s failed", m_host.c_str(), true);
+				closesocket(m_socket);
+				m_socket = INVALID_SOCKET;
+				return false;
+			}
+#endif
 		}
 
-		if (!ConnectWithTimeout(&sSocketAddress, sizeof(sSocketAddress)))
+		if (!InitSocketOpts(m_socket))
 		{
-			ReportError("Connection to %s failed", m_host.c_str(), true);
-			closesocket(m_socket);
-			m_socket = INVALID_SOCKET;
 			return false;
 		}
-#endif
-	}
-
-	if (!InitSocketOpts(m_socket))
-	{
-		return false;
-	}
 
 #ifndef DISABLE_TLS
-	if (m_tls && !StartTls(true, "", ""))
-	{
-		return false;
-	}
-#endif
-
-	return true;
-}
-
-inline bool Connection::InitSocketOpts(SOCKET socket)
-{
-	struct timeval TimeVal;
-	TimeVal.tv_sec = m_timeout;
-	TimeVal.tv_usec = 0;
-	char* optbuf = (char*)&TimeVal;
-	int optsize = sizeof(TimeVal);
-	int err = setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, optbuf, optsize);
-	if (err != 0)
-	{
-		ReportError("Socket initialization failed for %s", m_host.c_str(), true);
-		return false;
-	}
-	err = setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, optbuf, optsize);
-	if (err != 0)
-	{
-		ReportError("Socket initialization failed for %s", m_host.c_str(), true);
-		return false;
-	}
-	return true;
-}
-
-inline bool Connection::ConnectWithTimeout(void* address, int address_len)
-{
-	int flags = 0, error = 0, ret = 0;
-	socklen_t len = sizeof(error);
-
-	//set socket nonblocking flag
-	flags = fcntl(m_socket, F_GETFL, 0);
-	if (flags < 0)
-	{
-		return false;
-	}
-
-	if (fcntl(m_socket, F_SETFL, flags | O_NONBLOCK) < 0)
-	{
-		return false;
-	}
-
-	//initiate non-blocking connect
-	ret = connect(m_socket, (struct sockaddr*)address, address_len);
-	if (ret < 0)
-	{
-		int err = GetLastNetworkError();
-		if (err != EINPROGRESS)
+		if (m_tls && !StartTls(true, "", ""))
 		{
 			return false;
 		}
-	}
+#endif
 
-	//connect succeeded right away?
-	if (ret != 0)
+		return true;
+	}
+	virtual void DoDisconnect()
 	{
-		// poll: an fd_set holds descriptors below 1024 only, and FD_SET of a
-		// higher one (many connections, a raised descriptor limit) wrote past it
-		struct pollfd pfd;
-		pfd.fd = m_socket;
-		pfd.events = POLLIN | POLLOUT;
-		pfd.revents = 0;
-		if (m_deadline)
+		debug("Do disconnecting");
+
+		if (m_socket != INVALID_SOCKET)
 		{
-			ret = m_deadline->Wait(m_socket, true, true) ? 1 : 0;
-			pfd.revents = POLLIN | POLLOUT;
+#ifndef DISABLE_TLS
+			CloseTls();
+#endif
+			int is_listening = 0;
+			socklen_t len = sizeof(is_listening);
+			bool isUnixPath = nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0;
+			int sockoptRes = isUnixPath ? getsockopt(m_socket, SOL_SOCKET, SO_ACCEPTCONN, &is_listening, &len) : -1;
+			if (nzbget_rs_dqh_conn_should_unlink_listening_unix_socket(
+				isUnixPath ? 1 : 0, sockoptRes, is_listening) != 0)
+			{
+				unlink(m_host.c_str());
+			}
+			if (m_gracefull)
+			{
+				closesocket_gracefully(m_socket);
+			}
+			else
+			{
+				closesocket(m_socket);
+			}
+			m_socket = INVALID_SOCKET;
 		}
-		else ret = poll(&pfd, 1, nzbget_rs_ccm_conn_poll_timeout_ms(m_timeout));
-		//we are waiting for connect to complete now
+
+		m_status = csDisconnected;
+	}
+	bool InitSocketOpts(SOCKET socket)
+	{
+		struct timeval TimeVal;
+		TimeVal.tv_sec = m_timeout;
+		TimeVal.tv_usec = 0;
+		char* optbuf = (char*)&TimeVal;
+		int optsize = sizeof(TimeVal);
+		int err = setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, optbuf, optsize);
+		if (err != 0)
+		{
+			ReportError("Socket initialization failed for %s", m_host.c_str(), true);
+			return false;
+		}
+		err = setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, optbuf, optsize);
+		if (err != 0)
+		{
+			ReportError("Socket initialization failed for %s", m_host.c_str(), true);
+			return false;
+		}
+		return true;
+	}
+	bool ConnectWithTimeout(void* address, int address_len)
+	{
+		int flags = 0, error = 0, ret = 0;
+		socklen_t len = sizeof(error);
+
+		//set socket nonblocking flag
+		flags = fcntl(m_socket, F_GETFL, 0);
+		if (flags < 0)
+		{
+			return false;
+		}
+
+		if (fcntl(m_socket, F_SETFL, flags | O_NONBLOCK) < 0)
+		{
+			return false;
+		}
+
+		//initiate non-blocking connect
+		ret = connect(m_socket, (struct sockaddr*)address, address_len);
 		if (ret < 0)
 		{
-			return false;
+			int err = GetLastNetworkError();
+			if (err != EINPROGRESS)
+			{
+				return false;
+			}
 		}
-		if (ret == 0)
+
+		//connect succeeded right away?
+		if (ret != 0)
 		{
-			//we had a timeout
-			errno = ETIMEDOUT;
+			// poll: an fd_set holds descriptors below 1024 only, and FD_SET of a
+			// higher one (many connections, a raised descriptor limit) wrote past it
+			struct pollfd pfd;
+			pfd.fd = m_socket;
+			pfd.events = POLLIN | POLLOUT;
+			pfd.revents = 0;
+			if (m_deadline)
+			{
+				ret = m_deadline->Wait(m_socket, true, true) ? 1 : 0;
+				pfd.revents = POLLIN | POLLOUT;
+			}
+			else ret = poll(&pfd, 1, nzbget_rs_ccm_conn_poll_timeout_ms(m_timeout));
+			//we are waiting for connect to complete now
+			if (ret < 0)
+			{
+				return false;
+			}
+			if (ret == 0)
+			{
+				//we had a timeout
+				errno = ETIMEDOUT;
+				return false;
+			}
+
+			if (!nzbget_rs_ccm_conn_poll_revents_ready(pfd.revents, POLLIN | POLLOUT | POLLERR | POLLHUP))
+			{
+				return false;
+			}
+			//we had a positivite return so a descriptor is ready
+
+			if (getsockopt(m_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &len) < 0)
+			{
+				return false;
+			}
+
+			//check if we had a socket error
+			if (error)
+			{
+				errno = error;
+				return false;
+			}
+		}
+
+		//put socket back in blocking mode
+		if (m_deadline) return !m_deadline->Stopped();
+		if (fcntl(m_socket, F_SETFL, flags) < 0)
+		{
 			return false;
 		}
 
-		if (!nzbget_rs_ccm_conn_poll_revents_ready(pfd.revents, POLLIN | POLLOUT | POLLERR | POLLHUP))
-		{
-			return false;
-		}
-		//we had a positivite return so a descriptor is ready
-
-		if (getsockopt(m_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &len) < 0)
-		{
-			return false;
-		}
-
-		//check if we had a socket error
-		if (error)
-		{
-			errno = error;
-			return false;
-		}
+		return true;
 	}
-
-	//put socket back in blocking mode
-	if (m_deadline) return !m_deadline->Stopped();
-	if (fcntl(m_socket, F_SETFL, flags) < 0)
+#ifndef DISABLE_TLS
+	int recv(SOCKET s, char* buf, int len, int flags)
 	{
-		return false;
+		int received = 0;
+
+		if (m_tlsSocket)
+		{
+			m_tlsError = false;
+			received = m_tlsSocket->Recv(buf, len);
+			if (received < 0)
+			{
+				m_tlsError = true;
+				return -1;
+			}
+		}
+		else
+		{
+			received = ::recv(s, buf, len, flags);
+		}
+		return received;
 	}
+	int send(SOCKET s, const char* buf, int len, int flags)
+	{
+		int sent = 0;
 
-	return true;
-}
-
-inline void Connection::DoDisconnect()
-{
-	debug("Do disconnecting");
-
-	if (m_socket != INVALID_SOCKET)
+		if (m_tlsSocket)
+		{
+			m_tlsError = false;
+			sent = m_tlsSocket->Send(buf, len);
+			if (sent < 0)
+			{
+				m_tlsError = true;
+				return -1;
+			}
+			return sent;
+		}
+		else
+		{
+			sent = ::send(s, buf, len, flags);
+			return sent;
+		}
+	}
+	void CloseTls()
+	{
+		if (m_tlsSocket)
+		{
+			m_tlsSocket->Close();
+			m_tlsSocket.reset();
+		}
+	}
+#endif
+	void ReportError(const char* msgPrefix, const char* msgArg, bool printErrCode, int errCode = 0, const char* errMsg = nullptr)
 	{
 #ifndef DISABLE_TLS
-		CloseTls();
-#endif
-		int is_listening = 0;
-		socklen_t len = sizeof(is_listening);
-		bool isUnixPath = nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0;
-		int sockoptRes = isUnixPath ? getsockopt(m_socket, SOL_SOCKET, SO_ACCEPTCONN, &is_listening, &len) : -1;
-		if (nzbget_rs_dqh_conn_should_unlink_listening_unix_socket(
-			isUnixPath ? 1 : 0, sockoptRes, is_listening) != 0)
+		if (m_tlsError)
 		{
-			unlink(m_host.c_str());
+			// TLS-Error was already reported
+			m_tlsError = false;
+			return;
 		}
-		if (m_gracefull)
-		{
-			closesocket_gracefully(m_socket);
-		}
-		else
-		{
-			closesocket(m_socket);
-		}
-		m_socket = INVALID_SOCKET;
-	}
-
-	m_status = csDisconnected;
-}
-
-inline void Connection::ReadBuffer(char** buffer, int *bufLen)
-{
-	*bufLen = m_bufAvail;
-	*buffer = m_bufPtr;
-	m_bufAvail = 0;
-}
-
-inline void Connection::Cancel()
-{
-	debug("Cancelling connection");
-	if (m_socket != INVALID_SOCKET)
-	{
-		m_status = csCancelled;
-
-		if (m_forceClose)
-		{
-			SOCKET socket = m_socket;
-			m_socket = INVALID_SOCKET;
-			shutdown(socket, SHUT_RDWR);
-			closesocket(socket);
-		}
-		else
-		{
-			shutdown(m_socket, SHUT_RDWR);
-		}
-	}
-}
-
-inline int Connection::GetLastNetworkError()
-{
-	return errno;
-}
-
-inline void Connection::ReportError(const char* msgPrefix, const char* msgArg, bool printErrCode, int errCode, const char* errMsg)
-{
-#ifndef DISABLE_TLS
-	if (m_tlsError)
-	{
-		// TLS-Error was already reported
-		m_tlsError = false;
-		return;
-	}
 #endif
 
-	BString<1024> errPrefix(msgPrefix, msgArg);
+		BString<1024> errPrefix(msgPrefix, msgArg);
 
-	if (printErrCode)
-	{
-		BString<1024> printErrMsg;
-		errCode = nzbget_rs_dqh_conn_resolve_report_err_code(errCode, GetLastNetworkError());
-		if (errMsg)
+		if (printErrCode)
 		{
-			printErrMsg = errMsg;
+			BString<1024> printErrMsg;
+			errCode = nzbget_rs_dqh_conn_resolve_report_err_code(errCode, GetLastNetworkError());
+			if (errMsg)
+			{
+				printErrMsg = errMsg;
+			}
+			else
+			{
+				printErrMsg = strerror(errCode);
+			}
+
+			NzbgetRsBuf formattedErr = nzbget_rs_dqh_conn_format_report_err_with_code(
+				*errPrefix, errCode, (const char*)printErrMsg);
+			if (m_suppressErrors)
+			{
+				debug("%s", formattedErr.data ? formattedErr.data : "");
+			}
+			else
+			{
+				PrintError(formattedErr.data ? formattedErr.data : "");
+			}
+			nzbget_rs_free(formattedErr);
 		}
 		else
 		{
-			printErrMsg = strerror(errCode);
+			if (m_suppressErrors)
+			{
+				debug("%s", *errPrefix);
+			}
+			else
+			{
+				PrintError(errPrefix);
+			}
 		}
-
-		NzbgetRsBuf formattedErr = nzbget_rs_dqh_conn_format_report_err_with_code(
-			*errPrefix, errCode, (const char*)printErrMsg);
-		if (m_suppressErrors)
-		{
-			debug("%s", formattedErr.data ? formattedErr.data : "");
-		}
-		else
-		{
-			PrintError(formattedErr.data ? formattedErr.data : "");
-		}
-		nzbget_rs_free(formattedErr);
 	}
-	else
+	virtual void PrintError(const char* errMsg)
 	{
-		if (m_suppressErrors)
-		{
-			debug("%s", *errPrefix);
-		}
-		else
-		{
-			PrintError(errPrefix);
-		}
+		error("%s", errMsg);
 	}
-}
-
-inline void Connection::PrintError(const char* errMsg)
-{
-	error("%s", errMsg);
-}
-
-#ifndef DISABLE_TLS
-inline bool Connection::StartTls(bool isClient, const char* certFile, const char* keyFile)
-{
-	debug("Starting TLS");
-
-	m_tlsSocket = std::make_unique<TlsSocket>(m_socket, isClient, m_host.c_str(), certFile, keyFile, m_cipher.c_str(), m_certVerifLevel);
-	m_tlsSocket->SetSuppressErrors(m_suppressErrors);
-	m_tlsSocket->SetDeadline(m_deadline);
-
-	bool started = m_tlsSocket->Start();
-	m_tlsProbeFailure = m_tlsSocket->GetProbeFailure();
-	return started;
-}
-
-inline void Connection::CloseTls()
-{
-	if (m_tlsSocket)
+	int GetLastNetworkError()
 	{
-		m_tlsSocket->Close();
-		m_tlsSocket.reset();
+		return errno;
 	}
-}
-
-inline int Connection::recv(SOCKET s, char* buf, int len, int flags)
-{
-	int received = 0;
-
-	if (m_tlsSocket)
-	{
-		m_tlsError = false;
-		received = m_tlsSocket->Recv(buf, len);
-		if (received < 0)
-		{
-			m_tlsError = true;
-			return -1;
-		}
-	}
-	else
-	{
-		received = ::recv(s, buf, len, flags);
-	}
-	return received;
-}
-
-inline int Connection::send(SOCKET s, const char* buf, int len, int flags)
-{
-	int sent = 0;
-
-	if (m_tlsSocket)
-	{
-		m_tlsError = false;
-		sent = m_tlsSocket->Send(buf, len);
-		if (sent < 0)
-		{
-			m_tlsError = true;
-			return -1;
-		}
-		return sent;
-	}
-	else
-	{
-		sent = ::send(s, buf, len, flags);
-		return sent;
-	}
-}
-#endif
-
 #ifndef HAVE_GETADDRINFO
-inline in_addr_t Connection::ResolveHostAddr(const char* host)
-{
-	in_addr_t uaddr = inet_addr(host);
-	if (uaddr == INADDR_NONE)
+	in_addr_t ResolveHostAddr(const char* host)
 	{
-		struct hostent* hinfo;
-		bool err = false;
-		int h_errnop = 0;
+		in_addr_t uaddr = inet_addr(host);
+		if (uaddr == INADDR_NONE)
+		{
+			struct hostent* hinfo;
+			bool err = false;
+			int h_errnop = 0;
 #ifdef HAVE_GETHOSTBYNAME_R
-		struct hostent hinfobuf;
-		char strbuf[1024];
+			struct hostent hinfobuf;
+			char strbuf[1024];
 #ifdef HAVE_GETHOSTBYNAME_R_6
-		err = gethostbyname_r(host, &hinfobuf, strbuf, sizeof(strbuf), &hinfo, &h_errnop);
-		err = err || (hinfo == nullptr); // error on null hinfo (means 'no entry')
+			err = gethostbyname_r(host, &hinfobuf, strbuf, sizeof(strbuf), &hinfo, &h_errnop);
+			err = err || (hinfo == nullptr); // error on null hinfo (means 'no entry')
 #endif
 #ifdef HAVE_GETHOSTBYNAME_R_5
-		hinfo = gethostbyname_r(host, &hinfobuf, strbuf, sizeof(strbuf), &h_errnop);
-		err = hinfo == nullptr;
+			hinfo = gethostbyname_r(host, &hinfobuf, strbuf, sizeof(strbuf), &h_errnop);
+			err = hinfo == nullptr;
 #endif
 #ifdef HAVE_GETHOSTBYNAME_R_3
-		//NOTE: gethostbyname_r with three parameters were not tested
-		struct hostent_data hinfo_data;
-		hinfo = gethostbyname_r((char*)host, (struct hostent*)hinfobuf, &hinfo_data);
-		err = hinfo == nullptr;
+			//NOTE: gethostbyname_r with three parameters were not tested
+			struct hostent_data hinfo_data;
+			hinfo = gethostbyname_r((char*)host, (struct hostent*)hinfobuf, &hinfo_data);
+			err = hinfo == nullptr;
 #endif
 #else
-		std::lock_guard<std::mutex> guard(m_getHostByNameMutex);
-		hinfo = gethostbyname(host);
-		err = hinfo == nullptr;
+			std::lock_guard<std::mutex> guard(m_getHostByNameMutex);
+			hinfo = gethostbyname(host);
+			err = hinfo == nullptr;
 #endif
-		if (err)
-		{
-			ReportError("Could not resolve hostname %s", host, true, h_errnop, hstrerror(h_errnop));
-			return INADDR_NONE;
+			if (err)
+			{
+				ReportError("Could not resolve hostname %s", host, true, h_errnop, hstrerror(h_errnop));
+				return INADDR_NONE;
+			}
+
+			memcpy(&uaddr, hinfo->h_addr_list[0], sizeof(uaddr));
 		}
-
-		memcpy(&uaddr, hinfo->h_addr_list[0], sizeof(uaddr));
+		return uaddr;
 	}
-	return uaddr;
-}
 #endif
-
-inline const char* Connection::GetRemoteAddr()
-{
-	if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
-	{
-		return "-";
-	}
-
-	m_remoteAddr.Clear();
-
-	char peerName[1024];
-	int peerNameLength = sizeof(peerName);
-	if (getpeername(m_socket, (sockaddr*)&peerName, (SOCKLEN_T*)&peerNameLength) >= 0)
-	{
-		inet_ntop(((sockaddr_in*)&peerName)->sin_family,
-			((sockaddr_in*)&peerName)->sin_family == AF_INET6 ?
-			(void*)&((sockaddr_in6*)&peerName)->sin6_addr :
-			(void*)&((sockaddr_in*)&peerName)->sin_addr,
-			m_remoteAddr, m_remoteAddr.Capacity());
-		m_remoteAddr[m_remoteAddr.Capacity() - 1] = '\0';
-	}
-
-	return m_remoteAddr;
-}
-
-inline int Connection::FetchTotalBytesRead()
-{
-	int total = m_totalBytesRead;
-	m_totalBytesRead = 0;
-	return total;
-}
+};
 
 class WebDownloader : public Thread, public Subject
 {
@@ -6910,19 +6857,190 @@ public:
 		adFatalError
 	};
 
-	WebDownloader();
+	WebDownloader()
+		: m_contentLen(0)
+		, m_redirecting(false)
+		, m_redirected(false)
+		, m_gzip(false)
+	{
+		debug("Creating WebDownloader");
+
+		SetLastUpdateTimeNow();
+	}
 	EStatus GetStatus() { return m_status; }
-	virtual void Run();
-	virtual void Stop();
-	EStatus Download();
-	EStatus DownloadWithRedirects(int maxRedirects);
+	virtual void Run()
+	{
+		debug("Entering WebDownloader-loop");
+
+		SetStatus(adRunning);
+
+		int remainedDownloadRetries = 1;
+		int remainedConnectRetries = 1;
+		nzbget_rs_ntw_webdl_calc_initial_retries(
+			g_Options->GetUrlRetries(), m_retry ? 1 : 0,
+			&remainedDownloadRetries, &remainedConnectRetries);
+
+		EStatus Status = adFailed;
+
+		while (nzbget_rs_dqh_webdl_should_continue_retry_loop(
+			IsStopped() ? 1 : 0, remainedDownloadRetries, remainedConnectRetries) != 0)
+		{
+			SetLastUpdateTimeNow();
+
+			Status = DownloadWithRedirects(5);
+
+			if (nzbget_rs_ntw_webdl_should_wait_before_retry(
+				(int)Status, (int)adFailed, (int)adConnectError,
+				remainedDownloadRetries, remainedConnectRetries,
+				IsStopped() ? 1 : 0, m_force ? 1 : 0,
+				g_WorkState->GetPauseDownload() ? 1 : 0) != 0)
+			{
+				detail("Waiting %i sec to retry", g_Options->GetUrlInterval());
+				int msec = 0;
+				while (nzbget_rs_dqh_webdl_should_keep_waiting_retry_interval(
+					IsStopped() ? 1 : 0, msec, g_Options->GetUrlInterval(),
+					m_force ? 1 : 0, g_WorkState->GetPauseDownload() ? 1 : 0) != 0)
+				{
+					// waiting isn't hanging: an interval longer than UrlTimeout got the
+					// download cancelled and restarted with all its retries again
+					SetLastUpdateTimeNow();
+					Util::Sleep(100);
+					msec += 100;
+				}
+			}
+
+			if (IsStopped() || (!m_force && g_WorkState->GetPauseDownload()))
+			{
+				Status = adRetry;
+				break;
+			}
+
+			if (nzbget_rs_dqh_webdl_is_terminal_retry_status(
+				(int)Status, (int)adFinished, (int)adFatalError, (int)adNotFound) != 0)
+			{
+				break;
+			}
+
+			nzbget_rs_webdl_step_retry_counters(
+				(int)Status, (int)adConnectError,
+				remainedDownloadRetries, remainedConnectRetries,
+				&remainedDownloadRetries, &remainedConnectRetries);
+		}
+
+		if (Status != adFinished && Status != adRetry)
+		{
+			Status = adFailed;
+		}
+
+		if (Status == adFailed)
+		{
+			if (IsStopped())
+			{
+				detail("Download %s cancelled", *m_infoName);
+			}
+			else
+			{
+				error("Download %s failed", *m_infoName);
+			}
+		}
+
+		if (Status == adFinished)
+		{
+			detail("Download %s completed", *m_infoName);
+		}
+
+		SetStatus(Status);
+
+		debug("Exiting WebDownloader-loop");
+	}
+	virtual void Stop()
+	{
+		debug("Trying to stop WebDownloader");
+		Thread::Stop();
+		Guard guard(m_connectionMutex);
+		if (m_connection)
+		{
+			m_connection->SetSuppressErrors(true);
+			m_connection->Cancel();
+		}
+		debug("WebDownloader stopped successfully");
+	}
+	EStatus Download()
+	{
+		EStatus Status = adRunning;
+
+		URL url(m_url);
+
+		Status = CreateConnection(&url);
+		if (Status != adRunning)
+		{
+			return Status;
+		}
+
+		m_connection->SetTimeout(g_Options->GetUrlTimeout());
+		m_connection->SetSuppressErrors(false);
+
+		// connection
+		bool connected = m_connection->Connect();
+		if (nzbget_rs_dqh_webdl_is_connect_aborted(
+			connected ? 1 : 0, IsStopped() ? 1 : 0) != 0)
+		{
+			FreeConnection();
+			return adConnectError;
+		}
+
+		// Okay, we got a Connection. Now start downloading.
+		detail("Downloading %s", *m_infoName);
+
+		SendHeaders(&url);
+
+		Status = DownloadHeaders();
+
+		if (nzbget_rs_dqh_webdl_should_download_body((int)Status, (int)adRunning) != 0)
+		{
+			Status = DownloadBody();
+		}
+
+		if (IsStopped())
+		{
+			Status = adFailed;
+		}
+
+		FreeConnection();
+
+		if (nzbget_rs_dqh_webdl_should_delete_broken_output((int)Status, (int)adFinished) != 0)
+		{
+			// Download failed, delete broken output file
+			FileSystem::DeleteFile(m_outputFilename);
+		}
+
+		return Status;
+	}
+	EStatus DownloadWithRedirects(int maxRedirects)
+	{
+		// do sync download, following redirects
+		EStatus status = adRedirect;
+		while (status == adRedirect && maxRedirects >= 0)
+		{
+			maxRedirects--;
+			status = Download();
+		}
+
+		if (status == adRedirect)
+		{
+			warn("Too many redirects for %s", *m_infoName);
+			status = adFailed;
+		}
+
+		return status;
+	}
 	void SetInfoName(const char* infoName) { m_infoName = infoName; }
 	const char* GetInfoName() { return m_infoName; }
-	void SetUrl(const char* url);
+	void SetUrl(const char* url) { m_url = WebUtil::UrlEncode(url); }
 	const char* GetOutputFilename() { return m_outputFilename; }
 	void SetOutputFilename(const char* outputFilename) { m_outputFilename = outputFilename; }
 	time_t GetLastUpdateTime() { return m_lastUpdateTime; }
-	void SetLastUpdateTimeNow();
+	void SetLastUpdateTimeNow() { m_lastUpdateTime = Util::CurrentTime(); }
 	// the status code of the last response (0 before any)
 	int GetHttpStatus() const { return m_httpStatus; }
 	const char* GetOriginalFilename() { return m_originalFilename; }
@@ -6932,10 +7050,38 @@ public:
 	void SetCertVerifLevel(unsigned int level) { m_certVerifLevel = level; }
 #endif
 
-	void LogDebugInfo();
+	void LogDebugInfo()
+	{
+		info("      Web-Download: status=%i, LastUpdateTime=%s, filename=%s", m_status,
+			*Util::FormatTime(m_lastUpdateTime.load()), FileSystem::BaseFileName(m_outputFilename));
+	}
 
 protected:
-	virtual void ProcessHeader(const char* line);
+	virtual void ProcessHeader(const char* line)
+	{
+		// rust/src/webdownload.rs
+		int value = 0;
+		switch (nzbget_rs_http_header(line, m_redirecting, &value))
+		{
+			case 1:
+				m_contentLen = value;
+				m_confirmedLength = true;
+				break;
+
+			case 2:
+				m_gzip = true;
+				break;
+
+			case 3:
+				ParseFilename(line);
+				break;
+
+			case 4:
+				ParseRedirect(line + value);
+				m_redirected = true;
+				break;
+		}
+	}
 
 private:
 	CString m_url;
@@ -6962,603 +7108,358 @@ private:
 	std::unique_ptr<GUnzipStream> m_gUnzipStream;
 #endif
 
-	void SetStatus(EStatus status);
-	bool Write(void* buffer, int len);
-	bool PrepareFile();
-	void FreeConnection();
-	EStatus CheckResponse(const char* response);
-	EStatus CreateConnection(URL *url);
-	void ParseFilename(const char* contentDisposition);
-	void SendHeaders(URL *url);
-	EStatus DownloadHeaders();
-	EStatus DownloadBody();
-	void ParseRedirect(const char* location);
-};
-
-inline WebDownloader::WebDownloader()
-	: m_contentLen(0)
-	, m_redirecting(false)
-	, m_redirected(false)
-	, m_gzip(false)
-{
-	debug("Creating WebDownloader");
-
-	SetLastUpdateTimeNow();
-}
-
-inline void WebDownloader::SetUrl(const char* url)
-{
-	m_url = WebUtil::UrlEncode(url);
-}
-
-inline void WebDownloader::SetStatus(EStatus status)
-{
-	m_status = status;
-	Notify(nullptr);
-}
-
-inline void WebDownloader::SetLastUpdateTimeNow()
-{
-	m_lastUpdateTime = Util::CurrentTime();
-}
-
-inline void WebDownloader::Run()
-{
-	debug("Entering WebDownloader-loop");
-
-	SetStatus(adRunning);
-
-	int remainedDownloadRetries = 1;
-	int remainedConnectRetries = 1;
-	nzbget_rs_ntw_webdl_calc_initial_retries(
-		g_Options->GetUrlRetries(), m_retry ? 1 : 0,
-		&remainedDownloadRetries, &remainedConnectRetries);
-
-	EStatus Status = adFailed;
-
-	while (nzbget_rs_dqh_webdl_should_continue_retry_loop(
-		IsStopped() ? 1 : 0, remainedDownloadRetries, remainedConnectRetries) != 0)
+	void SetStatus(EStatus status)
 	{
-		SetLastUpdateTimeNow();
-
-		Status = DownloadWithRedirects(5);
-
-		if (nzbget_rs_ntw_webdl_should_wait_before_retry(
-			(int)Status, (int)adFailed, (int)adConnectError,
-			remainedDownloadRetries, remainedConnectRetries,
-			IsStopped() ? 1 : 0, m_force ? 1 : 0,
-			g_WorkState->GetPauseDownload() ? 1 : 0) != 0)
+		m_status = status;
+		Notify(nullptr);
+	}
+	bool Write(void* buffer, int len)
+	{
+		if (nzbget_rs_dqh_webdl_needs_prepare_file(m_outFile.Active() ? 1 : 0) != 0 && !PrepareFile())
 		{
-			detail("Waiting %i sec to retry", g_Options->GetUrlInterval());
-			int msec = 0;
-			while (nzbget_rs_dqh_webdl_should_keep_waiting_retry_interval(
-				IsStopped() ? 1 : 0, msec, g_Options->GetUrlInterval(),
-				m_force ? 1 : 0, g_WorkState->GetPauseDownload() ? 1 : 0) != 0)
+			return false;
+		}
+
+#ifndef DISABLE_GZIP
+		if (m_gzip)
+		{
+			m_gUnzipStream->Write(buffer, len);
+			const void *outBuf;
+			int outLen = 1;
+			while (outLen > 0)
 			{
-				// waiting isn't hanging: an interval longer than UrlTimeout got the
-				// download cancelled and restarted with all its retries again
-				SetLastUpdateTimeNow();
-				Util::Sleep(100);
-				msec += 100;
+				GUnzipStream::EStatus gZStatus = m_gUnzipStream->Read(&outBuf, &outLen);
+
+				if (gZStatus == GUnzipStream::zlError)
+				{
+					error("URL %s: GUnzip failed", *m_infoName);
+					return false;
+				}
+
+				if (outLen > 0 && nzbget_rs_dqh_webdl_is_gunzip_write_failed(
+					outLen, m_outFile.Write(outBuf, outLen)) != 0)
+				{
+					return false;
+				}
+
+				if (gZStatus == GUnzipStream::zlFinished)
+				{
+					m_confirmedLength = true;
+					return true;
+				}
 			}
-		}
-
-		if (IsStopped() || (!m_force && g_WorkState->GetPauseDownload()))
-		{
-			Status = adRetry;
-			break;
-		}
-
-		if (nzbget_rs_dqh_webdl_is_terminal_retry_status(
-			(int)Status, (int)adFinished, (int)adFatalError, (int)adNotFound) != 0)
-		{
-			break;
-		}
-
-		nzbget_rs_webdl_step_retry_counters(
-			(int)Status, (int)adConnectError,
-			remainedDownloadRetries, remainedConnectRetries,
-			&remainedDownloadRetries, &remainedConnectRetries);
-	}
-
-	if (Status != adFinished && Status != adRetry)
-	{
-		Status = adFailed;
-	}
-
-	if (Status == adFailed)
-	{
-		if (IsStopped())
-		{
-			detail("Download %s cancelled", *m_infoName);
+			return true;
 		}
 		else
+#endif
+
+		return m_outFile.Write(buffer, len) > 0;
+	}
+	bool PrepareFile()
+	{
+		// prepare file for writing
+
+		const char* filename = m_outputFilename;
+		if (!m_outFile.Open(filename, DiskFile::omWrite))
 		{
-			error("Download %s failed", *m_infoName);
+			error("Could not %s file %s", "create", filename);
+			return false;
+		}
+		if (g_Options->GetWriteBuffer() > 0)
+		{
+			m_outFile.SetWriteBuffer(nzbget_rs_tpr_webdl_kb_to_bytes(g_Options->GetWriteBuffer()));
+		}
+
+		return true;
+	}
+	void FreeConnection()
+	{
+		if (m_connection)
+		{
+			debug("Releasing connection");
+			Guard guard(m_connectionMutex);
+			if (nzbget_rs_dqh_webdl_should_disconnect_on_free(
+				(int)m_connection->GetStatus(), (int)Connection::csCancelled) != 0)
+			{
+				m_connection->Disconnect();
+			}
+			m_connection.reset();
 		}
 	}
-
-	if (Status == adFinished)
+	EStatus CheckResponse(const char* response)
 	{
-		detail("Download %s completed", *m_infoName);
+		// rust/src/webdownload.rs decides; the warnings are logged here
+		NzbgetRsHttpResponse r;
+		nzbget_rs_http_check_response(response, &r);
+		if (r.setStatus)
+		{
+			m_httpStatus = r.httpStatus;
+		}
+		switch (r.warn)
+		{
+			case 1:
+				if (!IsStopped())
+				{
+					warn("URL %s: Connection closed by remote host", *m_infoName);
+				}
+				break;
+
+			case 2:
+				warn("URL %s failed: %s", *m_infoName, response);
+				break;
+
+			case 3:
+				warn("URL %s failed: %s", *m_infoName, response + r.statusOffset);
+				break;
+		}
+		switch (r.result)
+		{
+			case 0:
+				return adRunning;
+
+			case 1:
+				m_redirecting = true;
+				return adRunning;
+
+			case 2:
+				return adConnectError;
+
+			case 3:
+				return adNotFound;
+
+			default:
+				return adFailed;
+		}
 	}
-
-	SetStatus(Status);
-
-	debug("Exiting WebDownloader-loop");
-}
-
-inline WebDownloader::EStatus WebDownloader::Download()
-{
-	EStatus Status = adRunning;
-
-	URL url(m_url);
-
-	Status = CreateConnection(&url);
-	if (Status != adRunning)
+	EStatus CreateConnection(URL *url)
 	{
-		return Status;
-	}
-
-	m_connection->SetTimeout(g_Options->GetUrlTimeout());
-	m_connection->SetSuppressErrors(false);
-
-	// connection
-	bool connected = m_connection->Connect();
-	if (nzbget_rs_dqh_webdl_is_connect_aborted(
-		connected ? 1 : 0, IsStopped() ? 1 : 0) != 0)
-	{
-		FreeConnection();
-		return adConnectError;
-	}
-
-	// Okay, we got a Connection. Now start downloading.
-	detail("Downloading %s", *m_infoName);
-
-	SendHeaders(&url);
-
-	Status = DownloadHeaders();
-
-	if (nzbget_rs_dqh_webdl_should_download_body((int)Status, (int)adRunning) != 0)
-	{
-		Status = DownloadBody();
-	}
-
-	if (IsStopped())
-	{
-		Status = adFailed;
-	}
-
-	FreeConnection();
-
-	if (nzbget_rs_dqh_webdl_should_delete_broken_output((int)Status, (int)adFinished) != 0)
-	{
-		// Download failed, delete broken output file
-		FileSystem::DeleteFile(m_outputFilename);
-	}
-
-	return Status;
-}
-
-inline WebDownloader::EStatus WebDownloader::DownloadWithRedirects(int maxRedirects)
-{
-	// do sync download, following redirects
-	EStatus status = adRedirect;
-	while (status == adRedirect && maxRedirects >= 0)
-	{
-		maxRedirects--;
-		status = Download();
-	}
-
-	if (status == adRedirect)
-	{
-		warn("Too many redirects for %s", *m_infoName);
-		status = adFailed;
-	}
-
-	return status;
-}
-
-inline WebDownloader::EStatus WebDownloader::CreateConnection(URL *url)
-{
-	int tlsDisabled = 0;
+		int tlsDisabled = 0;
 #ifdef DISABLE_TLS
-	tlsDisabled = 1;
+		tlsDisabled = 1;
 #endif
-	int port = 0;
-	int tlsInt = 0;
-	int rc = nzbget_rs_rco_webdl_resolve_protocol_port(
-		url->IsValid() ? 1 : 0, url->GetProtocol(), url->GetPort(),
-		tlsDisabled, &port, &tlsInt);
-	if (rc == -1)
-	{
-		error("URL is not valid: %s", url->GetAddress());
-		return adFatalError;
-	}
-	if (rc == -2)
-	{
-		error("Unsupported protocol in URL: %s", url->GetAddress());
-		return adFatalError;
-	}
-	if (rc == -3)
-	{
-		error("Program was compiled without TLS/SSL-support. Cannot download using https protocol. URL: %s", url->GetAddress());
-		return adFatalError;
-	}
-	bool tls = tlsInt != 0;
+		int port = 0;
+		int tlsInt = 0;
+		int rc = nzbget_rs_rco_webdl_resolve_protocol_port(
+			url->IsValid() ? 1 : 0, url->GetProtocol(), url->GetPort(),
+			tlsDisabled, &port, &tlsInt);
+		if (rc == -1)
+		{
+			error("URL is not valid: %s", url->GetAddress());
+			return adFatalError;
+		}
+		if (rc == -2)
+		{
+			error("Unsupported protocol in URL: %s", url->GetAddress());
+			return adFatalError;
+		}
+		if (rc == -3)
+		{
+			error("Program was compiled without TLS/SSL-support. Cannot download using https protocol. URL: %s", url->GetAddress());
+			return adFatalError;
+		}
+		bool tls = tlsInt != 0;
 
-	m_connection = std::make_unique<Connection>(url->GetHost(), port, tls);
+		m_connection = std::make_unique<Connection>(url->GetHost(), port, tls);
 
 #ifndef DISABLE_TLS
-	m_connection->SetCertVerifLevel(m_certVerifLevel);
+		m_connection->SetCertVerifLevel(m_certVerifLevel);
 #endif
 
-	return adRunning;
-}
-
-inline void WebDownloader::SendHeaders(URL *url)
-{
-	// retrieve file
-	// not cut to a fixed size: a long (signed) url lost its "HTTP/1.0" and line end
-	NzbgetRsBuf reqLineBuf = nzbget_rs_tpr_webdl_format_get_request_line(url->GetResource());
-	m_connection->WriteLine(reqLineBuf.data ? reqLineBuf.data : "");
-	nzbget_rs_free(reqLineBuf);
-
-	NzbgetRsBuf uaLineBuf = nzbget_rs_tpr_webdl_format_user_agent_header(Util::VersionRevision());
-	m_connection->WriteLine(uaLineBuf.data ? uaLineBuf.data : "");
-	nzbget_rs_free(uaLineBuf);
-
-	int isDefaultPort = nzbget_rs_ntw_webdl_is_default_http_port(
-		url->GetProtocol(), url->GetPort());
-	NzbgetRsBuf hostLineBuf = nzbget_rs_tpr_webdl_format_host_header(
-		isDefaultPort, url->GetHost(), url->GetPort());
-	m_connection->WriteLine(hostLineBuf.data ? hostLineBuf.data : "");
-	nzbget_rs_free(hostLineBuf);
-
-	m_connection->WriteLine("Accept: */*\r\n");
-#ifndef DISABLE_GZIP
-	m_connection->WriteLine("Accept-Encoding: gzip\r\n");
-#endif
-	m_connection->WriteLine("Connection: close\r\n");
-	m_connection->WriteLine("\r\n");
-}
-
-inline WebDownloader::EStatus WebDownloader::DownloadHeaders()
-{
-	EStatus Status = adRunning;
-
-	m_confirmedLength = false;
-	CharBuffer lineBuf(1024*10);
-	m_contentLen = -1;
-	bool firstLine = true;
-	m_gzip = false;
-	m_redirecting = false;
-	m_redirected = false;
-
-	// Headers
-	while (!IsStopped())
+		return adRunning;
+	}
+	void ParseFilename(const char* contentDisposition)
 	{
-		SetLastUpdateTimeNow();
-
-		int len = 0;
-		char* line = m_connection->ReadLine(lineBuf, lineBuf.Size(), &len);
-
-		if (firstLine)
+		CString filename = WebUtil::ParseContentDispositionFilename(contentDisposition);
+		if (filename.Empty())
 		{
-			Status = CheckResponse(line);
-			if (Status != adRunning)
+			return;
+		}
+
+		m_originalFilename = FileSystem::BaseFileName(filename);
+
+		debug("OriginalFilename: %s", *m_originalFilename);
+	}
+	void SendHeaders(URL *url)
+	{
+		// retrieve file
+		// not cut to a fixed size: a long (signed) url lost its "HTTP/1.0" and line end
+		NzbgetRsBuf reqLineBuf = nzbget_rs_tpr_webdl_format_get_request_line(url->GetResource());
+		m_connection->WriteLine(reqLineBuf.data ? reqLineBuf.data : "");
+		nzbget_rs_free(reqLineBuf);
+
+		NzbgetRsBuf uaLineBuf = nzbget_rs_tpr_webdl_format_user_agent_header(Util::VersionRevision());
+		m_connection->WriteLine(uaLineBuf.data ? uaLineBuf.data : "");
+		nzbget_rs_free(uaLineBuf);
+
+		int isDefaultPort = nzbget_rs_ntw_webdl_is_default_http_port(
+			url->GetProtocol(), url->GetPort());
+		NzbgetRsBuf hostLineBuf = nzbget_rs_tpr_webdl_format_host_header(
+			isDefaultPort, url->GetHost(), url->GetPort());
+		m_connection->WriteLine(hostLineBuf.data ? hostLineBuf.data : "");
+		nzbget_rs_free(hostLineBuf);
+
+		m_connection->WriteLine("Accept: */*\r\n");
+#ifndef DISABLE_GZIP
+		m_connection->WriteLine("Accept-Encoding: gzip\r\n");
+#endif
+		m_connection->WriteLine("Connection: close\r\n");
+		m_connection->WriteLine("\r\n");
+	}
+	EStatus DownloadHeaders()
+	{
+		EStatus Status = adRunning;
+
+		m_confirmedLength = false;
+		CharBuffer lineBuf(1024*10);
+		m_contentLen = -1;
+		bool firstLine = true;
+		m_gzip = false;
+		m_redirecting = false;
+		m_redirected = false;
+
+		// Headers
+		while (!IsStopped())
+		{
+			SetLastUpdateTimeNow();
+
+			int len = 0;
+			char* line = m_connection->ReadLine(lineBuf, lineBuf.Size(), &len);
+
+			if (firstLine)
+			{
+				Status = CheckResponse(line);
+				if (Status != adRunning)
+				{
+					break;
+				}
+				firstLine = false;
+			}
+
+			// Have we encountered a timeout?
+			if (!line)
+			{
+				if (!IsStopped())
+				{
+					warn("URL %s failed: Unexpected end of file", *m_infoName);
+				}
+				Status = adFailed;
+				break;
+			}
+
+			debug("Header: %s", line);
+
+			// detect body of response
+			if (nzbget_rs_ntw_webdl_is_header_end_line((unsigned char)*line) != 0)
 			{
 				break;
 			}
-			firstLine = false;
-		}
 
-		// Have we encountered a timeout?
-		if (!line)
-		{
-			if (!IsStopped())
+			Util::TrimRight(line);
+			ProcessHeader(line);
+
+			if (m_redirected)
 			{
-				warn("URL %s failed: Unexpected end of file", *m_infoName);
+				Status = adRedirect;
+				break;
 			}
-			Status = adFailed;
-			break;
 		}
 
-		debug("Header: %s", line);
-
-		// detect body of response
-		if (nzbget_rs_ntw_webdl_is_header_end_line((unsigned char)*line) != 0)
-		{
-			break;
-		}
-
-		Util::TrimRight(line);
-		ProcessHeader(line);
-
-		if (m_redirected)
-		{
-			Status = adRedirect;
-			break;
-		}
+		return Status;
 	}
+	EStatus DownloadBody()
+	{
+		EStatus Status = adRunning;
 
-	return Status;
-}
-
-inline WebDownloader::EStatus WebDownloader::DownloadBody()
-{
-	EStatus Status = adRunning;
-
-	m_outFile.Close();
-	bool end = false;
-	CharBuffer lineBuf(1024*10);
-	int writtenLen = 0;
+		m_outFile.Close();
+		bool end = false;
+		CharBuffer lineBuf(1024*10);
+		int writtenLen = 0;
 
 #ifndef DISABLE_GZIP
-	m_gUnzipStream.reset();
-	if (m_gzip)
-	{
-		m_gUnzipStream = std::make_unique<GUnzipStream>(1024*10);
-	}
+		m_gUnzipStream.reset();
+		if (m_gzip)
+		{
+			m_gUnzipStream = std::make_unique<GUnzipStream>(1024*10);
+		}
 #endif
 
-	// Body
-	while (!IsStopped())
-	{
-		SetLastUpdateTimeNow();
-
-		char* buffer;
-		int len;
-		m_connection->ReadBuffer(&buffer, &len);
-		if (nzbget_rs_dqh_webdl_should_try_recv_when_buf_empty(len) != 0)
+		// Body
+		while (!IsStopped())
 		{
-			len = m_connection->TryRecv(lineBuf, lineBuf.Size());
-			buffer = lineBuf;
-		}
+			SetLastUpdateTimeNow();
 
-		if (len <= 0)
-		{
-			if (nzbget_rs_rco_webdl_check_body_chunk(
-				len, m_contentLen, writtenLen, m_gzip ? 1 : 0, m_confirmedLength ? 1 : 0) == 1)
+			char* buffer;
+			int len;
+			m_connection->ReadBuffer(&buffer, &len);
+			if (nzbget_rs_dqh_webdl_should_try_recv_when_buf_empty(len) != 0)
+			{
+				len = m_connection->TryRecv(lineBuf, lineBuf.Size());
+				buffer = lineBuf;
+			}
+
+			if (len <= 0)
+			{
+				if (nzbget_rs_rco_webdl_check_body_chunk(
+					len, m_contentLen, writtenLen, m_gzip ? 1 : 0, m_confirmedLength ? 1 : 0) == 1)
+				{
+					end = true;
+					break;
+				}
+				if (!IsStopped())
+				{
+					warn("URL %s failed: Unexpected end of file", *m_infoName);
+				}
+				Status = adFailed;
+				break;
+			}
+
+			// write to output file
+			if (!Write(buffer, len))
+			{
+				Status = adFatalError;
+				break;
+			}
+			int bodyStep = nzbget_rs_rco_webdl_check_body_chunk(
+				len, m_contentLen, writtenLen, m_gzip ? 1 : 0, m_confirmedLength ? 1 : 0);
+			writtenLen += len;
+
+			if (bodyStep == 2)
 			{
 				end = true;
 				break;
 			}
-			if (!IsStopped())
-			{
-				warn("URL %s failed: Unexpected end of file", *m_infoName);
-			}
-			Status = adFailed;
-			break;
 		}
-
-		// write to output file
-		if (!Write(buffer, len))
-		{
-			Status = adFatalError;
-			break;
-		}
-		int bodyStep = nzbget_rs_rco_webdl_check_body_chunk(
-			len, m_contentLen, writtenLen, m_gzip ? 1 : 0, m_confirmedLength ? 1 : 0);
-		writtenLen += len;
-
-		if (bodyStep == 2)
-		{
-			end = true;
-			break;
-		}
-	}
 
 #ifndef DISABLE_GZIP
-	m_gUnzipStream.reset();
+		m_gUnzipStream.reset();
 #endif
 
-	m_outFile.Close();
+		m_outFile.Close();
 
-	int warnIncomplete = 0;
-	Status = (EStatus)nzbget_rs_webdl_resolve_body_end_status(
-		end ? 1 : 0, (int)Status, IsStopped() ? 1 : 0,
-		(int)adRunning, (int)adFailed, (int)adFinished, &warnIncomplete);
-	if (warnIncomplete)
-	{
-		warn("URL %s failed: file incomplete", *m_infoName);
-	}
-
-	return Status;
-}
-
-inline WebDownloader::EStatus WebDownloader::CheckResponse(const char* response)
-{
-	// rust/src/webdownload.rs decides; the warnings are logged here
-	NzbgetRsHttpResponse r;
-	nzbget_rs_http_check_response(response, &r);
-	if (r.setStatus)
-	{
-		m_httpStatus = r.httpStatus;
-	}
-	switch (r.warn)
-	{
-		case 1:
-			if (!IsStopped())
-			{
-				warn("URL %s: Connection closed by remote host", *m_infoName);
-			}
-			break;
-
-		case 2:
-			warn("URL %s failed: %s", *m_infoName, response);
-			break;
-
-		case 3:
-			warn("URL %s failed: %s", *m_infoName, response + r.statusOffset);
-			break;
-	}
-	switch (r.result)
-	{
-		case 0:
-			return adRunning;
-
-		case 1:
-			m_redirecting = true;
-			return adRunning;
-
-		case 2:
-			return adConnectError;
-
-		case 3:
-			return adNotFound;
-
-		default:
-			return adFailed;
-	}
-}
-
-inline void WebDownloader::ProcessHeader(const char* line)
-{
-	// rust/src/webdownload.rs
-	int value = 0;
-	switch (nzbget_rs_http_header(line, m_redirecting, &value))
-	{
-		case 1:
-			m_contentLen = value;
-			m_confirmedLength = true;
-			break;
-
-		case 2:
-			m_gzip = true;
-			break;
-
-		case 3:
-			ParseFilename(line);
-			break;
-
-		case 4:
-			ParseRedirect(line + value);
-			m_redirected = true;
-			break;
-	}
-}
-
-inline void WebDownloader::ParseFilename(const char* contentDisposition)
-{
-	CString filename = WebUtil::ParseContentDispositionFilename(contentDisposition);
-	if (filename.Empty())
-	{
-		return;
-	}
-
-	m_originalFilename = FileSystem::BaseFileName(filename);
-
-	debug("OriginalFilename: %s", *m_originalFilename);
-}
-
-inline void WebDownloader::ParseRedirect(const char* location)
-{
-	// rust/src/webdownload.rs resolves the address
-	NzbgetRsBuf buf = nzbget_rs_http_redirect(m_url, location);
-	std::string newLocation(buf.data, buf.len);
-	nzbget_rs_free(buf);
-	// without the query: it carries api keys and passwords (indexer links do),
-	// and this went into the log
-	auto noQuery = [](const char* url) { return std::string(url, nzbget_rs_ntw_webdl_strip_query_len(url)); };
-	detail("URL %s redirected to %s", noQuery(m_url).c_str(), noQuery(newLocation.c_str()).c_str());
-	SetUrl(newLocation.c_str());
-}
-
-inline bool WebDownloader::Write(void* buffer, int len)
-{
-	if (nzbget_rs_dqh_webdl_needs_prepare_file(m_outFile.Active() ? 1 : 0) != 0 && !PrepareFile())
-	{
-		return false;
-	}
-
-#ifndef DISABLE_GZIP
-	if (m_gzip)
-	{
-		m_gUnzipStream->Write(buffer, len);
-		const void *outBuf;
-		int outLen = 1;
-		while (outLen > 0)
+		int warnIncomplete = 0;
+		Status = (EStatus)nzbget_rs_webdl_resolve_body_end_status(
+			end ? 1 : 0, (int)Status, IsStopped() ? 1 : 0,
+			(int)adRunning, (int)adFailed, (int)adFinished, &warnIncomplete);
+		if (warnIncomplete)
 		{
-			GUnzipStream::EStatus gZStatus = m_gUnzipStream->Read(&outBuf, &outLen);
-
-			if (gZStatus == GUnzipStream::zlError)
-			{
-				error("URL %s: GUnzip failed", *m_infoName);
-				return false;
-			}
-
-			if (outLen > 0 && nzbget_rs_dqh_webdl_is_gunzip_write_failed(
-				outLen, m_outFile.Write(outBuf, outLen)) != 0)
-			{
-				return false;
-			}
-
-			if (gZStatus == GUnzipStream::zlFinished)
-			{
-				m_confirmedLength = true;
-				return true;
-			}
+			warn("URL %s failed: file incomplete", *m_infoName);
 		}
-		return true;
+
+		return Status;
 	}
-	else
-#endif
-
-	return m_outFile.Write(buffer, len) > 0;
-}
-
-inline bool WebDownloader::PrepareFile()
-{
-	// prepare file for writing
-
-	const char* filename = m_outputFilename;
-	if (!m_outFile.Open(filename, DiskFile::omWrite))
+	void ParseRedirect(const char* location)
 	{
-		error("Could not %s file %s", "create", filename);
-		return false;
+		// rust/src/webdownload.rs resolves the address
+		NzbgetRsBuf buf = nzbget_rs_http_redirect(m_url, location);
+		std::string newLocation(buf.data, buf.len);
+		nzbget_rs_free(buf);
+		// without the query: it carries api keys and passwords (indexer links do),
+		// and this went into the log
+		auto noQuery = [](const char* url) { return std::string(url, nzbget_rs_ntw_webdl_strip_query_len(url)); };
+		detail("URL %s redirected to %s", noQuery(m_url).c_str(), noQuery(newLocation.c_str()).c_str());
+		SetUrl(newLocation.c_str());
 	}
-	if (g_Options->GetWriteBuffer() > 0)
-	{
-		m_outFile.SetWriteBuffer(nzbget_rs_tpr_webdl_kb_to_bytes(g_Options->GetWriteBuffer()));
-	}
-
-	return true;
-}
-
-inline void WebDownloader::LogDebugInfo()
-{
-	info("      Web-Download: status=%i, LastUpdateTime=%s, filename=%s", m_status,
-		*Util::FormatTime(m_lastUpdateTime.load()), FileSystem::BaseFileName(m_outputFilename));
-}
-
-inline void WebDownloader::Stop()
-{
-	debug("Trying to stop WebDownloader");
-	Thread::Stop();
-	Guard guard(m_connectionMutex);
-	if (m_connection)
-	{
-		m_connection->SetSuppressErrors(true);
-		m_connection->Cancel();
-	}
-	debug("WebDownloader stopped successfully");
-}
-
-inline void WebDownloader::FreeConnection()
-{
-	if (m_connection)
-	{
-		debug("Releasing connection");
-		Guard guard(m_connectionMutex);
-		if (nzbget_rs_dqh_webdl_should_disconnect_on_free(
-			(int)m_connection->GetStatus(), (int)Connection::csCancelled) != 0)
-		{
-			m_connection->Disconnect();
-		}
-		m_connection.reset();
-	}
-}
+};
 
 #endif
 
@@ -20627,274 +20528,6 @@ extern DupeCoordinator* g_DupeCoordinator;
 #ifndef SCANNER_H
 #define SCANNER_H
 
-class Scanner final : public Service
-{
-public:
-	static constexpr std::string_view PROCESSED_DIR = "_processed";
-	static constexpr std::string_view BROKEN_DIR = "_broken";
-	static constexpr std::string_view UNPACK_DIR = "_unpack";
-
-	enum EAddStatus
-	{
-		asSkipped,
-		asSuccess,
-		asFailed
-	};
-
-	void InitOptions();
-	void ScanNzbDir(bool syncMode);
-	EAddStatus AddArchive(
-		const char* filename,
-		const char* category,
-		bool autoCategory,
-		int priority,
-		const char* dupeKey,
-		int dupeScore,
-		EDupeMode dupeMode,
-		NzbParameterList* parameters,
-		bool addTop,
-		bool addPaused,
-		NzbInfo* urlInfo,
-		const char* buffer,
-		int bufSize
-	);
-	EAddStatus AddArchive(
-		const char* filename,
-		const char* category,
-		bool autoCategory,
-		int priority,
-		const char* dupeKey,
-		int dupeScore,
-		EDupeMode dupeMode,
-		NzbParameterList* parameters,
-		bool addTop,
-		bool addPaused,
-		NzbInfo* urlInfo,
-		const char* tmpFilename
-	);
-	EAddStatus AddExternalFile(
-		const char* nzbName, 
-		const char* category,
-		bool autoCategory,
-		int priority,
-		const char* dupeKey, 
-		int dupeScore, 
-		EDupeMode dupeMode,
-		NzbParameterList* parameters, 
-		bool addTop, 
-		bool addPaused, 
-		NzbInfo* urlInfo,
-		const char* fileName, 
-		const char* buffer, 
-		int bufSize, 
-		int* nzbId
-	);
-	void InitPPParameters(const char* category, NzbParameterList* parameters, bool reset);
-	CString ResolveCategory(const char* category, const char* filename);
-
-protected:
-	int ServiceInterval() override;
-	void ServiceWork() override;
-
-private:
-	class FileData
-	{
-	public:
-		FileData(const char* filename, int64 size, time_t lastChange)
-			: m_filename{ filename ? filename : "" }
-			, m_size{ size }
-			, m_lastChange{ lastChange } {}
-		const char* GetFilename() const { return m_filename.c_str(); }
-		int64 GetSize() { return m_size; }
-		void SetSize(int64 size) { m_size = size; }
-		time_t GetLastChange() { return m_lastChange; }
-		void SetLastChange(time_t lastChange) { m_lastChange = lastChange; }
-	private:
-		std::string m_filename;
-		int64 m_size;
-		time_t m_lastChange;
-	};
-
-	using FileList = std::deque<FileData>;
-
-	class QueueData
-	{
-	public:
-		QueueData(
-			const char* filename,
-			const char* nzbName,
-			const char* category,
-			bool autoCategory,
-			int priority,
-			const char* dupeKey,
-			int dupeScore,
-			EDupeMode dupeMode,
-			NzbParameterList* parameters,
-			bool addTop,
-			bool addPaused,
-			NzbInfo* urlInfo,
-			EAddStatus* addStatus,
-			int* nzbId
-		);
-		const char* GetFilename() const { return m_filename.c_str(); }
-		const char* GetNzbName() const { return m_nzbName.c_str(); }
-		const char* GetCategory() const { return m_category.c_str(); }
-		int GetPriority() { return m_priority; }
-		const char* GetDupeKey() const { return m_dupeKey.c_str(); }
-		int GetDupeScore() { return m_dupeScore; }
-		EDupeMode GetDupeMode() { return m_dupeMode; }
-		NzbParameterList* GetParameters() { return &m_parameters; }
-		bool GetAddTop() { return m_addTop; }
-		bool GetAddPaused() { return m_addPaused; }
-		bool GetAutoCategory() const { return m_autoCategory; }
-		NzbInfo* GetUrlInfo() { return m_urlInfo; }
-		void SetAddStatus(EAddStatus addStatus);
-		void SetNzbId(int nzbId);
-	private:
-		NzbParameterList m_parameters;
-		std::string m_filename;
-		std::string m_nzbName;
-		std::string m_category;
-		std::string m_dupeKey;
-		int m_priority;
-		int m_dupeScore;
-		bool m_autoCategory;
-		bool m_addTop;
-		bool m_addPaused;
-		EDupeMode m_dupeMode;
-		NzbInfo* m_urlInfo;
-		EAddStatus* m_addStatus;
-		int* m_nzbId;
-	};
-
-	using QueueList = std::deque<QueueData>;
-
-	FileList m_fileList;
-	QueueList m_queueList;
-	std::mutex m_scanMutex;
-	std::atomic<bool> m_requestedNzbDirScan{false};
-	std::atomic<bool> m_scanning{false};
-	inline static int m_idGen = 0;
-	int m_nzbDirInterval = 0;
-	int m_pass = 0;
-	bool m_scanScript = false;
-	
-	/**
-	 * @brief Detects the category from the NZB file and sets it in the NzbInfo object.
-	 *
-	 * If a category is found in the NZB file and matches a configured category, it is set in nzbInfo.
-	 * Otherwise, the detected category (if any) is set directly.
-	 */
-	void DetectAndSetCategory(const NzbFile& nzbFile, NzbInfo& nzbInfo, const char* nzbName);
-	void CheckIncomingArchives(const fs::path& dir, bool checkStat);
-	std::vector<fs::path> FindArchives(const fs::path& dir, bool checkStat);
-	void UnpackArchives(const std::vector<fs::path>& archives);
-	std::optional<std::vector<fs::path>> ProcessArchive(const fs::path& archiveFile, const fs::path& destDir);
-	void CleanupStaleUnpackDir();
-	void CheckIncomingNzbs(const char* directory, const char* category, bool checkStat);
-	bool ShouldSkipItem(std::string_view filename);
-	bool AddFileToQueue(
-		const char* filename, 
-		const char* nzbName, 
-		const char* category,
-		bool autoCategory,
-		int priority, 
-		const char* dupeKey, 
-		int dupeScore, 
-		EDupeMode dupeMode,
-		NzbParameterList* parameters, 
-		bool addTop, 
-		bool addPaused, 
-		NzbInfo* urlInfo, 
-		int* nzbId
-	);
-	void ProcessIncomingFile(
-		const char* directory, 
-		const char* baseFilename,
-		const char* fullFilename,
-		const char* category
-	);
-
-	/**
-	 * @brief Process subdirectories recursively to build category paths
-	 *
-	 * When a subdirectory is encountered, it's treated as a category name.
-	 * The category path is built by concatenating the parent category with
-	 * the subdirectory name. This allows for nested
-	 * category structures like "Movies/Action" or "TV/Comedy".
-	 */
-	void ProcessSubdirectory(
-		const char* fullPath, 
-		const char* filename, 
-		const char* category, 
-		bool checkStat
-	);
-	bool CanProcessFile(const char* fullFilename, bool checkStat);
-	void DropOldFiles();
-};
-
-extern Scanner* g_Scanner;
-
-class UrlDownloader;
-
-class UrlCoordinator : public Thread, public Observer, public Debuggable
-{
-public:
-	UrlCoordinator();
-	~UrlCoordinator() override;
-	void Run() override;
-	void Stop() override;
-	void Update(Subject* caller, void* aspect) override;
-
-	// Editing the queue
-	void AddUrlToQueue(std::unique_ptr<NzbInfo> nzbInfo, bool addFirst);
-	bool HasMoreJobs() const { return m_hasMoreJobs; }
-	bool DeleteQueueEntry(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, bool avoidHistory);
-
-protected:
-	void LogDebugInfo() override;
-
-private:
-	using ActiveDownloads = std::list<UrlDownloader*>;
-
-	class DownloadQueueObserver final : public Observer
-	{
-	public:
-		UrlCoordinator* m_owner;
-		void Update(Subject* caller, void* aspect) override { m_owner->DownloadQueueUpdate(caller, aspect); }
-	};
-
-	ActiveDownloads m_activeDownloads;
-	std::atomic<bool> m_hasMoreJobs{true};
-	std::mutex m_waitMutex;
-	std::condition_variable m_waitCond;
-	DownloadQueueObserver m_downloadQueueObserver;
-
-	NzbInfo* GetNextUrl(DownloadQueue* downloadQueue);
-	void StartUrlDownload(NzbInfo* nzbInfo);
-	void UrlCompleted(UrlDownloader* urlDownloader);
-	void ResetHangingDownloads();
-	void WaitJobs();
-	void DownloadQueueUpdate(Subject* caller, void* aspect);
-};
-
-extern UrlCoordinator* g_UrlCoordinator;
-
-class UrlDownloader : public WebDownloader
-{
-public:
-	void SetNzbInfo(NzbInfo* nzbInfo) { m_nzbInfo = nzbInfo; }
-	NzbInfo* GetNzbInfo() { return m_nzbInfo; }
-	const char* GetCategory() const { return m_category; }
-
-protected:
-	void ProcessHeader(const char* line) override;
-
-private:
-	NzbInfo* m_nzbInfo;
-	CString m_category;
-};
-
 
 
 
@@ -21413,14 +21046,84 @@ extern ExtensionManager::Manager* g_ExtensionManager;
 #ifndef SCRIPTCONTROLLER_H
 #define SCRIPTCONTROLLER_H
 
+// System global variable holding environments variables
+extern char** environ;
+extern char* (*g_EnvironmentVariables)[];
+
+inline constexpr int FORK_ERROR_EXIT_CODE = 254;
+
+#ifdef CHILD_WATCHDOG
+class ChildWatchDog : public Thread
+{
+public:
+	void SetProcessId(pid_t processId) { m_processId = processId; }
+	void SetInfoName(const char* infoName) { m_infoName = infoName; }
+protected:
+	virtual void Run()
+	{
+		static const int WAIT_SECONDS = 60;
+		time_t start = Util::CurrentTime();
+		while (!IsStopped() && (Util::CurrentTime() - start) < WAIT_SECONDS)
+		{
+			Util::Sleep(10);
+		}
+
+		if (!IsStopped())
+		{
+			info("Restarting hanging child process for %s", *m_infoName);
+			kill(m_processId, SIGKILL);
+		}
+	}
+private:
+	pid_t m_processId;
+	CString m_infoName;
+};
+#endif
+
 class EnvironmentStrings
 {
 public:
-	void Clear();
-	void InitFromCurrentProcess();
-	void Append(const char* envstr);
-	void Append(CString&& envstr);
-	std::vector<char*> GetStrings();
+	void Clear()
+	{
+		m_strings.clear();
+	}
+	void InitFromCurrentProcess()
+	{
+		if (!g_EnvironmentVariables)
+			return;
+
+		for (int i = 0; (*g_EnvironmentVariables)[i]; i++)
+		{
+			char* var = (*g_EnvironmentVariables)[i];
+			// Ignore all env vars set by NZBGet.
+			// This is to avoid the passing of env vars after program update (when NZBGet is
+			// started from a script which was started by a previous instance of NZBGet).
+			// Format: NZBXX_YYYY (XX are any two characters, YYYY are any number of any characters).
+			if (!nzbget_rs_sus_is_nzbget_internal_env_var(var))
+			{
+				Append(var);
+			}
+		}
+	}
+	void Append(const char* envstr)
+	{
+		m_strings.emplace_back(envstr);
+	}
+	void Append(CString&& envstr)
+	{
+		m_strings.push_back(std::move(envstr));
+	}
+	/*
+	 * Returns environment block in format suitable for using with execve.
+	 */
+	std::vector<char*> GetStrings()
+	{
+		std::vector<char*> strings;
+		strings.reserve(m_strings.size() + 1);
+		std::copy(m_strings.begin(), m_strings.end(), std::back_inserter(strings));
+		strings.push_back(nullptr);
+		return strings;
+	}
 
 private:
 	typedef std::vector<CString> Strings;
@@ -21433,14 +21136,238 @@ class ScriptController
 public:
 	typedef std::vector<CString> ArgList;
 
-	ScriptController();
-	virtual ~ScriptController();
-	int Execute();
-	void Terminate();
-	bool Break();
-	void Resume();
-	void Detach();
-	static void TerminateAll();
+	ScriptController()
+	{
+		ResetEnv();
+
+		Guard guard(m_runningMutex);
+		m_runningScripts.push_back(this);
+	}
+	virtual ~ScriptController()
+	{
+		UnregisterRunningScript();
+	}
+	int Execute()
+	{
+		PrepareEnvOptions(nullptr);
+		PrepareArgs();
+
+		m_completed = false;
+		m_processId = 0;
+		if (m_terminated)
+		{
+			m_completed = true;
+			return -1;
+		}
+		int exitCode = 0;
+
+#ifdef CHILD_WATCHDOG
+		bool childConfirmed = false;
+		while (!childConfirmed && !m_terminated)
+		{
+#endif
+
+		int pipein = -1, pipeout = -1;
+		StartProcess(&pipein, &pipeout);
+		if (pipein == -1)
+		{
+			m_completed = true;
+			return -1;
+		}
+
+		// open the read end
+		m_readpipe = fdopen(pipein, "r");
+		if (!m_readpipe)
+		{
+			PrintMessage(Message::mkError, "Could not open read pipe to %s", *m_infoName);
+			close(pipein);
+			if (pipeout != -1)
+			{
+				close(pipeout);
+			}
+			m_completed = true;
+			return -1;
+		}
+
+		m_writepipe = 0;
+		if (m_needWrite)
+		{
+			// open the write end
+			m_writepipe = fdopen(pipeout, "w");
+			if (!m_writepipe)
+			{
+				PrintMessage(Message::mkError, "Could not open write pipe to %s", *m_infoName);
+				fclose(m_readpipe.exchange(nullptr));
+				close(pipeout);
+				m_completed = true;
+				return -1;
+			}
+		}
+
+#ifdef CHILD_WATCHDOG
+		debug("Creating child watchdog");
+		ChildWatchDog watchDog;
+		watchDog.SetAutoDestroy(false);
+		watchDog.SetProcessId(m_processId);
+		watchDog.SetInfoName(m_infoName);
+		watchDog.Start();
+#endif
+
+		CharBuffer buf(1024 * 10);
+
+		debug("Entering pipe-loop");
+		bool firstLine = true;
+		bool startError = false;
+		while (!m_terminated && !m_detached)
+		{
+			FILE* readpipe = m_readpipe;
+			if (!readpipe || feof(readpipe))
+			{
+				break;
+			}
+			if (ReadLine(buf, buf.Size(), readpipe) && m_readpipe)
+			{
+#ifdef CHILD_WATCHDOG
+				if (!childConfirmed)
+				{
+					childConfirmed = true;
+					watchDog.Stop();
+					debug("Child confirmed");
+					continue;
+				}
+#endif
+				if (nzbget_rs_ufs_script_ctrl_is_fork_start_error_line(firstLine ? 1 : 0, buf) != 0)
+				{
+					startError = true;
+				}
+				ProcessOutput(buf);
+				firstLine = false;
+			}
+		}
+		debug("Exited pipe-loop");
+
+#ifdef CHILD_WATCHDOG
+		debug("Destroying WatchDog");
+		if (!childConfirmed)
+		{
+			watchDog.Stop();
+		}
+		while (watchDog.IsRunning())
+		{
+			Util::Sleep(5);
+		}
+#endif
+
+		if (FILE* readpipe = m_readpipe.exchange(nullptr))
+		{
+			fclose(readpipe);
+		}
+
+		if (m_writepipe)
+		{
+			fclose(m_writepipe);
+		}
+
+		if (m_terminated && m_infoName)
+		{
+			warn("Interrupted %s", *m_infoName);
+		}
+
+		exitCode = 0;
+
+		if (!m_detached)
+		{
+			exitCode = WaitProcess();
+			exitCode = nzbget_rs_ufs_script_ctrl_normalize_fork_exit_code(
+				exitCode, FORK_ERROR_EXIT_CODE, startError ? 1 : 0);
+		}
+
+#ifdef CHILD_WATCHDOG
+		}	// while (!bChildConfirmed && !m_bTerminated)
+#endif
+
+		debug("Exit code %i", exitCode);
+		m_completed = true;
+		m_processId = 0;
+		return exitCode;
+	}
+	void Terminate()
+	{
+		debug("Stopping %s", *m_infoName);
+		m_terminated = true;
+
+		pid_t childPid = m_processId.load();
+		pid_t killId = (pid_t)nzbget_rs_ufs_script_ctrl_select_kill_pid(
+			(int)childPid, childPid > 0 ? (int)getpgid(childPid) : 0);
+		int killRes = childPid > 0 ? kill(killId, SIGKILL) : 0;
+		bool ok = nzbget_rs_dqh_script_ctrl_is_terminate_ok(
+			(int)childPid, killRes, m_completed ? 1 : 0) != 0;
+
+		if (ok)
+		{
+			debug("Terminated %s", *m_infoName);
+		}
+		else
+		{
+			error("Could not terminate %s", *m_infoName);
+		}
+
+		debug("Stopped %s", *m_infoName);
+	}
+	bool Break()
+	{
+		debug("Sending break signal to %s", *m_infoName);
+
+		pid_t pid = m_processId.load();
+		bool ok = nzbget_rs_dqh_script_ctrl_can_send_break((int)pid, m_completed ? 1 : 0) != 0 &&
+			kill(pid, SIGINT) == 0;
+
+		if (ok)
+		{
+			debug("Sent break signal to %s", *m_infoName);
+		}
+		else
+		{
+			warn("Could not send break signal to %s", *m_infoName);
+		}
+
+		return ok;
+	}
+	void Resume()
+	{
+		m_terminated = false;
+		m_detached = false;
+		m_processId = 0;
+	}
+	void Detach()
+	{
+		debug("Detaching %s", *m_infoName);
+		m_detached = true;
+		if (FILE* readpipe = m_readpipe.exchange(nullptr))
+		{
+			fclose(readpipe);
+		}
+	}
+	static void TerminateAll()
+	{
+		Guard guard(m_runningMutex);
+		for (ScriptController* script : m_runningScripts)
+		{
+			if (script->HasActiveProcess() && !script->m_detached)
+			{
+				// send break signal and wait up to 5 seconds for graceful termination
+				if (script->Break())
+				{
+					time_t curtime = Util::CurrentTime();
+					while (!script->m_completed && std::abs(curtime - Util::CurrentTime()) <= 10)
+					{
+						Util::Sleep(100);
+					}
+				}
+				script->Terminate();
+			}
+		}
+	}
 
 	const char* GetScript() { return !m_args.empty() ? *m_args[0] : nullptr; }
 	void SetWorkingDir(const char* workingDir) { m_workingDir = workingDir; }
@@ -21448,27 +21375,378 @@ public:
 	void SetInfoName(const char* infoName) { m_infoName = infoName; }
 	const char* GetInfoName() { return m_infoName; }
 	void SetLogPrefix(const char* logPrefix) { m_logPrefix = logPrefix; }
-	void SetEnvVar(const char* name, const char* value);
-	void SetEnvVarSpecial(const char* prefix, const char* name, const char* value);
-	void SetIntEnvVar(const char* name, int value);
-	bool HasActiveProcess();
+	void SetEnvVar(const char* name, const char* value)
+	{
+		NzbgetRsBuf envBuf = nzbget_rs_dqh_script_ctrl_format_env_assignment(name, value);
+		m_environmentStrings.Append(CString(envBuf.data ? envBuf.data : "", (int)envBuf.len));
+		nzbget_rs_free(envBuf);
+	}
+	void SetEnvVarSpecial(const char* prefix, const char* name, const char* value)
+	{
+		NzbgetRsBuf varBuf = nzbget_rs_dqh_script_ctrl_format_prefixed_varname(prefix, name);
+		BString<1024> varname;
+		varname.Set(varBuf.data ? varBuf.data : "", (int)varBuf.len);
+		nzbget_rs_free(varBuf);
+
+		// Original name
+		SetEnvVar(varname, value);
+
+		NzbgetRsBuf normBuf = nzbget_rs_sus_normalize_special_env_var_name(varname);
+		if (normBuf.data && nzbget_rs_dqh_bytes_equal(varname, normBuf.data) == 0)
+		{
+			SetEnvVar(normBuf.data, value);
+		}
+		nzbget_rs_free(normBuf);
+	}
+	void SetIntEnvVar(const char* name, int value)
+	{
+		NzbgetRsBuf valBuf = nzbget_rs_dqh_conn_format_port_str(value);
+		SetEnvVar(name, valBuf.data ? valBuf.data : "0");
+		nzbget_rs_free(valBuf);
+	}
+	bool HasActiveProcess()
+	{
+		return m_processId.load() > 0 && !m_completed;
+	}
 
 protected:
-	void ProcessOutput(char* text);
-	virtual bool ReadLine(char* buf, int bufSize, FILE* stream);
-	void PrintMessage(Message::EKind kind, const char* format, ...) PRINTF_SYNTAX(3);
-	virtual void AddMessage(Message::EKind kind, const char* text);
+	void ProcessOutput(char* text)
+	{
+		debug("Processing output received from script");
+
+		int msgKind = 0;
+		size_t msgOffset = 0;
+		if (!nzbget_rs_sus_classify_script_output_line(text, &msgKind, &msgOffset))
+		{
+			return;
+		}
+		Message::EKind kind = Message::mkInfo;
+		switch (msgKind)
+		{
+			case 1: kind = Message::mkWarning; break;
+			case 2: kind = Message::mkError; break;
+			case 3: kind = Message::mkDetail; break;
+			case 4: kind = Message::mkDebug; break;
+			default: kind = Message::mkInfo; break;
+		}
+		PrintMessage(kind, "%s", text + msgOffset);
+
+		debug("Processing output received from script - completed");
+	}
+	virtual bool ReadLine(char* buf, int bufSize, FILE* stream)
+	{
+		return fgets(buf, bufSize, stream);
+	}
+	void PrintMessage(Message::EKind kind, const char* format, ...) PRINTF_SYNTAX(3)
+	{
+		// not cut to a fixed size: subclasses parse commands ("[NZB] ...") from it
+		CString tmp2;
+
+		va_list ap;
+		va_start(ap, format);
+		tmp2.FormatV(format, ap);
+		va_end(ap);
+
+		if (m_logPrefix)
+		{
+			NzbgetRsBuf prefBuf = nzbget_rs_dqh_script_format_prefixed_message(m_logPrefix, *tmp2);
+			AddMessage(kind, prefBuf.data ? prefBuf.data : "");
+			nzbget_rs_free(prefBuf);
+		}
+		else
+		{
+			AddMessage(kind, tmp2);
+		}
+	}
+	virtual void AddMessage(Message::EKind kind, const char* text)
+	{
+		switch (kind)
+		{
+			case Message::mkDetail:
+				detail("%s", text);
+				break;
+
+			case Message::mkInfo:
+				info("%s", text);
+				break;
+
+			case Message::mkWarning:
+				warn("%s", text);
+				break;
+
+			case Message::mkError:
+				error("%s", text);
+				break;
+
+			case Message::mkDebug:
+				debug("%s", text);
+				break;
+		}
+	}
 	bool GetTerminated() { return m_terminated; }
-	void ResetEnv();
-	void PrepareEnvOptions(const char* stripPrefix);
-	void PrepareArgs();
+	void ResetEnv()
+	{
+		m_environmentStrings.Clear();
+		m_environmentStrings.InitFromCurrentProcess();
+	}
+	/**
+	 * If szStripPrefix is not nullptr, only options, whose names start with the prefix
+	 * are processed. The prefix is then stripped from the names.
+	 * If szStripPrefix is nullptr, all options are processed; without stripping.
+	 */
+	void PrepareEnvOptions(const char* stripPrefix)
+	{
+		int prefixLen = stripPrefix ? strlen(stripPrefix) : 0;
+
+		for (Options::OptEntry& optEntry : g_Options->GuardOptEntries())
+		{
+			const char* value = GetOptValue(optEntry.GetName(), optEntry.GetValue());
+			if (nzbget_rs_ufs_script_ctrl_matches_env_prefix(optEntry.GetName(), stripPrefix, prefixLen) != 0)
+			{
+				SetEnvVarSpecial("NZBPO", optEntry.GetName() + prefixLen, value);
+			}
+			else if (!stripPrefix)
+			{
+				SetEnvVarSpecial("NZBOP", optEntry.GetName(), value);
+			}
+		}
+	}
+	void PrepareArgs()
+	{
+		*m_cmdLine = '\0';
+		m_cmdArgs.clear();
+
+		if (m_args.size() == 1)
+		{
+			const auto found = Util::FindExecutorProgram(m_args[0].Str(), g_Options->GetShellOverride());
+			int useFound = 0, prependArg = 0;
+			nzbget_rs_tpr_script_resolve_single_arg_executor(
+				found.has_value() ? 1 : 0,
+				found ? found.value().c_str() : nullptr,
+				m_args[0].Str(),
+				&useFound, &prependArg);
+			strncpy(m_cmdLine, useFound ? found.value().c_str() : (const char*)m_args[0], sizeof(m_cmdLine) - 1);
+			// an interpreter goes before the script; a script run directly is
+			// argv[0] already (m_args), not its own first argument too
+			if (prependArg)
+			{
+				m_cmdArgs.emplace_back(found.value().c_str());
+			}
+
+			debug("CmdLine: %s", m_cmdLine);
+		}
+		else
+		{
+			strncpy(m_cmdLine, m_args[0], sizeof(m_cmdLine) - 1);
+		}
+	}
 	virtual const char* GetOptValue([[maybe_unused]] const char* name, const char* value) { return value; }
-	void StartProcess(int* pipein, int* pipeout);
-	int WaitProcess();
-	void UnregisterRunningScript();
+	/*
+	* Returns file descriptor of the read-pipe or -1 on error.
+	*/
+	void StartProcess(int* pipein, int* pipeout)
+	{
+		CString workingDir = m_workingDir;
+		if (workingDir.Empty())
+		{
+			workingDir = FileSystem::GetCurrentDirectory();
+		}
+
+		const char* script = m_args[0];
+
+		int pin[] = {-1, -1};
+		int pout[] = {-1, -1};
+
+		// create the pipes, close-on-exec: a script another thread starts at the
+		// same time would otherwise inherit our write end and keep it open for as
+		// long as it runs - we'd see no end of output until that script ended too.
+		// dup2() onto the child's stdin/stdout/stderr clears the flag there.
+		auto makePipe = [](int fds[2])
+		{
+#ifdef __linux__
+			return pipe2(fds, O_CLOEXEC);
+#else
+			if (pipe(fds))
+			{
+				return -1;
+			}
+			fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+			fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+			return 0;
+#endif
+		};
+		if (makePipe(pin))
+		{
+			PrintMessage(Message::mkError, "Could not open read pipe: errno %i", errno);
+			return;
+		}
+		if (m_needWrite && makePipe(pout))
+		{
+			PrintMessage(Message::mkError, "Could not open write pipe: errno %i", errno);
+			close(pin[0]);
+			close(pin[1]);
+			return;
+		}
+
+		std::vector<char*> environmentStrings = m_environmentStrings.GetStrings();
+		char** envdata = environmentStrings.data();
+
+		CheckEnvSize(environmentStrings);
+
+		std::copy(std::begin(m_args), std::end(m_args), std::back_inserter(m_cmdArgs));
+		m_cmdArgs.emplace_back(nullptr);
+		char* const* argdata = (char* const*)m_cmdArgs.data();
+
+#ifdef DEBUG
+		debug("Starting  process: %s", script);
+		for (const char* arg : m_args)
+		{
+			debug("arg: %s", arg);
+		}
+#endif
+
+		debug("forking");
+		pid_t pid = fork();
+
+		if (pid == -1)
+		{
+			PrintMessage(Message::mkError, "Could not start %s: errno %i", *m_infoName, errno);
+			close(pin[0]);
+			close(pin[1]);
+			if (m_needWrite)
+			{
+				close(pout[0]);
+				close(pout[1]);
+			}
+			return;
+		}
+		else if (pid == 0)
+		{
+			// here goes the second instance
+
+			// only certain functions may be used here or the program may hang.
+			// for a list of functions see chapter "async-signal-safe functions" in
+			// http://man7.org/linux/man-pages/man7/signal.7.html
+
+			// create new process group (see Terminate() where it is used)
+			setsid();
+
+			// make the pipeout to be the same as stdout and stderr
+			dup2(pin[1], 1);
+			dup2(pin[1], 2);
+			close(pin[0]);
+			close(pin[1]);
+
+			if (m_needWrite)
+			{
+				// make the pipein to be the same as stdin
+				dup2(pout[0], 0);
+				close(pout[0]);
+				close(pout[1]);
+			}
+
+#ifdef CHILD_WATCHDOG
+			write(1, "\n", 1);
+			fsync(1);
+#endif
+
+			chdir(workingDir);
+			environ = envdata;
+
+			execvp(m_cmdLine, argdata);
+
+			if (errno == EACCES)
+			{
+				write(1, "[WARNING] Fixing permissions for", 32);
+				write(1, script, strlen(script));
+				write(1, "\n", 1);
+				fsync(1);
+				FileSystem::FixExecPermission(script);
+				execvp(m_cmdLine, argdata);
+			}
+
+			// NOTE: the text "[ERROR] Could not start " is checked later,
+			// by changing adjust the dependent code below.
+			write(1, "[ERROR] Could not start ", 24);
+			write(1, script, strlen(script));
+			write(1, ": ", 2);
+			char* errtext = strerror(errno);
+			write(1, errtext, strlen(errtext));
+			write(1, "\n", 1);
+			fsync(1);
+			_exit(FORK_ERROR_EXIT_CODE);
+		}
+
+		// continue the first instance
+		debug("forked");
+		debug("Child Process-ID: %i", (int)pid);
+
+		m_processId = pid;
+
+		// close unused pipe ends; the caller gets the others only now: on a
+		// failed fork they were closed already
+		close(pin[1]);
+		if (m_needWrite)
+		{
+			close(pout[0]);
+		}
+		*pipein = pin[0];
+		*pipeout = pout[1];
+	}
+	int WaitProcess()
+	{
+		int status = 0;
+		pid_t res;
+		do
+		{
+			res = waitpid(m_processId, &status, 0);
+		} while (res == -1 && errno == EINTR);
+		if (res == -1)
+		{
+			return -1;
+		}
+		if (WIFEXITED(status))
+		{
+			int exitCode = WEXITSTATUS(status);
+			return exitCode;
+		}
+		if (WIFSIGNALED(status))
+		{
+			// not a success: a crashed or killed program used to read as exit
+			// code 0. The shell's convention, 128 + signal.
+			if (!m_terminated)
+			{
+				PrintMessage(Message::mkWarning, "%s was killed by signal %i", *m_infoName, WTERMSIG(status));
+			}
+			return nzbget_rs_ufs_script_ctrl_calc_signal_exit_code(WTERMSIG(status));
+		}
+		return -1;
+	}
+	void UnregisterRunningScript()
+	{
+		Guard guard(m_runningMutex);
+		m_runningScripts.erase(std::remove(m_runningScripts.begin(), m_runningScripts.end(), this), m_runningScripts.end());
+	}
 
 private:
-	void CheckEnvSize(const std::vector<char*>& envs);
+	void CheckEnvSize(const std::vector<char*>& envs)
+	{
+		if (ARGS_LIMIT_SIZE <= 0) return;
+
+		size_t limit = static_cast<size_t>(ARGS_LIMIT_SIZE);
+		size_t exceededTotal = 0;
+		if (nzbget_rs_sus_check_env_size_limit(
+			reinterpret_cast<const char* const*>(envs.data()),
+			envs.size(),
+			sizeof(void*),
+			limit,
+			&exceededTotal))
+		{
+			PrintMessage(Message::EKind::mkWarning,
+						 "Total environment size (%zu bytes) exceeds OS limit (%zu bytes): %s",
+						 exceededTotal, limit, "This may cause process creation to fail");
+		}
+	}
 
 	ArgList m_args;
 	ArgList m_cmdArgs;
@@ -21497,709 +21775,6 @@ private:
 	inline static RunningScripts m_runningScripts{};
 	inline static Mutex m_runningMutex{};
 };
-
-// System global variable holding environments variables
-extern char** environ;
-extern char* (*g_EnvironmentVariables)[];
-
-inline constexpr int FORK_ERROR_EXIT_CODE = 254;
-
-#ifdef CHILD_WATCHDOG
-class ChildWatchDog : public Thread
-{
-public:
-	void SetProcessId(pid_t processId) { m_processId = processId; }
-	void SetInfoName(const char* infoName) { m_infoName = infoName; }
-protected:
-	virtual void Run();
-private:
-	pid_t m_processId;
-	CString m_infoName;
-};
-
-inline void ChildWatchDog::Run()
-{
-	static const int WAIT_SECONDS = 60;
-	time_t start = Util::CurrentTime();
-	while (!IsStopped() && (Util::CurrentTime() - start) < WAIT_SECONDS)
-	{
-		Util::Sleep(10);
-	}
-
-	if (!IsStopped())
-	{
-		info("Restarting hanging child process for %s", *m_infoName);
-		kill(m_processId, SIGKILL);
-	}
-}
-#endif
-
-inline void EnvironmentStrings::Clear()
-{
-	m_strings.clear();
-}
-
-inline void EnvironmentStrings::InitFromCurrentProcess()
-{
-	if (!g_EnvironmentVariables)
-		return;
-
-	for (int i = 0; (*g_EnvironmentVariables)[i]; i++)
-	{
-		char* var = (*g_EnvironmentVariables)[i];
-		// Ignore all env vars set by NZBGet.
-		// This is to avoid the passing of env vars after program update (when NZBGet is
-		// started from a script which was started by a previous instance of NZBGet).
-		// Format: NZBXX_YYYY (XX are any two characters, YYYY are any number of any characters).
-		if (!nzbget_rs_sus_is_nzbget_internal_env_var(var))
-		{
-			Append(var);
-		}
-	}
-}
-
-inline void EnvironmentStrings::Append(const char* envstr)
-{
-	m_strings.emplace_back(envstr);
-}
-
-inline void EnvironmentStrings::Append(CString&& envstr)
-{
-	m_strings.push_back(std::move(envstr));
-}
-
-/*
- * Returns environment block in format suitable for using with execve.
- */
-inline std::vector<char*> EnvironmentStrings::GetStrings()
-{
-	std::vector<char*> strings;
-	strings.reserve(m_strings.size() + 1);
-	std::copy(m_strings.begin(), m_strings.end(), std::back_inserter(strings));
-	strings.push_back(nullptr);
-	return strings;
-}
-
-inline ScriptController::ScriptController()
-{
-	ResetEnv();
-
-	Guard guard(m_runningMutex);
-	m_runningScripts.push_back(this);
-}
-
-inline ScriptController::~ScriptController()
-{
-	UnregisterRunningScript();
-}
-
-inline void ScriptController::UnregisterRunningScript()
-{
-	Guard guard(m_runningMutex);
-	m_runningScripts.erase(std::remove(m_runningScripts.begin(), m_runningScripts.end(), this), m_runningScripts.end());
-}
-
-inline void ScriptController::ResetEnv()
-{
-	m_environmentStrings.Clear();
-	m_environmentStrings.InitFromCurrentProcess();
-}
-
-inline void ScriptController::SetEnvVar(const char* name, const char* value)
-{
-	NzbgetRsBuf envBuf = nzbget_rs_dqh_script_ctrl_format_env_assignment(name, value);
-	m_environmentStrings.Append(CString(envBuf.data ? envBuf.data : "", (int)envBuf.len));
-	nzbget_rs_free(envBuf);
-}
-
-inline void ScriptController::SetIntEnvVar(const char* name, int value)
-{
-	NzbgetRsBuf valBuf = nzbget_rs_dqh_conn_format_port_str(value);
-	SetEnvVar(name, valBuf.data ? valBuf.data : "0");
-	nzbget_rs_free(valBuf);
-}
-
-/**
- * If szStripPrefix is not nullptr, only options, whose names start with the prefix
- * are processed. The prefix is then stripped from the names.
- * If szStripPrefix is nullptr, all options are processed; without stripping.
- */
-inline void ScriptController::PrepareEnvOptions(const char* stripPrefix)
-{
-	int prefixLen = stripPrefix ? strlen(stripPrefix) : 0;
-
-	for (Options::OptEntry& optEntry : g_Options->GuardOptEntries())
-	{
-		const char* value = GetOptValue(optEntry.GetName(), optEntry.GetValue());
-		if (nzbget_rs_ufs_script_ctrl_matches_env_prefix(optEntry.GetName(), stripPrefix, prefixLen) != 0)
-		{
-			SetEnvVarSpecial("NZBPO", optEntry.GetName() + prefixLen, value);
-		}
-		else if (!stripPrefix)
-		{
-			SetEnvVarSpecial("NZBOP", optEntry.GetName(), value);
-		}
-	}
-}
-
-inline void ScriptController::SetEnvVarSpecial(const char* prefix, const char* name, const char* value)
-{
-	NzbgetRsBuf varBuf = nzbget_rs_dqh_script_ctrl_format_prefixed_varname(prefix, name);
-	BString<1024> varname;
-	varname.Set(varBuf.data ? varBuf.data : "", (int)varBuf.len);
-	nzbget_rs_free(varBuf);
-
-	// Original name
-	SetEnvVar(varname, value);
-
-	NzbgetRsBuf normBuf = nzbget_rs_sus_normalize_special_env_var_name(varname);
-	if (normBuf.data && nzbget_rs_dqh_bytes_equal(varname, normBuf.data) == 0)
-	{
-		SetEnvVar(normBuf.data, value);
-	}
-	nzbget_rs_free(normBuf);
-}
-
-inline void ScriptController::PrepareArgs()
-{
-	*m_cmdLine = '\0';
-	m_cmdArgs.clear();
-
-	if (m_args.size() == 1)
-	{
-		const auto found = Util::FindExecutorProgram(m_args[0].Str(), g_Options->GetShellOverride());
-		int useFound = 0, prependArg = 0;
-		nzbget_rs_tpr_script_resolve_single_arg_executor(
-			found.has_value() ? 1 : 0,
-			found ? found.value().c_str() : nullptr,
-			m_args[0].Str(),
-			&useFound, &prependArg);
-		strncpy(m_cmdLine, useFound ? found.value().c_str() : (const char*)m_args[0], sizeof(m_cmdLine) - 1);
-		// an interpreter goes before the script; a script run directly is
-		// argv[0] already (m_args), not its own first argument too
-		if (prependArg)
-		{
-			m_cmdArgs.emplace_back(found.value().c_str());
-		}
-
-		debug("CmdLine: %s", m_cmdLine);
-	}
-	else
-	{
-		strncpy(m_cmdLine, m_args[0], sizeof(m_cmdLine) - 1);
-	}
-}
-
-inline int ScriptController::Execute()
-{
-	PrepareEnvOptions(nullptr);
-	PrepareArgs();
-
-	m_completed = false;
-	m_processId = 0;
-	if (m_terminated)
-	{
-		m_completed = true;
-		return -1;
-	}
-	int exitCode = 0;
-
-#ifdef CHILD_WATCHDOG
-	bool childConfirmed = false;
-	while (!childConfirmed && !m_terminated)
-	{
-#endif
-
-	int pipein = -1, pipeout = -1;
-	StartProcess(&pipein, &pipeout);
-	if (pipein == -1)
-	{
-		m_completed = true;
-		return -1;
-	}
-
-	// open the read end
-	m_readpipe = fdopen(pipein, "r");
-	if (!m_readpipe)
-	{
-		PrintMessage(Message::mkError, "Could not open read pipe to %s", *m_infoName);
-		close(pipein);
-		if (pipeout != -1)
-		{
-			close(pipeout);
-		}
-		m_completed = true;
-		return -1;
-	}
-
-	m_writepipe = 0;
-	if (m_needWrite)
-	{
-		// open the write end
-		m_writepipe = fdopen(pipeout, "w");
-		if (!m_writepipe)
-		{
-			PrintMessage(Message::mkError, "Could not open write pipe to %s", *m_infoName);
-			fclose(m_readpipe.exchange(nullptr));
-			close(pipeout);
-			m_completed = true;
-			return -1;
-		}
-	}
-
-#ifdef CHILD_WATCHDOG
-	debug("Creating child watchdog");
-	ChildWatchDog watchDog;
-	watchDog.SetAutoDestroy(false);
-	watchDog.SetProcessId(m_processId);
-	watchDog.SetInfoName(m_infoName);
-	watchDog.Start();
-#endif
-
-	CharBuffer buf(1024 * 10);
-
-	debug("Entering pipe-loop");
-	bool firstLine = true;
-	bool startError = false;
-	while (!m_terminated && !m_detached)
-	{
-		FILE* readpipe = m_readpipe;
-		if (!readpipe || feof(readpipe))
-		{
-			break;
-		}
-		if (ReadLine(buf, buf.Size(), readpipe) && m_readpipe)
-		{
-#ifdef CHILD_WATCHDOG
-			if (!childConfirmed)
-			{
-				childConfirmed = true;
-				watchDog.Stop();
-				debug("Child confirmed");
-				continue;
-			}
-#endif
-			if (nzbget_rs_ufs_script_ctrl_is_fork_start_error_line(firstLine ? 1 : 0, buf) != 0)
-			{
-				startError = true;
-			}
-			ProcessOutput(buf);
-			firstLine = false;
-		}
-	}
-	debug("Exited pipe-loop");
-
-#ifdef CHILD_WATCHDOG
-	debug("Destroying WatchDog");
-	if (!childConfirmed)
-	{
-		watchDog.Stop();
-	}
-	while (watchDog.IsRunning())
-	{
-		Util::Sleep(5);
-	}
-#endif
-
-	if (FILE* readpipe = m_readpipe.exchange(nullptr))
-	{
-		fclose(readpipe);
-	}
-
-	if (m_writepipe)
-	{
-		fclose(m_writepipe);
-	}
-
-	if (m_terminated && m_infoName)
-	{
-		warn("Interrupted %s", *m_infoName);
-	}
-
-	exitCode = 0;
-
-	if (!m_detached)
-	{
-		exitCode = WaitProcess();
-		exitCode = nzbget_rs_ufs_script_ctrl_normalize_fork_exit_code(
-			exitCode, FORK_ERROR_EXIT_CODE, startError ? 1 : 0);
-	}
-
-#ifdef CHILD_WATCHDOG
-	}	// while (!bChildConfirmed && !m_bTerminated)
-#endif
-
-	debug("Exit code %i", exitCode);
-	m_completed = true;
-	m_processId = 0;
-	return exitCode;
-}
-
-/*
-* Returns file descriptor of the read-pipe or -1 on error.
-*/
-inline void ScriptController::StartProcess(int* pipein, int* pipeout)
-{
-	CString workingDir = m_workingDir;
-	if (workingDir.Empty())
-	{
-		workingDir = FileSystem::GetCurrentDirectory();
-	}
-
-	const char* script = m_args[0];
-
-	int pin[] = {-1, -1};
-	int pout[] = {-1, -1};
-
-	// create the pipes, close-on-exec: a script another thread starts at the
-	// same time would otherwise inherit our write end and keep it open for as
-	// long as it runs - we'd see no end of output until that script ended too.
-	// dup2() onto the child's stdin/stdout/stderr clears the flag there.
-	auto makePipe = [](int fds[2])
-	{
-#ifdef __linux__
-		return pipe2(fds, O_CLOEXEC);
-#else
-		if (pipe(fds))
-		{
-			return -1;
-		}
-		fcntl(fds[0], F_SETFD, FD_CLOEXEC);
-		fcntl(fds[1], F_SETFD, FD_CLOEXEC);
-		return 0;
-#endif
-	};
-	if (makePipe(pin))
-	{
-		PrintMessage(Message::mkError, "Could not open read pipe: errno %i", errno);
-		return;
-	}
-	if (m_needWrite && makePipe(pout))
-	{
-		PrintMessage(Message::mkError, "Could not open write pipe: errno %i", errno);
-		close(pin[0]);
-		close(pin[1]);
-		return;
-	}
-
-	std::vector<char*> environmentStrings = m_environmentStrings.GetStrings();
-	char** envdata = environmentStrings.data();
-
-	CheckEnvSize(environmentStrings);
-
-	std::copy(std::begin(m_args), std::end(m_args), std::back_inserter(m_cmdArgs));
-	m_cmdArgs.emplace_back(nullptr);
-	char* const* argdata = (char* const*)m_cmdArgs.data();
-
-#ifdef DEBUG
-	debug("Starting  process: %s", script);
-	for (const char* arg : m_args)
-	{
-		debug("arg: %s", arg);
-	}
-#endif
-
-	debug("forking");
-	pid_t pid = fork();
-
-	if (pid == -1)
-	{
-		PrintMessage(Message::mkError, "Could not start %s: errno %i", *m_infoName, errno);
-		close(pin[0]);
-		close(pin[1]);
-		if (m_needWrite)
-		{
-			close(pout[0]);
-			close(pout[1]);
-		}
-		return;
-	}
-	else if (pid == 0)
-	{
-		// here goes the second instance
-
-		// only certain functions may be used here or the program may hang.
-		// for a list of functions see chapter "async-signal-safe functions" in
-		// http://man7.org/linux/man-pages/man7/signal.7.html
-
-		// create new process group (see Terminate() where it is used)
-		setsid();
-
-		// make the pipeout to be the same as stdout and stderr
-		dup2(pin[1], 1);
-		dup2(pin[1], 2);
-		close(pin[0]);
-		close(pin[1]);
-
-		if (m_needWrite)
-		{
-			// make the pipein to be the same as stdin
-			dup2(pout[0], 0);
-			close(pout[0]);
-			close(pout[1]);
-		}
-
-#ifdef CHILD_WATCHDOG
-		write(1, "\n", 1);
-		fsync(1);
-#endif
-
-		chdir(workingDir);
-		environ = envdata;
-
-		execvp(m_cmdLine, argdata);
-
-		if (errno == EACCES)
-		{
-			write(1, "[WARNING] Fixing permissions for", 32);
-			write(1, script, strlen(script));
-			write(1, "\n", 1);
-			fsync(1);
-			FileSystem::FixExecPermission(script);
-			execvp(m_cmdLine, argdata);
-		}
-
-		// NOTE: the text "[ERROR] Could not start " is checked later,
-		// by changing adjust the dependent code below.
-		write(1, "[ERROR] Could not start ", 24);
-		write(1, script, strlen(script));
-		write(1, ": ", 2);
-		char* errtext = strerror(errno);
-		write(1, errtext, strlen(errtext));
-		write(1, "\n", 1);
-		fsync(1);
-		_exit(FORK_ERROR_EXIT_CODE);
-	}
-
-	// continue the first instance
-	debug("forked");
-	debug("Child Process-ID: %i", (int)pid);
-
-	m_processId = pid;
-
-	// close unused pipe ends; the caller gets the others only now: on a
-	// failed fork they were closed already
-	close(pin[1]);
-	if (m_needWrite)
-	{
-		close(pout[0]);
-	}
-	*pipein = pin[0];
-	*pipeout = pout[1];
-}
-
-inline int ScriptController::WaitProcess()
-{
-	int status = 0;
-	pid_t res;
-	do
-	{
-		res = waitpid(m_processId, &status, 0);
-	} while (res == -1 && errno == EINTR);
-	if (res == -1)
-	{
-		return -1;
-	}
-	if (WIFEXITED(status))
-	{
-		int exitCode = WEXITSTATUS(status);
-		return exitCode;
-	}
-	if (WIFSIGNALED(status))
-	{
-		// not a success: a crashed or killed program used to read as exit
-		// code 0. The shell's convention, 128 + signal.
-		if (!m_terminated)
-		{
-			PrintMessage(Message::mkWarning, "%s was killed by signal %i", *m_infoName, WTERMSIG(status));
-		}
-		return nzbget_rs_ufs_script_ctrl_calc_signal_exit_code(WTERMSIG(status));
-	}
-	return -1;
-}
-
-inline bool ScriptController::HasActiveProcess()
-{
-	return m_processId.load() > 0 && !m_completed;
-}
-
-inline void ScriptController::Terminate()
-{
-	debug("Stopping %s", *m_infoName);
-	m_terminated = true;
-
-	pid_t childPid = m_processId.load();
-	pid_t killId = (pid_t)nzbget_rs_ufs_script_ctrl_select_kill_pid(
-		(int)childPid, childPid > 0 ? (int)getpgid(childPid) : 0);
-	int killRes = childPid > 0 ? kill(killId, SIGKILL) : 0;
-	bool ok = nzbget_rs_dqh_script_ctrl_is_terminate_ok(
-		(int)childPid, killRes, m_completed ? 1 : 0) != 0;
-
-	if (ok)
-	{
-		debug("Terminated %s", *m_infoName);
-	}
-	else
-	{
-		error("Could not terminate %s", *m_infoName);
-	}
-
-	debug("Stopped %s", *m_infoName);
-}
-
-inline void ScriptController::TerminateAll()
-{
-	Guard guard(m_runningMutex);
-	for (ScriptController* script : m_runningScripts)
-	{
-		if (script->HasActiveProcess() && !script->m_detached)
-		{
-			// send break signal and wait up to 5 seconds for graceful termination
-			if (script->Break())
-			{
-				time_t curtime = Util::CurrentTime();
-				while (!script->m_completed && std::abs(curtime - Util::CurrentTime()) <= 10)
-				{
-					Util::Sleep(100);
-				}
-			}
-			script->Terminate();
-		}
-	}
-}
-
-inline bool ScriptController::Break()
-{
-	debug("Sending break signal to %s", *m_infoName);
-
-	pid_t pid = m_processId.load();
-	bool ok = nzbget_rs_dqh_script_ctrl_can_send_break((int)pid, m_completed ? 1 : 0) != 0 &&
-		kill(pid, SIGINT) == 0;
-
-	if (ok)
-	{
-		debug("Sent break signal to %s", *m_infoName);
-	}
-	else
-	{
-		warn("Could not send break signal to %s", *m_infoName);
-	}
-
-	return ok;
-}
-
-inline void ScriptController::Detach()
-{
-	debug("Detaching %s", *m_infoName);
-	m_detached = true;
-	if (FILE* readpipe = m_readpipe.exchange(nullptr))
-	{
-		fclose(readpipe);
-	}
-}
-
-inline void ScriptController::Resume()
-{
-	m_terminated = false;
-	m_detached = false;
-	m_processId = 0;
-}
-
-inline bool ScriptController::ReadLine(char* buf, int bufSize, FILE* stream)
-{
-	return fgets(buf, bufSize, stream);
-}
-
-inline void ScriptController::ProcessOutput(char* text)
-{
-	debug("Processing output received from script");
-
-	int msgKind = 0;
-	size_t msgOffset = 0;
-	if (!nzbget_rs_sus_classify_script_output_line(text, &msgKind, &msgOffset))
-	{
-		return;
-	}
-	Message::EKind kind = Message::mkInfo;
-	switch (msgKind)
-	{
-		case 1: kind = Message::mkWarning; break;
-		case 2: kind = Message::mkError; break;
-		case 3: kind = Message::mkDetail; break;
-		case 4: kind = Message::mkDebug; break;
-		default: kind = Message::mkInfo; break;
-	}
-	PrintMessage(kind, "%s", text + msgOffset);
-
-	debug("Processing output received from script - completed");
-}
-
-inline void ScriptController::AddMessage(Message::EKind kind, const char* text)
-{
-	switch (kind)
-	{
-		case Message::mkDetail:
-			detail("%s", text);
-			break;
-
-		case Message::mkInfo:
-			info("%s", text);
-			break;
-
-		case Message::mkWarning:
-			warn("%s", text);
-			break;
-
-		case Message::mkError:
-			error("%s", text);
-			break;
-
-		case Message::mkDebug:
-			debug("%s", text);
-			break;
-	}
-}
-
-inline void ScriptController::PrintMessage(Message::EKind kind, const char* format, ...)
-{
-	// not cut to a fixed size: subclasses parse commands ("[NZB] ...") from it
-	CString tmp2;
-
-	va_list ap;
-	va_start(ap, format);
-	tmp2.FormatV(format, ap);
-	va_end(ap);
-
-	if (m_logPrefix)
-	{
-		NzbgetRsBuf prefBuf = nzbget_rs_dqh_script_format_prefixed_message(m_logPrefix, *tmp2);
-		AddMessage(kind, prefBuf.data ? prefBuf.data : "");
-		nzbget_rs_free(prefBuf);
-	}
-	else
-	{
-		AddMessage(kind, tmp2);
-	}
-}
-
-inline void ScriptController::CheckEnvSize(const std::vector<char*>& envs)
-{
-	if (ARGS_LIMIT_SIZE <= 0) return;
-
-	size_t limit = static_cast<size_t>(ARGS_LIMIT_SIZE);
-	size_t exceededTotal = 0;
-	if (nzbget_rs_sus_check_env_size_limit(
-		reinterpret_cast<const char* const*>(envs.data()),
-		envs.size(),
-		sizeof(void*),
-		limit,
-		&exceededTotal))
-	{
-		PrintMessage(Message::EKind::mkWarning,
-					 "Total environment size (%zu bytes) exceeds OS limit (%zu bytes): %s",
-					 exceededTotal, limit, "This may cause process creation to fail");
-	}
-}
 
 #endif
 
@@ -22420,6 +21995,8 @@ private:
 #ifndef QUEUESCRIPT_H
 #define QUEUESCRIPT_H
 
+class QueueScriptCoordinator;
+extern QueueScriptCoordinator* g_QueueScriptCoordinator;
 
 class QueueScriptCoordinator
 {
@@ -22435,13 +22012,389 @@ public:
 		qeNzbDeleted // highest priority
 	};
 
+	static NzbInfo* FindNzbInfo(DownloadQueue* downloadQueue, int nzbId)
+	{
+		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(nzbId);
+		if (nzbInfo)
+		{
+			return nzbInfo;
+		}
+
+		HistoryInfo* historyInfo = downloadQueue->GetHistory()->Find(nzbId);
+		if (historyInfo)
+		{
+			return historyInfo->GetNzbInfo();
+		}
+
+		return nullptr;
+	}
+
+	class QueueScriptController : public Thread, public NzbScriptController
+	{
+	public:
+		virtual void Run() override
+		{
+			ExecuteScript(m_script);
+
+			SetLogPrefix(nullptr);
+
+			if (m_markBad)
+			{
+				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+				NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_id);
+				if (nzbInfo)
+				{
+					nzbInfo->PrintMessage(Message::mkWarning, "Cancelling download and deleting %s", *m_nzbName);
+					nzbInfo->SetDeleteStatus(NzbInfo::dsBad);
+					downloadQueue->EditEntry(m_id, DownloadQueue::eaGroupDelete, nullptr);
+				}
+			}
+
+			g_QueueScriptCoordinator->CheckQueue();
+		}
+		static void StartScript(NzbInfo* nzbInfo, std::shared_ptr<const Extension::Script> script, QueueScriptCoordinator::EEvent event)
+		{
+			if (!nzbInfo || nzbInfo->GetSkipScriptProcessing())
+			{
+				return;
+			}
+
+			QueueScriptController* scriptController = new QueueScriptController();
+
+			scriptController->m_nzbName = nzbInfo->GetName();
+			scriptController->m_nzbFilename = nzbInfo->GetFilename();
+			scriptController->m_url = nzbInfo->GetUrl();
+			scriptController->m_category = nzbInfo->GetCategory();
+			scriptController->m_destDir = nzbInfo->GetDestDir();
+			scriptController->m_queuedFilename = nzbInfo->GetQueuedFilename();
+			scriptController->m_id = nzbInfo->GetId();
+			scriptController->m_priority = nzbInfo->GetPriority();
+			scriptController->m_dupeKey = nzbInfo->GetDupeKey();
+			scriptController->m_dupeMode = nzbInfo->GetDupeMode();
+			scriptController->m_dupeScore = nzbInfo->GetDupeScore();
+			scriptController->m_parameters.CopyFrom(nzbInfo->GetParameters());
+			scriptController->m_script = std::move(script);
+			scriptController->m_event = event;
+			scriptController->m_prefixLen = 0;
+			scriptController->m_markBad = false;
+			scriptController->m_deleteStatus = nzbInfo->GetDeleteStatus();
+			scriptController->m_urlStatus = nzbInfo->GetUrlStatus();
+			scriptController->m_markStatus = nzbInfo->GetMarkStatus();
+			scriptController->SetAutoDestroy(true);
+
+			scriptController->Start();
+		}
+
+	protected:
+		virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script) override
+		{
+			PrintMessage(m_event == QueueScriptCoordinator::qeFileDownloaded ? Message::mkDetail : Message::mkInfo,
+				"Executing queue-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbName));
+
+			SetArgs({script->GetEntry()});
+
+			BString<1024> infoName("queue-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbName));
+			SetInfoName(infoName);
+
+			SetLogPrefix(script->GetDisplayName());
+			m_prefixLen = static_cast<int>(strlen(script->GetDisplayName())) + 2; // 2 = strlen(": ");
+			PrepareParams(script->GetName());
+
+			Execute();
+
+			SetLogPrefix(nullptr);
+		}
+		virtual void AddMessage(Message::EKind kind, const char* text) override
+		{
+			const char* msgText = text + m_prefixLen;
+
+			NzbgetRsQueueScriptCmd cmd{};
+			int cmdKind = nzbget_rs_sus_parse_queue_script_cmd(
+				msgText,
+				static_cast<int>(m_event),
+				static_cast<int>(QueueScriptCoordinator::qeNzbDownloaded),
+				&cmd);
+			if (cmdKind != 0)
+			{
+				debug("Command %s detected", msgText + 6);
+				if (cmdKind == 1)
+				{
+					std::string param(msgText + cmd.key_offset, cmd.key_len);
+					GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+					NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
+					if (nzbInfo)
+					{
+						nzbInfo->GetParameters()->SetParameter(param.c_str(), msgText + cmd.val_offset);
+					}
+				}
+				else if (cmdKind == 2)
+				{
+					GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+					NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
+					if (nzbInfo)
+					{
+						nzbInfo->SetFinalDir(msgText + cmd.val_offset);
+					}
+				}
+				else if (cmdKind == 3)
+				{
+					m_markBad = true;
+					GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+					NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
+					if (nzbInfo)
+					{
+						nzbInfo->PrintMessage(Message::mkWarning, "Marking %s as bad", *m_nzbName);
+						nzbInfo->SetMarkStatus(NzbInfo::ksBad);
+					}
+				}
+				else
+				{
+					error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
+				}
+				return;
+			}
+			{
+				NzbInfo* nzbInfo = nullptr;
+				{
+					GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+					nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
+					if (nzbInfo)
+					{
+						nzbInfo->AddMessage(kind, text);
+					}
+				}
+
+				if (!nzbInfo)
+				{
+					ScriptController::AddMessage(kind, text);
+				}
+			}
+		}
+
+	private:
+		CString m_nzbName;
+		CString m_nzbFilename;
+		CString m_url;
+		CString m_category;
+		CString m_destDir;
+		CString m_queuedFilename;
+		int m_id;
+		int m_priority;
+		CString m_dupeKey;
+		EDupeMode m_dupeMode;
+		int m_dupeScore;
+		NzbParameterList m_parameters;
+		int m_prefixLen;
+		std::shared_ptr<const Extension::Script> m_script;
+		QueueScriptCoordinator::EEvent m_event;
+		bool m_markBad;
+		NzbInfo::EDeleteStatus m_deleteStatus;
+		NzbInfo::EUrlStatus m_urlStatus;
+		NzbInfo::EMarkStatus m_markStatus;
+
+		void PrepareParams(const char* scriptName)
+		{
+			ResetEnv();
+
+			NzbgetRsQueueScriptEnv env{};
+			env.nzb_name = m_nzbName;
+			env.nzb_id = m_id;
+			env.filename = m_nzbFilename;
+			env.dest_dir = m_destDir;
+			env.queued_filename = m_queuedFilename;
+			env.url = m_url;
+			env.category = m_category;
+			env.priority = m_priority;
+			env.dupe_key = m_dupeKey;
+			env.dupe_score = m_dupeScore;
+			env.dupe_mode = static_cast<int>(m_dupeMode);
+			env.event = static_cast<int>(m_event);
+			env.delete_status = static_cast<int>(m_deleteStatus);
+			env.url_status = static_cast<int>(m_urlStatus);
+			env.mark_status = static_cast<int>(m_markStatus);
+
+			nzbget_rs_queue_script_prepare_env(
+				&env,
+				this,
+				[](void* ctx, const char* name, const char* value)
+				{
+					static_cast<QueueScriptController*>(ctx)->SetEnvVar(name, value);
+				},
+				[](void* ctx, const char* name, int value)
+				{
+					static_cast<QueueScriptController*>(ctx)->SetIntEnvVar(name, value);
+				});
+
+			PrepareEnvScript(&m_parameters, scriptName);
+		}
+	};
+
 	void Stop() { m_stopped = true; }
-	void InitOptions();
-	void EnqueueScript(NzbInfo* nzbInfo, EEvent event);
-	void CheckQueue();
-	bool HasJob(int nzbId, bool* active);
-	int GetQueueSize();
-	static NzbInfo* FindNzbInfo(DownloadQueue* downloadQueue, int nzbId);
+	void InitOptions()
+	{
+		auto found = g_ExtensionManager->FindIf([&](auto script)
+			{
+				return script->GetQueueScript() == true;
+			}
+		);
+
+		m_hasQueueScripts = found.has_value();
+	}
+	void EnqueueScript(NzbInfo* nzbInfo, EEvent event)
+	{
+		if (!m_hasQueueScripts || !nzbInfo || nzbInfo->GetSkipScriptProcessing())
+		{
+			return;
+		}
+
+		Guard guard(m_queueMutex);
+
+		if (event == qeNzbDownloaded)
+		{
+			m_queue.erase(std::remove_if(m_queue.begin(), m_queue.end(),
+				[nzbInfo](std::unique_ptr<QueueItem>& queueItem)
+				{
+					return queueItem->GetNzbId() == nzbInfo->GetId();
+				}),
+				m_queue.end());
+		}
+
+		time_t curTime = Util::CurrentTime();
+		if (nzbget_rs_sus_should_skip_queue_event_interval(
+			static_cast<int>(event),
+			static_cast<int>(qeFileDownloaded),
+			g_Options->GetEventInterval(),
+			static_cast<int64>(curTime),
+			static_cast<int64>(nzbInfo->GetQueueScriptTime())))
+		{
+			return;
+		}
+
+		g_ExtensionManager->ForEach([&](auto script)
+			{
+				if (UsableScript(script, nzbInfo, event))
+				{
+					bool alreadyQueued = false;
+					if (event == qeFileDownloaded)
+					{
+						for (QueueItem* queueItem : &m_queue)
+						{
+							if (queueItem->GetNzbId() == nzbInfo->GetId() && queueItem->GetScript() == script)
+							{
+								alreadyQueued = true;
+								break;
+							}
+						}
+					}
+
+					if (!alreadyQueued)
+					{
+						std::unique_ptr<QueueItem> queueItem = std::make_unique<QueueItem>(nzbInfo->GetId(), script, event);
+						if (m_curItem)
+						{
+							m_queue.push_back(std::move(queueItem));
+						}
+						else
+						{
+							m_curItem = std::move(queueItem);
+							QueueScriptController::StartScript(nzbInfo, m_curItem->GetScript(), m_curItem->GetEvent());
+						}
+					}
+
+					nzbInfo->SetQueueScriptTime(Util::CurrentTime());
+				}
+			}
+		);
+	}
+	void CheckQueue()
+	{
+		if (m_stopped)
+		{
+			return;
+		}
+
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		Guard guard(m_queueMutex);
+
+		m_curItem.reset();
+		NzbInfo* curNzbInfo = nullptr;
+		EEvent maxEvent = EEvent::qeFileDownloaded;
+		Queue::iterator itCurItem;
+
+		for (Queue::iterator it = m_queue.begin(); it != m_queue.end(); )
+		{
+			std::unique_ptr<QueueItem>& queueItem = *it;
+
+			NzbInfo* nzbInfo = FindNzbInfo(downloadQueue, queueItem->GetNzbId());
+
+			EEvent event = queueItem->GetEvent();
+			bool ignoreEvent = nzbget_rs_sus_should_ignore_queued_script_event(
+				nzbInfo ? 1 : 0,
+				nzbInfo ? static_cast<int>(nzbInfo->GetDeleteStatus()) : 0,
+				static_cast<int>(NzbInfo::dsNone),
+				nzbInfo ? static_cast<int>(nzbInfo->GetMarkStatus()) : 0,
+				static_cast<int>(NzbInfo::ksBad),
+				static_cast<int>(event),
+				static_cast<int>(qeNzbDeleted),
+				static_cast<int>(qeNzbMarked)) != 0;
+
+			if (ignoreEvent)
+			{
+				it = m_queue.erase(it);
+				if (curNzbInfo)
+				{
+					curNzbInfo = nullptr;
+					it = m_queue.begin();
+				}
+				continue;
+			}
+
+			if (!curNzbInfo || queueItem->GetEvent() > maxEvent)
+			{
+				itCurItem = it;
+				curNzbInfo = nzbInfo;
+				maxEvent = queueItem->GetEvent();
+			}
+
+			++it;
+		}
+
+		if (curNzbInfo)
+		{
+			m_curItem = std::move(*itCurItem);
+			m_queue.erase(itCurItem);
+			QueueScriptController::StartScript(curNzbInfo, m_curItem->GetScript(), m_curItem->GetEvent());
+		}
+	}
+	bool HasJob(int nzbId, bool* active)
+	{
+		Guard guard(m_queueMutex);
+
+		bool working = m_curItem && m_curItem->GetNzbId() == nzbId;
+		if (active)
+		{
+			*active = working;
+		}
+		if (!working)
+		{
+			for (QueueItem* queueItem : &m_queue)
+			{
+				working = queueItem->GetNzbId() == nzbId;
+				if (working)
+				{
+					break;
+				}
+			}
+		}
+
+		return working;
+	}
+	int GetQueueSize()
+	{
+		Guard guard(m_queueMutex);
+
+		return static_cast<int>(m_queue.size()) + (m_curItem ? 1 : 0);
+	}
 
 private:
 	class QueueItem
@@ -22466,444 +22419,45 @@ private:
 	bool m_hasQueueScripts = false;
 	bool m_stopped = false;
 
-	bool UsableScript(std::shared_ptr<const Extension::Script> script, NzbInfo* nzbInfo, EEvent event);
-};
-
-extern QueueScriptCoordinator* g_QueueScriptCoordinator;
-
-class QueueScriptController : public Thread, public NzbScriptController
-{
-public:
-	virtual void Run() override;
-	static void StartScript(NzbInfo* nzbInfo, std::shared_ptr<const Extension::Script> script, QueueScriptCoordinator::EEvent event);
-
-protected:
-	virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script) override;
-	virtual void AddMessage(Message::EKind kind, const char* text) override;
-
-private:
-	CString m_nzbName;
-	CString m_nzbFilename;
-	CString m_url;
-	CString m_category;
-	CString m_destDir;
-	CString m_queuedFilename;
-	int m_id;
-	int m_priority;
-	CString m_dupeKey;
-	EDupeMode m_dupeMode;
-	int m_dupeScore;
-	NzbParameterList m_parameters;
-	int m_prefixLen;
-	std::shared_ptr<const Extension::Script> m_script;
-	QueueScriptCoordinator::EEvent m_event;
-	bool m_markBad;
-	NzbInfo::EDeleteStatus m_deleteStatus;
-	NzbInfo::EUrlStatus m_urlStatus;
-	NzbInfo::EMarkStatus m_markStatus;
-
-	void PrepareParams(const char* scriptName);
-};
-
-inline void QueueScriptController::StartScript(NzbInfo* nzbInfo, std::shared_ptr<const Extension::Script> script, QueueScriptCoordinator::EEvent event)
-{
-	if (!nzbInfo || nzbInfo->GetSkipScriptProcessing())
+	bool UsableScript(std::shared_ptr<const Extension::Script> script, NzbInfo* nzbInfo, EEvent event)
 	{
-		return;
-	}
-
-	QueueScriptController* scriptController = new QueueScriptController();
-
-	scriptController->m_nzbName = nzbInfo->GetName();
-	scriptController->m_nzbFilename = nzbInfo->GetFilename();
-	scriptController->m_url = nzbInfo->GetUrl();
-	scriptController->m_category = nzbInfo->GetCategory();
-	scriptController->m_destDir = nzbInfo->GetDestDir();
-	scriptController->m_queuedFilename = nzbInfo->GetQueuedFilename();
-	scriptController->m_id = nzbInfo->GetId();
-	scriptController->m_priority = nzbInfo->GetPriority();
-	scriptController->m_dupeKey = nzbInfo->GetDupeKey();
-	scriptController->m_dupeMode = nzbInfo->GetDupeMode();
-	scriptController->m_dupeScore = nzbInfo->GetDupeScore();
-	scriptController->m_parameters.CopyFrom(nzbInfo->GetParameters());
-	scriptController->m_script = std::move(script);
-	scriptController->m_event = event;
-	scriptController->m_prefixLen = 0;
-	scriptController->m_markBad = false;
-	scriptController->m_deleteStatus = nzbInfo->GetDeleteStatus();
-	scriptController->m_urlStatus = nzbInfo->GetUrlStatus();
-	scriptController->m_markStatus = nzbInfo->GetMarkStatus();
-	scriptController->SetAutoDestroy(true);
-
-	scriptController->Start();
-}
-
-inline void QueueScriptController::Run()
-{
-	ExecuteScript(m_script);
-
-	SetLogPrefix(nullptr);
-
-	if (m_markBad)
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_id);
-		if (nzbInfo)
+		size_t pcount = nzbInfo->GetParameters()->size();
+		std::vector<const char*> pnames;
+		std::vector<const char*> pvals;
+		pnames.reserve(pcount);
+		pvals.reserve(pcount);
+		for (NzbParameter& parameter : nzbInfo->GetParameters())
 		{
-			nzbInfo->PrintMessage(Message::mkWarning, "Cancelling download and deleting %s", *m_nzbName);
-			nzbInfo->SetDeleteStatus(NzbInfo::dsBad);
-			downloadQueue->EditEntry(m_id, DownloadQueue::eaGroupDelete, nullptr);
+			pnames.push_back(parameter.GetName());
+			pvals.push_back(parameter.GetValue());
 		}
-	}
-
-	g_QueueScriptCoordinator->CheckQueue();
-}
-
-inline void QueueScriptController::ExecuteScript(std::shared_ptr<const Extension::Script> script)
-{
-	PrintMessage(m_event == QueueScriptCoordinator::qeFileDownloaded ? Message::mkDetail : Message::mkInfo,
-		"Executing queue-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbName));
-
-	SetArgs({script->GetEntry()});
-
-	BString<1024> infoName("queue-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbName));
-	SetInfoName(infoName);
-
-	SetLogPrefix(script->GetDisplayName());
-	m_prefixLen = static_cast<int>(strlen(script->GetDisplayName())) + 2; // 2 = strlen(": ");
-	PrepareParams(script->GetName());
-
-	Execute();
-
-	SetLogPrefix(nullptr);
-}
-
-inline void QueueScriptController::PrepareParams(const char* scriptName)
-{
-	ResetEnv();
-
-	NzbgetRsQueueScriptEnv env{};
-	env.nzb_name = m_nzbName;
-	env.nzb_id = m_id;
-	env.filename = m_nzbFilename;
-	env.dest_dir = m_destDir;
-	env.queued_filename = m_queuedFilename;
-	env.url = m_url;
-	env.category = m_category;
-	env.priority = m_priority;
-	env.dupe_key = m_dupeKey;
-	env.dupe_score = m_dupeScore;
-	env.dupe_mode = static_cast<int>(m_dupeMode);
-	env.event = static_cast<int>(m_event);
-	env.delete_status = static_cast<int>(m_deleteStatus);
-	env.url_status = static_cast<int>(m_urlStatus);
-	env.mark_status = static_cast<int>(m_markStatus);
-
-	nzbget_rs_queue_script_prepare_env(
-		&env,
-		this,
-		[](void* ctx, const char* name, const char* value)
+		const char* postScript = nullptr;
+		if (event == qeUrlCompleted)
 		{
-			static_cast<QueueScriptController*>(ctx)->SetEnvVar(name, value);
-		},
-		[](void* ctx, const char* name, int value)
-		{
-			static_cast<QueueScriptController*>(ctx)->SetIntEnvVar(name, value);
-		});
-
-	PrepareEnvScript(&m_parameters, scriptName);
-}
-
-inline void QueueScriptController::AddMessage(Message::EKind kind, const char* text)
-{
-	const char* msgText = text + m_prefixLen;
-
-	NzbgetRsQueueScriptCmd cmd{};
-	int cmdKind = nzbget_rs_sus_parse_queue_script_cmd(
-		msgText,
-		static_cast<int>(m_event),
-		static_cast<int>(QueueScriptCoordinator::qeNzbDownloaded),
-		&cmd);
-	if (cmdKind != 0)
-	{
-		debug("Command %s detected", msgText + 6);
-		if (cmdKind == 1)
-		{
-			std::string param(msgText + cmd.key_offset, cmd.key_len);
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
-			if (nzbInfo)
+			postScript = g_Options->GetExtensions();
+			if (!Util::EmptyStr(nzbInfo->GetCategory()))
 			{
-				nzbInfo->GetParameters()->SetParameter(param.c_str(), msgText + cmd.val_offset);
-			}
-		}
-		else if (cmdKind == 2)
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
-			if (nzbInfo)
-			{
-				nzbInfo->SetFinalDir(msgText + cmd.val_offset);
-			}
-		}
-		else if (cmdKind == 3)
-		{
-			m_markBad = true;
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
-			if (nzbInfo)
-			{
-				nzbInfo->PrintMessage(Message::mkWarning, "Marking %s as bad", *m_nzbName);
-				nzbInfo->SetMarkStatus(NzbInfo::ksBad);
-			}
-		}
-		else
-		{
-			error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
-		}
-		return;
-	}
-	{
-		NzbInfo* nzbInfo = nullptr;
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
-			if (nzbInfo)
-			{
-				nzbInfo->AddMessage(kind, text);
-			}
-		}
-
-		if (!nzbInfo)
-		{
-			ScriptController::AddMessage(kind, text);
-		}
-	}
-}
-
-inline void QueueScriptCoordinator::InitOptions()
-{
-	auto found = g_ExtensionManager->FindIf([&](auto script)
-		{
-			return script->GetQueueScript() == true;
-		}
-	);
-
-	m_hasQueueScripts = found.has_value();
-}
-
-inline void QueueScriptCoordinator::EnqueueScript(NzbInfo* nzbInfo, EEvent event)
-{
-	if (!m_hasQueueScripts || !nzbInfo || nzbInfo->GetSkipScriptProcessing())
-	{
-		return;
-	}
-
-	Guard guard(m_queueMutex);
-
-	if (event == qeNzbDownloaded)
-	{
-		m_queue.erase(std::remove_if(m_queue.begin(), m_queue.end(),
-			[nzbInfo](std::unique_ptr<QueueItem>& queueItem)
-			{
-				return queueItem->GetNzbId() == nzbInfo->GetId();
-			}),
-			m_queue.end());
-	}
-
-	time_t curTime = Util::CurrentTime();
-	if (nzbget_rs_sus_should_skip_queue_event_interval(
-		static_cast<int>(event),
-		static_cast<int>(qeFileDownloaded),
-		g_Options->GetEventInterval(),
-		static_cast<int64>(curTime),
-		static_cast<int64>(nzbInfo->GetQueueScriptTime())))
-	{
-		return;
-	}
-
-	g_ExtensionManager->ForEach([&](auto script)
-		{
-			if (UsableScript(script, nzbInfo, event))
-			{
-				bool alreadyQueued = false;
-				if (event == qeFileDownloaded)
+				Options::Category* categoryObj = g_Options->FindCategory(nzbInfo->GetCategory(), false);
+				if (categoryObj && !Util::EmptyStr(categoryObj->GetExtensions()))
 				{
-					for (QueueItem* queueItem : &m_queue)
-					{
-						if (queueItem->GetNzbId() == nzbInfo->GetId() && queueItem->GetScript() == script)
-						{
-							alreadyQueued = true;
-							break;
-						}
-					}
+					postScript = categoryObj->GetExtensions();
 				}
-
-				if (!alreadyQueued)
-				{
-					std::unique_ptr<QueueItem> queueItem = std::make_unique<QueueItem>(nzbInfo->GetId(), script, event);
-					if (m_curItem)
-					{
-						m_queue.push_back(std::move(queueItem));
-					}
-					else
-					{
-						m_curItem = std::move(queueItem);
-						QueueScriptController::StartScript(nzbInfo, m_curItem->GetScript(), m_curItem->GetEvent());
-					}
-				}
-
-				nzbInfo->SetQueueScriptTime(Util::CurrentTime());
 			}
 		}
-	);
-}
-
-inline bool QueueScriptCoordinator::UsableScript(std::shared_ptr<const Extension::Script> script, NzbInfo* nzbInfo, EEvent event)
-{
-	size_t pcount = nzbInfo->GetParameters()->size();
-	std::vector<const char*> pnames;
-	std::vector<const char*> pvals;
-	pnames.reserve(pcount);
-	pvals.reserve(pcount);
-	for (NzbParameter& parameter : nzbInfo->GetParameters())
-	{
-		pnames.push_back(parameter.GetName());
-		pvals.push_back(parameter.GetValue());
-	}
-	const char* postScript = nullptr;
-	if (event == qeUrlCompleted)
-	{
-		postScript = g_Options->GetExtensions();
-		if (!Util::EmptyStr(nzbInfo->GetCategory()))
-		{
-			Options::Category* categoryObj = g_Options->FindCategory(nzbInfo->GetCategory(), false);
-			if (categoryObj && !Util::EmptyStr(categoryObj->GetExtensions()))
-			{
-				postScript = categoryObj->GetExtensions();
-			}
-		}
-	}
-	return nzbget_rs_sus_is_usable_queue_script(
-		script->GetQueueScript() ? 1 : 0,
-		script->GetQueueEvents(),
-		script->GetName(),
-		static_cast<int>(event),
-		static_cast<int>(qeUrlCompleted),
-		pnames.data(),
-		pvals.data(),
-		pcount,
-		postScript) != 0;
-}
-
-inline NzbInfo* QueueScriptCoordinator::FindNzbInfo(DownloadQueue* downloadQueue, int nzbId)
-{
-	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(nzbId);
-	if (nzbInfo)
-	{
-		return nzbInfo;
-	}
-
-	HistoryInfo* historyInfo = downloadQueue->GetHistory()->Find(nzbId);
-	if (historyInfo)
-	{
-		return historyInfo->GetNzbInfo();
-	}
-
-	return nullptr;
-}
-
-inline void QueueScriptCoordinator::CheckQueue()
-{
-	if (m_stopped)
-	{
-		return;
-	}
-
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	Guard guard(m_queueMutex);
-
-	m_curItem.reset();
-	NzbInfo* curNzbInfo = nullptr;
-	EEvent maxEvent = EEvent::qeFileDownloaded;
-	Queue::iterator itCurItem;
-
-	for (Queue::iterator it = m_queue.begin(); it != m_queue.end(); )
-	{
-		std::unique_ptr<QueueItem>& queueItem = *it;
-
-		NzbInfo* nzbInfo = FindNzbInfo(downloadQueue, queueItem->GetNzbId());
-
-		EEvent event = queueItem->GetEvent();
-		bool ignoreEvent = nzbget_rs_sus_should_ignore_queued_script_event(
-			nzbInfo ? 1 : 0,
-			nzbInfo ? static_cast<int>(nzbInfo->GetDeleteStatus()) : 0,
-			static_cast<int>(NzbInfo::dsNone),
-			nzbInfo ? static_cast<int>(nzbInfo->GetMarkStatus()) : 0,
-			static_cast<int>(NzbInfo::ksBad),
+		return nzbget_rs_sus_is_usable_queue_script(
+			script->GetQueueScript() ? 1 : 0,
+			script->GetQueueEvents(),
+			script->GetName(),
 			static_cast<int>(event),
-			static_cast<int>(qeNzbDeleted),
-			static_cast<int>(qeNzbMarked)) != 0;
-
-		if (ignoreEvent)
-		{
-			it = m_queue.erase(it);
-			if (curNzbInfo)
-			{
-				curNzbInfo = nullptr;
-				it = m_queue.begin();
-			}
-			continue;
-		}
-
-		if (!curNzbInfo || queueItem->GetEvent() > maxEvent)
-		{
-			itCurItem = it;
-			curNzbInfo = nzbInfo;
-			maxEvent = queueItem->GetEvent();
-		}
-
-		++it;
+			static_cast<int>(qeUrlCompleted),
+			pnames.data(),
+			pvals.data(),
+			pcount,
+			postScript) != 0;
 	}
+};
 
-	if (curNzbInfo)
-	{
-		m_curItem = std::move(*itCurItem);
-		m_queue.erase(itCurItem);
-		QueueScriptController::StartScript(curNzbInfo, m_curItem->GetScript(), m_curItem->GetEvent());
-	}
-}
-
-inline bool QueueScriptCoordinator::HasJob(int nzbId, bool* active)
-{
-	Guard guard(m_queueMutex);
-
-	bool working = m_curItem && m_curItem->GetNzbId() == nzbId;
-	if (active)
-	{
-		*active = working;
-	}
-	if (!working)
-	{
-		for (QueueItem* queueItem : &m_queue)
-		{
-			working = queueItem->GetNzbId() == nzbId;
-			if (working)
-			{
-				break;
-			}
-		}
-	}
-
-	return working;
-}
-
-inline int QueueScriptCoordinator::GetQueueSize()
-{
-	Guard guard(m_queueMutex);
-
-	return static_cast<int>(m_queue.size()) + (m_curItem ? 1 : 0);
-}
+using QueueScriptController = QueueScriptCoordinator::QueueScriptController;
 
 #endif
 
@@ -30244,686 +29798,794 @@ inline void PrePostProcessor::FileDownloaded(DownloadQueue* downloadQueue, NzbIn
 
 #endif
 
-class ScanScriptCheck : public NzbScriptController
-{
-protected:
-	virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script) { has |= script->GetScanScript(); }
-	bool has = false;
-	friend class ScanScriptController;
-};
+class Scanner;
+extern Scanner* g_Scanner;
 
-class ScanScriptController : public NzbScriptController
+class Scanner final : public Service
 {
 public:
-	ScanScriptController(
-		std::string& nzbName,
-		std::string& category,
-		std::string& dupeKey)
-		: m_nzbFilename(nullptr)
-		, m_url(nullptr)
-		, m_directory(nullptr)
-		, m_nzbName{ nzbName }
-		, m_category{ category }
-		, m_dupeKey{ dupeKey }
-		, m_priority(nullptr)
-		, m_dupeScore(nullptr)
-		, m_addTop(nullptr)
-		, m_addPaused(nullptr)
-		, m_dupeMode(nullptr)
-		, m_parameters(nullptr) {}
+	static constexpr std::string_view PROCESSED_DIR = "_processed";
+	static constexpr std::string_view BROKEN_DIR = "_broken";
+	static constexpr std::string_view UNPACK_DIR = "_unpack";
 
-	static void ExecuteScripts(
-		const char* nzbFilename,
-		NzbInfo* nzbInfo,
-		const char* directory,
-		std::string& nzbName,
-		std::string& category,
-		int* priority,
-		NzbParameterList* parameters,
-		bool* addTop,
-		bool* addPaused,
-		std::string& dupeKey,
-		int* dupeScore,
-		EDupeMode* dupeMode)
+	enum EAddStatus
 	{
-		if (nzbInfo && nzbInfo->GetSkipScriptProcessing())
+		asSkipped,
+		asSuccess,
+		asFailed
+	};
+
+	class ScanScriptController;
+
+	class ScanScriptCheck : public NzbScriptController
+	{
+	protected:
+		virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script) { has |= script->GetScanScript(); }
+		bool has = false;
+		friend class ScanScriptController;
+	};
+
+	class ScanScriptController : public NzbScriptController
+	{
+	public:
+		ScanScriptController(
+			std::string& nzbName,
+			std::string& category,
+			std::string& dupeKey)
+			: m_nzbFilename(nullptr)
+			, m_url(nullptr)
+			, m_directory(nullptr)
+			, m_nzbName{ nzbName }
+			, m_category{ category }
+			, m_dupeKey{ dupeKey }
+			, m_priority(nullptr)
+			, m_dupeScore(nullptr)
+			, m_addTop(nullptr)
+			, m_addPaused(nullptr)
+			, m_dupeMode(nullptr)
+			, m_parameters(nullptr) {}
+
+		static void ExecuteScripts(
+			const char* nzbFilename,
+			NzbInfo* nzbInfo,
+			const char* directory,
+			std::string& nzbName,
+			std::string& category,
+			int* priority,
+			NzbParameterList* parameters,
+			bool* addTop,
+			bool* addPaused,
+			std::string& dupeKey,
+			int* dupeScore,
+			EDupeMode* dupeMode)
 		{
-			return;
+			if (nzbInfo && nzbInfo->GetSkipScriptProcessing())
+			{
+				return;
+			}
+
+			ScanScriptController scriptController(nzbName, category, dupeKey);
+			scriptController.m_nzbFilename = nzbFilename;
+			scriptController.m_url = nzbInfo ? nzbInfo->GetUrl() : "";
+			scriptController.m_directory = directory;
+			scriptController.m_parameters = parameters;
+			scriptController.m_priority = priority;
+			scriptController.m_addTop = addTop;
+			scriptController.m_addPaused = addPaused;
+			scriptController.m_dupeScore = dupeScore;
+			scriptController.m_dupeMode = dupeMode;
+			scriptController.m_prefixLen = 0;
+
+			const char* extensions = g_Options->GetExtensions();
+
+			if (!category.empty())
+			{
+				Options::Category* categoryObj = g_Options->FindCategory(category.c_str(), false);
+				if (categoryObj && !Util::EmptyStr(categoryObj->GetExtensions()))
+				{
+					extensions = categoryObj->GetExtensions();
+				}
+			}
+
+			scriptController.ExecuteScriptList(extensions);
 		}
 
-		ScanScriptController scriptController(nzbName, category, dupeKey);
-		scriptController.m_nzbFilename = nzbFilename;
-		scriptController.m_url = nzbInfo ? nzbInfo->GetUrl() : "";
-		scriptController.m_directory = directory;
-		scriptController.m_parameters = parameters;
-		scriptController.m_priority = priority;
-		scriptController.m_addTop = addTop;
-		scriptController.m_addPaused = addPaused;
-		scriptController.m_dupeScore = dupeScore;
-		scriptController.m_dupeMode = dupeMode;
-		scriptController.m_prefixLen = 0;
-
-		const char* extensions = g_Options->GetExtensions();
-
-		if (!category.empty())
+		static bool HasScripts()
 		{
-			Options::Category* categoryObj = g_Options->FindCategory(category.c_str(), false);
-			if (categoryObj && !Util::EmptyStr(categoryObj->GetExtensions()))
+			ScanScriptCheck check;
+			check.ExecuteScriptList(g_Options->GetExtensions());
+			// a category's extensions replace the global ones for its nzbs
+			for (Options::Category& category : g_Options->GetCategories())
 			{
-				extensions = categoryObj->GetExtensions();
+				check.ExecuteScriptList(category.GetExtensions());
+			}
+			return check.has;
+		}
+
+	protected:
+		void ExecuteScript(std::shared_ptr<const Extension::Script> script) override
+		{
+			if (!script->GetScanScript() || !FileSystem::FileExists(m_nzbFilename))
+			{
+				return;
+			}
+
+			PrintMessage(Message::mkInfo, "Executing scan-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
+
+			SetArgs({script->GetEntry()});
+
+			BString<1024> infoName("scan-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
+			SetInfoName(infoName);
+
+			SetLogPrefix(script->GetDisplayName());
+			m_prefixLen = static_cast<int>(strlen(script->GetDisplayName())) + 2; // 2 = strlen(": ");
+			PrepareParams(script->GetName());
+
+			Execute();
+
+			SetLogPrefix(nullptr);
+		}
+
+		void AddMessage(Message::EKind kind, const char* text) override
+		{
+			const char* msgText = text + m_prefixLen;
+
+			NzbgetRsScanScriptCmd cmd{};
+			int cmdKind = nzbget_rs_sus_parse_scan_script_cmd(msgText, &cmd);
+			if (cmdKind != 0)
+			{
+				debug("Command %s detected", msgText + 6);
+				switch (cmdKind)
+				{
+					case 1:
+						m_nzbName = msgText + cmd.val_offset;
+						break;
+					case 2:
+						m_category = msgText + cmd.val_offset;
+						g_Scanner->InitPPParameters(m_category.c_str(), m_parameters, true);
+						break;
+					case 3:
+					{
+						std::string param(msgText + cmd.key_offset, cmd.key_len);
+						m_parameters->SetParameter(param.c_str(), msgText + cmd.val_offset);
+						break;
+					}
+					case 4:
+						*m_priority = cmd.int_val;
+						break;
+					case 5:
+						*m_addTop = cmd.int_val != 0;
+						break;
+					case 6:
+						*m_addPaused = cmd.int_val != 0;
+						break;
+					case 7:
+						m_dupeKey = msgText + cmd.val_offset;
+						break;
+					case 8:
+						*m_dupeScore = cmd.int_val;
+						break;
+					case 9:
+						*m_dupeMode = cmd.int_val == 1 ? dmAll : (cmd.int_val == 2 ? dmForce : dmScore);
+						break;
+					case -2:
+						error("Invalid value \"%s\" for command \"DUPEMODE\" received from %s",
+							msgText + cmd.val_offset, GetInfoName());
+						break;
+					default:
+						error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
+						break;
+				}
+				return;
+			}
+			ScriptController::AddMessage(kind, text);
+		}
+
+	private:
+		const char* m_nzbFilename;
+		const char* m_url;
+		const char* m_directory;
+		std::string& m_nzbName;
+		std::string& m_category;
+		std::string& m_dupeKey;
+		int* m_priority;
+		int* m_dupeScore;
+		bool* m_addTop;
+		bool* m_addPaused;
+		EDupeMode* m_dupeMode;
+		NzbParameterList* m_parameters;
+		int m_prefixLen = 0;
+
+		void PrepareParams(const char* scriptName)
+		{
+			ResetEnv();
+
+			nzbget_rs_scan_script_prepare_env(
+				m_nzbFilename,
+				FileSystem::BaseFileName(m_nzbFilename),
+				m_url,
+				m_nzbName.c_str(),
+				m_category.c_str(),
+				*m_priority,
+				*m_addTop ? 1 : 0,
+				*m_addPaused ? 1 : 0,
+				m_dupeKey.c_str(),
+				*m_dupeScore,
+				static_cast<int>(*m_dupeMode),
+				m_directory,
+				PATH_SEPARATOR,
+				this,
+				[](void* ctx, const char* name, const char* value)
+				{
+					static_cast<ScanScriptController*>(ctx)->SetEnvVar(name, value);
+				},
+				[](void* ctx, const char* name, int value)
+				{
+					static_cast<ScanScriptController*>(ctx)->SetIntEnvVar(name, value);
+				});
+
+			PrepareEnvScript(m_parameters, scriptName);
+		}
+	};
+
+private:
+	class FileData
+	{
+	public:
+		FileData(const char* filename, int64 size, time_t lastChange)
+			: m_filename{ filename ? filename : "" }
+			, m_size{ size }
+			, m_lastChange{ lastChange } {}
+		const char* GetFilename() const { return m_filename.c_str(); }
+		int64 GetSize() { return m_size; }
+		void SetSize(int64 size) { m_size = size; }
+		time_t GetLastChange() { return m_lastChange; }
+		void SetLastChange(time_t lastChange) { m_lastChange = lastChange; }
+	private:
+		std::string m_filename;
+		int64 m_size;
+		time_t m_lastChange;
+	};
+
+	using FileList = std::deque<FileData>;
+
+	class QueueData
+	{
+	public:
+		QueueData(
+			const char* filename,
+			const char* nzbName,
+			const char* category,
+			bool autoCategory,
+			int priority,
+			const char* dupeKey,
+			int dupeScore,
+			EDupeMode dupeMode,
+			NzbParameterList* parameters,
+			bool addTop,
+			bool addPaused,
+			NzbInfo* urlInfo,
+			EAddStatus* addStatus,
+			int* nzbId)
+			: m_filename{ filename ? filename : "" }
+			, m_nzbName{ nzbName ? nzbName : "" }
+			, m_category{ category ? category : "" }
+			, m_autoCategory{ autoCategory }
+			, m_priority{ priority }
+			, m_dupeKey{ dupeKey ? dupeKey : "" }
+			, m_dupeScore{ dupeScore }
+			, m_dupeMode{ dupeMode }
+			, m_addTop{ addTop }
+			, m_addPaused{ addPaused }
+			, m_urlInfo{ urlInfo }
+			, m_addStatus{ addStatus }
+			, m_nzbId{ nzbId }
+		{
+			if (parameters)
+			{
+				m_parameters.CopyFrom(parameters);
 			}
 		}
-
-		scriptController.ExecuteScriptList(extensions);
-	}
-
-	static bool HasScripts()
-	{
-		ScanScriptCheck check;
-		check.ExecuteScriptList(g_Options->GetExtensions());
-		// a category's extensions replace the global ones for its nzbs
-		for (Options::Category& category : g_Options->GetCategories())
+		const char* GetFilename() const { return m_filename.c_str(); }
+		const char* GetNzbName() const { return m_nzbName.c_str(); }
+		const char* GetCategory() const { return m_category.c_str(); }
+		int GetPriority() { return m_priority; }
+		const char* GetDupeKey() const { return m_dupeKey.c_str(); }
+		int GetDupeScore() { return m_dupeScore; }
+		EDupeMode GetDupeMode() { return m_dupeMode; }
+		NzbParameterList* GetParameters() { return &m_parameters; }
+		bool GetAddTop() { return m_addTop; }
+		bool GetAddPaused() { return m_addPaused; }
+		bool GetAutoCategory() const { return m_autoCategory; }
+		NzbInfo* GetUrlInfo() { return m_urlInfo; }
+		void SetAddStatus(EAddStatus addStatus)
 		{
-			check.ExecuteScriptList(category.GetExtensions());
+			if (m_addStatus)
+			{
+				*m_addStatus = addStatus;
+			}
 		}
-		return check.has;
+		void SetNzbId(int nzbId)
+		{
+			if (m_nzbId)
+			{
+				*m_nzbId = nzbId;
+			}
+		}
+	private:
+		NzbParameterList m_parameters;
+		std::string m_filename;
+		std::string m_nzbName;
+		std::string m_category;
+		std::string m_dupeKey;
+		int m_priority;
+		int m_dupeScore;
+		bool m_autoCategory;
+		bool m_addTop;
+		bool m_addPaused;
+		EDupeMode m_dupeMode;
+		NzbInfo* m_urlInfo;
+		EAddStatus* m_addStatus;
+		int* m_nzbId;
+	};
+
+	using QueueList = std::deque<QueueData>;
+
+	FileList m_fileList;
+	QueueList m_queueList;
+	std::mutex m_scanMutex;
+	std::atomic<bool> m_requestedNzbDirScan{false};
+	std::atomic<bool> m_scanning{false};
+	inline static int m_idGen = 0;
+	int m_nzbDirInterval = 0;
+	int m_pass = 0;
+	bool m_scanScript = false;
+
+public:
+	void InitOptions()
+	{
+		m_nzbDirInterval = 1;
+		m_scanScript = ScanScriptController::HasScripts();
+
+		CleanupStaleUnpackDir();
 	}
 
 protected:
-	void ExecuteScript(std::shared_ptr<const Extension::Script> script) override
+	int ServiceInterval() override
 	{
-		if (!script->GetScanScript() || !FileSystem::FileExists(m_nzbFilename))
-		{
-			return;
-		}
-
-		PrintMessage(Message::mkInfo, "Executing scan-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
-
-		SetArgs({script->GetEntry()});
-
-		BString<1024> infoName("scan-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
-		SetInfoName(infoName);
-
-		SetLogPrefix(script->GetDisplayName());
-		m_prefixLen = static_cast<int>(strlen(script->GetDisplayName())) + 2; // 2 = strlen(": ");
-		PrepareParams(script->GetName());
-
-		Execute();
-
-		SetLogPrefix(nullptr);
+		return m_requestedNzbDirScan ? Service::Now :
+			g_Options->GetNzbDirInterval() <= 0 ? Service::Sleep :
+			m_nzbDirInterval;
 	}
 
-	void AddMessage(Message::EKind kind, const char* text) override
+	void ServiceWork() override
 	{
-		const char* msgText = text + m_prefixLen;
+		debug("Scanner service work");
 
-		NzbgetRsScanScriptCmd cmd{};
-		int cmdKind = nzbget_rs_sus_parse_scan_script_cmd(msgText, &cmd);
-		if (cmdKind != 0)
+		if (!DownloadQueue::IsLoaded())
 		{
-			debug("Command %s detected", msgText + 6);
-			switch (cmdKind)
-			{
-				case 1:
-					m_nzbName = msgText + cmd.val_offset;
-					break;
-				case 2:
-					m_category = msgText + cmd.val_offset;
-					g_Scanner->InitPPParameters(m_category.c_str(), m_parameters, true);
-					break;
-				case 3:
-				{
-					std::string param(msgText + cmd.key_offset, cmd.key_len);
-					m_parameters->SetParameter(param.c_str(), msgText + cmd.val_offset);
-					break;
-				}
-				case 4:
-					*m_priority = cmd.int_val;
-					break;
-				case 5:
-					*m_addTop = cmd.int_val != 0;
-					break;
-				case 6:
-					*m_addPaused = cmd.int_val != 0;
-					break;
-				case 7:
-					m_dupeKey = msgText + cmd.val_offset;
-					break;
-				case 8:
-					*m_dupeScore = cmd.int_val;
-					break;
-				case 9:
-					*m_dupeMode = cmd.int_val == 1 ? dmAll : (cmd.int_val == 2 ? dmForce : dmScore);
-					break;
-				case -2:
-					error("Invalid value \"%s\" for command \"DUPEMODE\" received from %s",
-						msgText + cmd.val_offset, GetInfoName());
-					break;
-				default:
-					error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
-					break;
-			}
 			return;
 		}
-		ScriptController::AddMessage(kind, text);
+
+		m_nzbDirInterval = g_Options->GetNzbDirInterval();
+
+		if (g_WorkState->GetPauseScan() && !m_requestedNzbDirScan)
+		{
+			return;
+		}
+
+		debug("Scanner service work: doing work");
+
+		std::lock_guard<std::mutex> guard{m_scanMutex};
+
+		// check nzbdir every g_Options->GetNzbDirInterval() seconds or if requested
+		bool checkStat = !m_requestedNzbDirScan;
+		m_requestedNzbDirScan = false;
+		m_scanning = true;
+
+		if (g_Options->GetNzbDirArchiveScan())
+		{
+			CheckIncomingArchives(g_Options->GetNzbDirPath(), checkStat);
+		}
+
+		CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
+		if (!checkStat && m_scanScript)
+		{
+			// if immediate scan requested, we need second scan to process files extracted by scan-scripts
+			CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
+		}
+		m_scanning = false;
+
+		// if NzbDirFileAge is less than NzbDirInterval (that can happen if NzbDirInterval
+		// is set for rare scans like once per hour) we make 4 scans:
+		//   - one additional scan is necessary to check sizes of detected files;
+		//   - another scan is required to check files which were extracted by scan-scripts;
+		//   - third scan is needed to check sizes of extracted files.
+		nzbget_rs_dsp_scanner_next_pass(
+			g_Options->GetNzbDirInterval(),
+			g_Options->GetNzbDirFileAge(),
+			m_scanScript ? 1 : 0,
+			m_pass,
+			&m_nzbDirInterval,
+			&m_pass);
+
+		DropOldFiles();
+		m_queueList.clear();
 	}
 
 private:
-	const char* m_nzbFilename;
-	const char* m_url;
-	const char* m_directory;
-	std::string& m_nzbName;
-	std::string& m_category;
-	std::string& m_dupeKey;
-	int* m_priority;
-	int* m_dupeScore;
-	bool* m_addTop;
-	bool* m_addPaused;
-	EDupeMode* m_dupeMode;
-	NzbParameterList* m_parameters;
-	int m_prefixLen = 0;
-
-	void PrepareParams(const char* scriptName)
+	void CheckIncomingArchives(const fs::path& dir, bool checkStat)
 	{
-		ResetEnv();
+		const auto archives = FindArchives(dir, checkStat);
+		UnpackArchives(archives);
+	}
 
-		nzbget_rs_scan_script_prepare_env(
-			m_nzbFilename,
-			FileSystem::BaseFileName(m_nzbFilename),
-			m_url,
-			m_nzbName.c_str(),
-			m_category.c_str(),
-			*m_priority,
-			*m_addTop ? 1 : 0,
-			*m_addPaused ? 1 : 0,
-			m_dupeKey.c_str(),
-			*m_dupeScore,
-			static_cast<int>(*m_dupeMode),
-			m_directory,
-			PATH_SEPARATOR,
-			this,
-			[](void* ctx, const char* name, const char* value)
+	std::vector<fs::path> FindArchives(const fs::path& dir, bool checkStat)
+	{
+		// the non-throwing forms: an unreadable subdirectory (lost+found, a
+		// folder of another user) or one removed during the walk threw out of
+		// the scanner thread and ended the program
+		std::vector<fs::path> archives;
+		fs::error_code ec;
+		auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
+		for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+		{
+			const auto& path = it->path();
+			const std::string filename = fs::u8string(path.filename());
+			fs::error_code typeEc;
+
+			if (ShouldSkipItem(filename))
 			{
-				static_cast<ScanScriptController*>(ctx)->SetEnvVar(name, value);
+				if (it->is_directory(typeEc))
+				{
+					it.disable_recursion_pending();
+				}
+				continue;
+			}
+
+			if (!it->is_regular_file(typeEc))
+			{
+				continue;
+			}
+
+			// like an nzb, an archive is taken once it stopped changing: one
+			// still being copied in failed to extract and was moved aside for good
+			const std::string pathStr = fs::u8string(path);
+			if (nzbget_rs_unpack_can_extract_with_zipfast(pathStr.c_str()) != 0 &&
+				CanProcessFile(pathStr.c_str(), checkStat))
+			{
+				archives.push_back(path);
+			}
+		}
+		if (ec)
+		{
+			warn("Could not scan %s for archives: %s", fs::u8string(dir).c_str(), ec.message().c_str());
+		}
+
+		archives.shrink_to_fit();
+		return archives;
+	}
+
+	std::optional<std::vector<fs::path>> ProcessArchive(const fs::path& archiveFile, const fs::path& destDir)
+	{
+		const auto unpackDir = (g_Options->GetTempDirPath() / UNPACK_DIR) / fs::make_unique_filename();
+		std::vector<fs::path> to;
+		const std::string archiveStr = fs::u8string(archiveFile);
+		const std::string unpackStr = fs::u8string(unpackDir);
+		const std::string destStr = fs::u8string(destDir);
+		const std::string processedStr = fs::u8string(g_Options->GetNzbDirPath() / PROCESSED_DIR);
+		const std::string brokenStr = fs::u8string(g_Options->GetNzbDirPath() / BROKEN_DIR);
+
+		if (!nzbget_rs_archive_processor_process(
+			archiveStr.c_str(),
+			unpackStr.c_str(),
+			destStr.c_str(),
+			processedStr.c_str(),
+			brokenStr.c_str(),
+			(int)g_Options->GetNzbDirArchiveAction(),
+			&to,
+			[](void* /*ctx*/, int kind, const char* msg) {
+				const char* text = msg ? msg : "";
+				if (kind == 1)
+				{
+					warn("%s", text);
+				}
+				else if (kind == 2)
+				{
+					error("%s", text);
+				}
+				else if (kind == 3)
+				{
+					detail("%s", text);
+				}
+				else
+				{
+					info("%s", text);
+				}
 			},
-			[](void* ctx, const char* name, int value)
-			{
-				static_cast<ScanScriptController*>(ctx)->SetIntEnvVar(name, value);
-			});
-
-		PrepareEnvScript(m_parameters, scriptName);
-	}
-};
-
-
-inline Scanner::QueueData::QueueData(
-	const char* filename,
-	const char* nzbName,
-	const char* category,
-	bool autoCategory,
-	int priority,
-	const char* dupeKey,
-	int dupeScore,
-	EDupeMode dupeMode,
-	NzbParameterList* parameters,
-	bool addTop,
-	bool addPaused,
-	NzbInfo* urlInfo,
-	EAddStatus* addStatus,
-	int* nzbId) 
-	: m_filename{ filename ? filename : "" }
-	, m_nzbName{ nzbName ? nzbName : "" }
-	, m_category{ category ? category : "" }
-	, m_autoCategory{ autoCategory }
-	, m_priority{ priority }
-	, m_dupeKey{ dupeKey ? dupeKey : "" }
-	, m_dupeScore{ dupeScore }
-	, m_dupeMode{ dupeMode }
-	, m_addTop{ addTop }
-	, m_addPaused{ addPaused }
-	, m_urlInfo{ urlInfo }
-	, m_addStatus{ addStatus }
-	, m_nzbId{ nzbId }
-{
-	if (parameters)
-	{
-		m_parameters.CopyFrom(parameters);
-	}
-}
-
-inline void Scanner::QueueData::SetAddStatus(EAddStatus addStatus)
-{
-	if (m_addStatus)
-	{
-		*m_addStatus = addStatus;
-	}
-}
-
-inline void Scanner::QueueData::SetNzbId(int nzbId)
-{
-	if (m_nzbId)
-	{
-		*m_nzbId = nzbId;
-	}
-}
-
-
-inline void Scanner::InitOptions()
-{
-	m_nzbDirInterval = 1;
-	m_scanScript = ScanScriptController::HasScripts();
-
-	CleanupStaleUnpackDir();
-}
-
-inline int Scanner::ServiceInterval()
-{
-	return m_requestedNzbDirScan ? Service::Now :
-		g_Options->GetNzbDirInterval() <= 0 ? Service::Sleep :
-		m_nzbDirInterval;
-}
-
-inline void Scanner::ServiceWork()
-{
-	debug("Scanner service work");
-
-	if (!DownloadQueue::IsLoaded())
-	{
-		return;
-	}
-
-	m_nzbDirInterval = g_Options->GetNzbDirInterval();
-
-	if (g_WorkState->GetPauseScan() && !m_requestedNzbDirScan)
-	{
-		return;
-	}
-
-	debug("Scanner service work: doing work");
-
-	std::lock_guard<std::mutex> guard{m_scanMutex};
-
-	// check nzbdir every g_Options->GetNzbDirInterval() seconds or if requested
-	bool checkStat = !m_requestedNzbDirScan;
-	m_requestedNzbDirScan = false;
-	m_scanning = true;
-
-	if (g_Options->GetNzbDirArchiveScan())
-	{
-		CheckIncomingArchives(g_Options->GetNzbDirPath(), checkStat);
-	}
-
-	CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
-	if (!checkStat && m_scanScript)
-	{
-		// if immediate scan requested, we need second scan to process files extracted by scan-scripts
-		CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
-	}
-	m_scanning = false;
-
-	// if NzbDirFileAge is less than NzbDirInterval (that can happen if NzbDirInterval
-	// is set for rare scans like once per hour) we make 4 scans:
-	//   - one additional scan is necessary to check sizes of detected files;
-	//   - another scan is required to check files which were extracted by scan-scripts;
-	//   - third scan is needed to check sizes of extracted files.
-	nzbget_rs_dsp_scanner_next_pass(
-		g_Options->GetNzbDirInterval(),
-		g_Options->GetNzbDirFileAge(),
-		m_scanScript ? 1 : 0,
-		m_pass,
-		&m_nzbDirInterval,
-		&m_pass);
-
-	DropOldFiles();
-	m_queueList.clear();
-}
-
-inline void Scanner::CheckIncomingArchives(const fs::path& dir, bool checkStat)
-{
-	const auto archives = FindArchives(dir, checkStat);
-	UnpackArchives(archives);
-}
-
-inline std::vector<fs::path> Scanner::FindArchives(const fs::path& dir, bool checkStat)
-{
-	// the non-throwing forms: an unreadable subdirectory (lost+found, a
-	// folder of another user) or one removed during the walk threw out of
-	// the scanner thread and ended the program
-	std::vector<fs::path> archives;
-	fs::error_code ec;
-	auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
-	for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
-	{
-		const auto& path = it->path();
-		const std::string filename = fs::u8string(path.filename());
-		fs::error_code typeEc;
-
-		if (ShouldSkipItem(filename))
+			[](void* rawCtx, const char* movedPath) {
+				auto* out = static_cast<std::vector<fs::path>*>(rawCtx);
+				if (movedPath)
+				{
+					out->push_back(fs::u8path(movedPath));
+				}
+			}))
 		{
-			if (it->is_directory(typeEc))
-			{
-				it.disable_recursion_pending();
-			}
-			continue;
+			return std::nullopt;
 		}
 
-		if (!it->is_regular_file(typeEc))
+		return to;
+	}
+
+	void UnpackArchives(const std::vector<fs::path>& archives)
+	{
+		if (archives.empty()) return;
+
+		for (const auto& archive : archives)
 		{
-			continue;
-		}
-
-		// like an nzb, an archive is taken once it stopped changing: one
-		// still being copied in failed to extract and was moved aside for good
-		const std::string pathStr = fs::u8string(path);
-		if (nzbget_rs_unpack_can_extract_with_zipfast(pathStr.c_str()) != 0 &&
-			CanProcessFile(pathStr.c_str(), checkStat))
-		{
-			archives.push_back(path);
-		}
-	}
-	if (ec)
-	{
-		warn("Could not scan %s for archives: %s", fs::u8string(dir).c_str(), ec.message().c_str());
-	}
-
-	archives.shrink_to_fit();
-	return archives;
-}
-
-inline std::optional<std::vector<fs::path>> Scanner::ProcessArchive(const fs::path& archiveFile, const fs::path& destDir)
-{
-	const auto unpackDir = (g_Options->GetTempDirPath() / UNPACK_DIR) / fs::make_unique_filename();
-	std::vector<fs::path> to;
-	const std::string archiveStr = fs::u8string(archiveFile);
-	const std::string unpackStr = fs::u8string(unpackDir);
-	const std::string destStr = fs::u8string(destDir);
-	const std::string processedStr = fs::u8string(g_Options->GetNzbDirPath() / PROCESSED_DIR);
-	const std::string brokenStr = fs::u8string(g_Options->GetNzbDirPath() / BROKEN_DIR);
-
-	if (!nzbget_rs_archive_processor_process(
-		archiveStr.c_str(),
-		unpackStr.c_str(),
-		destStr.c_str(),
-		processedStr.c_str(),
-		brokenStr.c_str(),
-		(int)g_Options->GetNzbDirArchiveAction(),
-		&to,
-		[](void* /*ctx*/, int kind, const char* msg) {
-			const char* text = msg ? msg : "";
-			if (kind == 1)
-			{
-				warn("%s", text);
-			}
-			else if (kind == 2)
-			{
-				error("%s", text);
-			}
-			else if (kind == 3)
-			{
-				detail("%s", text);
-			}
-			else
-			{
-				info("%s", text);
-			}
-		},
-		[](void* rawCtx, const char* movedPath) {
-			auto* out = static_cast<std::vector<fs::path>*>(rawCtx);
-			if (movedPath)
-			{
-				out->push_back(fs::u8path(movedPath));
-			}
-		}))
-	{
-		return std::nullopt;
-	}
-
-	return to;
-}
-
-inline void Scanner::UnpackArchives(const std::vector<fs::path>& archives)
-{
-	if (archives.empty()) return;
-
-	for (const auto& archive : archives)
-	{
-		ProcessArchive(archive, archive.parent_path());
-	}
-}
-
-inline void Scanner::CleanupStaleUnpackDir()
-{
-	const fs::path unpackDir = g_Options->GetTempDirPath() / UNPACK_DIR;
-	fs::error_code ec;
-	fs::remove_all(unpackDir, ec);
-	if (ec)
-	{
-		warn("Could not remove stale unpack directory '%s/%s': %s (code %d)", 
-			g_Options->GetTempDir(), UNPACK_DIR.data(), ec.message().c_str(), ec.value());	
-	}
-}
-
-/**
-* Check if there are files in directory for incoming nzb-files
-* and add them to download queue
-*/
-inline void Scanner::CheckIncomingNzbs(const char* directory, const char* category, bool checkStat)
-{
-	DirBrowser dir(directory);
-	while (const char* filename = dir.Next())
-	{
-		if (ShouldSkipItem(filename))
-		{
-			continue;
-		}
-
-		BString<1024> fullfilename("%s%c%s", directory, PATH_SEPARATOR, filename);
-		bool isDirectory = FileSystem::DirectoryExists(fullfilename);
-
-		if (isDirectory)
-		{
-			ProcessSubdirectory(fullfilename, filename, category, checkStat);
-		}
-		else if (!isDirectory && CanProcessFile(fullfilename, checkStat))
-		{
-			ProcessIncomingFile(directory, filename, fullfilename, category);
-		}
-	}
-}
-
-inline void Scanner::ProcessSubdirectory(const char* fullPath, const char* filename, const char* category, bool checkStat)
-{
-	BString<1024> subCategory;
-	if (category && category[0] != '\0')
-	{
-		subCategory.Format("%s%c%s", category, PATH_SEPARATOR, filename);
-	}
-	else
-	{
-		subCategory = filename;
-	}
-	CheckIncomingNzbs(fullPath, subCategory, checkStat);
-}
-
-/**
- * Only files which were not changed during last g_pOptions->GetNzbDirFileAge() seconds
- * can be processed. That prevents the processing of files, which are currently being
- * copied into nzb-directory (eg. being downloaded in web-browser).
- */
-inline bool Scanner::CanProcessFile(const char* fullFilename, bool checkStat)
-{
-	if (!nzbget_rs_dsp_can_process_extension(fullFilename))
-	{
-		return false;
-	}
-
-	if (!checkStat)
-	{
-		return true;
-	}
-
-	int64 size = FileSystem::FileSize(fullFilename);
-	time_t current = Util::CurrentTime();
-	bool canProcess = false;
-	bool inList = false;
-
-	for (FileList::iterator it = m_fileList.begin(); it != m_fileList.end(); ++it)
-	{
-		FileData& fileData = *it;
-		if (!strcmp(fileData.GetFilename(), fullFilename))
-		{
-			inList = true;
-			int64 updatedSize = fileData.GetSize();
-			int64 updatedLastChange = (int64)fileData.GetLastChange();
-			if (nzbget_rs_dsp_eval_file_age(
-				fileData.GetSize(), size, (int64)fileData.GetLastChange(), (int64)current,
-				g_Options->GetNzbDirFileAge(), &updatedSize, &updatedLastChange))
-			{
-				canProcess = true;
-				m_fileList.erase(it);
-			}
-			else
-			{
-				fileData.SetSize(updatedSize);
-				fileData.SetLastChange((time_t)updatedLastChange);
-			}
-			break;
+			ProcessArchive(archive, archive.parent_path());
 		}
 	}
 
-	if (!inList)
+	void CleanupStaleUnpackDir()
 	{
-		m_fileList.emplace_back(fullFilename, size, current);
+		const fs::path unpackDir = g_Options->GetTempDirPath() / UNPACK_DIR;
+		fs::error_code ec;
+		fs::remove_all(unpackDir, ec);
+		if (ec)
+		{
+			warn("Could not remove stale unpack directory '%s/%s': %s (code %d)", 
+				g_Options->GetTempDir(), UNPACK_DIR.data(), ec.message().c_str(), ec.value());	
+		}
 	}
 
-	return canProcess;
-}
-
-/**
- * Remove old files from the list of monitored files.
- * Normally these files are deleted from the list when they are processed.
- * However if a file was detected by function "CanProcessFile" once but wasn't
- * processed later (for example if the user deleted it), it will stay in the list,
- * until we remove it here.
- */
-inline void Scanner::DropOldFiles()
-{
-	time_t current = Util::CurrentTime();
-
-	m_fileList.erase(std::remove_if(m_fileList.begin(), m_fileList.end(),
-		[current](FileData& fileData)
+	/**
+	* Check if there are files in directory for incoming nzb-files
+	* and add them to download queue
+	*/
+	void CheckIncomingNzbs(const char* directory, const char* category, bool checkStat)
+	{
+		DirBrowser dir(directory);
+		while (const char* filename = dir.Next())
 		{
-			if (nzbget_rs_dsp_should_drop_scan_file(
-				(int64)fileData.GetLastChange(), (int64)current,
-				g_Options->GetNzbDirInterval(), g_Options->GetNzbDirFileAge()))
+			if (ShouldSkipItem(filename))
 			{
-				debug("Removing file %s from scan file list", fileData.GetFilename());
-				return true;
+				continue;
 			}
+
+			BString<1024> fullfilename("%s%c%s", directory, PATH_SEPARATOR, filename);
+			bool isDirectory = FileSystem::DirectoryExists(fullfilename);
+
+			if (isDirectory)
+			{
+				ProcessSubdirectory(fullfilename, filename, category, checkStat);
+			}
+			else if (!isDirectory && CanProcessFile(fullfilename, checkStat))
+			{
+				ProcessIncomingFile(directory, filename, fullfilename, category);
+			}
+		}
+	}
+
+	void ProcessSubdirectory(const char* fullPath, const char* filename, const char* category, bool checkStat)
+	{
+		BString<1024> subCategory;
+		if (category && category[0] != '\0')
+		{
+			subCategory.Format("%s%c%s", category, PATH_SEPARATOR, filename);
+		}
+		else
+		{
+			subCategory = filename;
+		}
+		CheckIncomingNzbs(fullPath, subCategory, checkStat);
+	}
+
+	/**
+	 * Only files which were not changed during last g_pOptions->GetNzbDirFileAge() seconds
+	 * can be processed. That prevents the processing of files, which are currently being
+	 * copied into nzb-directory (eg. being downloaded in web-browser).
+	 */
+	bool CanProcessFile(const char* fullFilename, bool checkStat)
+	{
+		if (!nzbget_rs_dsp_can_process_extension(fullFilename))
+		{
 			return false;
-		}),
-		m_fileList.end());
-}
-
-inline bool Scanner::ShouldSkipItem(std::string_view filename)
-{
-	std::string nameStr(filename);
-	std::string procStr(PROCESSED_DIR);
-	std::string brokStr(BROKEN_DIR);
-	return nzbget_rs_scanner_should_skip_item(
-		nameStr.c_str(), procStr.c_str(), brokStr.c_str()) != 0;
-}
-
-inline void Scanner::ProcessIncomingFile(
-	const char* directory,
-	const char* baseFilename,
-	const char* fullFilename,
-	const char* category
-)
-{
-	const char* extension = strrchr(baseFilename, '.');
-	if (!extension)
-	{
-		return;
-	}
-
-	std::string nzbName;
-	std::string nzbCategory = category ? category : "";
-	std::string dupeKey;
-	NzbParameterList parameters;
-	int priority = 0;
-	bool addTop = false;
-	bool addPaused = false;
-	bool autoCategory = nzbCategory.empty();
-	int dupeScore = 0;
-	EDupeMode dupeMode = dmScore;
-	EAddStatus addStatus = asSkipped;
-	QueueData* queueData = nullptr;
-	NzbInfo* nzbInfo = nullptr;
-	int nzbId = 0;
-
-	for (QueueData& queueData1 : m_queueList)
-	{
-		if (FileSystem::SameFilename(queueData1.GetFilename(), fullFilename))
-		{
-			queueData = &queueData1;
-			nzbName = queueData->GetNzbName();
-			nzbCategory = queueData->GetCategory();
-			priority = queueData->GetPriority();
-			dupeKey = queueData->GetDupeKey();
-			dupeScore = queueData->GetDupeScore();
-			dupeMode = queueData->GetDupeMode();
-			addTop = queueData->GetAddTop();
-			addPaused = queueData->GetAddPaused();
-			parameters.CopyFrom(queueData->GetParameters());
-			nzbInfo = queueData->GetUrlInfo();
-			autoCategory = queueData->GetAutoCategory();
 		}
-	}
 
-	InitPPParameters(nzbCategory.c_str(), &parameters, false);
-
-	bool exists = true;
-
-	bool ranScanScript = m_scanScript && strcasecmp(extension, ".nzb_processed");
-	if (ranScanScript)
-	{
-		ScanScriptController::ExecuteScripts(fullFilename,
-			nzbInfo,
-			directory,
-			nzbName,
-			nzbCategory,
-			&priority,
-			&parameters,
-			&addTop,
-			&addPaused,
-			dupeKey,
-			&dupeScore,
-			&dupeMode
-		);
-		exists = FileSystem::FileExists(fullFilename);
-	}
-	int renameToProcessed = 0;
-	int incAction = nzbget_rs_scanner_classify_incoming_extension(
-		ranScanScript ? 1 : 0, exists ? 1 : 0, extension, &renameToProcessed);
-	if (renameToProcessed)
-	{
-		CString bakname2;
-		bool renameOK = FileSystem::RenameBak(fullFilename, "processed", false, bakname2);
-		if (!renameOK)
+		if (!checkStat)
 		{
-			error("Could not rename file %s to %s: %s", fullFilename, *bakname2,
-				*FileSystem::GetLastErrorMessage());
+			return true;
 		}
+
+		int64 size = FileSystem::FileSize(fullFilename);
+		time_t current = Util::CurrentTime();
+		bool canProcess = false;
+		bool inList = false;
+
+		for (FileList::iterator it = m_fileList.begin(); it != m_fileList.end(); ++it)
+		{
+			FileData& fileData = *it;
+			if (!strcmp(fileData.GetFilename(), fullFilename))
+			{
+				inList = true;
+				int64 updatedSize = fileData.GetSize();
+				int64 updatedLastChange = (int64)fileData.GetLastChange();
+				if (nzbget_rs_dsp_eval_file_age(
+					fileData.GetSize(), size, (int64)fileData.GetLastChange(), (int64)current,
+					g_Options->GetNzbDirFileAge(), &updatedSize, &updatedLastChange))
+				{
+					canProcess = true;
+					m_fileList.erase(it);
+				}
+				else
+				{
+					fileData.SetSize(updatedSize);
+					fileData.SetLastChange((time_t)updatedLastChange);
+				}
+				break;
+			}
+		}
+
+		if (!inList)
+		{
+			m_fileList.emplace_back(fullFilename, size, current);
+		}
+
+		return canProcess;
 	}
-	if (incAction == 1)
+
+	/**
+	 * Remove old files from the list of monitored files.
+	 * Normally these files are deleted from the list when they are processed.
+	 * However if a file was detected by function "CanProcessFile" once but wasn't
+	 * processed later (for example if the user deleted it), it will stay in the list,
+	 * until we remove it here.
+	 */
+	void DropOldFiles()
 	{
-		CString renamedName;
-		bool renameOK = FileSystem::RenameBak(fullFilename, "nzb", true, renamedName);
-		if (renameOK)
+		time_t current = Util::CurrentTime();
+
+		m_fileList.erase(std::remove_if(m_fileList.begin(), m_fileList.end(),
+			[current](FileData& fileData)
+			{
+				if (nzbget_rs_dsp_should_drop_scan_file(
+					(int64)fileData.GetLastChange(), (int64)current,
+					g_Options->GetNzbDirInterval(), g_Options->GetNzbDirFileAge()))
+				{
+					debug("Removing file %s from scan file list", fileData.GetFilename());
+					return true;
+				}
+				return false;
+			}),
+			m_fileList.end());
+	}
+
+	bool ShouldSkipItem(std::string_view filename)
+	{
+		std::string nameStr(filename);
+		std::string procStr(PROCESSED_DIR);
+		std::string brokStr(BROKEN_DIR);
+		return nzbget_rs_scanner_should_skip_item(
+			nameStr.c_str(), procStr.c_str(), brokStr.c_str()) != 0;
+	}
+
+	void ProcessIncomingFile(
+		const char* directory,
+		const char* baseFilename,
+		const char* fullFilename,
+		const char* category
+	)
+	{
+		const char* extension = strrchr(baseFilename, '.');
+		if (!extension)
+		{
+			return;
+		}
+
+		std::string nzbName;
+		std::string nzbCategory = category ? category : "";
+		std::string dupeKey;
+		NzbParameterList parameters;
+		int priority = 0;
+		bool addTop = false;
+		bool addPaused = false;
+		bool autoCategory = nzbCategory.empty();
+		int dupeScore = 0;
+		EDupeMode dupeMode = dmScore;
+		EAddStatus addStatus = asSkipped;
+		QueueData* queueData = nullptr;
+		NzbInfo* nzbInfo = nullptr;
+		int nzbId = 0;
+
+		for (QueueData& queueData1 : m_queueList)
+		{
+			if (FileSystem::SameFilename(queueData1.GetFilename(), fullFilename))
+			{
+				queueData = &queueData1;
+				nzbName = queueData->GetNzbName();
+				nzbCategory = queueData->GetCategory();
+				priority = queueData->GetPriority();
+				dupeKey = queueData->GetDupeKey();
+				dupeScore = queueData->GetDupeScore();
+				dupeMode = queueData->GetDupeMode();
+				addTop = queueData->GetAddTop();
+				addPaused = queueData->GetAddPaused();
+				parameters.CopyFrom(queueData->GetParameters());
+				nzbInfo = queueData->GetUrlInfo();
+				autoCategory = queueData->GetAutoCategory();
+			}
+		}
+
+		InitPPParameters(nzbCategory.c_str(), &parameters, false);
+
+		bool exists = true;
+
+		bool ranScanScript = m_scanScript && strcasecmp(extension, ".nzb_processed");
+		if (ranScanScript)
+		{
+			ScanScriptController::ExecuteScripts(fullFilename,
+				nzbInfo,
+				directory,
+				nzbName,
+				nzbCategory,
+				&priority,
+				&parameters,
+				&addTop,
+				&addPaused,
+				dupeKey,
+				&dupeScore,
+				&dupeMode
+			);
+			exists = FileSystem::FileExists(fullFilename);
+		}
+		int renameToProcessed = 0;
+		int incAction = nzbget_rs_scanner_classify_incoming_extension(
+			ranScanScript ? 1 : 0, exists ? 1 : 0, extension, &renameToProcessed);
+		if (renameToProcessed)
+		{
+			CString bakname2;
+			bool renameOK = FileSystem::RenameBak(fullFilename, "processed", false, bakname2);
+			if (!renameOK)
+			{
+				error("Could not rename file %s to %s: %s", fullFilename, *bakname2,
+					*FileSystem::GetLastErrorMessage());
+			}
+		}
+		if (incAction == 1)
+		{
+			CString renamedName;
+			bool renameOK = FileSystem::RenameBak(fullFilename, "nzb", true, renamedName);
+			if (renameOK)
+			{
+				bool added = AddFileToQueue(
+					renamedName,
+					nzbName.c_str(),
+					nzbCategory.c_str(),
+					autoCategory,
+					priority,
+					dupeKey.c_str(),
+					dupeScore,
+					dupeMode,
+					&parameters,
+					addTop,
+					addPaused,
+					nzbInfo,
+					&nzbId
+				);
+				addStatus = added ? asSuccess : asFailed;
+			}
+			else
+			{
+				error("Could not rename file %s to %s: %s", fullFilename, *renamedName,
+					*FileSystem::GetLastErrorMessage());
+				addStatus = asFailed;
+			}
+		}
+		else if (incAction == 2)
 		{
 			bool added = AddFileToQueue(
-				renamedName,
+				fullFilename,
 				nzbName.c_str(),
 				nzbCategory.c_str(),
 				autoCategory,
@@ -30939,541 +30601,401 @@ inline void Scanner::ProcessIncomingFile(
 			);
 			addStatus = added ? asSuccess : asFailed;
 		}
-		else
+
+		if (queueData)
 		{
-			error("Could not rename file %s to %s: %s", fullFilename, *renamedName,
-				*FileSystem::GetLastErrorMessage());
-			addStatus = asFailed;
+			queueData->SetAddStatus(addStatus);
+			queueData->SetNzbId(nzbId);
 		}
 	}
-	else if (incAction == 2)
+
+public:
+	void InitPPParameters(const char* category, NzbParameterList* parameters, bool reset)
 	{
-		bool added = AddFileToQueue(
-			fullFilename,
-			nzbName.c_str(),
-			nzbCategory.c_str(),
-			autoCategory,
-			priority,
-			dupeKey.c_str(),
-			dupeScore,
-			dupeMode,
-			&parameters,
-			addTop,
-			addPaused,
-			nzbInfo,
-			&nzbId
-		);
-		addStatus = added ? asSuccess : asFailed;
+		bool unpack = g_Options->GetUnpack();
+		const char* extensions = g_Options->GetExtensions();
+
+		if (!Util::EmptyStr(category))
+		{
+			Options::Category* categoryObj = g_Options->FindCategory(category, false);
+			if (categoryObj)
+			{
+				unpack = categoryObj->GetUnpack();
+				if (!Util::EmptyStr(categoryObj->GetExtensions()))
+				{
+					extensions = categoryObj->GetExtensions();
+				}
+			}
+		}
+
+		if (reset)
+		{
+			g_ExtensionManager->ForEach([&parameters](auto script)
+				{
+					BString<1024> paramName("%s:", script->GetName());
+					parameters->SetParameter(paramName, nullptr);
+				}
+			);
+		}
+
+		if (!parameters->Find("*Unpack:"))
+		{
+			parameters->SetParameter("*Unpack:", unpack ? "yes" : "no");
+		}
+
+		if (!Util::EmptyStr(extensions))
+		{
+			// create pp-parameter for each post-processing or queue- script
+			g_ExtensionManager->ForEach(
+				[&](auto script)
+				{
+					Tokenizer tok(extensions, ",;");
+					while (const char* scriptName = tok.Next())
+					{
+						if (strcmp(scriptName, script->GetName()) != 0) continue;
+
+						BString<1024> paramName("%s:", scriptName);
+						if ((script->GetPostScript() || script->GetQueueScript()) && !parameters->Find(paramName))
+						{
+							parameters->SetParameter(paramName, "yes");
+						}
+					}
+				});
+		}
 	}
 
-	if (queueData)
+	CString ResolveCategory(const char* category, const char* filename)
 	{
-		queueData->SetAddStatus(addStatus);
-		queueData->SetNzbId(nzbId);
+		CString useCategory = category ? category : "";
+		Options::Category* categoryObj = g_Options->FindCategory(useCategory, true);
+		if (categoryObj && strcmp(useCategory, categoryObj->GetName()) != 0)
+		{
+			useCategory = categoryObj->GetName();
+			detail("Category '%s' matched to '%s' for '%s'", category, *useCategory, filename);
+		}
+		return useCategory;
 	}
-}
 
-inline void Scanner::InitPPParameters(const char* category, NzbParameterList* parameters, bool reset)
-{
-	bool unpack = g_Options->GetUnpack();
-	const char* extensions = g_Options->GetExtensions();
-
-	if (!Util::EmptyStr(category))
+private:
+	void DetectAndSetCategory(const NzbFile& nzbFile, NzbInfo& nzbInfo, const char* nzbName)
 	{
-		Options::Category* categoryObj = g_Options->FindCategory(category, false);
+		const std::string& nzbCategory = nzbFile.GetCategoryFromFile();
+		if (nzbCategory.empty())
+		{
+			detail("Auto-category: no category detected in '%s'", nzbName);
+			return;
+		}
+		Options::Category* categoryObj = g_Options->FindCategory(nzbCategory.c_str(), true);
 		if (categoryObj)
 		{
-			unpack = categoryObj->GetUnpack();
-			if (!Util::EmptyStr(categoryObj->GetExtensions()))
-			{
-				extensions = categoryObj->GetExtensions();
-			}
+			const char* category = categoryObj->GetName();
+			detail("Category '%s' matched to '%s' for '%s'", category, nzbCategory.c_str(), nzbName);
+			nzbInfo.SetCategory(category);
+		}
+		else
+		{
+			detail("Auto-category: using detected category '%s' for '%s'", nzbCategory.c_str(), nzbName);
+			nzbInfo.SetCategory(nzbCategory.c_str());
 		}
 	}
 
-	if (reset)
+	bool AddFileToQueue(
+		const char* filename,
+		const char* nzbName,
+		const char* category,
+		bool autoCategory,
+		int priority,
+		const char* dupeKey,
+		int dupeScore,
+		EDupeMode dupeMode,
+		NzbParameterList* parameters,
+		bool addTop,
+		bool addPaused,
+		NzbInfo* urlInfo,
+		int* nzbId
+	)
 	{
-		g_ExtensionManager->ForEach([&parameters](auto script)
-			{
-				BString<1024> paramName("%s:", script->GetName());
-				parameters->SetParameter(paramName, nullptr);
-			}
-		);
-	}
+		const char* basename = FileSystem::BaseFileName(filename);
 
-	if (!parameters->Find("*Unpack:"))
-	{
-		parameters->SetParameter("*Unpack:", unpack ? "yes" : "no");
-	}
+		info("Adding collection %s to queue", basename);
 
-	if (!Util::EmptyStr(extensions))
-	{
-		// create pp-parameter for each post-processing or queue- script
-		g_ExtensionManager->ForEach(
-			[&](auto script)
+		NzbFile nzbFile(filename, category);
+		bool ok = nzbFile.Parse();
+		if (!ok)
+		{
+			error("Could not add collection %s to queue", basename);
+		}
+
+		CString bakname2;
+		const char* bakSuffix = ok ? "queued" : "error";
+		if (!FileSystem::RenameBak(filename, bakSuffix, false, bakname2))
+		{
+			ok = false;
+			error("Could not rename file %s to %s: %s", filename, *bakname2,
+				*FileSystem::GetLastErrorMessage());
+		}
+
+		std::unique_ptr<NzbInfo> nzbInfo = nzbFile.DetachNzbInfo();
+		nzbInfo->SetQueuedFilename(bakname2);
+
+		if (autoCategory)
+		{
+			DetectAndSetCategory(nzbFile, *nzbInfo, nzbName);
+			InitPPParameters(nzbInfo->GetCategory(), parameters, true);
+		}
+
+		if (!Util::EmptyStr(nzbName))
+		{
+			nzbInfo->SetName(nullptr);
+			nzbInfo->SetFilename(nzbName);
+			nzbInfo->BuildDestDirName();
+		}
+
+		if (ok)
+		{
+			for (FileInfo* fileInfo : nzbInfo->GetFileList())
 			{
-				Tokenizer tok(extensions, ",;");
-				while (const char* scriptName = tok.Next())
+				// a warning when the nzb stops short of what the subject declares or
+				// leaves out much of a file (a fragment listing 1 of 9374 parts); a
+				// segment or two an indexer dropped is common and only a detail
+				if (fileInfo->GetMissedArticles() > 0)
 				{
-					if (strcmp(scriptName, script->GetName()) != 0) continue;
-
-					BString<1024> paramName("%s:", scriptName);
-					if ((script->GetPostScript() || script->GetQueueScript()) && !parameters->Find(paramName))
-					{
-						parameters->SetParameter(paramName, "yes");
-					}
+					bool cutShort = nzbFile.GetCutShortFiles().count(fileInfo) > 0;
+					int sev = nzbget_rs_dsp_classify_missed_articles(
+						fileInfo->GetMissedArticles(), fileInfo->GetTotalArticles(), cutShort ? 1 : 0);
+					int presentArticles = fileInfo->GetTotalArticles() - fileInfo->GetMissedArticles();
+					nzbInfo->PrintMessage(
+						sev == 2 ? Message::mkWarning : Message::mkDetail,
+						"Collection %s lists only %i of the %i articles of %s: the missing ones count as failed",
+						nzbInfo->GetName(), presentArticles,
+						fileInfo->GetTotalArticles(), fileInfo->GetFilename());
 				}
-			});
-	}
-}
+			}
+		}
 
-inline CString Scanner::ResolveCategory(const char* category, const char* filename)
-{
-	CString useCategory = category ? category : "";
-	Options::Category* categoryObj = g_Options->FindCategory(useCategory, true);
-	if (categoryObj && strcmp(useCategory, categoryObj->GetName()) != 0)
-	{
-		useCategory = categoryObj->GetName();
-		detail("Category '%s' matched to '%s' for '%s'", category, *useCategory, filename);
-	}
-	return useCategory;
-}
+		nzbInfo->SetDupeKey(dupeKey);
+		nzbInfo->SetDupeScore(dupeScore);
+		nzbInfo->SetDupeMode(dupeMode);
+		nzbInfo->SetPriority(priority);
+		if (urlInfo)
+		{
+			nzbInfo->SetUrl(urlInfo->GetUrl());
+			nzbInfo->SetUrlStatus(urlInfo->GetUrlStatus());
+			nzbInfo->SetFeedId(urlInfo->GetFeedId());
+			nzbInfo->SetDupeHint(urlInfo->GetDupeHint());
+			nzbInfo->SetDesiredServerId(urlInfo->GetDesiredServerId());
+			nzbInfo->SetSkipScriptProcessing(urlInfo->GetSkipScriptProcessing());
+			nzbInfo->SetSkipDiskWrite(urlInfo->GetSkipDiskWrite());
+		}
 
-inline void Scanner::DetectAndSetCategory(const NzbFile& nzbFile, NzbInfo& nzbInfo, const char* nzbName)
-{
-	const std::string& nzbCategory = nzbFile.GetCategoryFromFile();
-	if (nzbCategory.empty())
-	{
-		detail("Auto-category: no category detected in '%s'", nzbName);
-		return;
-	}
-	Options::Category* categoryObj = g_Options->FindCategory(nzbCategory.c_str(), true);
-	if (categoryObj)
-	{
-		const char* category = categoryObj->GetName();
-		detail("Category '%s' matched to '%s' for '%s'", category, nzbCategory.c_str(), nzbName);
-		nzbInfo.SetCategory(category);
-	}
-	else
-	{
-		detail("Auto-category: using detected category '%s' for '%s'", nzbCategory.c_str(), nzbName);
-		nzbInfo.SetCategory(nzbCategory.c_str());
-	}
-}
+		if (!nzbFile.GetPassword().empty())
+		{
+			nzbInfo->GetParameters()->SetParameter("*Unpack:Password", nzbFile.GetPassword().c_str());
+		}
 
-inline bool Scanner::AddFileToQueue(
-	const char* filename,
-	const char* nzbName,
-	const char* category,
-	bool autoCategory,
-	int priority,
-	const char* dupeKey,
-	int dupeScore,
-	EDupeMode dupeMode,
-	NzbParameterList* parameters,
-	bool addTop,
-	bool addPaused,
-	NzbInfo* urlInfo,
-	int* nzbId
-)
-{
-	const char* basename = FileSystem::BaseFileName(filename);
+		nzbInfo->GetParameters()->CopyFrom(parameters);
 
-	info("Adding collection %s to queue", basename);
-
-	NzbFile nzbFile(filename, category);
-	bool ok = nzbFile.Parse();
-	if (!ok)
-	{
-		error("Could not add collection %s to queue", basename);
-	}
-
-	CString bakname2;
-	const char* bakSuffix = ok ? "queued" : "error";
-	if (!FileSystem::RenameBak(filename, bakSuffix, false, bakname2))
-	{
-		ok = false;
-		error("Could not rename file %s to %s: %s", filename, *bakname2,
-			*FileSystem::GetLastErrorMessage());
-	}
-
-	std::unique_ptr<NzbInfo> nzbInfo = nzbFile.DetachNzbInfo();
-	nzbInfo->SetQueuedFilename(bakname2);
-
-	if (autoCategory)
-	{
-		DetectAndSetCategory(nzbFile, *nzbInfo, nzbName);
-		InitPPParameters(nzbInfo->GetCategory(), parameters, true);
-	}
-
-	if (!Util::EmptyStr(nzbName))
-	{
-		nzbInfo->SetName(nullptr);
-		nzbInfo->SetFilename(nzbName);
-		nzbInfo->BuildDestDirName();
-	}
-
-	if (ok)
-	{
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
-			// a warning when the nzb stops short of what the subject declares or
-			// leaves out much of a file (a fragment listing 1 of 9374 parts); a
-			// segment or two an indexer dropped is common and only a detail
-			if (fileInfo->GetMissedArticles() > 0)
+			fileInfo->SetPaused(addPaused);
+		}
+
+		NzbInfo* addedNzb = nullptr;
+
+		if (ok)
+		{
+			addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
+		}
+		else if (urlInfo)
+		{
+			for (Message& message : nzbInfo->GuardCachedMessages())
 			{
-				bool cutShort = nzbFile.GetCutShortFiles().count(fileInfo) > 0;
-				int sev = nzbget_rs_dsp_classify_missed_articles(
-					fileInfo->GetMissedArticles(), fileInfo->GetTotalArticles(), cutShort ? 1 : 0);
-				int presentArticles = fileInfo->GetTotalArticles() - fileInfo->GetMissedArticles();
-				nzbInfo->PrintMessage(
-					sev == 2 ? Message::mkWarning : Message::mkDetail,
-					"Collection %s lists only %i of the %i articles of %s: the missing ones count as failed",
-					nzbInfo->GetName(), presentArticles,
-					fileInfo->GetTotalArticles(), fileInfo->GetFilename());
+				urlInfo->AddMessage(message.GetKind(), message.GetText(), false);
 			}
 		}
-	}
-
-	nzbInfo->SetDupeKey(dupeKey);
-	nzbInfo->SetDupeScore(dupeScore);
-	nzbInfo->SetDupeMode(dupeMode);
-	nzbInfo->SetPriority(priority);
-	if (urlInfo)
-	{
-		nzbInfo->SetUrl(urlInfo->GetUrl());
-		nzbInfo->SetUrlStatus(urlInfo->GetUrlStatus());
-		nzbInfo->SetFeedId(urlInfo->GetFeedId());
-		nzbInfo->SetDupeHint(urlInfo->GetDupeHint());
-		nzbInfo->SetDesiredServerId(urlInfo->GetDesiredServerId());
-		nzbInfo->SetSkipScriptProcessing(urlInfo->GetSkipScriptProcessing());
-		nzbInfo->SetSkipDiskWrite(urlInfo->GetSkipDiskWrite());
-	}
-
-	if (!nzbFile.GetPassword().empty())
-	{
-		nzbInfo->GetParameters()->SetParameter("*Unpack:Password", nzbFile.GetPassword().c_str());
-	}
-
-	nzbInfo->GetParameters()->CopyFrom(parameters);
-
-	for (FileInfo* fileInfo : nzbInfo->GetFileList())
-	{
-		fileInfo->SetPaused(addPaused);
-	}
-
-	NzbInfo* addedNzb = nullptr;
-
-	if (ok)
-	{
-		addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
-	}
-	else if (urlInfo)
-	{
-		for (Message& message : nzbInfo->GuardCachedMessages())
+		else
 		{
-			urlInfo->AddMessage(message.GetKind(), message.GetText(), false);
+			nzbInfo->SetDeleteStatus(NzbInfo::dsScan);
+			addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
+		}
+
+		if (nzbId)
+		{
+			*nzbId = addedNzb ? addedNzb->GetId() : 0;
+		}
+
+		return ok;
+	}
+
+public:
+	void ScanNzbDir(bool syncMode)
+	{
+		{
+			std::lock_guard<std::mutex> guard{m_scanMutex};
+			m_scanning = true;
+			m_requestedNzbDirScan = true;
+			WakeUp();
+		}
+
+		while (syncMode && (m_scanning || m_requestedNzbDirScan))
+		{
+			Util::Sleep(100);
 		}
 	}
-	else
+
+	EAddStatus AddArchive(const char* filename, const char* category,
+		bool autoCategory, int priority, const char* dupeKey,
+		int dupeScore, EDupeMode dupeMode,
+		NzbParameterList* parameters, bool addTop, bool addPaused,
+		NzbInfo* urlInfo, const char* buffer, int bufSize)
 	{
-		nzbInfo->SetDeleteStatus(NzbInfo::dsScan);
-		addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
-	}
-
-	if (nzbId)
-	{
-		*nzbId = addedNzb ? addedNzb->GetId() : 0;
-	}
-
-	return ok;
-}
-
-inline void Scanner::ScanNzbDir(bool syncMode)
-{
-	{
-		std::lock_guard<std::mutex> guard{m_scanMutex};
-		m_scanning = true;
-		m_requestedNzbDirScan = true;
-		WakeUp();
-	}
-
-	while (syncMode && (m_scanning || m_requestedNzbDirScan))
-	{
-		Util::Sleep(100);
-	}
-}
-
-inline Scanner::EAddStatus Scanner::AddArchive(const char* filename, const char* category,
-										bool autoCategory, int priority, const char* dupeKey,
-										int dupeScore, EDupeMode dupeMode,
-										NzbParameterList* parameters, bool addTop, bool addPaused,
-										NzbInfo* urlInfo, const char* buffer, int bufSize)
-{
-	if (Util::EmptyStr(filename))
-	{
-		error("Failed to add the archive to the download queue: Archive filename cannot be empty");
-		return EAddStatus::asFailed;
-	}
-
-	if (g_Options->GetTempDirPath().empty())
-	{
-		error("Failed to create file '%s': '%s' is required and cannot be empty",
-			filename, Options::TEMPDIR.data());
-		return EAddStatus::asFailed;
-	}
-
-	if (g_Options->GetNzbDirPath().empty())
-	{
-		error("Failed to create file '%s': '%s' is required and cannot be empty",
-			filename, Options::NZBDIR.data());
-		return EAddStatus::asFailed;
-	}
-
-	const auto archiveFilename = FileSystem::MakeValidFilename(filename);
-	const auto archiveFilePath = g_Options->GetTempDirPath() / *archiveFilename;
-
-	fs::error_code ec;
-	{
-		std::ofstream file(archiveFilePath.c_str(), std::ios::binary);
-		if (!file.is_open())
+		if (Util::EmptyStr(filename))
 		{
-			error("Failed to create archive file '%s' in temporary directory: %s",
-				*archiveFilename, std::strerror(errno));
+			error("Failed to add the archive to the download queue: Archive filename cannot be empty");
 			return EAddStatus::asFailed;
 		}
 
-		file.write(buffer, bufSize);
-		file.close();
-		if (!file)
+		if (g_Options->GetTempDirPath().empty())
 		{
-			error("Failed to write data to archive file '%s': %s",
-				*archiveFilename, std::strerror(errno));
-			fs::remove(archiveFilePath, ec);
-			return EAddStatus::asFailed;
-		}
-	}
-
-	if (!g_Options->GetNzbDirArchiveScan()) 
-	{
-		const auto finalArchiveFilePath = g_Options->GetNzbDirPath() / *archiveFilename;
-		fs::move_file(archiveFilePath, finalArchiveFilePath, ec);
-		if (ec)
-		{
-			error("Failed to move file '%s' to %s: %s",
-				*archiveFilename, Options::NZBDIR.data(), ec.message().c_str());
+			error("Failed to create file '%s': '%s' is required and cannot be empty",
+				filename, Options::TEMPDIR.data());
 			return EAddStatus::asFailed;
 		}
 
-		info("Skipping processing of '%s': option '%s' is disabled",
-			*archiveFilename, Options::NZBDIRARCHIVESCAN.data());
-		return EAddStatus::asSkipped;
-	}
-
-	std::vector<EAddStatus> statuses;
-	{
-		std::lock_guard<std::mutex> guard{m_scanMutex};
-
-		auto nzbFiles = ProcessArchive(archiveFilePath, g_Options->GetNzbDirPath());
-		if (!nzbFiles)
+		if (g_Options->GetNzbDirPath().empty())
 		{
+			error("Failed to create file '%s': '%s' is required and cannot be empty",
+				filename, Options::NZBDIR.data());
 			return EAddStatus::asFailed;
 		}
 
-		if (nzbFiles->empty())
+		const auto archiveFilename = FileSystem::MakeValidFilename(filename);
+		const auto archiveFilePath = g_Options->GetTempDirPath() / *archiveFilename;
+
+		fs::error_code ec;
 		{
+			std::ofstream file(archiveFilePath.c_str(), std::ios::binary);
+			if (!file.is_open())
+			{
+				error("Failed to create archive file '%s' in temporary directory: %s",
+					*archiveFilename, std::strerror(errno));
+				return EAddStatus::asFailed;
+			}
+
+			file.write(buffer, bufSize);
+			file.close();
+			if (!file)
+			{
+				error("Failed to write data to archive file '%s': %s",
+					*archiveFilename, std::strerror(errno));
+				fs::remove(archiveFilePath, ec);
+				return EAddStatus::asFailed;
+			}
+		}
+
+		if (!g_Options->GetNzbDirArchiveScan()) 
+		{
+			const auto finalArchiveFilePath = g_Options->GetNzbDirPath() / *archiveFilename;
+			fs::move_file(archiveFilePath, finalArchiveFilePath, ec);
+			if (ec)
+			{
+				error("Failed to move file '%s' to %s: %s",
+					*archiveFilename, Options::NZBDIR.data(), ec.message().c_str());
+				return EAddStatus::asFailed;
+			}
+
+			info("Skipping processing of '%s': option '%s' is disabled",
+				*archiveFilename, Options::NZBDIRARCHIVESCAN.data());
 			return EAddStatus::asSkipped;
 		}
 
-		// the url item goes with the first nzb only: adding it takes the item
-		// out of the queue and frees it, and the next nzb of the archive read
-		// the freed item (and could take another queue entry out with it).
-		// Each nzb reports how it went (sized up front: the entries point here)
-		statuses.assign(nzbFiles->size(), EAddStatus::asSkipped);
-		size_t index = 0;
-		for (const auto& nzbFile : *nzbFiles)
+		std::vector<EAddStatus> statuses;
 		{
-			const auto nzbFilePathStr = fs::u8string(nzbFile);
-			const auto fileName = fs::u8string(nzbFile.filename());
-			const CString useCategory = ResolveCategory(category, fileName.c_str());
-			m_queueList.emplace_back(
-				nzbFilePathStr.c_str(), fileName.c_str(), useCategory,
-				autoCategory, priority, dupeKey, dupeScore, dupeMode,
-				parameters, addTop, addPaused,
-				index == 0 ? urlInfo : nullptr,
-				&statuses[index], nullptr);
-			index++;
-		}
-		// requested under the lock, as in AddExternalFile: a periodic scan
-		// waiting for the lock skipped the young files, cleared their entries
-		// and they were added later without category, key, score or url (F14)
-		m_requestedNzbDirScan = true;
-	}
+			std::lock_guard<std::mutex> guard{m_scanMutex};
 
-	ScanNzbDir(true);
+			auto nzbFiles = ProcessArchive(archiveFilePath, g_Options->GetNzbDirPath());
+			if (!nzbFiles)
+			{
+				return EAddStatus::asFailed;
+			}
 
-	std::vector<int> statusInts;
-	statusInts.reserve(statuses.size());
-	for (EAddStatus st : statuses)
-	{
-		statusInts.push_back((int)st);
-	}
-	return (EAddStatus)nzbget_rs_scanner_resolve_archive_add_status(
-		urlInfo ? 1 : 0,
-		statusInts.data(),
-		statusInts.size(),
-		(int)EAddStatus::asSuccess,
-		(int)EAddStatus::asSkipped);
-}
+			if (nzbFiles->empty())
+			{
+				return EAddStatus::asSkipped;
+			}
 
-inline Scanner::EAddStatus Scanner::AddArchive(
-	const char* filename,
-	const char* category,
-	bool autoCategory,
-	int priority,
-	const char* dupeKey,
-	int dupeScore,
-	EDupeMode dupeMode,
-	NzbParameterList* parameters,
-	bool addTop,
-	bool addPaused,
-	NzbInfo* urlInfo,
-	const char* tmpFilename)
-{
-	CharBuffer buffer;
-	if (!FileSystem::LoadFileIntoBuffer(tmpFilename, buffer, false))
-	{
-		error("Could not open file '%s'", tmpFilename);
-		return EAddStatus::asFailed;
-	}
-	fs::error_code ec;
-	fs::remove(tmpFilename, ec);
-	if (ec)
-	{
-		const auto msg = ec.message();
-		error("Failed to remove '%s': %s (code %d)", tmpFilename, msg.c_str(), ec.value());
-	}
-
-	return AddArchive(
-		filename,
-		category,
-		autoCategory,
-		priority,
-		dupeKey,
-		dupeScore,
-		dupeMode,
-		parameters,
-		addTop,
-		addPaused,
-		urlInfo,
-		*buffer,
-		buffer.Size()
-	);
-}
-
-inline Scanner::EAddStatus Scanner::AddExternalFile(
-	const char* nzbName,
-	const char* category,
-	bool autoCategory,
-	int priority,
-	const char* dupeKey,
-	int dupeScore,
-	EDupeMode dupeMode,
-	NzbParameterList* parameters,
-	bool addTop,
-	bool addPaused,
-	NzbInfo* urlInfo,
-	const char* fileName,
-	const char* buffer,
-	int bufSize,
-	int* nzbId
-)
-{
-	bool nzb = false;
-	BString<1024> tempFileName;
-
-	// the names are picked and taken under the lock: two appends at once picked the
-	// same temporary or queue file name, one overwrote the other and returned -1 (F14)
-	std::unique_lock<std::mutex> guard{m_scanMutex};
-
-	if (fileName)
-	{
-		tempFileName = fileName;
-	}
-	else
-	{
-		int num = ++m_idGen;
-		while (tempFileName.Empty() || FileSystem::FileExists(tempFileName))
-		{
-			tempFileName.Format("%s%cnzb-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, num);
-			num++;
+			// the url item goes with the first nzb only: adding it takes the item
+			// out of the queue and frees it, and the next nzb of the archive read
+			// the freed item (and could take another queue entry out with it).
+			// Each nzb reports how it went (sized up front: the entries point here)
+			statuses.assign(nzbFiles->size(), EAddStatus::asSkipped);
+			size_t index = 0;
+			for (const auto& nzbFile : *nzbFiles)
+			{
+				const auto nzbFilePathStr = fs::u8string(nzbFile);
+				const auto fileName = fs::u8string(nzbFile.filename());
+				const CString useCategory = ResolveCategory(category, fileName.c_str());
+				m_queueList.emplace_back(
+					nzbFilePathStr.c_str(), fileName.c_str(), useCategory,
+					autoCategory, priority, dupeKey, dupeScore, dupeMode,
+					parameters, addTop, addPaused,
+					index == 0 ? urlInfo : nullptr,
+					&statuses[index], nullptr);
+				index++;
+			}
+			// requested under the lock, as in AddExternalFile: a periodic scan
+			// waiting for the lock skipped the young files, cleared their entries
+			// and they were added later without category, key, score or url (F14)
+			m_requestedNzbDirScan = true;
 		}
 
-		if (!FileSystem::SaveBufferIntoFile(tempFileName, buffer, bufSize))
-		{
-			error("Could not create file %s", *tempFileName);
-			return asFailed;
-		}
+		ScanNzbDir(true);
 
-		nzb = nzbget_rs_dsp_is_nzb_xml_prefix((const uint8_t*)buffer, (size_t)std::max(0, bufSize)) != 0;
+		std::vector<int> statusInts;
+		statusInts.reserve(statuses.size());
+		for (EAddStatus st : statuses)
+		{
+			statusInts.push_back((int)st);
+		}
+		return (EAddStatus)nzbget_rs_scanner_resolve_archive_add_status(
+			urlInfo ? 1 : 0,
+			statusInts.data(),
+			statusInts.size(),
+			(int)EAddStatus::asSuccess,
+			(int)EAddStatus::asSkipped);
 	}
 
-	// move file into NzbDir, make sure the file name is unique
-	// a name that is a full path (a client passing its file) drops the folder; any
-	// other "/" belongs to the name (indexers post "[hash] [16/22] - Title"), and it
-	// lost everything up to it ("22] - Title"). MakeValidFilename makes it safe
-	bool absolutePath = nzbget_rs_scanner_is_absolute_nzb_name(nzbName) != 0;
-	CString validNzbName = FileSystem::MakeValidFilename(absolutePath ? FileSystem::BaseFileName(nzbName) : nzbName);
+	EAddStatus AddArchive(
+		const char* filename,
+		const char* category,
+		bool autoCategory,
+		int priority,
+		const char* dupeKey,
+		int dupeScore,
+		EDupeMode dupeMode,
+		NzbParameterList* parameters,
+		bool addTop,
+		bool addPaused,
+		NzbInfo* urlInfo,
+		const char* tmpFilename)
 	{
-		NzbgetRsBuf normBuf = nzbget_rs_dsp_normalize_external_nzb_name(nzbName, validNzbName, nzb ? 1 : 0);
-		std::string normStr(normBuf.data ? normBuf.data : "", normBuf.len);
-		nzbget_rs_free(normBuf);
-		validNzbName = normStr.c_str();
-	}
-
-	BString<1024> scanFileName("%s%c%s", g_Options->GetNzbDir(), PATH_SEPARATOR, *validNzbName);
-
-	const char* validCStr = validNzbName ? *validNzbName : "";
-	size_t validLen = strlen(validCStr);
-	ptrdiff_t dotOff = nzbget_rs_file_extension(validCStr, validLen);
-	bool hasExt = dotOff >= 0;
-	std::string basePart(validCStr, hasExt ? (size_t)dotOff : validLen);
-	std::string extPart = hasExt ? std::string(validCStr + dotOff + 1) : std::string();
-
-	int num = 2;
-	while (FileSystem::FileExists(scanFileName))
-	{
-		if (hasExt)
+		CharBuffer buffer;
+		if (!FileSystem::LoadFileIntoBuffer(tmpFilename, buffer, false))
 		{
-			scanFileName.Format("%s%c%s_%i.%s", g_Options->GetNzbDir(), PATH_SEPARATOR,
-				basePart.c_str(), num, extPart.c_str());
+			error("Could not open file '%s'", tmpFilename);
+			return EAddStatus::asFailed;
 		}
-		else
+		fs::error_code ec;
+		fs::remove(tmpFilename, ec);
+		if (ec)
 		{
-			scanFileName.Format("%s%c%s_%i", g_Options->GetNzbDir(), PATH_SEPARATOR,
-				basePart.c_str(), num);
-		}
-		num++;
-	}
-
-	EAddStatus addStatus;
-
-	{
-		if (!FileSystem::MoveFile(tempFileName, scanFileName))
-		{
-			error("Could not move file %s to %s: %s", *tempFileName, *scanFileName,
-				*FileSystem::GetLastErrorMessage());
-			FileSystem::DeleteFile(tempFileName);
-			return asFailed;
+			const auto msg = ec.message();
+			error("Failed to remove '%s': %s (code %d)", tmpFilename, msg.c_str(), ec.value());
 		}
 
-		CString useCategory = ResolveCategory(category, nzbName);
-
-		addStatus = asSkipped;
-		m_queueList.emplace_back(
-			scanFileName,
-			nzbName,
-			useCategory,
+		return AddArchive(
+			filename,
+			category,
 			autoCategory,
 			priority,
 			dupeKey,
@@ -31483,451 +31005,608 @@ inline Scanner::EAddStatus Scanner::AddExternalFile(
 			addTop,
 			addPaused,
 			urlInfo,
-			&addStatus,
-			nzbId
+			*buffer,
+			buffer.Size()
 		);
-		// requested under the lock: a periodic scan that took the lock first skipped
-		// the file (too young) and cleared its entry, and the file was added later
-		// without the name, key and score it was sent with (F14)
-		m_requestedNzbDirScan = true;
-	}
-	guard.unlock();
-
-	ScanNzbDir(true);
-
-	return addStatus;
-}
-
-#
-inline void UrlDownloader::ProcessHeader(const char* line)
-{
-	WebDownloader::ProcessHeader(line);
-
-	size_t start, length;
-	NzbgetRsBuf name{}, value{};
-	switch (nzbget_rs_url_dnzb_header(line, &start, &length, &name, &value))
-	{
-		case 1:
-			m_category = length > 0 ? CString(line + start, (int)length) : CString("");
-			debug("Category: %s", *m_category);
-			break;
-
-		case 2:
-			debug("X-DNZB: %s", name.data);
-			debug("Value: %s", value.data);
-			m_nzbInfo->GetParameters()->SetParameter(name.data, value.data);
-			nzbget_rs_free(name);
-			nzbget_rs_free(value);
-			break;
-	}
-}
-
-inline UrlCoordinator::UrlCoordinator()
-{
-	m_downloadQueueObserver.m_owner = this;
-	DownloadQueue::Guard()->Attach(&m_downloadQueueObserver);
-}
-
-inline UrlCoordinator::~UrlCoordinator()
-{
-	debug("Destroying UrlCoordinator");
-
-	for (UrlDownloader* urlDownloader : m_activeDownloads)
-	{
-		delete urlDownloader;
-	}
-	m_activeDownloads.clear();
-
-	debug("UrlCoordinator destroyed");
-}
-
-inline void UrlCoordinator::Run()
-{
-	debug("Entering UrlCoordinator-loop");
-
-	while (!DownloadQueue::IsLoaded())
-	{
-		Util::Sleep(20);
 	}
 
-	time_t lastReset = 0;
-	while (!IsStopped())
+	EAddStatus AddExternalFile(
+		const char* nzbName,
+		const char* category,
+		bool autoCategory,
+		int priority,
+		const char* dupeKey,
+		int dupeScore,
+		EDupeMode dupeMode,
+		NzbParameterList* parameters,
+		bool addTop,
+		bool addPaused,
+		NzbInfo* urlInfo,
+		const char* fileName,
+		const char* buffer,
+		int bufSize,
+		int* nzbId
+	)
 	{
-		bool downloadStarted = false;
+		bool nzb = false;
+		BString<1024> tempFileName;
 
+		// the names are picked and taken under the lock: two appends at once picked the
+		// same temporary or queue file name, one overwrote the other and returned -1 (F14)
+		std::unique_lock<std::mutex> guard{m_scanMutex};
+
+		if (fileName)
 		{
-			NzbInfo* nzbInfo = nullptr;
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			if ((int)m_activeDownloads.size() < g_Options->GetUrlConnections())
-			{
-				nzbInfo = GetNextUrl(downloadQueue);
-				if (nzbInfo && (!g_WorkState->GetPauseDownload() || g_Options->GetUrlForce()))
-				{
-					StartUrlDownload(nzbInfo);
-					downloadStarted = true;
-				}
-			}
-			m_hasMoreJobs = !m_activeDownloads.empty() || nzbInfo != nullptr;
-		}
-
-		if (lastReset != Util::CurrentTime())
-		{
-			ResetHangingDownloads();
-			lastReset = Util::CurrentTime();
-		}
-
-		if (!m_hasMoreJobs && !IsStopped())
-		{
-			std::unique_lock<std::mutex> lk(m_waitMutex);
-			m_waitCond.wait(lk, [&] { return m_hasMoreJobs || IsStopped(); });
+			tempFileName = fileName;
 		}
 		else
 		{
-			Util::Sleep(downloadStarted ? 0 : 100);
-		}
-	}
-
-	WaitJobs();
-
-	debug("Exiting UrlCoordinator-loop");
-}
-
-inline void UrlCoordinator::WaitJobs()
-{
-	debug("UrlCoordinator: waiting for Downloads to complete");
-
-	while (true)
-	{
-		{
-			GuardedDownloadQueue guard = DownloadQueue::Guard();
-			if (m_activeDownloads.empty())
+			int num = ++m_idGen;
+			while (tempFileName.Empty() || FileSystem::FileExists(tempFileName))
 			{
-				break;
+				tempFileName.Format("%s%cnzb-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, num);
+				num++;
 			}
+
+			if (!FileSystem::SaveBufferIntoFile(tempFileName, buffer, bufSize))
+			{
+				error("Could not create file %s", *tempFileName);
+				return asFailed;
+			}
+
+			nzb = nzbget_rs_dsp_is_nzb_xml_prefix((const uint8_t*)buffer, (size_t)std::max(0, bufSize)) != 0;
 		}
-		Util::Sleep(100);
-		ResetHangingDownloads();
+
+		// move file into NzbDir, make sure the file name is unique
+		// a name that is a full path (a client passing its file) drops the folder; any
+		// other "/" belongs to the name (indexers post "[hash] [16/22] - Title"), and it
+		// lost everything up to it ("22] - Title"). MakeValidFilename makes it safe
+		bool absolutePath = nzbget_rs_scanner_is_absolute_nzb_name(nzbName) != 0;
+		CString validNzbName = FileSystem::MakeValidFilename(absolutePath ? FileSystem::BaseFileName(nzbName) : nzbName);
+		{
+			NzbgetRsBuf normBuf = nzbget_rs_dsp_normalize_external_nzb_name(nzbName, validNzbName, nzb ? 1 : 0);
+			std::string normStr(normBuf.data ? normBuf.data : "", normBuf.len);
+			nzbget_rs_free(normBuf);
+			validNzbName = normStr.c_str();
+		}
+
+		BString<1024> scanFileName("%s%c%s", g_Options->GetNzbDir(), PATH_SEPARATOR, *validNzbName);
+
+		const char* validCStr = validNzbName ? *validNzbName : "";
+		size_t validLen = strlen(validCStr);
+		ptrdiff_t dotOff = nzbget_rs_file_extension(validCStr, validLen);
+		bool hasExt = dotOff >= 0;
+		std::string basePart(validCStr, hasExt ? (size_t)dotOff : validLen);
+		std::string extPart = hasExt ? std::string(validCStr + dotOff + 1) : std::string();
+
+		int num = 2;
+		while (FileSystem::FileExists(scanFileName))
+		{
+			if (hasExt)
+			{
+				scanFileName.Format("%s%c%s_%i.%s", g_Options->GetNzbDir(), PATH_SEPARATOR,
+					basePart.c_str(), num, extPart.c_str());
+			}
+			else
+			{
+				scanFileName.Format("%s%c%s_%i", g_Options->GetNzbDir(), PATH_SEPARATOR,
+					basePart.c_str(), num);
+			}
+			num++;
+		}
+
+		EAddStatus addStatus;
+
+		{
+			if (!FileSystem::MoveFile(tempFileName, scanFileName))
+			{
+				error("Could not move file %s to %s: %s", *tempFileName, *scanFileName,
+					*FileSystem::GetLastErrorMessage());
+				FileSystem::DeleteFile(tempFileName);
+				return asFailed;
+			}
+
+			CString useCategory = ResolveCategory(category, nzbName);
+
+			addStatus = asSkipped;
+			m_queueList.emplace_back(
+				scanFileName,
+				nzbName,
+				useCategory,
+				autoCategory,
+				priority,
+				dupeKey,
+				dupeScore,
+				dupeMode,
+				parameters,
+				addTop,
+				addPaused,
+				urlInfo,
+				&addStatus,
+				nzbId
+			);
+			// requested under the lock: a periodic scan that took the lock first skipped
+			// the file (too young) and cleared its entry, and the file was added later
+			// without the name, key and score it was sent with (F14)
+			m_requestedNzbDirScan = true;
+		}
+		guard.unlock();
+
+		ScanNzbDir(true);
+
+		return addStatus;
+	}
+};
+
+using ScanScriptController = Scanner::ScanScriptController;
+
+class UrlDownloader : public WebDownloader
+{
+public:
+	void SetNzbInfo(NzbInfo* nzbInfo) { m_nzbInfo = nzbInfo; }
+	NzbInfo* GetNzbInfo() { return m_nzbInfo; }
+	const char* GetCategory() const { return m_category; }
+
+protected:
+	void ProcessHeader(const char* line) override
+	{
+		WebDownloader::ProcessHeader(line);
+
+		size_t start, length;
+		NzbgetRsBuf name{}, value{};
+		switch (nzbget_rs_url_dnzb_header(line, &start, &length, &name, &value))
+		{
+			case 1:
+				m_category = length > 0 ? CString(line + start, (int)length) : CString("");
+				debug("Category: %s", *m_category);
+				break;
+
+			case 2:
+				debug("X-DNZB: %s", name.data);
+				debug("Value: %s", value.data);
+				m_nzbInfo->GetParameters()->SetParameter(name.data, value.data);
+				nzbget_rs_free(name);
+				nzbget_rs_free(value);
+				break;
+		}
 	}
 
-	debug("UrlCoordinator: Downloads are completed");
-}
+private:
+	NzbInfo* m_nzbInfo;
+	CString m_category;
+};
 
-inline void UrlCoordinator::Stop()
+class UrlCoordinator : public Thread, public Observer, public Debuggable
 {
-	Thread::Stop();
-
-	debug("Stopping UrlDownloads");
+public:
+	UrlCoordinator()
 	{
-		GuardedDownloadQueue guard = DownloadQueue::Guard();
+		m_downloadQueueObserver.m_owner = this;
+		DownloadQueue::Guard()->Attach(&m_downloadQueueObserver);
+	}
+
+	~UrlCoordinator() override
+	{
+		debug("Destroying UrlCoordinator");
+
 		for (UrlDownloader* urlDownloader : m_activeDownloads)
 		{
-			urlDownloader->Stop();
+			delete urlDownloader;
 		}
+		m_activeDownloads.clear();
+
+		debug("UrlCoordinator destroyed");
 	}
-	debug("UrlDownloads are notified");
 
-	std::lock_guard<std::mutex> guard(m_waitMutex);
-	m_waitCond.notify_all();
-}
-
-inline void UrlCoordinator::DownloadQueueUpdate(Subject*, void* aspect)
-{
-	debug("Notification from download queue received");
-
-	DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
-	if (queueAspect->action == DownloadQueue::eaUrlAdded ||
-		queueAspect->action == DownloadQueue::eaUrlReturned)
+	void Run() override
 	{
+		debug("Entering UrlCoordinator-loop");
+
+		while (!DownloadQueue::IsLoaded())
+		{
+			Util::Sleep(20);
+		}
+
+		time_t lastReset = 0;
+		while (!IsStopped())
+		{
+			bool downloadStarted = false;
+
+			{
+				NzbInfo* nzbInfo = nullptr;
+				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+				if ((int)m_activeDownloads.size() < g_Options->GetUrlConnections())
+				{
+					nzbInfo = GetNextUrl(downloadQueue);
+					if (nzbInfo && (!g_WorkState->GetPauseDownload() || g_Options->GetUrlForce()))
+					{
+						StartUrlDownload(nzbInfo);
+						downloadStarted = true;
+					}
+				}
+				m_hasMoreJobs = !m_activeDownloads.empty() || nzbInfo != nullptr;
+			}
+
+			if (lastReset != Util::CurrentTime())
+			{
+				ResetHangingDownloads();
+				lastReset = Util::CurrentTime();
+			}
+
+			if (!m_hasMoreJobs && !IsStopped())
+			{
+				std::unique_lock<std::mutex> lk(m_waitMutex);
+				m_waitCond.wait(lk, [&] { return m_hasMoreJobs || IsStopped(); });
+			}
+			else
+			{
+				Util::Sleep(downloadStarted ? 0 : 100);
+			}
+		}
+
+		WaitJobs();
+
+		debug("Exiting UrlCoordinator-loop");
+	}
+
+	void Stop() override
+	{
+		Thread::Stop();
+
+		debug("Stopping UrlDownloads");
+		{
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			for (UrlDownloader* urlDownloader : m_activeDownloads)
+			{
+				urlDownloader->Stop();
+			}
+		}
+		debug("UrlDownloads are notified");
+
 		std::lock_guard<std::mutex> guard(m_waitMutex);
-		m_hasMoreJobs = true;
 		m_waitCond.notify_all();
 	}
-}
 
-inline void UrlCoordinator::ResetHangingDownloads()
-{
-	if (g_Options->GetUrlTimeout() == 0)
+	void Update(Subject* caller, void*) override
 	{
-		return;
-	}
+		debug("Notification from UrlDownloader received");
 
-	GuardedDownloadQueue guard = DownloadQueue::Guard();
-	time_t tm = Util::CurrentTime();
-
-	for (UrlDownloader* urlDownloader : m_activeDownloads)
-	{
-		if (nzbget_rs_url_coord_is_hanging_download(
-			static_cast<int64>(tm),
-			static_cast<int64>(urlDownloader->GetLastUpdateTime()),
-			g_Options->GetUrlTimeout(),
-			static_cast<int>(urlDownloader->GetStatus()),
-			static_cast<int>(UrlDownloader::adRunning)))
+		UrlDownloader* urlDownloader = (UrlDownloader*)caller;
+		if (urlDownloader->GetStatus() == WebDownloader::adFinished ||
+			urlDownloader->GetStatus() == WebDownloader::adFailed ||
+			urlDownloader->GetStatus() == WebDownloader::adRetry)
 		{
-			error("Cancelling hanging url download %s", urlDownloader->GetInfoName());
-			urlDownloader->Stop();
+			UrlCompleted(urlDownloader);
 		}
 	}
-}
 
-inline void UrlCoordinator::LogDebugInfo()
-{
-	info("   ---------- UrlCoordinator");
+	bool HasMoreJobs() const { return m_hasMoreJobs; }
 
-	GuardedDownloadQueue guard = DownloadQueue::Guard();
-	info("    Active Downloads: %i", (int)m_activeDownloads.size());
-	for (UrlDownloader* urlDownloader : m_activeDownloads)
+	bool DeleteQueueEntry(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, bool avoidHistory)
 	{
-		urlDownloader->LogDebugInfo();
-	}
-}
+		if (nzbInfo->GetActiveDownloads() > 0)
+		{
+			info("Deleting active URL %s", nzbInfo->GetName());
+			nzbInfo->SetDeleting(true);
+			nzbInfo->SetAvoidHistory(avoidHistory);
 
-inline NzbInfo* UrlCoordinator::GetNextUrl(DownloadQueue* downloadQueue)
-{
-	size_t n = downloadQueue->GetQueue()->size();
-	if (n == 0)
-	{
-		return nullptr;
-	}
-	std::vector<NzbInfo*> items;
-	std::vector<int> kinds;
-	std::vector<int> urlStatuses;
-	std::vector<int> deleteStatuses;
-	std::vector<int> priorities;
-	items.reserve(n);
-	kinds.reserve(n);
-	urlStatuses.reserve(n);
-	deleteStatuses.reserve(n);
-	priorities.reserve(n);
-	for (NzbInfo* nzbInfo1 : downloadQueue->GetQueue())
-	{
-		items.push_back(nzbInfo1);
-		kinds.push_back(static_cast<int>(nzbInfo1->GetKind()));
-		urlStatuses.push_back(static_cast<int>(nzbInfo1->GetUrlStatus()));
-		deleteStatuses.push_back(static_cast<int>(nzbInfo1->GetDeleteStatus()));
-		priorities.push_back(nzbInfo1->GetPriority());
-	}
-	int idx = nzbget_rs_url_coord_select_next_url(
-		kinds.data(),
-		urlStatuses.data(),
-		deleteStatuses.data(),
-		priorities.data(),
-		n,
-		static_cast<int>(NzbInfo::nkUrl),
-		static_cast<int>(NzbInfo::lsNone),
-		static_cast<int>(NzbInfo::dsNone));
-	return idx >= 0 && static_cast<size_t>(idx) < items.size() ? items[idx] : nullptr;
-}
+			for (UrlDownloader* urlDownloader : m_activeDownloads)
+			{
+				if (urlDownloader->GetNzbInfo() == nzbInfo)
+				{
+					urlDownloader->Stop();
+					return true;
+				}
+			}
 
-inline void UrlCoordinator::StartUrlDownload(NzbInfo* nzbInfo)
-{
-	debug("Starting new UrlDownloader");
+			return false;
+		}
 
-	UrlDownloader* urlDownloader = new UrlDownloader();
-	urlDownloader->SetAutoDestroy(true);
-	urlDownloader->Attach(this);
-	urlDownloader->SetNzbInfo(nzbInfo);
-	urlDownloader->SetUrl(nzbInfo->GetUrl());
-	urlDownloader->SetForce(g_Options->GetUrlForce());
-	urlDownloader->SetInfoName(nzbInfo->MakeNiceUrlName(nzbInfo->GetUrl(), nzbInfo->GetFilename()));
-	NzbgetRsBuf outPathBuf = nzbget_rs_url_coord_format_temp_path(
-		g_Options->GetTempDir(), PATH_SEPARATOR, nzbInfo->GetId());
-	urlDownloader->SetOutputFilename(outPathBuf.data ? outPathBuf.data : "");
-	nzbget_rs_free(outPathBuf);
+		info("Deleting URL %s", nzbInfo->GetName());
 
-	nzbInfo->SetActiveDownloads(1);
-	nzbInfo->SetUrlStatus(NzbInfo::lsRunning);
+		if (nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
+		{
+			nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
+		}
+		nzbInfo->SetUrlStatus(NzbInfo::lsNone);
 
-	m_activeDownloads.push_back(urlDownloader);
-	urlDownloader->Start();
-}
+		DownloadQueue::Aspect deletedAspect = {DownloadQueue::eaUrlDeleted, downloadQueue, nzbInfo, nullptr};
+		downloadQueue->Notify(&deletedAspect);
 
-inline void UrlCoordinator::Update(Subject* caller, void*)
-{
-	debug("Notification from UrlDownloader received");
-
-	UrlDownloader* urlDownloader = (UrlDownloader*)caller;
-	if (urlDownloader->GetStatus() == WebDownloader::adFinished ||
-		urlDownloader->GetStatus() == WebDownloader::adFailed ||
-		urlDownloader->GetStatus() == WebDownloader::adRetry)
-	{
-		UrlCompleted(urlDownloader);
-	}
-}
-
-inline void UrlCoordinator::UrlCompleted(UrlDownloader* urlDownloader)
-{
-	debug("URL downloaded");
-
-	NzbInfo* nzbInfo = urlDownloader->GetNzbInfo();
-
-	const char* origname;
-	if (urlDownloader->GetOriginalFilename())
-	{
-		origname = urlDownloader->GetOriginalFilename();
-	}
-	else
-	{
-		origname = FileSystem::BaseFileName(nzbInfo->GetUrl());
+		return true;
 	}
 
-	CString filename = FileSystem::MakeValidFilename(origname);
-
-	debug("Filename: [%s]", *filename);
-
-	bool retry;
-
+	void AddUrlToQueue(std::unique_ptr<NzbInfo> nzbInfo, bool addFirst)
 	{
+		debug("Adding URL to queue");
+
+		NzbInfo* addedNzb = nzbInfo.get();
+
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 
-		m_activeDownloads.erase(std::find(m_activeDownloads.begin(), m_activeDownloads.end(), urlDownloader));
+		DownloadQueue::Aspect foundAspect = {DownloadQueue::eaUrlFound, downloadQueue, addedNzb, nullptr};
+		downloadQueue->Notify(&foundAspect);
 
-		int urlStatus = nzbInfo->GetUrlStatus();
-		int deleteStatus = nzbInfo->GetDeleteStatus();
-		int again = 0;
-		nzbget_rs_url_completed(urlDownloader->GetStatus(), nzbInfo->GetDeleting(), &urlStatus, &deleteStatus, &again);
-		retry = again != 0;
-		if (nzbInfo->GetDeleting())
+		if (addedNzb->GetDeleteStatus() != NzbInfo::dsManual)
 		{
-			nzbInfo->SetDeleteStatus((NzbInfo::EDeleteStatus)deleteStatus);
-			nzbInfo->SetDeleting(false);
+			downloadQueue->GetQueue()->Add(std::move(nzbInfo), addFirst);
+
+			DownloadQueue::Aspect addedAspect = {DownloadQueue::eaUrlAdded, downloadQueue, addedNzb, nullptr};
+			downloadQueue->Notify(&addedAspect);
 		}
-		nzbInfo->SetUrlStatus((NzbInfo::EUrlStatus)urlStatus);
 
-		if (!retry)
+		downloadQueue->Save();
+	}
+
+protected:
+	void LogDebugInfo() override
+	{
+		info("   ---------- UrlCoordinator");
+
+		GuardedDownloadQueue guard = DownloadQueue::Guard();
+		info("    Active Downloads: %i", (int)m_activeDownloads.size());
+		for (UrlDownloader* urlDownloader : m_activeDownloads)
 		{
-			DownloadQueue::Aspect aspect = {DownloadQueue::eaUrlCompleted, downloadQueue, nzbInfo, nullptr};
-			downloadQueue->Notify(&aspect);
+			urlDownloader->LogDebugInfo();
 		}
 	}
 
-	if (retry)
+private:
+	using ActiveDownloads = std::list<UrlDownloader*>;
+
+	class DownloadQueueObserver final : public Observer
 	{
-		nzbInfo->SetActiveDownloads(0);
-		return;
+	public:
+		UrlCoordinator* m_owner;
+		void Update(Subject* caller, void* aspect) override { m_owner->DownloadQueueUpdate(caller, aspect); }
+	};
+
+	ActiveDownloads m_activeDownloads;
+	std::atomic<bool> m_hasMoreJobs{true};
+	std::mutex m_waitMutex;
+	std::condition_variable m_waitCond;
+	DownloadQueueObserver m_downloadQueueObserver;
+
+	void WaitJobs()
+	{
+		debug("UrlCoordinator: waiting for Downloads to complete");
+
+		while (true)
+		{
+			{
+				GuardedDownloadQueue guard = DownloadQueue::Guard();
+				if (m_activeDownloads.empty())
+				{
+					break;
+				}
+			}
+			Util::Sleep(100);
+			ResetHangingDownloads();
+		}
+
+		debug("UrlCoordinator: Downloads are completed");
 	}
 
-	if (nzbInfo->GetUrlStatus() == NzbInfo::lsFinished)
+	void DownloadQueueUpdate(Subject*, void* aspect)
 	{
-		const char* name = !Util::EmptyStr(nzbInfo->GetFilename())
-			? nzbInfo->GetFilename() : *filename;
-		const char* category = !Util::EmptyStr(nzbInfo->GetCategory())
-			? nzbInfo->GetCategory() : urlDownloader->GetCategory();
+		debug("Notification from download queue received");
 
-		Scanner::EAddStatus addStatus;
-		if (nzbget_rs_unpack_can_extract_with_zipfast(name) != 0)
+		DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
+		if (queueAspect->action == DownloadQueue::eaUrlAdded ||
+			queueAspect->action == DownloadQueue::eaUrlReturned)
 		{
-			addStatus = g_Scanner->AddArchive(
-				name,
-				category,
-				nzbInfo->GetAutoCategory(),
-				nzbInfo->GetPriority(),
-				nzbInfo->GetDupeKey(),
-				nzbInfo->GetDupeScore(),
-				nzbInfo->GetDupeMode(),
-				nzbInfo->GetParameters(),
-				false,
-				nzbInfo->GetAddUrlPaused(),
-				nzbInfo,
-				urlDownloader->GetOutputFilename()
-			);
+			std::lock_guard<std::mutex> guard(m_waitMutex);
+			m_hasMoreJobs = true;
+			m_waitCond.notify_all();
 		}
-		else 
-		{
-			addStatus = g_Scanner->AddExternalFile(
-				name,
-				category,
-				nzbInfo->GetAutoCategory(),
-				nzbInfo->GetPriority(),
-				nzbInfo->GetDupeKey(),
-				nzbInfo->GetDupeScore(),
-				nzbInfo->GetDupeMode(),
-				nzbInfo->GetParameters(),
-				false,
-				nzbInfo->GetAddUrlPaused(),
-				nzbInfo,
-				urlDownloader->GetOutputFilename(),
-				nullptr,
-				0,
-				nullptr
-			);
-		}
+	}
 
-		if (addStatus == Scanner::asSuccess)
+	void ResetHangingDownloads()
+	{
+		if (g_Options->GetUrlTimeout() == 0)
 		{
 			return;
 		}
 
-		nzbInfo->SetUrlStatus(addStatus == Scanner::asFailed
-			? NzbInfo::lsScanFailed : NzbInfo::lsScanSkipped);
-	}
-
-	g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeUrlCompleted);
-
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-		nzbInfo->SetActiveDownloads(0);
-
-		DownloadQueue::Aspect aspect = {DownloadQueue::eaUrlFailed, downloadQueue, nzbInfo, nullptr};
-		downloadQueue->Notify(&aspect);
-	}
-}
-
-inline bool UrlCoordinator::DeleteQueueEntry(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, bool avoidHistory)
-{
-	if (nzbInfo->GetActiveDownloads() > 0)
-	{
-		info("Deleting active URL %s", nzbInfo->GetName());
-		nzbInfo->SetDeleting(true);
-		nzbInfo->SetAvoidHistory(avoidHistory);
+		GuardedDownloadQueue guard = DownloadQueue::Guard();
+		time_t tm = Util::CurrentTime();
 
 		for (UrlDownloader* urlDownloader : m_activeDownloads)
 		{
-			if (urlDownloader->GetNzbInfo() == nzbInfo)
+			if (nzbget_rs_url_coord_is_hanging_download(
+				static_cast<int64>(tm),
+				static_cast<int64>(urlDownloader->GetLastUpdateTime()),
+				g_Options->GetUrlTimeout(),
+				static_cast<int>(urlDownloader->GetStatus()),
+				static_cast<int>(UrlDownloader::adRunning)))
 			{
+				error("Cancelling hanging url download %s", urlDownloader->GetInfoName());
 				urlDownloader->Stop();
-				return true;
+			}
+		}
+	}
+
+	NzbInfo* GetNextUrl(DownloadQueue* downloadQueue)
+	{
+		size_t n = downloadQueue->GetQueue()->size();
+		if (n == 0)
+		{
+			return nullptr;
+		}
+		std::vector<NzbInfo*> items;
+		std::vector<int> kinds;
+		std::vector<int> urlStatuses;
+		std::vector<int> deleteStatuses;
+		std::vector<int> priorities;
+		items.reserve(n);
+		kinds.reserve(n);
+		urlStatuses.reserve(n);
+		deleteStatuses.reserve(n);
+		priorities.reserve(n);
+		for (NzbInfo* nzbInfo1 : downloadQueue->GetQueue())
+		{
+			items.push_back(nzbInfo1);
+			kinds.push_back(static_cast<int>(nzbInfo1->GetKind()));
+			urlStatuses.push_back(static_cast<int>(nzbInfo1->GetUrlStatus()));
+			deleteStatuses.push_back(static_cast<int>(nzbInfo1->GetDeleteStatus()));
+			priorities.push_back(nzbInfo1->GetPriority());
+		}
+		int idx = nzbget_rs_url_coord_select_next_url(
+			kinds.data(),
+			urlStatuses.data(),
+			deleteStatuses.data(),
+			priorities.data(),
+			n,
+			static_cast<int>(NzbInfo::nkUrl),
+			static_cast<int>(NzbInfo::lsNone),
+			static_cast<int>(NzbInfo::dsNone));
+		return idx >= 0 && static_cast<size_t>(idx) < items.size() ? items[idx] : nullptr;
+	}
+
+	void StartUrlDownload(NzbInfo* nzbInfo)
+	{
+		debug("Starting new UrlDownloader");
+
+		UrlDownloader* urlDownloader = new UrlDownloader();
+		urlDownloader->SetAutoDestroy(true);
+		urlDownloader->Attach(this);
+		urlDownloader->SetNzbInfo(nzbInfo);
+		urlDownloader->SetUrl(nzbInfo->GetUrl());
+		urlDownloader->SetForce(g_Options->GetUrlForce());
+		urlDownloader->SetInfoName(nzbInfo->MakeNiceUrlName(nzbInfo->GetUrl(), nzbInfo->GetFilename()));
+		NzbgetRsBuf outPathBuf = nzbget_rs_url_coord_format_temp_path(
+			g_Options->GetTempDir(), PATH_SEPARATOR, nzbInfo->GetId());
+		urlDownloader->SetOutputFilename(outPathBuf.data ? outPathBuf.data : "");
+		nzbget_rs_free(outPathBuf);
+
+		nzbInfo->SetActiveDownloads(1);
+		nzbInfo->SetUrlStatus(NzbInfo::lsRunning);
+
+		m_activeDownloads.push_back(urlDownloader);
+		urlDownloader->Start();
+	}
+
+	void UrlCompleted(UrlDownloader* urlDownloader)
+	{
+		debug("URL downloaded");
+
+		NzbInfo* nzbInfo = urlDownloader->GetNzbInfo();
+
+		const char* origname;
+		if (urlDownloader->GetOriginalFilename())
+		{
+			origname = urlDownloader->GetOriginalFilename();
+		}
+		else
+		{
+			origname = FileSystem::BaseFileName(nzbInfo->GetUrl());
+		}
+
+		CString filename = FileSystem::MakeValidFilename(origname);
+
+		debug("Filename: [%s]", *filename);
+
+		bool retry;
+
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+			m_activeDownloads.erase(std::find(m_activeDownloads.begin(), m_activeDownloads.end(), urlDownloader));
+
+			int urlStatus = nzbInfo->GetUrlStatus();
+			int deleteStatus = nzbInfo->GetDeleteStatus();
+			int again = 0;
+			nzbget_rs_url_completed(urlDownloader->GetStatus(), nzbInfo->GetDeleting(), &urlStatus, &deleteStatus, &again);
+			retry = again != 0;
+			if (nzbInfo->GetDeleting())
+			{
+				nzbInfo->SetDeleteStatus((NzbInfo::EDeleteStatus)deleteStatus);
+				nzbInfo->SetDeleting(false);
+			}
+			nzbInfo->SetUrlStatus((NzbInfo::EUrlStatus)urlStatus);
+
+			if (!retry)
+			{
+				DownloadQueue::Aspect aspect = {DownloadQueue::eaUrlCompleted, downloadQueue, nzbInfo, nullptr};
+				downloadQueue->Notify(&aspect);
 			}
 		}
 
-		return false;
+		if (retry)
+		{
+			nzbInfo->SetActiveDownloads(0);
+			return;
+		}
+
+		if (nzbInfo->GetUrlStatus() == NzbInfo::lsFinished)
+		{
+			const char* name = !Util::EmptyStr(nzbInfo->GetFilename())
+				? nzbInfo->GetFilename() : *filename;
+			const char* category = !Util::EmptyStr(nzbInfo->GetCategory())
+				? nzbInfo->GetCategory() : urlDownloader->GetCategory();
+
+			Scanner::EAddStatus addStatus;
+			if (nzbget_rs_unpack_can_extract_with_zipfast(name) != 0)
+			{
+				addStatus = g_Scanner->AddArchive(
+					name,
+					category,
+					nzbInfo->GetAutoCategory(),
+					nzbInfo->GetPriority(),
+					nzbInfo->GetDupeKey(),
+					nzbInfo->GetDupeScore(),
+					nzbInfo->GetDupeMode(),
+					nzbInfo->GetParameters(),
+					false,
+					nzbInfo->GetAddUrlPaused(),
+					nzbInfo,
+					urlDownloader->GetOutputFilename()
+				);
+			}
+			else 
+			{
+				addStatus = g_Scanner->AddExternalFile(
+					name,
+					category,
+					nzbInfo->GetAutoCategory(),
+					nzbInfo->GetPriority(),
+					nzbInfo->GetDupeKey(),
+					nzbInfo->GetDupeScore(),
+					nzbInfo->GetDupeMode(),
+					nzbInfo->GetParameters(),
+					false,
+					nzbInfo->GetAddUrlPaused(),
+					nzbInfo,
+					urlDownloader->GetOutputFilename(),
+					nullptr,
+					0,
+					nullptr
+				);
+			}
+
+			if (addStatus == Scanner::asSuccess)
+			{
+				return;
+			}
+
+			nzbInfo->SetUrlStatus(addStatus == Scanner::asFailed
+				? NzbInfo::lsScanFailed : NzbInfo::lsScanSkipped);
+		}
+
+		g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeUrlCompleted);
+
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+			nzbInfo->SetActiveDownloads(0);
+
+			DownloadQueue::Aspect aspect = {DownloadQueue::eaUrlFailed, downloadQueue, nzbInfo, nullptr};
+			downloadQueue->Notify(&aspect);
+		}
 	}
+};
 
-	info("Deleting URL %s", nzbInfo->GetName());
-
-	if (nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
-	{
-		nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
-	}
-	nzbInfo->SetUrlStatus(NzbInfo::lsNone);
-
-	DownloadQueue::Aspect deletedAspect = {DownloadQueue::eaUrlDeleted, downloadQueue, nzbInfo, nullptr};
-	downloadQueue->Notify(&deletedAspect);
-
-	return true;
-}
-
-inline void UrlCoordinator::AddUrlToQueue(std::unique_ptr<NzbInfo> nzbInfo, bool addFirst)
-{
-	debug("Adding URL to queue");
-
-	NzbInfo* addedNzb = nzbInfo.get();
-
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	DownloadQueue::Aspect foundAspect = {DownloadQueue::eaUrlFound, downloadQueue, addedNzb, nullptr};
-	downloadQueue->Notify(&foundAspect);
-
-	if (addedNzb->GetDeleteStatus() != NzbInfo::dsManual)
-	{
-		downloadQueue->GetQueue()->Add(std::move(nzbInfo), addFirst);
-
-		DownloadQueue::Aspect addedAspect = {DownloadQueue::eaUrlAdded, downloadQueue, addedNzb, nullptr};
-		downloadQueue->Notify(&addedAspect);
-	}
-
-	downloadQueue->Save();
-}
+extern UrlCoordinator* g_UrlCoordinator;
 
 
 #endif /* SCANNER_H */
@@ -43506,204 +43185,6 @@ inline void QueueCoordinator::DiscardDownloadedArticles(NzbInfo* nzbInfo, FileIn
 #ifndef WEBSERVER_H
 #define WEBSERVER_H
 
-class XmlCommand;
-
-class XmlRpcProcessor
-{
-public:
-	enum ERpcProtocol
-	{
-		rpUndefined,
-		rpXmlRpc,
-		rpJsonRpc,
-		rpJsonPRpc
-	};
-
-	enum EHttpMethod
-	{
-		hmPost,
-		hmGet
-	};
-
-	enum EUserAccess
-	{
-		uaControl,
-		uaRestricted,
-		uaAdd
-	};
-
-	void Execute();
-	void SetHttpMethod(EHttpMethod httpMethod) { m_httpMethod = httpMethod; }
-	void SetUserAccess(EUserAccess userAccess) { m_userAccess = userAccess; }
-	// whether JSON-P requests are answered (option JsonP); off unless set
-	void SetJsonP(bool jsonP) { m_jsonP = jsonP; }
-	void SetUrl(const char* url)
-	{
-		NzbgetRsBuf urlBuf = nzbget_rs_xmlrpc_normalize_url(url);
-		m_url.Set(urlBuf.data ? urlBuf.data : "", (int)urlBuf.len);
-		nzbget_rs_free(urlBuf);
-	}
-	void SetRequest(char* request) { m_request = request; }
-	const char* GetResponse() { return m_response; }
-	const char* GetContentType() { return m_contentType; }
-	static bool IsRpcRequest(const char* url) { return nzbget_rs_rco_rpc_is_rpc_request(url) != 0; }
-	bool IsSafeMethod() { return m_safeMethod; }
-
-private:
-	char* m_request = nullptr;
-	const char* m_contentType = nullptr;
-	ERpcProtocol m_protocol;
-	EHttpMethod m_httpMethod;
-	EUserAccess m_userAccess;
-	CString m_url;
-	StringBuilder m_response;
-	bool m_safeMethod = false;
-	bool m_jsonP = false;
-
-	// what Dispatch does with a command: run it, or answer with an error, inside the
-	// JSON-P callback or plain
-	enum EDispatch
-	{
-		dpExecute,
-		dpRefuseInCallback,
-		dpRefuse
-	};
-
-	XmlCommand CreateCommand(const char* methodName);
-	void MutliCall();
-	void BuildResponse(const char* response, const char* callbackFunc, bool fault, const char* requestId)
-	{
-		debug("Response=%s", response);
-
-		bool xmlRpc = m_protocol == rpXmlRpc;
-
-		NzbgetRsBuf head, tail;
-		nzbget_rs_rpc_envelope(m_protocol, fault, callbackFunc, requestId, &head, &tail);
-		m_response.Append(head.data);
-		m_response.Append(response);
-		m_response.Append(tail.data);
-		nzbget_rs_free(head);
-		nzbget_rs_free(tail);
-
-		m_contentType = nzbget_rs_dqh_xmlrpc_response_content_type(xmlRpc ? 1 : 0);
-	}
-	void BuildErrorResponse(int errCode, const char* errText);
-	void BuildJsonPRefusal(XmlCommand* command, int errCode, const char* errText, const char* requestId);
-};
-
-class XmlCommand
-{
-public:
-	explicit XmlCommand(int cmdId) : m_cmdId(cmdId)
-	{
-		m_response.Reserve(1024 * 10 - 1);
-	}
-	XmlCommand(int errCode, const char* errText) : m_cmdId(0), m_errCode(errCode), m_errText(errText)
-	{
-		m_response.Reserve(1024 * 10 - 1);
-	}
-	void Execute();
-	void PrepareParams();
-	void SetRequest(char* request) { m_request = request; m_requestPtr = m_request; }
-	void SetProtocol(XmlRpcProcessor::ERpcProtocol protocol) { m_protocol = protocol; }
-	void SetHttpMethod(XmlRpcProcessor::EHttpMethod httpMethod) { m_httpMethod = httpMethod; }
-	void SetUserAccess(XmlRpcProcessor::EUserAccess userAccess) { m_userAccess = userAccess; }
-	const char* GetResponse() { return m_response; }
-	const char* GetCallbackFunc() { return m_callbackFunc; }
-	bool GetFault() { return m_fault; }
-	bool IsSafeMethod() { return nzbget_rs_xmlrpc_is_safe_command(m_cmdId) != 0; }
-	bool IsError() { return m_cmdId == 0; }
-
-	struct ServerParams
-	{
-		std::string host;
-		std::string username;
-		std::string password;
-		std::string cipher;
-		int port;
-		int timeout;
-		int certVerifLevel;
-		bool encryption;
-	};
-	void PrintTestServerError(const char* errMsg);
-
-private:
-	int m_cmdId = 0;
-	int m_errCode = 0;
-	const char* m_errText = nullptr;
-	char* m_request = nullptr;
-	char* m_requestPtr = nullptr;
-	char* m_callbackFunc = nullptr;
-	StringBuilder m_response;
-	bool m_fault = false;
-	XmlRpcProcessor::ERpcProtocol m_protocol = XmlRpcProcessor::rpUndefined;
-	XmlRpcProcessor::EHttpMethod m_httpMethod = XmlRpcProcessor::hmPost;
-	XmlRpcProcessor::EUserAccess m_userAccess = XmlRpcProcessor::uaControl;
-	CString m_testServerErrText;
-
-	void BuildErrorResponse(int errCode, const char* errText, ...);
-	void BuildBoolResponse(bool ok);
-	void BuildIntResponse(int value);
-	void AppendResponse(const char* part);
-	void AppendCondResponse(const char* part, bool cond);
-	bool IsJson();
-	bool NextParamAsInt(int* value);
-	bool NextParamAsBool(bool* value);
-	bool NextParamAsStr(char** valueBuf);
-	CString EncodeStr(const char* str);
-	void DecodeStr(char* str);
-
-	void ExecutePauseUnpause(bool pause, int pauseAction);
-	void ExecuteScheduleResume();
-	void ExecuteShutdown();
-	void ExecuteReload();
-	void ExecuteVersion();
-	void ExecuteDumpDebug();
-	void ExecuteSetDownloadRate();
-	void ExecuteStatus();
-	void ExecuteSysInfo();
-	void ExecuteSystemHealth();
-	void ExecuteLog(int logSource);
-	void ExecuteListFiles();
-	void AppendNzbInfoFields(NzbInfo* nzbInfo);
-	void AppendPostInfoFields(PostInfo* postInfo, int logEntries, bool postQueue);
-	void ExecuteListGroups();
-	const char* DetectGroupStatus(NzbInfo* nzbInfo);
-	void ExecuteEditQueue();
-	void ExecuteDownload();
-	void ExecuteAppendFleet();
-	void ExecutePostQueue();
-	void ExecuteWriteLog();
-	void ExecuteClearLog();
-	void ExecuteScan();
-	void ExecuteHistory();
-	const char* DetectHistoryStatus(HistoryInfo* historyInfo);
-	void ExecuteUrlQueue();
-	void ExecuteConfig();
-	void ExecuteLoadConfig();
-	void ExecuteLoadExtensions();
-	void ExecuteDownloadExtension();
-	void ExecuteUpdateExtension();
-	void ExecuteDeleteExtension();
-	void ExecuteTestExtension();
-	void ExecuteSaveConfig();
-	void ExecuteConfigTemplates();
-	void ExecuteViewFeed(bool preview);
-	void ExecuteFetchFeed();
-	void ExecuteEditServer();
-	void ExecuteReadUrl();
-	void ExecuteCheckUpdates();
-	void ExecuteStartUpdate();
-	void ExecuteServerVolumes();
-	void ExecuteResetServerVolume();
-	void ExecuteTestServer();
-	void ExecuteTlsCipher(int operation);
-	void ExecuteTestServerSpeed();
-	void ExecuteTestDiskSpeed();
-	void ExecuteTestNetworkSpeed();
-	void ExecuteStartScript();
-};
-
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
  *
@@ -45894,370 +45375,263 @@ namespace
 extern void ExitProc();
 extern void Reload();
 
-//*****************************************************************
-// XmlRpcProcessor
-
-inline void XmlRpcProcessor::Execute()
+class XmlRpcProcessor
 {
-	m_protocol = (ERpcProtocol)nzbget_rs_rpc_protocol(m_url);
-	if (m_protocol == rpUndefined)
+public:
+	enum ERpcProtocol
 	{
-		error("internal error: invalid rpc-request: %s", *m_url);
-		return;
-	}
+		rpUndefined,
+		rpXmlRpc,
+		rpJsonRpc,
+		rpJsonPRpc
+	};
 
-	char* request = m_request;
-
-	BString<100> methodName;
-	// echoed as sent: cut to 99 characters it made the response invalid JSON (an id
-	// past 4 KB is left out rather than cut)
-	CString requestId;
-
-	const char* params = nullptr;
-	const char* requestIdPtr = nullptr;
-	int requestIdLen = 0;
-	nzbget_rs_rpc_route(m_url, m_request, m_httpMethod == hmGet, m_protocol, methodName, &params,
-		&requestIdPtr, &requestIdLen);
-	request = const_cast<char*>(params);
-	if (requestIdPtr)
+	enum EHttpMethod
 	{
-		requestId.Set(requestIdPtr, requestIdLen);
-	}
+		hmPost,
+		hmGet
+	};
 
-	debug("MethodName=%s", *methodName);
-
-	m_userAccess = (EUserAccess)nzbget_rs_rpc_access(m_protocol, m_userAccess);
-
-	if (nzbget_rs_dqh_xmlrpc_is_multicall_post(
-		methodName, m_protocol == rpXmlRpc ? 1 : 0, m_httpMethod == hmPost ? 1 : 0) != 0)
+	enum EUserAccess
 	{
-		MutliCall();
-	}
-	else
+		uaControl,
+		uaRestricted,
+		uaAdd
+	};
+
+	class XmlCommand
 	{
-		XmlCommand command = CreateCommand(methodName);
-		command.SetRequest(request);
-		command.SetProtocol(m_protocol);
-		command.SetHttpMethod(m_httpMethod);
-		command.SetUserAccess(m_userAccess);
-		command.PrepareParams();
-		m_safeMethod = command.IsSafeMethod();
-		int errCode = 0;
-		const char* errText = nullptr;
-		switch ((EDispatch)nzbget_rs_rpc_decide(
-			m_protocol, m_httpMethod, m_safeMethod, command.IsError(), m_jsonP, &errCode, &errText))
+	public:
+		explicit XmlCommand(int cmdId) : m_cmdId(cmdId)
 		{
-			case dpExecute:
-				command.Execute();
-				BuildResponse(command.GetResponse(), command.GetCallbackFunc(), command.GetFault(), requestId);
-				break;
-
-			case dpRefuseInCallback:
-				BuildJsonPRefusal(&command, errCode, errText, requestId);
-				break;
-
-			case dpRefuse:
-				BuildErrorResponse(errCode, errText);
-				break;
+			m_response.Reserve(1024 * 10 - 1);
 		}
-	}
-}
-
-inline void XmlRpcProcessor::MutliCall()
-{
-	bool error = false;
-	StringBuilder response;
-
-	response.Append("<array><data>");
-
-	char* requestPtr = m_request;
-	size_t structOff = 0;
-	while (nzbget_rs_rol_xmlrpc_multicall_find_struct_end(requestPtr, &structOff))
-	{
-		char* callEnd = requestPtr + structOff;
-		*callEnd = '\0';
-		debug("MutliCall, request=%s", requestPtr);
-		size_t nameOff = 0;
-		size_t paramsOff = 0;
-		if (!nzbget_rs_rol_xmlrpc_multicall_locate_parts(requestPtr, structOff, &nameOff, &paramsOff))
+		XmlCommand(int errCode, const char* errText) : m_cmdId(0), m_errCode(errCode), m_errText(errText)
 		{
-			error = true;
-			break;
+			m_response.Reserve(1024 * 10 - 1);
 		}
-		char* nameEnd = requestPtr + nameOff;
+		void SetRequest(char* request) { m_request = request; m_requestPtr = m_request; }
+		void SetProtocol(XmlRpcProcessor::ERpcProtocol protocol) { m_protocol = protocol; }
+		void SetHttpMethod(XmlRpcProcessor::EHttpMethod httpMethod) { m_httpMethod = httpMethod; }
+		void SetUserAccess(XmlRpcProcessor::EUserAccess userAccess) { m_userAccess = userAccess; }
+		const char* GetResponse() { return m_response; }
+		const char* GetCallbackFunc() { return m_callbackFunc; }
+		bool GetFault() { return m_fault; }
+		bool IsSafeMethod() { return nzbget_rs_xmlrpc_is_safe_command(m_cmdId) != 0; }
+		bool IsError() { return m_cmdId == 0; }
 
-		char methodName[100];
-		methodName[0] = '\0';
-		WebUtil::XmlParseTagValue(nameEnd, "string", methodName, sizeof(methodName), nullptr);
-		debug("MutliCall, MethodName=%s", methodName);
-
-		XmlCommand command = CreateCommand(methodName);
-		// a call of the multicall runs as the caller, with the caller's access: it ran
-		// with full control access (a restricted user read the passwords through it);
-		// its parameters are its "params" member, not the start of the call
-		command.SetProtocol(m_protocol);
-		command.SetHttpMethod(m_httpMethod);
-		command.SetUserAccess(m_userAccess);
-		command.SetRequest(requestPtr + paramsOff);
-		m_safeMethod |= command.IsSafeMethod();
-		command.Execute();
-
-		debug("MutliCall, Response=%s", command.GetResponse());
-
-		bool wrapArray = nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(command.GetResponse()) != 0;
-		if (wrapArray)
+		struct ServerParams
 		{
-			response.Append("<array><data>");
-		}
-		response.Append("<value>");
-		response.Append(command.GetResponse());
-		response.Append("</value>");
-		if (wrapArray)
+			std::string host;
+			std::string username;
+			std::string password;
+			std::string cipher;
+			int port;
+			int timeout;
+			int certVerifLevel;
+			bool encryption;
+		};
+
+		void PrepareParams()
 		{
-			response.Append("</data></array>");
+			if (nzbget_rs_dqh_xmlrpc_should_skip_to_json_post_params(
+				IsJson() ? 1 : 0, (int)m_httpMethod, (int)XmlRpcProcessor::hmPost) != 0)
+			{
+				// without "params" the request is emptied: no parameters follow
+				m_requestPtr = nzbget_rs_rpc_skip_to_params(m_requestPtr);
+			}
+
+			if (m_protocol == XmlRpcProcessor::rpJsonPRpc)
+			{
+				NextParamAsStr(&m_callbackFunc);
+			}
 		}
 
-		requestPtr = callEnd + 9; //strlen("</struct>")
-	}
+		void PrintTestServerError(const char* errMsg)
+		{
+			if (m_testServerErrText.Empty())
+			{
+				m_testServerErrText = EncodeStr(errMsg);
+			}
+		}
 
-	if (error)
-	{
-		BuildErrorResponse(4, "Parse error");
-	}
-	else
-	{
-		response.Append("</data></array>");
-		BuildResponse(response, "", false, nullptr);
-	}
-}
+		void Execute()
+		{
+			switch (m_cmdId)
+			{
+				case 1: ExecutePauseUnpause(true, 0); break;
+				case 2: ExecutePauseUnpause(false, 0); break;
+				case 3: ExecuteShutdown(); break;
+				case 4: ExecuteReload(); break;
+				case 5: ExecuteVersion(); break;
+				case 6: ExecuteDumpDebug(); break;
+				case 7: ExecuteSetDownloadRate(); break;
+				case 8: ExecuteStatus(); break;
+				case 9: ExecuteSysInfo(); break;
+				case 10: ExecuteSystemHealth(); break;
+				case 11: ExecuteLog(0); break;
+				case 12: ExecuteListFiles(); break;
+				case 13: ExecuteListGroups(); break;
+				case 14: ExecuteEditQueue(); break;
+				case 15: ExecuteDownload(); break;
+				case 16: ExecuteAppendFleet(); break;
+				case 17: ExecutePostQueue(); break;
+				case 18: ExecuteWriteLog(); break;
+				case 19: ExecuteClearLog(); break;
+				case 20: ExecuteLog(3); break;
+				case 21: ExecuteScan(); break;
+				case 22: ExecutePauseUnpause(true, 1); break;
+				case 23: ExecutePauseUnpause(false, 1); break;
+				case 24: ExecutePauseUnpause(true, 2); break;
+				case 25: ExecutePauseUnpause(false, 2); break;
+				case 26: ExecuteScheduleResume(); break;
+				case 27: ExecuteHistory(); break;
+				case 28: ExecuteUrlQueue(); break;
+				case 29: ExecuteConfig(); break;
+				case 30: ExecuteLoadConfig(); break;
+				case 31: ExecuteLoadExtensions(); break;
+				case 32: ExecuteDownloadExtension(); break;
+				case 33: ExecuteUpdateExtension(); break;
+				case 34: ExecuteDeleteExtension(); break;
+				case 35: ExecuteTestExtension(); break;
+				case 36: ExecuteSaveConfig(); break;
+				case 37: ExecuteConfigTemplates(); break;
+				case 38: ExecuteViewFeed(false); break;
+				case 39: ExecuteViewFeed(true); break;
+				case 40: ExecuteFetchFeed(); break;
+				case 41: ExecuteEditServer(); break;
+				case 42: ExecuteReadUrl(); break;
+				case 43: ExecuteCheckUpdates(); break;
+				case 44: ExecuteStartUpdate(); break;
+				case 45: ExecuteLog(1); break;
+				case 46: ExecuteServerVolumes(); break;
+				case 47: ExecuteResetServerVolume(); break;
+				case 48: ExecuteTlsCipher(0); break;
+				case 49: ExecuteTlsCipher(1); break;
+				case 50: ExecuteTlsCipher(2); break;
+				case 51: ExecuteTestServer(); break;
+				case 52: ExecuteTestServerSpeed(); break;
+				case 53: ExecuteTestDiskSpeed(); break;
+				case 54: ExecuteTestNetworkSpeed(); break;
+				case 55: ExecuteStartScript(); break;
+				case 56: ExecuteLog(2); break;
+				default: BuildErrorResponse(m_errCode, "%s", m_errText ? m_errText : "Invalid procedure"); break;
+			}
+		}
 
-inline void XmlRpcProcessor::BuildErrorResponse(int errCode, const char* errText)
-{
-	XmlCommand command(errCode, errText);
-	command.SetProtocol(m_protocol);
-	command.Execute();
-	BuildResponse(command.GetResponse(), "", command.GetFault(), nullptr);
-}
+	private:
+		int m_cmdId = 0;
+		int m_errCode = 0;
+		const char* m_errText = nullptr;
+		char* m_request = nullptr;
+		char* m_requestPtr = nullptr;
+		char* m_callbackFunc = nullptr;
+		StringBuilder m_response;
+		bool m_fault = false;
+		XmlRpcProcessor::ERpcProtocol m_protocol = XmlRpcProcessor::rpUndefined;
+		XmlRpcProcessor::EHttpMethod m_httpMethod = XmlRpcProcessor::hmPost;
+		XmlRpcProcessor::EUserAccess m_userAccess = XmlRpcProcessor::uaControl;
+		CString m_testServerErrText;
 
-// a JSON-P refusal goes through the caller's callback, so the page that loaded it
-// sees it
-inline void XmlRpcProcessor::BuildJsonPRefusal(XmlCommand* command, int errCode, const char* errText,
-	const char* requestId)
-{
-	XmlCommand refusal(errCode, errText);
-	refusal.SetProtocol(m_protocol);
-	refusal.Execute();
-	BuildResponse(refusal.GetResponse(), command->GetCallbackFunc(), refusal.GetFault(), requestId);
-}
+		bool IsJson()
+		{
+			return nzbget_rs_dqh_xmlrpc_is_json_protocol(
+				(int)m_protocol,
+				(int)XmlRpcProcessor::rpJsonRpc,
+				(int)XmlRpcProcessor::rpJsonPRpc) != 0;
+		}
 
-inline XmlCommand XmlRpcProcessor::CreateCommand(const char* methodName)
-{
-	int accessDenied = nzbget_rs_ntw_xmlrpc_check_user_access_denied(
-		(int)m_userAccess, (int)uaAdd, (int)uaRestricted, methodName);
-	if (accessDenied == 1)
-	{
-		warn("Received request \"%s\" from add-user, access denied", methodName);
-		return XmlCommand(401, "Access denied");
-	}
-	if (accessDenied == 2)
-	{
-		warn("Received request \"%s\" from restricted user, access denied", methodName);
-		return XmlCommand(401, "Access denied");
-	}
+		void AppendResponse(const char* part)
+		{
+			m_response.Append(part);
+		}
 
-	int cmdId = nzbget_rs_xmlrpc_match_command(methodName);
-	if (cmdId <= 0)
-	{
-		return XmlCommand(1, "Invalid procedure");
-	}
-	return XmlCommand(cmdId);
-}
+		void AppendCondResponse(const char* part, bool cond)
+		{
+			if (cond)
+			{
+				m_response.Append(part);
+			}
+		}
 
+		void BuildErrorResponse(int errCode, const char* errText, ...)
+		{
+			char fullText[1024];
 
-//*****************************************************************
-// Base command
+			va_list ap;
+			va_start(ap, errText);
+			vsnprintf(fullText, 1024, errText, ap);
+			fullText[1024-1] = '\0';
+			va_end(ap);
 
-inline bool XmlCommand::IsJson()
-{
-	return nzbget_rs_dqh_xmlrpc_is_json_protocol(
-		(int)m_protocol,
-		(int)XmlRpcProcessor::rpJsonRpc,
-		(int)XmlRpcProcessor::rpJsonPRpc) != 0;
-}
+			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_error(IsJson() ? 1 : 0, errCode, fullText));
 
-inline void XmlCommand::AppendResponse(const char* part)
-{
-	m_response.Append(part);
-}
+			m_fault = true;
+		}
 
-inline void XmlCommand::AppendCondResponse(const char* part, bool cond)
-{
-	if (cond)
-	{
-		m_response.Append(part);
-	}
-}
+		void BuildBoolResponse(bool ok)
+		{
+			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_bool(IsJson() ? 1 : 0, ok ? 1 : 0));
+		}
 
-inline void XmlCommand::BuildErrorResponse(int errCode, const char* errText, ...)
-{
-	char fullText[1024];
+		void BuildIntResponse(int value)
+		{
+			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_int(IsJson() ? 1 : 0, value));
+		}
 
-	va_list ap;
-	va_start(ap, errText);
-	vsnprintf(fullText, 1024, errText, ap);
-	fullText[1024-1] = '\0';
-	va_end(ap);
+		bool NextParamAsInt(int* value)
+		{
+			return nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 0, value, nullptr);
+		}
 
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_error(IsJson() ? 1 : 0, errCode, fullText));
+		bool NextParamAsBool(bool* value)
+		{
+			int intValue;
+			if (!nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 1, &intValue, nullptr))
+			{
+				return false;
+			}
+			*value = intValue != 0;
+			return true;
+		}
 
-	m_fault = true;
-}
+		bool NextParamAsStr(char** value)
+		{
+			return nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 2, nullptr, value);
+		}
 
-inline void XmlCommand::BuildBoolResponse(bool ok)
-{
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_bool(IsJson() ? 1 : 0, ok ? 1 : 0));
-}
+		CString EncodeStr(const char* str)
+		{
+			if (!str)
+			{
+				return "";
+			}
 
-inline void XmlCommand::BuildIntResponse(int value)
-{
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_int(IsJson() ? 1 : 0, value));
-}
+			CString result;
+			if (IsJson())
+			{
+				result = WebUtil::JsonEncode(str);
+			}
+			else
+			{
+				result = WebUtil::XmlEncode(str);
+			}
+			return result;
+		}
 
-inline void XmlCommand::PrepareParams()
-{
-	if (nzbget_rs_dqh_xmlrpc_should_skip_to_json_post_params(
-		IsJson() ? 1 : 0, (int)m_httpMethod, (int)XmlRpcProcessor::hmPost) != 0)
-	{
-		// without "params" the request is emptied: no parameters follow
-		m_requestPtr = nzbget_rs_rpc_skip_to_params(m_requestPtr);
-	}
+		void DecodeStr(char* str)
+		{
+			if (IsJson())
+			{
+				WebUtil::JsonDecode(str);
+			}
+			else
+			{
+				WebUtil::XmlDecode(str);
+			}
+		}
 
-	if (m_protocol == XmlRpcProcessor::rpJsonPRpc)
-	{
-		NextParamAsStr(&m_callbackFunc);
-	}
-}
-
-inline bool XmlCommand::NextParamAsInt(int* value)
-{
-	return nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 0, value, nullptr);
-}
-
-inline bool XmlCommand::NextParamAsBool(bool* value)
-{
-	int intValue;
-	if (!nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 1, &intValue, nullptr))
-	{
-		return false;
-	}
-	*value = intValue != 0;
-	return true;
-}
-
-inline bool XmlCommand::NextParamAsStr(char** value)
-{
-	return nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 2, nullptr, value);
-}
-
-inline CString XmlCommand::EncodeStr(const char* str)
-{
-	if (!str)
-	{
-		return "";
-	}
-
-	CString result;
-	if (IsJson())
-	{
-		result = WebUtil::JsonEncode(str);
-	}
-	else
-	{
-		result = WebUtil::XmlEncode(str);
-	}
-	return result;
-}
-
-inline void XmlCommand::DecodeStr(char* str)
-{
-	if (IsJson())
-	{
-		WebUtil::JsonDecode(str);
-	}
-	else
-	{
-		WebUtil::XmlDecode(str);
-	}
-}
-
-//*****************************************************************
-// Commands
-
-inline void XmlCommand::Execute()
-{
-	switch (m_cmdId)
-	{
-		case 1: ExecutePauseUnpause(true, 0); break;
-		case 2: ExecutePauseUnpause(false, 0); break;
-		case 3: ExecuteShutdown(); break;
-		case 4: ExecuteReload(); break;
-		case 5: ExecuteVersion(); break;
-		case 6: ExecuteDumpDebug(); break;
-		case 7: ExecuteSetDownloadRate(); break;
-		case 8: ExecuteStatus(); break;
-		case 9: ExecuteSysInfo(); break;
-		case 10: ExecuteSystemHealth(); break;
-		case 11: ExecuteLog(0); break;
-		case 12: ExecuteListFiles(); break;
-		case 13: ExecuteListGroups(); break;
-		case 14: ExecuteEditQueue(); break;
-		case 15: ExecuteDownload(); break;
-		case 16: ExecuteAppendFleet(); break;
-		case 17: ExecutePostQueue(); break;
-		case 18: ExecuteWriteLog(); break;
-		case 19: ExecuteClearLog(); break;
-		case 20: ExecuteLog(3); break;
-		case 21: ExecuteScan(); break;
-		case 22: ExecutePauseUnpause(true, 1); break;
-		case 23: ExecutePauseUnpause(false, 1); break;
-		case 24: ExecutePauseUnpause(true, 2); break;
-		case 25: ExecutePauseUnpause(false, 2); break;
-		case 26: ExecuteScheduleResume(); break;
-		case 27: ExecuteHistory(); break;
-		case 28: ExecuteUrlQueue(); break;
-		case 29: ExecuteConfig(); break;
-		case 30: ExecuteLoadConfig(); break;
-		case 31: ExecuteLoadExtensions(); break;
-		case 32: ExecuteDownloadExtension(); break;
-		case 33: ExecuteUpdateExtension(); break;
-		case 34: ExecuteDeleteExtension(); break;
-		case 35: ExecuteTestExtension(); break;
-		case 36: ExecuteSaveConfig(); break;
-		case 37: ExecuteConfigTemplates(); break;
-		case 38: ExecuteViewFeed(false); break;
-		case 39: ExecuteViewFeed(true); break;
-		case 40: ExecuteFetchFeed(); break;
-		case 41: ExecuteEditServer(); break;
-		case 42: ExecuteReadUrl(); break;
-		case 43: ExecuteCheckUpdates(); break;
-		case 44: ExecuteStartUpdate(); break;
-		case 45: ExecuteLog(1); break;
-		case 46: ExecuteServerVolumes(); break;
-		case 47: ExecuteResetServerVolume(); break;
-		case 48: ExecuteTlsCipher(0); break;
-		case 49: ExecuteTlsCipher(1); break;
-		case 50: ExecuteTlsCipher(2); break;
-		case 51: ExecuteTestServer(); break;
-		case 52: ExecuteTestServerSpeed(); break;
-		case 53: ExecuteTestDiskSpeed(); break;
-		case 54: ExecuteTestNetworkSpeed(); break;
-		case 55: ExecuteStartScript(); break;
-		case 56: ExecuteLog(2); break;
-		default: BuildErrorResponse(m_errCode, "%s", m_errText ? m_errText : "Invalid procedure"); break;
-	}
-}
-
-inline void XmlCommand::ExecutePauseUnpause(bool pause, int pauseAction)
+void ExecutePauseUnpause(bool pause, int pauseAction)
 {
 	bool ok = true;
 
@@ -46285,7 +45659,7 @@ inline void XmlCommand::ExecutePauseUnpause(bool pause, int pauseAction)
 }
 
 // bool scheduleresume(int Seconds)
-inline void XmlCommand::ExecuteScheduleResume()
+void ExecuteScheduleResume()
 {
 	int seconds = 0;
 	bool hasParam = NextParamAsInt(&seconds);
@@ -46302,30 +45676,30 @@ inline void XmlCommand::ExecuteScheduleResume()
 	BuildBoolResponse(true);
 }
 
-inline void XmlCommand::ExecuteShutdown()
+void ExecuteShutdown()
 {
 	BuildBoolResponse(true);
 	ExitProc();
 }
 
-inline void XmlCommand::ExecuteReload()
+void ExecuteReload()
 {
 	BuildBoolResponse(true);
 	Reload();
 }
 
-inline void XmlCommand::ExecuteVersion()
+void ExecuteVersion()
 {
 	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(IsJson() ? 1 : 0, Util::VersionRevision(), 0, 1023));
 }
 
-inline void XmlCommand::ExecuteDumpDebug()
+void ExecuteDumpDebug()
 {
 	g_Log->LogDebugInfo();
 	BuildBoolResponse(true);
 }
 
-inline void XmlCommand::ExecuteSetDownloadRate()
+void ExecuteSetDownloadRate()
 {
 	int rate = 0;
 	// in KB/s: a rate past INT_MAX / 1024 wrapped around to a tiny limit
@@ -46341,7 +45715,7 @@ inline void XmlCommand::ExecuteSetDownloadRate()
 	BuildBoolResponse(true);
 }
 
-inline void XmlCommand::ExecuteStatus()
+void ExecuteStatus()
 {
 	int postJobCount = 0;
 	int urlCount = 0;
@@ -46444,7 +45818,7 @@ inline void XmlCommand::ExecuteStatus()
 		IsJson() ? 1 : 0, &statusFields, servers.data(), servers.size()));
 }
 
-inline void XmlCommand::ExecuteSysInfo()
+void ExecuteSysInfo()
 {
 	std::string response = IsJson()
 		? System::ToJsonStr(*g_SystemInfo)
@@ -46453,7 +45827,7 @@ inline void XmlCommand::ExecuteSysInfo()
 	AppendResponse(response.c_str());
 }
 
-inline void XmlCommand::ExecuteSystemHealth()
+void ExecuteSystemHealth()
 {
 	if (g_Options->GetSystemHealthCheck())
 	{
@@ -46466,7 +45840,7 @@ inline void XmlCommand::ExecuteSystemHealth()
 }
 
 // struct[] log(idfrom, entries) / loadlog(nzbid, logidfrom, logentries) / logupdate / logscript
-inline void XmlCommand::ExecuteLog(int logSource)
+void ExecuteLog(int logSource)
 {
 	int nzbId = 0;
 	if (logSource == 3 && !NextParamAsInt(&nzbId))
@@ -46547,7 +45921,7 @@ inline void XmlCommand::ExecuteLog(int logSource)
 
 // struct[] listfiles(int IDFrom, int IDTo, int NZBID)
 // For backward compatibility with 0.8 parameter "NZBID" is optional
-inline void XmlCommand::ExecuteListFiles()
+void ExecuteListFiles()
 {
 	int idStart = 0;
 	int idEnd = 0;
@@ -46615,7 +45989,7 @@ inline void XmlCommand::ExecuteListFiles()
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
 }
 
-inline void XmlCommand::AppendNzbInfoFields(NzbInfo* nzbInfo)
+void AppendNzbInfoFields(NzbInfo* nzbInfo)
 {
 	time_t postStartTime = nzbInfo->GetPostInfo() ? nzbInfo->GetPostInfo()->GetStartTime() : 0;
 	time_t curTime = postStartTime ? Util::CurrentTime() : 0;
@@ -46697,7 +46071,7 @@ inline void XmlCommand::AppendNzbInfoFields(NzbInfo* nzbInfo)
 		stats.data(), stats.size()));
 }
 
-inline void XmlCommand::AppendPostInfoFields(PostInfo* postInfo, int logEntries, bool postQueue)
+void AppendPostInfoFields(PostInfo* postInfo, int logEntries, bool postQueue)
 {
 	time_t curTime = postInfo ? Util::CurrentTime() : 0;
 
@@ -46738,7 +46112,7 @@ inline void XmlCommand::AppendPostInfoFields(PostInfo* postInfo, int logEntries,
 }
 
 // struct[] listgroups(int NumberOfLogEntries)
-inline void XmlCommand::ExecuteListGroups()
+void ExecuteListGroups()
 {
 	int nrEntries = 0;
 	NextParamAsInt(&nrEntries);
@@ -46774,7 +46148,7 @@ inline void XmlCommand::ExecuteListGroups()
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
 }
 
-inline const char* XmlCommand::DetectGroupStatus(NzbInfo* nzbInfo)
+const char* DetectGroupStatus(NzbInfo* nzbInfo)
 {
 	bool hasPostInfo = nzbInfo->GetPostInfo() != nullptr;
 	int postStage = hasPostInfo ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
@@ -46798,7 +46172,7 @@ inline const char* XmlCommand::DetectGroupStatus(NzbInfo* nzbInfo)
 //    bool editqueue(string Command, string Args, int[] IDs)
 // v17:
 //    bool editqueue(string Command, int Offset, string Args, int[] IDs)
-inline void XmlCommand::ExecuteEditQueue()
+void ExecuteEditQueue()
 {
 	int action = -1;
 	NzbgetRsBuf argsOrErr{nullptr, 0};
@@ -46843,7 +46217,7 @@ inline void XmlCommand::ExecuteEditQueue()
 //   bool append(string NZBFilename, string Category, int Priority, bool AddToTop, string Content, bool AddPaused, string DupeKey, int DupeScore, string DupeMode)
 // appendfleet(DupeKey, Category, Priority, Timeout, Name1, Content1, Name2, Content2, ...):
 // a content is the nzb-file in base64 or its url; see Fleet
-inline void XmlCommand::ExecuteAppendFleet()
+void ExecuteAppendFleet()
 {
 	if (!IsJson())
 	{
@@ -46932,7 +46306,7 @@ inline void XmlCommand::ExecuteAppendFleet()
 		entries.data(), entries.size()));
 }
 
-inline void XmlCommand::ExecuteDownload()
+void ExecuteDownload()
 {
 	bool v13 = true;
 
@@ -47128,7 +46502,7 @@ inline void XmlCommand::ExecuteDownload()
 }
 
 // deprecated
-inline void XmlCommand::ExecutePostQueue()
+void ExecutePostQueue()
 {
 	int nrEntries = 0;
 	NextParamAsInt(&nrEntries);
@@ -47164,7 +46538,7 @@ inline void XmlCommand::ExecutePostQueue()
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
 }
 
-inline void XmlCommand::ExecuteWriteLog()
+void ExecuteWriteLog()
 {
 	char* kind;
 	char* text;
@@ -47193,14 +46567,14 @@ inline void XmlCommand::ExecuteWriteLog()
 	BuildBoolResponse(true);
 }
 
-inline void XmlCommand::ExecuteClearLog()
+void ExecuteClearLog()
 {
 	g_Log->Clear();
 
 	BuildBoolResponse(true);
 }
 
-inline void XmlCommand::ExecuteScan()
+void ExecuteScan()
 {
 	bool syncMode = false;
 	// optional parameter "SyncMode"
@@ -47212,7 +46586,7 @@ inline void XmlCommand::ExecuteScan()
 
 // struct[] history(bool hidden)
 // Parameter "hidden" is optional (new in v12)
-inline void XmlCommand::ExecuteHistory()
+void ExecuteHistory()
 {
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
@@ -47282,7 +46656,7 @@ inline void XmlCommand::ExecuteHistory()
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
 }
 
-inline const char* XmlCommand::DetectHistoryStatus(HistoryInfo* historyInfo)
+const char* DetectHistoryStatus(HistoryInfo* historyInfo)
 {
 	const char* status = "FAILURE/INTERNAL_ERROR";
 	int entryKind = nzbget_rs_dqh_xmlrpc_classify_history_entry_kind(
@@ -47306,7 +46680,7 @@ inline const char* XmlCommand::DetectHistoryStatus(HistoryInfo* historyInfo)
 }
 
 // Deprecated in v13
-inline void XmlCommand::ExecuteUrlQueue()
+void ExecuteUrlQueue()
 {
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
@@ -47333,7 +46707,7 @@ inline void XmlCommand::ExecuteUrlQueue()
 }
 
 // struct[] config()
-inline void XmlCommand::ExecuteConfig()
+void ExecuteConfig()
 {
 	Options::GuardedOptEntries optEntries = g_Options->GuardOptEntries();
 	std::vector<NzbgetRsRpcConfigItem> entries;
@@ -47356,7 +46730,7 @@ inline void XmlCommand::ExecuteConfig()
 }
 
 // struct[] loadconfig()
-inline void XmlCommand::ExecuteLoadConfig()
+void ExecuteLoadConfig()
 {
 	int fault = 0;
 	NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_load_config(
@@ -47369,7 +46743,7 @@ inline void XmlCommand::ExecuteLoadConfig()
 	AppendRsBuf(m_response, buf);
 }
 
-inline void XmlCommand::ExecuteLoadExtensions()
+void ExecuteLoadExtensions()
 {
 	bool loadFromDisk = false;
 	bool isJson = IsJson();
@@ -47409,7 +46783,7 @@ inline void XmlCommand::ExecuteLoadExtensions()
 	AppendResponse(isJson ? "\n]" : "</data></array>\n");
 }
 
-inline void XmlCommand::ExecuteDownloadExtension()
+void ExecuteDownloadExtension()
 {
 	char* url;
 	if (!NextParamAsStr(&url))
@@ -47468,7 +46842,7 @@ inline void XmlCommand::ExecuteDownloadExtension()
 	BuildBoolResponse(true);
 }
 
-inline void XmlCommand::ExecuteUpdateExtension()
+void ExecuteUpdateExtension()
 {
 	char* url;
 	if (!NextParamAsStr(&url))
@@ -47508,7 +46882,7 @@ inline void XmlCommand::ExecuteUpdateExtension()
 	BuildBoolResponse(true);
 }
 
-inline void XmlCommand::ExecuteDeleteExtension()
+void ExecuteDeleteExtension()
 {
 	char* extName;
 	if (!NextParamAsStr(&extName))
@@ -47528,7 +46902,7 @@ inline void XmlCommand::ExecuteDeleteExtension()
 	BuildBoolResponse(true);
 }
 
-inline void XmlCommand::ExecuteTestExtension()
+void ExecuteTestExtension()
 {
 	char* extEntryFileName;
 	if (!NextParamAsStr(&extEntryFileName))
@@ -47549,7 +46923,7 @@ inline void XmlCommand::ExecuteTestExtension()
 }
 
 // bool saveconfig(struct[] data)
-inline void XmlCommand::ExecuteSaveConfig()
+void ExecuteSaveConfig()
 {
 	int fault = 0;
 	NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_save_config(
@@ -47564,7 +46938,7 @@ inline void XmlCommand::ExecuteSaveConfig()
 
 // struct[] configtemplates(bool loadFromDisk)
 // parameter "loadFromDisk" is optional (new in v14)
-inline void XmlCommand::ExecuteConfigTemplates()
+void ExecuteConfigTemplates()
 {
 	bool loadFromDisk = false;
 	NextParamAsBool(&loadFromDisk);
@@ -47600,7 +46974,7 @@ inline void XmlCommand::ExecuteConfigTemplates()
 // v16:
 // struct[] previewfeed(int id, string name, string url, string filter, bool backlog, bool pauseNzb, string category,
 //		int priority, int interval, string feedfilter, bool includeNonMatching, int cacheTimeSec, string cacheId)
-inline void XmlCommand::ExecuteViewFeed(bool preview)
+void ExecuteViewFeed(bool preview)
 {
 	bool includeNonMatching = false;
 	std::shared_ptr<FeedItemList> feedItems;
@@ -47728,7 +47102,7 @@ inline void XmlCommand::ExecuteViewFeed(bool preview)
 }
 
 // bool fetchfeed(int ID)
-inline void XmlCommand::ExecuteFetchFeed()
+void ExecuteFetchFeed()
 {
 	int id;
 	if (!NextParamAsInt(&id))
@@ -47743,7 +47117,7 @@ inline void XmlCommand::ExecuteFetchFeed()
 }
 
 // bool editserver(int ID, bool Active)
-inline void XmlCommand::ExecuteEditServer()
+void ExecuteEditServer()
 {
 	bool ok = false;
 	int first = true;
@@ -47785,7 +47159,7 @@ inline void XmlCommand::ExecuteEditServer()
 }
 
 // string readurl(string url, string infoname)
-inline void XmlCommand::ExecuteReadUrl()
+void ExecuteReadUrl()
 {
 	char* url;
 	if (!NextParamAsStr(&url))
@@ -47843,7 +47217,7 @@ inline void XmlCommand::ExecuteReadUrl()
 }
 
 // string checkupdates()
-inline void XmlCommand::ExecuteCheckUpdates()
+void ExecuteCheckUpdates()
 {
 	CString updateInfo;
 	bool ok = g_Maintenance->CheckUpdates(updateInfo);
@@ -47859,7 +47233,7 @@ inline void XmlCommand::ExecuteCheckUpdates()
 }
 
 // bool startupdate(string branch)
-inline void XmlCommand::ExecuteStartUpdate()
+void ExecuteStartUpdate()
 {
 	char* branchName;
 	if (!NextParamAsStr(&branchName))
@@ -47884,7 +47258,7 @@ inline void XmlCommand::ExecuteStartUpdate()
 }
 
 // struct[] servervolumes(bool BytesPerSeconds, bool BytesPerMinutes, bool BytesPerHours, bool BytesPerDays, bool ArticlesPerDays)
-inline void XmlCommand::ExecuteServerVolumes()
+void ExecuteServerVolumes()
 {
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
@@ -47957,7 +47331,7 @@ inline void XmlCommand::ExecuteServerVolumes()
 }
 
 // bool resetservervolume(int serverid, string counter);
-inline void XmlCommand::ExecuteResetServerVolume()
+void ExecuteResetServerVolume()
 {
 	int serverId;
 	char* counter;
@@ -48001,7 +47375,7 @@ inline void XmlCommand::ExecuteResetServerVolume()
 }
 
 // string testserver(string host, int port, string username, string password, bool encryption, string cipher, int timeout, int certVerifLevel);
-inline void XmlCommand::ExecuteTestServer()
+void ExecuteTestServer()
 {
 	ServerParams params;
 	char* host;
@@ -48147,15 +47521,7 @@ inline void XmlCommand::ExecuteTestServer()
 		1023));
 }
 
-inline void XmlCommand::PrintTestServerError(const char* errMsg)
-{
-	if (m_testServerErrText.Empty())
-	{
-		m_testServerErrText = EncodeStr(errMsg);
-	}
-}
-
-inline void XmlCommand::ExecuteTlsCipher(int operation)
+void ExecuteTlsCipher(int operation)
 {
 	const NzbgetRsJsonLimits limits{0x7ffffffeu, 0x7fffffffu / 24u, 0x3fffffffu};
 	int fault = 0;
@@ -48180,7 +47546,7 @@ inline void XmlCommand::ExecuteTlsCipher(int operation)
 	AppendRsBuf(m_response, buf);
 }
 
-inline void XmlCommand::ExecuteTestServerSpeed()
+void ExecuteTestServerSpeed()
 {
 	char* nzbFileUrl;
 	if (!NextParamAsStr(&nzbFileUrl))
@@ -48225,7 +47591,7 @@ inline void XmlCommand::ExecuteTestServerSpeed()
 	BuildBoolResponse(true);
 }
 
-inline void XmlCommand::ExecuteTestDiskSpeed()
+void ExecuteTestDiskSpeed()
 {
 	NzbgetRsBuf dirPathBuf{nullptr, 0};
 	size_t bufferSizeBytes = 0;
@@ -48289,7 +47655,7 @@ inline void XmlCommand::ExecuteTestDiskSpeed()
 		IsJson() ? 1 : 0, writeBytes, writeMs, readBytes, readMs));
 }
 
-inline void XmlCommand::ExecuteTestNetworkSpeed()
+void ExecuteTestNetworkSpeed()
 {
 	// a pause that was on before the test stays on
 	PauseGuard pauseGuard;
@@ -48361,7 +47727,7 @@ inline void XmlCommand::ExecuteTestNetworkSpeed()
 }
 
 // bool startscript(string script, string command, string context, struct[] options);
-inline void XmlCommand::ExecuteStartScript()
+void ExecuteStartScript()
 {
 	NzbgetRsBuf scriptBuf{nullptr, 0};
 	NzbgetRsBuf commandBuf{nullptr, 0};
@@ -48397,6 +47763,231 @@ inline void XmlCommand::ExecuteStartScript()
 
 	BuildBoolResponse(ok);
 }
+	};
+
+	void Execute()
+	{
+		m_protocol = (ERpcProtocol)nzbget_rs_rpc_protocol(m_url);
+		if (m_protocol == rpUndefined)
+		{
+			error("internal error: invalid rpc-request: %s", *m_url);
+			return;
+		}
+
+		char* request = m_request;
+
+		BString<100> methodName;
+		// echoed as sent: cut to 99 characters it made the response invalid JSON (an id
+		// past 4 KB is left out rather than cut)
+		CString requestId;
+
+		const char* params = nullptr;
+		const char* requestIdPtr = nullptr;
+		int requestIdLen = 0;
+		nzbget_rs_rpc_route(m_url, m_request, m_httpMethod == hmGet, m_protocol, methodName, &params,
+			&requestIdPtr, &requestIdLen);
+		request = const_cast<char*>(params);
+		if (requestIdPtr)
+		{
+			requestId.Set(requestIdPtr, requestIdLen);
+		}
+
+		debug("MethodName=%s", *methodName);
+
+		m_userAccess = (EUserAccess)nzbget_rs_rpc_access(m_protocol, m_userAccess);
+
+		if (nzbget_rs_dqh_xmlrpc_is_multicall_post(
+			methodName, m_protocol == rpXmlRpc ? 1 : 0, m_httpMethod == hmPost ? 1 : 0) != 0)
+		{
+			MutliCall();
+		}
+		else
+		{
+			XmlCommand command = CreateCommand(methodName);
+			command.SetRequest(request);
+			command.SetProtocol(m_protocol);
+			command.SetHttpMethod(m_httpMethod);
+			command.SetUserAccess(m_userAccess);
+			command.PrepareParams();
+			m_safeMethod = command.IsSafeMethod();
+			int errCode = 0;
+			const char* errText = nullptr;
+			switch ((EDispatch)nzbget_rs_rpc_decide(
+				m_protocol, m_httpMethod, m_safeMethod, command.IsError(), m_jsonP, &errCode, &errText))
+			{
+				case dpExecute:
+					command.Execute();
+					BuildResponse(command.GetResponse(), command.GetCallbackFunc(), command.GetFault(), requestId);
+					break;
+
+				case dpRefuseInCallback:
+					BuildJsonPRefusal(&command, errCode, errText, requestId);
+					break;
+
+				case dpRefuse:
+					BuildErrorResponse(errCode, errText);
+					break;
+			}
+		}
+	}
+	void SetHttpMethod(EHttpMethod httpMethod) { m_httpMethod = httpMethod; }
+	void SetUserAccess(EUserAccess userAccess) { m_userAccess = userAccess; }
+	// whether JSON-P requests are answered (option JsonP); off unless set
+	void SetJsonP(bool jsonP) { m_jsonP = jsonP; }
+	void SetUrl(const char* url)
+	{
+		NzbgetRsBuf urlBuf = nzbget_rs_xmlrpc_normalize_url(url);
+		m_url.Set(urlBuf.data ? urlBuf.data : "", (int)urlBuf.len);
+		nzbget_rs_free(urlBuf);
+	}
+	void SetRequest(char* request) { m_request = request; }
+	const char* GetResponse() { return m_response; }
+	const char* GetContentType() { return m_contentType; }
+	static bool IsRpcRequest(const char* url) { return nzbget_rs_rco_rpc_is_rpc_request(url) != 0; }
+	bool IsSafeMethod() { return m_safeMethod; }
+
+private:
+	char* m_request = nullptr;
+	const char* m_contentType = nullptr;
+	ERpcProtocol m_protocol;
+	EHttpMethod m_httpMethod;
+	EUserAccess m_userAccess;
+	CString m_url;
+	StringBuilder m_response;
+	bool m_safeMethod = false;
+	bool m_jsonP = false;
+
+	// what Dispatch does with a command: run it, or answer with an error, inside the
+	// JSON-P callback or plain
+	enum EDispatch
+	{
+		dpExecute,
+		dpRefuseInCallback,
+		dpRefuse
+	};
+
+	XmlCommand CreateCommand(const char* methodName)
+	{
+		int accessDenied = nzbget_rs_ntw_xmlrpc_check_user_access_denied(
+			(int)m_userAccess, (int)uaAdd, (int)uaRestricted, methodName);
+		if (accessDenied == 1)
+		{
+			warn("Received request \"%s\" from add-user, access denied", methodName);
+			return XmlCommand(401, "Access denied");
+		}
+		if (accessDenied == 2)
+		{
+			warn("Received request \"%s\" from restricted user, access denied", methodName);
+			return XmlCommand(401, "Access denied");
+		}
+
+		int cmdId = nzbget_rs_xmlrpc_match_command(methodName);
+		if (cmdId <= 0)
+		{
+			return XmlCommand(1, "Invalid procedure");
+		}
+		return XmlCommand(cmdId);
+	}
+	void MutliCall()
+	{
+		bool error = false;
+		StringBuilder response;
+
+		response.Append("<array><data>");
+
+		char* requestPtr = m_request;
+		size_t structOff = 0;
+		while (nzbget_rs_rol_xmlrpc_multicall_find_struct_end(requestPtr, &structOff))
+		{
+			char* callEnd = requestPtr + structOff;
+			*callEnd = '\0';
+			debug("MutliCall, request=%s", requestPtr);
+			size_t nameOff = 0;
+			size_t paramsOff = 0;
+			if (!nzbget_rs_rol_xmlrpc_multicall_locate_parts(requestPtr, structOff, &nameOff, &paramsOff))
+			{
+				error = true;
+				break;
+			}
+			char* nameEnd = requestPtr + nameOff;
+
+			char methodName[100];
+			methodName[0] = '\0';
+			WebUtil::XmlParseTagValue(nameEnd, "string", methodName, sizeof(methodName), nullptr);
+			debug("MutliCall, MethodName=%s", methodName);
+
+			XmlCommand command = CreateCommand(methodName);
+			// a call of the multicall runs as the caller, with the caller's access: it ran
+			// with full control access (a restricted user read the passwords through it);
+			// its parameters are its "params" member, not the start of the call
+			command.SetProtocol(m_protocol);
+			command.SetHttpMethod(m_httpMethod);
+			command.SetUserAccess(m_userAccess);
+			command.SetRequest(requestPtr + paramsOff);
+			m_safeMethod |= command.IsSafeMethod();
+			command.Execute();
+
+			debug("MutliCall, Response=%s", command.GetResponse());
+
+			bool wrapArray = nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(command.GetResponse()) != 0;
+			if (wrapArray)
+			{
+				response.Append("<array><data>");
+			}
+			response.Append("<value>");
+			response.Append(command.GetResponse());
+			response.Append("</value>");
+			if (wrapArray)
+			{
+				response.Append("</data></array>");
+			}
+
+			requestPtr = callEnd + 9; //strlen("</struct>")
+		}
+
+		if (error)
+		{
+			BuildErrorResponse(4, "Parse error");
+		}
+		else
+		{
+			response.Append("</data></array>");
+			BuildResponse(response, "", false, nullptr);
+		}
+	}
+	void BuildResponse(const char* response, const char* callbackFunc, bool fault, const char* requestId)
+	{
+		debug("Response=%s", response);
+
+		bool xmlRpc = m_protocol == rpXmlRpc;
+
+		NzbgetRsBuf head, tail;
+		nzbget_rs_rpc_envelope(m_protocol, fault, callbackFunc, requestId, &head, &tail);
+		m_response.Append(head.data);
+		m_response.Append(response);
+		m_response.Append(tail.data);
+		nzbget_rs_free(head);
+		nzbget_rs_free(tail);
+
+		m_contentType = nzbget_rs_dqh_xmlrpc_response_content_type(xmlRpc ? 1 : 0);
+	}
+	void BuildErrorResponse(int errCode, const char* errText)
+	{
+		XmlCommand command(errCode, errText);
+		command.SetProtocol(m_protocol);
+		command.Execute();
+		BuildResponse(command.GetResponse(), "", command.GetFault(), nullptr);
+	}
+	void BuildJsonPRefusal(XmlCommand* command, int errCode, const char* errText, const char* requestId)
+	{
+		XmlCommand refusal(errCode, errText);
+		refusal.SetProtocol(m_protocol);
+		refusal.Execute();
+		BuildResponse(refusal.GetResponse(), command->GetCallbackFunc(), refusal.GetFault(), requestId);
+	}
+};
+
+using XmlCommand = XmlRpcProcessor::XmlCommand;
 
 class WebProcessor
 {

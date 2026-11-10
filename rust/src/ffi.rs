@@ -9,11 +9,28 @@ pub(crate) mod tls_cipher_native;
 #[no_mangle]
 pub extern "C" fn nzbget_rs_tls_cipher_pin(protocol: c_int, bits: u32, flags: u32) -> c_int {
     use crate::tlscipher::{eligible, Protocol, Suite};
-    let version = match protocol { 12 => Protocol::Tls12, 13 => Protocol::Tls13, _ => return 0 };
-    if bits > u16::MAX.into() { return 0; }
-    let suite = Suite { name: String::new(), algorithm: String::new(), protocol: version, security_bits: bits as u16,
-        aead: flags & 1 != 0, certificate: flags & 2 != 0, ephemeral: flags & 4 != 0 };
-    if eligible(&suite) { protocol } else { 0 }
+    let version = match protocol {
+        12 => Protocol::Tls12,
+        13 => Protocol::Tls13,
+        _ => return 0,
+    };
+    if bits > u16::MAX.into() {
+        return 0;
+    }
+    let suite = Suite {
+        name: String::new(),
+        algorithm: String::new(),
+        protocol: version,
+        security_bits: bits as u16,
+        aead: flags & 1 != 0,
+        certificate: flags & 2 != 0,
+        ephemeral: flags & 4 != 0,
+    };
+    if eligible(&suite) {
+        protocol
+    } else {
+        0
+    }
 }
 
 fn cipher_response(result: Result<String, crate::tlscipher::Error>) -> RsBuf {
@@ -22,7 +39,10 @@ fn cipher_response(result: Result<String, crate::tlscipher::Error>) -> RsBuf {
         Err(error) => {
             let mut message = Vec::new();
             crate::escape::json_encode(error.0.as_bytes(), &mut message);
-            let mut out = b"{\"Error\":\"".to_vec(); out.extend(message); out.extend_from_slice(b"\"}"); into_buf(out)
+            let mut out = b"{\"Error\":\"".to_vec();
+            out.extend(message);
+            out.extend_from_slice(b"\"}");
+            into_buf(out)
         }
     }
 }
@@ -32,15 +52,21 @@ fn cipher_response(result: Result<String, crate::tlscipher::Error>) -> RsBuf {
 /// to Rust exactly once, including rejected/duplicate starts. Callbacks are
 /// thread-safe for the documented single-worker use and must never unwind.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tls_cipher_start(backend: *const tls_cipher_native::Io) -> RsBuf {
-    if backend.is_null() { return cipher_response(Err(crate::tlscipher::Error("Missing TLS backend."))); }
+pub unsafe extern "C" fn nzbget_rs_tls_cipher_start(
+    backend: *const tls_cipher_native::Io,
+) -> RsBuf {
+    if backend.is_null() {
+        return cipher_response(Err(crate::tlscipher::Error("Missing TLS backend.")));
+    }
     cipher_response(tls_cipher_native::start(unsafe { *backend }))
 }
 /// # Safety
 /// id is null or a readable NUL-terminated string; null/empty queries current job.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tls_cipher_status(id: *const c_char) -> RsBuf {
-    let id = if id.is_null() { None } else {
+    let id = if id.is_null() {
+        None
+    } else {
         let Ok(value) = unsafe { CStr::from_ptr(id) }.to_str() else {
             return cipher_response(Err(crate::tlscipher::Error("Invalid cipher job ID.")));
         };
@@ -52,12 +78,22 @@ pub unsafe extern "C" fn nzbget_rs_tls_cipher_status(id: *const c_char) -> RsBuf
 /// id points to a readable NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tls_cipher_cancel(id: *const c_char) -> RsBuf {
-    if id.is_null() { return cipher_response(Err(crate::tlscipher::Error("Missing cipher job ID."))); }
-    let Ok(id) = unsafe { CStr::from_ptr(id) }.to_str() else { return cipher_response(Err(crate::tlscipher::Error("Invalid cipher job ID."))); };
-    cipher_response(tls_cipher_native::service().cancel(id).and_then(|()| tls_cipher_native::service().status(Some(id))))
+    if id.is_null() {
+        return cipher_response(Err(crate::tlscipher::Error("Missing cipher job ID.")));
+    }
+    let Ok(id) = unsafe { CStr::from_ptr(id) }.to_str() else {
+        return cipher_response(Err(crate::tlscipher::Error("Invalid cipher job ID.")));
+    };
+    cipher_response(
+        tls_cipher_native::service()
+            .cancel(id)
+            .and_then(|()| tls_cipher_native::service().status(Some(id))),
+    )
 }
 #[no_mangle]
-pub extern "C" fn nzbget_rs_tls_cipher_shutdown() { tls_cipher_native::service().shutdown(); }
+pub extern "C" fn nzbget_rs_tls_cipher_shutdown() {
+    tls_cipher_native::service().shutdown();
+}
 
 #[cfg(test)]
 mod tls_cipher_abi_tests {
@@ -66,7 +102,14 @@ mod tls_cipher_abi_tests {
     fn cipher_pin_validates_protocol_security_and_authentication_flags() {
         assert_eq!(nzbget_rs_tls_cipher_pin(13, 128, 3), 13);
         assert_eq!(nzbget_rs_tls_cipher_pin(12, 128, 7), 12);
-        for (protocol, bits, flags) in [(11, 256, 7), (12, 128, 3), (13, 64, 7), (13, 128, 1), (13, 128, 2), (13, u32::MAX, 7)] {
+        for (protocol, bits, flags) in [
+            (11, 256, 7),
+            (12, 128, 3),
+            (13, 64, 7),
+            (13, 128, 1),
+            (13, 128, 2),
+            (13, u32::MAX, 7),
+        ] {
             assert_eq!(nzbget_rs_tls_cipher_pin(protocol, bits, flags), 0);
         }
     }
@@ -76,7 +119,9 @@ mod tls_cipher_abi_tests {
         let response = unsafe { nzbget_rs_tls_cipher_status(bytes.as_ptr().cast()) };
         let text = unsafe { std::slice::from_raw_parts(response.data.cast::<u8>(), response.len) };
         assert!(text.starts_with(b"{\"Error\":"));
-        unsafe { nzbget_rs_free(response); }
+        unsafe {
+            nzbget_rs_free(response);
+        }
     }
 }
 
@@ -91,11 +136,19 @@ pub(crate) fn into_buf(mut v: Vec<u8>) -> RsBuf {
     v.push(0);
     let len = v.len() - 1;
     let mut v = std::mem::ManuallyDrop::new(v);
-    RsBuf { data: v.as_mut_ptr() as *mut c_char, len, cap: v.capacity() }
+    RsBuf {
+        data: v.as_mut_ptr() as *mut c_char,
+        len,
+        cap: v.capacity(),
+    }
 }
 
 pub(crate) unsafe fn input<'a>(raw: *const c_char) -> &'a [u8] {
-    if raw.is_null() { &[] } else { CStr::from_ptr(raw).to_bytes() }
+    if raw.is_null() {
+        &[]
+    } else {
+        CStr::from_ptr(raw).to_bytes()
+    }
 }
 
 // ---- twins and alts (twin.rs); lists cross the ABI as text lines ----
@@ -123,7 +176,11 @@ unsafe fn str_arg(raw: *const c_char) -> String {
 }
 
 unsafe fn bytes_arg<'a>(data: *const u8, len: usize) -> &'a [u8] {
-    if data.is_null() { &[] } else { std::slice::from_raw_parts(data, len) }
+    if data.is_null() {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data, len)
+    }
 }
 
 /// Opens (or reopens) the store of par2 file lists at `path`.
@@ -144,14 +201,20 @@ pub unsafe extern "C" fn nzbget_rs_twin_open(path: *const c_char) {
 /// `posting` is null or a valid NUL-terminated string; `data` points to `len`
 /// readable bytes (or is null with `len` 0).
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_put_par2(id: i32, posting: *const c_char, data: *const u8, len: usize)
-    -> RsBuf {
+pub unsafe extern "C" fn nzbget_rs_twin_put_par2(
+    id: i32,
+    posting: *const c_char,
+    data: *const u8,
+    len: usize,
+) -> RsBuf {
     let (mut sigs, complete) = crate::twin::par2_set(bytes_arg(data, len));
     let posting = str_arg(posting);
     // a partial list adds to the posting's partial list from an earlier try (that
     // one may have seen articles this one didn't); a complete one replaces it
     if !complete {
-        if let Some(earlier) = with_store(|store| store.partial_of(id, &posting).map(|l| l.sigs.clone())).flatten() {
+        if let Some(earlier) =
+            with_store(|store| store.partial_of(id, &posting).map(|l| l.sigs.clone())).flatten()
+        {
             sigs = crate::twin::merge(&earlier, &sigs);
         }
     }
@@ -160,7 +223,11 @@ pub unsafe extern "C" fn nzbget_rs_twin_put_par2(id: i32, posting: *const c_char
         // bound to the posting: its fingerprint and the posting's own id (a hash of
         // its message-ids), which differently named twins don't share
         let identity = format!("{print}#{posting}");
-        let listed = crate::twin::Listed { sigs, complete, print: identity };
+        let listed = crate::twin::Listed {
+            sigs,
+            complete,
+            print: identity,
+        };
         with_store(|store| store.put(id, listed));
     }
     // "fingerprint\tcomplete": a partial list is fetched again
@@ -177,7 +244,13 @@ pub unsafe extern "C" fn nzbget_rs_twin_has(id: i32, print: *const c_char) -> i3
     let print = str_arg(print);
     with_store(|store| {
         let listed = store.get(id, &print);
-        if listed.sigs.is_empty() { 0 } else if listed.complete { 2 } else { 1 }
+        if listed.sigs.is_empty() {
+            0
+        } else if listed.complete {
+            2
+        } else {
+            1
+        }
     })
     .unwrap_or(0)
 }
@@ -206,12 +279,20 @@ pub unsafe extern "C" fn nzbget_rs_twin_prune(lines: *const c_char) {
 /// `md5s` points to `count` valid NUL-terminated strings (null entries are
 /// empty) and `lengths` to `count` values; both may be null for 0.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_fingerprint(md5s: *const *const c_char, lengths: *const u64, count: usize)
-    -> RsBuf {
+pub unsafe extern "C" fn nzbget_rs_twin_fingerprint(
+    md5s: *const *const c_char,
+    lengths: *const u64,
+    count: usize,
+) -> RsBuf {
     if count > 0 && (md5s.is_null() || lengths.is_null()) {
         return into_buf(Vec::new());
     }
-    let files = (0..count).map(|i| (String::from_utf8_lossy(input(*md5s.add(i))), *lengths.add(i)));
+    let files = (0..count).map(|i| {
+        (
+            String::from_utf8_lossy(input(*md5s.add(i))),
+            *lengths.add(i),
+        )
+    });
     into_buf(crate::twin::fingerprint_cow(files).into_bytes())
 }
 
@@ -230,7 +311,8 @@ pub unsafe extern "C" fn nzbget_rs_par2_block_size(data: *const u8, len: usize) 
 /// `filename` is null or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_par2_volume_blocks(filename: *const c_char) -> i32 {
-    crate::twin::volume_blocks_bytes(input(filename)).map_or(-1, |b| i32::try_from(b).unwrap_or(i32::MAX))
+    crate::twin::volume_blocks_bytes(input(filename))
+        .map_or(-1, |b| i32::try_from(b).unwrap_or(i32::MAX))
 }
 
 /// The label of download `dupe` against `primary` (each by id and fingerprint):
@@ -239,11 +321,20 @@ pub unsafe extern "C" fn nzbget_rs_par2_volume_blocks(filename: *const c_char) -
 /// # Safety
 /// `primary_print` and `dupe_print` are null or valid NUL-terminated strings.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_kind(primary: i32, primary_print: *const c_char, dupe: i32,
-    dupe_print: *const c_char) -> RsBuf {
+pub unsafe extern "C" fn nzbget_rs_twin_kind(
+    primary: i32,
+    primary_print: *const c_char,
+    dupe: i32,
+    dupe_print: *const c_char,
+) -> RsBuf {
     let (primary_print, dupe_print) = (str_arg(primary_print), str_arg(dupe_print));
-    let kind = with_store(|store| crate::twin::kind(store.get(primary, &primary_print), store.get(dupe, &dupe_print)))
-        .unwrap_or_default();
+    let kind = with_store(|store| {
+        crate::twin::kind(
+            store.get(primary, &primary_print),
+            store.get(dupe, &dupe_print),
+        )
+    })
+    .unwrap_or_default();
     into_buf(kind.into_bytes())
 }
 
@@ -254,12 +345,23 @@ pub unsafe extern "C" fn nzbget_rs_twin_kind(primary: i32, primary_print: *const
 /// # Safety
 /// Every pointer is null or a valid NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_match(own: i32, own_print: *const c_char, target: *const c_char,
-    target_alt: *const c_char, donor: i32, donor_print: *const c_char) -> RsBuf {
+pub unsafe extern "C" fn nzbget_rs_twin_match(
+    own: i32,
+    own_print: *const c_char,
+    target: *const c_char,
+    target_alt: *const c_char,
+    donor: i32,
+    donor_print: *const c_char,
+) -> RsBuf {
     let (own_print, donor_print) = (str_arg(own_print), str_arg(donor_print));
     let (target, target_alt) = (str_arg(target), str_arg(target_alt));
     let found = with_store(|store| {
-        crate::twin::match_by_content(store.get(own, &own_print), &target, &target_alt, store.get(donor, &donor_print))
+        crate::twin::match_by_content(
+            store.get(own, &own_print),
+            &target,
+            &target_alt,
+            store.get(donor, &donor_print),
+        )
     })
     .flatten();
     into_buf(match found {
@@ -274,27 +376,12 @@ pub unsafe extern "C" fn nzbget_rs_twin_match(own: i32, own_print: *const c_char
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_free(buf: RsBuf) {
     if !buf.data.is_null() {
-        drop(Vec::from_raw_parts(buf.data as *mut u8, buf.len + 1, buf.cap));
+        drop(Vec::from_raw_parts(
+            buf.data as *mut u8,
+            buf.len + 1,
+            buf.cap,
+        ));
     }
-}
-
-/// Base64-decodes `input` into `output` (WebUtil::DecodeBase64); a length of
-/// 0 or less means up to the NUL, with the legacy uint32 length truncation.
-/// `output` may be `input`.
-///
-/// # Safety
-/// `input` is null or readable for its length (or through its NUL). Null input
-/// returns zero without accessing output. Otherwise `output` is writable for
-/// `len / 4 * 3` bytes and is `input` or doesn't overlap it. No terminator is
-/// written. Both buffers remain caller-owned.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_decode_base64(input: *const c_char, length: c_int, output: *mut c_char) -> u32 {
-    if input.is_null() {
-        return 0;
-    }
-    // C++ stores strlen's result in uint32 before reading any quartets.
-    let len = if length > 0 { length as usize } else { CStr::from_ptr(input).to_bytes().len() as u32 as usize };
-    crate::decode::base64_in_place(input.cast(), len, output.cast()) as u32
 }
 
 /// Decodes a JSON string body in place (WebUtil::JsonDecode).
@@ -323,43 +410,6 @@ pub unsafe extern "C" fn nzbget_rs_crc32_append(block: *const u8, len: u32, init
     }
     let slice = std::slice::from_raw_parts(block, len as usize);
     crate::crc::crc32_append(slice, init)
-}
-
-/// ZLib::GZipLen: returns upper bound on gzip-compressed output size.
-#[no_mangle]
-pub extern "C" fn nzbget_rs_gzip_len(input_len: c_int) -> u32 {
-    let n = input_len.max(0) as u32;
-    n.saturating_add(n >> 12)
-        .saturating_add(n >> 14)
-        .saturating_add(n >> 25)
-        .saturating_add(32)
-}
-
-/// ZLib::GZip: compresses `in_buf[..in_len]` into `out_buf[..out_len]` in gzip format via `flate2`.
-///
-/// # Safety
-/// `in_buf` is readable for `in_len` bytes; `out_buf` is writable for `out_len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_gzip_compress(
-    in_buf: *const u8,
-    in_len: c_int,
-    out_buf: *mut u8,
-    out_len: c_int,
-) -> u32 {
-    if out_buf.is_null() || out_len <= 0 || in_len < 0 || (in_len > 0 && in_buf.is_null()) {
-        return 0;
-    }
-    let in_slice = if in_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(in_buf, in_len as usize)
-    };
-    let out_slice = std::slice::from_raw_parts_mut(out_buf, out_len as usize);
-    let mut comp = flate2::Compress::new_gzip(flate2::Compression::default(), 15);
-    match comp.compress(in_slice, out_slice, flate2::FlushCompress::Finish) {
-        Ok(flate2::Status::StreamEnd) => comp.total_out() as u32,
-        _ => 0,
-    }
 }
 
 // ---- Terminal / TUI FFI (replacing C ncurses) ----
@@ -401,7 +451,9 @@ unsafe fn in_place(raw: *mut c_char, f: impl FnOnce(&mut [u8]) -> usize) {
 /// `raw` is null or a writable NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_xml_decode(raw: *mut c_char) {
-    in_place(raw, |b| crate::text::xml_decode(b, &crate::util::byte_tolower_locale))
+    in_place(raw, |b| {
+        crate::text::xml_decode(b, &crate::util::byte_tolower_locale)
+    })
 }
 
 /// WebUtil::XmlFindTag: a pointer into `xml` and the value length, or null
@@ -410,7 +462,11 @@ pub unsafe extern "C" fn nzbget_rs_xml_decode(raw: *mut c_char) {
 /// # Safety
 /// `xml` and `tag` are null or NUL-terminated; `value_length` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xml_find_tag(xml: *const c_char, tag: *const c_char, value_length: *mut c_int) -> *const c_char {
+pub unsafe extern "C" fn nzbget_rs_xml_find_tag(
+    xml: *const c_char,
+    tag: *const c_char,
+    value_length: *mut c_int,
+) -> *const c_char {
     if xml.is_null() || tag.is_null() || value_length.is_null() {
         return std::ptr::null();
     }
@@ -428,16 +484,6 @@ pub unsafe extern "C" fn nzbget_rs_xml_find_tag(xml: *const c_char, tag: *const 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_format_size(size: i64) -> RsBuf {
     into_buf(crate::util::format_size(size))
-}
-
-/// Util::ReduceStr, in place.
-///
-/// # Safety
-/// `s` is null or a writable NUL-terminated string; `from` and `to` are null
-/// or NUL-terminated. Operands may alias `s`; any null argument is a no-op.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_reduce_str(s: *mut c_char, from: *const c_char, to: *const c_char) {
-    crate::util::reduce_str(s, from, to)
 }
 
 /// Util::MatchFileExt.
@@ -463,7 +509,15 @@ pub struct FeedItemCallbacks {
     pub user: *mut std::ffi::c_void,
     /// a field's text (null for a null C string) and number; `attr` is the
     /// attribute name for "attr-" fields
-    pub field: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char, *mut *const c_char, *mut i64)>,
+    pub field: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            c_int,
+            *const c_char,
+            *mut *const c_char,
+            *mut i64,
+        ),
+    >,
     /// GetSeason (0) or GetEpisode (1) after the title is parsed
     pub season_episode: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int) -> *const c_char>,
     pub apply: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const FeedOptions)>,
@@ -510,13 +564,24 @@ impl crate::feedfilter::Item for CItem<'_> {
         let mut s: *const c_char = std::ptr::null();
         let mut n: i64 = 0;
         unsafe {
-            (self.cb.field.expect("callbacks validated"))(self.cb.user, field as c_int, attr.as_ptr(), &mut s, &mut n);
+            (self.cb.field.expect("callbacks validated"))(
+                self.cb.user,
+                field as c_int,
+                attr.as_ptr(),
+                &mut s,
+                &mut n,
+            );
             (c_text(s), n)
         }
     }
 
     fn season_episode(&mut self, episode: bool) -> Option<Vec<u8>> {
-        unsafe { c_text((self.cb.season_episode.expect("callbacks validated"))(self.cb.user, episode as c_int)) }
+        unsafe {
+            c_text((self.cb.season_episode.expect("callbacks validated"))(
+                self.cb.user,
+                episode as c_int,
+            ))
+        }
     }
 
     fn apply(&mut self, o: &crate::feedfilter::Applied<'_>) {
@@ -568,7 +633,9 @@ impl crate::feedfilter::Item for CItem<'_> {
 /// # Safety
 /// `filter` is null (an empty filter) or NUL-terminated.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_filter_new(filter: *const c_char) -> *mut crate::feedfilter::FeedFilter {
+pub unsafe extern "C" fn nzbget_rs_feed_filter_new(
+    filter: *const c_char,
+) -> *mut crate::feedfilter::FeedFilter {
     Box::into_raw(Box::new(crate::feedfilter::FeedFilter::new(input(filter))))
 }
 
@@ -592,12 +659,18 @@ pub unsafe extern "C" fn nzbget_rs_feed_filter_free(filter: *mut crate::feedfilt
 /// NUL-terminated strings until the next callback; passed strings are only
 /// borrowed for the callback. Regex handles must remain valid across calls.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_filter_match(filter: *mut crate::feedfilter::FeedFilter, item: *const FeedItemCallbacks) {
+pub unsafe extern "C" fn nzbget_rs_feed_filter_match(
+    filter: *mut crate::feedfilter::FeedFilter,
+    item: *const FeedItemCallbacks,
+) {
     if filter.is_null() || item.is_null() {
         return;
     }
     let cb = &*item;
-    if cb.field.is_none() || cb.season_episode.is_none() || cb.apply.is_none() || cb.set_match.is_none()
+    if cb.field.is_none()
+        || cb.season_episode.is_none()
+        || cb.apply.is_none()
+        || cb.set_match.is_none()
     {
         return;
     }
@@ -606,7 +679,11 @@ pub unsafe extern "C" fn nzbget_rs_feed_filter_match(filter: *mut crate::feedfil
 }
 
 unsafe fn bytes<'a>(p: *const c_char, len: usize) -> &'a [u8] {
-    if p.is_null() || len == 0 { &[] } else { std::slice::from_raw_parts(p.cast(), len) }
+    if p.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(p.cast(), len)
+    }
 }
 
 /// Deobfuscation::IsExcessivelyObfuscated (rust/src/deobfuscation.rs).
@@ -614,7 +691,10 @@ unsafe fn bytes<'a>(p: *const c_char, len: usize) -> &'a [u8] {
 /// # Safety
 /// `s` is null or readable for `len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_is_excessively_obfuscated(s: *const c_char, len: usize) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_is_excessively_obfuscated(
+    s: *const c_char,
+    len: usize,
+) -> c_int {
     crate::deobfuscation::is_excessively_obfuscated(bytes(s, len)) as c_int
 }
 
@@ -626,11 +706,32 @@ pub unsafe extern "C" fn nzbget_rs_is_excessively_obfuscated(s: *const c_char, l
 pub unsafe extern "C" fn nzbget_rs_file_type(which: c_int, s: *const c_char, len: usize) -> c_int {
     use crate::filetypes::*;
     const CHECKS: [fn(&[u8]) -> bool; 26] = [
-        is_seven_zip_ext, is_rar_ext, is_rar_volume_ext, is_numeric_volume_ext, is_all_digits_ext, is_archive_ext,
-        is_disc_structure_ext, is_disc_structure_dir, is_disc_descriptor_ext, is_disc_image_ext,
-        is_generic_disc_image_ext, is_clutter_dir, is_clutter_file, is_parity_ext, is_video_ext, is_audio_ext,
-        is_subtitle_ext, is_nfo_ext, is_book_ext, is_image_ext, is_sample_stem, is_seven_zip_file, is_rar_file,
-        is_archive_file, is_sample_file, is_known_collection_ext,
+        is_seven_zip_ext,
+        is_rar_ext,
+        is_rar_volume_ext,
+        is_numeric_volume_ext,
+        is_all_digits_ext,
+        is_archive_ext,
+        is_disc_structure_ext,
+        is_disc_structure_dir,
+        is_disc_descriptor_ext,
+        is_disc_image_ext,
+        is_generic_disc_image_ext,
+        is_clutter_dir,
+        is_clutter_file,
+        is_parity_ext,
+        is_video_ext,
+        is_audio_ext,
+        is_subtitle_ext,
+        is_nfo_ext,
+        is_book_ext,
+        is_image_ext,
+        is_sample_stem,
+        is_seven_zip_file,
+        is_rar_file,
+        is_archive_file,
+        is_sample_file,
+        is_known_collection_ext,
     ];
     match usize::try_from(which).ok().and_then(|w| CHECKS.get(w)) {
         Some(check) => check(bytes(s, len)) as c_int,
@@ -647,7 +748,12 @@ pub unsafe extern "C" fn nzbget_rs_file_type(which: c_int, s: *const c_char, len
 /// `len <= isize::MAX`. Null means empty regardless of `len`. Panics abort
 /// rather than unwinding across the ABI.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_path_text(op: c_int, s: *const c_char, len: usize, flag: c_int) -> RsBuf {
+pub unsafe extern "C" fn nzbget_rs_path_text(
+    op: c_int,
+    s: *const c_char,
+    len: usize,
+    flag: c_int,
+) -> RsBuf {
     let b = bytes(s, len);
     into_buf(match op {
         0 => crate::paths::make_valid_filename(b, flag != 0),
@@ -672,7 +778,11 @@ pub unsafe extern "C" fn nzbget_rs_path_position(op: c_int, s: *const c_char, le
         0 => crate::paths::base_file_name(b),
         1 => {
             let (path, name) = crate::paths::split_path_and_filename(b);
-            if name.is_empty() && path.len() == b.len() { usize::MAX } else { path.len() }
+            if name.is_empty() && path.len() == b.len() {
+                usize::MAX
+            } else {
+                path.len()
+            }
         }
         2 => crate::paths::extract_file_path_from_cmd(b).len(),
         _ => 0,
@@ -691,162 +801,12 @@ pub unsafe extern "C" fn nzbget_rs_normalize_path_separators(path: *mut c_char) 
     })
 }
 
-/// WebProcessor::ParseHeaders for one line (rust/src/webserver.rs): the kind
-/// (0 other, 1 Content-Length, 2 credentials, 3 credentials too long,
-/// 4 Accept-Encoding, 5 Origin, 6 Auth-Token cookie, 7 X-Forwarded-For,
-/// 8 If-None-Match, 9 keep-alive, 10 end of headers), its value as offset
-/// and length in the line, and a number (Content-Length, gzip).
-///
-/// # Safety
-/// `line` is null (empty) or readable for `len` initialized bytes. Header
-/// tests stop at the first NUL; fixed-offset values may start beyond it in
-/// unusual locales. Outputs are null or writable and disjoint from inputs.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_web_header(
-    line: *const c_char,
-    len: usize,
-    auth_info_empty: c_int,
-    value_start: *mut usize,
-    value_len: *mut usize,
-    number: *mut c_int,
-) -> c_int {
-    use crate::webserver::Header;
-    let l = bytes(line, len);
-    let h = crate::webserver::header(l, auth_info_empty != 0);
-    let (kind, value, n): (c_int, &[u8], c_int) = match h {
-        Header::Other => (0, &[], 0),
-        Header::ContentLength(n) => (1, &[], n),
-        Header::Auth(v) => (2, v, 0),
-        Header::AuthTooBig => (3, &[], 0),
-        Header::AcceptEncoding { gzip } => (4, &[], gzip as c_int),
-        Header::Origin(v) => (5, v, 0),
-        Header::AuthToken(v) => (6, v, 0),
-        Header::ForwardedFor(v) => (7, v, 0),
-        Header::IfNoneMatch(v) => (8, v, 0),
-        Header::KeepAlive => (9, &[], 0),
-        Header::End => (10, &[], 0),
-    };
-    if !value_start.is_null() {
-        // the value's place in the line, an empty value's too (an empty
-        // "Authorization: Basic " decodes nothing, not the whole line)
-        let at = value.as_ptr() as usize;
-        let base = l.as_ptr() as usize;
-        *value_start = if at >= base && at <= base + l.len() { at - base } else { l.len() };
-    }
-    if !value_len.is_null() {
-        *value_len = value.len();
-    }
-    if !number.is_null() {
-        *number = n;
-    }
-    kind
-}
-
-/// WebProcessor::ParseUrl: the URL to dispatch, or with `redirect` set the
-/// location to redirect to; `auth` gets the credentials of the URL (data
-/// null for none). Free both with nzbget_rs_free.
-///
-/// # Safety
-/// `url` is null (empty) or readable for `len` bytes, stopping at its first
-/// NUL. `redirect` and `auth` are null or writable, disjoint from the input
-/// and each other. The caller owns returned buffers; free with nzbget_rs_free.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_web_parse_url(url: *const c_char, len: usize, redirect: *mut c_int, auth: *mut RsBuf) -> RsBuf {
-    let none = || RsBuf { data: std::ptr::null_mut(), len: 0, cap: 0 };
-    if !auth.is_null() {
-        *auth = none();
-    }
-    match crate::webserver::parse_url(bytes(url, len)) {
-        crate::webserver::Url::Redirect(loc) => {
-            if !redirect.is_null() {
-                *redirect = 1;
-            }
-            into_buf(loc)
-        }
-        crate::webserver::Url::Go { url, auth: a } => {
-            if !redirect.is_null() {
-                *redirect = 0;
-            }
-            if let (Some(a), false) = (a, auth.is_null()) {
-                *auth = into_buf(a);
-            }
-            into_buf(url)
-        }
-    }
-}
-
-/// CheckCredentials' options and inputs (null strings for unset options).
-#[repr(C)]
-pub struct WebCredentialsC {
-    /// control, restricted, add: username, password
-    pub users: [*const c_char; 6],
-    pub authorized_ip: *const c_char,
-    pub remote_addr: *const c_char,
-    pub auth_info: *const c_char,
-    pub auth_token: *const c_char,
-    pub server_tokens: [*const c_char; 3],
-}
-
-/// CheckCredentials' result.
-#[repr(C)]
-pub struct WebCheckC {
-    pub authorized: c_int,
-    /// EUserAccess, or -1 to leave it
-    pub access: c_int,
-    /// where m_authInfo is cut (its ':'), or -1
-    pub auth_cut: isize,
-    pub warn: c_int,
-}
-
-unsafe fn opt(p: *const c_char) -> Option<&'static [u8]> {
-    (!p.is_null()).then(|| CStr::from_ptr(p).to_bytes())
-}
-
-/// WebProcessor::CheckCredentials.
-///
-/// # Safety
-/// `input` is null or readable; its strings are null or NUL-terminated.
-/// `out` is null or writable and disjoint from all input storage. Null input denies access.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_web_check_credentials(input: *const WebCredentialsC, out: *mut WebCheckC) {
-    if out.is_null() {
-        return;
-    }
-    *out = WebCheckC { authorized: 0, access: -1, auth_cut: -1, warn: 0 };
-    if input.is_null() {
-        return;
-    }
-    let i = &*input;
-    let lower = crate::wildmask::Lower::Fold(&crate::util::wild_mask_fold_locale);
-    let o = crate::webserver::Credentials {
-        control_username: opt(i.users[0]),
-        control_password: opt(i.users[1]),
-        restricted_username: opt(i.users[2]),
-        restricted_password: opt(i.users[3]),
-        add_username: opt(i.users[4]),
-        add_password: opt(i.users[5]),
-        authorized_ip: opt(i.authorized_ip),
-    };
-    let tokens = [opt(i.server_tokens[0]).unwrap_or_default(), opt(i.server_tokens[1]).unwrap_or_default(), opt(i.server_tokens[2]).unwrap_or_default()];
-    let r = crate::webserver::check_credentials(
-        &o,
-        opt(i.remote_addr).unwrap_or_default(),
-        opt(i.auth_info).unwrap_or_default(),
-        opt(i.auth_token).unwrap_or_default(),
-        tokens,
-        &lower,
-    );
-    *out = WebCheckC {
-        authorized: r.authorized as c_int,
-        access: r.access.unwrap_or(-1),
-        auth_cut: r.auth_cut.map_or(-1, |k| k as isize),
-        warn: r.warn as c_int,
-    };
-}
-
 /// Decoder (rust/src/decoder.rs) with built-in Rust `nntmux-yenc` + `crc32fast` (or custom callbacks).
 #[no_mangle]
-pub extern "C" fn nzbget_rs_decoder_new(decode: Option<crate::decoder::DecodeFn>, crc: Option<crate::decoder::CrcFn>) -> *mut crate::decoder::Decoder {
+pub extern "C" fn nzbget_rs_decoder_new(
+    decode: Option<crate::decoder::DecodeFn>,
+    crc: Option<crate::decoder::CrcFn>,
+) -> *mut crate::decoder::Decoder {
     let (decode, crc) = match (decode, crc) {
         (Some(d), Some(c)) => (d, c),
         (None, None) => (
@@ -873,7 +833,9 @@ pub unsafe extern "C" fn nzbget_rs_decoder_free(d: *mut crate::decoder::Decoder)
 /// `d` is null or a live, exclusively borrowed handle from nzbget_rs_decoder_new.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_decoder_clear(d: *mut crate::decoder::Decoder) {
-    if let Some(d) = d.as_mut() { d.clear(); }
+    if let Some(d) = d.as_mut() {
+        d.clear();
+    }
 }
 
 /// Decoder::DecodeBuffer.
@@ -883,7 +845,11 @@ pub unsafe extern "C" fn nzbget_rs_decoder_clear(d: *mut crate::decoder::Decoder
 /// Decoder needed (see Decoder::decode_buffer), disjoint from `d`. NULL
 /// input or a negative length is a no-op. Panics abort at this C ABI boundary.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_decoder_decode(d: *mut crate::decoder::Decoder, buffer: *mut c_char, len: c_int) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_decoder_decode(
+    d: *mut crate::decoder::Decoder,
+    buffer: *mut c_char,
+    len: c_int,
+) -> c_int {
     if d.is_null() || buffer.is_null() || len < 0 {
         return 0;
     }
@@ -896,7 +862,8 @@ pub unsafe extern "C" fn nzbget_rs_decoder_decode(d: *mut crate::decoder::Decode
 /// `d` is null or a live, exclusively borrowed handle from nzbget_rs_decoder_new.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_decoder_check(d: *mut crate::decoder::Decoder) -> c_int {
-    d.as_mut().map_or(crate::decoder::Status::UnknownError, |d| d.check()) as c_int
+    d.as_mut()
+        .map_or(crate::decoder::Status::UnknownError, |d| d.check()) as c_int
 }
 
 /// The decoder's settings and fields: `which` 0 crc check, 1 raw mode
@@ -905,7 +872,11 @@ pub unsafe extern "C" fn nzbget_rs_decoder_check(d: *mut crate::decoder::Decoder
 /// # Safety
 /// `d` is null or a live, exclusively borrowed handle from nzbget_rs_decoder_new.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_decoder_set(d: *mut crate::decoder::Decoder, which: c_int, value: c_int) {
+pub unsafe extern "C" fn nzbget_rs_decoder_set(
+    d: *mut crate::decoder::Decoder,
+    which: c_int,
+    value: c_int,
+) {
     let Some(d) = d.as_mut() else { return };
     match which {
         0 => d.crc_check = value != 0,
@@ -920,7 +891,10 @@ pub unsafe extern "C" fn nzbget_rs_decoder_set(d: *mut crate::decoder::Decoder, 
 /// # Safety
 /// `d` is null or a live, exclusively borrowed handle from nzbget_rs_decoder_new.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_decoder_get(d: *mut crate::decoder::Decoder, which: c_int) -> i64 {
+pub unsafe extern "C" fn nzbget_rs_decoder_get(
+    d: *mut crate::decoder::Decoder,
+    which: c_int,
+) -> i64 {
     let Some(d) = d.as_ref() else { return 0 };
     match which {
         0 => d.format as i64,
@@ -939,7 +913,9 @@ pub unsafe extern "C" fn nzbget_rs_decoder_get(d: *mut crate::decoder::Decoder, 
 /// # Safety
 /// `d` is null or a live, exclusively borrowed handle from nzbget_rs_decoder_new.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_decoder_filename(d: *mut crate::decoder::Decoder) -> *const c_char {
+pub unsafe extern "C" fn nzbget_rs_decoder_filename(
+    d: *mut crate::decoder::Decoder,
+) -> *const c_char {
     d.as_mut().map_or(c"".as_ptr(), |d| d.filename_c().cast())
 }
 
@@ -981,16 +957,26 @@ pub unsafe extern "C" fn nzbget_rs_scheduler_check(
     {
         return 0;
     }
-    let tasks: &mut [crate::scheduler::Task] =
-        if count == 0 { &mut [] } else { std::slice::from_raw_parts_mut(tasks, count) };
+    let tasks: &mut [crate::scheduler::Task] = if count == 0 {
+        &mut []
+    } else {
+        std::slice::from_raw_parts_mut(tasks, count)
+    };
     // Keep the retry transactional, including each task's last execution time.
     let mut updated_tasks = tasks.to_vec();
     let mut updated_last_check = *last_check;
-    let r = crate::scheduler::check_tasks(&mut updated_tasks, &mut updated_last_check, current, current_offset, last_check_offset, |time| {
-        let mut fields = std::mem::MaybeUninit::uninit();
-        gmtime(time, fields.as_mut_ptr());
-        fields.assume_init()
-    });
+    let r = crate::scheduler::check_tasks(
+        &mut updated_tasks,
+        &mut updated_last_check,
+        current,
+        current_offset,
+        last_check_offset,
+        |time| {
+            let mut fields = std::mem::MaybeUninit::uninit();
+            gmtime(time, fields.as_mut_ptr());
+            fields.assume_init()
+        },
+    );
     let n = r.due.len();
     if n > due_capacity {
         return n;
@@ -1044,7 +1030,8 @@ pub unsafe extern "C" fn nzbget_rs_rpc_next_param(
     str_value: *mut *mut c_char,
 ) -> c_int {
     use crate::rpcparams::{Kind, Raw};
-    if request.is_null() || (*request).is_null()
+    if request.is_null()
+        || (*request).is_null()
         || !matches!(what, 0..=2)
         || (what != 2 && int_value.is_null())
         || (what == 2 && str_value.is_null())
@@ -1119,7 +1106,11 @@ pub unsafe extern "C" fn nzbget_rs_rpc_route(
     id_len: *mut c_int,
 ) {
     let r = crate::rpcroute::route(input(url), input(request), get != 0, protocol);
-    std::ptr::copy_nonoverlapping(r.method.as_ptr().cast::<c_char>(), method_name, r.method.len());
+    std::ptr::copy_nonoverlapping(
+        r.method.as_ptr().cast::<c_char>(),
+        method_name,
+        r.method.len(),
+    );
     *method_name.add(r.method.len()) = 0;
     *params = match r.params {
         // a null URL has no parameters to point into (and no arithmetic on null)
@@ -1198,7 +1189,11 @@ pub unsafe extern "C" fn nzbget_rs_rpc_decide(
 
 /// `len` bytes at `data` (empty when null or zero).
 unsafe fn span<'a>(data: *const c_char, len: usize) -> &'a [u8] {
-    if data.is_null() || len == 0 { &[] } else { std::slice::from_raw_parts(data.cast::<u8>(), len) }
+    if data.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data.cast::<u8>(), len)
+    }
 }
 
 /// Util::SplitCommandLine: the words, each NUL-terminated, one after the
@@ -1228,7 +1223,11 @@ pub unsafe extern "C" fn nzbget_rs_trim_line(s: *mut c_char, right_only: c_int) 
     }
     let text = CStr::from_ptr(s).to_bytes();
     let len = text.len();
-    let (start, end) = if right_only != 0 { (0, crate::util::trim_right_line(text)) } else { crate::util::trim_line(text) };
+    let (start, end) = if right_only != 0 {
+        (0, crate::util::trim_right_line(text))
+    } else {
+        crate::util::trim_line(text)
+    };
     // The legacy helper zeroes every removed byte, not just the new terminator.
     // The shared CStr borrow ends before these writes.
     std::ptr::write_bytes(s.add(end), 0, len - end);
@@ -1240,7 +1239,11 @@ pub unsafe extern "C" fn nzbget_rs_trim_line(s: *mut c_char, right_only: c_int) 
 /// # Safety
 /// `first_day` and `slots` are null (a no-op) or writable.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_volume_calc_slots(loc_cur_time: i64, first_day: *mut c_int, slots: *mut crate::statmeter::Slots) {
+pub unsafe extern "C" fn nzbget_rs_volume_calc_slots(
+    loc_cur_time: i64,
+    first_day: *mut c_int,
+    slots: *mut crate::statmeter::Slots,
+) {
     if first_day.is_null() || slots.is_null() {
         return;
     }
@@ -1273,12 +1276,25 @@ pub unsafe extern "C" fn nzbget_rs_volume_add(
     bytes: i64,
 ) {
     unsafe fn array<'a>(p: *mut i64, len: usize) -> &'a mut [i64] {
-        if p.is_null() || len == 0 { &mut [] } else { std::slice::from_raw_parts_mut(p, len) }
+        if p.is_null() || len == 0 {
+            &mut []
+        } else {
+            std::slice::from_raw_parts_mut(p, len)
+        }
     }
-    let Some(slots) = slots.as_ref().copied() else { return };
+    let Some(slots) = slots.as_ref().copied() else {
+        return;
+    };
     crate::statmeter::add_stats(
-        array(seconds, seconds_len), array(minutes, minutes_len), array(hours, hours_len), &slots,
-        last_min_slot, last_hour_slot, loc_cur_time, loc_data_time, bytes,
+        array(seconds, seconds_len),
+        array(minutes, minutes_len),
+        array(hours, hours_len),
+        &slots,
+        last_min_slot,
+        last_hour_slot,
+        loc_cur_time,
+        loc_data_time,
+        bytes,
     );
 }
 
@@ -1308,8 +1324,12 @@ pub unsafe extern "C" fn nzbget_rs_validate_option_name(
 /// `name` is null (not protected), or points to a readable NUL-terminated
 /// string in one allocation, unchanged for the duration of the call.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_option_restricted(name: *const c_char, signed_char: c_int) -> c_int {
-    (!name.is_null() && crate::options::option_restricted(CStr::from_ptr(name), signed_char != 0)) as c_int
+pub unsafe extern "C" fn nzbget_rs_option_restricted(
+    name: *const c_char,
+    signed_char: c_int,
+) -> c_int {
+    (!name.is_null() && crate::options::option_restricted(CStr::from_ptr(name), signed_char != 0))
+        as c_int
 }
 
 /// NzbgetRsNntpIo: the C++ connection for the NNTP exchange. Each callback
@@ -1319,7 +1339,8 @@ pub struct NntpIo {
     pub ctx: *mut std::ffi::c_void,
     pub write_line: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
     pub read_line: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut *mut c_char) -> c_int>,
-    pub report_error: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char) -> c_int>,
+    pub report_error:
+        Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char) -> c_int>,
     pub debug: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
     pub cancelled: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut c_int) -> c_int>,
     pub user: *const c_char,
@@ -1337,12 +1358,20 @@ struct FfiNntp<'a> {
 impl FfiNntp<'_> {
     unsafe fn text<'a>(p: *const c_char) -> &'a CStr {
         // the C++ strings outlive the exchange
-        if p.is_null() { c"" } else { unsafe { CStr::from_ptr(p) } }
+        if p.is_null() {
+            c""
+        } else {
+            unsafe { CStr::from_ptr(p) }
+        }
     }
 }
 
 fn nntp_status(r: c_int) -> Result<(), crate::nntp::Abort> {
-    if r == 0 { Ok(()) } else { Err(crate::nntp::Abort) }
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(crate::nntp::Abort)
+    }
 }
 
 // The caller of the NNTP exports guarantees the Io buffer/callback contract.
@@ -1406,7 +1435,10 @@ unsafe fn nntp_run<T>(
     if auth_error.is_null() || auth_rejected.is_null() {
         return -1;
     }
-    let mut auth = crate::nntp::Auth { error: *auth_error != 0, rejected: *auth_rejected != 0 };
+    let mut auth = crate::nntp::Auth {
+        error: *auth_error != 0,
+        rejected: *auth_rejected != 0,
+    };
     let r = f(&mut FfiNntp { io }, &mut auth);
     *auth_error = auth.error as c_int;
     *auth_rejected = auth.rejected as c_int;
@@ -1438,7 +1470,13 @@ pub unsafe extern "C" fn nzbget_rs_nntp_request(
     if req.is_null() || answer.is_null() {
         return -1;
     }
-    nntp_run(io, auth_error, auth_rejected, |io, auth| crate::nntp::request(io, auth, req), |a| *answer = a)
+    nntp_run(
+        io,
+        auth_error,
+        auth_rejected,
+        |io, auth| crate::nntp::request(io, auth, req),
+        |a| *answer = a,
+    )
 }
 
 /// NntpConnection::Connect after the socket connected: `*result` 0 connected,
@@ -1456,7 +1494,9 @@ pub unsafe extern "C" fn nzbget_rs_nntp_handshake(
     if result.is_null() {
         return -1;
     }
-    nntp_run(io, auth_error, auth_rejected, crate::nntp::handshake, |r| *result = r)
+    nntp_run(io, auth_error, auth_rejected, crate::nntp::handshake, |r| {
+        *result = r
+    })
 }
 
 /// NntpConnection::JoinGroup when not in `group`: the answer (or null) and
@@ -1476,10 +1516,16 @@ pub unsafe extern "C" fn nzbget_rs_nntp_join_group(
     if group.is_null() || answer.is_null() || joined.is_null() {
         return -1;
     }
-    nntp_run(io, auth_error, auth_rejected, |io, auth| crate::nntp::join_group(io, auth, group), |(a, j)| {
-        *answer = a;
-        *joined = j as c_int;
-    })
+    nntp_run(
+        io,
+        auth_error,
+        auth_rejected,
+        |io, auth| crate::nntp::join_group(io, auth, group),
+        |(a, j)| {
+            *answer = a;
+            *joined = j as c_int;
+        },
+    )
 }
 
 /// NzbgetRsCmdlineSink: the C++ CommandLineParser's fields. Each callback
@@ -1500,7 +1546,11 @@ pub struct CmdlineSink {
 struct FfiCmdline<'a>(&'a CmdlineSink);
 
 fn cmd_status(r: c_int) -> Result<(), crate::cmdline::Abort> {
-    if r == 0 { Ok(()) } else { Err(crate::cmdline::Abort) }
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(crate::cmdline::Abort)
+    }
 }
 
 impl crate::cmdline::Sink for FfiCmdline<'_> {
@@ -1554,21 +1604,32 @@ impl crate::cmdline::Sink for FfiCmdline<'_> {
 /// unwind. `sink` is valid; getopt globals are not used concurrently.
 /// Rust panics abort at this ABI boundary; they never unwind into C++.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cmdline_parse(argc: c_int, argv: *mut *mut c_char, use_long: c_int, sink: *const CmdlineSink) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_cmdline_parse(
+    argc: c_int,
+    argv: *mut *mut c_char,
+    use_long: c_int,
+    sink: *const CmdlineSink,
+) -> c_int {
     let Some(sink) = sink.as_ref() else { return -1 };
     if argv.is_null() || argc < 1 {
         return -1;
     }
     if (0..argc).any(|i| (*argv.add(i as usize)).is_null())
-        || sink.set_int.is_none() || sink.set_str.is_none() || sink.steal.is_none()
-        || sink.push_option.is_none() || sink.push_id.is_none()
-        || sink.push_name.is_none() || sink.error.is_none()
+        || sink.set_int.is_none()
+        || sink.set_str.is_none()
+        || sink.steal.is_none()
+        || sink.push_option.is_none()
+        || sink.push_id.is_none()
+        || sink.push_name.is_none()
+        || sink.error.is_none()
     {
         return -1;
     }
-    crate::cmdline::with_getopt_lock(|| match crate::cmdline::parse(argc, argv, use_long != 0, &mut FfiCmdline(sink)) {
-        Ok(()) => 0,
-        Err(_) => -1,
+    crate::cmdline::with_getopt_lock(|| {
+        match crate::cmdline::parse(argc, argv, use_long != 0, &mut FfiCmdline(sink)) {
+            Ok(()) => 0,
+            Err(_) => -1,
+        }
     })
 }
 
@@ -1586,12 +1647,24 @@ mod cmdline_tests {
     unsafe fn called(ctx: *mut c_void) -> c_int {
         let calls = &mut *ctx.cast::<Calls>();
         calls.count += 1;
-        if calls.count == calls.fail_at { -1 } else { 0 }
+        if calls.count == calls.fail_at {
+            -1
+        } else {
+            0
+        }
     }
-    unsafe extern "C" fn integer(ctx: *mut c_void, _: c_int, _: c_int) -> c_int { called(ctx) }
-    unsafe extern "C" fn string(ctx: *mut c_void, _: c_int, _: *const c_char) -> c_int { called(ctx) }
-    unsafe extern "C" fn id(ctx: *mut c_void, _: c_int) -> c_int { called(ctx) }
-    unsafe extern "C" fn text(ctx: *mut c_void, _: *const c_char) -> c_int { called(ctx) }
+    unsafe extern "C" fn integer(ctx: *mut c_void, _: c_int, _: c_int) -> c_int {
+        called(ctx)
+    }
+    unsafe extern "C" fn string(ctx: *mut c_void, _: c_int, _: *const c_char) -> c_int {
+        called(ctx)
+    }
+    unsafe extern "C" fn id(ctx: *mut c_void, _: c_int) -> c_int {
+        called(ctx)
+    }
+    unsafe extern "C" fn text(ctx: *mut c_void, _: *const c_char) -> c_int {
+        called(ctx)
+    }
     unsafe extern "C" fn steal(ctx: *mut c_void, _: c_int, index: c_int) -> c_int {
         let result = called(ctx);
         if result == 0 {
@@ -1603,25 +1676,55 @@ mod cmdline_tests {
 
     #[test]
     fn cmdline_rejects_invalid_inputs_and_stops_at_each_failed_callback() {
-        let mut calls = Calls { count: 0, fail_at: usize::MAX, argv: std::ptr::null_mut() };
+        let mut calls = Calls {
+            count: 0,
+            fail_at: usize::MAX,
+            argv: std::ptr::null_mut(),
+        };
         let mut sink = CmdlineSink {
-            getopt_long: None, ctx: (&mut calls as *mut Calls).cast(),
-            set_int: Some(integer), set_str: Some(string), steal: Some(steal),
-            push_option: Some(text), push_id: Some(id), push_name: Some(text), error: Some(text),
+            getopt_long: None,
+            ctx: (&mut calls as *mut Calls).cast(),
+            set_int: Some(integer),
+            set_str: Some(string),
+            steal: Some(steal),
+            push_option: Some(text),
+            push_id: Some(id),
+            push_name: Some(text),
+            error: Some(text),
         };
         let mut null_arg = [std::ptr::null_mut()];
         let mut null_value = [c"nzbget".as_ptr().cast_mut(), std::ptr::null_mut()];
         unsafe {
-            assert_eq!(nzbget_rs_cmdline_parse(2, null_value.as_mut_ptr(), 0, &sink), -1);
-            assert_eq!(nzbget_rs_cmdline_parse(1, null_arg.as_mut_ptr(), 0, &sink), -1);
-            assert_eq!(nzbget_rs_cmdline_parse(1, std::ptr::null_mut(), 0, &sink), -1);
-            assert_eq!(nzbget_rs_cmdline_parse(0, null_arg.as_mut_ptr(), 0, &sink), -1);
-            assert_eq!(nzbget_rs_cmdline_parse(-1, null_arg.as_mut_ptr(), 0, &sink), -1);
-            assert_eq!(nzbget_rs_cmdline_parse(1, null_arg.as_mut_ptr(), 0, std::ptr::null()), -1);
+            assert_eq!(
+                nzbget_rs_cmdline_parse(2, null_value.as_mut_ptr(), 0, &sink),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_cmdline_parse(1, null_arg.as_mut_ptr(), 0, &sink),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_cmdline_parse(1, std::ptr::null_mut(), 0, &sink),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_cmdline_parse(0, null_arg.as_mut_ptr(), 0, &sink),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_cmdline_parse(-1, null_arg.as_mut_ptr(), 0, &sink),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_cmdline_parse(1, null_arg.as_mut_ptr(), 0, std::ptr::null()),
+                -1
+            );
         }
         assert_eq!(calls.count, 0);
         for args in [
-            vec!["nzbget", "-A", "N", "name", "-o", "X=1", "-c", "conf", "file"],
+            vec![
+                "nzbget", "-A", "N", "name", "-o", "X=1", "-c", "conf", "file",
+            ],
             vec!["nzbget", "-E", "GN", "D", "name"],
             vec!["nzbget", "-E", "G", "D", "1,3-5"],
             vec!["nzbget", "-E", "G", "invalid"],
@@ -1634,7 +1737,9 @@ mod cmdline_tests {
                 calls.count = 0;
                 calls.fail_at = fail_at;
                 calls.argv = argv.as_mut_ptr();
-                let result = unsafe { nzbget_rs_cmdline_parse(args.len() as c_int, argv.as_mut_ptr(), 0, &sink) };
+                let result = unsafe {
+                    nzbget_rs_cmdline_parse(args.len() as c_int, argv.as_mut_ptr(), 0, &sink)
+                };
                 if result == 0 {
                     assert_eq!(calls.count + 1, fail_at);
                     break;
@@ -1688,7 +1793,8 @@ pub unsafe extern "C" fn nzbget_rs_file_exists(path: *const c_char) -> c_int {
 #[cfg(unix)]
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_directory_exists(path: *const c_char) -> c_int {
-    (!path.is_null() && crate::fsops::directory_exists(input(path), &crate::fsops::posix_stat)) as c_int
+    (!path.is_null() && crate::fsops::directory_exists(input(path), &crate::fsops::posix_stat))
+        as c_int
 }
 
 /// FileSystem::ForceDirectories: 1 created or there, else 0 with the message
@@ -1699,7 +1805,10 @@ pub unsafe extern "C" fn nzbget_rs_directory_exists(path: *const c_char) -> c_in
 /// from the input. Every non-null output is initialized, including on failure.
 #[cfg(unix)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_force_directories(path: *const c_char, errmsg: *mut RsBuf) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_force_directories(
+    path: *const c_char,
+    errmsg: *mut RsBuf,
+) -> c_int {
     if errmsg.is_null() {
         return 0;
     }
@@ -1818,7 +1927,8 @@ fn c_string(b: &[u8]) -> std::ffi::CString {
 pub struct RarRenamerRunEnv {
     pub ctx: *mut std::ffi::c_void,
     pub stopped: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    pub progress: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int) -> c_int>,
+    pub progress:
+        Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int) -> c_int>,
     pub message: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char) -> c_int>,
     pub register_renamed:
         Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char) -> c_int>,
@@ -1828,7 +1938,9 @@ struct FfiRarRenamerRun<'a>(&'a RarRenamerRunEnv);
 
 impl crate::rarrenamer::RunCallbacks for FfiRarRenamerRun<'_> {
     fn stopped(&mut self) -> Result<bool, ()> {
-        let Some(f) = self.0.stopped else { return Ok(false) };
+        let Some(f) = self.0.stopped else {
+            return Ok(false);
+        };
         match unsafe { f(self.0.ctx) } {
             0 => Ok(false),
             1 => Ok(true),
@@ -1836,7 +1948,9 @@ impl crate::rarrenamer::RunCallbacks for FfiRarRenamerRun<'_> {
         }
     }
     fn progress(&mut self, label: &[u8], stage_progress: i32) -> Result<(), ()> {
-        let Some(f) = self.0.progress else { return Ok(()) };
+        let Some(f) = self.0.progress else {
+            return Ok(());
+        };
         let l = c_string(label);
         if unsafe { f(self.0.ctx, l.as_ptr(), stage_progress) } == 0 {
             Ok(())
@@ -1845,7 +1959,9 @@ impl crate::rarrenamer::RunCallbacks for FfiRarRenamerRun<'_> {
         }
     }
     fn message(&mut self, kind: i32, text: &[u8]) -> Result<(), ()> {
-        let Some(f) = self.0.message else { return Ok(()) };
+        let Some(f) = self.0.message else {
+            return Ok(());
+        };
         let t = c_string(text);
         if unsafe { f(self.0.ctx, kind, t.as_ptr()) } == 0 {
             Ok(())
@@ -1854,7 +1970,9 @@ impl crate::rarrenamer::RunCallbacks for FfiRarRenamerRun<'_> {
         }
     }
     fn register_renamed(&mut self, old_base: &[u8], new_base: &[u8]) -> Result<(), ()> {
-        let Some(f) = self.0.register_renamed else { return Ok(()) };
+        let Some(f) = self.0.register_renamed else {
+            return Ok(());
+        };
         let o = c_string(old_base);
         let n = c_string(new_base);
         if unsafe { f(self.0.ctx, o.as_ptr(), n.as_ptr()) } == 0 {
@@ -1885,7 +2003,11 @@ pub unsafe extern "C" fn nzbget_rs_rar_renamer_execute(
     let (Some(env), Some(renamed_count)) = (env.as_ref(), renamed_count.as_mut()) else {
         return -1;
     };
-    let info = if info_name.is_null() { &b"(null)"[..] } else { input(info_name) };
+    let info = if info_name.is_null() {
+        &b"(null)"[..]
+    } else {
+        input(info_name)
+    };
     let res = crate::rarrenamer::execute_all(
         input(dest_dir),
         info,
@@ -1895,7 +2017,11 @@ pub unsafe extern "C" fn nzbget_rs_rar_renamer_execute(
         renamed_count,
         &mut FfiRarRenamerRun(env),
     );
-    if res.is_ok() { 0 } else { -1 }
+    if res.is_ok() {
+        0
+    } else {
+        -1
+    }
 }
 
 /// DirectRenamer's RenameContentAnalyzer: a new analyzer (free with
@@ -1961,7 +2087,10 @@ pub unsafe extern "C" fn nzbget_rs_rename_analyzer_append(
 /// `a` is null or a live, exclusively accessed analyzer; `hash` is null or
 /// writable for 33 bytes and does not overlap `a`.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rename_analyzer_finish(a: *mut crate::renameanalyzer::Analyzer, hash: *mut c_char) {
+pub unsafe extern "C" fn nzbget_rs_rename_analyzer_finish(
+    a: *mut crate::renameanalyzer::Analyzer,
+    hash: *mut c_char,
+) {
     let Some(a) = a.as_mut() else { return };
     if hash.is_null() {
         return;
@@ -1971,7 +2100,8 @@ pub unsafe extern "C" fn nzbget_rs_rename_analyzer_finish(a: *mut crate::renamea
 }
 
 /// Reads the par2 hash at an index of DirectRenamer's FileHashList.
-pub type ParHashAt = unsafe extern "C" fn(*mut std::ffi::c_void, usize, *mut *const c_char, *mut *const c_char);
+pub type ParHashAt =
+    unsafe extern "C" fn(*mut std::ffi::c_void, usize, *mut *const c_char, *mut *const c_char);
 
 /// DirectRenamer::BuildNewRegularName: the index of the par2 hash whose file
 /// name the file gets, or -1 to keep its name.
@@ -1981,8 +2111,13 @@ pub type ParHashAt = unsafe extern "C" fn(*mut std::ffi::c_void, usize, *mut *co
 /// for every index below `count`, a filename and hash that are null (empty)
 /// or NUL-terminated and stay valid until this returns; it must not unwind.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_direct_regular_name(old_name: *const c_char, hash16k: *const c_char, count: usize,
-    at: Option<ParHashAt>, ctx: *mut std::ffi::c_void) -> isize {
+pub unsafe extern "C" fn nzbget_rs_direct_regular_name(
+    old_name: *const c_char,
+    hash16k: *const c_char,
+    count: usize,
+    at: Option<ParHashAt>,
+    ctx: *mut std::ffi::c_void,
+) -> isize {
     let as_c = |p: *const c_char| if p.is_null() { c"" } else { CStr::from_ptr(p) };
     let Some(at) = at else { return -1 };
     let hashes = (0..count).map(|i| {
@@ -1990,7 +2125,8 @@ pub unsafe extern "C" fn nzbget_rs_direct_regular_name(old_name: *const c_char, 
         at(ctx, i, &mut filename, &mut hash);
         (as_c(filename), as_c(hash))
     });
-    crate::directrenamer::regular_name(as_c(old_name), as_c(hash16k), hashes).map_or(-1, |i| i as isize)
+    crate::directrenamer::regular_name(as_c(old_name), as_c(hash16k), hashes)
+        .map_or(-1, |i| i as isize)
 }
 
 /// DirectRenamer::BuildNewParName; free the name with nzbget_rs_free.
@@ -2032,13 +2168,26 @@ pub struct ParName {
 /// NUL-terminated (null: needs renaming), set ids null (empty) or
 /// NUL-terminated.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_direct_need_rename_pars(pars: *const ParName, count: usize) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_direct_need_rename_pars(
+    pars: *const ParName,
+    count: usize,
+) -> c_int {
     if pars.is_null() {
         return 0;
     }
-    let pars: Vec<_> = std::slice::from_raw_parts(pars, count).iter().map(|p| {
-        ((!p.filename.is_null()).then(|| CStr::from_ptr(p.filename)), if p.set_id.is_null() { c"" } else { CStr::from_ptr(p.set_id) })
-    }).collect();
+    let pars: Vec<_> = std::slice::from_raw_parts(pars, count)
+        .iter()
+        .map(|p| {
+            (
+                (!p.filename.is_null()).then(|| CStr::from_ptr(p.filename)),
+                if p.set_id.is_null() {
+                    c""
+                } else {
+                    CStr::from_ptr(p.set_id)
+                },
+            )
+        })
+        .collect();
     crate::directrenamer::need_rename_pars(&pars) as c_int
 }
 
@@ -2061,7 +2210,9 @@ pub unsafe extern "C" fn nzbget_rs_par_renamer_execute(
     update_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int)>,
     print_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
     register_parred_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-    register_renamed_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char)>,
+    register_renamed_cb: Option<
+        unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char),
+    >,
     out_renamed_count: *mut c_int,
     out_has_missed_files: *mut c_int,
     out_has_damaged_par_files: *mut c_int,
@@ -2207,7 +2358,9 @@ pub unsafe extern "C" fn nzbget_rs_delete_directory_with_content(
         crate::fsops::set_last_errno(libc::EFAULT);
         if !errmsg.is_null() {
             let last_err = crate::fsops::error_message(libc::EFAULT);
-            errmsg.write(into_buf(crate::util::fs_format_null_delete_errmsg(&last_err)));
+            errmsg.write(into_buf(crate::util::fs_format_null_delete_errmsg(
+                &last_err,
+            )));
         }
         return 0;
     }
@@ -2269,85 +2422,6 @@ pub unsafe extern "C" fn nzbget_rs_file_extension(name: *const c_char, len: usiz
     crate::fsdelete::file_extension(name).map_or(-1, |ext| (name.len() - ext.len()) as isize)
 }
 
-/// BinRpcProcessor::Execute's check of a request base (BASE_SIZE bytes as
-/// received): 1 when the credentials match, else 0; `kind` (null: not
-/// written) gets the request type.
-///
-/// # Safety
-/// `base` is readable for `len` bytes (fewer than BASE_SIZE: 0); the control
-/// names are null (empty) or NUL-terminated; `kind` is null or writable.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_check(base: *const u8, len: usize, control_user: *const c_char,
-    control_password: *const c_char, kind: *mut u32) -> c_int {
-    let Some(base) = bytes_arg(base, len).get(..crate::binrpc::BASE_SIZE) else { return 0 };
-    let base: &[u8; crate::binrpc::BASE_SIZE] = base.try_into().unwrap();
-    // Finish reading inputs before writing an output that may overlap them.
-    let request_type = crate::binrpc::request_type(base);
-    let valid = crate::binrpc::credentials_ok(base, input(control_user), input(control_password));
-    if !kind.is_null() {
-        kind.write(request_type);
-    }
-    valid as c_int
-}
-
-/// The request type's name for the log ("Unknown" past the last type): a
-/// static NUL-terminated string.
-#[no_mangle]
-pub extern "C" fn nzbget_rs_binrpc_name(kind: u32) -> *const c_char {
-    crate::binrpc::request_name(kind).as_ptr()
-}
-
-/// Dispatch's size check against g_MessageRequestSizes: 1 when fine, 0 with
-/// `expected`/`received` (null: not written) set on a size mismatch. A short
-/// base or a missing table entry also returns 0, leaving outputs untouched.
-///
-/// # Safety
-/// `base` is null or readable for `len` bytes; `sizes` is null or `count`
-/// readable, aligned values; outputs are null or writable, aligned values.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_size_ok(base: *const u8, len: usize, sizes: *const u32, count: usize,
-    expected: *mut u32, received: *mut u32) -> c_int {
-    let Some(base) = bytes_arg(base, len).get(..crate::binrpc::BASE_SIZE) else { return 0 };
-    let base: &[u8; crate::binrpc::BASE_SIZE] = base.try_into().unwrap();
-    let sizes = if sizes.is_null() { &[][..] } else { std::slice::from_raw_parts(sizes, count) };
-    let kind = crate::binrpc::request_type(base);
-    if (1..=crate::binrpc::LAST_TYPE).contains(&kind) && sizes.len() <= kind as usize {
-        return 0;
-    }
-    match crate::binrpc::size_error(base, sizes) {
-        None => 1,
-        Some((e, r)) => {
-            if !expected.is_null() {
-                expected.write(e);
-            }
-            if !received.is_null() {
-                received.write(r);
-            }
-            0
-        }
-    }
-}
-
-/// SendBoolResponse's bytes (the 16-byte response, then the text and its
-/// NUL); free with nzbget_rs_free.
-///
-/// # Safety
-/// `text` is null (empty) or NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_bool_response(success: c_int, text: *const c_char) -> RsBuf {
-    into_buf(crate::binrpc::bool_response(success != 0, input(text)))
-}
-
-/// Download's URL test: 1 when `content` starts with "http:/" or "https:/"
-/// in any case.
-///
-/// # Safety
-/// `content` is null (empty) or NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_is_url(content: *const c_char) -> c_int {
-    crate::binrpc::is_url_cstr(content.cast()) as c_int
-}
-
 /// UrlDownloader::ProcessHeader's X-DNZB headers: 1 with `*start` and
 /// `*length` the trimmed value of X-DNZB-Category in `line` (nothing is
 /// allocated), 2 with `name` the parameter's name and `value` its value, 0
@@ -2357,8 +2431,13 @@ pub unsafe extern "C" fn nzbget_rs_binrpc_is_url(content: *const c_char) -> c_in
 /// `line` is null (empty) or NUL-terminated; the outputs are null or
 /// writable.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_url_dnzb_header(line: *const c_char, start: *mut usize, length: *mut usize,
-    name: *mut RsBuf, value: *mut RsBuf) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_url_dnzb_header(
+    line: *const c_char,
+    start: *mut usize,
+    length: *mut usize,
+    name: *mut RsBuf,
+    value: *mut RsBuf,
+) -> c_int {
     use crate::urlcoord::Dnzb;
     match crate::urlcoord::dnzb_header(input(line)) {
         Dnzb::None => 0,
@@ -2381,184 +2460,6 @@ pub unsafe extern "C" fn nzbget_rs_url_dnzb_header(line: *const c_char, start: *
             2
         }
     }
-}
-
-/// A response of `total` bytes (and a NUL after them for the C string
-/// functions) written by `fill`, which gets room for them and returns the
-/// bytes it wrote; an empty buffer for no bytes or more than an int's range.
-/// The buffer isn't zeroed first.
-///
-/// # Safety
-/// As the entries' strings in `fill`.
-unsafe fn response(total: u64, fill: impl FnOnce(&mut [std::mem::MaybeUninit<u8>]) -> usize) -> RsBuf {
-    if total == 0 || total > crate::binrpc::MAX_RESPONSE {
-        return RsBuf { data: std::ptr::null_mut(), len: 0, cap: 0 };
-    }
-    let total = total as usize;
-    let mut v: Vec<u8> = Vec::with_capacity(total + 1);
-    let room = v.spare_capacity_mut();
-    assert_eq!(fill(&mut room[..total]), total);
-    room[total].write(0);
-    v.set_len(total + 1);
-    let mut v = std::mem::ManuallyDrop::new(v);
-    RsBuf { data: v.as_mut_ptr() as *mut c_char, len: total, cap: v.capacity() }
-}
-
-/// An encoded response: owned_capacity is zero when data borrows the
-/// caller's scratch buffer; otherwise free the equivalent RsBuf.
-#[repr(C)]
-pub struct BinResponse {
-    pub data: *mut c_char,
-    pub len: usize,
-    pub owned_capacity: usize,
-}
-
-/// Uses scratch only when it holds the complete response and its final NUL.
-/// All lengths retain response's limits; an undersized or null scratch falls
-/// back to one owned allocation. The scratch buffer is never freed by Rust.
-///
-/// # Safety
-/// scratch is null or writable for capacity bytes, and does not overlap
-/// any entry or string read by fill. As response for fill.
-unsafe fn response_into(total: u64, scratch: *mut c_char, capacity: usize,
-    fill: impl FnOnce(&mut [std::mem::MaybeUninit<u8>]) -> usize) -> BinResponse {
-    if total != 0 && total <= crate::binrpc::MAX_RESPONSE && !scratch.is_null() && total < capacity as u64 {
-        let total = total as usize;
-        let room = std::slice::from_raw_parts_mut(scratch.cast::<std::mem::MaybeUninit<u8>>(), total);
-        assert_eq!(fill(room), total);
-        scratch.add(total).write(0);
-        BinResponse { data: scratch, len: total, owned_capacity: 0 }
-    } else {
-        let buf = response(total, fill);
-        BinResponse { data: buf.data, len: buf.len, owned_capacity: buf.cap }
-    }
-}
-
-unsafe fn batch<'a, E>(first: *const E, count: usize) -> &'a [E] {
-    if first.is_null() { &[] } else { std::slice::from_raw_parts(first, count) }
-}
-
-/// Encodes a whole List response into caller scratch when it fits, or
-/// one owned allocation otherwise. owned_capacity == 0 means borrowed;
-/// otherwise free RsBuf {data, len, cap: owned_capacity}. Empty/oversized
-/// responses have null data. See response_into for scratch requirements.
-///
-/// # Safety
-/// Arrays and strings meet encode_list's requirements. scratch is null or
-/// writable for capacity bytes, disjoint from all input arrays/strings.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_encode_list_into(nzbs: *const crate::binrpc::NzbEntry, nzb_count: usize,
-    params: *const crate::binrpc::ParamEntry, param_count: usize, files: *const crate::binrpc::FileEntry,
-    file_count: usize, scratch: *mut c_char, capacity: usize) -> BinResponse {
-    use crate::binrpc::{encode, encoded_len};
-    let (nzbs, params, files) = (batch(nzbs, nzb_count), batch(params, param_count), batch(files, file_count));
-    let total = encoded_len(nzbs).saturating_add(encoded_len(params)).saturating_add(encoded_len(files));
-    response_into(total, scratch, capacity, |out| {
-        let mut at = encode(nzbs, out);
-        at += encode(params, &mut out[at..]);
-        at + encode(files, &mut out[at..])
-    })
-}
-
-/// As encode_list_into, for a log response.
-///
-/// # Safety
-/// As encode_list_into.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_encode_log_into(log: *const crate::binrpc::LogEntry, count: usize,
-    scratch: *mut c_char, capacity: usize) -> BinResponse {
-    let entries = batch(log, count);
-    response_into(crate::binrpc::encoded_len(entries), scratch, capacity, |out| crate::binrpc::encode(entries, out))
-}
-
-/// As encode_list_into, for a post_queue response.
-///
-/// # Safety
-/// As encode_list_into.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_encode_post_queue_into(jobs: *const crate::binrpc::PostEntry, count: usize,
-    scratch: *mut c_char, capacity: usize) -> BinResponse {
-    let entries = batch(jobs, count);
-    response_into(crate::binrpc::encoded_len(entries), scratch, capacity, |out| crate::binrpc::encode(entries, out))
-}
-
-/// As encode_list_into, for a history response.
-///
-/// # Safety
-/// As encode_list_into.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_encode_history_into(history: *const crate::binrpc::HistoryEntry, count: usize,
-    scratch: *mut c_char, capacity: usize) -> BinResponse {
-    let entries = batch(history, count);
-    response_into(crate::binrpc::encoded_len(entries), scratch, capacity, |out| crate::binrpc::encode(entries, out))
-}
-
-/// The remote client's reading of one list-response entry at `*at`: 1 with
-/// `nints` ints in `ints` (host order), `nfields` string starts in `starts`
-/// (the strings' lengths in ints[fields[k]]) and `*at` past the entry; 0
-/// (outputs untouched) when it or a string doesn't fit in `len`.
-///
-/// # Safety
-/// `data` is readable for `len` (or null with 0); `at` is valid; `ints`,
-/// `fields` and `starts` are valid, aligned arrays of their counts (or null
-/// for 0). `ints` and `starts` are writable and may be uninitialized.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_read_entry(data: *const c_char, len: usize, at: *mut usize, ints: *mut u32,
-    nints: usize, fields: *const usize, starts: *mut usize, nfields: usize) -> c_int {
-    if at.is_null() || (nints > 0 && ints.is_null()) || (nfields > 0 && (fields.is_null() || starts.is_null())) {
-        return 0;
-    }
-    let data = bytes_arg(data.cast(), len);
-    let fields: &[usize] = if nfields > 0 { std::slice::from_raw_parts(fields, nfields) } else { &[] };
-    // C callers pass uninitialized output arrays. Form slices only over
-    // initialized storage, then write the caller's arrays after validation.
-    let mut values = vec![0; nints];
-    let mut offsets = vec![0; nfields];
-    match crate::binrpc::read_entry(data, *at, &mut values, fields, &mut offsets) {
-        Some(next) => {
-            if nints > 0 {
-                std::ptr::copy_nonoverlapping(values.as_ptr(), ints, nints);
-            }
-            if nfields > 0 {
-                std::ptr::copy_nonoverlapping(offsets.as_ptr(), starts, nfields);
-            }
-            *at = next;
-            1
-        }
-        None => 0,
-    }
-}
-
-/// The remote client's log listing of the first `count` entries of `len`
-/// bytes of data, as printed ("[INFO] text" lines, each with its newline;
-/// free with nzbget_rs_free). It ends at an entry that doesn't fit the data;
-/// unknown kinds have no line.
-///
-/// # Safety
-/// `data` is readable for `len` (or null with 0).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_log_listing(data: *const c_char, len: usize, count: u32) -> RsBuf {
-    into_buf(crate::binrpc::log_listing(bytes_arg(data.cast(), len), count))
-}
-
-/// The remote client's post-processing listing ("[id] name, stage, n%"; as
-/// nzbget_rs_binrpc_log_listing).
-///
-/// # Safety
-/// As nzbget_rs_binrpc_log_listing.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_post_queue_listing(data: *const c_char, len: usize, count: u32) -> RsBuf {
-    into_buf(crate::binrpc::post_queue_listing(bytes_arg(data.cast(), len), count))
-}
-
-/// The remote client's history listing ("[id] name (...)"; as
-/// nzbget_rs_binrpc_log_listing). Kinds it doesn't list have no line.
-///
-/// # Safety
-/// As nzbget_rs_binrpc_log_listing.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_history_listing(data: *const c_char, len: usize, count: u32) -> RsBuf {
-    into_buf(crate::binrpc::history_listing(bytes_arg(data.cast(), len), count))
 }
 
 /// The C library's ctype under the daemon's locale (NzbFile).
@@ -2590,346 +2491,26 @@ unsafe fn rs_ctype<'a>(ct: *const RsCtype) -> Option<crate::nzbfile::Ctype<'a>> 
 }
 
 #[cfg(test)]
-mod binrpc_tests {
-    use super::*;
-    use crate::binrpc::{FileEntry, HistoryEntry, LogEntry, NzbEntry, ParamEntry, PostEntry, Text, BASE_SIZE};
-    use std::ptr::{null, null_mut};
-
-    fn log(id: u32, kind: u32, text: &[u8]) -> LogEntry {
-        LogEntry { id, kind, time: 0, texts: [Text::new(text)] }
-    }
-
-    fn bytes(buf: &RsBuf) -> &[u8] {
-        unsafe { bytes_arg(buf.data.cast(), buf.len) }
-    }
-
-
-    #[test]
-    fn credential_output_may_overlap_inputs() {
-        #[repr(C, align(4))]
-        struct Base([u8; BASE_SIZE]);
-        unsafe {
-            let mut base = Base([0; BASE_SIZE]);
-            base.0[8..12].copy_from_slice(&14u32.to_be_bytes());
-            base.0[12..16].copy_from_slice(b"user");
-            let ptr = base.0.as_mut_ptr();
-            assert_eq!(nzbget_rs_binrpc_check(ptr, BASE_SIZE, c"user".as_ptr(), c"".as_ptr(),
-                ptr.add(12).cast()), 1);
-            assert_eq!(ptr.add(12).cast::<u32>().read(), 14);
-
-            let mut control_password = u32::from_ne_bytes(*b"pw\0\0");
-            base.0[44..46].copy_from_slice(b"pw");
-            let password_ptr = &mut control_password as *mut u32;
-            assert_eq!(nzbget_rs_binrpc_check(base.0.as_ptr(), BASE_SIZE, null(), password_ptr.cast(),
-                password_ptr), 1);
-            assert_eq!(control_password, 14);
-        }
-    }
-
-    #[test]
-    fn missing_sizes_fail_and_null_outputs_are_allowed() {
-        unsafe {
-            let mut base = [0u8; BASE_SIZE];
-            base[8..12].copy_from_slice(&14u32.to_be_bytes());
-            let sizes = [123u32; 15];
-            let (mut expected, mut received) = (7, 9);
-            for count in 0..15 {
-                assert_eq!(nzbget_rs_binrpc_size_ok(base.as_ptr(), BASE_SIZE, sizes.as_ptr(), count,
-                    &mut expected, &mut received), 0);
-                assert_eq!((expected, received), (7, 9));
-            }
-            assert_eq!(nzbget_rs_binrpc_size_ok(base.as_ptr(), BASE_SIZE, null(), 15, null_mut(), null_mut()), 0);
-            assert_eq!(nzbget_rs_binrpc_size_ok(base.as_ptr(), BASE_SIZE, sizes.as_ptr(), 15,
-                null_mut(), null_mut()), 0);
-            assert_eq!(nzbget_rs_binrpc_size_ok(base.as_ptr(), BASE_SIZE, sizes.as_ptr(), 15,
-                &mut expected, &mut received), 0);
-            assert_eq!((expected, received), (123, 0));
-            base[4..8].copy_from_slice(&123u32.to_be_bytes());
-            assert_eq!(nzbget_rs_binrpc_size_ok(base.as_ptr(), BASE_SIZE, sizes.as_ptr(), 15,
-                null_mut(), null_mut()), 1);
-            // Unknown types still bypass the table, just as Dispatch does.
-            base[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
-            assert_eq!(nzbget_rs_binrpc_size_ok(base.as_ptr(), BASE_SIZE, null(), 0, null_mut(), null_mut()), 1);
-        }
-    }
-
-    #[test]
-    fn null_and_short_inputs() {
-        unsafe {
-            let base = [0u8; BASE_SIZE];
-            let mut kind = 42;
-            for len in 0..BASE_SIZE {
-                assert_eq!(nzbget_rs_binrpc_check(base.as_ptr(), len, null(), null(), &mut kind), 0);
-                assert_eq!(kind, 42);
-                assert_eq!(nzbget_rs_binrpc_size_ok(base.as_ptr(), len, null(), 0, null_mut(), null_mut()), 0);
-            }
-            assert_eq!(nzbget_rs_binrpc_check(null(), BASE_SIZE, null(), null(), &mut kind), 0);
-            assert_eq!(kind, 42);
-            assert_eq!(nzbget_rs_binrpc_size_ok(null(), BASE_SIZE, null(), 0, null_mut(), null_mut()), 0);
-            assert_eq!(nzbget_rs_binrpc_check(base.as_ptr(), BASE_SIZE, null(), null(), null_mut()), 1);
-            let response = nzbget_rs_binrpc_bool_response(-1, null());
-            assert_eq!(std::slice::from_raw_parts(response.data.cast::<u8>(), response.len),
-                [0x6e, 0x7a, 0x62, 0x31, 0, 0, 0, 16, 0, 0, 0, 1, 0, 0, 0, 1, 0]);
-            nzbget_rs_free(response);
-        }
-    }
-
-    #[test]
-    fn client_entry_outputs_and_failures() {
-        use std::mem::MaybeUninit;
-        unsafe {
-            let data = b"\0\0\0\x07\0\0\0\x04abc\0";
-            let fields = [1usize];
-            let mut at = 0;
-            let mut ints = MaybeUninit::<[u32; 2]>::uninit();
-            let mut starts = MaybeUninit::<[usize; 1]>::uninit();
-            assert_eq!(nzbget_rs_binrpc_read_entry(data.as_ptr().cast(), data.len(), &mut at,
-                ints.as_mut_ptr().cast(), 2, fields.as_ptr(), starts.as_mut_ptr().cast(), 1), 1);
-            assert_eq!(ints.assume_init(), [7, 4]);
-            assert_eq!(starts.assume_init(), [8]);
-            assert_eq!(at, 12);
-
-            let (mut ints, mut starts) = ([91, 92], [93]);
-            let bad_length = b"\0\0\0\x07\xff\xff\xff\xffabc\0";
-            let no_nul = b"\0\0\0\x07\0\0\0\x04abcd";
-            for (bytes, offset, field) in [
-                (&data[..7], 0, 1), (&data[..11], 0, 1), (&bad_length[..], 0, 1),
-                (&no_nul[..], 0, 1), (&data[..], 0, 2), (&data[..], usize::MAX - 2, 1),
-            ] {
-                at = offset;
-                assert_eq!(nzbget_rs_binrpc_read_entry(bytes.as_ptr().cast(), bytes.len(), &mut at,
-                    ints.as_mut_ptr(), 2, &field, starts.as_mut_ptr(), 1), 0);
-                assert_eq!((at, ints, starts), (offset, [91, 92], [93]));
-            }
-
-            at = 0;
-            for (out_at, out_ints, in_fields, out_starts) in [
-                (null_mut(), ints.as_mut_ptr(), fields.as_ptr(), starts.as_mut_ptr()),
-                (&mut at, null_mut(), fields.as_ptr(), starts.as_mut_ptr()),
-                (&mut at, ints.as_mut_ptr(), null(), starts.as_mut_ptr()),
-                (&mut at, ints.as_mut_ptr(), fields.as_ptr(), null_mut()),
-            ] {
-                assert_eq!(nzbget_rs_binrpc_read_entry(data.as_ptr().cast(), data.len(), out_at,
-                    out_ints, 2, in_fields, out_starts, 1), 0);
-                assert_eq!((at, ints, starts), (0, [91, 92], [93]));
-            }
-            assert_eq!(nzbget_rs_binrpc_read_entry(null(), 0, &mut at, ints.as_mut_ptr(), 2,
-                fields.as_ptr(), starts.as_mut_ptr(), 1), 0);
-            assert_eq!((at, ints, starts), (0, [91, 92], [93]));
-            assert_eq!(nzbget_rs_binrpc_read_entry(null(), 0, &mut at, null_mut(), 0, null(), null_mut(), 0), 1);
-
-            // Outputs may reuse input storage after all input has been read.
-            let mut words = [7u32.to_be(), 4u32.to_be(), 0];
-            let mut field_and_start = 1usize;
-            let p = words.as_mut_ptr();
-            let s = &mut field_and_start as *mut usize;
-            assert_eq!(nzbget_rs_binrpc_read_entry(p.cast(), 12, &mut at, p, 2, s, s, 1), 1);
-            assert_eq!((words, field_and_start, at), ([7, 4, 0], 8, 12));
-        }
-    }
-
-    #[test]
-    fn binrpc_url_prefix_handles_null_short_and_mixed_case_strings() {
-        unsafe {
-            assert_eq!(nzbget_rs_binrpc_is_url(null()), 0);
-            for source in [b"http:/".as_slice(), b"https:/", b"ftp:/", b"http:x", b"https:x", b"<?xml version=1><nzb>"] {
-                for end in 0..=source.len() {
-                    let input = std::ffi::CString::new(&source[..end]).unwrap();
-                    assert_eq!(nzbget_rs_binrpc_is_url(input.as_ptr()) != 0, crate::binrpc::is_url(&source[..end]));
-                }
-            }
-            for mask in 0..32 {
-                let mut source = b"https:/".to_vec();
-                for (at, ch) in source[..5].iter_mut().enumerate() {
-                    if mask & (1 << at) != 0 { *ch = ch.to_ascii_uppercase(); }
-                }
-                let input = std::ffi::CString::new(source).unwrap();
-                assert_eq!(nzbget_rs_binrpc_is_url(input.as_ptr()), 1);
-            }
-            let mut source = b"<?xml version=1><nzb>".to_vec();
-            source.resize(1024 * 1024, b'x');
-            source.push(0);
-            assert_eq!(nzbget_rs_binrpc_is_url(source.as_ptr().cast()), 0);
-        }
-    }
-
-
-
-
-
-
-    #[test]
-    fn encoders_allocate_once_and_read_back() {
-        unsafe {
-            // nothing: an empty buffer that frees as any
-            let none = nzbget_rs_binrpc_encode_log_into(null(), 5, null_mut(), 0);
-            assert_eq!((none.data, none.len, none.owned_capacity), (null_mut(), 0, 0));
-            let none = nzbget_rs_binrpc_encode_list_into(null(), 0, null(), 0, null(), 0, null_mut(), 0);
-            assert_eq!(none.len, 0);
-
-            let entries = [log(1, 2, b"hello"), log(2, 4, b""), log(3, 0, b"abcd")];
-            let b = nzbget_rs_binrpc_encode_log_into(entries.as_ptr(), entries.len(), null_mut(), 0);
-            let buf = RsBuf { data: b.data, len: b.len, cap: b.owned_capacity };
-            assert_eq!(buf.len, 24 + 20 + 24);
-            // the text is a C string past the data, too
-            assert_eq!(*buf.data.add(buf.len), 0);
-            let mut out = [std::mem::MaybeUninit::<LogEntry>::uninit(); 4];
-            let mut at = 0;
-            let n = crate::binrpc::read_many(bytes(&buf), &mut at, out.as_mut_ptr().cast::<LogEntry>(), 3);
-            assert_eq!((n, at), (3, buf.len));
-            assert_eq!(input(out[2].assume_init().texts[0].data.cast()), b"abcd");
-            nzbget_rs_free(buf);
-
-            // the three kinds of List in one buffer, in order
-            let nzbs = [NzbEntry { id: 1, kind: 0, size_lo: 0, size_hi: 0, remaining_size_lo: 0, remaining_size_hi: 0,
-                paused_size_lo: 0, paused_size_hi: 0, paused_count: 0, remaining_par_count: 0, priority: 0, matched: 1,
-                texts: [Text::new(b"f"), Text::new(b"n"), Text::EMPTY, Text::EMPTY, Text::EMPTY] }];
-            let params = [ParamEntry { nzb_index: 1, texts: [Text::new(b"k"), Text::new(b"v")] }];
-            let files = [FileEntry { id: 9, nzb_index: 1, size_lo: 0, size_hi: 0, remaining_size_lo: 0, remaining_size_hi: 0,
-                paused: 0, filename_confirmed: 0, active_downloads: 0, matched: 0, texts: [Text::new(b"s"), Text::EMPTY] }];
-            let b = nzbget_rs_binrpc_encode_list_into(nzbs.as_ptr(), 1, params.as_ptr(), 1, files.as_ptr(), 1, null_mut(), 0);
-            let buf = RsBuf { data: b.data, len: b.len, cap: b.owned_capacity };
-            assert_eq!(buf.len, (68 + 8) + (12 + 4) + (48 + 4));
-            let data = bytes(&buf);
-            assert_eq!(&data[0..4], [0, 0, 0, 1]);
-            assert_eq!(data[68..70], *b"f\0");
-            assert_eq!(&data[76..80], [0, 0, 0, 1]);
-            let (mut at, mut nz, mut pa, mut fi) = (0usize, MaybeUninitNzb::new(), MaybeUninitPar::new(), MaybeUninitFile::new());
-            assert_eq!(crate::binrpc::read_many(data, &mut at, nz.0.as_mut_ptr().cast::<NzbEntry>(), 1), 1);
-            assert_eq!(crate::binrpc::read_many(data, &mut at, pa.0.as_mut_ptr().cast::<ParamEntry>(), 1), 1);
-            assert_eq!(crate::binrpc::read_many(data, &mut at, fi.0.as_mut_ptr().cast::<FileEntry>(), 1), 1);
-            assert_eq!(at, buf.len);
-            assert_eq!(nz.0[0].assume_init().matched, 1);
-            assert_eq!(pa.0[0].assume_init().nzb_index, 1);
-            assert_eq!(fi.0[0].assume_init().id, 9);
-            nzbget_rs_free(buf);
-
-            // the other two kinds
-            let jobs = [PostEntry { id: 1, stage: 7, stage_progress: 100, file_progress: 0, start_time: 0, stage_time: 0,
-                texts: [Text::EMPTY, Text::new(b"Name"), Text::EMPTY, Text::EMPTY] }];
-            let b = nzbget_rs_binrpc_encode_post_queue_into(jobs.as_ptr(), 1, null_mut(), 0);
-            let buf = RsBuf { data: b.data, len: b.len, cap: b.owned_capacity };
-            assert_eq!(buf.len, 40 + 1 + 5 + 1 + 1);
-            let listing = nzbget_rs_binrpc_post_queue_listing(buf.data, buf.len, 1);
-            assert_eq!(bytes(&listing), b"[1] Name, Unpacking, 10%\n");
-            nzbget_rs_free(listing);
-            nzbget_rs_free(buf);
-            let history = [HistoryEntry { id: 1, kind: 1, time: 0, size_lo: 2048, size_hi: 0, file_count: 2, par_status: 3,
-                script_status: 3, url_status: 0, texts: [Text::new(b"Nzb")] }];
-            let b = nzbget_rs_binrpc_encode_history_into(history.as_ptr(), 1, null_mut(), 0);
-            let buf = RsBuf { data: b.data, len: b.len, cap: b.owned_capacity };
-            assert_eq!(buf.len, 40 + 4);
-            let listing = nzbget_rs_binrpc_history_listing(buf.data, buf.len, 1);
-            assert_eq!(bytes(&listing), b"[1] Nzb (2 files, 2.00 KB, Par successful, Script successful)\n");
-            nzbget_rs_free(listing);
-            nzbget_rs_free(buf);
-        }
-    }
-
-    struct MaybeUninitNzb([std::mem::MaybeUninit<NzbEntry>; 1]);
-    struct MaybeUninitPar([std::mem::MaybeUninit<ParamEntry>; 1]);
-    struct MaybeUninitFile([std::mem::MaybeUninit<FileEntry>; 1]);
-    impl MaybeUninitNzb { fn new() -> Self { Self([std::mem::MaybeUninit::uninit()]) } }
-    impl MaybeUninitPar { fn new() -> Self { Self([std::mem::MaybeUninit::uninit()]) } }
-    impl MaybeUninitFile { fn new() -> Self { Self([std::mem::MaybeUninit::uninit()]) } }
-
-    #[test]
-    fn a_response_over_an_int_or_with_no_bytes_is_empty() {
-        unsafe {
-            let called = std::cell::Cell::new(false);
-            for total in [0, crate::binrpc::MAX_RESPONSE + 1, u64::MAX] {
-                let buf = response(total, |_| {
-                    called.set(true);
-                    0
-                });
-                assert_eq!((buf.data, buf.len, buf.cap), (null_mut(), 0, 0));
-            }
-            assert!(!called.get());
-            let buf = response(5, |out| {
-                assert_eq!(out.len(), 5);
-                for (slot, byte) in out.iter_mut().zip(b"hello") {
-                    slot.write(*byte);
-                }
-                5
-            });
-            assert_eq!(bytes(&buf), b"hello");
-            assert_eq!(*buf.data.add(5), 0);
-            nzbget_rs_free(buf);
-        }
-    }
-
-    #[test]
-    fn response_scratch_has_explicit_ownership_and_exact_boundaries() {
-        unsafe {
-            let entries = [log(1, 2, b"hello"), log(2, 0, b"")];
-            let owned_resp = nzbget_rs_binrpc_encode_log_into(entries.as_ptr(), entries.len(), null_mut(), 0);
-            let owned = RsBuf { data: owned_resp.data, len: owned_resp.len, cap: owned_resp.owned_capacity };
-            let expected = bytes(&owned).to_vec();
-            for capacity in [0, owned.len - 1, owned.len, owned.len + 1, owned.len + 9] {
-                let mut scratch = vec![0xabu8; owned.len + 10];
-                let b = nzbget_rs_binrpc_encode_log_into(entries.as_ptr(), entries.len(), scratch.as_mut_ptr().cast(), capacity);
-                assert_eq!(bytes_arg(b.data.cast(), b.len), expected);
-                assert_eq!(*b.data.add(b.len), 0);
-                if capacity > owned.len {
-                    assert_eq!(b.data, scratch.as_mut_ptr().cast());
-                    assert_eq!(b.owned_capacity, 0);
-                    assert_eq!(scratch[b.len + 1], 0xab);
-                } else {
-                    assert_ne!(b.data, scratch.as_mut_ptr().cast());
-                    assert!(b.owned_capacity > 0);
-                    assert!(scratch.iter().all(|&v| v == 0xab));
-                    nzbget_rs_free(RsBuf { data: b.data, len: b.len, cap: b.owned_capacity });
-                }
-            }
-            // A null buffer cannot be borrowed, regardless of its capacity.
-            let b = nzbget_rs_binrpc_encode_log_into(entries.as_ptr(), entries.len(), null_mut(), usize::MAX);
-            assert!(b.owned_capacity > 0);
-            assert_eq!(bytes_arg(b.data.cast(), b.len), expected);
-            nzbget_rs_free(RsBuf { data: b.data, len: b.len, cap: b.owned_capacity });
-            let mut scratch = [0xabu8; 32];
-            for total in [0, crate::binrpc::MAX_RESPONSE + 1, u64::MAX] {
-                let b = response_into(total, scratch.as_mut_ptr().cast(), scratch.len(), |_| panic!("invalid size filled"));
-                assert_eq!((b.data, b.len, b.owned_capacity), (null_mut(), 0, 0));
-                assert!(scratch.iter().all(|&v| v == 0xab));
-            }
-            nzbget_rs_free(owned);
-        }
-    }
-
-    #[test]
-    fn listings_of_null_and_short_data_are_empty_strings() {
-        unsafe {
-            for listing in [nzbget_rs_binrpc_log_listing(null(), 0, 5), nzbget_rs_binrpc_post_queue_listing(null(), 0, 5),
-                nzbget_rs_binrpc_history_listing(null(), 7, 5)] {
-                assert_eq!(bytes(&listing), b"");
-                assert_eq!(*listing.data, 0);
-                nzbget_rs_free(listing);
-            }
-            let entries = [log(1, 0, b"x")];
-            let b = nzbget_rs_binrpc_encode_log_into(entries.as_ptr(), 1, null_mut(), 0);
-            let buf = RsBuf { data: b.data, len: b.len, cap: b.owned_capacity };
-            let listing = nzbget_rs_binrpc_log_listing(buf.data, buf.len, 2);
-            assert_eq!(bytes(&listing), b"[INFO] x\n");
-            nzbget_rs_free(listing);
-            nzbget_rs_free(buf);
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn twin_fingerprint_takes_arrays() {
         unsafe {
-            let md5s = [b"abc\0".as_ptr().cast(), std::ptr::null(), b"abc\0".as_ptr().cast()];
+            let md5s = [
+                b"abc\0".as_ptr().cast(),
+                std::ptr::null(),
+                b"abc\0".as_ptr().cast(),
+            ];
             let lengths = [1u64, 7, 1];
             let result = nzbget_rs_twin_fingerprint(md5s.as_ptr(), lengths.as_ptr(), 3);
             let expected = crate::twin::fingerprint_of([("abc", 1), ("", 7)].into_iter());
             assert_eq!(input(result.data), expected.as_bytes()); // the repeated one counts once
             nzbget_rs_free(result);
-            for (m, l, n) in [(std::ptr::null(), std::ptr::null(), 0), (std::ptr::null(), lengths.as_ptr(), 1)] {
+            for (m, l, n) in [
+                (std::ptr::null(), std::ptr::null(), 0),
+                (std::ptr::null(), lengths.as_ptr(), 1),
+            ] {
                 let empty = nzbget_rs_twin_fingerprint(m, l, n);
                 assert_eq!(input(empty.data), b"");
                 nzbget_rs_free(empty);
@@ -2942,10 +2523,17 @@ mod tests {
         use std::ptr::{null, null_mut};
         // Poison rather than zero the output: a caller need not initialize
         // an out parameter, even when the operation fails.
-        let poison = || RsBuf { data: null_mut(), len: usize::MAX, cap: usize::MAX };
+        let poison = || RsBuf {
+            data: null_mut(),
+            len: usize::MAX,
+            cap: usize::MAX,
+        };
         unsafe {
             let mut error = poison();
-            assert_eq!(nzbget_rs_delete_directory_with_content(null(), b'/' as c_char, &mut error), 0);
+            assert_eq!(
+                nzbget_rs_delete_directory_with_content(null(), b'/' as c_char, &mut error),
+                0
+            );
             assert!(input(error.data).starts_with(b"could not delete (null): "));
             nzbget_rs_free(error);
             let mut name = poison();
@@ -2953,7 +2541,10 @@ mod tests {
             assert_eq!(name.len, 0);
             assert_eq!(input(name.data), b"");
             nzbget_rs_free(name);
-            assert_eq!(nzbget_rs_delete_directory_with_content(null(), 0, null_mut()), 0);
+            assert_eq!(
+                nzbget_rs_delete_directory_with_content(null(), 0, null_mut()),
+                0
+            );
             assert_eq!(nzbget_rs_rename_bak(null(), null(), 0, null_mut()), 0);
             assert_eq!(nzbget_rs_file_extension(null(), 0), -1);
             assert_eq!(nzbget_rs_file_extension(b"a.\0b.c".as_ptr().cast(), 6), 4);
@@ -3008,15 +2599,25 @@ mod tests {
                 &mut damaged,
             );
             assert_eq!((renamed, missed, damaged), (0, 0, 0));
-            assert_eq!(nzbget_rs_par_renamer_list_parred_files(null(), 1024, null_mut(), None), 0);
-            assert_eq!(nzbget_rs_par_renamer_load_par_entries(null(), null_mut(), None, None), 0);
+            assert_eq!(
+                nzbget_rs_par_renamer_list_parred_files(null(), 1024, null_mut(), None),
+                0
+            );
+            assert_eq!(
+                nzbget_rs_par_renamer_load_par_entries(null(), null_mut(), None, None),
+                0
+            );
         }
     }
 
     #[test]
     fn rarrenamer_nulls_and_borrowed_callback_strings() {
         use std::ptr::{null, null_mut};
-        unsafe extern "C" fn progress(ctx: *mut std::ffi::c_void, label: *const c_char, stage: c_int) -> c_int {
+        unsafe extern "C" fn progress(
+            ctx: *mut std::ffi::c_void,
+            label: *const c_char,
+            stage: c_int,
+        ) -> c_int {
             let out = &mut *ctx.cast::<Vec<(Vec<u8>, c_int)>>();
             out.push((CStr::from_ptr(label).to_bytes().to_vec(), stage));
             0
@@ -3031,9 +2632,34 @@ mod tests {
         };
         let mut renamed = 0;
         unsafe {
-            assert_eq!(nzbget_rs_rar_renamer_execute(null(), null(), null(), null(), null(), 1, null_mut()), -1);
-            assert_eq!(nzbget_rs_rar_renamer_execute(&env, null(), null(), null(), null(), 1, null_mut()), -1);
-            assert_eq!(nzbget_rs_rar_renamer_execute(&env, c"/nonexistent_dir_12345".as_ptr(), c"job".as_ptr(), null(), null(), 1, &mut renamed), 0);
+            assert_eq!(
+                nzbget_rs_rar_renamer_execute(
+                    null(),
+                    null(),
+                    null(),
+                    null(),
+                    null(),
+                    1,
+                    null_mut()
+                ),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_rar_renamer_execute(&env, null(), null(), null(), null(), 1, null_mut()),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_rar_renamer_execute(
+                    &env,
+                    c"/nonexistent_dir_12345".as_ptr(),
+                    c"job".as_ptr(),
+                    null(),
+                    null(),
+                    1,
+                    &mut renamed
+                ),
+                0
+            );
             assert_eq!(renamed, 0);
             assert_eq!(out, vec![(b"Checkingrar-files for job".to_vec(), 0)]);
         }
@@ -3049,17 +2675,35 @@ mod tests {
                 assert_eq!(nzbget_rs_parse_par_filename(name, 1, p, p), 0);
                 assert_eq!(output, 77);
             }
-            assert_eq!(nzbget_rs_parse_par_filename(c"a.vol+2.par2".as_ptr(), -1, p, p), 1);
+            assert_eq!(
+                nzbget_rs_parse_par_filename(c"a.vol+2.par2".as_ptr(), -1, p, p),
+                1
+            );
             assert_eq!(output, -1); // blocks wins when outputs alias
-            assert_eq!(nzbget_rs_parse_par_filename(c"a.par2".as_ptr(), 1, null_mut(), null_mut()), 1);
-            assert_eq!(nzbget_rs_same_par_collection(null(), c"a.par2".as_ptr(), 1), 0);
-            assert_eq!(nzbget_rs_same_par_collection(c"a.par2".as_ptr(), null(), 1), 0);
+            assert_eq!(
+                nzbget_rs_parse_par_filename(c"a.par2".as_ptr(), 1, null_mut(), null_mut()),
+                1
+            );
+            assert_eq!(
+                nzbget_rs_same_par_collection(null(), c"a.par2".as_ptr(), 1),
+                0
+            );
+            assert_eq!(
+                nzbget_rs_same_par_collection(c"a.par2".as_ptr(), null(), 1),
+                0
+            );
 
             let mut name = [b'a'; crate::parparser::BSTRING_MAX];
             name[1018..].copy_from_slice(b".par2");
-            assert_eq!(nzbget_rs_parse_par_filename(name.as_ptr().cast(), 1, p, null_mut()), 1);
+            assert_eq!(
+                nzbget_rs_parse_par_filename(name.as_ptr().cast(), 1, p, null_mut()),
+                1
+            );
             assert_eq!(output, 1018);
-            assert_eq!(nzbget_rs_same_par_collection(name.as_ptr().cast(), name.as_ptr().cast(), 1), 1);
+            assert_eq!(
+                nzbget_rs_same_par_collection(name.as_ptr().cast(), name.as_ptr().cast(), 1),
+                1
+            );
         }
     }
 
@@ -3068,17 +2712,26 @@ mod tests {
     fn fsops_null_outputs_and_ownership() {
         unsafe {
             let mut msg = std::mem::MaybeUninit::uninit();
-            assert_eq!(nzbget_rs_force_directories(std::ptr::null(), msg.as_mut_ptr()), 0);
+            assert_eq!(
+                nzbget_rs_force_directories(std::ptr::null(), msg.as_mut_ptr()),
+                0
+            );
             let msg = msg.assume_init();
             assert_eq!(msg.len, 0);
             assert_eq!(CStr::from_ptr(msg.data), c"");
             nzbget_rs_free(msg);
-            assert_eq!(nzbget_rs_force_directories(c".".as_ptr(), std::ptr::null_mut()), 0);
+            assert_eq!(
+                nzbget_rs_force_directories(c".".as_ptr(), std::ptr::null_mut()),
+                0
+            );
             assert_eq!(nzbget_rs_file_exists(std::ptr::null()), 0);
             assert_eq!(nzbget_rs_directory_exists(std::ptr::null()), 0);
             assert_eq!(nzbget_rs_directory_exists(c".".as_ptr()), 1);
             let mut source = b"~/x\0".to_vec();
-            let expanded = crate::fsops::expand_home_path(Some(CStr::from_ptr(source.as_ptr().cast())), Some(b""));
+            let expanded = crate::fsops::expand_home_path(
+                Some(CStr::from_ptr(source.as_ptr().cast())),
+                Some(b""),
+            );
             source[2] = b'y';
             assert_eq!(expanded, b"/x");
         }
@@ -3094,33 +2747,88 @@ mod tests {
         }
         let mut buffer = *b"200 ready\r\n\0";
         let mut io = NntpIo {
-            ctx: buffer.as_mut_ptr().cast(), write_line: None, read_line: Some(greeting),
-            report_error: None, debug: None, cancelled: None,
-            user: null(), password: null(), name: null(), host: null(), conn_host: null(),
+            ctx: buffer.as_mut_ptr().cast(),
+            write_line: None,
+            read_line: Some(greeting),
+            report_error: None,
+            debug: None,
+            cancelled: None,
+            user: null(),
+            password: null(),
+            name: null(),
+            host: null(),
+            conn_host: null(),
         };
         unsafe {
             let (mut error, mut rejected, mut result, mut joined) = (1, 1, -9, -9);
             let mut answer = null_mut();
-            assert_eq!(nzbget_rs_nntp_request(null(), null(), null_mut(), null_mut(), null_mut()), -1);
-            assert_eq!(nzbget_rs_nntp_handshake(null(), null_mut(), null_mut(), null_mut()), -1);
-            assert_eq!(nzbget_rs_nntp_join_group(null(), null(), null_mut(), null_mut(), null_mut(), null_mut()), -1);
-            assert_eq!(nzbget_rs_nntp_request(&io, null(), &mut error, &mut rejected, &mut answer), -1);
-            assert_eq!(nzbget_rs_nntp_join_group(&io, null(), &mut error, &mut rejected, &mut answer, &mut joined), -1);
-            assert_eq!(nzbget_rs_nntp_handshake(null(), &mut error, &mut rejected, &mut result), -1);
+            assert_eq!(
+                nzbget_rs_nntp_request(null(), null(), null_mut(), null_mut(), null_mut()),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_nntp_handshake(null(), null_mut(), null_mut(), null_mut()),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_nntp_join_group(
+                    null(),
+                    null(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null_mut()
+                ),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_nntp_request(&io, null(), &mut error, &mut rejected, &mut answer),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_nntp_join_group(
+                    &io,
+                    null(),
+                    &mut error,
+                    &mut rejected,
+                    &mut answer,
+                    &mut joined
+                ),
+                -1
+            );
+            assert_eq!(
+                nzbget_rs_nntp_handshake(null(), &mut error, &mut rejected, &mut result),
+                -1
+            );
             assert_eq!((error, rejected, result, joined), (1, 1, -9, -9));
 
             // NULL configuration strings are empty; optional debug is absent.
-            assert_eq!(nzbget_rs_nntp_handshake(&io, &mut error, &mut rejected, &mut result), 0);
+            assert_eq!(
+                nzbget_rs_nntp_handshake(&io, &mut error, &mut rejected, &mut result),
+                0
+            );
             assert_eq!((error, rejected, result), (1, 1, 0));
 
             // Missing required write/read callbacks stop the exchange and leave
             // result outputs untouched, while writing back reached auth state.
-            assert_eq!(nzbget_rs_nntp_request(&io, c"BODY x\r\n".as_ptr(), &mut error, &mut rejected, &mut answer), -1);
+            assert_eq!(
+                nzbget_rs_nntp_request(
+                    &io,
+                    c"BODY x\r\n".as_ptr(),
+                    &mut error,
+                    &mut rejected,
+                    &mut answer
+                ),
+                -1
+            );
             assert_eq!((error, rejected), (0, 0));
             assert!(answer.is_null());
             io.read_line = None;
             result = -9;
-            assert_eq!(nzbget_rs_nntp_handshake(&io, &mut error, &mut rejected, &mut result), -1);
+            assert_eq!(
+                nzbget_rs_nntp_handshake(&io, &mut error, &mut rejected, &mut result),
+                -1
+            );
             assert_eq!(result, -9);
         }
     }
@@ -3129,10 +2837,19 @@ mod tests {
     fn options_ffi_outputs() {
         use std::ptr::null_mut;
         unsafe {
-            assert_eq!(nzbget_rs_validate_option_name(std::ptr::null(), None, null_mut()), 0);
-            assert_eq!(nzbget_rs_validate_option_name(c"Server1.Host".as_ptr(), None, null_mut()), 1);
+            assert_eq!(
+                nzbget_rs_validate_option_name(std::ptr::null(), None, null_mut()),
+                0
+            );
+            assert_eq!(
+                nzbget_rs_validate_option_name(c"Server1.Host".as_ptr(), None, null_mut()),
+                1
+            );
             assert_eq!(nzbget_rs_option_restricted(std::ptr::null(), 1), 0);
-            assert_eq!(nzbget_rs_option_restricted(c"Server1.Password".as_ptr(), 1), 1);
+            assert_eq!(
+                nzbget_rs_option_restricted(c"Server1.Password".as_ptr(), 1),
+                1
+            );
             assert_eq!(nzbget_rs_option_restricted(c"Server1.Host".as_ptr(), 1), 0);
         }
     }
@@ -3153,19 +2870,60 @@ mod tests {
             let mut sec = [91, 1i64 << 40, 92];
             let mut min = [93, 7, 94];
             let mut hour = [95, 8, 96];
-            slots = Slots { sec: 0, min: -1, hour: 1, ..Slots::default() };
-            nzbget_rs_volume_add(sec.as_mut_ptr().add(1), 1, min.as_mut_ptr().add(1), 1,
-                hour.as_mut_ptr().add(1), 1, &slots, 0, 0, 0, 0, 5);
+            slots = Slots {
+                sec: 0,
+                min: -1,
+                hour: 1,
+                ..Slots::default()
+            };
+            nzbget_rs_volume_add(
+                sec.as_mut_ptr().add(1),
+                1,
+                min.as_mut_ptr().add(1),
+                1,
+                hour.as_mut_ptr().add(1),
+                1,
+                &slots,
+                0,
+                0,
+                0,
+                0,
+                5,
+            );
             assert_eq!(sec, [91, (1i64 << 40) + 5, 92]);
             assert_eq!(min, [93, 7, 94]);
             assert_eq!(hour, [95, 8, 96]);
-            nzbget_rs_volume_add(sec.as_mut_ptr(), 3, null_mut(), 0,
-                null_mut(), 0, null(), 0, 0, 60, 0, 5);
+            nzbget_rs_volume_add(
+                sec.as_mut_ptr(),
+                3,
+                null_mut(),
+                0,
+                null_mut(),
+                0,
+                null(),
+                0,
+                0,
+                60,
+                0,
+                5,
+            );
             assert_eq!(sec, [91, (1i64 << 40) + 5, 92]);
             for t in [i64::MIN, i64::MAX, i64::from(i32::MIN), -2_147_483_647, -61] {
                 nzbget_rs_volume_calc_slots(t, &mut first, &mut slots);
-                nzbget_rs_volume_add(null_mut(), usize::MAX, sec.as_mut_ptr().add(1), 1,
-                    hour.as_mut_ptr().add(1), 0, &slots, 0, 0, t, 0, i64::MAX);
+                nzbget_rs_volume_add(
+                    null_mut(),
+                    usize::MAX,
+                    sec.as_mut_ptr().add(1),
+                    1,
+                    hour.as_mut_ptr().add(1),
+                    0,
+                    &slots,
+                    0,
+                    0,
+                    t,
+                    0,
+                    i64::MAX,
+                );
             }
             assert_eq!((sec[0], sec[2]), (91, 92));
             assert_eq!(hour, [95, 8, 96]);
@@ -3176,8 +2934,20 @@ mod tests {
             let buffer = storage.as_mut_ptr();
             let descriptor = buffer.cast::<Slots>();
             descriptor.write(Slots::default());
-            nzbget_rs_volume_add(buffer, 3, null_mut(), 0,
-                null_mut(), 0, descriptor, 0, 0, 0, 0, 9);
+            nzbget_rs_volume_add(
+                buffer,
+                3,
+                null_mut(),
+                0,
+                null_mut(),
+                0,
+                descriptor,
+                0,
+                0,
+                0,
+                0,
+                9,
+            );
             assert_eq!(storage, [9, 0, 0]);
         }
     }
@@ -3223,8 +2993,16 @@ mod tests {
                     let mut params = c"sentinel".as_ptr();
                     let mut id = params;
                     let mut len = -1;
-                    nzbget_rs_rpc_route(null, null, get, protocol,
-                        method.as_mut_ptr().add(1).cast(), &mut params, &mut id, &mut len);
+                    nzbget_rs_rpc_route(
+                        null,
+                        null,
+                        get,
+                        protocol,
+                        method.as_mut_ptr().add(1).cast(),
+                        &mut params,
+                        &mut id,
+                        &mut len,
+                    );
                     assert_eq!((method[0], method[1], method[101]), (0x55, 0, 0x55));
                     assert!(params.is_null() && id.is_null());
                     assert_eq!(len, 0);
@@ -3237,15 +3015,31 @@ mod tests {
             let mut params = null;
             let mut id = null;
             let mut len = -1;
-            nzbget_rs_rpc_route(url.as_ptr().cast(), null, 1, 2,
-                method.as_mut_ptr().add(1).cast(), &mut params, &mut id, &mut len);
+            nzbget_rs_rpc_route(
+                url.as_ptr().cast(),
+                null,
+                1,
+                2,
+                method.as_mut_ptr().add(1).cast(),
+                &mut params,
+                &mut id,
+                &mut len,
+            );
             assert_eq!(&method[1..100], &[b'x'; 99]);
             assert_eq!((method[0], method[100], method[101]), (0x55, 0, 0x55));
             assert_eq!(params, url.as_ptr().add(210).cast());
             assert!(id.is_null());
             let request = c"\"id\":},\"method\":\"\"";
-            nzbget_rs_rpc_route(null, request.as_ptr(), 0, 2,
-                method.as_mut_ptr().add(1).cast(), &mut params, &mut id, &mut len);
+            nzbget_rs_rpc_route(
+                null,
+                request.as_ptr(),
+                0,
+                2,
+                method.as_mut_ptr().add(1).cast(),
+                &mut params,
+                &mut id,
+                &mut len,
+            );
             assert_eq!(params, request.as_ptr());
             assert_eq!(id, request.as_ptr().add(5));
             assert_eq!(len, 0); // CString::Set will echo the suffix for length zero.
@@ -3265,7 +3059,10 @@ mod tests {
                 (4, c"Not safe procedure for JSON-P. Use JSON-RPC or XML-RPC with HTTP-Method POST instead"));
             assert_eq!(nzbget_rs_rpc_decide(2, 0, 0, 0, 0, &mut code, &mut text), 0);
             assert!(code == 0 && text.is_null());
-            assert_eq!(nzbget_rs_rpc_decide(3, 0, 1, 0, 0, std::ptr::null_mut(), std::ptr::null_mut()), 1);
+            assert_eq!(
+                nzbget_rs_rpc_decide(3, 0, 1, 0, 0, std::ptr::null_mut(), std::ptr::null_mut()),
+                1
+            );
         }
     }
 
@@ -3276,13 +3073,22 @@ mod tests {
             let mut id = b"7\0ignored".to_vec();
             let mut head = std::mem::MaybeUninit::uninit();
             let mut tail = std::mem::MaybeUninit::uninit();
-            nzbget_rs_rpc_envelope(3, 0, cb.as_ptr().cast(), id.as_ptr().cast(),
-                head.as_mut_ptr(), tail.as_mut_ptr());
+            nzbget_rs_rpc_envelope(
+                3,
+                0,
+                cb.as_ptr().cast(),
+                id.as_ptr().cast(),
+                head.as_mut_ptr(),
+                tail.as_mut_ptr(),
+            );
             let head = head.assume_init();
             let tail = tail.assume_init();
             cb.fill(b'x');
             id.fill(b'x');
-            assert_eq!(input(head.data), b"callback({\n\"version\" : \"1.1\",\n\"id\" : 7,\n\"result\" : ");
+            assert_eq!(
+                input(head.data),
+                b"callback({\n\"version\" : \"1.1\",\n\"id\" : 7,\n\"result\" : "
+            );
             assert_eq!(input(head.data).len(), head.len);
             nzbget_rs_free(head);
             assert_eq!(input(tail.data), b"\n})");
@@ -3295,21 +3101,45 @@ mod tests {
     fn rpc_null_arguments_and_unknown_kind() {
         unsafe {
             assert!(nzbget_rs_rpc_skip_to_params(std::ptr::null_mut()).is_null());
-            assert_eq!(nzbget_rs_rpc_next_param(std::ptr::null_mut(), 1, 1, 0,
-                std::ptr::null_mut(), std::ptr::null_mut()), 0);
+            assert_eq!(
+                nzbget_rs_rpc_next_param(
+                    std::ptr::null_mut(),
+                    1,
+                    1,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                ),
+                0
+            );
             let mut null = std::ptr::null_mut();
             let mut number = 12345;
-            assert_eq!(nzbget_rs_rpc_next_param(&mut null, 1, 1, 0,
-                &mut number, std::ptr::null_mut()), 0);
+            assert_eq!(
+                nzbget_rs_rpc_next_param(&mut null, 1, 1, 0, &mut number, std::ptr::null_mut()),
+                0
+            );
             assert_eq!(number, 12345);
-            for (what, input) in [(0, b"a=12&b=3\0".as_slice()),
-                (1, b"a=true&b=false\0"), (2, b"a=x%20y&b=z\0"), (-1, b"a=1\0"), (3, b"a=1\0")]
-            {
+            for (what, input) in [
+                (0, b"a=12&b=3\0".as_slice()),
+                (1, b"a=true&b=false\0"),
+                (2, b"a=x%20y&b=z\0"),
+                (-1, b"a=1\0"),
+                (3, b"a=1\0"),
+            ] {
                 let mut buf = input.to_vec();
                 let base = buf.as_mut_ptr().cast();
                 let mut request = base;
-                assert_eq!(nzbget_rs_rpc_next_param(&mut request, 1, 1, what,
-                    std::ptr::null_mut(), std::ptr::null_mut()), 0);
+                assert_eq!(
+                    nzbget_rs_rpc_next_param(
+                        &mut request,
+                        1,
+                        1,
+                        what,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut()
+                    ),
+                    0
+                );
                 assert_eq!(request, base);
                 assert_eq!(buf, input);
             }
@@ -3329,16 +3159,34 @@ mod tests {
             };
             fields.write(gmtime(time - correction));
         }
-        let original = Task { hours: 336, minutes: 0, week_days: 0, last_executed: 0 };
+        let original = Task {
+            hours: 336,
+            minutes: 0,
+            week_days: 0,
+            last_executed: 0,
+        };
         let mut task = original;
         let mut last = 0;
         let mut reset = -1;
         let mut due = [usize::MAX; 17];
         for capacity in [0, 1, 9, 14] {
             let n = unsafe {
-                nzbget_rs_scheduler_check(&mut task, 1, &mut last, 80_049_600, 0, 0,
-                    if capacity == 0 { std::ptr::null_mut() } else { due.as_mut_ptr().add(1) },
-                    capacity, &mut reset, Some(calendar))
+                nzbget_rs_scheduler_check(
+                    &mut task,
+                    1,
+                    &mut last,
+                    80_049_600,
+                    0,
+                    0,
+                    if capacity == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        due.as_mut_ptr().add(1)
+                    },
+                    capacity,
+                    &mut reset,
+                    Some(calendar),
+                )
             };
             assert_eq!(n, 15);
             assert_eq!(task, original);
@@ -3347,8 +3195,18 @@ mod tests {
             assert_eq!(due, [usize::MAX; 17]);
         }
         let n = unsafe {
-            nzbget_rs_scheduler_check(&mut task, 1, &mut last, 80_049_600, 0, 0,
-                due.as_mut_ptr().add(1), 15, &mut reset, Some(calendar))
+            nzbget_rs_scheduler_check(
+                &mut task,
+                1,
+                &mut last,
+                80_049_600,
+                0,
+                0,
+                due.as_mut_ptr().add(1),
+                15,
+                &mut reset,
+                Some(calendar),
+            )
         };
         assert_eq!(n, 15);
         assert_eq!(&due[1..16], &[0; 15]);
@@ -3364,7 +3222,12 @@ mod tests {
         unsafe extern "C" fn calendar(time: i64, fields: *mut crate::scheduler::Tm) {
             fields.write(crate::scheduler::gmtime(time));
         }
-        let original = Task { hours: -1, minutes: 0, week_days: 0, last_executed: 0 };
+        let original = Task {
+            hours: -1,
+            minutes: 0,
+            week_days: 0,
+            last_executed: 0,
+        };
         // Each required pointer may be absent. Rejection must be atomic.
         for missing in 0..5 {
             let mut task = original;
@@ -3373,15 +3236,31 @@ mod tests {
             let mut due = [usize::MAX; 9];
             let n = unsafe {
                 nzbget_rs_scheduler_check(
-                    if missing == 0 { std::ptr::null_mut() } else { &mut task },
+                    if missing == 0 {
+                        std::ptr::null_mut()
+                    } else {
+                        &mut task
+                    },
                     1,
-                    if missing == 1 { std::ptr::null_mut() } else { &mut last },
+                    if missing == 1 {
+                        std::ptr::null_mut()
+                    } else {
+                        &mut last
+                    },
                     456,
                     0,
                     0,
-                    if missing == 2 { std::ptr::null_mut() } else { due.as_mut_ptr() },
+                    if missing == 2 {
+                        std::ptr::null_mut()
+                    } else {
+                        due.as_mut_ptr()
+                    },
                     due.len(),
-                    if missing == 3 { std::ptr::null_mut() } else { &mut reset },
+                    if missing == 3 {
+                        std::ptr::null_mut()
+                    } else {
+                        &mut reset
+                    },
                     if missing == 4 { None } else { Some(calendar) },
                 )
             };
@@ -3396,46 +3275,58 @@ mod tests {
         let mut reset = -1;
         let mut due = [usize::MAX; 9];
         unsafe {
-            assert_eq!(nzbget_rs_scheduler_check(&mut task, usize::MAX, &mut last, 456, 0, 0, due.as_mut_ptr(), due.len(), &mut reset, Some(calendar)), 0);
-            assert_eq!(nzbget_rs_scheduler_check(&mut task, 1, &mut last, 456, 0, 0, due.as_mut_ptr(), usize::MAX, &mut reset, Some(calendar)), 0);
+            assert_eq!(
+                nzbget_rs_scheduler_check(
+                    &mut task,
+                    usize::MAX,
+                    &mut last,
+                    456,
+                    0,
+                    0,
+                    due.as_mut_ptr(),
+                    due.len(),
+                    &mut reset,
+                    Some(calendar)
+                ),
+                0
+            );
+            assert_eq!(
+                nzbget_rs_scheduler_check(
+                    &mut task,
+                    1,
+                    &mut last,
+                    456,
+                    0,
+                    0,
+                    due.as_mut_ptr(),
+                    usize::MAX,
+                    &mut reset,
+                    Some(calendar)
+                ),
+                0
+            );
             assert_eq!(task, original);
             assert_eq!(last, 123);
             assert_eq!(reset, -1);
             assert_eq!(due, [usize::MAX; 9]);
-            assert_eq!(nzbget_rs_scheduler_check(std::ptr::null_mut(), 0, &mut last, 456, 0, 0, std::ptr::null_mut(), 0, &mut reset, Some(calendar)), 0);
+            assert_eq!(
+                nzbget_rs_scheduler_check(
+                    std::ptr::null_mut(),
+                    0,
+                    &mut last,
+                    456,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut reset,
+                    Some(calendar)
+                ),
+                0
+            );
         }
         assert_eq!(last, 456);
         assert_eq!(reset, 0);
-    }
-
-    #[test]
-    fn web_null_inputs_and_optional_outputs() {
-        unsafe {
-            let mut check = WebCheckC { authorized: 1, access: 2, auth_cut: 100, warn: 1 };
-            nzbget_rs_web_check_credentials(std::ptr::null(), &mut check);
-            assert_eq!((check.authorized, check.access, check.auth_cut, check.warn), (0, -1, -1, 0));
-            nzbget_rs_web_check_credentials(std::ptr::null(), std::ptr::null_mut());
-            let mut redirect = -1;
-            let mut auth = RsBuf { data: std::ptr::null_mut(), len: 0, cap: 0 };
-            let url = nzbget_rs_web_parse_url(std::ptr::null(), 42, &mut redirect, &mut auth);
-            assert_eq!(redirect, 0);
-            assert!(auth.data.is_null());
-            assert_eq!(CStr::from_ptr(url.data).to_bytes(), b"");
-            nzbget_rs_free(url);
-            nzbget_rs_free(auth);
-            let input = b"/nzbget\0/u:p/jsonrpc";
-            let url = nzbget_rs_web_parse_url(input.as_ptr().cast(), input.len(), &mut redirect, std::ptr::null_mut());
-            assert_eq!(redirect, 1);
-            assert_eq!(CStr::from_ptr(url.data).to_bytes(), b"/nzbget/");
-            nzbget_rs_free(url);
-            let input = b"/u:p/jsonrpc";
-            let url = nzbget_rs_web_parse_url(input.as_ptr().cast(), input.len(), std::ptr::null_mut(), std::ptr::null_mut());
-            assert_eq!(CStr::from_ptr(url.data).to_bytes(), b"/jsonrpc");
-            nzbget_rs_free(url);
-            let (mut start, mut len, mut number) = (99, 99, 99);
-            assert_eq!(nzbget_rs_web_header(std::ptr::null(), 42, 1, &mut start, &mut len, &mut number), 10);
-            assert_eq!((start, len, number), (0, 0, 0));
-        }
     }
 
     #[test]
@@ -3453,9 +3344,22 @@ mod tests {
                 }
             }
             nzbget_rs_normalize_path_separators(std::ptr::null_mut());
-            let mut raw = [b'a', crate::paths::ALT_PATH_SEPARATOR, 0, crate::paths::ALT_PATH_SEPARATOR];
+            let mut raw = [
+                b'a',
+                crate::paths::ALT_PATH_SEPARATOR,
+                0,
+                crate::paths::ALT_PATH_SEPARATOR,
+            ];
             nzbget_rs_normalize_path_separators(raw.as_mut_ptr().cast());
-            assert_eq!(raw, [b'a', crate::paths::PATH_SEPARATOR, 0, crate::paths::ALT_PATH_SEPARATOR]);
+            assert_eq!(
+                raw,
+                [
+                    b'a',
+                    crate::paths::PATH_SEPARATOR,
+                    0,
+                    crate::paths::ALT_PATH_SEPARATOR
+                ]
+            );
 
             // Length-bounded input need not have a terminator. The result
             // owns its bytes, including embedded NULs, and an extra terminator.
@@ -3464,14 +3368,26 @@ mod tests {
             let second = nzbget_rs_path_text(1, input.as_ptr().cast(), input.len(), 0);
             input.fill(b'x');
             drop(input);
-            assert_eq!(std::slice::from_raw_parts(first.data.cast::<u8>(), first.len + 1), b"\"a\0b\"\0");
+            assert_eq!(
+                std::slice::from_raw_parts(first.data.cast::<u8>(), first.len + 1),
+                b"\"a\0b\"\0"
+            );
             assert_eq!(CStr::from_ptr(second.data), c"a");
             nzbget_rs_free(second);
             nzbget_rs_free(first);
             let path = b"a/b";
-            assert_eq!(nzbget_rs_path_position(0, path.as_ptr().cast(), path.len()), 2);
-            assert_eq!(nzbget_rs_path_position(1, path.as_ptr().cast(), path.len()), 1);
-            assert_eq!(nzbget_rs_path_position(1, path.as_ptr().cast(), 1), usize::MAX);
+            assert_eq!(
+                nzbget_rs_path_position(0, path.as_ptr().cast(), path.len()),
+                2
+            );
+            assert_eq!(
+                nzbget_rs_path_position(1, path.as_ptr().cast(), path.len()),
+                1
+            );
+            assert_eq!(
+                nzbget_rs_path_position(1, path.as_ptr().cast(), 1),
+                usize::MAX
+            );
         }
     }
 
@@ -3499,7 +3415,10 @@ mod tests {
     fn deobfuscation_nulls_lengths_and_owned_buffers() {
         unsafe {
             for len in [0, 10, usize::MAX] {
-                assert_eq!(nzbget_rs_is_excessively_obfuscated(std::ptr::null(), len), 0);
+                assert_eq!(
+                    nzbget_rs_is_excessively_obfuscated(std::ptr::null(), len),
+                    0
+                );
             }
             let mut input = b"prefix \"a\0b\" suffix".to_vec();
             let first = crate::deobfuscation::deobfuscate(&input);
@@ -3508,8 +3427,14 @@ mod tests {
             drop(input);
             assert_eq!(first, b"a\0b");
             assert_eq!(second, b"prefix");
-            assert_eq!(nzbget_rs_is_excessively_obfuscated(b"abcx".as_ptr().cast(), 3), 1);
-            assert_eq!(nzbget_rs_is_excessively_obfuscated(b"abcx".as_ptr().cast(), 4), 0);
+            assert_eq!(
+                nzbget_rs_is_excessively_obfuscated(b"abcx".as_ptr().cast(), 3),
+                1
+            );
+            assert_eq!(
+                nzbget_rs_is_excessively_obfuscated(b"abcx".as_ptr().cast(), 4),
+                0
+            );
         }
     }
 
@@ -3525,7 +3450,13 @@ mod tests {
         unsafe fn probe<'a>(user: *mut c_void) -> &'a mut Probe {
             &mut *user.cast::<Probe>()
         }
-        unsafe extern "C" fn field(user: *mut c_void, f: c_int, _: *const c_char, s: *mut *const c_char, n: *mut i64) {
+        unsafe extern "C" fn field(
+            user: *mut c_void,
+            f: c_int,
+            _: *const c_char,
+            s: *mut *const c_char,
+            n: *mut i64,
+        ) {
             let p = probe(user);
             p.events.push(format!("field {f}"));
             *s = std::ptr::null();
@@ -3542,16 +3473,20 @@ mod tests {
             if o.has_category != 0 {
                 p.category = c_text(o.category).unwrap_or_default();
             }
-            if o.has_priority != 0 { p.priority = o.priority as i64; }
+            if o.has_priority != 0 {
+                p.priority = o.priority as i64;
+            }
         }
         unsafe extern "C" fn set_match(user: *mut c_void, status: c_int, rule: c_int) {
             probe(user).events.push(format!("match {status} {rule}"));
         }
         let mut p = Probe::default();
         let cb = FeedItemCallbacks {
-            user: (&mut p as *mut Probe).cast(), field: Some(field),
+            user: (&mut p as *mut Probe).cast(),
+            field: Some(field),
             season_episode: Some(season),
-            apply: Some(apply), set_match: Some(set_match),
+            apply: Some(apply),
+            set_match: Some(set_match),
         };
         unsafe {
             nzbget_rs_feed_filter_free(std::ptr::null_mut());
@@ -3584,26 +3519,46 @@ mod tests {
             nzbget_rs_feed_filter_match(filter, &cb);
             nzbget_rs_feed_filter_free(filter);
             assert_eq!(p.category, b"02");
-            assert_eq!(p.events, ["field 0", "season 0", "match 1 1", "apply", "field 13", "match 1 2", "apply"]);
+            assert_eq!(
+                p.events,
+                [
+                    "field 0",
+                    "season 0",
+                    "match 1 1",
+                    "apply",
+                    "field 13",
+                    "match 1 2",
+                    "apply"
+                ]
+            );
         }
     }
 
     #[test]
     fn util_ffi_nulls_ownership_and_table_without_callbacks() {
         unsafe {
-            nzbget_rs_reduce_str(std::ptr::null_mut(), std::ptr::null(), std::ptr::null());
+            crate::util::reduce_str(std::ptr::null_mut(), std::ptr::null(), std::ptr::null());
             let mut raw = *b"abc\0";
-            nzbget_rs_reduce_str(raw.as_mut_ptr().cast(), std::ptr::null(), c"".as_ptr());
+            crate::util::reduce_str(raw.as_mut_ptr().cast(), std::ptr::null(), c"".as_ptr());
             assert_eq!(&raw, b"abc\0");
             let first = nzbget_rs_format_size(512);
             let second = nzbget_rs_format_size(12345);
             nzbget_rs_free(second);
-            assert_eq!(std::slice::from_raw_parts(first.data.cast::<u8>(), first.len + 1), &b"512 B\0"[..]);
+            assert_eq!(
+                std::slice::from_raw_parts(first.data.cast::<u8>(), first.len + 1),
+                &b"512 B\0"[..]
+            );
             nzbget_rs_free(first);
             for list in [c".NZB", c"*.NZ?"] {
-                assert_eq!(nzbget_rs_match_file_ext(c"a.nzb".as_ptr(), list.as_ptr(), c",".as_ptr()), 1);
+                assert_eq!(
+                    nzbget_rs_match_file_ext(c"a.nzb".as_ptr(), list.as_ptr(), c",".as_ptr()),
+                    1
+                );
             }
-            assert_eq!(nzbget_rs_match_file_ext(std::ptr::null(), std::ptr::null(), std::ptr::null()), 0);
+            assert_eq!(
+                nzbget_rs_match_file_ext(std::ptr::null(), std::ptr::null(), std::ptr::null()),
+                0
+            );
         }
     }
 
@@ -3611,15 +3566,22 @@ mod tests {
     fn webutil_nulls_borrowing_and_ownership() {
         unsafe {
             let mut length = -7;
-            for (text, name) in [(std::ptr::null(), c"x".as_ptr()),
-                                 (c"".as_ptr(), std::ptr::null()),
-                                 (c"".as_ptr(), c"x".as_ptr())] {
+            for (text, name) in [
+                (std::ptr::null(), c"x".as_ptr()),
+                (c"".as_ptr(), std::ptr::null()),
+                (c"".as_ptr(), c"x".as_ptr()),
+            ] {
                 assert!(nzbget_rs_xml_find_tag(text, name, &mut length).is_null());
                 assert_eq!(length, -7);
             }
-            assert!(nzbget_rs_xml_find_tag(c"".as_ptr(), c"x".as_ptr(), std::ptr::null_mut()).is_null());
+            assert!(
+                nzbget_rs_xml_find_tag(c"".as_ptr(), c"x".as_ptr(), std::ptr::null_mut()).is_null()
+            );
             let xml = c"<x>abc</x>";
-            assert_eq!(nzbget_rs_xml_find_tag(xml.as_ptr(), c"x".as_ptr(), &mut length), xml.as_ptr().add(3));
+            assert_eq!(
+                nzbget_rs_xml_find_tag(xml.as_ptr(), c"x".as_ptr(), &mut length),
+                xml.as_ptr().add(3)
+            );
             assert_eq!(length, 3);
         }
     }
@@ -3637,7 +3599,6 @@ mod tests {
     #[test]
     fn decoder_null_arguments_and_failed_value_preserve_length() {
         unsafe {
-            assert_eq!(nzbget_rs_decode_base64(std::ptr::null(), 4, std::ptr::null_mut()), 0);
             nzbget_rs_json_decode(std::ptr::null_mut());
         }
     }
@@ -3645,11 +3606,6 @@ mod tests {
     #[test]
     fn decoder_in_place_buffers_and_borrowed_value_pointer() {
         unsafe {
-            let mut base64 = *b"YWJj\0YQ==!";
-            let ptr = base64.as_mut_ptr().cast();
-            assert_eq!(nzbget_rs_decode_base64(ptr, 9, ptr), 4);
-            assert_eq!(&base64, b"abca\0YQ==!");
-
             let mut json = *b"\\ud83d\\ude00\\u0000\0!";
             nzbget_rs_json_decode(json.as_mut_ptr().cast());
             assert_eq!(&json[..8], b"\xf0\x9f\x98\x80\xef\xbf\xbd\0");
@@ -3659,7 +3615,13 @@ mod tests {
 
     #[test]
     fn null_buffer_can_be_freed() {
-        unsafe { nzbget_rs_free(RsBuf { data: std::ptr::null_mut(), len: 0, cap: 0 }) };
+        unsafe {
+            nzbget_rs_free(RsBuf {
+                data: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            })
+        };
     }
 }
 
@@ -3667,7 +3629,11 @@ mod tests {
 
 /// The bytes of a (pointer, length) argument; NULL is empty.
 unsafe fn arg<'a>(data: *const c_char, len: usize) -> &'a [u8] {
-    if data.is_null() || len == 0 { &[] } else { std::slice::from_raw_parts(data.cast(), len) }
+    if data.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data.cast(), len)
+    }
 }
 
 /// ReleaseName::Normalize.
@@ -3693,8 +3659,12 @@ pub unsafe extern "C" fn nzbget_rs_releasename_readable(name: *const c_char, len
 /// # Safety
 /// `a` and `b` must be readable for `alen` and `blen` bytes (or NULL).
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_releasename_same_release(a: *const c_char, alen: usize, b: *const c_char,
-                                                            blen: usize) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_releasename_same_release(
+    a: *const c_char,
+    alen: usize,
+    b: *const c_char,
+    blen: usize,
+) -> c_int {
     c_int::from(crate::releasename::same_release(arg(a, alen), arg(b, blen)))
 }
 
@@ -3713,7 +3683,10 @@ unsafe fn strings<'a>(data: *const *const c_char, lens: *const usize, n: usize) 
     if n == 0 || data.is_null() || lens.is_null() {
         return Vec::new();
     }
-    let (data, lens) = (std::slice::from_raw_parts(data, n), std::slice::from_raw_parts(lens, n));
+    let (data, lens) = (
+        std::slice::from_raw_parts(data, n),
+        std::slice::from_raw_parts(lens, n),
+    );
     data.iter().zip(lens).map(|(&p, &l)| arg(p, l)).collect()
 }
 
@@ -3723,14 +3696,24 @@ unsafe fn listings<'a>(raw: *const NzbgetRsListing, n: usize) -> Vec<crate::post
     }
     std::slice::from_raw_parts(raw, n)
         .iter()
-        .map(|l| crate::posting::Listing { link: arg(l.link, l.link_len), size: l.size, grabs: l.grabs, date: l.date })
+        .map(|l| crate::posting::Listing {
+            link: arg(l.link, l.link_len),
+            size: l.size,
+            grabs: l.grabs,
+            date: l.date,
+        })
         .collect()
 }
 
 /// Writes groups of indices: `indices` (writable for n) gets them group after
 /// group, `group_sizes` (writable for n) each group's length, `*groups` the
 /// number of groups; returns the indices written.
-unsafe fn write_groups(groups: Vec<Vec<usize>>, indices: *mut usize, group_sizes: *mut usize, count: *mut usize) -> usize {
+unsafe fn write_groups(
+    groups: Vec<Vec<usize>>,
+    indices: *mut usize,
+    group_sizes: *mut usize,
+    count: *mut usize,
+) -> usize {
     let mut written = 0;
     for (g, group) in groups.iter().enumerate() {
         *group_sizes.add(g) = group.len();
@@ -3748,8 +3731,13 @@ unsafe fn write_groups(groups: Vec<Vec<usize>>, indices: *mut usize, group_sizes
 /// # Safety
 /// `ids`/`lens` readable for `n`; `out` writable for 64; `out_len` writable.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_posting_sketch(ids: *const *const c_char, lens: *const usize, n: usize,
-                                                  out: *mut u32, out_len: *mut usize) {
+pub unsafe extern "C" fn nzbget_rs_posting_sketch(
+    ids: *const *const c_char,
+    lens: *const usize,
+    n: usize,
+    out: *mut u32,
+    out_len: *mut usize,
+) {
     let sketch = crate::posting::make_sketch(strings(ids, lens, n));
     std::ptr::copy_nonoverlapping(sketch.as_ptr(), out, sketch.len());
     *out_len = sketch.len();
@@ -3760,8 +3748,19 @@ pub unsafe extern "C" fn nzbget_rs_posting_sketch(ids: *const *const c_char, len
 /// # Safety
 /// `a` and `b` readable for `na` and `nb` (NULL when 0).
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_posting_same_sketch(a: *const u32, na: usize, b: *const u32, nb: usize) -> c_int {
-    let s = |p: *const u32, n: usize| if n == 0 || p.is_null() { &[][..] } else { std::slice::from_raw_parts(p, n) };
+pub unsafe extern "C" fn nzbget_rs_posting_same_sketch(
+    a: *const u32,
+    na: usize,
+    b: *const u32,
+    nb: usize,
+) -> c_int {
+    let s = |p: *const u32, n: usize| {
+        if n == 0 || p.is_null() {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(p, n)
+        }
+    };
     c_int::from(crate::posting::same_sketch(s(a, na), s(b, nb)))
 }
 
@@ -3770,9 +3769,18 @@ pub unsafe extern "C" fn nzbget_rs_posting_same_sketch(a: *const u32, na: usize,
 /// # Safety
 /// The arrays must be readable for their counts.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_posting_same_posting(a: *const *const c_char, alens: *const usize, na: usize,
-                                                        b: *const *const c_char, blens: *const usize, nb: usize) -> c_int {
-    c_int::from(crate::posting::same_posting(&strings(a, alens, na), &strings(b, blens, nb)))
+pub unsafe extern "C" fn nzbget_rs_posting_same_posting(
+    a: *const *const c_char,
+    alens: *const usize,
+    na: usize,
+    b: *const *const c_char,
+    blens: *const usize,
+    nb: usize,
+) -> c_int {
+    c_int::from(crate::posting::same_posting(
+        &strings(a, alens, na),
+        &strings(b, blens, nb),
+    ))
 }
 
 /// Posting::ListingMismatch.
@@ -3786,10 +3794,21 @@ pub extern "C" fn nzbget_rs_posting_listing_mismatch(listing_size: i64, nzb_byte
 /// # Safety
 /// `listings` readable for `n`; `indices` and `group_sizes` writable for `n`; `groups` writable.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_posting_order(raw: *const NzbgetRsListing, n: usize, pick_bytes: i64,
-                                                 max_postings: c_int, indices: *mut usize, group_sizes: *mut usize,
-                                                 groups: *mut usize) -> usize {
-    write_groups(crate::posting::order_postings(&listings(raw, n), pick_bytes, max_postings), indices, group_sizes, groups)
+pub unsafe extern "C" fn nzbget_rs_posting_order(
+    raw: *const NzbgetRsListing,
+    n: usize,
+    pick_bytes: i64,
+    max_postings: c_int,
+    indices: *mut usize,
+    group_sizes: *mut usize,
+    groups: *mut usize,
+) -> usize {
+    write_groups(
+        crate::posting::order_postings(&listings(raw, n), pick_bytes, max_postings),
+        indices,
+        group_sizes,
+        groups,
+    )
 }
 
 // Native duplicate-discovery identity (rust/src/dupeidentity.rs).
@@ -3802,10 +3821,16 @@ pub struct DupeIdentityInput {
     pub extension_len: usize,
 }
 
-unsafe fn dupe_identity_input(raw: *const DupeIdentityInput) -> Option<crate::dupeidentity::Identity> {
-    if raw.is_null() { return None; }
+unsafe fn dupe_identity_input(
+    raw: *const DupeIdentityInput,
+) -> Option<crate::dupeidentity::Identity> {
+    if raw.is_null() {
+        return None;
+    }
     let raw = &*raw;
-    if raw.bytes == 0 { return None; }
+    if raw.bytes == 0 {
+        return None;
+    }
     Some(crate::dupeidentity::Identity {
         bytes: raw.bytes,
         name: arg(raw.name, raw.name_len).to_vec(),
@@ -3816,19 +3841,43 @@ unsafe fn dupe_identity_input(raw: *const DupeIdentityInput) -> Option<crate::du
 /// # Safety
 /// Names are readable for their lengths, or NULL (empty).
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_candidate(title: *const c_char, title_len: usize, bytes: u64,
-    name: *const c_char, name_len: usize, size: u64) -> c_int {
-    c_int::from(crate::dupeidentity::candidate_ok(arg(title, title_len), bytes, arg(name, name_len), size, 0.0, true))
+pub unsafe extern "C" fn nzbget_rs_dupe_candidate(
+    title: *const c_char,
+    title_len: usize,
+    bytes: u64,
+    name: *const c_char,
+    name_len: usize,
+    size: u64,
+) -> c_int {
+    c_int::from(crate::dupeidentity::candidate_ok(
+        arg(title, title_len),
+        bytes,
+        arg(name, name_len),
+        size,
+        0.0,
+        true,
+    ))
 }
 
 /// # Safety
 /// Names readable for their lengths; identities NULL or valid with readable fields.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_lenient_ok(title: *const c_char, title_len: usize,
-    main_name: *const c_char, main_len: usize, mine: *const DupeIdentityInput, theirs: *const DupeIdentityInput) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_dupe_lenient_ok(
+    title: *const c_char,
+    title_len: usize,
+    main_name: *const c_char,
+    main_len: usize,
+    mine: *const DupeIdentityInput,
+    theirs: *const DupeIdentityInput,
+) -> c_int {
     let mine = dupe_identity_input(mine);
     let theirs = dupe_identity_input(theirs);
-    c_int::from(crate::dupeidentity::lenient_ok(arg(title, title_len), arg(main_name, main_len), mine.as_ref(), theirs.as_ref()))
+    c_int::from(crate::dupeidentity::lenient_ok(
+        arg(title, title_len),
+        arg(main_name, main_len),
+        mine.as_ref(),
+        theirs.as_ref(),
+    ))
 }
 
 // Native duplicate-discovery watcher and per-search fetch budget.
@@ -3844,20 +3893,52 @@ pub struct DupeWatchPeer {
 /// Eligibility with an unchanged identity and an existing search stamp, before
 /// peer snapshots are needed. This scalar boundary does not read queue memory.
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dupe_watch_stamped(flags: u32, score: i32, now: i64,
-    previous_score: i32, previous_time: i64) -> c_int {
-    crate::dupewatch::decide(flags, score, None, now,
-        Some(crate::dupewatch::SearchStamp { score: previous_score, time: previous_time }), false) as c_int
+pub extern "C" fn nzbget_rs_dupe_watch_stamped(
+    flags: u32,
+    score: i32,
+    now: i64,
+    previous_score: i32,
+    previous_time: i64,
+) -> c_int {
+    crate::dupewatch::decide(
+        flags,
+        score,
+        None,
+        now,
+        Some(crate::dupewatch::SearchStamp {
+            score: previous_score,
+            time: previous_time,
+        }),
+        false,
+    ) as c_int
 }
 
 #[inline(never)]
-unsafe fn dupe_watch_has_higher(pick: &DupeWatchPeer, peers: *const DupeWatchPeer, count: usize) -> bool {
+unsafe fn dupe_watch_has_higher(
+    pick: &DupeWatchPeer,
+    peers: *const DupeWatchPeer,
+    count: usize,
+) -> bool {
     use crate::dupewatch::{self, Snapshot};
-    let mine = Snapshot { id: pick.id, score: pick.score, flags: pick.flags, key: arg(pick.key, pick.key_len) };
+    let mine = Snapshot {
+        id: pick.id,
+        score: pick.score,
+        flags: pick.flags,
+        key: arg(pick.key, pick.key_len),
+    };
     for peer in std::slice::from_raw_parts(peers, count) {
-        if peer.id == pick.id || peer.score <= pick.score { continue; }
-        let other = Snapshot { id: peer.id, score: peer.score, flags: peer.flags, key: arg(peer.key, peer.key_len) };
-        if dupewatch::higher_peer(mine, other, true) { return true; }
+        if peer.id == pick.id || peer.score <= pick.score {
+            continue;
+        }
+        let other = Snapshot {
+            id: peer.id,
+            score: peer.score,
+            flags: peer.flags,
+            key: arg(peer.key, peer.key_len),
+        };
+        if dupewatch::higher_peer(mine, other, true) {
+            return true;
+        }
     }
     false
 }
@@ -3865,41 +3946,74 @@ unsafe fn dupe_watch_has_higher(pick: &DupeWatchPeer, peers: *const DupeWatchPee
 /// # Safety
 /// Peer records and key buffers valid for their counts; pick is non-NULL.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_watch(pick: *const DupeWatchPeer, peers: *const DupeWatchPeer,
-    count: usize, now: i64, previous_score: i32, previous_time: i64, has_previous: c_int,
-    identity_changed: c_int) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_dupe_watch(
+    pick: *const DupeWatchPeer,
+    peers: *const DupeWatchPeer,
+    count: usize,
+    now: i64,
+    previous_score: i32,
+    previous_time: i64,
+    has_previous: c_int,
+    identity_changed: c_int,
+) -> c_int {
     use crate::dupewatch::{self, Decision};
-    if pick.is_null() { return 0; }
+    if pick.is_null() {
+        return 0;
+    }
     let pick = &*pick;
     // Changed identities never use the previous stamp; avoid irrelevant time
     // arithmetic as well as peer/key work on these common fast paths.
     let previous = if has_previous != 0 && identity_changed == 0 {
-        Some(dupewatch::SearchStamp { score: previous_score, time: previous_time })
-    } else { None };
-    let preliminary = dupewatch::decide(pick.flags, pick.score, None, now, previous, identity_changed != 0);
-    if preliminary != Decision::Search || count == 0 || peers.is_null() { return preliminary as c_int; }
+        Some(dupewatch::SearchStamp {
+            score: previous_score,
+            time: previous_time,
+        })
+    } else {
+        None
+    };
+    let preliminary = dupewatch::decide(
+        pick.flags,
+        pick.score,
+        None,
+        now,
+        previous,
+        identity_changed != 0,
+    );
+    if preliminary != Decision::Search || count == 0 || peers.is_null() {
+        return preliminary as c_int;
+    }
     // Keep the key scan out of the entry's register-save/prologue fast path.
-    if dupe_watch_has_higher(pick, peers, count) { return Decision::Skip as c_int; }
+    if dupe_watch_has_higher(pick, peers, count) {
+        return Decision::Skip as c_int;
+    }
     Decision::Search as c_int
 }
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dupe_budget_new(max_donors: u32) -> *mut crate::dupewatch::FetchBudget {
-    Box::into_raw(Box::new(crate::dupewatch::FetchBudget::from_max_donors(max_donors as usize)))
+    Box::into_raw(Box::new(crate::dupewatch::FetchBudget::from_max_donors(
+        max_donors as usize,
+    )))
 }
 
 /// # Safety
 /// Budget is a live pointer returned by nzbget_rs_dupe_budget_new; callers have joined users before freeing.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupe_budget_free(budget: *mut crate::dupewatch::FetchBudget) {
-    if !budget.is_null() { drop(Box::from_raw(budget)); }
+    if !budget.is_null() {
+        drop(Box::from_raw(budget));
+    }
 }
 
 /// # Safety
 /// Budget is live; concurrent calls are allowed, but free must not run concurrently.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_budget_spent(budget: *const crate::dupewatch::FetchBudget) -> c_int {
-    if budget.is_null() { return 1; }
+pub unsafe extern "C" fn nzbget_rs_dupe_budget_spent(
+    budget: *const crate::dupewatch::FetchBudget,
+) -> c_int {
+    if budget.is_null() {
+        return 1;
+    }
     c_int::from((*budget).spent())
 }
 
@@ -3907,15 +4021,25 @@ pub unsafe extern "C" fn nzbget_rs_dupe_budget_spent(budget: *const crate::dupew
 /// The decoded body is readable for len, or NULL (empty).
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupe_par_block(data: *const c_char, len: usize) -> u64 {
-    crate::twin::block_size(arg(data,len))
+    crate::twin::block_size(arg(data, len))
 }
 /// # Safety
 /// Names readable for their lengths, or NULL (empty).
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_outer_ok(title: *const c_char, title_len: usize, name: *const c_char, len: usize) -> c_int {
-    let title=arg(title,title_len);let name=arg(name,len);
-    c_int::from(!crate::dupeidentity::conflicts(title,name) && !crate::dupeidentity::other_title(title,name)
-        && (!crate::releasename::readable(name) || crate::dupeidentity::consistent(title,name)))
+pub unsafe extern "C" fn nzbget_rs_dupe_outer_ok(
+    title: *const c_char,
+    title_len: usize,
+    name: *const c_char,
+    len: usize,
+) -> c_int {
+    let title = arg(title, title_len);
+    let name = arg(name, len);
+    c_int::from(
+        !crate::dupeidentity::conflicts(title, name)
+            && !crate::dupeidentity::other_title(title, name)
+            && (!crate::releasename::readable(name)
+                || crate::dupeidentity::consistent(title, name)),
+    )
 }
 
 // Memory Pressure Monitor C ABI (Requirement R8)
@@ -4549,9 +4673,16 @@ unsafe fn purge_owned_outside(x: &PurgeOutsideC) -> Result<purge::OutsideClaim, 
 // purge_slice already charges each borrowed C record. Preserve that bound and
 // charge any additional fixed storage required by its owned Rust counterpart.
 // All tables and nested byte spans are budgeted before conversion allocates.
-fn purge_owned_table_overhead<C, R>(count: usize, budget: &mut purge::Budget) -> Result<(), purge::PurgeError> {
+fn purge_owned_table_overhead<C, R>(
+    count: usize,
+    budget: &mut purge::Budget,
+) -> Result<(), purge::PurgeError> {
     let extra = std::mem::size_of::<R>().saturating_sub(std::mem::size_of::<C>());
-    budget.add(count.checked_mul(extra).ok_or(purge::PurgeError::LimitExceeded)?)
+    budget.add(
+        count
+            .checked_mul(extra)
+            .ok_or(purge::PurgeError::LimitExceeded)?,
+    )
 }
 
 unsafe fn purge_snapshot(x: &PurgeSnapshotC) -> Result<purge::Snapshot, purge::PurgeError> {
@@ -4585,14 +4716,23 @@ unsafe fn purge_snapshot(x: &PurgeSnapshotC) -> Result<purge::Snapshot, purge::P
     purge_owned_table_overhead::<PurgeSourceC, purge::SourceValidation>(sources.len(), &mut b)?;
     purge_owned_table_overhead::<PurgeCustodyC, purge::CustodyReceipt>(custody.len(), &mut b)?;
     purge_owned_table_overhead::<PurgeParentC, purge::ParentMembership>(parents.len(), &mut b)?;
-    purge_owned_table_overhead::<PurgeComparisonC, purge::AnchorComparison>(comparisons.len(), &mut b)?;
+    purge_owned_table_overhead::<PurgeComparisonC, purge::AnchorComparison>(
+        comparisons.len(),
+        &mut b,
+    )?;
     purge_owned_table_overhead::<PurgeDirectC, purge::DirectBinding>(direct.len(), &mut b)?;
     purge_owned_table_overhead::<PurgePairC, purge::PairMembershipReceipt>(pairs.len(), &mut b)?;
-    purge_owned_table_overhead::<PurgePairCustodyC, purge::PairCustodyReceipt>(pair_custody.len(), &mut b)?;
+    purge_owned_table_overhead::<PurgePairCustodyC, purge::PairCustodyReceipt>(
+        pair_custody.len(),
+        &mut b,
+    )?;
     purge_owned_table_overhead::<PurgeRootC, purge::RootRecord>(roots.len(), &mut b)?;
     purge_owned_table_overhead::<PurgeNamespaceC, purge::NamespaceProof>(namespaces.len(), &mut b)?;
     purge_owned_table_overhead::<PurgeEntryC, purge::InventoryEntry>(entries.len(), &mut b)?;
-    purge_owned_table_overhead::<PurgeOwnershipC, purge::OwnershipReceipt>(ownership.len(), &mut b)?;
+    purge_owned_table_overhead::<PurgeOwnershipC, purge::OwnershipReceipt>(
+        ownership.len(),
+        &mut b,
+    )?;
     purge_owned_table_overhead::<PurgeOutsideC, purge::OutsideClaim>(outside.len(), &mut b)?;
     purge_raw_bytes(x.captured_context, purge::MAX_IDENTITY, &mut b)?;
     purge_raw_bytes(x.current_context, purge::MAX_IDENTITY, &mut b)?;
@@ -5712,8 +5852,8 @@ unsafe fn purge_persistence_receipt(
     }))
 }
 
-mod purge_subjects;
 mod purge_inventory;
+mod purge_subjects;
 
 mod purge_intake;
 
@@ -5729,25 +5869,44 @@ mod purge_snapshot_review_tests {
         // rejects owned fixed widths before conversion allocates anything.
         let bytes = vec![b'x'; purge::MAX_IDENTITY];
         let mut members: Vec<PurgeMemberC> = vec![unsafe { std::mem::zeroed() }; 512];
-        let mut remaining = purge::MAX_PAYLOAD - members.len() * std::mem::size_of::<PurgeMemberC>();
+        let mut remaining =
+            purge::MAX_PAYLOAD - members.len() * std::mem::size_of::<PurgeMemberC>();
         assert!(std::mem::size_of::<purge::MemberRecord>() > std::mem::size_of::<PurgeMemberC>());
         for member in &mut members {
-            for span in [&mut member.binding.posting_source, &mut member.name, &mut member.key] {
-                let count = remaining.min(bytes.len()); remaining -= count;
-                *span = PurgeBytesC { data: bytes.as_ptr(), len: count as u32 };
+            for span in [
+                &mut member.binding.posting_source,
+                &mut member.name,
+                &mut member.key,
+            ] {
+                let count = remaining.min(bytes.len());
+                remaining -= count;
+                *span = PurgeBytesC {
+                    data: bytes.as_ptr(),
+                    len: count as u32,
+                };
             }
         }
         assert_eq!(remaining, 0);
         members.last_mut().unwrap().complete_inventory = 2;
         let mut snapshot: PurgeSnapshotC = unsafe { std::mem::zeroed() };
-        snapshot.members = members.as_ptr(); snapshot.members_count = members.len() as u32;
-        let (result, allocations) = crate::allocation_probe::measure(|| unsafe { purge_snapshot(&snapshot) });
-        assert_eq!(result.err(), Some(purge::PurgeError::LimitExceeded), "PR108_F2_OWNED_WIDTH_PREFLIGHT");
-        assert_eq!(allocations.calls, 0, "ABI preflight allocated before rejecting fixed owned widths");
+        snapshot.members = members.as_ptr();
+        snapshot.members_count = members.len() as u32;
+        let (result, allocations) =
+            crate::allocation_probe::measure(|| unsafe { purge_snapshot(&snapshot) });
+        assert_eq!(
+            result.err(),
+            Some(purge::PurgeError::LimitExceeded),
+            "PR108_F2_OWNED_WIDTH_PREFLIGHT"
+        );
+        assert_eq!(
+            allocations.calls, 0,
+            "ABI preflight allocated before rejecting fixed owned widths"
+        );
     }
 
     fn exact_owned_width<T>() {
-        let width = std::mem::size_of::<T>(); assert!(width > 1);
+        let width = std::mem::size_of::<T>();
+        assert!(width > 1);
         let mut exact = purge::Budget::new();
         exact.add(purge::MAX_PAYLOAD - width).unwrap();
         exact.table::<T>(1).unwrap();
@@ -5756,7 +5915,10 @@ mod purge_snapshot_review_tests {
         short.add(purge::MAX_PAYLOAD - width + 1).unwrap();
         assert_eq!(short.table::<T>(1), Err(purge::PurgeError::LimitExceeded));
         let mut overflow = purge::Budget::new();
-        assert_eq!(overflow.table::<T>(usize::MAX / width + 1), Err(purge::PurgeError::LimitExceeded));
+        assert_eq!(
+            overflow.table::<T>(usize::MAX / width + 1),
+            Err(purge::PurgeError::LimitExceeded)
+        );
     }
     #[test]
     fn review_all_converted_owned_record_widths_have_checked_boundaries() {
@@ -5779,13 +5941,26 @@ mod purge_snapshot_review_tests {
     #[test]
     fn review_snapshot_small_owned_records_and_nested_bytes_still_convert() {
         let identity = b"root";
-        let roots = [PurgeRootC { id: 1, descriptor_identity: PurgeBytesC { data: identity.as_ptr(), len: 4 }, configured_container: 1 }];
+        let roots = [PurgeRootC {
+            id: 1,
+            descriptor_identity: PurgeBytesC {
+                data: identity.as_ptr(),
+                len: 4,
+            },
+            configured_container: 1,
+        }];
         let mut snapshot: PurgeSnapshotC = unsafe { std::mem::zeroed() };
-        snapshot.roots = roots.as_ptr(); snapshot.roots_count = 1;
+        snapshot.roots = roots.as_ptr();
+        snapshot.roots_count = 1;
         let owned = unsafe { purge_snapshot(&snapshot) }.unwrap();
-        assert_eq!(owned.roots.len(), 1); assert_eq!(owned.roots[0].id, 1);
-        assert_eq!(owned.roots[0].descriptor_identity, b"root"); assert!(owned.roots[0].configured_container);
-        assert_ne!(owned.roots[0].descriptor_identity.as_ptr(), identity.as_ptr());
+        assert_eq!(owned.roots.len(), 1);
+        assert_eq!(owned.roots[0].id, 1);
+        assert_eq!(owned.roots[0].descriptor_identity, b"root");
+        assert!(owned.roots[0].configured_container);
+        assert_ne!(
+            owned.roots[0].descriptor_identity.as_ptr(),
+            identity.as_ptr()
+        );
     }
 }
 
@@ -5794,7 +5969,9 @@ mod purge_snapshot_review_tests {
 // ============================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_register_lifecycle_hooks(hooks: *const crate::lifecycle::LifecycleHooks) {
+pub unsafe extern "C" fn nzbget_rs_register_lifecycle_hooks(
+    hooks: *const crate::lifecycle::LifecycleHooks,
+) {
     if let Some(hooks) = hooks.as_ref() {
         crate::lifecycle::register_hooks(*hooks);
     }
@@ -5832,7 +6009,6 @@ mod lifecycle_ffi_tests {
 // ArticleDownloader Hot-Path C ABI (rust/src/dupefallback.rs)
 // ============================================================================
 
-
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupe_fallback_steps_hash(
     sizes: *const c_int,
@@ -5844,11 +6020,6 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_steps_hash(
     let slice = std::slice::from_raw_parts(sizes, count);
     crate::dupefallback::article_size_steps_hash(slice)
 }
-
-
-
-
-
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupe_fallback_match_donor_file(
@@ -5923,19 +6094,9 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_match_donor_file(
     .map_or(-1, |idx| idx as isize)
 }
 
-
-
-
-
-
-
-
-
-
 // ============================================================================
 // Post-Repair & DupeCoordinator Hot-Path FFI (`rust/src/postrepair.rs`)
 // ============================================================================
-
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupecoord_select_dupe_backup(
@@ -6093,11 +6254,7 @@ pub unsafe extern "C" fn nzbget_rs_par_repairer_verify_extra_file(
         on_quick_verified_inc: None,
     };
     let cbs_ref = cbs.as_ref().unwrap_or(&empty_cbs);
-    c_int::from(r.verify_extra_file(
-        &p_path,
-        is_split_fragment != 0,
-        cbs_ref,
-    ))
+    c_int::from(r.verify_extra_file(&p_path, is_split_fragment != 0, cbs_ref))
 }
 
 #[no_mangle]
@@ -6326,20 +6483,6 @@ pub unsafe extern "C" fn nzbget_rs_unpack_parse_message(
 // DiskState, PrePostProcessor, Scanner & TwinCheck Hot-Path FFI (`rust/src/diskstatepp.rs`)
 // ============================================================================
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ============================================================================
 // DupeSearch, Fleet, DonorHealth, Newznab, FeedCoordinator, FeedInfo &
 // FeedFile Hot-Path FFI (`rust/src/dupesearch_nzb.rs` / `rust/src/feed.rs`)
@@ -6407,10 +6550,18 @@ pub unsafe extern "C" fn nzbget_rs_nntp_processor_handle_line(
     send_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int)>,
     log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
 ) -> c_int {
-    let data_dir_opt = (!data_dir.is_null()).then(|| input(data_dir)).filter(|b| !b.is_empty());
-    let cache_dir_opt = (!cache_dir.is_null()).then(|| input(cache_dir)).filter(|b| !b.is_empty());
+    let data_dir_opt = (!data_dir.is_null())
+        .then(|| input(data_dir))
+        .filter(|b| !b.is_empty());
+    let cache_dir_opt = (!cache_dir.is_null())
+        .then(|| input(cache_dir))
+        .filter(|b| !b.is_empty());
     let cache_ref = (!cache.is_null()).then(|| &*cache);
-    let line_bytes = if raw_line.is_null() { &[][..] } else { input(raw_line) };
+    let line_bytes = if raw_line.is_null() {
+        &[][..]
+    } else {
+        input(raw_line)
+    };
 
     let mut write_line_fn = |line: &[u8]| {
         if let Some(cb) = write_line_cb {
@@ -6598,7 +6749,6 @@ pub unsafe extern "C" fn nzbget_rs_network_speed_test_run(
 // Consolidated ArticleDownloader & ServerPool Hot-Path FFI (`rust/src/nntp.rs`)
 // ============================================================================
 
-
 // ============================================================================
 // ArticleWriter, ArticleCache & MemoryMonitor FFI (`rust/src/artwritercore.rs`)
 // ============================================================================
@@ -6688,7 +6838,11 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
     output_filename_len: usize,
     cb_ctx: *mut std::ffi::c_void,
     open_file_cb: Option<
-        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char, read_write: c_int) -> c_int,
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            path: *const c_char,
+            read_write: c_int,
+        ) -> c_int,
     >,
     out_final_path: *mut RsBuf,
     out_temp_path: *mut RsBuf,
@@ -6726,7 +6880,11 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
         },
         |path_bytes| crate::fsops::file_exists(path_bytes, &crate::fsops::posix_stat),
         |path_bytes| {
-            crate::fsops::force_directories(path_bytes, &mut force_dirs_err, &crate::fsops::posix_stat)
+            crate::fsops::force_directories(
+                path_bytes,
+                &mut force_dirs_err,
+                &crate::fsops::posix_stat,
+            )
         },
         |path_bytes| CString::new(path_bytes).is_ok_and(|c| libc::unlink(c.as_ptr()) == 0),
         |path_bytes, read_write| {
@@ -6740,7 +6898,10 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
         },
         |path_bytes| {
             if let Ok(c_path) = CString::new(path_bytes) {
-                let _ = libc::mkdir(c_path.as_ptr(), libc::S_IRWXU | libc::S_IRWXG | libc::S_IRWXO);
+                let _ = libc::mkdir(
+                    c_path.as_ptr(),
+                    libc::S_IRWXU | libc::S_IRWXG | libc::S_IRWXO,
+                );
             }
             crate::fsops::directory_exists(path_bytes, &crate::fsops::posix_stat)
         },
@@ -7016,7 +7177,9 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_move_completed_files(
     completed_filenames: *const *const c_char,
     completed_len: usize,
     ctx: *mut std::ffi::c_void,
-    cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, err_msg_or_null: *const c_char) -> c_int>,
+    cb: Option<
+        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, err_msg_or_null: *const c_char) -> c_int,
+    >,
 ) -> c_int {
     let d_dir = if dest_dir.is_null() {
         &[][..]
@@ -7266,7 +7429,6 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_finish_disk_ops(
     );
 }
 
-
 // ============================================================================
 // QueueCoordinator & Options consolidated FFI exports
 // ============================================================================
@@ -7275,26 +7437,13 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_finish_disk_ops(
 // DiskState Consolidated Validation & State FFI (`rust/src/diskstatepp.rs`)
 // ============================================================================
 
-
-
-
-
-
-
-
 // ============================================================================
 // Consolidated WebDownloader & StatMeter FFI (`rust/src/webdownload.rs`, `rust/src/statmeter.rs`)
 // ============================================================================
 
-
-
-
 // ============================================================================
 // DiskState Consolidated Parsing & Matching FFI (`rust/src/diskstatepp.rs`)
 // ============================================================================
-
-
-
 
 // ============================================================================
 // DupeSearch Consolidated FFI (`rust/src/dupesearch_nzb.rs`)
@@ -7316,16 +7465,6 @@ pub unsafe extern "C" fn nzbget_rs_cmdline_format_usage(
         path_sep as u8,
         include_daemon != 0,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_status_summary(
-    spec: *const crate::binrpc::StatusSummarySpec,
-) -> RsBuf {
-    if spec.is_null() {
-        return into_buf(Vec::new());
-    }
-    into_buf(crate::binrpc::status_summary(&*spec))
 }
 
 #[no_mangle]
@@ -7495,109 +7634,6 @@ pub unsafe extern "C" fn nzbget_rs_nserv_format_usage(base_name: *const c_char) 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_decode_log_response_entries(
-    data: *const u8,
-    len: usize,
-    nr_entries: u32,
-    ctx: *mut std::ffi::c_void,
-    emit_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u32, u32, u32, *const c_char)>,
-) {
-    if data.is_null() || len == 0 {
-        return;
-    }
-    let Some(cb) = emit_cb else {
-        return;
-    };
-    let slice = std::slice::from_raw_parts(data, len);
-    crate::binrpc::decode_log_response_entries(slice, nr_entries, |id, kind, time, text_ptr| {
-        cb(ctx, id, kind, time, text_ptr.cast());
-    });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_encode_edit_queue_trailing(
-    text: *const c_char,
-    ids: *const i32,
-    ids_len: usize,
-    names: *const *const c_char,
-    names_len: usize,
-    out_text_len: *mut c_int,
-    out_names_len: *mut c_int,
-) -> RsBuf {
-    let text_opt = if text.is_null() {
-        None
-    } else {
-        Some(input(text))
-    };
-    let ids_slice = if ids.is_null() || ids_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(ids, ids_len)
-    };
-    let mut name_slices = Vec::with_capacity(if names.is_null() { 0 } else { names_len });
-    if !names.is_null() {
-        for i in 0..names_len {
-            name_slices.push(input(*names.add(i)));
-        }
-    }
-    let (buf, tlen, nlen) =
-        crate::binrpc::encode_edit_queue_trailing(text_opt, ids_slice, &name_slices);
-    if !out_text_len.is_null() {
-        *out_text_len = tlen;
-    }
-    if !out_names_len.is_null() {
-        *out_names_len = nlen;
-    }
-    into_buf(buf)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_file_listing_from_wire(
-    data: *const c_char,
-    len: usize,
-    nr_nzb: u32,
-    nr_ppp: u32,
-    nr_files: u32,
-    has_pattern: c_int,
-) -> RsBuf {
-    let slice = if data.is_null() || len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(data.cast::<u8>(), len)
-    };
-    into_buf(crate::binrpc::file_listing_from_wire(
-        slice,
-        nr_nzb,
-        nr_ppp,
-        nr_files,
-        has_pattern != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_group_listing_from_wire(
-    data: *const c_char,
-    len: usize,
-    nr_nzb: u32,
-    nr_ppp: u32,
-    nr_files: u32,
-    has_pattern: c_int,
-) -> RsBuf {
-    let slice = if data.is_null() || len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(data.cast::<u8>(), len)
-    };
-    into_buf(crate::binrpc::group_listing_from_wire(
-        slice,
-        nr_nzb,
-        nr_ppp,
-        nr_files,
-        has_pattern != 0,
-    ))
-}
-
-#[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
     path: *const c_char,
@@ -7726,7 +7762,13 @@ pub unsafe extern "C" fn nzbget_rs_twin_visit_par2_sigs(
         let name: Vec<u8> = s
             .name
             .bytes()
-            .map(|b| if matches!(b, b'\n' | b'\t' | b'\r') { b'_' } else { b })
+            .map(|b| {
+                if matches!(b, b'\n' | b'\t' | b'\r') {
+                    b'_'
+                } else {
+                    b
+                }
+            })
             .collect();
         cb(
             ctx,
@@ -7782,7 +7824,12 @@ pub unsafe extern "C" fn nzbget_rs_twin_visit_nzb_entries(
         if let Some(cb) = on_segment {
             for (bytes, id) in &e.segments {
                 let id_clean = clean(id);
-                cb(ctx, *bytes as i64, id_clean.as_ptr().cast::<c_char>(), id_clean.len());
+                cb(
+                    ctx,
+                    *bytes as i64,
+                    id_clean.as_ptr().cast::<c_char>(),
+                    id_clean.len(),
+                );
             }
         }
     }
@@ -7964,11 +8011,14 @@ pub unsafe extern "C" fn nzbget_rs_options_load_config_file(
         return 0;
     }
     let c_path = CStr::from_ptr(path);
-    i32::from(crate::options::load_config_file_lines(c_path, |line_no, line| {
-        if let Some(cb) = on_line_cb {
-            cb(ctx, line_no, line.as_ptr());
-        }
-    }))
+    i32::from(crate::options::load_config_file_lines(
+        c_path,
+        |line_no, line| {
+            if let Some(cb) = on_line_cb {
+                cb(ctx, line_no, line.as_ptr());
+            }
+        },
+    ))
 }
 
 #[no_mangle]
@@ -8135,14 +8185,8 @@ pub unsafe extern "C" fn nzbget_rs_par_damage_judge(
         }
     }
 
-    *out_verdict = crate::pardamage::judge(
-        nzb_id,
-        dir_path,
-        nzb_size,
-        nzb_par_size,
-        &q_vec,
-        &c_vec,
-    );
+    *out_verdict =
+        crate::pardamage::judge(nzb_id, dir_path, nzb_size, nzb_par_size, &q_vec, &c_vec);
 }
 
 #[no_mangle]
@@ -8181,7 +8225,8 @@ pub unsafe extern "C" fn nzbget_rs_move_controller_move_files(
 ) -> c_int {
     let inter_path =
         crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(inter_dir));
-    let dest_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
+    let dest_path =
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
     let ok = crate::cleanup::move_files(
         &inter_path,
         &dest_path,
@@ -8222,7 +8267,8 @@ pub unsafe extern "C" fn nzbget_rs_move_controller_remove_stale_hardlinks(
 ) {
     let hl_path =
         crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(hard_link_path));
-    let dst_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
+    let dst_path =
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
     crate::cleanup::remove_stale_hardlinks(&hl_path, &dst_path, |kind, msg| {
         if let Some(cb) = log_cb {
             let c_msg = bytes_to_cstr_buf(msg);
@@ -8240,8 +8286,10 @@ pub unsafe extern "C" fn nzbget_rs_cleanup_controller_run(
     log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
     out_cleanup_status: *mut c_int,
 ) -> c_int {
-    let dst_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
-    let fin_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(final_dir));
+    let dst_path =
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
+    let fin_path =
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(final_dir));
     let ext_bytes = crate::diskstate_format::cstr_to_bytes(ext_cleanup_disk);
     let (outcome, status) =
         crate::cleanup::run_cleanup(&dst_path, &fin_path, ext_bytes, |kind, msg| {
@@ -8271,7 +8319,8 @@ pub unsafe extern "C" fn nzbget_rs_post_renamer_run(
 ) -> c_int {
     let meta_bytes = crate::diskstate_format::cstr_to_bytes(meta_name);
     let nzb_bytes = crate::diskstate_format::cstr_to_bytes(nzb_name);
-    let dst_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dst_dir));
+    let dst_path =
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dst_dir));
     let ignore_bytes = crate::diskstate_format::cstr_to_bytes(ignore_ext);
 
     crate::cleanup::run_post_renamer(
@@ -8838,8 +8887,7 @@ pub unsafe extern "C" fn nzbget_rs_ext_mgr_prepare_update(
     } else {
         CStr::from_ptr(archive_path).to_bytes()
     };
-    let (backup, err) =
-        crate::extension::ext_mgr_prepare_update(en, found != 0, use_count, tp, ap);
+    let (backup, err) = crate::extension::ext_mgr_prepare_update(en, found != 0, use_count, tp, ap);
     if !out_backup_path.is_null() {
         *out_backup_path = into_buf(backup);
     }
@@ -9458,29 +9506,27 @@ pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_get_file(
 // DownloadInfo, DupeProbe & DupeCoordinator End-to-End FFI
 // ============================================================================
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupecoord_files_on_disk(
     final_dir: *const c_char,
     dest_dir: *const c_char,
     ext_cleanup_disk: *const c_char,
 ) -> c_int {
-    let f = if final_dir.is_null() { b"" } else { CStr::from_ptr(final_dir).to_bytes() };
-    let d = if dest_dir.is_null() { b"" } else { CStr::from_ptr(dest_dir).to_bytes() };
-    let e = if ext_cleanup_disk.is_null() { b"" } else { CStr::from_ptr(ext_cleanup_disk).to_bytes() };
+    let f = if final_dir.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(final_dir).to_bytes()
+    };
+    let d = if dest_dir.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    let e = if ext_cleanup_disk.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(ext_cleanup_disk).to_bytes()
+    };
     crate::dupecoord::files_on_disk(f, d, e) as c_int
 }
 
@@ -9511,8 +9557,6 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_no_backup_reason(
     ))
 }
 
-
-
 // ============================================================================
 // DirectUnpack & UnpackController (`rust/src/unpack.rs`)
 // ============================================================================
@@ -9536,14 +9580,11 @@ pub unsafe extern "C" fn nzbget_rs_queue_editor_visit_category_ext_diff(
     });
 }
 
-
 #[allow(clippy::too_many_arguments)]
-
 // =========================================================================
 // Consolidated RepairController (`repair.rs`), ContentMap (`streamrepair.rs`),
 // and TwinCheck (`twin.rs`) FFI
 // =========================================================================
-
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_twin_sample_indices(
     primary_seg_counts: *const usize,
@@ -9695,7 +9736,11 @@ pub unsafe extern "C" fn nzbget_rs_archive_processor_process(
                     msg.extend_from_slice(ext);
                 }
                 let c_msg = cstring_lossy(&msg);
-                cb(ctx, crate::cleanup::CleanupLogKind::Error as c_int, c_msg.as_ptr());
+                cb(
+                    ctx,
+                    crate::cleanup::CleanupLogKind::Error as c_int,
+                    c_msg.as_ptr(),
+                );
             }
             (false, false)
         },
@@ -9809,11 +9854,9 @@ impl crate::dupesearch_nzb::DonorServerExchange for CppDonorTransport {
         for req in batch {
             msg_ptrs.push(req.message_id.as_ptr().cast::<c_char>());
             msg_lens.push(req.message_id.len());
-            gate_ptrs.push(
-                req.gate
-                    .as_ref()
-                    .map_or(std::ptr::null_mut(), |g| std::sync::Arc::as_ptr(g) as *mut c_void),
-            );
+            gate_ptrs.push(req.gate.as_ref().map_or(std::ptr::null_mut(), |g| {
+                std::sync::Arc::as_ptr(g) as *mut c_void
+            }));
             let mut g_ptrs = Vec::with_capacity(req.groups.len());
             let mut g_lens = Vec::with_capacity(req.groups.len());
             for g in req.groups.iter() {
@@ -9966,13 +10009,12 @@ pub unsafe extern "C" fn nzbget_rs_donor_check_posting(
     out_body_checked: *mut c_int,
     out_body_bad: *mut c_int,
 ) {
-    let keepalive: Option<std::sync::Arc<dyn Send + Sync>> =
-        keepalive_drop.map(|drop_fn| {
-            std::sync::Arc::new(CppKeepAlive {
-                ptr: keepalive_ptr as usize,
-                drop_fn,
-            }) as std::sync::Arc<dyn Send + Sync>
-        });
+    let keepalive: Option<std::sync::Arc<dyn Send + Sync>> = keepalive_drop.map(|drop_fn| {
+        std::sync::Arc::new(CppKeepAlive {
+            ptr: keepalive_ptr as usize,
+            drop_fn,
+        }) as std::sync::Arc<dyn Send + Sync>
+    });
     let mut servers = Vec::with_capacity(server_count);
     if !server_handles.is_null() {
         for i in 0..server_count {
@@ -9986,7 +10028,9 @@ pub unsafe extern "C" fn nzbget_rs_donor_check_posting(
     let mut ids = Vec::with_capacity(ids_count);
     if !ids_ptr.is_null() && !ids_lens.is_null() {
         for i in 0..ids_count {
-            ids.push(String::from_utf8_lossy(bytes(*ids_ptr.add(i), *ids_lens.add(i))).into_owned());
+            ids.push(
+                String::from_utf8_lossy(bytes(*ids_ptr.add(i), *ids_lens.add(i))).into_owned(),
+            );
         }
     }
     let mut groups = Vec::with_capacity(group_count);
@@ -10079,13 +10123,12 @@ pub unsafe extern "C" fn nzbget_rs_donor_check_postings(
         ),
     >,
 ) {
-    let keepalive: Option<std::sync::Arc<dyn Send + Sync>> =
-        keepalive_drop.map(|drop_fn| {
-            std::sync::Arc::new(CppKeepAlive {
-                ptr: keepalive_ptr as usize,
-                drop_fn,
-            }) as std::sync::Arc<dyn Send + Sync>
-        });
+    let keepalive: Option<std::sync::Arc<dyn Send + Sync>> = keepalive_drop.map(|drop_fn| {
+        std::sync::Arc::new(CppKeepAlive {
+            ptr: keepalive_ptr as usize,
+            drop_fn,
+        }) as std::sync::Arc<dyn Send + Sync>
+    });
     let mut servers = Vec::with_capacity(server_count);
     if !server_handles.is_null() {
         for i in 0..server_count {
@@ -10270,9 +10313,7 @@ pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_fetch(
             bytes: i64,
         ),
     >,
-    on_recovery_bytes: Option<
-        unsafe extern "C" fn(ctx: *mut c_void, ptr: *const u64, len: usize),
-    >,
+    on_recovery_bytes: Option<unsafe extern "C" fn(ctx: *mut c_void, ptr: *const u64, len: usize)>,
 ) -> c_int {
     if handle.is_null() {
         return 1;
@@ -10360,12 +10401,11 @@ pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_fetch(
     fetched.reason as c_int
 }
 
-
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupe_identity_fetch_article(
     msg_id: *const c_char,
     msg_id_len: usize,
-     deadline: i64,
+    deadline: i64,
     ctx: *mut c_void,
     now_cb: Option<unsafe extern "C" fn(*mut c_void) -> i64>,
     stopped_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
@@ -10623,7 +10663,11 @@ pub unsafe extern "C" fn nzbget_rs_regex_is_valid(handle: *const std::ffi::c_voi
         return 0;
     }
     let rx = &*handle.cast::<crate::util::PosixRegEx>();
-    if rx.is_valid() { 1 } else { 0 }
+    if rx.is_valid() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -10653,7 +10697,11 @@ pub unsafe extern "C" fn nzbget_rs_dir_browser_new(
     snapshot: c_int,
 ) -> *mut std::ffi::c_void {
     let p = (!path.is_null()).then(|| CStr::from_ptr(path));
-    Box::into_raw(Box::new(crate::fsops::PosixDirBrowser::new(p, snapshot != 0))).cast()
+    Box::into_raw(Box::new(crate::fsops::PosixDirBrowser::new(
+        p,
+        snapshot != 0,
+    )))
+    .cast()
 }
 
 #[cfg(unix)]
@@ -10672,7 +10720,9 @@ pub unsafe extern "C" fn nzbget_rs_dir_browser_next(
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dir_browser_free(handle: *mut std::ffi::c_void) {
     if !handle.is_null() {
-        drop(Box::from_raw(handle.cast::<crate::fsops::PosixDirBrowser>()));
+        drop(Box::from_raw(
+            handle.cast::<crate::fsops::PosixDirBrowser>(),
+        ));
     }
 }
 
@@ -10773,7 +10823,9 @@ pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_new(
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_free(handle: *mut std::ffi::c_void) {
     if !handle.is_null() {
-        drop(Box::from_raw(handle.cast::<crate::nntp::ArticleBatchFetcher>()));
+        drop(Box::from_raw(
+            handle.cast::<crate::nntp::ArticleBatchFetcher>(),
+        ));
     }
 }
 
@@ -10794,21 +10846,10 @@ pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_begin(
     req_count: usize,
     ctx: *mut std::ffi::c_void,
     get_req_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-        ) -> usize,
+        unsafe extern "C" fn(*mut std::ffi::c_void, usize, *mut *const c_char, *mut usize) -> usize,
     >,
     get_group_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            usize,
-            *mut *const c_char,
-            *mut usize,
-        ),
+        unsafe extern "C" fn(*mut std::ffi::c_void, usize, usize, *mut *const c_char, *mut usize),
     >,
 ) {
     if handle.is_null() {
@@ -10819,7 +10860,8 @@ pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_begin(
     for i in 0..req_count {
         let mut mid_ptr: *const c_char = std::ptr::null();
         let mut mid_len: usize = 0;
-        let grp_count = get_req_cb.map_or(0, |cb| unsafe { cb(ctx, i, &mut mid_ptr, &mut mid_len) });
+        let grp_count =
+            get_req_cb.map_or(0, |cb| unsafe { cb(ctx, i, &mut mid_ptr, &mut mid_len) });
         let mut groups = Vec::with_capacity(grp_count);
         if let Some(gcb) = get_group_cb {
             for g in 0..grp_count {
@@ -11250,9 +11292,8 @@ pub struct NzbgetRsOptionsHost {
             u32,
         ),
     >,
-    pub add_task: Option<
-        unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int, c_int, c_int, *const c_char),
-    >,
+    pub add_task:
+        Option<unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int, c_int, c_int, *const c_char)>,
     pub add_category: Option<
         unsafe extern "C" fn(
             *mut c_void,
@@ -11272,11 +11313,7 @@ impl crate::options::OptionsHost for FfiOptionsHost<'_> {
     fn find_entry(
         &mut self,
         name: &CStr,
-    ) -> Option<(
-        Option<std::ffi::CString>,
-        Option<std::ffi::CString>,
-        i32,
-    )> {
+    ) -> Option<(Option<std::ffi::CString>, Option<std::ffi::CString>, i32)> {
         let cb = self.0.find_entry?;
         let mut val_ptr: *const c_char = std::ptr::null();
         let mut def_ptr: *const c_char = std::ptr::null();
@@ -11355,7 +11392,14 @@ impl crate::options::OptionsHost for FfiOptionsHost<'_> {
             return Ok(());
         };
         let mut err_buf = [0 as c_char; 1024];
-        let ok = unsafe { cb(self.0.ctx, dir.as_ptr(), err_buf.as_mut_ptr(), err_buf.len()) };
+        let ok = unsafe {
+            cb(
+                self.0.ctx,
+                dir.as_ptr(),
+                err_buf.as_mut_ptr(),
+                err_buf.len(),
+            )
+        };
         if ok != 0 {
             Ok(())
         } else {
@@ -11536,8 +11580,7 @@ pub unsafe extern "C" fn nzbget_rs_options_split_and_convert(
     if option.is_null() {
         return 0;
     }
-    let Some((name, val)) =
-        crate::options::split_and_convert_option_string(CStr::from_ptr(option))
+    let Some((name, val)) = crate::options::split_and_convert_option_string(CStr::from_ptr(option))
     else {
         return 0;
     };
@@ -11897,12 +11940,8 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_execute_save_config(
     } else {
         Some(CStr::from_ptr(config_filename).to_bytes())
     };
-    let (pos, fault, resp) = crate::xmlrpc_format::xmlrpc_execute_save_config_raw(
-        raw,
-        is_get != 0,
-        is_json != 0,
-        fname,
-    );
+    let (pos, fault, resp) =
+        crate::xmlrpc_format::xmlrpc_execute_save_config_raw(raw, is_get != 0, is_json != 0, fname);
     *request = (*request).add(pos);
     if !out_fault.is_null() {
         *out_fault = c_int::from(fault);
@@ -12064,11 +12103,7 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_start_script(
         return 0;
     }
     let raw = crate::rpcparams::Raw::new((*request).cast::<u8>());
-    let res = crate::xmlrpc_format::xmlrpc_parse_start_script_raw(
-        raw,
-        is_get != 0,
-        is_json != 0,
-    );
+    let res = crate::xmlrpc_format::xmlrpc_parse_start_script_raw(raw, is_get != 0, is_json != 0);
     let Some((pos, script, command, context, entries)) = res else {
         return 0;
     };
@@ -12112,11 +12147,8 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_test_disk_speed(
         return 0;
     }
     let raw = crate::rpcparams::Raw::new((*request).cast::<u8>());
-    let res = crate::xmlrpc_format::xmlrpc_parse_test_disk_speed_raw(
-        raw,
-        is_get != 0,
-        is_json != 0,
-    );
+    let res =
+        crate::xmlrpc_format::xmlrpc_parse_test_disk_speed_raw(raw, is_get != 0, is_json != 0);
     match res {
         Ok((pos, dir_path, buf_bytes, max_bytes, timeout_sec)) => {
             *request = (*request).add(pos);
@@ -12151,7 +12183,9 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_append_fleet(
     is_json: c_int,
     max_members: c_int,
     ctx: *mut c_void,
-    header_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, c_int, c_int)>,
+    header_cb: Option<
+        unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, c_int, c_int),
+    >,
     member_cb: Option<
         unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *const c_char, usize),
     >,
@@ -12264,7 +12298,14 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_download(
             if !out_dl.is_null() {
                 let (has_dk, dk_buf) = match dl.dupe_key {
                     Some(dk) => (1, into_buf(dk)),
-                    None => (0, RsBuf { data: std::ptr::null_mut(), len: 0, cap: 0 }),
+                    None => (
+                        0,
+                        RsBuf {
+                            data: std::ptr::null_mut(),
+                            len: 0,
+                            cap: 0,
+                        },
+                    ),
                 };
                 *out_dl = NzbgetRsParsedDownload {
                     v13: c_int::from(dl.v13),
@@ -12352,7 +12393,14 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_view_feed(
     if !out_vf.is_null() {
         let (has_ff, ff_buf) = match vf.feed_filter {
             Some(ff) => (1, into_buf(ff)),
-            None => (0, RsBuf { data: std::ptr::null_mut(), len: 0, cap: 0 }),
+            None => (
+                0,
+                RsBuf {
+                    data: std::ptr::null_mut(),
+                    len: 0,
+                    cap: 0,
+                },
+            ),
         };
         *out_vf = NzbgetRsParsedViewFeed {
             id: vf.id,
@@ -12468,7 +12516,8 @@ type DonorBeginMemberBatchFn =
 struct FfiM1DonorEnv {
     ctx: *mut std::ffi::c_void,
     is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    refresh_live_name_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> *const c_char>,
+    refresh_live_name_cb:
+        Option<unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> *const c_char>,
     begin_member_batch_cb: DonorBeginMemberBatchFn,
     next_article_cb: DonorNextArticleFn,
     cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
@@ -12924,10 +12973,7 @@ impl crate::streamrepair::CrossPackDonorEnv for FfiCrossPackDonorEnv {
         }
     }
 
-    fn sync_target_holes(
-        &mut self,
-        target_holes: &[Vec<crate::dupefallback::NzbgetRsByteRange>],
-    ) {
+    fn sync_target_holes(&mut self, target_holes: &[Vec<crate::dupefallback::NzbgetRsByteRange>]) {
         let Some(cb) = self.sync_target_holes_cb else {
             return;
         };
@@ -12938,12 +12984,7 @@ impl crate::streamrepair::CrossPackDonorEnv for FfiCrossPackDonorEnv {
             flat.extend_from_slice(th);
         }
         unsafe {
-            cb(
-                self.ctx,
-                counts.as_ptr(),
-                flat.as_ptr(),
-                counts.len(),
-            );
+            cb(self.ctx, counts.as_ptr(), flat.as_ptr(), counts.len());
         }
     }
 
@@ -12973,7 +13014,8 @@ impl crate::streamrepair::CrossPackDonorEnv for FfiCrossPackDonorEnv {
         let Some(cb) = self.emit_debug_cb else {
             return;
         };
-        for mut line in crate::streamrepair::format_rar_volume_debug_lines(member_name, vol, files) {
+        for mut line in crate::streamrepair::format_rar_volume_debug_lines(member_name, vol, files)
+        {
             line.push(0);
             unsafe { cb(self.ctx, line.as_ptr() as *const c_char) };
         }
@@ -13081,9 +13123,7 @@ pub unsafe extern "C" fn nzbget_rs_cross_pack_session_new(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cross_pack_session_free(
-    session: *mut NzbgetRsCrossPackSession,
-) {
+pub unsafe extern "C" fn nzbget_rs_cross_pack_session_free(session: *mut NzbgetRsCrossPackSession) {
     if !session.is_null() {
         drop(Box::from_raw(session));
     }
@@ -13276,11 +13316,8 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_read_package_info_str(
     out_err_kind: *mut c_int,
     out_file_name: *mut RsBuf,
 ) -> RsBuf {
-    match crate::extension::maintenance_read_package_info_str(
-        input(web_dir),
-        sep as u8,
-        input(key),
-    ) {
+    match crate::extension::maintenance_read_package_info_str(input(web_dir), sep as u8, input(key))
+    {
         Ok(val) => {
             if !out_err_kind.is_null() {
                 *out_err_kind = 0;
@@ -13423,7 +13460,12 @@ pub extern "C" fn nzbget_rs_nzb_calc_health(
     allow_estimation: c_int,
 ) -> c_int {
     if is_critical == 0 {
-        crate::downloadinfo::calc_health(size, par_size, current_failed_size, par_current_failed_size)
+        crate::downloadinfo::calc_health(
+            size,
+            par_size,
+            current_failed_size,
+            par_current_failed_size,
+        )
     } else {
         crate::downloadinfo::calc_critical_health(
             size,
@@ -13493,7 +13535,10 @@ pub unsafe extern "C" fn nzbget_rs_nzb_completed_same_filename(
     a: *const c_char,
     b: *const c_char,
 ) -> c_int {
-    c_int::from(crate::downloadinfo::completed_same_filename(input(a), input(b)))
+    c_int::from(crate::downloadinfo::completed_same_filename(
+        input(a),
+        input(b),
+    ))
 }
 
 #[no_mangle]
@@ -13913,10 +13958,7 @@ pub unsafe extern "C" fn nzbget_rs_fs_op_with_err(
             if p1.is_null() || p2.is_null() {
                 libc::EINVAL as i64
             } else {
-                match crate::fsops::move_file_no_overwrite(
-                    CStr::from_ptr(p1),
-                    CStr::from_ptr(p2),
-                ) {
+                match crate::fsops::move_file_no_overwrite(CStr::from_ptr(p1), CStr::from_ptr(p2)) {
                     Ok(()) => 0,
                     Err(e) => e as i64,
                 }
@@ -14034,164 +14076,6 @@ pub unsafe extern "C" fn nzbget_rs_tokenizer_next(
     } else {
         *inout_save_ptr = cur.add(slice.len());
         std::ptr::null_mut()
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_init_message_base(
-    out: *mut u8,
-    request_type: c_int,
-    struct_size: c_int,
-    username: *const c_char,
-    password: *const c_char,
-) {
-    if out.is_null() {
-        return;
-    }
-    let buf: &mut [u8; crate::binrpc::BASE_SIZE] =
-        std::slice::from_raw_parts_mut(out, crate::binrpc::BASE_SIZE)
-            .try_into()
-            .unwrap();
-    crate::binrpc::init_message_base(buf, request_type, struct_size, input(username), input(password));
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_init_download_request(
-    out: *mut u8,
-    username: *const c_char,
-    password: *const c_char,
-    nzb_filename: *const c_char,
-    nzb_content: *const c_char,
-    is_url: c_int,
-    category: *const c_char,
-    add_first: c_int,
-    add_paused: c_int,
-    priority: c_int,
-    dupe_score: c_int,
-    dupe_mode: c_int,
-    dupe_key: *const c_char,
-    trailing_len: c_int,
-    auto_category: c_int,
-) {
-    if out.is_null() {
-        return;
-    }
-    let buf: &mut [u8; crate::binrpc::DOWNLOAD_REQUEST_SIZE] =
-        std::slice::from_raw_parts_mut(out, crate::binrpc::DOWNLOAD_REQUEST_SIZE)
-            .try_into()
-            .unwrap();
-    crate::binrpc::init_download_request(
-        buf,
-        input(username),
-        input(password),
-        input(nzb_filename),
-        input(nzb_content),
-        is_url != 0,
-        input(category),
-        add_first != 0,
-        add_paused != 0,
-        priority,
-        dupe_score,
-        dupe_mode,
-        input(dupe_key),
-        trailing_len,
-        auto_category != 0,
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_edit_parse(
-    data: *const u8,
-    data_len: u32,
-    nr_ids: c_int,
-    nr_names: c_int,
-    names_len: c_int,
-    text_len: c_int,
-    out_ids: *mut i32,
-) -> c_int {
-    if !crate::binrpc::edit_sizes_ok(nr_ids, nr_names, names_len, text_len, data_len) {
-        return 0;
-    }
-    if data.is_null() {
-        return 1;
-    }
-    let slice = std::slice::from_raw_parts(data, data_len as usize);
-    let ids_slice = if nr_ids <= 0 || out_ids.is_null() {
-        &mut [][..]
-    } else {
-        std::slice::from_raw_parts_mut(out_ids.cast::<u32>(), nr_ids as usize)
-    };
-    c_int::from(crate::binrpc::edit_split(
-        slice,
-        text_len as usize,
-        ids_slice,
-        nr_names.max(0) as usize,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_calc_log_slice(
-    msg_count: c_int,
-    lines: c_int,
-    id_from: u32,
-    first_msg_id: u32,
-    out_start: *mut c_int,
-    out_nr_entries: *mut c_int,
-) {
-    let (start, nr_entries) =
-        crate::binrpc::calc_log_slice(msg_count, lines, id_from, first_msg_id);
-    if !out_start.is_null() {
-        *out_start = start;
-    }
-    if !out_nr_entries.is_null() {
-        *out_nr_entries = nr_entries;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_web_parse_request_or_mime(
-    sig_or_filename: *const c_char,
-    line: *mut c_char,
-    out_method: *mut c_int,
-    out_url_offset: *mut usize,
-    out_mime: *mut *const c_char,
-) -> c_int {
-    if line.is_null() {
-        if sig_or_filename.is_null() {
-            if !out_mime.is_null() {
-                *out_mime = std::ptr::null();
-            }
-            return 0;
-        }
-        if let Some(mime) = crate::binrpc::detect_content_type(input(sig_or_filename)) {
-            if !out_mime.is_null() {
-                *out_mime = mime.as_ptr();
-            }
-            1
-        } else {
-            if !out_mime.is_null() {
-                *out_mime = std::ptr::null();
-            }
-            0
-        }
-    } else {
-        if sig_or_filename.is_null() {
-            return 0;
-        }
-        let sig = std::slice::from_raw_parts(sig_or_filename.cast::<u8>(), 4);
-        let len = CStr::from_ptr(line).to_bytes_with_nul().len();
-        let line_slice = std::slice::from_raw_parts_mut(line.cast::<u8>(), len);
-        if let Some((method, offset)) = crate::binrpc::parse_web_request_line(sig, line_slice) {
-            if !out_method.is_null() {
-                *out_method = method;
-            }
-            if !out_url_offset.is_null() {
-                *out_url_offset = offset;
-            }
-            1
-        } else {
-            0
-        }
     }
 }
 
@@ -14332,13 +14216,7 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_parse_unpack_state(
     let Some(read_cb) = on_parsed_and_read_archives_cb else {
         return 0;
     };
-    let line4 = read_cb(
-        ctx,
-        direct,
-        c_int::from(tried),
-        c_int::from(repaired),
-        last,
-    );
+    let line4 = read_cb(ctx, direct, c_int::from(tried), c_int::from(repaired), last);
     if line4.is_null() {
         return 0;
     }
@@ -14883,108 +14761,6 @@ pub unsafe extern "C" fn nzbget_rs_url_decode_path_in_place(raw: *mut c_char) {
     buf[dec_len + tail_len] = 0;
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_web_classify_url(op: c_int, s: *const c_char) -> c_int {
-    let bytes = if s.is_null() { &[][..] } else { input(s) };
-    match op {
-        0 => crate::webserver::web_classify_get_dispatch(bytes),
-        1 => c_int::from(crate::webserver::web_is_ignorable_404(bytes)),
-        _ => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_web_format_response(
-    kind: c_int,
-    form_auth: c_int,
-    keep_alive: c_int,
-    unchanged: c_int,
-    gzip: c_int,
-    body_len: c_int,
-    str_arg: *const c_char,
-    origin: *const c_char,
-    auth_token: *const c_char,
-    content_type: *const c_char,
-    etag: *const c_char,
-    version: *const c_char,
-    out_body: *mut RsBuf,
-) -> RsBuf {
-    let ver = if version.is_null() {
-        &[][..]
-    } else {
-        input(version)
-    };
-    let orig = if origin.is_null() {
-        &[][..]
-    } else {
-        input(origin)
-    };
-    let s_arg = if str_arg.is_null() {
-        &[][..]
-    } else {
-        input(str_arg)
-    };
-    match kind {
-        0 => into_buf(crate::webserver::format_auth_response(
-            form_auth != 0,
-            keep_alive != 0,
-            ver,
-        )),
-        1 => into_buf(crate::webserver::format_options_response(
-            keep_alive != 0,
-            orig,
-            ver,
-        )),
-        2 => {
-            let (hdr, body) =
-                crate::webserver::format_error_response(s_arg, keep_alive != 0, ver);
-            if !out_body.is_null() {
-                *out_body = into_buf(body);
-            }
-            into_buf(hdr)
-        }
-        3 => into_buf(crate::webserver::format_redirect_response(
-            s_arg,
-            keep_alive != 0,
-            ver,
-        )),
-        4 => {
-            let tok = if auth_token.is_null() {
-                &[][..]
-            } else {
-                input(auth_token)
-            };
-            let ct = if content_type.is_null() {
-                None
-            } else {
-                Some(input(content_type))
-            };
-            let et = if etag.is_null() {
-                None
-            } else {
-                Some(input(etag))
-            };
-            into_buf(crate::webserver::format_body_response_header(
-                unchanged != 0,
-                keep_alive != 0,
-                orig,
-                form_auth != 0,
-                tok,
-                body_len,
-                ct,
-                gzip != 0,
-                et,
-                ver,
-            ))
-        }
-        _ => RsBuf {
-            data: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        },
-    }
-}
-
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct RsServerMatchItem {
@@ -15039,10 +14815,7 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_classify_temp_or_legacy(
                 input(header)
             };
             match crate::diskstate_format::classify_legacy_file_state(
-                fname,
-                hdr,
-                file_ver,
-                legacy_ver,
+                fname, hdr, file_ver, legacy_ver,
             ) {
                 Some((id, suffix_kind)) => {
                     if !out_a.is_null() {
@@ -15220,9 +14993,21 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_load_file_state(
         stats_len: usize,
     ),
 ) -> c_int {
-    let tdir = if temp_dir.is_null() { &[][..] } else { input(temp_dir) };
-    let ddir = if dest_dir.is_null() { &[][..] } else { input(dest_dir) };
-    let cfn = if cur_filename.is_null() { &[][..] } else { input(cur_filename) };
+    let tdir = if temp_dir.is_null() {
+        &[][..]
+    } else {
+        input(temp_dir)
+    };
+    let ddir = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        input(dest_dir)
+    };
+    let cfn = if cur_filename.is_null() {
+        &[][..]
+    } else {
+        input(cur_filename)
+    };
     let cofn = if cur_output_filename.is_null() {
         &[][..]
     } else {
@@ -15268,10 +15053,22 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_match_servers(
     let mut srv_inputs = Vec::with_capacity(srv_slice.len());
     for s in srv_slice {
         srv_inputs.push(crate::diskstate_format::ServerMatchInput {
-            name: if s.name.is_null() { &[][..] } else { input(s.name) },
-            host: if s.host.is_null() { &[][..] } else { input(s.host) },
+            name: if s.name.is_null() {
+                &[][..]
+            } else {
+                input(s.name)
+            },
+            host: if s.host.is_null() {
+                &[][..]
+            } else {
+                input(s.host)
+            },
             port: s.port,
-            user: if s.user.is_null() { &[][..] } else { input(s.user) },
+            user: if s.user.is_null() {
+                &[][..]
+            } else {
+                input(s.user)
+            },
         });
     }
     let mut state_ids = vec![0i32; srv_inputs.len()];
@@ -15284,8 +15081,7 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_match_servers(
         return 0;
     };
     if !out_state_ids.is_null() && !state_ids.is_empty() {
-        std::slice::from_raw_parts_mut(out_state_ids, state_ids.len())
-            .copy_from_slice(&state_ids);
+        std::slice::from_raw_parts_mut(out_state_ids, state_ids.len()).copy_from_slice(&state_ids);
     }
     if !out_perfect_match.is_null() {
         *out_perfect_match = c_int::from(perfect);
@@ -15313,15 +15109,7 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_fs_op(
     let mut o1 = 0;
     let mut o2 = 0;
     let res = crate::diskstate_format::diskstate_fs_op(
-        op,
-        qdir,
-        sep as u8,
-        a1,
-        a2,
-        a3,
-        a4,
-        &mut o1,
-        &mut o2,
+        op, qdir, sep as u8, a1, a2, a3, a4, &mut o1, &mut o2,
     );
     if !out1.is_null() {
         *out1 = o1;
@@ -15407,8 +15195,16 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_load_file_info(
         art_or_null: *const crate::diskstate_format::NzbgetRsDiskArticleInfo,
     ),
 ) -> c_int {
-    let ddir = if dest_dir.is_null() { &[][..] } else { input(dest_dir) };
-    let cfn = if cur_filename.is_null() { &[][..] } else { input(cur_filename) };
+    let ddir = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        input(dest_dir)
+    };
+    let cfn = if cur_filename.is_null() {
+        &[][..]
+    } else {
+        input(cur_filename)
+    };
     let cofn = if cur_output_filename.is_null() {
         &[][..]
     } else {
@@ -15494,11 +15290,7 @@ pub unsafe extern "C" fn nzbget_rs_server_pool_op(
             let in_use = std::slice::from_raw_parts(ptr2, len);
             let connected = std::slice::from_raw_parts(out_ptr as *const u8, len);
             c_int::from(crate::dupefallback::server_pool_level_should_close(
-                in_use,
-                connected,
-                free_times,
-                a,
-                b as c_int,
+                in_use, connected, free_times, a, b as c_int,
             ))
         }
         _ => 0,
@@ -15601,8 +15393,7 @@ pub unsafe extern "C" fn nzbget_rs_statmeter_op(
             } else {
                 std::slice::from_raw_parts(slice_ptr, slice_len)
             };
-            let elapsed_slots =
-                crate::statmeter::calc_month_slots_utc(loc_or_cur_time, b_i32);
+            let elapsed_slots = crate::statmeter::calc_month_slots_utc(loc_or_cur_time, b_i32);
             let (month_bytes, day_bytes) = crate::statmeter::calc_quota_usage(
                 loc_or_cur_time,
                 a_i32,
@@ -15637,13 +15428,8 @@ pub unsafe extern "C" fn nzbget_rs_statmeter_op(
             mask
         }
         2 => {
-            let (reached, action) = crate::statmeter::eval_quota_status(
-                a_i32,
-                b_i32,
-                a_i64,
-                b_i64,
-                c_i32 != 0,
-            );
+            let (reached, action) =
+                crate::statmeter::eval_quota_status(a_i32, b_i32, a_i64, b_i64, c_i32 != 0);
             if !out_i32.is_null() {
                 *out_i32 = action;
             }
@@ -15670,12 +15456,8 @@ pub unsafe extern "C" fn nzbget_rs_memory_and_cache_op(
             if inout1.is_null() || inout2.is_null() {
                 return flag1;
             }
-            let (next_tier, transitioned) = crate::artwritercore::memory_monitor_step(
-                tier,
-                flag1,
-                &mut *inout1,
-                &mut *inout2,
-            );
+            let (next_tier, transitioned) =
+                crate::artwritercore::memory_monitor_step(tier, flag1, &mut *inout1, &mut *inout2);
             next_tier | (c_int::from(transitioned) << 8)
         }
         1 => {
@@ -15866,9 +15648,7 @@ pub unsafe extern "C" fn nzbget_rs_history_coord_op(
             } else {
                 input(str_arg)
             };
-            if txt.eq_ignore_ascii_case(b"YES")
-                || txt.eq_ignore_ascii_case(b"TRUE")
-                || txt == b"1"
+            if txt.eq_ignore_ascii_case(b"YES") || txt.eq_ignore_ascii_case(b"TRUE") || txt == b"1"
             {
                 3 // dsDupe
             } else {
@@ -15971,13 +15751,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_editor_op(
             let has_vol = std::slice::from_raw_parts(s2 as *const u8, len1);
             let sizes = std::slice::from_raw_parts(in1 as *const i64, len1);
             let out_pause = std::slice::from_raw_parts_mut(inout1 as *mut u8, len1);
-            crate::queueeditor::select_pars_to_pause(
-                is_par,
-                has_vol,
-                sizes,
-                a != 0,
-                out_pause,
-            );
+            crate::queueeditor::select_pars_to_pause(is_par, has_vol, sizes, a != 0, out_pause);
         }
         return 0;
     }
@@ -16021,8 +15795,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_editor_op(
             if inout1.is_null() {
                 return 0;
             }
-            let (work_offset, new_last) =
-                crate::queueeditor::clamp_move_offset(a, b, c, *inout1);
+            let (work_offset, new_last) = crate::queueeditor::clamp_move_offset(a, b, c, *inout1);
             *inout1 = new_last;
             work_offset
         }
@@ -16053,7 +15826,15 @@ pub unsafe extern "C" fn nzbget_rs_queue_editor_op(
             let is_group_del = (18..=21).contains(&a);
             if is_group_del && !inout1.is_null() {
                 let (parking, avoid_hist, set_dupe, cleanup_disk) =
-                    crate::queueeditor::eval_group_delete_flags(a, 19, 20, 21, b, c != 0, f1 as i32);
+                    crate::queueeditor::eval_group_delete_flags(
+                        a,
+                        19,
+                        20,
+                        21,
+                        b,
+                        c != 0,
+                        f1 as i32,
+                    );
                 *inout1 = 1
                     | (c_int::from(parking) << 1)
                     | (c_int::from(avoid_hist) << 2)
@@ -16454,7 +16235,13 @@ pub unsafe extern "C" fn nzbget_rs_feed_str_op(
             into_buf(filename)
         }
         6 => into_buf(crate::feed::format_temp_filename(
-            b1, a as u8, b, c != 0, d, e, f,
+            b1,
+            a as u8,
+            b,
+            c != 0,
+            d,
+            e,
+            f,
         )),
         _ => RsBuf {
             data: std::ptr::null_mut(),
@@ -16519,9 +16306,7 @@ pub unsafe extern "C" fn nzbget_rs_twin_service_op(
         }
         4 => {
             if !out_buf.is_null() {
-                *out_buf = into_buf(crate::twin::format_twin_kind_message(
-                    b1, b2, b3, a != 0,
-                ));
+                *out_buf = into_buf(crate::twin::format_twin_kind_message(b1, b2, b3, a != 0));
             }
             1
         }
@@ -16643,8 +16428,7 @@ pub unsafe extern "C" fn nzbget_rs_url_coord_op(
     match op {
         0 => {
             let cur_url = if out_i32_2.is_null() { 0 } else { *out_i32_2 };
-            let (new_url, new_del, retry) =
-                crate::urlcoord::completed(a, b != 0, cur_url, c);
+            let (new_url, new_del, retry) = crate::urlcoord::completed(a, b != 0, cur_url, c);
             if !out_i32_1.is_null() {
                 *out_i32_1 = new_del;
             }
@@ -16683,11 +16467,7 @@ pub unsafe extern "C" fn nzbget_rs_url_coord_op(
         3 => {
             let temp_dir = if s1.is_null() { &[][..] } else { input(s1) };
             if !out_buf.is_null() {
-                *out_buf = into_buf(crate::urlcoord::format_temp_url_path(
-                    temp_dir,
-                    a as u8,
-                    b,
-                ));
+                *out_buf = into_buf(crate::urlcoord::format_temp_url_path(temp_dir, a as u8, b));
             }
             1
         }
@@ -16724,8 +16504,7 @@ pub unsafe extern "C" fn nzbget_rs_scanner_op(
         }
         1 => c_int::from(crate::scanner::can_process_extension(b1)),
         2 => {
-            let (can_proc, upd_sz, upd_lc) =
-                crate::scanner::eval_file_age(t1, t2, t3, t4, a);
+            let (can_proc, upd_sz, upd_lc) = crate::scanner::eval_file_age(t1, t2, t3, t4, a);
             if !out_i64_1.is_null() {
                 *out_i64_1 = upd_sz;
             }
@@ -16741,8 +16520,7 @@ pub unsafe extern "C" fn nzbget_rs_scanner_op(
             b"_broken",
         )),
         5 => {
-            let (ren_proc, act) =
-                crate::scanner::classify_incoming_extension(a != 0, b != 0, b1);
+            let (ren_proc, act) = crate::scanner::classify_incoming_extension(a != 0, b != 0, b1);
             if !out_i32.is_null() {
                 *out_i32 = c_int::from(ren_proc);
             }
@@ -16787,12 +16565,13 @@ pub unsafe extern "C" fn nzbget_rs_scheduler_service_op(
         }
         3 => {
             let id = if s2.is_null() { 0 } else { libc::atoi(s2) };
-            c_int::from(crate::scheduler::scheduler_matches_server_ref(id, a, s1, s2))
+            c_int::from(crate::scheduler::scheduler_matches_server_ref(
+                id, a, s1, s2,
+            ))
         }
         4 => {
             let id = if s2.is_null() { 0 } else { libc::atoi(s2) };
-            let (matched, fetch_id) =
-                crate::scheduler::scheduler_matches_feed_ref(id, a, s1, s2);
+            let (matched, fetch_id) = crate::scheduler::scheduler_matches_feed_ref(id, a, s1, s2);
             if !out_i32.is_null() {
                 *out_i32 = fetch_id;
             }
@@ -17102,16 +16881,8 @@ pub unsafe extern "C" fn nzbget_rs_prepost_op(
             act
         }
         7 => {
-            let (ready, upd_sec, is_comp, new_sec) = crate::prepost::eval_cleanup_job_state(
-                a != 0,
-                b != 0,
-                c,
-                12,
-                d != 0,
-                t1,
-                t2,
-                e,
-            );
+            let (ready, upd_sec, is_comp, new_sec) =
+                crate::prepost::eval_cleanup_job_state(a != 0, b != 0, c, 12, d != 0, t1, t2, e);
             if !out1.is_null() {
                 *out1 = c_int::from(upd_sec);
             }
@@ -17544,35 +17315,15 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_op(
         )),
         11 => c_int::from(crate::queuecoord::download_hopeless(a, b, c)),
         12 => {
-            let (defer, upd_checked) = crate::queuecoord::should_defer_dupe_failover(
-                a != 0,
-                b,
-                c,
-                h,
-                e,
-                1,
-                f != 0,
-                d,
-                g,
-            );
+            let (defer, upd_checked) =
+                crate::queuecoord::should_defer_dupe_failover(a != 0, b, c, h, e, 1, f != 0, d, g);
             if !out1.is_null() {
                 *out1 = c_int::from(upd_checked);
             }
             c_int::from(defer)
         }
         13 => {
-            let eval = crate::queuecoord::eval_dead_download(
-                a,
-                b,
-                c,
-                d,
-                e,
-                f != 0,
-                h,
-                i,
-                g,
-                j,
-            );
+            let eval = crate::queuecoord::eval_dead_download(a, b, c, d, e, f != 0, h, i, g, j);
             if !out_arr.is_null() {
                 let s = std::slice::from_raw_parts_mut(out_arr, 10);
                 s[0] = eval.own;
@@ -17783,15 +17534,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_counters_op(
                 let i64s = std::slice::from_raw_parts_mut(i64_inout, 3);
                 let (dfr, ff_sz, nf_sz, npf_sz, ff_art, nf_art) =
                     crate::queuecoord::apply_failed_article_counters(
-                        b,
-                        c,
-                        a,
-                        i32s[0],
-                        i64s[0],
-                        i64s[1],
-                        i64s[2],
-                        i32s[1],
-                        i32s[2],
+                        b, c, a, i32s[0], i64s[0], i64s[1], i64s[2], i32s[1], i32s[2],
                     );
                 i32s[0] = dfr;
                 i32s[1] = ff_art;
@@ -17806,16 +17549,15 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_counters_op(
             if !i32_inout.is_null() && !i64_inout.is_null() {
                 let i32s = std::slice::from_raw_parts_mut(i32_inout, 1);
                 let i64s = std::slice::from_raw_parts_mut(i64_inout, 3);
-                let (rf, rn, pz, comp, fc) =
-                    crate::queuecoord::advance_article_completion_counters(
-                        i64s[0],
-                        i64s[1],
-                        i64s[2],
-                        a,
-                        b != 0,
-                        i32s[0],
-                        c,
-                    );
+                let (rf, rn, pz, comp, fc) = crate::queuecoord::advance_article_completion_counters(
+                    i64s[0],
+                    i64s[1],
+                    i64s[2],
+                    a,
+                    b != 0,
+                    i32s[0],
+                    c,
+                );
                 i64s[0] = rf;
                 i64s[1] = rn;
                 i64s[2] = pz;
@@ -17903,21 +17645,8 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_counters_op(
                 let i64s = std::slice::from_raw_parts_mut(i64_inout, 9);
                 let (nr, npz, nsa, nss, npss, nfa, nfs, npfs, fr) =
                     crate::queuecoord::discard_downloaded_articles_counters(
-                        i64s[0],
-                        i64s[1],
-                        i32s[0],
-                        i64s[2],
-                        i64s[3],
-                        i32s[1],
-                        i64s[4],
-                        i64s[5],
-                        a,
-                        b,
-                        t1,
-                        c,
-                        t2,
-                        i64s[6],
-                        i64s[7],
+                        i64s[0], i64s[1], i32s[0], i64s[2], i64s[3], i32s[1], i64s[4], i64s[5], a,
+                        b, t1, c, t2, i64s[6], i64s[7],
                     );
                 i64s[0] = nr;
                 i64s[1] = npz;
@@ -17972,11 +17701,7 @@ pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
         CStr::from_ptr(s2).to_bytes()
     };
     match op {
-        0 => c_int::from(crate::repair::should_use_par_quick(
-            a != 0,
-            b != 0,
-            c != 0,
-        )),
+        0 => c_int::from(crate::repair::should_use_par_quick(a != 0, b != 0, c != 0)),
         1 => {
             let (new_status, set_rep, rep_val, wait_time, par_sec) =
                 crate::repair::complete_par_check(a, b, 2, 3, 1, 1, 3, 4, 2, c, d, t1, t2);
@@ -18034,9 +17759,8 @@ pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
                 *out1 = new_stage;
             }
             if !out2.is_null() {
-                *out2 = c_int::from(changed)
-                    | (c_int::from(set_rt) << 1)
-                    | (c_int::from(cancel) << 2);
+                *out2 =
+                    c_int::from(changed) | (c_int::from(set_rt) << 1) | (c_int::from(cancel) << 2);
             }
             if !out3.is_null() {
                 *out3 = new_rsec;
@@ -18058,12 +17782,7 @@ pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
             }
             0
         }
-        5 => c_int::from(crate::repair::should_load_partial_segments(
-            a,
-            2,
-            b,
-            c != 0,
-        )),
+        5 => c_int::from(crate::repair::should_load_partial_segments(a, 2, b, c != 0)),
         6 => crate::repair::classify_file_crc_status(a, b != 0, c != 0, 1, 3, 2, 1, 3, 2, 0),
         7 => c_int::from(crate::repair::should_consider_twin_candidate(
             a != 0,
@@ -18241,14 +17960,12 @@ pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
             if a == 0 {
                 return 0;
             }
-            let event_name =
-                if b >= 0 && (b as usize) < crate::extension::QUEUE_EVENT_NAMES.len() {
-                    crate::extension::QUEUE_EVENT_NAMES[b as usize]
-                } else {
-                    b"UNKNOWN"
-                };
-            if !s1_bytes.is_empty()
-                && !s1_bytes.windows(event_name.len()).any(|w| w == event_name)
+            let event_name = if b >= 0 && (b as usize) < crate::extension::QUEUE_EVENT_NAMES.len() {
+                crate::extension::QUEUE_EVENT_NAMES[b as usize]
+            } else {
+                b"UNKNOWN"
+            };
+            if !s1_bytes.is_empty() && !s1_bytes.windows(event_name.len()).any(|w| w == event_name)
             {
                 return 0;
             }
@@ -18638,7 +18355,12 @@ pub unsafe extern "C" fn nzbget_rs_dupesearch_op(
             reason
         }
         7 => {
-            if !i64_1.is_null() && !i32_1.is_null() && !i64_2.is_null() && !out_arr.is_null() && len > 0 {
+            if !i64_1.is_null()
+                && !i32_1.is_null()
+                && !i64_2.is_null()
+                && !out_arr.is_null()
+                && len > 0
+            {
                 let tb = std::slice::from_raw_parts(i64_1, len);
                 let gr = std::slice::from_raw_parts(i32_1, len);
                 let dt = std::slice::from_raw_parts(i64_2, len);
@@ -18652,14 +18374,8 @@ pub unsafe extern "C" fn nzbget_rs_dupesearch_op(
             0
         }
         8 => {
-            let (score, pct, add_zero) = crate::dupesearch_nzb::eval_member_rerank(
-                a,
-                b,
-                c,
-                d,
-                f1,
-                e != 0,
-            );
+            let (score, pct, add_zero) =
+                crate::dupesearch_nzb::eval_member_rerank(a, b, c, d, f1, e != 0);
             if !out1.is_null() {
                 *out1 = pct;
             }
@@ -18758,15 +18474,8 @@ pub unsafe extern "C" fn nzbget_rs_dupesearch_op(
             s1_bytes, s2_bytes, s3_bytes, s4_bytes,
         )),
         18 => {
-            let (alive, dead, comp) = crate::dupesearch_nzb::eval_fleet_member_health(
-                a != 0,
-                b != 0,
-                c,
-                d,
-                e,
-                f,
-                g,
-            );
+            let (alive, dead, comp) =
+                crate::dupesearch_nzb::eval_fleet_member_health(a != 0, b != 0, c, d, e, f, g);
             if !out1.is_null() {
                 *out1 = alive;
             }
@@ -18866,20 +18575,22 @@ pub unsafe extern "C" fn nzbget_rs_dupesearch_op(
             }
             updated_reason
         }
-        23 => c_int::from(crate::dupesearch_nzb::dupesearch_is_better_parent_candidate(
-            a != 0,
-            b,
-            0,
-            c != 0,
-            d,
-            0,
-            e != 0,
-            crate::dupesearch_nzb::lower_key(s1_bytes).as_slice() == s2_bytes,
-            f,
-            g,
-            t1 != 0,
-            t2 as i32,
-        )),
+        23 => c_int::from(
+            crate::dupesearch_nzb::dupesearch_is_better_parent_candidate(
+                a != 0,
+                b,
+                0,
+                c != 0,
+                d,
+                0,
+                e != 0,
+                crate::dupesearch_nzb::lower_key(s1_bytes).as_slice() == s2_bytes,
+                f,
+                g,
+                t1 != 0,
+                t2 as i32,
+            ),
+        ),
         _ => 0,
     }
 }
@@ -18907,8 +18618,7 @@ pub struct NzbgetRsConnEnv {
     pub total_bytes_read: *mut c_int,
     pub read_buf: *mut u8,
     pub read_buf_cap: usize,
-    pub send_cb:
-        Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int) -> c_int>,
+    pub send_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int) -> c_int>,
     pub recv_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut c_char, c_int) -> c_int>,
     pub error_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
     pub debug_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
@@ -18977,9 +18687,8 @@ pub unsafe extern "C" fn nzbget_rs_conn_op(
     let host = input(e.host);
     let mut is_listener = matches!(op, 0 | 2) && !e.is_listener.is_null() && *e.is_listener != 0;
     let mut accept_busy = op == 3 && !e.accept_busy.is_null() && *e.accept_busy != 0;
-    let mut tls_error = matches!(op, 0 | 1 | 3 | 7 | 8 | 9 | 11)
-        && !e.tls_error.is_null()
-        && *e.tls_error != 0;
+    let mut tls_error =
+        matches!(op, 0 | 1 | 3 | 7 | 8 | 9 | 11) && !e.tls_error.is_null() && *e.tls_error != 0;
 
     let to_cstr_lossless = |msg: &[u8]| -> std::ffi::CString {
         let nul = msg.iter().position(|&b| b == 0).unwrap_or(msg.len());
@@ -19263,9 +18972,11 @@ pub struct NzbgetRsWebDlEnv {
         Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int, c_int) -> c_int>,
     pub free_conn_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
     pub write_line_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-    pub read_line_cb:
-        Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut c_char, c_int, *mut c_int) -> c_int>,
-    pub read_body_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut c_char, c_int) -> c_int>,
+    pub read_line_cb: Option<
+        unsafe extern "C" fn(*mut std::ffi::c_void, *mut c_char, c_int, *mut c_int) -> c_int,
+    >,
+    pub read_body_cb:
+        Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut c_char, c_int) -> c_int>,
     pub is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
     pub is_paused_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
     pub touch_time_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
@@ -19435,6 +19146,838 @@ pub unsafe extern "C" fn nzbget_rs_webdl_execute(
         0 => webdl_download_with_redirects(max_redirects, &cfg, &mut io) as c_int,
         1 => webdl_run_loop(&cfg, &mut io) as c_int,
         _ => WebDlStatus::AdFailed as c_int,
+    }
+}
+
+// ---- WebProcessor / BinRpcProcessor / RemoteClient / Frontend FFI ----
+
+pub type NzbgetRsWebSendBodyFn =
+    unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *const c_char, c_int);
+
+#[repr(C)]
+pub struct NzbgetRsWebServeEnv {
+    pub ctx: *mut c_void,
+    pub signature: *const c_char,
+    pub remote_addr: *const c_char,
+    pub version: *const c_char,
+    pub web_dir: *const c_char,
+    pub script_dirs: *const *const c_char,
+    pub script_dirs_count: usize,
+    pub control_username: *const c_char,
+    pub control_password: *const c_char,
+    pub restricted_username: *const c_char,
+    pub restricted_password: *const c_char,
+    pub add_username: *const c_char,
+    pub add_password: *const c_char,
+    pub authorized_ip: *const c_char,
+    pub control_port: c_int,
+    pub form_auth: c_int,
+    pub gzip_enabled: c_int,
+    pub debug_build: c_int,
+    pub read_line_cb: Option<unsafe extern "C" fn(*mut c_void, *mut c_char, c_int) -> c_int>,
+    pub recv_cb: Option<unsafe extern "C" fn(*mut c_void, *mut c_char, c_int) -> c_int>,
+    pub send_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_int>,
+    pub log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
+    pub rpc_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *mut c_char,
+            c_int,
+            c_int,
+            *const c_char,
+            *mut c_void,
+            NzbgetRsWebSendBodyFn,
+        ),
+    >,
+}
+
+unsafe fn to_nul_cvec(bytes: &[u8]) -> std::ffi::CString {
+    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    std::ffi::CString::from_vec_unchecked(bytes[..nul].to_vec())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_web_serve(op: c_int, env: *const NzbgetRsWebServeEnv) -> c_int {
+    #[cfg(unix)]
+    let _cancel_guard = PosixCancelGuard::disable();
+
+    if op == 0 {
+        crate::webserver::init_server_tokens(|msg| {
+            if !env.is_null() {
+                if let Some(cb) = (*env).log_cb {
+                    let c = to_nul_cvec(msg);
+                    cb((*env).ctx, 2, c.as_ptr());
+                }
+            }
+        });
+        return 1;
+    }
+
+    #[cfg(unix)]
+    if op == 1 {
+        let Some(e) = env.as_ref() else {
+            return 0;
+        };
+        if e.signature.is_null() {
+            return 0;
+        }
+        let sig = std::slice::from_raw_parts(e.signature.cast::<u8>(), 4);
+        let mut script_vec = Vec::with_capacity(if e.script_dirs.is_null() {
+            0
+        } else {
+            e.script_dirs_count
+        });
+        if !e.script_dirs.is_null() {
+            for i in 0..e.script_dirs_count {
+                script_vec.push(input(*e.script_dirs.add(i)));
+            }
+        }
+        let opt_c = |p: *const c_char| -> Option<&[u8]> {
+            (!p.is_null()).then(|| CStr::from_ptr(p).to_bytes())
+        };
+        let cfg = crate::webserver::WebServeConfig {
+            signature: sig,
+            remote_addr: input(e.remote_addr),
+            version: input(e.version),
+            web_dir: input(e.web_dir),
+            script_dirs: &script_vec,
+            credentials: crate::webserver::Credentials {
+                control_username: opt_c(e.control_username),
+                control_password: opt_c(e.control_password),
+                restricted_username: opt_c(e.restricted_username),
+                restricted_password: opt_c(e.restricted_password),
+                add_username: opt_c(e.add_username),
+                add_password: opt_c(e.add_password),
+                authorized_ip: opt_c(e.authorized_ip),
+            },
+            control_port: e.control_port,
+            form_auth: e.form_auth != 0,
+            gzip_enabled: e.gzip_enabled != 0,
+            debug_build: e.debug_build != 0,
+        };
+        let lower = crate::wildmask::Lower::Fold(&crate::util::wild_mask_fold_locale);
+
+        unsafe extern "C" fn send_body_trampoline(
+            send_ctx: *mut c_void,
+            body_ptr: *const c_char,
+            body_len: c_int,
+            ct_ptr: *const c_char,
+            cachable: c_int,
+        ) {
+            let emit = &mut *(send_ctx as *mut &mut dyn FnMut(&[u8], Option<&[u8]>, bool));
+            let body = if body_ptr.is_null() || body_len <= 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(body_ptr.cast::<u8>(), body_len as usize)
+            };
+            let ct = (!ct_ptr.is_null()).then(|| CStr::from_ptr(ct_ptr).to_bytes());
+            emit(body, ct, cachable != 0);
+        }
+
+        let keep_alive = crate::webserver::serve_web_request(
+            &cfg,
+            &lower,
+            |dst| {
+                let Some(cb) = e.read_line_cb else {
+                    return false;
+                };
+                cb(e.ctx, dst.as_mut_ptr().cast(), dst.len() as c_int) != 0
+            },
+            |dst| {
+                let Some(cb) = e.recv_cb else {
+                    return false;
+                };
+                cb(e.ctx, dst.as_mut_ptr().cast(), dst.len() as c_int) != 0
+            },
+            |src| {
+                let Some(cb) = e.send_cb else {
+                    return false;
+                };
+                cb(e.ctx, src.as_ptr().cast(), src.len() as c_int) != 0
+            },
+            |level, msg| {
+                if let Some(cb) = e.log_cb {
+                    let c = to_nul_cvec(msg);
+                    cb(e.ctx, level, c.as_ptr());
+                }
+            },
+            |req_body, http_method, user_access, url_c, mut emit| {
+                if let Some(cb) = e.rpc_cb {
+                    let mut emit_ref: &mut dyn FnMut(&[u8], Option<&[u8]>, bool) = &mut emit;
+                    cb(
+                        e.ctx,
+                        req_body.as_mut_ptr().cast(),
+                        http_method,
+                        user_access,
+                        url_c.as_ptr().cast(),
+                        (&mut emit_ref as *mut &mut dyn FnMut(&[u8], Option<&[u8]>, bool)).cast(),
+                        send_body_trampoline,
+                    );
+                }
+            },
+        );
+        return c_int::from(keep_alive);
+    }
+
+    0
+}
+
+pub type NzbgetRsBinRpcListPushNzbFn = unsafe extern "C" fn(
+    *mut c_void,
+    u32,
+    u32,
+    i64,
+    i64,
+    i64,
+    u32,
+    u32,
+    u32,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+);
+pub type NzbgetRsBinRpcListPushParamFn =
+    unsafe extern "C" fn(*mut c_void, u32, *const c_char, *const c_char);
+pub type NzbgetRsBinRpcListPushFileFn = unsafe extern "C" fn(
+    *mut c_void,
+    u32,
+    u32,
+    i64,
+    i64,
+    u32,
+    u32,
+    u32,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+);
+pub type NzbgetRsBinRpcListSetStateFn = unsafe extern "C" fn(
+    *mut c_void,
+    i64,
+    u32,
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    c_int,
+    i64,
+);
+pub type NzbgetRsBinRpcLogBeginFn = unsafe extern "C" fn(*mut c_void, c_int, u32, *mut c_int);
+pub type NzbgetRsBinRpcLogPushFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32, *const c_char);
+pub type NzbgetRsBinRpcPostPushFn = unsafe extern "C" fn(
+    *mut c_void,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+    *const c_char,
+);
+pub type NzbgetRsBinRpcHistPushFn =
+    unsafe extern "C" fn(*mut c_void, u32, u32, u32, i64, u32, u32, u32, u32, *const c_char);
+
+#[repr(C)]
+pub struct NzbgetRsBinRpcServeEnv {
+    pub ctx: *mut c_void,
+    pub remote_addr: *const c_char,
+    pub control_user: *const c_char,
+    pub control_password: *const c_char,
+    pub version: *const c_char,
+    pub control_port: c_int,
+    pub recv_cb: Option<unsafe extern "C" fn(*mut c_void, *mut c_char, c_int) -> c_int>,
+    pub send_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_int>,
+    pub log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
+    pub action_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            c_int,
+            c_int,
+            c_int,
+            c_int,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            c_int,
+            *const i32,
+            usize,
+            *const *const c_char,
+            usize,
+        ) -> c_int,
+    >,
+    pub collect_list_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            c_int,
+            *mut c_void,
+            NzbgetRsBinRpcListPushNzbFn,
+            NzbgetRsBinRpcListPushParamFn,
+            NzbgetRsBinRpcListPushFileFn,
+            NzbgetRsBinRpcListSetStateFn,
+        ),
+    >,
+    pub collect_log_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            u32,
+            *mut c_void,
+            NzbgetRsBinRpcLogBeginFn,
+            NzbgetRsBinRpcLogPushFn,
+        ),
+    >,
+    pub collect_post_cb:
+        Option<unsafe extern "C" fn(*mut c_void, *mut c_void, NzbgetRsBinRpcPostPushFn)>,
+    pub collect_history_cb:
+        Option<unsafe extern "C" fn(*mut c_void, c_int, *mut c_void, NzbgetRsBinRpcHistPushFn)>,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_serve(env: *const NzbgetRsBinRpcServeEnv) {
+    #[cfg(unix)]
+    {
+        let _cancel_guard = PosixCancelGuard::disable();
+        let Some(e) = env.as_ref() else {
+            return;
+        };
+
+        unsafe extern "C" fn list_push_nzb(
+            b_ptr: *mut c_void,
+            id: u32,
+            kind: u32,
+            size: i64,
+            rem_size: i64,
+            paused_size: i64,
+            paused_files: u32,
+            rem_pars: u32,
+            priority: u32,
+            filename: *const c_char,
+            name: *const c_char,
+            dest_dir: *const c_char,
+            category: *const c_char,
+            queued_filename: *const c_char,
+        ) {
+            let b = &mut *b_ptr.cast::<crate::binrpc::BinRpcListBuilder>();
+            b.push_nzb(
+                id,
+                kind,
+                size,
+                rem_size,
+                paused_size,
+                paused_files,
+                rem_pars,
+                priority,
+                input(filename),
+                input(name),
+                input(dest_dir),
+                input(category),
+                input(queued_filename),
+            );
+        }
+
+        unsafe extern "C" fn list_push_param(
+            b_ptr: *mut c_void,
+            owner_idx: u32,
+            name: *const c_char,
+            value: *const c_char,
+        ) {
+            let b = &mut *b_ptr.cast::<crate::binrpc::BinRpcListBuilder>();
+            b.push_param(owner_idx, input(name), input(value));
+        }
+
+        unsafe extern "C" fn list_push_file(
+            b_ptr: *mut c_void,
+            id: u32,
+            nzb_idx: u32,
+            size: i64,
+            rem_size: i64,
+            paused: u32,
+            fn_confirmed: u32,
+            active_dl: u32,
+            nzb_name: *const c_char,
+            subject: *const c_char,
+            filename: *const c_char,
+        ) {
+            let b = &mut *b_ptr.cast::<crate::binrpc::BinRpcListBuilder>();
+            b.push_file(
+                id,
+                nzb_idx,
+                size,
+                rem_size,
+                paused,
+                fn_confirmed,
+                active_dl,
+                input(nzb_name),
+                input(subject),
+                input(filename),
+            );
+        }
+
+        unsafe extern "C" fn list_set_state(
+            b_ptr: *mut c_void,
+            rem_size: i64,
+            dl_rate: u32,
+            dl_limit: c_int,
+            dl_paused: c_int,
+            post_paused: c_int,
+            scan_paused: c_int,
+            thread_cnt: c_int,
+            post_jobs: c_int,
+            up_sec: c_int,
+            dn_sec: c_int,
+            stand_by: c_int,
+            all_bytes: i64,
+        ) {
+            let b = &mut *b_ptr.cast::<crate::binrpc::BinRpcListBuilder>();
+            b.remaining_size = rem_size;
+            b.download_rate = dl_rate;
+            b.download_limit = dl_limit;
+            b.download_paused = dl_paused;
+            b.post_paused = post_paused;
+            b.scan_paused = scan_paused;
+            b.thread_count = thread_cnt;
+            b.post_job_count = post_jobs;
+            b.up_time_sec = up_sec;
+            b.dn_time_sec = dn_sec;
+            b.stand_by = stand_by;
+            b.downloaded_bytes = all_bytes;
+            b.state_populated = true;
+        }
+
+        struct LogCollectCtx<'a> {
+            lines: i32,
+            id_from: u32,
+            nr_entries: &'a mut u32,
+            enc: &'a mut crate::binrpc::WireEntryEncoder,
+        }
+
+        unsafe extern "C" fn log_begin(
+            enc_ptr: *mut c_void,
+            msg_count: c_int,
+            first_id: u32,
+            out_start: *mut c_int,
+        ) {
+            let lc = &mut *enc_ptr.cast::<LogCollectCtx<'_>>();
+            let (start, nr) =
+                crate::binrpc::calc_log_slice(msg_count, lc.lines, lc.id_from, first_id);
+            *lc.nr_entries = nr.max(0) as u32;
+            if !out_start.is_null() {
+                *out_start = start;
+            }
+        }
+
+        unsafe extern "C" fn log_push(
+            enc_ptr: *mut c_void,
+            id: u32,
+            kind: u32,
+            time: u32,
+            text: *const c_char,
+        ) {
+            let lc = &mut *enc_ptr.cast::<LogCollectCtx<'_>>();
+            let entry = crate::binrpc::LogEntry {
+                id,
+                kind,
+                time,
+                texts: [crate::binrpc::Text::new(input(text))],
+            };
+            lc.enc.push(&entry);
+        }
+
+        struct CountedEncCtx<'a> {
+            nr_entries: &'a mut u32,
+            enc: &'a mut crate::binrpc::WireEntryEncoder,
+        }
+
+        unsafe extern "C" fn post_push(
+            enc_ptr: *mut c_void,
+            id: u32,
+            stage: u32,
+            stage_prog: u32,
+            file_prog: u32,
+            start_sec: u32,
+            stage_sec: u32,
+            filename: *const c_char,
+            name: *const c_char,
+            dest_dir: *const c_char,
+            label: *const c_char,
+        ) {
+            let ce = &mut *enc_ptr.cast::<CountedEncCtx<'_>>();
+            *ce.nr_entries = ce.nr_entries.wrapping_add(1);
+            let entry = crate::binrpc::PostEntry {
+                id,
+                stage,
+                stage_progress: stage_prog,
+                file_progress: file_prog,
+                start_time: start_sec,
+                stage_time: stage_sec,
+                texts: [
+                    crate::binrpc::Text::new(input(filename)),
+                    crate::binrpc::Text::new(input(name)),
+                    crate::binrpc::Text::new(input(dest_dir)),
+                    crate::binrpc::Text::new(input(label)),
+                ],
+            };
+            ce.enc.push(&entry);
+        }
+
+        unsafe extern "C" fn hist_push(
+            enc_ptr: *mut c_void,
+            id: u32,
+            kind: u32,
+            time: u32,
+            size: i64,
+            file_cnt: u32,
+            par_status: u32,
+            script_status: u32,
+            url_status: u32,
+            name: *const c_char,
+        ) {
+            let ce = &mut *enc_ptr.cast::<CountedEncCtx<'_>>();
+            *ce.nr_entries = ce.nr_entries.wrapping_add(1);
+            let size_hi = ((size >> 32) & 0xffff_ffff) as u32;
+            let size_lo = (size & 0xffff_ffff) as u32;
+            let entry = crate::binrpc::HistoryEntry {
+                id,
+                kind,
+                time,
+                size_lo,
+                size_hi,
+                file_count: file_cnt,
+                par_status,
+                script_status,
+                url_status,
+                texts: [crate::binrpc::Text::new(input(name))],
+            };
+            ce.enc.push(&entry);
+        }
+
+        crate::binrpc::serve_binrpc(
+            input(e.remote_addr),
+            input(e.control_user),
+            input(e.control_password),
+            input(e.version),
+            e.control_port,
+            |dst| {
+                let Some(cb) = e.recv_cb else {
+                    return false;
+                };
+                cb(e.ctx, dst.as_mut_ptr().cast(), dst.len() as c_int) != 0
+            },
+            |src| {
+                let Some(cb) = e.send_cb else {
+                    return false;
+                };
+                cb(e.ctx, src.as_ptr().cast(), src.len() as c_int) != 0
+            },
+            |kind, msg| {
+                if let Some(cb) = e.log_cb {
+                    let c = to_nul_cvec(msg);
+                    cb(e.ctx, kind, c.as_ptr());
+                }
+            },
+            |kind, a1, a2, a3, a4, s1, s2, s3, body, ids, names| {
+                let Some(cb) = e.action_cb else {
+                    return false;
+                };
+                let c1 = to_nul_cvec(s1);
+                let c2 = to_nul_cvec(s2);
+                let c3 = to_nul_cvec(s3);
+                let mut body_buf: Vec<u8> = Vec::new();
+                let (body_ptr, body_len) = if body.is_empty() {
+                    (c"".as_ptr(), 0)
+                } else {
+                    body_buf.reserve_exact(body.len() + 1);
+                    body_buf.extend_from_slice(body);
+                    body_buf.push(0);
+                    (body_buf.as_ptr().cast::<c_char>(), body.len() as c_int)
+                };
+                let name_cvecs: Vec<std::ffi::CString> =
+                    names.iter().map(|n| to_nul_cvec(n)).collect();
+                let name_ptrs: Vec<*const c_char> = name_cvecs.iter().map(|c| c.as_ptr()).collect();
+                cb(
+                    e.ctx,
+                    kind,
+                    a1,
+                    a2,
+                    a3,
+                    a4,
+                    c1.as_ptr(),
+                    c2.as_ptr(),
+                    c3.as_ptr(),
+                    body_ptr,
+                    body_len,
+                    if ids.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        ids.as_ptr()
+                    },
+                    ids.len(),
+                    if name_ptrs.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        name_ptrs.as_ptr()
+                    },
+                    name_ptrs.len(),
+                ) != 0
+            },
+            |want_files, want_state, builder| {
+                if let Some(cb) = e.collect_list_cb {
+                    cb(
+                        e.ctx,
+                        c_int::from(want_files),
+                        c_int::from(want_state),
+                        (builder as *mut crate::binrpc::BinRpcListBuilder).cast(),
+                        list_push_nzb,
+                        list_push_param,
+                        list_push_file,
+                        list_set_state,
+                    );
+                }
+            },
+            |lines, id_from, nr_entries, enc| {
+                if let Some(cb) = e.collect_log_cb {
+                    let mut lc = LogCollectCtx {
+                        lines,
+                        id_from,
+                        nr_entries,
+                        enc,
+                    };
+                    cb(
+                        e.ctx,
+                        lines,
+                        id_from,
+                        (&mut lc as *mut LogCollectCtx<'_>).cast(),
+                        log_begin,
+                        log_push,
+                    );
+                }
+            },
+            |nr_entries, enc| {
+                if let Some(cb) = e.collect_post_cb {
+                    let mut ce = CountedEncCtx { nr_entries, enc };
+                    cb(e.ctx, (&mut ce as *mut CountedEncCtx<'_>).cast(), post_push);
+                }
+            },
+            |show_hidden, nr_entries, enc| {
+                if let Some(cb) = e.collect_history_cb {
+                    let mut ce = CountedEncCtx { nr_entries, enc };
+                    cb(
+                        e.ctx,
+                        c_int::from(show_hidden),
+                        (&mut ce as *mut CountedEncCtx<'_>).cast(),
+                        hist_push,
+                    );
+                }
+            },
+        );
+    }
+}
+
+#[repr(C)]
+pub struct NzbgetRsBinRpcClientEnv {
+    pub ctx: *mut c_void,
+    pub control_ip: *const c_char,
+    pub control_port: c_int,
+    pub control_username: *const c_char,
+    pub control_password: *const c_char,
+    pub verbose: c_int,
+    pub match_mode: c_int,
+    pub set_rate: c_int,
+    pub edit_action: c_int,
+    pub edit_offset: c_int,
+    pub edit_text: *const c_char,
+    pub edit_ids: *const i32,
+    pub edit_ids_len: usize,
+    pub edit_names: *const *const c_char,
+    pub edit_names_len: usize,
+    pub log_lines: c_int,
+    pub log_first_id: u32,
+    pub add_nzb_filename: *const c_char,
+    pub arg_filename: *const c_char,
+    pub add_category: *const c_char,
+    pub auto_category: c_int,
+    pub add_top: c_int,
+    pub add_paused: c_int,
+    pub add_priority: c_int,
+    pub add_dupe_key: *const c_char,
+    pub add_dupe_mode: c_int,
+    pub add_dupe_score: c_int,
+    pub write_log_kind: c_int,
+    pub write_log_text: *const c_char,
+    pub want_file_list: c_int,
+    pub want_summary: c_int,
+    pub out_summary: *mut crate::binrpc::FrontendSummary,
+    pub write_stdout_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize)>,
+    pub write_perror_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub is_stopped_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
+    pub on_log_cb: Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32, *const c_char)>,
+    pub on_nzb_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            u32,
+            u32,
+            i64,
+            i64,
+            i64,
+            c_int,
+            c_int,
+            c_int,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+        ),
+    >,
+    pub on_param_cb: Option<unsafe extern "C" fn(*mut c_void, usize, *const c_char, *const c_char)>,
+    pub on_file_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            usize,
+            u32,
+            i64,
+            i64,
+            c_int,
+            c_int,
+            c_int,
+            *const c_char,
+            *const c_char,
+        ),
+    >,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_client(
+    op: c_int,
+    env: *const NzbgetRsBinRpcClientEnv,
+) -> c_int {
+    #[cfg(unix)]
+    {
+        let _cancel_guard = PosixCancelGuard::disable();
+        let Some(e) = env.as_ref() else {
+            return 0;
+        };
+        let ids_slice = if e.edit_ids.is_null() || e.edit_ids_len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(e.edit_ids, e.edit_ids_len)
+        };
+        let mut name_slices = Vec::with_capacity(if e.edit_names.is_null() {
+            0
+        } else {
+            e.edit_names_len
+        });
+        if !e.edit_names.is_null() {
+            for i in 0..e.edit_names_len {
+                name_slices.push(input(*e.edit_names.add(i)));
+            }
+        }
+        let params = crate::binrpc::BinRpcClientParams {
+            control_ip: input(e.control_ip),
+            control_port: e.control_port,
+            control_username: input(e.control_username),
+            control_password: input(e.control_password),
+            verbose: e.verbose != 0,
+            match_mode: e.match_mode,
+            set_rate: e.set_rate,
+            edit_action: e.edit_action,
+            edit_offset: e.edit_offset,
+            edit_text: (!e.edit_text.is_null()).then(|| CStr::from_ptr(e.edit_text).to_bytes()),
+            edit_ids: ids_slice,
+            edit_names: &name_slices,
+            log_lines: e.log_lines,
+            log_first_id: e.log_first_id,
+            add_nzb_filename: input(e.add_nzb_filename),
+            arg_filename: input(e.arg_filename),
+            add_category: input(e.add_category),
+            auto_category: e.auto_category != 0,
+            add_top: e.add_top != 0,
+            add_paused: e.add_paused != 0,
+            add_priority: e.add_priority,
+            add_dupe_key: input(e.add_dupe_key),
+            add_dupe_mode: e.add_dupe_mode,
+            add_dupe_score: e.add_dupe_score,
+            write_log_kind: e.write_log_kind,
+            write_log_text: input(e.write_log_text),
+            want_file_list: e.want_file_list != 0,
+            want_summary: e.want_summary != 0,
+        };
+        let out_sum = e.out_summary.as_mut();
+        let ok = crate::binrpc::client_execute(
+            op,
+            &params,
+            out_sum,
+            |bytes| {
+                if let Some(cb) = e.write_stdout_cb {
+                    cb(e.ctx, bytes.as_ptr().cast(), bytes.len());
+                }
+            },
+            |cmsg| {
+                if let Some(cb) = e.write_perror_cb {
+                    cb(e.ctx, cmsg.as_ptr());
+                }
+            },
+            || {
+                if let Some(cb) = e.is_stopped_cb {
+                    cb(e.ctx) != 0
+                } else {
+                    false
+                }
+            },
+            |id, kind, time, txt| {
+                if let Some(cb) = e.on_log_cb {
+                    cb(e.ctx, id, kind, time, txt.cast());
+                }
+            },
+            |id, kind, sz, rem, psd, pfc, rpc, prio, f0, f1, f2, f3, f4| {
+                if let Some(cb) = e.on_nzb_cb {
+                    cb(
+                        e.ctx,
+                        id,
+                        kind,
+                        sz,
+                        rem,
+                        psd,
+                        pfc,
+                        rpc,
+                        prio,
+                        f0.cast(),
+                        f1.cast(),
+                        f2.cast(),
+                        f3.cast(),
+                        f4.cast(),
+                    );
+                }
+            },
+            |idx, k, v| {
+                if let Some(cb) = e.on_param_cb {
+                    cb(e.ctx, idx, k.cast(), v.cast());
+                }
+            },
+            |idx, id, sz, rem, psd, fnc, act, s, f| {
+                if let Some(cb) = e.on_file_cb {
+                    cb(e.ctx, idx, id, sz, rem, psd, fnc, act, s.cast(), f.cast());
+                }
+            },
+        );
+        return c_int::from(ok);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (op, env);
+        0
     }
 }
 

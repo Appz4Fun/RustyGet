@@ -42,11 +42,6 @@ void nzbget_rs_free(NzbgetRsBuf buf);
 
 // RPC request decoders (rust/src/decode.rs), as WebUtil's:
 // All buffers remain caller-owned; these functions allocate no result buffers.
-// Base64: NULL input returns 0. Otherwise input is readable for length bytes,
-// or, when length <= 0, through the NUL (strlen is truncated to uint32 as in
-// C++). Output has room for len / 4 * 3 bytes, and is input or disjoint from it.
-// Returns bytes written, without a terminator.
-unsigned int nzbget_rs_decode_base64(const char* input, int length, char* output);
 // raw is NULL (no-op) or a writable NUL-terminated string, decoded in place.
 void nzbget_rs_json_decode(char* raw);
 
@@ -62,10 +57,6 @@ const char* nzbget_rs_xml_find_tag(const char* xml, const char* tag, int* valueL
 // copy and release with nzbget_rs_free. Numeric formatting uses LC_NUMERIC.
 // Panics abort and never unwind through C++.
 NzbgetRsBuf nzbget_rs_format_size(long long size);
-// Caller-owned writable NUL-terminated str; from/to are NUL-terminated and
-// may point into str. Any NULL argument is a no-op. Empty patterns and growing
-// replacements are no-ops; equal-length replacements retain C++ truncation.
-void nzbget_rs_reduce_str(char* str, const char* from, const char* to);
 // NULL strings are empty; non-NULL strings must be readable and NUL-terminated.
 int nzbget_rs_match_file_ext(const char* filename, const char* extensionList, const char* listSeparator);
 
@@ -129,37 +120,6 @@ NzbgetRsBuf nzbget_rs_path_text(int op, const char* str, size_t len, int flag);
 size_t nzbget_rs_path_position(int op, const char* str, size_t len);
 // path is NULL (no-op) or a writable NUL-terminated string, owned by the caller.
 void nzbget_rs_normalize_path_separators(char* path);
-
-// WebProcessor's request decisions (rust/src/webserver.rs). Header kinds:
-// 0 other, 1 Content-Length (number), 2 credentials (value), 3 credentials
-// too long, 4 Accept-Encoding (number: gzip), 5 Origin, 6 Auth-Token cookie,
-// 7 X-Forwarded-For, 8 If-None-Match, 9 keep-alive, 10 end of headers
-// line is NULL (empty) or len initialized bytes. Tests stop at its first NUL;
-// a locale-induced early match still reads the value at its fixed offset,
-// bounded by len. Outputs may be NULL and must not alias the input.
-int nzbget_rs_web_header(const char* line, size_t len, int authInfoEmpty,
-	size_t* valueStart, size_t* valueLen, int* number);
-// NULL URL means empty; embedded NUL ends the URL. Outputs may be NULL.
-// Free both returned buffers with nzbget_rs_free (including on exceptions).
-NzbgetRsBuf nzbget_rs_web_parse_url(const char* url, size_t len, int* redirect, NzbgetRsBuf* auth);
-typedef struct
-{
-	const char* users[6]; // control, restricted, add: username, password
-	const char* authorizedIp;
-	const char* remoteAddr;
-	const char* authInfo;
-	const char* authToken;
-	const char* serverTokens[3];
-} NzbgetRsWebCredentials;
-typedef struct
-{
-	int authorized;
-	int access; // EUserAccess, -1 to leave it
-	ptrdiff_t authCut; // where m_authInfo is cut, -1 for none
-	int warn;
-} NzbgetRsWebCheck;
-// NULL input denies access; NULL out is a no-op. Output must not alias inputs.
-void nzbget_rs_web_check_credentials(const NzbgetRsWebCredentials* input, NzbgetRsWebCheck* out);
 
 // Decoder (rust/src/decoder.rs), with rapidyenc's incremental decoder (its
 // state as an int) and CRC. Get: 0 format, 1 begin, 2 end, 3 size,
@@ -503,118 +463,6 @@ int nzbget_rs_rename_bak(const char* filename, const char* bakPart, int removeOl
 // FileSystem::GetFileExtension: the offset of the last '.', or -1.
 ptrdiff_t nzbget_rs_file_extension(const char* name, size_t len);
 
-// The binary remote protocol's frame (rust/src/binrpc.rs). base is the
-// request base as received (SNzbRequestBase, 76 bytes, network byte order).
-// check: 1 when the credentials match (strcmp as BinRpcProcessor compared
-// them; an empty control user isn't compared), *type the request type.
-// name: a static string for the log. size_ok: 1, or 0 with *expected and
-// *received set for a known type whose struct size differs from sizes[type].
-// bool_response: the bytes SendBoolResponse sends (free with nzbget_rs_free).
-// trailing_ok: 1 when 0 <= len <= max. NULL outputs aren't written; a NULL
-// or short base fails, as does a missing sizes entry for a known type,
-// leaving outputs untouched. NULL control strings/text mean empty strings.
-// Non-NULL inputs must be readable for their lengths (strings through NUL);
-// non-NULL uint32_t pointers must be aligned and outputs writable. Outputs
-// may overlap inputs; inputs are read first. Panics abort.
-int nzbget_rs_binrpc_check(const unsigned char* base, size_t len, const char* controlUser, const char* controlPassword,
-	uint32_t* type);
-const char* nzbget_rs_binrpc_name(uint32_t type);
-int nzbget_rs_binrpc_size_ok(const unsigned char* base, size_t len, const uint32_t* sizes, size_t count,
-	uint32_t* expected, uint32_t* received);
-NzbgetRsBuf nzbget_rs_binrpc_bool_response(int success, const char* text);
-// Default single-entry decoder retained for BuildFileList; outputs may be uninitialized.
-int nzbget_rs_binrpc_read_entry(const char* data, size_t len, size_t* at, uint32_t* ints, size_t nints,
-	const size_t* fields, size_t* starts, size_t nfields);
-// The entries of a list response (List, Log, PostQueue, History), one
-// struct per entry, ints in host order, strings as bytes and a length
-// (without the NUL; a NULL string needs length 0). The C++ collects a
-// response's entries under its locks and one encode call makes the trailing
-// data: each entry's ints big-endian, the lengths (with their NULs) in the
-// fields of its strings, the strings with their NULs, zeros to 4 bytes
-// counted in its last length, as the wire has them; ints an entry doesn't
-// set are 0. The bytes are allocated once (free with nzbget_rs_free); no
-// bytes, or more than INT_MAX, come back empty (NULL data, length 0).
-// The strings are read during the call only. Read the same entries back
-// with read_nzbs, read_params and read_files: up to max entries from *at
-// of len bytes into out (which may be uninitialized), *at moved past them;
-// fewer than max (the number read) when an entry or a string, up to its
-// NUL, doesn't fit in len. The strings point into data and end at their
-// NULs (their len is not set: 0). The listings are the client's printed
-// lines of up to count entries (each with its newline, as a string; free
-// with nzbget_rs_free): [INFO] text for a log message (nothing for an
-// unknown kind), [id] name, stage, n% for a post-processing job, [id] name
-// (...) for an NZB, URL or hidden item of the history (nothing for other
-// kinds; unknown stages and statuses have no text); they end at an entry
-// that doesn't fit in len.
-typedef struct
-{
-	const char* data;
-	size_t len;
-} NzbgetRsBinText;
-typedef struct
-{
-	uint32_t id, kind, sizeLo, sizeHi, remainingSizeLo, remainingSizeHi, pausedSizeLo, pausedSizeHi, pausedCount,
-		remainingParCount, priority, match;
-	NzbgetRsBinText filename, name, destDir, category, queuedFilename;
-} NzbgetRsBinNzb;
-typedef struct
-{
-	uint32_t nzbIndex; // counts from 1
-	NzbgetRsBinText name, value;
-} NzbgetRsBinParam;
-typedef struct
-{
-	uint32_t id, nzbIndex, sizeLo, sizeHi, remainingSizeLo, remainingSizeHi, paused, filenameConfirmed, activeDownloads,
-		match;
-	NzbgetRsBinText subject, filename;
-} NzbgetRsBinFile;
-typedef struct
-{
-	uint32_t id, kind, time;
-	NzbgetRsBinText text;
-} NzbgetRsBinLog;
-typedef struct
-{
-	uint32_t id, stage, stageProgress, fileProgress, startTime, stageTime;
-	NzbgetRsBinText filename, name, destDir, progressLabel;
-} NzbgetRsBinPost;
-typedef struct
-{
-	uint32_t id, kind, time, sizeLo, sizeHi, fileCount, parStatus, scriptStatus, urlStatus;
-	NzbgetRsBinText name;
-} NzbgetRsBinHistory;
-// Small responses can borrow caller scratch. ownedCapacity == 0 means
-// borrowed (never pass it to nzbget_rs_free); otherwise free
-// NzbgetRsBuf {data, len, ownedCapacity}. Null or insufficient scratch uses
-// one owned allocation. capacity must include the final NUL. The scratch
-// buffer must stay alive until the response is sent, and must not overlap
-// any input array/string. Oversized responses still return empty data.
-typedef struct
-{
-    char* data;
-    size_t len, ownedCapacity;
-} NzbgetRsBinResponse;
-NzbgetRsBinResponse nzbget_rs_binrpc_encode_list_into(const NzbgetRsBinNzb* nzbs, size_t nzbCount,
-    const NzbgetRsBinParam* params, size_t paramCount, const NzbgetRsBinFile* files, size_t fileCount,
-    char* scratch, size_t capacity);
-NzbgetRsBinResponse nzbget_rs_binrpc_encode_log_into(const NzbgetRsBinLog* log, size_t count, char* scratch, size_t capacity);
-NzbgetRsBinResponse nzbget_rs_binrpc_encode_post_queue_into(const NzbgetRsBinPost* jobs, size_t count,
-    char* scratch, size_t capacity);
-NzbgetRsBinResponse nzbget_rs_binrpc_encode_history_into(const NzbgetRsBinHistory* history, size_t count,
-    char* scratch, size_t capacity);
-NzbgetRsBuf nzbget_rs_binrpc_log_listing(const char* data, size_t len, uint32_t count);
-NzbgetRsBuf nzbget_rs_binrpc_post_queue_listing(const char* data, size_t len, uint32_t count);
-NzbgetRsBuf nzbget_rs_binrpc_history_listing(const char* data, size_t len, uint32_t count);
-// EditQueue's trailing data (text, ids, names). edit_sizes: 1 when the
-// client's counts and lengths are non-negative, nrIds <= 10000000, nrNames <=
-// namesLen and nrIds*4 + textLen + namesLen == dataLen. edit_split: 1 when
-// the nrIds big-endian ids after the text and the nrNames names after them
-// fit in len, each name ending within it, with the ids written into ids
-// (host order); 0 (ids untouched) otherwise. Nothing is allocated. data is
-// readable for len bytes; ids is writable for nrIds (NULL for 0).
-// is_url: 1 when content starts with "http:/" or "https:/" in any case (NULL
-// is empty).
-int nzbget_rs_binrpc_is_url(const char* content);
 // NzbFile (rust/src/nzbfile.rs), under the C library's ctype: classes are
 // isspace/isdigit's classes of bytes 0..255 (masks space and digit), lower
 // is tolower's table of -128..255 at index 0, charSigned whether char is
@@ -1580,23 +1428,6 @@ NzbgetRsBuf nzbget_rs_diskstate_format_volume_stat_item(
     const NzbgetRsDiskVolumeStatInput* inp);
 
 typedef struct {
-    int include_remaining_size;
-    int64_t remaining_size;
-    uint32_t download_rate;
-    uint32_t download_paused;
-    uint32_t download2_paused;
-    uint32_t download_stand_by;
-    int64_t downloaded_bytes;
-    uint32_t download_time_sec;
-    uint32_t download_limit;
-    uint32_t up_time_sec;
-    uint32_t thread_count;
-    uint32_t post_job_count;
-    uint32_t scan_paused;
-    uint32_t post_paused;
-} NzbgetRsBinRpcStatusSummarySpec;
-
-typedef struct {
     int stand_by;
     int pause_download;
     int64_t current_download_speed;
@@ -1650,8 +1481,6 @@ typedef struct {
 
 NzbgetRsBuf nzbget_rs_cmdline_format_usage(
     const char* base_name, char path_sep, int include_daemon);
-NzbgetRsBuf nzbget_rs_binrpc_status_summary(
-    const NzbgetRsBinRpcStatusSummarySpec* spec);
 NzbgetRsBuf nzbget_rs_ncurses_format_status_bar(
     const NzbgetRsNcursesStatusSpec* spec);
 NzbgetRsBuf nzbget_rs_ncurses_format_top_header(
@@ -1689,20 +1518,6 @@ NzbgetRsBuf nzbget_rs_diskstate_format_nzb_message_line(
     const char* time_str, int tm, int kind, const char* text, const char* line_ending);
 
 NzbgetRsBuf nzbget_rs_nserv_format_usage(const char* base_name);
-
-void nzbget_rs_binrpc_decode_log_response_entries(
-    const uint8_t* data, size_t len, uint32_t nr_entries, void* ctx,
-    void (*emit_cb)(void* ctx, uint32_t id, uint32_t kind, uint32_t time, const char* text));
-NzbgetRsBuf nzbget_rs_binrpc_encode_edit_queue_trailing(
-    const char* text, const int32_t* ids, size_t ids_len,
-    const char* const* names, size_t names_len,
-    int* out_text_len, int* out_names_len);
-NzbgetRsBuf nzbget_rs_binrpc_file_listing_from_wire(
-    const char* data, size_t len, uint32_t nr_nzb, uint32_t nr_ppp,
-    uint32_t nr_files, int has_pattern);
-NzbgetRsBuf nzbget_rs_binrpc_group_listing_from_wire(
-    const char* data, size_t len, uint32_t nr_nzb, uint32_t nr_ppp,
-    uint32_t nr_files, int has_pattern);
 
 size_t nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
     const char* path, const char* dest_dir, const char* filename,
@@ -2959,9 +2774,6 @@ void nzbget_rs_cross_pack_session_process_donor(
 
 
 uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
-uint32_t nzbget_rs_gzip_len(int input_len);
-uint32_t nzbget_rs_gzip_compress(
-    const uint8_t* in_buf, int in_len, uint8_t* out_buf, int out_len);
 
 int nzbget_rs_term_init(void);
 void nzbget_rs_term_shutdown(void);
@@ -3154,24 +2966,6 @@ int nzbget_rs_fs_get_disk_state(
     const char* path, int64_t* out_avail, int64_t* out_total);
 char* nzbget_rs_tokenizer_next(
     char* data_str, const char* separators, char** inout_save_ptr, int* inout_working);
-void nzbget_rs_binrpc_init_message_base(
-    uint8_t* out, int request_type, int struct_size,
-    const char* username, const char* password);
-void nzbget_rs_binrpc_init_download_request(
-    uint8_t* out, const char* username, const char* password,
-    const char* nzb_filename, const char* nzb_content, int is_url,
-    const char* category, int add_first, int add_paused, int priority,
-    int dupe_score, int dupe_mode, const char* dupe_key,
-    int trailing_len, int auto_category);
-int nzbget_rs_binrpc_edit_parse(
-    const uint8_t* data, uint32_t data_len, int nr_ids, int nr_names,
-    int names_len, int text_len, int32_t* out_ids);
-void nzbget_rs_binrpc_calc_log_slice(
-    int msg_count, int lines, uint32_t id_from, uint32_t first_msg_id,
-    int* out_start, int* out_nr_entries);
-int nzbget_rs_web_parse_request_or_mime(
-    const char* sig_or_filename, char* line,
-    int* out_method, size_t* out_url_offset, const char** out_mime);
 void nzbget_rs_nzb_update_current_stats_step(
     RsDownloadCurrentStatsAcc* acc, int64_t file_remaining_size,
     int file_success_articles, int file_failed_articles,
@@ -3259,12 +3053,6 @@ int nzbget_rs_dupesearch_parse_state_line(
     size_t* out_key_off, size_t* out_key_len, int* out_score, int64_t* out_time,
     size_t* out_title_off, size_t* out_title_len, int* out_retryable);
 void nzbget_rs_url_decode_path_in_place(char* raw);
-int nzbget_rs_web_classify_url(int op, const char* s);
-NzbgetRsBuf nzbget_rs_web_format_response(
-    int kind, int form_auth, int keep_alive, int unchanged, int gzip, int body_len,
-    const char* str_arg, const char* origin, const char* auth_token,
-    const char* content_type, const char* etag, const char* version,
-    NzbgetRsBuf* out_body);
 
 typedef struct NzbgetRsServerMatchItem {
     const char* name;
@@ -3582,6 +3370,161 @@ typedef struct NzbgetRsWebDlEnv {
 } NzbgetRsWebDlEnv;
 
 int nzbget_rs_webdl_execute(int op, int max_redirects, const NzbgetRsWebDlEnv* env);
+
+typedef void (*NzbgetRsWebSendBodyFn)(
+    void* send_ctx, const char* body, int body_len, const char* content_type, int cachable);
+
+typedef struct NzbgetRsWebServeEnv {
+    void* ctx;
+    const char* signature;
+    const char* remote_addr;
+    const char* version;
+    const char* web_dir;
+    const char* const* script_dirs;
+    size_t script_dirs_count;
+    const char* control_username;
+    const char* control_password;
+    const char* restricted_username;
+    const char* restricted_password;
+    const char* add_username;
+    const char* add_password;
+    const char* authorized_ip;
+    int control_port;
+    int form_auth;
+    int gzip_enabled;
+    int debug_build;
+    int (*read_line_cb)(void* ctx, char* buf, int size);
+    int (*recv_cb)(void* ctx, char* buf, int size);
+    int (*send_cb)(void* ctx, const char* buf, int size);
+    void (*log_cb)(void* ctx, int level, const char* msg);
+    void (*rpc_cb)(
+        void* ctx, char* req_body, int http_method, int user_access, const char* url,
+        void* send_ctx, NzbgetRsWebSendBodyFn send_body);
+} NzbgetRsWebServeEnv;
+
+int nzbget_rs_web_serve(int op, const NzbgetRsWebServeEnv* env);
+
+typedef void (*NzbgetRsBinRpcListPushNzbFn)(
+    void* b_ctx, uint32_t id, uint32_t kind, int64_t size, int64_t rem_size, int64_t paused_size,
+    uint32_t paused_files, uint32_t rem_pars, uint32_t priority,
+    const char* filename, const char* name, const char* dest_dir,
+    const char* category, const char* queued_filename);
+typedef void (*NzbgetRsBinRpcListPushParamFn)(
+    void* b_ctx, uint32_t owner_idx, const char* name, const char* value);
+typedef void (*NzbgetRsBinRpcListPushFileFn)(
+    void* b_ctx, uint32_t id, uint32_t nzb_idx, int64_t size, int64_t rem_size,
+    uint32_t paused, uint32_t fn_confirmed, uint32_t active_dl,
+    const char* nzb_name, const char* subject, const char* filename);
+typedef void (*NzbgetRsBinRpcListSetStateFn)(
+    void* b_ctx, int64_t rem_size, uint32_t dl_rate, int dl_limit, int dl_paused,
+    int post_paused, int scan_paused, int thread_cnt, int post_jobs,
+    int up_sec, int dn_sec, int stand_by, int64_t all_bytes);
+typedef void (*NzbgetRsBinRpcLogBeginFn)(
+    void* enc_ctx, int msg_count, uint32_t first_id, int* out_start);
+typedef void (*NzbgetRsBinRpcLogPushFn)(
+    void* enc_ctx, uint32_t id, uint32_t kind, uint32_t time, const char* text);
+typedef void (*NzbgetRsBinRpcPostPushFn)(
+    void* enc_ctx, uint32_t id, uint32_t stage, uint32_t stage_prog, uint32_t file_prog,
+    uint32_t start_sec, uint32_t stage_sec, const char* filename, const char* name,
+    const char* dest_dir, const char* label);
+typedef void (*NzbgetRsBinRpcHistPushFn)(
+    void* enc_ctx, uint32_t id, uint32_t kind, uint32_t time, int64_t size,
+    uint32_t file_cnt, uint32_t par_status, uint32_t script_status,
+    uint32_t url_status, const char* name);
+
+typedef struct NzbgetRsBinRpcServeEnv {
+    void* ctx;
+    const char* remote_addr;
+    const char* control_user;
+    const char* control_password;
+    const char* version;
+    int control_port;
+    int (*recv_cb)(void* ctx, char* buf, int size);
+    int (*send_cb)(void* ctx, const char* buf, int size);
+    void (*log_cb)(void* ctx, int kind, const char* msg);
+    int (*action_cb)(
+        void* ctx, int kind, int a1, int a2, int a3, int a4,
+        const char* s1, const char* s2, const char* s3,
+        const char* body, int body_len,
+        const int32_t* ids, size_t ids_len,
+        const char* const* names, size_t names_len);
+    void (*collect_list_cb)(
+        void* ctx, int want_files, int want_state, void* b_ctx,
+        NzbgetRsBinRpcListPushNzbFn push_nzb, NzbgetRsBinRpcListPushParamFn push_param,
+        NzbgetRsBinRpcListPushFileFn push_file, NzbgetRsBinRpcListSetStateFn set_state);
+    void (*collect_log_cb)(
+        void* ctx, int lines, uint32_t id_from, void* enc_ctx,
+        NzbgetRsBinRpcLogBeginFn begin_log, NzbgetRsBinRpcLogPushFn push_log);
+    void (*collect_post_cb)(
+        void* ctx, void* enc_ctx, NzbgetRsBinRpcPostPushFn push_post);
+    void (*collect_history_cb)(
+        void* ctx, int show_hidden, void* enc_ctx, NzbgetRsBinRpcHistPushFn push_hist);
+} NzbgetRsBinRpcServeEnv;
+
+void nzbget_rs_binrpc_serve(const NzbgetRsBinRpcServeEnv* env);
+
+typedef struct NzbgetRsFrontendSummary {
+    int64_t current_download_speed;
+    int64_t remaining_size;
+    int64_t all_bytes;
+    int32_t pause_download;
+    int32_t download_limit;
+    int32_t thread_count;
+    int32_t post_job_count;
+    int32_t up_time_sec;
+    int32_t dn_time_sec;
+    int32_t stand_by;
+} NzbgetRsFrontendSummary;
+
+typedef struct NzbgetRsBinRpcClientEnv {
+    void* ctx;
+    const char* control_ip;
+    int control_port;
+    const char* control_username;
+    const char* control_password;
+    int verbose;
+    int match_mode;
+    int set_rate;
+    int edit_action;
+    int edit_offset;
+    const char* edit_text;
+    const int32_t* edit_ids;
+    size_t edit_ids_len;
+    const char* const* edit_names;
+    size_t edit_names_len;
+    int log_lines;
+    uint32_t log_first_id;
+    const char* add_nzb_filename;
+    const char* arg_filename;
+    const char* add_category;
+    int auto_category;
+    int add_top;
+    int add_paused;
+    int add_priority;
+    const char* add_dupe_key;
+    int add_dupe_mode;
+    int add_dupe_score;
+    int write_log_kind;
+    const char* write_log_text;
+    int want_file_list;
+    int want_summary;
+    NzbgetRsFrontendSummary* out_summary;
+    void (*write_stdout_cb)(void* ctx, const char* ptr, size_t len);
+    void (*write_perror_cb)(void* ctx, const char* msg);
+    int (*is_stopped_cb)(void* ctx);
+    void (*on_log_cb)(void* ctx, uint32_t id, uint32_t kind, uint32_t time, const char* text);
+    void (*on_nzb_cb)(
+        void* ctx, uint32_t id, uint32_t kind, int64_t size, int64_t rem_size, int64_t paused_size,
+        int paused_files, int rem_pars, int priority,
+        const char* filename, const char* name, const char* dest_dir,
+        const char* category, const char* queued_filename);
+    void (*on_param_cb)(void* ctx, size_t nzb_idx, const char* name, const char* value);
+    void (*on_file_cb)(
+        void* ctx, size_t nzb_idx, uint32_t id, int64_t size, int64_t rem_size,
+        int paused, int fn_confirmed, int active_dl, const char* subject, const char* filename);
+} NzbgetRsBinRpcClientEnv;
+
+int nzbget_rs_binrpc_client(int op, const NzbgetRsBinRpcClientEnv* env);
 
 #include "nzbget_tls_cipher.h"
 

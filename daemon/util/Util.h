@@ -71,23 +71,17 @@
 
 #include <unistd.h>
 #include <pwd.h>
-#include <grp.h>
 #include <signal.h>
-#include <netdb.h>
 #include <pthread.h>
 #include <getopt.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <sys/resource.h>
 #include <sys/statvfs.h>
 #include <sys/wait.h>
-#include <sys/un.h>
-#include <sys/file.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <dirent.h>
 #include <poll.h>
-#include <regex.h>
 
 #ifndef __linux__
 #include <sys/sysctl.h>
@@ -141,20 +135,15 @@
 #include <thread>
 #include <atomic>
 #include <utility>
-#include <future>
 #include <mutex>
 #include <shared_mutex>
 #include <condition_variable>
 #include <chrono>
 #include <optional>
-#include <variant>
 #include <limits>
 #include <type_traits>
-#include <random>
 #include <exception>
-#include <iomanip>
 #include <span>
-#include <regex>
 
 #ifndef DISABLE_TLS
 #include <openssl/ssl.h>
@@ -184,10 +173,6 @@ namespace OpenSSL
 // is causing fatal problems in SIMD units which must not have static initialization because
 // they contain code with runtime CPU dispatching.
 //#include <iostream>
-
-#ifdef HAVE_REGEX_H
-#include <regex.h>
-#endif
 
 #ifndef DISABLE_PARCHECK
 #include <assert.h>
@@ -776,7 +761,6 @@ public:
 	StringBuilder& operator=(const StringBuilder& other) = delete;
 	StringBuilder& operator=(StringBuilder&& other) = delete;
 	operator const char*() const { return m_data ? m_data : ""; }
-	int Length() const { return m_length; }
 	void Reserve(int capacity, bool exact = false)
 	{
 		if (capacity > m_capacity || m_capacity == 0)
@@ -927,9 +911,6 @@ public:
 		return result;
 	}
 
-	static int64 JoinInt64(uint32 Hi, uint32 Lo) { return ((int64)Hi << 32) | Lo; }
-	static void SplitInt64(int64 Int64, uint32* Hi, uint32* Lo) { *Hi = (uint32)(Int64 >> 32); *Lo = (uint32)(Int64 & 0xFFFFFFFF); }
-
 	static void TrimRight(char* str) { nzbget_rs_trim_line(str, 1); }
 	static bool EmptyStr(const char* str) { return !str || !*str; }
 
@@ -958,12 +939,6 @@ public:
 			return static_cast<uint64_t>(num) > static_cast<uint64_t>(std::numeric_limits<To>::max())
 				? 0 : static_cast<To>(num);
 		}
-	}
-
-	static char* ReduceStr(char* str, const char* from, const char* to)
-	{
-		nzbget_rs_reduce_str(str, from, to);
-		return str;
 	}
 
 	static void SetStandByMode([[maybe_unused]] bool standBy) {}
@@ -1014,11 +989,6 @@ public:
 class WebUtil
 {
 public:
-	static uint32 DecodeBase64(char* inputBuffer, int inputBufferLength, char* outputBuffer)
-	{
-		return nzbget_rs_decode_base64(inputBuffer, inputBufferLength, outputBuffer);
-	}
-
 	static void XmlDecode(char* raw) { nzbget_rs_xml_decode(raw); }
 
 	static const char* XmlFindTag(const char* xml, const char* tag, int* valueLength)
@@ -1067,23 +1037,6 @@ public:
 private:
 	void* m_rsRegex = nullptr;
 };
-
-#ifndef DISABLE_GZIP
-class ZLib
-{
-public:
-	static uint32 GZipLen(int inputBufferLength) { return nzbget_rs_gzip_len(inputBufferLength); }
-
-	static uint32 GZip(const void* inputBuffer, int inputBufferLength, void* outputBuffer, int outputBufferLength)
-	{
-		return nzbget_rs_gzip_compress(
-			static_cast<const uint8_t*>(inputBuffer),
-			inputBufferLength,
-			static_cast<uint8_t*>(outputBuffer),
-			outputBufferLength);
-	}
-};
-#endif
 
 class Tokenizer
 {
@@ -41178,7 +41131,6 @@ void ExecuteStartScript()
 	void SetRequest(char* request) { m_request = request; }
 	const char* GetResponse() { return m_response; }
 	const char* GetContentType() { return m_contentType; }
-	static bool IsRpcRequest(const char* url) { return nzbget_rs_rpc_protocol(url) != rpUndefined; }
 	bool IsSafeMethod() { return m_safeMethod; }
 
 private:
@@ -41312,600 +41264,7 @@ private:
 	}
 };
 
-class WebProcessor
-{
-public:
-	enum EHttpMethod
-	{
-		hmPost,
-		hmGet,
-		hmOptions
-	};
-
-	static void Init()
-	{
-		if (m_serverAuthToken[0][0] != 0)
-		{
-			// already initialized
-			return;
-		}
-
-		for (size_t j = uaControl; j <= uaAdd; ++j)
-		{
-			GenerateSecureToken(m_serverAuthToken[j]);
-		}
-	}
-
-	void Execute()
-	{
-		m_gzip = false;
-		m_userAccess = uaControl;
-		m_authInfo[0] = '\0';
-		m_authToken[0] = '\0';
-
-		ParseHeaders();
-
-		if (m_httpMethod == hmPost && m_contentLen <= 0)
-		{
-			// answered and closed: without an answer a kept-alive client waited until
-			// its timeout, and a body (chunked) left unread would be the next request
-			error("Invalid-request: content length is 0");
-			m_keepAlive = false;
-			SendErrorResponse(ERR_HTTP_BAD_REQUEST, false);
-			return;
-		}
-
-		if (m_httpMethod == hmOptions)
-		{
-			SendOptionsResponse();
-			return;
-		}
-
-		if (!ParseUrl())
-		{
-			return;
-		}
-
-		m_rpcRequest = XmlRpcProcessor::IsRpcRequest(m_url);
-		m_authorized = CheckCredentials();
-
-		if ((!g_Options->GetFormAuth() || m_rpcRequest) && !m_authorized)
-		{
-			SendAuthResponse();
-			return;
-		}
-
-		if (m_httpMethod == hmPost)
-		{
-			// a body of a size no request has: the buffer for it couldn't be allocated
-			// (its size + 1 overflowed at INT_MAX) and was written through anyway. A
-			// request without credentials (the login form) is small
-			if (m_contentLen < 0 || m_contentLen > (m_authorized ? 768 * 1024 * 1024 : 64 * 1024))
-			{
-				SendErrorResponse(ERR_HTTP_BAD_REQUEST, true);
-				return;
-			}
-
-			// reading http body (request content)
-			m_request.Reserve(m_contentLen);
-			if (!m_request)
-			{
-				SendErrorResponse(ERR_HTTP_SERVICE_UNAVAILABLE, true);
-				return;
-			}
-			m_request[m_contentLen] = '\0';
-
-			if (!m_connection->Recv(m_request, m_contentLen))
-			{
-				error("Invalid-request: could not read data");
-				m_keepAlive = false;
-				return;
-			}
-			debug("Request=%s", *m_request);
-		}
-
-		debug("request received from %s", m_connection->GetRemoteAddr());
-
-		Dispatch();
-	}
-
-	void SetConnection(Connection* connection) { m_connection = connection; }
-	void SetUrl(const char* url) { m_url = url; }
-	void SetHttpMethod(EHttpMethod httpMethod) { m_httpMethod = httpMethod; }
-	bool GetKeepAlive() { return m_keepAlive; }
-
-private:
-	static constexpr int TOKEN_SIZE = 48 + 1;
-	static constexpr const char* ERR_HTTP_BAD_REQUEST = "400 Bad Request";
-	static constexpr const char* ERR_HTTP_NOT_FOUND = "404 Not Found";
-	static constexpr const char* ERR_HTTP_SERVICE_UNAVAILABLE = "503 Service Unavailable";
-	static constexpr int MAX_UNCOMPRESSED_SIZE = 500;
-
-	enum EUserAccess
-	{
-		uaControl,
-		uaRestricted,
-		uaAdd
-	};
-
-	Connection* m_connection = nullptr;
-	CString m_request;
-	CString m_url;
-	EHttpMethod m_httpMethod;
-	EUserAccess m_userAccess;
-	bool m_rpcRequest;
-	bool m_authorized;
-	bool m_gzip;
-	CString m_origin;
-	int m_contentLen;
-	char m_authInfo[256+1];
-	char m_authToken[TOKEN_SIZE];
-	inline static char m_serverAuthToken[3][TOKEN_SIZE]{};
-	CString m_forwardedFor;
-	CString m_oldETag;
-	bool m_keepAlive = false;
-	std::hash<std::string_view> m_hasher;
-
-	static void GenerateSecureToken(char* token)
-	{
-		// 1 byte = 2 hex characters.
-		// For a token string of size TOKEN_SIZE (including \0), we need half that many random bytes.
-		constexpr size_t BYTES_NEEDED = (TOKEN_SIZE - 1) / 2;
-		uint8_t randBytes[BYTES_NEEDED];
-		bool ok = false;
-
-#ifndef DISABLE_TLS
-		ok = RAND_bytes(randBytes, static_cast<int>(BYTES_NEEDED)) == 1;
-#endif
-		if (!ok)
-		{
-			try
-			{
-				std::random_device rd;
-				std::uniform_int_distribution<unsigned int> dist(0, 0xFF);
-				for (size_t i = 0; i < BYTES_NEEDED; ++i)
-				{
-					randBytes[i] = static_cast<uint8_t>(dist(rd));
-				}
-			}
-			catch (const std::exception& ex)
-			{
-				error("Could not generate secure authentication token: %s", ex.what());
-				exit(1);
-			}
-		}
-
-		static constexpr char HEX[] = "0123456789abcdef";
-		for (size_t i = 0; i < BYTES_NEEDED; ++i)
-		{
-			token[i * 2] = HEX[randBytes[i] >> 4];
-			token[i * 2 + 1] = HEX[randBytes[i] & 0x0f];
-		}
-		token[BYTES_NEEDED * 2] = '\0';
-	}
-
-	void ParseHeaders()
-	{
-		// Keep the entire initialized buffer: in unusual locales strncasecmp can
-		// match at an early NUL, but C++ still reads values at fixed offsets.
-		char buffer[1024]{};
-		m_contentLen = 0;
-		while (char* p = m_connection->ReadLine(buffer, sizeof(buffer), nullptr))
-		{
-			if (char* cr = strrchr(p, '\r')) *cr = '\0';
-			debug("header=%s", p);
-
-			size_t start = 0, len = 0;
-			int number = 0;
-			int kind = nzbget_rs_web_header(p, sizeof(buffer), Util::EmptyStr(m_authInfo), &start, &len, &number);
-			std::string value(p + start, len);
-			switch (kind)
-			{
-				case 1:
-					m_contentLen = number;
-					break;
-				case 2:
-					m_authInfo[WebUtil::DecodeBase64(p + start, 0, m_authInfo)] = '\0';
-					break;
-				case 3:
-					error("Invalid-request: auth-info too big");
-					return;
-				case 4:
-					m_gzip = number != 0;
-					break;
-				case 5:
-					m_origin = value.c_str();
-					break;
-				case 6:
-					strncpy(m_authToken, value.c_str(), sizeof(m_authToken) - 1);
-					m_authToken[sizeof(m_authToken) - 1] = '\0';
-					break;
-				case 7:
-					m_forwardedFor = value.c_str();
-					break;
-				case 8:
-					m_oldETag = value.c_str();
-					break;
-				case 9:
-					m_keepAlive = true;
-					break;
-				case 10:
-					debug("URL=%s", *m_url);
-					return;
-			}
-		}
-
-		debug("URL=%s", *m_url);
-	}
-
-	// false when it answered the request itself (a redirect)
-	bool ParseUrl()
-	{
-		// rust/src/webserver.rs
-		int redirect = 0;
-		NzbgetRsBuf auth{};
-		NzbgetRsBuf url = nzbget_rs_web_parse_url(m_url, strlen(m_url), &redirect, &auth);
-		// Both buffers belong to Rust, including if constructing target throws.
-		auto release = [](NzbgetRsBuf* buf) { nzbget_rs_free(*buf); };
-		std::unique_ptr<NzbgetRsBuf, decltype(release)> urlOwner(&url, release);
-		std::unique_ptr<NzbgetRsBuf, decltype(release)> authOwner(&auth, release);
-		std::string target(url.data, url.len);
-		if (redirect)
-		{
-			SendRedirectResponse(target.c_str());
-			return false;
-		}
-		if (auth.data)
-		{
-			size_t len = std::min(auth.len, sizeof(m_authInfo) - 1);
-			memcpy(m_authInfo, auth.data, len);
-			m_authInfo[len] = '\0';
-		}
-		m_url = target.c_str();
-
-		debug("Final URL=%s", *m_url);
-		return true;
-	}
-
-	bool CheckCredentials()
-	{
-		// rust/src/webserver.rs
-		NzbgetRsWebCredentials input{};
-		input.users[0] = g_Options->GetControlUsername();
-		input.users[1] = g_Options->GetControlPassword();
-		input.users[2] = g_Options->GetRestrictedUsername();
-		input.users[3] = g_Options->GetRestrictedPassword();
-		input.users[4] = g_Options->GetAddUsername();
-		input.users[5] = g_Options->GetAddPassword();
-		input.authorizedIp = g_Options->GetAuthorizedIp();
-		input.remoteAddr = m_connection->GetRemoteAddr();
-		input.authInfo = m_authInfo;
-		input.authToken = m_authToken;
-		for (int j = uaControl; j <= uaAdd; j++)
-		{
-			input.serverTokens[j] = m_serverAuthToken[j];
-		}
-
-		NzbgetRsWebCheck check{};
-		nzbget_rs_web_check_credentials(&input, &check);
-		if (check.authCut >= 0)
-		{
-			m_authInfo[check.authCut] = '\0';
-		}
-		if (check.access >= 0)
-		{
-			m_userAccess = (EUserAccess)check.access;
-		}
-		if (check.warn)
-		{
-			warn("Request received on port %i from %s%s, but username (%s) or password invalid",
-				g_Options->GetControlPort(), m_connection->GetRemoteAddr(),
-				m_forwardedFor.Empty() ? "" : *CString::FormatStr(" (forwarded for: %s)", *m_forwardedFor),
-				m_authInfo);
-		}
-		return check.authorized != 0;
-	}
-
-	void Dispatch()
-	{
-		if (m_url[0] != '/')
-		{
-			SendErrorResponse(ERR_HTTP_BAD_REQUEST, true);
-			return;
-		}
-
-		if (m_rpcRequest)
-		{
-			XmlRpcProcessor processor;
-			processor.SetRequest(m_request);
-			processor.SetHttpMethod(m_httpMethod == hmGet ? XmlRpcProcessor::hmGet : XmlRpcProcessor::hmPost);
-			processor.SetUserAccess((XmlRpcProcessor::EUserAccess)m_userAccess);
-			processor.SetJsonP(g_Options->GetJsonP());
-			processor.SetUrl(m_url);
-			processor.Execute();
-			SendBodyResponse(processor.GetResponse(), strlen(processor.GetResponse()), processor.GetContentType(), processor.IsSafeMethod());
-			return;
-		}
-
-		if (m_httpMethod != hmGet)
-		{
-			SendErrorResponse(ERR_HTTP_BAD_REQUEST, true);
-			return;
-		}
-
-		int getRoute = nzbget_rs_web_classify_url(0, m_url ? *m_url : "");
-		if (getRoute == 0)
-		{
-			SendErrorResponse(ERR_HTTP_NOT_FOUND, true);
-			return;
-		}
-		if (getRoute == 1 || getRoute == 2)
-		{
-			if (!m_authorized)
-			{
-				SendAuthResponse();
-				return;
-			}
-
-			const auto& scriptDirs = g_Options->GetScriptDirPaths();
-			if (scriptDirs.empty())
-			{
-				SendErrorResponse(ERR_HTTP_SERVICE_UNAVAILABLE, true);
-				return;
-			}
-
-			if (getRoute == 1)
-			{
-				SendErrorResponse(ERR_HTTP_NOT_FOUND, false);
-				return;
-			}
-
-			std::string_view extUrl = m_url + 12;
-			bool found = false;
-			for (const auto& scriptDir : scriptDirs)
-			{
-				fs::path filePath = scriptDir / extUrl;
-				fs::error_code ec;
-				auto resolvedDir = fs::canonical(scriptDir, ec);
-				if (ec) continue;
-
-				auto resolvedPath = fs::canonical(filePath, ec);
-				if (ec) continue;
-
-				auto rel = resolvedPath.lexically_relative(resolvedDir);
-				if (rel.empty() || rel.native().front() == '.') continue;
-
-				CharBuffer body;
-				std::string filePathStr = fs::u8string(resolvedPath);
-				if (FileSystem::LoadFileIntoBuffer(filePathStr.c_str(), body, true))
-				{
-					const char* contentType = DetectContentType(filePathStr.c_str());
-					int len = body.Size() - 1;
-					SendBodyResponse(body, len, contentType, true);
-					found = true;
-					break;
-				}
-			}
-
-			if (!found)
-			{
-				SendErrorResponse(ERR_HTTP_NOT_FOUND, false);
-			}
-			return;
-		}
-
-		if (Util::EmptyStr(g_Options->GetWebDir()))
-		{
-			SendErrorResponse(ERR_HTTP_SERVICE_UNAVAILABLE, true);
-			return;
-		}
-
-		if (getRoute == 3)
-		{
-			SendMultiFileResponse();
-		}
-		else
-		{
-			SendSingleFileResponse();
-		}
-	}
-
-	void SendAuthResponse()
-	{
-		NzbgetRsBuf header = nzbget_rs_web_format_response(
-			0, g_Options->GetFormAuth() ? 1 : 0, m_keepAlive ? 1 : 0, 0, 0, 0,
-			nullptr, nullptr, nullptr, nullptr, nullptr, Util::VersionRevision(), nullptr);
-		debug("ResponseHeader=%s", header.data);
-		m_connection->Send(header.data, (int)header.len);
-		nzbget_rs_free(header);
-	}
-
-	void SendOptionsResponse()
-	{
-		NzbgetRsBuf header = nzbget_rs_web_format_response(
-			1, 0, m_keepAlive ? 1 : 0, 0, 0, 0,
-			nullptr, m_origin.Str(), nullptr, nullptr, nullptr, Util::VersionRevision(), nullptr);
-		debug("ResponseHeader=%s", header.data);
-		m_connection->Send(header.data, (int)header.len);
-		nzbget_rs_free(header);
-	}
-
-	void SendErrorResponse(const char* errCode, bool printWarning)
-	{
-		if (printWarning)
-		{
-			warn("Web-Server: %s, Resource: %s", errCode, *m_url);
-		}
-		NzbgetRsBuf body{};
-		NzbgetRsBuf header = nzbget_rs_web_format_response(
-			2, 0, m_keepAlive ? 1 : 0, 0, 0, 0,
-			errCode, nullptr, nullptr, nullptr, nullptr, Util::VersionRevision(), &body);
-		m_connection->Send(header.data, (int)header.len);
-		m_connection->Send(body.data, (int)body.len);
-		nzbget_rs_free(header);
-		nzbget_rs_free(body);
-	}
-
-	void SendRedirectResponse(const char* url)
-	{
-		NzbgetRsBuf header = nzbget_rs_web_format_response(
-			3, 0, m_keepAlive ? 1 : 0, 0, 0, 0,
-			url, nullptr, nullptr, nullptr, nullptr, Util::VersionRevision(), nullptr);
-		debug("ResponseHeader=%s", header.data);
-		m_connection->Send(header.data, (int)header.len);
-		nzbget_rs_free(header);
-	}
-
-	void SendBodyResponse(const char* body, int bodyLen, const char* contentType, bool cachable)
-	{
-		BString<1024> newETag;
-		bool unchanged = false;
-
-		if (cachable)
-		{
-			// over the whole body: as a C string it ended at the first zero byte, and
-			// every image (PNG, ICO...) had the same ETag - a changed one was answered
-			// "not modified"
-			size_t hash = m_hasher(std::string_view(body, bodyLen));
-			newETag.Format("\"%zx\"", hash);
-
-			unchanged = !m_oldETag.Empty() && !strcmp(m_oldETag, newETag);
-			if (unchanged)
-			{
-				body = "";
-				bodyLen = 0;
-			}
-		}
-
-#ifndef DISABLE_GZIP
-		CharBuffer gbuf;
-		bool gzip = m_gzip && bodyLen > MAX_UNCOMPRESSED_SIZE;
-		if (gzip)
-		{
-			uint32 outLen = ZLib::GZipLen(bodyLen);
-			gbuf.Reserve(outLen);
-			int gzippedLen = ZLib::GZip(body, bodyLen, *gbuf, outLen);
-			if (gzippedLen > 0 && gzippedLen < bodyLen)
-			{
-				body = gbuf;
-				bodyLen = gzippedLen;
-			}
-			else
-			{
-				gzip = false;
-			}
-		}
-#else
-		bool gzip = false;
-#endif
-
-		NzbgetRsBuf header = nzbget_rs_web_format_response(
-			4, g_Options->GetFormAuth() ? 1 : 0, m_keepAlive ? 1 : 0,
-			unchanged ? 1 : 0, gzip ? 1 : 0, bodyLen,
-			nullptr, m_origin.Str(), m_authorized ? m_serverAuthToken[m_userAccess] : "",
-			contentType, cachable ? *newETag : nullptr, Util::VersionRevision(), nullptr);
-		debug("[%s] (%s) %s", *m_url, *m_oldETag, header.data);
-		m_connection->Send(header.data, (int)header.len);
-		nzbget_rs_free(header);
-		m_connection->Send(body, bodyLen);
-	}
-
-	void SendSingleFileResponse()
-	{
-		const char* defRes = (!m_url.Empty() && m_url[strlen(m_url) - 1] == '/') ? "index.html" : "";
-		CString filename = CString::FormatStr("%s%s%s", g_Options->GetWebDir(), *m_url, defRes);
-
-		debug("serving file: %s", *filename);
-
-		CharBuffer body;
-		if (!FileSystem::LoadFileIntoBuffer(filename, body, true))
-		{
-			bool ignorable = nzbget_rs_web_classify_url(1, FileSystem::BaseFileName(filename)) != 0;
-			SendErrorResponse(ERR_HTTP_NOT_FOUND, !ignorable);
-			return;
-		}
-
-		const char* contentType = DetectContentType(filename);
-		int len = body.Size() - 1;
-
-#ifdef DEBUG
-		if (contentType && !strcmp(contentType, "text/html"))
-		{
-			Util::ReduceStr(body, "<!-- %if-debug%", "");
-			Util::ReduceStr(body, "<!-- %if-not-debug% -->", "<!--");
-			Util::ReduceStr(body, "<!-- %end% -->", "-->");
-			Util::ReduceStr(body, "%end% -->", "");
-			len = strlen(body);
-		}
-#endif
-
-		SendBodyResponse(body, len, contentType, true);
-	}
-
-	void SendMultiFileResponse()
-	{
-		debug("serving multiple files: %s", *m_url);
-
-		StringBuilder response;
-		char* filelist = strchr((char*)m_url, '?');
-		if (!filelist)
-		{
-			SendErrorResponse(ERR_HTTP_NOT_FOUND, false);
-			return;
-		}
-		*filelist++ = '\0';
-
-		Tokenizer tok(filelist, "+");
-		while (const char* filename = tok.Next())
-		{
-			CString diskFilename = CString::FormatStr("%s%c%s", g_Options->GetWebDir(), PATH_SEPARATOR, filename);
-
-			CharBuffer body;
-			if (!FileSystem::LoadFileIntoBuffer(diskFilename, body, true))
-			{
-				warn("Web-Server: %s, Resource: /%s", ERR_HTTP_NOT_FOUND, filename);
-				SendErrorResponse(ERR_HTTP_NOT_FOUND, false);
-				return;
-			}
-
-			response.Append(body);
-		}
-
-		SendBodyResponse(response, response.Length(), DetectContentType(m_url), true);
-	}
-
-	static const char* DetectContentType(const char* filename)
-	{
-		const char* mime = nullptr;
-		nzbget_rs_web_parse_request_or_mime(filename, nullptr, nullptr, nullptr, &mime);
-		return mime;
-	}
-};
-
 #include <system_error>
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2005 Bo Cordes Petersen <placebodk@sourceforge.net>
- *  Copyright (C) 2007-2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
-
-
-#ifndef BINRPC_H
-#define BINRPC_H
 
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
@@ -41953,869 +41312,7 @@ private:
  */
 
 
-#ifndef MESSAGEBASE_H
-#define MESSAGEBASE_H
-
 static const int32 NZBMESSAGE_SIGNATURE = 0x6E7A6231; // = "nzb-XX" (protocol version)
-static const int NZBREQUESTFILENAMESIZE = 512;
-static const int NZBREQUESTPASSWORDSIZE = 32;
-
-/**
-* NZBGet communication protocol uses only two basic data types: integer and char.
-* Integer values are passed using network byte order (Big-Endian).
-* Use function "htonl" and "ntohl" to convert integers to/from machine
-* (host) byte order.
-* All char-strings ends with nullptr-char.
-*
-* NOTE:
-* NZBGet communication protocol is intended for usage only by NZBGet itself.
-* The communication works only if server and client has the same version.
-* The compatibility with previous program versions is not provided.
-* Third-party programs should use JSON-RPC or XML-RPC to communicate with NZBGet.
-*/
-
-// Possible values for field "m_type" of struct "SNZBRequestBase":
-enum ERemoteRequest
-{
-	rrDownload = 1,
-	rrPauseUnpause,
-	rrList,
-	rrSetDownloadRate,
-	rrDumpDebug,
-	rrEditQueue,
-	rrLog,
-	rrShutdown,
-	rrReload,
-	rrVersion,
-	rrPostQueue,
-	rrWriteLog,
-	rrScan,
-	rrHistory
-};
-
-// Possible values for field "m_action" of struct "SNZBPauseUnpauseRequest":
-enum ERemotePauseUnpauseAction
-{
-	rpDownload = 1, // pause/unpause download queue
-	rpPostProcess, // pause/unpause post-processor queue
-	rpScan // pause/unpause scan of incoming nzb-directory
-};
-
-// Possible values for field "m_matchMode" of struct "SNZBEditQueueRequest":
-enum ERemoteMatchMode
-{
-	rmId = 1, // ID
-	rmName, // Name
-	rmRegEx // RegEx
-};
-
-// The basic SNZBRequestBase struct, used in all requests
-struct SNzbRequestBase
-{
-	int32 m_signature; // Signature must be NZBMESSAGE_SIGNATURE in integer-value
-	int32 m_structSize; // Size of the entire struct
-	int32 m_type; // Message type, see enum in NZBMessageRequest-namespace
-	char m_username[NZBREQUESTPASSWORDSIZE]; // User name
-	char m_password[NZBREQUESTPASSWORDSIZE]; // Password
-};
-
-// The basic SNZBResposneBase struct, used in all responses
-struct SNzbResponseBase
-{
-	int32 m_signature; // Signature must be NZBMESSAGE_SIGNATURE in integer-value
-	int32 m_structSize; // Size of the entire struct
-};
-
-// A download request
-struct SNzbDownloadRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-	char m_nzbFilename[NZBREQUESTFILENAMESIZE]; // Name of nzb-file. For URLs can be empty, then the filename is read from URL download response
-	char m_category[NZBREQUESTFILENAMESIZE]; // Category, can be empty
-	int32 m_addFirst; // 1 - add file to the top of download queue
-	int32 m_addPaused; // 1 - pause added files
-	int32 m_priority; // Priority for files (0 - default)
-	int32 m_dupeScore; // Duplicate score
-	int32 m_dupeMode; // Duplicate mode (EDupeMode)
-	char m_dupeKey[NZBREQUESTFILENAMESIZE]; // Duplicate key
-	int32 m_trailingDataLength; // Length of nzb-file in bytes
-	int32 m_autoCategory;
-	//char m_content[m_trailingDataLength]; // variable sized
-};
-
-// A download response
-struct SNzbDownloadResponse
-{
-	SNzbResponseBase m_messageBase; // Must be the first in the struct
-	int32 m_success; // 0 - command failed, 1 - command executed successfully
-	int32 m_trailingDataLength; // Length of Text-string (m_szText), following to this record
-	//char m_text[m_trailingDataLength]; // variable sized
-};
-
-// A list and status request
-struct SNzbListRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-	int32 m_fileList; // 1 - return file list
-	int32 m_serverState; // 1 - return server state
-	int32 m_matchMode; // File/Group match mode, see enum eRemoteMatchMode (only values eRemoteMatchModeID (no filter) and eRemoteMatchModeRegEx are allowed)
-	int32 m_matchGroup; // 0 - match files; 1 - match nzbs (when m_iMatchMode == eRemoteMatchModeRegEx)
-	char m_pattern[NZBREQUESTFILENAMESIZE]; // RegEx Pattern (when m_iMatchMode == eRemoteMatchModeRegEx)
-};
-
-// A list response
-struct SNzbListResponse
-{
-	SNzbResponseBase m_messageBase; // Must be the first in the struct
-	int32 m_entrySize; // Size of the SNZBListResponseEntry-struct
-	int32 m_remainingSizeLo; // Remaining size in bytes, Low 32-bits of 64-bit value
-	int32 m_remainingSizeHi; // Remaining size in bytes, High 32-bits of 64-bit value
-	int32 m_downloadRate; // Current download speed, in Bytes pro Second
-	int32 m_downloadLimit; // Current download limit, in Bytes pro Second
-	int32 m_downloadPaused; // 1 - download queue is currently in paused-state
-	int32 m_download2Paused; // 1 - download queue is currently in paused-state (second pause-register)
-	int32 m_downloadStandBy; // 0 - there are currently downloads running, 1 - no downloads in progress (download queue paused or all download jobs completed)
-	int32 m_postPaused; // 1 - post-processor queue is currently in paused-state
-	int32 m_scanPaused; // 1 - scaning of incoming directory is currently in paused-state
-	int32 m_threadCount; // Number of threads running
-	int32 m_postJobCount; // Number of jobs in post-processor queue (including current job)
-	int32 m_upTimeSec; // Server up time in seconds
-	int32 m_downloadTimeSec; // Server download time in seconds (up_time - standby_time)
-	int32 m_downloadedBytesLo; // Amount of data downloaded since server start, Low 32-bits of 64-bit value
-	int32 m_downloadedBytesHi; // Amount of data downloaded since server start, High 32-bits of 64-bit value
-	int32 m_regExValid; // 0 - error in RegEx-pattern, 1 - RegEx-pattern is valid (only when Request has eRemoteMatchModeRegEx)
-	int32 m_nrTrailingNzbEntries; // Number of List-NZB-entries, following to this structure
-	int32 m_nrTrailingPPPEntries; // Number of List-PPP-entries, following to this structure
-	int32 m_nrTrailingFileEntries; // Number of List-File-entries, following to this structure
-	int32 m_trailingDataLength; // Length of all List-entries, following to this structure
-	// SNzbListResponseEntry m_nzbEntries[m_nrTrailingNZBEntries] // variable sized
-	// SNzbListResponseEntry m_pppEntries[m_nrTrailingPPPEntries] // variable sized
-	// SNzbListResponseEntry m_fileEntries[m_nrTrailingFileEntries] // variable sized
-};
-
-static constexpr uint32 NZBLIST_FILE_ENTRY_WIRE_SIZE = 12 * sizeof(int32);
-static constexpr uint32 NZBLOG_ENTRY_WIRE_SIZE = 4 * sizeof(int32);
-static constexpr uint32 NZBPOSTQUEUE_ENTRY_WIRE_SIZE = 10 * sizeof(int32);
-static constexpr uint32 NZBHISTORY_ENTRY_WIRE_SIZE = 10 * sizeof(int32);
-
-// A log request
-struct SNzbLogRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-	int32 m_idFrom; // Only one of these two parameters
-	int32 m_lines; // can be set. The another one must be set to "0".
-};
-
-// A log response
-struct SNzbLogResponse
-{
-	SNzbResponseBase m_messageBase; // Must be the first in the struct
-	int32 m_entrySize; // Size of the SNZBLogResponseEntry-struct
-	int32 m_nrTrailingEntries; // Number of Log-entries, following to this structure
-	int32 m_trailingDataLength; // Length of all Log-entries, following to this structure
-	// SNZBLogResponseEntry m_entries[m_trailingEntries] // variable sized
-};
-
-// A Pause/Unpause request
-struct SNzbPauseUnpauseRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-	int32 m_pause; // 1 - server must be paused, 0 - server must be unpaused
-	int32 m_action; // Action to be executed, see enum ERemotePauseUnpauseAction
-};
-
-// Request setting the download rate
-struct SNzbSetDownloadRateRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-	int32 m_downloadRate; // Speed limit, in Bytes pro Second
-};
-
-// edit queue request
-struct SNzbEditQueueRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-	int32 m_action; // Action to be executed, see enum DownloadQueue::EEditAction
-	int32 m_offset; // Offset to move (for m_iAction = 0)
-	int32 m_matchMode; // File/Group match mode, see enum eRemoteMatchMode
-	int32 m_nrTrailingIdEntries; // Number of ID-entries, following to this structure
-	int32 m_nrTrailingNameEntries; // Number of Name-entries, following to this structure
-	int32 m_trailingNameEntriesLen; // Length of all Name-entries, following to this structure
-	int32 m_textLen; // Length of Text-string (m_szText), following to this record
-	int32 m_trailingDataLength; // Length of Text-string and all ID-entries, following to this structure
-	//char m_text[m_textLen]; // variable sized
-	//int32 m_ids[m_nrTrailingIdEntries]; // variable sized array of IDs. For File-Actions - ID of file, for Group-Actions - ID of any file belonging to group
-	//char* m_names[m_nrTrailingNameEntries]; // variable sized array of strings. For File-Actions - name of file incl. nzb-name as path, for Group-Actions - name of group
-};
-
-// A PostQueue response
-struct SNzbPostQueueResponse
-{
-	SNzbResponseBase m_messageBase; // Must be the first in the struct
-	int32 m_entrySize; // Size of the SNZBPostQueueResponseEntry-struct
-	int32 m_nrTrailingEntries; // Number of PostQueue-entries, following to this structure
-	int32 m_trailingDataLength; // Length of all PostQueue-entries, following to this structure
-	// SNZBPostQueueResponseEntry m_entries[m_nrTrailingEntries] // variable sized
-};
-
-// Write log request
-struct SNzbWriteLogRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-	int32 m_kind; // see Message::Kind in "Log.h"
-	int32 m_trailingDataLength; // Length of nzb-file in bytes
-	//char m_text[m_trailingDataLength]; // variable sized
-};
-
-// Scan nzb directory request
-struct SNzbScanRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-	int32 m_syncMode; // 0 - asynchronous Scan (the command returns immediately), 1 - synchronous Scan (the command returns when the scan is completed)
-};
-
-// A history request
-struct SNzbHistoryRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-	int32 m_hidden; // 0 - only return visible records, 1 - also return hidden records
-};
-
-// history response
-struct SNzbHistoryResponse
-{
-	SNzbResponseBase m_messageBase; // Must be the first in the struct
-	int32 m_entrySize; // Size of the SNZBHistoryResponseEntry-struct
-	int32 m_nrTrailingEntries; // Number of History-entries, following to this structure
-	int32 m_trailingDataLength; // Length of all History-entries, following to this structure
-	// SNZBHistoryResponseEntry m_entries[m_nrTrailingEntries] // variable sized
-};
-
-#endif
-
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2005 Bo Cordes Petersen <placebodk@users.sourceforge.net>
- *  Copyright (C) 2007-2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *  Copyright (C) 2026 Denis <denis@nzbget.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
-
-
-#ifndef REMOTECLIENT_H
-#define REMOTECLIENT_H
-
-
-class RemoteClient
-{
-public:
-	void SetVerbose(bool verbose) { m_verbose = verbose; }
-
-	/*
-	 * Sends a message to the running nzbget process.
-	 */
-	bool RequestServerDownload(const char* nzbFilename, const char* nzbContent,
-		const char* category, bool autoCategory,
-		bool addFirst, bool addPaused, int priority,
-		const char* dupeKey, int dupeMode, int dupeScore)
-	{
-		// Read the file into the buffer
-		CharBuffer buffer;
-		int length = 0;
-		bool isUrl = nzbget_rs_binrpc_is_url(nzbContent);
-		if (isUrl)
-		{
-			length = strlen(nzbContent) + 1;
-		}
-		else
-		{
-			if (!FileSystem::LoadFileIntoBuffer(nzbContent, buffer, false))
-			{
-				printf("Could not load file %s\n", nzbContent);
-				return false;
-			}
-			length = buffer.Size();
-		}
-
-		if (!InitConnection()) return false;
-
-		SNzbDownloadRequest DownloadRequest{};
-		nzbget_rs_binrpc_init_download_request(
-			reinterpret_cast<uint8_t*>(&DownloadRequest),
-			g_Options->GetControlUsername(), g_Options->GetControlPassword(),
-			nzbFilename, nzbContent, isUrl ? 1 : 0, category,
-			addFirst ? 1 : 0, addPaused ? 1 : 0, priority, dupeScore, dupeMode,
-			dupeKey, length, autoCategory ? 1 : 0);
-
-		return SendRequestAndReceiveBool(DownloadRequest, isUrl ? nzbContent : *buffer, length);
-	}
-
-	bool RequestServerList(bool files, bool groups, const char* pattern)
-	{
-		if (!InitConnection()) return false;
-
-		SNzbListRequest ListRequest = {};
-		InitMessageBase(&ListRequest.m_messageBase, rrList, sizeof(ListRequest));
-		ListRequest.m_fileList = htonl(true);
-		ListRequest.m_serverState = htonl(true);
-		ListRequest.m_matchMode = htonl(pattern ? rmRegEx : rmId);
-		ListRequest.m_matchGroup = htonl(groups);
-		if (pattern)
-		{
-			strncpy(ListRequest.m_pattern, pattern, NZBREQUESTFILENAMESIZE - 1);
-			ListRequest.m_pattern[NZBREQUESTFILENAMESIZE-1] = '\0';
-		}
-
-		SNzbListResponse ListResponse;
-		CharBuffer buf;
-		if (!ExchangeTrailingResponse(ListRequest, ListResponse, buf))
-		{
-			return false;
-		}
-
-		if (pattern && !ListResponse.m_regExValid)
-		{
-			printf("Error in regular expression\n");
-			return false;
-		}
-
-		if (files)
-		{
-			if (ntohl(ListResponse.m_trailingDataLength) == 0)
-			{
-				printf("Server has no files queued for download\n");
-			}
-			else
-			{
-				NzbgetRsBuf formatted = nzbget_rs_binrpc_file_listing_from_wire(
-					buf,
-					buf.Size(),
-					ntohl(ListResponse.m_nrTrailingNzbEntries),
-					ntohl(ListResponse.m_nrTrailingPPPEntries),
-					ntohl(ListResponse.m_nrTrailingFileEntries),
-					pattern ? 1 : 0);
-				if (formatted.data)
-				{
-					fwrite(formatted.data, 1, formatted.len, stdout);
-				}
-				nzbget_rs_free(formatted);
-			}
-		}
-
-		if (groups)
-		{
-			if (ntohl(ListResponse.m_trailingDataLength) == 0)
-			{
-				printf("Server has no files queued for download\n");
-			}
-			else
-			{
-				NzbgetRsBuf formatted = nzbget_rs_binrpc_group_listing_from_wire(
-					buf,
-					buf.Size(),
-					ntohl(ListResponse.m_nrTrailingNzbEntries),
-					ntohl(ListResponse.m_nrTrailingPPPEntries),
-					ntohl(ListResponse.m_nrTrailingFileEntries),
-					pattern ? 1 : 0);
-				if (formatted.data)
-				{
-					fwrite(formatted.data, 1, formatted.len, stdout);
-				}
-				nzbget_rs_free(formatted);
-			}
-		}
-
-		NzbgetRsBinRpcStatusSummarySpec statusSpec{};
-		statusSpec.include_remaining_size = (!files && !groups) ? 1 : 0;
-		statusSpec.remaining_size = Util::JoinInt64(ntohl(ListResponse.m_remainingSizeHi), ntohl(ListResponse.m_remainingSizeLo));
-		statusSpec.download_rate = ntohl(ListResponse.m_downloadRate);
-		statusSpec.download_paused = ntohl(ListResponse.m_downloadPaused);
-		statusSpec.download2_paused = ntohl(ListResponse.m_download2Paused);
-		statusSpec.download_stand_by = ntohl(ListResponse.m_downloadStandBy);
-		statusSpec.downloaded_bytes = Util::JoinInt64(ntohl(ListResponse.m_downloadedBytesHi), ntohl(ListResponse.m_downloadedBytesLo));
-		statusSpec.download_time_sec = ntohl(ListResponse.m_downloadTimeSec);
-		statusSpec.download_limit = ntohl(ListResponse.m_downloadLimit);
-		statusSpec.up_time_sec = ntohl(ListResponse.m_upTimeSec);
-		statusSpec.thread_count = ntohl(ListResponse.m_threadCount);
-		statusSpec.post_job_count = ntohl(ListResponse.m_postJobCount);
-		statusSpec.scan_paused = ntohl(ListResponse.m_scanPaused);
-		statusSpec.post_paused = ntohl(ListResponse.m_postPaused);
-
-		NzbgetRsBuf statusBuf = nzbget_rs_binrpc_status_summary(&statusSpec);
-		if (statusBuf.data)
-		{
-			fwrite(statusBuf.data, 1, statusBuf.len, stdout);
-		}
-		nzbget_rs_free(statusBuf);
-
-		return true;
-	}
-
-	bool RequestServerPauseUnpause(bool pause, ERemotePauseUnpauseAction action)
-	{
-		if (!InitConnection()) return false;
-
-		SNzbPauseUnpauseRequest PauseUnpauseRequest = {};
-		InitMessageBase(&PauseUnpauseRequest.m_messageBase, rrPauseUnpause, sizeof(PauseUnpauseRequest));
-		PauseUnpauseRequest.m_pause = htonl(pause);
-		PauseUnpauseRequest.m_action = htonl(action);
-
-		return SendRequestAndReceiveBool(PauseUnpauseRequest);
-	}
-
-	bool RequestServerSetDownloadRate(int rate)
-	{
-		if (!InitConnection()) return false;
-
-		SNzbSetDownloadRateRequest SetDownloadRateRequest = {};
-		InitMessageBase(&SetDownloadRateRequest.m_messageBase, rrSetDownloadRate, sizeof(SetDownloadRateRequest));
-		SetDownloadRateRequest.m_downloadRate = htonl(rate);
-
-		return SendRequestAndReceiveBool(SetDownloadRateRequest);
-	}
-
-	bool RequestServerEditQueue(DownloadQueue::EEditAction action, int offset, const char* text,
-		IdList* idList, NameList* nameList, ERemoteMatchMode matchMode)
-	{
-		if ((!idList || idList->empty()) && (!nameList || nameList->empty()))
-		{
-			printf("File(s) not specified\n");
-			return false;
-		}
-
-		if (!InitConnection()) return false;
-
-		std::vector<const char*> namePtrs;
-		if (nameList && !nameList->empty())
-		{
-			namePtrs.reserve(nameList->size());
-			for (CString& name : nameList)
-			{
-				namePtrs.push_back(*name);
-			}
-		}
-
-		int textLen = 0;
-		int nameLength = 0;
-		NzbgetRsBuf trailingBuf = nzbget_rs_binrpc_encode_edit_queue_trailing(
-			text,
-			idList && !idList->empty() ? idList->data() : nullptr,
-			idList ? idList->size() : 0,
-			namePtrs.empty() ? nullptr : namePtrs.data(),
-			namePtrs.size(),
-			&textLen,
-			&nameLength);
-		int length = (int)trailingBuf.len;
-
-		SNzbEditQueueRequest EditQueueRequest = {};
-		InitMessageBase(&EditQueueRequest.m_messageBase, rrEditQueue, sizeof(EditQueueRequest));
-		EditQueueRequest.m_action = htonl(action);
-		EditQueueRequest.m_matchMode = htonl(matchMode);
-		EditQueueRequest.m_offset = htonl((int)offset);
-		EditQueueRequest.m_textLen = htonl(textLen);
-		EditQueueRequest.m_nrTrailingIdEntries = htonl(idList ? idList->size() : 0);
-		EditQueueRequest.m_nrTrailingNameEntries = htonl((int)namePtrs.size());
-		EditQueueRequest.m_trailingNameEntriesLen = htonl(nameLength);
-		EditQueueRequest.m_trailingDataLength = htonl(length);
-
-		bool OK = SendRequestAndReceiveBool(EditQueueRequest, trailingBuf.data, length);
-		nzbget_rs_free(trailingBuf);
-		return OK;
-	}
-
-	bool RequestServerLog(int lines)
-	{
-		if (!InitConnection()) return false;
-
-		SNzbLogRequest LogRequest = {};
-		InitMessageBase(&LogRequest.m_messageBase, rrLog, sizeof(LogRequest));
-		LogRequest.m_lines = htonl(lines);
-		LogRequest.m_idFrom = 0;
-
-		SNzbLogResponse LogResponse;
-		CharBuffer buf;
-		if (!ExchangeTrailingResponse(LogRequest, LogResponse, buf))
-		{
-			return false;
-		}
-
-		if (LogResponse.m_trailingDataLength == 0)
-		{
-			printf("Log is empty\n");
-		}
-		else
-		{
-			printf("Log (last %i entries)\n", ntohl(LogResponse.m_nrTrailingEntries));
-			printf("-----------------------------------\n");
-
-			// rust/src/binrpc.rs: the lines of all the entries that fit the data
-			NzbgetRsBuf rsListing = nzbget_rs_binrpc_log_listing(buf, buf.Size(), ntohl(LogResponse.m_nrTrailingEntries));
-			printf("%s", rsListing.data);
-			nzbget_rs_free(rsListing);
-
-			printf("-----------------------------------\n");
-		}
-
-		return true;
-	}
-
-	bool RequestPostQueue()
-	{
-		if (!InitConnection()) return false;
-
-		SNzbRequestBase PostQueueRequest = {};
-		InitMessageBase(&PostQueueRequest, rrPostQueue, sizeof(PostQueueRequest));
-
-		SNzbPostQueueResponse PostQueueResponse;
-		CharBuffer buf;
-		if (!ExchangeTrailingResponse(PostQueueRequest, PostQueueResponse, buf))
-		{
-			return false;
-		}
-
-		if (ntohl(PostQueueResponse.m_trailingDataLength) == 0)
-		{
-			printf("Server has no jobs queued for post-processing\n");
-		}
-		else
-		{
-			printf("Post-Processing List\n");
-			printf("-----------------------------------\n");
-
-			// rust/src/binrpc.rs: the lines of all the entries that fit the data
-			NzbgetRsBuf rsListing = nzbget_rs_binrpc_post_queue_listing(buf, buf.Size(), ntohl(PostQueueResponse.m_nrTrailingEntries));
-			printf("%s", rsListing.data);
-			nzbget_rs_free(rsListing);
-
-			printf("-----------------------------------\n");
-		}
-
-		return true;
-	}
-
-	bool RequestWriteLog(int kind, const char* text)
-	{
-		if (!InitConnection()) return false;
-
-		SNzbWriteLogRequest WriteLogRequest = {};
-		InitMessageBase(&WriteLogRequest.m_messageBase, rrWriteLog, sizeof(WriteLogRequest));
-		WriteLogRequest.m_kind = htonl(kind);
-		int length = strlen(text) + 1;
-		WriteLogRequest.m_trailingDataLength = htonl(length);
-
-		return SendRequestAndReceiveBool(WriteLogRequest, text, length);
-	}
-
-	bool RequestScan(bool syncMode)
-	{
-		if (!InitConnection()) return false;
-
-		SNzbScanRequest ScanRequest = {};
-		InitMessageBase(&ScanRequest.m_messageBase, rrScan, sizeof(ScanRequest));
-		ScanRequest.m_syncMode = htonl(syncMode);
-
-		return SendRequestAndReceiveBool(ScanRequest);
-	}
-
-	bool RequestHistory(bool withHidden)
-	{
-		if (!InitConnection()) return false;
-
-		SNzbHistoryRequest HistoryRequest = {};
-		InitMessageBase(&HistoryRequest.m_messageBase, rrHistory, sizeof(HistoryRequest));
-		HistoryRequest.m_hidden = htonl(withHidden);
-
-		SNzbHistoryResponse HistoryResponse;
-		CharBuffer buf;
-		if (!ExchangeTrailingResponse(HistoryRequest, HistoryResponse, buf))
-		{
-			return false;
-		}
-
-		if (ntohl(HistoryResponse.m_trailingDataLength) == 0)
-		{
-			printf("Server has no files in history\n");
-		}
-		else
-		{
-			printf("History (most recent first)\n");
-			printf("-----------------------------------\n");
-
-			// rust/src/binrpc.rs: the lines of all the entries that fit the data
-			NzbgetRsBuf rsListing = nzbget_rs_binrpc_history_listing(buf, buf.Size(), ntohl(HistoryResponse.m_nrTrailingEntries));
-			printf("%s", rsListing.data);
-			nzbget_rs_free(rsListing);
-
-			printf("-----------------------------------\n");
-			printf("Items: %i\n", ntohl(HistoryResponse.m_nrTrailingEntries));
-		}
-
-		return true;
-	}
-
-	bool SendSimpleBoolRequest(ERemoteRequest request)
-	{
-		if (!InitConnection()) return false;
-
-		SNzbRequestBase req = {};
-		InitMessageBase(&req, request, sizeof(req));
-
-		return SendRequestAndReceiveBool(req);
-	}
-
-	void BuildFileList(SNzbListResponse* listResponse, const char* trailingData, DownloadQueue* downloadQueue)
-	{
-		size_t len = ntohl(listResponse->m_trailingDataLength);
-		if (len == 0)
-		{
-			return;
-		}
-		size_t at = 0;
-
-		// read nzb entries
-		static const size_t nzbStrings[] = {12, 13, 14, 15, 16};
-		for (uint32 i = 0; i < ntohl(listResponse->m_nrTrailingNzbEntries); i++)
-		{
-			RsEntry<17, 5> e;
-			if (!e.Next(trailingData, len, at, nzbStrings))
-			{
-				return;
-			}
-			std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
-			nzbInfo->SetId(e.ints[0]);
-			nzbInfo->SetKind((NzbInfo::EKind)e.ints[1]);
-			nzbInfo->SetSize(Util::JoinInt64(e.ints[3], e.ints[2]));
-			nzbInfo->SetRemainingSize(Util::JoinInt64(e.ints[5], e.ints[4]));
-			nzbInfo->SetPausedSize(Util::JoinInt64(e.ints[7], e.ints[6]));
-			nzbInfo->SetPausedFileCount(e.ints[8]);
-			nzbInfo->SetRemainingParCount(e.ints[9]);
-			nzbInfo->SetFilename(e.strings[0]);
-			nzbInfo->SetName(e.strings[1]);
-			nzbInfo->SetDestDir(e.strings[2]);
-			nzbInfo->SetCategory(e.strings[3]);
-			nzbInfo->SetQueuedFilename(e.strings[4]);
-			nzbInfo->SetPriority(e.ints[10]);
-
-			downloadQueue->GetQueue()->Add(std::move(nzbInfo));
-		}
-
-		//read ppp entries
-		static const size_t pppStrings[] = {1, 2};
-		for (uint32 i = 0; i < ntohl(listResponse->m_nrTrailingPPPEntries); i++)
-		{
-			RsEntry<3, 2> e;
-			if (!e.Next(trailingData, len, at, pppStrings))
-			{
-				return;
-			}
-			std::unique_ptr<NzbInfo>& nzbInfo = downloadQueue->GetQueue()->at(e.ints[0] - 1);
-			nzbInfo->GetParameters()->SetParameter(e.strings[0], e.strings[1]);
-		}
-
-		//read file entries
-		static const size_t fileStrings[] = {10, 11};
-		for (uint32 i = 0; i < ntohl(listResponse->m_nrTrailingFileEntries); i++)
-		{
-			RsEntry<12, 2> e;
-			if (!e.Next(trailingData, len, at, fileStrings))
-			{
-				return;
-			}
-			std::unique_ptr<FileInfo> fileInfo = std::make_unique<FileInfo>();
-			fileInfo->SetId(e.ints[0]);
-			fileInfo->SetSize(Util::JoinInt64(e.ints[3], e.ints[2]));
-			fileInfo->SetRemainingSize(Util::JoinInt64(e.ints[5], e.ints[4]));
-			fileInfo->SetPaused(e.ints[6]);
-			fileInfo->SetSubject(e.strings[0]);
-			fileInfo->SetFilename(e.strings[1]);
-			fileInfo->SetFilenameConfirmed(e.ints[7]);
-			fileInfo->SetActiveDownloads(e.ints[8]);
-
-			std::unique_ptr<NzbInfo>& nzbInfo = downloadQueue->GetQueue()->at(e.ints[1] - 1);
-			// the group's count is its files' (the answer has none per group): it
-			// stayed 0, and -L G never showed the threads of a downloading group
-			nzbInfo->SetActiveDownloads(nzbInfo->GetActiveDownloads() + fileInfo->GetActiveDownloads());
-			fileInfo->SetNzbInfo(nzbInfo.get());
-			nzbInfo->GetFileList()->Add(std::move(fileInfo));
-		}
-	}
-
-private:
-	// One entry of a list response, read by rust/src/binrpc.rs: its ints (host
-	// order) and strings; Next is false at an entry that doesn't fit the data,
-	// which ends the listing
-	template <size_t Ints, size_t Strings>
-	struct RsEntry
-	{
-		uint32 ints[Ints];
-		const char* strings[Strings];
-
-		bool Next(const char* data, size_t len, size_t& at, const size_t (&fields)[Strings])
-		{
-			size_t starts[Strings];
-			if (!nzbget_rs_binrpc_read_entry(data, len, &at, ints, Ints, fields, starts, Strings))
-			{
-				return false;
-			}
-			for (size_t k = 0; k < Strings; k++)
-			{
-				strings[k] = data + starts[k];
-			}
-			return true;
-		}
-	};
-
-	std::unique_ptr<Connection> m_connection;
-	bool m_verbose = true;
-
-	bool InitConnection()
-	{
-		const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
-
-		// Create a connection to the server (retry briefly if server is mid-reload)
-		bool OK = false;
-		for (int attempt = 0; attempt < 10; ++attempt)
-		{
-			m_connection = std::make_unique<Connection>(controlIp, g_Options->GetControlPort(), false);
-			OK = m_connection->Connect();
-			if (OK)
-			{
-				break;
-			}
-			Util::Sleep(50);
-		}
-		if (!OK)
-		{
-			printf("Unable to send request to RustyGet server at %s (port %i)\n", controlIp, g_Options->GetControlPort());
-		}
-		return OK;
-	}
-
-	void InitMessageBase(SNzbRequestBase* messageBase, int request, int size)
-	{
-		nzbget_rs_binrpc_init_message_base(
-			reinterpret_cast<uint8_t*>(messageBase), request, size,
-			g_Options->GetControlUsername(), g_Options->GetControlPassword());
-	}
-
-	template <typename Req>
-	bool SendRequestAndReceiveBool(const Req& req, const char* trailing = nullptr, int trailingLen = 0)
-	{
-		bool OK = m_connection->Send((char*)&req, sizeof(req));
-		if (!OK)
-		{
-			perror("m_pConnection->Send");
-		}
-		else
-		{
-			if (trailingLen > 0 && trailing)
-			{
-				m_connection->Send(trailing, trailingLen);
-			}
-			OK = ReceiveBoolResponse();
-		}
-		m_connection->Disconnect();
-		return OK;
-	}
-
-	template <typename Req, typename Resp>
-	bool ExchangeTrailingResponse(const Req& req, Resp& resp, CharBuffer& buf)
-	{
-		if (!m_connection->Send((char*)&req, sizeof(req)))
-		{
-			perror("m_pConnection->Send");
-			return false;
-		}
-
-		printf("Request sent\n");
-
-		bool read = m_connection->Recv((char*)&resp, sizeof(resp));
-		if (!read ||
-			(int)ntohl(resp.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
-			ntohl(resp.m_messageBase.m_structSize) != sizeof(resp))
-		{
-			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
-			return false;
-		}
-
-		if (ntohl(resp.m_trailingDataLength) > 0)
-		{
-			buf.Reserve(ntohl(resp.m_trailingDataLength));
-			if (!m_connection->Recv(buf, buf.Size()))
-			{
-				return false;
-			}
-		}
-
-		m_connection->Disconnect();
-		return true;
-	}
-
-	bool ReceiveBoolResponse()
-	{
-		printf("Request sent\n");
-
-		// all bool-responses have the same format of structure, we use SNZBDownloadResponse here
-		SNzbDownloadResponse BoolResponse;
-		memset(&BoolResponse, 0, sizeof(BoolResponse));
-
-		bool read = m_connection->Recv((char*)&BoolResponse, sizeof(BoolResponse));
-		if (!read ||
-			(int)ntohl(BoolResponse.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
-			ntohl(BoolResponse.m_messageBase.m_structSize) != sizeof(BoolResponse))
-		{
-			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
-			return false;
-		}
-
-		int textLen = ntohl(BoolResponse.m_trailingDataLength);
-		CString buf;
-		buf.Reserve(textLen);
-		read = m_connection->Recv(buf, textLen);
-		if (!read)
-		{
-			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
-			return false;
-		}
-
-		printf("server returned: %s\n", *buf);
-		return ntohl(BoolResponse.m_success);
-	}
-
-	void printf(const char* msg, ...)
-	{
-		if (m_verbose)
-		{
-			va_list ap;
-			va_start(ap, msg);
-			::vprintf(msg, ap);
-			va_end(ap);
-		}
-	}
-
-	void perror(const char* msg)
-	{
-		if (m_verbose)
-		{
-			::perror(msg);
-		}
-	}
-};
-
-#endif
 
 class Frontend : public Thread
 {
@@ -42922,20 +41419,24 @@ protected:
 		return g_Options->GetRemoteClientMode();
 	}
 
-	void InitMessageBase(SNzbRequestBase* messageBase, int request, int size)
+	NzbgetRsBinRpcClientEnv MakeRemoteEnv()
 	{
-		nzbget_rs_binrpc_init_message_base(
-			reinterpret_cast<uint8_t*>(messageBase), request, size,
-			g_Options->GetControlUsername(), g_Options->GetControlPassword());
+		NzbgetRsBinRpcClientEnv env{};
+		env.ctx = this;
+		env.control_ip = g_Options->GetControlIp();
+		env.control_port = g_Options->GetControlPort();
+		env.control_username = g_Options->GetControlUsername();
+		env.control_password = g_Options->GetControlPassword();
+		env.is_stopped_cb = [](void* c) -> int { return static_cast<Frontend*>(c)->IsStopped() ? 1 : 0; };
+		return env;
 	}
 
 	void ServerPauseUnpause(bool pause)
 	{
 		if (IsRemoteMode())
 		{
-			RemoteClient client;
-			client.SetVerbose(false);
-			client.RequestServerPauseUnpause(pause, rpDownload);
+			NzbgetRsBinRpcClientEnv env = MakeRemoteEnv();
+			nzbget_rs_binrpc_client(pause ? 16 : 17, &env);
 		}
 		else
 		{
@@ -42948,9 +41449,9 @@ protected:
 	{
 		if (IsRemoteMode())
 		{
-			RemoteClient client;
-			client.SetVerbose(false);
-			client.RequestServerSetDownloadRate(rate);
+			NzbgetRsBinRpcClientEnv env = MakeRemoteEnv();
+			env.set_rate = rate;
+			nzbget_rs_binrpc_client(5, &env);
 		}
 		else
 		{
@@ -42962,10 +41463,14 @@ protected:
 	{
 		if (IsRemoteMode())
 		{
-			RemoteClient client;
-			client.SetVerbose(false);
-			IdList ids = { id };
-			return client.RequestServerEditQueue(action, offset, nullptr, &ids, nullptr, rmId);
+			NzbgetRsBinRpcClientEnv env = MakeRemoteEnv();
+			int32_t targetId = id;
+			env.edit_action = (int)action;
+			env.edit_offset = offset;
+			env.match_mode = 1;
+			env.edit_ids = &targetId;
+			env.edit_ids_len = 1;
+			return nzbget_rs_binrpc_client(7, &env) != 0;
 		}
 		else
 		{
@@ -42997,104 +41502,104 @@ private:
 	MessageList m_remoteMessages;
 	WorkStateObserver m_workStateObserver;
 
-	template <typename Req, typename Resp>
-	bool ExchangeRemoteRequest(const Req& req, Resp& resp, CharBuffer& buf)
-	{
-		const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
-		Connection connection(controlIp, g_Options->GetControlPort(), false);
-
-		if (!connection.Connect() || !connection.Send((char*)(&req), sizeof(req)))
-		{
-			return false;
-		}
-
-		bool read = connection.Recv((char*) &resp, sizeof(resp));
-		if (!read ||
-			(int)ntohl(resp.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
-			ntohl(resp.m_messageBase.m_structSize) != sizeof(resp))
-		{
-			return false;
-		}
-
-		if (ntohl(resp.m_trailingDataLength) > 0)
-		{
-			buf.Reserve(ntohl(resp.m_trailingDataLength));
-			if (!connection.Recv(buf, buf.Size()))
-			{
-				return false;
-			}
-		}
-
-		connection.Disconnect();
-		return true;
-	}
-
 	bool RequestMessages()
 	{
-		SNzbLogRequest LogRequest = {};
-		InitMessageBase(&LogRequest.m_messageBase, rrLog, sizeof(LogRequest));
-		LogRequest.m_lines = htonl(m_neededLogEntries);
-		LogRequest.m_idFrom = htonl(m_neededLogEntries == 0 ? (m_neededLogFirstId > 0 ? m_neededLogFirstId : 1) : 0);
-
-		SNzbLogResponse LogResponse;
-		CharBuffer buf;
-		if (!ExchangeRemoteRequest(LogRequest, LogResponse, buf))
-		{
-			return false;
-		}
-
-		if (ntohl(LogResponse.m_trailingDataLength) > 0)
-		{
-			nzbget_rs_binrpc_decode_log_response_entries(
-				(const uint8_t*)(const char*)buf,
-				(size_t)buf.Size(),
-				ntohl(LogResponse.m_nrTrailingEntries),
-				&m_remoteMessages,
-				[](void* rawCtx, uint32_t id, uint32_t kind, uint32_t time, const char* text) {
-					static_cast<MessageList*>(rawCtx)->emplace_back(
-						id, (Message::EKind)kind, (time_t)time, text ? text : "");
-				});
-		}
-
-		return true;
+		NzbgetRsBinRpcClientEnv env = MakeRemoteEnv();
+		env.log_lines = (int)m_neededLogEntries;
+		env.log_first_id = m_neededLogFirstId;
+		env.on_log_cb = [](void* rawCtx, uint32_t id, uint32_t kind, uint32_t time, const char* text) {
+			static_cast<Frontend*>(rawCtx)->m_remoteMessages.emplace_back(
+				id, (Message::EKind)kind, (time_t)time, text ? text : "");
+		};
+		return nzbget_rs_binrpc_client(100, &env) != 0;
 	}
 
 	bool RequestFileList()
 	{
-		SNzbListRequest ListRequest = {};
-		InitMessageBase(&ListRequest.m_messageBase, rrList, sizeof(ListRequest));
-		ListRequest.m_fileList = htonl(m_fileList);
-		ListRequest.m_serverState = htonl(m_summary);
+		struct ListCtx
+		{
+			Frontend* self;
+			std::optional<GuardedDownloadQueue> dq;
+			DownloadQueue* guard()
+			{
+				if (!dq.has_value())
+				{
+					dq.emplace(DownloadQueue::Guard());
+				}
+				return dq->operator->();
+			}
+		} lctx{this, std::nullopt};
 
-		SNzbListResponse ListResponse;
-		CharBuffer buf;
-		if (!ExchangeRemoteRequest(ListRequest, ListResponse, buf))
+		NzbgetRsFrontendSummary sum{};
+		NzbgetRsBinRpcClientEnv env = MakeRemoteEnv();
+		env.ctx = &lctx;
+		env.is_stopped_cb = [](void* c) -> int { return static_cast<ListCtx*>(c)->self->IsStopped() ? 1 : 0; };
+		env.want_file_list = m_fileList ? 1 : 0;
+		env.want_summary = m_summary ? 1 : 0;
+		env.out_summary = m_summary ? &sum : nullptr;
+		env.on_nzb_cb = [](void* c, uint32_t id, uint32_t kind, int64_t sz, int64_t rem, int64_t psd,
+			int pfc, int rpc, int prio, const char* fn, const char* nm, const char* dst, const char* cat, const char* qfn) {
+			std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
+			nzbInfo->SetId(id);
+			nzbInfo->SetKind((NzbInfo::EKind)kind);
+			nzbInfo->SetSize(sz);
+			nzbInfo->SetRemainingSize(rem);
+			nzbInfo->SetPausedSize(psd);
+			nzbInfo->SetPausedFileCount(pfc);
+			nzbInfo->SetRemainingParCount(rpc);
+			nzbInfo->SetFilename(fn);
+			nzbInfo->SetName(nm);
+			nzbInfo->SetDestDir(dst);
+			nzbInfo->SetCategory(cat);
+			nzbInfo->SetQueuedFilename(qfn);
+			nzbInfo->SetPriority(prio);
+			static_cast<ListCtx*>(c)->guard()->GetQueue()->Add(std::move(nzbInfo));
+		};
+		env.on_param_cb = [](void* c, size_t idx, const char* k, const char* v) {
+			auto* q = static_cast<ListCtx*>(c)->guard()->GetQueue();
+			if (idx < q->size())
+			{
+				q->at(idx)->GetParameters()->SetParameter(k, v);
+			}
+		};
+		env.on_file_cb = [](void* c, size_t idx, uint32_t id, int64_t sz, int64_t rem,
+			int psd, int fnc, int act, const char* subj, const char* fn) {
+			auto* q = static_cast<ListCtx*>(c)->guard()->GetQueue();
+			if (idx >= q->size())
+			{
+				return;
+			}
+			std::unique_ptr<FileInfo> fileInfo = std::make_unique<FileInfo>();
+			fileInfo->SetId(id);
+			fileInfo->SetSize(sz);
+			fileInfo->SetRemainingSize(rem);
+			fileInfo->SetPaused(psd);
+			fileInfo->SetSubject(subj);
+			fileInfo->SetFilename(fn);
+			fileInfo->SetFilenameConfirmed(fnc);
+			fileInfo->SetActiveDownloads(act);
+			std::unique_ptr<NzbInfo>& nzbInfo = q->at(idx);
+			nzbInfo->SetActiveDownloads(nzbInfo->GetActiveDownloads() + fileInfo->GetActiveDownloads());
+			fileInfo->SetNzbInfo(nzbInfo.get());
+			nzbInfo->GetFileList()->Add(std::move(fileInfo));
+		};
+		if (!nzbget_rs_binrpc_client(101, &env))
 		{
 			return false;
 		}
-
 		if (m_summary)
 		{
-			m_pauseDownload = ntohl(ListResponse.m_downloadPaused);
-			m_remainingSize = Util::JoinInt64(ntohl(ListResponse.m_remainingSizeHi), ntohl(ListResponse.m_remainingSizeLo));
-			m_currentDownloadSpeed = ntohl(ListResponse.m_downloadRate);
-			m_downloadLimit = ntohl(ListResponse.m_downloadLimit);
-			m_threadCount = ntohl(ListResponse.m_threadCount);
-			m_postJobCount = ntohl(ListResponse.m_postJobCount);
-			m_upTimeSec = ntohl(ListResponse.m_upTimeSec);
-			m_dnTimeSec = ntohl(ListResponse.m_downloadTimeSec);
-			m_standBy = ntohl(ListResponse.m_downloadStandBy);
-			m_allBytes = Util::JoinInt64(ntohl(ListResponse.m_downloadedBytesHi), ntohl(ListResponse.m_downloadedBytesLo));
+			m_pauseDownload = sum.pause_download != 0;
+			m_remainingSize = sum.remaining_size;
+			m_currentDownloadSpeed = sum.current_download_speed;
+			m_downloadLimit = sum.download_limit;
+			m_threadCount = sum.thread_count;
+			m_postJobCount = sum.post_job_count;
+			m_upTimeSec = sum.up_time_sec;
+			m_dnTimeSec = sum.dn_time_sec;
+			m_standBy = sum.stand_by != 0;
+			m_allBytes = sum.all_bytes;
 		}
-
-		if (m_fileList && ntohl(ListResponse.m_trailingDataLength) > 0)
-		{
-			RemoteClient client;
-			client.SetVerbose(false);
-
-			client.BuildFileList(&ListResponse, buf, DownloadQueue::Guard());
-		}
-
 		return true;
 	}
 
@@ -43883,810 +42388,6 @@ private:
 extern void ExitProc();
 extern void Reload();
 
-inline const uint32 g_MessageRequestSizes[] =
-	{ 0,
-		sizeof(SNzbDownloadRequest),
-		sizeof(SNzbPauseUnpauseRequest),
-		sizeof(SNzbListRequest),
-		sizeof(SNzbSetDownloadRateRequest),
-		sizeof(SNzbRequestBase),
-		sizeof(SNzbEditQueueRequest),
-		sizeof(SNzbLogRequest),
-		sizeof(SNzbRequestBase),
-		sizeof(SNzbRequestBase),
-		sizeof(SNzbRequestBase),
-		sizeof(SNzbRequestBase),
-		sizeof(SNzbWriteLogRequest),
-		sizeof(SNzbScanRequest),
-		sizeof(SNzbHistoryRequest)
-	};
-
-static_assert(sizeof(g_MessageRequestSizes) / sizeof(g_MessageRequestSizes[0]) == rrHistory + 1);
-
-// a fixed-size string field of a request ends within its field
-template <size_t N> inline void TerminateField(char (&field)[N]) { field[N - 1] = '\0'; }
-
-// Match Rust's repr(C) layout, including pointer alignment on 32-bit targets.
-#define RS_LAYOUT(type, first, ints, strings) \
-    static_assert(offsetof(type, first) == ((4 * (ints) + alignof(NzbgetRsBinText) - 1) & \
-        ~(alignof(NzbgetRsBinText) - 1)) && \
-        sizeof(type) == offsetof(type, first) + (strings) * sizeof(NzbgetRsBinText), "BinRpc entry layout")
-RS_LAYOUT(NzbgetRsBinNzb, filename, 12, 5);
-RS_LAYOUT(NzbgetRsBinParam, name, 1, 2);
-RS_LAYOUT(NzbgetRsBinFile, subject, 10, 2);
-RS_LAYOUT(NzbgetRsBinLog, text, 3, 1);
-RS_LAYOUT(NzbgetRsBinPost, filename, 6, 4);
-RS_LAYOUT(NzbgetRsBinHistory, name, 9, 1);
-#undef RS_LAYOUT
-
-static inline NzbgetRsBinText RsText(const char* text)
-{
-	return {text, text ? strlen(text) : 0};
-}
-
-class BinRpcProcessor
-{
-public:
-	BinRpcProcessor()
-	{
-		m_messageBase.m_signature = (int)NZBMESSAGE_SIGNATURE;
-	}
-
-	void Execute()
-	{
-		// Read the first package which needs to be a request
-		if (!m_connection->Recv(((char*)&m_messageBase) + sizeof(m_messageBase.m_signature), sizeof(m_messageBase) - sizeof(m_messageBase.m_signature)))
-		{
-			warn("Non-RustyGet request received on port %i from %s", g_Options->GetControlPort(), m_connection->GetRemoteAddr());
-			return;
-		}
-
-		// rust/src/binrpc.rs: the credentials and the request type
-		uint32 type = 0;
-		if (!nzbget_rs_binrpc_check(reinterpret_cast<const unsigned char*>(&m_messageBase), sizeof(m_messageBase),
-			g_Options->GetControlUsername(), g_Options->GetControlPassword(), &type))
-		{
-			warn("RustyGet request received on port %i from %s, but username or password invalid", g_Options->GetControlPort(), m_connection->GetRemoteAddr());
-			return;
-		}
-
-		debug("%s request received from %s", nzbget_rs_binrpc_name(type), m_connection->GetRemoteAddr());
-
-		Dispatch();
-	}
-
-	void SetConnection(Connection* connection) { m_connection = connection; }
-
-private:
-	// The trailing data of a list response, encoded by rust/src/binrpc.rs
-	class RsBytes
-	{
-	public:
-		RsBytes() : m_bytes{} {}
-		char* Scratch() { return m_scratch; }
-		size_t Capacity() const { return sizeof(m_scratch); }
-		RsBytes(const RsBytes&) = delete;
-		~RsBytes() { Free(); }
-
-		RsBytes& operator=(NzbgetRsBinResponse bytes)
-		{
-			Free();
-			m_bytes = bytes;
-			return *this;
-		}
-
-		int Size() { return (int)m_bytes.len; }
-
-		// the bytes, sent after the response
-		void Send(Connection* connection)
-		{
-			if (m_bytes.len > 0)
-			{
-				connection->Send(m_bytes.data, (int)m_bytes.len);
-			}
-		}
-
-	private:
-		NzbgetRsBinResponse m_bytes;
-		// A complete small response and its final NUL, alive until Send returns.
-		char m_scratch[16384];
-		void Free()
-		{
-			if (m_bytes.ownedCapacity != 0)
-			{
-				nzbget_rs_free({m_bytes.data, m_bytes.len, m_bytes.ownedCapacity});
-			}
-		}
-	};
-
-	SNzbRequestBase m_messageBase;
-	Connection* m_connection;
-
-	void Dispatch()
-	{
-		// rust/src/binrpc.rs
-		uint32 expectedSize = 0, receivedSize = 0;
-		if (!nzbget_rs_binrpc_size_ok(reinterpret_cast<const unsigned char*>(&m_messageBase), sizeof(m_messageBase),
-			g_MessageRequestSizes, sizeof(g_MessageRequestSizes) / sizeof(g_MessageRequestSizes[0]), &expectedSize, &receivedSize))
-		{
-			error("Invalid size of request: expected %i Bytes, but received %i Bytes", expectedSize, receivedSize);
-			return;
-		}
-
-		switch (ntohl(m_messageBase.m_type))
-		{
-			case rrDownload:
-				ExecuteDownload();
-				break;
-
-			case rrList:
-				ExecuteList();
-				break;
-
-			case rrLog:
-				ExecuteLog();
-				break;
-
-			case rrPauseUnpause:
-				ExecutePauseUnpause();
-				break;
-
-			case rrEditQueue:
-				ExecuteEditQueue();
-				break;
-
-			case rrSetDownloadRate:
-				ExecuteSetDownloadRate();
-				break;
-
-			case rrDumpDebug:
-				g_Log->LogDebugInfo();
-				SendBoolResponse(true, "Debug-Command completed successfully");
-				break;
-
-			case rrShutdown:
-				SendBoolResponse(true, "Stopping server");
-				ExitProc();
-				break;
-
-			case rrReload:
-				SendBoolResponse(true, "Reloading server");
-				Reload();
-				break;
-
-			case rrVersion:
-				SendBoolResponse(true, Util::VersionRevision());
-				break;
-
-			case rrPostQueue:
-				ExecutePostQueue();
-				break;
-
-			case rrWriteLog:
-				ExecuteWriteLog();
-				break;
-
-			case rrScan:
-				ExecuteScan();
-				break;
-
-			case rrHistory:
-				ExecuteHistory();
-				break;
-
-			default:
-				error("Received unsupported request %i", ntohl(m_messageBase.m_type));
-				break;
-		}
-	}
-
-	template <typename Resp>
-	static Resp InitTableResponse(uint32 entryWireSize)
-	{
-		Resp resp{};
-		resp.m_messageBase.m_signature = htonl(NZBMESSAGE_SIGNATURE);
-		resp.m_messageBase.m_structSize = htonl(sizeof(Resp));
-		resp.m_entrySize = htonl(entryWireSize);
-		return resp;
-	}
-
-	template <typename Resp>
-	void SendTableResponse(Resp& resp, RsBytes& entries)
-	{
-		resp.m_trailingDataLength = htonl(entries.Size());
-		m_connection->Send((char*)&resp, sizeof(resp));
-		entries.Send(m_connection);
-	}
-
-	void SendBoolResponse(bool success, const char* text)
-	{
-		// rust/src/binrpc.rs: the response, then the text and its NUL
-		NzbgetRsBuf response = nzbget_rs_binrpc_bool_response(success, text);
-		m_connection->Send(response.data, sizeof(SNzbDownloadResponse));
-		m_connection->Send(response.data + sizeof(SNzbDownloadResponse), (int)(response.len - sizeof(SNzbDownloadResponse)));
-		nzbget_rs_free(response);
-	}
-
-	bool ReceiveRequest(void* buffer, int size)
-	{
-		memcpy(buffer, &m_messageBase, sizeof(SNzbRequestBase));
-		size -= sizeof(SNzbRequestBase);
-		if (size > 0)
-		{
-			if (!m_connection->Recv(((char*)buffer) + sizeof(SNzbRequestBase), size))
-			{
-				error("invalid request");
-				return false;
-			}
-		}
-		return true;
-	}
-
-	// The data following a request: its length is the client's and is checked (no
-	// buffer was allocated for 0 or a negative one, and the data was used all the
-	// same); the buffer gets a terminator after it, as its strings are read with
-	// the C string functions
-	bool ReceiveTrailing(CharBuffer& buffer, int64 len, int64 maxLen)
-	{
-		if (len < 0 || len > maxLen)
-		{
-			error("invalid request: data length %" PRIi64, len);
-			return false;
-		}
-		buffer.Reserve((int)len + 1);
-		if (!buffer)
-		{
-			error("invalid request: no memory for %" PRIi64 " bytes", len);
-			return false;
-		}
-		if (len > 0 && !m_connection->Recv(buffer, (int)len))
-		{
-			error("invalid request");
-			return false;
-		}
-		buffer[(int)len] = '\0';
-		return true;
-	}
-
-	void ExecutePauseUnpause()
-	{
-		SNzbPauseUnpauseRequest PauseUnpauseRequest;
-		if (!ReceiveRequest(&PauseUnpauseRequest, sizeof(PauseUnpauseRequest)))
-		{
-			return;
-		}
-
-		g_WorkState->SetResumeTime(0);
-
-		switch (ntohl(PauseUnpauseRequest.m_action))
-		{
-			case rpDownload:
-				g_WorkState->SetPauseDownload(ntohl(PauseUnpauseRequest.m_pause));
-				break;
-
-			case rpPostProcess:
-				g_WorkState->SetPausePostProcess(ntohl(PauseUnpauseRequest.m_pause));
-				break;
-
-			case rpScan:
-				g_WorkState->SetPauseScan(ntohl(PauseUnpauseRequest.m_pause));
-				break;
-		}
-
-		SendBoolResponse(true, "Pause-/Unpause-Command completed successfully");
-	}
-
-	void ExecuteSetDownloadRate()
-	{
-		SNzbSetDownloadRateRequest SetDownloadRequest;
-		if (!ReceiveRequest(&SetDownloadRequest, sizeof(SetDownloadRequest)))
-		{
-			return;
-		}
-
-		g_WorkState->SetSpeedLimit(ntohl(SetDownloadRequest.m_downloadRate));
-		SendBoolResponse(true, "Rate-Command completed successfully");
-	}
-
-	void ExecuteDownload()
-	{
-		SNzbDownloadRequest DownloadRequest;
-		if (!ReceiveRequest(&DownloadRequest, sizeof(DownloadRequest)))
-		{
-			return;
-		}
-
-		TerminateField(DownloadRequest.m_nzbFilename);
-		TerminateField(DownloadRequest.m_category);
-		TerminateField(DownloadRequest.m_dupeKey);
-
-		int bufLen = (int)ntohl(DownloadRequest.m_trailingDataLength);
-		CharBuffer nzbContent;
-		if (bufLen <= 0 || !ReceiveTrailing(nzbContent, bufLen, 768 * 1024 * 1024))
-		{
-			error("invalid request");
-			return;
-		}
-
-		int priority = ntohl(DownloadRequest.m_priority);
-		bool addPaused = ntohl(DownloadRequest.m_addPaused);
-		bool addTop = ntohl(DownloadRequest.m_addFirst);
-		bool autoCategory = ntohl(DownloadRequest.m_autoCategory);
-		int dupeMode = ntohl(DownloadRequest.m_dupeMode);
-		int dupeScore = ntohl(DownloadRequest.m_dupeScore);
-
-		bool ok = false;
-
-		if (nzbget_rs_binrpc_is_url(nzbContent))
-		{
-			// add url
-			std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
-			nzbInfo->SetKind(NzbInfo::nkUrl);
-			nzbInfo->SetUrl(nzbContent);
-			nzbInfo->SetFilename(DownloadRequest.m_nzbFilename);
-			nzbInfo->SetCategory(DownloadRequest.m_category);
-			nzbInfo->SetAutoCategory(autoCategory);
-			nzbInfo->SetPriority(priority);
-			nzbInfo->SetAddUrlPaused(addPaused);
-			nzbInfo->SetDupeKey(DownloadRequest.m_dupeKey);
-			nzbInfo->SetDupeScore(dupeScore);
-			nzbInfo->SetDupeMode((EDupeMode)dupeMode);
-
-			g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), addTop);
-
-			ok = true;
-		}
-		else
-		{
-			ok = g_Scanner->AddExternalFile(
-				DownloadRequest.m_nzbFilename,
-				DownloadRequest.m_category,
-				autoCategory,
-				priority,
-				DownloadRequest.m_dupeKey,
-				dupeScore,
-				static_cast<EDupeMode>(dupeMode),
-				nullptr,
-				addTop,
-				addPaused,
-				nullptr,
-				nullptr,
-				nzbContent,
-				bufLen,
-				nullptr
-			) != Scanner::asFailed;
-		}
-
-		SendBoolResponse(ok, BString<1024>(
-			ok ? "Collection %s added to queue" : "Download Request failed for %s",
-			FileSystem::BaseFileName(DownloadRequest.m_nzbFilename)));
-	}
-
-	void ExecuteList()
-	{
-		SNzbListRequest ListRequest;
-		if (!ReceiveRequest(&ListRequest, sizeof(ListRequest)))
-		{
-			return;
-		}
-
-		SNzbListResponse ListResponse = InitTableResponse<SNzbListResponse>(NZBLIST_FILE_ENTRY_WIRE_SIZE);
-
-		RsBytes entries;
-
-		if (ntohl(ListRequest.m_fileList))
-		{
-			ERemoteMatchMode matchMode = (ERemoteMatchMode)ntohl(ListRequest.m_matchMode);
-			bool matchGroup = ntohl(ListRequest.m_matchGroup);
-			TerminateField(ListRequest.m_pattern);
-			const char* pattern = ListRequest.m_pattern;
-
-			std::unique_ptr<RegEx> regEx;
-			if (matchMode == rmRegEx)
-			{
-				regEx = std::make_unique<RegEx>(pattern);
-				ListResponse.m_regExValid = regEx->IsValid();
-			}
-
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-			int nrNzbEntries = downloadQueue->GetQueue()->size();
-			int nrPPPEntries = 0;
-			int nrFileEntries = 0;
-
-			// the entries, collected under the lock for rust/src/binrpc.rs
-			std::vector<NzbgetRsBinNzb> nzbEntries;
-			std::vector<NzbgetRsBinParam> pppEntries;
-			std::vector<NzbgetRsBinFile> fileEntries;
-			size_t pppCount = 0, fileCount = 0;
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				pppCount += nzbInfo->GetParameters()->size();
-				fileCount += nzbInfo->GetFileList()->size();
-			}
-			nzbEntries.reserve(nrNzbEntries);
-			pppEntries.reserve(pppCount);
-			fileEntries.reserve(fileCount);
-
-			int ownerIndex = 0;
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				ownerIndex++;
-				uint32 sizeHi, sizeLo, remainingSizeHi, remainingSizeLo, pausedSizeHi, pausedSizeLo;
-				Util::SplitInt64(nzbInfo->GetSize(), &sizeHi, &sizeLo);
-				Util::SplitInt64(nzbInfo->GetRemainingSize(), &remainingSizeHi, &remainingSizeLo);
-				Util::SplitInt64(nzbInfo->GetPausedSize(), &pausedSizeHi, &pausedSizeLo);
-				uint32 groupMatched = (matchGroup && (!regEx || regEx->Match(nzbInfo->GetName()))) ? 1 : 0;
-				nzbEntries.push_back({(uint32)nzbInfo->GetId(), (uint32)nzbInfo->GetKind(), sizeLo, sizeHi, remainingSizeLo,
-					remainingSizeHi, pausedSizeLo, pausedSizeHi, (uint32)nzbInfo->GetPausedFileCount(),
-					(uint32)nzbInfo->GetRemainingParCount(), (uint32)nzbInfo->GetPriority(),
-					groupMatched,
-					RsText(nzbInfo->GetFilename()), RsText(nzbInfo->GetName()), RsText(nzbInfo->GetDestDir()),
-					RsText(nzbInfo->GetCategory()), RsText(nzbInfo->GetQueuedFilename())});
-
-				for (NzbParameter& nzbParameter : nzbInfo->GetParameters())
-				{
-					pppEntries.push_back({(uint32)ownerIndex, RsText(nzbParameter.GetName()), RsText(nzbParameter.GetValue())});
-					nrPPPEntries++;
-				}
-
-				for (FileInfo* fileInfo : nzbInfo->GetFileList())
-				{
-					nrFileEntries++;
-					int nzbIndex = ownerIndex;
-					if (fileInfo->GetNzbInfo() != nzbInfo)
-					{
-						// Retain the first-match behavior for an unusual parent.
-						nzbIndex = 0;
-						for (uint32 i = 0; i < downloadQueue->GetQueue()->size(); i++)
-						{
-							nzbIndex++;
-							if (downloadQueue->GetQueue()->at(i).get() == fileInfo->GetNzbInfo())
-							{
-								break;
-							}
-						}
-					}
-
-					bool match = false;
-					if (regEx && !matchGroup)
-					{
-						match = regEx->Match(CString::FormatStr("%s/%s",
-							fileInfo->GetNzbInfo()->GetName(), FileSystem::BaseFileName(fileInfo->GetFilename())));
-					}
-
-					uint32 fileSizeHi, fileSizeLo, fileRemHi, fileRemLo;
-					Util::SplitInt64(fileInfo->GetSize(), &fileSizeHi, &fileSizeLo);
-					Util::SplitInt64(fileInfo->GetRemainingSize(), &fileRemHi, &fileRemLo);
-					fileEntries.push_back({(uint32)fileInfo->GetId(), (uint32)nzbIndex, fileSizeLo, fileSizeHi, fileRemLo,
-						fileRemHi, (uint32)fileInfo->GetPaused(), (uint32)fileInfo->GetFilenameConfirmed(),
-						(uint32)fileInfo->GetActiveDownloads(), (uint32)match,
-						RsText(fileInfo->GetSubject()), RsText(fileInfo->GetFilename())});
-				}
-			}
-
-			entries = nzbget_rs_binrpc_encode_list_into(nzbEntries.data(), nzbEntries.size(), pppEntries.data(), pppEntries.size(),
-				fileEntries.data(), fileEntries.size(), entries.Scratch(), entries.Capacity());
-
-			ListResponse.m_nrTrailingNzbEntries = htonl(nrNzbEntries);
-			ListResponse.m_nrTrailingPPPEntries = htonl(nrPPPEntries);
-			ListResponse.m_nrTrailingFileEntries = htonl(nrFileEntries);
-		}
-
-		if (htonl(ListRequest.m_serverState))
-		{
-			int postJobCount = 0;
-			int64 remainingSize;
-			{
-				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-				{
-					postJobCount += nzbInfo->GetPostInfo() ? 1 : 0;
-				}
-				downloadQueue->CalcRemainingSize(&remainingSize, nullptr);
-			}
-
-			uint32 sizeHi, sizeLo;
-			uint32 downloadRate = Util::SafeIntCast<int64, uint32>(g_StatMeter->CalcCurrentDownloadSpeed());
-			ListResponse.m_downloadRate = htonl(downloadRate);
-			Util::SplitInt64(remainingSize, &sizeHi, &sizeLo);
-			ListResponse.m_remainingSizeHi = htonl(sizeHi);
-			ListResponse.m_remainingSizeLo = htonl(sizeLo);
-			ListResponse.m_downloadLimit = htonl(g_WorkState->GetSpeedLimit());
-			ListResponse.m_downloadPaused = htonl(g_WorkState->GetPauseDownload());
-			ListResponse.m_postPaused = htonl(g_WorkState->GetPausePostProcess());
-			ListResponse.m_scanPaused = htonl(g_WorkState->GetPauseScan());
-			ListResponse.m_threadCount = htonl(Thread::GetThreadCount() - 1); // not counting itself
-			ListResponse.m_postJobCount = htonl(postJobCount);
-
-			int upTimeSec, dnTimeSec;
-			int64 allBytes;
-			bool standBy;
-			g_StatMeter->CalcTotalStat(&upTimeSec, &dnTimeSec, &allBytes, &standBy);
-			ListResponse.m_upTimeSec = htonl(upTimeSec);
-			ListResponse.m_downloadTimeSec = htonl(dnTimeSec);
-			ListResponse.m_downloadStandBy = htonl(standBy);
-			Util::SplitInt64(allBytes, &sizeHi, &sizeLo);
-			ListResponse.m_downloadedBytesHi = htonl(sizeHi);
-			ListResponse.m_downloadedBytesLo = htonl(sizeLo);
-		}
-
-		SendTableResponse(ListResponse, entries);
-	}
-
-	void ExecuteLog()
-	{
-		SNzbLogRequest LogRequest;
-		if (!ReceiveRequest(&LogRequest, sizeof(LogRequest)))
-		{
-			return;
-		}
-
-		RsBytes entries;
-		int nrEntries;
-
-		{
-			GuardedMessageList messages = g_Log->GuardMessages();
-
-			int msgCount = (int)messages->size();
-			int start = 0;
-			nzbget_rs_binrpc_calc_log_slice(
-				msgCount, (int)ntohl(LogRequest.m_lines), ntohl(LogRequest.m_idFrom),
-				messages->empty() ? 0 : (uint32)messages->front().GetId(),
-				&start, &nrEntries);
-
-			// the messages from start on, collected under the lock for rust/src/binrpc.rs
-			std::vector<NzbgetRsBinLog> log;
-			if ((size_t)start < messages->size())
-			{
-				log.reserve(messages->size() - (size_t)start);
-			}
-			for (uint32 i = (uint32)start; i < messages->size(); i++)
-			{
-				Message& message = messages->at(i);
-				log.push_back({(uint32)message.GetId(), (uint32)message.GetKind(), (uint32)(int)message.GetTime(),
-					RsText(message.GetText())});
-			}
-			entries = nzbget_rs_binrpc_encode_log_into(log.data(), log.size(), entries.Scratch(), entries.Capacity());
-		}
-
-		SNzbLogResponse LogResponse = InitTableResponse<SNzbLogResponse>(NZBLOG_ENTRY_WIRE_SIZE);
-		LogResponse.m_nrTrailingEntries = htonl(nrEntries);
-		SendTableResponse(LogResponse, entries);
-	}
-
-	void ExecuteEditQueue()
-	{
-		SNzbEditQueueRequest EditQueueRequest;
-		if (!ReceiveRequest(&EditQueueRequest, sizeof(EditQueueRequest)))
-		{
-			return;
-		}
-
-		int nrIdEntries = ntohl(EditQueueRequest.m_nrTrailingIdEntries);
-		int nrNameEntries = ntohl(EditQueueRequest.m_nrTrailingNameEntries);
-		int nameEntriesLen = ntohl(EditQueueRequest.m_trailingNameEntriesLen);
-		int action = ntohl(EditQueueRequest.m_action);
-		int matchMode = ntohl(EditQueueRequest.m_matchMode);
-		int offset = ntohl(EditQueueRequest.m_offset);
-		int textLen = ntohl(EditQueueRequest.m_textLen);
-		uint32 bufLength = ntohl(EditQueueRequest.m_trailingDataLength);
-
-		if (!nzbget_rs_binrpc_edit_parse(
-			nullptr, bufLength, nrIdEntries, nrNameEntries, nameEntriesLen, textLen, nullptr))
-		{
-			error("Invalid struct size");
-			return;
-		}
-
-		CharBuffer buf;
-		if (!ReceiveTrailing(buf, bufLength, 64 * 1024 * 1024))
-		{
-			return;
-		}
-		if (textLen > 0)
-		{
-			buf[textLen - 1] = '\0';
-		}
-
-		if (nrIdEntries <= 0 && nrNameEntries <= 0)
-		{
-			SendBoolResponse(false, "Edit-Command failed: no IDs/Names specified");
-			return;
-		}
-
-		const char* text = textLen > 0 ? *buf : "";
-		IdList cIdList(nrIdEntries);
-		if (!nzbget_rs_binrpc_edit_parse(
-			reinterpret_cast<const uint8_t*>(*buf), bufLength, nrIdEntries, nrNameEntries,
-			nameEntriesLen, textLen, cIdList.data()))
-		{
-			error("Invalid struct size");
-			return;
-		}
-		NameList cNameList;
-		cNameList.reserve(nrNameEntries);
-		const char* names = buf + textLen + nrIdEntries * sizeof(int32);
-		for (int i = 0; i < nrNameEntries; i++)
-		{
-			cNameList.push_back(names);
-			names += strlen(names) + 1;
-		}
-
-		bool useOffsetStr = (action == DownloadQueue::eaFileMoveOffset || action == DownloadQueue::eaGroupMoveOffset);
-		bool ok = DownloadQueue::Guard()->EditList(
-			nrIdEntries > 0 ? &cIdList : nullptr,
-			nrNameEntries > 0 ? &cNameList : nullptr,
-			(DownloadQueue::EMatchMode)matchMode, (DownloadQueue::EEditAction)action,
-			useOffsetStr ? *BString<100>("%i", offset) : text);
-
-		if (ok)
-		{
-			SendBoolResponse(true, "Edit-Command completed successfully");
-		}
-		else
-		{
-			SendBoolResponse(false, "Edit-Command failed");
-		}
-	}
-
-	void ExecutePostQueue()
-	{
-		SNzbPostQueueResponse PostQueueResponse = InitTableResponse<SNzbPostQueueResponse>(NZBPOSTQUEUE_ENTRY_WIRE_SIZE);
-
-		RsBytes entries;
-
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-			// Make a data structure and copy all the elements of the list into it
-			NzbList* nzbList = downloadQueue->GetQueue();
-
-			int NrEntries = 0;
-			time_t curTime = Util::CurrentTime();
-			// collected under the lock for rust/src/binrpc.rs
-			std::vector<NzbgetRsBinPost> jobs;
-			jobs.reserve(nzbList->size());
-
-			for (NzbInfo* nzbInfo : nzbList)
-			{
-				PostInfo* postInfo = nzbInfo->GetPostInfo();
-				if (!postInfo)
-				{
-					continue;
-				}
-
-				NrEntries++;
-				jobs.push_back({(uint32)nzbInfo->GetId(), (uint32)postInfo->GetStage(), (uint32)postInfo->GetStageProgress(),
-					(uint32)postInfo->GetFileProgress(),
-					postInfo->GetStartTime() ? (uint32)(curTime - postInfo->GetStartTime()) : 0,
-					postInfo->GetStageTime() ? (uint32)(curTime - postInfo->GetStageTime()) : 0,
-					RsText(postInfo->GetNzbInfo()->GetFilename()), RsText(postInfo->GetNzbInfo()->GetName()),
-					RsText(postInfo->GetNzbInfo()->GetDestDir()), RsText(postInfo->GetProgressLabel())});
-			}
-			entries = nzbget_rs_binrpc_encode_post_queue_into(jobs.data(), jobs.size(), entries.Scratch(), entries.Capacity());
-
-			PostQueueResponse.m_nrTrailingEntries = htonl(NrEntries);
-		}
-
-		SendTableResponse(PostQueueResponse, entries);
-	}
-
-	void ExecuteWriteLog()
-	{
-		SNzbWriteLogRequest WriteLogRequest;
-		if (!ReceiveRequest(&WriteLogRequest, sizeof(WriteLogRequest)))
-		{
-			return;
-		}
-
-		CharBuffer recvBuffer;
-		if (!ReceiveTrailing(recvBuffer, (int)ntohl(WriteLogRequest.m_trailingDataLength), 1024 * 1024))
-		{
-			return;
-		}
-
-		bool OK = true;
-		switch ((Message::EKind)ntohl(WriteLogRequest.m_kind))
-		{
-			case Message::mkDetail:
-				detail("%s", *recvBuffer);
-				break;
-			case Message::mkInfo:
-				info("%s", *recvBuffer);
-				break;
-			case Message::mkWarning:
-				warn("%s", *recvBuffer);
-				break;
-			case Message::mkError:
-				error("%s", *recvBuffer);
-				break;
-			case Message::mkDebug:
-				debug("%s", *recvBuffer);
-				break;
-			default:
-				OK = false;
-		}
-		SendBoolResponse(OK, OK ? "Message added to log" : "Invalid message-kind");
-	}
-
-	void ExecuteScan()
-	{
-		SNzbScanRequest ScanRequest;
-		if (!ReceiveRequest(&ScanRequest, sizeof(ScanRequest)))
-		{
-			return;
-		}
-
-		bool syncMode = ntohl(ScanRequest.m_syncMode);
-
-		g_Scanner->ScanNzbDir(syncMode);
-		SendBoolResponse(true, syncMode ? "Scan-Command completed" : "Scan-Command scheduled successfully");
-	}
-
-	void ExecuteHistory()
-	{
-		SNzbHistoryRequest HistoryRequest;
-		if (!ReceiveRequest(&HistoryRequest, sizeof(HistoryRequest)))
-		{
-			return;
-		}
-
-		bool showHidden = ntohl(HistoryRequest.m_hidden);
-
-		SNzbHistoryResponse HistoryResponse = InitTableResponse<SNzbHistoryResponse>(NZBHISTORY_ENTRY_WIRE_SIZE);
-
-		RsBytes entries;
-
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-			int nrEntries = 0;
-			// collected under the lock for rust/src/binrpc.rs
-			std::vector<NzbgetRsBinHistory> history;
-			history.reserve(downloadQueue->GetHistory()->size());
-			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
-			{
-				if (historyInfo->GetKind() == HistoryInfo::hkDup && !showHidden)
-				{
-					continue;
-				}
-				nrEntries++;
-				// fields a kind doesn't set are 0
-				uint32 sizeHi = 0, sizeLo = 0, fileCount = 0, parStatus = 0, scriptStatus = 0, urlStatus = 0;
-				if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-				{
-					NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-					Util::SplitInt64(nzbInfo->GetSize(), &sizeHi, &sizeLo);
-					fileCount = nzbInfo->GetFileCount();
-					parStatus = nzbInfo->GetParStatus();
-					scriptStatus = nzbInfo->GetScriptStatuses()->CalcTotalStatus();
-				}
-				else if (historyInfo->GetKind() == HistoryInfo::hkDup)
-				{
-					DupInfo* dupInfo = historyInfo->GetDupInfo();
-					Util::SplitInt64(dupInfo->GetSize(), &sizeHi, &sizeLo);
-				}
-				else if (historyInfo->GetKind() == HistoryInfo::hkUrl)
-				{
-					NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-					urlStatus = nzbInfo->GetUrlStatus();
-				}
-				history.push_back({(uint32)historyInfo->GetId(), (uint32)historyInfo->GetKind(), (uint32)(int)historyInfo->GetTime(),
-					sizeLo, sizeHi, fileCount, parStatus, scriptStatus, urlStatus, RsText(historyInfo->GetName())});
-			}
-			entries = nzbget_rs_binrpc_encode_history_into(history.data(), history.size(), entries.Scratch(), entries.Capacity());
-
-			HistoryResponse.m_nrTrailingEntries = htonl(nrEntries);
-		}
-
-		SendTableResponse(HistoryResponse, entries);
-	}
-};
-
-#endif
-
-
 class RequestProcessor : public Thread, public Subject
 {
 public:
@@ -44732,30 +42433,282 @@ private:
 
 	bool ServWebRequest(const char* signature)
 	{
-		char buffer[1024];
-		if (!m_connection->ReadLine(buffer, sizeof(buffer), nullptr))
+		const auto& scriptDirPaths = g_Options->GetScriptDirPaths();
+		std::vector<std::string> scriptDirStrs;
+		std::vector<const char*> scriptDirPtrs;
+		scriptDirStrs.reserve(scriptDirPaths.size());
+		scriptDirPtrs.reserve(scriptDirPaths.size());
+		for (const auto& p : scriptDirPaths)
 		{
-			return false;
+			scriptDirStrs.push_back(fs::u8string(p));
+			scriptDirPtrs.push_back(scriptDirStrs.back().c_str());
 		}
 
-		int method = 0;
-		size_t urlOffset = 0;
-		if (!nzbget_rs_web_parse_request_or_mime(signature, buffer, &method, &urlOffset, nullptr))
-		{
-			return false;
-		}
-		WebProcessor::EHttpMethod httpMethod = static_cast<WebProcessor::EHttpMethod>(method);
-		char* url = buffer + urlOffset;
+		NzbgetRsWebServeEnv env{};
+		env.ctx = m_connection.get();
+		env.signature = signature;
+		env.remote_addr = m_connection->GetRemoteAddr();
+		env.version = Util::VersionRevision();
+		env.web_dir = g_Options->GetWebDir();
+		env.script_dirs = scriptDirPtrs.empty() ? nullptr : scriptDirPtrs.data();
+		env.script_dirs_count = scriptDirPtrs.size();
+		env.control_username = g_Options->GetControlUsername();
+		env.control_password = g_Options->GetControlPassword();
+		env.restricted_username = g_Options->GetRestrictedUsername();
+		env.restricted_password = g_Options->GetRestrictedPassword();
+		env.add_username = g_Options->GetAddUsername();
+		env.add_password = g_Options->GetAddPassword();
+		env.authorized_ip = g_Options->GetAuthorizedIp();
+		env.control_port = g_Options->GetControlPort();
+		env.form_auth = g_Options->GetFormAuth() ? 1 : 0;
+#ifndef DISABLE_GZIP
+		env.gzip_enabled = 1;
+#endif
+#ifdef DEBUG
+		env.debug_build = 1;
+#endif
+		env.read_line_cb = [](void* c, char* buf, int sz) -> int {
+			return static_cast<Connection*>(c)->ReadLine(buf, sz, nullptr) != nullptr ? 1 : 0;
+		};
+		env.recv_cb = [](void* c, char* buf, int sz) -> int {
+			return static_cast<Connection*>(c)->Recv(buf, sz) ? 1 : 0;
+		};
+		env.send_cb = [](void* c, const char* buf, int sz) -> int {
+			return static_cast<Connection*>(c)->Send(buf, sz) ? 1 : 0;
+		};
+		env.log_cb = [](void*, int lvl, const char* msg) {
+			if (lvl == 0) debug("%s", msg);
+			else if (lvl == 1) warn("%s", msg);
+			else error("%s", msg);
+		};
+		env.rpc_cb = [](void*, char* req, int hm, int ua, const char* url, void* sctx, NzbgetRsWebSendBodyFn sendBody) {
+			XmlRpcProcessor processor;
+			processor.SetRequest(req);
+			processor.SetHttpMethod(hm == 1 ? XmlRpcProcessor::hmGet : XmlRpcProcessor::hmPost);
+			processor.SetUserAccess((XmlRpcProcessor::EUserAccess)ua);
+			processor.SetJsonP(g_Options->GetJsonP());
+			processor.SetUrl(url);
+			processor.Execute();
+			const char* resp = processor.GetResponse();
+			sendBody(sctx, resp, (int)strlen(resp), processor.GetContentType(), processor.IsSafeMethod() ? 1 : 0);
+		};
+		return nzbget_rs_web_serve(1, &env) != 0;
+	}
 
-		debug("url: %s", url);
-
-		WebProcessor processor;
-		processor.SetConnection(m_connection.get());
-		processor.SetUrl(url);
-		processor.SetHttpMethod(httpMethod);
-		processor.Execute();
-
-		return processor.GetKeepAlive();
+	void ServBinRpc()
+	{
+		NzbgetRsBinRpcServeEnv env{};
+		env.ctx = m_connection.get();
+		env.remote_addr = m_connection->GetRemoteAddr();
+		env.control_user = g_Options->GetControlUsername();
+		env.control_password = g_Options->GetControlPassword();
+		env.version = Util::VersionRevision();
+		env.control_port = g_Options->GetControlPort();
+		env.recv_cb = [](void* c, char* buf, int sz) -> int {
+			return static_cast<Connection*>(c)->Recv(buf, sz) ? 1 : 0;
+		};
+		env.send_cb = [](void* c, const char* buf, int sz) -> int {
+			return static_cast<Connection*>(c)->Send(buf, sz) ? 1 : 0;
+		};
+		env.log_cb = [](void*, int kind, const char* msg) {
+			switch ((Message::EKind)kind)
+			{
+				case Message::mkInfo: info("%s", msg); break;
+				case Message::mkWarning: warn("%s", msg); break;
+				case Message::mkError: error("%s", msg); break;
+				case Message::mkDebug: debug("%s", msg); break;
+				case Message::mkDetail: detail("%s", msg); break;
+			}
+		};
+		env.action_cb = [](void*, int kind, int a1, int a2, int a3, int a4,
+			const char* s1, const char* s2, const char* s3, const char* body, int bodyLen,
+			const int32_t* ids, size_t idsLen, const char* const* names, size_t namesLen) -> int {
+			switch (kind)
+			{
+				case 1:
+				{
+					bool addTop = (a1 & 1) != 0;
+					bool addPaused = (a1 & 2) != 0;
+					bool autoCategory = (a1 & 4) != 0;
+					bool isUrl = (a1 & 8) != 0;
+					if (isUrl)
+					{
+						std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
+						nzbInfo->SetKind(NzbInfo::nkUrl);
+						nzbInfo->SetUrl(body);
+						nzbInfo->SetFilename(s1);
+						nzbInfo->SetCategory(s2);
+						nzbInfo->SetAutoCategory(autoCategory);
+						nzbInfo->SetPriority(a2);
+						nzbInfo->SetAddUrlPaused(addPaused);
+						nzbInfo->SetDupeKey(s3);
+						nzbInfo->SetDupeScore(a3);
+						nzbInfo->SetDupeMode((EDupeMode)a4);
+						g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), addTop);
+						return 1;
+					}
+					return g_Scanner->AddExternalFile(
+						s1, s2, autoCategory, a2, s3, a3, (EDupeMode)a4,
+						nullptr, addTop, addPaused, nullptr, nullptr, body, bodyLen, nullptr) != Scanner::asFailed ? 1 : 0;
+				}
+				case 2:
+					g_WorkState->SetResumeTime(0);
+					if (a2 == 1) g_WorkState->SetPauseDownload(a1 != 0);
+					else if (a2 == 2) g_WorkState->SetPausePostProcess(a1 != 0);
+					else if (a2 == 3) g_WorkState->SetPauseScan(a1 != 0);
+					return 1;
+				case 4:
+					g_WorkState->SetSpeedLimit(a1);
+					return 1;
+				case 5:
+					g_Log->LogDebugInfo();
+					return 1;
+				case 6:
+				{
+					IdList cIdList(ids, ids + idsLen);
+					NameList cNameList;
+					cNameList.reserve(namesLen);
+					for (size_t i = 0; i < namesLen; i++)
+					{
+						cNameList.emplace_back(names[i]);
+					}
+					return DownloadQueue::Guard()->EditList(
+						idsLen > 0 ? &cIdList : nullptr,
+						namesLen > 0 ? &cNameList : nullptr,
+						(DownloadQueue::EMatchMode)a2, (DownloadQueue::EEditAction)a1, s1) ? 1 : 0;
+				}
+				case 8:
+					ExitProc();
+					return 1;
+				case 9:
+					Reload();
+					return 1;
+				case 13:
+					g_Scanner->ScanNzbDir(a1 != 0);
+					return 1;
+			}
+			return 0;
+		};
+		env.collect_list_cb = [](void*, int wantFiles, int wantState, void* bCtx,
+			NzbgetRsBinRpcListPushNzbFn pushNzb, NzbgetRsBinRpcListPushParamFn pushParam,
+			NzbgetRsBinRpcListPushFileFn pushFile, NzbgetRsBinRpcListSetStateFn setState) {
+			if (wantFiles)
+			{
+				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+				uint32 ownerIndex = 0;
+				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+				{
+					ownerIndex++;
+					pushNzb(bCtx, (uint32)nzbInfo->GetId(), (uint32)nzbInfo->GetKind(),
+						nzbInfo->GetSize(), nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(),
+						(uint32)nzbInfo->GetPausedFileCount(), (uint32)nzbInfo->GetRemainingParCount(),
+						(uint32)nzbInfo->GetPriority(), nzbInfo->GetFilename(), nzbInfo->GetName(),
+						nzbInfo->GetDestDir(), nzbInfo->GetCategory(), nzbInfo->GetQueuedFilename());
+					for (NzbParameter& p : nzbInfo->GetParameters())
+					{
+						pushParam(bCtx, ownerIndex, p.GetName(), p.GetValue());
+					}
+					for (FileInfo* fileInfo : nzbInfo->GetFileList())
+					{
+						uint32 nzbIndex = ownerIndex;
+						if (fileInfo->GetNzbInfo() != nzbInfo)
+						{
+							nzbIndex = 0;
+							for (uint32 i = 0; i < downloadQueue->GetQueue()->size(); i++)
+							{
+								nzbIndex++;
+								if (downloadQueue->GetQueue()->at(i).get() == fileInfo->GetNzbInfo())
+								{
+									break;
+								}
+							}
+						}
+						pushFile(bCtx, (uint32)fileInfo->GetId(), nzbIndex,
+							fileInfo->GetSize(), fileInfo->GetRemainingSize(),
+							(uint32)fileInfo->GetPaused(), (uint32)fileInfo->GetFilenameConfirmed(),
+							(uint32)fileInfo->GetActiveDownloads(), fileInfo->GetNzbInfo()->GetName(),
+							fileInfo->GetSubject(), fileInfo->GetFilename());
+					}
+				}
+			}
+			if (wantState)
+			{
+				int postJobCount = 0;
+				int64 remainingSize = 0;
+				{
+					GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+					for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+					{
+						postJobCount += nzbInfo->GetPostInfo() ? 1 : 0;
+					}
+					downloadQueue->CalcRemainingSize(&remainingSize, nullptr);
+				}
+				uint32 downloadRate = Util::SafeIntCast<int64, uint32>(g_StatMeter->CalcCurrentDownloadSpeed());
+				int upTimeSec, dnTimeSec;
+				int64 allBytes;
+				bool standBy;
+				g_StatMeter->CalcTotalStat(&upTimeSec, &dnTimeSec, &allBytes, &standBy);
+				setState(bCtx, remainingSize, downloadRate, g_WorkState->GetSpeedLimit(),
+					g_WorkState->GetPauseDownload() ? 1 : 0, g_WorkState->GetPausePostProcess() ? 1 : 0,
+					g_WorkState->GetPauseScan() ? 1 : 0, Thread::GetThreadCount() - 1, postJobCount,
+					upTimeSec, dnTimeSec, standBy ? 1 : 0, allBytes);
+			}
+		};
+		env.collect_log_cb = [](void*, int, uint32_t, void* encCtx,
+			NzbgetRsBinRpcLogBeginFn beginLog, NzbgetRsBinRpcLogPushFn pushLog) {
+			GuardedMessageList messages = g_Log->GuardMessages();
+			int start = 0;
+			beginLog(encCtx, (int)messages->size(),
+				messages->empty() ? 0 : (uint32)messages->front().GetId(), &start);
+			for (uint32 i = (uint32)start; i < messages->size(); i++)
+			{
+				Message& m = messages->at(i);
+				pushLog(encCtx, (uint32)m.GetId(), (uint32)m.GetKind(), (uint32)(int)m.GetTime(), m.GetText());
+			}
+		};
+		env.collect_post_cb = [](void*, void* encCtx, NzbgetRsBinRpcPostPushFn pushPost) {
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			time_t curTime = Util::CurrentTime();
+			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+			{
+				PostInfo* postInfo = nzbInfo->GetPostInfo();
+				if (!postInfo) continue;
+				pushPost(encCtx, (uint32)nzbInfo->GetId(), (uint32)postInfo->GetStage(),
+					(uint32)postInfo->GetStageProgress(), (uint32)postInfo->GetFileProgress(),
+					postInfo->GetStartTime() ? (uint32)(curTime - postInfo->GetStartTime()) : 0,
+					postInfo->GetStageTime() ? (uint32)(curTime - postInfo->GetStageTime()) : 0,
+					postInfo->GetNzbInfo()->GetFilename(), postInfo->GetNzbInfo()->GetName(),
+					postInfo->GetNzbInfo()->GetDestDir(), postInfo->GetProgressLabel());
+			}
+		};
+		env.collect_history_cb = [](void*, int showHidden, void* encCtx, NzbgetRsBinRpcHistPushFn pushHist) {
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			for (HistoryInfo* h : downloadQueue->GetHistory())
+			{
+				if (h->GetKind() == HistoryInfo::hkDup && !showHidden) continue;
+				int64 size = 0;
+				uint32 fileCount = 0, parStatus = 0, scriptStatus = 0, urlStatus = 0;
+				if (h->GetKind() == HistoryInfo::hkNzb)
+				{
+					NzbInfo* nzbInfo = h->GetNzbInfo();
+					size = nzbInfo->GetSize();
+					fileCount = nzbInfo->GetFileCount();
+					parStatus = nzbInfo->GetParStatus();
+					scriptStatus = nzbInfo->GetScriptStatuses()->CalcTotalStatus();
+				}
+				else if (h->GetKind() == HistoryInfo::hkDup)
+				{
+					size = h->GetDupInfo()->GetSize();
+				}
+				else if (h->GetKind() == HistoryInfo::hkUrl)
+				{
+					urlStatus = h->GetNzbInfo()->GetUrlStatus();
+				}
+				pushHist(encCtx, (uint32)h->GetId(), (uint32)h->GetKind(), (uint32)(int)h->GetTime(),
+					size, fileCount, parStatus, scriptStatus, urlStatus, h->GetName());
+			}
+		};
+		nzbget_rs_binrpc_serve(&env);
 	}
 
 	void Execute()
@@ -44781,9 +42734,7 @@ private:
 		if ((int)ntohl(signature) == (int)NZBMESSAGE_SIGNATURE)
 		{
 			ok = true;
-			BinRpcProcessor processor;
-			processor.SetConnection(m_connection.get());
-			processor.Execute();
+			ServBinRpc();
 		}
 		else if (!strncmp((char*)&signature, "POST", 4) ||
 			!strncmp((char*)&signature, "GET ", 4) ||

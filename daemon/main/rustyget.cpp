@@ -1534,7 +1534,9 @@ private:
 			return;
 		}
 
-		WebProcessor::Init();
+		NzbgetRsWebServeEnv webInit{};
+		webInit.log_cb = [](void*, int, const char* m) { error("%s", m); };
+		nzbget_rs_web_serve(0, &webInit);
 		m_remoteServer = std::make_unique<RemoteServer>(false);
 		m_remoteServer->Start();
 
@@ -1725,117 +1727,52 @@ private:
 
 	void ProcessClientRequest()
 	{
-		RemoteClient Client;
-		bool ok = false;
-
-		switch (m_commandLineParser->m_clientOperation)
+		if (m_commandLineParser->m_clientOperation == CommandLineParser::opClientNoOperation)
 		{
-			case CommandLineParser::opClientRequestListFiles:
-				ok = Client.RequestServerList(true, false, m_commandLineParser->m_matchMode == CommandLineParser::mmRegEx ? *m_commandLineParser->m_editQueueText : nullptr);
-				break;
-
-			case CommandLineParser::opClientRequestListGroups:
-				ok = Client.RequestServerList(false, true, m_commandLineParser->m_matchMode == CommandLineParser::mmRegEx ? *m_commandLineParser->m_editQueueText : nullptr);
-				break;
-
-			case CommandLineParser::opClientRequestListStatus:
-				ok = Client.RequestServerList(false, false, nullptr);
-				break;
-
-			case CommandLineParser::opClientRequestDownloadPause:
-				ok = Client.RequestServerPauseUnpause(true, rpDownload);
-				break;
-
-			case CommandLineParser::opClientRequestDownloadUnpause:
-				ok = Client.RequestServerPauseUnpause(false, rpDownload);
-				break;
-
-			case CommandLineParser::opClientRequestSetRate:
-				ok = Client.RequestServerSetDownloadRate(m_commandLineParser->m_setRate);
-				break;
-
-			case CommandLineParser::opClientRequestDumpDebug:
-				ok = Client.SendSimpleBoolRequest(rrDumpDebug);
-				break;
-
-			case CommandLineParser::opClientRequestEditQueue:
-				ok = Client.RequestServerEditQueue((DownloadQueue::EEditAction)m_commandLineParser->m_editQueueAction,
-					m_commandLineParser->m_editQueueOffset, m_commandLineParser->m_editQueueText,
-					&m_commandLineParser->m_editQueueIdList, &m_commandLineParser->m_editQueueNameList,
-					(ERemoteMatchMode)m_commandLineParser->m_matchMode);
-				break;
-
-			case CommandLineParser::opClientRequestLog:
-				ok = Client.RequestServerLog(m_commandLineParser->m_logLines);
-				break;
-
-			case CommandLineParser::opClientRequestShutdown:
-				ok = Client.SendSimpleBoolRequest(rrShutdown);
-				break;
-
-			case CommandLineParser::opClientRequestReload:
-				ok = Client.SendSimpleBoolRequest(rrReload);
-				break;
-
-			case CommandLineParser::opClientRequestDownload:
-				ok = Client.RequestServerDownload(
-					m_commandLineParser->m_addNzbFilename,
-					m_commandLineParser->m_argFilename,
-					m_commandLineParser->m_addCategory,
-					m_commandLineParser->m_autoCategory,
-					m_commandLineParser->m_addTop,
-					m_commandLineParser->m_addPaused,
-					m_commandLineParser->m_addPriority,
-					m_commandLineParser->m_addDupeKey,
-					m_commandLineParser->m_addDupeMode,
-					m_commandLineParser->m_addDupeScore);
-				break;
-
-			case CommandLineParser::opClientRequestVersion:
-				ok = Client.SendSimpleBoolRequest(rrVersion);
-				break;
-
-			case CommandLineParser::opClientRequestPostQueue:
-				ok = Client.RequestPostQueue();
-				break;
-
-			case CommandLineParser::opClientRequestWriteLog:
-				ok = Client.RequestWriteLog(m_commandLineParser->m_writeLogKind, m_commandLineParser->m_lastArg);
-				break;
-
-			case CommandLineParser::opClientRequestScanAsync:
-				ok = Client.RequestScan(false);
-				break;
-
-			case CommandLineParser::opClientRequestScanSync:
-				ok = Client.RequestScan(true);
-				break;
-
-			case CommandLineParser::opClientRequestPostPause:
-				ok = Client.RequestServerPauseUnpause(true, rpPostProcess);
-				break;
-
-			case CommandLineParser::opClientRequestPostUnpause:
-				ok = Client.RequestServerPauseUnpause(false, rpPostProcess);
-				break;
-
-			case CommandLineParser::opClientRequestScanPause:
-				ok = Client.RequestServerPauseUnpause(true, rpScan);
-				break;
-
-			case CommandLineParser::opClientRequestScanUnpause:
-				ok = Client.RequestServerPauseUnpause(false, rpScan);
-				break;
-
-			case CommandLineParser::opClientRequestHistory:
-			case CommandLineParser::opClientRequestHistoryAll:
-				ok = Client.RequestHistory(m_commandLineParser->m_clientOperation == CommandLineParser::opClientRequestHistoryAll);
-				break;
-
-			case CommandLineParser::opClientNoOperation:
-				return;
+			return;
 		}
 
+		std::vector<const char*> namePtrs;
+		namePtrs.reserve(m_commandLineParser->m_editQueueNameList.size());
+		for (CString& name : m_commandLineParser->m_editQueueNameList)
+		{
+			namePtrs.push_back(*name);
+		}
+
+		NzbgetRsBinRpcClientEnv env{};
+		env.control_ip = m_options->GetControlIp();
+		env.control_port = m_options->GetControlPort();
+		env.control_username = m_options->GetControlUsername();
+		env.control_password = m_options->GetControlPassword();
+		env.verbose = 1;
+		env.match_mode = (int)m_commandLineParser->m_matchMode;
+		env.set_rate = m_commandLineParser->m_setRate;
+		env.edit_action = m_commandLineParser->m_editQueueAction;
+		env.edit_offset = m_commandLineParser->m_editQueueOffset;
+		env.edit_text = *m_commandLineParser->m_editQueueText;
+		env.edit_ids = m_commandLineParser->m_editQueueIdList.empty() ? nullptr : m_commandLineParser->m_editQueueIdList.data();
+		env.edit_ids_len = m_commandLineParser->m_editQueueIdList.size();
+		env.edit_names = namePtrs.empty() ? nullptr : namePtrs.data();
+		env.edit_names_len = namePtrs.size();
+		env.log_lines = m_commandLineParser->m_logLines;
+		env.add_nzb_filename = m_commandLineParser->m_addNzbFilename;
+		env.arg_filename = m_commandLineParser->m_argFilename;
+		env.add_category = m_commandLineParser->m_addCategory;
+		env.auto_category = m_commandLineParser->m_autoCategory ? 1 : 0;
+		env.add_top = m_commandLineParser->m_addTop ? 1 : 0;
+		env.add_paused = m_commandLineParser->m_addPaused ? 1 : 0;
+		env.add_priority = m_commandLineParser->m_addPriority;
+		env.add_dupe_key = m_commandLineParser->m_addDupeKey;
+		env.add_dupe_mode = m_commandLineParser->m_addDupeMode;
+		env.add_dupe_score = m_commandLineParser->m_addDupeScore;
+		env.write_log_kind = m_commandLineParser->m_writeLogKind;
+		env.write_log_text = m_commandLineParser->m_lastArg;
+		env.write_stdout_cb = [](void*, const char* ptr, size_t len) {
+			if (ptr && len > 0) fwrite(ptr, 1, len, stdout);
+		};
+		env.write_perror_cb = [](void*, const char* msg) { ::perror(msg); };
+
+		bool ok = nzbget_rs_binrpc_client((int)m_commandLineParser->m_clientOperation, &env) != 0;
 		exit(ok ? 0 : 1);
 	}
 };

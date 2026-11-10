@@ -3387,6 +3387,96 @@ int nzbget_rs_scheduler_service_op(
     const char* s1, const char* s2, int* out_i32);
 const char* nzbget_rs_scheduler_service_str(int op, int val);
 
+typedef struct RsPostJobCandidate {
+    uint8_t has_post_info;
+    uint8_t working;
+    uint8_t has_queue_script_job;
+    uint8_t direct_unpack_running;
+    uint8_t has_live_repair_thread;
+    int32_t priority;
+    uint8_t force_priority;
+    uint8_t need_par_check;
+    uint8_t need_unpack;
+    uint8_t in_active_jobs;
+    uint8_t download_completed;
+} RsPostJobCandidate;
+
+typedef struct NzbgetRsNzbMergeSplitCounters {
+    int32_t file_count;
+    int32_t active_downloads;
+    uint32_t full_content_hash;
+    uint32_t filtered_content_hash;
+    int64_t size;
+    int64_t remaining_size;
+    int32_t paused_file_count;
+    int64_t paused_size;
+    int64_t success_size;
+    int64_t current_success_size;
+    int64_t failed_size;
+    int64_t current_failed_size;
+    int64_t par_size;
+    int64_t par_success_size;
+    int64_t par_current_success_size;
+    int64_t par_failed_size;
+    int64_t par_current_failed_size;
+    int32_t remaining_par_count;
+    int32_t total_articles;
+    int32_t success_articles;
+    int32_t failed_articles;
+    int32_t current_success_articles;
+    int32_t current_failed_articles;
+    int64_t min_time;
+    int64_t max_time;
+    int64_t downloaded_size;
+    int32_t download_sec;
+    int64_t download_start_time;
+} NzbgetRsNzbMergeSplitCounters;
+
+typedef struct NzbgetRsSplitFileCounters {
+    int64_t size;
+    int64_t remaining_size;
+    int64_t success_size;
+    int64_t failed_size;
+    int64_t missed_size;
+    int32_t total_articles;
+    int32_t missed_articles;
+    int32_t success_articles;
+    int32_t failed_articles;
+    int32_t par_file;
+    int32_t paused;
+} NzbgetRsSplitFileCounters;
+
+int nzbget_rs_daemon_service_op(
+    int op, int a, int b, int c, int d, int64_t t1,
+    const char* s1, const char* s2, int* out1, int* out2,
+    void* ctx, void (*cb)(void*, const char*));
+int nzbget_rs_prepost_op(
+    int op, int a, int b, int c, int d, int e, int f, int g, int h, int i,
+    int64_t t1, int64_t t2, const char* s1, const char* s2, const char* s3,
+    const int* arr, size_t len, int* out1, int* out2, int* out3, int* out4, int* out5, int* out6);
+void nzbget_rs_prepost_delete_cleanup(
+    int cleanup_disk, int delete_status, int parking, int skip_disk_write, int opt_skip_write,
+    const char* dest_dir, const char* final_dir, const char* const* completed_files, size_t completed_count,
+    void* ctx, void (*log_cb)(void*, int, const char*, const char*));
+int nzbget_rs_prepost_pick_next_job(
+    const RsPostJobCandidate* candidates, size_t len,
+    int allow_par, int has_active_unpack, int pause_post_process);
+int nzbget_rs_queue_coord_op(
+    int op, int a, int b, int c, int d, int e, int f, int g, int h, int i, int j,
+    int64_t t1, int64_t t2, int64_t t3, int64_t t4,
+    const char* s1, const char* s2, const char* const* cstr_arr,
+    const int* i32_1, const int* i32_2, const uint8_t* u8_1, const int64_t* i64_1, size_t len,
+    int* out1, int* out2, int* out3, int* out_arr);
+NzbgetRsBuf nzbget_rs_queue_coord_str_op(
+    int op, int a, int b, int c, int64_t t1,
+    const char* s1, const char* s2, const char* s3, const int* i32_arr, size_t len,
+    int* out_unique, size_t* out_unique_len);
+int nzbget_rs_queue_coord_counters_op(
+    int op, int a, int b, int c, int d, int64_t t1, int64_t t2,
+    const char* s1, const char* s2,
+    NzbgetRsNzbMergeSplitCounters* ms1, NzbgetRsNzbMergeSplitCounters* ms2,
+    const NzbgetRsSplitFileCounters* sf, int* i32_inout, int64_t* i64_inout);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

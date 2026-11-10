@@ -561,16 +561,7 @@ static void SignalProc(int signum)
 
 static void InstallErrorHandler()
 {
-	if (g_Options->GetCrashDump())
-	{
-		rlimit rlim{};
-		rlim.rlim_cur = RLIM_INFINITY;
-		rlim.rlim_max = RLIM_INFINITY;
-		setrlimit(RLIMIT_CORE, &rlim);
-#ifdef HAVE_SYS_PRCTL_H
-		prctl(PR_SET_DUMPABLE, 1);
-#endif
-	}
+	nzbget_rs_daemon_service_op(0, g_Options->GetCrashDump() ? 1 : 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 
 	bool exitPending = g_SigExitPending.load(std::memory_order_seq_cst);
 	s_shutdownInitiated.store(exitPending, std::memory_order_seq_cst);
@@ -635,46 +626,31 @@ protected:
 		if (g_Options->GetDiskSpace() > 0 && g_WorkState->GetDownloading())
 		{
 			debug("Disk service work: check disk space");
-			if (const auto state = FileSystem::GetDiskState(g_Options->GetDestDir());
-				state.has_value() && state->available / 1024 / 1024 < g_Options->GetDiskSpace())
+			int destLow = 0, interLow = 0;
+			nzbget_rs_daemon_service_op(2, g_Options->GetDiskSpace(), 0, 0, 0, 0,
+				g_Options->GetDestDir(), g_Options->GetInterDir(), &destLow, &interLow, nullptr, nullptr);
+			if (destLow)
 			{
 				warn("Low disk space on %s. Pausing download", g_Options->GetDestDir());
 				g_WorkState->SetPauseDownload(true);
 			}
-			if (!Util::EmptyStr(g_Options->GetInterDir()))
+			if (interLow)
 			{
-				if (const auto state = FileSystem::GetDiskState(g_Options->GetInterDir());
-					state.has_value() && state->available / 1024 / 1024 < g_Options->GetDiskSpace())
-				{
-					warn("Low disk space on %s. Pausing download", g_Options->GetInterDir());
-					g_WorkState->SetPauseDownload(true);
-				}
+				warn("Low disk space on %s. Pausing download", g_Options->GetInterDir());
+				g_WorkState->SetPauseDownload(true);
 			}
 		}
 
 		if (m_waitingRequiredDir)
 		{
 			debug("Disk service work: check required dir");
-			if (!Util::EmptyStr(g_Options->GetRequiredDir()))
+			int nextReported = m_waitingReported ? 1 : 0;
+			if (!nzbget_rs_daemon_service_op(3, m_waitingReported ? 1 : 0, 0, 0, 0, 0,
+				g_Options->GetRequiredDir(), nullptr, &nextReported, nullptr, nullptr,
+				[](void*, const char* dir) { info("Waiting for required directory %s", dir); }))
 			{
-				bool allExist = true;
-				Tokenizer tok(g_Options->GetRequiredDir(), ",;");
-				while (const char* dir = tok.Next())
-				{
-					if (!FileSystem::FileExists(dir) && !FileSystem::DirectoryExists(dir))
-					{
-						if (!m_waitingReported)
-						{
-							info("Waiting for required directory %s", dir);
-						}
-						allExist = false;
-					}
-				}
-				if (!allExist)
-				{
-					m_waitingReported = true;
-					return;
-				}
+				m_waitingReported = nextReported != 0;
+				return;
 			}
 
 			if (m_waitingReported)
@@ -1013,18 +989,8 @@ public:
 			m_memoryMonitor->InitOptions();
 		}
 
-		mode_t uMask = static_cast<mode_t>(m_options->GetUMask());
-		if (uMask < 01000)
-		{
-			/* set newly created file permissions */
-			FileSystem::uMask = uMask;
-			umask(FileSystem::uMask);
-		}
-		else
-		{
-			FileSystem::uMask = umask(0);
-			umask(FileSystem::uMask);
-		}
+		FileSystem::uMask = static_cast<mode_t>(nzbget_rs_daemon_service_op(
+			7, m_options->GetUMask(), 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
 
 #ifdef DEBUG
 		debug("Using %o umask", FileSystem::uMask);
@@ -1062,81 +1028,21 @@ public:
 				/* child (daemon) continues */
 				setsid();
 
-				int devNull = open("/dev/null", O_RDWR);
-				if (devNull >= 0)
+				int owned = 0, truncFailed = 0;
+				int err = nzbget_rs_daemon_service_op(1, 0, 0, 0, 0, 0,
+					m_options->GetLockFile(), m_options->GetDaemonUsername(), &owned, &truncFailed, nullptr, nullptr);
+				if (err != 0)
 				{
-					dup2(devNull, 0);
-					dup2(devNull, 1);
-					dup2(devNull, 2);
-					if (devNull > 2)
-					{
-						close(devNull);
-					}
+					const char* msg = err == 1 ? "could not create lock-file %s" :
+						err == 2 ? "lock-file %s is not a regular file" :
+						err == 3 ? "could not acquire lock on lock-file %s" :
+						err == 4 ? "invalid DaemonUsername" : "could not drop privileges";
+					error("%s", *(err <= 3 ? BString<1024>("Starting daemon failed: %s", *BString<1024>(msg, m_options->GetLockFile()))
+						: BString<1024>("Starting daemon failed: %s", msg)));
+					exit(1);
 				}
-
-				int lfp = -1;
-				bool truncateFailed = false;
-				if (!Util::EmptyStr(m_options->GetLockFile()))
-				{
-					lfp = open(m_options->GetLockFile(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0640);
-					if (lfp < 0)
-					{
-						error("Starting daemon failed: could not create lock-file %s", m_options->GetLockFile());
-						exit(1);
-					}
-					struct stat st{};
-					if (fstat(lfp, &st) != 0 || !S_ISREG(st.st_mode))
-					{
-						close(lfp);
-						error("Starting daemon failed: lock-file %s is not a regular file", m_options->GetLockFile());
-						exit(1);
-					}
-					if (lockf(lfp, F_TLOCK, 0) < 0)
-					{
-						close(lfp);
-						error("Starting daemon failed: could not acquire lock on lock-file %s", m_options->GetLockFile());
-						exit(1);
-					}
-					g_LockFileOwned = true;
-					if (ftruncate(lfp, 0) != 0)
-					{
-						truncateFailed = true;
-					}
-				}
-
-				const char* daemonUser = m_options->GetDaemonUsername();
-				if (!Util::EmptyStr(daemonUser) && strcmp(daemonUser, "root") != 0 && (getuid() == 0 || geteuid() == 0))
-				{
-					passwd* pw = getpwnam(daemonUser);
-					if (!pw)
-					{
-						error("Starting daemon failed: invalid DaemonUsername");
-						exit(1);
-					}
-					if (lfp >= 0)
-					{
-						(void)fchown(lfp, pw->pw_uid, pw->pw_gid);
-					}
-					if (setgroups(0, nullptr) != 0 || setgid(pw->pw_gid) != 0 ||
-						initgroups(daemonUser, pw->pw_gid) != 0 || setuid(pw->pw_uid) != 0)
-					{
-						error("Starting daemon failed: could not drop privileges");
-						exit(1);
-					}
-				}
-
-				if (lfp >= 0)
-				{
-					BString<100> str("%d\n", getpid());
-					(void)write(lfp, str, strlen(str));
-				}
-
-				signal(SIGCHLD, SIG_IGN);
-				signal(SIGTSTP, SIG_IGN);
-				signal(SIGTTOU, SIG_IGN);
-				signal(SIGTTIN, SIG_IGN);
-
-				if (truncateFailed)
+				g_LockFileOwned = owned != 0;
+				if (truncFailed)
 				{
 					warn("Could not truncate lock-file %s", m_options->GetLockFile());
 				}
@@ -1637,8 +1543,8 @@ private:
 		m_remoteServer = std::make_unique<RemoteServer>(false);
 		m_remoteServer->Start();
 
-		if (m_options->GetSecureControl() &&
-			!(m_options->GetControlIp() && m_options->GetControlIp()[0] == '/'))
+		if (nzbget_rs_daemon_service_op(4, m_options->GetSecureControl() ? 1 : 0, 0, 0, 0, 0,
+			m_options->GetControlIp(), nullptr, nullptr, nullptr, nullptr, nullptr))
 		{
 			m_remoteSecureServer = std::make_unique<RemoteServer>(true);
 			m_remoteSecureServer->Start();
@@ -1789,10 +1695,9 @@ private:
 				Reload();
 			}
 
-			if (!m_options->GetServerMode() &&
-				!m_queueCoordinator->HasMoreJobs() &&
-				!m_urlCoordinator->HasMoreJobs() &&
-				!m_prePostProcessor->HasMoreJobs())
+			if (nzbget_rs_daemon_service_op(5, m_options->GetServerMode() ? 1 : 0,
+				m_queueCoordinator->HasMoreJobs() ? 1 : 0, m_urlCoordinator->HasMoreJobs() ? 1 : 0,
+				m_prePostProcessor->HasMoreJobs() ? 1 : 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr))
 			{
 				// Standalone-mode: download completed
 				if (!m_queueCoordinator->IsStopped())
@@ -2092,8 +1997,8 @@ void Reload()
 	{
 		int64 elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
 			now - g_reloadFirstRequestTime).count();
-		int64 clampedMs = std::min<int64>(elapsedMs + 100, 1500);
-		g_reloadTargetTime = g_reloadFirstRequestTime + std::chrono::milliseconds(clampedMs);
+		g_reloadTargetTime = g_reloadFirstRequestTime + std::chrono::milliseconds(
+			nzbget_rs_daemon_service_op(6, 0, 0, 0, 0, elapsedMs, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
 		g_reloadCond.notify_one();
 		debug("Reload request debounced, target extended");
 	}

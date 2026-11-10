@@ -311,16 +311,19 @@ impl LifecycleManager {
     }
 }
 
-/// Enables core dumps on Linux (`setrlimit(RLIMIT_CORE, RLIM_INFINITY)` + `prctl(PR_SET_DUMPABLE, 1)`).
+/// Enables core dumps (`setrlimit(RLIMIT_CORE, RLIM_INFINITY)` on Unix + `prctl(PR_SET_DUMPABLE, 1)` on Linux).
 pub fn enable_core_dump() {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     unsafe {
         let rlim = libc::rlimit {
             rlim_cur: libc::RLIM_INFINITY,
             rlim_max: libc::RLIM_INFINITY,
         };
         let _ = libc::setrlimit(libc::RLIMIT_CORE, &rlim);
-        let _ = libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
+        #[cfg(target_os = "linux")]
+        {
+            let _ = libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
+        }
     }
 }
 
@@ -424,7 +427,10 @@ pub fn daemonize_setup(
         let backward_compat_root =
             crate::systemhealth::nzbget_is_backward_compat_root_user(daemon_username.to_bytes());
 
-        if !backward_compat_root && (libc::getuid() == 0 || libc::geteuid() == 0) {
+        if !daemon_username.to_bytes().is_empty()
+            && !backward_compat_root
+            && (libc::getuid() == 0 || libc::geteuid() == 0)
+        {
             let pw = libc::getpwnam(daemon_username.as_ptr());
             if pw.is_null() {
                 return Err(4);

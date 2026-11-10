@@ -16669,3 +16669,1123 @@ pub unsafe extern "C" fn nzbget_rs_scheduler_service_str(op: c_int, val: c_int) 
     bytes.as_ptr() as *const c_char
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_daemon_service_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    d: c_int,
+    t1: i64,
+    s1: *const c_char,
+    s2: *const c_char,
+    out1: *mut c_int,
+    out2: *mut c_int,
+    ctx: *mut c_void,
+    cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+) -> c_int {
+    match op {
+        0 => {
+            if a != 0 {
+                crate::lifecycle::enable_core_dump();
+            }
+            0
+        }
+        1 => {
+            let lock_file = if s1.is_null() {
+                c""
+            } else {
+                CStr::from_ptr(s1)
+            };
+            let daemon_user = if s2.is_null() {
+                c""
+            } else {
+                CStr::from_ptr(s2)
+            };
+            match crate::lifecycle::daemonize_setup(lock_file, daemon_user) {
+                Ok((owned, trunc_failed)) => {
+                    if !out1.is_null() {
+                        *out1 = c_int::from(owned);
+                    }
+                    if !out2.is_null() {
+                        *out2 = c_int::from(trunc_failed);
+                    }
+                    0
+                }
+                Err(code) => code,
+            }
+        }
+        2 => {
+            let dest_dir = if s1.is_null() {
+                c""
+            } else {
+                CStr::from_ptr(s1)
+            };
+            let inter_dir = if s2.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(s2))
+            };
+            let (dest_low, inter_low) =
+                crate::fsops::disk_service_check_disk_space(dest_dir, inter_dir, a);
+            if !out1.is_null() {
+                *out1 = c_int::from(dest_low);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(inter_low);
+            }
+            c_int::from(dest_low || inter_low)
+        }
+        3 => {
+            let req_bytes = if s1.is_null() {
+                &[][..]
+            } else {
+                CStr::from_ptr(s1).to_bytes()
+            };
+            let (all_exist, next_reported) =
+                crate::fsops::disk_service_check_required_dirs(req_bytes, a != 0, |dir| {
+                    if let Some(f) = cb {
+                        f(ctx, dir.as_ptr());
+                    }
+                });
+            if !out1.is_null() {
+                *out1 = c_int::from(next_reported);
+            }
+            c_int::from(all_exist)
+        }
+        4 => {
+            let ip_bytes = if s1.is_null() {
+                &[][..]
+            } else {
+                CStr::from_ptr(s1).to_bytes()
+            };
+            c_int::from(crate::options::nzbget_should_start_secure_server(
+                a != 0,
+                cfg!(unix),
+                ip_bytes,
+            ))
+        }
+        5 => c_int::from(crate::options::nzbget_should_stop_standalone(
+            a != 0,
+            b != 0,
+            c != 0,
+            d != 0,
+        )),
+        6 => crate::options::roc_nzbget_reload_clamp_debounce_ms(t1, 100, 1500) as c_int,
+        7 => {
+            #[cfg(unix)]
+            {
+                let umask_val = a as u32;
+                let res = if crate::options::nzbget_is_valid_umask(umask_val) {
+                    let m = umask_val as libc::mode_t;
+                    libc::umask(m);
+                    m
+                } else {
+                    let m = libc::umask(0);
+                    libc::umask(m);
+                    m
+                };
+                res as c_int
+            }
+            #[cfg(not(unix))]
+            {
+                a
+            }
+        }
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_prepost_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    d: c_int,
+    e: c_int,
+    f: c_int,
+    g: c_int,
+    h: c_int,
+    i: c_int,
+    t1: i64,
+    t2: i64,
+    s1: *const c_char,
+    s2: *const c_char,
+    s3: *const c_char,
+    arr: *const c_int,
+    len: usize,
+    out1: *mut c_int,
+    out2: *mut c_int,
+    out3: *mut c_int,
+    out4: *mut c_int,
+    out5: *mut c_int,
+    out6: *mut c_int,
+) -> c_int {
+    let s1_bytes = if s1.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s1).to_bytes()
+    };
+    let s2_bytes = if s2.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s2).to_bytes()
+    };
+    let s3_bytes = if s3.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s3).to_bytes()
+    };
+    let stages = if arr.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(arr, len)
+    };
+    match op {
+        0 => c_int::from(crate::prepost::should_complete_after_direct_rename(
+            a != 0,
+            b,
+            3,
+            c != 0,
+            d,
+            0,
+            e != 0,
+            f != 0,
+            g != 0,
+            h != 0,
+            i != 0,
+        )),
+        1 => {
+            let (route, enq_del, set_par_skip) = crate::prepost::classify_nzb_downloaded_entry(
+                a != 0,
+                b != 0,
+                c != 0,
+                d,
+                2,
+                4,
+                e != 0,
+                f != 0,
+                g,
+                0,
+                h,
+                1,
+                2,
+            );
+            if !out1.is_null() {
+                *out1 = c_int::from(enq_del);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(set_par_skip);
+            }
+            route
+        }
+        2 => {
+            let (new_stage, req_par) =
+                crate::prepost::sanitise_post_stage(a, 11, 12, 0, b != 0, c != 0, d, 1);
+            if !out1.is_null() {
+                *out1 = c_int::from(req_par);
+            }
+            new_stage
+        }
+        3 => crate::prepost::classify_file_event(
+            a != 0,
+            b != 0,
+            c != 0,
+            d,
+            0,
+            2,
+            e != 0,
+            f != 0,
+            g != 0,
+        ),
+        4 => {
+            let (new_status, call_dl) = crate::prepost::resolve_nzb_deleted_route(a, 0, 1, 2, 4);
+            if !out1.is_null() {
+                *out1 = c_int::from(call_dl);
+            }
+            new_status
+        }
+        5 => {
+            let (add_hist, call_dupe, enq_del, need_save) = crate::prepost::eval_nzb_completed(
+                a,
+                2,
+                b,
+                c != 0,
+                d != 0,
+                e,
+                2,
+                f != 0,
+                g,
+                0,
+                2,
+                4,
+                7,
+                6,
+            );
+            if !out1.is_null() {
+                *out1 = c_int::from(add_hist);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(call_dupe);
+            }
+            if !out3.is_null() {
+                *out3 = c_int::from(enq_del);
+            }
+            if !out4.is_null() {
+                *out4 = c_int::from(need_save);
+            }
+            c_int::from(add_hist)
+        }
+        6 => {
+            let (act, new_force_full) = crate::prepost::classify_request_par_action(
+                a != 0,
+                b,
+                1,
+                c != 0,
+                d != 0,
+                e,
+                3,
+                f != 0,
+                g != 0,
+            );
+            if !out1.is_null() {
+                *out1 = c_int::from(new_force_full);
+            }
+            act
+        }
+        7 => {
+            let (ready, upd_sec, is_comp, new_sec) = crate::prepost::eval_cleanup_job_state(
+                a != 0,
+                b != 0,
+                c,
+                12,
+                d != 0,
+                t1,
+                t2,
+                e,
+            );
+            if !out1.is_null() {
+                *out1 = c_int::from(upd_sec);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(is_comp);
+            }
+            if !out3.is_null() {
+                *out3 = new_sec;
+            }
+            c_int::from(ready)
+        }
+        8 => {
+            let (can_run, allow_par) = crate::prepost::can_run_more_jobs(stages, 1, 4, 3, a);
+            if !out1.is_null() {
+                *out1 = c_int::from(allow_par);
+            }
+            c_int::from(can_run)
+        }
+        9 => crate::prepost::classify_skipped_par_health(a, 1, b, 3, c, d, t1, t2),
+        10 => {
+            let (want_unpack, unpack, start_rar_rename) =
+                crate::prepost::eval_want_unpack_and_rar_rename(
+                    a != 0,
+                    s1_bytes,
+                    b,
+                    0,
+                    c,
+                    0,
+                    d,
+                    0,
+                    e != 0,
+                );
+            if !out1.is_null() {
+                *out1 = c_int::from(want_unpack);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(unpack);
+            }
+            if !out3.is_null() {
+                *out3 = c_int::from(start_rar_rename);
+            }
+            c_int::from(start_rar_rename)
+        }
+        11 => {
+            let opt_post_dl_ren = (t1 & 1) != 0;
+            let post_dl_ren_status = ((t1 >> 1) & 0xFF) as i32;
+            let opt_ren_after_unpack = ((t1 >> 9) & 1) != 0;
+            let post_unpack_ren_status = ((t1 >> 10) & 0xFF) as i32;
+            let dec = crate::prepost::eval_post_stages(
+                a != 0,
+                b,
+                c,
+                d,
+                e,
+                f != 0,
+                g,
+                h,
+                s1_bytes,
+                s2_bytes,
+                crate::paths::PATH_SEPARATOR,
+                i,
+                opt_post_dl_ren,
+                post_dl_ren_status,
+                !s1_bytes.is_empty(),
+                !s3_bytes.is_empty(),
+                opt_ren_after_unpack,
+                post_unpack_ren_status,
+            );
+            if !out1.is_null() {
+                *out1 = dec.unpack;
+            }
+            if !out2.is_null() {
+                *out2 = dec.skip_unpack_due_to_par;
+            }
+            if !out3.is_null() {
+                *out3 = dec.cleanup;
+            }
+            if !out4.is_null() {
+                *out4 = dec.move_inter;
+            }
+            if !out5.is_null() {
+                *out5 = dec.post_download_renaming;
+            }
+            if !out6.is_null() {
+                *out6 = dec.post_unpack_renaming;
+            }
+            dec.unpack
+        }
+        12 => c_int::from(crate::prepost::calc_post_pause_state(
+            stages,
+            a != 0,
+            b != 0,
+            c != 0,
+        )),
+        13 => crate::prepost::classify_file_downloaded_direct_unpack(
+            a != 0,
+            b != 0,
+            c != 0,
+            d != 0,
+            e,
+            0,
+            1,
+            f,
+            1,
+            g != 0,
+        ),
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_prepost_delete_cleanup(
+    cleanup_disk: c_int,
+    delete_status: c_int,
+    parking: c_int,
+    skip_disk_write: c_int,
+    opt_skip_write: c_int,
+    dest_dir: *const c_char,
+    final_dir: *const c_char,
+    completed_files: *const *const c_char,
+    completed_count: usize,
+    ctx: *mut c_void,
+    log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char, *const c_char)>,
+) {
+    let mode = crate::prepost::classify_delete_cleanup_mode(
+        cleanup_disk != 0,
+        delete_status,
+        3,
+        parking != 0,
+        skip_disk_write != 0,
+        opt_skip_write != 0,
+    );
+    if mode == 0 || dest_dir.is_null() {
+        return;
+    }
+    let dest_cstr = CStr::from_ptr(dest_dir);
+    let dest_bytes = dest_cstr.to_bytes();
+    let sep = crate::paths::PATH_SEPARATOR;
+    if mode == 1 {
+        if crate::fsops::directory_exists(dest_bytes, &crate::fsops::posix_stat) {
+            if let Some(cb) = log_cb {
+                cb(ctx, 0, c"Deleting dir %s".as_ptr(), dest_dir);
+            }
+            let mut errmsg = Vec::new();
+            if !crate::fsdelete::delete_directory_with_content(
+                &mut crate::fsops::PosixFsOps,
+                dest_bytes,
+                sep,
+                &mut errmsg,
+            )
+            .unwrap_or(false)
+            {
+                if let Some(cb) = log_cb {
+                    if let Ok(err_c) = CString::new(errmsg) {
+                        cb(ctx, 1, dest_dir, err_c.as_ptr());
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    if !completed_files.is_null() && completed_count > 0 {
+        let slice = std::slice::from_raw_parts(completed_files, completed_count);
+        for &cf_ptr in slice {
+            if cf_ptr.is_null() {
+                continue;
+            }
+            let cf_bytes = CStr::from_ptr(cf_ptr).to_bytes();
+            let mut full = Vec::with_capacity(dest_bytes.len() + 1 + cf_bytes.len());
+            full.extend_from_slice(dest_bytes);
+            full.push(sep);
+            full.extend_from_slice(cf_bytes);
+            if crate::fsops::file_exists(&full, &crate::fsops::posix_stat) {
+                if let Some(cb) = log_cb {
+                    cb(ctx, 0, c"Deleting file %s".as_ptr(), cf_ptr);
+                }
+                if let Ok(full_c) = CString::new(full) {
+                    let _ = crate::fsops::delete_file(&full_c);
+                }
+            }
+        }
+    }
+
+    let mut dir = crate::fsops::PosixDirBrowser::new(Some(dest_cstr), false);
+    loop {
+        let fn_ptr = dir.next_ptr();
+        if fn_ptr.is_null() {
+            break;
+        }
+        let fn_bytes = CStr::from_ptr(fn_ptr).to_bytes();
+        if fn_bytes.ends_with(b".out.tmp") {
+            let mut full = Vec::with_capacity(dest_bytes.len() + 1 + fn_bytes.len());
+            full.extend_from_slice(dest_bytes);
+            full.push(sep);
+            full.extend_from_slice(fn_bytes);
+            if let Some(cb) = log_cb {
+                cb(ctx, 0, c"Deleting file %s".as_ptr(), fn_ptr);
+            }
+            if let Ok(full_c) = CString::new(full) {
+                let _ = crate::fsops::delete_file(&full_c);
+            }
+        }
+    }
+
+    let _ = crate::fsdelete::delete_directory(&mut crate::fsops::PosixFsOps, dest_bytes, sep);
+    if !final_dir.is_null() {
+        let final_cstr = CStr::from_ptr(final_dir);
+        let final_bytes = final_cstr.to_bytes();
+        if final_bytes != dest_bytes
+            && crate::fsops::directory_exists(final_bytes, &crate::fsops::posix_stat)
+        {
+            let _ =
+                crate::fsdelete::delete_directory(&mut crate::fsops::PosixFsOps, final_bytes, sep);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_prepost_pick_next_job(
+    candidates: *const crate::prepost::RsPostJobCandidate,
+    len: usize,
+    allow_par: c_int,
+    has_active_unpack: c_int,
+    pause_post_process: c_int,
+) -> c_int {
+    let slice = if candidates.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(candidates, len)
+    };
+    crate::prepost::pick_next_post_job(
+        slice,
+        allow_par != 0,
+        has_active_unpack != 0,
+        pause_post_process != 0,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_queue_coord_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    d: c_int,
+    e: c_int,
+    f: c_int,
+    g: c_int,
+    h: c_int,
+    i: c_int,
+    j: c_int,
+    t1: i64,
+    t2: i64,
+    t3: i64,
+    t4: i64,
+    s1: *const c_char,
+    s2: *const c_char,
+    cstr_arr: *const *const c_char,
+    i32_1: *const c_int,
+    i32_2: *const c_int,
+    u8_1: *const u8,
+    i64_1: *const i64,
+    len: usize,
+    out1: *mut c_int,
+    out2: *mut c_int,
+    out3: *mut c_int,
+    out_arr: *mut c_int,
+) -> c_int {
+    let s1_bytes = if s1.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s1).to_bytes()
+    };
+    let s2_bytes = if s2.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s2).to_bytes()
+    };
+    match op {
+        0 => {
+            if cstr_arr.is_null() || i64_1.is_null() || out_arr.is_null() || len == 0 {
+                return 0;
+            }
+            let ptrs = std::slice::from_raw_parts(cstr_arr, len);
+            let sizes = std::slice::from_raw_parts(i64_1, len);
+            let mut names: Vec<&[u8]> = Vec::with_capacity(len);
+            for &p in ptrs {
+                names.push(if p.is_null() {
+                    &[][..]
+                } else {
+                    CStr::from_ptr(p).to_bytes()
+                });
+            }
+            let mut out_idx = vec![0usize; len];
+            let written = crate::queuecoord::find_dupe_file_indices(&names, sizes, &mut out_idx);
+            let out_slice = std::slice::from_raw_parts_mut(out_arr, len);
+            for k in 0..written {
+                out_slice[k] = out_idx[k] as c_int;
+            }
+            written as c_int
+        }
+        1 => {
+            if s1.is_null() {
+                return 0;
+            }
+            c_int::from(crate::queuecoord::is_side_file(s1_bytes, s2_bytes))
+        }
+        2 => crate::queuecoord::validate_split_file_state(a, b, c != 0, d == 0),
+        3 => {
+            let levels = if i32_1.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(i32_1, len)
+            };
+            let actives = if u8_1.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(u8_1, len)
+            };
+            let conns = if i32_2.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(i32_2, len)
+            };
+            crate::queuecoord::calc_downloads_limit(levels, actives, conns)
+        }
+        4 => {
+            let (posted_min, start_min) =
+                crate::queuecoord::calc_propagation_wait_log_mins(t1, a, t2);
+            if !out1.is_null() {
+                *out1 = posted_min;
+            }
+            if !out2.is_null() {
+                *out2 = start_min;
+            }
+            start_min
+        }
+        5 => {
+            let donors = if i32_1.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(i32_1, len)
+            };
+            crate::queuecoord::select_dupe_donor_id(a, donors, s1_bytes, s2_bytes)
+        }
+        6 => {
+            let (rec, next_file, next_nzb, trig_cutover) =
+                crate::queuecoord::eval_dupe_recovery_and_cutover(
+                    a,
+                    b != 0,
+                    s1_bytes,
+                    s2_bytes,
+                    c,
+                    d,
+                    e != 0,
+                    f,
+                );
+            if !out1.is_null() {
+                *out1 = next_file;
+            }
+            if !out2.is_null() {
+                *out2 = next_nzb;
+            }
+            if !out3.is_null() {
+                *out3 = c_int::from(trig_cutover);
+            }
+            c_int::from(rec)
+        }
+        7 => {
+            let (fc, comp_parts) = crate::queuecoord::eval_file_completion_and_assembly(
+                a != 0,
+                b != 0,
+                c,
+                d != 0,
+                e != 0,
+                f != 0,
+            );
+            if !out1.is_null() {
+                *out1 = c_int::from(fc);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(comp_parts);
+            }
+            c_int::from(comp_parts)
+        }
+        8 => c_int::from(crate::queuecoord::should_skip_health_check(
+            a,
+            3,
+            2,
+            b,
+            3,
+            c != 0,
+            d,
+            2,
+            e,
+            f,
+            h,
+            g,
+        )),
+        9 => {
+            let other_sizes = if i64_1.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(i64_1, len)
+            };
+            c_int::from(crate::queuecoord::is_size_twin(
+                a != 0,
+                b != 0,
+                t1,
+                t3,
+                t4,
+                t2,
+                other_sizes,
+            ))
+        }
+        10 => c_int::from(crate::queuecoord::is_queued_dupe_active(
+            a != 0,
+            b,
+            0,
+            c,
+            d != 0,
+            e != 0,
+            f,
+            0,
+            g != 0,
+            h != 0,
+            i,
+            1,
+        )),
+        11 => c_int::from(crate::queuecoord::download_hopeless(a, b, c)),
+        12 => {
+            let (defer, upd_checked) = crate::queuecoord::should_defer_dupe_failover(
+                a != 0,
+                b,
+                c,
+                h,
+                e,
+                1,
+                f != 0,
+                d,
+                g,
+            );
+            if !out1.is_null() {
+                *out1 = c_int::from(upd_checked);
+            }
+            c_int::from(defer)
+        }
+        13 => {
+            let eval = crate::queuecoord::eval_dead_download(
+                a,
+                b,
+                c,
+                d,
+                e,
+                f != 0,
+                h,
+                i,
+                g,
+                j,
+            );
+            if !out_arr.is_null() {
+                let s = std::slice::from_raw_parts_mut(out_arr, 10);
+                s[0] = eval.own;
+                s[1] = eval.tried;
+                s[2] = eval.dead_rate;
+                s[3] = eval.dead_run;
+                s[4] = eval.dead;
+                s[5] = eval.projected;
+                s[6] = eval.doomed;
+                s[7] = eval.hopeless;
+                s[8] = eval.far_below;
+                s[9] = eval.below;
+            }
+            eval.dead
+        }
+        14 => c_int::from(crate::queuecoord::should_park_dead_without_backup(
+            a != 0,
+            b,
+            1,
+            c,
+            d,
+            e,
+            f,
+            g,
+            h != 0,
+            i != 0,
+        )),
+        15 => c_int::from(crate::queuecoord::should_wait_for_borrowing_on_par_damage(
+            a != 0,
+            b != 0,
+            c,
+            2,
+            d != 0,
+            e,
+            1,
+            f,
+            h,
+            g,
+        )),
+        16 => c_int::from(crate::queuecoord::is_hanging_download(t1, t2, a, b != 0)),
+        17 => {
+            let (disc_par, disc_infos) = crate::queuecoord::eval_discard_direct_rename_file(
+                a != 0,
+                b,
+                c,
+                d != 0,
+                e != 0,
+                f != 0,
+                g,
+            );
+            if !out1.is_null() {
+                *out1 = c_int::from(disc_par);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(disc_infos);
+            }
+            c_int::from(disc_par || disc_infos)
+        }
+        18 => crate::queuecoord::classify_completed_file_status(a, b, c, d),
+        19 => {
+            let (del_data, save_part) =
+                crate::queuecoord::eval_delete_file_diskstate_flags(a, 1, 2, b, c, d);
+            if !out1.is_null() {
+                *out1 = c_int::from(del_data);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(save_part);
+            }
+            c_int::from(del_data)
+        }
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_queue_coord_str_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    t1: i64,
+    s1: *const c_char,
+    s2: *const c_char,
+    s3: *const c_char,
+    i32_arr: *const c_int,
+    len: usize,
+    out_unique: *mut c_int,
+    out_unique_len: *mut usize,
+) -> RsBuf {
+    let s1_bytes = if s1.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s1).to_bytes()
+    };
+    let s2_bytes = if s2.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s2).to_bytes()
+    };
+    let s3_bytes = if s3.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s3).to_bytes()
+    };
+    match op {
+        0 => {
+            let ids = if i32_arr.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(i32_arr, len)
+            };
+            let (unique, formatted) = crate::queuecoord::format_donor_id_list(ids);
+            if !out_unique.is_null() && !unique.is_empty() {
+                let copy_len = unique.len().min(len);
+                std::ptr::copy_nonoverlapping(unique.as_ptr(), out_unique, copy_len);
+                if !out_unique_len.is_null() {
+                    *out_unique_len = copy_len;
+                }
+            } else if !out_unique_len.is_null() {
+                *out_unique_len = 0;
+            }
+            into_buf(formatted)
+        }
+        1 => into_buf(crate::queuecoord::format_par_damage_summary(
+            a != 0,
+            b,
+            c,
+            t1,
+            len as i32,
+        )),
+        2 => into_buf(crate::queuecoord::resolve_completed_filename(
+            a != 0,
+            b,
+            s1_bytes,
+            s2_bytes,
+            s3_bytes,
+            crate::paths::PATH_SEPARATOR,
+            c != 0,
+        )),
+        _ => into_buf(Vec::new()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_queue_coord_counters_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    _d: c_int,
+    t1: i64,
+    t2: i64,
+    s1: *const c_char,
+    s2: *const c_char,
+    ms1: *mut crate::queuecoord::NzbgetRsNzbMergeSplitCounters,
+    ms2: *mut crate::queuecoord::NzbgetRsNzbMergeSplitCounters,
+    sf: *const crate::queuecoord::NzbgetRsSplitFileCounters,
+    i32_inout: *mut c_int,
+    i64_inout: *mut i64,
+) -> c_int {
+    let s1_bytes = if s1.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s1).to_bytes()
+    };
+    let s2_bytes = if s2.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s2).to_bytes()
+    };
+    match op {
+        0 => {
+            if !ms1.is_null() && !ms2.is_null() {
+                crate::queuecoord::merge_counters(&mut *ms1, &*ms2);
+            }
+            0
+        }
+        1 => {
+            if !ms1.is_null() && !ms2.is_null() && !sf.is_null() {
+                crate::queuecoord::split_transfer_file(&mut *ms1, &mut *ms2, &*sf);
+            }
+            0
+        }
+        2 => {
+            if !i32_inout.is_null() && !i64_inout.is_null() {
+                let i32s = std::slice::from_raw_parts_mut(i32_inout, 2);
+                let i64s = std::slice::from_raw_parts_mut(i64_inout, 3);
+                let (fs, ns, ps, fa, na) = crate::queuecoord::apply_success_article_counters(
+                    t1,
+                    a != 0,
+                    i64s[0],
+                    i64s[1],
+                    i64s[2],
+                    i32s[0],
+                    i32s[1],
+                );
+                i64s[0] = fs;
+                i64s[1] = ns;
+                i64s[2] = ps;
+                i32s[0] = fa;
+                i32s[1] = na;
+            }
+            0
+        }
+        3 => {
+            if !i32_inout.is_null() && !i64_inout.is_null() {
+                let i32s = std::slice::from_raw_parts_mut(i32_inout, 3);
+                let i64s = std::slice::from_raw_parts_mut(i64_inout, 3);
+                let (dfr, ff_sz, nf_sz, npf_sz, ff_art, nf_art) =
+                    crate::queuecoord::apply_failed_article_counters(
+                        b,
+                        c,
+                        a,
+                        i32s[0],
+                        i64s[0],
+                        i64s[1],
+                        i64s[2],
+                        i32s[1],
+                        i32s[2],
+                    );
+                i32s[0] = dfr;
+                i32s[1] = ff_art;
+                i32s[2] = nf_art;
+                i64s[0] = ff_sz;
+                i64s[1] = nf_sz;
+                i64s[2] = npf_sz;
+            }
+            0
+        }
+        4 => {
+            if !i32_inout.is_null() && !i64_inout.is_null() {
+                let i32s = std::slice::from_raw_parts_mut(i32_inout, 1);
+                let i64s = std::slice::from_raw_parts_mut(i64_inout, 3);
+                let (rf, rn, pz, comp, fc) =
+                    crate::queuecoord::advance_article_completion_counters(
+                        i64s[0],
+                        i64s[1],
+                        i64s[2],
+                        a,
+                        b != 0,
+                        i32s[0],
+                        c,
+                    );
+                i64s[0] = rf;
+                i64s[1] = rn;
+                i64s[2] = pz;
+                i32s[0] = comp;
+                return c_int::from(fc);
+            }
+            0
+        }
+        5 => {
+            if !i32_inout.is_null() && !i64_inout.is_null() {
+                let i32s = std::slice::from_raw_parts_mut(i32_inout, 3);
+                let i64s = std::slice::from_raw_parts_mut(i64_inout, 5);
+                let (mut f_fa, mut n_fa, mut n_sa) = (i32s[0], i32s[1], i32s[2]);
+                let (mut f_fs, mut n_fs, mut n_ss, mut np_fs, mut np_ss) =
+                    (i64s[0], i64s[1], i64s[2], i64s[3], i64s[4]);
+                crate::queuecoord::apply_assembly_failure_counters(
+                    a,
+                    t1,
+                    b != 0,
+                    &mut f_fa,
+                    &mut f_fs,
+                    &mut n_fa,
+                    &mut n_sa,
+                    &mut n_fs,
+                    &mut n_ss,
+                    &mut np_fs,
+                    &mut np_ss,
+                );
+                i32s[0] = f_fa;
+                i32s[1] = n_fa;
+                i32s[2] = n_sa;
+                i64s[0] = f_fs;
+                i64s[1] = n_fs;
+                i64s[2] = n_ss;
+                i64s[3] = np_fs;
+                i64s[4] = np_ss;
+            }
+            0
+        }
+        6 => {
+            if !i32_inout.is_null() && !i64_inout.is_null() {
+                let i32s = std::slice::from_raw_parts_mut(i32_inout, 6);
+                let i64s = std::slice::from_raw_parts_mut(i64_inout, 6);
+                let (mut f_sa, mut f_fa, mut n_sa, mut n_fa, mut f_dr, mut n_dr) =
+                    (i32s[0], i32s[1], i32s[2], i32s[3], i32s[4], i32s[5]);
+                let (mut f_ss, mut f_fs, mut n_ss, mut n_fs, mut np_ss, mut np_fs) =
+                    (i64s[0], i64s[1], i64s[2], i64s[3], i64s[4], i64s[5]);
+                crate::queuecoord::demote_article_counters(
+                    a,
+                    b != 0,
+                    c != 0,
+                    s1_bytes,
+                    s2_bytes,
+                    &mut f_ss,
+                    &mut f_fs,
+                    &mut f_sa,
+                    &mut f_fa,
+                    &mut n_ss,
+                    &mut n_fs,
+                    &mut np_ss,
+                    &mut np_fs,
+                    &mut n_sa,
+                    &mut n_fa,
+                    &mut f_dr,
+                    &mut n_dr,
+                );
+                i32s[0] = f_sa;
+                i32s[1] = f_fa;
+                i32s[2] = n_sa;
+                i32s[3] = n_fa;
+                i32s[4] = f_dr;
+                i32s[5] = n_dr;
+                i64s[0] = f_ss;
+                i64s[1] = f_fs;
+                i64s[2] = n_ss;
+                i64s[3] = n_fs;
+                i64s[4] = np_ss;
+                i64s[5] = np_fs;
+            }
+            0
+        }
+        7 => {
+            if !i32_inout.is_null() && !i64_inout.is_null() {
+                let i32s = std::slice::from_raw_parts_mut(i32_inout, 2);
+                let i64s = std::slice::from_raw_parts_mut(i64_inout, 9);
+                let (nr, npz, nsa, nss, npss, nfa, nfs, npfs, fr) =
+                    crate::queuecoord::discard_downloaded_articles_counters(
+                        i64s[0],
+                        i64s[1],
+                        i32s[0],
+                        i64s[2],
+                        i64s[3],
+                        i32s[1],
+                        i64s[4],
+                        i64s[5],
+                        a,
+                        b,
+                        t1,
+                        c,
+                        t2,
+                        i64s[6],
+                        i64s[7],
+                    );
+                i64s[0] = nr;
+                i64s[1] = npz;
+                i32s[0] = nsa;
+                i64s[2] = nss;
+                i64s[3] = npss;
+                i32s[1] = nfa;
+                i64s[4] = nfs;
+                i64s[5] = npfs;
+                i64s[8] = fr;
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
+

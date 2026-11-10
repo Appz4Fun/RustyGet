@@ -1682,10 +1682,6 @@ NzbgetRsBuf nzbget_rs_diskstate_format_server_info(
     const int* ports, const char* const* users, size_t len);
 NzbgetRsBuf nzbget_rs_diskstate_format_nzb_message_line(
     const char* time_str, int tm, int kind, const char* text, const char* line_ending);
-int nzbget_rs_diskstate_parse_completed_file_line(
-    char* buf, int format_version, int* out_id, int* out_status,
-    uint32_t* out_crc, int* out_par_file, const char** out_hash16k,
-    const char** out_par_set_id, const char** out_file_name);
 
 NzbgetRsBuf nzbget_rs_nserv_format_usage(const char* base_name);
 
@@ -3292,19 +3288,29 @@ int nzbget_rs_diskstate_parse_log_line(
     const char* line, int* out_time, int* out_kind, size_t* out_text_off);
 int nzbget_rs_diskstate_is_orphan_queue_file(
     const char* filename, const int* file_ids, size_t file_len, const int* nzb_ids, size_t nzb_len);
-int nzbget_rs_diskstate_need_staged_file_check(
-    int completed, int format_version, int status_int, int ai_finished, int64_t segment_offset,
-    int segment_size, int staged_fallback, int part_number, int direct_write, int force_direct_write);
-int nzbget_rs_diskstate_eval_article_load_state(
-    int format_version, int completed, int fields, int status_in, int64_t segment_offset_in,
-    int segment_size_in, int staged_fallback_in, int part_number, int staged_file_exists,
-    int direct_write, int force_direct_write, int has_result_filename, int completed_articles_in,
-    int total_size, int* out_status, int64_t* out_seg_offset, int* out_seg_size,
-    int* out_fallback_round, int* out_need_result_filename, int* out_completed_articles);
-int nzbget_rs_diskstate_reconcile_direct_write_output(
-    const char* line_or_null, int output_initialized, int has_own_out_file, int has_out_tmp,
-    int has_completed_dest, int success_articles, int completed, int output_filename_empty,
-    int64_t* out_i64, int* out_i32);
+int nzbget_rs_diskstate_load_nzb_info(
+    void* infile_ctx, const char* (*read_line_cb)(void* ctx, int max_size),
+    int format_version, int pt_finished, void* target_ctx,
+    void (*on_loaded_cb)(
+        void* ctx, const NzbgetRsDiskNzbInfoInput* inp, int flags,
+        const NzbgetRsDiskCompletedFile* completed, size_t completed_len,
+        const NzbgetRsDiskParam* params, size_t params_len,
+        const NzbgetRsDiskScriptStatus* scripts, size_t scripts_len,
+        const NzbgetRsDiskServerStat* stats, size_t stats_len,
+        const NzbgetRsDiskFileStub* files, const int* file_times, size_t files_len));
+int nzbget_rs_diskstate_load_file_state(
+    void* infile_ctx, const char* (*read_line_cb)(void* ctx, int max_size),
+    int format_version, int completed, int file_id, int has_articles, int articles_len,
+    int has_options, int direct_write, int force_direct_write, int cur_output_initialized,
+    int sep, const char* temp_dir, const char* dest_dir, const char* cur_filename,
+    const char* cur_output_filename, void* target_ctx,
+    int (*article_cb)(
+        void* ctx, int op, int idx, int status, int64_t seg_offset, int seg_size,
+        uint32_t crc, int fallback_round, const char* result_filename),
+    void (*on_summary_cb)(
+        void* ctx, const NzbgetRsDiskFileStateInput* fields, int flags,
+        int completed_articles, const char* new_output_filename,
+        const NzbgetRsDiskServerStat* stats, size_t stats_len));
 int nzbget_rs_diskstate_match_servers(
     const NzbgetRsServerMatchItem* servers, size_t server_count,
     void* infile_ctx, const char* (*read_line_cb)(void* ctx, int max_size),

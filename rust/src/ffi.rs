@@ -15261,130 +15261,108 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_is_orphan_queue_file(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_need_staged_file_check(
-    completed: c_int,
+pub unsafe extern "C" fn nzbget_rs_diskstate_load_nzb_info(
+    infile_ctx: *mut c_void,
+    read_line_cb: crate::diskstate_format::ReadLineFn,
     format_version: c_int,
-    status_int: c_int,
-    ai_finished: c_int,
-    segment_offset: i64,
-    segment_size: c_int,
-    staged_fallback: c_int,
-    part_number: c_int,
-    direct_write: c_int,
-    force_direct_write: c_int,
+    pt_finished: c_int,
+    target_ctx: *mut c_void,
+    on_loaded_cb: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        inp: *const crate::diskstate_format::NzbgetRsDiskNzbInfoInput,
+        flags: c_int,
+        completed: *const crate::diskstate_format::NzbgetRsDiskCompletedFile,
+        completed_len: usize,
+        params: *const crate::diskstate_format::NzbgetRsDiskParam,
+        params_len: usize,
+        scripts: *const crate::diskstate_format::NzbgetRsDiskScriptStatus,
+        scripts_len: usize,
+        stats: *const crate::diskstate_format::NzbgetRsDiskServerStat,
+        stats_len: usize,
+        files: *const crate::diskstate_format::NzbgetRsDiskFileStub,
+        file_times: *const c_int,
+        files_len: usize,
+    ),
 ) -> c_int {
-    c_int::from(crate::diskstate_format::need_staged_file_check(
-        completed != 0,
+    c_int::from(crate::diskstate_format::load_nzb_info(
+        infile_ctx,
+        read_line_cb,
         format_version,
-        status_int,
-        ai_finished,
-        segment_offset,
-        segment_size,
-        staged_fallback,
-        part_number,
-        direct_write != 0,
-        force_direct_write != 0,
+        pt_finished,
+        target_ctx,
+        on_loaded_cb,
     ))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_eval_article_load_state(
+pub unsafe extern "C" fn nzbget_rs_diskstate_load_file_state(
+    infile_ctx: *mut c_void,
+    read_line_cb: crate::diskstate_format::ReadLineFn,
     format_version: c_int,
     completed: c_int,
-    fields: c_int,
-    status_in: c_int,
-    segment_offset_in: i64,
-    segment_size_in: c_int,
-    staged_fallback_in: c_int,
-    part_number: c_int,
-    staged_file_exists: c_int,
+    file_id: c_int,
+    has_articles: c_int,
+    articles_len: c_int,
+    has_options: c_int,
     direct_write: c_int,
     force_direct_write: c_int,
-    has_result_filename: c_int,
-    completed_articles_in: c_int,
-    total_size: c_int,
-    out_status: *mut c_int,
-    out_seg_offset: *mut i64,
-    out_seg_size: *mut c_int,
-    out_fallback_round: *mut c_int,
-    out_need_result_filename: *mut c_int,
-    out_completed_articles: *mut c_int,
+    cur_output_initialized: c_int,
+    sep: c_int,
+    temp_dir: *const c_char,
+    dest_dir: *const c_char,
+    cur_filename: *const c_char,
+    cur_output_filename: *const c_char,
+    target_ctx: *mut c_void,
+    article_cb: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        op: c_int,
+        idx: c_int,
+        status: c_int,
+        seg_offset: i64,
+        seg_size: c_int,
+        crc: u32,
+        fallback_round: c_int,
+        result_filename: *const c_char,
+    ) -> c_int,
+    on_summary_cb: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        fields: *const crate::diskstate_format::NzbgetRsDiskFileStateInput,
+        flags: c_int,
+        completed_articles: c_int,
+        new_output_filename: *const c_char,
+        stats: *const crate::diskstate_format::NzbgetRsDiskServerStat,
+        stats_len: usize,
+    ),
 ) -> c_int {
-    let ev = crate::diskstate_format::eval_article_load_state(
-        format_version,
-        completed != 0,
-        fields,
-        status_in,
-        segment_offset_in,
-        segment_size_in,
-        staged_fallback_in,
-        part_number,
-        staged_file_exists != 0,
-        direct_write != 0,
-        force_direct_write != 0,
-        has_result_filename != 0,
-        completed_articles_in,
-        total_size,
-    );
-    if !out_status.is_null() {
-        *out_status = ev.status;
-    }
-    if !out_seg_offset.is_null() {
-        *out_seg_offset = ev.segment_offset;
-    }
-    if !out_seg_size.is_null() {
-        *out_seg_size = ev.segment_size;
-    }
-    if !out_fallback_round.is_null() {
-        *out_fallback_round = ev.dupe_fallback_round;
-    }
-    if !out_need_result_filename.is_null() {
-        *out_need_result_filename = ev.need_result_filename;
-    }
-    if !out_completed_articles.is_null() {
-        *out_completed_articles = ev.completed_articles;
-    }
-    ev.valid
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_reconcile_direct_write_output(
-    line_or_null: *const c_char,
-    output_initialized: c_int,
-    has_own_out_file: c_int,
-    has_out_tmp: c_int,
-    has_completed_dest: c_int,
-    success_articles: c_int,
-    completed: c_int,
-    output_filename_empty: c_int,
-    out_i64: *mut i64,
-    out_i32: *mut c_int,
-) -> c_int {
-    if !line_or_null.is_null() {
-        let (kind, dec_size, out_init) =
-            crate::diskstate_format::parse_legacy_file_state_trailer(input(line_or_null));
-        if !out_i64.is_null() {
-            *out_i64 = dec_size;
-        }
-        if !out_i32.is_null() {
-            *out_i32 = out_init;
-        }
-        kind
+    let tdir = if temp_dir.is_null() { &[][..] } else { input(temp_dir) };
+    let ddir = if dest_dir.is_null() { &[][..] } else { input(dest_dir) };
+    let cfn = if cur_filename.is_null() { &[][..] } else { input(cur_filename) };
+    let cofn = if cur_output_filename.is_null() {
+        &[][..]
     } else {
-        let (new_init, pick_kind) = crate::diskstate_format::reconcile_direct_write_output(
-            output_initialized != 0,
-            has_own_out_file != 0,
-            has_out_tmp != 0,
-            has_completed_dest != 0,
-            success_articles,
-            completed != 0,
-            output_filename_empty != 0,
-        );
-        if !out_i32.is_null() {
-            *out_i32 = pick_kind;
-        }
-        c_int::from(new_init)
-    }
+        input(cur_output_filename)
+    };
+    c_int::from(crate::diskstate_format::load_file_state(
+        infile_ctx,
+        read_line_cb,
+        format_version,
+        completed,
+        file_id,
+        has_articles,
+        articles_len,
+        has_options,
+        direct_write,
+        force_direct_write,
+        cur_output_initialized,
+        sep as u8,
+        tdir,
+        ddir,
+        cfn,
+        cofn,
+        target_ctx,
+        article_cb,
+        on_summary_cb,
+    ))
 }
 
 #[unsafe(no_mangle)]

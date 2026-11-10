@@ -836,8 +836,8 @@ fn parse_u32_field(field: &[u8]) -> Option<u32> {
 /// Parses a completed-file line in `DiskState::LoadNzbInfo` (mutating `buf` in place
 /// for `format_version >= 60` comma-separated `hash16k` and `parSetId` fields).
 /// Returns `1` on success, `0` on parse error.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_parse_completed_file_line(
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn parse_completed_file_line(
     buf: *mut c_char,
     format_version: c_int,
     out_id: *mut c_int,
@@ -1191,8 +1191,8 @@ pub fn c_atoi(bytes: &[u8]) -> i32 {
     }
 }
 
-/// Parse `%i` style integer (base 10, `0x` hex, or `0` octal).
-fn parse_scanf_i32(bytes: &[u8]) -> Option<(i32, usize)> {
+/// Parse `%i` style 64-bit integer (base 10, `0x` hex, or `0` octal).
+fn parse_scanf_i64(bytes: &[u8]) -> Option<(i64, usize)> {
     let mut i = 0;
     while i < bytes.len() && is_c_space(bytes[i]) {
         i += 1;
@@ -1256,7 +1256,12 @@ fn parse_scanf_i32(bytes: &[u8]) -> Option<(i32, usize)> {
     } else {
         acc as i64
     };
-    Some((val as i32, digits_start))
+    Some((val, digits_start))
+}
+
+/// Parse `%i` style integer (base 10, `0x` hex, or `0` octal).
+fn parse_scanf_i32(bytes: &[u8]) -> Option<(i32, usize)> {
+    parse_scanf_i64(bytes).map(|(v, used)| (v as i32, used))
 }
 
 const FORMATVERSION_SIGNATURE: &[u8] = b"nzbget diskstate file version ";
@@ -2058,6 +2063,15 @@ impl<'a> ScanCursor<'a> {
             self.0 = self.0.strip_prefix(b",")?;
         }
         let (v, used) = parse_scanf_i32(self.0)?;
+        self.0 = &self.0[used..];
+        Some(v)
+    }
+
+    fn i64(&mut self, comma: bool) -> Option<i64> {
+        if comma {
+            self.0 = self.0.strip_prefix(b",")?;
+        }
+        let (v, used) = parse_scanf_i64(self.0)?;
         self.0 = &self.0[used..];
         Some(v)
     }
@@ -2893,37 +2907,6 @@ pub unsafe fn load_section(
             }
             true
         }
-        3 => {
-            let Some(cb) = read_line_cb else { return false };
-            let Some(stat_count) = (unsafe { scan_one_i32(infile_ctx, cb) }) else {
-                return false;
-            };
-            for _ in 0..stat_count {
-                let Some(line) = (unsafe { read_line_bytes(infile_ctx, cb, 1024) }) else {
-                    return false;
-                };
-                let mut sc = ScanCursor(&line);
-                let (Some(server_id), Some(success), Some(failed)) =
-                    (sc.i32(false), sc.i32(true), sc.i32(true))
-                else {
-                    return false;
-                };
-                unsafe {
-                    on_entry_cb(
-                        target_ctx,
-                        server_id,
-                        success,
-                        failed,
-                        0,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                    );
-                }
-            }
-            true
-        }
         4 => {
             use std::io::Read;
             let legacy_ver = now as i32;
@@ -3017,6 +3000,952 @@ pub unsafe fn load_section(
     }
 }
 
+unsafe fn read_server_stats(
+    infile_ctx: *mut std::ffi::c_void,
+    read_line_cb: ReadLineFn,
+) -> Option<Vec<NzbgetRsDiskServerStat>> {
+    let stat_count = unsafe { scan_one_i32(infile_ctx, read_line_cb) }?;
+    let mut stats = Vec::with_capacity(stat_count.clamp(0, 256) as usize);
+    for _ in 0..stat_count {
+        let line = unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }?;
+        let mut sc = ScanCursor(&line);
+        let (server_id, success_articles, failed_articles) =
+            (sc.i32(false)?, sc.i32(true)?, sc.i32(true)?);
+        stats.push(NzbgetRsDiskServerStat {
+            server_id,
+            success_articles,
+            failed_articles,
+        });
+    }
+    Some(stats)
+}
+
+/// Parses `DiskState::LoadNzbInfo` via `read_line_cb`.
+/// `flags` bitmask passed to `on_loaded_cb`:
+/// - `1`: `format_version >= 51` (`par_full`, `force_par_full`, `force_repair`, `extra_par_blocks`)
+/// - `2`: `format_version >= 48` (`downloaded_size`, `download_sec`, `post_total_sec`, `par_sec`, `repair_sec`, `unpack_sec`)
+/// - `4`: 4-field parameter header (`skip_script_processing`, `skip_disk_write`, `desired_server_id`)
+/// - `8`: `format_version < 56` (`file_times` populated)
+pub unsafe fn load_nzb_info(
+    infile_ctx: *mut std::ffi::c_void,
+    read_line_cb: ReadLineFn,
+    format_version: c_int,
+    pt_finished: c_int,
+    target_ctx: *mut std::ffi::c_void,
+    on_loaded_cb: unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        inp: *const NzbgetRsDiskNzbInfoInput,
+        flags: c_int,
+        completed: *const NzbgetRsDiskCompletedFile,
+        completed_len: usize,
+        params: *const NzbgetRsDiskParam,
+        params_len: usize,
+        scripts: *const NzbgetRsDiskScriptStatus,
+        scripts_len: usize,
+        stats: *const NzbgetRsDiskServerStat,
+        stats_len: usize,
+        files: *const NzbgetRsDiskFileStub,
+        file_times: *const c_int,
+        files_len: usize,
+    ),
+) -> bool {
+    let Some(id) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+    let Some(kind) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+    let Some(url_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 10240) }) else {
+        return false;
+    };
+    let Some(filename_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 10240) }) else {
+        return false;
+    };
+    let Some(dest_dir_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 10240) }) else {
+        return false;
+    };
+    let Some(final_dir_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 10240) }) else {
+        return false;
+    };
+    let hard_link_c = if format_version >= 63 {
+        let Some(v) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 10240) }) else {
+            return false;
+        };
+        Some(v)
+    } else {
+        None
+    };
+    let meta_name_c = if format_version >= 64 && format_version != 65 {
+        let Some(v) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 10240) }) else {
+            return false;
+        };
+        Some(v)
+    } else {
+        None
+    };
+    let Some(queued_filename_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 10240) })
+    else {
+        return false;
+    };
+    let Some(name_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 10240) }) else {
+        return false;
+    };
+    let Some(category_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 10240) }) else {
+        return false;
+    };
+
+    let Some(prio_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut prc = ScanCursor(&prio_line);
+    let (Some(priority), Some(raw_post_stage), Some(delete_paused), Some(many_dupe_files)) =
+        (prc.i32(false), prc.i32(true), prc.i32(true), prc.i32(true))
+    else {
+        return false;
+    };
+    let feed_id = if format_version >= 54 {
+        let Some(fid) = prc.i32(true) else {
+            return false;
+        };
+        fid
+    } else {
+        0
+    };
+    let (has_post_info, post_stage) = if raw_post_stage > 0 {
+        (1, normalize_post_stage(raw_post_stage, format_version, pt_finished))
+    } else {
+        (0, 0)
+    };
+
+    let Some(st_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut stc = ScanCursor(&st_line);
+    let (Some(par_status), Some(unpack_status), Some(move_status), Some(par_rename_status)) =
+        (stc.i32(false), stc.i32(true), stc.i32(true), stc.i32(true))
+    else {
+        return false;
+    };
+    let rar_rename_status = if format_version >= 58 {
+        let Some(v) = stc.i32(true) else { return false };
+        v
+    } else {
+        0
+    };
+    let direct_rename_status = if format_version >= 60 {
+        let Some(v) = stc.i32(true) else { return false };
+        v
+    } else {
+        0
+    };
+    let (Some(delete_status), Some(mark_status), Some(url_status)) =
+        (stc.i32(true), stc.i32(true), stc.i32(true))
+    else {
+        return false;
+    };
+
+    let Some(pause_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut psc = ScanCursor(&pause_line);
+    let (Some(unpack_cleaned_up_disk), Some(health_paused), Some(add_url_paused)) =
+        (psc.i32(false), psc.i32(true), psc.i32(true))
+    else {
+        return false;
+    };
+
+    let Some(fc_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut fcc = ScanCursor(&fc_line);
+    let (Some(file_count), Some(parked_file_count)) = (fcc.i32(false), fcc.i32(true)) else {
+        return false;
+    };
+    let message_count = if format_version >= 52 {
+        let Some(mc) = fcc.i32(true) else { return false };
+        mc
+    } else {
+        0
+    };
+
+    let Some(tm_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut tmc = ScanCursor(&tm_line);
+    let (Some(min_time), Some(max_time)) = (tmc.i32(false), tmc.i32(true)) else {
+        return false;
+    };
+
+    let mut flags: c_int = 0;
+    let mut par_full = 0;
+    let mut force_par_full = 0;
+    let mut force_repair = 0;
+    let mut extra_par_blocks = 0;
+    if format_version >= 51 {
+        flags |= 1;
+        let Some(pf_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        let mut pfc = ScanCursor(&pf_line);
+        let (Some(pf), Some(fpf), Some(fr)) = (pfc.i32(false), pfc.i32(true), pfc.i32(true)) else {
+            return false;
+        };
+        par_full = pf;
+        force_par_full = fpf;
+        force_repair = fr;
+        if format_version >= 55 {
+            let Some(epb) = pfc.i32(true) else { return false };
+            extra_par_blocks = epb;
+        }
+    }
+
+    let Some(hash_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut hsc = ScanCursor(&hash_line);
+    let (Some(full_content_hash), Some(filtered_content_hash)) =
+        (hsc.u32(false), hsc.u32(true))
+    else {
+        return false;
+    };
+
+    let Some(sz1_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut sz1c = ScanCursor(&sz1_line);
+    let (Some(h1), Some(l1), Some(h2), Some(l2), Some(h3), Some(l3)) = (
+        sz1c.u32(false),
+        sz1c.u32(true),
+        sz1c.u32(true),
+        sz1c.u32(true),
+        sz1c.u32(true),
+        sz1c.u32(true),
+    ) else {
+        return false;
+    };
+    let size = join_i64(h1, l1);
+    let success_size = join_i64(h2, l2);
+    let failed_size = join_i64(h3, l3);
+
+    let Some(sz2_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut sz2c = ScanCursor(&sz2_line);
+    let (Some(ph1), Some(pl1), Some(ph2), Some(pl2), Some(ph3), Some(pl3)) = (
+        sz2c.u32(false),
+        sz2c.u32(true),
+        sz2c.u32(true),
+        sz2c.u32(true),
+        sz2c.u32(true),
+        sz2c.u32(true),
+    ) else {
+        return false;
+    };
+    let par_size = join_i64(ph1, pl1);
+    let par_success_size = join_i64(ph2, pl2);
+    let par_failed_size = join_i64(ph3, pl3);
+
+    let Some(art_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut artc = ScanCursor(&art_line);
+    let (Some(total_articles), Some(success_articles), Some(failed_articles)) =
+        (artc.i32(false), artc.i32(true), artc.i32(true))
+    else {
+        return false;
+    };
+
+    let Some(dupe_key_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 10240) }) else {
+        return false;
+    };
+
+    let Some(dupe_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut dpc = ScanCursor(&dupe_line);
+    let (Some(dupe_mode), Some(dupe_score)) = (dpc.i32(false), dpc.i32(true)) else {
+        return false;
+    };
+    let dupe_hint = if format_version >= 61 {
+        let Some(dh) = dpc.i32(true) else { return false };
+        dh
+    } else {
+        0
+    };
+
+    let mut downloaded_size = 0i64;
+    let mut download_sec = 0;
+    let mut post_total_sec = 0;
+    let mut par_sec = 0;
+    let mut repair_sec = 0;
+    let mut unpack_sec = 0;
+    if format_version >= 48 {
+        flags |= 2;
+        let Some(dl_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        let mut dlc = ScanCursor(&dl_line);
+        let (
+            Some(dh4),
+            Some(dl4),
+            Some(dsec),
+            Some(ptsec),
+            Some(psec),
+            Some(rsec),
+            Some(usec),
+        ) = (
+            dlc.u32(false),
+            dlc.u32(true),
+            dlc.i32(true),
+            dlc.i32(true),
+            dlc.i32(true),
+            dlc.i32(true),
+            dlc.i32(true),
+        )
+        else {
+            return false;
+        };
+        downloaded_size = join_i64(dh4, dl4);
+        download_sec = dsec;
+        post_total_sec = ptsec;
+        par_sec = psec;
+        repair_sec = rsec;
+        unpack_sec = usec;
+    }
+
+    let Some(comp_count) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+    struct CompHold {
+        id: c_int,
+        status: c_int,
+        crc: u32,
+        par_file: c_int,
+        h16k: Vec<u8>,
+        pset: Vec<u8>,
+        fname: Vec<u8>,
+        orig: Vec<u8>,
+    }
+    let mut comp_holds = Vec::with_capacity(comp_count.clamp(0, 1024) as usize);
+    for _ in 0..comp_count {
+        let Some(mut line_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 10240) }) else {
+            return false;
+        };
+        let mut cf_id = 0;
+        let mut cf_status = 0;
+        let mut cf_crc = 0u32;
+        let mut cf_par = 0;
+        let mut cf_h16k: *const c_char = std::ptr::null();
+        let mut cf_pset: *const c_char = std::ptr::null();
+        let mut cf_fname: *const c_char = std::ptr::null();
+        if unsafe {
+            parse_completed_file_line(
+                line_c.as_mut_ptr().cast(),
+                format_version,
+                &mut cf_id,
+                &mut cf_status,
+                &mut cf_crc,
+                &mut cf_par,
+                &mut cf_h16k,
+                &mut cf_pset,
+                &mut cf_fname,
+            )
+        } == 0
+        {
+            return false;
+        }
+        let h_slice = unsafe { cstr_to_bytes(cf_h16k) };
+        let mut h_c = Vec::with_capacity(h_slice.len() + 1);
+        h_c.extend_from_slice(h_slice);
+        h_c.push(0);
+
+        let p_slice = unsafe { cstr_to_bytes(cf_pset) };
+        let mut p_c = Vec::with_capacity(p_slice.len() + 1);
+        p_c.extend_from_slice(p_slice);
+        p_c.push(0);
+
+        let (fname_c, orig_c) = if format_version >= 62 {
+            let Some(f_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) }) else {
+                return false;
+            };
+            let Some(o_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) }) else {
+                return false;
+            };
+            (f_c, o_c)
+        } else {
+            let f_slice = unsafe { cstr_to_bytes(cf_fname) };
+            let mut f_c = Vec::with_capacity(f_slice.len() + 1);
+            f_c.extend_from_slice(f_slice);
+            f_c.push(0);
+            (f_c, vec![0])
+        };
+        comp_holds.push(CompHold {
+            id: cf_id,
+            status: cf_status,
+            crc: cf_crc,
+            par_file: cf_par,
+            h16k: h_c,
+            pset: p_c,
+            fname: fname_c,
+            orig: orig_c,
+        });
+    }
+    let completed: Vec<NzbgetRsDiskCompletedFile> = comp_holds
+        .iter()
+        .map(|h| NzbgetRsDiskCompletedFile {
+            id: h.id,
+            status: h.status,
+            crc: h.crc,
+            par_file: h.par_file,
+            hash16k: h.h16k.as_ptr().cast(),
+            par_set_id: h.pset.as_ptr().cast(),
+            filename: h.fname.as_ptr().cast(),
+            origname: h.orig.as_ptr().cast(),
+        })
+        .collect();
+
+    let Some(param_hdr) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut prmc = ScanCursor(&param_hdr);
+    let Some(parameter_count) = prmc.i32(false) else {
+        return false;
+    };
+    let mut skip_script_processing = 0;
+    let mut skip_disk_write = 0;
+    let mut desired_server_id = 0;
+    if let Some(ssp) = prmc.i32(true) {
+        let (Some(sdw), Some(dsi)) = (prmc.i32(true), prmc.i32(true)) else {
+            return false;
+        };
+        skip_script_processing = ssp;
+        skip_disk_write = sdw;
+        desired_server_id = dsi;
+        flags |= 4;
+    }
+    let mut param_holds: Vec<(Vec<u8>, Vec<u8>)> =
+        Vec::with_capacity(parameter_count.clamp(0, 256) as usize);
+    for _ in 0..parameter_count {
+        let Some(p_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 10240) }) else {
+            return false;
+        };
+        if let Some(eq_pos) = p_line.iter().position(|&b| b == b'=') {
+            let mut k = p_line[..eq_pos].to_vec();
+            k.push(0);
+            let mut v = p_line[eq_pos + 1..].to_vec();
+            v.push(0);
+            param_holds.push((k, v));
+        }
+    }
+    let params: Vec<NzbgetRsDiskParam> = param_holds
+        .iter()
+        .map(|(k, v)| NzbgetRsDiskParam {
+            name: k.as_ptr().cast(),
+            value: v.as_ptr().cast(),
+        })
+        .collect();
+
+    let Some(script_count) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+    let mut script_holds: Vec<(c_int, Vec<u8>)> =
+        Vec::with_capacity(script_count.clamp(0, 256) as usize);
+    for _ in 0..script_count {
+        let Some(s_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 10240) }) else {
+            return false;
+        };
+        if let Some(comma_pos) = s_line.iter().position(|&b| b == b',') {
+            let mut st = c_atoi(&s_line[..comma_pos]);
+            if st > 1 && format_version < 25 {
+                st -= 1;
+            }
+            let mut sname = s_line[comma_pos + 1..].to_vec();
+            sname.push(0);
+            script_holds.push((st, sname));
+        }
+    }
+    let scripts: Vec<NzbgetRsDiskScriptStatus> = script_holds
+        .iter()
+        .map(|(st, sname)| NzbgetRsDiskScriptStatus {
+            status: *st,
+            name: sname.as_ptr().cast(),
+        })
+        .collect();
+
+    let Some(stats) = (unsafe { read_server_stats(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+
+    if format_version < 52 {
+        let Some(log_count) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+            return false;
+        };
+        for _ in 0..log_count {
+            if (unsafe { read_line_bytes(infile_ctx, read_line_cb, 10240) }).is_none() {
+                return false;
+            }
+        }
+    }
+
+    let Some(stub_count) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+    if format_version < 56 {
+        flags |= 8;
+    }
+    let cap = stub_count.clamp(0, 1024) as usize;
+    let mut files = Vec::with_capacity(cap);
+    let mut file_times = Vec::with_capacity(cap);
+    for _ in 0..stub_count {
+        let Some(f_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        let mut fc = ScanCursor(&f_line);
+        let (fid, paused, ftime, extra_priority) = if format_version >= 56 {
+            let (Some(i), Some(p), Some(ep)) = (fc.i32(false), fc.i32(true), fc.i32(true)) else {
+                return false;
+            };
+            (i, p, 0, ep)
+        } else {
+            let (Some(i), Some(p), Some(t), Some(ep)) =
+                (fc.i32(false), fc.i32(true), fc.i32(true), fc.i32(true))
+            else {
+                return false;
+            };
+            (i, p, t, ep)
+        };
+        files.push(NzbgetRsDiskFileStub {
+            id: fid,
+            paused,
+            extra_priority,
+        });
+        file_times.push(ftime);
+    }
+
+    let inp = NzbgetRsDiskNzbInfoInput {
+        id,
+        kind,
+        url: url_c.as_ptr().cast(),
+        filename: filename_c.as_ptr().cast(),
+        dest_dir: dest_dir_c.as_ptr().cast(),
+        final_dir: final_dir_c.as_ptr().cast(),
+        hard_link_path: hard_link_c
+            .as_ref()
+            .map_or(std::ptr::null(), |v| v.as_ptr().cast()),
+        meta_name: meta_name_c
+            .as_ref()
+            .map_or(std::ptr::null(), |v| v.as_ptr().cast()),
+        queued_filename: queued_filename_c.as_ptr().cast(),
+        name: if name_c.len() > 1 {
+            name_c.as_ptr().cast()
+        } else {
+            std::ptr::null()
+        },
+        category: category_c.as_ptr().cast(),
+        priority,
+        has_post_info,
+        post_stage,
+        delete_paused,
+        many_dupe_files,
+        feed_id,
+        par_status,
+        unpack_status,
+        move_status,
+        par_rename_status,
+        rar_rename_status,
+        direct_rename_status,
+        delete_status,
+        mark_status,
+        url_status,
+        unpack_cleaned_up_disk,
+        health_paused,
+        add_url_paused,
+        file_count,
+        parked_file_count,
+        message_count,
+        min_time,
+        max_time,
+        par_full,
+        force_par_full,
+        force_repair,
+        extra_par_blocks,
+        full_content_hash,
+        filtered_content_hash,
+        size,
+        success_size,
+        failed_size,
+        par_size,
+        par_success_size,
+        par_failed_size,
+        total_articles,
+        success_articles,
+        failed_articles,
+        dupe_key: dupe_key_c.as_ptr().cast(),
+        dupe_mode,
+        dupe_score,
+        dupe_hint,
+        downloaded_size,
+        download_sec,
+        post_total_sec,
+        par_sec,
+        repair_sec,
+        unpack_sec,
+        skip_script_processing,
+        skip_disk_write,
+        desired_server_id,
+    };
+
+    unsafe {
+        on_loaded_cb(
+            target_ctx,
+            &inp,
+            flags,
+            completed.as_ptr(),
+            completed.len(),
+            params.as_ptr(),
+            params.len(),
+            scripts.as_ptr(),
+            scripts.len(),
+            stats.as_ptr(),
+            stats.len(),
+            files.as_ptr(),
+            file_times.as_ptr(),
+            files.len(),
+        );
+    }
+    true
+}
+
+/// Parses `DiskState::LoadFileState` via `read_line_cb`.
+/// `flags` bitmask passed to `on_summary_cb`:
+/// - `1`: `decoded_file_size` present (`format_version >= 8` or `< 8` `#decoded` trailer)
+/// - `2`: non-empty `filename` present (`format_version >= 4`)
+/// - `4`: `hash16k` and `par_file` present (`format_version >= 5`)
+/// - `8`: `par_set_id` present (`format_version >= 6`)
+/// - `16`: `output_initialized` updated (`< 8` trailer or `DirectWrite` reconciliation)
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn load_file_state(
+    infile_ctx: *mut std::ffi::c_void,
+    read_line_cb: ReadLineFn,
+    format_version: c_int,
+    completed: c_int,
+    file_id: c_int,
+    has_articles: c_int,
+    articles_len: c_int,
+    has_options: c_int,
+    direct_write: c_int,
+    force_direct_write: c_int,
+    cur_output_initialized: c_int,
+    sep: u8,
+    temp_dir: &[u8],
+    dest_dir: &[u8],
+    cur_filename: &[u8],
+    cur_output_filename: &[u8],
+    target_ctx: *mut std::ffi::c_void,
+    article_cb: unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        op: c_int,
+        idx: c_int,
+        status: c_int,
+        seg_offset: i64,
+        seg_size: c_int,
+        crc: u32,
+        fallback_round: c_int,
+        result_filename: *const c_char,
+    ) -> c_int,
+    on_summary_cb: unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        fields: *const NzbgetRsDiskFileStateInput,
+        flags: c_int,
+        completed_articles: c_int,
+        new_output_filename: *const c_char,
+        stats: *const NzbgetRsDiskServerStat,
+        stats_len: usize,
+    ),
+) -> bool {
+    let Some(art_hdr) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut ahc = ScanCursor(&art_hdr);
+    let (Some(success_articles), Some(failed_articles)) = (ahc.i32(false), ahc.i32(true)) else {
+        return false;
+    };
+
+    let Some(sz_hdr) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut szc = ScanCursor(&sz_hdr);
+    let (Some(h1), Some(l1), Some(h2), Some(l2), Some(h3), Some(l3)) = (
+        szc.u32(false),
+        szc.u32(true),
+        szc.u32(true),
+        szc.u32(true),
+        szc.u32(true),
+        szc.u32(true),
+    ) else {
+        return false;
+    };
+    let remaining_size = join_i64(h1, l1);
+    let success_size = join_i64(h2, l2);
+    let failed_size = join_i64(h3, l3);
+
+    let mut flags: c_int = 0;
+    let mut decoded_file_size = 0i64;
+    if format_version >= 8 {
+        let Some(dec_hdr) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        let mut dc = ScanCursor(&dec_hdr);
+        let (Some(dh), Some(dl)) = (dc.u32(false), dc.u32(true)) else {
+            return false;
+        };
+        decoded_file_size = join_i64(dh, dl);
+        flags |= 1;
+    }
+
+    let filename_c = if format_version >= 4 {
+        let Some(v) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        if v.len() > 1 {
+            flags |= 2;
+        }
+        v
+    } else {
+        vec![0]
+    };
+
+    let mut hash16k_c = vec![0];
+    let mut par_set_id_c = vec![0];
+    let mut par_file = 0;
+    if format_version >= 5 {
+        let Some(h_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        hash16k_c = h_c;
+        flags |= 4;
+        if format_version >= 6 {
+            let Some(p_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) }) else {
+                return false;
+            };
+            par_set_id_c = p_c;
+            flags |= 8;
+        }
+        let Some(pf) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+            return false;
+        };
+        par_file = pf;
+    }
+
+    let Some(stats) = (unsafe { read_server_stats(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+
+    let Some(size) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+    if !validate_article_count(size, has_articles != 0, articles_len) {
+        return false;
+    }
+
+    let comp_bool = completed != 0;
+    let dw_bool = direct_write != 0;
+    let fdw_bool = force_direct_write != 0;
+    let mut completed_articles = 0;
+
+    for i in 0..size {
+        let meta = unsafe { article_cb(target_ctx, 0, i, 0, 0, 0, 0, 0, std::ptr::null()) };
+        let part_number = meta >> 1;
+        let has_result_filename = (meta & 1) != 0;
+
+        let Some(art_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        let mut ac = ScanCursor(&art_line);
+        let mut fields = 0;
+        let mut status_int = 0;
+        let mut segment_offset = 0i64;
+        let mut segment_size = 0;
+        let mut crc = 0u32;
+        let mut staged_fallback = 0;
+        if let Some(v0) = ac.i32(false) {
+            status_int = v0;
+            fields = 1;
+            if format_version >= 2 {
+                if let Some(v1) = ac.i64(true) {
+                    segment_offset = v1;
+                    fields = 2;
+                    if let Some(v2) = ac.i32(true) {
+                        segment_size = v2;
+                        fields = 3;
+                        if let Some(v3) = ac.u32(true) {
+                            crc = v3;
+                            fields = 4;
+                            if let Some(v4) = ac.i32(true) {
+                                staged_fallback = v4;
+                                fields = 5;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let staged_exists = need_staged_file_check(
+            comp_bool,
+            format_version,
+            status_int,
+            2, // ArticleInfo::aiFinished
+            segment_offset,
+            segment_size,
+            staged_fallback,
+            part_number,
+            dw_bool,
+            fdw_bool,
+        ) && {
+            let p = diskstate_format_staged_part_path(temp_dir, sep, file_id, part_number);
+            crate::fsops::posix_stat(&p) == 1
+        };
+
+        let ev = eval_article_load_state(
+            format_version,
+            comp_bool,
+            fields,
+            status_int,
+            segment_offset,
+            segment_size,
+            staged_fallback,
+            part_number,
+            staged_exists,
+            dw_bool,
+            fdw_bool,
+            has_result_filename,
+            completed_articles,
+            size,
+        );
+        if ev.valid == 0 {
+            return false;
+        }
+        completed_articles = ev.completed_articles;
+
+        let mut res_fn_c;
+        let res_ptr = if ev.need_result_filename != 0 {
+            res_fn_c = diskstate_format_staged_part_path(temp_dir, sep, file_id, part_number);
+            res_fn_c.push(0);
+            res_fn_c.as_ptr().cast::<c_char>()
+        } else {
+            std::ptr::null()
+        };
+        unsafe {
+            article_cb(
+                target_ctx,
+                1,
+                i,
+                ev.status,
+                ev.segment_offset,
+                ev.segment_size,
+                crc,
+                ev.dupe_fallback_round,
+                res_ptr,
+            );
+        }
+    }
+
+    let mut out_init_bool = cur_output_initialized != 0;
+    if format_version < 8 {
+        while let Some(trailer) = unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) } {
+            let (kind, dec_size, out_init) = parse_legacy_file_state_trailer(&trailer);
+            if kind == 1 {
+                decoded_file_size = dec_size;
+                flags |= 1;
+            } else if kind == 2 {
+                out_init_bool = out_init != 0;
+                flags |= 16;
+            }
+        }
+    }
+
+    let mut new_out_fn_c: Option<Vec<u8>> = None;
+    if has_options != 0 && (dw_bool || fdw_bool) {
+        let eff_filename = if (flags & 2) != 0 {
+            &filename_c[..filename_c.len() - 1]
+        } else {
+            cur_filename
+        };
+        let has_own_out =
+            !cur_output_filename.is_empty() && crate::fsops::posix_stat(cur_output_filename) == 1;
+        let out_tmp_p = if !dest_dir.is_empty() {
+            crate::artwritercore::article_writer_format_dest_file_path(
+                dest_dir,
+                sep,
+                format!("{file_id}.out.tmp").as_bytes(),
+            )
+        } else {
+            Vec::new()
+        };
+        let has_out_tmp = !out_tmp_p.is_empty() && crate::fsops::posix_stat(&out_tmp_p) == 1;
+        let comp_dest_p = if (comp_bool || fdw_bool)
+            && !dest_dir.is_empty()
+            && !eff_filename.is_empty()
+        {
+            crate::artwritercore::article_writer_format_dest_file_path(dest_dir, sep, eff_filename)
+        } else {
+            Vec::new()
+        };
+        let has_comp_dest = !comp_dest_p.is_empty() && crate::fsops::posix_stat(&comp_dest_p) == 1;
+
+        let (new_init, pick_kind) = reconcile_direct_write_output(
+            out_init_bool,
+            has_own_out,
+            has_out_tmp,
+            has_comp_dest,
+            success_articles,
+            comp_bool,
+            cur_output_filename.is_empty(),
+        );
+        out_init_bool = new_init;
+        flags |= 16;
+        if pick_kind == 1 {
+            let mut p = out_tmp_p;
+            p.push(0);
+            new_out_fn_c = Some(p);
+        } else if pick_kind == 2 {
+            let mut p = comp_dest_p;
+            p.push(0);
+            new_out_fn_c = Some(p);
+        }
+    }
+
+    let state_fields = NzbgetRsDiskFileStateInput {
+        success_articles,
+        failed_articles,
+        remaining_size,
+        success_size,
+        failed_size,
+        filename: filename_c.as_ptr().cast(),
+        hash16k: hash16k_c.as_ptr().cast(),
+        par_set_id: par_set_id_c.as_ptr().cast(),
+        par_file,
+        decoded_file_size,
+        output_initialized: c_int::from(out_init_bool),
+    };
+
+    unsafe {
+        on_summary_cb(
+            target_ctx,
+            &state_fields,
+            flags,
+            completed_articles,
+            new_out_fn_c
+                .as_ref()
+                .map_or(std::ptr::null(), |v| v.as_ptr().cast()),
+            stats.as_ptr(),
+            stats.len(),
+        );
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3096,7 +4025,7 @@ mod tests {
             let mut pset: *const c_char = std::ptr::null();
             let mut fname: *const c_char = std::ptr::null();
             assert_eq!(
-                nzbget_rs_diskstate_parse_completed_file_line(
+                parse_completed_file_line(
                     line.as_mut_ptr().cast(),
                     61,
                     &mut id,

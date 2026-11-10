@@ -3278,6 +3278,82 @@ NzbgetRsBuf nzbget_rs_web_format_response(
     const char* content_type, const char* etag, const char* version,
     NzbgetRsBuf* out_body);
 
+typedef struct NzbgetRsServerMatchItem {
+    const char* name;
+    const char* host;
+    int port;
+    const char* user;
+} NzbgetRsServerMatchItem;
+
+int nzbget_rs_diskstate_classify_temp_or_legacy(
+    int op, const char* filename, const char* header, int file_ver, int legacy_ver,
+    int* out_a, int* out_b);
+int nzbget_rs_diskstate_parse_log_line(
+    const char* line, int* out_time, int* out_kind, size_t* out_text_off);
+int nzbget_rs_diskstate_is_orphan_queue_file(
+    const char* filename, const int* file_ids, size_t file_len, const int* nzb_ids, size_t nzb_len);
+int nzbget_rs_diskstate_need_staged_file_check(
+    int completed, int format_version, int status_int, int ai_finished, int64_t segment_offset,
+    int segment_size, int staged_fallback, int part_number, int direct_write, int force_direct_write);
+int nzbget_rs_diskstate_eval_article_load_state(
+    int format_version, int completed, int fields, int status_in, int64_t segment_offset_in,
+    int segment_size_in, int staged_fallback_in, int part_number, int staged_file_exists,
+    int direct_write, int force_direct_write, int has_result_filename, int completed_articles_in,
+    int total_size, int* out_status, int64_t* out_seg_offset, int* out_seg_size,
+    int* out_fallback_round, int* out_need_result_filename, int* out_completed_articles);
+int nzbget_rs_diskstate_reconcile_direct_write_output(
+    const char* line_or_null, int output_initialized, int has_own_out_file, int has_out_tmp,
+    int has_completed_dest, int success_articles, int completed, int output_filename_empty,
+    int64_t* out_i64, int* out_i32);
+int nzbget_rs_diskstate_match_servers(
+    const NzbgetRsServerMatchItem* servers, size_t server_count,
+    const NzbgetRsServerMatchItem* refs, size_t ref_count, int* out_state_ids);
+int nzbget_rs_server_pool_op(
+    int op, int64_t a, int64_t b, int c, const int* ptr1, const uint8_t* ptr2, size_t len, int* out_ptr);
+int nzbget_rs_server_pool_normalize_levels(
+    const int* levels, const uint8_t* active, const int* max_conns, size_t len,
+    size_t* out_sorted_indices, int* out_norm_levels);
+int nzbget_rs_article_fetch_limit_op(
+    int op, int64_t* inout_bytes, int64_t bytes, int64_t begin, int64_t end, int64_t file_size);
+int nzbget_rs_statmeter_op(
+    int op, int64_t loc_or_cur_time, int64_t a_i64, int64_t b_i64, int64_t c_i64,
+    int a_i32, int b_i32, int c_i32, const int64_t* slice_ptr, size_t slice_len,
+    int64_t* out_i64_1, int64_t* out_i64_2, int* out_i32);
+int nzbget_rs_memory_and_cache_op(
+    int op, size_t a, size_t b, int tier, int flag1, int flag2, int flag3, int* inout1, int* inout2);
+int nzbget_rs_dupe_probe_op(
+    int op, size_t a, int b, int c, int d, const char* str_arg,
+    const uint8_t* in_a, const int* in_b, const int* in_c, size_t* out_ptr);
+NzbgetRsBuf nzbget_rs_dupe_probe_eval_outcome(
+    int op, int existing, int sampled, int missing_servers, int active_servers,
+    int unreachable_servers, int reached_servers, int finished, const char* str_arg,
+    int* out_outcome);
+int nzbget_rs_history_coord_op(
+    int op, int a, int b, int c, int d, int e, int64_t f, int64_t g, const char* str_arg);
+void nzbget_rs_history_reset_articles_batch(
+    int all_failed, int reset_failed, int is_par_file, int partial_state,
+    int64_t file_size, int64_t file_missed_size, int file_total_articles, int file_missed_articles,
+    int64_t* file_failed_size, int* file_failed_articles, int64_t* file_remaining_size,
+    int* file_completed_articles, int64_t* file_success_size, int* file_success_articles,
+    int64_t* nzb_failed_size, int64_t* nzb_success_size, int* nzb_failed_articles,
+    int* nzb_success_articles, int64_t* nzb_par_failed_size, int64_t* nzb_par_success_size,
+    int* article_statuses, const int* article_sizes, uint8_t* out_reset_flags, size_t article_count);
+int nzbget_rs_queue_editor_op(
+    int op, int a, int b, int c, int64_t f1, int64_t f2, const char* s1, const char* s2,
+    const int* in1, size_t len1, const int* in2, size_t len2, int* inout1, int* inout2);
+uint64_t nzbget_rs_dupe_identity_calc(
+    int op, int present, int missing, int error, uint64_t listed_parts, uint64_t declared_parts,
+    int64_t total_or_data_bytes, uint64_t article_bytes, uint64_t block_or_min, double alive_in,
+    const uint64_t* rec_ptr, size_t rec_len, double* out_f64);
+uint32_t nzbget_rs_dupe_watch_item_flags(
+    int kind, int in_history, int dupe_success, int deleting, int delete_status,
+    int has_post_info, int dupe_mode, int is_donor, int dupe_hint, int has_dupe_fleet);
+int nzbget_rs_dupe_watch_is_live_fleet_peer(
+    const char* peer_key, size_t peer_len, const char* pick_key, size_t pick_len, uint32_t peer_flags);
+NzbgetRsBuf nzbget_rs_dupe_watch_format_state_line(
+    int64_t now, int64_t ttl_sec, const char* key, size_t key_len, int score, int64_t time,
+    const char* title, size_t title_len, int retryable);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

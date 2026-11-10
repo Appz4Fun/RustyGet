@@ -297,17 +297,22 @@ pub fn resolve_move_groups_target(
     if !moved_ids.contains(&target_id) {
         return (target_id, before, 0);
     }
-    let mut found = false;
-    for &qid in queue_ids {
-        if found {
-            if !moved_ids.contains(&qid) {
-                return (qid, true, 0);
+    if let Some(target_idx) = queue_ids.iter().position(|&id| id == target_id) {
+        if before {
+            for &qid in queue_ids[..=target_idx].iter().rev() {
+                if !moved_ids.contains(&qid) {
+                    return (qid, false, 0);
+                }
             }
-        } else if qid == target_id {
-            found = true;
+        } else {
+            for &qid in &queue_ids[target_idx..] {
+                if !moved_ids.contains(&qid) {
+                    return (qid, true, 0);
+                }
+            }
         }
     }
-    (target_id, before, max_id)
+    (target_id, before, if before { -max_id } else { max_id })
 }
 
 /// Computes the offset between `move_id` and `target_id` in `QueueEditor::MoveGroupsTo`.

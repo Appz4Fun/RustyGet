@@ -1244,9 +1244,479 @@ pub fn parse_command_line(args: &[&[u8]], use_long: bool) -> ParsedCommandLine {
     sink.out
 }
 
+/// DownloadQueue::EEditAction mapping corresponding to `cmdline::edit::*` (`0..=34`).
+const DOWNLOAD_QUEUE_EDIT_ACTIONS: [i32; 35] = [
+    35, 36, 38, 39, 40, 41, 42, 47, 48, 49, 12, 2, 13, 3, 16, 4, 22, 7, 23, 8, 17, 5, 18, 6, 19,
+    34, 26, 25, 29, 27, 10, 28, 24, 11, 1,
+];
+
+/// Message::EKind mapping corresponding to `-W` (`I, W, E, D, G` -> `0, 1, 2, 4, 3`).
+const WRITE_LOG_KINDS: [i32; 5] = [0, 1, 2, 4, 3];
+
+/// Owned command-line parser state backing `NzbgetRsCmdline` (`daemon/main/rustyget.cpp`).
+#[derive(Default)]
+pub struct CmdlineHandle {
+    pub no_config: bool,
+    pub print_usage: bool,
+    pub print_version: bool,
+    pub print_options: bool,
+    pub server_mode: bool,
+    pub daemon_mode: bool,
+    pub remote_client_mode: bool,
+    pub client_operation: i32,
+    pub add_top: bool,
+    pub add_paused: bool,
+    pub add_priority: i32,
+    pub add_dupe_score: i32,
+    pub add_dupe_mode: i32,
+    pub match_mode: i32,
+    pub test_backtrace: bool,
+    pub web_get: bool,
+    pub sig_verify: bool,
+    pub log_lines: i32,
+    pub edit_queue_action: i32,
+    pub edit_queue_offset: i32,
+    pub write_log_kind: i32,
+    pub pause_download: bool,
+    pub errors: bool,
+    pub auto_category: bool,
+    pub set_rate: i32,
+    pub config_filename: Option<std::ffi::CString>,
+    pub web_get_filename: Option<std::ffi::CString>,
+    pub pub_key_filename: Option<std::ffi::CString>,
+    pub sig_filename: Option<std::ffi::CString>,
+    pub add_category: Option<std::ffi::CString>,
+    pub last_arg: Option<std::ffi::CString>,
+    pub arg_filename: Option<std::ffi::CString>,
+    pub add_nzb_filename: Option<std::ffi::CString>,
+    pub add_dupe_key: Option<std::ffi::CString>,
+    pub edit_queue_text: Option<std::ffi::CString>,
+    pub option_list: Vec<std::ffi::CString>,
+    pub edit_queue_id_list: Vec<i32>,
+    pub edit_queue_name_list: Vec<std::ffi::CString>,
+}
+
+impl CmdlineHandle {
+    /// Parses `argc`/`argv` under `GETOPT_MUTEX`, emitting parse error lines via `on_error_line`.
+    ///
+    /// # Safety
+    /// `argv` must point to `argc >= 1` non-null NUL-terminated C strings.
+    pub unsafe fn parse_argv(
+        argc: c_int,
+        argv: *const *const c_char,
+        mut on_error_line: impl FnMut(&[u8]),
+    ) -> Option<Self> {
+        if argc < 1 || argv.is_null() {
+            return None;
+        }
+        let mut cstrings = Vec::with_capacity(argc as usize);
+        for i in 0..(argc as usize) {
+            let p = *argv.add(i);
+            if p.is_null() {
+                return None;
+            }
+            cstrings.push(Some(CStr::from_ptr(p).to_owned()));
+        }
+        let mut argv_mut: Vec<*mut c_char> = cstrings
+            .iter()
+            .map(|c| c.as_ref().unwrap().as_ptr().cast_mut())
+            .collect();
+        argv_mut.push(std::ptr::null_mut());
+
+        struct HandleSink<F> {
+            out: CmdlineHandle,
+            cstrings: Vec<Option<std::ffi::CString>>,
+            argv: Vec<*mut c_char>,
+            on_err: F,
+        }
+        impl<F> HandleSink<F> {
+            fn sync_args(&mut self) {
+                let mut moved = std::mem::take(&mut self.cstrings);
+                let mut next = vec![None; moved.len()];
+                for (i, ptr) in self.argv[..moved.len()].iter().copied().enumerate() {
+                    if !ptr.is_null() {
+                        if let Some(pos) = moved.iter().position(|c| {
+                            c.as_ref().is_some_and(|cs| cs.as_ptr().cast_mut() == ptr)
+                        }) {
+                            next[i] = moved[pos].take();
+                        }
+                    }
+                }
+                self.cstrings = next;
+            }
+        }
+        impl<F: FnMut(&[u8])> Sink for HandleSink<F> {
+            unsafe fn getopt_long(&mut self, argc: c_int, argv: *mut *mut c_char) -> c_int {
+                default_getopt_long(argc, argv)
+            }
+            fn set_int(&mut self, f: i32, v: i32) -> Result<(), Abort> {
+                match f {
+                    field::NO_CONFIG => self.out.no_config = v != 0,
+                    field::PRINT_USAGE => self.out.print_usage = v != 0,
+                    field::PRINT_VERSION => self.out.print_version = v != 0,
+                    field::PRINT_OPTIONS => self.out.print_options = v != 0,
+                    field::SERVER_MODE => self.out.server_mode = v != 0,
+                    field::DAEMON_MODE => self.out.daemon_mode = v != 0,
+                    field::REMOTE_CLIENT_MODE => self.out.remote_client_mode = v != 0,
+                    field::CLIENT_OPERATION => self.out.client_operation = v,
+                    field::ADD_TOP => self.out.add_top = v != 0,
+                    field::ADD_PAUSED => self.out.add_paused = v != 0,
+                    field::ADD_PRIORITY => self.out.add_priority = v,
+                    field::ADD_DUPE_SCORE => self.out.add_dupe_score = v,
+                    field::ADD_DUPE_MODE => {
+                        if (0..3).contains(&v) {
+                            self.out.add_dupe_mode = v;
+                        }
+                    }
+                    field::MATCH_MODE => self.out.match_mode = v,
+                    field::TEST_BACKTRACE => self.out.test_backtrace = v != 0,
+                    field::WEB_GET => self.out.web_get = v != 0,
+                    field::SIG_VERIFY => self.out.sig_verify = v != 0,
+                    field::LOG_LINES => self.out.log_lines = v,
+                    field::EDIT_ACTION => {
+                        if let Some(&mapped) = DOWNLOAD_QUEUE_EDIT_ACTIONS.get(v as usize) {
+                            self.out.edit_queue_action = mapped;
+                        }
+                    }
+                    field::EDIT_OFFSET => self.out.edit_queue_offset = v,
+                    field::WRITE_LOG_KIND => {
+                        if let Some(&mapped) = WRITE_LOG_KINDS.get(v as usize) {
+                            self.out.write_log_kind = mapped;
+                        }
+                    }
+                    field::PAUSE_DOWNLOAD => self.out.pause_download = v != 0,
+                    field::ERRORS => self.out.errors = v != 0,
+                    _ => {}
+                }
+                Ok(())
+            }
+            fn set_str(&mut self, f: i32, value: *const c_char) -> Result<(), Abort> {
+                let owned = (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_owned());
+                match f {
+                    field::CONFIG_FILENAME => self.out.config_filename = owned,
+                    field::WEB_GET_FILENAME => self.out.web_get_filename = owned,
+                    field::PUB_KEY_FILENAME => self.out.pub_key_filename = owned,
+                    field::SIG_FILENAME => self.out.sig_filename = owned,
+                    field::ADD_CATEGORY => {
+                        self.out.add_category = owned;
+                        self.out.auto_category = false;
+                    }
+                    field::LAST_ARG => self.out.last_arg = owned,
+                    field::ARG_FILENAME => self.out.arg_filename = owned,
+                    field::SET_RATE_ARG => {
+                        let rate = if value.is_null() {
+                            0.0
+                        } else {
+                            unsafe { libc::strtod(value, std::ptr::null_mut()) }
+                        };
+                        self.out.set_rate = (rate * 1024.0) as i32;
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+            fn steal(&mut self, f: i32, index: c_int) -> Result<(), Abort> {
+                self.sync_args();
+                let idx = index as usize;
+                let taken = self.cstrings.get_mut(idx).and_then(Option::take);
+                if let Some(slot) = self.argv.get_mut(idx) {
+                    *slot = std::ptr::null_mut();
+                }
+                match f {
+                    field::ADD_NZB_FILENAME => self.out.add_nzb_filename = taken,
+                    field::ADD_DUPE_KEY => self.out.add_dupe_key = taken,
+                    field::EDIT_QUEUE_TEXT => self.out.edit_queue_text = taken,
+                    _ => {}
+                }
+                Ok(())
+            }
+            fn push_option(&mut self, value: *const c_char) -> Result<(), Abort> {
+                if !value.is_null() {
+                    self.out
+                        .option_list
+                        .push(unsafe { CStr::from_ptr(value) }.to_owned());
+                }
+                Ok(())
+            }
+            fn push_id(&mut self, id: i32) -> Result<(), Abort> {
+                self.out.edit_queue_id_list.push(id);
+                Ok(())
+            }
+            fn push_name(&mut self, value: *const c_char) -> Result<(), Abort> {
+                if !value.is_null() {
+                    self.out
+                        .edit_queue_name_list
+                        .push(unsafe { CStr::from_ptr(value) }.to_owned());
+                }
+                Ok(())
+            }
+            fn error(&mut self, msg: &CStr) -> Result<(), Abort> {
+                self.out.errors = true;
+                let mut line = Vec::with_capacity(msg.to_bytes().len() + 1);
+                line.extend_from_slice(msg.to_bytes());
+                line.push(b'\n');
+                (self.on_err)(&line);
+                Ok(())
+            }
+        }
+
+        let mut sink = HandleSink {
+            out: CmdlineHandle {
+                match_mode: 1,
+                auto_category: true,
+                ..Default::default()
+            },
+            cstrings,
+            argv: argv_mut,
+            on_err: &mut on_error_line,
+        };
+        let ok = with_getopt_lock(|| {
+            let argv_ptr = sink.argv.as_mut_ptr();
+            parse(argc, argv_ptr, true, &mut sink).is_ok()
+        });
+        ok.then_some(sink.out)
+    }
+
+    pub fn get_flag(&self, f: i32) -> i32 {
+        match f {
+            field::NO_CONFIG => i32::from(self.no_config),
+            field::PRINT_USAGE => i32::from(self.print_usage),
+            field::PRINT_VERSION => i32::from(self.print_version),
+            field::PRINT_OPTIONS => i32::from(self.print_options),
+            field::SERVER_MODE => i32::from(self.server_mode),
+            field::DAEMON_MODE => i32::from(self.daemon_mode),
+            field::REMOTE_CLIENT_MODE => i32::from(self.remote_client_mode),
+            field::CLIENT_OPERATION => self.client_operation,
+            field::TEST_BACKTRACE => i32::from(self.test_backtrace),
+            field::WEB_GET => i32::from(self.web_get),
+            field::SIG_VERIFY => i32::from(self.sig_verify),
+            field::PAUSE_DOWNLOAD => i32::from(self.pause_download),
+            field::ERRORS => i32::from(self.errors),
+            _ => 0,
+        }
+    }
+
+    pub fn get_cstr_ptr(&self, f: i32) -> *const c_char {
+        let opt_ptr = |o: &Option<std::ffi::CString>| {
+            o.as_ref().map_or(std::ptr::null(), |c| c.as_ptr())
+        };
+        if f >= 1000 {
+            return self
+                .option_list
+                .get((f - 1000) as usize)
+                .map_or(std::ptr::null(), |c| c.as_ptr());
+        }
+        match f {
+            field::CONFIG_FILENAME => opt_ptr(&self.config_filename),
+            field::WEB_GET_FILENAME => opt_ptr(&self.web_get_filename),
+            field::PUB_KEY_FILENAME => opt_ptr(&self.pub_key_filename),
+            field::SIG_FILENAME => opt_ptr(&self.sig_filename),
+            field::ADD_CATEGORY => opt_ptr(&self.add_category),
+            field::LAST_ARG => opt_ptr(&self.last_arg),
+            field::ARG_FILENAME => opt_ptr(&self.arg_filename),
+            field::ADD_NZB_FILENAME => opt_ptr(&self.add_nzb_filename),
+            field::ADD_DUPE_KEY => opt_ptr(&self.add_dupe_key),
+            field::EDIT_QUEUE_TEXT => opt_ptr(&self.edit_queue_text),
+            _ => std::ptr::null(),
+        }
+    }
+
+    /// Executes `RustyGet::ProcessClientRequest` directly via `crate::binrpc::client_execute`.
+    #[cfg(unix)]
+    pub fn execute_client(
+        &self,
+        control_ip: &[u8],
+        control_port: i32,
+        control_username: &[u8],
+        control_password: &[u8],
+        write_stdout: impl FnMut(&[u8]),
+        write_perror: impl FnMut(&CStr),
+    ) -> bool {
+        if self.client_operation == op::NONE {
+            return true;
+        }
+        let name_slices: Vec<&[u8]> = self
+            .edit_queue_name_list
+            .iter()
+            .map(|c| c.as_bytes())
+            .collect();
+        fn opt_bytes(o: &Option<std::ffi::CString>) -> &[u8] {
+            o.as_ref().map_or(b"", |c| c.as_bytes())
+        }
+        let params = crate::binrpc::BinRpcClientParams {
+            control_ip,
+            control_port,
+            control_username,
+            control_password,
+            verbose: true,
+            match_mode: self.match_mode,
+            set_rate: self.set_rate,
+            edit_action: self.edit_queue_action,
+            edit_offset: self.edit_queue_offset,
+            edit_text: self.edit_queue_text.as_ref().map(|c| c.as_bytes()),
+            edit_ids: &self.edit_queue_id_list,
+            edit_names: &name_slices,
+            log_lines: self.log_lines,
+            log_first_id: 0,
+            add_nzb_filename: opt_bytes(&self.add_nzb_filename),
+            arg_filename: opt_bytes(&self.arg_filename),
+            add_category: opt_bytes(&self.add_category),
+            auto_category: self.auto_category,
+            add_top: self.add_top,
+            add_paused: self.add_paused,
+            add_priority: self.add_priority,
+            add_dupe_key: opt_bytes(&self.add_dupe_key),
+            add_dupe_mode: self.add_dupe_mode,
+            add_dupe_score: self.add_dupe_score,
+            write_log_kind: self.write_log_kind,
+            write_log_text: opt_bytes(&self.last_arg),
+            want_file_list: false,
+            want_summary: false,
+        };
+        crate::binrpc::client_execute(
+            self.client_operation,
+            &params,
+            None,
+            write_stdout,
+            write_perror,
+            || false,
+            |_, _, _, _| {},
+            |_, _, _, _, _, _, _, _, _, _, _, _, _| {},
+            |_, _, _| {},
+            |_, _, _, _, _, _, _, _, _| {},
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmdline_handle_parses_mappings_and_stops_on_callback_abort() {
+        let args = [
+            c"nzbget".as_ptr(),
+            c"-n".as_ptr(),
+            c"-o".as_ptr(),
+            c"A=1".as_ptr(),
+            c"-R".as_ptr(),
+            c"2.5".as_ptr(),
+        ];
+        let mut errs = Vec::new();
+        let h = unsafe {
+            CmdlineHandle::parse_argv(args.len() as c_int, args.as_ptr(), |b| {
+                errs.extend_from_slice(b);
+            })
+        }
+        .unwrap();
+        assert!(errs.is_empty());
+        assert_eq!(h.get_flag(field::NO_CONFIG), 1);
+        assert!(h.get_cstr_ptr(field::CONFIG_FILENAME).is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(h.get_cstr_ptr(1000)) }.to_bytes(),
+            b"A=1"
+        );
+        assert!(h.get_cstr_ptr(1001).is_null());
+        assert_eq!(h.set_rate, 2560);
+
+        let w_args = [
+            c"nzbget".as_ptr(),
+            c"-W".as_ptr(),
+            c"D".as_ptr(),
+            c"hello".as_ptr(),
+        ];
+        let wh = unsafe { CmdlineHandle::parse_argv(4, w_args.as_ptr(), |_| {}) }.unwrap();
+        assert_eq!(wh.write_log_kind, 4); // Message::mkDetail
+        assert_eq!(wh.get_flag(field::CLIENT_OPERATION), op::WRITE_LOG);
+
+        let e_args = [
+            c"nzbget".as_ptr(),
+            c"-E".as_ptr(),
+            c"G".as_ptr(),
+            c"D".as_ptr(),
+            c"2-4".as_ptr(),
+        ];
+        let eh = unsafe { CmdlineHandle::parse_argv(5, e_args.as_ptr(), |_| {}) }.unwrap();
+        assert_eq!(eh.edit_queue_action, 18); // eaGroupDelete
+        assert_eq!(eh.edit_queue_id_list, vec![2, 3, 4]);
+
+        unsafe {
+            assert!(CmdlineHandle::parse_argv(0, args.as_ptr(), |_| {}).is_none());
+            assert!(CmdlineHandle::parse_argv(1, std::ptr::null(), |_| {}).is_none());
+            let bad = [c"nzbget".as_ptr(), std::ptr::null()];
+            assert!(CmdlineHandle::parse_argv(2, bad.as_ptr(), |_| {}).is_none());
+        }
+
+        // Verify Sink callback failure halts parsing immediately
+        struct FailAtSink {
+            count: usize,
+            fail_at: usize,
+            argv: *mut *mut c_char,
+        }
+        impl FailAtSink {
+            fn step(&mut self) -> Result<(), Abort> {
+                self.count += 1;
+                if self.count == self.fail_at {
+                    Err(Abort)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        impl Sink for FailAtSink {
+            unsafe fn getopt_long(&mut self, argc: c_int, argv: *mut *mut c_char) -> c_int {
+                default_getopt_long(argc, argv)
+            }
+            fn set_int(&mut self, _: i32, _: i32) -> Result<(), Abort> {
+                self.step()
+            }
+            fn set_str(&mut self, _: i32, _: *const c_char) -> Result<(), Abort> {
+                self.step()
+            }
+            fn steal(&mut self, _: i32, index: c_int) -> Result<(), Abort> {
+                self.step()?;
+                unsafe { *self.argv.add(index as usize) = std::ptr::null_mut() };
+                Ok(())
+            }
+            fn push_option(&mut self, _: *const c_char) -> Result<(), Abort> {
+                self.step()
+            }
+            fn push_id(&mut self, _: i32) -> Result<(), Abort> {
+                self.step()
+            }
+            fn push_name(&mut self, _: *const c_char) -> Result<(), Abort> {
+                self.step()
+            }
+            fn error(&mut self, _: &CStr) -> Result<(), Abort> {
+                self.step()
+            }
+        }
+        let sample = ["nzbget", "-A", "N", "name", "-o", "X=1", "-c", "conf", "file"];
+        let strings: Vec<_> = sample
+            .iter()
+            .map(|s| std::ffi::CString::new(*s).unwrap())
+            .collect();
+        let mut fail_at = 1usize;
+        loop {
+            let mut argv: Vec<_> = strings.iter().map(|s| s.as_ptr().cast_mut()).collect();
+            argv.push(std::ptr::null_mut());
+            let mut sink = FailAtSink {
+                count: 0,
+                fail_at,
+                argv: argv.as_mut_ptr(),
+            };
+            let res = with_getopt_lock(|| unsafe {
+                parse(sample.len() as c_int, argv.as_mut_ptr(), false, &mut sink)
+            });
+            if res.is_ok() {
+                assert_eq!(sink.count + 1, fail_at);
+                break;
+            }
+            assert_eq!(sink.count, fail_at);
+            fail_at += 1;
+            assert!(fail_at < 64);
+        }
+    }
 
     #[test]
     fn test_format_usage() {

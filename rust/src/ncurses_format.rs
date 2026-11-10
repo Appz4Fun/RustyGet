@@ -1447,9 +1447,1392 @@ pub fn ncurses_resolve_group_edit_action(
     }
 }
 
+// ---- Frontend Execution Engine (`Frontend`, `LoggableFrontend`, `NCursesFrontend`, `NServFrontend`) ----
+
+pub type FrontendWriteStdoutFn =
+    unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_char, usize, std::ffi::c_int);
+pub type FrontendActionFn = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    std::ffi::c_int,
+    std::ffi::c_int,
+    std::ffi::c_int,
+    std::ffi::c_int,
+) -> i64;
+pub type FrontendLocalSummaryFn =
+    unsafe extern "C" fn(*mut std::ffi::c_void, *mut crate::binrpc::FrontendSummary);
+pub type FrontendEmitMsgFn = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    u32,
+    std::ffi::c_int,
+    i64,
+    *const std::ffi::c_char,
+);
+pub type FrontendLocalMessagesFn = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    std::ffi::c_int,
+    u32,
+    *mut std::ffi::c_int,
+    *mut std::ffi::c_void,
+    FrontendEmitMsgFn,
+);
+pub type FrontendEmitNzbFn = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    std::ffi::c_int,
+    std::ffi::c_int,
+    std::ffi::c_int,
+    i64,
+    i64,
+    i64,
+    std::ffi::c_int,
+    std::ffi::c_int,
+    *const std::ffi::c_char,
+);
+pub type FrontendEmitFileFn = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    usize,
+    std::ffi::c_int,
+    std::ffi::c_int,
+    std::ffi::c_int,
+    i64,
+    i64,
+    *const std::ffi::c_char,
+);
+pub type FrontendLocalQueueFn = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    *mut std::ffi::c_void,
+    FrontendEmitNzbFn,
+    FrontendEmitFileFn,
+);
+
+/// FFI environment for `nzbget_rs_frontend_op`.
+#[repr(C)]
+pub struct NzbgetRsFrontendEnv {
+    pub ctx: *mut std::ffi::c_void,
+    pub remote_mode: std::ffi::c_int,
+    pub update_interval: std::ffi::c_int,
+    pub use_color: std::ffi::c_int,
+    pub show_nzbname: std::ffi::c_int,
+    pub show_timestamp: std::ffi::c_int,
+    pub group_files: std::ffi::c_int,
+    pub time_correction: std::ffi::c_int,
+    pub path_sep: u8,
+    pub control_ip: *const std::ffi::c_char,
+    pub control_port: std::ffi::c_int,
+    pub control_username: *const std::ffi::c_char,
+    pub control_password: *const std::ffi::c_char,
+    pub write_stdout_cb: Option<FrontendWriteStdoutFn>,
+    pub action_cb: Option<FrontendActionFn>,
+    pub local_summary_cb: Option<FrontendLocalSummaryFn>,
+    pub local_messages_cb: Option<FrontendLocalMessagesFn>,
+    pub local_queue_cb: Option<FrontendLocalQueueFn>,
+}
+
+struct FrontendLogEntry {
+    id: u32,
+    kind: i32,
+    time: i64,
+    text: Vec<u8>,
+}
+
+struct FrontendFileEntry {
+    id: i32,
+    active_downloads: i32,
+    paused: bool,
+    size: i64,
+    remaining_size: i64,
+    filename_cstr: Vec<u8>,
+}
+
+struct FrontendGroupEntry {
+    id: i32,
+    priority: i32,
+    active_downloads: i32,
+    name_cstr: Vec<u8>,
+    size: i64,
+    remaining_size: i64,
+    paused_size: i64,
+    paused_file_count: i32,
+    remaining_par_count: i32,
+    files: Vec<FrontendFileEntry>,
+}
+
+unsafe fn cstr_with_nul(ptr: *const u8) -> Vec<u8> {
+    if ptr.is_null() {
+        vec![0]
+    } else {
+        std::ffi::CStr::from_ptr(ptr.cast())
+            .to_bytes_with_nul()
+            .to_vec()
+    }
+}
+
+fn fe_write_stdout(env: &NzbgetRsFrontendEnv, bytes: &[u8], flush: bool) {
+    if let Some(cb) = env.write_stdout_cb {
+        unsafe {
+            cb(
+                env.ctx,
+                if bytes.is_empty() {
+                    std::ptr::null()
+                } else {
+                    bytes.as_ptr().cast()
+                },
+                bytes.len(),
+                std::ffi::c_int::from(flush),
+            );
+        }
+    }
+}
+
+fn fe_action(env: &NzbgetRsFrontendEnv, op: i32, a1: i32, a2: i32, a3: i32) -> i64 {
+    if let Some(cb) = env.action_cb {
+        unsafe { cb(env.ctx, op, a1, a2, a3) }
+    } else {
+        0
+    }
+}
+
+fn fe_is_stopped(env: &NzbgetRsFrontendEnv) -> bool {
+    fe_action(env, 0, 0, 0, 0) != 0
+}
+
+fn fe_collect_local_messages(
+    env: &NzbgetRsFrontendEnv,
+    tail_mode: i32,
+    arg: u32,
+) -> (bool, Vec<FrontendLogEntry>) {
+    unsafe extern "C" fn push_msg(
+        raw: *mut std::ffi::c_void,
+        id: u32,
+        kind: std::ffi::c_int,
+        time: i64,
+        text: *const std::ffi::c_char,
+    ) {
+        let out = &mut *raw.cast::<Vec<FrontendLogEntry>>();
+        out.push(FrontendLogEntry {
+            id,
+            kind,
+            time,
+            text: cstr_bytes(text.cast()).to_vec(),
+        });
+    }
+    let mut skipped: std::ffi::c_int = 0;
+    let mut out = Vec::new();
+    if let Some(cb) = env.local_messages_cb {
+        unsafe {
+            cb(
+                env.ctx,
+                tail_mode,
+                arg,
+                &mut skipped,
+                (&mut out as *mut Vec<FrontendLogEntry>).cast(),
+                push_msg,
+            );
+        }
+    }
+    (skipped != 0, out)
+}
+
+fn fe_collect_local_queue(env: &NzbgetRsFrontendEnv) -> Vec<FrontendGroupEntry> {
+    unsafe extern "C" fn push_nzb(
+        raw: *mut std::ffi::c_void,
+        id: std::ffi::c_int,
+        prio: std::ffi::c_int,
+        act: std::ffi::c_int,
+        sz: i64,
+        rem: i64,
+        psd: i64,
+        pfc: std::ffi::c_int,
+        rpc: std::ffi::c_int,
+        name: *const std::ffi::c_char,
+    ) {
+        let groups = &mut *raw.cast::<Vec<FrontendGroupEntry>>();
+        groups.push(FrontendGroupEntry {
+            id,
+            priority: prio,
+            active_downloads: act,
+            name_cstr: cstr_with_nul(name.cast()),
+            size: sz,
+            remaining_size: rem,
+            paused_size: psd,
+            paused_file_count: pfc,
+            remaining_par_count: rpc,
+            files: Vec::new(),
+        });
+    }
+    unsafe extern "C" fn push_file(
+        raw: *mut std::ffi::c_void,
+        idx: usize,
+        id: std::ffi::c_int,
+        act: std::ffi::c_int,
+        paused: std::ffi::c_int,
+        sz: i64,
+        rem: i64,
+        fname: *const std::ffi::c_char,
+    ) {
+        let groups = &mut *raw.cast::<Vec<FrontendGroupEntry>>();
+        if let Some(g) = groups.get_mut(idx) {
+            g.files.push(FrontendFileEntry {
+                id,
+                active_downloads: act,
+                paused: paused != 0,
+                size: sz,
+                remaining_size: rem,
+                filename_cstr: cstr_with_nul(fname.cast()),
+            });
+        }
+    }
+    let mut groups = Vec::new();
+    if let Some(cb) = env.local_queue_cb {
+        unsafe {
+            cb(
+                env.ctx,
+                (&mut groups as *mut Vec<FrontendGroupEntry>).cast(),
+                push_nzb,
+                push_file,
+            );
+        }
+    }
+    groups
+}
+
+#[cfg(unix)]
+fn fe_make_remote_params<'a>(
+    env: &'a NzbgetRsFrontendEnv,
+    ids: &'a [i32],
+) -> crate::binrpc::BinRpcClientParams<'a> {
+    crate::binrpc::BinRpcClientParams {
+        control_ip: unsafe { cstr_bytes(env.control_ip.cast()) },
+        control_port: env.control_port,
+        control_username: unsafe { cstr_bytes(env.control_username.cast()) },
+        control_password: unsafe { cstr_bytes(env.control_password.cast()) },
+        verbose: false,
+        match_mode: 1,
+        set_rate: 0,
+        edit_action: 0,
+        edit_offset: 0,
+        edit_text: None,
+        edit_ids: ids,
+        edit_names: &[],
+        log_lines: 0,
+        log_first_id: 0,
+        add_nzb_filename: b"",
+        arg_filename: b"",
+        add_category: b"",
+        auto_category: false,
+        add_top: false,
+        add_paused: false,
+        add_priority: 0,
+        add_dupe_key: b"",
+        add_dupe_mode: 0,
+        add_dupe_score: 0,
+        write_log_kind: 0,
+        write_log_text: b"",
+        want_file_list: false,
+        want_summary: false,
+    }
+}
+
+#[cfg(unix)]
+fn fe_prepare_remote(
+    env: &NzbgetRsFrontendEnv,
+    want_summary: bool,
+    want_file_list: bool,
+    needed_log_entries: u32,
+    needed_log_first_id: u32,
+    summary: &mut crate::binrpc::FrontendSummary,
+    messages: &mut Vec<FrontendLogEntry>,
+    groups: &mut Vec<FrontendGroupEntry>,
+) -> bool {
+    if fe_is_stopped(env) {
+        return false;
+    }
+    messages.clear();
+    groups.clear();
+
+    let mut params = fe_make_remote_params(env, &[]);
+    params.log_lines = needed_log_entries as i32;
+    params.log_first_id = needed_log_first_id;
+    params.want_file_list = want_file_list;
+    params.want_summary = want_summary;
+
+    let mut ok = crate::binrpc::client_execute(
+        100,
+        &params,
+        None,
+        |_| {},
+        |_| {},
+        || fe_is_stopped(env),
+        |id, kind, time, txt| {
+            messages.push(FrontendLogEntry {
+                id,
+                kind: kind as i32,
+                time: i64::from(time),
+                text: unsafe { cstr_bytes(txt) }.to_vec(),
+            });
+        },
+        |_, _, _, _, _, _, _, _, _, _, _, _, _| {},
+        |_, _, _| {},
+        |_, _, _, _, _, _, _, _, _| {},
+    );
+
+    if ok && (want_summary || want_file_list) {
+        let mut raw_files: Vec<(usize, FrontendFileEntry)> = Vec::new();
+        ok = crate::binrpc::client_execute(
+            101,
+            &params,
+            want_summary.then_some(summary),
+            |_| {},
+            |_| {},
+            || fe_is_stopped(env),
+            |_, _, _, _| {},
+            |id, _kind, sz, rem, psd, pfc, rpc, prio, _f0, nm, _f2, _f3, _f4| {
+                groups.push(FrontendGroupEntry {
+                    id: id as i32,
+                    priority: prio,
+                    active_downloads: 0,
+                    name_cstr: unsafe { cstr_with_nul(nm) },
+                    size: sz,
+                    remaining_size: rem,
+                    paused_size: psd,
+                    paused_file_count: pfc,
+                    remaining_par_count: rpc,
+                    files: Vec::new(),
+                });
+            },
+            |_, _, _| {},
+            |idx, fid, sz, rem, psd, _fnc, act, _subj, fname| {
+                raw_files.push((
+                    idx,
+                    FrontendFileEntry {
+                        id: fid as i32,
+                        active_downloads: act,
+                        paused: psd != 0,
+                        size: sz,
+                        remaining_size: rem,
+                        filename_cstr: unsafe { cstr_with_nul(fname) },
+                    },
+                ));
+            },
+        );
+        for (idx, file_entry) in raw_files {
+            if let Some(g) = groups.get_mut(idx) {
+                g.active_downloads += file_entry.active_downloads;
+                g.files.push(file_entry);
+            }
+        }
+    }
+
+    if !ok {
+        let ctrl_ip = unsafe { cstr_bytes(env.control_ip.cast()) };
+        let effective_ip: &[u8] = if ctrl_ip == b"0.0.0.0" {
+            b"127.0.0.1"
+        } else {
+            ctrl_ip
+        };
+        let mut msg = Vec::with_capacity(68 + effective_ip.len());
+        msg.extend_from_slice(b"\nUnable to send request to RustyGet server at ");
+        msg.extend_from_slice(effective_ip);
+        msg.extend_from_slice(b" (port ");
+        msg.extend_from_slice(env.control_port.to_string().as_bytes());
+        msg.extend_from_slice(b")    \n");
+        fe_write_stdout(env, &msg, false);
+        let _ = fe_action(env, 2, 0, 0, 0);
+        messages.clear();
+        groups.clear();
+        return false;
+    }
+    true
+}
+
+#[cfg(not(unix))]
+fn fe_prepare_remote(
+    _env: &NzbgetRsFrontendEnv,
+    _want_summary: bool,
+    _want_file_list: bool,
+    _needed_log_entries: u32,
+    _needed_log_first_id: u32,
+    _summary: &mut crate::binrpc::FrontendSummary,
+    _messages: &mut Vec<FrontendLogEntry>,
+    _groups: &mut Vec<FrontendGroupEntry>,
+) -> bool {
+    false
+}
+
+fn fe_server_pause_unpause(env: &NzbgetRsFrontendEnv, pause: bool, log_local_info: bool) {
+    if env.remote_mode != 0 {
+        #[cfg(unix)]
+        {
+            let params = fe_make_remote_params(env, &[]);
+            let _ = crate::binrpc::client_execute(
+                if pause { 16 } else { 17 },
+                &params,
+                None,
+                |_| {},
+                |_| {},
+                || fe_is_stopped(env),
+                |_, _, _, _| {},
+                |_, _, _, _, _, _, _, _, _, _, _, _, _| {},
+                |_, _, _| {},
+                |_, _, _, _, _, _, _, _, _| {},
+            );
+        }
+    } else {
+        let _ = fe_action(env, 3, i32::from(pause), i32::from(log_local_info), 0);
+    }
+}
+
+fn fe_server_set_rate(env: &NzbgetRsFrontendEnv, rate: i32) {
+    if env.remote_mode != 0 {
+        #[cfg(unix)]
+        {
+            let mut params = fe_make_remote_params(env, &[]);
+            params.set_rate = rate;
+            let _ = crate::binrpc::client_execute(
+                5,
+                &params,
+                None,
+                |_| {},
+                |_| {},
+                || fe_is_stopped(env),
+                |_, _, _, _| {},
+                |_, _, _, _, _, _, _, _, _, _, _, _, _| {},
+                |_, _, _| {},
+                |_, _, _, _, _, _, _, _, _| {},
+            );
+        }
+    } else {
+        let _ = fe_action(env, 4, rate, 0, 0);
+    }
+}
+
+fn fe_server_edit_queue(env: &NzbgetRsFrontendEnv, action: i32, offset: i32, id: i32) -> bool {
+    if env.remote_mode != 0 {
+        #[cfg(unix)]
+        {
+            let ids = [id];
+            let mut params = fe_make_remote_params(env, &ids);
+            params.edit_action = action;
+            params.edit_offset = offset;
+            return crate::binrpc::client_execute(
+                7,
+                &params,
+                None,
+                |_| {},
+                |_| {},
+                || fe_is_stopped(env),
+                |_, _, _, _| {},
+                |_, _, _, _, _, _, _, _, _, _, _, _, _| {},
+                |_, _, _| {},
+                |_, _, _, _, _, _, _, _, _| {},
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    } else {
+        fe_action(env, 5, action, offset, id) != 0
+    }
+}
+
+/// Runs `LoggableFrontend` (`mode = 0` plain, `mode = 1` colored) or `NServFrontend` (`mode = 3`).
+fn run_loggable(mode: i32, env: &NzbgetRsFrontendEnv) {
+    let colored = mode == 1 || mode == 3;
+    let want_summary = mode == 1;
+    let mut need_go_back = false;
+    let mut needed_log_first_id: u32 = 0;
+    let mut summary = crate::binrpc::FrontendSummary::default();
+    let mut remote_messages = Vec::new();
+    let mut remote_groups = Vec::new();
+
+    let mut update = |need_go_back: &mut bool,
+                      needed_log_first_id: &mut u32,
+                      summary: &mut crate::binrpc::FrontendSummary| {
+        if env.remote_mode != 0 {
+            if !fe_prepare_remote(
+                env,
+                want_summary,
+                false,
+                0,
+                *needed_log_first_id,
+                summary,
+                &mut remote_messages,
+                &mut remote_groups,
+            ) {
+                return;
+            }
+        } else if want_summary {
+            if let Some(cb) = env.local_summary_cb {
+                unsafe { cb(env.ctx, summary) };
+            }
+        }
+
+        if mode == 1 && *need_go_back {
+            fe_write_stdout(env, b"\r\x1b[1A", false);
+            *need_go_back = false;
+        }
+
+        if env.remote_mode != 0 {
+            if !remote_messages.is_empty() {
+                let first_id = remote_messages[0].id;
+                let mut start = needed_log_first_id
+                    .wrapping_sub(first_id)
+                    .wrapping_add(1) as i32;
+                if start < 0 {
+                    fe_write_stdout(
+                        env,
+                        if colored { b".....\x1b[K\n" } else { b".....\n" },
+                        false,
+                    );
+                    start = 0;
+                }
+                for m in remote_messages.iter().skip(start as usize) {
+                    let line = format_log_message_line(colored, m.kind, &m.text);
+                    fe_write_stdout(env, &line, false);
+                    *needed_log_first_id = m.id;
+                }
+            }
+            remote_messages.clear();
+            remote_groups.clear();
+        } else {
+            let (skipped, msgs) = fe_collect_local_messages(env, 0, *needed_log_first_id);
+            if skipped {
+                fe_write_stdout(
+                    env,
+                    if colored { b".....\x1b[K\n" } else { b".....\n" },
+                    false,
+                );
+            }
+            for m in &msgs {
+                let line = format_log_message_line(colored, m.kind, &m.text);
+                fe_write_stdout(env, &line, false);
+                *needed_log_first_id = m.id;
+            }
+        }
+
+        if mode == 1 {
+            fe_write_stdout(env, b"\x1b[s", false);
+            let status = format_colored_status_bar(
+                summary.stand_by,
+                summary.pause_download,
+                summary.current_download_speed,
+                summary.remaining_size,
+                i64::from(summary.download_limit),
+                summary.post_job_count,
+                summary.thread_count,
+                b"\x1b[K",
+            );
+            fe_write_stdout(env, &status, false);
+            *need_go_back = true;
+        }
+
+        fe_write_stdout(env, b"", true);
+    };
+
+    while !fe_is_stopped(env) {
+        update(&mut need_go_back, &mut needed_log_first_id, &mut summary);
+        let _ = fe_action(env, 1, env.update_interval, 0, 0);
+    }
+    update(&mut need_go_back, &mut needed_log_first_id, &mut summary);
+
+    if mode == 1 && env.remote_mode != 0 {
+        fe_write_stdout(env, b"\n", false);
+    }
+}
+
+fn fe_calc_queue_size(groups: &[FrontendGroupEntry], group_files: bool) -> i32 {
+    if group_files {
+        groups.len() as i32
+    } else {
+        groups.iter().map(|g| g.files.len() as i32).sum()
+    }
+}
+
+/// Runs `NCursesFrontend` (`mode = 2`).
+fn run_ncurses(
+    env: &NzbgetRsFrontendEnv,
+    mut read_key: impl FnMut() -> i32,
+    mut refresh_screen: impl FnMut(i32, i32),
+) {
+    const COLOR_TEXT: i32 = 1;
+    const COLOR_STATUS: i32 = 7;
+    const COLOR_INFOLINE: i32 = 9;
+    const COLOR_TEXTHIGHL: i32 = 10;
+
+    let use_color = env.use_color != 0;
+    let mut data_update_pos: i32 = 0;
+    let mut update_next_time = false;
+    let mut screen_height: i32 = 0;
+    let mut screen_width: i32 = 0;
+    let mut queue_win_top: i32 = 0;
+    let mut queue_win_height: i32 = 0;
+    let mut queue_win_client_height: i32 = 0;
+    let mut messages_win_top: i32 = 0;
+    let mut messages_win_height: i32 = 0;
+    let mut messages_win_client_height: i32 = 0;
+    let mut selected_queue_entry: i32 = 0;
+    let mut last_edit_entry: i32 = -1;
+    let mut last_pause_pars = false;
+    let mut queue_scroll_offset: i32 = 0;
+    let mut hint: Vec<u8> = Vec::new();
+    let mut start_hint: i64 = 0;
+    let mut input_number_index: i32 = 0;
+    let mut input_value: i32 = 0;
+    let mut input_mode: i32 = 0;
+    let mut show_nzbname = env.show_nzbname != 0;
+    let mut show_timestamp = env.show_timestamp != 0;
+    let mut group_files = env.group_files != 0;
+    let mut queue_window_percentage: i32 = 50;
+
+    let mut summary = crate::binrpc::FrontendSummary::default();
+    let mut groups: Vec<FrontendGroupEntry> = Vec::new();
+    let mut messages: Vec<FrontendLogEntry> = Vec::new();
+
+    while !fe_is_stopped(env) {
+        let mut update_now = false;
+        let key = read_key();
+
+        if key != -1 {
+            update_now = true;
+            update_next_time = true;
+        } else if update_next_time {
+            update_now = true;
+            update_next_time = false;
+        } else if data_update_pos <= 0 {
+            update_now = true;
+            update_next_time = false;
+        }
+
+        if update_now {
+            'update_frame: {
+                if env.remote_mode == 0 {
+                    groups = fe_collect_local_queue(env);
+                    messages = fe_collect_local_messages(env, 1, 0).1;
+                }
+
+                ncurses_calc_window_sizes(
+                    fe_calc_queue_size(&groups, group_files),
+                    queue_window_percentage,
+                    &mut screen_height,
+                    &mut screen_width,
+                    &mut queue_win_top,
+                    &mut queue_win_height,
+                    &mut queue_win_client_height,
+                    &mut messages_win_top,
+                    &mut messages_win_height,
+                    &mut messages_win_client_height,
+                );
+
+                if data_update_pos <= 0 {
+                    if env.remote_mode != 0 {
+                        let needed_entries = messages_win_client_height.max(0) as u32;
+                        if !fe_prepare_remote(
+                            env,
+                            true,
+                            true,
+                            needed_entries,
+                            0,
+                            &mut summary,
+                            &mut messages,
+                            &mut groups,
+                        ) {
+                            break 'update_frame;
+                        }
+                    } else if let Some(cb) = env.local_summary_cb {
+                        unsafe { cb(env.ctx, &mut summary) };
+                    }
+
+                    ncurses_calc_window_sizes(
+                        fe_calc_queue_size(&groups, group_files),
+                        queue_window_percentage,
+                        &mut screen_height,
+                        &mut screen_width,
+                        &mut queue_win_top,
+                        &mut queue_win_height,
+                        &mut queue_win_client_height,
+                        &mut messages_win_top,
+                        &mut messages_win_height,
+                        &mut messages_win_client_height,
+                    );
+                }
+
+                if input_mode == 1 && fe_calc_queue_size(&groups, group_files) == 0 {
+                    selected_queue_entry = 0;
+                    input_mode = 0;
+                }
+
+                if queue_win_height > 0 {
+                    let in_scroll = |idx: i32| {
+                        idx >= queue_scroll_offset
+                            && idx < queue_scroll_offset + queue_win_height - 1
+                    };
+                    if group_files {
+                        let mut line_nr = queue_win_top;
+                        if groups.is_empty() {
+                            let hdr = format_group_queue_header(use_color, 0, 0, 0);
+                            let top =
+                                format_top_header(&hdr, screen_width, false, summary.dn_time_sec);
+                            term_plot_line(&top, line_nr, 0, screen_width, use_color, COLOR_INFOLINE);
+                            line_nr += 1;
+                            term_plot_line(
+                                b"Ready to receive nzb-job",
+                                line_nr,
+                                0,
+                                screen_width,
+                                use_color,
+                                COLOR_TEXT,
+                            );
+                        } else {
+                            line_nr += 1;
+                            let mut col_width_files: i32 = 0;
+                            let mut col_width_total: i32 = 0;
+                            let mut col_width_left: i32 = 0;
+                            for (i, g) in groups.iter().enumerate() {
+                                if in_scroll(i as i32) {
+                                    let spec = NcursesGroupRowSpec {
+                                        edit_queue_mode: i32::from(input_mode == 1),
+                                        selected: 0,
+                                        use_color: i32::from(use_color),
+                                        color_highl: COLOR_TEXTHIGHL,
+                                        color_text: COLOR_TEXT,
+                                        screen_width,
+                                        calc_col_width: 1,
+                                        id: g.id,
+                                        priority: g.priority,
+                                        active_downloads: g.active_downloads,
+                                        name: g.name_cstr.as_ptr(),
+                                        file_count: g.files.len() as i32,
+                                        paused_file_count: g.paused_file_count,
+                                        size: g.size,
+                                        remaining_size: g.remaining_size,
+                                        paused_size: g.paused_size,
+                                        stand_by: summary.stand_by,
+                                        pause_download: summary.pause_download,
+                                        current_download_speed: summary.current_download_speed,
+                                    };
+                                    let _ = format_group_row(
+                                        &spec,
+                                        &mut col_width_files,
+                                        &mut col_width_total,
+                                        &mut col_width_left,
+                                    );
+                                }
+                            }
+
+                            let mut remaining: i64 = 0;
+                            let mut paused: i64 = 0;
+                            for (i, g) in groups.iter().enumerate() {
+                                if in_scroll(i as i32) {
+                                    let spec = NcursesGroupRowSpec {
+                                        edit_queue_mode: i32::from(input_mode == 1),
+                                        selected: i32::from((i as i32) == selected_queue_entry),
+                                        use_color: i32::from(use_color),
+                                        color_highl: COLOR_TEXTHIGHL,
+                                        color_text: COLOR_TEXT,
+                                        screen_width,
+                                        calc_col_width: 0,
+                                        id: g.id,
+                                        priority: g.priority,
+                                        active_downloads: g.active_downloads,
+                                        name: g.name_cstr.as_ptr(),
+                                        file_count: g.files.len() as i32,
+                                        paused_file_count: g.paused_file_count,
+                                        size: g.size,
+                                        remaining_size: g.remaining_size,
+                                        paused_size: g.paused_size,
+                                        stand_by: summary.stand_by,
+                                        pause_download: summary.pause_download,
+                                        current_download_speed: summary.current_download_speed,
+                                    };
+                                    let (row_buf, color) = format_group_row(
+                                        &spec,
+                                        &mut col_width_files,
+                                        &mut col_width_total,
+                                        &mut col_width_left,
+                                    );
+                                    term_plot_line(
+                                        &row_buf,
+                                        line_nr,
+                                        0,
+                                        screen_width,
+                                        use_color,
+                                        color,
+                                    );
+                                    line_nr += 1;
+                                }
+                                remaining += g.remaining_size;
+                                paused += g.paused_size;
+                            }
+
+                            let hdr = format_group_queue_header(
+                                use_color,
+                                groups.len() as i32,
+                                remaining,
+                                paused,
+                            );
+                            let top =
+                                format_top_header(&hdr, screen_width, false, summary.dn_time_sec);
+                            term_plot_line(
+                                &top,
+                                queue_win_top,
+                                0,
+                                screen_width,
+                                use_color,
+                                COLOR_INFOLINE,
+                            );
+                        }
+                    } else {
+                        let mut line_nr = queue_win_top + 1;
+                        let mut remaining: i64 = 0;
+                        let mut paused: i64 = 0;
+                        let mut paused_files: i32 = 0;
+                        let mut file_num: i32 = 0;
+
+                        for g in &groups {
+                            for f in &g.files {
+                                if in_scroll(file_num) {
+                                    let spec = NcursesFileRowSpec {
+                                        edit_queue_mode: i32::from(input_mode == 1),
+                                        selected: i32::from(file_num == selected_queue_entry),
+                                        use_color: i32::from(use_color),
+                                        color_highl: COLOR_TEXTHIGHL,
+                                        color_text: COLOR_TEXT,
+                                        id: f.id,
+                                        priority: g.priority,
+                                        active_downloads: f.active_downloads,
+                                        paused: i32::from(f.paused),
+                                        show_nzbname: i32::from(show_nzbname),
+                                        path_sep: env.path_sep,
+                                        nzb_name: g.name_cstr.as_ptr(),
+                                        filename: f.filename_cstr.as_ptr(),
+                                        size: f.size,
+                                        remaining_size: f.remaining_size,
+                                    };
+                                    let (row_buf, color) = format_file_row(&spec);
+                                    term_plot_line(
+                                        &row_buf,
+                                        line_nr,
+                                        0,
+                                        screen_width,
+                                        use_color,
+                                        color,
+                                    );
+                                    line_nr += 1;
+                                }
+                                file_num += 1;
+                                remaining += f.remaining_size;
+                                if f.paused {
+                                    paused += f.remaining_size;
+                                    paused_files += 1;
+                                }
+                            }
+                        }
+
+                        let hdr = format_file_queue_header(
+                            use_color,
+                            file_num,
+                            paused_files,
+                            remaining,
+                            paused,
+                        );
+                        let top = format_top_header(&hdr, screen_width, true, summary.up_time_sec);
+                        term_plot_line(
+                            &top,
+                            queue_win_top,
+                            0,
+                            screen_width,
+                            use_color,
+                            COLOR_INFOLINE,
+                        );
+                        if file_num == 0 {
+                            term_plot_line(
+                                b"Ready to receive nzb-job",
+                                line_nr,
+                                0,
+                                screen_width,
+                                use_color,
+                                COLOR_TEXT,
+                            );
+                        }
+                    }
+                }
+
+                if messages_win_height > 0 {
+                    let mut line_nr = messages_win_top;
+                    term_plot_line(
+                        if use_color {
+                            b" Messages"
+                        } else {
+                            b"***  Messages"
+                        },
+                        line_nr,
+                        0,
+                        screen_width,
+                        use_color,
+                        COLOR_INFOLINE,
+                    );
+                    line_nr += 1;
+
+                    let mut line = line_nr + messages_win_client_height - 1;
+                    let mut lines_to_print = messages_win_client_height;
+
+                    for m in messages.iter().rev() {
+                        if lines_to_print <= 0 {
+                            break;
+                        }
+                        let printed = ncurses_print_message(
+                            m.kind,
+                            m.time,
+                            &m.text,
+                            line,
+                            lines_to_print,
+                            show_timestamp,
+                            env.time_correction,
+                            screen_width,
+                            use_color,
+                        );
+                        line -= printed;
+                        lines_to_print -= printed;
+                    }
+
+                    if lines_to_print > 0 {
+                        line = line_nr + messages_win_client_height - 1;
+                        while lines_to_print > 0 {
+                            lines_to_print -= 1;
+                            term_plot_line(b"", line, 0, screen_width, use_color, COLOR_TEXT);
+                            line -= 1;
+                        }
+                        let mut lines_to_print2 = messages_win_client_height;
+                        for m in messages.iter().rev() {
+                            if lines_to_print2 <= 0 {
+                                break;
+                            }
+                            let printed = ncurses_print_message(
+                                m.kind,
+                                m.time,
+                                &m.text,
+                                line,
+                                lines_to_print2,
+                                show_timestamp,
+                                env.time_correction,
+                                screen_width,
+                                use_color,
+                            );
+                            line -= printed;
+                            lines_to_print2 -= printed;
+                        }
+                    }
+                }
+
+                let status_spec = NcursesStatusSpec {
+                    stand_by: summary.stand_by,
+                    pause_download: summary.pause_download,
+                    current_download_speed: summary.current_download_speed,
+                    remaining_size: summary.remaining_size,
+                    download_limit: i64::from(summary.download_limit),
+                    post_job_count: summary.post_job_count,
+                    dn_time_sec: summary.dn_time_sec,
+                    all_bytes: summary.all_bytes,
+                    thread_count: summary.thread_count,
+                };
+                let status_buf = format_status_bar(&status_spec);
+                term_plot_line(
+                    &status_buf,
+                    screen_height - 2,
+                    0,
+                    screen_width,
+                    use_color,
+                    COLOR_STATUS,
+                );
+
+                let cur_time = fe_action(env, 7, 0, 0, 0);
+                ncurses_print_key_input_bar(
+                    screen_height,
+                    screen_width,
+                    use_color,
+                    input_mode,
+                    group_files,
+                    selected_queue_entry,
+                    fe_calc_queue_size(&groups, group_files),
+                    input_value,
+                    input_number_index,
+                    &hint,
+                    &mut start_hint,
+                    cur_time,
+                );
+
+                let mut k = key;
+                while k != -1 {
+                    let mut st = NcursesKeyState {
+                        input_mode,
+                        show_nzbname: i32::from(show_nzbname),
+                        show_timestamp: i32::from(show_timestamp),
+                        group_files: i32::from(group_files),
+                        queue_window_percentage,
+                        selected_queue_entry,
+                        queue_scroll_offset,
+                        queue_win_client_height,
+                        input_number_index,
+                        input_value,
+                        ..Default::default()
+                    };
+                    ncurses_handle_key(&mut st, k, fe_calc_queue_size(&groups, group_files));
+                    input_mode = st.input_mode;
+                    show_nzbname = st.show_nzbname != 0;
+                    show_timestamp = st.show_timestamp != 0;
+                    group_files = st.group_files != 0;
+                    queue_window_percentage = st.queue_window_percentage;
+                    queue_scroll_offset = st.queue_scroll_offset;
+                    input_number_index = st.input_number_index;
+                    input_value = st.input_value;
+                    if st.exit_proc != 0 {
+                        let _ = fe_action(env, 6, 0, 0, 0);
+                    }
+                    if st.calc_window_sizes != 0 {
+                        ncurses_calc_window_sizes(
+                            fe_calc_queue_size(&groups, group_files),
+                            queue_window_percentage,
+                            &mut screen_height,
+                            &mut screen_width,
+                            &mut queue_win_top,
+                            &mut queue_win_height,
+                            &mut queue_win_client_height,
+                            &mut messages_win_top,
+                            &mut messages_win_height,
+                            &mut messages_win_client_height,
+                        );
+                    }
+                    if st.toggle_pause != 0 {
+                        let pause = summary.pause_download == 0;
+                        fe_server_pause_unpause(env, pause, env.remote_mode == 0);
+                    }
+                    if st.set_delete_hint != 0 {
+                        hint.clear();
+                        hint.extend_from_slice(b" Use Uppercase \"D\" for delete");
+                        start_hint = fe_action(env, 7, 0, 0, 0);
+                    }
+                    let mut edit_ok = true;
+                    if st.edit_action != 0 {
+                        let mut act = st.edit_action;
+                        let mut target_id = 0i32;
+                        if group_files {
+                            let has_group = selected_queue_entry >= 0
+                                && (selected_queue_entry as usize) < groups.len();
+                            let (rem, psd, rpc) = if has_group {
+                                let g = &groups[selected_queue_entry as usize];
+                                target_id = g.id;
+                                (g.remaining_size, g.paused_size, g.remaining_par_count)
+                            } else {
+                                (0, 0, 0)
+                            };
+                            act = ncurses_resolve_group_edit_action(
+                                act,
+                                has_group,
+                                rem,
+                                psd,
+                                rpc,
+                                selected_queue_entry,
+                                last_edit_entry,
+                                &mut last_pause_pars,
+                            );
+                        } else {
+                            let mut fnum = 0i32;
+                            for g in &groups {
+                                for f in &g.files {
+                                    if selected_queue_entry == fnum {
+                                        target_id = f.id;
+                                        if act == 4 && f.paused {
+                                            act = 5;
+                                        }
+                                    }
+                                    fnum += 1;
+                                }
+                            }
+                        }
+                        last_edit_entry = selected_queue_entry;
+                        data_update_pos = 10;
+                        update_next_time = true;
+                        edit_ok = if target_id != 0 {
+                            let ok = fe_server_edit_queue(env, act, st.edit_offset, target_id);
+                            if env.remote_mode == 0 {
+                                groups = fe_collect_local_queue(env);
+                            }
+                            ok
+                        } else {
+                            false
+                        };
+                    }
+                    if st.has_select_entry != 0 && edit_ok {
+                        let (sel, scr) = ncurses_set_current_queue_entry(
+                            st.select_entry,
+                            fe_calc_queue_size(&groups, group_files),
+                            queue_scroll_offset,
+                            queue_win_client_height,
+                        );
+                        selected_queue_entry = sel;
+                        queue_scroll_offset = scr;
+                    }
+                    if st.need_update_data != 0 {
+                        data_update_pos = 10;
+                        update_next_time = true;
+                    }
+                    if st.has_set_download_rate != 0 {
+                        fe_server_set_rate(env, st.download_rate_bytes);
+                    }
+                    if st.stop_loop != 0 {
+                        break;
+                    }
+                    k = read_key();
+                }
+
+                refresh_screen(screen_height, screen_width);
+            }
+        }
+
+        if data_update_pos <= 0 {
+            data_update_pos = env.update_interval;
+        }
+        let sleep_interval = if input_mode == 0 { 100 } else { 10 };
+        let _ = fe_action(env, 1, sleep_interval, 0, 0);
+        data_update_pos -= sleep_interval;
+    }
+}
+
+/// Consolidated entry point for `nzbget_rs_frontend_op`:
+/// - `0`: `term_init()`
+/// - `1`: `term_shutdown()`
+/// - `2`: `LoggableFrontend(false)`
+/// - `3`: `LoggableFrontend(true)` (`ColoredFrontend`)
+/// - `4`: `NCursesFrontend`
+/// - `5`: `NServFrontend`
+///
+/// # Safety
+/// For `op >= 2`, `env` must be a valid pointer to `NzbgetRsFrontendEnv`.
+pub unsafe fn frontend_op(op: std::ffi::c_int, env: *const NzbgetRsFrontendEnv) -> std::ffi::c_int {
+    match op {
+        0 => term_init(),
+        1 => {
+            term_shutdown();
+            0
+        }
+        2 => {
+            if let Some(e) = env.as_ref() {
+                run_loggable(0, e);
+            }
+            0
+        }
+        3 => {
+            if let Some(e) = env.as_ref() {
+                run_loggable(1, e);
+            }
+            0
+        }
+        4 => {
+            if let Some(e) = env.as_ref() {
+                run_ncurses(e, term_read_key, term_refresh);
+            }
+            0
+        }
+        5 => {
+            if let Some(e) = env.as_ref() {
+                run_loggable(3, e);
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_frontend_runner_loggable_colored_and_ncurses_local_loop() {
+        struct MockHost {
+            stopped: bool,
+            waits: usize,
+            max_waits: usize,
+            flushes: usize,
+            stdout: Vec<u8>,
+            edited: Vec<(i32, i32, i32)>,
+            paused_calls: Vec<(i32, i32)>,
+            exit_called: bool,
+        }
+        unsafe extern "C" fn write_cb(
+            raw: *mut std::ffi::c_void,
+            ptr: *const std::ffi::c_char,
+            len: usize,
+            do_flush: std::ffi::c_int,
+        ) {
+            let h = &mut *raw.cast::<MockHost>();
+            if !ptr.is_null() && len > 0 {
+                h.stdout
+                    .extend_from_slice(std::slice::from_raw_parts(ptr.cast::<u8>(), len));
+            }
+            if do_flush != 0 {
+                h.flushes += 1;
+            }
+        }
+        unsafe extern "C" fn action_cb(
+            raw: *mut std::ffi::c_void,
+            op: std::ffi::c_int,
+            a1: std::ffi::c_int,
+            a2: std::ffi::c_int,
+            a3: std::ffi::c_int,
+        ) -> i64 {
+            let h = &mut *raw.cast::<MockHost>();
+            match op {
+                0 => i64::from(h.stopped),
+                1 => {
+                    h.waits += 1;
+                    if h.waits >= h.max_waits {
+                        h.stopped = true;
+                    }
+                    0
+                }
+                2 => {
+                    h.stopped = true;
+                    0
+                }
+                3 => {
+                    h.paused_calls.push((a1, a2));
+                    0
+                }
+                5 => {
+                    h.edited.push((a1, a2, a3));
+                    1
+                }
+                6 => {
+                    h.exit_called = true;
+                    h.stopped = true;
+                    0
+                }
+                7 => 1_700_000_000,
+                _ => 0,
+            }
+        }
+        unsafe extern "C" fn sum_cb(
+            _raw: *mut std::ffi::c_void,
+            s: *mut crate::binrpc::FrontendSummary,
+        ) {
+            let s = &mut *s;
+            s.current_download_speed = 1024 * 1024;
+            s.remaining_size = 4 * 1024 * 1024;
+            s.thread_count = 4;
+            s.up_time_sec = 120;
+            s.dn_time_sec = 60;
+            s.all_bytes = 60 * 1024 * 1024;
+        }
+        unsafe extern "C" fn msgs_cb(
+            _raw: *mut std::ffi::c_void,
+            tail_mode: std::ffi::c_int,
+            arg: u32,
+            _out_skipped: *mut std::ffi::c_int,
+            emit_ctx: *mut std::ffi::c_void,
+            emit: FrontendEmitMsgFn,
+        ) {
+            if tail_mode != 0 || arg == 0 {
+                emit(emit_ctx, 1, 0, 1_700_000_000, c"hello frontend".as_ptr());
+            }
+        }
+        unsafe extern "C" fn queue_cb(
+            _raw: *mut std::ffi::c_void,
+            emit_ctx: *mut std::ffi::c_void,
+            emit_nzb: FrontendEmitNzbFn,
+            emit_file: FrontendEmitFileFn,
+        ) {
+            emit_nzb(
+                emit_ctx,
+                10,
+                0,
+                1,
+                8 * 1024 * 1024,
+                4 * 1024 * 1024,
+                0,
+                0,
+                1,
+                c"TestJob".as_ptr(),
+            );
+            emit_file(
+                emit_ctx,
+                0,
+                101,
+                1,
+                0,
+                8 * 1024 * 1024,
+                4 * 1024 * 1024,
+                c"part1.rar".as_ptr(),
+            );
+        }
+
+        // 1. ColoredFrontend local loop
+        let mut host = MockHost {
+            stopped: false,
+            waits: 0,
+            max_waits: 2,
+            flushes: 0,
+            stdout: Vec::new(),
+            edited: Vec::new(),
+            paused_calls: Vec::new(),
+            exit_called: false,
+        };
+        let env = NzbgetRsFrontendEnv {
+            ctx: (&mut host as *mut MockHost).cast(),
+            remote_mode: 0,
+            update_interval: 50,
+            use_color: 1,
+            show_nzbname: 1,
+            show_timestamp: 0,
+            group_files: 0,
+            time_correction: 0,
+            path_sep: b'/',
+            control_ip: c"127.0.0.1".as_ptr(),
+            control_port: 6789,
+            control_username: c"".as_ptr(),
+            control_password: c"".as_ptr(),
+            write_stdout_cb: Some(write_cb),
+            action_cb: Some(action_cb),
+            local_summary_cb: Some(sum_cb),
+            local_messages_cb: Some(msgs_cb),
+            local_queue_cb: Some(queue_cb),
+        };
+        unsafe { frontend_op(3, &env) };
+        let text = String::from_utf8(host.stdout.clone()).unwrap();
+        assert!(text.contains("\x1b[32m[INFO]\x1b[39m hello frontend\x1b[K\n"));
+        assert!(text.contains("4 threads, 1.00 MB/s, 4.00 MB remaining"));
+        assert!(text.contains("\r\x1b[1A"));
+        assert!(host.flushes >= 2);
+
+        // 2. NCursesFrontend local loop with synthetic keys ('p', 'e', 'p', 'q')
+        host.stopped = false;
+        host.waits = 0;
+        host.max_waits = 10;
+        let mut keys = std::collections::VecDeque::from([
+            b'p' as i32,
+            b'e' as i32,
+            -1,
+            b'p' as i32,
+            b'q' as i32,
+            -1,
+        ]);
+        let mut rendered = Vec::new();
+        run_ncurses(
+            &env,
+            || keys.pop_front().unwrap_or(-1),
+            |_r, _c| {
+                let mut g = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+                rendered.extend_from_slice(&g.frame_buf);
+                g.frame_buf.clear();
+            },
+        );
+        let frame_str = String::from_utf8(rendered).unwrap();
+        assert!(frame_str.contains("TestJob/part1.rar"));
+        assert!(frame_str.contains("hello frontend"));
+        assert_eq!(host.paused_calls, vec![(1, 1)]);
+        assert_eq!(host.edited, vec![(4, 0, 101)]);
+        assert!(host.exit_called);
+    }
 
     #[test]
     fn test_format_status_bar() {

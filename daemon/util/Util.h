@@ -38916,180 +38916,207 @@ private:
 
 static const int32 NZBMESSAGE_SIGNATURE = 0x6E7A6231; // = "nzb-XX" (protocol version)
 
+extern void ExitProc();
+
 class Frontend : public Thread
 {
 public:
-	Frontend()
+	explicit Frontend(int mode) : m_mode(mode)
 	{
-		debug("Creating Frontend");
-
-		m_workStateObserver.m_owner = this;
-		g_WorkState->Attach(&m_workStateObserver);
-
-		m_updateInterval = g_Options->GetUpdateInterval();
+		if (m_mode != 3)
+		{
+			debug("Creating Frontend");
+			m_workStateObserver.m_owner = this;
+			if (g_WorkState)
+			{
+				g_WorkState->Attach(&m_workStateObserver);
+			}
+			if (g_Options)
+			{
+				m_updateInterval = g_Options->GetUpdateInterval();
+			}
+		}
+		if (m_mode == 2)
+		{
+			m_useColor = nzbget_rs_frontend_op(0, nullptr) > 0;
+		}
 	}
 
-protected:
-	bool m_summary = false;
-	bool m_fileList = false;
-	uint32 m_neededLogEntries = 0;
-	uint32 m_neededLogFirstId = 0;
-	int m_updateInterval;
+	~Frontend() override
+	{
+		if (m_mode != 3 && g_WorkState)
+		{
+			g_WorkState->Detach(&m_workStateObserver);
+		}
+		if (m_mode == 2)
+		{
+			nzbget_rs_frontend_op(1, nullptr);
+			printf("\n");
+		}
+	}
 
-	// summary
-	int64 m_currentDownloadSpeed = 0;
-	int64 m_remainingSize = 0;
-	bool m_pauseDownload = false;
-	int m_downloadLimit = 0;
-	int m_threadCount = 0;
-	int m_postJobCount = 0;
-	int m_upTimeSec = 0;
-	int m_dnTimeSec = 0;
-	int64 m_allBytes = 0;
-	bool m_standBy = false;
-	std::mutex m_waitMutex;
-	std::condition_variable m_waitCond;
-
-	virtual void Stop()
+	void Stop() override
 	{
 		Thread::Stop();
-
 		m_waitCond.notify_all();
 	}
 
-	bool PrepareData()
+protected:
+	void Run() override
 	{
-		if (IsRemoteMode())
+		if (m_mode == 0 || m_mode == 1)
 		{
-			if (IsStopped())
-			{
-				return false;
-			}
-			if (!RequestMessages() || ((m_summary || m_fileList) && !RequestFileList()))
-			{
-				const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
-				printf("\nUnable to send request to RustyGet server at %s (port %i)    \n", controlIp, g_Options->GetControlPort());
-				Stop();
-				return false;
-			}
+			debug("Entering LoggableFrontend-loop");
 		}
-		else
+		else if (m_mode == 2)
 		{
-			if (m_summary)
-			{
-				m_currentDownloadSpeed = g_StatMeter->CalcCurrentDownloadSpeed();
-				m_pauseDownload = g_WorkState->GetPauseDownload();
-				m_downloadLimit = g_WorkState->GetSpeedLimit();
-				m_threadCount = Thread::GetThreadCount();
-				g_StatMeter->CalcTotalStat(&m_upTimeSec, &m_dnTimeSec, &m_allBytes, &m_standBy);
-
-				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-				m_postJobCount = 0;
-				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-				{
-					m_postJobCount += nzbInfo->GetPostInfo() ? 1 : 0;
-				}
-				downloadQueue->CalcRemainingSize(&m_remainingSize, nullptr);
-			}
+			debug("Entering NCursesFrontend-loop");
 		}
-		return true;
-	}
 
-	void FreeData()
-	{
-		if (IsRemoteMode())
-		{
-			m_remoteMessages.clear();
-			DownloadQueue::Guard()->GetQueue()->clear();
-		}
-	}
-
-	GuardedMessageList GuardMessages()
-	{
-		if (IsRemoteMode())
-		{
-			return GuardedMessageList(&m_remoteMessages, nullptr);
-		}
-		else
-		{
-			return g_Log->GuardMessages();
-		}
-	}
-
-	bool IsRemoteMode()
-	{
-		return g_Options->GetRemoteClientMode();
-	}
-
-	NzbgetRsBinRpcClientEnv MakeRemoteEnv()
-	{
-		NzbgetRsBinRpcClientEnv env{};
+		NzbgetRsFrontendEnv env{};
 		env.ctx = this;
-		env.control_ip = g_Options->GetControlIp();
-		env.control_port = g_Options->GetControlPort();
-		env.control_username = g_Options->GetControlUsername();
-		env.control_password = g_Options->GetControlPassword();
-		env.is_stopped_cb = [](void* c) -> int { return static_cast<Frontend*>(c)->IsStopped() ? 1 : 0; };
-		return env;
-	}
+		env.remote_mode = (m_mode != 3 && g_Options && g_Options->GetRemoteClientMode()) ? 1 : 0;
+		env.update_interval = m_updateInterval;
+		env.use_color = m_useColor ? 1 : 0;
+		env.path_sep = (uint8_t)PATH_SEPARATOR;
+		if (m_mode != 3 && g_Options)
+		{
+			env.show_nzbname = g_Options->GetCursesNzbName() ? 1 : 0;
+			env.show_timestamp = g_Options->GetCursesTime() ? 1 : 0;
+			env.group_files = g_Options->GetCursesGroup() ? 1 : 0;
+			env.time_correction = g_Options->GetTimeCorrection();
+			env.control_ip = g_Options->GetControlIp();
+			env.control_port = g_Options->GetControlPort();
+			env.control_username = g_Options->GetControlUsername();
+			env.control_password = g_Options->GetControlPassword();
+		}
+		env.write_stdout_cb = [](void*, const char* ptr, size_t len, int doFlush) {
+			if (ptr && len > 0)
+			{
+				fwrite(ptr, 1, len, stdout);
+			}
+			if (doFlush)
+			{
+				fflush(stdout);
+			}
+		};
+		env.action_cb = [](void* raw, int op, int a1, int a2, int a3) -> int64_t {
+			Frontend* self = static_cast<Frontend*>(raw);
+			switch (op)
+			{
+			case 0:
+				return self->IsStopped() ? 1 : 0;
+			case 1:
+				if (self->m_mode != 3 && g_WorkState && g_WorkState->GetPauseFrontend())
+				{
+					std::unique_lock<std::mutex> lk(self->m_waitMutex);
+					self->m_waitCond.wait_for(lk, std::chrono::milliseconds(2000));
+				}
+				else
+				{
+					Util::Sleep(a1);
+				}
+				return 0;
+			case 2:
+				self->Stop();
+				return 0;
+			case 3:
+				if (a2)
+				{
+					info("%s", a1 ? "Pausing download" : "Unpausing download");
+				}
+				g_WorkState->SetResumeTime(0);
+				g_WorkState->SetPauseDownload(a1 != 0);
+				return 0;
+			case 4:
+				g_WorkState->SetSpeedLimit(a1);
+				return 0;
+			case 5:
+				return DownloadQueue::Guard()->EditEntry(
+					a3, static_cast<DownloadQueue::EEditAction>(a1), BString<100>("%i", a2)) ? 1 : 0;
+			case 6:
+				ExitProc();
+				return 0;
+			case 7:
+				return static_cast<int64_t>(Util::CurrentTime());
+			default:
+				return 0;
+			}
+		};
+		env.local_summary_cb = [](void*, NzbgetRsFrontendSummary* s) {
+			bool standBy = false;
+			s->current_download_speed = g_StatMeter->CalcCurrentDownloadSpeed();
+			s->pause_download = g_WorkState->GetPauseDownload() ? 1 : 0;
+			s->download_limit = g_WorkState->GetSpeedLimit();
+			s->thread_count = Thread::GetThreadCount();
+			g_StatMeter->CalcTotalStat(&s->up_time_sec, &s->dn_time_sec, &s->all_bytes, &standBy);
+			s->stand_by = standBy ? 1 : 0;
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			s->post_job_count = 0;
+			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+			{
+				s->post_job_count += nzbInfo->GetPostInfo() ? 1 : 0;
+			}
+			downloadQueue->CalcRemainingSize(&s->remaining_size, nullptr);
+		};
+		env.local_messages_cb = [](void*, int tailMode, uint32_t arg, int* outSkipped, void* emitCtx,
+			void (*emit)(void*, uint32_t, int, int64_t, const char*)) {
+			GuardedMessageList messages = g_Log->GuardMessages();
+			if (messages->empty())
+			{
+				return;
+			}
+			if (tailMode == 0)
+			{
+				int start = static_cast<int>(arg) - static_cast<int>(messages->front().GetId()) + 1;
+				if (start < 0)
+				{
+					if (outSkipped) *outSkipped = 1;
+					start = 0;
+				}
+				for (uint32 i = static_cast<uint32>(start); i < messages->size(); i++)
+				{
+					Message& m = messages->at(i);
+					emit(emitCtx, m.GetId(), static_cast<int>(m.GetKind()), static_cast<int64_t>(m.GetTime()), m.GetText());
+				}
+			}
+			else
+			{
+				for (uint32 i = 0; i < messages->size(); i++)
+				{
+					Message& m = messages->at(i);
+					emit(emitCtx, m.GetId(), static_cast<int>(m.GetKind()), static_cast<int64_t>(m.GetTime()), m.GetText());
+				}
+			}
+		};
+		env.local_queue_cb = [](void*, void* emitCtx,
+			void (*emitNzb)(void*, int, int, int, int64_t, int64_t, int64_t, int, int, const char*),
+			void (*emitFile)(void*, size_t, int, int, int, int64_t, int64_t, const char*)) {
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			size_t idx = 0;
+			for (NzbInfo* n : downloadQueue->GetQueue())
+			{
+				emitNzb(emitCtx, n->GetId(), n->GetPriority(), n->GetActiveDownloads(),
+					n->GetSize(), n->GetRemainingSize(), n->GetPausedSize(),
+					n->GetPausedFileCount(), n->GetRemainingParCount(), n->GetName());
+				for (FileInfo* f : n->GetFileList())
+				{
+					emitFile(emitCtx, idx, f->GetId(), f->GetActiveDownloads(), f->GetPaused() ? 1 : 0,
+						f->GetSize(), f->GetRemainingSize(), f->GetFilename());
+				}
+				idx++;
+			}
+		};
 
-	void ServerPauseUnpause(bool pause)
-	{
-		if (IsRemoteMode())
-		{
-			NzbgetRsBinRpcClientEnv env = MakeRemoteEnv();
-			nzbget_rs_binrpc_client(pause ? 16 : 17, &env);
-		}
-		else
-		{
-			g_WorkState->SetResumeTime(0);
-			g_WorkState->SetPauseDownload(pause);
-		}
-	}
+		nzbget_rs_frontend_op(2 + m_mode, &env);
 
-	void ServerSetDownloadRate(int rate)
-	{
-		if (IsRemoteMode())
+		if (m_mode == 0 || m_mode == 1)
 		{
-			NzbgetRsBinRpcClientEnv env = MakeRemoteEnv();
-			env.set_rate = rate;
-			nzbget_rs_binrpc_client(5, &env);
+			debug("Exiting LoggableFrontend-loop");
 		}
-		else
+		else if (m_mode == 2)
 		{
-			g_WorkState->SetSpeedLimit(rate);
-		}
-	}
-
-	bool ServerEditQueue(DownloadQueue::EEditAction action, int offset, int id)
-	{
-		if (IsRemoteMode())
-		{
-			NzbgetRsBinRpcClientEnv env = MakeRemoteEnv();
-			int32_t targetId = id;
-			env.edit_action = (int)action;
-			env.edit_offset = offset;
-			env.match_mode = 1;
-			env.edit_ids = &targetId;
-			env.edit_ids_len = 1;
-			return nzbget_rs_binrpc_client(7, &env) != 0;
-		}
-		else
-		{
-			return DownloadQueue::Guard()->EditEntry(id, action, BString<100>("%i", offset));
-		}
-	}
-
-	void Wait(int milliseconds)
-	{
-		if (g_WorkState->GetPauseFrontend())
-		{
-			std::unique_lock<std::mutex> lk(m_waitMutex);
-			m_waitCond.wait_for(lk, std::chrono::milliseconds(2000));
-		}
-		else
-		{
-			Util::Sleep(milliseconds);
+			debug("Exiting NCursesFrontend-loop");
 		}
 	}
 
@@ -39097,897 +39124,20 @@ private:
 	class WorkStateObserver : public Observer
 	{
 	public:
-		Frontend* m_owner;
-		virtual void Update(Subject* caller, void* aspect) { m_owner->WorkStateUpdate(caller, aspect); }
+		Frontend* m_owner = nullptr;
+		void Update(Subject*, void*) override { m_owner->m_waitCond.notify_all(); }
 	};
 
-	MessageList m_remoteMessages;
-	WorkStateObserver m_workStateObserver;
-
-	bool RequestMessages()
-	{
-		NzbgetRsBinRpcClientEnv env = MakeRemoteEnv();
-		env.log_lines = (int)m_neededLogEntries;
-		env.log_first_id = m_neededLogFirstId;
-		env.on_log_cb = [](void* rawCtx, uint32_t id, uint32_t kind, uint32_t time, const char* text) {
-			static_cast<Frontend*>(rawCtx)->m_remoteMessages.emplace_back(
-				id, (Message::EKind)kind, (time_t)time, text ? text : "");
-		};
-		return nzbget_rs_binrpc_client(100, &env) != 0;
-	}
-
-	bool RequestFileList()
-	{
-		struct ListCtx
-		{
-			Frontend* self;
-			std::optional<GuardedDownloadQueue> dq;
-			DownloadQueue* guard()
-			{
-				if (!dq.has_value())
-				{
-					dq.emplace(DownloadQueue::Guard());
-				}
-				return dq->operator->();
-			}
-		} lctx{this, std::nullopt};
-
-		NzbgetRsFrontendSummary sum{};
-		NzbgetRsBinRpcClientEnv env = MakeRemoteEnv();
-		env.ctx = &lctx;
-		env.is_stopped_cb = [](void* c) -> int { return static_cast<ListCtx*>(c)->self->IsStopped() ? 1 : 0; };
-		env.want_file_list = m_fileList ? 1 : 0;
-		env.want_summary = m_summary ? 1 : 0;
-		env.out_summary = m_summary ? &sum : nullptr;
-		env.on_nzb_cb = [](void* c, uint32_t id, uint32_t kind, int64_t sz, int64_t rem, int64_t psd,
-			int pfc, int rpc, int prio, const char* fn, const char* nm, const char* dst, const char* cat, const char* qfn) {
-			std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
-			nzbInfo->SetId(id);
-			nzbInfo->SetKind((NzbInfo::EKind)kind);
-			nzbInfo->SetSize(sz);
-			nzbInfo->SetRemainingSize(rem);
-			nzbInfo->SetPausedSize(psd);
-			nzbInfo->SetPausedFileCount(pfc);
-			nzbInfo->SetRemainingParCount(rpc);
-			nzbInfo->SetFilename(fn);
-			nzbInfo->SetName(nm);
-			nzbInfo->SetDestDir(dst);
-			nzbInfo->SetCategory(cat);
-			nzbInfo->SetQueuedFilename(qfn);
-			nzbInfo->SetPriority(prio);
-			static_cast<ListCtx*>(c)->guard()->GetQueue()->Add(std::move(nzbInfo));
-		};
-		env.on_param_cb = [](void* c, size_t idx, const char* k, const char* v) {
-			auto* q = static_cast<ListCtx*>(c)->guard()->GetQueue();
-			if (idx < q->size())
-			{
-				q->at(idx)->GetParameters()->SetParameter(k, v);
-			}
-		};
-		env.on_file_cb = [](void* c, size_t idx, uint32_t id, int64_t sz, int64_t rem,
-			int psd, int fnc, int act, const char* subj, const char* fn) {
-			auto* q = static_cast<ListCtx*>(c)->guard()->GetQueue();
-			if (idx >= q->size())
-			{
-				return;
-			}
-			std::unique_ptr<FileInfo> fileInfo = std::make_unique<FileInfo>();
-			fileInfo->SetId(id);
-			fileInfo->SetSize(sz);
-			fileInfo->SetRemainingSize(rem);
-			fileInfo->SetPaused(psd);
-			fileInfo->SetSubject(subj);
-			fileInfo->SetFilename(fn);
-			fileInfo->SetFilenameConfirmed(fnc);
-			fileInfo->SetActiveDownloads(act);
-			std::unique_ptr<NzbInfo>& nzbInfo = q->at(idx);
-			nzbInfo->SetActiveDownloads(nzbInfo->GetActiveDownloads() + fileInfo->GetActiveDownloads());
-			fileInfo->SetNzbInfo(nzbInfo.get());
-			nzbInfo->GetFileList()->Add(std::move(fileInfo));
-		};
-		if (!nzbget_rs_binrpc_client(101, &env))
-		{
-			return false;
-		}
-		if (m_summary)
-		{
-			m_pauseDownload = sum.pause_download != 0;
-			m_remainingSize = sum.remaining_size;
-			m_currentDownloadSpeed = sum.current_download_speed;
-			m_downloadLimit = sum.download_limit;
-			m_threadCount = sum.thread_count;
-			m_postJobCount = sum.post_job_count;
-			m_upTimeSec = sum.up_time_sec;
-			m_dnTimeSec = sum.dn_time_sec;
-			m_standBy = sum.stand_by != 0;
-			m_allBytes = sum.all_bytes;
-		}
-		return true;
-	}
-
-	void WorkStateUpdate(Subject*, void*)
-	{
-		m_waitCond.notify_all();
-	}
-};
-
-class LoggableFrontend : public Frontend
-{
-public:
-	explicit LoggableFrontend(bool colored = false) : m_colored(colored)
-	{
-		if (colored)
-		{
-			m_summary = true;
-		}
-	}
-
-protected:
-	void Run() override
-	{
-		debug("Entering LoggableFrontend-loop");
-
-		while (!IsStopped())
-		{
-			Update();
-			Wait(m_updateInterval);
-		}
-		Update();
-
-		BeforeExit();
-
-		debug("Exiting LoggableFrontend-loop");
-	}
-
-	void Update()
-	{
-		if (!PrepareData())
-		{
-			FreeData();
-			return;
-		}
-
-		BeforePrint();
-
-		{
-			GuardedMessageList messages = GuardMessages();
-			if (!messages->empty())
-			{
-				Message& firstMessage = messages->front();
-				int start = m_neededLogFirstId - firstMessage.GetId() + 1;
-				if (start < 0)
-				{
-					PrintSkip();
-					start = 0;
-				}
-				for (uint32 i = (uint32)start; i < messages->size(); i++)
-				{
-					PrintMessage(messages->at(i));
-					m_neededLogFirstId = messages->at(i).GetId();
-				}
-			}
-		}
-
-		PrintStatus();
-
-		FreeData();
-
-		fflush(stdout);
-	}
-
-	void BeforePrint()
-	{
-		if (m_colored && m_needGoBack)
-		{
-			printf("\r\033[1A");
-			m_needGoBack = false;
-		}
-	}
-
-	void BeforeExit()
-	{
-		if (m_colored && IsRemoteMode())
-		{
-			printf("\n");
-		}
-	}
-
-	void PrintMessage(Message& message)
-	{
-		NzbgetRsBuf line = nzbget_rs_frontend_format_log_message(
-			m_colored ? 1 : 0, (int)message.GetKind(), message.GetText());
-		if (line.data)
-		{
-			fwrite(line.data, 1, line.len, stdout);
-		}
-		nzbget_rs_free(line);
-	}
-
-	void PrintStatus()
-	{
-		if (!m_colored)
-		{
-			return;
-		}
-		printf("\033[s");
-		NzbgetRsBuf status = nzbget_rs_colored_frontend_format_status_bar(
-			m_standBy ? 1 : 0,
-			m_pauseDownload ? 1 : 0,
-			m_currentDownloadSpeed,
-			m_remainingSize,
-			m_downloadLimit,
-			m_postJobCount,
-			m_threadCount,
-			"\033[K");
-		if (status.data)
-		{
-			fwrite(status.data, 1, status.len, stdout);
-		}
-		nzbget_rs_free(status);
-		m_needGoBack = true;
-	}
-
-	void PrintSkip()
-	{
-		printf(m_colored ? ".....\033[K\n" : ".....\n");
-	}
-
-private:
-	bool m_colored = false;
-	bool m_needGoBack = false;
-};
-
-
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2004 Sven Henkel <sidddy@users.sourceforge.net>
- *  Copyright (C) 2007-2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
-
-
-#ifndef NCURSESFRONTEND_H
-#define NCURSESFRONTEND_H
-
-#ifndef DISABLE_CURSES
-
-extern void ExitProc();
-
-static const int NCURSES_COLORPAIR_TEXT		= 1;
-static const int NCURSES_COLORPAIR_STATUS		= 7;
-static const int NCURSES_COLORPAIR_INFOLINE	= 9;
-static const int NCURSES_COLORPAIR_TEXTHIGHL 	= 10;
-
-static const int READKEY_EMPTY = -1;
-
-class NCursesFrontend : public Frontend
-{
-public:
-	NCursesFrontend()
-		: m_startHint(0)
-		, m_colWidthFiles(0)
-		, m_colWidthTotal(0)
-		, m_colWidthLeft(0)
-		, m_inputValue(0)
-	{
-		m_summary = true;
-		m_fileList = true;
-
-		m_showNzbname = g_Options->GetCursesNzbName();
-		m_showTimestamp = g_Options->GetCursesTime();
-		m_groupFiles = g_Options->GetCursesGroup();
-
-		int colorSupport = nzbget_rs_term_init();
-		m_useColor = colorSupport > 0;
-	}
-
-	virtual ~NCursesFrontend()
-	{
-		nzbget_rs_term_shutdown();
-		printf("\n");
-		SetHint(nullptr);
-	}
-
-protected:
-	virtual void Run()
-	{
-		debug("Entering NCursesFrontend-loop");
-
-		m_dataUpdatePos = 0;
-
-		while (!IsStopped())
-		{
-			// The data (queue and log) is updated each m_iUpdateInterval msec,
-			// but the window is updated more often for better reaction on user's input
-
-			bool updateNow = false;
-			int key = ReadConsoleKey();
-
-			if (key != READKEY_EMPTY)
-			{
-				updateNow = true;
-				m_updateNextTime = true;
-			}
-			else if (m_updateNextTime)
-			{
-				updateNow = true;
-				m_updateNextTime = false;
-			}
-			else if (m_dataUpdatePos <= 0)
-			{
-				updateNow = true;
-				m_updateNextTime = false;
-			}
-
-			if (updateNow)
-			{
-				Update(key);
-			}
-
-			if (m_dataUpdatePos <= 0)
-			{
-				m_dataUpdatePos = m_updateInterval;
-			}
-
-			// update more often (sleep shorter) if need faster reaction on user input
-			int sleepInterval = m_inputMode == normal ? 100 : 10;
-			Wait(sleepInterval);
-			m_dataUpdatePos -= sleepInterval;
-		}
-
-		FreeData();
-
-		debug("Exiting NCursesFrontend-loop");
-	}
-
-private:
-	enum EInputMode
-	{
-		normal,
-		editQueue,
-		downloadRate
-	};
-
+	int m_mode;
+	int m_updateInterval = 100;
 	bool m_useColor = true;
-	int m_dataUpdatePos = 0;
-	bool m_updateNextTime = false;
-	int m_screenHeight = 0;
-	int m_screenWidth = 0;
-	int m_queueWinTop = 0;
-	int m_queueWinHeight = 0;
-	int m_queueWinClientHeight = 0;
-	int m_messagesWinTop = 0;
-	int m_messagesWinHeight = 0;
-	int m_messagesWinClientHeight = 0;
-	int m_selectedQueueEntry = 0;
-	int m_lastEditEntry = -1;
-	bool m_lastPausePars = false;
-	int m_queueScrollOffset = 0;
-	std::string m_hint;
-	time_t m_startHint;
-	int m_colWidthFiles;
-	int m_colWidthTotal;
-	int m_colWidthLeft;
-
-	// Inputting numbers
-	int m_inputNumberIndex = 0;
-	int m_inputValue;
-
-	EInputMode m_inputMode = normal;
-	bool m_showNzbname;
-	bool m_showTimestamp;
-	bool m_groupFiles;
-	int m_queueWindowPercentage = 50;
-
-	void NeedUpdateData()
-	{
-		m_dataUpdatePos = 10;
-		m_updateNextTime = true;
-	}
-
-	void Update(int key)
-	{
-		// Figure out how big the screen is
-		CalcWindowSizes();
-
-		if (m_dataUpdatePos <= 0)
-		{
-			FreeData();
-			m_neededLogEntries = m_messagesWinClientHeight;
-			if (!PrepareData())
-			{
-				return;
-			}
-
-			// recalculate frame sizes
-			CalcWindowSizes();
-		}
-
-		if (m_inputMode == editQueue && CalcQueueSize() == 0)
-		{
-			m_selectedQueueEntry = 0;
-			m_inputMode = normal;
-		}
-
-		//------------------------------------------
-		// Print Current NZBInfoList
-		//------------------------------------------
-		if (m_queueWinHeight > 0)
-		{
-			PrintQueue();
-		}
-
-		//------------------------------------------
-		// Print Messages
-		//------------------------------------------
-		if (m_messagesWinHeight > 0)
-		{
-			PrintMessages();
-		}
-
-		PrintStatus();
-
-		PrintKeyInputBar();
-
-		UpdateInput(key);
-
-		RefreshScreen();
-	}
-
-	void CalcWindowSizes()
-	{
-		nzbget_rs_ncurses_calc_window_sizes(
-			CalcQueueSize(), m_queueWindowPercentage,
-			&m_screenHeight, &m_screenWidth,
-			&m_queueWinTop, &m_queueWinHeight, &m_queueWinClientHeight,
-			&m_messagesWinTop, &m_messagesWinHeight, &m_messagesWinClientHeight);
-	}
-
-	int CalcQueueSize()
-	{
-		int queueSize = 0;
-		if (m_groupFiles)
-		{
-			queueSize = DownloadQueue::Guard()->GetQueue()->size();
-		}
-		else
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				queueSize += nzbInfo->GetFileList()->size();
-			}
-		}
-		return queueSize;
-	}
-
-	void PlotLine(const char* str, int row, int pos, int colorPair)
-	{
-		nzbget_rs_term_plot_line(str, row, pos, m_screenWidth, m_useColor ? 1 : 0, colorPair);
-	}
-
-	void RefreshScreen()
-	{
-		nzbget_rs_term_refresh(m_screenHeight, m_screenWidth);
-	}
-
-	void PrintMessages()
-	{
-		int lineNr = m_messagesWinTop;
-
-		PlotLine(m_useColor ? " Messages" : "***  Messages",
-			lineNr++, 0, NCURSES_COLORPAIR_INFOLINE);
-
-		int line = lineNr + m_messagesWinClientHeight - 1;
-		int linesToPrint = m_messagesWinClientHeight;
-
-		GuardedMessageList messages = GuardMessages();
-
-		// print messages from bottom
-		for (int i = (int)messages->size() - 1; i >= 0 && linesToPrint > 0; i--)
-		{
-			int printedLines = PrintMessage(messages->at(i), line, linesToPrint);
-			line -= printedLines;
-			linesToPrint -= printedLines;
-		}
-
-		if (linesToPrint > 0)
-		{
-			// too few messages, print them again from top
-			line = lineNr + m_messagesWinClientHeight - 1;
-			while (linesToPrint-- > 0)
-			{
-				PlotLine("", line--, 0, NCURSES_COLORPAIR_TEXT);
-			}
-			int linesToPrint2 = m_messagesWinClientHeight;
-			for (int i = (int)messages->size() - 1; i >= 0 && linesToPrint2 > 0; i--)
-			{
-				int printedLines = PrintMessage(messages->at(i), line, linesToPrint2);
-				line -= printedLines;
-				linesToPrint2 -= printedLines;
-			}
-		}
-	}
-
-	int PrintMessage(Message& msg, int row, int maxLines)
-	{
-		return nzbget_rs_ncurses_print_message(
-			static_cast<int>(msg.GetKind()), static_cast<int64_t>(msg.GetTime()),
-			msg.GetText(), row, maxLines, m_showTimestamp ? 1 : 0,
-			g_Options->GetTimeCorrection(), m_screenWidth, m_useColor ? 1 : 0);
-	}
-
-	void PrintStatus()
-	{
-		int statusRow = m_screenHeight - 2;
-
-		NzbgetRsNcursesStatusSpec spec{};
-		spec.stand_by = m_standBy ? 1 : 0;
-		spec.pause_download = m_pauseDownload ? 1 : 0;
-		spec.current_download_speed = m_currentDownloadSpeed;
-		spec.remaining_size = m_remainingSize;
-		spec.download_limit = m_downloadLimit;
-		spec.post_job_count = m_postJobCount;
-		spec.dn_time_sec = m_dnTimeSec;
-		spec.all_bytes = m_allBytes;
-		spec.thread_count = m_threadCount;
-
-		NzbgetRsBuf buf = nzbget_rs_ncurses_format_status_bar(&spec);
-		if (buf.data)
-		{
-			PlotLine(buf.data, statusRow, 0, NCURSES_COLORPAIR_STATUS);
-		}
-		nzbget_rs_free(buf);
-	}
-
-	void PrintKeyInputBar()
-	{
-		int64_t startHint = static_cast<int64_t>(m_startHint);
-		nzbget_rs_ncurses_print_key_input_bar(
-			m_screenHeight, m_screenWidth, m_useColor ? 1 : 0,
-			static_cast<int>(m_inputMode), m_groupFiles ? 1 : 0,
-			m_selectedQueueEntry, CalcQueueSize(), m_inputValue,
-			m_inputNumberIndex, m_hint.empty() ? nullptr : m_hint.c_str(),
-			&startHint, static_cast<int64_t>(Util::CurrentTime()));
-		m_startHint = static_cast<time_t>(startHint);
-	}
-
-	void SetHint(const char* hint)
-	{
-		if (hint) m_hint = hint;
-		if (!m_hint.empty()) m_startHint = Util::CurrentTime();
-	}
-
-	void PrintQueue()
-	{
-		if (m_groupFiles)
-		{
-			PrintGroupQueue();
-		}
-		else
-		{
-			PrintFileQueue();
-		}
-	}
-
-	bool IsRowInScrollWindow(int index) const
-	{
-		return index >= m_queueScrollOffset && index < m_queueScrollOffset + m_queueWinHeight - 1;
-	}
-
-	void PrintFileQueue()
-	{
-		int lineNr = m_queueWinTop + 1;
-		int64 remaining = 0;
-		int64 paused = 0;
-		int pausedFiles = 0;
-		int fileNum = 0;
-
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-		{
-			for (FileInfo* fileInfo : nzbInfo->GetFileList())
-			{
-				if (IsRowInScrollWindow(fileNum))
-				{
-					PrintFilename(fileInfo, lineNr++, fileNum == m_selectedQueueEntry);
-				}
-				fileNum++;
-
-				remaining += fileInfo->GetRemainingSize();
-				if (fileInfo->GetPaused())
-				{
-					paused += fileInfo->GetRemainingSize();
-					pausedFiles++;
-				}
-			}
-		}
-
-		NzbgetRsBuf headerBuf = nzbget_rs_ncurses_format_file_queue_header(
-			m_useColor ? 1 : 0, fileNum, pausedFiles, remaining, paused);
-		if (headerBuf.data)
-		{
-			PrintTopHeader(headerBuf.data, m_queueWinTop, true);
-		}
-		nzbget_rs_free(headerBuf);
-		if (fileNum == 0)
-		{
-			PlotLine("Ready to receive nzb-job", lineNr, 0, NCURSES_COLORPAIR_TEXT);
-		}
-	}
-
-	void PrintFilename(FileInfo * fileInfo, int row, bool selected)
-	{
-		NzbgetRsNcursesFileRowSpec spec{};
-		spec.edit_queue_mode = m_inputMode == editQueue ? 1 : 0;
-		spec.selected = selected ? 1 : 0;
-		spec.use_color = m_useColor ? 1 : 0;
-		spec.color_highl = NCURSES_COLORPAIR_TEXTHIGHL;
-		spec.color_text = NCURSES_COLORPAIR_TEXT;
-		spec.id = fileInfo->GetId();
-		spec.priority = fileInfo->GetNzbInfo()->GetPriority();
-		spec.active_downloads = fileInfo->GetActiveDownloads();
-		spec.paused = fileInfo->GetPaused() ? 1 : 0;
-		spec.show_nzbname = m_showNzbname ? 1 : 0;
-		spec.path_sep = (uint8_t)PATH_SEPARATOR;
-		spec.nzb_name = fileInfo->GetNzbInfo()->GetName();
-		spec.filename = fileInfo->GetFilename();
-		spec.size = fileInfo->GetSize();
-		spec.remaining_size = fileInfo->GetRemainingSize();
-
-		int color = NCURSES_COLORPAIR_TEXT;
-		NzbgetRsBuf buf = nzbget_rs_ncurses_format_file_row(&spec, &color);
-		if (buf.data)
-		{
-			PlotLine(buf.data, row, 0, color);
-		}
-		nzbget_rs_free(buf);
-	}
-
-	void PrintTopHeader(char* header, int lineNr, bool upTime)
-	{
-		int time = upTime ? m_upTimeSec : m_dnTimeSec;
-		NzbgetRsBuf buf = nzbget_rs_ncurses_format_top_header(
-			header, m_screenWidth, upTime ? 1 : 0, time);
-		if (buf.data)
-		{
-			PlotLine(buf.data, lineNr, 0, NCURSES_COLORPAIR_INFOLINE);
-		}
-		nzbget_rs_free(buf);
-	}
-
-	void PrintGroupQueue()
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-		int lineNr = m_queueWinTop;
-
-		if (downloadQueue->GetQueue()->empty())
-		{
-			NzbgetRsBuf headerBuf = nzbget_rs_ncurses_format_group_queue_header(
-				m_useColor ? 1 : 0, 0, 0, 0);
-			if (headerBuf.data)
-			{
-				PrintTopHeader(headerBuf.data, lineNr++, false);
-			}
-			nzbget_rs_free(headerBuf);
-			PlotLine("Ready to receive nzb-job", lineNr++, 0, NCURSES_COLORPAIR_TEXT);
-		}
-		else
-		{
-			lineNr++;
-
-			ResetColWidths();
-			int calcLineNr = lineNr;
-			int i = 0;
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				if (IsRowInScrollWindow(i))
-				{
-					PrintGroupname(nzbInfo, calcLineNr++, false, true);
-				}
-				i++;
-			}
-
-			int64 remaining = 0;
-			int64 paused = 0;
-			i = 0;
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				if (IsRowInScrollWindow(i))
-				{
-					PrintGroupname(nzbInfo, lineNr++, i == m_selectedQueueEntry, false);
-				}
-				i++;
-				remaining += nzbInfo->GetRemainingSize();
-				paused += nzbInfo->GetPausedSize();
-			}
-
-			NzbgetRsBuf headerBuf = nzbget_rs_ncurses_format_group_queue_header(
-				m_useColor ? 1 : 0, (int)downloadQueue->GetQueue()->size(), remaining, paused);
-			if (headerBuf.data)
-			{
-				PrintTopHeader(headerBuf.data, m_queueWinTop, false);
-			}
-			nzbget_rs_free(headerBuf);
-		}
-	}
-
-	void ResetColWidths()
-	{
-		m_colWidthFiles = 0;
-		m_colWidthTotal = 0;
-		m_colWidthLeft = 0;
-	}
-
-	void PrintGroupname(NzbInfo* nzbInfo, int row, bool selected, bool calcColWidth)
-	{
-		NzbgetRsNcursesGroupRowSpec spec{};
-		spec.edit_queue_mode = m_inputMode == editQueue ? 1 : 0;
-		spec.selected = selected ? 1 : 0;
-		spec.use_color = m_useColor ? 1 : 0;
-		spec.color_highl = NCURSES_COLORPAIR_TEXTHIGHL;
-		spec.color_text = NCURSES_COLORPAIR_TEXT;
-		spec.screen_width = m_screenWidth;
-		spec.calc_col_width = calcColWidth ? 1 : 0;
-		spec.id = nzbInfo->GetId();
-		spec.priority = nzbInfo->GetPriority();
-		spec.active_downloads = nzbInfo->GetActiveDownloads();
-		spec.name = nzbInfo->GetName();
-		spec.file_count = (int)nzbInfo->GetFileList()->size();
-		spec.paused_file_count = nzbInfo->GetPausedFileCount();
-		spec.size = nzbInfo->GetSize();
-		spec.remaining_size = nzbInfo->GetRemainingSize();
-		spec.paused_size = nzbInfo->GetPausedSize();
-		spec.stand_by = m_standBy ? 1 : 0;
-		spec.pause_download = m_pauseDownload ? 1 : 0;
-		spec.current_download_speed = m_currentDownloadSpeed;
-
-		int color = NCURSES_COLORPAIR_TEXT;
-		NzbgetRsBuf buf = nzbget_rs_ncurses_format_group_row(
-			&spec, &m_colWidthFiles, &m_colWidthTotal, &m_colWidthLeft, &color);
-		if (!calcColWidth && buf.data)
-		{
-			PlotLine(buf.data, row, 0, color);
-		}
-		nzbget_rs_free(buf);
-	}
-
-	bool EditQueue(DownloadQueue::EEditAction action, int offset)
-	{
-		int ID = 0;
-
-		if (m_groupFiles)
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			bool hasGroup = m_selectedQueueEntry >= 0 &&
-				m_selectedQueueEntry < (int)downloadQueue->GetQueue()->size();
-			int64 remainingSize = 0, pausedSize = 0;
-			int remainingParCount = 0;
-			if (hasGroup)
-			{
-				std::unique_ptr<NzbInfo>& nzbInfo = downloadQueue->GetQueue()->at(m_selectedQueueEntry);
-				ID = nzbInfo->GetId();
-				remainingSize = nzbInfo->GetRemainingSize();
-				pausedSize = nzbInfo->GetPausedSize();
-				remainingParCount = nzbInfo->GetRemainingParCount();
-			}
-			int pausePars = m_lastPausePars ? 1 : 0;
-			action = static_cast<DownloadQueue::EEditAction>(
-				nzbget_rs_ncurses_resolve_group_edit_action(
-					static_cast<int>(action), hasGroup ? 1 : 0, remainingSize, pausedSize,
-					remainingParCount, m_selectedQueueEntry, m_lastEditEntry, &pausePars));
-			m_lastPausePars = pausePars != 0;
-		}
-		else
-		{
-			int fileNum = 0;
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				for (FileInfo* fileInfo : nzbInfo->GetFileList())
-				{
-					if (m_selectedQueueEntry == fileNum)
-					{
-						ID = fileInfo->GetId();
-						if (action == DownloadQueue::eaFilePause && fileInfo->GetPaused())
-						{
-							action = DownloadQueue::eaFileResume;
-						}
-					}
-					fileNum++;
-				}
-			}
-		}
-
-		m_lastEditEntry = m_selectedQueueEntry;
-
-		NeedUpdateData();
-
-		return ID != 0 ? ServerEditQueue(action, offset, ID) : false;
-	}
-
-	void SetCurrentQueueEntry(int entry)
-	{
-		nzbget_rs_ncurses_set_current_queue_entry(
-			entry, CalcQueueSize(), m_queueWinClientHeight,
-			&m_queueScrollOffset, &m_selectedQueueEntry);
-	}
-
-	/*
-	 * Process keystrokes starting with the initialKey, which must not be
-	 * READKEY_EMPTY but has alread been set via ReadConsoleKey.
-	 */
-	void UpdateInput(int initialKey)
-	{
-		for (int key = initialKey; key != READKEY_EMPTY; key = ReadConsoleKey())
-		{
-			NzbgetRsNcursesKeyState st{};
-			st.input_mode = static_cast<int>(m_inputMode);
-			st.show_nzbname = m_showNzbname ? 1 : 0;
-			st.show_timestamp = m_showTimestamp ? 1 : 0;
-			st.group_files = m_groupFiles ? 1 : 0;
-			st.queue_window_percentage = m_queueWindowPercentage;
-			st.selected_queue_entry = m_selectedQueueEntry;
-			st.queue_scroll_offset = m_queueScrollOffset;
-			st.queue_win_client_height = m_queueWinClientHeight;
-			st.input_number_index = m_inputNumberIndex;
-			st.input_value = m_inputValue;
-			nzbget_rs_ncurses_handle_key(&st, key, CalcQueueSize());
-			m_inputMode = static_cast<EInputMode>(st.input_mode);
-			m_showNzbname = st.show_nzbname != 0;
-			m_showTimestamp = st.show_timestamp != 0;
-			m_groupFiles = st.group_files != 0;
-			m_queueWindowPercentage = st.queue_window_percentage;
-			m_queueScrollOffset = st.queue_scroll_offset;
-			m_inputNumberIndex = st.input_number_index;
-			m_inputValue = st.input_value;
-			if (st.exit_proc) ExitProc();
-			if (st.calc_window_sizes) CalcWindowSizes();
-			if (st.toggle_pause)
-			{
-				if (!IsRemoteMode()) info("%s", m_pauseDownload ? "Unpausing download" : "Pausing download");
-				ServerPauseUnpause(!m_pauseDownload);
-			}
-			if (st.set_delete_hint) SetHint(" Use Uppercase \"D\" for delete");
-			bool editOk = true;
-			if (st.edit_action)
-			{
-				editOk = EditQueue(static_cast<DownloadQueue::EEditAction>(st.edit_action), st.edit_offset);
-			}
-			if (st.has_select_entry && editOk) SetCurrentQueueEntry(st.select_entry);
-			if (st.need_update_data) NeedUpdateData();
-			if (st.has_set_download_rate) ServerSetDownloadRate(st.download_rate_bytes);
-			if (st.stop_loop) return;
-		}
-	}
-
-	int ReadConsoleKey()
-	{
-		return nzbget_rs_term_read_key();
-	}
+	std::mutex m_waitMutex;
+	std::condition_variable m_waitCond;
+	WorkStateObserver m_workStateObserver;
 };
 
 #endif
 
-#endif
-
-#endif
-
-extern void ExitProc();
 extern void Reload();
 
 class RequestProcessor : public Thread, public Subject

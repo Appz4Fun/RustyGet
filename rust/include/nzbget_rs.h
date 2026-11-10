@@ -253,32 +253,18 @@ int nzbget_rs_nntp_handshake(const NzbgetRsNntpIo* io, int* authError, int* auth
 int nzbget_rs_nntp_join_group(const NzbgetRsNntpIo* io, const char* group, int* authError, int* authRejected,
 	char** answer, int* joined);
 
-// CommandLineParser (rust/src/cmdline.rs): its constructor, over the argv array
-// getopt permutes. The fields are set through the sink (field numbers in
-// rust/src/cmdline.rs: field, edit); steal moves argv[index] into a field
-// (std::move, the entry becomes null). Callbacks return 0, or -1 when they
-// threw (parsing stops, the call returns -1: rethrow then). No callback may
-// unwind. String arguments are borrowed for the callback; copy them if retained.
-// steal keeps a moved allocation alive until its destination is overwritten
-// or parsing finishes. The argv array
-// initially contains argc non-NULL strings followed by a NULL sentinel.
-// NULL inputs/entries or missing
-// callbacks return -1. getopt globals must not be used concurrently.
-typedef struct NzbgetRsCmdlineSink
-{
-	// The platform's getopt_long with the C++ option table; optional only
-	// when useLong == 0. Returns libc's option code (or -1 at end).
-	int (*getoptLong)(int argc, char** argv);
-	void* ctx;
-	int (*setInt)(void* ctx, int field, int value);
-	int (*setStr)(void* ctx, int field, const char* value);
-	int (*steal)(void* ctx, int field, int index);
-	int (*pushOption)(void* ctx, const char* value);
-	int (*pushId)(void* ctx, int id);
-	int (*pushName)(void* ctx, const char* value);
-	int (*error)(void* ctx, const char* msg);
-} NzbgetRsCmdlineSink;
-int nzbget_rs_cmdline_parse(int argc, char** argv, int useLong, const NzbgetRsCmdlineSink* sink);
+typedef struct NzbgetRsCmdline NzbgetRsCmdline;
+NzbgetRsCmdline* nzbget_rs_cmdline_new(
+	int argc, const char* const* argv,
+	void (*write_stdout_cb)(void* ctx, const char* ptr, size_t len), void* ctx);
+void nzbget_rs_cmdline_free(NzbgetRsCmdline* cmd);
+int nzbget_rs_cmdline_get_flag(const NzbgetRsCmdline* cmd, int field);
+const char* nzbget_rs_cmdline_get_str(const NzbgetRsCmdline* cmd, int field);
+int nzbget_rs_cmdline_run_client(
+	const NzbgetRsCmdline* cmd, const char* control_ip, int control_port,
+	const char* control_username, const char* control_password,
+	void (*write_stdout_cb)(void* ctx, const char* ptr, size_t len),
+	void (*write_perror_cb)(void* ctx, const char* msg), void* ctx);
 
 // FileSystem's file operations (rust/src/fsops.rs, POSIX). error_message:
 // writes at most 1022 bytes plus NUL (the original BString capacity argument)
@@ -1311,80 +1297,8 @@ NzbgetRsBuf nzbget_rs_diskstate_format_dup_info(
 NzbgetRsBuf nzbget_rs_diskstate_format_volume_stat_item(
     const NzbgetRsDiskVolumeStatInput* inp);
 
-typedef struct {
-    int stand_by;
-    int pause_download;
-    int64_t current_download_speed;
-    int64_t remaining_size;
-    int64_t download_limit;
-    int post_job_count;
-    int dn_time_sec;
-    int64_t all_bytes;
-    int thread_count;
-} NzbgetRsNcursesStatusSpec;
-
-typedef struct {
-    int edit_queue_mode;
-    int selected;
-    int use_color;
-    int color_highl;
-    int color_text;
-    int id;
-    int priority;
-    int active_downloads;
-    int paused;
-    int show_nzbname;
-    uint8_t path_sep;
-    const char* nzb_name;
-    const char* filename;
-    int64_t size;
-    int64_t remaining_size;
-} NzbgetRsNcursesFileRowSpec;
-
-typedef struct {
-    int edit_queue_mode;
-    int selected;
-    int use_color;
-    int color_highl;
-    int color_text;
-    int screen_width;
-    int calc_col_width;
-    int id;
-    int priority;
-    int active_downloads;
-    const char* name;
-    int file_count;
-    int paused_file_count;
-    int64_t size;
-    int64_t remaining_size;
-    int64_t paused_size;
-    int stand_by;
-    int pause_download;
-    int64_t current_download_speed;
-} NzbgetRsNcursesGroupRowSpec;
-
 NzbgetRsBuf nzbget_rs_cmdline_format_usage(
     const char* base_name, char path_sep, int include_daemon);
-NzbgetRsBuf nzbget_rs_ncurses_format_status_bar(
-    const NzbgetRsNcursesStatusSpec* spec);
-NzbgetRsBuf nzbget_rs_ncurses_format_top_header(
-    const char* header, int screen_width, int up_time, int time_sec);
-NzbgetRsBuf nzbget_rs_ncurses_format_file_queue_header(
-    int use_color, int file_num, int paused_files, int64_t remaining, int64_t paused);
-NzbgetRsBuf nzbget_rs_ncurses_format_group_queue_header(
-    int use_color, int group_count, int64_t remaining, int64_t paused);
-NzbgetRsBuf nzbget_rs_ncurses_format_file_row(
-    const NzbgetRsNcursesFileRowSpec* spec, int* out_color);
-NzbgetRsBuf nzbget_rs_ncurses_format_group_row(
-    const NzbgetRsNcursesGroupRowSpec* spec,
-    int* inout_col_files, int* inout_col_total, int* inout_col_left, int* out_color);
-
-NzbgetRsBuf nzbget_rs_colored_frontend_format_status_bar(
-    int stand_by, int pause_download, int64_t current_download_speed,
-    int64_t remaining_size, int64_t download_limit, int post_job_count,
-    int thread_count, const char* control_seq);
-NzbgetRsBuf nzbget_rs_frontend_format_log_message(
-    int colored, int kind, const char* text);
 
 NzbgetRsBuf nzbget_rs_diskstate_format_unpack_trailer_item(
     int id, int direct_unpack_status, int unpack_tried, int par_repaired,
@@ -2550,11 +2464,6 @@ void nzbget_rs_cross_pack_session_process_donor(
 
 uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
 
-int nzbget_rs_term_init(void);
-void nzbget_rs_term_shutdown(void);
-void nzbget_rs_term_refresh(int row, int col);
-int nzbget_rs_term_read_key(void);
-
 void nzbget_rs_par_repairer_delete_leftovers(
     const NzbgetRsParRepairer* handle,
     void* ctx,
@@ -2621,37 +2530,6 @@ int nzbget_rs_options_load_config_file(
     const char* path, void* ctx,
     void (*on_line_cb)(void*, int, const char*));
 
-typedef struct NzbgetRsNcursesKeyState {
-    int input_mode;
-    int show_nzbname;
-    int show_timestamp;
-    int group_files;
-    int queue_window_percentage;
-    int selected_queue_entry;
-    int queue_scroll_offset;
-    int queue_win_client_height;
-    int input_number_index;
-    int input_value;
-    int exit_proc;
-    int calc_window_sizes;
-    int need_update_data;
-    int toggle_pause;
-    int set_delete_hint;
-    int edit_action;
-    int edit_offset;
-    int has_select_entry;
-    int select_entry;
-    int has_set_download_rate;
-    int download_rate_bytes;
-    int stop_loop;
-} NzbgetRsNcursesKeyState;
-
-void nzbget_rs_ncurses_set_current_queue_entry(
-    int entry, int queue_size, int queue_win_client_height,
-    int* inout_scroll_offset, int* out_selected_entry);
-void nzbget_rs_ncurses_handle_key(
-    NzbgetRsNcursesKeyState* state, int key, int queue_size);
-
 NzbgetRsBuf nzbget_rs_nzb_format_name(
     int op, const char* s1, const char* s2, const char* s3,
     const char* s4, const char* s5, int flag, int nzb_id);
@@ -2694,27 +2572,6 @@ void nzbget_rs_nzb_update_deleted_stats(
 NzbgetRsBuf nzbget_rs_util_find_executor_program(
     const char* filename, const char* custom_path, int* out_found);
 void nzbget_rs_util_format_time(int64_t time_sec, char* buffer, int bufsize);
-
-void nzbget_rs_term_plot_line(
-    const char* text, int row, int pos, int screen_width, int use_color, int color_pair);
-void nzbget_rs_ncurses_calc_window_sizes(
-    int queue_size, int queue_window_percentage,
-    int* inout_screen_height, int* inout_screen_width,
-    int* out_queue_win_top, int* out_queue_win_height, int* out_queue_win_client_height,
-    int* out_messages_win_top, int* out_messages_win_height, int* out_messages_win_client_height);
-int nzbget_rs_ncurses_print_message(
-    int msg_kind, int64_t msg_time, const char* msg_text,
-    int row, int max_lines, int show_timestamp, int time_correction,
-    int screen_width, int use_color);
-void nzbget_rs_ncurses_print_key_input_bar(
-    int screen_height, int screen_width, int use_color,
-    int input_mode, int group_files, int selected_queue_entry, int queue_size,
-    int input_value, int input_number_index,
-    const char* hint, int64_t* inout_start_hint, int64_t cur_time);
-int nzbget_rs_ncurses_resolve_group_edit_action(
-    int action, int has_group, int64_t remaining_size, int64_t paused_size,
-    int remaining_par_count, int selected_entry, int last_edit_entry,
-    int* inout_last_pause_pars);
 
 typedef struct RsDownloadCurrentStatsAcc {
     int64_t remaining_size;
@@ -3270,55 +3127,38 @@ typedef struct NzbgetRsFrontendSummary {
     int32_t stand_by;
 } NzbgetRsFrontendSummary;
 
-typedef struct NzbgetRsBinRpcClientEnv {
+typedef struct NzbgetRsFrontendEnv {
     void* ctx;
+    int remote_mode;
+    int update_interval;
+    int use_color;
+    int show_nzbname;
+    int show_timestamp;
+    int group_files;
+    int time_correction;
+    uint8_t path_sep;
     const char* control_ip;
     int control_port;
     const char* control_username;
     const char* control_password;
-    int verbose;
-    int match_mode;
-    int set_rate;
-    int edit_action;
-    int edit_offset;
-    const char* edit_text;
-    const int32_t* edit_ids;
-    size_t edit_ids_len;
-    const char* const* edit_names;
-    size_t edit_names_len;
-    int log_lines;
-    uint32_t log_first_id;
-    const char* add_nzb_filename;
-    const char* arg_filename;
-    const char* add_category;
-    int auto_category;
-    int add_top;
-    int add_paused;
-    int add_priority;
-    const char* add_dupe_key;
-    int add_dupe_mode;
-    int add_dupe_score;
-    int write_log_kind;
-    const char* write_log_text;
-    int want_file_list;
-    int want_summary;
-    NzbgetRsFrontendSummary* out_summary;
-    void (*write_stdout_cb)(void* ctx, const char* ptr, size_t len);
-    void (*write_perror_cb)(void* ctx, const char* msg);
-    int (*is_stopped_cb)(void* ctx);
-    void (*on_log_cb)(void* ctx, uint32_t id, uint32_t kind, uint32_t time, const char* text);
-    void (*on_nzb_cb)(
-        void* ctx, uint32_t id, uint32_t kind, int64_t size, int64_t rem_size, int64_t paused_size,
-        int paused_files, int rem_pars, int priority,
-        const char* filename, const char* name, const char* dest_dir,
-        const char* category, const char* queued_filename);
-    void (*on_param_cb)(void* ctx, size_t nzb_idx, const char* name, const char* value);
-    void (*on_file_cb)(
-        void* ctx, size_t nzb_idx, uint32_t id, int64_t size, int64_t rem_size,
-        int paused, int fn_confirmed, int active_dl, const char* subject, const char* filename);
-} NzbgetRsBinRpcClientEnv;
+    void (*write_stdout_cb)(void* ctx, const char* ptr, size_t len, int do_flush);
+    int64_t (*action_cb)(void* ctx, int op, int a1, int a2, int a3);
+    void (*local_summary_cb)(void* ctx, NzbgetRsFrontendSummary* out_summary);
+    void (*local_messages_cb)(
+        void* ctx, int tail_mode, uint32_t arg, int* out_skipped, void* emit_ctx,
+        void (*emit_cb)(void* emit_ctx, uint32_t id, int kind, int64_t time, const char* text));
+    void (*local_queue_cb)(
+        void* ctx, void* emit_ctx,
+        void (*emit_nzb_cb)(
+            void* emit_ctx, int id, int priority, int active_dl,
+            int64_t size, int64_t rem_size, int64_t paused_size,
+            int paused_files, int rem_pars, const char* name),
+        void (*emit_file_cb)(
+            void* emit_ctx, size_t nzb_idx, int id, int active_dl,
+            int paused, int64_t size, int64_t rem_size, const char* filename));
+} NzbgetRsFrontendEnv;
 
-int nzbget_rs_binrpc_client(int op, const NzbgetRsBinRpcClientEnv* env);
+int nzbget_rs_frontend_op(int op, const NzbgetRsFrontendEnv* env);
 
 #include "nzbget_tls_cipher.h"
 

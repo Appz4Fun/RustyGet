@@ -397,28 +397,6 @@ pub unsafe extern "C" fn nzbget_rs_crc32_append(block: *const u8, len: u32, init
     crate::crc::crc32_append(slice, init)
 }
 
-// ---- Terminal / TUI FFI (replacing C ncurses) ----
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_term_init() -> c_int {
-    crate::ncurses_format::term_init()
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_term_shutdown() {
-    crate::ncurses_format::term_shutdown()
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_term_refresh(row: c_int, col: c_int) {
-    crate::ncurses_format::term_refresh(row, col);
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_term_read_key() -> c_int {
-    crate::ncurses_format::term_read_key()
-}
-
 /// Runs an in-place text helper on the NUL-terminated `raw` and puts the NUL
 /// at the new end.
 unsafe fn in_place(raw: *mut c_char, f: impl FnOnce(&mut [u8]) -> usize) {
@@ -1281,235 +1259,107 @@ pub unsafe extern "C" fn nzbget_rs_nntp_join_group(
     )
 }
 
-/// NzbgetRsCmdlineSink: the C++ CommandLineParser's fields. Each callback
-/// returns 0, or -1 when it threw (parsing stops; C++ rethrows).
 #[repr(C)]
-pub struct CmdlineSink {
-    pub getopt_long: Option<unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int>,
-    pub ctx: *mut std::ffi::c_void,
-    pub set_int: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, c_int) -> c_int>,
-    pub set_str: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char) -> c_int>,
-    pub steal: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, c_int) -> c_int>,
-    pub push_option: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub push_id: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int) -> c_int>,
-    pub push_name: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub error: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-}
+pub struct NzbgetRsCmdline(crate::cmdline::CmdlineHandle);
 
-struct FfiCmdline<'a>(&'a CmdlineSink);
-
-fn cmd_status(r: c_int) -> Result<(), crate::cmdline::Abort> {
-    if r == 0 {
-        Ok(())
-    } else {
-        Err(crate::cmdline::Abort)
-    }
-}
-
-impl crate::cmdline::Sink for FfiCmdline<'_> {
-    unsafe fn getopt_long(&mut self, argc: c_int, argv: *mut *mut c_char) -> c_int {
-        match self.0.getopt_long {
-            Some(f) => f(argc, argv),
-            None => crate::cmdline::default_getopt_long(argc, argv),
-        }
-    }
-    fn set_int(&mut self, field: i32, value: i32) -> Result<(), crate::cmdline::Abort> {
-        let f = self.0.set_int.ok_or(crate::cmdline::Abort)?;
-        cmd_status(unsafe { f(self.0.ctx, field, value) })
-    }
-    fn set_str(&mut self, field: i32, value: *const c_char) -> Result<(), crate::cmdline::Abort> {
-        let f = self.0.set_str.ok_or(crate::cmdline::Abort)?;
-        cmd_status(unsafe { f(self.0.ctx, field, value) })
-    }
-    fn steal(&mut self, field: i32, index: c_int) -> Result<(), crate::cmdline::Abort> {
-        let f = self.0.steal.ok_or(crate::cmdline::Abort)?;
-        cmd_status(unsafe { f(self.0.ctx, field, index) })
-    }
-    fn push_option(&mut self, value: *const c_char) -> Result<(), crate::cmdline::Abort> {
-        let f = self.0.push_option.ok_or(crate::cmdline::Abort)?;
-        cmd_status(unsafe { f(self.0.ctx, value) })
-    }
-    fn push_id(&mut self, id: i32) -> Result<(), crate::cmdline::Abort> {
-        let f = self.0.push_id.ok_or(crate::cmdline::Abort)?;
-        cmd_status(unsafe { f(self.0.ctx, id) })
-    }
-    fn push_name(&mut self, value: *const c_char) -> Result<(), crate::cmdline::Abort> {
-        let f = self.0.push_name.ok_or(crate::cmdline::Abort)?;
-        cmd_status(unsafe { f(self.0.ctx, value) })
-    }
-    fn error(&mut self, msg: &CStr) -> Result<(), crate::cmdline::Abort> {
-        let f = self.0.error.ok_or(crate::cmdline::Abort)?;
-        cmd_status(unsafe { f(self.0.ctx, msg.as_ptr()) })
-    }
-}
-
-/// CommandLineParser's constructor: parses `argv` (permuted in place by
-/// getopt, entries nulled when the sink steals them) into the sink. 0, or -1
-/// when a callback threw.
-///
-/// # Safety
-/// `argv` points to `argc` C strings and a trailing null sentinel, writable
-/// as getopt permutes them.
-/// NULL inputs/entries and missing callbacks return -1. Only consumed entries
-/// may be nulled by `steal`; it keeps their strings alive until the destination
-/// is overwritten or parsing finishes. String callbacks copy borrowed data
-/// if retaining it; no callback may
-/// unwind. `sink` is valid; getopt globals are not used concurrently.
-/// Rust panics abort at this ABI boundary; they never unwind into C++.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cmdline_parse(
+pub unsafe extern "C" fn nzbget_rs_cmdline_new(
     argc: c_int,
-    argv: *mut *mut c_char,
-    use_long: c_int,
-    sink: *const CmdlineSink,
-) -> c_int {
-    let Some(sink) = sink.as_ref() else { return -1 };
-    if argv.is_null() || argc < 1 {
-        return -1;
-    }
-    if (0..argc).any(|i| (*argv.add(i as usize)).is_null())
-        || sink.set_int.is_none()
-        || sink.set_str.is_none()
-        || sink.steal.is_none()
-        || sink.push_option.is_none()
-        || sink.push_id.is_none()
-        || sink.push_name.is_none()
-        || sink.error.is_none()
-    {
-        return -1;
-    }
-    crate::cmdline::with_getopt_lock(|| {
-        match crate::cmdline::parse(argc, argv, use_long != 0, &mut FfiCmdline(sink)) {
-            Ok(()) => 0,
-            Err(_) => -1,
-        }
-    })
-}
-
-#[cfg(test)]
-mod cmdline_tests {
-    use super::*;
-    use std::ffi::{c_void, CString};
-
-    struct Calls {
-        count: usize,
-        fail_at: usize,
-        argv: *mut *mut c_char,
-    }
-
-    unsafe fn called(ctx: *mut c_void) -> c_int {
-        let calls = &mut *ctx.cast::<Calls>();
-        calls.count += 1;
-        if calls.count == calls.fail_at {
-            -1
-        } else {
-            0
-        }
-    }
-    unsafe extern "C" fn integer(ctx: *mut c_void, _: c_int, _: c_int) -> c_int {
-        called(ctx)
-    }
-    unsafe extern "C" fn string(ctx: *mut c_void, _: c_int, _: *const c_char) -> c_int {
-        called(ctx)
-    }
-    unsafe extern "C" fn id(ctx: *mut c_void, _: c_int) -> c_int {
-        called(ctx)
-    }
-    unsafe extern "C" fn text(ctx: *mut c_void, _: *const c_char) -> c_int {
-        called(ctx)
-    }
-    unsafe extern "C" fn steal(ctx: *mut c_void, _: c_int, index: c_int) -> c_int {
-        let result = called(ctx);
-        if result == 0 {
-            // The owning CString remains alive, as the C++ destination would.
-            *(*ctx.cast::<Calls>()).argv.add(index as usize) = std::ptr::null_mut();
-        }
-        result
-    }
-
-    #[test]
-    fn cmdline_rejects_invalid_inputs_and_stops_at_each_failed_callback() {
-        let mut calls = Calls {
-            count: 0,
-            fail_at: usize::MAX,
-            argv: std::ptr::null_mut(),
-        };
-        let mut sink = CmdlineSink {
-            getopt_long: None,
-            ctx: (&mut calls as *mut Calls).cast(),
-            set_int: Some(integer),
-            set_str: Some(string),
-            steal: Some(steal),
-            push_option: Some(text),
-            push_id: Some(id),
-            push_name: Some(text),
-            error: Some(text),
-        };
-        let mut null_arg = [std::ptr::null_mut()];
-        let mut null_value = [c"nzbget".as_ptr().cast_mut(), std::ptr::null_mut()];
-        unsafe {
-            assert_eq!(
-                nzbget_rs_cmdline_parse(2, null_value.as_mut_ptr(), 0, &sink),
-                -1
-            );
-            assert_eq!(
-                nzbget_rs_cmdline_parse(1, null_arg.as_mut_ptr(), 0, &sink),
-                -1
-            );
-            assert_eq!(
-                nzbget_rs_cmdline_parse(1, std::ptr::null_mut(), 0, &sink),
-                -1
-            );
-            assert_eq!(
-                nzbget_rs_cmdline_parse(0, null_arg.as_mut_ptr(), 0, &sink),
-                -1
-            );
-            assert_eq!(
-                nzbget_rs_cmdline_parse(-1, null_arg.as_mut_ptr(), 0, &sink),
-                -1
-            );
-            assert_eq!(
-                nzbget_rs_cmdline_parse(1, null_arg.as_mut_ptr(), 0, std::ptr::null()),
-                -1
-            );
-        }
-        assert_eq!(calls.count, 0);
-        for args in [
-            vec![
-                "nzbget", "-A", "N", "name", "-o", "X=1", "-c", "conf", "file",
-            ],
-            vec!["nzbget", "-E", "GN", "D", "name"],
-            vec!["nzbget", "-E", "G", "D", "1,3-5"],
-            vec!["nzbget", "-E", "G", "invalid"],
-        ] {
-            let strings: Vec<_> = args.iter().map(|a| CString::new(*a).unwrap()).collect();
-            let mut fail_at = 1;
-            loop {
-                let mut argv: Vec<_> = strings.iter().map(|a| a.as_ptr().cast_mut()).collect();
-                argv.push(std::ptr::null_mut());
-                calls.count = 0;
-                calls.fail_at = fail_at;
-                calls.argv = argv.as_mut_ptr();
-                let result = unsafe {
-                    nzbget_rs_cmdline_parse(args.len() as c_int, argv.as_mut_ptr(), 0, &sink)
-                };
-                if result == 0 {
-                    assert_eq!(calls.count + 1, fail_at);
-                    break;
-                }
-                assert_eq!(calls.count, fail_at, "callbacks continued after failure");
-                fail_at += 1;
-                assert!(fail_at < 100);
+    argv: *const *const c_char,
+    write_stdout_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize)>,
+    ctx: *mut c_void,
+) -> *mut NzbgetRsCmdline {
+    match crate::cmdline::CmdlineHandle::parse_argv(argc, argv, |bytes| {
+        if let Some(cb) = write_stdout_cb {
+            if !bytes.is_empty() {
+                cb(ctx, bytes.as_ptr().cast(), bytes.len());
             }
         }
-        let mut argv = [c"nzbget".as_ptr().cast_mut(), std::ptr::null_mut()];
-        calls.count = 0;
-        unsafe {
-            sink.error = None;
-            assert_eq!(nzbget_rs_cmdline_parse(1, argv.as_mut_ptr(), 1, &sink), -1);
-            assert_eq!(nzbget_rs_cmdline_parse(1, argv.as_mut_ptr(), 0, &sink), -1);
-        }
-        assert_eq!(calls.count, 0);
+    }) {
+        Some(h) => Box::into_raw(Box::new(NzbgetRsCmdline(h))),
+        None => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cmdline_free(cmd: *mut NzbgetRsCmdline) {
+    if !cmd.is_null() {
+        drop(Box::from_raw(cmd));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cmdline_get_flag(
+    cmd: *const NzbgetRsCmdline,
+    field: c_int,
+) -> c_int {
+    match cmd.as_ref() {
+        Some(c) => c.0.get_flag(field),
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cmdline_get_str(
+    cmd: *const NzbgetRsCmdline,
+    field: c_int,
+) -> *const c_char {
+    match cmd.as_ref() {
+        Some(c) => c.0.get_cstr_ptr(field),
+        None => std::ptr::null(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cmdline_run_client(
+    cmd: *const NzbgetRsCmdline,
+    control_ip: *const c_char,
+    control_port: c_int,
+    control_username: *const c_char,
+    control_password: *const c_char,
+    write_stdout_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize)>,
+    write_perror_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    ctx: *mut c_void,
+) -> c_int {
+    #[cfg(unix)]
+    {
+        let _cancel_guard = PosixCancelGuard::disable();
+        let Some(c) = cmd.as_ref() else {
+            return 0;
+        };
+        let ok = c.0.execute_client(
+            input(control_ip),
+            control_port,
+            input(control_username),
+            input(control_password),
+            |bytes| {
+                if let Some(cb) = write_stdout_cb {
+                    if !bytes.is_empty() {
+                        cb(ctx, bytes.as_ptr().cast(), bytes.len());
+                    }
+                }
+            },
+            |cmsg| {
+                if let Some(cb) = write_perror_cb {
+                    cb(ctx, cmsg.as_ptr());
+                }
+            },
+        );
+        return c_int::from(ok);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            cmd,
+            control_ip,
+            control_port,
+            control_username,
+            control_password,
+            write_stdout_cb,
+            write_perror_cb,
+            ctx,
+        );
+        0
     }
 }
 
@@ -7050,167 +6900,6 @@ pub unsafe extern "C" fn nzbget_rs_cmdline_format_usage(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ncurses_format_status_bar(
-    spec: *const crate::ncurses_format::NcursesStatusSpec,
-) -> RsBuf {
-    if spec.is_null() {
-        return into_buf(Vec::new());
-    }
-    into_buf(crate::ncurses_format::format_status_bar(&*spec))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ncurses_format_top_header(
-    header: *const c_char,
-    screen_width: c_int,
-    up_time: c_int,
-    time_sec: c_int,
-) -> RsBuf {
-    let hdr = if header.is_null() {
-        b""
-    } else {
-        CStr::from_ptr(header).to_bytes()
-    };
-    into_buf(crate::ncurses_format::format_top_header(
-        hdr,
-        screen_width,
-        up_time != 0,
-        time_sec,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ncurses_format_file_queue_header(
-    use_color: c_int,
-    file_num: c_int,
-    paused_files: c_int,
-    remaining: i64,
-    paused: i64,
-) -> RsBuf {
-    into_buf(crate::ncurses_format::format_file_queue_header(
-        use_color != 0,
-        file_num,
-        paused_files,
-        remaining,
-        paused,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ncurses_format_group_queue_header(
-    use_color: c_int,
-    group_count: c_int,
-    remaining: i64,
-    paused: i64,
-) -> RsBuf {
-    into_buf(crate::ncurses_format::format_group_queue_header(
-        use_color != 0,
-        group_count,
-        remaining,
-        paused,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ncurses_format_file_row(
-    spec: *const crate::ncurses_format::NcursesFileRowSpec,
-    out_color: *mut c_int,
-) -> RsBuf {
-    if spec.is_null() {
-        if !out_color.is_null() {
-            *out_color = 0;
-        }
-        return into_buf(Vec::new());
-    }
-    let (row, color) = crate::ncurses_format::format_file_row(&*spec);
-    if !out_color.is_null() {
-        *out_color = color;
-    }
-    into_buf(row)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ncurses_format_group_row(
-    spec: *const crate::ncurses_format::NcursesGroupRowSpec,
-    inout_col_files: *mut c_int,
-    inout_col_total: *mut c_int,
-    inout_col_left: *mut c_int,
-    out_color: *mut c_int,
-) -> RsBuf {
-    if spec.is_null() {
-        if !out_color.is_null() {
-            *out_color = 0;
-        }
-        return into_buf(Vec::new());
-    }
-    let mut wf = if inout_col_files.is_null() {
-        0
-    } else {
-        *inout_col_files
-    };
-    let mut wt = if inout_col_total.is_null() {
-        0
-    } else {
-        *inout_col_total
-    };
-    let mut wl = if inout_col_left.is_null() {
-        0
-    } else {
-        *inout_col_left
-    };
-    let (row, color) = crate::ncurses_format::format_group_row(&*spec, &mut wf, &mut wt, &mut wl);
-    if !inout_col_files.is_null() {
-        *inout_col_files = wf;
-    }
-    if !inout_col_total.is_null() {
-        *inout_col_total = wt;
-    }
-    if !inout_col_left.is_null() {
-        *inout_col_left = wl;
-    }
-    if !out_color.is_null() {
-        *out_color = color;
-    }
-    into_buf(row)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_colored_frontend_format_status_bar(
-    stand_by: c_int,
-    pause_download: c_int,
-    current_download_speed: i64,
-    remaining_size: i64,
-    download_limit: i64,
-    post_job_count: c_int,
-    thread_count: c_int,
-    control_seq: *const c_char,
-) -> RsBuf {
-    into_buf(crate::ncurses_format::format_colored_status_bar(
-        stand_by,
-        pause_download,
-        current_download_speed,
-        remaining_size,
-        download_limit,
-        post_job_count,
-        thread_count,
-        input(control_seq),
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_frontend_format_log_message(
-    colored: c_int,
-    kind: c_int,
-    text: *const c_char,
-) -> RsBuf {
-    into_buf(crate::ncurses_format::format_log_message_line(
-        colored != 0,
-        kind,
-        input(text),
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_nserv_format_usage(base_name: *const c_char) -> RsBuf {
     into_buf(crate::cmdline::format_nserv_usage(input(base_name)))
 }
@@ -12309,44 +11998,6 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_prepare_signature_inputs(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ncurses_set_current_queue_entry(
-    entry: c_int,
-    queue_size: c_int,
-    queue_win_client_height: c_int,
-    inout_scroll_offset: *mut c_int,
-    out_selected_entry: *mut c_int,
-) {
-    let scroll_in = if inout_scroll_offset.is_null() {
-        0
-    } else {
-        *inout_scroll_offset
-    };
-    let (sel, scroll_out) = crate::ncurses_format::ncurses_set_current_queue_entry(
-        entry,
-        queue_size,
-        scroll_in,
-        queue_win_client_height,
-    );
-    if !inout_scroll_offset.is_null() {
-        *inout_scroll_offset = scroll_out;
-    }
-    if !out_selected_entry.is_null() {
-        *out_selected_entry = sel;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ncurses_handle_key(
-    state: *mut crate::ncurses_format::NcursesKeyState,
-    key: c_int,
-    queue_size: c_int,
-) {
-    if !state.is_null() {
-        crate::ncurses_format::ncurses_handle_key(&mut *state, key, queue_size);
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_nzb_format_name(
     op: c_int,
     s1: *const c_char,
@@ -12664,140 +12315,6 @@ pub unsafe extern "C" fn nzbget_rs_util_format_time(
         let slice = std::slice::from_raw_parts_mut(buffer.cast::<u8>(), bufsize as usize);
         crate::util::util_format_time(time_sec, slice);
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_term_plot_line(
-    text: *const c_char,
-    row: c_int,
-    pos: c_int,
-    screen_width: c_int,
-    use_color: c_int,
-    color_pair: c_int,
-) {
-    crate::ncurses_format::term_plot_line(
-        input(text),
-        row,
-        pos,
-        screen_width,
-        use_color != 0,
-        color_pair,
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ncurses_calc_window_sizes(
-    queue_size: c_int,
-    queue_window_percentage: c_int,
-    inout_screen_height: *mut c_int,
-    inout_screen_width: *mut c_int,
-    out_queue_win_top: *mut c_int,
-    out_queue_win_height: *mut c_int,
-    out_queue_win_client_height: *mut c_int,
-    out_messages_win_top: *mut c_int,
-    out_messages_win_height: *mut c_int,
-    out_messages_win_client_height: *mut c_int,
-) {
-    crate::ncurses_format::ncurses_calc_window_sizes(
-        queue_size,
-        queue_window_percentage,
-        &mut *inout_screen_height,
-        &mut *inout_screen_width,
-        &mut *out_queue_win_top,
-        &mut *out_queue_win_height,
-        &mut *out_queue_win_client_height,
-        &mut *out_messages_win_top,
-        &mut *out_messages_win_height,
-        &mut *out_messages_win_client_height,
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ncurses_print_message(
-    msg_kind: c_int,
-    msg_time: i64,
-    msg_text: *const c_char,
-    row: c_int,
-    max_lines: c_int,
-    show_timestamp: c_int,
-    time_correction: c_int,
-    screen_width: c_int,
-    use_color: c_int,
-) -> c_int {
-    crate::ncurses_format::ncurses_print_message(
-        msg_kind,
-        msg_time,
-        input(msg_text),
-        row,
-        max_lines,
-        show_timestamp != 0,
-        time_correction,
-        screen_width,
-        use_color != 0,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ncurses_print_key_input_bar(
-    screen_height: c_int,
-    screen_width: c_int,
-    use_color: c_int,
-    input_mode: c_int,
-    group_files: c_int,
-    selected_queue_entry: c_int,
-    queue_size: c_int,
-    input_value: c_int,
-    input_number_index: c_int,
-    hint: *const c_char,
-    inout_start_hint: *mut i64,
-    cur_time: i64,
-) {
-    crate::ncurses_format::ncurses_print_key_input_bar(
-        screen_height,
-        screen_width,
-        use_color != 0,
-        input_mode,
-        group_files != 0,
-        selected_queue_entry,
-        queue_size,
-        input_value,
-        input_number_index,
-        input(hint),
-        &mut *inout_start_hint,
-        cur_time,
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ncurses_resolve_group_edit_action(
-    action: c_int,
-    has_group: c_int,
-    remaining_size: i64,
-    paused_size: i64,
-    remaining_par_count: c_int,
-    selected_entry: c_int,
-    last_edit_entry: c_int,
-    inout_last_pause_pars: *mut c_int,
-) -> c_int {
-    let mut pause_pars = if inout_last_pause_pars.is_null() {
-        false
-    } else {
-        *inout_last_pause_pars != 0
-    };
-    let out = crate::ncurses_format::ncurses_resolve_group_edit_action(
-        action,
-        has_group != 0,
-        remaining_size,
-        paused_size,
-        remaining_par_count,
-        selected_entry,
-        last_edit_entry,
-        &mut pause_pars,
-    );
-    if !inout_last_pause_pars.is_null() {
-        *inout_last_pause_pars = c_int::from(pause_pars);
-    }
-    out
 }
 
 #[no_mangle]
@@ -18635,200 +18152,14 @@ pub unsafe extern "C" fn nzbget_rs_binrpc_serve(env: *const NzbgetRsBinRpcServeE
     }
 }
 
-#[repr(C)]
-pub struct NzbgetRsBinRpcClientEnv {
-    pub ctx: *mut c_void,
-    pub control_ip: *const c_char,
-    pub control_port: c_int,
-    pub control_username: *const c_char,
-    pub control_password: *const c_char,
-    pub verbose: c_int,
-    pub match_mode: c_int,
-    pub set_rate: c_int,
-    pub edit_action: c_int,
-    pub edit_offset: c_int,
-    pub edit_text: *const c_char,
-    pub edit_ids: *const i32,
-    pub edit_ids_len: usize,
-    pub edit_names: *const *const c_char,
-    pub edit_names_len: usize,
-    pub log_lines: c_int,
-    pub log_first_id: u32,
-    pub add_nzb_filename: *const c_char,
-    pub arg_filename: *const c_char,
-    pub add_category: *const c_char,
-    pub auto_category: c_int,
-    pub add_top: c_int,
-    pub add_paused: c_int,
-    pub add_priority: c_int,
-    pub add_dupe_key: *const c_char,
-    pub add_dupe_mode: c_int,
-    pub add_dupe_score: c_int,
-    pub write_log_kind: c_int,
-    pub write_log_text: *const c_char,
-    pub want_file_list: c_int,
-    pub want_summary: c_int,
-    pub out_summary: *mut crate::binrpc::FrontendSummary,
-    pub write_stdout_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize)>,
-    pub write_perror_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
-    pub is_stopped_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
-    pub on_log_cb: Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32, *const c_char)>,
-    pub on_nzb_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            u32,
-            u32,
-            i64,
-            i64,
-            i64,
-            c_int,
-            c_int,
-            c_int,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-        ),
-    >,
-    pub on_param_cb: Option<unsafe extern "C" fn(*mut c_void, usize, *const c_char, *const c_char)>,
-    pub on_file_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            usize,
-            u32,
-            i64,
-            i64,
-            c_int,
-            c_int,
-            c_int,
-            *const c_char,
-            *const c_char,
-        ),
-    >,
-}
-
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_client(
+pub unsafe extern "C" fn nzbget_rs_frontend_op(
     op: c_int,
-    env: *const NzbgetRsBinRpcClientEnv,
+    env: *const crate::ncurses_format::NzbgetRsFrontendEnv,
 ) -> c_int {
     #[cfg(unix)]
-    {
-        let _cancel_guard = PosixCancelGuard::disable();
-        let Some(e) = env.as_ref() else {
-            return 0;
-        };
-        let ids_slice = if e.edit_ids.is_null() || e.edit_ids_len == 0 {
-            &[]
-        } else {
-            std::slice::from_raw_parts(e.edit_ids, e.edit_ids_len)
-        };
-        let mut name_slices = Vec::with_capacity(if e.edit_names.is_null() {
-            0
-        } else {
-            e.edit_names_len
-        });
-        if !e.edit_names.is_null() {
-            for i in 0..e.edit_names_len {
-                name_slices.push(input(*e.edit_names.add(i)));
-            }
-        }
-        let params = crate::binrpc::BinRpcClientParams {
-            control_ip: input(e.control_ip),
-            control_port: e.control_port,
-            control_username: input(e.control_username),
-            control_password: input(e.control_password),
-            verbose: e.verbose != 0,
-            match_mode: e.match_mode,
-            set_rate: e.set_rate,
-            edit_action: e.edit_action,
-            edit_offset: e.edit_offset,
-            edit_text: (!e.edit_text.is_null()).then(|| CStr::from_ptr(e.edit_text).to_bytes()),
-            edit_ids: ids_slice,
-            edit_names: &name_slices,
-            log_lines: e.log_lines,
-            log_first_id: e.log_first_id,
-            add_nzb_filename: input(e.add_nzb_filename),
-            arg_filename: input(e.arg_filename),
-            add_category: input(e.add_category),
-            auto_category: e.auto_category != 0,
-            add_top: e.add_top != 0,
-            add_paused: e.add_paused != 0,
-            add_priority: e.add_priority,
-            add_dupe_key: input(e.add_dupe_key),
-            add_dupe_mode: e.add_dupe_mode,
-            add_dupe_score: e.add_dupe_score,
-            write_log_kind: e.write_log_kind,
-            write_log_text: input(e.write_log_text),
-            want_file_list: e.want_file_list != 0,
-            want_summary: e.want_summary != 0,
-        };
-        let out_sum = e.out_summary.as_mut();
-        let ok = crate::binrpc::client_execute(
-            op,
-            &params,
-            out_sum,
-            |bytes| {
-                if let Some(cb) = e.write_stdout_cb {
-                    cb(e.ctx, bytes.as_ptr().cast(), bytes.len());
-                }
-            },
-            |cmsg| {
-                if let Some(cb) = e.write_perror_cb {
-                    cb(e.ctx, cmsg.as_ptr());
-                }
-            },
-            || {
-                if let Some(cb) = e.is_stopped_cb {
-                    cb(e.ctx) != 0
-                } else {
-                    false
-                }
-            },
-            |id, kind, time, txt| {
-                if let Some(cb) = e.on_log_cb {
-                    cb(e.ctx, id, kind, time, txt.cast());
-                }
-            },
-            |id, kind, sz, rem, psd, pfc, rpc, prio, f0, f1, f2, f3, f4| {
-                if let Some(cb) = e.on_nzb_cb {
-                    cb(
-                        e.ctx,
-                        id,
-                        kind,
-                        sz,
-                        rem,
-                        psd,
-                        pfc,
-                        rpc,
-                        prio,
-                        f0.cast(),
-                        f1.cast(),
-                        f2.cast(),
-                        f3.cast(),
-                        f4.cast(),
-                    );
-                }
-            },
-            |idx, k, v| {
-                if let Some(cb) = e.on_param_cb {
-                    cb(e.ctx, idx, k.cast(), v.cast());
-                }
-            },
-            |idx, id, sz, rem, psd, fnc, act, s, f| {
-                if let Some(cb) = e.on_file_cb {
-                    cb(e.ctx, idx, id, sz, rem, psd, fnc, act, s.cast(), f.cast());
-                }
-            },
-        );
-        return c_int::from(ok);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (op, env);
-        0
-    }
+    let _cancel_guard = PosixCancelGuard::disable();
+    crate::ncurses_format::frontend_op(op, env)
 }
 
 #[cfg(all(test, unix))]

@@ -13959,7 +13959,7 @@ mod tests {
             crate::ffi::nzbget_rs_free(suf_key);
 
             let r = [br(0, 100), br(200, 100)];
-            assert_eq!(crate::ffi::nzbget_rs_stream_total_size(r.as_ptr(), 2), 200);
+            assert_eq!(total_size(&r), 200);
             assert_eq!(
                 crate::ffi::nzbget_rs_stream_intersects_any(br(50, 20), r.as_ptr(), 2),
                 1

@@ -796,14 +796,14 @@ pub fn script_config_commit_cipher_patch(
 pub fn ext_is_in_list(extensions_list: &[u8], target_name: &[u8]) -> bool {
     fn trim_tokenizer_ws(mut s: &[u8]) -> &[u8] {
         while let Some(&b) = s.first() {
-            if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+            if b <= b' ' {
                 s = &s[1..];
             } else {
                 break;
             }
         }
         while let Some(&b) = s.last() {
-            if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+            if b <= b' ' {
                 s = &s[..s.len() - 1];
             } else {
                 break;

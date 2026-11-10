@@ -17788,4 +17788,528 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_counters_op(
     }
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    d: c_int,
+    e: c_int,
+    f: c_int,
+    t1: i64,
+    t2: i64,
+    t3: i64,
+    t4: i64,
+    s1: *const c_char,
+    s2: *const c_char,
+    i32_arr: *const c_int,
+    u8_arr: *const u8,
+    i64_arr: *const i64,
+    len: usize,
+    out1: *mut c_int,
+    out2: *mut c_int,
+    out3: *mut c_int,
+    out4: *mut c_int,
+    out_arr: *mut c_int,
+    out_i64_arr: *mut i64,
+) -> c_int {
+    let s1_bytes = if s1.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s1).to_bytes()
+    };
+    let s2_bytes = if s2.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s2).to_bytes()
+    };
+    match op {
+        0 => c_int::from(crate::repair::should_use_par_quick(
+            a != 0,
+            b != 0,
+            c != 0,
+        )),
+        1 => {
+            let (new_status, set_rep, rep_val, wait_time, par_sec) =
+                crate::repair::complete_par_check(a, b, 2, 3, 1, 1, 3, 4, 2, c, d, t1, t2);
+            if !out1.is_null() {
+                *out1 = c_int::from(set_rep);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(rep_val);
+            }
+            if !out3.is_null() {
+                *out3 = wait_time;
+            }
+            if !out4.is_null() {
+                *out4 = par_sec;
+            }
+            new_status
+        }
+        2 => {
+            let counts = if i32_arr.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(i32_arr, len)
+            };
+            let (selected, rem_needed) = crate::repair::select_more_pars(counts, a);
+            if !out1.is_null() {
+                *out1 = rem_needed;
+            }
+            let copy_len = selected.len().min(len);
+            if !out_arr.is_null() && copy_len > 0 {
+                for (i, &idx) in selected.iter().take(copy_len).enumerate() {
+                    *out_arr.add(i) = idx as c_int;
+                }
+            }
+            copy_len as c_int
+        }
+        3 => {
+            let (new_stage, changed, set_rt, new_rsec, cancel, est_sec, est_min) =
+                crate::repair::eval_par_progress_update(
+                    a,
+                    b,
+                    1,
+                    2,
+                    3,
+                    4,
+                    t1,
+                    t2,
+                    t3,
+                    c,
+                    d != 0,
+                    e,
+                    f != 0,
+                    t4 as i32,
+                );
+            if !out1.is_null() {
+                *out1 = new_stage;
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(changed)
+                    | (c_int::from(set_rt) << 1)
+                    | (c_int::from(cancel) << 2);
+            }
+            if !out3.is_null() {
+                *out3 = new_rsec;
+            }
+            if !out4.is_null() {
+                *out4 = est_sec;
+            }
+            est_min
+        }
+        4 => {
+            if !out_i64_arr.is_null() {
+                let ts = std::slice::from_raw_parts_mut(out_i64_arr, 4);
+                let (s_stage, s_start, s_par, s_rep) =
+                    crate::repair::calc_paused_timestamps(t1, t2, ts[0], ts[1], ts[2], ts[3]);
+                ts[0] = s_stage;
+                ts[1] = s_start;
+                ts[2] = s_par;
+                ts[3] = s_rep;
+            }
+            0
+        }
+        5 => c_int::from(crate::repair::should_load_partial_segments(
+            a,
+            2,
+            b,
+            c != 0,
+        )),
+        6 => crate::repair::classify_file_crc_status(a, b != 0, c != 0, 1, 3, 2, 1, 3, 2, 0),
+        7 => c_int::from(crate::repair::should_consider_twin_candidate(
+            a != 0,
+            b,
+            c,
+            d != 0,
+            s1_bytes,
+            e != 0,
+            f != 0,
+        )),
+        8 => {
+            let is_par2 = if u8_arr.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(u8_arr, len)
+            };
+            let sizes = if i64_arr.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(i64_arr, len)
+            };
+            crate::repair::select_best_twin_par2_index(is_par2, sizes, t1)
+                .map_or(-1, |idx| idx as c_int)
+        }
+        9 => c_int::from(crate::repair::should_skip_twin_volume_entry(
+            a != 0,
+            s1_bytes,
+            s2_bytes,
+        )),
+        10 => crate::repair::estimate_twin_vol_blocks(t1, t2 as u64),
+        11 => {
+            let blocks = if i32_arr.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(i32_arr, len)
+            };
+            let (avail, covers) = crate::repair::sum_and_check_twin_blocks(blocks, a);
+            if !out1.is_null() {
+                *out1 = avail;
+            }
+            c_int::from(covers)
+        }
+        12 => {
+            let blocks = if i32_arr.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(i32_arr, len)
+            };
+            crate::repair::pick_twin_volume(blocks, a).map_or(-1, |idx| idx as c_int)
+        }
+        13 => {
+            let (usable, eff_blocks, strict_ok) = crate::repair::eval_find_pars_candidate(
+                a != 0,
+                b,
+                t1,
+                t2,
+                c != 0,
+                d != 0,
+                s1_bytes,
+                s2_bytes,
+            );
+            if !out1.is_null() {
+                *out1 = eff_blocks;
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(strict_ok);
+            }
+            c_int::from(usable)
+        }
+        14 => c_int::from(crate::unpack::has_completed_archive_ext(s1_bytes)),
+        15 => c_int::from(crate::unpack::use_inter_dir(
+            s1_bytes,
+            s2_bytes,
+            crate::paths::PATH_SEPARATOR,
+        )),
+        16 => {
+            let (outcome, move_status) = crate::cleanup::decide_move_outcome(a != 0, b != 0);
+            if !out1.is_null() {
+                *out1 = move_status;
+            }
+            outcome
+        }
+        17 => crate::cleanup::rename_classify_run_outcome(a != 0, b),
+        18 => {
+            let (use_final, detect_missing) =
+                crate::cleanup::rename_eval_par_config(a, b, c, d != 0);
+            if !out1.is_null() {
+                *out1 = c_int::from(detect_missing);
+            }
+            c_int::from(use_final)
+        }
+        19 => {
+            let (init_status, req_extra, req_par_check) =
+                crate::cleanup::rename_complete_action(a, b, c != 0, d, e != 0, f);
+            if !out1.is_null() {
+                *out1 = c_int::from(req_extra);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(req_par_check);
+            }
+            init_status
+        }
+        20 => c_int::from(crate::cleanup::rename_should_reset_par_status(t1)),
+        21 => c_int::from(crate::unpack::is_unpack_space_error(a != 0, s1_bytes)),
+        22 => {
+            let (req_par, force_rep, st) = crate::unpack::eval_unpack_completed_failure(
+                a != 0,
+                b != 0,
+                c,
+                1,
+                d != 0,
+                (e & 1) != 0,
+                (e & 2) != 0,
+                (e & 4) != 0,
+                (e & 8) != 0,
+                (e & 16) != 0,
+                (e & 32) != 0,
+                (e & 64) != 0,
+                (f & 1) != 0,
+                (f & 2) != 0,
+                (f & 4) != 0,
+                (f & 8) != 0,
+            );
+            if !out1.is_null() {
+                *out1 = c_int::from(req_par);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(force_rep);
+            }
+            st
+        }
+        23 => c_int::from(crate::extension::ext_is_in_list(s1_bytes, s2_bytes)),
+        24 => {
+            if !s1_bytes.is_empty()
+                && s1_bytes[0] != b'*'
+                && s1_bytes[s1_bytes.len() - 1] == b':'
+                && (s2_bytes.eq_ignore_ascii_case(b"yes")
+                    || s2_bytes.eq_ignore_ascii_case(b"on")
+                    || s2_bytes == b"1")
+            {
+                (s1_bytes.len() - 1) as c_int
+            } else {
+                0
+            }
+        }
+        25 => c_int::from(crate::extension::is_nzbget_internal_env_var(s1_bytes)),
+        26 => {
+            let (trimmed_len, mk, text_off) =
+                crate::extension::classify_script_output_line(s1_bytes);
+            if trimmed_len == 0 {
+                return -1;
+            }
+            if !out1.is_null() {
+                *out1 = trimmed_len as c_int;
+            }
+            if !out2.is_null() {
+                *out2 = text_off as c_int;
+            }
+            mk
+        }
+        27 => c_int::from(crate::extension::should_skip_queue_event_interval(
+            a, b, c, t1, t2,
+        )),
+        28 => c_int::from(crate::extension::should_ignore_queued_script_event(
+            a != 0,
+            b,
+            0,
+            c,
+            1,
+            d,
+            6,
+            2,
+        )),
+        29 => {
+            if a == 0 {
+                return 0;
+            }
+            let event_name =
+                if b >= 0 && (b as usize) < crate::extension::QUEUE_EVENT_NAMES.len() {
+                    crate::extension::QUEUE_EVENT_NAMES[b as usize]
+                } else {
+                    b"UNKNOWN"
+                };
+            if !s1_bytes.is_empty()
+                && !s1_bytes.windows(event_name.len()).any(|w| w == event_name)
+            {
+                return 0;
+            }
+            if s2_bytes.eq_ignore_ascii_case(b"yes")
+                || s2_bytes.eq_ignore_ascii_case(b"on")
+                || s2_bytes == b"1"
+            {
+                return 1;
+            }
+            if b == 1 {
+                2
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    d: c_int,
+    e: c_int,
+    t1: i64,
+    t2: i64,
+    t3: i64,
+    f1: f64,
+    s1: *const c_char,
+    cstr_arr: *const *const c_char,
+    i64_arr: *const i64,
+    len: usize,
+    out1: *mut c_int,
+    out2: *mut c_int,
+    i64_inout: *mut i64,
+    out_buf: *mut RsBuf,
+) -> c_int {
+    let s1_bytes = if s1.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s1).to_bytes()
+    };
+    match op {
+        0 => c_int::from(crate::streamrepair::is_par2_job_or_file(a != 0, s1_bytes)),
+        1 => {
+            let mut names = Vec::with_capacity(len);
+            if !cstr_arr.is_null() {
+                for &p in std::slice::from_raw_parts(cstr_arr, len) {
+                    names.push(if p.is_null() {
+                        &[][..]
+                    } else {
+                        CStr::from_ptr(p).to_bytes()
+                    });
+                }
+            }
+            let sizes = if i64_arr.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(i64_arr, len)
+            };
+            let (rank, win) =
+                crate::streamrepair::compute_positional_rank(&names, sizes, s1_bytes, t1);
+            if !out1.is_null() {
+                *out1 = rank;
+            }
+            if !out2.is_null() {
+                *out2 = win;
+            }
+            rank
+        }
+        2 => {
+            if !out1.is_null() && !i64_inout.is_null() {
+                let i64s = std::slice::from_raw_parts_mut(i64_inout, 2);
+                let (outcome, new_art, new_fsz, new_pfsz) =
+                    crate::streamrepair::classify_remaining_hole_target(
+                        a != 0,
+                        t1,
+                        b != 0,
+                        c != 0,
+                        d,
+                        t2,
+                        t3,
+                        *out1,
+                        i64s[0],
+                        i64s[1],
+                    );
+                *out1 = new_art;
+                i64s[0] = new_fsz;
+                i64s[1] = new_pfsz;
+                return outcome;
+            }
+            0
+        }
+        3 => c_int::from(crate::streamrepair::is_incomplete_nzb_hole(t1, t2)),
+        4 => {
+            if !i64_inout.is_null() {
+                let s = std::slice::from_raw_parts_mut(i64_inout, 8);
+                let (nf, ns, ncf, ncs, npf, nps, npcf, npcs) =
+                    crate::streamrepair::credit_repaired_sizes(
+                        t1, t2, s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+                    );
+                s[0] = nf;
+                s[1] = ns;
+                s[2] = ncf;
+                s[3] = ncs;
+                s[4] = npf;
+                s[5] = nps;
+                s[6] = npcf;
+                s[7] = npcs;
+            }
+            0
+        }
+        5 => {
+            let (reset_pr, set_ps, new_ps, set_fpf, clr_rpc, chk_mp) =
+                crate::streamrepair::resolve_completion_par_action(
+                    t1,
+                    a != 0,
+                    b,
+                    0,
+                    c,
+                    1,
+                    d,
+                    e,
+                    5,
+                    0,
+                );
+            if !out1.is_null() {
+                *out1 = c_int::from(reset_pr)
+                    | (c_int::from(set_ps) << 1)
+                    | (c_int::from(set_fpf) << 2)
+                    | (c_int::from(clr_rpc) << 3)
+                    | (c_int::from(chk_mp) << 4);
+            }
+            new_ps
+        }
+        6 => {
+            if !i64_inout.is_null() && !i64_arr.is_null() {
+                let ins = std::slice::from_raw_parts(i64_arr, 6);
+                let mut new_prog = 0i64;
+                let mut reset_last = false;
+                let reason = crate::streamrepair::watchdog_eval_tick(
+                    t1,
+                    t2,
+                    a != 0,
+                    b,
+                    ins[0],
+                    ins[1],
+                    ins[2],
+                    f1,
+                    c,
+                    d,
+                    e,
+                    len as i32,
+                    ins[3],
+                    ins[4],
+                    ins[5],
+                    &mut new_prog,
+                    &mut reset_last,
+                );
+                *i64_inout = new_prog;
+                if !out1.is_null() {
+                    *out1 = c_int::from(reset_last);
+                }
+                if let Some(msg) = reason {
+                    if !out_buf.is_null() {
+                        *out_buf = into_buf(msg);
+                    }
+                    return 1;
+                }
+            }
+            0
+        }
+        7 => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::streamrepair::format_whole_files_suffix(a));
+            }
+            0
+        }
+        8 => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::repair::build_twin_filename(s1_bytes, len));
+            }
+            0
+        }
+        9 => {
+            if !out_buf.is_null() {
+                let reason = crate::repair::twin_par2_reject_reason(a);
+                let end = reason.iter().position(|&b| b == 0).unwrap_or(reason.len());
+                *out_buf = into_buf(reason[..end].to_vec());
+            }
+            0
+        }
+        10 => {
+            let norm = crate::extension::normalize_special_env_var_name(s1_bytes);
+            if norm.as_slice() != s1_bytes {
+                if !out_buf.is_null() {
+                    *out_buf = into_buf(norm);
+                }
+                return 1;
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
+
 

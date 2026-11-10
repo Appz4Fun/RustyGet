@@ -3476,6 +3476,16 @@ int nzbget_rs_queue_coord_counters_op(
     const char* s1, const char* s2,
     NzbgetRsNzbMergeSplitCounters* ms1, NzbgetRsNzbMergeSplitCounters* ms2,
     const NzbgetRsSplitFileCounters* sf, int* i32_inout, int64_t* i64_inout);
+int nzbget_rs_repair_ctrl_op(
+    int op, int a, int b, int c, int d, int e, int f,
+    int64_t t1, int64_t t2, int64_t t3, int64_t t4,
+    const char* s1, const char* s2, const int* i32_arr, const uint8_t* u8_arr, const int64_t* i64_arr, size_t len,
+    int* out1, int* out2, int* out3, int* out4, int* out_arr, int64_t* out_i64_arr);
+int nzbget_rs_stream_repair_ctrl_op(
+    int op, int a, int b, int c, int d, int e,
+    int64_t t1, int64_t t2, int64_t t3, double f1,
+    const char* s1, const char* const* cstr_arr, const int64_t* i64_arr, size_t len,
+    int* out1, int* out2, int64_t* i64_inout, NzbgetRsBuf* out_buf);
 
 #include "nzbget_tls_cipher.h"
 

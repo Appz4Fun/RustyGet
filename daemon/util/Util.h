@@ -14648,7 +14648,7 @@ public:
 			}
 		}
 
-		double flushedMb = nzbget_rs_dqh_stream_repair_bytes_to_mb(flushedSize);
+		double flushedMb = (double)flushedSize / 1024.0 / 1024.0;
 		if (GetSkipDiskWrite())
 		{
 			detail("Discarded %i articles (%.2f MB) from cache (SkipWrite) for %s", flushedArticles,
@@ -22262,72 +22262,6 @@ private:
 	bool DeleteUrl(NzbInfo* nzbInfo, DownloadQueue::EEditAction action);
 };
 
-static inline NzbgetRsNzbMergeSplitCounters ReadNzbMergeSplitCounters(NzbInfo* nzbInfo)
-{
-	NzbgetRsNzbMergeSplitCounters c{};
-	c.file_count = nzbInfo->GetFileCount();
-	c.active_downloads = nzbInfo->GetActiveDownloads();
-	c.full_content_hash = nzbInfo->GetFullContentHash();
-	c.filtered_content_hash = nzbInfo->GetFilteredContentHash();
-	c.size = nzbInfo->GetSize();
-	c.remaining_size = nzbInfo->GetRemainingSize();
-	c.paused_file_count = nzbInfo->GetPausedFileCount();
-	c.paused_size = nzbInfo->GetPausedSize();
-	c.success_size = nzbInfo->GetSuccessSize();
-	c.current_success_size = nzbInfo->GetCurrentSuccessSize();
-	c.failed_size = nzbInfo->GetFailedSize();
-	c.current_failed_size = nzbInfo->GetCurrentFailedSize();
-	c.par_size = nzbInfo->GetParSize();
-	c.par_success_size = nzbInfo->GetParSuccessSize();
-	c.par_current_success_size = nzbInfo->GetParCurrentSuccessSize();
-	c.par_failed_size = nzbInfo->GetParFailedSize();
-	c.par_current_failed_size = nzbInfo->GetParCurrentFailedSize();
-	c.remaining_par_count = nzbInfo->GetRemainingParCount();
-	c.total_articles = nzbInfo->GetTotalArticles();
-	c.success_articles = nzbInfo->GetSuccessArticles();
-	c.failed_articles = nzbInfo->GetFailedArticles();
-	c.current_success_articles = nzbInfo->GetCurrentSuccessArticles();
-	c.current_failed_articles = nzbInfo->GetCurrentFailedArticles();
-	c.min_time = (int64)nzbInfo->GetMinTime();
-	c.max_time = (int64)nzbInfo->GetMaxTime();
-	c.downloaded_size = nzbInfo->GetDownloadedSize();
-	c.download_sec = nzbInfo->GetDownloadSec();
-	c.download_start_time = (int64)nzbInfo->GetDownloadStartTime();
-	return c;
-}
-
-static inline void WriteNzbMergeSplitCounters(NzbInfo* nzbInfo, const NzbgetRsNzbMergeSplitCounters& c)
-{
-	nzbInfo->SetFileCount(c.file_count);
-	nzbInfo->SetActiveDownloads(c.active_downloads);
-	nzbInfo->SetFullContentHash(c.full_content_hash);
-	nzbInfo->SetFilteredContentHash(c.filtered_content_hash);
-	nzbInfo->SetSize(c.size);
-	nzbInfo->SetRemainingSize(c.remaining_size);
-	nzbInfo->SetPausedFileCount(c.paused_file_count);
-	nzbInfo->SetPausedSize(c.paused_size);
-	nzbInfo->SetSuccessSize(c.success_size);
-	nzbInfo->SetCurrentSuccessSize(c.current_success_size);
-	nzbInfo->SetFailedSize(c.failed_size);
-	nzbInfo->SetCurrentFailedSize(c.current_failed_size);
-	nzbInfo->SetParSize(c.par_size);
-	nzbInfo->SetParSuccessSize(c.par_success_size);
-	nzbInfo->SetParCurrentSuccessSize(c.par_current_success_size);
-	nzbInfo->SetParFailedSize(c.par_failed_size);
-	nzbInfo->SetParCurrentFailedSize(c.par_current_failed_size);
-	nzbInfo->SetRemainingParCount(c.remaining_par_count);
-	nzbInfo->SetTotalArticles(c.total_articles);
-	nzbInfo->SetSuccessArticles(c.success_articles);
-	nzbInfo->SetFailedArticles(c.failed_articles);
-	nzbInfo->SetCurrentSuccessArticles(c.current_success_articles);
-	nzbInfo->SetCurrentFailedArticles(c.current_failed_articles);
-	nzbInfo->SetMinTime((time_t)c.min_time);
-	nzbInfo->SetMaxTime((time_t)c.max_time);
-	nzbInfo->SetDownloadedSize(c.downloaded_size);
-	nzbInfo->SetDownloadSec(c.download_sec);
-	nzbInfo->SetDownloadStartTime((time_t)c.download_start_time);
-}
-
 
 class QueueCoordinator : public Thread, public Observer, public Debuggable
 {
@@ -22574,33 +22508,44 @@ public:
 		debug("CheckDupeFileInfos");
 
 		std::vector<FileInfo*> files;
-		std::vector<const char*> filenames;
+		std::vector<std::string> filenames;
 		std::vector<int64_t> sizes;
 		files.reserve(nzbInfo->GetFileList()->size());
 		filenames.reserve(nzbInfo->GetFileList()->size());
 		sizes.reserve(nzbInfo->GetFileList()->size());
+		std::map<std::string, std::vector<std::pair<int, size_t>>> byName;
+		size_t idx = 0;
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
 			files.push_back(fileInfo);
-			filenames.push_back(fileInfo->GetFilename());
+			std::string fn = fileInfo->GetFilename() ? fileInfo->GetFilename() : "";
 			sizes.push_back(fileInfo->GetSize());
+			byName[fn].emplace_back((int)(idx + 1), idx);
+			filenames.push_back(std::move(fn));
+			idx++;
 		}
 
-		std::vector<size_t> dupeIndices(files.size(), 0);
-		size_t dupeCount = nzbget_rs_queue_coord_find_dupe_file_indices(
-			filenames.data(), sizes.data(), files.size(),
-			dupeIndices.data(), dupeIndices.size());
-
-		for (size_t i = 0; i < dupeCount; i++)
+		for (size_t i = 0; i < files.size(); i++)
 		{
-			FileInfo* fileInfo = files[dupeIndices[i]];
-			warn("File \"%s\" appears twice in collection, adding only the biggest file", fileInfo->GetFilename());
-			int fileId = fileInfo->GetId();
-			nzbInfo->UpdateDeletedStats(fileInfo);
-			nzbInfo->GetFileList()->Remove(fileInfo);
-			if (g_Options->GetServerMode())
+			const auto& same = byName[filenames[i]];
+			if (same.size() != 2)
 			{
-				g_DiskState->DiscardFile(fileId, true, false, false);
+				continue;
+			}
+			auto [selfPos, selfIdx] = same[0].second == i ? same[0] : same[1];
+			auto [otherPos, otherIdx] = same[0].second == i ? same[1] : same[0];
+			if (sizes[selfIdx] < sizes[otherIdx] ||
+				(sizes[selfIdx] == sizes[otherIdx] && otherPos < selfPos))
+			{
+				FileInfo* fileInfo = files[i];
+				warn("File \"%s\" appears twice in collection, adding only the biggest file", fileInfo->GetFilename());
+				int fileId = fileInfo->GetId();
+				nzbInfo->UpdateDeletedStats(fileInfo);
+				nzbInfo->GetFileList()->Remove(fileInfo);
+				if (g_Options->GetServerMode())
+				{
+					g_DiskState->DiscardFile(fileId, true, false, false);
+				}
 			}
 		}
 	}
@@ -22673,7 +22618,31 @@ public:
 
 	static bool SideFile(const char* filename)
 	{
-		return nzbget_rs_qhp_is_side_file(filename, g_Options->GetExtCleanupDisk()) != 0;
+		if (!filename)
+		{
+			return false;
+		}
+		const char* ext = strrchr(filename, '.');
+		if (!ext)
+		{
+			return false;
+		}
+		for (const char* side : { ".nfo", ".sfv", ".txt", ".url", ".srr", ".srs", ".nzb", ".jpg", ".jpeg", ".png" })
+		{
+			if (!strcasecmp(ext, side))
+			{
+				return true;
+			}
+		}
+		Tokenizer tok(g_Options->GetExtCleanupDisk(), ",; ");
+		while (const char* token = tok.Next())
+		{
+			if (!strcasecmp(ext, token) && strcasecmp(token, ".par2") != 0)
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	void FailOverDeadPick(DownloadQueue* downloadQueue, int nzbId, int samples, int missingServers, int activeServers, int recoveredAtStart = 0)
@@ -22820,10 +22789,45 @@ public:
 		}
 		srcNzbInfo->GetFileList()->clear();
 
-		NzbgetRsNzbMergeSplitCounters destCounters = ReadNzbMergeSplitCounters(destNzbInfo);
-		NzbgetRsNzbMergeSplitCounters srcCounters = ReadNzbMergeSplitCounters(srcNzbInfo);
-		nzbget_rs_queue_coord_merge_counters(&destCounters, &srcCounters);
-		WriteNzbMergeSplitCounters(destNzbInfo, destCounters);
+		destNzbInfo->SetFileCount(destNzbInfo->GetFileCount() + srcNzbInfo->GetFileCount());
+		destNzbInfo->SetActiveDownloads(destNzbInfo->GetActiveDownloads() + srcNzbInfo->GetActiveDownloads());
+		destNzbInfo->SetFullContentHash(0);
+		destNzbInfo->SetFilteredContentHash(0);
+		destNzbInfo->SetSize(destNzbInfo->GetSize() + srcNzbInfo->GetSize());
+		destNzbInfo->SetRemainingSize(destNzbInfo->GetRemainingSize() + srcNzbInfo->GetRemainingSize());
+		destNzbInfo->SetPausedFileCount(destNzbInfo->GetPausedFileCount() + srcNzbInfo->GetPausedFileCount());
+		destNzbInfo->SetPausedSize(destNzbInfo->GetPausedSize() + srcNzbInfo->GetPausedSize());
+		destNzbInfo->SetSuccessSize(destNzbInfo->GetSuccessSize() + srcNzbInfo->GetSuccessSize());
+		destNzbInfo->SetCurrentSuccessSize(destNzbInfo->GetCurrentSuccessSize() + srcNzbInfo->GetCurrentSuccessSize());
+		destNzbInfo->SetFailedSize(destNzbInfo->GetFailedSize() + srcNzbInfo->GetFailedSize());
+		destNzbInfo->SetCurrentFailedSize(destNzbInfo->GetCurrentFailedSize() + srcNzbInfo->GetCurrentFailedSize());
+		destNzbInfo->SetParSize(destNzbInfo->GetParSize() + srcNzbInfo->GetParSize());
+		destNzbInfo->SetParSuccessSize(destNzbInfo->GetParSuccessSize() + srcNzbInfo->GetParSuccessSize());
+		destNzbInfo->SetParCurrentSuccessSize(destNzbInfo->GetParCurrentSuccessSize() + srcNzbInfo->GetParCurrentSuccessSize());
+		destNzbInfo->SetParFailedSize(destNzbInfo->GetParFailedSize() + srcNzbInfo->GetParFailedSize());
+		destNzbInfo->SetParCurrentFailedSize(destNzbInfo->GetParCurrentFailedSize() + srcNzbInfo->GetParCurrentFailedSize());
+		destNzbInfo->SetRemainingParCount(destNzbInfo->GetRemainingParCount() + srcNzbInfo->GetRemainingParCount());
+		destNzbInfo->SetTotalArticles(destNzbInfo->GetTotalArticles() + srcNzbInfo->GetTotalArticles());
+		destNzbInfo->SetSuccessArticles(destNzbInfo->GetSuccessArticles() + srcNzbInfo->GetSuccessArticles());
+		destNzbInfo->SetFailedArticles(destNzbInfo->GetFailedArticles() + srcNzbInfo->GetFailedArticles());
+		destNzbInfo->SetCurrentSuccessArticles(destNzbInfo->GetCurrentSuccessArticles() + srcNzbInfo->GetCurrentSuccessArticles());
+		destNzbInfo->SetCurrentFailedArticles(destNzbInfo->GetCurrentFailedArticles() + srcNzbInfo->GetCurrentFailedArticles());
+		if (srcNzbInfo->GetMinTime() < destNzbInfo->GetMinTime())
+		{
+			destNzbInfo->SetMinTime(srcNzbInfo->GetMinTime());
+		}
+		if (srcNzbInfo->GetMaxTime() > destNzbInfo->GetMaxTime())
+		{
+			destNzbInfo->SetMaxTime(srcNzbInfo->GetMaxTime());
+		}
+		destNzbInfo->SetDownloadedSize(destNzbInfo->GetDownloadedSize() + srcNzbInfo->GetDownloadedSize());
+		destNzbInfo->SetDownloadSec(destNzbInfo->GetDownloadSec() + srcNzbInfo->GetDownloadSec());
+		if (!((destNzbInfo->GetDownloadStartTime() > 0 &&
+				destNzbInfo->GetDownloadStartTime() < srcNzbInfo->GetDownloadStartTime()) ||
+			srcNzbInfo->GetDownloadStartTime() == 0))
+		{
+			destNzbInfo->SetDownloadStartTime(srcNzbInfo->GetDownloadStartTime());
+		}
 		destNzbInfo->GetServerStats()->ListOp(srcNzbInfo->GetServerStats(), ServerStatList::soAdd);
 		destNzbInfo->GetCurrentServerStats()->ListOp(srcNzbInfo->GetCurrentServerStats(), ServerStatList::soAdd);
 
@@ -22896,9 +22900,6 @@ public:
 		srcNzbInfo->SetFullContentHash(0);
 		srcNzbInfo->SetFilteredContentHash(0);
 
-		NzbgetRsNzbMergeSplitCounters srcCounters = ReadNzbMergeSplitCounters(srcNzbInfo);
-		NzbgetRsNzbMergeSplitCounters dstCounters = ReadNzbMergeSplitCounters(nzbInfo.get());
-
 		for (FileInfo* fileInfo : fileList)
 		{
 			DownloadQueue::Aspect aspect = { DownloadQueue::eaFileDeleted, downloadQueue, fileInfo->GetNzbInfo(), fileInfo };
@@ -22907,26 +22908,54 @@ public:
 			nzbInfo->GetFileList()->Add(srcNzbInfo->GetFileList()->Remove(fileInfo));
 			fileInfo->SetNzbInfo(nzbInfo.get());
 
-			NzbgetRsSplitFileCounters fc{};
-			fc.size = fileInfo->GetSize();
-			fc.remaining_size = fileInfo->GetRemainingSize();
-			fc.success_size = fileInfo->GetSuccessSize();
-			fc.failed_size = fileInfo->GetFailedSize();
-			fc.missed_size = fileInfo->GetMissedSize();
-			fc.total_articles = fileInfo->GetTotalArticles();
-			fc.missed_articles = fileInfo->GetMissedArticles();
-			fc.success_articles = fileInfo->GetSuccessArticles();
-			fc.failed_articles = fileInfo->GetFailedArticles();
-			fc.par_file = fileInfo->GetParFile() ? 1 : 0;
-			fc.paused = fileInfo->GetPaused() ? 1 : 0;
+			int64 failedAndMissedSize = fileInfo->GetFailedSize() + fileInfo->GetMissedSize();
+			int failedAndMissedArticles = fileInfo->GetFailedArticles() + fileInfo->GetMissedArticles();
 
-			nzbget_rs_queue_coord_split_transfer_file(&srcCounters, &dstCounters, &fc);
+			srcNzbInfo->SetFileCount(srcNzbInfo->GetFileCount() - 1);
+			srcNzbInfo->SetSize(srcNzbInfo->GetSize() - fileInfo->GetSize());
+			srcNzbInfo->SetRemainingSize(srcNzbInfo->GetRemainingSize() - fileInfo->GetRemainingSize());
+			srcNzbInfo->SetCurrentSuccessSize(srcNzbInfo->GetCurrentSuccessSize() - fileInfo->GetSuccessSize());
+			srcNzbInfo->SetCurrentFailedSize(srcNzbInfo->GetCurrentFailedSize() - failedAndMissedSize);
+			srcNzbInfo->SetTotalArticles(srcNzbInfo->GetTotalArticles() - fileInfo->GetTotalArticles());
+			srcNzbInfo->SetFailedArticles(srcNzbInfo->GetFailedArticles() - fileInfo->GetMissedArticles());
+			srcNzbInfo->SetCurrentSuccessArticles(srcNzbInfo->GetCurrentSuccessArticles() - fileInfo->GetSuccessArticles());
+			srcNzbInfo->SetCurrentFailedArticles(srcNzbInfo->GetCurrentFailedArticles() - failedAndMissedArticles);
+
+			nzbInfo->SetFileCount(nzbInfo->GetFileCount() + 1);
+			nzbInfo->SetSize(nzbInfo->GetSize() + fileInfo->GetSize());
+			nzbInfo->SetRemainingSize(nzbInfo->GetRemainingSize() + fileInfo->GetRemainingSize());
+			nzbInfo->SetCurrentSuccessSize(nzbInfo->GetCurrentSuccessSize() + fileInfo->GetSuccessSize());
+			nzbInfo->SetCurrentFailedSize(nzbInfo->GetCurrentFailedSize() + failedAndMissedSize);
+			nzbInfo->SetTotalArticles(nzbInfo->GetTotalArticles() + fileInfo->GetTotalArticles());
+			nzbInfo->SetFailedArticles(nzbInfo->GetFailedArticles() + fileInfo->GetMissedArticles());
+			nzbInfo->SetCurrentSuccessArticles(nzbInfo->GetCurrentSuccessArticles() + fileInfo->GetSuccessArticles());
+			nzbInfo->SetCurrentFailedArticles(nzbInfo->GetCurrentFailedArticles() + failedAndMissedArticles);
+
+			if (fileInfo->GetParFile())
+			{
+				srcNzbInfo->SetParSize(srcNzbInfo->GetParSize() - fileInfo->GetSize());
+				srcNzbInfo->SetParCurrentSuccessSize(srcNzbInfo->GetParCurrentSuccessSize() - fileInfo->GetSuccessSize());
+				srcNzbInfo->SetParCurrentFailedSize(srcNzbInfo->GetParCurrentFailedSize() - failedAndMissedSize);
+				srcNzbInfo->SetRemainingParCount(srcNzbInfo->GetRemainingParCount() - 1);
+
+				nzbInfo->SetParSize(nzbInfo->GetParSize() + fileInfo->GetSize());
+				nzbInfo->SetParCurrentSuccessSize(nzbInfo->GetParCurrentSuccessSize() + fileInfo->GetSuccessSize());
+				nzbInfo->SetParCurrentFailedSize(nzbInfo->GetParCurrentFailedSize() + failedAndMissedSize);
+				nzbInfo->SetRemainingParCount(nzbInfo->GetRemainingParCount() + 1);
+			}
+
+			if (fileInfo->GetPaused())
+			{
+				srcNzbInfo->SetPausedFileCount(srcNzbInfo->GetPausedFileCount() - 1);
+				srcNzbInfo->SetPausedSize(srcNzbInfo->GetPausedSize() - fileInfo->GetRemainingSize());
+
+				nzbInfo->SetPausedFileCount(nzbInfo->GetPausedFileCount() + 1);
+				nzbInfo->SetPausedSize(nzbInfo->GetPausedSize() + fileInfo->GetRemainingSize());
+			}
+
 			srcNzbInfo->GetCurrentServerStats()->ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
 			nzbInfo->GetCurrentServerStats()->ListOp(fileInfo->GetServerStats(), ServerStatList::soAdd);
 		}
-
-		WriteNzbMergeSplitCounters(srcNzbInfo, srcCounters);
-		WriteNzbMergeSplitCounters(nzbInfo.get(), dstCounters);
 
 		nzbInfo->UpdateMinMaxTime();
 		if (srcNzbInfo->GetCompletedFiles()->empty())
@@ -22956,8 +22985,8 @@ protected:
 		int64 remaining, remainingForced;
 		downloadQueue->CalcRemainingSize(&remaining, &remainingForced);
 		info("     Remaining: %.1f MB, Forced: %.1f MB",
-			nzbget_rs_dqh_stream_repair_bytes_to_mb(remaining),
-			nzbget_rs_dqh_stream_repair_bytes_to_mb(remainingForced));
+			(double)remaining / 1024.0 / 1024.0,
+			(double)remainingForced / 1024.0 / 1024.0);
 		info("     Download: %s, Post-process: %s, Scan: %s",
 			 g_WorkState->GetPauseDownload() ? "paused" : (g_WorkState->GetTempPauseDownload() ? "temp-paused" : "active"),
 			 g_WorkState->GetPausePostProcess() ? "paused" : "active",
@@ -23189,20 +23218,16 @@ private:
 			return;
 		}
 
-		std::vector<int32_t> normLevels;
-		std::vector<uint8_t> actives;
-		std::vector<int32_t> maxConns;
+		int limit = 2;
 		for (NewsServer* newsServer : g_ServerPool->GetServers())
 		{
-			normLevels.push_back(newsServer->GetNormLevel());
-			actives.push_back(newsServer->GetActive() ? 1 : 0);
-			maxConns.push_back(newsServer->GetMaxConnections());
+			if ((newsServer->GetNormLevel() == 0 || newsServer->GetNormLevel() == 1) &&
+				newsServer->GetActive())
+			{
+				limit += newsServer->GetMaxConnections();
+			}
 		}
-		m_downloadsLimit = nzbget_rs_qhp_adjust_downloads_limit(
-			normLevels.empty() ? nullptr : normLevels.data(),
-			actives.empty() ? nullptr : actives.data(),
-			maxConns.empty() ? nullptr : maxConns.data(),
-			normLevels.size());
+		m_downloadsLimit = limit;
 	}
 
 	bool GetNextArticle(DownloadQueue* downloadQueue, FileInfo* &fileInfo, ArticleInfo* &articleInfo)
@@ -23234,60 +23259,32 @@ private:
 					!HasActiveDupe(downloadQueue, nzbInfo) &&
 					((!g_WorkState->GetPauseDownload() && !g_WorkState->GetQuotaReached()) || nzbInfo->GetForcePriority()))
 				{
-					std::vector<FileInfo*> ptrs;
-					std::vector<NzbgetRsCandidateFile> cands;
-					ptrs.reserve(nzbInfo->GetFileList()->size() + 2);
-					cands.reserve(nzbInfo->GetFileList()->size() + 2);
-					if (fileInfo)
-					{
-						ptrs.push_back(fileInfo);
-						cands.push_back(NzbgetRsCandidateFile{
-							fileInfo->GetNzbInfo()->GetPriority(),
-							fileInfo->GetExtraPriority() ? 1 : 0,
-							0, 0, 0,
-							(int64_t)fileInfo->GetTime()
-						});
-					}
-					if (propagationWaitFile)
-					{
-						ptrs.push_back(propagationWaitFile);
-						cands.push_back(NzbgetRsCandidateFile{
-							propagationWaitFile->GetNzbInfo()->GetPriority(),
-							propagationWaitFile->GetExtraPriority() ? 1 : 0,
-							0, 0, 0,
-							(int64_t)propagationWaitFile->GetTime()
-						});
-					}
+					int propagationDelay = g_Options->GetPropagationDelay();
 					for (FileInfo* fileInfo1 : nzbInfo->GetFileList())
 					{
 						bool alreadyChecked = !checkedFiles.empty() &&
 							std::find(checkedFiles.begin(), checkedFiles.end(), fileInfo1) != checkedFiles.end();
-						ptrs.push_back(fileInfo1);
-						cands.push_back(NzbgetRsCandidateFile{
-							fileInfo1->GetNzbInfo()->GetPriority(),
-							fileInfo1->GetExtraPriority() ? 1 : 0,
-							fileInfo1->GetPaused() ? 1 : 0,
-							fileInfo1->GetDeleted() ? 1 : 0,
-							alreadyChecked ? 1 : 0,
-							(int64_t)fileInfo1->GetTime()
-						});
-					}
-					int bestIdx = -1;
-					int propIdx = -1;
-					nzbget_rs_qhp_select_next_file(
-						cands.empty() ? nullptr : cands.data(),
-						cands.size(),
-						g_Options->GetPropagationDelay(),
-						(int64_t)curDate,
-						&bestIdx,
-						&propIdx);
-					if (bestIdx >= 0 && (size_t)bestIdx < ptrs.size())
-					{
-						fileInfo = ptrs[bestIdx];
-					}
-					if (propIdx >= 0 && (size_t)propIdx < ptrs.size())
-					{
-						propagationWaitFile = ptrs[propIdx];
+						if (alreadyChecked || fileInfo1->GetPaused() || fileInfo1->GetDeleted())
+						{
+							continue;
+						}
+						bool propWait = propagationDelay > 0 &&
+							(int)fileInfo1->GetTime() + propagationDelay >= (int)curDate;
+						if (!propWait)
+						{
+							bool higher = !fileInfo ||
+								(fileInfo1->GetExtraPriority() == fileInfo->GetExtraPriority() &&
+									fileInfo1->GetNzbInfo()->GetPriority() > fileInfo->GetNzbInfo()->GetPriority()) ||
+								(fileInfo1->GetExtraPriority() && !fileInfo->GetExtraPriority());
+							if (higher)
+							{
+								fileInfo = fileInfo1;
+							}
+						}
+						else if (!propagationWaitFile || fileInfo1->GetTime() < propagationWaitFile->GetTime())
+						{
+							propagationWaitFile = fileInfo1;
+						}
 					}
 				}
 			}
@@ -23805,33 +23802,30 @@ private:
 	void RejectBorrowedArticles(FileInfo* fileInfo, const std::vector<ArticleInfo*>& articles)
 	{
 		NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
-		std::vector<int32_t> rawDonorIds;
-		rawDonorIds.reserve(articles.size());
+		std::set<int> uniqueDonors;
 		for (ArticleInfo* article : articles)
 		{
-			rawDonorIds.push_back(article->GetDupeDonorId());
+			uniqueDonors.insert(article->GetDupeDonorId());
 			if (article->GetStatus() == ArticleInfo::aiFinished)
 			{
 				// (not recovered any more: own articles are counted right again, review item 4)
 				CountAsFailed(fileInfo, article);
 			}
 		}
-		std::vector<int32_t> uniqueDonors(rawDonorIds.size(), 0);
-		size_t uniqueLen = 0;
-		NzbgetRsBuf namesBuf = nzbget_rs_queue_coord_format_donor_id_list(
-			rawDonorIds.empty() ? nullptr : rawDonorIds.data(),
-			rawDonorIds.size(),
-			uniqueDonors.empty() ? nullptr : uniqueDonors.data(),
-			&uniqueLen);
-		for (size_t i = 0; i < uniqueLen; ++i)
+		std::string names;
+		for (int id : uniqueDonors)
 		{
-			nzbInfo->GetDupeBlockedDonors()->insert(uniqueDonors[i]);
+			nzbInfo->GetDupeBlockedDonors()->insert(id);
+			if (!names.empty())
+			{
+				names += ", ";
+			}
+			names += std::to_string(id);
 		}
 		nzbInfo->PrintMessage(Message::mkWarning,
 			"%i article(s) of %s borrowed from duplicates don't match its par2 checksums: counted as "
 			"failed, and duplicate(s) %s lend this download no more articles",
-			(int)articles.size(), fileInfo->GetFilename(), namesBuf.data ? namesBuf.data : "");
-		nzbget_rs_free(namesBuf);
+			(int)articles.size(), fileInfo->GetFilename(), names.c_str());
 	}
 
 	void DeleteDownloader(DownloadQueue* downloadQueue, ArticleDownloader* articleDownloader, bool fileCompleted);
@@ -24146,7 +24140,39 @@ private:
 		// a renamed par2-file loses its extension: only names that are data count
 		auto dataName = [](const char* filename)
 			{
-				return nzbget_rs_qhp_is_data_filename(filename) != 0;
+				if (!filename)
+				{
+					return false;
+				}
+				const char* ext = strrchr(filename, '.');
+				if (!ext || !ext[1])
+				{
+					return false;
+				}
+				for (const char* known : {
+					".mkv", ".mp4", ".avi", ".m4v", ".ts", ".m2ts", ".mov", ".wmv", ".mpg",
+					".mpeg", ".iso", ".rar", ".7z", ".zip", ".nfo", ".sfv", ".srr", ".srt",
+					".sub", ".idx", ".jpg", ".png", ".txt", ".flac", ".mp3", ".m4a" })
+				{
+					if (!strcasecmp(ext, known))
+					{
+						return true;
+					}
+				}
+				const char* p = (ext[1] == 'r' || ext[1] == 'R') ? ext + 2 : ext + 1;
+				size_t len = strlen(p);
+				if (len < 2 || len > 3)
+				{
+					return false;
+				}
+				for (size_t i = 0; i < len; i++)
+				{
+					if (p[i] < '0' || p[i] > '9')
+					{
+						return false;
+					}
+				}
+				return true;
 			};
 
 		if (DupeArticleFallback::HasPar2(nzbInfo))
@@ -24189,29 +24215,31 @@ private:
 		// download in history has no file list): within 0.3%, nzb sizes are encoded.
 		// Its par2-files don't count: the same archives reposted with other par2
 		// volumes are still a twin of this par-less download
-		auto twin = [nzbInfo, largest](NzbInfo* other)
+		auto sizeNear = [](int64 size1, int64 size2)
 			{
-				bool sameNameOrKey = other != nzbInfo &&
-					DupeCoordinator::SameNameOrKey(other->GetName(), other->GetDupeKey(),
-						nzbInfo->GetName(), nzbInfo->GetDupeKey());
-				std::vector<int64_t> otherFileSizes;
-				if (sameNameOrKey)
+				return std::llabs(size1 - size2) * 1000 <= size1 * 3;
+			};
+		auto twin = [nzbInfo, largest, sizeNear](NzbInfo* other)
+			{
+				if (other == nzbInfo ||
+					!DupeCoordinator::SameNameOrKey(other->GetName(), other->GetDupeKey(),
+						nzbInfo->GetName(), nzbInfo->GetDupeKey()))
 				{
-					otherFileSizes.reserve(other->GetFileList()->size());
-					for (FileInfo* fileInfo : other->GetFileList())
+					return false;
+				}
+				if (sizeNear(nzbInfo->GetSize(), other->GetSize()) ||
+					(other->GetParSize() > 0 && sizeNear(nzbInfo->GetSize(), other->GetSize() - other->GetParSize())))
+				{
+					return true;
+				}
+				for (FileInfo* fileInfo : other->GetFileList())
+				{
+					if (sizeNear(largest, fileInfo->GetSize()))
 					{
-						otherFileSizes.push_back(fileInfo->GetSize());
+						return true;
 					}
 				}
-				return nzbget_rs_queue_coord_is_size_twin(
-					other == nzbInfo ? 1 : 0,
-					sameNameOrKey ? 1 : 0,
-					nzbInfo->GetSize(),
-					other->GetSize(),
-					other->GetParSize(),
-					largest,
-					otherFileSizes.empty() ? nullptr : otherFileSizes.data(),
-					otherFileSizes.size()) != 0;
+				return false;
 			};
 		for (NzbInfo* queued : downloadQueue->GetQueue())
 		{
@@ -24276,11 +24304,12 @@ private:
 
 	static bool DownloadHopeless(NzbInfo* nzbInfo)
 	{
-		return nzbget_rs_qhp_download_hopeless(
-			nzbInfo->GetTotalArticles(),
-			nzbInfo->GetCurrentSuccessArticles(),
-			nzbInfo->GetCurrentFailedArticles()
-		) != 0;
+		int total = nzbInfo->GetTotalArticles();
+		int currentSuccess = nzbInfo->GetCurrentSuccessArticles();
+		int tried = currentSuccess + nzbInfo->GetCurrentFailedArticles();
+		return total > 0 &&
+			(int64)tried * 100 >= (int64)total * 10 &&
+			(int64)currentSuccess * 100 < (int64)tried * 10;
 	}
 
 	void CheckDupeFailover(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
@@ -24298,28 +24327,23 @@ private:
 		int recovered = nzbInfo->GetDupeRecoveredArticles();
 		int failed = nzbInfo->GetCurrentFailedArticles();
 		bool fallbackEnabled = g_Options->GetDupeArticleFallback() != Options::dafNone;
-		bool parCannotCover = (fallbackEnabled && attempted == 0 &&
-			nzbInfo->GetDupeParDeferState() == NzbInfo::dpDeferred) ?
-			DupeArticleFallback::ParCannotCover(nzbInfo) : false;
-		int updateChecked = 0;
-		if (nzbget_rs_queue_coord_should_defer_dupe_failover(
-			fallbackEnabled ? 1 : 0,
-			attempted,
-			recovered,
-			DupeFailoverSample,
-			(int)nzbInfo->GetDupeParDeferState(),
-			(int)NzbInfo::dpDeferred,
-			parCannotCover ? 1 : 0,
-			failed,
-			nzbInfo->GetDupeFailoverChecked(),
-			&updateChecked) != 0)
+		if (fallbackEnabled && attempted > 0 &&
+			(attempted < DupeFailoverSample || recovered * 2 >= attempted))
 		{
 			return;
 		}
-		if (updateChecked)
+		if (fallbackEnabled && attempted == 0 &&
+			nzbInfo->GetDupeParDeferState() == NzbInfo::dpDeferred &&
+			!DupeArticleFallback::ParCannotCover(nzbInfo))
 		{
-			nzbInfo->SetDupeFailoverChecked(failed);
+			return;
 		}
+		if (nzbInfo->GetDupeFailoverChecked() >= 0 &&
+			failed - nzbInfo->GetDupeFailoverChecked() < DupeFailoverSample)
+		{
+			return;
+		}
+		nzbInfo->SetDupeFailoverChecked(failed);
 
 		// failing over needs duplicate handling (a backup in history is returned
 		// by DupeCoordinator::NzbCompleted only then); parking a hopeless
@@ -24377,28 +24401,16 @@ private:
 		// its own articles: those borrowed from duplicates say nothing about its posting
 		int critical = DownloadCriticalHealth(downloadQueue, nzbInfo);
 		int probing = DupeProbe::ProbingFor(nzbInfo->GetId());
-		NzbgetRsDeadDownloadEval rsDead{};
-		nzbget_rs_qhp_eval_dead_download(
-			nzbInfo->GetCurrentSuccessArticles(),
-			nzbInfo->GetDupeRecoveredArticles(),
-			nzbInfo->GetCurrentFailedArticles(),
-			nzbInfo->GetFileCount(),
-			nzbInfo->GetDupeFailedRun(),
-			DupeArticleFallback::ParCannotCover(nzbInfo, false) ? 1 : 0,
-			critical,
-			DupeArticleFallback::ParEdgeMargin,
-			FilesTried(nzbInfo),
-			probing,
-			&rsDead
-		);
-		int own = rsDead.own;
+		int own = std::max(0, nzbInfo->GetCurrentSuccessArticles() - std::max(0, nzbInfo->GetDupeRecoveredArticles()));
 		int failed = nzbInfo->GetCurrentFailedArticles();
-		int tried = rsDead.tried;
-		bool deadRate = rsDead.dead_rate != 0;
-		bool dead = rsDead.dead != 0;
-		int projected = rsDead.projected;
-		bool doomed = rsDead.doomed != 0;
-		bool hopeless = rsDead.hopeless != 0;
+		int tried = own + failed;
+		bool deadRate = failed >= 64 + nzbInfo->GetFileCount() && (int64)own * 100 < (int64)failed;
+		bool deadRun = nzbInfo->GetDupeFailedRun() >= 40 && DupeArticleFallback::ParCannotCover(nzbInfo, false);
+		bool dead = deadRate || deadRun;
+		int projected = tried > 0 ? (int)((int64)own * 1000 / tried) : 1000;
+		bool doomed = !dead && tried >= ProjectedFailureSample && FilesTried(nzbInfo) >= 3 &&
+			projected < critical + DupeArticleFallback::ParEdgeMargin;
+		bool hopeless = own == 0 && failed >= ProjectedFailureSample && probing >= 10;
 		if (!dead && !doomed && CheckParDamage(downloadQueue, nzbInfo))
 		{
 			return;
@@ -24420,19 +24432,13 @@ private:
 			// through 10 GB). Borrowing gets its say: while it waits for par-check, or
 			// recovers most of what it tries, no park.
 			int attempted = nzbInfo->GetDupeAttemptedArticles() + nzbInfo->GetDupeUnsourcedArticles();
-			bool farBelow = rsDead.far_below != 0;
-			bool below = rsDead.below != 0;
-			if (nzbget_rs_queue_coord_should_park_dead_without_backup(
-				g_Options->GetDupeArticleFallback() != Options::dafNone ? 1 : 0,
-				(int)nzbInfo->GetDupeParDeferState(),
-				(int)NzbInfo::dpDeferred,
-				attempted,
-				nzbInfo->GetDupeRecoveredArticles(),
-				tried,
-				ProjectedFailureSample,
-				tried >= ProjectedFailureSample ? FilesTried(nzbInfo) : 0,
-				farBelow ? 1 : 0,
-				below ? 1 : 0) != 0)
+			bool farBelow = projected * 2 < critical;
+			bool below = projected < critical && tried >= 1000;
+			bool borrowing = g_Options->GetDupeArticleFallback() != Options::dafNone &&
+				(nzbInfo->GetDupeParDeferState() == NzbInfo::dpDeferred ||
+					(attempted > 0 && nzbInfo->GetDupeRecoveredArticles() * 2 >= attempted));
+			if (tried >= ProjectedFailureSample && FilesTried(nzbInfo) >= 3 &&
+				(farBelow || below) && !borrowing)
 			{
 				nzbInfo->PrintMessage(Message::mkWarning,
 					"Parking %s: %i of %i tried article(s) of its own arrived, projected health %.1f%% "
@@ -24508,22 +24514,18 @@ private:
 		// borrowing the missing articles from duplicates gets its turn first (B36):
 		// the damage ends its wait for par-check (ParCannotCover), and the failover
 		// comes when it tried DupeFailoverSample articles and recovered under half
-		bool fallbackEnabled = g_Options->GetDupeArticleFallback() != Options::dafNone;
-		bool hasPar2 = (fallbackEnabled && !g_Options->GetRawArticle() &&
-			nzbInfo->GetDupeMode() != dmForce) ? DupeArticleFallback::HasPar2(nzbInfo) : false;
-		if (nzbget_rs_queue_coord_should_wait_for_borrowing_on_par_damage(
-			fallbackEnabled ? 1 : 0,
-			g_Options->GetRawArticle() ? 1 : 0,
-			(int)nzbInfo->GetDupeMode(),
-			(int)dmForce,
-			hasPar2 ? 1 : 0,
-			(int)nzbInfo->GetDupeParDeferState(),
-			(int)NzbInfo::dpDeferred,
-			nzbInfo->GetDupeAttemptedArticles() + nzbInfo->GetDupeUnsourcedArticles(),
-			DupeFailoverSample,
-			nzbInfo->GetDupeRecoveredArticles()) != 0)
+		if (g_Options->GetDupeArticleFallback() != Options::dafNone &&
+			!g_Options->GetRawArticle() &&
+			nzbInfo->GetDupeMode() != dmForce &&
+			DupeArticleFallback::HasPar2(nzbInfo))
 		{
-			return false;
+			int attempted = nzbInfo->GetDupeAttemptedArticles() + nzbInfo->GetDupeUnsourcedArticles();
+			if (nzbInfo->GetDupeParDeferState() == NzbInfo::dpDeferred ||
+				attempted < DupeFailoverSample ||
+				nzbInfo->GetDupeRecoveredArticles() * 2 >= attempted)
+			{
+				return false;
+			}
 		}
 
 		// a duplicate of it queued and not paused: a dupe tool is swapping it for a
@@ -24542,14 +24544,11 @@ private:
 
 		HistoryInfo* backup = g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo,
 			nzbInfo->GetName(), nzbInfo->GetDupeKey());
-		NzbgetRsBuf damageBuf = nzbget_rs_queue_coord_format_par_damage_summary(
-			certain ? 1 : 0,
-			verdict.damagedBlocks,
-			verdict.projectedBlocks,
-			verdict.blockSize,
+		BString<1024> damage("%i par2 block(s) of %.1f MB damaged%s, its par2-files hold %i recovery block(s)",
+			certain ? verdict.damagedBlocks : verdict.projectedBlocks,
+			(double)verdict.blockSize / 1024.0 / 1024.0,
+			certain ? "" : " at the rate so far",
 			verdict.recoveryBlocks);
-		BString<1024> damage = damageBuf.data ? damageBuf.data : "";
-		nzbget_rs_free(damageBuf);
 		if (!backup)
 		{
 			if (ParDamage::FirstReport(nzbInfo->GetId()))
@@ -24667,12 +24666,8 @@ private:
 
 		for (ArticleDownloader* articleDownloader : m_activeDownloads)
 		{
-			if (nzbget_rs_qhp_is_hanging_download(
-				(int64_t)tm,
-				(int64_t)articleDownloader->GetLastUpdateTime(),
-				g_Options->GetArticleTimeout(),
-				articleDownloader->GetStatus() == ArticleDownloader::adRunning ? 1 : 0
-			) != 0)
+			if (tm - articleDownloader->GetLastUpdateTime() > g_Options->GetArticleTimeout() + 1 &&
+				articleDownloader->GetStatus() == ArticleDownloader::adRunning)
 			{
 				error("Cancelling hanging download %s @ %s", articleDownloader->GetInfoName(),
 					articleDownloader->GetConnectionName());
@@ -25472,7 +25467,7 @@ public:
 			// This is to avoid the passing of env vars after program update (when NZBGet is
 			// started from a script which was started by a previous instance of NZBGet).
 			// Format: NZBXX_YYYY (XX are any two characters, YYYY are any number of any characters).
-			if (!nzbget_rs_sus_is_nzbget_internal_env_var(var))
+			if (strncmp(var, "NZB", 3) != 0 || strlen(var) <= 5 || var[5] != '_')
 			{
 				Append(var);
 			}
@@ -25609,7 +25604,7 @@ public:
 					continue;
 				}
 #endif
-				if (nzbget_rs_ufs_script_ctrl_is_fork_start_error_line(firstLine ? 1 : 0, buf) != 0)
+				if (firstLine && !strncmp(buf, "[ERROR] Could not start ", 24))
 				{
 					startError = true;
 				}
@@ -25651,8 +25646,10 @@ public:
 		if (!m_detached)
 		{
 			exitCode = WaitProcess();
-			exitCode = nzbget_rs_ufs_script_ctrl_normalize_fork_exit_code(
-				exitCode, FORK_ERROR_EXIT_CODE, startError ? 1 : 0);
+			if (exitCode == FORK_ERROR_EXIT_CODE && startError)
+			{
+				exitCode = -1;
+			}
 		}
 
 #ifdef CHILD_WATCHDOG
@@ -25670,11 +25667,9 @@ public:
 		m_terminated = true;
 
 		pid_t childPid = m_processId.load();
-		pid_t killId = (pid_t)nzbget_rs_ufs_script_ctrl_select_kill_pid(
-			(int)childPid, childPid > 0 ? (int)getpgid(childPid) : 0);
+		pid_t killId = (childPid > 0 && getpgid(childPid) == childPid) ? -childPid : childPid;
 		int killRes = childPid > 0 ? kill(killId, SIGKILL) : 0;
-		bool ok = nzbget_rs_dqh_script_ctrl_is_terminate_ok(
-			(int)childPid, killRes, m_completed ? 1 : 0) != 0;
+		bool ok = childPid <= 0 || killRes == 0 || m_completed;
 
 		if (ok)
 		{
@@ -25692,8 +25687,7 @@ public:
 		debug("Sending break signal to %s", *m_infoName);
 
 		pid_t pid = m_processId.load();
-		bool ok = nzbget_rs_dqh_script_ctrl_can_send_break((int)pid, m_completed ? 1 : 0) != 0 &&
-			kill(pid, SIGINT) == 0;
+		bool ok = pid > 0 && !m_completed && kill(pid, SIGINT) == 0;
 
 		if (ok)
 		{
@@ -25750,26 +25744,32 @@ public:
 	void SetLogPrefix(const char* logPrefix) { m_logPrefix = logPrefix; }
 	void SetEnvVar(const char* name, const char* value)
 	{
-		NzbgetRsBuf envBuf = nzbget_rs_dqh_script_ctrl_format_env_assignment(name, value);
-		m_environmentStrings.Append(CString(envBuf.data ? envBuf.data : "", (int)envBuf.len));
-		nzbget_rs_free(envBuf);
+		m_environmentStrings.Append(CString::FormatStr("%s=%s", name ? name : "", value ? value : ""));
 	}
 	void SetEnvVarSpecial(const char* prefix, const char* name, const char* value)
 	{
-		NzbgetRsBuf varBuf = nzbget_rs_dqh_script_ctrl_format_prefixed_varname(prefix, name);
-		BString<1024> varname;
-		varname.Set(varBuf.data ? varBuf.data : "", (int)varBuf.len);
-		nzbget_rs_free(varBuf);
+		BString<1024> varname("%s_%s", prefix ? prefix : "", name ? name : "");
 
 		// Original name
 		SetEnvVar(varname, value);
 
-		NzbgetRsBuf normBuf = nzbget_rs_sus_normalize_special_env_var_name(varname);
-		if (normBuf.data && nzbget_rs_dqh_bytes_equal(varname, normBuf.data) == 0)
+		BString<1024> normVarname = *varname;
+		for (char* p = normVarname; *p; p++)
 		{
-			SetEnvVar(normBuf.data, value);
+			if (strchr(".:*!\"$%&/()=`+~#'{}[]@- ", *p))
+			{
+				*p = '_';
+			}
+			else if (*p >= 'a' && *p <= 'z')
+			{
+				*p = (char)(*p - 'a' + 'A');
+			}
 		}
-		nzbget_rs_free(normBuf);
+
+		if (strcmp(varname, normVarname) != 0)
+		{
+			SetEnvVar(normVarname, value);
+		}
 	}
 	void SetIntEnvVar(const char* name, int value)
 	{
@@ -25787,22 +25787,38 @@ protected:
 	{
 		debug("Processing output received from script");
 
-		int msgKind = 0;
-		size_t msgOffset = 0;
-		if (!nzbget_rs_sus_classify_script_output_line(text, &msgKind, &msgOffset))
+		for (char* pend = text + strlen(text) - 1; pend >= text && (*pend == '\n' || *pend == '\r' || *pend == ' '); pend--) *pend = '\0';
+
+		if (text[0] == '\0')
 		{
+			// skip empty lines which are sometimesCreates by scripts
 			return;
 		}
-		Message::EKind kind = Message::mkInfo;
-		switch (msgKind)
+
+		if (!strncmp(text, "[INFO] ", 7))
 		{
-			case 1: kind = Message::mkWarning; break;
-			case 2: kind = Message::mkError; break;
-			case 3: kind = Message::mkDetail; break;
-			case 4: kind = Message::mkDebug; break;
-			default: kind = Message::mkInfo; break;
+			PrintMessage(Message::mkInfo, "%s", text + 7);
 		}
-		PrintMessage(kind, "%s", text + msgOffset);
+		else if (!strncmp(text, "[WARNING] ", 10))
+		{
+			PrintMessage(Message::mkWarning, "%s", text + 10);
+		}
+		else if (!strncmp(text, "[ERROR] ", 8))
+		{
+			PrintMessage(Message::mkError, "%s", text + 8);
+		}
+		else if (!strncmp(text, "[DETAIL] ", 9))
+		{
+			PrintMessage(Message::mkDetail, "%s", text + 9);
+		}
+		else if (!strncmp(text, "[DEBUG] ", 8))
+		{
+			PrintMessage(Message::mkDebug, "%s", text + 8);
+		}
+		else
+		{
+			PrintMessage(Message::mkInfo, "%s", text);
+		}
 
 		debug("Processing output received from script - completed");
 	}
@@ -25822,9 +25838,8 @@ protected:
 
 		if (m_logPrefix)
 		{
-			NzbgetRsBuf prefBuf = nzbget_rs_dqh_script_format_prefixed_message(m_logPrefix, *tmp2);
-			AddMessage(kind, prefBuf.data ? prefBuf.data : "");
-			nzbget_rs_free(prefBuf);
+			CString tmp3 = CString::FormatStr("%s: %s", m_logPrefix, *tmp2);
+			AddMessage(kind, tmp3);
 		}
 		else
 		{
@@ -25869,12 +25884,13 @@ protected:
 	 */
 	void PrepareEnvOptions(const char* stripPrefix)
 	{
-		int prefixLen = stripPrefix ? strlen(stripPrefix) : 0;
+		int prefixLen = stripPrefix ? (int)strlen(stripPrefix) : 0;
 
 		for (Options::OptEntry& optEntry : g_Options->GuardOptEntries())
 		{
 			const char* value = GetOptValue(optEntry.GetName(), optEntry.GetValue());
-			if (nzbget_rs_ufs_script_ctrl_matches_env_prefix(optEntry.GetName(), stripPrefix, prefixLen) != 0)
+			if (stripPrefix && !strncmp(optEntry.GetName(), stripPrefix, prefixLen) &&
+				(int)strlen(optEntry.GetName()) > prefixLen)
 			{
 				SetEnvVarSpecial("NZBPO", optEntry.GetName() + prefixLen, value);
 			}
@@ -25892,16 +25908,10 @@ protected:
 		if (m_args.size() == 1)
 		{
 			const auto found = Util::FindExecutorProgram(m_args[0].Str(), g_Options->GetShellOverride());
-			int useFound = 0, prependArg = 0;
-			nzbget_rs_tpr_script_resolve_single_arg_executor(
-				found.has_value() ? 1 : 0,
-				found ? found.value().c_str() : nullptr,
-				m_args[0].Str(),
-				&useFound, &prependArg);
-			strncpy(m_cmdLine, useFound ? found.value().c_str() : (const char*)m_args[0], sizeof(m_cmdLine) - 1);
+			strncpy(m_cmdLine, found ? found.value().c_str() : (const char*)m_args[0], sizeof(m_cmdLine) - 1);
 			// an interpreter goes before the script; a script run directly is
 			// argv[0] already (m_args), not its own first argument too
-			if (prependArg)
+			if (found && found.value() != m_args[0].Str())
 			{
 				m_cmdArgs.emplace_back(found.value().c_str());
 			}
@@ -26091,7 +26101,7 @@ protected:
 			{
 				PrintMessage(Message::mkWarning, "%s was killed by signal %i", *m_infoName, WTERMSIG(status));
 			}
-			return nzbget_rs_ufs_script_ctrl_calc_signal_exit_code(WTERMSIG(status));
+			return 128 + WTERMSIG(status);
 		}
 		return -1;
 	}
@@ -26106,18 +26116,20 @@ private:
 	{
 		if (ARGS_LIMIT_SIZE <= 0) return;
 
+		size_t totalEnvSize = 0;
 		size_t limit = static_cast<size_t>(ARGS_LIMIT_SIZE);
-		size_t exceededTotal = 0;
-		if (nzbget_rs_sus_check_env_size_limit(
-			reinterpret_cast<const char* const*>(envs.data()),
-			envs.size(),
-			sizeof(void*),
-			limit,
-			&exceededTotal))
+
+		for (const auto& var : envs)
 		{
-			PrintMessage(Message::EKind::mkWarning,
-						 "Total environment size (%zu bytes) exceeds OS limit (%zu bytes): %s",
-						 exceededTotal, limit, "This may cause process creation to fail");
+			if (!var) continue;
+			totalEnvSize += strlen(var) + 1 + sizeof(char*);
+			if (totalEnvSize > limit)
+			{
+				PrintMessage(Message::EKind::mkWarning,
+							 "Total environment size (%zu bytes) exceeds OS limit (%zu bytes): %s",
+							 totalEnvSize, limit, "This may cause process creation to fail");
+				break;
+			}
 		}
 	}
 
@@ -26633,12 +26645,10 @@ public:
 		}
 
 		time_t curTime = Util::CurrentTime();
-		if (nzbget_rs_sus_should_skip_queue_event_interval(
-			static_cast<int>(event),
-			static_cast<int>(qeFileDownloaded),
-			g_Options->GetEventInterval(),
-			static_cast<int64>(curTime),
-			static_cast<int64>(nzbInfo->GetQueueScriptTime())))
+		if (event == qeFileDownloaded &&
+			(g_Options->GetEventInterval() == -1 ||
+			(g_Options->GetEventInterval() > 0 && curTime - nzbInfo->GetQueueScriptTime() > 0 &&
+			(int)(curTime - nzbInfo->GetQueueScriptTime()) < g_Options->GetEventInterval())))
 		{
 			return;
 		}
@@ -26701,15 +26711,9 @@ public:
 			NzbInfo* nzbInfo = FindNzbInfo(downloadQueue, queueItem->GetNzbId());
 
 			EEvent event = queueItem->GetEvent();
-			bool ignoreEvent = nzbget_rs_sus_should_ignore_queued_script_event(
-				nzbInfo ? 1 : 0,
-				nzbInfo ? static_cast<int>(nzbInfo->GetDeleteStatus()) : 0,
-				static_cast<int>(NzbInfo::dsNone),
-				nzbInfo ? static_cast<int>(nzbInfo->GetMarkStatus()) : 0,
-				static_cast<int>(NzbInfo::ksBad),
-				static_cast<int>(event),
-				static_cast<int>(qeNzbDeleted),
-				static_cast<int>(qeNzbMarked)) != 0;
+			bool ignoreEvent = !nzbInfo ||
+				(nzbInfo->GetDeleteStatus() != NzbInfo::dsNone && event != qeNzbDeleted && event != qeNzbMarked) ||
+				(nzbInfo->GetMarkStatus() == NzbInfo::ksBad && event != qeNzbMarked);
 
 			if (ignoreEvent)
 			{
@@ -26794,20 +26798,30 @@ private:
 
 	bool UsableScript(std::shared_ptr<const Extension::Script> script, NzbInfo* nzbInfo, EEvent event)
 	{
-		size_t pcount = nzbInfo->GetParameters()->size();
-		std::vector<const char*> pnames;
-		std::vector<const char*> pvals;
-		pnames.reserve(pcount);
-		pvals.reserve(pcount);
-		for (NzbParameter& parameter : nzbInfo->GetParameters())
+		if (!script->GetQueueScript())
 		{
-			pnames.push_back(parameter.GetName());
-			pvals.push_back(parameter.GetValue());
+			return false;
 		}
-		const char* postScript = nullptr;
+		static const char* const QueueScriptEventNames[] = {
+			"FILE_DOWNLOADED", "URL_COMPLETED", "NZB_MARKED", "NZB_ADDED", "NZB_NAMED", "NZB_DOWNLOADED", "NZB_DELETED" };
+		int ev = static_cast<int>(event);
+		const char* eventName = (ev >= 0 && ev <= 6) ? QueueScriptEventNames[ev] : "UNKNOWN";
+		const char* queueEvents = script->GetQueueEvents();
+		if (queueEvents && *queueEvents && !strstr(queueEvents, eventName))
+		{
+			return false;
+		}
+		const char* scriptName = script->GetName() ? script->GetName() : "";
+		BString<1024> paramName("%s:", scriptName);
+		NzbParameter* parameter = nzbInfo->GetParameters()->Find(*paramName);
+		const char* paramVal = parameter ? parameter->GetValue() : nullptr;
+		if (paramVal && (!strcasecmp(paramVal, "yes") || !strcasecmp(paramVal, "on") || !strcmp(paramVal, "1")))
+		{
+			return true;
+		}
 		if (event == qeUrlCompleted)
 		{
-			postScript = g_Options->GetExtensions();
+			const char* postScript = g_Options->GetExtensions();
 			if (!Util::EmptyStr(nzbInfo->GetCategory()))
 			{
 				Options::Category* categoryObj = g_Options->FindCategory(nzbInfo->GetCategory(), false);
@@ -26816,17 +26830,16 @@ private:
 					postScript = categoryObj->GetExtensions();
 				}
 			}
+			Tokenizer tok(postScript, ",;");
+			while (const char* sname = tok.Next())
+			{
+				if (FileSystem::SameFilename(sname, scriptName))
+				{
+					return true;
+				}
+			}
 		}
-		return nzbget_rs_sus_is_usable_queue_script(
-			script->GetQueueScript() ? 1 : 0,
-			script->GetQueueEvents(),
-			script->GetName(),
-			static_cast<int>(event),
-			static_cast<int>(qeUrlCompleted),
-			pnames.data(),
-			pvals.data(),
-			pcount,
-			postScript) != 0;
+		return false;
 	}
 };
 
@@ -28691,7 +28704,7 @@ private:
 				m_twinIndex = index->filename;
 				m_twinBlockSize = TwinCheck::BlockSize(data.data(), data.size());
 				PrintMessage(Message::mkInfo, "Trying the par2 set of twin %s (blocks of %.1f MB)",
-					m_twinName.c_str(), nzbget_rs_dqh_stream_repair_bytes_to_mb(m_twinBlockSize));
+					m_twinName.c_str(), static_cast<double>(m_twinBlockSize) / (1024.0 * 1024.0));
 				return path;
 			}
 			return "";
@@ -28989,10 +29002,7 @@ public:
 			m_postInfo->SetProgressLabel("Repairing files from duplicates");
 		}
 
-		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("stream repair", *nzbName);
-		BString<1024> infoName;
-		infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
-		nzbget_rs_free(infoNameBuf);
+		BString<1024> infoName("stream repair for %s", *nzbName);
 		SetInfoName(infoName);
 
 		if (targets.empty())
@@ -29146,10 +29156,7 @@ private:
 			}
 		}
 
-		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("live stream repair", *nzbName);
-		BString<1024> infoName;
-		infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
-		nzbget_rs_free(infoNameBuf);
+		BString<1024> infoName("live stream repair for %s", *nzbName);
 		SetInfoName(infoName);
 
 		bool anyEligible = false;
@@ -29427,14 +29434,17 @@ private:
 				missing += DupeStreamRepair::TotalSize(target.Holes);
 				unsized += target.DecodedFileSize <= 0 ? 1 : 0;
 			}
-			NzbgetRsBuf wholeFilesBuf = nzbget_rs_stream_format_whole_files_suffix(unsized);
+			BString<100> wholeFilesSuffix;
+			if (unsized > 0)
+			{
+				wholeFilesSuffix.Format(" and %i whole file(s)", unsized);
+			}
 			PrintMessage(Message::mkWarning,
 				"Stream repair of %s stopped: %s (option DupeStreamTimeout); %.1f MB recovered, %.1f MB%s still missing",
 				nzbName, *m_slowReason,
-				nzbget_rs_dqh_stream_repair_bytes_to_mb(m_recoveredBytes),
-				nzbget_rs_dqh_stream_repair_bytes_to_mb(missing),
-				wholeFilesBuf.data ? wholeFilesBuf.data : "");
-			nzbget_rs_free(wholeFilesBuf);
+				static_cast<double>(m_recoveredBytes) / (1024.0 * 1024.0),
+				static_cast<double>(missing) / (1024.0 * 1024.0),
+				*wholeFilesSuffix);
 		}
 	}
 
@@ -29453,10 +29463,16 @@ private:
 			memberNames.emplace_back(completedFile.GetFilename());
 		}
 
+		auto isPar2JobOrFile = [](bool isParFile, const char* filename)
+		{
+			if (isParFile) return true;
+			size_t len = filename ? strlen(filename) : 0;
+			return len >= 5 && !strcasecmp(filename + len - 5, ".par2");
+		};
+
 		for (StreamRepairJob& job : *nzbInfo->GetStreamRepairJobs())
 		{
-			if (nzbget_rs_stream_is_par2_job_or_file(
-				job.GetParFile() ? 1 : 0, job.GetFilename()) != 0)
+			if (isPar2JobOrFile(job.GetParFile(), job.GetFilename()))
 			{
 				continue;
 			}
@@ -29483,8 +29499,7 @@ private:
 				}
 			}
 
-			if (nzbget_rs_stream_is_par2_job_or_file(
-				target.IsParFile ? 1 : 0, target.Filename))
+			if (isPar2JobOrFile(target.IsParFile, target.Filename))
 			{
 				continue;
 			}
@@ -29547,28 +29562,15 @@ private:
 			}
 		}
 
-		if (!donorNzbs.empty())
-		{
-			std::vector<int32_t> dupeScores;
-			std::vector<int32_t> donorIds;
-			std::vector<size_t> order(donorNzbs.size());
-			dupeScores.reserve(donorNzbs.size());
-			donorIds.reserve(donorNzbs.size());
-			for (NzbInfo* d : donorNzbs)
+		std::sort(donorNzbs.begin(), donorNzbs.end(),
+			[](NzbInfo* a, NzbInfo* b)
 			{
-				dupeScores.push_back(d->GetDupeScore());
-				donorIds.push_back(d->GetId());
-			}
-			size_t n = nzbget_rs_stream_order_donor_indices(
-				dupeScores.data(), donorIds.data(), donorNzbs.size(), order.data());
-			RawNzbList sortedDonors;
-			sortedDonors.reserve(n);
-			for (size_t i = 0; i < n; i++)
-			{
-				sortedDonors.push_back(donorNzbs[order[i]]);
-			}
-			donorNzbs = std::move(sortedDonors);
-		}
+				if (a->GetDupeScore() != b->GetDupeScore())
+				{
+					return a->GetDupeScore() > b->GetDupeScore();
+				}
+				return a->GetId() < b->GetId();
+			});
 
 		for (NzbInfo* donorNzbInfo : donorNzbs)
 		{
@@ -29916,36 +29918,41 @@ private:
 		const char* parDisposition = m_hasParFiles ? "left to par-repair" : "no par2 files to repair it";
 		for (RepairTarget& target : targets)
 		{
-			int targetStatus = nzbget_rs_stream_classify_remaining_hole_target(
-				interrupted ? 1 : 0, target.DecodedFileSize, target.Holes.empty() ? 1 : 0,
-				target.IsParFile ? 1 : 0, target.FailedArticles, target.FailedSize, target.MissedSize,
-				&m_recoveredArticles, &m_recoveredFailedSize, &m_recoveredFailedParSize);
-			if (targetStatus == 1)
+			if (target.DecodedFileSize > 0 && target.Holes.empty())
+			{
+				m_recoveredArticles += target.FailedArticles;
+				m_recoveredFailedSize += target.FailedSize + target.MissedSize;
+				if (target.IsParFile)
+				{
+					m_recoveredFailedParSize += target.FailedSize + target.MissedSize;
+				}
+				continue;
+			}
+			if (interrupted)
 			{
 				continue;
 			}
-			if (targetStatus == 2)
+			m_holesRemain = true;
+			if (target.DecodedFileSize <= 0)
 			{
-				m_holesRemain = true;
 				PrintMessage(Message::mkInfo,
 					"Stream repair of %s: no duplicate could supply the file (%s)",
 					*target.Filename, parDisposition);
 			}
-			else if (targetStatus == 3)
+			else
 			{
-				m_holesRemain = true;
 				int64 missing = DupeStreamRepair::TotalSize(target.Holes);
 				PrintMessage(Message::mkInfo,
 					"Stream repair of %s: %.1f MB still missing after stream repair (%s)",
-					*target.Filename, nzbget_rs_dqh_stream_repair_bytes_to_mb(missing),
+					*target.Filename, static_cast<double>(missing) / (1024.0 * 1024.0),
 					parDisposition);
-				if (nzbget_rs_stream_is_incomplete_nzb_hole(missing, target.EncodedSize) != 0)
+				if (missing > target.EncodedSize + target.EncodedSize / 10 + 1024 * 1024)
 				{
 					PrintMessage(Message::mkWarning,
 						"%s is %.1f MB according to its articles, but the nzb's articles cover only "
 						"%.1f MB of it: the nzb is incomplete",
-						*target.Filename, nzbget_rs_dqh_stream_repair_bytes_to_mb(target.DecodedFileSize),
-						nzbget_rs_dqh_stream_repair_bytes_to_mb(target.DecodedFileSize - missing));
+						*target.Filename, static_cast<double>(target.DecodedFileSize) / (1024.0 * 1024.0),
+						static_cast<double>(target.DecodedFileSize - missing) / (1024.0 * 1024.0));
 				}
 			}
 		}
@@ -31742,16 +31749,13 @@ public:
 			}
 		}
 
-		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("move", *nzbName);
-		BString<1024> infoName;
-		infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
-		nzbget_rs_free(infoNameBuf);
+		BString<1024> infoName("move for %s", *nzbName);
 		SetInfoName(*infoName);
 		PrintMessage(Message::mkInfo, "Moving completed files for %s", *nzbName);
 
 		bool ok = MoveFiles();
 
-		nzbget_rs_dqh_post_capitalize_first_ascii(*infoName);
+		infoName[0] = 'M';
 
 		if (ok)
 		{
@@ -31873,10 +31877,7 @@ public:
 			finalDir = m_postInfo->GetNzbInfo()->GetFinalDir();
 		}
 
-		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("cleanup", *nzbName);
-		BString<1024> infoName;
-		infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
-		nzbget_rs_free(infoNameBuf);
+		BString<1024> infoName("cleanup for %s", *nzbName);
 		SetInfoName(*infoName);
 
 		PrintMessage(Message::mkInfo, "Cleaning up %s", *nzbName);
@@ -31893,7 +31894,7 @@ public:
 			},
 			&cleanupStatus);
 
-		nzbget_rs_dqh_post_capitalize_first_ascii(*infoName);
+		infoName[0] = 'C';
 
 		if (cleanupOutcome == 1)
 		{
@@ -31961,10 +31962,7 @@ public:
 			finalDir = m_postInfo->GetNzbInfo()->GetFinalDir();
 		}
 
-		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("rename", *nzbName);
-		BString<1024> infoName;
-		infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
-		nzbget_rs_free(infoNameBuf);
+		BString<1024> infoName("rename for %s", *nzbName);
 		SetInfoName(infoName);
 
 		const char* archiveKindPrefix = m_kind == jkRar ? "archive " : "";
@@ -32294,22 +32292,18 @@ public:
 
 		{
 			GuardedDownloadQueue guard = DownloadQueue::Guard();
-			size_t pcount = m_postInfo->GetNzbInfo()->GetParameters()->size();
-			std::vector<const char*> pnames;
-			std::vector<const char*> pvals;
-			pnames.reserve(pcount);
-			pvals.reserve(pcount);
 			for (NzbParameter& parameter : m_postInfo->GetNzbInfo()->GetParameters())
 			{
-				pnames.push_back(parameter.GetName());
-				pvals.push_back(parameter.GetValue());
+				const char* varname = parameter.GetName();
+				const char* val = parameter.GetValue();
+				size_t len = varname ? strlen(varname) : 0;
+				if (len > 0 && varname[0] != '*' && varname[len - 1] == ':' &&
+					val && (!strcasecmp(val, "yes") || !strcasecmp(val, "on") || !strcmp(val, "1")))
+				{
+					scriptCommaList.Append(varname, static_cast<int>(len - 1));
+					scriptCommaList.Append(",");
+				}
 			}
-			NzbgetRsBuf listBuf = nzbget_rs_sus_build_enabled_script_comma_list(pnames.data(), pvals.data(), pcount);
-			if (listBuf.data)
-			{
-				scriptCommaList.Append(listBuf.data);
-			}
-			nzbget_rs_free(listBuf);
 			m_postInfo->GetNzbInfo()->GetScriptStatuses()->clear();
 		}
 
@@ -36004,7 +35998,7 @@ public:
 	 * definitive misses (an outage, where every answer is an error, never does) */
 	static bool DeadProbe(const Health& health)
 	{
-		return nzbget_rs_df_donor_health_dead_probe(health.present, health.missing, MinKnown) != 0;
+		return health.present == 0 && health.missing >= MinKnown;
 	}
 
 	struct SampleOptions
@@ -36358,10 +36352,11 @@ namespace DupeUtil
 
 	inline std::string Lower(std::string text)
 	{
-		NzbgetRsBuf buf = nzbget_rs_dqh_dupe_util_lower(text.data(), text.size());
-		std::string out(buf.data ? buf.data : "", buf.len);
-		nzbget_rs_free(buf);
-		return out;
+		for (char& ch : text)
+		{
+			ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+		}
+		return text;
 	}
 
 	inline std::string ReadAll(const std::string& path)
@@ -36527,10 +36522,10 @@ public:
 			return reply;
 		}
 
-		NzbgetRsBuf pathBuf = nzbget_rs_dqh_http_get_format_temp_path(
-			g_Options->GetTempDir(), PATH_SEPARATOR, (int)Util::CurrentTime(), ++g_counter);
-		std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
-		nzbget_rs_free(pathBuf);
+		int nowSec = (int)Util::CurrentTime();
+		int counter = ++g_counter;
+		std::string path = std::string(g_Options->GetTempDir() ? g_Options->GetTempDir() : "") +
+			PATH_SEPARATOR + "dupesearch-" + std::to_string(nowSec) + "-" + std::to_string(counter) + ".tmp";
 
 		WebDownloader downloader;
 		downloader.SetUrl(url.c_str());
@@ -36555,13 +36550,17 @@ public:
 				std::unique_lock<std::mutex> lock(doneMutex);
 				while (!done)
 				{
-					int64_t waitMs = 250;
-					if (nzbget_rs_snh_http_get_calc_watchdog_wait(
-						deadlineMs, DonorHealth::NowMs(), FileSystem::FileSize(path.c_str()), maxBytes, &waitMs))
+					long long nowMs = DonorHealth::NowMs();
+					int64 fileSize = FileSystem::FileSize(path.c_str());
+					if ((deadlineMs > 0 && nowMs >= deadlineMs) ||
+						(fileSize > 0 && static_cast<size_t>(fileSize) > maxBytes))
 					{
 						downloader.Stop();
 						return;
 					}
+					long long waitMs = deadlineMs > 0
+						? std::min(250LL, std::max(1LL, deadlineMs - nowMs))
+						: 250LL;
 					doneCond.wait_for(lock, std::chrono::milliseconds(waitMs), [&]() { return done; });
 				}
 			});
@@ -36744,19 +36743,17 @@ public:
 		{
 			for (size_t index = next++; index < queries.size(); index = next++)
 			{
-				std::vector<const char*> lKeys;
-				std::vector<const char*> lVals;
-				lKeys.reserve(queries[index].size());
-				lVals.reserve(queries[index].size());
+				std::string label;
 				for (const auto& param : queries[index])
 				{
-					lKeys.push_back(param.first.c_str());
-					lVals.push_back(param.second.c_str());
+					if (!label.empty())
+					{
+						label += ' ';
+					}
+					label += param.first;
+					label += '=';
+					label += param.second;
 				}
-				NzbgetRsBuf lblBuf = nzbget_rs_dqh_newznab_format_query_label(
-					lKeys.data(), lVals.data(), lKeys.size());
-				std::string label(lblBuf.data ? lblBuf.data : "", lblBuf.len);
-				nzbget_rs_free(lblBuf);
 
 				for (int page = 0; page < MaxPages; page++)
 				{
@@ -36767,15 +36764,9 @@ public:
 					}
 
 					Params params = queries[index];
-					NzbgetRsBuf limBuf = nzbget_rs_dqh_conn_format_port_str(PageSize);
-					params.emplace_back("limit", std::string(limBuf.data ? limBuf.data : "", limBuf.len));
-					nzbget_rs_free(limBuf);
-					NzbgetRsBuf offBuf = nzbget_rs_dqh_conn_format_port_str(page * PageSize);
-					params.emplace_back("offset", std::string(offBuf.data ? offBuf.data : "", offBuf.len));
-					nzbget_rs_free(offBuf);
-					NzbgetRsBuf infoBuf = nzbget_rs_dqh_newznab_format_search_info_name(label.c_str(), page + 1);
-					std::string infoName(infoBuf.data ? infoBuf.data : "", infoBuf.len);
-					nzbget_rs_free(infoBuf);
+					params.emplace_back("limit", std::to_string(PageSize));
+					params.emplace_back("offset", std::to_string(page * PageSize));
+					std::string infoName = "DupeSearch " + label + " page " + std::to_string(page + 1);
 					long long pageDeadlineMs = std::max(1LL, DonorHealth::NowMs() + (long long)(deadline - Util::CurrentTime()) * 1000LL);
 					HttpGet::Reply reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
 						pageDeadlineMs);

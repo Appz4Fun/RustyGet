@@ -9288,9 +9288,7 @@ public:
 	{
 		debug("Saving FileInfo %i to disk", fileInfo->GetId());
 
-		NzbgetRsBuf fnBuf = nzbget_rs_dqh_conn_format_port_str(fileInfo->GetId());
-		BString<100> filename = fnBuf.data ? fnBuf.data : "";
-		nzbget_rs_free(fnBuf);
+		BString<100> filename("%i", fileInfo->GetId());
 		StateFile stateFile(filename, DISKSTATE_FILE_VERSION, replace);
 		stateFile.SetFlush(!replace);
 
@@ -9312,9 +9310,7 @@ public:
 	{
 		debug("Loading FileInfo %i from disk", fileInfo->GetId());
 
-		NzbgetRsBuf fnBuf = nzbget_rs_dqh_conn_format_port_str(fileInfo->GetId());
-		BString<100> filename = fnBuf.data ? fnBuf.data : "";
-		nzbget_rs_free(fnBuf);
+		BString<100> filename("%i", fileInfo->GetId());
 		StateFile stateFile(filename, DISKSTATE_FILE_VERSION, false, DISKSTATE_FILE_LEGACY_VERSION);
 
 		StateDiskFile* infile = stateFile.BeginRead();
@@ -25773,9 +25769,7 @@ public:
 	}
 	void SetIntEnvVar(const char* name, int value)
 	{
-		NzbgetRsBuf valBuf = nzbget_rs_dqh_conn_format_port_str(value);
-		SetEnvVar(name, valBuf.data ? valBuf.data : "0");
-		nzbget_rs_free(valBuf);
+		SetEnvVar(name, BString<100>("%i", value));
 	}
 	bool HasActiveProcess()
 	{
@@ -36946,7 +36940,7 @@ public:
 
 	static int CapFor(int connections)
 	{
-		return nzbget_rs_snh_nntp_health_cap_for(connections, MaxCap);
+		return std::max(1, std::min((int)MaxCap, connections / 2));
 	}
 
 	static DonorHealth::ServerList Servers()
@@ -37044,19 +37038,14 @@ protected:
 			}
 		}
 
-		std::vector<const char*> statIds;
-		std::vector<size_t> statLens;
-		statIds.reserve(batch.size());
-		statLens.reserve(batch.size());
+		std::string commands;
+		commands.reserve(batch.size() * 48);
 		for (const DonorHealth::Request& request : batch)
 		{
-			statIds.push_back(request.messageId.data());
-			statLens.push_back(request.messageId.size());
+			commands += "STAT ";
+			commands += Bracketed(request.messageId);
+			commands += "\r\n";
 		}
-		NzbgetRsBuf cmdBuf = nzbget_rs_dqh_nntp_health_format_stat_batch(
-			statIds.data(), statLens.data(), statIds.size());
-		std::string commands(cmdBuf.data ? cmdBuf.data : "", cmdBuf.len);
-		nzbget_rs_free(cmdBuf);
 		if (!connection->Send(commands.c_str(), (int)commands.size()))
 		{
 			release.broken = true;
@@ -37082,8 +37071,8 @@ protected:
 				error.answers = answers;
 				throw error;
 			}
-			int statReply = nzbget_rs_snh_nntp_health_classify_stat_reply(line);
-			answers.push_back(statReply == 0 ? Answer::Present : statReply == 1 ? Answer::Missing : Answer::Error);
+			answers.push_back(strncmp(line, "223", 3) == 0 ? Answer::Present :
+				strncmp(line, "430", 3) == 0 ? Answer::Missing : Answer::Error);
 		}
 
 		for (size_t i = 0; i < batch.size(); i++)
@@ -37116,15 +37105,15 @@ protected:
 						}
 						ArticleFetcher fetcher;
 						ArticleFetcher::FetchedArticle article = fetcher.FetchFromConnection(connection, Bracketed(batch[i].messageId).c_str(), groups);
-						int throwError = 0;
-						int classified = nzbget_rs_nntp_health_classify_body_fetch_result(
-							article.Success ? 1 : 0, article.Transient ? 1 : 0,
-							(int)Answer::Present, (int)Answer::BodyBad, &throwError);
-						if (throwError != 0)
+						if (article.Success)
+						{
+							return Answer::Present;
+						}
+						if (article.Transient)
 						{
 							throw DonorHealth::ExchangeError();
 						}
-						return (Answer)classified;
+						return Answer::BodyBad;
 					});
 			}
 			catch (DonorHealth::ExchangeError&)
@@ -37151,11 +37140,11 @@ private:
 
 	static std::string Bracketed(const std::string& messageId)
 	{
-		NzbgetRsBuf buf = nzbget_rs_dqh_nntp_health_format_bracketed_id(
-			messageId.data(), messageId.size());
-		std::string out(buf.data ? buf.data : "", buf.len);
-		nzbget_rs_free(buf);
-		return out;
+		if (!messageId.empty() && messageId.front() == '<' && messageId.back() == '>')
+		{
+			return messageId;
+		}
+		return "<" + messageId + ">";
 	}
 };
 
@@ -37670,10 +37659,9 @@ NzbInfo* FindNzb(DownloadQueue* downloadQueue, int nzbId)
 
 bool SavedHistoryBackup(NzbInfo* pick, NzbInfo* candidate)
 {
-    return nzbget_rs_df_saved_history_backup(
-        pick != nullptr ? 1 : 0, pick ? pick->GetFullContentHash() : 0,
-        (int)candidate->GetDeleteStatus(), candidate->GetFullContentHash(),
-        (int)NzbInfo::dsDupe, (int)NzbInfo::dsCopy) != 0;
+	return candidate->GetDeleteStatus() == NzbInfo::dsDupe ||
+		(pick && candidate->GetDeleteStatus() == NzbInfo::dsCopy &&
+			candidate->GetFullContentHash() != pick->GetFullContentHash());
 }
 
 bool PlacementAvailable(DownloadQueue* queue, NzbInfo* pick, NzbInfo* backup, bool wholeBackup = false)
@@ -37706,9 +37694,17 @@ bool PlacementAvailable(DownloadQueue* queue, NzbInfo* pick, NzbInfo* backup, bo
 
 std::string LowerKey(const std::string& key)
 {
-	NzbgetRsBuf buf = nzbget_rs_df_lower_key(key.c_str());
-	std::string out(buf.data ? buf.data : "", buf.len);
-	nzbget_rs_free(buf);
+	std::string out;
+	out.reserve(key.size());
+	for (unsigned char b : key)
+	{
+		char ch = (b >= 'A' && b <= 'Z') ? (char)(b + ('a' - 'A')) : (char)b;
+		if (ch == '\t' || ch == '\n' || ch == '\r')
+		{
+			ch = ' ';
+		}
+		out.push_back(ch);
+	}
 	return out;
 }
 
@@ -37928,32 +37924,18 @@ private:
 	        // An external lower-scored backup can arrive after the initial search.
 	        // Queue notifications run under the queue lock; only schedule work here.
 	        NzbInfo* added = queueAspect->nzbInfo;
-	        if (nzbget_rs_dqh_dupesearch_should_check_added_for_parent_rank(
-	            (int)queueAspect->action,
-	            (int)DownloadQueue::eaNzbAdded,
-	            IsDonor(added) ? 1 : 0,
-	            (int)added->GetDupeMode(),
-	            (int)dmScore,
-	            added->GetParameters()->Find("DupeFleet") != nullptr ? 1 : 0) != 0)
+	        if (queueAspect->action == DownloadQueue::eaNzbAdded && !IsDonor(added) &&
+	            added->GetDupeMode() == dmScore && !added->GetParameters()->Find("DupeFleet"))
 	        {
 	            NzbInfo* parent = nullptr;
 	            std::string addedKey = LowerKey(EffectiveKey(added));
 	            for (NzbInfo* item : downloadQueue->GetQueue())
 	            {
-	                bool sameLowerKey = item != added && LowerKey(EffectiveKey(item)) == addedKey;
-	                if (nzbget_rs_dqh_dupesearch_is_better_parent_candidate(
-	                    item == added ? 1 : 0,
-	                    (int)item->GetKind(),
-	                    (int)NzbInfo::nkNzb,
-	                    item->GetDeleting() ? 1 : 0,
-	                    (int)item->GetDeleteStatus(),
-	                    (int)NzbInfo::dsNone,
-	                    item->GetPostInfo() != nullptr ? 1 : 0,
-	                    sameLowerKey ? 1 : 0,
-	                    item->GetDupeScore(),
-	                    added->GetDupeScore(),
-	                    parent != nullptr ? 1 : 0,
-	                    parent ? parent->GetDupeScore() : 0) != 0)
+	                if (item != added && item->GetKind() == NzbInfo::nkNzb && !item->GetDeleting() &&
+	                    item->GetDeleteStatus() == NzbInfo::dsNone && !item->GetPostInfo() &&
+	                    LowerKey(EffectiveKey(item)) == addedKey &&
+	                    item->GetDupeScore() > added->GetDupeScore() &&
+	                    (!parent || item->GetDupeScore() > parent->GetDupeScore()))
 	                {
 	                    parent = item;
 	                }
@@ -38020,12 +38002,8 @@ private:
 	    std::string lowerKey = LowerKey(key);
 	    const std::string ownerPrefix = std::to_string(nzbId) + ":";
 	    NzbParameter* owner = pick->GetParameters()->Find(OwnedKeyParam);
-	    bool generatedKey = nzbget_rs_dqh_dupesearch_is_generated_key(
-	        Util::EmptyStr(pick->GetDupeKey()) ? 1 : 0,
-	        owner != nullptr ? 1 : 0,
-	        owner ? owner->GetValue() : nullptr,
-	        nzbId,
-	        key.c_str()) != 0;
+	    bool generatedKey = Util::EmptyStr(pick->GetDupeKey()) ||
+	        (owner && key.compare(0, 6, "dupes:") == 0 && owner->GetValue() == ownerPrefix + key);
 	    std::string title;
 	    Searched previous;
 	    bool havePrevious = false, changedIdentity = false, rankOnly = false, cachedName = false, rankRequested = false;
@@ -38119,11 +38097,7 @@ private:
 	    auto retain = [&](NzbInfo* item, bool inHistory) {
 	        // Lower/equal ordinary peers cannot affect the Rust highest-score rule.
 	        // Fleet markers still matter at any score, including history entries.
-	        if (nzbget_rs_dqh_dupesearch_should_retain_peer(
-	            item == pick ? 1 : 0,
-	            item->GetDupeScore(),
-	            pick->GetDupeScore(),
-	            item->GetParameters()->Find("DupeFleet") != nullptr ? 1 : 0) != 0)
+	        if (item != pick && (item->GetDupeScore() > pick->GetDupeScore() || item->GetParameters()->Find("DupeFleet")))
 	        { others.push_back(item); histories.push_back(inHistory); }
 	    };
 	    for (NzbInfo* item : downloadQueue->GetQueue()) retain(item, false);
@@ -38178,7 +38152,7 @@ private:
 	    job.rankOnly = rankOnly;
 	    pick->PrintMessage(Message::mkInfo, "DupeSearch: searching duplicates of %s (key %s)%s",
 	        pick->GetName(), key.c_str(),
-	        nzbget_rs_dqh_dupesearch_prepare_status_suffix(rankOnly ? 1 : 0, history ? 1 : 0));
+	        rankOnly ? ": ranking new backups" : history ? ": it failed before its search was due" : "");
 	    return true;
 	}
 
@@ -38207,12 +38181,22 @@ private:
 			if (LowerKey(EffectiveKey(item)) == lowerKey || ReleaseName::SameRelease(nzbInfo->GetName(), item->GetName()))
 			{
 				// the file of a merged group names several, separated by "|"
-				const char* qf = item->GetQueuedFilename() ? item->GetQueuedFilename() : "";
-				nzbget_rs_dqh_fleet_visit_pipe_names(qf, strlen(qf), &job.knownFiles,
-					[](void* ctx, const char* namePtr, size_t nameLen)
+				std::string qf = item->GetQueuedFilename() ? item->GetQueuedFilename() : "";
+				size_t start = 0;
+				while (start <= qf.size())
+				{
+					size_t end = qf.find('|', start);
+					size_t len = (end == std::string::npos ? qf.size() : end) - start;
+					if (len > 0)
 					{
-						static_cast<std::vector<std::string>*>(ctx)->emplace_back(namePtr, nameLen);
-					});
+						job.knownFiles.push_back(qf.substr(start, len));
+					}
+					if (end == std::string::npos)
+					{
+						break;
+					}
+					start = end + 1;
+				}
 			}
 		};
 		for (NzbInfo* item : downloadQueue->GetQueue())
@@ -38221,19 +38205,10 @@ private:
 	        // Zero-delay ranking can precede asynchronous duplicate filing. The
 	        // score editor handles either live or history IDs, so include that
 	        // snapshot rather than losing the only add notification.
-	        if (nzbget_rs_dupesearch_is_rank_only_queued_member(
-	            job.rankOnly ? 1 : 0,
-	            item == nzbInfo ? 1 : 0,
-	            (int)item->GetKind(),
-	            (int)NzbInfo::nkNzb,
-	            (int)item->GetDupeMode(),
-	            (int)dmScore,
-	            item->GetPostInfo() != nullptr ? 1 : 0,
-	            (int)item->GetDeleteStatus(),
-	            (int)NzbInfo::dsNone,
-	            (int)NzbInfo::dsDupe,
-	            item->GetDupeScore(),
-	            nzbInfo->GetDupeScore()) != 0 &&
+	        if (job.rankOnly && item != nzbInfo && item->GetKind() == NzbInfo::nkNzb &&
+	            item->GetDupeMode() == dmScore && !item->GetPostInfo() &&
+	            (item->GetDeleteStatus() == NzbInfo::dsNone || item->GetDeleteStatus() == NzbInfo::dsDupe) &&
+	            item->GetDupeScore() < nzbInfo->GetDupeScore() &&
 	            LowerKey(EffectiveKey(item))==lowerKey &&
 	            ReleaseName::SameRelease(nzbInfo->GetName(),item->GetName()) &&
 	            !Util::EmptyStr(item->GetQueuedFilename()) &&
@@ -38275,8 +38250,10 @@ private:
 	        options.sample.minimum=g_Options->GetDupeHealthMin();
 	        options.sample.maximum=g_Options->GetDupeHealthMax();
 	        options.sample.maxBody=g_Options->GetDupeBodyChecks();
-	        options.budgetMs=nzbget_rs_dupesearch_calc_expand_budget_ms(
-	            g_Options->GetDupeHealthBudget(), (int64_t)deadline, (int64_t)Util::CurrentTime());
+	        long long optMs = (long long)g_Options->GetDupeHealthBudget() * 1000LL;
+	        long long leftMs = ((long long)deadline - (long long)Util::CurrentTime()) * 1000LL;
+	        options.budgetMs = (int)std::clamp(std::max(1LL, std::min(optMs, leftMs)),
+	            1LL, (long long)std::numeric_limits<int>::max());
 	        return options;
 	    };
 	    auto check = [&](const NzbSummary& info) {
@@ -38563,14 +38540,14 @@ private:
 		// a search that learned nothing - a query failed and nothing came back, or no
 		// posting could be fetched (indexers refusing, the deadline) - doesn't hold the
 		// key for SearchWindowSec: the next add of the key, or a restart, searches it again
-		int retryReason = nzbget_rs_dupesearch_classify_search_retry_reason(
-			stats.queries, stats.failed, verified.empty() ? 1 : 0, fetched.empty() ? 1 : 0,
-			fetchStats.refused, fetchStats.fetch, notTried);
-		if (retryReason > 0)
+		bool allFailed = stats.queries > 0 && stats.failed == stats.queries;
+		bool queriesFailed = stats.failed > 0 && verified.empty();
+		bool nothingFetched = fetched.empty() && ((long long)fetchStats.refused + fetchStats.fetch + notTried) > 0;
+		if (queriesFailed || nothingFetched)
 		{
 			ForgetSearch(job.dupeKey, ReleaseName::Normalize(job.name));
 			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: %s, the key may be searched again", job.name.c_str(),
-				retryReason == 1 ? "no indexer answered" : retryReason == 2 ? "an indexer query failed and nothing came back" :
+				allFailed ? "no indexer answered" : queriesFailed ? "an indexer query failed and nothing came back" :
 				"no posting could be fetched");
 		}
 
@@ -38587,25 +38564,19 @@ private:
 	        (unsigned long long)std::numeric_limits<long long>::max());
 		if (verified.size() > 1)
 		{
-			std::vector<int64_t> totalBytes(verified.size());
-			std::vector<int> grabs(verified.size());
-			std::vector<int64_t> dates(verified.size());
-			std::vector<size_t> orderIdx(verified.size());
-			for (size_t i = 0; i < verified.size(); i++)
-			{
-				totalBytes[i] = verified[i].info.totalBytes;
-				grabs[i] = verified[i].listing.grabs;
-				dates[i] = (int64_t)verified[i].listing.date;
-			}
-			nzbget_rs_df_sort_verified_postings(
-				totalBytes.data(), grabs.data(), dates.data(), verified.size(), pickBytes, orderIdx.data());
-			std::vector<NzbFetcher::Fetched> sorted;
-			sorted.reserve(verified.size());
-			for (size_t idx : orderIdx)
-			{
-				sorted.push_back(std::move(verified[idx]));
-			}
-			verified = std::move(sorted);
+			auto dist = [&](long long b) -> unsigned long long {
+				return b >= pickBytes
+					? (unsigned long long)b - (unsigned long long)pickBytes
+					: (unsigned long long)pickBytes - (unsigned long long)b;
+			};
+			std::stable_sort(verified.begin(), verified.end(),
+				[&](const NzbFetcher::Fetched& a, const NzbFetcher::Fetched& b) {
+					unsigned long long da = dist(a.info.totalBytes);
+					unsigned long long db = dist(b.info.totalBytes);
+					if (da != db) return da < db;
+					if (a.listing.grabs != b.listing.grabs) return a.listing.grabs > b.listing.grabs;
+					return a.listing.date > b.listing.date;
+				});
 		}
 
 		DonorHealth::ServerList servers;
@@ -38659,10 +38630,7 @@ private:
 			std::vector<DonorHealth::Posting> list;
 			for (size_t i = 0; i < verified.size(); i++)
 			{
-				NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(i);
-				std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
-				nzbget_rs_free(keyBuf);
-				list.push_back({ std::move(keyStr), verified[i].info.messageIds, groupsOf(verified[i].info) });
+				list.push_back({ std::to_string(i), verified[i].info.messageIds, groupsOf(verified[i].info) });
 			}
 			DonorHealth::CheckPostings(servers, list, healthOptions, false, FetchParallel,
 				[&](const std::string& key, const DonorHealth::Health& health)
@@ -38703,13 +38671,11 @@ private:
 	        GuardedDownloadQueue queue = DownloadQueue::Guard();
 	        NzbInfo* currentPick = FindNzb(queue, job.nzbId);
 	        return (int)std::count_if(placed.begin(), placed.end(), [&](const auto& item) {
-	            bool avail = !item.second.member && item.second.valid &&
-	                item.second.entry.score > DonorScore::Dead && item.second.id >= 0 &&
-	                PlacementAvailable(queue, currentPick, FindNzb(queue, item.second.id));
-	            return nzbget_rs_dupesearch_slot_counts_as_used(
-	                item.second.member ? 1 : 0, item.second.valid ? 1 : 0,
-	                item.second.entry.score, DonorScore::Dead, item.second.id,
-	                g_Options->GetDupeSearchDryRun() ? 1 : 0, avail ? 1 : 0) != 0;
+	            return !item.second.member && item.second.valid &&
+	                item.second.entry.score > DonorScore::Dead &&
+	                (item.second.id < 0
+	                    ? g_Options->GetDupeSearchDryRun()
+	                    : PlacementAvailable(queue, currentPick, FindNzb(queue, item.second.id)));
 	        });
 	    };
 		DonorScore::Ranks ranks;
@@ -38764,13 +38730,16 @@ private:
 				placed[i] = { id, entryOf(i, score, alive), verified[i].listing.title };
 				Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: added %s [%s] score=%i alive=%i%% (%s)", job.name.c_str(),
 					verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(), base + score,
-					nzbget_rs_dupesearch_alive_to_percent(alive), how);
+					alive < 0 ? -1 : (int)std::lround(100 * alive), how);
 			};
 
 		// the probe-alive postings go in at once, then each is rescored when its
 		// full sample lands; the rest are added as their samples finish
-		size_t fast = nzbget_rs_dupesearch_calc_fast_donor_count(
-			g_Options->GetDupeFastDonors(), live.size(), cap);
+		size_t fast = std::min((size_t)std::max(0, g_Options->GetDupeFastDonors()), live.size());
+		if (cap > 0)
+		{
+			fast = std::min(fast, (size_t)cap);
+		}
 		std::set<size_t> fastSet;
 		for (size_t n = 0; n < fast; n++)
 		{
@@ -38785,10 +38754,7 @@ private:
 			std::vector<DonorHealth::Posting> list;
 			for (size_t i : todo)
 			{
-				NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(i);
-				std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
-				nzbget_rs_free(keyBuf);
-				list.push_back({ std::move(keyStr), verified[i].info.messageIds, groupsOf(verified[i].info) });
+				list.push_back({ std::to_string(i), verified[i].info.messageIds, groupsOf(verified[i].info) });
 			}
 			DonorHealth::CheckPostings(servers, list, healthOptions, true, FetchParallel,
 				[&](const std::string& key, const DonorHealth::Health& health)
@@ -38803,7 +38769,7 @@ private:
 					bool isDead = DupeIdentity::IsDead(health, verified[i].info, g_Options->GetDupeMinAlive());
 					Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: %s [%s]: alive=%i%% (%i of %i articles)", job.name.c_str(),
 						verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(),
-						nzbget_rs_dupesearch_alive_to_percent(alive), health.present, health.Answered());
+						alive < 0 ? -1 : (int)std::lround(100 * alive), health.present, health.Answered());
 
 					auto it = placed.find(i);
 					if (it != placed.end())
@@ -38812,11 +38778,8 @@ private:
 						Placed& donor = it->second;
 						ranks.Release(donor.entry.score);
 						int score = isDead ? DonorScore::Dead : ranks.Take(alive, donor.entry.twin);
-						NzbgetRsBuf paramBuf = nzbget_rs_dqh_dupesearch_format_key_val_param(
-							AliveParam,
-							nzbget_rs_dupesearch_fast_donor_alive_param(isDead ? 1 : 0, alive));
-						std::string param(paramBuf.data ? paramBuf.data : "", paramBuf.len);
-						nzbget_rs_free(paramBuf);
+						int aliveVal = isDead ? 0 : alive < 0 ? 100 : (int)std::lround(100 * alive);
+						std::string param = std::string(AliveParam) + "=" + std::to_string(aliveVal);
 						if (alive < 0 || SetScore(donor.id, base + score,
 							param.empty() ? std::vector<std::string>() : std::vector<std::string>{ param }))
 						{
@@ -38924,10 +38887,7 @@ private:
 					sameAs[m] = (size_t)nzbget_rs_dqh_parse_c_atoi(first->key.c_str());
 					continue;
 				}
-				NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(m);
-				std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
-				nzbget_rs_free(keyBuf);
-				list.push_back({ std::move(keyStr), summaries[m].messageIds, groupsOf(summaries[m]) });
+				list.push_back({ std::to_string(m), summaries[m].messageIds, groupsOf(summaries[m]) });
 			}
 			std::map<size_t, DonorHealth::Health> measured;
 			if (!servers.empty()) DonorHealth::CheckPostings(servers, list, healthOptions, true, FetchParallel,
@@ -39002,15 +38962,13 @@ private:
 			int score = base + wanted[n];
 			if (donor.member)
 			{
-				int percent = 0;
-				int addAliveZero = 0;
-				nzbget_rs_df_eval_member_rerank(
-					base, wanted[n], DonorScore::Dead, donor.oldScore, donor.entry.alive, allDead ? 1 : 0,
-					&score, &percent, &addAliveZero);
-				NzbgetRsBuf hpBuf = nzbget_rs_dqh_dupesearch_format_key_val_param(HealthParam, percent);
-				params.emplace_back(hpBuf.data ? hpBuf.data : "", hpBuf.len);
-				nzbget_rs_free(hpBuf);
-				if (addAliveZero)
+				int percent = (int)std::lround(100 * donor.entry.alive);
+				if ((percent < 100 && score > donor.oldScore) || allDead)
+				{
+					score = donor.oldScore;
+				}
+				params.push_back(std::string(HealthParam) + "=" + std::to_string(percent));
+				if (wanted[n] == DonorScore::Dead)
 				{
 					params.push_back(std::string(AliveParam) + "=0");
 				}
@@ -39049,19 +39007,18 @@ private:
 		rejected["dead"] += dead;
 		rejected["over-cap"] += overCap;
 		rejected["rescore"] += rescoreFailed;
-		std::vector<const char*> rejKeys;
-		std::vector<int> rejCounts;
-		rejKeys.reserve(rejected.size());
-		rejCounts.reserve(rejected.size());
+		std::string outcome;
 		for (const auto& entry : rejected)
 		{
-			rejKeys.push_back(entry.first.c_str());
-			rejCounts.push_back(entry.second);
+			if (entry.second > 0)
+			{
+				if (!outcome.empty())
+				{
+					outcome += ", ";
+				}
+				outcome += entry.first + ": " + std::to_string(entry.second);
+			}
 		}
-		NzbgetRsBuf outcomeBuf = nzbget_rs_dqh_dupesearch_format_rejected_outcome(
-			rejKeys.data(), rejCounts.data(), rejected.size());
-		std::string outcome(outcomeBuf.data ? outcomeBuf.data : "", outcomeBuf.len);
-		nzbget_rs_free(outcomeBuf);
 		Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: results=%i candidates=%i postings=%i verified=%i added=%i rejected={%s}",
 			job.name.c_str(), results, candidates, postings, (int)verified.size(), added, outcome.c_str());
 		RemovePending(job.nzbId);
@@ -39076,13 +39033,11 @@ private:
 	        GuardedDownloadQueue queue = DownloadQueue::Guard();
 	        NzbInfo* currentPick = FindNzb(queue, job.nzbId);
 	        usableBackup=std::any_of(placed.begin(),placed.end(),[&](const auto& item) {
-	            bool avail = item.second.id >= 0 && item.second.valid &&
-	                item.second.entry.score > DonorScore::Dead && item.second.entry.alive >= 0.999 &&
-	                PlacementAvailable(queue, currentPick, FindNzb(queue, item.second.id), true);
-	            return nzbget_rs_dupesearch_is_usable_whole_backup(
-	                item.second.valid ? 1 : 0, item.second.entry.score, DonorScore::Dead,
-	                item.second.entry.alive, item.second.id,
-	                g_Options->GetDupeSearchDryRun() ? 1 : 0, avail ? 1 : 0) != 0;
+	            return item.second.valid && item.second.entry.score > DonorScore::Dead &&
+	                item.second.entry.alive >= 0.999 &&
+	                (item.second.id < 0
+	                    ? g_Options->GetDupeSearchDryRun()
+	                    : PlacementAvailable(queue, currentPick, FindNzb(queue, item.second.id), true));
 	        });
 	    }
 	    bool stateRetryable = false;
@@ -39098,13 +39053,9 @@ private:
 	          SetRetryable(LowerKey(job.dupeKey), ReleaseName::Normalize(job.name), false); }
 	        if (!g_Options->GetDupeSearchDryRun()) SaveState();
 	    }
-	    int retryDiscoveryInt = 0;
-	    int rankIncompleteInt = 0;
-	    nzbget_rs_dupesearch_eval_post_place_retry(
-	        job.rankOnly ? 1 : 0, stateRetryable ? 1 : 0, usableBackup ? 1 : 0,
-	        uncheckedMembers.size(), &retryDiscoveryInt, &rankIncompleteInt);
-	    bool rankIncomplete = rankIncompleteInt != 0;
-	    bool retryDiscovery = retryDiscoveryInt != 0;
+	    bool retryWanted = job.rankOnly ? stateRetryable : true;
+	    bool retryDiscovery = retryWanted && !usableBackup;
+	    bool rankIncomplete = job.rankOnly && !uncheckedMembers.empty();
 	    // A rename/deletion may make this pick ineligible for scheduling, but must
 	    // not falsely complete the original title's unfulfilled discovery stamp.
 	    if (retryDiscovery && !IsStopped()) ForgetSearch(job.dupeKey, ReleaseName::Normalize(job.name));
@@ -39149,19 +39100,15 @@ private:
 		{
 			return "the pick was deleted";
 		}
-		std::string pickEffKey = EffectiveKey(pick);
-		std::string pickNormName = ReleaseName::Normalize(pick->GetName());
-		std::string jobNormName = ReleaseName::Normalize(job.name);
-		int reason = nzbget_rs_df_eval_pick_gone(
-			1, 0, (int)pick->GetDeleteStatus(), (int)NzbInfo::dsManual,
-			pickEffKey.c_str(), job.dupeKey.c_str(), pickNormName.c_str(), jobNormName.c_str());
-		switch (reason)
+		if (LowerKey(EffectiveKey(pick)) != LowerKey(job.dupeKey))
 		{
-			case 1: return "the pick was deleted";
-			case 2: return "the duplicate key of the pick changed";
-			case 3: return "the name of the pick changed";
-			default: return "";
+			return "the duplicate key of the pick changed";
 		}
+		if (ReleaseName::Normalize(pick->GetName()) != ReleaseName::Normalize(job.name))
+		{
+			return "the name of the pick changed";
+		}
+		return "";
 	}
 
 	int AddDonor(const Job& job, const NzbSummary& pick, const NzbFetcher::Fetched& posting, int score, double alive)
@@ -39181,7 +39128,7 @@ private:
 		{
 			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: dry run, would add %s [%s] score=%i alive=%i%%", job.name.c_str(),
 				posting.listing.title.c_str(), posting.listing.indexer.c_str(), score,
-				nzbget_rs_dupesearch_alive_to_percent(alive));
+				alive < 0 ? -1 : (int)std::lround(100 * alive));
 			return -1;
 		}
 		std::string fingerprint = posting.info.Fingerprint();
@@ -39197,21 +39144,18 @@ private:
 		parameters.SetParameter(DonorParam, "yes");
 		for (const std::string& hint : DupeIdentity::Hints(pick, posting.info, posting.sameInner))
 		{
-			size_t nameLen = 0, valOff = 0;
-			if (nzbget_rs_tpr_split_param_assignment(hint.c_str(), &nameLen, &valOff) != 0)
+			size_t eq = hint.find('=');
+			if (eq != std::string::npos)
 			{
-				parameters.SetParameter(hint.substr(0, nameLen).c_str(), hint.c_str() + valOff);
+				parameters.SetParameter(hint.substr(0, eq).c_str(), hint.c_str() + eq + 1);
 			}
 		}
 		if (alive >= 0)
 		{
-			NzbgetRsBuf aliveBuf = nzbget_rs_dqh_conn_format_port_str(
-				nzbget_rs_dupesearch_alive_to_percent(alive));
-			parameters.SetParameter(AliveParam, aliveBuf.data ? aliveBuf.data : "0");
-			nzbget_rs_free(aliveBuf);
+			parameters.SetParameter(AliveParam, std::to_string((int)std::lround(100 * alive)).c_str());
 		}
 		std::string name = posting.listing.title;
-		if (nzbget_rs_dupesearch_needs_nzb_ext(name.data(), name.size()) != 0)
+		if (name.size() < 4 || strcasecmp(name.c_str() + name.size() - 4, ".nzb") != 0)
 		{
 			name += ".nzb";
 		}
@@ -39280,9 +39224,7 @@ private:
 			}
 		}
 		IdList ids{ id };
-		NzbgetRsBuf scoreBuf = nzbget_rs_dqh_conn_format_port_str(score);
-		std::string text(scoreBuf.data ? scoreBuf.data : "", scoreBuf.len);
-		nzbget_rs_free(scoreBuf);
+		std::string text = std::to_string(score);
 		const std::pair<DownloadQueue::EEditAction, DownloadQueue::EEditAction> kinds[] = {
 			{ DownloadQueue::eaHistorySetDupeScore, DownloadQueue::eaHistorySetParameter },
 			{ DownloadQueue::eaGroupSetDupeScore, DownloadQueue::eaGroupSetParameter } };
@@ -39327,10 +39269,11 @@ private:
 
 	std::string PendingDir(int nzbId)
 	{
-		NzbgetRsBuf dirBuf = nzbget_rs_dqh_dupesearch_format_pending_dir(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
-		std::string dir(dirBuf.data ? dirBuf.data : "", dirBuf.len);
-		nzbget_rs_free(dirBuf);
+		std::string dir = std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "dupesearch-pending";
+		if (nzbId > 0)
+		{
+			dir += PATH_SEPARATOR + std::to_string(nzbId);
+		}
 		return dir;
 	}
 
@@ -39365,14 +39308,10 @@ private:
 		for (size_t i = 0; i < verified.size() && ok; i++)
 		{
 			const Newznab::Result& listing = verified[i].listing;
-			NzbgetRsBuf baseBuf = nzbget_rs_dqh_dupesearch_format_indexed_base_path(
-				dir.c_str(), PATH_SEPARATOR, i);
-			std::string base(baseBuf.data ? baseBuf.data : "", baseBuf.len);
-			nzbget_rs_free(baseBuf);
-			NzbgetRsBuf metaBuf = nzbget_rs_df_format_pending_meta(
-				listing.title.c_str(), listing.indexer.c_str(), listing.grabs, listing.size, (int64_t)listing.date);
-			std::string metaStr(metaBuf.data ? metaBuf.data : "", metaBuf.len);
-			nzbget_rs_free(metaBuf);
+			std::string base = dir + PATH_SEPARATOR + std::to_string(i);
+			std::string metaStr = listing.title + "\t" + listing.indexer + "\t" +
+				std::to_string(listing.grabs) + "\t" + std::to_string(listing.size) + "\t" +
+				std::to_string((long long)listing.date) + "\t\n";
 			ok = DupeUtil::WriteAtomic(base + ".nzb", verified[i].data) && DupeUtil::WriteAtomic(base + ".meta", metaStr) &&
 	            DupeUtil::WriteAtomic(base + ".inner", verified[i].sameInner ? "1\n" : "0\n");
 		}
@@ -39397,10 +39336,29 @@ private:
 		DirBrowser dirBrowser(PendingDir(0).c_str());
 		while (const char* name = dirBrowser.Next())
 		{
-			int parsedId = nzbget_rs_dqh_dupesearch_parse_pending_dir_id(name);
-			if (parsedId > 0)
+			if (!name[0] || name[0] == '0')
 			{
-				ids.push_back(parsedId);
+				continue;
+			}
+			long long acc = 0;
+			bool digits = true;
+			for (const char* p = name; *p; ++p)
+			{
+				if (*p < '0' || *p > '9')
+				{
+					digits = false;
+					break;
+				}
+				acc = acc * 10 + (*p - '0');
+				if (acc > std::numeric_limits<int>::max())
+				{
+					digits = false;
+					break;
+				}
+			}
+			if (digits && acc > 0)
+			{
+				ids.push_back((int)acc);
 			}
 		}
 
@@ -39412,12 +39370,8 @@ private:
 			}
 			std::string dir = PendingDir(nzbId);
 	        std::string phase = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "phase");
-			int fetchedInt = 0;
-			int rankingInt = 0;
-			nzbget_rs_dupesearch_classify_pending_phase(
-				phase.data(), phase.size(), &fetchedInt, &rankingInt);
-			bool fetched = fetchedInt != 0;
-	        bool ranking = rankingInt != 0;
+	        bool fetched = phase == "fetched\n";
+	        bool ranking = phase == "ranking\n";
 
 			Job job;
 	        bool stateErased = false;
@@ -39471,20 +39425,10 @@ private:
 	        // Proof belongs to the original pick. Old state without that binding is
 	        // searched again rather than assigning its donors to an unknown release.
 	        bool titleExists = FileSystem::FileExists((dir + PATH_SEPARATOR + "pick-title").c_str());
-	        std::string savedTitle = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title") : std::string();
-	        std::string savedKey = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key") : std::string();
-	        std::string savedPosting = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-posting") : std::string();
-	        std::string currentTitle = ReleaseName::Normalize(job.name);
-	        std::string currentKey = LowerKey(job.dupeKey);
-	        std::string currentPosting = pick.Fingerprint();
-	        if (nzbget_rs_dqh_dupesearch_pending_identity_matches(
-	            titleExists ? 1 : 0,
-	            (const uint8_t*)savedTitle.data(), savedTitle.size(),
-	            (const uint8_t*)currentTitle.data(), currentTitle.size(),
-	            (const uint8_t*)savedKey.data(), savedKey.size(),
-	            (const uint8_t*)currentKey.data(), currentKey.size(),
-	            (const uint8_t*)savedPosting.data(), savedPosting.size(),
-	            (const uint8_t*)currentPosting.data(), currentPosting.size()) == 0)
+	        if (!titleExists ||
+	            DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title") != ReleaseName::Normalize(job.name) ||
+	            DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key") != LowerKey(job.dupeKey) ||
+	            DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-posting") != pick.Fingerprint())
 	        {
 	            Note(job.nzbId, Message::mkInfo, "DupeSearch: saved search identity changed; searching the current pick again");
 	            std::string oldKey = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key");
@@ -39529,10 +39473,7 @@ private:
 			std::map<std::string, int> rejected;
 			for (int i = 0;; i++)
 			{
-				NzbgetRsBuf baseBuf = nzbget_rs_dqh_dupesearch_format_indexed_base_path(
-					dir.c_str(), PATH_SEPARATOR, (size_t)i);
-				std::string base(baseBuf.data ? baseBuf.data : "", baseBuf.len);
-				nzbget_rs_free(baseBuf);
+				std::string base = dir + PATH_SEPARATOR + std::to_string(i);
 				if (!FileSystem::FileExists((base + ".meta").c_str()))
 				{
 					break;
@@ -39792,8 +39733,7 @@ public:
 	{
 		using namespace FleetDetail;
 		Result result;
-		request.timeoutSec = nzbget_rs_dqh_fleet_clamp_timeout_sec(
-			request.timeoutSec, (int)MaxTimeoutSec);
+		request.timeoutSec = std::max(5, std::min(request.timeoutSec, (int)MaxTimeoutSec));
 		if (request.members.empty())
 		{
 			result.reason = "NO_MEMBERS";
@@ -39845,9 +39785,9 @@ public:
 				HttpGet::Reply& reply = fetched[i];
 				if (!reply.ok)
 				{
-					NzbgetRsBuf errBuf = nzbget_rs_dqh_fleet_format_fetch_error(reply.status);
-					candidate.error.assign(errBuf.data ? errBuf.data : "", errBuf.len);
-					nzbget_rs_free(errBuf);
+					candidate.error = reply.status != 0
+						? "the nzb-file could not be fetched (HTTP " + std::to_string(reply.status) + ")"
+						: "the nzb-file could not be fetched (connection failed)";
 					continue;
 				}
 				member.data = std::move(reply.body);
@@ -39883,30 +39823,31 @@ public:
 					{
 						return;
 					}
-					int64_t newTop = top;
-					nzbget_rs_dqh_fleet_update_key_score_bounds(
-						top, lowest, any ? 1 : 0, queued ? 1 : 0,
-						nzbInfo->GetDeleting() ? 1 : 0,
-						(int)nzbInfo->GetDeleteStatus(),
-						(int)NzbInfo::dsNone,
-						runningId, runningScore,
-						nzbInfo->GetId(), nzbInfo->GetDupeScore(),
-						&newTop, &lowest, &runningId, &runningScore);
-					top = newTop;
+					top = std::max(top, (long long)nzbInfo->GetDupeScore() + 1000LL);
+					lowest = any ? std::min(lowest, nzbInfo->GetDupeScore()) : nzbInfo->GetDupeScore();
 					any = true;
-					std::string names = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
-					struct PipeCtx
+					if (queued && !nzbInfo->GetDeleting() && nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
+						(runningId == 0 || nzbInfo->GetDupeScore() > runningScore))
 					{
-						std::vector<std::pair<int, std::string>>& existing;
-						int id;
-					} pipeCtx{existing, nzbInfo->GetId()};
-					nzbget_rs_dqh_fleet_visit_pipe_names(
-						names.data(), names.size(), &pipeCtx,
-						[](void* ctx, const char* partPtr, size_t partLen)
+						runningId = nzbInfo->GetId();
+						runningScore = nzbInfo->GetDupeScore();
+					}
+					std::string names = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
+					size_t start = 0;
+					while (start <= names.size())
+					{
+						size_t end = names.find('|', start);
+						size_t len = (end == std::string::npos ? names.size() : end) - start;
+						if (len > 0)
 						{
-							auto* c = static_cast<PipeCtx*>(ctx);
-							c->existing.emplace_back(c->id, std::string(partPtr, partLen));
-						});
+							existing.emplace_back(nzbInfo->GetId(), names.substr(start, len));
+						}
+						if (end == std::string::npos)
+						{
+							break;
+						}
+						start = end + 1;
+					}
 				};
 			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 			{
@@ -39946,13 +39887,8 @@ public:
 			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 			{
 				NzbInfo* item = historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo() : nullptr;
-				if (!item || nzbget_rs_dqh_fleet_is_already_downloaded_history_item(
-					item != nullptr ? 1 : 0,
-					(int)item->GetDeleteStatus(),
-					(int)NzbInfo::dsNone,
-					item->IsDupeSuccess() ? 1 : 0,
-					(int)item->GetMarkStatus(),
-					(int)NzbInfo::ksBad) == 0 ||
+				if (!item || item->GetDeleteStatus() != NzbInfo::dsNone ||
+					!item->IsDupeSuccess() || item->GetMarkStatus() == NzbInfo::ksBad ||
 					!ReleaseName::Readable(item->GetName()))
 				{
 					continue;
@@ -39989,18 +39925,14 @@ public:
 		{
 			if (candidate.error.empty() && candidate.sameAs < 0 && !candidate.existingId)
 			{
-				NzbgetRsBuf idxBuf = nzbget_rs_dqh_conn_format_port_str(candidate.index);
-				std::string idxStr(idxBuf.data ? idxBuf.data : "", idxBuf.len);
-				nzbget_rs_free(idxBuf);
-				postings.push_back({ std::move(idxStr), candidate.summary.messageIds,
+				postings.push_back({ std::to_string(candidate.index), candidate.summary.messageIds,
 					std::make_shared<std::vector<std::string>>(candidate.summary.groups) });
 			}
 		}
 		DonorHealth::ServerList servers = NntpHealthServer::Servers();
 		std::unique_lock<std::timed_mutex> checkGuard(g_checkMutex, std::defer_lock);
 		bool mayCheck = !servers.empty() && !postings.empty() && checkGuard.try_lock_for(
-			std::chrono::milliseconds(nzbget_rs_dqh_fleet_calc_check_lock_wait_ms(
-				deadlineMs, DonorHealth::NowMs(), FinishReserveMs)));
+			std::chrono::milliseconds(std::max(0LL, deadlineMs - DonorHealth::NowMs() - FinishReserveMs - 1000LL)));
 		if (!servers.empty() && !postings.empty() && !mayCheck)
 		{
 			result.complete = false;
@@ -40012,12 +39944,9 @@ public:
 			options.sample.minimum = g_Options->GetDupeHealthMin();
 			options.sample.maxBody = g_Options->GetDupeBodyChecks();
 			long long checkStart = DonorHealth::NowMs();
-			int64_t checkDeadlineMs = 0;
-			nzbget_rs_dqh_fleet_calc_check_budget_and_deadline(
-				g_Options->GetDupeHealthMax(), FleetSampleMax,
-				deadlineMs, checkStart, FinishReserveMs,
-				&options.sample.maximum, &options.budgetMs, &checkDeadlineMs);
-			options.deadlineMs = checkDeadlineMs;
+			options.sample.maximum = std::min(g_Options->GetDupeHealthMax(), FleetSampleMax);
+			options.budgetMs = (int)std::max(1000LL, deadlineMs - checkStart - FinishReserveMs);
+			options.deadlineMs = checkStart + options.budgetMs;
 			std::mutex mutex;
 			{
 				g_WorkState->HoldDownloadForFleet(true);
@@ -40043,15 +39972,17 @@ public:
 			{
 				continue;
 			}
-			int alivePct = -1, isDead = 0, memberComplete = 0;
-			nzbget_rs_df_eval_fleet_member_health(
-				candidate.checked ? 1 : 0, result.complete ? 1 : 0,
-				candidate.health.present, candidate.health.missing, candidate.health.error,
-				DonorHealth::MinKnown, g_Options->GetDupeMinAlive(),
-				&alivePct, &isDead, &memberComplete);
-			candidate.alive = alivePct;
-			candidate.dead = isDead != 0;
-			result.complete &= memberComplete != 0;
+			int answered = candidate.health.Answered();
+			bool unknown = !candidate.checked || (!result.complete && candidate.health.present == 0);
+			double alive = (unknown || answered < DonorHealth::MinKnown)
+				? -1.0
+				: (double)candidate.health.present / (double)answered;
+			candidate.alive = alive < 0.0 ? -1 : (int)std::lround(100.0 * alive);
+			bool deadProbe = candidate.health.present == 0 && candidate.health.missing >= DonorHealth::MinKnown;
+			candidate.dead = !unknown && (deadProbe ||
+				(alive >= 0.0 && alive * 100.0 < g_Options->GetDupeMinAlive() &&
+					candidate.health.missing >= DonorHealth::MinKnown));
+			result.complete &= candidate.checked && answered >= DonorHealth::MinKnown;
 		}
 		for (Candidate& candidate : candidates)
 		{
@@ -40062,40 +39993,58 @@ public:
 			}
 		}
 
-		std::vector<uint8_t> hasError(candidates.size());
-		std::vector<int> sameAs(candidates.size());
-		std::vector<uint8_t> isDeadArr(candidates.size());
-		std::vector<int> aliveArr(candidates.size());
-		std::vector<int64_t> totalBytesArr(candidates.size());
-		std::vector<size_t> rankedIdx(candidates.size());
-		for (size_t i = 0; i < candidates.size(); i++)
+		std::vector<long long> sizes;
+		for (const Candidate& c : candidates)
 		{
-			hasError[i] = candidates[i].error.empty() ? 0 : 1;
-			sameAs[i] = candidates[i].sameAs;
-			isDeadArr[i] = candidates[i].dead ? 1 : 0;
-			aliveArr[i] = candidates[i].alive;
-			totalBytesArr[i] = candidates[i].summary.totalBytes;
-		}
-		size_t rankedCount = nzbget_rs_df_rank_fleet_candidates(
-			hasError.data(), sameAs.data(), isDeadArr.data(), aliveArr.data(), totalBytesArr.data(),
-			candidates.size(), rankedIdx.data());
-		std::vector<Candidate*> order;
-		std::vector<Candidate*> ranked;
-		ranked.reserve(rankedCount);
-		for (size_t i = 0; i < rankedCount; i++)
-		{
-			Candidate* c = &candidates[rankedIdx[i]];
-			ranked.push_back(c);
-			if (c->sameAs < 0)
+			if (c.error.empty())
 			{
-				order.push_back(c);
+				sizes.push_back(c.summary.totalBytes);
 			}
 		}
+		std::sort(sizes.begin(), sizes.end());
+		long long typical = sizes.empty() ? 0 : sizes[sizes.size() / 2];
+
 		auto tier = [](const Candidate& c)
 		{
-			return nzbget_rs_dqh_fleet_candidate_tier(
-				!c.error.empty() ? 1 : 0, c.dead ? 1 : 0, c.alive);
+			if (!c.error.empty()) return 3;
+			if (c.dead) return 2;
+			if (c.alive < 0) return 1;
+			return 0;
 		};
+		auto distance = [&](const Candidate& c) -> unsigned long long
+		{
+			return c.summary.totalBytes >= typical
+				? (unsigned long long)c.summary.totalBytes - (unsigned long long)typical
+				: (unsigned long long)typical - (unsigned long long)c.summary.totalBytes;
+		};
+
+		std::vector<Candidate*> order;
+		for (Candidate& candidate : candidates)
+		{
+			if (candidate.sameAs < 0)
+			{
+				order.push_back(&candidate);
+			}
+		}
+		std::stable_sort(order.begin(), order.end(), [&](const Candidate* a, const Candidate* b)
+			{
+				if (tier(*a) != tier(*b)) return tier(*a) < tier(*b);
+				if (a->alive != b->alive) return a->alive > b->alive;
+				return distance(*a) < distance(*b);
+			});
+
+		std::vector<Candidate*> ranked;
+		for (Candidate* c : order)
+		{
+			ranked.push_back(c);
+			for (Candidate& copy : candidates)
+			{
+				if (copy.sameAs == (int)c->index)
+				{
+					ranked.push_back(&copy);
+				}
+			}
+		}
 
 		if (DonorHealth::Stopping() || HttpGet::Stopped())
 		{
@@ -40140,22 +40089,24 @@ public:
 			else
 			{
 				NzbParameterList parameters;
-				NzbgetRsBuf rankBuf = nzbget_rs_dqh_conn_format_port_str(entry.rank);
-				parameters.SetParameter(FleetParam, rankBuf.data ? rankBuf.data : "0");
-				nzbget_rs_free(rankBuf);
+				parameters.SetParameter(FleetParam, std::to_string(entry.rank).c_str());
 				if (candidate->alive >= 0)
 				{
-					NzbgetRsBuf aliveBuf = nzbget_rs_dqh_conn_format_port_str(
-						candidate->dead ? 0 : candidate->alive);
-					parameters.SetParameter(DupeSearch::AliveParam, aliveBuf.data ? aliveBuf.data : "0");
-					nzbget_rs_free(aliveBuf);
+					parameters.SetParameter(DupeSearch::AliveParam,
+						std::to_string(candidate->dead ? 0 : candidate->alive).c_str());
 				}
 				int nzbId = 0;
-				NzbgetRsBuf nameBuf = nzbget_rs_dqh_fleet_ensure_nzb_ext(member.name.data(), member.name.size());
-				std::string name(nameBuf.data ? nameBuf.data : "", nameBuf.len);
-				nzbget_rs_free(nameBuf);
-				int memberScore = nzbget_rs_dqh_fleet_calc_member_add_score(
-					runningId, lowest, top, entry.rank);
+				std::string name = member.name;
+				if (name.size() < 4 || strcasecmp(name.c_str() + name.size() - 4, ".nzb") != 0)
+				{
+					name += ".nzb";
+				}
+				long long baseScore = runningId != 0
+					? (long long)lowest
+					: std::min(top, (long long)std::numeric_limits<int>::max());
+				int memberScore = (int)std::clamp(baseScore - (long long)entry.rank,
+					(long long)std::numeric_limits<int>::min(),
+					(long long)std::numeric_limits<int>::max());
 				Scanner::EAddStatus status = g_Scanner->AddExternalFile(name.c_str(), request.category.c_str(),
 					false, request.priority, request.dupeKey.c_str(),
 					memberScore, dmScore, &parameters,
@@ -40213,18 +40164,14 @@ public:
 				[](const Candidate& c) { return c.error.empty(); });
 			bool anyUnknown = std::any_of(order.begin(), order.end(),
 				[&](const Candidate* c) { return c->error.empty() && c->alive < 0; });
-			int reasonCode = nzbget_rs_df_eval_fleet_outcome_reason(
-				anyUsable ? 1 : 0, anyAlive ? 1 : 0, anyUnknown ? 1 : 0, onDisk ? 1 : 0);
-			static const char* const kReasons[] = {
-				"NO_USABLE_MEMBERS", "INCOMPLETE", "ALL_DEAD", "ALREADY_DOWNLOADED", "NOT_QUEUED"
-			};
-			result.reason = kReasons[(reasonCode >= 0 && reasonCode < 5) ? reasonCode : 4];
+			result.reason = !anyUsable ? "NO_USABLE_MEMBERS" :
+				!anyAlive ? (anyUnknown ? "INCOMPLETE" : "ALL_DEAD") :
+				onDisk ? "ALREADY_DOWNLOADED" : "NOT_QUEUED";
 		}
-		NzbgetRsBuf sumBuf = nzbget_rs_dqh_fleet_format_summary_log(
+		info("Fleet of %i nzb-file(s) for %s: %s%s",
 			(int)request.members.size(), request.dupeKey.c_str(),
-			result.chosen, result.reason.c_str(), result.complete ? 1 : 0);
-		info("%s", sumBuf.data ? sumBuf.data : "");
-		nzbget_rs_free(sumBuf);
+			result.chosen ? ("queued #" + std::to_string(result.chosen)).c_str() : result.reason.c_str(),
+			result.complete ? "" : " (not every posting checked in time)");
 		return result;
 	}
 };
@@ -40876,9 +40823,11 @@ inline void QueueCoordinator::DeleteFileInfo(DownloadQueue* downloadQueue, FileI
 		nzbInfo->UpdateDeletedStats(fileInfo);
 	}
 
-	CompletedFile::EStatus fileStatus = (CompletedFile::EStatus)nzbget_rs_qhp_classify_completed_file_status(
-		fileInfo->GetTotalArticles(), fileInfo->GetSuccessArticles(),
-		fileInfo->GetMissedArticles(), fileInfo->GetFailedArticles());
+	CompletedFile::EStatus fileStatus =
+		fileInfo->GetTotalArticles() == fileInfo->GetSuccessArticles() ? CompletedFile::cfSuccess :
+		fileInfo->GetTotalArticles() == fileInfo->GetMissedArticles() + fileInfo->GetFailedArticles() ? CompletedFile::cfFailure :
+		fileInfo->GetSuccessArticles() > 0 || fileInfo->GetFailedArticles() > 0 ? CompletedFile::cfPartial :
+		CompletedFile::cfNone;
 
 	if (g_Options->GetServerMode())
 	{
@@ -40898,16 +40847,23 @@ inline void QueueCoordinator::DeleteFileInfo(DownloadQueue* downloadQueue, FileI
 	if (completed || parking)
 	{
 		const std::string& outputFilename = fileInfo->GetOutputFilename();
-		bool outputFileExists = (completed && fileStatus == CompletedFile::cfFailure && !Util::EmptyStr(fileInfo->GetFilename()))
-			? FileSystem::FileExists(outputFilename.c_str())
-			: true;
-		NzbgetRsBuf fnBuf = nzbget_rs_qhp_resolve_completed_filename(
-			completed ? 1 : 0, (int)fileStatus, outputFilename.c_str(),
-			fileInfo->GetFilename() ? fileInfo->GetFilename() : "",
-			fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR,
-			outputFileExists ? 1 : 0);
-		std::string filename(fnBuf.data ? fnBuf.data : "");
-		nzbget_rs_free(fnBuf);
+		std::string filename = completed && !outputFilename.empty()
+			? FileSystem::BaseFileName(outputFilename.c_str())
+			: (fileInfo->GetFilename() ? fileInfo->GetFilename() : "");
+		std::string destPrefix = std::string(fileInfo->GetNzbInfo()->GetDestDir()) + PATH_SEPARATOR;
+		if (completed && !outputFilename.empty() &&
+			outputFilename.size() > destPrefix.size() &&
+			outputFilename.compare(0, destPrefix.size(), destPrefix) == 0 &&
+			outputFilename.find(PATH_SEPARATOR, destPrefix.size()) != std::string::npos)
+		{
+			filename = outputFilename.substr(destPrefix.size());
+		}
+		if (completed && fileStatus == CompletedFile::cfFailure &&
+			!Util::EmptyStr(fileInfo->GetFilename()) &&
+			!FileSystem::FileExists(outputFilename.c_str()))
+		{
+			filename = fileInfo->GetFilename();
+		}
 
 		// the par2 blocks its failed articles spoil (CheckParDamage)
 		if (completed)
@@ -49044,16 +49000,11 @@ private:
 		}
 
 		bool useOffsetStr = (action == DownloadQueue::eaFileMoveOffset || action == DownloadQueue::eaGroupMoveOffset);
-		NzbgetRsBuf offBuf = useOffsetStr ? nzbget_rs_dqh_conn_format_port_str(offset) : NzbgetRsBuf{};
 		bool ok = DownloadQueue::Guard()->EditList(
 			nrIdEntries > 0 ? &cIdList : nullptr,
 			nrNameEntries > 0 ? &cNameList : nullptr,
 			(DownloadQueue::EMatchMode)matchMode, (DownloadQueue::EEditAction)action,
-			useOffsetStr ? (offBuf.data ? offBuf.data : "0") : text);
-		if (useOffsetStr)
-		{
-			nzbget_rs_free(offBuf);
-		}
+			useOffsetStr ? *BString<100>("%i", offset) : text);
 
 		if (ok)
 		{

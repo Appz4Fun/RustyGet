@@ -1116,11 +1116,6 @@ int nzbget_rs_qhp_calc_health(
 int nzbget_rs_qhp_calc_critical_health(
     int64_t size, int64_t par_size, int64_t par_current_failed_size, int allow_estimation);
 
-int nzbget_rs_qhp_classify_completed_file_status(
-    int total_articles, int success_articles, int missed_articles, int failed_articles);
-NzbgetRsBuf nzbget_rs_qhp_resolve_completed_filename(
-    int completed, int file_status, const char* output_filename, const char* file_filename,
-    const char* dest_dir, char path_sep, int output_file_exists);
 int nzbget_rs_qhp_article_cache_should_flush(
     size_t allocated, size_t effective_limit, int tier, int just_flushed, int reset_counter,
     int is_stopped, int direct_write, int* out_flush_everything, int* out_need_emergency_flush);
@@ -1224,10 +1219,6 @@ typedef struct NzbgetRsDupeSearchStateLine {
     int32_t retryable;
 } NzbgetRsDupeSearchStateLine;
 
-NzbgetRsBuf nzbget_rs_df_lower_key(const char* key);
-int nzbget_rs_df_saved_history_backup(
-    int has_pick, uint32_t pick_full_hash, int candidate_delete_status,
-    uint32_t candidate_full_hash, int ds_dupe, int ds_copy);
 int nzbget_rs_df_placement_available(
     int has_backup, int is_nzb_kind, int deleting, int delete_status,
     int ds_none, int ds_manual, int ds_dupe, int ds_copy,
@@ -1236,33 +1227,12 @@ int nzbget_rs_df_placement_available(
     int has_pick, uint32_t pick_full_hash, uint32_t backup_full_hash,
     int queued_file_exists, int health, int critical_health,
     int health_check_is_dupe, int has_marked_alive, int marked_alive_val);
-void nzbget_rs_df_sort_verified_postings(
-    const int64_t* total_bytes, const int* grabs, const int64_t* dates,
-    size_t count, int64_t pick_bytes, size_t* out_order);
-void nzbget_rs_df_eval_member_rerank(
-    int base, int wanted_score, int dead_score, int old_score, double alive, int all_dead,
-    int* out_score, int* out_percent, int* out_add_alive_zero);
-int nzbget_rs_df_eval_pick_gone(
-    int has_pick, int deleting, int delete_status, int ds_manual,
-    const char* pick_eff_key, const char* job_dupe_key,
-    const char* pick_norm_name, const char* job_norm_name);
-NzbgetRsBuf nzbget_rs_df_format_pending_meta(
-    const char* title, const char* indexer, int grabs, int64_t size, int64_t date);
 void nzbget_rs_df_parse_pending_meta(
     const char* meta, size_t len, NzbgetRsPendingMetaView* out_view);
 int nzbget_rs_df_parse_dupesearch_state_line(
     const char* line, size_t len, int64_t now, int64_t state_ttl_sec,
     NzbgetRsDupeSearchStateLine* out_line);
 
-void nzbget_rs_df_eval_fleet_member_health(
-    int checked, int result_complete, int present, int missing, int error,
-    int min_known, int min_alive_pct,
-    int* out_alive_pct, int* out_dead, int* out_member_complete);
-size_t nzbget_rs_df_rank_fleet_candidates(
-    const uint8_t* has_error, const int* same_as, const uint8_t* dead,
-    const int* alive, const int64_t* total_bytes, size_t count, size_t* out_ranked);
-int nzbget_rs_df_eval_fleet_outcome_reason(
-    int any_usable, int any_alive, int any_unknown, int on_disk);
 
 NzbgetRsBuf nzbget_rs_df_build_newznab_url(
     const char* base, const char* const* param_keys, const char* const* param_vals,
@@ -1382,8 +1352,6 @@ void nzbget_rs_nserv_parse_args(
         int param_error),
     void (*push_opt_cb)(void* ctx, const char* opt));
 
-int nzbget_rs_snh_nntp_health_cap_for(int connections, int max_cap);
-int nzbget_rs_snh_nntp_health_classify_stat_reply(const char* line);
 
 int nzbget_rs_network_speed_test_run(
     void* ctx,
@@ -1442,13 +1410,6 @@ void nzbget_rs_awc_article_writer_execute_cleanup_old_data(
     NzbgetRsBuf* out_deleted_old_dest_dir, int* out_has_deleted_old_dest_dir,
     int* out_clear_output_filename);
 
-int nzbget_rs_dupesearch_classify_search_retry_reason(
-    int queries, int failed, int verified_empty, int fetched_empty,
-    int refused, int fetch_err, int not_tried);
-size_t nzbget_rs_dupesearch_calc_fast_donor_count(
-    int dupe_fast_donors, size_t live_count, int cap);
-int nzbget_rs_dupesearch_alive_to_percent(double alive);
-int nzbget_rs_dupesearch_fast_donor_alive_param(int is_dead, double alive);
 
 int nzbget_rs_dsp_validate_dupe_extras_header(
     int scan_cnt, int recovered_articles, int recovered_holes);
@@ -1518,45 +1479,8 @@ int nzbget_rs_dsp_feed_status_matches(
     const char* feed_filter, const char* filter,
     uint32_t feed_filter_hash, uint32_t filter_hash);
 
-int nzbget_rs_dupesearch_slot_counts_as_used(
-    int is_member, int is_valid, int score, int dead_score,
-    int id, int dry_run, int placement_available);
-int nzbget_rs_dupesearch_is_usable_whole_backup(
-    int is_valid, int score, int dead_score, double alive,
-    int id, int dry_run, int placement_available);
-int nzbget_rs_dupesearch_eval_post_place_retry(
-    int rank_only, int state_retryable, int usable_backup,
-    size_t unchecked_members_len, int* out_retry_discovery,
-    int* out_rank_incomplete);
-int nzbget_rs_dupesearch_needs_nzb_ext(
-    const char* name_ptr, size_t name_len);
-void nzbget_rs_dupesearch_classify_pending_phase(
-    const char* phase_ptr, size_t phase_len,
-    int* out_fetched, int* out_ranking);
 
-int nzbget_rs_dqh_fleet_clamp_timeout_sec(
-    int timeout_sec, int max_timeout_sec);
-void nzbget_rs_dqh_fleet_update_key_score_bounds(
-    int64_t cur_top, int cur_lowest, int any_seen, int queued,
-    int deleting, int delete_status, int ds_none_val,
-    int cur_running_id, int cur_running_score, int item_id, int item_score,
-    int64_t* out_top, int* out_lowest, int* out_running_id,
-    int* out_running_score);
-int nzbget_rs_dqh_fleet_is_already_downloaded_history_item(
-    int has_item, int delete_status, int ds_none_val, int is_dupe_success,
-    int mark_status, int ks_bad_val);
-int nzbget_rs_dqh_fleet_calc_member_add_score(
-    int running_id, int lowest, int64_t top, int rank);
 
-int nzbget_rs_dupesearch_is_rank_only_queued_member(
-    int rank_only, int is_self, int kind, int nk_nzb_val, int dupe_mode,
-    int dm_score_val, int has_post_info, int delete_status, int ds_none_val,
-    int ds_dupe_val, int item_score, int pick_score);
-int nzbget_rs_dupesearch_calc_expand_budget_ms(
-    int budget_sec, int64_t deadline, int64_t now);
-int nzbget_rs_nntp_health_classify_body_fetch_result(
-    int success, int transient, int ans_present, int ans_body_bad,
-    int* out_throw_error);
 void nzbget_rs_dupesearch_fnv1a_fingerprint(
     const char* const* ids, const size_t* id_lens, size_t id_count,
     char* out_hex16);
@@ -2216,10 +2140,6 @@ void nzbget_rs_twin_visit_nzb_entries(
     void (*on_segment)(void* ctx, int64_t bytes, const char* id_ptr, size_t id_len));
 NzbgetRsBuf nzbget_rs_twin_format_kind_message(
     const char* nzb_name, const char* primary_name, const char* kind, int32_t by_par2);
-NzbgetRsBuf nzbget_rs_dqh_fleet_ensure_nzb_ext(const char* name_ptr, size_t name_len);
-void nzbget_rs_dqh_fleet_visit_pipe_names(
-    const char* names_ptr, size_t names_len, void* ctx,
-    void (*visit)(void* ctx, const char* part_ptr, size_t part_len));
 
 NzbgetRsBuf nzbget_rs_stream_build_donor_key(
     const char* password,
@@ -2242,56 +2162,8 @@ int32_t nzbget_rs_twin_compare_par2_data(
     const char* own_print_ptr,
     const uint8_t* twin_data_ptr,
     size_t twin_data_len);
-NzbgetRsBuf nzbget_rs_dqh_fleet_format_fetch_error(int32_t status);
-void nzbget_rs_dqh_fleet_calc_check_budget_and_deadline(
-    int32_t opt_max, int32_t fleet_sample_max, int64_t deadline_ms,
-    int64_t check_start_ms, int64_t finish_reserve_ms,
-    int32_t* out_sample_max, int32_t* out_budget_ms,
-    int64_t* out_check_deadline_ms);
-int32_t nzbget_rs_dqh_fleet_candidate_tier(
-    int32_t has_error, int32_t dead, int32_t alive);
-NzbgetRsBuf nzbget_rs_dqh_fleet_format_summary_log(
-    int32_t members_count, const char* dupe_key, int32_t chosen,
-    const char* reason, int32_t complete);
-int32_t nzbget_rs_dqh_dupesearch_is_generated_key(
-    int32_t dupe_key_empty, int32_t has_owner, const char* owner_value,
-    int32_t nzb_id, const char* key);
-int32_t nzbget_rs_dqh_dupesearch_should_check_added_for_parent_rank(
-    int32_t action, int32_t ea_nzb_added, int32_t is_donor,
-    int32_t dupe_mode, int32_t dm_score, int32_t has_dupe_fleet_param);
-int32_t nzbget_rs_dqh_dupesearch_is_better_parent_candidate(
-    int32_t is_same_item, int32_t kind, int32_t nk_nzb, int32_t deleting,
-    int32_t delete_status, int32_t ds_none, int32_t has_post_info,
-    int32_t same_lower_key, int32_t item_score, int32_t added_score,
-    int32_t has_parent, int32_t parent_score);
-int32_t nzbget_rs_dqh_dupesearch_should_retain_peer(
-    int32_t is_same_item, int32_t item_score, int32_t pick_score,
-    int32_t has_dupe_fleet_param);
-NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_rejected_outcome(
-    const char* const* keys_ptr, const int32_t* counts_ptr, size_t len);
-int32_t nzbget_rs_dqh_dupesearch_parse_pending_dir_id(const char* name);
-int32_t nzbget_rs_dqh_dupesearch_pending_identity_matches(
-    int32_t has_pick_title_file,
-    const uint8_t* saved_title_ptr, size_t saved_title_len,
-    const uint8_t* cur_norm_title_ptr, size_t cur_norm_title_len,
-    const uint8_t* saved_key_ptr, size_t saved_key_len,
-    const uint8_t* cur_lower_key_ptr, size_t cur_lower_key_len,
-    const uint8_t* saved_posting_ptr, size_t saved_posting_len,
-    const uint8_t* cur_fingerprint_ptr, size_t cur_fingerprint_len);
-int32_t nzbget_rs_tpr_split_param_assignment(
-    const char* text, size_t* out_name_len, size_t* out_value_offset);
-NzbgetRsBuf nzbget_rs_dqh_conn_format_port_str(int32_t port);
 NzbgetRsBuf nzbget_rs_tpr_article_writer_format_dest_file_path(
     const char* dest_dir, char sep, const char* filename);
-NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_key_val_param(
-    const char* param_name, int32_t val);
-NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_pending_dir(
-    const char* queue_dir, char sep, int32_t nzb_id);
-NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_indexed_base_path(
-    const char* dir, char sep, size_t idx);
-NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_usize_str(size_t idx);
-int64_t nzbget_rs_dqh_fleet_calc_check_lock_wait_ms(
-    int64_t deadline_ms, int64_t now_ms, int64_t finish_reserve_ms);
 NzbgetRsBuf nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
     int32_t first_idx, const int64_t* values, size_t count);
 NzbgetRsBuf nzbget_rs_dqh_fs_extract_parent_dir_path(const char* filename, char sep);
@@ -2345,14 +2217,9 @@ char* nzbget_rs_dqh_tokenizer_next(
 uint32_t nzbget_rs_dqh_article_writer_step_file_crc(
     int first_article, uint32_t current_crc, uint32_t article_crc,
     int segment_size, int* out_first_article);
-const char* nzbget_rs_dqh_dupesearch_prepare_status_suffix(int rank_only, int history);
 void nzbget_rs_dqh_dupesearch_visit_expand_queries(
     const char* name, size_t name_len, void* ctx,
     void (*cb)(void* ctx, const char* q_ptr, size_t q_len));
-NzbgetRsBuf nzbget_rs_dqh_nntp_health_format_bracketed_id(
-    const char* message_id, size_t len);
-NzbgetRsBuf nzbget_rs_dqh_nntp_health_format_stat_batch(
-    const char* const* ids, const size_t* lens, size_t count);
 
 typedef struct NzbgetRsParDamageQueuedFile {
     const char* filename;

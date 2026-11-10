@@ -1034,6 +1034,263 @@ pub fn article_writer_process_articles(
     (crc, commit_error, failed_delta)
 }
 
+/// Cached article descriptor for `article_writer_flush_cache`.
+#[derive(Debug, Clone, Copy)]
+pub struct ArticleWriterFlushItem<'a> {
+    pub segment_offset: i64,
+    pub segment_size: i32,
+    pub segment_content: &'a [u8],
+    pub result_filename: Option<&'a [u8]>,
+}
+
+/// `ArticleWriter::FlushCache` (`daemon/nntp/ArticleWriter.cpp`):
+/// Flushes cached articles to disk (either seeking/writing into `output_filename` when
+/// `direct_write` is true, or writing `<result_filename>.tmp` and moving it to `result_filename`
+/// when `direct_write` is false) or discards them when `skip_disk_write` is true.
+/// Returns `(flushed_articles, flushed_size)`.
+pub fn article_writer_flush_cache(
+    items: &[ArticleWriterFlushItem<'_>],
+    direct_write: bool,
+    skip_disk_write: bool,
+    output_filename: &[u8],
+    mut should_stop_fn: impl FnMut() -> bool,
+    mut discard_fn: impl FnMut(usize),
+    mut log_err_fn: impl FnMut(&[u8]),
+) -> (i32, i64) {
+    let mut flushed_articles: i32 = 0;
+    let mut flushed_size: i64 = 0;
+    let mut direct_file: Option<std::fs::File> = None;
+
+    for (idx, item) in items.iter().enumerate() {
+        if should_stop_fn() {
+            break;
+        }
+
+        if !skip_disk_write {
+            if direct_write {
+                if direct_file.is_none() {
+                    match std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(crate::fsops::path(c_bytes(output_filename)))
+                    {
+                        Ok(f) => direct_file = Some(f),
+                        Err(e) => {
+                            let err_msg = crate::fsops::error_message(e.raw_os_error().unwrap_or(0));
+                            let msg = join_c_slices(&[
+                                b"Could not open file ",
+                                output_filename,
+                                b": ",
+                                &err_msg,
+                            ]);
+                            log_err_fn(&msg);
+                            discard_fn(idx);
+                            flushed_articles += 1;
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(f) = direct_file.as_mut() {
+                    if let Ok(pos) = u64::try_from(item.segment_offset) {
+                        let _ = std::io::Seek::seek(f, std::io::SeekFrom::Start(pos));
+                    }
+                    let len = (item.segment_size.max(0) as usize).min(item.segment_content.len());
+                    let _ = std::io::Write::write_all(f, &item.segment_content[..len]);
+                }
+
+                flushed_size += item.segment_size as i64;
+                flushed_articles += 1;
+                discard_fn(idx);
+            } else {
+                let dest_file = join_c_slices(&[item.result_filename.unwrap_or(b""), b".tmp"]);
+                let mut f = match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(crate::fsops::path(&dest_file))
+                {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let err_msg = crate::fsops::error_message(e.raw_os_error().unwrap_or(0));
+                        let msg = join_c_slices(&[
+                            b"Could not create file ",
+                            &dest_file,
+                            b": ",
+                            &err_msg,
+                        ]);
+                        log_err_fn(&msg);
+                        discard_fn(idx);
+                        flushed_articles += 1;
+                        break;
+                    }
+                };
+
+                let len = (item.segment_size.max(0) as usize).min(item.segment_content.len());
+                let _ = std::io::Write::write_all(&mut f, &item.segment_content[..len]);
+                drop(f);
+
+                flushed_size += item.segment_size as i64;
+                flushed_articles += 1;
+                discard_fn(idx);
+
+                let moved = match (
+                    std::ffi::CString::new(dest_file.as_slice()),
+                    item.result_filename
+                        .and_then(|rf| std::ffi::CString::new(c_bytes(rf)).ok()),
+                ) {
+                    (Ok(c_src), Some(c_dst)) => crate::fsops::move_file(&c_src, &c_dst),
+                    _ => false,
+                };
+                if !moved {
+                    let err_msg = crate::fsops::error_message(crate::fsops::last_errno());
+                    let msg = join_c_slices(&[
+                        b"Could not rename file ",
+                        &dest_file,
+                        b" to ",
+                        item.result_filename.unwrap_or(b"(null)"),
+                        b": ",
+                        &err_msg,
+                    ]);
+                    log_err_fn(&msg);
+                }
+            }
+        } else {
+            flushed_size += item.segment_size as i64;
+            flushed_articles += 1;
+            discard_fn(idx);
+        }
+    }
+
+    (flushed_articles, flushed_size)
+}
+
+/// `ArticleWriter::HandlePostProcessing` (`daemon/nntp/ArticleWriter.cpp`):
+/// Handles post-completion file rename (when `original_filename != current_filename`) and hardlink
+/// deletion (when `is_hard_linked && inter_dir_empty`).
+/// Returns `(updated_output_filename, clear_output_filename_and_return)`.
+pub fn article_writer_post_process_rename_and_hardlink(
+    original_filename: &[u8],
+    current_filename: &[u8],
+    nzb_dest_dir: &[u8],
+    file_output_filename: &[u8],
+    writer_output_filename: &[u8],
+    is_hard_linked: bool,
+    inter_dir_empty: bool,
+    mut log_err_fn: impl FnMut(&[u8]),
+) -> (Option<Vec<u8>>, bool) {
+    let mut updated_output_filename = None;
+    if c_bytes(original_filename) != c_bytes(current_filename) {
+        let c_dir = std::ffi::CString::new(c_bytes(nzb_dest_dir)).unwrap_or_default();
+        let c_fn = std::ffi::CString::new(c_bytes(current_filename)).unwrap_or_default();
+        let new_ofn = crate::fsops::make_unique_filename(&c_dir, &c_fn, &crate::fsops::posix_stat);
+        let moved = match (
+            std::ffi::CString::new(c_bytes(file_output_filename)),
+            std::ffi::CString::new(c_bytes(&new_ofn)),
+        ) {
+            (Ok(c_src), Ok(c_dst)) => crate::fsops::move_file(&c_src, &c_dst),
+            _ => false,
+        };
+        if !moved {
+            let err_msg = crate::fsops::error_message(crate::fsops::last_errno());
+            let msg = join_c_slices(&[
+                b"Could not rename file ",
+                file_output_filename,
+                b" to ",
+                &new_ofn,
+                b": ",
+                &err_msg,
+            ]);
+            log_err_fn(&msg);
+        }
+        updated_output_filename = Some(new_ofn);
+    }
+
+    if is_hard_linked && inter_dir_empty {
+        let deleted = std::ffi::CString::new(c_bytes(writer_output_filename))
+            .is_ok_and(|c| crate::fsops::delete_file(&c));
+        if deleted {
+            return (updated_output_filename, true);
+        } else {
+            log_err_fn(b"Cannot remove hardlink");
+        }
+    }
+
+    (updated_output_filename, false)
+}
+
+/// `ArticleWriter::Finish` (`daemon/nntp/ArticleWriter.cpp`):
+/// Performs disk cleanup/rename actions when finishing an article download.
+#[allow(clippy::too_many_arguments)]
+pub fn article_writer_finish_disk_ops(
+    success: bool,
+    skip_disk_write: bool,
+    raw_article: bool,
+    direct_write: bool,
+    has_cached_data: bool,
+    temp_filename: &[u8],
+    result_filename: &[u8],
+    mut log_err_fn: impl FnMut(&[u8]),
+) {
+    if !success {
+        if !skip_disk_write {
+            if let Ok(c_tmp) = std::ffi::CString::new(c_bytes(temp_filename)) {
+                crate::fsops::delete_file(&c_tmp);
+            }
+            if let Ok(c_res) = std::ffi::CString::new(c_bytes(result_filename)) {
+                crate::fsops::delete_file(&c_res);
+            }
+        }
+        return;
+    }
+
+    if !raw_article {
+        if !direct_write && !has_cached_data && !skip_disk_write {
+            let c_tmp_opt = std::ffi::CString::new(c_bytes(temp_filename)).ok();
+            let c_res_opt = std::ffi::CString::new(c_bytes(result_filename)).ok();
+            let moved = match (c_tmp_opt.as_ref(), c_res_opt.as_ref()) {
+                (Some(c_src), Some(c_dst)) => crate::fsops::move_file(c_src, c_dst),
+                _ => false,
+            };
+            if !moved {
+                let err_msg = crate::fsops::error_message(crate::fsops::last_errno());
+                let msg = join_c_slices(&[
+                    b"Could not rename file ",
+                    temp_filename,
+                    b" to ",
+                    result_filename,
+                    b": ",
+                    &err_msg,
+                ]);
+                log_err_fn(&msg);
+            }
+            if let Some(c_tmp) = c_tmp_opt {
+                crate::fsops::delete_file(&c_tmp);
+            }
+        }
+    } else if !skip_disk_write {
+        let moved = match (
+            std::ffi::CString::new(c_bytes(temp_filename)),
+            std::ffi::CString::new(c_bytes(result_filename)),
+        ) {
+            (Ok(c_src), Ok(c_dst)) => crate::fsops::move_file(&c_src, &c_dst),
+            _ => false,
+        };
+        if !moved {
+            let err_msg = crate::fsops::error_message(crate::fsops::last_errno());
+            let msg = join_c_slices(&[
+                b"Could not move file ",
+                temp_filename,
+                b" to ",
+                result_filename,
+                b": ",
+                &err_msg,
+            ]);
+            log_err_fn(&msg);
+        }
+    }
+}
+
 /// `ArticleWriter::SetWriteBuffer` (`ArticleWriter.cpp`).
 pub fn calc_write_buffer_size(write_buffer_kb: i32, rec_size: i32) -> i32 {
     if write_buffer_kb <= 0 {
@@ -1573,6 +1830,75 @@ mod tests {
         assert_ne!(crc, 0);
         assert_eq!(written, b"abcdefgh");
         assert_eq!(discarded, vec![0, 1]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flush_cache_post_process_and_finish_disk_ops_work() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbget_awc_batch218_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let part1 = dir.join("1.001");
+        let part1_bytes = part1.to_string_lossy().as_bytes().to_vec();
+        let mut discarded = Vec::new();
+        let mut errs = Vec::new();
+        let flush_items = [ArticleWriterFlushItem {
+            segment_offset: 0,
+            segment_size: 5,
+            segment_content: b"hello",
+            result_filename: Some(&part1_bytes),
+        }];
+        let (flushed_cnt, flushed_sz) = article_writer_flush_cache(
+            &flush_items,
+            false,
+            false,
+            b"",
+            || false,
+            |idx| discarded.push(idx),
+            |e| errs.push(e.to_vec()),
+        );
+        assert_eq!(flushed_cnt, 1);
+        assert_eq!(flushed_sz, 5);
+        assert_eq!(discarded, vec![0]);
+        assert!(errs.is_empty());
+        assert_eq!(std::fs::read(&part1).unwrap(), b"hello");
+
+        let tmp_part = dir.join("2.001.tmp");
+        let res_part = dir.join("2.001");
+        std::fs::write(&tmp_part, b"world").unwrap();
+        article_writer_finish_disk_ops(
+            true,
+            false,
+            false,
+            false,
+            false,
+            tmp_part.to_string_lossy().as_bytes(),
+            res_part.to_string_lossy().as_bytes(),
+            |e| errs.push(e.to_vec()),
+        );
+        assert!(errs.is_empty());
+        assert!(!tmp_part.exists());
+        assert_eq!(std::fs::read(&res_part).unwrap(), b"world");
+
+        let (updated_ofn, clear_and_ret) = article_writer_post_process_rename_and_hardlink(
+            b"orig.bin",
+            b"renamed.bin",
+            dir.to_string_lossy().as_bytes(),
+            res_part.to_string_lossy().as_bytes(),
+            res_part.to_string_lossy().as_bytes(),
+            false,
+            true,
+            |e| errs.push(e.to_vec()),
+        );
+        assert!(errs.is_empty());
+        assert!(!clear_and_ret);
+        assert!(updated_ofn.is_some());
+        assert_eq!(std::fs::read(dir.join("renamed.bin")).unwrap(), b"world");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

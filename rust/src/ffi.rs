@@ -7532,6 +7532,198 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_create_output_file(
     }
 }
 
+#[repr(C)]
+pub struct NzbgetRsFlushArticleItem {
+    pub segment_offset: i64,
+    pub segment_size: i32,
+    pub segment_content: *const u8,
+    pub result_filename: *const c_char,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_flush_cache(
+    items: *const NzbgetRsFlushArticleItem,
+    items_len: usize,
+    direct_write: c_int,
+    skip_disk_write: c_int,
+    output_filename: *const c_char,
+    output_filename_len: usize,
+    ctx: *mut std::ffi::c_void,
+    cb: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            op: c_int,
+            idx: usize,
+            msg: *const c_char,
+        ) -> c_int,
+    >,
+    out_flushed_articles: *mut c_int,
+    out_flushed_size: *mut i64,
+) {
+    let out_fn = if output_filename.is_null() || output_filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(output_filename.cast::<u8>(), output_filename_len)
+    };
+    let mut rs_items = Vec::with_capacity(items_len);
+    if !items.is_null() && items_len > 0 {
+        for raw in std::slice::from_raw_parts(items, items_len) {
+            let content = if raw.segment_content.is_null() {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(raw.segment_content, raw.segment_size.max(0) as usize)
+            };
+            let rf = if raw.result_filename.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(raw.result_filename).to_bytes())
+            };
+            rs_items.push(crate::artwritercore::ArticleWriterFlushItem {
+                segment_offset: raw.segment_offset,
+                segment_size: raw.segment_size,
+                segment_content: content,
+                result_filename: rf,
+            });
+        }
+    }
+    let (flushed_articles, flushed_size) = crate::artwritercore::article_writer_flush_cache(
+        &rs_items,
+        direct_write != 0,
+        skip_disk_write != 0,
+        out_fn,
+        || cb.is_some_and(|f| f(ctx, 0, 0, std::ptr::null()) != 0),
+        |idx| {
+            if let Some(f) = cb {
+                let _ = f(ctx, 1, idx, std::ptr::null());
+            }
+        },
+        |msg| {
+            if let Some(f) = cb {
+                let c_msg = nul(msg);
+                let _ = f(ctx, 2, 0, c_msg.as_ptr().cast());
+            }
+        },
+    );
+    if !out_flushed_articles.is_null() {
+        *out_flushed_articles = flushed_articles;
+    }
+    if !out_flushed_size.is_null() {
+        *out_flushed_size = flushed_size;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_post_process_rename_and_hardlink(
+    original_filename: *const c_char,
+    original_filename_len: usize,
+    current_filename: *const c_char,
+    nzb_dest_dir: *const c_char,
+    nzb_dest_dir_len: usize,
+    file_output_filename: *const c_char,
+    file_output_filename_len: usize,
+    writer_output_filename: *const c_char,
+    writer_output_filename_len: usize,
+    is_hard_linked: c_int,
+    inter_dir_empty: c_int,
+    ctx: *mut std::ffi::c_void,
+    log_err_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, msg: *const c_char)>,
+    out_updated_output_filename: *mut RsBuf,
+    out_has_updated_output_filename: *mut c_int,
+) -> c_int {
+    let orig_fn = if original_filename.is_null() || original_filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(original_filename.cast::<u8>(), original_filename_len)
+    };
+    let cur_fn = if current_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(current_filename).to_bytes()
+    };
+    let dest_dir = if nzb_dest_dir.is_null() || nzb_dest_dir_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(nzb_dest_dir.cast::<u8>(), nzb_dest_dir_len)
+    };
+    let file_ofn = if file_output_filename.is_null() || file_output_filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(file_output_filename.cast::<u8>(), file_output_filename_len)
+    };
+    let writer_ofn = if writer_output_filename.is_null() || writer_output_filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(
+            writer_output_filename.cast::<u8>(),
+            writer_output_filename_len,
+        )
+    };
+    let (updated_ofn, clear_and_return) =
+        crate::artwritercore::article_writer_post_process_rename_and_hardlink(
+            orig_fn,
+            cur_fn,
+            dest_dir,
+            file_ofn,
+            writer_ofn,
+            is_hard_linked != 0,
+            inter_dir_empty != 0,
+            |msg| {
+                if let Some(f) = log_err_cb {
+                    let c_msg = nul(msg);
+                    f(ctx, c_msg.as_ptr().cast());
+                }
+            },
+        );
+    if !out_has_updated_output_filename.is_null() {
+        *out_has_updated_output_filename = c_int::from(updated_ofn.is_some());
+    }
+    if !out_updated_output_filename.is_null() {
+        *out_updated_output_filename = into_buf(updated_ofn.unwrap_or_default());
+    }
+    c_int::from(clear_and_return)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_finish_disk_ops(
+    success: c_int,
+    skip_disk_write: c_int,
+    raw_article: c_int,
+    direct_write: c_int,
+    has_cached_data: c_int,
+    temp_filename: *const c_char,
+    temp_filename_len: usize,
+    result_filename: *const c_char,
+    result_filename_len: usize,
+    ctx: *mut std::ffi::c_void,
+    log_err_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, msg: *const c_char)>,
+) {
+    let tmp_fn = if temp_filename.is_null() || temp_filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(temp_filename.cast::<u8>(), temp_filename_len)
+    };
+    let res_fn = if result_filename.is_null() || result_filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(result_filename.cast::<u8>(), result_filename_len)
+    };
+    crate::artwritercore::article_writer_finish_disk_ops(
+        success != 0,
+        skip_disk_write != 0,
+        raw_article != 0,
+        direct_write != 0,
+        has_cached_data != 0,
+        tmp_fn,
+        res_fn,
+        |msg| {
+            if let Some(f) = log_err_cb {
+                let c_msg = nul(msg);
+                f(ctx, c_msg.as_ptr().cast());
+            }
+        },
+    );
+}
+
 
 // ============================================================================
 // QueueCoordinator & Options consolidated FFI exports

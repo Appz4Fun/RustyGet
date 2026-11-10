@@ -12819,60 +12819,40 @@ public:
 	{
 		m_outFile.Close();
 
-		if (!success)
+		bool rawArticle = g_Options->GetRawArticle();
+		bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
+			m_format == Decoder::efYenc && !IsDupeFallbackArticle();
+		bool hasCached = m_articleData.GetData() != nullptr;
+
+		nzbget_rs_awc_article_writer_finish_disk_ops(
+			success ? 1 : 0, GetSkipDiskWrite() ? 1 : 0, rawArticle ? 1 : 0,
+			directWrite ? 1 : 0, hasCached ? 1 : 0,
+			m_tempFilename.data(), m_tempFilename.size(),
+			m_resultFilename.data(), m_resultFilename.size(),
+			m_fileInfo->GetNzbInfo(),
+			+[](void* ctx, const char* msg) {
+				static_cast<NzbInfo*>(ctx)->PrintMessage(Message::mkError, "%s", msg);
+			});
+
+		if (!success || rawArticle)
 		{
-			if (!GetSkipDiskWrite())
-			{
-				FileSystem::DeleteFile(m_tempFilename.c_str());
-				FileSystem::DeleteFile(m_resultFilename.c_str());
-			}
 			return;
 		}
 
-		bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
-			m_format == Decoder::efYenc && !IsDupeFallbackArticle();
-
-		if (!g_Options->GetRawArticle())
+		if (hasCached)
 		{
-			if (!directWrite && !m_articleData.GetData() && !GetSkipDiskWrite())
+			if (m_articleSize != m_articlePtr)
 			{
-				if (!FileSystem::MoveFile(m_tempFilename.c_str(), m_resultFilename.c_str()))
-				{
-					m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-						"Could not rename file %s to %s: %s", m_tempFilename.c_str(), m_resultFilename.c_str(),
-						*FileSystem::GetLastErrorMessage());
-				}
-				FileSystem::DeleteFile(m_tempFilename.c_str());
+				g_ArticleCache->Realloc(&m_articleData, m_articlePtr);
 			}
-
-			if (m_articleData.GetData())
-			{
-				if (m_articleSize != m_articlePtr)
-				{
-					g_ArticleCache->Realloc(&m_articleData, m_articlePtr);
-				}
-				Guard contentGuard = g_ArticleCache->GuardContent();
-				m_articleInfo->AttachSegment(std::make_unique<CachedSegmentData>(std::move(m_articleData)), m_articleOffset, m_articlePtr);
-				m_fileInfo->SetCachedArticles(m_fileInfo->GetCachedArticles() + 1);
-			}
-			else
-			{
-				m_articleInfo->SetSegmentOffset(m_articleOffset);
-				m_articleInfo->SetSegmentSize(m_articlePtr);
-			}
+			Guard contentGuard = g_ArticleCache->GuardContent();
+			m_articleInfo->AttachSegment(std::make_unique<CachedSegmentData>(std::move(m_articleData)), m_articleOffset, m_articlePtr);
+			m_fileInfo->SetCachedArticles(m_fileInfo->GetCachedArticles() + 1);
 		}
 		else
 		{
-			// rawmode
-			if (!GetSkipDiskWrite())
-			{
-				if (!FileSystem::MoveFile(m_tempFilename.c_str(), m_resultFilename.c_str()))
-				{
-					m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-						"Could not move file %s to %s: %s", m_tempFilename.c_str(), m_resultFilename.c_str(),
-						*FileSystem::GetLastErrorMessage());
-				}
-			}
+			m_articleInfo->SetSegmentOffset(m_articleOffset);
+			m_articleInfo->SetSegmentSize(m_articlePtr);
 		}
 	}
 
@@ -13217,33 +13197,33 @@ public:
 		m_fileInfo->SetCrc(crc);
 		m_fileInfo->SetOutputFilename(currentPath.data());
 
-		// 1. Rename if file was renamed during completion
-		if (originalFilename != m_fileInfo->GetFilename())
+		const std::string& curOutFn = m_fileInfo->GetOutputFilename();
+		NzbgetRsBuf updatedOfnBuf{};
+		int hasUpdatedOfn = 0;
+		int clearAndReturn = nzbget_rs_awc_article_writer_post_process_rename_and_hardlink(
+			originalFilename.data(), originalFilename.size(),
+			m_fileInfo->GetFilename(),
+			nzbDestDir.data(), nzbDestDir.size(),
+			curOutFn.data(), curOutFn.size(),
+			m_outputFilename.data(), m_outputFilename.size(),
+			m_fileInfo->IsHardLinked() ? 1 : 0,
+			Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0,
+			m_fileInfo->GetNzbInfo(),
+			+[](void* ctx, const char* msg) {
+				static_cast<NzbInfo*>(ctx)->PrintMessage(Message::mkError, "%s", msg);
+			},
+			&updatedOfnBuf, &hasUpdatedOfn);
+		if (hasUpdatedOfn)
 		{
-			CString newOfn = FileSystem::MakeUniqueFilename(nzbDestDir.data(), m_fileInfo->GetFilename());
-			if (!FileSystem::MoveFile(m_fileInfo->GetOutputFilename().c_str(), *newOfn))
-			{
-				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not rename file %s to %s: %s",
-					m_fileInfo->GetOutputFilename().c_str(), *newOfn, *FileSystem::GetLastErrorMessage());
-			}
-			m_fileInfo->SetOutputFilename(newOfn);
+			m_fileInfo->SetOutputFilename(std::string(updatedOfnBuf.data ? updatedOfnBuf.data : "", updatedOfnBuf.len));
+		}
+		nzbget_rs_free(updatedOfnBuf);
+		if (clearAndReturn)
+		{
+			m_fileInfo->SetOutputFilename(nullptr);
+			return;
 		}
 
-		// 2. Handle Hardlinks
-		if (m_fileInfo->IsHardLinked() && Util::EmptyStr(g_Options->GetInterDir()))
-		{
-			if (FileSystem::DeleteFile(m_outputFilename.c_str()))
-			{
-				m_fileInfo->SetOutputFilename(nullptr);
-				return;
-			}
-			else
-			{
-				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Cannot remove hardlink");
-			}
-		}
-
-		// 3. Move Completed Files (if destination changed)
 		if (nzbDestDir != m_fileInfo->GetNzbInfo()->GetDestDir())
 		{
 			MoveCompletedFiles(m_fileInfo->GetNzbInfo(), nzbDestDir.data());
@@ -13259,8 +13239,6 @@ public:
 		// were never written to the file although marked done
 		bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
 			m_fileInfo->GetOutputInitialized();
-		DiskFile outfile;
-		bool needBufFile = false;
 		int flushedArticles = 0;
 		int64 flushedSize = 0;
 
@@ -13268,6 +13246,7 @@ public:
 			ArticleCache::FlushGuard flushGuard = g_ArticleCache->GuardFlush();
 
 			std::vector<ArticleInfo*> cachedArticles;
+			std::vector<NzbgetRsFlushArticleItem> items;
 
 			{
 				Guard contentGuard = g_ArticleCache->GuardContent();
@@ -13280,98 +13259,37 @@ public:
 				m_fileInfo->SetFlushLocked(true);
 
 				cachedArticles.reserve(m_fileInfo->GetArticles()->size());
+				items.reserve(m_fileInfo->GetArticles()->size());
 				for (ArticleInfo* pa : m_fileInfo->GetArticles())
 				{
 					if (pa->GetSegmentContent())
 					{
 						cachedArticles.push_back(pa);
+						items.push_back(NzbgetRsFlushArticleItem{
+							pa->GetSegmentOffset(),
+							pa->GetSegmentSize(),
+							reinterpret_cast<const uint8_t*>(pa->GetSegmentContent()),
+							pa->GetResultFilename()
+						});
 					}
 				}
 			}
 
-			for (ArticleInfo* pa : cachedArticles)
-			{
-				if (m_fileInfo->GetDeleted() && !m_fileInfo->GetNzbInfo()->GetParking())
-				{
-					// the file was deleted during flushing: stop flushing immediately
-					break;
-				}
-
-				if (!GetSkipDiskWrite())
-				{
-					if (directWrite && !outfile.Active())
-					{
-						const std::string& outputFilename = m_fileInfo->GetOutputFilename();
-						if (!outfile.Open(outputFilename.c_str(), DiskFile::omReadWrite))
-						{
-							m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-								"Could not open file %s: %s", outputFilename.c_str(),
-								*FileSystem::GetLastErrorMessage());
-							// prevent multiple error messages
-							pa->DiscardSegment();
-							flushedArticles++;
-							break;
-						}
-						needBufFile = true;
-					}
-
-					CString destFile;
-
-					if (!directWrite)
-					{
-						destFile.Format("%s.tmp", pa->GetResultFilename() ? pa->GetResultFilename() : "");
-						if (!outfile.Open(destFile, DiskFile::omWrite))
-						{
-							m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-								"Could not create file %s: %s", *destFile,
-								*FileSystem::GetLastErrorMessage());
-							// prevent multiple error messages
-							pa->DiscardSegment();
-							flushedArticles++;
-							break;
-						}
-						needBufFile = true;
-					}
-
-					if (outfile.Active() && needBufFile)
-					{
-						SetWriteBuffer(outfile, 0);
-						needBufFile = false;
-					}
-
-					if (directWrite)
-					{
-						outfile.Seek(pa->GetSegmentOffset());
-					}
-
-					outfile.Write(pa->GetSegmentContent(), pa->GetSegmentSize());
-
-					flushedSize += pa->GetSegmentSize();
-					flushedArticles++;
-
-					pa->DiscardSegment();
-
-					if (!directWrite)
-					{
-						outfile.Close();
-
-						if (!FileSystem::MoveFile(destFile, pa->GetResultFilename()))
-						{
-							m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-								"Could not rename file %s to %s: %s", *destFile, pa->GetResultFilename(),
-								*FileSystem::GetLastErrorMessage());
-						}
-					}
-				}
-				else
-				{
-					flushedSize += pa->GetSegmentSize();
-					flushedArticles++;
-					pa->DiscardSegment();
-				}
-			}
-
-			outfile.Close();
+			const std::string& outputFilename = m_fileInfo->GetOutputFilename();
+			struct Ctx { ArticleWriter* self; std::vector<ArticleInfo*>* cached; } ctx{ this, &cachedArticles };
+			nzbget_rs_awc_article_writer_flush_cache(
+				items.data(), items.size(),
+				directWrite ? 1 : 0, GetSkipDiskWrite() ? 1 : 0,
+				outputFilename.data(), outputFilename.size(),
+				&ctx,
+				+[](void* rawCtx, int op, size_t idx, const char* msg) -> int {
+					auto* c = static_cast<Ctx*>(rawCtx);
+					if (op == 0) return (c->self->m_fileInfo->GetDeleted() && !c->self->m_fileInfo->GetNzbInfo()->GetParking()) ? 1 : 0;
+					if (op == 1) { (*c->cached)[idx]->DiscardSegment(); return 0; }
+					if (op == 2) c->self->m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "%s", msg);
+					return 0;
+				},
+				&flushedArticles, &flushedSize);
 
 			{
 				Guard contentGuard = g_ArticleCache->GuardContent();

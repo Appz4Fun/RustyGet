@@ -1137,6 +1137,35 @@ int nzbget_rs_awc_article_writer_move_completed_files(
 int nzbget_rs_awc_article_writer_create_output_file(
     const char* output_filename, int64_t size, NzbgetRsBuf* out_err);
 
+typedef struct NzbgetRsFlushArticleItem {
+    int64_t segment_offset;
+    int32_t segment_size;
+    const uint8_t* segment_content;
+    const char* result_filename;
+} NzbgetRsFlushArticleItem;
+
+void nzbget_rs_awc_article_writer_flush_cache(
+    const NzbgetRsFlushArticleItem* items, size_t items_len,
+    int direct_write, int skip_disk_write,
+    const char* output_filename, size_t output_filename_len,
+    void* ctx,
+    int (*cb)(void* ctx, int op, size_t idx, const char* msg),
+    int* out_flushed_articles, int64_t* out_flushed_size);
+int nzbget_rs_awc_article_writer_post_process_rename_and_hardlink(
+    const char* original_filename, size_t original_filename_len,
+    const char* current_filename,
+    const char* nzb_dest_dir, size_t nzb_dest_dir_len,
+    const char* file_output_filename, size_t file_output_filename_len,
+    const char* writer_output_filename, size_t writer_output_filename_len,
+    int is_hard_linked, int inter_dir_empty,
+    void* ctx, void (*log_err_cb)(void* ctx, const char* msg),
+    NzbgetRsBuf* out_updated_output_filename, int* out_has_updated_output_filename);
+void nzbget_rs_awc_article_writer_finish_disk_ops(
+    int success, int skip_disk_write, int raw_article, int direct_write, int has_cached_data,
+    const char* temp_filename, size_t temp_filename_len,
+    const char* result_filename, size_t result_filename_len,
+    void* ctx, void (*log_err_cb)(void* ctx, const char* msg));
+
 
 
 /* Consolidated WebDownloader & StatMeter FFI (`webdownload.rs`, `statmeter.rs`) */

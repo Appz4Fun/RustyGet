@@ -13958,9 +13958,6 @@ pub unsafe extern "C" fn nzbget_rs_fs_op_with_err(
     val: i64,
     out_errmsg: *mut RsBuf,
 ) -> i64 {
-    if !out_errmsg.is_null() {
-        *out_errmsg = into_buf(Vec::new());
-    }
     let mut errmsg = Vec::new();
     let res: i64 = match op {
         0 => {
@@ -14053,7 +14050,7 @@ pub unsafe extern "C" fn nzbget_rs_fs_op_with_err(
         }
         _ => 0,
     };
-    if !out_errmsg.is_null() && !errmsg.is_empty() {
+    if !out_errmsg.is_null() {
         *out_errmsg = into_buf(errmsg);
     }
     res

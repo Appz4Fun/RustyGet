@@ -635,63 +635,147 @@ pub fn move_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
     ok
 }
 
+/// Cross-device (`EXDEV`) fallback for `move_file_no_overwrite`:
+/// creates `dst_filename` exclusively (`O_CREAT | O_EXCL`), copies in 16 KiB chunks,
+/// verifies size, preserves permissions (`st_mode & 0o7777`), and removes `src_filename`.
+/// Only removes `dst_filename` on failure if this call exclusively created it.
+pub(crate) fn move_file_no_overwrite_exdev(
+    src_filename: &CStr,
+    dst_filename: &CStr,
+) -> Result<(), i32> {
+    use std::os::unix::fs::MetadataExt;
+    let src_meta = match std::fs::metadata(path(src_filename.to_bytes())) {
+        Ok(m) => m,
+        Err(e) => {
+            let meta_err = e.raw_os_error().unwrap_or(sys::EIO);
+            let meta_err = if meta_err == 0 { sys::EIO } else { meta_err };
+            set_last_errno(meta_err);
+            return Err(meta_err);
+        }
+    };
+    let src_size = src_meta.size() as i64;
+    let src_mode = (src_meta.mode() & 0o7777) as libc::mode_t;
+
+    let in_fd = unsafe {
+        libc::open(
+            src_filename.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
+    if in_fd == -1 {
+        let e = last_errno();
+        let open_err = if e == 0 { sys::EIO } else { e };
+        set_last_errno(open_err);
+        return Err(open_err);
+    }
+
+    let out_fd = unsafe {
+        libc::open(
+            dst_filename.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+            0o666u32,
+        )
+    };
+    if out_fd == -1 {
+        let e = last_errno();
+        let open_err = if e == 0 { sys::EIO } else { e };
+        unsafe { sys::close(in_fd) };
+        set_last_errno(open_err);
+        return Err(open_err);
+    }
+
+    let mut buf = [0u8; 16 * 1024];
+    let mut total_copied: i64 = 0;
+    let mut copy_err: i32 = 0;
+    loop {
+        let r = unsafe { sys::read(in_fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if r < 0 {
+            let e = last_errno();
+            if e == libc::EINTR {
+                continue;
+            }
+            copy_err = if e == 0 { sys::EIO } else { e };
+            break;
+        }
+        if r == 0 {
+            break;
+        }
+        let r_len = r as usize;
+        let mut off = 0usize;
+        while off < r_len {
+            let w = unsafe { sys::write(out_fd, buf[off..r_len].as_ptr().cast(), r_len - off) };
+            if w < 0 {
+                let e = last_errno();
+                if e == libc::EINTR {
+                    continue;
+                }
+                copy_err = if e == 0 { sys::EIO } else { e };
+                break;
+            }
+            if w == 0 {
+                copy_err = sys::EIO;
+                break;
+            }
+            off += w as usize;
+            total_copied += w as i64;
+        }
+        if copy_err != 0 {
+            break;
+        }
+    }
+
+    unsafe { sys::close(in_fd) };
+    if unsafe { sys::close(out_fd) } != 0 && copy_err == 0 {
+        let e = last_errno();
+        copy_err = if e == 0 { sys::EIO } else { e };
+    }
+    if copy_err == 0 && total_copied != src_size {
+        copy_err = sys::EIO;
+    }
+    if copy_err == 0 && unsafe { libc::chmod(dst_filename.as_ptr(), src_mode) } != 0 {
+        let e = last_errno();
+        copy_err = if e == 0 { sys::EIO } else { e };
+    }
+    if copy_err != 0 {
+        unsafe { libc::unlink(dst_filename.as_ptr()) };
+        set_last_errno(copy_err);
+        return Err(copy_err);
+    }
+    if unsafe { libc::unlink(src_filename.as_ptr()) } != 0 {
+        let e = last_errno();
+        let rm_err = if e == 0 { sys::EIO } else { e };
+        unsafe { libc::unlink(dst_filename.as_ptr()) };
+        set_last_errno(rm_err);
+        return Err(rm_err);
+    }
+    Ok(())
+}
+
 /// `fs::move_file` (`daemon/util/FileSystem.h`):
 /// Moves `src_filename` to `dst_filename` without overwriting an existing destination,
-/// falling back to `copy_file` + `delete_file` on `EXDEV` and removing any partial
-/// destination if the cross-device copy or source removal fails.
+/// falling back to exclusive cross-device copy + source removal on `EXDEV`.
 pub fn move_file_no_overwrite(src_filename: &CStr, dst_filename: &CStr) -> Result<(), i32> {
-    match std::fs::metadata(path(dst_filename.to_bytes())) {
-        Ok(_) => {
-            set_last_errno(sys::EEXIST);
-            return Err(sys::EEXIST);
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            let err = e.raw_os_error().unwrap_or(sys::EIO);
-            set_last_errno(err);
-            return Err(err);
-        }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(dst_filename.as_ptr(), &mut st) } == 0 {
+        set_last_errno(sys::EEXIST);
+        return Err(sys::EEXIST);
+    }
+    let stat_err = last_errno();
+    if stat_err != ENOENT {
+        let err = if stat_err == 0 { sys::EIO } else { stat_err };
+        set_last_errno(err);
+        return Err(err);
     }
     if unsafe { sys::rename(src_filename.as_ptr(), dst_filename.as_ptr()) == 0 } {
         return Ok(());
     }
     let err = last_errno();
     if err != sys::EXDEV {
+        let err = if err == 0 { sys::EIO } else { err };
+        set_last_errno(err);
         return Err(err);
     }
-    let src_perms = match std::fs::metadata(path(src_filename.to_bytes())) {
-        Ok(m) => m.permissions(),
-        Err(e) => {
-            let meta_err = e.raw_os_error().unwrap_or(sys::EIO);
-            set_last_errno(meta_err);
-            return Err(meta_err);
-        }
-    };
-    if !copy_file(src_filename, dst_filename) {
-        let copy_err = {
-            let e = last_errno();
-            if e == 0 { sys::EIO } else { e }
-        };
-        delete_file(dst_filename);
-        set_last_errno(copy_err);
-        return Err(copy_err);
-    }
-    if let Err(e) = std::fs::set_permissions(path(dst_filename.to_bytes()), src_perms) {
-        let perm_err = e.raw_os_error().unwrap_or(sys::EIO);
-        delete_file(dst_filename);
-        set_last_errno(perm_err);
-        return Err(perm_err);
-    }
-    if !delete_file(src_filename) {
-        let rm_err = {
-            let e = last_errno();
-            if e == 0 { sys::EIO } else { e }
-        };
-        delete_file(dst_filename);
-        set_last_errno(rm_err);
-        return Err(rm_err);
-    }
-    Ok(())
+    move_file_no_overwrite_exdev(src_filename, dst_filename)
 }
 
 /// Computes `(available_bytes, total_bytes)` from `(f_bavail, f_blocks, f_frsize)`
@@ -1709,6 +1793,26 @@ mod tests {
             assert!(get_real_path(f1_bytes).is_some());
             assert!(!get_current_directory().is_empty());
             assert!(!expand_home_path_auto(Some(c"~/test")).is_empty());
+
+            let exdev_src = sub.join("exdev_src.txt");
+            let exdev_dst = sub.join("exdev_dst.txt");
+            std::fs::write(&exdev_src, b"new-content").unwrap();
+            std::fs::write(&exdev_dst, b"existing-content").unwrap();
+            let exdev_src_c = CString::new(exdev_src.as_os_str().as_bytes()).unwrap();
+            let exdev_dst_c = CString::new(exdev_dst.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                move_file_no_overwrite_exdev(&exdev_src_c, &exdev_dst_c),
+                Err(sys::EEXIST)
+            );
+            assert_eq!(std::fs::read(&exdev_dst).unwrap(), b"existing-content");
+            assert_eq!(std::fs::read(&exdev_src).unwrap(), b"new-content");
+            std::fs::remove_file(&exdev_dst).unwrap();
+            assert_eq!(
+                move_file_no_overwrite_exdev(&exdev_src_c, &exdev_dst_c),
+                Ok(())
+            );
+            assert!(!exdev_src.exists());
+            assert_eq!(std::fs::read(&exdev_dst).unwrap(), b"new-content");
         }
 
         let _ = std::fs::remove_dir_all(&base_dir);

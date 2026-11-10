@@ -1118,7 +1118,7 @@ pub fn util_classify_executor_ext(filename: &[u8]) -> (i32, usize) {
 }
 
 /// Finds the next non-empty trimmed token `(tok_start, tok_end, next_pos)` in `s`
-/// separated by any byte in `separators` and trimmed via `crate::util::trim_line`,
+/// separated by any byte in `separators` and trimmed of bytes `<= b' '`,
 /// for `Tokenizer::Next`.
 pub fn tokenizer_find_next_token(
     s: &[u8],
@@ -1142,7 +1142,14 @@ pub fn tokenizer_find_next_token(
         } else {
             raw_end
         };
-        let (trim_start, trim_end) = crate::util::trim_line(&s[pos..raw_end]);
+        let tok = &s[pos..raw_end];
+        let trim_start = tok.iter().take_while(|&&b| b <= b' ').count();
+        let trim_end = tok.len()
+            - tok[trim_start..]
+                .iter()
+                .rev()
+                .take_while(|&&b| b <= b' ')
+                .count();
         if trim_start < trim_end {
             return Some((pos + trim_start, pos + trim_end, next_pos));
         }
@@ -2263,5 +2270,10 @@ mod tests {
         let t_len = time_buf.iter().position(|&b| b == 0).unwrap_or(0);
         assert_eq!(t_len, 24);
         assert!(!time_buf[..t_len].contains(&b'\n'));
+
+        assert_eq!(
+            tokenizer_find_next_token(b"\x0bscript.py\x0c, next", b",;"),
+            Some((1, 10, 12))
+        );
     }
 }

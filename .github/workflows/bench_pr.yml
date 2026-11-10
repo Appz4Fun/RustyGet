@@ -4,9 +4,6 @@ name: bench pull request
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-    types: [opened, reopened, synchronize, edited]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -41,33 +38,27 @@ jobs:
     name: Discover guarded lifecycle targets
     if: >-
       github.repository == 'Appz4Fun/RustyGet' &&
-      ((github.event_name != 'pull_request' && github.ref == 'refs/heads/main') ||
-       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       prs: ${{ steps.targets.outputs.prs }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - id: targets
         name: Read current same-repository open PR identities
         env:
           BENCH_GITHUB_TOKEN: ${{ github.token }}
-          CONTROLLER_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
           INPUT_PR: ${{ inputs.pr_number }}
-          EVENT_PR: ${{ github.event.pull_request.number }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = push ]; then
             python3 -I scripts/bench/publish.py --list-prs \
-              --repository "$GITHUB_REPOSITORY" --controller-sha "$CONTROLLER_SHA" --github-output "$GITHUB_OUTPUT"
-          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            python3 -I scripts/bench/publish.py --list-prs --pr "$INPUT_PR" \
-              --repository "$GITHUB_REPOSITORY" --controller-sha "$CONTROLLER_SHA" --github-output "$GITHUB_OUTPUT"
+              --repository "$GITHUB_REPOSITORY" --controller-sha "$GITHUB_SHA" --github-output "$GITHUB_OUTPUT"
           else
-            python3 -I scripts/bench/publish.py --list-prs --pr "$EVENT_PR" \
-              --repository "$GITHUB_REPOSITORY" --controller-sha "$CONTROLLER_SHA" --github-output "$GITHUB_OUTPUT"
+            python3 -I scripts/bench/publish.py --list-prs --pr "$INPUT_PR" \
+              --repository "$GITHUB_REPOSITORY" --controller-sha "$GITHUB_SHA" --github-output "$GITHUB_OUTPUT"
           fi
 
   lifecycle:
@@ -85,21 +76,20 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Verify identity and invalidate against fresh live state
         env:
           BENCH_GITHUB_TOKEN: ${{ secrets.BENCHMARK_GITHUB_TOKEN }}
-          CONTROLLER_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
           PR_NUMBER: ${{ matrix.pr }}
           HEAD_SHA: ${{ inputs.head_sha }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             python3 -I scripts/bench/publish.py --set-pr-status pending --status-intent manual \
-              --repository "$GITHUB_REPOSITORY" --controller-sha "$CONTROLLER_SHA" --pr "$PR_NUMBER" --expected-head-sha "$HEAD_SHA"
+              --repository "$GITHUB_REPOSITORY" --controller-sha "$GITHUB_SHA" --pr "$PR_NUMBER" --expected-head-sha "$HEAD_SHA"
           else
             python3 -I scripts/bench/publish.py --set-pr-status pending --status-intent automatic \
-              --repository "$GITHUB_REPOSITORY" --controller-sha "$CONTROLLER_SHA" --pr "$PR_NUMBER"
+              --repository "$GITHUB_REPOSITORY" --controller-sha "$GITHUB_SHA" --pr "$PR_NUMBER"
           fi
 
   validate:

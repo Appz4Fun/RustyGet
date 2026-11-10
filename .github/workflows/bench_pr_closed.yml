@@ -2,29 +2,68 @@
 name: bench archive closed pull request
 
 on:
-  pull_request:
+  push:
     branches: [main]
-    types: [closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Closed pull request number in canonical decimal digits
+        required: true
+        type: string
 
 permissions:
   contents: read
-
-# Publication and archival share a lock; publishers also check the PR is open.
-concurrency:
-  group: bench-publication-pr-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  pull-requests: read
 
 jobs:
-  archive_pr_branch:
-    name: Archive the closed pull request's branch with Bencher
-    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+  discover:
+    name: Resolve closed pull request target
+    if: >-
+      github.repository == 'Appz4Fun/RustyGet' &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      pr: ${{ steps.discover.outputs.pr }}
+    steps:
+      - name: Resolve same-repository closed PR identity
+        id: discover
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PR: ${{ inputs.pr_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_WORKFLOW_REF" == Appz4Fun/RustyGet/.github/workflows/bench_pr_closed.yml@refs/heads/main ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            if [[ ! "$INPUT_PR" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::Invalid pull request identity for archive."
+              exit 1
+            fi
+            printf 'pr=%s\n' "$INPUT_PR" >> "$GITHUB_OUTPUT"
+          else
+            pr=$(gh api "repos/Appz4Fun/RustyGet/commits/$GITHUB_SHA/pulls" \
+              --jq 'map(select(.state == "closed" and .base.ref == "main" and .base.repo.full_name == "Appz4Fun/RustyGet" and .head.repo.full_name == "Appz4Fun/RustyGet")) | sort_by(.number) | last | .number // empty')
+            if [[ "$pr" =~ ^[1-9][0-9]*$ ]]; then
+              printf 'pr=%s\n' "$pr" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  archive_pr_branch:
+    name: Archive the closed pull request's branch with Bencher
+    needs: discover
+    if: needs.discover.outputs.pr != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Publication and archival share a lock; publishers also check the PR is open.
+    concurrency:
+      group: bench-publication-pr-${{ needs.discover.outputs.pr }}
+      cancel-in-progress: false
     steps:
       - name: Checkout reviewed target-branch tools
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Diagnose archive configuration without exposing values
@@ -55,7 +94,7 @@ jobs:
           BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
           BENCHER_HOST_URL: ${{ vars.BENCHER_HOST }}
           BENCHER_KEY: ${{ secrets.BENCHER_API_KEY }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ needs.discover.outputs.pr }}
           BENCH_GITHUB_TOKEN: ${{ secrets.BENCHMARK_GITHUB_TOKEN }}
         shell: bash
         run: |

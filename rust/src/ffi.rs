@@ -7191,7 +7191,7 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
         |path_bytes| {
             crate::fsops::force_directories(path_bytes, &mut force_dirs_err, &crate::fsops::posix_stat)
         },
-        |path_bytes| CString::new(path_bytes).is_ok_and(|c| crate::fsops::delete_file(&c)),
+        |path_bytes| CString::new(path_bytes).is_ok_and(|c| libc::unlink(c.as_ptr()) == 0),
         |path_bytes, read_write| {
             let Some(cb) = open_file_cb else {
                 return false;
@@ -7300,7 +7300,7 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_cleanup_old_data(
         &articles,
         |a, b| a == b,
         |path_bytes| crate::fsops::file_exists(path_bytes, &crate::fsops::posix_stat),
-        |path_bytes| CString::new(path_bytes).is_ok_and(|c| crate::fsops::delete_file(&c)),
+        |path_bytes| CString::new(path_bytes).is_ok_and(|c| libc::unlink(c.as_ptr()) == 0),
         |from_bytes, to_bytes| {
             let Ok(c_from) = CString::new(from_bytes) else {
                 return false;

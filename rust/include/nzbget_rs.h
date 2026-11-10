@@ -1335,10 +1335,7 @@ typedef struct {
 
 int nzbget_rs_xmlrpc_match_command(
     int user_access, int ua_add, int ua_restricted, const char* method_name);
-int nzbget_rs_xmlrpc_is_safe_command(int cmd_id);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_error(int is_json, int err_code, const char* err_text);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_bool(int is_json, int ok);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_int(int is_json, int value);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_string(int is_json, const char* raw_str, int encode, size_t max_len);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_status(
     int is_json, const NzbgetRsRpcStatusInput* inp,
@@ -1702,26 +1699,11 @@ int nzbget_rs_diskstate_parse_completed_file_line(
     uint32_t* out_crc, int* out_par_file, const char** out_hash16k,
     const char** out_par_set_id, const char** out_file_name);
 
-NzbgetRsBuf nzbget_rs_xmlrpc_format_disk_speed(
-    int is_json, uint64_t write_bytes, double write_ms,
-    uint64_t read_bytes, double read_ms);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_network_speed(
-    int is_json, double speed_mbps);
-
 NzbgetRsBuf nzbget_rs_nserv_format_usage(const char* base_name);
 
-void nzbget_rs_binrpc_init_message_base(
-    uint8_t* out, int request_type, int struct_size,
-    const char* username, const char* password);
 void nzbget_rs_binrpc_decode_log_response_entries(
     const uint8_t* data, size_t len, uint32_t nr_entries, void* ctx,
     void (*emit_cb)(void* ctx, uint32_t id, uint32_t kind, uint32_t time, const char* text));
-void nzbget_rs_binrpc_init_download_request(
-    uint8_t* out, const char* username, const char* password,
-    const char* nzb_filename, const char* nzb_content, int is_url,
-    const char* category, int add_first, int add_paused, int priority,
-    int dupe_score, int dupe_mode, const char* dupe_key,
-    int trailing_len, int auto_category);
 NzbgetRsBuf nzbget_rs_binrpc_encode_edit_queue_trailing(
     const char* text, const int32_t* ids, size_t ids_len,
     const char* const* names, size_t names_len,
@@ -2226,35 +2208,12 @@ typedef struct NzbgetRsParsedFeedItemView {
     size_t attr_count;
 } NzbgetRsParsedFeedItemView;
 
-void nzbget_rs_feed_info_init(
-    int id, const char* name, const char* filter,
-    NzbgetRsBuf* out_default_name, uint32_t* out_filter_hash);
-int nzbget_rs_feed_parse_prefixed_int(const char* value);
-int nzbget_rs_feed_has_any_series_id(
-    const char* series, const char* rage_id, const char* tvdb_id, const char* tvmaze_id,
-    int item_rage_id, int item_tvdb_id, int item_tvmaze_id);
-NzbgetRsBuf nzbget_rs_feed_build_dupe_key(
-    const char* rage_id, const char* tvdb_id, const char* tvmaze_id, const char* series,
-    int item_rage_id, int item_tvdb_id, int item_tvmaze_id, int item_imdb_id,
-    int season_num, int episode_num, const char* season, const char* episode);
-int nzbget_rs_feed_parse_season_episode(
-    const char* title, NzbgetRsBuf* out_season, NzbgetRsBuf* out_episode);
-
 NzbgetRsFeedFileParser* nzbget_rs_feed_file_parser_parse_file(const char* filename);
 void nzbget_rs_feed_file_parser_free(NzbgetRsFeedFileParser* parser);
 size_t nzbget_rs_feed_file_parser_finalize(NzbgetRsFeedFileParser* parser);
 int nzbget_rs_feed_file_parser_get_item(
     const NzbgetRsFeedFileParser* parser, size_t index,
     NzbgetRsParsedFeedItemView* out_view);
-
-void nzbget_rs_feed_create_nzb_info(
-    int feed_id, const char* feed_cat, int category_source,
-    const char* item_url, const char* item_filename,
-    const char* item_cat, const char* item_add_cat,
-    int64_t item_size, int64_t item_time, int item_priority,
-    int item_pause_nzb, const char* item_dupe_key,
-    int item_dupe_score, int item_dupe_mode,
-    NzbgetRsBuf* out_filename, NzbgetRsBuf* out_category);
 
 // NzbFileParser, UrlCoordinator & DirectRenamer End-to-End FFI
 typedef struct NzbgetRsNzbFileParser NzbgetRsNzbFileParser;
@@ -2333,9 +2292,6 @@ NzbgetRsBuf nzbget_rs_dupecoord_no_backup_reason(
 void nzbget_rs_queue_editor_visit_category_ext_diff(
     const char* old_ext, const char* new_ext, void* ctx,
     void (*cb)(void* ctx, const char* param_name, const char* param_val));
-
-int nzbget_rs_diskstate_save_id_floor(
-    const char* queue_dir, char sep, int nzb_id, int file_id);
 
 int nzbget_rs_twin_sample_indices(
     const size_t* primary_seg_counts, const int64_t* primary_seg_bytes, size_t primary_seg_bytes_len,
@@ -2541,32 +2497,6 @@ int nzbget_rs_script_config_commit_cipher_patch(
     int (*cancel_cb)(void*),
     void (*on_dir_sync_fail_cb)(void*));
 
-typedef struct NzbgetRsTransientRetries NzbgetRsTransientRetries;
-NzbgetRsTransientRetries* nzbget_rs_transient_retries_new(int attempts, int interval_sec);
-void nzbget_rs_transient_retries_free(NzbgetRsTransientRetries* ptr);
-int nzbget_rs_transient_retries_register(NzbgetRsTransientRetries* ptr, uintptr_t server_key, int64_t now);
-size_t nzbget_rs_transient_retries_waiting_servers(const NzbgetRsTransientRetries* ptr, int64_t now, uintptr_t* out_keys, size_t max_keys);
-int nzbget_rs_transient_retries_is_empty(const NzbgetRsTransientRetries* ptr);
-int nzbget_rs_transient_retries_is_exhausted(const NzbgetRsTransientRetries* ptr);
-int nzbget_rs_transient_retries_remained_retries(const NzbgetRsTransientRetries* ptr, uintptr_t server_key);
-void nzbget_rs_transient_retries_set_remained_retries(NzbgetRsTransientRetries* ptr, uintptr_t server_key, int remained);
-
-int64_t nzbget_rs_fs_file_size(const char* filename);
-int nzbget_rs_fs_delete_file(const char* filename);
-int nzbget_rs_fs_create_directory_exclusive(const char* dir_filename);
-int nzbget_rs_fs_remove_directory(const char* dir_filename);
-int nzbget_rs_fs_open_cloexec_fd(const char* filename, int mode, int om_read, int om_read_write, int om_write);
-int nzbget_rs_fs_flush_file_buffers(int file_descriptor, NzbgetRsBuf* out_errmsg);
-int nzbget_rs_fs_flush_dir_buffers(const char* filename, char path_sep, NzbgetRsBuf* out_errmsg);
-int nzbget_rs_fs_allocate_file(const char* filename, int64_t size, NzbgetRsBuf* out_errmsg);
-int nzbget_rs_fs_move_file(const char* src_filename, const char* dst_filename);
-int nzbget_rs_fs_move_file_no_overwrite(const char* src_filename, const char* dst_filename);
-int nzbget_rs_fs_get_disk_state(
-    const char* path,
-    int64_t* out_available,
-    int64_t* out_total);
-
-
 typedef struct NzbgetRsParsedOptions {
     int32_t download_rate;
     int32_t article_timeout;
@@ -2746,7 +2676,6 @@ void nzbget_rs_options_create_scheduler_task(
     const NzbgetRsOptionsHost* host, int id, const char* time,
     const char* week_days, int command, const char* param);
 
-NzbgetRsBuf nzbget_rs_xmlrpc_normalize_url(const char* url);
 NzbgetRsBuf nzbget_rs_xmlrpc_execute_save_config(
     char** request, int is_get, int is_json,
     const char* config_filename, int* out_fault);
@@ -2852,8 +2781,6 @@ int nzbget_rs_unpack_extract_with_zipfast(
     int overwrite_mode, int cleanup_disk,
     void (*log_cb)(void* ctx, int kind, const char* msg), void* log_ctx,
     int (*is_stopped_cb)(void* ctx));
-
-void nzbget_rs_fs_fix_exec_permission(const char* filename);
 
 void nzbget_rs_unpack_controller_check_archive_files(
     const char* dest_dir,
@@ -3100,21 +3027,6 @@ void nzbget_rs_par_repairer_find_and_sort_extra_files(
     int (*is_parred_cb)(void* ctx, const char* filename),
     void (*add_extra_cb)(void* ctx, const char* full_path));
 
-void nzbget_rs_enable_core_dump(void);
-int nzbget_rs_socket_deadline_wait(
-    int fd, int read, int write, void* ctx,
-    int64_t (*remaining_ms_or_stopped_cb)(void* ctx));
-int nzbget_rs_daemonize_setup(
-    const char* lock_file, const char* daemon_username,
-    int* out_lock_owned, int* out_warn_truncate);
-void nzbget_rs_disk_service_check_disk_space(
-    const char* dest_dir, const char* inter_dir, int disk_space_mb,
-    int* out_dest_low, int* out_inter_low);
-int nzbget_rs_disk_service_check_required_dirs(
-    const char* required_dir, int waiting_reported, int* out_next_waiting_reported,
-    void* ctx, void (*on_missing_cb)(void* ctx, const char* dir));
-NzbgetRsBuf nzbget_rs_http_get_read_and_delete(
-    const char* path, size_t path_len, size_t max_bytes, int read_body, int* out_ok);
 int nzbget_rs_system_info_fetch_network(
     const char* host, int use_tls, int include_gzip, const char* version_rev,
     void* ctx,
@@ -3128,27 +3040,7 @@ NzbgetRsBuf nzbget_rs_maintenance_read_package_info_str(
 int nzbget_rs_maintenance_prepare_signature_inputs(
     const char* in_filename, const char* sig_filename, const char* pub_key_filename,
     uint8_t* out_in_hash, uint8_t* out_signature, NzbgetRsBuf* out_pub_key);
-int nzbget_rs_fs_save_buffer_into_file(
-    const char* filename, const char* buffer, size_t buf_len);
-NzbgetRsBuf nzbget_rs_fs_expand_file_name(const char* filename);
-NzbgetRsBuf nzbget_rs_fs_get_exe_file_name(const char* argv0);
-int nzbget_rs_util_find_executor_program(
-    const char* filename, size_t filename_len,
-    const char* custom_path, size_t custom_path_len,
-    NzbgetRsBuf* out_buf);
-NzbgetRsBuf nzbget_rs_fs_make_unique_path(const char* target_path);
-int nzbget_rs_fs_create_hard_link(
-    const char* from, const char* to, NzbgetRsBuf* errmsg);
-int nzbget_rs_fs_load_file_into_buffer(
-    const char* filename, int add_trailing_null,
-    void* ctx, uint8_t* (*reserve_cb)(void* ctx, int buf_size));
-NzbgetRsBuf nzbget_rs_fs_expand_home_path(const char* filename);
-int nzbget_rs_fs_get_real_path(
-    const char* path, size_t path_len, NzbgetRsBuf* out_buf);
-NzbgetRsBuf nzbget_rs_fs_get_current_directory(void);
-int nzbget_rs_fs_read_first_8_bytes(const char* filename, uint8_t* out_head);
 
-int nzbget_rs_statmeter_calc_month_slots(int64_t loc_cur_time, int quota_start_day);
 int nzbget_rs_unpack_controller_try_password_file(
     const char* path, void* ctx,
     int (*should_continue_cb)(void*),

@@ -773,15 +773,6 @@ pub fn restore_file_or_dir_permissions(filename: &[u8], umask: u32) -> bool {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_fs_fix_exec_permission(filename: *const c_char) {
-    if filename.is_null() {
-        return;
-    }
-    let bytes = unsafe { CStr::from_ptr(filename).to_bytes() };
-    fix_exec_permission(bytes);
-}
-
 /// Checks `dest_dir` and (when non-empty) `inter_dir` free disk space against `disk_space_mb`.
 /// Returns `(dest_low, inter_low)`.
 pub fn disk_service_check_disk_space(
@@ -1102,24 +1093,6 @@ pub fn read_first_8_bytes(filename: &[u8]) -> Option<[u8; 8]> {
     let mut head = [0u8; 8];
     f.read_exact(&mut head).ok()?;
     Some(head)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_fs_read_first_8_bytes(
-    filename: *const c_char,
-    out_head: *mut u8,
-) -> c_int {
-    if filename.is_null() || out_head.is_null() {
-        return 0;
-    }
-    let bytes = unsafe { CStr::from_ptr(filename).to_bytes() };
-    let Some(head) = read_first_8_bytes(bytes) else {
-        return 0;
-    };
-    unsafe {
-        std::ptr::copy_nonoverlapping(head.as_ptr(), out_head, 8);
-    }
-    1
 }
 
 pub(crate) struct PosixFsOps;

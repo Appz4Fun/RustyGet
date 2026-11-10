@@ -86,6 +86,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <dirent.h>
+#include <poll.h>
+#include <regex.h>
 
 #ifndef __linux__
 #include <sys/sysctl.h>
@@ -884,14 +886,6 @@ protected:
 #include <climits>
 #include <stdexcept>
 
-// Keep the Rust allocation owned even if std::string's allocation throws.
-static inline std::string CopyRustPathText(NzbgetRsBuf buf)
-{
-	const auto release = [buf](char*) { nzbget_rs_free(buf); };
-	const std::unique_ptr<char, decltype(release)> owner(buf.data, release);
-	return std::string(buf.data, buf.len);
-}
-
 class Util
 {
 public:
@@ -900,17 +894,117 @@ public:
 		return nzbget_rs_match_file_ext(filename, extensionList, listSeparator) != 0;
 	}
 
+	static uint32 HashBJ96(const char* buffer, size_t bufSize, uint32 initValue)
+	{
+		auto mix = [](uint32& a, uint32& b, uint32& c) {
+			a -= b; a -= c; a ^= (c >> 13);
+			b -= c; b -= a; b ^= (a << 8);
+			c -= a; c -= b; c ^= (b >> 13);
+			a -= b; a -= c; a ^= (c >> 12);
+			b -= c; b -= a; b ^= (a << 16);
+			c -= a; c -= b; c ^= (b >> 5);
+			a -= b; a -= c; a ^= (c >> 3);
+			b -= c; b -= a; b ^= (a << 10);
+			c -= a; c -= b; c ^= (b >> 15);
+		};
+		auto word = [](const uchar* s) -> uint32 {
+			return (uint32)s[0] | ((uint32)s[1] << 8) | ((uint32)s[2] << 16) | ((uint32)s[3] << 24);
+		};
+		uint32 a = 0x9e3779b9u, b = 0x9e3779b9u, c = initValue;
+		uint32 length = (uint32)bufSize;
+		const uchar* k = reinterpret_cast<const uchar*>(buffer);
+		size_t rem = bufSize;
+		while (rem >= 12)
+		{
+			a += word(k);
+			b += word(k + 4);
+			c += word(k + 8);
+			mix(a, b, c);
+			k += 12;
+			rem -= 12;
+		}
+		c += length;
+		uchar tail[12]{};
+		if (rem > 0)
+		{
+			memcpy(tail, k, rem);
+		}
+		a += word(tail);
+		b += word(tail + 4);
+		c += (word(tail + 8) << 8);
+		mix(a, b, c);
+		return c;
+	}
+
 	static std::optional<std::string>
 	FindExecutorProgram(const std::string& filename, const std::string& customPath)
 	{
-		NzbgetRsBuf buf{};
-		if (nzbget_rs_util_find_executor_program(
-			filename.data(), filename.size(), customPath.data(), customPath.size(), &buf) == 0)
+		std::string_view fname(filename.c_str());
+		size_t dot = fname.rfind('.');
+		if (dot == std::string_view::npos)
 		{
-			nzbget_rs_free(buf);
+			return filename;
+		}
+		std::string_view fileExt = fname.substr(dot);
+		if (!fileExt.empty() && !customPath.empty())
+		{
+			std::string_view cpath(customPath.c_str());
+			size_t pos = 0;
+			while (pos <= cpath.size())
+			{
+				size_t next = cpath.find_first_of(",;", pos);
+				std::string_view tok = next == std::string_view::npos
+					? cpath.substr(pos) : cpath.substr(pos, next - pos);
+				while (!tok.empty() && (tok.front() == ' ' || tok.front() == '\t' || tok.front() == '\r' || tok.front() == '\n'))
+				{
+					tok.remove_prefix(1);
+				}
+				while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\t' || tok.back() == '\r' || tok.back() == '\n'))
+				{
+					tok.remove_suffix(1);
+				}
+				size_t eq = tok.find('=');
+				if (eq != std::string_view::npos && tok.substr(0, eq) == fileExt)
+				{
+					return std::string(tok.substr(eq + 1));
+				}
+				if (next == std::string_view::npos) break;
+				pos = next + 1;
+			}
+		}
+		if (fileExt == ".py")
+		{
+			for (const char* exe : { "python3", "python", "py" })
+			{
+				BString<100> cmd("%s --version > /dev/null 2> /dev/null", exe);
+				if (system(cmd) == 0)
+				{
+					return std::string(exe);
+				}
+			}
 			return std::nullopt;
 		}
-		return CopyRustPathText(buf);
+		if (fileExt == ".sh")
+		{
+			for (const char* exe : { "bash", "sh" })
+			{
+				BString<100> cmd("%s --version > /dev/null 2> /dev/null", exe);
+				if (system(cmd) == 0)
+				{
+					return std::string(exe);
+				}
+			}
+			return std::nullopt;
+		}
+		if (fileExt == ".js")
+		{
+			if (system("node --version > /dev/null 2> /dev/null") == 0)
+			{
+				return std::string("node");
+			}
+			return std::nullopt;
+		}
+		return filename;
 	}
 
 	static std::vector<CString> SplitCommandLine(const char* commandLine)
@@ -1418,20 +1512,128 @@ inline path make_unique_filename()
 
 inline fs::path make_unique_filename(const fs::path& targetPath)
 {
-	return fs::u8path(CopyRustPathText(nzbget_rs_fs_make_unique_path(targetPath.c_str())));
+	struct stat st{};
+	if (stat(targetPath.c_str(), &st) != 0)
+	{
+		return targetPath;
+	}
+	const auto baseDir = targetPath.parent_path();
+	const auto stem = targetPath.stem().string();
+	const auto ext = targetPath.extension().string();
+	int counter = 1;
+	while (true)
+	{
+		std::string name = stem + " (" + std::to_string(counter++) + ")" + ext;
+		fs::path uniquePath = baseDir / name;
+		if (stat(uniquePath.c_str(), &st) != 0)
+		{
+			return uniquePath;
+		}
+	}
 }
 
 inline void move_file(const fs::path& src, const fs::path& dest, fs::error_code& ec) noexcept
 {
-	int err = nzbget_rs_fs_move_file_no_overwrite(src.c_str(), dest.c_str());
-	if (err == 0)
+	struct stat st{};
+	if (stat(dest.c_str(), &st) == 0)
+	{
+		errno = EEXIST;
+		ec = std::make_error_code(std::errc::file_exists);
+		return;
+	}
+	if (errno != ENOENT)
+	{
+		ec = std::make_error_code(static_cast<std::errc>(errno));
+		return;
+	}
+	if (rename(src.c_str(), dest.c_str()) == 0)
 	{
 		ec.clear();
+		return;
 	}
-	else
+	if (errno != EXDEV)
 	{
-		ec = std::make_error_code(static_cast<std::errc>(err));
+		ec = std::make_error_code(static_cast<std::errc>(errno));
+		return;
 	}
+	struct stat srcSt{};
+	if (stat(src.c_str(), &srcSt) != 0)
+	{
+		ec = std::make_error_code(static_cast<std::errc>(errno));
+		return;
+	}
+	int inFd = open(src.c_str(), O_RDONLY | O_CLOEXEC);
+	if (inFd < 0)
+	{
+		ec = std::make_error_code(static_cast<std::errc>(errno));
+		return;
+	}
+	int outFd = open(dest.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
+	if (outFd < 0)
+	{
+		int err = errno;
+		close(inFd);
+		errno = err;
+		ec = std::make_error_code(static_cast<std::errc>(err));
+		return;
+	}
+	char buffer[16 * 1024];
+	int copyErr = 0;
+	off_t totalCopied = 0;
+	while (true)
+	{
+		ssize_t n = read(inFd, buffer, sizeof(buffer));
+		if (n == 0) break;
+		if (n < 0)
+		{
+			if (errno == EINTR) continue;
+			copyErr = errno ? errno : EIO;
+			break;
+		}
+		ssize_t written = 0;
+		while (written < n)
+		{
+			ssize_t w = write(outFd, buffer + written, (size_t)(n - written));
+			if (w < 0)
+			{
+				if (errno == EINTR) continue;
+				copyErr = errno ? errno : EIO;
+				break;
+			}
+			written += w;
+		}
+		if (copyErr != 0) break;
+		totalCopied += n;
+	}
+	close(inFd);
+	if (close(outFd) != 0 && copyErr == 0)
+	{
+		copyErr = errno ? errno : EIO;
+	}
+	if (copyErr == 0 && totalCopied != srcSt.st_size)
+	{
+		copyErr = EIO;
+	}
+	if (copyErr == 0 && chmod(dest.c_str(), srcSt.st_mode & 07777) != 0)
+	{
+		copyErr = errno ? errno : EIO;
+	}
+	if (copyErr != 0)
+	{
+		unlink(dest.c_str());
+		errno = copyErr;
+		ec = std::make_error_code(static_cast<std::errc>(copyErr));
+		return;
+	}
+	if (unlink(src.c_str()) != 0)
+	{
+		int rmErr = errno ? errno : EIO;
+		unlink(dest.c_str());
+		errno = rmErr;
+		ec = std::make_error_code(static_cast<std::errc>(rmErr));
+		return;
+	}
+	ec.clear();
 }
 }
 
@@ -1500,47 +1702,138 @@ public:
 
 	static std::optional<std::string> GetRealPath(const std::string& path)
 	{
-		NzbgetRsBuf buf{};
-		if (nzbget_rs_fs_get_real_path(path.data(), path.size(), &buf) == 0)
+		if (path.empty())
 		{
-			nzbget_rs_free(buf);
 			return std::nullopt;
 		}
-		return CopyRustPathText(buf);
+		char* resolved = realpath(path.c_str(), nullptr);
+		if (!resolved)
+		{
+			return std::nullopt;
+		}
+		std::string result(resolved);
+		free(resolved);
+		return result;
 	}
 
 	static bool LoadFileIntoBuffer(const char* filename, CharBuffer& buffer, bool addTrailingNull)
 	{
-		return nzbget_rs_fs_load_file_into_buffer(
-			filename,
-			addTrailingNull ? 1 : 0,
-			&buffer,
-			[](void* ctx, int bufSize) -> uint8_t* {
-				auto* b = static_cast<CharBuffer*>(ctx);
-				b->Reserve(bufSize);
-				return reinterpret_cast<uint8_t*>(static_cast<char*>(*b));
-			}) != 0;
+		if (!FileExists(filename))
+		{
+			return false;
+		}
+		int fd = open(filename, O_RDONLY | O_CLOEXEC);
+		if (fd < 0)
+		{
+			return false;
+		}
+		int64 size = FileSize(filename);
+		int64 extra = addTrailingNull ? 1 : 0;
+		if (size < 0 || size + extra > INT32_MAX)
+		{
+			close(fd);
+			return false;
+		}
+		buffer.Reserve((int)(size + extra));
+		size_t total = 0;
+		while (total < (size_t)size)
+		{
+			ssize_t n = read(fd, static_cast<char*>(buffer) + total, (size_t)size - total);
+			if (n < 0)
+			{
+				if (errno == EINTR) continue;
+				close(fd);
+				return false;
+			}
+			if (n == 0)
+			{
+				close(fd);
+				return false;
+			}
+			total += (size_t)n;
+		}
+		close(fd);
+		if (addTrailingNull)
+		{
+			buffer[(int)size] = 0;
+		}
+		return true;
 	}
 
 	static bool SaveBufferIntoFile(const char* filename, const char* buffer, int bufLen)
 	{
-		return nzbget_rs_fs_save_buffer_into_file(
-			filename, buffer, bufLen > 0 ? static_cast<size_t>(bufLen) : 0) != 0;
+		if (!filename || !*filename)
+		{
+			return false;
+		}
+		int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+		if (fd < 0)
+		{
+			return false;
+		}
+		size_t len = bufLen > 0 && buffer ? (size_t)bufLen : 0;
+		size_t written = 0;
+		while (written < len)
+		{
+			ssize_t n = write(fd, buffer + written, len - written);
+			if (n < 0)
+			{
+				if (errno == EINTR) continue;
+				close(fd);
+				return false;
+			}
+			written += (size_t)n;
+		}
+		return close(fd) == 0;
 	}
 
 	static bool AllocateFile(const char* filename, int64 size, [[maybe_unused]] bool sparse, CString& errmsg)
 	{
-		NzbgetRsBuf errBuf{};
-		bool ok = nzbget_rs_fs_allocate_file(filename, size, &errBuf) != 0;
-		if (errBuf.len == 0)
+		errmsg.Clear();
+		if (!filename || size < 0)
 		{
-			errmsg.Clear();
+			return false;
 		}
-		else
+		int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
+		if (fd < 0)
 		{
-			errmsg.Set(errBuf.data ? errBuf.data : "", (int)errBuf.len);
+			errmsg = GetLastErrorMessage();
+			return false;
 		}
-		nzbget_rs_free(errBuf);
+		close(fd);
+
+		(void)truncate(filename, (off_t)size);
+		bool ok = FileSize(filename) == size;
+		if (!ok)
+		{
+			(void)truncate(filename, 0);
+			fd = open(filename, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
+			if (fd < 0)
+			{
+				errmsg = GetLastErrorMessage();
+				return false;
+			}
+			char zeros[16 * 1024]{};
+			int64 remaining = size;
+			while (remaining > 0)
+			{
+				int64 need = remaining < (int64)sizeof(zeros) ? remaining : (int64)sizeof(zeros);
+				ssize_t written = write(fd, zeros, (size_t)need);
+				if ((int64)written != need)
+				{
+					errmsg = GetLastErrorMessage();
+					close(fd);
+					return false;
+				}
+				remaining -= written;
+			}
+			close(fd);
+			ok = FileSize(filename) == size;
+			if (!ok)
+			{
+				errmsg = "created file has wrong size";
+			}
+		}
 		return ok;
 	}
 
@@ -1562,22 +1855,100 @@ public:
 
 	static bool MoveFile(const char* srcFilename, const char* dstFilename)
 	{
-		return nzbget_rs_fs_move_file(srcFilename, dstFilename) != 0;
+		if (!srcFilename || !dstFilename)
+		{
+			return false;
+		}
+		if (rename(srcFilename, dstFilename) == 0)
+		{
+			return true;
+		}
+		if (errno != EXDEV)
+		{
+			return false;
+		}
+		int inFd = open(srcFilename, O_RDONLY | O_CLOEXEC);
+		if (inFd < 0)
+		{
+			return false;
+		}
+		int outFd = open(dstFilename, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+		if (outFd < 0)
+		{
+			int savedErrno = errno;
+			close(inFd);
+			errno = savedErrno;
+			return false;
+		}
+		char buffer[16 * 1024];
+		bool copyOk = true;
+		int savedErrno = 0;
+		int64 totalCopied = 0;
+		while (true)
+		{
+			ssize_t n = read(inFd, buffer, sizeof(buffer));
+			if (n == 0) break;
+			if (n < 0)
+			{
+				if (errno == EINTR) continue;
+				savedErrno = errno;
+				copyOk = false;
+				break;
+			}
+			ssize_t written = 0;
+			while (written < n)
+			{
+				ssize_t w = write(outFd, buffer + written, (size_t)(n - written));
+				if (w < 0)
+				{
+					if (errno == EINTR) continue;
+					savedErrno = errno;
+					copyOk = false;
+					break;
+				}
+				written += w;
+			}
+			if (!copyOk) break;
+			totalCopied += n;
+		}
+		close(inFd);
+		if (close(outFd) != 0 && copyOk)
+		{
+			savedErrno = errno;
+			copyOk = false;
+		}
+		if (copyOk && totalCopied != FileSize(srcFilename))
+		{
+			copyOk = false;
+		}
+		if (!copyOk)
+		{
+			unlink(dstFilename);
+			if (savedErrno != 0)
+			{
+				errno = savedErrno;
+			}
+			return false;
+		}
+		return unlink(srcFilename) == 0;
 	}
 
-	static bool DeleteFile(const char* filename) { return nzbget_rs_fs_delete_file(filename) != 0; }
+	static bool DeleteFile(const char* filename) { return filename && unlink(filename) == 0; }
 	static bool FileExists(const char* filename) { return nzbget_rs_file_exists(filename) != 0; }
 	static bool DirectoryExists(const char* dirFilename) { return nzbget_rs_directory_exists(dirFilename) != 0; }
 
 	static bool CreateDirectory(const char* dirFilename)
 	{
-		nzbget_rs_fs_create_directory_exclusive(dirFilename);
+		if (dirFilename)
+		{
+			mkdir(dirFilename, S_IRWXU | S_IRWXG | S_IRWXO);
+		}
 		return DirectoryExists(dirFilename);
 	}
 
 	static bool RemoveDirectory(const char* dirFilename)
 	{
-		return nzbget_rs_fs_remove_directory(dirFilename) != 0;
+		return dirFilename && rmdir(dirFilename) == 0;
 	}
 
 	static bool DeleteDirectory(const char* dirFilename)
@@ -1616,33 +1987,49 @@ public:
 
 	static bool CreateHardLink(const char *from, const char *to, CString& errmsg)
 	{
-		NzbgetRsBuf msg{};
-		bool ok = nzbget_rs_fs_create_hard_link(from, to, &msg) != 0;
 		errmsg.Clear();
-		if (!ok)
+		if (!from || !to)
 		{
-			errmsg.Set(msg.data ? msg.data : "", static_cast<int>(msg.len));
+			return false;
 		}
-		nzbget_rs_free(msg);
-		return ok;
+		auto [newPath, _] = SplitPathAndFilename(to);
+		if (!ForceDirectories(newPath.c_str(), errmsg))
+		{
+			return false;
+		}
+		if (link(from, to) != 0)
+		{
+			errmsg = GetLastErrorMessage();
+			return false;
+		}
+		return true;
 	}
 
 	static CString GetCurrentDirectory()
 	{
-		NzbgetRsBuf buf = nzbget_rs_fs_get_current_directory();
-		CString res(buf.data ? buf.data : "", static_cast<int>(buf.len));
-		nzbget_rs_free(buf);
-		return res;
+		BString<1024> path;
+		if (getcwd(path, path.Capacity()))
+		{
+			return *path;
+		}
+		return "";
 	}
 
-	static int64 FileSize(const char* filename) { return nzbget_rs_fs_file_size(filename); }
+	static int64 FileSize(const char* filename)
+	{
+		struct stat st{};
+		return (filename && stat(filename, &st) == 0) ? (int64)st.st_size : -1;
+	}
 
 	static std::optional<DiskState> GetDiskState(const char* path)
 	{
-		int64 available = 0;
-		int64 total = 0;
-		if (nzbget_rs_fs_get_disk_state(path, &available, &total) != 0)
+		struct statvfs s{};
+		if (path && statvfs(path, &s) == 0)
 		{
+			uint64 availU = (uint64)s.f_bavail * (uint64)s.f_frsize;
+			uint64 totalU = (uint64)s.f_blocks * (uint64)s.f_frsize;
+			int64 available = availU > (uint64)INT64_MAX ? INT64_MAX : (int64)availU;
+			int64 total = totalU > (uint64)INT64_MAX ? INT64_MAX : (int64)totalU;
 			return DiskState{ available, total };
 		}
 		return std::nullopt;
@@ -1669,52 +2056,109 @@ public:
 
 	static CString ExpandHomePath(const char* filename)
 	{
-		NzbgetRsBuf buf = nzbget_rs_fs_expand_home_path(filename);
-		CString result(buf.data, static_cast<int>(buf.len));
-		nzbget_rs_free(buf);
-		return result;
+		if (!filename)
+		{
+			return "";
+		}
+		if (filename[0] == '~' && filename[1] == '/')
+		{
+			const char* homeDir = getenv("HOME");
+			if (!homeDir)
+			{
+				passwd* pw = getpwuid(getuid());
+				if (pw)
+				{
+					homeDir = pw->pw_dir;
+				}
+			}
+			if (!homeDir)
+			{
+				return "";
+			}
+			CString result;
+			result.Format("%s%s", homeDir, !strcmp(homeDir, "/") ? filename + 2 : filename + 1);
+			return result;
+		}
+		return filename;
 	}
 
-	static void FixExecPermission(const char* filename) { nzbget_rs_fs_fix_exec_permission(filename); }
+	static void FixExecPermission(const char* filename)
+	{
+		struct stat buf{};
+		if (filename && stat(filename, &buf) == 0)
+		{
+			chmod(filename, buf.st_mode | S_IXUSR | S_IXGRP | S_IXOTH);
+		}
+	}
 	static inline mode_t uMask;
 
 	static CString ExpandFileName(const char* filename)
 	{
-		NzbgetRsBuf expBuf = nzbget_rs_fs_expand_file_name(filename);
-		CString result(expBuf.data ? expBuf.data : "", static_cast<int>(expBuf.len));
-		nzbget_rs_free(expBuf);
-		return result;
+		if (!filename || !*filename)
+		{
+			return "";
+		}
+		if (filename[0] == '/')
+		{
+			return filename;
+		}
+		const char* rel = !strncmp(filename, "./", 2) ? filename + 2 : filename;
+		CString curDir = GetCurrentDirectory();
+		BString<1024> result("%s/%s", *curDir, rel);
+		return *result;
 	}
 
 	static CString GetExeFileName(const char* argv0)
 	{
-		NzbgetRsBuf exeBuf = nzbget_rs_fs_get_exe_file_name(argv0);
-		CString result(exeBuf.data ? exeBuf.data : "", static_cast<int>(exeBuf.len));
-		nzbget_rs_free(exeBuf);
-		return result;
+		char buf[1024];
+		ssize_t r = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+		if (r > 0)
+		{
+			buf[r] = '\0';
+			return buf;
+		}
+		r = readlink("/proc/curproc/file", buf, sizeof(buf) - 1);
+		if (r > 0)
+		{
+			buf[r] = '\0';
+			return buf;
+		}
+		return ExpandFileName(argv0);
 	}
 
 	static bool FlushFileBuffers(int fileDescriptor, CString& errmsg)
 	{
-		NzbgetRsBuf errBuf{};
-		bool ok = nzbget_rs_fs_flush_file_buffers(fileDescriptor, &errBuf) != 0;
-		if (!ok)
+#if defined(__APPLE__)
+		int ret = fcntl(fileDescriptor, F_FULLFSYNC) == -1 ? 1 : 0;
+#elif defined(__linux__) || defined(__ANDROID__)
+		int ret = fdatasync(fileDescriptor);
+#else
+		int ret = fsync(fileDescriptor);
+#endif
+		if (ret == 0)
 		{
-			errmsg.Set(errBuf.data ? errBuf.data : "", (int)errBuf.len);
+			return true;
 		}
-		nzbget_rs_free(errBuf);
-		return ok;
+		errmsg = GetLastErrorMessage();
+		return false;
 	}
 
 	static bool FlushDirBuffers(const char* filename, CString& errmsg)
 	{
-		NzbgetRsBuf errBuf{};
-		bool ok = nzbget_rs_fs_flush_dir_buffers(filename, PATH_SEPARATOR, &errBuf) != 0;
-		if (!ok)
+		CString parentPath = filename ? filename : "";
+		char* p = strrchr(parentPath, PATH_SEPARATOR);
+		if (p)
 		{
-			errmsg.Set(errBuf.data ? errBuf.data : "", (int)errBuf.len);
+			*p = '\0';
 		}
-		nzbget_rs_free(errBuf);
+		int fd = open(parentPath, O_RDONLY | O_CLOEXEC);
+		if (fd == -1)
+		{
+			errmsg = GetLastErrorMessage();
+			return false;
+		}
+		bool ok = FlushFileBuffers(fd, errmsg);
+		close(fd);
 		return ok;
 	}
 
@@ -1751,10 +2195,15 @@ public:
 
 	bool Open(const char* filename, EOpenMode mode)
 	{
+		if (!filename)
+		{
+			return false;
+		}
 		const char* strmode = mode == omRead ? FOPEN_RB : mode == omReadWrite ?
 			FOPEN_RBP : mode == omWrite ? FOPEN_WB : FOPEN_AB;
-		int fd = nzbget_rs_fs_open_cloexec_fd(
-			filename, (int)mode, (int)omRead, (int)omReadWrite, (int)omWrite);
+		int flags = mode == omRead ? O_RDONLY : mode == omReadWrite ? O_RDWR :
+			mode == omWrite ? (O_WRONLY | O_CREAT | O_TRUNC) : (O_WRONLY | O_CREAT | O_APPEND);
+		int fd = open(filename, flags | O_CLOEXEC, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
 		if (fd == -1)
 		{
 			return false;
@@ -1920,13 +2369,11 @@ public:
 		, m_priority{ priority }
 		, m_certVerifLevel{ certVerifLevel }
 	{
-		NzbgetRsBuf nameBuf{};
-		nzbget_rs_feed_info_init(m_id, m_name.c_str(), m_filter.c_str(), &nameBuf, &m_filterHash);
-		if (nameBuf.data)
+		if (m_name.empty())
 		{
-			m_name.assign(nameBuf.data, nameBuf.len);
+			m_name = "Feed" + std::to_string(m_id);
 		}
-		nzbget_rs_free(nameBuf);
+		m_filterHash = Util::HashBJ96(m_filter.c_str(), m_filter.size(), 0);
 	}
 	int GetId() const { return m_id; }
 	const char* GetName() const { return m_name.c_str(); }
@@ -2120,16 +2567,39 @@ public:
 	}
 	void BuildDupeKey(const char* rageId, const char* tvdbId, const char* tvmazeId, const char* series)
 	{
-		bool anySeriesId = nzbget_rs_feed_has_any_series_id(
-			series, rageId, tvdbId, tvmazeId, m_rageId, m_tvdbId, m_tvmazeId) != 0;
+		int rageIdNum = !Util::EmptyStr(rageId) ? atoi(rageId) : m_rageId;
+		int tvdbIdNum = !Util::EmptyStr(tvdbId) ? atoi(tvdbId) : m_tvdbId;
+		int tvmazeIdNum = !Util::EmptyStr(tvmazeId) ? atoi(tvmazeId) : m_tvmazeId;
+
+		bool anySeriesId = !Util::EmptyStr(series) || rageIdNum != 0 || tvdbIdNum != 0 || tvmazeIdNum != 0;
 		int seasonNum = anySeriesId ? GetSeasonNum() : 0;
 		int episodeNum = (anySeriesId && seasonNum != 0) ? GetEpisodeNum() : 0;
-		NzbgetRsBuf buf = nzbget_rs_feed_build_dupe_key(
-			rageId, tvdbId, tvmazeId, series,
-			m_rageId, m_tvdbId, m_tvmazeId, m_imdbId,
-			seasonNum, episodeNum, m_season.c_str(), m_episode.c_str());
-		m_dupeKey.assign(buf.data ? buf.data : "", buf.len);
-		nzbget_rs_free(buf);
+		bool hasSe = seasonNum != 0 && episodeNum != 0;
+
+		if (!Util::EmptyStr(series) && hasSe)
+		{
+			m_dupeKey = std::string("series=") + series + "-" + m_season + "-" + m_episode;
+		}
+		else if (rageIdNum != 0 && hasSe)
+		{
+			m_dupeKey = "rageid=" + std::to_string(rageIdNum) + "-" + m_season + "-" + m_episode;
+		}
+		else if (tvdbIdNum != 0 && hasSe)
+		{
+			m_dupeKey = "tvdbid=" + std::to_string(tvdbIdNum) + "-" + m_season + "-" + m_episode;
+		}
+		else if (tvmazeIdNum != 0 && hasSe)
+		{
+			m_dupeKey = "tvmazeid=" + std::to_string(tvmazeIdNum) + "-" + m_season + "-" + m_episode;
+		}
+		else if (m_imdbId != 0)
+		{
+			m_dupeKey = "imdb=" + std::to_string(m_imdbId);
+		}
+		else
+		{
+			m_dupeKey = "";
+		}
 		m_dupeKey.shrink_to_fit();
 	}
 	int GetDupeScore() const { return m_dupeScore; }
@@ -2180,7 +2650,16 @@ private:
 
 	int ParsePrefixedInt(const char *value)
 	{
-		return nzbget_rs_feed_parse_prefixed_int(value);
+		if (!value || !*value)
+		{
+			return 0;
+		}
+		const char* val = value;
+		if (!strchr("0123456789", *val))
+		{
+			val++;
+		}
+		return atoi(val);
 	}
 
 	void ParseSeasonEpisode()
@@ -2192,15 +2671,31 @@ private:
 
 		m_seasonEpisodeParsed = true;
 
-		NzbgetRsBuf seasonBuf{};
-		NzbgetRsBuf episodeBuf{};
-		if (nzbget_rs_feed_parse_season_episode(m_title.c_str(), &seasonBuf, &episodeBuf) != 0)
+		regex_t rx{};
+		if (regcomp(&rx, "[^[:alnum:]]s?([0-9]+)[ex]([0-9]+(-?e[0-9]+)?)[^[:alnum:]]", REG_ICASE | REG_EXTENDED) != 0)
 		{
-			SetSeason(seasonBuf.data ? seasonBuf.data : "");
-			SetEpisode(episodeBuf.data ? episodeBuf.data : "");
+			return;
 		}
-		nzbget_rs_free(seasonBuf);
-		nzbget_rs_free(episodeBuf);
+		regmatch_t matches[10]{};
+		if (regexec(&rx, m_title.c_str(), 10, matches, 0) == 0 &&
+			matches[1].rm_so >= 0 && matches[2].rm_so >= 0)
+		{
+			int seasonNum = atoi(m_title.c_str() + matches[1].rm_so);
+			BString<100> season("S%02d", seasonNum);
+			SetSeason(season);
+
+			std::string ep("E");
+			for (regoff_t i = matches[2].rm_so; i < matches[2].rm_eo; ++i)
+			{
+				char ch = m_title[static_cast<size_t>(i)];
+				if (ch != '-')
+				{
+					ep.push_back((ch >= 'a' && ch <= 'z') ? static_cast<char>(ch - 'a' + 'A') : ch);
+				}
+			}
+			SetEpisode(ep.c_str());
+		}
+		regfree(&rx);
 	}
 };
 
@@ -4439,18 +4934,29 @@ struct SocketDeadline
 	bool Stopped() const { return std::chrono::steady_clock::now() >= end || (cancelled && cancelled()); }
 	bool Wait(SOCKET socket, bool read, bool write) const
 	{
-		return nzbget_rs_socket_deadline_wait(
-			(int)socket,
-			read ? 1 : 0,
-			write ? 1 : 0,
-			const_cast<SocketDeadline*>(this),
-			+[](void* ctx) noexcept -> int64_t
+		while (!Stopped())
+		{
+			auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(
+				end - std::chrono::steady_clock::now()).count();
+			if (rem < 0)
 			{
-				const auto* self = static_cast<const SocketDeadline*>(ctx);
-				if (self->Stopped()) return -1;
-				return std::chrono::duration_cast<std::chrono::milliseconds>(
-					self->end - std::chrono::steady_clock::now()).count();
-			}) != 0;
+				return false;
+			}
+			int timeoutMs = rem < 1 ? 1 : (rem > 50 ? 50 : static_cast<int>(rem));
+			struct pollfd pfd{};
+			pfd.fd = (int)socket;
+			pfd.events = (read ? POLLIN : 0) | (write ? POLLOUT : 0);
+			int r = poll(&pfd, 1, timeoutMs);
+			if (r > 0)
+			{
+				return !Stopped();
+			}
+			if (r < 0 && errno != EINTR)
+			{
+				return false;
+			}
+		}
+		return false;
 	}
 };
 
@@ -10254,8 +10760,14 @@ private:
 
 	void SaveIdFloor()
 	{
-		nzbget_rs_diskstate_save_id_floor(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, NzbInfo::LastGenId(), FileInfo::LastGenId());
+		BString<1024> idsFilename("%s%cids", g_Options->GetQueueDir(), PATH_SEPARATOR);
+		BString<1024> tempFilename("%s.new", *idsFilename);
+		BString<100> text("nzb %i file %i\n", NzbInfo::LastGenId(), FileInfo::LastGenId());
+		if (!FileSystem::SaveBufferIntoFile(tempFilename, text, (int)strlen(text)) ||
+			rename(tempFilename, idsFilename) != 0)
+		{
+			FileSystem::DeleteFile(tempFilename);
+		}
 	}
 
 	void ConvertLegacyFileStates(Servers* servers)
@@ -13782,8 +14294,28 @@ private:
 	int CalcMonthSlots(const ServerVolume&)
 	{
 		time_t locCurTime = Util::CurrentTime() + g_WorkState->GetLocalTimeOffset();
-		return nzbget_rs_statmeter_calc_month_slots(
-			static_cast<int64_t>(locCurTime), g_Options->GetQuotaStartDay());
+		tm timeinfo{};
+		gmtime_r(&locCurTime, &timeinfo);
+		int quotaStartDay = g_Options->GetQuotaStartDay();
+		if (quotaStartDay > timeinfo.tm_mday)
+		{
+			int prevMonthsDays = 31;
+			if (timeinfo.tm_mon == 2)
+			{
+				int year = timeinfo.tm_year + 1900;
+				prevMonthsDays = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) ? 29 : 28;
+			}
+			else if (timeinfo.tm_mon == 4 || timeinfo.tm_mon == 6 || timeinfo.tm_mon == 9 || timeinfo.tm_mon == 11)
+			{
+				prevMonthsDays = 30;
+			}
+			if (quotaStartDay > prevMonthsDays)
+			{
+				return timeinfo.tm_mday;
+			}
+			return prevMonthsDays - quotaStartDay + timeinfo.tm_mday + 1;
+		}
+		return timeinfo.tm_mday - quotaStartDay + 1;
 	}
 };
 
@@ -18411,7 +18943,9 @@ public:
 			return FileInfo::fcUnknown;
 		}
 		uint8 head[8] = {0};
-		if (!nzbget_rs_fs_read_first_8_bytes(fileInfo->GetOutputFilename().c_str(), head))
+		DiskFile f;
+		if (!f.Open(fileInfo->GetOutputFilename().c_str(), DiskFile::omRead) ||
+			f.Read(head, sizeof(head)) != sizeof(head))
 		{
 			return FileInfo::fcUnknown;	// not on disk yet (the article cache)
 		}
@@ -18821,9 +19355,69 @@ public:
 		EStatus status = adFailed;
 		int retries = g_Options->GetArticleRetries() > 0 ? g_Options->GetArticleRetries() : 1;
 		int remainedRetries = retries;
-		std::unique_ptr<NzbgetRsTransientRetries, decltype(&nzbget_rs_transient_retries_free)> transientRetries(
-			nzbget_rs_transient_retries_new(retries, g_Options->GetArticleInterval()),
-			nzbget_rs_transient_retries_free);
+		struct TransientRetries
+		{
+			struct ServerState
+			{
+				NewsServer* server;
+				int count;
+				time_t retryAfter;
+				std::optional<int> remained;
+			};
+			int attempts;
+			int intervalSec;
+			bool exhausted = false;
+			std::vector<ServerState> perServer;
+
+			ServerState& Entry(NewsServer* server)
+			{
+				for (ServerState& s : perServer)
+				{
+					if (s.server == server) return s;
+				}
+				perServer.push_back(ServerState{server, 0, 0, std::nullopt});
+				return perServer.back();
+			}
+
+			const ServerState* Get(NewsServer* server) const
+			{
+				for (const ServerState& s : perServer)
+				{
+					if (s.server == server) return &s;
+				}
+				return nullptr;
+			}
+
+			bool Register(NewsServer* server, time_t now)
+			{
+				ServerState& s = Entry(server);
+				s.count++;
+				if (s.count >= attempts)
+				{
+					exhausted = true;
+					return false;
+				}
+				int interval = intervalSec;
+				for (int i = 1; i < s.count && interval < 60; i++)
+				{
+					interval *= 2;
+				}
+				int wait = interval < 60 ? interval : 60;
+				s.retryAfter = now + wait;
+				return true;
+			}
+
+			int RemainedRetries(NewsServer* server) const
+			{
+				const ServerState* s = Get(server);
+				return (s && s->remained.has_value()) ? *s->remained : attempts;
+			}
+
+			void SetRemainedRetries(NewsServer* server, int remained)
+			{
+				Entry(server).remained = remained;
+			}
+		} transientRetries{retries, g_Options->GetArticleInterval() > 0 ? g_Options->GetArticleInterval() : 0};
 		ServerPool::RawServerList failedServers;
 		failedServers.reserve(g_ServerPool->GetServers()->size());
 		NewsServer* wantServer = nullptr;
@@ -18839,25 +19433,24 @@ public:
 			SetStatus(adWaiting);
 			while (!m_connection && !IsStopped() && serverConfigGeneration == g_ServerPool->GetGeneration())
 			{
-				if (nzbget_rs_transient_retries_is_empty(transientRetries.get()) != 0)
+				if (transientRetries.perServer.empty())
 				{
 					m_connection = g_ServerPool->GetConnection(level, wantServer, &failedServers);
 				}
 				else
 				{
 					ServerPool::RawServerList ignoreServers = failedServers;
-					std::vector<uintptr_t> waitingPtrs(g_ServerPool->GetServers()->size());
-					size_t waitingCount = nzbget_rs_transient_retries_waiting_servers(
-						transientRetries.get(), (int64)Util::CurrentTime(),
-						waitingPtrs.data(), waitingPtrs.size());
+					time_t now = Util::CurrentTime();
 					bool wantServerWaiting = false;
-					for (size_t wi = 0; wi < waitingCount; ++wi)
+					for (const auto& s : transientRetries.perServer)
 					{
-						NewsServer* waitingServer = reinterpret_cast<NewsServer*>(waitingPtrs[wi]);
-						ignoreServers.push_back(waitingServer);
-						if (waitingServer == wantServer)
+						if (s.retryAfter > now)
 						{
-							wantServerWaiting = true;
+							ignoreServers.push_back(s.server);
+							if (s.server == wantServer)
+							{
+								wantServerWaiting = true;
+							}
 						}
 					}
 					if (!wantServerWaiting)
@@ -18881,8 +19474,7 @@ public:
 
 			lastServer = m_connection->GetNewsServer();
 			level = lastServer->GetNormLevel();
-			remainedRetries = nzbget_rs_transient_retries_remained_retries(
-				transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer));
+			remainedRetries = transientRetries.RemainedRetries(lastServer);
 
 			m_connection->SetSuppressErrors(false);
 
@@ -18918,8 +19510,7 @@ public:
 			bool authRejected = false;
 			if (!connected && m_connection && m_connection->GetAuthRejected())
 			{
-				if (nzbget_rs_transient_retries_register(
-					transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer), (int64)Util::CurrentTime()) != 0)
+				if (transientRetries.Register(lastServer, Util::CurrentTime()))
 				{
 					transientRetryScheduled = true;
 				}
@@ -18937,8 +19528,7 @@ public:
 
 				if (status == adTransientError)
 				{
-					if (nzbget_rs_transient_retries_register(
-						transientRetries.get(), reinterpret_cast<uintptr_t>(newsServer), (int64)Util::CurrentTime()) != 0)
+					if (transientRetries.Register(newsServer, Util::CurrentTime()))
 					{
 						status = adConnectError;
 						transientRetryScheduled = true;
@@ -18996,8 +19586,7 @@ public:
 			{
 				remainedRetries--;
 			}
-			nzbget_rs_transient_retries_set_remained_retries(
-				transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer), remainedRetries);
+			transientRetries.SetRemainedRetries(lastServer, remainedRetries);
 
 			bool optionalBlocked = false;
 			if (!connected && m_connection && !IsStopped())
@@ -19110,7 +19699,7 @@ public:
 			status = adRetry;
 		}
 
-		if (status == adFailed && nzbget_rs_transient_retries_is_exhausted(transientRetries.get()) != 0)
+		if (status == adFailed && transientRetries.exhausted)
 		{
 			detail("Download %s failed: temporary server errors outlasted all attempts, the article may still exist", *m_infoName);
 		}
@@ -37481,15 +38070,27 @@ public:
 		}
 
 		reply.status = downloader.GetHttpStatus();
-		int readOk = 0;
-		NzbgetRsBuf bodyBuf = nzbget_rs_http_get_read_and_delete(
-			path.data(), path.size(), maxBytes, status == WebDownloader::adFinished ? 1 : 0, &readOk);
-		if (readOk != 0)
+		if (status == WebDownloader::adFinished)
 		{
-			reply.body.assign(bodyBuf.data ? bodyBuf.data : "", bodyBuf.len);
-			reply.ok = true;
+			DiskFile f;
+			if (f.Open(path.c_str(), DiskFile::omRead))
+			{
+				int64 size = FileSystem::FileSize(path.c_str());
+				if (size >= 0 && (uint64)size <= maxBytes)
+				{
+					reply.body.resize((size_t)size);
+					if (size == 0 || f.Read(reply.body.data(), size) == size)
+					{
+						reply.ok = true;
+					}
+					else
+					{
+						reply.body.clear();
+					}
+				}
+			}
 		}
-		nzbget_rs_free(bodyBuf);
+		FileSystem::DeleteFile(path.c_str());
 		return reply;
 	}
 
@@ -42867,37 +43468,42 @@ private:
 				{
 					debug("Download %s from %s", feedItemInfo.GetUrl(), feedInfo->GetName());
 
-					NzbgetRsBuf fnBuf{};
-					NzbgetRsBuf catBuf{};
-					nzbget_rs_feed_create_nzb_info(
-						feedInfo->GetId(),
-						feedInfo->GetCategory(),
-						static_cast<int>(feedInfo->GetCategorySource()),
-						feedItemInfo.GetUrl(),
-						feedItemInfo.GetFilename(),
-						feedItemInfo.GetCategory(),
-						feedItemInfo.GetAddCategory().c_str(),
-						feedItemInfo.GetSize(),
-						(int64_t)feedItemInfo.GetTime(),
-						feedItemInfo.GetPriority(),
-						feedItemInfo.GetPauseNzb() ? 1 : 0,
-						feedItemInfo.GetDupeKey(),
-						feedItemInfo.GetDupeScore(),
-						(int)feedItemInfo.GetDupeMode(),
-						&fnBuf,
-						&catBuf);
-
 					std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
 					nzbInfo->SetKind(NzbInfo::nkUrl);
 					nzbInfo->SetFeedId(feedInfo->GetId());
 					nzbInfo->SetUrl(feedItemInfo.GetUrl());
-					if (fnBuf.len > 0 && fnBuf.data)
+					BString<1024> nzbName;
+					if (!Util::EmptyStr(feedItemInfo.GetFilename()))
 					{
-						nzbInfo->SetFilename(fnBuf.data);
+						const char* fn = feedItemInfo.GetFilename();
+						const char* ext = strrchr(fn, '.');
+						int stemLen = (ext && !strcasecmp(ext, ".nzb")) ? (int)(ext - fn) : (int)strlen(fn);
+						if (stemLen > 0)
+						{
+							nzbName.Format("%.*s.nzb", stemLen, fn);
+						}
 					}
-					nzbInfo->SetCategory(catBuf.data ? catBuf.data : "");
-					nzbget_rs_free(fnBuf);
-					nzbget_rs_free(catBuf);
+					if (!nzbName.Empty())
+					{
+						nzbInfo->SetFilename(FileSystem::MakeValidFilename(nzbName, false));
+					}
+					if (!feedItemInfo.GetAddCategory().empty())
+					{
+						nzbInfo->SetCategory(feedItemInfo.GetAddCategory().c_str());
+					}
+					else if (!Util::EmptyStr(feedInfo->GetCategory()))
+					{
+						nzbInfo->SetCategory(feedInfo->GetCategory());
+					}
+					else if (feedInfo->GetCategorySource() == FeedInfo::CategorySource::Auto ||
+						feedInfo->GetCategorySource() == FeedInfo::CategorySource::NZBFile)
+					{
+						nzbInfo->SetCategory(feedItemInfo.GetCategory());
+					}
+					else
+					{
+						nzbInfo->SetCategory("");
+					}
 
 					nzbInfo->SetPriority(feedItemInfo.GetPriority());
 					nzbInfo->SetAddUrlPaused(feedItemInfo.GetPauseNzb());
@@ -44272,7 +44878,18 @@ public:
 		const char* GetResponse() { return m_response; }
 		const char* GetCallbackFunc() { return m_callbackFunc; }
 		bool GetFault() { return m_fault; }
-		bool IsSafeMethod() { return nzbget_rs_xmlrpc_is_safe_command(m_cmdId) != 0; }
+		bool IsSafeMethod()
+		{
+			switch (m_cmdId)
+			{
+				case 5: case 6: case 8: case 9: case 10: case 11: case 12:
+				case 13: case 17: case 20: case 27: case 28: case 29:
+				case 30: case 31: case 37: case 45: case 46: case 56:
+					return true;
+				default:
+					return false;
+			}
+		}
 		bool IsError() { return m_cmdId == 0; }
 
 		void PrepareParams()
@@ -44410,12 +45027,20 @@ public:
 
 		void BuildBoolResponse(bool ok)
 		{
-			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_bool(IsJson() ? 1 : 0, ok ? 1 : 0));
+			if (IsJson())
+			{
+				AppendResponse(ok ? "true" : "false");
+			}
+			else
+			{
+				AppendResponse(ok ? "<boolean>1</boolean>" : "<boolean>0</boolean>");
+			}
 		}
 
 		void BuildIntResponse(int value)
 		{
-			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_int(IsJson() ? 1 : 0, value));
+			BString<64> buf(IsJson() ? "%i" : "<i4>%i</i4>", value);
+			AppendResponse(buf);
 		}
 
 		bool NextParamAsInt(int* value)
@@ -46213,8 +46838,17 @@ void ExecuteTestDiskSpeed()
 	info("Disk speed test for %s: write %.1f MiB/s, read %.1f MiB/s",
 		*dirPath, MiBPerSec(writeBytes, writeMs), MiBPerSec(readBytes, readMs));
 
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_disk_speed(
-		IsJson() ? 1 : 0, writeBytes, writeMs, readBytes, readMs));
+	uint64 sizeMB = writeBytes / 1024 / 1024;
+	uint64 readSizeMB = readBytes / 1024 / 1024;
+	BString<512> resp(
+		IsJson()
+			? "{\"SizeMB\":%" PRIu64 ",\"DurationMS\":%.6f,\"ReadSizeMB\":%" PRIu64 ",\"ReadDurationMS\":%.6f}"
+			: "<value><struct><member><name>SizeMB</name><value><i4>%" PRIu64 "</i4></value></member>"
+			  "<member><name>DurationMS</name><value><double>%.6f</double></value></member>"
+			  "<member><name>ReadSizeMB</name><value><i4>%" PRIu64 "</i4></value></member>"
+			  "<member><name>ReadDurationMS</name><value><double>%.6f</double></value></member></struct></value>",
+		sizeMB, writeMs, readSizeMB, readMs);
+	AppendResponse(resp);
 }
 
 void ExecuteTestNetworkSpeed()
@@ -46281,8 +46915,12 @@ void ExecuteTestNetworkSpeed()
 		return;
 	}
 	nzbget_rs_free(errBuf);
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_network_speed(
-		IsJson() ? 1 : 0, speedMbps));
+	BString<256> resp(
+		IsJson()
+			? "{\"SpeedMbps\":%.6f}"
+			: "<value><struct><member><name>SpeedMbps</name><value><double>%.6f</double></value></member></struct></value>",
+		speedMbps);
+	AppendResponse(resp);
 }
 
 // bool startscript(string script, string command, string context, struct[] options);
@@ -46394,9 +47032,35 @@ void ExecuteStartScript()
 	void SetJsonP(bool jsonP) { m_jsonP = jsonP; }
 	void SetUrl(const char* url)
 	{
-		NzbgetRsBuf urlBuf = nzbget_rs_xmlrpc_normalize_url(url);
-		m_url.Set(urlBuf.data ? urlBuf.data : "", (int)urlBuf.len);
-		nzbget_rs_free(urlBuf);
+		m_url = url;
+		if (!m_url.Empty())
+		{
+			auto nibble = [](char c) -> uchar {
+				if (c >= '0' && c <= '9') return (uchar)(c - '0');
+				if (c >= 'a' && c <= 'f') return (uchar)(c - 'a' + 10);
+				if (c >= 'A' && c <= 'F') return (uchar)(c - 'A' + 10);
+				return 0;
+			};
+			char* p = m_url;
+			char* o = m_url;
+			while (*p && *p != '?')
+			{
+				if (p[0] == '%' && p[1] && p[2] && p[1] != '?' && p[2] != '?')
+				{
+					*o++ = (char)((nibble(p[1]) << 4) + nibble(p[2]));
+					p += 3;
+				}
+				else
+				{
+					*o++ = *p++;
+				}
+			}
+			while (*p)
+			{
+				*o++ = *p++;
+			}
+			*o = '\0';
+		}
 	}
 	void SetRequest(char* request) { m_request = request; }
 	const char* GetResponse() { return m_response; }
@@ -47547,23 +48211,22 @@ public:
 
 		if (!InitConnection()) return false;
 
-		SNzbDownloadRequest DownloadRequest;
-		nzbget_rs_binrpc_init_download_request(
-			(uint8_t*)&DownloadRequest,
-			g_Options->GetControlUsername(),
-			g_Options->GetControlPassword(),
-			nzbFilename,
-			nzbContent,
-			isUrl ? 1 : 0,
-			category,
-			addFirst ? 1 : 0,
-			addPaused ? 1 : 0,
-			priority,
-			dupeScore,
-			dupeMode,
-			dupeKey,
-			length,
-			autoCategory ? 1 : 0);
+		SNzbDownloadRequest DownloadRequest{};
+		InitMessageBase(&DownloadRequest.m_messageBase, rrDownload, sizeof(DownloadRequest));
+		const char* reqFilename = (nzbFilename && *nzbFilename) ? nzbFilename : (!isUrl && nzbContent ? nzbContent : "");
+		strncpy(DownloadRequest.m_nzbFilename, reqFilename, NZBREQUESTFILENAMESIZE - 1);
+		DownloadRequest.m_nzbFilename[NZBREQUESTFILENAMESIZE - 1] = '\0';
+		strncpy(DownloadRequest.m_category, category ? category : "", NZBREQUESTFILENAMESIZE - 1);
+		DownloadRequest.m_category[NZBREQUESTFILENAMESIZE - 1] = '\0';
+		DownloadRequest.m_addFirst = htonl(addFirst);
+		DownloadRequest.m_addPaused = htonl(addPaused);
+		DownloadRequest.m_priority = htonl(priority);
+		DownloadRequest.m_dupeScore = htonl(dupeScore);
+		DownloadRequest.m_dupeMode = htonl(dupeMode);
+		strncpy(DownloadRequest.m_dupeKey, dupeKey ? dupeKey : "", NZBREQUESTFILENAMESIZE - 1);
+		DownloadRequest.m_dupeKey[NZBREQUESTFILENAMESIZE - 1] = '\0';
+		DownloadRequest.m_trailingDataLength = htonl(length);
+		DownloadRequest.m_autoCategory = htonl(autoCategory);
 
 		return SendRequestAndReceiveBool(DownloadRequest, isUrl ? nzbContent : *buffer, length);
 	}
@@ -48011,12 +48674,15 @@ private:
 
 	void InitMessageBase(SNzbRequestBase* messageBase, int request, int size)
 	{
-		nzbget_rs_binrpc_init_message_base(
-			(uint8_t*)messageBase,
-			request,
-			size,
-			g_Options->GetControlUsername(),
-			g_Options->GetControlPassword());
+		messageBase->m_signature = htonl(NZBMESSAGE_SIGNATURE);
+		messageBase->m_type = htonl(request);
+		messageBase->m_structSize = htonl(size);
+
+		strncpy(messageBase->m_username, g_Options->GetControlUsername(), NZBREQUESTPASSWORDSIZE - 1);
+		messageBase->m_username[NZBREQUESTPASSWORDSIZE - 1] = '\0';
+
+		strncpy(messageBase->m_password, g_Options->GetControlPassword(), NZBREQUESTPASSWORDSIZE - 1);
+		messageBase->m_password[NZBREQUESTPASSWORDSIZE - 1] = '\0';
 	}
 
 	template <typename Req>
@@ -48232,12 +48898,15 @@ protected:
 
 	void InitMessageBase(SNzbRequestBase* messageBase, int request, int size)
 	{
-		nzbget_rs_binrpc_init_message_base(
-			(uint8_t*)messageBase,
-			request,
-			size,
-			g_Options->GetControlUsername(),
-			g_Options->GetControlPassword());
+		messageBase->m_signature = htonl(NZBMESSAGE_SIGNATURE);
+		messageBase->m_type = htonl(request);
+		messageBase->m_structSize = htonl(size);
+
+		strncpy(messageBase->m_username, g_Options->GetControlUsername(), NZBREQUESTPASSWORDSIZE - 1);
+		messageBase->m_username[NZBREQUESTPASSWORDSIZE - 1] = '\0';
+
+		strncpy(messageBase->m_password, g_Options->GetControlPassword(), NZBREQUESTPASSWORDSIZE - 1);
+		messageBase->m_password[NZBREQUESTPASSWORDSIZE - 1] = '\0';
 	}
 
 	void ServerPauseUnpause(bool pause)

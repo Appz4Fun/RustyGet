@@ -563,7 +563,13 @@ static void InstallErrorHandler()
 {
 	if (g_Options->GetCrashDump())
 	{
-		nzbget_rs_enable_core_dump();
+		rlimit rlim{};
+		rlim.rlim_cur = RLIM_INFINITY;
+		rlim.rlim_max = RLIM_INFINITY;
+		setrlimit(RLIMIT_CORE, &rlim);
+#ifdef HAVE_SYS_PRCTL_H
+		prctl(PR_SET_DUMPABLE, 1);
+#endif
 	}
 
 	bool exitPending = g_SigExitPending.load(std::memory_order_seq_cst);
@@ -629,50 +635,55 @@ protected:
 		if (g_Options->GetDiskSpace() > 0 && g_WorkState->GetDownloading())
 		{
 			debug("Disk service work: check disk space");
-			int destLow = 0;
-			int interLow = 0;
-			nzbget_rs_disk_service_check_disk_space(
-				g_Options->GetDestDir(),
-				g_Options->GetInterDir(),
-				g_Options->GetDiskSpace(),
-				&destLow,
-				&interLow);
-			if (destLow != 0)
+			if (const auto state = FileSystem::GetDiskState(g_Options->GetDestDir());
+				state.has_value() && state->available / 1024 / 1024 < g_Options->GetDiskSpace())
 			{
 				warn("Low disk space on %s. Pausing download", g_Options->GetDestDir());
 				g_WorkState->SetPauseDownload(true);
 			}
-			if (interLow != 0)
+			if (!Util::EmptyStr(g_Options->GetInterDir()))
 			{
-				warn("Low disk space on %s. Pausing download", g_Options->GetInterDir());
-				g_WorkState->SetPauseDownload(true);
+				if (const auto state = FileSystem::GetDiskState(g_Options->GetInterDir());
+					state.has_value() && state->available / 1024 / 1024 < g_Options->GetDiskSpace())
+				{
+					warn("Low disk space on %s. Pausing download", g_Options->GetInterDir());
+					g_WorkState->SetPauseDownload(true);
+				}
 			}
 		}
 
 		if (m_waitingRequiredDir)
 		{
 			debug("Disk service work: check required dir");
-			int nextWaitingReported = m_waitingReported ? 1 : 0;
-			int allExist = nzbget_rs_disk_service_check_required_dirs(
-				g_Options->GetRequiredDir(),
-				m_waitingReported ? 1 : 0,
-				&nextWaitingReported,
-				nullptr,
-				+[](void*, const char* dir)
-				{
-					info("Waiting for required directory %s", dir);
-				});
-			m_waitingReported = nextWaitingReported != 0;
-			if (allExist)
+			if (!Util::EmptyStr(g_Options->GetRequiredDir()))
 			{
-				if (m_waitingReported)
+				bool allExist = true;
+				Tokenizer tok(g_Options->GetRequiredDir(), ",;");
+				while (const char* dir = tok.Next())
 				{
-					info("All required directories available");
+					if (!FileSystem::FileExists(dir) && !FileSystem::DirectoryExists(dir))
+					{
+						if (!m_waitingReported)
+						{
+							info("Waiting for required directory %s", dir);
+						}
+						allExist = false;
+					}
 				}
-				g_WorkState->SetTempPauseDownload(false);
-				g_WorkState->SetTempPausePostprocess(false);
-				m_waitingRequiredDir = false;
+				if (!allExist)
+				{
+					m_waitingReported = true;
+					return;
+				}
 			}
+
+			if (m_waitingReported)
+			{
+				info("All required directories available");
+			}
+			g_WorkState->SetTempPauseDownload(false);
+			g_WorkState->SetTempPausePostprocess(false);
+			m_waitingRequiredDir = false;
 		}
 	}
 
@@ -1051,43 +1062,81 @@ public:
 				/* child (daemon) continues */
 				setsid();
 
-				int lockOwned = 0;
-				int warnTruncate = 0;
-				int err = nzbget_rs_daemonize_setup(
-					m_options->GetLockFile(),
-					m_options->GetDaemonUsername(),
-					&lockOwned,
-					&warnTruncate);
-				if (err == 1)
+				int devNull = open("/dev/null", O_RDWR);
+				if (devNull >= 0)
 				{
-					error("Starting daemon failed: could not create lock-file %s", m_options->GetLockFile());
-					exit(1);
+					dup2(devNull, 0);
+					dup2(devNull, 1);
+					dup2(devNull, 2);
+					if (devNull > 2)
+					{
+						close(devNull);
+					}
 				}
-				if (err == 2)
+
+				int lfp = -1;
+				bool truncateFailed = false;
+				if (!Util::EmptyStr(m_options->GetLockFile()))
 				{
-					error("Starting daemon failed: lock-file %s is not a regular file", m_options->GetLockFile());
-					exit(1);
-				}
-				if (err == 3)
-				{
-					error("Starting daemon failed: could not acquire lock on lock-file %s", m_options->GetLockFile());
-					exit(1);
-				}
-				if (err == 4)
-				{
-					error("Starting daemon failed: invalid DaemonUsername");
-					exit(1);
-				}
-				if (err == 5)
-				{
-					error("Starting daemon failed: could not drop privileges");
-					exit(1);
-				}
-				if (lockOwned != 0)
-				{
+					lfp = open(m_options->GetLockFile(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0640);
+					if (lfp < 0)
+					{
+						error("Starting daemon failed: could not create lock-file %s", m_options->GetLockFile());
+						exit(1);
+					}
+					struct stat st{};
+					if (fstat(lfp, &st) != 0 || !S_ISREG(st.st_mode))
+					{
+						close(lfp);
+						error("Starting daemon failed: lock-file %s is not a regular file", m_options->GetLockFile());
+						exit(1);
+					}
+					if (lockf(lfp, F_TLOCK, 0) < 0)
+					{
+						close(lfp);
+						error("Starting daemon failed: could not acquire lock on lock-file %s", m_options->GetLockFile());
+						exit(1);
+					}
 					g_LockFileOwned = true;
+					if (ftruncate(lfp, 0) != 0)
+					{
+						truncateFailed = true;
+					}
 				}
-				if (warnTruncate != 0)
+
+				const char* daemonUser = m_options->GetDaemonUsername();
+				if (!Util::EmptyStr(daemonUser) && strcmp(daemonUser, "root") != 0 && (getuid() == 0 || geteuid() == 0))
+				{
+					passwd* pw = getpwnam(daemonUser);
+					if (!pw)
+					{
+						error("Starting daemon failed: invalid DaemonUsername");
+						exit(1);
+					}
+					if (lfp >= 0)
+					{
+						(void)fchown(lfp, pw->pw_uid, pw->pw_gid);
+					}
+					if (setgroups(0, nullptr) != 0 || setgid(pw->pw_gid) != 0 ||
+						initgroups(daemonUser, pw->pw_gid) != 0 || setuid(pw->pw_uid) != 0)
+					{
+						error("Starting daemon failed: could not drop privileges");
+						exit(1);
+					}
+				}
+
+				if (lfp >= 0)
+				{
+					BString<100> str("%d\n", getpid());
+					(void)write(lfp, str, strlen(str));
+				}
+
+				signal(SIGCHLD, SIG_IGN);
+				signal(SIGTSTP, SIG_IGN);
+				signal(SIGTTOU, SIG_IGN);
+				signal(SIGTTIN, SIG_IGN);
+
+				if (truncateFailed)
 				{
 					warn("Could not truncate lock-file %s", m_options->GetLockFile());
 				}

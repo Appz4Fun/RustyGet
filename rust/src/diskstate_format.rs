@@ -1348,19 +1348,6 @@ pub fn save_id_floor_file(queue_dir: &[u8], sep: u8, nzb_id: i32, file_id: i32) 
     true
 }
 
-/// # Safety
-/// `queue_dir` must be a valid NUL-terminated C string or null.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_save_id_floor(
-    queue_dir: *const c_char,
-    sep: c_char,
-    nzb_id: c_int,
-    file_id: c_int,
-) -> c_int {
-    let qd = unsafe { cstr_to_bytes(queue_dir) };
-    c_int::from(save_id_floor_file(qd, sep as u8, nzb_id, file_id))
-}
-
 /// `DiskState::RaiseIdsPastQueueDir` filename classifier.
 /// Returns `Some((id, is_nzb_log))` when the filename is `"n<id>.log"` or `"<id>"` / `"<id>s"` / `"<id>c"`.
 pub fn classify_queue_dir_id(filename: &[u8]) -> Option<(i32, bool)> {

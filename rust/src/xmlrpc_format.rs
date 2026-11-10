@@ -388,11 +388,6 @@ pub fn is_safe_command(cmd_id: c_int) -> bool {
     )
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_xmlrpc_is_safe_command(cmd_id: c_int) -> c_int {
-    is_safe_command(cmd_id) as c_int
-}
-
 /// # Safety
 /// `err_text` is null or a valid NUL-terminated string.
 #[no_mangle]
@@ -419,30 +414,6 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_error(
     }
     if out.len() > 1023 {
         out.truncate(1023);
-    }
-    into_buf(out)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_xmlrpc_format_bool(is_json: c_int, ok: c_int) -> RsBuf {
-    let json = is_json != 0;
-    let b = bool_str(json, ok != 0);
-    let mut out = Vec::with_capacity(32);
-    if json {
-        out.extend_from_slice(b.as_bytes());
-    } else {
-        let _ = write!(out, "<boolean>{}</boolean>", b);
-    }
-    into_buf(out)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_xmlrpc_format_int(is_json: c_int, value: c_int) -> RsBuf {
-    let mut out = Vec::with_capacity(32);
-    if is_json != 0 {
-        let _ = write!(out, "{}", value);
-    } else {
-        let _ = write!(out, "<i4>{}</i4>", value);
     }
     into_buf(out)
 }
@@ -2314,18 +2285,17 @@ fn format_json_f64(val: f64) -> String {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_xmlrpc_format_disk_speed(
-    is_json: c_int,
+pub fn format_disk_speed_bytes(
+    is_json: bool,
     write_bytes: u64,
     write_ms: f64,
     read_bytes: u64,
     read_ms: f64,
-) -> RsBuf {
+) -> Vec<u8> {
     let size_mb = write_bytes / 1024 / 1024;
     let read_size_mb = read_bytes / 1024 / 1024;
     let mut out = Vec::with_capacity(256);
-    if is_json != 0 {
+    if is_json {
         let _ = write!(
             out,
             "{{\"SizeMB\":{},\"DurationMS\":{},\"ReadSizeMB\":{},\"ReadDurationMS\":{}}}",
@@ -2341,16 +2311,12 @@ pub extern "C" fn nzbget_rs_xmlrpc_format_disk_speed(
             size_mb, write_ms, read_size_mb, read_ms
         );
     }
-    into_buf(out)
+    out
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_xmlrpc_format_network_speed(
-    is_json: c_int,
-    speed_mbps: f64,
-) -> RsBuf {
+pub fn format_network_speed_bytes(is_json: bool, speed_mbps: f64) -> Vec<u8> {
     let mut out = Vec::with_capacity(128);
-    if is_json != 0 {
+    if is_json {
         let _ = write!(out, "{{\"SpeedMbps\":{}}}", format_json_f64(speed_mbps));
     } else {
         let _ = write!(
@@ -2359,7 +2325,7 @@ pub extern "C" fn nzbget_rs_xmlrpc_format_network_speed(
             speed_mbps
         );
     }
-    into_buf(out)
+    out
 }
 
 /// Splits `XmlRpcProcessor::SetUrl` into `(path_set_len, query_offset)`.
@@ -2591,10 +2557,10 @@ mod tests {
     #[test]
     fn test_primitives_and_error_formatting() {
         unsafe {
-            assert_eq!(buf_to_string(nzbget_rs_xmlrpc_format_bool(1, 1)), "true");
-            assert_eq!(buf_to_string(nzbget_rs_xmlrpc_format_bool(0, 0)), "<boolean>0</boolean>");
-            assert_eq!(buf_to_string(nzbget_rs_xmlrpc_format_int(1, -42)), "-42");
-            assert_eq!(buf_to_string(nzbget_rs_xmlrpc_format_int(0, 42)), "<i4>42</i4>");
+            assert_eq!(format_bool_bytes(true, true), b"true");
+            assert_eq!(format_bool_bytes(false, false), b"<boolean>0</boolean>");
+            assert_eq!(format_int_bytes(true, -42), b"-42");
+            assert_eq!(format_int_bytes(false, 42), b"<i4>42</i4>");
 
             let msg = CString::new("Bad <param> \"x\"").unwrap();
             let err_json = buf_to_string(nzbget_rs_xmlrpc_format_error(1, 2, msg.as_ptr()));
@@ -2694,18 +2660,19 @@ mod tests {
             ));
             assert!(dup_xml.ends_with("<member><name>Status</name><value><string>DELETED/DUPE</string></value></member>\n"));
 
-            let d_json = buf_to_string(nzbget_rs_xmlrpc_format_disk_speed(
-                1,
+            let d_json = String::from_utf8(format_disk_speed_bytes(
+                true,
                 100 * 1024 * 1024,
                 250.5,
                 200 * 1024 * 1024,
                 125.0,
-            ));
+            ))
+            .unwrap();
             assert_eq!(
                 d_json,
                 "{\"SizeMB\":100,\"DurationMS\":250.5,\"ReadSizeMB\":200,\"ReadDurationMS\":125.0}"
             );
-            let n_xml = buf_to_string(nzbget_rs_xmlrpc_format_network_speed(0, 940.25));
+            let n_xml = String::from_utf8(format_network_speed_bytes(false, 940.25)).unwrap();
             assert_eq!(
                 n_xml,
                 "<value><struct><member><name>SpeedMbps</name><value><double>940.250000</double></value></member></struct></value>"

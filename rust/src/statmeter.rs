@@ -249,14 +249,6 @@ pub fn calc_month_slots_utc(loc_cur_time: i64, quota_start_day: i32) -> i32 {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_statmeter_calc_month_slots(
-    loc_cur_time: i64,
-    quota_start_day: std::os::raw::c_int,
-) -> std::os::raw::c_int {
-    calc_month_slots_utc(loc_cur_time, quota_start_day)
-}
-
 pub const SPEEDMETER_SLOTS: usize = 30;
 pub const SPEEDMETER_SLOTSIZE: i32 = 1;
 

@@ -563,7 +563,16 @@ pub fn copy_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
     let mut write_errno: i32 = 0;
     loop {
         let cnt = unsafe { sys::read(in_fd, buffer.as_mut_ptr().cast(), buffer.len()) as i64 };
-        if cnt <= 0 {
+        if cnt < 0 {
+            let err = last_errno();
+            if err == libc::EINTR {
+                continue;
+            }
+            write_errno = err;
+            ok = false;
+            break;
+        }
+        if cnt == 0 {
             break;
         }
         let mut off = 0usize;
@@ -572,8 +581,17 @@ pub fn copy_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
             let w = unsafe {
                 sys::write(out_fd, buffer[off..].as_ptr().cast(), (cnt as usize) - off)
             };
-            if w <= 0 {
-                write_errno = last_errno();
+            if w < 0 {
+                let err = last_errno();
+                if err == libc::EINTR {
+                    continue;
+                }
+                write_errno = err;
+                write_failed = true;
+                break;
+            }
+            if w == 0 {
+                write_errno = sys::EIO;
                 write_failed = true;
                 break;
             }

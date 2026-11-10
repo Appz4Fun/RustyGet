@@ -3486,6 +3486,15 @@ int nzbget_rs_stream_repair_ctrl_op(
     int64_t t1, int64_t t2, int64_t t3, double f1,
     const char* s1, const char* const* cstr_arr, const int64_t* i64_arr, size_t len,
     int* out1, int* out2, int64_t* i64_inout, NzbgetRsBuf* out_buf);
+int nzbget_rs_dupesearch_op(
+    int op, int a, int b, int c, int d, int e, int f, int g,
+    int64_t t1, int64_t t2, double f1,
+    const char* s1, const char* s2, const char* s3, const char* s4,
+    const char* const* cstr1, const char* const* cstr2,
+    const uint8_t* u8_1, const uint8_t* u8_2,
+    const int* i32_1, const int* i32_2,
+    const int64_t* i64_1, const int64_t* i64_2, size_t len,
+    int* out1, int* out2, int* out_arr, int64_t* out_i64, NzbgetRsBuf* out_buf);
 
 #include "nzbget_tls_cipher.h"
 

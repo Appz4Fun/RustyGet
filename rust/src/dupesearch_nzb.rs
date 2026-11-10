@@ -4459,6 +4459,173 @@ pub fn http_get_read_and_delete(path: &[u8], max_bytes: usize, read_body: bool) 
     result
 }
 
+pub fn parse_atoi_bytes(bytes: &[u8]) -> i32 {
+    c_atoi_bytes(bytes)
+}
+
+pub fn url_encode_percent(text: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = Vec::with_capacity(text.len());
+    for &ch in text {
+        if ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'_' || ch == b'.' || ch == b'~' {
+            out.push(ch);
+        } else {
+            out.push(b'%');
+            out.push(HEX[(ch >> 4) as usize]);
+            out.push(HEX[(ch & 0x0F) as usize]);
+        }
+    }
+    out
+}
+
+pub fn build_newznab_url_percent(
+    base: &[u8],
+    param_keys: &[&[u8]],
+    param_vals: &[&[u8]],
+    api_key: &[u8],
+) -> Vec<u8> {
+    let mut url = base.to_vec();
+    if let Some(scheme) = base.windows(3).position(|w| w == b"://") {
+        let after_scheme = scheme + 3;
+        let host_end = base[after_scheme..]
+            .iter()
+            .position(|&b| b == b'/' || b == b'?')
+            .map(|p| after_scheme + p)
+            .unwrap_or(base.len());
+        let query_start = base[host_end..]
+            .iter()
+            .position(|&b| b == b'?')
+            .map(|p| host_end + p)
+            .unwrap_or(base.len());
+        let path = &base[host_end..query_start];
+        if path.is_empty() || path == b"/" {
+            url.clear();
+            url.extend_from_slice(&base[..host_end]);
+            url.extend_from_slice(b"/api");
+            url.extend_from_slice(&base[query_start..]);
+        }
+    }
+    if url.contains(&b'?') {
+        url.push(b'&');
+    } else {
+        url.push(b'?');
+    }
+    let count = param_keys.len().min(param_vals.len());
+    for i in 0..count {
+        url.extend_from_slice(&url_encode_percent(param_keys[i]));
+        url.push(b'=');
+        url.extend_from_slice(&url_encode_percent(param_vals[i]));
+        url.push(b'&');
+    }
+    url.extend_from_slice(b"apikey=");
+    url.extend_from_slice(&url_encode_percent(api_key));
+    url
+}
+
+pub fn mark_searching_pending(
+    dir: &[u8],
+    job_name: &[u8],
+    job_dupe_key: &[u8],
+    rank_only: bool,
+) -> bool {
+    if dir.is_empty() {
+        return false;
+    }
+    let dir_path = dupe_bytes_to_path(dir);
+    let _ = std::fs::remove_dir_all(dir_path);
+    if std::fs::create_dir_all(dir_path).is_err() {
+        return false;
+    }
+    let norm_title = crate::releasename::normalize(job_name);
+    let low_key = lower_key(job_dupe_key);
+    let phase: &[u8] = if rank_only {
+        b"ranking\n"
+    } else {
+        b"searching\n"
+    };
+    dupe_write_atomic(&dir_path.join("pick-title"), &norm_title)
+        && dupe_write_atomic(&dir_path.join("pick-key"), &low_key)
+        && dupe_write_atomic(&dir_path.join("phase"), phase)
+}
+
+pub fn save_pending_header(
+    dir: &[u8],
+    job_name: &[u8],
+    job_dupe_key: &[u8],
+    pick_fingerprint: &[u8],
+) -> bool {
+    if dir.is_empty() {
+        return false;
+    }
+    let dir_path = dupe_bytes_to_path(dir);
+    let norm_title = crate::releasename::normalize(job_name);
+    let low_key = lower_key(job_dupe_key);
+    dupe_write_atomic(&dir_path.join("pick-title"), &norm_title)
+        && dupe_write_atomic(&dir_path.join("pick-key"), &low_key)
+        && dupe_write_atomic(&dir_path.join("pick-posting"), pick_fingerprint)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn save_pending_item(
+    dir: &[u8],
+    idx: usize,
+    title: &[u8],
+    indexer: &[u8],
+    grabs: i32,
+    size: i64,
+    date: i64,
+    data: &[u8],
+    same_inner: bool,
+) -> bool {
+    if dir.is_empty() {
+        return false;
+    }
+    let dir_path = dupe_bytes_to_path(dir);
+    let meta = format_pending_meta(title, indexer, grabs, size, date);
+    let inner: &[u8] = if same_inner { b"1\n" } else { b"0\n" };
+    dupe_write_atomic(&dir_path.join(format!("{idx}.nzb")), data)
+        && dupe_write_atomic(&dir_path.join(format!("{idx}.meta")), &meta)
+        && dupe_write_atomic(&dir_path.join(format!("{idx}.inner")), inner)
+}
+
+pub fn save_pending_finish(dir: &[u8]) -> bool {
+    if dir.is_empty() {
+        return false;
+    }
+    let dir_path = dupe_bytes_to_path(dir);
+    dupe_write_atomic(&dir_path.join("phase"), b"fetched\n")
+}
+
+pub fn check_pending_identity(
+    dir: &[u8],
+    job_name: &[u8],
+    job_dupe_key: &[u8],
+    pick_fingerprint: &[u8],
+) -> bool {
+    if dir.is_empty() {
+        return false;
+    }
+    let dir_path = dupe_bytes_to_path(dir);
+    let title_path = dir_path.join("pick-title");
+    if !std::fs::metadata(&title_path).is_ok_and(|m| !m.is_dir()) {
+        return false;
+    }
+    let saved_title = std::fs::read(&title_path).unwrap_or_default();
+    let saved_key = std::fs::read(dir_path.join("pick-key")).unwrap_or_default();
+    let saved_posting = std::fs::read(dir_path.join("pick-posting")).unwrap_or_default();
+    let cur_norm_title = crate::releasename::normalize(job_name);
+    let cur_lower_key = lower_key(job_dupe_key);
+    dupesearch_pending_identity_matches(
+        true,
+        &saved_title,
+        &cur_norm_title,
+        &saved_key,
+        &cur_lower_key,
+        &saved_posting,
+        pick_fingerprint,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

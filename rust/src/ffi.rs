@@ -15760,6 +15760,53 @@ pub unsafe extern "C" fn nzbget_rs_history_coord_op(
             ))
         }
         3 => crate::historycoord::classify_dup_status(a, b, c != 0),
+        4 => {
+            let min_time = crate::historycoord::calc_min_time(f, b);
+            crate::historycoord::classify_service_work_item(a, d, e, g, min_time, c != 0)
+        }
+        5 => c_int::from(crate::historycoord::should_delete_dest_dir(
+            a == 0,
+            b,
+            0,
+            c,
+            2,
+            d,
+            2,
+            5,
+            e != 0,
+        )),
+        6 => c_int::from(crate::historycoord::eval_requeue_loaded_file(
+            a,
+            0,
+            3,
+            2,
+            b != 0,
+            c != 0,
+            f,
+        )),
+        7 => {
+            let txt = if str_arg.is_null() {
+                &[][..]
+            } else {
+                input(str_arg)
+            };
+            c_int::from(crate::historycoord::is_temporary_output_name(txt))
+        }
+        8 => {
+            let txt = if str_arg.is_null() {
+                &[][..]
+            } else {
+                input(str_arg)
+            };
+            if txt.eq_ignore_ascii_case(b"YES")
+                || txt.eq_ignore_ascii_case(b"TRUE")
+                || txt == b"1"
+            {
+                3 // dsDupe
+            } else {
+                1 // dsManual
+            }
+        }
         _ => 0,
     }
 }
@@ -15850,6 +15897,22 @@ pub unsafe extern "C" fn nzbget_rs_queue_editor_op(
     inout1: *mut c_int,
     inout2: *mut c_int,
 ) -> c_int {
+    if op == 9 {
+        if !s1.is_null() && !s2.is_null() && !in1.is_null() && !inout1.is_null() && len1 > 0 {
+            let is_par = std::slice::from_raw_parts(s1 as *const u8, len1);
+            let has_vol = std::slice::from_raw_parts(s2 as *const u8, len1);
+            let sizes = std::slice::from_raw_parts(in1 as *const i64, len1);
+            let out_pause = std::slice::from_raw_parts_mut(inout1 as *mut u8, len1);
+            crate::queueeditor::select_pars_to_pause(
+                is_par,
+                has_vol,
+                sizes,
+                a != 0,
+                out_pause,
+            );
+        }
+        return 0;
+    }
     let b1 = if s1.is_null() { &[][..] } else { input(s1) };
     let b2 = if s2.is_null() { &[][..] } else { input(s2) };
     let sl1 = if in1.is_null() || len1 == 0 {
@@ -15917,6 +15980,22 @@ pub unsafe extern "C" fn nzbget_rs_queue_editor_op(
             f2,
             c != 0,
         )),
+        7 => crate::queueeditor::parse_dupe_mode(b1).unwrap_or(-1),
+        8 => {
+            let is_group_del = (18..=21).contains(&a);
+            if is_group_del && !inout1.is_null() {
+                let (parking, avoid_hist, set_dupe, cleanup_disk) =
+                    crate::queueeditor::eval_group_delete_flags(a, 19, 20, 21, b, c != 0, f1 as i32);
+                *inout1 = 1
+                    | (c_int::from(parking) << 1)
+                    | (c_int::from(avoid_hist) << 2)
+                    | (c_int::from(set_dupe) << 3)
+                    | (c_int::from(cleanup_disk) << 4);
+            } else if !inout1.is_null() {
+                *inout1 = 0;
+            }
+            crate::queueeditor::map_group_to_file_action(a)
+        }
         _ => 0,
     }
 }
@@ -18310,6 +18389,433 @@ pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_op(
         _ => 0,
     }
 }
+
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_dupesearch_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    d: c_int,
+    e: c_int,
+    f: c_int,
+    g: c_int,
+    t1: i64,
+    t2: i64,
+    f1: f64,
+    s1: *const c_char,
+    s2: *const c_char,
+    s3: *const c_char,
+    s4: *const c_char,
+    cstr1: *const *const c_char,
+    cstr2: *const *const c_char,
+    u8_1: *const u8,
+    u8_2: *const u8,
+    i32_1: *const c_int,
+    i32_2: *const c_int,
+    i64_1: *const i64,
+    i64_2: *const i64,
+    len: usize,
+    out1: *mut c_int,
+    out2: *mut c_int,
+    out_arr: *mut c_int,
+    out_i64: *mut i64,
+    out_buf: *mut RsBuf,
+) -> c_int {
+    let b_or_empty = |p: *const c_char| -> &[u8] {
+        if p.is_null() {
+            &[][..]
+        } else {
+            CStr::from_ptr(p).to_bytes()
+        }
+    };
+    let s1_bytes = b_or_empty(s1);
+    let s2_bytes = b_or_empty(s2);
+    let s3_bytes = b_or_empty(s3);
+    let s4_bytes = b_or_empty(s4);
+    match op {
+        0 => {
+            let mut keys = Vec::with_capacity(len);
+            let mut vals = Vec::with_capacity(len);
+            if !cstr1.is_null() && !cstr2.is_null() && len > 0 {
+                let ks = std::slice::from_raw_parts(cstr1, len);
+                let vs = std::slice::from_raw_parts(cstr2, len);
+                for i in 0..len {
+                    keys.push(b_or_empty(ks[i]));
+                    vals.push(b_or_empty(vs[i]));
+                }
+            }
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::dupesearch_nzb::build_newznab_url_percent(
+                    s1_bytes, &keys, &vals, s2_bytes,
+                ));
+            }
+            0
+        }
+        1 => c_int::from(crate::dupesearch_nzb::saved_history_backup(
+            a != 0,
+            b as u32,
+            c,
+            d as u32,
+            3,
+            6,
+        )),
+        2 => {
+            let qf_exists = !s1_bytes.is_empty()
+                && crate::fsops::file_exists(s1_bytes, &crate::fsops::posix_stat);
+            let has_marked_alive = !s2.is_null();
+            let marked_alive_val = if has_marked_alive {
+                crate::dupesearch_nzb::parse_atoi_bytes(s2_bytes)
+            } else {
+                0
+            };
+            c_int::from(crate::dupesearch_nzb::placement_available(
+                (a & 1) != 0,
+                (a & 2) != 0,
+                (a & 4) != 0,
+                b,
+                0,
+                1,
+                3,
+                6,
+                c,
+                1,
+                d,
+                2,
+                (a & 8) != 0,
+                (a & 16) != 0,
+                (a & 32) != 0,
+                (a & 64) != 0,
+                (a & 128) != 0,
+                e as u32,
+                f as u32,
+                qf_exists,
+                g,
+                t1 as i32,
+                (a & 256) != 0,
+                has_marked_alive,
+                marked_alive_val,
+            ))
+        }
+        3 => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::dupesearch_nzb::lower_key(s1_bytes));
+            }
+            0
+        }
+        4 => {
+            let qf = if !cstr1.is_null() {
+                b_or_empty(*cstr1)
+            } else {
+                &[][..]
+            };
+            let item_low = crate::dupesearch_nzb::lower_key(s1_bytes);
+            let same_key = item_low.as_slice() == s2_bytes;
+            let same_rel = crate::releasename::same_release(s3_bytes, s4_bytes);
+            let add_known = d == 0 && !qf.is_empty() && f != 1 && (same_key || same_rel);
+            let item_score = (t1 >> 32) as i32;
+            let pick_score = (t1 as u32) as i32;
+            let item_hash = (t2 >> 32) as u32;
+            let pick_hash = t2 as u32;
+            let add_member = if a == 0 {
+                crate::dupesearch_nzb::dupesearch_is_rank_only_queued_member(
+                    b != 0,
+                    c != 0,
+                    d,
+                    0,
+                    e,
+                    0,
+                    g != 0,
+                    f,
+                    0,
+                    3,
+                    item_score,
+                    pick_score,
+                ) && same_key
+                    && same_rel
+                    && !qf.is_empty()
+                    && !qf.contains(&b'|')
+            } else {
+                c == 0
+                    && crate::dupesearch_nzb::saved_history_backup(
+                        true, pick_hash, f, item_hash, 3, 6,
+                    )
+                    && same_key
+                    && same_rel
+                    && !qf.is_empty()
+                    && !qf.contains(&b'|')
+            };
+            c_int::from(add_known) | (c_int::from(add_member) << 1)
+        }
+        5 => crate::dupesearch_nzb::dupesearch_calc_expand_budget_ms(a, t1, t2),
+        6 => {
+            let reason = crate::dupesearch_nzb::dupesearch_classify_search_retry_reason(
+                a,
+                b,
+                c != 0,
+                d != 0,
+                e,
+                f,
+                g,
+            );
+            if reason != 0 && !out_buf.is_null() {
+                let msg: &[u8] = match reason {
+                    1 => b"no indexer answered",
+                    2 => b"an indexer query failed and nothing came back",
+                    _ => b"no posting could be fetched",
+                };
+                *out_buf = into_buf(msg.to_vec());
+            }
+            reason
+        }
+        7 => {
+            if !i64_1.is_null() && !i32_1.is_null() && !i64_2.is_null() && !out_arr.is_null() && len > 0 {
+                let tb = std::slice::from_raw_parts(i64_1, len);
+                let gr = std::slice::from_raw_parts(i32_1, len);
+                let dt = std::slice::from_raw_parts(i64_2, len);
+                let mut order = vec![0usize; len];
+                crate::dupesearch_nzb::sort_verified_postings(tb, gr, dt, t1, &mut order);
+                let out_s = std::slice::from_raw_parts_mut(out_arr, len);
+                for i in 0..len {
+                    out_s[i] = order[i] as c_int;
+                }
+            }
+            0
+        }
+        8 => {
+            let (score, pct, add_zero) = crate::dupesearch_nzb::eval_member_rerank(
+                a,
+                b,
+                c,
+                d,
+                f1,
+                e != 0,
+            );
+            if !out1.is_null() {
+                *out1 = pct;
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(add_zero);
+            }
+            score
+        }
+        9 => {
+            let mut keys = Vec::with_capacity(len);
+            let counts = if i32_1.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(i32_1, len)
+            };
+            if !cstr1.is_null() && len > 0 {
+                for &p in std::slice::from_raw_parts(cstr1, len) {
+                    keys.push(b_or_empty(p));
+                }
+            }
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::dupesearch_nzb::dupesearch_format_rejected_outcome(
+                    &keys, counts,
+                ));
+            }
+            0
+        }
+        10 => {
+            let (_, retry_disc, rank_inc) = crate::dupesearch_nzb::dupesearch_eval_post_place_retry(
+                a != 0,
+                b != 0,
+                c != 0,
+                d as usize,
+            );
+            if !out1.is_null() {
+                *out1 = c_int::from(retry_disc);
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(rank_inc);
+            }
+            0
+        }
+        11 => {
+            let pick_norm = crate::releasename::normalize(s3_bytes);
+            let job_norm = crate::releasename::normalize(s4_bytes);
+            let code = crate::dupesearch_nzb::eval_pick_gone(
+                a != 0,
+                b != 0,
+                c,
+                1,
+                s1_bytes,
+                s2_bytes,
+                &pick_norm,
+                &job_norm,
+            );
+            if code != 0 && !out_buf.is_null() {
+                let msg: &[u8] = match code {
+                    1 => b"the pick was deleted",
+                    2 => b"the duplicate key of the pick changed",
+                    _ => b"the name of the pick changed",
+                };
+                *out_buf = into_buf(msg.to_vec());
+            }
+            code
+        }
+        12 => c_int::from(crate::dupesearch_nzb::mark_searching_pending(
+            s1_bytes,
+            s2_bytes,
+            s3_bytes,
+            a != 0,
+        )),
+        13 => c_int::from(crate::dupesearch_nzb::save_pending_header(
+            s1_bytes, s2_bytes, s3_bytes, s4_bytes,
+        )),
+        14 => {
+            let data = if u8_1.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(u8_1, len)
+            };
+            c_int::from(crate::dupesearch_nzb::save_pending_item(
+                s1_bytes,
+                a as usize,
+                s2_bytes,
+                s3_bytes,
+                b,
+                t1,
+                t2,
+                data,
+                c != 0,
+            ))
+        }
+        15 => c_int::from(crate::dupesearch_nzb::save_pending_finish(s1_bytes)),
+        16 => crate::dupesearch_nzb::dupesearch_parse_pending_dir_id(s1_bytes),
+        17 => c_int::from(crate::dupesearch_nzb::check_pending_identity(
+            s1_bytes, s2_bytes, s3_bytes, s4_bytes,
+        )),
+        18 => {
+            let (alive, dead, comp) = crate::dupesearch_nzb::eval_fleet_member_health(
+                a != 0,
+                b != 0,
+                c,
+                d,
+                e,
+                f,
+                g,
+            );
+            if !out1.is_null() {
+                *out1 = alive;
+            }
+            if !out2.is_null() {
+                *out2 = c_int::from(dead);
+            }
+            c_int::from(comp)
+        }
+        19 => {
+            if !u8_1.is_null()
+                && !i32_1.is_null()
+                && !u8_2.is_null()
+                && !i32_2.is_null()
+                && !i64_1.is_null()
+                && !out_arr.is_null()
+                && len > 0
+            {
+                let has_err = std::slice::from_raw_parts(u8_1, len);
+                let same_as = std::slice::from_raw_parts(i32_1, len);
+                let dead = std::slice::from_raw_parts(u8_2, len);
+                let alive = std::slice::from_raw_parts(i32_2, len);
+                let tb = std::slice::from_raw_parts(i64_1, len);
+                let mut ranked = vec![0usize; len];
+                let n = crate::dupesearch_nzb::rank_fleet_candidates(
+                    has_err,
+                    same_as,
+                    dead,
+                    alive,
+                    tb,
+                    &mut ranked,
+                );
+                let out_s = std::slice::from_raw_parts_mut(out_arr, n);
+                for i in 0..n {
+                    out_s[i] = ranked[i] as c_int;
+                }
+                return n as c_int;
+            }
+            0
+        }
+        20 => {
+            if a != 0 || !s1_bytes.eq_ignore_ascii_case(s2_bytes) {
+                return 0;
+            }
+            if !out1.is_null() && !out2.is_null() && !out_arr.is_null() && !out_i64.is_null() {
+                let (nt, nl, nrid, nrsc) = crate::dupesearch_nzb::fleet_update_key_score_bounds(
+                    *out_i64,
+                    *out1,
+                    g != 0,
+                    b != 0,
+                    c != 0,
+                    d,
+                    0,
+                    *out2,
+                    *out_arr,
+                    e,
+                    f,
+                );
+                *out_i64 = nt;
+                *out1 = nl;
+                *out2 = nrid;
+                *out_arr = nrsc;
+            }
+            1
+        }
+        21 => crate::dupesearch_nzb::fleet_calc_member_add_score(a, b, t1, c),
+        22 => {
+            let mut reason_bytes = s2_bytes.to_vec();
+            let mut updated_reason = 0;
+            if a == 0 && reason_bytes.is_empty() {
+                let code = crate::dupesearch_nzb::eval_fleet_outcome_reason(
+                    c != 0,
+                    d != 0,
+                    e != 0,
+                    f != 0,
+                );
+                let r: &[u8] = match code {
+                    0 => b"NO_USABLE_MEMBERS",
+                    1 => b"INCOMPLETE",
+                    2 => b"ALL_DEAD",
+                    3 => b"ALREADY_DOWNLOADED",
+                    _ => b"NOT_QUEUED",
+                };
+                reason_bytes = r.to_vec();
+                updated_reason = 1;
+                if !out1.is_null() {
+                    *out1 = code;
+                }
+            }
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::dupesearch_nzb::fleet_format_summary_log(
+                    g,
+                    s1_bytes,
+                    a,
+                    &reason_bytes,
+                    b != 0,
+                ));
+            }
+            updated_reason
+        }
+        23 => c_int::from(crate::dupesearch_nzb::dupesearch_is_better_parent_candidate(
+            a != 0,
+            b,
+            0,
+            c != 0,
+            d,
+            0,
+            e != 0,
+            crate::dupesearch_nzb::lower_key(s1_bytes).as_slice() == s2_bytes,
+            f,
+            g,
+            t1 != 0,
+            t2 as i32,
+        )),
+        _ => 0,
+    }
+}
+
 
 
 

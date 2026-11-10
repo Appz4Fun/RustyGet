@@ -11955,39 +11955,25 @@ mod tests {
             }));
         }
 
-        // 27. ContentMapRustFfiBoundaryTest (calls the actual exported extern "C" ABI functions)
-        unsafe {
+        // 27. ContentMapRustBoundaryTest
+        {
             let m_ids = [10i32, 20];
             let d_bases = [0i64, 100];
             let m_sizes = [100i64, 100];
-            let mut out_members = [NzbgetRsMemberRange {
-                member_index: 0,
-                offset: 0,
-                size: 0,
-            }; 4];
-            let n_comp = crate::ffi::nzbget_rs_composite_to_members(
-                m_ids.as_ptr(),
-                d_bases.as_ptr(),
-                m_sizes.as_ptr(),
-                2,
+            let n_comp = composite_to_members(
+                &m_ids,
+                &d_bases,
+                &m_sizes,
                 NzbgetRsByteRange {
                     offset: 50,
                     size: 100,
                 },
-                out_members.as_mut_ptr(),
-                out_members.len(),
             );
-            assert_eq!(n_comp, 2);
+            assert_eq!(n_comp.len(), 2);
 
             let holes = [NzbgetRsByteRange { offset: 10, size: 20 }];
-            assert_eq!(
-                crate::ffi::nzbget_rs_holed_source_intersects(holes.as_ptr(), 1, 15, 5),
-                1
-            );
-            assert_eq!(
-                crate::ffi::nzbget_rs_holed_source_intersects(holes.as_ptr(), 1, 0, 10),
-                0
-            );
+            assert!(holed_source_intersects(&holes, 15, 5));
+            assert!(!holed_source_intersects(&holes, 0, 10));
 
             let runs = [NzbgetRsContentRun {
                 inner_offset: 0,
@@ -11995,133 +11981,50 @@ mod tests {
                 member_offset: 100,
                 size: 50,
             }];
-            let mut out_ranges = [NzbgetRsByteRange { offset: 0, size: 0 }; 4];
             assert_eq!(
-                crate::ffi::nzbget_rs_content_map_to_inner(
-                    runs.as_ptr(),
-                    1,
+                content_map_to_inner(
+                    &runs,
                     0,
                     NzbgetRsByteRange {
                         offset: 110,
                         size: 20,
                     },
-                    out_ranges.as_mut_ptr(),
-                    out_ranges.len(),
-                ),
+                )
+                .len(),
                 1
             );
             assert_eq!(
-                crate::ffi::nzbget_rs_content_map_from_inner(
-                    runs.as_ptr(),
-                    1,
-                    NzbgetRsByteRange { offset: 10, size: 20 },
-                    out_members.as_mut_ptr(),
-                    out_members.len(),
-                ),
+                content_map_from_inner(&runs, NzbgetRsByteRange { offset: 10, size: 20 }).len(),
                 1
             );
             let c_offs = [100i64];
             let c_sizes = [64i64];
             let has_c = [1u8];
             assert_eq!(
-                crate::ffi::nzbget_rs_content_map_cipher_range(
-                    runs.as_ptr(),
-                    c_offs.as_ptr(),
-                    c_sizes.as_ptr(),
-                    has_c.as_ptr(),
-                    1,
+                content_map_cipher_range(
+                    &runs,
+                    &c_offs,
+                    &c_sizes,
+                    &has_c,
                     NzbgetRsByteRange { offset: 0, size: 32 },
-                    out_members.as_mut_ptr(),
-                    out_members.len(),
-                ),
+                )
+                .len(),
                 1
             );
 
-            unsafe extern "C" fn collect_group_set(
-                ctx: *mut std::ffi::c_void,
-                format: i32,
-                members: *const i32,
-                count: usize,
-            ) {
-                let out = unsafe { &mut *(ctx as *mut Vec<(i32, Vec<i32>)>) };
-                let slice = unsafe { std::slice::from_raw_parts(members, count) };
-                out.push((format, slice.to_vec()));
-            }
-            let c_names = [c"movie.part01.rar".as_ptr(), c"movie.part02.rar".as_ptr()];
-            let mut grouped: Vec<(i32, Vec<i32>)> = Vec::new();
-            crate::ffi::nzbget_rs_content_mapper_group_sets(
-                c_names.as_ptr(),
-                c_names.len(),
-                (&mut grouped as *mut Vec<(i32, Vec<i32>)>).cast(),
-                Some(collect_group_set),
-            );
+            let grouped = content_mapper_group_sets(&[b"movie.part01.rar", b"movie.part02.rar"]);
             assert_eq!(grouped.len(), 1);
 
             let uncoalesced = [
                 NzbgetRsByteRange { offset: 0, size: 10 },
                 NzbgetRsByteRange { offset: 10, size: 10 },
             ];
-            assert_eq!(
-                crate::ffi::nzbget_rs_content_mapper_coalesce_ranges(
-                    uncoalesced.as_ptr(),
-                    uncoalesced.len(),
-                    out_ranges.as_mut_ptr(),
-                    out_ranges.len(),
-                ),
-                1
-            );
+            assert_eq!(content_mapper_coalesce_ranges(&uncoalesced).len(), 1);
 
-            unsafe extern "C" fn fail_read_cb(
-                _ctx: *mut std::ffi::c_void,
-                _idx: i32,
-                _off: i64,
-                _buf: *mut u8,
-                _size: i64,
-            ) -> i32 {
-                0
-            }
-            unsafe extern "C" fn noop_ok_cb(
-                _ctx: *mut std::ffi::c_void,
-                _name: *const std::ffi::c_char,
-                _size: i64,
-                _runs: *const NzbgetRsContentRun,
-                _count: usize,
-            ) {
-            }
-            unsafe extern "C" fn capture_skip_cb(
-                ctx: *mut std::ffi::c_void,
-                reason: *const std::ffi::c_char,
-            ) {
-                let s = unsafe { &mut *(ctx as *mut String) };
-                *s = unsafe { std::ffi::CStr::from_ptr(reason) }
-                    .to_string_lossy()
-                    .into_owned();
-            }
             let member_idx = [0i32];
             let member_sz = [10i64];
-            let mut zip_skip = String::new();
-            crate::ffi::nzbget_rs_content_mapper_build_zip_map(
-                member_idx.as_ptr(),
-                member_sz.as_ptr(),
-                1,
-                (&mut zip_skip as *mut String).cast(),
-                Some(fail_read_cb),
-                Some(noop_ok_cb),
-                Some(capture_skip_cb),
-            );
-            assert!(!zip_skip.is_empty());
-
-            let mut seven_skip = String::new();
-            crate::ffi::nzbget_rs_content_mapper_build_seven_zip_map(
-                member_idx.as_ptr(),
-                member_sz.as_ptr(),
-                1,
-                (&mut seven_skip as *mut String).cast(),
-                Some(fail_read_cb),
-                Some(noop_ok_cb),
-                Some(capture_skip_cb),
-            );
-            assert!(!seven_skip.is_empty());
+            assert!(content_mapper_build_zip_map(&member_idx, &member_sz, |_, _, _| false).is_err());
+            assert!(content_mapper_build_seven_zip_map(&member_idx, &member_sz, |_, _, _| false).is_err());
 
             // Verify on_rar_volume_parsed is invoked for RAR volume mapping diagnostics.
             let rar_vol =
@@ -12225,22 +12128,24 @@ mod tests {
             }
 
             let mut target_debug_lines: Vec<String> = Vec::new();
-            let session = crate::ffi::nzbget_rs_cross_pack_session_new(
-                dest_c.as_ptr(),
-                member_ptrs.as_ptr(),
-                1,
-                target_ptrs.as_ptr(),
-                target_sizes.as_ptr(),
-                target_eligible.as_ptr(),
-                target_hole_counts.as_ptr(),
-                target_holes_flat.as_ptr(),
-                1,
-                std::ptr::null(),
-                (&mut target_debug_lines as *mut Vec<String>).cast(),
-                None,
-                None,
-                Some(capture_debug_line),
-            );
+            let session = unsafe {
+                crate::ffi::nzbget_rs_cross_pack_session_new(
+                    dest_c.as_ptr(),
+                    member_ptrs.as_ptr(),
+                    1,
+                    target_ptrs.as_ptr(),
+                    target_sizes.as_ptr(),
+                    target_eligible.as_ptr(),
+                    target_hole_counts.as_ptr(),
+                    target_holes_flat.as_ptr(),
+                    1,
+                    std::ptr::null(),
+                    (&mut target_debug_lines as *mut Vec<String>).cast(),
+                    None,
+                    None,
+                    Some(capture_debug_line),
+                )
+            };
             assert!(!session.is_null());
             assert_eq!(
                 target_debug_lines,
@@ -12298,32 +12203,34 @@ mod tests {
             let donor_art_counts = [1usize];
             let donor_art_sizes = [donor_rar_vol.len() as i32];
 
-            crate::ffi::nzbget_rs_cross_pack_session_process_donor(
-                session,
-                c"".as_ptr(),
-                c"Donor.RAR".as_ptr(),
-                c"".as_ptr(),
-                donor_file_ptrs.as_ptr(),
-                donor_file_sizes.as_ptr(),
-                donor_art_counts.as_ptr(),
-                donor_art_sizes.as_ptr(),
-                1,
-                0,
-                (&mut donor_ctx as *mut FfiDonorDiagCtx).cast(),
-                None,
-                Some(fetch_donor_rar_part),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(capture_donor_debug_line),
-            );
+            unsafe {
+                crate::ffi::nzbget_rs_cross_pack_session_process_donor(
+                    session,
+                    c"".as_ptr(),
+                    c"Donor.RAR".as_ptr(),
+                    c"".as_ptr(),
+                    donor_file_ptrs.as_ptr(),
+                    donor_file_sizes.as_ptr(),
+                    donor_art_counts.as_ptr(),
+                    donor_art_sizes.as_ptr(),
+                    1,
+                    0,
+                    (&mut donor_ctx as *mut FfiDonorDiagCtx).cast(),
+                    None,
+                    Some(fetch_donor_rar_part),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(capture_donor_debug_line),
+                );
+            }
             assert_eq!(
                 donor_ctx.debug_lines,
                 vec![
@@ -12332,10 +12239,10 @@ mod tests {
                 ]
             );
             assert_eq!(
-                crate::ffi::nzbget_rs_cross_pack_session_has_inner_holes(session),
+                unsafe { crate::ffi::nzbget_rs_cross_pack_session_has_inner_holes(session) },
                 0
             );
-            crate::ffi::nzbget_rs_cross_pack_session_free(session);
+            unsafe { crate::ffi::nzbget_rs_cross_pack_session_free(session) };
             let _ = std::fs::remove_dir_all(&tmp_dir);
         }
     }
@@ -12870,10 +12777,6 @@ mod tests {
         assert!(!is_stream_eligible(b"movie.par2"));
         assert!(!is_stream_eligible(b"noextension"));
         assert!(!is_stream_eligible(b""));
-        assert_eq!(
-            unsafe { crate::ffi::nzbget_rs_stream_is_eligible(std::ptr::null()) },
-            0
-        );
 
         // 2. StreamRepairComputeHolesTest
         let holes = compute_holes(&[br(0, 300), br(500, 300)], 1000);
@@ -13454,11 +13357,6 @@ mod tests {
         assert_eq!(suffix_key(b"archive.7z.001"), b"7z.001");
         assert!(suffix_key(b"noextension").is_empty());
         assert!(suffix_key(b"").is_empty());
-        unsafe {
-            let null_suf = crate::ffi::nzbget_rs_stream_suffix_key(std::ptr::null());
-            assert_eq!(null_suf.len, 0);
-            crate::ffi::nzbget_rs_free(null_suf);
-        }
 
         // 20. StreamRepairRefusesParTargetCandidatesTest & StreamRepairExcludesParDonorCandidatesTest
         assert!(select_donor_candidates(
@@ -13923,122 +13821,35 @@ mod tests {
         assert_eq!(crate::dupefallback::blocks_touched(&[], block), 0);
         assert_eq!(crate::dupefallback::blocks_touched(&[br(0, 10)], 0), 0);
 
-        // 27. StreamRepairRustFfiBoundaryTest
-        unsafe {
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_is_eligible(c"movie.mkv".as_ptr()),
-                1
-            );
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_is_eligible(c"movie.par2".as_ptr()),
-                0
-            );
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_decoded_size_plausible(980, 1000),
-                1
-            );
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_exceeds_decompress_cap(0, 1024, 0, 1024),
-                0
-            );
+        // 27. StreamRepairRustBoundaryTest
+        {
+            assert!(is_stream_eligible(b"movie.mkv"));
+            assert!(!is_stream_eligible(b"movie.par2"));
+            assert!(decoded_size_plausible(980, 1000));
+            assert!(!exceeds_decompress_cap(0, 1024, 0, 1024));
 
             assert_eq!(volume_set_key(b"Show.part01.rar"), b"show.part#.rar");
-
-            let vol_key = crate::ffi::nzbget_rs_stream_volume_key(c"Show.part01.rar".as_ptr());
-            assert_eq!(
-                std::slice::from_raw_parts(vol_key.data.cast::<u8>(), vol_key.len),
-                b"part1.rar"
-            );
-            crate::ffi::nzbget_rs_free(vol_key);
-
-            let suf_key = crate::ffi::nzbget_rs_stream_suffix_key(c"Show.part01.rar".as_ptr());
-            assert_eq!(
-                std::slice::from_raw_parts(suf_key.data.cast::<u8>(), suf_key.len),
-                b"part01.rar"
-            );
-            crate::ffi::nzbget_rs_free(suf_key);
+            assert_eq!(volume_key(b"Show.part01.rar"), b"part1.rar");
+            assert_eq!(suffix_key(b"Show.part01.rar"), b"part01.rar");
 
             let r = [br(0, 100), br(200, 100)];
             assert_eq!(total_size(&r), 200);
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_intersects_any(br(50, 20), r.as_ptr(), 2),
-                1
-            );
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_intersects_any(br(110, 50), r.as_ptr(), 2),
-                0
-            );
+            assert!(intersects_any(br(50, 20), &r));
+            assert!(!intersects_any(br(110, 50), &r));
 
-            let mut out_holes = [br(0, 0); 4];
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_compute_holes(
-                    r.as_ptr(),
-                    2,
-                    300,
-                    out_holes.as_mut_ptr(),
-                    4
-                ),
-                1
-            );
-            assert_eq!(out_holes[0], br(100, 100));
+            let out_holes = compute_holes(&r, 300);
+            assert_eq!(out_holes, vec![br(100, 100)]);
 
             let adv_sizes = [150i32, 150];
             assert_eq!(estimate_donor_ranges(&adv_sizes, 300).len(), 2);
 
-            let mut probes = [0i32; 2];
-            assert!(
-                crate::ffi::nzbget_rs_stream_select_probe_parts(
-                    r.as_ptr(),
-                    2,
-                    out_holes.as_ptr(),
-                    1,
-                    2,
-                    probes.as_mut_ptr(),
-                    2
-                ) >= 1
-            );
-
-            let mut sub = [br(0, 0); 4];
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_subtract_covered(
-                    r.as_ptr(),
-                    2,
-                    br(0, 100),
-                    sub.as_mut_ptr(),
-                    4
-                ),
-                1
-            );
-
-            let mut win = [br(0, 0); 4];
-            assert!(
-                crate::ffi::nzbget_rs_stream_build_probe_windows(
-                    300,
-                    out_holes.as_ptr(),
-                    1,
-                    out_holes.as_ptr(),
-                    1,
-                    2,
-                    16,
-                    win.as_mut_ptr(),
-                    4
-                ) >= 1
-            );
+            assert!(!select_probe_parts(&r, &out_holes, 2).is_empty());
+            assert_eq!(subtract_covered(&r, br(0, 100)).len(), 1);
+            assert!(!build_probe_windows(300, &out_holes, &out_holes, 2, 16).is_empty());
 
             let five_holes = [br(0, 100), br(100_000, 100), br(200_000, 100)];
-            let mut five_win = [br(0, 0); 5];
             assert_eq!(
-                crate::ffi::nzbget_rs_stream_build_probe_windows(
-                    300_000,
-                    five_holes.as_ptr(),
-                    3,
-                    five_holes.as_ptr(),
-                    3,
-                    2,
-                    16,
-                    five_win.as_mut_ptr(),
-                    5
-                ),
+                build_probe_windows(300_000, &five_holes, &five_holes, 2, 16).len(),
                 5
             );
 
@@ -14048,48 +13859,15 @@ mod tests {
                 member_offset: 0,
                 size: 1_000_000,
             }];
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_plain_compare_floor(
-                    runs.as_ptr(),
-                    1,
-                    out_holes.as_ptr(),
-                    1,
-                    r.as_ptr(),
-                    1
-                ),
-                100
-            );
-
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_encrypted_chain_start(
-                    32,
-                    64,
-                    16,
-                    out_holes.as_ptr(),
-                    1
-                ),
-                32
-            );
+            assert_eq!(plain_compare_floor(&runs, &out_holes, &r[..1]), 100);
+            assert_eq!(encrypted_chain_start(32, 64, 16, &out_holes), 32);
 
             let varied = [1u8, 2, 3, 4];
-            assert_eq!(
-                crate::ffi::nzbget_rs_stream_buffer_has_varied_data(varied.as_ptr(), 4),
-                1
-            );
+            assert!(buffer_has_varied_data(&varied));
 
-            let names = [c"b.rar".as_ptr(), c"a.rar".as_ptr()];
+            let names: [&[u8]; 2] = [b"b.rar", b"a.rar"];
             let sizes = [1000i64, 1000];
-            let mut rank = -1i32;
-            let mut window = 0i32;
-            crate::ffi::nzbget_rs_stream_compute_positional_rank(
-                names.as_ptr(),
-                sizes.as_ptr(),
-                2,
-                c"b.rar".as_ptr(),
-                980,
-                &mut rank,
-                &mut window,
-            );
+            let (rank, window) = compute_positional_rank(&names, &sizes, b"b.rar", 980);
             assert_eq!(rank, 1);
             assert_eq!(window, 2);
         }

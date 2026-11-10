@@ -9830,10 +9830,7 @@ public:
 
 		for (const char* name : { "queue", "history" })
 		{
-			NzbgetRsBuf qBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				g_Options->GetQueueDir(), PATH_SEPARATOR, name);
-			FileSystem::DeleteFile(qBuf.data ? qBuf.data : "");
-			nzbget_rs_free(qBuf);
+			FileSystem::DeleteFile(CString::FormatStr("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, name));
 		}
 
 		DirBrowser dir(g_Options->GetQueueDir());
@@ -9866,11 +9863,7 @@ public:
 		// were deleted. Load it so both generators continue past those IDs.
 		for (const char* name : { "queue", "history", "ids" })
 		{
-			NzbgetRsBuf qBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				g_Options->GetQueueDir(), PATH_SEPARATOR, name);
-			bool exists = FileSystem::FileExists(qBuf.data ? qBuf.data : "");
-			nzbget_rs_free(qBuf);
-			if (exists)
+			if (FileSystem::FileExists(CString::FormatStr("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, name)))
 			{
 				return true;
 			}
@@ -9921,10 +9914,7 @@ public:
 
 			if (garbage)
 			{
-				NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					g_Options->GetTempDir(), PATH_SEPARATOR, filename);
-				FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
-				nzbget_rs_free(fullFnBuf);
+				FileSystem::DeleteFile(CString::FormatStr("%s%c%s", g_Options->GetTempDir(), PATH_SEPARATOR, filename));
 			}
 		}
 	}
@@ -10105,10 +10095,7 @@ public:
 
 	void WriteCacheFlag()
 	{
-		NzbgetRsBuf flagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
-		BString<1024> flagFilename = flagBuf.data ? flagBuf.data : "";
-		nzbget_rs_free(flagBuf);
+		BString<1024> flagFilename("%s%cacache", g_Options->GetQueueDir(), PATH_SEPARATOR);
 
 		StateDiskFile outfile;
 		if (!outfile.Open(flagFilename, StateDiskFile::omWrite))
@@ -10122,10 +10109,7 @@ public:
 
 	void DeleteCacheFlag()
 	{
-		NzbgetRsBuf flagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
-		FileSystem::DeleteFile(flagBuf.data ? flagBuf.data : "");
-		nzbget_rs_free(flagBuf);
+		FileSystem::DeleteFile(CString::FormatStr("%s%cacache", g_Options->GetQueueDir(), PATH_SEPARATOR));
 	}
 
 	void AppendNzbMessage(int nzbId, Message::EKind kind, const char* text)
@@ -10230,10 +10214,7 @@ private:
 		// and without them its id went to the next download after a restart (a client
 		// that still knew the old id then edited or deleted the new download)
 		CharBuffer ids;
-		NzbgetRsBuf idsPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, "ids");
-		BString<1024> idsFilename = idsPathBuf.data ? idsPathBuf.data : "";
-		nzbget_rs_free(idsPathBuf);
+		BString<1024> idsFilename("%s%cids", g_Options->GetQueueDir(), PATH_SEPARATOR);
 		if (FileSystem::FileExists(idsFilename) && FileSystem::LoadFileIntoBuffer(idsFilename, ids, true))
 		{
 			int nzbId = 0;
@@ -10290,10 +10271,7 @@ private:
 			{
 				continue;
 			}
-			NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-			BString<1024> path = pathBuf.data ? pathBuf.data : "";
-			nzbget_rs_free(pathBuf);
+			BString<1024> path("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
 			DiskFile file;
 			char header[100] = {0};
 			if (!file.Open(path, DiskFile::omRead) || !file.ReadLine(header, sizeof(header)))
@@ -10345,10 +10323,7 @@ private:
 		time_t now = Util::CurrentTime();
 		for (const char* name : { "queue", "history", "progress" })
 		{
-			NzbgetRsBuf fnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				g_Options->GetQueueDir(), PATH_SEPARATOR, name);
-			BString<1024> filename = fnBuf.data ? fnBuf.data : "";
-			nzbget_rs_free(fnBuf);
+			BString<1024> filename("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, name);
 			if (FileSystem::FileExists(filename))
 			{
 				CString keptName = CString::FormatStr("%s.unreadable-%lld", *filename, (long long)now);
@@ -11343,10 +11318,7 @@ private:
 					}
 					if (forceDirectWrite && destDir && !Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()))
 					{
-						NzbgetRsBuf forceDestBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-							destDir, PATH_SEPARATOR, fileInfo->GetFilename());
-						hasForceDest = FileSystem::FileExists(forceDestBuf.data ? forceDestBuf.data : "");
-						nzbget_rs_free(forceDestBuf);
+						hasForceDest = FileSystem::FileExists(CString::FormatStr("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
 					}
 				}
 				bool restoredOutputInit = outputInitialized != 0 &&
@@ -11655,10 +11627,7 @@ private:
 			if ((completed || fileInfo->GetForceDirectWrite()) && destDir && !Util::EmptyStr(destDir) &&
 				!Util::EmptyStr(fileInfo->GetFilename()))
 			{
-				NzbgetRsBuf compDestBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					destDir, PATH_SEPARATOR, fileInfo->GetFilename());
-				hasCompletedDest = FileSystem::FileExists(compDestBuf.data ? compDestBuf.data : "");
-				nzbget_rs_free(compDestBuf);
+				hasCompletedDest = FileSystem::FileExists(CString::FormatStr("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
 			}
 			bool hasDirectWriteOutput = hasOwnOutFile || hasOutTmp || hasCompletedDest;
 
@@ -11682,9 +11651,7 @@ private:
 				}
 				else
 				{
-					NzbgetRsBuf pickedBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(destDir, PATH_SEPARATOR, fileInfo->GetFilename());
-					fileInfo->SetOutputFilename(pickedBuf.data ? pickedBuf.data : "");
-					nzbget_rs_free(pickedBuf);
+					fileInfo->SetOutputFilename(*CString::FormatStr("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
 				}
 			}
 		}
@@ -11903,11 +11870,8 @@ private:
 
 			if (del)
 			{
-				NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
 				detail("Deleting orphaned diskstate file %s", filename);
-				FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
-				nzbget_rs_free(fullFnBuf);
+				FileSystem::DeleteFile(CString::FormatStr("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename));
 				deletedFiles++;
 			}
 		}
@@ -12110,10 +12074,7 @@ private:
 
 	bool LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers)
 	{
-		NzbgetRsBuf cacheFlagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
-		bool cacheWasActive = FileSystem::FileExists(cacheFlagBuf.data ? cacheFlagBuf.data : "");
-		nzbget_rs_free(cacheFlagBuf);
+		bool cacheWasActive = FileSystem::FileExists(CString::FormatStr("%s%cacache", g_Options->GetQueueDir(), PATH_SEPARATOR));
 
 		DirBrowser dir(g_Options->GetQueueDir());
 		while (const char* filename = dir.Next())
@@ -12148,10 +12109,7 @@ private:
 									fileInfo->SetRemainingSize(remainingSize);
 									fileInfo->SetSuccessSize(successSize);
 									fileInfo->SetFailedSize(failedSize);
-									NzbgetRsBuf dmgFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-										g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-									FileSystem::DeleteFile(dmgFnBuf.data ? dmgFnBuf.data : "");
-									nzbget_rs_free(dmgFnBuf);
+									FileSystem::DeleteFile(CString::FormatStr("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename));
 									goto next;
 								}
 								if (m_lastFileStateVersion > DISKSTATE_FILE_VERSION)
@@ -12169,10 +12127,7 @@ private:
 				}
 				else
 				{
-					NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-						g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-					FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
-					nzbget_rs_free(fullFnBuf);
+					FileSystem::DeleteFile(CString::FormatStr("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename));
 				}
 			}
 			next:;
@@ -14297,10 +14252,7 @@ public:
 				BString<1024> destFilePath;
 				if (filename)
 				{
-					NzbgetRsBuf dfpBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-						m_fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, filename);
-					destFilePath.Set(dfpBuf.data ? dfpBuf.data : "", (int)dfpBuf.len);
-					nzbget_rs_free(dfpBuf);
+					destFilePath.Format("%s%c%s", m_fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, filename);
 				}
 				bool isOwnOutputFile = false;
 				if (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite())
@@ -14502,13 +14454,7 @@ public:
 		bool hasForceDest = false;
 		if ((directWriteOpt || forceDirectWrite) && !curOutputInit)
 		{
-			BString<1024> destPath;
-			{
-				NzbgetRsBuf dpBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					nzbDestDir.c_str(), PATH_SEPARATOR, filename.c_str());
-				destPath.Set(dpBuf.data ? dpBuf.data : "", (int)dpBuf.len);
-				nzbget_rs_free(dpBuf);
-			}
+			BString<1024> destPath("%s%c%s", nzbDestDir.c_str(), PATH_SEPARATOR, filename.c_str());
 			hasOwnOut = !m_outputFilename.empty() && FileSystem::FileExists(m_outputFilename.c_str());
 			hasForceDest = !hasOwnOut && forceDirectWrite && FileSystem::FileExists(destPath);
 		}
@@ -16978,8 +16924,7 @@ private:
 		{
 			return false;
 		}
-		std::string path = RsString(nzbget_rs_tpr_article_writer_format_dest_file_path(
-			g_Options->GetQueueDir(), PATH_SEPARATOR, "twincheck"));
+		std::string path = std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "twincheck";
 		std::lock_guard<std::mutex> guard(mutex);
 		if (openedPath != path)
 		{
@@ -17326,7 +17271,7 @@ public:
 				return StreamRangeList();
 			}
 
-			std::vector<NzbgetRsByteRange> covered;
+			StreamRangeList covered;
 			covered.reserve(fileInfo->GetArticles()->size());
 			for (ArticleInfo* article : fileInfo->GetArticles())
 			{
@@ -17335,14 +17280,22 @@ public:
 					covered.push_back({article->GetSegmentOffset(), article->GetSegmentSize()});
 				}
 			}
-			std::vector<NzbgetRsByteRange> rsHoles(covered.size() + 1);
-			size_t count = nzbget_rs_stream_compute_holes(
-				covered.data(), covered.size(), fileSize, rsHoles.data(), rsHoles.size());
+			std::sort(covered.begin(), covered.end(),
+				[](const StreamRange& a, const StreamRange& b) { return a.Offset < b.Offset; });
+
 			StreamRangeList holes;
-			holes.reserve(count);
-			for (size_t i = 0; i < count; i++)
+			int64 pos = 0;
+			for (const StreamRange& r : covered)
 			{
-				holes.push_back({rsHoles[i].offset, rsHoles[i].size});
+				if (r.Offset > pos)
+				{
+					holes.push_back({pos, r.Offset - pos});
+				}
+				pos = std::max(pos, r.Offset + r.Size);
+			}
+			if (pos < fileSize)
+			{
+				holes.push_back({pos, fileSize - pos});
 			}
 			return holes;
 		}
@@ -19753,10 +19706,8 @@ private:
 			{
 				if (completedFile.GetParFile())
 				{
-					NzbgetRsBuf parPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-						nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
-					directParLoader->m_parFiles.emplace_back(parPathBuf.data ? parPathBuf.data : "");
-					nzbget_rs_free(parPathBuf);
+					directParLoader->m_parFiles.emplace_back(CString::FormatStr("%s%c%s",
+						nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename()));
 				}
 			}
 
@@ -20008,10 +19959,7 @@ private:
 		}
 
 		std::string nzbFinalDir = nzbInfo->BuildFinalDirName().Str();
-		NzbgetRsBuf finalOutBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			nzbFinalDir.c_str(), PATH_SEPARATOR, newName.c_str());
-		std::string finalOutputFilename(finalOutBuf.data ? finalOutBuf.data : "", finalOutBuf.len);
-		nzbget_rs_free(finalOutBuf);
+		std::string finalOutputFilename = nzbFinalDir + PATH_SEPARATOR + newName;
 
 		nzbInfo->PrintMessage(Message::mkInfo,
 			"HardLinking %s file %s to %s", phaseLabel, filename, newName.c_str());
@@ -20099,14 +20047,8 @@ private:
 			}
 
 			const std::string destDir = nzbInfo->GetDestDir();
-			NzbgetRsBuf oldOutBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				destDir.c_str(), PATH_SEPARATOR, completedFile.GetFilename());
-			const std::string oldOutputFilename(oldOutBuf.data ? oldOutBuf.data : "", oldOutBuf.len);
-			nzbget_rs_free(oldOutBuf);
-			NzbgetRsBuf outBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				destDir.c_str(), PATH_SEPARATOR, newName.c_str());
-			const std::string outputFilename(outBuf.data ? outBuf.data : "", outBuf.len);
-			nzbget_rs_free(outBuf);
+			const std::string oldOutputFilename = destDir + PATH_SEPARATOR + completedFile.GetFilename();
+			const std::string outputFilename = destDir + PATH_SEPARATOR + newName;
 
 			nzbInfo->PrintMessage(Message::mkInfo,
 				"Renaming completed file %s to %s",
@@ -24529,10 +24471,8 @@ private:
 					nzbInfo->GetDupeMode() != dmForce &&
 					!nzbInfo->GetManyDupeFiles())
 				{
-					NzbgetRsBuf destPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-						nzbInfo->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
-					dupeFileExists = FileSystem::FileExists(destPathBuf.data ? destPathBuf.data : "");
-					nzbget_rs_free(destPathBuf);
+					dupeFileExists = FileSystem::FileExists(CString::FormatStr("%s%c%s",
+						nzbInfo->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename()));
 				}
 				if (dupeFileExists)
 				{
@@ -24637,10 +24577,7 @@ private:
 			}
 			if (path.empty() || !FileSystem::FileExists(path.c_str()))
 			{
-				NzbgetRsBuf destPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					destDir.c_str(), PATH_SEPARATOR, filename.c_str());
-				path = destPathBuf.data ? destPathBuf.data : "";
-				nzbget_rs_free(destPathBuf);
+				path = destDir + PATH_SEPARATOR + filename;
 			}
 			std::vector<ArticleInfo*> wrong = g_Options->GetDupeArticleFallback() != Options::dafNone ?
 				DupeArticleFallback::BorrowedPar2Mismatches(fileInfo, path.c_str(), destDir.c_str(), filename.c_str()) :
@@ -24899,10 +24836,8 @@ private:
 				}
 				else if (fileInfo->GetForceDirectWrite())
 				{
-					NzbgetRsBuf outBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					BString<1024> outputFilename("%s%c%s",
 						fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
-					BString<1024> outputFilename = outBuf.data ? outBuf.data : "";
-					nzbget_rs_free(outBuf);
 					if (FileSystem::FileExists(outputFilename))
 					{
 						fileInfo->SetOutputFilename(outputFilename);
@@ -24915,10 +24850,8 @@ private:
 		{
 			g_DiskState->LoadFileState(fileInfo, g_ServerPool->GetServers(), true);
 
-			NzbgetRsBuf outBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
-			fileInfo->SetOutputFilename(outBuf.data ? outBuf.data : "");
-			nzbget_rs_free(outBuf);
+			fileInfo->SetOutputFilename(*CString::FormatStr("%s%c%s",
+				fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename()));
 
 			fileInfo->SetOutputInitialized(true);
 			fileInfo->SetForceDirectWrite(true);
@@ -28112,10 +28045,7 @@ private:
 
 			if (!IsStopped())
 			{
-				NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					m_destDir.c_str(), PATH_SEPARATOR, parFilename.c_str());
-				std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
-				nzbget_rs_free(pathBuf);
+				std::string path = m_destDir + PATH_SEPARATOR + parFilename;
 				std::string fullParFilename = FileSystem::GetRealPath(path)
 					.value_or(std::move(path));
 
@@ -28124,11 +28054,7 @@ private:
 				BString<1024> infoName;
 				infoName.Set(parFilename.c_str(), baseLen);
 
-				NzbgetRsBuf parInfoBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					m_nzbName.c_str(), PATH_SEPARATOR, *infoName);
-				BString<1024> parInfoName;
-				parInfoName.Set(parInfoBuf.data ? parInfoBuf.data : "", (int)parInfoBuf.len);
-				nzbget_rs_free(parInfoBuf);
+				BString<1024> parInfoName("%s%c%s", m_nzbName.c_str(), PATH_SEPARATOR, *infoName);
 				SetInfoName(parInfoName);
 
 				EStatus status = RunParCheck(std::move(fullParFilename));
@@ -29013,11 +28939,8 @@ public:
 		bool sameCollection = fileInfo->GetNzbInfo() == m_parChecker.GetPostInfo()->GetNzbInfo();
 		if (sameCollection && !deleted)
 		{
-			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			BString<1024> fullFilename("%s%c%s",
 				fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
-			BString<1024> fullFilename;
-			fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-			nzbget_rs_free(fullFnBuf);
 			m_parChecker.AddParFile(fullFilename);
 		}
 		else
@@ -29323,10 +29246,7 @@ private:
 							break;
 						}
 					}
-					NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-						nzbInfo->GetDestDir(), PATH_SEPARATOR, currentName.c_str());
-					std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
-					nzbget_rs_free(pathBuf);
+					std::string path = std::string(nzbInfo->GetDestDir()) + PATH_SEPARATOR + currentName;
 					path = FileSystem::GetRealPath(path).value_or(path);
 					return FileSystem::SameFilename(path.c_str(), verifiedPath.c_str());
 				}), jobs->end());
@@ -29683,11 +29603,7 @@ private:
 			std::string name = "_twin." + (entry.filename.empty()
 				? std::to_string(m_twinFiles.size()) + ".par2"
 				: entry.filename);
-			NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				GetDestDir(), PATH_SEPARATOR, name.c_str());
-			BString<1024> path;
-			path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
-			nzbget_rs_free(pathBuf);
+			BString<1024> path("%s%c%s", GetDestDir(), PATH_SEPARATOR, name.c_str());
 			if (!FileSystem::SaveBufferIntoFile(*path, data.empty() ? "" : data.data(), data.size()))
 			{
 				return "";
@@ -30409,23 +30325,40 @@ private:
 		sizes.reserve(memberNames.size());
 		for (const CString& memberName : memberNames)
 		{
-			NzbgetRsBuf memberPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				destDir, PATH_SEPARATOR, *memberName);
-			BString<1024> memberPath;
-			memberPath.Set(memberPathBuf.data ? memberPathBuf.data : "", (int)memberPathBuf.len);
-			nzbget_rs_free(memberPathBuf);
-			names.push_back(*memberName);
+			BString<1024> memberPath("%s%c%s", destDir ? destDir : "", PATH_SEPARATOR, *memberName ? *memberName : "");
+			names.push_back(*memberName ? *memberName : "");
 			sizes.push_back(FileSystem::FileSize(memberPath));
 		}
 		for (RepairTarget& target : targets)
 		{
-			int rank = -1;
+			int rank = 0;
 			int windowSize = 0;
-			nzbget_rs_stream_compute_positional_rank(
-				names.data(), sizes.data(), names.size(),
-				target.Filename, target.DecodedFileSize, &rank, &windowSize);
-			target.PositionalRank = rank;
-			target.PositionalWindow = windowSize;
+			bool selfSeen = false;
+			const char* targetName = target.Filename ? *target.Filename : "";
+			for (size_t i = 0; i < names.size(); i++)
+			{
+				int64_t sz = sizes[i];
+				__int128 diff = sz > target.DecodedFileSize
+					? (__int128)sz - (__int128)target.DecodedFileSize
+					: (__int128)target.DecodedFileSize - (__int128)sz;
+				if (sz <= 0 || diff > (__int128)std::max<int64_t>(sz, target.DecodedFileSize) / 8)
+				{
+					continue;
+				}
+				windowSize++;
+				int cmp = strcasecmp(names[i], targetName);
+				if (cmp == 0)
+				{
+					selfSeen = true;
+					continue;
+				}
+				if (cmp < 0)
+				{
+					rank++;
+				}
+			}
+			target.PositionalRank = selfSeen ? rank : -1;
+			target.PositionalWindow = selfSeen ? windowSize : 0;
 		}
 	}
 
@@ -33524,11 +33457,7 @@ static inline bool ParCannotCover(NzbInfo* nzbInfo)
 	{
 		if (ParParser::SameParCollection(filename, mainPars[0].c_str(), true))
 		{
-			NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				nzbInfo->GetDestDir(), PATH_SEPARATOR, filename);
-			BString<1024> path;
-			path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
-			nzbget_rs_free(pathBuf);
+			BString<1024> path("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, filename);
 			int64 size = FileSystem::FileSize(path);
 			if (size >= 0 && (parFileSize < 0 || size < parFileSize))
 			{
@@ -34207,11 +34136,7 @@ private:
 			// download was cancelled, deleting already downloaded files from disk
 			for (CompletedFile& completedFile: nzbInfo->GetCompletedFiles())
 			{
-				NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
-				BString<1024> fullFileName;
-				fullFileName.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-				nzbget_rs_free(fullFnBuf);
+				BString<1024> fullFileName("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
 				if (FileSystem::FileExists(fullFileName))
 				{
 					detail("Deleting file %s", completedFile.GetFilename());
@@ -34226,11 +34151,7 @@ private:
 				size_t fnLen = strlen(filename);
 				if (fnLen >= 8 && !strcmp(filename + fnLen - 8, ".out.tmp"))
 				{
-					NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-						nzbInfo->GetDestDir(), PATH_SEPARATOR, filename);
-					BString<1024> fullFilename;
-					fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-					nzbget_rs_free(fullFnBuf);
+					BString<1024> fullFilename("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, filename);
 					detail("Deleting file %s", filename);
 					FileSystem::DeleteFile(fullFilename);
 				}

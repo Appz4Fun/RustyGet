@@ -4,7 +4,7 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
 
 #[path = "tlscipher/native.rs"]
-mod tls_cipher_native;
+pub(crate) mod tls_cipher_native;
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_tls_cipher_pin(protocol: c_int, bits: u32, flags: u32) -> c_int {
@@ -58,20 +58,6 @@ pub unsafe extern "C" fn nzbget_rs_tls_cipher_cancel(id: *const c_char) -> RsBuf
 }
 #[no_mangle]
 pub extern "C" fn nzbget_rs_tls_cipher_shutdown() { tls_cipher_native::service().shutdown(); }
-/// # Safety
-/// argv contains argc valid NUL-terminated strings from main; argc must be 5.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tls_cipher_resolver(argc: c_int, argv: *const *const c_char) -> c_int {
-    if argc != 5 || argv.is_null() { return 2; }
-    let pointers = unsafe { std::slice::from_raw_parts(argv, argc as usize) };
-    let mut args = Vec::new();
-    for &pointer in &pointers[1..] {
-        if pointer.is_null() { return 2; }
-        let Ok(value) = unsafe { CStr::from_ptr(pointer) }.to_str() else { return 2; };
-        args.push(value.to_owned());
-    }
-    tls_cipher_native::resolver(&args)
-}
 
 #[cfg(test)]
 mod tls_cipher_abi_tests {
@@ -342,26 +328,6 @@ pub unsafe extern "C" fn nzbget_rs_json_decode(raw: *mut c_char) {
     let buf = std::slice::from_raw_parts_mut(raw.cast::<u8>(), len);
     let n = crate::decode::json_decode(buf);
     *raw.add(n) = 0;
-}
-
-/// The next JSON value in `text` (WebUtil::JsonNextValue): its start, with
-/// its length in `value_length`, or null.
-///
-/// # Safety
-/// `text` is null or a NUL-terminated string; `value_length` is null or
-/// writable.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_json_next_value(text: *const c_char, value_length: *mut c_int) -> *const c_char {
-    if text.is_null() || value_length.is_null() {
-        return std::ptr::null();
-    }
-    match crate::decode::json_next_value(CStr::from_ptr(text).to_bytes()) {
-        Some((start, len)) => {
-            *value_length = len as c_int;
-            text.add(start)
-        }
-        None => std::ptr::null(),
-    }
 }
 
 /// Crc32::Append: hardware-accelerated IEEE 802.3 CRC-32 update via `crc32fast`.
@@ -641,25 +607,6 @@ pub unsafe extern "C" fn nzbget_rs_xml_find_tag(xml: *const c_char, tag: *const 
     }
 }
 
-/// WebUtil::JsonFindField: a pointer into `text` and the value length, or
-/// null (`value_length` untouched).
-///
-/// # Safety
-/// `text` and `field` are null or NUL-terminated; `value_length` is null or writable.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_json_find_field(text: *const c_char, field: *const c_char, value_length: *mut c_int) -> *const c_char {
-    if text.is_null() || field.is_null() || value_length.is_null() {
-        return std::ptr::null();
-    }
-    match crate::webutil::json_find_field(input(text), input(field)) {
-        Some((start, len)) => {
-            *value_length = len as c_int;
-            text.add(start)
-        }
-        None => std::ptr::null(),
-    }
-}
-
 /// WebUtil::ParseContentDispositionFilename; `data` is null for no file name
 /// (the C++ null CString).
 ///
@@ -681,34 +628,6 @@ pub unsafe extern "C" fn nzbget_rs_content_disposition_filename(
 #[no_mangle]
 pub extern "C" fn nzbget_rs_format_size(size: i64) -> RsBuf {
     into_buf(crate::util::format_size(size))
-}
-
-/// Util::FormatSpeed; free the result with nzbget_rs_free.
-#[no_mangle]
-pub extern "C" fn nzbget_rs_format_speed(bytes_per_second: i64) -> RsBuf {
-    into_buf(crate::util::format_speed(bytes_per_second))
-}
-
-/// Util::AlphaNum.
-///
-/// # Safety
-/// `s` is null or NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_alpha_num(s: *const c_char) -> c_int {
-    crate::util::alpha_num(input(s)) as c_int
-}
-
-/// Util::HashBJ96 over `len` bytes (the C++ uint32 of an int length).
-///
-/// # Safety
-/// `buf` is null or readable for `len` bytes (as uint32), at most isize::MAX.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_hash_bj96(buf: *const c_char, len: c_int, init: u32) -> u32 {
-    let len = len as u32 as usize;
-    if buf.is_null() || len == 0 {
-        return crate::util::hash_bj96(&[], init);
-    }
-    crate::util::hash_bj96(std::slice::from_raw_parts(buf.cast(), len), init)
 }
 
 /// Util::ReduceStr, in place.
@@ -1550,58 +1469,6 @@ pub unsafe extern "C" fn nzbget_rs_trim_line(s: *mut c_char, right_only: c_int) 
     s.add(start)
 }
 
-/// Util::TrimLeft/TrimRight/Trim(std::string&) (`left`, `right`) and
-/// Util::SanitizeLine (`sanitize`, which also blanks control characters in
-/// place): the kept range [*start, return value) of the `len` bytes.
-///
-/// # Safety
-/// `data` is null or writable for `len` bytes; `start` is null or writable
-/// after the buffer access. `right_space`, when supplied, classifies a byte
-/// as the caller's C++ char and must not unwind or access `data`. If absent,
-/// no trailing bytes are classified as whitespace. NULL `start` skips output.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_trim_string(data: *mut c_char, len: usize, left: c_int, right: c_int, sanitize: c_int, start: *mut usize, right_space: Option<extern "C" fn(c_int) -> c_int>) -> usize {
-    let space = |b: u8| right_space.is_some_and(|f| f(b as c_int) != 0);
-    let (s, e) = if data.is_null() || len == 0 {
-        (0, 0)
-    } else {
-        let buf = std::slice::from_raw_parts_mut(data.cast::<u8>(), len);
-        if sanitize != 0 { crate::util::sanitize_line(buf, space) } else { crate::util::trim_string(buf, left != 0, right != 0, space) }
-    };
-    if !start.is_null() { *start = s; }
-    e
-}
-
-/// Util::EndsWith over byte ranges (std::string_view).
-///
-/// # Safety
-/// `s` and `suffix` are null or readable for their lengths.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ends_with(s: *const c_char, len: usize, suffix: *const c_char, suffix_len: usize, case_sensitive: c_int) -> c_int {
-    crate::util::ends_with(span(s, len), span(suffix, suffix_len), case_sensitive != 0) as c_int
-}
-
-/// Util::FormatBuffer; free with nzbget_rs_free.
-///
-/// # Safety
-/// `buf` is null or readable for `len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_format_buffer(buf: *const c_char, len: c_int) -> RsBuf {
-    into_buf(crate::util::format_buffer(span(buf, len.max(0) as usize)))
-}
-
-/// WebUtil::ParseRfc822DateTime (0 for null).
-///
-/// # Safety
-/// `s` is null or NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_parse_rfc822_date_time(s: *const c_char) -> i64 {
-    if s.is_null() {
-        return 0;
-    }
-    crate::util::parse_rfc822_date_time(CStr::from_ptr(s))
-}
-
 /// ServerVolume::CalcSlots: the slots of a local time; updates `*first_day`.
 ///
 /// # Safety
@@ -1649,36 +1516,6 @@ pub unsafe extern "C" fn nzbget_rs_volume_add(
     );
 }
 
-/// Options::ParseTime (0 for null input); the outputs are written as the
-/// C++ wrote them, also on failure.
-///
-/// # Safety
-/// `time` is null or NUL-terminated; nonnull outputs are writable and disjoint
-/// from `time`, but may alias each other. Null arguments return 0 without writes.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_parse_time(time: *const c_char, hours: *mut c_int, minutes: *mut c_int) -> c_int {
-    if time.is_null() || hours.is_null() || minutes.is_null() {
-        return 0;
-    }
-    crate::options::parse_time_with(CStr::from_ptr(time), |h| hours.write(h), |m| minutes.write(m)) as c_int
-}
-
-/// Options::ParseWeekDays; `*bits` is written as the C++ wrote it.
-///
-/// # Safety
-/// `week_days` is null or NUL-terminated; nonnull `bits` is writable and disjoint
-/// from the input. Null input means empty; a null output returns 0.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_parse_week_days(week_days: *const c_char, bits: *mut c_int) -> c_int {
-    if bits.is_null() {
-        return 0;
-    }
-    let mut result = 0;
-    let valid = crate::options::parse_week_days(input(week_days), &mut result);
-    bits.write(result);
-    valid as c_int
-}
-
 /// Options::ValidateOptionName: 0 invalid, 1 valid, 2 obsolete (warn), 3 an
 /// obsolete script option (an error with a value), 4 an obsolete log option.
 /// `predefined(ctx, name)` is GetOption's answer, asked after the read-only check.
@@ -1707,45 +1544,6 @@ pub unsafe extern "C" fn nzbget_rs_validate_option_name(
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_option_restricted(name: *const c_char, signed_char: c_int) -> c_int {
     (!name.is_null() && crate::options::option_restricted(CStr::from_ptr(name), signed_char != 0)) as c_int
-}
-
-/// Options::ConvertOldOption: the current name and value; free both with
-/// nzbget_rs_free. Null inputs read as empty. Null outputs discard that result;
-/// identical output pointers retain only the new value.
-///
-/// # Safety
-/// `option` and `value` are null or NUL-terminated; nonnull outputs are writable
-/// and disjoint from the inputs and either equal or disjoint from each other.
-/// Their previous contents are not freed.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_convert_old_option(option: *const c_char, value: *const c_char, new_option: *mut RsBuf, new_value: *mut RsBuf) {
-    let as_c = |p: *const c_char| if p.is_null() { c"" } else { CStr::from_ptr(p) };
-    let (o, v) = crate::options::convert_old_option(as_c(option), as_c(value));
-    if !new_option.is_null() && new_option != new_value {
-        new_option.write(into_buf(o.into_bytes()));
-    }
-    if !new_value.is_null() {
-        new_value.write(into_buf(v.into_bytes()));
-    }
-}
-
-/// Options::HasScript.
-///
-/// # Safety
-/// `list` and `name` are null or NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_has_script(list: *const c_char, name: *const c_char) -> c_int {
-    let name = if name.is_null() { c"" } else { CStr::from_ptr(name) };
-    crate::options::has_script(input(list), name) as c_int
-}
-
-/// Options::ParseCategorySource: 0 Auto, 1 NZBFile, 2 FeedFile.
-///
-/// # Safety
-/// `value` is null or NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_parse_category_source(value: *const c_char) -> c_int {
-    crate::options::parse_category_source((!value.is_null()).then(|| CStr::from_ptr(value)))
 }
 
 /// NzbgetRsHttpResponse: WebDownloader::CheckResponse's decision.
@@ -2219,19 +2017,6 @@ pub unsafe extern "C" fn nzbget_rs_make_unique_filename(dir: *const c_char, base
     into_buf(crate::fsops::make_unique_filename(as_c(dir), as_c(basename), &crate::fsops::posix_stat))
 }
 
-/// FileSystem::ExpandHomePath with the home directory the C++ looked up
-/// (null: none); free with nzbget_rs_free.
-///
-/// # Safety
-/// `filename` and `home` are null or NUL-terminated.
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_expand_home_path(filename: *const c_char, home: *const c_char) -> RsBuf {
-    let filename = (!filename.is_null()).then(|| CStr::from_ptr(filename));
-    let home = (!home.is_null()).then(|| input(home));
-    into_buf(crate::fsops::expand_home_path(filename, home))
-}
-
 // Copy exactly the bounded input BString<1024>::Set read. CStr::from_ptr on
 // the original pointer would scan beyond that bound, possibly off its allocation.
 unsafe fn par_filename_input(name: *const c_char) -> [u8; crate::parparser::BSTRING_MAX + 1] {
@@ -2325,190 +2110,6 @@ pub unsafe extern "C" fn nzbget_rs_find_main_pars(
             }
         },
     ))
-}
-
-/// NzbgetRsRarIo: RarVolume's content source and header cipher.
-#[repr(C)]
-pub struct RarIo {
-    pub ctx: *mut std::ffi::c_void,
-    pub size: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> i64>,
-    pub read: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *mut u8, i64) -> c_int>,
-    pub rar3_prepare: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const u8) -> c_int>,
-    pub rar5_prepare: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u8, *const u8) -> c_int>,
-    pub init: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const u8) -> c_int>,
-    pub decrypt: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, *mut u8) -> c_int>,
-    pub free: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    pub add_file: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const RarFileOut) -> c_int>,
-    pub set_data_offset: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
-}
-
-/// NzbgetRsRarVolume: RarVolume's state, read and written back.
-#[repr(C)]
-pub struct RarVolumeState {
-    pub version: c_int,
-    pub volume_no: u32,
-    pub new_naming: c_int,
-    pub has_next_volume: c_int,
-    pub multi_volume: c_int,
-    pub encrypted: c_int,
-    pub has_password: c_int,
-    pub decrypt_buf: [u8; 16],
-    pub decrypt_pos: u8,
-    pub use_native_cipher: c_int,
-    pub password: *const c_char,
-    pub password_len: usize,
-    pub decrypt_key: [u8; 32],
-    pub decrypt_iv: [u8; 16],
-}
-
-/// NzbgetRsRarFile: one file of the volume (borrowed for the add_file call).
-#[repr(C)]
-pub struct RarFileOut {
-    pub filename: *const c_char,
-    pub filename_len: usize,
-    pub time: u32,
-    pub attr: u32,
-    pub size: i64,
-    pub split_before: c_int,
-    pub split_after: c_int,
-    pub method: u32,
-    pub stored: c_int,
-    pub packed_size: i64,
-    pub data_offset: i64,
-    pub encrypted_data: c_int,
-    pub has_salt: c_int,
-    pub salt: [u8; 8],
-    pub has_crypt: c_int,
-    pub crypt_version: u64,
-    pub crypt_flags: u64,
-    pub crypt_kdf_count: u8,
-    pub crypt_salt: [u8; 16],
-    pub crypt_iv: [u8; 16],
-    pub crypt_check_value: [u8; 12],
-    pub crypt_has_check: c_int,
-}
-
-struct FfiRar<'a>(&'a RarIo);
-
-impl crate::rarreader::Source for FfiRar<'_> {
-    fn size(&mut self) -> i64 {
-        self.0.size.map_or(-1, |f| unsafe { f(self.0.ctx) })
-    }
-    fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
-        self.0.read.is_some_and(|f| unsafe { f(self.0.ctx, offset, buf.as_mut_ptr(), buf.len() as i64) } != 0)
-    }
-}
-
-impl crate::rarreader::Cipher for FfiRar<'_> {
-    fn rar3_prepare(&mut self, salt: &[u8; 8]) -> bool {
-        self.0.rar3_prepare.is_some_and(|f| unsafe { f(self.0.ctx, salt.as_ptr()) } != 0)
-    }
-    fn rar5_prepare(&mut self, kdf_count: u8, salt: &[u8; 16]) -> bool {
-        self.0.rar5_prepare.is_some_and(|f| unsafe { f(self.0.ctx, kdf_count, salt.as_ptr()) } != 0)
-    }
-    fn init(&mut self, key_bits: i32, iv: Option<&[u8; 16]>) -> bool {
-        let iv = iv.map_or(std::ptr::null(), |v| v.as_ptr());
-        self.0.init.is_some_and(|f| unsafe { f(self.0.ctx, key_bits, iv) } != 0)
-    }
-    fn decrypt(&mut self, input: &[u8; 16], output: &mut [u8; 16]) -> bool {
-        self.0.decrypt.is_some_and(|f| unsafe { f(self.0.ctx, input.as_ptr(), output.as_mut_ptr()) } != 0)
-    }
-    fn free(&mut self) {
-        if let Some(f) = self.0.free {
-            unsafe { f(self.0.ctx) }
-        }
-    }
-}
-
-impl crate::rarreader::Files for FfiRar<'_> {
-    fn add(&mut self, f: &crate::rarreader::RarFile) -> bool {
-        let Some(add) = self.0.add_file else { return true };
-        let c = f.crypt.unwrap_or_default();
-        let out = RarFileOut {
-            filename: if f.filename.is_empty() { c"".as_ptr() } else { f.filename.as_ptr().cast() },
-            filename_len: f.filename.len(),
-            time: f.time,
-            attr: f.attr,
-            size: f.size,
-            split_before: f.split_before as c_int,
-            split_after: f.split_after as c_int,
-            method: f.method,
-            stored: f.stored as c_int,
-            packed_size: f.packed_size,
-            data_offset: f.data_offset,
-            encrypted_data: f.encrypted_data as c_int,
-            has_salt: f.has_salt as c_int,
-            salt: f.salt,
-            has_crypt: f.crypt.is_some() as c_int,
-            crypt_version: c.version,
-            crypt_flags: c.flags,
-            crypt_kdf_count: c.kdf_count,
-            crypt_salt: c.salt,
-            crypt_iv: c.iv,
-            crypt_check_value: c.check_value,
-            crypt_has_check: c.has_check as c_int,
-        };
-        unsafe { add(self.0.ctx, &out) != 0 }
-    }
-    fn set_data_offset(&mut self, position: i64) {
-        if self.0.add_file.is_none() { return; }
-        if let Some(set) = self.0.set_data_offset {
-            unsafe { set(self.0.ctx, position) }
-        }
-    }
-}
-
-/// RarVolume::ReadFrom: parses the source into `state` (updated) and hands the
-/// files read to add_file, in order (also when the parse fails). 1 when the
-/// volume was read to its end, else 0.
-///
-/// # Safety
-/// Non-NULL `io` and `state` must be aligned, initialized objects. `io` stays
-/// immutable and `state` is exclusively borrowed for the call, including
-/// callbacks. Callbacks must not unwind or retain borrowed pointers; read
-/// writes at most `len` bytes, decrypt at most 16 bytes. ctx is caller-owned.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rar_read(io: *const RarIo, state: *mut RarVolumeState) -> c_int {
-    let (Some(io), Some(st)) = (io.as_ref(), state.as_mut()) else { return 0 };
-    let mut v = crate::rarreader::Volume {
-        version: st.version,
-        volume_no: st.volume_no,
-        new_naming: st.new_naming != 0,
-        has_next_volume: st.has_next_volume != 0,
-        multi_volume: st.multi_volume != 0,
-        encrypted: st.encrypted != 0,
-        has_password: st.has_password != 0,
-        decrypt_buf: st.decrypt_buf,
-        decrypt_pos: st.decrypt_pos,
-    };
-    let mut source = FfiRar(io);
-    let mut files = FfiRar(io);
-    let ok = if st.use_native_cipher != 0 {
-        let pw = if st.password.is_null() || st.password_len == 0 {
-            &[][..]
-        } else {
-            std::slice::from_raw_parts(st.password.cast::<u8>(), st.password_len)
-        };
-        let mut cipher =
-            crate::streamrepair::NativeRarCipher::with_state(pw, st.decrypt_key, st.decrypt_iv);
-        let res = crate::rarreader::read_from(&mut v, &mut source, &mut cipher, &mut files);
-        let (key, iv) = cipher.state();
-        st.decrypt_key = key;
-        st.decrypt_iv = iv;
-        res
-    } else {
-        let mut cipher = FfiRar(io);
-        crate::rarreader::read_from(&mut v, &mut source, &mut cipher, &mut files)
-    };
-    st.version = v.version;
-    st.volume_no = v.volume_no;
-    st.new_naming = v.new_naming as c_int;
-    st.has_next_volume = v.has_next_volume as c_int;
-    st.multi_volume = v.multi_volume as c_int;
-    st.encrypted = v.encrypted as c_int;
-    st.decrypt_buf = v.decrypt_buf;
-    st.decrypt_pos = v.decrypt_pos;
-    ok as c_int
 }
 
 fn c_string(b: &[u8]) -> std::ffi::CString {
@@ -3155,59 +2756,6 @@ unsafe fn batch<'a, E>(first: *const E, count: usize) -> &'a [E] {
     if first.is_null() { &[] } else { std::slice::from_raw_parts(first, count) }
 }
 
-/// The trailing data of a List response (binrpc::encode of the NZBs, then
-/// the parameters, then the files, in one allocation; free with
-/// nzbget_rs_free). Empty (null data, length 0) with no entries or when
-/// the data would be more than INT_MAX bytes. NULL arrays are empty.
-///
-/// # Safety
-/// The arrays are null or readable for their counts, the entries' strings
-/// readable for their lengths.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_encode_list(nzbs: *const crate::binrpc::NzbEntry, nzb_count: usize,
-    params: *const crate::binrpc::ParamEntry, param_count: usize, files: *const crate::binrpc::FileEntry,
-    file_count: usize) -> RsBuf {
-    use crate::binrpc::{encode, encoded_len};
-    let (nzbs, params, files) = (batch(nzbs, nzb_count), batch(params, param_count), batch(files, file_count));
-    let total = encoded_len(nzbs).saturating_add(encoded_len(params)).saturating_add(encoded_len(files));
-    response(total, |out| {
-        let mut at = encode(nzbs, out);
-        at += encode(params, &mut out[at..]);
-        at + encode(files, &mut out[at..])
-    })
-}
-
-/// The trailing data of a Log response (as nzbget_rs_binrpc_encode_list).
-///
-/// # Safety
-/// As nzbget_rs_binrpc_encode_list.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_encode_log(log: *const crate::binrpc::LogEntry, count: usize) -> RsBuf {
-    let log = batch(log, count);
-    response(crate::binrpc::encoded_len(log), |out| crate::binrpc::encode(log, out))
-}
-
-/// The trailing data of a PostQueue response (as nzbget_rs_binrpc_encode_list).
-///
-/// # Safety
-/// As nzbget_rs_binrpc_encode_list.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_encode_post_queue(jobs: *const crate::binrpc::PostEntry, count: usize) -> RsBuf {
-    let jobs = batch(jobs, count);
-    response(crate::binrpc::encoded_len(jobs), |out| crate::binrpc::encode(jobs, out))
-}
-
-/// The trailing data of a History response (as nzbget_rs_binrpc_encode_list).
-///
-/// # Safety
-/// As nzbget_rs_binrpc_encode_list.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_encode_history(history: *const crate::binrpc::HistoryEntry, count: usize)
-    -> RsBuf {
-    let history = batch(history, count);
-    response(crate::binrpc::encoded_len(history), |out| crate::binrpc::encode(history, out))
-}
-
 /// Encodes a whole List response into caller scratch when it fits, or
 /// one owned allocation otherwise. owned_capacity == 0 means borrowed;
 /// otherwise free RsBuf {data, len, cap: owned_capacity}. Empty/oversized
@@ -3297,53 +2845,6 @@ pub unsafe extern "C" fn nzbget_rs_binrpc_read_entry(data: *const c_char, len: u
         }
         None => 0,
     }
-}
-
-/// The remote client's reading of up to `max` list-response entries from
-/// `*at` of the `len` bytes of data into `out`: the number read, with `*at`
-/// past them. Fewer than `max` when an entry or one of its strings (up to
-/// its NUL) doesn't fit in `len`: the entries before it are read. The
-/// strings point into `data` (and end at their NULs).
-///
-/// # Safety
-/// `data` is readable for `len` (or null with 0); `at` is valid; `out` is
-/// writable for `max` entries (or null for 0) and may be uninitialized.
-unsafe fn read_entries<E: crate::binrpc::Entry>(data: *const c_char, len: usize, at: *mut usize, out: *mut E,
-    max: usize) -> usize {
-    if at.is_null() || (max > 0 && out.is_null()) {
-        return 0;
-    }
-    crate::binrpc::read_many(bytes_arg(data.cast(), len), &mut *at, out, max)
-}
-
-/// The NZB entries of a List response (see read_entries above).
-///
-/// # Safety
-/// As read_entries above.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_read_nzbs(data: *const c_char, len: usize, at: *mut usize,
-    out: *mut crate::binrpc::NzbEntry, max: usize) -> usize {
-    read_entries(data, len, at, out, max)
-}
-
-/// The parameter entries of a List response (see read_entries above).
-///
-/// # Safety
-/// As read_entries above.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_read_params(data: *const c_char, len: usize, at: *mut usize,
-    out: *mut crate::binrpc::ParamEntry, max: usize) -> usize {
-    read_entries(data, len, at, out, max)
-}
-
-/// The file entries of a List response (see read_entries above).
-///
-/// # Safety
-/// As read_entries above.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_binrpc_read_files(data: *const c_char, len: usize, at: *mut usize,
-    out: *mut crate::binrpc::FileEntry, max: usize) -> usize {
-    read_entries(data, len, at, out, max)
 }
 
 /// The remote client's log listing of the first `count` entries of `len`
@@ -3579,21 +3080,20 @@ mod binrpc_tests {
     fn encoders_allocate_once_and_read_back() {
         unsafe {
             // nothing: an empty buffer that frees as any
-            let none = nzbget_rs_binrpc_encode_log(null(), 5);
-            assert_eq!((none.data, none.len), (null_mut(), 0));
-            nzbget_rs_free(none);
-            let none = nzbget_rs_binrpc_encode_list(null(), 0, null(), 0, null(), 0);
+            let none = nzbget_rs_binrpc_encode_log_into(null(), 5, null_mut(), 0);
+            assert_eq!((none.data, none.len, none.owned_capacity), (null_mut(), 0, 0));
+            let none = nzbget_rs_binrpc_encode_list_into(null(), 0, null(), 0, null(), 0, null_mut(), 0);
             assert_eq!(none.len, 0);
-            nzbget_rs_free(none);
 
             let entries = [log(1, 2, b"hello"), log(2, 4, b""), log(3, 0, b"abcd")];
-            let buf = nzbget_rs_binrpc_encode_log(entries.as_ptr(), entries.len());
+            let b = nzbget_rs_binrpc_encode_log_into(entries.as_ptr(), entries.len(), null_mut(), 0);
+            let buf = RsBuf { data: b.data, len: b.len, cap: b.owned_capacity };
             assert_eq!(buf.len, 24 + 20 + 24);
             // the text is a C string past the data, too
             assert_eq!(*buf.data.add(buf.len), 0);
             let mut out = [std::mem::MaybeUninit::<LogEntry>::uninit(); 4];
             let mut at = 0;
-            let n = nzbget_rs_binrpc_read_entries_for_test(buf.data, buf.len, &mut at, out.as_mut_ptr().cast());
+            let n = crate::binrpc::read_many(bytes(&buf), &mut at, out.as_mut_ptr().cast::<LogEntry>(), 3);
             assert_eq!((n, at), (3, buf.len));
             assert_eq!(input(out[2].assume_init().texts[0].data.cast()), b"abcd");
             nzbget_rs_free(buf);
@@ -3605,16 +3105,17 @@ mod binrpc_tests {
             let params = [ParamEntry { nzb_index: 1, texts: [Text::new(b"k"), Text::new(b"v")] }];
             let files = [FileEntry { id: 9, nzb_index: 1, size_lo: 0, size_hi: 0, remaining_size_lo: 0, remaining_size_hi: 0,
                 paused: 0, filename_confirmed: 0, active_downloads: 0, matched: 0, texts: [Text::new(b"s"), Text::EMPTY] }];
-            let buf = nzbget_rs_binrpc_encode_list(nzbs.as_ptr(), 1, params.as_ptr(), 1, files.as_ptr(), 1);
+            let b = nzbget_rs_binrpc_encode_list_into(nzbs.as_ptr(), 1, params.as_ptr(), 1, files.as_ptr(), 1, null_mut(), 0);
+            let buf = RsBuf { data: b.data, len: b.len, cap: b.owned_capacity };
             assert_eq!(buf.len, (68 + 8) + (12 + 4) + (48 + 4));
             let data = bytes(&buf);
             assert_eq!(&data[0..4], [0, 0, 0, 1]);
             assert_eq!(data[68..70], *b"f\0");
             assert_eq!(&data[76..80], [0, 0, 0, 1]);
             let (mut at, mut nz, mut pa, mut fi) = (0usize, MaybeUninitNzb::new(), MaybeUninitPar::new(), MaybeUninitFile::new());
-            assert_eq!(nzbget_rs_binrpc_read_nzbs(buf.data, buf.len, &mut at, nz.0.as_mut_ptr().cast(), 1), 1);
-            assert_eq!(nzbget_rs_binrpc_read_params(buf.data, buf.len, &mut at, pa.0.as_mut_ptr().cast(), 1), 1);
-            assert_eq!(nzbget_rs_binrpc_read_files(buf.data, buf.len, &mut at, fi.0.as_mut_ptr().cast(), 1), 1);
+            assert_eq!(crate::binrpc::read_many(data, &mut at, nz.0.as_mut_ptr().cast::<NzbEntry>(), 1), 1);
+            assert_eq!(crate::binrpc::read_many(data, &mut at, pa.0.as_mut_ptr().cast::<ParamEntry>(), 1), 1);
+            assert_eq!(crate::binrpc::read_many(data, &mut at, fi.0.as_mut_ptr().cast::<FileEntry>(), 1), 1);
             assert_eq!(at, buf.len);
             assert_eq!(nz.0[0].assume_init().matched, 1);
             assert_eq!(pa.0[0].assume_init().nzb_index, 1);
@@ -3624,7 +3125,8 @@ mod binrpc_tests {
             // the other two kinds
             let jobs = [PostEntry { id: 1, stage: 7, stage_progress: 100, file_progress: 0, start_time: 0, stage_time: 0,
                 texts: [Text::EMPTY, Text::new(b"Name"), Text::EMPTY, Text::EMPTY] }];
-            let buf = nzbget_rs_binrpc_encode_post_queue(jobs.as_ptr(), 1);
+            let b = nzbget_rs_binrpc_encode_post_queue_into(jobs.as_ptr(), 1, null_mut(), 0);
+            let buf = RsBuf { data: b.data, len: b.len, cap: b.owned_capacity };
             assert_eq!(buf.len, 40 + 1 + 5 + 1 + 1);
             let listing = nzbget_rs_binrpc_post_queue_listing(buf.data, buf.len, 1);
             assert_eq!(bytes(&listing), b"[1] Name, Unpacking, 10%\n");
@@ -3632,7 +3134,8 @@ mod binrpc_tests {
             nzbget_rs_free(buf);
             let history = [HistoryEntry { id: 1, kind: 1, time: 0, size_lo: 2048, size_hi: 0, file_count: 2, par_status: 3,
                 script_status: 3, url_status: 0, texts: [Text::new(b"Nzb")] }];
-            let buf = nzbget_rs_binrpc_encode_history(history.as_ptr(), 1);
+            let b = nzbget_rs_binrpc_encode_history_into(history.as_ptr(), 1, null_mut(), 0);
+            let buf = RsBuf { data: b.data, len: b.len, cap: b.owned_capacity };
             assert_eq!(buf.len, 40 + 4);
             let listing = nzbget_rs_binrpc_history_listing(buf.data, buf.len, 1);
             assert_eq!(bytes(&listing), b"[1] Nzb (2 files, 2.00 KB, Par successful, Script successful)\n");
@@ -3647,11 +3150,6 @@ mod binrpc_tests {
     impl MaybeUninitNzb { fn new() -> Self { Self([std::mem::MaybeUninit::uninit()]) } }
     impl MaybeUninitPar { fn new() -> Self { Self([std::mem::MaybeUninit::uninit()]) } }
     impl MaybeUninitFile { fn new() -> Self { Self([std::mem::MaybeUninit::uninit()]) } }
-
-    /// Reads up to 3 log entries (a test stand-in for a kind's reader).
-    unsafe fn nzbget_rs_binrpc_read_entries_for_test(data: *const c_char, len: usize, at: *mut usize, out: *mut LogEntry) -> usize {
-        read_entries(data, len, at, out, 3)
-    }
 
     #[test]
     fn a_response_over_an_int_or_with_no_bytes_is_empty() {
@@ -3682,7 +3180,8 @@ mod binrpc_tests {
     fn response_scratch_has_explicit_ownership_and_exact_boundaries() {
         unsafe {
             let entries = [log(1, 2, b"hello"), log(2, 0, b"")];
-            let owned = nzbget_rs_binrpc_encode_log(entries.as_ptr(), entries.len());
+            let owned_resp = nzbget_rs_binrpc_encode_log_into(entries.as_ptr(), entries.len(), null_mut(), 0);
+            let owned = RsBuf { data: owned_resp.data, len: owned_resp.len, cap: owned_resp.owned_capacity };
             let expected = bytes(&owned).to_vec();
             for capacity in [0, owned.len - 1, owned.len, owned.len + 1, owned.len + 9] {
                 let mut scratch = vec![0xabu8; owned.len + 10];
@@ -3716,28 +3215,6 @@ mod binrpc_tests {
     }
 
     #[test]
-    fn readers_check_their_arguments() {
-        unsafe {
-            let entries = [log(1, 2, b"hello")];
-            let buf = nzbget_rs_binrpc_encode_log(entries.as_ptr(), 1);
-            let mut out = [std::mem::MaybeUninit::<LogEntry>::uninit(); 1];
-            let mut at = 0;
-            // no position, no output
-            assert_eq!(nzbget_rs_binrpc_read_nzbs(buf.data, buf.len, null_mut(), null_mut(), 0), 0);
-            assert_eq!(nzbget_rs_binrpc_read_nzbs(buf.data, buf.len, &mut at, null_mut(), 1), 0);
-            assert_eq!(at, 0);
-            // zero entries, a null output, and no data
-            assert_eq!(nzbget_rs_binrpc_read_nzbs(buf.data, buf.len, &mut at, null_mut(), 0), 0);
-            assert_eq!(read_entries(null(), 0, &mut at, out.as_mut_ptr().cast::<LogEntry>(), 1), 0);
-            assert_eq!(read_entries(buf.data, buf.len - 1, &mut at, out.as_mut_ptr().cast::<LogEntry>(), 1), 0);
-            assert_eq!(at, 0);
-            assert_eq!(read_entries(buf.data, buf.len, &mut at, out.as_mut_ptr().cast::<LogEntry>(), 1), 1);
-            assert_eq!(at, buf.len);
-            nzbget_rs_free(buf);
-        }
-    }
-
-    #[test]
     fn listings_of_null_and_short_data_are_empty_strings() {
         unsafe {
             for listing in [nzbget_rs_binrpc_log_listing(null(), 0, 5), nzbget_rs_binrpc_post_queue_listing(null(), 0, 5),
@@ -3747,7 +3224,8 @@ mod binrpc_tests {
                 nzbget_rs_free(listing);
             }
             let entries = [log(1, 0, b"x")];
-            let buf = nzbget_rs_binrpc_encode_log(entries.as_ptr(), 1);
+            let b = nzbget_rs_binrpc_encode_log_into(entries.as_ptr(), 1, null_mut(), 0);
+            let buf = RsBuf { data: b.data, len: b.len, cap: b.owned_capacity };
             let listing = nzbget_rs_binrpc_log_listing(buf.data, buf.len, 2);
             assert_eq!(bytes(&listing), b"[INFO] x\n");
             nzbget_rs_free(listing);
@@ -3881,94 +3359,6 @@ mod tests {
     }
 
     #[test]
-    fn rarreader_nulls_borrowed_files_and_failed_append() {
-        use std::ptr::{null, null_mut};
-        struct Context {
-            data: Vec<u8>,
-            names: Vec<Vec<u8>>,
-            positions: Vec<i64>,
-            reject: bool,
-            freed: usize,
-        }
-        unsafe extern "C" fn size(ctx: *mut std::ffi::c_void) -> i64 {
-            (*(ctx as *mut Context)).data.len() as i64
-        }
-        unsafe extern "C" fn read(ctx: *mut std::ffi::c_void, offset: i64, buf: *mut u8, len: i64) -> c_int {
-            let ctx = &*(ctx as *mut Context);
-            let Some(data) = ctx.data.get(offset as usize..offset as usize + len as usize) else { return 0 };
-            std::ptr::copy_nonoverlapping(data.as_ptr(), buf, data.len());
-            1
-        }
-        unsafe extern "C" fn add(ctx: *mut std::ffi::c_void, file: *const RarFileOut) -> c_int {
-            let ctx = &mut *(ctx as *mut Context);
-            if ctx.reject { return 0; }
-            let file = &*file;
-            assert_eq!(file.data_offset, -1);
-            ctx.names.push(std::slice::from_raw_parts(file.filename.cast(), file.filename_len).to_vec());
-            1
-        }
-        unsafe extern "C" fn offset(ctx: *mut std::ffi::c_void, position: i64) {
-            (*(ctx as *mut Context)).positions.push(position);
-        }
-        unsafe extern "C" fn free(ctx: *mut std::ffi::c_void) {
-            (*(ctx as *mut Context)).freed += 1;
-        }
-        let mut state = RarVolumeState {
-            version: 0, volume_no: 0, new_naming: 0, has_next_volume: 0,
-            multi_volume: 0, encrypted: 0, has_password: 0,
-            decrypt_buf: [0; 16], decrypt_pos: 16,
-            use_native_cipher: 0, password: null(), password_len: 0,
-            decrypt_key: [0; 32], decrypt_iv: [0; 16],
-        };
-        let mut io = RarIo {
-            ctx: null_mut(), size: None, read: None, rar3_prepare: None,
-            rar5_prepare: None, init: None, decrypt: None, free: None,
-            add_file: None, set_data_offset: None,
-        };
-        unsafe {
-            assert_eq!(nzbget_rs_rar_read(null(), null_mut()), 0);
-            assert_eq!(nzbget_rs_rar_read(null(), &mut state), 0);
-            assert_eq!(nzbget_rs_rar_read(&io, null_mut()), 0);
-            assert_eq!(nzbget_rs_rar_read(&io, &mut state), 0);
-            let mut ctx = Context {
-                // Two headers (one empty name), followed by an invalid block.
-                data: b"Rar!\x1a\x07\x01\0".to_vec(),
-                names: Vec::new(), positions: Vec::new(), reject: false, freed: 0,
-            };
-            ctx.data.extend([0,0,0,0,9,2,0,0,0,0,0,0,1,b'a']);
-            ctx.data.extend([0,0,0,0,8,2,0,0,0,0,0,0,0]);
-            io.ctx = (&mut ctx as *mut Context).cast();
-            io.size = Some(size);
-            io.read = Some(read);
-            io.add_file = Some(add);
-            io.set_data_offset = Some(offset);
-            io.free = Some(free);
-            assert_eq!(nzbget_rs_rar_read(&io, &mut state), 0);
-            assert_eq!(ctx.names, [b"a".to_vec(), Vec::new()]);
-            assert_eq!(ctx.positions, [22, 35]);
-            assert_eq!(ctx.freed, 1);
-            ctx.data[21] = b'z';
-            assert_eq!(ctx.names[0], b"a"); // callback owns its copy
-            ctx.reject = true;
-            assert_eq!(nzbget_rs_rar_read(&io, &mut state), 0);
-            assert_eq!(ctx.names.len(), 2);
-            assert_eq!(ctx.positions, [22, 35]); // no seek after rejected append
-            assert_eq!(ctx.freed, 2);
-            // All byte values are valid FFI state. The main header switches
-            // encryption on before any decrypt normalizes an oversized pos.
-            ctx.data = b"Rar!\x1a\x07\0".to_vec();
-            ctx.data.extend([0, 0, 0x73, 0x80, 0, 13, 0]);
-            ctx.data.extend([0; 6]);
-            state.has_password = 1;
-            for pos in 0..=u8::MAX {
-                state.encrypted = 0;
-                state.decrypt_pos = pos;
-                assert_eq!(nzbget_rs_rar_read(&io, &mut state), 0);
-            }
-        }
-    }
-
-    #[test]
     fn parparser_bounded_input_and_outputs() {
         use std::ptr::{null, null_mut};
         unsafe {
@@ -4007,10 +3397,9 @@ mod tests {
             assert_eq!(nzbget_rs_directory_exists(std::ptr::null()), 0);
             assert_eq!(nzbget_rs_directory_exists(c".".as_ptr()), 1);
             let mut source = b"~/x\0".to_vec();
-            let expanded = nzbget_rs_expand_home_path(source.as_ptr().cast(), c"".as_ptr());
+            let expanded = crate::fsops::expand_home_path(Some(CStr::from_ptr(source.as_ptr().cast())), Some(b""));
             source[2] = b'y';
-            assert_eq!(CStr::from_ptr(expanded.data), c"/x");
-            nzbget_rs_free(expanded);
+            assert_eq!(expanded, b"/x");
         }
     }
 
@@ -4107,57 +3496,10 @@ mod tests {
 
     #[test]
     fn options_ffi_outputs() {
-        use std::{mem::MaybeUninit, ptr::null_mut};
+        use std::ptr::null_mut;
         unsafe {
-            let mut out = 77;
-            let p = &mut out as *mut c_int;
-            assert_eq!(nzbget_rs_parse_time(c"23:59".as_ptr(), p, p), 1);
-            assert_eq!(out, 59);
-            assert_eq!(nzbget_rs_parse_time(c"24:00".as_ptr(), p, p), 0);
-            assert_eq!(out, 24);
-            assert_eq!(nzbget_rs_parse_time(c"*".as_ptr(), p, p), 1);
-            assert_eq!(out, 0);
-            assert_eq!(nzbget_rs_parse_time(c"1:*".as_ptr(), p, p), 0);
-            assert_eq!(out, 1);
-            assert_eq!(nzbget_rs_parse_time(c"bad".as_ptr(), p, p), 0);
-            assert_eq!(out, 1);
-            assert_eq!(nzbget_rs_parse_time(std::ptr::null(), p, p), 0);
-            assert_eq!(nzbget_rs_parse_time(c"*".as_ptr(), p, null_mut()), 0);
-            assert_eq!(nzbget_rs_parse_time(c"*".as_ptr(), null_mut(), p), 0);
-            assert_eq!(out, 1);
-            let (mut h, mut m) = (MaybeUninit::uninit(), MaybeUninit::uninit());
-            assert_eq!(nzbget_rs_parse_time(c"*:12".as_ptr(), h.as_mut_ptr(), m.as_mut_ptr()), 1);
-            assert_eq!((h.assume_init(), m.assume_init()), (-2, 12));
-            assert_eq!(nzbget_rs_parse_week_days(std::ptr::null(), p), 1);
-            assert_eq!(out, 0);
-            assert_eq!(nzbget_rs_parse_week_days(c"1".as_ptr(), null_mut()), 0);
-
-            let (mut o, mut v) = (MaybeUninit::<RsBuf>::uninit(), MaybeUninit::<RsBuf>::uninit());
-            let option = std::ffi::CString::new("WriteBufferSize").unwrap();
-            let value = std::ffi::CString::new("-1").unwrap();
-            nzbget_rs_convert_old_option(option.as_ptr(), value.as_ptr(), o.as_mut_ptr(), v.as_mut_ptr());
-            drop((option, value));
-            let (o, v) = (o.assume_init(), v.assume_init());
-            assert_eq!(CStr::from_ptr(o.data), c"WriteBuffer");
-            assert_eq!(CStr::from_ptr(v.data), c"1024");
-            nzbget_rs_free(o);
-            nzbget_rs_free(v);
-            for which in 0..3 {
-                let mut out = MaybeUninit::<RsBuf>::uninit();
-                let p = out.as_mut_ptr();
-                nzbget_rs_convert_old_option(std::ptr::null(), std::ptr::null(),
-                    if which == 0 { null_mut() } else { p },
-                    if which == 1 { null_mut() } else { p });
-                let out = out.assume_init();
-                assert_eq!(CStr::from_ptr(out.data), c"");
-                nzbget_rs_free(out);
-            }
-            nzbget_rs_convert_old_option(std::ptr::null(), std::ptr::null(), null_mut(), null_mut());
             assert_eq!(nzbget_rs_validate_option_name(std::ptr::null(), None, null_mut()), 0);
             assert_eq!(nzbget_rs_validate_option_name(c"Server1.Host".as_ptr(), None, null_mut()), 1);
-            assert_eq!(nzbget_rs_has_script(std::ptr::null(), std::ptr::null()), 0);
-            assert_eq!(nzbget_rs_has_script(c"a.py".as_ptr(), std::ptr::null()), 0);
-            assert_eq!(nzbget_rs_parse_category_source(std::ptr::null()), 1);
             assert_eq!(nzbget_rs_option_restricted(std::ptr::null(), 1), 0);
             assert_eq!(nzbget_rs_option_restricted(c"Server1.Password".as_ptr(), 1), 1);
             assert_eq!(nzbget_rs_option_restricted(c"Server1.Host".as_ptr(), 1), 0);
@@ -4211,24 +3553,13 @@ mod tests {
 
     #[test]
     fn textutil_in_place_ranges_nulls_and_ownership() {
-        extern "C" fn space(byte: c_int) -> c_int {
-            // An unsigned-char caller in a locale with a high-byte space.
-            (byte == 255 || byte == 32) as c_int
-        }
         unsafe {
             let null = std::ptr::null_mut();
             assert!(nzbget_rs_trim_line(null, 0).is_null());
-            assert_eq!(nzbget_rs_trim_string(null, 10, 1, 1, 1, null.cast(), None), 0);
-            assert_eq!(nzbget_rs_parse_rfc822_date_time(null), 0);
-            assert_eq!(nzbget_rs_ends_with(null, 0, null, 0, 0), 1);
-            assert_eq!(nzbget_rs_ends_with(null, 0, c"x".as_ptr(), 1, 0), 0);
-            for buf in [nzbget_rs_split_command_line(null), nzbget_rs_format_buffer(null, 10),
-                nzbget_rs_format_buffer(c"x".as_ptr(), -1)]
-            {
-                assert_eq!(buf.len, 0);
-                assert_eq!(*buf.data, 0);
-                nzbget_rs_free(buf);
-            }
+            let buf = nzbget_rs_split_command_line(null);
+            assert_eq!(buf.len, 0);
+            assert_eq!(*buf.data, 0);
+            nzbget_rs_free(buf);
             for (source, expected, offset) in [
                 (b"! x \t\r\n\0!".as_slice(), b"! x\0\0\0\0\0!".as_slice(), 1),
                 (b"! \t\r\n\0!", b"!\0\0\0\0\0!", 0),
@@ -4242,25 +3573,11 @@ mod tests {
                     assert_eq!(buf, expected);
                 }
             }
-            let mut buf = *b"!\t\0x\xff!";
-            let mut start = usize::MAX;
-            let end = nzbget_rs_trim_string(buf.as_mut_ptr().add(1).cast(), 4, 1, 1, 1,
-                &mut start, Some(space));
-            assert_eq!((start, end), (2, 3));
-            assert_eq!(&buf, b"!  x\xff!");
-            let mut all = *b" \t\r\n";
-            assert_eq!(nzbget_rs_trim_string(all.as_mut_ptr().cast(), all.len(), 1, 1, 1,
-                &mut start, Some(space)), 4);
-            assert_eq!(start, 4); // empty kept range, valid for resize then erase
             let mut source = b"a 'b c'\0".to_vec();
             let words = nzbget_rs_split_command_line(source.as_ptr().cast());
-            let hex = nzbget_rs_format_buffer(source.as_ptr().cast(), 2);
             source.fill(b'x');
-            assert_eq!(span(words.data, words.len), b"a\0b c\0");
-            assert_eq!(span(hex.data, hex.len), b"61 20 ");
+            assert_eq!(bytes_arg(words.data.cast(), words.len), b"a\0b c\0");
             nzbget_rs_free(words);
-            assert_eq!(input(hex.data), b"61 20 ");
-            nzbget_rs_free(hex);
         }
     }
 
@@ -4643,22 +3960,15 @@ mod tests {
     #[test]
     fn util_ffi_nulls_ownership_and_table_without_callbacks() {
         unsafe {
-            assert_eq!(nzbget_rs_alpha_num(std::ptr::null()), 1);
-            assert_eq!(nzbget_rs_hash_bj96(std::ptr::null(), 7, 42), crate::util::hash_bj96(&[], 42));
             nzbget_rs_reduce_str(std::ptr::null_mut(), std::ptr::null(), std::ptr::null());
             let mut raw = *b"abc\0";
             nzbget_rs_reduce_str(raw.as_mut_ptr().cast(), std::ptr::null(), c"".as_ptr());
             assert_eq!(&raw, b"abc\0");
-            for (format, expected) in [
-                (nzbget_rs_format_size as extern "C" fn(i64) -> RsBuf, &b"512 B\0"[..]),
-                (nzbget_rs_format_speed, &b"0 KB/s\0"[..]),
-            ] {
-                let first = format(512);
-                let second = format(12345);
-                nzbget_rs_free(second);
-                assert_eq!(std::slice::from_raw_parts(first.data.cast::<u8>(), first.len + 1), expected);
-                nzbget_rs_free(first);
-            }
+            let first = nzbget_rs_format_size(512);
+            let second = nzbget_rs_format_size(12345);
+            nzbget_rs_free(second);
+            assert_eq!(std::slice::from_raw_parts(first.data.cast::<u8>(), first.len + 1), &b"512 B\0"[..]);
+            nzbget_rs_free(first);
             for list in [c".NZB", c"*.NZ?"] {
                 assert_eq!(nzbget_rs_match_file_ext(c"a.nzb".as_ptr(), list.as_ptr(), c",".as_ptr()), 1);
             }
@@ -4669,22 +3979,16 @@ mod tests {
     #[test]
     fn webutil_nulls_borrowing_and_ownership() {
         unsafe {
-            for find in [nzbget_rs_xml_find_tag, nzbget_rs_json_find_field] {
-                let mut length = -7;
-                for (text, name) in [(std::ptr::null(), c"x".as_ptr()),
-                                     (c"".as_ptr(), std::ptr::null()),
-                                     (c"".as_ptr(), c"x".as_ptr())] {
-                    assert!(find(text, name, &mut length).is_null());
-                    assert_eq!(length, -7);
-                }
-                assert!(find(c"".as_ptr(), c"x".as_ptr(), std::ptr::null_mut()).is_null());
-            }
-            let xml = c"<x>abc</x>";
-            let json = c"\"x\": 123";
             let mut length = -7;
+            for (text, name) in [(std::ptr::null(), c"x".as_ptr()),
+                                 (c"".as_ptr(), std::ptr::null()),
+                                 (c"".as_ptr(), c"x".as_ptr())] {
+                assert!(nzbget_rs_xml_find_tag(text, name, &mut length).is_null());
+                assert_eq!(length, -7);
+            }
+            assert!(nzbget_rs_xml_find_tag(c"".as_ptr(), c"x".as_ptr(), std::ptr::null_mut()).is_null());
+            let xml = c"<x>abc</x>";
             assert_eq!(nzbget_rs_xml_find_tag(xml.as_ptr(), c"x".as_ptr(), &mut length), xml.as_ptr().add(3));
-            assert_eq!(length, 3);
-            assert_eq!(nzbget_rs_json_find_field(json.as_ptr(), c"x".as_ptr(), &mut length), json.as_ptr().add(5));
             assert_eq!(length, 3);
 
             let result = nzbget_rs_content_disposition_filename(std::ptr::null());
@@ -4735,12 +4039,6 @@ mod tests {
         unsafe {
             assert_eq!(nzbget_rs_decode_base64(std::ptr::null(), 4, std::ptr::null_mut()), 0);
             nzbget_rs_json_decode(std::ptr::null_mut());
-            let mut length = -7;
-            for text in [std::ptr::null(), b"\0".as_ptr().cast(), b"\"x\\a\0".as_ptr().cast()] {
-                assert!(nzbget_rs_json_next_value(text, &mut length).is_null());
-                assert_eq!(length, -7);
-            }
-            assert!(nzbget_rs_json_next_value(b"123\0".as_ptr().cast(), std::ptr::null_mut()).is_null());
         }
     }
 
@@ -4756,11 +4054,6 @@ mod tests {
             nzbget_rs_json_decode(json.as_mut_ptr().cast());
             assert_eq!(&json[..8], b"\xf0\x9f\x98\x80\xef\xbf\xbd\0");
             assert_eq!(json[19], b'!');
-
-            let text = b" ,\"x\\\"y\", rest\0";
-            let mut length = -7;
-            assert_eq!(nzbget_rs_json_next_value(text.as_ptr().cast(), &mut length), text.as_ptr().add(2).cast());
-            assert_eq!(length, 6);
         }
     }
 
@@ -4976,23 +4269,6 @@ unsafe fn dupe_identity_input(raw: *const DupeIdentityInput) -> Option<crate::du
         name: arg(raw.name, raw.name_len).to_vec(),
         extension: arg(raw.extension, raw.extension_len).to_vec(),
     })
-}
-
-/// A bounded decoded first article. Result: u64 size LE, u32 extension length LE,
-/// extension bytes, name bytes. Empty means unknown; release with nzbget_rs_free.
-/// # Safety
-/// Inputs are readable for their lengths, or NULL (empty).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_inner(data: *const c_char, len: usize, name: *const c_char,
-    name_len: usize, total: u64, minimum: u64) -> RsBuf {
-    let Some(found) = crate::dupeidentity::inner_entry(arg(data, len), arg(name, name_len), total, minimum) else {
-        return into_buf(Vec::new());
-    };
-    let mut out = found.bytes.to_le_bytes().to_vec();
-    out.extend_from_slice(&(found.extension.len() as u32).to_le_bytes());
-    out.extend_from_slice(&found.extension);
-    out.extend_from_slice(&found.name);
-    into_buf(out)
 }
 
 /// # Safety
@@ -7114,560 +6390,6 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_match_donor_file(
 
 
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_is_eligible(filename: *const c_char) -> c_int {
-    if filename.is_null() {
-        return 0;
-    }
-    crate::streamrepair::is_stream_eligible(CStr::from_ptr(filename).to_bytes()) as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_compute_holes(
-    covered: *const crate::dupefallback::NzbgetRsByteRange,
-    count: usize,
-    file_size: i64,
-    out_holes: *mut crate::dupefallback::NzbgetRsByteRange,
-    cap: usize,
-) -> usize {
-    let slice = if count == 0 || covered.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(covered, count)
-    };
-    let holes = crate::streamrepair::compute_holes(slice, file_size);
-    if !out_holes.is_null() && cap > 0 {
-        let n = holes.len().min(cap);
-        std::ptr::copy_nonoverlapping(holes.as_ptr(), out_holes, n);
-    }
-    holes.len()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_intersects_any(
-    range: crate::dupefallback::NzbgetRsByteRange,
-    ranges: *const crate::dupefallback::NzbgetRsByteRange,
-    count: usize,
-) -> c_int {
-    let slice = if count == 0 || ranges.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(ranges, count)
-    };
-    crate::streamrepair::intersects_any(range, slice) as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_select_probe_parts(
-    donor_ranges: *const crate::dupefallback::NzbgetRsByteRange,
-    donor_count: usize,
-    holes: *const crate::dupefallback::NzbgetRsByteRange,
-    hole_count: usize,
-    count: c_int,
-    out_parts: *mut c_int,
-    cap: usize,
-) -> usize {
-    let donors = if donor_count == 0 || donor_ranges.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(donor_ranges, donor_count)
-    };
-    let hole_slice = if hole_count == 0 || holes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(holes, hole_count)
-    };
-    let parts = crate::streamrepair::select_probe_parts(donors, hole_slice, count);
-    if !out_parts.is_null() && cap > 0 {
-        let n = parts.len().min(cap);
-        std::ptr::copy_nonoverlapping(parts.as_ptr(), out_parts, n);
-    }
-    parts.len()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_subtract_covered(
-    holes: *const crate::dupefallback::NzbgetRsByteRange,
-    hole_count: usize,
-    covered: crate::dupefallback::NzbgetRsByteRange,
-    out_holes: *mut crate::dupefallback::NzbgetRsByteRange,
-    cap: usize,
-) -> usize {
-    let hole_slice = if hole_count == 0 || holes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(holes, hole_count)
-    };
-    let rem = crate::streamrepair::subtract_covered(hole_slice, covered);
-    if !out_holes.is_null() && cap > 0 {
-        let n = rem.len().min(cap);
-        std::ptr::copy_nonoverlapping(rem.as_ptr(), out_holes, n);
-    }
-    rem.len()
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_stream_decoded_size_plausible(
-    decoded_size: i64,
-    encoded_size: i64,
-) -> c_int {
-    crate::streamrepair::decoded_size_plausible(decoded_size, encoded_size) as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_suffix_key(filename: *const c_char) -> RsBuf {
-    let bytes = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    into_buf(crate::streamrepair::suffix_key(bytes))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_volume_key(filename: *const c_char) -> RsBuf {
-    let bytes = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    into_buf(crate::streamrepair::volume_key(bytes))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_stream_exceeds_decompress_cap(
-    total_bytes: i64,
-    next_chunk: i64,
-    total_extent: i64,
-    member_declared_size: i64,
-) -> c_int {
-    crate::streamrepair::exceeds_decompress_cap(
-        total_bytes,
-        next_chunk,
-        total_extent,
-        member_declared_size,
-    ) as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_composite_to_members(
-    member_indexes: *const i32,
-    disk_bases: *const i64,
-    member_sizes: *const i64,
-    member_count: usize,
-    range: crate::dupefallback::NzbgetRsByteRange,
-    out_pieces: *mut crate::streamrepair::NzbgetRsMemberRange,
-    cap: usize,
-) -> usize {
-    if member_count == 0
-        || member_indexes.is_null()
-        || disk_bases.is_null()
-        || member_sizes.is_null()
-    {
-        return 0;
-    }
-    let idx = std::slice::from_raw_parts(member_indexes, member_count);
-    let bases = std::slice::from_raw_parts(disk_bases, member_count);
-    let sizes = std::slice::from_raw_parts(member_sizes, member_count);
-    let pieces = crate::streamrepair::composite_to_members(idx, bases, sizes, range);
-    if !out_pieces.is_null() && cap > 0 {
-        let n = pieces.len().min(cap);
-        std::ptr::copy_nonoverlapping(pieces.as_ptr(), out_pieces, n);
-    }
-    pieces.len()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_holed_source_intersects(
-    holes: *const crate::dupefallback::NzbgetRsByteRange,
-    hole_count: usize,
-    offset: i64,
-    size: i64,
-) -> c_int {
-    let hole_slice = if hole_count == 0 || holes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(holes, hole_count)
-    };
-    crate::streamrepair::holed_source_intersects(hole_slice, offset, size) as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_content_map_to_inner(
-    runs: *const crate::streamrepair::NzbgetRsContentRun,
-    run_count: usize,
-    member_index: i32,
-    member_range: crate::dupefallback::NzbgetRsByteRange,
-    out_ranges: *mut crate::dupefallback::NzbgetRsByteRange,
-    cap: usize,
-) -> usize {
-    let run_slice = if run_count == 0 || runs.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(runs, run_count)
-    };
-    let res = crate::streamrepair::content_map_to_inner(run_slice, member_index, member_range);
-    if !out_ranges.is_null() && cap > 0 {
-        let n = res.len().min(cap);
-        std::ptr::copy_nonoverlapping(res.as_ptr(), out_ranges, n);
-    }
-    res.len()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_content_map_from_inner(
-    runs: *const crate::streamrepair::NzbgetRsContentRun,
-    run_count: usize,
-    inner_range: crate::dupefallback::NzbgetRsByteRange,
-    out_pieces: *mut crate::streamrepair::NzbgetRsMemberRange,
-    cap: usize,
-) -> usize {
-    let run_slice = if run_count == 0 || runs.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(runs, run_count)
-    };
-    let res = crate::streamrepair::content_map_from_inner(run_slice, inner_range);
-    if !out_pieces.is_null() && cap > 0 {
-        let n = res.len().min(cap);
-        std::ptr::copy_nonoverlapping(res.as_ptr(), out_pieces, n);
-    }
-    res.len()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_content_map_cipher_range(
-    runs: *const crate::streamrepair::NzbgetRsContentRun,
-    cipher_data_offsets: *const i64,
-    cipher_sizes: *const i64,
-    has_crypto: *const u8,
-    run_count: usize,
-    cipher_range: crate::dupefallback::NzbgetRsByteRange,
-    out_pieces: *mut crate::streamrepair::NzbgetRsMemberRange,
-    cap: usize,
-) -> usize {
-    if run_count == 0
-        || runs.is_null()
-        || cipher_data_offsets.is_null()
-        || cipher_sizes.is_null()
-        || has_crypto.is_null()
-    {
-        return 0;
-    }
-    let run_slice = std::slice::from_raw_parts(runs, run_count);
-    let offsets_slice = std::slice::from_raw_parts(cipher_data_offsets, run_count);
-    let sizes_slice = std::slice::from_raw_parts(cipher_sizes, run_count);
-    let crypto_slice = std::slice::from_raw_parts(has_crypto, run_count);
-    let res = crate::streamrepair::content_map_cipher_range(
-        run_slice,
-        offsets_slice,
-        sizes_slice,
-        crypto_slice,
-        cipher_range,
-    );
-    if !out_pieces.is_null() && cap > 0 {
-        let n = res.len().min(cap);
-        std::ptr::copy_nonoverlapping(res.as_ptr(), out_pieces, n);
-    }
-    res.len()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_content_mapper_group_sets(
-    member_names: *const *const c_char,
-    count: usize,
-    ctx: *mut std::ffi::c_void,
-    on_set: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const i32, usize)>,
-) {
-    let Some(cb) = on_set else {
-        return;
-    };
-    let mut slices: Vec<&[u8]> = Vec::with_capacity(count);
-    if !member_names.is_null() {
-        let ptrs = std::slice::from_raw_parts(member_names, count);
-        for &p in ptrs {
-            slices.push(if p.is_null() {
-                b""
-            } else {
-                CStr::from_ptr(p).to_bytes()
-            });
-        }
-    }
-    let sets = crate::streamrepair::content_mapper_group_sets(&slices);
-    for (fmt, members) in sets {
-        cb(ctx, fmt, members.as_ptr(), members.len());
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_content_mapper_coalesce_ranges(
-    ranges: *const crate::dupefallback::NzbgetRsByteRange,
-    count: usize,
-    out_ranges: *mut crate::dupefallback::NzbgetRsByteRange,
-    cap: usize,
-) -> usize {
-    let slice = if count == 0 || ranges.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(ranges, count)
-    };
-    let merged = crate::streamrepair::content_mapper_coalesce_ranges(slice);
-    if !out_ranges.is_null() && cap > 0 {
-        let n = merged.len().min(cap);
-        std::ptr::copy_nonoverlapping(merged.as_ptr(), out_ranges, n);
-    }
-    merged.len()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_content_mapper_build_zip_map(
-    member_indexes: *const i32,
-    member_sizes: *const i64,
-    count: usize,
-    ctx: *mut std::ffi::c_void,
-    read_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int>,
-    on_success: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const c_char,
-            i64,
-            *const crate::streamrepair::NzbgetRsContentRun,
-            usize,
-        ),
-    >,
-    on_error: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-) -> c_int {
-    let Some(read_fn) = read_cb else {
-        return 0;
-    };
-    let idx = if count == 0 || member_indexes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(member_indexes, count)
-    };
-    let sizes = if count == 0 || member_sizes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(member_sizes, count)
-    };
-    match crate::streamrepair::content_mapper_build_zip_map(idx, sizes, |m_idx, offset, buf| {
-        read_fn(ctx, m_idx, offset, buf.as_mut_ptr(), buf.len() as i64) != 0
-    }) {
-        Ok((mut inner_name, inner_size, runs)) => {
-            inner_name.push(0);
-            if let Some(cb) = on_success {
-                cb(
-                    ctx,
-                    inner_name.as_ptr().cast(),
-                    inner_size,
-                    runs.as_ptr(),
-                    runs.len(),
-                );
-            }
-            1
-        }
-        Err(reason) => {
-            if let Some(cb) = on_error {
-                let mut reason_c = reason.as_bytes().to_vec();
-                reason_c.push(0);
-                cb(ctx, reason_c.as_ptr().cast());
-            }
-            0
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_content_mapper_build_seven_zip_map(
-    member_indexes: *const i32,
-    member_sizes: *const i64,
-    count: usize,
-    ctx: *mut std::ffi::c_void,
-    read_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int>,
-    on_success: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const c_char,
-            i64,
-            *const crate::streamrepair::NzbgetRsContentRun,
-            usize,
-        ),
-    >,
-    on_error: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-) -> c_int {
-    let Some(read_fn) = read_cb else {
-        return 0;
-    };
-    let idx = if count == 0 || member_indexes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(member_indexes, count)
-    };
-    let sizes = if count == 0 || member_sizes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(member_sizes, count)
-    };
-    match crate::streamrepair::content_mapper_build_seven_zip_map(
-        idx,
-        sizes,
-        |m_idx, offset, buf| read_fn(ctx, m_idx, offset, buf.as_mut_ptr(), buf.len() as i64) != 0,
-    ) {
-        Ok((mut inner_name, inner_size, runs)) => {
-            inner_name.push(0);
-            if let Some(cb) = on_success {
-                cb(
-                    ctx,
-                    inner_name.as_ptr().cast(),
-                    inner_size,
-                    runs.as_ptr(),
-                    runs.len(),
-                );
-            }
-            1
-        }
-        Err(reason) => {
-            if let Some(cb) = on_error {
-                let mut reason_c = reason.as_bytes().to_vec();
-                reason_c.push(0);
-                cb(ctx, reason_c.as_ptr().cast());
-            }
-            0
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_build_probe_windows(
-    inner_size: i64,
-    holes: *const crate::dupefallback::NzbgetRsByteRange,
-    hole_count: usize,
-    original_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    orig_count: usize,
-    probe_count: c_int,
-    min_probe_compare_bytes: i64,
-    out_windows: *mut crate::dupefallback::NzbgetRsByteRange,
-    cap: usize,
-) -> usize {
-    let h = if hole_count == 0 || holes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(holes, hole_count)
-    };
-    let orig = if orig_count == 0 || original_holes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(original_holes, orig_count)
-    };
-    let windows = crate::streamrepair::build_probe_windows(
-        inner_size,
-        h,
-        orig,
-        probe_count,
-        min_probe_compare_bytes,
-    );
-    if !out_windows.is_null() && cap > 0 {
-        let n = windows.len().min(cap);
-        std::ptr::copy_nonoverlapping(windows.as_ptr(), out_windows, n);
-    }
-    windows.len()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_plain_compare_floor(
-    runs: *const crate::streamrepair::NzbgetRsContentRun,
-    run_count: usize,
-    original_inner_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    orig_count: usize,
-    windows: *const crate::dupefallback::NzbgetRsByteRange,
-    window_count: usize,
-) -> i64 {
-    let r = if run_count == 0 || runs.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(runs, run_count)
-    };
-    let orig = if orig_count == 0 || original_inner_holes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(original_inner_holes, orig_count)
-    };
-    let w = if window_count == 0 || windows.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(windows, window_count)
-    };
-    crate::streamrepair::plain_compare_floor(r, orig, w)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_encrypted_chain_start(
-    window_offset: i64,
-    window_end: i64,
-    block_size: i64,
-    original_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    orig_count: usize,
-) -> i64 {
-    let orig = if orig_count == 0 || original_holes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(original_holes, orig_count)
-    };
-    crate::streamrepair::encrypted_chain_start(window_offset, window_end, block_size, orig)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_buffer_has_varied_data(
-    data: *const u8,
-    len: usize,
-) -> c_int {
-    if len < 2 || data.is_null() {
-        return 0;
-    }
-    crate::streamrepair::buffer_has_varied_data(std::slice::from_raw_parts(data, len)) as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_compute_positional_rank(
-    member_names: *const *const c_char,
-    member_sizes: *const i64,
-    member_count: usize,
-    target_filename: *const c_char,
-    target_decoded_size: i64,
-    out_rank: *mut c_int,
-    out_window: *mut c_int,
-) {
-    let mut names: Vec<&[u8]> = Vec::with_capacity(member_count);
-    if !member_names.is_null() {
-        let ptrs = std::slice::from_raw_parts(member_names, member_count);
-        for &p in ptrs {
-            names.push(if p.is_null() {
-                b""
-            } else {
-                CStr::from_ptr(p).to_bytes()
-            });
-        }
-    }
-    let sizes = if member_count == 0 || member_sizes.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(member_sizes, member_count)
-    };
-    let target = if target_filename.is_null() {
-        b""
-    } else {
-        CStr::from_ptr(target_filename).to_bytes()
-    };
-    let (rank, window) =
-        crate::streamrepair::compute_positional_rank(&names, sizes, target, target_decoded_size);
-    if !out_rank.is_null() {
-        *out_rank = rank;
-    }
-    if !out_window.is_null() {
-        *out_window = window;
-    }
-}
-
 // ============================================================================
 // Post-Repair & DupeCoordinator Hot-Path FFI (`rust/src/postrepair.rs`)
 // ============================================================================
@@ -9444,29 +8166,6 @@ pub unsafe extern "C" fn nzbget_rs_twin_compare_par2_data(
         std::slice::from_raw_parts(twin_data_ptr, twin_data_len)
     };
     crate::twin::compare_twin_par2_data(&own_names, &own_md5s, own_print, twin_data)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_article_writer_format_dest_file_path(
-    dest_dir: *const c_char,
-    sep: c_char,
-    filename: *const c_char,
-) -> RsBuf {
-    let dd = if dest_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_dir).to_bytes()
-    };
-    let fn_bytes = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    into_buf(
-        crate::artwritercore::article_writer_format_dest_file_path(
-            dd, sep as u8, fn_bytes,
-        ),
-    )
 }
 
 #[no_mangle]

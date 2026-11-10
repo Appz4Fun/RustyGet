@@ -863,14 +863,6 @@ ptrdiff_t nzbget_rs_dupe_fallback_match_donor_file(
 
 
 
-size_t nzbget_rs_stream_compute_holes(
-    const NzbgetRsByteRange* covered, size_t count, int64_t file_size,
-    NzbgetRsByteRange* out_holes, size_t cap);
-void nzbget_rs_stream_compute_positional_rank(
-    const char* const* member_names, const int64_t* member_sizes, size_t member_count,
-    const char* target_filename, int64_t target_decoded_size,
-    int* out_rank, int* out_window);
-
 // ============================================================================
 // Post-Repair & DupeCoordinator Hot-Path FFI (`rust/src/postrepair.rs`)
 // ============================================================================
@@ -1794,8 +1786,6 @@ int32_t nzbget_rs_twin_compare_par2_data(
     const char* own_print_ptr,
     const uint8_t* twin_data_ptr,
     size_t twin_data_len);
-NzbgetRsBuf nzbget_rs_tpr_article_writer_format_dest_file_path(
-    const char* dest_dir, char sep, const char* filename);
 int nzbget_rs_newznab_parse_response(
     const uint8_t* xml_ptr, size_t xml_len, void* ctx,
     void (*on_error)(void* ctx, int error_code, const uint8_t* error_text_ptr, size_t error_text_len),

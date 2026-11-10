@@ -84,7 +84,21 @@ pub unsafe extern "C" fn nzbget_rs_main(
     // 1. Pre-flight check
     let route = inspect_preflight(argc, argv as *const *mut c_char);
     if route == EntrypointRoute::TlsCipherResolve {
-        return crate::ffi::nzbget_rs_tls_cipher_resolver(argc, argv as *const *const c_char);
+        if argc != 5 || argv.is_null() {
+            return 2;
+        }
+        let pointers = std::slice::from_raw_parts(argv as *const *const c_char, argc as usize);
+        let mut args = Vec::new();
+        for &pointer in &pointers[1..] {
+            if pointer.is_null() {
+                return 2;
+            }
+            let Ok(value) = CStr::from_ptr(pointer).to_str() else {
+                return 2;
+            };
+            args.push(value.to_owned());
+        }
+        return crate::ffi::tls_cipher_native::resolver(&args);
     }
 
     // 2. Platform initialization

@@ -65,23 +65,6 @@ pub fn is_par_name(name: &[u8]) -> bool {
     name.len() >= 5 && name[name.len() - 5..].eq_ignore_ascii_case(b".par2")
 }
 
-#[repr(C)]
-pub struct SubjectRange {
-    pub start: usize,
-    pub len: usize,
-}
-
-unsafe fn bytes<'a>(data: *const u8, len: usize) -> Option<&'a [u8]> {
-    if len == 0 {
-        return Some(&[]);
-    }
-    if data.is_null() || len > isize::MAX as usize {
-        return None;
-    }
-    // SAFETY: callers promise a readable allocation of len bytes for this call.
-    Some(unsafe { std::slice::from_raw_parts(data, len) })
-}
-
 /// Extracts the file name of a subject (`NameOfSubject` in `NzbReader.cpp`):
 /// the first quoted non-empty string (trimmed of ASCII whitespace), else
 /// `unquoted_subject_range(subject)`.
@@ -95,29 +78,6 @@ pub fn name_of_subject_range(subject: &[u8]) -> (usize, usize) {
         }
     }
     unquoted_subject_range(subject)
-}
-
-/// # Safety
-/// data must point to len readable bytes (or be null for zero len).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_unquoted_subject(
-    data: *const u8,
-    len: usize,
-) -> SubjectRange {
-    let (start, end) = unsafe { bytes(data, len) }
-        .map(unquoted_subject_range)
-        .unwrap_or((0, 0));
-    SubjectRange {
-        start,
-        len: end - start,
-    }
-}
-
-/// # Safety
-/// data must point to len readable bytes (or be null for zero len).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_par_name(data: *const u8, len: usize) -> i32 {
-    i32::from(unsafe { bytes(data, len) }.is_some_and(is_par_name))
 }
 
 /// Validates an NZB segment message-id (`ValidMessageId` in `NzbReader.cpp`).
@@ -4520,19 +4480,6 @@ mod tests {
         ] {
             let (start, end) = unquoted_subject_range(input);
             assert_eq!(&input[start..end], want, "{input:?}");
-        }
-    }
-    #[test]
-    fn ffi_rejects_null_nonempty_and_unrepresentable_lengths() {
-        // These inputs must be rejected before constructing a slice.
-        unsafe {
-            for len in [0, 1, usize::MAX] {
-                let range = nzbget_rs_dupesearch_unquoted_subject(std::ptr::null(), len);
-                assert_eq!((range.start, range.len), (0, 0));
-                assert_eq!(nzbget_rs_dupesearch_par_name(std::ptr::null(), len), 0);
-            }
-            let range = nzbget_rs_dupesearch_unquoted_subject(b"a".as_ptr(), usize::MAX);
-            assert_eq!((range.start, range.len), (0, 0));
         }
     }
     #[test]

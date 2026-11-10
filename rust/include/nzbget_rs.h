@@ -878,24 +878,8 @@ int nzbget_rs_dupe_fallback_par_cannot_cover(
     int64_t current_success_size, int64_t par_current_success_size, int64_t total_size,
     int current_success_articles, int current_failed_articles, int with_margin);
 uint64_t nzbget_rs_dupe_fallback_steps_hash(const int* sizes, size_t count);
-int64_t nzbget_rs_dupe_fallback_expected_offset(
-    ptrdiff_t index, int part_number, int prev_part_number, int prev_status,
-    int64_t prev_offset, int prev_size);
-int64_t nzbget_rs_dupe_fallback_expected_end(
-    ptrdiff_t index, size_t count, int part_number, int64_t decoded_file_size,
-    int next_part_number, int next_status, int64_t next_offset, int next_size);
-int nzbget_rs_dupe_fallback_segment_aligned(
-    int64_t segment_offset, int segment_size, int64_t expected_offset, int64_t expected_end);
 ptrdiff_t nzbget_rs_dupe_fallback_first_untiled(
     const NzbgetRsArticleGeom* articles, size_t count, int64_t decoded_size);
-int nzbget_rs_dupe_fallback_merge_decoded_size(int64_t* decoded_file_size, int64_t article_file_size);
-int nzbget_rs_dupe_fallback_register_lead_failure(
-    int fallback_round, int lead_snapshot, int donor_count, int next_lead,
-    int* lead_donor_id, int* lead_failures, int* lead_switches);
-void nzbget_rs_dupe_fallback_register_lead_success(
-    int fallback_round, int lead_snapshot, int lead_donor_id,
-    int64_t expected_offset, int64_t expected_end,
-    int* lead_failures, int* lead_switches);
 int nzbget_rs_dupe_fallback_is_par_file(
     int par_file, int first_content, int fc_par2, int filename_confirmed,
     const char* filename);
@@ -915,37 +899,6 @@ int nzbget_rs_dupe_fallback_eval_par_defer(
     int dp_deferred, int dp_lifted, int par_cannot_cover,
     int damage_certain, int damage_projected,
     int* out_lift_defer_state, int* out_log_lifted);
-int nzbget_rs_dupe_fallback_should_abort_deferred_try(
-    int defer, int round, int has_download_queue, int source_donors_empty);
-void nzbget_rs_dupe_fallback_resolve_exhausted_sources(
-    int defer, int pinned_round, int dupe_proactive, int par_defer_state,
-    int dp_none, int has_download_queue, int orig_msg_id_empty,
-    int* out_check_log_par_defer, int* out_inc_unsourced,
-    int* out_restore_orig_msg_id);
-size_t nzbget_rs_dupe_fallback_find_rotate_offset(
-    const int32_t* donor_ids_ptr, size_t count, int32_t lead_nzb_id);
-void nzbget_rs_dupe_fallback_compute_pin_lead_state(
-    const int* contributors, size_t contributors_len, int cur_file_lead_donor_id,
-    int* out_lead_snapshot, int* out_next_lead,
-    int* out_donor_count, int* out_new_file_lead);
-int nzbget_rs_dupe_fallback_should_vacate_ghost_lead(
-    int lead_nzb_id, int is_barred, const int32_t* donor_ids_ptr, size_t donor_ids_len);
-int nzbget_rs_dupe_fallback_own_article_matches(
-    int own_part_number, int part_number, const char* own_msg_id,
-    const char* orig_msg_id, const char* cur_msg_id);
-int nzbget_rs_dupe_fallback_is_donor_eligible(
-    int is_self, int kind, int expected_kind, int dupe_mode, int dm_force);
-int nzbget_rs_dupe_fallback_is_twin_kind(
-    const char* own_identity, const char* donor_identity, const char* kind);
-int nzbget_rs_dupe_fallback_compare_donors(
-    int twin1, int score1, int id1, int twin2, int score2, int id2);
-int nzbget_rs_dupe_fallback_should_reset_non_twin_lead(
-    int twin_only, int lead_id, const char* own_identity,
-    const char* lead_identity, const char* kind);
-int nzbget_rs_dupe_fallback_is_bad_donor_in_cooldown(
-    int64_t cur_time, int64_t bad_time, int retry_sec);
-int nzbget_rs_dupe_fallback_classify_first_head(
-    const uint8_t* head_ptr, size_t head_len);
 
 typedef struct {
     const char* filename;
@@ -1052,7 +1005,6 @@ typedef struct NzbgetRsUnpackMessageInfo {
 
 int nzbget_rs_dupecoord_same_name_or_key(
     const char* name1, const char* dupe_key1, const char* name2, const char* dupe_key2);
-int nzbget_rs_dupecoord_failover_warranted(int item_score, int health, int backup_score);
 int nzbget_rs_dupecoord_parse_alive_permille(const char* value);
 int nzbget_rs_dupecoord_select_dupe_backup(
     int has_self_nzb, uint32_t self_full_content_hash, int dupe_health,
@@ -1186,7 +1138,6 @@ int nzbget_rs_qhp_calc_health(
 int nzbget_rs_qhp_calc_critical_health(
     int64_t size, int64_t par_size, int64_t par_current_failed_size, int allow_estimation);
 
-int nzbget_rs_qhp_calc_write_buffer_size(int write_buffer_kb, int rec_size);
 int nzbget_rs_qhp_classify_completed_file_status(
     int total_articles, int success_articles, int missed_articles, int failed_articles);
 NzbgetRsBuf nzbget_rs_qhp_resolve_completed_filename(
@@ -1214,10 +1165,6 @@ int nzbget_rs_qhp_is_side_file(const char* filename, const char* ext_cleanup_dis
 int nzbget_rs_qhp_is_hanging_download(
     int64_t now, int64_t last_update, int article_timeout, int is_running);
 
-int nzbget_rs_qhp_should_cleanup_parked_files(
-    int par_status, int unpack_status, int64_t failed_size, int64_t par_failed_size,
-    int delete_status, int parking, int unpack_cleaned_up_disk);
-int nzbget_rs_qhp_classify_dup_status(int mark_status, int delete_status, int is_dupe_success);
 int nzbget_rs_qhp_parse_dupe_mode(const char* text, int* out_mode);
 
 int nzbget_rs_qhp_parse_sort_spec(const char* sort, int* out_criteria, int* out_order);
@@ -1368,17 +1315,6 @@ NzbgetRsBuf nzbget_rs_df_mask_newznab_text(const char* text, size_t len);
 // (`rust/src/statmeter.rs` / `rust/src/extension.rs`)
 // ============================================================================
 
-typedef struct NzbgetRsDirectRenameParDelta {
-    int32_t apply_hash16k;
-    int32_t par_flag_changed;
-    int64_t par_size;
-    int64_t par_current_success_size;
-    int64_t par_current_failed_size;
-    int64_t par_failed_size;
-    int32_t remaining_par_count;
-    int32_t unpause_non_par;
-} NzbgetRsDirectRenameParDelta;
-
 typedef struct NzbgetRsQueueScriptCmd {
     int32_t kind;
     size_t key_offset;
@@ -1524,38 +1460,6 @@ int nzbget_rs_network_speed_test_run(
     double* out_speed_mbps,
     NzbgetRsBuf* out_err_msg);
 
-int nzbget_rs_nntp_article_dl_is_retention_failure(
-    int retention_days, int64_t file_time, int64_t cur_time, int* out_age_days);
-int nzbget_rs_nntp_article_dl_all_servers_on_level_failed(
-    int level, const int32_t* cand_ids, const int32_t* cand_levels,
-    const int32_t* cand_groups, const uint8_t* cand_avail, size_t cand_count,
-    const int32_t* failed_ids, const int32_t* failed_levels,
-    const int32_t* failed_groups, size_t failed_count);
-int nzbget_rs_nntp_article_dl_resolve_final_status(
-    int status, int is_duplicate, int is_stopped, int ad_finished,
-    int ad_failed, int ad_retry, int ad_fatal_error);
-int nzbget_rs_nntp_article_dl_classify_decode_status(
-    int raw_article, int decoder_status, int is_yenc, int range_exceeded);
-void nzbget_rs_nntp_article_dl_eval_level_exhaustion(
-    int all_failed, int level, int max_norm_level,
-    int* out_advance_level, int* out_new_level, int* out_break_all_failed);
-int nzbget_rs_nntp_article_dl_handle_content_rejected(
-    int content_rejected, int dupe_fallback_round, int cur_status,
-    int ad_failed, int remained_retries, int* out_should_break,
-    int* out_status, int* out_content_rejected, int* out_remained_retries);
-int nzbget_rs_nntp_article_dl_classify_write_failure(
-    int local_write_error, int ad_fatal_error, int ad_failed,
-    int* out_content_rejected);
-void nzbget_rs_nntp_article_dl_normalize_connect_and_decrement_retries(
-    int connected, int status, int ad_connect_error, int ad_failed, int remained_retries,
-    int* out_connected, int* out_status, int* out_retries);
-int nzbget_rs_nntp_article_dl_is_join_group_ok(const char* response);
-int nzbget_rs_nntp_article_dl_classify_attempt_stat(
-    int status, int ad_finished, int ad_failed, int ad_not_found, int ad_crc_error,
-    int* out_success, int* out_failed);
-int nzbget_rs_nntp_article_dl_should_advance_server_list(
-    int has_want_server, int connected, int retention_failure,
-    int optional_blocked, int auth_rejected, int* out_push_failed_server);
 void nzbget_rs_nntp_server_pool_eval_block_server(
     int64_t prev_block_time, int64_t cur_time, int retry_interval,
     int* out_new_block, int* out_should_warn);
@@ -1603,17 +1507,6 @@ void nzbget_rs_awc_article_writer_execute_cleanup_old_data(
     NzbgetRsBuf* out_checked_old_dest_dir, int* out_has_checked_old_dest_dir,
     NzbgetRsBuf* out_deleted_old_dest_dir, int* out_has_deleted_old_dest_dir,
     int* out_clear_output_filename);
-int nzbget_rs_awc_article_writer_classify_completion_status(
-    int total_articles, int success_articles, int missed_articles, int failed_articles);
-int nzbget_rs_awc_article_writer_advance_and_check_range(
-    int raw_article, int* inout_ptr, int len, int article_size);
-int nzbget_rs_awc_article_writer_resolve_direct_write_ready(
-    int direct_write_opt, int force_direct_write, int output_initialized,
-    int has_own_out, int has_force_dest, int* out_output_initialized);
-int nzbget_rs_awc_article_cache_can_flush_file(
-    int cached_articles, int active_downloads, int skip_disk_write, int flush_everything);
-int nzbget_rs_awc_article_cache_can_alloc(
-    size_t effective_limit, size_t allocated, size_t size, int* out_was_empty);
 
 int nzbget_rs_dupesearch_classify_search_retry_reason(
     int queries, int failed, int verified_empty, int fetched_empty,
@@ -1622,11 +1515,6 @@ size_t nzbget_rs_dupesearch_calc_fast_donor_count(
     int dupe_fast_donors, size_t live_count, int cap);
 int nzbget_rs_dupesearch_alive_to_percent(double alive);
 int nzbget_rs_dupesearch_fast_donor_alive_param(int is_dead, double alive);
-
-int nzbget_rs_nntp_article_fetcher_eval_decoded_yenc(
-    int check_status, int ds_finished, int format, int ef_yenc,
-    int64_t begin_pos, int64_t end_pos, int64_t size, size_t data_len,
-    int64_t* out_offset, int64_t* out_file_size, int* out_success);
 
 int nzbget_rs_dsp_validate_dupe_extras_header(
     int scan_cnt, int recovered_articles, int recovered_holes);
@@ -2538,11 +2426,6 @@ int32_t nzbget_rs_dqh_dupesearch_pending_identity_matches(
     const uint8_t* cur_fingerprint_ptr, size_t cur_fingerprint_len);
 int32_t nzbget_rs_tpr_split_param_assignment(
     const char* text, size_t* out_name_len, size_t* out_value_offset);
-int32_t nzbget_rs_tpr_article_fetcher_is_server_eligible_on_level(
-    int32_t server_active, int32_t server_norm_level, int32_t target_level,
-    int32_t server_id, int32_t server_group,
-    const int32_t* failed_ids_ptr, const int32_t* failed_groups_ptr,
-    const int32_t* failed_levels_ptr, size_t failed_count);
 double nzbget_rs_dqh_stream_repair_bytes_to_mb(int64_t bytes);
 void nzbget_rs_tpr_script_resolve_single_arg_executor(
     int32_t has_found, const char* found_executor, const char* arg0,
@@ -2554,25 +2437,14 @@ int32_t nzbget_rs_queue_coord_is_size_twin(
     int32_t is_self, int32_t same_name_or_key, int64_t self_size, int64_t other_size,
     int64_t other_par_size, int64_t largest_self_file,
     const int64_t* other_file_sizes_ptr, size_t other_file_sizes_len);
-NzbgetRsBuf nzbget_rs_dqh_article_dl_format_connection_name(
-    const char* server_name, const char* host);
-NzbgetRsBuf nzbget_rs_dqh_article_dl_format_fetch_command(
-    int32_t raw_article, const char* message_id);
-NzbgetRsBuf nzbget_rs_dqh_article_writer_format_info_path(
-    const char* nzb_name, char sep, const char* filename);
-NzbgetRsBuf nzbget_rs_dqh_article_writer_format_raw_part_dest(
-    const char* final_output_path, size_t final_output_path_len,
-    char sep, int32_t part_number);
 NzbgetRsBuf nzbget_rs_tpr_post_format_info_name(
     const char* prefix, const char* name);
 NzbgetRsBuf nzbget_rs_dqh_conn_format_port_str(int32_t port);
 NzbgetRsBuf nzbget_rs_tpr_article_writer_format_dest_file_path(
     const char* dest_dir, char sep, const char* filename);
-NzbgetRsBuf nzbget_rs_tpr_article_writer_format_tmp_path(const char* base_path);
 NzbgetRsBuf nzbget_rs_queue_coord_format_par_damage_summary(
     int32_t certain, int32_t damaged_blocks, int32_t projected_blocks,
     int64_t block_size, int32_t recovery_blocks);
-NzbgetRsBuf nzbget_rs_dqh_article_fetcher_format_body_cmd(const char* message_id);
 NzbgetRsBuf nzbget_rs_dqh_newznab_format_search_info_name(
     const char* label, int32_t page_one_based);
 NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_key_val_param(
@@ -3157,20 +3029,6 @@ int nzbget_rs_nzbfile_parser_get_file(
     const NzbgetRsNzbFileParser* parser, size_t index,
     NzbgetRsNzbKeptFileView* out_view);
 
-void nzbget_rs_direct_renamer_eval_article(
-    int article_size, size_t article_count, int old_par_file, int new_par_file,
-    int file_paused, int64_t file_size, int64_t file_success_size,
-    int64_t file_failed_size, int64_t file_missed_size,
-    int64_t par_size, int64_t par_current_success_size,
-    int64_t par_current_failed_size, int64_t par_failed_size,
-    int remaining_par_count, NzbgetRsDirectRenameParDelta* out_delta);
-size_t nzbget_rs_direct_renamer_select_pars_to_unpause(
-    const int* ids, const char* const* set_ids, const uint8_t* completed,
-    const uint8_t* in_file_list, const int64_t* sizes, size_t count,
-    int* out_file_ids);
-NzbgetRsBuf nzbget_rs_direct_renamer_resolve_old_output_path(
-    const char* curr_output_filename, const char* dest_dir, char sep, const char* filename);
-
 int nzbget_rs_downloadinfo_script_calc_total_status(const int32_t* statuses, size_t len);
 void nzbget_rs_downloadinfo_server_stat_apply_op(
     int cur_success, int cur_failed, int delta_success, int delta_failed,
@@ -3238,8 +3096,6 @@ NzbgetRsBuf nzbget_rs_dupe_probe_eval_recheck_outcome(
 
 int nzbget_rs_dupecoord_files_on_disk(
     const char* final_dir, const char* dest_dir, const char* ext_cleanup_disk);
-NzbgetRsBuf nzbget_rs_dupecoord_format_dupe_skip_message(
-    const char* name, const char* other_name, int in_history, int same_content, int good);
 NzbgetRsBuf nzbget_rs_dupecoord_no_backup_reason(
     int fails_over_flag, int dupe_mode, const NzbgetRsDupeHistoryCandidate* history,
     size_t history_len, void* cb_ctx, int (*file_exists_cb)(void* ctx, size_t history_index));
@@ -3258,24 +3114,9 @@ int nzbget_rs_dupecoord_accumulate_history_dupe_status(
 
 int nzbget_rs_unpack_has_completed_archive_ext(const char* filename);
 
-int nzbget_rs_queue_editor_group_sorter_compare_values(
-    int sort_criteria, int sort_order, int so_descending, int cmp_name,
-    int64_t size1, int64_t size2, int64_t rem1, int64_t rem2,
-    int64_t min_time1, int64_t min_time2, int cmp_cat, int prio1, int prio2);
-size_t nzbget_rs_queue_editor_dedup_id_list(
-    const int32_t* ids_ptr, size_t len, int32_t* out_ids_ptr);
-int32_t nzbget_rs_queue_editor_map_group_to_file_action(int32_t action);
-int nzbget_rs_queue_editor_filename_has_vol(const char* filename);
 void nzbget_rs_queue_editor_visit_category_ext_diff(
     const char* old_ext, const char* new_ext, void* ctx,
     void (*cb)(void* ctx, const char* param_name, const char* param_val));
-void nzbget_rs_queue_editor_resolve_move_groups_target(
-    int32_t target_id, const int32_t* queue_ids_ptr, size_t queue_len,
-    const int32_t* moved_ids_ptr, size_t moved_len, int32_t before, int32_t max_id,
-    int32_t* out_target_id, int32_t* out_before, int32_t* out_offset);
-int nzbget_rs_queue_editor_calc_move_groups_to_offset(
-    const int* queue_ids, size_t queue_len, int target_id, int move_id,
-    int before, size_t item_list_size);
 
 int nzbget_rs_history_coord_should_recheck_failed_articles(
     int daf_none, int hc_dupe, int kind_nzb, int failed_articles,
@@ -4233,9 +4074,6 @@ int nzbget_rs_dupecoord_eval_queue_score_dupe(
     int32_t health_check, int32_t queued_is_redownload_auto,
     int32_t queued_cur_success_articles, int32_t queued_health, int32_t queued_crit_health,
     int32_t queued_has_post_info);
-const char* nzbget_rs_dupecoord_resolve_history_mark(
-    int32_t mark_status, int32_t dupe_check, int32_t kind, int32_t dupe_mode,
-    int32_t* out_dup_status, int32_t* out_post_action);
 
 int nzbget_rs_statmeter_calc_month_slots(int64_t loc_cur_time, int quota_start_day);
 int nzbget_rs_unpack_controller_try_password_file(

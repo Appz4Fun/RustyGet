@@ -13602,8 +13602,9 @@ inline CachedSegmentData ArticleCache::Alloc(int size)
 	void* p = nullptr;
 	size_t effectiveLimit = GetEffectiveLimit();
 
-	int wasEmpty = 0;
-	if (nzbget_rs_awc_article_cache_can_alloc(effectiveLimit, m_allocated, (size_t)size, &wasEmpty) != 0)
+	bool wasEmpty = m_allocated == 0;
+	size_t avail = effectiveLimit > m_allocated ? effectiveLimit - m_allocated : 0;
+	if (effectiveLimit > 0 && (size_t)size <= avail)
 	{
 		p = malloc(size);
 		if (p)
@@ -13812,11 +13813,11 @@ public:
 
 	bool Write(char* buffer, int len)
 	{
-		if (nzbget_rs_awc_article_writer_advance_and_check_range(
-			g_Options->GetRawArticle() ? 1 : 0,
-			&m_articlePtr,
-			len,
-			m_articleSize) != 0)
+		if (!g_Options->GetRawArticle())
+		{
+			m_articlePtr = (int)((uint32)m_articlePtr + (uint32)len);
+		}
+		if (!g_Options->GetRawArticle() && m_articlePtr > m_articleSize)
 		{
 			return true;
 		}
@@ -13935,30 +13936,16 @@ public:
 			hasOwnOut = !m_outputFilename.empty() && FileSystem::FileExists(m_outputFilename.c_str());
 			hasForceDest = !hasOwnOut && forceDirectWrite && FileSystem::FileExists(destPath);
 		}
-		int newOutputInit = curOutputInit ? 1 : 0;
-		bool directWrite = nzbget_rs_awc_article_writer_resolve_direct_write_ready(
-			directWriteOpt ? 1 : 0,
-			forceDirectWrite ? 1 : 0,
-			curOutputInit ? 1 : 0,
-			hasOwnOut ? 1 : 0,
-			hasForceDest ? 1 : 0,
-			&newOutputInit) != 0;
-		if (newOutputInit && !curOutputInit)
+		bool wantDirect = directWriteOpt || forceDirectWrite;
+		if (wantDirect && !curOutputInit && (hasOwnOut || (forceDirectWrite && hasForceDest)))
 		{
+			curOutputInit = true;
 			m_fileInfo->SetOutputInitialized(true);
 		}
+		bool directWrite = wantDirect && curOutputInit;
 		bool cached = m_fileInfo->GetCachedArticles() > 0;
 
-		std::string fullInfoPath;
-		{
-			NzbgetRsBuf infoPathBuf = nzbget_rs_dqh_article_writer_format_info_path(
-				nzbName.c_str(), PATH_SEPARATOR, filename.c_str());
-			if (infoPathBuf.data)
-			{
-				fullInfoPath.assign(infoPathBuf.data, infoPathBuf.len);
-			}
-			nzbget_rs_free(infoPathBuf);
-		}
+		std::string fullInfoPath = nzbName + PATH_SEPARATOR + filename;
 		LogStartMessage(fullInfoPath, directWrite, cached);
 
 		// 2. Return if no successful articles
@@ -14316,15 +14303,13 @@ public:
 			else if (g_Options->GetRawArticle())
 			{
 				// Move raw files
-				NzbgetRsBuf dstBuf = nzbget_rs_dqh_article_writer_format_raw_part_dest(
-					finalOutputPath.data(), finalOutputPath.size(), PATH_SEPARATOR, pa->GetPartNumber());
-				const char* dstFileName = dstBuf.data ? dstBuf.data : "";
+				CString dstFileName = CString::FormatStr("%.*s%c%03i",
+					(int)finalOutputPath.size(), finalOutputPath.data(), PATH_SEPARATOR, pa->GetPartNumber());
 				if (!FileSystem::MoveFile(pa->GetResultFilename(), dstFileName))
 				{
 					m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not move file %s to %s: %s",
-						pa->GetResultFilename(), dstFileName, *FileSystem::GetLastErrorMessage());
+						pa->GetResultFilename(), *dstFileName, *FileSystem::GetLastErrorMessage());
 				}
-				nzbget_rs_free(dstBuf);
 			}
 
 			// 3. Calculate CRC
@@ -14475,14 +14460,11 @@ public:
 
 	void ReportCompletionStatus(std::string_view infoFilename)
 	{
-		const int completionKind = nzbget_rs_awc_article_writer_classify_completion_status(
-			m_fileInfo->GetTotalArticles(), m_fileInfo->GetSuccessArticles(),
-			m_fileInfo->GetMissedArticles(), m_fileInfo->GetFailedArticles());
-		if (completionKind == 1)
+		if (m_fileInfo->GetTotalArticles() == m_fileInfo->GetSuccessArticles())
 		{
 			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkInfo, "Successfully downloaded %s", infoFilename.data());
 		}
-		else if (completionKind == 2)
+		else if ((int64)m_fileInfo->GetMissedArticles() + (int64)m_fileInfo->GetFailedArticles() > 0)
 		{
 			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkWarning, "%i of %i article downloads failed for \"%s\"",
 				m_fileInfo->GetMissedArticles() + m_fileInfo->GetFailedArticles(),
@@ -14601,13 +14583,11 @@ public:
 						needBufFile = true;
 					}
 
-					BString<1024> destFile;
+					CString destFile;
 
 					if (!directWrite)
 					{
-						NzbgetRsBuf tmpBuf = nzbget_rs_tpr_article_writer_format_tmp_path(pa->GetResultFilename());
-						destFile.Set(tmpBuf.data ? tmpBuf.data : "", (int)tmpBuf.len);
-						nzbget_rs_free(tmpBuf);
+						destFile.Format("%s.tmp", pa->GetResultFilename() ? pa->GetResultFilename() : "");
 						if (!outfile.Open(destFile, DiskFile::omWrite))
 						{
 							m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
@@ -14895,9 +14875,11 @@ private:
 
 	void SetWriteBuffer(DiskFile& outFile, int recSize)
 	{
-		int bufSize = nzbget_rs_qhp_calc_write_buffer_size(g_Options->GetWriteBuffer(), recSize);
-		if (bufSize > 0)
+		int writeBufferKb = g_Options->GetWriteBuffer();
+		if (writeBufferKb > 0)
 		{
+			int maxBytes = (int)std::min<int64>((int64)writeBufferKb * 1024, INT32_MAX);
+			int bufSize = (recSize > 0 && recSize < maxBytes) ? recSize : maxBytes;
 			outFile.SetWriteBuffer(bufSize);
 		}
 	}
@@ -14922,7 +14904,7 @@ inline bool ArticleCache::CheckFlush(bool flushEverything)
 {
 	debug("Checking cache, Allocated: %i, FlushEverything: %i", (int)m_allocated, (int)flushEverything);
 
-	BString<1024> infoName;
+	CString infoName;
 
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
@@ -14935,16 +14917,13 @@ inline bool ArticleCache::CheckFlush(bool flushEverything)
 
 			for (FileInfo* fileInfo : nzbInfo->GetFileList())
 			{
-				if (nzbget_rs_awc_article_cache_can_flush_file(
-						fileInfo->GetCachedArticles(), fileInfo->GetActiveDownloads(),
-						fileInfo->GetNzbInfo()->GetSkipDiskWrite() ? 1 : 0,
-						flushEverything ? 1 : 0) != 0)
+				if (fileInfo->GetCachedArticles() > 0 &&
+					(fileInfo->GetActiveDownloads() == 0 || flushEverything) &&
+					(!fileInfo->GetNzbInfo()->GetSkipDiskWrite() || flushEverything))
 				{
 					m_fileInfo = fileInfo;
-					NzbgetRsBuf infoBuf = nzbget_rs_dqh_article_writer_format_info_path(
+					infoName.Format("%s%c%s",
 						m_fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR, m_fileInfo->GetFilename());
-					infoName.Set(infoBuf.data ? infoBuf.data : "", (int)infoBuf.len);
-					nzbget_rs_free(infoBuf);
 					break;
 				}
 			}
@@ -15027,22 +15006,24 @@ public:
 				break;
 			}
 			int eligible = 0;
-			std::vector<int> failedIds, failedGroups, failedLevels;
-			failedIds.reserve(failedServers.size());
-			failedGroups.reserve(failedServers.size());
-			failedLevels.reserve(failedServers.size());
-			for (NewsServer* failed : failedServers)
-			{
-				failedIds.push_back(failed->GetId());
-				failedGroups.push_back(failed->GetGroup());
-				failedLevels.push_back(failed->GetNormLevel());
-			}
 			for (NewsServer* server : g_ServerPool->GetServers())
 			{
-				if (nzbget_rs_tpr_article_fetcher_is_server_eligible_on_level(
-					server->GetActive() ? 1 : 0, server->GetNormLevel(), level,
-					server->GetId(), server->GetGroup(),
-					failedIds.data(), failedGroups.data(), failedLevels.data(), failedServers.size()) != 0)
+				if (!server->GetActive() || server->GetNormLevel() != level)
+				{
+					continue;
+				}
+				bool serverFailed = false;
+				for (NewsServer* failed : failedServers)
+				{
+					if (failed == server ||
+						(failed->GetGroup() > 0 && failed->GetGroup() == server->GetGroup() &&
+						 failed->GetNormLevel() == level))
+					{
+						serverFailed = true;
+						break;
+					}
+				}
+				if (!serverFailed)
 				{
 					eligible++;
 				}
@@ -15162,12 +15143,12 @@ public:
 			for (const CString& group : groups)
 			{
 				response = connection->JoinGroup(group);
-				if (nzbget_rs_nntp_article_dl_is_join_group_ok(response) != 0)
+				if (response && response[0] == '2')
 				{
 					break;
 				}
 			}
-			if (nzbget_rs_nntp_article_dl_is_join_group_ok(response) == 0)
+			if (!response || response[0] != '2')
 			{
 				detail("Stream repair: could not join groups on %s for %s",
 					connection->GetNewsServer()->GetName(), messageId);
@@ -15180,10 +15161,7 @@ public:
 			}
 		}
 
-		NzbgetRsBuf bodyCmdBuf = nzbget_rs_dqh_article_fetcher_format_body_cmd(messageId);
-		BString<1024> bodyCmd;
-		bodyCmd.Set(bodyCmdBuf.data ? bodyCmdBuf.data : "", (int)bodyCmdBuf.len);
-		nzbget_rs_free(bodyCmdBuf);
+		CString bodyCmd = CString::FormatStr("BODY %s\r\n", messageId ? messageId : "");
 		const char* response = connection->Request(bodyCmd);
 		if (!response)
 		{
@@ -15192,7 +15170,7 @@ public:
 			result.Transient = true;
 			return result;
 		}
-		if (nzbget_rs_nntp_article_dl_is_join_group_ok(response) == 0)
+		if (response[0] != '2')
 		{
 			detail("Stream repair: article %s not available on %s",
 				messageId, connection->GetNewsServer()->GetName());
@@ -15292,22 +15270,19 @@ public:
 			return result;
 		}
 
-		int64 decOffset = 0;
-		int64 decFileSize = 0;
-		int decSuccess = 0;
-		if (!nzbget_rs_nntp_article_fetcher_eval_decoded_yenc(
-			(int)decoder.Check(), (int)Decoder::dsFinished,
-			(int)decoder.GetFormat(), (int)Decoder::efYenc,
-			decoder.GetBeginPos(), decoder.GetEndPos(), decoder.GetSize(),
-			result.Data.size(), &decOffset, &decFileSize, &decSuccess))
+		if (decoder.Check() != Decoder::dsFinished ||
+			decoder.GetFormat() != Decoder::efYenc ||
+			decoder.GetBeginPos() <= 0 ||
+			decoder.GetEndPos() <= 0 ||
+			result.Data.empty())
 		{
 			detail("Stream repair: article %s from %s failed decoding",
 				messageId, connection->GetNewsServer()->GetName());
 			return result;
 		}
-		result.Offset = decOffset;
-		result.FileSize = decFileSize;
-		result.Success = decSuccess != 0;
+		result.Offset = decoder.GetBeginPos() - 1;
+		result.FileSize = decoder.GetSize();
+		result.Success = (int64)result.Data.size() == decoder.GetEndPos() - decoder.GetBeginPos() + 1;
 
 		return result;
 	}
@@ -17201,9 +17176,7 @@ public:
 		}
 
 		int round = articleInfo->GetDupeFallbackRound();
-		if (nzbget_rs_dupe_fallback_should_abort_deferred_try(
-			defer ? 1 : 0, round, downloadQueue ? 1 : 0,
-			articleInfo->GetDupeSourceDonors()->empty() ? 1 : 0) != 0)
+		if (defer && ((round == 0 && !downloadQueue) || (round > 0 && articleInfo->GetDupeSourceDonors()->empty())))
 		{
 			return false;
 		}
@@ -17245,32 +17218,27 @@ public:
 		}
 		if (round >= (int)sources.size())
 		{
-			int checkLogParDefer = 0;
-			int incUnsourced = 0;
-			int restoreOrigMsgId = 0;
-			nzbget_rs_dupe_fallback_resolve_exhausted_sources(
-				defer ? 1 : 0,
-				pinnedRound,
-				articleInfo->GetDupeProactive() ? 1 : 0,
-				(int)nzbInfo->GetDupeParDeferState(),
-				(int)NzbInfo::dpNone,
-				downloadQueue != nullptr ? 1 : 0,
-				Util::EmptyStr(articleInfo->GetDupeOriginalMessageId()) ? 1 : 0,
-				&checkLogParDefer,
-				&incUnsourced,
-				&restoreOrigMsgId);
-			if (checkLogParDefer && !CollectDonors(downloadQueue, nzbInfo).empty())
+			if (defer)
 			{
-				nzbInfo->SetDupeParDeferState(NzbInfo::dpDeferred);
-				nzbInfo->PrintMessage(Message::mkInfo,
-					"Deferring duplicate recovery for %s to par-check (its par2 files may cover the damage)",
-					nzbInfo->GetName());
+				if (!articleInfo->GetDupeProactive() &&
+					nzbInfo->GetDupeParDeferState() == NzbInfo::dpNone &&
+					downloadQueue && !CollectDonors(downloadQueue, nzbInfo).empty())
+				{
+					nzbInfo->SetDupeParDeferState(NzbInfo::dpDeferred);
+					nzbInfo->PrintMessage(Message::mkInfo,
+						"Deferring duplicate recovery for %s to par-check (its par2 files may cover the damage)",
+						nzbInfo->GetName());
+				}
+				if (pinnedRound > 0 && !Util::EmptyStr(articleInfo->GetDupeOriginalMessageId()))
+				{
+					articleInfo->SetMessageId(articleInfo->GetDupeOriginalMessageId());
+				}
 			}
-			if (incUnsourced)
+			else if (pinnedRound == 0 && !articleInfo->GetDupeProactive())
 			{
 				nzbInfo->SetDupeUnsourcedArticles(nzbInfo->GetDupeUnsourcedArticles() + 1);
 			}
-			if (restoreOrigMsgId)
+			else if (!Util::EmptyStr(articleInfo->GetDupeOriginalMessageId()))
 			{
 				articleInfo->SetMessageId(articleInfo->GetDupeOriginalMessageId());
 			}
@@ -17305,17 +17273,15 @@ public:
 	 * (order among the others preserved); no-op when the id is 0 or absent. */
 	static void RotateToLead(RawNzbList& donors, int leadNzbId)
 	{
-		std::vector<int32_t> donorIds;
-		donorIds.reserve(donors.size());
-		for (NzbInfo* donor : donors)
+		if (leadNzbId == 0)
 		{
-			donorIds.push_back(donor->GetId());
+			return;
 		}
-		size_t idx = nzbget_rs_dupe_fallback_find_rotate_offset(
-			donorIds.data(), donorIds.size(), leadNzbId);
-		if (idx > 0 && idx < donors.size())
+		auto it = std::find_if(donors.begin(), donors.end(),
+			[leadNzbId](NzbInfo* donor) { return donor->GetId() == leadNzbId; });
+		if (it != donors.begin() && it != donors.end())
 		{
-			std::rotate(donors.begin(), donors.begin() + idx, donors.end());
+			std::rotate(donors.begin(), it, donors.end());
 		}
 	}
 
@@ -17381,15 +17347,20 @@ public:
 		const std::vector<CString>& candidates, const std::vector<int>& contributors,
 		bool cutover, const char* primaryMessageId)
 	{
-		int leadSnapshot = 0;
-		int nextLead = 0;
-		int donorCount = 0;
-		int newFileLead = fileInfo->GetDupeLeadDonorId();
-		nzbget_rs_dupe_fallback_compute_pin_lead_state(
-			contributors.empty() ? nullptr : contributors.data(),
-			contributors.size(),
-			fileInfo->GetDupeLeadDonorId(),
-			&leadSnapshot, &nextLead, &donorCount, &newFileLead);
+		std::vector<int> donorIds;
+		for (int id : contributors)
+		{
+			if (std::find(donorIds.begin(), donorIds.end(), id) == donorIds.end())
+			{
+				donorIds.push_back(id);
+			}
+		}
+		int leadSnapshot = donorIds.empty() ? 0 : donorIds[0];
+		int nextLead = donorIds.size() > 1 ? donorIds[1] : 0;
+		int donorCount = (int)donorIds.size();
+		int newFileLead = (fileInfo->GetDupeLeadDonorId() == 0 && !donorIds.empty())
+			? donorIds[0]
+			: fileInfo->GetDupeLeadDonorId();
 		articleInfo->SetDupeLeadSnapshot(leadSnapshot);
 		articleInfo->SetDupeNextLead(nextLead);
 		articleInfo->SetDupeDonorCount(donorCount);
@@ -17422,12 +17393,24 @@ public:
 	static bool RegisterLeadFailure(FileInfo* fileInfo, ArticleInfo* articleInfo)
 	{
 		int leadDonorId = fileInfo->GetDupeLeadDonorId();
-		int leadFailures = fileInfo->GetDupeLeadFailures();
+		if (articleInfo->GetDupeFallbackRound() != 1 ||
+			articleInfo->GetDupeLeadSnapshot() == 0 ||
+			articleInfo->GetDupeLeadSnapshot() != leadDonorId)
+		{
+			return false;
+		}
+		int leadFailures = (int)std::min<int64>((int64)fileInfo->GetDupeLeadFailures() + 1, INT32_MAX);
 		int leadSwitches = fileInfo->GetDupeLeadSwitches();
-		bool rotated = nzbget_rs_dupe_fallback_register_lead_failure(
-			articleInfo->GetDupeFallbackRound(), articleInfo->GetDupeLeadSnapshot(),
-			articleInfo->GetDupeDonorCount(), articleInfo->GetDupeNextLead(),
-			&leadDonorId, &leadFailures, &leadSwitches) != 0;
+		bool rotated = false;
+		if (leadFailures >= 3 &&
+			articleInfo->GetDupeNextLead() != 0 &&
+			leadSwitches < articleInfo->GetDupeDonorCount())
+		{
+			leadDonorId = articleInfo->GetDupeNextLead();
+			leadFailures = 0;
+			leadSwitches = (int)std::min<int64>((int64)leadSwitches + 1, INT32_MAX);
+			rotated = true;
+		}
 		fileInfo->SetDupeLeadDonorId(leadDonorId);
 		fileInfo->SetDupeLeadFailures(leadFailures);
 		fileInfo->SetDupeLeadSwitches(leadSwitches);
@@ -17448,16 +17431,12 @@ public:
 		{
 			return;
 		}
-		int leadFailures = fileInfo->GetDupeLeadFailures();
-		int leadSwitches = fileInfo->GetDupeLeadSwitches();
-		nzbget_rs_dupe_fallback_register_lead_success(
-			articleInfo->GetDupeFallbackRound(), articleInfo->GetDupeLeadSnapshot(),
-			fileInfo->GetDupeLeadDonorId(),
-			ExpectedSegmentOffset(fileInfo, articleInfo),
-			ExpectedSegmentEnd(fileInfo, articleInfo),
-			&leadFailures, &leadSwitches);
-		fileInfo->SetDupeLeadFailures(leadFailures);
-		fileInfo->SetDupeLeadSwitches(leadSwitches);
+		fileInfo->SetDupeLeadFailures(0);
+		if (ExpectedSegmentOffset(fileInfo, articleInfo) != -1 &&
+			ExpectedSegmentEnd(fileInfo, articleInfo) != -1)
+		{
+			fileInfo->SetDupeLeadSwitches(0);
+		}
 	}
 
 	/* A lead donor deleted from queue/history would freeze the lead
@@ -17472,17 +17451,13 @@ public:
 		// par2 check (B40), is vacated: a barred one was passed over when sources were
 		// pinned, so no article's lead matched it again and the lead rotation froze
 		int leadNzbId = fileInfo->GetDupeLeadDonorId();
-		bool barred = fileInfo->GetNzbInfo() && fileInfo->GetNzbInfo()->GetDupeBlockedDonors()->count(leadNzbId);
-		std::vector<int32_t> donorIds;
-		donorIds.reserve(donors.size());
-		for (NzbInfo* donor : donors)
+		if (leadNzbId == 0)
 		{
-			donorIds.push_back(donor->GetId());
+			return;
 		}
-		if (nzbget_rs_dupe_fallback_should_vacate_ghost_lead(
-			leadNzbId, barred ? 1 : 0,
-			donorIds.empty() ? nullptr : donorIds.data(),
-			donorIds.size()) == 0)
+		bool barred = fileInfo->GetNzbInfo() && fileInfo->GetNzbInfo()->GetDupeBlockedDonors()->count(leadNzbId);
+		if (!barred && std::any_of(donors.begin(), donors.end(),
+			[leadNzbId](NzbInfo* donor) { return donor->GetId() == leadNzbId; }))
 		{
 			return;
 		}
@@ -17547,8 +17522,8 @@ public:
 		{
 			std::string kind = (donorNzbId && !ownIdentity.empty() && !Util::EmptyStr(donorPrint)) ?
 				TwinCheck::Kind(own->GetId(), ownIdentity.c_str(), donorNzbId, donorPrint) : "";
-			twinAllowed = donorNzbId && nzbget_rs_dupe_fallback_is_twin_kind(
-				ownIdentity.c_str(), donorPrint, kind.c_str()) != 0;
+			twinAllowed = donorNzbId && !ownIdentity.empty() && !Util::EmptyStr(donorPrint) &&
+				strncmp(kind.c_str(), "twin", 4) == 0;
 			if (!twinAllowed)
 			{
 				return nullptr;
@@ -17651,14 +17626,20 @@ public:
 		{
 			return -1;
 		}
+		if (index == 0)
+		{
+			return articleInfo->GetPartNumber() == 1 ? 0 : -1;
+		}
 
-		ArticleInfo* prev = index > 0 ? (*articles)[index - 1].get() : nullptr;
-		return nzbget_rs_dupe_fallback_expected_offset(
-			index, articleInfo->GetPartNumber(),
-			prev ? prev->GetPartNumber() : 0,
-			prev ? (int)prev->GetStatus() : 0,
-			prev ? prev->GetSegmentOffset() : 0,
-			prev ? prev->GetSegmentSize() : 0);
+		ArticleInfo* prev = (*articles)[index - 1].get();
+		if (prev->GetPartNumber() + 1 == articleInfo->GetPartNumber() &&
+			prev->GetStatus() == ArticleInfo::aiFinished &&
+			prev->GetSegmentSize() > 0 &&
+			prev->GetSegmentOffset() >= 0)
+		{
+			return prev->GetSegmentOffset() + prev->GetSegmentSize();
+		}
+		return -1;
 	}
 
 	/* Decoded byte offset the article must end at (exclusive): the begin of an
@@ -17668,19 +17649,25 @@ public:
 	{
 		ArticleList* articles = fileInfo->GetArticles();
 		int index = FindArticleIndex(articles, articleInfo);
-		if (index < 0)
+		if (index < 0 || (size_t)index >= articles->size())
 		{
 			return -1;
 		}
+		if ((size_t)index + 1 == articles->size())
+		{
+			int64 fileSize = fileInfo->GetDecodedFileSize();
+			return fileSize > 0 ? fileSize : -1;
+		}
 
-		ArticleInfo* next = (index + 1 < (int)articles->size()) ? (*articles)[index + 1].get() : nullptr;
-		return nzbget_rs_dupe_fallback_expected_end(
-			index, articles->size(), articleInfo->GetPartNumber(),
-			fileInfo->GetDecodedFileSize(),
-			next ? next->GetPartNumber() : 0,
-			next ? (int)next->GetStatus() : 0,
-			next ? next->GetSegmentOffset() : 0,
-			next ? next->GetSegmentSize() : 0);
+		ArticleInfo* next = (*articles)[index + 1].get();
+		if (articleInfo->GetPartNumber() + 1 == next->GetPartNumber() &&
+			next->GetStatus() == ArticleInfo::aiFinished &&
+			next->GetSegmentSize() > 0 &&
+			next->GetSegmentOffset() > 0)
+		{
+			return next->GetSegmentOffset();
+		}
+		return -1;
 	}
 
 	/* Verifies the decoded byte range recorded for a finished article
@@ -17694,10 +17681,21 @@ public:
 		{
 			return true;
 		}
-		return nzbget_rs_dupe_fallback_segment_aligned(
-			begin, size,
-			ExpectedSegmentOffset(fileInfo, articleInfo),
-			ExpectedSegmentEnd(fileInfo, articleInfo)) != 0;
+		if (begin < 0)
+		{
+			return false;
+		}
+		int64 expectedBegin = ExpectedSegmentOffset(fileInfo, articleInfo);
+		if (expectedBegin >= 0 && begin != expectedBegin)
+		{
+			return false;
+		}
+		int64 expectedEnd = ExpectedSegmentEnd(fileInfo, articleInfo);
+		if (expectedEnd >= 0 && begin + size != expectedEnd)
+		{
+			return false;
+		}
+		return true;
 	}
 
 	/* Whole-file decoded-boundary check, independent of the (non-persisted)
@@ -17752,9 +17750,17 @@ public:
 	static bool MergeDecodedFileSize(FileInfo* fileInfo, int64 articleFileSize)
 	{
 		int64 decodedFileSize = fileInfo->GetDecodedFileSize();
-		bool conflict = nzbget_rs_dupe_fallback_merge_decoded_size(&decodedFileSize, articleFileSize) != 0;
-		fileInfo->SetDecodedFileSize(decodedFileSize);
-		return conflict;
+		if (articleFileSize <= 0 || decodedFileSize < 0 || decodedFileSize == articleFileSize)
+		{
+			return false;
+		}
+		if (decodedFileSize == 0)
+		{
+			fileInfo->SetDecodedFileSize(articleFileSize);
+			return false;
+		}
+		fileInfo->SetDecodedFileSize(-1);
+		return true;
 	}
 
 	/* what the file's first article holds, read from disk if not known yet */
@@ -17779,12 +17785,20 @@ public:
 		{
 			return FileInfo::fcUnknown;	// not on disk yet (the article cache)
 		}
-		int headKind = nzbget_rs_dupe_fallback_classify_first_head(head, sizeof(head));
-		if (headKind == 0)
+		bool allZero = true;
+		for (uint8 b : head)
+		{
+			if (b != 0)
+			{
+				allZero = false;
+				break;
+			}
+		}
+		if (allZero)
 		{
 			return FileInfo::fcUnknown;	// not on disk yet (the article cache)
 		}
-		fileInfo->SetFirstContent(headKind == 1 ? FileInfo::fcPar2 : FileInfo::fcOther);
+		fileInfo->SetFirstContent(memcmp(head, "PAR2\0PKT", 8) == 0 ? FileInfo::fcPar2 : FileInfo::fcOther);
 		return fileInfo->GetFirstContent();
 	}
 
@@ -17823,12 +17837,9 @@ private:
 
 		for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
 		{
-			if (nzbget_rs_dupe_fallback_is_donor_eligible(
-				queuedNzbInfo == nzbInfo ? 1 : 0,
-				(int)queuedNzbInfo->GetKind(),
-				(int)NzbInfo::nkNzb,
-				(int)queuedNzbInfo->GetDupeMode(),
-				(int)dmForce) != 0 &&
+			if (queuedNzbInfo != nzbInfo &&
+				queuedNzbInfo->GetKind() == NzbInfo::nkNzb &&
+				queuedNzbInfo->GetDupeMode() != dmForce &&
 				nzbget_rs_dupecoord_same_name_or_key(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
 					nzbInfo->GetName(), nzbInfo->GetDupeKey()) != 0)
 			{
@@ -17839,12 +17850,7 @@ private:
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
 			if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
-				nzbget_rs_dupe_fallback_is_donor_eligible(
-					0,
-					(int)historyInfo->GetKind(),
-					(int)HistoryInfo::hkNzb,
-					(int)historyInfo->GetNzbInfo()->GetDupeMode(),
-					(int)dmForce) != 0 &&
+				historyInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
 				nzbget_rs_dupecoord_same_name_or_key(historyInfo->GetNzbInfo()->GetName(),
 					historyInfo->GetNzbInfo()->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey()) != 0)
 			{
@@ -17866,8 +17872,7 @@ private:
 				std::string donorIdentity = TwinCheck::Identity(donor);
 				std::string kind = !donorIdentity.empty() ?
 					TwinCheck::Kind(nzbInfo->GetId(), ownIdentity.c_str(), donor->GetId(), donorIdentity.c_str()) : "";
-				if (nzbget_rs_dupe_fallback_is_twin_kind(
-					ownIdentity.c_str(), donorIdentity.c_str(), kind.c_str()) != 0)
+				if (!donorIdentity.empty() && strncmp(kind.c_str(), "twin", 4) == 0)
 				{
 					twinDonors.insert(donor);
 				}
@@ -17879,9 +17884,15 @@ private:
 			{
 				bool twin1 = twinDonors.count(donor1) > 0;
 				bool twin2 = twinDonors.count(donor2) > 0;
-				return nzbget_rs_dupe_fallback_compare_donors(
-					twin1 ? 1 : 0, donor1->GetDupeScore(), donor1->GetId(),
-					twin2 ? 1 : 0, donor2->GetDupeScore(), donor2->GetId()) != 0;
+				if (twin1 != twin2)
+				{
+					return twin1;
+				}
+				if (donor1->GetDupeScore() != donor2->GetDupeScore())
+				{
+					return donor1->GetDupeScore() > donor2->GetDupeScore();
+				}
+				return donor1->GetId() < donor2->GetId();
 			});
 
 		return donors;
@@ -17918,11 +17929,13 @@ private:
 			{
 				ArticleInfo* article = (*articles)[i].get();
 				ArticleInfo* ownArticle = (*ownArticles)[i].get();
-				if (nzbget_rs_dupe_fallback_own_article_matches(
-					ownArticle->GetPartNumber(), article->GetPartNumber(),
-					ownArticle->GetMessageId(),
-					article->GetDupeOriginalMessageId(),
-					article->GetMessageId()) != 0)
+				const char* msgId = !Util::EmptyStr(article->GetDupeOriginalMessageId())
+					? article->GetDupeOriginalMessageId()
+					: article->GetMessageId();
+				if (ownArticle->GetPartNumber() == article->GetPartNumber() &&
+					!Util::EmptyStr(msgId) &&
+					ownArticle->GetMessageId() &&
+					!strcmp(ownArticle->GetMessageId(), msgId))
 				{
 					return CString(ownFile->GetFilename());
 				}
@@ -17947,8 +17960,7 @@ private:
 			std::string leadIdentity = it != donors.end() ? TwinCheck::Identity(*it) : "";
 			std::string leadKind = (!ownIdentity.empty() && !leadIdentity.empty()) ?
 				TwinCheck::Kind(nzbInfo->GetId(), ownIdentity.c_str(), leadId, leadIdentity.c_str()) : "";
-			if (nzbget_rs_dupe_fallback_should_reset_non_twin_lead(
-				twinOnly ? 1 : 0, leadId, ownIdentity.c_str(), leadIdentity.c_str(), leadKind.c_str()) != 0)
+			if (ownIdentity.empty() || leadIdentity.empty() || strncmp(leadKind.c_str(), "twin", 4) != 0)
 			{
 				fileInfo->SetDupeLeadDonorId(0);
 				fileInfo->SetDupeLeadFailures(0);
@@ -18025,8 +18037,7 @@ private:
 		// a duplicate whose nzb-file couldn't be read is asked again after a while: the
 		// failure may have been passing (review item 9)
 		auto bad = m_badDonors.find(donorId);
-		if (bad != m_badDonors.end() && nzbget_rs_dupe_fallback_is_bad_donor_in_cooldown(
-			(int64)Util::CurrentTime(), (int64)bad->second, BadDonorRetrySec) != 0)
+		if (bad != m_badDonors.end() && (int64)Util::CurrentTime() - (int64)bad->second < BadDonorRetrySec)
 		{
 			return nullptr;
 		}
@@ -18242,25 +18253,19 @@ public:
 			m_connection->SetCertVerifLevel(lastServer->GetCertVerificationLevel());
 	#endif
 
-			{
-				NzbgetRsBuf connNameBuf = nzbget_rs_dqh_article_dl_format_connection_name(
-					m_connection->GetNewsServer()->GetName(), m_connection->GetHost());
-				m_connectionName.Set(connNameBuf.data ? connNameBuf.data : "", (int)connNameBuf.len);
-				nzbget_rs_free(connNameBuf);
-			}
+			m_connectionName.Format("%s (%s)", m_connection->GetNewsServer()->GetName(), m_connection->GetHost());
 
 			// check server retention
-			int fileAgeDays = 0;
-			bool retentionFailure = nzbget_rs_nntp_article_dl_is_retention_failure(
-				m_connection->GetNewsServer()->GetRetention(),
-				(int64)m_fileInfo->GetTime(),
-				(int64)Util::CurrentTime(),
-				&fileAgeDays) != 0;
+			int retention = m_connection->GetNewsServer()->GetRetention();
+			time_t fileTime = m_fileInfo->GetTime();
+			int fileAgeDays = (retention > 0 && fileTime > 0)
+				? (int)std::clamp<int64>(((int64)Util::CurrentTime() - (int64)fileTime) / 86400, INT32_MIN, INT32_MAX)
+				: 0;
+			bool retentionFailure = retention > 0 && fileTime > 0 && fileAgeDays > retention;
 			if (retentionFailure)
 			{
 				detail("Article %s @ %s failed: out of server retention (file age: %i, configured retention: %i)",
-					*m_infoName, *m_connectionName, fileAgeDays,
-					m_connection->GetNewsServer()->GetRetention());
+					*m_infoName, *m_connectionName, fileAgeDays, retention);
 				status = adFailed;
 				FreeConnection(true);
 			}
@@ -18308,16 +18313,10 @@ public:
 					}
 				}
 
-				int success = 0, failed = 0;
-				if (nzbget_rs_nntp_article_dl_classify_attempt_stat(
-					(int)status,
-					(int)adFinished,
-					(int)adFailed,
-					(int)adNotFound,
-					(int)adCrcError,
-					&success,
-					&failed) != 0)
+				if (status == adFinished || status == adFailed || status == adNotFound || status == adCrcError)
 				{
+					int success = status == adFinished ? 1 : 0;
+					int failed = status == adFinished ? 0 : 1;
 					int serverId = newsServer->GetId();
 					m_serverStats.StatOp(serverId, success, failed, ServerStatList::soSet);
 					ServerVolume::Stats stats;
@@ -18333,29 +18332,16 @@ public:
 				AddServerStats();
 			}
 
+			if (m_contentRejected)
 			{
-				int shouldBreak = 0;
-				int statusInt = (int)status;
-				int crInt = m_contentRejected ? 1 : 0;
-				if (nzbget_rs_nntp_article_dl_handle_content_rejected(
-					crInt,
-					m_articleInfo->GetDupeFallbackRound(),
-					statusInt,
-					(int)adFailed,
-					remainedRetries,
-					&shouldBreak,
-					&statusInt,
-					&crInt,
-					&remainedRetries) != 0)
+				FreeConnection(false);
+				status = adFailed;
+				if (m_articleInfo->GetDupeFallbackRound() > 0)
 				{
-					FreeConnection(false);
-					status = (EStatus)statusInt;
-					if (shouldBreak != 0)
-					{
-						break;
-					}
-					m_contentRejected = crInt != 0;
+					break;
 				}
+				m_contentRejected = false;
+				remainedRetries = 0;
 			}
 
 			if (!connected && m_connection)
@@ -18363,13 +18349,16 @@ public:
 				detail("Article %s @ %s failed: could not establish connection", *m_infoName, *m_connectionName);
 			}
 
-			int connInt = connected ? 1 : 0;
-			int statusInt = (int)status;
-			nzbget_rs_nntp_article_dl_normalize_connect_and_decrement_retries(
-				connInt, statusInt, (int)adConnectError, (int)adFailed, remainedRetries,
-				&connInt, &statusInt, &remainedRetries);
-			connected = connInt != 0;
-			status = (EStatus)statusInt;
+			if (status == adConnectError)
+			{
+				connected = false;
+				status = adFailed;
+			}
+
+			if (connected && status == adFailed)
+			{
+				remainedRetries--;
+			}
 			nzbget_rs_transient_retries_set_remained_retries(
 				transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer), remainedRetries);
 
@@ -18414,62 +18403,54 @@ public:
 				break;
 			}
 
-			int pushFailedServer = 0;
-			if (nzbget_rs_nntp_article_dl_should_advance_server_list(
-				wantServer ? 1 : 0,
-				connected ? 1 : 0,
-				retentionFailure ? 1 : 0,
-				optionalBlocked ? 1 : 0,
-				authRejected ? 1 : 0,
-				&pushFailedServer) != 0)
+			if (!wantServer && (connected || retentionFailure || optionalBlocked || authRejected))
 			{
-				if (pushFailedServer)
+				if (!optionalBlocked)
 				{
 					failedServers.push_back(lastServer);
 				}
 
-				size_t candCount = g_ServerPool->GetServers()->size();
-				std::vector<int32_t> candIds(candCount), candLevels(candCount), candGroups(candCount);
-				std::vector<uint8_t> candAvail(candCount);
-				size_t ci = 0;
+				bool allServersOnLevelFailed = true;
 				for (NewsServer* candidateServer : g_ServerPool->GetServers())
 				{
-					candIds[ci] = candidateServer->GetId();
-					candLevels[ci] = candidateServer->GetNormLevel();
-					candGroups[ci] = candidateServer->GetGroup();
-					candAvail[ci] = (candidateServer->GetActive() &&
+					if (candidateServer->GetNormLevel() == level &&
+						candidateServer->GetActive() &&
 						candidateServer->GetMaxConnections() != 0 &&
-						!(candidateServer->GetOptional() && g_ServerPool->IsServerBlocked(candidateServer))) ? 1 : 0;
-					++ci;
+						!(candidateServer->GetOptional() && g_ServerPool->IsServerBlocked(candidateServer)))
+					{
+						bool candidateFailed = false;
+						for (NewsServer* ignoreServer : failedServers)
+						{
+							if (ignoreServer == candidateServer ||
+								(ignoreServer->GetGroup() > 0 &&
+								 ignoreServer->GetGroup() == candidateServer->GetGroup() &&
+								 ignoreServer->GetNormLevel() == candidateServer->GetNormLevel()))
+							{
+								candidateFailed = true;
+								break;
+							}
+						}
+						if (!candidateFailed)
+						{
+							allServersOnLevelFailed = false;
+							break;
+						}
+					}
 				}
-				size_t failCount = failedServers.size();
-				std::vector<int32_t> failIds(failCount), failLevels(failCount), failGroups(failCount);
-				for (size_t fi = 0; fi < failCount; ++fi)
-				{
-					failIds[fi] = failedServers[fi]->GetId();
-					failLevels[fi] = failedServers[fi]->GetNormLevel();
-					failGroups[fi] = failedServers[fi]->GetGroup();
-				}
-				bool allServersOnLevelFailed = nzbget_rs_nntp_article_dl_all_servers_on_level_failed(
-					level, candIds.data(), candLevels.data(), candGroups.data(), candAvail.data(), candCount,
-					failIds.data(), failLevels.data(), failGroups.data(), failCount) != 0;
 
-				int advanceLevel = 0;
-				int newLevel = level;
-				int breakAllFailed = 0;
-				nzbget_rs_nntp_article_dl_eval_level_exhaustion(
-					allServersOnLevelFailed ? 1 : 0, level, g_ServerPool->GetMaxNormLevel(),
-					&advanceLevel, &newLevel, &breakAllFailed);
-				if (advanceLevel != 0)
+				if (allServersOnLevelFailed)
 				{
-					detail("Article %s @ all level %i servers failed, increasing level", *m_infoName, level);
-					level = newLevel;
-				}
-				else if (breakAllFailed != 0)
-				{
-					detail("Article %s @ all servers failed", *m_infoName);
-					status = adFailed;
-					break;
+					if (level < g_ServerPool->GetMaxNormLevel())
+					{
+						detail("Article %s @ all level %i servers failed, increasing level", *m_infoName, level);
+						level++;
+					}
+					else
+					{
+						detail("Article %s @ all servers failed", *m_infoName);
+						status = adFailed;
+						break;
+					}
 				}
 
 				remainedRetries = retries;
@@ -18478,15 +18459,18 @@ public:
 
 		FreeConnection(status == adFinished);
 
-		bool stopped = IsStopped();
-		status = (EStatus)nzbget_rs_nntp_article_dl_resolve_final_status(
-			(int)status,
-			m_articleWriter.GetDuplicate() ? 1 : 0,
-			stopped ? 1 : 0,
-			(int)adFinished, (int)adFailed, (int)adRetry, (int)adFatalError);
-		if (stopped)
+		if (m_articleWriter.GetDuplicate())
+		{
+			status = adFinished;
+		}
+		if (status != adFinished && status != adRetry && status != adFatalError)
+		{
+			status = adFailed;
+		}
+		if (IsStopped())
 		{
 			detail("Download %s cancelled", *m_infoName);
+			status = adRetry;
 		}
 
 		if (status == adFailed && nzbget_rs_transient_retries_is_exhausted(transientRetries.get()) != 0)
@@ -18571,7 +18555,7 @@ private:
 			for (CString& group : m_fileInfo->GetGroups())
 			{
 				response = m_connection->JoinGroup(group);
-				if (nzbget_rs_nntp_article_dl_is_join_group_ok(response) != 0)
+				if (response && response[0] == '2')
 				{
 					break;
 				}
@@ -18585,12 +18569,10 @@ private:
 		}
 
 		// retrieve article
-		{
-			NzbgetRsBuf cmdBuf = nzbget_rs_dqh_article_dl_format_fetch_command(
-				g_Options->GetRawArticle() ? 1 : 0, m_articleInfo->GetMessageId());
-			response = m_connection->Request(cmdBuf.data ? cmdBuf.data : "");
-			nzbget_rs_free(cmdBuf);
-		}
+		CString cmd = CString::FormatStr("%s %s\r\n",
+			g_Options->GetRawArticle() ? "ARTICLE" : "BODY",
+			m_articleInfo->GetMessageId() ? m_articleInfo->GetMessageId() : "");
+		response = m_connection->Request(cmd);
 
 		status = CheckResponse(response, "could not fetch article");
 		if (status != adFinished)
@@ -18660,11 +18642,13 @@ private:
 			// write to output file
 			if (len > 0 && !Write(buffer, len))
 			{
-				int crInt = 0;
-				status = (EStatus)nzbget_rs_nntp_article_dl_classify_write_failure(
-					m_localWriteError ? 1 : 0, (int)adFatalError, (int)adFailed, &crInt);
-				if (crInt != 0)
+				if (m_localWriteError)
 				{
+					status = adFatalError;
+				}
+				else
+				{
+					status = adFailed;
 					m_contentRejected = true;
 				}
 				break;
@@ -18804,10 +18788,14 @@ private:
 		}
 		Decoder::EStatus status = m_decoder.Check();
 		bool isYenc = m_decoder.GetFormat() == Decoder::efYenc;
-		switch (nzbget_rs_nntp_article_dl_classify_decode_status(
-			0, (int)status, isYenc ? 1 : 0, m_articleWriter.GetRangeExceeded() ? 1 : 0))
+		switch (status)
 		{
-			case 1:
+			case Decoder::dsFinished:
+				if (isYenc && m_articleWriter.GetRangeExceeded())
+				{
+					detail("Decoding %s failed: more data than its range", *m_infoName);
+					return adFailed;
+				}
 				if (m_decoder.GetArticleFilename())
 				{
 					m_articleFilename = m_decoder.GetArticleFilename();
@@ -18818,19 +18806,16 @@ private:
 						m_decoder.GetCalculatedCrc() : m_decoder.GetExpectedCrc());
 				}
 				return adFinished;
-			case 2:
-				detail("Decoding %s failed: more data than its range", *m_infoName);
-				return adFailed;
-			case 3:
+			case Decoder::dsCrcError:
 				detail("Decoding %s failed: CRC-Error", *m_infoName);
 				return adCrcError;
-			case 4:
+			case Decoder::dsArticleIncomplete:
 				detail("Decoding %s failed: article incomplete", *m_infoName);
 				return adFailed;
-			case 5:
+			case Decoder::dsInvalidSize:
 				detail("Decoding %s failed: size mismatch", *m_infoName);
 				return adFailed;
-			case 6:
+			case Decoder::dsNoBinaryData:
 				detail("Decoding %s failed: no binary data found", *m_infoName);
 				return adFailed;
 			default:
@@ -18982,25 +18967,7 @@ public:
 
 		NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
 
-		NzbgetRsDirectRenameParDelta parDelta{};
-		nzbget_rs_direct_renamer_eval_article(
-			articleInfo->GetSize(),
-			fileInfo->GetArticles()->size(),
-			fileInfo->GetParFile() ? 1 : 0,
-			contentAnalyzer->GetParFile() ? 1 : 0,
-			fileInfo->GetPaused() ? 1 : 0,
-			fileInfo->GetSize(),
-			fileInfo->GetSuccessSize(),
-			fileInfo->GetFailedSize(),
-			fileInfo->GetMissedSize(),
-			nzbInfo->GetParSize(),
-			nzbInfo->GetParCurrentSuccessSize(),
-			nzbInfo->GetParCurrentFailedSize(),
-			nzbInfo->GetParFailedSize(),
-			nzbInfo->GetRemainingParCount(),
-			&parDelta);
-
-		if (parDelta.apply_hash16k)
+		if (articleInfo->GetSize() >= 16 * 1024 || fileInfo->GetArticles()->size() == 1)
 		{
 			fileInfo->SetHash16k(contentAnalyzer->GetHash16k());
 			debug("file: %s; article-hash16k: %s", fileInfo->GetFilename(), fileInfo->GetHash16k());
@@ -19010,18 +18977,19 @@ public:
 			contentAnalyzer->GetParFile() ? "par2-file" : "non-par2-file",
 			fileInfo->GetFilename());
 
-		if (parDelta.par_flag_changed)
+		if (fileInfo->GetParFile() != contentAnalyzer->GetParFile())
 		{
 			debug("Changing par2-flag for %s", fileInfo->GetFilename());
 			fileInfo->SetParFile(contentAnalyzer->GetParFile());
 
-			nzbInfo->SetParSize(parDelta.par_size);
-			nzbInfo->SetParCurrentSuccessSize(parDelta.par_current_success_size);
-			nzbInfo->SetParCurrentFailedSize(parDelta.par_current_failed_size);
-			nzbInfo->SetParFailedSize(parDelta.par_failed_size);
-			nzbInfo->SetRemainingParCount(parDelta.remaining_par_count);
+			int sign = contentAnalyzer->GetParFile() ? +1 : -1;
+			nzbInfo->SetParSize(nzbInfo->GetParSize() + fileInfo->GetSize() * sign);
+			nzbInfo->SetParCurrentSuccessSize(nzbInfo->GetParCurrentSuccessSize() + fileInfo->GetSuccessSize() * sign);
+			nzbInfo->SetParCurrentFailedSize(nzbInfo->GetParCurrentFailedSize() + (fileInfo->GetFailedSize() + fileInfo->GetMissedSize()) * sign);
+			nzbInfo->SetParFailedSize(nzbInfo->GetParFailedSize() + fileInfo->GetMissedSize() * sign);
+			nzbInfo->SetRemainingParCount(nzbInfo->GetRemainingParCount() + sign);
 
-			if (parDelta.unpause_non_par)
+			if (!contentAnalyzer->GetParFile() && fileInfo->GetPaused())
 			{
 				fileInfo->GetNzbInfo()->PrintMessage(Message::mkInfo, "Resuming non-par2-file %s", fileInfo->GetFilename());
 				fileInfo->SetPaused(false);
@@ -19222,47 +19190,34 @@ private:
 		ParFileList parFiles;
 		CollectPars(nzbInfo, &parFiles);
 
-		size_t n = parFiles.size();
-		if (n == 0)
+		while (!parFiles.empty())
 		{
-			return;
-		}
-		std::vector<int> ids;
-		std::vector<const char*> setIds;
-		std::vector<uint8_t> completed;
-		std::vector<uint8_t> inFileList;
-		std::vector<int64> sizes;
-		std::vector<int> outFileIds(n, 0);
-		ids.reserve(n);
-		setIds.reserve(n);
-		completed.reserve(n);
-		inFileList.reserve(n);
-		sizes.reserve(n);
-		for (ParFile& parFile : parFiles)
-		{
-			FileInfo* fileInfo = nzbInfo->GetFileList()->Find(parFile.GetId());
-			ids.push_back(parFile.GetId());
-			setIds.push_back(parFile.GetSetId());
-			completed.push_back(parFile.GetCompleted() ? 1 : 0);
-			inFileList.push_back(fileInfo ? 1 : 0);
-			sizes.push_back(fileInfo ? fileInfo->GetSize() : 0);
-		}
-		size_t selected = nzbget_rs_direct_renamer_select_pars_to_unpause(
-			ids.data(),
-			setIds.data(),
-			completed.data(),
-			inFileList.data(),
-			sizes.data(),
-			n,
-			outFileIds.data());
-		for (size_t i = 0; i < selected; i++)
-		{
-			FileInfo* fileInfo = nzbInfo->GetFileList()->Find(outFileIds[i]);
-			if (fileInfo)
+			CString setId = parFiles[0].GetSetId();
+			FileInfo* bestFileInfo = nullptr;
+			bool setCompleted = false;
+
+			for (ParFileList::iterator it = parFiles.begin(); it != parFiles.end(); )
 			{
-				nzbInfo->PrintMessage(Message::mkInfo, "Increasing priority for par2-file %s", fileInfo->GetFilename());
-				fileInfo->SetPaused(false);
-				fileInfo->SetExtraPriority(true);
+				ParFile& parFile = *it;
+				if (!strcasecmp(parFile.GetSetId(), setId))
+				{
+					setCompleted |= parFile.GetCompleted();
+					FileInfo* fileInfo = nzbInfo->GetFileList()->Find(parFile.GetId());
+					if (fileInfo && (!bestFileInfo || fileInfo->GetSize() < bestFileInfo->GetSize()))
+					{
+						bestFileInfo = fileInfo;
+					}
+					it = parFiles.erase(it);
+					continue;
+				}
+				++it;
+			}
+
+			if (bestFileInfo && !setCompleted)
+			{
+				nzbInfo->PrintMessage(Message::mkInfo, "Increasing priority for par2-file %s", bestFileInfo->GetFilename());
+				bestFileInfo->SetPaused(false);
+				bestFileInfo->SetExtraPriority(true);
 			}
 		}
 	}
@@ -19383,10 +19338,9 @@ private:
 
 			const std::string& currOutputFilename = fileInfo->GetOutputFilename();
 			const std::string nzbDestDir = fileInfo->GetNzbInfo()->GetDestDir();
-			NzbgetRsBuf oldOutBuf = nzbget_rs_direct_renamer_resolve_old_output_path(
-				currOutputFilename.c_str(), nzbDestDir.c_str(), PATH_SEPARATOR, fileInfo->GetFilename());
-			const std::string oldOutputFilename(oldOutBuf.data ? oldOutBuf.data : "", oldOutBuf.len);
-			nzbget_rs_free(oldOutBuf);
+			const std::string oldOutputFilename = !currOutputFilename.empty()
+				? currOutputFilename
+				: nzbDestDir + PATH_SEPARATOR + fileInfo->GetFilename();
 
 			nzbInfo->PrintMessage(Message::mkInfo,
 				"Renaming in-progress file %s to %s",
@@ -19733,7 +19687,7 @@ public:
 
 	static bool DupeFailoverWarranted(int itemScore, int health, int backupScore)
 	{
-		return nzbget_rs_dupecoord_failover_warranted(itemScore, health, backupScore) != 0;
+		return backupScore > itemScore || health < 1000;
 	}
 
 	void HistoryMark(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, NzbInfo::EMarkStatus markStatus);
@@ -20493,15 +20447,14 @@ public:
 
 		// Cleaning up parked files if par-check was successful or unpack was successful or
 		// health is 100% (if unpack and par-check were not performed) or if deleted
-		bool cleanupParkedFiles = nzbget_rs_qhp_should_cleanup_parked_files(
-			(int32_t)nzbInfo->GetParStatus(),
-			(int32_t)nzbInfo->GetUnpackStatus(),
-			nzbInfo->GetFailedSize(),
-			nzbInfo->GetParFailedSize(),
-			(int32_t)nzbInfo->GetDeleteStatus(),
-			nzbInfo->GetParking() ? 1 : 0,
-			nzbInfo->GetUnpackCleanedUpDisk() ? 1 : 0
-		) != 0;
+		bool cleanupParkedFiles =
+			nzbInfo->GetParStatus() == NzbInfo::psSuccess ||
+			nzbInfo->GetUnpackStatus() == NzbInfo::usSuccess ||
+			(nzbInfo->GetParStatus() == NzbInfo::psNone &&
+			 nzbInfo->GetUnpackStatus() == NzbInfo::usNone &&
+			 nzbInfo->GetFailedSize() - nzbInfo->GetParFailedSize() == 0) ||
+			(nzbInfo->GetDeleteStatus() != NzbInfo::dsNone && !nzbInfo->GetParking()) ||
+			nzbInfo->GetUnpackCleanedUpDisk();
 
 		if (cleanupParkedFiles)
 		{
@@ -20631,11 +20584,18 @@ public:
 		dupInfo->SetFullContentHash(historyInfo->GetNzbInfo()->GetFullContentHash());
 		dupInfo->SetFilteredContentHash(historyInfo->GetNzbInfo()->GetFilteredContentHash());
 
-		dupInfo->SetStatus((DupInfo::EStatus)nzbget_rs_qhp_classify_dup_status(
-			(int32_t)historyInfo->GetNzbInfo()->GetMarkStatus(),
-			(int32_t)historyInfo->GetNzbInfo()->GetDeleteStatus(),
-			historyInfo->GetNzbInfo()->IsDupeSuccess() ? 1 : 0
-		));
+		NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
+		DupInfo::EStatus status =
+			nzbInfo->GetMarkStatus() == NzbInfo::ksGood ? DupInfo::dsGood :
+			nzbInfo->GetMarkStatus() == NzbInfo::ksBad ? DupInfo::dsBad :
+			nzbInfo->GetMarkStatus() == NzbInfo::ksSuccess ? DupInfo::dsSuccess :
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsDupe ? DupInfo::dsDupe :
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsManual ||
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsGood ||
+			nzbInfo->GetDeleteStatus() == NzbInfo::dsCopy ? DupInfo::dsDeleted :
+			nzbInfo->IsDupeSuccess() ? DupInfo::dsSuccess :
+			DupInfo::dsFailed;
+		dupInfo->SetStatus(status);
 
 		std::unique_ptr<HistoryInfo> newHistoryInfo = std::make_unique<HistoryInfo>(std::move(dupInfo));
 		newHistoryInfo->SetTime(historyInfo->GetTime());
@@ -21018,14 +20978,14 @@ inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzb
 		// in queue - the new item is skipped
 		if (queuedNzbInfo != nzbInfo && sameContent && nzbInfo->GetKind() == NzbInfo::nkNzb)
 		{
-			NzbgetRsBuf msgBuf = nzbget_rs_dupecoord_format_dupe_skip_message(
-				nzbInfo->GetName(), queuedNzbInfo->GetName(), 0, 1, 0);
-			std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
-			nzbget_rs_free(msgBuf);
+			CString message = !strcmp(nzbInfo->GetName(), queuedNzbInfo->GetName())
+				? CString::FormatStr("Skipping duplicate %s, already queued", nzbInfo->GetName())
+				: CString::FormatStr("Skipping duplicate %s, already queued as %s",
+					nzbInfo->GetName(), queuedNzbInfo->GetName());
 
 			if (nzbInfo->GetFeedId())
 			{
-				warn("%s", message.c_str());
+				warn("%s", *message);
 				// Flag saying QueueCoordinator to skip nzb-file
 				nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
 				g_HistoryCoordinator->DeleteDiskFiles(nzbInfo);
@@ -21033,7 +20993,7 @@ inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzb
 			else
 			{
 				nzbInfo->SetDeleteStatus(NzbInfo::dsCopy);
-				nzbInfo->AddMessage(Message::mkWarning, message.c_str());
+				nzbInfo->AddMessage(Message::mkWarning, *message);
 			}
 
 			return;
@@ -21222,21 +21182,25 @@ inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzb
 
 	if (skip)
 	{
-		NzbgetRsBuf msgBuf = nzbget_rs_dupecoord_format_dupe_skip_message(
-			nzbInfo->GetName(), dupeName, 1, sameContent ? 1 : 0, good ? 1 : 0);
-		std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
-		nzbget_rs_free(msgBuf);
+		const char* reason = sameContent
+			? "exactly same content (the same posting, no new articles)"
+			: (good ? "good status" : "success status");
+		const char* otherName = dupeName ? dupeName : "";
+		CString message = !strcmp(nzbInfo->GetName(), otherName)
+			? CString::FormatStr("Skipping duplicate %s, found in history with %s", nzbInfo->GetName(), reason)
+			: CString::FormatStr("Skipping duplicate %s, found in history %s with %s",
+				nzbInfo->GetName(), otherName, reason);
 
 		if (nzbInfo->GetFeedId() && nzbInfo->GetDupeHint() == NzbInfo::dhNone)
 		{
 			nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
-			warn("%s", message.c_str());
+			warn("%s", *message);
 			g_HistoryCoordinator->DeleteDiskFiles(nzbInfo);
 		}
 		else
 		{
 			nzbInfo->SetDeleteStatus(sameContent ? NzbInfo::dsCopy : NzbInfo::dsGood);
-			nzbInfo->AddMessage(Message::mkWarning, message.c_str());
+			nzbInfo->AddMessage(Message::mkWarning, *message);
 		}
 
 		if (returnBackup)
@@ -21500,20 +21464,43 @@ private:
 				return false;
 			}
 
-			return nzbget_rs_queue_editor_group_sorter_compare_values(
-				(int)m_sortCriteria,
-				(int)m_sortOrder,
-				(int)soDescending,
-				strcmp(nzbInfo1->GetName(), nzbInfo2->GetName()),
-				nzbInfo1->GetSize(),
-				nzbInfo2->GetSize(),
-				nzbInfo1->GetRemainingSize() - nzbInfo1->GetPausedSize(),
-				nzbInfo2->GetRemainingSize() - nzbInfo2->GetPausedSize(),
-				(int64)nzbInfo1->GetMinTime(),
-				(int64)nzbInfo2->GetMinTime(),
-				strcmp(nzbInfo1->GetCategory(), nzbInfo2->GetCategory()),
-				nzbInfo1->GetPriority(),
-				nzbInfo2->GetPriority()) != 0;
+			bool ret = false;
+			switch (m_sortCriteria)
+			{
+				case scName:
+					ret = m_sortOrder == soDescending
+						? strcmp(nzbInfo1->GetName(), nzbInfo2->GetName()) > 0
+						: strcmp(nzbInfo1->GetName(), nzbInfo2->GetName()) < 0;
+					break;
+				case scSize:
+					ret = m_sortOrder == soDescending
+						? nzbInfo1->GetSize() > nzbInfo2->GetSize()
+						: nzbInfo1->GetSize() < nzbInfo2->GetSize();
+					break;
+				case scRemainingSize:
+				{
+					int64 rem1 = nzbInfo1->GetRemainingSize() - nzbInfo1->GetPausedSize();
+					int64 rem2 = nzbInfo2->GetRemainingSize() - nzbInfo2->GetPausedSize();
+					ret = m_sortOrder == soDescending ? rem1 > rem2 : rem1 < rem2;
+					break;
+				}
+				case scAge:
+					ret = m_sortOrder == soDescending
+						? nzbInfo1->GetMinTime() < nzbInfo2->GetMinTime()
+						: nzbInfo1->GetMinTime() > nzbInfo2->GetMinTime();
+					break;
+				case scCategory:
+					ret = m_sortOrder == soDescending
+						? strcmp(nzbInfo1->GetCategory(), nzbInfo2->GetCategory()) > 0
+						: strcmp(nzbInfo1->GetCategory(), nzbInfo2->GetCategory()) < 0;
+					break;
+				case scPriority:
+					ret = m_sortOrder == soDescending
+						? nzbInfo1->GetPriority() > nzbInfo2->GetPriority()
+						: nzbInfo1->GetPriority() < nzbInfo2->GetPriority();
+					break;
+			}
+			return ret;
 		}
 	private:
 		enum ESortCriteria
@@ -21596,12 +21583,14 @@ private:
 		IdList uniqueIds;
 		if (idList)
 		{
-			uniqueIds.resize(idList->size(), 0);
-			size_t uniqueLen = nzbget_rs_queue_editor_dedup_id_list(
-				idList->empty() ? nullptr : idList->data(),
-				idList->size(),
-				uniqueIds.empty() ? nullptr : uniqueIds.data());
-			uniqueIds.resize(uniqueLen);
+			uniqueIds.reserve(idList->size());
+			for (int id : *idList)
+			{
+				if (std::find(uniqueIds.begin(), uniqueIds.end(), id) == uniqueIds.end())
+				{
+					uniqueIds.push_back(id);
+				}
+			}
 			idList = &uniqueIds;
 		}
 
@@ -21944,7 +21933,12 @@ private:
 		}
 
 		DownloadQueue::EEditAction fileAction =
-			(DownloadQueue::EEditAction)nzbget_rs_queue_editor_map_group_to_file_action((int32_t)action);
+			action == DownloadQueue::eaGroupPause ? DownloadQueue::eaFilePause :
+			action == DownloadQueue::eaGroupResume ? DownloadQueue::eaFileResume :
+			action == DownloadQueue::eaGroupPauseAllPars ? DownloadQueue::eaFilePauseAllPars :
+			action == DownloadQueue::eaGroupPauseExtraPars ? DownloadQueue::eaFilePauseExtraPars :
+			isGroupDel ? DownloadQueue::eaFileDelete :
+			(DownloadQueue::EEditAction)0;
 		bool ok = InternEditList(&itemList, nullptr, fileAction, args);
 
 		if (isGroupDel &&
@@ -22007,9 +22001,10 @@ private:
 		std::vector<uint8_t> rsOutPause(count, 0);
 		for (FileInfo* fileInfo : fileList)
 		{
+			CString loFileName = fileInfo->GetFilename();
+			for (char* p = loFileName; *p; p++) *p = tolower((unsigned char)*p);
 			rsIsPar.push_back(fileInfo->GetParFile() ? 1 : 0);
-			rsHasVol.push_back(
-				nzbget_rs_queue_editor_filename_has_vol(fileInfo->GetFilename()) != 0 ? 1 : 0);
+			rsHasVol.push_back(strstr(loFileName, ".vol") != nullptr ? 1 : 0);
 			rsSizes.push_back(fileInfo->GetSize());
 		}
 		nzbget_rs_qhp_select_pars_to_pause(
@@ -22120,33 +22115,43 @@ private:
 
 		if (ItemListContainsItem(itemList, targetId))
 		{
-			std::vector<int32_t> queueIds;
-			queueIds.reserve(m_downloadQueue->GetQueue()->size());
-			for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
+			auto targetIt = std::find_if(m_downloadQueue->GetQueue()->begin(), m_downloadQueue->GetQueue()->end(),
+				[targetId](const std::unique_ptr<NzbInfo>& nzbInfo) { return nzbInfo->GetId() == targetId; });
+			bool found = false;
+			if (before)
 			{
-				queueIds.push_back(nzbInfo->GetId());
+				for (auto it = targetIt; ; --it)
+				{
+					if (!ItemListContainsItem(itemList, (*it)->GetId()))
+					{
+						targetId = (*it)->GetId();
+						before = false;
+						found = true;
+						break;
+					}
+					if (it == m_downloadQueue->GetQueue()->begin())
+					{
+						break;
+					}
+				}
 			}
-			std::vector<int32_t> movedIds;
-			movedIds.reserve(itemList->size());
-			for (const EditItem& item : *itemList)
+			else
 			{
-				movedIds.push_back(item.m_nzbInfo->GetId());
+				for (auto it = targetIt; it != m_downloadQueue->GetQueue()->end(); ++it)
+				{
+					if (!ItemListContainsItem(itemList, (*it)->GetId()))
+					{
+						targetId = (*it)->GetId();
+						before = true;
+						found = true;
+						break;
+					}
+				}
 			}
-			int32_t newTargetId = targetId, newBefore = before ? 1 : 0, newOffset = offset;
-			nzbget_rs_queue_editor_resolve_move_groups_target(
-				targetId,
-				queueIds.empty() ? nullptr : queueIds.data(),
-				queueIds.size(),
-				movedIds.empty() ? nullptr : movedIds.data(),
-				movedIds.size(),
-				before ? 1 : 0,
-				MAX_ID,
-				&newTargetId,
-				&newBefore,
-				&newOffset);
-			targetId = newTargetId;
-			before = newBefore != 0;
-			offset = newOffset;
+			if (!found)
+			{
+				offset = before ? -MAX_ID : MAX_ID;
+			}
 		}
 
 		AlignGroups(itemList);
@@ -22154,15 +22159,34 @@ private:
 		if (offset == 0)
 		{
 			int moveId = itemList->at(0).m_nzbInfo->GetId();
-			std::vector<int> queueIds;
-			queueIds.reserve(m_downloadQueue->GetQueue()->size());
+			int targetIndex = 0;
+			int moveIndex = 0;
+			int idx = 0;
 			for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
 			{
-				queueIds.push_back(nzbInfo->GetId());
+				if (nzbInfo->GetId() == targetId)
+				{
+					targetIndex = idx;
+				}
+				if (nzbInfo->GetId() == moveId)
+				{
+					moveIndex = idx;
+				}
+				idx++;
 			}
-			offset = nzbget_rs_queue_editor_calc_move_groups_to_offset(
-				queueIds.data(), queueIds.size(), targetId, moveId,
-				before ? 1 : 0, itemList->size());
+			offset = targetIndex - moveIndex;
+			if (offset > 0 && before)
+			{
+				offset -= (int)itemList->size();
+			}
+			else if (offset < 0 && !before)
+			{
+				offset += 1;
+			}
+			else if (offset > 0 && !before)
+			{
+				offset -= (int)itemList->size() - 1;
+			}
 		}
 
 		BString<100> offStr("%i", offset);
@@ -26810,17 +26834,11 @@ using QueueScriptController = QueueScriptCoordinator::QueueScriptController;
 
 inline void DupeCoordinator::HistoryMark(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, NzbInfo::EMarkStatus markStatus)
 {
-	int itemDupeMode = historyInfo->GetKind() == HistoryInfo::hkNzb ? (int)historyInfo->GetNzbInfo()->GetDupeMode() :
-		historyInfo->GetKind() == HistoryInfo::hkDup ? (int)historyInfo->GetDupInfo()->GetDupeMode() : 0;
-	int dupStatus = 0;
-	int postAction = 0;
-	const char* markStatusName = nzbget_rs_dupecoord_resolve_history_mark(
-		(int)markStatus,
-		g_Options->GetDupeCheck() ? 1 : 0,
-		(int)historyInfo->GetKind(),
-		itemDupeMode,
-		&dupStatus,
-		&postAction);
+	const char* markStatusName =
+		markStatus == NzbInfo::ksBad ? "bad" :
+		markStatus == NzbInfo::ksGood ? "good" :
+		markStatus == NzbInfo::ksSuccess ? "success" :
+		"NONE";
 	info("Marking %s as %s", historyInfo->GetName(), markStatusName);
 
 	if (historyInfo->GetKind() == HistoryInfo::hkNzb)
@@ -26830,7 +26848,10 @@ inline void DupeCoordinator::HistoryMark(DownloadQueue* downloadQueue, HistoryIn
 	}
 	else if (historyInfo->GetKind() == HistoryInfo::hkDup)
 	{
-		historyInfo->GetDupInfo()->SetStatus((DupInfo::EStatus)dupStatus);
+		historyInfo->GetDupInfo()->SetStatus(
+			markStatus == NzbInfo::ksGood ? DupInfo::dsGood :
+			markStatus == NzbInfo::ksSuccess ? DupInfo::dsSuccess :
+			DupInfo::dsBad);
 	}
 	else
 	{
@@ -26838,11 +26859,18 @@ inline void DupeCoordinator::HistoryMark(DownloadQueue* downloadQueue, HistoryIn
 		return;
 	}
 
-	if (postAction == 1)
+	if (!g_Options->GetDupeCheck() ||
+		(historyInfo->GetKind() == HistoryInfo::hkNzb && historyInfo->GetNzbInfo()->GetDupeMode() == dmForce) ||
+		(historyInfo->GetKind() == HistoryInfo::hkDup && historyInfo->GetDupInfo()->GetDupeMode() == dmForce))
+	{
+		return;
+	}
+
+	if (markStatus == NzbInfo::ksGood)
 	{
 		HistoryCleanup(downloadQueue, historyInfo);
 	}
-	else if (postAction == 2)
+	else if (markStatus == NzbInfo::ksBad)
 	{
 		const char* dupeKey = historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo()->GetDupeKey() :
 			historyInfo->GetKind() == HistoryInfo::hkDup ? historyInfo->GetDupInfo()->GetDupeKey() :

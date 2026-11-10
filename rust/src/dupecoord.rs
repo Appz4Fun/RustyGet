@@ -972,26 +972,6 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_eval_queue_score_dupe(
     )
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupecoord_resolve_history_mark(
-    mark_status: i32,
-    dupe_check: i32,
-    kind: i32,
-    dupe_mode: i32,
-    out_dup_status: *mut i32,
-    out_post_action: *mut i32,
-) -> *const c_char {
-    let (mark_name, dup_status, post_action) =
-        resolve_history_mark(mark_status, dupe_check != 0, kind, dupe_mode);
-    if !out_dup_status.is_null() {
-        *out_dup_status = dup_status;
-    }
-    if !out_post_action.is_null() {
-        *out_post_action = post_action;
-    }
-    mark_name.as_ptr().cast()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

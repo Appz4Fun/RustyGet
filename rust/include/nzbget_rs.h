@@ -3307,7 +3307,32 @@ int nzbget_rs_diskstate_reconcile_direct_write_output(
     int64_t* out_i64, int* out_i32);
 int nzbget_rs_diskstate_match_servers(
     const NzbgetRsServerMatchItem* servers, size_t server_count,
-    const NzbgetRsServerMatchItem* refs, size_t ref_count, int* out_state_ids);
+    void* infile_ctx, const char* (*read_line_cb)(void* ctx, int max_size),
+    int* out_state_ids, int* out_perfect_match);
+int nzbget_rs_diskstate_fs_op(
+    int op, const char* queue_dir, int sep, int a1, int a2, int a3, int a4,
+    int* out1, int* out2);
+int nzbget_rs_diskstate_load_dupe_extras(
+    void* infile_ctx, const char* (*read_line_cb)(void* ctx, int max_size),
+    int format_version, void* target_ctx,
+    void (*on_header_cb)(void* ctx, int rec_articles, int64_t rec_bytes, int rec_holes),
+    void (*on_job_cb)(void* ctx, const NzbgetRsDiskRepairJob* job));
+int nzbget_rs_diskstate_load_volume_stat(
+    void* infile_ctx, const char* (*read_line_cb)(void* ctx, int max_size),
+    int format_version, void* target_ctx,
+    void (*on_item_cb)(void* ctx, int slot_idx, const NzbgetRsDiskVolumeStatInput* item, int has_custom_times));
+int nzbget_rs_diskstate_load_file_info(
+    void* infile_ctx, const char* (*read_line_cb)(void* ctx, int max_size),
+    int format_version, int file_summary, int articles,
+    int file_id, int direct_write_opt, int force_direct_write, int sep,
+    const char* dest_dir, const char* cur_filename, const char* cur_output_filename,
+    void* target_ctx,
+    void (*on_summary_cb)(void* ctx, const NzbgetRsDiskFileInfoInput* fields, int flags),
+    void (*on_item_cb)(void* ctx, const char* group_or_null, const NzbgetRsDiskArticleInfo* art_or_null));
+int nzbget_rs_diskstate_load_section(
+    int kind, void* infile_ctx, const char* (*read_line_cb)(void* ctx, int max_size),
+    int format_version, const char* queue_dir, int sep, int64_t now, void* target_ctx,
+    void (*on_entry_cb)(void* ctx, int a1, int a2, int a3, uint32_t u1, uint32_t u2, int64_t i64_1, const char* s1, const char* s2));
 int nzbget_rs_server_pool_op(
     int op, int64_t a, int64_t b, int c, const int* ptr1, const uint8_t* ptr2, size_t len, int* out_ptr);
 int nzbget_rs_server_pool_normalize_levels(

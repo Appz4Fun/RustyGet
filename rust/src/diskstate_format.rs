@@ -2047,6 +2047,976 @@ pub fn feed_status_matches(
     i32::from(ok)
 }
 
+pub type ReadLineFn =
+    unsafe extern "C" fn(ctx: *mut std::ffi::c_void, max_size: c_int) -> *const c_char;
+
+struct ScanCursor<'a>(&'a [u8]);
+
+impl<'a> ScanCursor<'a> {
+    fn i32(&mut self, comma: bool) -> Option<i32> {
+        if comma {
+            self.0 = self.0.strip_prefix(b",")?;
+        }
+        let (v, used) = parse_scanf_i32(self.0)?;
+        self.0 = &self.0[used..];
+        Some(v)
+    }
+
+    fn u32(&mut self, comma: bool) -> Option<u32> {
+        if comma {
+            self.0 = self.0.strip_prefix(b",")?;
+        }
+        let (v, rest) = parse_scanf_u32(self.0)?;
+        self.0 = rest;
+        Some(v)
+    }
+}
+
+unsafe fn read_line_bytes(
+    infile_ctx: *mut std::ffi::c_void,
+    read_line_cb: ReadLineFn,
+    max_size: c_int,
+) -> Option<Vec<u8>> {
+    let ptr = unsafe { read_line_cb(infile_ctx, max_size) };
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { std::ffi::CStr::from_ptr(ptr).to_bytes().to_vec() })
+    }
+}
+
+unsafe fn read_line_cstr(
+    infile_ctx: *mut std::ffi::c_void,
+    read_line_cb: ReadLineFn,
+    max_size: c_int,
+) -> Option<Vec<u8>> {
+    let mut v = unsafe { read_line_bytes(infile_ctx, read_line_cb, max_size) }?;
+    v.push(0);
+    Some(v)
+}
+
+unsafe fn scan_one_i32(
+    infile_ctx: *mut std::ffi::c_void,
+    read_line_cb: ReadLineFn,
+) -> Option<i32> {
+    let line = unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }?;
+    ScanCursor(&line).i32(false)
+}
+
+/// Consolidated filesystem operations for `DiskState`:
+/// - `op == 0`: `DiscardDownloadQueue`
+/// - `op == 1`: `DownloadQueueExists`
+/// - `op == 2`: `DiscardFile(a1, a2 != 0, a3 != 0, a4 != 0)`
+/// - `op == 3`: `DeleteCacheFlag`
+/// - `op == 4`: `RaiseIdsPastQueueDir` (outputs `max_nzb_id` and `max_file_id` into `out1`/`out2`)
+/// - `op == 5`: `SaveIdFloor(a1, a2)`
+/// - `op == 6`: `CacheWasActive` (checks `<queue_dir><sep>acache`)
+/// - `op == 7`: `DeleteQueueNzbLog(a1)` (deletes `<queue_dir><sep>n<a1>.log`)
+#[allow(clippy::too_many_arguments)]
+pub fn diskstate_fs_op(
+    op: i32,
+    qdir: &[u8],
+    sep: u8,
+    a1: i32,
+    a2: i32,
+    a3: i32,
+    a4: i32,
+    out1: &mut i32,
+    out2: &mut i32,
+) -> i32 {
+    let join = |name: &[u8]| -> Vec<u8> {
+        crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, name)
+    };
+    let remove = |name: &[u8]| {
+        let p = join(name);
+        let _ = std::fs::remove_file(crate::fsops::path(&p));
+    };
+    let exists = |name: &[u8]| -> bool {
+        let p = join(name);
+        crate::fsops::posix_stat(&p) == 1
+    };
+
+    match op {
+        0 => {
+            remove(b"queue");
+            remove(b"history");
+            for entry in crate::fsops::list_dir_entries(qdir) {
+                if !entry.is_empty() && entry.iter().all(|b| b.is_ascii_digit()) {
+                    remove(&entry);
+                    let mut s_name = entry.clone();
+                    s_name.push(b's');
+                    remove(&s_name);
+                    let mut c_name = entry;
+                    c_name.push(b'c');
+                    remove(&c_name);
+                }
+            }
+            1
+        }
+        1 => i32::from(exists(b"queue") || exists(b"history") || exists(b"ids")),
+        2 => {
+            if a2 != 0 {
+                remove(format!("{a1}").as_bytes());
+            }
+            if a3 != 0 {
+                remove(format!("{a1}s").as_bytes());
+            }
+            if a4 != 0 {
+                remove(format!("{a1}c").as_bytes());
+            }
+            1
+        }
+        3 => {
+            remove(b"acache");
+            1
+        }
+        4 => {
+            let mut max_nzb = -1i32;
+            let mut max_file = -1i32;
+            let ids_path = join(b"ids");
+            if crate::fsops::posix_stat(&ids_path) == 1 {
+                if let Ok(mut data) = std::fs::read(crate::fsops::path(&ids_path)) {
+                    data.push(0);
+                    if let Some((n_id, f_id)) = parse_ids_file(&data) {
+                        max_nzb = max_nzb.max(n_id);
+                        max_file = max_file.max(f_id);
+                    }
+                }
+            }
+            for entry in crate::fsops::list_dir_entries(qdir) {
+                if let Some((id, is_nzb_log)) = classify_queue_dir_id(&entry) {
+                    if is_nzb_log {
+                        max_nzb = max_nzb.max(id);
+                    } else {
+                        max_file = max_file.max(id);
+                    }
+                }
+            }
+            *out1 = max_nzb;
+            *out2 = max_file;
+            1
+        }
+        5 => i32::from(save_id_floor_file(qdir, sep, a1, a2)),
+        6 => i32::from(exists(b"acache")),
+        7 => {
+            remove(format!("n{a1}.log").as_bytes());
+            1
+        }
+        _ => 0,
+    }
+}
+
+/// Reads saved server info from `infile_ctx` via `read_line_cb` and runs `match_servers`.
+/// Returns `Some(perfect_match)` on success or `None` on read/parse error.
+pub unsafe fn load_server_refs_and_match(
+    servers: &[ServerMatchInput<'_>],
+    infile_ctx: *mut std::ffi::c_void,
+    read_line_cb: ReadLineFn,
+    out_state_ids: &mut [i32],
+) -> Option<bool> {
+    let size = unsafe { scan_one_i32(infile_ctx, read_line_cb) }?;
+    if !(0..=100_000).contains(&size) {
+        return None;
+    }
+    let count = size as usize;
+    let mut names = Vec::with_capacity(count);
+    let mut hosts = Vec::with_capacity(count);
+    let mut ports = Vec::with_capacity(count);
+    let mut users = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }?;
+        let host = unsafe { read_line_bytes(infile_ctx, read_line_cb, 200) }?;
+        let port = unsafe { scan_one_i32(infile_ctx, read_line_cb) }?;
+        let user = unsafe { read_line_bytes(infile_ctx, read_line_cb, 100) }?;
+        names.push(name);
+        hosts.push(host);
+        ports.push(port);
+        users.push(user);
+    }
+    let mut refs = Vec::with_capacity(count);
+    for idx in 0..count {
+        refs.push(ServerRefEntry {
+            state_id: (idx + 1) as i32,
+            name: &names[idx],
+            host: &hosts[idx],
+            port: ports[idx],
+            user: &users[idx],
+            matched: false,
+            perfect: false,
+        });
+    }
+    Some(match_servers(servers, &mut refs, out_state_ids))
+}
+
+/// Parses `DiskState::LoadDupeExtras` via `read_line_cb`.
+pub unsafe fn load_dupe_extras(
+    infile_ctx: *mut std::ffi::c_void,
+    read_line_cb: ReadLineFn,
+    format_version: c_int,
+    target_ctx: *mut std::ffi::c_void,
+    on_header_cb: unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        rec_articles: c_int,
+        rec_bytes: i64,
+        rec_holes: c_int,
+    ),
+    on_job_cb: unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        job: *const NzbgetRsDiskRepairJob,
+    ),
+) -> bool {
+    let Some(hdr_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut cur = ScanCursor(&hdr_line);
+    let (Some(rec_articles), Some(rec_hi), Some(rec_lo), Some(rec_holes)) =
+        (cur.i32(false), cur.u32(true), cur.u32(true), cur.i32(true))
+    else {
+        return false;
+    };
+    if !validate_dupe_extras_header(4, rec_articles, rec_holes) {
+        return false;
+    }
+    unsafe {
+        on_header_cb(
+            target_ctx,
+            rec_articles,
+            join_i64(rec_hi, rec_lo),
+            rec_holes,
+        );
+    }
+
+    let Some(repair_count) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+    if !(0..=100_000).contains(&repair_count) {
+        return false;
+    }
+    let want_steps = format_version >= 66;
+    let expected_fields = if want_steps { 11 } else { 9 };
+    for _ in 0..repair_count {
+        let Some(job_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        let mut jc = ScanCursor(&job_line);
+        let (
+            Some(file_id),
+            Some(dec_hi),
+            Some(dec_lo),
+            Some(fail_hi),
+            Some(fail_lo),
+            Some(miss_hi),
+            Some(miss_lo),
+            Some(par_file),
+            Some(failed_articles),
+        ) = (
+            jc.i32(false),
+            jc.u32(true),
+            jc.u32(true),
+            jc.u32(true),
+            jc.u32(true),
+            jc.u32(true),
+            jc.u32(true),
+            jc.i32(true),
+            jc.i32(true),
+        )
+        else {
+            return false;
+        };
+        let (steps_hi, steps_lo) = if want_steps {
+            let (Some(sh), Some(sl)) = (jc.u32(true), jc.u32(true)) else {
+                return false;
+            };
+            (sh, sl)
+        } else {
+            (0, 0)
+        };
+        if !validate_repair_job_header(
+            expected_fields,
+            expected_fields,
+            file_id,
+            par_file,
+            failed_articles,
+        ) {
+            return false;
+        }
+        let Some(filename_cstr) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) })
+        else {
+            return false;
+        };
+        let Some(hole_count) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+            return false;
+        };
+        if !(0..=1_000_000).contains(&hole_count) {
+            return false;
+        }
+        let decoded_size = join_i64(dec_hi, dec_lo);
+        let mut holes = Vec::with_capacity(hole_count as usize);
+        for _ in 0..hole_count {
+            let Some(hole_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) })
+            else {
+                return false;
+            };
+            let mut hc = ScanCursor(&hole_line);
+            let (Some(oh), Some(ol), Some(sh), Some(sl)) =
+                (hc.u32(false), hc.u32(true), hc.u32(true), hc.u32(true))
+            else {
+                return false;
+            };
+            let Some((offset, size)) = validate_repair_hole(oh, ol, sh, sl, decoded_size) else {
+                return false;
+            };
+            holes.push(NzbgetRsDiskStreamHole { offset, size });
+        }
+        let job = NzbgetRsDiskRepairJob {
+            file_id,
+            decoded_file_size: decoded_size,
+            failed_size: join_i64(fail_hi, fail_lo),
+            missed_size: join_i64(miss_hi, miss_lo),
+            par_file,
+            failed_articles,
+            steps_hash: join_i64(steps_hi, steps_lo) as u64,
+            filename: filename_cstr.as_ptr().cast::<c_char>(),
+            holes: if holes.is_empty() {
+                std::ptr::null()
+            } else {
+                holes.as_ptr()
+            },
+            holes_len: holes.len(),
+        };
+        unsafe { on_job_cb(target_ctx, &job) };
+    }
+    true
+}
+
+/// Parses `DiskState::LoadVolumeStat` via `read_line_cb`.
+pub unsafe fn load_volume_stat(
+    infile_ctx: *mut std::ffi::c_void,
+    read_line_cb: ReadLineFn,
+    format_version: c_int,
+    target_ctx: *mut std::ffi::c_void,
+    on_item_cb: unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        slot_idx: c_int,
+        item: *const NzbgetRsDiskVolumeStatInput,
+        has_custom_times: c_int,
+    ),
+) -> bool {
+    let Some(size) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+    for i in 0..size {
+        let Some(t_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        let Some(b_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        let mut tc = ScanCursor(&t_line);
+        let mut bc = ScanCursor(&b_line);
+        let (first_day, data_time, custom_time, counters_reset_time, hi1, lo1, hi2, lo2, has_custom) =
+            if format_version >= 4 {
+                let (Some(fd), Some(dt), Some(ct), Some(crt)) =
+                    (tc.i32(false), tc.i32(true), tc.i32(true), tc.i32(true))
+                else {
+                    return false;
+                };
+                let (Some(h1), Some(l1), Some(h2), Some(l2)) =
+                    (bc.u32(false), bc.u32(true), bc.u32(true), bc.u32(true))
+                else {
+                    return false;
+                };
+                (fd, dt, ct, crt, h1, l1, h2, l2, 1)
+            } else if format_version == 3 {
+                let (Some(fd), Some(dt), Some(ct)) = (tc.i32(false), tc.i32(true), tc.i32(true))
+                else {
+                    return false;
+                };
+                let (Some(h1), Some(l1), Some(h2), Some(l2)) =
+                    (bc.u32(false), bc.u32(true), bc.u32(true), bc.u32(true))
+                else {
+                    return false;
+                };
+                (fd, dt, ct, fd.wrapping_mul(86400), h1, l1, h2, l2, 1)
+            } else {
+                let (Some(fd), Some(dt)) = (tc.i32(false), tc.i32(true)) else {
+                    return false;
+                };
+                let (Some(h1), Some(l1)) = (bc.u32(false), bc.u32(true)) else {
+                    return false;
+                };
+                (fd, dt, 0, 0, h1, l1, 0, 0, 0)
+            };
+
+        let mut slots: [Vec<i64>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        for (k, slot) in slots.iter_mut().enumerate() {
+            let Some(arr_size) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+                return false;
+            };
+            let (valid, target_len) = calc_volume_slot_size(k as i32, arr_size);
+            if !valid {
+                return false;
+            }
+            slot.resize(target_len as usize, 0);
+            for j in 0..arr_size {
+                let Some(v_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) })
+                else {
+                    return false;
+                };
+                let mut vc = ScanCursor(&v_line);
+                let (Some(vh), Some(vl)) = (vc.u32(false), vc.u32(true)) else {
+                    return false;
+                };
+                if (j as usize) < slot.len() {
+                    slot[j as usize] = join_i64(vh, vl);
+                }
+            }
+        }
+
+        let mut articles = Vec::new();
+        if format_version >= 4 {
+            let Some(a_hdr) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+                return false;
+            };
+            let Some(arr_size) = ScanCursor(&a_hdr).u32(false) else {
+                return false;
+            };
+            if arr_size > 100_000 {
+                return false;
+            }
+            articles.reserve(arr_size as usize);
+            for _ in 0..arr_size {
+                let Some(a_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) })
+                else {
+                    return false;
+                };
+                let mut ac = ScanCursor(&a_line);
+                let (Some(failed), Some(success)) = (ac.u32(false), ac.u32(true)) else {
+                    return false;
+                };
+                articles.push(crate::xmlrpc_format::NzbgetRsRpcArticlePair { failed, success });
+            }
+        }
+
+        let item = NzbgetRsDiskVolumeStatInput {
+            first_day,
+            data_time,
+            custom_time,
+            counters_reset_time,
+            total_bytes: join_i64(hi1, lo1),
+            custom_bytes: join_i64(hi2, lo2),
+            bytes_per_seconds: slots[0].as_ptr(),
+            bytes_per_seconds_len: slots[0].len(),
+            bytes_per_minutes: slots[1].as_ptr(),
+            bytes_per_minutes_len: slots[1].len(),
+            bytes_per_hours: slots[2].as_ptr(),
+            bytes_per_hours_len: slots[2].len(),
+            bytes_per_days: slots[3].as_ptr(),
+            bytes_per_days_len: slots[3].len(),
+            articles_per_days: if articles.is_empty() {
+                std::ptr::null()
+            } else {
+                articles.as_ptr()
+            },
+            articles_per_days_len: articles.len(),
+        };
+        unsafe { on_item_cb(target_ctx, i, &item, has_custom) };
+    }
+    true
+}
+
+/// Parses `DiskState::LoadFileInfo` via `read_line_cb`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn load_file_info(
+    infile_ctx: *mut std::ffi::c_void,
+    read_line_cb: ReadLineFn,
+    format_version: c_int,
+    file_summary: c_int,
+    articles: c_int,
+    file_id: c_int,
+    direct_write_opt: c_int,
+    force_direct_write: c_int,
+    sep: u8,
+    dest_dir: &[u8],
+    cur_filename: &[u8],
+    cur_output_filename: &[u8],
+    target_ctx: *mut std::ffi::c_void,
+    on_summary_cb: unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        fields: *const NzbgetRsDiskFileInfoInput,
+        flags: c_int,
+    ),
+    on_item_cb: unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        group_or_null: *const c_char,
+        art_or_null: *const NzbgetRsDiskArticleInfo,
+    ),
+) -> bool {
+    let Some(subject_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let Some(filename_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let origname_c = if format_version >= 6 {
+        let Some(v) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        v
+    } else {
+        vec![0]
+    };
+    let output_filename_c = if format_version >= 7 {
+        let Some(v) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        v
+    } else {
+        vec![0]
+    };
+
+    let mut flags: c_int = 0;
+    if format_version >= 7 && output_filename_c.len() > 1 {
+        flags |= 1;
+    }
+
+    let mut filename_confirmed: c_int = 0;
+    let mut time_val: c_int = 0;
+    let mut output_initialized: c_int = 0;
+
+    if format_version >= 5 {
+        let Some(line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        let mut sc = ScanCursor(&line);
+        let (Some(fc), Some(tm)) = (sc.i32(false), sc.i32(true)) else {
+            return false;
+        };
+        filename_confirmed = fc;
+        time_val = tm;
+        if file_summary != 0 {
+            flags |= 2 | 4;
+        }
+        if let Some(oi) = sc.i32(true) {
+            if file_summary != 0 {
+                flags |= 8;
+                let dw = direct_write_opt != 0;
+                let fdw = force_direct_write != 0;
+                let mut has_own = false;
+                let mut has_tmp = false;
+                let mut has_force_dest = false;
+                if oi != 0 && (dw || fdw) {
+                    let eff_out = if (flags & 1) != 0 {
+                        &output_filename_c[..output_filename_c.len() - 1]
+                    } else {
+                        cur_output_filename
+                    };
+                    if !eff_out.is_empty() {
+                        has_own = crate::fsops::posix_stat(eff_out) == 1;
+                    }
+                    if !dest_dir.is_empty() {
+                        let tmp_p = crate::artwritercore::article_writer_format_dest_file_path(
+                            dest_dir,
+                            sep,
+                            format!("{file_id}.out.tmp").as_bytes(),
+                        );
+                        has_tmp = crate::fsops::posix_stat(&tmp_p) == 1;
+                    }
+                    let eff_fname = if filename_c.len() > 1 {
+                        &filename_c[..filename_c.len() - 1]
+                    } else {
+                        cur_filename
+                    };
+                    if fdw && !dest_dir.is_empty() && !eff_fname.is_empty() {
+                        let dst_p = crate::artwritercore::article_writer_format_dest_file_path(
+                            dest_dir, sep, eff_fname,
+                        );
+                        has_force_dest = crate::fsops::posix_stat(&dst_p) == 1;
+                    }
+                }
+                output_initialized = c_int::from(eval_restored_output_init(
+                    oi,
+                    dw,
+                    fdw,
+                    has_own,
+                    has_tmp,
+                    has_force_dest,
+                ));
+            }
+        }
+    } else if format_version >= 4 {
+        let Some(tm) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+            return false;
+        };
+        time_val = tm;
+        if file_summary != 0 {
+            flags |= 4;
+        }
+    }
+
+    let Some(sz_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut szc = ScanCursor(&sz_line);
+    let (Some(sz_hi), Some(sz_lo)) = (szc.u32(false), szc.u32(true)) else {
+        return false;
+    };
+
+    let Some(ms_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut msc = ScanCursor(&ms_line);
+    let (Some(ms_hi), Some(ms_lo)) = (msc.u32(false), msc.u32(true)) else {
+        return false;
+    };
+
+    let Some(par_file) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+
+    let Some(art_cnt_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+        return false;
+    };
+    let mut acc = ScanCursor(&art_cnt_line);
+    let (Some(total_articles), Some(missed_articles)) = (acc.i32(false), acc.i32(true)) else {
+        return false;
+    };
+
+    let fields = NzbgetRsDiskFileInfoInput {
+        subject: subject_c.as_ptr().cast::<c_char>(),
+        filename: filename_c.as_ptr().cast::<c_char>(),
+        origname: origname_c.as_ptr().cast::<c_char>(),
+        output_filename: output_filename_c.as_ptr().cast::<c_char>(),
+        filename_confirmed,
+        time: time_val,
+        output_initialized,
+        size: join_i64(sz_hi, sz_lo),
+        missed_size: join_i64(ms_hi, ms_lo),
+        par_file,
+        total_articles,
+        missed_articles,
+    };
+    unsafe { on_summary_cb(target_ctx, &fields, flags) };
+
+    let Some(grp_count) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+        return false;
+    };
+    for _ in 0..grp_count {
+        let Some(grp_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) }) else {
+            return false;
+        };
+        if file_summary != 0 && grp_c.len() > 1 {
+            unsafe { on_item_cb(target_ctx, grp_c.as_ptr().cast::<c_char>(), std::ptr::null()) };
+        }
+    }
+
+    if articles != 0 {
+        let Some(art_count) = (unsafe { scan_one_i32(infile_ctx, read_line_cb) }) else {
+            return false;
+        };
+        for _ in 0..art_count {
+            let Some(p_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
+                return false;
+            };
+            let mut pc = ScanCursor(&p_line);
+            let (Some(part_number), Some(size)) = (pc.i32(false), pc.i32(true)) else {
+                return false;
+            };
+            let Some(msg_c) = (unsafe { read_line_cstr(infile_ctx, read_line_cb, 1024) }) else {
+                return false;
+            };
+            let art = NzbgetRsDiskArticleInfo {
+                part_number,
+                size,
+                message_id: msg_c.as_ptr().cast::<c_char>(),
+            };
+            unsafe { on_item_cb(target_ctx, std::ptr::null(), &art) };
+        }
+    }
+
+    true
+}
+
+/// Consolidated section parser / directory scanner for `DiskState`:
+/// - `kind == 0`: `LoadDupInfo`
+/// - `kind == 1`: `LoadFeedStatus`
+/// - `kind == 2`: `LoadFeedHistory`
+/// - `kind == 3`: `LoadServerStats`
+/// - `kind == 4`: `ConvertLegacyFileStates` directory scan (`format_version` = `DISKSTATE_FILE_VERSION`, `now as i32` = `DISKSTATE_FILE_LEGACY_VERSION`)
+/// - `kind == 5`: `SetAsideQueueFiles` (`now` = `Util::CurrentTime()`)
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn load_section(
+    kind: c_int,
+    infile_ctx: *mut std::ffi::c_void,
+    read_line_cb: Option<ReadLineFn>,
+    format_version: c_int,
+    qdir: &[u8],
+    sep: u8,
+    now: i64,
+    target_ctx: *mut std::ffi::c_void,
+    on_entry_cb: unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        a1: c_int,
+        a2: c_int,
+        a3: c_int,
+        u1: u32,
+        u2: u32,
+        i64_1: i64,
+        s1: *const c_char,
+        s2: *const c_char,
+    ),
+) -> bool {
+    match kind {
+        0 => {
+            let Some(cb) = read_line_cb else { return false };
+            let Some(hdr) = (unsafe { read_line_bytes(infile_ctx, cb, 1024) }) else {
+                return false;
+            };
+            let mut sc = ScanCursor(&hdr);
+            let (
+                Some(status),
+                Some(hi),
+                Some(lo),
+                Some(full_hash),
+                Some(filt_hash),
+                Some(dupe_score),
+                Some(dupe_mode),
+            ) = (
+                sc.i32(false),
+                sc.u32(true),
+                sc.u32(true),
+                sc.u32(true),
+                sc.u32(true),
+                sc.i32(true),
+                sc.i32(true),
+            )
+            else {
+                return false;
+            };
+            let Some(name_c) = (unsafe { read_line_cstr(infile_ctx, cb, 1024) }) else {
+                return false;
+            };
+            let Some(key_c) = (unsafe { read_line_cstr(infile_ctx, cb, 1024) }) else {
+                return false;
+            };
+            unsafe {
+                on_entry_cb(
+                    target_ctx,
+                    status,
+                    dupe_score,
+                    dupe_mode,
+                    full_hash,
+                    filt_hash,
+                    join_i64(hi, lo),
+                    name_c.as_ptr().cast::<c_char>(),
+                    key_c.as_ptr().cast::<c_char>(),
+                );
+            }
+            true
+        }
+        1 => {
+            let Some(cb) = read_line_cb else { return false };
+            let Some(size) = (unsafe { scan_one_i32(infile_ctx, cb) }) else {
+                return false;
+            };
+            for _ in 0..size {
+                let Some(url_c) = (unsafe { read_line_cstr(infile_ctx, cb, 1024) }) else {
+                    return false;
+                };
+                let filter_c = if format_version == 2 {
+                    let Some(f) = (unsafe { read_line_cstr(infile_ctx, cb, 1024) }) else {
+                        return false;
+                    };
+                    f
+                } else {
+                    vec![0]
+                };
+                let filter_hash = if format_version >= 3 {
+                    let Some(h_line) = (unsafe { read_line_bytes(infile_ctx, cb, 1024) }) else {
+                        return false;
+                    };
+                    let Some(h) = ScanCursor(&h_line).u32(false) else {
+                        return false;
+                    };
+                    h
+                } else {
+                    0
+                };
+                let Some(last_update) = (unsafe { scan_one_i32(infile_ctx, cb) }) else {
+                    return false;
+                };
+                unsafe {
+                    on_entry_cb(
+                        target_ctx,
+                        last_update,
+                        format_version,
+                        0,
+                        filter_hash,
+                        0,
+                        0,
+                        url_c.as_ptr().cast::<c_char>(),
+                        filter_c.as_ptr().cast::<c_char>(),
+                    );
+                }
+            }
+            true
+        }
+        2 => {
+            let Some(cb) = read_line_cb else { return false };
+            let Some(size) = (unsafe { scan_one_i32(infile_ctx, cb) }) else {
+                return false;
+            };
+            for _ in 0..size {
+                let Some(line) = (unsafe { read_line_bytes(infile_ctx, cb, 1024) }) else {
+                    return false;
+                };
+                let mut sc = ScanCursor(&line);
+                let (Some(status), Some(last_seen)) = (sc.i32(false), sc.i32(true)) else {
+                    return false;
+                };
+                let Some(url_c) = (unsafe { read_line_cstr(infile_ctx, cb, 1024) }) else {
+                    return false;
+                };
+                unsafe {
+                    on_entry_cb(
+                        target_ctx,
+                        status,
+                        last_seen,
+                        0,
+                        0,
+                        0,
+                        0,
+                        url_c.as_ptr().cast::<c_char>(),
+                        std::ptr::null(),
+                    );
+                }
+            }
+            true
+        }
+        3 => {
+            let Some(cb) = read_line_cb else { return false };
+            let Some(stat_count) = (unsafe { scan_one_i32(infile_ctx, cb) }) else {
+                return false;
+            };
+            for _ in 0..stat_count {
+                let Some(line) = (unsafe { read_line_bytes(infile_ctx, cb, 1024) }) else {
+                    return false;
+                };
+                let mut sc = ScanCursor(&line);
+                let (Some(server_id), Some(success), Some(failed)) =
+                    (sc.i32(false), sc.i32(true), sc.i32(true))
+                else {
+                    return false;
+                };
+                unsafe {
+                    on_entry_cb(
+                        target_ctx,
+                        server_id,
+                        success,
+                        failed,
+                        0,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    );
+                }
+            }
+            true
+        }
+        4 => {
+            use std::io::Read;
+            let legacy_ver = now as i32;
+            for entry in crate::fsops::list_dir_entries(qdir) {
+                let digits = entry.iter().take_while(|b| b.is_ascii_digit()).count();
+                if digits == 0 {
+                    continue;
+                }
+                let rem = &entry[digits..];
+                if !(rem.is_empty() || rem == b"s" || rem == b"c") {
+                    continue;
+                }
+                let full_p = crate::artwritercore::article_writer_format_dest_file_path(
+                    qdir, sep, &entry,
+                );
+                let Ok(mut f) = std::fs::File::open(crate::fsops::path(&full_p)) else {
+                    continue;
+                };
+                let mut buf = [0u8; 99];
+                let Ok(n) = f.read(&mut buf) else {
+                    continue;
+                };
+                if n == 0 {
+                    continue;
+                }
+                let line_end = buf[..n].iter().position(|&b| b == b'\n').map_or(n, |p| p + 1);
+                if let Some((id, suffix_kind)) = classify_legacy_file_state(
+                    &entry,
+                    &buf[..line_end],
+                    format_version,
+                    legacy_ver,
+                ) {
+                    unsafe {
+                        on_entry_cb(
+                            target_ctx,
+                            id,
+                            suffix_kind,
+                            0,
+                            0,
+                            0,
+                            0,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                        );
+                    }
+                }
+            }
+            true
+        }
+        5 => {
+            for name in ["queue", "history", "progress"] {
+                let src = crate::artwritercore::article_writer_format_dest_file_path(
+                    qdir,
+                    sep,
+                    name.as_bytes(),
+                );
+                if crate::fsops::posix_stat(&src) == 1 {
+                    let kept_base = format!("{name}.unreadable-{now}");
+                    let dst = crate::artwritercore::article_writer_format_dest_file_path(
+                        qdir,
+                        sep,
+                        kept_base.as_bytes(),
+                    );
+                    if let (Ok(src_c), Ok(dst_c), Ok(name_c), Ok(base_c)) = (
+                        std::ffi::CString::new(src),
+                        std::ffi::CString::new(dst),
+                        std::ffi::CString::new(name),
+                        std::ffi::CString::new(kept_base),
+                    ) {
+                        if crate::fsops::move_file(&src_c, &dst_c) {
+                            unsafe {
+                                on_entry_cb(
+                                    target_ctx,
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    name_c.as_ptr(),
+                                    base_c.as_ptr(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2335,5 +3305,24 @@ mod tests {
         assert!(validate_article_count(50, true, 100));
         assert!(need_staged_file_check(false, 9, 0, 2, 1024, 512, 1, 3, true, false));
         assert_eq!(calc_volume_slot_size(0, 10), (true, 60));
+    }
+
+    #[test]
+    fn test_diskstate_fs_op_and_set_aside_regular_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget_diskstate_fs_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let qdir = dir.to_string_lossy().into_owned().into_bytes();
+        let mut o1 = 0;
+        let mut o2 = 0;
+        assert_eq!(diskstate_fs_op(1, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2), 0);
+        assert_eq!(diskstate_fs_op(5, &qdir, b'/', 12, 34, 0, 0, &mut o1, &mut o2), 1);
+        assert_eq!(diskstate_fs_op(1, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2), 1);
+        assert_eq!(diskstate_fs_op(4, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2), 1);
+        assert_eq!((o1, o2), (12, 34));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

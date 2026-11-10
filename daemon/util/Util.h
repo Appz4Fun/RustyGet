@@ -8819,6 +8819,13 @@ public:
 
 		return res;
 	}
+
+	char m_cbBuf[1024];
+	static const char* ReadLineCb(void* ctx, int maxSize)
+	{
+		auto* s = static_cast<StateDiskFile*>(ctx);
+		return s->ReadLine(s->m_cbBuf, maxSize > 0 && maxSize <= (int)sizeof(s->m_cbBuf) ? maxSize : (int)sizeof(s->m_cbBuf));
+	}
 };
 
 static inline void WriteRsBuf(StateDiskFile& outfile, NzbgetRsBuf buf)
@@ -8956,9 +8963,7 @@ public:
 
 		char FileSignatur[128];
 		m_file.ReadLine(FileSignatur, sizeof(FileSignatur));
-		size_t sigLen = strlen(FORMATVERSION_SIGNATURE);
-		m_fileVersion = !strncmp(FileSignatur, FORMATVERSION_SIGNATURE, sigLen) ?
-			atoi(FileSignatur + sigLen) : 0;
+		m_fileVersion = nzbget_rs_diskstate_classify_temp_or_legacy(3, nullptr, FileSignatur, 0, 0, nullptr, nullptr);
 		if (m_fileVersion > m_readVersion)
 		{
 			error("Could not load diskstate file %s due to file version mismatch", *m_destFilename);
@@ -9077,13 +9082,16 @@ public:
 				}
 
 				formatVersion = stateFile.GetFileVersion();
-				m_legacyQueueRead |= formatVersion != DISKSTATE_QUEUE_VERSION;
-				if (formatVersion <= 0)
+				int isLegacy = 0, needInlineHist = 0;
+				int verErr = nzbget_rs_diskstate_classify_temp_or_legacy(
+					4, nullptr, nullptr, formatVersion, DISKSTATE_QUEUE_VERSION, &isLegacy, &needInlineHist);
+				m_legacyQueueRead |= isLegacy != 0;
+				if (verErr == 1)
 				{
 					error("Failed to read queue: diskstate file is corrupted");
 					{ queueFilesFailed = true; goto error; }
 				}
-				else if (formatVersion < 47)
+				else if (verErr == 2)
 				{
 					error("Failed to read queue and history data. Only queue and history from NZBGet v13 or newer can be converted by this RustyGet version. "
 						"Old queue and history data still can be converted using NZBGet v16 as an intermediate version.");
@@ -9092,7 +9100,7 @@ public:
 
 				if (!LoadQueue(downloadQueue->GetQueue(), servers, *infile, formatVersion)) { queueFilesFailed = true; goto error; }
 
-				if (formatVersion < 57)
+				if (needInlineHist)
 				{
 					if (!LoadHistory(downloadQueue->GetHistory(), servers, *infile, formatVersion)) { queueFilesFailed = true; goto error; }
 				}
@@ -9309,76 +9317,26 @@ public:
 
 		if (deleteLog)
 		{
-			FileSystem::DeleteFile(CString::FormatStr("%s%cn%i.log", g_Options->GetQueueDir(), PATH_SEPARATOR, nzbInfo->GetId()));
+			nzbget_rs_diskstate_fs_op(7, g_Options->GetQueueDir(), PATH_SEPARATOR, nzbInfo->GetId(), 0, 0, 0, nullptr, nullptr);
 		}
 	}
 
 	void DiscardDownloadQueue()
 	{
 		debug("Discarding queue");
-
-		for (const char* name : { "queue", "history" })
-		{
-			FileSystem::DeleteFile(CString::FormatStr("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, name));
-		}
-
-		DirBrowser dir(g_Options->GetQueueDir());
-		while (const char* filename = dir.Next())
-		{
-			// delete all files whose names have only characters '0'..'9'
-			bool onlyNums = true;
-			for (const char* p = filename; *p; p++)
-			{
-				if (*p < '0' || *p > '9')
-				{
-					onlyNums = false;
-					break;
-				}
-			}
-			if (onlyNums)
-			{
-				FileSystem::DeleteFile(CString::FormatStr("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename));
-				FileSystem::DeleteFile(CString::FormatStr("%s%c%ss", g_Options->GetQueueDir(), PATH_SEPARATOR, filename));
-				FileSystem::DeleteFile(CString::FormatStr("%s%c%sc", g_Options->GetQueueDir(), PATH_SEPARATOR, filename));
-			}
-		}
+		nzbget_rs_diskstate_fs_op(0, g_Options->GetQueueDir(), PATH_SEPARATOR, 0, 0, 0, 0, nullptr, nullptr);
 	}
 
 	bool DownloadQueueExists()
 	{
 		debug("Checking if a saved queue exists on disk");
-
-		// An empty queue still has saved state: the IDs handed out before its entries
-		// were deleted. Load it so both generators continue past those IDs.
-		for (const char* name : { "queue", "history", "ids" })
-		{
-			if (FileSystem::FileExists(CString::FormatStr("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, name)))
-			{
-				return true;
-			}
-		}
-		return false;
+		return nzbget_rs_diskstate_fs_op(1, g_Options->GetQueueDir(), PATH_SEPARATOR, 0, 0, 0, 0, nullptr, nullptr) != 0;
 	}
 
 	void DiscardFile(int fileId, bool deleteData, bool deletePartialState, bool deleteCompletedState)
 	{
-		// info and articles file
-		if (deleteData)
-		{
-			FileSystem::DeleteFile(CString::FormatStr("%s%c%i", g_Options->GetQueueDir(), PATH_SEPARATOR, fileId));
-		}
-
-		// partial state file
-		if (deletePartialState)
-		{
-			FileSystem::DeleteFile(CString::FormatStr("%s%c%is", g_Options->GetQueueDir(), PATH_SEPARATOR, fileId));
-		}
-
-		// completed state file
-		if (deleteCompletedState)
-		{
-			FileSystem::DeleteFile(CString::FormatStr("%s%c%ic", g_Options->GetQueueDir(), PATH_SEPARATOR, fileId));
-		}
+		nzbget_rs_diskstate_fs_op(2, g_Options->GetQueueDir(), PATH_SEPARATOR,
+			fileId, deleteData ? 1 : 0, deletePartialState ? 1 : 0, deleteCompletedState ? 1 : 0, nullptr, nullptr);
 	}
 
 	void CleanupTempDir(DownloadQueue* downloadQueue)
@@ -9599,7 +9557,7 @@ public:
 
 	void DeleteCacheFlag()
 	{
-		FileSystem::DeleteFile(CString::FormatStr("%s%cacache", g_Options->GetQueueDir(), PATH_SEPARATOR));
+		nzbget_rs_diskstate_fs_op(3, g_Options->GetQueueDir(), PATH_SEPARATOR, 0, 0, 0, 0, nullptr, nullptr);
 	}
 
 	void AppendNzbMessage(int nzbId, Message::EKind kind, const char* text)
@@ -9665,63 +9623,27 @@ private:
 
 	void RaiseIdsPastQueueDir()
 	{
-		CharBuffer ids;
-		BString<1024> idsFilename("%s%cids", g_Options->GetQueueDir(), PATH_SEPARATOR);
-		if (FileSystem::FileExists(idsFilename) && FileSystem::LoadFileIntoBuffer(idsFilename, ids, true))
-		{
-			int nzbId = 0, fileId = 0;
-			if (sscanf(ids, "nzb %i file %i", &nzbId, &fileId) == 2 && nzbId >= 0 && fileId >= 0)
-			{
-				NzbInfo::RaiseIdFloor(nzbId);
-				FileInfo::RaiseIdFloor(fileId);
-			}
-		}
-
-		DirBrowser dir(g_Options->GetQueueDir());
-		while (const char* filename = dir.Next())
-		{
-			int id = 0, isNzbLog = 0;
-			if (nzbget_rs_diskstate_classify_temp_or_legacy(1, filename, nullptr, 0, 0, &id, &isNzbLog))
-			{
-				if (isNzbLog) NzbInfo::RaiseIdFloor(id);
-				else FileInfo::RaiseIdFloor(id);
-			}
-		}
+		int maxNzbId = -1, maxFileId = -1;
+		nzbget_rs_diskstate_fs_op(4, g_Options->GetQueueDir(), PATH_SEPARATOR, 0, 0, 0, 0, &maxNzbId, &maxFileId);
+		if (maxNzbId >= 0) NzbInfo::RaiseIdFloor(maxNzbId);
+		if (maxFileId >= 0) FileInfo::RaiseIdFloor(maxFileId);
 	}
 
 	void SaveIdFloor()
 	{
-		BString<1024> idsFilename("%s%cids", g_Options->GetQueueDir(), PATH_SEPARATOR);
-		BString<1024> tempFilename("%s.new", *idsFilename);
-		BString<100> text("nzb %i file %i\n", NzbInfo::LastGenId(), FileInfo::LastGenId());
-		if (!FileSystem::SaveBufferIntoFile(tempFilename, text, (int)strlen(text)) ||
-			rename(tempFilename, idsFilename) != 0)
-		{
-			FileSystem::DeleteFile(tempFilename);
-		}
+		nzbget_rs_diskstate_fs_op(5, g_Options->GetQueueDir(), PATH_SEPARATOR,
+			NzbInfo::LastGenId(), FileInfo::LastGenId(), 0, 0, nullptr, nullptr);
 	}
 
 	void ConvertLegacyFileStates(Servers* servers)
 	{
 		std::vector<std::pair<int, int>> legacy;
-		DirBrowser dir(g_Options->GetQueueDir());
-		while (const char* filename = dir.Next())
-		{
-			BString<1024> path("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-			DiskFile file;
-			char header[100] = {0};
-			if (!file.Open(path, DiskFile::omRead) || !file.ReadLine(header, sizeof(header)))
-			{
-				continue;
-			}
-			file.Close();
-			int id = 0, suffixKind = 0;
-			if (nzbget_rs_diskstate_classify_temp_or_legacy(
-				2, filename, header, DISKSTATE_FILE_VERSION, DISKSTATE_FILE_LEGACY_VERSION, &id, &suffixKind))
-			{
-				legacy.emplace_back(id, suffixKind);
-			}
-		}
+		nzbget_rs_diskstate_load_section(
+			4, nullptr, nullptr, DISKSTATE_FILE_VERSION, g_Options->GetQueueDir(), PATH_SEPARATOR,
+			DISKSTATE_FILE_LEGACY_VERSION, &legacy,
+			[](void* p, int id, int suffixKind, int, uint32_t, uint32_t, int64_t, const char*, const char*) {
+				static_cast<std::vector<std::pair<int, int>>*>(p)->emplace_back(id, suffixKind);
+			});
 		if (legacy.empty())
 		{
 			return;
@@ -9750,20 +9672,11 @@ private:
 
 	void SetAsideQueueFiles()
 	{
-		time_t now = Util::CurrentTime();
-		for (const char* name : { "queue", "history", "progress" })
-		{
-			BString<1024> filename("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, name);
-			if (FileSystem::FileExists(filename))
-			{
-				CString keptName = CString::FormatStr("%s.unreadable-%lld", *filename, (long long)now);
-				if (FileSystem::MoveFile(filename, keptName))
-				{
-					error("Diskstate file %s could not be read; it is kept as %s", name,
-						FileSystem::BaseFileName(keptName));
-				}
-			}
-		}
+		nzbget_rs_diskstate_load_section(
+			5, nullptr, nullptr, 0, g_Options->GetQueueDir(), PATH_SEPARATOR, (int64_t)Util::CurrentTime(), nullptr,
+			[](void*, int, int, int, uint32_t, uint32_t, int64_t, const char* name, const char* keptBase) {
+				error("Diskstate file %s could not be read; it is kept as %s", name, keptBase);
+			});
 	}
 
 	void SaveQueue(NzbList* queue, StateDiskFile& outfile)
@@ -9916,69 +9829,23 @@ private:
 
 	bool LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int formatVersion)
 	{
-		char buf[1024];
-		uint32 recoveredHigh = 0, recoveredLow = 0;
-		int recoveredArticles = 0, recoveredHoles = 0;
-		int headerScanCnt;
-		headerScanCnt = infile.ScanLine("%i,%u,%u,%i", &recoveredArticles, &recoveredHigh, &recoveredLow,
-			&recoveredHoles);
-		if (headerScanCnt != 4 || recoveredArticles < 0 || recoveredHoles < 0) goto error;
-		nzbInfo->SetDupeRecoveredArticles(recoveredArticles);
-		nzbInfo->SetDupeRecoveredBytes(Util::JoinInt64(recoveredHigh, recoveredLow));
-		nzbInfo->SetDupeRecoveredHoles(recoveredHoles);
-
-		int repairCount;
-		{
-			repairCount = 0;
-			int repairScanCnt = infile.ScanLine("%i", &repairCount);
-			if (repairScanCnt != 1 || repairCount < 0 || repairCount > 100000) goto error;
-		}
-		for (int i = 0; i < repairCount; i++)
-		{
-			int fileId = 0, parFile = 0, failedArticles = 0;
-			uint32 decodedHigh = 0, decodedLow = 0, failedHigh = 0, failedLow = 0, missedHigh = 0, missedLow = 0;
-			uint32 stepsHigh = 0, stepsLow = 0;
-			int expectedJobFields = formatVersion >= 66 ? 11 : 9;
-			int jobScanCnt = expectedJobFields == 11 ?
-				infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i,%u,%u", &fileId, &decodedHigh,
-					&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
-					&failedArticles, &stepsHigh, &stepsLow) :
-				infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i", &fileId, &decodedHigh,
-					&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
-					&failedArticles);
-			if (jobScanCnt != expectedJobFields || failedArticles < 0 || fileId <= 0 ||
-				parFile < 0 || parFile > 1) goto error;
-			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-			int holeCount;
-			{
-				holeCount = 0;
-				int holeScanCnt = infile.ScanLine("%i", &holeCount);
-				if (holeScanCnt != 1 || holeCount < 0 || holeCount > 1000000) goto error;
-			}
-			int64 decodedSize = Util::JoinInt64(decodedHigh, decodedLow);
-			StreamRangeList holes;
-			holes.reserve(holeCount);
-			for (int j = 0; j < holeCount; j++)
-			{
-				uint32 offsetHigh, offsetLow, sizeHigh, sizeLow;
-				if (infile.ScanLine("%u,%u,%u,%u", &offsetHigh, &offsetLow, &sizeHigh, &sizeLow) != 4) goto error;
-				int64 offset = Util::JoinInt64(offsetHigh, offsetLow);
-				int64 size = Util::JoinInt64(sizeHigh, sizeLow);
-				if (offset < 0 || size <= 0 || decodedSize <= 0 ||
-					offset > decodedSize || size > decodedSize - offset) goto error;
-				holes.push_back({offset, size});
-			}
-			nzbInfo->GetStreamRepairJobs()->emplace_back(fileId, buf, decodedSize,
-				Util::JoinInt64(failedHigh, failedLow), Util::JoinInt64(missedHigh, missedLow),
-				failedArticles, parFile != 0, std::move(holes),
-				(uint64)Util::JoinInt64(stepsHigh, stepsLow));
-		}
-
-
-		return true;
-
-	error:
-		return false;
+		return nzbget_rs_diskstate_load_dupe_extras(
+			&infile, StateDiskFile::ReadLineCb, formatVersion, nzbInfo,
+			[](void* p, int recArt, int64_t recBytes, int recHoles) {
+				auto* n = static_cast<NzbInfo*>(p);
+				n->SetDupeRecoveredArticles(recArt);
+				n->SetDupeRecoveredBytes(recBytes);
+				n->SetDupeRecoveredHoles(recHoles);
+			},
+			[](void* p, const NzbgetRsDiskRepairJob* j) {
+				auto* n = static_cast<NzbInfo*>(p);
+				StreamRangeList holes;
+				holes.reserve(j->holes_len);
+				for (size_t k = 0; k < j->holes_len; k++) holes.push_back({j->holes[k].offset, j->holes[k].size});
+				n->GetStreamRepairJobs()->emplace_back(j->file_id, j->filename, j->decoded_file_size,
+					j->failed_size, j->missed_size, j->failed_articles, j->par_file != 0,
+					std::move(holes), j->steps_hash);
+			}) != 0;
 	}
 
 	void SaveDupeTrailer(const std::vector<NzbInfo*>& nzbs, StateDiskFile& outfile)
@@ -10593,31 +10460,27 @@ private:
 
 	bool LoadServerStats(ServerStatList* serverStatList, Servers* servers, StateDiskFile& infile)
 	{
-		int statCount;
-		if (infile.ScanLine("%i", &statCount) != 1) goto error;
-		for (int i = 0; i < statCount; i++)
-		{
-			int serverId, successArticles, failedArticles;
-			if (infile.ScanLine("%i,%i,%i", &serverId, &successArticles, &failedArticles) != 3) goto error;
-
-			if (servers)
-			{
-				// find server (id could change if config file was edited)
-				for (NewsServer* newsServer : servers)
+		struct Ctx { ServerStatList* list; Servers* servers; } ctx{serverStatList, servers};
+		if (!nzbget_rs_diskstate_load_section(
+			3, &infile, StateDiskFile::ReadLineCb, 0, nullptr, 0, 0, &ctx,
+			[](void* p, int serverId, int successArticles, int failedArticles, uint32_t, uint32_t, int64_t, const char*, const char*) {
+				auto* c = static_cast<Ctx*>(p);
+				if (c->servers)
 				{
-					if (newsServer->GetStateId() == serverId)
+					for (NewsServer* ns : c->servers)
 					{
-						serverStatList->StatOp(newsServer->GetId(), successArticles, failedArticles, ServerStatList::soSet);
+						if (ns->GetStateId() == serverId)
+						{
+							c->list->StatOp(ns->GetId(), successArticles, failedArticles, ServerStatList::soSet);
+						}
 					}
 				}
-			}
+			}))
+		{
+			error("Error reading server stats from disk");
+			return false;
 		}
-
 		return true;
-
-	error:
-		error("Error reading server stats from disk");
-		return false;
 	}
 
 	bool SaveFileInfo(FileInfo* fileInfo, StateDiskFile& outfile, bool articles)
@@ -10669,118 +10532,50 @@ private:
 
 	bool LoadFileInfo(FileInfo* fileInfo, StateDiskFile& infile, int formatVersion, bool fileSummary, bool articles)
 	{
-		char buf[1024];
-
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		if (fileSummary && !Util::EmptyStr(buf)) fileInfo->SetSubject(buf);
-
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		if (fileSummary && !Util::EmptyStr(buf)) fileInfo->SetFilename(buf);
-
-		if (formatVersion >= 6)
-		{
-			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-			if (fileSummary && !Util::EmptyStr(buf)) fileInfo->SetOrigname(buf);
-		}
-
-		if (formatVersion >= 7)
-		{
-			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-			if (!Util::EmptyStr(buf))
-			{
-				fileInfo->SetOutputFilename(buf);
-			}
-		}
-
-		if (formatVersion >= 5)
-		{
-			int time = 0, filenameConfirmed = 0, outputInitialized = 0;
-			int cnt = infile.ScanLine("%i,%i,%i", &filenameConfirmed, &time, &outputInitialized);
-			if (cnt < 2) goto error;
-			if (fileSummary) fileInfo->SetFilenameConfirmed(static_cast<bool>(filenameConfirmed));
-			if (fileSummary) fileInfo->SetTime(static_cast<time_t>(time));
-			if (fileSummary && cnt >= 3)
-			{
-				bool directWriteOpt = g_Options && g_Options->GetDirectWrite();
-				bool forceDirectWrite = fileInfo->GetForceDirectWrite();
-				bool hasOwnOutFile = false;
-				bool hasOutTmp = false;
-				bool hasForceDest = false;
-				if (outputInitialized && (directWriteOpt || forceDirectWrite))
+		const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
+		struct Ctx { FileInfo* f; bool summary; } ctx{fileInfo, fileSummary};
+		if (!nzbget_rs_diskstate_load_file_info(
+			&infile, StateDiskFile::ReadLineCb, formatVersion, fileSummary ? 1 : 0, articles ? 1 : 0,
+			fileInfo->GetId(), (g_Options && g_Options->GetDirectWrite()) ? 1 : 0,
+			fileInfo->GetForceDirectWrite() ? 1 : 0, PATH_SEPARATOR,
+			destDir, fileInfo->GetFilename(), fileInfo->GetOutputFilename().c_str(), &ctx,
+			[](void* p, const NzbgetRsDiskFileInfoInput* in, int flags) {
+				auto* c = static_cast<Ctx*>(p);
+				FileInfo* f = c->f;
+				if (flags & 1) f->SetOutputFilename(in->output_filename);
+				if (c->summary)
 				{
-					const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
-					hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
-						FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
-					if (destDir && !Util::EmptyStr(destDir))
-					{
-						hasOutTmp = FileSystem::FileExists(CString::FormatStr("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()));
-					}
-					if (forceDirectWrite && destDir && !Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()))
-					{
-						hasForceDest = FileSystem::FileExists(CString::FormatStr("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
-					}
+					if (*in->subject) f->SetSubject(in->subject);
+					if (*in->filename) f->SetFilename(in->filename);
+					if (*in->origname) f->SetOrigname(in->origname);
+					if (flags & 2) f->SetFilenameConfirmed((bool)in->filename_confirmed);
+					if (flags & 4) f->SetTime((time_t)in->time);
+					if (flags & 8) f->SetOutputInitialized((bool)in->output_initialized);
+					f->SetSize(in->size);
+					f->SetMissedSize(in->missed_size);
+					f->SetRemainingSize(in->size - in->missed_size);
+					f->SetParFile((bool)in->par_file);
+					f->SetTotalArticles(in->total_articles);
+					f->SetMissedArticles(in->missed_articles);
 				}
-				bool restoredOutputInit = outputInitialized != 0 &&
-					(!(directWriteOpt || forceDirectWrite) || hasOwnOutFile || hasOutTmp || hasForceDest);
-				fileInfo->SetOutputInitialized(restoredOutputInit);
-			}
-		}
-		else if (formatVersion >= 4)
+			},
+			[](void* p, const char* grp, const NzbgetRsDiskArticleInfo* art) {
+				FileInfo* f = static_cast<Ctx*>(p)->f;
+				if (grp) f->GetGroups()->push_back(grp);
+				if (art)
+				{
+					auto ai = std::make_unique<ArticleInfo>();
+					ai->SetPartNumber(art->part_number);
+					ai->SetSize(art->size);
+					ai->SetMessageId(art->message_id);
+					f->GetArticles()->push_back(std::move(ai));
+				}
+			}))
 		{
-			int time;
-			if (infile.ScanLine("%i", &time) != 1) goto error;
-			if (fileSummary) fileInfo->SetTime(static_cast<time_t>(time));
+			error("Error reading diskstate for file %i", fileInfo->GetId());
+			return false;
 		}
-
-		uint32 High, Low;
-		if (infile.ScanLine("%u,%u", &High, &Low) != 2) goto error;
-		if (fileSummary) fileInfo->SetSize(Util::JoinInt64(High, Low));
-		if (fileSummary) fileInfo->SetRemainingSize(fileInfo->GetSize());
-
-		if (infile.ScanLine("%u,%u", &High, &Low) != 2) goto error;
-		if (fileSummary) fileInfo->SetMissedSize(Util::JoinInt64(High, Low));
-		if (fileSummary) fileInfo->SetRemainingSize(fileInfo->GetSize() - fileInfo->GetMissedSize());
-
-		int parFile;
-		if (infile.ScanLine("%i", &parFile) != 1) goto error;
-		if (fileSummary) fileInfo->SetParFile(static_cast<bool>(parFile));
-
-		int totalArticles, missedArticles;
-		if (infile.ScanLine("%i,%i", &totalArticles, &missedArticles) != 2) goto error;
-		if (fileSummary) fileInfo->SetTotalArticles(totalArticles);
-		if (fileSummary) fileInfo->SetMissedArticles(missedArticles);
-
-		int size;
-		if (infile.ScanLine("%i", &size) != 1) goto error;
-		for (int i = 0; i < size; i++)
-		{
-			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-			if (fileSummary && !Util::EmptyStr(buf)) fileInfo->GetGroups()->push_back(buf);
-		}
-
-		if (articles)
-		{
-			if (infile.ScanLine("%i", &size) != 1) goto error;
-			for (int i = 0; i < size; i++)
-			{
-				int PartNumber, PartSize;
-				if (infile.ScanLine("%i,%i", &PartNumber, &PartSize) != 2) goto error;
-
-				if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-
-				std::unique_ptr<ArticleInfo> articleInfo = std::make_unique<ArticleInfo>();
-				articleInfo->SetPartNumber(PartNumber);
-				articleInfo->SetSize(PartSize);
-				articleInfo->SetMessageId(buf);
-				fileInfo->GetArticles()->push_back(std::move(articleInfo));
-			}
-		}
-
 		return true;
-
-	error:
-		error("Error reading diskstate for file %i", fileInfo->GetId());
-		return false;
 	}
 
 	bool SaveFileState(FileInfo* fileInfo, StateDiskFile& outfile, bool completed)
@@ -11017,31 +10812,19 @@ private:
 
 	bool LoadDupInfo(DupInfo* dupInfo, StateDiskFile& infile, int formatVersion)
 	{
-		char buf[1024];
-
-		int status;
-		uint32 High, Low;
-		uint32 fullContentHash, filteredContentHash = 0;
-		int dupeScore, dupeMode;
-		if (infile.ScanLine("%i,%u,%u,%u,%u,%i,%i", &status, &High, &Low, &fullContentHash, &filteredContentHash, &dupeScore, &dupeMode) != 7) goto error;
-
-		dupInfo->SetStatus((DupInfo::EStatus)status);
-		dupInfo->SetFullContentHash(fullContentHash);
-		dupInfo->SetFilteredContentHash(filteredContentHash);
-		dupInfo->SetSize(Util::JoinInt64(High, Low));
-		dupInfo->SetDupeScore(dupeScore);
-		dupInfo->SetDupeMode((EDupeMode)dupeMode);
-
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		dupInfo->SetName(buf);
-
-		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-		dupInfo->SetDupeKey(buf);
-
-		return true;
-
-	error:
-		return false;
+		return nzbget_rs_diskstate_load_section(
+			0, &infile, StateDiskFile::ReadLineCb, formatVersion, nullptr, 0, 0, dupInfo,
+			[](void* p, int status, int dupeScore, int dupeMode, uint32_t fullHash, uint32_t filtHash, int64_t size, const char* name, const char* dupeKey) {
+				auto* d = static_cast<DupInfo*>(p);
+				d->SetStatus((DupInfo::EStatus)status);
+				d->SetFullContentHash(fullHash);
+				d->SetFilteredContentHash(filtHash);
+				d->SetSize(size);
+				d->SetDupeScore(dupeScore);
+				d->SetDupeMode((EDupeMode)dupeMode);
+				d->SetName(name);
+				d->SetDupeKey(dupeKey);
+			}) != 0;
 	}
 
 	void SaveHistory(HistoryList* history, StateDiskFile& outfile)
@@ -11236,46 +11019,23 @@ private:
 	bool LoadFeedStatus(Feeds* feeds, StateDiskFile& infile, int formatVersion)
 	{
 		debug("Loading feed status from disk");
-
-		int size;
-		if (infile.ScanLine("%i", &size) != 1) goto error;
-		for (int i = 0; i < size; i++)
-		{
-			char url[1024];
-			if (!infile.ReadLine(url, sizeof(url))) goto error;
-
-			char filter[1024];
-			if (formatVersion == 2)
-			{
-				if (!infile.ReadLine(filter, sizeof(filter))) goto error;
-			}
-
-			uint32 filterHash = 0;
-			if (formatVersion >= 3)
-			{
-				if (infile.ScanLine("%u", &filterHash) != 1) goto error;
-			}
-
-			int lastUpdate = 0;
-			if (infile.ScanLine("%i", &lastUpdate) != 1) goto error;
-
-			for (FeedInfo* feedInfo : feeds)
-			{
-				if (!strcmp(feedInfo->GetUrl(), url) &&
-					((formatVersion == 1) ||
-					 (formatVersion == 2 && !strcmp(feedInfo->GetFilter(), filter)) ||
-					 (formatVersion >= 3 && feedInfo->GetFilterHash() == filterHash)))
+		if (!nzbget_rs_diskstate_load_section(
+			1, &infile, StateDiskFile::ReadLineCb, formatVersion, nullptr, 0, 0, feeds,
+			[](void* p, int lastUpdate, int ver, int, uint32_t filterHash, uint32_t, int64_t, const char* url, const char* filter) {
+				for (FeedInfo* f : static_cast<Feeds*>(p))
 				{
-					feedInfo->SetLastUpdate((time_t)lastUpdate);
+					if (!strcmp(f->GetUrl(), url) &&
+						(ver == 1 || (ver == 2 && !strcmp(f->GetFilter(), filter)) || (ver >= 3 && f->GetFilterHash() == filterHash)))
+					{
+						f->SetLastUpdate((time_t)lastUpdate);
+					}
 				}
-			}
+			}))
+		{
+			error("Error reading feed status from disk");
+			return false;
 		}
-
 		return true;
-
-	error:
-		error("Error reading feed status from disk");
-		return false;
 	}
 
 	bool SaveFeedHistory(FeedHistory* feedHistory, StateDiskFile& outfile)
@@ -11303,27 +11063,16 @@ private:
 	bool LoadFeedHistory(FeedHistory* feedHistory, StateDiskFile& infile, int formatVersion)
 	{
 		debug("Loading feed history from disk");
-
-		int size;
-		if (infile.ScanLine("%i", &size) != 1) goto error;
-		for (int i = 0; i < size; i++)
+		if (!nzbget_rs_diskstate_load_section(
+			2, &infile, StateDiskFile::ReadLineCb, formatVersion, nullptr, 0, 0, feedHistory,
+			[](void* p, int status, int lastSeen, int, uint32_t, uint32_t, int64_t, const char* url, const char*) {
+				static_cast<FeedHistory*>(p)->emplace_back(url, (FeedHistoryInfo::EStatus)status, (time_t)lastSeen);
+			}))
 		{
-			int status = 0;
-			int lastSeen = 0;
-			int r = infile.ScanLine("%i,%i", &status, &lastSeen);
-			if (r != 2) goto error;
-
-			char url[1024];
-			if (!infile.ReadLine(url, sizeof(url))) goto error;
-
-			feedHistory->emplace_back(url, (FeedHistoryInfo::EStatus)(status), (time_t)(lastSeen));
+			error("Error reading feed history from disk");
+			return false;
 		}
-
 		return true;
-
-	error:
-		error("Error reading feed history from disk");
-		return false;
 	}
 
 	void CalcFileStats(DownloadQueue* downloadQueue, int formatVersion)
@@ -11403,15 +11152,15 @@ private:
 
 	bool LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers)
 	{
-		bool cacheWasActive = FileSystem::FileExists(CString::FormatStr("%s%cacache", g_Options->GetQueueDir(), PATH_SEPARATOR));
+		bool cacheWasActive = nzbget_rs_diskstate_fs_op(6, g_Options->GetQueueDir(), PATH_SEPARATOR, 0, 0, 0, 0, nullptr, nullptr) != 0;
 
 		DirBrowser dir(g_Options->GetQueueDir());
 		while (const char* filename = dir.Next())
 		{
-			int id = 0;
-			char suffix = '\0';
-			if (sscanf(filename, "%i%c", &id, &suffix) == 2)
+			int id = 0, suffixInt = 0;
+			if (nzbget_rs_diskstate_classify_temp_or_legacy(5, filename, nullptr, 0, 0, &id, &suffixInt))
 			{
+				char suffix = (char)suffixInt;
 				if (suffix == 'c' || (g_Options->GetContinuePartial() && !cacheWasActive))
 				{
 					for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
@@ -11494,43 +11243,24 @@ private:
 	{
 		debug("Loading server info from disk");
 
-		*perfectMatch = true;
-
-		int size = 0;
-		std::vector<std::array<CString, 3>> refStrs;
-		std::vector<NzbgetRsServerMatchItem> refItems;
-		if (infile.ScanLine("%i", &size) != 1 || size < 0) goto error;
-		refStrs.resize((size_t)size);
-		refItems.resize((size_t)size);
-		for (int i = 0; i < size; i++)
+		std::vector<NzbgetRsServerMatchItem> srvItems;
+		srvItems.reserve(servers->size());
+		for (NewsServer* newsServer : servers)
 		{
-			char name[1024], host[200], user[100];
-			int port = 0;
-			if (!infile.ReadLine(name, sizeof(name)) ||
-				!infile.ReadLine(host, sizeof(host)) ||
-				infile.ScanLine("%i", &port) != 1 ||
-				!infile.ReadLine(user, sizeof(user)))
-			{
-				goto error;
-			}
-			refStrs[i] = { name, host, user };
-			refItems[i] = { *refStrs[i][0], *refStrs[i][1], port, *refStrs[i][2] };
+			srvItems.push_back({ newsServer->GetName(), newsServer->GetHost(), newsServer->GetPort(), newsServer->GetUser() });
 		}
-
+		std::vector<int> stateIds(srvItems.size(), 0);
+		int pm = 1;
+		if (!nzbget_rs_diskstate_match_servers(
+			srvItems.data(), srvItems.size(), &infile, StateDiskFile::ReadLineCb, stateIds.data(), &pm))
 		{
-			std::vector<NzbgetRsServerMatchItem> srvItems;
-			srvItems.reserve(servers->size());
-			for (NewsServer* newsServer : servers)
-			{
-				srvItems.push_back({ newsServer->GetName(), newsServer->GetHost(), newsServer->GetPort(), newsServer->GetUser() });
-			}
-			std::vector<int> stateIds(srvItems.size(), 0);
-			*perfectMatch = nzbget_rs_diskstate_match_servers(
-				srvItems.data(), srvItems.size(), refItems.data(), refItems.size(), stateIds.data()) != 0;
-			for (size_t i = 0; i < servers->size(); i++)
-			{
-				servers->at(i)->SetStateId(stateIds[i]);
-			}
+			error("Error reading server info from disk");
+			return false;
+		}
+		*perfectMatch = pm != 0;
+		for (size_t i = 0; i < servers->size(); i++)
+		{
+			servers->at(i)->SetStateId(stateIds[i]);
 		}
 
 		debug("******** MATCHING NEWS-SERVERS **********");
@@ -11544,11 +11274,6 @@ private:
 		debug("All servers perfectly matched: %s", *perfectMatch ? "yes" : "no");
 
 		return true;
-
-	error:
-		error("Error reading server info from disk");
-
-		return false;
 	}
 
 	bool SaveVolumeStat(ServerVolumes* serverVolumes, StateDiskFile& outfile)
@@ -11594,117 +11319,50 @@ private:
 	{
 		debug("Loading volume stats from disk");
 
-		int size;
-		if (infile.ScanLine("%i", &size) != 1) goto error;
-		for (int i = 0; i < size; i++)
+		struct Ctx { Servers* servers; ServerVolumes* volumes; int formatVer; } ctx{servers, serverVolumes, formatVersion};
+		if (!nzbget_rs_diskstate_load_volume_stat(
+			&infile, StateDiskFile::ReadLineCb, formatVersion, &ctx,
+			[](void* p, int i, const NzbgetRsDiskVolumeStatInput* v, int hasCustomTimes) {
+				auto* c = static_cast<Ctx*>(p);
+				ServerVolume* sv = nullptr;
+				if (i == 0) sv = &c->volumes->at(0);
+				else
+				{
+					for (NewsServer* ns : c->servers)
+					{
+						if (ns->GetStateId() == i) sv = &c->volumes->at(ns->GetId());
+					}
+				}
+				if (!sv) return;
+				if (hasCustomTimes)
+				{
+					sv->SetCustomTime((time_t)v->custom_time);
+					sv->SetCountersResetTime((time_t)v->counters_reset_time);
+				}
+				sv->SetFirstDay(v->first_day);
+				sv->SetDataTime((time_t)v->data_time);
+				sv->SetTotalBytes(v->total_bytes);
+				sv->SetCustomBytes(v->custom_bytes);
+				sv->BytesPerSeconds()->assign(v->bytes_per_seconds, v->bytes_per_seconds + v->bytes_per_seconds_len);
+				sv->BytesPerMinutes()->assign(v->bytes_per_minutes, v->bytes_per_minutes + v->bytes_per_minutes_len);
+				sv->BytesPerHours()->assign(v->bytes_per_hours, v->bytes_per_hours + v->bytes_per_hours_len);
+				sv->BytesPerDays()->assign(v->bytes_per_days, v->bytes_per_days + v->bytes_per_days_len);
+				if (c->formatVer >= 4)
+				{
+					ServerVolume::ArticlesArray articlesArr;
+					articlesArr.reserve(v->articles_per_days_len);
+					for (size_t k = 0; k < v->articles_per_days_len; k++)
+					{
+						articlesArr.push_back({v->articles_per_days[k].failed, v->articles_per_days[k].success});
+					}
+					sv->SetArticlesPerDays(std::move(articlesArr));
+				}
+			}))
 		{
-			ServerVolume* serverVolume = nullptr;
-
-			if (i == 0)
-			{
-				serverVolume = &serverVolumes->at(0);
-			}
-			else
-			{
-				for (NewsServer* newsServer : servers)
-				{
-					if (newsServer->GetStateId() == i)
-					{
-						serverVolume = &serverVolumes->at(newsServer->GetId());
-					}
-				}
-			}
-
-			int firstDay, dataTime, customTime, countersResetTime;
-			uint32 High1, Low1, High2 = 0, Low2 = 0;
-			if (formatVersion >= 4)
-			{
-				if (infile.ScanLine("%i,%i,%i,%i", &firstDay, &dataTime,&customTime, &countersResetTime) != 4) goto error;
-				if (infile.ScanLine("%u,%u,%u,%u", &High1, &Low1, &High2, &Low2) != 4) goto error;
-
-				if (serverVolume)
-				{
-					serverVolume->SetCustomTime(static_cast<time_t>(customTime));
-					serverVolume->SetCountersResetTime(static_cast<time_t>(countersResetTime));
-				}
-			}
-			else if (formatVersion == 3)
-			{
-				if (infile.ScanLine("%i,%i,%i", &firstDay, &dataTime,&customTime) != 3) goto error;
-				if (infile.ScanLine("%u,%u,%u,%u", &High1, &Low1, &High2, &Low2) != 4) goto error;
-
-				if (serverVolume)
-				{
-					serverVolume->SetCustomTime(static_cast<time_t>(customTime));
-					time_t firstDayTime = static_cast<time_t>(firstDay * 86400);
-					serverVolume->SetCountersResetTime(firstDayTime);
-				}
-			}
-			else
-			{
-				if (infile.ScanLine("%i,%i", &firstDay, &dataTime) != 2) goto error;
-				if (infile.ScanLine("%u,%u", &High1, &Low1) != 2) goto error;
-			}
-			if (serverVolume) serverVolume->SetFirstDay(firstDay);
-			if (serverVolume) serverVolume->SetDataTime((time_t)dataTime);
-			if (serverVolume) serverVolume->SetTotalBytes(Util::JoinInt64(High1, Low1));
-			if (serverVolume) serverVolume->SetCustomBytes(Util::JoinInt64(High2, Low2));
-
-			ServerVolume::VolumeArray* VolumeArrays[] = { 
-				serverVolume ? serverVolume->BytesPerSeconds() : nullptr,
-				serverVolume ? serverVolume->BytesPerMinutes() : nullptr,
-				serverVolume ? serverVolume->BytesPerHours() : nullptr,
-				serverVolume ? serverVolume->BytesPerDays() : nullptr };
-			for (int k=0; k < 4; k++)
-			{
-				ServerVolume::VolumeArray* volumeArray = VolumeArrays[k];
-
-				// the seconds, minutes and hours arrays have fixed sizes (the counters
-				// index them by the clock), the days one grows: a count from the file
-				// sized them, and a wrong one (damaged file) threw at every start or
-				// left them too short for the counters
-				int arrSize;
-				if (infile.ScanLine("%i", &arrSize) != 1) goto error;
-				if (arrSize < 0 || arrSize > 100000) goto error;
-				int fixedSize = (k == 0 || k == 1) ? 60 : (k == 2 ? 24 : 0);
-				if (volumeArray) volumeArray->assign(fixedSize > 0 ? fixedSize : arrSize, 0);
-
-				for (int j = 0; j < arrSize; j++)
-				{
-					if (infile.ScanLine("%u,%u", &High1, &Low1) != 2) goto error;
-					if (volumeArray && j < (int)volumeArray->size())
-					{
-						(*volumeArray)[j] = Util::JoinInt64(High1, Low1);
-					}
-				}
-			}
-
-			if (formatVersion >= 4)
-			{
-				uint32 arrSize;
-				if (infile.ScanLine("%u", &arrSize) != 1) goto error;
-				if (arrSize > 100000) goto error;
-
-				ServerVolume::ArticlesArray articlesArr;
-				articlesArr.reserve(arrSize);
-
-				ServerVolume::Articles articles;
-				while (arrSize--)
-				{
-					if (infile.ScanLine("%u,%u", &articles.failed, &articles.success) != 2) goto error;
-					articlesArr.push_back(articles);
-				}
-
-				if (serverVolume) serverVolume->SetArticlesPerDays(std::move(articlesArr));
-			}
+			error("Error reading volume stats from disk");
+			return false;
 		}
-
 		return true;
-
-	error:
-		error("Error reading volume stats from disk");
-
-		return false;
 	}
 };
 

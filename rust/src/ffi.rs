@@ -1,7 +1,7 @@
 //! C ABI. Strings come in as NUL-terminated C strings; results go out as a
 //! buffer the caller copies and then frees with nzbget_rs_free.
 
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
 #[path = "tlscipher/native.rs"]
 pub(crate) mod tls_cipher_native;
@@ -6401,11 +6401,10 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_select_dupe_backup(
     self_full_content_hash: u32,
     dupe_health: c_int,
     history: *const crate::dupecoord::NzbgetRsDupeHistoryCandidate,
+    queued_filenames: *const *const c_char,
     history_count: usize,
     queue: *const crate::dupecoord::NzbgetRsDupeQueueCandidate,
     queue_count: usize,
-    ctx: *mut std::ffi::c_void,
-    file_exists_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, history_index: usize) -> c_int>,
 ) -> c_int {
     let h = if history_count == 0 || history.is_null() {
         &[][..]
@@ -6424,11 +6423,11 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_select_dupe_backup(
         h,
         q,
         |idx| {
-            if let Some(cb) = file_exists_cb {
-                cb(ctx, idx) != 0
-            } else {
-                false
+            if queued_filenames.is_null() || idx >= history_count {
+                return false;
             }
+            let ptr = *queued_filenames.add(idx);
+            !ptr.is_null() && crate::fsops::file_exists(input(ptr), &crate::fsops::posix_stat)
         },
     )
 }
@@ -7074,8 +7073,6 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_build_output_filenames(
     existing_output_filename: *const c_char,
     output_initialized: c_int,
     file_filename: *const c_char,
-    cb_ctx: *mut std::ffi::c_void,
-    file_exists_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
     out_result_filename: *mut RsBuf,
     out_temp_filename: *mut RsBuf,
     out_output_filename: *mut RsBuf,
@@ -7113,15 +7110,7 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_build_output_filenames(
         existing,
         output_initialized != 0,
         fname,
-        |path_bytes| {
-            let Some(cb) = file_exists_cb else {
-                return false;
-            };
-            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
-            c_path.extend_from_slice(path_bytes);
-            c_path.push(0);
-            cb(cb_ctx, c_path.as_ptr().cast()) != 0
-        },
+        |path_bytes| crate::fsops::file_exists(path_bytes, &crate::fsops::posix_stat),
     ) else {
         return 0;
     };
@@ -7156,30 +7145,15 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
     output_filename: *const c_char,
     output_filename_len: usize,
     cb_ctx: *mut std::ffi::c_void,
-    same_filename_cb: Option<
-        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, a: *const c_char, b: *const c_char) -> c_int,
-    >,
-    make_unique_cb: Option<
-        unsafe extern "C" fn(
-            ctx: *mut std::ffi::c_void,
-            dir: *const c_char,
-            fname: *const c_char,
-            out_buf: *mut c_char,
-            out_cap: usize,
-        ) -> usize,
-    >,
-    file_exists_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
-    force_dirs_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
-    delete_file_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
     open_file_cb: Option<
         unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char, read_write: c_int) -> c_int,
     >,
-    create_dir_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
     out_final_path: *mut RsBuf,
     out_temp_path: *mut RsBuf,
     out_updated_output_filename: *mut RsBuf,
     out_parent_dir_failed: *mut RsBuf,
     out_has_parent_dir_failed: *mut c_int,
+    out_force_dirs_err: *mut RsBuf,
     out_error_kind: *mut c_int,
     out_error_path: *mut RsBuf,
 ) -> c_int {
@@ -7198,6 +7172,7 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
     } else {
         std::slice::from_raw_parts(output_filename.cast::<u8>(), output_filename_len)
     };
+    let mut force_dirs_err = Vec::new();
     let res = crate::artwritercore::article_writer_execute_setup_output_file(
         d_dir,
         fname,
@@ -7206,79 +7181,17 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
         direct_write != 0,
         force_direct_write != 0,
         out_fn,
-        |a, b| {
-            let Some(cb) = same_filename_cb else {
-                return a == b;
-            };
-            let mut ca = Vec::with_capacity(a.len() + 1);
-            ca.extend_from_slice(a);
-            ca.push(0);
-            let mut cb_vec = Vec::with_capacity(b.len() + 1);
-            cb_vec.extend_from_slice(b);
-            cb_vec.push(0);
-            cb(cb_ctx, ca.as_ptr().cast(), cb_vec.as_ptr().cast()) != 0
-        },
+        |a, b| a == b,
         |dir_bytes, fname_bytes| {
-            let Some(cb) = make_unique_cb else {
-                return [dir_bytes, &[sep as u8], fname_bytes].concat();
-            };
-            let mut c_dir = Vec::with_capacity(dir_bytes.len() + 1);
-            c_dir.extend_from_slice(dir_bytes);
-            c_dir.push(0);
-            let mut c_fn = Vec::with_capacity(fname_bytes.len() + 1);
-            c_fn.extend_from_slice(fname_bytes);
-            c_fn.push(0);
-            let mut buf = vec![0u8; 1024];
-            let len = cb(
-                cb_ctx,
-                c_dir.as_ptr().cast(),
-                c_fn.as_ptr().cast(),
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-            );
-            if len < buf.len() {
-                buf.truncate(len);
-                buf
-            } else {
-                let mut big = vec![0u8; len + 1];
-                let len2 = cb(
-                    cb_ctx,
-                    c_dir.as_ptr().cast(),
-                    c_fn.as_ptr().cast(),
-                    big.as_mut_ptr().cast(),
-                    big.len(),
-                );
-                big.truncate(len2.min(len));
-                big
-            }
+            let c_dir = CString::new(dir_bytes).unwrap_or_default();
+            let c_fn = CString::new(fname_bytes).unwrap_or_default();
+            crate::fsops::make_unique_filename(&c_dir, &c_fn, &crate::fsops::posix_stat)
         },
+        |path_bytes| crate::fsops::file_exists(path_bytes, &crate::fsops::posix_stat),
         |path_bytes| {
-            let Some(cb) = file_exists_cb else {
-                return false;
-            };
-            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
-            c_path.extend_from_slice(path_bytes);
-            c_path.push(0);
-            cb(cb_ctx, c_path.as_ptr().cast()) != 0
+            crate::fsops::force_directories(path_bytes, &mut force_dirs_err, &crate::fsops::posix_stat)
         },
-        |path_bytes| {
-            let Some(cb) = force_dirs_cb else {
-                return true;
-            };
-            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
-            c_path.extend_from_slice(path_bytes);
-            c_path.push(0);
-            cb(cb_ctx, c_path.as_ptr().cast()) != 0
-        },
-        |path_bytes| {
-            let Some(cb) = delete_file_cb else {
-                return true;
-            };
-            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
-            c_path.extend_from_slice(path_bytes);
-            c_path.push(0);
-            cb(cb_ctx, c_path.as_ptr().cast()) != 0
-        },
+        |path_bytes| CString::new(path_bytes).is_ok_and(|c| crate::fsops::delete_file(&c)),
         |path_bytes, read_write| {
             let Some(cb) = open_file_cb else {
                 return false;
@@ -7289,13 +7202,10 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
             cb(cb_ctx, c_path.as_ptr().cast(), i32::from(read_write)) != 0
         },
         |path_bytes| {
-            let Some(cb) = create_dir_cb else {
-                return false;
-            };
-            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
-            c_path.extend_from_slice(path_bytes);
-            c_path.push(0);
-            cb(cb_ctx, c_path.as_ptr().cast()) != 0
+            if let Ok(c_path) = CString::new(path_bytes) {
+                let _ = libc::mkdir(c_path.as_ptr(), libc::S_IRWXU | libc::S_IRWXG | libc::S_IRWXO);
+            }
+            crate::fsops::directory_exists(path_bytes, &crate::fsops::posix_stat)
         },
     );
     if !out_final_path.is_null() {
@@ -7312,6 +7222,9 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
     }
     if !out_parent_dir_failed.is_null() {
         *out_parent_dir_failed = into_buf(res.parent_dir_failed.unwrap_or_default());
+    }
+    if !out_force_dirs_err.is_null() {
+        *out_force_dirs_err = into_buf(force_dirs_err);
     }
     if !out_error_kind.is_null() {
         *out_error_kind = res.error_kind;
@@ -7338,18 +7251,8 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_cleanup_old_data(
     dupe_fallback_rounds: *const c_int,
     result_filenames: *const *const c_char,
     articles_len: usize,
-    cb_ctx: *mut std::ffi::c_void,
-    same_filename_cb: Option<
-        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, a: *const c_char, b: *const c_char) -> c_int,
-    >,
-    file_exists_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
-    delete_file_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
-    move_file_cb: Option<
-        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, from: *const c_char, to: *const c_char) -> c_int,
-    >,
-    dir_empty_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, dir: *const c_char) -> c_int>,
-    remove_dir_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, dir: *const c_char) -> c_int>,
     out_move_failed: *mut c_int,
+    out_move_error: *mut RsBuf,
     out_checked_old_dest_dir: *mut RsBuf,
     out_has_checked_old_dest_dir: *mut c_int,
     out_deleted_old_dest_dir: *mut RsBuf,
@@ -7384,6 +7287,7 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_cleanup_old_data(
             articles.push((r, rf));
         }
     }
+    let mut move_error = Vec::new();
     let res = crate::artwritercore::article_writer_execute_cleanup_old_data(
         direct_write != 0,
         d_dir,
@@ -7394,69 +7298,36 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_cleanup_old_data(
         sep1 as u8,
         sep2 as u8,
         &articles,
-        |a, b| {
-            let Some(cb) = same_filename_cb else {
-                return a == b;
-            };
-            let mut ca = Vec::with_capacity(a.len() + 1);
-            ca.extend_from_slice(a);
-            ca.push(0);
-            let mut cb_vec = Vec::with_capacity(b.len() + 1);
-            cb_vec.extend_from_slice(b);
-            cb_vec.push(0);
-            cb(cb_ctx, ca.as_ptr().cast(), cb_vec.as_ptr().cast()) != 0
-        },
-        |path_bytes| {
-            let Some(cb) = file_exists_cb else {
-                return false;
-            };
-            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
-            c_path.extend_from_slice(path_bytes);
-            c_path.push(0);
-            cb(cb_ctx, c_path.as_ptr().cast()) != 0
-        },
-        |path_bytes| {
-            let Some(cb) = delete_file_cb else {
-                return false;
-            };
-            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
-            c_path.extend_from_slice(path_bytes);
-            c_path.push(0);
-            cb(cb_ctx, c_path.as_ptr().cast()) != 0
-        },
+        |a, b| a == b,
+        |path_bytes| crate::fsops::file_exists(path_bytes, &crate::fsops::posix_stat),
+        |path_bytes| CString::new(path_bytes).is_ok_and(|c| crate::fsops::delete_file(&c)),
         |from_bytes, to_bytes| {
-            let Some(cb) = move_file_cb else {
+            let Ok(c_from) = CString::new(from_bytes) else {
                 return false;
             };
-            let mut c_from = Vec::with_capacity(from_bytes.len() + 1);
-            c_from.extend_from_slice(from_bytes);
-            c_from.push(0);
-            let mut c_to = Vec::with_capacity(to_bytes.len() + 1);
-            c_to.extend_from_slice(to_bytes);
-            c_to.push(0);
-            cb(cb_ctx, c_from.as_ptr().cast(), c_to.as_ptr().cast()) != 0
+            let Ok(c_to) = CString::new(to_bytes) else {
+                return false;
+            };
+            if crate::fsops::move_file(&c_from, &c_to) {
+                true
+            } else {
+                let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                move_error = crate::fsops::error_message(err);
+                false
+            }
         },
         |dir_bytes| {
-            let Some(cb) = dir_empty_cb else {
-                return false;
-            };
-            let mut c_dir = Vec::with_capacity(dir_bytes.len() + 1);
-            c_dir.extend_from_slice(dir_bytes);
-            c_dir.push(0);
-            cb(cb_ctx, c_dir.as_ptr().cast()) != 0
+            let c_dir = CString::new(dir_bytes).ok();
+            let mut browser = crate::fsops::PosixDirBrowser::new(c_dir.as_deref(), true);
+            browser.next_ptr().is_null()
         },
-        |dir_bytes| {
-            let Some(cb) = remove_dir_cb else {
-                return false;
-            };
-            let mut c_dir = Vec::with_capacity(dir_bytes.len() + 1);
-            c_dir.extend_from_slice(dir_bytes);
-            c_dir.push(0);
-            cb(cb_ctx, c_dir.as_ptr().cast()) != 0
-        },
+        |dir_bytes| CString::new(dir_bytes).is_ok_and(|c| crate::fsops::remove_directory(&c)),
     );
     if !out_move_failed.is_null() {
         *out_move_failed = i32::from(res.move_failed);
+    }
+    if !out_move_error.is_null() {
+        *out_move_error = into_buf(move_error);
     }
     if !out_has_checked_old_dest_dir.is_null() {
         *out_has_checked_old_dest_dir = i32::from(res.checked_old_dest_dir.is_some());
@@ -7817,7 +7688,6 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
     segment_offsets: *const i64,
     segment_sizes: *const i32,
     article_count: usize,
-    crc_cb: Option<unsafe extern "C" fn(*const u8, usize) -> u32>,
     out_indices: *mut i32,
     out_cap: usize,
 ) -> usize {
@@ -7848,10 +7718,7 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
         std::slice::from_raw_parts(fallback_rounds, article_count),
         std::slice::from_raw_parts(segment_offsets, article_count),
         std::slice::from_raw_parts(segment_sizes, article_count),
-        |buf| match crc_cb {
-            Some(cb) => cb(buf.as_ptr(), buf.len()),
-            None => crate::dupefallback::crc32_ieee(buf),
-        },
+        crate::dupefallback::crc32_ieee,
     );
     let n = mismatches.len().min(out_cap);
     std::ptr::copy_nonoverlapping(mismatches.as_ptr(), out_indices, n);
@@ -8143,8 +8010,6 @@ pub unsafe extern "C" fn nzbget_rs_log_rotate_log_file(
 pub unsafe extern "C" fn nzbget_rs_options_find_default_config_file(
     app_dir: *const c_char,
     sep: c_char,
-    ctx: *mut std::ffi::c_void,
-    file_exists_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
     out_found: *mut c_int,
 ) -> RsBuf {
     if !out_found.is_null() {
@@ -8156,11 +8021,7 @@ pub unsafe extern "C" fn nzbget_rs_options_find_default_config_file(
         CStr::from_ptr(app_dir).to_bytes()
     };
     match crate::options::find_default_config_file(dir, sep as u8, |path| {
-        if let Some(cb) = file_exists_cb {
-            cb(ctx, path.as_ptr()) != 0
-        } else {
-            false
-        }
+        crate::fsops::file_exists(path.to_bytes(), &crate::fsops::posix_stat)
     }) {
         Some(found) => {
             if !out_found.is_null() {
@@ -9707,9 +9568,8 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_no_backup_reason(
     fails_over_flag: c_int,
     dupe_mode: c_int,
     history: *const crate::dupecoord::NzbgetRsDupeHistoryCandidate,
+    queued_filenames: *const *const c_char,
     history_len: usize,
-    cb_ctx: *mut std::ffi::c_void,
-    file_exists_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, history_index: usize) -> c_int>,
 ) -> RsBuf {
     let h = if history_len == 0 || history.is_null() {
         &[][..]
@@ -9721,11 +9581,11 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_no_backup_reason(
         dupe_mode,
         h,
         |idx| {
-            if let Some(cb) = file_exists_cb {
-                cb(cb_ctx, idx) != 0
-            } else {
-                false
+            if queued_filenames.is_null() || idx >= history_len {
+                return false;
             }
+            let ptr = *queued_filenames.add(idx);
+            !ptr.is_null() && crate::fsops::file_exists(input(ptr), &crate::fsops::posix_stat)
         },
     ))
 }

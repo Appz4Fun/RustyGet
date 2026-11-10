@@ -915,9 +915,9 @@ typedef struct NzbgetRsUnpackMessageInfo {
 
 int nzbget_rs_dupecoord_select_dupe_backup(
     int has_self_nzb, uint32_t self_full_content_hash, int dupe_health,
-    const NzbgetRsDupeHistoryCandidate* history, size_t history_count,
-    const NzbgetRsDupeQueueCandidate* queue, size_t queue_count,
-    void* ctx, int (*file_exists_cb)(void* ctx, size_t history_index));
+    const NzbgetRsDupeHistoryCandidate* history,
+    const char* const* queued_filenames, size_t history_count,
+    const NzbgetRsDupeQueueCandidate* queue, size_t queue_count);
 
 typedef struct NzbgetRsParRepairer NzbgetRsParRepairer;
 
@@ -1089,7 +1089,6 @@ int nzbget_rs_awc_article_writer_build_output_filenames(
     const char* tmp_dir, const char* dest_dir, char sep, int file_id, int part_num,
     int direct_write, int force_direct_write, const char* existing_output_filename,
     int output_initialized, const char* file_filename,
-    void* cb_ctx, int (*file_exists_cb)(void* ctx, const char* path),
     NzbgetRsBuf* out_result_filename, NzbgetRsBuf* out_temp_filename,
     NzbgetRsBuf* out_output_filename, int* out_has_output_filename,
     int* out_update_file_info_output_filename);
@@ -1099,16 +1098,11 @@ int nzbget_rs_awc_article_writer_execute_setup_output_file(
     char sep, int raw_article, int direct_write, int force_direct_write,
     const char* output_filename, size_t output_filename_len,
     void* cb_ctx,
-    int (*same_filename_cb)(void* ctx, const char* a, const char* b),
-    size_t (*make_unique_cb)(void* ctx, const char* dir, const char* fname, char* out_buf, size_t out_cap),
-    int (*file_exists_cb)(void* ctx, const char* path),
-    int (*force_dirs_cb)(void* ctx, const char* path),
-    int (*delete_file_cb)(void* ctx, const char* path),
     int (*open_file_cb)(void* ctx, const char* path, int read_write),
-    int (*create_dir_cb)(void* ctx, const char* path),
     NzbgetRsBuf* out_final_path, NzbgetRsBuf* out_temp_path,
     NzbgetRsBuf* out_updated_output_filename,
     NzbgetRsBuf* out_parent_dir_failed, int* out_has_parent_dir_failed,
+    NzbgetRsBuf* out_force_dirs_err,
     int* out_error_kind, NzbgetRsBuf* out_error_path);
 void nzbget_rs_awc_article_writer_execute_cleanup_old_data(
     int direct_write,
@@ -1117,14 +1111,8 @@ void nzbget_rs_awc_article_writer_execute_cleanup_old_data(
     const char* output_filename, size_t output_filename_len,
     int is_hard_linked, int inter_dir_empty, char sep1, char sep2,
     const int* dupe_fallback_rounds, const char* const* result_filenames, size_t articles_len,
-    void* cb_ctx,
-    int (*same_filename_cb)(void* ctx, const char* a, const char* b),
-    int (*file_exists_cb)(void* ctx, const char* path),
-    int (*delete_file_cb)(void* ctx, const char* path),
-    int (*move_file_cb)(void* ctx, const char* from, const char* to),
-    int (*dir_empty_cb)(void* ctx, const char* dir),
-    int (*remove_dir_cb)(void* ctx, const char* dir),
     int* out_move_failed,
+    NzbgetRsBuf* out_move_error,
     NzbgetRsBuf* out_checked_old_dest_dir, int* out_has_checked_old_dest_dir,
     NzbgetRsBuf* out_deleted_old_dest_dir, int* out_has_deleted_old_dest_dir,
     int* out_clear_output_filename);
@@ -1719,7 +1707,6 @@ size_t nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
     const char* path, const char* dest_dir, const char* filename,
     const int32_t* statuses, const int32_t* donor_ids, const int32_t* fallback_rounds,
     const int64_t* segment_offsets, const int32_t* segment_sizes, size_t article_count,
-    uint32_t (*crc_cb)(const uint8_t* data, size_t len),
     int32_t* out_indices, size_t out_cap);
 
 void nzbget_rs_df_build_newznab_queries(
@@ -2286,7 +2273,7 @@ int nzbget_rs_dupecoord_files_on_disk(
     const char* final_dir, const char* dest_dir, const char* ext_cleanup_disk);
 NzbgetRsBuf nzbget_rs_dupecoord_no_backup_reason(
     int fails_over_flag, int dupe_mode, const NzbgetRsDupeHistoryCandidate* history,
-    size_t history_len, void* cb_ctx, int (*file_exists_cb)(void* ctx, size_t history_index));
+    const char* const* queued_filenames, size_t history_len);
 
 
 void nzbget_rs_queue_editor_visit_category_ext_diff(
@@ -3050,8 +3037,7 @@ NzbgetRsBuf nzbget_rs_log_rotate_log_file(
     const char* log_file, char sep, int64_t cur_time, int rotate_log,
     void* ctx, void (*on_info_cb)(void*, const char*));
 NzbgetRsBuf nzbget_rs_options_find_default_config_file(
-    const char* app_dir, char sep, void* ctx,
-    int (*file_exists_cb)(void*, const char*), int* out_found);
+    const char* app_dir, char sep, int* out_found);
 int nzbget_rs_options_load_config_file(
     const char* path, void* ctx,
     void (*on_line_cb)(void*, int, const char*));

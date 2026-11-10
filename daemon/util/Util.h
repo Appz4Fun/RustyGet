@@ -1153,19 +1153,6 @@ public:
 		return nzbget_rs_decode_base64(inputBuffer, inputBufferLength, outputBuffer);
 	}
 
-	static CString XmlEncode(const char* raw)
-	{
-		NzbgetRsBuf buf = nzbget_rs_xml_encode(raw);
-		if (buf.len >= static_cast<size_t>(std::numeric_limits<int>::max()))
-		{
-			nzbget_rs_free(buf);
-			std::abort();
-		}
-		CString result(buf.data, static_cast<int>(buf.len));
-		nzbget_rs_free(buf);
-		return result;
-	}
-
 	static void XmlDecode(char* raw) { nzbget_rs_xml_decode(raw); }
 
 	static const char* XmlFindTag(const char* xml, const char* tag, int* valueLength)
@@ -1189,19 +1176,6 @@ public:
 			*tagEnd = value + valueLen;
 		}
 		return true;
-	}
-
-	static CString JsonEncode(const char* raw)
-	{
-		NzbgetRsBuf buf = nzbget_rs_json_encode(raw);
-		if (buf.len >= static_cast<size_t>(std::numeric_limits<int>::max()))
-		{
-			nzbget_rs_free(buf);
-			std::abort();
-		}
-		CString result(buf.data, static_cast<int>(buf.len));
-		nzbget_rs_free(buf);
-		return result;
 	}
 
 	static void JsonDecode(char* raw) { nzbget_rs_json_decode(raw); }
@@ -1946,11 +1920,6 @@ public:
 		return DirectoryExists(dirFilename);
 	}
 
-	static bool RemoveDirectory(const char* dirFilename)
-	{
-		return dirFilename && rmdir(dirFilename) == 0;
-	}
-
 	static bool DeleteDirectory(const char* dirFilename)
 	{
 		return nzbget_rs_delete_directory(dirFilename, PATH_SEPARATOR) == 1;
@@ -2033,12 +2002,6 @@ public:
 			return DiskState{ available, total };
 		}
 		return std::nullopt;
-	}
-
-	static bool DirEmpty(const char* dirFilename)
-	{
-		DirBrowser dir(dirFilename);
-		return dir.Next() == nullptr;
 	}
 
 	static bool RenameBak(const char* filename, const char* bakPart, bool removeOldExtension, CString& newName)
@@ -3662,11 +3625,6 @@ private:
 			NzbgetRsBuf foundBuf = nzbget_rs_options_find_default_config_file(
 				*m_appDir,
 				'/',
-				nullptr,
-				[](void*, const char* path) -> int
-				{
-					return FileSystem::FileExists(path) ? 1 : 0;
-				},
 				&found);
 			if (found)
 			{
@@ -15102,47 +15060,15 @@ public:
 								bool directWrite,
 								bool cached)
 	{
-		struct SetupCtx {
-			DiskFile* outfile;
-			CString forceDirsErr;
-		} ctx{&outfile, {}};
-
-		auto sameFilenameCb = [](void*, const char* a, const char* b) -> int {
-			return FileSystem::SameFilename(a, b) ? 1 : 0;
-		};
-		auto makeUniqueCb = [](void*, const char* dir, const char* fname, char* outBuf, size_t outCap) -> size_t {
-			CString uniq = FileSystem::MakeUniqueFilename(dir, fname);
-			size_t len = uniq.Length();
-			if (outBuf && outCap > 0)
-			{
-				size_t copyLen = len < outCap ? len : outCap - 1;
-				memcpy(outBuf, *uniq, copyLen);
-				outBuf[copyLen] = '\0';
-			}
-			return len;
-		};
-		auto fileExistsCb = [](void*, const char* path) -> int {
-			return FileSystem::FileExists(path) ? 1 : 0;
-		};
-		auto forceDirsCb = [](void* rawCtx, const char* path) -> int {
-			auto* c = static_cast<SetupCtx*>(rawCtx);
-			return FileSystem::ForceDirectories(path, c->forceDirsErr) ? 1 : 0;
-		};
-		auto deleteFileCb = [](void*, const char* path) -> int {
-			return FileSystem::DeleteFile(path) ? 1 : 0;
-		};
 		auto openFileCb = [](void* rawCtx, const char* path, int readWrite) -> int {
-			auto* c = static_cast<SetupCtx*>(rawCtx);
-			return c->outfile->Open(path, readWrite ? DiskFile::omReadWrite : DiskFile::omWrite) ? 1 : 0;
-		};
-		auto createDirCb = [](void*, const char* path) -> int {
-			return FileSystem::CreateDirectory(path) ? 1 : 0;
+			return static_cast<DiskFile*>(rawCtx)->Open(path, readWrite ? DiskFile::omReadWrite : DiskFile::omWrite) ? 1 : 0;
 		};
 
 		NzbgetRsBuf finalBuf{};
 		NzbgetRsBuf tempBuf{};
 		NzbgetRsBuf updatedOutBuf{};
 		NzbgetRsBuf parentFailedBuf{};
+		NzbgetRsBuf forceDirsErrBuf{};
 		NzbgetRsBuf errPathBuf{};
 		int hasParentFailed = 0;
 		int errKind = 0;
@@ -15157,19 +15083,14 @@ public:
 			m_fileInfo->GetForceDirectWrite() ? 1 : 0,
 			m_outputFilename.data(),
 			m_outputFilename.size(),
-			&ctx,
-			sameFilenameCb,
-			makeUniqueCb,
-			fileExistsCb,
-			forceDirsCb,
-			deleteFileCb,
+			&outfile,
 			openFileCb,
-			createDirCb,
 			&finalBuf,
 			&tempBuf,
 			&updatedOutBuf,
 			&parentFailedBuf,
 			&hasParentFailed,
+			&forceDirsErrBuf,
 			&errKind,
 			&errPathBuf);
 
@@ -15182,13 +15103,15 @@ public:
 		nzbget_rs_free(updatedOutBuf);
 		std::string parentFailed(parentFailedBuf.data ? parentFailedBuf.data : "", parentFailedBuf.len);
 		nzbget_rs_free(parentFailedBuf);
+		std::string forceDirsErr(forceDirsErrBuf.data ? forceDirsErrBuf.data : "", forceDirsErrBuf.len);
+		nzbget_rs_free(forceDirsErrBuf);
 		std::string errPath(errPathBuf.data ? errPathBuf.data : "", errPathBuf.len);
 		nzbget_rs_free(errPathBuf);
 
 		if (hasParentFailed)
 		{
 			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not create directory %s: %s",
-				parentFailed.c_str(), *ctx.forceDirsErr);
+				parentFailed.c_str(), forceDirsErr.c_str());
 		}
 
 		if (!ok)
@@ -15422,34 +15345,7 @@ public:
 			resultFilenames.push_back(pa->GetResultFilename());
 		}
 
-		auto sameFilenameCb = [](void*, const char* a, const char* b) -> int {
-			return FileSystem::SameFilename(a, b) ? 1 : 0;
-		};
-		auto fileExistsCb = [](void*, const char* path) -> int {
-			return FileSystem::FileExists(path) ? 1 : 0;
-		};
-		CString moveErrorMessage;
-		auto deleteFileCb = [](void*, const char* path) -> int {
-			return FileSystem::DeleteFile(path) ? 1 : 0;
-		};
-		auto moveFileCb = [](void* ctx, const char* from, const char* to) -> int {
-			if (FileSystem::MoveFile(from, to))
-			{
-				return 1;
-			}
-			if (ctx)
-			{
-				*static_cast<CString*>(ctx) = FileSystem::GetLastErrorMessage();
-			}
-			return 0;
-		};
-		auto dirEmptyCb = [](void*, const char* dir) -> int {
-			return FileSystem::DirEmpty(dir) ? 1 : 0;
-		};
-		auto removeDirCb = [](void*, const char* dir) -> int {
-			return FileSystem::RemoveDirectory(dir) ? 1 : 0;
-		};
-
+		NzbgetRsBuf moveErrorBuf{};
 		NzbgetRsBuf checkedOldDirBuf{};
 		NzbgetRsBuf deletedOldDirBuf{};
 		int moveFailed = 0;
@@ -15471,20 +15367,16 @@ public:
 			dupeFallbackRounds.data(),
 			resultFilenames.data(),
 			dupeFallbackRounds.size(),
-			&moveErrorMessage,
-			sameFilenameCb,
-			fileExistsCb,
-			deleteFileCb,
-			moveFileCb,
-			dirEmptyCb,
-			removeDirCb,
 			&moveFailed,
+			&moveErrorBuf,
 			&checkedOldDirBuf,
 			&hasCheckedOldDir,
 			&deletedOldDirBuf,
 			&hasDeletedOldDir,
 			&clearOutputFilename);
 
+		std::string moveError(moveErrorBuf.data ? moveErrorBuf.data : "", moveErrorBuf.len);
+		nzbget_rs_free(moveErrorBuf);
 		std::string checkedOldDir(checkedOldDirBuf.data ? checkedOldDirBuf.data : "", checkedOldDirBuf.len);
 		nzbget_rs_free(checkedOldDirBuf);
 		std::string deletedOldDir(deletedOldDirBuf.data ? deletedOldDirBuf.data : "", deletedOldDirBuf.len);
@@ -15493,7 +15385,7 @@ public:
 		if (moveFailed)
 		{
 			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not move file %s to %s: %s",
-				m_outputFilename.c_str(), finalOutputPath.data(), *moveErrorMessage);
+				m_outputFilename.c_str(), finalOutputPath.data(), moveError.c_str());
 		}
 		if (hasCheckedOldDir)
 		{
@@ -15876,10 +15768,6 @@ private:
 		}
 		const std::string& existingOutputFilename = m_fileInfo->GetOutputFilename();
 
-		auto fileExistsCb = [](void*, const char* path) -> int {
-			return FileSystem::FileExists(path) ? 1 : 0;
-		};
-
 		NzbgetRsBuf resultBuf{};
 		NzbgetRsBuf tempBuf{};
 		NzbgetRsBuf outputBuf{};
@@ -15896,8 +15784,6 @@ private:
 			existingOutputFilename.c_str(),
 			m_fileInfo->GetOutputInitialized() ? 1 : 0,
 			m_fileInfo->GetFilename(),
-			nullptr,
-			fileExistsCb,
 			&resultBuf,
 			&tempBuf,
 			&outputBuf,
@@ -18445,14 +18331,7 @@ public:
 		size_t count = nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
 			path, destDir, filename, statuses.data(), donorIds.data(),
 			fallbackRounds.data(), segmentOffsets.data(), segmentSizes.data(),
-			n,
-			[](const uint8_t* data, size_t len) -> uint32_t
-			{
-				Crc32 crc;
-				crc.Append(const_cast<uchar*>(data), (uint32)len);
-				return crc.Finish();
-			},
-			outIndices.data(), outIndices.size());
+			n, outIndices.data(), outIndices.size());
 		std::vector<ArticleInfo*> mismatches;
 		mismatches.reserve(count);
 		for (size_t i = 0; i < count; i++)
@@ -20816,14 +20695,14 @@ public:
 
 	std::string NoBackupReason(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	{
-		std::vector<HistoryInfo*> historyItems;
 		std::vector<NzbgetRsDupeHistoryCandidate> historyCandidates;
-		historyItems.reserve(downloadQueue->GetHistory()->size());
+		std::vector<const char*> queuedFilenames;
 		historyCandidates.reserve(downloadQueue->GetHistory()->size());
+		queuedFilenames.reserve(downloadQueue->GetHistory()->size());
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
-			historyItems.push_back(historyInfo);
 			NzbgetRsDupeHistoryCandidate c{};
+			const char* queuedFilename = nullptr;
 			c.kind = (int)historyInfo->GetKind();
 			if (historyInfo->GetKind() == HistoryInfo::hkNzb)
 			{
@@ -20836,22 +20715,18 @@ public:
 				c.critical_health = item->CalcCriticalHealth(true);
 				c.same_name_or_key = (item != nzbInfo &&
 					SameNameOrKey(item->GetName(), item->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey())) ? 1 : 0;
+				queuedFilename = item->GetQueuedFilename();
 			}
 			historyCandidates.push_back(c);
+			queuedFilenames.push_back(queuedFilename);
 		}
-
-		auto fileExistsCb = [](void* ctx, size_t idx) -> int {
-			auto* items = static_cast<std::vector<HistoryInfo*>*>(ctx);
-			return FileSystem::FileExists((*items)[idx]->GetNzbInfo()->GetQueuedFilename()) ? 1 : 0;
-		};
 
 		NzbgetRsBuf buf = nzbget_rs_dupecoord_no_backup_reason(
 			FailsOver(nzbInfo) ? 1 : 0,
 			(int)nzbInfo->GetDupeMode(),
 			historyCandidates.data(),
-			historyCandidates.size(),
-			&historyItems,
-			fileExistsCb);
+			queuedFilenames.data(),
+			historyCandidates.size());
 		std::string out(buf.data ? buf.data : "", buf.len);
 		nzbget_rs_free(buf);
 		return out;
@@ -20868,12 +20743,15 @@ public:
 	{
 		std::vector<HistoryInfo*> historyItems;
 		std::vector<NzbgetRsDupeHistoryCandidate> historyCandidates;
+		std::vector<const char*> queuedFilenames;
 		historyItems.reserve(downloadQueue->GetHistory()->size());
 		historyCandidates.reserve(downloadQueue->GetHistory()->size());
+		queuedFilenames.reserve(downloadQueue->GetHistory()->size());
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
 			historyItems.push_back(historyInfo);
 			NzbgetRsDupeHistoryCandidate c{};
+			const char* queuedFilename = nullptr;
 			c.kind = (int)historyInfo->GetKind();
 			if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
 			{
@@ -20888,6 +20766,7 @@ public:
 				c.health = item->CalcHealth();
 				c.critical_health = item->CalcCriticalHealth(true);
 				c.same_name_or_key = SameNameOrKey(item->GetName(), item->GetDupeKey(), nzbName, dupeKey) ? 1 : 0;
+				queuedFilename = item->GetQueuedFilename();
 			}
 			else if (historyInfo->GetKind() == HistoryInfo::hkDup)
 			{
@@ -20898,6 +20777,7 @@ public:
 				c.same_name_or_key = SameNameOrKey(dup->GetName(), dup->GetDupeKey(), nzbName, dupeKey) ? 1 : 0;
 			}
 			historyCandidates.push_back(c);
+			queuedFilenames.push_back(queuedFilename);
 		}
 
 		std::vector<NzbgetRsDupeQueueCandidate> queueCandidates;
@@ -20913,21 +20793,15 @@ public:
 			queueCandidates.push_back(q);
 		}
 
-		auto fileExistsCb = [](void* ctx, size_t idx) -> int {
-			auto* items = static_cast<std::vector<HistoryInfo*>*>(ctx);
-			return FileSystem::FileExists((*items)[idx]->GetNzbInfo()->GetQueuedFilename()) ? 1 : 0;
-		};
-
 		int winner = nzbget_rs_dupecoord_select_dupe_backup(
 			nzbInfo != nullptr ? 1 : 0,
 			nzbInfo ? nzbInfo->GetFullContentHash() : 0,
 			g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0,
 			historyCandidates.data(),
+			queuedFilenames.data(),
 			historyCandidates.size(),
 			queueCandidates.data(),
-			queueCandidates.size(),
-			&historyItems,
-			fileExistsCb);
+			queueCandidates.size());
 
 		return winner >= 0 && (size_t)winner < historyItems.size() ? historyItems[(size_t)winner] : nullptr;
 	}

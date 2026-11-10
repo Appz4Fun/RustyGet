@@ -2392,11 +2392,6 @@ pub fn log_format_rotated_path(
     out
 }
 
-/// Formats `"<pid>\n"` for `NZBGet::Daemonize`.
-pub fn nzbget_format_pid_line(pid: i32) -> Vec<u8> {
-    format!("{pid}\n").into_bytes()
-}
-
 /// Formats `"<major>.<minor>.<patch>"` from a packed 24-bit version integer for `SystemInfo`.
 pub fn sysinfo_format_rapidyenc_version(ver: i32) -> Vec<u8> {
     let major = (ver >> 16) & 0xFF;
@@ -2554,11 +2549,6 @@ pub fn os_classify_os_release_line(
     }
 }
 
-/// Returns true when `DiskService::ServiceWork` should check free disk space.
-pub fn disk_service_should_check_disk_space(disk_space_mb: i32, is_downloading: bool) -> bool {
-    disk_space_mb > 0 && is_downloading
-}
-
 /// Evaluates a required directory check in `DiskService::CheckRequiredDir`:
 /// returns `(is_missing, should_log_waiting, next_waiting_reported)`.
 pub fn disk_service_eval_missing_required_dir(
@@ -2578,35 +2568,6 @@ pub fn disk_service_eval_missing_required_dir(
     } else {
         (false, false, cur_waiting_reported)
     }
-}
-
-/// Returns true when `NZBGet::Phase1_Init` should run the system health check.
-pub fn nzbget_should_run_system_health_check(
-    server_mode: bool,
-    system_health_check: bool,
-) -> bool {
-    server_mode && system_health_check
-}
-
-/// Evaluates whether `NZBGet::BootConfig` should print usage and exit, returning the exit code (`0` or `1`).
-pub fn nzbget_classify_boot_usage_or_error(
-    print_usage: bool,
-    has_errors: bool,
-    arg_count: i32,
-) -> Option<i32> {
-    if print_usage || has_errors || arg_count <= 1 {
-        Some(if print_usage { 0 } else { 1 })
-    } else {
-        None
-    }
-}
-
-/// Returns true when `NZBGet::StopFrontend` should immediately stop the frontend thread before waiting.
-pub fn nzbget_should_stop_frontend_immediately(
-    remote_client_mode: bool,
-    stopped: bool,
-) -> bool {
-    !remote_client_mode || stopped
 }
 
 /// Classifies the log file initialization action in `Log::InitOptions`:

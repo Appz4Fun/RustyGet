@@ -558,58 +558,6 @@ pub fn benchmark_calc_write_chunk(block_size: usize, max_bytes: u64, write_bytes
     (block_size as u64).min(rem) as usize
 }
 
-/// Matches the readiness check in `ServiceCoordinator::Run`.
-pub fn service_should_work_now(
-    service_interval: i32,
-    service_now: i32,
-    cur_time: i64,
-    last_work: i64,
-) -> bool {
-    if service_interval < service_now {
-        return false;
-    }
-    let diff = cur_time.wrapping_sub(last_work).wrapping_abs();
-    diff >= i64::from(service_interval)
-}
-
-/// Matches the remaining wait calculation in `ServiceCoordinator::Run`:
-/// Returns `(remaining, next_wait_interval)`.
-pub fn service_calc_remaining_wait(
-    service_interval: i32,
-    service_now: i32,
-    service_sleep: i32,
-    cur_time: i64,
-    last_work: i64,
-    cur_wait_interval: i32,
-) -> (i32, i32) {
-    let mut remaining = service_sleep;
-    let mut wait_interval = cur_wait_interval;
-    if service_interval >= service_now {
-        let elapsed = cur_time.wrapping_sub(last_work) as i32;
-        remaining = service_interval.min(service_interval.wrapping_sub(elapsed));
-        wait_interval = wait_interval.min(remaining);
-    }
-    (remaining, wait_interval)
-}
-
-/// Matches `DiskService::ServiceInterval()`.
-pub fn disk_service_interval(
-    waiting_required_dir: bool,
-    disk_space_mb: i32,
-    downloading: bool,
-    sleep_val: i32,
-) -> i32 {
-    if waiting_required_dir {
-        1
-    } else if disk_space_mb <= 0 {
-        sleep_val
-    } else if !downloading {
-        10
-    } else {
-        1
-    }
-}
-
 /// Matches the free space check in `DiskService::CheckDiskSpace()`.
 pub fn disk_service_is_low_space(available_bytes: i64, disk_space_mb: i32) -> bool {
     if disk_space_mb < 0 {
@@ -799,25 +747,9 @@ pub fn util_internal_timegm(
     timegm_c(year, month.clamp(0, 11), tm_mday, tm_hour, tm_min, tm_sec)
 }
 
-/// Computes the bounded copy length for an XML tag value into a buffer of size
-/// `value_buf_size` (`WebUtil::XmlParseTagValue`).
-pub fn webutil_xml_calc_copy_len(value_len: i32, value_buf_size: i32) -> i32 {
-    if value_len < value_buf_size {
-        value_len
-    } else {
-        value_buf_size.wrapping_sub(1)
-    }
-}
-
 /// Computes the match length `rm_eo - rm_so` for a regex capture group (`RegEx::GetMatchLen`).
 pub fn regex_calc_match_len(rm_so: i32, rm_eo: i32) -> i32 {
     rm_eo.wrapping_sub(rm_so)
-}
-
-/// Returns `1` when a tokenizer input string of length `len` fits in the inline
-/// short-string buffer of capacity `capacity` (`Tokenizer::Tokenizer`).
-pub fn tokenizer_fits_short_string(len: i32, capacity: i32) -> i32 {
-    i32::from(len < capacity)
 }
 
 /// Validates a file size for `FileSystem::LoadFileIntoBuffer` (`0 <= file_size <= INT_MAX - 1`)
@@ -854,24 +786,6 @@ pub fn fs_classify_expand_file_name(filename: &[u8]) -> (i32, usize) {
 /// Returns `1` when `filename` is `"."` or `".."`, `0` otherwise (`DirBrowser::Next`).
 pub fn dir_browser_is_dot_or_dotdot(filename: &[u8]) -> i32 {
     i32::from(filename == b"." || filename == b"..")
-}
-
-/// Maps `DiskFile::ESeekOrigin` to the C stdio `SEEK_*` origin constant (`DiskFile::Seek`).
-pub fn disk_file_select_seek_origin(
-    origin: i32,
-    so_cur: i32,
-    so_end: i32,
-    seek_set: i32,
-    seek_cur: i32,
-    seek_end: i32,
-) -> i32 {
-    if origin == so_cur {
-        seek_cur
-    } else if origin == so_end {
-        seek_end
-    } else {
-        seek_set
-    }
 }
 
 /// Returns `1` when `opt_name` starts with `strip_prefix` (of length `prefix_len`)

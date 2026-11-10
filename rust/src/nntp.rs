@@ -707,37 +707,9 @@ pub fn article_fetcher_is_server_eligible_on_level(
     true
 }
 
-/// Computes the read buffer capacity (`read_buf_size + 1 + decode_slack`) for `Connection::Connection`.
-pub fn conn_calc_read_buffer_cap(read_buf_size: i32, decode_slack: i32) -> i32 {
-    read_buf_size.saturating_add(1).saturating_add(decode_slack)
-}
-
 /// Formats `port` as a decimal byte string for `Connection::Bind` and `Connection::DoConnect`.
 pub fn conn_format_port_str(port: i32) -> Vec<u8> {
     format!("{port}").into_bytes()
-}
-
-/// Clamps `buf_avail` to `>= 0` for `Connection::ReadLine`.
-pub fn conn_clamp_buf_avail(buf_avail: i32) -> i32 {
-    if buf_avail > 0 {
-        buf_avail
-    } else {
-        0
-    }
-}
-
-/// Formats `"<prefix>: Error <err_code> - <err_msg>"` for `Connection::ReportError`.
-pub fn conn_format_report_err_with_code(
-    prefix: &[u8],
-    err_code: i32,
-    err_msg: &[u8],
-) -> Vec<u8> {
-    let mid = format!(": Error {err_code} - ");
-    let mut out = Vec::with_capacity(prefix.len() + mid.len() + err_msg.len());
-    out.extend_from_slice(prefix);
-    out.extend_from_slice(mid.as_bytes());
-    out.extend_from_slice(err_msg);
-    out
 }
 
 /// Formats `"BODY <message_id>\r\n"` for `ArticleFetcher::FetchOnConnection`.
@@ -848,54 +820,6 @@ pub fn nntp_conn_classify_handshake_result(result: i32) -> i32 {
 /// Returns true when `ArticleBatchFetcher::Begin` should call `EnsureWorkers()` (`worker_count > 0 && !is_stopped`).
 pub fn article_batch_should_ensure_workers(worker_count: i32, is_stopped: bool) -> bool {
     worker_count > 0 && !is_stopped
-}
-
-/// Returns true when a Unix-domain socket path length overflows `sun_path` (`host_len >= sun_path_cap`).
-pub fn conn_is_unix_path_too_long(host_len: usize, sun_path_cap: usize) -> bool {
-    host_len >= sun_path_cap
-}
-
-/// Resolves the `getaddrinfo` error code passed to `Connection::ReportError` (`if res != eai_system { res } else { 0 }`).
-pub fn conn_resolve_gai_report_err_code(res: i32, eai_system: i32) -> i32 {
-    if res != eai_system {
-        res
-    } else {
-        0
-    }
-}
-
-/// Returns true when `Connection::DoConnect` should log `"Socket creation failed"` (`is_invalid_socket && has_addr_list`).
-pub fn conn_should_report_socket_create_failed(
-    is_invalid_socket: bool,
-    has_addr_list: bool,
-) -> bool {
-    is_invalid_socket && has_addr_list
-}
-
-/// Returns true when `Connection::DoConnect` should report connection failure and close a created socket (`!connected && !is_invalid_socket`).
-pub fn conn_should_cleanup_unconnected_socket(
-    connected: bool,
-    is_invalid_socket: bool,
-) -> bool {
-    !connected && !is_invalid_socket
-}
-
-/// Returns true when `Connection::DoDisconnect` should `unlink` a listening Unix-domain socket (`is_unix_path && getsockopt_res == 0 && is_listening != 0`).
-pub fn conn_should_unlink_listening_unix_socket(
-    is_unix_path: bool,
-    getsockopt_res: i32,
-    is_listening: i32,
-) -> bool {
-    is_unix_path && getsockopt_res == 0 && is_listening != 0
-}
-
-/// Resolves the error code in `Connection::ReportError` (`if err_code == 0 { last_net_err } else { err_code }`).
-pub fn conn_resolve_report_err_code(err_code: i32, last_net_err: i32) -> i32 {
-    if err_code == 0 {
-        last_net_err
-    } else {
-        err_code
-    }
 }
 
 /// Returns true when `Network::SpeedTest::RunTest` should count an iteration as a failure (`elapsed_sec == 0.0 || downloaded < target_size`).
@@ -1072,108 +996,6 @@ pub fn server_pool_calc_remaining_block_sec(
     let end = block_time.saturating_add(i64::from(retry_interval));
     if end > cur_time {
         (end - cur_time).clamp(0, i64::from(i32::MAX)) as i32
-    } else {
-        0
-    }
-}
-
-/// Selects `addrinfo.ai_family` for `Connection::Bind` and `Connection::DoConnect`:
-/// `m_ipVersion == ipV4 ? AF_INET : m_ipVersion == ipV6 ? AF_INET6 : AF_UNSPEC`.
-pub fn conn_select_ai_family(
-    ip_version: i32,
-    ip_v4: i32,
-    ip_v6: i32,
-    af_inet: i32,
-    af_inet6: i32,
-    af_unspec: i32,
-) -> i32 {
-    if ip_version == ip_v4 {
-        af_inet
-    } else if ip_version == ip_v6 {
-        af_inet6
-    } else {
-        af_unspec
-    }
-}
-
-/// Checks whether `host` is a Unix domain socket path (`!m_host.empty() && m_host.front() == '/'`).
-pub fn conn_is_unix_domain_path(host: &[u8]) -> bool {
-    !host.is_empty() && host[0] == b'/'
-}
-
-/// Calculates the buffered chunk length in `Connection::Recv`:
-/// `size > m_bufAvail ? m_bufAvail : size`.
-pub fn conn_recv_buffered_chunk_len(size: i32, buf_avail: i32) -> i32 {
-    if size > buf_avail {
-        buf_avail
-    } else {
-        size
-    }
-}
-
-/// Calculates the `poll()` timeout in milliseconds for `Connection::ConnectWithTimeout`:
-/// `m_timeout ? m_timeout * 1000 : -1`.
-pub fn conn_poll_timeout_ms(timeout_sec: i32) -> i32 {
-    if timeout_sec != 0 {
-        timeout_sec.wrapping_mul(1000)
-    } else {
-        -1
-    }
-}
-
-/// Checks whether `pollfd.revents` has any ready/error bits set (`revents & mask != 0`).
-pub fn conn_poll_revents_ready(revents: i32, mask: i32) -> bool {
-    (revents & mask) != 0
-}
-
-/// Computes the chunk length and newline presence for a single `Connection::ReadLine` buffer step.
-/// Returns `(copy_len, found_newline)`.
-pub fn conn_read_line_chunk(buf: &[u8], max_out: usize) -> (usize, bool) {
-    let found_pos = buf.iter().position(|&b| b == b'\n');
-    let raw_len = match found_pos {
-        Some(idx) => idx + 1,
-        None => buf.len(),
-    };
-    let copy_len = raw_len.min(max_out);
-    (copy_len, found_pos.is_some())
-}
-
-/// Classifies `errno` after a failed `accept()` in `Connection::Accept`:
-/// - `1`: transient connection-aborted/network errno -> retry `accept()` immediately
-/// - `2`: descriptor/buffer exhaustion (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`) -> set `m_acceptBusy = true` and break
-/// - `0`: other error -> set `m_acceptBusy = false` and break
-#[allow(clippy::too_many_arguments)]
-pub fn conn_classify_accept_errno(
-    err: i32,
-    eintr: i32,
-    econnaborted: i32,
-    eproto: i32,
-    enetdown: i32,
-    enoprotoopt: i32,
-    ehostdown: i32,
-    ehostunreach: i32,
-    eopnotsupp: i32,
-    enetunreach: i32,
-    enonet: i32,
-    emfile: i32,
-    enfile: i32,
-    enobufs: i32,
-    enomem: i32,
-) -> i32 {
-    if err == eintr
-        || err == econnaborted
-        || err == eproto
-        || err == enetdown
-        || err == enoprotoopt
-        || err == ehostdown
-        || err == ehostunreach
-        || err == eopnotsupp
-        || err == enetunreach
-        || (enonet != 0 && err == enonet)
-    {
-        1
-    } else if err == emfile || err == enfile || err == enobufs || err == enomem {
-        2
     } else {
         0
     }

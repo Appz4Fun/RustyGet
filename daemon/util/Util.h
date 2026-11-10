@@ -818,8 +818,8 @@ public:
 		return result;
 	}
 
-	static int64 JoinInt64(uint32 Hi, uint32 Lo) { return nzbget_rs_ufs_util_join_int64(Hi, Lo); }
-	static void SplitInt64(int64 Int64, uint32* Hi, uint32* Lo) { nzbget_rs_ufs_util_split_int64(Int64, Hi, Lo); }
+	static int64 JoinInt64(uint32 Hi, uint32 Lo) { return ((int64)Hi << 32) | Lo; }
+	static void SplitInt64(int64 Int64, uint32* Hi, uint32* Lo) { *Hi = (uint32)(Int64 >> 32); *Lo = (uint32)(Int64 & 0xFFFFFFFF); }
 
 	static int64_t SafeCastSignedToSigned(int64_t num, int64_t minTo, int64_t maxTo) noexcept
 	{
@@ -959,7 +959,7 @@ public:
 		{
 			return false;
 		}
-		int len = nzbget_rs_ufs_webutil_xml_calc_copy_len(valueLen, valueBufSize);
+		int len = valueLen < valueBufSize ? valueLen : valueBufSize - 1;
 		strncpy(valueBuf, value, len);
 		valueBuf[len] = '\0';
 		if (tagEnd)
@@ -1157,7 +1157,7 @@ public:
 	Tokenizer(const char* dataString, const char* separators) : m_separators(separators)
 	{
 		int len = strlen(dataString);
-		if (nzbget_rs_ufs_tokenizer_fits_short_string(len, m_shortString.Capacity()) != 0)
+		if (len <= m_shortString.Capacity())
 		{
 			m_shortString.Set(dataString);
 			m_dataString = m_shortString;
@@ -1589,8 +1589,7 @@ public:
 	bool Seek(int64 position, ESeekOrigin origin = soSet)
 	{
 		return fseek(m_file, position,
-			nzbget_rs_ufs_disk_file_select_seek_origin(
-				(int)origin, (int)soCur, (int)soEnd, SEEK_SET, SEEK_CUR, SEEK_END)) == 0;
+			origin == soCur ? SEEK_CUR : origin == soEnd ? SEEK_END : SEEK_SET) == 0;
 	}
 
 	int64 Print(const char* format, ...) PRINTF_SYNTAX(2)
@@ -2600,8 +2599,10 @@ public:
 		OptEntry* optEntry = FindOption(optname);
 		if (optEntry)
 		{
-			m_configLine = nzbget_rs_dqh_options_update_config_line_on_get(
-				optEntry->GetLineNo(), m_configLine);
+			if (optEntry->GetLineNo() > 0)
+			{
+				m_configLine = optEntry->GetLineNo();
+			}
 			return optEntry->GetValue();
 		}
 		return nullptr;
@@ -3125,7 +3126,7 @@ private:
 
 		CString curvalue;
 
-		if (nzbget_rs_dqh_options_should_expand_home_value(value, m_noDiskAccess ? 1 : 0) != 0)
+		if (value && (value[0] == '~') && (value[1] == '/') && !m_noDiskAccess)
 		{
 			curvalue = FileSystem::ExpandHomePath(value);
 		}
@@ -3369,19 +3370,12 @@ public:
 	{
 		const char* messageType[] = { "INFO", "WARNING", "ERROR", "DEBUG", "DETAIL"};
 
-		int logFileAction = nzbget_rs_dqh_log_classify_init_logfile_action(
-			g_Options->GetRemoteClientMode() ? 1 : 0,
-			g_Options->GetDirectClientMode() ? 1 : 0,
-			(int)g_Options->GetWriteLog(),
-			(int)Options::wlNone,
-			(int)Options::wlReset,
-			g_Options->GetLogFile() ? 1 : 0,
-			g_Options->GetServerMode() ? 1 : 0);
-		if (logFileAction != 0)
+		if (!g_Options->GetRemoteClientMode() && !g_Options->GetDirectClientMode() &&
+			g_Options->GetWriteLog() != Options::wlNone && g_Options->GetLogFile())
 		{
 			UpdateLogPath(g_Options->GetLogFile());
 
-			if (logFileAction == 2)
+			if (g_Options->GetServerMode() && g_Options->GetWriteLog() == Options::wlReset)
 			{
 				g_Log->ResetLog();
 			}
@@ -3412,15 +3406,12 @@ public:
 					break;
 			}
 
-			int writeToFile = 0;
-			int keepInScreen = 0;
-			nzbget_rs_rco_log_init_message_disposition((int)target, &writeToFile, &keepInScreen);
-			if (writeToFile)
+			if (target == Options::mtLog || target == Options::mtBoth)
 			{
 				Filelog("%s\t%s", messageType[message.GetKind()], message.GetText());
 			}
 
-			if (!keepInScreen)
+			if (target != Options::mtScreen && target != Options::mtBoth)
 			{
 				m_messages.erase(m_messages.begin() + i);
 			}
@@ -3454,7 +3445,7 @@ public:
 		if (m_logFile)
 		{
 			time_t curTime = Util::CurrentTime() + g_Options->GetTimeCorrection();
-			if (nzbget_rs_rol_log_should_close_idle((int64)curTime, (int64)m_lastWritten.load()))
+			if (std::abs(curTime - m_lastWritten.load()) > 1)
 			{
 				m_logFile.reset();
 			}
@@ -3510,8 +3501,8 @@ private:
 		char time[50];
 		Util::FormatTime(rawtime, time, 50);
 
-		if (nzbget_rs_rco_log_should_rotate(
-			(int64)rawtime, (int64)m_lastWritten.load(), (int)g_Options->GetWriteLog()))
+		if (((int)rawtime / 86400 != (int)m_lastWritten.load() / 86400) &&
+			g_Options->GetWriteLog() == Options::wlRotate)
 		{
 			if (m_logFile)
 			{
@@ -3669,10 +3660,14 @@ inline void debug(const char* msg, ...)
 
 	BString<1024> tmp2;
 #ifdef HAVE_VARIADIC_MACROS
-	NzbgetRsBuf dbgBuf = nzbget_rs_dqh_log_format_debug_line(
-		tmp1, FileSystem::BaseFileName(filename), lineNr, funcname);
-	tmp2.Set(dbgBuf.data ? dbgBuf.data : "", (int)dbgBuf.len);
-	nzbget_rs_free(dbgBuf);
+	if (funcname)
+	{
+		tmp2.Format("%s (%s:%i:%s)", tmp1, FileSystem::BaseFileName(filename), lineNr, funcname);
+	}
+	else
+	{
+		tmp2.Format("%s (%s:%i)", tmp1, FileSystem::BaseFileName(filename), lineNr);
+	}
 #else
 	tmp2.Set(tmp1);
 #endif
@@ -3781,10 +3776,8 @@ public:
 			for (Service* service : m_services)
 			{
 				int serviceInterval = service->ServiceInterval();
-				if (nzbget_rs_euh_service_should_work_now(
-						serviceInterval, Service::Now,
-						static_cast<int64_t>(Util::CurrentTime()),
-						static_cast<int64_t>(service->m_lastWork)) != 0)
+				if (serviceInterval >= Service::Now &&
+					std::abs(Util::CurrentTime() - service->m_lastWork) >= serviceInterval)
 				{
 					service->ServiceWork();
 					service->m_lastWork = Util::CurrentTime();
@@ -3797,11 +3790,12 @@ public:
 			{
 				int serviceInterval = service->ServiceInterval();
 				int remaining = Service::Sleep;
-				nzbget_rs_euh_service_calc_remaining_wait(
-					serviceInterval, Service::Now, Service::Sleep,
-					static_cast<int64_t>(curTime),
-					static_cast<int64_t>(service->m_lastWork),
-					waitInterval, &remaining, &waitInterval);
+				if (serviceInterval >= Service::Now)
+				{
+					int elapsed = static_cast<int>(curTime - service->m_lastWork);
+					remaining = std::min(serviceInterval, serviceInterval - elapsed);
+					waitInterval = std::min(waitInterval, remaining);
+				}
 				debug("serviceInterval: %i, remaining: %i", serviceInterval, remaining);
 			}
 
@@ -4328,8 +4322,7 @@ public:
 			return false;
 		}
 
-		if (nzbget_rs_dqh_tls_has_cert_and_key_files(
-			m_certFile.empty() ? 1 : 0, m_keyFile.empty() ? 1 : 0) != 0)
+		if (!m_certFile.empty() && !m_keyFile.empty())
 		{
 			if (!SSL_CTX_use_certificate_chain_file(m_context.get(), m_certFile.c_str()))
 			{
@@ -4345,20 +4338,12 @@ public:
 			}
 		}
 
-		if (nzbget_rs_dqh_tls_should_verify_client_x509_store(
-			m_isClient ? 1 : 0, m_X509Store ? 1 : 0) != 0)
+		if (m_isClient && m_X509Store)
 		{
 			SSL_CTX_set1_cert_store(m_context.get(), m_X509Store.get());
-
-			if (nzbget_rs_ntw_tls_should_verify_peer(
-				1, (int)m_certVerifLevel, (int)Options::ECertVerifLevel::cvNone) != 0)
-			{
-				SSL_CTX_set_verify(m_context.get(), SSL_VERIFY_PEER, nullptr);
-			}
-			else
-			{
-				SSL_CTX_set_verify(m_context.get(), SSL_VERIFY_NONE, nullptr);
-			}
+			SSL_CTX_set_verify(m_context.get(),
+				m_certVerifLevel > (int)Options::ECertVerifLevel::cvNone ? SSL_VERIFY_PEER : SSL_VERIFY_NONE,
+				nullptr);
 		}
 
 		m_session.reset(SSL_new(m_context.get()));
@@ -4376,8 +4361,7 @@ public:
 			return false;
 		}
 
-		if (nzbget_rs_dqh_tls_should_set_sni_hostname(
-			m_isClient ? 1 : 0, m_host.empty() ? 1 : 0) != 0 &&
+		if (m_isClient && !m_host.empty() &&
 			!SSL_set_tlsext_host_name(m_session.get(), m_host.c_str()))
 		{
 			ReportError("Could not set host name for TLS");
@@ -4398,47 +4382,39 @@ public:
 			if (m_deadline && m_deadline->Stopped()) { Close(); return false; }
 			ec = m_isClient ? SSL_connect(m_session.get()) : SSL_accept(m_session.get());
 		} while (ec < 1 && RetryIo(ec));
-		bool shouldVerify = nzbget_rs_ntw_tls_should_verify_peer(
-			m_X509Store ? 1 : 0, (int)m_certVerifLevel, (int)Options::ECertVerifLevel::cvNone) != 0;
+		bool shouldVerify = m_X509Store && m_certVerifLevel > (int)Options::ECertVerifLevel::cvNone;
 		if (ec < 1)
 		{
 			if (m_deadline)
 			{
 				unsigned long code = ERR_peek_last_error();
 				int reason = ERR_GET_REASON(code);
-				if (nzbget_rs_ntw_tls_is_explicit_handshake_rejection(
-					ERR_GET_LIB(code), ERR_LIB_SSL, reason,
-					SSL_R_SSLV3_ALERT_HANDSHAKE_FAILURE,
-					SSL_R_TLSV1_ALERT_PROTOCOL_VERSION,
-					SSL_R_NO_SHARED_CIPHER,
-					SSL_R_UNSUPPORTED_PROTOCOL) != 0)
+				if (ERR_GET_LIB(code) == ERR_LIB_SSL &&
+					(reason == SSL_R_SSLV3_ALERT_HANDSHAKE_FAILURE ||
+					 reason == SSL_R_TLSV1_ALERT_PROTOCOL_VERSION ||
+					 reason == SSL_R_NO_SHARED_CIPHER ||
+					 reason == SSL_R_UNSUPPORTED_PROTOCOL))
 					m_probeFailure = 0; // Explicit rejection of this single-suite handshake.
 			}
-			if (nzbget_rs_dqh_tls_should_check_verify_result_on_handshake_fail(
-				m_isClient ? 1 : 0, shouldVerify ? 1 : 0) != 0)
+			if (m_isClient && shouldVerify)
 			{
 				long verifyRes = SSL_get_verify_result(m_session.get());
 				if (verifyRes != X509_V_OK)
 				{
 					m_probeFailure = -4;
-					NzbgetRsBuf verifyErrBuf = nzbget_rs_dqh_tls_format_cert_verify_err(
-						m_host.c_str(), X509_verify_cert_error_string(verifyRes));
-					PrintError(verifyErrBuf.data ? verifyErrBuf.data : "");
-					nzbget_rs_free(verifyErrBuf);
+					PrintError(BString<1024>("TLS certificate verification failed for %s: %s. For more info visit https://github.com/xbmc4lyfe/RustyGet",
+						m_host.c_str(), X509_verify_cert_error_string(verifyRes)));
 					Close();
 					return false;
 				}
 			}
 
-			NzbgetRsBuf hsErrBuf = nzbget_rs_dqh_tls_format_handshake_err(m_host.c_str());
-			ReportError(hsErrBuf.data ? hsErrBuf.data : "");
-			nzbget_rs_free(hsErrBuf);
+			ReportError(BString<1024>("TLS handshake failed for %s", m_host.c_str()));
 			Close();
 			return false;
 		}
 
-		if (nzbget_rs_dqh_tls_should_validate_client_cert(
-			m_isClient ? 1 : 0, shouldVerify ? 1 : 0) != 0 && !ValidateCert())
+		if (m_isClient && shouldVerify && !ValidateCert())
 		{
 			m_probeFailure = -4;
 			Close();
@@ -4457,8 +4433,7 @@ public:
 
 	void Close()
 	{
-		if (nzbget_rs_dqh_tls_should_send_close_notify(
-			m_session ? 1 : 0, m_connected ? 1 : 0, m_deadline ? 1 : 0) != 0)
+		if (m_session && m_connected && !m_deadline)
 		{
 			if (SSL_shutdown(m_session.get()) == 0)
 			{
@@ -4481,7 +4456,9 @@ public:
 
 		if (m_retCode < 0)
 		{
-			ReportError(nzbget_rs_dqh_tls_select_io_err_msg(1, ERR_peek_error() == 0 ? 1 : 0));
+			ReportError(ERR_peek_error() == 0 ?
+				"Could not write to TLS-Socket: Connection closed by remote host" :
+				"Could not write to TLS-Socket");
 			return -1;
 		}
 
@@ -4498,7 +4475,9 @@ public:
 
 		if (m_retCode < 0)
 		{
-			ReportError(nzbget_rs_dqh_tls_select_io_err_msg(0, ERR_peek_error() == 0 ? 1 : 0));
+			ReportError(ERR_peek_error() == 0 ?
+				"Could not read from TLS-Socket: Connection closed by remote host" :
+				"Could not read from TLS-Socket");
 			return -1;
 		}
 
@@ -4558,7 +4537,7 @@ private:
 		// A single modern suite is an exact pin. Without a protocol bound, setting
 		// only a TLS 1.2 list leaves the default TLS 1.3 suites usable (and vice versa).
 		// Empty values and custom lists retain their historical negotiation behavior.
-		if (!nzbget_rs_dqh_tls_is_cipher_list(cipher.data(), cipher.size()))
+		if (cipher.find(':') == std::string_view::npos)
 		{
 			const auto* ciphers = SSL_get_ciphers(m_session.get());
 			for (int i = 0; i < sk_SSL_CIPHER_num(ciphers); ++i)
@@ -4566,20 +4545,17 @@ private:
 				const SSL_CIPHER* candidate = sk_SSL_CIPHER_value(ciphers, i);
 				const char* candName = SSL_CIPHER_get_name(candidate);
 				if (cipher != candName) continue;
-				bool tls13 = nzbget_rs_dqh_tls_is_tls13_version_str(SSL_CIPHER_get_version(candidate)) != 0;
+				bool tls13 = std::string_view(SSL_CIPHER_get_version(candidate)) == "TLSv1.3";
 				int auth = SSL_CIPHER_get_auth_nid(candidate), kx = SSL_CIPHER_get_kx_nid(candidate);
-				unsigned flags = nzbget_rs_dqh_tls_compute_suite_flags(
-					SSL_CIPHER_is_aead(candidate) ? 1 : 0,
-					tls13 ? 1 : 0,
-					(auth == NID_auth_rsa || auth == NID_auth_ecdsa) ? 1 : 0,
-					(kx == NID_kx_ecdhe || kx == NID_kx_dhe) ? 1 : 0);
-				unsigned bits = nzbget_rs_dqh_tls_resolve_cipher_bits(
-					candName, (unsigned)SSL_CIPHER_get_bits(candidate, nullptr));
+				unsigned flags = (SSL_CIPHER_is_aead(candidate) ? 1u : 0u) |
+					(tls13 || auth == NID_auth_rsa || auth == NID_auth_ecdsa ? 2u : 0u) |
+					(tls13 || kx == NID_kx_ecdhe || kx == NID_kx_dhe ? 4u : 0u);
+				unsigned bits = strstr(candName, "CCM8") ? 64u : (unsigned)SSL_CIPHER_get_bits(candidate, nullptr);
 				if (!nzbget_rs_tls_cipher_pin(tls13 ? 13 : 12, bits, flags)) break;
 				int version = tls13 ? TLS1_3_VERSION : TLS1_2_VERSION;
 				int minimum = SSL_get_min_proto_version(m_session.get());
 				int maximum = SSL_get_max_proto_version(m_session.get());
-				if (nzbget_rs_dqh_tls_is_proto_version_out_of_bounds(version, minimum, maximum) != 0) return false;
+				if ((minimum && version < minimum) || (maximum && version > maximum)) return false;
 				if (!SSL_set_min_proto_version(m_session.get(), version) || !SSL_set_max_proto_version(m_session.get(), version)) return false;
 				return tls13 ? SSL_set_ciphersuites(m_session.get(), m_cipher.c_str()) == 1 :
 					SSL_set_cipher_list(m_session.get(), m_cipher.c_str()) == 1;
@@ -4618,12 +4594,9 @@ private:
 	{
 		if (!m_deadline) return false;
 		int error = SSL_get_error(m_session.get(), result);
-		int wantRead = 0;
-		int wantWrite = 0;
-		if (!nzbget_rs_ntw_tls_classify_want_io(
-			error, SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE, &wantRead, &wantWrite))
+		if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE)
 			return false;
-		return m_deadline->Wait(m_socket, wantRead != 0, wantWrite != 0);
+		return m_deadline->Wait(m_socket, error == SSL_ERROR_WANT_READ, error == SSL_ERROR_WANT_WRITE);
 	}
 
 	void ReportError(const char* errMsg, bool suppressable = true)
@@ -4637,15 +4610,11 @@ private:
 
 			if (suppressable && m_suppressErrors)
 			{
-				NzbgetRsBuf formattedErr = nzbget_rs_dqh_tls_format_report_err(errMsg, errstr);
-				debug("%s", formattedErr.data ? formattedErr.data : "");
-				nzbget_rs_free(formattedErr);
+				debug("%s: %s", errMsg, errstr);
 			}
 			else if (errcode != 0)
 			{
-				NzbgetRsBuf formattedErr = nzbget_rs_dqh_tls_format_report_err(errMsg, errstr);
-				PrintError(formattedErr.data ? formattedErr.data : "");
-				nzbget_rs_free(formattedErr);
+				PrintError(BString<1024>("%s: %s", errMsg, errstr));
 			}
 			else
 			{
@@ -4662,18 +4631,15 @@ private:
 		OpenSSL::X509Ptr cert{ SSL_get_peer_certificate(m_session.get()), &X509_free };
 		if (!cert)
 		{
-			NzbgetRsBuf verifyErrBuf = nzbget_rs_dqh_tls_format_cert_verify_err(
-				m_host.c_str(), "no certificate provided by server");
-			PrintError(verifyErrBuf.data ? verifyErrBuf.data : "");
-			nzbget_rs_free(verifyErrBuf);
+			PrintError(BString<1024>("TLS certificate verification failed for %s: no certificate provided by server. For more info visit https://github.com/xbmc4lyfe/RustyGet",
+				m_host.c_str()));
 			return false;
 		}
 
 #ifdef HAVE_X509_CHECK_HOST
 		// hostname verification
-		bool shouldCheckHost = nzbget_rs_ntw_tls_should_check_host(
-			(int)m_certVerifLevel, (int)Options::ECertVerifLevel::cvMinimal, m_host.empty() ? 1 : 0) != 0;
-		if (shouldCheckHost && !X509_check_host(cert.get(), m_host.c_str(), m_host.size(), 0, nullptr))
+		if (m_certVerifLevel > (int)Options::ECertVerifLevel::cvMinimal && !m_host.empty() &&
+			!X509_check_host(cert.get(), m_host.c_str(), m_host.size(), 0, nullptr))
 		{
 			const unsigned char* certHost = nullptr;
 			// Find the position of the CN field in the Subject field of the certificate
@@ -4693,10 +4659,8 @@ private:
 				}
 			}
 
-			NzbgetRsBuf mismatchErrBuf = nzbget_rs_dqh_tls_format_hostname_mismatch_err(
-				m_host.c_str(), reinterpret_cast<const char*>(certHost));
-			PrintError(mismatchErrBuf.data ? mismatchErrBuf.data : "");
-			nzbget_rs_free(mismatchErrBuf);
+			PrintError(BString<1024>("TLS certificate verification failed for %s: certificate hostname mismatch (%s). For more info visit https://github.com/xbmc4lyfe/RustyGet",
+				m_host.c_str(), certHost ? reinterpret_cast<const char*>(certHost) : "(null)"));
 			return false;
 		}
 #endif
@@ -5002,8 +4966,7 @@ public:
 	{
 		debug("Creating Connection");
 
-		m_readBuf.Reserve(nzbget_rs_dqh_conn_calc_read_buffer_cap(
-			CONNECTION_READBUFFER_SIZE, DECODE_SLACK));
+		m_readBuf.Reserve(CONNECTION_READBUFFER_SIZE + 1 + DECODE_SLACK);
 #ifndef DISABLE_TLS
 		m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
 #endif
@@ -5021,8 +4984,7 @@ public:
 		m_bufAvail = 0;
 		m_timeout = 60;
 		m_suppressErrors = true;
-		m_readBuf.Reserve(nzbget_rs_dqh_conn_calc_read_buffer_cap(
-			CONNECTION_READBUFFER_SIZE, DECODE_SLACK));
+		m_readBuf.Reserve(CONNECTION_READBUFFER_SIZE + 1 + DECODE_SLACK);
 #ifndef DISABLE_TLS
 		m_tlsSocket = nullptr;
 		m_tlsError = false;
@@ -5100,11 +5062,11 @@ public:
 
 		int errcode = 0;
 
-		if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
+		if (!m_host.empty() && m_host.front() == '/')
 		{
 			struct sockaddr_un addr;
 			addr.sun_family = AF_UNIX;
-			if (nzbget_rs_dqh_conn_is_unix_path_too_long(m_host.size(), sizeof(addr.sun_path)) != 0)
+			if (m_host.size() >= sizeof(addr.sun_path))
 			{
 				ReportError("Binding socket failed for %s: name too long\n", m_host.c_str(), false);
 				return false;
@@ -5136,19 +5098,16 @@ public:
 			struct addrinfo addr_hints, *addr_list, *addr;
 
 			memset(&addr_hints, 0, sizeof(addr_hints));
-			addr_hints.ai_family = nzbget_rs_ccm_conn_select_ai_family(
-				(int)m_ipVersion, (int)ipV4, (int)ipV6, AF_INET, AF_INET6, AF_UNSPEC);
+			addr_hints.ai_family = m_ipVersion == ipV4 ? AF_INET : m_ipVersion == ipV6 ? AF_INET6 : AF_UNSPEC;
 			addr_hints.ai_socktype = SOCK_STREAM;
 			addr_hints.ai_flags = AI_PASSIVE;    // For wildcard IP address
 
-			NzbgetRsBuf portStrBuf = nzbget_rs_dqh_conn_format_port_str(m_port);
-			BString<100> portStr("%s", portStrBuf.data ? portStrBuf.data : "0");
-			nzbget_rs_free(portStrBuf);
+			BString<100> portStr("%d", m_port);
 
 			int res = getaddrinfo(m_host.c_str(), portStr, &addr_hints, &addr_list);
 			if (res != 0)
 			{
-				int gaiErr = nzbget_rs_dqh_conn_resolve_gai_report_err_code(res, EAI_SYSTEM);
+				int gaiErr = res != EAI_SYSTEM ? res : 0;
 				ReportError("Could not resolve hostname %s", m_host.c_str(), true,
 					gaiErr,
 					gaiErr != 0 ? gai_strerror(res) : nullptr);
@@ -5320,8 +5279,12 @@ public:
 				m_readBuf[bufAvail] = '\0';
 			}
 
-			int foundNewline = 0;
-			int len = nzbget_rs_rco_conn_read_line_chunk(bufPtr, bufAvail, size, &foundNewline);
+			char* nl = static_cast<char*>(memchr(bufPtr, '\n', bufAvail));
+			int len = nl ? static_cast<int>(nl - bufPtr + 1) : bufAvail;
+			if (len > size)
+			{
+				len = size;
+			}
 
 			memcpy(inpBuffer, bufPtr, len);
 			inpBuffer += len;
@@ -5330,14 +5293,14 @@ public:
 			bytesRead += len;
 			size -= len;
 
-			if (foundNewline)
+			if (nl)
 			{
 				break;
 			}
 		}
 		*inpBuffer = '\0';
 
-		m_bufAvail = nzbget_rs_dqh_conn_clamp_buf_avail(bufAvail); // copy back to member
+		m_bufAvail = bufAvail > 0 ? bufAvail : 0; // copy back to member
 		m_bufPtr = bufPtr; // copy back to member
 
 		if (bytesReadOut)
@@ -5377,19 +5340,17 @@ public:
 				// a connection that failed before it was taken: take the next one
 				// (the listener was torn down and rebound for each of these)
 				int err = errno;
-				int enonetVal = 0;
+				if (err == EINTR || err == ECONNABORTED || err == EPROTO || err == ENETDOWN ||
+					err == ENOPROTOOPT || err == EHOSTDOWN || err == EHOSTUNREACH || err == EOPNOTSUPP ||
+					err == ENETUNREACH
 #ifdef ENONET
-				enonetVal = ENONET;
+					|| err == ENONET
 #endif
-				int acceptClass = nzbget_rs_rco_conn_classify_accept_errno(
-					err, EINTR, ECONNABORTED, EPROTO, ENETDOWN,
-					ENOPROTOOPT, EHOSTDOWN, EHOSTUNREACH, EOPNOTSUPP,
-					ENETUNREACH, enonetVal, EMFILE, ENFILE, ENOBUFS, ENOMEM);
-				if (acceptClass == 1)
+					)
 				{
 					continue;
 				}
-				m_acceptBusy = (acceptClass == 2);
+				m_acceptBusy = (err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM);
 			}
 			break;
 		}
@@ -5443,7 +5404,7 @@ public:
 
 		if (m_bufAvail > 0)
 		{
-			int len = nzbget_rs_ccm_conn_recv_buffered_chunk_len(size, m_bufAvail);
+			int len = size > m_bufAvail ? m_bufAvail : size;
 			memcpy(bufPtr, m_bufPtr, len);
 			bufPtr += len;
 			m_bufPtr += len;
@@ -5504,7 +5465,7 @@ public:
 #endif
 	const char* GetRemoteAddr()
 	{
-		if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
+		if (!m_host.empty() && m_host.front() == '/')
 		{
 			return "-";
 		}
@@ -5609,11 +5570,11 @@ protected:
 
 		m_socket = INVALID_SOCKET;
 
-		if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
+		if (!m_host.empty() && m_host.front() == '/')
 		{
 			struct sockaddr_un addr;
 			addr.sun_family = AF_UNIX;
-			if (nzbget_rs_dqh_conn_is_unix_path_too_long(m_host.size(), sizeof(addr.sun_path)) != 0)
+			if (m_host.size() >= sizeof(addr.sun_path))
 			{
 				ReportError("Connection to %s failed: name too long\n", m_host.c_str(), false);
 				return false;
@@ -5644,13 +5605,10 @@ protected:
 			struct addrinfo addr_hints, *addr_list, *addr;
 
 			memset(&addr_hints, 0, sizeof(addr_hints));
-			addr_hints.ai_family = nzbget_rs_ccm_conn_select_ai_family(
-				(int)m_ipVersion, (int)ipV4, (int)ipV6, AF_INET, AF_INET6, AF_UNSPEC);
+			addr_hints.ai_family = m_ipVersion == ipV4 ? AF_INET : m_ipVersion == ipV6 ? AF_INET6 : AF_UNSPEC;
 			addr_hints.ai_socktype = SOCK_STREAM;
 
-			NzbgetRsBuf portStrBuf = nzbget_rs_dqh_conn_format_port_str(m_port);
-			BString<100> portStr("%s", portStrBuf.data ? portStrBuf.data : "0");
-			nzbget_rs_free(portStrBuf);
+			BString<100> portStr("%d", m_port);
 
 			// Optimizer probes resolve in a bounded owned child, preserving m_host
 			// for TLS SNI/certificate validation. AI_NUMERICHOST never queries DNS.
@@ -5684,7 +5642,7 @@ protected:
 
 			if (res != 0)
 			{
-				int gaiErr = nzbget_rs_dqh_conn_resolve_gai_report_err_code(res, EAI_SYSTEM);
+				int gaiErr = res != EAI_SYSTEM ? res : 0;
 				ReportError("Could not resolve hostname %s", m_host.c_str(), true,
 							gaiErr,
 							gaiErr != 0 ? gai_strerror(res) : nullptr);
@@ -5728,14 +5686,12 @@ protected:
 				}
 			}
 
-			if (nzbget_rs_dqh_conn_should_report_socket_create_failed(
-				m_socket == INVALID_SOCKET ? 1 : 0, addr_list ? 1 : 0) != 0)
+			if (m_socket == INVALID_SOCKET && addr_list)
 			{
 				ReportError("Socket creation failed for %s", m_host.c_str(), true);
 			}
 
-			if (nzbget_rs_dqh_conn_should_cleanup_unconnected_socket(
-				connected ? 1 : 0, m_socket == INVALID_SOCKET ? 1 : 0) != 0)
+			if (!connected && m_socket != INVALID_SOCKET)
 			{
 				ReportError("Connection to %s failed", m_host.c_str(), true);
 				closesocket(m_socket);
@@ -5806,10 +5762,8 @@ protected:
 #endif
 			int is_listening = 0;
 			socklen_t len = sizeof(is_listening);
-			bool isUnixPath = nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0;
-			int sockoptRes = isUnixPath ? getsockopt(m_socket, SOL_SOCKET, SO_ACCEPTCONN, &is_listening, &len) : -1;
-			if (nzbget_rs_dqh_conn_should_unlink_listening_unix_socket(
-				isUnixPath ? 1 : 0, sockoptRes, is_listening) != 0)
+			if (!m_host.empty() && m_host.front() == '/' &&
+				getsockopt(m_socket, SOL_SOCKET, SO_ACCEPTCONN, &is_listening, &len) == 0 && is_listening)
 			{
 				unlink(m_host.c_str());
 			}
@@ -5889,7 +5843,7 @@ protected:
 				ret = m_deadline->Wait(m_socket, true, true) ? 1 : 0;
 				pfd.revents = POLLIN | POLLOUT;
 			}
-			else ret = poll(&pfd, 1, nzbget_rs_ccm_conn_poll_timeout_ms(m_timeout));
+			else ret = poll(&pfd, 1, m_timeout ? m_timeout * 1000 : -1);
 			//we are waiting for connect to complete now
 			if (ret < 0)
 			{
@@ -5902,7 +5856,7 @@ protected:
 				return false;
 			}
 
-			if (!nzbget_rs_ccm_conn_poll_revents_ready(pfd.revents, POLLIN | POLLOUT | POLLERR | POLLHUP))
+			if (!(pfd.revents & (POLLIN | POLLOUT | POLLERR | POLLHUP)))
 			{
 				return false;
 			}
@@ -5997,7 +5951,10 @@ protected:
 		if (printErrCode)
 		{
 			BString<1024> printErrMsg;
-			errCode = nzbget_rs_dqh_conn_resolve_report_err_code(errCode, GetLastNetworkError());
+			if (errCode == 0)
+			{
+				errCode = GetLastNetworkError();
+			}
 			if (errMsg)
 			{
 				printErrMsg = errMsg;
@@ -6007,17 +5964,14 @@ protected:
 				printErrMsg = strerror(errCode);
 			}
 
-			NzbgetRsBuf formattedErr = nzbget_rs_dqh_conn_format_report_err_with_code(
-				*errPrefix, errCode, (const char*)printErrMsg);
 			if (m_suppressErrors)
 			{
-				debug("%s", formattedErr.data ? formattedErr.data : "");
+				debug("%s: Error %i - %s", *errPrefix, errCode, *printErrMsg);
 			}
 			else
 			{
-				PrintError(formattedErr.data ? formattedErr.data : "");
+				PrintError(BString<1024>("%s: Error %i - %s", *errPrefix, errCode, *printErrMsg));
 			}
-			nzbget_rs_free(formattedErr);
 		}
 		else
 		{
@@ -12825,7 +12779,8 @@ namespace TlsCipherBackend
 				ccm = mode == EVP_CIPH_CCM_MODE;
 				if (mode != EVP_CIPH_GCM_MODE && !ccm && EVP_CIPHER_nid(cipher) != NID_chacha20_poly1305) return false;
 				if (keySize <= 0 || keySize > static_cast<int>(key.size()) || RAND_bytes(key.data(), keySize) != 1 || RAND_bytes(prefix.data(), prefix.size()) != 1) return false;
-				nzbget_rs_dqh_tls_cipher_fill_test_plaintext(plaintext.data(), RecordSize);
+				for (size_t i = 0; i < RecordSize; ++i)
+					plaintext[i] = static_cast<unsigned char>((i * 31 + i / 251) & 255);
 				return EVP_EncryptInit_ex(encrypt.get(), cipher, nullptr, nullptr, nullptr) == 1 &&
 					EVP_DecryptInit_ex(decrypt.get(), cipher, nullptr, nullptr, nullptr) == 1 &&
 					EVP_CIPHER_CTX_ctrl(encrypt.get(), EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) == 1 &&
@@ -12833,12 +12788,15 @@ namespace TlsCipherBackend
 			}
 			bool Prepare(uint64_t sequence, uint32_t count)
 			{
-				if (!nzbget_rs_dqh_tls_cipher_is_prepare_batch_valid(sequence, count)) return false;
+				if (count == 0 || count > 64 || sequence > std::numeric_limits<uint64_t>::max() - count) return false;
 				first = sequence; ciphertext.resize(count); tags.resize(count); nonces.resize(count);
 				for (uint32_t i = 0; i < count; ++i)
 				{
 					auto& nonce = nonces[i];
-					nzbget_rs_dqh_tls_cipher_write_record_nonce(prefix.data(), sequence + i, nonce.data());
+					memcpy(nonce.data(), prefix.data(), 4);
+					uint64_t seq = sequence + i;
+					for (int b = 0; b < 8; ++b)
+						nonce[4 + b] = static_cast<unsigned char>((seq >> ((7 - b) * 8)) & 0xff);
 					int size = 0, tail = 0;
 					unsigned char aad[5]{23, 3, 3, 0x40, static_cast<unsigned char>(tagSize)};
 					if (ccm && EVP_CIPHER_CTX_ctrl(encrypt.get(), EVP_CTRL_AEAD_SET_TAG, tagSize, nullptr) != 1) return false;
@@ -12859,7 +12817,7 @@ namespace TlsCipherBackend
 			}
 			int Record(uint64_t sequence)
 			{
-				if (!nzbget_rs_dqh_tls_cipher_is_record_seq_in_range(sequence, first, ciphertext.size())) return -1;
+				if (sequence < first || sequence - first >= ciphertext.size()) return -1;
 				size_t i = static_cast<size_t>(sequence - first);
 				unsigned char aad[5]{23, 3, 3, 0x40, static_cast<unsigned char>(tagSize)};
 				int size = 0, tail = 0;
@@ -12871,7 +12829,7 @@ namespace TlsCipherBackend
 					EVP_DecryptUpdate(decrypt.get(), output.data(), &size, ciphertext[i].data(), RecordSize) != 1 || size != RecordSize) return -1;
 				if (!ccm && (EVP_CIPHER_CTX_ctrl(decrypt.get(), EVP_CTRL_AEAD_SET_TAG, tagSize, tags[i].data()) != 1 ||
 					EVP_DecryptFinal_ex(decrypt.get(), output.data() + size, &tail) != 1 || tail != 0)) return -1;
-				return nzbget_rs_dqh_mem_slices_equal(output.data(), plaintext.data(), RecordSize) != 0 ? RecordSize : -1;
+				return memcmp(output.data(), plaintext.data(), RecordSize) == 0 ? RecordSize : -1;
 			}
 		};
 
@@ -12897,23 +12855,19 @@ namespace TlsCipherBackend
 				{
 					const auto* suite = sk_SSL_CIPHER_value(suites, i);
 					const char* suiteName = SSL_CIPHER_get_name(suite);
-					bool tls13 = nzbget_rs_dqh_tls_is_tls13_version_str(SSL_CIPHER_get_version(suite)) != 0;
+					bool tls13 = std::string_view(SSL_CIPHER_get_version(suite)) == "TLSv1.3";
 					int version = tls13 ? TLS1_3_VERSION : TLS1_2_VERSION;
-					if (nzbget_rs_dqh_tls_is_proto_version_out_of_bounds(version, minimum, maximum) != 0) continue;
+					if ((minimum && version < minimum) || (maximum && version > maximum)) continue;
 					int auth = SSL_CIPHER_get_auth_nid(suite), kx = SSL_CIPHER_get_kx_nid(suite);
-					unsigned flags = nzbget_rs_dqh_tls_compute_suite_flags(
-						SSL_CIPHER_is_aead(suite) ? 1 : 0,
-						tls13 ? 1 : 0,
-						(auth == NID_auth_rsa || auth == NID_auth_ecdsa) ? 1 : 0,
-						(kx == NID_kx_ecdhe || kx == NID_kx_dhe) ? 1 : 0);
+					unsigned flags = (SSL_CIPHER_is_aead(suite) ? 1u : 0u) |
+						(tls13 || auth == NID_auth_rsa || auth == NID_auth_ecdsa ? 2u : 0u) |
+						(tls13 || kx == NID_kx_ecdhe || kx == NID_kx_dhe ? 4u : 0u);
 					const EVP_CIPHER* bulk = EVP_get_cipherbynid(SSL_CIPHER_get_cipher_nid(suite));
-					NzbgetRsBuf bulkBuf = nzbget_rs_dqh_tls_format_bulk_cipher_name(
-						bulk ? EVP_CIPHER_name(bulk) : nullptr, suiteName);
-					unsigned bits = nzbget_rs_dqh_tls_resolve_cipher_bits(
-						suiteName, (unsigned)SSL_CIPHER_get_bits(suite, nullptr));
-					int emitted = emit(context, suiteName, bulkBuf.data ? bulkBuf.data : "", tls13 ? 13 : 12, bits, flags);
-					nzbget_rs_free(bulkBuf);
-					if (!emitted) return 0;
+					bool hasCcm8 = strstr(suiteName, "CCM8") != nullptr;
+					std::string bulkName = bulk ? EVP_CIPHER_name(bulk) : "unavailable";
+					if (hasCcm8) bulkName += "@8";
+					unsigned bits = hasCcm8 ? 64u : (unsigned)SSL_CIPHER_get_bits(suite, nullptr);
+					if (!emit(context, suiteName, bulkName.c_str(), tls13 ? 13 : 12, bits, flags)) return 0;
 				}
 				return 1;
 			}
@@ -12946,12 +12900,10 @@ namespace TlsCipherBackend
 		{
 			try
 			{
-				int precheck = nzbget_rs_dqh_tls_cipher_precheck_probe_args(
-					cancel(cancelContext) ? 1 : 0,
-					milliseconds,
-					server->verification ? 1 : 0,
-					TlsSocket::HasCertificateStore() ? 1 : 0);
-				if (precheck != 0) return precheck;
+				if (cancel(cancelContext)) return -6;
+				if (milliseconds == 0) return -3;
+				if (milliseconds > 10000) return -1;
+				if (server->verification && !TlsSocket::HasCertificateStore()) return -4;
 				auto deadline = std::make_shared<SocketDeadline>();
 				deadline->end = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
 				deadline->cancelled = [=] { return cancel(cancelContext) != 0; };
@@ -12966,24 +12918,16 @@ namespace TlsCipherBackend
 					addresses.push_back(remaining.substr(pos, end == std::string::npos ? end : end - pos));
 					if (end == std::string::npos) break; pos = end + 1;
 				}
-				if (!nzbget_rs_dqh_tls_cipher_is_probe_addr_list_valid(addresses.size())) return -2;
+				if (addresses.empty() || addresses.size() > 16) return -2;
 				connection.SetResolvedAddresses(addresses); connection.SetDeadline(deadline);
 				connection.SetSuppressErrors(true); connection.SetTimeout(10);
 				bool connected = connection.Connect();
-				int result = nzbget_rs_dqh_tls_resolve_probe_result(
-					connected ? 1 : 0,
-					connection.GetNegotiatedCipher(),
-					cipher,
-					connection.GetNegotiatedVersion(),
-					protocol,
-					TLS1_3_VERSION,
-					TLS1_2_VERSION,
-					connection.GetAuthError() ? 1 : 0,
-					connection.GetTlsProbeFailure());
-				result = nzbget_rs_dqh_tls_cipher_classify_probe_deadline_override(
-					result,
-					cancel(cancelContext) ? 1 : 0,
-					std::chrono::steady_clock::now() >= deadline->end ? 1 : 0);
+				int expectedVer = protocol == 13 ? TLS1_3_VERSION : TLS1_2_VERSION;
+				int result = (connected && strcmp(connection.GetNegotiatedCipher(), cipher) == 0 &&
+					connection.GetNegotiatedVersion() == expectedVer) ? 1 :
+					connection.GetAuthError() ? -5 : connection.GetTlsProbeFailure();
+				if (cancel(cancelContext)) result = -6;
+				else if (std::chrono::steady_clock::now() >= deadline->end) result = -3;
 				connection.SetBroken(); connection.Disconnect();
 				return result;
 			}

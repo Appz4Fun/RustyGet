@@ -51,12 +51,11 @@ private:
 			if (!messages->empty())
 			{
 				Message& firstMessage = messages->front();
-				int needSkip = 0;
-				int start = nzbget_rs_nserv_frontend_calc_start_index(
-					m_neededLogFirstId, firstMessage.GetId(), &needSkip);
-				if (needSkip)
+				int start = static_cast<int>(m_neededLogFirstId) - static_cast<int>(firstMessage.GetId()) + 1;
+				if (start < 0)
 				{
 					printf(".....\033[K\n");
+					start = 0;
 				}
 				for (uint32 i = (uint32)start; i < messages->size(); i++)
 				{
@@ -618,19 +617,16 @@ public:
 protected:
 	int ServiceInterval() override
 	{
-		return nzbget_rs_euh_disk_service_interval(
-			m_waitingRequiredDir ? 1 : 0,
-			g_Options->GetDiskSpace(),
-			g_WorkState->GetDownloading() ? 1 : 0,
-			Service::Sleep);
+		return m_waitingRequiredDir ? 1 :
+			g_Options->GetDiskSpace() > 0 && g_WorkState->GetDownloading() ? 1 :
+			Service::Sleep;
 	}
 
 	void ServiceWork() override
 	{
 		debug("Disk service work");
 
-		if (nzbget_rs_dqh_disk_service_should_check_disk_space(
-			g_Options->GetDiskSpace(), g_WorkState->GetDownloading() ? 1 : 0) != 0)
+		if (g_Options->GetDiskSpace() > 0 && g_WorkState->GetDownloading())
 		{
 			debug("Disk service work: check disk space");
 			int destLow = 0;
@@ -1007,7 +1003,7 @@ public:
 		}
 
 		mode_t uMask = static_cast<mode_t>(m_options->GetUMask());
-		if (nzbget_rs_ccm_nzbget_is_valid_umask((uint32_t)uMask) != 0)
+		if (uMask < 01000)
 		{
 			/* set newly created file permissions */
 			FileSystem::uMask = uMask;
@@ -1031,9 +1027,7 @@ public:
 
 		ProcessDirect();
 
-		if (nzbget_rs_dqh_nzbget_should_run_system_health_check(
-			g_Options->GetServerMode() ? 1 : 0,
-			g_Options->GetSystemHealthCheck() ? 1 : 0) != 0)
+		if (g_Options->GetServerMode() && g_Options->GetSystemHealthCheck())
 		{
 			m_systemHealth = std::make_unique<SystemHealth::Service>(
 				*g_Options,
@@ -1443,15 +1437,10 @@ private:
 			printf("RustyGet version: %s\n", Util::VersionRevision());
 			exit(0);
 		}
-		int bootExitCode = 0;
-		if (nzbget_rs_dqh_nzbget_classify_boot_usage_or_error(
-			m_commandLineParser->m_printUsage ? 1 : 0,
-			m_commandLineParser->m_errors ? 1 : 0,
-			g_ArgumentCount,
-			&bootExitCode) != 0)
+		if (m_commandLineParser->m_printUsage || m_commandLineParser->m_errors || g_ArgumentCount <= 1)
 		{
 			m_commandLineParser->PrintUsage(((const char**)(*g_Arguments))[0]);
-			exit(bootExitCode);
+			exit(m_commandLineParser->m_printUsage ? 0 : 1);
 		}
 
 		debug("Reading options");
@@ -1460,17 +1449,16 @@ private:
 		m_options->SetRemoteClientMode(m_commandLineParser->m_remoteClientMode);
 		m_options->SetServerMode(m_commandLineParser->m_serverMode);
 		m_options->SetDaemonMode(m_commandLineParser->m_daemonMode);
-		int testBacktrace = 0;
+		bool testBacktrace = false;
 #ifdef DEBUG
-		testBacktrace = m_commandLineParser->m_testBacktrace ? 1 : 0;
+		testBacktrace = m_commandLineParser->m_testBacktrace;
 #endif
-		m_options->SetDirectClientMode(nzbget_rs_roc_nzbget_boot_is_direct_client_mode(
-			testBacktrace,
-			m_commandLineParser->m_webGet ? 1 : 0,
-			m_commandLineParser->m_sigVerify ? 1 : 0,
-			(int)m_commandLineParser->m_clientOperation,
-			(int)CommandLineParser::opClientNoOperation,
-			m_commandLineParser->m_printOptions ? 1 : 0) != 0);
+		m_options->SetDirectClientMode(
+			testBacktrace ||
+			m_commandLineParser->m_webGet ||
+			m_commandLineParser->m_sigVerify ||
+			m_commandLineParser->m_clientOperation != CommandLineParser::opClientNoOperation ||
+			m_commandLineParser->m_printOptions);
 		m_workState->SetPauseDownload(m_commandLineParser->m_pauseDownload);
 		m_workState->SetSpeedLimit(g_Options->GetDownloadRate());
 
@@ -1480,10 +1468,8 @@ private:
 		{
 			exit(1);
 		}
-		else if (nzbget_rs_roc_nzbget_boot_should_pause_on_config_errors(
-			m_options->GetConfigErrors() ? 1 : 0,
-			(int)m_commandLineParser->m_clientOperation,
-			(int)CommandLineParser::opClientNoOperation))
+		else if (m_options->GetConfigErrors() &&
+			m_commandLineParser->m_clientOperation == CommandLineParser::opClientNoOperation)
 		{
 			info("Pausing all activities due to errors in configuration");
 			m_workState->SetPauseDownload(true);
@@ -1560,7 +1546,7 @@ private:
 			downloader.SetInfoName("WebGet");
 
 			WebDownloader::EStatus status = downloader.DownloadWithRedirects(5);
-			exit(nzbget_rs_ccm_nzbget_webget_exit_code((int)status, (int)WebDownloader::adFinished));
+			exit(status == WebDownloader::adFinished ? 0 : 1);
 		}
 
 		if (m_commandLineParser->m_sigVerify)
@@ -1568,7 +1554,7 @@ private:
 #ifndef DISABLE_TLS
 			bool ok = Maintenance::VerifySignature(m_commandLineParser->m_lastArg,
 				m_commandLineParser->m_sigFilename, m_commandLineParser->m_pubKeyFilename);
-			exit(nzbget_rs_ccm_nzbget_sigverify_exit_code(ok ? 1 : 0));
+			exit(ok ? 93 : 1);
 #else
 			printf("ERROR: Could not verify signature, the program was compiled without OpenSSL support\n");
 			exit(1);
@@ -1602,8 +1588,8 @@ private:
 		m_remoteServer = std::make_unique<RemoteServer>(false);
 		m_remoteServer->Start();
 
-		if (nzbget_rs_ccm_nzbget_should_start_secure_server(
-			m_options->GetSecureControl() ? 1 : 0, 1, m_options->GetControlIp()) != 0)
+		if (m_options->GetSecureControl() &&
+			!(m_options->GetControlIp() && m_options->GetControlIp()[0] == '/'))
 		{
 			m_remoteSecureServer = std::make_unique<RemoteServer>(true);
 			m_remoteSecureServer->Start();
@@ -1699,9 +1685,7 @@ private:
 	{
 		if (m_frontend)
 		{
-			if (nzbget_rs_dqh_nzbget_should_stop_frontend_immediately(
-				m_commandLineParser->m_remoteClientMode ? 1 : 0,
-				m_stopped ? 1 : 0) != 0)
+			if (!m_commandLineParser->m_remoteClientMode || m_stopped)
 			{
 				debug("Stopping Frontend");
 				m_frontend->Stop();
@@ -1756,11 +1740,10 @@ private:
 				Reload();
 			}
 
-			if (nzbget_rs_ccm_nzbget_should_stop_standalone(
-				m_options->GetServerMode() ? 1 : 0,
-				m_queueCoordinator->HasMoreJobs() ? 1 : 0,
-				m_urlCoordinator->HasMoreJobs() ? 1 : 0,
-				m_prePostProcessor->HasMoreJobs() ? 1 : 0) != 0)
+			if (!m_options->GetServerMode() &&
+				!m_queueCoordinator->HasMoreJobs() &&
+				!m_urlCoordinator->HasMoreJobs() &&
+				!m_prePostProcessor->HasMoreJobs())
 			{
 				// Standalone-mode: download completed
 				if (!m_queueCoordinator->IsStopped())
@@ -2060,7 +2043,7 @@ void Reload()
 	{
 		int64 elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
 			now - g_reloadFirstRequestTime).count();
-		int64 clampedMs = nzbget_rs_roc_nzbget_reload_clamp_debounce_ms(elapsedMs, 100, 1500);
+		int64 clampedMs = std::min<int64>(elapsedMs + 100, 1500);
 		g_reloadTargetTime = g_reloadFirstRequestTime + std::chrono::milliseconds(clampedMs);
 		g_reloadCond.notify_one();
 		debug("Reload request debounced, target extended");

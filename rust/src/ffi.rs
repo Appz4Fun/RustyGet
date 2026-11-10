@@ -10460,64 +10460,6 @@ pub unsafe extern "C" fn nzbget_rs_sus_check_env_size_limit(
 // ============================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_conn_read_line_chunk(
-    buf_ptr: *const c_char,
-    buf_avail: c_int,
-    max_out: c_int,
-    out_found_newline: *mut c_int,
-) -> c_int {
-    if buf_ptr.is_null() || buf_avail <= 0 || max_out <= 0 {
-        if !out_found_newline.is_null() {
-            *out_found_newline = 0;
-        }
-        return 0;
-    }
-    let slice = std::slice::from_raw_parts(buf_ptr.cast::<u8>(), buf_avail as usize);
-    let (copy_len, found) = crate::nntp::conn_read_line_chunk(slice, max_out as usize);
-    if !out_found_newline.is_null() {
-        *out_found_newline = if found { 1 } else { 0 };
-    }
-    copy_len as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_conn_classify_accept_errno(
-    err: c_int,
-    eintr: c_int,
-    econnaborted: c_int,
-    eproto: c_int,
-    enetdown: c_int,
-    enoprotoopt: c_int,
-    ehostdown: c_int,
-    ehostunreach: c_int,
-    eopnotsupp: c_int,
-    enetunreach: c_int,
-    enonet: c_int,
-    emfile: c_int,
-    enfile: c_int,
-    enobufs: c_int,
-    enomem: c_int,
-) -> c_int {
-    crate::nntp::conn_classify_accept_errno(
-        err,
-        eintr,
-        econnaborted,
-        eproto,
-        enetdown,
-        enoprotoopt,
-        ehostdown,
-        ehostunreach,
-        eopnotsupp,
-        enetunreach,
-        enonet,
-        emfile,
-        enfile,
-        enobufs,
-        enomem,
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_rco_webdl_resolve_protocol_port(
     is_valid: c_int,
     protocol: *const c_char,
@@ -10556,35 +10498,6 @@ pub unsafe extern "C" fn nzbget_rs_rco_webdl_check_body_chunk(
         gzip != 0,
         confirmed_length != 0,
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_log_should_rotate(
-    rawtime: i64,
-    last_written: i64,
-    write_log_mode: c_int,
-) -> c_int {
-    if crate::util::log_should_rotate(rawtime, last_written, write_log_mode) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_log_init_message_disposition(
-    target: c_int,
-    out_write_to_file: *mut c_int,
-    out_keep_in_screen: *mut c_int,
-) {
-    let (write_to_file, keep_in_screen) =
-        crate::util::log_init_message_disposition(target);
-    if !out_write_to_file.is_null() {
-        *out_write_to_file = if write_to_file { 1 } else { 0 };
-    }
-    if !out_keep_in_screen.is_null() {
-        *out_keep_in_screen = if keep_in_screen { 1 } else { 0 };
-    }
 }
 
 // ============================================================================
@@ -10677,20 +10590,6 @@ pub unsafe extern "C" fn nzbget_rs_nntp_processor_handle_line(
         &mut send_fn,
         &mut log_fn,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nserv_frontend_calc_start_index(
-    needed_first_id: c_int,
-    first_msg_id: c_int,
-    out_need_skip: *mut c_int,
-) -> c_int {
-    let (start, skip) =
-        crate::nserv::nserv_frontend_calc_start_index(needed_first_id, first_msg_id);
-    if !out_need_skip.is_null() {
-        *out_need_skip = i32::from(skip);
-    }
-    start
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10877,67 +10776,6 @@ pub unsafe extern "C" fn nzbget_rs_network_speed_test_run(
             0
         }
     }
-}
-
-// ============================================================================
-// Extension, Utility, NServ & SystemHealth Hot-Path FFI
-// ============================================================================
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_service_should_work_now(
-    service_interval: c_int,
-    service_now: c_int,
-    cur_time: i64,
-    last_work: i64,
-) -> c_int {
-    i32::from(crate::util::service_should_work_now(
-        service_interval,
-        service_now,
-        cur_time,
-        last_work,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_service_calc_remaining_wait(
-    service_interval: c_int,
-    service_now: c_int,
-    service_sleep: c_int,
-    cur_time: i64,
-    last_work: i64,
-    cur_wait_interval: c_int,
-    out_remaining: *mut c_int,
-    out_wait_interval: *mut c_int,
-) {
-    let (rem, wait) = crate::util::service_calc_remaining_wait(
-        service_interval,
-        service_now,
-        service_sleep,
-        cur_time,
-        last_work,
-        cur_wait_interval,
-    );
-    if !out_remaining.is_null() {
-        *out_remaining = rem;
-    }
-    if !out_wait_interval.is_null() {
-        *out_wait_interval = wait;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_disk_service_interval(
-    waiting_required_dir: c_int,
-    disk_space_mb: c_int,
-    downloading: c_int,
-    sleep_val: c_int,
-) -> c_int {
-    crate::util::disk_service_interval(
-        waiting_required_dir != 0,
-        disk_space_mb,
-        downloading != 0,
-        sleep_val,
-    )
 }
 
 // ============================================================================
@@ -11745,101 +11583,6 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_cache_can_alloc(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_conn_select_ai_family(
-    ip_version: c_int,
-    ip_v4: c_int,
-    ip_v6: c_int,
-    af_inet: c_int,
-    af_inet6: c_int,
-    af_unspec: c_int,
-) -> c_int {
-    crate::nntp::conn_select_ai_family(
-        ip_version, ip_v4, ip_v6, af_inet, af_inet6, af_unspec,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ccm_conn_is_unix_domain_path(host: *const c_char) -> c_int {
-    let h = if host.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(host).to_bytes()
-    };
-    i32::from(crate::nntp::conn_is_unix_domain_path(h))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_conn_recv_buffered_chunk_len(
-    size: c_int,
-    buf_avail: c_int,
-) -> c_int {
-    crate::nntp::conn_recv_buffered_chunk_len(size, buf_avail)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_conn_poll_timeout_ms(timeout_sec: c_int) -> c_int {
-    crate::nntp::conn_poll_timeout_ms(timeout_sec)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_conn_poll_revents_ready(revents: c_int, mask: c_int) -> c_int {
-    i32::from(crate::nntp::conn_poll_revents_ready(
-        revents, mask,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_nzbget_is_valid_umask(umask_val: u32) -> c_int {
-    i32::from(crate::options::nzbget_is_valid_umask(umask_val))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ccm_nzbget_should_start_secure_server(
-    secure_control: c_int,
-    is_unix: c_int,
-    control_ip: *const c_char,
-) -> c_int {
-    let ip = if control_ip.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(control_ip).to_bytes()
-    };
-    i32::from(crate::options::nzbget_should_start_secure_server(
-        secure_control != 0,
-        is_unix != 0,
-        ip,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_nzbget_should_stop_standalone(
-    server_mode: c_int,
-    queue_more: c_int,
-    url_more: c_int,
-    post_more: c_int,
-) -> c_int {
-    i32::from(crate::options::nzbget_should_stop_standalone(
-        server_mode != 0,
-        queue_more != 0,
-        url_more != 0,
-        post_more != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_nzbget_webget_exit_code(
-    status: c_int,
-    ad_finished: c_int,
-) -> c_int {
-    crate::options::nzbget_webget_exit_code(status, ad_finished)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_nzbget_sigverify_exit_code(ok: c_int) -> c_int {
-    crate::options::nzbget_sigverify_exit_code(ok != 0)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_ntw_nntp_map_ip_version(
     ip_version: c_int,
     ip_v4: c_int,
@@ -11847,71 +11590,6 @@ pub extern "C" fn nzbget_rs_ntw_nntp_map_ip_version(
     ip_auto: c_int,
 ) -> c_int {
     crate::nntp::nntp_map_ip_version(ip_version, ip_v4, ip_v6, ip_auto)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ntw_tls_should_verify_peer(
-    has_store: c_int,
-    cert_verif_level: c_int,
-    cv_none: c_int,
-) -> c_int {
-    i32::from(crate::tlscipher::tls_should_verify_peer(
-        has_store != 0,
-        cert_verif_level,
-        cv_none,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ntw_tls_is_explicit_handshake_rejection(
-    err_lib: c_int,
-    err_lib_ssl: c_int,
-    reason: c_int,
-    r_handshake_fail: c_int,
-    r_proto_ver: c_int,
-    r_no_shared_cipher: c_int,
-    r_unsupported_proto: c_int,
-) -> c_int {
-    i32::from(crate::tlscipher::tls_is_explicit_handshake_rejection(
-        err_lib,
-        err_lib_ssl,
-        reason,
-        r_handshake_fail,
-        r_proto_ver,
-        r_no_shared_cipher,
-        r_unsupported_proto,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ntw_tls_should_check_host(
-    cert_verif_level: c_int,
-    cv_minimal: c_int,
-    host_empty: c_int,
-) -> c_int {
-    i32::from(crate::tlscipher::tls_should_check_host(
-        cert_verif_level,
-        cv_minimal,
-        host_empty != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ntw_tls_classify_want_io(
-    ssl_err: c_int,
-    want_read: c_int,
-    want_write: c_int,
-    out_want_read: *mut c_int,
-    out_want_write: *mut c_int,
-) -> c_int {
-    let (retry, r, w) = crate::tlscipher::tls_classify_want_io(ssl_err, want_read, want_write);
-    if !out_want_read.is_null() {
-        *out_want_read = i32::from(r);
-    }
-    if !out_want_write.is_null() {
-        *out_want_write = i32::from(w);
-    }
-    i32::from(retry)
 }
 
 #[no_mangle]
@@ -12422,70 +12100,8 @@ pub extern "C" fn nzbget_rs_statmeter_calc_resumed_download_start(
 }
 
 // ============================================================================
-// XmlRpc, Options, Log & NString Hot-Path FFI
-// ============================================================================
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rol_log_should_close_idle(
-    cur_time: i64,
-    last_written: i64,
-) -> c_int {
-    i32::from(crate::util::log_should_close_idle(
-        cur_time,
-        last_written,
-    ))
-}
-
-// ============================================================================
 // Util, FileSystem, ScriptController, UnpackController & ScriptConfig Hot-Path FFI
 // ============================================================================
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ufs_util_join_int64(hi: u32, lo: u32) -> i64 {
-    crate::util::util_join_int64(hi, lo)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ufs_util_split_int64(
-    int64_val: i64,
-    out_hi: *mut u32,
-    out_lo: *mut u32,
-) {
-    let (hi, lo) = crate::util::util_split_int64(int64_val);
-    if !out_hi.is_null() {
-        *out_hi = hi;
-    }
-    if !out_lo.is_null() {
-        *out_lo = lo;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ufs_webutil_xml_calc_copy_len(
-    value_len: c_int,
-    value_buf_size: c_int,
-) -> c_int {
-    crate::util::webutil_xml_calc_copy_len(value_len, value_buf_size)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ufs_tokenizer_fits_short_string(len: c_int, capacity: c_int) -> c_int {
-    crate::util::tokenizer_fits_short_string(len, capacity)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ufs_disk_file_select_seek_origin(
-    origin: c_int,
-    so_cur: c_int,
-    so_end: c_int,
-    seek_set: c_int,
-    seek_cur: c_int,
-    seek_end: c_int,
-) -> c_int {
-    crate::util::disk_file_select_seek_origin(
-        origin, so_cur, so_end, seek_set, seek_cur, seek_end,
-    )
-}
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_ufs_script_ctrl_matches_env_prefix(
@@ -12627,51 +12243,6 @@ pub unsafe extern "C" fn nzbget_rs_dsp_feed_status_matches(
         crate::queuecoord::cstr_to_bytes(filter),
         feed_filter_hash,
         filter_hash,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_roc_nzbget_boot_is_direct_client_mode(
-    test_backtrace: c_int,
-    web_get: c_int,
-    sig_verify: c_int,
-    client_op: c_int,
-    op_no_operation: c_int,
-    print_options: c_int,
-) -> c_int {
-    crate::options::roc_nzbget_boot_is_direct_client_mode(
-        test_backtrace,
-        web_get,
-        sig_verify,
-        client_op,
-        op_no_operation,
-        print_options,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_roc_nzbget_boot_should_pause_on_config_errors(
-    config_errors: c_int,
-    client_op: c_int,
-    op_no_operation: c_int,
-) -> c_int {
-    crate::options::roc_nzbget_boot_should_pause_on_config_errors(
-        config_errors,
-        client_op,
-        op_no_operation,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_roc_nzbget_reload_clamp_debounce_ms(
-    elapsed_since_first_ms: i64,
-    debounce_delay_ms: i64,
-    max_burst_delay_ms: i64,
-) -> i64 {
-    crate::options::roc_nzbget_reload_clamp_debounce_ms(
-        elapsed_since_first_ms,
-        debounce_delay_ms,
-        max_burst_delay_ms,
     )
 }
 
@@ -14387,117 +13958,8 @@ pub unsafe extern "C" fn nzbget_rs_tpr_post_format_info_name(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_conn_calc_read_buffer_cap(
-    read_buf_size: i32,
-    decode_slack: i32,
-) -> i32 {
-    crate::nntp::conn_calc_read_buffer_cap(read_buf_size, decode_slack)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_conn_format_port_str(port: i32) -> RsBuf {
     into_buf(crate::nntp::conn_format_port_str(port))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_conn_clamp_buf_avail(buf_avail: i32) -> i32 {
-    crate::nntp::conn_clamp_buf_avail(buf_avail)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_conn_format_report_err_with_code(
-    prefix: *const c_char,
-    err_code: i32,
-    err_msg: *const c_char,
-) -> RsBuf {
-    let p = if prefix.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(prefix).to_bytes()
-    };
-    let m = if err_msg.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(err_msg).to_bytes()
-    };
-    into_buf(
-        crate::nntp::conn_format_report_err_with_code(p, err_code, m),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_report_err(
-    err_msg: *const c_char,
-    err_str: *const c_char,
-) -> RsBuf {
-    let m = if err_msg.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(err_msg).to_bytes()
-    };
-    let s = if err_str.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(err_str).to_bytes()
-    };
-    into_buf(crate::tlscipher::tls_format_report_err(m, s))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_cert_verify_err(
-    host: *const c_char,
-    verify_err_str: *const c_char,
-) -> RsBuf {
-    let h = if host.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(host).to_bytes()
-    };
-    let v = if verify_err_str.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(verify_err_str).to_bytes()
-    };
-    into_buf(crate::tlscipher::tls_format_cert_verify_err(h, v))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_handshake_err(host: *const c_char) -> RsBuf {
-    let h = if host.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(host).to_bytes()
-    };
-    into_buf(crate::tlscipher::tls_format_handshake_err(h))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_hostname_mismatch_err(
-    host: *const c_char,
-    cert_host: *const c_char,
-) -> RsBuf {
-    let h = if host.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(host).to_bytes()
-    };
-    let ch = if cert_host.is_null() {
-        b"(null)"
-    } else {
-        CStr::from_ptr(cert_host).to_bytes()
-    };
-    into_buf(
-        crate::tlscipher::tls_format_hostname_mismatch_err(h, ch),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_select_io_err_msg(
-    is_write: i32,
-    peek_err_zero: i32,
-) -> *const c_char {
-    crate::tlscipher::tls_select_io_err_msg(is_write != 0, peek_err_zero != 0).as_ptr()
-        as *const c_char
 }
 
 #[no_mangle]
@@ -14901,33 +14363,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_script_ctrl_format_prefixed_varname(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_log_format_debug_line(
-    msg: *const c_char,
-    base_filename: *const c_char,
-    line_nr: c_int,
-    funcname: *const c_char,
-) -> RsBuf {
-    let m = if msg.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(msg).to_bytes()
-    };
-    let b = if base_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_filename).to_bytes()
-    };
-    let f = if funcname.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(funcname).to_bytes())
-    };
-    into_buf(crate::systemhealth::log_format_debug_line(
-        m, b, line_nr, f,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
     first_idx: c_int,
     values: *const i64,
@@ -14991,64 +14426,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_find_char_pos(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_is_tls13_version_str(
-    ver: *const c_char,
-) -> c_int {
-    let v = if ver.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(ver).to_bytes()
-    };
-    c_int::from(crate::tlscipher::tls_is_tls13_version_str(v))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_resolve_cipher_bits(
-    cipher_name: *const c_char,
-    raw_bits: u32,
-) -> u32 {
-    let c = if cipher_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(cipher_name).to_bytes()
-    };
-    crate::tlscipher::tls_resolve_cipher_bits(c, raw_bits)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_bulk_cipher_name(
-    bulk_name: *const c_char,
-    cipher_name: *const c_char,
-) -> RsBuf {
-    let b = if bulk_name.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(bulk_name).to_bytes())
-    };
-    let c = if cipher_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(cipher_name).to_bytes()
-    };
-    into_buf(crate::tlscipher::tls_format_bulk_cipher_name(b, c))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_compute_suite_flags(
-    is_aead: c_int,
-    tls13: c_int,
-    auth_is_cert: c_int,
-    kx_is_ephemeral: c_int,
-) -> u32 {
-    crate::tlscipher::tls_compute_suite_flags(
-        is_aead != 0,
-        tls13 != 0,
-        auth_is_cert != 0,
-        kx_is_ephemeral != 0,
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_nntp_conn_is_already_in_group(
     active_group: *const c_char,
     grp: *const c_char,
@@ -15064,22 +14441,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nntp_conn_is_already_in_group(
         CStr::from_ptr(grp).to_bytes()
     };
     c_int::from(crate::nntp::nntp_conn_is_already_in_group(a, g))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_options_should_expand_home_value(
-    value: *const c_char,
-    no_disk_access: c_int,
-) -> c_int {
-    let v = if value.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(value).to_bytes())
-    };
-    c_int::from(crate::options::options_should_expand_home_value(
-        v,
-        no_disk_access != 0,
-    ))
 }
 
 #[no_mangle]
@@ -15116,41 +14477,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_bytes_eq_ignore_case(
         CStr::from_ptr(b).to_bytes()
     };
     c_int::from(crate::util::bytes_eq_ignore_case(sa, sb))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_resolve_probe_result(
-    connected: c_int,
-    negotiated_cipher: *const c_char,
-    expected_cipher: *const c_char,
-    negotiated_version: c_int,
-    protocol: c_int,
-    tls13_ver: c_int,
-    tls12_ver: c_int,
-    auth_error: c_int,
-    tls_probe_failure: c_int,
-) -> c_int {
-    let neg = if negotiated_cipher.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(negotiated_cipher).to_bytes()
-    };
-    let exp = if expected_cipher.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(expected_cipher).to_bytes()
-    };
-    crate::tlscipher::tls_resolve_probe_result(
-        connected != 0,
-        neg,
-        exp,
-        negotiated_version,
-        protocol,
-        tls13_ver,
-        tls12_ver,
-        auth_error != 0,
-        tls_probe_failure,
-    )
 }
 
 #[no_mangle]
@@ -15286,19 +14612,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_mem_slices_equal(
     let sa = std::slice::from_raw_parts(a, len);
     let sb = std::slice::from_raw_parts(b, len);
     i32::from(crate::util::mem_slices_equal(sa, sb))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_is_cipher_list(
-    cipher: *const c_char,
-    cipher_len: usize,
-) -> c_int {
-    let s = if cipher.is_null() || cipher_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(cipher as *const u8, cipher_len)
-    };
-    i32::from(crate::tlscipher::tls_is_cipher_list(s))
 }
 
 #[no_mangle]
@@ -15597,95 +14910,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_select_volume_server_slot(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_disk_service_should_check_disk_space(
-    disk_space_mb: c_int,
-    is_downloading: c_int,
-) -> c_int {
-    i32::from(
-        crate::systemhealth::disk_service_should_check_disk_space(
-            disk_space_mb,
-            is_downloading != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_options_update_config_line_on_get(
-    line_no: c_int,
-    cur_config_line: c_int,
-) -> c_int {
-    crate::options::options_update_config_line_on_get(line_no, cur_config_line)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_nzbget_should_run_system_health_check(
-    server_mode: c_int,
-    system_health_check: c_int,
-) -> c_int {
-    i32::from(
-        crate::systemhealth::nzbget_should_run_system_health_check(
-            server_mode != 0,
-            system_health_check != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbget_classify_boot_usage_or_error(
-    print_usage: c_int,
-    has_errors: c_int,
-    arg_count: c_int,
-    out_exit_code: *mut c_int,
-) -> c_int {
-    if let Some(code) = crate::systemhealth::nzbget_classify_boot_usage_or_error(
-        print_usage != 0,
-        has_errors != 0,
-        arg_count,
-    ) {
-        if !out_exit_code.is_null() {
-            *out_exit_code = code;
-        }
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_nzbget_should_stop_frontend_immediately(
-    remote_client_mode: c_int,
-    stopped: c_int,
-) -> c_int {
-    i32::from(
-        crate::systemhealth::nzbget_should_stop_frontend_immediately(
-            remote_client_mode != 0,
-            stopped != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_log_classify_init_logfile_action(
-    remote_client_mode: c_int,
-    direct_client_mode: c_int,
-    write_log: c_int,
-    wl_none: c_int,
-    wl_reset: c_int,
-    has_log_file: c_int,
-    server_mode: c_int,
-) -> c_int {
-    crate::systemhealth::log_classify_init_logfile_action(
-        remote_client_mode != 0,
-        direct_client_mode != 0,
-        write_log,
-        wl_none,
-        wl_reset,
-        has_log_file != 0,
-        server_mode != 0,
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_script_ctrl_is_terminate_ok(
     child_pid: c_int,
     kill_res: c_int,
@@ -15793,131 +15017,6 @@ pub extern "C" fn nzbget_rs_dqh_webdl_is_terminal_retry_status(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_conn_is_unix_path_too_long(
-    host_len: usize,
-    sun_path_cap: usize,
-) -> c_int {
-    i32::from(crate::nntp::conn_is_unix_path_too_long(
-        host_len,
-        sun_path_cap,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_conn_resolve_gai_report_err_code(
-    res: c_int,
-    eai_system: c_int,
-) -> c_int {
-    crate::nntp::conn_resolve_gai_report_err_code(res, eai_system)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_conn_should_report_socket_create_failed(
-    is_invalid_socket: c_int,
-    has_addr_list: c_int,
-) -> c_int {
-    i32::from(
-        crate::nntp::conn_should_report_socket_create_failed(
-            is_invalid_socket != 0,
-            has_addr_list != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_conn_should_cleanup_unconnected_socket(
-    connected: c_int,
-    is_invalid_socket: c_int,
-) -> c_int {
-    i32::from(
-        crate::nntp::conn_should_cleanup_unconnected_socket(
-            connected != 0,
-            is_invalid_socket != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_conn_should_unlink_listening_unix_socket(
-    is_unix_path: c_int,
-    getsockopt_res: c_int,
-    is_listening: c_int,
-) -> c_int {
-    i32::from(
-        crate::nntp::conn_should_unlink_listening_unix_socket(
-            is_unix_path != 0,
-            getsockopt_res,
-            is_listening,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_conn_resolve_report_err_code(
-    err_code: c_int,
-    last_net_err: c_int,
-) -> c_int {
-    crate::nntp::conn_resolve_report_err_code(err_code, last_net_err)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_has_cert_and_key_files(
-    cert_empty: c_int,
-    key_empty: c_int,
-) -> c_int {
-    i32::from(crate::tlscipher::tls_has_cert_and_key_files(
-        cert_empty != 0,
-        key_empty != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_should_set_sni_hostname(
-    is_client: c_int,
-    host_empty: c_int,
-) -> c_int {
-    i32::from(crate::tlscipher::tls_should_set_sni_hostname(
-        is_client != 0,
-        host_empty != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_should_validate_client_cert(
-    is_client: c_int,
-    should_verify: c_int,
-) -> c_int {
-    i32::from(crate::tlscipher::tls_should_validate_client_cert(
-        is_client != 0,
-        should_verify != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_is_proto_version_out_of_bounds(
-    version: c_int,
-    minimum: c_int,
-    maximum: c_int,
-) -> c_int {
-    i32::from(
-        crate::tlscipher::tls_is_proto_version_out_of_bounds(version, minimum, maximum),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_should_send_close_notify(
-    has_session: c_int,
-    connected: c_int,
-    has_deadline: c_int,
-) -> c_int {
-    i32::from(crate::tlscipher::tls_should_send_close_notify(
-        has_session != 0,
-        connected != 0,
-        has_deadline != 0,
-    ))
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_webdl_is_connect_aborted(
     connected: c_int,
     is_stopped: c_int,
@@ -15976,75 +15075,6 @@ pub extern "C" fn nzbget_rs_dqh_webdl_should_disconnect_on_free(
         conn_status,
         cs_cancelled,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_cipher_fill_test_plaintext(
-    buf: *mut u8,
-    len: usize,
-) {
-    if buf.is_null() || len == 0 {
-        return;
-    }
-    let slice = std::slice::from_raw_parts_mut(buf, len);
-    crate::tlscipher::tls_cipher_fill_test_plaintext(slice);
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_cipher_is_prepare_batch_valid(
-    sequence: u64,
-    count: u32,
-) -> c_int {
-    i32::from(
-        crate::tlscipher::tls_cipher_is_prepare_batch_valid(sequence, count),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_tls_cipher_write_record_nonce(
-    prefix4: *const u8,
-    seq: u64,
-    out_nonce12: *mut u8,
-) {
-    if prefix4.is_null() || out_nonce12.is_null() {
-        return;
-    }
-    let prefix: &[u8; 4] = &*(prefix4 as *const [u8; 4]);
-    let out: &mut [u8; 12] = &mut *(out_nonce12 as *mut [u8; 12]);
-    crate::tlscipher::tls_cipher_write_record_nonce(prefix, seq, out);
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_cipher_is_record_seq_in_range(
-    sequence: u64,
-    first: u64,
-    count: usize,
-) -> c_int {
-    i32::from(
-        crate::tlscipher::tls_cipher_is_record_seq_in_range(sequence, first, count),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_cipher_precheck_probe_args(
-    cancelled: c_int,
-    milliseconds: u64,
-    verification: c_int,
-    has_cert_store: c_int,
-) -> c_int {
-    crate::tlscipher::tls_cipher_precheck_probe_args(
-        cancelled != 0,
-        milliseconds,
-        verification != 0,
-        has_cert_store != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_cipher_is_probe_addr_list_valid(
-    addr_count: usize,
-) -> c_int {
-    i32::from(crate::tlscipher::tls_cipher_is_probe_addr_list_valid(addr_count))
 }
 
 #[no_mangle]
@@ -16254,45 +15284,6 @@ pub extern "C" fn nzbget_rs_dqh_webdl_should_try_recv_when_buf_empty(
     buf_len: c_int,
 ) -> c_int {
     i32::from(crate::webdownload::webdl_should_try_recv_when_buf_empty(buf_len))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_should_verify_client_x509_store(
-    is_client: c_int,
-    has_x509_store: c_int,
-) -> c_int {
-    i32::from(
-        crate::tlscipher::tls_should_verify_client_x509_store(
-            is_client != 0,
-            has_x509_store != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_should_check_verify_result_on_handshake_fail(
-    is_client: c_int,
-    should_verify: c_int,
-) -> c_int {
-    i32::from(
-        crate::tlscipher::tls_should_check_verify_result_on_handshake_fail(
-            is_client != 0,
-            should_verify != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_tls_cipher_classify_probe_deadline_override(
-    current_result: c_int,
-    is_cancelled: c_int,
-    deadline_expired: c_int,
-) -> c_int {
-    crate::tlscipher::tls_cipher_classify_probe_deadline_override(
-        current_result,
-        is_cancelled != 0,
-        deadline_expired != 0,
-    )
 }
 
 #[repr(C)]

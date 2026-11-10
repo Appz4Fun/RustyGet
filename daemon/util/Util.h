@@ -19438,17 +19438,17 @@ private:
 					{
 						return false;
 					}
-					articleOffset = beginPos - 1;
-					int64 rangeSize = endPos - beginPos + 1;
-					if (articleOffset < 0 ||
-						rangeSize <= 0 ||
-						rangeSize > 1024LL * 1024LL * 1024LL ||
-						(articleFileSize > 0 && articleOffset + rangeSize > articleFileSize))
+					if (beginPos < 1 ||
+						endPos < beginPos ||
+						endPos - beginPos >= 1024LL * 1024LL * 1024LL ||
+						(articleFileSize > 0 && endPos > articleFileSize))
 					{
 						warn("Malformed article %s: range %lli-%lli out of range (file size %lli)", *m_infoName,
 							(long long)beginPos, (long long)endPos, (long long)articleFileSize);
 						return false;
 					}
+					articleOffset = beginPos - 1;
+					int64 rangeSize = endPos - beginPos + 1;
 					articleSize = (int)rangeSize;
 					m_decodedFileSize = articleFileSize;
 					if (fallbackRound > 0 && expectedFileSize > 0 && articleFileSize != expectedFileSize)
@@ -19460,10 +19460,10 @@ private:
 					if (fallbackRound > 0 && dupeExpectedOffset >= 0 && articleOffset != dupeExpectedOffset)
 					{
 						detail("Discarding article %s from duplicate: decoded offset mismatch (%lli vs %lli)",
-							*m_infoName, (long long)(beginPos - 1), (long long)dupeExpectedOffset);
+							*m_infoName, (long long)articleOffset, (long long)dupeExpectedOffset);
 						return false;
 					}
-					if (fallbackRound > 0 && dupeExpectedEnd >= 0 && articleOffset + (int64)articleSize != dupeExpectedEnd)
+					if (fallbackRound > 0 && dupeExpectedEnd >= 0 && endPos != dupeExpectedEnd)
 					{
 						detail("Discarding article %s from duplicate: decoded end mismatch (%lli vs %lli)",
 							*m_infoName, (long long)endPos, (long long)dupeExpectedEnd);
@@ -31301,31 +31301,31 @@ private:
 		m_postInfo->SetStreamRepairDone(true);
 		m_postInfo->SetStreamRepairRecovered(recovered);
 
-		if (recovered && nzbInfo->GetParRenameStatus() != NzbInfo::rsNone)
+		if (recovered || m_holesRemain)
 		{
-			nzbInfo->SetParRenameStatus(NzbInfo::rsNone);
-		}
-		if (recovered && nzbInfo->GetParStatus() == NzbInfo::psSkipped)
-		{
-			nzbInfo->SetParStatus(g_Options->GetParCheck() == Options::pcManual ? NzbInfo::psManual : NzbInfo::psNone);
-		}
-		if (m_holesRemain)
-		{
-			if (ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+			if (recovered && nzbInfo->GetParRenameStatus() != NzbInfo::rsNone)
 			{
-				m_postInfo->SetRequestParCheck(true);
+				nzbInfo->SetParRenameStatus(NzbInfo::rsNone);
 			}
-		}
-		else if (recovered)
-		{
-			if (ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+			if (nzbInfo->GetParStatus() > NzbInfo::psSkipped)
 			{
-				m_postInfo->SetRequestParCheck(true);
-				m_postInfo->SetForceParFull(true);
+				if (recovered)
+				{
+					nzbInfo->SetParStatus(g_Options->GetParCheck() == Options::pcManual ? NzbInfo::psManual : NzbInfo::psNone);
+					m_postInfo->SetForceParFull(true);
+					m_postInfo->SetRequestParCheck(false);
+				}
 			}
 			else
 			{
-				m_postInfo->SetRequestParCheck(false);
+				if (ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+				{
+					m_postInfo->SetRequestParCheck(true);
+				}
+				if (recovered)
+				{
+					m_postInfo->SetForceParFull(true);
+				}
 			}
 		}
 
@@ -47230,21 +47230,15 @@ private:
 		{
 			return nullptr;
 		}
-		if (Util::EndsWith(filename, ".html", false)) return "text/html";
 		if (Util::EndsWith(filename, ".css", false)) return "text/css";
+		if (Util::EndsWith(filename, ".html", false)) return "text/html";
 		if (Util::EndsWith(filename, ".js", false)) return "application/javascript";
-		if (Util::EndsWith(filename, ".json", false) || Util::EndsWith(filename, ".R", false)) return "application/json";
 		if (Util::EndsWith(filename, ".png", false)) return "image/png";
+		if (Util::EndsWith(filename, ".jpeg", false)) return "image/jpeg";
 		if (Util::EndsWith(filename, ".gif", false)) return "image/gif";
-		if (Util::EndsWith(filename, ".jpg", false)) return "image/jpeg";
 		if (Util::EndsWith(filename, ".svg", false)) return "image/svg+xml";
-		if (Util::EndsWith(filename, ".ico", false)) return "image/x-icon";
-		if (Util::EndsWith(filename, ".woff2", false)) return "font/woff2";
-		if (Util::EndsWith(filename, ".woff", false)) return "font/woff";
-		if (Util::EndsWith(filename, ".ttf", false)) return "font/ttf";
-		if (Util::EndsWith(filename, ".otf", false)) return "font/otf";
-		if (Util::EndsWith(filename, ".eot", false)) return "application/vnd.ms-fontobject";
-		return "application/octet-stream";
+		if (Util::EndsWith(filename, ".json", false)) return "application/json";
+		return nullptr;
 	}
 };
 

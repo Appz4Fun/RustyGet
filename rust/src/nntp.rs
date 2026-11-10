@@ -907,15 +907,6 @@ pub fn speed_test_is_iteration_failed(
     elapsed_sec == 0.0 || downloaded < target_size
 }
 
-/// Returns true when `Network::SpeedTest::ExecuteTest` should break from its receive loop (`received <= 0 || elapsed_sec >= timeout_sec`).
-pub fn speed_test_should_stop_recv_loop(
-    received: i32,
-    elapsed_sec: f64,
-    timeout_sec: f64,
-) -> bool {
-    received <= 0 || elapsed_sec >= timeout_sec
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

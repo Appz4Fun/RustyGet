@@ -895,34 +895,6 @@ pub fn maintenance_extract_package_info_str(
     Some((val_start, quote_close_rel))
 }
 
-/// Classifies a script output line (after stripping `m_prefixLen`) in `UpdateScriptController::AddMessage`:
-/// - `0`: regular log line (does not start with `"[NZB] "`)
-/// - `1`: `"[NZB] QUIT"` command
-/// - `-1`: invalid `"[NZB] ..."` command
-pub fn maintenance_classify_update_message(text: &[u8]) -> i32 {
-    if !text.starts_with(b"[NZB] ") {
-        0
-    } else if &text[6..] == b"QUIT" {
-        1
-    } else {
-        -1
-    }
-}
-
-/// Classifies a script output line (after stripping `m_prefixLen`) in `UpdateInfoScriptController::AddMessage`:
-/// - `0`: regular log line (does not start with `"[NZB] "`)
-/// - `1`: `"[NZB] [UPDATEINFO]..."` command (payload starts at `text + 18`)
-/// - `-1`: invalid `"[NZB] ..."` command
-pub fn maintenance_classify_update_info_message(text: &[u8]) -> i32 {
-    if !text.starts_with(b"[NZB] ") {
-        0
-    } else if text[6..].starts_with(b"[UPDATEINFO]") {
-        1
-    } else {
-        -1
-    }
-}
-
 /// Decodes a hex-encoded RSA-SHA256 signature line tail in `Signature::ReadSignature`
 /// (starting after `sigTitle`, trimming 2 trailing bytes when `sig_len > 2`, and decoding
 /// up to 256 bytes into `out_sig`). Returns `true` iff exactly 256 bytes were decoded.

@@ -2308,19 +2308,6 @@ fn bytes_to_path(bytes: &[u8]) -> std::path::PathBuf {
     std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
-/// Resolves `script` against `app_dir` if `script` does not start with `sep` for `Maintenance::StartUpdate`.
-pub fn maintenance_resolve_script_path(app_dir: &[u8], sep: u8, script: &[u8]) -> Vec<u8> {
-    if script.first().copied() != Some(sep) {
-        let mut out = Vec::with_capacity(app_dir.len() + 1 + script.len());
-        out.extend_from_slice(app_dir);
-        out.push(sep);
-        out.extend_from_slice(script);
-        out
-    } else {
-        script.to_vec()
-    }
-}
-
 /// Formats `"<web_dir><sep>package-info.json"` for `Maintenance::ReadPackageInfoStr`.
 pub fn maintenance_format_package_info_path(web_dir: &[u8], sep: u8) -> Vec<u8> {
     const SUFFIX: &[u8] = b"package-info.json";
@@ -2329,61 +2316,6 @@ pub fn maintenance_format_package_info_path(web_dir: &[u8], sep: u8) -> Vec<u8> 
     out.push(sep);
     out.extend_from_slice(SUFFIX);
     out
-}
-
-/// Formats `"update-script <base_name>"` or `"update-info-script <base_name>"`
-/// for `UpdateScriptController::Run` and `UpdateInfoScriptController::ExecuteScript`.
-pub fn maintenance_format_script_info_name(
-    is_info_script: bool,
-    base_name: &[u8],
-) -> Vec<u8> {
-    let prefix: &[u8] = if is_info_script {
-        b"update-info-script "
-    } else {
-        b"update-script "
-    };
-    let mut out = Vec::with_capacity(prefix.len() + base_name.len());
-    out.extend_from_slice(prefix);
-    out.extend_from_slice(base_name);
-    out
-}
-
-/// Returns `"STABLE"`, `"TESTING"`, or `"DEVEL"` for `UpdateScriptController::Run`.
-pub fn maintenance_branch_name(branch: i32) -> &'static [u8] {
-    match branch {
-        1 => b"TESTING\0",
-        2 => b"DEVEL\0",
-        _ => b"STABLE\0",
-    }
-}
-
-/// Returns `"DAEMON"` or `"SERVER"` for `UpdateScriptController::Run`.
-pub fn maintenance_run_mode_name(daemon_mode: bool) -> &'static [u8] {
-    if daemon_mode {
-        b"DAEMON\0"
-    } else {
-        b"SERVER\0"
-    }
-}
-
-/// Formats `"NZBUP_CMDLINE<index>"` for `UpdateScriptController::Run`.
-pub fn maintenance_format_cmdline_env_name(index: i32) -> Vec<u8> {
-    format!("NZBUP_CMDLINE{index}").into_bytes()
-}
-
-/// Returns `(log_prefix, prefix_len)` after bounding `base_name` to `max_len` bytes
-/// and stripping the file extension for `UpdateScriptController::Run` and
-/// `UpdateInfoScriptController::ExecuteScript`.
-pub fn maintenance_strip_ext_and_calc_prefix_len(
-    base_name: &[u8],
-    max_len: usize,
-) -> (Vec<u8>, usize) {
-    let bounded = &base_name[..base_name.len().min(max_len)];
-    let stem_len = bounded
-        .iter()
-        .rposition(|&b| b == b'.')
-        .unwrap_or(bounded.len());
-    (bounded[..stem_len].to_vec(), stem_len.saturating_add(2))
 }
 
 /// Formats `"\"RSA-SHA256(<base_name>)\" : \""` for `Signature::ReadSignature`.

@@ -42967,11 +42967,9 @@ public:
 			return false;
 		}
 
+		if (m_updateScript[0] != PATH_SEPARATOR)
 		{
-			NzbgetRsBuf scriptPathBuf = nzbget_rs_dqh_maintenance_resolve_script_path(
-				g_Options->GetAppDir(), PATH_SEPARATOR, *m_updateScript);
-			m_updateScript.Set(scriptPathBuf.data ? scriptPathBuf.data : "", (int)scriptPathBuf.len);
-			nzbget_rs_free(scriptPathBuf);
+			m_updateScript = CString::FormatStr("%s%c%s", g_Options->GetAppDir(), PATH_SEPARATOR, *m_updateScript);
 		}
 
 		{
@@ -43012,11 +43010,10 @@ public:
 			{
 				text = text + m_prefixLen;
 
-				int infoKind = nzbget_rs_feh_maintenance_classify_update_info_message(text);
-				if (infoKind != 0)
+				if (!strncmp(text, "[NZB] ", 6))
 				{
 					debug("Command %s detected", text + 6);
-					if (infoKind == 1)
+					if (!strncmp(text + 6, "[UPDATEINFO]", 12))
 					{
 						m_updateInfo.Append(text + 6 + 12);
 					}
@@ -43093,16 +43090,14 @@ public:
 private:
 	static int InitScriptInfoAndLogPrefix(ScriptController& sc, int isInfoScript, const char* baseScript, size_t maxPrefixLen)
 	{
-		NzbgetRsBuf infoBuf = nzbget_rs_dqh_maintenance_format_script_info_name(isInfoScript, baseScript);
-		sc.SetInfoName(infoBuf.data ? infoBuf.data : "");
-		nzbget_rs_free(infoBuf);
+		sc.SetInfoName(CString::FormatStr("%s %s", isInfoScript ? "update-info-script" : "update-script", baseScript));
 
-		size_t prefixLen = 0;
-		NzbgetRsBuf lpBuf = nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len(
-			baseScript, maxPrefixLen, &prefixLen);
-		sc.SetLogPrefix(lpBuf.data ? lpBuf.data : "");
-		nzbget_rs_free(lpBuf);
-		return (int)prefixLen;
+		size_t boundedLen = std::min(strlen(baseScript), maxPrefixLen);
+		CString logPrefix;
+		logPrefix.Set(baseScript, (int)boundedLen);
+		if (char* ext = strrchr(logPrefix, '.')) *ext = '\0';
+		sc.SetLogPrefix(logPrefix);
+		return strlen(logPrefix) + 2;
 	}
 
 	class UpdateScriptController : public Thread, public ScriptController
@@ -43118,24 +43113,17 @@ private:
 			const char* baseScript = FileSystem::BaseFileName(GetScript());
 			m_prefixLen = InitScriptInfoAndLogPrefix(*this, 0, baseScript, 99);
 
-			SetEnvVar("NZBUP_BRANCH", nzbget_rs_dqh_maintenance_branch_name((int)m_branch));
+			static const char* BranchNames[] = { "STABLE", "TESTING", "DEVEL" };
+			SetEnvVar("NZBUP_BRANCH", BranchNames[m_branch]);
 
-			SetEnvVar("NZBUP_RUNMODE", nzbget_rs_dqh_maintenance_run_mode_name(g_Options->GetDaemonMode() ? 1 : 0));
+			SetEnvVar("NZBUP_RUNMODE", g_Options->GetDaemonMode() ? "DAEMON" : "SERVER");
 
 			for (int i = 0; i < g_ArgumentCount; i++)
 			{
-				NzbgetRsBuf envBuf = nzbget_rs_dqh_maintenance_format_cmdline_env_name(i);
-				SetEnvVar(envBuf.data ? envBuf.data : "", (*g_Arguments)[i]);
-				nzbget_rs_free(envBuf);
+				SetEnvVar(BString<100>("NZBUP_CMDLINE%i", i), (*g_Arguments)[i]);
 			}
 
-			int pid = (int)getpid();
-
-			{
-				NzbgetRsBuf pidBuf = nzbget_rs_dqh_conn_format_port_str(pid);
-				SetEnvVar("NZBUP_PROCESSID", pidBuf.data ? pidBuf.data : "");
-				nzbget_rs_free(pidBuf);
-			}
+			SetIntEnvVar("NZBUP_PROCESSID", (int)getpid());
 
 			Execute();
 
@@ -43149,11 +43137,10 @@ private:
 		{
 			text = text + m_prefixLen;
 
-			int msgKind = nzbget_rs_feh_maintenance_classify_update_message(text);
-			if (msgKind != 0)
+			if (!strncmp(text, "[NZB] ", 6))
 			{
 				debug("Command %s detected", text + 6);
-				if (msgKind == 1)
+				if (!strcmp(text + 6, "QUIT"))
 				{
 					Detach();
 					ExitProc();
@@ -43252,7 +43239,7 @@ namespace
 
 	double MiBPerSec(uint64_t bytes, double ms)
 	{
-		return nzbget_rs_ntw_xmlrpc_mib_per_sec(bytes, ms);
+		return ms > 0.0 ? (static_cast<double>(bytes) / 1024.0 / 1024.0) / (ms / 1000.0) : 0.0;
 	}
 
 	void AppendRsBuf(StringBuilder& response, NzbgetRsBuf buf)
@@ -43523,16 +43510,13 @@ void ExecutePauseUnpause(bool pause, int pauseAction)
 void ExecuteScheduleResume()
 {
 	int seconds = 0;
-	bool hasParam = NextParamAsInt(&seconds);
-	int64_t resumeTime = 0;
-	if (!nzbget_rs_dqh_xmlrpc_calc_schedule_resume_time(
-		hasParam ? 1 : 0, seconds, (int64_t)Util::CurrentTime(), &resumeTime))
+	if (!NextParamAsInt(&seconds) || seconds < 0)
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
 	}
 
-	g_WorkState->SetResumeTime((time_t)resumeTime);
+	g_WorkState->SetResumeTime(Util::CurrentTime() + (time_t)seconds);
 
 	BuildBoolResponse(true);
 }
@@ -43564,15 +43548,13 @@ void ExecuteSetDownloadRate()
 {
 	int rate = 0;
 	// in KB/s: a rate past INT_MAX / 1024 wrapped around to a tiny limit
-	int bytesPerSec = 0;
-	if (!NextParamAsInt(&rate) ||
-		!nzbget_rs_rol_xmlrpc_validate_download_rate(rate, &bytesPerSec))
+	if (!NextParamAsInt(&rate) || rate < 0 || rate > INT_MAX / 1024)
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
 	}
 
-	g_WorkState->SetSpeedLimit(bytesPerSec);
+	g_WorkState->SetSpeedLimit(rate * 1024);
 	BuildBoolResponse(true);
 }
 
@@ -43705,7 +43687,7 @@ void ExecuteLog(int logSource)
 	int idFrom = 0;
 	int nrEntries = 0;
 	if (!NextParamAsInt(&idFrom) || !NextParamAsInt(&nrEntries) ||
-		!nzbget_rs_roc_xmlrpc_log_params_valid(idFrom, nrEntries))
+		(nrEntries > 0 && idFrom > 0))
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
@@ -43747,10 +43729,23 @@ void ExecuteLog(int logSource)
 	GuardedMessageList messages = guardMessages();
 
 	int start = messages->size();
-	nzbget_rs_rco_rpc_log_slice_range(
-		(int)messages->size(),
-		messages->empty() ? 0 : (int)messages->front().GetId(),
-		idFrom, nrEntries, &start, &nrEntries);
+	if (nrEntries > 0)
+	{
+		if (nrEntries > (int)messages->size())
+		{
+			nrEntries = messages->size();
+		}
+		start = messages->size() - nrEntries;
+	}
+	if (idFrom > 0 && !messages->empty())
+	{
+		nrEntries = messages->size();
+		start = idFrom - messages->front().GetId();
+		if (start < 0)
+		{
+			start = 0;
+		}
+	}
 
 	std::vector<NzbgetRsRpcLogEntry> entries;
 	if ((uint32)start < messages->size())
@@ -43780,7 +43775,7 @@ void ExecuteListFiles()
 	int idEnd = 0;
 	bool hasIdStart = NextParamAsInt(&idStart);
 	bool hasIdEnd = hasIdStart ? NextParamAsInt(&idEnd) : false;
-	if (!nzbget_rs_roc_xmlrpc_list_files_params_valid(hasIdStart ? 1 : 0, hasIdEnd ? 1 : 0, idStart, idEnd, 0))
+	if (hasIdStart && (!hasIdEnd || idEnd < idStart))
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
@@ -43790,7 +43785,7 @@ void ExecuteListFiles()
 	int nzbId = 0;
 	NextParamAsInt(&nzbId);
 
-	if (!nzbget_rs_roc_xmlrpc_list_files_params_valid(hasIdStart ? 1 : 0, hasIdEnd ? 1 : 0, idStart, idEnd, nzbId))
+	if (nzbId > 0 && (idStart != 0 || idEnd != 0))
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
@@ -43808,13 +43803,14 @@ void ExecuteListFiles()
 	{
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
-			int progress = 0;
-			if (nzbget_rs_rco_rpc_list_files_match_and_progress(
-				nzbId, fileInfo->GetNzbInfo()->GetId(), fileInfo->GetId(),
-				idStart, idEnd, fileInfo->GetSize(), fileInfo->GetRemainingSize(),
-				fileInfo->GetMissedSize(), fileInfo->GetFailedSize(),
-				fileInfo->GetSuccessSize(), &progress))
+			if ((nzbId > 0 && nzbId == fileInfo->GetNzbInfo()->GetId()) ||
+				(nzbId == 0 && (idStart == 0 || (idStart <= fileInfo->GetId() && fileInfo->GetId() <= idEnd))))
 			{
+				int64 denom = fileInfo->GetSize() - fileInfo->GetMissedSize();
+				int progress = (fileInfo->GetFailedSize() == 0 && fileInfo->GetSuccessSize() == 0) || denom <= 0
+					? 0
+					: (int)(1000 - fileInfo->GetRemainingSize() * 1000 / denom);
+
 				NzbgetRsRpcFileItem item{};
 				item.id = fileInfo->GetId();
 				item.file_size = fileInfo->GetSize();
@@ -43933,10 +43929,13 @@ void AppendPostInfoFields(PostInfo* postInfo, int logEntries, bool postQueue)
 	if (logEntries > 0 && postInfo)
 	{
 		messages.emplace(postInfo->GetNzbInfo()->GuardCachedMessages());
-		int start = 0;
-		if (nzbget_rs_rol_xmlrpc_post_info_log_slice(
-			logEntries, (int)(*messages)->size(), &start, &logEntries))
+		if (!(*messages)->empty())
 		{
+			if (logEntries > (int)(*messages)->size())
+			{
+				logEntries = (*messages)->size();
+			}
+			int start = (*messages)->size() - logEntries;
 			entries.reserve((*messages)->size() - (uint32)start);
 			for (uint32 i = (uint32)start; i < (*messages)->size(); i++)
 			{
@@ -43977,7 +43976,11 @@ void ExecuteListGroups()
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 	{
-		const char* status = DetectGroupStatus(nzbInfo);
+		bool hasPostInfo = nzbInfo->GetPostInfo() != nullptr;
+		int postStage = hasPostInfo ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
+		bool queueScriptActive = false;
+		bool hasQueueScriptJob = hasPostInfo && postStage == (int)PostInfo::ptQueued &&
+			g_QueueScriptCoordinator->HasJob(nzbInfo->GetId(), &queueScriptActive);
 
 		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_group_item_start(
 			IsJson() ? 1 : 0,
@@ -43989,7 +43992,12 @@ void ExecuteListGroups()
 			nzbInfo->GetRemainingParCount(),
 			nzbInfo->GetPriority(),
 			nzbInfo->GetActiveDownloads(),
-			status));
+			hasPostInfo ? 1 : 0,
+			postStage,
+			hasQueueScriptJob ? 1 : 0,
+			queueScriptActive ? 1 : 0,
+			(int)nzbInfo->GetDirectUnpackStatus(),
+			(int)nzbInfo->GetKind()));
 
 		AppendNzbInfoFields(nzbInfo);
 		AppendCondResponse(",\n", IsJson());
@@ -43999,25 +44007,6 @@ void ExecuteListGroups()
 	}
 
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
-}
-
-const char* DetectGroupStatus(NzbInfo* nzbInfo)
-{
-	bool hasPostInfo = nzbInfo->GetPostInfo() != nullptr;
-	int postStage = hasPostInfo ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
-	bool queueScriptActive = false;
-	bool hasQueueScriptJob = hasPostInfo && postStage == (int)PostInfo::ptQueued &&
-		g_QueueScriptCoordinator->HasJob(nzbInfo->GetId(), &queueScriptActive);
-	return nzbget_rs_rco_rpc_detect_group_status(
-		hasPostInfo ? 1 : 0,
-		postStage,
-		hasQueueScriptJob ? 1 : 0,
-		queueScriptActive ? 1 : 0,
-		(int)nzbInfo->GetDirectUnpackStatus(),
-		nzbInfo->GetActiveDownloads(),
-		(int)nzbInfo->GetKind(),
-		nzbInfo->GetPausedSize(),
-		nzbInfo->GetRemainingSize());
 }
 
 // v18:
@@ -44305,16 +44294,20 @@ void ExecuteWriteLog()
 
 	debug("Kind=%s, Text=%s", kind, text);
 
-	switch (nzbget_rs_rco_rpc_parse_write_log_kind(kind))
+	if (!strcmp(kind, "INFO"))
+		info("%s", text);
+	else if (!strcmp(kind, "WARNING"))
+		warn("%s", text);
+	else if (!strcmp(kind, "ERROR"))
+		error("%s", text);
+	else if (!strcmp(kind, "DETAIL"))
+		detail("%s", text);
+	else if (!strcmp(kind, "DEBUG"))
+		debug("%s", text);
+	else
 	{
-		case 0: info("%s", text); break;
-		case 1: warn("%s", text); break;
-		case 2: error("%s", text); break;
-		case 4: detail("%s", text); break;
-		case 3: debug("%s", text); break;
-		default:
-			BuildErrorResponse(3, "Invalid Kind");
-			return;
+		BuildErrorResponse(3, "Invalid Kind");
+		return;
 	}
 
 	BuildBoolResponse(true);
@@ -44376,7 +44369,6 @@ void ExecuteHistory()
 		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
 		{
 			DupInfo* dupInfo = historyInfo->GetDupInfo();
-			const char* status = nzbget_rs_rco_rpc_detect_history_dup_status((int)dupInfo->GetStatus());
 
 			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_history_dup_item(
 				IsJson() ? 1 : 0,
@@ -44388,8 +44380,7 @@ void ExecuteHistory()
 				dupInfo->GetDupeKey(),
 				dupInfo->GetDupeScore(),
 				(int)dupInfo->GetDupeMode(),
-				(int)dupInfo->GetStatus(),
-				status));
+				(int)dupInfo->GetStatus()));
 		}
 
 		AppendResponse(IsJson() ? "}" : "</struct></value>");
@@ -44741,17 +44732,14 @@ void ExecuteViewFeed(bool preview)
 
 	for (FeedItemInfo& feedItemInfo : feedItems.get())
 	{
-		int sizeMB = 0;
-		if (nzbget_rs_rol_xmlrpc_view_feed_should_include(
-			includeNonMatching ? 1 : 0, (int)feedItemInfo.GetMatchStatus(),
-			(int)FeedItemInfo::msAccepted, feedItemInfo.GetSize(), &sizeMB))
+		if (includeNonMatching || feedItemInfo.GetMatchStatus() == FeedItemInfo::msAccepted)
 		{
 			NzbgetRsRpcFeedItem item{};
 			item.title = feedItemInfo.GetTitle();
 			item.filename = feedItemInfo.GetFilename();
 			item.url = feedItemInfo.GetUrl();
 			item.size = feedItemInfo.GetSize();
-			item.size_mb = sizeMB;
+			item.size_mb = (int)(feedItemInfo.GetSize() / 1024 / 1024);
 			item.category = feedItemInfo.GetCategory();
 			item.add_category = feedItemInfo.GetAddCategory().c_str();
 			item.pause_nzb = feedItemInfo.GetPauseNzb() ? 1 : 0;
@@ -44847,14 +44835,11 @@ void ExecuteReadUrl()
 	}
 
 	// generate temp file name
-	BString<1024> tempFileName;
+	CString tempFileName;
 	int num = 1;
 	while (num == 1 || FileSystem::FileExists(tempFileName))
 	{
-		NzbgetRsBuf tmpBuf = nzbget_rs_tpr_xmlrpc_format_readurl_temp_filename(
-			g_Options->GetTempDir(), PATH_SEPARATOR, num);
-		tempFileName.Set(tmpBuf.data ? tmpBuf.data : "", (int)tmpBuf.len);
-		nzbget_rs_free(tmpBuf);
+		tempFileName.Format("%s%creadurl-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, num);
 		num++;
 	}
 
@@ -44912,13 +44897,17 @@ void ExecuteStartUpdate()
 	}
 
 	Maintenance::EBranch branch;
-	int branchCode = nzbget_rs_rco_rpc_parse_update_branch(branchName);
-	if (branchCode < 0)
+	if (!strcasecmp(branchName, "STABLE"))
+		branch = Maintenance::brStable;
+	else if (!strcasecmp(branchName, "TESTING"))
+		branch = Maintenance::brTesting;
+	else if (!strcasecmp(branchName, "DEVEL"))
+		branch = Maintenance::brDevel;
+	else
 	{
 		BuildErrorResponse(2, "Invalid parameter (Branch)");
 		return;
 	}
-	branch = (Maintenance::EBranch)branchCode;
 
 	bool ok = g_Maintenance->StartUpdate(branch);
 
@@ -45009,13 +44998,13 @@ void ExecuteResetServerVolume()
 		return;
 	}
 
-	int counterKind = nzbget_rs_ntw_xmlrpc_validate_reset_counter(counter);
-	if (counterKind == 0)
+	bool reset = Util::EmptyStr(counter);
+	bool custom = !strcmp(counter, "CUSTOM");
+	if (!reset && !custom)
 	{
 		BuildErrorResponse(3, "Invalid Counter");
 		return;
 	}
-	bool reset = counterKind == 1;
 
 	bool ok = false;
 	int index = 0;
@@ -45098,8 +45087,7 @@ void ExecuteTestServer()
 		void PrintError(const char* errMsg) override { m_owner->PrintTestServerError(errMsg); }
 	};
 	TestConnection connection(&server, this);
-	connection.SetTimeout(nzbget_rs_rol_xmlrpc_test_server_effective_timeout(
-		ts.timeout, g_Options->GetArticleTimeout()));
+	connection.SetTimeout(ts.timeout > 0 ? ts.timeout : g_Options->GetArticleTimeout());
 	connection.SetSuppressErrors(false);
 
 	bool ok = connection.Connect();
@@ -45109,14 +45097,10 @@ void ExecuteTestServer()
 		BString<1024> id;
 		while (id.Length() < 30)
 		{
-			NzbgetRsBuf rBuf = nzbget_rs_dqh_conn_format_port_str(rand());
-			id.Append(rBuf.data ? rBuf.data : "", (int)rBuf.len);
-			nzbget_rs_free(rBuf);
+			id.Append(BString<100>("%i", rand()));
 		}
-		NzbgetRsBuf cmdBuf = nzbget_rs_tpr_xmlrpc_format_testserver_article_cmd(*id);
-		const char* response = connection.Request(cmdBuf.data ? cmdBuf.data : "");
-		nzbget_rs_free(cmdBuf);
-		ok = nzbget_rs_rol_xmlrpc_test_server_response_ok(response) != 0;
+		const char* response = connection.Request(BString<1024>("ARTICLE <%s@nzbget.com>\r\n", *id));
+		ok = response && (*response == '4' || *response == '2');
 	}
 
 	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(
@@ -45168,13 +45152,12 @@ void ExecuteTestServerSpeed()
 	}
 
 	NewsServer* server = g_ServerPool->GetServerById(serverId);
-	int serverErr = nzbget_rs_roc_xmlrpc_test_server_speed_check_server(
-		server != nullptr ? 1 : 0,
-		server && server->GetActive() ? 1 : 0,
-		server ? server->GetMaxConnections() : 0);
-	if (serverErr != 0)
+	if (!server || !server->GetActive() || server->GetMaxConnections() == 0)
 	{
-		BuildErrorResponse(2, nzbget_rs_dqh_xmlrpc_test_server_speed_err_msg(serverErr));
+		BuildErrorResponse(2,
+			!server ? "Server not found" :
+			!server->GetActive() ? "Server is not active" :
+			"Server has no connections configured");
 		return;
 	}
 
@@ -45289,10 +45272,7 @@ void ExecuteTestNetworkSpeed()
 		auto start = steady_clock::now();
 		while (int received = connection.TryRecv(buffer, sizeof(buffer)))
 		{
-			if (nzbget_rs_dqh_speed_test_should_stop_recv_loop(
-				received,
-				duration<double>(steady_clock::now() - start).count(),
-				static_cast<double>(timeoutSec)) != 0)
+			if (received <= 0 || duration<double>(steady_clock::now() - start).count() >= static_cast<double>(timeoutSec))
 			{
 				break;
 			}
@@ -45400,8 +45380,7 @@ void ExecuteStartScript()
 
 		m_userAccess = (EUserAccess)nzbget_rs_rpc_access(m_protocol, m_userAccess);
 
-		if (nzbget_rs_dqh_xmlrpc_is_multicall_post(
-			methodName, m_protocol == rpXmlRpc ? 1 : 0, m_httpMethod == hmPost ? 1 : 0) != 0)
+		if (!strcasecmp(methodName, "system.multicall") && m_protocol == rpXmlRpc && m_httpMethod == hmPost)
 		{
 			MutliCall();
 		}
@@ -45447,7 +45426,7 @@ void ExecuteStartScript()
 	void SetRequest(char* request) { m_request = request; }
 	const char* GetResponse() { return m_response; }
 	const char* GetContentType() { return m_contentType; }
-	static bool IsRpcRequest(const char* url) { return nzbget_rs_rco_rpc_is_rpc_request(url) != 0; }
+	static bool IsRpcRequest(const char* url) { return nzbget_rs_rpc_protocol(url) != rpUndefined; }
 	bool IsSafeMethod() { return m_safeMethod; }
 
 private:
@@ -45472,20 +45451,14 @@ private:
 
 	XmlCommand CreateCommand(const char* methodName)
 	{
-		int accessDenied = nzbget_rs_ntw_xmlrpc_check_user_access_denied(
+		int cmdId = nzbget_rs_xmlrpc_match_command(
 			(int)m_userAccess, (int)uaAdd, (int)uaRestricted, methodName);
-		if (accessDenied == 1)
+		if (cmdId == -1 || cmdId == -2)
 		{
-			warn("Received request \"%s\" from add-user, access denied", methodName);
+			warn("Received request \"%s\" from %s, access denied",
+				methodName, cmdId == -1 ? "add-user" : "restricted user");
 			return XmlCommand(401, "Access denied");
 		}
-		if (accessDenied == 2)
-		{
-			warn("Received request \"%s\" from restricted user, access denied", methodName);
-			return XmlCommand(401, "Access denied");
-		}
-
-		int cmdId = nzbget_rs_xmlrpc_match_command(methodName);
 		if (cmdId <= 0)
 		{
 			return XmlCommand(1, "Invalid procedure");
@@ -45500,25 +45473,23 @@ private:
 		response.Append("<array><data>");
 
 		char* requestPtr = m_request;
-		size_t structOff = 0;
-		while (nzbget_rs_rol_xmlrpc_multicall_find_struct_end(requestPtr, &structOff))
+		while (char* callEnd = strstr(requestPtr, "</struct>"))
 		{
-			char* callEnd = requestPtr + structOff;
 			*callEnd = '\0';
 			debug("MutliCall, request=%s", requestPtr);
-			size_t nameOff = 0;
-			size_t paramsOff = 0;
-			if (!nzbget_rs_rol_xmlrpc_multicall_locate_parts(requestPtr, structOff, &nameOff, &paramsOff))
+			char* nameEnd = strstr(requestPtr, "</name>");
+			if (!nameEnd)
 			{
 				error = true;
 				break;
 			}
-			char* nameEnd = requestPtr + nameOff;
 
 			char methodName[100];
 			methodName[0] = '\0';
 			WebUtil::XmlParseTagValue(nameEnd, "string", methodName, sizeof(methodName), nullptr);
 			debug("MutliCall, MethodName=%s", methodName);
+
+			char* paramsEnd = strstr(nameEnd, "params</name>");
 
 			XmlCommand command = CreateCommand(methodName);
 			// a call of the multicall runs as the caller, with the caller's access: it ran
@@ -45527,21 +45498,22 @@ private:
 			command.SetProtocol(m_protocol);
 			command.SetHttpMethod(m_httpMethod);
 			command.SetUserAccess(m_userAccess);
-			command.SetRequest(requestPtr + paramsOff);
+			command.SetRequest(paramsEnd ? paramsEnd : requestPtr);
 			m_safeMethod |= command.IsSafeMethod();
 			command.Execute();
 
 			debug("MutliCall, Response=%s", command.GetResponse());
 
-			bool wrapArray = nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(command.GetResponse()) != 0;
-			if (wrapArray)
+			bool fault = !strncmp(command.GetResponse(), "<fault>", 7);
+			bool array = !fault && !strncmp(command.GetResponse(), "<array>", 7);
+			if (!fault && !array)
 			{
 				response.Append("<array><data>");
 			}
 			response.Append("<value>");
 			response.Append(command.GetResponse());
 			response.Append("</value>");
-			if (wrapArray)
+			if (!fault && !array)
 			{
 				response.Append("</data></array>");
 			}
@@ -45573,7 +45545,7 @@ private:
 		nzbget_rs_free(head);
 		nzbget_rs_free(tail);
 
-		m_contentType = nzbget_rs_dqh_xmlrpc_response_content_type(xmlRpc ? 1 : 0);
+		m_contentType = xmlRpc ? "text/xml" : "application/json";
 	}
 	void BuildErrorResponse(int errCode, const char* errText, const char* callbackFunc = "", const char* requestId = nullptr)
 	{
@@ -45621,9 +45593,7 @@ public:
 
 		ParseHeaders();
 
-		int preParseMethod = nzbget_rs_dqh_webserver_classify_pre_parse_method(
-			(int)m_httpMethod, (int)hmPost, (int)hmOptions, m_contentLen);
-		if (preParseMethod == 1)
+		if (m_httpMethod == hmPost && m_contentLen <= 0)
 		{
 			// answered and closed: without an answer a kept-alive client waited until
 			// its timeout, and a body (chunked) left unread would be the next request
@@ -45633,7 +45603,7 @@ public:
 			return;
 		}
 
-		if (preParseMethod == 2)
+		if (m_httpMethod == hmOptions)
 		{
 			SendOptionsResponse();
 			return;
@@ -45647,8 +45617,7 @@ public:
 		m_rpcRequest = XmlRpcProcessor::IsRpcRequest(m_url);
 		m_authorized = CheckCredentials();
 
-		if (nzbget_rs_sfw_web_proc_should_send_auth_response(
-			g_Options->GetFormAuth() ? 1 : 0, m_rpcRequest ? 1 : 0, m_authorized ? 1 : 0) != 0)
+		if ((!g_Options->GetFormAuth() || m_rpcRequest) && !m_authorized)
 		{
 			SendAuthResponse();
 			return;
@@ -45659,7 +45628,7 @@ public:
 			// a body of a size no request has: the buffer for it couldn't be allocated
 			// (its size + 1 overflowed at INT_MAX) and was written through anyway. A
 			// request without credentials (the login form) is small
-			if (!nzbget_rs_ntw_web_proc_is_content_len_valid(m_contentLen, m_authorized ? 1 : 0))
+			if (m_contentLen < 0 || m_contentLen > (m_authorized ? 768 * 1024 * 1024 : 64 * 1024))
 			{
 				SendErrorResponse(ERR_HTTP_BAD_REQUEST, true);
 				return;
@@ -45730,34 +45699,37 @@ private:
 		// 1 byte = 2 hex characters.
 		// For a token string of size TOKEN_SIZE (including \0), we need half that many random bytes.
 		constexpr size_t BYTES_NEEDED = (TOKEN_SIZE - 1) / 2;
+		uint8_t randBytes[BYTES_NEEDED];
+		bool ok = false;
 
 #ifndef DISABLE_TLS
-		unsigned char randBytes[BYTES_NEEDED];
-		if (RAND_bytes(randBytes, static_cast<int>(BYTES_NEEDED)) == 1)
-		{
-			nzbget_rs_dqh_webserver_encode_hex_token(
-				randBytes, BYTES_NEEDED, token, TOKEN_SIZE);
-			return;
-		}
+		ok = RAND_bytes(randBytes, static_cast<int>(BYTES_NEEDED)) == 1;
 #endif
-
-		try
+		if (!ok)
 		{
-			std::random_device rd;
-			std::uniform_int_distribution<unsigned int> dist(0, 0xFF);
-			uint8_t fallbackBytes[BYTES_NEEDED];
-			for (size_t i = 0; i < BYTES_NEEDED; ++i)
+			try
 			{
-				fallbackBytes[i] = static_cast<uint8_t>(dist(rd));
+				std::random_device rd;
+				std::uniform_int_distribution<unsigned int> dist(0, 0xFF);
+				for (size_t i = 0; i < BYTES_NEEDED; ++i)
+				{
+					randBytes[i] = static_cast<uint8_t>(dist(rd));
+				}
 			}
-			nzbget_rs_dqh_webserver_encode_hex_token(
-				fallbackBytes, BYTES_NEEDED, token, TOKEN_SIZE);
+			catch (const std::exception& ex)
+			{
+				error("Could not generate secure authentication token: %s", ex.what());
+				exit(1);
+			}
 		}
-		catch (const std::exception& ex)
+
+		static constexpr char HEX[] = "0123456789abcdef";
+		for (size_t i = 0; i < BYTES_NEEDED; ++i)
 		{
-			error("Could not generate secure authentication token: %s", ex.what());
-			exit(1);
+			token[i * 2] = HEX[randBytes[i] >> 4];
+			token[i * 2 + 1] = HEX[randBytes[i] & 0x0f];
 		}
+		token[BYTES_NEEDED * 2] = '\0';
 	}
 
 	void ParseHeaders()
@@ -45768,11 +45740,7 @@ private:
 		m_contentLen = 0;
 		while (char* p = m_connection->ReadLine(buffer, sizeof(buffer), nullptr))
 		{
-			size_t crPos = 0;
-			if (nzbget_rs_dqh_scanner_find_last_char_pos(p, '\r', &crPos) != 0)
-			{
-				p[crPos] = '\0';
-			}
+			if (char* cr = strrchr(p, '\r')) *cr = '\0';
 			debug("header=%s", p);
 
 			size_t start = 0, len = 0;
@@ -45878,12 +45846,10 @@ private:
 		}
 		if (check.warn)
 		{
-			NzbgetRsBuf fwdBuf = nzbget_rs_dqh_webserver_format_forwarded_for_suffix(*m_forwardedFor);
 			warn("Request received on port %i from %s%s, but username (%s) or password invalid",
 				g_Options->GetControlPort(), m_connection->GetRemoteAddr(),
-				fwdBuf.data ? fwdBuf.data : "",
+				m_forwardedFor.Empty() ? "" : *CString::FormatStr(" (forwarded for: %s)", *m_forwardedFor),
 				m_authInfo);
-			nzbget_rs_free(fwdBuf);
 		}
 		return check.authorized != 0;
 	}
@@ -45921,7 +45887,7 @@ private:
 			SendErrorResponse(ERR_HTTP_NOT_FOUND, true);
 			return;
 		}
-		if (nzbget_rs_dqh_webserver_classify_ext_route(getRoute) != 0)
+		if (getRoute == 1 || getRoute == 2)
 		{
 			if (!m_authorized)
 			{
@@ -45955,9 +45921,7 @@ private:
 				if (ec) continue;
 
 				auto rel = resolvedPath.lexically_relative(resolvedDir);
-				if (nzbget_rs_dqh_webserver_is_rel_path_outside_root(
-					rel.empty() ? 1 : 0,
-					rel.empty() ? '\0' : static_cast<char>(rel.native().front())) != 0) continue;
+				if (rel.empty() || rel.native().front() == '.') continue;
 
 				CharBuffer body;
 				std::string filePathStr = fs::u8string(resolvedPath);
@@ -46055,11 +46019,9 @@ private:
 			// every image (PNG, ICO...) had the same ETag - a changed one was answered
 			// "not modified"
 			size_t hash = m_hasher(std::string_view(body, bodyLen));
-			NzbgetRsBuf etagBuf = nzbget_rs_tpr_web_format_quoted_hex_etag(hash);
-			newETag.Set(etagBuf.data ? etagBuf.data : "", (int)etagBuf.len);
-			nzbget_rs_free(etagBuf);
+			newETag.Format("\"%zx\"", hash);
 
-			unchanged = nzbget_rs_sfw_web_proc_is_etag_unchanged(m_oldETag, newETag) != 0;
+			unchanged = !m_oldETag.Empty() && !strcmp(m_oldETag, newETag);
 			if (unchanged)
 			{
 				body = "";
@@ -46069,14 +46031,13 @@ private:
 
 #ifndef DISABLE_GZIP
 		CharBuffer gbuf;
-		bool gzip = nzbget_rs_ntw_web_proc_should_use_gzip(
-			m_gzip ? 1 : 0, bodyLen, MAX_UNCOMPRESSED_SIZE) != 0;
+		bool gzip = m_gzip && bodyLen > MAX_UNCOMPRESSED_SIZE;
 		if (gzip)
 		{
 			uint32 outLen = ZLib::GZipLen(bodyLen);
 			gbuf.Reserve(outLen);
 			int gzippedLen = ZLib::GZip(body, bodyLen, *gbuf, outLen);
-			if (nzbget_rs_tpr_web_is_gzip_smaller(gzippedLen, bodyLen) != 0)
+			if (gzippedLen > 0 && gzippedLen < bodyLen)
 			{
 				body = gbuf;
 				bodyLen = gzippedLen;
@@ -46115,15 +46076,8 @@ private:
 
 	void SendSingleFileResponse()
 	{
-		const char* defRes = nzbget_rs_ntw_web_proc_default_resource(m_url);
-
-		BString<1024> filename;
-		{
-			NzbgetRsBuf pathBuf = nzbget_rs_tpr_web_format_single_file_path(
-				g_Options->GetWebDir(), *m_url, defRes);
-			filename.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
-			nzbget_rs_free(pathBuf);
-		}
+		const char* defRes = (!m_url.Empty() && m_url[strlen(m_url) - 1] == '/') ? "index.html" : "";
+		CString filename = CString::FormatStr("%s%s%s", g_Options->GetWebDir(), *m_url, defRes);
 
 		debug("serving file: %s", *filename);
 
@@ -46144,7 +46098,7 @@ private:
 		int len = body.Size() - 1;
 
 #ifdef DEBUG
-		if (nzbget_rs_dqh_webserver_is_html_content_type(contentType) != 0)
+		if (contentType && !strcmp(contentType, "text/html"))
 		{
 			Util::ReduceStr(body, "<!-- %if-debug%", "");
 			Util::ReduceStr(body, "<!-- %if-not-debug% -->", "<!--");
@@ -46162,19 +46116,18 @@ private:
 		debug("serving multiple files: %s", *m_url);
 
 		StringBuilder response;
-		size_t qPos = 0;
-		nzbget_rs_dqh_diskstate_find_char_pos(m_url, '?', &qPos);
-		char* filelist = (char*)m_url + qPos;
+		char* filelist = strchr((char*)m_url, '?');
+		if (!filelist)
+		{
+			SendErrorResponse(ERR_HTTP_NOT_FOUND, false);
+			return;
+		}
 		*filelist++ = '\0';
 
 		Tokenizer tok(filelist, "+");
 		while (const char* filename = tok.Next())
 		{
-			NzbgetRsBuf diskFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				g_Options->GetWebDir(), PATH_SEPARATOR, filename);
-			BString<1024> diskFilename;
-			diskFilename.Set(diskFnBuf.data ? diskFnBuf.data : "", (int)diskFnBuf.len);
-			nzbget_rs_free(diskFnBuf);
+			CString diskFilename = CString::FormatStr("%s%c%s", g_Options->GetWebDir(), PATH_SEPARATOR, filename);
 
 			CharBuffer body;
 			if (!FileSystem::LoadFileIntoBuffer(diskFilename, body, true))
@@ -47065,12 +47018,9 @@ private:
 		printf("Request sent\n");
 
 		bool read = m_connection->Recv((char*)&resp, sizeof(resp));
-		if (!nzbget_rs_sfw_rpc_is_response_header_valid(
-			read ? 1 : 0,
-			ntohl(resp.m_messageBase.m_signature),
-			(uint32_t)NZBMESSAGE_SIGNATURE,
-			ntohl(resp.m_messageBase.m_structSize),
-			(uint32_t)sizeof(resp)))
+		if (!read ||
+			(int)ntohl(resp.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
+			ntohl(resp.m_messageBase.m_structSize) != sizeof(resp))
 		{
 			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 			return false;
@@ -47098,12 +47048,9 @@ private:
 		memset(&BoolResponse, 0, sizeof(BoolResponse));
 
 		bool read = m_connection->Recv((char*)&BoolResponse, sizeof(BoolResponse));
-		if (!nzbget_rs_sfw_rpc_is_response_header_valid(
-			read ? 1 : 0,
-			ntohl(BoolResponse.m_messageBase.m_signature),
-			(uint32_t)NZBMESSAGE_SIGNATURE,
-			ntohl(BoolResponse.m_messageBase.m_structSize),
-			(uint32_t)sizeof(BoolResponse)))
+		if (!read ||
+			(int)ntohl(BoolResponse.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
+			ntohl(BoolResponse.m_messageBase.m_structSize) != sizeof(BoolResponse))
 		{
 			printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 			return false;
@@ -47300,10 +47247,7 @@ protected:
 		}
 		else
 		{
-			NzbgetRsBuf offBuf = nzbget_rs_dqh_conn_format_port_str(offset);
-			bool ok = DownloadQueue::Guard()->EditEntry(id, action, offBuf.data ? offBuf.data : "0");
-			nzbget_rs_free(offBuf);
-			return ok;
+			return DownloadQueue::Guard()->EditEntry(id, action, BString<100>("%i", offset));
 		}
 	}
 
@@ -47343,12 +47287,9 @@ private:
 		}
 
 		bool read = connection.Recv((char*) &resp, sizeof(resp));
-		if (!nzbget_rs_sfw_rpc_is_response_header_valid(
-			read ? 1 : 0,
-			ntohl(resp.m_messageBase.m_signature),
-			(uint32_t)NZBMESSAGE_SIGNATURE,
-			ntohl(resp.m_messageBase.m_structSize),
-			(uint32_t)sizeof(resp)))
+		if (!read ||
+			(int)ntohl(resp.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
+			ntohl(resp.m_messageBase.m_structSize) != sizeof(resp))
 		{
 			return false;
 		}

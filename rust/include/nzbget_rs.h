@@ -1469,22 +1469,6 @@ int nzbget_rs_sus_check_env_size_limit(
     const char* const* env_vars, size_t count, size_t ptr_size, size_t limit,
     size_t* out_exceeded_total);
 
-int nzbget_rs_rco_rpc_is_rpc_request(const char* url);
-void nzbget_rs_rco_rpc_log_slice_range(
-    int messages_len, int front_id, int id_from, int nr_entries,
-    int* out_start, int* out_nr_entries);
-int nzbget_rs_rco_rpc_list_files_match_and_progress(
-    int nzb_id, int file_nzb_id, int file_id, int id_start, int id_end,
-    int64_t size, int64_t remaining_size, int64_t missed_size,
-    int64_t failed_size, int64_t success_size, int* out_progress);
-const char* nzbget_rs_rco_rpc_detect_group_status(
-    int has_post_info, int post_stage, int has_queue_script_job,
-    int queue_script_active, int direct_unpack_status, int active_downloads,
-    int kind, int64_t paused_size, int64_t remaining_size);
-int nzbget_rs_rco_rpc_parse_write_log_kind(const char* kind);
-const char* nzbget_rs_rco_rpc_detect_history_dup_status(int dup_status);
-int nzbget_rs_rco_rpc_parse_update_branch(const char* branch_name);
-
 int nzbget_rs_rco_conn_read_line_chunk(
     const char* buf_ptr, int buf_avail, int max_out, int* out_found_newline);
 int nzbget_rs_rco_conn_classify_accept_errno(
@@ -1502,9 +1486,6 @@ int nzbget_rs_rco_log_should_rotate(
     int64_t rawtime, int64_t last_written, int write_log_mode);
 void nzbget_rs_rco_log_init_message_disposition(
     int target, int* out_write_to_file, int* out_keep_in_screen);
-
-int nzbget_rs_feh_maintenance_classify_update_message(const char* text);
-int nzbget_rs_feh_maintenance_classify_update_info_message(const char* text);
 
 void nzbget_rs_nzb_generator_execute(
     const char* data_dir, int segment_size,
@@ -1701,16 +1682,6 @@ size_t nzbget_rs_ntw_webdl_strip_query_len(const char* url);
 int nzbget_rs_ntw_server_pool_calc_remaining_block_sec(
     int64_t block_time, int retry_interval, int64_t cur_time);
 
-int nzbget_rs_ntw_web_proc_is_content_len_valid(int content_len, int authorized);
-int nzbget_rs_ntw_web_proc_should_use_gzip(
-    int gzip_enabled, int body_len, int max_uncompressed_size);
-const char* nzbget_rs_ntw_web_proc_default_resource(const char* url);
-
-double nzbget_rs_ntw_xmlrpc_mib_per_sec(uint64_t bytes, double ms);
-int nzbget_rs_ntw_xmlrpc_check_user_access_denied(
-    int user_access, int ua_add, int ua_restricted, const char* method_name);
-int nzbget_rs_ntw_xmlrpc_validate_reset_counter(const char* counter);
-
 int nzbget_rs_dupesearch_classify_search_retry_reason(
     int queries, int failed, int verified_empty, int fetched_empty,
     int refused, int fetch_err, int not_tried);
@@ -1777,27 +1748,7 @@ int nzbget_rs_statmeter_calc_local_time_offset(
 int64_t nzbget_rs_statmeter_calc_resumed_download_start(
     int64_t prev_start_download, int64_t cur_time, int64_t paused_from);
 
-// Scheduler, Frontend, ColoredFrontend, NCursesFrontend, RemoteClient &
-// WebServer Hot-Path C ABI
-int nzbget_rs_sfw_rpc_is_response_header_valid(
-    int read_ok, uint32_t resp_sig_host, uint32_t expected_sig,
-    uint32_t resp_struct_size_host, uint32_t expected_struct_size);
-int nzbget_rs_sfw_web_proc_should_send_auth_response(
-    int form_auth, int rpc_request, int authorized);
-int nzbget_rs_sfw_web_proc_is_etag_unchanged(
-    const char* old_etag, const char* new_etag);
-
 // XmlRpc, Options, Log & NString Hot-Path C ABI
-int nzbget_rs_rol_xmlrpc_validate_download_rate(
-    int rate, int* out_bytes_per_sec);
-int nzbget_rs_rol_xmlrpc_post_info_log_slice(
-    int log_entries, int messages_size, int* out_start, int* out_clamped_entries);
-int nzbget_rs_rol_xmlrpc_view_feed_should_include(
-    int include_non_matching, int match_status, int ms_accepted,
-    int64_t size_bytes, int* out_size_mb);
-int nzbget_rs_rol_xmlrpc_test_server_effective_timeout(
-    int param_timeout, int article_timeout);
-int nzbget_rs_rol_xmlrpc_test_server_response_ok(const char* response);
 int nzbget_rs_rol_log_should_close_idle(int64_t cur_time, int64_t last_written);
 
 // Util, FileSystem, ScriptController, UnpackController & ScriptConfig Hot-Path C ABI
@@ -1846,12 +1797,6 @@ int nzbget_rs_dsp_feed_status_matches(
     uint32_t feed_filter_hash, uint32_t filter_hash);
 
 // XmlRpc, Options, NZBGet & RemoteClient Hot-Path C ABI
-int nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(const char* resp);
-int nzbget_rs_roc_xmlrpc_log_params_valid(int id_from, int nr_entries);
-int nzbget_rs_roc_xmlrpc_list_files_params_valid(
-    int has_id_start, int has_id_end, int id_start, int id_end, int nzb_id);
-int nzbget_rs_roc_xmlrpc_test_server_speed_check_server(
-    int has_server, int is_active, int max_connections);
 int nzbget_rs_roc_nzbget_boot_is_direct_client_mode(
     int test_backtrace, int web_get, int sig_verify,
     int client_op, int op_no_operation, int print_options);
@@ -2100,7 +2045,8 @@ typedef struct {
     const char* reason;
 } NzbgetRsRpcFleetMember;
 
-int nzbget_rs_xmlrpc_match_command(const char* method_name);
+int nzbget_rs_xmlrpc_match_command(
+    int user_access, int ua_add, int ua_restricted, const char* method_name);
 int nzbget_rs_xmlrpc_is_safe_command(int cmd_id);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_error(int is_json, int err_code, const char* err_text);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_bool(int is_json, int ok);
@@ -2125,7 +2071,9 @@ NzbgetRsBuf nzbget_rs_xmlrpc_format_post_info_fields(
 NzbgetRsBuf nzbget_rs_xmlrpc_format_group_item_start(
     int is_json, int index, int nzb_id, int64_t remaining_size, int64_t paused_size,
     int remaining_file_count, int remaining_par_count, int priority,
-    int active_downloads, const char* status);
+    int active_downloads, int has_post_info, int post_stage,
+    int has_queue_script_job, int queue_script_active,
+    int direct_unpack_status, int kind);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_postqueue_item_start(
     int is_json, int index, int nzb_id, const char* info_name, int stage, int file_progress);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_history_nzb_start(
@@ -2133,7 +2081,7 @@ NzbgetRsBuf nzbget_rs_xmlrpc_format_history_nzb_start(
     int retry_data, int history_time, const char* status);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_history_dup_item(
     int is_json, int index, int id, const char* name, int history_time, int64_t size,
-    const char* dupe_key, int dupe_score, int dupe_mode, int dup_status, const char* status);
+    const char* dupe_key, int dupe_score, int dupe_mode, int dup_status);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_urlqueue_item(
     int is_json, int index, int id, const char* filename, const char* url,
     const char* name, const char* category, int priority);
@@ -2629,10 +2577,6 @@ NzbgetRsBuf nzbget_rs_stream_build_donor_key(
     const int32_t* art_sizes_ptr,
     const char* const* art_message_ids_ptr,
     size_t total_articles);
-int32_t nzbget_rs_rol_xmlrpc_multicall_find_struct_end(
-    const char* request_ptr, size_t* out_struct_off);
-int32_t nzbget_rs_rol_xmlrpc_multicall_locate_parts(
-    const char* request_ptr, size_t request_len, size_t* out_name_off, size_t* out_params_off);
 int32_t nzbget_rs_twin_compare_par2_data(
     const char* const* own_names_ptr,
     const char* const* own_md5s_ptr,
@@ -2711,13 +2655,6 @@ void nzbget_rs_dqh_statmeter_calc_debug_speed_and_timediff(
     int32_t speed_start_time, int32_t slot_size,
     int32_t* out_speed_kb, int32_t* out_time_diff);
 int32_t nzbget_rs_dqh_statmeter_bytes_to_mb_i32(int64_t bytes);
-NzbgetRsBuf nzbget_rs_tpr_web_format_quoted_hex_etag(size_t hash);
-int32_t nzbget_rs_tpr_web_is_gzip_smaller(int32_t gzipped_len, int32_t body_len);
-NzbgetRsBuf nzbget_rs_tpr_web_format_single_file_path(
-    const char* web_dir, const char* url, const char* def_res);
-NzbgetRsBuf nzbget_rs_tpr_xmlrpc_format_readurl_temp_filename(
-    const char* temp_dir, char sep, int32_t num);
-NzbgetRsBuf nzbget_rs_tpr_xmlrpc_format_testserver_article_cmd(const char* id);
 NzbgetRsBuf nzbget_rs_tpr_post_format_info_name(
     const char* prefix, const char* name);
 int32_t nzbget_rs_dqh_conn_calc_read_buffer_cap(int32_t read_buf_size, int32_t decode_slack);
@@ -2736,15 +2673,6 @@ NzbgetRsBuf nzbget_rs_tpr_webdl_format_get_request_line(const char* resource);
 NzbgetRsBuf nzbget_rs_tpr_webdl_format_user_agent_header(const char* version_rev);
 NzbgetRsBuf nzbget_rs_tpr_webdl_format_host_header(
     int32_t is_default_port, const char* host, int32_t port);
-NzbgetRsBuf nzbget_rs_dqh_maintenance_resolve_script_path(
-    const char* app_dir, char sep, const char* script);
-NzbgetRsBuf nzbget_rs_dqh_maintenance_format_script_info_name(
-    int32_t is_info_script, const char* base_name);
-const char* nzbget_rs_dqh_maintenance_branch_name(int32_t branch);
-const char* nzbget_rs_dqh_maintenance_run_mode_name(int32_t daemon_mode);
-NzbgetRsBuf nzbget_rs_dqh_maintenance_format_cmdline_env_name(int32_t index);
-NzbgetRsBuf nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len(
-    const char* base_name, size_t max_len, size_t* out_prefix_len);
 NzbgetRsBuf nzbget_rs_tpr_article_writer_format_dest_file_path(
     const char* dest_dir, char sep, const char* filename);
 NzbgetRsBuf nzbget_rs_tpr_article_writer_format_tmp_path(const char* base_path);
@@ -2767,7 +2695,6 @@ NzbgetRsBuf nzbget_rs_queue_coord_format_par_damage_summary(
     int32_t certain, int32_t damaged_blocks, int32_t projected_blocks,
     int64_t block_size, int32_t recovery_blocks);
 NzbgetRsBuf nzbget_rs_dqh_article_fetcher_format_body_cmd(const char* message_id);
-NzbgetRsBuf nzbget_rs_dqh_webserver_format_forwarded_for_suffix(const char* forwarded_for);
 NzbgetRsBuf nzbget_rs_dqh_newznab_format_search_info_name(
     const char* label, int32_t page_one_based);
 NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_key_val_param(
@@ -2803,11 +2730,6 @@ int nzbget_rs_dqh_nntp_conn_is_already_in_group(
     const char* active_group, const char* grp);
 int nzbget_rs_dqh_options_should_expand_home_value(
     const char* value, int no_disk_access);
-int nzbget_rs_dqh_xmlrpc_is_multicall_post(
-    const char* method_name, int is_xmlrpc_proto, int is_http_post);
-int nzbget_rs_dqh_webserver_is_html_content_type(const char* content_type);
-int nzbget_rs_dqh_scanner_find_last_char_pos(
-    const char* text, char ch, size_t* out_pos);
 int nzbget_rs_dqh_bytes_equal(const char* a, const char* b);
 int nzbget_rs_dqh_bytes_eq_ignore_case(const char* a, const char* b);
 int nzbget_rs_newznab_parse_response(
@@ -2857,8 +2779,6 @@ NzbgetRsBuf nzbget_rs_dqh_dupe_util_lower(const char* text, size_t text_len);
 int nzbget_rs_dupe_util_write_atomic(
     const char* path, size_t path_len, const char* data, size_t data_len);
 NzbgetRsBuf nzbget_rs_dupe_util_read_all(const char* path, size_t path_len);
-void nzbget_rs_dqh_webserver_encode_hex_token(
-    const uint8_t* bytes, size_t bytes_len, char* out_token, size_t out_cap);
 NzbgetRsBuf nzbget_rs_dqh_script_format_prefixed_message(
     const char* prefix, const char* text);
 int nzbget_rs_dqh_diskstate_next_comma_token(
@@ -2866,8 +2786,6 @@ int nzbget_rs_dqh_diskstate_next_comma_token(
     size_t* out_tok_len, size_t* out_next_cursor);
 char* nzbget_rs_dqh_tokenizer_next(
     char* data_string, const char* separators, int working, char** save_ptr);
-const char* nzbget_rs_dqh_xmlrpc_response_content_type(int is_xml_rpc);
-const char* nzbget_rs_dqh_xmlrpc_test_server_speed_err_msg(int server_err);
 uint32_t nzbget_rs_dqh_article_writer_step_file_crc(
     int first_article, uint32_t current_crc, uint32_t article_crc,
     int segment_size, int* out_first_article);
@@ -2882,14 +2800,10 @@ NzbgetRsBuf nzbget_rs_dqh_nntp_health_format_bracketed_id(
     const char* message_id, size_t len);
 NzbgetRsBuf nzbget_rs_dqh_nntp_health_format_stat_batch(
     const char* const* ids, const size_t* lens, size_t count);
-int nzbget_rs_dqh_webserver_classify_pre_parse_method(
-    int http_method, int hm_post, int hm_options, int content_len);
 int nzbget_rs_dqh_diskstate_classify_begin_read_recovery(
     int transactional, int dest_exists, int temp_exists);
 int nzbget_rs_dqh_diskstate_select_volume_server_slot(
     int index, const int32_t* state_ids, const int32_t* server_ids, size_t count);
-int nzbget_rs_dqh_xmlrpc_calc_schedule_resume_time(
-    int has_param, int seconds, int64_t cur_time, int64_t* out_resume_time);
 int nzbget_rs_dqh_disk_service_should_check_disk_space(
     int disk_space_mb, int is_downloading);
 int nzbget_rs_dqh_options_update_config_line_on_get(int line_no, int cur_config_line);
@@ -2937,8 +2851,6 @@ int nzbget_rs_dqh_webdl_should_delete_broken_output(int status, int ad_finished)
 int nzbget_rs_dqh_webdl_needs_prepare_file(int out_file_active);
 int nzbget_rs_dqh_webdl_is_gunzip_write_failed(int out_len, int64_t written_bytes);
 int nzbget_rs_dqh_webdl_should_disconnect_on_free(int conn_status, int cs_cancelled);
-int nzbget_rs_dqh_speed_test_should_stop_recv_loop(
-    int received, double elapsed_sec, double timeout_sec);
 void nzbget_rs_dqh_tls_cipher_fill_test_plaintext(uint8_t* buf, size_t len);
 int nzbget_rs_dqh_tls_cipher_is_prepare_batch_valid(uint64_t sequence, uint32_t count);
 void nzbget_rs_dqh_tls_cipher_write_record_nonce(
@@ -2986,9 +2898,6 @@ int nzbget_rs_dqh_tls_should_check_verify_result_on_handshake_fail(
     int is_client, int should_verify);
 int nzbget_rs_dqh_tls_cipher_classify_probe_deadline_override(
     int current_result, int is_cancelled, int deadline_expired);
-int nzbget_rs_dqh_webserver_classify_ext_route(int get_route);
-int nzbget_rs_dqh_webserver_is_rel_path_outside_root(
-    int is_empty, char first_char);
 
 typedef struct NzbgetRsParDamageQueuedFile {
     const char* filename;

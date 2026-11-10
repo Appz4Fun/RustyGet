@@ -4,8 +4,6 @@
 //! as the C library's strncasecmp and numbers parse as its atoi (current
 //! locale). Reading the request and answering it stay C++.
 
-use std::ffi::{c_char, CStr};
-
 use crate::bytes::{find, find_byte};
 use crate::wildmask::{wild_match, Lower};
 
@@ -378,65 +376,6 @@ Set-Cookie: Auth-Type=",
     truncate_bstring_1024(out)
 }
 
-/// `WebProcessor::Execute`:
-/// Checks whether an unauthorized HTTP request must immediately receive a 401 response.
-#[inline]
-pub fn web_proc_should_send_auth_response(
-    form_auth: bool,
-    rpc_request: bool,
-    authorized: bool,
-) -> bool {
-    (!form_auth || rpc_request) && !authorized
-}
-
-/// `WebProcessor::SendBodyResponse`:
-/// Checks whether `old_etag` is non-null and equal to `new_etag`.
-///
-/// # Safety
-/// `old_etag` and `new_etag` must be either null or valid null-terminated C strings.
-#[inline]
-pub unsafe fn web_proc_is_etag_unchanged(
-    old_etag: *const c_char,
-    new_etag: *const c_char,
-) -> bool {
-    if old_etag.is_null() || new_etag.is_null() {
-        return false;
-    }
-    CStr::from_ptr(old_etag).to_bytes() == CStr::from_ptr(new_etag).to_bytes()
-}
-
-/// Returns the maximum allowed HTTP POST `Content-Length` for `WebProcessor::Execute`.
-pub fn web_proc_max_post_content_len(authorized: bool) -> i32 {
-    if authorized {
-        768 * 1024 * 1024
-    } else {
-        64 * 1024
-    }
-}
-
-/// Validates whether an HTTP POST `Content-Length` is within bounds for `authorized`.
-pub fn web_proc_is_content_len_valid(content_len: i32, authorized: bool) -> bool {
-    content_len >= 0 && content_len <= web_proc_max_post_content_len(authorized)
-}
-
-/// Returns whether `WebProcessor::SendBodyResponse` should attempt gzip compression.
-pub fn web_proc_should_use_gzip(
-    gzip_enabled: bool,
-    body_len: i32,
-    max_uncompressed_size: i32,
-) -> bool {
-    gzip_enabled && body_len > max_uncompressed_size
-}
-
-/// Returns `"index.html\0"` when `url` ends with `'/'`, else `"\0"`.
-pub fn web_proc_default_resource(url: &[u8]) -> &'static [u8] {
-    if url.last() == Some(&b'/') {
-        b"index.html\0"
-    } else {
-        b"\0"
-    }
-}
-
 /// Validates URL characters in `WebProcessor::Dispatch`:
 /// allows only `0..9 A..Z a..z . - + _ / ?` and rejects `..`.
 pub fn web_is_safe_url_chars(url: &[u8]) -> bool {
@@ -510,80 +449,6 @@ pub fn web_detect_content_type(filename: &[u8]) -> Option<&'static [u8]> {
     } else {
         None
     }
-}
-
-/// Formats `WebProcessor::SendBodyResponse` quoted hex ETag (`"\"%zx\""`).
-pub fn web_format_quoted_hex_etag(hash: usize) -> Vec<u8> {
-    format!("\"{hash:x}\"").into_bytes()
-}
-
-/// Evaluates whether gzipped output is smaller than the original body in `WebProcessor::SendBodyResponse`.
-pub fn web_is_gzip_smaller(gzipped_len: i32, body_len: i32) -> bool {
-    gzipped_len > 0 && gzipped_len < body_len
-}
-
-/// Formats `WebProcessor::SendSingleFileResponse` file path (`"%s%s%s"`, `web_dir`, `url`, `def_res`).
-pub fn web_format_single_file_path(web_dir: &[u8], url: &[u8], def_res: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(web_dir.len() + url.len() + def_res.len());
-    out.extend_from_slice(web_dir);
-    out.extend_from_slice(url);
-    out.extend_from_slice(def_res);
-    out
-}
-
-/// Formats `" (forwarded for: <forwarded_for>)"` when non-empty else `""` for `WebProcessor::CheckCredentials`.
-pub fn webserver_format_forwarded_for_suffix(forwarded_for: &[u8]) -> Vec<u8> {
-    if forwarded_for.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity(17 + forwarded_for.len() + 1);
-    out.extend_from_slice(b" (forwarded for: ");
-    out.extend_from_slice(forwarded_for);
-    out.push(b')');
-    out
-}
-
-/// Returns `true` when `content_type == Some(b"text/html")` for `WebProcessor::SendFileResponse`.
-pub fn webserver_is_html_content_type(content_type: Option<&[u8]>) -> bool {
-    content_type == Some(b"text/html")
-}
-
-/// Encodes `bytes` as lowercase hexadecimal ASCII bytes (`2 * bytes.len()`) for `GenerateSecureToken`.
-pub fn webserver_encode_hex_token(bytes: &[u8]) -> Vec<u8> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = Vec::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        out.push(HEX[(b >> 4) as usize]);
-        out.push(HEX[(b & 0x0f) as usize]);
-    }
-    out
-}
-
-/// Classifies the pre-URL HTTP method check in `WebProcessor::Execute`:
-/// `1` = reject POST with `content_len <= 0`, `2` = answer OPTIONS request, `0` = continue.
-pub fn webserver_classify_pre_parse_method(
-    http_method: i32,
-    hm_post: i32,
-    hm_options: i32,
-    content_len: i32,
-) -> i32 {
-    if http_method == hm_post && content_len <= 0 {
-        1
-    } else if http_method == hm_options {
-        2
-    } else {
-        0
-    }
-}
-
-/// Returns true when `WebProcessor::Dispatch` routes a GET request to an extension resource (`get_route == 1 || get_route == 2`).
-pub fn webserver_classify_ext_route(get_route: i32) -> bool {
-    get_route == 1 || get_route == 2
-}
-
-/// Returns true when a canonicalized extension asset path resolves outside the script directory (`is_empty || first_char == b'.'`).
-pub fn webserver_is_rel_path_outside_root(is_empty: bool, first_char: u8) -> bool {
-    is_empty || first_char == b'.'
 }
 
 #[cfg(test)]

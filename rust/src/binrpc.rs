@@ -2180,20 +2180,6 @@ mod tests {
     }
 }
 
-/// Validates a binary RPC response header after converting fields to host byte order.
-#[inline]
-pub fn rpc_is_response_header_valid(
-    read_ok: bool,
-    resp_sig_host: u32,
-    expected_sig: u32,
-    resp_struct_size_host: u32,
-    expected_struct_size: u32,
-) -> bool {
-    read_ok
-        && (resp_sig_host as i32) == (expected_sig as i32)
-        && resp_struct_size_host == expected_struct_size
-}
-
 /// Checks whether the remaining download time line should be printed in `RemoteClient::RequestServerList`.
 #[inline]
 pub fn remote_client_should_print_remaining_time(

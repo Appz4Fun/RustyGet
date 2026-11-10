@@ -367,8 +367,18 @@ pub fn match_command(method: &[u8]) -> c_int {
 /// # Safety
 /// `method_name` is null or a valid NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_match_command(method_name: *const c_char) -> c_int {
-    match_command(unsafe { input(method_name) })
+pub unsafe extern "C" fn nzbget_rs_xmlrpc_match_command(
+    user_access: c_int,
+    ua_add: c_int,
+    ua_restricted: c_int,
+    method_name: *const c_char,
+) -> c_int {
+    let method_bytes = unsafe { input(method_name) };
+    match xmlrpc_check_user_access_denied(user_access, ua_add, ua_restricted, method_bytes) {
+        1 => -1,
+        2 => -2,
+        _ => match_command(method_bytes),
+    }
 }
 
 pub fn is_safe_command(cmd_id: c_int) -> bool {
@@ -1451,9 +1461,8 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_post_info_fields(
     into_buf(out)
 }
 
-/// # Safety
-/// `status` is null or a valid NUL-terminated string.
 #[no_mangle]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_group_item_start(
     is_json: c_int,
     index: c_int,
@@ -1464,7 +1473,12 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_group_item_start(
     remaining_par_count: c_int,
     priority: c_int,
     active_downloads: c_int,
-    status: *const c_char,
+    has_post_info: c_int,
+    post_stage: c_int,
+    has_queue_script_job: c_int,
+    queue_script_active: c_int,
+    direct_unpack_status: c_int,
+    kind: c_int,
 ) -> RsBuf {
     let json = is_json != 0;
     let (rem_hi, rem_lo) = split_i64(remaining_size);
@@ -1479,7 +1493,19 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_group_item_start(
             &mut pau_mb,
         );
     }
-    let status_str = String::from_utf8_lossy(unsafe { input(status) });
+    let status_str = rpc_detect_group_status(
+        has_post_info != 0,
+        post_stage,
+        has_queue_script_job != 0,
+        queue_script_active != 0,
+        direct_unpack_status,
+        active_downloads,
+        kind,
+        paused_size,
+        remaining_size,
+    )
+    .to_str()
+    .unwrap_or("QUEUED");
 
     let mut out = Vec::with_capacity(512);
     if json {
@@ -1653,7 +1679,7 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_history_nzb_start(
 }
 
 /// # Safety
-/// `name`, `dupe_key`, and `status` are null or valid NUL-terminated strings.
+/// `name` and `dupe_key` are null or valid NUL-terminated strings.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_history_dup_item(
     is_json: c_int,
@@ -1666,7 +1692,6 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_history_dup_item(
     dupe_score: c_int,
     dupe_mode: c_int,
     dup_status: c_int,
-    status: *const c_char,
 ) -> RsBuf {
     let json = is_json != 0;
     let (size_hi, size_lo) = split_i64(size);
@@ -1675,7 +1700,9 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_history_dup_item(
     let dupe_key_enc = encode_str(json, unsafe { input(dupe_key) });
     let dupe_mode_str = table_get(&DUPE_MODE_NAMES, dupe_mode, "SCORE");
     let dup_status_str = table_get(&DUP_STATUS_NAMES, dup_status, "UNKNOWN");
-    let status_str = String::from_utf8_lossy(unsafe { input(status) });
+    let status_str = rpc_detect_history_dup_status(dup_status)
+        .to_str()
+        .unwrap_or("FAILURE/INTERNAL_ERROR");
 
     let mut out = Vec::with_capacity(512);
     if json {
@@ -2354,37 +2381,6 @@ pub fn xmlrpc_should_use_edit_offset(
     has_offset && (action == ea_file_move_offset || action == ea_group_move_offset)
 }
 
-/// Formats `ReadUrlXmlCommand::Execute` temporary filename (`"%s%creadurl-%i.tmp"`, `temp_dir`, `sep`, `num`).
-pub fn xmlrpc_format_readurl_temp_filename(temp_dir: &[u8], sep: u8, num: i32) -> Vec<u8> {
-    let suffix = format!("readurl-{num}.tmp");
-    let mut out = Vec::with_capacity(temp_dir.len() + 1 + suffix.len());
-    out.extend_from_slice(temp_dir);
-    out.push(sep);
-    out.extend_from_slice(suffix.as_bytes());
-    out
-}
-
-/// Formats `TestServerXmlCommand::Execute` synthetic `ARTICLE <%s@nzbget.com>\r\n` command.
-pub fn xmlrpc_format_testserver_article_cmd(id: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(id.len() + 24);
-    out.extend_from_slice(b"ARTICLE <");
-    out.extend_from_slice(id);
-    out.extend_from_slice(b"@nzbget.com>\r\n");
-    out
-}
-
-/// Returns `true` when `is_xmlrpc_proto && is_http_post` and `method_name` matches `"system.multicall"`
-/// case-insensitively (`dqh_bytes_eq_ignore_case`) for `XmlRpcProcessor::Execute`.
-pub fn xmlrpc_is_multicall_post(
-    method_name: &[u8],
-    is_xmlrpc_proto: bool,
-    is_http_post: bool,
-) -> bool {
-    is_xmlrpc_proto
-        && is_http_post
-        && crate::util::bytes_eq_ignore_case(method_name, b"system.multicall")
-}
-
 /// Returns `true` when `name == b"_TlsCipherBaseline"` for `SaveConfigXmlCommand::Execute`.
 pub fn xmlrpc_is_tls_cipher_baseline_entry(name: &[u8]) -> bool {
     name == b"_TlsCipherBaseline"
@@ -2409,24 +2405,6 @@ pub fn xmlrpc_concat_decoded_path_and_query(
     out
 }
 
-/// Returns the NUL-terminated HTTP `Content-Type` string for `XmlRpcProcessor::BuildResponse`.
-pub fn xmlrpc_response_content_type(is_xml_rpc: bool) -> &'static [u8] {
-    if is_xml_rpc {
-        b"text/xml\0"
-    } else {
-        b"application/json\0"
-    }
-}
-
-/// Returns the NUL-terminated server validation error message for `TestServerSpeedXmlCommand::Execute`.
-pub fn xmlrpc_test_server_speed_err_msg(server_err: i32) -> &'static [u8] {
-    match server_err {
-        1 => b"Server not found\0",
-        2 => b"Server is not active\0",
-        _ => b"Server has no connections configured\0",
-    }
-}
-
 /// Classifies the `TlsCipherXmlCommand::Execute` operation code:
 /// `0` = `Start`, `1` = `Status`, `2` = `Cancel`.
 pub fn xmlrpc_classify_tls_cipher_op(operation: i32) -> i32 {
@@ -2436,19 +2414,6 @@ pub fn xmlrpc_classify_tls_cipher_op(operation: i32) -> i32 {
         1
     } else {
         2
-    }
-}
-
-/// Validates the `ScheduleResumeXmlCommand::Execute` parameter and computes the resume timestamp.
-pub fn xmlrpc_calc_schedule_resume_time(
-    has_param: bool,
-    seconds: i32,
-    cur_time: i64,
-) -> Option<i64> {
-    if has_param && seconds >= 0 {
-        Some(cur_time.saturating_add(i64::from(seconds)))
-    } else {
-        None
     }
 }
 
@@ -2702,7 +2667,6 @@ mod tests {
 
             let name = CString::new("Release").unwrap();
             let key = CString::new("series=1").unwrap();
-            let status = CString::new("DUPE").unwrap();
             let dup_json = buf_to_string(nzbget_rs_xmlrpc_format_history_dup_item(
                 1,
                 0,
@@ -2714,9 +2678,8 @@ mod tests {
                 100,
                 0,
                 4,
-                status.as_ptr(),
             ));
-            assert!(dup_json.ends_with("\"Status\" : \"DUPE\"\n"));
+            assert!(dup_json.ends_with("\"Status\" : \"DELETED/DUPE\"\n"));
             let dup_xml = buf_to_string(nzbget_rs_xmlrpc_format_history_dup_item(
                 0,
                 0,
@@ -2728,9 +2691,8 @@ mod tests {
                 100,
                 0,
                 4,
-                status.as_ptr(),
             ));
-            assert!(dup_xml.ends_with("<member><name>Status</name><value><string>DUPE</string></value></member>\n"));
+            assert!(dup_xml.ends_with("<member><name>Status</name><value><string>DELETED/DUPE</string></value></member>\n"));
 
             let d_json = buf_to_string(nzbget_rs_xmlrpc_format_disk_speed(
                 1,
@@ -2749,15 +2711,6 @@ mod tests {
                 "<value><struct><member><name>SpeedMbps</name><value><double>940.250000</double></value></member></struct></value>"
             );
         }
-    }
-}
-
-/// Computes `MiB/s` from `bytes` and `ms` in `XmlRpc.cpp`.
-pub fn xmlrpc_mib_per_sec(bytes: u64, ms: f64) -> f64 {
-    if ms > 0.0 {
-        (bytes as f64 / 1024.0 / 1024.0) / (ms / 1000.0)
-    } else {
-        0.0
     }
 }
 
@@ -2828,27 +2781,6 @@ pub fn xmlrpc_parse_category_source(
     }
 }
 
-/// Classifies `counter` in `ResetServerVolumeXmlCommand`.
-pub fn xmlrpc_validate_reset_counter(counter: &[u8]) -> i32 {
-    if counter.is_empty() {
-        1
-    } else if counter == b"CUSTOM" {
-        2
-    } else {
-        0
-    }
-}
-
-/// `SetDownloadRateXmlCommand::Execute`: validates that `rate` (in KiB/s) is
-/// in `0..=i32::MAX / 1024` and computes `rate * 1024` (in B/s).
-pub fn xmlrpc_validate_download_rate(rate: i32) -> (bool, i32) {
-    if rate < 0 || rate > i32::MAX / 1024 {
-        (false, 0)
-    } else {
-        (true, rate * 1024)
-    }
-}
-
 /// `StatusXmlCommand::Execute`: computes `averageDownloadRate`.
 pub fn xmlrpc_calc_average_download_rate(download_time_sec: i32, all_bytes: i64) -> i64 {
     if download_time_sec > 0 {
@@ -2879,17 +2811,6 @@ pub fn xmlrpc_nzb_message_and_post_time(
     };
     let post_total_time_sec = i64::from(post_total_sec).wrapping_add(active_post_sec) as i32;
     (eff_msg_count, post_total_time_sec)
-}
-
-/// `NzbInfoXmlCommand::AppendPostInfoFields`: computes `(should_iter, start, clamped_log_entries)`.
-pub fn xmlrpc_post_info_log_slice(log_entries: i32, messages_size: i32) -> (bool, i32, i32) {
-    if log_entries > 0 && messages_size > 0 {
-        let clamped = log_entries.min(messages_size);
-        let start = messages_size - clamped;
-        (true, start, clamped)
-    } else {
-        (false, 0, log_entries)
-    }
 }
 
 /// `SaveConfigXmlCommand::Execute`: validates JSON option entry keys `(key1, key2)`.
@@ -2925,94 +2846,6 @@ pub fn xmlrpc_save_config_decoded_baseline_valid(
     !has_cipher_baseline
         && decoded_value.len() <= 1024 * 1024
         && decoded_value.starts_with(b"v1\n")
-}
-
-/// `ViewFeedXmlCommand::Execute`: checks whether a feed item should be included and computes `sizeMB`.
-pub fn xmlrpc_view_feed_should_include(
-    include_non_matching: bool,
-    match_status: i32,
-    ms_accepted: i32,
-    size_bytes: i64,
-) -> (bool, i32) {
-    let include = include_non_matching || match_status == ms_accepted;
-    let size_mb = if include {
-        (size_bytes / 1024 / 1024) as i32
-    } else {
-        0
-    };
-    (include, size_mb)
-}
-
-/// `TestServerXmlCommand::Execute`: resolves effective connection timeout.
-pub fn xmlrpc_test_server_effective_timeout(param_timeout: i32, article_timeout: i32) -> i32 {
-    if param_timeout == 0 {
-        article_timeout
-    } else {
-        param_timeout
-    }
-}
-
-/// `TestServerXmlCommand::Execute`: checks whether the NNTP `ARTICLE` response starts with `'4'` or `'2'`.
-pub fn xmlrpc_test_server_response_ok(has_response: bool, first_char: u8) -> bool {
-    has_response && (first_char == b'4' || first_char == b'2')
-}
-
-/// Scans a NUL-terminated C string linearly until `"</struct>"` is matched or NUL is reached.
-pub unsafe fn xmlrpc_multicall_find_struct_end_cstr(
-    request_ptr: *const c_char,
-) -> Option<usize> {
-    if request_ptr.is_null() {
-        return None;
-    }
-    const NEEDLE: &[u8; 9] = b"</struct>";
-    let base = request_ptr.cast::<u8>();
-    let mut i = 0usize;
-    loop {
-        let mut matched = 0usize;
-        while matched < NEEDLE.len() {
-            let b = *base.add(i + matched);
-            if b == 0 {
-                return None;
-            }
-            if b != NEEDLE[matched] {
-                break;
-            }
-            matched += 1;
-        }
-        if matched == NEEDLE.len() {
-            return Some(i);
-        }
-        if *base.add(i) == 0 {
-            return None;
-        }
-        i += 1;
-    }
-}
-
-/// Locates `"</name>"` and optional `"params</name>"` within a `<struct>` slice.
-pub fn xmlrpc_multicall_locate_parts(call_slice: &[u8]) -> Option<(usize, usize)> {
-    let name_off = call_slice.windows(7).position(|w| w == b"</name>")?;
-    let params_off = call_slice[name_off..]
-        .windows(13)
-        .position(|w| w == b"params</name>")
-        .map(|rel| name_off + rel)
-        .unwrap_or(0);
-    Some((name_off, params_off))
-}
-
-/// Returns 1 when an XML-RPC multicall sub-response is neither a `<fault>` nor an `<array>`.
-pub unsafe fn roc_xmlrpc_multicall_needs_array_wrap(resp: *const c_char) -> c_int {
-    if resp.is_null() {
-        return 1;
-    }
-    let bytes = unsafe { CStr::from_ptr(resp).to_bytes() };
-    let fault = bytes.starts_with(b"<fault>");
-    let array = !fault && bytes.starts_with(b"<array>");
-    if !fault && !array {
-        1
-    } else {
-        0
-    }
 }
 
 /// Returns 1 when a TLS cipher optimizer RPC call has control access over JSON-RPC POST.
@@ -3139,32 +2972,6 @@ pub unsafe fn roc_xmlrpc_status_calc_disk_space_mb(
     }
 }
 
-/// Validates `LogXmlCommand` parameters (`!(nr_entries > 0 && id_from > 0)`).
-pub fn roc_xmlrpc_log_params_valid(id_from: c_int, nr_entries: c_int) -> c_int {
-    if nr_entries > 0 && id_from > 0 {
-        0
-    } else {
-        1
-    }
-}
-
-/// Validates `ListFilesXmlCommand` range and `nzbId` parameters.
-pub fn roc_xmlrpc_list_files_params_valid(
-    has_id_start: c_int,
-    has_id_end: c_int,
-    id_start: c_int,
-    id_end: c_int,
-    nzb_id: c_int,
-) -> c_int {
-    if has_id_start != 0 && (has_id_end == 0 || id_end < id_start) {
-        return 0;
-    }
-    if nzb_id > 0 && (id_start != 0 || id_end != 0) {
-        return 0;
-    }
-    1
-}
-
 /// Computes `StageTimeSec` and `TotalTimeSec` for `NzbInfoXmlCommand::AppendPostInfoFields`.
 pub unsafe fn roc_xmlrpc_post_info_elapsed_sec(
     cur_time: i64,
@@ -3234,23 +3041,6 @@ pub unsafe fn roc_xmlrpc_server_volumes_calc_mb(
     }
 }
 
-/// Validates target server availability for `TestServerSpeedXmlCommand::Execute`.
-pub fn roc_xmlrpc_test_server_speed_check_server(
-    has_server: c_int,
-    is_active: c_int,
-    max_connections: c_int,
-) -> c_int {
-    if has_server == 0 {
-        1
-    } else if is_active == 0 {
-        2
-    } else if max_connections == 0 {
-        3
-    } else {
-        0
-    }
-}
-
 /// Validates `TestDiskSpeedXmlCommand::Execute` parameters and computes byte sizes.
 pub unsafe fn roc_xmlrpc_test_disk_speed_validate_params(
     write_buffer_kib: c_int,
@@ -3277,73 +3067,6 @@ pub unsafe fn roc_xmlrpc_test_disk_speed_validate_params(
         }
     }
     0
-}
-
-/// Checks whether a request URL targets one of the XML-RPC / JSON-RPC / JSONP-RPC endpoints.
-pub fn rpc_is_rpc_request(url: &[u8]) -> bool {
-    url == b"/xmlrpc"
-        || url.starts_with(b"/xmlrpc/")
-        || url == b"/jsonrpc"
-        || url.starts_with(b"/jsonrpc/")
-        || url == b"/jsonprpc"
-        || url.starts_with(b"/jsonprpc/")
-}
-
-/// Computes `(start_index, effective_nr_entries)` for `LogXmlCommand::Execute`.
-pub fn rpc_log_slice_range(
-    messages_len: i32,
-    front_id: i32,
-    id_from: i32,
-    nr_entries: i32,
-) -> (i32, i32) {
-    let mut start = messages_len;
-    let mut eff_entries = nr_entries;
-    if eff_entries > 0 {
-        if eff_entries > messages_len {
-            eff_entries = messages_len;
-        }
-        start = messages_len - eff_entries;
-    }
-    if id_from > 0 && messages_len > 0 {
-        eff_entries = messages_len;
-        start = id_from - front_id;
-        if start < 0 {
-            start = 0;
-        }
-    }
-    (start, eff_entries)
-}
-
-/// Evaluates whether a `FileInfo` matches the `ListFilesXmlCommand` filter and computes its permille progress.
-#[allow(clippy::too_many_arguments)]
-pub fn rpc_list_files_match_and_progress(
-    nzb_id: i32,
-    file_nzb_id: i32,
-    file_id: i32,
-    id_start: i32,
-    id_end: i32,
-    size: i64,
-    remaining_size: i64,
-    missed_size: i64,
-    failed_size: i64,
-    success_size: i64,
-) -> Option<i32> {
-    let matches = (nzb_id > 0 && nzb_id == file_nzb_id)
-        || (nzb_id == 0 && (id_start == 0 || (id_start <= file_id && file_id <= id_end)));
-    if !matches {
-        return None;
-    }
-    let progress = if failed_size == 0 && success_size == 0 {
-        0
-    } else {
-        let denom = size - missed_size;
-        if denom <= 0 {
-            0
-        } else {
-            (1000 - (remaining_size * 1000) / denom) as i32
-        }
-    };
-    Some(progress)
 }
 
 const POST_STAGE_CS_NAMES: [&CStr; 15] = [
@@ -3528,18 +3251,6 @@ pub fn rpc_validate_edit_queue_args(action: i32, args: &[u8], parsed_int_ok: boo
     true
 }
 
-/// Parses the log message kind string in `WriteLogXmlCommand::Execute`.
-pub fn rpc_parse_write_log_kind(kind: &[u8]) -> i32 {
-    match kind {
-        b"INFO" => 0,
-        b"WARNING" => 1,
-        b"ERROR" => 2,
-        b"DEBUG" => 3,
-        b"DETAIL" => 4,
-        _ => -1,
-    }
-}
-
 const HISTORY_DUP_STATUS_CS_NAMES: [&CStr; 7] = [
     c"FAILURE/INTERNAL_ERROR",
     c"SUCCESS/HIDDEN",
@@ -3556,19 +3267,6 @@ pub fn rpc_detect_history_dup_status(dup_status: i32) -> &'static CStr {
         HISTORY_DUP_STATUS_CS_NAMES[dup_status as usize]
     } else {
         c"FAILURE/INTERNAL_ERROR"
-    }
-}
-
-/// Parses the branch name in `StartUpdateXmlCommand::Execute`.
-pub fn rpc_parse_update_branch(branch_name: &[u8]) -> i32 {
-    if branch_name.eq_ignore_ascii_case(b"stable") {
-        0
-    } else if branch_name.eq_ignore_ascii_case(b"testing") {
-        1
-    } else if branch_name.eq_ignore_ascii_case(b"devel") {
-        2
-    } else {
-        -1
     }
 }
 

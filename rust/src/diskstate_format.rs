@@ -986,42 +986,6 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_parse_completed_file_line(
     1
 }
 
-/// Formats `"<queue_dir><sep><filename><suffix>"` (omitting `suffix` when `suffix == 0`) for `DiskState::DiscardDownloadQueue`.
-pub fn diskstate_format_queue_file_state_path(
-    queue_dir: &[u8],
-    sep: u8,
-    filename: &[u8],
-    suffix: u8,
-) -> Vec<u8> {
-    let mut out =
-        Vec::with_capacity(queue_dir.len() + 1 + filename.len() + usize::from(suffix != 0));
-    out.extend_from_slice(queue_dir);
-    out.push(sep);
-    out.extend_from_slice(filename);
-    if suffix != 0 {
-        out.push(suffix);
-    }
-    out
-}
-
-/// Formats `"<queue_dir><sep><file_id><suffix>"` (omitting `suffix` when `suffix == 0`) for `DiskState::DiscardFile`.
-pub fn diskstate_format_queue_id_state_path(
-    queue_dir: &[u8],
-    sep: u8,
-    file_id: i32,
-    suffix: u8,
-) -> Vec<u8> {
-    let id_str = file_id.to_string();
-    let mut out = Vec::with_capacity(queue_dir.len() + 1 + id_str.len() + usize::from(suffix != 0));
-    out.extend_from_slice(queue_dir);
-    out.push(sep);
-    out.extend_from_slice(id_str.as_bytes());
-    if suffix != 0 {
-        out.push(suffix);
-    }
-    out
-}
-
 /// Formats `"<base_path>.new"` for `StateFile::StateFile` and `DiskState::SaveIdFloor`.
 pub fn diskstate_format_new_path(base_path: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(base_path.len() + 4);
@@ -1033,34 +997,6 @@ pub fn diskstate_format_new_path(base_path: &[u8]) -> Vec<u8> {
 /// Formats `"nzb <nzb_id> file <file_id>\n"` for `DiskState::SaveIdFloor`.
 pub fn diskstate_format_ids_line(nzb_id: i32, file_id: i32) -> Vec<u8> {
     format!("nzb {nzb_id} file {file_id}\n").into_bytes()
-}
-
-/// Returns legacy suffix NUL-terminated string (`"s\0"`, `"c\0"`, or `"\0"`) for `DiskState::ConvertLegacyFileStates`.
-pub fn diskstate_legacy_suffix_str(suffix_kind: i32) -> &'static [u8] {
-    match suffix_kind {
-        1 => b"s\0",
-        2 => b"c\0",
-        _ => b"\0",
-    }
-}
-
-/// Formats `"<filename>.unreadable-<now>"` for `DiskState::SetAsideQueueFiles`.
-pub fn diskstate_format_unreadable_path(filename: &[u8], now: i64) -> Vec<u8> {
-    let suffix = format!(".unreadable-{now}");
-    let mut out = Vec::with_capacity(filename.len() + suffix.len());
-    out.extend_from_slice(filename);
-    out.extend_from_slice(suffix.as_bytes());
-    out
-}
-
-/// Formats `"<dest_dir><sep><file_id>.out.tmp"` for `DiskState::LoadFileInfo`, `DiskState::LoadFileState`, and `QueueCoordinator::LoadPartialState`.
-pub fn diskstate_format_out_tmp_path(dest_dir: &[u8], sep: u8, file_id: i32) -> Vec<u8> {
-    let suffix = format!("{file_id}.out.tmp");
-    let mut out = Vec::with_capacity(dest_dir.len() + 1 + suffix.len());
-    out.extend_from_slice(dest_dir);
-    out.push(sep);
-    out.extend_from_slice(suffix.as_bytes());
-    out
 }
 
 /// Formats `"<temp_dir><sep><file_id>.<part_num:03>"` for `DiskState::LoadFileState`.
@@ -1086,30 +1022,6 @@ pub fn diskstate_format_staged_part_path(
 pub fn diskstate_format_file_state_name(file_id: i32, completed: bool) -> Vec<u8> {
     let ch = if completed { 'c' } else { 's' };
     format!("{file_id}{ch}").into_bytes()
-}
-
-/// Formats `"<queue_dir><sep>n<nzb_id>.log"` for `DiskState::DiscardFiles`, `DiskState::AppendNzbMessage`, and `DiskState::LoadNzbMessages`.
-pub fn diskstate_format_nzb_log_path(queue_dir: &[u8], sep: u8, nzb_id: i32) -> Vec<u8> {
-    let suffix = format!("n{nzb_id}.log");
-    let mut out = Vec::with_capacity(queue_dir.len() + 1 + suffix.len());
-    out.extend_from_slice(queue_dir);
-    out.push(sep);
-    out.extend_from_slice(suffix.as_bytes());
-    out
-}
-
-/// Returns `true` when `filename` is `<digits>`, `<digits>s`, or `<digits>c` for `DiskState::SetAsideQueueFiles`.
-pub fn diskstate_is_candidate_queue_file_name(filename: &[u8]) -> bool {
-    let digits = filename.iter().take_while(|&&b| b.is_ascii_digit()).count();
-    if digits == 0 {
-        return false;
-    }
-    matches!(&filename[digits..], b"" | b"s" | b"c")
-}
-
-/// Finds the first `sep` byte in `line` and returns its byte index (`Some(pos)`), or `None` if absent.
-pub fn diskstate_find_char_pos(line: &[u8], sep: u8) -> Option<usize> {
-    line.iter().position(|&b| b == sep)
 }
 
 /// Parses `(id, suffix)` from a queue state filename following `sscanf(filename, "%i%c", &id, &suffix) == 2`
@@ -1212,107 +1124,6 @@ pub fn diskstate_next_comma_token(
     None
 }
 
-/// Classifies transactional temp/dest file recovery in `StateFile::BeginRead`:
-/// `1` = delete leftover temp file, `2` = restore temp file to dest file, `0` = normal open.
-pub fn diskstate_classify_begin_read_recovery(
-    transactional: bool,
-    dest_exists: bool,
-    temp_exists: bool,
-) -> i32 {
-    if transactional && dest_exists && temp_exists {
-        1
-    } else if !dest_exists && temp_exists {
-        2
-    } else {
-        0
-    }
-}
-
-/// Selects the `serverVolumes` slot index for `DiskState::LoadVolumeStat` entry `index`:
-/// returns `0` for `index == 0`, the last matching `server_id` where `state_id == index`, or `-1` if none.
-pub fn diskstate_select_volume_server_slot(
-    index: i32,
-    state_ids: &[i32],
-    server_ids: &[i32],
-) -> i32 {
-    if index == 0 {
-        return 0;
-    }
-    let count = state_ids.len().min(server_ids.len());
-    let mut slot = -1;
-    for k in 0..count {
-        if state_ids[k] == index {
-            slot = server_ids[k];
-        }
-    }
-    slot
-}
-
-/// Resolves `m_readVersion` in `StateFile::StateFile` (`read_version` if non-zero, else `format_version`).
-pub fn diskstate_resolve_read_version(read_version: i32, format_version: i32) -> i32 {
-    if read_version != 0 {
-        read_version
-    } else {
-        format_version
-    }
-}
-
-/// Returns true when `StateFile::FileExists` finds the destination or transactional temp file (`dest_exists || (transactional && temp_exists)`).
-pub fn diskstate_state_file_exists(
-    dest_exists: bool,
-    transactional: bool,
-    temp_exists: bool,
-) -> bool {
-    dest_exists || (transactional && temp_exists)
-}
-
-/// Returns true when `StateFile::FinishWrite` should flush file or directory buffers (`flush && flush_queue_opt`).
-pub fn diskstate_should_flush_queue_file(flush: bool, flush_queue_opt: bool) -> bool {
-    flush && flush_queue_opt
-}
-
-/// Returns true when `StateFile::BeginRead` detects an unsupported newer file version (`file_version > read_version`).
-pub fn diskstate_is_file_version_unsupported(file_version: i32, read_version: i32) -> bool {
-    file_version > read_version
-}
-
-/// Returns true when `DiskState::LoadDownloadQueue` should load the separate `history` state file (`format_version == 0 || format_version >= 57`).
-pub fn diskstate_should_load_separate_history_file(format_version: i32) -> bool {
-    format_version == 0 || format_version >= 57
-}
-
-/// Returns true when `DiskState::LoadDownloadQueue` error cleanup should still load file infos (`!file_infos_loaded && !queue_empty`).
-pub fn diskstate_should_reload_fallback_file_infos(
-    file_infos_loaded: bool,
-    queue_empty: bool,
-) -> bool {
-    !file_infos_loaded && !queue_empty
-}
-
-/// Returns the expected field count for a stream-repair job header in `DiskState::LoadDupeExtras` (`11` if `format_version >= 66`, else `9`).
-pub fn diskstate_expected_repair_job_fields(format_version: i32) -> i32 {
-    if format_version >= 66 {
-        11
-    } else {
-        9
-    }
-}
-
-/// Returns true when a `%i` count scan in `DiskState` failed or produced a negative count (`scan_cnt != 1 || count < 0`).
-pub fn diskstate_is_nonneg_count_scan_invalid(scan_cnt: i32, count: i32) -> bool {
-    scan_cnt != 1 || count < 0
-}
-
-/// Returns true when `DiskState::LoadNzbInfo` should read the `MetaName` line (`format_version >= 64 && format_version != 65`).
-pub fn diskstate_has_meta_name_field(format_version: i32) -> bool {
-    format_version >= 64 && format_version != 65
-}
-
-/// Returns true when `DiskState::LoadServerStats` matches a server's `StateId` (`news_server_state_id == server_id`).
-pub fn diskstate_matches_server_state_id(news_server_state_id: i32, server_id: i32) -> bool {
-    news_server_state_id == server_id
-}
-
 /// Selects `orig_msg_id` when non-empty, otherwise `cur_msg_id` (`DiskState::SaveFileInfo` and `DupeArticleFallback::NzbFilenameOf`).
 pub fn diskstate_select_original_or_current_msg_id<'a>(
     orig_msg_id: &'a [u8],
@@ -1323,53 +1134,6 @@ pub fn diskstate_select_original_or_current_msg_id<'a>(
     } else {
         cur_msg_id
     }
-}
-
-/// Returns true when `DiskState::LoadFileInfo` should probe on-disk direct-write files (`output_initialized != 0 && (direct_write_opt || force_direct_write)`).
-pub fn diskstate_should_probe_direct_write_files(
-    output_initialized: i32,
-    direct_write_opt: bool,
-    force_direct_write: bool,
-) -> bool {
-    output_initialized != 0 && (direct_write_opt || force_direct_write)
-}
-
-/// Returns true when `DiskState::LoadFileState` can check for a completed destination file (`(completed || force_direct_write) && !dest_dir_empty && !filename_empty`).
-pub fn diskstate_can_check_completed_dest_file(
-    completed: bool,
-    force_direct_write: bool,
-    dest_dir_empty: bool,
-    filename_empty: bool,
-) -> bool {
-    (completed || force_direct_write) && !dest_dir_empty && !filename_empty
-}
-
-/// Returns true when `DiskState::LoadHistory` matches a history entry's `NzbInfo` by ID (`(kind == hk_nzb || kind == hk_url) && nzb_id == target_id`).
-pub fn diskstate_matches_history_nzb_id(
-    kind: i32,
-    hk_nzb: i32,
-    hk_url: i32,
-    nzb_id: i32,
-    target_id: i32,
-) -> bool {
-    (kind == hk_nzb || kind == hk_url) && nzb_id == target_id
-}
-
-/// Returns true when `DiskState::SaveFeeds` should discard the feeds file (`feeds_empty && feed_history_empty`).
-pub fn diskstate_should_discard_feeds_file(
-    feeds_empty: bool,
-    feed_history_empty: bool,
-) -> bool {
-    feeds_empty && feed_history_empty
-}
-
-/// Returns true when `DiskState::LoadVolumeStat` can store a scanned value at `index` (`has_volume_array && index >= 0 && (index as usize) < array_size`).
-pub fn diskstate_can_store_volume_slot(
-    has_volume_array: bool,
-    index: i32,
-    array_size: usize,
-) -> bool {
-    has_volume_array && index >= 0 && (index as usize) < array_size
 }
 
 /// Convert a C string pointer safely to a byte slice.

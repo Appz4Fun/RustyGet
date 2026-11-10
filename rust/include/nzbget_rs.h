@@ -1469,9 +1469,6 @@ int nzbget_rs_sus_check_env_size_limit(
     const char* const* env_vars, size_t count, size_t ptr_size, size_t limit,
     size_t* out_exceeded_total);
 
-int nzbget_rs_rco_webdl_resolve_protocol_port(
-    int is_valid, const char* protocol, int port, int tls_disabled,
-    int* out_port, int* out_tls);
 int nzbget_rs_rco_webdl_check_body_chunk(
     int chunk_len, int content_len, int written_len, int gzip, int confirmed_length);
 
@@ -1617,21 +1614,6 @@ int nzbget_rs_awc_article_cache_can_flush_file(
     int cached_articles, int active_downloads, int skip_disk_write, int flush_everything);
 int nzbget_rs_awc_article_cache_can_alloc(
     size_t effective_limit, size_t allocated, size_t size, int* out_was_empty);
-
-int nzbget_rs_ntw_nntp_map_ip_version(
-    int ip_version, int ip_v4, int ip_v6, int ip_auto);
-
-void nzbget_rs_ntw_webdl_calc_initial_retries(
-    int url_retries, int retry_enabled, int* out_rem_dl, int* out_rem_conn);
-int nzbget_rs_ntw_webdl_should_wait_before_retry(
-    int status, int ad_failed, int ad_connect_error,
-    int rem_dl, int rem_conn, int is_stopped, int force, int pause_download);
-int nzbget_rs_ntw_webdl_is_default_http_port(const char* protocol, int port);
-int nzbget_rs_ntw_webdl_is_header_end_line(int first_ch);
-size_t nzbget_rs_ntw_webdl_strip_query_len(const char* url);
-
-int nzbget_rs_ntw_server_pool_calc_remaining_block_sec(
-    int64_t block_time, int retry_interval, int64_t cur_time);
 
 int nzbget_rs_dupesearch_classify_search_retry_reason(
     int queries, int failed, int verified_empty, int fetched_empty,
@@ -2581,36 +2563,12 @@ NzbgetRsBuf nzbget_rs_dqh_article_writer_format_info_path(
 NzbgetRsBuf nzbget_rs_dqh_article_writer_format_raw_part_dest(
     const char* final_output_path, size_t final_output_path_len,
     char sep, int32_t part_number);
-void nzbget_rs_dqh_statmeter_calc_debug_speed_and_timediff(
-    int32_t current_download_speed, int32_t cur_time,
-    int32_t speed_start_time, int32_t slot_size,
-    int32_t* out_speed_kb, int32_t* out_time_diff);
-int32_t nzbget_rs_dqh_statmeter_bytes_to_mb_i32(int64_t bytes);
 NzbgetRsBuf nzbget_rs_tpr_post_format_info_name(
     const char* prefix, const char* name);
 NzbgetRsBuf nzbget_rs_dqh_conn_format_port_str(int32_t port);
-NzbgetRsBuf nzbget_rs_tpr_webdl_format_get_request_line(const char* resource);
-NzbgetRsBuf nzbget_rs_tpr_webdl_format_user_agent_header(const char* version_rev);
-NzbgetRsBuf nzbget_rs_tpr_webdl_format_host_header(
-    int32_t is_default_port, const char* host, int32_t port);
 NzbgetRsBuf nzbget_rs_tpr_article_writer_format_dest_file_path(
     const char* dest_dir, char sep, const char* filename);
 NzbgetRsBuf nzbget_rs_tpr_article_writer_format_tmp_path(const char* base_path);
-size_t nzbget_rs_tpr_server_volume_required_day_len(int32_t day_slot, size_t current_len);
-NzbgetRsBuf nzbget_rs_dqh_diskstate_format_new_path(const char* base_path);
-const char* nzbget_rs_dqh_diskstate_legacy_suffix_str(int32_t suffix_kind);
-NzbgetRsBuf nzbget_rs_dqh_diskstate_format_unreadable_path(const char* filename, int64_t now);
-NzbgetRsBuf nzbget_rs_dqh_diskstate_format_out_tmp_path(
-    const char* dest_dir, char sep, int32_t file_id);
-NzbgetRsBuf nzbget_rs_dqh_diskstate_format_staged_part_path(
-    const char* temp_dir, char sep, int32_t file_id, int32_t part_num);
-NzbgetRsBuf nzbget_rs_dqh_diskstate_format_file_state_name(int32_t file_id, int32_t completed);
-NzbgetRsBuf nzbget_rs_dqh_diskstate_format_nzb_log_path(
-    const char* queue_dir, char sep, int32_t nzb_id);
-NzbgetRsBuf nzbget_rs_tpr_diskstate_format_queue_file_state_path(
-    const char* queue_dir, char sep, const char* filename, char suffix);
-NzbgetRsBuf nzbget_rs_tpr_diskstate_format_queue_id_state_path(
-    const char* queue_dir, char sep, int32_t file_id, char suffix);
 NzbgetRsBuf nzbget_rs_queue_coord_format_par_damage_summary(
     int32_t certain, int32_t damaged_blocks, int32_t projected_blocks,
     int64_t block_size, int32_t recovery_blocks);
@@ -2635,11 +2593,6 @@ NzbgetRsBuf nzbget_rs_dqh_script_ctrl_format_prefixed_varname(
 NzbgetRsBuf nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
     int32_t first_idx, const int64_t* values, size_t count);
 NzbgetRsBuf nzbget_rs_dqh_fs_extract_parent_dir_path(const char* filename, char sep);
-int nzbget_rs_dqh_diskstate_is_candidate_queue_file_name(const char* filename);
-int nzbget_rs_dqh_diskstate_find_char_pos(
-    const char* line, char sep, size_t* out_pos);
-int nzbget_rs_dqh_nntp_conn_is_already_in_group(
-    const char* active_group, const char* grp);
 int nzbget_rs_dqh_bytes_equal(const char* a, const char* b);
 int nzbget_rs_dqh_bytes_eq_ignore_case(const char* a, const char* b);
 int nzbget_rs_newznab_parse_response(
@@ -2679,7 +2632,6 @@ int nzbget_rs_posting_sketch_of_file(
 int nzbget_rs_dqh_parse_c_atoi(const char* text);
 int nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(
     const char* filename, int* out_id, char* out_suffix);
-int nzbget_rs_dqh_mem_slices_equal(const void* a, const void* b, size_t len);
 NzbgetRsBuf nzbget_rs_dqh_dupe_util_lower(const char* text, size_t text_len);
 int nzbget_rs_dupe_util_write_atomic(
     const char* path, size_t path_len, const char* data, size_t data_len);
@@ -2705,61 +2657,9 @@ NzbgetRsBuf nzbget_rs_dqh_nntp_health_format_bracketed_id(
     const char* message_id, size_t len);
 NzbgetRsBuf nzbget_rs_dqh_nntp_health_format_stat_batch(
     const char* const* ids, const size_t* lens, size_t count);
-int nzbget_rs_dqh_diskstate_classify_begin_read_recovery(
-    int transactional, int dest_exists, int temp_exists);
-int nzbget_rs_dqh_diskstate_select_volume_server_slot(
-    int index, const int32_t* state_ids, const int32_t* server_ids, size_t count);
 int nzbget_rs_dqh_script_ctrl_is_terminate_ok(
     int child_pid, int kill_res, int completed);
 int nzbget_rs_dqh_script_ctrl_can_send_break(int pid, int completed);
-int nzbget_rs_dqh_server_pool_should_disconnect_idle_level_conn(
-    int conn_norm_level, int level, int conn_status, int cs_connected);
-int nzbget_rs_dqh_statmeter_has_any_quota_configured(int daily_quota, int monthly_quota);
-int nzbget_rs_dqh_nntp_conn_classify_handshake_result(int result);
-int nzbget_rs_dqh_webdl_should_continue_retry_loop(
-    int is_stopped, int remained_download_retries, int remained_connect_retries);
-int nzbget_rs_dqh_webdl_should_keep_waiting_retry_interval(
-    int is_stopped, int msec, int url_interval_sec, int force, int pause_download);
-int nzbget_rs_dqh_webdl_is_terminal_retry_status(
-    int status, int ad_finished, int ad_fatal_error, int ad_not_found);
-int nzbget_rs_dqh_webdl_is_connect_aborted(int connected, int is_stopped);
-int nzbget_rs_dqh_webdl_should_download_body(int status, int ad_running);
-int nzbget_rs_dqh_webdl_should_delete_broken_output(int status, int ad_finished);
-int nzbget_rs_dqh_webdl_needs_prepare_file(int out_file_active);
-int nzbget_rs_dqh_webdl_is_gunzip_write_failed(int out_len, int64_t written_bytes);
-int nzbget_rs_dqh_webdl_should_disconnect_on_free(int conn_status, int cs_cancelled);
-int nzbget_rs_dqh_diskstate_resolve_read_version(
-    int read_version, int format_version);
-int nzbget_rs_dqh_diskstate_state_file_exists(
-    int dest_exists, int transactional, int temp_exists);
-int nzbget_rs_dqh_diskstate_should_flush_queue_file(
-    int flush, int flush_queue_opt);
-int nzbget_rs_dqh_diskstate_is_file_version_unsupported(
-    int file_version, int read_version);
-int nzbget_rs_dqh_diskstate_should_load_separate_history_file(
-    int format_version);
-int nzbget_rs_dqh_diskstate_should_reload_fallback_file_infos(
-    int file_infos_loaded, int queue_empty);
-int nzbget_rs_dqh_diskstate_expected_repair_job_fields(int format_version);
-int nzbget_rs_dqh_diskstate_is_nonneg_count_scan_invalid(
-    int scan_cnt, int count);
-int nzbget_rs_dqh_diskstate_has_meta_name_field(int format_version);
-int nzbget_rs_dqh_diskstate_matches_server_state_id(
-    int news_server_state_id, int server_id);
-const char* nzbget_rs_dqh_diskstate_select_original_or_current_msg_id(
-    const char* orig_msg_id, const char* cur_msg_id);
-int nzbget_rs_dqh_diskstate_should_probe_direct_write_files(
-    int output_initialized, int direct_write_opt, int force_direct_write);
-int nzbget_rs_dqh_diskstate_can_check_completed_dest_file(
-    int completed, int force_direct_write, int dest_dir_empty,
-    int filename_empty);
-int nzbget_rs_dqh_diskstate_matches_history_nzb_id(
-    int kind, int hk_nzb, int hk_url, int nzb_id, int target_id);
-int nzbget_rs_dqh_diskstate_should_discard_feeds_file(
-    int feeds_empty, int feed_history_empty);
-int nzbget_rs_dqh_diskstate_can_store_volume_slot(
-    int has_volume_array, int index, size_t array_size);
-int nzbget_rs_dqh_webdl_should_try_recv_when_buf_empty(int buf_len);
 
 typedef struct NzbgetRsParDamageQueuedFile {
     const char* filename;

@@ -1098,11 +1098,6 @@ pub fn nstring_find_substr_from(haystack: &[u8], needle: &[u8], pos: i32) -> i32
     }
 }
 
-/// Returns `true` when two byte slices are identical.
-pub fn mem_slices_equal(a: &[u8], b: &[u8]) -> bool {
-    a == b
-}
-
 /// Classifies the file extension in `Util::FindExecutorProgram`:
 /// returns `(0, 0)` when no `.` is present, or `(kind, dot_idx)` where `kind` is:
 /// `1` = `".py"`, `2` = `".sh"`, `3` = `".js"`, `4` = any other extension.

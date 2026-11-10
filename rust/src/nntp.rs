@@ -721,11 +721,6 @@ pub fn article_fetcher_format_body_cmd(message_id: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Returns `true` when `!active_group.is_empty() && active_group == grp` for `NntpConnection::JoinGroup`.
-pub fn nntp_conn_is_already_in_group(active_group: &[u8], grp: &[u8]) -> bool {
-    !active_group.is_empty() && active_group == grp
-}
-
 /// Formats an NNTP message-id in angle brackets (`<id>`) if not already bracketed.
 pub fn nntp_health_format_bracketed_id(message_id: &[u8]) -> Vec<u8> {
     if message_id.first() == Some(&b'<') && message_id.last() == Some(&b'>') {
@@ -801,20 +796,6 @@ pub fn server_pool_should_disconnect_idle_level_conn(
     cs_connected: i32,
 ) -> bool {
     conn_norm_level == level && conn_status == cs_connected
-}
-
-/// Classifies `NntpConnection::Connect` handshake result:
-/// `0` = connected (`result == 0`),
-/// `1` = disconnect & fail (`result == 1`),
-/// `-1` = fail without disconnect (`result != 0 && result != 1`).
-pub fn nntp_conn_classify_handshake_result(result: i32) -> i32 {
-    if result == 1 {
-        1
-    } else if result == 0 {
-        0
-    } else {
-        -1
-    }
 }
 
 /// Returns true when `ArticleBatchFetcher::Begin` should call `EnsureWorkers()` (`worker_count > 0 && !is_stopped`).
@@ -938,17 +919,6 @@ pub fn nntp_health_classify_stat_reply(line: &[u8]) -> i32 {
     }
 }
 
-/// Maps NewsServer IP version (`4` / `6` / other) to `Connection::EIPVersion`.
-pub fn nntp_map_ip_version(ip_version: i32, ip_v4: i32, ip_v6: i32, ip_auto: i32) -> i32 {
-    if ip_version == 4 {
-        ip_v4
-    } else if ip_version == 6 {
-        ip_v6
-    } else {
-        ip_auto
-    }
-}
-
 /// Returns whether `ServerPool::GetConnection` can advance past `level` given a server's state.
 pub fn server_pool_can_advance_level(
     norm_level: i32,
@@ -982,23 +952,6 @@ pub fn server_pool_match_ignore_server(
 ) -> bool {
     cand_id == ign_id
         || (ign_group > 0 && ign_group == cand_group && ign_norm_level == cand_norm_level)
-}
-
-/// Computes remaining block seconds before `ServerPool::LogDebugInfo` unblocks a server.
-pub fn server_pool_calc_remaining_block_sec(
-    block_time: i64,
-    retry_interval: i32,
-    cur_time: i64,
-) -> i32 {
-    if block_time == 0 {
-        return 0;
-    }
-    let end = block_time.saturating_add(i64::from(retry_interval));
-    if end > cur_time {
-        (end - cur_time).clamp(0, i64::from(i32::MAX)) as i32
-    } else {
-        0
-    }
 }
 
 // ============================================================================

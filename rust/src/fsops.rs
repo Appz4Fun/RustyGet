@@ -936,7 +936,14 @@ pub fn save_buffer_into_file(filename: &CStr, buffer: &[u8]) -> bool {
                 buffer.len() - written,
             )
         };
-        if w <= 0 {
+        if w < 0 {
+            if last_errno() == libc::EINTR {
+                continue;
+            }
+            ok = false;
+            break;
+        }
+        if w == 0 {
             ok = false;
             break;
         }
@@ -1116,7 +1123,14 @@ pub fn load_file_into_buffer(
         let mut read_total = 0usize;
         while read_total < target {
             let n = unsafe { sys::read(fd, ptr.add(read_total).cast(), target - read_total) };
-            if n <= 0 {
+            if n < 0 {
+                if last_errno() == libc::EINTR {
+                    continue;
+                }
+                unsafe { sys::close(fd) };
+                return false;
+            }
+            if n == 0 {
                 unsafe { sys::close(fd) };
                 return false;
             }

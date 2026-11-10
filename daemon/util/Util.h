@@ -1383,11 +1383,8 @@ public:
 	{
 		int ok = 0;
 		NzbgetRsBuf buf = nzbget_rs_fs_string_op(0, path.c_str(), &ok);
-		if (!ok)
-		{
-			return std::nullopt;
-		}
-		std::string result(buf.data, buf.len);
+		std::optional<std::string> result;
+		if (ok) result.emplace(buf.data, buf.len);
 		nzbget_rs_free(buf);
 		return result;
 	}

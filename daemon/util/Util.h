@@ -8156,36 +8156,19 @@ public:
 	}
 	static CString MakeNiceNzbName(const char* nzbFilename, bool removeExt)
 	{
-		const char* fn = nzbFilename ? nzbFilename : "";
-		bool isAbs = (fn[0] == '/' || fn[0] == '\\') ||
-			(std::isalpha((unsigned char)fn[0]) && fn[1] == ':' && (fn[2] == '\\' || fn[2] == '/'));
-		const char* base = isAbs ? FileSystem::BaseFileName(fn) : fn;
-		std::string stripped(base);
-		if (removeExt && stripped.size() >= 4 &&
-			!strcasecmp(stripped.c_str() + stripped.size() - 4, ".nzb"))
-		{
-			stripped.resize(stripped.size() - 4);
-		}
-		NzbgetRsBuf validBuf = nzbget_rs_path_text(1, stripped.data(), stripped.size(), false);
-		CString valid(validBuf.data, static_cast<int>(validBuf.len));
-		nzbget_rs_free(validBuf);
-		return valid.Empty() ? CString("nzb") : std::move(valid);
+		NzbgetRsBuf buf = nzbget_rs_nzb_format_name(
+			0, nzbFilename, nullptr, nullptr, nullptr, nullptr, removeExt ? 1 : 0, 0);
+		CString out(buf.data, static_cast<int>(buf.len));
+		nzbget_rs_free(buf);
+		return out;
 	}
 	static CString MakeNiceUrlName(const char* urlStr, const char* nzbFilename)
 	{
-		URL url(urlStr);
-		const char* host = url.GetHost() ? url.GetHost() : "";
-		if (!Util::EmptyStr(nzbFilename))
-		{
-			CString nicename = MakeNiceNzbName(nzbFilename, true);
-			return CString::FormatStr("%s @ %s", *nicename, host);
-		}
-		if (url.IsValid())
-		{
-			const char* resource = url.GetResource() ? url.GetResource() : "/";
-			return CString::FormatStr("%s%s", host, resource);
-		}
-		return urlStr ? urlStr : "";
+		NzbgetRsBuf buf = nzbget_rs_nzb_format_name(
+			1, urlStr, nzbFilename, nullptr, nullptr, nullptr, 0, 0);
+		CString out(buf.data, static_cast<int>(buf.len));
+		nzbget_rs_free(buf);
+		return out;
 	}
 	const char* GetDestDir() { return m_destDir; }
 	void SetDestDir(const char* destDir) { m_destDir = destDir; }
@@ -8302,29 +8285,6 @@ public:
 	void SetMinTime(time_t minTime) { m_minTime = minTime; }
 	time_t GetMaxTime() { return m_maxTime; }
 	void SetMaxTime(time_t maxTime) { m_maxTime = maxTime; }
-	static std::string DirNameOf(const char* name, size_t reserve)
-	{
-		std::string dirName = Util::EmptyStr(name) ? "nzb" : name;
-		if (!dirName.empty() && dirName[0] == '.')
-		{
-			dirName.insert(dirName.begin(), '_');
-		}
-		size_t maxLen = reserve < 255 ? 255 - reserve : 0;
-		if (dirName.size() > maxLen)
-		{
-			size_t cut = maxLen;
-			while (cut > 0 && ((unsigned char)dirName[cut] & 0xC0) == 0x80)
-			{
-				cut--;
-			}
-			dirName.resize(cut);
-			while (!dirName.empty() && (dirName.back() == '.' || dirName.back() == ' '))
-			{
-				dirName.pop_back();
-			}
-		}
-		return dirName;
-	}
 	CString BuildFinalDirName()
 	{
 		const char* categoryDestDir = nullptr;
@@ -8336,86 +8296,40 @@ public:
 				categoryDestDir = category->GetDestDir();
 			}
 		}
-
-		std::string out;
-		bool useCategory = false;
-		if (!m_category.Empty() && !Util::EmptyStr(categoryDestDir))
-		{
-			out = categoryDestDir;
-		}
-		else
-		{
-			out = g_Options->GetDestDir() ? g_Options->GetDestDir() : "";
-			useCategory = !m_category.Empty();
-		}
-		if (g_Options->GetAppendCategoryDir() && useCategory)
-		{
-			NzbgetRsBuf catBuf = nzbget_rs_path_text(2, *m_category, strlen(*m_category), false);
-			if (catBuf.len > 0)
-			{
-				out.push_back(PATH_SEPARATOR);
-				out.append(catBuf.data, catBuf.len);
-			}
-			nzbget_rs_free(catBuf);
-		}
-		out.push_back(PATH_SEPARATOR);
-		if (Util::EmptyStr(GetName()))
-		{
-			out.append(*CString::FormatStr("nzb-%i", GetId()));
-		}
-		else
-		{
-			out.append(DirNameOf(GetName(), 0));
-		}
-		return out.c_str();
+		NzbgetRsBuf buf = nzbget_rs_nzb_format_name(
+			2, g_Options->GetDestDir(), categoryDestDir, *m_category,
+			GetName(), nullptr, g_Options->GetAppendCategoryDir() ? 1 : 0, GetId());
+		CString out(buf.data, static_cast<int>(buf.len));
+		nzbget_rs_free(buf);
+		return out;
 	}
 	void BuildDestDirName()
 	{
-		if (Util::EmptyStr(g_Options->GetInterDir()))
+		const char* categoryDestDir = nullptr;
+		if (Util::EmptyStr(g_Options->GetInterDir()) && !m_category.Empty())
 		{
-			m_destDir = BuildFinalDirName();
+			Options::Category* category = g_Options->FindCategory(m_category, false);
+			if (category && !Util::EmptyStr(category->GetDestDir()))
+			{
+				categoryDestDir = category->GetDestDir();
+			}
 		}
-		else
-		{
-			CString idSuffix = CString::FormatStr(".#%i", GetId());
-			std::string dirName = DirNameOf(GetName(), strlen(*idSuffix));
-			m_destDir = CString::FormatStr("%s%c%s%s",
-				g_Options->GetInterDir(), PATH_SEPARATOR, dirName.c_str(), *idSuffix);
-		}
+		NzbgetRsBuf buf = nzbget_rs_nzb_format_name(
+			3, g_Options->GetInterDir(), g_Options->GetDestDir(), categoryDestDir,
+			*m_category, GetName(), g_Options->GetAppendCategoryDir() ? 1 : 0, GetId());
+		m_destDir = CString(buf.data, static_cast<int>(buf.len));
+		nzbget_rs_free(buf);
 	}
 	CompletedFileList* GetCompletedFiles() { return &m_completedFiles; }
 	bool RenameCompletedFile(const char* oldName, const char* newAbsoluteOrRelativePath)
 	{
-		if (!oldName || !*oldName || !newAbsoluteOrRelativePath || !*newAbsoluteOrRelativePath)
-		{
-			return false;
-		}
-		size_t oldLen = strlen(oldName);
+		if (Util::EmptyStr(oldName) || Util::EmptyStr(newAbsoluteOrRelativePath)) return false;
 		for (CompletedFile& completedFile : m_completedFiles)
 		{
 			const char* fn = completedFile.GetFilename() ? completedFile.GetFilename() : "";
-			if (strlen(fn) != oldLen)
+			if (nzbget_rs_nzb_completed_same_filename(fn, oldName))
 			{
-				continue;
-			}
-			bool same = true;
-			for (size_t i = 0; i < oldLen; i++)
-			{
-				unsigned char c1 = fn[i] == '\\' ? '/' : (unsigned char)fn[i];
-				unsigned char c2 = oldName[i] == '\\' ? '/' : (unsigned char)oldName[i];
-				if (std::tolower(c1) != std::tolower(c2))
-				{
-					same = false;
-					break;
-				}
-			}
-			if (same)
-			{
-				const char* orig = completedFile.GetOrigname();
-				if (!orig || !*orig)
-				{
-					completedFile.SetOrigname(fn);
-				}
+				if (Util::EmptyStr(completedFile.GetOrigname())) completedFile.SetOrigname(fn);
 				completedFile.SetFilename(newAbsoluteOrRelativePath);
 				return true;
 			}
@@ -8477,45 +8391,13 @@ public:
 	ServerStatList* GetCurrentServerStats() { return &m_currentServerStats; }
 	int CalcHealth()
 	{
-		int64 dataSize = m_size - m_parSize;
-		if (m_currentFailedSize == 0 || m_size == m_parSize || dataSize <= 0)
-		{
-			return 1000;
-		}
-		int64 dataFailed = m_currentFailedSize - m_parCurrentFailedSize;
-		int health = (int)((dataSize - dataFailed) * 1000 / dataSize);
-		if (health == 1000 && dataFailed > 0)
-		{
-			health = 999;
-		}
-		return health;
+		return nzbget_rs_nzb_calc_health(
+			0, m_size, m_parSize, m_currentFailedSize, m_parCurrentFailedSize, 0);
 	}
 	int CalcCriticalHealth(bool allowEstimation)
 	{
-		if (m_size == 0)
-		{
-			return 1000;
-		}
-		if (m_size == m_parSize)
-		{
-			return 0;
-		}
-		int64 goodParSize = m_parSize - m_parCurrentFailedSize;
-		int64 denom = m_size - goodParSize;
-		int criticalHealth = denom != 0 ? (int)((m_size - goodParSize * 2) * 1000 / denom) : 0;
-		if (goodParSize * 2 > m_size)
-		{
-			criticalHealth = 0;
-		}
-		else if (criticalHealth == 1000 && m_parSize > 0)
-		{
-			criticalHealth = 999;
-		}
-		if (criticalHealth == 1000 && allowEstimation)
-		{
-			criticalHealth = 850;
-		}
-		return criticalHealth;
+		return nzbget_rs_nzb_calc_health(
+			1, m_size, m_parSize, m_currentFailedSize, m_parCurrentFailedSize, allowEstimation ? 1 : 0);
 	}
 	const char* GetDupeKey() { return m_dupeKey; }
 	void SetDupeKey(const char* dupeKey) { m_dupeKey = dupeKey ? dupeKey : ""; }
@@ -8756,165 +8638,22 @@ public:
 	}
 	bool IsDupeSuccess()
 	{
-		bool failure =
-			m_markStatus != NzbInfo::ksSuccess &&
-			m_markStatus != NzbInfo::ksGood &&
-			(m_deleteStatus != NzbInfo::dsNone ||
-			m_markStatus == NzbInfo::ksBad ||
-			m_parStatus == NzbInfo::psFailure ||
-			m_unpackStatus == NzbInfo::usFailure ||
-			m_unpackStatus == NzbInfo::usPassword ||
-			m_urlStatus == NzbInfo::lsFailed ||
-			m_urlStatus == NzbInfo::lsScanSkipped ||
-			m_urlStatus == NzbInfo::lsScanFailed ||
-			(m_parStatus == NzbInfo::psSkipped &&
-			m_unpackStatus == NzbInfo::usSkipped &&
-			CalcHealth() < CalcCriticalHealth(true)) ||
-			(g_Options->GetHealthCheck() == Options::hcDupe &&
-			(m_parStatus == NzbInfo::psNone || m_parStatus == NzbInfo::psSkipped) &&
-			(m_unpackStatus == NzbInfo::usNone || m_unpackStatus == NzbInfo::usSkipped) &&
-			CalcHealth() < CalcCriticalHealth(false)));
-		return !failure;
+		return nzbget_rs_nzb_is_dupe_success(
+			static_cast<int>(m_markStatus), static_cast<int>(m_deleteStatus),
+			static_cast<int>(m_parStatus), static_cast<int>(m_unpackStatus),
+			static_cast<int>(m_urlStatus), CalcHealth(), CalcCriticalHealth(true),
+			CalcCriticalHealth(false), g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0) != 0;
 	}
 	const char* MakeTextStatus(bool ignoreScriptStatus)
 	{
-		const char* status = "FAILURE/INTERNAL_ERROR";
-
-		if (m_kind == NzbInfo::nkNzb)
-		{
-			int health = CalcHealth();
-			int criticalHealth = CalcCriticalHealth(false);
-			ScriptStatus::EStatus scriptStatus = ignoreScriptStatus ? ScriptStatus::srSuccess : m_scriptStatuses.CalcTotalStatus();
-
-			if (m_markStatus == NzbInfo::ksBad)
-			{
-				status = "FAILURE/BAD";
-			}
-			else if (m_markStatus == NzbInfo::ksGood)
-			{
-				status = "SUCCESS/GOOD";
-			}
-			else if (m_markStatus == NzbInfo::ksSuccess)
-			{
-				status = "SUCCESS/MARK";
-			}
-			else if (m_deleteStatus == NzbInfo::dsHealth)
-			{
-				status = "FAILURE/HEALTH";
-			}
-			else if (m_deleteStatus == NzbInfo::dsManual)
-			{
-				status = "DELETED/MANUAL";
-			}
-			else if (m_deleteStatus == NzbInfo::dsDupe)
-			{
-				status = "DELETED/DUPE";
-			}
-			else if (m_deleteStatus == NzbInfo::dsBad)
-			{
-				status = "FAILURE/BAD";
-			}
-			else if (m_deleteStatus == NzbInfo::dsGood)
-			{
-				status = "DELETED/GOOD";
-			}
-			else if (m_deleteStatus == NzbInfo::dsCopy)
-			{
-				status = "DELETED/COPY";
-			}
-			else if (m_deleteStatus == NzbInfo::dsScan)
-			{
-				status = "FAILURE/SCAN";
-			}
-			else if (m_parStatus == NzbInfo::psFailure)
-			{
-				status = "FAILURE/PAR";
-			}
-			else if (m_unpackStatus == NzbInfo::usFailure)
-			{
-				status = "FAILURE/UNPACK";
-			}
-			else if (m_moveStatus == NzbInfo::msFailure)
-			{
-				status = "FAILURE/MOVE";
-			}
-			else if (m_parStatus == NzbInfo::psManual)
-			{
-				status = "WARNING/DAMAGED";
-			}
-			else if (m_parStatus == NzbInfo::psRepairPossible)
-			{
-				status = "WARNING/REPAIRABLE";
-			}
-			else if ((m_parStatus == NzbInfo::psNone || m_parStatus == NzbInfo::psSkipped) &&
-					 (m_unpackStatus == NzbInfo::usNone || m_unpackStatus == NzbInfo::usSkipped) &&
-					 health < criticalHealth)
-			{
-				status = "FAILURE/HEALTH";
-			}
-			else if ((m_parStatus == NzbInfo::psNone || m_parStatus == NzbInfo::psSkipped) &&
-					 (m_unpackStatus == NzbInfo::usNone || m_unpackStatus == NzbInfo::usSkipped) &&
-					 health < 1000 && health >= criticalHealth)
-			{
-				status = "WARNING/HEALTH";
-			}
-			else if ((m_parStatus == NzbInfo::psNone || m_parStatus == NzbInfo::psSkipped) &&
-					 (m_unpackStatus == NzbInfo::usNone || m_unpackStatus == NzbInfo::usSkipped) &&
-					 scriptStatus != ScriptStatus::srFailure && health == 1000)
-			{
-				status = "SUCCESS/HEALTH";
-			}
-			else if (m_unpackStatus == NzbInfo::usSpace)
-			{
-				status = "WARNING/SPACE";
-			}
-			else if (m_unpackStatus == NzbInfo::usPassword)
-			{
-				status = "WARNING/PASSWORD";
-			}
-			else if ((m_unpackStatus == NzbInfo::usSuccess ||
-					  ((m_unpackStatus == NzbInfo::usNone || m_unpackStatus == NzbInfo::usSkipped) &&
-					   m_parStatus == NzbInfo::psSuccess)) &&
-					 scriptStatus == ScriptStatus::srSuccess)
-			{
-				status = "SUCCESS/ALL";
-			}
-			else if (m_unpackStatus == NzbInfo::usSuccess && scriptStatus == ScriptStatus::srNone)
-			{
-				status = "SUCCESS/UNPACK";
-			}
-			else if (m_parStatus == NzbInfo::psSuccess && scriptStatus == ScriptStatus::srNone)
-			{
-				status = "SUCCESS/PAR";
-			}
-			else if (scriptStatus == ScriptStatus::srFailure)
-			{
-				status = "WARNING/SCRIPT";
-			}
-		}
-		else if (m_kind == NzbInfo::nkUrl)
-		{
-			if (m_deleteStatus == NzbInfo::dsManual)
-			{
-				status = "DELETED/MANUAL";
-			}
-			else if (m_deleteStatus == NzbInfo::dsDupe)
-			{
-				status = "DELETED/DUPE";
-			}
-			else if (m_deleteStatus == NzbInfo::dsGood)
-			{
-				status = "DELETED/GOOD";
-			}
-			else
-			{
-				static const char* UrlStatusStrings[] = { "FAILURE/INTERNAL_ERROR", "FAILURE/INTERNAL_ERROR", "FAILURE/INTERNAL_ERROR",
-					"FAILURE/FETCH", "FAILURE/INTERNAL_ERROR", "WARNING/SKIPPED", "FAILURE/SCAN" };
-				status = UrlStatusStrings[m_urlStatus];
-			}
-		}
-
-		return status;
+		ScriptStatus::EStatus scriptStatus = ignoreScriptStatus ?
+			ScriptStatus::srSuccess : m_scriptStatuses.CalcTotalStatus();
+		return nzbget_rs_nzb_make_text_status(
+			static_cast<int>(m_kind), static_cast<int>(m_markStatus),
+			static_cast<int>(m_deleteStatus), static_cast<int>(m_parStatus),
+			static_cast<int>(m_unpackStatus), static_cast<int>(m_moveStatus),
+			static_cast<int>(m_urlStatus), static_cast<int>(scriptStatus),
+			CalcHealth(), CalcCriticalHealth(false));
 	}
 	void AddMessage(Message::EKind kind, const char* text, bool print = true);
 	void PrintMessage(Message::EKind kind, const char* format, ...) PRINTF_SYNTAX(3)
@@ -49129,13 +48868,6 @@ static const int NCURSES_COLORPAIR_HINT		= 12;
 static const int MAX_SCREEN_WIDTH				= 512;
 
 static const int READKEY_EMPTY = -1;
-static const int KEY_DOWN      = 258;
-static const int KEY_UP        = 259;
-static const int KEY_HOME      = 262;
-static const int KEY_BACKSPACE = 263;
-static const int KEY_NPAGE     = 338;
-static const int KEY_PPAGE     = 339;
-static const int KEY_END       = 360;
 
 class NCursesFrontend : public Frontend
 {
@@ -49825,40 +49557,9 @@ private:
 
 	void SetCurrentQueueEntry(int entry)
 	{
-		int queueSize = CalcQueueSize();
-		if (entry < 0)
-		{
-			entry = 0;
-		}
-		else if (entry > queueSize - 1)
-		{
-			entry = queueSize - 1;
-		}
-
-		if (entry > m_queueScrollOffset + m_queueWinClientHeight ||
-			entry < m_queueScrollOffset - m_queueWinClientHeight)
-		{
-			m_queueScrollOffset = entry - m_queueWinClientHeight / 2;
-		}
-		else if (entry < m_queueScrollOffset)
-		{
-			m_queueScrollOffset -= m_queueWinClientHeight;
-		}
-		else if (entry >= m_queueScrollOffset + m_queueWinClientHeight)
-		{
-			m_queueScrollOffset += m_queueWinClientHeight;
-		}
-
-		if (m_queueScrollOffset > queueSize - m_queueWinClientHeight)
-		{
-			m_queueScrollOffset = queueSize - m_queueWinClientHeight;
-		}
-		if (m_queueScrollOffset < 0)
-		{
-			m_queueScrollOffset = 0;
-		}
-
-		m_selectedQueueEntry = entry;
+		nzbget_rs_ncurses_set_current_queue_entry(
+			entry, CalcQueueSize(), m_queueWinClientHeight,
+			&m_queueScrollOffset, &m_selectedQueueEntry);
 	}
 
 	/*
@@ -49867,204 +49568,45 @@ private:
 	 */
 	void UpdateInput(int initialKey)
 	{
-		int key = initialKey;
-		while (key != READKEY_EMPTY)
+		for (int key = initialKey; key != READKEY_EMPTY; key = ReadConsoleKey())
 		{
-			int queueSize = CalcQueueSize();
-
-			// Normal or edit queue mode
-			if (m_inputMode == normal || m_inputMode == editQueue)
+			NzbgetRsNcursesKeyState st{};
+			st.input_mode = static_cast<int>(m_inputMode);
+			st.show_nzbname = m_showNzbname ? 1 : 0;
+			st.show_timestamp = m_showTimestamp ? 1 : 0;
+			st.group_files = m_groupFiles ? 1 : 0;
+			st.queue_window_percentage = m_queueWindowPercentage;
+			st.selected_queue_entry = m_selectedQueueEntry;
+			st.queue_scroll_offset = m_queueScrollOffset;
+			st.queue_win_client_height = m_queueWinClientHeight;
+			st.input_number_index = m_inputNumberIndex;
+			st.input_value = m_inputValue;
+			nzbget_rs_ncurses_handle_key(&st, key, CalcQueueSize());
+			m_inputMode = static_cast<EInputMode>(st.input_mode);
+			m_showNzbname = st.show_nzbname != 0;
+			m_showTimestamp = st.show_timestamp != 0;
+			m_groupFiles = st.group_files != 0;
+			m_queueWindowPercentage = st.queue_window_percentage;
+			m_queueScrollOffset = st.queue_scroll_offset;
+			m_inputNumberIndex = st.input_number_index;
+			m_inputValue = st.input_value;
+			if (st.exit_proc) ExitProc();
+			if (st.calc_window_sizes) CalcWindowSizes();
+			if (st.toggle_pause)
 			{
-				switch (key)
-				{
-				case 'q':
-					// Key 'q' for quit
-					ExitProc();
-					break;
-				case 'z':
-					// show/hide NZBFilename
-					m_showNzbname = !m_showNzbname;
-					break;
-				case 'w':
-					// swicth window sizes
-					m_queueWindowPercentage = m_queueWindowPercentage == 50 ? 100 :
-						(m_queueWindowPercentage == 100 && m_inputMode != editQueue) ? 0 : 50;
-					CalcWindowSizes();
-					SetCurrentQueueEntry(m_selectedQueueEntry);
-					break;
-				case 'g':
-					// group/ungroup files
-					m_groupFiles = !m_groupFiles;
-					SetCurrentQueueEntry(m_selectedQueueEntry);
-					NeedUpdateData();
-					break;
-				}
+				if (!IsRemoteMode()) info("%s", m_pauseDownload ? "Unpausing download" : "Pausing download");
+				ServerPauseUnpause(!m_pauseDownload);
 			}
-
-			// Normal mode
-			if (m_inputMode == normal)
+			if (st.set_delete_hint) SetHint(" Use Uppercase \"D\" for delete");
+			bool editOk = true;
+			if (st.edit_action)
 			{
-				switch (key)
-				{
-				case 'p':
-					// Key 'p' for pause
-					if (!IsRemoteMode())
-					{
-						info("%s", m_pauseDownload ? "Unpausing download" : "Pausing download");
-					}
-					ServerPauseUnpause(!m_pauseDownload);
-					break;
-				case 'e':
-				case 10: // return
-				case 13: // enter
-					if (queueSize > 0)
-					{
-						m_inputMode = editQueue;
-						if (m_queueWindowPercentage == 0)
-						{
-							m_queueWindowPercentage = 50;
-						}
-						return;
-					}
-					break;
-				case 'r':
-					// Download rate
-					m_inputMode = downloadRate;
-					m_inputNumberIndex = 0;
-					m_inputValue = 0;
-					return;
-				case 't':
-					// show/hide Timestamps
-					m_showTimestamp = !m_showTimestamp;
-					break;
-				}
+				editOk = EditQueue(static_cast<DownloadQueue::EEditAction>(st.edit_action), st.edit_offset);
 			}
-
-			// Edit Queue mode
-			if (m_inputMode == editQueue)
-			{
-				switch (key)
-				{
-				case 'e':
-				case 10: // return
-				case 13: // enter
-					m_inputMode = normal;
-					return;
-				case KEY_DOWN:
-					if (m_selectedQueueEntry < queueSize - 1)
-					{
-						SetCurrentQueueEntry(m_selectedQueueEntry + 1);
-					}
-					break;
-				case KEY_UP:
-					if (m_selectedQueueEntry > 0)
-					{
-						SetCurrentQueueEntry(m_selectedQueueEntry - 1);
-					}
-					break;
-				case KEY_PPAGE:
-					if (m_selectedQueueEntry > 0)
-					{
-						if (m_selectedQueueEntry == m_queueScrollOffset)
-						{
-							m_queueScrollOffset -= m_queueWinClientHeight;
-							SetCurrentQueueEntry(m_selectedQueueEntry - m_queueWinClientHeight);
-						}
-						else
-						{
-							SetCurrentQueueEntry(m_queueScrollOffset);
-						}
-					}
-					break;
-				case KEY_NPAGE:
-					if (m_selectedQueueEntry < queueSize - 1)
-					{
-						int bottom = m_queueScrollOffset + m_queueWinClientHeight - 1;
-						if (m_selectedQueueEntry == bottom)
-						{
-							m_queueScrollOffset += m_queueWinClientHeight;
-							SetCurrentQueueEntry(m_selectedQueueEntry + m_queueWinClientHeight);
-						}
-						else
-						{
-							SetCurrentQueueEntry(bottom);
-						}
-					}
-					break;
-				case KEY_HOME:
-					SetCurrentQueueEntry(0);
-					break;
-				case KEY_END:
-					SetCurrentQueueEntry(queueSize > 0 ? queueSize - 1 : 0);
-					break;
-				case 'p':
-					// Key 'p' for pause
-					EditQueue(DownloadQueue::eaFilePause, 0);
-					break;
-				case 'd':
-					SetHint(" Use Uppercase \"D\" for delete");
-					break;
-				case 'D':
-					// Delete entry
-					if (EditQueue(DownloadQueue::eaFileDelete, 0))
-					{
-						SetCurrentQueueEntry(m_selectedQueueEntry);
-					}
-					break;
-				case 'u':
-					if (EditQueue(DownloadQueue::eaFileMoveOffset, -1))
-					{
-						SetCurrentQueueEntry(m_selectedQueueEntry - 1);
-					}
-					break;
-				case 'n':
-					if (EditQueue(DownloadQueue::eaFileMoveOffset, +1))
-					{
-						SetCurrentQueueEntry(m_selectedQueueEntry + 1);
-					}
-					break;
-				case 't':
-					if (EditQueue(DownloadQueue::eaFileMoveTop, 0))
-					{
-						SetCurrentQueueEntry(0);
-					}
-					break;
-				case 'b':
-					if (EditQueue(DownloadQueue::eaFileMoveBottom, 0))
-					{
-						SetCurrentQueueEntry(queueSize > 0 ? queueSize - 1 : 0);
-					}
-					break;
-				}
-			}
-
-			// Edit download rate input mode
-			if (m_inputMode == downloadRate)
-			{
-				if (m_inputNumberIndex < 5 && key >= '0' && key <= '9')
-				{
-					m_inputValue = (m_inputValue * 10) + (key - '0');
-					m_inputNumberIndex++;
-				}
-				else if (key == 10 || key == 13)
-				{
-					ServerSetDownloadRate(m_inputValue * 1024);
-					m_inputMode = normal;
-					return;
-				}
-				else if (key == 27)
-				{
-					m_inputMode = normal;
-					return;
-				}
-				else if (m_inputNumberIndex > 0 && key == KEY_BACKSPACE)
-				{
-					m_inputValue = (m_inputValue - (m_inputValue % 10)) / 10;
-					m_inputNumberIndex--;
-				}
-			}
-
-			key = ReadConsoleKey();
+			if (st.has_select_entry && editOk) SetCurrentQueueEntry(st.select_entry);
+			if (st.need_update_data) NeedUpdateData();
+			if (st.has_set_download_rate) ServerSetDownloadRate(st.download_rate_bytes);
+			if (st.stop_loop) return;
 		}
 	}
 

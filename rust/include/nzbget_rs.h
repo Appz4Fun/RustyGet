@@ -3042,6 +3042,52 @@ int nzbget_rs_options_load_config_file(
     const char* path, void* ctx,
     void (*on_line_cb)(void*, int, const char*));
 
+typedef struct NzbgetRsNcursesKeyState {
+    int input_mode;
+    int show_nzbname;
+    int show_timestamp;
+    int group_files;
+    int queue_window_percentage;
+    int selected_queue_entry;
+    int queue_scroll_offset;
+    int queue_win_client_height;
+    int input_number_index;
+    int input_value;
+    int exit_proc;
+    int calc_window_sizes;
+    int need_update_data;
+    int toggle_pause;
+    int set_delete_hint;
+    int edit_action;
+    int edit_offset;
+    int has_select_entry;
+    int select_entry;
+    int has_set_download_rate;
+    int download_rate_bytes;
+    int stop_loop;
+} NzbgetRsNcursesKeyState;
+
+void nzbget_rs_ncurses_set_current_queue_entry(
+    int entry, int queue_size, int queue_win_client_height,
+    int* inout_scroll_offset, int* out_selected_entry);
+void nzbget_rs_ncurses_handle_key(
+    NzbgetRsNcursesKeyState* state, int key, int queue_size);
+
+NzbgetRsBuf nzbget_rs_nzb_format_name(
+    int op, const char* s1, const char* s2, const char* s3,
+    const char* s4, const char* s5, int flag, int nzb_id);
+int nzbget_rs_nzb_calc_health(
+    int is_critical, int64_t size, int64_t par_size,
+    int64_t current_failed_size, int64_t par_current_failed_size, int allow_estimation);
+int nzbget_rs_nzb_is_dupe_success(
+    int mark_status, int delete_status, int par_status, int unpack_status,
+    int url_status, int health, int critical_health_est, int critical_health_exact,
+    int health_check_dupe);
+const char* nzbget_rs_nzb_make_text_status(
+    int kind, int mark_status, int delete_status, int par_status, int unpack_status,
+    int move_status, int url_status, int script_status, int health, int critical_health);
+int nzbget_rs_nzb_completed_same_filename(const char* a, const char* b);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

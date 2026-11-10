@@ -13411,3 +13411,167 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_prepare_signature_inputs(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ncurses_set_current_queue_entry(
+    entry: c_int,
+    queue_size: c_int,
+    queue_win_client_height: c_int,
+    inout_scroll_offset: *mut c_int,
+    out_selected_entry: *mut c_int,
+) {
+    let scroll_in = if inout_scroll_offset.is_null() {
+        0
+    } else {
+        *inout_scroll_offset
+    };
+    let (sel, scroll_out) = crate::ncurses_format::ncurses_set_current_queue_entry(
+        entry,
+        queue_size,
+        scroll_in,
+        queue_win_client_height,
+    );
+    if !inout_scroll_offset.is_null() {
+        *inout_scroll_offset = scroll_out;
+    }
+    if !out_selected_entry.is_null() {
+        *out_selected_entry = sel;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ncurses_handle_key(
+    state: *mut crate::ncurses_format::NcursesKeyState,
+    key: c_int,
+    queue_size: c_int,
+) {
+    if !state.is_null() {
+        crate::ncurses_format::ncurses_handle_key(&mut *state, key, queue_size);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_format_name(
+    op: c_int,
+    s1: *const c_char,
+    s2: *const c_char,
+    s3: *const c_char,
+    s4: *const c_char,
+    s5: *const c_char,
+    flag: c_int,
+    nzb_id: c_int,
+) -> RsBuf {
+    let out = match op {
+        0 => crate::downloadinfo::make_nice_nzb_name(input(s1), flag != 0),
+        1 => crate::downloadinfo::make_nice_url_name(
+            if s1.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(s1))
+            },
+            input(s2),
+        ),
+        2 => crate::downloadinfo::build_final_dir_name(
+            input(s1),
+            input(s2),
+            input(s3),
+            flag != 0,
+            input(s4),
+            nzb_id,
+        ),
+        3 => crate::downloadinfo::build_dest_dir_name(
+            input(s1),
+            input(s2),
+            input(s3),
+            input(s4),
+            flag != 0,
+            input(s5),
+            nzb_id,
+        ),
+        _ => Vec::new(),
+    };
+    into_buf(out)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_nzb_calc_health(
+    is_critical: c_int,
+    size: i64,
+    par_size: i64,
+    current_failed_size: i64,
+    par_current_failed_size: i64,
+    allow_estimation: c_int,
+) -> c_int {
+    if is_critical == 0 {
+        crate::downloadinfo::calc_health(size, par_size, current_failed_size, par_current_failed_size)
+    } else {
+        crate::downloadinfo::calc_critical_health(
+            size,
+            par_size,
+            par_current_failed_size,
+            allow_estimation != 0,
+        )
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_nzb_is_dupe_success(
+    mark_status: c_int,
+    delete_status: c_int,
+    par_status: c_int,
+    unpack_status: c_int,
+    url_status: c_int,
+    health: c_int,
+    critical_health_est: c_int,
+    critical_health_exact: c_int,
+    health_check_dupe: c_int,
+) -> c_int {
+    c_int::from(crate::downloadinfo::is_dupe_success(
+        mark_status,
+        delete_status,
+        par_status,
+        unpack_status,
+        url_status,
+        health,
+        critical_health_est,
+        critical_health_exact,
+        health_check_dupe != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_nzb_make_text_status(
+    kind: c_int,
+    mark_status: c_int,
+    delete_status: c_int,
+    par_status: c_int,
+    unpack_status: c_int,
+    move_status: c_int,
+    url_status: c_int,
+    script_status: c_int,
+    health: c_int,
+    critical_health: c_int,
+) -> *const c_char {
+    crate::downloadinfo::make_text_status_cstr(
+        kind,
+        mark_status,
+        delete_status,
+        par_status,
+        unpack_status,
+        move_status,
+        url_status,
+        script_status,
+        health,
+        critical_health,
+    )
+    .as_ptr()
+    .cast::<c_char>()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_completed_same_filename(
+    a: *const c_char,
+    b: *const c_char,
+) -> c_int {
+    c_int::from(crate::downloadinfo::completed_same_filename(input(a), input(b)))
+}
+

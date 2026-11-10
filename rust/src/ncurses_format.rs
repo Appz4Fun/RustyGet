@@ -978,6 +978,250 @@ pub fn term_read_key() -> i32 {
     )
 }
 
+/// `NCursesFrontend::SetCurrentQueueEntry` (`NCursesFrontend.cpp`).
+pub fn ncurses_set_current_queue_entry(
+    mut entry: i32,
+    queue_size: i32,
+    mut scroll_offset: i32,
+    client_height: i32,
+) -> (i32, i32) {
+    if entry < 0 {
+        entry = 0;
+    } else if entry > queue_size - 1 {
+        entry = queue_size - 1;
+    }
+
+    if entry > scroll_offset + client_height || entry < scroll_offset - client_height {
+        scroll_offset = entry - client_height / 2;
+    } else if entry < scroll_offset {
+        scroll_offset -= client_height;
+    } else if entry >= scroll_offset + client_height {
+        scroll_offset += client_height;
+    }
+
+    if scroll_offset > queue_size - client_height {
+        scroll_offset = queue_size - client_height;
+    }
+    if scroll_offset < 0 {
+        scroll_offset = 0;
+    }
+
+    (entry, scroll_offset)
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NcursesKeyState {
+    pub input_mode: i32,
+    pub show_nzbname: i32,
+    pub show_timestamp: i32,
+    pub group_files: i32,
+    pub queue_window_percentage: i32,
+    pub selected_queue_entry: i32,
+    pub queue_scroll_offset: i32,
+    pub queue_win_client_height: i32,
+    pub input_number_index: i32,
+    pub input_value: i32,
+    pub exit_proc: i32,
+    pub calc_window_sizes: i32,
+    pub need_update_data: i32,
+    pub toggle_pause: i32,
+    pub set_delete_hint: i32,
+    pub edit_action: i32,
+    pub edit_offset: i32,
+    pub has_select_entry: i32,
+    pub select_entry: i32,
+    pub has_set_download_rate: i32,
+    pub download_rate_bytes: i32,
+    pub stop_loop: i32,
+}
+
+/// `NCursesFrontend::UpdateInput` per-key transition (`NCursesFrontend.cpp`).
+pub fn ncurses_handle_key(state: &mut NcursesKeyState, key: i32, queue_size: i32) {
+    state.exit_proc = 0;
+    state.calc_window_sizes = 0;
+    state.need_update_data = 0;
+    state.toggle_pause = 0;
+    state.set_delete_hint = 0;
+    state.edit_action = 0;
+    state.edit_offset = 0;
+    state.has_select_entry = 0;
+    state.select_entry = 0;
+    state.has_set_download_rate = 0;
+    state.download_rate_bytes = 0;
+    state.stop_loop = 0;
+
+    if state.input_mode == 0 || state.input_mode == 1 {
+        match key {
+            x if x == b'q' as i32 => {
+                state.exit_proc = 1;
+            }
+            x if x == b'z' as i32 => {
+                state.show_nzbname = i32::from(state.show_nzbname == 0);
+            }
+            x if x == b'w' as i32 => {
+                state.queue_window_percentage = if state.queue_window_percentage == 50 {
+                    100
+                } else if state.queue_window_percentage == 100 && state.input_mode != 1 {
+                    0
+                } else {
+                    50
+                };
+                state.calc_window_sizes = 1;
+                state.has_select_entry = 1;
+                state.select_entry = state.selected_queue_entry;
+            }
+            x if x == b'g' as i32 => {
+                state.group_files = i32::from(state.group_files == 0);
+                state.has_select_entry = 1;
+                state.select_entry = state.selected_queue_entry;
+                state.need_update_data = 1;
+            }
+            _ => {}
+        }
+    }
+
+    if state.input_mode == 0 {
+        match key {
+            x if x == b'p' as i32 => {
+                state.toggle_pause = 1;
+            }
+            x if x == b'e' as i32 || x == 10 || x == 13 => {
+                if queue_size > 0 {
+                    state.input_mode = 1;
+                    if state.queue_window_percentage == 0 {
+                        state.queue_window_percentage = 50;
+                    }
+                    state.stop_loop = 1;
+                    return;
+                }
+            }
+            x if x == b'r' as i32 => {
+                state.input_mode = 2;
+                state.input_number_index = 0;
+                state.input_value = 0;
+                state.stop_loop = 1;
+                return;
+            }
+            x if x == b't' as i32 => {
+                state.show_timestamp = i32::from(state.show_timestamp == 0);
+            }
+            _ => {}
+        }
+    }
+
+    if state.input_mode == 1 {
+        match key {
+            x if x == b'e' as i32 || x == 10 || x == 13 => {
+                state.input_mode = 0;
+                state.stop_loop = 1;
+                return;
+            }
+            258 => {
+                if state.selected_queue_entry < queue_size - 1 {
+                    state.has_select_entry = 1;
+                    state.select_entry = state.selected_queue_entry + 1;
+                }
+            }
+            259 => {
+                if state.selected_queue_entry > 0 {
+                    state.has_select_entry = 1;
+                    state.select_entry = state.selected_queue_entry - 1;
+                }
+            }
+            339 => {
+                if state.selected_queue_entry > 0 {
+                    state.has_select_entry = 1;
+                    if state.selected_queue_entry == state.queue_scroll_offset {
+                        state.queue_scroll_offset -= state.queue_win_client_height;
+                        state.select_entry =
+                            state.selected_queue_entry - state.queue_win_client_height;
+                    } else {
+                        state.select_entry = state.queue_scroll_offset;
+                    }
+                }
+            }
+            338 => {
+                if state.selected_queue_entry < queue_size - 1 {
+                    let bottom = state.queue_scroll_offset + state.queue_win_client_height - 1;
+                    state.has_select_entry = 1;
+                    if state.selected_queue_entry == bottom {
+                        state.queue_scroll_offset += state.queue_win_client_height;
+                        state.select_entry =
+                            state.selected_queue_entry + state.queue_win_client_height;
+                    } else {
+                        state.select_entry = bottom;
+                    }
+                }
+            }
+            262 => {
+                state.has_select_entry = 1;
+                state.select_entry = 0;
+            }
+            360 => {
+                state.has_select_entry = 1;
+                state.select_entry = if queue_size > 0 { queue_size - 1 } else { 0 };
+            }
+            x if x == b'p' as i32 => {
+                state.edit_action = 4;
+                state.edit_offset = 0;
+            }
+            x if x == b'd' as i32 => {
+                state.set_delete_hint = 1;
+            }
+            x if x == b'D' as i32 => {
+                state.edit_action = 6;
+                state.edit_offset = 0;
+                state.has_select_entry = 1;
+                state.select_entry = state.selected_queue_entry;
+            }
+            x if x == b'u' as i32 => {
+                state.edit_action = 1;
+                state.edit_offset = -1;
+                state.has_select_entry = 1;
+                state.select_entry = state.selected_queue_entry - 1;
+            }
+            x if x == b'n' as i32 => {
+                state.edit_action = 1;
+                state.edit_offset = 1;
+                state.has_select_entry = 1;
+                state.select_entry = state.selected_queue_entry + 1;
+            }
+            x if x == b't' as i32 => {
+                state.edit_action = 2;
+                state.edit_offset = 0;
+                state.has_select_entry = 1;
+                state.select_entry = 0;
+            }
+            x if x == b'b' as i32 => {
+                state.edit_action = 3;
+                state.edit_offset = 0;
+                state.has_select_entry = 1;
+                state.select_entry = if queue_size > 0 { queue_size - 1 } else { 0 };
+            }
+            _ => {}
+        }
+    }
+
+    if state.input_mode == 2 {
+        if state.input_number_index < 5 && (b'0' as i32..=b'9' as i32).contains(&key) {
+            state.input_value = (state.input_value * 10) + (key - b'0' as i32);
+            state.input_number_index += 1;
+        } else if key == 10 || key == 13 {
+            state.has_set_download_rate = 1;
+            state.download_rate_bytes = state.input_value * 1024;
+            state.input_mode = 0;
+            state.stop_loop = 1;
+        } else if key == 27 {
+            state.input_mode = 0;
+            state.stop_loop = 1;
+        } else if state.input_number_index > 0 && key == 263 {
+            state.input_value = (state.input_value - (state.input_value % 10)) / 10;
+            state.input_number_index -= 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

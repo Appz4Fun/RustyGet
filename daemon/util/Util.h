@@ -1293,14 +1293,6 @@ inline path make_unique_filename()
 	return std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
 }
 
-inline fs::path make_unique_filename(const fs::path& targetPath)
-{
-	NzbgetRsBuf buf = nzbget_rs_fs_string_op(5, targetPath.c_str(), nullptr);
-	fs::path result(std::string_view(buf.data, buf.len));
-	nzbget_rs_free(buf);
-	return result;
-}
-
 inline void move_file(const fs::path& src, const fs::path& dest, fs::error_code& ec) noexcept
 {
 	int err = (int)nzbget_rs_fs_op_with_err(5, src.c_str(), dest.c_str(), 0, nullptr);
@@ -13029,39 +13021,24 @@ public:
 								bool directWrite,
 								bool cached)
 	{
+		struct Ctx { ArticleWriter* self; DiskFile* outfile; } ctx{ this, &outfile };
 		auto openFileCb = [](void* rawCtx, const char* path, int readWrite) -> int {
-			return static_cast<DiskFile*>(rawCtx)->Open(path, readWrite ? DiskFile::omReadWrite : DiskFile::omWrite) ? 1 : 0;
+			auto* c = static_cast<Ctx*>(rawCtx);
+			if (readWrite < 0)
+			{
+				c->self->m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "%s", path);
+				return 0;
+			}
+			return c->outfile->Open(path, readWrite ? DiskFile::omReadWrite : DiskFile::omWrite) ? 1 : 0;
 		};
 
-		NzbgetRsBuf finalBuf{};
-		NzbgetRsBuf tempBuf{};
-		NzbgetRsBuf updatedOutBuf{};
-		NzbgetRsBuf parentFailedBuf{};
-		NzbgetRsBuf forceDirsErrBuf{};
-		NzbgetRsBuf errPathBuf{};
-		int hasParentFailed = 0;
-		int errKind = 0;
+		NzbgetRsBuf finalBuf{}, tempBuf{}, updatedOutBuf{};
 		int ok = nzbget_rs_awc_article_writer_execute_setup_output_file(
-			destDir.data(),
-			destDir.size(),
-			filename.data(),
-			filename.size(),
-			PATH_SEPARATOR,
-			g_Options->GetRawArticle() ? 1 : 0,
-			directWrite ? 1 : 0,
+			destDir.data(), destDir.size(), filename.data(), filename.size(), PATH_SEPARATOR,
+			g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0,
 			m_fileInfo->GetForceDirectWrite() ? 1 : 0,
-			m_outputFilename.data(),
-			m_outputFilename.size(),
-			&outfile,
-			openFileCb,
-			&finalBuf,
-			&tempBuf,
-			&updatedOutBuf,
-			&parentFailedBuf,
-			&hasParentFailed,
-			&forceDirsErrBuf,
-			&errKind,
-			&errPathBuf);
+			m_outputFilename.data(), m_outputFilename.size(), &ctx, openFileCb,
+			&finalBuf, &tempBuf, &updatedOutBuf);
 
 		OutputPaths paths;
 		paths.finalPath.assign(finalBuf.data ? finalBuf.data : "", finalBuf.len);
@@ -13070,44 +13047,15 @@ public:
 		nzbget_rs_free(tempBuf);
 		m_outputFilename.assign(updatedOutBuf.data ? updatedOutBuf.data : "", updatedOutBuf.len);
 		nzbget_rs_free(updatedOutBuf);
-		std::string parentFailed(parentFailedBuf.data ? parentFailedBuf.data : "", parentFailedBuf.len);
-		nzbget_rs_free(parentFailedBuf);
-		std::string forceDirsErr(forceDirsErrBuf.data ? forceDirsErrBuf.data : "", forceDirsErrBuf.len);
-		nzbget_rs_free(forceDirsErrBuf);
-		std::string errPath(errPathBuf.data ? errPathBuf.data : "", errPathBuf.len);
-		nzbget_rs_free(errPathBuf);
-
-		if (hasParentFailed)
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not create directory %s: %s",
-				parentFailed.c_str(), forceDirsErr.c_str());
-		}
 
 		if (!ok)
 		{
-			if (errKind == 1)
-			{
-				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not create file %s: %s",
-					errPath.c_str(), *FileSystem::GetLastErrorMessage());
-			}
-			else if (errKind == 2)
-			{
-				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not open file %s: %s",
-					errPath.c_str(), *FileSystem::GetLastErrorMessage());
-			}
-			else if (errKind == 3)
-			{
-				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not create directory %s: %s",
-					errPath.c_str(), *FileSystem::GetLastErrorMessage());
-			}
 			return std::nullopt;
 		}
-
 		if (outfile.Active())
 		{
 			SetWriteBuffer(outfile, 0);
 		}
-
 		return paths;
 	}
 
@@ -13117,156 +13065,59 @@ public:
 								bool directWrite,
 								bool cached)
 	{
-		uint32 crc = 0;
 		std::unique_ptr<ArticleCache::FlushGuard> flushGuard;
-
 		if (cached)
 		{
 			flushGuard = std::make_unique<ArticleCache::FlushGuard>(g_ArticleCache->GuardFlush());
 		}
 
-		CharBuffer buffer;
-		bool firstArticle = true;
-
-		if (!g_Options->GetRawArticle() && !directWrite)
-		{
-			buffer.Reserve(1024 * 64);
-		}
-
+		std::vector<NzbgetRsProcessArticleItem> items;
+		std::vector<ArticleInfo*> finished;
+		items.reserve(m_fileInfo->GetArticles()->size());
+		finished.reserve(m_fileInfo->GetArticles()->size());
 		for (ArticleInfo* pa : m_fileInfo->GetArticles())
 		{
 			if (pa->GetStatus() != ArticleInfo::aiFinished) continue;
-
-			// 1. Fill gaps (Direct Write)
-			if (!g_Options->GetRawArticle() && !directWrite &&
-				pa->GetSegmentOffset() > -1 && pa->GetSegmentOffset() > outfile.Position() && outfile.Position() > -1)
-			{
-				memset(buffer, 0, static_cast<size_t>(buffer.Size()));
-				if (!GetSkipDiskWrite())
-				{
-					while (pa->GetSegmentOffset() > outfile.Position() && outfile.Position() > -1 &&
-						outfile.Write(buffer, std::min(pa->GetSegmentOffset() - outfile.Position(), static_cast<int64_t>(buffer.Size()))));
-				}
-			}
-
-			// 2. Write Content (Cached or Disk)
-			if (pa->GetSegmentContent())
-			{
-				if (!GetSkipDiskWrite())
-				{
-					if (!outfile.Seek(pa->GetSegmentOffset()))
-					{
-						m_commitError = true;
-						m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-							"Could not seek while writing cached article %s",
-							infoFilename.data());
-						continue;
-					}
-					if (outfile.Write(pa->GetSegmentContent(), pa->GetSegmentSize()) !=
-						pa->GetSegmentSize())
-					{
-						m_commitError = true;
-						m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-							"Could not write cached article %s", infoFilename.data());
-					}
-				}
-				pa->DiscardSegment();
-			}
-			else if (directWrite && pa->GetDupeFallbackRound() > 0 &&
-				pa->GetResultFilename() && !GetSkipDiskWrite())
-			{
-				// Duplicate articles are staged in their per-article temp file even
-				// when DirectWrite is enabled.  Copy only after the queue coordinator
-				// has accepted the article's final geometry; never let an unvalidated
-				// donor overwrite the shared output during download.
-				DiskFile infile;
-				if (FileSystem::FileSize(pa->GetResultFilename()) != pa->GetSegmentSize())
-				{
-					m_commitError = true;
-					m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-						"Staged duplicate article has an invalid size for %s", infoFilename.data());
-				}
-				else if (infile.Open(pa->GetResultFilename(), DiskFile::omRead))
-				{
-					if (!outfile.Seek(pa->GetSegmentOffset()))
-					{
-						m_commitError = true;
-						m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-							"Could not seek while committing staged duplicate article %s",
-							infoFilename.data());
-						infile.Close();
-						continue;
-					}
-					CharBuffer stagedBuffer(1024 * 64);
-					int cnt = 0;
-					int64 copied = 0;
-					while ((cnt = infile.Read(stagedBuffer, stagedBuffer.Size())) > 0)
-					{
-						if (outfile.Write(stagedBuffer, cnt) != cnt)
-						{
-							m_commitError = true;
-							m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-								"Could not commit staged duplicate article %s", infoFilename.data());
-							break;
-						}
-						copied += cnt;
-					}
-					if (copied != pa->GetSegmentSize())
-					{
-						m_commitError = true;
-					}
-					infile.Close();
-				}
-				else
-				{
-					m_commitError = true;
-				}
-			}
-			else if (!g_Options->GetRawArticle() && !directWrite && !GetSkipDiskWrite())
-			{
-				// Read from partial file and append to outfile
-				DiskFile infile;
-				if (pa->GetResultFilename() && infile.Open(pa->GetResultFilename(), DiskFile::omRead))
-				{
-					int64_t cnt = buffer.Size();
-					while (cnt == buffer.Size())
-					{
-						cnt = infile.Read(buffer, buffer.Size());
-						outfile.Write(buffer, cnt);
-					}
-					infile.Close();
-				}
-				else
-				{
-					m_fileInfo->SetFailedArticles(m_fileInfo->GetFailedArticles() + 1);
-					m_fileInfo->SetSuccessArticles(m_fileInfo->GetSuccessArticles() - 1);
-					m_fileInfo->GetNzbInfo()->PrintMessage(
-						Message::mkError, "Could not find file %s for %s [%i/%zu]",
-						pa->GetResultFilename(), infoFilename.data(),
-						pa->GetPartNumber(), m_fileInfo->GetArticles()->size());
-				}
-			}
-			else if (g_Options->GetRawArticle())
-			{
-				// Move raw files
-				CString dstFileName = CString::FormatStr("%.*s%c%03i",
-					(int)finalOutputPath.size(), finalOutputPath.data(), PATH_SEPARATOR, pa->GetPartNumber());
-				if (!FileSystem::MoveFile(pa->GetResultFilename(), dstFileName))
-				{
-					m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not move file %s to %s: %s",
-						pa->GetResultFilename(), *dstFileName, *FileSystem::GetLastErrorMessage());
-				}
-			}
-
-			// 3. Calculate CRC
-			if (m_format == Decoder::efYenc)
-			{
-				crc = firstArticle ? pa->GetCrc() : Crc32::Combine(crc, pa->GetCrc(), pa->GetSegmentSize());
-				firstArticle = false;
-			}
+			items.push_back(NzbgetRsProcessArticleItem{
+				pa->GetSegmentOffset(),
+				pa->GetSegmentSize(),
+				pa->GetCrc(),
+				pa->GetPartNumber(),
+				pa->GetDupeFallbackRound(),
+				reinterpret_cast<const uint8_t*>(pa->GetSegmentContent()),
+				pa->GetResultFilename()
+			});
+			finished.push_back(pa);
 		}
 
-		buffer.Clear();
+		struct Ctx { ArticleWriter* self; DiskFile* outfile; std::vector<ArticleInfo*>* finished; } ctx{ this, &outfile, &finished };
+		auto ioCb = [](void* rawCtx, int op, int64_t val, const void* ptr, size_t len) -> int64_t {
+			auto* c = static_cast<Ctx*>(rawCtx);
+			if (op == 0) return c->outfile->Position();
+			if (op == 1) return c->outfile->Seek(val) ? 1 : 0;
+			if (op == 2) return c->outfile->Write(ptr, static_cast<int64>(len));
+			if (op == 3) { (*c->finished)[static_cast<size_t>(val)]->DiscardSegment(); return 0; }
+			if (op == 4) c->self->m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "%s", static_cast<const char*>(ptr));
+			return 0;
+		};
+
+		int commitErr = 0, failedDelta = 0;
+		uint32 crc = nzbget_rs_awc_article_writer_process_articles(
+			items.data(), items.size(), m_fileInfo->GetArticles()->size(),
+			infoFilename.data(), infoFilename.size(),
+			finalOutputPath.data(), finalOutputPath.size(),
+			g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0,
+			GetSkipDiskWrite() ? 1 : 0, m_format == Decoder::efYenc ? 1 : 0,
+			&ctx, ioCb, &commitErr, &failedDelta);
+		if (commitErr)
+		{
+			m_commitError = true;
+		}
+		if (failedDelta > 0)
+		{
+			m_fileInfo->SetFailedArticles(m_fileInfo->GetFailedArticles() + failedDelta);
+			m_fileInfo->SetSuccessArticles(m_fileInfo->GetSuccessArticles() - failedDelta);
+		}
 		return crc;
 	}
 
@@ -13314,56 +13165,24 @@ public:
 			resultFilenames.push_back(pa->GetResultFilename());
 		}
 
-		NzbgetRsBuf moveErrorBuf{};
-		NzbgetRsBuf checkedOldDirBuf{};
-		NzbgetRsBuf deletedOldDirBuf{};
-		int moveFailed = 0;
-		int hasCheckedOldDir = 0;
-		int hasDeletedOldDir = 0;
 		int clearOutputFilename = 0;
 		nzbget_rs_awc_article_writer_execute_cleanup_old_data(
-			directWrite ? 1 : 0,
-			nzbDestDir.data(),
-			nzbDestDir.size(),
-			finalOutputPath.data(),
-			finalOutputPath.size(),
-			m_outputFilename.data(),
-			m_outputFilename.size(),
+			directWrite ? 1 : 0, nzbDestDir.data(), nzbDestDir.size(),
+			finalOutputPath.data(), finalOutputPath.size(),
+			m_outputFilename.data(), m_outputFilename.size(),
 			m_fileInfo->IsHardLinked() ? 1 : 0,
 			Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0,
-			PATH_SEPARATOR,
-			ALT_PATH_SEPARATOR,
-			dupeFallbackRounds.data(),
-			resultFilenames.data(),
-			dupeFallbackRounds.size(),
-			&moveFailed,
-			&moveErrorBuf,
-			&checkedOldDirBuf,
-			&hasCheckedOldDir,
-			&deletedOldDirBuf,
-			&hasDeletedOldDir,
+			PATH_SEPARATOR, ALT_PATH_SEPARATOR,
+			dupeFallbackRounds.data(), resultFilenames.data(), dupeFallbackRounds.size(),
+			m_fileInfo->GetNzbInfo(),
+			+[](void* ctx, int isDebug, const char* msg) {
+				if (isDebug)
+					debug("%s", msg);
+				else
+					static_cast<NzbInfo*>(ctx)->PrintMessage(Message::mkError, "%s", msg);
+			},
 			&clearOutputFilename);
 
-		std::string moveError(moveErrorBuf.data ? moveErrorBuf.data : "", moveErrorBuf.len);
-		nzbget_rs_free(moveErrorBuf);
-		std::string checkedOldDir(checkedOldDirBuf.data ? checkedOldDirBuf.data : "", checkedOldDirBuf.len);
-		nzbget_rs_free(checkedOldDirBuf);
-		std::string deletedOldDir(deletedOldDirBuf.data ? deletedOldDirBuf.data : "", deletedOldDirBuf.len);
-		nzbget_rs_free(deletedOldDirBuf);
-
-		if (moveFailed)
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not move file %s to %s: %s",
-				m_outputFilename.c_str(), finalOutputPath.data(), moveError.c_str());
-		}
-		if (hasCheckedOldDir)
-		{
-			debug("Checking old dir for: %s", m_outputFilename.c_str());
-		}
-		if (hasDeletedOldDir)
-		{
-			debug("Deleting old dir: %s", deletedOldDir.c_str());
-		}
 		if (clearOutputFilename)
 		{
 			m_fileInfo->SetOutputFilename(nullptr);
@@ -13576,101 +13395,43 @@ public:
 
 	static bool MoveCompletedFiles(NzbInfo* nzbInfo, const char* oldDestDir)
 	{
-		if (nzbInfo->GetSkipDiskWrite())
-		{
-			return true; // nothing was written, nothing to move
-		}
-
-		if (nzbInfo->GetCompletedFiles()->empty())
+		if (nzbInfo->GetSkipDiskWrite() || nzbInfo->GetCompletedFiles()->empty())
 		{
 			return true;
 		}
-
-		const fs::path destDir = fs::u8path(nzbInfo->GetDestDir());
-		const fs::path oldDir  = fs::u8path(oldDestDir);
-		fs::error_code ec;
-		fs::create_directories(destDir, ec);
-		if (ec)
-		{
-			nzbInfo->PrintMessage(
-				Message::mkError,
-				"Could not create directory %s: %s",
-				nzbInfo->GetDestDir(),
-				ec.message().c_str()
-			);
-			return false;
-		}
-
-		// move already downloaded files to new destination
+		std::vector<const char*> completedFilenames;
+		completedFilenames.reserve(nzbInfo->GetCompletedFiles()->size());
 		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 		{
-			const auto fileName = fs::u8path(completedFile.GetFilename());
-			const auto oldPath = oldDir / fileName;
-			fs::path newPath = destDir / fileName;
-
-			if (oldPath == newPath || !fs::exists(oldPath, ec)) continue;
-
-			if (fs::exists(newPath, ec))
-			{
-				newPath = fs::make_unique_filename(newPath);
-			}
-
-			if (newPath.has_parent_path())
-			{
-				fs::create_directories(newPath.parent_path(), ec);
-			}
-
-			fs::move_file(oldPath, newPath, ec);
-			if (ec)
-			{
-				const auto newPathStr = fs::u8string(newPath);
-				nzbInfo->PrintMessage(Message::mkError, "Could not move file %s to %s: %s",
-					oldPath.string().c_str(), newPathStr.c_str(), ec.message().c_str());
-			}
-			else
-			{
-				fs::path oldDirParent = oldDir.parent_path();
-				fs::path parent = oldPath.parent_path();
-				while (parent != oldDirParent)
+			completedFilenames.push_back(completedFile.GetFilename());
+		}
+		return nzbget_rs_awc_article_writer_move_completed_files(
+			nzbInfo->GetDestDir(),
+			oldDestDir,
+			completedFilenames.data(),
+			completedFilenames.size(),
+			nzbInfo,
+			+[](void* ctx, const char* errMsgOrNull) -> int {
+				auto* info = static_cast<NzbInfo*>(ctx);
+				if (errMsgOrNull && *errMsgOrNull)
 				{
-					if (fs::exists(parent, ec) && fs::is_empty(parent, ec))
+					info->PrintMessage(Message::mkError, "%s", errMsgOrNull);
+					return 0;
+				}
+				for (FileInfo* fileInfo : info->GetFileList())
+				{
+					if (fileInfo->GetOutputInitialized() && !fileInfo->GetOutputFilename().empty() &&
+						fileInfo->GetActiveDownloads() > 0)
 					{
-						fs::remove(parent, ec);
-						parent = parent.parent_path();
-					}
-					else
-					{
-						break;
+						Guard guard = fileInfo->GuardOutputFile();
+						if (fileInfo->GetOutputInitialized())
+						{
+							return 1;
+						}
 					}
 				}
-			}
-		}
-
-		if (fs::exists(oldDir, ec) && fs::is_empty(oldDir, ec))
-		{
-			bool pendingWrites = false;
-			for (FileInfo* fileInfo : nzbInfo->GetFileList())
-			{
-				if (pendingWrites) break;
-
-				if (fileInfo->GetOutputInitialized() && !fileInfo->GetOutputFilename().empty() &&
-					fileInfo->GetActiveDownloads() > 0)
-				{
-					Guard guard = fileInfo->GuardOutputFile();
-					if (fileInfo->GetOutputInitialized())
-					{
-						pendingWrites = true;
-					}
-				}
-			}
-
-			if (!pendingWrites)
-			{
-				fs::remove(oldDir, ec);
-			}
-		}
-
-		return true;
+				return 0;
+			}) != 0;
 	}
 
 private:
@@ -13688,37 +13449,15 @@ private:
 	/* creates output file and subdirectores */
 	bool CreateOutputFile(int64 size)
 	{
-		if (FileSystem::FileExists(m_outputFilename.c_str()))
+		NzbgetRsBuf errBuf{};
+		bool ok = nzbget_rs_awc_article_writer_create_output_file(
+			m_outputFilename.c_str(), size, &errBuf) != 0;
+		if (!ok && errBuf.data && *errBuf.data)
 		{
-			if (FileSystem::FileSize(m_outputFilename.c_str()) == size)
-			{
-				// keep existing old file from previous program session
-				return true;
-			}
-			// delete existing old file from previous program session
-			FileSystem::DeleteFile(m_outputFilename.c_str());
+			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "%s", errBuf.data);
 		}
-
-		// ensure the directory exist
-		BString<1024> destDir;
-		destDir.Set(m_outputFilename.c_str(), (int)(FileSystem::BaseFileName(m_outputFilename.c_str()) - m_outputFilename.c_str()));
-		CString errmsg;
-
-		if (!FileSystem::ForceDirectories(destDir, errmsg))
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-				"Could not create directory %s: %s", *destDir, *errmsg);
-			return false;
-		}
-
-		if (!FileSystem::AllocateFile(m_outputFilename.c_str(), size, g_Options->GetArticleCache() == 0, errmsg))
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-				"Could not create file %s: %s", m_outputFilename.c_str(), *errmsg);
-			return false;
-		}
-
-		return true;
+		nzbget_rs_free(errBuf);
+		return ok;
 	}
 
 	void BuildOutputFilename()

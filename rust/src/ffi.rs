@@ -7151,11 +7151,6 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
     out_final_path: *mut RsBuf,
     out_temp_path: *mut RsBuf,
     out_updated_output_filename: *mut RsBuf,
-    out_parent_dir_failed: *mut RsBuf,
-    out_has_parent_dir_failed: *mut c_int,
-    out_force_dirs_err: *mut RsBuf,
-    out_error_kind: *mut c_int,
-    out_error_path: *mut RsBuf,
 ) -> c_int {
     let d_dir = if dest_dir.is_null() || dest_dir_len == 0 {
         &[][..]
@@ -7217,20 +7212,35 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
     if !out_updated_output_filename.is_null() {
         *out_updated_output_filename = into_buf(res.updated_output_filename);
     }
-    if !out_has_parent_dir_failed.is_null() {
-        *out_has_parent_dir_failed = i32::from(res.parent_dir_failed.is_some());
-    }
-    if !out_parent_dir_failed.is_null() {
-        *out_parent_dir_failed = into_buf(res.parent_dir_failed.unwrap_or_default());
-    }
-    if !out_force_dirs_err.is_null() {
-        *out_force_dirs_err = into_buf(force_dirs_err);
-    }
-    if !out_error_kind.is_null() {
-        *out_error_kind = res.error_kind;
-    }
-    if !out_error_path.is_null() {
-        *out_error_path = into_buf(res.error_path);
+    if let Some(cb) = open_file_cb {
+        if let Some(pdir) = res.parent_dir_failed {
+            let msg = crate::artwritercore::join_c_slices(&[
+                b"Could not create directory ",
+                &pdir,
+                b": ",
+                &force_dirs_err,
+            ]);
+            let c_msg = nul(&msg);
+            cb(cb_ctx, c_msg.as_ptr().cast(), -1);
+        }
+        if !res.ok && res.error_kind != 0 {
+            let err_msg = crate::fsops::error_message(crate::fsops::last_errno());
+            let verb: &[u8] = match res.error_kind {
+                1 => b"create file",
+                2 => b"open file",
+                _ => b"create directory",
+            };
+            let msg = crate::artwritercore::join_c_slices(&[
+                b"Could not ",
+                verb,
+                b" ",
+                &res.error_path,
+                b": ",
+                &err_msg,
+            ]);
+            let c_msg = nul(&msg);
+            cb(cb_ctx, c_msg.as_ptr().cast(), -1);
+        }
     }
     i32::from(res.ok)
 }
@@ -7251,12 +7261,10 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_cleanup_old_data(
     dupe_fallback_rounds: *const c_int,
     result_filenames: *const *const c_char,
     articles_len: usize,
-    out_move_failed: *mut c_int,
-    out_move_error: *mut RsBuf,
-    out_checked_old_dest_dir: *mut RsBuf,
-    out_has_checked_old_dest_dir: *mut c_int,
-    out_deleted_old_dest_dir: *mut RsBuf,
-    out_has_deleted_old_dest_dir: *mut c_int,
+    log_ctx: *mut std::ffi::c_void,
+    log_cb: Option<
+        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, is_debug: c_int, msg: *const c_char),
+    >,
     out_clear_output_filename: *mut c_int,
 ) {
     let d_dir = if nzb_dest_dir.is_null() || nzb_dest_dir_len == 0 {
@@ -7323,28 +7331,207 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_cleanup_old_data(
         },
         |dir_bytes| CString::new(dir_bytes).is_ok_and(|c| crate::fsops::remove_directory(&c)),
     );
-    if !out_move_failed.is_null() {
-        *out_move_failed = i32::from(res.move_failed);
-    }
-    if !out_move_error.is_null() {
-        *out_move_error = into_buf(move_error);
-    }
-    if !out_has_checked_old_dest_dir.is_null() {
-        *out_has_checked_old_dest_dir = i32::from(res.checked_old_dest_dir.is_some());
-    }
-    if !out_checked_old_dest_dir.is_null() {
-        *out_checked_old_dest_dir = into_buf(res.checked_old_dest_dir.unwrap_or_default());
-    }
-    if !out_has_deleted_old_dest_dir.is_null() {
-        *out_has_deleted_old_dest_dir = i32::from(res.deleted_old_dest_dir.is_some());
-    }
-    if !out_deleted_old_dest_dir.is_null() {
-        *out_deleted_old_dest_dir = into_buf(res.deleted_old_dest_dir.unwrap_or_default());
+    if let Some(cb) = log_cb {
+        if res.move_failed {
+            let msg = crate::artwritercore::join_c_slices(&[
+                b"Could not move file ",
+                out_fn,
+                b" to ",
+                final_path,
+                b": ",
+                &move_error,
+            ]);
+            let c_msg = nul(&msg);
+            cb(log_ctx, 0, c_msg.as_ptr().cast());
+        }
+        if res.checked_old_dest_dir.is_some() {
+            let msg = crate::artwritercore::join_c_slices(&[b"Checking old dir for: ", out_fn]);
+            let c_msg = nul(&msg);
+            cb(log_ctx, 1, c_msg.as_ptr().cast());
+        }
+        if let Some(del_dir) = res.deleted_old_dest_dir {
+            let msg = crate::artwritercore::join_c_slices(&[b"Deleting old dir: ", &del_dir]);
+            let c_msg = nul(&msg);
+            cb(log_ctx, 1, c_msg.as_ptr().cast());
+        }
     }
     if !out_clear_output_filename.is_null() {
         *out_clear_output_filename = i32::from(res.clear_output_filename);
     }
 }
+
+#[repr(C)]
+pub struct NzbgetRsProcessArticleItem {
+    pub segment_offset: i64,
+    pub segment_size: i32,
+    pub crc: u32,
+    pub part_number: i32,
+    pub dupe_fallback_round: i32,
+    pub segment_content: *const u8,
+    pub result_filename: *const c_char,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_process_articles(
+    items: *const NzbgetRsProcessArticleItem,
+    items_len: usize,
+    total_articles_count: usize,
+    info_filename: *const c_char,
+    info_filename_len: usize,
+    final_output_path: *const c_char,
+    final_output_path_len: usize,
+    raw_article: c_int,
+    direct_write: c_int,
+    skip_disk_write: c_int,
+    is_yenc: c_int,
+    ctx: *mut std::ffi::c_void,
+    io_cb: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            op: c_int,
+            val: i64,
+            ptr: *const std::ffi::c_void,
+            len: usize,
+        ) -> i64,
+    >,
+    out_commit_error: *mut c_int,
+    out_failed_delta: *mut c_int,
+) -> u32 {
+    let info_fn = if info_filename.is_null() || info_filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(info_filename.cast::<u8>(), info_filename_len)
+    };
+    let final_path = if final_output_path.is_null() || final_output_path_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(final_output_path.cast::<u8>(), final_output_path_len)
+    };
+    let mut rs_items = Vec::with_capacity(items_len);
+    if !items.is_null() && items_len > 0 {
+        for raw in std::slice::from_raw_parts(items, items_len) {
+            let content = if raw.segment_content.is_null() {
+                None
+            } else {
+                Some(std::slice::from_raw_parts(
+                    raw.segment_content,
+                    raw.segment_size.max(0) as usize,
+                ))
+            };
+            let rf = if raw.result_filename.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(raw.result_filename).to_bytes())
+            };
+            rs_items.push(crate::artwritercore::ArticleWriterProcessItem {
+                segment_offset: raw.segment_offset,
+                segment_size: raw.segment_size,
+                crc: raw.crc,
+                part_number: raw.part_number,
+                dupe_fallback_round: raw.dupe_fallback_round,
+                segment_content: content,
+                result_filename: rf,
+            });
+        }
+    }
+    let (crc, commit_error, failed_delta) = crate::artwritercore::article_writer_process_articles(
+        &rs_items,
+        total_articles_count,
+        info_fn,
+        final_path,
+        raw_article != 0,
+        direct_write != 0,
+        skip_disk_write != 0,
+        is_yenc != 0,
+        || io_cb.map_or(-1, |cb| cb(ctx, 0, 0, std::ptr::null(), 0)),
+        |off| io_cb.is_some_and(|cb| cb(ctx, 1, off, std::ptr::null(), 0) != 0),
+        |buf| io_cb.map_or(0, |cb| cb(ctx, 2, 0, buf.as_ptr().cast(), buf.len())),
+        |idx| {
+            if let Some(cb) = io_cb {
+                let _ = cb(ctx, 3, idx as i64, std::ptr::null(), 0);
+            }
+        },
+        |msg| {
+            if let Some(cb) = io_cb {
+                let c_msg = nul(msg);
+                let _ = cb(ctx, 4, 0, c_msg.as_ptr().cast(), 0);
+            }
+        },
+    );
+    if !out_commit_error.is_null() {
+        *out_commit_error = c_int::from(commit_error);
+    }
+    if !out_failed_delta.is_null() {
+        *out_failed_delta = failed_delta;
+    }
+    crc
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_move_completed_files(
+    dest_dir: *const c_char,
+    old_dest_dir: *const c_char,
+    completed_filenames: *const *const c_char,
+    completed_len: usize,
+    ctx: *mut std::ffi::c_void,
+    cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, err_msg_or_null: *const c_char) -> c_int>,
+) -> c_int {
+    let d_dir = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    let o_dir = if old_dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(old_dest_dir).to_bytes()
+    };
+    let mut fnames = Vec::with_capacity(completed_len);
+    if !completed_filenames.is_null() && completed_len > 0 {
+        for &p in std::slice::from_raw_parts(completed_filenames, completed_len) {
+            fnames.push(if p.is_null() {
+                &[][..]
+            } else {
+                CStr::from_ptr(p).to_bytes()
+            });
+        }
+    }
+    c_int::from(crate::artwritercore::article_writer_move_completed_files(
+        d_dir,
+        o_dir,
+        &fnames,
+        |msg| {
+            if let Some(f) = cb {
+                let c_msg = nul(msg);
+                let _ = f(ctx, c_msg.as_ptr().cast());
+            }
+        },
+        || cb.is_some_and(|f| f(ctx, std::ptr::null()) != 0),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_create_output_file(
+    output_filename: *const c_char,
+    size: i64,
+    out_err: *mut RsBuf,
+) -> c_int {
+    let out_fn = if output_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(output_filename).to_bytes()
+    };
+    match crate::artwritercore::article_writer_create_output_file(out_fn, size) {
+        Ok(()) => 1,
+        Err(err) => {
+            if !out_err.is_null() {
+                *out_err = into_buf(err);
+            }
+            0
+        }
+    }
+}
+
 
 // ============================================================================
 // QueueCoordinator & Options consolidated FFI exports

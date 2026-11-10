@@ -679,6 +679,361 @@ pub fn article_writer_execute_cleanup_old_data(
     }
 }
 
+fn c_bytes(bytes: &[u8]) -> &[u8] {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    &bytes[..end]
+}
+
+pub(crate) fn join_c_slices(slices: &[&[u8]]) -> Vec<u8> {
+    let total: usize = slices.iter().map(|s| c_bytes(s).len()).sum();
+    let mut out = Vec::with_capacity(total);
+    for &s in slices {
+        out.extend_from_slice(c_bytes(s));
+    }
+    out
+}
+
+/// `ArticleWriter::CreateOutputFile` (`daemon/nntp/ArticleWriter.cpp`):
+/// Keeps an existing file when its size equals `size`, otherwise deletes it, creates parent
+/// directories up to `base_file_name_offset`, and preallocates `output_filename` to `size` bytes.
+pub fn article_writer_create_output_file(output_filename: &[u8], size: i64) -> Result<(), Vec<u8>> {
+    let Ok(c_path) = std::ffi::CString::new(output_filename) else {
+        return Err(b"Invalid output filename".to_vec());
+    };
+    if crate::fsops::file_exists(output_filename, &crate::fsops::posix_stat) {
+        if crate::fsops::file_size(&c_path) == size {
+            return Ok(());
+        }
+        crate::fsops::delete_file(&c_path);
+    }
+    let base_off = crate::paths::base_file_name(output_filename).min(1023);
+    let dest_dir = &output_filename[..base_off];
+    let mut errmsg = Vec::new();
+    if !crate::fsops::force_directories(dest_dir, &mut errmsg, &crate::fsops::posix_stat) {
+        return Err(join_c_slices(&[
+            b"Could not create directory ",
+            dest_dir,
+            b": ",
+            &errmsg,
+        ]));
+    }
+    if !crate::fsops::allocate_file(&c_path, size, &mut errmsg) {
+        return Err(join_c_slices(&[
+            b"Could not create file ",
+            output_filename,
+            b": ",
+            &errmsg,
+        ]));
+    }
+    Ok(())
+}
+
+/// `ArticleWriter::MoveCompletedFiles` (`daemon/nntp/ArticleWriter.cpp`):
+/// Creates `dest_dir`, moves each completed file from `old_dest_dir` to `dest_dir` (making unique
+/// filenames on collision and pruning empty parent directories), and removes `old_dest_dir` when
+/// empty and `has_pending_writes_fn()` is false.
+pub fn article_writer_move_completed_files(
+    dest_dir: &[u8],
+    old_dest_dir: &[u8],
+    completed_filenames: &[&[u8]],
+    mut log_err_fn: impl FnMut(&[u8]),
+    has_pending_writes_fn: impl FnOnce() -> bool,
+) -> bool {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+
+    if completed_filenames.is_empty() {
+        return true;
+    }
+
+    let dest_dir_path = crate::fsops::path(dest_dir);
+    let old_dir_path = crate::fsops::path(old_dest_dir);
+    if let Err(e) = std::fs::create_dir_all(dest_dir_path) {
+        let err_msg = crate::fsops::error_message(e.raw_os_error().unwrap_or(0));
+        let msg = join_c_slices(&[b"Could not create directory ", dest_dir, b": ", &err_msg]);
+        log_err_fn(&msg);
+        return false;
+    }
+
+    for &file_name_bytes in completed_filenames {
+        let file_name_path = crate::fsops::path(file_name_bytes);
+        let old_path = old_dir_path.join(file_name_path);
+        let mut new_path = dest_dir_path.join(file_name_path);
+
+        if old_path == new_path || std::fs::metadata(&old_path).is_err() {
+            continue;
+        }
+
+        if std::fs::metadata(&new_path).is_ok() {
+            let unique_bytes =
+                crate::fsops::make_unique_path(crate::fsops::path_to_bytes(&new_path));
+            #[cfg(unix)]
+            {
+                new_path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&unique_bytes));
+            }
+            #[cfg(not(unix))]
+            {
+                new_path =
+                    std::path::PathBuf::from(String::from_utf8_lossy(&unique_bytes).into_owned());
+            }
+        }
+
+        if let Some(parent) = new_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let move_res = match (
+            std::ffi::CString::new(crate::fsops::path_to_bytes(&old_path)),
+            std::ffi::CString::new(crate::fsops::path_to_bytes(&new_path)),
+        ) {
+            (Ok(c_src), Ok(c_dst)) => crate::fsops::move_file_no_overwrite(&c_src, &c_dst),
+            _ => Err(libc::EINVAL),
+        };
+
+        if let Err(err_code) = move_res {
+            let err_msg = crate::fsops::error_message(err_code);
+            let msg = join_c_slices(&[
+                b"Could not move file ",
+                crate::fsops::path_to_bytes(&old_path),
+                b" to ",
+                crate::fsops::path_to_bytes(&new_path),
+                b": ",
+                &err_msg,
+            ]);
+            log_err_fn(&msg);
+        } else {
+            let old_dir_parent = old_dir_path.parent();
+            let mut parent_opt = old_path.parent();
+            while let Some(parent) = parent_opt {
+                if Some(parent) == old_dir_parent {
+                    break;
+                }
+                let is_empty = std::fs::metadata(parent).is_ok()
+                    && std::fs::read_dir(parent).is_ok_and(|mut it| it.next().is_none());
+                if is_empty {
+                    let _ = std::fs::remove_dir(parent);
+                    parent_opt = parent.parent();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    let old_dir_empty = std::fs::metadata(old_dir_path).is_ok()
+        && std::fs::read_dir(old_dir_path).is_ok_and(|mut it| it.next().is_none());
+    if old_dir_empty && !has_pending_writes_fn() {
+        let _ = std::fs::remove_dir(old_dir_path);
+    }
+
+    true
+}
+
+///Finished article descriptor for `article_writer_process_articles`.
+#[derive(Debug, Clone, Copy)]
+pub struct ArticleWriterProcessItem<'a> {
+    pub segment_offset: i64,
+    pub segment_size: i32,
+    pub crc: u32,
+    pub part_number: i32,
+    pub dupe_fallback_round: i32,
+    pub segment_content: Option<&'a [u8]>,
+    pub result_filename: Option<&'a [u8]>,
+}
+
+/// `ArticleWriter::ProcessArticles` (`daemon/nntp/ArticleWriter.cpp`):
+/// Processes all finished articles (gap filling, cached segment writing, staged duplicate copying,
+/// partial file joining, raw article moving, and cumulative yEnc CRC calculation).
+/// Returns `(crc, commit_error, failed_articles_delta)`.
+#[allow(clippy::too_many_arguments)]
+pub fn article_writer_process_articles(
+    items: &[ArticleWriterProcessItem<'_>],
+    total_articles_count: usize,
+    info_filename: &[u8],
+    final_output_path: &[u8],
+    raw_article: bool,
+    direct_write: bool,
+    skip_disk_write: bool,
+    is_yenc: bool,
+    mut position_fn: impl FnMut() -> i64,
+    mut seek_fn: impl FnMut(i64) -> bool,
+    mut write_fn: impl FnMut(&[u8]) -> i64,
+    mut discard_fn: impl FnMut(usize),
+    mut log_err_fn: impl FnMut(&[u8]),
+) -> (u32, bool, i32) {
+    let mut crc: u32 = 0;
+    let mut first_article = true;
+    let mut commit_error = false;
+    let mut failed_delta: i32 = 0;
+    let mut io_buf = if !raw_article && !direct_write {
+        vec![0u8; 64 * 1024]
+    } else {
+        Vec::new()
+    };
+
+    for (idx, item) in items.iter().enumerate() {
+        if !raw_article && !direct_write && item.segment_offset > -1 {
+            let pos = position_fn();
+            if item.segment_offset > pos && pos > -1 {
+                io_buf.fill(0);
+                if !skip_disk_write {
+                    loop {
+                        let cur_pos = position_fn();
+                        if !(item.segment_offset > cur_pos && cur_pos > -1) {
+                            break;
+                        }
+                        let chunk =
+                            (item.segment_offset - cur_pos).min(io_buf.len() as i64) as usize;
+                        if write_fn(&io_buf[..chunk]) == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(content) = item.segment_content {
+            if !skip_disk_write {
+                if !seek_fn(item.segment_offset) {
+                    commit_error = true;
+                    let msg = join_c_slices(&[
+                        b"Could not seek while writing cached article ",
+                        info_filename,
+                    ]);
+                    log_err_fn(&msg);
+                    continue;
+                }
+                if write_fn(content) != item.segment_size as i64 {
+                    commit_error = true;
+                    let msg = join_c_slices(&[b"Could not write cached article ", info_filename]);
+                    log_err_fn(&msg);
+                }
+            }
+            discard_fn(idx);
+        } else if direct_write
+            && item.dupe_fallback_round > 0
+            && item.result_filename.is_some()
+            && !skip_disk_write
+        {
+            let rf = item.result_filename.unwrap_or(b"");
+            let file_sz = std::ffi::CString::new(rf)
+                .ok()
+                .map_or(-1, |c| crate::fsops::file_size(&c));
+            if file_sz != item.segment_size as i64 {
+                commit_error = true;
+                let msg = join_c_slices(&[
+                    b"Staged duplicate article has an invalid size for ",
+                    info_filename,
+                ]);
+                log_err_fn(&msg);
+            } else if let Some(mut infile) = crate::fsops::file_exists(rf, &crate::fsops::posix_stat)
+                .then(|| std::fs::File::open(crate::fsops::path(rf)).ok())
+                .flatten()
+            {
+                if !seek_fn(item.segment_offset) {
+                    commit_error = true;
+                    let msg = join_c_slices(&[
+                        b"Could not seek while committing staged duplicate article ",
+                        info_filename,
+                    ]);
+                    log_err_fn(&msg);
+                    continue;
+                }
+                let mut staged_buf = vec![0u8; 64 * 1024];
+                let mut copied: i64 = 0;
+                loop {
+                    match std::io::Read::read(&mut infile, &mut staged_buf) {
+                        Ok(0) => break,
+                        Ok(cnt) => {
+                            if write_fn(&staged_buf[..cnt]) != cnt as i64 {
+                                commit_error = true;
+                                let msg = join_c_slices(&[
+                                    b"Could not commit staged duplicate article ",
+                                    info_filename,
+                                ]);
+                                log_err_fn(&msg);
+                                break;
+                            }
+                            copied += cnt as i64;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
+                if copied != item.segment_size as i64 {
+                    commit_error = true;
+                }
+            } else {
+                commit_error = true;
+            }
+        } else if !raw_article && !direct_write && !skip_disk_write {
+            if let Some(mut infile) = item
+                .result_filename
+                .filter(|p| crate::fsops::file_exists(p, &crate::fsops::posix_stat))
+                .and_then(|rf| std::fs::File::open(crate::fsops::path(rf)).ok())
+            {
+                loop {
+                    match std::io::Read::read(&mut infile, &mut io_buf) {
+                        Ok(0) => break,
+                        Ok(cnt) => {
+                            let _ = write_fn(&io_buf[..cnt]);
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
+            } else {
+                failed_delta += 1;
+                let suffix = format!(" [{}/{}]", item.part_number, total_articles_count);
+                let msg = join_c_slices(&[
+                    b"Could not find file ",
+                    item.result_filename.unwrap_or(b"(null)"),
+                    b" for ",
+                    info_filename,
+                    suffix.as_bytes(),
+                ]);
+                log_err_fn(&msg);
+            }
+        } else if raw_article {
+            let dst_file_name = article_writer_format_raw_part_dest(
+                final_output_path,
+                crate::paths::PATH_SEPARATOR,
+                item.part_number,
+            );
+            let rf = item.result_filename.unwrap_or(b"");
+            let moved = if let (Ok(c_src), Ok(c_dst)) = (
+                std::ffi::CString::new(rf),
+                std::ffi::CString::new(dst_file_name.as_slice()),
+            ) {
+                crate::fsops::move_file(&c_src, &c_dst)
+            } else {
+                false
+            };
+            if !moved {
+                let err_msg = crate::fsops::error_message(crate::fsops::last_errno());
+                let msg = join_c_slices(&[
+                    b"Could not move file ",
+                    rf,
+                    b" to ",
+                    &dst_file_name,
+                    b": ",
+                    &err_msg,
+                ]);
+                log_err_fn(&msg);
+            }
+        }
+
+        if is_yenc {
+            let (next_crc, next_first) =
+                article_writer_step_file_crc(first_article, crc, item.crc, item.segment_size);
+            crc = next_crc;
+            first_article = next_first;
+        }
+    }
+
+    (crc, commit_error, failed_delta)
+}
+
 /// `ArticleWriter::SetWriteBuffer` (`ArticleWriter.cpp`).
 pub fn calc_write_buffer_size(write_buffer_kb: i32, rec_size: i32) -> i32 {
     if write_buffer_kb <= 0 {
@@ -1142,5 +1497,83 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn create_output_file_move_completed_files_and_process_articles_work() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbget_awc_batch217_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let out_file = dir.join("old_dest").join("sub").join("file1.bin");
+        let out_bytes = out_file.to_string_lossy().as_bytes().to_vec();
+        article_writer_create_output_file(&out_bytes, 128).unwrap();
+        assert_eq!(std::fs::metadata(&out_file).unwrap().len(), 128);
+
+        let old_dest = dir.join("old_dest");
+        let new_dest = dir.join("new_dest");
+        let mut errors = Vec::new();
+        let ok = article_writer_move_completed_files(
+            new_dest.to_string_lossy().as_bytes(),
+            old_dest.to_string_lossy().as_bytes(),
+            &[b"sub/file1.bin" as &[u8]],
+            |err| errors.push(err.to_vec()),
+            || false,
+        );
+        assert!(ok);
+        assert!(errors.is_empty());
+        assert!(new_dest.join("sub").join("file1.bin").exists());
+        assert!(!old_dest.exists());
+
+        let mut discarded = Vec::new();
+        let mut written = Vec::new();
+        let items = [
+            ArticleWriterProcessItem {
+                segment_offset: 0,
+                segment_size: 4,
+                crc: 0x1111_2222,
+                part_number: 1,
+                dupe_fallback_round: 0,
+                segment_content: Some(b"abcd"),
+                result_filename: None,
+            },
+            ArticleWriterProcessItem {
+                segment_offset: 4,
+                segment_size: 4,
+                crc: 0x3333_4444,
+                part_number: 2,
+                dupe_fallback_round: 0,
+                segment_content: Some(b"efgh"),
+                result_filename: None,
+            },
+        ];
+        let (crc, commit_error, failed_delta) = article_writer_process_articles(
+            &items,
+            2,
+            b"NZB/file1.bin",
+            b"/tmp/file1.bin",
+            false,
+            true,
+            false,
+            true,
+            || 0,
+            |_off| true,
+            |buf| {
+                written.extend_from_slice(buf);
+                buf.len() as i64
+            },
+            |idx| discarded.push(idx),
+            |_msg| {},
+        );
+        assert!(!commit_error);
+        assert_eq!(failed_delta, 0);
+        assert_ne!(crc, 0);
+        assert_eq!(written, b"abcdefgh");
+        assert_eq!(discarded, vec![0, 1]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

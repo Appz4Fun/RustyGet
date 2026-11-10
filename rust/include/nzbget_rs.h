@@ -1085,6 +1085,16 @@ int nzbget_rs_network_speed_test_run(
     NzbgetRsBuf* out_err_msg);
 
 
+typedef struct NzbgetRsProcessArticleItem {
+    int64_t segment_offset;
+    int32_t segment_size;
+    uint32_t crc;
+    int32_t part_number;
+    int32_t dupe_fallback_round;
+    const uint8_t* segment_content;
+    const char* result_filename;
+} NzbgetRsProcessArticleItem;
+
 int nzbget_rs_awc_article_writer_build_output_filenames(
     const char* tmp_dir, const char* dest_dir, char sep, int file_id, int part_num,
     int direct_write, int force_direct_write, const char* existing_output_filename,
@@ -1100,10 +1110,7 @@ int nzbget_rs_awc_article_writer_execute_setup_output_file(
     void* cb_ctx,
     int (*open_file_cb)(void* ctx, const char* path, int read_write),
     NzbgetRsBuf* out_final_path, NzbgetRsBuf* out_temp_path,
-    NzbgetRsBuf* out_updated_output_filename,
-    NzbgetRsBuf* out_parent_dir_failed, int* out_has_parent_dir_failed,
-    NzbgetRsBuf* out_force_dirs_err,
-    int* out_error_kind, NzbgetRsBuf* out_error_path);
+    NzbgetRsBuf* out_updated_output_filename);
 void nzbget_rs_awc_article_writer_execute_cleanup_old_data(
     int direct_write,
     const char* nzb_dest_dir, size_t nzb_dest_dir_len,
@@ -1111,11 +1118,24 @@ void nzbget_rs_awc_article_writer_execute_cleanup_old_data(
     const char* output_filename, size_t output_filename_len,
     int is_hard_linked, int inter_dir_empty, char sep1, char sep2,
     const int* dupe_fallback_rounds, const char* const* result_filenames, size_t articles_len,
-    int* out_move_failed,
-    NzbgetRsBuf* out_move_error,
-    NzbgetRsBuf* out_checked_old_dest_dir, int* out_has_checked_old_dest_dir,
-    NzbgetRsBuf* out_deleted_old_dest_dir, int* out_has_deleted_old_dest_dir,
+    void* log_ctx, void (*log_cb)(void* ctx, int is_debug, const char* msg),
     int* out_clear_output_filename);
+uint32_t nzbget_rs_awc_article_writer_process_articles(
+    const NzbgetRsProcessArticleItem* items, size_t items_len,
+    size_t total_articles_count,
+    const char* info_filename, size_t info_filename_len,
+    const char* final_output_path, size_t final_output_path_len,
+    int raw_article, int direct_write, int skip_disk_write, int is_yenc,
+    void* ctx,
+    int64_t (*io_cb)(void* ctx, int op, int64_t val, const void* ptr, size_t len),
+    int* out_commit_error, int* out_failed_delta);
+int nzbget_rs_awc_article_writer_move_completed_files(
+    const char* dest_dir, const char* old_dest_dir,
+    const char* const* completed_filenames, size_t completed_len,
+    void* ctx,
+    int (*cb)(void* ctx, const char* err_msg_or_null));
+int nzbget_rs_awc_article_writer_create_output_file(
+    const char* output_filename, int64_t size, NzbgetRsBuf* out_err);
 
 
 

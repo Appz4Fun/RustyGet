@@ -30329,6 +30329,20 @@ private:
 			names.push_back(*memberName ? *memberName : "");
 			sizes.push_back(FileSystem::FileSize(memberPath));
 		}
+		auto asciiCaseCmp = [](const char* a, const char* b)
+			{
+				const unsigned char* pa = (const unsigned char*)a;
+				const unsigned char* pb = (const unsigned char*)b;
+				for (;; ++pa, ++pb)
+				{
+					unsigned char ca = (*pa >= 'A' && *pa <= 'Z') ? (*pa + ('a' - 'A')) : *pa;
+					unsigned char cb = (*pb >= 'A' && *pb <= 'Z') ? (*pb + ('a' - 'A')) : *pb;
+					if (ca != cb || ca == 0)
+					{
+						return (int)ca - (int)cb;
+					}
+				}
+			};
 		for (RepairTarget& target : targets)
 		{
 			int rank = 0;
@@ -30346,7 +30360,7 @@ private:
 					continue;
 				}
 				windowSize++;
-				int cmp = strcasecmp(names[i], targetName);
+				int cmp = asciiCaseCmp(names[i], targetName);
 				if (cmp == 0)
 				{
 					selfSeen = true;

@@ -6180,10 +6180,14 @@ public:
 				break;
 			}
 
-			nzbget_rs_webdl_step_retry_counters(
-				(int)Status, (int)adConnectError,
-				remainedDownloadRetries, remainedConnectRetries,
-				&remainedDownloadRetries, &remainedConnectRetries);
+			if (Status != adConnectError)
+			{
+				remainedDownloadRetries--;
+			}
+			else
+			{
+				remainedConnectRetries--;
+			}
 		}
 
 		if (Status != adFinished && Status != adRetry)
@@ -6695,13 +6699,14 @@ private:
 
 		m_outFile.Close();
 
-		int warnIncomplete = 0;
-		Status = (EStatus)nzbget_rs_webdl_resolve_body_end_status(
-			end ? 1 : 0, (int)Status, IsStopped() ? 1 : 0,
-			(int)adRunning, (int)adFailed, (int)adFinished, &warnIncomplete);
-		if (warnIncomplete)
+		if (!end && Status == adRunning && !IsStopped())
 		{
 			warn("URL %s failed: file incomplete", *m_infoName);
+			Status = adFailed;
+		}
+		if (end)
+		{
+			Status = adFinished;
 		}
 
 		return Status;
@@ -6778,21 +6783,21 @@ public:
 			serverStat = &back();
 		}
 
-		int newSuccess = serverStat->GetSuccessArticles();
-		int newFailed = serverStat->GetFailedArticles();
-		nzbget_rs_downloadinfo_server_stat_apply_op(
-			newSuccess,
-			newFailed,
-			successArticles,
-			failedArticles,
-			(int)statOperation,
-			(int)soSet,
-			(int)soAdd,
-			(int)soSubtract,
-			&newSuccess,
-			&newFailed);
-		serverStat->SetSuccessArticles(newSuccess);
-		serverStat->SetFailedArticles(newFailed);
+		if (statOperation == soSet)
+		{
+			serverStat->SetSuccessArticles(successArticles);
+			serverStat->SetFailedArticles(failedArticles);
+		}
+		else if (statOperation == soAdd)
+		{
+			serverStat->SetSuccessArticles(serverStat->GetSuccessArticles() + successArticles);
+			serverStat->SetFailedArticles(serverStat->GetFailedArticles() + failedArticles);
+		}
+		else if (statOperation == soSubtract)
+		{
+			serverStat->SetSuccessArticles(serverStat->GetSuccessArticles() - successArticles);
+			serverStat->SetFailedArticles(serverStat->GetFailedArticles() - failedArticles);
+		}
 	}
 
 	void ListOp(ServerStatList* serverStats, EStatOperation statOperation)
@@ -7562,17 +7567,34 @@ public:
 	}
 	static CString MakeNiceNzbName(const char* nzbFilename, bool removeExt)
 	{
-		NzbgetRsBuf buf = nzbget_rs_downloadinfo_make_nice_nzb_name(nzbFilename, removeExt ? 1 : 0);
-		std::string out(buf.data ? buf.data : "nzb", buf.len);
-		nzbget_rs_free(buf);
-		return out.c_str();
+		const char* fn = nzbFilename ? nzbFilename : "";
+		bool isAbs = (fn[0] == '/' || fn[0] == '\\') ||
+			(std::isalpha((unsigned char)fn[0]) && fn[1] == ':' && (fn[2] == '\\' || fn[2] == '/'));
+		const char* base = isAbs ? FileSystem::BaseFileName(fn) : fn;
+		std::string stripped(base);
+		if (removeExt && stripped.size() >= 4 &&
+			!strcasecmp(stripped.c_str() + stripped.size() - 4, ".nzb"))
+		{
+			stripped.resize(stripped.size() - 4);
+		}
+		CString valid = FileSystem::MakeValidFilename(stripped.c_str(), false);
+		return valid.Empty() ? CString("nzb") : std::move(valid);
 	}
 	static CString MakeNiceUrlName(const char* urlStr, const char* nzbFilename)
 	{
-		NzbgetRsBuf buf = nzbget_rs_downloadinfo_make_nice_url_name(urlStr, nzbFilename);
-		std::string out(buf.data ? buf.data : "", buf.len);
-		nzbget_rs_free(buf);
-		return out.c_str();
+		URL url(urlStr);
+		const char* host = url.GetHost() ? url.GetHost() : "";
+		if (!Util::EmptyStr(nzbFilename))
+		{
+			CString nicename = MakeNiceNzbName(nzbFilename, true);
+			return CString::FormatStr("%s @ %s", *nicename, host);
+		}
+		if (url.IsValid())
+		{
+			const char* resource = url.GetResource() ? url.GetResource() : "/";
+			return CString::FormatStr("%s%s", host, resource);
+		}
+		return urlStr ? urlStr : "";
 	}
 	const char* GetDestDir() { return m_destDir; }
 	void SetDestDir(const char* destDir) { m_destDir = destDir; }
@@ -7603,19 +7625,25 @@ public:
 	int GetActiveDownloads() { return m_activeDownloads; }
 	void SetActiveDownloads(int activeDownloads)
 	{
-		int outSec = m_downloadSec;
-		int64 outStartTime = (int64)m_downloadStartTime;
-		int outStartSec = m_downloadStartSec;
-		int outChanged = 0;
-		nzbget_rs_downloadinfo_calc_active_downloads_sec(
-			m_activeDownloads, activeDownloads, m_kind == NzbInfo::nkNzb ? 1 : 0,
-			(int64)Util::CurrentTime(), m_downloadSec, (int64)m_downloadStartTime,
-			m_downloadStartSec, &outSec, &outStartTime, &outStartSec, &outChanged);
-		m_downloadSec = outSec;
-		m_downloadStartTime = (time_t)outStartTime;
-		m_downloadStartSec = outStartSec;
-		if (outChanged)
+		time_t curTime = Util::CurrentTime();
+		if (((m_activeDownloads == 0 && activeDownloads > 0) ||
+			(m_activeDownloads > 0 && activeDownloads == 0)) && m_kind == NzbInfo::nkNzb)
 		{
+			if (activeDownloads > 0)
+			{
+				m_downloadStartTime = curTime;
+				m_downloadStartSec = m_downloadSec;
+			}
+			else
+			{
+				m_downloadSec = m_downloadStartSec + (int)(curTime - m_downloadStartTime);
+				m_downloadStartTime = 0;
+				m_changed = true;
+			}
+		}
+		else if (activeDownloads > 0)
+		{
+			m_downloadSec = m_downloadStartSec + (int)(curTime - m_downloadStartTime);
 			m_changed = true;
 		}
 		m_activeDownloads = activeDownloads;
@@ -7683,6 +7711,29 @@ public:
 	void SetMinTime(time_t minTime) { m_minTime = minTime; }
 	time_t GetMaxTime() { return m_maxTime; }
 	void SetMaxTime(time_t maxTime) { m_maxTime = maxTime; }
+	static std::string DirNameOf(const char* name, size_t reserve)
+	{
+		std::string dirName = Util::EmptyStr(name) ? "nzb" : name;
+		if (!dirName.empty() && dirName[0] == '.')
+		{
+			dirName.insert(dirName.begin(), '_');
+		}
+		size_t maxLen = reserve < 255 ? 255 - reserve : 0;
+		if (dirName.size() > maxLen)
+		{
+			size_t cut = maxLen;
+			while (cut > 0 && ((unsigned char)dirName[cut] & 0xC0) == 0x80)
+			{
+				cut--;
+			}
+			dirName.resize(cut);
+			while (!dirName.empty() && (dirName.back() == '.' || dirName.back() == ' '))
+			{
+				dirName.pop_back();
+			}
+		}
+		return dirName;
+	}
 	CString BuildFinalDirName()
 	{
 		const char* categoryDestDir = nullptr;
@@ -7695,16 +7746,36 @@ public:
 			}
 		}
 
-		NzbgetRsBuf finalBuf = nzbget_rs_downloadinfo_build_final_dir_name(
-			g_Options->GetDestDir(),
-			categoryDestDir,
-			m_category,
-			g_Options->GetAppendCategoryDir() ? 1 : 0,
-			GetName(),
-			GetId());
-		CString finalDir = finalBuf.data ? finalBuf.data : "";
-		nzbget_rs_free(finalBuf);
-		return finalDir;
+		std::string out;
+		bool useCategory = false;
+		if (!m_category.Empty() && !Util::EmptyStr(categoryDestDir))
+		{
+			out = categoryDestDir;
+		}
+		else
+		{
+			out = g_Options->GetDestDir() ? g_Options->GetDestDir() : "";
+			useCategory = !m_category.Empty();
+		}
+		if (g_Options->GetAppendCategoryDir() && useCategory)
+		{
+			CString categoryDir = FileSystem::MakeValidFilename(m_category, true);
+			if (!categoryDir.Empty())
+			{
+				out.push_back(PATH_SEPARATOR);
+				out.append(*categoryDir);
+			}
+		}
+		out.push_back(PATH_SEPARATOR);
+		if (Util::EmptyStr(GetName()))
+		{
+			out.append(*CString::FormatStr("nzb-%i", GetId()));
+		}
+		else
+		{
+			out.append(DirNameOf(GetName(), 0));
+		}
+		return out.c_str();
 	}
 	void BuildDestDirName()
 	{
@@ -7714,10 +7785,10 @@ public:
 		}
 		else
 		{
-			NzbgetRsBuf destBuf = nzbget_rs_downloadinfo_build_dest_dir_name(
-				g_Options->GetInterDir(), nullptr, nullptr, nullptr, 0, GetName(), GetId());
-			m_destDir = destBuf.data ? destBuf.data : "";
-			nzbget_rs_free(destBuf);
+			CString idSuffix = CString::FormatStr(".#%i", GetId());
+			std::string dirName = DirNameOf(GetName(), strlen(*idSuffix));
+			m_destDir = CString::FormatStr("%s%c%s%s",
+				g_Options->GetInterDir(), PATH_SEPARATOR, dirName.c_str(), *idSuffix);
 		}
 	}
 	CompletedFileList* GetCompletedFiles() { return &m_completedFiles; }
@@ -8093,23 +8164,165 @@ public:
 	}
 	bool IsDupeSuccess()
 	{
-		return nzbget_rs_downloadinfo_is_dupe_success(
-			(int)m_markStatus, (int)m_deleteStatus, (int)m_parStatus,
-			(int)m_unpackStatus, (int)m_urlStatus, CalcHealth(),
-			CalcCriticalHealth(true), CalcCriticalHealth(false),
-			g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0) != 0;
+		bool failure =
+			m_markStatus != NzbInfo::ksSuccess &&
+			m_markStatus != NzbInfo::ksGood &&
+			(m_deleteStatus != NzbInfo::dsNone ||
+			m_markStatus == NzbInfo::ksBad ||
+			m_parStatus == NzbInfo::psFailure ||
+			m_unpackStatus == NzbInfo::usFailure ||
+			m_unpackStatus == NzbInfo::usPassword ||
+			m_urlStatus == NzbInfo::lsFailed ||
+			m_urlStatus == NzbInfo::lsScanSkipped ||
+			m_urlStatus == NzbInfo::lsScanFailed ||
+			(m_parStatus == NzbInfo::psSkipped &&
+			m_unpackStatus == NzbInfo::usSkipped &&
+			CalcHealth() < CalcCriticalHealth(true)) ||
+			(g_Options->GetHealthCheck() == Options::hcDupe &&
+			(m_parStatus == NzbInfo::psNone || m_parStatus == NzbInfo::psSkipped) &&
+			(m_unpackStatus == NzbInfo::usNone || m_unpackStatus == NzbInfo::usSkipped) &&
+			CalcHealth() < CalcCriticalHealth(false)));
+		return !failure;
 	}
 	const char* MakeTextStatus(bool ignoreScriptStatus)
 	{
-		int health = m_kind == NzbInfo::nkNzb ? CalcHealth() : 0;
-		int criticalHealth = m_kind == NzbInfo::nkNzb ? CalcCriticalHealth(false) : 0;
-		ScriptStatus::EStatus scriptStatus = (m_kind == NzbInfo::nkNzb && !ignoreScriptStatus)
-			? m_scriptStatuses.CalcTotalStatus()
-			: ScriptStatus::srSuccess;
-		return nzbget_rs_downloadinfo_make_text_status(
-			(int)m_kind, (int)m_markStatus, (int)m_deleteStatus, (int)m_parStatus,
-			(int)m_unpackStatus, (int)m_moveStatus, (int)m_urlStatus,
-			(int)scriptStatus, health, criticalHealth);
+		const char* status = "FAILURE/INTERNAL_ERROR";
+
+		if (m_kind == NzbInfo::nkNzb)
+		{
+			int health = CalcHealth();
+			int criticalHealth = CalcCriticalHealth(false);
+			ScriptStatus::EStatus scriptStatus = ignoreScriptStatus ? ScriptStatus::srSuccess : m_scriptStatuses.CalcTotalStatus();
+
+			if (m_markStatus == NzbInfo::ksBad)
+			{
+				status = "FAILURE/BAD";
+			}
+			else if (m_markStatus == NzbInfo::ksGood)
+			{
+				status = "SUCCESS/GOOD";
+			}
+			else if (m_markStatus == NzbInfo::ksSuccess)
+			{
+				status = "SUCCESS/MARK";
+			}
+			else if (m_deleteStatus == NzbInfo::dsHealth)
+			{
+				status = "FAILURE/HEALTH";
+			}
+			else if (m_deleteStatus == NzbInfo::dsManual)
+			{
+				status = "DELETED/MANUAL";
+			}
+			else if (m_deleteStatus == NzbInfo::dsDupe)
+			{
+				status = "DELETED/DUPE";
+			}
+			else if (m_deleteStatus == NzbInfo::dsBad)
+			{
+				status = "FAILURE/BAD";
+			}
+			else if (m_deleteStatus == NzbInfo::dsGood)
+			{
+				status = "DELETED/GOOD";
+			}
+			else if (m_deleteStatus == NzbInfo::dsCopy)
+			{
+				status = "DELETED/COPY";
+			}
+			else if (m_deleteStatus == NzbInfo::dsScan)
+			{
+				status = "FAILURE/SCAN";
+			}
+			else if (m_parStatus == NzbInfo::psFailure)
+			{
+				status = "FAILURE/PAR";
+			}
+			else if (m_unpackStatus == NzbInfo::usFailure)
+			{
+				status = "FAILURE/UNPACK";
+			}
+			else if (m_moveStatus == NzbInfo::msFailure)
+			{
+				status = "FAILURE/MOVE";
+			}
+			else if (m_parStatus == NzbInfo::psManual)
+			{
+				status = "WARNING/DAMAGED";
+			}
+			else if (m_parStatus == NzbInfo::psRepairPossible)
+			{
+				status = "WARNING/REPAIRABLE";
+			}
+			else if ((m_parStatus == NzbInfo::psNone || m_parStatus == NzbInfo::psSkipped) &&
+					 (m_unpackStatus == NzbInfo::usNone || m_unpackStatus == NzbInfo::usSkipped) &&
+					 health < criticalHealth)
+			{
+				status = "FAILURE/HEALTH";
+			}
+			else if ((m_parStatus == NzbInfo::psNone || m_parStatus == NzbInfo::psSkipped) &&
+					 (m_unpackStatus == NzbInfo::usNone || m_unpackStatus == NzbInfo::usSkipped) &&
+					 health < 1000 && health >= criticalHealth)
+			{
+				status = "WARNING/HEALTH";
+			}
+			else if ((m_parStatus == NzbInfo::psNone || m_parStatus == NzbInfo::psSkipped) &&
+					 (m_unpackStatus == NzbInfo::usNone || m_unpackStatus == NzbInfo::usSkipped) &&
+					 scriptStatus != ScriptStatus::srFailure && health == 1000)
+			{
+				status = "SUCCESS/HEALTH";
+			}
+			else if (m_unpackStatus == NzbInfo::usSpace)
+			{
+				status = "WARNING/SPACE";
+			}
+			else if (m_unpackStatus == NzbInfo::usPassword)
+			{
+				status = "WARNING/PASSWORD";
+			}
+			else if ((m_unpackStatus == NzbInfo::usSuccess ||
+					  ((m_unpackStatus == NzbInfo::usNone || m_unpackStatus == NzbInfo::usSkipped) &&
+					   m_parStatus == NzbInfo::psSuccess)) &&
+					 scriptStatus == ScriptStatus::srSuccess)
+			{
+				status = "SUCCESS/ALL";
+			}
+			else if (m_unpackStatus == NzbInfo::usSuccess && scriptStatus == ScriptStatus::srNone)
+			{
+				status = "SUCCESS/UNPACK";
+			}
+			else if (m_parStatus == NzbInfo::psSuccess && scriptStatus == ScriptStatus::srNone)
+			{
+				status = "SUCCESS/PAR";
+			}
+			else if (scriptStatus == ScriptStatus::srFailure)
+			{
+				status = "WARNING/SCRIPT";
+			}
+		}
+		else if (m_kind == NzbInfo::nkUrl)
+		{
+			if (m_deleteStatus == NzbInfo::dsManual)
+			{
+				status = "DELETED/MANUAL";
+			}
+			else if (m_deleteStatus == NzbInfo::dsDupe)
+			{
+				status = "DELETED/DUPE";
+			}
+			else if (m_deleteStatus == NzbInfo::dsGood)
+			{
+				status = "DELETED/GOOD";
+			}
+			else
+			{
+				static const char* UrlStatusStrings[] = { "FAILURE/INTERNAL_ERROR", "FAILURE/INTERNAL_ERROR", "FAILURE/INTERNAL_ERROR",
+					"FAILURE/FETCH", "FAILURE/INTERNAL_ERROR", "WARNING/SKIPPED", "FAILURE/SCAN" };
+				status = UrlStatusStrings[m_urlStatus];
+			}
+		}
+
+		return status;
 	}
 	void AddMessage(Message::EKind kind, const char* text, bool print = true);
 	void PrintMessage(Message::EKind kind, const char* format, ...) PRINTF_SYNTAX(3)
@@ -8156,117 +8369,100 @@ public:
 
 		for (FileInfo* fileInfo : &m_fileList)
 		{
-			NzbgetRsDpsCurrentStatsAcc acc{
-				m_remainingSize,
-				m_currentSuccessSize,
-				m_currentFailedSize,
-				m_pausedSize,
-				m_parCurrentSuccessSize,
-				m_parCurrentFailedSize,
-				m_currentSuccessArticles,
-				m_currentFailedArticles,
-				m_extraPriority,
-				m_pausedFileCount,
-				m_remainingParCount,
-				0
-			};
-			nzbget_rs_downloadinfo_update_current_stats_step(
-				&acc,
-				fileInfo->GetRemainingSize(),
-				fileInfo->GetSuccessArticles(),
-				fileInfo->GetFailedArticles(),
-				fileInfo->GetSuccessSize(),
-				fileInfo->GetFailedSize(),
-				fileInfo->GetExtraPriority() ? 1 : 0,
-				fileInfo->GetPaused() ? 1 : 0,
-				fileInfo->GetParFile() ? 1 : 0);
-			m_remainingSize = acc.remaining_size;
-			m_currentSuccessArticles = acc.current_success_articles;
-			m_currentFailedArticles = acc.current_failed_articles;
-			m_currentSuccessSize = acc.current_success_size;
-			m_currentFailedSize = acc.current_failed_size;
-			m_extraPriority = acc.extra_priority;
-			m_pausedFileCount = acc.paused_file_count;
-			m_pausedSize = acc.paused_size;
-			m_remainingParCount = acc.remaining_par_count;
-			m_parCurrentSuccessSize = acc.par_current_success_size;
-			m_parCurrentFailedSize = acc.par_current_failed_size;
+			m_remainingSize += fileInfo->GetRemainingSize();
+			m_currentSuccessArticles += fileInfo->GetSuccessArticles();
+			m_currentFailedArticles += fileInfo->GetFailedArticles();
+			m_currentSuccessSize += fileInfo->GetSuccessSize();
+			m_currentFailedSize += fileInfo->GetFailedSize();
+			if (fileInfo->GetExtraPriority())
+			{
+				m_extraPriority++;
+			}
+			if (fileInfo->GetPaused())
+			{
+				m_pausedFileCount++;
+				m_pausedSize += fileInfo->GetRemainingSize();
+			}
+			if (fileInfo->GetParFile())
+			{
+				m_remainingParCount++;
+				m_parCurrentSuccessSize += fileInfo->GetSuccessSize();
+				m_parCurrentFailedSize += fileInfo->GetFailedSize();
+			}
 
 			m_currentServerStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soAdd);
 		}
 	}
 	void UpdateCompletedStats(FileInfo* fileInfo)
 	{
-		nzbget_rs_downloadinfo_update_completed_stats(
-			fileInfo->GetSuccessSize(),
-			fileInfo->GetFailedSize(),
-			fileInfo->GetFailedArticles(),
-			fileInfo->GetSuccessArticles(),
-			fileInfo->GetExtraPriority() ? 1 : 0,
-			fileInfo->GetParFile() ? 1 : 0,
-			fileInfo->GetPaused() ? 1 : 0,
-			&m_successSize,
-			&m_failedSize,
-			&m_failedArticles,
-			&m_successArticles,
-			&m_extraPriority,
-			&m_parSuccessSize,
-			&m_parFailedSize,
-			&m_remainingParCount,
-			&m_pausedFileCount);
+		m_successSize += fileInfo->GetSuccessSize();
+		m_failedSize += fileInfo->GetFailedSize();
+		m_failedArticles += fileInfo->GetFailedArticles();
+		m_successArticles += fileInfo->GetSuccessArticles();
+		if (fileInfo->GetExtraPriority())
+		{
+			m_extraPriority--;
+		}
+		if (fileInfo->GetParFile())
+		{
+			m_parSuccessSize += fileInfo->GetSuccessSize();
+			m_parFailedSize += fileInfo->GetFailedSize();
+			m_remainingParCount--;
+		}
+		if (fileInfo->GetPaused())
+		{
+			m_pausedFileCount--;
+		}
 
 		m_serverStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soAdd);
 	}
 	void UpdateDeletedStats(FileInfo* fileInfo)
 	{
-		nzbget_rs_downloadinfo_update_deleted_stats(
-			fileInfo->GetSize(),
-			fileInfo->GetSuccessSize(),
-			fileInfo->GetFailedSize(),
-			fileInfo->GetMissedSize(),
-			fileInfo->GetTotalArticles(),
-			fileInfo->GetSuccessArticles(),
-			fileInfo->GetFailedArticles(),
-			fileInfo->GetMissedArticles(),
-			fileInfo->GetRemainingSize(),
-			fileInfo->GetExtraPriority() ? 1 : 0,
-			fileInfo->GetParFile() ? 1 : 0,
-			fileInfo->GetPaused() ? 1 : 0,
-			&m_fileCount,
-			&m_size,
-			&m_currentSuccessSize,
-			&m_failedSize,
-			&m_failedArticles,
-			&m_currentFailedSize,
-			&m_totalArticles,
-			&m_currentSuccessArticles,
-			&m_currentFailedArticles,
-			&m_remainingSize,
-			&m_extraPriority,
-			&m_remainingParCount,
-			&m_parSize,
-			&m_parCurrentSuccessSize,
-			&m_parFailedSize,
-			&m_parCurrentFailedSize,
-			&m_pausedFileCount,
-			&m_pausedSize);
+		m_fileCount--;
+		m_size -= fileInfo->GetSize();
+		m_currentSuccessSize -= fileInfo->GetSuccessSize();
+		m_failedSize -= fileInfo->GetMissedSize();
+		m_failedArticles -= fileInfo->GetMissedArticles();
+		m_currentFailedSize -= fileInfo->GetFailedSize() + fileInfo->GetMissedSize();
+		m_totalArticles -= fileInfo->GetTotalArticles();
+		m_currentSuccessArticles -= fileInfo->GetSuccessArticles();
+		m_currentFailedArticles -= fileInfo->GetFailedArticles() + fileInfo->GetMissedArticles();
+		m_remainingSize -= fileInfo->GetRemainingSize();
+		if (fileInfo->GetExtraPriority())
+		{
+			m_extraPriority--;
+		}
+		if (fileInfo->GetParFile())
+		{
+			m_remainingParCount--;
+			m_parSize -= fileInfo->GetSize();
+			m_parCurrentSuccessSize -= fileInfo->GetSuccessSize();
+			m_parFailedSize -= fileInfo->GetMissedSize();
+			m_parCurrentFailedSize -= fileInfo->GetFailedSize() + fileInfo->GetMissedSize();
+		}
+		if (fileInfo->GetPaused())
+		{
+			m_pausedFileCount--;
+			m_pausedSize -= fileInfo->GetRemainingSize();
+		}
 
 		m_currentServerStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
 	}
 	bool IsDownloadCompleted(bool ignorePausedPars)
 	{
-		return nzbget_rs_downloadinfo_is_download_completed(
-			m_activeDownloads,
-			ignorePausedPars ? 1 : 0,
-			m_fileList.size(),
-			&m_fileList,
-			[](void* rawCtx, size_t idx, int* outPaused, int* outParFile, int* outDeleted) {
-				auto* list = static_cast<FileList*>(rawCtx);
-				FileInfo* fi = (*list)[idx].get();
-				*outPaused = fi->GetPaused() ? 1 : 0;
-				*outParFile = fi->GetParFile() ? 1 : 0;
-				*outDeleted = fi->GetDeleted() ? 1 : 0;
-			}) != 0;
+		if (m_activeDownloads != 0)
+		{
+			return false;
+		}
+		for (FileInfo* fileInfo : &m_fileList)
+		{
+			if (((!fileInfo->GetPaused() || !ignorePausedPars) || !fileInfo->GetParFile()) &&
+				!fileInfo->GetDeleted())
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 	void SetDesiredServerId(int id) { m_desiredServerId = id; }
 	int GetDesiredServerId() { return m_desiredServerId; }
@@ -8797,25 +8993,15 @@ public:
 		nzbget_rs_volume_add(m_bytesPerSeconds.data(), m_bytesPerSeconds.size(), m_bytesPerMinutes.data(),
 			m_bytesPerMinutes.size(), m_bytesPerHours.data(), m_bytesPerHours.size(), &slots, lastMinSlot,
 			lastHourSlot, locCurTime, locDataTime, bytes);
-		size_t daySlotIdx = m_daySlot >= 0 ? static_cast<size_t>(m_daySlot) : 0;
-		int64 curDayBytes = m_daySlot >= 0 ? m_bytesPerDays[daySlotIdx] : 0;
-		int curDayFailed = m_daySlot >= 0 ? m_articlesPerDays[daySlotIdx].failed : 0;
-		int curDaySuccess = m_daySlot >= 0 ? m_articlesPerDays[daySlotIdx].success : 0;
-		int updateDay = 0;
-		int64 newDayBytes = 0, newTotalBytes = 0, newCustomBytes = 0;
-		int newDayFailed = 0, newDaySuccess = 0;
-		nzbget_rs_statmeter_accum_day_and_total_volume(
-			m_daySlot, curDayBytes, curDayFailed, curDaySuccess,
-			m_totalBytes, m_customBytes, bytes, stats.articles.failed, stats.articles.success,
-			&updateDay, &newDayBytes, &newDayFailed, &newDaySuccess, &newTotalBytes, &newCustomBytes);
-		if (updateDay != 0)
+		if (m_daySlot >= 0)
 		{
-			m_bytesPerDays[daySlotIdx] = newDayBytes;
-			m_articlesPerDays[daySlotIdx].failed = newDayFailed;
-			m_articlesPerDays[daySlotIdx].success = newDaySuccess;
+			size_t daySlotIdx = static_cast<size_t>(m_daySlot);
+			m_bytesPerDays[daySlotIdx] += bytes;
+			m_articlesPerDays[daySlotIdx].failed += stats.articles.failed;
+			m_articlesPerDays[daySlotIdx].success += stats.articles.success;
 		}
-		m_totalBytes = newTotalBytes;
-		m_customBytes = newCustomBytes;
+		m_totalBytes += bytes;
+		m_customBytes += bytes;
 
 		m_dataTime = curTime;
 	}
@@ -8955,7 +9141,13 @@ public:
 		// a line break inside a value (a name, key or url sent through the API) split
 		// the record over two lines, and the whole file was set aside as unreadable at
 		// the next start: it is kept as a space
-		nzbget_rs_dsp_sanitize_line_breaks(str.data(), (size_t)len);
+		for (int i = 0; i < len; i++)
+		{
+			if (str[i] == '\n' || str[i] == '\r')
+			{
+				str[i] = ' ';
+			}
+		}
 
 		// replacing terminating <NULL> with <LF>
 		str[len++] = '\n';
@@ -9152,7 +9344,9 @@ public:
 
 		char FileSignatur[128];
 		m_file.ReadLine(FileSignatur, sizeof(FileSignatur));
-		m_fileVersion = nzbget_rs_dsp_parse_format_version(FileSignatur);
+		size_t sigLen = strlen(FORMATVERSION_SIGNATURE);
+		m_fileVersion = !strncmp(FileSignatur, FORMATVERSION_SIGNATURE, sigLen) ?
+			atoi(FileSignatur + sigLen) : 0;
 		if (m_fileVersion > m_readVersion)
 		{
 			error("Could not load diskstate file %s due to file version mismatch", *m_destFilename);
@@ -9271,17 +9465,13 @@ public:
 				}
 
 				formatVersion = stateFile.GetFileVersion();
-				int isLegacy = 0;
-				int loadInlineHistory = 0;
-				int verStatus = nzbget_rs_dsp_check_queue_format_version(
-					formatVersion, DISKSTATE_QUEUE_VERSION, &isLegacy, &loadInlineHistory);
-				m_legacyQueueRead |= isLegacy != 0;
-				if (verStatus == 1)
+				m_legacyQueueRead |= formatVersion != DISKSTATE_QUEUE_VERSION;
+				if (formatVersion <= 0)
 				{
 					error("Failed to read queue: diskstate file is corrupted");
 					{ queueFilesFailed = true; goto error; }
 				}
-				else if (verStatus == 2)
+				else if (formatVersion < 47)
 				{
 					error("Failed to read queue and history data. Only queue and history from NZBGet v13 or newer can be converted by this RustyGet version. "
 						"Old queue and history data still can be converted using NZBGet v16 as an intermediate version.");
@@ -9290,7 +9480,7 @@ public:
 
 				if (!LoadQueue(downloadQueue->GetQueue(), servers, *infile, formatVersion)) { queueFilesFailed = true; goto error; }
 
-				if (loadInlineHistory != 0)
+				if (formatVersion < 57)
 				{
 					if (!LoadHistory(downloadQueue->GetHistory(), servers, *infile, formatVersion)) { queueFilesFailed = true; goto error; }
 				}
@@ -9592,9 +9782,8 @@ public:
 		while (const char* filename = dir.Next())
 		{
 			int id = 0, part = 0;
-			int kind = nzbget_rs_dsp_classify_temp_file(filename, &id, &part);
-			bool garbage = kind == 1;
-			if (kind == 2)
+			bool garbage = strstr(filename, ".tmp") || strstr(filename, ".dec");
+			if (!garbage && sscanf(filename, "%i.%i", &id, &part) == 2)
 			{
 				garbage = true;
 				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
@@ -9865,11 +10054,41 @@ public:
 		{
 			Util::TrimRight(line);
 
-			int time = 0;
-			int kindInt = (int)Message::mkError;
-			size_t textOffset = 0;
-			if (!nzbget_rs_dsp_parse_log_line(line, &time, &kindInt, &textOffset)) goto exit;
-			messages->emplace_back(++id, (Message::EKind)kindInt, (time_t)time, line + textOffset);
+			char* p = strchr(line, '\t');
+			if (!p) goto exit;
+			int time = atoi(p + 1);
+
+			p = strchr(p + 1, '\t');
+			if (!p) goto exit;
+			char* kindStr = p + 1;
+
+			Message::EKind kind = Message::mkError;
+			if (!strncmp(kindStr, "INFO", 4))
+			{
+				kind = Message::mkInfo;
+			}
+			else if (!strncmp(kindStr, "WARNING", 7))
+			{
+				kind = Message::mkWarning;
+			}
+			else if (!strncmp(kindStr, "ERROR", 5))
+			{
+				kind = Message::mkError;
+			}
+			else if (!strncmp(kindStr, "DETAIL", 6))
+			{
+				kind = Message::mkDetail;
+			}
+			else if (!strncmp(kindStr, "DEBUG", 5))
+			{
+				kind = Message::mkDebug;
+			}
+
+			p = strchr(kindStr, '\t');
+			if (!p) goto exit;
+			char* text = p + 1;
+
+			messages->emplace_back(++id, kind, (time_t)time, text);
 		}
 
 	exit:
@@ -9896,7 +10115,7 @@ private:
 		{
 			int nzbId = 0;
 			int fileId = 0;
-			if (nzbget_rs_dsp_parse_ids_file(ids, &nzbId, &fileId))
+			if (sscanf(ids, "nzb %i file %i", &nzbId, &fileId) == 2 && nzbId >= 0 && fileId >= 0)
 			{
 				NzbInfo::RaiseIdFloor(nzbId);
 				FileInfo::RaiseIdFloor(fileId);
@@ -9906,18 +10125,25 @@ private:
 		DirBrowser dir(g_Options->GetQueueDir());
 		while (const char* filename = dir.Next())
 		{
-			int isNzbLog = 0;
-			int id = nzbget_rs_dsp_classify_queue_dir_id(filename, &isNzbLog);
-			if (id > 0)
+			bool nzbLog = filename[0] == 'n';
+			const char* p = nzbLog ? filename + 1 : filename;
+			if (!std::isdigit((unsigned char)*p))
 			{
-				if (isNzbLog)
-				{
-					NzbInfo::RaiseIdFloor(id);
-				}
-				else
-				{
-					FileInfo::RaiseIdFloor(id);
-				}
+				continue;
+			}
+			char* end = nullptr;
+			long id = strtol(p, &end, 10);
+			if (id <= 0 || id > INT_MAX)
+			{
+				continue;
+			}
+			if (nzbLog && !strcmp(end, ".log"))
+			{
+				NzbInfo::RaiseIdFloor((int)id);
+			}
+			else if (!nzbLog && (*end == '\0' || !strcmp(end, "s") || !strcmp(end, "c")))
+			{
+				FileInfo::RaiseIdFloor((int)id);
 			}
 		}
 	}
@@ -9952,12 +10178,13 @@ private:
 				continue;
 			}
 			file.Close();
-			int legacyId = 0;
-			int suffixKind = 0;
-			if (nzbget_rs_dsp_classify_legacy_file_state(
-				filename, header, DISKSTATE_FILE_VERSION, DISKSTATE_FILE_LEGACY_VERSION, &legacyId, &suffixKind))
+			int version = 0;
+			size_t sigLen = strlen(FORMATVERSION_SIGNATURE);
+			if (!strncmp(header, FORMATVERSION_SIGNATURE, sigLen) &&
+				sscanf(header + sigLen, "%i", &version) == 1 &&
+				version > DISKSTATE_FILE_VERSION && version <= DISKSTATE_FILE_LEGACY_VERSION)
 			{
-				legacy.emplace_back(legacyId, suffixKind == 1 ? "s" : (suffixKind == 2 ? "c" : ""));
+				legacy.emplace_back(atoi(filename), filename + digits);
 			}
 		}
 		if (legacy.empty())
@@ -10167,8 +10394,7 @@ private:
 		int headerScanCnt;
 		headerScanCnt = infile.ScanLine("%i,%u,%u,%i", &recoveredArticles, &recoveredHigh, &recoveredLow,
 			&recoveredHoles);
-		if (headerScanCnt != 4 || !nzbget_rs_dsp_validate_dupe_extras_header(
-			headerScanCnt, recoveredArticles, recoveredHoles)) goto error;
+		if (headerScanCnt != 4 || recoveredArticles < 0 || recoveredHoles < 0) goto error;
 		nzbInfo->SetDupeRecoveredArticles(recoveredArticles);
 		nzbInfo->SetDupeRecoveredBytes(Util::JoinInt64(recoveredHigh, recoveredLow));
 		nzbInfo->SetDupeRecoveredHoles(recoveredHoles);
@@ -10192,8 +10418,8 @@ private:
 				infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i", &fileId, &decodedHigh,
 					&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
 					&failedArticles);
-			if (jobScanCnt != expectedJobFields || !nzbget_rs_dsp_validate_repair_job_header(
-				jobScanCnt, expectedJobFields, fileId, parFile, failedArticles)) goto error;
+			if (jobScanCnt != expectedJobFields || failedArticles < 0 || fileId <= 0 ||
+				parFile < 0 || parFile > 1) goto error;
 			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
 			int holeCount;
 			{
@@ -10208,9 +10434,10 @@ private:
 			{
 				uint32 offsetHigh, offsetLow, sizeHigh, sizeLow;
 				if (infile.ScanLine("%u,%u,%u,%u", &offsetHigh, &offsetLow, &sizeHigh, &sizeLow) != 4) goto error;
-				int64 offset = 0;
-				int64 size = 0;
-				if (!nzbget_rs_dsp_validate_repair_hole(offsetHigh, offsetLow, sizeHigh, sizeLow, decodedSize, &offset, &size)) goto error;
+				int64 offset = Util::JoinInt64(offsetHigh, offsetLow);
+				int64 size = Util::JoinInt64(sizeHigh, sizeLow);
+				if (offset < 0 || size <= 0 || decodedSize <= 0 ||
+					offset > decodedSize || size > decodedSize - offset) goto error;
 				holes.push_back({offset, size});
 			}
 			nzbInfo->GetStreamRepairJobs()->emplace_back(fileId, buf, decodedSize,
@@ -10231,11 +10458,10 @@ private:
 		std::vector<NzbInfo*> withExtras;
 		for (NzbInfo* nzbInfo : nzbs)
 		{
-			if (nzbget_rs_dsp_has_dupe_extras(
-				nzbInfo->GetDupeRecoveredArticles(),
-				nzbInfo->GetDupeRecoveredBytes(),
-				nzbInfo->GetDupeRecoveredHoles(),
-				nzbInfo->GetStreamRepairJobs()->size()))
+			if (nzbInfo->GetDupeRecoveredArticles() != 0 ||
+				nzbInfo->GetDupeRecoveredBytes() != 0 ||
+				nzbInfo->GetDupeRecoveredHoles() != 0 ||
+				!nzbInfo->GetStreamRepairJobs()->empty())
 			{
 				withExtras.push_back(nzbInfo);
 			}
@@ -10545,7 +10771,18 @@ private:
 		if (postStage > 0)
 		{
 			nzbInfo->EnterPostProcess();
-			postStage = nzbget_rs_dsp_normalize_post_stage(postStage, formatVersion, (int)PostInfo::ptFinished);
+			if (formatVersion < 59 && postStage == 6)
+			{
+				postStage += 1;
+			}
+			else if (formatVersion < 59 && postStage > 6)
+			{
+				postStage += 2;
+			}
+			if (postStage > (int)PostInfo::ptFinished)
+			{
+				postStage = (int)PostInfo::ptFinished;
+			}
 			nzbInfo->GetPostInfo()->SetStage((PostInfo::EStage)postStage);
 		}
 		nzbInfo->SetFeedId(feedId);
@@ -10999,13 +11236,8 @@ private:
 						nzbget_rs_free(forceDestBuf);
 					}
 				}
-				bool restoredOutputInit = nzbget_rs_dsp_eval_restored_output_init(
-					outputInitialized,
-					directWriteOpt ? 1 : 0,
-					forceDirectWrite ? 1 : 0,
-					hasOwnOutFile ? 1 : 0,
-					hasOutTmp ? 1 : 0,
-					hasForceDest ? 1 : 0) != 0;
+				bool restoredOutputInit = outputInitialized != 0 &&
+					(!(directWriteOpt || forceDirectWrite) || hasOwnOutFile || hasOutTmp || hasForceDest);
 				fileInfo->SetOutputInitialized(restoredOutputInit);
 			}
 		}
@@ -11097,15 +11329,12 @@ private:
 		articles.reserve(fileInfo->GetArticles()->size());
 		for (ArticleInfo* articleInfo : fileInfo->GetArticles())
 		{
-			int savedStatus = 0;
-			int stagedFallback = nzbget_rs_dsp_calc_staged_fallback(
-				completed ? 1 : 0,
-				(int)articleInfo->GetStatus(),
-				(int)ArticleInfo::aiFinished,
-				articleInfo->GetDupeFallbackRound(),
-				articleInfo->GetResultFilename() ? 1 : 0,
-				(int)ArticleInfo::aiUndefined,
-				&savedStatus);
+			int stagedFallback = (!completed &&
+				articleInfo->GetStatus() == ArticleInfo::aiFinished &&
+				articleInfo->GetDupeFallbackRound() > 0 &&
+				articleInfo->GetResultFilename()) ? 1 : 0;
+			int savedStatus = stagedFallback != 0 ?
+				(int)ArticleInfo::aiUndefined : (int)articleInfo->GetStatus();
 			articles.push_back(NzbgetRsDiskArticleState{
 				savedStatus,
 				articleInfo->GetSegmentOffset(),
@@ -11177,8 +11406,7 @@ private:
 		// the state of a file with its articles loaded can't list more (a stale or
 		// damaged state file did: at() threw out of the queue coordinator). Fewer is
 		// fine, as upstream has it: older queues saved some states with none
-		if (!nzbget_rs_dsp_validate_article_count(
-			size, hasArticles ? 1 : 0, (int)fileInfo->GetArticles()->size()))
+		if (size < 0 || (hasArticles && (size_t)size > fileInfo->GetArticles()->size()) || size > 10000000)
 		{
 			goto error;
 		}
@@ -11201,62 +11429,79 @@ private:
 			{
 				fields = infile.ScanLine("%i,%" PRIi64 ",%i,%u,%i", &statusInt, &segmentOffset,
 					&segmentSize, &crc, &stagedFallback);
+				if ((formatVersion >= 9 ? fields != 5 : fields < 4) ||
+					(stagedFallback != 0 && stagedFallback != 1))
+				{
+					goto error;
+				}
+				if (!completed && (segmentOffset < 0 || segmentSize < 0 || segmentSize > 1024 * 1024 * 1024))
+				{
+					statusInt = (int)ArticleInfo::aiUndefined;
+					stagedFallback = 0;
+					segmentOffset = 0;
+					segmentSize = 0;
+				}
+				if (stagedFallback != 0 && pa->GetPartNumber() > 0 &&
+					FileSystem::FileExists(CString::FormatStr("%s%c%i.%03i",
+						g_Options->GetTempDir(), PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber())))
+				{
+					statusInt = (int)ArticleInfo::aiFinished;
+				}
+				else
+				{
+					stagedFallback = 0;
+				}
+				pa->SetSegmentOffset(segmentOffset);
+				pa->SetSegmentSize(segmentSize);
+				pa->SetCrc(crc);
 			}
 			else
 			{
 				fields = infile.ScanLine("%i", &statusInt);
+				if (fields != 1)
+				{
+					goto error;
+				}
 			}
-			bool needStagedCheck = nzbget_rs_dsp_need_staged_file_check(
-				completed ? 1 : 0,
-				formatVersion,
-				statusInt,
-				(int)ArticleInfo::aiFinished,
-				segmentOffset,
-				segmentSize,
-				stagedFallback,
-				pa->GetPartNumber(),
-				g_Options->GetDirectWrite() ? 1 : 0,
-				fileInfo->GetForceDirectWrite() ? 1 : 0) != 0;
-			bool stagedFileExists = false;
-			if (needStagedCheck)
+
+			int dupeFallbackRound = (!completed && formatVersion >= 2 &&
+				statusInt == (int)ArticleInfo::aiFinished && stagedFallback != 0) ? 1 : 0;
+
+			if (statusInt == (int)ArticleInfo::aiRunning)
 			{
-				stagedFileExists = FileSystem::FileExists(CString::FormatStr("%s%c%i.%03i",
-					g_Options->GetTempDir(), PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber()));
+				statusInt = (int)ArticleInfo::aiUndefined;
 			}
-			NzbgetRsArticleLoadEval eval{};
-			if (!nzbget_rs_dsp_eval_article_load_state(
-				formatVersion,
-				completed ? 1 : 0,
-				fields,
-				statusInt,
-				segmentOffset,
-				segmentSize,
-				stagedFallback,
-				pa->GetPartNumber(),
-				stagedFileExists ? 1 : 0,
-				g_Options->GetDirectWrite() ? 1 : 0,
-				fileInfo->GetForceDirectWrite() ? 1 : 0,
-				pa->GetResultFilename() ? 1 : 0,
-				completedArticles,
-				size,
-				&eval))
+
+			bool directWrite = g_Options->GetDirectWrite();
+			bool forceDirectWrite = fileInfo->GetForceDirectWrite();
+			if (!completed && formatVersion < 9 &&
+				statusInt == (int)ArticleInfo::aiFinished &&
+				(directWrite || forceDirectWrite) &&
+				pa->GetPartNumber() > 0 &&
+				FileSystem::FileExists(CString::FormatStr("%s%c%i.%03i",
+					g_Options->GetTempDir(), PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber())))
 			{
-				goto error;
+				dupeFallbackRound = 1;
 			}
-			if (formatVersion >= 2)
-			{
-				pa->SetSegmentOffset(eval.segment_offset);
-				pa->SetSegmentSize(eval.segment_size);
-				pa->SetCrc(crc);
-			}
-			pa->SetDupeFallbackRound(eval.dupe_fallback_round);
-			if (eval.need_result_filename)
+
+			pa->SetDupeFallbackRound(dupeFallbackRound);
+			if (statusInt == (int)ArticleInfo::aiFinished &&
+				((!directWrite && !forceDirectWrite) || dupeFallbackRound > 0) &&
+				!pa->GetResultFilename())
 			{
 				pa->SetResultFilename(CString::FormatStr("%s%c%i.%03i",
 					g_Options->GetTempDir(), PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber()));
 			}
-			completedArticles = eval.completed_articles;
-			pa->SetStatus((ArticleInfo::EStatus)eval.status);
+			if (completedArticles == size - 1 && !completed)
+			{
+				statusInt = (int)ArticleInfo::aiUndefined;
+				pa->SetDupeFallbackRound(0);
+			}
+			if (statusInt != (int)ArticleInfo::aiUndefined)
+			{
+				completedArticles++;
+			}
+			pa->SetStatus((ArticleInfo::EStatus)statusInt);
 		}
 
 		fileInfo->SetCompletedArticles(completedArticles);
@@ -11267,15 +11512,15 @@ private:
 			char trailer[1024];
 			while (infile.ReadLine(trailer, sizeof(trailer)))
 			{
-				int64 decodedSize = 0;
+				uint32 decHigh = 0, decLow = 0;
 				int outputInit = 0;
-				int trailerKind = nzbget_rs_dsp_parse_legacy_file_state_trailer(
-					trailer, &decodedSize, &outputInit);
-				if (trailerKind == 1)
+				if (!strncmp(trailer, "#decoded ", 9) &&
+					sscanf(trailer + 9, "%u,%u", &decHigh, &decLow) == 2)
 				{
-					fileInfo->SetDecodedFileSize(decodedSize);
+					fileInfo->SetDecodedFileSize(Util::JoinInt64(decHigh, decLow));
 				}
-				else if (trailerKind == 2)
+				else if (!strncmp(trailer, "OutputInitialized=", 18) &&
+					sscanf(trailer + 18, "%i", &outputInit) == 1)
 				{
 					fileInfo->SetOutputInitialized(outputInit != 0);
 				}
@@ -11304,28 +11549,30 @@ private:
 			}
 			bool hasDirectWriteOutput = hasOwnOutFile || hasOutTmp || hasCompletedDest;
 
-			int newOutputInitialized = 0;
-			int pickPathKind = 0;
-			nzbget_rs_dsp_reconcile_direct_write_output(
-				fileInfo->GetOutputInitialized() ? 1 : 0,
-				hasOwnOutFile ? 1 : 0,
-				hasOutTmp ? 1 : 0,
-				hasCompletedDest ? 1 : 0,
-				fileInfo->GetSuccessArticles(),
-				completed ? 1 : 0,
-				fileInfo->GetOutputFilename().empty() ? 1 : 0,
-				&newOutputInitialized,
-				&pickPathKind);
-			fileInfo->SetOutputInitialized(newOutputInitialized != 0);
-			if (pickPathKind == 1)
+			bool newOutputInitialized = fileInfo->GetOutputInitialized();
+			if (newOutputInitialized && !hasDirectWriteOutput)
 			{
-				fileInfo->SetOutputFilename(*CString::FormatStr("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()));
+				newOutputInitialized = false;
 			}
-			else if (pickPathKind != 0)
+			else if (!newOutputInitialized && hasDirectWriteOutput &&
+				(fileInfo->GetSuccessArticles() > 0 || completed))
 			{
-				NzbgetRsBuf pickedBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(destDir, PATH_SEPARATOR, fileInfo->GetFilename());
-				fileInfo->SetOutputFilename(pickedBuf.data ? pickedBuf.data : "");
-				nzbget_rs_free(pickedBuf);
+				newOutputInitialized = true;
+			}
+			fileInfo->SetOutputInitialized(newOutputInitialized);
+			if (newOutputInitialized && fileInfo->GetOutputFilename().empty() &&
+				(hasOutTmp || hasCompletedDest))
+			{
+				if (hasOutTmp)
+				{
+					fileInfo->SetOutputFilename(*CString::FormatStr("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()));
+				}
+				else
+				{
+					NzbgetRsBuf pickedBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(destDir, PATH_SEPARATOR, fileInfo->GetFilename());
+					fileInfo->SetOutputFilename(pickedBuf.data ? pickedBuf.data : "");
+					nzbget_rs_free(pickedBuf);
+				}
 			}
 		}
 
@@ -11532,10 +11779,14 @@ private:
 		DirBrowser dir(g_Options->GetQueueDir());
 		while (const char* filename = dir.Next())
 		{
-			bool del = nzbget_rs_dsp_is_orphan_queue_file(
-				filename,
-				fileIdList.data(), fileIdList.size(),
-				nzbIdList.data(), nzbIdList.size()) != 0;
+			int id;
+			char suffix;
+			bool del =
+				((sscanf(filename, "%i%c", &id, &suffix) == 2 && (suffix == 's' || suffix == 'c')) ||
+				(sscanf(filename, "%i", &id) == 1 && !strchr(filename, '.'))) &&
+				!std::binary_search(fileIdList.begin(), fileIdList.end(), id);
+			del |= sscanf(filename, "n%i.log", &id) == 1 &&
+				!std::binary_search(nzbIdList.begin(), nzbIdList.end(), id);
 
 			if (del)
 			{
@@ -11604,14 +11855,10 @@ private:
 
 			for (FeedInfo* feedInfo : feeds)
 			{
-				if (nzbget_rs_dsp_feed_status_matches(
-					feedInfo->GetUrl(),
-					url,
-					formatVersion,
-					formatVersion == 2 ? feedInfo->GetFilter() : "",
-					formatVersion == 2 ? filter : "",
-					feedInfo->GetFilterHash(),
-					filterHash) != 0)
+				if (!strcmp(feedInfo->GetUrl(), url) &&
+					((formatVersion == 1) ||
+					 (formatVersion == 2 && !strcmp(feedInfo->GetFilter(), filter)) ||
+					 (formatVersion >= 3 && feedInfo->GetFilterHash() == filterHash)))
 				{
 					feedInfo->SetLastUpdate((time_t)lastUpdate);
 				}
@@ -11852,18 +12099,21 @@ private:
 
 		*perfectMatch = true;
 
+		struct ServerRef
+		{
+			int m_stateId;
+			CString m_name;
+			CString m_host;
+			int m_port;
+			CString m_user;
+			bool m_matched = false;
+			bool m_perfect = false;
+		};
+
 		int size = 0;
-		std::vector<int> refIds;
-		std::vector<CString> refNameStrs;
-		std::vector<CString> refHostStrs;
-		std::vector<int> refPorts;
-		std::vector<CString> refUserStrs;
+		std::vector<ServerRef> refs;
 		if (infile.ScanLine("%i", &size) != 1 || size < 0) goto error;
-		refIds.reserve(size);
-		refNameStrs.reserve(size);
-		refHostStrs.reserve(size);
-		refPorts.reserve(size);
-		refUserStrs.reserve(size);
+		refs.reserve(size);
 		for (int i = 0; i < size; i++)
 		{
 			char name[1024];
@@ -11878,53 +12128,108 @@ private:
 			char user[100];
 			if (!infile.ReadLine(user, sizeof(user))) goto error;
 
-			refIds.push_back(i + 1);
-			refNameStrs.emplace_back(name);
-			refHostStrs.emplace_back(host);
-			refPorts.push_back(port);
-			refUserStrs.emplace_back(user);
+			refs.push_back(ServerRef{ i + 1, name, host, port, user, false, false });
 		}
 
 		{
-			std::vector<const char*> srvNames;
-			std::vector<const char*> srvHosts;
-			std::vector<int> srvPorts;
-			std::vector<const char*> srvUsers;
-			srvNames.reserve(servers->size());
-			srvHosts.reserve(servers->size());
-			srvPorts.reserve(servers->size());
-			srvUsers.reserve(servers->size());
+			enum class MatchCriteria { Name, Host, Port, User };
+			auto findCandidates = [&refs](NewsServer* newsServer, std::vector<size_t>& candidates,
+				MatchCriteria criteria, bool keepIfNothing)
+			{
+				std::vector<size_t> orig = candidates;
+				candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+					[&](size_t idx)
+					{
+						const ServerRef& r = refs[idx];
+						bool m = false;
+						switch (criteria)
+						{
+							case MatchCriteria::Name:
+								m = !strcasecmp(newsServer->GetName(), r.m_name);
+								break;
+							case MatchCriteria::Host:
+								m = !strcasecmp(newsServer->GetHost(), r.m_host);
+								break;
+							case MatchCriteria::Port:
+								m = newsServer->GetPort() == r.m_port;
+								break;
+							case MatchCriteria::User:
+								m = !strcasecmp(newsServer->GetUser(), r.m_user);
+								break;
+						}
+						return !(m && !r.m_matched);
+					}),
+					candidates.end());
+				if (candidates.empty() && keepIfNothing)
+				{
+					candidates = std::move(orig);
+				}
+			};
+
 			for (NewsServer* newsServer : servers)
 			{
-				srvNames.push_back(newsServer->GetName());
-				srvHosts.push_back(newsServer->GetHost());
-				srvPorts.push_back(newsServer->GetPort());
-				srvUsers.push_back(newsServer->GetUser());
+				newsServer->SetStateId(0);
 			}
 
-			std::vector<const char*> refNames;
-			std::vector<const char*> refHosts;
-			std::vector<const char*> refUsers;
-			refNames.reserve(refNameStrs.size());
-			refHosts.reserve(refHostStrs.size());
-			refUsers.reserve(refUserStrs.size());
-			for (size_t i = 0; i < refNameStrs.size(); i++)
-			{
-				refNames.push_back(*refNameStrs[i]);
-				refHosts.push_back(*refHostStrs[i]);
-				refUsers.push_back(*refUserStrs[i]);
-			}
-
-			std::vector<int> outStateIds(servers->size(), 0);
-			*perfectMatch = nzbget_rs_dsp_match_servers(
-				srvNames.data(), srvHosts.data(), srvPorts.data(), srvUsers.data(), servers->size(),
-				refIds.data(), refNames.data(), refHosts.data(), refPorts.data(), refUsers.data(), refIds.size(),
-				outStateIds.data()) != 0;
-
-			size_t idx = 0;
+			// Step 1: trying perfect match
 			for (NewsServer* newsServer : servers)
 			{
-				newsServer->SetStateId(outStateIds[idx++]);
+				std::vector<size_t> matchedRefs(refs.size());
+				for (size_t i = 0; i < refs.size(); i++)
+				{
+					matchedRefs[i] = i;
+				}
+				findCandidates(newsServer, matchedRefs, MatchCriteria::Name, false);
+				findCandidates(newsServer, matchedRefs, MatchCriteria::Host, false);
+				findCandidates(newsServer, matchedRefs, MatchCriteria::Port, false);
+				findCandidates(newsServer, matchedRefs, MatchCriteria::User, false);
+
+				if (matchedRefs.size() == 1)
+				{
+					ServerRef& ref = refs[matchedRefs[0]];
+					newsServer->SetStateId(ref.m_stateId);
+					ref.m_matched = true;
+					ref.m_perfect = true;
+				}
+			}
+
+			// Step 2: matching host, port, username and server-name
+			for (NewsServer* newsServer : servers)
+			{
+				if (newsServer->GetStateId() == 0)
+				{
+					std::vector<size_t> matchedRefs(refs.size());
+					for (size_t i = 0; i < refs.size(); i++)
+					{
+						matchedRefs[i] = i;
+					}
+					findCandidates(newsServer, matchedRefs, MatchCriteria::Host, false);
+
+					if (matchedRefs.size() > 1)
+					{
+						findCandidates(newsServer, matchedRefs, MatchCriteria::Name, true);
+					}
+					if (matchedRefs.size() > 1)
+					{
+						findCandidates(newsServer, matchedRefs, MatchCriteria::User, true);
+					}
+					if (matchedRefs.size() > 1)
+					{
+						findCandidates(newsServer, matchedRefs, MatchCriteria::Port, true);
+					}
+
+					if (!matchedRefs.empty())
+					{
+						ServerRef& ref = refs[matchedRefs[0]];
+						newsServer->SetStateId(ref.m_stateId);
+						ref.m_matched = true;
+					}
+				}
+			}
+
+			for (const ServerRef& ref : refs)
+			{
+				*perfectMatch = *perfectMatch && ref.m_perfect;
 			}
 		}
 
@@ -12061,9 +12366,9 @@ private:
 				// left them too short for the counters
 				int arrSize;
 				if (infile.ScanLine("%i", &arrSize) != 1) goto error;
-				int targetVolumeSize = 0;
-				if (!nzbget_rs_dsp_calc_volume_slot_size(k, arrSize, &targetVolumeSize)) goto error;
-				if (volumeArray) volumeArray->assign(targetVolumeSize, 0);
+				if (arrSize < 0 || arrSize > 100000) goto error;
+				int fixedSize = (k == 0 || k == 1) ? 60 : (k == 2 ? 24 : 0);
+				if (volumeArray) volumeArray->assign(fixedSize > 0 ? fixedSize : arrSize, 0);
 
 				for (int j = 0; j < arrSize; j++)
 				{
@@ -12622,23 +12927,30 @@ public:
 
 		for (int level = 0; level <= m_maxNormLevel; level++)
 		{
-			std::vector<uint8_t> inUse;
-			std::vector<uint8_t> connected;
-			std::vector<int64_t> freeTimes;
+			bool hasOpen = false;
+			bool inUseOnLevel = false;
+			int inactiveTime = 0;
 			for (PooledConnection* connection : &m_connections)
 			{
 				if (connection->GetNewsServer()->GetNormLevel() == level)
 				{
-					inUse.push_back(connection->GetInUse() ? 1 : 0);
-					connected.push_back(connection->GetStatus() == Connection::csConnected ? 1 : 0);
-					freeTimes.push_back((int64_t)connection->GetFreeTime());
+					if (connection->GetInUse())
+					{
+						inUseOnLevel = true;
+						break;
+					}
+					if (connection->GetStatus() == Connection::csConnected)
+					{
+						int tdiff = (int)(curtime - connection->GetFreeTime());
+						if (!hasOpen || tdiff < inactiveTime)
+						{
+							inactiveTime = tdiff;
+						}
+						hasOpen = true;
+					}
 				}
 			}
-			if (nzbget_rs_server_pool_level_should_close(
-				inUse.empty() ? nullptr : inUse.data(),
-				connected.empty() ? nullptr : connected.data(),
-				freeTimes.empty() ? nullptr : freeTimes.data(),
-				inUse.size(), (int64_t)curtime, CONNECTION_HOLD_SECODNS) != 0)
+			if (!inUseOnLevel && hasOpen && inactiveTime > CONNECTION_HOLD_SECODNS)
 			{
 				for (PooledConnection* connection : &m_connections)
 				{
@@ -12665,21 +12977,16 @@ public:
 
 	void BlockServer(NewsServer* newsServer)
 	{
-		int newBlockInt = 0;
-		int shouldWarnInt = 0;
+		bool shouldWarn = false;
 		{
 			Guard guard(m_connectionsMutex);
 			time_t curTime = Util::CurrentTime();
-			nzbget_rs_nntp_server_pool_eval_block_server(
-				(int64_t)newsServer->GetBlockTime(),
-				(int64_t)curTime,
-				m_retryInterval,
-				&newBlockInt,
-				&shouldWarnInt);
+			bool newBlock = newsServer->GetBlockTime() != curTime;
+			shouldWarn = newBlock && m_retryInterval > 0;
 			newsServer->SetBlockTime(curTime);
 		}
 
-		if (shouldWarnInt != 0)
+		if (shouldWarn)
 		{
 			warn("Blocking %s (%s) for %i sec", newsServer->GetName(), newsServer->GetHost(), m_retryInterval);
 		}
@@ -12687,13 +12994,16 @@ public:
 
 	bool IsServerBlocked(NewsServer* newsServer)
 	{
-		if (!newsServer->GetBlockTime())
+		int64 blockTime = (int64)newsServer->GetBlockTime();
+		if (!blockTime)
 		{
 			return false;
 		}
 
-		time_t curTime = Util::CurrentTime();
-		return nzbget_rs_server_pool_is_blocked(newsServer->GetBlockTime(), curTime, m_retryInterval) != 0;
+		int64 curTime = (int64)Util::CurrentTime();
+		int64 end = (m_retryInterval > 0 && blockTime > INT64_MAX - (int64)m_retryInterval) ?
+			INT64_MAX : blockTime + (int64)m_retryInterval;
+		return blockTime <= curTime && curTime < end;
 	}
 
 protected:
@@ -12780,23 +13090,28 @@ private:
 			return;
 		}
 
-		size_t count = m_sortedServers.size();
-		std::vector<NzbgetRsServerNormInput> inputs(count);
-		std::vector<size_t> sortedIndices(count);
-		std::vector<int> normLevels(count);
-		std::vector<NewsServer*> origServers = m_sortedServers;
-		for (size_t i = 0; i < count; i++)
+		std::stable_sort(m_sortedServers.begin(), m_sortedServers.end(),
+			[](NewsServer* a, NewsServer* b) { return a->GetLevel() < b->GetLevel(); });
+
+		int minLevel = m_sortedServers[0]->GetLevel();
+		m_maxNormLevel = 0;
+		int lastLevel = minLevel;
+		for (NewsServer* newsServer : m_sortedServers)
 		{
-			inputs[i].level = origServers[i]->GetLevel();
-			inputs[i].active = origServers[i]->GetActive() ? 1 : 0;
-			inputs[i].max_connections = origServers[i]->GetMaxConnections();
-		}
-		m_maxNormLevel = nzbget_rs_server_pool_normalize_levels(
-			inputs.data(), count, sortedIndices.data(), normLevels.data());
-		for (size_t i = 0; i < count; i++)
-		{
-			origServers[i]->SetNormLevel(normLevels[i]);
-			m_sortedServers[i] = origServers[sortedIndices[i]];
+			if ((newsServer->GetActive() && newsServer->GetMaxConnections() > 0) ||
+				newsServer->GetLevel() == minLevel)
+			{
+				if (newsServer->GetLevel() != lastLevel)
+				{
+					m_maxNormLevel++;
+				}
+				newsServer->SetNormLevel(m_maxNormLevel);
+				lastLevel = newsServer->GetLevel();
+			}
+			else
+			{
+				newsServer->SetNormLevel(-1);
+			}
 		}
 	}
 };
@@ -15096,19 +15411,43 @@ inline bool ArticleCache::CheckFlush(bool flushEverything)
 class ArticleFetchLimits
 {
 public:
+	static constexpr int64 MaxDecodedBytes = 64LL * 1024 * 1024;
+	static constexpr int64 MaxHeaderBytes = 64LL * 1024;
+	static constexpr int64 MaxRawBytes = MaxDecodedBytes * 3 + MaxHeaderBytes;
+
 	bool AddRawBytes(int64 bytes)
 	{
-		return nzbget_rs_article_fetch_add_raw_bytes(&m_rawBytes, bytes) != 0;
+		if (bytes < 0 || bytes > MaxRawBytes - m_rawBytes)
+		{
+			return false;
+		}
+		m_rawBytes += bytes;
+		return true;
 	}
 
 	bool HeaderWithinLimit(bool declaredRangeKnown) const
 	{
-		return nzbget_rs_article_fetch_header_within_limit(m_rawBytes, declaredRangeKnown ? 1 : 0) != 0;
+		return declaredRangeKnown || m_rawBytes <= MaxHeaderBytes;
 	}
 
 	bool AddDecodedBytes(int64 bytes, int64 begin, int64 end, int64 fileSize)
 	{
-		return nzbget_rs_article_fetch_add_decoded_bytes(&m_decodedBytes, bytes, begin, end, fileSize) != 0;
+		if (bytes < 0 || begin <= 0 || end < begin || fileSize <= 0 || end > fileSize)
+		{
+			return false;
+		}
+		int64 diff = end - begin;
+		if (diff > INT64_MAX - 1)
+		{
+			return false;
+		}
+		int64 declaredBytes = diff + 1;
+		if (declaredBytes > MaxDecodedBytes || bytes > declaredBytes - m_decodedBytes)
+		{
+			return false;
+		}
+		m_decodedBytes += bytes;
+		return true;
 	}
 
 private:
@@ -16818,12 +17157,16 @@ public:
 	 * matches. Recognized parity must never be a duplicate target or donor. */
 	static bool IsParFile(FileInfo* fileInfo)
 	{
-		return nzbget_rs_dupe_fallback_is_par_file(
-			fileInfo->GetParFile() ? 1 : 0,
-			(int)fileInfo->GetFirstContent(),
-			(int)FileInfo::fcPar2,
-			fileInfo->GetFilenameConfirmed() ? 1 : 0,
-			fileInfo->GetFilename()) != 0;
+		if (fileInfo->GetParFile() || fileInfo->GetFirstContent() == FileInfo::fcPar2)
+		{
+			return true;
+		}
+		if (!fileInfo->GetFilenameConfirmed() || !fileInfo->GetFilename())
+		{
+			return false;
+		}
+		size_t len = strlen(fileInfo->GetFilename());
+		return len >= 5 && !strcasecmp(fileInfo->GetFilename() + len - 5, ".par2");
 	}
 
 	/* The step fingerprint as a 64-bit hash (0 = the file has too few or too
@@ -17173,17 +17516,21 @@ public:
 	 * DownloadQueue-lock, like TryFallback. */
 	static bool ShouldDeferToPar(NzbInfo* nzbInfo)
 	{
-		int headerVerdict = nzbget_rs_dupe_fallback_should_defer_to_par_header(
-			nzbInfo ? 1 : 0,
-			nzbInfo ? (int)nzbInfo->GetDirectRenameStatus() : 0,
-			(int)NzbInfo::tsRunning,
-			(nzbInfo && nzbInfo->GetAllFirst()) ? 1 : 0,
-			nzbInfo ? (int)nzbInfo->GetParStatus() : 0,
-			(int)NzbInfo::psFailure,
-			nzbInfo ? nzbInfo->GetParSize() : 0);
-		if (headerVerdict != 0)
+		if (!nzbInfo)
 		{
-			return headerVerdict > 0;
+			return false;
+		}
+		if (nzbInfo->GetDirectRenameStatus() == NzbInfo::tsRunning && !nzbInfo->GetAllFirst())
+		{
+			return true;
+		}
+		if (nzbInfo->GetParStatus() == NzbInfo::psFailure)
+		{
+			return false;
+		}
+		if (nzbInfo->GetParSize() > 0)
+		{
+			return true;
 		}
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
@@ -17212,12 +17559,26 @@ public:
 	 * Must be called within DownloadQueue-lock. */
 	static bool ParCannotCover(NzbInfo* nzbInfo, bool withMargin = true)
 	{
-		return nzbget_rs_dupe_fallback_par_cannot_cover(
-			nzbInfo->GetParSize(), nzbInfo->GetParCurrentFailedSize(),
-			nzbInfo->GetCurrentFailedSize(), nzbInfo->GetCurrentSuccessSize(),
-			nzbInfo->GetParCurrentSuccessSize(), nzbInfo->GetSize(),
-			nzbInfo->GetCurrentSuccessArticles(), nzbInfo->GetCurrentFailedArticles(),
-			withMargin ? 1 : 0) != 0;
+		int64 parAvailable = nzbInfo->GetParSize() - nzbInfo->GetParCurrentFailedSize();
+		int64 dataFailed = nzbInfo->GetCurrentFailedSize() - nzbInfo->GetParCurrentFailedSize();
+		if (dataFailed <= 0)
+		{
+			return false;
+		}
+		if (dataFailed > parAvailable)
+		{
+			return true;
+		}
+		int tried = nzbInfo->GetCurrentSuccessArticles() + nzbInfo->GetCurrentFailedArticles();
+		int64 dataTotal = nzbInfo->GetSize() - nzbInfo->GetParSize();
+		int64 dataTried = (nzbInfo->GetCurrentSuccessSize() - nzbInfo->GetParCurrentSuccessSize()) + dataFailed;
+		if (tried < 200 || dataTried <= 0 || dataTotal <= 0)
+		{
+			return false;
+		}
+		double projectedFailed = (double)dataFailed * (double)dataTotal / (double)dataTried;
+		double margin = withMargin ? ((double)dataTotal * (double)ParEdgeMargin / 1000.0) : 0.0;
+		return projectedFailed + margin > (double)parAvailable;
 	}
 
 	bool TryFallback(DownloadQueue* downloadQueue, FileInfo* fileInfo, ArticleInfo* articleInfo)
@@ -17236,23 +17597,29 @@ public:
 		// file wait for its first article lost the articles failing before it
 		FileInfo::EFirstContent content = FirstContent(fileInfo);
 		NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
-		if (nzbget_rs_dupe_fallback_check_try_preconditions(
-			(int)g_Options->GetDupeArticleFallback(),
-			(int)Options::dafNone,
-			g_Options->GetRawArticle() ? 1 : 0,
-			IsParFile(fileInfo) ? 1 : 0,
-			(int)content,
-			(int)FileInfo::fcPar2,
-			(int)FileInfo::fcUnknown,
-			articleInfo->GetPartNumber(),
-			fileInfo->GetFilename(),
-			fileInfo->GetDeleted() ? 1 : 0,
-			nzbInfo->GetDeleting() ? 1 : 0,
-			nzbInfo->GetParking() ? 1 : 0,
-			(int)nzbInfo->GetDeleteStatus(),
-			(int)NzbInfo::dsNone,
-			(int)nzbInfo->GetDupeMode(),
-			(int)dmForce) == 0)
+		auto hasExtension = [](const char* fn) -> bool {
+			if (!fn) return false;
+			const char* dot = strrchr(fn, '.');
+			if (!dot || dot == fn) return false;
+			size_t extLen = strlen(dot + 1);
+			if (extLen == 0 || extLen > 4) return false;
+			for (size_t i = 0; i < extLen; ++i)
+			{
+				unsigned char c = (unsigned char)dot[1 + i];
+				if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')))
+				{
+					return false;
+				}
+			}
+			return true;
+		};
+		if (content == FileInfo::fcPar2 ||
+			(content == FileInfo::fcUnknown && articleInfo->GetPartNumber() != 1 && !hasExtension(fileInfo->GetFilename())) ||
+			fileInfo->GetDeleted() ||
+			nzbInfo->GetDeleting() ||
+			nzbInfo->GetParking() ||
+			nzbInfo->GetDeleteStatus() != NzbInfo::dsNone ||
+			nzbInfo->GetDupeMode() == dmForce)
 		{
 			return false;
 		}
@@ -17295,22 +17662,15 @@ public:
 			// par2 repairs whole blocks: the blocks the failed articles spoiled may
 			// be more than its volumes hold long before the bytes are (ParDamage);
 			// borrowing then starts, and the par-damage failover waits for it
-			int liftDeferState = 0;
-			int logLifted = 0;
-			defer = nzbget_rs_dupe_fallback_eval_par_defer(
-				parDefer ? 1 : 0,
-				articleInfo->GetPartNumber(),
-				(int)nzbInfo->GetDupeParDeferState(),
-				(int)NzbInfo::dpDeferred,
-				(int)NzbInfo::dpLifted,
-				ParCannotCover(nzbInfo) ? 1 : 0,
-				damage.Certain() ? 1 : 0,
-				damage.Projected() ? 1 : 0,
-				&liftDeferState,
-				&logLifted) != 0;
-			if (liftDeferState)
+			defer = parDefer &&
+				articleInfo->GetPartNumber() != 1 &&
+				nzbInfo->GetDupeParDeferState() != NzbInfo::dpLifted &&
+				!ParCannotCover(nzbInfo) &&
+				!damage.Certain() &&
+				!damage.Projected();
+			if (parDefer && !defer && articleInfo->GetPartNumber() != 1)
 			{
-				if (logLifted)
+				if (nzbInfo->GetDupeParDeferState() == NzbInfo::dpDeferred)
 				{
 					nzbInfo->PrintMessage(Message::mkInfo,
 						"Damage of %s exceeds its par2 recovery data (or will, judged by the articles tried so far), "
@@ -17860,19 +18220,52 @@ public:
 		}
 
 		ArticleList* articles = fileInfo->GetArticles();
-		std::vector<NzbgetRsArticleGeom> geom(articles->size());
-		for (size_t i = 0; i < articles->size(); i++)
+		int64 expected = 0;
+		for (size_t index = 0; index < articles->size(); index++)
 		{
-			ArticleInfo* a = (*articles)[i].get();
-			geom[i].part_number = a->GetPartNumber();
-			geom[i].status = (int32_t)a->GetStatus();
-			geom[i].segment_offset = a->GetSegmentOffset();
-			geom[i].segment_size = a->GetSegmentSize();
-			geom[i].fallback_round = a->GetDupeFallbackRound();
+			ArticleInfo* article = (*articles)[index].get();
+			if (article->GetStatus() != ArticleInfo::aiFinished || article->GetSegmentSize() <= 0)
+			{
+				return nullptr;
+			}
+			if (article->GetSegmentOffset() != expected)
+			{
+				if (index > 0)
+				{
+					ArticleInfo* prev = (*articles)[index - 1].get();
+					bool prevBorrowed = prev->GetDupeFallbackRound() > 0;
+					bool thisBorrowed = article->GetDupeFallbackRound() > 0;
+					if (prevBorrowed != thisBorrowed)
+					{
+						return prevBorrowed ? prev : article;
+					}
+					int64 end = article->GetSegmentOffset() + (int64)article->GetSegmentSize();
+					bool placedRight = false;
+					if (index + 1 < articles->size())
+					{
+						ArticleInfo* next = (*articles)[index + 1].get();
+						placedRight = next->GetStatus() == ArticleInfo::aiFinished &&
+							next->GetSegmentSize() > 0 &&
+							next->GetSegmentOffset() == end;
+					}
+					else
+					{
+						placedRight = (end == decodedSize);
+					}
+					if (article->GetSegmentOffset() > expected && placedRight)
+					{
+						return prev;
+					}
+				}
+				return article;
+			}
+			expected = article->GetSegmentOffset() + (int64)article->GetSegmentSize();
 		}
-		ptrdiff_t idx = nzbget_rs_dupe_fallback_first_untiled(
-			geom.empty() ? nullptr : geom.data(), geom.size(), decodedSize);
-		return (idx >= 0 && (size_t)idx < articles->size()) ? (*articles)[(size_t)idx].get() : nullptr;
+		if (expected != decodedSize)
+		{
+			return articles->empty() ? nullptr : articles->back().get();
+		}
+		return nullptr;
 	}
 
 	/* True when any article of the file was substituted from a duplicate (its
@@ -19683,7 +20076,11 @@ public:
 	{
 		const int healthCheck = (int)g_Options->GetHealthCheck();
 		const char* targetDupeKey = nzbInfo->GetDupeKey();
-		const char* extCleanupDisk = g_Options->GetExtCleanupDisk();
+		if ((healthCheck != (int)Options::hcDupe && healthCheck != (int)Options::hcPark) ||
+			Util::EmptyStr(targetDupeKey))
+		{
+			return nullptr;
+		}
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
 			if (historyInfo->GetKind() != HistoryInfo::hkNzb)
@@ -19691,17 +20088,12 @@ public:
 				continue;
 			}
 			NzbInfo* item = historyInfo->GetNzbInfo();
-			if (nzbget_rs_dupecoord_is_downloaded_on_disk_candidate(
-				healthCheck,
-				targetDupeKey,
-				item == nzbInfo ? 1 : 0,
-				(int)item->GetDeleteStatus(),
-				item->IsDupeSuccess() ? 1 : 0,
-				(int)item->GetMarkStatus(),
-				item->GetDupeKey(),
-				item->GetFinalDir(),
-				item->GetDestDir(),
-				extCleanupDisk) != 0)
+			if (item != nzbInfo &&
+				item->GetDeleteStatus() == NzbInfo::dsNone &&
+				item->IsDupeSuccess() &&
+				item->GetMarkStatus() != NzbInfo::ksBad &&
+				!strcasecmp(item->GetDupeKey(), targetDupeKey) &&
+				FilesOnDisk(item))
 			{
 				return item;
 			}
@@ -19845,14 +20237,11 @@ public:
 		// find duplicates in download queue
 		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 		{
-			statuses = nzbget_rs_dupecoord_accumulate_queue_dupe_status(
-				statuses,
-				name,
-				dupeKey,
-				nzbInfo->GetName(),
-				nzbInfo->GetDupeKey(),
-				nzbInfo->GetSuccessArticles(),
-				nzbInfo->GetFailedArticles());
+			if (SameNameOrKey(name, dupeKey, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+			{
+				statuses |= (nzbInfo->GetSuccessArticles() + nzbInfo->GetFailedArticles() > 0) ?
+					(int)dsDownloading : (int)dsQueued;
+			}
 		}
 
 		// find duplicates in history
@@ -19918,7 +20307,14 @@ public:
 		{
 			return -1;
 		}
-		return nzbget_rs_dupecoord_parse_alive_permille(parameter->GetValue());
+		char* end = nullptr;
+		double percent = strtod(parameter->GetValue(), &end);
+		if (end == parameter->GetValue() || std::isnan(percent))
+		{
+			return -1;
+		}
+		double clamped = std::clamp(percent, 0.0, 100.0);
+		return (int)std::lround(clamped * 10.0);
 	}
 
 private:
@@ -19987,19 +20383,43 @@ public:
 		}
 
 		size_t wanted = std::min(total, (size_t)count);
-		indexes.resize(wanted);
-		nzbget_rs_dupe_probe_sample_indexes(total, count, indexes.data(), indexes.size());
+		indexes.reserve(wanted);
+		for (size_t i = 0; i < wanted; i++)
+		{
+			unsigned __int128 num = (unsigned __int128)(2 * i + 1) * (unsigned __int128)total;
+			unsigned __int128 den = (unsigned __int128)(2 * wanted);
+			indexes.push_back((size_t)(num / den));
+		}
 		return indexes;
 	}
 
 	static EAnswer Classify(const char* response)
 	{
-		return (EAnswer)nzbget_rs_dupe_probe_classify(response);
+		if (!response)
+		{
+			return daUnknown;
+		}
+		if (response[0] == '2')
+		{
+			return daExists;
+		}
+		if (strncmp(response, "400", 3) == 0 || strncmp(response, "499", 3) == 0)
+		{
+			return daUnknown;
+		}
+		if (strncmp(response, "41", 2) == 0 ||
+			strncmp(response, "42", 2) == 0 ||
+			strncmp(response, "43", 2) == 0 ||
+			strncmp(response, "451", 3) == 0)
+		{
+			return daMissing;
+		}
+		return daUnknown;
 	}
 
 	static bool IsDead(int existing, int definitiveServers, int activeServers)
 	{
-		return nzbget_rs_dupe_probe_is_dead(existing, definitiveServers, activeServers) != 0;
+		return existing < MinAliveSamples && definitiveServers > 0 && definitiveServers >= activeServers;
 	}
 
 	static void Start(int nzbId, std::vector<Sample> samples, int recoveredAtStart = 0)
@@ -20147,42 +20567,42 @@ protected:
 		}
 
 		int sampled = (int)m_samples.size();
-		int outcome = 0;
-		NzbgetRsBuf msgBuf = nzbget_rs_dupe_probe_eval_run_outcome(
-			verdict.Existing,
-			sampled,
-			verdict.MissingServers,
-			verdict.ActiveServers,
-			verdict.UnreachableServers,
-			verdict.ReachedServers,
-			verdict.Finished ? 1 : 0,
-			verdict.FoundOn.c_str(),
-			&outcome);
-		std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
-		nzbget_rs_free(msgBuf);
-
-		if (outcome == 1)
+		std::string unreachableSuffix = verdict.UnreachableServers > 0 ?
+			*CString::FormatStr(", %i unreachable left out", verdict.UnreachableServers) : "";
+		if (verdict.Dead())
 		{
+			std::string message = *CString::FormatStr(
+				"Dupe probe: %i of %i sampled articles exist (%i of %i servers answered definitively%s)",
+				verdict.Existing, sampled, verdict.MissingServers, verdict.ActiveServers, unreachableSuffix.c_str());
+			if (!verdict.FoundOn.empty())
+			{
+				message += ", on " + verdict.FoundOn;
+			}
+			message += ": the posting is dead";
 			Note(Message::mkInfo, "%s", message.c_str());
 			Abandon(verdict.MissingServers, verdict.ActiveServers);
 		}
-		else if (outcome == 2)
+		else if (verdict.Existing >= MinAliveSamples)
 		{
-			Note(Message::mkInfo, "%s", message.c_str());
+			Note(Message::mkInfo,
+				"Dupe probe: %i of %i sampled articles found (it stops at %i), the first on %s: not abandoning it",
+				verdict.Existing, sampled, MinAliveSamples, verdict.FoundOn.c_str());
 		}
-		else if (outcome == 3)
+		else if (verdict.Finished && verdict.ReachedServers == 0)
 		{
 			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 			NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
 			if (nzbInfo)
 			{
 				nzbInfo->SetDeadPickProbed(false);
-				nzbInfo->PrintMessage(Message::mkDetail, "%s", message.c_str());
+				nzbInfo->PrintMessage(Message::mkDetail, "Dupe probe: no server could be asked, will probe again");
 			}
 		}
-		else if (outcome == 4)
+		else if (verdict.Finished)
 		{
-			Note(Message::mkInfo, "%s", message.c_str());
+			Note(Message::mkInfo,
+				"Dupe probe: no verdict (%i of %i sampled articles exist, %i of %i servers answered definitively%s)",
+				verdict.Existing, sampled, verdict.MissingServers, verdict.ActiveServers, unreachableSuffix.c_str());
 		}
 
 		Unregister();
@@ -20373,27 +20793,33 @@ private:
 	{
 		Verdict verdict;
 		Servers* servers = g_ServerPool->GetServers();
-		std::vector<uint8_t> srvActive;
-		std::vector<int32_t> srvGroups;
-		std::vector<int32_t> srvLevels;
-		std::vector<int32_t> srvIds;
-		srvActive.reserve(servers->size());
-		srvGroups.reserve(servers->size());
-		srvLevels.reserve(servers->size());
-		srvIds.reserve(servers->size());
+		std::vector<int> seenGroups;
+		std::vector<std::pair<int, int>> levelIds;
 		for (NewsServer* server : servers)
 		{
-			srvActive.push_back(server->GetActive() ? 1 : 0);
-			srvGroups.push_back(server->GetGroup());
-			srvLevels.push_back(server->GetNormLevel());
-			srvIds.push_back(server->GetId());
+			if (!server->GetActive())
+			{
+				continue;
+			}
+			int g = server->GetGroup();
+			if (g > 0)
+			{
+				if (std::find(seenGroups.begin(), seenGroups.end(), g) != seenGroups.end())
+				{
+					continue;
+				}
+				seenGroups.push_back(g);
+			}
+			levelIds.emplace_back(server->GetNormLevel(), server->GetId());
 		}
-		std::vector<int32_t> order(servers->size());
-		size_t orderLen = nzbget_rs_dupe_probe_select_server_order(
-			srvActive.data(), srvGroups.data(), srvLevels.data(), srvIds.data(),
-			servers->size(), order.data(), order.size());
-		order.resize(orderLen);
-		verdict.ActiveServers = (int)orderLen;
+		std::sort(levelIds.begin(), levelIds.end());
+		std::vector<int32_t> order;
+		order.reserve(levelIds.size());
+		for (const auto& entry : levelIds)
+		{
+			order.push_back(entry.second);
+		}
+		verdict.ActiveServers = (int)order.size();
 
 		std::set<int> probed;
 		time_t start = Util::CurrentTime();
@@ -20476,23 +20902,23 @@ private:
 				}
 			}
 
-			int outcome = 0;
-			NzbgetRsBuf msgBuf = nzbget_rs_dupe_probe_eval_recheck_outcome(
-				verdict.Existing, sampled, verdict.ReachedServers, duplicateQueuedName, &outcome);
-			std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
-			nzbget_rs_free(msgBuf);
-
-			nzbInfo->PrintMessage(Message::mkInfo, "%s", message.c_str());
-			if (outcome == 1)
+			if (verdict.ReachedServers == 0)
 			{
+				nzbInfo->PrintMessage(Message::mkInfo, "Failed articles not rechecked: no server connection was free");
 				nzbInfo->GetParameters()->SetParameter("*DupeRecheck", nullptr);
 				return;
 			}
-			if (outcome == 2)
+			bool retry = (int64)verdict.Existing * 2 >= (int64)sampled;
+			if (retry && !Util::EmptyStr(duplicateQueuedName))
 			{
+				nzbInfo->PrintMessage(Message::mkInfo,
+					"Not retrying failed articles: duplicate %s downloads in its place", duplicateQueuedName);
 				return;
 			}
-			if (outcome == 3)
+			nzbInfo->PrintMessage(Message::mkInfo,
+				"%i of %i failed articles exist on the servers%s",
+				verdict.Existing, sampled, retry ? ": retrying failed articles" : "; not retrying");
+			if (retry)
 			{
 				IdList ids = { historyInfo->GetId() };
 				downloadQueue->EditList(&ids, nullptr, DownloadQueue::mmId, DownloadQueue::eaHistoryRetryFailed, nullptr);
@@ -20643,13 +21069,14 @@ public:
 
 	void RecheckFailedArticles(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	{
-		if (nzbget_rs_history_coord_should_recheck_failed_articles(
-			g_Options->GetDupeArticleFallback() == Options::dafNone ? 1 : 0,
-			g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0,
-			nzbInfo->GetKind() == NzbInfo::nkNzb ? 1 : 0,
-			nzbInfo->GetFailedArticles(),
-			nzbInfo->MakeTextStatus(true),
-			nzbInfo->GetParameters()->Find("*DupeRecheck") != nullptr ? 1 : 0) == 0)
+		CString textStatus = nzbInfo->MakeTextStatus(true);
+		if ((g_Options->GetDupeArticleFallback() == Options::dafNone &&
+			 g_Options->GetHealthCheck() != Options::hcDupe) ||
+			nzbInfo->GetKind() != NzbInfo::nkNzb ||
+			nzbInfo->GetFailedArticles() <= 0 ||
+			strncmp(*textStatus, "FAILURE", 7) != 0 ||
+			strcmp(*textStatus, "FAILURE/BAD") == 0 ||
+			nzbInfo->GetParameters()->Find("*DupeRecheck") != nullptr)
 		{
 			return;
 		}
@@ -20968,79 +21395,47 @@ private:
 	{
 		NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
 		ArticleList* articles = fileInfo->GetArticles();
-		std::vector<int> artStatuses;
-		std::vector<int> artSizes;
-		std::vector<uint8_t> resetFlags(articles->size(), 0);
-		artStatuses.reserve(articles->size());
-		artSizes.reserve(articles->size());
-		for (ArticleInfo* pa : articles)
-		{
-			artStatuses.push_back((int)pa->GetStatus());
-			artSizes.push_back(pa->GetSize());
-		}
 
-		int64 fileFailedSize = fileInfo->GetFailedSize();
-		int fileFailedArticles = fileInfo->GetFailedArticles();
-		int64 fileRemainingSize = fileInfo->GetRemainingSize();
-		int fileCompletedArticles = fileInfo->GetCompletedArticles();
+		int64 fileFailedSize = allFailed ? (fileInfo->GetSize() - fileInfo->GetMissedSize()) : fileInfo->GetFailedSize();
+		int fileFailedArticles = allFailed ? (fileInfo->GetTotalArticles() - fileInfo->GetMissedArticles()) : fileInfo->GetFailedArticles();
+		int64 fileRemainingSize = allFailed ? 0 : fileInfo->GetRemainingSize();
+		int fileCompletedArticles = allFailed ? fileFailedArticles : fileInfo->GetCompletedArticles();
 		int64 fileSuccessSize = fileInfo->GetSuccessSize();
 		int fileSuccessArticles = fileInfo->GetSuccessArticles();
-		int64 nzbFailedSize = nzbInfo->GetFailedSize();
-		int64 nzbSuccessSize = nzbInfo->GetSuccessSize();
-		int nzbFailedArticles = nzbInfo->GetFailedArticles();
-		int nzbSuccessArticles = nzbInfo->GetSuccessArticles();
-		int64 nzbParFailedSize = nzbInfo->GetParFailedSize();
-		int64 nzbParSuccessSize = nzbInfo->GetParSuccessSize();
-
-		nzbget_rs_history_coord_reset_articles_batch(
-			allFailed ? 1 : 0,
-			resetFailed ? 1 : 0,
-			fileInfo->GetParFile() ? 1 : 0,
-			(int)fileInfo->GetPartialState(),
-			fileInfo->GetSize(),
-			fileInfo->GetMissedSize(),
-			fileInfo->GetTotalArticles(),
-			fileInfo->GetMissedArticles(),
-			&fileFailedSize,
-			&fileFailedArticles,
-			&fileRemainingSize,
-			&fileCompletedArticles,
-			&fileSuccessSize,
-			&fileSuccessArticles,
-			&nzbFailedSize,
-			&nzbSuccessSize,
-			&nzbFailedArticles,
-			&nzbSuccessArticles,
-			&nzbParFailedSize,
-			&nzbParSuccessSize,
-			artStatuses.data(),
-			artSizes.data(),
-			resetFlags.data(),
-			articles->size());
 
 		nzbInfo->GetServerStats()->ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
-		nzbInfo->SetFailedSize(nzbFailedSize);
-		nzbInfo->SetSuccessSize(nzbSuccessSize);
-		nzbInfo->SetFailedArticles(nzbFailedArticles);
-		nzbInfo->SetSuccessArticles(nzbSuccessArticles);
+		nzbInfo->SetFailedSize(nzbInfo->GetFailedSize() - fileFailedSize);
+		nzbInfo->SetSuccessSize(nzbInfo->GetSuccessSize() - fileSuccessSize);
+		nzbInfo->SetFailedArticles(nzbInfo->GetFailedArticles() - fileFailedArticles);
+		nzbInfo->SetSuccessArticles(nzbInfo->GetSuccessArticles() - fileSuccessArticles);
 		if (fileInfo->GetParFile())
 		{
-			nzbInfo->SetParFailedSize(nzbParFailedSize);
-			nzbInfo->SetParSuccessSize(nzbParSuccessSize);
+			nzbInfo->SetParFailedSize(nzbInfo->GetParFailedSize() - fileFailedSize);
+			nzbInfo->SetParSuccessSize(nzbInfo->GetParSuccessSize() - fileSuccessSize);
 		}
-		fileInfo->SetFailedSize(fileFailedSize);
-		fileInfo->SetFailedArticles(fileFailedArticles);
-		fileInfo->SetRemainingSize(fileRemainingSize);
-		fileInfo->SetCompletedArticles(fileCompletedArticles);
-		fileInfo->SetSuccessSize(fileSuccessSize);
-		fileInfo->SetSuccessArticles(fileSuccessArticles);
 
-		for (size_t i = 0; i < articles->size(); ++i)
+		for (ArticleInfo* pa : articles)
 		{
-			if (resetFlags[i])
+			ArticleInfo::EStatus st = pa->GetStatus();
+			bool shouldReset =
+				(st == ArticleInfo::aiFailed && (resetFailed || fileInfo->GetPartialState() == FileInfo::psNone)) ||
+				(st == ArticleInfo::aiUndefined && resetFailed && allFailed) ||
+				(st == ArticleInfo::aiFinished && fileInfo->GetPartialState() == FileInfo::psNone);
+			if (shouldReset)
 			{
-				ArticleInfo* pa = (*articles)[i].get();
-				pa->SetStatus((ArticleInfo::EStatus)artStatuses[i]);
+				fileCompletedArticles--;
+				fileRemainingSize += pa->GetSize();
+				if (st == ArticleInfo::aiFailed || st == ArticleInfo::aiUndefined)
+				{
+					fileFailedArticles--;
+					fileFailedSize -= pa->GetSize();
+				}
+				else if (st == ArticleInfo::aiFinished)
+				{
+					fileSuccessArticles--;
+					fileSuccessSize -= pa->GetSize();
+				}
+				pa->SetStatus(ArticleInfo::aiUndefined);
 				pa->SetCrc(0);
 				pa->SetSegmentOffset(0);
 				pa->SetSegmentSize(0);
@@ -21048,6 +21443,13 @@ private:
 				pa->SetDupeExpectedEnd(-1);
 			}
 		}
+
+		fileInfo->SetFailedSize(fileFailedSize);
+		fileInfo->SetFailedArticles(fileFailedArticles);
+		fileInfo->SetRemainingSize(fileRemainingSize);
+		fileInfo->SetCompletedArticles(fileCompletedArticles);
+		fileInfo->SetSuccessSize(fileSuccessSize);
+		fileInfo->SetSuccessArticles(fileSuccessArticles);
 	}
 
 	bool HistorySetParameter(HistoryInfo* historyInfo, const char* text)

@@ -115,19 +115,6 @@ pub unsafe extern "C" fn nzbget_rs_main(
         return 1;
     }
 
-    #[cfg(windows)]
-    {
-        let hooks = get_hooks().or_else(resolve_hooks);
-        if let Some(hooks) = hooks {
-            if let Some(win_svc) = hooks.win_service_check {
-                let win_svc_rc = win_svc(argc, argv);
-                if win_svc_rc != 0 {
-                    return win_svc_rc;
-                }
-            }
-        }
-    }
-
     // 3. Lifecycle coordinator loop (4-Phase Lifecycle)
     LifecycleManager::global().run_daemon_loop(argc, argv, argp)
 }

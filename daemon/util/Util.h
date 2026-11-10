@@ -400,7 +400,6 @@ private:
 class Guard
 {
 public:
-	Guard() : m_mutex(nullptr) {}
 	Guard(Mutex& mutex) : m_mutex(&mutex) { if (m_mutex) m_mutex->Lock(); }
 	Guard(Mutex* mutex) : m_mutex(mutex) { if (m_mutex) m_mutex->Lock(); }
 	Guard(std::unique_ptr<Mutex>& mutex) : m_mutex(mutex.get()) { if (m_mutex) m_mutex->Lock(); }
@@ -480,12 +479,9 @@ public:
 	bool Kill()
 	{
 		std::lock_guard<std::mutex> guard(m_threadMutex);
+		m_stopped = true;
 
-#ifdef HAVE_PTHREAD_CANCEL
 		bool terminated = pthread_cancel(m_threadObj) == 0;
-#else
-		bool terminated = false;
-#endif
 
 		if (terminated)
 		{
@@ -498,6 +494,7 @@ public:
 	bool IsRunning() const { return m_running; }
 	void SetAutoDestroy(bool autoDestroy) { m_autoDestroy = autoDestroy; }
 	static int GetThreadCount() { return m_threadCount; }
+	static bool IsCurrentThreadStopped() { return m_currentThread && m_currentThread->IsStopped(); }
 
 protected:
 	virtual void Run() {} // Virtual function - override in derivatives
@@ -505,6 +502,7 @@ protected:
 private:
 	inline static std::mutex m_threadMutex;
 	inline static std::atomic<int> m_threadCount{1};
+	inline static thread_local Thread* m_currentThread = nullptr;
 	std::thread::native_handle_type m_threadObj = 0;
 	std::atomic<bool> m_running{false};
 	std::atomic<bool> m_stopped{false};
@@ -513,6 +511,11 @@ private:
 	void thread_handler()
 	{
 		++m_threadCount;
+		struct CurrentGuard
+		{
+			CurrentGuard(Thread* t) { m_currentThread = t; }
+			~CurrentGuard() { m_currentThread = nullptr; }
+		} currentGuard(this);
 
 		Run();
 
@@ -683,11 +686,6 @@ public:
 				data[curLen] = '\0';
 			}
 		}
-	}
-	void Bind(char* str)
-	{
-		free(m_data);
-		m_data = str;
 	}
 	void Set(const char* str, int len = 0)
 	{
@@ -894,11 +892,6 @@ public:
 		return nzbget_rs_match_file_ext(filename, extensionList, listSeparator) != 0;
 	}
 
-	static uint32 HashBJ96(const char* buffer, size_t bufSize, uint32 initValue)
-	{
-		return nzbget_rs_hash_bj96(buffer, static_cast<int>(bufSize), initValue);
-	}
-
 	static std::optional<std::string>
 	FindExecutorProgram(const std::string& filename, const std::string& customPath)
 	{
@@ -971,11 +964,6 @@ public:
 	{
 		nzbget_rs_reduce_str(str, from, to);
 		return str;
-	}
-
-	static bool EndsWith(const char* str, const char* suffix, bool caseSensitive)
-	{
-		return nzbget_rs_util_ends_with(str, suffix, caseSensitive ? 1 : 0) != 0;
 	}
 
 	static void SetStandByMode([[maybe_unused]] bool standBy) {}
@@ -1057,88 +1045,6 @@ public:
 	}
 
 	static void JsonDecode(char* raw) { nzbget_rs_json_decode(raw); }
-
-	static CString ParseContentDispositionFilename(const char* contentDisposition)
-	{
-		NzbgetRsBuf buf = nzbget_rs_content_disposition_filename(contentDisposition);
-		if (!buf.data)
-		{
-			return CString();
-		}
-		if (buf.len >= static_cast<size_t>(std::numeric_limits<int>::max()))
-		{
-			nzbget_rs_free(buf);
-			std::abort();
-		}
-		CString result(buf.data, static_cast<int>(buf.len));
-		nzbget_rs_free(buf);
-		return result;
-	}
-
-	static CString UrlEncode(const char* raw)
-	{
-		NzbgetRsBuf buf = nzbget_rs_url_encode(raw);
-		if (buf.len >= static_cast<size_t>(std::numeric_limits<int>::max()))
-		{
-			nzbget_rs_free(buf);
-			std::abort();
-		}
-		CString result(buf.data, static_cast<int>(buf.len));
-		nzbget_rs_free(buf);
-		return result;
-	}
-};
-
-class URL
-{
-public:
-	URL(const char* address) : m_address(address)
-	{
-		if (address)
-		{
-			ParseUrl();
-		}
-	}
-	bool IsValid() { return m_valid; }
-	const char* GetAddress() { return m_address; }
-	const char* GetProtocol() { return m_protocol; }
-	const char* GetHost() { return m_host; }
-	const char* GetResource() { return m_resource; }
-	int GetPort() { return m_port; }
-
-private:
-	CString m_address;
-	CString m_protocol;
-	CString m_user;
-	CString m_password;
-	CString m_host;
-	CString m_resource;
-	int m_port = 0;
-	bool m_valid = false;
-
-	void ParseUrl()
-	{
-		NzbgetRsUrlParts r;
-		nzbget_rs_parse_url(m_address, &r);
-		if (!r.valid)
-		{
-			return;
-		}
-		CString* fields[] = {&m_protocol, &m_user, &m_password, &m_host, &m_resource};
-		for (int i = 0; i < 5; i++)
-		{
-			if (r.parts[i][0] >= 0)
-			{
-				fields[i]->Set(r.parts[i][1] > 0 ? m_address + r.parts[i][0] : "", static_cast<int>(r.parts[i][1]));
-			}
-		}
-		if (r.parts[4][0] < 0)
-		{
-			m_resource = "/";
-		}
-		m_port = r.port;
-		m_valid = true;
-	}
 };
 
 class RegEx
@@ -1176,52 +1082,6 @@ public:
 			static_cast<uint8_t*>(outputBuffer),
 			outputBufferLength);
 	}
-};
-
-class GUnzipStream
-{
-public:
-	enum EStatus
-	{
-		zlError,
-		zlFinished,
-		zlOK
-	};
-
-	GUnzipStream(int BufferSize) : m_rsStream(nzbget_rs_gunzip_new(BufferSize)) {}
-	~GUnzipStream()
-	{
-		nzbget_rs_gunzip_free(static_cast<RsGUnzipStream*>(m_rsStream));
-		m_rsStream = nullptr;
-	}
-
-	void Write(const void *inputBuffer, int inputBufferLength)
-	{
-		nzbget_rs_gunzip_write(
-			static_cast<RsGUnzipStream*>(m_rsStream),
-			static_cast<const uint8_t*>(inputBuffer),
-			inputBufferLength);
-	}
-
-	EStatus Read(const void **outputBuffer, int *outputBufferLength)
-	{
-		int status = nzbget_rs_gunzip_read(
-			static_cast<RsGUnzipStream*>(m_rsStream),
-			outputBuffer,
-			outputBufferLength);
-		if (status == 1)
-		{
-			return zlFinished;
-		}
-		if (status == 2)
-		{
-			return zlOK;
-		}
-		return zlError;
-	}
-
-private:
-	void* m_rsStream = nullptr;
 };
 #endif
 
@@ -1264,11 +1124,6 @@ public:
 	void Reset() { m_state = 0; }
 	void Append(uchar* block, uint32 length) { m_state = nzbget_rs_crc32_append(block, length, m_state); }
 	uint32 Finish() { return m_state; }
-
-	static uint32 Combine(uint32 crc1, uint32 crc2, uint32 len2)
-	{
-		return nzbget_rs_crc32_combine(crc1, crc2, len2);
-	}
 
 private:
 	uint32 m_state = 0;
@@ -1397,26 +1252,9 @@ public:
 		return nzbget_rs_fs_op_with_err(6, filename, buffer, bufLen, nullptr) != 0;
 	}
 
-	static bool AllocateFile(const char* filename, int64 size, [[maybe_unused]] bool sparse, CString& errmsg)
-	{
-		NzbgetRsBuf err{};
-		bool ok = nzbget_rs_fs_op_with_err(0, filename, nullptr, size, &err) != 0;
-		errmsg.Set(err.data, (int)err.len);
-		nzbget_rs_free(err);
-		return ok;
-	}
-
 	static CString MakeValidFilename(const char* filename, bool allowSlashes = false)
 	{
 		NzbgetRsBuf buf = nzbget_rs_path_text(0, filename, strlen(filename), allowSlashes);
-		CString result(buf.data, static_cast<int>(buf.len));
-		nzbget_rs_free(buf);
-		return result;
-	}
-
-	static CString MakeUniqueFilename(const char* destDir, const char* basename)
-	{
-		NzbgetRsBuf buf = nzbget_rs_make_unique_filename(destDir, basename);
 		CString result(buf.data, static_cast<int>(buf.len));
 		nzbget_rs_free(buf);
 		return result;
@@ -1438,11 +1276,6 @@ public:
 			mkdir(dirFilename, S_IRWXU | S_IRWXG | S_IRWXO);
 		}
 		return DirectoryExists(dirFilename);
-	}
-
-	static bool DeleteDirectory(const char* dirFilename)
-	{
-		return nzbget_rs_delete_directory(dirFilename, PATH_SEPARATOR) == 1;
 	}
 
 	static bool DeleteDirectoryWithContent(const char* dirFilename, CString& errmsg)
@@ -1669,11 +1502,7 @@ void info(const char* msg, ...) PRINTF_SYNTAX(1);
 void detail(const char* msg, ...) PRINTF_SYNTAX(1);
 
 #ifdef DEBUG
-#ifdef HAVE_VARIADIC_MACROS
 void debug(const char* filename, const char* funcname, int lineNr, const char* msg, ...) PRINTF_SYNTAX(4);
-#else
-void debug(const char* msg, ...) PRINTF_SYNTAX(1);
-#endif
 #endif
 
 class Message
@@ -3634,11 +3463,7 @@ private:
 	friend void info(const char* msg, ...);
 	friend void detail(const char* msg, ...);
 #ifdef DEBUG
-#ifdef HAVE_VARIADIC_MACROS
 	friend void debug(const char* filename, const char* funcname, int lineNr, const char* msg, ...);
-#else
-	friend void debug(const char* msg, ...);
-#endif
 #endif
 };
 
@@ -3668,11 +3493,7 @@ inline void Log::LogDebugInfo()
 }
 
 #ifdef DEBUG
-#ifdef HAVE_VARIADIC_MACROS
 inline void debug(const char* filename, const char* funcname, int lineNr, const char* msg, ...)
-#else
-inline void debug(const char* msg, ...)
-#endif
 {
 	if (!g_Log)
 	{
@@ -3688,7 +3509,6 @@ inline void debug(const char* msg, ...)
 	va_end(ap);
 
 	BString<1024> tmp2;
-#ifdef HAVE_VARIADIC_MACROS
 	if (funcname)
 	{
 		tmp2.Format("%s (%s:%i:%s)", tmp1, FileSystem::BaseFileName(filename), lineNr, funcname);
@@ -3697,9 +3517,6 @@ inline void debug(const char* msg, ...)
 	{
 		tmp2.Format("%s (%s:%i)", tmp1, FileSystem::BaseFileName(filename), lineNr);
 	}
-#else
-	tmp2.Set(tmp1);
-#endif
 
 	Guard guard(g_Log->m_logMutex);
 
@@ -3753,9 +3570,7 @@ inline void detail(const char* msg, ...)
 }
 
 #ifdef DEBUG
-#ifdef HAVE_VARIADIC_MACROS
 #define debug(...) debug(__FILE__, FUNCTION_MACRO_NAME, __LINE__, __VA_ARGS__)
-#endif
 #else
 #define debug(...) do { } while(0)
 #endif
@@ -4508,7 +4323,7 @@ public:
 		return m_retCode;
 	}
 
-	void SetSuppressErrors(bool suppressErrors) { m_suppressErrors = suppressErrors; }
+	void BindSuppressErrors(const std::atomic<bool>* suppressErrors) { m_suppressErrors = suppressErrors; }
 	const char* GetNegotiatedCipher() const { return m_session ? SSL_get_cipher_name(m_session.get()) : ""; }
 	int GetNegotiatedVersion() const { return m_session ? SSL_version(m_session.get()) : 0; }
 	static bool HasCertificateStore() { return static_cast<bool>(m_X509Store); }
@@ -4603,7 +4418,7 @@ private:
 	std::string m_cipher;
 
 	bool m_isClient;
-	bool m_suppressErrors = false;
+	const std::atomic<bool>* m_suppressErrors = nullptr;
 	bool m_connected = false;
 	int m_probeFailure = -1;
 
@@ -4632,7 +4447,7 @@ private:
 			ERR_error_string_n(errcode, errstr, sizeof(errstr));
 			errstr[1024 - 1] = '\0';
 
-			if (suppressable && m_suppressErrors)
+			if (suppressable && m_suppressErrors && m_suppressErrors->load())
 			{
 				debug("%s: %s", errMsg, errstr);
 			}
@@ -4660,7 +4475,6 @@ private:
 			return false;
 		}
 
-#ifdef HAVE_X509_CHECK_HOST
 		// hostname verification
 		if (m_certVerifLevel > (int)Options::ECertVerifLevel::cvMinimal && !m_host.empty() &&
 			!X509_check_host(cert.get(), m_host.c_str(), m_host.size(), 0, nullptr))
@@ -4687,7 +4501,6 @@ private:
 				m_host.c_str(), certHost ? reinterpret_cast<const char*>(certHost) : "(null)"));
 			return false;
 		}
-#endif
 
 		return true;
 	}
@@ -4897,65 +4710,10 @@ extern System::SystemInfo* g_SystemInfo;
 #endif
 
 
-// sockets aren't inherited by the scripts nzbget starts: a script that outlived
-// the program kept the control port listening, and copies of client sockets kept
-// connections from closing
-#ifdef SOCK_CLOEXEC
-#define SOCKET_CLOEXEC SOCK_CLOEXEC
-#else
-#define SOCKET_CLOEXEC 0
-#endif
-
-// a socket is close-on-exec, so that the scripts nzbget starts don't inherit
-// its connections and listeners. socket() takes the flag where SOCK_CLOEXEC
-// exists, accept4() on Linux; elsewhere (macOS has neither) it is set afterwards
-static inline void SetCloseOnExec(SOCKET socket)
-{
-	if (socket != INVALID_SOCKET)
-	{
-		fcntl(socket, F_SETFD, fcntl(socket, F_GETFD, 0) | FD_CLOEXEC);
-	}
-}
-
-#include <poll.h>
-
 static const int CONNECTION_READBUFFER_SIZE = 1024;
 // past the data read into a buffer: a decoder writing into it (uuencoded lines) may
 // write up to one line's worth more than it was given
 static const int DECODE_SLACK = 128;
-
-inline void closesocket_gracefully(SOCKET socket)
-{
-	char buf[1024];
-	struct linger linger;
-
-	// Set linger option to avoid socket hanging out after close. This prevent
-	// ephemeral port exhaust problem under high QPS.
-	linger.l_onoff = 1;
-	linger.l_linger = 1;
-	setsockopt(socket, SOL_SOCKET, SO_LINGER, (char *) &linger, sizeof(linger));
-
-	// Send FIN to the client
-	shutdown(socket, SHUT_WR);
-
-	// Set non-blocking mode
-	int flags;
-	flags = fcntl(socket, F_GETFL, 0);
-	fcntl(socket, F_SETFL, flags | O_NONBLOCK);
-
-	// Read and discard pending incoming data. If we do not do that and close the
-	// socket, the data in the send buffer may be discarded. This
-	// behaviour is seen on Windows, when client keeps sending data
-	// when server decides to close the connection; then when client
-	// does recv() it gets no data back.
-	int n;
-	do {
-		n = recv(socket, buf, sizeof(buf), 0);
-	} while (n > 0);
-
-	// Now we know that our FIN is ACK-ed, safe to close
-	closesocket(socket);
-}
 
 class Connection
 {
@@ -4976,42 +4734,38 @@ public:
 		ipV6 = 6
 	};
 
-	static void Init()
+	struct CancelRegistry
 	{
-		debug("Initializing global connection data");
-	}
+		Mutex mutex;
+		std::vector<Connection*> conns;
+		bool stopped = false;
+	};
+	inline static thread_local std::shared_ptr<CancelRegistry> t_cancelRegistry;
 
-	static void Final()
-	{
-	}
+	static void Init() { debug("Initializing global connection data"); }
+	static void Final() {}
 
-	Connection(const char* host, int port, bool tls) :
+	Connection(const char* host, int port, bool tls, bool registerCancel = true) :
 		m_host(host ? host : ""), m_port(port), m_tls(tls)
 	{
 		debug("Creating Connection");
-
 		m_readBuf.Reserve(CONNECTION_READBUFFER_SIZE + 1 + DECODE_SLACK);
 #ifndef DISABLE_TLS
 		m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
 #endif
+		if (registerCancel)
+		{
+			AttachCancelRegistry();
+		}
 	}
 
-	Connection(SOCKET socket, bool tls)
+	Connection(SOCKET socket, bool tls) :
+		m_port(0), m_tls(tls), m_socket(socket), m_status(csConnected)
 	{
 		debug("Creating Connection");
-
-		m_port = 0;
-		m_tls = tls;
-		m_status = csConnected;
-		m_socket = socket;
 		m_host = GetRemoteAddr();
-		m_bufAvail = 0;
-		m_timeout = 60;
-		m_suppressErrors = true;
 		m_readBuf.Reserve(CONNECTION_READBUFFER_SIZE + 1 + DECODE_SLACK);
 #ifndef DISABLE_TLS
-		m_tlsSocket = nullptr;
-		m_tlsError = false;
 		m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
 #endif
 	}
@@ -5019,438 +4773,122 @@ public:
 	virtual ~Connection()
 	{
 		debug("Destroying Connection");
-
+		if (m_cancelRegistry)
+		{
+			Guard guard(m_cancelRegistry->mutex);
+			auto& v = m_cancelRegistry->conns;
+			v.erase(std::remove(v.begin(), v.end(), this), v.end());
+		}
 		Connection::Disconnect();
 	}
 
 	void SetSuppressErrors(bool suppressErrors)
 	{
-		m_suppressErrors = suppressErrors;
-#ifndef DISABLE_TLS
-		if (m_tlsSocket)
-		{
-			m_tlsSocket->SetSuppressErrors(suppressErrors);
-		}
-#endif
+		m_suppressErrors.store(suppressErrors);
 	}
 
 	virtual bool Connect()
 	{
 		debug("Connecting");
-
 		if (m_status == csConnected)
 		{
 			return true;
 		}
-
-		bool res = DoConnect();
-
-		if (res)
+		std::vector<const char*> resolved;
+		resolved.reserve(m_resolvedAddresses.size());
+		for (const auto& s : m_resolvedAddresses)
+		{
+			resolved.push_back(s.c_str());
+		}
+		NzbgetRsConnEnv env = MakeConnEnv();
+		env.resolved_addrs = resolved.empty() ? nullptr : resolved.data();
+		env.resolved_count = resolved.size();
+		bool res = nzbget_rs_conn_op(1, &env, nullptr, 0, nullptr, nullptr, nullptr, 0, nullptr) != 0;
+		if (m_status == csCancelled || Thread::IsCurrentThreadStopped())
+		{
+			res = false;
+		}
+#ifndef DISABLE_TLS
+		if (res && m_tls && !StartTls(true, "", ""))
+		{
+			res = false;
+		}
+#endif
+		if (res && m_status != csCancelled && !Thread::IsCurrentThreadStopped())
 		{
 			m_status = csConnected;
 		}
 		else
 		{
+			res = false;
 			DoDisconnect();
 		}
-
 		return res;
 	}
 
 	virtual bool Disconnect()
 	{
 		debug("Disconnecting");
-
-		if (m_status == csDisconnected)
+		if (m_status == csDisconnected && m_socket == INVALID_SOCKET)
 		{
 			return true;
 		}
-
 		DoDisconnect();
-
-		m_status = csDisconnected;
-		m_socket = INVALID_SOCKET;
 		m_bufAvail = 0;
-
+		m_bufOffset = 0;
 		return true;
 	}
 
 	bool Bind()
 	{
 		debug("Binding");
-
-		if (m_status == csListening)
-		{
-			return true;
-		}
-
-		int errcode = 0;
-
-		if (!m_host.empty() && m_host.front() == '/')
-		{
-			struct sockaddr_un addr;
-			addr.sun_family = AF_UNIX;
-			if (m_host.size() >= sizeof(addr.sun_path))
-			{
-				ReportError("Binding socket failed for %s: name too long\n", m_host.c_str(), false);
-				return false;
-			}
-			strcpy(addr.sun_path, m_host.c_str());
-
-			m_socket = socket(PF_UNIX, SOCK_STREAM | SOCKET_CLOEXEC, 0);
-#ifndef SOCK_CLOEXEC
-			SetCloseOnExec(m_socket);
-#endif
-			if (m_socket == INVALID_SOCKET)
-			{
-				ReportError("Socket creation failed for %s", m_host.c_str(), true);
-				return false;
-			}
-
-			unlink(m_host.c_str());
-
-			if (bind(m_socket, (struct sockaddr *)&addr, sizeof(addr)) == -1)
-			{
-				// Connection failed
-				closesocket(m_socket);
-				m_socket = INVALID_SOCKET;
-			}
-		}
-		else
-		{
-#ifdef HAVE_GETADDRINFO
-			struct addrinfo addr_hints, *addr_list, *addr;
-
-			memset(&addr_hints, 0, sizeof(addr_hints));
-			addr_hints.ai_family = m_ipVersion == ipV4 ? AF_INET : m_ipVersion == ipV6 ? AF_INET6 : AF_UNSPEC;
-			addr_hints.ai_socktype = SOCK_STREAM;
-			addr_hints.ai_flags = AI_PASSIVE;    // For wildcard IP address
-
-			BString<100> portStr("%d", m_port);
-
-			int res = getaddrinfo(m_host.c_str(), portStr, &addr_hints, &addr_list);
-			if (res != 0)
-			{
-				int gaiErr = res != EAI_SYSTEM ? res : 0;
-				ReportError("Could not resolve hostname %s", m_host.c_str(), true,
-					gaiErr,
-					gaiErr != 0 ? gai_strerror(res) : nullptr);
-				return false;
-			}
-
-			m_socket = INVALID_SOCKET;
-			for (addr = addr_list; addr != nullptr; addr = addr->ai_next)
-			{
-				m_socket = socket(addr->ai_family, addr->ai_socktype | SOCKET_CLOEXEC, addr->ai_protocol);
-#ifndef SOCK_CLOEXEC
-				SetCloseOnExec(m_socket);
-#endif
-				if (m_socket != INVALID_SOCKET)
-				{
-					int opt = 1;
-					setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
-					res = bind(m_socket, addr->ai_addr, addr->ai_addrlen);
-					if (res != -1)
-					{
-						// Connection established
-						break;
-					}
-					// Connection failed
-					errcode = GetLastNetworkError();
-					closesocket(m_socket);
-					m_socket = INVALID_SOCKET;
-				}
-			}
-
-			freeaddrinfo(addr_list);
-
-#else
-
-			struct sockaddr_in	sSocketAddress;
-			memset(&sSocketAddress, 0, sizeof(sSocketAddress));
-			sSocketAddress.sin_family = AF_INET;
-			if (m_host.empty())
-			{
-				sSocketAddress.sin_addr.s_addr = htonl(INADDR_ANY);
-			}
-			else
-			{
-				sSocketAddress.sin_addr.s_addr = ResolveHostAddr(m_host.c_str());
-				if (sSocketAddress.sin_addr.s_addr == INADDR_NONE)
-				{
-					return false;
-				}
-			}
-			sSocketAddress.sin_port = htons(m_port);
-
-			m_socket = socket(PF_INET, SOCK_STREAM | SOCKET_CLOEXEC, 0);
-#ifndef SOCK_CLOEXEC
-			SetCloseOnExec(m_socket);
-#endif
-			if (m_socket == INVALID_SOCKET)
-			{
-				ReportError("Socket creation failed for %s", m_host.c_str(), true);
-				return false;
-			}
-
-			int opt = 1;
-			setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
-
-			int res = bind(m_socket, (struct sockaddr *) &sSocketAddress, sizeof(sSocketAddress));
-			if (res == -1)
-			{
-				// Connection failed
-				errcode = GetLastNetworkError();
-				closesocket(m_socket);
-				m_socket = INVALID_SOCKET;
-			}
-#endif
-		}
-
-		if (m_socket == INVALID_SOCKET)
-		{
-			ReportError("Binding socket failed for %s", m_host.c_str(), true, errcode);
-			return false;
-		}
-
-		if (listen(m_socket, 100) < 0)
-		{
-			ReportError("Listen on socket failed for %s", m_host.c_str(), true);
-			closesocket(m_socket);
-			m_socket = INVALID_SOCKET;
-			return false;
-		}
-
-		m_status = csListening;
-
-		return true;
+		NzbgetRsConnEnv env = MakeConnEnv();
+		return nzbget_rs_conn_op(0, &env, nullptr, 0, nullptr, nullptr, nullptr, 0, nullptr) != 0;
 	}
 
 	int WriteLine(const char* buffer)
 	{
-		//debug("Connection::WriteLine");
-
-		if (m_status != csConnected)
-		{
-			return -1;
-		}
-
-		int res = send(m_socket, buffer, strlen(buffer), 0);
-		if (res <= 0)
-		{
-			m_status = csBroken;
-		}
-
-		return res;
+		NzbgetRsConnEnv env = MakeConnEnv();
+		return nzbget_rs_conn_op(10, &env, nullptr, 0, buffer, nullptr, nullptr, 0, nullptr);
 	}
 
 	bool Send(const char* buffer, int size)
 	{
 		debug("Sending data");
-
-		if (m_status != csConnected)
-		{
-			return false;
-		}
-
-		int bytesSent = 0;
-		while (bytesSent < size)
-		{
-			int res = send(m_socket, buffer + bytesSent, size-bytesSent, 0);
-			if (res <= 0)
-			{
-				m_status = csBroken;
-				return false;
-			}
-			bytesSent += res;
-		}
-
-		return true;
+		NzbgetRsConnEnv env = MakeConnEnv();
+		return nzbget_rs_conn_op(6, &env, const_cast<char*>(buffer), size, nullptr, nullptr, nullptr, 0, nullptr) != 0;
 	}
 
 	char* ReadLine(char* buffer, int size, int* bytesReadOut)
 	{
-		if (m_status != csConnected)
-		{
-			return nullptr;
-		}
-
-		char* inpBuffer = buffer;
-		size--; // for trailing '0'
-		int bytesRead = 0;
-		int bufAvail = m_bufAvail; // local variable is faster
-		char* bufPtr = m_bufPtr; // local variable is faster
-		while (size)
-		{
-			if (!bufAvail)
-			{
-				bufAvail = recv(m_socket, m_readBuf, CONNECTION_READBUFFER_SIZE, 0);
-				if (bufAvail < 0)
-				{
-					ReportError("Could not receive data on socket from %s", m_host.c_str(), true);
-					m_status = csBroken;
-					break;
-				}
-				else if (bufAvail == 0)
-				{
-					break;
-				}
-				else
-				{
-					m_totalBytesRead += bufAvail;
-				}
-				bufPtr = m_readBuf;
-				m_readBuf[bufAvail] = '\0';
-			}
-
-			char* nl = static_cast<char*>(memchr(bufPtr, '\n', bufAvail));
-			int len = nl ? static_cast<int>(nl - bufPtr + 1) : bufAvail;
-			if (len > size)
-			{
-				len = size;
-			}
-
-			memcpy(inpBuffer, bufPtr, len);
-			inpBuffer += len;
-			bufPtr += len;
-			bufAvail -= len;
-			bytesRead += len;
-			size -= len;
-
-			if (nl)
-			{
-				break;
-			}
-		}
-		*inpBuffer = '\0';
-
-		m_bufAvail = bufAvail > 0 ? bufAvail : 0; // copy back to member
-		m_bufPtr = bufPtr; // copy back to member
-
-		if (bytesReadOut)
-		{
-			*bytesReadOut = bytesRead;
-		}
-
-		if (inpBuffer == buffer)
-		{
-			return nullptr;
-		}
-
-		return buffer;
+		NzbgetRsConnEnv env = MakeConnEnv();
+		return nzbget_rs_conn_op(7, &env, buffer, size, nullptr, nullptr, nullptr, 0, bytesReadOut) != 0 ? buffer : nullptr;
 	}
 
 	std::unique_ptr<Connection> Accept()
 	{
 		debug("Accepting connection");
-
-		if (m_status != csListening)
+		NzbgetRsConnEnv env = MakeConnEnv();
+		int accepted = nzbget_rs_conn_op(3, &env, nullptr, 0, nullptr, nullptr, nullptr, 0, nullptr);
+		if (accepted == INVALID_SOCKET)
 		{
 			return nullptr;
 		}
-
-		m_acceptBusy = false;
-		SOCKET socket;
-		for (;;)
-		{
-#if defined(__linux__) && defined(SOCK_CLOEXEC)
-			socket = accept4(m_socket, nullptr, nullptr, SOCK_CLOEXEC);
-#else
-			socket = accept(m_socket, nullptr, nullptr);
-			SetCloseOnExec(socket);
-#endif
-			if (socket == INVALID_SOCKET && m_status != csCancelled)
-			{
-				// a connection that failed before it was taken: take the next one
-				// (the listener was torn down and rebound for each of these)
-				int err = errno;
-				if (err == EINTR || err == ECONNABORTED || err == EPROTO || err == ENETDOWN ||
-					err == ENOPROTOOPT || err == EHOSTDOWN || err == EHOSTUNREACH || err == EOPNOTSUPP ||
-					err == ENETUNREACH
-#ifdef ENONET
-					|| err == ENONET
-#endif
-					)
-				{
-					continue;
-				}
-				m_acceptBusy = (err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM);
-			}
-			break;
-		}
-		if (socket == INVALID_SOCKET && m_status != csCancelled)
-		{
-			ReportError("Could not accept connection for %s", m_host.c_str(), true);
-		}
-		if (socket == INVALID_SOCKET)
-		{
-			return nullptr;
-		}
-
-		InitSocketOpts(socket);
-
-		// InitSocketOpts() applied the listener's timeout to the new socket:
-		// keep the Connection's own idea of it (used by the poll/select waits)
-		// in step instead of the constructor's default
-		auto acceptedConnection = std::make_unique<Connection>(socket, m_tls);
+		auto acceptedConnection = std::make_unique<Connection>(accepted, m_tls);
 		acceptedConnection->SetTimeout(m_timeout);
 		return acceptedConnection;
 	}
 
 	int TryRecv(char* buffer, int size)
 	{
-		//debug("Receiving data");
-
-		memset(buffer, 0, size);
-
-		int received = recv(m_socket, buffer, size, 0);
-
-		if (received < 0)
-		{
-			ReportError("Could not receive data on socket from %s", m_host.c_str(), true);
-		}
-		else
-		{
-			m_totalBytesRead += received;
-		}
-
-		return received;
+		NzbgetRsConnEnv env = MakeConnEnv();
+		return nzbget_rs_conn_op(11, &env, buffer, size, nullptr, nullptr, nullptr, 0, nullptr);
 	}
 
-	bool Recv(char * buffer, int size)
+	bool Recv(char* buffer, int size)
 	{
-		//debug("Receiving data (full buffer)");
-
-		memset(buffer, 0, size);
-
-		char* bufPtr = (char*)buffer;
-		int NeedBytes = size;
-
-		if (m_bufAvail > 0)
-		{
-			int len = size > m_bufAvail ? m_bufAvail : size;
-			memcpy(bufPtr, m_bufPtr, len);
-			bufPtr += len;
-			m_bufPtr += len;
-			m_bufAvail -= len;
-			NeedBytes -= len;
-		}
-
-		// Read from the socket until nothing remains
-		while (NeedBytes > 0)
-		{
-			int received = recv(m_socket, bufPtr, NeedBytes, 0);
-			// Did the recv succeed?
-			if (received <= 0)
-			{
-				ReportError("Could not receive data on socket from %s", m_host.c_str(), true);
-				return false;
-			}
-			bufPtr += received;
-			NeedBytes -= received;
-			m_totalBytesRead += received;
-		}
-		return true;
+		NzbgetRsConnEnv env = MakeConnEnv();
+		return nzbget_rs_conn_op(8, &env, buffer, size, nullptr, nullptr, nullptr, 0, nullptr) != 0;
 	}
 
 	const char* GetHost() const { return m_host.c_str(); }
@@ -5464,24 +4902,18 @@ public:
 	int GetTlsProbeFailure() const { return m_tlsProbeFailure; }
 #endif
 	void SetIPVersion(EIPVersion ipVersion) { m_ipVersion = ipVersion; }
-	EStatus GetStatus() { return m_status; }
-	// the last Accept() failed for lack of descriptors or memory, not on the listener
-	bool GetAcceptBusy() { return m_acceptBusy; }
-	// the peer can't be relied on any more (a timeout mid-reply): Disconnect sends
-	// nothing and waits for nothing
+	EStatus GetStatus() { return static_cast<EStatus>(m_status.load()); }
+	bool GetAcceptBusy() { return m_acceptBusy != 0; }
 	void SetBroken() { m_status = csBroken; }
 	void SetGracefull(bool gracefull) { m_gracefull = gracefull; }
-	void SetForceClose(bool forceClose) { m_forceClose = forceClose; }
 #ifndef DISABLE_TLS
 	void SetCertVerifLevel(unsigned int level) { m_certVerifLevel = level; }
 	bool StartTls(bool isClient, const char* certFile, const char* keyFile)
 	{
 		debug("Starting TLS");
-
-		m_tlsSocket = std::make_unique<TlsSocket>(m_socket, isClient, m_host.c_str(), certFile, keyFile, m_cipher.c_str(), m_certVerifLevel);
-		m_tlsSocket->SetSuppressErrors(m_suppressErrors);
+		m_tlsSocket = std::make_unique<TlsSocket>(m_socket.load(), isClient, m_host.c_str(), certFile, keyFile, m_cipher.c_str(), m_certVerifLevel);
+		m_tlsSocket->BindSuppressErrors(&m_suppressErrors);
 		m_tlsSocket->SetDeadline(m_deadline);
-
 		bool started = m_tlsSocket->Start();
 		m_tlsProbeFailure = m_tlsSocket->GetProbeFailure();
 		return started;
@@ -5493,21 +4925,9 @@ public:
 		{
 			return "-";
 		}
-
 		m_remoteAddr.Clear();
-
-		char peerName[1024];
-		int peerNameLength = sizeof(peerName);
-		if (getpeername(m_socket, (sockaddr*)&peerName, (SOCKLEN_T*)&peerNameLength) >= 0)
-		{
-			inet_ntop(((sockaddr_in*)&peerName)->sin_family,
-				((sockaddr_in*)&peerName)->sin_family == AF_INET6 ?
-				(void*)&((sockaddr_in6*)&peerName)->sin6_addr :
-				(void*)&((sockaddr_in*)&peerName)->sin_addr,
-				m_remoteAddr, m_remoteAddr.Capacity());
-			m_remoteAddr[m_remoteAddr.Capacity() - 1] = '\0';
-		}
-
+		NzbgetRsConnEnv env = MakeConnEnv();
+		nzbget_rs_conn_op(4, &env, m_remoteAddr, m_remoteAddr.Capacity(), nullptr, nullptr, nullptr, 0, nullptr);
 		return m_remoteAddr;
 	}
 	int FetchTotalBytesRead()
@@ -5519,31 +4939,20 @@ public:
 	void Cancel()
 	{
 		debug("Cancelling connection");
-		if (m_socket != INVALID_SOCKET)
-		{
-			m_status = csCancelled;
-
-			if (m_forceClose)
-			{
-				SOCKET socket = m_socket;
-				m_socket = INVALID_SOCKET;
-				shutdown(socket, SHUT_RDWR);
-				closesocket(socket);
-			}
-			else
-			{
-				shutdown(m_socket, SHUT_RDWR);
-			}
-		}
+		NzbgetRsConnEnv env{};
+		env.socket_atomic = reinterpret_cast<int*>(&m_socket);
+		env.status_atomic = reinterpret_cast<int*>(&m_status);
+		nzbget_rs_conn_op(5, &env, nullptr, 0, nullptr, nullptr, nullptr, 0, nullptr);
 	}
-	void ReadBuffer(char** buffer, int *bufLen)
+	void ReadBuffer(char** buffer, int* bufLen)
 	{
-		*bufLen = m_bufAvail;
-		*buffer = m_bufPtr;
+		*bufLen = static_cast<int>(m_bufAvail);
+		*buffer = static_cast<char*>(m_readBuf) + m_bufOffset;
 		m_bufAvail = 0;
 	}
 
 protected:
+	static_assert(std::atomic<int>::is_always_lock_free);
 	std::string m_host;
 	std::string m_cipher;
 	std::vector<std::string> m_resolvedAddresses;
@@ -5551,514 +4960,141 @@ protected:
 	int m_port;
 	bool m_tls;
 	EIPVersion m_ipVersion = ipAuto;
-	SOCKET m_socket = INVALID_SOCKET;
+	std::atomic<int> m_socket{INVALID_SOCKET};
 	CharBuffer m_readBuf;
-	int m_bufAvail = 0;
-	char* m_bufPtr = nullptr;
-	std::atomic<EStatus> m_status{csDisconnected};
+	size_t m_bufOffset = 0;
+	size_t m_bufAvail = 0;
+	std::atomic<int> m_status{csDisconnected};
 	int m_timeout = 60;
-	bool m_suppressErrors = true;
-	bool m_acceptBusy = false;
+	std::atomic<bool> m_suppressErrors{true};
+	int m_isListener = 0;
+	int m_acceptBusy = 0;
+	int m_tlsError = 0;
 	BString<100> m_remoteAddr;
 	int m_totalBytesRead = 0;
 	bool m_gracefull = false;
-	bool m_forceClose = false;
+	std::shared_ptr<CancelRegistry> m_cancelRegistry;
 #ifndef DISABLE_TLS
-	unsigned int m_certVerifLevel;
-#endif
-
-	struct SockAddr
-	{
-		int ai_family;
-		int ai_socktype;
-		int ai_protocol;
-		bool operator==(const SockAddr& rhs) const
-			{ return memcmp(this, &rhs, sizeof(SockAddr)) == 0; }
-	};
-
-#ifndef DISABLE_TLS
+	unsigned int m_certVerifLevel = 0;
 	std::unique_ptr<TlsSocket> m_tlsSocket;
-	bool m_tlsError = false;
 	int m_tlsProbeFailure = -1;
 #endif
-#ifndef HAVE_GETADDRINFO
-#ifndef HAVE_GETHOSTBYNAME_R
-	inline static std::mutex m_getHostByNameMutex;
-#endif
-#endif
 
-	virtual bool DoConnect()
+	void AttachCancelRegistry()
 	{
-		debug("Do connecting");
-		if (m_deadline && m_deadline->Stopped()) return false;
-
-		m_socket = INVALID_SOCKET;
-
-		if (!m_host.empty() && m_host.front() == '/')
+		if (t_cancelRegistry)
 		{
-			struct sockaddr_un addr;
-			addr.sun_family = AF_UNIX;
-			if (m_host.size() >= sizeof(addr.sun_path))
+			m_cancelRegistry = t_cancelRegistry;
+			Guard guard(m_cancelRegistry->mutex);
+			m_cancelRegistry->conns.push_back(this);
+			if (m_cancelRegistry->stopped)
 			{
-				ReportError("Connection to %s failed: name too long\n", m_host.c_str(), false);
-				return false;
-			}
-			strcpy(addr.sun_path, m_host.c_str());
-
-			m_socket = socket(PF_UNIX, SOCK_STREAM | SOCKET_CLOEXEC, 0);
-#ifndef SOCK_CLOEXEC
-			SetCloseOnExec(m_socket);
-#endif
-			if (m_socket == INVALID_SOCKET)
-			{
-				ReportError("Socket creation failed for %s", m_host.c_str(), true);
-				return false;
-			}
-
-			if (!ConnectWithTimeout(&addr, sizeof(addr)))
-			{
-				ReportError("Connection to %s failed", m_host.c_str(), true);
-				closesocket(m_socket);
-				m_socket = INVALID_SOCKET;
-				return false;
+				m_status = csCancelled;
+				Cancel();
 			}
 		}
-		else
-		{
-#ifdef HAVE_GETADDRINFO
-			struct addrinfo addr_hints, *addr_list, *addr;
-
-			memset(&addr_hints, 0, sizeof(addr_hints));
-			addr_hints.ai_family = m_ipVersion == ipV4 ? AF_INET : m_ipVersion == ipV6 ? AF_INET6 : AF_UNSPEC;
-			addr_hints.ai_socktype = SOCK_STREAM;
-
-			BString<100> portStr("%d", m_port);
-
-			// Optimizer probes resolve in a bounded owned child, preserving m_host
-			// for TLS SNI/certificate validation. AI_NUMERICHOST never queries DNS.
-			std::vector<std::unique_ptr<addrinfo, decltype(&freeaddrinfo)>> resolvedLists;
-			std::vector<addrinfo> resolvedItems;
-			int res;
-			if (!m_resolvedAddresses.empty())
-			{
-				addr_hints.ai_flags |= AI_NUMERICHOST;
-				addr_list = nullptr;
-				for (const auto& numeric : m_resolvedAddresses)
-				{
-					addrinfo* list = nullptr;
-					if (getaddrinfo(numeric.c_str(), portStr, &addr_hints, &list) == 0 && list)
-					{
-						resolvedLists.emplace_back(list, &freeaddrinfo);
-						for (addrinfo* item = list; item; item = item->ai_next) resolvedItems.push_back(*item);
-					}
-				}
-				for (size_t i = 0; i < resolvedItems.size(); ++i)
-					resolvedItems[i].ai_next = i + 1 < resolvedItems.size() ? &resolvedItems[i + 1] : nullptr;
-				addr_list = resolvedItems.empty() ? nullptr : &resolvedItems.front();
-				res = addr_list ? 0 : EAI_NONAME;
-			}
-			else if (m_deadline)
-			{
-				return false; // Probe DNS must never fall back to blocking resolution.
-			}
-			else res = getaddrinfo(m_host.c_str(), portStr, &addr_hints, &addr_list);
-			debug("getaddrinfo for %s: %i", m_host.c_str(), res);
-
-			if (res != 0)
-			{
-				int gaiErr = res != EAI_SYSTEM ? res : 0;
-				ReportError("Could not resolve hostname %s", m_host.c_str(), true,
-							gaiErr,
-							gaiErr != 0 ? gai_strerror(res) : nullptr);
-				return false;
-			}
-
-			std::vector<SockAddr> triedAddr;
-			bool connected = false;
-
-			for (addr = addr_list; addr != nullptr; addr = addr->ai_next)
-			{
-				if (m_deadline && m_deadline->Stopped()) break;
-				// don't try the same combinations of ai_family, ai_socktype, ai_protocol multiple times
-				SockAddr sa = { addr->ai_family, addr->ai_socktype, addr->ai_protocol };
-				if (!m_deadline && std::find(triedAddr.begin(), triedAddr.end(), sa) != triedAddr.end())
-				{
-					continue;
-				}
-				triedAddr.push_back(sa);
-
-				if (m_socket != INVALID_SOCKET)
-				{
-					closesocket(m_socket);
-				}
-
-				m_socket = socket(addr->ai_family, addr->ai_socktype | SOCKET_CLOEXEC, addr->ai_protocol);
-#ifndef SOCK_CLOEXEC
-				SetCloseOnExec(m_socket);
-#endif
-				if (m_socket == INVALID_SOCKET)
-				{
-					// try another addr/family/protocol
-					continue;
-				}
-
-				if (ConnectWithTimeout(addr->ai_addr, addr->ai_addrlen))
-				{
-					// Connection established
-					connected = true;
-					break;
-				}
-			}
-
-			if (m_socket == INVALID_SOCKET && addr_list)
-			{
-				ReportError("Socket creation failed for %s", m_host.c_str(), true);
-			}
-
-			if (!connected && m_socket != INVALID_SOCKET)
-			{
-				ReportError("Connection to %s failed", m_host.c_str(), true);
-				closesocket(m_socket);
-				m_socket = INVALID_SOCKET;
-			}
-
-			if (resolvedLists.empty()) freeaddrinfo(addr_list);
-
-			if (m_socket == INVALID_SOCKET)
-			{
-				return false;
-			}
-
-#else
-
-			struct sockaddr_in	sSocketAddress;
-			memset(&sSocketAddress, 0, sizeof(sSocketAddress));
-			sSocketAddress.sin_family = AF_INET;
-			sSocketAddress.sin_port = htons(m_port);
-			sSocketAddress.sin_addr.s_addr = ResolveHostAddr(m_host.c_str());
-			if (sSocketAddress.sin_addr.s_addr == INADDR_NONE)
-			{
-				return false;
-			}
-
-			m_socket = socket(PF_INET, SOCK_STREAM | SOCKET_CLOEXEC, 0);
-#ifndef SOCK_CLOEXEC
-			SetCloseOnExec(m_socket);
-#endif
-			if (m_socket == INVALID_SOCKET)
-			{
-				ReportError("Socket creation failed for %s", m_host.c_str(), true);
-				return false;
-			}
-
-			if (!ConnectWithTimeout(&sSocketAddress, sizeof(sSocketAddress)))
-			{
-				ReportError("Connection to %s failed", m_host.c_str(), true);
-				closesocket(m_socket);
-				m_socket = INVALID_SOCKET;
-				return false;
-			}
-#endif
-		}
-
-		if (!InitSocketOpts(m_socket))
-		{
-			return false;
-		}
-
-#ifndef DISABLE_TLS
-		if (m_tls && !StartTls(true, "", ""))
-		{
-			return false;
-		}
-#endif
-
-		return true;
 	}
-	virtual void DoDisconnect()
+
+	void DoDisconnect()
 	{
 		debug("Do disconnecting");
-
-		if (m_socket != INVALID_SOCKET)
-		{
 #ifndef DISABLE_TLS
-			CloseTls();
-#endif
-			int is_listening = 0;
-			socklen_t len = sizeof(is_listening);
-			if (!m_host.empty() && m_host.front() == '/' &&
-				getsockopt(m_socket, SOL_SOCKET, SO_ACCEPTCONN, &is_listening, &len) == 0 && is_listening)
-			{
-				unlink(m_host.c_str());
-			}
-			if (m_gracefull)
-			{
-				closesocket_gracefully(m_socket);
-			}
-			else
-			{
-				closesocket(m_socket);
-			}
-			m_socket = INVALID_SOCKET;
-		}
-
-		m_status = csDisconnected;
-	}
-	bool InitSocketOpts(SOCKET socket)
-	{
-		struct timeval TimeVal;
-		TimeVal.tv_sec = m_timeout;
-		TimeVal.tv_usec = 0;
-		char* optbuf = (char*)&TimeVal;
-		int optsize = sizeof(TimeVal);
-		int err = setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, optbuf, optsize);
-		if (err != 0)
-		{
-			ReportError("Socket initialization failed for %s", m_host.c_str(), true);
-			return false;
-		}
-		err = setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, optbuf, optsize);
-		if (err != 0)
-		{
-			ReportError("Socket initialization failed for %s", m_host.c_str(), true);
-			return false;
-		}
-		return true;
-	}
-	bool ConnectWithTimeout(void* address, int address_len)
-	{
-		int flags = 0, error = 0, ret = 0;
-		socklen_t len = sizeof(error);
-
-		//set socket nonblocking flag
-		flags = fcntl(m_socket, F_GETFL, 0);
-		if (flags < 0)
-		{
-			return false;
-		}
-
-		if (fcntl(m_socket, F_SETFL, flags | O_NONBLOCK) < 0)
-		{
-			return false;
-		}
-
-		//initiate non-blocking connect
-		ret = connect(m_socket, (struct sockaddr*)address, address_len);
-		if (ret < 0)
-		{
-			int err = GetLastNetworkError();
-			if (err != EINPROGRESS)
-			{
-				return false;
-			}
-		}
-
-		//connect succeeded right away?
-		if (ret != 0)
-		{
-			// poll: an fd_set holds descriptors below 1024 only, and FD_SET of a
-			// higher one (many connections, a raised descriptor limit) wrote past it
-			struct pollfd pfd;
-			pfd.fd = m_socket;
-			pfd.events = POLLIN | POLLOUT;
-			pfd.revents = 0;
-			if (m_deadline)
-			{
-				ret = m_deadline->Wait(m_socket, true, true) ? 1 : 0;
-				pfd.revents = POLLIN | POLLOUT;
-			}
-			else ret = poll(&pfd, 1, m_timeout ? m_timeout * 1000 : -1);
-			//we are waiting for connect to complete now
-			if (ret < 0)
-			{
-				return false;
-			}
-			if (ret == 0)
-			{
-				//we had a timeout
-				errno = ETIMEDOUT;
-				return false;
-			}
-
-			if (!(pfd.revents & (POLLIN | POLLOUT | POLLERR | POLLHUP)))
-			{
-				return false;
-			}
-			//we had a positivite return so a descriptor is ready
-
-			if (getsockopt(m_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &len) < 0)
-			{
-				return false;
-			}
-
-			//check if we had a socket error
-			if (error)
-			{
-				errno = error;
-				return false;
-			}
-		}
-
-		//put socket back in blocking mode
-		if (m_deadline) return !m_deadline->Stopped();
-		if (fcntl(m_socket, F_SETFL, flags) < 0)
-		{
-			return false;
-		}
-
-		return true;
-	}
-#ifndef DISABLE_TLS
-	int recv(SOCKET s, char* buf, int len, int flags)
-	{
-		int received = 0;
-
-		if (m_tlsSocket)
-		{
-			m_tlsError = false;
-			received = m_tlsSocket->Recv(buf, len);
-			if (received < 0)
-			{
-				m_tlsError = true;
-				return -1;
-			}
-		}
-		else
-		{
-			received = ::recv(s, buf, len, flags);
-		}
-		return received;
-	}
-	int send(SOCKET s, const char* buf, int len, int flags)
-	{
-		int sent = 0;
-
-		if (m_tlsSocket)
-		{
-			m_tlsError = false;
-			sent = m_tlsSocket->Send(buf, len);
-			if (sent < 0)
-			{
-				m_tlsError = true;
-				return -1;
-			}
-			return sent;
-		}
-		else
-		{
-			sent = ::send(s, buf, len, flags);
-			return sent;
-		}
-	}
-	void CloseTls()
-	{
-		if (m_tlsSocket)
+		if (m_socket != INVALID_SOCKET && m_tlsSocket)
 		{
 			m_tlsSocket->Close();
 			m_tlsSocket.reset();
 		}
-	}
 #endif
-	void ReportError(const char* msgPrefix, const char* msgArg, bool printErrCode, int errCode = 0, const char* errMsg = nullptr)
+		NzbgetRsConnEnv env = MakeConnEnv();
+		nzbget_rs_conn_op(2, &env, nullptr, 0, nullptr, nullptr, nullptr, 0, nullptr);
+	}
+
+	int RawRecv(char* buf, int len)
 	{
 #ifndef DISABLE_TLS
-		if (m_tlsError)
+		if (m_tlsSocket)
 		{
-			// TLS-Error was already reported
-			m_tlsError = false;
-			return;
+			m_tlsError = 0;
+			int received = m_tlsSocket->Recv(buf, len);
+			if (received < 0)
+			{
+				m_tlsError = 1;
+				return -1;
+			}
+			return received;
 		}
 #endif
-
-		BString<1024> errPrefix(msgPrefix, msgArg);
-
-		if (printErrCode)
-		{
-			BString<1024> printErrMsg;
-			if (errCode == 0)
-			{
-				errCode = GetLastNetworkError();
-			}
-			if (errMsg)
-			{
-				printErrMsg = errMsg;
-			}
-			else
-			{
-				printErrMsg = strerror(errCode);
-			}
-
-			if (m_suppressErrors)
-			{
-				debug("%s: Error %i - %s", *errPrefix, errCode, *printErrMsg);
-			}
-			else
-			{
-				PrintError(BString<1024>("%s: Error %i - %s", *errPrefix, errCode, *printErrMsg));
-			}
-		}
-		else
-		{
-			if (m_suppressErrors)
-			{
-				debug("%s", *errPrefix);
-			}
-			else
-			{
-				PrintError(errPrefix);
-			}
-		}
+		return static_cast<int>(::recv(m_socket.load(), buf, static_cast<size_t>(len), 0));
 	}
-	virtual void PrintError(const char* errMsg)
+
+	int RawSend(const char* buf, int len)
 	{
-		error("%s", errMsg);
-	}
-	int GetLastNetworkError()
-	{
-		return errno;
-	}
-#ifndef HAVE_GETADDRINFO
-	in_addr_t ResolveHostAddr(const char* host)
-	{
-		in_addr_t uaddr = inet_addr(host);
-		if (uaddr == INADDR_NONE)
+#ifndef DISABLE_TLS
+		if (m_tlsSocket)
 		{
-			struct hostent* hinfo;
-			bool err = false;
-			int h_errnop = 0;
-#ifdef HAVE_GETHOSTBYNAME_R
-			struct hostent hinfobuf;
-			char strbuf[1024];
-#ifdef HAVE_GETHOSTBYNAME_R_6
-			err = gethostbyname_r(host, &hinfobuf, strbuf, sizeof(strbuf), &hinfo, &h_errnop);
-			err = err || (hinfo == nullptr); // error on null hinfo (means 'no entry')
-#endif
-#ifdef HAVE_GETHOSTBYNAME_R_5
-			hinfo = gethostbyname_r(host, &hinfobuf, strbuf, sizeof(strbuf), &h_errnop);
-			err = hinfo == nullptr;
-#endif
-#ifdef HAVE_GETHOSTBYNAME_R_3
-			//NOTE: gethostbyname_r with three parameters were not tested
-			struct hostent_data hinfo_data;
-			hinfo = gethostbyname_r((char*)host, (struct hostent*)hinfobuf, &hinfo_data);
-			err = hinfo == nullptr;
-#endif
-#else
-			std::lock_guard<std::mutex> guard(m_getHostByNameMutex);
-			hinfo = gethostbyname(host);
-			err = hinfo == nullptr;
-#endif
-			if (err)
+			m_tlsError = 0;
+			int sent = m_tlsSocket->Send(buf, len);
+			if (sent < 0)
 			{
-				ReportError("Could not resolve hostname %s", host, true, h_errnop, hstrerror(h_errnop));
-				return INADDR_NONE;
+				m_tlsError = 1;
+				return -1;
 			}
-
-			memcpy(&uaddr, hinfo->h_addr_list[0], sizeof(uaddr));
+			return sent;
 		}
-		return uaddr;
-	}
 #endif
+		return static_cast<int>(::send(m_socket.load(), buf, static_cast<size_t>(len), 0));
+	}
+
+	NzbgetRsConnEnv MakeConnEnv()
+	{
+		NzbgetRsConnEnv env{};
+		env.ctx = this;
+		env.host = m_host.c_str();
+		env.port = m_port;
+		env.ip_version = static_cast<int>(m_ipVersion);
+		env.timeout_sec = m_timeout;
+		env.graceful = (m_gracefull && m_status != csCancelled && !Thread::IsCurrentThreadStopped()) ? 1 : 0;
+		env.force_close = 0;
+		env.has_deadline = m_deadline ? 1 : 0;
+		env.socket_atomic = reinterpret_cast<int*>(&m_socket);
+		env.status_atomic = reinterpret_cast<int*>(&m_status);
+		env.is_listener = &m_isListener;
+		env.accept_busy = &m_acceptBusy;
+		env.tls_error = &m_tlsError;
+		env.buf_offset = &m_bufOffset;
+		env.buf_avail = &m_bufAvail;
+		env.total_bytes_read = &m_totalBytesRead;
+		env.read_buf = reinterpret_cast<uint8_t*>(static_cast<char*>(m_readBuf));
+		env.read_buf_cap = static_cast<size_t>(m_readBuf.Size());
+		env.send_cb = [](void* ctx, const char* buf, int len) -> int {
+			return static_cast<Connection*>(ctx)->RawSend(buf, len);
+		};
+		env.recv_cb = [](void* ctx, char* buf, int len) -> int {
+			return static_cast<Connection*>(ctx)->RawRecv(buf, len);
+		};
+		env.error_cb = [](void* ctx, const char* msg) {
+			auto* self = static_cast<Connection*>(ctx);
+			if (self->m_suppressErrors.load()) debug("%s", msg); else self->PrintError(msg);
+		};
+		env.debug_cb = [](void*, const char* msg) { debug("%s", msg); };
+		env.deadline_wait_cb = [](void* ctx, int fd, int r, int w) -> int {
+			auto* self = static_cast<Connection*>(ctx);
+			return (self->m_deadline && self->m_deadline->Wait(fd, r != 0, w != 0)) ? 1 : 0;
+		};
+		env.deadline_stopped_cb = [](void* ctx) -> int {
+			auto* self = static_cast<Connection*>(ctx);
+			return ((self->m_deadline && self->m_deadline->Stopped()) || Thread::IsCurrentThreadStopped()) ? 1 : 0;
+		};
+		return env;
+	}
+
+	void ReportError(const char* msgPrefix, const char* msgArg, bool printErrCode, int errCode = 0, const char* errMsg = nullptr)
+	{
+		NzbgetRsConnEnv env = MakeConnEnv();
+		nzbget_rs_conn_op(9, &env, nullptr, printErrCode ? 1 : 0, msgPrefix, msgArg, errMsg, errCode, nullptr);
+	}
+
+	virtual void PrintError(const char* errMsg) { error("%s", errMsg); }
 };
 
 class WebDownloader : public Thread, public Subject
@@ -6078,99 +5114,18 @@ public:
 	};
 
 	WebDownloader()
-		: m_contentLen(0)
-		, m_redirecting(false)
-		, m_redirected(false)
-		, m_gzip(false)
 	{
 		debug("Creating WebDownloader");
-
 		SetLastUpdateTimeNow();
 	}
 	EStatus GetStatus() { return m_status; }
-	virtual void Run()
+	virtual void Run() override
 	{
 		debug("Entering WebDownloader-loop");
-
-		SetStatus(adRunning);
-
-		int remainedDownloadRetries = m_retry ? (g_Options->GetUrlRetries() > 0 ? g_Options->GetUrlRetries() : 1) : 1;
-		int remainedConnectRetries = m_retry ? (remainedDownloadRetries > 10 ? remainedDownloadRetries : 10) : 1;
-
-		EStatus Status = adFailed;
-
-		while (!IsStopped() && remainedDownloadRetries > 0 && remainedConnectRetries > 0)
-		{
-			SetLastUpdateTimeNow();
-
-			Status = DownloadWithRedirects(5);
-
-			if (((Status == adFailed && remainedDownloadRetries > 1) ||
-				(Status == adConnectError && remainedConnectRetries > 1)) &&
-				!IsStopped() && !(!m_force && g_WorkState->GetPauseDownload()))
-			{
-				detail("Waiting %i sec to retry", g_Options->GetUrlInterval());
-				int msec = 0;
-				while (!IsStopped() &&
-					((int64)msec < std::clamp((int64)g_Options->GetUrlInterval() * 1000, (int64)INT32_MIN, (int64)INT32_MAX)) &&
-					!(!m_force && g_WorkState->GetPauseDownload()))
-				{
-					// waiting isn't hanging: an interval longer than UrlTimeout got the
-					// download cancelled and restarted with all its retries again
-					SetLastUpdateTimeNow();
-					Util::Sleep(100);
-					msec += 100;
-				}
-			}
-
-			if (IsStopped() || (!m_force && g_WorkState->GetPauseDownload()))
-			{
-				Status = adRetry;
-				break;
-			}
-
-			if (Status == adFinished || Status == adFatalError || Status == adNotFound)
-			{
-				break;
-			}
-
-			if (Status != adConnectError)
-			{
-				remainedDownloadRetries--;
-			}
-			else
-			{
-				remainedConnectRetries--;
-			}
-		}
-
-		if (Status != adFinished && Status != adRetry)
-		{
-			Status = adFailed;
-		}
-
-		if (Status == adFailed)
-		{
-			if (IsStopped())
-			{
-				detail("Download %s cancelled", *m_infoName);
-			}
-			else
-			{
-				error("Download %s failed", *m_infoName);
-			}
-		}
-
-		if (Status == adFinished)
-		{
-			detail("Download %s completed", *m_infoName);
-		}
-
-		SetStatus(Status);
-
+		ExecuteWebDl(1, 5);
 		debug("Exiting WebDownloader-loop");
 	}
-	virtual void Stop()
+	virtual void Stop() override
 	{
 		debug("Trying to stop WebDownloader");
 		Thread::Stop();
@@ -6182,82 +5137,17 @@ public:
 		}
 		debug("WebDownloader stopped successfully");
 	}
-	EStatus Download()
-	{
-		EStatus Status = adRunning;
-
-		URL url(m_url);
-
-		Status = CreateConnection(&url);
-		if (Status != adRunning)
-		{
-			return Status;
-		}
-
-		m_connection->SetTimeout(g_Options->GetUrlTimeout());
-		m_connection->SetSuppressErrors(false);
-
-		// connection
-		bool connected = m_connection->Connect();
-		if (!connected || IsStopped())
-		{
-			FreeConnection();
-			return adConnectError;
-		}
-
-		// Okay, we got a Connection. Now start downloading.
-		detail("Downloading %s", *m_infoName);
-
-		SendHeaders(&url);
-
-		Status = DownloadHeaders();
-
-		if (Status == adRunning)
-		{
-			Status = DownloadBody();
-		}
-
-		if (IsStopped())
-		{
-			Status = adFailed;
-		}
-
-		FreeConnection();
-
-		if (Status != adFinished)
-		{
-			// Download failed, delete broken output file
-			FileSystem::DeleteFile(m_outputFilename);
-		}
-
-		return Status;
-	}
 	EStatus DownloadWithRedirects(int maxRedirects)
 	{
-		// do sync download, following redirects
-		EStatus status = adRedirect;
-		while (status == adRedirect && maxRedirects >= 0)
-		{
-			maxRedirects--;
-			status = Download();
-		}
-
-		if (status == adRedirect)
-		{
-			warn("Too many redirects for %s", *m_infoName);
-			status = adFailed;
-		}
-
-		return status;
+		return ExecuteWebDl(0, maxRedirects);
 	}
 	void SetInfoName(const char* infoName) { m_infoName = infoName; }
 	const char* GetInfoName() { return m_infoName; }
-	void SetUrl(const char* url) { m_url = WebUtil::UrlEncode(url); }
+	void SetUrl(const char* url) { m_url = url ? url : ""; }
 	const char* GetOutputFilename() { return m_outputFilename; }
 	void SetOutputFilename(const char* outputFilename) { m_outputFilename = outputFilename; }
 	time_t GetLastUpdateTime() { return m_lastUpdateTime; }
 	void SetLastUpdateTimeNow() { m_lastUpdateTime = Util::CurrentTime(); }
-	// the status code of the last response (0 before any)
 	int GetHttpStatus() const { return m_httpStatus; }
 	const char* GetOriginalFilename() { return m_originalFilename; }
 	void SetForce(bool force) { m_force = force; }
@@ -6273,31 +5163,7 @@ public:
 	}
 
 protected:
-	virtual void ProcessHeader(const char* line)
-	{
-		// rust/src/webdownload.rs
-		int value = 0;
-		switch (nzbget_rs_http_header(line, m_redirecting, &value))
-		{
-			case 1:
-				m_contentLen = value;
-				m_confirmedLength = true;
-				break;
-
-			case 2:
-				m_gzip = true;
-				break;
-
-			case 3:
-				ParseFilename(line);
-				break;
-
-			case 4:
-				ParseRedirect(line + value);
-				m_redirected = true;
-				break;
-		}
-	}
+	virtual void ProcessHeader([[maybe_unused]] const char* line) {}
 
 private:
 	CString m_url;
@@ -6307,372 +5173,116 @@ private:
 	EStatus m_status = adUndefined;
 	std::atomic<time_t> m_lastUpdateTime{0};
 	CString m_infoName;
-	DiskFile m_outFile;
-	int m_contentLen;
-	bool m_confirmedLength = false;
 	int m_httpStatus = 0;
 	CString m_originalFilename;
 	bool m_force = false;
-	bool m_redirecting;
-	bool m_redirected;
-	bool m_gzip;
 	bool m_retry = true;
 #ifndef DISABLE_TLS
 	unsigned int m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
 #endif
-#ifndef DISABLE_GZIP
-	std::unique_ptr<GUnzipStream> m_gUnzipStream;
-#endif
 
-	void SetStatus(EStatus status)
+	EStatus ExecuteWebDl(int op, int maxRedirects)
 	{
-		m_status = status;
-		Notify(nullptr);
-	}
-	bool Write(void* buffer, int len)
-	{
-		if (!m_outFile.Active() && !PrepareFile())
-		{
-			return false;
-		}
-
-#ifndef DISABLE_GZIP
-		if (m_gzip)
-		{
-			m_gUnzipStream->Write(buffer, len);
-			const void *outBuf;
-			int outLen = 1;
-			while (outLen > 0)
-			{
-				GUnzipStream::EStatus gZStatus = m_gUnzipStream->Read(&outBuf, &outLen);
-
-				if (gZStatus == GUnzipStream::zlError)
-				{
-					error("URL %s: GUnzip failed", *m_infoName);
-					return false;
-				}
-
-				if (outLen > 0 && m_outFile.Write(outBuf, outLen) <= 0)
-				{
-					return false;
-				}
-
-				if (gZStatus == GUnzipStream::zlFinished)
-				{
-					m_confirmedLength = true;
-					return true;
-				}
-			}
-			return true;
-		}
-		else
-#endif
-
-		return m_outFile.Write(buffer, len) > 0;
-	}
-	bool PrepareFile()
-	{
-		// prepare file for writing
-
-		const char* filename = m_outputFilename;
-		if (!m_outFile.Open(filename, DiskFile::omWrite))
-		{
-			error("Could not %s file %s", "create", filename);
-			return false;
-		}
-		if (g_Options->GetWriteBuffer() > 0)
-		{
-			m_outFile.SetWriteBuffer(g_Options->GetWriteBuffer() * 1024);
-		}
-
-		return true;
-	}
-	void FreeConnection()
-	{
-		if (m_connection)
-		{
-			debug("Releasing connection");
-			Guard guard(m_connectionMutex);
-			if (m_connection->GetStatus() == Connection::csCancelled)
-			{
-				m_connection->Disconnect();
-			}
-			m_connection.reset();
-		}
-	}
-	EStatus CheckResponse(const char* response)
-	{
-		// rust/src/webdownload.rs decides; the warnings are logged here
-		NzbgetRsHttpResponse r;
-		nzbget_rs_http_check_response(response, &r);
-		if (r.setStatus)
-		{
-			m_httpStatus = r.httpStatus;
-		}
-		switch (r.warn)
-		{
-			case 1:
-				if (!IsStopped())
-				{
-					warn("URL %s: Connection closed by remote host", *m_infoName);
-				}
-				break;
-
-			case 2:
-				warn("URL %s failed: %s", *m_infoName, response);
-				break;
-
-			case 3:
-				warn("URL %s failed: %s", *m_infoName, response + r.statusOffset);
-				break;
-		}
-		switch (r.result)
-		{
-			case 0:
-				return adRunning;
-
-			case 1:
-				m_redirecting = true;
-				return adRunning;
-
-			case 2:
-				return adConnectError;
-
-			case 3:
-				return adNotFound;
-
-			default:
-				return adFailed;
-		}
-	}
-	EStatus CreateConnection(URL *url)
-	{
-		if (!url->IsValid())
-		{
-			error("URL is not valid: %s", url->GetAddress());
-			return adFatalError;
-		}
-
-		int port = url->GetPort();
-		if (port == 0 && !strcasecmp(url->GetProtocol(), "http"))
-		{
-			port = 80;
-		}
-		if (port == 0 && !strcasecmp(url->GetProtocol(), "https"))
-		{
-			port = 443;
-		}
-
-		if (strcasecmp(url->GetProtocol(), "http") && strcasecmp(url->GetProtocol(), "https"))
-		{
-			error("Unsupported protocol in URL: %s", url->GetAddress());
-			return adFatalError;
-		}
-
-		bool tls = !strcasecmp(url->GetProtocol(), "https");
-
+		NzbgetRsWebDlEnv env{};
+		env.ctx = this;
+		env.initial_url = m_url;
+		env.output_filename = m_outputFilename;
+		env.info_name = m_infoName;
+		env.version = Util::VersionRevision();
+		env.write_buffer_kb = g_Options ? g_Options->GetWriteBuffer() : 0;
+		env.url_retries = g_Options ? g_Options->GetUrlRetries() : 1;
+		env.url_interval_sec = g_Options ? g_Options->GetUrlInterval() : 0;
+		env.retry = m_retry ? 1 : 0;
+		env.force = m_force ? 1 : 0;
 #ifdef DISABLE_TLS
-		if (tls)
-		{
-			error("Program was compiled without TLS/SSL-support. Cannot download using https protocol. URL: %s", url->GetAddress());
-			return adFatalError;
-		}
+		env.tls_disabled = 1;
 #endif
-
-		m_connection = std::make_unique<Connection>(url->GetHost(), port, tls);
-
+#ifdef DISABLE_GZIP
+		env.gzip_disabled = 1;
+#endif
+		env.connect_cb = [](void* ctx, const char* host, int port, int tls) -> int {
+			auto* self = static_cast<WebDownloader*>(ctx);
+			Connection* conn = nullptr;
+			{
+				Guard guard(self->m_connectionMutex);
+				self->m_connection = std::make_unique<Connection>(host, port, tls != 0);
 #ifndef DISABLE_TLS
-		m_connection->SetCertVerifLevel(m_certVerifLevel);
+				self->m_connection->SetCertVerifLevel(self->m_certVerifLevel);
 #endif
-
-		return adRunning;
-	}
-	void ParseFilename(const char* contentDisposition)
-	{
-		CString filename = WebUtil::ParseContentDispositionFilename(contentDisposition);
-		if (filename.Empty())
-		{
-			return;
-		}
-
-		m_originalFilename = FileSystem::BaseFileName(filename);
-
-		debug("OriginalFilename: %s", *m_originalFilename);
-	}
-	void SendHeaders(URL *url)
-	{
-		// retrieve file
-		// not cut to a fixed size: a long (signed) url lost its "HTTP/1.0" and line end
-		m_connection->WriteLine(CString::FormatStr("GET %s HTTP/1.0\r\n", url->GetResource()));
-		m_connection->WriteLine(CString::FormatStr("User-Agent: RustyGet/%s\r\n", Util::VersionRevision()));
-		if (url->GetPort() == 0 ||
-			(url->GetPort() == 80 && !strcasecmp(url->GetProtocol(), "http")) ||
-			(url->GetPort() == 443 && !strcasecmp(url->GetProtocol(), "https")))
-		{
-			m_connection->WriteLine(CString::FormatStr("Host: %s\r\n", url->GetHost()));
-		}
-		else
-		{
-			m_connection->WriteLine(CString::FormatStr("Host: %s:%i\r\n", url->GetHost(), url->GetPort()));
-		}
-		m_connection->WriteLine("Accept: */*\r\n");
-#ifndef DISABLE_GZIP
-		m_connection->WriteLine("Accept-Encoding: gzip\r\n");
-#endif
-		m_connection->WriteLine("Connection: close\r\n");
-		m_connection->WriteLine("\r\n");
-	}
-	EStatus DownloadHeaders()
-	{
-		EStatus Status = adRunning;
-
-		m_confirmedLength = false;
-		CharBuffer lineBuf(1024*10);
-		m_contentLen = -1;
-		bool firstLine = true;
-		m_gzip = false;
-		m_redirecting = false;
-		m_redirected = false;
-
-		// Headers
-		while (!IsStopped())
-		{
-			SetLastUpdateTimeNow();
-
-			int len = 0;
-			char* line = m_connection->ReadLine(lineBuf, lineBuf.Size(), &len);
-
-			if (firstLine)
+				self->m_connection->SetTimeout(g_Options ? g_Options->GetUrlTimeout() : 60);
+				self->m_connection->SetSuppressErrors(false);
+				conn = self->m_connection.get();
+			}
+			return conn->Connect() ? 1 : 0;
+		};
+		env.free_conn_cb = [](void* ctx) {
+			auto* self = static_cast<WebDownloader*>(ctx);
+			if (self->m_connection)
 			{
-				Status = CheckResponse(line);
-				if (Status != adRunning)
+				debug("Releasing connection");
+				Guard guard(self->m_connectionMutex);
+				if (self->m_connection && self->m_connection->GetStatus() == Connection::csCancelled)
 				{
-					break;
+					self->m_connection->Disconnect();
 				}
-				firstLine = false;
+				self->m_connection.reset();
 			}
-
-			// Have we encountered a timeout?
-			if (!line)
+		};
+		env.write_line_cb = [](void* ctx, const char* line) {
+			auto* self = static_cast<WebDownloader*>(ctx);
+			if (self->m_connection) self->m_connection->WriteLine(line);
+		};
+		env.read_line_cb = [](void* ctx, char* buf, int size, int* outLen) -> int {
+			auto* self = static_cast<WebDownloader*>(ctx);
+			return (self->m_connection && self->m_connection->ReadLine(buf, size, outLen)) ? 1 : 0;
+		};
+		env.read_body_cb = [](void* ctx, char* buf, int size) -> int {
+			auto* self = static_cast<WebDownloader*>(ctx);
+			if (!self->m_connection) return -1;
+			char* rbuf = nullptr;
+			int rlen = 0;
+			self->m_connection->ReadBuffer(&rbuf, &rlen);
+			if (rlen > 0)
 			{
-				if (!IsStopped())
-				{
-					warn("URL %s failed: Unexpected end of file", *m_infoName);
-				}
-				Status = adFailed;
-				break;
+				int copyLen = rlen < size ? rlen : size;
+				memcpy(buf, rbuf, static_cast<size_t>(copyLen));
+				return copyLen;
 			}
-
-			debug("Header: %s", line);
-
-			// detect body of response
-			if (*line == '\r' || *line == '\n')
-			{
-				break;
-			}
-
-			Util::TrimRight(line);
-			ProcessHeader(line);
-
-			if (m_redirected)
-			{
-				Status = adRedirect;
-				break;
-			}
-		}
-
-		return Status;
-	}
-	EStatus DownloadBody()
-	{
-		EStatus Status = adRunning;
-
-		m_outFile.Close();
-		bool end = false;
-		CharBuffer lineBuf(1024*10);
-		int writtenLen = 0;
-
-#ifndef DISABLE_GZIP
-		m_gUnzipStream.reset();
-		if (m_gzip)
-		{
-			m_gUnzipStream = std::make_unique<GUnzipStream>(1024*10);
-		}
-#endif
-
-		// Body
-		while (!IsStopped())
-		{
-			SetLastUpdateTimeNow();
-
-			char* buffer;
-			int len;
-			m_connection->ReadBuffer(&buffer, &len);
-			if (len == 0)
-			{
-				len = m_connection->TryRecv(lineBuf, lineBuf.Size());
-				buffer = lineBuf;
-			}
-
-			if (len <= 0)
-			{
-				if (len == 0 && m_contentLen == -1 && writtenLen > 0)
-				{
-					end = true;
-					break;
-				}
-				if (!IsStopped())
-				{
-					warn("URL %s failed: Unexpected end of file", *m_infoName);
-				}
-				Status = adFailed;
-				break;
-			}
-
-			// write to output file
-			if (!Write(buffer, len))
-			{
-				Status = adFatalError;
-				break;
-			}
-			writtenLen += len;
-
-			if (writtenLen == m_contentLen || (m_contentLen == -1 && m_gzip && m_confirmedLength))
-			{
-				end = true;
-				break;
-			}
-		}
-
-#ifndef DISABLE_GZIP
-		m_gUnzipStream.reset();
-#endif
-
-		m_outFile.Close();
-
-		if (!end && Status == adRunning && !IsStopped())
-		{
-			warn("URL %s failed: file incomplete", *m_infoName);
-			Status = adFailed;
-		}
-		if (end)
-		{
-			Status = adFinished;
-		}
-
-		return Status;
-	}
-	void ParseRedirect(const char* location)
-	{
-		// rust/src/webdownload.rs resolves the address
-		NzbgetRsBuf buf = nzbget_rs_http_redirect(m_url, location);
-		std::string newLocation(buf.data, buf.len);
-		nzbget_rs_free(buf);
-		// without the query: it carries api keys and passwords (indexer links do),
-		// and this went into the log
-		auto noQuery = [](const char* url) { return std::string(url, strcspn(url, "?")); };
-		detail("URL %s redirected to %s", noQuery(m_url).c_str(), noQuery(newLocation.c_str()).c_str());
-		SetUrl(newLocation.c_str());
+			return self->m_connection->TryRecv(buf, size);
+		};
+		env.is_stopped_cb = [](void* ctx) -> int {
+			return (static_cast<WebDownloader*>(ctx)->IsStopped() || Thread::IsCurrentThreadStopped()) ? 1 : 0;
+		};
+		env.is_paused_cb = [](void*) -> int {
+			return (g_WorkState && g_WorkState->GetPauseDownload()) ? 1 : 0;
+		};
+		env.touch_time_cb = [](void* ctx) {
+			static_cast<WebDownloader*>(ctx)->SetLastUpdateTimeNow();
+		};
+		env.set_status_cb = [](void* ctx, int status) {
+			auto* self = static_cast<WebDownloader*>(ctx);
+			self->m_status = static_cast<EStatus>(status);
+			self->Notify(nullptr);
+		};
+		env.set_http_status_cb = [](void* ctx, int httpStatus) {
+			static_cast<WebDownloader*>(ctx)->m_httpStatus = httpStatus;
+		};
+		env.set_orig_filename_cb = [](void* ctx, const char* filename) {
+			static_cast<WebDownloader*>(ctx)->m_originalFilename = filename;
+		};
+		env.set_url_cb = [](void* ctx, const char* url) {
+			static_cast<WebDownloader*>(ctx)->m_url = url;
+		};
+		env.on_header_cb = [](void* ctx, const char* line) {
+			static_cast<WebDownloader*>(ctx)->ProcessHeader(line);
+		};
+		env.on_log_cb = [](void*, int level, const char* msg) {
+			if (level == 0) debug("%s", msg);
+			else if (level == 1) detail("%s", msg);
+			else if (level == 2) warn("%s", msg);
+			else error("%s", msg);
+		};
+		return static_cast<EStatus>(nzbget_rs_webdl_execute(op, maxRedirects, &env));
 	}
 };
 
@@ -11102,8 +9712,8 @@ class NntpConnection : public Connection
 public:
 	static constexpr int CONNECTION_LINEBUFFER_SIZE = 1024 * 10;
 
-	NntpConnection(NewsServer* newsServer) :
-		Connection(newsServer->GetHost(), newsServer->GetPort(), newsServer->GetTls()), m_newsServer(newsServer)
+	NntpConnection(NewsServer* newsServer, bool registerCancel = true) :
+		Connection(newsServer->GetHost(), newsServer->GetPort(), newsServer->GetTls(), registerCancel), m_newsServer(newsServer)
 	{
 		m_lineBuf.Reserve(CONNECTION_LINEBUFFER_SIZE);
 		SetCipher(newsServer->GetCipher());
@@ -11652,7 +10262,7 @@ private:
 	class PooledConnection : public NntpConnection
 	{
 	public:
-		using NntpConnection::NntpConnection;
+		explicit PooledConnection(NewsServer* newsServer) : NntpConnection(newsServer, false) {}
 		bool GetInUse() { return m_inUse; }
 		void SetInUse(bool inUse) { m_inUse = inUse; }
 		time_t GetFreeTime() { return m_freeTime; }
@@ -13514,10 +12124,6 @@ inline bool ArticleCache::CheckFlush(bool flushEverything)
 class ArticleFetchLimits
 {
 public:
-	static constexpr int64 MaxDecodedBytes = 64LL * 1024 * 1024;
-	static constexpr int64 MaxHeaderBytes = 64LL * 1024;
-	static constexpr int64 MaxRawBytes = MaxDecodedBytes * 3 + MaxHeaderBytes;
-
 	bool AddRawBytes(int64 bytes)
 	{
 		return nzbget_rs_article_fetch_limit_op(0, &m_rawBytes, bytes, 0, 0, 0) != 0;
@@ -13944,15 +12550,8 @@ public:
 		CString MessageId;
 		std::shared_ptr<const std::vector<CString>> Groups;
 	};
-	using FetchFunc = std::function<ArticleFetcher::FetchedArticle(const Request&)>;
 
 	ArticleBatchFetcher()
-	{
-		InitRsBatch();
-	}
-
-	explicit ArticleBatchFetcher(FetchFunc fetchFunc) :
-		m_fetchFunc(std::move(fetchFunc))
 	{
 		InitRsBatch();
 	}
@@ -14038,7 +12637,6 @@ private:
 	int m_workerCount = 0;
 	std::atomic<int>* m_waitCounter = nullptr;
 	std::vector<std::unique_ptr<ArticleFetcher>> m_workerFetchers;
-	FetchFunc m_fetchFunc;			// test seam; production uses real fetchers
 	ArticleFetcher m_inlineFetcher;	// worker count 0 (live mode)
 	void* m_rsBatch = nullptr;
 
@@ -14060,24 +12658,16 @@ private:
 					{
 						grpVec->emplace_back(groups[i] ? groups[i] : "");
 					}
-					if (self->m_fetchFunc)
+					ArticleFetcher* fetcher = &self->m_inlineFetcher;
+					if (workerIdx != SIZE_MAX)
 					{
-						Request req{CString(msgId ? msgId : ""), grpVec};
-						fetched = self->m_fetchFunc(req);
-					}
-					else
-					{
-						ArticleFetcher* fetcher = &self->m_inlineFetcher;
-						if (workerIdx != SIZE_MAX)
+						Guard guard(self->m_mutex);
+						if (workerIdx < self->m_workerFetchers.size())
 						{
-							Guard guard(self->m_mutex);
-							if (workerIdx < self->m_workerFetchers.size())
-							{
-								fetcher = self->m_workerFetchers[workerIdx].get();
-							}
+							fetcher = self->m_workerFetchers[workerIdx].get();
 						}
-						fetched = fetcher->Fetch(msgId ? msgId : "", *grpVec);
 					}
+					fetched = fetcher->Fetch(msgId ? msgId : "", *grpVec);
 				}
 				catch (const std::exception& e)
 				{
@@ -20213,13 +18803,6 @@ private:
 
 	bool BuildIdListFromNameList(IdList* idList, NameList* nameList, DownloadQueue::EMatchMode matchMode, DownloadQueue::EEditAction action)
 	{
-	#ifndef HAVE_REGEX_H
-		if (matchMode == DownloadQueue::mmRegEx)
-		{
-			return false;
-		}
-	#endif
-
 		std::set<int> uniqueIds;
 
 		for (CString& name : nameList)
@@ -24979,13 +23562,11 @@ public:
 	void SetInfoName(const char* infoName) { m_infoName = infoName ? infoName : ""; }
 	void SetNzbName(const char* nzbName) { m_nzbName = nzbName ? nzbName : ""; }
 	void SetParQuick(bool parQuick) { m_parQuick = parQuick; }
-	bool GetParQuick() { return m_parQuick; }
 	void SetForceRepair(bool forceRepair) { m_forceRepair = forceRepair; }
 	void SetParFull(bool parFull) { m_parFull = parFull; }
 	bool GetParFull() { return m_parFull; }
 	EStatus GetStatus() { return m_status; }
 
-#ifndef DISABLE_PARCHECK
 	void Execute()
 	{
 		m_verifiedFiles.clear();
@@ -25038,7 +23619,6 @@ public:
 	{
 		return m_repairer ? nzbget_rs_par_repairer_block_size(m_repairer) : 0;
 	}
-#endif
 
 protected:
 	struct Segment
@@ -25147,7 +23727,6 @@ private:
 	bool m_hasDamagedFiles;
 	bool m_forceRepair = false;
 
-#ifndef DISABLE_PARCHECK
 	NzbgetRsParCallbacks MakeCallbacks()
 	{
 		NzbgetRsParCallbacks cbs{};
@@ -26083,7 +24662,6 @@ private:
 			}
 		}
 	}
-#endif
 };
 
 #endif
@@ -33017,8 +31595,6 @@ public:
 protected:
 	void ProcessHeader(const char* line) override
 	{
-		WebDownloader::ProcessHeader(line);
-
 		size_t start, length;
 		NzbgetRsBuf name{}, value{};
 		switch (nzbget_rs_url_dnzb_header(line, &start, &length, &name, &value))
@@ -34978,11 +33554,8 @@ class DonorScore
 {
 public:
 	static constexpr int Dead = 1;
-	static constexpr int Top = 90;
 
 	static int Base(int pickScore) { return nzbget_rs_donor_score_calc(0, pickScore, 0.0, 0, nullptr, 0); }
-
-	static int Target(double alive, bool twin) { return nzbget_rs_donor_score_calc(1, 0, alive, twin ? 1 : 0, nullptr, 0); }
 
 	class Ranks
 	{
@@ -35230,14 +33803,6 @@ NzbInfo* FindNzb(DownloadQueue* downloadQueue, int nzbId)
 		}
 	}
 	return nullptr;
-}
-
-bool SavedHistoryBackup(NzbInfo* pick, NzbInfo* candidate)
-{
-	return nzbget_rs_dupesearch_op(1, pick != nullptr ? 1 : 0, pick ? (int)pick->GetFullContentHash() : 0,
-		(int)candidate->GetDeleteStatus(), (int)candidate->GetFullContentHash(), 0, 0, 0, 0, 0, 0.0,
-		nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0,
-		nullptr, nullptr, nullptr, nullptr, nullptr) != 0;
 }
 
 bool PlacementAvailable(DownloadQueue* queue, NzbInfo* pick, NzbInfo* backup, bool wholeBackup = false)
@@ -39497,7 +38062,6 @@ public:
 		{
 		}
 		friend class Scheduler;
-		static const int STARTUP_TASK = -1;
 		int GetId() const { return m_id; }
 		int GetHours() const { return m_hours; }
 		int GetMinutes() const { return m_minutes; }
@@ -45962,13 +44526,6 @@ private:
 		}
 		else
 		{
-#ifndef HAVE_REGEX_H
-			if ((DownloadQueue::EMatchMode)matchMode == DownloadQueue::mmRegEx)
-			{
-				SendBoolResponse(false, "Edit-Command failed: the program was compiled without RegEx-support");
-				return;
-			}
-#endif
 			SendBoolResponse(false, "Edit-Command failed");
 		}
 	}
@@ -46144,6 +44701,11 @@ public:
 
 	void Run() override
 	{
+		struct RegistryScope
+		{
+			explicit RegistryScope(std::shared_ptr<Connection::CancelRegistry> r) { Connection::t_cancelRegistry = std::move(r); }
+			~RegistryScope() { Connection::t_cancelRegistry.reset(); }
+		} scope(m_cancelRegistry);
 		Execute();
 		Notify(nullptr);
 	}
@@ -46152,6 +44714,12 @@ public:
 	{
 		Thread::Stop();
 		m_connection->Cancel();
+		Guard guard(m_cancelRegistry->mutex);
+		m_cancelRegistry->stopped = true;
+		for (Connection* conn : m_cancelRegistry->conns)
+		{
+			conn->Cancel();
+		}
 	}
 
 	void SetTls(bool tls) { m_tls = tls; }
@@ -46160,6 +44728,7 @@ public:
 private:
 	bool m_tls;
 	std::unique_ptr<Connection> m_connection;
+	std::shared_ptr<Connection::CancelRegistry> m_cancelRegistry = std::make_shared<Connection::CancelRegistry>();
 
 	bool ServWebRequest(const char* signature)
 	{
@@ -46278,28 +44847,38 @@ public:
 
 		while (!IsStopped())
 		{
-			bool bind = true;
-
-			if (!m_connection)
+			std::shared_ptr<Connection> conn;
+			bool needBind = false;
 			{
-				m_connection = std::make_unique<Connection>(g_Options->GetControlIp(),
-					m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort(),
-					m_tls);
-				m_connection->SetTimeout(g_Options->GetRemoteTimeout());
-				m_connection->SetSuppressErrors(false);
-				bind = m_connection->Bind();
+				Guard guard(m_processorsMutex);
 				if (IsStopped())
 				{
 					break;
 				}
+				if (!m_connection)
+				{
+					m_connection = std::make_shared<Connection>(g_Options->GetControlIp(),
+						m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort(),
+						m_tls);
+					m_connection->SetTimeout(g_Options->GetRemoteTimeout());
+					m_connection->SetSuppressErrors(false);
+					needBind = true;
+				}
+				conn = m_connection;
+			}
+
+			bool bind = !needBind || conn->Bind();
+			if (IsStopped())
+			{
+				break;
 			}
 
 			std::unique_ptr<Connection> acceptedConnection;
 			if (bind)
 			{
-				acceptedConnection = m_connection->Accept();
+				acceptedConnection = conn->Accept();
 			}
-			if (bind && !acceptedConnection && m_connection && m_connection->GetAcceptBusy() && !IsStopped())
+			if (bind && !acceptedConnection && conn->GetAcceptBusy() && !IsStopped())
 			{
 				Util::Sleep(200);
 				continue;
@@ -46310,14 +44889,20 @@ public:
 				{
 					break;
 				}
-				m_connection.reset();
+				{
+					Guard guard(m_processorsMutex);
+					m_connection.reset();
+				}
 				Util::Sleep(500);
 				continue;
 			}
 
-			if (!IsStopped())
 			{
 				Guard guard(m_processorsMutex);
+				if (IsStopped())
+				{
+					break;
+				}
 				if ((int)m_activeProcessors.size() >= MaxProcessors)
 				{
 					time_t now = Util::CurrentTime();
@@ -46351,9 +44936,14 @@ public:
 			}
 		}
 
-		if (m_connection)
+		std::shared_ptr<Connection> finalConn;
 		{
-			m_connection->Disconnect();
+			Guard guard(m_processorsMutex);
+			finalConn = std::move(m_connection);
+		}
+		if (finalConn)
+		{
+			finalConn->Disconnect();
 		}
 
 		debug("RemoteServer: waiting for request processor to complete");
@@ -46374,16 +44964,14 @@ public:
 	void Stop() override
 	{
 		Thread::Stop();
-		if (m_connection)
-		{
-			m_connection->SetSuppressErrors(true);
-			m_connection->SetForceClose(true);
-			m_connection->Cancel();
-		}
-
 		debug("Stopping RequestProcessors");
 		{
 			Guard guard(m_processorsMutex);
+			if (m_connection)
+			{
+				m_connection->SetSuppressErrors(true);
+				m_connection->Cancel();
+			}
 			for (RequestProcessor* requestProcessor : m_activeProcessors)
 			{
 				requestProcessor->Stop();
@@ -46391,18 +44979,6 @@ public:
 		}
 		debug("RequestProcessors are notified");
 		debug("RemoteServer stop end");
-	}
-
-	void ForceStop()
-	{
-		debug("Killing RequestProcessors");
-		Guard guard(m_processorsMutex);
-		for (RequestProcessor* requestProcessor : m_activeProcessors)
-		{
-			requestProcessor->Kill();
-		}
-		m_activeProcessors.clear();
-		debug("RequestProcessors are killed");
 	}
 
 	void Update(Subject* caller, void* aspect) override
@@ -46423,7 +44999,7 @@ private:
 	typedef std::deque<RequestProcessor*> RequestProcessors;
 
 	bool m_tls;
-	std::unique_ptr<Connection> m_connection;
+	std::shared_ptr<Connection> m_connection;
 	RequestProcessors m_activeProcessors;
 	Mutex m_processorsMutex;
 	time_t m_lastCapWarning = 0;

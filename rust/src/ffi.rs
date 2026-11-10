@@ -98,24 +98,6 @@ pub(crate) unsafe fn input<'a>(raw: *const c_char) -> &'a [u8] {
     if raw.is_null() { &[] } else { CStr::from_ptr(raw).to_bytes() }
 }
 
-/// # Safety
-/// `raw` is null or a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_json_encode(raw: *const c_char) -> RsBuf {
-    let mut v = Vec::new();
-    crate::escape::json_encode(input(raw), &mut v);
-    into_buf(v)
-}
-
-/// # Safety
-/// `raw` is null or a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xml_encode(raw: *const c_char) -> RsBuf {
-    let mut v = Vec::new();
-    crate::escape::xml_encode(input(raw), &mut v);
-    into_buf(v)
-}
-
 // ---- twins and alts (twin.rs); lists cross the ABI as text lines ----
 
 fn with_store<T>(f: impl FnOnce(&mut crate::twin::Store) -> T) -> Option<T> {
@@ -380,121 +362,6 @@ pub unsafe extern "C" fn nzbget_rs_gzip_compress(
     }
 }
 
-pub struct RsGUnzipStream {
-    decomp: flate2::Decompress,
-    out_buf: Vec<u8>,
-    next_in: *const u8,
-    avail_in: usize,
-}
-
-/// GUnzipStream::GUnzipStream: creates a streaming gzip decompressor backed by `flate2`.
-#[no_mangle]
-pub extern "C" fn nzbget_rs_gunzip_new(buf_size: c_int) -> *mut RsGUnzipStream {
-    let cap = buf_size.max(1) as usize;
-    Box::into_raw(Box::new(RsGUnzipStream {
-        decomp: flate2::Decompress::new_gzip(15),
-        out_buf: vec![0u8; cap],
-        next_in: std::ptr::null(),
-        avail_in: 0,
-    }))
-}
-
-/// GUnzipStream::~GUnzipStream: frees a streaming gzip decompressor.
-///
-/// # Safety
-/// `stream` is null or from `nzbget_rs_gunzip_new`.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_gunzip_free(stream: *mut RsGUnzipStream) {
-    if !stream.is_null() {
-        drop(Box::from_raw(stream));
-    }
-}
-
-/// GUnzipStream::Write: sets the next compressed input slice.
-///
-/// # Safety
-/// `stream` is null or a valid `RsGUnzipStream`; `in_buf` is readable for `in_len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_gunzip_write(
-    stream: *mut RsGUnzipStream,
-    in_buf: *const u8,
-    in_len: c_int,
-) {
-    let Some(s) = stream.as_mut() else { return };
-    if in_buf.is_null() || in_len <= 0 {
-        s.next_in = std::ptr::null();
-        s.avail_in = 0;
-    } else {
-        s.next_in = in_buf;
-        s.avail_in = in_len as usize;
-    }
-}
-
-/// GUnzipStream::Read: decompresses the next chunk.
-/// Returns `0` (`zlError`), `1` (`zlFinished`), or `2` (`zlOK`).
-///
-/// # Safety
-/// `stream` is null or a valid `RsGUnzipStream`; `out_ptr` and `out_len` are valid output pointers.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_gunzip_read(
-    stream: *mut RsGUnzipStream,
-    out_ptr: *mut *const c_void,
-    out_len: *mut c_int,
-) -> c_int {
-    if !out_len.is_null() {
-        *out_len = 0;
-    }
-    let Some(s) = stream.as_mut() else { return 0 };
-    let in_slice = if s.next_in.is_null() || s.avail_in == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(s.next_in, s.avail_in)
-    };
-    let before_in = s.decomp.total_in();
-    let before_out = s.decomp.total_out();
-    let status = s
-        .decomp
-        .decompress(in_slice, &mut s.out_buf, flate2::FlushDecompress::None);
-    let consumed = (s.decomp.total_in() - before_in) as usize;
-    let produced = (s.decomp.total_out() - before_out) as usize;
-    if consumed > 0 && !s.next_in.is_null() {
-        s.next_in = s.next_in.add(consumed);
-        s.avail_in = s.avail_in.saturating_sub(consumed);
-    }
-    match status {
-        Ok(flate2::Status::StreamEnd) => {
-            if !out_len.is_null() {
-                *out_len = produced as c_int;
-            }
-            if !out_ptr.is_null() {
-                *out_ptr = s.out_buf.as_ptr().cast();
-            }
-            1 // zlFinished
-        }
-        Ok(flate2::Status::Ok) => {
-            if !out_len.is_null() {
-                *out_len = produced as c_int;
-            }
-            if !out_ptr.is_null() {
-                *out_ptr = s.out_buf.as_ptr().cast();
-            }
-            2 // zlOK
-        }
-        Ok(flate2::Status::BufError) => {
-            if produced > 0 {
-                if !out_len.is_null() {
-                    *out_len = produced as c_int;
-                }
-                if !out_ptr.is_null() {
-                    *out_ptr = s.out_buf.as_ptr().cast();
-                }
-            }
-            2 // zlOK
-        }
-        Err(_) => 0, // zlError
-    }
-}
-
 // ---- Terminal / TUI FFI (replacing C ncurses) ----
 
 #[no_mangle]
@@ -505,45 +372,6 @@ pub extern "C" fn nzbget_rs_term_init() -> c_int {
 #[no_mangle]
 pub extern "C" fn nzbget_rs_term_shutdown() {
     crate::ncurses_format::term_shutdown()
-}
-
-/// # Safety
-/// `rows` and `cols` are null or valid writable pointers.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_term_get_size(rows: *mut c_int, cols: *mut c_int) {
-    let (r, c) = crate::ncurses_format::term_get_size();
-    if !rows.is_null() {
-        *rows = r;
-    }
-    if !cols.is_null() {
-        *cols = c;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_term_clear() {
-    crate::ncurses_format::term_clear()
-}
-
-/// # Safety
-/// `text` is null or a valid NUL-terminated C string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_term_plot_text(
-    text: *const c_char,
-    row: c_int,
-    col: c_int,
-    use_color: c_int,
-    color_pair: c_int,
-    blink: c_int,
-) {
-    crate::ncurses_format::term_plot_text(
-        input(text),
-        row,
-        col,
-        use_color != 0,
-        color_pair,
-        blink != 0,
-    );
 }
 
 #[no_mangle]
@@ -576,17 +404,6 @@ pub unsafe extern "C" fn nzbget_rs_xml_decode(raw: *mut c_char) {
     in_place(raw, |b| crate::text::xml_decode(b, &crate::util::byte_tolower_locale))
 }
 
-/// WebUtil::UrlEncode; free the result with nzbget_rs_free.
-///
-/// # Safety
-/// `raw` is null or a NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_url_encode(raw: *const c_char) -> RsBuf {
-    let mut v = Vec::new();
-    crate::text::url_encode(input(raw), &mut v);
-    into_buf(v)
-}
-
 /// WebUtil::XmlFindTag: a pointer into `xml` and the value length, or null
 /// (`value_length` untouched).
 ///
@@ -604,23 +421,6 @@ pub unsafe extern "C" fn nzbget_rs_xml_find_tag(xml: *const c_char, tag: *const 
             xml.add(start)
         }
         None => std::ptr::null(),
-    }
-}
-
-/// WebUtil::ParseContentDispositionFilename; `data` is null for no file name
-/// (the C++ null CString).
-///
-/// # Safety
-/// `cd` is null or NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_content_disposition_filename(
-    cd: *const c_char,
-) -> RsBuf {
-    let none = RsBuf { data: std::ptr::null_mut(), len: 0, cap: 0 };
-    let lower = crate::wildmask::Lower::Fold(&crate::util::byte_tolower_locale);
-    match crate::webutil::content_disposition_filename(input(cd), &lower) {
-        Some(v) => into_buf(v),
-        None => none,
     }
 }
 
@@ -655,40 +455,6 @@ pub unsafe extern "C" fn nzbget_rs_match_file_ext(
         input(list),
         input(separators),
     ))
-}
-
-/// URL::ParseUrl's result: each part as a start and length in the address,
-/// start -1 for a part not set.
-#[repr(C)]
-pub struct UrlParts {
-    pub valid: c_int,
-    pub port: c_int,
-    /// protocol, user, password, host, resource: [start, length]
-    pub parts: [[isize; 2]; 5],
-}
-
-/// URL::ParseUrl (rust/src/url.rs). A valid URL without a resource has
-/// resource start -1: the caller uses "/".
-///
-/// # Safety
-/// `address` is null or NUL-terminated; `out` is writable.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_parse_url(address: *const c_char, out: *mut UrlParts) {
-    if out.is_null() {
-        return;
-    }
-    let mut r = UrlParts { valid: 0, port: 0, parts: [[-1, 0]; 5] };
-    if !address.is_null() {
-        let u = crate::url::parse_url(CStr::from_ptr(address));
-        r.valid = u.valid as c_int;
-        r.port = u.port;
-        for (k, p) in [u.protocol, u.user, u.password, u.host, u.resource].into_iter().enumerate() {
-            if let Some((start, len)) = p {
-                r.parts[k] = [start as isize, len as isize];
-            }
-        }
-    }
-    *out = r;
 }
 
 /// A FeedFilter's view of the C++ feed item (rust/src/feedfilter.rs).
@@ -1546,65 +1312,6 @@ pub unsafe extern "C" fn nzbget_rs_option_restricted(name: *const c_char, signed
     (!name.is_null() && crate::options::option_restricted(CStr::from_ptr(name), signed_char != 0)) as c_int
 }
 
-/// NzbgetRsHttpResponse: WebDownloader::CheckResponse's decision.
-#[repr(C)]
-pub struct HttpResponse {
-    pub result: c_int,
-    pub set_status: c_int,
-    pub http_status: c_int,
-    pub warn: c_int,
-    pub status_offset: usize,
-}
-
-/// WebDownloader::CheckResponse for the first response line (null: closed).
-///
-/// # Safety
-/// `response` is null or NUL-terminated; `out` is null (a no-op) or writable.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_http_check_response(response: *const c_char, out: *mut HttpResponse) {
-    if out.is_null() {
-        return;
-    }
-    let r = crate::webdownload::check_response((!response.is_null()).then(|| CStr::from_ptr(response)));
-    // C++ supplies uninitialized output storage. Read the input before
-    // writing, so callers may also reuse its storage for the result.
-    out.write(HttpResponse {
-        result: r.result,
-        set_status: r.set_status as c_int,
-        http_status: r.http_status,
-        warn: r.warn,
-        status_offset: r.status_offset,
-    });
-}
-
-/// WebDownloader::ProcessHeader: 0 nothing, 1 Content-Length (`*value`),
-/// 2 gzip, 3 Content-Disposition, 4 Location (the address at `line + *value`).
-///
-/// # Safety
-/// `line` is null (nothing) or NUL-terminated; `value` is null or writable.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_http_header(line: *const c_char, redirecting: c_int, value: *mut c_int) -> c_int {
-    if line.is_null() {
-        return 0;
-    }
-    let (action, v) = crate::webdownload::process_header(CStr::from_ptr(line), redirecting != 0);
-    if !value.is_null() {
-        value.write(v);
-    }
-    action
-}
-
-/// WebDownloader::ParseRedirect: where `location` leads from `old_url`; free
-/// with nzbget_rs_free. Null inputs read as empty.
-///
-/// # Safety
-/// `old_url` and `location` are null or NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_http_redirect(old_url: *const c_char, location: *const c_char) -> RsBuf {
-    let as_c = |p: *const c_char| if p.is_null() { c"" } else { CStr::from_ptr(p) };
-    into_buf(crate::webdownload::redirect(as_c(old_url), as_c(location)))
-}
-
 /// NzbgetRsNntpIo: the C++ connection for the NNTP exchange. Each callback
 /// returns 0, or -1 when it threw (the exchange stops; C++ rethrows).
 #[repr(C)]
@@ -2004,17 +1711,6 @@ pub unsafe extern "C" fn nzbget_rs_force_directories(path: *const c_char, errmsg
     let ok = crate::fsops::force_directories(input(path), &mut msg, &crate::fsops::posix_stat);
     errmsg.write(into_buf(msg));
     ok as c_int
-}
-
-/// FileSystem::MakeUniqueFilename; free with nzbget_rs_free.
-///
-/// # Safety
-/// `dir` and `basename` are null (empty) or NUL-terminated.
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_make_unique_filename(dir: *const c_char, basename: *const c_char) -> RsBuf {
-    let as_c = |p: *const c_char| if p.is_null() { c"" } else { CStr::from_ptr(p) };
-    into_buf(crate::fsops::make_unique_filename(as_c(dir), as_c(basename), &crate::fsops::posix_stat))
 }
 
 // Copy exactly the bounded input BString<1024>::Set read. CStr::from_ptr on
@@ -2493,20 +2189,6 @@ pub unsafe extern "C" fn nzbget_rs_par_renamer_load_par_entries(
         }
     }
     1
-}
-
-/// FileSystem::DeleteDirectory: 1 removed, 0 not.
-///
-/// # Safety
-/// `dir` is null (sets `errno = EFAULT` and returns 0) or NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_delete_directory(dir: *const c_char, separator: c_char) -> c_int {
-    if dir.is_null() {
-        crate::fsops::set_last_errno(libc::EFAULT);
-        return 0;
-    }
-    crate::fsdelete::delete_directory(&mut crate::fsops::PosixFsOps, input(dir), separator as u8)
-        .unwrap_or(false) as c_int
 }
 
 /// FileSystem::DeleteDirectoryWithContent: 1 all deleted, 0 not.
@@ -3271,7 +2953,6 @@ mod tests {
             assert_eq!(name.len, 0);
             assert_eq!(input(name.data), b"");
             nzbget_rs_free(name);
-            assert_eq!(nzbget_rs_delete_directory(null(), b'/' as c_char), 0);
             assert_eq!(nzbget_rs_delete_directory_with_content(null(), 0, null_mut()), 0);
             assert_eq!(nzbget_rs_rename_bak(null(), null(), 0, null_mut()), 0);
             assert_eq!(nzbget_rs_file_extension(null(), 0), -1);
@@ -3441,56 +3122,6 @@ mod tests {
             result = -9;
             assert_eq!(nzbget_rs_nntp_handshake(&io, &mut error, &mut rejected, &mut result), -1);
             assert_eq!(result, -9);
-        }
-    }
-
-    #[test]
-    fn webdownload_nulls_offsets_and_owned_redirects() {
-        unsafe {
-            nzbget_rs_http_check_response(std::ptr::null(), std::ptr::null_mut());
-            let mut response = std::mem::MaybeUninit::<HttpResponse>::uninit();
-            nzbget_rs_http_check_response(std::ptr::null(), response.as_mut_ptr());
-            let response = response.assume_init();
-            assert_eq!((response.result, response.set_status, response.warn), (2, 0, 1));
-
-            let line = c"HTTP/1.1 4040 Missing";
-            let mut response = std::mem::MaybeUninit::<HttpResponse>::uninit();
-            nzbget_rs_http_check_response(line.as_ptr(), response.as_mut_ptr());
-            let response = response.assume_init();
-            assert_eq!((response.result, response.http_status, response.warn), (3, 4040, 3));
-            assert_eq!(CStr::from_ptr(line.as_ptr().add(response.status_offset)), c"4040 Missing");
-
-            // Output pointers require writable storage, not initialized Rust
-            // values; they may overlap an input whose bytes are read first.
-            let mut slot = std::mem::MaybeUninit::<HttpResponse>::uninit();
-            let input = slot.as_mut_ptr().cast::<c_char>();
-            std::ptr::copy_nonoverlapping(c"HTTP 404".as_ptr(), input, 9);
-            nzbget_rs_http_check_response(input, slot.as_mut_ptr());
-            assert_eq!(slot.assume_init().http_status, 404);
-
-            let mut uninit_value = std::mem::MaybeUninit::<c_int>::uninit();
-            assert_eq!(nzbget_rs_http_header(c"Content-Length: 17".as_ptr(), 0, uninit_value.as_mut_ptr()), 1);
-            assert_eq!(uninit_value.assume_init(), 17);
-
-            let mut value = 123;
-            assert_eq!(nzbget_rs_http_header(std::ptr::null(), 1, &mut value), 0);
-            assert_eq!(value, 123);
-            assert_eq!(nzbget_rs_http_header(c"Content-Length: -7".as_ptr(), 0, std::ptr::null_mut()), 1);
-            let line = c"Location: /next";
-            assert_eq!(nzbget_rs_http_header(line.as_ptr(), -1, &mut value), 4);
-            assert_eq!(CStr::from_ptr(line.as_ptr().add(value as usize)), c"/next");
-
-            let empty = nzbget_rs_http_redirect(std::ptr::null(), std::ptr::null());
-            assert_eq!(CStr::from_ptr(empty.data), c"(null)://(null)");
-            nzbget_rs_free(empty);
-            let base = std::ffi::CString::new("http://h:81/a/file?q").unwrap();
-            let location = std::ffi::CString::new("next").unwrap();
-            let buf = nzbget_rs_http_redirect(base.as_ptr(), location.as_ptr());
-            drop(base);
-            drop(location);
-            assert_eq!(std::slice::from_raw_parts(buf.data.cast::<u8>(), buf.len), b"http://h:81/a/next");
-            assert_eq!(*buf.data.add(buf.len), 0);
-            nzbget_rs_free(buf);
         }
     }
 
@@ -3990,19 +3621,6 @@ mod tests {
             let xml = c"<x>abc</x>";
             assert_eq!(nzbget_rs_xml_find_tag(xml.as_ptr(), c"x".as_ptr(), &mut length), xml.as_ptr().add(3));
             assert_eq!(length, 3);
-
-            let result = nzbget_rs_content_disposition_filename(std::ptr::null());
-            assert!(result.data.is_null());
-            nzbget_rs_free(result);
-            for (mut raw, expected) in [(b"filename=\"\"\0".to_vec(), &b"\0"[..]),
-                                         (b"FILENAME=abc\0".to_vec(), &b"abc\0"[..])] {
-                let result = nzbget_rs_content_disposition_filename(raw.as_ptr().cast());
-                raw.fill(b'!');
-                assert!(!result.data.is_null());
-                assert_eq!(result.len, expected.len() - 1);
-                assert_eq!(std::slice::from_raw_parts(result.data.cast::<u8>(), result.len + 1), expected);
-                nzbget_rs_free(result);
-            }
         }
     }
 
@@ -4013,24 +3631,6 @@ mod tests {
             let mut xml = *b"&#xA;\0tail";
             nzbget_rs_xml_decode(xml.as_mut_ptr().cast());
             assert_eq!(&xml[..2], b"\n\0");
-            let result = nzbget_rs_url_encode(std::ptr::null());
-            assert_eq!(result.len, 0);
-            assert!(!result.data.is_null());
-            assert_eq!(*result.data, 0);
-            nzbget_rs_free(result);
-        }
-    }
-
-    #[test]
-    fn text_encoders_return_independently_owned_buffers() {
-        unsafe {
-            let expected = &b"\xe9%20x\0"[..];
-            let mut raw = *b"\xe9 x\0ignored";
-            let result = nzbget_rs_url_encode(raw.as_ptr().cast());
-            raw.fill(b'!');
-            assert_eq!(result.len, expected.len() - 1);
-            assert_eq!(std::slice::from_raw_parts(result.data.cast::<u8>(), result.len + 1), expected);
-            nzbget_rs_free(result);
         }
     }
 
@@ -4054,64 +3654,6 @@ mod tests {
             nzbget_rs_json_decode(json.as_mut_ptr().cast());
             assert_eq!(&json[..8], b"\xf0\x9f\x98\x80\xef\xbf\xbd\0");
             assert_eq!(json[19], b'!');
-        }
-    }
-
-    type Encoder = unsafe extern "C" fn(*const c_char) -> RsBuf;
-
-    fn check(encode: Encoder, input: *const c_char, expected: &[u8]) {
-        unsafe {
-            let buf = encode(input);
-            assert!(!buf.data.is_null());
-            assert_eq!(buf.len, expected.len());
-            assert!(buf.cap > buf.len);
-            assert_eq!(CStr::from_ptr(buf.data).to_bytes(), expected);
-            nzbget_rs_free(buf);
-        }
-    }
-
-    #[test]
-    fn null_and_empty_input_return_owned_empty_strings() {
-        for encode in [nzbget_rs_json_encode as Encoder, nzbget_rs_xml_encode] {
-            check(encode, std::ptr::null(), b"");
-            check(encode, b"\0".as_ptr().cast(), b"");
-        }
-    }
-
-    #[test]
-    fn input_stops_at_first_nul_including_inside_utf8() {
-        for encode in [nzbget_rs_json_encode as Encoder, nzbget_rs_xml_encode] {
-            check(encode, b"abc\0ignored\0".as_ptr().cast(), b"abc");
-            check(encode, b"a\xe2\x82\0ignored\0".as_ptr().cast(), b"a");
-            check(encode, b"a\xf0\x9f\x98\0ignored\0".as_ptr().cast(), b"a");
-        }
-    }
-
-    #[test]
-    fn preserves_legacy_malformed_utf8() {
-        check(nzbget_rs_json_encode, b"\xc0\x80\0".as_ptr().cast(), b"\\u0000");
-        check(nzbget_rs_xml_encode, b"\xc0\x80\0".as_ptr().cast(), b".");
-        // Only the first continuation byte is validated by the old C++.
-        check(nzbget_rs_json_encode, b"\xe2\x82A\0".as_ptr().cast(), b"\\u2081");
-        check(nzbget_rs_xml_encode, b"\xe2\x82A\0".as_ptr().cast(), b"&#x002081;");
-        check(nzbget_rs_json_encode, b"\xf7\xbf\xbf\xbf\0".as_ptr().cast(), b"\\udfbf\\udfff");
-        check(nzbget_rs_xml_encode, b"\xf7\xbf\xbf\xbf\0".as_ptr().cast(), b".");
-    }
-
-    #[test]
-    fn result_owns_storage_independently_of_input() {
-        for encode in [nzbget_rs_json_encode as Encoder, nzbget_rs_xml_encode] {
-            let mut input = b"plain\0".to_vec();
-            unsafe {
-                let first = encode(input.as_ptr().cast());
-                input[0] = b'P';
-                let second = encode(input.as_ptr().cast());
-                drop(input);
-                assert_eq!(CStr::from_ptr(first.data).to_bytes(), b"plain");
-                nzbget_rs_free(first);
-                assert_eq!(CStr::from_ptr(second.data).to_bytes(), b"Plain");
-                nzbget_rs_free(second);
-            }
         }
     }
 
@@ -14107,20 +13649,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_update_deleted_stats(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_hash_bj96(
-    buffer: *const c_char,
-    buf_size: c_int,
-    init_value: u32,
-) -> u32 {
-    let bytes = if buffer.is_null() || buf_size <= 0 {
-        b""
-    } else {
-        std::slice::from_raw_parts(buffer.cast::<u8>(), buf_size as usize)
-    };
-    crate::util::hash_bj96(bytes, init_value)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_util_find_executor_program(
     filename: *const c_char,
     custom_path: *const c_char,
@@ -14476,27 +14004,6 @@ pub unsafe extern "C" fn nzbget_rs_fs_get_disk_state(
     } else {
         0
     }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_crc32_combine(crc1: u32, crc2: u32, len2: u32) -> u32 {
-    crate::crc::combine(crc1, crc2, len2)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_util_ends_with(
-    str_ptr: *const c_char,
-    suffix_ptr: *const c_char,
-    case_sensitive: c_int,
-) -> c_int {
-    if str_ptr.is_null() || suffix_ptr.is_null() {
-        return 0;
-    }
-    c_int::from(crate::util::ends_with(
-        input(str_ptr),
-        input(suffix_ptr),
-        case_sensitive != 0,
-    ))
 }
 
 #[no_mangle]
@@ -19377,6 +18884,624 @@ pub unsafe extern "C" fn nzbget_rs_dupesearch_op(
     }
 }
 
+#[cfg(unix)]
+#[repr(C)]
+pub struct NzbgetRsConnEnv {
+    pub ctx: *mut std::ffi::c_void,
+    pub host: *const c_char,
+    pub port: c_int,
+    pub ip_version: c_int,
+    pub timeout_sec: c_int,
+    pub graceful: c_int,
+    pub force_close: c_int,
+    pub has_deadline: c_int,
+    pub resolved_addrs: *const *const c_char,
+    pub resolved_count: usize,
+    pub socket_atomic: *mut c_int,
+    pub status_atomic: *mut c_int,
+    pub is_listener: *mut c_int,
+    pub accept_busy: *mut c_int,
+    pub tls_error: *mut c_int,
+    pub buf_offset: *mut usize,
+    pub buf_avail: *mut usize,
+    pub total_bytes_read: *mut c_int,
+    pub read_buf: *mut u8,
+    pub read_buf_cap: usize,
+    pub send_cb:
+        Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int) -> c_int>,
+    pub recv_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut c_char, c_int) -> c_int>,
+    pub error_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+    pub debug_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+    pub deadline_wait_cb:
+        Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, c_int, c_int) -> c_int>,
+    pub deadline_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+}
 
+#[cfg(unix)]
+struct PosixCancelGuard {
+    old_state: c_int,
+}
 
+#[cfg(unix)]
+impl PosixCancelGuard {
+    unsafe fn disable() -> Self {
+        extern "C" {
+            fn pthread_setcancelstate(state: c_int, oldstate: *mut c_int) -> c_int;
+        }
+        let mut old_state = libc::PTHREAD_CANCEL_ENABLE;
+        pthread_setcancelstate(libc::PTHREAD_CANCEL_DISABLE, &mut old_state);
+        Self { old_state }
+    }
+}
 
+#[cfg(unix)]
+impl Drop for PosixCancelGuard {
+    fn drop(&mut self) {
+        extern "C" {
+            fn pthread_setcancelstate(state: c_int, oldstate: *mut c_int) -> c_int;
+        }
+        unsafe {
+            pthread_setcancelstate(self.old_state, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_conn_op(
+    op: c_int,
+    env: *const NzbgetRsConnEnv,
+    buf_ptr: *mut c_char,
+    buf_len: c_int,
+    arg1: *const c_char,
+    arg2: *const c_char,
+    arg3: *const c_char,
+    int_arg: c_int,
+    out_int: *mut c_int,
+) -> c_int {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    let _cancel_guard = PosixCancelGuard::disable();
+    if env.is_null() {
+        return 0;
+    }
+    let e = &*env;
+    if e.socket_atomic.is_null() || e.status_atomic.is_null() {
+        return 0;
+    }
+    let sock_slot = AtomicI32::from_ptr(e.socket_atomic);
+    let status_slot = AtomicI32::from_ptr(e.status_atomic);
+    if op == 5 {
+        crate::socket::cancel_socket(e.force_close != 0, sock_slot, status_slot);
+        return 1;
+    }
+    let host = input(e.host);
+    let mut is_listener = matches!(op, 0 | 2) && !e.is_listener.is_null() && *e.is_listener != 0;
+    let mut accept_busy = op == 3 && !e.accept_busy.is_null() && *e.accept_busy != 0;
+    let mut tls_error = matches!(op, 0 | 1 | 3 | 7 | 8 | 9 | 11)
+        && !e.tls_error.is_null()
+        && *e.tls_error != 0;
+
+    let to_cstr_lossless = |msg: &[u8]| -> std::ffi::CString {
+        let nul = msg.iter().position(|&b| b == 0).unwrap_or(msg.len());
+        std::ffi::CString::from_vec_unchecked(msg[..nul].to_vec())
+    };
+
+    let on_error = |msg: &[u8]| {
+        if let Some(cb) = e.error_cb {
+            let c = to_cstr_lossless(msg);
+            cb(e.ctx, c.as_ptr());
+        }
+    };
+    let on_debug = |msg: &[u8]| {
+        if let Some(cb) = e.debug_cb {
+            let c = to_cstr_lossless(msg);
+            cb(e.ctx, c.as_ptr());
+        }
+    };
+
+    let res = match op {
+        0 => c_int::from(crate::socket::bind_listener(
+            host,
+            e.port,
+            e.ip_version,
+            sock_slot,
+            status_slot,
+            &mut is_listener,
+            &mut tls_error,
+            on_error,
+        )),
+        1 => {
+            let mut resolved_vec = Vec::with_capacity(e.resolved_count);
+            if !e.resolved_addrs.is_null() && e.resolved_count > 0 {
+                for i in 0..e.resolved_count {
+                    let p = *e.resolved_addrs.add(i);
+                    resolved_vec.push(input(p));
+                }
+            }
+            c_int::from(crate::socket::connect_stream(
+                host,
+                e.port,
+                e.ip_version,
+                e.timeout_sec,
+                &resolved_vec,
+                e.has_deadline != 0,
+                |fd, r, w| {
+                    e.deadline_wait_cb.map_or(false, |cb| {
+                        cb(e.ctx, fd, c_int::from(r), c_int::from(w)) != 0
+                    })
+                },
+                || e.deadline_stopped_cb.map_or(false, |cb| cb(e.ctx) != 0),
+                sock_slot,
+                status_slot,
+                &mut tls_error,
+                on_error,
+                on_debug,
+            ))
+        }
+        2 => {
+            crate::socket::disconnect_socket(
+                host,
+                e.graceful != 0,
+                &mut is_listener,
+                sock_slot,
+                status_slot,
+            );
+            1
+        }
+        3 => crate::socket::accept_connection(
+            host,
+            e.timeout_sec,
+            sock_slot,
+            status_slot,
+            &mut accept_busy,
+            &mut tls_error,
+            || e.deadline_stopped_cb.map_or(false, |cb| cb(e.ctx) != 0),
+            on_error,
+        ),
+        4 => {
+            let ra = crate::socket::remote_addr(host, sock_slot.load(Ordering::SeqCst));
+            if !buf_ptr.is_null() && buf_len > 0 {
+                let copy_len = ra.len().min((buf_len as usize).saturating_sub(1));
+                if copy_len > 0 {
+                    std::ptr::copy_nonoverlapping(ra.as_ptr(), buf_ptr.cast::<u8>(), copy_len);
+                }
+                *buf_ptr.add(copy_len) = 0;
+                copy_len as c_int
+            } else {
+                0
+            }
+        }
+        6 => {
+            let data = if buf_ptr.is_null() || buf_len <= 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(buf_ptr.cast::<u8>(), buf_len as usize)
+            };
+            c_int::from(crate::socket::send_all(status_slot, data, |chunk| {
+                e.send_cb.map_or(-1, |cb| {
+                    cb(e.ctx, chunk.as_ptr().cast::<c_char>(), chunk.len() as c_int)
+                })
+            }))
+        }
+        7 => {
+            if status_slot.load(Ordering::SeqCst) != crate::socket::CS_CONNECTED
+                || buf_ptr.is_null()
+                || buf_len <= 0
+                || e.read_buf.is_null()
+                || e.read_buf_cap == 0
+                || e.buf_offset.is_null()
+                || e.buf_avail.is_null()
+                || e.total_bytes_read.is_null()
+            {
+                0
+            } else {
+                let rbuf = std::slice::from_raw_parts_mut(e.read_buf, e.read_buf_cap);
+                let dst = std::slice::from_raw_parts_mut(buf_ptr.cast::<u8>(), buf_len as usize);
+                let r = crate::socket::read_line(
+                    host,
+                    status_slot,
+                    rbuf,
+                    &mut *e.buf_offset,
+                    &mut *e.buf_avail,
+                    &mut *e.total_bytes_read,
+                    dst,
+                    &mut tls_error,
+                    |chunk, te| {
+                        let out = e.recv_cb.map_or(-1, |cb| {
+                            cb(
+                                e.ctx,
+                                chunk.as_mut_ptr().cast::<c_char>(),
+                                chunk.len() as c_int,
+                            )
+                        });
+                        *te = !e.tls_error.is_null() && *e.tls_error != 0;
+                        out
+                    },
+                    on_error,
+                );
+                match r {
+                    Some(n) => {
+                        if !out_int.is_null() {
+                            *out_int = n as c_int;
+                        }
+                        1
+                    }
+                    None => {
+                        if !out_int.is_null() {
+                            *out_int = 0;
+                        }
+                        0
+                    }
+                }
+            }
+        }
+        8 => {
+            if buf_len <= 0 {
+                1
+            } else if buf_ptr.is_null()
+                || e.read_buf.is_null()
+                || e.buf_offset.is_null()
+                || e.buf_avail.is_null()
+                || e.total_bytes_read.is_null()
+            {
+                0
+            } else {
+                let rbuf = std::slice::from_raw_parts(e.read_buf, e.read_buf_cap);
+                let dst = std::slice::from_raw_parts_mut(buf_ptr.cast::<u8>(), buf_len as usize);
+                c_int::from(crate::socket::recv_exact(
+                    host,
+                    rbuf,
+                    &mut *e.buf_offset,
+                    &mut *e.buf_avail,
+                    &mut *e.total_bytes_read,
+                    dst,
+                    &mut tls_error,
+                    |chunk, te| {
+                        let out = e.recv_cb.map_or(-1, |cb| {
+                            cb(
+                                e.ctx,
+                                chunk.as_mut_ptr().cast::<c_char>(),
+                                chunk.len() as c_int,
+                            )
+                        });
+                        *te = !e.tls_error.is_null() && *e.tls_error != 0;
+                        out
+                    },
+                    on_error,
+                ))
+            }
+        }
+        9 => {
+            let prefix = input(arg1);
+            let msg_arg = if arg2.is_null() {
+                None
+            } else {
+                Some(input(arg2))
+            };
+            let err_msg = if arg3.is_null() {
+                None
+            } else {
+                Some(input(arg3))
+            };
+            if let Some(formatted) = crate::socket::format_report_error(
+                &mut tls_error,
+                prefix,
+                msg_arg,
+                buf_len != 0,
+                int_arg,
+                err_msg,
+            ) {
+                on_error(&formatted);
+            }
+            1
+        }
+        10 => crate::socket::write_line(status_slot, input(arg1), |chunk| {
+            e.send_cb.map_or(-1, |cb| {
+                cb(e.ctx, chunk.as_ptr().cast::<c_char>(), chunk.len() as c_int)
+            })
+        }),
+        11 => {
+            if buf_ptr.is_null() || buf_len < 0 || e.total_bytes_read.is_null() {
+                -1
+            } else {
+                let dst = if buf_len == 0 {
+                    &mut [][..]
+                } else {
+                    std::slice::from_raw_parts_mut(buf_ptr.cast::<u8>(), buf_len as usize)
+                };
+                crate::socket::try_recv(
+                    host,
+                    &mut *e.total_bytes_read,
+                    dst,
+                    &mut tls_error,
+                    |chunk, te| {
+                        let out = e.recv_cb.map_or(-1, |cb| {
+                            cb(
+                                e.ctx,
+                                chunk.as_mut_ptr().cast::<c_char>(),
+                                chunk.len() as c_int,
+                            )
+                        });
+                        *te = !e.tls_error.is_null() && *e.tls_error != 0;
+                        out
+                    },
+                    on_error,
+                )
+            }
+        }
+        _ => 0,
+    };
+
+    if matches!(op, 0 | 2) && !e.is_listener.is_null() {
+        *e.is_listener = c_int::from(is_listener);
+    }
+    if op == 3 && !e.accept_busy.is_null() {
+        *e.accept_busy = c_int::from(accept_busy);
+    }
+    if matches!(op, 0 | 1 | 3 | 7 | 8 | 9 | 11) && !e.tls_error.is_null() {
+        *e.tls_error = c_int::from(tls_error);
+    }
+    res
+}
+
+#[cfg(unix)]
+#[repr(C)]
+pub struct NzbgetRsWebDlEnv {
+    pub ctx: *mut std::ffi::c_void,
+    pub initial_url: *const c_char,
+    pub output_filename: *const c_char,
+    pub info_name: *const c_char,
+    pub version: *const c_char,
+    pub write_buffer_kb: c_int,
+    pub url_retries: c_int,
+    pub url_interval_sec: c_int,
+    pub retry: c_int,
+    pub force: c_int,
+    pub tls_disabled: c_int,
+    pub gzip_disabled: c_int,
+    pub connect_cb:
+        Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int, c_int) -> c_int>,
+    pub free_conn_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    pub write_line_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+    pub read_line_cb:
+        Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut c_char, c_int, *mut c_int) -> c_int>,
+    pub read_body_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut c_char, c_int) -> c_int>,
+    pub is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    pub is_paused_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    pub touch_time_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    pub set_status_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int)>,
+    pub set_http_status_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int)>,
+    pub set_orig_filename_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+    pub set_url_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+    pub on_header_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+    pub on_log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+}
+
+#[cfg(unix)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_webdl_execute(
+    op: c_int,
+    max_redirects: c_int,
+    env: *const NzbgetRsWebDlEnv,
+) -> c_int {
+    use crate::webdownload::{
+        webdl_download_with_redirects, webdl_run_loop, WebDlConfig, WebDlIo, WebDlStatus,
+    };
+    let _cancel_guard = PosixCancelGuard::disable();
+    if env.is_null() {
+        return WebDlStatus::AdFailed as c_int;
+    }
+    let e = &*env;
+    let cfg = WebDlConfig {
+        initial_url: input(e.initial_url),
+        output_filename: input(e.output_filename),
+        info_name: input(e.info_name),
+        version: input(e.version),
+        write_buffer_kb: e.write_buffer_kb,
+        url_retries: e.url_retries,
+        url_interval_sec: e.url_interval_sec,
+        retry: e.retry != 0,
+        force: e.force != 0,
+        tls_disabled: e.tls_disabled != 0,
+        gzip_disabled: e.gzip_disabled != 0,
+    };
+
+    struct CWebDlIo<'a> {
+        e: &'a NzbgetRsWebDlEnv,
+    }
+
+    impl WebDlIo for CWebDlIo<'_> {
+        fn connect(&mut self, host: &CStr, port: i32, tls: bool) -> bool {
+            unsafe {
+                self.e.connect_cb.map_or(false, |cb| {
+                    cb(self.e.ctx, host.as_ptr(), port, c_int::from(tls)) != 0
+                })
+            }
+        }
+        fn free_conn(&mut self) {
+            unsafe {
+                if let Some(cb) = self.e.free_conn_cb {
+                    cb(self.e.ctx);
+                }
+            }
+        }
+        fn write_line(&mut self, line: &CStr) {
+            unsafe {
+                if let Some(cb) = self.e.write_line_cb {
+                    cb(self.e.ctx, line.as_ptr());
+                }
+            }
+        }
+        fn read_line(&mut self, buf: &mut [u8]) -> Option<usize> {
+            unsafe {
+                let mut len: c_int = 0;
+                let ok = self.e.read_line_cb.map_or(0, |cb| {
+                    cb(
+                        self.e.ctx,
+                        buf.as_mut_ptr().cast::<c_char>(),
+                        buf.len() as c_int,
+                        &mut len,
+                    )
+                });
+                if ok != 0 {
+                    Some((len.max(0) as usize).min(buf.len().saturating_sub(1)))
+                } else {
+                    None
+                }
+            }
+        }
+        fn read_body_chunk(&mut self, buf: &mut [u8]) -> i32 {
+            unsafe {
+                self.e.read_body_cb.map_or(-1, |cb| {
+                    cb(
+                        self.e.ctx,
+                        buf.as_mut_ptr().cast::<c_char>(),
+                        buf.len() as c_int,
+                    )
+                })
+            }
+        }
+        fn is_stopped(&mut self) -> bool {
+            unsafe { self.e.is_stopped_cb.map_or(false, |cb| cb(self.e.ctx) != 0) }
+        }
+        fn is_paused(&mut self) -> bool {
+            unsafe { self.e.is_paused_cb.map_or(false, |cb| cb(self.e.ctx) != 0) }
+        }
+        fn touch_time(&mut self) {
+            unsafe {
+                if let Some(cb) = self.e.touch_time_cb {
+                    cb(self.e.ctx);
+                }
+            }
+        }
+        fn sleep_100ms(&mut self) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        fn set_status(&mut self, status: WebDlStatus) {
+            unsafe {
+                if let Some(cb) = self.e.set_status_cb {
+                    cb(self.e.ctx, status as c_int);
+                }
+            }
+        }
+        fn set_http_status(&mut self, http_status: i32) {
+            unsafe {
+                if let Some(cb) = self.e.set_http_status_cb {
+                    cb(self.e.ctx, http_status);
+                }
+            }
+        }
+        fn set_original_filename(&mut self, filename: &[u8]) {
+            unsafe {
+                if let Some(cb) = self.e.set_orig_filename_cb {
+                    let nul = filename
+                        .iter()
+                        .position(|&b| b == 0)
+                        .unwrap_or(filename.len());
+                    let c = std::ffi::CString::from_vec_unchecked(filename[..nul].to_vec());
+                    cb(self.e.ctx, c.as_ptr());
+                }
+            }
+        }
+        fn set_url(&mut self, url: &[u8]) {
+            unsafe {
+                if let Some(cb) = self.e.set_url_cb {
+                    let nul = url.iter().position(|&b| b == 0).unwrap_or(url.len());
+                    let c = std::ffi::CString::from_vec_unchecked(url[..nul].to_vec());
+                    cb(self.e.ctx, c.as_ptr());
+                }
+            }
+        }
+        fn on_header(&mut self, line: &CStr) {
+            unsafe {
+                if let Some(cb) = self.e.on_header_cb {
+                    cb(self.e.ctx, line.as_ptr());
+                }
+            }
+        }
+        fn on_log(&mut self, level: i32, msg: &[u8]) {
+            unsafe {
+                if let Some(cb) = self.e.on_log_cb {
+                    let nul = msg.iter().position(|&b| b == 0).unwrap_or(msg.len());
+                    let c = std::ffi::CString::from_vec_unchecked(msg[..nul].to_vec());
+                    cb(self.e.ctx, level, c.as_ptr());
+                }
+            }
+        }
+    }
+
+    let mut io = CWebDlIo { e };
+    match op {
+        0 => webdl_download_with_redirects(max_redirects, &cfg, &mut io) as c_int,
+        1 => webdl_run_loop(&cfg, &mut io) as c_int,
+        _ => WebDlStatus::AdFailed as c_int,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod conn_op_cancel_tests {
+    use super::*;
+    use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    #[test]
+    fn conn_op_cancel_touches_only_atomic_slots() {
+        let mut pair = [0 as c_int; 2];
+        assert_eq!(
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, pair.as_mut_ptr()) },
+            0
+        );
+        let sock = AtomicI32::new(pair[0]);
+        let status = AtomicI32::new(crate::socket::CS_CONNECTED);
+        let dangling_c = NonNull::<c_char>::dangling().as_ptr();
+        let dangling_i = NonNull::<c_int>::dangling().as_ptr();
+        let dangling_u = NonNull::<usize>::dangling().as_ptr();
+        let env = NzbgetRsConnEnv {
+            ctx: std::ptr::null_mut(),
+            host: dangling_c,
+            port: 0,
+            ip_version: 0,
+            timeout_sec: 0,
+            graceful: 0,
+            force_close: 0,
+            has_deadline: 0,
+            resolved_addrs: std::ptr::null(),
+            resolved_count: 0,
+            socket_atomic: sock.as_ptr(),
+            status_atomic: status.as_ptr(),
+            is_listener: dangling_i,
+            accept_busy: dangling_i,
+            tls_error: dangling_i,
+            buf_offset: dangling_u,
+            buf_avail: dangling_u,
+            total_bytes_read: dangling_i,
+            read_buf: NonNull::<u8>::dangling().as_ptr(),
+            read_buf_cap: 16,
+            send_cb: None,
+            recv_cb: None,
+            error_cb: None,
+            debug_cb: None,
+            deadline_wait_cb: None,
+            deadline_stopped_cb: None,
+        };
+        let rc = unsafe {
+            nzbget_rs_conn_op(
+                5,
+                &env,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 1);
+        assert_eq!(status.load(Ordering::SeqCst), crate::socket::CS_CANCELLED);
+        unsafe {
+            libc::close(pair[0]);
+            libc::close(pair[1]);
+        }
+    }
+}

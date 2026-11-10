@@ -17,11 +17,6 @@ typedef struct
 	size_t cap;
 } NzbgetRsBuf;
 
-// raw may be NULL (treated as empty); otherwise it must point to a readable
-// NUL-terminated string for the duration of the call. Results own their storage.
-// Allocation failure or a Rust panic aborts; unwinding never crosses this ABI.
-NzbgetRsBuf nzbget_rs_json_encode(const char* raw);
-NzbgetRsBuf nzbget_rs_xml_encode(const char* raw);
 // Twins and alts (rust/src/twin.rs). Lists are text lines: a file list is
 // "length\tmd5\tname" per file. A download is given by its id and its
 // identity "fingerprint#posting" (DupeFiles and the posting's message-id
@@ -58,15 +53,10 @@ void nzbget_rs_json_decode(char* raw);
 // WebUtil's text helpers (rust/src/text.rs): the in-place ones take NULL (no-op)
 // or a caller-owned writable NUL-terminated string. Panics abort.
 void nzbget_rs_xml_decode(char* raw);
-// NULL input means empty. Results are Rust-owned NUL-terminated buffers:
-// copy before freeing with nzbget_rs_free, never with the C allocator.
-NzbgetRsBuf nzbget_rs_url_encode(const char* raw);
 
 // WebUtil's finders (rust/src/webutil.rs): a pointer into the text and the
 // value length, or NULL with valueLength untouched
 const char* nzbget_rs_xml_find_tag(const char* xml, const char* tag, int* valueLength);
-// WebUtil::ParseContentDispositionFilename: data is NULL for no file name.
-NzbgetRsBuf nzbget_rs_content_disposition_filename(const char* contentDisposition);
 
 // Util's string helpers (rust/src/util.rs). Format results are Rust-owned;
 // copy and release with nzbget_rs_free. Numeric formatting uses LC_NUMERIC.
@@ -78,17 +68,6 @@ NzbgetRsBuf nzbget_rs_format_size(long long size);
 void nzbget_rs_reduce_str(char* str, const char* from, const char* to);
 // NULL strings are empty; non-NULL strings must be readable and NUL-terminated.
 int nzbget_rs_match_file_ext(const char* filename, const char* extensionList, const char* listSeparator);
-
-// URL::ParseUrl (rust/src/url.rs): parts (protocol, user, password, host,
-// resource) as {start, length} in the address, start -1 when not set; a valid
-// URL without a resource has resource start -1 (meaning "/")
-typedef struct
-{
-	int valid;
-	int port;
-	ptrdiff_t parts[5][2];
-} NzbgetRsUrlParts;
-void nzbget_rs_parse_url(const char* address, NzbgetRsUrlParts* out);
 
 // FeedFilter (rust/src/feedfilter.rs): the feed item stays in C++ and is read
 // and changed through these callbacks, in the C++ order. Fields: title,
@@ -330,25 +309,6 @@ void nzbget_rs_volume_add(int64_t* seconds, size_t secondsLen, int64_t* minutes,
 int nzbget_rs_validate_option_name(const char* name, int (*predefined)(void* ctx, const char* name), void* ctx);
 int nzbget_rs_option_restricted(const char* name, int signedChar);
 
-// WebDownloader's HTTP decisions (rust/src/webdownload.rs). check_response:
-// result 0 running, 1 running a redirect, 2 connect error, 3 not found,
-// 4 failed; setStatus/httpStatus the status code read; warn 0 none,
-// 1 connection closed, 2 failed with the whole line, 3 failed with the text at
-// statusOffset. http_header: 0 nothing, 1 Content-Length (*value), 2 gzip,
-// 3 Content-Disposition, 4 Location (at line + *value). http_redirect: the
-// address a Location leads to (free with nzbget_rs_free).
-typedef struct NzbgetRsHttpResponse
-{
-	int result;
-	int setStatus;
-	int httpStatus;
-	int warn;
-	size_t statusOffset;
-} NzbgetRsHttpResponse;
-void nzbget_rs_http_check_response(const char* response, NzbgetRsHttpResponse* out);
-int nzbget_rs_http_header(const char* line, int redirecting, int* value);
-NzbgetRsBuf nzbget_rs_http_redirect(const char* oldUrl, const char* location);
-
 // NntpConnection's protocol (rust/src/nntp.rs), driving the C++ connection
 // through NzbgetRsNntpIo. Each callback returns 0, or -1 when it threw: the
 // exchange stops and the call returns -1 (rethrow then). readLine sets *line
@@ -425,8 +385,6 @@ int nzbget_rs_directory_exists(const char* path);
 // 1 on success, 0 on failure; every non-NULL errmsg is initialized (empty on
 // success or invalid NULL arguments). errmsg must not overlap the input.
 int nzbget_rs_force_directories(const char* path, NzbgetRsBuf* errmsg);
-// NULL dir/basename mean empty strings.
-NzbgetRsBuf nzbget_rs_make_unique_filename(const char* dir, const char* basename);
 
 // ParParser's name checks (rust/src/parparser.rs).
 // Names are borrowed and read only through the first NUL or 1023 bytes.
@@ -539,7 +497,6 @@ int nzbget_rs_par_renamer_load_par_entries(
 // must not hold an allocation needing release. Callbacks must not unwind;
 // sink and add/set are valid only during their list/lastError call. Strings
 // passed to add/set are copied before that function returns.
-int nzbget_rs_delete_directory(const char* dir, char separator);
 int nzbget_rs_delete_directory_with_content(const char* dir, char separator, NzbgetRsBuf* errmsg);
 int nzbget_rs_rename_bak(const char* filename, const char* bakPart, int removeOldExtension,
 	NzbgetRsBuf* newName);
@@ -814,7 +771,6 @@ void nzbget_rs_signal_notify(int signum);
 void nzbget_c_set_process_args(int argc, char* argv[], char* argp[]);
 void nzbget_c_util_init(void);
 int  nzbget_c_nserv_main(int argc, char* argv[]);
-int  nzbget_c_win_service_check(int argc, char* argv[]);
 int  nzbget_c_phase1_init(bool reloading);
 int  nzbget_c_phase2_subsystems_create_and_recover(bool reloading);
 int  nzbget_c_phase3_server_activate(void);
@@ -3006,18 +2962,9 @@ uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t ini
 uint32_t nzbget_rs_gzip_len(int input_len);
 uint32_t nzbget_rs_gzip_compress(
     const uint8_t* in_buf, int in_len, uint8_t* out_buf, int out_len);
-typedef struct RsGUnzipStream RsGUnzipStream;
-RsGUnzipStream* nzbget_rs_gunzip_new(int buf_size);
-void nzbget_rs_gunzip_free(RsGUnzipStream* stream);
-void nzbget_rs_gunzip_write(RsGUnzipStream* stream, const uint8_t* in_buf, int in_len);
-int nzbget_rs_gunzip_read(RsGUnzipStream* stream, const void** out_ptr, int* out_len);
 
 int nzbget_rs_term_init(void);
 void nzbget_rs_term_shutdown(void);
-void nzbget_rs_term_get_size(int* rows, int* cols);
-void nzbget_rs_term_clear(void);
-void nzbget_rs_term_plot_text(
-    const char* text, int row, int col, int use_color, int color_pair, int blink);
 void nzbget_rs_term_refresh(int row, int col);
 int nzbget_rs_term_read_key(void);
 
@@ -3157,7 +3104,6 @@ void nzbget_rs_nzb_update_deleted_stats(
     int64_t* inout_par_size, int64_t* inout_par_cur_success_size, int64_t* inout_par_failed_size,
     int64_t* inout_par_cur_failed_size, int* inout_paused_file_count, int64_t* inout_paused_size);
 
-uint32_t nzbget_rs_hash_bj96(const char* buffer, int buf_size, uint32_t init_value);
 NzbgetRsBuf nzbget_rs_util_find_executor_program(
     const char* filename, const char* custom_path, int* out_found);
 void nzbget_rs_util_format_time(int64_t time_sec, char* buffer, int bufsize);
@@ -3206,9 +3152,6 @@ int nzbget_rs_fs_load_file_into_buffer(
     uint8_t* (*reserve_cb)(void*, int));
 int nzbget_rs_fs_get_disk_state(
     const char* path, int64_t* out_avail, int64_t* out_total);
-uint32_t nzbget_rs_crc32_combine(uint32_t crc1, uint32_t crc2, uint32_t len2);
-int nzbget_rs_util_ends_with(
-    const char* str_ptr, const char* suffix_ptr, int case_sensitive);
 char* nzbget_rs_tokenizer_next(
     char* data_str, const char* separators, char** inout_save_ptr, int* inout_working);
 void nzbget_rs_binrpc_init_message_base(
@@ -3575,6 +3518,70 @@ int nzbget_rs_dupesearch_op(
     const int* i32_1, const int* i32_2,
     const int64_t* i64_1, const int64_t* i64_2, size_t len,
     int* out1, int* out2, int* out_arr, int64_t* out_i64, NzbgetRsBuf* out_buf);
+
+typedef struct NzbgetRsConnEnv {
+    void* ctx;
+    const char* host;
+    int port;
+    int ip_version;
+    int timeout_sec;
+    int graceful;
+    int force_close;
+    int has_deadline;
+    const char* const* resolved_addrs;
+    size_t resolved_count;
+    int* socket_atomic;
+    int* status_atomic;
+    int* is_listener;
+    int* accept_busy;
+    int* tls_error;
+    size_t* buf_offset;
+    size_t* buf_avail;
+    int* total_bytes_read;
+    uint8_t* read_buf;
+    size_t read_buf_cap;
+    int (*send_cb)(void* ctx, const char* buf, int len);
+    int (*recv_cb)(void* ctx, char* buf, int len);
+    void (*error_cb)(void* ctx, const char* msg);
+    void (*debug_cb)(void* ctx, const char* msg);
+    int (*deadline_wait_cb)(void* ctx, int fd, int read, int write);
+    int (*deadline_stopped_cb)(void* ctx);
+} NzbgetRsConnEnv;
+
+int nzbget_rs_conn_op(
+    int op, const NzbgetRsConnEnv* env, char* buf_ptr, int buf_len,
+    const char* arg1, const char* arg2, const char* arg3, int int_arg, int* out_int);
+
+typedef struct NzbgetRsWebDlEnv {
+    void* ctx;
+    const char* initial_url;
+    const char* output_filename;
+    const char* info_name;
+    const char* version;
+    int write_buffer_kb;
+    int url_retries;
+    int url_interval_sec;
+    int retry;
+    int force;
+    int tls_disabled;
+    int gzip_disabled;
+    int (*connect_cb)(void* ctx, const char* host, int port, int tls);
+    void (*free_conn_cb)(void* ctx);
+    void (*write_line_cb)(void* ctx, const char* line);
+    int (*read_line_cb)(void* ctx, char* buf, int size, int* out_len);
+    int (*read_body_cb)(void* ctx, char* buf, int size);
+    int (*is_stopped_cb)(void* ctx);
+    int (*is_paused_cb)(void* ctx);
+    void (*touch_time_cb)(void* ctx);
+    void (*set_status_cb)(void* ctx, int status);
+    void (*set_http_status_cb)(void* ctx, int http_status);
+    void (*set_orig_filename_cb)(void* ctx, const char* filename);
+    void (*set_url_cb)(void* ctx, const char* url);
+    void (*on_header_cb)(void* ctx, const char* line);
+    void (*on_log_cb)(void* ctx, int level, const char* msg);
+} NzbgetRsWebDlEnv;
+
+int nzbget_rs_webdl_execute(int op, int max_redirects, const NzbgetRsWebDlEnv* env);
 
 #include "nzbget_tls_cipher.h"
 

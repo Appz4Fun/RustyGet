@@ -52,6 +52,8 @@ pub mod rpcparams;
 pub mod rpcroute;
 pub mod scanner;
 pub mod scheduler;
+#[cfg(unix)]
+pub mod socket;
 pub mod statmeter;
 pub mod systemhealth;
 pub mod text;

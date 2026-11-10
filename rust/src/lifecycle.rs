@@ -55,7 +55,6 @@ pub struct LifecycleHooks {
         Option<unsafe extern "C" fn(c_int, *mut *mut c_char, *mut *mut c_char)>,
     pub util_init: Option<unsafe extern "C" fn()>,
     pub nserv_main: Option<unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int>,
-    pub win_service_check: Option<unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int>,
     pub phase1_init: Option<unsafe extern "C" fn(bool) -> c_int>,
     pub phase2_subsystems_create_and_recover: Option<unsafe extern "C" fn(bool) -> c_int>,
     pub phase3_server_activate: Option<unsafe extern "C" fn() -> c_int>,
@@ -95,7 +94,6 @@ pub fn resolve_hooks() -> Option<LifecycleHooks> {
         let set_process_args = resolve_sym(b"nzbget_c_set_process_args\0");
         let util_init = resolve_sym(b"nzbget_c_util_init\0");
         let nserv_main = resolve_sym(b"nzbget_c_nserv_main\0");
-        let win_service_check = None;
         let phase1_init = resolve_sym(b"nzbget_c_phase1_init\0");
         let phase2_subsystems_create_and_recover =
             resolve_sym(b"nzbget_c_phase2_subsystems_create_and_recover\0");
@@ -112,7 +110,6 @@ pub fn resolve_hooks() -> Option<LifecycleHooks> {
                 set_process_args,
                 util_init,
                 nserv_main,
-                win_service_check,
                 phase1_init,
                 phase2_subsystems_create_and_recover,
                 phase3_server_activate,
@@ -582,7 +579,6 @@ mod tests {
             set_process_args: None,
             util_init: None,
             nserv_main: None,
-            win_service_check: None,
             phase1_init: Some(mock_phase1),
             phase2_subsystems_create_and_recover: Some(mock_phase2),
             phase3_server_activate: Some(mock_phase3),
@@ -621,7 +617,6 @@ mod tests {
             set_process_args: None,
             util_init: None,
             nserv_main: None,
-            win_service_check: None,
             phase1_init: Some(mock_phase1_client_exit),
             phase2_subsystems_create_and_recover: Some(mock_phase2),
             phase3_server_activate: Some(mock_phase3),
@@ -670,7 +665,6 @@ mod tests {
             set_process_args: None,
             util_init: None,
             nserv_main: None,
-            win_service_check: None,
             phase1_init: Some(mock_phase1),
             phase2_subsystems_create_and_recover: Some(mock_phase2),
             phase3_server_activate: Some(mock_phase3),

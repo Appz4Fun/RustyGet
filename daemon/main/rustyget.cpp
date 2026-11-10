@@ -771,12 +771,7 @@ struct CommandLineParser
 		args.push_back(nullptr);
 		RsSink sink{this, args.data(), nullptr};
 		NzbgetRsCmdlineSink rsSink{nullptr, &sink, RsSetInt, RsSetStr, RsSteal, RsPushOption, RsPushId, RsPushName, RsError};
-#ifdef HAVE_GETOPT_LONG
-		const int useLong = 1;
-#else
-		const int useLong = 0;
-#endif
-		int result = nzbget_rs_cmdline_parse(argc, args.data(), useLong, &rsSink);
+		int result = nzbget_rs_cmdline_parse(argc, args.data(), 1, &rsSink);
 		if (sink.error)
 		{
 			std::rethrow_exception(sink.error);
@@ -1565,44 +1560,10 @@ private:
 			m_remoteSecureServer->Stop();
 		}
 
-		int maxWaitMSec = 5000;
-		while (((m_remoteServer && m_remoteServer->IsRunning()) ||
-			(m_remoteSecureServer && m_remoteSecureServer->IsRunning())) &&
-			maxWaitMSec > 0)
+		while ((m_remoteServer && m_remoteServer->IsRunning()) ||
+			(m_remoteSecureServer && m_remoteSecureServer->IsRunning()))
 		{
-			Util::Sleep(100);
-			maxWaitMSec -= 100;
-		}
-
-		if (m_remoteServer && m_remoteServer->IsRunning())
-		{
-			m_remoteServer->ForceStop();
-		}
-
-		if (m_remoteSecureServer && m_remoteSecureServer->IsRunning())
-		{
-			m_remoteSecureServer->ForceStop();
-		}
-
-		maxWaitMSec = 5000;
-		while (((m_remoteServer && m_remoteServer->IsRunning()) ||
-			(m_remoteSecureServer && m_remoteSecureServer->IsRunning())) &&
-			maxWaitMSec > 0)
-		{
-			Util::Sleep(100);
-			maxWaitMSec -= 100;
-		}
-
-		if (m_remoteServer && m_remoteServer->IsRunning())
-		{
-			debug("Killing RemoteServer");
-			m_remoteServer->Kill();
-		}
-
-		if (m_remoteSecureServer && m_remoteSecureServer->IsRunning())
-		{
-			debug("Killing RemoteSecureServer");
-			m_remoteSecureServer->Kill();
+			Util::Sleep(50);
 		}
 
 		debug("RemoteServer stopped");
@@ -2042,12 +2003,6 @@ int nzbget_c_nserv_main(int argc, char* argv[])
 	printf("ERROR: Could not start NServ, the program was compiled without NServ\n");
 	return 1;
 #endif
-}
-
-int nzbget_c_win_service_check(int argc, char* argv[])
-{
-	(void)argc; (void)argv;
-	return 0;
 }
 
 int nzbget_c_phase1_init(bool reloading)

@@ -1641,4 +1641,26 @@ mod tests {
             let _ = libc::close(fds[1]);
         }
     }
+
+    #[test]
+    fn test_ncurses_queue_selection_and_group_edit_action() {
+        assert_eq!(ncurses_set_current_queue_entry(-5, 10, 0, 4), (0, 0));
+        assert_eq!(ncurses_set_current_queue_entry(15, 10, 0, 4), (9, 6));
+
+        let mut pause_pars = false;
+        assert_eq!(
+            ncurses_resolve_group_edit_action(4, true, 100, 0, 2, 0, -1, &mut pause_pars),
+            23
+        );
+        assert!(pause_pars);
+        assert_eq!(
+            ncurses_resolve_group_edit_action(4, true, 100, 0, 2, 0, 0, &mut pause_pars),
+            16
+        );
+        assert!(!pause_pars);
+        assert_eq!(
+            ncurses_resolve_group_edit_action(4, true, 100, 100, 0, 0, 0, &mut pause_pars),
+            17
+        );
+    }
 }

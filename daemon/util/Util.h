@@ -17421,6 +17421,12 @@ public:
 	 * not bypass the rotation bound. */
 	static void RegisterLeadSuccess(FileInfo* fileInfo, ArticleInfo* articleInfo)
 	{
+		if (articleInfo->GetDupeFallbackRound() != 1 ||
+			articleInfo->GetDupeLeadSnapshot() <= 0 ||
+			articleInfo->GetDupeLeadSnapshot() != fileInfo->GetDupeLeadDonorId())
+		{
+			return;
+		}
 		int leadFailures = fileInfo->GetDupeLeadFailures();
 		int leadSwitches = fileInfo->GetDupeLeadSwitches();
 		nzbget_rs_dupe_fallback_register_lead_success(

@@ -13575,3 +13575,337 @@ pub unsafe extern "C" fn nzbget_rs_nzb_completed_same_filename(
     c_int::from(crate::downloadinfo::completed_same_filename(input(a), input(b)))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_calc_active_downloads_sec(
+    old_active: c_int,
+    new_active: c_int,
+    is_nzb_kind: c_int,
+    cur_time: i64,
+    inout_download_sec: *mut c_int,
+    inout_download_start_time: *mut i64,
+    inout_download_start_sec: *mut c_int,
+    out_changed: *mut c_int,
+) {
+    let (sec, start_time, start_sec, changed) = crate::downloadinfo::calc_active_downloads_sec(
+        old_active,
+        new_active,
+        is_nzb_kind != 0,
+        cur_time,
+        if inout_download_sec.is_null() {
+            0
+        } else {
+            *inout_download_sec
+        },
+        if inout_download_start_time.is_null() {
+            0
+        } else {
+            *inout_download_start_time
+        },
+        if inout_download_start_sec.is_null() {
+            0
+        } else {
+            *inout_download_start_sec
+        },
+    );
+    if !inout_download_sec.is_null() {
+        *inout_download_sec = sec;
+    }
+    if !inout_download_start_time.is_null() {
+        *inout_download_start_time = start_time;
+    }
+    if !inout_download_start_sec.is_null() {
+        *inout_download_start_sec = start_sec;
+    }
+    if !out_changed.is_null() {
+        *out_changed = c_int::from(changed);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_update_completed_stats(
+    file_success_size: i64,
+    file_failed_size: i64,
+    file_failed_articles: c_int,
+    file_success_articles: c_int,
+    file_extra_priority: c_int,
+    file_par_file: c_int,
+    file_paused: c_int,
+    inout_success_size: *mut i64,
+    inout_failed_size: *mut i64,
+    inout_failed_articles: *mut c_int,
+    inout_success_articles: *mut c_int,
+    inout_extra_priority: *mut c_int,
+    inout_par_success_size: *mut i64,
+    inout_par_failed_size: *mut i64,
+    inout_remaining_par_count: *mut c_int,
+    inout_paused_file_count: *mut c_int,
+) {
+    crate::downloadinfo::update_completed_stats(
+        file_success_size,
+        file_failed_size,
+        file_failed_articles,
+        file_success_articles,
+        file_extra_priority != 0,
+        file_par_file != 0,
+        file_paused != 0,
+        &mut *inout_success_size,
+        &mut *inout_failed_size,
+        &mut *inout_failed_articles,
+        &mut *inout_success_articles,
+        &mut *inout_extra_priority,
+        &mut *inout_par_success_size,
+        &mut *inout_par_failed_size,
+        &mut *inout_remaining_par_count,
+        &mut *inout_paused_file_count,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_update_deleted_stats(
+    file_size: i64,
+    file_success_size: i64,
+    file_failed_size: i64,
+    file_missed_size: i64,
+    file_total_articles: c_int,
+    file_success_articles: c_int,
+    file_failed_articles: c_int,
+    file_missed_articles: c_int,
+    file_remaining_size: i64,
+    file_extra_priority: c_int,
+    file_par_file: c_int,
+    file_paused: c_int,
+    inout_file_count: *mut c_int,
+    inout_size: *mut i64,
+    inout_cur_success_size: *mut i64,
+    inout_failed_size: *mut i64,
+    inout_failed_articles: *mut c_int,
+    inout_cur_failed_size: *mut i64,
+    inout_total_articles: *mut c_int,
+    inout_cur_success_articles: *mut c_int,
+    inout_cur_failed_articles: *mut c_int,
+    inout_remaining_size: *mut i64,
+    inout_extra_priority: *mut c_int,
+    inout_remaining_par_count: *mut c_int,
+    inout_par_size: *mut i64,
+    inout_par_cur_success_size: *mut i64,
+    inout_par_failed_size: *mut i64,
+    inout_par_cur_failed_size: *mut i64,
+    inout_paused_file_count: *mut c_int,
+    inout_paused_size: *mut i64,
+) {
+    crate::downloadinfo::update_deleted_stats(
+        file_size,
+        file_success_size,
+        file_failed_size,
+        file_missed_size,
+        file_total_articles,
+        file_success_articles,
+        file_failed_articles,
+        file_missed_articles,
+        file_remaining_size,
+        file_extra_priority != 0,
+        file_par_file != 0,
+        file_paused != 0,
+        &mut *inout_file_count,
+        &mut *inout_size,
+        &mut *inout_cur_success_size,
+        &mut *inout_failed_size,
+        &mut *inout_failed_articles,
+        &mut *inout_cur_failed_size,
+        &mut *inout_total_articles,
+        &mut *inout_cur_success_articles,
+        &mut *inout_cur_failed_articles,
+        &mut *inout_remaining_size,
+        &mut *inout_extra_priority,
+        &mut *inout_remaining_par_count,
+        &mut *inout_par_size,
+        &mut *inout_par_cur_success_size,
+        &mut *inout_par_failed_size,
+        &mut *inout_par_cur_failed_size,
+        &mut *inout_paused_file_count,
+        &mut *inout_paused_size,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hash_bj96(
+    buffer: *const c_char,
+    buf_size: c_int,
+    init_value: u32,
+) -> u32 {
+    let bytes = if buffer.is_null() || buf_size <= 0 {
+        b""
+    } else {
+        std::slice::from_raw_parts(buffer.cast::<u8>(), buf_size as usize)
+    };
+    crate::util::hash_bj96(bytes, init_value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_find_executor_program(
+    filename: *const c_char,
+    custom_path: *const c_char,
+    out_found: *mut c_int,
+) -> RsBuf {
+    match crate::util::util_find_executor_program(input(filename), input(custom_path)) {
+        Some(v) => {
+            if !out_found.is_null() {
+                *out_found = 1;
+            }
+            into_buf(v)
+        }
+        None => {
+            if !out_found.is_null() {
+                *out_found = 0;
+            }
+            into_buf(Vec::new())
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_format_time(
+    time_sec: i64,
+    buffer: *mut c_char,
+    bufsize: c_int,
+) {
+    if !buffer.is_null() && bufsize > 0 {
+        let slice = std::slice::from_raw_parts_mut(buffer.cast::<u8>(), bufsize as usize);
+        crate::util::util_format_time(time_sec, slice);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_term_plot_line(
+    text: *const c_char,
+    row: c_int,
+    pos: c_int,
+    screen_width: c_int,
+    use_color: c_int,
+    color_pair: c_int,
+) {
+    crate::ncurses_format::term_plot_line(
+        input(text),
+        row,
+        pos,
+        screen_width,
+        use_color != 0,
+        color_pair,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ncurses_calc_window_sizes(
+    queue_size: c_int,
+    queue_window_percentage: c_int,
+    inout_screen_height: *mut c_int,
+    inout_screen_width: *mut c_int,
+    out_queue_win_top: *mut c_int,
+    out_queue_win_height: *mut c_int,
+    out_queue_win_client_height: *mut c_int,
+    out_messages_win_top: *mut c_int,
+    out_messages_win_height: *mut c_int,
+    out_messages_win_client_height: *mut c_int,
+) {
+    crate::ncurses_format::ncurses_calc_window_sizes(
+        queue_size,
+        queue_window_percentage,
+        &mut *inout_screen_height,
+        &mut *inout_screen_width,
+        &mut *out_queue_win_top,
+        &mut *out_queue_win_height,
+        &mut *out_queue_win_client_height,
+        &mut *out_messages_win_top,
+        &mut *out_messages_win_height,
+        &mut *out_messages_win_client_height,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ncurses_print_message(
+    msg_kind: c_int,
+    msg_time: i64,
+    msg_text: *const c_char,
+    row: c_int,
+    max_lines: c_int,
+    show_timestamp: c_int,
+    time_correction: c_int,
+    screen_width: c_int,
+    use_color: c_int,
+) -> c_int {
+    crate::ncurses_format::ncurses_print_message(
+        msg_kind,
+        msg_time,
+        input(msg_text),
+        row,
+        max_lines,
+        show_timestamp != 0,
+        time_correction,
+        screen_width,
+        use_color != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ncurses_print_key_input_bar(
+    screen_height: c_int,
+    screen_width: c_int,
+    use_color: c_int,
+    input_mode: c_int,
+    group_files: c_int,
+    selected_queue_entry: c_int,
+    queue_size: c_int,
+    input_value: c_int,
+    input_number_index: c_int,
+    hint: *const c_char,
+    inout_start_hint: *mut i64,
+    cur_time: i64,
+) {
+    crate::ncurses_format::ncurses_print_key_input_bar(
+        screen_height,
+        screen_width,
+        use_color != 0,
+        input_mode,
+        group_files != 0,
+        selected_queue_entry,
+        queue_size,
+        input_value,
+        input_number_index,
+        input(hint),
+        &mut *inout_start_hint,
+        cur_time,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ncurses_resolve_group_edit_action(
+    action: c_int,
+    has_group: c_int,
+    remaining_size: i64,
+    paused_size: i64,
+    remaining_par_count: c_int,
+    selected_entry: c_int,
+    last_edit_entry: c_int,
+    inout_last_pause_pars: *mut c_int,
+) -> c_int {
+    let mut pause_pars = if inout_last_pause_pars.is_null() {
+        false
+    } else {
+        *inout_last_pause_pars != 0
+    };
+    let out = crate::ncurses_format::ncurses_resolve_group_edit_action(
+        action,
+        has_group != 0,
+        remaining_size,
+        paused_size,
+        remaining_par_count,
+        selected_entry,
+        last_edit_entry,
+        &mut pause_pars,
+    );
+    if !inout_last_pause_pars.is_null() {
+        *inout_last_pause_pars = c_int::from(pause_pars);
+    }
+    out
+}
+

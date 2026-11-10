@@ -1222,6 +1222,231 @@ pub fn ncurses_handle_key(state: &mut NcursesKeyState, key: i32, queue_size: i32
     }
 }
 
+/// `NCursesFrontend::PlotLine` (`NCursesFrontend.cpp`).
+pub fn term_plot_line(
+    text: &[u8],
+    row: i32,
+    pos: i32,
+    screen_width: i32,
+    use_color: bool,
+    color_pair: i32,
+) {
+    let w = screen_width.clamp(0, MAX_SCREEN_WIDTH as i32) as usize;
+    let mut line_buf = [b' '; MAX_SCREEN_WIDTH];
+    let copy_len = text.len().min(w);
+    if copy_len > 0 {
+        line_buf[..copy_len].copy_from_slice(&text[..copy_len]);
+    }
+    let mut target_len = w;
+    let rem = screen_width.wrapping_sub(pos);
+    if (w as i32) + 1 > rem && rem < MAX_SCREEN_WIDTH as i32 {
+        target_len = rem.clamp(0, w as i32) as usize;
+    }
+    term_plot_text(&line_buf[..target_len], row, pos, use_color, color_pair, false);
+}
+
+/// `NCursesFrontend::CalcWindowSizes` (`NCursesFrontend.cpp`).
+#[allow(clippy::too_many_arguments)]
+pub fn ncurses_calc_window_sizes(
+    queue_size: i32,
+    queue_window_percentage: i32,
+    screen_height: &mut i32,
+    screen_width: &mut i32,
+    queue_win_top: &mut i32,
+    queue_win_height: &mut i32,
+    queue_win_client_height: &mut i32,
+    messages_win_top: &mut i32,
+    messages_win_height: &mut i32,
+    messages_win_client_height: &mut i32,
+) {
+    let (nr_rows, raw_cols) = term_get_size();
+    let nr_cols = raw_cols.clamp(9, MAX_SCREEN_WIDTH as i32);
+    if nr_rows != *screen_height || nr_cols != *screen_width {
+        term_clear();
+        *screen_height = nr_rows;
+        *screen_width = nr_cols;
+    }
+    *queue_win_top = 0;
+    *queue_win_height = (nr_rows - 2) * queue_window_percentage / 100;
+    if *queue_win_height - 1 > queue_size {
+        *queue_win_height = if queue_size > 0 { queue_size + 1 } else { 2 };
+    }
+    *queue_win_client_height = (*queue_win_height - 1).max(0);
+    *messages_win_top = *queue_win_height;
+    *messages_win_height = nr_rows - *queue_win_height - 2;
+    *messages_win_client_height = (*messages_win_height - 1).max(0);
+}
+
+/// `NCursesFrontend::PrintMessage` (`NCursesFrontend.cpp`).
+#[allow(clippy::too_many_arguments)]
+pub fn ncurses_print_message(
+    msg_kind: i32,
+    msg_time: i64,
+    msg_text: &[u8],
+    row: i32,
+    max_lines: i32,
+    show_timestamp: bool,
+    time_correction: i32,
+    screen_width: i32,
+    use_color: bool,
+) -> i32 {
+    let mut text = if show_timestamp {
+        let mut tbuf = [0u8; 50];
+        crate::util::util_format_time(msg_time.wrapping_add(i64::from(time_correction)), &mut tbuf);
+        let tlen = tbuf.iter().position(|&b| b == 0).unwrap_or(tbuf.len());
+        let mut v = Vec::with_capacity(tlen + 3 + msg_text.len());
+        v.extend_from_slice(&tbuf[..tlen]);
+        v.extend_from_slice(b" - ");
+        v.extend_from_slice(msg_text);
+        v
+    } else {
+        msg_text.to_vec()
+    };
+
+    for b in &mut text {
+        if *b == b'\n' || *b == b'\r' || *b == b'\x08' {
+            *b = b' ';
+        }
+    }
+
+    let len = text.len() as i32;
+    let win_width = screen_width - 8;
+    let msg_lines = if win_width > 0 {
+        (len / win_width) + i32::from(len % win_width > 0)
+    } else {
+        0
+    };
+
+    const MSG_TYPES: [&[u8]; 5] = [
+        b"INFO    ",
+        b"WARNING ",
+        b"ERROR   ",
+        b"DEBUG   ",
+        b"DETAIL  ",
+    ];
+    let color_pair = if (0..5).contains(&msg_kind) {
+        msg_kind + 2
+    } else {
+        1
+    };
+
+    let mut lines = 0;
+    let mut i = msg_lines - 1;
+    while i >= 0 && lines < max_lines {
+        let r = row - msg_lines + i + 1;
+        let offset = (win_width * i).max(0) as usize;
+        let slice = text.get(offset..).unwrap_or(b"");
+        term_plot_line(slice, r, 8, screen_width, use_color, 1);
+        let prefix = if i == 0 && (0..5).contains(&msg_kind) {
+            MSG_TYPES[msg_kind as usize]
+        } else {
+            b"        "
+        };
+        term_plot_text(prefix, r, 0, use_color, color_pair, false);
+        lines += 1;
+        i -= 1;
+    }
+
+    lines
+}
+
+/// `NCursesFrontend::PrintKeyInputBar` (`NCursesFrontend.cpp`).
+#[allow(clippy::too_many_arguments)]
+pub fn ncurses_print_key_input_bar(
+    screen_height: i32,
+    screen_width: i32,
+    use_color: bool,
+    input_mode: i32,
+    group_files: bool,
+    selected_queue_entry: i32,
+    queue_size: i32,
+    input_value: i32,
+    input_number_index: i32,
+    hint: &[u8],
+    start_hint: &mut i64,
+    cur_time: i64,
+) {
+    let input_bar_row = screen_height - 1;
+
+    if !hint.is_empty() {
+        if cur_time - *start_hint < 5 {
+            term_plot_line(hint, input_bar_row, 0, screen_width, use_color, 12);
+            return;
+        }
+        *start_hint = cur_time;
+    }
+
+    match input_mode {
+        0 => {
+            let line: &[u8] = if group_files {
+                b"(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime"
+            } else {
+                b"(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime | n(Z)b"
+            };
+            term_plot_line(line, input_bar_row, 0, screen_width, use_color, 8);
+        }
+        1 => {
+            let status: &[u8] = if selected_queue_entry > 0
+                && queue_size > 1
+                && selected_queue_entry == queue_size - 1
+            {
+                b"(Q)uit | (E)xit | (P)ause | (D)elete | (U)p/(T)op"
+            } else if queue_size > 1 && selected_queue_entry == 0 {
+                b"(Q)uit | (E)xit | (P)ause | (D)elete | dow(N)/(B)ottom"
+            } else if queue_size > 1 {
+                b"(Q)uit | (E)xit | (P)ause | (D)elete | (U)p/dow(N)/(T)op/(B)ottom"
+            } else {
+                b"(Q)uit | (E)xit | (P)ause | (D)elete"
+            };
+            term_plot_line(status, input_bar_row, 0, screen_width, use_color, 8);
+        }
+        2 => {
+            let msg = format!("Download rate: {input_value}");
+            term_plot_line(msg.as_bytes(), input_bar_row, 0, screen_width, use_color, 8);
+            term_plot_text(b" ", input_bar_row, 15 + input_number_index, use_color, 11, true);
+        }
+        _ => {}
+    }
+}
+
+/// `NCursesFrontend::EditQueue` group-mode action mapping (`NCursesFrontend.cpp`).
+#[allow(clippy::too_many_arguments)]
+pub fn ncurses_resolve_group_edit_action(
+    mut action: i32,
+    has_group: bool,
+    remaining_size: i64,
+    paused_size: i64,
+    remaining_par_count: i32,
+    selected_entry: i32,
+    last_edit_entry: i32,
+    last_pause_pars: &mut bool,
+) -> i32 {
+    if has_group && action == 4 {
+        if remaining_size == paused_size {
+            action = 5;
+        } else if paused_size == 0
+            && remaining_par_count > 0
+            && !(*last_pause_pars && last_edit_entry == selected_entry)
+        {
+            action = 8;
+            *last_pause_pars = true;
+        } else {
+            *last_pause_pars = false;
+        }
+    }
+    match action {
+        1 => 11,
+        2 => 12,
+        3 => 13,
+        4 => 16,
+        5 => 17,
+        6 => 18,
+        7 => 22,
+        8 => 23,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

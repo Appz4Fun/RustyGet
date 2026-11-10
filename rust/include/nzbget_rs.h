@@ -3087,6 +3087,56 @@ const char* nzbget_rs_nzb_make_text_status(
     int kind, int mark_status, int delete_status, int par_status, int unpack_status,
     int move_status, int url_status, int script_status, int health, int critical_health);
 int nzbget_rs_nzb_completed_same_filename(const char* a, const char* b);
+void nzbget_rs_nzb_calc_active_downloads_sec(
+    int old_active, int new_active, int is_nzb_kind, int64_t cur_time,
+    int* inout_download_sec, int64_t* inout_download_start_time,
+    int* inout_download_start_sec, int* out_changed);
+void nzbget_rs_nzb_update_completed_stats(
+    int64_t file_success_size, int64_t file_failed_size,
+    int file_failed_articles, int file_success_articles,
+    int file_extra_priority, int file_par_file, int file_paused,
+    int64_t* inout_success_size, int64_t* inout_failed_size,
+    int* inout_failed_articles, int* inout_success_articles,
+    int* inout_extra_priority, int64_t* inout_par_success_size,
+    int64_t* inout_par_failed_size, int* inout_remaining_par_count,
+    int* inout_paused_file_count);
+void nzbget_rs_nzb_update_deleted_stats(
+    int64_t file_size, int64_t file_success_size, int64_t file_failed_size,
+    int64_t file_missed_size, int file_total_articles, int file_success_articles,
+    int file_failed_articles, int file_missed_articles, int64_t file_remaining_size,
+    int file_extra_priority, int file_par_file, int file_paused,
+    int* inout_file_count, int64_t* inout_size, int64_t* inout_cur_success_size,
+    int64_t* inout_failed_size, int* inout_failed_articles, int64_t* inout_cur_failed_size,
+    int* inout_total_articles, int* inout_cur_success_articles, int* inout_cur_failed_articles,
+    int64_t* inout_remaining_size, int* inout_extra_priority, int* inout_remaining_par_count,
+    int64_t* inout_par_size, int64_t* inout_par_cur_success_size, int64_t* inout_par_failed_size,
+    int64_t* inout_par_cur_failed_size, int* inout_paused_file_count, int64_t* inout_paused_size);
+
+uint32_t nzbget_rs_hash_bj96(const char* buffer, int buf_size, uint32_t init_value);
+NzbgetRsBuf nzbget_rs_util_find_executor_program(
+    const char* filename, const char* custom_path, int* out_found);
+void nzbget_rs_util_format_time(int64_t time_sec, char* buffer, int bufsize);
+
+void nzbget_rs_term_plot_line(
+    const char* text, int row, int pos, int screen_width, int use_color, int color_pair);
+void nzbget_rs_ncurses_calc_window_sizes(
+    int queue_size, int queue_window_percentage,
+    int* inout_screen_height, int* inout_screen_width,
+    int* out_queue_win_top, int* out_queue_win_height, int* out_queue_win_client_height,
+    int* out_messages_win_top, int* out_messages_win_height, int* out_messages_win_client_height);
+int nzbget_rs_ncurses_print_message(
+    int msg_kind, int64_t msg_time, const char* msg_text,
+    int row, int max_lines, int show_timestamp, int time_correction,
+    int screen_width, int use_color);
+void nzbget_rs_ncurses_print_key_input_bar(
+    int screen_height, int screen_width, int use_color,
+    int input_mode, int group_files, int selected_queue_entry, int queue_size,
+    int input_value, int input_number_index,
+    const char* hint, int64_t* inout_start_hint, int64_t cur_time);
+int nzbget_rs_ncurses_resolve_group_edit_action(
+    int action, int has_group, int64_t remaining_size, int64_t paused_size,
+    int remaining_par_count, int selected_entry, int last_edit_entry,
+    int* inout_last_pause_pars);
 
 #include "nzbget_tls_cipher.h"
 

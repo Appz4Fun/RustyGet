@@ -896,115 +896,22 @@ public:
 
 	static uint32 HashBJ96(const char* buffer, size_t bufSize, uint32 initValue)
 	{
-		auto mix = [](uint32& a, uint32& b, uint32& c) {
-			a -= b; a -= c; a ^= (c >> 13);
-			b -= c; b -= a; b ^= (a << 8);
-			c -= a; c -= b; c ^= (b >> 13);
-			a -= b; a -= c; a ^= (c >> 12);
-			b -= c; b -= a; b ^= (a << 16);
-			c -= a; c -= b; c ^= (b >> 5);
-			a -= b; a -= c; a ^= (c >> 3);
-			b -= c; b -= a; b ^= (a << 10);
-			c -= a; c -= b; c ^= (b >> 15);
-		};
-		auto word = [](const uchar* s) -> uint32 {
-			return (uint32)s[0] | ((uint32)s[1] << 8) | ((uint32)s[2] << 16) | ((uint32)s[3] << 24);
-		};
-		uint32 a = 0x9e3779b9u, b = 0x9e3779b9u, c = initValue;
-		uint32 length = (uint32)bufSize;
-		const uchar* k = reinterpret_cast<const uchar*>(buffer);
-		size_t rem = bufSize;
-		while (rem >= 12)
-		{
-			a += word(k);
-			b += word(k + 4);
-			c += word(k + 8);
-			mix(a, b, c);
-			k += 12;
-			rem -= 12;
-		}
-		c += length;
-		uchar tail[12]{};
-		if (rem > 0)
-		{
-			memcpy(tail, k, rem);
-		}
-		a += word(tail);
-		b += word(tail + 4);
-		c += (word(tail + 8) << 8);
-		mix(a, b, c);
-		return c;
+		return nzbget_rs_hash_bj96(buffer, static_cast<int>(bufSize), initValue);
 	}
 
 	static std::optional<std::string>
 	FindExecutorProgram(const std::string& filename, const std::string& customPath)
 	{
-		std::string_view fname(filename.c_str());
-		size_t dot = fname.rfind('.');
-		if (dot == std::string_view::npos)
+		int found = 0;
+		NzbgetRsBuf buf = nzbget_rs_util_find_executor_program(
+			filename.c_str(), customPath.c_str(), &found);
+		std::optional<std::string> out;
+		if (found)
 		{
-			return filename;
+			out = std::string(buf.data ? buf.data : "", buf.len);
 		}
-		std::string_view fileExt = fname.substr(dot);
-		if (!fileExt.empty() && !customPath.empty())
-		{
-			std::string_view cpath(customPath.c_str());
-			size_t pos = 0;
-			while (pos <= cpath.size())
-			{
-				size_t next = cpath.find_first_of(",;", pos);
-				std::string_view tok = next == std::string_view::npos
-					? cpath.substr(pos) : cpath.substr(pos, next - pos);
-				while (!tok.empty() && (tok.front() == ' ' || tok.front() == '\t' || tok.front() == '\r' || tok.front() == '\n'))
-				{
-					tok.remove_prefix(1);
-				}
-				while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\t' || tok.back() == '\r' || tok.back() == '\n'))
-				{
-					tok.remove_suffix(1);
-				}
-				size_t eq = tok.find('=');
-				if (eq != std::string_view::npos && tok.substr(0, eq) == fileExt)
-				{
-					return std::string(tok.substr(eq + 1));
-				}
-				if (next == std::string_view::npos) break;
-				pos = next + 1;
-			}
-		}
-		if (fileExt == ".py")
-		{
-			for (const char* exe : { "python3", "python", "py" })
-			{
-				BString<100> cmd("%s --version > /dev/null 2> /dev/null", exe);
-				if (system(cmd) == 0)
-				{
-					return std::string(exe);
-				}
-			}
-			return std::nullopt;
-		}
-		if (fileExt == ".sh")
-		{
-			for (const char* exe : { "bash", "sh" })
-			{
-				BString<100> cmd("%s --version > /dev/null 2> /dev/null", exe);
-				if (system(cmd) == 0)
-				{
-					return std::string(exe);
-				}
-			}
-			return std::nullopt;
-		}
-		if (fileExt == ".js")
-		{
-			if (system("node --version > /dev/null 2> /dev/null") == 0)
-			{
-				return std::string("node");
-			}
-			return std::nullopt;
-		}
-		return filename;
+		nzbget_rs_free(buf);
+		return out;
 	}
 
 	static std::vector<CString> SplitCommandLine(const char* commandLine)
@@ -1101,20 +1008,7 @@ public:
 
 	static void FormatTime(time_t timeSec, char* buffer, int bufsize)
 	{
-		if (!buffer || bufsize <= 0)
-		{
-			return;
-		}
-		memset(buffer, 0, static_cast<size_t>(bufsize));
-		char tmp[64]{};
-		ctime_r(&timeSec, tmp);
-		strncpy(buffer, tmp, static_cast<size_t>(bufsize - 1));
-		buffer[bufsize - 1] = '\0';
-		size_t sLen = strlen(buffer);
-		if (sLen > 0)
-		{
-			buffer[sLen - 1] = '\0';
-		}
+		nzbget_rs_util_format_time(static_cast<int64_t>(timeSec), buffer, bufsize);
 	}
 
 	static CString FormatTime(time_t timeSec)
@@ -8199,27 +8093,14 @@ public:
 	int GetActiveDownloads() { return m_activeDownloads; }
 	void SetActiveDownloads(int activeDownloads)
 	{
-		time_t curTime = Util::CurrentTime();
-		if (((m_activeDownloads == 0 && activeDownloads > 0) ||
-			(m_activeDownloads > 0 && activeDownloads == 0)) && m_kind == NzbInfo::nkNzb)
-		{
-			if (activeDownloads > 0)
-			{
-				m_downloadStartTime = curTime;
-				m_downloadStartSec = m_downloadSec;
-			}
-			else
-			{
-				m_downloadSec = m_downloadStartSec + (int)(curTime - m_downloadStartTime);
-				m_downloadStartTime = 0;
-				m_changed = true;
-			}
-		}
-		else if (activeDownloads > 0)
-		{
-			m_downloadSec = m_downloadStartSec + (int)(curTime - m_downloadStartTime);
-			m_changed = true;
-		}
+		int64_t startTime = static_cast<int64_t>(m_downloadStartTime);
+		int changed = 0;
+		nzbget_rs_nzb_calc_active_downloads_sec(
+			m_activeDownloads, activeDownloads, m_kind == NzbInfo::nkNzb ? 1 : 0,
+			static_cast<int64_t>(Util::CurrentTime()), &m_downloadSec, &startTime,
+			&m_downloadStartSec, &changed);
+		m_downloadStartTime = static_cast<time_t>(startTime);
+		if (changed) m_changed = true;
 		m_activeDownloads = activeDownloads;
 	}
 	int64 GetSuccessSize() { return m_successSize; }
@@ -8726,57 +8607,31 @@ public:
 	}
 	void UpdateCompletedStats(FileInfo* fileInfo)
 	{
-		m_successSize += fileInfo->GetSuccessSize();
-		m_failedSize += fileInfo->GetFailedSize();
-		m_failedArticles += fileInfo->GetFailedArticles();
-		m_successArticles += fileInfo->GetSuccessArticles();
-		if (fileInfo->GetExtraPriority())
-		{
-			m_extraPriority--;
-		}
-		if (fileInfo->GetParFile())
-		{
-			m_parSuccessSize += fileInfo->GetSuccessSize();
-			m_parFailedSize += fileInfo->GetFailedSize();
-			m_remainingParCount--;
-		}
-		if (fileInfo->GetPaused())
-		{
-			m_pausedFileCount--;
-		}
-
+		nzbget_rs_nzb_update_completed_stats(
+			fileInfo->GetSuccessSize(), fileInfo->GetFailedSize(),
+			fileInfo->GetFailedArticles(), fileInfo->GetSuccessArticles(),
+			fileInfo->GetExtraPriority() ? 1 : 0, fileInfo->GetParFile() ? 1 : 0,
+			fileInfo->GetPaused() ? 1 : 0,
+			&m_successSize, &m_failedSize, &m_failedArticles, &m_successArticles,
+			&m_extraPriority, &m_parSuccessSize, &m_parFailedSize,
+			&m_remainingParCount, &m_pausedFileCount);
 		m_serverStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soAdd);
 	}
 	void UpdateDeletedStats(FileInfo* fileInfo)
 	{
-		m_fileCount--;
-		m_size -= fileInfo->GetSize();
-		m_currentSuccessSize -= fileInfo->GetSuccessSize();
-		m_failedSize -= fileInfo->GetMissedSize();
-		m_failedArticles -= fileInfo->GetMissedArticles();
-		m_currentFailedSize -= fileInfo->GetFailedSize() + fileInfo->GetMissedSize();
-		m_totalArticles -= fileInfo->GetTotalArticles();
-		m_currentSuccessArticles -= fileInfo->GetSuccessArticles();
-		m_currentFailedArticles -= fileInfo->GetFailedArticles() + fileInfo->GetMissedArticles();
-		m_remainingSize -= fileInfo->GetRemainingSize();
-		if (fileInfo->GetExtraPriority())
-		{
-			m_extraPriority--;
-		}
-		if (fileInfo->GetParFile())
-		{
-			m_remainingParCount--;
-			m_parSize -= fileInfo->GetSize();
-			m_parCurrentSuccessSize -= fileInfo->GetSuccessSize();
-			m_parFailedSize -= fileInfo->GetMissedSize();
-			m_parCurrentFailedSize -= fileInfo->GetFailedSize() + fileInfo->GetMissedSize();
-		}
-		if (fileInfo->GetPaused())
-		{
-			m_pausedFileCount--;
-			m_pausedSize -= fileInfo->GetRemainingSize();
-		}
-
+		nzbget_rs_nzb_update_deleted_stats(
+			fileInfo->GetSize(), fileInfo->GetSuccessSize(), fileInfo->GetFailedSize(),
+			fileInfo->GetMissedSize(), fileInfo->GetTotalArticles(),
+			fileInfo->GetSuccessArticles(), fileInfo->GetFailedArticles(),
+			fileInfo->GetMissedArticles(), fileInfo->GetRemainingSize(),
+			fileInfo->GetExtraPriority() ? 1 : 0, fileInfo->GetParFile() ? 1 : 0,
+			fileInfo->GetPaused() ? 1 : 0,
+			&m_fileCount, &m_size, &m_currentSuccessSize, &m_failedSize,
+			&m_failedArticles, &m_currentFailedSize, &m_totalArticles,
+			&m_currentSuccessArticles, &m_currentFailedArticles, &m_remainingSize,
+			&m_extraPriority, &m_remainingParCount, &m_parSize,
+			&m_parCurrentSuccessSize, &m_parFailedSize, &m_parCurrentFailedSize,
+			&m_pausedFileCount, &m_pausedSize);
 		m_currentServerStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
 	}
 	bool IsDownloadCompleted(bool ignorePausedPars)
@@ -48850,22 +48705,12 @@ private:
 
 #ifndef DISABLE_CURSES
 
-inline void curses_clear()
-{
-	nzbget_rs_term_clear();
-}
-
 extern void ExitProc();
 
 static const int NCURSES_COLORPAIR_TEXT		= 1;
 static const int NCURSES_COLORPAIR_STATUS		= 7;
-static const int NCURSES_COLORPAIR_KEYBAR		= 8;
 static const int NCURSES_COLORPAIR_INFOLINE	= 9;
 static const int NCURSES_COLORPAIR_TEXTHIGHL 	= 10;
-static const int NCURSES_COLORPAIR_CURSOR		= 11;
-static const int NCURSES_COLORPAIR_HINT		= 12;
-
-static const int MAX_SCREEN_WIDTH				= 512;
 
 static const int READKEY_EMPTY = -1;
 
@@ -49045,28 +48890,11 @@ private:
 
 	void CalcWindowSizes()
 	{
-		int nrRows = 24, nrColumns = 80;
-		nzbget_rs_term_get_size(&nrRows, &nrColumns);
-		// the line buffers hold MAX_SCREEN_WIDTH columns (a wider terminal wrote past
-		// them), and messages wrap at the width less 8 (a divisor of zero at 8)
-		int queueSize = CalcQueueSize();
-		nrColumns = std::clamp(nrColumns, 9, MAX_SCREEN_WIDTH);
-		if (nrRows != m_screenHeight || nrColumns != m_screenWidth)
-		{
-			curses_clear();
-			m_screenHeight = nrRows;
-			m_screenWidth = nrColumns;
-		}
-		m_queueWinTop = 0;
-		m_queueWinHeight = (nrRows - 2) * m_queueWindowPercentage / 100;
-		if (m_queueWinHeight - 1 > queueSize)
-		{
-			m_queueWinHeight = queueSize > 0 ? queueSize + 1 : 2;
-		}
-		m_queueWinClientHeight = std::max(0, m_queueWinHeight - 1);
-		m_messagesWinTop = m_queueWinHeight;
-		m_messagesWinHeight = nrRows - m_queueWinHeight - 2;
-		m_messagesWinClientHeight = std::max(0, m_messagesWinHeight - 1);
+		nzbget_rs_ncurses_calc_window_sizes(
+			CalcQueueSize(), m_queueWindowPercentage,
+			&m_screenHeight, &m_screenWidth,
+			&m_queueWinTop, &m_queueWinHeight, &m_queueWinClientHeight,
+			&m_messagesWinTop, &m_messagesWinHeight, &m_messagesWinClientHeight);
 	}
 
 	int CalcQueueSize()
@@ -49089,31 +48917,7 @@ private:
 
 	void PlotLine(const char* str, int row, int pos, int colorPair)
 	{
-		int w = std::clamp(m_screenWidth, 0, MAX_SCREEN_WIDTH);
-		char lineBuf[MAX_SCREEN_WIDTH + 1];
-		size_t textLen = str ? strlen(str) : 0;
-		size_t copyLen = std::min(textLen, (size_t)w);
-		if (copyLen > 0)
-		{
-			memcpy(lineBuf, str, copyLen);
-		}
-		if ((int)copyLen < w)
-		{
-			memset(lineBuf + copyLen, ' ', w - copyLen);
-		}
-		int targetLen = w;
-		int rem = m_screenWidth - pos;
-		if (w + 1 > rem && rem < MAX_SCREEN_WIDTH)
-		{
-			targetLen = std::clamp(rem, 0, w);
-		}
-		lineBuf[targetLen] = '\0';
-		PlotText(lineBuf, row, pos, colorPair, false);
-	}
-
-	void PlotText(const char * string, int row, int pos, int colorPair, bool blink)
-	{
-		nzbget_rs_term_plot_text(string, row, pos, m_useColor ? 1 : 0, colorPair, blink ? 1 : 0);
+		nzbget_rs_term_plot_line(str, row, pos, m_screenWidth, m_useColor ? 1 : 0, colorPair);
 	}
 
 	void RefreshScreen()
@@ -49161,46 +48965,10 @@ private:
 
 	int PrintMessage(Message& msg, int row, int maxLines)
 	{
-		CString text;
-
-		if (m_showTimestamp)
-		{
-			time_t rawtime = msg.GetTime() + g_Options->GetTimeCorrection();
-			text.Format("%s - %s", *Util::FormatTime(rawtime), msg.GetText());
-		}
-		else
-		{
-			text = msg.GetText();
-		}
-
-		// replace some special characters with spaces
-		int len = (int)strlen(text);
-		for (int i = 0; i < len; i++)
-		{
-			if (text[i] == '\n' || text[i] == '\r' || text[i] == '\b')
-			{
-				text[i] = ' ';
-			}
-		}
-		int winWidth = m_screenWidth - 8;
-		int msgLines = winWidth > 0 ? (len / winWidth) + (len % winWidth > 0 ? 1 : 0) : 0;
-
-		static const char* msgTypes[] = { "INFO    ", "WARNING ", "ERROR   ", "DEBUG   ", "DETAIL  " };
-		int kind = (int)msg.GetKind();
-		int colorPair = (kind >= 0 && kind < 5) ? (kind + 2) : NCURSES_COLORPAIR_TEXT;
-
-		int lines = 0;
-		for (int i = msgLines - 1; i >= 0 && lines < maxLines; i--)
-		{
-			int r = row - msgLines + i + 1;
-			PlotLine(text + winWidth * i, r, 8, NCURSES_COLORPAIR_TEXT);
-			PlotText(
-				(i == 0 && kind >= 0 && kind < 5) ? msgTypes[kind] : "        ",
-				r, 0, colorPair, false);
-			lines++;
-		}
-
-		return lines;
+		return nzbget_rs_ncurses_print_message(
+			static_cast<int>(msg.GetKind()), static_cast<int64_t>(msg.GetTime()),
+			msg.GetText(), row, maxLines, m_showTimestamp ? 1 : 0,
+			g_Options->GetTimeCorrection(), m_screenWidth, m_useColor ? 1 : 0);
 	}
 
 	void PrintStatus()
@@ -49228,51 +48996,14 @@ private:
 
 	void PrintKeyInputBar()
 	{
-		int queueSize = CalcQueueSize();
-		int inputBarRow = m_screenHeight - 1;
-
-		if (!m_hint.empty())
-		{
-			time_t time = Util::CurrentTime();
-			if (time - m_startHint < 5)
-			{
-				PlotLine(m_hint.c_str(), inputBarRow, 0, NCURSES_COLORPAIR_HINT);
-				return;
-			}
-			else
-			{
-				SetHint(nullptr);
-			}
-		}
-
-		switch (m_inputMode)
-		{
-		case normal:
-			PlotLine(
-				m_groupFiles ? "(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime" :
-				"(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime | n(Z)b",
-				inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
-			break;
-		case editQueue:
-		{
-			const char* status =
-				(m_selectedQueueEntry > 0 && queueSize > 1 && m_selectedQueueEntry == queueSize - 1) ? "(Q)uit | (E)xit | (P)ause | (D)elete | (U)p/(T)op" :
-				(queueSize > 1 && m_selectedQueueEntry == 0) ? "(Q)uit | (E)xit | (P)ause | (D)elete | dow(N)/(B)ottom" :
-				(queueSize > 1) ? "(Q)uit | (E)xit | (P)ause | (D)elete | (U)p/dow(N)/(T)op/(B)ottom" :
-				"(Q)uit | (E)xit | (P)ause | (D)elete";
-
-			PlotLine(status, inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
-			break;
-		}
-		case downloadRate:
-		{
-			PlotLine(BString<100>("Download rate: %i", m_inputValue), inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
-
-			// Print the cursor
-			PlotText(" ", inputBarRow, 15 + m_inputNumberIndex, NCURSES_COLORPAIR_CURSOR, true);
-			break;
-		}
-		}
+		int64_t startHint = static_cast<int64_t>(m_startHint);
+		nzbget_rs_ncurses_print_key_input_bar(
+			m_screenHeight, m_screenWidth, m_useColor ? 1 : 0,
+			static_cast<int>(m_inputMode), m_groupFiles ? 1 : 0,
+			m_selectedQueueEntry, CalcQueueSize(), m_inputValue,
+			m_inputNumberIndex, m_hint.empty() ? nullptr : m_hint.c_str(),
+			&startHint, static_cast<int64_t>(Util::CurrentTime()));
+		m_startHint = static_cast<time_t>(startHint);
 	}
 
 	void SetHint(const char* hint)
@@ -49483,42 +49214,24 @@ private:
 		if (m_groupFiles)
 		{
 			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			if (m_selectedQueueEntry >= 0 && m_selectedQueueEntry < (int)downloadQueue->GetQueue()->size())
+			bool hasGroup = m_selectedQueueEntry >= 0 &&
+				m_selectedQueueEntry < (int)downloadQueue->GetQueue()->size();
+			int64 remainingSize = 0, pausedSize = 0;
+			int remainingParCount = 0;
+			if (hasGroup)
 			{
 				std::unique_ptr<NzbInfo>& nzbInfo = downloadQueue->GetQueue()->at(m_selectedQueueEntry);
 				ID = nzbInfo->GetId();
-				if (action == DownloadQueue::eaFilePause)
-				{
-					if (nzbInfo->GetRemainingSize() == nzbInfo->GetPausedSize())
-					{
-						action = DownloadQueue::eaFileResume;
-					}
-					else if (nzbInfo->GetPausedSize() == 0 && nzbInfo->GetRemainingParCount() > 0 &&
-						!(m_lastPausePars && m_lastEditEntry == m_selectedQueueEntry))
-					{
-						action = DownloadQueue::eaFilePauseExtraPars;
-						m_lastPausePars = true;
-					}
-					else
-					{
-						m_lastPausePars = false;
-					}
-				}
+				remainingSize = nzbInfo->GetRemainingSize();
+				pausedSize = nzbInfo->GetPausedSize();
+				remainingParCount = nzbInfo->GetRemainingParCount();
 			}
-
-			// map file-edit-actions to group-edit-actions
-			switch (action)
-			{
-			case DownloadQueue::eaFileMoveOffset: action = DownloadQueue::eaGroupMoveOffset; break;
-			case DownloadQueue::eaFileMoveTop: action = DownloadQueue::eaGroupMoveTop; break;
-			case DownloadQueue::eaFileMoveBottom: action = DownloadQueue::eaGroupMoveBottom; break;
-			case DownloadQueue::eaFilePause: action = DownloadQueue::eaGroupPause; break;
-			case DownloadQueue::eaFileResume: action = DownloadQueue::eaGroupResume; break;
-			case DownloadQueue::eaFileDelete: action = DownloadQueue::eaGroupDelete; break;
-			case DownloadQueue::eaFilePauseAllPars: action = DownloadQueue::eaGroupPauseAllPars; break;
-			case DownloadQueue::eaFilePauseExtraPars: action = DownloadQueue::eaGroupPauseExtraPars; break;
-			default: action = (DownloadQueue::EEditAction)0; break;
-			}
+			int pausePars = m_lastPausePars ? 1 : 0;
+			action = static_cast<DownloadQueue::EEditAction>(
+				nzbget_rs_ncurses_resolve_group_edit_action(
+					static_cast<int>(action), hasGroup ? 1 : 0, remainingSize, pausedSize,
+					remainingParCount, m_selectedQueueEntry, m_lastEditEntry, &pausePars));
+			m_lastPausePars = pausePars != 0;
 		}
 		else
 		{
@@ -49545,14 +49258,7 @@ private:
 
 		NeedUpdateData();
 
-		if (ID != 0)
-		{
-			return ServerEditQueue(action, offset, ID);
-		}
-		else
-		{
-			return false;
-		}
+		return ID != 0 ? ServerEditQueue(action, offset, ID) : false;
 	}
 
 	void SetCurrentQueueEntry(int entry)

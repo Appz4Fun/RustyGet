@@ -3353,6 +3353,39 @@ int nzbget_rs_dupe_watch_is_live_fleet_peer(
 NzbgetRsBuf nzbget_rs_dupe_watch_format_state_line(
     int64_t now, int64_t ttl_sec, const char* key, size_t key_len, int score, int64_t time,
     const char* title, size_t title_len, int retryable);
+intptr_t nzbget_rs_transient_retries_op(
+    void* handle, int op, uintptr_t a, int64_t b, uintptr_t* out_arr, size_t out_cap);
+int nzbget_rs_article_dl_op(
+    int op, int a, const char* response, int64_t begin_pos, int64_t end_pos,
+    int64_t article_file_size, int64_t expected_file_size, int64_t dupe_expected_offset,
+    int64_t dupe_expected_end, int64_t* out_offset, int* out_size);
+int nzbget_rs_feed_op(
+    int op, int a, int b, int c, int d, int64_t t1, int64_t t2,
+    const char* s1, const char* s2, const char* s3, const char* s4, int* out_i32);
+NzbgetRsBuf nzbget_rs_feed_str_op(
+    int op, int a, int b, int c, int d, int e, int f,
+    const char* s1, const char* s2, const char* s3, const char* s4, const char* s5, const char* s6,
+    NzbgetRsBuf* out_buf2, uint32_t* out_u32);
+int nzbget_rs_twin_service_op(
+    int op, int a, int b, int c, int d, int64_t f1, int64_t f2,
+    const char* s1, const char* s2, const char* s3, const uint8_t* u8_1, const uint8_t* u8_2,
+    const int* i32_1, const int64_t* i64_1, size_t len, NzbgetRsBuf* out_buf);
+int nzbget_rs_xmlrpc_resp_op(
+    int op, int is_json, int int_val, uint64_t u64_1, uint64_t u64_2,
+    double f64_1, double f64_2, NzbgetRsBuf* out_buf);
+int nzbget_rs_socket_deadline_wait(
+    int fd, int read, int write, void* ctx, int64_t (*rem_cb)(void*));
+intptr_t nzbget_rs_url_coord_op(
+    int op, int a, int b, int c, int64_t t1, int64_t t2, const char* s1,
+    const int* arr1, const int* arr2, const int* arr3, const int* arr4, size_t len,
+    int* out_i32_1, int* out_i32_2, int* out_i32_3, NzbgetRsBuf* out_buf);
+int nzbget_rs_scanner_op(
+    int op, int a, int b, int c, int d, int64_t t1, int64_t t2, int64_t t3, int64_t t4,
+    const char* s1, const int* arr, size_t len, int* out_i32, int64_t* out_i64_1, int64_t* out_i64_2);
+int nzbget_rs_scheduler_service_op(
+    int op, int a, int b, int c, int d, int64_t t1, int64_t t2,
+    const char* s1, const char* s2, int* out_i32);
+const char* nzbget_rs_scheduler_service_str(int op, int val);
 
 #include "nzbget_tls_cipher.h"
 

@@ -16054,6 +16054,618 @@ pub unsafe extern "C" fn nzbget_rs_dupe_watch_format_state_line(
     ))
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_transient_retries_op(
+    handle: *mut c_void,
+    op: c_int,
+    a: usize,
+    b: i64,
+    out_arr: *mut usize,
+    out_cap: usize,
+) -> isize {
+    match op {
+        0 => Box::into_raw(Box::new(crate::nntp::TransientRetries::new(
+            a as i32, b as i32,
+        ))) as isize,
+        1 => {
+            if !handle.is_null() {
+                drop(Box::from_raw(handle as *mut crate::nntp::TransientRetries));
+            }
+            0
+        }
+        2 => {
+            if handle.is_null() {
+                return 0;
+            }
+            isize::from((&mut *(handle as *mut crate::nntp::TransientRetries)).register(a, b))
+        }
+        3 => {
+            if handle.is_null() {
+                return 0;
+            }
+            (&*(handle as *const crate::nntp::TransientRetries)).remained_retries(a) as isize
+        }
+        4 => {
+            if !handle.is_null() {
+                (&mut *(handle as *mut crate::nntp::TransientRetries))
+                    .set_remained_retries(a, b as i32);
+            }
+            0
+        }
+        5 => {
+            if handle.is_null() {
+                return 1;
+            }
+            isize::from((&*(handle as *const crate::nntp::TransientRetries)).is_empty())
+        }
+        6 => {
+            if handle.is_null() {
+                return 0;
+            }
+            isize::from((&*(handle as *const crate::nntp::TransientRetries)).is_exhausted())
+        }
+        7 => {
+            if handle.is_null() {
+                return 0;
+            }
+            let tr = &*(handle as *const crate::nntp::TransientRetries);
+            let waiting = tr.waiting_servers(b);
+            let want_waiting = waiting.contains(&a);
+            let mut written = 0usize;
+            if !out_arr.is_null() && out_cap > 0 {
+                written = waiting.len().min(out_cap);
+                std::ptr::copy_nonoverlapping(waiting.as_ptr(), out_arr, written);
+            }
+            ((written as isize) << 1) | isize::from(want_waiting)
+        }
+        _ => 0,
+    }
+}
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_article_dl_op(
+    op: c_int,
+    a: c_int,
+    response: *const c_char,
+    begin_pos: i64,
+    end_pos: i64,
+    article_file_size: i64,
+    expected_file_size: i64,
+    dupe_expected_offset: i64,
+    dupe_expected_end: i64,
+    out_offset: *mut i64,
+    out_size: *mut c_int,
+) -> c_int {
+    match op {
+        0 => {
+            let resp = if response.is_null() {
+                None
+            } else {
+                Some(input(response))
+            };
+            crate::dupefallback::article_downloader_check_response(resp, a != 0)
+        }
+        1 => match crate::dupefallback::article_downloader_validate_yenc(
+            begin_pos,
+            end_pos,
+            article_file_size,
+            expected_file_size,
+            a,
+            dupe_expected_offset,
+            dupe_expected_end,
+        ) {
+            Ok((offset, size)) => {
+                if !out_offset.is_null() {
+                    *out_offset = offset;
+                }
+                if !out_size.is_null() {
+                    *out_size = size;
+                }
+                0
+            }
+            Err(code) => {
+                if code == 4 || code == 5 {
+                    if !out_offset.is_null() {
+                        *out_offset = begin_pos - 1;
+                    }
+                    if !out_size.is_null() {
+                        *out_size = (end_pos - begin_pos + 1) as c_int;
+                    }
+                }
+                code
+            }
+        },
+        _ => 0,
+    }
+}
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_feed_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    d: c_int,
+    t1: i64,
+    t2: i64,
+    s1: *const c_char,
+    s2: *const c_char,
+    s3: *const c_char,
+    s4: *const c_char,
+    out_i32: *mut c_int,
+) -> c_int {
+    let b1 = if s1.is_null() { &[][..] } else { input(s1) };
+    let b2 = if s2.is_null() { &[][..] } else { input(s2) };
+    let b3 = if s3.is_null() { &[][..] } else { input(s3) };
+    let b4 = if s4.is_null() { &[][..] } else { input(s4) };
+    match op {
+        0 => crate::feed::parse_prefixed_int(b1),
+        1 => c_int::from(crate::feed::has_any_series_id(b4, b1, b2, b3, a, b, c)),
+        2 => {
+            let (start, force) = crate::feed::should_start_feed(a, t1, t2, b != 0, c, d);
+            if !out_i32.is_null() {
+                *out_i32 = c_int::from(force);
+            }
+            c_int::from(start)
+        }
+        3 => {
+            let (interval, new_last) = crate::feed::calc_feed_next_interval(a != 0, b, c);
+            if !out_i32.is_null() {
+                *out_i32 = new_last;
+            }
+            interval
+        }
+        4 => {
+            let (status, should_add) = crate::feed::classify_item_history(a != 0, b != 0, c != 0);
+            if !out_i32.is_null() {
+                *out_i32 = c_int::from(should_add);
+            }
+            status
+        }
+        5 => crate::feed::resolve_preview_item_status(a != 0, b, c != 0, d != 0),
+        6 => c_int::from(crate::feed::is_feed_cache_expired(t1, a, t2)),
+        7 => c_int::from(crate::feed::is_feed_download_hanging(t1, t2, a, b, c)),
+        8 => c_int::from(crate::feed::is_feed_url_and_filter_updated(
+            b1, b2, b3, b4, t1,
+        )),
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_feed_str_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    d: c_int,
+    e: c_int,
+    f: c_int,
+    s1: *const c_char,
+    s2: *const c_char,
+    s3: *const c_char,
+    s4: *const c_char,
+    s5: *const c_char,
+    s6: *const c_char,
+    out_buf2: *mut RsBuf,
+    out_u32: *mut u32,
+) -> RsBuf {
+    let b1 = if s1.is_null() { &[][..] } else { input(s1) };
+    let b2 = if s2.is_null() { &[][..] } else { input(s2) };
+    let b3 = if s3.is_null() { &[][..] } else { input(s3) };
+    let b4 = if s4.is_null() { &[][..] } else { input(s4) };
+    let b5 = if s5.is_null() { &[][..] } else { input(s5) };
+    let b6 = if s6.is_null() { &[][..] } else { input(s6) };
+    match op {
+        0 => {
+            let (default_name, filter_hash) = crate::feed::feed_info_init(a, b1, b2);
+            if !out_u32.is_null() {
+                *out_u32 = filter_hash;
+            }
+            match default_name {
+                Some(name) => into_buf(name),
+                None => RsBuf {
+                    data: std::ptr::null_mut(),
+                    len: 0,
+                    cap: 0,
+                },
+            }
+        }
+        1 => match crate::feed::parse_season_episode(b1) {
+            Some((season, ep)) => {
+                if !out_buf2.is_null() {
+                    *out_buf2 = into_buf(ep);
+                }
+                into_buf(season)
+            }
+            None => RsBuf {
+                data: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            },
+        },
+        2 => into_buf(crate::feed::build_feed_dupe_key(
+            b1, b2, b3, b4, a, b, c, d, e, f, b5, b6,
+        )),
+        3 => into_buf(crate::feed::format_dupe_status_mask(a)),
+        4 => into_buf(crate::feed::resolve_category(b1, a, b2).to_vec()),
+        5 => {
+            let norm = crate::feed::normalize_feed_nzb_name(b1);
+            let filename = if norm.is_empty() {
+                Vec::new()
+            } else {
+                crate::paths::make_valid_filename(&norm[..norm.len().min(1023)], false)
+            };
+            let cat = if !b2.is_empty() {
+                b2.to_vec()
+            } else {
+                crate::feed::resolve_category(b3, a, b4).to_vec()
+            };
+            if !out_buf2.is_null() {
+                *out_buf2 = into_buf(cat);
+            }
+            into_buf(filename)
+        }
+        6 => into_buf(crate::feed::format_temp_filename(
+            b1, a as u8, b, c != 0, d, e, f,
+        )),
+        _ => RsBuf {
+            data: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        },
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_twin_service_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    d: c_int,
+    f1: i64,
+    f2: i64,
+    s1: *const c_char,
+    s2: *const c_char,
+    s3: *const c_char,
+    u8_1: *const u8,
+    u8_2: *const u8,
+    i32_1: *const c_int,
+    i64_1: *const i64,
+    len: usize,
+    out_buf: *mut RsBuf,
+) -> c_int {
+    let b1 = if s1.is_null() { &[][..] } else { input(s1) };
+    let b2 = if s2.is_null() { &[][..] } else { input(s2) };
+    let b3 = if s3.is_null() { &[][..] } else { input(s3) };
+    match op {
+        0 => c_int::from(crate::twin::is_dupe_item(a != 0, f1, f2, b, c, d)),
+        1 => c_int::from(crate::twin::is_print_usable(b1)),
+        2 => {
+            if u8_1.is_null() || u8_2.is_null() || i32_1.is_null() || len == 0 {
+                return -1;
+            }
+            crate::twin::select_primary(
+                std::slice::from_raw_parts(u8_1, len),
+                std::slice::from_raw_parts(u8_2, len),
+                std::slice::from_raw_parts(i32_1, len),
+            )
+        }
+        3 => {
+            let kind = crate::twin::resolve_kind(
+                a != 0,
+                b != 0,
+                c != 0,
+                b1,
+                d != 0,
+                f1 != 0,
+                f2 != 0,
+                f2 != 0,
+                b2,
+            );
+            let non_empty = !kind.is_empty();
+            if !out_buf.is_null() {
+                *out_buf = into_buf(kind);
+            }
+            c_int::from(non_empty)
+        }
+        4 => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::twin::format_twin_kind_message(
+                    b1, b2, b3, a != 0,
+                ));
+            }
+            1
+        }
+        5 => crate::twin::parse_fingerprint_files(b1),
+        6 => {
+            if u8_1.is_null() || i64_1.is_null() || len == 0 {
+                return -1;
+            }
+            crate::twin::select_min_par2_index(
+                std::slice::from_raw_parts(u8_1, len),
+                std::slice::from_raw_parts(i64_1, len),
+                f1,
+            )
+        }
+        7 => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::twin::format_identity(b1, b2));
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_xmlrpc_resp_op(
+    op: c_int,
+    is_json: c_int,
+    int_val: c_int,
+    u64_1: u64,
+    u64_2: u64,
+    f64_1: f64,
+    f64_2: f64,
+    out_buf: *mut RsBuf,
+) -> c_int {
+    match op {
+        0 => c_int::from(crate::xmlrpc_format::is_safe_command(int_val)),
+        1 => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::xmlrpc_format::format_bool_bytes(
+                    is_json != 0,
+                    int_val != 0,
+                ));
+            }
+            1
+        }
+        2 => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::xmlrpc_format::format_int_bytes(
+                    is_json != 0,
+                    int_val,
+                ));
+            }
+            1
+        }
+        3 => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::xmlrpc_format::format_disk_speed_bytes(
+                    is_json != 0,
+                    u64_1,
+                    f64_1,
+                    u64_2,
+                    f64_2,
+                ));
+            }
+            1
+        }
+        4 => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::xmlrpc_format::format_network_speed_bytes(
+                    is_json != 0,
+                    f64_1,
+                ));
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_socket_deadline_wait(
+    fd: c_int,
+    read: c_int,
+    write: c_int,
+    ctx: *mut c_void,
+    rem_cb: Option<unsafe extern "C" fn(*mut c_void) -> i64>,
+) -> c_int {
+    let Some(cb) = rem_cb else {
+        return 0;
+    };
+    c_int::from(crate::lifecycle::socket_deadline_wait(
+        fd,
+        read != 0,
+        write != 0,
+        || cb(ctx),
+    ))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_url_coord_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    t1: i64,
+    t2: i64,
+    s1: *const c_char,
+    arr1: *const c_int,
+    arr2: *const c_int,
+    arr3: *const c_int,
+    arr4: *const c_int,
+    len: usize,
+    out_i32_1: *mut c_int,
+    out_i32_2: *mut c_int,
+    out_i32_3: *mut c_int,
+    out_buf: *mut RsBuf,
+) -> isize {
+    match op {
+        0 => {
+            let cur_url = if out_i32_2.is_null() { 0 } else { *out_i32_2 };
+            let (new_url, new_del, retry) =
+                crate::urlcoord::completed(a, b != 0, cur_url, c);
+            if !out_i32_1.is_null() {
+                *out_i32_1 = new_del;
+            }
+            if !out_i32_2.is_null() {
+                *out_i32_2 = new_url;
+            }
+            if !out_i32_3.is_null() {
+                *out_i32_3 = c_int::from(b != 0);
+            }
+            isize::from(retry)
+        }
+        1 => {
+            let kinds = if arr1.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(arr1, len)
+            };
+            let url_st = if arr2.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(arr2, len)
+            };
+            let del_st = if arr3.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(arr3, len)
+            };
+            let prios = if arr4.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(arr4, len)
+            };
+            crate::urlcoord::select_next_url(kinds, url_st, del_st, prios, 1, 0, 0) as isize
+        }
+        2 => isize::from(crate::urlcoord::is_hanging_url_download(t1, t2, a, b, 1)),
+        3 => {
+            let temp_dir = if s1.is_null() { &[][..] } else { input(s1) };
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::urlcoord::format_temp_url_path(
+                    temp_dir,
+                    a as u8,
+                    b,
+                ));
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_scanner_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    d: c_int,
+    t1: i64,
+    t2: i64,
+    t3: i64,
+    t4: i64,
+    s1: *const c_char,
+    arr: *const c_int,
+    len: usize,
+    out_i32: *mut c_int,
+    out_i64_1: *mut i64,
+    out_i64_2: *mut i64,
+) -> c_int {
+    let b1 = if s1.is_null() { &[][..] } else { input(s1) };
+    match op {
+        0 => {
+            let (next_int, next_pass) = crate::scanner::next_pass(a, b, c != 0, d);
+            if !out_i32.is_null() {
+                *out_i32 = next_pass;
+            }
+            next_int
+        }
+        1 => c_int::from(crate::scanner::can_process_extension(b1)),
+        2 => {
+            let (can_proc, upd_sz, upd_lc) =
+                crate::scanner::eval_file_age(t1, t2, t3, t4, a);
+            if !out_i64_1.is_null() {
+                *out_i64_1 = upd_sz;
+            }
+            if !out_i64_2.is_null() {
+                *out_i64_2 = upd_lc;
+            }
+            c_int::from(can_proc)
+        }
+        3 => c_int::from(crate::scanner::should_drop_scan_file(t1, t2, a, b)),
+        4 => c_int::from(crate::scanner::should_skip_item(
+            b1,
+            b"_processed",
+            b"_broken",
+        )),
+        5 => {
+            let (ren_proc, act) =
+                crate::scanner::classify_incoming_extension(a != 0, b != 0, b1);
+            if !out_i32.is_null() {
+                *out_i32 = c_int::from(ren_proc);
+            }
+            act
+        }
+        6 => crate::scanner::classify_missed_articles(a, b, c != 0),
+        7 => {
+            let statuses = if arr.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(arr, len)
+            };
+            crate::scanner::resolve_archive_add_status(a != 0, statuses, b, c)
+        }
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_scheduler_service_op(
+    op: c_int,
+    a: c_int,
+    b: c_int,
+    c: c_int,
+    d: c_int,
+    t1: i64,
+    t2: i64,
+    s1: *const c_char,
+    s2: *const c_char,
+    out_i32: *mut c_int,
+) -> c_int {
+    match op {
+        0 => c_int::from(crate::scheduler::scheduler_task_less(a, b, c, d)),
+        1 => c_int::from(crate::scheduler::scheduler_should_execute_process(
+            a != 0,
+            b,
+            -1,
+        )),
+        2 => {
+            let kb = if s1.is_null() { 0 } else { libc::atoi(s1) };
+            crate::scheduler::scheduler_calc_speed_limit_bytes(kb)
+        }
+        3 => {
+            let id = if s2.is_null() { 0 } else { libc::atoi(s2) };
+            c_int::from(crate::scheduler::scheduler_matches_server_ref(id, a, s1, s2))
+        }
+        4 => {
+            let id = if s2.is_null() { 0 } else { libc::atoi(s2) };
+            let (matched, fetch_id) =
+                crate::scheduler::scheduler_matches_feed_ref(id, a, s1, s2);
+            if !out_i32.is_null() {
+                *out_i32 = fetch_id;
+            }
+            c_int::from(matched)
+        }
+        5 => c_int::from(crate::scheduler::scheduler_should_autoresume(t1, t2)),
+        6 => crate::scheduler::scheduler_bytes_to_kb(a),
+        7 => crate::scheduler::scheduler_calc_next_work_interval(t1),
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_scheduler_service_str(op: c_int, val: c_int) -> *const c_char {
+    let bytes = match op {
+        0 => crate::scheduler::scheduler_pause_action_str(val != 0),
+        1 => crate::scheduler::scheduler_server_action_str(val != 0),
+        2 => crate::scheduler::scheduler_command_name(val),
+        _ => b"\0",
+    };
+    bytes.as_ptr() as *const c_char
+}
 

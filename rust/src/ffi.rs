@@ -14422,4 +14422,682 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_is_data_filename(filename: *const
     c_int::from(crate::queuecoord::is_data_filename(input(filename)))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_diskstate_parse_unpack_state(
+    line1: *const c_char,
+    line2: *const c_char,
+    line3: *const c_char,
+    ns_running: c_int,
+    ns_none: c_int,
+    ctx: *mut c_void,
+    on_parsed_and_read_archives_cb: Option<
+        unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int, c_int) -> *const c_char,
+    >,
+    add_archive_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize)>,
+) -> c_int {
+    let l1 = crate::diskstate_format::cstr_to_bytes(line1);
+    let l2 = crate::diskstate_format::cstr_to_bytes(line2);
+    let l3 = crate::diskstate_format::cstr_to_bytes(line3);
+    let Some((direct, tried, repaired, last)) =
+        crate::diskstate_format::parse_unpack_state_lines(l1, l2, l3, ns_running, ns_none)
+    else {
+        return 0;
+    };
+    let Some(read_cb) = on_parsed_and_read_archives_cb else {
+        return 0;
+    };
+    let line4 = read_cb(
+        ctx,
+        direct,
+        c_int::from(tried),
+        c_int::from(repaired),
+        last,
+    );
+    if line4.is_null() {
+        return 0;
+    }
+    if let Some(cb) = add_archive_cb {
+        let l4 = crate::diskstate_format::cstr_to_bytes(line4);
+        let archives = l4.strip_prefix(b"ExtractedArchives=").unwrap_or(l4);
+        let mut cursor = 0;
+        while let Some((start, len, next)) =
+            crate::diskstate_format::diskstate_next_comma_token(archives, cursor)
+        {
+            cb(ctx, archives.as_ptr().add(start) as *const c_char, len);
+            cursor = next;
+        }
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_is_par_file(
+    par_file: c_int,
+    first_content: c_int,
+    fc_par2: c_int,
+    filename_confirmed: c_int,
+    filename: *const c_char,
+) -> c_int {
+    let bytes = if filename.is_null() {
+        &[][..]
+    } else {
+        input(filename)
+    };
+    c_int::from(crate::dupefallback::is_par_file(
+        par_file != 0,
+        first_content,
+        fc_par2,
+        filename_confirmed != 0,
+        bytes,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_par_cannot_cover(
+    par_size: i64,
+    par_failed_size: i64,
+    current_failed_size: i64,
+    current_success_size: i64,
+    par_current_success_size: i64,
+    total_size: i64,
+    current_success_articles: c_int,
+    current_failed_articles: c_int,
+    with_margin: c_int,
+) -> c_int {
+    c_int::from(crate::dupefallback::par_cannot_cover(
+        par_size,
+        par_failed_size,
+        current_failed_size,
+        current_success_size,
+        par_current_success_size,
+        total_size,
+        current_success_articles,
+        current_failed_articles,
+        with_margin != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_check_try_preconditions(
+    first_content: c_int,
+    fc_par2: c_int,
+    fc_unknown: c_int,
+    part_number: c_int,
+    filename: *const c_char,
+    file_deleted: c_int,
+    nzb_deleting: c_int,
+    nzb_parking: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+) -> c_int {
+    let bytes = if filename.is_null() {
+        &[][..]
+    } else {
+        input(filename)
+    };
+    c_int::from(crate::dupefallback::check_try_preconditions(
+        1,
+        0,
+        false,
+        false,
+        first_content,
+        fc_par2,
+        fc_unknown,
+        part_number,
+        bytes,
+        file_deleted != 0,
+        nzb_deleting != 0,
+        nzb_parking != 0,
+        delete_status,
+        ds_none,
+        dupe_mode,
+        dm_force,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_compute_pin_lead_state(
+    contributors: *const c_int,
+    count: usize,
+    cur_file_lead_donor_id: c_int,
+    out_lead_snapshot: *mut c_int,
+    out_next_lead: *mut c_int,
+    out_donor_count: *mut c_int,
+    out_new_file_lead: *mut c_int,
+) {
+    let slice = if contributors.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(contributors, count)
+    };
+    let (snap, next, dcount, new_lead) =
+        crate::dupefallback::compute_pin_lead_state(slice, cur_file_lead_donor_id);
+    if !out_lead_snapshot.is_null() {
+        *out_lead_snapshot = snap;
+    }
+    if !out_next_lead.is_null() {
+        *out_next_lead = next;
+    }
+    if !out_donor_count.is_null() {
+        *out_donor_count = dcount;
+    }
+    if !out_new_file_lead.is_null() {
+        *out_new_file_lead = new_lead;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_register_lead_failure(
+    fallback_round: c_int,
+    lead_snapshot: c_int,
+    donor_count: c_int,
+    next_lead: c_int,
+    inout_lead_donor_id: *mut c_int,
+    inout_lead_failures: *mut c_int,
+    inout_lead_switches: *mut c_int,
+) -> c_int {
+    if inout_lead_donor_id.is_null()
+        || inout_lead_failures.is_null()
+        || inout_lead_switches.is_null()
+    {
+        return 0;
+    }
+    c_int::from(crate::dupefallback::register_lead_failure(
+        fallback_round,
+        lead_snapshot,
+        donor_count,
+        next_lead,
+        &mut *inout_lead_donor_id,
+        &mut *inout_lead_failures,
+        &mut *inout_lead_switches,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_register_lead_success(
+    fallback_round: c_int,
+    lead_snapshot: c_int,
+    lead_donor_id: c_int,
+    expected_offset: i64,
+    expected_end: i64,
+    inout_lead_failures: *mut c_int,
+    inout_lead_switches: *mut c_int,
+) {
+    if inout_lead_failures.is_null() || inout_lead_switches.is_null() {
+        return;
+    }
+    crate::dupefallback::register_lead_success(
+        fallback_round,
+        lead_snapshot,
+        lead_donor_id,
+        expected_offset,
+        expected_end,
+        &mut *inout_lead_failures,
+        &mut *inout_lead_switches,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_first_untiled_article(
+    articles: *const crate::dupefallback::NzbgetRsArticleGeom,
+    count: usize,
+    decoded_size: i64,
+) -> isize {
+    let slice = if articles.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(articles, count)
+    };
+    crate::dupefallback::first_untiled_article(slice, decoded_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_merge_decoded_file_size(
+    inout_decoded_file_size: *mut i64,
+    article_file_size: i64,
+) -> c_int {
+    if inout_decoded_file_size.is_null() {
+        return 0;
+    }
+    let (conflict, next_size) =
+        crate::dupefallback::merge_decoded_file_size(*inout_decoded_file_size, article_file_size);
+    *inout_decoded_file_size = next_size;
+    c_int::from(conflict)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_classify_first_head(
+    head: *const u8,
+    len: usize,
+) -> c_int {
+    let slice = if head.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(head, len)
+    };
+    crate::dupefallback::classify_first_head(slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_script_parse_nzb_cmd(
+    scope: c_int,
+    msg_text: *const c_char,
+    event: c_int,
+    qe_nzb_downloaded: c_int,
+    out_key_off: *mut usize,
+    out_key_len: *mut usize,
+    out_val_off: *mut usize,
+    out_int_val: *mut c_int,
+) -> c_int {
+    let bytes = if msg_text.is_null() {
+        &[][..]
+    } else {
+        input(msg_text)
+    };
+    let (kind, k_off, k_len, v_off, i_val) = match scope {
+        0 => {
+            let r = crate::extension::parse_queue_script_cmd(bytes, event, qe_nzb_downloaded);
+            (r.kind, r.key_offset, r.key_len, r.val_offset, 0)
+        }
+        1 => {
+            let r = crate::extension::parse_post_script_cmd(bytes);
+            (r.kind, r.key_offset, r.key_len, r.val_offset, 0)
+        }
+        2 => {
+            let r = crate::extension::parse_scan_script_cmd(bytes);
+            (r.kind, r.key_offset, r.key_len, r.val_offset, r.int_val)
+        }
+        _ => (0, 0, 0, 0, 0),
+    };
+    if !out_key_off.is_null() {
+        *out_key_off = k_off;
+    }
+    if !out_key_len.is_null() {
+        *out_key_len = k_len;
+    }
+    if !out_val_off.is_null() {
+        *out_val_off = v_off;
+    }
+    if !out_int_val.is_null() {
+        *out_int_val = i_val;
+    }
+    kind
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_post_script_analyse_exit_code(
+    exit_code: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+    parcheck_enabled: c_int,
+    sr_none: c_int,
+    sr_failure: c_int,
+    sr_success: c_int,
+    out_msg_action: *mut c_int,
+    out_req_par_check: *mut c_int,
+) -> c_int {
+    let (status, action, req) = crate::extension::analyse_post_script_exit_code(
+        exit_code,
+        par_status,
+        ps_skipped,
+        parcheck_enabled != 0,
+        sr_none,
+        sr_failure,
+        sr_success,
+    );
+    if !out_msg_action.is_null() {
+        *out_msg_action = action;
+    }
+    if !out_req_par_check.is_null() {
+        *out_req_par_check = c_int::from(req);
+    }
+    status
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_scanner_prepare_external_name(
+    nzb_name: *const c_char,
+    is_from_disk: c_int,
+    buf_ptr: *const c_char,
+    buf_size: c_int,
+    inout_is_nzb: *mut c_int,
+) -> RsBuf {
+    let mut is_nzb = if !inout_is_nzb.is_null() {
+        *inout_is_nzb != 0
+    } else {
+        false
+    };
+    if is_from_disk == 0 {
+        let slice = if buf_ptr.is_null() || buf_size <= 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(buf_ptr as *const u8, buf_size as usize)
+        };
+        is_nzb = crate::scanner::is_nzb_xml_prefix(slice);
+        if !inout_is_nzb.is_null() {
+            *inout_is_nzb = c_int::from(is_nzb);
+        }
+    }
+    let name_bytes = if nzb_name.is_null() {
+        &[][..]
+    } else {
+        input(nzb_name)
+    };
+    let raw_for_valid = if crate::scanner::is_absolute_nzb_name(name_bytes) {
+        &name_bytes[crate::paths::base_file_name(name_bytes)..]
+    } else {
+        name_bytes
+    };
+    let valid = crate::paths::make_valid_filename(raw_for_valid, false);
+    into_buf(crate::scanner::normalize_external_nzb_name(
+        name_bytes, &valid, is_nzb,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_summary_fingerprint(
+    ids_ptr: *const *const c_char,
+    ids_lens: *const usize,
+    count: usize,
+    out_hex16: *mut c_char,
+) {
+    let mut slices: Vec<&[u8]> = Vec::with_capacity(count);
+    if !ids_ptr.is_null() && !ids_lens.is_null() {
+        for i in 0..count {
+            let p = *ids_ptr.add(i);
+            let l = *ids_lens.add(i);
+            if p.is_null() || l == 0 {
+                slices.push(&[]);
+            } else {
+                slices.push(std::slice::from_raw_parts(p as *const u8, l));
+            }
+        }
+    }
+    let hex = crate::dupesearch_nzb::fnv1a_fingerprint(&slices);
+    if !out_hex16.is_null() {
+        std::ptr::copy_nonoverlapping(hex.as_ptr(), out_hex16 as *mut u8, 16);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_newznab_mask(text: *const c_char, len: usize) -> RsBuf {
+    let slice = if text.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(text as *const u8, len)
+    };
+    into_buf(crate::dupesearch_nzb::mask_newznab_text(slice))
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NzbgetRsDonorScoreEntry {
+    pub score: c_int,
+    pub alive: f64,
+    pub twin: c_int,
+    pub bytes: i64,
+    pub grabs: c_int,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_score_calc(
+    op: c_int,
+    pick_score: c_int,
+    alive: f64,
+    twin: c_int,
+    used_ptr: *const c_int,
+    used_len: usize,
+) -> c_int {
+    match op {
+        0 => crate::donorscore::base(pick_score),
+        1 => crate::donorscore::target(alive, twin != 0),
+        2 => {
+            let used = if used_ptr.is_null() || used_len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(used_ptr, used_len)
+            };
+            crate::donorscore::take_rank(alive, twin != 0, used)
+        }
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_score_rerank(
+    entries: *const NzbgetRsDonorScoreEntry,
+    count: usize,
+    pick_bytes: i64,
+    out_scores: *mut c_int,
+) {
+    if entries.is_null() || out_scores.is_null() || count == 0 {
+        return;
+    }
+    let slice = std::slice::from_raw_parts(entries, count);
+    let rs_entries: Vec<crate::donorscore::Entry> = slice
+        .iter()
+        .map(|e| crate::donorscore::Entry {
+            score: e.score,
+            alive: e.alive,
+            twin: e.twin != 0,
+            bytes: e.bytes,
+            grabs: e.grabs,
+        })
+        .collect();
+    let scores = crate::donorscore::rerank(&rs_entries, pick_bytes);
+    std::slice::from_raw_parts_mut(out_scores, count).copy_from_slice(&scores);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupesearch_parse_pending_meta(
+    meta_ptr: *const c_char,
+    meta_len: usize,
+    out_title_off: *mut usize,
+    out_title_len: *mut usize,
+    out_indexer_off: *mut usize,
+    out_indexer_len: *mut usize,
+    out_grabs: *mut c_int,
+    out_size: *mut i64,
+    out_date: *mut i64,
+) {
+    let slice = if meta_ptr.is_null() || meta_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(meta_ptr as *const u8, meta_len)
+    };
+    let r = crate::dupesearch_nzb::parse_pending_meta(slice);
+    if !out_title_off.is_null() {
+        *out_title_off = r.title_offset;
+    }
+    if !out_title_len.is_null() {
+        *out_title_len = r.title_len;
+    }
+    if !out_indexer_off.is_null() {
+        *out_indexer_off = r.indexer_offset;
+    }
+    if !out_indexer_len.is_null() {
+        *out_indexer_len = r.indexer_len;
+    }
+    if !out_grabs.is_null() {
+        *out_grabs = r.grabs;
+    }
+    if !out_size.is_null() {
+        *out_size = r.size;
+    }
+    if !out_date.is_null() {
+        *out_date = r.date;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupesearch_parse_state_line(
+    line_ptr: *const c_char,
+    line_len: usize,
+    now: i64,
+    ttl_sec: i64,
+    out_key_off: *mut usize,
+    out_key_len: *mut usize,
+    out_score: *mut c_int,
+    out_time: *mut i64,
+    out_title_off: *mut usize,
+    out_title_len: *mut usize,
+    out_retryable: *mut c_int,
+) -> c_int {
+    let slice = if line_ptr.is_null() || line_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(line_ptr as *const u8, line_len)
+    };
+    let r = crate::dupesearch_nzb::parse_dupesearch_state_line(slice, now, ttl_sec);
+    if r.valid == 0 || r.within_ttl == 0 {
+        return 0;
+    }
+    if !out_key_off.is_null() {
+        *out_key_off = r.key_offset;
+    }
+    if !out_key_len.is_null() {
+        *out_key_len = r.key_len;
+    }
+    if !out_score.is_null() {
+        *out_score = r.score;
+    }
+    if !out_time.is_null() {
+        *out_time = r.time;
+    }
+    if !out_title_off.is_null() {
+        *out_title_off = r.title_offset;
+    }
+    if !out_title_len.is_null() {
+        *out_title_len = r.title_len;
+    }
+    if !out_retryable.is_null() {
+        *out_retryable = r.retryable;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_url_decode_path_in_place(raw: *mut c_char) {
+    if raw.is_null() {
+        return;
+    }
+    let total_len = std::ffi::CStr::from_ptr(raw).to_bytes().len();
+    let buf = std::slice::from_raw_parts_mut(raw as *mut u8, total_len + 1);
+    let q = buf[..total_len]
+        .iter()
+        .position(|&b| b == b'?')
+        .unwrap_or(total_len);
+    let dec_len = crate::text::url_decode(&mut buf[..q]);
+    let tail_len = total_len - q;
+    if tail_len > 0 && dec_len != q {
+        buf.copy_within(q..total_len, dec_len);
+    }
+    buf[dec_len + tail_len] = 0;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_web_classify_url(op: c_int, s: *const c_char) -> c_int {
+    let bytes = if s.is_null() { &[][..] } else { input(s) };
+    match op {
+        0 => crate::webserver::web_classify_get_dispatch(bytes),
+        1 => c_int::from(crate::webserver::web_is_ignorable_404(bytes)),
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_web_format_response(
+    kind: c_int,
+    form_auth: c_int,
+    keep_alive: c_int,
+    unchanged: c_int,
+    gzip: c_int,
+    body_len: c_int,
+    str_arg: *const c_char,
+    origin: *const c_char,
+    auth_token: *const c_char,
+    content_type: *const c_char,
+    etag: *const c_char,
+    version: *const c_char,
+    out_body: *mut RsBuf,
+) -> RsBuf {
+    let ver = if version.is_null() {
+        &[][..]
+    } else {
+        input(version)
+    };
+    let orig = if origin.is_null() {
+        &[][..]
+    } else {
+        input(origin)
+    };
+    let s_arg = if str_arg.is_null() {
+        &[][..]
+    } else {
+        input(str_arg)
+    };
+    match kind {
+        0 => into_buf(crate::webserver::format_auth_response(
+            form_auth != 0,
+            keep_alive != 0,
+            ver,
+        )),
+        1 => into_buf(crate::webserver::format_options_response(
+            keep_alive != 0,
+            orig,
+            ver,
+        )),
+        2 => {
+            let (hdr, body) =
+                crate::webserver::format_error_response(s_arg, keep_alive != 0, ver);
+            if !out_body.is_null() {
+                *out_body = into_buf(body);
+            }
+            into_buf(hdr)
+        }
+        3 => into_buf(crate::webserver::format_redirect_response(
+            s_arg,
+            keep_alive != 0,
+            ver,
+        )),
+        4 => {
+            let tok = if auth_token.is_null() {
+                &[][..]
+            } else {
+                input(auth_token)
+            };
+            let ct = if content_type.is_null() {
+                None
+            } else {
+                Some(input(content_type))
+            };
+            let et = if etag.is_null() {
+                None
+            } else {
+                Some(input(etag))
+            };
+            into_buf(crate::webserver::format_body_response_header(
+                unchanged != 0,
+                keep_alive != 0,
+                orig,
+                form_auth != 0,
+                tok,
+                body_len,
+                ct,
+                gzip != 0,
+                et,
+                ver,
+            ))
+        }
+        _ => RsBuf {
+            data: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        },
+    }
+}
+
+
 

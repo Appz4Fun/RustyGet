@@ -10175,54 +10175,23 @@ private:
 		{
 			return false;
 		}
-		auto parsePrefixedInt = [](const char* line, const char* prefix, size_t prefixLen, int& out) -> bool
-		{
-			const char* s = !strncmp(line, prefix, prefixLen) ? line + prefixLen : line;
-			return sscanf(s, "%i", &out) == 1;
-		};
-		int directUnpackStatus = 0, unpackTriedFlags = 0, lastUnpackStatus = 0;
-		if (!parsePrefixedInt(line1, "DirectUnpackStatus=", 19, directUnpackStatus) ||
-			!parsePrefixedInt(line2, "UnpackTried=", 12, unpackTriedFlags) ||
-			!parsePrefixedInt(line3, "LastUnpackStatus=", 17, lastUnpackStatus))
-		{
-			return false;
-		}
-		if (directUnpackStatus == static_cast<int>(NzbInfo::nsRunning))
-		{
-			directUnpackStatus = static_cast<int>(NzbInfo::nsNone);
-		}
-		target->SetDirectUnpackStatus(static_cast<NzbInfo::EDirectUnpackStatus>(directUnpackStatus));
-		target->SetUnpackTried((unpackTriedFlags & 1) != 0);
-		target->SetParRepaired((unpackTriedFlags & 2) != 0);
-		target->SetLastUnpackStatus(lastUnpackStatus);
-
-		std::vector<char> largeBuf(65536);
-		if (!infile.ReadLine(largeBuf.data(), largeBuf.size()))
-		{
-			return false;
-		}
-		char* archivesStr = largeBuf.data();
-		if (!strncmp(archivesStr, "ExtractedArchives=", 18))
-		{
-			archivesStr += 18;
-		}
-		if (std::vector<CString>* archives = target->GetExtractedArchives())
-		{
-			archives->clear();
-			for (const char* p = archivesStr; *p; )
-			{
-				while (*p == ',') p++;
-				if (!*p) break;
-				const char* end = p;
-				while (*end && *end != ',') end++;
-				if (end > p)
-				{
-					archives->emplace_back(p, (int)(end - p));
-				}
-				p = *end ? end + 1 : end;
-			}
-		}
-		return true;
+		struct Ctx { NzbInfo* target; StateDiskFile* infile; std::vector<char> buf = std::vector<char>(65536); } ctx{target, &infile};
+		return nzbget_rs_diskstate_parse_unpack_state(
+			line1, line2, line3, (int)NzbInfo::nsRunning, (int)NzbInfo::nsNone, &ctx,
+			[](void* p, int d, int t, int r, int l) -> const char* {
+				auto* c = static_cast<Ctx*>(p);
+				c->target->SetDirectUnpackStatus((NzbInfo::EDirectUnpackStatus)d);
+				c->target->SetUnpackTried(t != 0);
+				c->target->SetParRepaired(r != 0);
+				c->target->SetLastUnpackStatus(l);
+				if (!c->infile->ReadLine(c->buf.data(), c->buf.size())) return nullptr;
+				if (auto* a = c->target->GetExtractedArchives()) a->clear();
+				return c->buf.data();
+			},
+			[](void* p, const char* tok, size_t len) {
+				auto* c = static_cast<Ctx*>(p);
+				if (auto* a = c->target->GetExtractedArchives()) a->emplace_back(tok, (int)len);
+			}) != 0;
 	}
 
 	bool LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateDiskFile& infile)
@@ -16739,16 +16708,10 @@ public:
 	 * matches. Recognized parity must never be a duplicate target or donor. */
 	static bool IsParFile(FileInfo* fileInfo)
 	{
-		if (fileInfo->GetParFile() || fileInfo->GetFirstContent() == FileInfo::fcPar2)
-		{
-			return true;
-		}
-		if (!fileInfo->GetFilenameConfirmed() || !fileInfo->GetFilename())
-		{
-			return false;
-		}
-		size_t len = strlen(fileInfo->GetFilename());
-		return len >= 5 && !strcasecmp(fileInfo->GetFilename() + len - 5, ".par2");
+		return nzbget_rs_dupe_fallback_is_par_file(
+			fileInfo->GetParFile() ? 1 : 0, (int)fileInfo->GetFirstContent(),
+			(int)FileInfo::fcPar2, fileInfo->GetFilenameConfirmed() ? 1 : 0,
+			fileInfo->GetFilename()) != 0;
 	}
 
 	/* The step fingerprint as a 64-bit hash (0 = the file has too few or too
@@ -17071,13 +17034,8 @@ public:
 
 	static bool CompletedFileIsPar2(CompletedFile& completedFile)
 	{
-		if (completedFile.GetParFile())
-		{
-			return true;
-		}
-		const char* fn = completedFile.GetFilename();
-		size_t len = fn ? strlen(fn) : 0;
-		return len >= 5 && !strcasecmp(fn + len - 5, ".par2");
+		return nzbget_rs_dupe_fallback_is_par_file(
+			completedFile.GetParFile() ? 1 : 0, 0, 1, 1, completedFile.GetFilename()) != 0;
 	}
 
 	/* does the collection have par2 files (the only check a borrowed article's bytes get) */
@@ -17151,26 +17109,12 @@ public:
 	 * Must be called within DownloadQueue-lock. */
 	static bool ParCannotCover(NzbInfo* nzbInfo, bool withMargin = true)
 	{
-		int64 parAvailable = nzbInfo->GetParSize() - nzbInfo->GetParCurrentFailedSize();
-		int64 dataFailed = nzbInfo->GetCurrentFailedSize() - nzbInfo->GetParCurrentFailedSize();
-		if (dataFailed <= 0)
-		{
-			return false;
-		}
-		if (dataFailed > parAvailable)
-		{
-			return true;
-		}
-		int tried = nzbInfo->GetCurrentSuccessArticles() + nzbInfo->GetCurrentFailedArticles();
-		int64 dataTotal = nzbInfo->GetSize() - nzbInfo->GetParSize();
-		int64 dataTried = (nzbInfo->GetCurrentSuccessSize() - nzbInfo->GetParCurrentSuccessSize()) + dataFailed;
-		if (tried < 200 || dataTried <= 0 || dataTotal <= 0)
-		{
-			return false;
-		}
-		double projectedFailed = (double)dataFailed * (double)dataTotal / (double)dataTried;
-		double margin = withMargin ? ((double)dataTotal * (double)ParEdgeMargin / 1000.0) : 0.0;
-		return projectedFailed + margin > (double)parAvailable;
+		return nzbget_rs_dupe_fallback_par_cannot_cover(
+			nzbInfo->GetParSize(), nzbInfo->GetParCurrentFailedSize(),
+			nzbInfo->GetCurrentFailedSize(), nzbInfo->GetCurrentSuccessSize(),
+			nzbInfo->GetParCurrentSuccessSize(), nzbInfo->GetSize(),
+			nzbInfo->GetCurrentSuccessArticles(), nzbInfo->GetCurrentFailedArticles(),
+			withMargin ? 1 : 0) != 0;
 	}
 
 	bool TryFallback(DownloadQueue* downloadQueue, FileInfo* fileInfo, ArticleInfo* articleInfo)
@@ -17189,29 +17133,12 @@ public:
 		// file wait for its first article lost the articles failing before it
 		FileInfo::EFirstContent content = FirstContent(fileInfo);
 		NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
-		auto hasExtension = [](const char* fn) -> bool {
-			if (!fn) return false;
-			const char* dot = strrchr(fn, '.');
-			if (!dot || dot == fn) return false;
-			size_t extLen = strlen(dot + 1);
-			if (extLen == 0 || extLen > 4) return false;
-			for (size_t i = 0; i < extLen; ++i)
-			{
-				unsigned char c = (unsigned char)dot[1 + i];
-				if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')))
-				{
-					return false;
-				}
-			}
-			return true;
-		};
-		if (content == FileInfo::fcPar2 ||
-			(content == FileInfo::fcUnknown && articleInfo->GetPartNumber() != 1 && !hasExtension(fileInfo->GetFilename())) ||
-			fileInfo->GetDeleted() ||
-			nzbInfo->GetDeleting() ||
-			nzbInfo->GetParking() ||
-			nzbInfo->GetDeleteStatus() != NzbInfo::dsNone ||
-			nzbInfo->GetDupeMode() == dmForce)
+		if (!nzbget_rs_dupe_fallback_check_try_preconditions(
+			(int)content, (int)FileInfo::fcPar2, (int)FileInfo::fcUnknown,
+			articleInfo->GetPartNumber(), fileInfo->GetFilename(),
+			fileInfo->GetDeleted() ? 1 : 0, nzbInfo->GetDeleting() ? 1 : 0,
+			nzbInfo->GetParking() ? 1 : 0, (int)nzbInfo->GetDeleteStatus(),
+			(int)NzbInfo::dsNone, (int)nzbInfo->GetDupeMode(), (int)dmForce))
 		{
 			return false;
 		}
@@ -17438,20 +17365,10 @@ public:
 		const std::vector<CString>& candidates, const std::vector<int>& contributors,
 		bool cutover, const char* primaryMessageId)
 	{
-		std::vector<int> donorIds;
-		for (int id : contributors)
-		{
-			if (std::find(donorIds.begin(), donorIds.end(), id) == donorIds.end())
-			{
-				donorIds.push_back(id);
-			}
-		}
-		int leadSnapshot = donorIds.empty() ? 0 : donorIds[0];
-		int nextLead = donorIds.size() > 1 ? donorIds[1] : 0;
-		int donorCount = (int)donorIds.size();
-		int newFileLead = (fileInfo->GetDupeLeadDonorId() == 0 && !donorIds.empty())
-			? donorIds[0]
-			: fileInfo->GetDupeLeadDonorId();
+		int leadSnapshot = 0, nextLead = 0, donorCount = 0, newFileLead = 0;
+		nzbget_rs_dupe_fallback_compute_pin_lead_state(
+			contributors.data(), contributors.size(), fileInfo->GetDupeLeadDonorId(),
+			&leadSnapshot, &nextLead, &donorCount, &newFileLead);
 		articleInfo->SetDupeLeadSnapshot(leadSnapshot);
 		articleInfo->SetDupeNextLead(nextLead);
 		articleInfo->SetDupeDonorCount(donorCount);
@@ -17484,24 +17401,12 @@ public:
 	static bool RegisterLeadFailure(FileInfo* fileInfo, ArticleInfo* articleInfo)
 	{
 		int leadDonorId = fileInfo->GetDupeLeadDonorId();
-		if (articleInfo->GetDupeFallbackRound() != 1 ||
-			articleInfo->GetDupeLeadSnapshot() == 0 ||
-			articleInfo->GetDupeLeadSnapshot() != leadDonorId)
-		{
-			return false;
-		}
-		int leadFailures = (int)std::min<int64>((int64)fileInfo->GetDupeLeadFailures() + 1, INT32_MAX);
+		int leadFailures = fileInfo->GetDupeLeadFailures();
 		int leadSwitches = fileInfo->GetDupeLeadSwitches();
-		bool rotated = false;
-		if (leadFailures >= 3 &&
-			articleInfo->GetDupeNextLead() != 0 &&
-			leadSwitches < articleInfo->GetDupeDonorCount())
-		{
-			leadDonorId = articleInfo->GetDupeNextLead();
-			leadFailures = 0;
-			leadSwitches = (int)std::min<int64>((int64)leadSwitches + 1, INT32_MAX);
-			rotated = true;
-		}
+		bool rotated = nzbget_rs_dupe_fallback_register_lead_failure(
+			articleInfo->GetDupeFallbackRound(), articleInfo->GetDupeLeadSnapshot(),
+			articleInfo->GetDupeDonorCount(), articleInfo->GetDupeNextLead(),
+			&leadDonorId, &leadFailures, &leadSwitches) != 0;
 		fileInfo->SetDupeLeadDonorId(leadDonorId);
 		fileInfo->SetDupeLeadFailures(leadFailures);
 		fileInfo->SetDupeLeadSwitches(leadSwitches);
@@ -17516,18 +17421,14 @@ public:
 	 * not bypass the rotation bound. */
 	static void RegisterLeadSuccess(FileInfo* fileInfo, ArticleInfo* articleInfo)
 	{
-		if (articleInfo->GetDupeFallbackRound() != 1 ||
-			articleInfo->GetDupeLeadSnapshot() == 0 ||
-			articleInfo->GetDupeLeadSnapshot() != fileInfo->GetDupeLeadDonorId())
-		{
-			return;
-		}
-		fileInfo->SetDupeLeadFailures(0);
-		if (ExpectedSegmentOffset(fileInfo, articleInfo) != -1 &&
-			ExpectedSegmentEnd(fileInfo, articleInfo) != -1)
-		{
-			fileInfo->SetDupeLeadSwitches(0);
-		}
+		int leadFailures = fileInfo->GetDupeLeadFailures();
+		int leadSwitches = fileInfo->GetDupeLeadSwitches();
+		nzbget_rs_dupe_fallback_register_lead_success(
+			articleInfo->GetDupeFallbackRound(), articleInfo->GetDupeLeadSnapshot(),
+			fileInfo->GetDupeLeadDonorId(), ExpectedSegmentOffset(fileInfo, articleInfo),
+			ExpectedSegmentEnd(fileInfo, articleInfo), &leadFailures, &leadSwitches);
+		fileInfo->SetDupeLeadFailures(leadFailures);
+		fileInfo->SetDupeLeadSwitches(leadSwitches);
 	}
 
 	/* A lead donor deleted from queue/history would freeze the lead
@@ -17793,64 +17694,22 @@ public:
 	 * fallback round. */
 	static ArticleInfo* FirstUntiledArticle(FileInfo* fileInfo)
 	{
-		// DecodedFileSize is only set from a decoded yEnc article; when it is 0 the
-		// file is non-yEnc (e.g. uuencode, whose articles all record offset 0) or
-		// its geometry is not yet known - either way the tiling cannot be judged.
-		// After a restart it is repopulated from the first yEnc article that
-		// completes, so it is available again by the time a reloaded file finishes.
 		int64 decodedSize = fileInfo->GetDecodedFileSize();
 		if (decodedSize <= 0)
 		{
 			return nullptr;
 		}
-
 		ArticleList* articles = fileInfo->GetArticles();
-		int64 expected = 0;
-		for (size_t index = 0; index < articles->size(); index++)
+		std::vector<NzbgetRsArticleGeom> geom(articles->size());
+		for (size_t i = 0; i < articles->size(); i++)
 		{
-			ArticleInfo* article = (*articles)[index].get();
-			if (article->GetStatus() != ArticleInfo::aiFinished || article->GetSegmentSize() <= 0)
-			{
-				return nullptr;
-			}
-			if (article->GetSegmentOffset() != expected)
-			{
-				if (index > 0)
-				{
-					ArticleInfo* prev = (*articles)[index - 1].get();
-					bool prevBorrowed = prev->GetDupeFallbackRound() > 0;
-					bool thisBorrowed = article->GetDupeFallbackRound() > 0;
-					if (prevBorrowed != thisBorrowed)
-					{
-						return prevBorrowed ? prev : article;
-					}
-					int64 end = article->GetSegmentOffset() + (int64)article->GetSegmentSize();
-					bool placedRight = false;
-					if (index + 1 < articles->size())
-					{
-						ArticleInfo* next = (*articles)[index + 1].get();
-						placedRight = next->GetStatus() == ArticleInfo::aiFinished &&
-							next->GetSegmentSize() > 0 &&
-							next->GetSegmentOffset() == end;
-					}
-					else
-					{
-						placedRight = (end == decodedSize);
-					}
-					if (article->GetSegmentOffset() > expected && placedRight)
-					{
-						return prev;
-					}
-				}
-				return article;
-			}
-			expected = article->GetSegmentOffset() + (int64)article->GetSegmentSize();
+			ArticleInfo* a = (*articles)[i].get();
+			geom[i] = {a->GetPartNumber(), (int32_t)a->GetStatus(), a->GetSegmentOffset(),
+				a->GetSegmentSize(), a->GetDupeFallbackRound()};
 		}
-		if (expected != decodedSize)
-		{
-			return articles->empty() ? nullptr : articles->back().get();
-		}
-		return nullptr;
+		ptrdiff_t idx = nzbget_rs_dupe_fallback_first_untiled_article(
+			geom.empty() ? nullptr : geom.data(), geom.size(), decodedSize);
+		return (idx >= 0 && (size_t)idx < articles->size()) ? (*articles)[(size_t)idx].get() : nullptr;
 	}
 
 	/* True when any article of the file was substituted from a duplicate (its
@@ -17874,17 +17733,10 @@ public:
 	static bool MergeDecodedFileSize(FileInfo* fileInfo, int64 articleFileSize)
 	{
 		int64 decodedFileSize = fileInfo->GetDecodedFileSize();
-		if (articleFileSize <= 0 || decodedFileSize < 0 || decodedFileSize == articleFileSize)
-		{
-			return false;
-		}
-		if (decodedFileSize == 0)
-		{
-			fileInfo->SetDecodedFileSize(articleFileSize);
-			return false;
-		}
-		fileInfo->SetDecodedFileSize(-1);
-		return true;
+		bool conflict = nzbget_rs_dupe_fallback_merge_decoded_file_size(
+			&decodedFileSize, articleFileSize) != 0;
+		fileInfo->SetDecodedFileSize(decodedFileSize);
+		return conflict;
 	}
 
 	/* what the file's first article holds, read from disk if not known yet */
@@ -17911,20 +17763,12 @@ public:
 		{
 			return FileInfo::fcUnknown;	// not on disk yet (the article cache)
 		}
-		bool allZero = true;
-		for (uint8 b : head)
-		{
-			if (b != 0)
-			{
-				allZero = false;
-				break;
-			}
-		}
-		if (allZero)
+		int cls = nzbget_rs_dupe_fallback_classify_first_head(head, sizeof(head));
+		if (cls == 0)
 		{
 			return FileInfo::fcUnknown;	// not on disk yet (the article cache)
 		}
-		fileInfo->SetFirstContent(memcmp(head, "PAR2\0PKT", 8) == 0 ? FileInfo::fcPar2 : FileInfo::fcOther);
+		fileInfo->SetFirstContent(cls == 1 ? FileInfo::fcPar2 : FileInfo::fcOther);
 		return fileInfo->GetFirstContent();
 	}
 
@@ -26800,48 +26644,22 @@ public:
 		virtual void AddMessage(Message::EKind kind, const char* text) override
 		{
 			const char* msgText = text + m_prefixLen;
-
-			if (!strncmp(msgText, "[NZB] ", 6))
+			size_t keyOff = 0, keyLen = 0, valOff = 0;
+			int cmdKind = nzbget_rs_script_parse_nzb_cmd(
+				0, msgText, (int)m_event, (int)QueueScriptCoordinator::qeNzbDownloaded,
+				&keyOff, &keyLen, &valOff, nullptr);
+			if (cmdKind != 0)
 			{
 				debug("Command %s detected", msgText + 6);
-				const char* body = msgText + 6;
-				if (!strncmp(body, "NZBPR_", 6))
+				if (cmdKind > 0)
 				{
-					const char* kv = body + 6;
-					const char* eq = strchr(kv, '=');
-					if (eq)
-					{
-						std::string param(kv, (size_t)(eq - kv));
-						GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-						NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
-						if (nzbInfo)
-						{
-							nzbInfo->GetParameters()->SetParameter(param.c_str(), eq + 1);
-						}
-					}
-					else
-					{
-						error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
-					}
-				}
-				else if (!strncmp(body, "DIRECTORY=", 10) && m_event == QueueScriptCoordinator::qeNzbDownloaded)
-				{
+					if (cmdKind == 3) m_markBad = true;
 					GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-					NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
-					if (nzbInfo)
+					if (NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id))
 					{
-						nzbInfo->SetFinalDir(body + 10);
-					}
-				}
-				else if (!strncmp(body, "MARK=BAD", 8))
-				{
-					m_markBad = true;
-					GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-					NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
-					if (nzbInfo)
-					{
-						nzbInfo->PrintMessage(Message::mkWarning, "Marking %s as bad", *m_nzbName);
-						nzbInfo->SetMarkStatus(NzbInfo::ksBad);
+						if (cmdKind == 1) nzbInfo->GetParameters()->SetParameter(std::string(msgText + keyOff, keyLen).c_str(), msgText + valOff);
+						else if (cmdKind == 2) nzbInfo->SetFinalDir(msgText + valOff);
+						else if (cmdKind == 3) { nzbInfo->PrintMessage(Message::mkWarning, "Marking %s as bad", *m_nzbName); nzbInfo->SetMarkStatus(NzbInfo::ksBad); }
 					}
 				}
 				else
@@ -32758,49 +32576,16 @@ protected:
 	virtual void AddMessage(Message::EKind kind, const char* text)
 	{
 		const char* msgText = text + m_prefixLen;
-
-		if (!strncmp(msgText, "[NZB] ", 6))
+		size_t keyOff = 0, keyLen = 0, valOff = 0;
+		int cmdKind = nzbget_rs_script_parse_nzb_cmd(1, msgText, 0, 0, &keyOff, &keyLen, &valOff, nullptr);
+		if (cmdKind != 0)
 		{
 			debug("Command %s detected", msgText + 6);
-			const char* body = msgText + 6;
-			if (!strncmp(body, "FINALDIR=", 9))
-			{
-				GuardedDownloadQueue guard = DownloadQueue::Guard();
-				m_postInfo->GetNzbInfo()->SetFinalDir(body + 9);
-			}
-			else if (!strncmp(body, "DIRECTORY=", 10))
-			{
-				GuardedDownloadQueue guard = DownloadQueue::Guard();
-				m_postInfo->GetNzbInfo()->SetDestDir(body + 10);
-			}
-			else if (!strncmp(body, "NZBPR_", 6))
-			{
-				const char* kv = body + 6;
-				const char* eq = strchr(kv, '=');
-				if (eq)
-				{
-					std::string param(kv, (size_t)(eq - kv));
-					GuardedDownloadQueue guard = DownloadQueue::Guard();
-					m_postInfo->GetNzbInfo()->GetParameters()->SetParameter(param.c_str(), eq + 1);
-				}
-				else
-				{
-					m_postInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-						"Invalid command \"%s\" received from %s", msgText, GetInfoName());
-				}
-			}
-			else if (!strncmp(body, "MARK=BAD", 8))
-			{
-				SetLogPrefix(nullptr);
-				PrintMessage(Message::mkWarning, "Marking %s as bad", m_postInfo->GetNzbInfo()->GetName());
-				SetLogPrefix(m_script->GetDisplayName());
-				m_postInfo->GetNzbInfo()->SetMarkStatus(NzbInfo::ksBad);
-			}
-			else
-			{
-				m_postInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-					"Invalid command \"%s\" received from %s", msgText, GetInfoName());
-			}
+			if (cmdKind == 1) { GuardedDownloadQueue guard = DownloadQueue::Guard(); m_postInfo->GetNzbInfo()->SetFinalDir(msgText + valOff); }
+			else if (cmdKind == 2) { GuardedDownloadQueue guard = DownloadQueue::Guard(); m_postInfo->GetNzbInfo()->SetDestDir(msgText + valOff); }
+			else if (cmdKind == 3) { std::string param(msgText + keyOff, keyLen); GuardedDownloadQueue guard = DownloadQueue::Guard(); m_postInfo->GetNzbInfo()->GetParameters()->SetParameter(param.c_str(), msgText + valOff); }
+			else if (cmdKind == 4) { SetLogPrefix(nullptr); PrintMessage(Message::mkWarning, "Marking %s as bad", m_postInfo->GetNzbInfo()->GetName()); SetLogPrefix(m_script->GetDisplayName()); m_postInfo->GetNzbInfo()->SetMarkStatus(NzbInfo::ksBad); }
+			else m_postInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Invalid command \"%s\" received from %s", msgText, GetInfoName());
 		}
 		else
 		{
@@ -32903,44 +32688,23 @@ private:
 
 	ScriptStatus::EStatus AnalyseExitCode(int exitCode, const char* upInfoName)
 	{
-		// The ScriptStatus is accumulated for all scripts:
-		// If any script has failed the status is "failure", etc.
-
-		switch (exitCode)
-		{
-			case 93:
-				PrintMessage(Message::mkInfo, "%s successful", upInfoName);
-				return ScriptStatus::srSuccess;
-
-			case 94:
-			case -1:
-				PrintMessage(Message::mkError, "%s failed", upInfoName);
-				return ScriptStatus::srFailure;
-
-			case 95:
-				PrintMessage(Message::mkInfo, "%s skipped", upInfoName);
-				return ScriptStatus::srNone;
-
-#ifndef DISABLE_PARCHECK
-			case 92:
-				if (m_postInfo->GetNzbInfo()->GetParStatus() > NzbInfo::psSkipped)
-				{
-					PrintMessage(Message::mkError, "%s requested par-check/repair, but the collection was already checked", upInfoName);
-					return ScriptStatus::srFailure;
-				}
-				else
-				{
-					PrintMessage(Message::mkInfo, "%s requested par-check/repair", upInfoName);
-					m_postInfo->SetRequestParCheck(true);
-					m_postInfo->SetForceRepair(true);
-					return ScriptStatus::srSuccess;
-				}
+		int parcheckEnabled = 1;
+#ifdef DISABLE_PARCHECK
+		parcheckEnabled = 0;
 #endif
-
-			default:
-				PrintMessage(Message::mkError, "%s failed (terminated with unknown status)", upInfoName);
-				return ScriptStatus::srFailure;
-		}
+		int action = 0, reqPar = 0;
+		int st = nzbget_rs_post_script_analyse_exit_code(
+			exitCode, (int)m_postInfo->GetNzbInfo()->GetParStatus(), (int)NzbInfo::psSkipped,
+			parcheckEnabled, (int)ScriptStatus::srNone, (int)ScriptStatus::srFailure,
+			(int)ScriptStatus::srSuccess, &action, &reqPar);
+		if (action == 1) PrintMessage(Message::mkInfo, "%s successful", upInfoName);
+		else if (action == 2) PrintMessage(Message::mkError, "%s failed", upInfoName);
+		else if (action == 3) PrintMessage(Message::mkInfo, "%s skipped", upInfoName);
+		else if (action == 4) PrintMessage(Message::mkError, "%s requested par-check/repair, but the collection was already checked", upInfoName);
+		else if (action == 5) PrintMessage(Message::mkInfo, "%s requested par-check/repair", upInfoName);
+		else PrintMessage(Message::mkError, "%s failed (terminated with unknown status)", upInfoName);
+		if (reqPar) { m_postInfo->SetRequestParCheck(true); m_postInfo->SetForceRepair(true); }
+		return (ScriptStatus::EStatus)st;
 	}
 };
 
@@ -34583,66 +34347,24 @@ public:
 		void AddMessage(Message::EKind kind, const char* text) override
 		{
 			const char* msgText = text + m_prefixLen;
-
-			if (!strncmp(msgText, "[NZB] ", 6))
+			size_t keyOff = 0, keyLen = 0, valOff = 0;
+			int intVal = 0;
+			int cmdKind = nzbget_rs_script_parse_nzb_cmd(2, msgText, 0, 0, &keyOff, &keyLen, &valOff, &intVal);
+			if (cmdKind != 0)
 			{
 				debug("Command %s detected", msgText + 6);
-				const char* body = msgText + 6;
-				if (!strncmp(body, "NZBNAME=", 8))
-				{
-					m_nzbName = body + 8;
-				}
-				else if (!strncmp(body, "CATEGORY=", 9))
-				{
-					m_category = body + 9;
-					g_Scanner->InitPPParameters(m_category.c_str(), m_parameters, true);
-				}
-				else if (!strncmp(body, "NZBPR_", 6))
-				{
-					const char* kv = body + 6;
-					const char* eq = strchr(kv, '=');
-					if (eq)
-					{
-						std::string param(kv, (size_t)(eq - kv));
-						m_parameters->SetParameter(param.c_str(), eq + 1);
-					}
-					else
-					{
-						error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
-					}
-				}
-				else if (!strncmp(body, "PRIORITY=", 9))
-				{
-					*m_priority = atoi(body + 9);
-				}
-				else if (!strncmp(body, "TOP=", 4))
-				{
-					*m_addTop = atoi(body + 4) != 0;
-				}
-				else if (!strncmp(body, "PAUSED=", 7))
-				{
-					*m_addPaused = atoi(body + 7) != 0;
-				}
-				else if (!strncmp(body, "DUPEKEY=", 8))
-				{
-					m_dupeKey = body + 8;
-				}
-				else if (!strncmp(body, "DUPESCORE=", 10))
-				{
-					*m_dupeScore = atoi(body + 10);
-				}
-				else if (!strncmp(body, "DUPEMODE=", 9))
-				{
-					const char* val = body + 9;
-					if (!strcasecmp(val, "score")) *m_dupeMode = dmScore;
-					else if (!strcasecmp(val, "all")) *m_dupeMode = dmAll;
-					else if (!strcasecmp(val, "force")) *m_dupeMode = dmForce;
-					else error("Invalid value \"%s\" for command \"DUPEMODE\" received from %s", val, GetInfoName());
-				}
-				else
-				{
-					error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
-				}
+				const char* val = msgText + valOff;
+				if (cmdKind == 1) m_nzbName = val;
+				else if (cmdKind == 2) { m_category = val; g_Scanner->InitPPParameters(m_category.c_str(), m_parameters, true); }
+				else if (cmdKind == 3) m_parameters->SetParameter(std::string(msgText + keyOff, keyLen).c_str(), val);
+				else if (cmdKind == 4) *m_priority = intVal;
+				else if (cmdKind == 5) *m_addTop = intVal != 0;
+				else if (cmdKind == 6) *m_addPaused = intVal != 0;
+				else if (cmdKind == 7) m_dupeKey = val;
+				else if (cmdKind == 8) *m_dupeScore = intVal;
+				else if (cmdKind == 9) *m_dupeMode = intVal == 0 ? dmScore : (intVal == 1 ? dmAll : dmForce);
+				else if (cmdKind == -2) error("Invalid value \"%s\" for command \"DUPEMODE\" received from %s", val, GetInfoName());
+				else error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
 				return;
 			}
 			ScriptController::AddMessage(kind, text);
@@ -35720,58 +35442,15 @@ public:
 				error("Could not create file %s", *tempFileName);
 				return asFailed;
 			}
-
-			BString<1024> header;
-			if (buffer && bufSize > 0)
-			{
-				header.Set(buffer, std::min(bufSize, 1023));
-			}
-			nzb = !strncmp(header, "<?xml", 5) && strstr(header, "<nzb");
 		}
 
 		// move file into NzbDir, make sure the file name is unique
-		// a name that is a full path (a client passing its file) drops the folder; any
-		// other "/" belongs to the name (indexers post "[hash] [16/22] - Title"), and it
-		// lost everything up to it ("22] - Title"). MakeValidFilename makes it safe
-		bool absolutePath = nzbName && (nzbName[0] == '/' || nzbName[0] == '\\' ||
-			(std::isalpha((unsigned char)nzbName[0]) && nzbName[1] == ':' &&
-			 (nzbName[2] == '\\' || nzbName[2] == '/')));
-		CString validNzbName = FileSystem::MakeValidFilename(absolutePath ? FileSystem::BaseFileName(nzbName) : nzbName);
-		{
-			const char* vStr = validNzbName ? *validNzbName : "";
-			std::string normStr;
-			if (vStr[0] == '.')
-			{
-				normStr.push_back('_');
-			}
-			normStr.append(vStr);
-			if (normStr.size() > 200)
-			{
-				std::string ext;
-				size_t dot = normStr.rfind('.');
-				if (dot != std::string::npos && normStr.size() - dot <= 16)
-				{
-					ext = normStr.substr(dot);
-				}
-				size_t cut = 200 > ext.size() ? 200 - ext.size() : 0;
-				while (cut > 0 && ((unsigned char)normStr[cut] & 0xC0) == 0x80)
-				{
-					cut--;
-				}
-				normStr.resize(cut);
-				normStr.append(ext);
-			}
-			if (nzb)
-			{
-				const char* nStr = nzbName ? nzbName : "";
-				const char* dot = strrchr(nStr, '.');
-				if (!dot || strcasecmp(dot, ".nzb") != 0)
-				{
-					normStr.append(".nzb");
-				}
-			}
-			validNzbName = normStr.c_str();
-		}
+		int isNzbFlag = nzb ? 1 : 0;
+		NzbgetRsBuf normBuf = nzbget_rs_scanner_prepare_external_name(
+			nzbName, fileName != nullptr ? 1 : 0, buffer, bufSize, &isNzbFlag);
+		nzb = isNzbFlag != 0;
+		CString validNzbName = normBuf.data ? normBuf.data : "";
+		nzbget_rs_free(normBuf);
 
 		BString<1024> scanFileName("%s%c%s", g_Options->GetNzbDir(), PATH_SEPARATOR, *validNzbName);
 
@@ -36800,24 +36479,11 @@ struct NzbSummary
 
 	std::string Fingerprint() const
 	{
-		static constexpr uint64_t FnvOffset = 1469598103934665603ULL;
-		static constexpr uint64_t FnvPrime = 1099511628211ULL;
-		static constexpr char Hex[17] = "0123456789abcdef";
-
-		uint64_t hash = FnvOffset;
-		for (const std::string& id : messageIds)
-		{
-			for (unsigned char ch : id)
-			{
-				hash = (hash ^ (uint64_t)ch) * FnvPrime;
-			}
-			hash = (hash ^ (uint64_t)'\n') * FnvPrime;
-		}
+		std::vector<const char*> ptrs(messageIds.size());
+		std::vector<size_t> lens(messageIds.size());
+		for (size_t i = 0; i < messageIds.size(); i++) { ptrs[i] = messageIds[i].data(); lens[i] = messageIds[i].size(); }
 		char buffer[16];
-		for (int i = 0; i < 16; i++)
-		{
-			buffer[i] = Hex[(hash >> ((15 - i) * 4)) & 0x0f];
-		}
+		nzbget_rs_nzb_summary_fingerprint(ptrs.data(), lens.data(), ptrs.size(), buffer);
 		return std::string(buffer, 16);
 	}
 };
@@ -37174,63 +36840,10 @@ public:
 
 	static std::string Mask(const std::string& text)
 	{
-		std::string_view cut(text.data(), std::min<size_t>(text.size(), 1024));
-		std::string pass1;
-		pass1.reserve(cut.size());
-		size_t i = 0;
-		while (i < cut.size())
-		{
-			if (i + 7 < cut.size() && !strncasecmp(cut.data() + i, "apikey=", 7))
-			{
-				size_t j = i + 7;
-				while (j < cut.size() && cut[j] != '&' && !std::isspace((unsigned char)cut[j]))
-				{
-					j++;
-				}
-				if (j > i + 7)
-				{
-					pass1.append(cut.data() + i, 7);
-					pass1.append("***");
-					i = j;
-					continue;
-				}
-			}
-			pass1.push_back(cut[i]);
-			i++;
-		}
-		std::string out;
-		out.reserve(pass1.size());
-		size_t k = 0;
-		while (k < pass1.size())
-		{
-			if (k + 2 < pass1.size() && pass1[k] == '/' && pass1[k + 1] == '/')
-			{
-				size_t u = k + 2;
-				while (u < pass1.size() && pass1[u] != '/' && pass1[u] != '@' &&
-					!std::isspace((unsigned char)pass1[u]) && pass1[u] != ':')
-				{
-					u++;
-				}
-				if (u > k + 2 && u < pass1.size() && pass1[u] == ':')
-				{
-					size_t p = u + 1;
-					while (p < pass1.size() && pass1[p] != '/' && pass1[p] != '@' &&
-						!std::isspace((unsigned char)pass1[p]))
-					{
-						p++;
-					}
-					if (p > u + 1 && p < pass1.size() && pass1[p] == '@')
-					{
-						out.append("//***@");
-						k = p + 1;
-						continue;
-					}
-				}
-			}
-			out.push_back(pass1[k]);
-			k++;
-		}
-		return out;
+		NzbgetRsBuf buf = nzbget_rs_newznab_mask(text.data(), text.size());
+		std::string res(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return res;
 	}
 
 	struct SearchStats
@@ -37927,27 +37540,17 @@ public:
 	static constexpr int Dead = 1;
 	static constexpr int Top = 90;
 
-	static int Base(int pickScore)
-	{
-		return std::max(0, pickScore - 1000);
-	}
+	static int Base(int pickScore) { return nzbget_rs_donor_score_calc(0, pickScore, 0.0, 0, nullptr, 0); }
 
-	static int Target(double alive, bool twin)
-	{
-		double share = alive < 0.0 ? 1.0 : (alive < 1.0 ? alive : 1.0);
-		return std::min(Top, 9 + (int)std::nearbyint(80.0 * share) + (twin ? 1 : 0));
-	}
+	static int Target(double alive, bool twin) { return nzbget_rs_donor_score_calc(1, 0, alive, twin ? 1 : 0, nullptr, 0); }
 
 	class Ranks
 	{
 	public:
 		int Take(double alive, bool twin)
 		{
-			int score = Target(alive, twin);
-			while (score > Dead + 1 && m_used.count(score))
-			{
-				score--;
-			}
+			std::vector<int> used(m_used.begin(), m_used.end());
+			int score = nzbget_rs_donor_score_calc(2, 0, alive, twin ? 1 : 0, used.data(), used.size());
 			m_used.insert(score);
 			return score;
 		}
@@ -37968,40 +37571,13 @@ public:
 
 	static std::vector<int> Rerank(const std::vector<Entry>& entries, long long pickBytes)
 	{
-		std::vector<int> scores;
-		scores.reserve(entries.size());
-		std::vector<size_t> live;
+		std::vector<NzbgetRsDonorScoreEntry> raw(entries.size());
 		for (size_t i = 0; i < entries.size(); i++)
 		{
-			scores.push_back(entries[i].score);
-			if (entries[i].score > Dead)
-			{
-				live.push_back(i);
-			}
+			raw[i] = {entries[i].score, entries[i].alive, entries[i].twin ? 1 : 0, (int64_t)entries[i].bytes, entries[i].grabs};
 		}
-		auto percent = [](const Entry& e) {
-			return (int)std::nearbyint(100.0 * (e.alive < 0.0 ? 1.0 : e.alive));
-		};
-		auto distance = [pickBytes](const Entry& e) {
-			return e.bytes > pickBytes ? e.bytes - pickBytes : pickBytes - e.bytes;
-		};
-		std::stable_sort(live.begin(), live.end(), [&](size_t a, size_t b) {
-			const Entry& x = entries[a];
-			const Entry& y = entries[b];
-			int px = percent(x), py = percent(y);
-			if (px != py) return px > py;
-			if (x.twin != y.twin) return x.twin > y.twin;
-			long long dx = distance(x), dy = distance(y);
-			if (dx != dy) return dx < dy;
-			return x.grabs > y.grabs;
-		});
-		int previous = 100;
-		for (size_t i : live)
-		{
-			int want = std::max(Dead + 1, std::min(Target(entries[i].alive, entries[i].twin), previous - 1));
-			previous = want;
-			scores[i] = want;
-		}
+		std::vector<int> scores(entries.size());
+		nzbget_rs_donor_score_rerank(raw.data(), raw.size(), (int64_t)pickBytes, scores.data());
 		return scores;
 	}
 };
@@ -40075,30 +39651,15 @@ private:
 				}
 				NzbFetcher::Fetched posting;
 				std::string metaRaw = DupeUtil::ReadAll(base + ".meta");
-				size_t fOff[5] = {};
-				size_t fLen[5] = {};
-				size_t mStart = 0;
-				for (int fi = 0; fi < 5 && mStart <= metaRaw.size(); fi++)
-				{
-					size_t tab = metaRaw.find('\t', mStart);
-					if (tab != std::string::npos)
-					{
-						fOff[fi] = mStart;
-						fLen[fi] = tab - mStart;
-						mStart = tab + 1;
-					}
-					else
-					{
-						fOff[fi] = mStart;
-						fLen[fi] = metaRaw.size() - mStart;
-						mStart = metaRaw.size() + 1;
-					}
-				}
-				posting.listing.title.assign(metaRaw.data() + fOff[0], fLen[0]);
-				posting.listing.indexer.assign(metaRaw.data() + fOff[1], fLen[1]);
-				posting.listing.grabs = atoi(std::string(metaRaw.data() + fOff[2], fLen[2]).c_str());
-				posting.listing.size = atoll(std::string(metaRaw.data() + fOff[3], fLen[3]).c_str());
-				posting.listing.date = (time_t)atoll(std::string(metaRaw.data() + fOff[4], fLen[4]).c_str());
+				size_t tOff = 0, tLen = 0, iOff = 0, iLen = 0;
+				int64_t sz = 0, dt = 0;
+				nzbget_rs_dupesearch_parse_pending_meta(
+					metaRaw.data(), metaRaw.size(), &tOff, &tLen, &iOff, &iLen,
+					&posting.listing.grabs, &sz, &dt);
+				posting.listing.title.assign(metaRaw.data() + tOff, tLen);
+				posting.listing.indexer.assign(metaRaw.data() + iOff, iLen);
+				posting.listing.size = (long long)sz;
+				posting.listing.date = (time_t)dt;
 				posting.data = DupeUtil::ReadAll(base + ".nzb");
 				if (!NzbReader::Parse(posting.data, posting.info))
 				{
@@ -40138,49 +39699,19 @@ private:
 		std::lock_guard<std::mutex> guard(m_mutex);
 		while (std::getline(file, line))
 		{
-			auto nextTabField = [&](size_t start, size_t& outOff, size_t& outLen, size_t& outNext) -> bool {
-				if (start > line.size()) return false;
-				size_t tab = line.find('\t', start);
-				if (tab != std::string::npos)
-				{
-					outOff = start;
-					outLen = tab - start;
-					outNext = tab + 1;
-					return true;
-				}
-				if (start < line.size())
-				{
-					outOff = start;
-					outLen = line.size() - start;
-					outNext = line.size() + 1;
-					return true;
-				}
-				return false;
-			};
-			size_t kOff = 0, kLen = 0, pos1 = 0;
-			size_t sOff = 0, sLen = 0, pos2 = 0;
-			size_t tOff = 0, tLen = 0, pos3 = 0;
-			if (!nextTabField(0, kOff, kLen, pos1) ||
-				!nextTabField(pos1, sOff, sLen, pos2) ||
-				!nextTabField(pos2, tOff, tLen, pos3))
+			size_t kOff = 0, kLen = 0, titleOff = 0, titleLen = 0;
+			int score = 0, retryable = 0;
+			int64_t searchTime = 0;
+			if (nzbget_rs_dupesearch_parse_state_line(
+				line.data(), line.size(), (int64_t)now, StateTtlSec,
+				&kOff, &kLen, &score, &searchTime, &titleOff, &titleLen, &retryable))
 			{
-				continue;
-			}
-			size_t titleOff = line.size(), titleLen = 0, pos4 = line.size() + 1;
-			nextTabField(pos3, titleOff, titleLen, pos4);
-			size_t retryOff = line.size(), retryLen = 0, pos5 = line.size() + 1;
-			nextTabField(pos4, retryOff, retryLen, pos5);
-			int score = atoi(std::string(line.data() + sOff, sLen).c_str());
-			time_t searchTime = (time_t)atoll(std::string(line.data() + tOff, tLen).c_str());
-			if ((int64_t)now - (int64_t)searchTime < StateTtlSec)
-			{
-				std::string key(line.data() + kOff, kLen);
 				Searched searched;
 				searched.score = score;
-				searched.time = searchTime;
+				searched.time = (time_t)searchTime;
 				searched.title.assign(line.data() + titleOff, titleLen);
-				searched.retryable = (retryLen == 1 && line[retryOff] == '1') || titleLen == 0;
-				RecordSearch(key, searched);
+				searched.retryable = retryable != 0;
+				RecordSearch(std::string(line.data() + kOff, kLen), searched);
 			}
 		}
 	}
@@ -45952,34 +45483,7 @@ void ExecuteStartScript()
 	void SetUrl(const char* url)
 	{
 		m_url = url;
-		if (!m_url.Empty())
-		{
-			auto nibble = [](char c) -> uchar {
-				if (c >= '0' && c <= '9') return (uchar)(c - '0');
-				if (c >= 'a' && c <= 'f') return (uchar)(c - 'a' + 10);
-				if (c >= 'A' && c <= 'F') return (uchar)(c - 'A' + 10);
-				return 0;
-			};
-			char* p = m_url;
-			char* o = m_url;
-			while (*p && *p != '?')
-			{
-				if (p[0] == '%' && p[1] && p[2] && p[1] != '?' && p[2] != '?')
-				{
-					*o++ = (char)((nibble(p[1]) << 4) + nibble(p[2]));
-					p += 3;
-				}
-				else
-				{
-					*o++ = *p++;
-				}
-			}
-			while (*p)
-			{
-				*o++ = *p++;
-			}
-			*o = '\0';
-		}
+		nzbget_rs_url_decode_path_in_place(m_url);
 	}
 	void SetRequest(char* request) { m_request = request; }
 	const char* GetResponse() { return m_response; }
@@ -46439,27 +45943,11 @@ private:
 			return;
 		}
 
-		const char* uStr = m_url ? *m_url : "";
-		size_t uLen = strlen(uStr);
-		for (size_t i = 0; i < uLen; i++)
+		int getRoute = nzbget_rs_web_classify_url(0, m_url ? *m_url : "");
+		if (getRoute == 0)
 		{
-			unsigned char c = (unsigned char)uStr[i];
-			bool allowed = std::isalnum(c) || c == '.' || c == '-' || c == '+' || c == '?' || c == '_' || c == '/';
-			if (!allowed || (c == '.' && uStr[i + 1] == '.'))
-			{
-				SendErrorResponse(ERR_HTTP_NOT_FOUND, true);
-				return;
-			}
-		}
-		int getRoute = 4;
-		if (!strncmp(uStr, "/extensions/", 12))
-		{
-			const char* slash = strchr(uStr + 12, '/');
-			getRoute = (!slash || slash == uStr + 12) ? 1 : 2;
-		}
-		else if (!strncmp(uStr, "/combined.", 10) && strchr(uStr, '?'))
-		{
-			getRoute = 3;
+			SendErrorResponse(ERR_HTTP_NOT_FOUND, true);
+			return;
 		}
 		if (getRoute == 1 || getRoute == 2)
 		{
@@ -46534,30 +46022,22 @@ private:
 
 	void SendAuthResponse()
 	{
-		BString<1024> header(
-			"HTTP/1.1 401 Unauthorized\r\n%sConnection: %s\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nServer: RustyGet-%s\r\n\r\n",
-			g_Options->GetFormAuth() ? "" : "WWW-Authenticate: Basic realm=\"RustyGet\"\r\n",
-			m_keepAlive ? "keep-alive" : "close",
-			Util::VersionRevision());
-		debug("ResponseHeader=%s", *header);
-		m_connection->Send(header, header.Length());
+		NzbgetRsBuf header = nzbget_rs_web_format_response(
+			0, g_Options->GetFormAuth() ? 1 : 0, m_keepAlive ? 1 : 0, 0, 0, 0,
+			nullptr, nullptr, nullptr, nullptr, nullptr, Util::VersionRevision(), nullptr);
+		debug("ResponseHeader=%s", header.data);
+		m_connection->Send(header.data, (int)header.len);
+		nzbget_rs_free(header);
 	}
 
 	void SendOptionsResponse()
 	{
-		BString<1024> header(
-			"HTTP/1.1 200 OK\r\nConnection: %s\r\nContent-Length: 0\r\n"
-			"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-			"Access-Control-Allow-Origin: %s\r\n"
-			"Access-Control-Allow-Credentials: true\r\n"
-			"Access-Control-Max-Age: 86400\r\n"
-			"Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
-			"Server: RustyGet-%s\r\n\r\n",
-			m_keepAlive ? "keep-alive" : "close",
-			m_origin.Str(),
-			Util::VersionRevision());
-		debug("ResponseHeader=%s", *header);
-		m_connection->Send(header, header.Length());
+		NzbgetRsBuf header = nzbget_rs_web_format_response(
+			1, 0, m_keepAlive ? 1 : 0, 0, 0, 0,
+			nullptr, m_origin.Str(), nullptr, nullptr, nullptr, Util::VersionRevision(), nullptr);
+		debug("ResponseHeader=%s", header.data);
+		m_connection->Send(header.data, (int)header.len);
+		nzbget_rs_free(header);
 	}
 
 	void SendErrorResponse(const char* errCode, bool printWarning)
@@ -46566,27 +46046,24 @@ private:
 		{
 			warn("Web-Server: %s, Resource: %s", errCode, *m_url);
 		}
-
-		BString<1024> body("<html><head><title>%s</title></head><body>Error: %s</body></html>", errCode, errCode);
-		BString<1024> header(
-			"HTTP/1.1 %s\r\nConnection: %s\r\nContent-Length: %i\r\nContent-Type: text/html\r\nServer: RustyGet-%s\r\n\r\n",
-			errCode,
-			m_keepAlive ? "keep-alive" : "close",
-			body.Length(),
-			Util::VersionRevision());
-		m_connection->Send(header, header.Length());
-		m_connection->Send(body, body.Length());
+		NzbgetRsBuf body{};
+		NzbgetRsBuf header = nzbget_rs_web_format_response(
+			2, 0, m_keepAlive ? 1 : 0, 0, 0, 0,
+			errCode, nullptr, nullptr, nullptr, nullptr, Util::VersionRevision(), &body);
+		m_connection->Send(header.data, (int)header.len);
+		m_connection->Send(body.data, (int)body.len);
+		nzbget_rs_free(header);
+		nzbget_rs_free(body);
 	}
 
 	void SendRedirectResponse(const char* url)
 	{
-		BString<1024> header(
-			"HTTP/1.1 301 Moved Permanently\r\nLocation: %s\r\nConnection: %s\r\nContent-Length: 0\r\nServer: RustyGet-%s\r\n\r\n",
-			url,
-			m_keepAlive ? "keep-alive" : "close",
-			Util::VersionRevision());
-		debug("ResponseHeader=%s", *header);
-		m_connection->Send(header, header.Length());
+		NzbgetRsBuf header = nzbget_rs_web_format_response(
+			3, 0, m_keepAlive ? 1 : 0, 0, 0, 0,
+			url, nullptr, nullptr, nullptr, nullptr, Util::VersionRevision(), nullptr);
+		debug("ResponseHeader=%s", header.data);
+		m_connection->Send(header.data, (int)header.len);
+		nzbget_rs_free(header);
 	}
 
 	void SendBodyResponse(const char* body, int bodyLen, const char* contentType, bool cachable)
@@ -46632,42 +46109,14 @@ private:
 		bool gzip = false;
 #endif
 
-		BString<1024> ctHeader;
-		if (contentType)
-		{
-			ctHeader.Format("Content-Type: %s\r\n", contentType);
-		}
-		BString<1024> etagHeader;
-		if (cachable)
-		{
-			etagHeader.Format("ETag: %s\r\n", *newETag);
-		}
-		BString<1024> header(
-			"HTTP/1.1 %s\r\nConnection: %s\r\n"
-			"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-			"Access-Control-Allow-Origin: %s\r\n"
-			"Access-Control-Allow-Credentials: true\r\n"
-			"Access-Control-Max-Age: 86400\r\n"
-			"Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
-			"Set-Cookie: Auth-Type=%s; SameSite=Lax\r\n"
-			"Set-Cookie: Auth-Token=%s; HttpOnly; SameSite=Lax\r\n"
-			"Content-Length: %i\r\n%s%s%s"
-			"Server: RustyGet-%s\r\n\r\n",
-			unchanged ? "304 Not Modified" : "200 OK",
-			m_keepAlive ? "keep-alive" : "close",
-			m_origin.Str(),
-			g_Options->GetFormAuth() ? "form" : "http",
-			m_authorized ? m_serverAuthToken[m_userAccess] : "",
-			bodyLen,
-			*ctHeader,
-			gzip ? "Content-Encoding: gzip\r\n" : "",
-			*etagHeader,
-			Util::VersionRevision());
-
-		debug("[%s] (%s) %s", *m_url, *m_oldETag, *header);
-
-		// Send the request answer
-		m_connection->Send(header, header.Length());
+		NzbgetRsBuf header = nzbget_rs_web_format_response(
+			4, g_Options->GetFormAuth() ? 1 : 0, m_keepAlive ? 1 : 0,
+			unchanged ? 1 : 0, gzip ? 1 : 0, bodyLen,
+			nullptr, m_origin.Str(), m_authorized ? m_serverAuthToken[m_userAccess] : "",
+			contentType, cachable ? *newETag : nullptr, Util::VersionRevision(), nullptr);
+		debug("[%s] (%s) %s", *m_url, *m_oldETag, header.data);
+		m_connection->Send(header.data, (int)header.len);
+		nzbget_rs_free(header);
 		m_connection->Send(body, bodyLen);
 	}
 
@@ -46681,14 +46130,7 @@ private:
 		CharBuffer body;
 		if (!FileSystem::LoadFileIntoBuffer(filename, body, true))
 		{
-			// do not print warnings "404 not found" for certain files (by base
-			// name: the full path never matched them; and the flag passed on is
-			// "print warning", so no missing file was ever warned about)
-			const char* baseName = FileSystem::BaseFileName(filename);
-			bool ignorable = !strcmp(baseName, "package-info.json") ||
-				!strcmp(baseName, "favicon.ico") ||
-				!strncmp(baseName, "apple-touch-icon", 16);
-
+			bool ignorable = nzbget_rs_web_classify_url(1, FileSystem::BaseFileName(filename)) != 0;
 			SendErrorResponse(ERR_HTTP_NOT_FOUND, !ignorable);
 			return;
 		}

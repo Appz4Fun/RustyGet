@@ -3200,6 +3200,84 @@ size_t nzbget_rs_stream_repair_compute_holes(
     NzbgetRsByteRange* out_holes, size_t max_holes);
 int nzbget_rs_queue_coord_is_data_filename(const char* filename);
 
+typedef struct NzbgetRsArticleGeom {
+    int32_t part_number;
+    int32_t status;
+    int64_t segment_offset;
+    int32_t segment_size;
+    int32_t fallback_round;
+} NzbgetRsArticleGeom;
+
+typedef struct NzbgetRsDonorScoreEntry {
+    int score;
+    double alive;
+    int twin;
+    int64_t bytes;
+    int grabs;
+} NzbgetRsDonorScoreEntry;
+
+int nzbget_rs_diskstate_parse_unpack_state(
+    const char* line1, const char* line2, const char* line3,
+    int ns_running, int ns_none, void* ctx,
+    const char* (*on_parsed_and_read_archives_cb)(void* ctx, int direct, int tried, int repaired, int last),
+    void (*add_archive_cb)(void* ctx, const char* tok, size_t len));
+int nzbget_rs_dupe_fallback_is_par_file(
+    int par_file, int first_content, int fc_par2, int filename_confirmed, const char* filename);
+int nzbget_rs_dupe_fallback_par_cannot_cover(
+    int64_t par_size, int64_t par_failed_size, int64_t current_failed_size,
+    int64_t current_success_size, int64_t par_current_success_size, int64_t total_size,
+    int current_success_articles, int current_failed_articles, int with_margin);
+int nzbget_rs_dupe_fallback_check_try_preconditions(
+    int first_content, int fc_par2, int fc_unknown, int part_number, const char* filename,
+    int file_deleted, int nzb_deleting, int nzb_parking, int delete_status, int ds_none,
+    int dupe_mode, int dm_force);
+void nzbget_rs_dupe_fallback_compute_pin_lead_state(
+    const int* contributors, size_t count, int cur_file_lead_donor_id,
+    int* out_lead_snapshot, int* out_next_lead, int* out_donor_count, int* out_new_file_lead);
+int nzbget_rs_dupe_fallback_register_lead_failure(
+    int fallback_round, int lead_snapshot, int donor_count, int next_lead,
+    int* inout_lead_donor_id, int* inout_lead_failures, int* inout_lead_switches);
+void nzbget_rs_dupe_fallback_register_lead_success(
+    int fallback_round, int lead_snapshot, int lead_donor_id,
+    int64_t expected_offset, int64_t expected_end,
+    int* inout_lead_failures, int* inout_lead_switches);
+ptrdiff_t nzbget_rs_dupe_fallback_first_untiled_article(
+    const NzbgetRsArticleGeom* articles, size_t count, int64_t decoded_size);
+int nzbget_rs_dupe_fallback_merge_decoded_file_size(
+    int64_t* inout_decoded_file_size, int64_t article_file_size);
+int nzbget_rs_dupe_fallback_classify_first_head(const uint8_t* head, size_t len);
+int nzbget_rs_script_parse_nzb_cmd(
+    int scope, const char* msg_text, int event, int qe_nzb_downloaded,
+    size_t* out_key_off, size_t* out_key_len, size_t* out_val_off, int* out_int_val);
+int nzbget_rs_post_script_analyse_exit_code(
+    int exit_code, int par_status, int ps_skipped, int parcheck_enabled,
+    int sr_none, int sr_failure, int sr_success, int* out_msg_action, int* out_req_par_check);
+NzbgetRsBuf nzbget_rs_scanner_prepare_external_name(
+    const char* nzb_name, int is_from_disk, const char* buf_ptr, int buf_size, int* inout_is_nzb);
+void nzbget_rs_nzb_summary_fingerprint(
+    const char* const* ids_ptr, const size_t* ids_lens, size_t count, char* out_hex16);
+NzbgetRsBuf nzbget_rs_newznab_mask(const char* text, size_t len);
+int nzbget_rs_donor_score_calc(
+    int op, int pick_score, double alive, int twin, const int* used_ptr, size_t used_len);
+void nzbget_rs_donor_score_rerank(
+    const NzbgetRsDonorScoreEntry* entries, size_t count, int64_t pick_bytes, int* out_scores);
+void nzbget_rs_dupesearch_parse_pending_meta(
+    const char* meta_ptr, size_t meta_len,
+    size_t* out_title_off, size_t* out_title_len,
+    size_t* out_indexer_off, size_t* out_indexer_len,
+    int* out_grabs, int64_t* out_size, int64_t* out_date);
+int nzbget_rs_dupesearch_parse_state_line(
+    const char* line_ptr, size_t line_len, int64_t now, int64_t ttl_sec,
+    size_t* out_key_off, size_t* out_key_len, int* out_score, int64_t* out_time,
+    size_t* out_title_off, size_t* out_title_len, int* out_retryable);
+void nzbget_rs_url_decode_path_in_place(char* raw);
+int nzbget_rs_web_classify_url(int op, const char* s);
+NzbgetRsBuf nzbget_rs_web_format_response(
+    int kind, int form_auth, int keep_alive, int unchanged, int gzip, int body_len,
+    const char* str_arg, const char* origin, const char* auth_token,
+    const char* content_type, const char* etag, const char* version,
+    NzbgetRsBuf* out_body);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

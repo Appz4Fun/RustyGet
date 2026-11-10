@@ -7577,7 +7577,9 @@ public:
 		{
 			stripped.resize(stripped.size() - 4);
 		}
-		CString valid = FileSystem::MakeValidFilename(stripped.c_str(), false);
+		NzbgetRsBuf validBuf = nzbget_rs_path_text(1, stripped.data(), stripped.size(), false);
+		CString valid(validBuf.data, static_cast<int>(validBuf.len));
+		nzbget_rs_free(validBuf);
 		return valid.Empty() ? CString("nzb") : std::move(valid);
 	}
 	static CString MakeNiceUrlName(const char* urlStr, const char* nzbFilename)
@@ -7759,12 +7761,13 @@ public:
 		}
 		if (g_Options->GetAppendCategoryDir() && useCategory)
 		{
-			CString categoryDir = FileSystem::MakeValidFilename(m_category, true);
-			if (!categoryDir.Empty())
+			NzbgetRsBuf catBuf = nzbget_rs_path_text(2, *m_category, strlen(*m_category), false);
+			if (catBuf.len > 0)
 			{
 				out.push_back(PATH_SEPARATOR);
-				out.append(*categoryDir);
+				out.append(catBuf.data, catBuf.len);
 			}
+			nzbget_rs_free(catBuf);
 		}
 		out.push_back(PATH_SEPARATOR);
 		if (Util::EmptyStr(GetName()))

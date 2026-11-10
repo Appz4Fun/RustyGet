@@ -3138,6 +3138,68 @@ int nzbget_rs_ncurses_resolve_group_edit_action(
     int remaining_par_count, int selected_entry, int last_edit_entry,
     int* inout_last_pause_pars);
 
+typedef struct RsDownloadCurrentStatsAcc {
+    int64_t remaining_size;
+    int64_t current_success_size;
+    int64_t current_failed_size;
+    int64_t paused_size;
+    int64_t par_current_success_size;
+    int64_t par_current_failed_size;
+    int32_t current_success_articles;
+    int32_t current_failed_articles;
+    int32_t extra_priority;
+    int32_t paused_file_count;
+    int32_t remaining_par_count;
+    int32_t _pad;
+} RsDownloadCurrentStatsAcc;
+
+NzbgetRsBuf nzbget_rs_fs_string_op(int op, const char* path, int* out_ok);
+int64_t nzbget_rs_fs_op_with_err(
+    int op, const char* p1, const char* p2, int64_t val, NzbgetRsBuf* out_errmsg);
+int nzbget_rs_fs_load_file_into_buffer(
+    const char* filename, int add_trailing_null, void* ctx,
+    uint8_t* (*reserve_cb)(void*, int));
+int nzbget_rs_fs_get_disk_state(
+    const char* path, int64_t* out_avail, int64_t* out_total);
+uint32_t nzbget_rs_crc32_combine(uint32_t crc1, uint32_t crc2, uint32_t len2);
+int nzbget_rs_util_ends_with(
+    const char* str_ptr, const char* suffix_ptr, int case_sensitive);
+char* nzbget_rs_tokenizer_next(
+    char* data_str, const char* separators, char** inout_save_ptr, int* inout_working);
+void nzbget_rs_binrpc_init_message_base(
+    uint8_t* out, int request_type, int struct_size,
+    const char* username, const char* password);
+void nzbget_rs_binrpc_init_download_request(
+    uint8_t* out, const char* username, const char* password,
+    const char* nzb_filename, const char* nzb_content, int is_url,
+    const char* category, int add_first, int add_paused, int priority,
+    int dupe_score, int dupe_mode, const char* dupe_key,
+    int trailing_len, int auto_category);
+int nzbget_rs_binrpc_edit_parse(
+    const uint8_t* data, uint32_t data_len, int nr_ids, int nr_names,
+    int names_len, int text_len, int32_t* out_ids);
+void nzbget_rs_binrpc_calc_log_slice(
+    int msg_count, int lines, uint32_t id_from, uint32_t first_msg_id,
+    int* out_start, int* out_nr_entries);
+int nzbget_rs_web_parse_request_or_mime(
+    const char* sig_or_filename, char* line,
+    int* out_method, size_t* out_url_offset, const char** out_mime);
+void nzbget_rs_nzb_update_current_stats_step(
+    RsDownloadCurrentStatsAcc* acc, int64_t file_remaining_size,
+    int file_success_articles, int file_failed_articles,
+    int64_t file_success_size, int64_t file_failed_size,
+    int file_extra_priority, int file_paused, int file_par_file);
+void nzbget_rs_nzb_calc_min_max_time(
+    const int64_t* times, size_t count, int64_t* out_min, int64_t* out_max);
+void nzbget_rs_server_stat_apply_op(
+    int stat_op, int delta_success, int delta_failed,
+    int* inout_success, int* inout_failed);
+int nzbget_rs_script_calc_total_status(const int* statuses, size_t count);
+size_t nzbget_rs_stream_repair_compute_holes(
+    const NzbgetRsByteRange* covered, size_t count, int64_t file_size,
+    NzbgetRsByteRange* out_holes, size_t max_holes);
+int nzbget_rs_queue_coord_is_data_filename(const char* filename);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

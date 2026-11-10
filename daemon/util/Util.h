@@ -975,23 +975,7 @@ public:
 
 	static bool EndsWith(const char* str, const char* suffix, bool caseSensitive)
 	{
-		if (!str || !suffix)
-		{
-			return false;
-		}
-		if (!*suffix)
-		{
-			return true;
-		}
-		size_t strLen = strlen(str);
-		size_t sufLen = strlen(suffix);
-		if (sufLen > strLen)
-		{
-			return false;
-		}
-		return caseSensitive
-			? !strcmp(str + strLen - sufLen, suffix)
-			: !strcasecmp(str + strLen - sufLen, suffix);
+		return nzbget_rs_util_ends_with(str, suffix, caseSensitive ? 1 : 0) != 0;
 	}
 
 	static void SetStandByMode([[maybe_unused]] bool standBy) {}
@@ -1261,51 +1245,7 @@ public:
 
 	char* Next()
 	{
-		char* cur = m_working ? m_savePtr : m_dataString;
-		m_working = true;
-		if (!cur)
-		{
-			m_savePtr = nullptr;
-			return nullptr;
-		}
-		const char* seps = m_separators ? m_separators : "";
-		while (*cur)
-		{
-			while (*cur && strchr(seps, *cur))
-			{
-				cur++;
-			}
-			if (!*cur)
-			{
-				m_savePtr = cur;
-				return nullptr;
-			}
-			char* rawEnd = cur;
-			while (*rawEnd && !strchr(seps, *rawEnd))
-			{
-				rawEnd++;
-			}
-			char* nextPos = *rawEnd ? rawEnd + 1 : rawEnd;
-			char* trimStart = cur;
-			while (trimStart < rawEnd && (unsigned char)*trimStart <= ' ')
-			{
-				trimStart++;
-			}
-			char* trimEnd = rawEnd;
-			while (trimEnd > trimStart && (unsigned char)*(trimEnd - 1) <= ' ')
-			{
-				trimEnd--;
-			}
-			if (trimStart < trimEnd)
-			{
-				*trimEnd = '\0';
-				m_savePtr = nextPos;
-				return trimStart;
-			}
-			cur = nextPos;
-		}
-		m_savePtr = cur;
-		return nullptr;
+		return nzbget_rs_tokenizer_next(m_dataString, m_separators, &m_savePtr, &m_working);
 	}
 
 private:
@@ -1314,7 +1254,7 @@ private:
 	char* m_dataString;
 	const char* m_separators;
 	char* m_savePtr = nullptr;
-	bool m_working = false;
+	int m_working = 0;
 };
 
 class Crc32
@@ -1327,32 +1267,7 @@ public:
 
 	static uint32 Combine(uint32 crc1, uint32 crc2, uint32 len2)
 	{
-		if (len2 == 0) return crc1;
-		auto multModP = [](uint32 a, uint32 b) {
-			uint32 m = 1u << 31;
-			uint32 p = 0;
-			for (;;)
-			{
-				if (a & m)
-				{
-					p ^= b;
-					if ((a & (m - 1)) == 0) break;
-				}
-				m >>= 1;
-				b = (b & 1) ? ((b >> 1) ^ 0xedb88320u) : (b >> 1);
-			}
-			return p;
-		};
-		uint32 p = 1u << 31;
-		uint32 x2n = 1u << 30;
-		for (int k = 0; k < 3; k++) x2n = multModP(x2n, x2n);
-		while (len2 != 0)
-		{
-			if (len2 & 1) p = multModP(x2n, p);
-			len2 >>= 1;
-			if (len2 != 0) x2n = multModP(x2n, x2n);
-		}
-		return multModP(p, crc1) ^ crc2;
+		return nzbget_rs_crc32_combine(crc1, crc2, len2);
 	}
 
 private:
@@ -1380,128 +1295,24 @@ inline path make_unique_filename()
 
 inline fs::path make_unique_filename(const fs::path& targetPath)
 {
-	struct stat st{};
-	if (stat(targetPath.c_str(), &st) != 0)
-	{
-		return targetPath;
-	}
-	const auto baseDir = targetPath.parent_path();
-	const auto stem = targetPath.stem().string();
-	const auto ext = targetPath.extension().string();
-	int counter = 1;
-	while (true)
-	{
-		std::string name = stem + " (" + std::to_string(counter++) + ")" + ext;
-		fs::path uniquePath = baseDir / name;
-		if (stat(uniquePath.c_str(), &st) != 0)
-		{
-			return uniquePath;
-		}
-	}
+	NzbgetRsBuf buf = nzbget_rs_fs_string_op(5, targetPath.c_str(), nullptr);
+	fs::path result(std::string_view(buf.data, buf.len));
+	nzbget_rs_free(buf);
+	return result;
 }
 
 inline void move_file(const fs::path& src, const fs::path& dest, fs::error_code& ec) noexcept
 {
-	struct stat st{};
-	if (stat(dest.c_str(), &st) == 0)
-	{
-		errno = EEXIST;
-		ec = std::make_error_code(std::errc::file_exists);
-		return;
-	}
-	if (errno != ENOENT)
-	{
-		ec = std::make_error_code(static_cast<std::errc>(errno));
-		return;
-	}
-	if (rename(src.c_str(), dest.c_str()) == 0)
+	int err = (int)nzbget_rs_fs_op_with_err(5, src.c_str(), dest.c_str(), 0, nullptr);
+	if (err == 0)
 	{
 		ec.clear();
-		return;
 	}
-	if (errno != EXDEV)
+	else
 	{
-		ec = std::make_error_code(static_cast<std::errc>(errno));
-		return;
-	}
-	struct stat srcSt{};
-	if (stat(src.c_str(), &srcSt) != 0)
-	{
-		ec = std::make_error_code(static_cast<std::errc>(errno));
-		return;
-	}
-	int inFd = open(src.c_str(), O_RDONLY | O_CLOEXEC);
-	if (inFd < 0)
-	{
-		ec = std::make_error_code(static_cast<std::errc>(errno));
-		return;
-	}
-	int outFd = open(dest.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
-	if (outFd < 0)
-	{
-		int err = errno;
-		close(inFd);
 		errno = err;
 		ec = std::make_error_code(static_cast<std::errc>(err));
-		return;
 	}
-	char buffer[16 * 1024];
-	int copyErr = 0;
-	off_t totalCopied = 0;
-	while (true)
-	{
-		ssize_t n = read(inFd, buffer, sizeof(buffer));
-		if (n == 0) break;
-		if (n < 0)
-		{
-			if (errno == EINTR) continue;
-			copyErr = errno ? errno : EIO;
-			break;
-		}
-		ssize_t written = 0;
-		while (written < n)
-		{
-			ssize_t w = write(outFd, buffer + written, (size_t)(n - written));
-			if (w < 0)
-			{
-				if (errno == EINTR) continue;
-				copyErr = errno ? errno : EIO;
-				break;
-			}
-			written += w;
-		}
-		if (copyErr != 0) break;
-		totalCopied += n;
-	}
-	close(inFd);
-	if (close(outFd) != 0 && copyErr == 0)
-	{
-		copyErr = errno ? errno : EIO;
-	}
-	if (copyErr == 0 && totalCopied != srcSt.st_size)
-	{
-		copyErr = EIO;
-	}
-	if (copyErr == 0 && chmod(dest.c_str(), srcSt.st_mode & 07777) != 0)
-	{
-		copyErr = errno ? errno : EIO;
-	}
-	if (copyErr != 0)
-	{
-		unlink(dest.c_str());
-		errno = copyErr;
-		ec = std::make_error_code(static_cast<std::errc>(copyErr));
-		return;
-	}
-	if (unlink(src.c_str()) != 0)
-	{
-		int rmErr = errno ? errno : EIO;
-		unlink(dest.c_str());
-		errno = rmErr;
-		ec = std::make_error_code(static_cast<std::errc>(rmErr));
-		return;
-	}
-	ec.clear();
 }
 }
 
@@ -1570,138 +1381,39 @@ public:
 
 	static std::optional<std::string> GetRealPath(const std::string& path)
 	{
-		if (path.empty())
+		int ok = 0;
+		NzbgetRsBuf buf = nzbget_rs_fs_string_op(0, path.c_str(), &ok);
+		if (!ok)
 		{
 			return std::nullopt;
 		}
-		char* resolved = realpath(path.c_str(), nullptr);
-		if (!resolved)
-		{
-			return std::nullopt;
-		}
-		std::string result(resolved);
-		free(resolved);
+		std::string result(buf.data, buf.len);
+		nzbget_rs_free(buf);
 		return result;
 	}
 
 	static bool LoadFileIntoBuffer(const char* filename, CharBuffer& buffer, bool addTrailingNull)
 	{
-		if (!FileExists(filename))
-		{
-			return false;
-		}
-		int fd = open(filename, O_RDONLY | O_CLOEXEC);
-		if (fd < 0)
-		{
-			return false;
-		}
-		int64 size = FileSize(filename);
-		int64 extra = addTrailingNull ? 1 : 0;
-		if (size < 0 || size + extra > INT32_MAX)
-		{
-			close(fd);
-			return false;
-		}
-		buffer.Reserve((int)(size + extra));
-		size_t total = 0;
-		while (total < (size_t)size)
-		{
-			ssize_t n = read(fd, static_cast<char*>(buffer) + total, (size_t)size - total);
-			if (n < 0)
-			{
-				if (errno == EINTR) continue;
-				close(fd);
-				return false;
-			}
-			if (n == 0)
-			{
-				close(fd);
-				return false;
-			}
-			total += (size_t)n;
-		}
-		close(fd);
-		if (addTrailingNull)
-		{
-			buffer[(int)size] = 0;
-		}
-		return true;
+		return nzbget_rs_fs_load_file_into_buffer(
+			filename, addTrailingNull ? 1 : 0, &buffer,
+			[](void* ctx, int sz) -> uint8_t* {
+				auto* buf = static_cast<CharBuffer*>(ctx);
+				buf->Reserve(sz);
+				return reinterpret_cast<uint8_t*>(static_cast<char*>(*buf));
+			}) != 0;
 	}
 
 	static bool SaveBufferIntoFile(const char* filename, const char* buffer, int bufLen)
 	{
-		if (!filename || !*filename)
-		{
-			return false;
-		}
-		int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
-		if (fd < 0)
-		{
-			return false;
-		}
-		size_t len = bufLen > 0 && buffer ? (size_t)bufLen : 0;
-		size_t written = 0;
-		while (written < len)
-		{
-			ssize_t n = write(fd, buffer + written, len - written);
-			if (n < 0)
-			{
-				if (errno == EINTR) continue;
-				close(fd);
-				return false;
-			}
-			written += (size_t)n;
-		}
-		return close(fd) == 0;
+		return nzbget_rs_fs_op_with_err(6, filename, buffer, bufLen, nullptr) != 0;
 	}
 
 	static bool AllocateFile(const char* filename, int64 size, [[maybe_unused]] bool sparse, CString& errmsg)
 	{
-		errmsg.Clear();
-		if (!filename || size < 0)
-		{
-			return false;
-		}
-		int fd = open(filename, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
-		if (fd < 0)
-		{
-			errmsg = GetLastErrorMessage();
-			return false;
-		}
-		close(fd);
-
-		(void)truncate(filename, (off_t)size);
-		bool ok = FileSize(filename) == size;
-		if (!ok)
-		{
-			(void)truncate(filename, 0);
-			fd = open(filename, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
-			if (fd < 0)
-			{
-				errmsg = GetLastErrorMessage();
-				return false;
-			}
-			char zeros[16 * 1024]{};
-			int64 remaining = size;
-			while (remaining > 0)
-			{
-				int64 need = remaining < (int64)sizeof(zeros) ? remaining : (int64)sizeof(zeros);
-				ssize_t written = write(fd, zeros, (size_t)need);
-				if ((int64)written != need)
-				{
-					errmsg = GetLastErrorMessage();
-					close(fd);
-					return false;
-				}
-				remaining -= written;
-			}
-			close(fd);
-			ok = FileSize(filename) == size;
-			if (!ok)
-			{
-				errmsg = "created file has wrong size";
-			}
-		}
+		NzbgetRsBuf err{};
+		bool ok = nzbget_rs_fs_op_with_err(0, filename, nullptr, size, &err) != 0;
+		errmsg.Set(err.data, (int)err.len);
+		nzbget_rs_free(err);
 		return ok;
 	}
 
@@ -1723,82 +1435,7 @@ public:
 
 	static bool MoveFile(const char* srcFilename, const char* dstFilename)
 	{
-		if (!srcFilename || !dstFilename)
-		{
-			return false;
-		}
-		if (rename(srcFilename, dstFilename) == 0)
-		{
-			return true;
-		}
-		if (errno != EXDEV)
-		{
-			return false;
-		}
-		int inFd = open(srcFilename, O_RDONLY | O_CLOEXEC);
-		if (inFd < 0)
-		{
-			return false;
-		}
-		int outFd = open(dstFilename, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
-		if (outFd < 0)
-		{
-			int savedErrno = errno;
-			close(inFd);
-			errno = savedErrno;
-			return false;
-		}
-		char buffer[16 * 1024];
-		bool copyOk = true;
-		int savedErrno = 0;
-		int64 totalCopied = 0;
-		while (true)
-		{
-			ssize_t n = read(inFd, buffer, sizeof(buffer));
-			if (n == 0) break;
-			if (n < 0)
-			{
-				if (errno == EINTR) continue;
-				savedErrno = errno;
-				copyOk = false;
-				break;
-			}
-			ssize_t written = 0;
-			while (written < n)
-			{
-				ssize_t w = write(outFd, buffer + written, (size_t)(n - written));
-				if (w < 0)
-				{
-					if (errno == EINTR) continue;
-					savedErrno = errno;
-					copyOk = false;
-					break;
-				}
-				written += w;
-			}
-			if (!copyOk) break;
-			totalCopied += n;
-		}
-		close(inFd);
-		if (close(outFd) != 0 && copyOk)
-		{
-			savedErrno = errno;
-			copyOk = false;
-		}
-		if (copyOk && totalCopied != FileSize(srcFilename))
-		{
-			copyOk = false;
-		}
-		if (!copyOk)
-		{
-			unlink(dstFilename);
-			if (savedErrno != 0)
-			{
-				errno = savedErrno;
-			}
-			return false;
-		}
-		return unlink(srcFilename) == 0;
+		return nzbget_rs_fs_op_with_err(4, srcFilename, dstFilename, 0, nullptr) != 0;
 	}
 
 	static bool DeleteFile(const char* filename) { return filename && unlink(filename) == 0; }
@@ -1850,50 +1487,32 @@ public:
 
 	static bool CreateHardLink(const char *from, const char *to, CString& errmsg)
 	{
-		errmsg.Clear();
-		if (!from || !to)
-		{
-			return false;
-		}
-		auto [newPath, _] = SplitPathAndFilename(to);
-		if (!ForceDirectories(newPath.c_str(), errmsg))
-		{
-			return false;
-		}
-		if (link(from, to) != 0)
-		{
-			errmsg = GetLastErrorMessage();
-			return false;
-		}
-		return true;
+		NzbgetRsBuf err{};
+		bool ok = nzbget_rs_fs_op_with_err(1, from, to, 0, &err) != 0;
+		errmsg.Set(err.data, (int)err.len);
+		nzbget_rs_free(err);
+		return ok;
 	}
 
 	static CString GetCurrentDirectory()
 	{
-		BString<1024> path;
-		if (getcwd(path, path.Capacity()))
-		{
-			return *path;
-		}
-		return "";
+		NzbgetRsBuf buf = nzbget_rs_fs_string_op(1, nullptr, nullptr);
+		CString result(buf.data, (int)buf.len);
+		nzbget_rs_free(buf);
+		return result;
 	}
 
 	static int64 FileSize(const char* filename)
 	{
-		struct stat st{};
-		return (filename && stat(filename, &st) == 0) ? (int64)st.st_size : -1;
+		return nzbget_rs_fs_op_with_err(9, filename, nullptr, 0, nullptr);
 	}
 
 	static std::optional<DiskState> GetDiskState(const char* path)
 	{
-		struct statvfs s{};
-		if (path && statvfs(path, &s) == 0)
+		int64 avail = 0, total = 0;
+		if (nzbget_rs_fs_get_disk_state(path, &avail, &total))
 		{
-			uint64 availU = (uint64)s.f_bavail * (uint64)s.f_frsize;
-			uint64 totalU = (uint64)s.f_blocks * (uint64)s.f_frsize;
-			int64 available = availU > (uint64)INT64_MAX ? INT64_MAX : (int64)availU;
-			int64 total = totalU > (uint64)INT64_MAX ? INT64_MAX : (int64)totalU;
-			return DiskState{ available, total };
+			return DiskState{ avail, total };
 		}
 		return std::nullopt;
 	}
@@ -1913,109 +1532,49 @@ public:
 
 	static CString ExpandHomePath(const char* filename)
 	{
-		if (!filename)
-		{
-			return "";
-		}
-		if (filename[0] == '~' && filename[1] == '/')
-		{
-			const char* homeDir = getenv("HOME");
-			if (!homeDir)
-			{
-				passwd* pw = getpwuid(getuid());
-				if (pw)
-				{
-					homeDir = pw->pw_dir;
-				}
-			}
-			if (!homeDir)
-			{
-				return "";
-			}
-			CString result;
-			result.Format("%s%s", homeDir, !strcmp(homeDir, "/") ? filename + 2 : filename + 1);
-			return result;
-		}
-		return filename;
+		NzbgetRsBuf buf = nzbget_rs_fs_string_op(2, filename, nullptr);
+		CString result(buf.data, (int)buf.len);
+		nzbget_rs_free(buf);
+		return result;
 	}
 
 	static void FixExecPermission(const char* filename)
 	{
-		struct stat buf{};
-		if (filename && stat(filename, &buf) == 0)
-		{
-			chmod(filename, buf.st_mode | S_IXUSR | S_IXGRP | S_IXOTH);
-		}
+		nzbget_rs_fs_op_with_err(7, filename, nullptr, 0, nullptr);
 	}
 	static inline mode_t uMask;
 
 	static CString ExpandFileName(const char* filename)
 	{
-		if (!filename || !*filename)
-		{
-			return "";
-		}
-		if (filename[0] == '/')
-		{
-			return filename;
-		}
-		const char* rel = !strncmp(filename, "./", 2) ? filename + 2 : filename;
-		CString curDir = GetCurrentDirectory();
-		BString<1024> result("%s/%s", *curDir, rel);
-		return *result;
+		NzbgetRsBuf buf = nzbget_rs_fs_string_op(3, filename, nullptr);
+		CString result(buf.data, (int)buf.len);
+		nzbget_rs_free(buf);
+		return result;
 	}
 
 	static CString GetExeFileName(const char* argv0)
 	{
-		char buf[1024];
-		ssize_t r = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-		if (r > 0)
-		{
-			buf[r] = '\0';
-			return buf;
-		}
-		r = readlink("/proc/curproc/file", buf, sizeof(buf) - 1);
-		if (r > 0)
-		{
-			buf[r] = '\0';
-			return buf;
-		}
-		return ExpandFileName(argv0);
+		NzbgetRsBuf buf = nzbget_rs_fs_string_op(4, argv0, nullptr);
+		CString result(buf.data, (int)buf.len);
+		nzbget_rs_free(buf);
+		return result;
 	}
 
 	static bool FlushFileBuffers(int fileDescriptor, CString& errmsg)
 	{
-#if defined(__APPLE__)
-		int ret = fcntl(fileDescriptor, F_FULLFSYNC) == -1 ? 1 : 0;
-#elif defined(__linux__) || defined(__ANDROID__)
-		int ret = fdatasync(fileDescriptor);
-#else
-		int ret = fsync(fileDescriptor);
-#endif
-		if (ret == 0)
-		{
-			return true;
-		}
-		errmsg = GetLastErrorMessage();
-		return false;
+		NzbgetRsBuf err{};
+		bool ok = nzbget_rs_fs_op_with_err(2, nullptr, nullptr, fileDescriptor, &err) != 0;
+		errmsg.Set(err.data, (int)err.len);
+		nzbget_rs_free(err);
+		return ok;
 	}
 
 	static bool FlushDirBuffers(const char* filename, CString& errmsg)
 	{
-		CString parentPath = filename ? filename : "";
-		char* p = strrchr(parentPath, PATH_SEPARATOR);
-		if (p)
-		{
-			*p = '\0';
-		}
-		int fd = open(parentPath, O_RDONLY | O_CLOEXEC);
-		if (fd == -1)
-		{
-			errmsg = GetLastErrorMessage();
-			return false;
-		}
-		bool ok = FlushFileBuffers(fd, errmsg);
-		close(fd);
+		NzbgetRsBuf err{};
+		bool ok = nzbget_rs_fs_op_with_err(3, filename, nullptr, PATH_SEPARATOR, &err) != 0;
+		errmsg.Set(err.data, (int)err.len);
+		nzbget_rs_free(err);
 		return ok;
 	}
 
@@ -2052,19 +1611,13 @@ public:
 
 	bool Open(const char* filename, EOpenMode mode)
 	{
-		if (!filename)
+		int fd = (int)nzbget_rs_fs_op_with_err(8, filename, nullptr, (int)mode, nullptr);
+		if (fd == -1)
 		{
 			return false;
 		}
 		const char* strmode = mode == omRead ? FOPEN_RB : mode == omReadWrite ?
 			FOPEN_RBP : mode == omWrite ? FOPEN_WB : FOPEN_AB;
-		int flags = mode == omRead ? O_RDONLY : mode == omReadWrite ? O_RDWR :
-			mode == omWrite ? (O_WRONLY | O_CREAT | O_TRUNC) : (O_WRONLY | O_CREAT | O_APPEND);
-		int fd = open(filename, flags | O_CLOEXEC, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
-		if (fd == -1)
-		{
-			return false;
-		}
 		m_file = fdopen(fd, strmode);
 		if (!m_file)
 		{
@@ -7266,21 +6819,10 @@ public:
 			serverStat = &back();
 		}
 
-		if (statOperation == soSet)
-		{
-			serverStat->SetSuccessArticles(successArticles);
-			serverStat->SetFailedArticles(failedArticles);
-		}
-		else if (statOperation == soAdd)
-		{
-			serverStat->SetSuccessArticles(serverStat->GetSuccessArticles() + successArticles);
-			serverStat->SetFailedArticles(serverStat->GetFailedArticles() + failedArticles);
-		}
-		else if (statOperation == soSubtract)
-		{
-			serverStat->SetSuccessArticles(serverStat->GetSuccessArticles() - successArticles);
-			serverStat->SetFailedArticles(serverStat->GetFailedArticles() - failedArticles);
-		}
+		int s = serverStat->GetSuccessArticles(), f = serverStat->GetFailedArticles();
+		nzbget_rs_server_stat_apply_op((int)statOperation, successArticles, failedArticles, &s, &f);
+		serverStat->SetSuccessArticles(s);
+		serverStat->SetFailedArticles(f);
 	}
 
 	void ListOp(ServerStatList* serverStats, EStatOperation statOperation)
@@ -7852,16 +7394,10 @@ class ScriptStatusList : public ScriptStatusListBase
 public:
 	ScriptStatus::EStatus CalcTotalStatus()
 	{
-		ScriptStatus::EStatus status = ScriptStatus::srNone;
-		for (ScriptStatus& scriptStatus : this)
-		{
-			if ((scriptStatus.GetStatus() == ScriptStatus::srSuccess && status == ScriptStatus::srNone) ||
-				(scriptStatus.GetStatus() == ScriptStatus::srFailure))
-			{
-				status = scriptStatus.GetStatus();
-			}
-		}
-		return status;
+		std::vector<int> statuses;
+		statuses.reserve(size());
+		for (ScriptStatus& s : this) statuses.push_back((int)s.GetStatus());
+		return (ScriptStatus::EStatus)nzbget_rs_script_calc_total_status(statuses.data(), statuses.size());
 	}
 };
 
@@ -8356,29 +7892,13 @@ public:
 	}
 	void UpdateMinMaxTime()
 	{
-		m_minTime = 0;
-		m_maxTime = 0;
-		bool first = true;
-		for (FileInfo* fileInfo : &m_fileList)
-		{
-			if (first)
-			{
-				m_minTime = fileInfo->GetTime();
-				m_maxTime = fileInfo->GetTime();
-				first = false;
-			}
-			if (fileInfo->GetTime() > 0)
-			{
-				if (fileInfo->GetTime() < m_minTime)
-				{
-					m_minTime = fileInfo->GetTime();
-				}
-				if (fileInfo->GetTime() > m_maxTime)
-				{
-					m_maxTime = fileInfo->GetTime();
-				}
-			}
-		}
+		std::vector<int64_t> times;
+		times.reserve(m_fileList.size());
+		for (FileInfo* f : &m_fileList) times.push_back((int64_t)f->GetTime());
+		int64_t minT = 0, maxT = 0;
+		nzbget_rs_nzb_calc_min_max_time(times.data(), times.size(), &minT, &maxT);
+		m_minTime = (time_t)minT;
+		m_maxTime = (time_t)maxT;
 	}
 	bool GetParRepaired() { return m_parRepaired; }
 	void SetParRepaired(bool parRepaired) { m_parRepaired = parRepaired; }
@@ -8565,45 +8085,33 @@ public:
 	void SetLiveRepairThread(Thread* liveRepairThread) { m_liveRepairThread = liveRepairThread; }
 	void UpdateCurrentStats()
 	{
-		m_pausedFileCount = 0;
-		m_remainingParCount = 0;
-		m_remainingSize = 0;
-		m_pausedSize = 0;
-		m_currentSuccessArticles = m_successArticles;
-		m_currentFailedArticles = m_failedArticles;
-		m_currentSuccessSize = m_successSize;
-		m_currentFailedSize = m_failedSize;
-		m_parCurrentSuccessSize = m_parSuccessSize;
-		m_parCurrentFailedSize = m_parFailedSize;
-		m_extraPriority = 0;
-
+		RsDownloadCurrentStatsAcc acc{};
+		acc.current_success_articles = m_successArticles;
+		acc.current_failed_articles = m_failedArticles;
+		acc.current_success_size = m_successSize;
+		acc.current_failed_size = m_failedSize;
+		acc.par_current_success_size = m_parSuccessSize;
+		acc.par_current_failed_size = m_parFailedSize;
 		m_currentServerStats.ListOp(&m_serverStats, ServerStatList::soSet);
-
 		for (FileInfo* fileInfo : &m_fileList)
 		{
-			m_remainingSize += fileInfo->GetRemainingSize();
-			m_currentSuccessArticles += fileInfo->GetSuccessArticles();
-			m_currentFailedArticles += fileInfo->GetFailedArticles();
-			m_currentSuccessSize += fileInfo->GetSuccessSize();
-			m_currentFailedSize += fileInfo->GetFailedSize();
-			if (fileInfo->GetExtraPriority())
-			{
-				m_extraPriority++;
-			}
-			if (fileInfo->GetPaused())
-			{
-				m_pausedFileCount++;
-				m_pausedSize += fileInfo->GetRemainingSize();
-			}
-			if (fileInfo->GetParFile())
-			{
-				m_remainingParCount++;
-				m_parCurrentSuccessSize += fileInfo->GetSuccessSize();
-				m_parCurrentFailedSize += fileInfo->GetFailedSize();
-			}
-
+			nzbget_rs_nzb_update_current_stats_step(
+				&acc, fileInfo->GetRemainingSize(), fileInfo->GetSuccessArticles(),
+				fileInfo->GetFailedArticles(), fileInfo->GetSuccessSize(), fileInfo->GetFailedSize(),
+				fileInfo->GetExtraPriority() ? 1 : 0, fileInfo->GetPaused() ? 1 : 0, fileInfo->GetParFile() ? 1 : 0);
 			m_currentServerStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soAdd);
 		}
+		m_pausedFileCount = acc.paused_file_count;
+		m_remainingParCount = acc.remaining_par_count;
+		m_remainingSize = acc.remaining_size;
+		m_pausedSize = acc.paused_size;
+		m_currentSuccessArticles = acc.current_success_articles;
+		m_currentFailedArticles = acc.current_failed_articles;
+		m_currentSuccessSize = acc.current_success_size;
+		m_currentFailedSize = acc.current_failed_size;
+		m_parCurrentSuccessSize = acc.par_current_success_size;
+		m_parCurrentFailedSize = acc.par_current_failed_size;
+		m_extraPriority = acc.extra_priority;
 	}
 	void UpdateCompletedStats(FileInfo* fileInfo)
 	{
@@ -17278,12 +16786,8 @@ public:
 		static StreamRangeList ComputeHoles(FileInfo* fileInfo)
 		{
 			int64 fileSize = fileInfo->GetDecodedFileSize();
-			if (fileSize <= 0)
-			{
-				return StreamRangeList();
-			}
-
-			StreamRangeList covered;
+			if (fileSize <= 0) return StreamRangeList();
+			std::vector<NzbgetRsByteRange> covered;
 			covered.reserve(fileInfo->GetArticles()->size());
 			for (ArticleInfo* article : fileInfo->GetArticles())
 			{
@@ -17292,23 +16796,11 @@ public:
 					covered.push_back({article->GetSegmentOffset(), article->GetSegmentSize()});
 				}
 			}
-			std::sort(covered.begin(), covered.end(),
-				[](const StreamRange& a, const StreamRange& b) { return a.Offset < b.Offset; });
-
+			std::vector<NzbgetRsByteRange> out(covered.size() + 1);
+			size_t n = nzbget_rs_stream_repair_compute_holes(covered.data(), covered.size(), fileSize, out.data(), out.size());
 			StreamRangeList holes;
-			int64 pos = 0;
-			for (const StreamRange& r : covered)
-			{
-				if (r.Offset > pos)
-				{
-					holes.push_back({pos, r.Offset - pos});
-				}
-				pos = std::max(pos, r.Offset + r.Size);
-			}
-			if (pos < fileSize)
-			{
-				holes.push_back({pos, fileSize - pos});
-			}
+			holes.reserve(n);
+			for (size_t i = 0; i < n; i++) holes.push_back({out[i].offset, out[i].size});
 			return holes;
 		}
 
@@ -24983,44 +24475,6 @@ private:
 
 	static bool CertainlyParless(NzbInfo* nzbInfo)
 	{
-		// a renamed par2-file loses its extension: only names that are data count
-		auto dataName = [](const char* filename)
-			{
-				if (!filename)
-				{
-					return false;
-				}
-				const char* ext = strrchr(filename, '.');
-				if (!ext || !ext[1])
-				{
-					return false;
-				}
-				for (const char* known : {
-					".mkv", ".mp4", ".avi", ".m4v", ".ts", ".m2ts", ".mov", ".wmv", ".mpg",
-					".mpeg", ".iso", ".rar", ".7z", ".zip", ".nfo", ".sfv", ".srr", ".srt",
-					".sub", ".idx", ".jpg", ".png", ".txt", ".flac", ".mp3", ".m4a" })
-				{
-					if (!strcasecmp(ext, known))
-					{
-						return true;
-					}
-				}
-				const char* p = (ext[1] == 'r' || ext[1] == 'R') ? ext + 2 : ext + 1;
-				size_t len = strlen(p);
-				if (len < 2 || len > 3)
-				{
-					return false;
-				}
-				for (size_t i = 0; i < len; i++)
-				{
-					if (p[i] < '0' || p[i] > '9')
-					{
-						return false;
-					}
-				}
-				return true;
-			};
-
 		if (DupeArticleFallback::HasPar2(nzbInfo))
 		{
 			return false;
@@ -25028,7 +24482,7 @@ private:
 		int files = 0;
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
-			if (!dataName(fileInfo->GetFilename()))
+			if (!nzbget_rs_queue_coord_is_data_filename(fileInfo->GetFilename()))
 			{
 				return false;
 			}
@@ -25036,7 +24490,7 @@ private:
 		}
 		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 		{
-			if (!dataName(completedFile.GetFilename()))
+			if (!nzbget_rs_queue_coord_is_data_filename(completedFile.GetFilename()))
 			{
 				return false;
 			}
@@ -47293,19 +46747,9 @@ private:
 
 	static const char* DetectContentType(const char* filename)
 	{
-		if (!filename)
-		{
-			return nullptr;
-		}
-		if (Util::EndsWith(filename, ".css", false)) return "text/css";
-		if (Util::EndsWith(filename, ".html", false)) return "text/html";
-		if (Util::EndsWith(filename, ".js", false)) return "application/javascript";
-		if (Util::EndsWith(filename, ".png", false)) return "image/png";
-		if (Util::EndsWith(filename, ".jpeg", false)) return "image/jpeg";
-		if (Util::EndsWith(filename, ".gif", false)) return "image/gif";
-		if (Util::EndsWith(filename, ".svg", false)) return "image/svg+xml";
-		if (Util::EndsWith(filename, ".json", false)) return "application/json";
-		return nullptr;
+		const char* mime = nullptr;
+		nzbget_rs_web_parse_request_or_mime(filename, nullptr, nullptr, nullptr, &mime);
+		return mime;
 	}
 };
 
@@ -47680,21 +47124,12 @@ public:
 		if (!InitConnection()) return false;
 
 		SNzbDownloadRequest DownloadRequest{};
-		InitMessageBase(&DownloadRequest.m_messageBase, rrDownload, sizeof(DownloadRequest));
-		const char* reqFilename = (nzbFilename && *nzbFilename) ? nzbFilename : (!isUrl && nzbContent ? nzbContent : "");
-		strncpy(DownloadRequest.m_nzbFilename, reqFilename, NZBREQUESTFILENAMESIZE - 1);
-		DownloadRequest.m_nzbFilename[NZBREQUESTFILENAMESIZE - 1] = '\0';
-		strncpy(DownloadRequest.m_category, category ? category : "", NZBREQUESTFILENAMESIZE - 1);
-		DownloadRequest.m_category[NZBREQUESTFILENAMESIZE - 1] = '\0';
-		DownloadRequest.m_addFirst = htonl(addFirst);
-		DownloadRequest.m_addPaused = htonl(addPaused);
-		DownloadRequest.m_priority = htonl(priority);
-		DownloadRequest.m_dupeScore = htonl(dupeScore);
-		DownloadRequest.m_dupeMode = htonl(dupeMode);
-		strncpy(DownloadRequest.m_dupeKey, dupeKey ? dupeKey : "", NZBREQUESTFILENAMESIZE - 1);
-		DownloadRequest.m_dupeKey[NZBREQUESTFILENAMESIZE - 1] = '\0';
-		DownloadRequest.m_trailingDataLength = htonl(length);
-		DownloadRequest.m_autoCategory = htonl(autoCategory);
+		nzbget_rs_binrpc_init_download_request(
+			reinterpret_cast<uint8_t*>(&DownloadRequest),
+			g_Options->GetControlUsername(), g_Options->GetControlPassword(),
+			nzbFilename, nzbContent, isUrl ? 1 : 0, category,
+			addFirst ? 1 : 0, addPaused ? 1 : 0, priority, dupeScore, dupeMode,
+			dupeKey, length, autoCategory ? 1 : 0);
 
 		return SendRequestAndReceiveBool(DownloadRequest, isUrl ? nzbContent : *buffer, length);
 	}
@@ -48142,15 +47577,9 @@ private:
 
 	void InitMessageBase(SNzbRequestBase* messageBase, int request, int size)
 	{
-		messageBase->m_signature = htonl(NZBMESSAGE_SIGNATURE);
-		messageBase->m_type = htonl(request);
-		messageBase->m_structSize = htonl(size);
-
-		strncpy(messageBase->m_username, g_Options->GetControlUsername(), NZBREQUESTPASSWORDSIZE - 1);
-		messageBase->m_username[NZBREQUESTPASSWORDSIZE - 1] = '\0';
-
-		strncpy(messageBase->m_password, g_Options->GetControlPassword(), NZBREQUESTPASSWORDSIZE - 1);
-		messageBase->m_password[NZBREQUESTPASSWORDSIZE - 1] = '\0';
+		nzbget_rs_binrpc_init_message_base(
+			reinterpret_cast<uint8_t*>(messageBase), request, size,
+			g_Options->GetControlUsername(), g_Options->GetControlPassword());
 	}
 
 	template <typename Req>
@@ -48366,15 +47795,9 @@ protected:
 
 	void InitMessageBase(SNzbRequestBase* messageBase, int request, int size)
 	{
-		messageBase->m_signature = htonl(NZBMESSAGE_SIGNATURE);
-		messageBase->m_type = htonl(request);
-		messageBase->m_structSize = htonl(size);
-
-		strncpy(messageBase->m_username, g_Options->GetControlUsername(), NZBREQUESTPASSWORDSIZE - 1);
-		messageBase->m_username[NZBREQUESTPASSWORDSIZE - 1] = '\0';
-
-		strncpy(messageBase->m_password, g_Options->GetControlPassword(), NZBREQUESTPASSWORDSIZE - 1);
-		messageBase->m_password[NZBREQUESTPASSWORDSIZE - 1] = '\0';
+		nzbget_rs_binrpc_init_message_base(
+			reinterpret_cast<uint8_t*>(messageBase), request, size,
+			g_Options->GetControlUsername(), g_Options->GetControlPassword());
 	}
 
 	void ServerPauseUnpause(bool pause)
@@ -49877,23 +49300,11 @@ private:
 			GuardedMessageList messages = g_Log->GuardMessages();
 
 			int msgCount = (int)messages->size();
-			int lines = (int)ntohl(LogRequest.m_lines);
-			nrEntries = lines < 0 ? 0 : lines;
-			int start = msgCount;
-			if (nrEntries > 0)
-			{
-				if (nrEntries > msgCount)
-				{
-					nrEntries = msgCount;
-				}
-				start = msgCount - nrEntries;
-			}
-			uint32 idFrom = ntohl(LogRequest.m_idFrom);
-			if (idFrom > 0 && !messages->empty())
-			{
-				start = std::max(0, (int)(idFrom - (uint32)messages->front().GetId()));
-				nrEntries = std::max(0, msgCount - start);
-			}
+			int start = 0;
+			nzbget_rs_binrpc_calc_log_slice(
+				msgCount, (int)ntohl(LogRequest.m_lines), ntohl(LogRequest.m_idFrom),
+				messages->empty() ? 0 : (uint32)messages->front().GetId(),
+				&start, &nrEntries);
 
 			// the messages from start on, collected under the lock for rust/src/binrpc.rs
 			std::vector<NzbgetRsBinLog> log;
@@ -49932,11 +49343,8 @@ private:
 		int textLen = ntohl(EditQueueRequest.m_textLen);
 		uint32 bufLength = ntohl(EditQueueRequest.m_trailingDataLength);
 
-		// the parts' sizes from the client, checked against each other in 64 bits
-		// (the unsigned sum wrapped for negative counts) and against the data
-		if (nrIdEntries < 0 || nrNameEntries < 0 || textLen < 0 || nameEntriesLen < 0 ||
-			nrIdEntries > 10000000 || nrNameEntries > nameEntriesLen ||
-			(int64)nrIdEntries * 4 + (int64)textLen + (int64)nameEntriesLen != (int64)bufLength)
+		if (!nzbget_rs_binrpc_edit_parse(
+			nullptr, bufLength, nrIdEntries, nrNameEntries, nameEntriesLen, textLen, nullptr))
 		{
 			error("Invalid struct size");
 			return;
@@ -49958,38 +49366,16 @@ private:
 			return;
 		}
 
-		// no text is an empty one: the edits read it as a string (a priority, a name)
 		const char* text = textLen > 0 ? *buf : "";
-
-		IdList cIdList;
-		NameList cNameList;
-
-		static_assert(sizeof(IdList::value_type) == sizeof(uint32_t), "ids are 32 bits");
-		cIdList.resize(nrIdEntries);
-		size_t idsEnd = (size_t)textLen + (size_t)nrIdEntries * 4;
-		if (idsEnd > bufLength)
+		IdList cIdList(nrIdEntries);
+		if (!nzbget_rs_binrpc_edit_parse(
+			reinterpret_cast<const uint8_t*>(*buf), bufLength, nrIdEntries, nrNameEntries,
+			nameEntriesLen, textLen, cIdList.data()))
 		{
 			error("Invalid struct size");
 			return;
 		}
-		size_t at = idsEnd;
-		for (int i = 0; i < nrNameEntries; i++)
-		{
-			const void* nul = memchr(*buf + at, 0, bufLength - at);
-			if (!nul)
-			{
-				error("Invalid struct size");
-				return;
-			}
-			at = (size_t)((const char*)nul - *buf) + 1;
-		}
-		for (int i = 0; i < nrIdEntries; i++)
-		{
-			uint32_t beId = 0;
-			memcpy(&beId, *buf + textLen + (size_t)i * 4, 4);
-			cIdList[i] = (int32)ntohl(beId);
-		}
-		// each name ends within the data: checked above
+		NameList cNameList;
 		cNameList.reserve(nrNameEntries);
 		const char* names = buf + textLen + nrIdEntries * sizeof(int32);
 		for (int i = 0; i < nrNameEntries; i++)
@@ -50218,31 +49604,14 @@ private:
 			return false;
 		}
 
-		WebProcessor::EHttpMethod httpMethod = WebProcessor::hmGet;
-		char* url = buffer;
-		if (!strncmp(signature, "POST", 4))
-		{
-			if (buffer[0] == '\0')
-			{
-				return false;
-			}
-			httpMethod = WebProcessor::hmPost;
-			url++;
-		}
-		else if (!strncmp(signature, "OPTI", 4) && strlen(url) > 4)
-		{
-			httpMethod = WebProcessor::hmOptions;
-			url += 4;
-		}
-		else if (strncmp(signature, "GET ", 4))
+		int method = 0;
+		size_t urlOffset = 0;
+		if (!nzbget_rs_web_parse_request_or_mime(signature, buffer, &method, &urlOffset, nullptr))
 		{
 			return false;
 		}
-
-		if (char* p = strchr(url, ' '))
-		{
-			*p = '\0';
-		}
+		WebProcessor::EHttpMethod httpMethod = static_cast<WebProcessor::EHttpMethod>(method);
+		char* url = buffer + urlOffset;
 
 		debug("url: %s", url);
 

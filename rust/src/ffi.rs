@@ -13909,3 +13909,520 @@ pub unsafe extern "C" fn nzbget_rs_ncurses_resolve_group_edit_action(
     out
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_string_op(
+    op: c_int,
+    path: *const c_char,
+    out_ok: *mut c_int,
+) -> RsBuf {
+    let bytes = match op {
+        0 => match crate::fsops::get_real_path(input(path)) {
+            Some(b) => {
+                if !out_ok.is_null() {
+                    *out_ok = 1;
+                }
+                b
+            }
+            None => {
+                if !out_ok.is_null() {
+                    *out_ok = 0;
+                }
+                return into_buf(Vec::new());
+            }
+        },
+        1 => crate::fsops::get_current_directory(),
+        2 => {
+            let opt = if path.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(path))
+            };
+            crate::fsops::expand_home_path_auto(opt)
+        }
+        3 => crate::fsops::expand_file_name(input(path)),
+        4 => crate::fsops::get_exe_file_name(input(path)),
+        5 => crate::fsops::make_unique_path(input(path)),
+        _ => Vec::new(),
+    };
+    if !out_ok.is_null() && op != 0 {
+        *out_ok = 1;
+    }
+    into_buf(bytes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_op_with_err(
+    op: c_int,
+    p1: *const c_char,
+    p2: *const c_char,
+    val: i64,
+    out_errmsg: *mut RsBuf,
+) -> i64 {
+    if !out_errmsg.is_null() {
+        *out_errmsg = into_buf(Vec::new());
+    }
+    let mut errmsg = Vec::new();
+    let res: i64 = match op {
+        0 => {
+            if p1.is_null() || val < 0 {
+                0
+            } else {
+                i64::from(crate::fsops::allocate_file(
+                    CStr::from_ptr(p1),
+                    val,
+                    &mut errmsg,
+                ))
+            }
+        }
+        1 => {
+            if p1.is_null() || p2.is_null() {
+                0
+            } else {
+                i64::from(crate::fsops::create_hard_link(
+                    CStr::from_ptr(p1),
+                    CStr::from_ptr(p2),
+                    &crate::fsops::posix_stat,
+                    &mut errmsg,
+                ))
+            }
+        }
+        2 => i64::from(crate::fsops::flush_file_buffers(val as i32, &mut errmsg)),
+        3 => {
+            let c1 = if p1.is_null() {
+                c""
+            } else {
+                CStr::from_ptr(p1)
+            };
+            i64::from(crate::fsops::flush_dir_buffers(c1, val as u8, &mut errmsg))
+        }
+        4 => {
+            if p1.is_null() || p2.is_null() {
+                0
+            } else {
+                i64::from(crate::fsops::move_file(
+                    CStr::from_ptr(p1),
+                    CStr::from_ptr(p2),
+                ))
+            }
+        }
+        5 => {
+            if p1.is_null() || p2.is_null() {
+                libc::EINVAL as i64
+            } else {
+                match crate::fsops::move_file_no_overwrite(
+                    CStr::from_ptr(p1),
+                    CStr::from_ptr(p2),
+                ) {
+                    Ok(()) => 0,
+                    Err(e) => e as i64,
+                }
+            }
+        }
+        6 => {
+            if p1.is_null() || *p1 == 0 {
+                0
+            } else {
+                let slice = if p2.is_null() || val <= 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(p2.cast::<u8>(), val as usize)
+                };
+                i64::from(crate::fsops::save_buffer_into_file(
+                    CStr::from_ptr(p1),
+                    slice,
+                ))
+            }
+        }
+        7 => {
+            crate::fsops::fix_exec_permission(input(p1));
+            1
+        }
+        8 => {
+            if p1.is_null() {
+                -1
+            } else {
+                crate::fsops::open_cloexec_fd(CStr::from_ptr(p1), val as i32, 0, 1, 2) as i64
+            }
+        }
+        9 => {
+            if p1.is_null() {
+                -1
+            } else {
+                crate::fsops::file_size(CStr::from_ptr(p1))
+            }
+        }
+        _ => 0,
+    };
+    if !out_errmsg.is_null() && !errmsg.is_empty() {
+        *out_errmsg = into_buf(errmsg);
+    }
+    res
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_load_file_into_buffer(
+    filename: *const c_char,
+    add_trailing_null: c_int,
+    ctx: *mut std::ffi::c_void,
+    reserve_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int) -> *mut u8>,
+) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    let Some(cb) = reserve_cb else {
+        return 0;
+    };
+    c_int::from(crate::fsops::load_file_into_buffer(
+        CStr::from_ptr(filename),
+        add_trailing_null != 0,
+        &crate::fsops::posix_stat,
+        |sz| cb(ctx, sz),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_get_disk_state(
+    path: *const c_char,
+    out_avail: *mut i64,
+    out_total: *mut i64,
+) -> c_int {
+    if path.is_null() {
+        return 0;
+    }
+    if let Some((avail, total)) = crate::fsops::get_disk_state(CStr::from_ptr(path)) {
+        if !out_avail.is_null() {
+            *out_avail = avail;
+        }
+        if !out_total.is_null() {
+            *out_total = total;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_crc32_combine(crc1: u32, crc2: u32, len2: u32) -> u32 {
+    crate::crc::combine(crc1, crc2, len2)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_ends_with(
+    str_ptr: *const c_char,
+    suffix_ptr: *const c_char,
+    case_sensitive: c_int,
+) -> c_int {
+    if str_ptr.is_null() || suffix_ptr.is_null() {
+        return 0;
+    }
+    c_int::from(crate::util::ends_with(
+        input(str_ptr),
+        input(suffix_ptr),
+        case_sensitive != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tokenizer_next(
+    data_str: *mut c_char,
+    separators: *const c_char,
+    inout_save_ptr: *mut *mut c_char,
+    inout_working: *mut c_int,
+) -> *mut c_char {
+    let cur = if *inout_working != 0 {
+        *inout_save_ptr
+    } else {
+        data_str
+    };
+    *inout_working = 1;
+    if cur.is_null() {
+        *inout_save_ptr = std::ptr::null_mut();
+        return std::ptr::null_mut();
+    }
+    let slice = CStr::from_ptr(cur).to_bytes();
+    let seps = input(separators);
+    if let Some((tok_start, tok_end, next_pos)) =
+        crate::util::tokenizer_find_next_token(slice, seps)
+    {
+        *cur.add(tok_end) = 0;
+        *inout_save_ptr = cur.add(next_pos);
+        cur.add(tok_start)
+    } else {
+        *inout_save_ptr = cur.add(slice.len());
+        std::ptr::null_mut()
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_init_message_base(
+    out: *mut u8,
+    request_type: c_int,
+    struct_size: c_int,
+    username: *const c_char,
+    password: *const c_char,
+) {
+    if out.is_null() {
+        return;
+    }
+    let buf: &mut [u8; crate::binrpc::BASE_SIZE] =
+        std::slice::from_raw_parts_mut(out, crate::binrpc::BASE_SIZE)
+            .try_into()
+            .unwrap();
+    crate::binrpc::init_message_base(buf, request_type, struct_size, input(username), input(password));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_init_download_request(
+    out: *mut u8,
+    username: *const c_char,
+    password: *const c_char,
+    nzb_filename: *const c_char,
+    nzb_content: *const c_char,
+    is_url: c_int,
+    category: *const c_char,
+    add_first: c_int,
+    add_paused: c_int,
+    priority: c_int,
+    dupe_score: c_int,
+    dupe_mode: c_int,
+    dupe_key: *const c_char,
+    trailing_len: c_int,
+    auto_category: c_int,
+) {
+    if out.is_null() {
+        return;
+    }
+    let buf: &mut [u8; crate::binrpc::DOWNLOAD_REQUEST_SIZE] =
+        std::slice::from_raw_parts_mut(out, crate::binrpc::DOWNLOAD_REQUEST_SIZE)
+            .try_into()
+            .unwrap();
+    crate::binrpc::init_download_request(
+        buf,
+        input(username),
+        input(password),
+        input(nzb_filename),
+        input(nzb_content),
+        is_url != 0,
+        input(category),
+        add_first != 0,
+        add_paused != 0,
+        priority,
+        dupe_score,
+        dupe_mode,
+        input(dupe_key),
+        trailing_len,
+        auto_category != 0,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_edit_parse(
+    data: *const u8,
+    data_len: u32,
+    nr_ids: c_int,
+    nr_names: c_int,
+    names_len: c_int,
+    text_len: c_int,
+    out_ids: *mut i32,
+) -> c_int {
+    if !crate::binrpc::edit_sizes_ok(nr_ids, nr_names, names_len, text_len, data_len) {
+        return 0;
+    }
+    if data.is_null() {
+        return 1;
+    }
+    let slice = std::slice::from_raw_parts(data, data_len as usize);
+    let ids_slice = if nr_ids <= 0 || out_ids.is_null() {
+        &mut [][..]
+    } else {
+        std::slice::from_raw_parts_mut(out_ids.cast::<u32>(), nr_ids as usize)
+    };
+    c_int::from(crate::binrpc::edit_split(
+        slice,
+        text_len as usize,
+        ids_slice,
+        nr_names.max(0) as usize,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_calc_log_slice(
+    msg_count: c_int,
+    lines: c_int,
+    id_from: u32,
+    first_msg_id: u32,
+    out_start: *mut c_int,
+    out_nr_entries: *mut c_int,
+) {
+    let (start, nr_entries) =
+        crate::binrpc::calc_log_slice(msg_count, lines, id_from, first_msg_id);
+    if !out_start.is_null() {
+        *out_start = start;
+    }
+    if !out_nr_entries.is_null() {
+        *out_nr_entries = nr_entries;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_web_parse_request_or_mime(
+    sig_or_filename: *const c_char,
+    line: *mut c_char,
+    out_method: *mut c_int,
+    out_url_offset: *mut usize,
+    out_mime: *mut *const c_char,
+) -> c_int {
+    if line.is_null() {
+        if sig_or_filename.is_null() {
+            if !out_mime.is_null() {
+                *out_mime = std::ptr::null();
+            }
+            return 0;
+        }
+        if let Some(mime) = crate::binrpc::detect_content_type(input(sig_or_filename)) {
+            if !out_mime.is_null() {
+                *out_mime = mime.as_ptr();
+            }
+            1
+        } else {
+            if !out_mime.is_null() {
+                *out_mime = std::ptr::null();
+            }
+            0
+        }
+    } else {
+        if sig_or_filename.is_null() {
+            return 0;
+        }
+        let sig = std::slice::from_raw_parts(sig_or_filename.cast::<u8>(), 4);
+        let len = CStr::from_ptr(line).to_bytes_with_nul().len();
+        let line_slice = std::slice::from_raw_parts_mut(line.cast::<u8>(), len);
+        if let Some((method, offset)) = crate::binrpc::parse_web_request_line(sig, line_slice) {
+            if !out_method.is_null() {
+                *out_method = method;
+            }
+            if !out_url_offset.is_null() {
+                *out_url_offset = offset;
+            }
+            1
+        } else {
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_update_current_stats_step(
+    acc: *mut crate::downloadinfo::RsDownloadCurrentStatsAcc,
+    file_remaining_size: i64,
+    file_success_articles: c_int,
+    file_failed_articles: c_int,
+    file_success_size: i64,
+    file_failed_size: i64,
+    file_extra_priority: c_int,
+    file_paused: c_int,
+    file_par_file: c_int,
+) {
+    if acc.is_null() {
+        return;
+    }
+    crate::downloadinfo::update_current_stats_step(
+        &mut *acc,
+        file_remaining_size,
+        file_success_articles,
+        file_failed_articles,
+        file_success_size,
+        file_failed_size,
+        file_extra_priority != 0,
+        file_paused != 0,
+        file_par_file != 0,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_calc_min_max_time(
+    times: *const i64,
+    count: usize,
+    out_min: *mut i64,
+    out_max: *mut i64,
+) {
+    let slice = if times.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(times, count)
+    };
+    let (min_t, max_t) = crate::downloadinfo::calc_min_max_time(slice);
+    if !out_min.is_null() {
+        *out_min = min_t;
+    }
+    if !out_max.is_null() {
+        *out_max = max_t;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_server_stat_apply_op(
+    stat_op: c_int,
+    delta_success: c_int,
+    delta_failed: c_int,
+    inout_success: *mut c_int,
+    inout_failed: *mut c_int,
+) {
+    let (s, f) = crate::downloadinfo::server_stat_apply_op(
+        *inout_success,
+        *inout_failed,
+        delta_success,
+        delta_failed,
+        stat_op,
+        0,
+        1,
+        2,
+    );
+    *inout_success = s;
+    *inout_failed = f;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_script_calc_total_status(
+    statuses: *const c_int,
+    count: usize,
+) -> c_int {
+    let slice = if statuses.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(statuses, count)
+    };
+    crate::downloadinfo::script_calc_total_status(slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_repair_compute_holes(
+    covered: *const crate::dupefallback::NzbgetRsByteRange,
+    count: usize,
+    file_size: i64,
+    out_holes: *mut crate::dupefallback::NzbgetRsByteRange,
+    max_holes: usize,
+) -> usize {
+    let slice = if covered.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(covered, count)
+    };
+    let holes = crate::streamrepair::compute_holes(slice, file_size);
+    let n = holes.len().min(max_holes);
+    if !out_holes.is_null() && n > 0 {
+        std::slice::from_raw_parts_mut(out_holes, n).copy_from_slice(&holes[..n]);
+    }
+    n
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_queue_coord_is_data_filename(filename: *const c_char) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    c_int::from(crate::queuecoord::is_data_filename(input(filename)))
+}
+
+

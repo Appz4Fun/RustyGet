@@ -414,9 +414,9 @@ pub fn file_size(filename: &CStr) -> i64 {
 }
 
 /// `FileSystem::DeleteFile` (`daemon/util/FileSystem.cpp`):
-/// Removes `filename` via `remove`.
+/// Removes `filename` via `unlink`.
 pub fn delete_file(filename: &CStr) -> bool {
-    unsafe { sys::remove(filename.as_ptr()) == 0 }
+    unsafe { libc::unlink(filename.as_ptr()) == 0 }
 }
 
 /// `FileSystem::CreateDirectoryExclusive` (`daemon/util/FileSystem.cpp`):

@@ -1370,6 +1370,66 @@ pub fn group_listing_from_wire(
     group_listing(&groups, has_pattern)
 }
 
+/// Computes `(start, nr_entries)` for `BinRpcProcessor::ExecuteLog` (`daemon/remote/BinRpc.cpp`).
+pub fn calc_log_slice(msg_count: i32, lines: i32, id_from: u32, first_msg_id: u32) -> (i32, i32) {
+    let mut nr_entries = lines.max(0);
+    let mut start = msg_count;
+    if nr_entries > 0 {
+        if nr_entries > msg_count {
+            nr_entries = msg_count;
+        }
+        start = msg_count - nr_entries;
+    }
+    if id_from > 0 && msg_count > 0 {
+        start = (id_from.wrapping_sub(first_msg_id) as i32).max(0);
+        nr_entries = (msg_count - start).max(0);
+    }
+    (start, nr_entries)
+}
+
+/// Parses the HTTP request line after the 4-byte `signature` (`"POST"`, `"OPTI"`, `"GET "`)
+/// in `RequestProcessor::ServWebRequest` (`daemon/remote/RemoteServer.cpp`), terminating the URL
+/// at the first space and returning `(http_method, url_offset)`.
+pub fn parse_web_request_line(signature: &[u8], line: &mut [u8]) -> Option<(i32, usize)> {
+    let line_len = line.iter().position(|&b| b == 0).unwrap_or(line.len());
+    let (method, url_offset) = if signature.starts_with(b"POST") {
+        if line_len == 0 {
+            return None;
+        }
+        (0, 1) // hmPost = 0
+    } else if signature.starts_with(b"OPTI") && line_len > 4 {
+        (2, 4) // hmOptions = 2
+    } else if signature.starts_with(b"GET ") {
+        (1, 0) // hmGet = 1
+    } else {
+        return None;
+    };
+    if let Some(space) = line[url_offset..line_len].iter().position(|&b| b == b' ') {
+        line[url_offset + space] = 0;
+    }
+    Some((method, url_offset))
+}
+
+/// Returns the static MIME content type for `filename` (`WebProcessor::DetectContentType`).
+pub fn detect_content_type(filename: &[u8]) -> Option<&'static CStr> {
+    const MAP: &[(&[u8], &CStr)] = &[
+        (b".css", c"text/css"),
+        (b".html", c"text/html"),
+        (b".js", c"application/javascript"),
+        (b".png", c"image/png"),
+        (b".jpeg", c"image/jpeg"),
+        (b".gif", c"image/gif"),
+        (b".svg", c"image/svg+xml"),
+        (b".json", c"application/json"),
+    ];
+    for &(ext, mime) in MAP {
+        if crate::util::ends_with(filename, ext, false) {
+            return Some(mime);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

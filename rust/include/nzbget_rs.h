@@ -40,19 +40,6 @@ NzbgetRsBuf nzbget_rs_twin_match(int own, const char* ownPrint, const char* targ
 // is also accepted. Copy the bytes before freeing if they must outlive the result.
 void nzbget_rs_free(NzbgetRsBuf buf);
 
-// RPC request decoders (rust/src/decode.rs), as WebUtil's:
-// All buffers remain caller-owned; these functions allocate no result buffers.
-// raw is NULL (no-op) or a writable NUL-terminated string, decoded in place.
-void nzbget_rs_json_decode(char* raw);
-
-// WebUtil's text helpers (rust/src/text.rs): the in-place ones take NULL (no-op)
-// or a caller-owned writable NUL-terminated string. Panics abort.
-void nzbget_rs_xml_decode(char* raw);
-
-// WebUtil's finders (rust/src/webutil.rs): a pointer into the text and the
-// value length, or NULL with valueLength untouched
-const char* nzbget_rs_xml_find_tag(const char* xml, const char* tag, int* valueLength);
-
 // Util's string helpers (rust/src/util.rs). Format results are Rust-owned;
 // copy and release with nzbget_rs_free. Numeric formatting uses LC_NUMERIC.
 // Panics abort and never unwind through C++.
@@ -171,46 +158,6 @@ typedef struct NzbgetRsSchedTm
 } NzbgetRsSchedTm;
 // gmtime must fill all fields and must not throw. NULL is rejected atomically.
 size_t nzbget_rs_scheduler_check(NzbgetRsSchedTask* tasks, size_t count, long long* lastCheck, long long current, long long currentOffset, long long lastCheckOffset, size_t* due, size_t dueCapacity, int* reset, void (*gmtime)(long long, NzbgetRsSchedTm*));
-
-// XmlCommand's request parameters (rust/src/rpcparams.rs), parsed in place in
-// the writable NUL-terminated request. skip_to_params: PrepareParams for a JSON
-// POST (the position after "params", or the request emptied). next_param: what
-// 0 int, 1 bool (0/1 in *intValue), 2 string (*strValue points into the
-// request); get: a GET query string, else json: JSON-RPC, else XML-RPC. Moves
-// *request past the parameter; returns 1 with a value, else 0.
-// NULL request, *request or the required value output, and unknown what, are
-// rejected without mutation. Outputs and pointer slots must be disjoint from
-// each other and the request buffer. Storage stays caller-owned; string results
-// borrow the request and must not be freed. Panics cannot unwind across the ABI.
-char* nzbget_rs_rpc_skip_to_params(char* request);
-int nzbget_rs_rpc_next_param(char** request, int get, int json, int what, int* intValue, char** strValue);
-
-// XmlRpcProcessor's routing (rust/src/rpcroute.rs). protocol: the
-// ERpcProtocol of an RPC URL (rpUndefined if none). route: Dispatch's method
-// name (into a 100-byte buffer), where the parameters start (*params, into url
-// for GET, else request) and the JSON-RPC id (*id, *idLen; null if none or its
-// legacy C-int length exceeds 4096). Inputs may be NULL (empty), otherwise
-// they are NUL-terminated. route's output pointers must be non-NULL, writable,
-// and disjoint; methodName has at least 100 bytes. params/id borrow the
-// caller's input storage; do not free them or retain them beyond its lifetime.
-// envelope: BuildResponse's text before (head) and after (tail) the response;
-// head and tail must be non-NULL, aligned, writable and disjoint.
-// each result owns its buffer, independently of the inputs. Free both exactly
-// once with nzbget_rs_free. Panics abort; unwinding never crosses the ABI.
-// access: EUserAccess (0 control, 1 restricted, 2 add); JSON-P changes control
-// to restricted and leaves other access unchanged. protocol is ERpcProtocol
-// (0 undefined, 1 XML-RPC, 2 JSON-RPC, 3 JSON-P).
-// decide: 0 runs the command, 1 answers with an error inside the JSON-P
-// callback, 2 answers with a plain error; *code and *text get that error (0
-// and NULL when it runs). httpMethod is EHttpMethod (0 POST, 1 GET); safe,
-// error and jsonp are true when nonzero. NULL outputs discard that result.
-// Non-NULL outputs must be aligned, writable and disjoint. The returned text
-// is a static NUL-terminated string; do not modify or free it.
-int nzbget_rs_rpc_protocol(const char* url);
-void nzbget_rs_rpc_route(const char* url, const char* request, int get, int protocol, char* methodName, const char** params, const char** id, int* idLen);
-void nzbget_rs_rpc_envelope(int protocol, int fault, const char* callback, const char* id, NzbgetRsBuf* head, NzbgetRsBuf* tail);
-int nzbget_rs_rpc_access(int protocol, int access);
-int nzbget_rs_rpc_decide(int protocol, int httpMethod, int safe, int error, int jsonp, int* code, const char** text);
 
 // Util text helpers (rust/src/util.rs). split_command_line: the words, each
 // NUL-terminated, back to back (len covers all). trim_line: TrimRight(char*)
@@ -417,14 +364,6 @@ typedef struct NzbgetRsParName
 } NzbgetRsParName;
 int nzbget_rs_direct_need_rename_pars(const NzbgetRsParName* pars, size_t count);
 
-// Limits from this build of Boost.JSON, in decoded bytes / input elements.
-typedef struct NzbgetRsJsonLimits
-{
-	size_t stringSize;
-	size_t arraySize;
-	size_t objectSize;
-} NzbgetRsJsonLimits;
-
 // ParRenamer::Execute, ParRenamer::ListParredFiles, and DirectParLoader::LoadParFile
 // (rust/src/parrenamer.rs).
 void nzbget_rs_par_renamer_execute(
@@ -612,7 +551,6 @@ void nzbget_rs_memory_pressure_trim_heap(void);
 // Daemon Lifecycle Coordination C ABI (Requirement R2, Milestone M5)
 // ============================================================================
 
-int nzbget_rs_main(int argc, char* argv[], char* argp[]);
 void nzbget_rs_signal_notify(int signum);
 
 // C++ subsystem bridge functions exported to Rust
@@ -877,17 +815,6 @@ void nzbget_rs_nserv_parse_args(
         int mem_cache,
         int param_error),
     void (*push_opt_cb)(void* ctx, const char* opt));
-
-
-int nzbget_rs_network_speed_test_run(
-    void* ctx,
-    int (*execute_iter_cb)(
-        void* ctx, const char* req_ptr, size_t req_len, int64_t timeout_sec,
-        uint32_t* out_downloaded, double* out_elapsed),
-    void (*log_cb)(void* ctx, int kind, const char* msg),
-    double* out_speed_mbps,
-    NzbgetRsBuf* out_err_msg);
-
 
 typedef struct NzbgetRsProcessArticleItem {
     int64_t segment_offset;
@@ -1174,55 +1101,12 @@ typedef struct {
     const char* reason;
 } NzbgetRsRpcFleetMember;
 
-int nzbget_rs_xmlrpc_match_command(
-    int user_access, int ua_add, int ua_restricted, const char* method_name);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_error(int is_json, int err_code, const char* err_text);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_string(int is_json, const char* raw_str, int encode, size_t max_len);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_status(
-    int is_json, const NzbgetRsRpcStatusInput* inp,
-    const NzbgetRsRpcServerStatus* servers, size_t servers_len);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_log_list(
-    int is_json, const NzbgetRsRpcLogEntry* entries, size_t len);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_file_item(
-    int is_json, int index, const NzbgetRsRpcFileItem* item);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_nzb_info_fields(
-    int is_json, const NzbgetRsRpcNzbInfoInput* info,
-    const NzbgetRsRpcParamItem* params, size_t params_len,
-    const NzbgetRsRpcScriptItem* scripts, size_t scripts_len,
-    const NzbgetRsRpcServerStatItem* stats, size_t stats_len);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_post_info_fields(
-    int is_json, int post_queue, int has_post_info, const char* progress_label,
-    int stage_progress, int64_t cur_time, int64_t stage_time, int64_t start_time,
-    const NzbgetRsRpcLogEntry* logs, size_t logs_len);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_group_item_start(
-    int is_json, int index, int nzb_id, int64_t remaining_size, int64_t paused_size,
-    int remaining_file_count, int remaining_par_count, int priority,
-    int active_downloads, int has_post_info, int post_stage,
-    int has_queue_script_job, int queue_script_active,
-    int direct_unpack_status, int kind);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_postqueue_item_start(
-    int is_json, int index, int nzb_id, const char* info_name, int stage, int file_progress);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_history_nzb_start(
-    int is_json, int index, int id, const char* name, int remaining_file_count,
-    int retry_data, int history_time, const char* status);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_history_dup_item(
-    int is_json, int index, int id, const char* name, int history_time, int64_t size,
-    const char* dupe_key, int dupe_score, int dupe_mode, int dup_status);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_urlqueue_item(
-    int is_json, int index, int id, const char* filename, const char* url,
-    const char* name, const char* category, int priority);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_config_list(
-    int is_json, int user_access, int ua_restricted,
-    const NzbgetRsRpcConfigItem* entries, size_t len);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_config_templates(
-    int is_json, const char* const* templates, size_t len);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_feed_item(
-    int is_json, int index, const NzbgetRsRpcFeedItem* item);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_server_volume_item(
-    int is_json, int index, const NzbgetRsRpcServerVolumeItem* item);
-NzbgetRsBuf nzbget_rs_xmlrpc_format_fleet_result(
-    int chosen, int complete, const char* reason,
-    const NzbgetRsRpcFleetMember* members, size_t members_len);
+typedef struct {
+    const char* name;
+    int is_url;
+    const char* data;
+    size_t data_len;
+} NzbgetRsRpcFleetReqMember;
 
 typedef struct {
     int id;
@@ -2202,16 +2086,6 @@ int nzbget_rs_dupe_identity_read(
         const char** out_data_ptr, size_t* out_data_len),
     NzbgetRsBuf* out_name, NzbgetRsBuf* out_ext, uint64_t* out_bytes);
 
-int nzbget_rs_benchmark_run(
-    const char* dir_ptr, size_t dir_len, size_t block_size_bytes,
-    uint64_t max_file_size_bytes, int64_t timeout_secs,
-    int space_ok, uint64_t available_bytes,
-    const char* space_err_ptr, size_t space_err_len,
-    uint64_t* out_write_bytes, double* out_write_ms,
-    uint64_t* out_read_bytes, double* out_read_ms,
-    NzbgetRsBuf* out_err);
-
-
 void* nzbget_rs_regex_new(const char* pattern, int match_buf_size);
 void nzbget_rs_regex_free(void* handle);
 int nzbget_rs_regex_is_valid(const void* handle);
@@ -2478,105 +2352,6 @@ void nzbget_rs_options_init_scheduler(const NzbgetRsOptionsHost* host);
 void nzbget_rs_options_create_scheduler_task(
     const NzbgetRsOptionsHost* host, int id, const char* time,
     const char* week_days, int command, const char* param);
-
-NzbgetRsBuf nzbget_rs_xmlrpc_execute_save_config(
-    char** request, int is_get, int is_json,
-    const char* config_filename, int* out_fault);
-NzbgetRsBuf nzbget_rs_xmlrpc_execute_load_config(
-    int is_json, int user_access, int ua_restricted,
-    const char* config_filename, int* out_fault);
-NzbgetRsBuf nzbget_rs_xmlrpc_execute_tls_cipher(
-    int operation, int user_access, int ua_control,
-    int protocol, int rp_json_rpc, int http_method, int hm_post,
-    int is_json, const char* request, NzbgetRsJsonLimits limits,
-    void* ctx, NzbgetRsBuf (*backend_cb)(void* ctx, int op_kind, const char* job_id),
-    int* out_fault);
-int nzbget_rs_xmlrpc_parse_edit_queue(
-    char** request, int is_get, int is_json,
-    int ea_file_move_offset, int ea_group_move_offset,
-    int* out_action, NzbgetRsBuf* out_args_or_err, int* out_err_code,
-    void* id_ctx, void (*add_id_cb)(void* ctx, int id));
-int nzbget_rs_xmlrpc_parse_start_script(
-    char** request, int is_get, int is_json,
-    NzbgetRsBuf* out_script, NzbgetRsBuf* out_command, NzbgetRsBuf* out_context,
-    void* entry_ctx, void (*add_entry_cb)(void* ctx, const char* name, const char* val));
-int nzbget_rs_xmlrpc_parse_test_disk_speed(
-    char** request, int is_get, int is_json,
-    NzbgetRsBuf* out_dir_path, size_t* out_buffer_bytes, uint64_t* out_max_file_bytes,
-    int* out_timeout_sec, const char** out_err_msg);
-
-int nzbget_rs_xmlrpc_parse_append_fleet(
-    char** request, int is_get, int is_json, int max_members,
-    void* ctx,
-    void (*header_cb)(void* ctx, const char* dupe_key, const char* category, int priority, int timeout_sec),
-    void (*member_cb)(void* ctx, const char* name, int is_url, const char* data, size_t data_len),
-    NzbgetRsBuf* out_err);
-
-typedef struct NzbgetRsParsedDownload
-{
-    int v13;
-    NzbgetRsBuf filename;
-    NzbgetRsBuf category;
-    int priority;
-    int add_top;
-    int is_url;
-    NzbgetRsBuf content;
-    int add_paused;
-    int has_dupe_key;
-    NzbgetRsBuf dupe_key;
-    int dupe_score;
-    int dupe_mode;
-    int auto_category;
-} NzbgetRsParsedDownload;
-
-int nzbget_rs_xmlrpc_parse_download(
-    char** request, int is_get, int is_json,
-    int dm_score, int dm_all, int dm_force,
-    NzbgetRsParsedDownload* out_dl,
-    void* param_ctx, void (*add_param_cb)(void* ctx, const char* name, const char* val),
-    const char** out_err_msg);
-
-typedef struct NzbgetRsParsedViewFeed
-{
-    int id;
-    int include_non_matching;
-    NzbgetRsBuf name;
-    NzbgetRsBuf url;
-    NzbgetRsBuf filter;
-    int backlog;
-    int pause_nzb;
-    NzbgetRsBuf category;
-    int category_source;
-    int priority;
-    int interval;
-    int has_feed_filter;
-    NzbgetRsBuf feed_filter;
-    int cache_time_sec;
-    NzbgetRsBuf cache_id;
-} NzbgetRsParsedViewFeed;
-
-int nzbget_rs_xmlrpc_parse_view_feed(
-    char** request, int is_get, int is_json, int preview,
-    int cs_nzb_file, int cs_feed_file, int cs_auto,
-    NzbgetRsParsedViewFeed* out_vf);
-
-typedef struct NzbgetRsParsedTestServer
-{
-    NzbgetRsBuf host;
-    NzbgetRsBuf username;
-    NzbgetRsBuf password;
-    NzbgetRsBuf cipher;
-    int port;
-    int timeout;
-    int cert_verif_level;
-    int encryption;
-} NzbgetRsParsedTestServer;
-
-int nzbget_rs_xmlrpc_parse_test_server(
-    const char* request_body, char** request_ptr,
-    int is_get, int is_json, int http_method, int hm_post, int cert_verif_count,
-    NzbgetRsJsonLimits limits,
-    NzbgetRsParsedTestServer* out_ts, const char** out_err_msg);
 
 int nzbget_rs_unpack_can_extract_with_zipfast(const char* archive_path);
 int nzbget_rs_unpack_extract_with_zipfast(
@@ -3052,7 +2827,6 @@ int nzbget_rs_dupesearch_parse_state_line(
     const char* line_ptr, size_t line_len, int64_t now, int64_t ttl_sec,
     size_t* out_key_off, size_t* out_key_len, int* out_score, int64_t* out_time,
     size_t* out_title_off, size_t* out_title_len, int* out_retryable);
-void nzbget_rs_url_decode_path_in_place(char* raw);
 
 typedef struct NzbgetRsServerMatchItem {
     const char* name;
@@ -3181,9 +2955,6 @@ int nzbget_rs_twin_service_op(
     int op, int a, int b, int c, int d, int64_t f1, int64_t f2,
     const char* s1, const char* s2, const char* s3, const uint8_t* u8_1, const uint8_t* u8_2,
     const int* i32_1, const int64_t* i64_1, size_t len, NzbgetRsBuf* out_buf);
-int nzbget_rs_xmlrpc_resp_op(
-    int op, int is_json, int int_val, uint64_t u64_1, uint64_t u64_2,
-    double f64_1, double f64_2, NzbgetRsBuf* out_buf);
 int nzbget_rs_socket_deadline_wait(
     int fd, int read, int write, void* ctx, int64_t (*rem_cb)(void*));
 intptr_t nzbget_rs_url_coord_op(
@@ -3257,6 +3028,7 @@ typedef struct NzbgetRsSplitFileCounters {
     int32_t paused;
 } NzbgetRsSplitFileCounters;
 
+void nzbget_rs_lifecycle_reload_op(int op, int (*state_cb)(int action));
 int nzbget_rs_daemon_service_op(
     int op, int a, int b, int c, int d, int64_t t1,
     const char* s1, const char* s2, int* out1, int* out2,
@@ -3371,8 +3143,28 @@ typedef struct NzbgetRsWebDlEnv {
 
 int nzbget_rs_webdl_execute(int op, int max_redirects, const NzbgetRsWebDlEnv* env);
 
-typedef void (*NzbgetRsWebSendBodyFn)(
-    void* send_ctx, const char* body, int body_len, const char* content_type, int cachable);
+typedef int (*NzbgetRsXmlRpcActionFn)(
+    void* ctx, int op, int a1, int a2, int a3, int a4,
+    const char* s1, const char* s2, const char* s3, const char* s4,
+    const char* body, size_t body_len,
+    const int32_t* ids, size_t ids_len,
+    const NzbgetRsRpcParamItem* params, size_t params_len,
+    uint32_t* out_u32, double* out_f64, NzbgetRsBuf* out_buf);
+
+typedef void (*NzbgetRsXmlRpcEmitFn)(
+    void* emit_ctx, int sub,
+    int a1, int a2, int a3, int a4, int a5, int a6,
+    int64_t i1, int64_t i2, int64_t i3,
+    const char* s1, const char* s2, const char* s3, const char* s4,
+    const void* p1, size_t n1, const void* p2, size_t n2,
+    const void* p3, size_t n3, const void* p4, size_t n4);
+
+typedef int (*NzbgetRsXmlRpcCollectFn)(
+    void* ctx, int kind, int a1, int a2, int a3, int a4, int a5,
+    const char* s1, const char* s2, const char* s3,
+    const char* s4, const char* s5, const char* s6,
+    const void* p1, size_t n1,
+    void* emit_ctx, NzbgetRsXmlRpcEmitFn emit_cb);
 
 typedef struct NzbgetRsWebServeEnv {
     void* ctx;
@@ -3389,17 +3181,19 @@ typedef struct NzbgetRsWebServeEnv {
     const char* add_username;
     const char* add_password;
     const char* authorized_ip;
+    const char* config_filename;
+    const char* shell_override;
     int control_port;
     int form_auth;
     int gzip_enabled;
+    int json_p;
     int debug_build;
     int (*read_line_cb)(void* ctx, char* buf, int size);
     int (*recv_cb)(void* ctx, char* buf, int size);
     int (*send_cb)(void* ctx, const char* buf, int size);
     void (*log_cb)(void* ctx, int level, const char* msg);
-    void (*rpc_cb)(
-        void* ctx, char* req_body, int http_method, int user_access, const char* url,
-        void* send_ctx, NzbgetRsWebSendBodyFn send_body);
+    NzbgetRsXmlRpcActionFn rpc_action_cb;
+    NzbgetRsXmlRpcCollectFn rpc_collect_cb;
 } NzbgetRsWebServeEnv;
 
 int nzbget_rs_web_serve(int op, const NzbgetRsWebServeEnv* env);

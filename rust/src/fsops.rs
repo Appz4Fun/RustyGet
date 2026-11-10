@@ -831,6 +831,23 @@ pub fn get_disk_state(path: &CStr) -> Option<(i64, i64)> {
     get_disk_state_with(path, &default_statvfs)
 }
 
+/// Returns unsigned available filesystem bytes (`f_bavail * f_frsize`) via `statvfs`,
+/// or an OS error string if `statvfs` fails (matching `std::filesystem::space(dir, ec)`).
+pub fn statvfs_available_bytes(dir: &[u8]) -> Result<u64, String> {
+    let nul = dir.iter().position(|&b| b == 0).unwrap_or(dir.len());
+    let Ok(cpath) = std::ffi::CString::new(&dir[..nul]) else {
+        return Err("Invalid path".to_string());
+    };
+    unsafe {
+        let mut sv: sys::statvfs = std::mem::zeroed();
+        if sys::statvfs(cpath.as_ptr(), &mut sv) == 0 {
+            Ok((sv.f_bavail as u64).saturating_mul(sv.f_frsize as u64))
+        } else {
+            Err(std::io::Error::last_os_error().to_string())
+        }
+    }
+}
+
 /// `FileSystem::FixExecPermission` (`daemon/util/FileSystem.h`):
 /// Adds execute bits (`0o111`) to `filename` if `stat` succeeds.
 pub fn fix_exec_permission(filename: &[u8]) {

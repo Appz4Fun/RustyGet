@@ -129,7 +129,7 @@ mod tls_cipher_abi_tests {
 pub struct RsBuf {
     pub data: *mut c_char,
     pub len: usize,
-    cap: usize,
+    pub(crate) cap: usize,
 }
 
 pub(crate) fn into_buf(mut v: Vec<u8>) -> RsBuf {
@@ -384,21 +384,6 @@ pub unsafe extern "C" fn nzbget_rs_free(buf: RsBuf) {
     }
 }
 
-/// Decodes a JSON string body in place (WebUtil::JsonDecode).
-///
-/// # Safety
-/// `raw` is null or a writable NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_json_decode(raw: *mut c_char) {
-    if raw.is_null() {
-        return;
-    }
-    let len = CStr::from_ptr(raw).to_bytes().len();
-    let buf = std::slice::from_raw_parts_mut(raw.cast::<u8>(), len);
-    let n = crate::decode::json_decode(buf);
-    *raw.add(n) = 0;
-}
-
 /// Crc32::Append: hardware-accelerated IEEE 802.3 CRC-32 update via `crc32fast`.
 ///
 /// # Safety
@@ -443,41 +428,6 @@ unsafe fn in_place(raw: *mut c_char, f: impl FnOnce(&mut [u8]) -> usize) {
     let len = CStr::from_ptr(raw).to_bytes().len();
     let n = f(std::slice::from_raw_parts_mut(raw.cast::<u8>(), len));
     *raw.add(n) = 0;
-}
-
-/// WebUtil::XmlDecode, in place (rust/src/text.rs).
-///
-/// # Safety
-/// `raw` is null or a writable NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xml_decode(raw: *mut c_char) {
-    in_place(raw, |b| {
-        crate::text::xml_decode(b, &crate::util::byte_tolower_locale)
-    })
-}
-
-/// WebUtil::XmlFindTag: a pointer into `xml` and the value length, or null
-/// (`value_length` untouched).
-///
-/// # Safety
-/// `xml` and `tag` are null or NUL-terminated; `value_length` is null or writable.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xml_find_tag(
-    xml: *const c_char,
-    tag: *const c_char,
-    value_length: *mut c_int,
-) -> *const c_char {
-    if xml.is_null() || tag.is_null() || value_length.is_null() {
-        return std::ptr::null();
-    }
-    match crate::webutil::xml_find_tag(input(xml), input(tag)) {
-        Some((start, len)) => {
-            // the C++ (int) of a pointer difference
-            *value_length = len as c_int;
-            xml.add(start)
-        }
-        None => std::ptr::null(),
-    }
 }
 
 /// Util::FormatSize; free the result with nzbget_rs_free.
@@ -988,203 +938,6 @@ pub unsafe extern "C" fn nzbget_rs_scheduler_check(
         std::ptr::copy_nonoverlapping(r.due.as_ptr(), due, n);
     }
     n
-}
-
-/// The request from `p` through its NUL, writable.
-unsafe fn request_buf<'a>(p: *mut c_char) -> &'a mut [u8] {
-    let len = CStr::from_ptr(p).to_bytes().len();
-    std::slice::from_raw_parts_mut(p.cast::<u8>(), len + 1)
-}
-
-/// XmlCommand::PrepareParams for a JSON POST: the read position after
-/// `"params"`, or `request` emptied (and returned) without it.
-///
-/// # Safety
-/// `request` is null or a writable NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rpc_skip_to_params(request: *mut c_char) -> *mut c_char {
-    if request.is_null() {
-        return request;
-    }
-    request.add(crate::rpcparams::skip_to_params(request_buf(request)))
-}
-
-/// XmlCommand::NextParamAsInt (`what` 0), NextParamAsBool (1, as 0/1 in
-/// `*int_value`) and NextParamAsStr (2, a pointer into the request in
-/// `*str_value`): parses the next parameter at `*request` in place and moves
-/// `*request` past it. Returns 1 with a value, else 0 (outputs untouched).
-///
-/// # Safety
-/// Non-null `request` points to null or to a pointer into a writable
-/// NUL-terminated request; non-null `int_value`/`str_value` are writable for
-/// the kinds that use them. The pointer slots, value output and request buffer
-/// must be disjoint. All storage stays caller-owned; returned strings borrow
-/// the request. Panics abort rather than unwinding across the ABI.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rpc_next_param(
-    request: *mut *mut c_char,
-    get: c_int,
-    json: c_int,
-    what: c_int,
-    int_value: *mut c_int,
-    str_value: *mut *mut c_char,
-) -> c_int {
-    use crate::rpcparams::{Kind, Raw};
-    if request.is_null()
-        || (*request).is_null()
-        || !matches!(what, 0..=2)
-        || (what != 2 && int_value.is_null())
-        || (what == 2 && str_value.is_null())
-    {
-        return 0;
-    }
-    let base = *request;
-    // read in place: JSON and GET values without measuring the rest of the request
-    let raw = Raw::new(base.cast::<u8>());
-    let kind = if get != 0 {
-        Kind::Get
-    } else if json != 0 {
-        Kind::Json
-    } else {
-        Kind::Xml
-    };
-    let (pos, ok) = match what {
-        0 => {
-            let (pos, v) = raw.next_int(kind);
-            if let Some(v) = v {
-                *int_value = v;
-            }
-            (pos, v.is_some())
-        }
-        1 => {
-            let (pos, v) = raw.next_bool(kind, json != 0);
-            if let Some(v) = v {
-                *int_value = v as c_int;
-            }
-            (pos, v.is_some())
-        }
-        2 => {
-            let (pos, v) = raw.next_str(kind);
-            if let Some(v) = v {
-                *str_value = base.add(v);
-            }
-            (pos, v.is_some())
-        }
-        _ => (0, false),
-    };
-    *request = base.add(pos);
-    ok as c_int
-}
-
-/// XmlRpcProcessor::Execute: the protocol of an RPC URL (0 if none).
-///
-/// # Safety
-/// `url` is null or NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rpc_protocol(url: *const c_char) -> c_int {
-    crate::rpcroute::protocol(input(url))
-}
-
-/// XmlRpcProcessor::Dispatch's parsing: writes the method name (NUL-terminated,
-/// at most 99 bytes) to `method_name` (100 bytes), where the parameters start to
-/// `*params` (into `url` for GET, else `request`) and the JSON-RPC id to
-/// `*id`/`*id_len` (null if none).
-///
-/// # Safety
-/// `url` and `request` are null or NUL-terminated; the outputs are non-null,
-/// writable and disjoint, with 100 bytes at `method_name`. Returned pointers
-/// borrow the inputs. Panics abort rather than unwinding across the ABI.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rpc_route(
-    url: *const c_char,
-    request: *const c_char,
-    get: c_int,
-    protocol: c_int,
-    method_name: *mut c_char,
-    params: *mut *const c_char,
-    id: *mut *const c_char,
-    id_len: *mut c_int,
-) {
-    let r = crate::rpcroute::route(input(url), input(request), get != 0, protocol);
-    std::ptr::copy_nonoverlapping(
-        r.method.as_ptr().cast::<c_char>(),
-        method_name,
-        r.method.len(),
-    );
-    *method_name.add(r.method.len()) = 0;
-    *params = match r.params {
-        // a null URL has no parameters to point into (and no arithmetic on null)
-        Some(_) if url.is_null() => std::ptr::null(),
-        Some(at) => url.add(at),
-        None => request,
-    };
-    match r.id {
-        Some((at, len)) => {
-            *id = request.add(at);
-            *id_len = len as c_int;
-        }
-        None => {
-            *id = std::ptr::null();
-            *id_len = 0;
-        }
-    }
-}
-
-/// XmlRpcProcessor::BuildResponse: the text before and after a response; free
-/// both with nzbget_rs_free.
-///
-/// # Safety
-/// `callback` and `id` are null or NUL-terminated; `head` and `tail` are non-null,
-/// writable and disjoint. Each returned buffer is independently Rust-owned.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rpc_envelope(
-    protocol: c_int,
-    fault: c_int,
-    callback: *const c_char,
-    id: *const c_char,
-    head: *mut RsBuf,
-    tail: *mut RsBuf,
-) {
-    let callback = (!callback.is_null()).then(|| input(callback));
-    let id = (!id.is_null()).then(|| input(id));
-    let (h, t) = crate::rpcroute::envelope(protocol, fault != 0, callback, id);
-    *head = into_buf(h);
-    *tail = into_buf(t);
-}
-
-/// XmlRpcProcessor::Access: the access a request runs with (rpcroute::access).
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rpc_access(protocol: c_int, access: c_int) -> c_int {
-    crate::rpcroute::access(protocol, access)
-}
-
-/// XmlRpcProcessor::Decide: 0 runs the command, 1 answers with an error inside
-/// the JSON-P callback, 2 answers with a plain error; `code` and `text` get
-/// that error (0 and null when it runs). Null outputs discard that result.
-/// `text` is static.
-///
-/// # Safety
-/// Nonnull `code` and `text` must be aligned and valid for writes of their
-/// respective types, and their storage must not overlap. The returned text
-/// is NUL-terminated and must not be modified or freed.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rpc_decide(
-    protocol: c_int,
-    http_method: c_int,
-    safe: c_int,
-    error: c_int,
-    jsonp: c_int,
-    code: *mut c_int,
-    text: *mut *const c_char,
-) -> c_int {
-    let d = crate::rpcroute::decide(protocol, http_method, safe != 0, error != 0, jsonp != 0);
-    if !code.is_null() {
-        code.write(d.code);
-    }
-    if !text.is_null() {
-        text.write(d.text.map_or(std::ptr::null(), CStr::as_ptr));
-    }
-    d.dispatch
 }
 
 /// `len` bytes at `data` (empty when null or zero).
@@ -2984,165 +2737,77 @@ mod tests {
 
     #[test]
     fn rpc_route_null_inputs_borrowing_and_method_capacity() {
-        unsafe {
-            let null = std::ptr::null();
-            assert_eq!(nzbget_rs_rpc_protocol(null), 0);
-            for get in [0, 1] {
-                for protocol in [0, 1, 2, 3] {
-                    let mut method = [0x55_u8; 102];
-                    let mut params = c"sentinel".as_ptr();
-                    let mut id = params;
-                    let mut len = -1;
-                    nzbget_rs_rpc_route(
-                        null,
-                        null,
-                        get,
-                        protocol,
-                        method.as_mut_ptr().add(1).cast(),
-                        &mut params,
-                        &mut id,
-                        &mut len,
-                    );
-                    assert_eq!((method[0], method[1], method[101]), (0x55, 0, 0x55));
-                    assert!(params.is_null() && id.is_null());
-                    assert_eq!(len, 0);
-                }
+        assert_eq!(crate::rpcroute::protocol(b""), 0);
+        for get in [false, true] {
+            for protocol in [0, 1, 2, 3] {
+                let r = crate::rpcroute::route(b"", b"", get, protocol);
+                assert!(r.method.is_empty());
+                assert_eq!(r.params, if get { Some(0) } else { None });
+                assert!(r.id.is_none());
             }
-            let mut url = b"/jsonrpc/".to_vec();
-            url.extend_from_slice(&[b'x'; 200]);
-            url.extend_from_slice(b"?a=1\0");
-            let mut method = [0x55_u8; 102];
-            let mut params = null;
-            let mut id = null;
-            let mut len = -1;
-            nzbget_rs_rpc_route(
-                url.as_ptr().cast(),
-                null,
-                1,
-                2,
-                method.as_mut_ptr().add(1).cast(),
-                &mut params,
-                &mut id,
-                &mut len,
-            );
-            assert_eq!(&method[1..100], &[b'x'; 99]);
-            assert_eq!((method[0], method[100], method[101]), (0x55, 0, 0x55));
-            assert_eq!(params, url.as_ptr().add(210).cast());
-            assert!(id.is_null());
-            let request = c"\"id\":},\"method\":\"\"";
-            nzbget_rs_rpc_route(
-                null,
-                request.as_ptr(),
-                0,
-                2,
-                method.as_mut_ptr().add(1).cast(),
-                &mut params,
-                &mut id,
-                &mut len,
-            );
-            assert_eq!(params, request.as_ptr());
-            assert_eq!(id, request.as_ptr().add(5));
-            assert_eq!(len, 0); // CString::Set will echo the suffix for length zero.
-            assert_eq!(&method[..3], &[0x55, b'"', 0]);
         }
+        let mut url = b"/jsonrpc/".to_vec();
+        url.extend_from_slice(&[b'x'; 200]);
+        url.extend_from_slice(b"?a=1");
+        let r = crate::rpcroute::route(&url, b"", true, 2);
+        assert_eq!(r.method, vec![b'x'; 99]);
+        assert_eq!(r.params, Some(210));
+        assert!(r.id.is_none());
+        let request = b"\"id\":},\"method\":\"\"";
+        let r = crate::rpcroute::route(b"", request, false, 2);
+        assert!(r.params.is_none());
+        assert_eq!(r.id, Some((5, 0)));
+        assert_eq!(r.method, b"\"");
     }
 
     #[test]
     fn rpc_decide_outputs() {
-        unsafe {
-            assert_eq!(nzbget_rs_rpc_access(3, 0), 1);
-            assert_eq!(nzbget_rs_rpc_access(2, 0), 0);
-            let mut code = -1;
-            let mut text = c"sentinel".as_ptr();
-            assert_eq!(nzbget_rs_rpc_decide(3, 1, 0, 0, 1, &mut code, &mut text), 1);
-            assert_eq!((code, CStr::from_ptr(text)),
-                (4, c"Not safe procedure for JSON-P. Use JSON-RPC or XML-RPC with HTTP-Method POST instead"));
-            assert_eq!(nzbget_rs_rpc_decide(2, 0, 0, 0, 0, &mut code, &mut text), 0);
-            assert!(code == 0 && text.is_null());
-            assert_eq!(
-                nzbget_rs_rpc_decide(3, 0, 1, 0, 0, std::ptr::null_mut(), std::ptr::null_mut()),
-                1
-            );
-        }
+        assert_eq!(crate::rpcroute::access(3, 0), 1);
+        assert_eq!(crate::rpcroute::access(2, 0), 0);
+        let d = crate::rpcroute::decide(3, 1, false, false, true);
+        assert_eq!(d.dispatch, 1);
+        assert_eq!(
+            (d.code, d.text),
+            (
+                4,
+                Some(
+                    c"Not safe procedure for JSON-P. Use JSON-RPC or XML-RPC with HTTP-Method POST instead"
+                )
+            )
+        );
+        let d2 = crate::rpcroute::decide(2, 0, false, false, false);
+        assert_eq!((d2.dispatch, d2.code, d2.text), (0, 0, None));
+        assert_eq!(
+            crate::rpcroute::decide(3, 0, true, false, false).dispatch,
+            1
+        );
     }
 
     #[test]
     fn rpc_envelope_owns_both_outputs() {
-        unsafe {
-            let mut cb = b"callback\0ignored".to_vec();
-            let mut id = b"7\0ignored".to_vec();
-            let mut head = std::mem::MaybeUninit::uninit();
-            let mut tail = std::mem::MaybeUninit::uninit();
-            nzbget_rs_rpc_envelope(
-                3,
-                0,
-                cb.as_ptr().cast(),
-                id.as_ptr().cast(),
-                head.as_mut_ptr(),
-                tail.as_mut_ptr(),
-            );
-            let head = head.assume_init();
-            let tail = tail.assume_init();
-            cb.fill(b'x');
-            id.fill(b'x');
-            assert_eq!(
-                input(head.data),
-                b"callback({\n\"version\" : \"1.1\",\n\"id\" : 7,\n\"result\" : "
-            );
-            assert_eq!(input(head.data).len(), head.len);
-            nzbget_rs_free(head);
-            assert_eq!(input(tail.data), b"\n})");
-            assert_eq!(tail.len, 3);
-            nzbget_rs_free(tail);
-        }
+        let (head, tail) = crate::rpcroute::envelope(3, false, Some(b"callback"), Some(b"7"));
+        assert_eq!(
+            head,
+            b"callback({\n\"version\" : \"1.1\",\n\"id\" : 7,\n\"result\" : "
+        );
+        assert_eq!(tail, b"\n})");
     }
 
     #[test]
     fn rpc_null_arguments_and_unknown_kind() {
+        use crate::rpcparams::{Kind, Raw};
+        let mut req = b"{\"params\":[12,true,\"x y\"]}\0".to_vec();
+        let off = crate::rpcparams::skip_to_params(&mut req);
         unsafe {
-            assert!(nzbget_rs_rpc_skip_to_params(std::ptr::null_mut()).is_null());
-            assert_eq!(
-                nzbget_rs_rpc_next_param(
-                    std::ptr::null_mut(),
-                    1,
-                    1,
-                    0,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut()
-                ),
-                0
-            );
-            let mut null = std::ptr::null_mut();
-            let mut number = 12345;
-            assert_eq!(
-                nzbget_rs_rpc_next_param(&mut null, 1, 1, 0, &mut number, std::ptr::null_mut()),
-                0
-            );
-            assert_eq!(number, 12345);
-            for (what, input) in [
-                (0, b"a=12&b=3\0".as_slice()),
-                (1, b"a=true&b=false\0"),
-                (2, b"a=x%20y&b=z\0"),
-                (-1, b"a=1\0"),
-                (3, b"a=1\0"),
-            ] {
-                let mut buf = input.to_vec();
-                let base = buf.as_mut_ptr().cast();
-                let mut request = base;
-                assert_eq!(
-                    nzbget_rs_rpc_next_param(
-                        &mut request,
-                        1,
-                        1,
-                        what,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut()
-                    ),
-                    0
-                );
-                assert_eq!(request, base);
-                assert_eq!(buf, input);
-            }
+            let raw = Raw::new(req.as_mut_ptr().add(off));
+            let (p1, v1) = raw.next_int(Kind::Json);
+            assert_eq!(v1, Some(12));
+            let raw2 = Raw::new(req.as_mut_ptr().add(off + p1));
+            let (p2, v2) = raw2.next_bool(Kind::Json, true);
+            assert_eq!(v2, Some(true));
+            let raw3 = Raw::new(req.as_mut_ptr().add(off + p1 + p2));
+            let (_p3, v3) = raw3.next_str(Kind::Json);
+            assert!(v3.is_some());
         }
     }
 
@@ -3564,50 +3229,34 @@ mod tests {
 
     #[test]
     fn webutil_nulls_borrowing_and_ownership() {
-        unsafe {
-            let mut length = -7;
-            for (text, name) in [
-                (std::ptr::null(), c"x".as_ptr()),
-                (c"".as_ptr(), std::ptr::null()),
-                (c"".as_ptr(), c"x".as_ptr()),
-            ] {
-                assert!(nzbget_rs_xml_find_tag(text, name, &mut length).is_null());
-                assert_eq!(length, -7);
-            }
-            assert!(
-                nzbget_rs_xml_find_tag(c"".as_ptr(), c"x".as_ptr(), std::ptr::null_mut()).is_null()
-            );
-            let xml = c"<x>abc</x>";
-            assert_eq!(
-                nzbget_rs_xml_find_tag(xml.as_ptr(), c"x".as_ptr(), &mut length),
-                xml.as_ptr().add(3)
-            );
-            assert_eq!(length, 3);
-        }
+        assert!(crate::webutil::xml_find_tag(b"", b"").is_none());
+        assert!(crate::webutil::xml_find_tag(b"", b"x").is_none());
+        assert_eq!(
+            crate::webutil::xml_find_tag(b"<x>abc</x>", b"x"),
+            Some((3, 3))
+        );
     }
 
     #[test]
     fn text_null_inputs_and_callback() {
         unsafe {
-            nzbget_rs_xml_decode(std::ptr::null_mut());
+            in_place(std::ptr::null_mut(), |b| {
+                crate::text::xml_decode(b, &crate::util::byte_tolower_locale)
+            });
             let mut xml = *b"&#xA;\0tail";
-            nzbget_rs_xml_decode(xml.as_mut_ptr().cast());
+            in_place(xml.as_mut_ptr().cast(), |b| {
+                crate::text::xml_decode(b, &crate::util::byte_tolower_locale)
+            });
             assert_eq!(&xml[..2], b"\n\0");
-        }
-    }
-
-    #[test]
-    fn decoder_null_arguments_and_failed_value_preserve_length() {
-        unsafe {
-            nzbget_rs_json_decode(std::ptr::null_mut());
         }
     }
 
     #[test]
     fn decoder_in_place_buffers_and_borrowed_value_pointer() {
         unsafe {
+            in_place(std::ptr::null_mut(), crate::decode::json_decode);
             let mut json = *b"\\ud83d\\ude00\\u0000\0!";
-            nzbget_rs_json_decode(json.as_mut_ptr().cast());
+            in_place(json.as_mut_ptr().cast(), crate::decode::json_decode);
             assert_eq!(&json[..8], b"\xf0\x9f\x98\x80\xef\xbf\xbd\0");
             assert_eq!(json[19], b'!');
         }
@@ -6674,73 +6323,6 @@ pub unsafe extern "C" fn nzbget_rs_nserv_parse_args(
         for mut opt in parsed.cmd_opts {
             opt.push(0);
             cb(ctx, opt.as_ptr().cast());
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_network_speed_test_run(
-    ctx: *mut std::ffi::c_void,
-    execute_iter_cb: Option<
-        unsafe extern "C" fn(
-            ctx: *mut std::ffi::c_void,
-            req_ptr: *const c_char,
-            req_len: usize,
-            timeout_sec: i64,
-            out_downloaded: *mut u32,
-            out_elapsed: *mut f64,
-        ) -> c_int,
-    >,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-    out_speed_mbps: *mut f64,
-    out_err_msg: *mut RsBuf,
-) -> c_int {
-    if !out_err_msg.is_null() {
-        *out_err_msg = RsBuf {
-            data: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        };
-    }
-    if !out_speed_mbps.is_null() {
-        *out_speed_mbps = 0.0;
-    }
-    let Some(iter_fn) = execute_iter_cb else {
-        return 0;
-    };
-    let res = crate::webdownload::run_network_speed_test(
-        |req, timeout_sec| {
-            let mut downloaded: u32 = 0;
-            let mut elapsed: f64 = 0.0;
-            iter_fn(
-                ctx,
-                req.as_ptr().cast(),
-                req.len(),
-                timeout_sec,
-                &mut downloaded,
-                &mut elapsed,
-            );
-            (downloaded, elapsed)
-        },
-        |kind, msg| {
-            if let Some(cb) = log_cb {
-                let c_msg = nul(msg.as_bytes());
-                cb(ctx, kind, c_msg.as_ptr().cast());
-            }
-        },
-    );
-    match res {
-        Ok(speed) => {
-            if !out_speed_mbps.is_null() {
-                *out_speed_mbps = speed;
-            }
-            1
-        }
-        Err(err) => {
-            if !out_err_msg.is_null() {
-                *out_err_msg = into_buf(err.as_bytes().to_vec());
-            }
-            0
         }
     }
 }
@@ -10571,66 +10153,6 @@ pub unsafe extern "C" fn nzbget_rs_dupe_identity_read(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_benchmark_run(
-    dir_ptr: *const c_char,
-    dir_len: usize,
-    block_size_bytes: usize,
-    max_file_size_bytes: u64,
-    timeout_secs: i64,
-    space_ok: c_int,
-    available_bytes: u64,
-    space_err_ptr: *const c_char,
-    space_err_len: usize,
-    out_write_bytes: *mut u64,
-    out_write_ms: *mut f64,
-    out_read_bytes: *mut u64,
-    out_read_ms: *mut f64,
-    out_err: *mut RsBuf,
-) -> c_int {
-    let space_res = if space_ok != 0 {
-        Ok(available_bytes)
-    } else {
-        Err(String::from_utf8_lossy(bytes(space_err_ptr, space_err_len)).into_owned())
-    };
-    let timeout = std::time::Duration::from_secs(timeout_secs.max(0) as u64);
-    match crate::util::disk_benchmark_run_bytes(
-        bytes(dir_ptr, dir_len),
-        block_size_bytes,
-        max_file_size_bytes,
-        timeout,
-        space_res,
-    ) {
-        Ok(res) => {
-            if !out_write_bytes.is_null() {
-                *out_write_bytes = res.write_bytes;
-            }
-            if !out_write_ms.is_null() {
-                *out_write_ms = res.write_ms;
-            }
-            if !out_read_bytes.is_null() {
-                *out_read_bytes = res.read_bytes;
-            }
-            if !out_read_ms.is_null() {
-                *out_read_ms = res.read_ms;
-            }
-            0
-        }
-        Err(crate::util::DiskBenchmarkError::InvalidArgument(msg)) => {
-            if !out_err.is_null() {
-                *out_err = into_buf(msg.into_bytes());
-            }
-            1
-        }
-        Err(crate::util::DiskBenchmarkError::Runtime(msg)) => {
-            if !out_err.is_null() {
-                *out_err = into_buf(msg.into_bytes());
-            }
-            2
-        }
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_regex_new(
     pattern: *const c_char,
     match_buf_size: c_int,
@@ -11914,589 +11436,6 @@ pub unsafe extern "C" fn nzbget_rs_options_create_scheduler_task(
         command,
         param_opt,
     );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_execute_save_config(
-    request: *mut *mut c_char,
-    is_get: c_int,
-    is_json: c_int,
-    config_filename: *const c_char,
-    out_fault: *mut c_int,
-) -> RsBuf {
-    if request.is_null() || (*request).is_null() {
-        if !out_fault.is_null() {
-            *out_fault = 1;
-        }
-        return into_buf(crate::xmlrpc_format::format_error_bytes(
-            is_json != 0,
-            2,
-            b"Invalid parameter",
-        ));
-    }
-    let raw = crate::rpcparams::Raw::new((*request).cast::<u8>());
-    let fname = if config_filename.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(config_filename).to_bytes())
-    };
-    let (pos, fault, resp) =
-        crate::xmlrpc_format::xmlrpc_execute_save_config_raw(raw, is_get != 0, is_json != 0, fname);
-    *request = (*request).add(pos);
-    if !out_fault.is_null() {
-        *out_fault = c_int::from(fault);
-    }
-    into_buf(resp)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_execute_load_config(
-    is_json: c_int,
-    user_access: c_int,
-    ua_restricted: c_int,
-    config_filename: *const c_char,
-    out_fault: *mut c_int,
-) -> RsBuf {
-    let fname = if config_filename.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(config_filename).to_bytes())
-    };
-    let (fault, resp) = crate::xmlrpc_format::xmlrpc_execute_load_config(
-        is_json != 0,
-        user_access,
-        ua_restricted,
-        fname,
-    );
-    if !out_fault.is_null() {
-        *out_fault = c_int::from(fault);
-    }
-    into_buf(resp)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_execute_tls_cipher(
-    operation: c_int,
-    user_access: c_int,
-    ua_control: c_int,
-    protocol: c_int,
-    rp_json_rpc: c_int,
-    http_method: c_int,
-    hm_post: c_int,
-    is_json: c_int,
-    request: *const c_char,
-    limits: crate::json::Limits,
-    ctx: *mut c_void,
-    backend_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char) -> RsBuf>,
-    out_fault: *mut c_int,
-) -> RsBuf {
-    let req_opt = if request.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(request).to_bytes())
-    };
-    let invoke = |op_kind: i32, job_id: Option<&[u8]>| -> Vec<u8> {
-        let Some(cb) = backend_cb else {
-            return Vec::new();
-        };
-        let c_id = job_id.and_then(|b| std::ffi::CString::new(b).ok());
-        let id_ptr = c_id.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
-        let buf = cb(ctx, op_kind, id_ptr);
-        if buf.data.is_null() {
-            return Vec::new();
-        }
-        let slice = std::slice::from_raw_parts(buf.data.cast::<u8>(), buf.len);
-        let out = slice.to_vec();
-        nzbget_rs_free(buf);
-        out
-    };
-    let (fault, resp) = crate::xmlrpc_format::xmlrpc_execute_tls_cipher(
-        operation,
-        user_access,
-        ua_control,
-        protocol,
-        rp_json_rpc,
-        http_method,
-        hm_post,
-        is_json != 0,
-        req_opt,
-        limits,
-        invoke,
-    );
-    if !out_fault.is_null() {
-        *out_fault = c_int::from(fault);
-    }
-    into_buf(resp)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_edit_queue(
-    request: *mut *mut c_char,
-    is_get: c_int,
-    is_json: c_int,
-    ea_file_move_offset: c_int,
-    ea_group_move_offset: c_int,
-    out_action: *mut c_int,
-    out_args_or_err: *mut RsBuf,
-    out_err_code: *mut c_int,
-    id_ctx: *mut c_void,
-    add_id_cb: Option<unsafe extern "C" fn(*mut c_void, c_int)>,
-) -> c_int {
-    if request.is_null() || (*request).is_null() {
-        if !out_err_code.is_null() {
-            *out_err_code = 2;
-        }
-        if !out_args_or_err.is_null() {
-            *out_args_or_err = into_buf(b"Invalid parameter".to_vec());
-        }
-        return 0;
-    }
-    let raw = crate::rpcparams::Raw::new((*request).cast::<u8>());
-    let res = crate::xmlrpc_format::xmlrpc_parse_edit_queue_raw(
-        raw,
-        is_get != 0,
-        is_json != 0,
-        ea_file_move_offset,
-        ea_group_move_offset,
-    );
-    match res {
-        Ok((pos, action, args, ids)) => {
-            *request = (*request).add(pos);
-            if !out_action.is_null() {
-                *out_action = action;
-            }
-            if !out_args_or_err.is_null() {
-                *out_args_or_err = into_buf(args);
-            }
-            if let Some(cb) = add_id_cb {
-                for id in ids {
-                    cb(id_ctx, id);
-                }
-            }
-            1
-        }
-        Err((pos, code, msg)) => {
-            *request = (*request).add(pos);
-            if !out_err_code.is_null() {
-                *out_err_code = code;
-            }
-            if !out_args_or_err.is_null() {
-                *out_args_or_err = into_buf(msg.to_vec());
-            }
-            0
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_start_script(
-    request: *mut *mut c_char,
-    is_get: c_int,
-    is_json: c_int,
-    out_script: *mut RsBuf,
-    out_command: *mut RsBuf,
-    out_context: *mut RsBuf,
-    entry_ctx: *mut c_void,
-    add_entry_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
-) -> c_int {
-    if request.is_null() || (*request).is_null() {
-        return 0;
-    }
-    let raw = crate::rpcparams::Raw::new((*request).cast::<u8>());
-    let res = crate::xmlrpc_format::xmlrpc_parse_start_script_raw(raw, is_get != 0, is_json != 0);
-    let Some((pos, script, command, context, entries)) = res else {
-        return 0;
-    };
-    *request = (*request).add(pos);
-    if !out_script.is_null() {
-        *out_script = into_buf(script);
-    }
-    if !out_command.is_null() {
-        *out_command = into_buf(command);
-    }
-    if !out_context.is_null() {
-        *out_context = into_buf(context);
-    }
-    if let Some(cb) = add_entry_cb {
-        for (name, val) in entries {
-            let n_buf = into_buf(name);
-            let v_buf = into_buf(val);
-            cb(entry_ctx, n_buf.data, v_buf.data);
-            nzbget_rs_free(n_buf);
-            nzbget_rs_free(v_buf);
-        }
-    }
-    1
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_test_disk_speed(
-    request: *mut *mut c_char,
-    is_get: c_int,
-    is_json: c_int,
-    out_dir_path: *mut RsBuf,
-    out_buffer_bytes: *mut usize,
-    out_max_file_bytes: *mut u64,
-    out_timeout_sec: *mut c_int,
-    out_err_msg: *mut *const c_char,
-) -> c_int {
-    if request.is_null() || (*request).is_null() {
-        if !out_err_msg.is_null() {
-            *out_err_msg = b"Invalid argument (Path)\0".as_ptr().cast::<c_char>();
-        }
-        return 0;
-    }
-    let raw = crate::rpcparams::Raw::new((*request).cast::<u8>());
-    let res =
-        crate::xmlrpc_format::xmlrpc_parse_test_disk_speed_raw(raw, is_get != 0, is_json != 0);
-    match res {
-        Ok((pos, dir_path, buf_bytes, max_bytes, timeout_sec)) => {
-            *request = (*request).add(pos);
-            if !out_dir_path.is_null() {
-                *out_dir_path = into_buf(dir_path);
-            }
-            if !out_buffer_bytes.is_null() {
-                *out_buffer_bytes = buf_bytes;
-            }
-            if !out_max_file_bytes.is_null() {
-                *out_max_file_bytes = max_bytes;
-            }
-            if !out_timeout_sec.is_null() {
-                *out_timeout_sec = timeout_sec;
-            }
-            1
-        }
-        Err((pos, msg)) => {
-            *request = (*request).add(pos);
-            if !out_err_msg.is_null() {
-                *out_err_msg = msg.as_ptr();
-            }
-            0
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_append_fleet(
-    request: *mut *mut c_char,
-    is_get: c_int,
-    is_json: c_int,
-    max_members: c_int,
-    ctx: *mut c_void,
-    header_cb: Option<
-        unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, c_int, c_int),
-    >,
-    member_cb: Option<
-        unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *const c_char, usize),
-    >,
-    out_err: *mut RsBuf,
-) -> c_int {
-    if is_json == 0 {
-        if !out_err.is_null() {
-            *out_err = into_buf(b"appendfleet needs JSON-RPC".to_vec());
-        }
-        return 0;
-    }
-    if request.is_null() || (*request).is_null() {
-        if !out_err.is_null() {
-            *out_err = into_buf(b"Invalid parameter (DupeKey)".to_vec());
-        }
-        return 0;
-    }
-    let raw = crate::rpcparams::Raw::new((*request).cast::<u8>());
-    let res = crate::xmlrpc_format::xmlrpc_parse_append_fleet_raw(
-        raw,
-        is_get != 0,
-        is_json != 0,
-        max_members,
-    );
-    match res {
-        Ok((pos, parsed)) => {
-            *request = (*request).add(pos);
-            if let Some(hcb) = header_cb {
-                let dk_buf = into_buf(parsed.dupe_key);
-                let cat_buf = into_buf(parsed.category);
-                hcb(
-                    ctx,
-                    dk_buf.data,
-                    cat_buf.data,
-                    parsed.priority,
-                    parsed.timeout_sec,
-                );
-                nzbget_rs_free(dk_buf);
-                nzbget_rs_free(cat_buf);
-            }
-            if let Some(mcb) = member_cb {
-                for (name, is_url, content) in parsed.members {
-                    let n_buf = into_buf(name);
-                    let c_buf = into_buf(content);
-                    mcb(ctx, n_buf.data, c_int::from(is_url), c_buf.data, c_buf.len);
-                    nzbget_rs_free(n_buf);
-                    nzbget_rs_free(c_buf);
-                }
-            }
-            1
-        }
-        Err((pos, msg)) => {
-            *request = (*request).add(pos);
-            if !out_err.is_null() {
-                *out_err = into_buf(msg);
-            }
-            0
-        }
-    }
-}
-
-#[repr(C)]
-pub struct NzbgetRsParsedDownload {
-    pub v13: c_int,
-    pub filename: RsBuf,
-    pub category: RsBuf,
-    pub priority: c_int,
-    pub add_top: c_int,
-    pub is_url: c_int,
-    pub content: RsBuf,
-    pub add_paused: c_int,
-    pub has_dupe_key: c_int,
-    pub dupe_key: RsBuf,
-    pub dupe_score: c_int,
-    pub dupe_mode: c_int,
-    pub auto_category: c_int,
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_download(
-    request: *mut *mut c_char,
-    is_get: c_int,
-    is_json: c_int,
-    dm_score: c_int,
-    dm_all: c_int,
-    dm_force: c_int,
-    out_dl: *mut NzbgetRsParsedDownload,
-    param_ctx: *mut c_void,
-    add_param_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
-    out_err_msg: *mut *const c_char,
-) -> c_int {
-    if request.is_null() || (*request).is_null() {
-        if !out_err_msg.is_null() {
-            *out_err_msg = b"Invalid parameter (Filename)\0".as_ptr().cast::<c_char>();
-        }
-        return 0;
-    }
-    let raw = crate::rpcparams::Raw::new((*request).cast::<u8>());
-    let res = crate::xmlrpc_format::xmlrpc_parse_download_raw(
-        raw,
-        is_get != 0,
-        is_json != 0,
-        dm_score,
-        dm_all,
-        dm_force,
-    );
-    match res {
-        Ok((pos, dl)) => {
-            *request = (*request).add(pos);
-            if !out_dl.is_null() {
-                let (has_dk, dk_buf) = match dl.dupe_key {
-                    Some(dk) => (1, into_buf(dk)),
-                    None => (
-                        0,
-                        RsBuf {
-                            data: std::ptr::null_mut(),
-                            len: 0,
-                            cap: 0,
-                        },
-                    ),
-                };
-                *out_dl = NzbgetRsParsedDownload {
-                    v13: c_int::from(dl.v13),
-                    filename: into_buf(dl.filename),
-                    category: into_buf(dl.category),
-                    priority: dl.priority,
-                    add_top: c_int::from(dl.add_top),
-                    is_url: c_int::from(dl.is_url),
-                    content: into_buf(dl.content),
-                    add_paused: c_int::from(dl.add_paused),
-                    has_dupe_key: has_dk,
-                    dupe_key: dk_buf,
-                    dupe_score: dl.dupe_score,
-                    dupe_mode: dl.dupe_mode,
-                    auto_category: c_int::from(dl.auto_category),
-                };
-            }
-            if let Some(cb) = add_param_cb {
-                for (pname, pval) in dl.params {
-                    let n_buf = into_buf(pname);
-                    let v_buf = into_buf(pval);
-                    cb(param_ctx, n_buf.data, v_buf.data);
-                    nzbget_rs_free(n_buf);
-                    nzbget_rs_free(v_buf);
-                }
-            }
-            1
-        }
-        Err((pos, msg)) => {
-            *request = (*request).add(pos);
-            if !out_err_msg.is_null() {
-                *out_err_msg = msg.as_ptr();
-            }
-            0
-        }
-    }
-}
-
-#[repr(C)]
-pub struct NzbgetRsParsedViewFeed {
-    pub id: c_int,
-    pub include_non_matching: c_int,
-    pub name: RsBuf,
-    pub url: RsBuf,
-    pub filter: RsBuf,
-    pub backlog: c_int,
-    pub pause_nzb: c_int,
-    pub category: RsBuf,
-    pub category_source: c_int,
-    pub priority: c_int,
-    pub interval: c_int,
-    pub has_feed_filter: c_int,
-    pub feed_filter: RsBuf,
-    pub cache_time_sec: c_int,
-    pub cache_id: RsBuf,
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_view_feed(
-    request: *mut *mut c_char,
-    is_get: c_int,
-    is_json: c_int,
-    preview: c_int,
-    cs_nzb_file: c_int,
-    cs_feed_file: c_int,
-    cs_auto: c_int,
-    out_vf: *mut NzbgetRsParsedViewFeed,
-) -> c_int {
-    if request.is_null() || (*request).is_null() {
-        return 0;
-    }
-    let raw = crate::rpcparams::Raw::new((*request).cast::<u8>());
-    let Some((pos, vf)) = crate::xmlrpc_format::xmlrpc_parse_view_feed_raw(
-        raw,
-        is_get != 0,
-        is_json != 0,
-        preview != 0,
-        cs_nzb_file,
-        cs_feed_file,
-        cs_auto,
-    ) else {
-        return 0;
-    };
-    *request = (*request).add(pos);
-    if !out_vf.is_null() {
-        let (has_ff, ff_buf) = match vf.feed_filter {
-            Some(ff) => (1, into_buf(ff)),
-            None => (
-                0,
-                RsBuf {
-                    data: std::ptr::null_mut(),
-                    len: 0,
-                    cap: 0,
-                },
-            ),
-        };
-        *out_vf = NzbgetRsParsedViewFeed {
-            id: vf.id,
-            include_non_matching: c_int::from(vf.include_non_matching),
-            name: into_buf(vf.name),
-            url: into_buf(vf.url),
-            filter: into_buf(vf.filter),
-            backlog: c_int::from(vf.backlog),
-            pause_nzb: c_int::from(vf.pause_nzb),
-            category: into_buf(vf.category),
-            category_source: vf.category_source,
-            priority: vf.priority,
-            interval: vf.interval,
-            has_feed_filter: has_ff,
-            feed_filter: ff_buf,
-            cache_time_sec: vf.cache_time_sec,
-            cache_id: into_buf(vf.cache_id),
-        };
-    }
-    1
-}
-
-#[repr(C)]
-pub struct NzbgetRsParsedTestServer {
-    pub host: RsBuf,
-    pub username: RsBuf,
-    pub password: RsBuf,
-    pub cipher: RsBuf,
-    pub port: c_int,
-    pub timeout: c_int,
-    pub cert_verif_level: c_int,
-    pub encryption: c_int,
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_test_server(
-    request_body: *const c_char,
-    request_ptr: *mut *mut c_char,
-    is_get: c_int,
-    is_json: c_int,
-    http_method: c_int,
-    hm_post: c_int,
-    cert_verif_count: c_int,
-    limits: crate::json::Limits,
-    out_ts: *mut NzbgetRsParsedTestServer,
-    out_err_msg: *mut *const c_char,
-) -> c_int {
-    let body_opt = if request_body.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(request_body).to_bytes())
-    };
-    let raw_opt = if request_ptr.is_null() || (*request_ptr).is_null() {
-        None
-    } else {
-        Some(crate::rpcparams::Raw::new((*request_ptr).cast::<u8>()))
-    };
-    let res = crate::xmlrpc_format::xmlrpc_parse_test_server_raw(
-        body_opt,
-        raw_opt,
-        is_get != 0,
-        is_json != 0,
-        http_method,
-        hm_post,
-        cert_verif_count,
-        limits,
-    );
-    match res {
-        Ok((pos, ts)) => {
-            if !request_ptr.is_null() && !(*request_ptr).is_null() {
-                *request_ptr = (*request_ptr).add(pos);
-            }
-            if !out_ts.is_null() {
-                *out_ts = NzbgetRsParsedTestServer {
-                    host: into_buf(ts.host),
-                    username: into_buf(ts.username),
-                    password: into_buf(ts.password),
-                    cipher: into_buf(ts.cipher),
-                    port: ts.port,
-                    timeout: ts.timeout,
-                    cert_verif_level: ts.cert_verif_level,
-                    encryption: c_int::from(ts.encryption),
-                };
-            }
-            1
-        }
-        Err((pos, msg)) => {
-            if !request_ptr.is_null() && !(*request_ptr).is_null() {
-                *request_ptr = (*request_ptr).add(pos);
-            }
-            if !out_err_msg.is_null() {
-                *out_err_msg = msg.as_ptr();
-            }
-            0
-        }
-    }
 }
 
 type DonorNextArticleFn = Option<
@@ -14742,25 +13681,6 @@ pub unsafe extern "C" fn nzbget_rs_dupesearch_parse_state_line(
     1
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_url_decode_path_in_place(raw: *mut c_char) {
-    if raw.is_null() {
-        return;
-    }
-    let total_len = std::ffi::CStr::from_ptr(raw).to_bytes().len();
-    let buf = std::slice::from_raw_parts_mut(raw as *mut u8, total_len + 1);
-    let q = buf[..total_len]
-        .iter()
-        .position(|&b| b == b'?')
-        .unwrap_or(total_len);
-    let dec_len = crate::text::url_decode(&mut buf[..q]);
-    let tail_len = total_len - q;
-    if tail_len > 0 && dec_len != q {
-        buf.copy_within(q..total_len, dec_len);
-    }
-    buf[dec_len + tail_len] = 0;
-}
-
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct RsServerMatchItem {
@@ -16332,62 +15252,6 @@ pub unsafe extern "C" fn nzbget_rs_twin_service_op(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_resp_op(
-    op: c_int,
-    is_json: c_int,
-    int_val: c_int,
-    u64_1: u64,
-    u64_2: u64,
-    f64_1: f64,
-    f64_2: f64,
-    out_buf: *mut RsBuf,
-) -> c_int {
-    match op {
-        0 => c_int::from(crate::xmlrpc_format::is_safe_command(int_val)),
-        1 => {
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::xmlrpc_format::format_bool_bytes(
-                    is_json != 0,
-                    int_val != 0,
-                ));
-            }
-            1
-        }
-        2 => {
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::xmlrpc_format::format_int_bytes(
-                    is_json != 0,
-                    int_val,
-                ));
-            }
-            1
-        }
-        3 => {
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::xmlrpc_format::format_disk_speed_bytes(
-                    is_json != 0,
-                    u64_1,
-                    f64_1,
-                    u64_2,
-                    f64_2,
-                ));
-            }
-            1
-        }
-        4 => {
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::xmlrpc_format::format_network_speed_bytes(
-                    is_json != 0,
-                    f64_1,
-                ));
-            }
-            1
-        }
-        _ => 0,
-    }
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_socket_deadline_wait(
     fd: c_int,
     read: c_int,
@@ -16596,13 +15460,21 @@ pub unsafe extern "C" fn nzbget_rs_scheduler_service_str(op: c_int, val: c_int) 
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_lifecycle_reload_op(
+    op: c_int,
+    state_cb: Option<unsafe extern "C" fn(c_int) -> c_int>,
+) {
+    crate::lifecycle::reload_coordinator_op(op, state_cb);
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_daemon_service_op(
     op: c_int,
     a: c_int,
     b: c_int,
     c: c_int,
     d: c_int,
-    t1: i64,
+    _t1: i64,
     s1: *const c_char,
     s2: *const c_char,
     out1: *mut c_int,
@@ -16697,7 +15569,6 @@ pub unsafe extern "C" fn nzbget_rs_daemon_service_op(
             c != 0,
             d != 0,
         )),
-        6 => crate::options::roc_nzbget_reload_clamp_debounce_ms(t1, 100, 1500) as c_int,
         7 => {
             #[cfg(unix)]
             {
@@ -19151,9 +18022,6 @@ pub unsafe extern "C" fn nzbget_rs_webdl_execute(
 
 // ---- WebProcessor / BinRpcProcessor / RemoteClient / Frontend FFI ----
 
-pub type NzbgetRsWebSendBodyFn =
-    unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *const c_char, c_int);
-
 #[repr(C)]
 pub struct NzbgetRsWebServeEnv {
     pub ctx: *mut c_void,
@@ -19170,25 +18038,19 @@ pub struct NzbgetRsWebServeEnv {
     pub add_username: *const c_char,
     pub add_password: *const c_char,
     pub authorized_ip: *const c_char,
+    pub config_filename: *const c_char,
+    pub shell_override: *const c_char,
     pub control_port: c_int,
     pub form_auth: c_int,
     pub gzip_enabled: c_int,
+    pub json_p: c_int,
     pub debug_build: c_int,
     pub read_line_cb: Option<unsafe extern "C" fn(*mut c_void, *mut c_char, c_int) -> c_int>,
     pub recv_cb: Option<unsafe extern "C" fn(*mut c_void, *mut c_char, c_int) -> c_int>,
     pub send_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_int>,
     pub log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
-    pub rpc_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *mut c_char,
-            c_int,
-            c_int,
-            *const c_char,
-            *mut c_void,
-            NzbgetRsWebSendBodyFn,
-        ),
-    >,
+    pub rpc_action_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcActionFn>,
+    pub rpc_collect_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcCollectFn>,
 }
 
 unsafe fn to_nul_cvec(bytes: &[u8]) -> std::ffi::CString {
@@ -19257,23 +18119,6 @@ pub unsafe extern "C" fn nzbget_rs_web_serve(op: c_int, env: *const NzbgetRsWebS
         };
         let lower = crate::wildmask::Lower::Fold(&crate::util::wild_mask_fold_locale);
 
-        unsafe extern "C" fn send_body_trampoline(
-            send_ctx: *mut c_void,
-            body_ptr: *const c_char,
-            body_len: c_int,
-            ct_ptr: *const c_char,
-            cachable: c_int,
-        ) {
-            let emit = &mut *(send_ctx as *mut &mut dyn FnMut(&[u8], Option<&[u8]>, bool));
-            let body = if body_ptr.is_null() || body_len <= 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(body_ptr.cast::<u8>(), body_len as usize)
-            };
-            let ct = (!ct_ptr.is_null()).then(|| CStr::from_ptr(ct_ptr).to_bytes());
-            emit(body, ct, cachable != 0);
-        }
-
         let keep_alive = crate::webserver::serve_web_request(
             &cfg,
             &lower,
@@ -19301,19 +18146,24 @@ pub unsafe extern "C" fn nzbget_rs_web_serve(op: c_int, env: *const NzbgetRsWebS
                     cb(e.ctx, level, c.as_ptr());
                 }
             },
-            |req_body, http_method, user_access, url_c, mut emit| {
-                if let Some(cb) = e.rpc_cb {
-                    let mut emit_ref: &mut dyn FnMut(&[u8], Option<&[u8]>, bool) = &mut emit;
-                    cb(
-                        e.ctx,
-                        req_body.as_mut_ptr().cast(),
-                        http_method,
-                        user_access,
-                        url_c.as_ptr().cast(),
-                        (&mut emit_ref as *mut &mut dyn FnMut(&[u8], Option<&[u8]>, bool)).cast(),
-                        send_body_trampoline,
-                    );
-                }
+            |req_body, http_method, user_access, url_c, emit| {
+                let (resp, ct, safe) = crate::xmlrpc_format::serve_xmlrpc(
+                    e.ctx,
+                    req_body,
+                    http_method,
+                    user_access,
+                    e.json_p != 0,
+                    e.debug_build != 0,
+                    url_c,
+                    cfg.version,
+                    opt_c(e.config_filename),
+                    input(e.shell_override),
+                    e.log_cb,
+                    e.rpc_action_cb,
+                    e.rpc_collect_cb,
+                );
+                let nul = resp.iter().position(|&b| b == 0).unwrap_or(resp.len());
+                emit(&resp[..nul], ct, safe);
             },
         );
         return c_int::from(keep_alive);

@@ -76,7 +76,6 @@
 #include <getopt.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -984,37 +983,6 @@ public:
 	}
 
 	static int NumberOfCpuCores() { return std::thread::hardware_concurrency(); }
-};
-
-class WebUtil
-{
-public:
-	static void XmlDecode(char* raw) { nzbget_rs_xml_decode(raw); }
-
-	static const char* XmlFindTag(const char* xml, const char* tag, int* valueLength)
-	{
-		return nzbget_rs_xml_find_tag(xml, tag, valueLength);
-	}
-
-	static bool XmlParseTagValue(const char* xml, const char* tag, char* valueBuf, int valueBufSize, const char** tagEnd)
-	{
-		int valueLen = 0;
-		const char* value = XmlFindTag(xml, tag, &valueLen);
-		if (!value)
-		{
-			return false;
-		}
-		int len = valueLen < valueBufSize ? valueLen : valueBufSize - 1;
-		strncpy(valueBuf, value, len);
-		valueBuf[len] = '\0';
-		if (tagEnd)
-		{
-			*tagEnd = value + valueLen;
-		}
-		return true;
-	}
-
-	static void JsonDecode(char* raw) { nzbget_rs_json_decode(raw); }
 };
 
 class RegEx
@@ -35718,7 +35686,6 @@ public:
 
 	static constexpr int DefaultTimeoutSec = 45;
 	static constexpr int MaxTimeoutSec = 120;
-	static constexpr int MaxMembers = 50;
 	// a parameter of every item a fleet adds: its rank in the fleet. A queue extension
 	// (NZBPR_DupeFleet) can tell that nzbget ranked the key's copies already: ranking
 	// them again tied two live backups at one score
@@ -38899,2371 +38866,6 @@ private:
 #endif
 
 #endif
-#include <cerrno>
-namespace
-{
-	// Pauses downloads for the duration of a speed test and restores the previous
-	// state. Tests at the same time share it: the first saves the state, the last
-	// restores it (a second test restored "paused", saved while the first ran).
-	class PauseGuard
-	{
-	public:
-		PauseGuard()
-		{
-			std::lock_guard<std::mutex> lock(Mutex());
-			if (Active()++ == 0)
-			{
-				WasPaused() = g_WorkState->GetPauseDownload();
-				g_WorkState->SetPauseDownload(true);
-			}
-		}
-		PauseGuard(const PauseGuard&) = delete;
-		PauseGuard& operator=(const PauseGuard&) = delete;
-		~PauseGuard()
-		{
-			std::lock_guard<std::mutex> lock(Mutex());
-			if (--Active() == 0)
-			{
-				g_WorkState->SetPauseDownload(WasPaused());
-			}
-		}
-
-	private:
-		static std::mutex& Mutex() { static std::mutex mutex; return mutex; }
-		static int& Active() { static int active = 0; return active; }
-		static bool& WasPaused() { static bool wasPaused = false; return wasPaused; }
-	};
-
-	double MiBPerSec(uint64_t bytes, double ms)
-	{
-		return ms > 0.0 ? (static_cast<double>(bytes) / 1024.0 / 1024.0) / (ms / 1000.0) : 0.0;
-	}
-
-	void AppendRsBuf(StringBuilder& response, NzbgetRsBuf buf)
-	{
-		if (buf.data && buf.len > 0)
-		{
-			response.Append(buf.data, static_cast<int>(buf.len));
-		}
-		nzbget_rs_free(buf);
-	}
-}
-
-extern void ExitProc();
-extern void Reload();
-
-class XmlRpcProcessor
-{
-public:
-	enum ERpcProtocol
-	{
-		rpUndefined,
-		rpXmlRpc,
-		rpJsonRpc,
-		rpJsonPRpc
-	};
-
-	enum EHttpMethod
-	{
-		hmPost,
-		hmGet
-	};
-
-	enum EUserAccess
-	{
-		uaControl,
-		uaRestricted,
-		uaAdd
-	};
-
-	class XmlCommand
-	{
-	public:
-		explicit XmlCommand(int cmdId) : m_cmdId(cmdId)
-		{
-			m_response.Reserve(1024 * 10 - 1);
-		}
-		XmlCommand(int errCode, const char* errText) : m_cmdId(0), m_errCode(errCode), m_errText(errText)
-		{
-			m_response.Reserve(1024 * 10 - 1);
-		}
-		void SetRequest(char* request) { m_request = request; m_requestPtr = m_request; }
-		void SetProtocol(XmlRpcProcessor::ERpcProtocol protocol) { m_protocol = protocol; }
-		void SetHttpMethod(XmlRpcProcessor::EHttpMethod httpMethod) { m_httpMethod = httpMethod; }
-		void SetUserAccess(XmlRpcProcessor::EUserAccess userAccess) { m_userAccess = userAccess; }
-		const char* GetResponse() { return m_response; }
-		const char* GetCallbackFunc() { return m_callbackFunc; }
-		bool GetFault() { return m_fault; }
-		bool IsSafeMethod()
-		{
-			return nzbget_rs_xmlrpc_resp_op(0, 0, m_cmdId, 0, 0, 0.0, 0.0, nullptr) != 0;
-		}
-		bool IsError() { return m_cmdId == 0; }
-
-		void PrepareParams()
-		{
-			if (IsJson() && m_httpMethod == XmlRpcProcessor::hmPost)
-			{
-				// without "params" the request is emptied: no parameters follow
-				m_requestPtr = nzbget_rs_rpc_skip_to_params(m_requestPtr);
-			}
-
-			if (m_protocol == XmlRpcProcessor::rpJsonPRpc)
-			{
-				NextParamAsStr(&m_callbackFunc);
-			}
-		}
-
-		void PrintTestServerError(const char* errMsg)
-		{
-			if (m_testServerErrText.Empty() && errMsg)
-			{
-				m_testServerErrText = errMsg;
-			}
-		}
-
-		void Execute()
-		{
-			switch (m_cmdId)
-			{
-				case 1: ExecutePauseUnpause(true, 0); break;
-				case 2: ExecutePauseUnpause(false, 0); break;
-				case 3: ExecuteShutdown(); break;
-				case 4: ExecuteReload(); break;
-				case 5: ExecuteVersion(); break;
-				case 6: ExecuteDumpDebug(); break;
-				case 7: ExecuteSetDownloadRate(); break;
-				case 8: ExecuteStatus(); break;
-				case 9: ExecuteSysInfo(); break;
-				case 10: ExecuteSystemHealth(); break;
-				case 11: ExecuteLog(0); break;
-				case 12: ExecuteListFiles(); break;
-				case 13: ExecuteListGroups(); break;
-				case 14: ExecuteEditQueue(); break;
-				case 15: ExecuteDownload(); break;
-				case 16: ExecuteAppendFleet(); break;
-				case 17: ExecutePostQueue(); break;
-				case 18: ExecuteWriteLog(); break;
-				case 19: ExecuteClearLog(); break;
-				case 20: ExecuteLog(3); break;
-				case 21: ExecuteScan(); break;
-				case 22: ExecutePauseUnpause(true, 1); break;
-				case 23: ExecutePauseUnpause(false, 1); break;
-				case 24: ExecutePauseUnpause(true, 2); break;
-				case 25: ExecutePauseUnpause(false, 2); break;
-				case 26: ExecuteScheduleResume(); break;
-				case 27: ExecuteHistory(); break;
-				case 28: ExecuteUrlQueue(); break;
-				case 29: ExecuteConfig(); break;
-				case 30: ExecuteLoadConfig(); break;
-				case 31: ExecuteLoadExtensions(); break;
-				case 32: ExecuteDownloadExtension(); break;
-				case 33: ExecuteUpdateExtension(); break;
-				case 34: ExecuteDeleteExtension(); break;
-				case 35: ExecuteTestExtension(); break;
-				case 36: ExecuteSaveConfig(); break;
-				case 37: ExecuteConfigTemplates(); break;
-				case 38: ExecuteViewFeed(false); break;
-				case 39: ExecuteViewFeed(true); break;
-				case 40: ExecuteFetchFeed(); break;
-				case 41: ExecuteEditServer(); break;
-				case 42: ExecuteReadUrl(); break;
-				case 43: ExecuteCheckUpdates(); break;
-				case 44: ExecuteStartUpdate(); break;
-				case 45: ExecuteLog(1); break;
-				case 46: ExecuteServerVolumes(); break;
-				case 47: ExecuteResetServerVolume(); break;
-				case 48: ExecuteTlsCipher(0); break;
-				case 49: ExecuteTlsCipher(1); break;
-				case 50: ExecuteTlsCipher(2); break;
-				case 51: ExecuteTestServer(); break;
-				case 52: ExecuteTestServerSpeed(); break;
-				case 53: ExecuteTestDiskSpeed(); break;
-				case 54: ExecuteTestNetworkSpeed(); break;
-				case 55: ExecuteStartScript(); break;
-				case 56: ExecuteLog(2); break;
-				default: BuildErrorResponse(m_errCode, "%s", m_errText ? m_errText : "Invalid procedure"); break;
-			}
-		}
-
-	private:
-		int m_cmdId = 0;
-		int m_errCode = 0;
-		const char* m_errText = nullptr;
-		char* m_request = nullptr;
-		char* m_requestPtr = nullptr;
-		char* m_callbackFunc = nullptr;
-		StringBuilder m_response;
-		bool m_fault = false;
-		XmlRpcProcessor::ERpcProtocol m_protocol = XmlRpcProcessor::rpUndefined;
-		XmlRpcProcessor::EHttpMethod m_httpMethod = XmlRpcProcessor::hmPost;
-		XmlRpcProcessor::EUserAccess m_userAccess = XmlRpcProcessor::uaControl;
-		CString m_testServerErrText;
-
-		bool IsJson()
-		{
-			return m_protocol == XmlRpcProcessor::rpJsonRpc || m_protocol == XmlRpcProcessor::rpJsonPRpc;
-		}
-
-		void AppendResponse(const char* part)
-		{
-			m_response.Append(part);
-		}
-
-		void AppendCondResponse(const char* part, bool cond)
-		{
-			if (cond)
-			{
-				m_response.Append(part);
-			}
-		}
-
-		void BuildErrorResponse(int errCode, const char* errText, ...)
-		{
-			char fullText[1024];
-
-			va_list ap;
-			va_start(ap, errText);
-			vsnprintf(fullText, 1024, errText, ap);
-			fullText[1024-1] = '\0';
-			va_end(ap);
-
-			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_error(IsJson() ? 1 : 0, errCode, fullText));
-
-			m_fault = true;
-		}
-
-		void BuildBoolResponse(bool ok)
-		{
-			NzbgetRsBuf buf{nullptr, 0, 0};
-			nzbget_rs_xmlrpc_resp_op(1, IsJson() ? 1 : 0, ok ? 1 : 0, 0, 0, 0.0, 0.0, &buf);
-			AppendRsBuf(m_response, buf);
-		}
-
-		void BuildIntResponse(int value)
-		{
-			NzbgetRsBuf buf{nullptr, 0, 0};
-			nzbget_rs_xmlrpc_resp_op(2, IsJson() ? 1 : 0, value, 0, 0, 0.0, 0.0, &buf);
-			AppendRsBuf(m_response, buf);
-		}
-
-		bool NextParamAsInt(int* value)
-		{
-			return nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 0, value, nullptr);
-		}
-
-		bool NextParamAsBool(bool* value)
-		{
-			int intValue;
-			if (!nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 1, &intValue, nullptr))
-			{
-				return false;
-			}
-			*value = intValue != 0;
-			return true;
-		}
-
-		bool NextParamAsStr(char** value, bool decode = false)
-		{
-			if (!nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 2, nullptr, value))
-			{
-				return false;
-			}
-			if (decode)
-			{
-				if (IsJson())
-				{
-					WebUtil::JsonDecode(*value);
-				}
-				else
-				{
-					WebUtil::XmlDecode(*value);
-				}
-			}
-			return true;
-		}
-
-void ExecutePauseUnpause(bool pause, int pauseAction)
-{
-	bool ok = true;
-
-	g_WorkState->SetResumeTime(0);
-
-	switch (pauseAction)
-	{
-		case 0:
-			g_WorkState->SetPauseDownload(pause);
-			break;
-
-		case 1:
-			g_WorkState->SetPausePostProcess(pause);
-			break;
-
-		case 2:
-			g_WorkState->SetPauseScan(pause);
-			break;
-
-		default:
-			ok = false;
-	}
-
-	BuildBoolResponse(ok);
-}
-
-// bool scheduleresume(int Seconds)
-void ExecuteScheduleResume()
-{
-	int seconds = 0;
-	if (!NextParamAsInt(&seconds) || seconds < 0)
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	g_WorkState->SetResumeTime(Util::CurrentTime() + (time_t)seconds);
-
-	BuildBoolResponse(true);
-}
-
-void ExecuteShutdown()
-{
-	BuildBoolResponse(true);
-	ExitProc();
-}
-
-void ExecuteReload()
-{
-	BuildBoolResponse(true);
-	Reload();
-}
-
-void ExecuteVersion()
-{
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(IsJson() ? 1 : 0, Util::VersionRevision(), 0, 1023));
-}
-
-void ExecuteDumpDebug()
-{
-	g_Log->LogDebugInfo();
-	BuildBoolResponse(true);
-}
-
-void ExecuteSetDownloadRate()
-{
-	int rate = 0;
-	// in KB/s: a rate past INT_MAX / 1024 wrapped around to a tiny limit
-	if (!NextParamAsInt(&rate) || rate < 0 || rate > INT_MAX / 1024)
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	g_WorkState->SetSpeedLimit(rate * 1024);
-	BuildBoolResponse(true);
-}
-
-void ExecuteStatus()
-{
-	int postJobCount = 0;
-	int urlCount = 0;
-	int64 remainingSize, forcedSize;
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-		{
-			postJobCount += nzbInfo->GetPostInfo() != nullptr ? 1 : 0;
-			urlCount += nzbInfo->GetKind() == NzbInfo::nkUrl ? 1 : 0;
-		}
-		downloadQueue->CalcRemainingSize(&remainingSize, &forcedSize);
-	}
-
-	int64 articleCache = g_ArticleCache->GetAllocated();
-	const char* memoryPressure = g_MemoryMonitor ? g_MemoryMonitor->GetTierName() : "NORMAL";
-	int effectiveArticleCacheMB = g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveArticleCacheMB() : g_Options->GetArticleCache();
-	int effectiveParBufferMB = g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveParBufferMB(g_Options->GetParBuffer()) : g_Options->GetParBuffer();
-
-	int upTimeSec, downloadTimeSec;
-	int64 allBytes;
-	bool serverStandBy;
-	g_StatMeter->CalcTotalStat(&upTimeSec, &downloadTimeSec, &allBytes, &serverStandBy);
-
-	int64 monthBytes, dayBytes;
-	g_StatMeter->CalcQuotaUsage(monthBytes, dayBytes);
-
-	int64 freeDiskSpace = 0;
-	int64 totalDiskSpace = 0;
-	int64 freeInterDiskSpace = 0;
-	int64 totalInterDiskSpace = 0;
-
-	if (!Util::EmptyStr(g_Options->GetDestDir()))
-	{
-		if (auto res = FileSystem::GetDiskState(g_Options->GetDestDir()))
-		{
-			freeDiskSpace = res->available;
-			totalDiskSpace = res->total;
-		}
-	}
-
-	bool interDirEmpty = Util::EmptyStr(g_Options->GetInterDir());
-	if (!interDirEmpty)
-	{
-		if (auto res = FileSystem::GetDiskState(g_Options->GetInterDir()))
-		{
-			freeInterDiskSpace = res->available;
-			totalInterDiskSpace = res->total;
-		}
-	}
-
-	NzbgetRsRpcStatusInput statusFields{};
-	statusFields.remaining_size = remainingSize;
-	statusFields.forced_size = forcedSize;
-	statusFields.article_cache = articleCache;
-	statusFields.all_bytes = allBytes;
-	statusFields.month_bytes = monthBytes;
-	statusFields.day_bytes = dayBytes;
-	statusFields.memory_pressure = memoryPressure;
-	statusFields.effective_article_cache_mb = effectiveArticleCacheMB;
-	statusFields.effective_par_buffer_mb = effectiveParBufferMB;
-	statusFields.download_rate = g_StatMeter->CalcCurrentDownloadSpeed();
-	statusFields.download_limit = (int)(g_WorkState->GetSpeedLimit());
-	statusFields.thread_count = Thread::GetThreadCount() - 1; // not counting itself
-	statusFields.post_job_count = postJobCount;
-	statusFields.url_count = urlCount;
-	statusFields.up_time_sec = upTimeSec;
-	statusFields.download_time_sec = downloadTimeSec;
-	statusFields.download_paused = g_WorkState->GetPauseDownload() ? 1 : 0;
-	statusFields.server_stand_by = serverStandBy ? 1 : 0;
-	statusFields.post_paused = g_WorkState->GetPausePostProcess() ? 1 : 0;
-	statusFields.scan_paused = g_WorkState->GetPauseScan() ? 1 : 0;
-	statusFields.quota_reached = g_WorkState->GetQuotaReached() ? 1 : 0;
-	statusFields.free_disk_space = freeDiskSpace;
-	statusFields.total_disk_space = totalDiskSpace;
-	statusFields.inter_dir_empty = interDirEmpty ? 1 : 0;
-	statusFields.free_inter_disk_space = freeInterDiskSpace;
-	statusFields.total_inter_disk_space = totalInterDiskSpace;
-	statusFields.server_time = (int)Util::CurrentTime();
-	statusFields.resume_time = (int)g_WorkState->GetResumeTime();
-	statusFields.feed_active = g_FeedCoordinator->HasActiveDownloads() ? 1 : 0;
-	statusFields.queued_scripts = g_QueueScriptCoordinator->GetQueueSize();
-
-	std::vector<NzbgetRsRpcServerStatus> servers;
-	servers.reserve(g_ServerPool->GetServers()->size());
-	for (NewsServer* server : g_ServerPool->GetServers())
-	{
-		servers.push_back(NzbgetRsRpcServerStatus{ server->GetId(), server->GetActive() ? 1 : 0 });
-	}
-
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_status(
-		IsJson() ? 1 : 0, &statusFields, servers.data(), servers.size()));
-}
-
-void ExecuteSysInfo()
-{
-	std::string response = IsJson()
-		? System::ToJsonStr(*g_SystemInfo)
-		: System::ToXmlStr(*g_SystemInfo);
-
-	AppendResponse(response.c_str());
-}
-
-void ExecuteSystemHealth()
-{
-	if (g_Options->GetSystemHealthCheck())
-	{
-		AppendRsBuf(m_response, g_SystemHealth->DiagnoseSerialized(IsJson()));
-	}
-	else
-	{
-		BuildErrorResponse(1, "System health check is disabled in configuration");
-	}
-}
-
-// struct[] log(idfrom, entries) / loadlog(nzbid, logidfrom, logentries) / logupdate / logscript
-void ExecuteLog(int logSource)
-{
-	int nzbId = 0;
-	if (logSource == 3 && !NextParamAsInt(&nzbId))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	int idFrom = 0;
-	int nrEntries = 0;
-	if (!NextParamAsInt(&idFrom) || !NextParamAsInt(&nrEntries) ||
-		(nrEntries > 0 && idFrom > 0))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	debug("iIDFrom=%i", idFrom);
-	debug("iNrEntries=%i", nrEntries);
-
-	MessageList diskMessages;
-	std::unique_ptr<GuardedDownloadQueue> downloadQueue;
-	auto guardMessages = [&]() -> GuardedMessageList
-	{
-		if (logSource == 1)
-		{
-			return g_Maintenance->GuardMessages();
-		}
-		if (logSource == 2)
-		{
-			return g_CommandScriptLog->GuardMessages();
-		}
-		if (logSource == 3)
-		{
-			g_DiskState->LoadNzbMessages(nzbId, &diskMessages);
-			if (diskMessages.empty())
-			{
-				downloadQueue = std::make_unique<GuardedDownloadQueue>(DownloadQueue::Guard());
-				NzbInfo* nzbInfo = (*downloadQueue)->GetQueue()->Find(nzbId);
-				if (nzbInfo)
-				{
-					return nzbInfo->GuardCachedMessages();
-				}
-				downloadQueue.reset();
-			}
-			return GuardedMessageList(&diskMessages, nullptr);
-		}
-		return g_Log->GuardMessages();
-	};
-
-	GuardedMessageList messages = guardMessages();
-
-	int start = messages->size();
-	if (nrEntries > 0)
-	{
-		if (nrEntries > (int)messages->size())
-		{
-			nrEntries = messages->size();
-		}
-		start = messages->size() - nrEntries;
-	}
-	if (idFrom > 0 && !messages->empty())
-	{
-		nrEntries = messages->size();
-		start = idFrom - messages->front().GetId();
-		if (start < 0)
-		{
-			start = 0;
-		}
-	}
-
-	std::vector<NzbgetRsRpcLogEntry> entries;
-	if ((uint32)start < messages->size())
-	{
-		entries.reserve(messages->size() - (uint32)start);
-		for (uint32 i = (uint32)start; i < messages->size(); i++)
-		{
-			Message& message = messages->at(i);
-			entries.push_back(NzbgetRsRpcLogEntry{
-				(int)message.GetId(),
-				(int)message.GetKind(),
-				(int)message.GetTime(),
-				message.GetText()
-			});
-		}
-	}
-
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_log_list(
-		IsJson() ? 1 : 0, entries.data(), entries.size()));
-}
-
-// struct[] listfiles(int IDFrom, int IDTo, int NZBID)
-// For backward compatibility with 0.8 parameter "NZBID" is optional
-void ExecuteListFiles()
-{
-	int idStart = 0;
-	int idEnd = 0;
-	bool hasIdStart = NextParamAsInt(&idStart);
-	bool hasIdEnd = hasIdStart ? NextParamAsInt(&idEnd) : false;
-	if (hasIdStart && (!hasIdEnd || idEnd < idStart))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	// For backward compatibility with 0.8 parameter "NZBID" is optional (error checking omitted)
-	int nzbId = 0;
-	NextParamAsInt(&nzbId);
-
-	if (nzbId > 0 && (idStart != 0 || idEnd != 0))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	debug("iIDStart=%i", idStart);
-	debug("iIDEnd=%i", idEnd);
-
-	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
-
-	int index = 0;
-
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-	{
-		for (FileInfo* fileInfo : nzbInfo->GetFileList())
-		{
-			if ((nzbId > 0 && nzbId == fileInfo->GetNzbInfo()->GetId()) ||
-				(nzbId == 0 && (idStart == 0 || (idStart <= fileInfo->GetId() && fileInfo->GetId() <= idEnd))))
-			{
-				int64 denom = fileInfo->GetSize() - fileInfo->GetMissedSize();
-				int progress = (fileInfo->GetFailedSize() == 0 && fileInfo->GetSuccessSize() == 0) || denom <= 0
-					? 0
-					: (int)(1000 - fileInfo->GetRemainingSize() * 1000 / denom);
-
-				NzbgetRsRpcFileItem item{};
-				item.id = fileInfo->GetId();
-				item.file_size = fileInfo->GetSize();
-				item.remaining_size = fileInfo->GetRemainingSize();
-				item.post_time = (int)fileInfo->GetTime();
-				item.filename_confirmed = fileInfo->GetFilenameConfirmed() ? 1 : 0;
-				item.paused = fileInfo->GetPaused() ? 1 : 0;
-				item.nzb_id = fileInfo->GetNzbInfo()->GetId();
-				item.nzb_name = fileInfo->GetNzbInfo()->GetName();
-				item.nzb_filename = fileInfo->GetNzbInfo()->GetFilename();
-				item.subject = fileInfo->GetSubject();
-				item.filename = fileInfo->GetFilename();
-				item.dest_dir = fileInfo->GetNzbInfo()->GetDestDir();
-				item.category = fileInfo->GetNzbInfo()->GetCategory();
-				item.priority = fileInfo->GetNzbInfo()->GetPriority();
-				item.active_downloads = fileInfo->GetActiveDownloads();
-				item.progress = progress;
-
-				AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_file_item(
-					IsJson() ? 1 : 0, index++ > 0 ? 1 : 0, &item));
-			}
-		}
-	}
-
-	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
-}
-
-void AppendNzbInfoFields(NzbInfo* nzbInfo)
-{
-	time_t postStartTime = nzbInfo->GetPostInfo() ? nzbInfo->GetPostInfo()->GetStartTime() : 0;
-	time_t curTime = postStartTime ? Util::CurrentTime() : 0;
-
-	NzbgetRsRpcNzbInfoInput fields{};
-	fields.id = nzbInfo->GetId();
-	fields.name = nzbInfo->GetName();
-	fields.kind = (int)nzbInfo->GetKind();
-	fields.url = nzbInfo->GetUrl();
-	fields.filename = nzbInfo->GetFilename();
-	fields.dest_dir = nzbInfo->GetDestDir();
-	fields.final_dir = nzbInfo->GetFinalDir();
-	fields.category = nzbInfo->GetCategory();
-	fields.par_status = (int)nzbInfo->GetParStatus();
-	fields.extra_par_blocks = nzbInfo->GetExtraParBlocks();
-	fields.unpack_status = (int)nzbInfo->GetUnpackStatus();
-	fields.move_status = (int)nzbInfo->GetMoveStatus();
-	fields.script_status = (int)nzbInfo->GetScriptStatuses()->CalcTotalStatus();
-	fields.delete_status = (int)nzbInfo->GetDeleteStatus();
-	fields.mark_status = (int)nzbInfo->GetMarkStatus();
-	fields.url_status = (int)nzbInfo->GetUrlStatus();
-	fields.size = nzbInfo->GetSize();
-	fields.file_count = nzbInfo->GetFileCount();
-	fields.min_time = (int)nzbInfo->GetMinTime();
-	fields.max_time = (int)nzbInfo->GetMaxTime();
-	fields.total_articles = nzbInfo->GetTotalArticles();
-	fields.current_success_articles = nzbInfo->GetCurrentSuccessArticles();
-	fields.current_failed_articles = nzbInfo->GetCurrentFailedArticles();
-	fields.dupe_recovered_articles = nzbInfo->GetDupeRecoveredArticles();
-	fields.dupe_recovered_bytes = nzbInfo->GetDupeRecoveredBytes();
-	fields.dupe_recovered_holes = nzbInfo->GetDupeRecoveredHoles();
-	fields.live_repairing = nzbInfo->GetLiveRepairThread() != nullptr ? 1 : 0;
-	fields.health = nzbInfo->CalcHealth();
-	fields.critical_health = nzbInfo->CalcCriticalHealth(false);
-	fields.dupe_key = nzbInfo->GetDupeKey();
-	fields.dupe_score = nzbInfo->GetDupeScore();
-	fields.dupe_mode = (int)nzbInfo->GetDupeMode();
-	fields.downloaded_size = nzbInfo->GetDownloadedSize();
-	fields.download_sec = nzbInfo->GetDownloadSec();
-	fields.post_total_sec = nzbInfo->GetPostTotalSec();
-	fields.has_post_start_time = postStartTime != 0 ? 1 : 0;
-	fields.cur_time = (int64)curTime;
-	fields.post_start_time = (int64)postStartTime;
-	fields.par_sec = nzbInfo->GetParSec();
-	fields.repair_sec = nzbInfo->GetRepairSec();
-	fields.unpack_sec = nzbInfo->GetUnpackSec();
-	fields.message_count = nzbInfo->GetMessageCount();
-	fields.cached_message_count = nzbInfo->GetCachedMessageCount();
-
-	std::vector<NzbgetRsRpcParamItem> params;
-	params.reserve(nzbInfo->GetParameters()->size());
-	for (NzbParameter& parameter : nzbInfo->GetParameters())
-	{
-		params.push_back(NzbgetRsRpcParamItem{ parameter.GetName(), parameter.GetValue() });
-	}
-
-	std::vector<NzbgetRsRpcScriptItem> scripts;
-	scripts.reserve(nzbInfo->GetScriptStatuses()->size());
-	for (ScriptStatus& scriptStatus : nzbInfo->GetScriptStatuses())
-	{
-		scripts.push_back(NzbgetRsRpcScriptItem{ scriptStatus.GetName(), (int)scriptStatus.GetStatus() });
-	}
-
-	std::vector<NzbgetRsRpcServerStatItem> stats;
-	stats.reserve(nzbInfo->GetCurrentServerStats()->size());
-	for (ServerStat& serverStat : nzbInfo->GetCurrentServerStats())
-	{
-		stats.push_back(NzbgetRsRpcServerStatItem{
-			serverStat.GetServerId(),
-			serverStat.GetSuccessArticles(),
-			serverStat.GetFailedArticles()
-		});
-	}
-
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_nzb_info_fields(
-		IsJson() ? 1 : 0, &fields,
-		params.data(), params.size(),
-		scripts.data(), scripts.size(),
-		stats.data(), stats.size()));
-}
-
-void AppendPostInfoFields(PostInfo* postInfo, int logEntries, bool postQueue)
-{
-	time_t curTime = postInfo ? Util::CurrentTime() : 0;
-
-	std::optional<GuardedMessageList> messages;
-	std::vector<NzbgetRsRpcLogEntry> entries;
-	if (logEntries > 0 && postInfo)
-	{
-		messages.emplace(postInfo->GetNzbInfo()->GuardCachedMessages());
-		if (!(*messages)->empty())
-		{
-			if (logEntries > (int)(*messages)->size())
-			{
-				logEntries = (*messages)->size();
-			}
-			int start = (*messages)->size() - logEntries;
-			entries.reserve((*messages)->size() - (uint32)start);
-			for (uint32 i = (uint32)start; i < (*messages)->size(); i++)
-			{
-				Message& message = (*messages)->at(i);
-				entries.push_back(NzbgetRsRpcLogEntry{
-					(int)message.GetId(),
-					(int)message.GetKind(),
-					(int)message.GetTime(),
-					message.GetText()
-				});
-			}
-		}
-	}
-
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_post_info_fields(
-		IsJson() ? 1 : 0,
-		postQueue ? 1 : 0,
-		postInfo ? 1 : 0,
-		postInfo ? postInfo->GetProgressLabel() : nullptr,
-		postInfo ? postInfo->GetStageProgress() : 0,
-		(int64)curTime,
-		postInfo ? (int64)postInfo->GetStageTime() : 0,
-		postInfo ? (int64)postInfo->GetStartTime() : 0,
-		entries.data(),
-		entries.size()));
-}
-
-// struct[] listgroups(int NumberOfLogEntries)
-void ExecuteListGroups()
-{
-	int nrEntries = 0;
-	NextParamAsInt(&nrEntries);
-
-	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
-
-	int index = 0;
-
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-	{
-		bool hasPostInfo = nzbInfo->GetPostInfo() != nullptr;
-		int postStage = hasPostInfo ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
-		bool queueScriptActive = false;
-		bool hasQueueScriptJob = hasPostInfo && postStage == (int)PostInfo::ptQueued &&
-			g_QueueScriptCoordinator->HasJob(nzbInfo->GetId(), &queueScriptActive);
-
-		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_group_item_start(
-			IsJson() ? 1 : 0,
-			index++ > 0 ? 1 : 0,
-			nzbInfo->GetId(),
-			nzbInfo->GetRemainingSize(),
-			nzbInfo->GetPausedSize(),
-			(int)nzbInfo->GetFileList()->size(),
-			nzbInfo->GetRemainingParCount(),
-			nzbInfo->GetPriority(),
-			nzbInfo->GetActiveDownloads(),
-			hasPostInfo ? 1 : 0,
-			postStage,
-			hasQueueScriptJob ? 1 : 0,
-			queueScriptActive ? 1 : 0,
-			(int)nzbInfo->GetDirectUnpackStatus(),
-			(int)nzbInfo->GetKind()));
-
-		AppendNzbInfoFields(nzbInfo);
-		AppendCondResponse(",\n", IsJson());
-		AppendPostInfoFields(nzbInfo->GetPostInfo(), nrEntries, false);
-
-		AppendResponse(IsJson() ? "}" : "</struct></value>\n");
-	}
-
-	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
-}
-
-// v18:
-//    bool editqueue(string Command, string Args, int[] IDs)
-// v17:
-//    bool editqueue(string Command, int Offset, string Args, int[] IDs)
-void ExecuteEditQueue()
-{
-	int action = -1;
-	NzbgetRsBuf argsOrErr{nullptr, 0};
-	int errCode = 0;
-	IdList idList;
-	int okParse = nzbget_rs_xmlrpc_parse_edit_queue(
-		&m_requestPtr,
-		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
-		IsJson() ? 1 : 0,
-		(int)DownloadQueue::eaFileMoveOffset,
-		(int)DownloadQueue::eaGroupMoveOffset,
-		&action,
-		&argsOrErr,
-		&errCode,
-		&idList,
-		[](void* ctx, int id)
-		{
-			static_cast<IdList*>(ctx)->push_back(id);
-		});
-	if (!okParse)
-	{
-		BuildErrorResponse(errCode, "%s", argsOrErr.data ? argsOrErr.data : "Invalid parameter");
-		nzbget_rs_free(argsOrErr);
-		return;
-	}
-
-	bool ok = DownloadQueue::Guard()->EditList(&idList, nullptr, DownloadQueue::mmId,
-		(DownloadQueue::EEditAction)action, argsOrErr.data ? argsOrErr.data : "");
-	nzbget_rs_free(argsOrErr);
-
-	BuildBoolResponse(ok);
-}
-// v26.0: Added archived NZBs support.
-//   bool append(string filename, string Category, int Priority, bool AddToTop, string Content, bool AddPaused, string DupeKey, int DupeScore, string DupeMode, bool autoCategory)
-// v25.2: Added new parameter "autoCategory".
-//   bool append(string NZBFilename, string Category, int Priority, bool AddToTop, string Content, bool AddPaused, string DupeKey, int DupeScore, string DupeMode, bool autoCategory)
-// v16:
-//   int append(string NZBFilename, string NZBContent, string Category, int Priority, bool AddToTop, bool AddPaused, string DupeKey, int DupeScore, string DupeMode, struct[] Parameters)
-// v13 (new param order and new result type):
-//   int append(string NZBFilename, string NZBContent, string Category, int Priority, bool AddToTop, bool AddPaused, string DupeKey, int DupeScore, string DupeMode)
-// v12 (backward compatible, some params are optional):
-//   bool append(string NZBFilename, string Category, int Priority, bool AddToTop, string Content, bool AddPaused, string DupeKey, int DupeScore, string DupeMode)
-// appendfleet(DupeKey, Category, Priority, Timeout, Name1, Content1, Name2, Content2, ...):
-// a content is the nzb-file in base64 or its url; see Fleet
-void ExecuteAppendFleet()
-{
-	Fleet::Request request;
-	NzbgetRsBuf errBuf{nullptr, 0};
-	if (!nzbget_rs_xmlrpc_parse_append_fleet(
-		&m_requestPtr,
-		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
-		IsJson() ? 1 : 0,
-		Fleet::MaxMembers,
-		&request,
-		[](void* ctx, const char* dupeKey, const char* category, int priority, int timeoutSec)
-		{
-			Fleet::Request& req = *static_cast<Fleet::Request*>(ctx);
-			req.dupeKey = dupeKey ? dupeKey : "";
-			req.category = category ? category : "";
-			req.priority = priority;
-			req.timeoutSec = timeoutSec;
-		},
-		[](void* ctx, const char* name, int isUrl, const char* data, size_t dataLen)
-		{
-			Fleet::Member member;
-			member.name = name ? name : "";
-			if (isUrl)
-			{
-				member.url.assign(data, dataLen);
-			}
-			else
-			{
-				member.data.assign(data, dataLen);
-			}
-			static_cast<Fleet::Request*>(ctx)->members.push_back(std::move(member));
-		},
-		&errBuf))
-	{
-		BuildErrorResponse(2, "%s", errBuf.data ? errBuf.data : "Invalid parameter");
-		nzbget_rs_free(errBuf);
-		return;
-	}
-	nzbget_rs_free(errBuf);
-
-	Fleet::Result result = Fleet::Append(std::move(request));
-
-	std::vector<NzbgetRsRpcFleetMember> entries;
-	entries.reserve(result.members.size());
-	for (const Fleet::Entry& entry : result.members)
-	{
-		entries.push_back(NzbgetRsRpcFleetMember{
-			entry.nzbId,
-			entry.name.c_str(),
-			entry.rank,
-			entry.alive,
-			entry.status.c_str(),
-			entry.sameAs,
-			entry.sameAsRank,
-			entry.reason.c_str()
-		});
-	}
-
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_fleet_result(
-		result.chosen, result.complete ? 1 : 0, result.reason.c_str(),
-		entries.data(), entries.size()));
-}
-
-void ExecuteDownload()
-{
-	NzbgetRsParsedDownload dl{};
-	NzbParameterList Params;
-	const char* errMsg = nullptr;
-	if (!nzbget_rs_xmlrpc_parse_download(
-		&m_requestPtr,
-		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
-		IsJson() ? 1 : 0,
-		(int)dmScore, (int)dmAll, (int)dmForce,
-		&dl,
-		&Params,
-		[](void* ctx, const char* name, const char* val)
-		{
-			static_cast<NzbParameterList*>(ctx)->SetParameter(name, val);
-		},
-		&errMsg))
-	{
-		BuildErrorResponse(2, "%s", errMsg ? errMsg : "Invalid parameter");
-		return;
-	}
-
-	const char* filename = dl.filename.data ? dl.filename.data : "";
-	const char* category = dl.category.data ? dl.category.data : "";
-	const char* content = dl.content.data ? dl.content.data : "";
-	const char* dupeKey = dl.has_dupe_key ? (dl.dupe_key.data ? dl.dupe_key.data : "") : nullptr;
-	bool v13 = dl.v13 != 0;
-	bool addTop = dl.add_top != 0;
-	bool addPaused = dl.add_paused != 0;
-	bool autoCategory = dl.auto_category != 0;
-	EDupeMode dupeMode = (EDupeMode)dl.dupe_mode;
-
-	debug("FileName=%s", filename);
-
-	if (dl.is_url != 0)
-	{
-		// add url
-		std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
-		nzbInfo->SetKind(NzbInfo::nkUrl);
-		nzbInfo->SetUrl(content);
-		nzbInfo->SetFilename(filename);
-		nzbInfo->SetCategory(category);
-		nzbInfo->SetAutoCategory(autoCategory);
-		nzbInfo->SetPriority(dl.priority);
-		nzbInfo->SetAddUrlPaused(addPaused);
-		nzbInfo->SetDupeKey(dupeKey ? dupeKey : "");
-		nzbInfo->SetDupeScore(dl.dupe_score);
-		nzbInfo->SetDupeMode(dupeMode);
-		nzbInfo->GetParameters()->CopyFrom(&Params);
-		int nzbId = nzbInfo->GetId();
-
-		info("Queue %s", *nzbInfo->MakeNiceUrlName(content, filename));
-
-		g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), addTop);
-
-		if (v13)
-		{
-			BuildIntResponse(nzbId);
-		}
-		else
-		{
-			BuildBoolResponse(true);
-		}
-	}
-	else
-	{
-		int len = (int)dl.content.len;
-		if (nzbget_rs_unpack_can_extract_with_zipfast(filename) != 0)
-		{
-			const auto status = g_Scanner->AddArchive(
-				filename,
-				category,
-				autoCategory,
-				dl.priority,
-				dupeKey,
-				dl.dupe_score,
-				dupeMode,
-				Params.empty() ? nullptr : &Params,
-				addTop,
-				addPaused,
-				nullptr,
-				content,
-				len
-			);
-			BuildBoolResponse(status == Scanner::asSuccess);
-		}
-		else
-		{
-			int nzbId = -1;
-			g_Scanner->AddExternalFile(
-				filename,
-				category,
-				autoCategory,
-				dl.priority,
-				dupeKey,
-				dl.dupe_score,
-				dupeMode,
-				Params.empty() ? nullptr : &Params,
-				addTop,
-				addPaused,
-				nullptr,
-				nullptr,
-				content,
-				len,
-				&nzbId
-			);
-
-			if (v13)
-			{
-				BuildIntResponse(nzbId);
-			}
-			else
-			{
-				BuildBoolResponse(nzbId > 0);
-			}
-		}
-	}
-
-	nzbget_rs_free(dl.filename);
-	nzbget_rs_free(dl.category);
-	nzbget_rs_free(dl.content);
-	nzbget_rs_free(dl.dupe_key);
-}
-
-// deprecated
-void ExecutePostQueue()
-{
-	int nrEntries = 0;
-	NextParamAsInt(&nrEntries);
-
-	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
-
-	int index = 0;
-
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-	{
-		PostInfo* postInfo = nzbInfo->GetPostInfo();
-		if (!postInfo)
-		{
-			continue;
-		}
-
-		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_postqueue_item_start(
-			IsJson() ? 1 : 0,
-			index++ > 0 ? 1 : 0,
-			nzbInfo->GetId(),
-			postInfo->GetNzbInfo()->GetName(),
-			(int)postInfo->GetStage(),
-			postInfo->GetFileProgress()));
-
-		AppendNzbInfoFields(postInfo->GetNzbInfo());
-		AppendCondResponse(",\n", IsJson());
-		AppendPostInfoFields(postInfo, nrEntries, true);
-
-		AppendResponse(IsJson() ? "}" : "</struct></value>\n");
-	}
-
-	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
-}
-
-void ExecuteWriteLog()
-{
-	char* kind;
-	char* text;
-	if (!NextParamAsStr(&kind) || !NextParamAsStr(&text, true))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	debug("Kind=%s, Text=%s", kind, text);
-
-	if (!strcmp(kind, "INFO"))
-		info("%s", text);
-	else if (!strcmp(kind, "WARNING"))
-		warn("%s", text);
-	else if (!strcmp(kind, "ERROR"))
-		error("%s", text);
-	else if (!strcmp(kind, "DETAIL"))
-		detail("%s", text);
-	else if (!strcmp(kind, "DEBUG"))
-		debug("%s", text);
-	else
-	{
-		BuildErrorResponse(3, "Invalid Kind");
-		return;
-	}
-
-	BuildBoolResponse(true);
-}
-
-void ExecuteClearLog()
-{
-	g_Log->Clear();
-
-	BuildBoolResponse(true);
-}
-
-void ExecuteScan()
-{
-	bool syncMode = false;
-	// optional parameter "SyncMode"
-	NextParamAsBool(&syncMode);
-
-	g_Scanner->ScanNzbDir(syncMode);
-	BuildBoolResponse(true);
-}
-
-// struct[] history(bool hidden)
-// Parameter "hidden" is optional (new in v12)
-void ExecuteHistory()
-{
-	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
-
-	bool dup = false;
-	NextParamAsBool(&dup);
-
-	int index = 0;
-
-	GuardedDownloadQueue guard = DownloadQueue::Guard();
-	for (HistoryInfo* historyInfo : guard->GetHistory())
-	{
-		if (historyInfo->GetKind() == HistoryInfo::hkDup && !dup)
-		{
-			continue;
-		}
-
-		int hasComma = index++ > 0 ? 1 : 0;
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
-		{
-			NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-			const char* status = nzbInfo->MakeTextStatus(false);
-
-			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_history_nzb_start(
-				IsJson() ? 1 : 0,
-				hasComma,
-				historyInfo->GetId(),
-				historyInfo->GetName(),
-				nzbInfo->GetParkedFileCount(),
-				!nzbInfo->GetCompletedFiles()->empty() ? 1 : 0,
-				(int)historyInfo->GetTime(),
-				status));
-			AppendNzbInfoFields(nzbInfo);
-		}
-		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
-		{
-			DupInfo* dupInfo = historyInfo->GetDupInfo();
-
-			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_history_dup_item(
-				IsJson() ? 1 : 0,
-				hasComma,
-				historyInfo->GetId(),
-				historyInfo->GetName(),
-				(int)historyInfo->GetTime(),
-				dupInfo->GetSize(),
-				dupInfo->GetDupeKey(),
-				dupInfo->GetDupeScore(),
-				(int)dupInfo->GetDupeMode(),
-				(int)dupInfo->GetStatus()));
-		}
-
-		AppendResponse(IsJson() ? "}" : "</struct></value>");
-	}
-
-	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
-}
-
-// Deprecated in v13
-void ExecuteUrlQueue()
-{
-	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
-
-	int index = 0;
-
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-	{
-		if (nzbInfo->GetKind() == NzbInfo::nkUrl)
-		{
-			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_urlqueue_item(
-				IsJson() ? 1 : 0,
-				index++ > 0 ? 1 : 0,
-				nzbInfo->GetId(),
-				nzbInfo->GetFilename(),
-				nzbInfo->GetUrl(),
-				nzbInfo->GetName(),
-				nzbInfo->GetCategory(),
-				nzbInfo->GetPriority()));
-		}
-	}
-
-	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
-}
-
-// struct[] config()
-void ExecuteConfig()
-{
-	Options::GuardedOptEntries optEntries = g_Options->GuardOptEntries();
-	std::vector<NzbgetRsRpcConfigItem> entries;
-	entries.reserve(optEntries->size());
-	for (Options::OptEntry& optEntry : optEntries)
-	{
-		entries.push_back(NzbgetRsRpcConfigItem{
-			optEntry.GetName(),
-			optEntry.GetValue(),
-			optEntry.Restricted() ? 1 : 0
-		});
-	}
-
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_config_list(
-		IsJson() ? 1 : 0,
-		(int)m_userAccess,
-		(int)XmlRpcProcessor::uaRestricted,
-		entries.data(),
-		entries.size()));
-}
-
-// struct[] loadconfig()
-void ExecuteLoadConfig()
-{
-	int fault = 0;
-	NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_load_config(
-		IsJson() ? 1 : 0,
-		(int)m_userAccess,
-		(int)XmlRpcProcessor::uaRestricted,
-		g_Options ? g_Options->GetConfigFilename() : nullptr,
-		&fault);
-	m_fault = fault != 0;
-	AppendRsBuf(m_response, buf);
-}
-
-void ExecuteLoadExtensions()
-{
-	bool loadFromDisk = false;
-	bool isJson = IsJson();
-
-	if (!NextParamAsBool(&loadFromDisk))
-	{
-		BuildErrorResponse(2, "Invalid parameter (Load from disk)");
-		return;
-	}
-
-	if (loadFromDisk)
-	{
-		const auto& error = g_ExtensionManager->LoadExtensions();
-		if (error)
-		{
-			BuildErrorResponse(3, "%s", error.value().c_str());
-			return;
-		}
-	}
-
-	AppendResponse(isJson ? "[\n" : "<array><data>\n");
-
-	int index = 0;
-
-	g_ExtensionManager->ForEach([&](auto extension)
-		{
-			const std::string response = isJson
-				? Extension::ToJsonStr(*extension)
-				: Extension::ToXmlStr(*extension);
-
-			AppendCondResponse(",\n", isJson && index++ > 0);
-			AppendResponse(response.c_str());
-		}
-	);
-
-	AppendResponse(isJson ? "\n]" : "</data></array>\n");
-}
-
-void ExecuteDownloadExtension()
-{
-	char* url = nullptr;
-	char* extName = nullptr;
-	if (!NextParamAsStr(&url, true) || !NextParamAsStr(&extName, true))
-	{
-		BuildErrorResponse(2, url ? "Invalid parameter (Extension name)" : "Invalid parameter (URL)");
-		return;
-	}
-
-	if (Util::EmptyStr(g_Options->GetTempDir()))
-	{
-		BuildErrorResponse(3, "\"TempDir\" is not specified");
-		return;
-	}
-
-	const auto [status, filename] = g_ExtensionManager->DownloadExtension(url, extName);
-	// the downloaded archive stayed in TempDir whenever the install didn't
-	// happen (a successful install removes it)
-	auto removeDownload = [&filename]()
-		{
-			fs::error_code ec;
-			fs::remove(filename, ec);
-		};
-	if (status != WebDownloader::adFinished)
-	{
-		removeDownload();
-		BuildErrorResponse(3, "Failed to read URL");
-		return;
-	}
-
-	if (g_Options->GetScriptDirPaths().empty())
-	{
-		removeDownload();
-		BuildErrorResponse(3, "\"ScriptDir\" is not specified");
-		return;
-	}
-
-	if (const auto error = g_ExtensionManager->InstallExtension(filename, g_Options->GetScriptDirPaths().front()))
-	{
-		removeDownload();
-		BuildErrorResponse(3, "%s", error.value().c_str());
-		return;
-	}
-
-	BuildBoolResponse(true);
-}
-
-void ExecuteUpdateExtension()
-{
-	char* url = nullptr;
-	char* extName = nullptr;
-	if (!NextParamAsStr(&url, true) || !NextParamAsStr(&extName, true))
-	{
-		BuildErrorResponse(2, url ? "Invalid parameter (Extension name)" : "Invalid parameter (URL)");
-		return;
-	}
-
-	const auto [status, filename] = g_ExtensionManager->DownloadExtension(url, extName);
-	if (status != WebDownloader::adFinished)
-	{
-		// a partly downloaded archive stayed in TempDir
-		fs::error_code ec;
-		fs::remove(filename, ec);
-		BuildErrorResponse(3, "Failed to read URL");
-		return;
-	}
-
-	if (const auto error = g_ExtensionManager->UpdateExtension(filename, extName))
-	{
-		BuildErrorResponse(3, "%s", error.value().c_str());
-		return;
-	}
-
-	BuildBoolResponse(true);
-}
-
-void ExecuteDeleteExtension()
-{
-	char* extName;
-	if (!NextParamAsStr(&extName, true))
-	{
-		BuildErrorResponse(2, "Invalid parameter (Extension name)");
-		return;
-	}
-
-	const auto error = g_ExtensionManager->DeleteExtension(extName);
-	if (error)
-	{
-		BuildErrorResponse(2, "%s", error.value().c_str());
-		return;
-	}
-
-	BuildBoolResponse(true);
-}
-
-void ExecuteTestExtension()
-{
-	char* extEntryFileName;
-	if (!NextParamAsStr(&extEntryFileName, true))
-	{
-		BuildErrorResponse(2, "Invalid parameter (Extension entry file name)");
-		return;
-	}
-
-	const auto found = Util::FindExecutorProgram(extEntryFileName, g_Options->GetShellOverride());
-	if (!found)
-	{
-		BuildErrorResponse(2, "Failed to find the corresponding executor");
-		return;
-	}
-
-	BuildBoolResponse(true);
-}
-
-// bool saveconfig(struct[] data)
-void ExecuteSaveConfig()
-{
-	int fault = 0;
-	NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_save_config(
-		&m_requestPtr,
-		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
-		IsJson() ? 1 : 0,
-		g_Options ? g_Options->GetConfigFilename() : nullptr,
-		&fault);
-	m_fault = fault != 0;
-	AppendRsBuf(m_response, buf);
-}
-
-// struct[] configtemplates(bool loadFromDisk)
-// parameter "loadFromDisk" is optional (new in v14)
-void ExecuteConfigTemplates()
-{
-	bool loadFromDisk = false;
-	NextParamAsBool(&loadFromDisk);
-
-	ScriptConfig::ConfigTemplates* configTemplates = g_ScriptConfig->GetConfigTemplates();
-
-	ScriptConfig::ConfigTemplates loadedConfigTemplates;
-	if (loadFromDisk)
-	{
-		if (!g_ScriptConfig->LoadConfigTemplates(&loadedConfigTemplates))
-		{
-			BuildErrorResponse(3, "Could not read configuration templates");
-			return;
-		}
-		configTemplates = &loadedConfigTemplates;
-	}
-
-	std::vector<const char*> templates;
-	templates.reserve(configTemplates->size());
-	for (ScriptConfig::ConfigTemplate& configTemplate : configTemplates)
-	{
-		templates.push_back(configTemplate.GetTemplate());
-	}
-
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_config_templates(
-		IsJson() ? 1 : 0, templates.data(), templates.size()));
-}
-
-// struct[] viewfeed(int id)
-// v12:
-// struct[] previewfeed(string name, string url, string filter, bool pauseNzb, string category,
-//		int priority, bool includeNonMatching, int cacheTimeSec, string cacheId)
-// v16:
-// struct[] previewfeed(int id, string name, string url, string filter, bool backlog, bool pauseNzb, string category,
-//		int priority, int interval, string feedfilter, bool includeNonMatching, int cacheTimeSec, string cacheId)
-void ExecuteViewFeed(bool preview)
-{
-	NzbgetRsParsedViewFeed vf{};
-	if (!nzbget_rs_xmlrpc_parse_view_feed(
-		&m_requestPtr,
-		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
-		IsJson() ? 1 : 0,
-		preview ? 1 : 0,
-		(int)FeedInfo::CategorySource::NZBFile,
-		(int)FeedInfo::CategorySource::FeedFile,
-		(int)FeedInfo::CategorySource::Auto,
-		&vf))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	bool includeNonMatching = vf.include_non_matching != 0;
-	std::shared_ptr<FeedItemList> feedItems;
-
-	if (preview)
-	{
-		const char* name = vf.name.data ? vf.name.data : "";
-		const char* url = vf.url.data ? vf.url.data : "";
-		const char* filter = vf.filter.data ? vf.filter.data : "";
-		const char* category = vf.category.data ? vf.category.data : "";
-		const char* feedFilter = vf.has_feed_filter ? (vf.feed_filter.data ? vf.feed_filter.data : "") : nullptr;
-		const char* cacheId = vf.cache_id.data ? vf.cache_id.data : "";
-
-		debug("Url=%s", url);
-		debug("Filter=%s", filter);
-
-		feedItems = g_FeedCoordinator->PreviewFeed(
-			vf.id,
-			name,
-			url,
-			filter,
-			vf.backlog != 0,
-			vf.pause_nzb != 0,
-			category,
-			(FeedInfo::CategorySource)vf.category_source,
-			vf.priority,
-			vf.interval,
-			feedFilter,
-			vf.cache_time_sec,
-			cacheId
-		);
-	}
-	else
-	{
-		debug("ID=%i", vf.id);
-
-		feedItems = g_FeedCoordinator->ViewFeed(vf.id);
-	}
-
-	nzbget_rs_free(vf.name);
-	nzbget_rs_free(vf.url);
-	nzbget_rs_free(vf.filter);
-	nzbget_rs_free(vf.category);
-	nzbget_rs_free(vf.feed_filter);
-	nzbget_rs_free(vf.cache_id);
-
-	if (!feedItems)
-	{
-		BuildErrorResponse(3, "Could not read feed");
-		return;
-	}
-
-	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
-	int index = 0;
-
-	for (FeedItemInfo& feedItemInfo : feedItems.get())
-	{
-		if (includeNonMatching || feedItemInfo.GetMatchStatus() == FeedItemInfo::msAccepted)
-		{
-			NzbgetRsRpcFeedItem item{};
-			item.title = feedItemInfo.GetTitle();
-			item.filename = feedItemInfo.GetFilename();
-			item.url = feedItemInfo.GetUrl();
-			item.size = feedItemInfo.GetSize();
-			item.size_mb = (int)(feedItemInfo.GetSize() / 1024 / 1024);
-			item.category = feedItemInfo.GetCategory();
-			item.add_category = feedItemInfo.GetAddCategory().c_str();
-			item.pause_nzb = feedItemInfo.GetPauseNzb() ? 1 : 0;
-			item.priority = feedItemInfo.GetPriority();
-			item.time = (int)feedItemInfo.GetTime();
-			item.match_status = (int)feedItemInfo.GetMatchStatus();
-			item.match_rule = feedItemInfo.GetMatchRule();
-			item.dupe_key = feedItemInfo.GetDupeKey();
-			item.dupe_score = feedItemInfo.GetDupeScore();
-			item.dupe_mode = (int)feedItemInfo.GetDupeMode();
-			item.status = (int)feedItemInfo.GetStatus();
-
-			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_feed_item(
-				IsJson() ? 1 : 0, index++ > 0 ? 1 : 0, &item));
-		}
-	}
-
-	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
-}
-
-// bool fetchfeed(int ID)
-void ExecuteFetchFeed()
-{
-	int id;
-	if (!NextParamAsInt(&id))
-	{
-		BuildErrorResponse(2, "Invalid parameter (ID)");
-		return;
-	}
-
-	g_FeedCoordinator->FetchFeed(id);
-
-	BuildBoolResponse(true);
-}
-
-// bool editserver(int ID, bool Active)
-void ExecuteEditServer()
-{
-	bool ok = false;
-	int first = true;
-
-	int id;
-	while (NextParamAsInt(&id))
-	{
-		first = false;
-
-		bool active;
-		if (!NextParamAsBool(&active))
-		{
-			BuildErrorResponse(2, "Invalid parameter");
-			return;
-		}
-
-		for (NewsServer* server : g_ServerPool->GetServers())
-		{
-			if (server->GetId() == id)
-			{
-				server->SetActive(active);
-				ok = true;
-			}
-		}
-	}
-
-	if (first)
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	if (ok)
-	{
-		g_ServerPool->Changed();
-	}
-
-	BuildBoolResponse(ok);
-}
-
-// string readurl(string url, string infoname)
-void ExecuteReadUrl()
-{
-	char* url;
-	if (!NextParamAsStr(&url, true))
-	{
-		BuildErrorResponse(2, "Invalid parameter (URL)");
-		return;
-	}
-
-	char* infoName;
-	if (!NextParamAsStr(&infoName, true))
-	{
-		BuildErrorResponse(2, "Invalid parameter (InfoName)");
-		return;
-	}
-
-	// generate temp file name
-	CString tempFileName;
-	int num = 1;
-	while (num == 1 || FileSystem::FileExists(tempFileName))
-	{
-		tempFileName.Format("%s%creadurl-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, num);
-		num++;
-	}
-
-	std::unique_ptr<WebDownloader> downloader = std::make_unique<WebDownloader>();
-	downloader->SetUrl(url);
-	downloader->SetForce(true);
-	downloader->SetRetry(false);
-	downloader->SetOutputFilename(tempFileName);
-	downloader->SetInfoName(infoName);
-
-	// do sync download
-	WebDownloader::EStatus status = downloader->DownloadWithRedirects(5);
-	bool ok = status == WebDownloader::adFinished;
-
-	downloader.reset();
-
-	if (ok)
-	{
-		CharBuffer fileContent;
-		FileSystem::LoadFileIntoBuffer(tempFileName, fileContent, true);
-		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(IsJson() ? 1 : 0, fileContent, 1, 0));
-	}
-	else
-	{
-		BuildErrorResponse(3, "Could not read url");
-	}
-
-	FileSystem::DeleteFile(tempFileName);
-}
-
-// string checkupdates()
-void ExecuteCheckUpdates()
-{
-	CString updateInfo;
-	bool ok = g_Maintenance->CheckUpdates(updateInfo);
-
-	if (ok)
-	{
-		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(IsJson() ? 1 : 0, updateInfo, 1, 0));
-	}
-	else
-	{
-		BuildErrorResponse(3, "Could not read update info from update-info-script");
-	}
-}
-
-// bool startupdate(string branch)
-void ExecuteStartUpdate()
-{
-	char* branchName;
-	if (!NextParamAsStr(&branchName, true))
-	{
-		BuildErrorResponse(2, "Invalid parameter (Branch)");
-		return;
-	}
-
-	Maintenance::EBranch branch;
-	if (!strcasecmp(branchName, "STABLE"))
-		branch = Maintenance::brStable;
-	else if (!strcasecmp(branchName, "TESTING"))
-		branch = Maintenance::brTesting;
-	else if (!strcasecmp(branchName, "DEVEL"))
-		branch = Maintenance::brDevel;
-	else
-	{
-		BuildErrorResponse(2, "Invalid parameter (Branch)");
-		return;
-	}
-
-	bool ok = g_Maintenance->StartUpdate(branch);
-
-	BuildBoolResponse(ok);
-}
-
-// struct[] servervolumes(bool BytesPerSeconds, bool BytesPerMinutes, bool BytesPerHours, bool BytesPerDays, bool ArticlesPerDays)
-void ExecuteServerVolumes()
-{
-	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
-
-	bool BytesPer[] = {true, true, true, true};
-	NextParamAsBool(&BytesPer[0])
-		&& NextParamAsBool(&BytesPer[1])
-		&& NextParamAsBool(&BytesPer[2])
-		&& NextParamAsBool(&BytesPer[3]);
-
-	bool articlesPerDays = true;
-	NextParamAsBool(&articlesPerDays);
-
-	int index = 0;
-
-	for (ServerVolume& serverVolume : g_StatMeter->GuardServerVolumes())
-	{
-		const auto& articles = serverVolume.GetArticlesPerDays();
-		std::vector<NzbgetRsRpcArticlePair> articleEntries;
-		if (articlesPerDays)
-		{
-			articleEntries.reserve(articles.size());
-			for (const auto& art : articles)
-			{
-				articleEntries.push_back(NzbgetRsRpcArticlePair{ art.failed, art.success });
-			}
-		}
-
-		const ServerVolume::VolumeArray* bps = serverVolume.BytesPerSeconds();
-		const ServerVolume::VolumeArray* bpm = serverVolume.BytesPerMinutes();
-		const ServerVolume::VolumeArray* bph = serverVolume.BytesPerHours();
-		const ServerVolume::VolumeArray* bpd = serverVolume.BytesPerDays();
-
-		NzbgetRsRpcServerVolumeItem volFields{};
-		volFields.server_id = index;
-		volFields.data_time = static_cast<int>(serverVolume.GetDataTime());
-		volFields.first_day = serverVolume.GetFirstDay();
-		volFields.total_bytes = serverVolume.GetTotalBytes();
-		volFields.custom_bytes = serverVolume.GetCustomBytes();
-		volFields.custom_time = static_cast<int>(serverVolume.GetCustomTime());
-		volFields.counters_reset_time = static_cast<int>(serverVolume.GetCountersResetTime());
-		volFields.sec_slot = serverVolume.GetSecSlot();
-		volFields.min_slot = serverVolume.GetMinSlot();
-		volFields.hour_slot = serverVolume.GetHourSlot();
-		volFields.day_slot = serverVolume.GetDaySlot();
-		volFields.include_seconds = BytesPer[0] ? 1 : 0;
-		volFields.bytes_per_seconds = bps->data();
-		volFields.bytes_per_seconds_len = bps->size();
-		volFields.include_minutes = BytesPer[1] ? 1 : 0;
-		volFields.bytes_per_minutes = bpm->data();
-		volFields.bytes_per_minutes_len = bpm->size();
-		volFields.include_hours = BytesPer[2] ? 1 : 0;
-		volFields.bytes_per_hours = bph->data();
-		volFields.bytes_per_hours_len = bph->size();
-		volFields.include_days = BytesPer[3] ? 1 : 0;
-		volFields.bytes_per_days = bpd->data();
-		volFields.bytes_per_days_len = bpd->size();
-		volFields.include_articles = articlesPerDays ? 1 : 0;
-		volFields.articles_per_days = articleEntries.data();
-		volFields.articles_per_days_len = articleEntries.size();
-
-		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_server_volume_item(
-			IsJson() ? 1 : 0,
-			index,
-			&volFields));
-
-		index++;
-	}
-
-	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
-}
-
-// bool resetservervolume(int serverid, string counter);
-void ExecuteResetServerVolume()
-{
-	int serverId;
-	char* counter;
-	if (!NextParamAsInt(&serverId) || !NextParamAsStr(&counter))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	bool reset = Util::EmptyStr(counter);
-	bool custom = !strcmp(counter, "CUSTOM");
-	if (!reset && !custom)
-	{
-		BuildErrorResponse(3, "Invalid Counter");
-		return;
-	}
-
-	bool ok = false;
-	int index = 0;
-	for (ServerVolume& serverVolume : g_StatMeter->GuardServerVolumes())
-	{
-		if (index == serverId || serverId == -1)
-		{
-			if (reset)
-				serverVolume.Reset();
-			else
-				serverVolume.ResetCustom();
-			ok = true;
-		}
-		index++;
-	}
-
-	// saved like a download's counts: a restart before the next download
-	// brought the old counters back
-	if (ok)
-	{
-		g_StatMeter->MarkChanged();
-	}
-
-	BuildBoolResponse(ok);
-}
-
-// string testserver(string host, int port, string username, string password, bool encryption, string cipher, int timeout, int certVerifLevel);
-void ExecuteTestServer()
-{
-	const NzbgetRsJsonLimits limits{0x7ffffffeu, 0x7fffffffu / 24u, 0x3fffffffu};
-	NzbgetRsParsedTestServer ts{};
-	const char* errMsg = nullptr;
-	if (!nzbget_rs_xmlrpc_parse_test_server(
-		m_request,
-		&m_requestPtr,
-		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
-		IsJson() ? 1 : 0,
-		(int)m_httpMethod,
-		(int)XmlRpcProcessor::hmPost,
-		(int)Options::ECertVerifLevel::Count,
-		limits,
-		&ts,
-		&errMsg))
-	{
-		BuildErrorResponse(2, "%s", errMsg ? errMsg : "Invalid parameter");
-		return;
-	}
-
-	NewsServer server(
-		0,
-		true,
-		"test server",
-		ts.host.data ? ts.host.data : "",
-		ts.port,
-		0,
-		ts.username.data ? ts.username.data : "",
-		ts.password.data ? ts.password.data : "",
-		false,
-		ts.encryption != 0,
-		ts.cipher.data ? ts.cipher.data : "",
-		1,
-		0,
-		0,
-		0,
-		false,
-		ts.cert_verif_level
-	);
-	nzbget_rs_free(ts.host);
-	nzbget_rs_free(ts.username);
-	nzbget_rs_free(ts.password);
-	nzbget_rs_free(ts.cipher);
-
-	class TestConnection final : public NntpConnection
-	{
-	public:
-		TestConnection(NewsServer* newsServer, XmlCommand* owner) :
-			NntpConnection(newsServer), m_owner(owner) {}
-	protected:
-		XmlCommand* m_owner;
-		void PrintError(const char* errMsg) override { m_owner->PrintTestServerError(errMsg); }
-	};
-	TestConnection connection(&server, this);
-	connection.SetTimeout(ts.timeout > 0 ? ts.timeout : g_Options->GetArticleTimeout());
-	connection.SetSuppressErrors(false);
-
-	bool ok = connection.Connect();
-	if (ok)
-	{
-		// generate a unique non-existent message-id since we don't want a real article to be returned
-		BString<1024> id;
-		while (id.Length() < 30)
-		{
-			id.Append(BString<100>("%i", rand()));
-		}
-		const char* response = connection.Request(BString<1024>("ARTICLE <%s@nzbget.com>\r\n", *id));
-		ok = response && (*response == '4' || *response == '2');
-	}
-
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(
-		IsJson() ? 1 : 0,
-		ok ? "" : (m_testServerErrText.Empty() ? "Unknown error" : *m_testServerErrText),
-		1,
-		1023));
-}
-
-void ExecuteTlsCipher(int operation)
-{
-	const NzbgetRsJsonLimits limits{0x7ffffffeu, 0x7fffffffu / 24u, 0x3fffffffu};
-	int fault = 0;
-	NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_tls_cipher(
-		operation,
-		(int)m_userAccess, (int)XmlRpcProcessor::uaControl,
-		(int)m_protocol, (int)XmlRpcProcessor::rpJsonRpc,
-		(int)m_httpMethod, (int)XmlRpcProcessor::hmPost,
-		IsJson() ? 1 : 0,
-		m_request,
-		limits,
-		nullptr,
-		[](void*, int opKind, const char* jobId) -> NzbgetRsBuf
-		{
-			std::string resp = opKind == 0 ? TlsCipherBackend::Start() :
-				opKind == 1 ? TlsCipherBackend::Status(jobId) :
-				TlsCipherBackend::Cancel(jobId ? jobId : "");
-			return nzbget_rs_alloc_buf(resp.data(), resp.size());
-		},
-		&fault);
-	m_fault = fault != 0;
-	AppendRsBuf(m_response, buf);
-}
-
-void ExecuteTestServerSpeed()
-{
-	char* nzbFileUrl;
-	if (!NextParamAsStr(&nzbFileUrl, true))
-	{
-		BuildErrorResponse(2, "Invalid parameter: NZB file url");
-		return;
-	}
-
-	int serverId;
-	if (!NextParamAsInt(&serverId))
-	{
-		BuildErrorResponse(2, "Invalid parameter: Server ID");
-		return;
-	}
-
-	NewsServer* server = g_ServerPool->GetServerById(serverId);
-	if (!server || !server->GetActive() || server->GetMaxConnections() == 0)
-	{
-		BuildErrorResponse(2,
-			!server ? "Server not found" :
-			!server->GetActive() ? "Server is not active" :
-			"Server has no connections configured");
-		return;
-	}
-
-	std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
-	nzbInfo->SetKind(NzbInfo::nkUrl);
-	nzbInfo->SetUrl(nzbFileUrl);
-	nzbInfo->SetFilename(nzbFileUrl);
-	nzbInfo->SetPriority(NzbInfo::FORCE_PRIORITY);
-	nzbInfo->SetExtraPriority(NzbInfo::FORCE_PRIORITY);
-	nzbInfo->SetAddUrlPaused(false);
-	nzbInfo->SetDupeMode(EDupeMode::dmForce);
-	nzbInfo->SetDesiredServerId(serverId);
-	nzbInfo->SetSkipScriptProcessing(true);
-	nzbInfo->SetSkipDiskWrite(true);
-
-	g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), true);
-
-	BuildBoolResponse(true);
-}
-
-void ExecuteTestDiskSpeed()
-{
-	NzbgetRsBuf dirPathBuf{nullptr, 0};
-	size_t bufferSizeBytes = 0;
-	uint64_t maxFileSizeBytes = 0;
-	int timeoutSec = 0;
-	const char* errMsg = nullptr;
-	if (!nzbget_rs_xmlrpc_parse_test_disk_speed(
-		&m_requestPtr,
-		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
-		IsJson() ? 1 : 0,
-		&dirPathBuf,
-		&bufferSizeBytes,
-		&maxFileSizeBytes,
-		&timeoutSec,
-		&errMsg))
-	{
-		nzbget_rs_free(dirPathBuf);
-		BuildErrorResponse(2, "%s", errMsg ? errMsg : "Invalid parameter");
-		return;
-	}
-	CString dirPath(dirPathBuf.data ? dirPathBuf.data : "");
-	nzbget_rs_free(dirPathBuf);
-
-	PauseGuard pauseGuard;
-
-	std::string dir(*dirPath ? *dirPath : "");
-	fs::error_code ec;
-	const fs::path fsDirPath = fs::u8path(dir);
-	fs::space_info space = fs::space(fsDirPath, ec);
-	std::string spaceErr = ec ? ec.message() : std::string();
-
-	uint64_t writeBytes = 0;
-	double writeMs = 0.0;
-	uint64_t readBytes = 0;
-	double readMs = 0.0;
-	NzbgetRsBuf errBuf{nullptr, 0};
-	int rc = nzbget_rs_benchmark_run(
-		dir.data(), dir.size(),
-		bufferSizeBytes,
-		maxFileSizeBytes,
-		timeoutSec,
-		ec ? 0 : 1,
-		space.available,
-		spaceErr.data(), spaceErr.size(),
-		&writeBytes, &writeMs, &readBytes, &readMs,
-		&errBuf);
-	if (rc != 0)
-	{
-		std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
-		nzbget_rs_free(errBuf);
-		warn("Disk speed test for %s failed: %s", *dirPath, err.c_str());
-		BuildErrorResponse(2, "%s", err.c_str());
-		return;
-	}
-	nzbget_rs_free(errBuf);
-
-	info("Disk speed test for %s: write %.1f MiB/s, read %.1f MiB/s",
-		*dirPath, MiBPerSec(writeBytes, writeMs), MiBPerSec(readBytes, readMs));
-
-	NzbgetRsBuf respBuf{nullptr, 0, 0};
-	nzbget_rs_xmlrpc_resp_op(3, IsJson() ? 1 : 0, 0, writeBytes, readBytes, writeMs, readMs, &respBuf);
-	AppendRsBuf(m_response, respBuf);
-}
-
-void ExecuteTestNetworkSpeed()
-{
-	// a pause that was on before the test stays on
-	PauseGuard pauseGuard;
-	auto executeIterCb = [](
-		void*,
-		const char* reqPtr,
-		size_t reqLen,
-		int64_t timeoutSec,
-		uint32_t* outDownloaded,
-		double* outElapsed) -> int
-	{
-		using namespace std::chrono;
-#ifdef DISABLE_TLS
-		Connection connection("speed.cloudflare.com", 80, false);
-#else
-		Connection connection("speed.cloudflare.com", 443, true);
-#endif
-		connection.SetTimeout(1);
-		if (!connection.Connect() || !connection.Send(reqPtr, reqLen))
-		{
-			if (outDownloaded) *outDownloaded = 0;
-			if (outElapsed) *outElapsed = 0.0;
-			return 0;
-		}
-		uint32_t totalReceived = 0;
-		char buffer[8 * 1024];
-		auto start = steady_clock::now();
-		while (int received = connection.TryRecv(buffer, sizeof(buffer)))
-		{
-			if (received <= 0 || duration<double>(steady_clock::now() - start).count() >= static_cast<double>(timeoutSec))
-			{
-				break;
-			}
-			totalReceived += static_cast<uint32_t>(received);
-		}
-		auto finish = steady_clock::now();
-		if (outDownloaded) *outDownloaded = totalReceived;
-		if (outElapsed) *outElapsed = duration<double>(finish - start).count();
-		return 1;
-	};
-	auto logCb = [](void*, int kind, const char* msg)
-	{
-		if (!msg) return;
-		if (kind == 1)
-		{
-			error("%s", msg);
-		}
-		else
-		{
-			info("%s", msg);
-		}
-	};
-	double speedMbps = 0.0;
-	NzbgetRsBuf errBuf{nullptr, 0};
-	int ok = nzbget_rs_network_speed_test_run(nullptr, executeIterCb, logCb, &speedMbps, &errBuf);
-	if (!ok)
-	{
-		std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
-		nzbget_rs_free(errBuf);
-		BuildErrorResponse(2, "%s", err.c_str());
-		return;
-	}
-	nzbget_rs_free(errBuf);
-	NzbgetRsBuf respBuf{nullptr, 0, 0};
-	nzbget_rs_xmlrpc_resp_op(4, IsJson() ? 1 : 0, 0, 0, 0, speedMbps, 0.0, &respBuf);
-	AppendRsBuf(m_response, respBuf);
-}
-
-// bool startscript(string script, string command, string context, struct[] options);
-void ExecuteStartScript()
-{
-	NzbgetRsBuf scriptBuf{nullptr, 0};
-	NzbgetRsBuf commandBuf{nullptr, 0};
-	NzbgetRsBuf contextBuf{nullptr, 0};
-	std::unique_ptr<Options::OptEntries> optEntries = std::make_unique<Options::OptEntries>();
-	if (!nzbget_rs_xmlrpc_parse_start_script(
-		&m_requestPtr,
-		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
-		IsJson() ? 1 : 0,
-		&scriptBuf,
-		&commandBuf,
-		&contextBuf,
-		optEntries.get(),
-		[](void* ctx, const char* name, const char* val)
-		{
-			static_cast<Options::OptEntries*>(ctx)->emplace_back(name, val);
-		}))
-	{
-		nzbget_rs_free(scriptBuf);
-		nzbget_rs_free(commandBuf);
-		nzbget_rs_free(contextBuf);
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-	nzbget_rs_free(contextBuf);
-
-	bool ok = CommandScriptController::StartScript(
-		scriptBuf.data ? scriptBuf.data : "",
-		commandBuf.data ? commandBuf.data : "",
-		std::move(optEntries));
-	nzbget_rs_free(scriptBuf);
-	nzbget_rs_free(commandBuf);
-
-	BuildBoolResponse(ok);
-}
-	};
-
-	void Execute()
-	{
-		m_protocol = (ERpcProtocol)nzbget_rs_rpc_protocol(m_url);
-		if (m_protocol == rpUndefined)
-		{
-			error("internal error: invalid rpc-request: %s", *m_url);
-			return;
-		}
-
-		char* request = m_request;
-
-		BString<100> methodName;
-		// echoed as sent: cut to 99 characters it made the response invalid JSON (an id
-		// past 4 KB is left out rather than cut)
-		CString requestId;
-
-		const char* params = nullptr;
-		const char* requestIdPtr = nullptr;
-		int requestIdLen = 0;
-		nzbget_rs_rpc_route(m_url, m_request, m_httpMethod == hmGet, m_protocol, methodName, &params,
-			&requestIdPtr, &requestIdLen);
-		request = const_cast<char*>(params);
-		if (requestIdPtr)
-		{
-			requestId.Set(requestIdPtr, requestIdLen);
-		}
-
-		debug("MethodName=%s", *methodName);
-
-		m_userAccess = (EUserAccess)nzbget_rs_rpc_access(m_protocol, m_userAccess);
-
-		if (!strcasecmp(methodName, "system.multicall") && m_protocol == rpXmlRpc && m_httpMethod == hmPost)
-		{
-			MutliCall();
-		}
-		else
-		{
-			XmlCommand command = CreateCommand(methodName);
-			command.SetRequest(request);
-			command.SetProtocol(m_protocol);
-			command.SetHttpMethod(m_httpMethod);
-			command.SetUserAccess(m_userAccess);
-			command.PrepareParams();
-			m_safeMethod = command.IsSafeMethod();
-			int errCode = 0;
-			const char* errText = nullptr;
-			switch ((EDispatch)nzbget_rs_rpc_decide(
-				m_protocol, m_httpMethod, m_safeMethod, command.IsError(), m_jsonP, &errCode, &errText))
-			{
-				case dpExecute:
-					command.Execute();
-					BuildResponse(command.GetResponse(), command.GetCallbackFunc(), command.GetFault(), requestId);
-					break;
-
-				case dpRefuseInCallback:
-					BuildJsonPRefusal(&command, errCode, errText, requestId);
-					break;
-
-				case dpRefuse:
-					BuildErrorResponse(errCode, errText);
-					break;
-			}
-		}
-	}
-	void SetHttpMethod(EHttpMethod httpMethod) { m_httpMethod = httpMethod; }
-	void SetUserAccess(EUserAccess userAccess) { m_userAccess = userAccess; }
-	// whether JSON-P requests are answered (option JsonP); off unless set
-	void SetJsonP(bool jsonP) { m_jsonP = jsonP; }
-	void SetUrl(const char* url)
-	{
-		m_url = url;
-		nzbget_rs_url_decode_path_in_place(m_url);
-	}
-	void SetRequest(char* request) { m_request = request; }
-	const char* GetResponse() { return m_response; }
-	const char* GetContentType() { return m_contentType; }
-	bool IsSafeMethod() { return m_safeMethod; }
-
-private:
-	char* m_request = nullptr;
-	const char* m_contentType = nullptr;
-	ERpcProtocol m_protocol;
-	EHttpMethod m_httpMethod;
-	EUserAccess m_userAccess;
-	CString m_url;
-	StringBuilder m_response;
-	bool m_safeMethod = false;
-	bool m_jsonP = false;
-
-	// what Dispatch does with a command: run it, or answer with an error, inside the
-	// JSON-P callback or plain
-	enum EDispatch
-	{
-		dpExecute,
-		dpRefuseInCallback,
-		dpRefuse
-	};
-
-	XmlCommand CreateCommand(const char* methodName)
-	{
-		int cmdId = nzbget_rs_xmlrpc_match_command(
-			(int)m_userAccess, (int)uaAdd, (int)uaRestricted, methodName);
-		if (cmdId == -1 || cmdId == -2)
-		{
-			warn("Received request \"%s\" from %s, access denied",
-				methodName, cmdId == -1 ? "add-user" : "restricted user");
-			return XmlCommand(401, "Access denied");
-		}
-		if (cmdId <= 0)
-		{
-			return XmlCommand(1, "Invalid procedure");
-		}
-		return XmlCommand(cmdId);
-	}
-	void MutliCall()
-	{
-		bool error = false;
-		StringBuilder response;
-
-		response.Append("<array><data>");
-
-		char* requestPtr = m_request;
-		while (char* callEnd = strstr(requestPtr, "</struct>"))
-		{
-			*callEnd = '\0';
-			debug("MutliCall, request=%s", requestPtr);
-			char* nameEnd = strstr(requestPtr, "</name>");
-			if (!nameEnd)
-			{
-				error = true;
-				break;
-			}
-
-			char methodName[100];
-			methodName[0] = '\0';
-			WebUtil::XmlParseTagValue(nameEnd, "string", methodName, sizeof(methodName), nullptr);
-			debug("MutliCall, MethodName=%s", methodName);
-
-			char* paramsEnd = strstr(nameEnd, "params</name>");
-
-			XmlCommand command = CreateCommand(methodName);
-			// a call of the multicall runs as the caller, with the caller's access: it ran
-			// with full control access (a restricted user read the passwords through it);
-			// its parameters are its "params" member, not the start of the call
-			command.SetProtocol(m_protocol);
-			command.SetHttpMethod(m_httpMethod);
-			command.SetUserAccess(m_userAccess);
-			command.SetRequest(paramsEnd ? paramsEnd : requestPtr);
-			m_safeMethod |= command.IsSafeMethod();
-			command.Execute();
-
-			debug("MutliCall, Response=%s", command.GetResponse());
-
-			bool fault = !strncmp(command.GetResponse(), "<fault>", 7);
-			bool array = !fault && !strncmp(command.GetResponse(), "<array>", 7);
-			if (!fault && !array)
-			{
-				response.Append("<array><data>");
-			}
-			response.Append("<value>");
-			response.Append(command.GetResponse());
-			response.Append("</value>");
-			if (!fault && !array)
-			{
-				response.Append("</data></array>");
-			}
-
-			requestPtr = callEnd + 9; //strlen("</struct>")
-		}
-
-		if (error)
-		{
-			BuildErrorResponse(4, "Parse error");
-		}
-		else
-		{
-			response.Append("</data></array>");
-			BuildResponse(response, "", false, nullptr);
-		}
-	}
-	void BuildResponse(const char* response, const char* callbackFunc, bool fault, const char* requestId)
-	{
-		debug("Response=%s", response);
-
-		bool xmlRpc = m_protocol == rpXmlRpc;
-
-		NzbgetRsBuf head, tail;
-		nzbget_rs_rpc_envelope(m_protocol, fault, callbackFunc, requestId, &head, &tail);
-		m_response.Append(head.data);
-		m_response.Append(response);
-		m_response.Append(tail.data);
-		nzbget_rs_free(head);
-		nzbget_rs_free(tail);
-
-		m_contentType = xmlRpc ? "text/xml" : "application/json";
-	}
-	void BuildErrorResponse(int errCode, const char* errText, const char* callbackFunc = "", const char* requestId = nullptr)
-	{
-		NzbgetRsBuf errBuf = nzbget_rs_xmlrpc_format_error(
-			m_protocol != rpXmlRpc ? 1 : 0, errCode, errText ? errText : "Invalid procedure");
-		BuildResponse(errBuf.data ? errBuf.data : "", callbackFunc, true, requestId);
-		nzbget_rs_free(errBuf);
-	}
-	void BuildJsonPRefusal(XmlCommand* command, int errCode, const char* errText, const char* requestId)
-	{
-		BuildErrorResponse(errCode, errText, command->GetCallbackFunc(), requestId);
-	}
-};
-
 #include <system_error>
 
 /*
@@ -42459,8 +40061,11 @@ private:
 		env.add_username = g_Options->GetAddUsername();
 		env.add_password = g_Options->GetAddPassword();
 		env.authorized_ip = g_Options->GetAuthorizedIp();
+		env.config_filename = g_Options->GetConfigFilename();
+		env.shell_override = g_Options->GetShellOverride().c_str();
 		env.control_port = g_Options->GetControlPort();
 		env.form_auth = g_Options->GetFormAuth() ? 1 : 0;
+		env.json_p = g_Options->GetJsonP() ? 1 : 0;
 #ifndef DISABLE_GZIP
 		env.gzip_enabled = 1;
 #endif
@@ -42479,18 +40084,640 @@ private:
 		env.log_cb = [](void*, int lvl, const char* msg) {
 			if (lvl == 0) debug("%s", msg);
 			else if (lvl == 1) warn("%s", msg);
-			else error("%s", msg);
+			else if (lvl == 2) error("%s", msg);
+			else if (lvl == 3) info("%s", msg);
+			else detail("%s", msg);
 		};
-		env.rpc_cb = [](void*, char* req, int hm, int ua, const char* url, void* sctx, NzbgetRsWebSendBodyFn sendBody) {
-			XmlRpcProcessor processor;
-			processor.SetRequest(req);
-			processor.SetHttpMethod(hm == 1 ? XmlRpcProcessor::hmGet : XmlRpcProcessor::hmPost);
-			processor.SetUserAccess((XmlRpcProcessor::EUserAccess)ua);
-			processor.SetJsonP(g_Options->GetJsonP());
-			processor.SetUrl(url);
-			processor.Execute();
-			const char* resp = processor.GetResponse();
-			sendBody(sctx, resp, (int)strlen(resp), processor.GetContentType(), processor.IsSafeMethod() ? 1 : 0);
+		env.rpc_action_cb = [](void*, int op, int a1, int a2, int a3, int a4,
+			const char* s1, const char* s2, const char* s3, const char* s4,
+			const char* body, size_t bodyLen, const int32_t* ids, size_t idsLen,
+			const NzbgetRsRpcParamItem* params, size_t paramsLen,
+			uint32_t* outU32, double* outF64, NzbgetRsBuf* outBuf) -> int {
+			auto setBuf = [&](const char* p, size_t n) {
+				if (outBuf) *outBuf = nzbget_rs_alloc_buf(p, n);
+			};
+			switch (op)
+			{
+				case 1:
+					if (a1 == 0) { int prev = g_WorkState->GetPauseDownload() ? 1 : 0; g_WorkState->SetPauseDownload(true); return prev; }
+					g_WorkState->SetPauseDownload(a2 != 0);
+					return 0;
+				case 2:
+					g_WorkState->SetResumeTime(0);
+					if (a2 == 0) g_WorkState->SetPauseDownload(a1 != 0);
+					else if (a2 == 1) g_WorkState->SetPausePostProcess(a1 != 0);
+					else if (a2 == 2) g_WorkState->SetPauseScan(a1 != 0);
+					else return 0;
+					return 1;
+				case 3: g_WorkState->SetResumeTime(Util::CurrentTime() + (time_t)a1); return 1;
+				case 4: ExitProc(); return 1;
+				case 5: Reload(); return 1;
+				case 6: g_Log->LogDebugInfo(); return 1;
+				case 7: g_WorkState->SetSpeedLimit(a1); return 1;
+				case 8: { std::string r = a1 ? System::ToJsonStr(*g_SystemInfo) : System::ToXmlStr(*g_SystemInfo); setBuf(r.data(), r.size()); return 1; }
+				case 9:
+					if (!g_Options->GetSystemHealthCheck()) return 0;
+					if (outBuf) *outBuf = g_SystemHealth->DiagnoseSerialized(a1 != 0);
+					return 1;
+				case 10: {
+					IdList idList(ids, ids + idsLen);
+					return DownloadQueue::Guard()->EditList(&idList, nullptr, DownloadQueue::mmId,
+						(DownloadQueue::EEditAction)a1, s1 ? s1 : "") ? 1 : 0;
+				}
+				case 11: {
+					bool addTop = (a1 & 1) != 0, addPaused = (a1 & 2) != 0, autoCat = (a1 & 4) != 0;
+					bool isUrl = (a1 & 8) != 0, isZip = (a1 & 16) != 0;
+					NzbParameterList paramList;
+					for (size_t i = 0; i < paramsLen; i++) paramList.SetParameter(params[i].name, params[i].value);
+					if (isUrl)
+					{
+						auto nzbInfo = std::make_unique<NzbInfo>();
+						nzbInfo->SetKind(NzbInfo::nkUrl);
+						nzbInfo->SetUrl(body ? body : "");
+						nzbInfo->SetFilename(s1 ? s1 : "");
+						nzbInfo->SetCategory(s2 ? s2 : "");
+						nzbInfo->SetAutoCategory(autoCat);
+						nzbInfo->SetPriority(a2);
+						nzbInfo->SetAddUrlPaused(addPaused);
+						nzbInfo->SetDupeKey(s3 ? s3 : "");
+						nzbInfo->SetDupeScore(a3);
+						nzbInfo->SetDupeMode((EDupeMode)a4);
+						nzbInfo->GetParameters()->CopyFrom(&paramList);
+						int nzbId = nzbInfo->GetId();
+						info("Queue %s", *nzbInfo->MakeNiceUrlName(body ? body : "", s1 ? s1 : ""));
+						g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), addTop);
+						if (outU32) *outU32 = (uint32_t)nzbId;
+						return 1;
+					}
+					if (isZip)
+					{
+						return g_Scanner->AddArchive(s1 ? s1 : "", s2 ? s2 : "", autoCat, a2, s3, a3,
+							(EDupeMode)a4, paramList.empty() ? nullptr : &paramList, addTop, addPaused,
+							nullptr, body, (int)bodyLen) == Scanner::asSuccess ? 1 : 0;
+					}
+					int nzbId = -1;
+					g_Scanner->AddExternalFile(s1 ? s1 : "", s2 ? s2 : "", autoCat, a2, s3, a3,
+						(EDupeMode)a4, paramList.empty() ? nullptr : &paramList, addTop, addPaused,
+						nullptr, nullptr, body, (int)bodyLen, &nzbId);
+					if (outU32) *outU32 = (uint32_t)nzbId;
+					return nzbId > 0 ? 1 : 0;
+				}
+				case 12: g_Log->Clear(); return 1;
+				case 13: g_Scanner->ScanNzbDir(a1 != 0); return 1;
+				case 14: {
+					if (a1)
+					{
+						if (const auto& err = g_ExtensionManager->LoadExtensions())
+						{
+							setBuf(err->data(), err->size());
+							return 0;
+						}
+					}
+					bool isJson = a2 != 0;
+					std::string out = isJson ? "[\n" : "<array><data>\n";
+					int idx = 0;
+					g_ExtensionManager->ForEach([&](auto ext) {
+						if (isJson && idx++ > 0) out += ",\n";
+						out += isJson ? Extension::ToJsonStr(*ext) : Extension::ToXmlStr(*ext);
+					});
+					out += isJson ? "\n]" : "</data></array>\n";
+					setBuf(out.data(), out.size());
+					return 1;
+				}
+				case 15: {
+					if (a1 == 2)
+					{
+						if (const auto err = g_ExtensionManager->DeleteExtension(s1 ? s1 : "")) { setBuf(err->data(), err->size()); return 0; }
+						return 1;
+					}
+					if (a1 == 0 && Util::EmptyStr(g_Options->GetTempDir())) { const char* m = "\"TempDir\" is not specified"; setBuf(m, strlen(m)); return 0; }
+					const auto [status, filename] = g_ExtensionManager->DownloadExtension(s1 ? s1 : "", s2 ? s2 : "");
+					auto rmDl = [&]() { fs::error_code ec; fs::remove(filename, ec); };
+					if (status != WebDownloader::adFinished) { rmDl(); const char* m = "Failed to read URL"; setBuf(m, strlen(m)); return 0; }
+					if (a1 == 0)
+					{
+						if (g_Options->GetScriptDirPaths().empty()) { rmDl(); const char* m = "\"ScriptDir\" is not specified"; setBuf(m, strlen(m)); return 0; }
+						if (const auto err = g_ExtensionManager->InstallExtension(filename, g_Options->GetScriptDirPaths().front()))
+						{
+							rmDl();
+							setBuf(err->data(), err->size());
+							return 0;
+						}
+						return 1;
+					}
+					if (const auto err = g_ExtensionManager->UpdateExtension(filename, s2 ? s2 : "")) { setBuf(err->data(), err->size()); return 0; }
+					return 1;
+				}
+				case 16: g_FeedCoordinator->FetchFeed(a1); return 1;
+				case 17: {
+					bool ok = false;
+					for (size_t i = 0; i + 1 < idsLen; i += 2)
+					{
+						for (NewsServer* srv : g_ServerPool->GetServers())
+						{
+							if (srv->GetId() == ids[i]) { srv->SetActive(ids[i + 1] != 0); ok = true; }
+						}
+					}
+					if (ok) g_ServerPool->Changed();
+					return ok ? 1 : 0;
+				}
+				case 18: {
+					CString tempFileName;
+					for (int num = 1; num == 1 || FileSystem::FileExists(tempFileName); num++)
+						tempFileName.Format("%s%creadurl-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, num);
+					auto downloader = std::make_unique<WebDownloader>();
+					downloader->SetUrl(s1 ? s1 : "");
+					downloader->SetForce(true);
+					downloader->SetRetry(false);
+					downloader->SetOutputFilename(tempFileName);
+					downloader->SetInfoName(s2 ? s2 : "");
+					bool ok = downloader->DownloadWithRedirects(5) == WebDownloader::adFinished;
+					downloader.reset();
+					if (ok)
+					{
+						CharBuffer fileContent;
+						FileSystem::LoadFileIntoBuffer(tempFileName, fileContent, true);
+						const char* p = (const char*)fileContent ? (const char*)fileContent : "";
+						setBuf(p, strlen(p));
+					}
+					FileSystem::DeleteFile(tempFileName);
+					return ok ? 1 : 0;
+				}
+				case 19: {
+					CString updateInfo;
+					if (!g_Maintenance->CheckUpdates(updateInfo)) return 0;
+					const char* p = *updateInfo ? *updateInfo : "";
+					setBuf(p, strlen(p));
+					return 1;
+				}
+				case 20: return g_Maintenance->StartUpdate((Maintenance::EBranch)a1) ? 1 : 0;
+				case 21: {
+					bool ok = false;
+					int idx = 0;
+					for (ServerVolume& sv : g_StatMeter->GuardServerVolumes())
+					{
+						if (idx == a1 || a1 == -1) { if (a2 == 0) sv.Reset(); else sv.ResetCustom(); ok = true; }
+						idx++;
+					}
+					if (ok) g_StatMeter->MarkChanged();
+					return ok ? 1 : 0;
+				}
+				case 22: {
+					std::string r = a1 == 0 ? TlsCipherBackend::Start() :
+						a1 == 1 ? TlsCipherBackend::Status(s1) : TlsCipherBackend::Cancel(s1 ? s1 : "");
+					setBuf(r.data(), r.size());
+					return 1;
+				}
+				case 23: {
+					NewsServer server(0, true, "test server", s1 ? s1 : "", a1, 0,
+						s2 ? s2 : "", s3 ? s3 : "", false, a2 != 0, s4 ? s4 : "", 1, 0, 0, 0, false, a4);
+					CString errText;
+					class TestConn final : public NntpConnection
+					{
+					public:
+						TestConn(NewsServer* ns, CString* out) : NntpConnection(ns), m_out(out) {}
+					protected:
+						CString* m_out;
+						void PrintError(const char* m) override { if (m_out->Empty() && m) *m_out = m; }
+					} conn(&server, &errText);
+					conn.SetTimeout(a3 > 0 ? a3 : g_Options->GetArticleTimeout());
+					conn.SetSuppressErrors(false);
+					bool ok = conn.Connect();
+					if (ok)
+					{
+						BString<1024> id;
+						while (id.Length() < 30) id.Append(BString<100>("%i", rand()));
+						const char* resp = conn.Request(BString<1024>("ARTICLE <%s@nzbget.com>\r\n", *id));
+						ok = resp && (*resp == '4' || *resp == '2');
+					}
+					if (!ok && !errText.Empty()) setBuf(*errText, strlen(*errText));
+					return ok ? 1 : 0;
+				}
+				case 24: {
+					NewsServer* server = g_ServerPool->GetServerById(a1);
+					if (!server || !server->GetActive() || server->GetMaxConnections() == 0)
+					{
+						const char* m = !server ? "Server not found" :
+							!server->GetActive() ? "Server is not active" : "Server has no connections configured";
+						setBuf(m, strlen(m));
+						return 0;
+					}
+					auto nzbInfo = std::make_unique<NzbInfo>();
+					nzbInfo->SetKind(NzbInfo::nkUrl);
+					nzbInfo->SetUrl(s1 ? s1 : "");
+					nzbInfo->SetFilename(s1 ? s1 : "");
+					nzbInfo->SetPriority(NzbInfo::FORCE_PRIORITY);
+					nzbInfo->SetExtraPriority(NzbInfo::FORCE_PRIORITY);
+					nzbInfo->SetAddUrlPaused(false);
+					nzbInfo->SetDupeMode(EDupeMode::dmForce);
+					nzbInfo->SetDesiredServerId(a1);
+					nzbInfo->SetSkipScriptProcessing(true);
+					nzbInfo->SetSkipDiskWrite(true);
+					g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), true);
+					return 1;
+				}
+				case 25: {
+					using namespace std::chrono;
+#ifdef DISABLE_TLS
+					Connection conn("speed.cloudflare.com", 80, false);
+#else
+					Connection conn("speed.cloudflare.com", 443, true);
+#endif
+					conn.SetTimeout(1);
+					if (!conn.Connect() || !conn.Send(body, bodyLen))
+					{
+						if (outU32) *outU32 = 0;
+						if (outF64) *outF64 = 0.0;
+						return 0;
+					}
+					uint32_t total = 0;
+					char buf[8 * 1024];
+					auto start = steady_clock::now();
+					while (int received = conn.TryRecv(buf, sizeof(buf)))
+					{
+						if (received <= 0 || duration<double>(steady_clock::now() - start).count() >= static_cast<double>(a1)) break;
+						total += static_cast<uint32_t>(received);
+					}
+					if (outU32) *outU32 = total;
+					if (outF64) *outF64 = duration<double>(steady_clock::now() - start).count();
+					return 1;
+				}
+				case 26: {
+					auto optEntries = std::make_unique<Options::OptEntries>();
+					for (size_t i = 0; i < paramsLen; i++) optEntries->emplace_back(params[i].name, params[i].value);
+					return CommandScriptController::StartScript(s1 ? s1 : "", s2 ? s2 : "", std::move(optEntries)) ? 1 : 0;
+				}
+				default: return 0;
+			}
+		};
+		env.rpc_collect_cb = [](void*, int kind, int a1, int a2, int a3, int a4, int a5,
+			const char* s1, const char* s2, const char* s3, const char* s4, const char* s5, const char* s6,
+			const void* p1, size_t n1, void* emitCtx, NzbgetRsXmlRpcEmitFn emitCb) -> int {
+			auto withNzb = [&](NzbInfo* nzbInfo, auto&& fn) {
+				time_t postStartTime = nzbInfo->GetPostInfo() ? nzbInfo->GetPostInfo()->GetStartTime() : 0;
+				time_t curTime = postStartTime ? Util::CurrentTime() : 0;
+				NzbgetRsRpcNzbInfoInput f{};
+				f.id = nzbInfo->GetId(); f.name = nzbInfo->GetName(); f.kind = (int)nzbInfo->GetKind();
+				f.url = nzbInfo->GetUrl(); f.filename = nzbInfo->GetFilename();
+				f.dest_dir = nzbInfo->GetDestDir(); f.final_dir = nzbInfo->GetFinalDir();
+				f.category = nzbInfo->GetCategory(); f.par_status = (int)nzbInfo->GetParStatus();
+				f.extra_par_blocks = nzbInfo->GetExtraParBlocks();
+				f.unpack_status = (int)nzbInfo->GetUnpackStatus(); f.move_status = (int)nzbInfo->GetMoveStatus();
+				f.script_status = (int)nzbInfo->GetScriptStatuses()->CalcTotalStatus();
+				f.delete_status = (int)nzbInfo->GetDeleteStatus(); f.mark_status = (int)nzbInfo->GetMarkStatus();
+				f.url_status = (int)nzbInfo->GetUrlStatus(); f.size = nzbInfo->GetSize();
+				f.file_count = nzbInfo->GetFileCount();
+				f.min_time = (int)nzbInfo->GetMinTime(); f.max_time = (int)nzbInfo->GetMaxTime();
+				f.total_articles = nzbInfo->GetTotalArticles();
+				f.current_success_articles = nzbInfo->GetCurrentSuccessArticles();
+				f.current_failed_articles = nzbInfo->GetCurrentFailedArticles();
+				f.dupe_recovered_articles = nzbInfo->GetDupeRecoveredArticles();
+				f.dupe_recovered_bytes = nzbInfo->GetDupeRecoveredBytes();
+				f.dupe_recovered_holes = nzbInfo->GetDupeRecoveredHoles();
+				f.live_repairing = nzbInfo->GetLiveRepairThread() != nullptr ? 1 : 0;
+				f.health = nzbInfo->CalcHealth(); f.critical_health = nzbInfo->CalcCriticalHealth(false);
+				f.dupe_key = nzbInfo->GetDupeKey(); f.dupe_score = nzbInfo->GetDupeScore();
+				f.dupe_mode = (int)nzbInfo->GetDupeMode(); f.downloaded_size = nzbInfo->GetDownloadedSize();
+				f.download_sec = nzbInfo->GetDownloadSec(); f.post_total_sec = nzbInfo->GetPostTotalSec();
+				f.has_post_start_time = postStartTime != 0 ? 1 : 0;
+				f.cur_time = (int64)curTime; f.post_start_time = (int64)postStartTime;
+				f.par_sec = nzbInfo->GetParSec(); f.repair_sec = nzbInfo->GetRepairSec();
+				f.unpack_sec = nzbInfo->GetUnpackSec();
+				f.message_count = nzbInfo->GetMessageCount();
+				f.cached_message_count = nzbInfo->GetCachedMessageCount();
+				std::vector<NzbgetRsRpcParamItem> prms;
+				prms.reserve(nzbInfo->GetParameters()->size());
+				for (NzbParameter& p : nzbInfo->GetParameters()) prms.push_back({p.GetName(), p.GetValue()});
+				std::vector<NzbgetRsRpcScriptItem> scrs;
+				scrs.reserve(nzbInfo->GetScriptStatuses()->size());
+				for (ScriptStatus& s : nzbInfo->GetScriptStatuses()) scrs.push_back({s.GetName(), (int)s.GetStatus()});
+				std::vector<NzbgetRsRpcServerStatItem> sts;
+				sts.reserve(nzbInfo->GetCurrentServerStats()->size());
+				for (ServerStat& st : nzbInfo->GetCurrentServerStats())
+					sts.push_back({st.GetServerId(), st.GetSuccessArticles(), st.GetFailedArticles()});
+				fn(f, prms, scrs, sts);
+			};
+			auto emitPost = [&](PostInfo* postInfo, int logEntries, bool postQueue) {
+				time_t curTime = postInfo ? Util::CurrentTime() : 0;
+				std::optional<GuardedMessageList> messages;
+				std::vector<NzbgetRsRpcLogEntry> entries;
+				if (logEntries > 0 && postInfo)
+				{
+					messages.emplace(postInfo->GetNzbInfo()->GuardCachedMessages());
+					if (!(*messages)->empty())
+					{
+						int cnt = std::min(logEntries, (int)(*messages)->size());
+						int start = (int)(*messages)->size() - cnt;
+						entries.reserve(cnt);
+						for (uint32 i = (uint32)start; i < (*messages)->size(); i++)
+						{
+							Message& m = (*messages)->at(i);
+							entries.push_back({(int)m.GetId(), (int)m.GetKind(), (int)m.GetTime(), m.GetText()});
+						}
+					}
+				}
+				emitCb(emitCtx, 5, postQueue ? 1 : 0, postInfo ? 1 : 0, postInfo ? postInfo->GetStageProgress() : 0,
+					0, 0, 0, (int64)curTime, postInfo ? (int64)postInfo->GetStageTime() : 0,
+					postInfo ? (int64)postInfo->GetStartTime() : 0,
+					postInfo ? postInfo->GetProgressLabel() : nullptr, nullptr, nullptr, nullptr,
+					entries.data(), entries.size(), nullptr, 0, nullptr, 0, nullptr, 0);
+			};
+			switch (kind)
+			{
+				case 1: {
+					int postJobCount = 0, urlCount = 0;
+					int64 remainingSize, forcedSize;
+					{
+						GuardedDownloadQueue dq = DownloadQueue::Guard();
+						for (NzbInfo* n : dq->GetQueue())
+						{
+							postJobCount += n->GetPostInfo() != nullptr ? 1 : 0;
+							urlCount += n->GetKind() == NzbInfo::nkUrl ? 1 : 0;
+						}
+						dq->CalcRemainingSize(&remainingSize, &forcedSize);
+					}
+					int upTimeSec, downloadTimeSec;
+					int64 allBytes, monthBytes, dayBytes;
+					bool serverStandBy;
+					g_StatMeter->CalcTotalStat(&upTimeSec, &downloadTimeSec, &allBytes, &serverStandBy);
+					g_StatMeter->CalcQuotaUsage(monthBytes, dayBytes);
+					int64 freeDisk = 0, totalDisk = 0, freeInter = 0, totalInter = 0;
+					if (!Util::EmptyStr(g_Options->GetDestDir()))
+						if (auto r = FileSystem::GetDiskState(g_Options->GetDestDir())) { freeDisk = r->available; totalDisk = r->total; }
+					bool interEmpty = Util::EmptyStr(g_Options->GetInterDir());
+					if (!interEmpty)
+						if (auto r = FileSystem::GetDiskState(g_Options->GetInterDir())) { freeInter = r->available; totalInter = r->total; }
+					NzbgetRsRpcStatusInput sf{};
+					sf.remaining_size = remainingSize; sf.forced_size = forcedSize;
+					sf.article_cache = g_ArticleCache->GetAllocated();
+					sf.all_bytes = allBytes; sf.month_bytes = monthBytes; sf.day_bytes = dayBytes;
+					sf.memory_pressure = g_MemoryMonitor ? g_MemoryMonitor->GetTierName() : "NORMAL";
+					sf.effective_article_cache_mb = g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveArticleCacheMB() : g_Options->GetArticleCache();
+					sf.effective_par_buffer_mb = g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveParBufferMB(g_Options->GetParBuffer()) : g_Options->GetParBuffer();
+					sf.download_rate = g_StatMeter->CalcCurrentDownloadSpeed();
+					sf.download_limit = (int)g_WorkState->GetSpeedLimit();
+					sf.thread_count = Thread::GetThreadCount() - 1;
+					sf.post_job_count = postJobCount; sf.url_count = urlCount;
+					sf.up_time_sec = upTimeSec; sf.download_time_sec = downloadTimeSec;
+					sf.download_paused = g_WorkState->GetPauseDownload() ? 1 : 0;
+					sf.server_stand_by = serverStandBy ? 1 : 0;
+					sf.post_paused = g_WorkState->GetPausePostProcess() ? 1 : 0;
+					sf.scan_paused = g_WorkState->GetPauseScan() ? 1 : 0;
+					sf.quota_reached = g_WorkState->GetQuotaReached() ? 1 : 0;
+					sf.free_disk_space = freeDisk; sf.total_disk_space = totalDisk;
+					sf.inter_dir_empty = interEmpty ? 1 : 0;
+					sf.free_inter_disk_space = freeInter; sf.total_inter_disk_space = totalInter;
+					sf.server_time = (int)Util::CurrentTime(); sf.resume_time = (int)g_WorkState->GetResumeTime();
+					sf.feed_active = g_FeedCoordinator->HasActiveDownloads() ? 1 : 0;
+					sf.queued_scripts = g_QueueScriptCoordinator->GetQueueSize();
+					std::vector<NzbgetRsRpcServerStatus> srvs;
+					srvs.reserve(g_ServerPool->GetServers()->size());
+					for (NewsServer* srv : g_ServerPool->GetServers()) srvs.push_back({srv->GetId(), srv->GetActive() ? 1 : 0});
+					emitCb(emitCtx, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
+						&sf, 0, srvs.data(), srvs.size(), nullptr, 0, nullptr, 0);
+					return 1;
+				}
+				case 2: {
+					MessageList diskMessages;
+					std::unique_ptr<GuardedDownloadQueue> dq;
+					auto guardMessages = [&]() -> GuardedMessageList {
+						if (a1 == 1) return g_Maintenance->GuardMessages();
+						if (a1 == 2) return g_CommandScriptLog->GuardMessages();
+						if (a1 == 3)
+						{
+							g_DiskState->LoadNzbMessages(a2, &diskMessages);
+							if (diskMessages.empty())
+							{
+								dq = std::make_unique<GuardedDownloadQueue>(DownloadQueue::Guard());
+								if (NzbInfo* n = (*dq)->GetQueue()->Find(a2)) return n->GuardCachedMessages();
+								dq.reset();
+							}
+							return GuardedMessageList(&diskMessages, nullptr);
+						}
+						return g_Log->GuardMessages();
+					};
+					GuardedMessageList messages = guardMessages();
+					int start = (int)messages->size();
+					if (a4 > 0) start = (int)messages->size() - std::min(a4, (int)messages->size());
+					if (a3 > 0 && !messages->empty()) start = std::max(0, a3 - (int)messages->front().GetId());
+					std::vector<NzbgetRsRpcLogEntry> entries;
+					if ((uint32)start < messages->size())
+					{
+						entries.reserve(messages->size() - (uint32)start);
+						for (uint32 i = (uint32)start; i < messages->size(); i++)
+						{
+							Message& m = messages->at(i);
+							entries.push_back({(int)m.GetId(), (int)m.GetKind(), (int)m.GetTime(), m.GetText()});
+						}
+					}
+					emitCb(emitCtx, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
+						entries.data(), entries.size(), nullptr, 0, nullptr, 0, nullptr, 0);
+					return 1;
+				}
+				case 3: {
+					GuardedDownloadQueue dq = DownloadQueue::Guard();
+					for (NzbInfo* nzbInfo : dq->GetQueue())
+					{
+						for (FileInfo* fi : nzbInfo->GetFileList())
+						{
+							if ((a3 > 0 && a3 == fi->GetNzbInfo()->GetId()) ||
+								(a3 == 0 && (a1 == 0 || (a1 <= fi->GetId() && fi->GetId() <= a2))))
+							{
+								int64 denom = fi->GetSize() - fi->GetMissedSize();
+								int progress = (fi->GetFailedSize() == 0 && fi->GetSuccessSize() == 0) || denom <= 0
+									? 0 : (int)(1000 - fi->GetRemainingSize() * 1000 / denom);
+								NzbgetRsRpcFileItem item{
+									fi->GetId(), fi->GetSize(), fi->GetRemainingSize(), (int)fi->GetTime(),
+									fi->GetFilenameConfirmed() ? 1 : 0, fi->GetPaused() ? 1 : 0,
+									fi->GetNzbInfo()->GetId(), fi->GetNzbInfo()->GetName(),
+									fi->GetNzbInfo()->GetFilename(), fi->GetSubject(), fi->GetFilename(),
+									fi->GetNzbInfo()->GetDestDir(), fi->GetNzbInfo()->GetCategory(),
+									fi->GetNzbInfo()->GetPriority(), fi->GetActiveDownloads(), progress
+								};
+								emitCb(emitCtx, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
+									&item, 0, nullptr, 0, nullptr, 0, nullptr, 0);
+							}
+						}
+					}
+					return 1;
+				}
+				case 4: {
+					GuardedDownloadQueue dq = DownloadQueue::Guard();
+					for (NzbInfo* nzbInfo : dq->GetQueue())
+					{
+						bool hasPost = nzbInfo->GetPostInfo() != nullptr;
+						int postStage = hasPost ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
+						bool qsActive = false;
+						bool hasQs = hasPost && postStage == (int)PostInfo::ptQueued &&
+							g_QueueScriptCoordinator->HasJob(nzbInfo->GetId(), &qsActive);
+						int flags = (hasPost ? 1 : 0) | (hasQs ? 2 : 0) | (qsActive ? 4 : 0) |
+							((postStage & 0xff) << 4) | (((int)nzbInfo->GetDirectUnpackStatus() & 0xff) << 12) |
+							(((int)nzbInfo->GetKind() & 0xff) << 20);
+						withNzb(nzbInfo, [&](const auto& f, const auto& prms, const auto& scrs, const auto& sts) {
+							emitCb(emitCtx, 4, nzbInfo->GetId(), (int)nzbInfo->GetFileList()->size(),
+								nzbInfo->GetRemainingParCount(), nzbInfo->GetPriority(), nzbInfo->GetActiveDownloads(),
+								flags, nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(), 0,
+								nullptr, nullptr, nullptr, nullptr,
+								&f, 0, prms.data(), prms.size(), scrs.data(), scrs.size(), sts.data(), sts.size());
+						});
+						emitPost(nzbInfo->GetPostInfo(), a1, false);
+					}
+					return 1;
+				}
+				case 5: {
+					GuardedDownloadQueue dq = DownloadQueue::Guard();
+					for (NzbInfo* nzbInfo : dq->GetQueue())
+					{
+						PostInfo* pi = nzbInfo->GetPostInfo();
+						if (!pi) continue;
+						withNzb(pi->GetNzbInfo(), [&](const auto& f, const auto& prms, const auto& scrs, const auto& sts) {
+							emitCb(emitCtx, 6, nzbInfo->GetId(), (int)pi->GetStage(), pi->GetFileProgress(), 0, 0, 0,
+								0, 0, 0, pi->GetNzbInfo()->GetName(), nullptr, nullptr, nullptr,
+								&f, 0, prms.data(), prms.size(), scrs.data(), scrs.size(), sts.data(), sts.size());
+						});
+						emitPost(pi, a1, true);
+					}
+					return 1;
+				}
+				case 6: {
+					GuardedDownloadQueue dq = DownloadQueue::Guard();
+					for (HistoryInfo* hi : dq->GetHistory())
+					{
+						if (hi->GetKind() == HistoryInfo::hkDup && !a1) continue;
+						if (hi->GetKind() == HistoryInfo::hkNzb || hi->GetKind() == HistoryInfo::hkUrl)
+						{
+							NzbInfo* n = hi->GetNzbInfo();
+							const char* status = n->MakeTextStatus(false);
+							withNzb(n, [&](const auto& f, const auto& prms, const auto& scrs, const auto& sts) {
+								emitCb(emitCtx, 7, hi->GetId(), n->GetParkedFileCount(),
+									!n->GetCompletedFiles()->empty() ? 1 : 0, (int)hi->GetTime(), 0, 0,
+									0, 0, 0, hi->GetName(), status, nullptr, nullptr,
+									&f, 0, prms.data(), prms.size(), scrs.data(), scrs.size(), sts.data(), sts.size());
+							});
+						}
+						else if (hi->GetKind() == HistoryInfo::hkDup)
+						{
+							DupInfo* d = hi->GetDupInfo();
+							emitCb(emitCtx, 8, hi->GetId(), (int)hi->GetTime(), d->GetDupeScore(),
+								(int)d->GetDupeMode(), (int)d->GetStatus(), 0, d->GetSize(), 0, 0,
+								hi->GetName(), d->GetDupeKey(), nullptr, nullptr,
+								nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0);
+						}
+					}
+					return 1;
+				}
+				case 7: {
+					GuardedDownloadQueue dq = DownloadQueue::Guard();
+					for (NzbInfo* n : dq->GetQueue())
+					{
+						if (n->GetKind() == NzbInfo::nkUrl)
+							emitCb(emitCtx, 9, n->GetId(), n->GetPriority(), 0, 0, 0, 0, 0, 0, 0,
+								n->GetFilename(), n->GetUrl(), n->GetName(), n->GetCategory(),
+								nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0);
+					}
+					return 1;
+				}
+				case 8: {
+					Fleet::Request req;
+					req.dupeKey = s1 ? s1 : ""; req.category = s2 ? s2 : "";
+					req.priority = a1; req.timeoutSec = a2;
+					const auto* members = static_cast<const NzbgetRsRpcFleetReqMember*>(p1);
+					for (size_t i = 0; i < n1; i++)
+					{
+						Fleet::Member m;
+						m.name = members[i].name ? members[i].name : "";
+						if (members[i].is_url) m.url.assign(members[i].data, members[i].data_len);
+						else m.data.assign(members[i].data, members[i].data_len);
+						req.members.push_back(std::move(m));
+					}
+					Fleet::Result res = Fleet::Append(std::move(req));
+					std::vector<NzbgetRsRpcFleetMember> entries;
+					entries.reserve(res.members.size());
+					for (const Fleet::Entry& e : res.members)
+						entries.push_back({e.nzbId, e.name.c_str(), e.rank, e.alive, e.status.c_str(), e.sameAs, e.sameAsRank, e.reason.c_str()});
+					emitCb(emitCtx, 10, res.chosen, res.complete ? 1 : 0, 0, 0, 0, 0, 0, 0, 0,
+						res.reason.c_str(), nullptr, nullptr, nullptr,
+						entries.data(), entries.size(), nullptr, 0, nullptr, 0, nullptr, 0);
+					return 1;
+				}
+				case 9: {
+					Options::GuardedOptEntries optEntries = g_Options->GuardOptEntries();
+					std::vector<NzbgetRsRpcConfigItem> entries;
+					entries.reserve(optEntries->size());
+					for (Options::OptEntry& o : optEntries) entries.push_back({o.GetName(), o.GetValue(), o.Restricted() ? 1 : 0});
+					emitCb(emitCtx, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
+						entries.data(), entries.size(), nullptr, 0, nullptr, 0, nullptr, 0);
+					return 1;
+				}
+				case 10: {
+					ScriptConfig::ConfigTemplates* tmpls = g_ScriptConfig->GetConfigTemplates();
+					ScriptConfig::ConfigTemplates loaded;
+					if (a1)
+					{
+						if (!g_ScriptConfig->LoadConfigTemplates(&loaded)) return 0;
+						tmpls = &loaded;
+					}
+					std::vector<const char*> ptrs;
+					ptrs.reserve(tmpls->size());
+					for (ScriptConfig::ConfigTemplate& ct : tmpls) ptrs.push_back(ct.GetTemplate());
+					emitCb(emitCtx, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
+						ptrs.data(), ptrs.size(), nullptr, 0, nullptr, 0, nullptr, 0);
+					return 1;
+				}
+				case 11: {
+					bool preview = (a1 & 1) != 0, backlog = (a1 & 2) != 0, pauseNzb = (a1 & 4) != 0, inclNonMatch = (a1 & 8) != 0;
+					std::shared_ptr<FeedItemList> feedItems = preview
+						? g_FeedCoordinator->PreviewFeed(a2, s1 ? s1 : "", s2 ? s2 : "", s3 ? s3 : "",
+							backlog, pauseNzb, s4 ? s4 : "", (FeedInfo::CategorySource)a3, a4, a5, s5, (int)n1, s6 ? s6 : "")
+						: g_FeedCoordinator->ViewFeed(a2);
+					if (!feedItems) return 0;
+					for (FeedItemInfo& fi : feedItems.get())
+					{
+						if (inclNonMatch || fi.GetMatchStatus() == FeedItemInfo::msAccepted)
+						{
+							NzbgetRsRpcFeedItem item{
+								fi.GetTitle(), fi.GetFilename(), fi.GetUrl(), fi.GetSize(),
+								(int)(fi.GetSize() / 1024 / 1024), fi.GetCategory(), fi.GetAddCategory().c_str(),
+								fi.GetPauseNzb() ? 1 : 0, fi.GetPriority(), (int)fi.GetTime(),
+								(int)fi.GetMatchStatus(), fi.GetMatchRule(), fi.GetDupeKey(),
+								fi.GetDupeScore(), (int)fi.GetDupeMode(), (int)fi.GetStatus()
+							};
+							emitCb(emitCtx, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
+								&item, 0, nullptr, 0, nullptr, 0, nullptr, 0);
+						}
+					}
+					return 1;
+				}
+				case 12: {
+					int index = 0;
+					for (ServerVolume& sv : g_StatMeter->GuardServerVolumes())
+					{
+						const auto& arts = sv.GetArticlesPerDays();
+						std::vector<NzbgetRsRpcArticlePair> artEntries;
+						if (a5)
+						{
+							artEntries.reserve(arts.size());
+							for (const auto& art : arts) artEntries.push_back({art.failed, art.success});
+						}
+						const auto* bps = sv.BytesPerSeconds();
+						const auto* bpm = sv.BytesPerMinutes();
+						const auto* bph = sv.BytesPerHours();
+						const auto* bpd = sv.BytesPerDays();
+						NzbgetRsRpcServerVolumeItem vf{
+							index++, (int)sv.GetDataTime(), sv.GetFirstDay(), sv.GetTotalBytes(),
+							sv.GetCustomBytes(), (int)sv.GetCustomTime(), (int)sv.GetCountersResetTime(),
+							sv.GetSecSlot(), sv.GetMinSlot(), sv.GetHourSlot(), sv.GetDaySlot(),
+							a1, bps->data(), bps->size(), a2, bpm->data(), bpm->size(),
+							a3, bph->data(), bph->size(), a4, bpd->data(), bpd->size(),
+							a5, artEntries.data(), artEntries.size()
+						};
+						emitCb(emitCtx, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
+							&vf, 0, nullptr, 0, nullptr, 0, nullptr, 0);
+					}
+					return 1;
+				}
+				default: return 0;
+			}
 		};
 		return nzbget_rs_web_serve(1, &env) != 0;
 	}

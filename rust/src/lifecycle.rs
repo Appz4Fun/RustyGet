@@ -51,8 +51,7 @@ impl From<u32> for LifecyclePhase {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LifecycleHooks {
-    pub set_process_args:
-        Option<unsafe extern "C" fn(c_int, *mut *mut c_char, *mut *mut c_char)>,
+    pub set_process_args: Option<unsafe extern "C" fn(c_int, *mut *mut c_char, *mut *mut c_char)>,
     pub util_init: Option<unsafe extern "C" fn()>,
     pub nserv_main: Option<unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int>,
     pub phase1_init: Option<unsafe extern "C" fn(bool) -> c_int>,
@@ -340,8 +339,8 @@ pub fn socket_deadline_wait(
                 return false;
             }
             let milliseconds = remaining.clamp(1, 50) as c_int;
-            let events = (if read { libc::POLLIN } else { 0 })
-                | (if write { libc::POLLOUT } else { 0 });
+            let events =
+                (if read { libc::POLLIN } else { 0 }) | (if write { libc::POLLOUT } else { 0 });
             let mut descriptor = libc::pollfd {
                 fd,
                 events,
@@ -469,6 +468,203 @@ pub fn daemonize_setup(
     {
         let _ = (lock_file, daemon_username);
         Ok((false, false))
+    }
+}
+
+struct ReloadState {
+    pending: bool,
+    worker_running: bool,
+    first_request_time: Option<std::time::Instant>,
+    target_time: Option<std::time::Instant>,
+    worker_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+struct ReloadCoordinator {
+    mutex: std::sync::Mutex<ReloadState>,
+    cond: std::sync::Condvar,
+}
+
+impl ReloadCoordinator {
+    const fn new() -> Self {
+        Self {
+            mutex: std::sync::Mutex::new(ReloadState {
+                pending: false,
+                worker_running: false,
+                first_request_time: None,
+                target_time: None,
+                worker_thread: None,
+            }),
+            cond: std::sync::Condvar::new(),
+        }
+    }
+
+    fn cancel_pending(&self) {
+        let mut state = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
+        state.pending = false;
+        self.cond.notify_all();
+    }
+
+    fn cancel_and_join(&self) {
+        let mut state = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
+        state.pending = false;
+        self.cond.notify_all();
+        let can_join = state
+            .worker_thread
+            .as_ref()
+            .is_some_and(|h| h.thread().id() != std::thread::current().id());
+        if can_join {
+            while state.worker_running {
+                state = self.cond.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
+            if let Some(handle) = state.worker_thread.take() {
+                drop(state);
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn request_reload<F>(&'static self, state_cb: F)
+    where
+        F: Fn(c_int) -> c_int + Send + Sync + Copy + 'static,
+    {
+        use std::time::{Duration, Instant};
+
+        if state_cb(0) != 0 {
+            state_cb(1);
+            return;
+        }
+
+        let now = Instant::now();
+        let mut state = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
+
+        if !state.pending {
+            while state.worker_running {
+                state = self.cond.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
+            if state_cb(0) != 0 {
+                drop(state);
+                state_cb(1);
+                return;
+            }
+            if let Some(finished) = state.worker_thread.take() {
+                drop(state);
+                let _ = finished.join();
+                state = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
+                if state.pending || state.worker_running || state_cb(0) != 0 {
+                    return;
+                }
+            }
+
+            state.pending = true;
+            state.worker_running = true;
+            state.first_request_time = Some(now);
+            state.target_time = Some(now + Duration::from_millis(100));
+
+            let handle = std::thread::spawn(move || {
+                let mut wstate = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
+
+                while wstate.pending && state_cb(3) == 0 {
+                    let cur = Instant::now();
+                    let first = wstate.first_request_time.unwrap_or(cur);
+                    let target = wstate.target_time.unwrap_or(cur);
+                    if cur >= target
+                        || cur.saturating_duration_since(first) >= Duration::from_millis(1500)
+                    {
+                        break;
+                    }
+                    let wait_dur = target.saturating_duration_since(cur);
+                    wstate = self
+                        .cond
+                        .wait_timeout(wstate, wait_dur)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
+                }
+
+                if !wstate.pending && state_cb(3) == 0 {
+                    wstate.worker_running = false;
+                    self.cond.notify_all();
+                    return;
+                }
+
+                let mut logged_deferral = false;
+                while wstate.pending && state_cb(3) == 0 {
+                    drop(wstate);
+                    let flags = state_cb(4);
+                    let active_unpack = (flags & 1) != 0;
+                    let already_reloading = (flags & 2) != 0;
+                    if active_unpack && !logged_deferral {
+                        state_cb(5);
+                        logged_deferral = true;
+                    }
+                    wstate = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
+                    if !wstate.pending || state_cb(3) != 0 || !active_unpack || already_reloading {
+                        break;
+                    }
+                    wstate = self
+                        .cond
+                        .wait_timeout(wstate, Duration::from_millis(100))
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
+                }
+
+                if state_cb(6) != 0 {
+                    wstate.pending = false;
+                    drop(wstate);
+                    state_cb(7);
+                    let mut done = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
+                    done.worker_running = false;
+                    self.cond.notify_all();
+                    return;
+                }
+
+                if !wstate.pending {
+                    wstate.worker_running = false;
+                    self.cond.notify_all();
+                    return;
+                }
+
+                wstate.pending = false;
+                drop(wstate);
+
+                state_cb(8);
+
+                let mut done = self.mutex.lock().unwrap_or_else(|e| e.into_inner());
+                done.worker_running = false;
+                self.cond.notify_all();
+            });
+            state.worker_thread = Some(handle);
+        } else {
+            let first = state.first_request_time.unwrap_or(now);
+            let elapsed_ms = now
+                .saturating_duration_since(first)
+                .as_millis()
+                .min(i64::MAX as u128) as i64;
+            let clamped = crate::options::roc_nzbget_reload_clamp_debounce_ms(elapsed_ms, 100, 1500)
+                .max(0) as u64;
+            state.target_time = Some(first + Duration::from_millis(clamped));
+            self.cond.notify_one();
+            drop(state);
+            state_cb(2);
+        }
+    }
+}
+
+static RELOAD_COORDINATOR: ReloadCoordinator = ReloadCoordinator::new();
+
+/// Daemon reload debounce and unpack-deferral coordinator:
+/// - `op = 0`: `Reload()` (debounce 100ms..1500ms, defer while `HasActiveUnpack`, handle `SigExitPending`).
+/// - `op = 1`: Cancel pending reload (`Stop(false)` / `ExitProc()`).
+/// - `op = 2`: `CancelAndJoinReloadThread()`.
+pub fn reload_coordinator_op(op: c_int, state_cb: Option<unsafe extern "C" fn(c_int) -> c_int>) {
+    match op {
+        0 => {
+            if let Some(cb) = state_cb {
+                RELOAD_COORDINATOR.request_reload(move |action| unsafe { cb(action) });
+            }
+        }
+        1 => RELOAD_COORDINATOR.cancel_pending(),
+        2 => RELOAD_COORDINATOR.cancel_and_join(),
+        _ => {}
     }
 }
 
@@ -707,21 +903,15 @@ mod tests {
             libc::close(fds[1]);
         }
 
-        let tmp_dir = std::env::temp_dir().join(format!(
-            "rustyget_batch154_test_{}",
-            std::process::id()
-        ));
+        let tmp_dir =
+            std::env::temp_dir().join(format!("rustyget_batch154_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         std::fs::create_dir_all(&tmp_dir).unwrap();
         let existing_sub = tmp_dir.join("existing");
         std::fs::create_dir_all(&existing_sub).unwrap();
         let missing_sub = tmp_dir.join("missing");
 
-        let req_spec = format!(
-            "{};{}",
-            existing_sub.display(),
-            missing_sub.display()
-        );
+        let req_spec = format!("{};{}", existing_sub.display(), missing_sub.display());
         let mut logged = Vec::new();
         let (all_exist, next_reported) = crate::fsops::disk_service_check_required_dirs(
             req_spec.as_bytes(),
@@ -752,5 +942,78 @@ mod tests {
         assert!(!tmp_file.exists());
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_reload_coordinator_debounce_unpack_deferral_and_cancel() {
+        static TEST_EVENTS: std::sync::Mutex<Vec<c_int>> = std::sync::Mutex::new(Vec::new());
+        static TEST_UNPACK_POLLS: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "C" fn test_reload_cb(action: c_int) -> c_int {
+            TEST_EVENTS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(action);
+            match action {
+                0 => 0,
+                4 => {
+                    if TEST_UNPACK_POLLS.load(Ordering::SeqCst) > 0 {
+                        TEST_UNPACK_POLLS.fetch_sub(1, Ordering::SeqCst);
+                        1
+                    } else {
+                        0
+                    }
+                }
+                _ => 0,
+            }
+        }
+
+        TEST_EVENTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        TEST_UNPACK_POLLS.store(1, Ordering::SeqCst);
+
+        reload_coordinator_op(0, Some(test_reload_cb));
+        reload_coordinator_op(0, Some(test_reload_cb));
+        reload_coordinator_op(2, None);
+        assert!(TEST_EVENTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&2));
+
+        TEST_EVENTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        TEST_UNPACK_POLLS.store(1, Ordering::SeqCst);
+        reload_coordinator_op(0, Some(test_reload_cb));
+        for _ in 0..40 {
+            if TEST_EVENTS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&8)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        reload_coordinator_op(2, None);
+        let recorded = TEST_EVENTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            !recorded.contains(&1),
+            "unexpected already-stopping log: {recorded:?}"
+        );
+        assert!(
+            recorded.contains(&5),
+            "expected unpack deferral log: {recorded:?}"
+        );
+        assert!(
+            recorded.contains(&8),
+            "expected Stop(true) trigger: {recorded:?}"
+        );
     }
 }

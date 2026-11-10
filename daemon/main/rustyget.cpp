@@ -929,26 +929,6 @@ private:
 // and a second daemon that fails to get the lock must leave it in place.
 static bool g_LockFileOwned = false;
 
-static std::mutex g_reloadMutex;
-static std::condition_variable g_reloadCond;
-static bool g_reloadPending{false};
-static bool g_reloadWorkerRunning{false};
-static std::chrono::steady_clock::time_point g_reloadTargetTime;
-static std::chrono::steady_clock::time_point g_reloadFirstRequestTime;
-static std::thread g_reloadThread;
-
-static void CancelAndJoinReloadThread()
-{
-	std::unique_lock<std::mutex> lock(g_reloadMutex);
-	g_reloadPending = false;
-	g_reloadCond.notify_all();
-	if (g_reloadThread.joinable() && g_reloadThread.get_id() != std::this_thread::get_id())
-	{
-		g_reloadCond.wait(lock, [] { return !g_reloadWorkerRunning; });
-		g_reloadThread.join();
-	}
-}
-
 class RustyGet final : public Options::Extender
 {
 public:
@@ -1143,12 +1123,12 @@ public:
 	void Phase4_Shutdown(bool reload)
 	{
 		m_reloading = reload;
-		CancelAndJoinReloadThread();
+		nzbget_rs_lifecycle_reload_op(2, nullptr);
 		ScriptController::TerminateAll();
 
 		StopRemoteServer();
 		StopFrontend();
-		CancelAndJoinReloadThread();
+		nzbget_rs_lifecycle_reload_op(2, nullptr);
 
 		TlsCipherBackend::Shutdown();
 		if (!m_reloading)
@@ -1169,11 +1149,7 @@ public:
 	{
 		if (!reload)
 		{
-			{
-				std::lock_guard<std::mutex> reloadGuard(g_reloadMutex);
-				g_reloadPending = false;
-				g_reloadCond.notify_all();
-			}
+			nzbget_rs_lifecycle_reload_op(1, nullptr);
 			nzbget_rs_signal_notify(SIGTERM);
 		}
 
@@ -1781,134 +1757,46 @@ std::unique_ptr<RustyGet> g_RustyGet;
 
 void Reload()
 {
-	if (!g_RustyGet || g_RustyGet->GetReloading() || g_RustyGet->GetStopped() || g_SigExitPending.load())
-	{
-		debug("Daemon is already reloading or stopping");
-		return;
-	}
-
-	auto now = std::chrono::steady_clock::now();
-	std::unique_lock<std::mutex> lock(g_reloadMutex);
-
-	constexpr auto DEBOUNCE_DELAY = std::chrono::milliseconds(100);
-
-	if (!g_reloadPending)
-	{
-		g_reloadCond.wait(lock, [] { return !g_reloadWorkerRunning; });
-		if (!g_RustyGet || g_RustyGet->GetReloading() || g_RustyGet->GetStopped() || g_SigExitPending.load())
+	nzbget_rs_lifecycle_reload_op(0, [](int action) -> int {
+		switch (action)
 		{
-			debug("Daemon is already reloading or stopping");
-			return;
-		}
-		if (g_reloadThread.joinable())
-		{
-			std::thread finishedThread = std::move(g_reloadThread);
-			lock.unlock();
-			finishedThread.join();
-			lock.lock();
-			if (g_reloadPending || g_reloadWorkerRunning ||
-				!g_RustyGet || g_RustyGet->GetReloading() || g_RustyGet->GetStopped() || g_SigExitPending.load())
-			{
-				return;
-			}
-		}
-
-		g_reloadPending = true;
-		g_reloadWorkerRunning = true;
-		g_reloadFirstRequestTime = now;
-		g_reloadTargetTime = now + DEBOUNCE_DELAY;
-
-		g_reloadThread = std::thread([]() {
-			std::unique_lock<std::mutex> lock(g_reloadMutex);
-
-			while (g_reloadPending && !g_SigExitPending.load())
-			{
-				auto now = std::chrono::steady_clock::now();
-				if (now >= g_reloadTargetTime ||
-					now - g_reloadFirstRequestTime >= std::chrono::milliseconds(1500))
-				{
-					break;
-				}
-
-				g_reloadCond.wait_for(lock, g_reloadTargetTime - now);
-			}
-
-			if (!g_reloadPending && !g_SigExitPending.load())
-			{
-				g_reloadWorkerRunning = false;
-				g_reloadCond.notify_all();
-				return;
-			}
-
-			bool loggedDeferral = false;
-			while (g_reloadPending && !g_SigExitPending.load())
-			{
-				lock.unlock();
-				bool activeUnpack = g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack(false);
-				bool alreadyReloading = !g_RustyGet || g_RustyGet->GetReloading();
-				if (activeUnpack && !loggedDeferral)
-				{
-					info("Unpack is actively executing; deferring reload until unpack completes...");
-					loggedDeferral = true;
-				}
-				lock.lock();
-				if (!g_reloadPending || g_SigExitPending.load() || !activeUnpack || alreadyReloading)
-				{
-					break;
-				}
-				g_reloadCond.wait_for(lock, std::chrono::milliseconds(100));
-			}
-
-			if (g_SigExitPending.exchange(false))
-			{
-				g_reloadPending = false;
-				lock.unlock();
+			case 0:
+				return (!g_RustyGet || g_RustyGet->GetReloading() || g_RustyGet->GetStopped() || g_SigExitPending.load()) ? 1 : 0;
+			case 1:
+				debug("Daemon is already reloading or stopping");
+				return 0;
+			case 2:
+				debug("Reload request debounced, target extended");
+				return 0;
+			case 3:
+				return g_SigExitPending.load() ? 1 : 0;
+			case 4:
+				return ((g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack(false)) ? 1 : 0) |
+					((!g_RustyGet || g_RustyGet->GetReloading()) ? 2 : 0);
+			case 5:
+				info("Unpack is actively executing; deferring reload until unpack completes...");
+				return 0;
+			case 6:
+				return g_SigExitPending.exchange(false) ? 1 : 0;
+			case 7:
 				ExitProc();
-				lock.lock();
-				g_reloadWorkerRunning = false;
-				g_reloadCond.notify_all();
-				return;
-			}
-
-			if (!g_reloadPending)
-			{
-				g_reloadWorkerRunning = false;
-				g_reloadCond.notify_all();
-				return;
-			}
-
-			g_reloadPending = false;
-			lock.unlock();
-
-			if (g_RustyGet && !g_RustyGet->GetReloading())
-			{
-				info("Reloading...");
-				g_RustyGet->Stop(true);
-			}
-
-			lock.lock();
-			g_reloadWorkerRunning = false;
-			g_reloadCond.notify_all();
-		});
-	}
-	else
-	{
-		int64 elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-			now - g_reloadFirstRequestTime).count();
-		g_reloadTargetTime = g_reloadFirstRequestTime + std::chrono::milliseconds(
-			nzbget_rs_daemon_service_op(6, 0, 0, 0, 0, elapsedMs, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
-		g_reloadCond.notify_one();
-		debug("Reload request debounced, target extended");
-	}
+				return 0;
+			case 8:
+				if (g_RustyGet && !g_RustyGet->GetReloading())
+				{
+					info("Reloading...");
+					g_RustyGet->Stop(true);
+				}
+				return 0;
+			default:
+				return 0;
+		}
+	});
 }
 
 void ExitProc()
 {
-	{
-		std::lock_guard<std::mutex> guard(g_reloadMutex);
-		g_reloadPending = false;
-		g_reloadCond.notify_all();
-	}
+	nzbget_rs_lifecycle_reload_op(1, nullptr);
 	nzbget_rs_signal_notify(SIGTERM);
 
 	if (g_RustyGet)

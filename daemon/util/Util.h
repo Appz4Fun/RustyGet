@@ -791,38 +791,6 @@ public:
 	}
 };
 
-class Tokenizer
-{
-public:
-	Tokenizer(const char* dataString, const char* separators) : m_separators(separators)
-	{
-		int len = strlen(dataString);
-		if (len <= m_shortString.Capacity())
-		{
-			m_shortString.Set(dataString);
-			m_dataString = m_shortString;
-		}
-		else
-		{
-			m_longString.Set(dataString);
-			m_dataString = m_longString;
-		}
-	}
-
-	char* Next()
-	{
-		return nzbget_rs_tokenizer_next(m_dataString, m_separators, &m_savePtr, &m_working);
-	}
-
-private:
-	BString<1024> m_shortString;
-	CString m_longString;
-	char* m_dataString;
-	const char* m_separators;
-	char* m_savePtr = nullptr;
-	int m_working = 0;
-};
-
 class Crc32
 {
 public:
@@ -926,31 +894,7 @@ public:
 		return std::nullopt;
 	}
 
-	static CString ExpandHomePath(const char* filename)
-	{
-		NzbgetRsBuf buf = nzbget_rs_fs_string_op(2, filename, nullptr);
-		CString result(buf.data, (int)buf.len);
-		nzbget_rs_free(buf);
-		return result;
-	}
-
 	static inline mode_t uMask;
-
-	static CString ExpandFileName(const char* filename)
-	{
-		NzbgetRsBuf buf = nzbget_rs_fs_string_op(3, filename, nullptr);
-		CString result(buf.data, (int)buf.len);
-		nzbget_rs_free(buf);
-		return result;
-	}
-
-	static CString GetExeFileName(const char* argv0)
-	{
-		NzbgetRsBuf buf = nzbget_rs_fs_string_op(4, argv0, nullptr);
-		CString result(buf.data, (int)buf.len);
-		nzbget_rs_free(buf);
-		return result;
-	}
 };
 
 class DiskFile
@@ -1097,110 +1041,17 @@ enum EDupeMode
 #endif
 
 
-inline const char* PossibleConfigLocations[] =
-	{
-		"~/.rustyget",
-		"~/.config/rustyget.conf",
-		"~/.config/rustyget/rustyget.conf",
-		"/etc/rustyget.conf",
-		"/usr/etc/rustyget.conf",
-		"/usr/local/etc/rustyget.conf",
-		"/opt/etc/rustyget.conf",
-		"~/usr/etc/rustyget.conf",
-		"~/.nzbget",
-		"~/.config/nzbget.conf",
-		"~/.config/nzbget/nzbget.conf",
-		"/etc/nzbget.conf",
-		"/usr/etc/nzbget.conf",
-		"/usr/local/etc/nzbget.conf",
-		"/opt/etc/nzbget.conf",
-		"~/usr/etc/nzbget.conf",
-		nullptr
-	};
-
 class Options;
 extern Options* g_Options;
 
 class Options
 {
 public:
- // Program options
-	static constexpr std::string_view CONFIGFILE = "ConfigFile";
-	static constexpr std::string_view APPBIN = "AppBin";
-	static constexpr std::string_view APPDIR = "AppDir";
-	static constexpr std::string_view APPVERSION = "Version";
-	static constexpr std::string_view MAINDIR = "MainDir";
-	static constexpr std::string_view DESTDIR = "DestDir";
-	static constexpr std::string_view INTERDIR = "InterDir";
-	static constexpr std::string_view TEMPDIR = "TempDir";
-	static constexpr std::string_view QUEUEDIR = "QueueDir";
-	static constexpr std::string_view NZBDIR = "NzbDir";
-	static constexpr std::string_view WEBDIR = "WebDir";
-	static constexpr std::string_view CONFIGTEMPLATE = "ConfigTemplate";
-	static constexpr std::string_view SCRIPTDIR = "ScriptDir";
-	static constexpr std::string_view REQUIREDDIR = "RequiredDir";
-	static constexpr std::string_view LOGFILE = "LogFile";
-	static constexpr std::string_view WRITELOG = "WriteLog";
-	static constexpr std::string_view LOCKFILE = "LockFile";
-	static constexpr std::string_view DAEMONUSERNAME = "DaemonUsername";
-	static constexpr std::string_view DUPESEARCH = "DupeSearch";
-	static constexpr std::string_view DUPESEARCHURL = "DupeSearchUrl";
-	static constexpr std::string_view CONTROLIP = "ControlIP";
-	static constexpr std::string_view CONTROLUSERNAME = "ControlUsername";
-	static constexpr std::string_view CONTROLPASSWORD = "ControlPassword";
-	static constexpr std::string_view RESTRICTEDUSERNAME = "RestrictedUsername";
-	static constexpr std::string_view RESTRICTEDPASSWORD = "RestrictedPassword";
-	static constexpr std::string_view ADDUSERNAME = "AddUsername";
-	static constexpr std::string_view ADDPASSWORD = "AddPassword";
-	static constexpr std::string_view SECURECERT = "SecureCert";
-	static constexpr std::string_view SECUREKEY = "SecureKey";
-	static constexpr std::string_view CERTSTORE = "CertStore";
-	static constexpr std::string_view AUTHORIZEDIP = "AuthorizedIP";
-	static constexpr std::string_view RENAMEIGNOREEXT = "RenameIgnoreExt";
-	static constexpr std::string_view UNRARCMD = "UnrarCmd";
-	static constexpr std::string_view SEVENZIPCMD = "SevenZipCmd";
-	static constexpr std::string_view UNPACKPASSFILE = "UnpackPassFile";
-	static constexpr std::string_view SCRIPTORDER = "ScriptOrder";
-	static constexpr std::string_view EXTENSIONS = "Extensions";
-	static constexpr std::string_view EXTCLEANUPDISK = "ExtCleanupDisk";
-	static constexpr std::string_view PARIGNOREEXT = "ParIgnoreExt";
-	static constexpr std::string_view UNPACKIGNOREEXT = "UnpackIgnoreExt";
-	static constexpr std::string_view SHELLOVERRIDE = "ShellOverride";
-
-	enum EWriteLog
-	{
-		wlNone,
-		wlAppend,
-		wlReset,
-		wlRotate
-	};
-	enum EMessageTarget
-	{
-		mtNone,
-		mtScreen,
-		mtLog,
-		mtBoth
-	};
-	enum EOutputMode
-	{
-		omLoggable,
-		omColored,
-		omNCurses
-	};
-	enum EParCheck
-	{
-		pcAuto,
-		pcAlways,
-		pcForce,
-		pcManual
-	};
-	enum EParScan
-	{
-		psLimited,
-		psExtended,
-		psFull,
-		psDupe
-	};
+	enum EWriteLog { wlNone, wlAppend, wlReset, wlRotate };
+	enum EMessageTarget { mtNone, mtScreen, mtLog, mtBoth };
+	enum EOutputMode { omLoggable, omColored, omNCurses };
+	enum EParCheck { pcAuto, pcAlways, pcForce, pcManual };
+	enum EParScan { psLimited, psExtended, psFull, psDupe };
 	enum EDupeArticleFallback
 	{
 		// ordered by capability: every value includes the capabilities of the
@@ -1211,14 +1062,7 @@ public:
 		dafStream,
 		dafLive
 	};
-	enum EHealthCheck
-	{
-		hcPause,
-		hcDelete,
-		hcPark,
-		hcNone,
-		hcDupe
-	};
+	enum EHealthCheck { hcPause, hcDelete, hcPark, hcNone, hcDupe };
 	enum ESchedulerCommand
 	{
 		scPauseDownload,
@@ -1234,32 +1078,10 @@ public:
 		scDeactivateServer,
 		scFetchFeed
 	};
-	enum EPostStrategy
-	{
-		ppSequential,
-		ppBalanced,
-		ppAggressive,
-		ppRocket
-	};
-	enum EFileNaming
-	{
-		nfAuto,
-		nfArticle,
-		nfNzb
-	};
-	enum ECertVerifLevel
-	{
-		cvNone,
-		cvMinimal,
-		cvStrict,
-		Count
-	};
-	
-	enum ENzbDirArchiveAction
-	{
-		Delete,
-		Move
-	};
+	enum EPostStrategy { ppSequential, ppBalanced, ppAggressive, ppRocket };
+	enum EFileNaming { nfAuto, nfArticle, nfNzb };
+	enum ECertVerifLevel { cvNone, cvMinimal, cvStrict, Count };
+	enum ENzbDirArchiveAction { Delete, Move };
 
 	class OptEntry
 	{
@@ -1430,53 +1252,10 @@ public:
 		Init("rustyget/rustyget", nullptr, true, commandLineOptions, true, extender);
 	}
 
-	~Options() { g_Options = nullptr; }
-
-	static bool SplitOptionString(const char* option, CString& optName, CString& optValue)
+	~Options()
 	{
-		NzbgetRsBuf nameBuf{}, valBuf{};
-		if (!nzbget_rs_options_split_and_convert(option, &nameBuf, &valBuf))
-		{
-			return false;
-		}
-
-		optName.Set(nameBuf.data ? nameBuf.data : "", (int)nameBuf.len);
-		optValue.Set(valBuf.data ? valBuf.data : "", (int)valBuf.len);
-		nzbget_rs_free(nameBuf);
-		nzbget_rs_free(valBuf);
-
-		return true;
-	}
-
-	static void ConvertOldOptions(OptEntries* optEntries)
-	{
-		if (!optEntries) return;
-		std::vector<const char*> names;
-		std::vector<const char*> values;
-		names.reserve(optEntries->size());
-		values.reserve(optEntries->size());
-		for (const OptEntry& opt : *optEntries)
-		{
-			names.push_back(opt.GetName() ? opt.GetName() : "");
-			values.push_back(opt.GetValue() ? opt.GetValue() : "");
-		}
-		nzbget_rs_options_convert_old_options(
-			names.data(),
-			values.data(),
-			names.size(),
-			optEntries,
-			[](void* ctx, size_t idx, const char* name, const char* value)
-			{
-				auto* entries = static_cast<OptEntries*>(ctx);
-				if (idx < entries->size())
-				{
-					(*entries)[idx].m_value = value;
-				}
-				else
-				{
-					entries->emplace_back(name, value);
-				}
-			});
+		nzbget_rs_options_free(m_rs);
+		g_Options = nullptr;
 	}
 
 	bool GetFatalError() { return m_fatalError; }
@@ -1485,24 +1264,23 @@ public:
 	void CreateSchedulerTask(int id, const char* time, const char* weekDays,
 		ESchedulerCommand command, const char* param)
 	{
-		NzbgetRsOptionsHost host = MakeHost();
-		nzbget_rs_options_create_scheduler_task(&host, id, time, weekDays, (int)command, param);
+		m_configErrors = nzbget_rs_options_task(
+			m_rs, id, time, weekDays, static_cast<int>(command), param, this, &HostCb) != 0;
 	}
 
-	// Options
-	const char* GetConfigFilename() const { return m_configFilename; }
+	const char* GetConfigFilename() const { return Str(0); }
 	bool GetConfigErrors() const { return m_configErrors; }
-	const char* GetAppDir() const { return m_appDir; }
-	const char* GetMainDir() const { return m_mainDir; }
-	const char* GetDestDir() const { return m_destDir; }
-	const char* GetInterDir() const { return m_interDir; }
-	const char* GetTempDir() const { return m_tempDir; }
-	const char* GetQueueDir() const { return m_queueDir; }
-	const char* GetNzbDir() const { return m_nzbDir; }
-	const char* GetWebDir() const { return m_webDir; }
-	const char* GetConfigTemplate() const { return m_configTemplate; }
-	const char* GetScriptDir() const { return m_scriptDir; }
-	const char* GetRequiredDir() const { return m_requiredDir; }
+	const char* GetAppDir() const { return Str(1); }
+	const char* GetMainDir() const { return Str(2); }
+	const char* GetDestDir() const { return Str(3); }
+	const char* GetInterDir() const { return Str(4); }
+	const char* GetTempDir() const { return Str(5); }
+	const char* GetQueueDir() const { return Str(6); }
+	const char* GetNzbDir() const { return Str(7); }
+	const char* GetWebDir() const { return Str(8); }
+	const char* GetConfigTemplate() const { return Str(9); }
+	const char* GetScriptDir() const { return Str(10); }
+	const char* GetRequiredDir() const { return Str(11); }
 	bool GetSystemHealthCheck() const { return m_scalars.system_health_check != 0; }
 	bool GetNzbLog() const { return m_scalars.nzb_log != 0; }
 	EMessageTarget GetInfoTarget() const { return (EMessageTarget)m_scalars.info_target; }
@@ -1529,8 +1307,8 @@ public:
 	int GetDupeStreamTimeout() const { return m_scalars.dupe_stream_timeout; }
 	bool GetDupeSearch() const { return m_scalars.dupe_search != 0; }
 	bool GetDupeSearchDryRun() const { return m_scalars.dupe_search_dry_run != 0; }
-	const char* GetDupeSearchUrl() const { return m_dupeSearchUrl; }
-	const char* GetDupeSearchApiKey() const { return m_dupeSearchApiKey; }
+	const char* GetDupeSearchUrl() const { return Str(12); }
+	const char* GetDupeSearchApiKey() const { return Str(13); }
 	int GetDupeSearchDelay() const { return m_scalars.dupe_search_delay; }
 	int GetDupeSearchMaxDonors() const { return m_scalars.dupe_search_max_donors; }
 	int GetDupeHealthPercent() const { return m_scalars.dupe_health_percent; }
@@ -1540,30 +1318,30 @@ public:
 	int GetDupeHealthBudget() const { return m_scalars.dupe_health_budget; }
 	int GetDupeMinAlive() const { return m_scalars.dupe_min_alive; }
 	int GetDupeFastDonors() const { return m_scalars.dupe_fast_donors; }
-	const char* GetControlIp() const { return m_controlIp; }
-	const char* GetControlUsername() const { return m_controlUsername; }
-	const char* GetControlPassword() const { return m_controlPassword; }
-	const char* GetRestrictedUsername() const { return m_restrictedUsername; }
-	const char* GetRestrictedPassword() const { return m_restrictedPassword; }
-	const char* GetAddUsername() const { return m_addUsername; }
-	const char* GetAddPassword() const { return m_addPassword; }
+	const char* GetControlIp() const { return Str(14); }
+	const char* GetControlUsername() const { return Str(15); }
+	const char* GetControlPassword() const { return Str(16); }
+	const char* GetRestrictedUsername() const { return Str(17); }
+	const char* GetRestrictedPassword() const { return Str(18); }
+	const char* GetAddUsername() const { return Str(19); }
+	const char* GetAddPassword() const { return Str(20); }
 	int GetControlPort() const { return m_scalars.control_port; }
 	bool GetFormAuth() const { return m_scalars.form_auth != 0; }
 	bool GetJsonP() const { return m_scalars.json_p != 0; }
 	bool GetSecureControl() const { return m_scalars.secure_control != 0; }
 	int GetSecurePort() const { return m_scalars.secure_port; }
-	const char* GetSecureCert() const { return m_secureCert; }
-	const char* GetSecureKey() const { return m_secureKey; }
-	const char* GetCertStore() const { return m_certStore; }
+	const char* GetSecureCert() const { return Str(21); }
+	const char* GetSecureKey() const { return Str(22); }
+	const char* GetCertStore() const { return Str(23); }
 	bool GetCertCheck() const { return m_scalars.cert_check != 0; }
-	const char* GetAuthorizedIp() const { return m_authorizedIp; }
-	const char* GetLockFile() const { return m_lockFile; }
-	const char* GetDaemonUsername() const { return m_daemonUsername; }
+	const char* GetAuthorizedIp() const { return Str(24); }
+	const char* GetLockFile() const { return Str(25); }
+	const char* GetDaemonUsername() const { return Str(26); }
 	EOutputMode GetOutputMode() const { return (EOutputMode)m_scalars.output_mode; }
 	int GetUrlConnections() const { return m_scalars.url_connections; }
 	int GetLogBuffer() const { return m_scalars.log_buffer; }
 	EWriteLog GetWriteLog() const { return (EWriteLog)m_scalars.write_log; }
-	const char* GetLogFile() const { return m_logFile; }
+	const char* GetLogFile() const { return Str(27); }
 	int GetRotateLog() const { return m_scalars.rotate_log; }
 	EParCheck GetParCheck() const { return (EParCheck)m_scalars.par_check; }
 	bool GetParRepair() const { return m_scalars.par_repair != 0; }
@@ -1575,8 +1353,8 @@ public:
 	int GetParThreads() const { return m_scalars.par_threads; }
 	bool GetRarRename() const { return m_scalars.rar_rename != 0; }
 	EHealthCheck GetHealthCheck() const { return (EHealthCheck)m_scalars.health_check; }
-	const char* GetScriptOrder() const { return m_scriptOrder; }
-	const char* GetExtensions() const { return m_extensions; }
+	const char* GetScriptOrder() const { return Str(28); }
+	const char* GetExtensions() const { return Str(29); }
 	int GetUMask() const { return m_scalars.umask; }
 	int GetUpdateInterval() const { return m_scalars.update_interval; }
 	bool GetCursesNzbName() const { return m_scalars.curses_nzb_name != 0; }
@@ -1601,15 +1379,15 @@ public:
 	bool GetDirectUnpack() const { return m_scalars.direct_unpack != 0; }
 	bool GetUseTempUnpackDir() const { return m_scalars.use_temp_unpack_dir != 0; }
 	bool GetUnpackCleanupDisk() const { return m_scalars.unpack_cleanup_disk != 0; }
-	const char* GetUnrarCmd() const { return m_unrarCmd; }
-	const char* GetUnpackPassFile() const { return m_unpackPassFile; }
+	const char* GetUnrarCmd() const { return Str(30); }
+	const char* GetUnpackPassFile() const { return Str(31); }
 	bool GetUnpackPauseQueue() const { return m_scalars.unpack_pause_queue != 0; }
-	const char* GetExtCleanupDisk() const { return m_extCleanupDisk; }
-	const char* GetParIgnoreExt() const { return m_parIgnoreExt; }
+	const char* GetExtCleanupDisk() const { return Str(32); }
+	const char* GetParIgnoreExt() const { return Str(33); }
 	bool GetPostDownloadRename() const { return m_scalars.post_download_rename != 0; }
 	bool GetRenameAfterUnpack() const { return m_scalars.rename_after_unpack != 0; }
-	const char* GetRenameIgnoreExt() const { return m_renameIgnoreExt; }
-	const char* GetUnpackIgnoreExt() const { return m_unpackIgnoreExt; }
+	const char* GetRenameIgnoreExt() const { return Str(34); }
+	const char* GetUnpackIgnoreExt() const { return Str(35); }
 	int GetFeedHistory() const { return m_scalars.feed_history; }
 	bool GetUrlForce() const { return m_scalars.url_force != 0; }
 	int GetTimeCorrection() const { return m_scalars.time_correction; }
@@ -1617,14 +1395,14 @@ public:
 	int GetArticleCache() const { return m_scalars.article_cache; }
 	int GetEventInterval() const { return m_scalars.event_interval; }
 	int GetMemoryPressureInterval() const { return m_scalars.memory_pressure_interval; }
-	const char* GetMemoryPressurePath() const { return m_memoryPressurePath; }
-	const std::string& GetShellOverride() const { return m_shellOverride; }
+	const char* GetMemoryPressurePath() const { return Str(36); }
+	const char* GetShellOverride() const { const char* s = Str(40); return s ? s : ""; }
 	int GetMonthlyQuota() const { return m_scalars.monthly_quota; }
 	int GetQuotaStartDay() const { return m_scalars.quota_start_day; }
 	int GetDailyQuota() const { return m_scalars.daily_quota; }
 	bool GetDirectRename() const { return m_scalars.direct_rename != 0; }
 	bool GetHardLinking() const { return m_scalars.hard_linking != 0; }
-	const char* GetHardLinkingIgnoreExt() const { return m_hardLinkingIgnoreExt; }
+	const char* GetHardLinkingIgnoreExt() const { return Str(37); }
 	bool GetReorderFiles() const { return m_scalars.reorder_files != 0; }
 	EFileNaming GetFileNaming() const { return (EFileNaming)m_scalars.file_naming; }
 	int GetDownloadRate() const { return m_scalars.download_rate; }
@@ -1632,21 +1410,7 @@ public:
 	Categories* GetCategories() { return &m_categories; }
 	const Categories* GetCategories() const { return &m_categories; }
 	Category* FindCategory(const char* name, bool searchAliases) { return m_categories.FindCategory(name, searchAliases); }
-	const char* GetOption(const char* optname)
-	{
-		OptEntry* optEntry = FindOption(optname);
-		if (optEntry)
-		{
-			if (optEntry->GetLineNo() > 0)
-			{
-				m_configLine = optEntry->GetLineNo();
-			}
-			return optEntry->GetValue();
-		}
-		return nullptr;
-	}
 
-	// Current state
 	void SetServerMode(bool serverMode) { m_serverMode = serverMode; }
 	bool GetServerMode() const { return m_serverMode; }
 	void SetDaemonMode(bool daemonMode) { m_daemonMode = daemonMode; }
@@ -1656,708 +1420,99 @@ public:
 	void SetDirectClientMode(bool directClientMode) { m_directClientMode = directClientMode; }
 	bool GetDirectClientMode() const { return m_directClientMode; }
 
-	const char* GetUnrarPath() const { return m_unrarPath ? *m_unrarPath : ""; }
-	const char* GetSevenZipPath() const { return m_sevenZipPath ? *m_sevenZipPath : ""; }
+	const char* GetUnrarPath() const { const char* s = Str(38); return s ? s : ""; }
+	const char* GetSevenZipPath() const { const char* s = Str(39); return s ? s : ""; }
 	const std::vector<fs::path>& GetScriptDirPaths() const { return m_scriptDirPaths; }
 
 private:
+	NzbgetRsOptions* m_rs = nullptr;
 	OptEntries m_optEntries;
 	Mutex m_optEntriesMutex;
 	Categories m_categories;
-	bool m_noDiskAccess = false;
-	bool m_noConfig = false;
-	bool m_fatalError = false;
-	Extender* m_extender;
-
-	// Options
 	std::vector<fs::path> m_scriptDirPaths;
-
+	Extender* m_extender = nullptr;
+	NzbgetRsParsedOptions m_scalars{};
+	bool m_fatalError = false;
 	bool m_configErrors = false;
-	int m_configLine = 0;
-	CString m_appDir;
-	CString m_configFilename;
-	CString m_mainDir;
-	CString m_destDir;
-	CString m_interDir;
-	CString m_tempDir;
-	CString m_queueDir;
-	CString m_nzbDir;
-	CString m_webDir;
-	CString m_configTemplate;
-	CString m_scriptDir;
-	CString m_requiredDir;
-	CString m_dupeSearchUrl;
-	CString m_dupeSearchApiKey;
-	CString m_controlIp;
-	CString m_controlUsername;
-	CString m_controlPassword;
-	CString m_restrictedUsername;
-	CString m_restrictedPassword;
-	CString m_addUsername;
-	CString m_addPassword;
-	CString m_secureCert;
-	CString m_secureKey;
-	CString m_certStore;
-	CString m_authorizedIp;
-	CString m_lockFile;
-	CString m_daemonUsername;
-	CString m_logFile;
-	CString m_hardLinkingIgnoreExt;
-	CString m_extensions;
-	CString m_scriptOrder;
-	CString m_unrarCmd;
-	CString m_sevenZipCmd;
-	CString m_unrarPath;
-	CString m_sevenZipPath;
-	CString m_unpackPassFile;
-	CString m_extCleanupDisk;
-	CString m_parIgnoreExt;
-	CString m_unpackIgnoreExt;
-	CString m_memoryPressurePath;
-	std::string m_shellOverride;
-	CString m_renameIgnoreExt;
-	NzbgetRsParsedOptions m_scalars = DefaultScalars();
-
-	// Application mode
 	bool m_serverMode = false;
 	bool m_daemonMode = false;
 	bool m_remoteClientMode = false;
 	bool m_directClientMode = false;
 
+	const char* Str(int id) const { return nzbget_rs_options_str(m_rs, id); }
+
 	void Init(const char* exeName, const char* configFilename, bool noConfig,
 		CmdOptList* commandLineOptions, bool noDiskAccess, Extender* extender)
-{
-	g_Options = this;
-	m_extender = extender;
-	m_noDiskAccess = noDiskAccess;
-	m_noConfig = noConfig;
-	m_configFilename = configFilename;
-
-	SetOption(CONFIGFILE.data(), "");
-
-	CString filename;
-	if (m_noDiskAccess)
 	{
-		filename = exeName;
-	}
-	else
-	{
-		filename = FileSystem::GetExeFileName(exeName);
-	}
-	FileSystem::NormalizePathSeparators(filename);
-	SetOption(APPBIN.data(), filename);
-	char* end = strrchr(filename, PATH_SEPARATOR);
-	if (end) *end = '\0';
-	SetOption(APPDIR.data(), filename);
-	m_appDir = *filename;
-
-	SetOption(APPVERSION.data(), Util::VersionRevision());
-
-	InitDefaults();
-
-	InitOptFile();
-	if (m_fatalError)
-	{
-		return;
-	}
-
-	if (commandLineOptions)
-	{
-		InitCommandLineOptions(commandLineOptions);
-	}
-
-	if (!m_configFilename && !noConfig)
-	{
-		printf("No configuration-file found\n");
-		printf("Please use option \"-c\" or put configuration-file in one of the following locations:\n");
-		int p = 0;
-		while (const char* filename = PossibleConfigLocations[p++])
-		{
-			printf("%s\n", filename);
-		}
-		m_fatalError = true;
-		return;
-	}
-
-	ConvertOldOptions(&m_optEntries);
-
-	CheckDirs();
-	InitOptions();
-	CheckOptions();
-
-	InitServers();
-	InitCategories();
-	InitScheduler();
-	InitFeeds();
-}
-
-	NzbgetRsOptionsHost MakeHost()
-	{
-		NzbgetRsOptionsHost host{};
-		host.ctx = this;
-		host.find_entry = [](void* ctx, const char* name, const char** outVal, const char** outDefVal, int* outLineNo) -> int
-		{
-			auto* self = static_cast<Options*>(ctx);
-			OptEntry* optEntry = self->FindOption(name);
-			if (!optEntry)
-			{
-				return 0;
-			}
-			if (outVal) *outVal = optEntry->GetValue();
-			if (outDefVal) *outDefVal = optEntry->GetDefValue();
-			if (outLineNo) *outLineNo = optEntry->GetLineNo();
-			return 1;
-		};
-		host.set_entry_raw_value = [](void* ctx, const char* name, const char* value)
-		{
-			auto* self = static_cast<Options*>(ctx);
-			if (OptEntry* optEntry = self->FindOption(name))
-			{
-				optEntry->SetValue(value);
-			}
-		};
-		host.set_option = [](void* ctx, const char* name, const char* value)
-		{
-			static_cast<Options*>(ctx)->SetOption(name, value);
-		};
-		host.set_config_line = [](void* ctx, int line)
-		{
-			static_cast<Options*>(ctx)->m_configLine = line;
-		};
-		host.get_config_line = [](void* ctx) -> int
-		{
-			return static_cast<Options*>(ctx)->m_configLine;
-		};
-		host.config_error = [](void* ctx, const char* msg)
-		{
-			static_cast<Options*>(ctx)->ConfigError("%s", msg);
-		};
-		host.config_warn = [](void* ctx, const char* msg)
-		{
-			static_cast<Options*>(ctx)->ConfigWarn("%s", msg);
-		};
-		host.file_exists = [](void* /*ctx*/, const char* path) -> int
-		{
-			return FileSystem::FileExists(path) ? 1 : 0;
-		};
-		host.ensure_directory = [](void* ctx, const char* dir, char* errBuf, size_t errCap) -> int
-		{
-			auto* self = static_cast<Options*>(ctx);
-			CString errmsg;
-			if (!FileSystem::ForceDirectories(dir, errmsg))
-			{
-				if (errBuf && errCap > 0)
-				{
-					snprintf(errBuf, errCap, "%s", errmsg ? *errmsg : "");
-				}
-				return 0;
-			}
-			if (getuid() == 0 || geteuid() == 0)
-			{
-				struct passwd* pwd = getpwnam(self->GetOption(DAEMONUSERNAME.data()));
-				if (pwd != nullptr)
-				{
-					chown(dir, pwd->pw_uid, pwd->pw_gid);
-				}
-			}
-			return 1;
-		};
-		host.add_news_server = [](void* ctx, int id, int active, const char* name, const char* host,
-			int port, int ipVersion, const char* user, const char* pass, int joinGroup, int tls,
-			const char* cipher, int maxConnections, int retention, int level, int group, int optional,
-			uint32_t certVerifLevel)
-		{
-			auto* self = static_cast<Options*>(ctx);
-			if (self->m_extender)
-			{
-				self->m_extender->AddNewsServer(id, active != 0, name, host, port, ipVersion,
-					user, pass, joinGroup != 0, tls != 0, cipher, maxConnections, retention,
-					level, group, optional != 0, certVerifLevel);
-			}
-		};
-		host.add_feed = [](void* ctx, int id, const char* name, const char* url, int interval,
-			const char* filter, int backlog, int pauseNzb, const char* category, int categorySource,
-			int priority, const char* extensions, uint32_t certVerifLevel)
-		{
-			auto* self = static_cast<Options*>(ctx);
-			if (self->m_extender)
-			{
-				self->m_extender->AddFeed(id, name, url, interval, filter, backlog != 0, pauseNzb != 0,
-					category, categorySource, priority,
-					extensions, certVerifLevel);
-			}
-		};
-		host.add_task = [](void* ctx, int id, int hours, int minutes, int weekDaysBits,
-			int command, const char* param)
-		{
-			auto* self = static_cast<Options*>(ctx);
-			if (self->m_extender)
-			{
-				self->m_extender->AddTask(id, hours, minutes, weekDaysBits,
-					static_cast<ESchedulerCommand>(command), param);
-			}
-		};
-		host.add_category = [](void* ctx, const char* name, const char* destDir, int unpack,
-			const char* extensions, const char* const* aliases, size_t aliasesLen)
-		{
-			auto* self = static_cast<Options*>(ctx);
-			self->m_categories.emplace_back(name, destDir, unpack != 0, extensions);
-			Category& category = self->m_categories.back();
-			for (size_t i = 0; i < aliasesLen; ++i)
-			{
-				category.GetAliases()->push_back(aliases[i]);
-			}
-		};
-		return host;
-	}
-
-	static NzbgetRsParsedOptions DefaultScalars()
-	{
-		NzbgetRsParsedOptions s{};
-		s.info_target = mtScreen;
-		s.warning_target = mtScreen;
-		s.error_target = mtScreen;
-		s.debug_target = mtNone;
-		s.detail_target = mtScreen;
-		s.system_health_check = 1;
-		s.article_read_chunk_size = 4;
-		s.dupe_stream_timeout = 60;
-		s.dupe_search_delay = 20;
-		s.dupe_health_percent = 5;
-		s.dupe_health_min = 50;
-		s.dupe_health_max = 1000;
-		s.dupe_body_checks = 20;
-		s.dupe_health_budget = 120;
-		s.dupe_min_alive = 50;
-		s.dupe_fast_donors = 5;
-		s.output_mode = omLoggable;
-		s.write_log = wlAppend;
-		s.par_check = pcManual;
-		s.par_scan = psLimited;
-		s.par_quick = 1;
-		s.post_strategy = ppSequential;
-		s.health_check = hcNone;
-		s.nzb_dir_archive_scan = 1;
-		s.nzb_dir_archive_action = (int)ENzbDirArchiveAction::Move;
-		s.use_temp_unpack_dir = 1;
-		s.memory_pressure_interval = 500;
-		s.file_naming = nfArticle;
-		s.post_download_rename = 1;
-		s.rename_after_unpack = 1;
-		return s;
-	}
-
-	void ConfigError(const char* msg, ...)
-	{
-		char tmp2[1024];
-
-		va_list ap;
-		va_start(ap, msg);
-		vsnprintf(tmp2, 1024, msg, ap);
-		tmp2[1024-1] = '\0';
-		va_end(ap);
-
-		printf("%s(%i): %s\n", m_configFilename ? FileSystem::BaseFileName(m_configFilename) : "<noconfig>", m_configLine, tmp2);
-		error("%s(%i): %s", m_configFilename ? FileSystem::BaseFileName(m_configFilename) : "<noconfig>", m_configLine, tmp2);
-
-		m_configErrors = true;
-	}
-
-	void ConfigWarn(const char* msg, ...)
-	{
-		char tmp2[1024];
-
-		va_list ap;
-		va_start(ap, msg);
-		vsnprintf(tmp2, 1024, msg, ap);
-		tmp2[1024-1] = '\0';
-		va_end(ap);
-
-		const char* filename = m_configFilename ? FileSystem::BaseFileName(m_configFilename) : "<noconfig>";
-		printf("%s(%i): %s\n", filename, m_configLine, tmp2);
-		warn("%s(%i): %s", filename, m_configLine, tmp2);
-	}
-
-	void InitDefaults()
-	{
+		g_Options = this;
+		m_extender = extender;
+		int flags = 0;
 #ifdef DISABLE_CURSES
-		int disableCurses = 1;
-#else
-		int disableCurses = 0;
+		flags |= 1;
 #endif
-		nzbget_rs_options_init_defaults(
-			disableCurses,
-			[](void* ctx, const char* name, const char* value)
-			{
-				static_cast<Options*>(ctx)->SetOption(name, value);
-			},
-			this);
-	}
-
-	void InitOptFile()
-	{
-		if (!m_configFilename && !m_noConfig)
-		{
-			int found = 0;
-			NzbgetRsBuf foundBuf = nzbget_rs_options_find_default_config_file(
-				*m_appDir,
-				'/',
-				&found);
-			if (found)
-			{
-				m_configFilename.Set(foundBuf.data ? foundBuf.data : "", (int)foundBuf.len);
-			}
-			nzbget_rs_free(foundBuf);
-		}
-
-		if (m_configFilename)
-		{
-			CString filename = FileSystem::ExpandFileName(m_configFilename);
-			filename = FileSystem::ExpandHomePath(filename);
-
-			m_configFilename = *filename;
-
-			SetOption(CONFIGFILE.data(), m_configFilename);
-
-			LoadConfigFile();
-		}
-	}
-
-	void CheckDir(CString& dir, const char* optionName,
-		const char* parentDir, bool allowEmpty, bool create)
-	{
-		NzbgetRsOptionsHost host = MakeHost();
-		int hasDir = 0;
-		NzbgetRsBuf buf = nzbget_rs_options_check_dir(
-			&host, m_noDiskAccess ? 1 : 0, optionName, parentDir,
-			allowEmpty ? 1 : 0, create ? 1 : 0, &hasDir);
-		if (hasDir)
-		{
-			dir = buf.data ? buf.data : "";
-		}
-		else
-		{
-			dir = nullptr;
-		}
-		nzbget_rs_free(buf);
-	}
-
-	void CheckScriptDir()
-	{
-		NzbgetRsOptionsHost host = MakeHost();
-		int hasDir = 0;
-		NzbgetRsBuf buf = nzbget_rs_options_check_script_dir(
-			&host, m_noDiskAccess ? 1 : 0, m_mainDir, &hasDir);
-		if (hasDir)
-		{
-			m_scriptDir = buf.data ? buf.data : "";
-		}
-		else
-		{
-			m_scriptDir = nullptr;
-		}
-		nzbget_rs_free(buf);
-	}
-
-	void CheckDirs()
-	{
-		m_mainDir = GetOption(MAINDIR.data());
-
-		CheckDir(m_destDir, DESTDIR.data(), m_mainDir, false, true);
-		CheckDir(m_interDir, INTERDIR.data(), m_mainDir, true, true);
-		CheckDir(m_tempDir, TEMPDIR.data(), m_mainDir, false, true);
-		CheckDir(m_queueDir, QUEUEDIR.data(), m_mainDir, false, true);
-		CheckDir(m_webDir, WEBDIR.data(), nullptr, true, false);
-		CheckScriptDir();
-		CheckDir(m_nzbDir, NZBDIR.data(), m_mainDir, false, true);
-
-		Tokenizer tokDir(g_Options->GetScriptDir(), ",;");
-		while (const char* scriptDir = tokDir.Next())
-		{
-			m_scriptDirPaths.push_back(fs::u8path(scriptDir));
-		}
-	}
-
-	void InitOptions()
-	{
-		m_requiredDir = GetOption(REQUIREDDIR.data());
-
-		m_configTemplate		= GetOption(CONFIGTEMPLATE.data());
-		m_scriptOrder			= GetOption(SCRIPTORDER.data());
-		m_extensions			= GetOption(EXTENSIONS.data());
-		m_controlIp				= GetOption(CONTROLIP.data());
-		m_controlUsername		= GetOption(CONTROLUSERNAME.data());
-		m_controlPassword		= GetOption(CONTROLPASSWORD.data());
-		m_restrictedUsername	= GetOption(RESTRICTEDUSERNAME.data());
-		m_restrictedPassword	= GetOption(RESTRICTEDPASSWORD.data());
-		m_addUsername			= GetOption(ADDUSERNAME.data());
-		m_addPassword			= GetOption(ADDPASSWORD.data());
-		m_secureCert			= GetOption(SECURECERT.data());
-		m_secureKey				= GetOption(SECUREKEY.data());
-		m_certStore				= GetOption(CERTSTORE.data());
-		m_authorizedIp			= GetOption(AUTHORIZEDIP.data());
-		m_lockFile				= GetOption(LOCKFILE.data());
-		m_daemonUsername		= GetOption(DAEMONUSERNAME.data());
-		m_logFile				= GetOption(LOGFILE.data());
-		m_unrarCmd				= GetOption(UNRARCMD.data());
-		m_sevenZipCmd			= GetOption(SEVENZIPCMD.data());
-		m_unpackPassFile		= GetOption(UNPACKPASSFILE.data());
-		m_extCleanupDisk		= GetOption(EXTCLEANUPDISK.data());
-		m_parIgnoreExt			= GetOption(PARIGNOREEXT.data());
-		m_unpackIgnoreExt		= GetOption(UNPACKIGNOREEXT.data());
-
-		SetToolPathOption(m_unrarPath, m_unrarCmd ? *m_unrarCmd : "");
-		SetToolPathOption(m_sevenZipPath, m_sevenZipCmd ? *m_sevenZipCmd : "");
-
-		const char* shellOverride = GetOption(SHELLOVERRIDE.data());
-		m_shellOverride	= shellOverride ? shellOverride : "";
-
-		m_renameIgnoreExt 	    = GetOption(RENAMEIGNOREEXT.data());
-
-		NzbgetRsOptionsHost host = MakeHost();
-		int hasMemPath = 0, hasHlExt = 0, hasDupeUrl = 0, hasDupeKey = 0, warnDupeNoUrl = 0;
-		NzbgetRsBuf memPathBuf{}, hlExtBuf{}, dupeUrlBuf{}, dupeKeyBuf{};
-		nzbget_rs_options_init_scalars(
-			&host, &m_scalars,
-			&hasMemPath, &memPathBuf,
-			&hasHlExt, &hlExtBuf,
-			&hasDupeUrl, &dupeUrlBuf,
-			&hasDupeKey, &dupeKeyBuf,
-			&warnDupeNoUrl);
-		m_memoryPressurePath = hasMemPath ? (memPathBuf.data ? memPathBuf.data : "") : nullptr;
-		m_hardLinkingIgnoreExt = hasHlExt ? (hlExtBuf.data ? hlExtBuf.data : "") : nullptr;
-		m_dupeSearchUrl = hasDupeUrl ? (dupeUrlBuf.data ? dupeUrlBuf.data : "") : nullptr;
-		m_dupeSearchApiKey = hasDupeKey ? (dupeKeyBuf.data ? dupeKeyBuf.data : "") : nullptr;
-		nzbget_rs_free(memPathBuf);
-		nzbget_rs_free(hlExtBuf);
-		nzbget_rs_free(dupeUrlBuf);
-		nzbget_rs_free(dupeKeyBuf);
-
-		if (warnDupeNoUrl)
-		{
-			warn("Option <%s> is enabled but option <%s> is empty: no duplicates will be searched",
-				DUPESEARCH.data(), DUPESEARCHURL.data());
-		}
-	}
-
-	void SetOption(const char* optname, const char* value)
-	{
-		OptEntry* optEntry = FindOption(optname);
-		if (!optEntry)
-		{
-			m_optEntries.emplace_back(optname, nullptr);
-			optEntry = &m_optEntries.back();
-		}
-
-		CString curvalue;
-
-		if (value && (value[0] == '~') && (value[1] == '/') && !m_noDiskAccess)
-		{
-			curvalue = FileSystem::ExpandHomePath(value);
-		}
-		else
-		{
-			curvalue = value;
-		}
-
-		optEntry->SetLineNo(m_configLine);
-
-		if (curvalue)
-		{
-			NzbgetRsBuf expanded = nzbget_rs_options_expand_variables(
-				curvalue,
-				[](void* ctx, const char* name) -> const char*
-				{
-					return static_cast<Options*>(ctx)->GetOption(name);
-				},
-				this);
-			curvalue.Set(expanded.data ? expanded.data : "", (int)expanded.len);
-			nzbget_rs_free(expanded);
-		}
-
-		optEntry->SetValue(curvalue);
-	}
-
-	void SetToolPathOption(CString& pathOpt, std::string_view value)
-	{
-		if (value.empty()) return;
-
-		NzbgetRsBuf resolved = nzbget_rs_options_resolve_tool_path(value.data(), value.size());
-		pathOpt.Set(resolved.data ? resolved.data : "", (int)resolved.len);
-		nzbget_rs_free(resolved);
-	}
-
-	OptEntry* FindOption(const char* optname)
-	{
-		OptEntry* optEntry = m_optEntries.FindOption(optname);
-
-		if (optEntry && strcmp(optEntry->GetName(), optname ? optname : "") != 0)
-		{
-			optEntry->SetName(optname);
-		}
-
-		return optEntry;
-	}
-
-	void InitServers()
-	{
-		NzbgetRsOptionsHost host = MakeHost();
-#ifdef DISABLE_TLS
-		int disableTls = 1;
-#else
-		int disableTls = 0;
-#endif
-		NzbgetRsParsedOptions scalars = m_scalars;
-		nzbget_rs_options_init_servers(&host, disableTls, &scalars);
-		m_scalars = scalars;
-	}
-
-	void InitCategories()
-	{
-		NzbgetRsOptionsHost host = MakeHost();
-		nzbget_rs_options_init_categories(&host, m_noDiskAccess ? 1 : 0, m_destDir);
-	}
-
-	void InitFeeds()
-	{
-		NzbgetRsOptionsHost host = MakeHost();
-		nzbget_rs_options_init_feeds(&host);
-	}
-
-	void InitScheduler()
-	{
-		NzbgetRsOptionsHost host = MakeHost();
-		nzbget_rs_options_init_scheduler(&host);
-	}
-
-	void LoadConfigFile()
-	{
-		SetOption(CONFIGFILE.data(), m_configFilename);
-
-		m_configLine = 0;
-		if (!nzbget_rs_options_load_config_file(
-			m_configFilename,
-			this,
-			[](void* rawCtx, int lineNo, const char* line)
-			{
-				auto* self = static_cast<Options*>(rawCtx);
-				self->m_configLine = lineNo;
-				self->SetOptionString(line);
-			}))
-		{
-			ConfigError("Could not open file %s", *m_configFilename);
-			m_fatalError = true;
-			return;
-		}
-
-		m_configLine = 0;
-	}
-
-	void InitCommandLineOptions(CmdOptList* commandLineOptions)
-	{
-		for (const char* option : *commandLineOptions)
-		{
-			SetOptionString(option);
-		}
-	}
-
-	bool SetOptionString(const char* option)
-	{
-		CString optname;
-		CString optvalue;
-
-		if (!SplitOptionString(option, optname, optvalue))
-		{
-			ConfigError("Invalid option \"%s\"", option);
-			return false;
-		}
-
-		bool ok = ValidateOptionName(optname, optvalue);
-		if (ok)
-		{
-			SetOption(optname, optvalue);
-		}
-		else
-		{
-			ConfigError("Invalid option \"%s\"", *optname);
-		}
-
-		return ok;
-	}
-
-	bool ValidateOptionName(const char* optname, const char* optvalue)
-	{
-		auto predefined = [](void* ctx, const char* name) -> int
-		{
-			return static_cast<Options*>(ctx)->GetOption(name) != nullptr;
-		};
-		switch (nzbget_rs_validate_option_name(optname, predefined, this))
-		{
-			case 1:
-				return true;
-
-			case 2:
-				ConfigWarn("Option \"%s\" is obsolete, ignored", optname);
-				return true;
-
-			case 3:
-				if (!Util::EmptyStr(optvalue))
-				{
-					ConfigError("Option \"%s\" is obsolete, ignored, use \"%s\" and \"%s\" instead",
-						optname, SCRIPTDIR.data(), EXTENSIONS.data());
-				}
-				return true;
-
-			case 4:
-				ConfigWarn("Option \"%s\" is obsolete, ignored, use \"%s\" instead", optname, WRITELOG.data());
-				return true;
-
-			default:
-				return false;
-		}
-	}
-
-	void CheckOptions()
-	{
-		NzbgetRsOptionsHost host = MakeHost();
 #ifdef DISABLE_PARCHECK
-		int disableParcheck = 1;
-#else
-		int disableParcheck = 0;
-#endif
-#ifdef DISABLE_CURSES
-		int disableCurses = 1;
-#else
-		int disableCurses = 0;
+		flags |= 2;
 #endif
 #ifdef DISABLE_TLS
-		int disableTls = 1;
-#else
-		int disableTls = 0;
+		flags |= 4;
 #endif
 #ifdef HAVE_X509_CHECK_HOST
-		int haveX509CheckHost = 1;
-#else
-		int haveX509CheckHost = 0;
+		flags |= 8;
 #endif
-		int ctChanged = 0;
-		NzbgetRsParsedOptions scalars = m_scalars;
-		NzbgetRsBuf ctBuf = nzbget_rs_options_check_options(
-			&host, &scalars,
-			m_noDiskAccess ? 1 : 0,
-			sizeof(void*) == 4 ? 1 : 0,
-			disableParcheck, disableCurses, disableTls, haveX509CheckHost,
-			m_certStore.Empty() ? 1 : 0,
-			m_webDir ? *m_webDir : "",
-			m_configTemplate ? *m_configTemplate : nullptr,
-			m_unpackPassFile ? *m_unpackPassFile : nullptr,
-			&ctChanged);
-		m_scalars = scalars;
-		if (ctChanged)
+		int stateFlags = 0;
+		m_rs = nzbget_rs_options_new(
+			exeName, configFilename, noConfig ? 1 : 0, noDiskAccess ? 1 : 0,
+			commandLineOptions && !commandLineOptions->empty() ? commandLineOptions->data() : nullptr,
+			commandLineOptions ? commandLineOptions->size() : 0,
+			flags, Util::VersionRevision(), this, &HostCb, &m_scalars, &stateFlags);
+		m_fatalError = (stateFlags & 1) != 0;
+		m_configErrors = (stateFlags & 2) != 0;
+	}
+
+	static void HostCb(void* ctx, int op, const int* ints, const char* const* strs, size_t count)
+	{
+		auto* self = static_cast<Options*>(ctx);
+		if (op == 0) { printf("%s\n", strs[0]); return; }
+		if (op == 1) { printf("%s\n", strs[0]); error("%s", strs[0]); return; }
+		if (op == 2) { printf("%s\n", strs[0]); warn("%s", strs[0]); return; }
+		if (op == 3) { warn("%s", strs[0]); return; }
+		if (op == 4)
 		{
-			m_configTemplate.Set(ctBuf.data ? ctBuf.data : "", (int)ctBuf.len);
+			self->m_optEntries.emplace_back(strs[0], strs[1]);
+			auto& e = self->m_optEntries.back();
+			e.m_defValue = strs[2];
+			e.m_lineNo = ints[0];
+			return;
 		}
-		nzbget_rs_free(ctBuf);
+		if (op == 5)
+		{
+			self->m_categories.emplace_back(strs[0], strs[1], ints[0] != 0, strs[2]);
+			auto& cat = self->m_categories.back();
+			for (size_t i = 0; i < count; ++i) cat.GetAliases()->emplace_back(strs[3 + i]);
+			return;
+		}
+		if (op == 6)
+		{
+			for (size_t i = 0; i < count; ++i) self->m_scriptDirPaths.push_back(fs::u8path(strs[i]));
+			return;
+		}
+		if (!self->m_extender) return;
+		if (op == 7)
+		{
+			self->m_extender->AddNewsServer(ints[0], ints[1] != 0, strs[0], strs[1], ints[2], ints[3],
+				strs[2], strs[3], ints[4] != 0, ints[5] != 0, strs[4], ints[6], ints[7],
+				ints[8], ints[9], ints[10] != 0, static_cast<unsigned int>(ints[11]));
+		}
+		else if (op == 8)
+		{
+			self->m_extender->AddFeed(ints[0], strs[0], strs[1], ints[1], strs[2], ints[2] != 0,
+				ints[3] != 0, strs[3], ints[4], ints[5], strs[4], static_cast<unsigned int>(ints[6]));
+		}
+		else if (op == 9)
+		{
+			self->m_extender->AddTask(ints[0], ints[1], ints[2], ints[3],
+				static_cast<ESchedulerCommand>(ints[4]), strs[0]);
+		}
 	}
 };
 
@@ -3388,7 +2543,7 @@ public:
 		return m_retCode;
 	}
 
-	void BindSuppressErrors(const std::atomic<bool>* suppressErrors) { m_suppressErrors = suppressErrors; }
+	void BindSuppressErrors(uintptr_t suppressSlot) { m_suppressSlot = suppressSlot; }
 	const char* GetNegotiatedCipher() const { return m_session ? SSL_get_cipher_name(m_session.get()) : ""; }
 	int GetNegotiatedVersion() const { return m_session ? SSL_version(m_session.get()) : 0; }
 	static bool HasCertificateStore() { return static_cast<bool>(m_X509Store); }
@@ -3483,7 +2638,7 @@ private:
 	std::string m_cipher;
 
 	bool m_isClient;
-	const std::atomic<bool>* m_suppressErrors = nullptr;
+	uintptr_t m_suppressSlot = 0;
 	bool m_connected = false;
 	int m_probeFailure = -1;
 
@@ -3512,7 +2667,8 @@ private:
 			ERR_error_string_n(errcode, errstr, sizeof(errstr));
 			errstr[1024 - 1] = '\0';
 
-			if (suppressable && m_suppressErrors && m_suppressErrors->load())
+			if (suppressable && m_suppressSlot != 0 &&
+				nzbget_rs_conn_ctl(nullptr, 23, 0, m_suppressSlot, nullptr, nullptr, nullptr, 0) != 0)
 			{
 				debug("%s: %s", errMsg, errstr);
 			}
@@ -3775,11 +2931,6 @@ extern System::SystemInfo* g_SystemInfo;
 #endif
 
 
-static const int CONNECTION_READBUFFER_SIZE = 1024;
-// past the data read into a buffer: a decoder writing into it (uuencoded lines) may
-// write up to one line's worth more than it was given
-static const int DECODE_SLACK = 128;
-
 class Connection
 {
 public:
@@ -3799,364 +2950,148 @@ public:
 		ipV6 = 6
 	};
 
-	struct CancelRegistry
-	{
-		Mutex mutex;
-		std::vector<Connection*> conns;
-		bool stopped = false;
-	};
-	inline static thread_local std::shared_ptr<CancelRegistry> t_cancelRegistry;
-
 	static void Init() { debug("Initializing global connection data"); }
 	static void Final() {}
 
 	Connection(const char* host, int port, bool tls, bool registerCancel = true) :
-		m_host(host ? host : ""), m_port(port), m_tls(tls)
-	{
-		debug("Creating Connection");
-		m_readBuf.Reserve(CONNECTION_READBUFFER_SIZE + 1 + DECODE_SLACK);
-#ifndef DISABLE_TLS
-		m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
-#endif
-		if (registerCancel)
-		{
-			AttachCancelRegistry();
-		}
-	}
+		m_rs(nzbget_rs_conn_new(host ? host : "", port, tls ? 1 : 0, registerCancel ? 1 : 0, RsDbg(), this, &HostCb)) {}
 
 	Connection(SOCKET socket, bool tls) :
-		m_port(0), m_tls(tls), m_socket(socket), m_status(csConnected)
+		m_rs(nzbget_rs_conn_from_fd(socket, tls ? 1 : 0, 60, RsDbg(), this, &HostCb)) {}
+
+	explicit Connection(NzbgetRsConn* rs) : m_rs(rs)
 	{
-		debug("Creating Connection");
-		m_host = GetRemoteAddr();
-		m_readBuf.Reserve(CONNECTION_READBUFFER_SIZE + 1 + DECODE_SLACK);
-#ifndef DISABLE_TLS
-		m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
-#endif
+		nzbget_rs_conn_ctl(m_rs, 22, 0, reinterpret_cast<uintptr_t>(this), nullptr, nullptr, nullptr, 0);
 	}
 
-	virtual ~Connection()
-	{
-		debug("Destroying Connection");
-		if (m_cancelRegistry)
-		{
-			Guard guard(m_cancelRegistry->mutex);
-			auto& v = m_cancelRegistry->conns;
-			v.erase(std::remove(v.begin(), v.end(), this), v.end());
-		}
-		Connection::Disconnect();
-	}
+	virtual ~Connection() { nzbget_rs_conn_free(m_rs); }
 
-	void SetSuppressErrors(bool suppressErrors)
-	{
-		m_suppressErrors.store(suppressErrors);
-	}
-
-	virtual bool Connect()
-	{
-		debug("Connecting");
-		if (m_status == csConnected)
-		{
-			return true;
-		}
-		std::vector<const char*> resolved;
-		resolved.reserve(m_resolvedAddresses.size());
-		for (const auto& s : m_resolvedAddresses)
-		{
-			resolved.push_back(s.c_str());
-		}
-		NzbgetRsConnEnv env = MakeConnEnv();
-		env.resolved_addrs = resolved.empty() ? nullptr : resolved.data();
-		env.resolved_count = resolved.size();
-		bool res = nzbget_rs_conn_op(1, &env, nullptr, 0, nullptr, nullptr, nullptr, 0, nullptr) != 0;
-		if (m_status == csCancelled || Thread::IsCurrentThreadStopped())
-		{
-			res = false;
-		}
-#ifndef DISABLE_TLS
-		if (res && m_tls && !StartTls(true, "", ""))
-		{
-			res = false;
-		}
-#endif
-		if (res && m_status != csCancelled && !Thread::IsCurrentThreadStopped())
-		{
-			m_status = csConnected;
-		}
-		else
-		{
-			res = false;
-			DoDisconnect();
-		}
-		return res;
-	}
-
-	virtual bool Disconnect()
-	{
-		debug("Disconnecting");
-		if (m_status == csDisconnected && m_socket == INVALID_SOCKET)
-		{
-			return true;
-		}
-		DoDisconnect();
-		m_bufAvail = 0;
-		m_bufOffset = 0;
-		return true;
-	}
-
-	bool Bind()
-	{
-		debug("Binding");
-		NzbgetRsConnEnv env = MakeConnEnv();
-		return nzbget_rs_conn_op(0, &env, nullptr, 0, nullptr, nullptr, nullptr, 0, nullptr) != 0;
-	}
-
-	int WriteLine(const char* buffer)
-	{
-		NzbgetRsConnEnv env = MakeConnEnv();
-		return nzbget_rs_conn_op(10, &env, nullptr, 0, buffer, nullptr, nullptr, 0, nullptr);
-	}
-
-	bool Send(const char* buffer, int size)
-	{
-		debug("Sending data");
-		NzbgetRsConnEnv env = MakeConnEnv();
-		return nzbget_rs_conn_op(6, &env, const_cast<char*>(buffer), size, nullptr, nullptr, nullptr, 0, nullptr) != 0;
-	}
-
+	NzbgetRsConn* Handle() const { return m_rs; }
+	void SetSuppressErrors(bool s) { Ctl(5, s ? 1 : 0); }
+	virtual bool Connect() { return Ctl(0) != 0; }
+	virtual bool Disconnect() { return Ctl(1) != 0; }
+	bool Bind() { return Ctl(2) != 0; }
+	int WriteLine(const char* buffer) { return nzbget_rs_conn_io(m_rs, 0, const_cast<char*>(buffer), 0, nullptr); }
+	bool Send(const char* buffer, int size) { return nzbget_rs_conn_io(m_rs, 1, const_cast<char*>(buffer), size, nullptr) != 0; }
 	char* ReadLine(char* buffer, int size, int* bytesReadOut)
 	{
-		NzbgetRsConnEnv env = MakeConnEnv();
-		return nzbget_rs_conn_op(7, &env, buffer, size, nullptr, nullptr, nullptr, 0, bytesReadOut) != 0 ? buffer : nullptr;
+		return nzbget_rs_conn_io(m_rs, 2, buffer, size, bytesReadOut) != 0 ? buffer : nullptr;
 	}
-
 	std::unique_ptr<Connection> Accept()
 	{
-		debug("Accepting connection");
-		NzbgetRsConnEnv env = MakeConnEnv();
-		int accepted = nzbget_rs_conn_op(3, &env, nullptr, 0, nullptr, nullptr, nullptr, 0, nullptr);
-		if (accepted == INVALID_SOCKET)
-		{
-			return nullptr;
-		}
-		auto acceptedConnection = std::make_unique<Connection>(accepted, m_tls);
-		acceptedConnection->SetTimeout(m_timeout);
-		return acceptedConnection;
+		NzbgetRsConn* acc = nzbget_rs_conn_accept(m_rs);
+		return acc ? std::make_unique<Connection>(acc) : nullptr;
 	}
-
-	int TryRecv(char* buffer, int size)
+	int TryRecv(char* buffer, int size) { return nzbget_rs_conn_io(m_rs, 4, buffer, size, nullptr); }
+	bool Recv(char* buffer, int size) { return nzbget_rs_conn_io(m_rs, 3, buffer, size, nullptr) != 0; }
+	const char* GetHost() const { return reinterpret_cast<const char*>(Ctl(19)); }
+	void SetCipher(const char* cipher) { nzbget_rs_conn_ctl(m_rs, 7, 0, 0, cipher, nullptr, nullptr, 0); }
+	void SetTimeout(int timeout) { Ctl(6, timeout); }
+	void SetResolvedAddresses(const std::vector<std::string>& addresses)
 	{
-		NzbgetRsConnEnv env = MakeConnEnv();
-		return nzbget_rs_conn_op(11, &env, buffer, size, nullptr, nullptr, nullptr, 0, nullptr);
+		std::vector<const char*> ptrs;
+		ptrs.reserve(addresses.size());
+		for (const auto& s : addresses) ptrs.push_back(s.c_str());
+		nzbget_rs_conn_ctl(m_rs, 13, 0, 0, nullptr, nullptr, ptrs.empty() ? nullptr : ptrs.data(), ptrs.size());
 	}
-
-	bool Recv(char* buffer, int size)
+	void SetDeadline(std::shared_ptr<const SocketDeadline> deadline)
 	{
-		NzbgetRsConnEnv env = MakeConnEnv();
-		return nzbget_rs_conn_op(8, &env, buffer, size, nullptr, nullptr, nullptr, 0, nullptr) != 0;
+		m_deadline = std::move(deadline);
+		nzbget_rs_conn_ctl(m_rs, 12, 0, m_deadline ? reinterpret_cast<uintptr_t>(&m_deadline) : 0, nullptr, nullptr, nullptr, 0);
 	}
-
-	const char* GetHost() const { return m_host.c_str(); }
-	void SetCipher(const char* cipher) { m_cipher = cipher ? cipher : ""; }
-	void SetTimeout(int timeout) { m_timeout = timeout; }
-	void SetResolvedAddresses(const std::vector<std::string>& addresses) { m_resolvedAddresses = addresses; }
-	void SetDeadline(std::shared_ptr<const SocketDeadline> deadline) { m_deadline = std::move(deadline); }
 #ifndef DISABLE_TLS
-	const char* GetNegotiatedCipher() const { return m_tlsSocket ? m_tlsSocket->GetNegotiatedCipher() : ""; }
-	int GetNegotiatedVersion() const { return m_tlsSocket ? m_tlsSocket->GetNegotiatedVersion() : 0; }
-	int GetTlsProbeFailure() const { return m_tlsProbeFailure; }
-#endif
-	void SetIPVersion(EIPVersion ipVersion) { m_ipVersion = ipVersion; }
-	EStatus GetStatus() { return static_cast<EStatus>(m_status.load()); }
-	bool GetAcceptBusy() { return m_acceptBusy != 0; }
-	void SetBroken() { m_status = csBroken; }
-	void SetGracefull(bool gracefull) { m_gracefull = gracefull; }
-#ifndef DISABLE_TLS
-	void SetCertVerifLevel(unsigned int level) { m_certVerifLevel = level; }
+	const char* GetNegotiatedCipher() const { return reinterpret_cast<const char*>(Ctl(21)); }
+	int GetNegotiatedVersion() const { return static_cast<int>(Ctl(18)); }
+	int GetTlsProbeFailure() const { return static_cast<int>(Ctl(17)); }
+	void SetCertVerifLevel(unsigned int level) { Ctl(9, static_cast<int>(level)); }
 	bool StartTls(bool isClient, const char* certFile, const char* keyFile)
 	{
-		debug("Starting TLS");
-		m_tlsSocket = std::make_unique<TlsSocket>(m_socket.load(), isClient, m_host.c_str(), certFile, keyFile, m_cipher.c_str(), m_certVerifLevel);
-		m_tlsSocket->BindSuppressErrors(&m_suppressErrors);
-		m_tlsSocket->SetDeadline(m_deadline);
-		bool started = m_tlsSocket->Start();
-		m_tlsProbeFailure = m_tlsSocket->GetProbeFailure();
-		return started;
+		return nzbget_rs_conn_ctl(m_rs, 4, isClient ? 1 : 0, 0, certFile, keyFile, nullptr, 0) != 0;
 	}
 #endif
-	const char* GetRemoteAddr()
+	void SetIPVersion(EIPVersion ipVersion) { Ctl(8, static_cast<int>(ipVersion)); }
+	EStatus GetStatus() { return static_cast<EStatus>(Ctl(14)); }
+	bool GetAcceptBusy() { return Ctl(15) != 0; }
+	void SetBroken() { Ctl(11); }
+	void SetGracefull(bool gracefull) { Ctl(10, gracefull ? 1 : 0); }
+	const char* GetRemoteAddr() { return reinterpret_cast<const char*>(Ctl(20)); }
+	int FetchTotalBytesRead() { return static_cast<int>(Ctl(16)); }
+	void Cancel() { Ctl(3); }
+	void ReadBuffer(char** buffer, int* bufLen) { nzbget_rs_conn_io(m_rs, 5, reinterpret_cast<char*>(buffer), 0, bufLen); }
+
+	static int RsDbg()
 	{
-		if (!m_host.empty() && m_host.front() == '/')
+#ifdef DEBUG
+		return 1;
+#else
+		return 0;
+#endif
+	}
+
+	static intptr_t HostCb(void* ctx, int op, int a1, int a2, uintptr_t p1,
+		const char* s1, const char* s2, const char* s3, char* buf, int* outInt)
+	{
+		if (op == 0) { debug("%s", s1); return 0; }
+		if (op == 1)
 		{
-			return "-";
+			if (a1 != 0) debug("%s", s1);
+			else if (ctx) static_cast<Connection*>(ctx)->PrintError(s1);
+			else error("%s", s1);
+			return 0;
 		}
-		m_remoteAddr.Clear();
-		NzbgetRsConnEnv env = MakeConnEnv();
-		nzbget_rs_conn_op(4, &env, m_remoteAddr, m_remoteAddr.Capacity(), nullptr, nullptr, nullptr, 0, nullptr);
-		return m_remoteAddr;
-	}
-	int FetchTotalBytesRead()
-	{
-		int total = m_totalBytesRead;
-		m_totalBytesRead = 0;
-		return total;
-	}
-	void Cancel()
-	{
-		debug("Cancelling connection");
-		NzbgetRsConnEnv env{};
-		env.socket_atomic = reinterpret_cast<int*>(&m_socket);
-		env.status_atomic = reinterpret_cast<int*>(&m_status);
-		nzbget_rs_conn_op(5, &env, nullptr, 0, nullptr, nullptr, nullptr, 0, nullptr);
-	}
-	void ReadBuffer(char** buffer, int* bufLen)
-	{
-		*bufLen = static_cast<int>(m_bufAvail);
-		*buffer = static_cast<char*>(m_readBuf) + m_bufOffset;
-		m_bufAvail = 0;
+		if (op == 2)
+		{
+			const auto* dl = reinterpret_cast<const std::shared_ptr<const SocketDeadline>*>(p1);
+			return (Thread::IsCurrentThreadStopped() || (dl && *dl && (*dl)->Stopped())) ? 1 : 0;
+		}
+		if (op == 3)
+		{
+			const auto* dl = reinterpret_cast<const std::shared_ptr<const SocketDeadline>*>(p1);
+			return (dl && *dl && (*dl)->Wait(static_cast<SOCKET>(a1), a2 != 0, outInt && *outInt != 0)) ? 1 : 0;
+		}
+#ifndef DISABLE_TLS
+		if (op == 4)
+		{
+			const auto* ptrs = reinterpret_cast<const uintptr_t*>(p1);
+			auto* sock = new TlsSocket(static_cast<SOCKET>(a1), (a2 & 1) != 0,
+				s1 ? s1 : "", s2 ? s2 : "", s3 ? s3 : "", buf ? buf : "",
+				static_cast<unsigned int>((a2 >> 2) & 0xff));
+			sock->BindSuppressErrors(ptrs[1]);
+			const auto* dl = reinterpret_cast<const std::shared_ptr<const SocketDeadline>*>(ptrs[0]);
+			if (dl && *dl) sock->SetDeadline(*dl);
+			bool started = sock->Start();
+			if (outInt) { outInt[0] = started ? 1 : 0; outInt[1] = sock->GetProbeFailure(); }
+			return reinterpret_cast<intptr_t>(sock);
+		}
+		if (op == 5) return reinterpret_cast<TlsSocket*>(p1)->Send(s1, a1);
+		if (op == 6) return reinterpret_cast<TlsSocket*>(p1)->Recv(buf, a1);
+		if (op == 7)
+		{
+			auto* sock = reinterpret_cast<TlsSocket*>(p1);
+			if (a1) sock->Close();
+			delete sock;
+			return 0;
+		}
+		if (op == 9)
+		{
+			auto* sock = reinterpret_cast<TlsSocket*>(p1);
+			if (outInt) *outInt = sock->GetNegotiatedVersion();
+			return reinterpret_cast<intptr_t>(sock->GetNegotiatedCipher());
+		}
+		if (op == 10) { OpenSSL::StopSSLThread(); return 0; }
+#else
+		(void)s2; (void)s3; (void)buf;
+#endif
+		return 0;
 	}
 
 protected:
-	static_assert(std::atomic<int>::is_always_lock_free);
-	std::string m_host;
-	std::string m_cipher;
-	std::vector<std::string> m_resolvedAddresses;
 	std::shared_ptr<const SocketDeadline> m_deadline;
-	int m_port;
-	bool m_tls;
-	EIPVersion m_ipVersion = ipAuto;
-	std::atomic<int> m_socket{INVALID_SOCKET};
-	CharBuffer m_readBuf;
-	size_t m_bufOffset = 0;
-	size_t m_bufAvail = 0;
-	std::atomic<int> m_status{csDisconnected};
-	int m_timeout = 60;
-	std::atomic<bool> m_suppressErrors{true};
-	int m_isListener = 0;
-	int m_acceptBusy = 0;
-	int m_tlsError = 0;
-	BString<100> m_remoteAddr;
-	int m_totalBytesRead = 0;
-	bool m_gracefull = false;
-	std::shared_ptr<CancelRegistry> m_cancelRegistry;
-#ifndef DISABLE_TLS
-	unsigned int m_certVerifLevel = 0;
-	std::unique_ptr<TlsSocket> m_tlsSocket;
-	int m_tlsProbeFailure = -1;
-#endif
+	NzbgetRsConn* m_rs = nullptr;
 
-	void AttachCancelRegistry()
+	intptr_t Ctl(int op, int a1 = 0) const
 	{
-		if (t_cancelRegistry)
-		{
-			m_cancelRegistry = t_cancelRegistry;
-			Guard guard(m_cancelRegistry->mutex);
-			m_cancelRegistry->conns.push_back(this);
-			if (m_cancelRegistry->stopped)
-			{
-				m_status = csCancelled;
-				Cancel();
-			}
-		}
-	}
-
-	void DoDisconnect()
-	{
-		debug("Do disconnecting");
-#ifndef DISABLE_TLS
-		if (m_socket != INVALID_SOCKET && m_tlsSocket)
-		{
-			m_tlsSocket->Close();
-			m_tlsSocket.reset();
-		}
-#endif
-		NzbgetRsConnEnv env = MakeConnEnv();
-		nzbget_rs_conn_op(2, &env, nullptr, 0, nullptr, nullptr, nullptr, 0, nullptr);
-	}
-
-	int RawRecv(char* buf, int len)
-	{
-#ifndef DISABLE_TLS
-		if (m_tlsSocket)
-		{
-			m_tlsError = 0;
-			int received = m_tlsSocket->Recv(buf, len);
-			if (received < 0)
-			{
-				m_tlsError = 1;
-				return -1;
-			}
-			return received;
-		}
-#endif
-		return static_cast<int>(::recv(m_socket.load(), buf, static_cast<size_t>(len), 0));
-	}
-
-	int RawSend(const char* buf, int len)
-	{
-#ifndef DISABLE_TLS
-		if (m_tlsSocket)
-		{
-			m_tlsError = 0;
-			int sent = m_tlsSocket->Send(buf, len);
-			if (sent < 0)
-			{
-				m_tlsError = 1;
-				return -1;
-			}
-			return sent;
-		}
-#endif
-		return static_cast<int>(::send(m_socket.load(), buf, static_cast<size_t>(len), 0));
-	}
-
-	NzbgetRsConnEnv MakeConnEnv()
-	{
-		NzbgetRsConnEnv env{};
-		env.ctx = this;
-		env.host = m_host.c_str();
-		env.port = m_port;
-		env.ip_version = static_cast<int>(m_ipVersion);
-		env.timeout_sec = m_timeout;
-		env.graceful = (m_gracefull && m_status != csCancelled && !Thread::IsCurrentThreadStopped()) ? 1 : 0;
-		env.force_close = 0;
-		env.has_deadline = m_deadline ? 1 : 0;
-		env.socket_atomic = reinterpret_cast<int*>(&m_socket);
-		env.status_atomic = reinterpret_cast<int*>(&m_status);
-		env.is_listener = &m_isListener;
-		env.accept_busy = &m_acceptBusy;
-		env.tls_error = &m_tlsError;
-		env.buf_offset = &m_bufOffset;
-		env.buf_avail = &m_bufAvail;
-		env.total_bytes_read = &m_totalBytesRead;
-		env.read_buf = reinterpret_cast<uint8_t*>(static_cast<char*>(m_readBuf));
-		env.read_buf_cap = static_cast<size_t>(m_readBuf.Size());
-		env.send_cb = [](void* ctx, const char* buf, int len) -> int {
-			return static_cast<Connection*>(ctx)->RawSend(buf, len);
-		};
-		env.recv_cb = [](void* ctx, char* buf, int len) -> int {
-			return static_cast<Connection*>(ctx)->RawRecv(buf, len);
-		};
-		env.error_cb = [](void* ctx, const char* msg) {
-			auto* self = static_cast<Connection*>(ctx);
-			if (self->m_suppressErrors.load()) debug("%s", msg); else self->PrintError(msg);
-		};
-		env.debug_cb = [](void*, const char* msg) { debug("%s", msg); };
-		env.deadline_wait_cb = [](void* ctx, int fd, int r, int w) -> int {
-			auto* self = static_cast<Connection*>(ctx);
-			return (self->m_deadline && self->m_deadline->Wait(fd, r != 0, w != 0)) ? 1 : 0;
-		};
-		env.deadline_stopped_cb = [](void* ctx) -> int {
-			auto* self = static_cast<Connection*>(ctx);
-			return ((self->m_deadline && self->m_deadline->Stopped()) || Thread::IsCurrentThreadStopped()) ? 1 : 0;
-		};
-		return env;
-	}
-
-	void ReportError(const char* msgPrefix, const char* msgArg, bool printErrCode, int errCode = 0, const char* errMsg = nullptr)
-	{
-		NzbgetRsConnEnv env = MakeConnEnv();
-		nzbget_rs_conn_op(9, &env, nullptr, printErrCode ? 1 : 0, msgPrefix, msgArg, errMsg, errCode, nullptr);
+		return nzbget_rs_conn_ctl(m_rs, op, a1, 0, nullptr, nullptr, nullptr, 0);
 	}
 
 	virtual void PrintError(const char* errMsg) { error("%s", errMsg); }
@@ -4178,177 +3113,86 @@ public:
 		adFatalError
 	};
 
-	WebDownloader()
-	{
-		debug("Creating WebDownloader");
-		SetLastUpdateTimeNow();
-	}
-	EStatus GetStatus() { return m_status; }
-	virtual void Run() override
-	{
-		debug("Entering WebDownloader-loop");
-		ExecuteWebDl(1, 5);
-		debug("Exiting WebDownloader-loop");
-	}
-	virtual void Stop() override
-	{
-		debug("Trying to stop WebDownloader");
-		Thread::Stop();
-		Guard guard(m_connectionMutex);
-		if (m_connection)
-		{
-			m_connection->SetSuppressErrors(true);
-			m_connection->Cancel();
-		}
-		debug("WebDownloader stopped successfully");
-	}
+	WebDownloader() : m_rs(nzbget_rs_webdl_new(Connection::RsDbg(), &Connection::HostCb, this, &HostCb)) {}
+	~WebDownloader() override { nzbget_rs_webdl_free(m_rs); }
+	EStatus GetStatus() { return static_cast<EStatus>(nzbget_rs_webdl_ctl(m_rs, 3, 0, nullptr, nullptr, nullptr)); }
+	void Run() override { nzbget_rs_webdl_ctl(m_rs, 1, 0, nullptr, nullptr, nullptr); }
+	void Stop() override { Thread::Stop(); nzbget_rs_webdl_ctl(m_rs, 2, 0, nullptr, nullptr, nullptr); }
 	EStatus DownloadWithRedirects(int maxRedirects)
 	{
-		return ExecuteWebDl(0, maxRedirects);
+		return static_cast<EStatus>(nzbget_rs_webdl_ctl(m_rs, 0, maxRedirects, nullptr, nullptr, nullptr));
 	}
-	void SetInfoName(const char* infoName) { m_infoName = infoName; }
-	const char* GetInfoName() { return m_infoName; }
-	void SetUrl(const char* url) { m_url = url ? url : ""; }
-	const char* GetOutputFilename() { return m_outputFilename; }
-	void SetOutputFilename(const char* outputFilename) { m_outputFilename = outputFilename; }
-	time_t GetLastUpdateTime() { return m_lastUpdateTime; }
-	void SetLastUpdateTimeNow() { m_lastUpdateTime = Util::CurrentTime(); }
-	int GetHttpStatus() const { return m_httpStatus; }
-	const char* GetOriginalFilename() { return m_originalFilename; }
-	void SetForce(bool force) { m_force = force; }
-	void SetRetry(bool retry) { m_retry = retry; }
-#ifndef DISABLE_TLS
-	void SetCertVerifLevel(unsigned int level) { m_certVerifLevel = level; }
-#endif
-
-	void LogDebugInfo()
+	void SetInfoName(const char* infoName) { nzbget_rs_webdl_ctl(m_rs, 11, 0, infoName ? infoName : "", nullptr, nullptr); }
+	const char* GetInfoName() { return reinterpret_cast<const char*>(nzbget_rs_webdl_ctl(m_rs, 11, 0, nullptr, nullptr, nullptr)); }
+	void SetUrl(const char* url) { nzbget_rs_webdl_ctl(m_rs, 10, 0, url ? url : "", nullptr, nullptr); }
+	const char* GetOutputFilename() { return reinterpret_cast<const char*>(nzbget_rs_webdl_ctl(m_rs, 12, 0, nullptr, nullptr, nullptr)); }
+	void SetOutputFilename(const char* outputFilename) { nzbget_rs_webdl_ctl(m_rs, 12, 0, outputFilename ? outputFilename : "", nullptr, nullptr); }
+	time_t GetLastUpdateTime()
 	{
-		info("      Web-Download: status=%i, LastUpdateTime=%s, filename=%s", m_status,
-			*Util::FormatTime(m_lastUpdateTime.load()), FileSystem::BaseFileName(m_outputFilename));
+		int64_t t = 0;
+		nzbget_rs_webdl_ctl(m_rs, 5, 0, nullptr, &t, nullptr);
+		return static_cast<time_t>(t);
+	}
+	void SetLastUpdateTimeNow() { nzbget_rs_webdl_ctl(m_rs, 6, 0, nullptr, nullptr, nullptr); }
+	int GetHttpStatus() const { return static_cast<int>(nzbget_rs_webdl_ctl(m_rs, 4, 0, nullptr, nullptr, nullptr)); }
+	const char* GetOriginalFilename()
+	{
+		NzbgetRsBuf buf{};
+		nzbget_rs_webdl_ctl(m_rs, 13, 0, nullptr, nullptr, &buf);
+		m_originalFilename.Set(buf.data ? buf.data : "", static_cast<int>(buf.len));
+		nzbget_rs_free(buf);
+		return m_originalFilename;
+	}
+	void SetForce(bool force) { nzbget_rs_webdl_ctl(m_rs, 7, force ? 1 : 0, nullptr, nullptr, nullptr); }
+	void SetRetry(bool retry) { nzbget_rs_webdl_ctl(m_rs, 8, retry ? 1 : 0, nullptr, nullptr, nullptr); }
+#ifndef DISABLE_TLS
+	void SetCertVerifLevel(unsigned int level) { nzbget_rs_webdl_ctl(m_rs, 9, static_cast<int>(level), nullptr, nullptr, nullptr); }
+#endif
+	void LogDebugInfo() { nzbget_rs_webdl_ctl(m_rs, 14, 0, nullptr, nullptr, nullptr); }
+
+	static int HostCb(void* ctx, int op, int a1, const char* s1, int* outInts, const char** outStr)
+	{
+		auto* self = static_cast<WebDownloader*>(ctx);
+		if (op == 0)
+		{
+			outInts[0] = g_Options ? g_Options->GetWriteBuffer() : 0;
+			outInts[1] = g_Options ? g_Options->GetUrlRetries() : 1;
+			outInts[2] = g_Options ? g_Options->GetUrlInterval() : 0;
+			outInts[3] = g_Options ? g_Options->GetUrlTimeout() : 60;
+#ifdef DISABLE_TLS
+			outInts[4] = 1;
+#else
+			outInts[4] = 0;
+#endif
+#ifdef DISABLE_GZIP
+			outInts[5] = 1;
+#else
+			outInts[5] = 0;
+#endif
+			*outStr = Util::VersionRevision();
+			return 0;
+		}
+		if (op == 1) return ((self && self->IsStopped()) || Thread::IsCurrentThreadStopped()) ? 1 : 0;
+		if (op == 2) return (g_WorkState && g_WorkState->GetPauseDownload()) ? 1 : 0;
+		if (op == 3) { if (self) self->Notify(nullptr); return 0; }
+		if (op == 4) { if (self) self->ProcessHeader(s1); return 0; }
+		if (op == 5)
+		{
+			if (a1 == 0) debug("%s", s1);
+			else if (a1 == 1) detail("%s", s1);
+			else if (a1 == 2) warn("%s", s1);
+			else if (a1 == 3) error("%s", s1);
+			else info("%s", s1);
+		}
+		return 0;
 	}
 
 protected:
 	virtual void ProcessHeader([[maybe_unused]] const char* line) {}
 
 private:
-	CString m_url;
-	CString m_outputFilename;
-	std::unique_ptr<Connection> m_connection;
-	Mutex m_connectionMutex;
-	EStatus m_status = adUndefined;
-	std::atomic<time_t> m_lastUpdateTime{0};
-	CString m_infoName;
-	int m_httpStatus = 0;
+	NzbgetRsWebDl* m_rs = nullptr;
 	CString m_originalFilename;
-	bool m_force = false;
-	bool m_retry = true;
-#ifndef DISABLE_TLS
-	unsigned int m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
-#endif
-
-	EStatus ExecuteWebDl(int op, int maxRedirects)
-	{
-		NzbgetRsWebDlEnv env{};
-		env.ctx = this;
-		env.initial_url = m_url;
-		env.output_filename = m_outputFilename;
-		env.info_name = m_infoName;
-		env.version = Util::VersionRevision();
-		env.write_buffer_kb = g_Options ? g_Options->GetWriteBuffer() : 0;
-		env.url_retries = g_Options ? g_Options->GetUrlRetries() : 1;
-		env.url_interval_sec = g_Options ? g_Options->GetUrlInterval() : 0;
-		env.retry = m_retry ? 1 : 0;
-		env.force = m_force ? 1 : 0;
-#ifdef DISABLE_TLS
-		env.tls_disabled = 1;
-#endif
-#ifdef DISABLE_GZIP
-		env.gzip_disabled = 1;
-#endif
-		env.connect_cb = [](void* ctx, const char* host, int port, int tls) -> int {
-			auto* self = static_cast<WebDownloader*>(ctx);
-			Connection* conn = nullptr;
-			{
-				Guard guard(self->m_connectionMutex);
-				self->m_connection = std::make_unique<Connection>(host, port, tls != 0);
-#ifndef DISABLE_TLS
-				self->m_connection->SetCertVerifLevel(self->m_certVerifLevel);
-#endif
-				self->m_connection->SetTimeout(g_Options ? g_Options->GetUrlTimeout() : 60);
-				self->m_connection->SetSuppressErrors(false);
-				conn = self->m_connection.get();
-			}
-			return conn->Connect() ? 1 : 0;
-		};
-		env.free_conn_cb = [](void* ctx) {
-			auto* self = static_cast<WebDownloader*>(ctx);
-			if (self->m_connection)
-			{
-				debug("Releasing connection");
-				Guard guard(self->m_connectionMutex);
-				if (self->m_connection && self->m_connection->GetStatus() == Connection::csCancelled)
-				{
-					self->m_connection->Disconnect();
-				}
-				self->m_connection.reset();
-			}
-		};
-		env.write_line_cb = [](void* ctx, const char* line) {
-			auto* self = static_cast<WebDownloader*>(ctx);
-			if (self->m_connection) self->m_connection->WriteLine(line);
-		};
-		env.read_line_cb = [](void* ctx, char* buf, int size, int* outLen) -> int {
-			auto* self = static_cast<WebDownloader*>(ctx);
-			return (self->m_connection && self->m_connection->ReadLine(buf, size, outLen)) ? 1 : 0;
-		};
-		env.read_body_cb = [](void* ctx, char* buf, int size) -> int {
-			auto* self = static_cast<WebDownloader*>(ctx);
-			if (!self->m_connection) return -1;
-			char* rbuf = nullptr;
-			int rlen = 0;
-			self->m_connection->ReadBuffer(&rbuf, &rlen);
-			if (rlen > 0)
-			{
-				int copyLen = rlen < size ? rlen : size;
-				memcpy(buf, rbuf, static_cast<size_t>(copyLen));
-				return copyLen;
-			}
-			return self->m_connection->TryRecv(buf, size);
-		};
-		env.is_stopped_cb = [](void* ctx) -> int {
-			return (static_cast<WebDownloader*>(ctx)->IsStopped() || Thread::IsCurrentThreadStopped()) ? 1 : 0;
-		};
-		env.is_paused_cb = [](void*) -> int {
-			return (g_WorkState && g_WorkState->GetPauseDownload()) ? 1 : 0;
-		};
-		env.touch_time_cb = [](void* ctx) {
-			static_cast<WebDownloader*>(ctx)->SetLastUpdateTimeNow();
-		};
-		env.set_status_cb = [](void* ctx, int status) {
-			auto* self = static_cast<WebDownloader*>(ctx);
-			self->m_status = static_cast<EStatus>(status);
-			self->Notify(nullptr);
-		};
-		env.set_http_status_cb = [](void* ctx, int httpStatus) {
-			static_cast<WebDownloader*>(ctx)->m_httpStatus = httpStatus;
-		};
-		env.set_orig_filename_cb = [](void* ctx, const char* filename) {
-			static_cast<WebDownloader*>(ctx)->m_originalFilename = filename;
-		};
-		env.set_url_cb = [](void* ctx, const char* url) {
-			static_cast<WebDownloader*>(ctx)->m_url = url;
-		};
-		env.on_header_cb = [](void* ctx, const char* line) {
-			static_cast<WebDownloader*>(ctx)->ProcessHeader(line);
-		};
-		env.on_log_cb = [](void*, int level, const char* msg) {
-			if (level == 0) debug("%s", msg);
-			else if (level == 1) detail("%s", msg);
-			else if (level == 2) warn("%s", msg);
-			else error("%s", msg);
-		};
-		return static_cast<EStatus>(nzbget_rs_webdl_execute(op, maxRedirects, &env));
-	}
 };
 
 #endif
@@ -7502,192 +6346,34 @@ inline void NzbInfo::AddMessage(Message::EKind kind, const char * text, bool pri
 class NntpConnection : public Connection
 {
 public:
-	static constexpr int CONNECTION_LINEBUFFER_SIZE = 1024 * 10;
-
 	NntpConnection(NewsServer* newsServer, bool registerCancel = true) :
 		Connection(newsServer->GetHost(), newsServer->GetPort(), newsServer->GetTls(), registerCancel), m_newsServer(newsServer)
 	{
-		m_lineBuf.Reserve(CONNECTION_LINEBUFFER_SIZE);
 		SetCipher(newsServer->GetCipher());
 		SetIPVersion(newsServer->GetIpVersion() == 4 ? Connection::ipV4 :
 			(newsServer->GetIpVersion() == 6 ? Connection::ipV6 : Connection::ipAuto));
-
 #ifndef DISABLE_TLS
 		SetCertVerifLevel(newsServer->GetCertVerificationLevel());
 #endif
 	}
 
-	virtual bool Connect()
-	{
-		debug("Opening connection to %s", GetHost());
-
-		if (m_status == csConnected)
-		{
-			return true;
-		}
-		m_authRejected = false;
-		m_activeGroup = nullptr;
-
-		if (!Connection::Connect())
-		{
-			return false;
-		}
-
-		// rust/src/nntp.rs: the greeting, and the login when one is set
-		RsExchange exchange{this, nullptr};
-		NzbgetRsNntpIo io = exchange.Io();
-		int authError = m_authError, authRejected = m_authRejected;
-		int result = 0;
-		nzbget_rs_nntp_handshake(&io, &authError, &authRejected, &result);
-		m_authError = authError;
-		m_authRejected = authRejected;
-		exchange.Rethrow();
-		if (result != 0)
-		{
-			if (result == 1)
-			{
-				Disconnect();
-			}
-			return false;
-		}
-		return true;
-	}
-
-	virtual bool Disconnect()
-	{
-		if (m_status == csConnected)
-		{
-			Request("quit\r\n");
-		}
-		m_activeGroup = nullptr;
-		return Connection::Disconnect();
-	}
-
+	virtual bool Connect() override { return CallNntp(0, nullptr) != nullptr; }
+	virtual bool Disconnect() override { return CallNntp(1, nullptr) != nullptr; }
 	NewsServer* GetNewsServer() { return m_newsServer; }
-
-	const char* Request(const char* req)
-	{
-		if (!req)
-		{
-			return nullptr;
-		}
-
-		// rust/src/nntp.rs: the request, and a login when the server asks for one
-		RsExchange exchange{this, nullptr};
-		NzbgetRsNntpIo io = exchange.Io();
-		int authError = m_authError, authRejected = m_authRejected;
-		char* answer = nullptr;
-		nzbget_rs_nntp_request(&io, req, &authError, &authRejected, &answer);
-		m_authError = authError;
-		m_authRejected = authRejected;
-		exchange.Rethrow();
-		return answer;
-	}
-
-	const char* JoinGroup(const char* grp)
-	{
-		if (!m_activeGroup.Empty() && grp && !strcmp(*m_activeGroup, grp))
-		{
-			// already in group
-			strcpy(m_lineBuf, "211 ");
-			return m_lineBuf;
-		}
-
-		// rust/src/nntp.rs
-		RsExchange exchange{this, nullptr};
-		NzbgetRsNntpIo io = exchange.Io();
-		int authError = m_authError, authRejected = m_authRejected;
-		char* answer = nullptr;
-		int joined = 0;
-		nzbget_rs_nntp_join_group(&io, grp, &authError, &authRejected, &answer, &joined);
-		m_authError = authError;
-		m_authRejected = authRejected;
-		exchange.Rethrow();
-		if (joined)
-		{
-			m_activeGroup = grp;
-		}
-		return answer;
-	}
-
-	bool GetAuthError() { return m_authError; }
+	const char* Request(const char* req) { return CallNntp(2, req); }
+	const char* JoinGroup(const char* grp) { return CallNntp(3, grp); }
+	bool GetAuthError() { return CallNntp(4, nullptr) != nullptr; }
 	// the server refused the login for good (502), not for now (481: too many connections)
-	bool GetAuthRejected() { return m_authRejected; }
+	bool GetAuthRejected() { return CallNntp(5, nullptr) != nullptr; }
 
 private:
 	NewsServer* m_newsServer;
-	CString m_activeGroup;
-	CharBuffer m_lineBuf;
-	bool m_authError = false;
-	bool m_authRejected = false;
 
-#ifdef DEBUG
-	static constexpr bool RsDebugMessages = true;
-#else
-	static constexpr bool RsDebugMessages = false;
-#endif
-
-	// the connection as rust/src/nntp.rs drives it (NzbgetRsNntpIo)
-	struct RsExchange
+	const char* CallNntp(int op, const char* arg)
 	{
-		NntpConnection* connection;
-		std::exception_ptr error;
-
-		template <typename F>
-		static int Call(void* ctx, F f) noexcept
-		{
-			RsExchange* exchange = static_cast<RsExchange*>(ctx);
-			try
-			{
-				f(exchange->connection);
-				return 0;
-			}
-			catch (...)
-			{
-				exchange->error = std::current_exception();
-				return -1;
-			}
-		}
-
-		NzbgetRsNntpIo Io()
-		{
-			NewsServer* server = connection->m_newsServer;
-			return {this, RsWriteLine, RsReadLine, RsReportError, RsDebugMessages ? RsDebug : nullptr, RsCancelled, server->GetUser(),
-				server->GetPassword(), server->GetName(), server->GetHost(), connection->GetHost()};
-		}
-
-		void Rethrow()
-		{
-			if (error)
-			{
-				std::rethrow_exception(error);
-			}
-		}
-	};
-
-	static int RsWriteLine(void* ctx, const char* line)
-	{
-		return RsExchange::Call(ctx, [line](NntpConnection* c) { c->WriteLine(line); });
-	}
-
-	static int RsReadLine(void* ctx, char** line)
-	{
-		return RsExchange::Call(ctx, [line](NntpConnection* c) { *line = c->ReadLine(c->m_lineBuf, c->m_lineBuf.Size(), nullptr); });
-	}
-
-	static int RsReportError(void* ctx, const char* prefix, const char* arg)
-	{
-		return RsExchange::Call(ctx, [prefix, arg](NntpConnection* c) { c->ReportError(prefix, arg, false, 0); });
-	}
-
-	static int RsDebug(void* ctx, const char* msg)
-	{
-		return RsExchange::Call(ctx, [msg](NntpConnection*) { debug("%s", msg); });
-	}
-
-	static int RsCancelled(void* ctx, int* cancelled)
-	{
-		return RsExchange::Call(ctx, [cancelled](NntpConnection* c) { *cancelled = c->GetStatus() == csCancelled; });
+		return nzbget_rs_conn_nntp(m_rs, op, arg,
+			m_newsServer->GetUser(), m_newsServer->GetPassword(),
+			m_newsServer->GetName(), m_newsServer->GetHost());
 	}
 };
 
@@ -10824,7 +9510,7 @@ inline uintptr_t ScriptHostCb(
 	case 2:
 		if (a1 == 0)
 		{
-			strs[0] = g_Options ? g_Options->GetShellOverride().c_str() : "";
+			strs[0] = g_Options ? g_Options->GetShellOverride() : "";
 		}
 		else if (a1 == 1 && g_Options)
 		{
@@ -15508,8 +14194,6 @@ private:
  */
 
 
-static const int32 NZBMESSAGE_SIGNATURE = 0x6E7A6231; // = "nzb-XX" (protocol version)
-
 extern void ExitProc();
 
 class Frontend : public Thread
@@ -15744,16 +14428,28 @@ public:
 #ifndef DISABLE_TLS
 		OpenSSL::StopSSLThread();
 #endif
+		nzbget_rs_cancel_reg_free(m_cancelRegistry);
 	}
 
 	void Run() override
 	{
-		struct RegistryScope
-		{
-			explicit RegistryScope(std::shared_ptr<Connection::CancelRegistry> r) { Connection::t_cancelRegistry = std::move(r); }
-			~RegistryScope() { Connection::t_cancelRegistry.reset(); }
-		} scope(m_cancelRegistry);
-		Execute();
+#ifdef DISABLE_TLS
+		int tlsDisabled = 1;
+#else
+		int tlsDisabled = 0;
+#endif
+		nzbget_rs_req_proc_exec(
+			m_connection->Handle(), m_cancelRegistry, m_tls ? 1 : 0, tlsDisabled,
+			g_Options->GetSecurePort(), g_Options->GetControlPort(),
+			g_Options->GetSecureCert(), g_Options->GetSecureKey(),
+			this,
+			+[](void* ctx) { static_cast<RequestProcessor*>(ctx)->ServBinRpc(); },
+			+[](void* ctx, const char* sig) -> int {
+				return static_cast<RequestProcessor*>(ctx)->ServWebRequest(sig) ? 1 : 0;
+			},
+			+[](void*, int lvl, const char* msg) {
+				if (lvl == 0) debug("%s", msg); else warn("%s", msg);
+			});
 		Notify(nullptr);
 	}
 
@@ -15761,21 +14457,16 @@ public:
 	{
 		Thread::Stop();
 		m_connection->Cancel();
-		Guard guard(m_cancelRegistry->mutex);
-		m_cancelRegistry->stopped = true;
-		for (Connection* conn : m_cancelRegistry->conns)
-		{
-			conn->Cancel();
-		}
+		nzbget_rs_cancel_reg_stop(m_cancelRegistry);
 	}
 
 	void SetTls(bool tls) { m_tls = tls; }
 	void SetConnection(std::unique_ptr<Connection>&& connection) { m_connection = std::move(connection); }
 
 private:
-	bool m_tls;
+	bool m_tls = false;
 	std::unique_ptr<Connection> m_connection;
-	std::shared_ptr<Connection::CancelRegistry> m_cancelRegistry = std::make_shared<Connection::CancelRegistry>();
+	NzbgetRsCancelReg* m_cancelRegistry = nzbget_rs_cancel_reg_new();
 
 	bool ServWebRequest(const char* signature)
 	{
@@ -15806,7 +14497,7 @@ private:
 		env.add_password = g_Options->GetAddPassword();
 		env.authorized_ip = g_Options->GetAuthorizedIp();
 		env.config_filename = g_Options->GetConfigFilename();
-		env.shell_override = g_Options->GetShellOverride().c_str();
+		env.shell_override = g_Options->GetShellOverride();
 		env.control_port = g_Options->GetControlPort();
 		env.form_auth = g_Options->GetFormAuth() ? 1 : 0;
 		env.json_p = g_Options->GetJsonP() ? 1 : 0;
@@ -15959,25 +14650,16 @@ private:
 					return ok ? 1 : 0;
 				}
 				case 18: {
-					CString tempFileName;
-					for (int num = 1; num == 1 || FileSystem::FileExists(tempFileName); num++)
-						tempFileName.Format("%s%creadurl-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, num);
-					auto downloader = std::make_unique<WebDownloader>();
-					downloader->SetUrl(s1 ? s1 : "");
-					downloader->SetForce(true);
-					downloader->SetRetry(false);
-					downloader->SetOutputFilename(tempFileName);
-					downloader->SetInfoName(s2 ? s2 : "");
-					bool ok = downloader->DownloadWithRedirects(5) == WebDownloader::adFinished;
-					downloader.reset();
-					if (ok)
-					{
-						CharBuffer fileContent;
-						FileSystem::LoadFileIntoBuffer(tempFileName, fileContent, true);
-						const char* p = (const char*)fileContent ? (const char*)fileContent : "";
-						setBuf(p, strlen(p));
-					}
-					FileSystem::DeleteFile(tempFileName);
+#ifdef DEBUG
+					int dbg = 1;
+#else
+					int dbg = 0;
+#endif
+					NzbgetRsBuf buf{};
+					int ok = nzbget_rs_webdl_read_temp_url(
+						s1 ? s1 : "", s2 ? s2 : "", g_Options->GetTempDir(), dbg,
+						&Connection::HostCb, nullptr, &WebDownloader::HostCb, &buf);
+					if (ok && outBuf) *outBuf = buf; else nzbget_rs_free(buf);
 					return ok ? 1 : 0;
 				}
 				case 19: {
@@ -16054,30 +14736,18 @@ private:
 					return 1;
 				}
 				case 25: {
-					using namespace std::chrono;
 #ifdef DISABLE_TLS
-					Connection conn("speed.cloudflare.com", 80, false);
+					int tlsDis = 1;
 #else
-					Connection conn("speed.cloudflare.com", 443, true);
+					int tlsDis = 0;
 #endif
-					conn.SetTimeout(1);
-					if (!conn.Connect() || !conn.Send(body, bodyLen))
-					{
-						if (outU32) *outU32 = 0;
-						if (outF64) *outF64 = 0.0;
-						return 0;
-					}
-					uint32_t total = 0;
-					char buf[8 * 1024];
-					auto start = steady_clock::now();
-					while (int received = conn.TryRecv(buf, sizeof(buf)))
-					{
-						if (received <= 0 || duration<double>(steady_clock::now() - start).count() >= static_cast<double>(a1)) break;
-						total += static_cast<uint32_t>(received);
-					}
-					if (outU32) *outU32 = total;
-					if (outF64) *outF64 = duration<double>(steady_clock::now() - start).count();
-					return 1;
+#ifdef DEBUG
+					int dbg = 1;
+#else
+					int dbg = 0;
+#endif
+					return nzbget_rs_net_speedtest_iter(
+						body, bodyLen, a1, tlsDis, dbg, &Connection::HostCb, outU32, outF64);
 				}
 				case 26:
 					return nzbget_rs_command_script_start(
@@ -16640,251 +15310,99 @@ private:
 		};
 		nzbget_rs_binrpc_serve(&env);
 	}
-
-	void Execute()
-	{
-		bool ok = false;
-		m_connection->SetSuppressErrors(true);
-
-#ifndef DISABLE_TLS
-		if (m_tls && !m_connection->StartTls(false, g_Options->GetSecureCert(), g_Options->GetSecureKey()))
-		{
-			debug("Could not establish secure connection to web-client: Start TLS failed");
-			return;
-		}
-#endif
-
-		uint32 signature = 0;
-		if (!m_connection->Recv((char*)&signature, 4))
-		{
-			debug("Could not read request signature");
-			return;
-		}
-
-		if ((int)ntohl(signature) == (int)NZBMESSAGE_SIGNATURE)
-		{
-			ok = true;
-			ServBinRpc();
-		}
-		else if (!strncmp((char*)&signature, "POST", 4) ||
-			!strncmp((char*)&signature, "GET ", 4) ||
-			!strncmp((char*)&signature, "OPTI", 4))
-		{
-			ok = true;
-			while (ServWebRequest((char*)&signature))
-			{
-				if (!m_connection->Recv((char*)&signature, 4))
-				{
-					debug("Could not read request signature");
-					break;
-				}
-			}
-
-			m_connection->SetGracefull(true);
-			m_connection->Disconnect();
-		}
-
-		if (!ok)
-		{
-			warn("Non-RustyGet request received on port %i from %s",
-				m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort(),
-				m_connection->GetRemoteAddr());
-		}
-	}
 };
 
 class RemoteServer : public Thread, public Observer
 {
 public:
-	RemoteServer(bool tls) : m_tls(tls) {}
+	explicit RemoteServer(bool tls) : m_tls(tls)
+	{
+#ifdef DISABLE_TLS
+		int tlsDis = 1;
+#else
+		int tlsDis = 0;
+#endif
+#ifdef DEBUG
+		int dbg = 1;
+#else
+		int dbg = 0;
+#endif
+		m_rs = nzbget_rs_remote_srv_new(tls ? 1 : 0, tlsDis, dbg, &Connection::HostCb, this, &RemoteServer::HostCb);
+	}
 
 	~RemoteServer()
 	{
+		nzbget_rs_remote_srv_op(m_rs, 3, 0);
 #ifndef DISABLE_TLS
 		OpenSSL::StopSSLThread();
 #endif
 	}
 
-	void Run() override
-	{
-		debug("Entering RemoteServer-loop");
-
-#ifndef DISABLE_TLS
-		if (m_tls)
-		{
-			if (Util::EmptyStr(g_Options->GetSecureCert()) || !FileSystem::FileExists(g_Options->GetSecureCert()))
-			{
-				error("Could not initialize TLS, secure certificate is not configured or the cert-file was not found. Check option <SecureCert>");
-				return;
-			}
-
-			if (Util::EmptyStr(g_Options->GetSecureKey()) || !FileSystem::FileExists(g_Options->GetSecureKey()))
-			{
-				error("Could not initialize TLS, secure key is not configured or the key-file was not found. Check option <SecureKey>");
-				return;
-			}
-		}
-#endif
-
-		while (!IsStopped())
-		{
-			std::shared_ptr<Connection> conn;
-			bool needBind = false;
-			{
-				Guard guard(m_processorsMutex);
-				if (IsStopped())
-				{
-					break;
-				}
-				if (!m_connection)
-				{
-					m_connection = std::make_shared<Connection>(g_Options->GetControlIp(),
-						m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort(),
-						m_tls);
-					m_connection->SetTimeout(g_Options->GetRemoteTimeout());
-					m_connection->SetSuppressErrors(false);
-					needBind = true;
-				}
-				conn = m_connection;
-			}
-
-			bool bind = !needBind || conn->Bind();
-			if (IsStopped())
-			{
-				break;
-			}
-
-			std::unique_ptr<Connection> acceptedConnection;
-			if (bind)
-			{
-				acceptedConnection = conn->Accept();
-			}
-			if (bind && !acceptedConnection && conn->GetAcceptBusy() && !IsStopped())
-			{
-				Util::Sleep(200);
-				continue;
-			}
-			if (!bind || !acceptedConnection)
-			{
-				if (IsStopped())
-				{
-					break;
-				}
-				{
-					Guard guard(m_processorsMutex);
-					m_connection.reset();
-				}
-				Util::Sleep(500);
-				continue;
-			}
-
-			{
-				Guard guard(m_processorsMutex);
-				if (IsStopped())
-				{
-					break;
-				}
-				if ((int)m_activeProcessors.size() >= MaxProcessors)
-				{
-					time_t now = Util::CurrentTime();
-					if (now - m_lastCapWarning >= 60)
-					{
-						m_lastCapWarning = now;
-						warn("Too many connections to the web interface/API (%i); refusing new ones", MaxProcessors);
-					}
-					continue;
-				}
-				RequestProcessor* commandThread = new RequestProcessor();
-				commandThread->SetAutoDestroy(true);
-				commandThread->SetConnection(std::move(acceptedConnection));
-#ifndef DISABLE_TLS
-				commandThread->SetTls(m_tls);
-#endif
-				m_activeProcessors.push_back(commandThread);
-				commandThread->Attach(this);
-				try
-				{
-					commandThread->Start();
-				}
-				catch (const std::system_error& e)
-				{
-					m_activeProcessors.pop_back();
-					commandThread->Detach(this);
-					delete commandThread;
-					warn("Could not start a thread for a web interface/API connection: %s", e.what());
-					Util::Sleep(200);
-				}
-			}
-		}
-
-		std::shared_ptr<Connection> finalConn;
-		{
-			Guard guard(m_processorsMutex);
-			finalConn = std::move(m_connection);
-		}
-		if (finalConn)
-		{
-			finalConn->Disconnect();
-		}
-
-		debug("RemoteServer: waiting for request processor to complete");
-		bool completed = false;
-		while (!completed)
-		{
-			{
-				Guard guard(m_processorsMutex);
-				completed = m_activeProcessors.size() == 0;
-			}
-			Util::Sleep(100);
-		}
-		debug("RemoteServer: request processor are completed");
-
-		debug("Exiting RemoteServer-loop");
-	}
+	void Run() override { nzbget_rs_remote_srv_op(m_rs, 0, 0); }
 
 	void Stop() override
 	{
 		Thread::Stop();
-		debug("Stopping RequestProcessors");
-		{
-			Guard guard(m_processorsMutex);
-			if (m_connection)
-			{
-				m_connection->SetSuppressErrors(true);
-				m_connection->Cancel();
-			}
-			for (RequestProcessor* requestProcessor : m_activeProcessors)
-			{
-				requestProcessor->Stop();
-			}
-		}
-		debug("RequestProcessors are notified");
-		debug("RemoteServer stop end");
+		nzbget_rs_remote_srv_op(m_rs, 1, 0);
 	}
 
-	void Update(Subject* caller, void* aspect) override
+	void Update(Subject* caller, void*) override
 	{
-		(void)aspect;
-		debug("Notification from RequestProcessor received");
-
-		RequestProcessor* requestProcessor = (RequestProcessor*)caller;
-		Guard guard(m_processorsMutex);
-		auto it = std::find(m_activeProcessors.begin(), m_activeProcessors.end(), requestProcessor);
-		if (it != m_activeProcessors.end())
-		{
-			m_activeProcessors.erase(it);
-		}
+		nzbget_rs_remote_srv_op(m_rs, 2, reinterpret_cast<uintptr_t>(static_cast<RequestProcessor*>(caller)));
 	}
 
 private:
-	typedef std::deque<RequestProcessor*> RequestProcessors;
-
 	bool m_tls;
-	std::shared_ptr<Connection> m_connection;
-	RequestProcessors m_activeProcessors;
-	Mutex m_processorsMutex;
-	time_t m_lastCapWarning = 0;
-	static const int MaxProcessors = 256;
+	NzbgetRsRemoteServer* m_rs = nullptr;
+
+	static uintptr_t HostCb(void* ctx, int op, int a1, uintptr_t p1, const char* s1, int* outInts, const char** outStrs)
+	{
+		auto* self = static_cast<RemoteServer*>(ctx);
+		if (op == 0)
+		{
+			outInts[0] = self->m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort();
+			outInts[1] = g_Options->GetRemoteTimeout();
+			outStrs[0] = g_Options->GetControlIp();
+			outStrs[1] = g_Options->GetSecureCert();
+			outStrs[2] = g_Options->GetSecureKey();
+			return 0;
+		}
+		if (op == 1) return self->IsStopped() ? 1 : 0;
+		if (op == 2)
+		{
+			auto* commandThread = new RequestProcessor();
+			commandThread->SetAutoDestroy(true);
+			commandThread->SetConnection(std::make_unique<Connection>(reinterpret_cast<NzbgetRsConn*>(p1)));
+#ifndef DISABLE_TLS
+			commandThread->SetTls(a1 != 0);
+#endif
+			commandThread->Attach(self);
+			try
+			{
+				commandThread->Start();
+				return reinterpret_cast<uintptr_t>(commandThread);
+			}
+			catch (const std::system_error& e)
+			{
+				commandThread->Detach(self);
+				delete commandThread;
+				warn("Could not start a thread for a web interface/API connection: %s", e.what());
+				return 0;
+			}
+		}
+		if (op == 3)
+		{
+			reinterpret_cast<RequestProcessor*>(p1)->Stop();
+			return 0;
+		}
+		if (op == 4)
+		{
+			if (a1 == 0) debug("%s", s1);
+			else if (a1 == 1) warn("%s", s1);
+			else error("%s", s1);
+		}
+		return 0;
+	}
 };
 
 #endif

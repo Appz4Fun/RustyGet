@@ -1,0 +1,3019 @@
+//! Stateful networking, NNTP session, HTTP downloader, and RPC listener/processor
+//! runtime (`Connection`, `CancelRegistry`, `NntpConnection`, `WebDownloader`,
+//! `RemoteServer`, and `RequestProcessor::Execute`).
+
+use std::cell::{RefCell, UnsafeCell};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use crate::artwritercore::join_c_slices;
+use crate::socket::{
+    accept_connection, bind_listener, cancel_socket, connect_stream, disconnect_socket,
+    format_report_error, read_line, recv_exact, remote_addr, send_all, try_recv, write_line,
+    CONNECTION_READBUFFER_SIZE, CS_BROKEN, CS_CANCELLED, CS_CONNECTED, CS_DISCONNECTED,
+    INVALID_SOCKET,
+};
+use crate::webdownload::{
+    webdl_download_with_redirects, webdl_run_loop, WebDlConfig, WebDlIo, WebDlStatus,
+};
+
+const DECODE_SLACK: usize = 128;
+const NNTP_LINEBUF_SIZE: usize = 1024 * 10;
+const NZBMESSAGE_SIGNATURE: u32 = 0x6E7A_6231;
+const MAX_PROCESSORS: usize = 256;
+
+static NEXT_CONN_ID: AtomicUsize = AtomicUsize::new(1);
+
+/// Host callback bridging OpenSSL `TlsSocket`, `SocketDeadline`, thread-stop checks,
+/// and C++ `Connection::PrintError` / logging.
+///
+/// Operations:
+/// - `0`: `debug("%s", s1)`
+/// - `1`: `a1 != 0` (`suppress_errors`) -> `debug("%s", s1)` else `PrintError(s1)` / `error`
+/// - `2`: `is_stopped(deadline=p1)` -> `1` if stopped else `0`
+/// - `3`: `deadline_wait(deadline=p1, fd=a1, r=a2!=0, w=*out_int!=0)` -> `1` / `0`
+/// - `4`: `tls_start(fd=a1, flags_verif=a2, ptrs=p1 ([deadline, suppress_slot]), host=s1, cert=s2, key=s3, cipher=buf, out_int=[ok, probe_failure]) -> tls_sock`
+/// - `5`: `tls_send(tls_sock=p1, data=s1, len=a1) -> sent`
+/// - `6`: `tls_recv(tls_sock=p1, data=buf, len=a1) -> recvd`
+/// - `7`: `tls_close_free(tls_sock=p1, do_close=a1!=0)`
+/// - `9`: `tls_get_info(tls_sock=p1, out_ver=out_int) -> cipher_cstr as isize`
+/// - `10`: `OpenSSL::StopSSLThread()`
+pub type NzbgetRsConnHostFn = Option<
+    unsafe extern "C" fn(
+        ctx: *mut c_void,
+        op: c_int,
+        a1: c_int,
+        a2: c_int,
+        p1: usize,
+        s1: *const c_char,
+        s2: *const c_char,
+        s3: *const c_char,
+        buf: *mut c_char,
+        out_int: *mut c_int,
+    ) -> isize,
+>;
+
+fn bytes_to_cstring(raw: &[u8]) -> CString {
+    let nul = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    // SAFETY: slice up to first NUL contains no NUL bytes.
+    unsafe { CString::from_vec_unchecked(raw[..nul].to_vec()) }
+}
+
+unsafe fn opt_bytes<'a>(p: *const c_char) -> &'a [u8] {
+    if p.is_null() {
+        &[]
+    } else {
+        unsafe { CStr::from_ptr(p).to_bytes() }
+    }
+}
+
+pub struct ConnCancelSlot {
+    pub socket: AtomicI32,
+    pub status: AtomicI32,
+    pub suppress_errors: AtomicBool,
+    pub owner_ctx: AtomicUsize,
+    pub total_bytes_read: AtomicI32,
+    pub accept_busy: AtomicBool,
+    pub tls_probe_failure: AtomicI32,
+    pub debug_on: bool,
+    pub host_cb: NzbgetRsConnHostFn,
+}
+
+impl ConnCancelSlot {
+    fn new(
+        fd: c_int,
+        status: c_int,
+        debug_on: bool,
+        owner_ctx: usize,
+        host_cb: NzbgetRsConnHostFn,
+    ) -> Self {
+        Self {
+            socket: AtomicI32::new(fd),
+            status: AtomicI32::new(status),
+            suppress_errors: AtomicBool::new(true),
+            owner_ctx: AtomicUsize::new(owner_ctx),
+            total_bytes_read: AtomicI32::new(0),
+            accept_busy: AtomicBool::new(false),
+            tls_probe_failure: AtomicI32::new(-1),
+            debug_on,
+            host_cb,
+        }
+    }
+
+    fn emit_debug(&self, msg: &[u8]) {
+        if !self.debug_on {
+            return;
+        }
+        if let Some(cb) = self.host_cb {
+            let cs = bytes_to_cstring(msg);
+            let ctx = self.owner_ctx.load(Ordering::SeqCst);
+            unsafe {
+                cb(
+                    ctx as *mut c_void,
+                    0,
+                    0,
+                    0,
+                    0,
+                    cs.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+        }
+    }
+
+    pub fn set_suppress_errors(&self, sup: bool) {
+        self.suppress_errors.store(sup, Ordering::SeqCst);
+    }
+
+    pub fn cancel(&self, suppress: bool, _host_cb: NzbgetRsConnHostFn) {
+        if suppress {
+            self.set_suppress_errors(true);
+        }
+        self.emit_debug(b"Cancelling connection");
+        cancel_socket(false, &self.socket, &self.status);
+    }
+}
+
+pub struct NzbgetRsCancelReg {
+    inner: Mutex<(bool, Vec<(usize, Arc<ConnCancelSlot>)>)>,
+}
+
+impl Default for NzbgetRsCancelReg {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NzbgetRsCancelReg {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new((false, Vec::new())),
+        }
+    }
+
+    pub fn stop_all(&self) {
+        let slots: Vec<Arc<ConnCancelSlot>> = match self.inner.lock() {
+            Ok(mut g) => {
+                g.0 = true;
+                g.1.iter().map(|(_, s)| Arc::clone(s)).collect()
+            }
+            Err(p) => {
+                let mut g = p.into_inner();
+                g.0 = true;
+                g.1.iter().map(|(_, s)| Arc::clone(s)).collect()
+            }
+        };
+        for slot in slots {
+            slot.status.store(CS_CANCELLED, Ordering::SeqCst);
+            cancel_socket(false, &slot.socket, &slot.status);
+        }
+    }
+
+    fn detach(&self, id: usize) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.1.retain(|(eid, _)| *eid != id);
+        }
+    }
+}
+
+thread_local! {
+    static TL_CANCEL_REG: RefCell<Option<Arc<NzbgetRsCancelReg>>> = const { RefCell::new(None) };
+}
+
+struct CancelRegScope {
+    prev: Option<Arc<NzbgetRsCancelReg>>,
+}
+
+impl CancelRegScope {
+    fn enter(reg: Arc<NzbgetRsCancelReg>) -> Self {
+        let prev = TL_CANCEL_REG.with(|cell| cell.borrow_mut().replace(reg));
+        Self { prev }
+    }
+}
+
+impl Drop for CancelRegScope {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        TL_CANCEL_REG.with(|cell| {
+            *cell.borrow_mut() = prev;
+        });
+    }
+}
+
+struct ConnCore {
+    id: usize,
+    slot: Arc<ConnCancelSlot>,
+    cancel_reg: Option<Arc<NzbgetRsCancelReg>>,
+    host: CString,
+    cipher: CString,
+    resolved_addrs: Vec<Vec<u8>>,
+    deadline_ptr: usize,
+    tls_box: usize,
+    port: c_int,
+    tls: bool,
+    ip_version: c_int,
+    read_buf: Vec<u8>,
+    buf_offset: usize,
+    buf_avail: usize,
+    timeout: c_int,
+    is_listener: bool,
+    tls_error: bool,
+    remote_addr_cstr: CString,
+    graceful: bool,
+    cert_verif_level: u32,
+}
+
+impl ConnCore {
+    fn owner_ctx(&self) -> usize {
+        self.slot.owner_ctx.load(Ordering::SeqCst)
+    }
+
+    fn emit_debug(&self, msg: &[u8]) {
+        self.slot.emit_debug(msg);
+    }
+
+    fn emit_error(&self, msg: &[u8]) {
+        if let Some(cb) = self.slot.host_cb {
+            let cs = bytes_to_cstring(msg);
+            let sup = c_int::from(self.slot.suppress_errors.load(Ordering::SeqCst));
+            unsafe {
+                cb(
+                    self.owner_ctx() as *mut c_void,
+                    1,
+                    sup,
+                    0,
+                    0,
+                    cs.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+        }
+    }
+
+    fn is_stopped(&self) -> bool {
+        let Some(cb) = self.slot.host_cb else {
+            return false;
+        };
+        unsafe {
+            cb(
+                self.owner_ctx() as *mut c_void,
+                2,
+                0,
+                0,
+                self.deadline_ptr,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ) != 0
+        }
+    }
+
+    fn start_tls(&mut self, is_client: bool, cert_file: &CStr, key_file: &CStr) -> bool {
+        self.emit_debug(b"Starting TLS");
+        let Some(cb) = self.slot.host_cb else {
+            return false;
+        };
+        let ctx = self.owner_ctx();
+        let old_tb = std::mem::replace(&mut self.tls_box, 0);
+        if old_tb != 0 {
+            unsafe {
+                cb(
+                    ctx as *mut c_void,
+                    7,
+                    0,
+                    0,
+                    old_tb,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+        }
+        let fd = self.slot.socket.load(Ordering::SeqCst);
+        let flags_verif = c_int::from(is_client) | ((self.cert_verif_level as c_int) << 2);
+        let ptrs: [usize; 2] = [
+            self.deadline_ptr,
+            ptr::from_ref(&self.slot.suppress_errors) as usize,
+        ];
+        let mut out = [0 as c_int, -1 as c_int];
+        let new_tb = unsafe {
+            cb(
+                ctx as *mut c_void,
+                4,
+                fd,
+                flags_verif,
+                ptrs.as_ptr() as usize,
+                self.host.as_ptr(),
+                cert_file.as_ptr(),
+                key_file.as_ptr(),
+                self.cipher.as_ptr().cast_mut(),
+                out.as_mut_ptr(),
+            ) as usize
+        };
+        self.tls_box = new_tb;
+        self.slot.tls_probe_failure.store(out[1], Ordering::SeqCst);
+        out[0] != 0
+    }
+
+    fn close_tls_box(&mut self, do_close: bool) {
+        let tb = std::mem::replace(&mut self.tls_box, 0);
+        if tb != 0 {
+            if let Some(cb) = self.slot.host_cb {
+                unsafe {
+                    cb(
+                        self.owner_ctx() as *mut c_void,
+                        7,
+                        c_int::from(do_close),
+                        0,
+                        tb,
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn do_disconnect(&mut self) {
+        self.emit_debug(b"Do disconnecting");
+        let fd = self.slot.socket.load(Ordering::SeqCst);
+        self.close_tls_box(fd != INVALID_SOCKET);
+        let graceful = self.graceful
+            && self.slot.status.load(Ordering::SeqCst) != CS_CANCELLED
+            && !self.is_stopped();
+        disconnect_socket(
+            self.host.to_bytes(),
+            graceful,
+            &mut self.is_listener,
+            &self.slot.socket,
+            &self.slot.status,
+        );
+    }
+
+    fn disconnect_base(&mut self) -> bool {
+        self.emit_debug(b"Disconnecting");
+        if self.slot.status.load(Ordering::SeqCst) == CS_DISCONNECTED
+            && self.slot.socket.load(Ordering::SeqCst) == INVALID_SOCKET
+        {
+            self.close_tls_box(false);
+            return true;
+        }
+        self.do_disconnect();
+        self.buf_avail = 0;
+        self.buf_offset = 0;
+        true
+    }
+
+    fn connect_base(&mut self) -> bool {
+        #[cfg(unix)]
+        let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
+        self.emit_debug(b"Connecting");
+        if self.slot.status.load(Ordering::SeqCst) == CS_CONNECTED {
+            return true;
+        }
+        let resolved_slices: Vec<&[u8]> = self.resolved_addrs.iter().map(Vec::as_slice).collect();
+        let owner_ctx = self.owner_ctx();
+        let host_cb = self.slot.host_cb;
+        let debug_on = self.slot.debug_on;
+        let sup_ref = &self.slot.suppress_errors;
+        let deadline_ptr = self.deadline_ptr;
+        let on_err = |msg: &[u8]| {
+            if let Some(cb) = host_cb {
+                let cs = bytes_to_cstring(msg);
+                let sup = c_int::from(sup_ref.load(Ordering::SeqCst));
+                unsafe {
+                    cb(
+                        owner_ctx as *mut c_void,
+                        1,
+                        sup,
+                        0,
+                        0,
+                        cs.as_ptr(),
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    );
+                }
+            }
+        };
+        let on_dbg = |msg: &[u8]| {
+            if !debug_on {
+                return;
+            }
+            if let Some(cb) = host_cb {
+                let cs = bytes_to_cstring(msg);
+                unsafe {
+                    cb(
+                        owner_ctx as *mut c_void,
+                        0,
+                        0,
+                        0,
+                        0,
+                        cs.as_ptr(),
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    );
+                }
+            }
+        };
+        let mut res = connect_stream(
+            self.host.to_bytes(),
+            self.port,
+            self.ip_version,
+            self.timeout,
+            &resolved_slices,
+            deadline_ptr != 0,
+            |fd, r, w| {
+                let Some(cb) = host_cb else {
+                    return false;
+                };
+                let mut wf = c_int::from(w);
+                unsafe {
+                    cb(
+                        owner_ctx as *mut c_void,
+                        3,
+                        fd,
+                        c_int::from(r),
+                        deadline_ptr,
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null_mut(),
+                        &mut wf,
+                    ) != 0
+                }
+            },
+            || {
+                host_cb.map_or(false, |cb| unsafe {
+                    cb(
+                        owner_ctx as *mut c_void,
+                        2,
+                        0,
+                        0,
+                        deadline_ptr,
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    ) != 0
+                })
+            },
+            &self.slot.socket,
+            &self.slot.status,
+            &mut self.tls_error,
+            on_err,
+            on_dbg,
+        );
+        if self.slot.status.load(Ordering::SeqCst) == CS_CANCELLED || self.is_stopped() {
+            res = false;
+        }
+        if res && self.tls && !self.start_tls(true, c"", c"") {
+            res = false;
+        }
+        if res && self.slot.status.load(Ordering::SeqCst) != CS_CANCELLED && !self.is_stopped() {
+            self.slot.status.store(CS_CONNECTED, Ordering::SeqCst);
+        } else {
+            res = false;
+            self.do_disconnect();
+        }
+        res
+    }
+
+    fn bind(&mut self) -> bool {
+        #[cfg(unix)]
+        let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
+        self.emit_debug(b"Binding");
+        let owner_ctx = self.owner_ctx();
+        let host_cb = self.slot.host_cb;
+        let sup_ref = &self.slot.suppress_errors;
+        bind_listener(
+            self.host.to_bytes(),
+            self.port,
+            self.ip_version,
+            &self.slot.socket,
+            &self.slot.status,
+            &mut self.is_listener,
+            &mut self.tls_error,
+            |msg| {
+                if let Some(cb) = host_cb {
+                    let cs = bytes_to_cstring(msg);
+                    let sup = c_int::from(sup_ref.load(Ordering::SeqCst));
+                    unsafe {
+                        cb(
+                            owner_ctx as *mut c_void,
+                            1,
+                            sup,
+                            0,
+                            0,
+                            cs.as_ptr(),
+                            ptr::null(),
+                            ptr::null(),
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                        );
+                    }
+                }
+            },
+        )
+    }
+
+    fn accept_fd(&mut self) -> c_int {
+        #[cfg(unix)]
+        let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
+        self.emit_debug(b"Accepting connection");
+        let owner_ctx = self.owner_ctx();
+        let host_cb = self.slot.host_cb;
+        let sup_ref = &self.slot.suppress_errors;
+        let deadline_ptr = self.deadline_ptr;
+        let mut busy = self.slot.accept_busy.load(Ordering::SeqCst);
+        let fd = accept_connection(
+            self.host.to_bytes(),
+            self.timeout,
+            &self.slot.socket,
+            &self.slot.status,
+            &mut busy,
+            &mut self.tls_error,
+            || {
+                host_cb.map_or(false, |cb| unsafe {
+                    cb(
+                        owner_ctx as *mut c_void,
+                        2,
+                        0,
+                        0,
+                        deadline_ptr,
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    ) != 0
+                })
+            },
+            |msg| {
+                if let Some(cb) = host_cb {
+                    let cs = bytes_to_cstring(msg);
+                    let sup = c_int::from(sup_ref.load(Ordering::SeqCst));
+                    unsafe {
+                        cb(
+                            owner_ctx as *mut c_void,
+                            1,
+                            sup,
+                            0,
+                            0,
+                            cs.as_ptr(),
+                            ptr::null(),
+                            ptr::null(),
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                        );
+                    }
+                }
+            },
+        );
+        self.slot.accept_busy.store(busy, Ordering::SeqCst);
+        fd
+    }
+
+    fn raw_send_chunk(
+        slot: &ConnCancelSlot,
+        tb: usize,
+        owner_ctx: usize,
+        host_cb: NzbgetRsConnHostFn,
+        tls_error: &mut bool,
+        chunk: &[u8],
+    ) -> c_int {
+        if tb != 0 {
+            *tls_error = false;
+            let sent = host_cb.map_or(-1, |cb| unsafe {
+                cb(
+                    owner_ctx as *mut c_void,
+                    5,
+                    chunk.len() as c_int,
+                    0,
+                    tb,
+                    chunk.as_ptr().cast::<c_char>(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ) as c_int
+            });
+            if sent < 0 {
+                *tls_error = true;
+                return -1;
+            }
+            return sent;
+        }
+        unsafe {
+            libc::send(
+                slot.socket.load(Ordering::SeqCst),
+                chunk.as_ptr().cast(),
+                chunk.len(),
+                0,
+            ) as c_int
+        }
+    }
+
+    fn raw_recv_chunk(
+        slot: &ConnCancelSlot,
+        tb: usize,
+        owner_ctx: usize,
+        host_cb: NzbgetRsConnHostFn,
+        chunk: &mut [u8],
+        te: &mut bool,
+    ) -> c_int {
+        if tb != 0 {
+            *te = false;
+            let recvd = host_cb.map_or(-1, |cb| unsafe {
+                cb(
+                    owner_ctx as *mut c_void,
+                    6,
+                    chunk.len() as c_int,
+                    0,
+                    tb,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    chunk.as_mut_ptr().cast::<c_char>(),
+                    ptr::null_mut(),
+                ) as c_int
+            });
+            if recvd < 0 {
+                *te = true;
+                return -1;
+            }
+            return recvd;
+        }
+        *te = false;
+        unsafe {
+            libc::recv(
+                slot.socket.load(Ordering::SeqCst),
+                chunk.as_mut_ptr().cast(),
+                chunk.len(),
+                0,
+            ) as c_int
+        }
+    }
+
+    fn write_line_bytes(&mut self, line: &[u8]) -> c_int {
+        #[cfg(unix)]
+        let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
+        let owner_ctx = self.owner_ctx();
+        let tb = self.tls_box;
+        let slot = &self.slot;
+        let host_cb = slot.host_cb;
+        let tls_err = &mut self.tls_error;
+        write_line(&slot.status, line, |chunk| {
+            Self::raw_send_chunk(slot, tb, owner_ctx, host_cb, tls_err, chunk)
+        })
+    }
+
+    fn send_bytes(&mut self, data: &[u8]) -> bool {
+        #[cfg(unix)]
+        let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
+        self.emit_debug(b"Sending data");
+        let owner_ctx = self.owner_ctx();
+        let tb = self.tls_box;
+        let slot = &self.slot;
+        let host_cb = slot.host_cb;
+        let tls_err = &mut self.tls_error;
+        send_all(&slot.status, data, |chunk| {
+            Self::raw_send_chunk(slot, tb, owner_ctx, host_cb, tls_err, chunk)
+        })
+    }
+
+    fn read_line_slice(&mut self, dst: &mut [u8]) -> Option<usize> {
+        #[cfg(unix)]
+        let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
+        if self.slot.status.load(Ordering::SeqCst) != CS_CONNECTED || dst.is_empty() {
+            return None;
+        }
+        let owner_ctx = self.owner_ctx();
+        let tb = self.tls_box;
+        let slot = &self.slot;
+        let host_cb = slot.host_cb;
+        let mut delta = 0i32;
+        let res = read_line(
+            self.host.to_bytes(),
+            &slot.status,
+            &mut self.read_buf,
+            &mut self.buf_offset,
+            &mut self.buf_avail,
+            &mut delta,
+            dst,
+            &mut self.tls_error,
+            |chunk, te| Self::raw_recv_chunk(slot, tb, owner_ctx, host_cb, chunk, te),
+            |msg| {
+                if let Some(cb) = host_cb {
+                    let cs = bytes_to_cstring(msg);
+                    let sup = c_int::from(slot.suppress_errors.load(Ordering::SeqCst));
+                    unsafe {
+                        cb(
+                            owner_ctx as *mut c_void,
+                            1,
+                            sup,
+                            0,
+                            0,
+                            cs.as_ptr(),
+                            ptr::null(),
+                            ptr::null(),
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                        );
+                    }
+                }
+            },
+        );
+        if delta != 0 {
+            slot.total_bytes_read.fetch_add(delta, Ordering::SeqCst);
+        }
+        res
+    }
+
+    fn recv_exact_slice(&mut self, dst: &mut [u8]) -> bool {
+        #[cfg(unix)]
+        let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
+        if dst.is_empty() {
+            return true;
+        }
+        let owner_ctx = self.owner_ctx();
+        let tb = self.tls_box;
+        let slot = &self.slot;
+        let host_cb = slot.host_cb;
+        let mut delta = 0i32;
+        let ok = recv_exact(
+            self.host.to_bytes(),
+            &self.read_buf,
+            &mut self.buf_offset,
+            &mut self.buf_avail,
+            &mut delta,
+            dst,
+            &mut self.tls_error,
+            |chunk, te| Self::raw_recv_chunk(slot, tb, owner_ctx, host_cb, chunk, te),
+            |msg| {
+                if let Some(cb) = host_cb {
+                    let cs = bytes_to_cstring(msg);
+                    let sup = c_int::from(slot.suppress_errors.load(Ordering::SeqCst));
+                    unsafe {
+                        cb(
+                            owner_ctx as *mut c_void,
+                            1,
+                            sup,
+                            0,
+                            0,
+                            cs.as_ptr(),
+                            ptr::null(),
+                            ptr::null(),
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                        );
+                    }
+                }
+            },
+        );
+        if delta != 0 {
+            slot.total_bytes_read.fetch_add(delta, Ordering::SeqCst);
+        }
+        ok
+    }
+
+    fn try_recv_slice(&mut self, dst: &mut [u8]) -> c_int {
+        #[cfg(unix)]
+        let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
+        let owner_ctx = self.owner_ctx();
+        let tb = self.tls_box;
+        let slot = &self.slot;
+        let host_cb = slot.host_cb;
+        let mut delta = 0i32;
+        let n = try_recv(
+            self.host.to_bytes(),
+            &mut delta,
+            dst,
+            &mut self.tls_error,
+            |chunk, te| Self::raw_recv_chunk(slot, tb, owner_ctx, host_cb, chunk, te),
+            |msg| {
+                if let Some(cb) = host_cb {
+                    let cs = bytes_to_cstring(msg);
+                    let sup = c_int::from(slot.suppress_errors.load(Ordering::SeqCst));
+                    unsafe {
+                        cb(
+                            owner_ctx as *mut c_void,
+                            1,
+                            sup,
+                            0,
+                            0,
+                            cs.as_ptr(),
+                            ptr::null(),
+                            ptr::null(),
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                        );
+                    }
+                }
+            },
+        );
+        if delta != 0 {
+            slot.total_bytes_read.fetch_add(delta, Ordering::SeqCst);
+        }
+        n
+    }
+
+    fn report_error_msg(
+        &mut self,
+        prefix: &[u8],
+        arg: Option<&[u8]>,
+        print_code: bool,
+        code: c_int,
+    ) {
+        if let Some(formatted) =
+            format_report_error(&mut self.tls_error, prefix, arg, print_code, code, None)
+        {
+            self.emit_error(&formatted);
+        }
+    }
+
+    fn get_remote_addr(&mut self) -> &CStr {
+        let h = self.host.to_bytes();
+        if !h.is_empty() && h[0] == b'/' {
+            return c"-";
+        }
+        let ra = remote_addr(h, self.slot.socket.load(Ordering::SeqCst));
+        let cap = ra.len().min(99);
+        self.remote_addr_cstr = bytes_to_cstring(&ra[..cap]);
+        &self.remote_addr_cstr
+    }
+}
+
+struct ConnSession {
+    core: ConnCore,
+    nntp_active_group: Option<CString>,
+    nntp_line_buf: Option<Box<[u8; NNTP_LINEBUF_SIZE]>>,
+    nntp_auth: crate::nntp::Auth,
+}
+
+impl ConnSession {
+    fn nntp_connect(&mut self, user: &CStr, pass: &CStr, srv_name: &CStr, srv_host: &CStr) -> bool {
+        if self.core.slot.debug_on {
+            let msg = join_c_slices(&[b"Opening connection to ", self.core.host.to_bytes()]);
+            self.core.emit_debug(&msg);
+        }
+        if self.core.slot.status.load(Ordering::SeqCst) == CS_CONNECTED {
+            return true;
+        }
+        self.nntp_auth.rejected = false;
+        self.nntp_active_group = None;
+        if !self.core.connect_base() {
+            return false;
+        }
+        let line_buf = self
+            .nntp_line_buf
+            .get_or_insert_with(|| Box::new([0u8; NNTP_LINEBUF_SIZE]));
+        let conn_host = self.core.host.clone();
+        let mut io = DirectNntpIo {
+            core: &mut self.core,
+            line_buf,
+            user,
+            pass,
+            srv_name,
+            srv_host,
+            conn_host: &conn_host,
+        };
+        let result = crate::nntp::handshake(&mut io, &mut self.nntp_auth).unwrap_or(1);
+        if result != 0 {
+            if result == 1 {
+                self.nntp_disconnect(user, pass, srv_name, srv_host);
+            }
+            return false;
+        }
+        true
+    }
+
+    fn nntp_disconnect(
+        &mut self,
+        user: &CStr,
+        pass: &CStr,
+        srv_name: &CStr,
+        srv_host: &CStr,
+    ) -> bool {
+        if self.core.slot.status.load(Ordering::SeqCst) == CS_CONNECTED {
+            let _ = self.nntp_request(c"quit\r\n".as_ptr(), user, pass, srv_name, srv_host);
+        }
+        self.nntp_active_group = None;
+        self.core.disconnect_base()
+    }
+
+    fn nntp_request(
+        &mut self,
+        req: *const c_char,
+        user: &CStr,
+        pass: &CStr,
+        srv_name: &CStr,
+        srv_host: &CStr,
+    ) -> *const c_char {
+        if req.is_null() {
+            return ptr::null();
+        }
+        let line_buf = self
+            .nntp_line_buf
+            .get_or_insert_with(|| Box::new([0u8; NNTP_LINEBUF_SIZE]));
+        let conn_host = self.core.host.clone();
+        let mut io = DirectNntpIo {
+            core: &mut self.core,
+            line_buf,
+            user,
+            pass,
+            srv_name,
+            srv_host,
+            conn_host: &conn_host,
+        };
+        match unsafe { crate::nntp::request(&mut io, &mut self.nntp_auth, req) } {
+            Ok(ans) => ans.cast_const(),
+            Err(_) => ptr::null(),
+        }
+    }
+
+    fn nntp_join_group(
+        &mut self,
+        grp: *const c_char,
+        user: &CStr,
+        pass: &CStr,
+        srv_name: &CStr,
+        srv_host: &CStr,
+    ) -> *const c_char {
+        if !grp.is_null() {
+            let grp_cstr = unsafe { CStr::from_ptr(grp) };
+            if let Some(active) = self.nntp_active_group.as_deref() {
+                if !active.to_bytes().is_empty() && active == grp_cstr {
+                    let buf = self
+                        .nntp_line_buf
+                        .get_or_insert_with(|| Box::new([0u8; NNTP_LINEBUF_SIZE]));
+                    buf[..5].copy_from_slice(b"211 \0");
+                    return buf.as_ptr().cast::<c_char>();
+                }
+            }
+        } else {
+            return ptr::null();
+        }
+        let line_buf = self
+            .nntp_line_buf
+            .get_or_insert_with(|| Box::new([0u8; NNTP_LINEBUF_SIZE]));
+        let conn_host = self.core.host.clone();
+        let mut io = DirectNntpIo {
+            core: &mut self.core,
+            line_buf,
+            user,
+            pass,
+            srv_name,
+            srv_host,
+            conn_host: &conn_host,
+        };
+        match unsafe { crate::nntp::join_group(&mut io, &mut self.nntp_auth, grp) } {
+            Ok((ans, joined)) => {
+                if joined {
+                    let grp_cstr = unsafe { CStr::from_ptr(grp) };
+                    self.nntp_active_group = Some(grp_cstr.to_owned());
+                }
+                ans.cast_const()
+            }
+            Err(_) => ptr::null(),
+        }
+    }
+}
+
+pub struct NzbgetRsConn {
+    slot: Arc<ConnCancelSlot>,
+    host: CString,
+    session: UnsafeCell<ConnSession>,
+}
+
+// SAFETY: Cross-thread calls (`Cancel`, `SetSuppressErrors`, status/TLS/byte queries) borrow
+// `NzbgetRsConn` by shared `&self` and access only `slot` atomics and immutable `host`, never
+// `session`. Sequential owner-thread I/O borrows `session` inside `UnsafeCell`.
+unsafe impl Sync for NzbgetRsConn {}
+
+impl Drop for NzbgetRsConn {
+    fn drop(&mut self) {
+        let sess = self.session.get_mut();
+        sess.core.emit_debug(b"Destroying Connection");
+        if let Some(reg) = sess.core.cancel_reg.take() {
+            reg.detach(sess.core.id);
+        }
+        sess.core.disconnect_base();
+    }
+}
+
+impl NzbgetRsConn {
+    pub fn new_client(
+        host: &[u8],
+        port: c_int,
+        tls: bool,
+        register_cancel: bool,
+        debug_on: bool,
+        owner_ctx: usize,
+        host_cb: NzbgetRsConnHostFn,
+    ) -> Self {
+        let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
+        let slot = Arc::new(ConnCancelSlot::new(
+            INVALID_SOCKET,
+            CS_DISCONNECTED,
+            debug_on,
+            owner_ctx,
+            host_cb,
+        ));
+        let mut cancel_reg = None;
+        if register_cancel {
+            TL_CANCEL_REG.with(|cell| {
+                if let Some(reg) = cell.borrow().as_ref() {
+                    let reg_arc = Arc::clone(reg);
+                    let pre_stopped = match reg_arc.inner.lock() {
+                        Ok(mut g) => {
+                            g.1.push((id, Arc::clone(&slot)));
+                            g.0
+                        }
+                        Err(p) => {
+                            let mut g = p.into_inner();
+                            g.1.push((id, Arc::clone(&slot)));
+                            g.0
+                        }
+                    };
+                    if pre_stopped {
+                        slot.status.store(CS_CANCELLED, Ordering::SeqCst);
+                        cancel_socket(false, &slot.socket, &slot.status);
+                    }
+                    cancel_reg = Some(reg_arc);
+                }
+            });
+        }
+        let host_cstr = bytes_to_cstring(host);
+        let core = ConnCore {
+            id,
+            slot: Arc::clone(&slot),
+            cancel_reg,
+            host: host_cstr.clone(),
+            cipher: CString::default(),
+            resolved_addrs: Vec::new(),
+            deadline_ptr: 0,
+            tls_box: 0,
+            port,
+            tls,
+            ip_version: 0,
+            read_buf: vec![0u8; CONNECTION_READBUFFER_SIZE + 1 + DECODE_SLACK],
+            buf_offset: 0,
+            buf_avail: 0,
+            timeout: 60,
+            is_listener: false,
+            tls_error: false,
+            remote_addr_cstr: CString::default(),
+            graceful: false,
+            cert_verif_level: 2,
+        };
+        core.emit_debug(b"Creating Connection");
+        Self {
+            slot,
+            host: host_cstr,
+            session: UnsafeCell::new(ConnSession {
+                core,
+                nntp_active_group: None,
+                nntp_line_buf: None,
+                nntp_auth: crate::nntp::Auth::default(),
+            }),
+        }
+    }
+
+    pub fn from_accepted(
+        fd: c_int,
+        tls: bool,
+        timeout: c_int,
+        debug_on: bool,
+        owner_ctx: usize,
+        host_cb: NzbgetRsConnHostFn,
+    ) -> Self {
+        let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
+        let slot = Arc::new(ConnCancelSlot::new(
+            fd,
+            CS_CONNECTED,
+            debug_on,
+            owner_ctx,
+            host_cb,
+        ));
+        let mut core = ConnCore {
+            id,
+            slot: Arc::clone(&slot),
+            cancel_reg: None,
+            host: CString::default(),
+            cipher: CString::default(),
+            resolved_addrs: Vec::new(),
+            deadline_ptr: 0,
+            tls_box: 0,
+            port: 0,
+            tls,
+            ip_version: 0,
+            read_buf: vec![0u8; CONNECTION_READBUFFER_SIZE + 1 + DECODE_SLACK],
+            buf_offset: 0,
+            buf_avail: 0,
+            timeout,
+            is_listener: false,
+            tls_error: false,
+            remote_addr_cstr: CString::default(),
+            graceful: false,
+            cert_verif_level: 2,
+        };
+        core.emit_debug(b"Creating Connection");
+        let host_cstr = core.get_remote_addr().to_owned();
+        core.host = host_cstr.clone();
+        Self {
+            slot,
+            host: host_cstr,
+            session: UnsafeCell::new(ConnSession {
+                core,
+                nntp_active_group: None,
+                nntp_line_buf: None,
+                nntp_auth: crate::nntp::Auth::default(),
+            }),
+        }
+    }
+}
+
+struct DirectNntpIo<'a> {
+    core: &'a mut ConnCore,
+    line_buf: &'a mut [u8; NNTP_LINEBUF_SIZE],
+    user: &'a CStr,
+    pass: &'a CStr,
+    srv_name: &'a CStr,
+    srv_host: &'a CStr,
+    conn_host: &'a CStr,
+}
+
+unsafe impl crate::nntp::Io for DirectNntpIo<'_> {
+    fn write_line(&mut self, line: &CStr) -> Result<(), crate::nntp::Abort> {
+        self.core.write_line_bytes(line.to_bytes());
+        Ok(())
+    }
+
+    fn read_line(&mut self) -> Result<*mut c_char, crate::nntp::Abort> {
+        if self.core.read_line_slice(&mut self.line_buf[..]).is_some() {
+            Ok(self.line_buf.as_mut_ptr().cast::<c_char>())
+        } else {
+            Ok(ptr::null_mut())
+        }
+    }
+
+    fn report_error(&mut self, prefix: &CStr, arg: &CStr) -> Result<(), crate::nntp::Abort> {
+        self.core
+            .report_error_msg(prefix.to_bytes(), Some(arg.to_bytes()), false, 0);
+        Ok(())
+    }
+
+    fn debug(&mut self, msg: &CStr) -> Result<(), crate::nntp::Abort> {
+        self.core.emit_debug(msg.to_bytes());
+        Ok(())
+    }
+
+    fn debug_enabled(&self) -> bool {
+        self.core.slot.debug_on
+    }
+
+    fn cancelled(&mut self) -> Result<bool, crate::nntp::Abort> {
+        Ok(self.core.slot.status.load(Ordering::SeqCst) == CS_CANCELLED)
+    }
+
+    fn user(&self) -> &CStr {
+        self.user
+    }
+
+    fn password(&self) -> &CStr {
+        self.pass
+    }
+
+    fn name(&self) -> &CStr {
+        self.srv_name
+    }
+
+    fn host(&self) -> &CStr {
+        self.srv_host
+    }
+
+    fn conn_host(&self) -> &CStr {
+        self.conn_host
+    }
+}
+
+/// Host callback for `NzbgetRsWebDl`.
+///
+/// Operations:
+/// - `0`: query runtime options (`out_ints`: `[write_buffer_kb, url_retries, url_interval_sec, url_timeout, tls_disabled, gzip_disabled]`, `out_str`: `version`)
+/// - `1`: `is_stopped()` -> `1` / `0`
+/// - `2`: `is_paused()` -> `1` / `0`
+/// - `3`: `Notify(nullptr)` on status update (`a1 = status`)
+/// - `4`: `ProcessHeader(s1)`
+/// - `5`: `log(level=a1, msg=s1)` (`0=debug, 1=detail, 2=warn, 3=error, 4=info`)
+pub type NzbgetRsWebDlHostFn = Option<
+    unsafe extern "C" fn(
+        ctx: *mut c_void,
+        op: c_int,
+        a1: c_int,
+        s1: *const c_char,
+        out_ints: *mut c_int,
+        out_str: *mut *const c_char,
+    ) -> c_int,
+>;
+
+fn now_unix_sec() -> i64 {
+    #[cfg(unix)]
+    unsafe {
+        libc::time(ptr::null_mut()) as i64
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+pub struct NzbgetRsWebDl {
+    url: Mutex<CString>,
+    output_filename: UnsafeCell<CString>,
+    info_name: UnsafeCell<CString>,
+    original_filename: Mutex<CString>,
+    status: AtomicI32,
+    last_update_time: AtomicI64,
+    http_status: AtomicI32,
+    force: AtomicBool,
+    retry: AtomicBool,
+    cert_verif_level: AtomicI32,
+    active_slot: Mutex<Option<Arc<ConnCancelSlot>>>,
+    debug_on: bool,
+    conn_host_cb: NzbgetRsConnHostFn,
+    webdl_ctx: usize,
+    webdl_cb: NzbgetRsWebDlHostFn,
+}
+
+unsafe impl Sync for NzbgetRsWebDl {}
+
+impl NzbgetRsWebDl {
+    fn emit_log(&self, level: c_int, msg: &[u8]) {
+        if level == 0 && !self.debug_on {
+            return;
+        }
+        if let Some(cb) = self.webdl_cb {
+            let cs = bytes_to_cstring(msg);
+            unsafe {
+                cb(
+                    self.webdl_ctx as *mut c_void,
+                    5,
+                    level,
+                    cs.as_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+        }
+    }
+
+    fn execute(&self, op: c_int, max_redirects: c_int) -> c_int {
+        #[cfg(unix)]
+        let _cg = unsafe { crate::ffi::PosixCancelGuard::disable() };
+        if op == 1 {
+            self.emit_log(0, b"Entering WebDownloader-loop");
+        }
+        let mut ints = [0, 1, 0, 60, 0, 0];
+        let mut ver_ptr: *const c_char = ptr::null();
+        if let Some(cb) = self.webdl_cb {
+            unsafe {
+                cb(
+                    self.webdl_ctx as *mut c_void,
+                    0,
+                    0,
+                    ptr::null(),
+                    ints.as_mut_ptr(),
+                    &mut ver_ptr,
+                );
+            }
+        }
+        let ver_bytes = unsafe { opt_bytes(ver_ptr) };
+        let initial_url = self
+            .url
+            .lock()
+            .map(|g| g.to_bytes().to_vec())
+            .unwrap_or_default();
+        let out_fn = unsafe { (*self.output_filename.get()).to_bytes() };
+        let info_nm = unsafe { (*self.info_name.get()).to_bytes() };
+        let cfg = WebDlConfig {
+            initial_url: &initial_url,
+            output_filename: out_fn,
+            info_name: info_nm,
+            version: ver_bytes,
+            write_buffer_kb: ints[0],
+            url_retries: ints[1],
+            url_interval_sec: ints[2],
+            retry: self.retry.load(Ordering::SeqCst),
+            force: self.force.load(Ordering::SeqCst),
+            tls_disabled: ints[4] != 0,
+            gzip_disabled: ints[5] != 0,
+        };
+        let mut io = DirectWebDlIo {
+            dl: self,
+            conn: None,
+            url_timeout: ints[3],
+        };
+        let st = if op == 1 {
+            webdl_run_loop(&cfg, &mut io)
+        } else {
+            webdl_download_with_redirects(max_redirects, &cfg, &mut io)
+        };
+        if op == 1 {
+            self.emit_log(0, b"Exiting WebDownloader-loop");
+        }
+        st as c_int
+    }
+
+    fn stop(&self) {
+        self.emit_log(0, b"Trying to stop WebDownloader");
+        if let Ok(g) = self.active_slot.lock() {
+            if let Some(slot) = g.as_ref() {
+                slot.cancel(true, self.conn_host_cb);
+            }
+        }
+        self.emit_log(0, b"WebDownloader stopped successfully");
+    }
+
+    fn log_debug_info(&self) {
+        let mut tbuf = [0u8; 50];
+        crate::util::util_format_time(self.last_update_time.load(Ordering::SeqCst), &mut tbuf);
+        let tlen = tbuf.iter().position(|&b| b == 0).unwrap_or(0);
+        let out_b = unsafe { (*self.output_filename.get()).to_bytes() };
+        let base = &out_b[crate::paths::base_file_name(out_b)..];
+        let st_s = self.status.load(Ordering::SeqCst).to_string();
+        let msg = join_c_slices(&[
+            b"      Web-Download: status=",
+            st_s.as_bytes(),
+            b", LastUpdateTime=",
+            &tbuf[..tlen],
+            b", filename=",
+            base,
+        ]);
+        self.emit_log(4, &msg);
+    }
+}
+
+struct DirectWebDlIo<'a> {
+    dl: &'a NzbgetRsWebDl,
+    conn: Option<NzbgetRsConn>,
+    url_timeout: c_int,
+}
+
+impl Drop for DirectWebDlIo<'_> {
+    fn drop(&mut self) {
+        self.free_conn();
+    }
+}
+
+impl WebDlIo for DirectWebDlIo<'_> {
+    fn connect(&mut self, host: &CStr, port: i32, tls: bool) -> bool {
+        self.free_conn();
+        let mut conn = NzbgetRsConn::new_client(
+            host.to_bytes(),
+            port,
+            tls,
+            true,
+            self.dl.debug_on,
+            0,
+            self.dl.conn_host_cb,
+        );
+        let sess = conn.session.get_mut();
+        sess.core.cert_verif_level = self.dl.cert_verif_level.load(Ordering::SeqCst) as u32;
+        sess.core.timeout = self.url_timeout;
+        conn.slot.set_suppress_errors(false);
+        if let Ok(mut g) = self.dl.active_slot.lock() {
+            *g = Some(Arc::clone(&conn.slot));
+        }
+        let ok = conn.session.get_mut().core.connect_base();
+        self.conn = Some(conn);
+        ok
+    }
+
+    fn free_conn(&mut self) {
+        if let Some(mut conn) = self.conn.take() {
+            self.dl.emit_log(0, b"Releasing connection");
+            if let Ok(mut g) = self.dl.active_slot.lock() {
+                *g = None;
+            }
+            if conn.slot.status.load(Ordering::SeqCst) == CS_CANCELLED {
+                conn.session.get_mut().core.disconnect_base();
+            }
+        }
+    }
+
+    fn write_line(&mut self, line: &CStr) {
+        if let Some(conn) = self.conn.as_mut() {
+            conn.session
+                .get_mut()
+                .core
+                .write_line_bytes(line.to_bytes());
+        }
+    }
+
+    fn read_line(&mut self, buf: &mut [u8]) -> Option<usize> {
+        self.conn
+            .as_mut()?
+            .session
+            .get_mut()
+            .core
+            .read_line_slice(buf)
+    }
+
+    fn read_body_chunk(&mut self, buf: &mut [u8]) -> i32 {
+        let Some(conn) = self.conn.as_mut() else {
+            return -1;
+        };
+        let core = &mut conn.session.get_mut().core;
+        if core.buf_avail > 0 {
+            let avail = core.buf_avail;
+            let off = core.buf_offset;
+            core.buf_avail = 0;
+            let copy_len = avail.min(buf.len());
+            buf[..copy_len].copy_from_slice(&core.read_buf[off..off + copy_len]);
+            return copy_len as i32;
+        }
+        core.try_recv_slice(buf)
+    }
+
+    fn is_stopped(&mut self) -> bool {
+        self.dl.webdl_cb.map_or(false, |cb| unsafe {
+            cb(
+                self.dl.webdl_ctx as *mut c_void,
+                1,
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ) != 0
+        })
+    }
+
+    fn is_paused(&mut self) -> bool {
+        self.dl.webdl_cb.map_or(false, |cb| unsafe {
+            cb(
+                self.dl.webdl_ctx as *mut c_void,
+                2,
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ) != 0
+        })
+    }
+
+    fn touch_time(&mut self) {
+        self.dl
+            .last_update_time
+            .store(now_unix_sec(), Ordering::SeqCst);
+    }
+
+    fn sleep_100ms(&mut self) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    fn set_status(&mut self, status: WebDlStatus) {
+        let s = status as c_int;
+        self.dl.status.store(s, Ordering::SeqCst);
+        if let Some(cb) = self.dl.webdl_cb {
+            unsafe {
+                cb(
+                    self.dl.webdl_ctx as *mut c_void,
+                    3,
+                    s,
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+        }
+    }
+
+    fn set_http_status(&mut self, http_status: i32) {
+        self.dl.http_status.store(http_status, Ordering::SeqCst);
+    }
+
+    fn set_original_filename(&mut self, filename: &[u8]) {
+        if let Ok(mut g) = self.dl.original_filename.lock() {
+            *g = bytes_to_cstring(filename);
+        }
+    }
+
+    fn set_url(&mut self, url: &[u8]) {
+        if let Ok(mut g) = self.dl.url.lock() {
+            *g = bytes_to_cstring(url);
+        }
+    }
+
+    fn on_header(&mut self, line: &CStr) {
+        if let Some(cb) = self.dl.webdl_cb {
+            unsafe {
+                cb(
+                    self.dl.webdl_ctx as *mut c_void,
+                    4,
+                    0,
+                    line.as_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+        }
+    }
+
+    fn on_log(&mut self, level: i32, msg: &[u8]) {
+        self.dl.emit_log(level, msg);
+    }
+}
+
+/// Host callback for `NzbgetRsRemoteServer`.
+///
+/// Operations:
+/// - `0`: query config (`out_ints`: `[port, remote_timeout, is_stopped]`, `out_strs`: `[control_ip, secure_cert, secure_key]`)
+/// - `1`: `is_stopped()` -> `1` / `0`
+/// - `2`: spawn `RequestProcessor` for `accepted_conn = p1 as *mut NzbgetRsConn`, `tls = a1 != 0` -> returns `proc_ptr` (`0` on `std::system_error`)
+/// - `3`: stop `RequestProcessor` at `proc_ptr = p1`
+/// - `4`: `log(level=a1, msg=s1)` (`0=debug, 1=warn, 2=error`)
+pub type NzbgetRsRemoteSrvHostFn = Option<
+    unsafe extern "C" fn(
+        ctx: *mut c_void,
+        op: c_int,
+        a1: c_int,
+        p1: usize,
+        s1: *const c_char,
+        out_ints: *mut c_int,
+        out_strs: *mut *const c_char,
+    ) -> usize,
+>;
+
+struct RemoteSrvState {
+    listener_slot: Option<Arc<ConnCancelSlot>>,
+    active_processors: Vec<usize>,
+    last_cap_warning: i64,
+}
+
+pub struct NzbgetRsRemoteServer {
+    tls: bool,
+    tls_disabled: bool,
+    debug_on: bool,
+    conn_host_cb: NzbgetRsConnHostFn,
+    srv_ctx: usize,
+    srv_cb: NzbgetRsRemoteSrvHostFn,
+    state: Mutex<RemoteSrvState>,
+}
+
+impl NzbgetRsRemoteServer {
+    fn emit_log(&self, level: c_int, msg: &[u8]) {
+        if level == 0 && !self.debug_on {
+            return;
+        }
+        if let Some(cb) = self.srv_cb {
+            let cs = bytes_to_cstring(msg);
+            unsafe {
+                cb(
+                    self.srv_ctx as *mut c_void,
+                    4,
+                    level,
+                    0,
+                    cs.as_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+        }
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.srv_cb.map_or(true, |cb| unsafe {
+            cb(
+                self.srv_ctx as *mut c_void,
+                1,
+                0,
+                0,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ) != 0
+        })
+    }
+
+    fn run_loop(&self) {
+        self.emit_log(0, b"Entering RemoteServer-loop");
+        let mut ints = [0, 60, 0];
+        let mut strs = [ptr::null(); 3];
+        if let Some(cb) = self.srv_cb {
+            unsafe {
+                cb(
+                    self.srv_ctx as *mut c_void,
+                    0,
+                    0,
+                    0,
+                    ptr::null(),
+                    ints.as_mut_ptr(),
+                    strs.as_mut_ptr(),
+                );
+            }
+        }
+        let port = ints[0];
+        let remote_timeout = ints[1];
+        let control_ip = unsafe { opt_bytes(strs[0]) }.to_vec();
+        let secure_cert = unsafe { opt_bytes(strs[1]) }.to_vec();
+        let secure_key = unsafe { opt_bytes(strs[2]) }.to_vec();
+
+        if self.tls && !self.tls_disabled {
+            if secure_cert.is_empty()
+                || !crate::fsops::file_exists(&secure_cert, &crate::fsops::posix_stat)
+            {
+                self.emit_log(
+                    2,
+                    b"Could not initialize TLS, secure certificate is not configured or the cert-file was not found. Check option <SecureCert>",
+                );
+                return;
+            }
+            if secure_key.is_empty()
+                || !crate::fsops::file_exists(&secure_key, &crate::fsops::posix_stat)
+            {
+                self.emit_log(
+                    2,
+                    b"Could not initialize TLS, secure key is not configured or the key-file was not found. Check option <SecureKey>",
+                );
+                return;
+            }
+        }
+
+        let mut listener: Option<NzbgetRsConn> = None;
+
+        while !self.is_stopped() {
+            let mut need_bind = false;
+            {
+                let Ok(mut g) = self.state.lock() else {
+                    break;
+                };
+                if self.is_stopped() {
+                    break;
+                }
+                if listener.is_none() {
+                    let mut c = NzbgetRsConn::new_client(
+                        &control_ip,
+                        port,
+                        self.tls,
+                        true,
+                        self.debug_on,
+                        0,
+                        self.conn_host_cb,
+                    );
+                    c.session.get_mut().core.timeout = remote_timeout;
+                    c.slot.set_suppress_errors(false);
+                    g.listener_slot = Some(Arc::clone(&c.slot));
+                    listener = Some(c);
+                    need_bind = true;
+                }
+            }
+
+            let bound = match listener.as_mut() {
+                Some(c) => !need_bind || c.session.get_mut().core.bind(),
+                None => false,
+            };
+            if self.is_stopped() {
+                break;
+            }
+
+            let mut accepted_conn: Option<Box<NzbgetRsConn>> = None;
+            let mut accept_busy = false;
+            if bound {
+                if let Some(c) = listener.as_mut() {
+                    let fd = c.session.get_mut().core.accept_fd();
+                    accept_busy = c.slot.accept_busy.load(Ordering::SeqCst);
+                    if fd != INVALID_SOCKET {
+                        accepted_conn = Some(Box::new(NzbgetRsConn::from_accepted(
+                            fd,
+                            self.tls,
+                            remote_timeout,
+                            self.debug_on,
+                            0,
+                            self.conn_host_cb,
+                        )));
+                    }
+                }
+            }
+            if bound && accepted_conn.is_none() && accept_busy && !self.is_stopped() {
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            let Some(acc) = accepted_conn else {
+                if self.is_stopped() {
+                    break;
+                }
+                if let Ok(mut g) = self.state.lock() {
+                    g.listener_slot = None;
+                }
+                listener = None;
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            };
+
+            let mut spawn_failed = false;
+            {
+                let Ok(mut g) = self.state.lock() else {
+                    break;
+                };
+                if self.is_stopped() {
+                    drop(acc);
+                    break;
+                }
+                if g.active_processors.len() >= MAX_PROCESSORS {
+                    let now = now_unix_sec();
+                    if now - g.last_cap_warning >= 60 {
+                        g.last_cap_warning = now;
+                        let msg = format!(
+                            "Too many connections to the web interface/API ({MAX_PROCESSORS}); refusing new ones"
+                        );
+                        self.emit_log(1, msg.as_bytes());
+                    }
+                    drop(acc);
+                    continue;
+                }
+                let raw_acc = Box::into_raw(acc) as usize;
+                let proc_ptr = self.srv_cb.map_or(0, |cb| unsafe {
+                    cb(
+                        self.srv_ctx as *mut c_void,
+                        2,
+                        c_int::from(self.tls),
+                        raw_acc,
+                        ptr::null(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    )
+                });
+                if proc_ptr != 0 {
+                    g.active_processors.push(proc_ptr);
+                } else {
+                    spawn_failed = true;
+                }
+            }
+            if spawn_failed {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+
+        if let Ok(mut g) = self.state.lock() {
+            g.listener_slot = None;
+        }
+        if let Some(mut c) = listener.take() {
+            c.session.get_mut().core.disconnect_base();
+        }
+
+        self.emit_log(
+            0,
+            b"RemoteServer: waiting for request processor to complete",
+        );
+        loop {
+            let done = self
+                .state
+                .lock()
+                .map(|g| g.active_processors.is_empty())
+                .unwrap_or(true);
+            if done {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        self.emit_log(0, b"RemoteServer: request processor are completed");
+        self.emit_log(0, b"Exiting RemoteServer-loop");
+    }
+
+    fn stop(&self) {
+        self.emit_log(0, b"Stopping RequestProcessors");
+        if let Ok(g) = self.state.lock() {
+            if let Some(slot) = g.listener_slot.as_ref() {
+                slot.cancel(true, self.conn_host_cb);
+            }
+            if let Some(cb) = self.srv_cb {
+                for &proc_ptr in &g.active_processors {
+                    unsafe {
+                        cb(
+                            self.srv_ctx as *mut c_void,
+                            3,
+                            0,
+                            proc_ptr,
+                            ptr::null(),
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                        );
+                    }
+                }
+            }
+        }
+        self.emit_log(0, b"RequestProcessors are notified");
+        self.emit_log(0, b"RemoteServer stop end");
+    }
+
+    fn on_processor_done(&self, proc_ptr: usize) {
+        self.emit_log(0, b"Notification from RequestProcessor received");
+        if let Ok(mut g) = self.state.lock() {
+            if let Some(pos) = g.active_processors.iter().position(|&p| p == proc_ptr) {
+                g.active_processors.remove(pos);
+            }
+        }
+    }
+}
+
+/// Default Rust-backed `conn_cb` implementation for `NServMain` (`nserv.rs`).
+pub unsafe extern "C" fn nserv_default_conn_cb(
+    tls_host_cb: NzbgetRsConnHostFn,
+    debug_on: bool,
+    raw_conn: usize,
+    op: c_int,
+    a1: c_int,
+    a2: c_int,
+    s1: *const c_char,
+    s2: *const c_char,
+    out_buf: *mut c_char,
+) -> usize {
+    if op == 0 {
+        let mut conn = Box::new(NzbgetRsConn::new_client(
+            opt_bytes(s1),
+            a1,
+            !s2.is_null(),
+            true,
+            debug_on,
+            0,
+            tls_host_cb,
+        ));
+        conn.session.get_mut().core.timeout = 10;
+        conn.slot.set_suppress_errors(false);
+        return Box::into_raw(conn) as usize;
+    }
+    if raw_conn == 0 {
+        return 0;
+    }
+    let conn = &*(raw_conn as *const NzbgetRsConn);
+    match op {
+        1 => usize::from((*conn.session.get()).core.bind()),
+        2 => {
+            let (fd, tls, timeout) = {
+                let core = &mut (*conn.session.get()).core;
+                (core.accept_fd(), core.tls, core.timeout)
+            };
+            if fd == INVALID_SOCKET {
+                0
+            } else {
+                let acc = Box::new(NzbgetRsConn::from_accepted(
+                    fd,
+                    tls,
+                    timeout,
+                    debug_on,
+                    0,
+                    tls_host_cb,
+                ));
+                Box::into_raw(acc) as usize
+            }
+        }
+        3 => {
+            conn.slot.cancel(true, tls_host_cb);
+            1
+        }
+        4 => {
+            {
+                let core = &mut (*conn.session.get()).core;
+                if a1 == 1 {
+                    core.graceful = true;
+                }
+                if a1 == 1 || a1 == 2 || a2 == 1 {
+                    core.disconnect_base();
+                }
+            }
+            drop(Box::from_raw(raw_conn as *mut NzbgetRsConn));
+            if a2 == 1 {
+                if let Some(cb) = tls_host_cb {
+                    cb(
+                        ptr::null_mut(),
+                        10,
+                        0,
+                        0,
+                        0,
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    );
+                }
+            }
+            0
+        }
+        5 => {
+            conn.slot.set_suppress_errors(false);
+            if !s1.is_null() {
+                let cert = CStr::from_ptr(s1);
+                let key = if s2.is_null() {
+                    c""
+                } else {
+                    CStr::from_ptr(s2)
+                };
+                if !(*conn.session.get()).core.start_tls(false, cert, key) {
+                    return 0;
+                }
+            }
+            if !out_buf.is_null() && a1 > 0 {
+                let hb = conn.host.to_bytes();
+                let copy_len = hb.len().min((a1 as usize).saturating_sub(1));
+                if copy_len > 0 {
+                    ptr::copy_nonoverlapping(hb.as_ptr(), out_buf.cast::<u8>(), copy_len);
+                }
+                *out_buf.add(copy_len) = 0;
+            }
+            1
+        }
+        6 => {
+            if out_buf.is_null() || a1 <= 0 {
+                0
+            } else {
+                let dst = std::slice::from_raw_parts_mut(out_buf.cast::<u8>(), a1 as usize);
+                usize::from((*conn.session.get()).core.read_line_slice(dst).is_some())
+            }
+        }
+        7 => {
+            let core = &mut (*conn.session.get()).core;
+            if a2 != 0 {
+                core.write_line_bytes(opt_bytes(s1));
+            } else if !s1.is_null() && a1 > 0 {
+                let data = std::slice::from_raw_parts(s1.cast::<u8>(), a1 as usize);
+                core.send_bytes(data);
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FFI entry points
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cancel_reg_new() -> *mut Arc<NzbgetRsCancelReg> {
+    Box::into_raw(Box::new(Arc::new(NzbgetRsCancelReg::new())))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cancel_reg_stop(reg: *const Arc<NzbgetRsCancelReg>) {
+    if !reg.is_null() {
+        (*reg).stop_all();
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cancel_reg_free(reg: *mut Arc<NzbgetRsCancelReg>) {
+    if !reg.is_null() {
+        drop(Box::from_raw(reg));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_conn_new(
+    host: *const c_char,
+    port: c_int,
+    tls: c_int,
+    reg_cancel: c_int,
+    debug_on: c_int,
+    owner_ctx: *mut c_void,
+    host_cb: NzbgetRsConnHostFn,
+) -> *mut NzbgetRsConn {
+    Box::into_raw(Box::new(NzbgetRsConn::new_client(
+        opt_bytes(host),
+        port,
+        tls != 0,
+        reg_cancel != 0,
+        debug_on != 0,
+        owner_ctx as usize,
+        host_cb,
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_conn_from_fd(
+    fd: c_int,
+    tls: c_int,
+    timeout: c_int,
+    debug_on: c_int,
+    owner_ctx: *mut c_void,
+    host_cb: NzbgetRsConnHostFn,
+) -> *mut NzbgetRsConn {
+    Box::into_raw(Box::new(NzbgetRsConn::from_accepted(
+        fd,
+        tls != 0,
+        timeout,
+        debug_on != 0,
+        owner_ctx as usize,
+        host_cb,
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_conn_free(conn: *mut NzbgetRsConn) {
+    if !conn.is_null() {
+        drop(Box::from_raw(conn));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_conn_accept(conn: *mut NzbgetRsConn) -> *mut NzbgetRsConn {
+    if conn.is_null() {
+        return ptr::null_mut();
+    }
+    let c = &*(conn as *const NzbgetRsConn);
+    let (fd, tls, timeout) = {
+        let core = &mut (*c.session.get()).core;
+        (core.accept_fd(), core.tls, core.timeout)
+    };
+    if fd == INVALID_SOCKET {
+        return ptr::null_mut();
+    }
+    Box::into_raw(Box::new(NzbgetRsConn::from_accepted(
+        fd,
+        tls,
+        timeout,
+        c.slot.debug_on,
+        0,
+        c.slot.host_cb,
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_conn_ctl(
+    conn: *mut NzbgetRsConn,
+    op: c_int,
+    a1: c_int,
+    p1: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    addrs: *const *const c_char,
+    addrs_len: usize,
+) -> isize {
+    if op == 23 {
+        if p1 == 0 {
+            return 0;
+        }
+        return isize::from((&*(p1 as *const AtomicBool)).load(Ordering::SeqCst));
+    }
+    if conn.is_null() {
+        return 0;
+    }
+    let c = &*(conn as *const NzbgetRsConn);
+    match op {
+        3 => {
+            c.slot.cancel(false, c.slot.host_cb);
+            return 1;
+        }
+        5 => {
+            c.slot.set_suppress_errors(a1 != 0);
+            return 1;
+        }
+        11 => {
+            c.slot.status.store(CS_BROKEN, Ordering::SeqCst);
+            return 1;
+        }
+        14 => return c.slot.status.load(Ordering::SeqCst) as isize,
+        15 => return isize::from(c.slot.accept_busy.load(Ordering::SeqCst)),
+        16 => return c.slot.total_bytes_read.swap(0, Ordering::SeqCst) as isize,
+        17 => return c.slot.tls_probe_failure.load(Ordering::SeqCst) as isize,
+        19 => return c.host.as_ptr() as isize,
+        22 => {
+            c.slot.owner_ctx.store(p1, Ordering::SeqCst);
+            return 1;
+        }
+        _ => {}
+    }
+
+    let core = &mut (*c.session.get()).core;
+    match op {
+        0 => isize::from(core.connect_base()),
+        1 => isize::from(core.disconnect_base()),
+        2 => isize::from(core.bind()),
+        4 => {
+            let cert = if s1.is_null() {
+                c""
+            } else {
+                CStr::from_ptr(s1)
+            };
+            let key = if s2.is_null() {
+                c""
+            } else {
+                CStr::from_ptr(s2)
+            };
+            isize::from(core.start_tls(a1 != 0, cert, key))
+        }
+        6 => {
+            core.timeout = a1;
+            1
+        }
+        7 => {
+            core.cipher = bytes_to_cstring(opt_bytes(s1));
+            1
+        }
+        8 => {
+            core.ip_version = a1;
+            1
+        }
+        9 => {
+            core.cert_verif_level = a1 as u32;
+            1
+        }
+        10 => {
+            core.graceful = a1 != 0;
+            1
+        }
+        12 => {
+            core.deadline_ptr = p1;
+            1
+        }
+        13 => {
+            core.resolved_addrs.clear();
+            if !addrs.is_null() {
+                core.resolved_addrs.reserve(addrs_len);
+                for i in 0..addrs_len {
+                    let p = *addrs.add(i);
+                    core.resolved_addrs.push(opt_bytes(p).to_vec());
+                }
+            }
+            1
+        }
+        18 => {
+            if core.tls_box == 0 {
+                return 0;
+            }
+            let mut ver: c_int = 0;
+            if let Some(cb) = core.slot.host_cb {
+                cb(
+                    core.owner_ctx() as *mut c_void,
+                    9,
+                    0,
+                    0,
+                    core.tls_box,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    &mut ver,
+                );
+            }
+            ver as isize
+        }
+        20 => core.get_remote_addr().as_ptr() as isize,
+        21 => {
+            if core.tls_box == 0 {
+                return c"".as_ptr() as isize;
+            }
+            let mut ver: c_int = 0;
+            core.slot.host_cb.map_or(c"".as_ptr() as isize, |cb| {
+                let p = cb(
+                    core.owner_ctx() as *mut c_void,
+                    9,
+                    0,
+                    0,
+                    core.tls_box,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    &mut ver,
+                );
+                if p == 0 {
+                    c"".as_ptr() as isize
+                } else {
+                    p
+                }
+            })
+        }
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_conn_io(
+    conn: *mut NzbgetRsConn,
+    op: c_int,
+    buf: *mut c_char,
+    size: c_int,
+    out_int: *mut c_int,
+) -> c_int {
+    if conn.is_null() {
+        return if op == 4 { -1 } else { 0 };
+    }
+    let c = &*(conn as *const NzbgetRsConn);
+    let core = &mut (*c.session.get()).core;
+    match op {
+        0 => core.write_line_bytes(opt_bytes(buf.cast_const())),
+        1 => {
+            let slice = if buf.is_null() || size <= 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(buf.cast::<u8>(), size as usize)
+            };
+            c_int::from(core.send_bytes(slice))
+        }
+        2 => {
+            if buf.is_null() || size <= 0 {
+                if !out_int.is_null() {
+                    *out_int = 0;
+                }
+                return 0;
+            }
+            let dst = std::slice::from_raw_parts_mut(buf.cast::<u8>(), size as usize);
+            match core.read_line_slice(dst) {
+                Some(n) => {
+                    if !out_int.is_null() {
+                        *out_int = n as c_int;
+                    }
+                    1
+                }
+                None => {
+                    if !out_int.is_null() {
+                        *out_int = 0;
+                    }
+                    0
+                }
+            }
+        }
+        3 => {
+            if size <= 0 {
+                return 1;
+            }
+            if buf.is_null() {
+                return 0;
+            }
+            let dst = std::slice::from_raw_parts_mut(buf.cast::<u8>(), size as usize);
+            c_int::from(core.recv_exact_slice(dst))
+        }
+        4 => {
+            if buf.is_null() || size < 0 {
+                return -1;
+            }
+            let dst = if size == 0 {
+                &mut [][..]
+            } else {
+                std::slice::from_raw_parts_mut(buf.cast::<u8>(), size as usize)
+            };
+            core.try_recv_slice(dst)
+        }
+        5 => {
+            if !out_int.is_null() {
+                *out_int = core.buf_avail as c_int;
+            }
+            if !buf.is_null() {
+                let p = core
+                    .read_buf
+                    .as_mut_ptr()
+                    .add(core.buf_offset)
+                    .cast::<c_char>();
+                *(buf as *mut *mut c_char) = p;
+            }
+            core.buf_avail = 0;
+            1
+        }
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_conn_nntp(
+    conn: *mut NzbgetRsConn,
+    op: c_int,
+    arg: *const c_char,
+    user: *const c_char,
+    pass: *const c_char,
+    srv_name: *const c_char,
+    srv_host: *const c_char,
+) -> *const c_char {
+    if conn.is_null() {
+        return ptr::null();
+    }
+    let c = &*(conn as *const NzbgetRsConn);
+    let sess = &mut *c.session.get();
+    let u = if user.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(user)
+    };
+    let p = if pass.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(pass)
+    };
+    let n = if srv_name.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(srv_name)
+    };
+    let h = if srv_host.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(srv_host)
+    };
+    match op {
+        0 => {
+            if sess.nntp_connect(u, p, n, h) {
+                c"".as_ptr()
+            } else {
+                ptr::null()
+            }
+        }
+        1 => {
+            if sess.nntp_disconnect(u, p, n, h) {
+                c"".as_ptr()
+            } else {
+                ptr::null()
+            }
+        }
+        2 => sess.nntp_request(arg, u, p, n, h),
+        3 => sess.nntp_join_group(arg, u, p, n, h),
+        4 => {
+            if sess.nntp_auth.error {
+                c"".as_ptr()
+            } else {
+                ptr::null()
+            }
+        }
+        5 => {
+            if sess.nntp_auth.rejected {
+                c"".as_ptr()
+            } else {
+                ptr::null()
+            }
+        }
+        _ => ptr::null(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_webdl_new(
+    debug_on: c_int,
+    conn_host_cb: NzbgetRsConnHostFn,
+    webdl_ctx: *mut c_void,
+    webdl_cb: NzbgetRsWebDlHostFn,
+) -> *mut NzbgetRsWebDl {
+    let dl = Box::new(NzbgetRsWebDl {
+        url: Mutex::new(CString::default()),
+        output_filename: UnsafeCell::new(CString::default()),
+        info_name: UnsafeCell::new(CString::default()),
+        original_filename: Mutex::new(CString::default()),
+        status: AtomicI32::new(WebDlStatus::AdUndefined as i32),
+        last_update_time: AtomicI64::new(now_unix_sec()),
+        http_status: AtomicI32::new(0),
+        force: AtomicBool::new(false),
+        retry: AtomicBool::new(true),
+        cert_verif_level: AtomicI32::new(2),
+        active_slot: Mutex::new(None),
+        debug_on: debug_on != 0,
+        conn_host_cb,
+        webdl_ctx: webdl_ctx as usize,
+        webdl_cb,
+    });
+    dl.emit_log(0, b"Creating WebDownloader");
+    Box::into_raw(dl)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_webdl_free(dl: *mut NzbgetRsWebDl) {
+    if !dl.is_null() {
+        drop(Box::from_raw(dl));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_webdl_ctl(
+    dl: *mut NzbgetRsWebDl,
+    op: c_int,
+    a1: c_int,
+    s1: *const c_char,
+    out_i64: *mut i64,
+    out_buf: *mut crate::ffi::RsBuf,
+) -> isize {
+    if dl.is_null() {
+        return 0;
+    }
+    let d = &*(dl as *const NzbgetRsWebDl);
+    match op {
+        0 => d.execute(0, a1) as isize,
+        1 => d.execute(1, 5) as isize,
+        2 => {
+            d.stop();
+            1
+        }
+        3 => d.status.load(Ordering::SeqCst) as isize,
+        4 => d.http_status.load(Ordering::SeqCst) as isize,
+        5 => {
+            if !out_i64.is_null() {
+                *out_i64 = d.last_update_time.load(Ordering::SeqCst);
+            }
+            1
+        }
+        6 => {
+            d.last_update_time.store(now_unix_sec(), Ordering::SeqCst);
+            1
+        }
+        7 => {
+            d.force.store(a1 != 0, Ordering::SeqCst);
+            1
+        }
+        8 => {
+            d.retry.store(a1 != 0, Ordering::SeqCst);
+            1
+        }
+        9 => {
+            d.cert_verif_level.store(a1, Ordering::SeqCst);
+            1
+        }
+        10 => {
+            if let Ok(mut g) = d.url.lock() {
+                *g = bytes_to_cstring(opt_bytes(s1));
+            }
+            1
+        }
+        11 => {
+            if !s1.is_null() {
+                *d.info_name.get() = bytes_to_cstring(opt_bytes(s1));
+            }
+            (*d.info_name.get()).as_ptr() as isize
+        }
+        12 => {
+            if !s1.is_null() {
+                *d.output_filename.get() = bytes_to_cstring(opt_bytes(s1));
+            }
+            (*d.output_filename.get()).as_ptr() as isize
+        }
+        13 => {
+            if let Ok(g) = d.original_filename.lock() {
+                if !out_buf.is_null() {
+                    out_buf.write(crate::ffi::into_buf(g.to_bytes().to_vec()));
+                }
+            }
+            1
+        }
+        14 => {
+            d.log_debug_info();
+            1
+        }
+        _ => 0,
+    }
+}
+
+/// Executes RPC `readurl` (creating a unique `readurl-N.tmp` file in `temp_dir`,
+/// downloading with up to 5 redirects, loading up to the first NUL into `out_buf`,
+/// and removing the temporary file).
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_webdl_read_temp_url(
+    url: *const c_char,
+    info_name: *const c_char,
+    temp_dir: *const c_char,
+    debug_on: c_int,
+    conn_host_cb: NzbgetRsConnHostFn,
+    webdl_ctx: *mut c_void,
+    webdl_cb: NzbgetRsWebDlHostFn,
+    out_buf: *mut crate::ffi::RsBuf,
+) -> c_int {
+    let tdir = opt_bytes(temp_dir);
+    let sep = crate::paths::PATH_SEPARATOR as u8;
+    let mut num = 1i32;
+    let tmp_path = loop {
+        let ns = num.to_string();
+        let cand = join_c_slices(&[tdir, &[sep], b"readurl-", ns.as_bytes(), b".tmp"]);
+        if num > 1 && !crate::fsops::file_exists(&cand, &crate::fsops::posix_stat) {
+            break cand;
+        }
+        if num == 1 && !crate::fsops::file_exists(&cand, &crate::fsops::posix_stat) {
+            break cand;
+        }
+        num += 1;
+    };
+    let dl = nzbget_rs_webdl_new(debug_on, conn_host_cb, webdl_ctx, webdl_cb);
+    let d = &*(dl as *const NzbgetRsWebDl);
+    d.force.store(true, Ordering::SeqCst);
+    d.retry.store(false, Ordering::SeqCst);
+    if let Ok(mut g) = d.url.lock() {
+        *g = bytes_to_cstring(opt_bytes(url));
+    }
+    *d.output_filename.get() = bytes_to_cstring(&tmp_path);
+    *d.info_name.get() = bytes_to_cstring(opt_bytes(info_name));
+    let ok = d.execute(0, 5) == (WebDlStatus::AdFinished as c_int);
+    nzbget_rs_webdl_free(dl);
+
+    if ok && !out_buf.is_null() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let os_p = std::path::Path::new(std::ffi::OsStr::from_bytes(&tmp_path));
+            if let Ok(bytes) = std::fs::read(os_p) {
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                out_buf.write(crate::ffi::into_buf(bytes[..end].to_vec()));
+            } else {
+                out_buf.write(crate::ffi::into_buf(Vec::new()));
+            }
+        }
+    }
+    let tmp_c = bytes_to_cstring(&tmp_path);
+    let _ = libc::unlink(tmp_c.as_ptr());
+    c_int::from(ok)
+}
+
+/// Executes one RPC speed-test HTTP iteration against `speed.cloudflare.com`.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_net_speedtest_iter(
+    body: *const c_char,
+    body_len: usize,
+    duration_sec: c_int,
+    tls_disabled: c_int,
+    debug_on: c_int,
+    conn_host_cb: NzbgetRsConnHostFn,
+    out_bytes: *mut u32,
+    out_secs: *mut f64,
+) -> c_int {
+    let (port, use_tls) = if tls_disabled != 0 {
+        (80, false)
+    } else {
+        (443, true)
+    };
+    let mut conn = NzbgetRsConn::new_client(
+        b"speed.cloudflare.com",
+        port,
+        use_tls,
+        true,
+        debug_on != 0,
+        0,
+        conn_host_cb,
+    );
+    let core = &mut conn.session.get_mut().core;
+    core.timeout = 1;
+    let payload = if body.is_null() || body_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(body.cast::<u8>(), body_len)
+    };
+    if !core.connect_base() || !core.send_bytes(payload) {
+        if !out_bytes.is_null() {
+            *out_bytes = 0;
+        }
+        if !out_secs.is_null() {
+            *out_secs = 0.0;
+        }
+        return 0;
+    }
+    let mut total: u32 = 0;
+    let mut buf = [0u8; 8 * 1024];
+    let start = Instant::now();
+    let limit = duration_sec as f64;
+    loop {
+        let received = core.try_recv_slice(&mut buf);
+        if received <= 0 || start.elapsed().as_secs_f64() >= limit {
+            break;
+        }
+        total = total.wrapping_add(received as u32);
+    }
+    if !out_bytes.is_null() {
+        *out_bytes = total;
+    }
+    if !out_secs.is_null() {
+        *out_secs = start.elapsed().as_secs_f64();
+    }
+    1
+}
+
+/// Executes `RequestProcessor::Run` (`RegistryScope` + TLS handshake + signature dispatch).
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_req_proc_exec(
+    conn: *mut NzbgetRsConn,
+    reg: *const Arc<NzbgetRsCancelReg>,
+    tls: c_int,
+    tls_disabled: c_int,
+    secure_port: c_int,
+    control_port: c_int,
+    secure_cert: *const c_char,
+    secure_key: *const c_char,
+    proc_ctx: *mut c_void,
+    serv_binrpc_cb: Option<unsafe extern "C" fn(*mut c_void)>,
+    serv_web_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int>,
+    log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
+) {
+    if conn.is_null() {
+        return;
+    }
+    let _scope = if reg.is_null() {
+        None
+    } else {
+        Some(CancelRegScope::enter(Arc::clone(&*reg)))
+    };
+    let c = &*(conn as *const NzbgetRsConn);
+    c.slot.set_suppress_errors(true);
+    let debug_on = c.slot.debug_on;
+
+    let emit = |lvl: c_int, msg: &[u8]| {
+        if lvl == 0 && !debug_on {
+            return;
+        }
+        if let Some(cb) = log_cb {
+            let cs = bytes_to_cstring(msg);
+            cb(proc_ctx, lvl, cs.as_ptr());
+        }
+    };
+
+    if tls != 0 && tls_disabled == 0 {
+        let cert = if secure_cert.is_null() {
+            c""
+        } else {
+            CStr::from_ptr(secure_cert)
+        };
+        let key = if secure_key.is_null() {
+            c""
+        } else {
+            CStr::from_ptr(secure_key)
+        };
+        let started = { (*c.session.get()).core.start_tls(false, cert, key) };
+        if !started {
+            emit(
+                0,
+                b"Could not establish secure connection to web-client: Start TLS failed",
+            );
+            return;
+        }
+    }
+
+    let mut sig = [0u8; 4];
+    let got_sig = { (*c.session.get()).core.recv_exact_slice(&mut sig) };
+    if !got_sig {
+        emit(0, b"Could not read request signature");
+        return;
+    }
+
+    let mut ok = false;
+    if u32::from_be_bytes(sig) == NZBMESSAGE_SIGNATURE {
+        ok = true;
+        if let Some(cb) = serv_binrpc_cb {
+            cb(proc_ctx);
+        }
+    } else if &sig == b"POST" || &sig == b"GET " || &sig == b"OPTI" {
+        ok = true;
+        if let Some(cb) = serv_web_cb {
+            loop {
+                let mut sig_nul = [0u8; 5];
+                sig_nul[..4].copy_from_slice(&sig);
+                if cb(proc_ctx, sig_nul.as_ptr().cast::<c_char>()) == 0 {
+                    break;
+                }
+                let next_ok = { (*c.session.get()).core.recv_exact_slice(&mut sig) };
+                if !next_ok {
+                    emit(0, b"Could not read request signature");
+                    break;
+                }
+            }
+        }
+        let core = &mut (*c.session.get()).core;
+        core.graceful = true;
+        core.disconnect_base();
+    }
+
+    if !ok {
+        let port = if tls != 0 { secure_port } else { control_port };
+        let ra = {
+            (*c.session.get())
+                .core
+                .get_remote_addr()
+                .to_bytes()
+                .to_vec()
+        };
+        let ps = port.to_string();
+        let msg = join_c_slices(&[
+            b"Non-RustyGet request received on port ",
+            ps.as_bytes(),
+            b" from ",
+            &ra,
+        ]);
+        emit(1, &msg);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_remote_srv_new(
+    tls: c_int,
+    tls_disabled: c_int,
+    debug_on: c_int,
+    conn_host_cb: NzbgetRsConnHostFn,
+    srv_ctx: *mut c_void,
+    srv_cb: NzbgetRsRemoteSrvHostFn,
+) -> *mut NzbgetRsRemoteServer {
+    Box::into_raw(Box::new(NzbgetRsRemoteServer {
+        tls: tls != 0,
+        tls_disabled: tls_disabled != 0,
+        debug_on: debug_on != 0,
+        conn_host_cb,
+        srv_ctx: srv_ctx as usize,
+        srv_cb,
+        state: Mutex::new(RemoteSrvState {
+            listener_slot: None,
+            active_processors: Vec::new(),
+            last_cap_warning: 0,
+        }),
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_remote_srv_op(
+    srv: *mut NzbgetRsRemoteServer,
+    op: c_int,
+    proc_ptr: usize,
+) {
+    if srv.is_null() {
+        return;
+    }
+    match op {
+        0 => (&*(srv as *const NzbgetRsRemoteServer)).run_loop(),
+        1 => (&*(srv as *const NzbgetRsRemoteServer)).stop(),
+        2 => (&*(srv as *const NzbgetRsRemoteServer)).on_processor_done(proc_ptr),
+        3 => drop(Box::from_raw(srv)),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_registry_tracks_and_cancels_connections() {
+        let reg = Arc::new(NzbgetRsCancelReg::new());
+        {
+            let _scope = CancelRegScope::enter(Arc::clone(&reg));
+            let c1 = NzbgetRsConn::new_client(b"127.0.0.1", 12345, false, true, false, 0, None);
+            assert_eq!(c1.slot.status.load(Ordering::SeqCst), CS_DISCONNECTED);
+            reg.stop_all();
+            assert_eq!(c1.slot.status.load(Ordering::SeqCst), CS_CANCELLED);
+
+            let c2 = NzbgetRsConn::new_client(b"127.0.0.1", 12345, false, true, false, 0, None);
+            assert_eq!(c2.slot.status.load(Ordering::SeqCst), CS_CANCELLED);
+        }
+        assert!(reg.inner.lock().unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn loopback_bind_connect_io_and_nntp_handshake() {
+        let mut listener = NzbgetRsConn::new_client(b"127.0.0.1", 0, false, false, false, 0, None);
+        assert!(listener.session.get_mut().core.bind());
+        let lfd = listener.slot.socket.load(Ordering::SeqCst);
+        let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        let mut alen = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        unsafe {
+            assert_eq!(
+                libc::getsockname(lfd, (&mut addr as *mut libc::sockaddr_in).cast(), &mut alen),
+                0
+            );
+        }
+        let port = u16::from_be(addr.sin_port) as c_int;
+
+        let handle = std::thread::spawn(move || {
+            let afd = listener.session.get_mut().core.accept_fd();
+            assert_ne!(afd, INVALID_SOCKET);
+            let mut srv = NzbgetRsConn::from_accepted(afd, false, 5, false, 0, None);
+            let core = &mut srv.session.get_mut().core;
+            core.write_line_bytes(b"200 Welcome\r\n");
+            let mut lbuf = [0u8; 256];
+            let n = core.read_line_slice(&mut lbuf).unwrap();
+            assert_eq!(&lbuf[..n], b"GROUP alt.binaries.test\r\n");
+            core.write_line_bytes(b"211 1 1 1 alt.binaries.test\r\n");
+            let n2 = core.read_line_slice(&mut lbuf).unwrap();
+            assert_eq!(&lbuf[..n2], b"quit\r\n");
+            core.write_line_bytes(b"205 Bye\r\n");
+        });
+
+        let mut client = NzbgetRsConn::new_client(b"127.0.0.1", port, false, false, false, 0, None);
+        let cs = client.session.get_mut();
+        assert!(cs.nntp_connect(c"", c"", c"test", c"127.0.0.1"));
+        let g1 = cs.nntp_join_group(
+            c"alt.binaries.test".as_ptr(),
+            c"",
+            c"",
+            c"test",
+            c"127.0.0.1",
+        );
+        assert!(!g1.is_null());
+        let g2 = cs.nntp_join_group(
+            c"alt.binaries.test".as_ptr(),
+            c"",
+            c"",
+            c"test",
+            c"127.0.0.1",
+        );
+        assert_eq!(unsafe { CStr::from_ptr(g2).to_bytes() }, b"211 ");
+        assert!(cs.nntp_disconnect(c"", c"", c"test", c"127.0.0.1"));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn concurrent_cancel_wakes_blocking_recv_and_readline_via_shared_slot() {
+        for io_op in [2, 3] {
+            let mut fds = [-1 as c_int; 2];
+            unsafe {
+                assert_eq!(
+                    libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()),
+                    0
+                );
+            }
+            let raw_conn =
+                unsafe { nzbget_rs_conn_from_fd(fds[0], 0, 30, 0, ptr::null_mut(), None) };
+            let raw_addr = raw_conn as usize;
+
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || unsafe {
+                let c = raw_addr as *mut NzbgetRsConn;
+                entered_tx.send(()).unwrap();
+                let mut buf = [0 as c_char; 64];
+                let mut n = 0 as c_int;
+                nzbget_rs_conn_io(c, io_op, buf.as_mut_ptr(), 16, &mut n)
+            });
+
+            entered_rx.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(25));
+            unsafe {
+                assert_eq!(
+                    nzbget_rs_conn_ctl(raw_conn, 5, 1, 0, ptr::null(), ptr::null(), ptr::null(), 0),
+                    1
+                );
+                assert_eq!(
+                    nzbget_rs_conn_ctl(raw_conn, 3, 0, 0, ptr::null(), ptr::null(), ptr::null(), 0),
+                    1
+                );
+                assert_eq!(
+                    nzbget_rs_conn_ctl(
+                        raw_conn,
+                        14,
+                        0,
+                        0,
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null(),
+                        0
+                    ),
+                    CS_CANCELLED as isize
+                );
+            }
+            let res = reader.join().unwrap();
+            assert_eq!(res, 0);
+            unsafe {
+                nzbget_rs_conn_free(raw_conn);
+                libc::close(fds[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_suppress_updates_during_tls_start_and_close_are_lifetime_safe() {
+        struct MockTlsObj {
+            alive_magic: AtomicUsize,
+            suppress_slot: usize,
+        }
+
+        unsafe extern "C" fn mock_tls_host_cb(
+            _ctx: *mut c_void,
+            op: c_int,
+            _a1: c_int,
+            _a2: c_int,
+            p1: usize,
+            _s1: *const c_char,
+            _s2: *const c_char,
+            _s3: *const c_char,
+            _buf: *mut c_char,
+            out_int: *mut c_int,
+        ) -> isize {
+            match op {
+                4 => {
+                    let ptrs = &*(p1 as *const [usize; 2]);
+                    let obj = Box::new(MockTlsObj {
+                        alive_magic: AtomicUsize::new(0xA11CE_5AFE),
+                        suppress_slot: ptrs[1],
+                    });
+                    // Simulate `TlsSocket::ReportError` reading suppression mid-handshake.
+                    let sup = nzbget_rs_conn_ctl(
+                        ptr::null_mut(),
+                        23,
+                        0,
+                        obj.suppress_slot,
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null(),
+                        0,
+                    );
+                    assert!(sup == 0 || sup == 1);
+                    if !out_int.is_null() {
+                        *out_int = 0; // failing handshake triggers cleanup
+                        *out_int.add(1) = -1;
+                    }
+                    Box::into_raw(obj) as isize
+                }
+                7 => {
+                    let obj = Box::from_raw(p1 as *mut MockTlsObj);
+                    assert_eq!(obj.alive_magic.swap(0xDEAD, Ordering::SeqCst), 0xA11CE_5AFE);
+                    let sup = nzbget_rs_conn_ctl(
+                        ptr::null_mut(),
+                        23,
+                        0,
+                        obj.suppress_slot,
+                        ptr::null(),
+                        ptr::null(),
+                        ptr::null(),
+                        0,
+                    );
+                    assert!(sup == 0 || sup == 1);
+                    drop(obj);
+                    0
+                }
+                8 => panic!("TLS suppression must not dereference tls_box via op 8"),
+                _ => 0,
+            }
+        }
+
+        let raw_conn = unsafe {
+            nzbget_rs_conn_new(
+                c"127.0.0.1".as_ptr(),
+                563,
+                1,
+                0,
+                0,
+                ptr::null_mut(),
+                Some(mock_tls_host_cb),
+            )
+        };
+        let raw_addr = raw_conn as usize;
+        let done = Arc::new(AtomicBool::new(false));
+        let done_stopper = Arc::clone(&done);
+
+        let stopper = std::thread::spawn(move || unsafe {
+            let c = raw_addr as *mut NzbgetRsConn;
+            let mut flip = 0 as c_int;
+            while !done_stopper.load(Ordering::Relaxed) {
+                flip ^= 1;
+                assert_eq!(
+                    nzbget_rs_conn_ctl(c, 5, flip, 0, ptr::null(), ptr::null(), ptr::null(), 0),
+                    1
+                );
+                std::thread::yield_now();
+            }
+        });
+
+        unsafe {
+            for _ in 0..500 {
+                assert_eq!(
+                    nzbget_rs_conn_ctl(raw_conn, 4, 1, 0, ptr::null(), ptr::null(), ptr::null(), 0),
+                    0
+                );
+                assert_eq!(
+                    nzbget_rs_conn_ctl(raw_conn, 1, 0, 0, ptr::null(), ptr::null(), ptr::null(), 0),
+                    1
+                );
+            }
+        }
+        done.store(true, Ordering::SeqCst);
+        stopper.join().unwrap();
+
+        unsafe {
+            assert_eq!(
+                nzbget_rs_conn_ctl(raw_conn, 5, 1, 0, ptr::null(), ptr::null(), ptr::null(), 0),
+                1
+            );
+            let c = &*(raw_conn as *const NzbgetRsConn);
+            let sup_slot = ptr::from_ref(&c.slot.suppress_errors) as usize;
+            assert_eq!(
+                nzbget_rs_conn_ctl(
+                    ptr::null_mut(),
+                    23,
+                    0,
+                    sup_slot,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    0
+                ),
+                1
+            );
+            nzbget_rs_conn_free(raw_conn);
+        }
+    }
+}

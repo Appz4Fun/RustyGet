@@ -52,7 +52,10 @@ fn c_strtol(s: &[u8], base: i32) -> (c_long, bool) {
         let Some(d) = (s[i] as char).to_digit(radix) else {
             break;
         };
-        if let Some(next) = acc.checked_mul(radix as u64).and_then(|v| v.checked_add(d as u64)) {
+        if let Some(next) = acc
+            .checked_mul(radix as u64)
+            .and_then(|v| v.checked_add(d as u64))
+        {
             acc = next;
         } else {
             overflow = true;
@@ -95,7 +98,11 @@ pub fn parse_time(time: &CStr, hours: &mut i32, minutes: &mut i32) -> bool {
 
 // Keep writes ordered and optional: C callers may alias the two outputs or
 // supply uninitialized storage. Creating two &mut references would be UB.
-pub(crate) fn parse_time_with(time: &CStr, mut hours: impl FnMut(i32), mut minutes: impl FnMut(i32)) -> bool {
+pub(crate) fn parse_time_with(
+    time: &CStr,
+    mut hours: impl FnMut(i32),
+    mut minutes: impl FnMut(i32),
+) -> bool {
     let t = time.to_bytes();
     if t == b"*" {
         hours(-1);
@@ -176,30 +183,103 @@ pub enum NameCheck {
 
 /// The numbered sections and their option suffixes.
 const SECTIONS: [(&CStr, usize, &[&CStr]); 4] = [
-    (c"server", 6, &[
-        c".active", c".name", c".level", c".host", c".port", c".username", c".password", c".joingroup",
-        c".encryption", c".connections", c".cipher", c".group", c".retention", c".optional", c".notes",
-        c".ipversion", c".certverification",
-    ]),
-    (c"task", 4, &[c".time", c".weekdays", c".command", c".param", c".downloadrate", c".process"]),
-    (c"category", 8, &[c".name", c".destdir", c".extensions", c".unpack", c".aliases"]),
-    (c"feed", 4, &[
-        c".name", c".url", c".interval", c".filter", c".backlog", c".pausenzb", c".category",
-        c".categorySource", c".priority", c".extensions", c".certverification",
-    ]),
+    (
+        c"server",
+        6,
+        &[
+            c".active",
+            c".name",
+            c".level",
+            c".host",
+            c".port",
+            c".username",
+            c".password",
+            c".joingroup",
+            c".encryption",
+            c".connections",
+            c".cipher",
+            c".group",
+            c".retention",
+            c".optional",
+            c".notes",
+            c".ipversion",
+            c".certverification",
+        ],
+    ),
+    (
+        c"task",
+        4,
+        &[
+            c".time",
+            c".weekdays",
+            c".command",
+            c".param",
+            c".downloadrate",
+            c".process",
+        ],
+    ),
+    (
+        c"category",
+        8,
+        &[
+            c".name",
+            c".destdir",
+            c".extensions",
+            c".unpack",
+            c".aliases",
+        ],
+    ),
+    (
+        c"feed",
+        4,
+        &[
+            c".name",
+            c".url",
+            c".interval",
+            c".filter",
+            c".backlog",
+            c".pausenzb",
+            c".category",
+            c".categorySource",
+            c".priority",
+            c".extensions",
+            c".certverification",
+        ],
+    ),
 ];
 
 const OBSOLETE: [&CStr; 22] = [
-    c"RetryOnCrcError", c"AllowReProcess", c"LoadPars", c"ThreadLimit", c"PostLogKind", c"NZBLogKind",
-    c"ProcessLogKind", c"AppendNzbDir", c"RenameBroken", c"MergeNzb", c"StrictParName", c"ReloadUrlQueue",
-    c"ReloadPostQueue", c"ParCleanupQueue", c"DeleteCleanupDisk", c"HistoryCleanupDisk", c"SaveQueue",
-    c"ReloadQueue", c"TerminateTimeout", c"AccurateRate", c"CreateBrokenLog", c"BrokenLog",
+    c"RetryOnCrcError",
+    c"AllowReProcess",
+    c"LoadPars",
+    c"ThreadLimit",
+    c"PostLogKind",
+    c"NZBLogKind",
+    c"ProcessLogKind",
+    c"AppendNzbDir",
+    c"RenameBroken",
+    c"MergeNzb",
+    c"StrictParName",
+    c"ReloadUrlQueue",
+    c"ReloadPostQueue",
+    c"ParCleanupQueue",
+    c"DeleteCleanupDisk",
+    c"HistoryCleanupDisk",
+    c"SaveQueue",
+    c"ReloadQueue",
+    c"TerminateTimeout",
+    c"AccurateRate",
+    c"CreateBrokenLog",
+    c"BrokenLog",
 ];
 
 /// Options::ValidateOptionName; `predefined` tells whether the name is one of
 /// the options (GetOption), asked only after the read-only check.
 pub fn validate_option_name(name: &CStr, predefined: &mut dyn FnMut() -> bool) -> NameCheck {
-    if [c"ConfigFile", c"AppBin", c"AppDir", c"Version"].iter().any(|n| eq(name, n)) {
+    if [c"ConfigFile", c"AppBin", c"AppDir", c"Version"]
+        .iter()
+        .any(|n| eq(name, n))
+    {
         return NameCheck::Invalid;
     }
     if predefined() {
@@ -207,7 +287,10 @@ pub fn validate_option_name(name: &CStr, predefined: &mut dyn FnMut() -> bool) -
     }
     for (prefix, len, suffixes) in SECTIONS {
         if eq_n(name, prefix, len) {
-            let digits = name.to_bytes()[len.min(name.to_bytes().len())..].iter().take_while(|c| c.is_ascii_digit()).count();
+            let digits = name.to_bytes()[len.min(name.to_bytes().len())..]
+                .iter()
+                .take_while(|c| c.is_ascii_digit())
+                .count();
             let rest = from(name, len + digits);
             if suffixes.iter().any(|s| eq(rest, s)) {
                 return NameCheck::Valid;
@@ -220,10 +303,16 @@ pub fn validate_option_name(name: &CStr, predefined: &mut dyn FnMut() -> bool) -
     if OBSOLETE.iter().any(|n| eq(name, n)) {
         return NameCheck::Obsolete;
     }
-    if [c"PostProcess", c"NZBProcess", c"NZBAddedProcess"].iter().any(|n| eq(name, n)) {
+    if [c"PostProcess", c"NZBProcess", c"NZBAddedProcess"]
+        .iter()
+        .any(|n| eq(name, n))
+    {
         return NameCheck::ObsoleteScript;
     }
-    if [c"ScanScript", c"QueueScript", c"FeedScript"].iter().any(|n| eq(name, n)) {
+    if [c"ScanScript", c"QueueScript", c"FeedScript"]
+        .iter()
+        .any(|n| eq(name, n))
+    {
         return NameCheck::Valid;
     }
     if [c"CreateLog", c"ResetLog"].iter().any(|n| eq(name, n)) {
@@ -241,7 +330,9 @@ fn replace_all(s: &mut Vec<u8>, from: &[u8], to: &[u8]) {
         if pos != 0 && pos >= s.len() {
             return;
         }
-        let Some(found) = s[pos..].windows(from.len()).position(|w| w == from) else { return };
+        let Some(found) = s[pos..].windows(from.len()).position(|w| w == from) else {
+            return;
+        };
         let at = pos + found;
         s.splice(at..at + from.len(), to.iter().copied());
         pos = at + to.len();
@@ -290,7 +381,10 @@ pub fn convert_old_option(option: &CStr, value: &CStr) -> (CString, CString) {
         replace_all(&mut v, b".PostScript", b".Extensions");
         option = cstring(v);
     }
-    if eq_n(&option, c"Feed", 4) && name_len > 11 && eq(from(&option, (name_len - 11) as usize), c".FeedScript") {
+    if eq_n(&option, c"Feed", 4)
+        && name_len > 11
+        && eq(from(&option, (name_len - 11) as usize), c".FeedScript")
+    {
         let mut v = option.as_bytes().to_vec();
         replace_all(&mut v, b".FeedScript", b".Extensions");
         option = cstring(v);
@@ -334,7 +428,11 @@ fn tokenizer_length(len: usize) -> usize {
     // input whose narrowed length is small/negative takes that path and is
     // truncated by BString::Set to 1023 bytes. The other path's CString::Set
     // also narrows strlen before copying the string.
-    if (len as c_int) < 1023 { len.min(1023) } else { len as c_int as usize }
+    if (len as c_int) < 1023 {
+        len.min(1023)
+    } else {
+        len as c_int as usize
+    }
 }
 
 /// Options::ParseCategorySource: 0 Auto, 1 NZBFile (also the default), 2 FeedFile.
@@ -393,8 +491,19 @@ pub fn clamp_32bit_memory_limits(
 
 /// OptEntry::Restricted's options whose value is protected, compared with strcasecmp.
 const PROTECTED: [&CStr; 13] = [
-    c"ControlIP", c"ControlPort", c"FormAuth", c"JsonP", c"SecureControl", c"SecurePort", c"SecureCert",
-    c"SecureKey", c"CertStore", c"CertCheck", c"AuthorizedIP", c"DaemonUsername", c"UMask",
+    c"ControlIP",
+    c"ControlPort",
+    c"FormAuth",
+    c"JsonP",
+    c"SecureControl",
+    c"SecurePort",
+    c"SecureCert",
+    c"SecureKey",
+    c"CertStore",
+    c"CertCheck",
+    c"AuthorizedIP",
+    c"DaemonUsername",
+    c"UMask",
 ];
 
 /// Options::OptEntry::Restricted: whether an option's value is protected (shown
@@ -414,7 +523,8 @@ pub fn option_restricted(name: &CStr, _signed_char: bool) -> bool {
     for (l, &b) in lower.iter_mut().zip(bytes) {
         *l = b.to_ascii_lowercase();
     }
-    [&b"username"[..], b"password", b"apikey"].iter()
+    [&b"username"[..], b"password", b"apikey"]
+        .iter()
         .any(|needle| lower.windows(needle.len()).any(|w| w == *needle))
 }
 
@@ -688,23 +798,52 @@ mod tests {
     #[test]
     fn names() {
         let mut no = || false;
-        assert_eq!(validate_option_name(c"Server12.Host", &mut no), NameCheck::Valid);
-        assert_eq!(validate_option_name(c"server.port", &mut no), NameCheck::Valid);
-        assert_eq!(validate_option_name(c"Feed3.CategorySource", &mut no), NameCheck::Valid);
-        assert_eq!(validate_option_name(c"AppDir", &mut || true), NameCheck::Invalid);
-        assert_eq!(validate_option_name(c"Script.sh:Opt", &mut no), NameCheck::Valid);
-        assert_eq!(validate_option_name(c"loadpars", &mut no), NameCheck::Obsolete);
+        assert_eq!(
+            validate_option_name(c"Server12.Host", &mut no),
+            NameCheck::Valid
+        );
+        assert_eq!(
+            validate_option_name(c"server.port", &mut no),
+            NameCheck::Valid
+        );
+        assert_eq!(
+            validate_option_name(c"Feed3.CategorySource", &mut no),
+            NameCheck::Valid
+        );
+        assert_eq!(
+            validate_option_name(c"AppDir", &mut || true),
+            NameCheck::Invalid
+        );
+        assert_eq!(
+            validate_option_name(c"Script.sh:Opt", &mut no),
+            NameCheck::Valid
+        );
+        assert_eq!(
+            validate_option_name(c"loadpars", &mut no),
+            NameCheck::Obsolete
+        );
         assert_eq!(validate_option_name(c"Bogus", &mut no), NameCheck::Invalid);
     }
 
     #[test]
     fn old_options() {
         let (o, v) = convert_old_option(c"Category2.DefScript", c"x");
-        assert_eq!((o.as_bytes(), v.as_bytes()), (b"Category2.Extensions".as_slice(), b"x".as_slice()));
+        assert_eq!(
+            (o.as_bytes(), v.as_bytes()),
+            (b"Category2.Extensions".as_slice(), b"x".as_slice())
+        );
         // matched without case, replaced with case: left as it was
-        assert_eq!(convert_old_option(c"category2.defscript", c"x").0.as_bytes(), b"category2.defscript");
+        assert_eq!(
+            convert_old_option(c"category2.defscript", c"x")
+                .0
+                .as_bytes(),
+            b"category2.defscript"
+        );
         let (o, v) = convert_old_option(c"WriteBufferSize", c"-1");
-        assert_eq!((o.as_bytes(), v.as_bytes()), (b"WriteBuffer".as_slice(), b"1024".as_slice()));
+        assert_eq!(
+            (o.as_bytes(), v.as_bytes()),
+            (b"WriteBuffer".as_slice(), b"1024".as_slice())
+        );
         assert_eq!(convert_old_option(c"Decode", c"NO").1.as_bytes(), b"yes");
         assert!(has_script(b"a.py, B.sh", c"b.SH"));
         assert_eq!(parse_category_source(Some(c"FeedFile")), 2);
@@ -712,33 +851,71 @@ mod tests {
 
     #[test]
     fn restricted_options() {
-        for name in [c"ControlPassword", c"Server1.Username", c"server2.PASSWORD", c"DupeSearchApiKey", c"JsonP",
-            c"jsonp", c"UMASK", c"AuthorizedIP", c"Ext:Option", c":"] {
+        for name in [
+            c"ControlPassword",
+            c"Server1.Username",
+            c"server2.PASSWORD",
+            c"DupeSearchApiKey",
+            c"JsonP",
+            c"jsonp",
+            c"UMASK",
+            c"AuthorizedIP",
+            c"Ext:Option",
+            c":",
+        ] {
             assert!(option_restricted(name, c_char::MIN < 0), "{name:?}");
         }
-        for name in [c"DupeSearchUrl", c"DupeCheck", c"ControlIPs", c"JsonPx", c"Server1.Host", c""] {
+        for name in [
+            c"DupeSearchUrl",
+            c"DupeCheck",
+            c"ControlIPs",
+            c"JsonPx",
+            c"Server1.Host",
+            c"",
+        ] {
             assert!(!option_restricted(name, c_char::MIN < 0), "{name:?}");
         }
         // only the first 1023 bytes are searched for the words; a ':' anywhere counts
         let mut long = vec![b'a'; 1020];
         long.extend_from_slice(b"password");
-        assert!(!option_restricted(&CString::new(long.clone()).unwrap(), c_char::MIN < 0));
+        assert!(!option_restricted(
+            &CString::new(long.clone()).unwrap(),
+            c_char::MIN < 0
+        ));
         long.truncate(1015);
         long.extend_from_slice(b"password");
-        assert!(option_restricted(&CString::new(long.clone()).unwrap(), c_char::MIN < 0));
+        assert!(option_restricted(
+            &CString::new(long.clone()).unwrap(),
+            c_char::MIN < 0
+        ));
         long = vec![b'b'; 3023];
-        assert!(!option_restricted(&CString::new(long.clone()).unwrap(), c_char::MIN < 0));
+        assert!(!option_restricted(
+            &CString::new(long.clone()).unwrap(),
+            c_char::MIN < 0
+        ));
         long.push(b':');
-        assert!(option_restricted(&CString::new(long).unwrap(), c_char::MIN < 0));
+        assert!(option_restricted(
+            &CString::new(long).unwrap(),
+            c_char::MIN < 0
+        ));
     }
 
     #[test]
     fn enum_and_int_and_cat_extensions() {
         let names = [c"yes", c"no", c"true", c"false"];
         let vals = [1, 0, 1, 0];
-        assert_eq!(parse_enum_value(c"TRUE", c"no", &names, &vals), (true, 1, Some(0)));
-        assert_eq!(parse_enum_value(c"yes", c"no", &names, &vals), (true, 1, None));
-        assert_eq!(parse_enum_value(c"bogus", c"no", &names, &vals), (false, 0, Some(1)));
+        assert_eq!(
+            parse_enum_value(c"TRUE", c"no", &names, &vals),
+            (true, 1, Some(0))
+        );
+        assert_eq!(
+            parse_enum_value(c"yes", c"no", &names, &vals),
+            (true, 1, None)
+        );
+        assert_eq!(
+            parse_enum_value(c"bogus", c"no", &names, &vals),
+            (false, 0, Some(1))
+        );
 
         assert_eq!(parse_int_value(c"42", c"10", 10), (true, 42));
         assert_eq!(parse_int_value(c"42abc", c"10", 10), (false, 10));
@@ -1034,8 +1211,7 @@ pub fn options_trim_and_check_config_line(line: &[u8]) -> (usize, bool) {
         len -= 1;
     }
     let trimmed = &line[..len];
-    let skip =
-        trimmed.is_empty() || trimmed[0] == b'#' || trimmed.iter().all(|&b| b == b' ');
+    let skip = trimmed.is_empty() || trimmed[0] == b'#' || trimmed.iter().all(|&b| b == b' ');
     (len, skip)
 }
 
@@ -1650,6 +1826,46 @@ pub struct NzbgetRsParsedOptions {
     pub tls: i32,
 }
 
+impl NzbgetRsParsedOptions {
+    /// Returns the startup scalar defaults matching historical `Options` member initializers
+    /// so pre-`InitOptions` diagnostics buffer to `mtScreen` before `Log::InitOptions()`.
+    pub fn with_defaults() -> Self {
+        Self {
+            info_target: 1,
+            warning_target: 1,
+            error_target: 1,
+            debug_target: 0,
+            detail_target: 1,
+            system_health_check: 1,
+            article_read_chunk_size: 4,
+            dupe_stream_timeout: 60,
+            dupe_search_delay: 20,
+            dupe_health_percent: 5,
+            dupe_health_min: 50,
+            dupe_health_max: 1000,
+            dupe_body_checks: 20,
+            dupe_health_budget: 120,
+            dupe_min_alive: 50,
+            dupe_fast_donors: 5,
+            output_mode: 0,
+            write_log: 1,
+            par_check: 3,
+            par_scan: 0,
+            par_quick: 1,
+            post_strategy: 0,
+            health_check: 3,
+            nzb_dir_archive_scan: 1,
+            nzb_dir_archive_action: 1,
+            use_temp_unpack_dir: 1,
+            memory_pressure_interval: 500,
+            file_naming: 1,
+            post_download_rename: 1,
+            rename_after_unpack: 1,
+            ..Self::default()
+        }
+    }
+}
+
 fn format_bytes_msg(parts: &[&[u8]]) -> CString {
     let total_len: usize = parts.iter().map(|p| p.len()).sum();
     let mut out = Vec::with_capacity(total_len);
@@ -1743,11 +1959,8 @@ pub trait OptionsHost {
     fn parse_enum_value(&mut self, opt_name: &CStr, argn: &[&CStr], argv: &[i32]) -> i32 {
         let default_ret = argv.first().copied().unwrap_or(0);
         let Some((val_opt, def_opt, line_no)) = self.find_entry(opt_name) else {
-            let msg = format_bytes_msg(&[
-                b"Undefined value for option \"",
-                opt_name.to_bytes(),
-                b"\"",
-            ]);
+            let msg =
+                format_bytes_msg(&[b"Undefined value for option \"", opt_name.to_bytes(), b"\""]);
             self.config_error(&msg);
             return default_ret;
         };
@@ -1781,11 +1994,8 @@ pub trait OptionsHost {
 
     fn parse_int_value(&mut self, opt_name: &CStr, base: i32) -> i32 {
         let Some((val_opt, def_opt, line_no)) = self.find_entry(opt_name) else {
-            let msg = format_bytes_msg(&[
-                b"Undefined value for option \"",
-                opt_name.to_bytes(),
-                b"\"",
-            ]);
+            let msg =
+                format_bytes_msg(&[b"Undefined value for option \"", opt_name.to_bytes(), b"\""]);
             self.config_error(&msg);
             return 0;
         };
@@ -2013,8 +2223,7 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.post_download_rename = i32::from(host.parse_bool_value(c"PostDownloadRename"));
     s.rename_after_unpack = i32::from(host.parse_bool_value(c"RenameAfterUnpack"));
 
-    s.output_mode =
-        host.parse_enum_value(c"OutputMode", &OUTPUT_MODE_NAMES, &OUTPUT_MODE_VALUES);
+    s.output_mode = host.parse_enum_value(c"OutputMode", &OUTPUT_MODE_NAMES, &OUTPUT_MODE_VALUES);
     s.par_check = host.parse_enum_value(c"ParCheck", &PAR_CHECK_NAMES, &PAR_CHECK_VALUES);
     s.par_scan = host.parse_enum_value(c"ParScan", &PAR_SCAN_NAMES, &PAR_SCAN_VALUES);
     s.dupe_article_fallback = host.parse_enum_value(
@@ -2166,7 +2375,9 @@ pub fn check_options_host<H: OptionsHost>(
 
     if scalars.cert_check != 0 && cert_store_empty {
         host.locate_option_src_pos(c"CertCheck");
-        host.config_error(c"Option \"CertCheck\" requires proper configuration of option \"CertStore\"");
+        host.config_error(
+            c"Option \"CertCheck\" requires proper configuration of option \"CertStore\"",
+        );
         scalars.cert_check = 0;
     }
 
@@ -2194,8 +2405,7 @@ pub fn check_options_host<H: OptionsHost>(
 
     let orig_ac = scalars.article_cache;
     let orig_pb = scalars.par_buffer;
-    let (new_ac, new_pb, mem_err) =
-        clamp_32bit_memory_limits(is_32bit, orig_ac, orig_pb);
+    let (new_ac, new_pb, mem_err) = clamp_32bit_memory_limits(is_32bit, orig_ac, orig_pb);
     scalars.article_cache = new_ac;
     scalars.par_buffer = new_pb;
     if mem_err == 1 {
@@ -2508,9 +2718,8 @@ pub fn init_servers_host<H: OptionsHost>(
                 cert_verif_level as u32,
             );
         } else {
-            let msg = cstring(
-                format!("Server definition not complete for \"Server{}\"", n).into_bytes(),
-            );
+            let msg =
+                cstring(format!("Server definition not complete for \"Server{}\"", n).into_bytes());
             host.config_error(&msg);
         }
 
@@ -2531,11 +2740,7 @@ pub fn init_categories_host<H: OptionsHost>(
             n,
             b"Name",
         )));
-        let dest_dir_opt = cstring(options_format_indexed_opt_name(
-            b"Category",
-            n,
-            b"DestDir",
-        ));
+        let dest_dir_opt = cstring(options_format_indexed_opt_name(b"Category", n, b"DestDir"));
         let ndestdir = host.get_option(&dest_dir_opt);
 
         let unpack_opt = cstring(options_format_indexed_opt_name(b"Category", n, b"Unpack"));
@@ -3094,7 +3299,7 @@ impl<'a> RustOptions<'a> {
             shell_override: c"".to_owned(),
             dupe_search_url: c"".to_owned(),
             dupe_search_api_key: c"".to_owned(),
-            scalars: NzbgetRsParsedOptions::default(),
+            scalars: NzbgetRsParsedOptions::with_defaults(),
             extender,
         };
         opts.init(c"nzbget/nzbget", None, true, cmd_opts, true);
@@ -3118,10 +3323,8 @@ impl<'a> RustOptions<'a> {
         crate::paths::normalize_path_separators(&mut filename);
         let filename_cstr = cstring(filename.clone());
         self.set_option(c"AppBin", &filename_cstr);
-        let parent_dir = crate::util::fs_extract_parent_dir_path(
-            &filename,
-            crate::paths::PATH_SEPARATOR,
-        );
+        let parent_dir =
+            crate::util::fs_extract_parent_dir_path(&filename, crate::paths::PATH_SEPARATOR);
         let app_dir_cstr = cstring(parent_dir);
         self.set_option(c"AppDir", &app_dir_cstr);
         self.app_dir = app_dir_cstr;
@@ -3143,7 +3346,12 @@ impl<'a> RustOptions<'a> {
         let mut pairs: Vec<(CString, CString)> = self
             .opt_entries
             .iter()
-            .map(|e| (e.name.clone(), e.value.clone().unwrap_or_else(|| c"".to_owned())))
+            .map(|e| {
+                (
+                    e.name.clone(),
+                    e.value.clone().unwrap_or_else(|| c"".to_owned()),
+                )
+            })
             .collect();
         convert_old_options(&mut pairs);
         for (idx, (name, val)) in pairs.into_iter().enumerate() {
@@ -3191,7 +3399,9 @@ impl<'a> RustOptions<'a> {
     }
 
     fn check_dirs(&mut self) {
-        self.main_dir = self.get_option(c"MainDir").unwrap_or_else(|| c"".to_owned());
+        self.main_dir = self
+            .get_option(c"MainDir")
+            .unwrap_or_else(|| c"".to_owned());
         let main_dir = self.main_dir.clone();
         let no_disk = self.no_disk_access;
         self.dest_dir = check_dir_host(self, no_disk, c"DestDir", Some(&main_dir), false, true)
@@ -3204,22 +3414,32 @@ impl<'a> RustOptions<'a> {
             .unwrap_or_else(|| c"".to_owned());
         self.web_dir = check_dir_host(self, no_disk, c"WebDir", None, true, false)
             .unwrap_or_else(|| c"".to_owned());
-        self.script_dir = check_script_dir_host(self, no_disk, Some(&main_dir))
-            .unwrap_or_else(|| c"".to_owned());
+        self.script_dir =
+            check_script_dir_host(self, no_disk, Some(&main_dir)).unwrap_or_else(|| c"".to_owned());
         self.nzb_dir = check_dir_host(self, no_disk, c"NzbDir", Some(&main_dir), false, true)
             .unwrap_or_else(|| c"".to_owned());
-        let sd = self.get_option(c"ScriptDir").unwrap_or_else(|| c"".to_owned());
+        let sd = self
+            .get_option(c"ScriptDir")
+            .unwrap_or_else(|| c"".to_owned());
         self.script_dir_paths = split_script_dir_paths(sd.to_bytes());
     }
 
     fn init_options(&mut self) {
-        self.required_dir = self.get_option(c"RequiredDir").unwrap_or_else(|| c"".to_owned());
+        self.required_dir = self
+            .get_option(c"RequiredDir")
+            .unwrap_or_else(|| c"".to_owned());
         self.config_template = self
             .get_option(c"ConfigTemplate")
             .unwrap_or_else(|| c"".to_owned());
-        self.script_order = self.get_option(c"ScriptOrder").unwrap_or_else(|| c"".to_owned());
-        self.extensions = self.get_option(c"Extensions").unwrap_or_else(|| c"".to_owned());
-        self.control_ip = self.get_option(c"ControlIP").unwrap_or_else(|| c"".to_owned());
+        self.script_order = self
+            .get_option(c"ScriptOrder")
+            .unwrap_or_else(|| c"".to_owned());
+        self.extensions = self
+            .get_option(c"Extensions")
+            .unwrap_or_else(|| c"".to_owned());
+        self.control_ip = self
+            .get_option(c"ControlIP")
+            .unwrap_or_else(|| c"".to_owned());
         self.control_username = self
             .get_option(c"ControlUsername")
             .unwrap_or_else(|| c"".to_owned());
@@ -3232,19 +3452,39 @@ impl<'a> RustOptions<'a> {
         self.restricted_password = self
             .get_option(c"RestrictedPassword")
             .unwrap_or_else(|| c"".to_owned());
-        self.add_username = self.get_option(c"AddUsername").unwrap_or_else(|| c"".to_owned());
-        self.add_password = self.get_option(c"AddPassword").unwrap_or_else(|| c"".to_owned());
-        self.secure_cert = self.get_option(c"SecureCert").unwrap_or_else(|| c"".to_owned());
-        self.secure_key = self.get_option(c"SecureKey").unwrap_or_else(|| c"".to_owned());
-        self.cert_store = self.get_option(c"CertStore").unwrap_or_else(|| c"".to_owned());
-        self.authorized_ip = self.get_option(c"AuthorizedIP").unwrap_or_else(|| c"".to_owned());
-        self.lock_file = self.get_option(c"LockFile").unwrap_or_else(|| c"".to_owned());
+        self.add_username = self
+            .get_option(c"AddUsername")
+            .unwrap_or_else(|| c"".to_owned());
+        self.add_password = self
+            .get_option(c"AddPassword")
+            .unwrap_or_else(|| c"".to_owned());
+        self.secure_cert = self
+            .get_option(c"SecureCert")
+            .unwrap_or_else(|| c"".to_owned());
+        self.secure_key = self
+            .get_option(c"SecureKey")
+            .unwrap_or_else(|| c"".to_owned());
+        self.cert_store = self
+            .get_option(c"CertStore")
+            .unwrap_or_else(|| c"".to_owned());
+        self.authorized_ip = self
+            .get_option(c"AuthorizedIP")
+            .unwrap_or_else(|| c"".to_owned());
+        self.lock_file = self
+            .get_option(c"LockFile")
+            .unwrap_or_else(|| c"".to_owned());
         self.daemon_username = self
             .get_option(c"DaemonUsername")
             .unwrap_or_else(|| c"".to_owned());
-        self.log_file = self.get_option(c"LogFile").unwrap_or_else(|| c"".to_owned());
-        self.unrar_cmd = self.get_option(c"UnrarCmd").unwrap_or_else(|| c"".to_owned());
-        self.seven_zip_cmd = self.get_option(c"SevenZipCmd").unwrap_or_else(|| c"".to_owned());
+        self.log_file = self
+            .get_option(c"LogFile")
+            .unwrap_or_else(|| c"".to_owned());
+        self.unrar_cmd = self
+            .get_option(c"UnrarCmd")
+            .unwrap_or_else(|| c"".to_owned());
+        self.seven_zip_cmd = self
+            .get_option(c"SevenZipCmd")
+            .unwrap_or_else(|| c"".to_owned());
         self.unpack_pass_file = self
             .get_option(c"UnpackPassFile")
             .unwrap_or_else(|| c"".to_owned());
@@ -3364,17 +3604,17 @@ impl OptionsHost for RustOptions<'_> {
                 self.opt_entries.len() - 1
             }
         };
-        let curvalue = if options_should_expand_home_value(Some(value.to_bytes()), self.no_disk_access)
-        {
-            let home = std::env::var_os("HOME");
-            #[cfg(unix)]
-            let home_bytes = home.as_deref().map(std::os::unix::ffi::OsStrExt::as_bytes);
-            #[cfg(not(unix))]
-            let home_bytes: Option<&[u8]> = None;
-            crate::fsops::expand_home_path(Some(value), home_bytes)
-        } else {
-            value.to_bytes().to_vec()
-        };
+        let curvalue =
+            if options_should_expand_home_value(Some(value.to_bytes()), self.no_disk_access) {
+                let home = std::env::var_os("HOME");
+                #[cfg(unix)]
+                let home_bytes = home.as_deref().map(std::os::unix::ffi::OsStrExt::as_bytes);
+                #[cfg(not(unix))]
+                let home_bytes: Option<&[u8]> = None;
+                crate::fsops::expand_home_path(Some(value), home_bytes)
+            } else {
+                value.to_bytes().to_vec()
+            };
         self.opt_entries[idx].line_no = self.config_line;
         let expanded = expand_option_variables(&curvalue, |var_name| {
             self.get_option(var_name).map(|c| c.into_bytes())
@@ -3531,6 +3771,748 @@ impl OptionsHost for RustOptions<'_> {
             aliases: aliases.to_vec(),
         });
     }
+}
+
+pub type NzbgetRsOptionsHostFn = Option<
+    unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        op: c_int,
+        ints: *const c_int,
+        strs: *const *const c_char,
+        count: usize,
+    ),
+>;
+
+pub const OPT_STR_COUNT: usize = 41;
+
+/// Heap-backed daemon `Options` instance (`NzbgetRsOptions`) driving full initialization,
+/// string storage, and runtime scheduler task creation.
+pub struct NzbgetRsOptions {
+    opt_entries: Vec<RustOptEntry>,
+    categories: Vec<RustCategory>,
+    script_dir_paths: Vec<CString>,
+    strs: [Option<CString>; OPT_STR_COUNT],
+    no_disk_access: bool,
+    no_config: bool,
+    fatal_error: bool,
+    config_errors: bool,
+    config_line: i32,
+    scalars: NzbgetRsParsedOptions,
+    out_scalars: *mut NzbgetRsParsedOptions,
+    cb_ctx: *mut std::ffi::c_void,
+    cb_fn: NzbgetRsOptionsHostFn,
+}
+
+impl NzbgetRsOptions {
+    fn sync_scalars_to_host(&self) {
+        if !self.out_scalars.is_null() {
+            unsafe {
+                *self.out_scalars = self.scalars;
+            }
+        }
+    }
+
+    fn emit_host(&self, op: c_int, ints: &[c_int], strs: &[*const c_char], count: usize) {
+        if let Some(cb) = self.cb_fn {
+            let ints_ptr = if ints.is_empty() {
+                std::ptr::null()
+            } else {
+                ints.as_ptr()
+            };
+            let strs_ptr = if strs.is_empty() {
+                std::ptr::null()
+            } else {
+                strs.as_ptr()
+            };
+            unsafe { cb(self.cb_ctx, op, ints_ptr, strs_ptr, count) };
+        }
+    }
+
+    fn emit_diag(&self, op: c_int, msg: &CStr) {
+        let mut trunc = msg.to_bytes().to_vec();
+        if trunc.len() > 1023 {
+            trunc.truncate(1023);
+        }
+        let base: &[u8] = match self.strs[0].as_deref() {
+            Some(cf) => {
+                let raw = cf.to_bytes();
+                &raw[crate::paths::base_file_name(raw)..]
+            }
+            None => b"<noconfig>",
+        };
+        let line_s = self.config_line.to_string();
+        let formatted = format_bytes_msg(&[base, b"(", line_s.as_bytes(), b"): ", &trunc]);
+        let ptrs = [formatted.as_ptr()];
+        self.emit_host(op, &[], &ptrs, 1);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn init_daemon(
+        &mut self,
+        exe_name: &[u8],
+        config_filename: Option<&CStr>,
+        no_config: bool,
+        no_disk_access: bool,
+        cmd_opts: &[&CStr],
+        flags: c_int,
+        version: &CStr,
+    ) {
+        let disable_curses = (flags & 1) != 0;
+        let disable_parcheck = (flags & 2) != 0;
+        let disable_tls = (flags & 4) != 0;
+        let have_x509_check_host = (flags & 8) != 0;
+
+        self.no_disk_access = no_disk_access;
+        self.no_config = no_config;
+        self.strs[0] = config_filename.map(CStr::to_owned);
+
+        self.set_option(c"ConfigFile", c"");
+
+        let mut filename = if no_disk_access {
+            exe_name.to_vec()
+        } else {
+            crate::fsops::get_exe_file_name(exe_name)
+        };
+        crate::paths::normalize_path_separators(&mut filename);
+        let app_bin = cstring(filename.clone());
+        self.set_option(c"AppBin", &app_bin);
+        if let Some(pos) = filename
+            .iter()
+            .rposition(|&b| b == crate::paths::PATH_SEPARATOR as u8)
+        {
+            filename.truncate(pos);
+        }
+        let app_dir = cstring(filename);
+        self.set_option(c"AppDir", &app_dir);
+        self.strs[1] = Some(app_dir);
+
+        self.set_option(c"Version", version);
+
+        init_defaults_with(disable_curses, |name, val| self.set_option(name, val));
+
+        self.init_opt_file();
+        if self.fatal_error {
+            self.sync_entries_to_host();
+            return;
+        }
+
+        for &opt in cmd_opts {
+            self.set_option_string(opt);
+        }
+
+        if self.strs[0].is_none() && !no_config {
+            let p0 = [c"No configuration-file found".as_ptr()];
+            self.emit_host(0, &[], &p0, 1);
+            let p1 = [
+                c"Please use option \"-c\" or put configuration-file in one of the following locations:"
+                    .as_ptr(),
+            ];
+            self.emit_host(0, &[], &p1, 1);
+            for &loc in POSSIBLE_CONFIG_LOCATIONS {
+                let loc_c = cstring(loc.to_vec());
+                let pl = [loc_c.as_ptr()];
+                self.emit_host(0, &[], &pl, 1);
+            }
+            self.fatal_error = true;
+            self.sync_entries_to_host();
+            return;
+        }
+
+        let mut pairs: Vec<(CString, CString)> = self
+            .opt_entries
+            .iter()
+            .map(|e| {
+                (
+                    e.name.clone(),
+                    e.value.clone().unwrap_or_else(|| c"".to_owned()),
+                )
+            })
+            .collect();
+        convert_old_options(&mut pairs);
+        for (idx, (name, val)) in pairs.into_iter().enumerate() {
+            if idx < self.opt_entries.len() {
+                self.opt_entries[idx].value = Some(val);
+            } else {
+                self.opt_entries.push(RustOptEntry {
+                    name,
+                    value: Some(val),
+                    def_value: None,
+                    line_no: 0,
+                });
+            }
+        }
+
+        self.check_dirs_daemon();
+        self.init_options_daemon();
+
+        let mut ct = self.strs[9].clone();
+        let web_dir = self.strs[8]
+            .as_deref()
+            .map_or_else(Vec::new, |s| s.to_bytes().to_vec());
+        let upf = self.strs[31].clone();
+        let cert_store_empty = self.strs[23]
+            .as_deref()
+            .map_or(true, |s| s.to_bytes().is_empty());
+        let mut scalars = self.scalars;
+        check_options_host(
+            self,
+            &mut scalars,
+            self.no_disk_access,
+            usize::BITS == 32,
+            disable_parcheck,
+            disable_curses,
+            disable_tls,
+            have_x509_check_host,
+            cert_store_empty,
+            &web_dir,
+            &mut ct,
+            upf.as_deref(),
+        );
+        self.scalars = scalars;
+        self.sync_scalars_to_host();
+        self.strs[9] = ct;
+
+        let mut scalars = self.scalars;
+        init_servers_host(self, disable_tls, &mut scalars);
+        self.scalars = scalars;
+        self.sync_scalars_to_host();
+
+        let dest_dir = self.strs[3].clone();
+        let no_disk = self.no_disk_access;
+        init_categories_host(self, no_disk, dest_dir.as_deref());
+        init_scheduler_host(self);
+        init_feeds_host(self);
+
+        self.sync_entries_to_host();
+    }
+
+    fn init_opt_file(&mut self) {
+        if self.strs[0].is_none() && !self.no_config {
+            let app_dir_bytes = self.strs[1]
+                .as_deref()
+                .map_or_else(Vec::new, |s| s.to_bytes().to_vec());
+            if let Some(found) =
+                find_default_config_file(&app_dir_bytes, b'/', |p| self.file_exists(p))
+            {
+                self.strs[0] = Some(cstring(found));
+            }
+        }
+
+        if let Some(cf) = self.strs[0].clone() {
+            let exp1 = cstring(crate::fsops::expand_file_name(cf.to_bytes()));
+            let exp2 = cstring(crate::fsops::expand_home_path_auto(Some(&exp1)));
+            self.strs[0] = Some(exp2.clone());
+            self.set_option(c"ConfigFile", &exp2);
+            self.load_config_file(&exp2);
+        }
+    }
+
+    fn load_config_file(&mut self, cf: &CStr) {
+        self.set_option(c"ConfigFile", cf);
+        self.config_line = 0;
+        let ok = load_config_file_lines(cf, |line_no, line| {
+            self.config_line = line_no;
+            self.set_option_string(line);
+        });
+        if !ok {
+            let msg = format_bytes_msg(&[b"Could not open file ", cf.to_bytes()]);
+            self.config_error(&msg);
+            self.fatal_error = true;
+            return;
+        }
+        self.config_line = 0;
+    }
+
+    fn set_option_string(&mut self, option: &CStr) -> bool {
+        let Some((optname, optvalue)) = split_and_convert_option_string(option) else {
+            let msg = format_bytes_msg(&[b"Invalid option \"", option.to_bytes(), b"\""]);
+            self.config_error(&msg);
+            return false;
+        };
+        let check = validate_option_name(&optname, &mut || self.get_option(&optname).is_some());
+        match check {
+            NameCheck::Valid => {
+                self.set_option(&optname, &optvalue);
+                true
+            }
+            NameCheck::Obsolete => {
+                let msg = format_bytes_msg(&[
+                    b"Option \"",
+                    optname.to_bytes(),
+                    b"\" is obsolete, ignored",
+                ]);
+                self.config_warn(&msg);
+                true
+            }
+            NameCheck::ObsoleteScript => {
+                if !optvalue.to_bytes().is_empty() {
+                    let msg = format_bytes_msg(&[
+                        b"Option \"",
+                        optname.to_bytes(),
+                        b"\" is obsolete, ignored, use \"ScriptDir\" and \"Extensions\" instead",
+                    ]);
+                    self.config_error(&msg);
+                }
+                true
+            }
+            NameCheck::ObsoleteLog => {
+                let msg = format_bytes_msg(&[
+                    b"Option \"",
+                    optname.to_bytes(),
+                    b"\" is obsolete, ignored, use \"WriteLog\" instead",
+                ]);
+                self.config_warn(&msg);
+                true
+            }
+            NameCheck::Invalid => {
+                let msg = format_bytes_msg(&[b"Invalid option \"", optname.to_bytes(), b"\""]);
+                self.config_error(&msg);
+                false
+            }
+        }
+    }
+
+    fn check_dirs_daemon(&mut self) {
+        self.strs[2] = self.get_option(c"MainDir");
+        let main_dir = self.strs[2].clone();
+        let no_disk = self.no_disk_access;
+        self.strs[3] = check_dir_host(self, no_disk, c"DestDir", main_dir.as_deref(), false, true);
+        self.strs[4] = check_dir_host(self, no_disk, c"InterDir", main_dir.as_deref(), true, true);
+        self.strs[5] = check_dir_host(self, no_disk, c"TempDir", main_dir.as_deref(), false, true);
+        self.strs[6] = check_dir_host(self, no_disk, c"QueueDir", main_dir.as_deref(), false, true);
+        self.strs[8] = check_dir_host(self, no_disk, c"WebDir", None, true, false);
+        self.strs[10] = check_script_dir_host(self, no_disk, main_dir.as_deref());
+        self.strs[7] = check_dir_host(self, no_disk, c"NzbDir", main_dir.as_deref(), false, true);
+        let sd_bytes = self.strs[10].as_deref().map_or(&[][..], |s| s.to_bytes());
+        self.script_dir_paths = split_script_dir_paths(sd_bytes);
+    }
+
+    fn init_options_daemon(&mut self) {
+        self.strs[11] = self.get_option(c"RequiredDir");
+        self.strs[9] = self.get_option(c"ConfigTemplate");
+        self.strs[28] = self.get_option(c"ScriptOrder");
+        self.strs[29] = self.get_option(c"Extensions");
+        self.strs[14] = self.get_option(c"ControlIP");
+        self.strs[15] = self.get_option(c"ControlUsername");
+        self.strs[16] = self.get_option(c"ControlPassword");
+        self.strs[17] = self.get_option(c"RestrictedUsername");
+        self.strs[18] = self.get_option(c"RestrictedPassword");
+        self.strs[19] = self.get_option(c"AddUsername");
+        self.strs[20] = self.get_option(c"AddPassword");
+        self.strs[21] = self.get_option(c"SecureCert");
+        self.strs[22] = self.get_option(c"SecureKey");
+        self.strs[23] = self.get_option(c"CertStore");
+        self.strs[24] = self.get_option(c"AuthorizedIP");
+        self.strs[25] = self.get_option(c"LockFile");
+        self.strs[26] = self.get_option(c"DaemonUsername");
+        self.strs[27] = self.get_option(c"LogFile");
+        self.strs[30] = self.get_option(c"UnrarCmd");
+        let seven_zip_cmd = self.get_option(c"SevenZipCmd");
+        self.strs[31] = self.get_option(c"UnpackPassFile");
+        self.strs[32] = self.get_option(c"ExtCleanupDisk");
+        self.strs[33] = self.get_option(c"ParIgnoreExt");
+        self.strs[35] = self.get_option(c"UnpackIgnoreExt");
+
+        let unrar_bytes = self.strs[30].as_deref().map_or(&[][..], CStr::to_bytes);
+        self.strs[38] = Some(if unrar_bytes.is_empty() {
+            c"".to_owned()
+        } else {
+            cstring(resolve_tool_path_option(unrar_bytes))
+        });
+        let sz_bytes = seven_zip_cmd.as_deref().map_or(&[][..], CStr::to_bytes);
+        self.strs[39] = Some(if sz_bytes.is_empty() {
+            c"".to_owned()
+        } else {
+            cstring(resolve_tool_path_option(sz_bytes))
+        });
+
+        self.strs[40] = Some(
+            self.get_option(c"ShellOverride")
+                .unwrap_or_else(|| c"".to_owned()),
+        );
+        self.strs[34] = self.get_option(c"RenameIgnoreExt");
+
+        let mut mem_path = None;
+        let mut hl_ext = None;
+        let mut dupe_url = None;
+        let mut dupe_key = None;
+        let mut warn_no_url = false;
+        self.scalars = init_scalar_options_host(
+            self,
+            &mut mem_path,
+            &mut hl_ext,
+            &mut dupe_url,
+            &mut dupe_key,
+            &mut warn_no_url,
+        );
+        self.strs[36] = mem_path;
+        self.strs[37] = hl_ext;
+        self.strs[12] = dupe_url;
+        self.strs[13] = dupe_key;
+        self.sync_scalars_to_host();
+
+        if warn_no_url {
+            let p = [c"Option <DupeSearch> is enabled but option <DupeSearchUrl> is empty: no duplicates will be searched".as_ptr()];
+            self.emit_host(3, &[], &p, 1);
+        }
+    }
+
+    fn sync_entries_to_host(&self) {
+        for e in &self.opt_entries {
+            let ints = [e.line_no];
+            let ptrs = [
+                e.name.as_ptr(),
+                e.value.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+                e.def_value
+                    .as_ref()
+                    .map_or(std::ptr::null(), |s| s.as_ptr()),
+            ];
+            self.emit_host(4, &ints, &ptrs, 3);
+        }
+        for c in &self.categories {
+            let ints = [c_int::from(c.unpack)];
+            let mut ptrs = Vec::with_capacity(3 + c.aliases.len());
+            ptrs.push(c.name.as_ptr());
+            ptrs.push(c.dest_dir.as_ptr());
+            ptrs.push(c.extensions.as_ptr());
+            for a in &c.aliases {
+                ptrs.push(a.as_ptr());
+            }
+            self.emit_host(5, &ints, &ptrs, c.aliases.len());
+        }
+        if !self.script_dir_paths.is_empty() {
+            let ptrs: Vec<*const c_char> =
+                self.script_dir_paths.iter().map(|p| p.as_ptr()).collect();
+            self.emit_host(6, &[], &ptrs, ptrs.len());
+        }
+    }
+}
+
+impl OptionsHost for NzbgetRsOptions {
+    fn find_entry(&mut self, name: &CStr) -> Option<(Option<CString>, Option<CString>, i32)> {
+        let entry = self.opt_entries.iter_mut().find(|e| eq(&e.name, name))?;
+        if entry.name.to_bytes() != name.to_bytes() {
+            entry.name = name.to_owned();
+        }
+        Some((entry.value.clone(), entry.def_value.clone(), entry.line_no))
+    }
+
+    fn set_entry_raw_value(&mut self, name: &CStr, value: &CStr) {
+        if let Some(entry) = self.opt_entries.iter_mut().find(|e| eq(&e.name, name)) {
+            if entry.name.to_bytes() != name.to_bytes() {
+                entry.name = name.to_owned();
+            }
+            entry.set_value(value);
+        }
+    }
+
+    fn set_option(&mut self, name: &CStr, value: &CStr) {
+        let idx = match self.opt_entries.iter().position(|e| eq(&e.name, name)) {
+            Some(i) => {
+                if self.opt_entries[i].name.to_bytes() != name.to_bytes() {
+                    self.opt_entries[i].name = name.to_owned();
+                }
+                i
+            }
+            None => {
+                self.opt_entries.push(RustOptEntry::new(name, None));
+                self.opt_entries.len() - 1
+            }
+        };
+        let curvalue =
+            if options_should_expand_home_value(Some(value.to_bytes()), self.no_disk_access) {
+                crate::fsops::expand_home_path_auto(Some(value))
+            } else {
+                value.to_bytes().to_vec()
+            };
+        self.opt_entries[idx].line_no = self.config_line;
+        let expanded = expand_option_variables(&curvalue, |var_name| {
+            self.get_option(var_name).map(|c| c.into_bytes())
+        });
+        let expanded_cstr = cstring(expanded);
+        self.opt_entries[idx].set_value(&expanded_cstr);
+    }
+
+    fn set_config_line(&mut self, line: i32) {
+        self.config_line = line;
+    }
+
+    fn get_config_line(&self) -> i32 {
+        self.config_line
+    }
+
+    fn config_error(&mut self, msg: &CStr) {
+        self.emit_diag(1, msg);
+        self.config_errors = true;
+    }
+
+    fn config_warn(&mut self, msg: &CStr) {
+        self.emit_diag(2, msg);
+    }
+
+    fn file_exists(&self, path: &CStr) -> bool {
+        crate::fsops::file_exists(path.to_bytes(), &crate::fsops::posix_stat)
+    }
+
+    fn ensure_directory(&mut self, dir: &CStr) -> Result<(), CString> {
+        let mut msg = Vec::new();
+        if !crate::fsops::force_directories(dir.to_bytes(), &mut msg, &crate::fsops::posix_stat) {
+            return Err(cstring(msg));
+        }
+        #[cfg(unix)]
+        unsafe {
+            if libc::getuid() == 0 || libc::geteuid() == 0 {
+                if let Some(user) = self.get_option(c"DaemonUsername") {
+                    let pwd = libc::getpwnam(user.as_ptr());
+                    if !pwd.is_null() {
+                        let _ = libc::chown(dir.as_ptr(), (*pwd).pw_uid, (*pwd).pw_gid);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn add_news_server(
+        &mut self,
+        id: i32,
+        active: bool,
+        name: Option<&CStr>,
+        host: Option<&CStr>,
+        port: i32,
+        ip_version: i32,
+        user: Option<&CStr>,
+        pass: Option<&CStr>,
+        join_group: bool,
+        tls: bool,
+        cipher: Option<&CStr>,
+        max_connections: i32,
+        retention: i32,
+        level: i32,
+        group: i32,
+        optional: bool,
+        cert_verif_level: u32,
+    ) {
+        let ints = [
+            id,
+            c_int::from(active),
+            port,
+            ip_version,
+            c_int::from(join_group),
+            c_int::from(tls),
+            max_connections,
+            retention,
+            level,
+            group,
+            c_int::from(optional),
+            cert_verif_level as c_int,
+        ];
+        let ptrs = [
+            name.map_or(std::ptr::null(), CStr::as_ptr),
+            host.map_or(std::ptr::null(), CStr::as_ptr),
+            user.map_or(std::ptr::null(), CStr::as_ptr),
+            pass.map_or(std::ptr::null(), CStr::as_ptr),
+            cipher.map_or(std::ptr::null(), CStr::as_ptr),
+        ];
+        self.emit_host(7, &ints, &ptrs, 5);
+    }
+
+    fn add_feed(
+        &mut self,
+        id: i32,
+        name: Option<&CStr>,
+        url: Option<&CStr>,
+        interval: i32,
+        filter: Option<&CStr>,
+        backlog: bool,
+        pause_nzb: bool,
+        category: Option<&CStr>,
+        category_source: i32,
+        priority: i32,
+        extensions: Option<&CStr>,
+        cert_verif_level: u32,
+    ) {
+        let ints = [
+            id,
+            interval,
+            c_int::from(backlog),
+            c_int::from(pause_nzb),
+            category_source,
+            priority,
+            cert_verif_level as c_int,
+        ];
+        let ptrs = [
+            name.map_or(std::ptr::null(), CStr::as_ptr),
+            url.map_or(std::ptr::null(), CStr::as_ptr),
+            filter.map_or(std::ptr::null(), CStr::as_ptr),
+            category.map_or(std::ptr::null(), CStr::as_ptr),
+            extensions.map_or(std::ptr::null(), CStr::as_ptr),
+        ];
+        self.emit_host(8, &ints, &ptrs, 5);
+    }
+
+    fn add_task(
+        &mut self,
+        id: i32,
+        hours: i32,
+        minutes: i32,
+        week_days_bits: i32,
+        command: i32,
+        param: Option<&CStr>,
+    ) {
+        let ints = [id, hours, minutes, week_days_bits, command];
+        let ptrs = [param.map_or(std::ptr::null(), CStr::as_ptr)];
+        self.emit_host(9, &ints, &ptrs, 1);
+    }
+
+    fn add_category(
+        &mut self,
+        name: &CStr,
+        dest_dir: Option<&CStr>,
+        unpack: bool,
+        extensions: Option<&CStr>,
+        aliases: &[CString],
+    ) {
+        self.categories.push(RustCategory {
+            name: name.to_owned(),
+            dest_dir: dest_dir.unwrap_or(c"").to_owned(),
+            unpack,
+            extensions: extensions.unwrap_or(c"").to_owned(),
+            aliases: aliases.to_vec(),
+        });
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_new(
+    exe_name: *const c_char,
+    config_filename: *const c_char,
+    no_config: c_int,
+    no_disk_access: c_int,
+    cmd_opts: *const *const c_char,
+    cmd_opts_len: usize,
+    flags: c_int,
+    version: *const c_char,
+    cb_ctx: *mut std::ffi::c_void,
+    cb_fn: NzbgetRsOptionsHostFn,
+    out_scalars: *mut NzbgetRsParsedOptions,
+    out_state_flags: *mut c_int,
+) -> *mut NzbgetRsOptions {
+    let exe_bytes = if exe_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(exe_name).to_bytes()
+    };
+    let cf_opt = if config_filename.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(config_filename))
+    };
+    let ver_cstr = if version.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(version)
+    };
+    let mut cmd_vec = Vec::with_capacity(cmd_opts_len);
+    if !cmd_opts.is_null() {
+        for i in 0..cmd_opts_len {
+            let p = *cmd_opts.add(i);
+            if !p.is_null() {
+                cmd_vec.push(CStr::from_ptr(p));
+            }
+        }
+    }
+    let mut opts = Box::new(NzbgetRsOptions {
+        opt_entries: Vec::new(),
+        categories: Vec::new(),
+        script_dir_paths: Vec::new(),
+        strs: std::array::from_fn(|_| None),
+        no_disk_access: no_disk_access != 0,
+        no_config: no_config != 0,
+        fatal_error: false,
+        config_errors: false,
+        config_line: 0,
+        scalars: NzbgetRsParsedOptions::with_defaults(),
+        out_scalars,
+        cb_ctx,
+        cb_fn,
+    });
+    opts.sync_scalars_to_host();
+    opts.init_daemon(
+        exe_bytes,
+        cf_opt,
+        no_config != 0,
+        no_disk_access != 0,
+        &cmd_vec,
+        flags,
+        ver_cstr,
+    );
+    opts.sync_scalars_to_host();
+    if !out_state_flags.is_null() {
+        *out_state_flags = c_int::from(opts.fatal_error) | (c_int::from(opts.config_errors) << 1);
+    }
+    opts.out_scalars = std::ptr::null_mut();
+    opts.cb_ctx = std::ptr::null_mut();
+    opts.cb_fn = None;
+    Box::into_raw(opts)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_free(handle: *mut NzbgetRsOptions) {
+    if !handle.is_null() {
+        drop(Box::from_raw(handle));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_str(
+    handle: *const NzbgetRsOptions,
+    id: c_int,
+) -> *const c_char {
+    if handle.is_null() || id < 0 || (id as usize) >= OPT_STR_COUNT {
+        return std::ptr::null();
+    }
+    (*handle).strs[id as usize]
+        .as_deref()
+        .map_or(std::ptr::null(), CStr::as_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_task(
+    handle: *mut NzbgetRsOptions,
+    id: c_int,
+    time: *const c_char,
+    week_days: *const c_char,
+    command: c_int,
+    param: *const c_char,
+    cb_ctx: *mut std::ffi::c_void,
+    cb_fn: NzbgetRsOptionsHostFn,
+) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let opts = &mut *handle;
+    opts.cb_ctx = cb_ctx;
+    opts.cb_fn = cb_fn;
+    let time_opt = if time.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(time))
+    };
+    let wd_opt = if week_days.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(week_days))
+    };
+    let param_opt = if param.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(param))
+    };
+    create_scheduler_task_host(opts, id, time_opt, wd_opt, command, param_opt);
+    opts.cb_ctx = std::ptr::null_mut();
+    opts.cb_fn = None;
+    c_int::from(opts.config_errors)
 }
 
 #[cfg(test)]
@@ -3823,10 +4805,7 @@ mod options_full_suite_port_from_cpp {
     #[test]
     fn parse_tool_paths_test() {
         {
-            let cmd_opts = [
-                c"UnrarCmd=/test/path/unrar",
-                c"SevenZipCmd=/test/path/7z",
-            ];
+            let cmd_opts = [c"UnrarCmd=/test/path/unrar", c"SevenZipCmd=/test/path/7z"];
             let mut extender = OptionsExtenderMock::default();
             let options = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
             assert_eq!(options.unrar_path.as_c_str(), c"/test/path/unrar");
@@ -3870,13 +4849,11 @@ mod options_full_suite_port_from_cpp {
             assert_eq!(options.scalars.dupe_article_fallback, 0); // dafNone
         }
         {
-            let options =
-                RustOptions::new_no_config(Some(&[c"DupeArticleFallback=article"]), None);
+            let options = RustOptions::new_no_config(Some(&[c"DupeArticleFallback=article"]), None);
             assert_eq!(options.scalars.dupe_article_fallback, 1); // dafArticle
         }
         {
-            let options =
-                RustOptions::new_no_config(Some(&[c"DupeArticleFallback=stream"]), None);
+            let options = RustOptions::new_no_config(Some(&[c"DupeArticleFallback=stream"]), None);
             assert_eq!(options.scalars.dupe_article_fallback, 2); // dafStream
         }
         {
@@ -3904,8 +4881,7 @@ mod options_full_suite_port_from_cpp {
             assert_eq!(options.scalars.dupe_stream_decompress, 0);
         }
         {
-            let options =
-                RustOptions::new_no_config(Some(&[c"DupeStreamDecompress=yes"]), None);
+            let options = RustOptions::new_no_config(Some(&[c"DupeStreamDecompress=yes"]), None);
             assert_eq!(options.scalars.dupe_stream_decompress, 1);
         }
     }
@@ -3943,8 +4919,7 @@ mod options_full_suite_port_from_cpp {
 
         let long_seg = "a".repeat(2500);
         let cat_dest_opt = cstring(format!("Category1.DestDir=/{long_seg}").into_bytes());
-        let script_dir_opt =
-            cstring(format!("ScriptDir=/{long_seg}_1;/{long_seg}_2").into_bytes());
+        let script_dir_opt = cstring(format!("ScriptDir=/{long_seg}_1;/{long_seg}_2").into_bytes());
         let opts = [
             c"Category1.Name=movies",
             cat_dest_opt.as_c_str(),
@@ -3958,19 +4933,24 @@ mod options_full_suite_port_from_cpp {
         assert_eq!(options.script_dir_paths[1].to_bytes().len(), 2503);
 
         let long_web_dir = format!("/{long_seg}").into_bytes();
-        let default_conf = options_format_default_conf_path(&long_web_dir, crate::paths::PATH_SEPARATOR);
+        let default_conf =
+            options_format_default_conf_path(&long_web_dir, crate::paths::PATH_SEPARATOR);
         assert_eq!(default_conf.len(), 2501 + "/nzbget.conf".len());
     }
 
     #[test]
     fn find_default_and_load_config_file_test() {
-        let found = find_default_config_file(b"/opt/app", b'/', |p| {
-            p.to_bytes() == b"/etc/rustyget.conf"
-        });
+        let found =
+            find_default_config_file(b"/opt/app", b'/', |p| p.to_bytes() == b"/etc/rustyget.conf");
         assert_eq!(found.as_deref(), Some(b"/etc/rustyget.conf".as_slice()));
 
-        let tmp = std::env::temp_dir().join(format!("rustyget_opts_test_{}.conf", std::process::id()));
-        std::fs::write(&tmp, b"# comment\n\nControlPort=6789\r\n  \nMainDir=/tmp/rg\n").unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("rustyget_opts_test_{}.conf", std::process::id()));
+        std::fs::write(
+            &tmp,
+            b"# comment\n\nControlPort=6789\r\n  \nMainDir=/tmp/rg\n",
+        )
+        .unwrap();
         let c_tmp = CString::new(tmp.to_str().unwrap()).unwrap();
         let mut lines = Vec::new();
         assert!(load_config_file_lines(&c_tmp, |ln, s| {
@@ -3985,6 +4965,90 @@ mod options_full_suite_port_from_cpp {
             ]
         );
     }
+
+    #[test]
+    fn options_new_preserves_startup_and_parsed_targets_for_init_diagnostics() {
+        struct Cap {
+            scalars: NzbgetRsParsedOptions,
+            events: Vec<(c_int, i32, i32, String)>,
+        }
+        unsafe extern "C" fn cb(
+            ctx: *mut std::ffi::c_void,
+            op: c_int,
+            _ints: *const c_int,
+            strs: *const *const c_char,
+            _count: usize,
+        ) {
+            if (1..=3).contains(&op) {
+                let cap = &mut *(ctx as *mut Cap);
+                let msg = std::str::from_utf8(CStr::from_ptr(*strs).to_bytes())
+                    .unwrap()
+                    .to_owned();
+                cap.events.push((
+                    op,
+                    cap.scalars.error_target,
+                    cap.scalars.warning_target,
+                    msg,
+                ));
+            }
+        }
+
+        let mut cap = Cap {
+            scalars: NzbgetRsParsedOptions::default(),
+            events: Vec::new(),
+        };
+        let cmd_opts = [
+            c"BogusEarlyOption=1".as_ptr(),
+            c"ErrorTarget=both".as_ptr(),
+            c"WarningTarget=log".as_ptr(),
+            c"DupeSearch=yes".as_ptr(),
+            c"DupeSearchUrl=".as_ptr(),
+            c"Server1.Host=news.example.com".as_ptr(),
+        ];
+        let mut state_flags: c_int = 0;
+        let scalars_ptr: *mut NzbgetRsParsedOptions = &mut cap.scalars;
+        let handle = unsafe {
+            nzbget_rs_options_new(
+                c"rustyget".as_ptr(),
+                std::ptr::null(),
+                1,
+                1,
+                cmd_opts.as_ptr(),
+                cmd_opts.len(),
+                0,
+                c"1.0".as_ptr(),
+                (&mut cap as *mut Cap).cast(),
+                Some(cb),
+                scalars_ptr,
+                &mut state_flags,
+            )
+        };
+        unsafe { nzbget_rs_options_free(handle) };
+
+        assert_eq!(state_flags & 2, 2);
+        // 1) Pre-InitOptions invalid option sees startup default targets (mtScreen = 1).
+        assert_eq!(cap.events[0].0, 1);
+        assert_eq!(cap.events[0].1, 1);
+        assert_eq!(cap.events[0].2, 1);
+        assert!(cap.events[0]
+            .3
+            .contains("Invalid option \"BogusEarlyOption\""));
+        // 2) DupeSearch-without-URL warning sees parsed targets (ErrorTarget=both=3, WarningTarget=log=2).
+        let dupe_ev = cap
+            .events
+            .iter()
+            .find(|e| e.0 == 3)
+            .expect("expected DupeSearch warning");
+        assert_eq!(dupe_ev.1, 3);
+        assert_eq!(dupe_ev.2, 2);
+        // 3) Post-InitOptions incomplete Server1 error also sees parsed targets.
+        let srv_ev = cap
+            .events
+            .iter()
+            .find(|e| e.3.contains("Server definition not complete"))
+            .expect("expected Server1 error");
+        assert_eq!(srv_ev.0, 1);
+        assert_eq!(srv_ev.1, 3);
+        assert_eq!(srv_ev.2, 2);
+    }
 }
-
-

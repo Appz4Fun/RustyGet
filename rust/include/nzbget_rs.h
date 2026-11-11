@@ -71,65 +71,12 @@ void nzbget_rs_volume_add(int64_t* seconds, size_t secondsLen, int64_t* minutes,
 	int64_t* hours, size_t hoursLen, const NzbgetRsVolumeSlots* slots, int lastMinSlot, int lastHourSlot,
 	long long locCurTime, long long locDataTime, int64_t bytes);
 
-// Options' value parsers (rust/src/options.rs). parse_time/parse_week_days
-// write their outputs as the C++ did, also on failure. validate_option_name:
-// 0 invalid, 1 valid, 2 obsolete (warn), 3 obsolete script option (error with
-// a value), 4 obsolete log option; predefined(ctx, name) is GetOption's answer.
-// convert_old_option: the current name and value (free with nzbget_rs_free).
-// NULL inputs mean empty strings; NULL outputs discard the corresponding result.
-// Identical output pointers retain only the new value. Previous output buffers
-// are not freed. Non-NULL outputs must be writable and disjoint from inputs;
-// they must be either identical or disjoint from each other.
-// parse_time: NULL arguments return 0 without writes; outputs may alias each other.
-// parse_week_days: NULL input means empty; NULL output returns 0.
-// validate_option_name: NULL name is invalid; NULL callback means not predefined.
-// The callback must not unwind or modify/invalidate name; ctx is caller-owned.
-// has_script: NULL inputs mean empty. parse_category_source: NULL means NZBFile.
-// parse_category_source: FeedInfo::CategorySource (0 Auto, 1 NZBFile, 2 FeedFile).
 // option_restricted: OptEntry::Restricted, 1 when the value is protected; NULL is 0.
 // signedChar is nonzero when the caller's plain char is signed, including
 // compiler overrides such as -funsigned-char; Rust's target default may differ.
 // A non-NULL name must be readable and NUL-terminated within one allocation,
 // and remain unchanged for the duration of the call.
-int nzbget_rs_validate_option_name(const char* name, int (*predefined)(void* ctx, const char* name), void* ctx);
 int nzbget_rs_option_restricted(const char* name, int signedChar);
-
-// NntpConnection's protocol (rust/src/nntp.rs), driving the C++ connection
-// through NzbgetRsNntpIo. Each callback returns 0, or -1 when it threw: the
-// exchange stops and the call returns -1 (rethrow then). readLine sets *line
-// to the connection's line buffer or NULL; the exchange may cut it at its last
-// CR. The login state (authError, authRejected) is read and written back.
-// Only one exchange may use a connection at a time; callbacks must not reenter
-// it or unwind. A non-NULL line is writable and NUL-terminated, and remains
-// valid until the next readLine (including after return to the caller). Only
-// readLine may overwrite it. Callback string arguments are borrowed for that
-// callback only. Configuration strings remain immutable during the exchange;
-// NULL configuration strings mean empty. req/group may alias the line buffer
-// and must remain NUL-terminated across reads. Nothing is retained or freed.
-// Non-NULL outputs must be writable, mutually disjoint, and not overlap io or
-// strings. NULL required arguments or a missing required callback return -1;
-// result outputs are written only on success. debug may be NULL.
-// request: *answer is the buffer or NULL. handshake (after the socket
-// connected): *result 0 connected, 1 the greeting failed (disconnect), 2 the
-// login failed. join_group (not in the group yet): *answer, *joined.
-typedef struct NzbgetRsNntpIo
-{
-	void* ctx;
-	int (*writeLine)(void* ctx, const char* line);
-	int (*readLine)(void* ctx, char** line);
-	int (*reportError)(void* ctx, const char* prefix, const char* arg);
-	int (*debug)(void* ctx, const char* msg);
-	int (*cancelled)(void* ctx, int* cancelled);
-	const char* user;
-	const char* password;
-	const char* name;
-	const char* host;
-	const char* connHost;
-} NzbgetRsNntpIo;
-int nzbget_rs_nntp_request(const NzbgetRsNntpIo* io, const char* req, int* authError, int* authRejected, char** answer);
-int nzbget_rs_nntp_handshake(const NzbgetRsNntpIo* io, int* authError, int* authRejected, int* result);
-int nzbget_rs_nntp_join_group(const NzbgetRsNntpIo* io, const char* group, int* authError, int* authRejected,
-	char** answer, int* joined);
 
 typedef struct NzbgetRsCmdline NzbgetRsCmdline;
 NzbgetRsCmdline* nzbget_rs_cmdline_new(
@@ -225,6 +172,10 @@ typedef struct {
 
 
 
+typedef intptr_t (*NzbgetRsConnHostFn)(
+    void* ctx, int op, int a1, int a2, uintptr_t p1,
+    const char* s1, const char* s2, const char* s3, char* buf, int* out_int);
+
 typedef struct NzbgetRsNservEnv {
     void* ctx;
     const char* version;
@@ -232,6 +183,8 @@ typedef struct NzbgetRsNservEnv {
     void (*log_cb)(void* ctx, int level, const char* msg);
     void (*runtime_cb)(void* ctx, int op, int arg, const char* const* opts, size_t opt_len);
     uintptr_t (*conn_cb)(uintptr_t conn, int op, int a1, int a2, const char* s1, const char* s2, char* out_buf);
+    NzbgetRsConnHostFn tls_host_cb;
+    int debug_on;
 } NzbgetRsNservEnv;
 int nzbget_rs_nserv_run(int argc, const char* const* argv, const NzbgetRsNservEnv* env);
 
@@ -818,10 +771,6 @@ NzbgetRsBuf nzbget_rs_system_health_diagnose(
     void (*log_cb)(void* ctx, int severity, const char* msg));
 
 /* Extension & Script Subsystem End-to-End C ABI (`rust/src/extension.rs`, `rust/src/script.rs`, `rust/src/options.rs`) */
-void nzbget_rs_options_convert_old_options(
-    const char* const* names, const char* const* values, size_t count,
-    void* ctx,
-    void (*update_cb)(void* ctx, size_t idx, const char* name, const char* value));
 
 typedef struct NzbgetRsExtManager NzbgetRsExtManager;
 typedef struct NzbgetRsScriptRunner NzbgetRsScriptRunner;
@@ -1086,81 +1035,21 @@ typedef struct NzbgetRsParsedOptions {
     int32_t tls;
 } NzbgetRsParsedOptions;
 
-typedef struct NzbgetRsOptionsHost {
-    void* ctx;
-    int (*find_entry)(
-        void* ctx, const char* name,
-        const char** out_val, const char** out_def_val, int* out_line_no);
-    void (*set_entry_raw_value)(void* ctx, const char* name, const char* value);
-    void (*set_option)(void* ctx, const char* name, const char* value);
-    void (*set_config_line)(void* ctx, int line);
-    int (*get_config_line)(void* ctx);
-    void (*config_error)(void* ctx, const char* msg);
-    void (*config_warn)(void* ctx, const char* msg);
-    int (*file_exists)(void* ctx, const char* path);
-    int (*ensure_directory)(void* ctx, const char* dir, char* err_buf, size_t err_cap);
-    void (*add_news_server)(
-        void* ctx, int id, int active, const char* name, const char* host,
-        int port, int ip_version, const char* user, const char* pass,
-        int join_group, int tls, const char* cipher, int max_connections,
-        int retention, int level, int group, int optional, uint32_t cert_verif_level);
-    void (*add_feed)(
-        void* ctx, int id, const char* name, const char* url, int interval,
-        const char* filter, int backlog, int pause_nzb, const char* category,
-        int category_source, int priority, const char* extensions, uint32_t cert_verif_level);
-    void (*add_task)(
-        void* ctx, int id, int hours, int minutes, int week_days_bits,
-        int command, const char* param);
-    void (*add_category)(
-        void* ctx, const char* name, const char* dest_dir, int unpack,
-        const char* extensions, const char* const* aliases, size_t aliases_len);
-} NzbgetRsOptionsHost;
-
-void nzbget_rs_options_init_defaults(
-    int disable_curses,
-    void (*set_opt)(void* ctx, const char* name, const char* value),
-    void* ctx);
-NzbgetRsBuf nzbget_rs_options_expand_variables(
-    const char* initial_value,
-    const char* (*get_opt)(void* ctx, const char* name),
-    void* ctx);
-int nzbget_rs_options_split_and_convert(
-    const char* option, NzbgetRsBuf* out_name, NzbgetRsBuf* out_value);
-NzbgetRsBuf nzbget_rs_options_resolve_tool_path(const char* value, size_t len);
+typedef struct NzbgetRsOptions NzbgetRsOptions;
+typedef void (*NzbgetRsOptionsHostFn)(
+    void* ctx, int op, const int* ints, const char* const* strs, size_t count);
+NzbgetRsOptions* nzbget_rs_options_new(
+    const char* exe_name, const char* config_filename, int no_config, int no_disk_access,
+    const char* const* cmd_opts, size_t cmd_opts_len, int flags, const char* version,
+    void* cb_ctx, NzbgetRsOptionsHostFn cb_fn,
+    NzbgetRsParsedOptions* out_scalars, int* out_state_flags);
+void nzbget_rs_options_free(NzbgetRsOptions* handle);
+const char* nzbget_rs_options_str(const NzbgetRsOptions* handle, int id);
+int nzbget_rs_options_task(
+    NzbgetRsOptions* handle, int id, const char* time, const char* week_days,
+    int command, const char* param, void* cb_ctx, NzbgetRsOptionsHostFn cb_fn);
 int nzbget_rs_options_category_alias_list_matches(
     const char* const* aliases, size_t aliases_len, const char* name, int signed_char);
-NzbgetRsBuf nzbget_rs_options_check_dir(
-    const NzbgetRsOptionsHost* host, int no_disk_access,
-    const char* option_name, const char* parent_dir,
-    int allow_empty, int create, int* out_has_dir);
-NzbgetRsBuf nzbget_rs_options_check_script_dir(
-    const NzbgetRsOptionsHost* host, int no_disk_access,
-    const char* main_dir, int* out_has_dir);
-void nzbget_rs_options_init_scalars(
-    const NzbgetRsOptionsHost* host,
-    NzbgetRsParsedOptions* out_scalars,
-    int* out_has_mem_path, NzbgetRsBuf* out_mem_path,
-    int* out_has_hl_ext, NzbgetRsBuf* out_hl_ext,
-    int* out_has_dupe_url, NzbgetRsBuf* out_dupe_url,
-    int* out_has_dupe_key, NzbgetRsBuf* out_dupe_key,
-    int* out_warn_dupe_no_url);
-NzbgetRsBuf nzbget_rs_options_check_options(
-    const NzbgetRsOptionsHost* host,
-    NzbgetRsParsedOptions* scalars,
-    int no_disk_access, int is_32bit,
-    int disable_parcheck, int disable_curses, int disable_tls,
-    int have_x509_check_host, int cert_store_empty,
-    const char* web_dir, const char* config_template, const char* unpack_pass_file,
-    int* out_ct_changed);
-void nzbget_rs_options_init_servers(
-    const NzbgetRsOptionsHost* host, int disable_tls, NzbgetRsParsedOptions* scalars);
-void nzbget_rs_options_init_categories(
-    const NzbgetRsOptionsHost* host, int no_disk_access, const char* dest_dir);
-void nzbget_rs_options_init_feeds(const NzbgetRsOptionsHost* host);
-void nzbget_rs_options_init_scheduler(const NzbgetRsOptionsHost* host);
-void nzbget_rs_options_create_scheduler_task(
-    const NzbgetRsOptionsHost* host, int id, const char* time,
-    const char* week_days, int command, const char* param);
 
 uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
 
@@ -1175,11 +1064,6 @@ int nzbget_rs_system_info_fetch_network(
 NzbgetRsBuf nzbget_rs_log_rotate_log_file(
     const char* log_file, char sep, int64_t cur_time, int rotate_log,
     void* ctx, void (*on_info_cb)(void*, const char*));
-NzbgetRsBuf nzbget_rs_options_find_default_config_file(
-    const char* app_dir, char sep, int* out_found);
-int nzbget_rs_options_load_config_file(
-    const char* path, void* ctx,
-    void (*on_line_cb)(void*, int, const char*));
 
 NzbgetRsBuf nzbget_rs_nzb_format_name(
     int op, const char* s1, const char* s2, const char* s3,
@@ -1237,7 +1121,6 @@ typedef struct RsDownloadCurrentStatsAcc {
     int32_t _pad;
 } RsDownloadCurrentStatsAcc;
 
-NzbgetRsBuf nzbget_rs_fs_string_op(int op, const char* path, int* out_ok);
 int64_t nzbget_rs_fs_op_with_err(
     int op, const char* p1, const char* p2, int64_t val, NzbgetRsBuf* out_errmsg);
 int nzbget_rs_fs_load_file_into_buffer(
@@ -1245,8 +1128,6 @@ int nzbget_rs_fs_load_file_into_buffer(
     uint8_t* (*reserve_cb)(void*, int));
 int nzbget_rs_fs_get_disk_state(
     const char* path, int64_t* out_avail, int64_t* out_total);
-char* nzbget_rs_tokenizer_next(
-    char* data_str, const char* separators, char** inout_save_ptr, int* inout_working);
 void nzbget_rs_nzb_update_current_stats_step(
     RsDownloadCurrentStatsAcc* acc, int64_t file_remaining_size,
     int file_success_articles, int file_failed_articles,
@@ -1448,69 +1329,55 @@ int nzbget_rs_stream_repair_ctrl_exec(
     const NzbgetRsStreamRepairCtrl* ctrl, int op,
     NzbgetRsStreamRepairHostFn host_cb, void* ctx);
 
-typedef struct NzbgetRsConnEnv {
-    void* ctx;
-    const char* host;
-    int port;
-    int ip_version;
-    int timeout_sec;
-    int graceful;
-    int force_close;
-    int has_deadline;
-    const char* const* resolved_addrs;
-    size_t resolved_count;
-    int* socket_atomic;
-    int* status_atomic;
-    int* is_listener;
-    int* accept_busy;
-    int* tls_error;
-    size_t* buf_offset;
-    size_t* buf_avail;
-    int* total_bytes_read;
-    uint8_t* read_buf;
-    size_t read_buf_cap;
-    int (*send_cb)(void* ctx, const char* buf, int len);
-    int (*recv_cb)(void* ctx, char* buf, int len);
-    void (*error_cb)(void* ctx, const char* msg);
-    void (*debug_cb)(void* ctx, const char* msg);
-    int (*deadline_wait_cb)(void* ctx, int fd, int read, int write);
-    int (*deadline_stopped_cb)(void* ctx);
-} NzbgetRsConnEnv;
-
-int nzbget_rs_conn_op(
-    int op, const NzbgetRsConnEnv* env, char* buf_ptr, int buf_len,
-    const char* arg1, const char* arg2, const char* arg3, int int_arg, int* out_int);
-
-typedef struct NzbgetRsWebDlEnv {
-    void* ctx;
-    const char* initial_url;
-    const char* output_filename;
-    const char* info_name;
-    const char* version;
-    int write_buffer_kb;
-    int url_retries;
-    int url_interval_sec;
-    int retry;
-    int force;
-    int tls_disabled;
-    int gzip_disabled;
-    int (*connect_cb)(void* ctx, const char* host, int port, int tls);
-    void (*free_conn_cb)(void* ctx);
-    void (*write_line_cb)(void* ctx, const char* line);
-    int (*read_line_cb)(void* ctx, char* buf, int size, int* out_len);
-    int (*read_body_cb)(void* ctx, char* buf, int size);
-    int (*is_stopped_cb)(void* ctx);
-    int (*is_paused_cb)(void* ctx);
-    void (*touch_time_cb)(void* ctx);
-    void (*set_status_cb)(void* ctx, int status);
-    void (*set_http_status_cb)(void* ctx, int http_status);
-    void (*set_orig_filename_cb)(void* ctx, const char* filename);
-    void (*set_url_cb)(void* ctx, const char* url);
-    void (*on_header_cb)(void* ctx, const char* line);
-    void (*on_log_cb)(void* ctx, int level, const char* msg);
-} NzbgetRsWebDlEnv;
-
-int nzbget_rs_webdl_execute(int op, int max_redirects, const NzbgetRsWebDlEnv* env);
+typedef struct NzbgetRsCancelReg NzbgetRsCancelReg;
+NzbgetRsCancelReg* nzbget_rs_cancel_reg_new(void);
+void nzbget_rs_cancel_reg_stop(const NzbgetRsCancelReg* reg);
+void nzbget_rs_cancel_reg_free(NzbgetRsCancelReg* reg);
+typedef struct NzbgetRsConn NzbgetRsConn;
+NzbgetRsConn* nzbget_rs_conn_new(
+    const char* host, int port, int tls, int reg_cancel, int debug_on,
+    void* owner_ctx, NzbgetRsConnHostFn host_cb);
+NzbgetRsConn* nzbget_rs_conn_from_fd(
+    int fd, int tls, int timeout, int debug_on,
+    void* owner_ctx, NzbgetRsConnHostFn host_cb);
+void nzbget_rs_conn_free(NzbgetRsConn* conn);
+NzbgetRsConn* nzbget_rs_conn_accept(NzbgetRsConn* conn);
+intptr_t nzbget_rs_conn_ctl(
+    NzbgetRsConn* conn, int op, int a1, uintptr_t p1,
+    const char* s1, const char* s2, const char* const* addrs, size_t addrs_len);
+int nzbget_rs_conn_io(
+    NzbgetRsConn* conn, int op, char* buf, int size, int* out_int);
+const char* nzbget_rs_conn_nntp(
+    NzbgetRsConn* conn, int op, const char* arg,
+    const char* user, const char* pass, const char* srv_name, const char* srv_host);
+typedef struct NzbgetRsWebDl NzbgetRsWebDl;
+typedef int (*NzbgetRsWebDlHostFn)(
+    void* ctx, int op, int a1, const char* s1, int* out_ints, const char** out_str);
+NzbgetRsWebDl* nzbget_rs_webdl_new(
+    int debug_on, NzbgetRsConnHostFn conn_host_cb, void* webdl_ctx, NzbgetRsWebDlHostFn webdl_cb);
+void nzbget_rs_webdl_free(NzbgetRsWebDl* dl);
+intptr_t nzbget_rs_webdl_ctl(
+    NzbgetRsWebDl* dl, int op, int a1, const char* s1, int64_t* out_i64, NzbgetRsBuf* out_buf);
+int nzbget_rs_webdl_read_temp_url(
+    const char* url, const char* info_name, const char* temp_dir, int debug_on,
+    NzbgetRsConnHostFn conn_host_cb, void* webdl_ctx, NzbgetRsWebDlHostFn webdl_cb,
+    NzbgetRsBuf* out_buf);
+int nzbget_rs_net_speedtest_iter(
+    const char* body, size_t body_len, int duration_sec, int tls_disabled, int debug_on,
+    NzbgetRsConnHostFn conn_host_cb, uint32_t* out_bytes, double* out_secs);
+void nzbget_rs_req_proc_exec(
+    NzbgetRsConn* conn, const NzbgetRsCancelReg* reg, int tls, int tls_disabled,
+    int secure_port, int control_port, const char* secure_cert, const char* secure_key,
+    void* proc_ctx, void (*serv_binrpc_cb)(void*),
+    int (*serv_web_cb)(void*, const char*), void (*log_cb)(void*, int, const char*));
+typedef struct NzbgetRsRemoteServer NzbgetRsRemoteServer;
+typedef uintptr_t (*NzbgetRsRemoteSrvHostFn)(
+    void* ctx, int op, int a1, uintptr_t p1, const char* s1,
+    int* out_ints, const char** out_strs);
+NzbgetRsRemoteServer* nzbget_rs_remote_srv_new(
+    int tls, int tls_disabled, int debug_on, NzbgetRsConnHostFn conn_host_cb,
+    void* srv_ctx, NzbgetRsRemoteSrvHostFn srv_cb);
+void nzbget_rs_remote_srv_op(NzbgetRsRemoteServer* srv, int op, uintptr_t proc_ptr);
 
 typedef int (*NzbgetRsXmlRpcActionFn)(
     void* ctx, int op, int a1, int a2, int a3, int a4,

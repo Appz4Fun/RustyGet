@@ -35,6 +35,8 @@ pub mod fsops;
 pub mod historycoord;
 pub mod json;
 pub mod manifest;
+#[cfg(unix)]
+pub mod net;
 pub mod nntp;
 pub mod nserv;
 pub mod nstring;

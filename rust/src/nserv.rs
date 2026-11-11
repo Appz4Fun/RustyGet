@@ -305,8 +305,12 @@ fn os_str_bytes(s: &std::ffi::OsStr) -> &[u8] {
 }
 
 /// Runs `NzbGenerator::Execute` end-to-end on `data_dir` with `segment_size`.
-pub fn execute_nzb_generator<L>(data_dir: &Path, data_dir_bytes: &[u8], segment_size: i32, mut log_fn: L)
-where
+pub fn execute_nzb_generator<L>(
+    data_dir: &Path,
+    data_dir_bytes: &[u8],
+    segment_size: i32,
+    mut log_fn: L,
+) where
     L: FnMut(NzbGenLogKind, &[u8]),
 {
     log_fn(NzbGenLogKind::StartDir, data_dir_bytes);
@@ -338,7 +342,10 @@ where
             let mut outfile = match File::create(&nzb_path) {
                 Ok(f) => f,
                 Err(_) => {
-                    log_fn(NzbGenLogKind::CreateError, os_str_bytes(nzb_path.as_os_str()));
+                    log_fn(
+                        NzbGenLogKind::CreateError,
+                        os_str_bytes(nzb_path.as_os_str()),
+                    );
                     continue;
                 }
             };
@@ -595,13 +602,8 @@ pub fn nntp_server_in_list(serv_list: &[u8], server_id: i32) -> bool {
 }
 
 /// Calculates `(expected_time, chunk_num, chunk_size, pause)` for `NntpProcessor::SendData`.
-pub fn nntp_calc_send_chunks(
-    size: i32,
-    speed: i32,
-    elapsed_ticks: i64,
-) -> (i64, i32, i32, i32) {
-    let expected_time =
-        1000_i64 * (size as i64) / ((speed as i64) * 1024) - elapsed_ticks / 1000;
+pub fn nntp_calc_send_chunks(size: i32, speed: i32, elapsed_ticks: i64) -> (i64, i32, i32, i32) {
+    let expected_time = 1000_i64 * (size as i64) / ((speed as i64) * 1024) - elapsed_ticks / 1000;
     let mut chunk_num = 21;
     let mut chunk_size = size;
     let mut pause = 0;
@@ -1338,6 +1340,42 @@ pub struct NzbgetRsNservEnv {
             *mut std::ffi::c_char,
         ) -> usize,
     >,
+    #[cfg(unix)]
+    pub tls_host_cb: crate::net::NzbgetRsConnHostFn,
+    pub debug_on: std::ffi::c_int,
+}
+
+unsafe fn nserv_conn_op(
+    env: &NzbgetRsNservEnv,
+    conn: usize,
+    op: std::ffi::c_int,
+    a1: std::ffi::c_int,
+    a2: std::ffi::c_int,
+    s1: *const std::ffi::c_char,
+    s2: *const std::ffi::c_char,
+    out_buf: *mut std::ffi::c_char,
+) -> usize {
+    if let Some(cb) = env.conn_cb {
+        return cb(conn, op, a1, a2, s1, s2, out_buf);
+    }
+    #[cfg(unix)]
+    {
+        crate::net::nserv_default_conn_cb(
+            env.tls_host_cb,
+            env.debug_on != 0,
+            conn,
+            op,
+            a1,
+            a2,
+            s1,
+            s2,
+            out_buf,
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1388,9 +1426,6 @@ fn run_nntp_processor_session(
     conn: usize,
 ) {
     let env = &shared.env.0;
-    let Some(conn_cb) = env.conn_cb else {
-        return;
-    };
     let cert_ptr = shared
         .secure_cert
         .as_ref()
@@ -1402,7 +1437,8 @@ fn run_nntp_processor_session(
 
     let mut host_buf = [0 as std::ffi::c_char; 256];
     let started = unsafe {
-        conn_cb(
+        nserv_conn_op(
+            env,
             conn,
             5,
             host_buf.len() as std::ffi::c_int,
@@ -1418,7 +1454,18 @@ fn run_nntp_processor_session(
             4,
             &[b"Could not establish secure connection to nntp-client: Start TLS failed"],
         );
-        unsafe { conn_cb(conn, 4, 0, 1, std::ptr::null(), std::ptr::null(), std::ptr::null_mut()) };
+        unsafe {
+            nserv_conn_op(
+                env,
+                conn,
+                4,
+                0,
+                1,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            )
+        };
         return;
     }
 
@@ -1435,7 +1482,8 @@ fn run_nntp_processor_session(
     );
 
     unsafe {
-        conn_cb(
+        nserv_conn_op(
+            env,
             conn,
             7,
             0,
@@ -1449,7 +1497,8 @@ fn run_nntp_processor_session(
     let mut line_buf = [0 as std::ffi::c_char; 1024];
     loop {
         let got = unsafe {
-            conn_cb(
+            nserv_conn_op(
+                env,
                 conn,
                 6,
                 1024,
@@ -1466,7 +1515,8 @@ fn run_nntp_processor_session(
         let mut write_line_fn = |reply: &[u8]| {
             let cstr = nserv_bytes_to_cstring(reply);
             unsafe {
-                conn_cb(
+                nserv_conn_op(
+                    env,
                     conn,
                     7,
                     0,
@@ -1478,7 +1528,8 @@ fn run_nntp_processor_session(
             }
         };
         let mut send_fn = |chunk: &[u8]| unsafe {
-            conn_cb(
+            nserv_conn_op(
+                env,
                 conn,
                 7,
                 chunk.len() as std::ffi::c_int,
@@ -1491,11 +1542,7 @@ fn run_nntp_processor_session(
         let mut log_fn = |kind: i32, msg: &[u8]| match kind {
             0 => {
                 let ts = nserv_now_formatted();
-                nserv_env_log(
-                    env,
-                    1,
-                    &[&ts, format!(" [{proc_id}] ").as_bytes(), msg],
-                );
+                nserv_env_log(env, 1, &[&ts, format!(" [{proc_id}] ").as_bytes(), msg]);
             }
             1 => nserv_env_log(env, 1, &[format!("[{proc_id}] ").as_bytes(), msg]),
             2 => nserv_env_log(env, 3, &[format!("[{proc_id}] ").as_bytes(), msg]),
@@ -1520,7 +1567,18 @@ fn run_nntp_processor_session(
         }
     }
 
-    unsafe { conn_cb(conn, 4, 1, 1, std::ptr::null(), std::ptr::null(), std::ptr::null_mut()) };
+    unsafe {
+        nserv_conn_op(
+            env,
+            conn,
+            4,
+            1,
+            1,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        )
+    };
 }
 
 fn run_nntp_server_instance(
@@ -1531,9 +1589,6 @@ fn run_nntp_server_instance(
 ) {
     use std::sync::atomic::Ordering;
     let env = &shared.env.0;
-    let Some(conn_cb) = env.conn_cb else {
-        return;
-    };
 
     nserv_env_log(env, 0, &[b"Entering NntpServer-loop"]);
     let ts = nserv_now_formatted();
@@ -1553,7 +1608,8 @@ fn run_nntp_server_instance(
         let mut conn = listener_slot.lock().map(|g| *g).unwrap_or(0);
         let bind = if conn == 0 {
             let created = unsafe {
-                conn_cb(
+                nserv_conn_op(
+                    env,
                     0,
                     0,
                     port as std::ffi::c_int,
@@ -1565,7 +1621,8 @@ fn run_nntp_server_instance(
             };
             let bound = created != 0
                 && unsafe {
-                    conn_cb(
+                    nserv_conn_op(
+                        env,
                         created,
                         1,
                         0,
@@ -1579,7 +1636,8 @@ fn run_nntp_server_instance(
                 *g = created;
                 if shared.stopped.load(Ordering::SeqCst) && created != 0 {
                     unsafe {
-                        conn_cb(
+                        nserv_conn_op(
+                            env,
                             created,
                             3,
                             0,
@@ -1599,7 +1657,8 @@ fn run_nntp_server_instance(
 
         let accepted = if bind && !shared.stopped.load(Ordering::SeqCst) {
             unsafe {
-                conn_cb(
+                nserv_conn_op(
+                    env,
                     conn,
                     2,
                     0,
@@ -1621,7 +1680,8 @@ fn run_nntp_server_instance(
                 let old = std::mem::replace(&mut *g, 0);
                 if old != 0 {
                     unsafe {
-                        conn_cb(
+                        nserv_conn_op(
+                            env,
                             old,
                             4,
                             0,
@@ -1649,7 +1709,8 @@ fn run_nntp_server_instance(
         let old = std::mem::replace(&mut *g, 0);
         if old != 0 {
             unsafe {
-                conn_cb(
+                nserv_conn_op(
+                    env,
                     old,
                     4,
                     2,
@@ -1695,7 +1756,11 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
     if argc > 0 && !argv.is_null() {
         for i in 0..argc as usize {
             let p = *argv.add(i);
-            arg_slices.push(if p.is_null() { b"" } else { CStr::from_ptr(p).to_bytes() });
+            arg_slices.push(if p.is_null() {
+                b""
+            } else {
+                CStr::from_ptr(p).to_bytes()
+            });
         }
     }
 
@@ -1774,20 +1839,19 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
     shared
         .stopped
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    if let Some(conn_cb) = env.conn_cb {
-        for slot in &slots {
-            if let Ok(g) = slot.lock() {
-                if *g != 0 {
-                    conn_cb(
-                        *g,
-                        3,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                    );
-                }
+    for slot in &slots {
+        if let Ok(g) = slot.lock() {
+            if *g != 0 {
+                nserv_conn_op(
+                    env,
+                    *g,
+                    3,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                );
             }
         }
     }
@@ -1842,12 +1906,14 @@ mod tests {
             file_size,
             |chunk| {
                 // Verify NUL byte sits immediately past the slice for C-string callers
-                assert_eq!( unsafe { *chunk.as_ptr().add(chunk.len()) }, 0 );
+                assert_eq!(unsafe { *chunk.as_ptr().add(chunk.len()) }, 0);
                 encoded.extend_from_slice(chunk);
             },
         );
         let text = String::from_utf8_lossy(&encoded);
-        assert!(text.starts_with("=ybegin part=1 line=128 size=6 name=sample.dat\r\n=ypart begin=1 end=6\r\n"));
+        assert!(text.starts_with(
+            "=ybegin part=1 line=128 size=6 name=sample.dat\r\n=ypart begin=1 end=6\r\n"
+        ));
         assert!(text.ends_with("=yend size=6 part=0 pcrc32=a30bff0d\r\n"));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1875,11 +1941,16 @@ mod tests {
         assert!(logs.iter().any(|(k, _)| *k == NzbGenLogKind::Finished));
 
         let movie_nzb = std::fs::read_to_string(dir.join("movie.mkv.nzb")).unwrap();
-        assert!(movie_nzb.contains("<segment bytes=\"600\" number=\"1\">movie.mkv?1=0:600</segment>"));
-        assert!(movie_nzb.contains("<segment bytes=\"400\" number=\"2\">movie.mkv?2=600:400</segment>"));
+        assert!(
+            movie_nzb.contains("<segment bytes=\"600\" number=\"1\">movie.mkv?1=0:600</segment>")
+        );
+        assert!(
+            movie_nzb.contains("<segment bytes=\"400\" number=\"2\">movie.mkv?2=600:400</segment>")
+        );
 
         let album_nzb = std::fs::read_to_string(dir.join("album.nzb")).unwrap();
-        assert!(album_nzb.contains("<segment bytes=\"400\" number=\"1\">album/track01.flac?1=0:400</segment>"));
+        assert!(album_nzb
+            .contains("<segment bytes=\"400\" number=\"1\">album/track01.flac?1=0:400</segment>"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2047,7 +2118,16 @@ mod tests {
         let d_str = dir.to_str().unwrap().as_bytes();
         let c_str = cache_sub.to_str().unwrap().as_bytes();
         let handle = NServOptsHandle::parse_and_validate(
-            &[b"rustyget", b"--nserv", b"-d", d_str, b"-c", c_str, b"-v", b"3"],
+            &[
+                b"rustyget",
+                b"--nserv",
+                b"-d",
+                d_str,
+                b"-c",
+                c_str,
+                b"-v",
+                b"3",
+            ],
             |_| {},
             |lvl, m| logs.push((lvl, m.to_bytes().to_vec())),
         )
@@ -2078,7 +2158,13 @@ mod tests {
             allow_bind_finish: std::sync::Barrier::new(2),
         });
 
-        unsafe extern "C" fn mock_rt(_: *mut std::ffi::c_void, op: std::ffi::c_int, _: std::ffi::c_int, _: *const *const std::ffi::c_char, _: usize) {
+        unsafe extern "C" fn mock_rt(
+            _: *mut std::ffi::c_void,
+            op: std::ffi::c_int,
+            _: std::ffi::c_int,
+            _: *const *const std::ffi::c_char,
+            _: usize,
+        ) {
             if op == 3 {
                 let m = MOCK.get().unwrap();
                 m.entered_bind.wait();
@@ -2150,6 +2236,9 @@ mod tests {
             log_cb: None,
             runtime_cb: Some(mock_rt),
             conn_cb: Some(mock_conn),
+            #[cfg(unix)]
+            tls_host_cb: None,
+            debug_on: 0,
         };
         let rc = unsafe { nzbget_rs_nserv_run(argv.len() as std::ffi::c_int, argv.as_ptr(), &env) };
         release_thread.join().unwrap();

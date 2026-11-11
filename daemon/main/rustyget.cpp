@@ -66,52 +66,10 @@ inline int NServMain(int argc, char* argv[])
 		else if (op == 2) { while (c->frontend && c->frontend->IsRunning()) Util::Sleep(arg); }
 		else if (op == 3) { while (getchar()) Util::Sleep(200); }
 	};
-	env.conn_cb = +[](uintptr_t rawConn, int op, int a1, int a2, const char* s1, const char* s2, char* outBuf) -> uintptr_t {
-		if (op == 0)
-		{
-			auto* conn = new Connection(s1 ? s1 : "", a1, s2 != nullptr);
-			conn->SetTimeout(10);
-			conn->SetSuppressErrors(false);
-			return reinterpret_cast<uintptr_t>(conn);
-		}
-		auto* conn = reinterpret_cast<Connection*>(rawConn);
-		if (!conn) return 0;
-		if (op == 1) return conn->Bind() ? 1 : 0;
-		if (op == 2) return reinterpret_cast<uintptr_t>(conn->Accept().release());
-		if (op == 3) { conn->SetSuppressErrors(true); conn->Cancel(); return 1; }
-		if (op == 4)
-		{
-			if (a1 == 1) conn->SetGracefull(true);
-			if (a1 == 1 || a1 == 2 || a2 == 1) conn->Disconnect();
-			delete conn;
-#ifndef DISABLE_TLS
-			if (a2 == 1) OpenSSL::StopSSLThread();
+	env.tls_host_cb = &Connection::HostCb;
+#ifdef DEBUG
+	env.debug_on = 1;
 #endif
-			return 0;
-		}
-		if (op == 5)
-		{
-			conn->SetSuppressErrors(false);
-#ifndef DISABLE_TLS
-			if (s1 && !conn->StartTls(false, s1, s2)) return 0;
-#endif
-			const char* host = conn->GetHost();
-			if (outBuf && a1 > 0) snprintf(outBuf, static_cast<size_t>(a1), "%s", host ? host : "");
-			return 1;
-		}
-		if (op == 6)
-		{
-			int bytesRead = 0;
-			return conn->ReadLine(outBuf, a1, &bytesRead) ? 1 : 0;
-		}
-		if (op == 7)
-		{
-			if (a2 != 0) conn->WriteLine(s1 ? s1 : "");
-			else if (s1 && a1 > 0) conn->Send(s1, a1);
-			return 1;
-		}
-		return 0;
-	};
 	return nzbget_rs_nserv_run(argc, const_cast<const char* const*>(argv), &env);
 }
 #endif

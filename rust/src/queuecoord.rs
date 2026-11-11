@@ -1124,6 +1124,3560 @@ pub unsafe fn cstr_to_bytes<'a>(ptr: *const c_char) -> &'a [u8] {
     }
 }
 
+#[cfg(unix)]
+const DUPE_FAILOVER_SAMPLE: i32 = 32;
+#[cfg(unix)]
+const BACKUP_LEAD: i32 = 100;
+#[cfg(unix)]
+const DUPE_PROBE_SAMPLE_COUNT: i32 = 10;
+#[cfg(unix)]
+const DUPE_PROBE_MIN_ARTICLES: usize = 4;
+#[cfg(unix)]
+const DUPE_PROBE_MIN_ALIVE_SAMPLES: i32 = 2;
+
+#[cfg(unix)]
+pub struct NzbgetRsQueueCoordinator {
+    downloads_limit: std::sync::atomic::AtomicI32,
+    server_config_generation: std::sync::atomic::AtomicI32,
+    propagation_wait_logged_id: std::sync::atomic::AtomicI32,
+    donor_cache: std::sync::Mutex<crate::dupefallback::DonorCacheState>,
+}
+
+#[cfg(unix)]
+impl Default for NzbgetRsQueueCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(unix)]
+fn snapshot_file_articles(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    file_ptr: usize,
+    len: usize,
+) -> Vec<crate::queuesubsys_host::ArticleSnap> {
+    let mut v = Vec::with_capacity(len);
+    for i in 0..len {
+        v.push(host.article_at(file_ptr, i));
+    }
+    v
+}
+
+#[cfg(unix)]
+fn pack_merge_split_counters(
+    n: &crate::queuesubsys_host::NzbSnap,
+) -> NzbgetRsNzbMergeSplitCounters {
+    NzbgetRsNzbMergeSplitCounters {
+        file_count: n.file_count,
+        active_downloads: n.active_downloads,
+        full_content_hash: n.full_content_hash,
+        filtered_content_hash: n.filtered_content_hash,
+        size: n.size,
+        remaining_size: n.remaining_size,
+        paused_file_count: n.paused_file_count,
+        paused_size: n.paused_size,
+        success_size: n.success_size,
+        current_success_size: n.current_success_size,
+        failed_size: n.failed_size,
+        current_failed_size: n.current_failed_size,
+        par_size: n.par_size,
+        par_success_size: n.par_success_size,
+        par_current_success_size: n.par_current_success_size,
+        par_failed_size: n.par_failed_size,
+        par_current_failed_size: n.par_current_failed_size,
+        remaining_par_count: n.remaining_par_count,
+        total_articles: n.total_articles,
+        success_articles: n.success_articles,
+        failed_articles: n.failed_articles,
+        current_success_articles: n.current_success_articles,
+        current_failed_articles: n.current_failed_articles,
+        min_time: n.min_time,
+        max_time: n.max_time,
+        downloaded_size: n.downloaded_size,
+        download_sec: n.download_sec,
+        download_start_time: n.download_start_time,
+    }
+}
+
+#[cfg(unix)]
+fn join_path(dir: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dir.len() + 1 + name.len());
+    out.extend_from_slice(dir);
+    out.push(crate::paths::PATH_SEPARATOR);
+    out.extend_from_slice(name);
+    out
+}
+
+#[cfg(unix)]
+fn backup_alive_permille(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+) -> i32 {
+    let mut best = -1i32;
+    for key in [b"DupeAlive".as_slice(), b"DupeHealth".as_slice()] {
+        if let Some(val) = host.nzb_get_param(nzb_ptr, key) {
+            best = best.max(crate::dupecoord::parse_alive_permille_bytes(&val));
+        }
+    }
+    best
+}
+
+#[cfg(unix)]
+impl NzbgetRsQueueCoordinator {
+    pub fn new() -> Self {
+        Self {
+            downloads_limit: std::sync::atomic::AtomicI32::new(0),
+            server_config_generation: std::sync::atomic::AtomicI32::new(0),
+            propagation_wait_logged_id: std::sync::atomic::AtomicI32::new(0),
+            donor_cache: std::sync::Mutex::new(crate::dupefallback::DonorCacheState::default()),
+        }
+    }
+
+    fn with_donor_cache<R>(
+        &self,
+        f: impl FnOnce(&mut crate::dupefallback::DonorCacheState) -> R,
+    ) -> R {
+        let mut guard = self
+            .donor_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    }
+
+    pub(crate) fn init(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"Creating QueueCoordinator",
+        );
+        host.coord_dq_init();
+        host.work_state_attach_self();
+        crate::dupeprobe::probe_reset();
+        crate::twin::reset_all();
+    }
+
+    pub(crate) fn destroy(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"Destroying QueueCoordinator",
+        );
+        crate::dupeprobe::probe_wait_all();
+        crate::twin::wait_all();
+        host.delete_all_active_downloads();
+        host.coord_dq_final();
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"QueueCoordinator destroyed",
+        );
+    }
+
+    pub(crate) fn stop(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        crate::dupeprobe::probe_stop_all();
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"Stopping ArticleDownloads",
+        );
+        host.with_locked_queue(|_| {
+            let n = host.active_downloads_len();
+            for i in 0..n {
+                let ad = host.active_download_at(i);
+                host.ad_action(ad.ad_ptr, crate::queuesubsys_host::AD_ACT_STOP, 0);
+            }
+        });
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"ArticleDownloads are notified",
+        );
+    }
+
+    fn load(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        host.with_locked_queue(|dq_ptr| {
+            let opts = host.opts();
+            let mut stat_loaded = true;
+            let mut perfect_server_match = true;
+            let mut queue_loaded = false;
+
+            if opts.server_mode {
+                let (sl, pm) = host.stat_meter_load();
+                stat_loaded = sl;
+                perfect_server_match = pm;
+                if host.disk_queue_exists() {
+                    queue_loaded = host.disk_load_queue(dq_ptr);
+                } else {
+                    host.disk_discard_queue();
+                }
+            }
+
+            if queue_loaded && stat_loaded {
+                host.disk_cleanup_temp_dir(dq_ptr);
+            }
+
+            if queue_loaded && host.disk_legacy_queue_read() {
+                host.log(
+                    crate::queuesubsys_host::MK_INFO,
+                    b"Saving the queue and history of an earlier build in the upstream format",
+                );
+                host.dq_history_changed(dq_ptr);
+                host.dq_save(dq_ptr);
+            }
+
+            if queue_loaded && stat_loaded && !perfect_server_match {
+                host.log(
+                    crate::queuesubsys_host::MK_DEBUG,
+                    b"Changes in section <NEWS SERVERS> of config file detected, resaving queue",
+                );
+                host.stat_meter_save();
+                host.dq_history_changed(dq_ptr);
+                host.dq_save(dq_ptr);
+
+                if opts.server_mode {
+                    let qlen = host.queue_len(dq_ptr);
+                    for i in 0..qlen {
+                        let nzb_ptr = host.queue_at(dq_ptr, i);
+                        if opts.continue_partial {
+                            let flen = host.nzb_file_len(nzb_ptr);
+                            for j in 0..flen {
+                                let fp = host.nzb_file_at(nzb_ptr, j);
+                                let f = host.file_snap(fp);
+                                if f.articles_len > 0 {
+                                    host.disk_save_file_state(fp, false);
+                                }
+                            }
+                        }
+                        for cf in host.nzb_completed_files(nzb_ptr) {
+                            if (cf.status == crate::queuesubsys_host::CF_PARTIAL
+                                || cf.status == crate::queuesubsys_host::CF_FAILURE)
+                                && cf.id > 0
+                            {
+                                host.disk_resave_completed_file_state(cf.id);
+                            }
+                        }
+                    }
+                }
+            }
+
+            host.coord_dq_loaded();
+        });
+    }
+
+    fn adjust_downloads_limit(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        let cur_gen = host.server_pool_generation();
+        if self
+            .server_config_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == cur_gen
+        {
+            return;
+        }
+        let (levels, actives, conns) = host.server_pool_servers();
+        let limit = calc_downloads_limit(&levels, &actives, &conns);
+        self.downloads_limit
+            .store(limit, std::sync::atomic::Ordering::Relaxed);
+        self.server_config_generation
+            .store(cur_gen, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn wait_jobs(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"QueueCoordinator: waiting for Downloads to complete",
+        );
+        loop {
+            let mut empty = false;
+            host.with_locked_queue(|_| {
+                empty = host.active_downloads_len() == 0;
+            });
+            if empty {
+                break;
+            }
+            host.sleep_ms(100);
+            self.reset_hanging_downloads(host);
+        }
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"QueueCoordinator: Downloads are completed",
+        );
+    }
+
+    pub(crate) fn run(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"Entering QueueCoordinator-loop",
+        );
+        self.load(host);
+        self.adjust_downloads_limit(host);
+        let mut was_standby = true;
+        let mut article_downloads_running = false;
+        let mut last_reset: i64 = 0;
+        host.stat_meter_interval_check();
+        let mut wait_interval: i32 = 100;
+
+        while !host.self_is_stopped() {
+            let mut downloads_checked = false;
+            let mut download_started = false;
+
+            host.with_locked_queue(|dq_ptr| {
+                let opts = host.opts();
+                let next_pair = self.get_next_article(host, &opts, dq_ptr);
+                let has_more_articles = next_pair.is_some();
+                let active_len = host.active_downloads_len();
+                article_downloads_running = active_len > 0;
+                host.self_set_has_more_jobs(has_more_articles || article_downloads_running);
+
+                let dl_limit = self
+                    .downloads_limit
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let effective_limit = host.effective_downloads_limit(dl_limit);
+                let can_proceed = !host.self_is_stopped() && (active_len as i32) < effective_limit;
+
+                if let Some((file, art)) = next_pair {
+                    if can_proceed && (!opts.download_held || file.extra_priority) {
+                        let nzb = host.nzb_snap(file.nzb_ptr, false);
+                        let conn_ptr = host.server_pool_get_connection(
+                            nzb.has_desired_server,
+                            nzb.desired_server_id,
+                        );
+                        if conn_ptr != 0 {
+                            downloads_checked = true;
+                            article_downloads_running = true;
+                            download_started = true;
+                            self.start_dead_pick_probe(host, &opts, dq_ptr, &nzb);
+                            self.start_article_download(host, &opts, &nzb, &file, &art, conn_ptr);
+                        } else if nzb.has_desired_server {
+                            let mut dbg = b"Could not start download for ".to_vec();
+                            dbg.extend_from_slice(&nzb.name);
+                            dbg.extend_from_slice(
+                                format!(
+                                    ": desired server {} has no available connections",
+                                    nzb.desired_server_id
+                                )
+                                .as_bytes(),
+                            );
+                            host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
+                        }
+                    }
+                }
+            });
+
+            if !downloads_checked {
+                host.with_locked_queue(|_| {
+                    article_downloads_running = host.active_downloads_len() > 0;
+                });
+            }
+
+            let standby = !article_downloads_running;
+            if standby != was_standby {
+                host.stat_meter_enter_leave_standby(standby);
+                host.work_state_set_downloading(!standby);
+                was_standby = standby;
+                if standby {
+                    self.save_all_partial_state(host);
+                }
+            }
+
+            if standby {
+                wait_interval = (wait_interval * 2).min(2000);
+                host.self_standby_wait(wait_interval);
+            } else {
+                let sleep_interval = if download_started { 0 } else { 5 };
+                host.sleep_ms(sleep_interval);
+                host.stat_meter_add_zero_speed();
+                wait_interval = 100;
+            }
+
+            let now = host.opts().cur_time;
+            if last_reset != now {
+                host.server_pool_close_unused();
+                self.reset_hanging_downloads(host);
+                if !standby {
+                    self.save_all_partial_state(host);
+                }
+                host.stat_meter_interval_check();
+                host.log_interval_check();
+                self.adjust_downloads_limit(host);
+                host.set_standby_mode(standby);
+                last_reset = host.opts().cur_time;
+            }
+        }
+
+        self.wait_jobs(host);
+        self.save_all_partial_state(host);
+        self.save_queue_if_changed(host);
+        self.save_all_file_state(host);
+
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"Exiting QueueCoordinator-loop",
+        );
+    }
+
+    pub(crate) fn add_nzb_file_to_queue(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        uptr_addr: usize,
+        url_ptr: usize,
+        add_first: bool,
+    ) -> usize {
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"Adding NZBFile to queue",
+        );
+        let mut out_ptr = 0usize;
+        host.with_locked_queue(|dq_ptr| {
+            let opts = host.opts();
+            // Read raw NzbInfo* from std::unique_ptr<NzbInfo>* at uptr_addr
+            let raw_nzb_ptr = unsafe { *(uptr_addr as *const usize) };
+            let mut added_nzb_ptr = raw_nzb_ptr;
+
+            host.dq_notify(
+                dq_ptr,
+                crate::queuesubsys_host::ASPECT_NZB_FOUND,
+                added_nzb_ptr,
+                0,
+            );
+
+            let nzb = host.nzb_snap(added_nzb_ptr, false);
+            let delete_status = nzb.delete_status;
+
+            if delete_status != crate::queuesubsys_host::DS_NONE {
+                let flen = host.nzb_file_len(added_nzb_ptr);
+                let mut all_paused = flen > 0;
+                for i in 0..flen {
+                    let fp = host.nzb_file_at(added_nzb_ptr, i);
+                    let f = host.file_snap(fp);
+                    all_paused &= f.paused;
+                    if opts.server_mode {
+                        host.disk_discard_file(f.id, true, false, false);
+                    }
+                }
+                host.nzb_set_int(
+                    added_nzb_ptr,
+                    crate::queuesubsys_host::NZB_INT_DELETE_PAUSED,
+                    i32::from(all_paused),
+                );
+            }
+
+            if delete_status == crate::queuesubsys_host::DS_NONE {
+                if opts.dupe_check && nzb.dupe_mode != crate::queuesubsys_host::DM_FORCE {
+                    self.check_dupe_file_infos(host, added_nzb_ptr);
+                }
+                host.queue_insert_owned(dq_ptr, uptr_addr, url_ptr, add_first);
+            } else {
+                host.queue_insert_owned(dq_ptr, uptr_addr, 0, true);
+            }
+
+            if url_ptr != 0 {
+                let url_snap = host.nzb_snap(url_ptr, false);
+                host.nzb_set_int(
+                    added_nzb_ptr,
+                    crate::queuesubsys_host::NZB_INT_ID,
+                    url_snap.id,
+                );
+                host.queue_remove(dq_ptr, url_ptr);
+            }
+
+            let cur_nzb = host.nzb_snap(added_nzb_ptr, false);
+            if delete_status == crate::queuesubsys_host::DS_NONE {
+                let mut msg = b"Collection ".to_vec();
+                msg.extend_from_slice(&cur_nzb.name);
+                msg.extend_from_slice(b" added to queue");
+                host.nzb_print_message(added_nzb_ptr, crate::queuesubsys_host::MK_INFO, &msg);
+            }
+
+            if delete_status != crate::queuesubsys_host::DS_MANUAL {
+                host.dq_notify(
+                    dq_ptr,
+                    crate::queuesubsys_host::ASPECT_NZB_ADDED,
+                    added_nzb_ptr,
+                    0,
+                );
+            }
+
+            if delete_status != crate::queuesubsys_host::DS_NONE {
+                let check_id = cur_nzb.id;
+                host.queue_remove(dq_ptr, added_nzb_ptr);
+                if host.history_find_by_id(dq_ptr, check_id) == 0 {
+                    added_nzb_ptr = 0;
+                }
+            }
+
+            host.dq_save(dq_ptr);
+            out_ptr = added_nzb_ptr;
+        });
+        out_ptr
+    }
+
+    pub(crate) fn check_dupe_file_infos(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb_ptr: usize,
+    ) {
+        host.log(crate::queuesubsys_host::MK_DEBUG, b"CheckDupeFileInfos");
+        if nzb_ptr == 0 {
+            return;
+        }
+        let flen = host.nzb_file_len(nzb_ptr);
+        if flen == 0 {
+            return;
+        }
+        let opts = host.opts();
+        let mut snaps = Vec::with_capacity(flen);
+        let mut sizes = Vec::with_capacity(flen);
+        for i in 0..flen {
+            let f = host.file_snap(host.nzb_file_at(nzb_ptr, i));
+            sizes.push(f.size);
+            snaps.push(f);
+        }
+        let names: Vec<&[u8]> = snaps.iter().map(|f| f.filename.as_slice()).collect();
+        let mut dupes = vec![0usize; flen];
+        let count = find_dupe_file_indices(&names, &sizes, &mut dupes);
+        for &idx in &dupes[..count] {
+            let f = &snaps[idx];
+            let mut msg = b"File \"".to_vec();
+            msg.extend_from_slice(&f.filename);
+            msg.extend_from_slice(
+                b"\" appears twice in collection, adding only the biggest file",
+            );
+            host.log(crate::queuesubsys_host::MK_WARNING, &msg);
+            host.nzb_action(
+                nzb_ptr,
+                crate::queuesubsys_host::NZB_ACT_UPDATE_DELETED_STATS,
+                f.ptr,
+            );
+            host.nzb_remove_file(nzb_ptr, f.ptr);
+            if opts.server_mode {
+                host.disk_discard_file(f.id, true, false, false);
+            }
+        }
+    }
+
+    fn discard_temp_files(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        file: &crate::queuesubsys_host::FileSnap,
+    ) {
+        let unlink_bytes = |b: &[u8]| {
+            let c = crate::queuesubsys_host::c_bytes(b);
+            if let Ok(cs) = CStr::from_bytes_with_nul(&c) {
+                let _ = crate::fsops::delete_file(cs);
+            }
+        };
+        host.file_action(
+            file.ptr,
+            crate::queuesubsys_host::FILE_ACT_DISCARD_TEMP_ARTICLES,
+            usize::from(!opts.direct_write && !file.force_direct_write),
+        );
+        if opts.direct_write && !file.output_filename.is_empty() && !file.force_direct_write {
+            unlink_bytes(&file.output_filename);
+            if file.is_hard_linked && !file.hard_link_path.is_empty() {
+                unlink_bytes(&file.hard_link_path);
+            }
+        }
+    }
+
+    pub(crate) fn fail_over_dead_pick(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        nzb_id: i32,
+        samples: i32,
+        missing_servers: i32,
+        active_servers: i32,
+        recovered_at_start: i32,
+    ) {
+        let nzb_ptr = host.queue_find_by_id(dq_ptr, nzb_id);
+        if nzb_ptr == 0 {
+            return;
+        }
+        let nzb = host.nzb_snap(nzb_ptr, false);
+        if nzb.deleting
+            || nzb.parking
+            || nzb.delete_status != crate::queuesubsys_host::DS_NONE
+        {
+            return;
+        }
+        let own_success = nzb.current_success_articles
+            - (nzb.dupe_recovered_articles - recovered_at_start).max(0);
+        if own_success >= DUPE_PROBE_MIN_ALIVE_SAMPLES {
+            return;
+        }
+        let opts = host.opts();
+        let backup = if crate::dupecoord::fails_over_snap(&opts, &nzb) {
+            crate::dupecoord::find_dupe_backup_host(
+                host,
+                &opts,
+                dq_ptr,
+                nzb.ptr,
+                &nzb.name,
+                &nzb.dupe_key,
+            )
+        } else {
+            None
+        };
+        let Some((_, backup_nzb)) = backup else {
+            return;
+        };
+        if !crate::dupecoord::dupe_failover_warranted_inline(
+            nzb.dupe_score,
+            0,
+            backup_nzb.dupe_score,
+        ) {
+            return;
+        }
+        let mut msg = b"Failing over ".to_vec();
+        msg.extend_from_slice(&nzb.name);
+        msg.extend_from_slice(b" to duplicate ");
+        msg.extend_from_slice(&backup_nzb.name);
+        msg.extend_from_slice(
+            format!(
+                ": none of {} sampled articles exists on any server ({} of {} servers answered definitively)",
+                samples, missing_servers, active_servers
+            )
+            .as_bytes(),
+        );
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        host.nzb_set_int(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+            crate::queuesubsys_host::DS_HEALTH,
+        );
+        host.dq_edit_entry(
+            dq_ptr,
+            nzb.id,
+            crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
+            None,
+        );
+    }
+
+    pub(crate) fn delete_queue_entry(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        file_ptr: usize,
+    ) -> bool {
+        host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_DELETED, 1);
+        let mut downloading = false;
+        let n = host.active_downloads_len();
+        for i in 0..n {
+            let ad = host.active_download_at(i);
+            if ad.file_ptr == file_ptr {
+                downloading = true;
+                host.ad_action(ad.ad_ptr, crate::queuesubsys_host::AD_ACT_STOP, 0);
+            }
+        }
+        if !downloading {
+            self.delete_file_info(host, dq_ptr, file_ptr, false);
+        }
+        downloading
+    }
+
+    pub(crate) fn set_queue_entry_category(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb_ptr: usize,
+        category: &[u8],
+    ) -> bool {
+        let nzb = host.nzb_snap(nzb_ptr, false);
+        if nzb.has_post_info {
+            let mut msg = b"Could not change category for ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(b". File in post-process-stage");
+            host.log(crate::queuesubsys_host::MK_ERROR, &msg);
+            return false;
+        }
+        let old_dest_dir = nzb.dest_dir;
+        host.nzb_set_str(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_STR_CATEGORY,
+            category,
+        );
+        host.nzb_action(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR,
+            0,
+        );
+        let new_nzb = host.nzb_snap(nzb_ptr, false);
+        new_nzb.dest_dir == old_dest_dir || host.move_completed_files(nzb_ptr, &old_dest_dir)
+    }
+
+    pub(crate) fn set_queue_entry_name(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb_ptr: usize,
+        name: &[u8],
+    ) -> bool {
+        let nzb = host.nzb_snap(nzb_ptr, false);
+        if nzb.has_post_info {
+            let mut msg = b"Could not rename ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(b". File in post-process-stage");
+            host.log(crate::queuesubsys_host::MK_ERROR, &msg);
+            return false;
+        }
+        if name.is_empty() {
+            let mut msg = b"Could not rename ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(b". The new name cannot be empty");
+            host.log(crate::queuesubsys_host::MK_ERROR, &msg);
+            return false;
+        }
+        let nice = crate::downloadinfo::make_nice_nzb_name(name, false);
+        host.nzb_set_str(nzb_ptr, crate::queuesubsys_host::NZB_STR_NAME, &nice);
+
+        if nzb.kind == crate::queuesubsys_host::NK_URL {
+            let mut fn_buf = nice;
+            fn_buf.extend_from_slice(b".nzb");
+            host.nzb_set_str(nzb_ptr, crate::queuesubsys_host::NZB_STR_FILENAME, &fn_buf);
+            return true;
+        }
+
+        let old_dest_dir = nzb.dest_dir;
+        host.nzb_action(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR,
+            0,
+        );
+        let new_nzb = host.nzb_snap(nzb_ptr, false);
+        new_nzb.dest_dir == old_dest_dir || host.move_completed_files(nzb_ptr, &old_dest_dir)
+    }
+
+    pub(crate) fn merge_queue_entries(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        dest_ptr: usize,
+        src_ptr: usize,
+    ) -> bool {
+        let dest = host.nzb_snap(dest_ptr, false);
+        let src = host.nzb_snap(src_ptr, false);
+        if dest.has_post_info || src.has_post_info {
+            let mut msg = b"Could not merge ".to_vec();
+            msg.extend_from_slice(&dest.name);
+            msg.extend_from_slice(b" and ");
+            msg.extend_from_slice(&src.name);
+            msg.extend_from_slice(b". File in post-process-stage");
+            host.log(crate::queuesubsys_host::MK_ERROR, &msg);
+            return false;
+        }
+        if dest.kind == crate::queuesubsys_host::NK_URL
+            || src.kind == crate::queuesubsys_host::NK_URL
+        {
+            let mut msg = b"Could not merge ".to_vec();
+            msg.extend_from_slice(&dest.name);
+            msg.extend_from_slice(b" and ");
+            msg.extend_from_slice(&src.name);
+            msg.extend_from_slice(b". URLs cannot be merged");
+            host.log(crate::queuesubsys_host::MK_ERROR, &msg);
+            return false;
+        }
+
+        let old_dest_dir = src.dest_dir.clone();
+        host.nzb_set_str(
+            src_ptr,
+            crate::queuesubsys_host::NZB_STR_CATEGORY,
+            &dest.category,
+        );
+        host.nzb_set_str(
+            src_ptr,
+            crate::queuesubsys_host::NZB_STR_DEST_DIR,
+            &dest.dest_dir,
+        );
+        if old_dest_dir != dest.dest_dir {
+            let _ = host.move_completed_files(src_ptr, &old_dest_dir);
+        }
+
+        let mut dc = pack_merge_split_counters(&dest);
+        let sc = pack_merge_split_counters(&src);
+        merge_counters(&mut dc, &sc);
+
+        host.nzb_merge_lists_and_stats(dest_ptr, src_ptr);
+        host.nzb_apply_merge_split_counters(dest_ptr, &dc);
+
+        let mut merged_qf = dest.queued_filename;
+        merged_qf.push(b'|');
+        merged_qf.extend_from_slice(&src.queued_filename);
+        host.nzb_set_str(
+            dest_ptr,
+            crate::queuesubsys_host::NZB_STR_QUEUED_FILENAME,
+            &merged_qf,
+        );
+
+        for param in [
+            b"DupeFiles".as_slice(),
+            b"DupeKind".as_slice(),
+            b"DupeSampled".as_slice(),
+            b"DupeSampledOf".as_slice(),
+        ] {
+            host.nzb_set_param(dest_ptr, param, None);
+        }
+
+        host.disk_discard_files(src_ptr);
+        crate::dupefallback::par_damage_forget_all(src.id);
+        host.queue_remove(dq_ptr, src_ptr);
+        true
+    }
+
+    pub(crate) fn split_queue_entries(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        raw_file_list_ptr: usize,
+        name: &[u8],
+        out_new_nzb_ptr: *mut usize,
+    ) -> bool {
+        let file_ptrs = host.raw_file_list_vec(raw_file_list_ptr);
+        let mut src_nzb_ptr = 0usize;
+        let mut file_snaps = Vec::with_capacity(file_ptrs.len());
+
+        for &fp in &file_ptrs {
+            let f = host.file_snap(fp);
+            let f_nzb = host.nzb_snap(f.nzb_ptr, false);
+            let same_src = src_nzb_ptr == 0 || f.nzb_ptr == src_nzb_ptr;
+            let v = validate_split_file_state(
+                f.active_downloads,
+                f.completed_articles,
+                f_nzb.has_post_info,
+                same_src,
+            );
+            if v != 0 {
+                let mut msg = b"Could not split ".to_vec();
+                msg.extend_from_slice(&f.filename);
+                msg.extend_from_slice(if v == 1 {
+                    b". File is already (partially) downloaded"
+                } else if v == 2 {
+                    b". File in post-process-stage"
+                } else {
+                    b". The files belong to different collections"
+                });
+                host.log(crate::queuesubsys_host::MK_ERROR, &msg);
+                return false;
+            }
+            src_nzb_ptr = f.nzb_ptr;
+            file_snaps.push(f);
+        }
+
+        if src_nzb_ptr == 0 {
+            return false;
+        }
+
+        let src_snap = host.nzb_snap(src_nzb_ptr, false);
+        let (uptr_addr, new_nzb_ptr) = host.alloc_new_nzb_uptr();
+
+        host.nzb_set_str(
+            new_nzb_ptr,
+            crate::queuesubsys_host::NZB_STR_FILENAME,
+            &src_snap.filename,
+        );
+        host.nzb_set_str(new_nzb_ptr, crate::queuesubsys_host::NZB_STR_NAME, name);
+        host.nzb_set_str(
+            new_nzb_ptr,
+            crate::queuesubsys_host::NZB_STR_CATEGORY,
+            &src_snap.category,
+        );
+        host.nzb_set_int(new_nzb_ptr, crate::queuesubsys_host::NZB_INT_FULL_HASH, 0);
+        host.nzb_set_int(
+            new_nzb_ptr,
+            crate::queuesubsys_host::NZB_INT_FILTERED_HASH,
+            0,
+        );
+        host.nzb_set_int(
+            new_nzb_ptr,
+            crate::queuesubsys_host::NZB_INT_PRIORITY,
+            src_snap.priority,
+        );
+        host.nzb_action(
+            new_nzb_ptr,
+            crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR,
+            0,
+        );
+        host.nzb_set_str(
+            new_nzb_ptr,
+            crate::queuesubsys_host::NZB_STR_QUEUED_FILENAME,
+            &src_snap.queued_filename,
+        );
+        host.nzb_copy_params(new_nzb_ptr, src_nzb_ptr);
+
+        let new_init_snap = host.nzb_snap(new_nzb_ptr, false);
+        let mut sc = pack_merge_split_counters(&src_snap);
+        let mut nc = pack_merge_split_counters(&new_init_snap);
+        sc.full_content_hash = 0;
+        sc.filtered_content_hash = 0;
+
+        for f in &file_snaps {
+            host.dq_notify(
+                dq_ptr,
+                crate::queuesubsys_host::ASPECT_FILE_DELETED,
+                src_nzb_ptr,
+                f.ptr,
+            );
+            host.nzb_transfer_split_file(src_nzb_ptr, new_nzb_ptr, f.ptr);
+            let fc = NzbgetRsSplitFileCounters {
+                size: f.size,
+                remaining_size: f.remaining_size,
+                success_size: f.success_size,
+                failed_size: f.failed_size,
+                missed_size: f.missed_size,
+                total_articles: f.total_articles,
+                missed_articles: f.missed_articles,
+                success_articles: f.success_articles,
+                failed_articles: f.failed_articles,
+                par_file: i32::from(f.par_file),
+                paused: i32::from(f.paused),
+            };
+            split_transfer_file(&mut sc, &mut nc, &fc);
+        }
+
+        host.nzb_apply_merge_split_counters(src_nzb_ptr, &sc);
+        host.nzb_apply_merge_split_counters(new_nzb_ptr, &nc);
+
+        host.nzb_action(
+            new_nzb_ptr,
+            crate::queuesubsys_host::NZB_ACT_UPDATE_MIN_MAX_TIME,
+            0,
+        );
+        if host.nzb_completed_files(src_nzb_ptr).is_empty() {
+            host.nzb_action(
+                src_nzb_ptr,
+                crate::queuesubsys_host::NZB_ACT_UPDATE_MIN_MAX_TIME,
+                0,
+            );
+        }
+
+        if host.nzb_file_len(src_nzb_ptr) == 0 {
+            host.disk_discard_files(src_nzb_ptr);
+            crate::dupefallback::par_damage_forget_all(src_snap.id);
+            host.queue_remove(dq_ptr, src_nzb_ptr);
+        }
+
+        if !out_new_nzb_ptr.is_null() {
+            unsafe {
+                *out_new_nzb_ptr = new_nzb_ptr;
+            }
+        }
+        host.finish_new_nzb_uptr(dq_ptr, uptr_addr);
+        true
+    }
+
+    pub(crate) fn log_debug_info(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        host.with_locked_queue(|dq_ptr| {
+            let opts = host.opts();
+            host.log(
+                crate::queuesubsys_host::MK_INFO,
+                b"   ---------- Queue",
+            );
+            let (remaining, remaining_forced) = host.dq_calc_remaining_size(dq_ptr);
+            let rem_mb = (remaining as f64) / 1024.0 / 1024.0;
+            let forced_mb = (remaining_forced as f64) / 1024.0 / 1024.0;
+            host.log(
+                crate::queuesubsys_host::MK_INFO,
+                format!("     Remaining: {:.1} MB, Forced: {:.1} MB", rem_mb, forced_mb).as_bytes(),
+            );
+            let dl_state = if opts.pause_download {
+                "paused"
+            } else if opts.temp_pause_download {
+                "temp-paused"
+            } else {
+                "active"
+            };
+            let pp_state = if opts.pause_post_process {
+                "paused"
+            } else {
+                "active"
+            };
+            let sc_state = if opts.pause_scan { "paused" } else { "active" };
+            host.log(
+                crate::queuesubsys_host::MK_INFO,
+                format!(
+                    "     Download: {}, Post-process: {}, Scan: {}",
+                    dl_state, pp_state, sc_state
+                )
+                .as_bytes(),
+            );
+            host.log(
+                crate::queuesubsys_host::MK_INFO,
+                b"   ---------- QueueCoordinator",
+            );
+            let active_n = host.active_downloads_len();
+            let dl_limit = self
+                .downloads_limit
+                .load(std::sync::atomic::Ordering::Relaxed);
+            host.log(
+                crate::queuesubsys_host::MK_INFO,
+                format!("    Active Downloads: {}, Limit: {}", active_n, dl_limit).as_bytes(),
+            );
+            for i in 0..active_n {
+                let ad = host.active_download_at(i);
+                host.ad_action(ad.ad_ptr, crate::queuesubsys_host::AD_ACT_LOG_DEBUG, 0);
+            }
+        });
+    }
+
+    fn get_next_article(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        dq_ptr: usize,
+    ) -> Option<(
+        crate::queuesubsys_host::FileSnap,
+        crate::queuesubsys_host::ArticleSnap,
+    )> {
+        let mut checked_files: Vec<usize> = Vec::new();
+        let cur_date = opts.cur_time;
+
+        loop {
+            let mut best_file: Option<(crate::queuesubsys_host::NzbSnap, crate::queuesubsys_host::FileSnap)> =
+                None;
+            let mut prop_wait_file: Option<(
+                crate::queuesubsys_host::NzbSnap,
+                crate::queuesubsys_host::FileSnap,
+            )> = None;
+
+            let qlen = host.queue_len(dq_ptr);
+            for i in 0..qlen {
+                let nzb_ptr = host.queue_at(dq_ptr, i);
+                let nzb = host.nzb_snap(nzb_ptr, false);
+                let flen = host.nzb_file_len(nzb_ptr);
+
+                let nzb_higher = match &best_file {
+                    None => true,
+                    Some((best_nzb, _)) => {
+                        if nzb.has_extra_priority == best_nzb.has_extra_priority {
+                            nzb.priority > best_nzb.priority
+                        } else {
+                            nzb.has_extra_priority && !best_nzb.has_extra_priority
+                        }
+                    }
+                };
+
+                let nzb_paused = (flen as i32) == nzb.paused_file_count;
+
+                if nzb_higher
+                    && !nzb_paused
+                    && !self.has_active_dupe(host, dq_ptr, &nzb)
+                    && ((!opts.pause_download && !opts.quota_reached) || nzb.force_priority)
+                {
+                    let propagation_delay = opts.propagation_delay;
+                    for j in 0..flen {
+                        let fp = host.nzb_file_at(nzb_ptr, j);
+                        if checked_files.contains(&fp) {
+                            continue;
+                        }
+                        let f = host.file_snap(fp);
+                        if f.paused || f.deleted {
+                            continue;
+                        }
+                        let prop_wait = is_propagation_wait(f.time, propagation_delay, cur_date);
+                        if !prop_wait {
+                            let higher = match &best_file {
+                                None => true,
+                                Some((best_nzb, bf)) => {
+                                    (f.extra_priority == bf.extra_priority
+                                        && nzb.priority > best_nzb.priority)
+                                        || (f.extra_priority && !bf.extra_priority)
+                                }
+                            };
+                            if higher {
+                                best_file = Some((nzb.clone(), f));
+                            }
+                        } else if prop_wait_file
+                            .as_ref()
+                            .is_none_or(|(_, pw)| f.time < pw.time)
+                        {
+                            prop_wait_file = Some((nzb.clone(), f));
+                        }
+                    }
+                }
+            }
+
+            let Some((mut nzb, mut file)) = best_file else {
+                if let Some((pw_nzb, pw_file)) = prop_wait_file {
+                    let prev_logged = self
+                        .propagation_wait_logged_id
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if pw_file.id != prev_logged {
+                        self.propagation_wait_logged_id
+                            .store(pw_file.id, std::sync::atomic::Ordering::Relaxed);
+                        let (posted_min, start_min) = calc_propagation_wait_log_mins(
+                            pw_file.time,
+                            opts.propagation_delay,
+                            cur_date,
+                        );
+                        let mut msg = b"Holding ".to_vec();
+                        msg.extend_from_slice(&pw_nzb.name);
+                        msg.push(crate::paths::PATH_SEPARATOR);
+                        msg.extend_from_slice(&pw_file.filename);
+                        msg.extend_from_slice(
+                            format!(
+                                " due to PropagationDelay: posted {} min ago, download starts in {} min",
+                                posted_min, start_min
+                            )
+                            .as_bytes(),
+                        );
+                        host.nzb_print_message(
+                            pw_nzb.ptr,
+                            crate::queuesubsys_host::MK_DETAIL,
+                            &msg,
+                        );
+                    }
+                }
+                break;
+            };
+
+            if opts.direct_rename
+                && nzb.direct_rename_status <= crate::queuesubsys_host::TS_RUNNING
+                && !nzb.all_first
+            {
+                if let Some((f1, a1)) = self.get_next_first_article(host, opts, &nzb) {
+                    self.propagation_wait_logged_id
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                    return Some((f1, a1));
+                }
+            }
+
+            if file.articles_len == 0 && opts.server_mode {
+                host.disk_load_articles(file.ptr);
+                self.load_partial_state(host, opts, &nzb, file.ptr);
+                file = host.file_snap(file.ptr);
+            }
+
+            if let Some((idx, mut art)) = host.file_first_undefined_article(file.ptr) {
+                if file.dupe_cutover && art.dupe_fallback_round == 0 {
+                    art.dupe_proactive = true;
+                    host.article_set_int(
+                        art.ptr,
+                        crate::queuesubsys_host::ART_INT_DUPE_PROACTIVE,
+                        1,
+                    );
+                    let ok = self.with_donor_cache(|cache| {
+                        crate::dupefallback::try_fallback_host(
+                            cache,
+                            host,
+                            opts,
+                            dq_ptr,
+                            &mut nzb,
+                            &mut file,
+                            idx,
+                            &mut art,
+                        )
+                    });
+                    art.dupe_proactive = ok;
+                    host.article_set_int(
+                        art.ptr,
+                        crate::queuesubsys_host::ART_INT_DUPE_PROACTIVE,
+                        i32::from(ok),
+                    );
+                }
+                self.propagation_wait_logged_id
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                return Some((file, art));
+            }
+
+            if checked_files.capacity() < 100 {
+                checked_files.reserve(100);
+            }
+            checked_files.push(file.ptr);
+        }
+
+        None
+    }
+
+    fn get_next_first_article(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) -> Option<(
+        crate::queuesubsys_host::FileSnap,
+        crate::queuesubsys_host::ArticleSnap,
+    )> {
+        let flen = host.nzb_file_len(nzb.ptr);
+        for i in 0..flen {
+            let fp = host.nzb_file_at(nzb.ptr, i);
+            let mut f = host.file_snap(fp);
+            if !f.filename_confirmed {
+                if f.articles_len == 0 && opts.server_mode {
+                    host.disk_load_articles(fp);
+                    self.load_partial_state(host, opts, nzb, fp);
+                    f = host.file_snap(fp);
+                }
+                if f.articles_len > 0 {
+                    let a0 = host.article_at(fp, 0);
+                    if a0.status == crate::queuesubsys_host::AI_UNDEFINED {
+                        host.nzb_set_int(
+                            nzb.ptr,
+                            crate::queuesubsys_host::NZB_INT_DIRECT_RENAME_STATUS,
+                            crate::queuesubsys_host::TS_RUNNING,
+                        );
+                        return Some((f, a0));
+                    }
+                }
+            }
+        }
+        host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_ALL_FIRST, 1);
+        None
+    }
+
+    fn start_article_download(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+        file: &crate::queuesubsys_host::FileSnap,
+        art: &crate::queuesubsys_host::ArticleSnap,
+        conn_ptr: usize,
+    ) {
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"Starting new ArticleDownloader",
+        );
+        let attach_analyzer = art.part_number == 1
+            && !opts.raw_article
+            && (opts.direct_rename
+                || opts.dupe_article_fallback != crate::queuesubsys_host::DAF_NONE);
+
+        let mut info_name = nzb.name.clone();
+        info_name.push(crate::paths::PATH_SEPARATOR);
+        info_name.extend_from_slice(&file.filename);
+        info_name.extend_from_slice(
+            format!(" [{}/{}]", art.part_number, file.articles_len).as_bytes(),
+        );
+
+        host.start_article_download(file.ptr, art.ptr, conn_ptr, attach_analyzer, &info_name);
+    }
+
+    fn unpause_streaming_par_volumes(
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb_ptr: usize,
+        nzb_id: i32,
+    ) {
+        loop {
+            let ids = crate::parchecker::streaming_session_take_unpause_ids_bounded(nzb_id, 32);
+            if ids.is_empty() {
+                break;
+            }
+            let flen = host.nzb_file_len(nzb_ptr);
+            for uid in ids {
+                for i in 0..flen {
+                    let qf_ptr = host.nzb_file_at(nzb_ptr, i);
+                    let qf = host.file_snap(qf_ptr);
+                    if (qf.id as u64) == uid && qf.paused && !qf.deleted {
+                        host.file_set_int(qf_ptr, crate::queuesubsys_host::FILE_INT_PAUSED, 0);
+                        host.file_set_int(
+                            qf_ptr,
+                            crate::queuesubsys_host::FILE_INT_EXTRA_PRIORITY,
+                            1,
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn article_completed(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        ad_ptr: usize,
+    ) {
+        host.log(crate::queuesubsys_host::MK_DEBUG, b"Article downloaded");
+        let ad = host.ad_snap(ad_ptr);
+        let file_ptr = ad.file_ptr;
+        let mut complete_file_parts = false;
+
+        host.with_locked_queue(|dq_ptr| {
+            let opts = host.opts();
+            let mut file = host.file_snap(file_ptr);
+            let mut nzb = host.nzb_snap(file.nzb_ptr, false);
+            let articles_len = file.articles_len;
+            let Some((art_idx, mut art)) = host.file_find_article(file_ptr, ad.article_ptr) else {
+                self.delete_downloader(host, host.self_download_queue_ptr(), ad_ptr, false);
+                return;
+            };
+
+            let mut retry = false;
+            let mut file_completed = false;
+
+            let check_aligned = ad.status == crate::queuesubsys_host::AD_FINISHED
+                && art.dupe_fallback_round > 0
+                && ad.decoded_file_size > 0;
+            let misplaced = check_aligned
+                && !crate::dupefallback::segment_aligned_at(
+                    host,
+                    file_ptr,
+                    articles_len,
+                    art_idx,
+                    &art,
+                    file.decoded_file_size,
+                );
+            if misplaced {
+                self.discard_article_segment(host, &mut file, &art);
+                let mut msg = b"Discarding misaligned article ".to_vec();
+                msg.extend_from_slice(&file.filename);
+                msg.extend_from_slice(
+                    format!(" [{}/{}] from duplicate", art.part_number, articles_len).as_bytes(),
+                );
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+            }
+
+            if ad.status == crate::queuesubsys_host::AD_FINISHED && !misplaced {
+                art.status = crate::queuesubsys_host::AI_FINISHED;
+                host.article_set_int(
+                    art.ptr,
+                    crate::queuesubsys_host::ART_INT_STATUS,
+                    crate::queuesubsys_host::AI_FINISHED,
+                );
+                if art.dupe_fallback_round == 0
+                    || (!art.dupe_original_message_id.is_empty()
+                        && art.message_id == art.dupe_original_message_id)
+                {
+                    nzb.dupe_failed_run = 0;
+                    host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_DUPE_FAILED_RUN, 0);
+                }
+
+                let (fs, ns, ps, fa, na) = apply_success_article_counters(
+                    i64::from(art.size),
+                    file.par_file,
+                    file.success_size,
+                    nzb.current_success_size,
+                    nzb.par_current_success_size,
+                    file.success_articles,
+                    nzb.current_success_articles,
+                );
+                file.success_size = fs;
+                nzb.current_success_size = ns;
+                nzb.par_current_success_size = ps;
+                file.success_articles = fa;
+                nzb.current_success_articles = na;
+                host.file_set_i64(file.ptr, crate::queuesubsys_host::FILE_I64_SUCCESS_SIZE, fs);
+                host.nzb_set_i64(
+                    nzb.ptr,
+                    crate::queuesubsys_host::NZB_I64_CUR_SUCCESS_SIZE,
+                    ns,
+                );
+                host.nzb_set_i64(
+                    nzb.ptr,
+                    crate::queuesubsys_host::NZB_I64_PAR_CUR_SUCCESS_SIZE,
+                    ps,
+                );
+                host.file_set_int(
+                    file.ptr,
+                    crate::queuesubsys_host::FILE_INT_SUCCESS_ARTICLES,
+                    fa,
+                );
+                host.nzb_set_int(
+                    nzb.ptr,
+                    crate::queuesubsys_host::NZB_INT_CUR_SUCCESS_ARTICLES,
+                    na,
+                );
+
+                let previous_file_size = file.decoded_file_size;
+                if crate::dupefallback::merge_decoded_file_size_host(
+                    host,
+                    &mut file,
+                    ad.decoded_file_size,
+                ) {
+                    let mut msg = b"Articles of ".to_vec();
+                    msg.extend_from_slice(&file.filename);
+                    msg.extend_from_slice(
+                        format!(
+                            " declare different file sizes ({} vs {}); ignoring the declared size",
+                            previous_file_size, ad.decoded_file_size
+                        )
+                        .as_bytes(),
+                    );
+                    host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+                }
+
+                let (_, source_donors) = host.article_pinned_sources(art.ptr);
+                let donor_id = select_dupe_donor_id(
+                    art.dupe_fallback_round,
+                    &source_donors,
+                    &art.message_id,
+                    &art.dupe_original_message_id,
+                );
+                art.dupe_donor_id = donor_id;
+                host.article_set_int(
+                    art.ptr,
+                    crate::queuesubsys_host::ART_INT_DUPE_DONOR_ID,
+                    donor_id,
+                );
+
+                let (rec, next_file_rec, next_nzb_rec, trig_cutover) =
+                    eval_dupe_recovery_and_cutover(
+                        art.dupe_fallback_round,
+                        art.dupe_proactive,
+                        &art.message_id,
+                        &art.dupe_original_message_id,
+                        file.dupe_recovered_articles,
+                        nzb.dupe_recovered_articles,
+                        file.dupe_cutover,
+                        crate::dupefallback::CUTOVER_THRESHOLD,
+                    );
+                if rec {
+                    file.dupe_recovered_articles = next_file_rec;
+                    nzb.dupe_recovered_articles = next_nzb_rec;
+                    host.file_set_int(
+                        file.ptr,
+                        crate::queuesubsys_host::FILE_INT_DUPE_RECOVERED_ARTICLES,
+                        next_file_rec,
+                    );
+                    host.nzb_set_int(
+                        nzb.ptr,
+                        crate::queuesubsys_host::NZB_INT_DUPE_RECOVERED_ARTICLES,
+                        next_nzb_rec,
+                    );
+                    if trig_cutover {
+                        file.dupe_cutover = true;
+                        host.file_set_int(
+                            file.ptr,
+                            crate::queuesubsys_host::FILE_INT_DUPE_CUTOVER,
+                            1,
+                        );
+                        let mut msg = b"Leading with duplicate collections for ".to_vec();
+                        msg.extend_from_slice(&file.filename);
+                        msg.extend_from_slice(b" (primary is missing many articles)");
+                        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+                    }
+                }
+
+                crate::dupefallback::register_lead_success_at(
+                    host,
+                    &mut file,
+                    articles_len,
+                    art_idx,
+                    &art,
+                );
+
+                if file.dupe_recovered_articles > 0 && ad.decoded_file_size > 0 {
+                    self.demote_misaligned_dupe_neighbors(
+                        host,
+                        &mut nzb,
+                        &mut file,
+                        articles_len,
+                        art_idx,
+                    );
+                }
+
+                if !file.par_file
+                    && art.segment_offset >= 0
+                    && art.segment_size > 0
+                    && crate::parchecker::streaming_session_has_session(nzb.id)
+                {
+                    let seg_len = art.segment_size as usize;
+                    let seg_opt =
+                        host.article_cache_snapshot_segment(file.ptr, art.ptr, seg_len);
+                    let _ = crate::parchecker::streaming_session_on_article_finished_by_name(
+                        nzb.id,
+                        &file.filename,
+                        art.segment_offset as u64,
+                        art.segment_size as u64,
+                        art.crc,
+                        seg_opt.as_deref(),
+                    );
+                    Self::unpause_streaming_par_volumes(host, nzb.ptr, nzb.id);
+                }
+            } else if (ad.status == crate::queuesubsys_host::AD_FAILED || misplaced)
+                && self.with_donor_cache(|cache| {
+                    crate::dupefallback::try_fallback_host(
+                        cache,
+                        host,
+                        &opts,
+                        dq_ptr,
+                        &mut nzb,
+                        &mut file,
+                        art_idx,
+                        &mut art,
+                    )
+                })
+            {
+                art.status = crate::queuesubsys_host::AI_UNDEFINED;
+                host.article_set_int(
+                    art.ptr,
+                    crate::queuesubsys_host::ART_INT_STATUS,
+                    crate::queuesubsys_host::AI_UNDEFINED,
+                );
+                retry = true;
+                if art.part_number == 1 {
+                    nzb.all_first = false;
+                    host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_ALL_FIRST, 0);
+                }
+            } else if ad.status == crate::queuesubsys_host::AD_FAILED
+                || ad.status == crate::queuesubsys_host::AD_FATAL_ERROR
+                || misplaced
+            {
+                art.status = crate::queuesubsys_host::AI_FAILED;
+                host.article_set_int(
+                    art.ptr,
+                    crate::queuesubsys_host::ART_INT_STATUS,
+                    crate::queuesubsys_host::AI_FAILED,
+                );
+                let (dfr, ff_sz, nf_sz, npf_sz, ff_art, nf_art) = apply_failed_article_counters(
+                    art.part_number,
+                    file.par_file as i32,
+                    art.size,
+                    nzb.dupe_failed_run,
+                    file.failed_size,
+                    nzb.current_failed_size,
+                    nzb.par_current_failed_size,
+                    file.failed_articles,
+                    nzb.current_failed_articles,
+                );
+                nzb.dupe_failed_run = dfr;
+                file.failed_articles = ff_art;
+                nzb.current_failed_articles = nf_art;
+                file.failed_size = ff_sz;
+                nzb.current_failed_size = nf_sz;
+                nzb.par_current_failed_size = npf_sz;
+                host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_DUPE_FAILED_RUN, dfr);
+                host.file_set_int(
+                    file.ptr,
+                    crate::queuesubsys_host::FILE_INT_FAILED_ARTICLES,
+                    ff_art,
+                );
+                host.nzb_set_int(
+                    nzb.ptr,
+                    crate::queuesubsys_host::NZB_INT_CUR_FAILED_ARTICLES,
+                    nf_art,
+                );
+                host.file_set_i64(file.ptr, crate::queuesubsys_host::FILE_I64_FAILED_SIZE, ff_sz);
+                host.nzb_set_i64(
+                    nzb.ptr,
+                    crate::queuesubsys_host::NZB_I64_CUR_FAILED_SIZE,
+                    nf_sz,
+                );
+                host.nzb_set_i64(
+                    nzb.ptr,
+                    crate::queuesubsys_host::NZB_I64_PAR_CUR_FAILED_SIZE,
+                    npf_sz,
+                );
+
+                if !file.par_file
+                    && crate::parchecker::streaming_session_has_session(nzb.id)
+                    && art.segment_size > 0
+                    && art.segment_offset >= 0
+                {
+                    let _ =
+                        crate::parchecker::streaming_session_on_article_failed_permanently_by_name(
+                            nzb.id,
+                            &file.filename,
+                            art.segment_offset as u64,
+                            art.segment_size as u64,
+                        );
+                    Self::unpause_streaming_par_volumes(host, nzb.ptr, nzb.id);
+                }
+            } else if ad.status == crate::queuesubsys_host::AD_RETRY {
+                art.status = crate::queuesubsys_host::AI_UNDEFINED;
+                host.article_set_int(
+                    art.ptr,
+                    crate::queuesubsys_host::ART_INT_STATUS,
+                    crate::queuesubsys_host::AI_UNDEFINED,
+                );
+                retry = true;
+                if art.part_number == 1 {
+                    nzb.all_first = false;
+                    host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_ALL_FIRST, 0);
+                }
+            }
+
+            if ad.status != crate::queuesubsys_host::AD_RETRY {
+                host.ad_action(
+                    ad_ptr,
+                    crate::queuesubsys_host::AD_ACT_ADD_SERVER_STATS,
+                    0,
+                );
+            }
+
+            // Refresh paused state in case UnpauseStreamingParVolumes changed it
+            file = host.file_snap(file_ptr);
+            nzb = host.nzb_snap(file.nzb_ptr, false);
+
+            if !retry {
+                let (rf, rn, pz, comp, fc) = advance_article_completion_counters(
+                    file.remaining_size,
+                    nzb.remaining_size,
+                    nzb.paused_size,
+                    art.size,
+                    file.paused,
+                    file.completed_articles,
+                    articles_len as i32,
+                );
+                file.remaining_size = rf;
+                nzb.remaining_size = rn;
+                nzb.paused_size = pz;
+                file.completed_articles = comp;
+                file.partial_changed = true;
+                file_completed = fc;
+                host.file_set_i64(file.ptr, crate::queuesubsys_host::FILE_I64_REMAINING_SIZE, rf);
+                host.nzb_set_i64(nzb.ptr, crate::queuesubsys_host::NZB_I64_REMAINING_SIZE, rn);
+                host.nzb_set_i64(nzb.ptr, crate::queuesubsys_host::NZB_I64_PAUSED_SIZE, pz);
+                host.file_set_int(
+                    file.ptr,
+                    crate::queuesubsys_host::FILE_INT_COMPLETED_ARTICLES,
+                    comp,
+                );
+                host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 1);
+            }
+
+            if !file.filename_confirmed
+                && !misplaced
+                && ad.status == crate::queuesubsys_host::AD_FINISHED
+                && ad.has_article_filename
+            {
+                let use_from_article = opts.file_naming == crate::queuesubsys_host::NF_ARTICLE
+                    || (opts.file_naming == crate::queuesubsys_host::NF_AUTO
+                        && !crate::deobfuscation::is_excessively_obfuscated(&ad.article_filename)
+                        && !nzb.many_dupe_files);
+                if use_from_article {
+                    host.file_set_str(
+                        file.ptr,
+                        crate::queuesubsys_host::FILE_STR_FILENAME,
+                        Some(&ad.article_filename),
+                    );
+                    host.file_action(
+                        file.ptr,
+                        crate::queuesubsys_host::FILE_ACT_MAKE_VALID_FILENAME,
+                        0,
+                    );
+                    file = host.file_snap(file.ptr);
+                }
+                file.filename_confirmed = true;
+                host.file_set_int(
+                    file.ptr,
+                    crate::queuesubsys_host::FILE_INT_FILENAME_CONFIRMED,
+                    1,
+                );
+                let mut dupe_file_exists = false;
+                if opts.dupe_check
+                    && nzb.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                    && !nzb.many_dupe_files
+                {
+                    let check_path = join_path(&nzb.dest_dir, &file.filename);
+                    dupe_file_exists =
+                        crate::fsops::file_exists(&check_path, &crate::fsops::posix_stat);
+                }
+                if dupe_file_exists {
+                    let mut msg = b"File \"".to_vec();
+                    msg.extend_from_slice(&file.filename);
+                    msg.extend_from_slice(
+                        b"\" seems to be duplicate, cancelling download and deleting file from queue",
+                    );
+                    host.log(crate::queuesubsys_host::MK_WARNING, &msg);
+                    file_completed = false;
+                    file.dupe_deleted = true;
+                    host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_DUPE_DELETED, 1);
+                    self.delete_queue_entry(host, dq_ptr, file.ptr);
+                    file = host.file_snap(file.ptr);
+                }
+            }
+
+            if ad.has_content_analyzer
+                && !misplaced
+                && ad.status == crate::queuesubsys_host::AD_FINISHED
+            {
+                let fc = if ad.analyzed_par_file {
+                    crate::queuesubsys_host::FC_PAR2
+                } else {
+                    crate::queuesubsys_host::FC_OTHER
+                };
+                file.first_content = fc;
+                host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_FIRST_CONTENT, fc);
+                if opts.direct_rename {
+                    host.ad_action(
+                        ad_ptr,
+                        crate::queuesubsys_host::AD_ACT_DIRECT_RENAME_ARTICLE,
+                        dq_ptr,
+                    );
+                }
+            }
+
+            nzb = host.nzb_snap(file.nzb_ptr, false);
+            let next_dl_size = nzb.downloaded_size + ad.downloaded_size;
+            host.nzb_set_i64(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_I64_DOWNLOADED_SIZE,
+                next_dl_size,
+            );
+
+            file = host.file_snap(file.ptr);
+            let finished_before_cancel = file_completed && !file.deleted;
+
+            self.check_health(host, &opts, dq_ptr, file.ptr);
+            self.check_dead_download(host, &opts, dq_ptr, nzb.ptr);
+
+            file = host.file_snap(file.ptr);
+            nzb = host.nzb_snap(file.nzb_ptr, false);
+
+            let (fc_out, cp_out) = eval_file_completion_and_assembly(
+                file_completed,
+                nzb.parking,
+                file.active_downloads,
+                file.dupe_deleted,
+                file.deleted,
+                finished_before_cancel,
+            );
+            file_completed = fc_out;
+            complete_file_parts = cp_out;
+
+            if file_completed
+                && file.success_articles == file.total_articles
+                && (opts.dupe_article_fallback != crate::queuesubsys_host::DAF_NONE
+                    || file.dupe_recovered_articles > 0
+                    || file.dupe_attempted_articles > 0)
+            {
+                let mut fresh_articles = snapshot_file_articles(host, file.ptr, file.articles_len);
+                self.validate_completed_file_tiling(
+                    host,
+                    &mut nzb,
+                    &mut file,
+                    &mut fresh_articles,
+                );
+            }
+
+            if !complete_file_parts {
+                self.delete_downloader(host, host.self_download_queue_ptr(), ad_ptr, false);
+            }
+        });
+
+        if complete_file_parts {
+            if !host.ad_action(
+                ad_ptr,
+                crate::queuesubsys_host::AD_ACT_COMPLETE_FILE_PARTS,
+                0,
+            ) {
+                host.with_locked_queue(|dq_ptr| {
+                    let opts = host.opts();
+                    let file = host.file_snap(file_ptr);
+                    let nzb = host.nzb_snap(file.nzb_ptr, false);
+                    let mut f_fa = file.failed_articles;
+                    let mut f_fs = file.failed_size;
+                    let mut n_fa = nzb.current_failed_articles;
+                    let mut n_sa = nzb.current_success_articles;
+                    let mut n_fs = nzb.current_failed_size;
+                    let mut n_ss = nzb.current_success_size;
+                    let mut np_fs = nzb.par_current_failed_size;
+                    let mut np_ss = nzb.par_current_success_size;
+                    apply_assembly_failure_counters(
+                        file.success_articles,
+                        file.success_size,
+                        file.par_file,
+                        &mut f_fa,
+                        &mut f_fs,
+                        &mut n_fa,
+                        &mut n_sa,
+                        &mut n_fs,
+                        &mut n_ss,
+                        &mut np_fs,
+                        &mut np_ss,
+                    );
+                    host.file_set_int(
+                        file.ptr,
+                        crate::queuesubsys_host::FILE_INT_FAILED_ARTICLES,
+                        f_fa,
+                    );
+                    host.file_set_int(
+                        file.ptr,
+                        crate::queuesubsys_host::FILE_INT_SUCCESS_ARTICLES,
+                        0,
+                    );
+                    host.file_set_i64(
+                        file.ptr,
+                        crate::queuesubsys_host::FILE_I64_FAILED_SIZE,
+                        f_fs,
+                    );
+                    host.file_set_i64(file.ptr, crate::queuesubsys_host::FILE_I64_SUCCESS_SIZE, 0);
+                    host.nzb_set_int(
+                        nzb.ptr,
+                        crate::queuesubsys_host::NZB_INT_CUR_FAILED_ARTICLES,
+                        n_fa,
+                    );
+                    host.nzb_set_int(
+                        nzb.ptr,
+                        crate::queuesubsys_host::NZB_INT_CUR_SUCCESS_ARTICLES,
+                        n_sa,
+                    );
+                    host.nzb_set_i64(
+                        nzb.ptr,
+                        crate::queuesubsys_host::NZB_I64_CUR_FAILED_SIZE,
+                        n_fs,
+                    );
+                    host.nzb_set_i64(
+                        nzb.ptr,
+                        crate::queuesubsys_host::NZB_I64_CUR_SUCCESS_SIZE,
+                        n_ss,
+                    );
+                    host.nzb_set_i64(
+                        nzb.ptr,
+                        crate::queuesubsys_host::NZB_I64_PAR_CUR_FAILED_SIZE,
+                        np_fs,
+                    );
+                    host.nzb_set_i64(
+                        nzb.ptr,
+                        crate::queuesubsys_host::NZB_I64_PAR_CUR_SUCCESS_SIZE,
+                        np_ss,
+                    );
+                    host.file_action(
+                        file.ptr,
+                        crate::queuesubsys_host::FILE_ACT_FAIL_FINISHED_ARTICLES,
+                        0,
+                    );
+                    self.discard_temp_files(host, &opts, &file);
+                    self.delete_downloader(host, dq_ptr, ad_ptr, true);
+                });
+                return;
+            }
+
+            host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 0);
+
+            let (mut path, dest_dir, filename, articles, daf_mode) = {
+                let mut tup = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0i32);
+                host.with_locked_queue(|_| {
+                    let opts = host.opts();
+                    if opts.dupe_article_fallback != crate::queuesubsys_host::DAF_NONE {
+                        let f = host.file_snap(file_ptr);
+                        let n = host.nzb_snap(f.nzb_ptr, false);
+                        let arts = snapshot_file_articles(host, file_ptr, f.articles_len);
+                        tup = (
+                            f.output_filename,
+                            n.dest_dir,
+                            f.filename,
+                            arts,
+                            opts.dupe_article_fallback,
+                        );
+                    }
+                });
+                tup
+            };
+
+            if daf_mode != crate::queuesubsys_host::DAF_NONE
+                && (path.is_empty() || !crate::fsops::file_exists(&path, &crate::fsops::posix_stat))
+            {
+                path = join_path(&dest_dir, &filename);
+            }
+            let wrong_indices = if daf_mode != crate::queuesubsys_host::DAF_NONE {
+                crate::dupefallback::borrowed_par2_mismatches_slice(
+                    &articles, &path, &dest_dir, &filename,
+                )
+            } else {
+                Vec::new()
+            };
+
+            host.with_locked_queue(|dq_ptr| {
+                if !wrong_indices.is_empty() {
+                    let mut f = host.file_snap(file_ptr);
+                    let mut n = host.nzb_snap(f.nzb_ptr, false);
+                    let mut fresh_arts = snapshot_file_articles(host, file_ptr, f.articles_len);
+                    self.reject_borrowed_articles(
+                        host,
+                        &mut n,
+                        &mut f,
+                        &mut fresh_arts,
+                        &wrong_indices,
+                    );
+                }
+                self.delete_downloader(host, dq_ptr, ad_ptr, true);
+            });
+        }
+    }
+
+    fn reject_borrowed_articles(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb: &mut crate::queuesubsys_host::NzbSnap,
+        file: &mut crate::queuesubsys_host::FileSnap,
+        articles: &mut [crate::queuesubsys_host::ArticleSnap],
+        wrong_indices: &[usize],
+    ) {
+        let mut donor_ids = Vec::with_capacity(wrong_indices.len());
+        let mut rejected_count = 0usize;
+        for &idx in wrong_indices {
+            if idx >= articles.len() {
+                continue;
+            }
+            rejected_count += 1;
+            donor_ids.push(articles[idx].dupe_donor_id);
+            if articles[idx].status == crate::queuesubsys_host::AI_FINISHED {
+                self.count_as_failed(host, nzb, file, &mut articles[idx]);
+            }
+        }
+        let (unique_ids, formatted_names) = format_donor_id_list(&donor_ids);
+        for id in unique_ids {
+            host.nzb_blocked_donor_op(nzb.ptr, true, id);
+        }
+        let mut msg = format!("{} article(s) of ", rejected_count).into_bytes();
+        msg.extend_from_slice(&file.filename);
+        msg.extend_from_slice(
+            b" borrowed from duplicates don't match its par2 checksums: counted as failed, and duplicate(s) ",
+        );
+        msg.extend_from_slice(&formatted_names);
+        msg.extend_from_slice(b" lend this download no more articles");
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+    }
+
+    fn delete_downloader(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        ad_ptr: usize,
+        file_completed: bool,
+    ) {
+        let ad = host.ad_snap(ad_ptr);
+        let file = host.file_snap(ad.file_ptr);
+        let nzb = host.nzb_snap(file.nzb_ptr, false);
+        let delete_file_obj = file_completed || (file.deleted && file.active_downloads == 1);
+
+        host.remove_active_download(ad_ptr);
+
+        let next_f_ad = file.active_downloads - 1;
+        let next_n_ad = nzb.active_downloads - 1;
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_ACTIVE_DOWNLOADS,
+            next_f_ad,
+        );
+        host.nzb_set_int(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_INT_ACTIVE_DOWNLOADS,
+            next_n_ad,
+        );
+
+        if delete_file_obj {
+            let nzb_id = nzb.id;
+            self.delete_file_info(host, dq_ptr, file.ptr, file_completed);
+            let found_nzb = host.queue_find_by_id(dq_ptr, nzb_id);
+            if found_nzb != 0 {
+                host.nzb_set_int(found_nzb, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+                host.dq_save_changed(dq_ptr);
+            }
+        } else if next_n_ad == 0 {
+            host.prepost_check_download_completed(dq_ptr, nzb.ptr);
+        }
+    }
+
+    fn delete_file_info(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        file_ptr: usize,
+        completed: bool,
+    ) {
+        while host.article_cache_file_busy(file_ptr) {
+            host.sleep_ms(5);
+        }
+
+        let opts = host.opts();
+        let file = host.file_snap(file_ptr);
+        let nzb = host.nzb_snap(file.nzb_ptr, false);
+        let parking = nzb.parking;
+        let file_deleted = file.deleted;
+
+        host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_DELETED, 1);
+
+        if completed && file.dupe_attempted_articles > 0 {
+            let mut msg = format!(
+                "Recovered {} of {} missing article(s) of ",
+                file.dupe_recovered_articles, file.dupe_attempted_articles
+            )
+            .into_bytes();
+            msg.extend_from_slice(&file.filename);
+            msg.extend_from_slice(b" from duplicate collections");
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+        }
+
+        if completed || nzb.deleting {
+            host.nzb_action(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_ACT_UPDATE_COMPLETED_STATS,
+                file.ptr,
+            );
+        } else {
+            host.nzb_action(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_ACT_UPDATE_DELETED_STATS,
+                file.ptr,
+            );
+        }
+
+        let file_status = classify_completed_file_status(
+            file.total_articles,
+            file.success_articles,
+            file.missed_articles,
+            file.failed_articles,
+        );
+
+        if opts.server_mode {
+            let (del_data, save_part) = eval_delete_file_diskstate_flags(
+                file_status,
+                crate::queuesubsys_host::CF_SUCCESS,
+                crate::queuesubsys_host::CF_PARTIAL,
+                file_deleted as i32,
+                parking as i32,
+                completed as i32,
+            );
+            host.disk_discard_file(file.id, del_data, true, false);
+            if save_part {
+                host.disk_save_file_state(file.ptr, true);
+            }
+        }
+
+        if !completed {
+            self.discard_temp_files(host, &opts, &file);
+        }
+
+        if completed || parking {
+            let out_exists = !file.output_filename.is_empty()
+                && crate::fsops::file_exists(&file.output_filename, &crate::fsops::posix_stat);
+            let filename = resolve_completed_filename(
+                completed,
+                file_status,
+                &file.output_filename,
+                &file.filename,
+                &nzb.dest_dir,
+                crate::paths::PATH_SEPARATOR,
+                out_exists,
+            );
+
+            let articles = snapshot_file_articles(host, file.ptr, file.articles_len);
+            let fresh_nzb = host.nzb_snap(nzb.ptr, false);
+
+            if completed {
+                crate::dupefallback::par_damage_file_completed_host(
+                    host, &fresh_nzb, &file, &articles, &filename,
+                );
+            }
+
+            let is_incomplete = completed
+                && (file_status == crate::queuesubsys_host::CF_PARTIAL
+                    || file_status == crate::queuesubsys_host::CF_FAILURE);
+            let is_side = is_incomplete && is_side_file(&filename, &opts.ext_cleanup_disk);
+            if is_side {
+                let mut msg = b"Not repairing side file ".to_vec();
+                msg.extend_from_slice(&filename);
+                msg.extend_from_slice(b" from duplicates");
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+            }
+            if is_incomplete
+                && !is_side
+                && crate::dupefallback::build_repair_job_host(
+                    host, &opts, &fresh_nzb, &file, &articles, &filename,
+                )
+            {
+                let mut msg = b"Queueing stream repair of ".to_vec();
+                msg.extend_from_slice(&filename);
+                if file_status == crate::queuesubsys_host::CF_FAILURE {
+                    msg.extend_from_slice(b" (no article available) from duplicate collections");
+                } else {
+                    msg.extend_from_slice(b" from duplicate collections");
+                }
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+
+                let flen = host.nzb_file_len(nzb.ptr);
+                let mut more_files_queued = false;
+                for i in 0..flen {
+                    let qf_ptr = host.nzb_file_at(nzb.ptr, i);
+                    if qf_ptr != file.ptr {
+                        let qf = host.file_snap(qf_ptr);
+                        if !qf.deleted {
+                            more_files_queued = true;
+                            break;
+                        }
+                    }
+                }
+                let latest_nzb = host.nzb_snap(nzb.ptr, false);
+                if opts.dupe_article_fallback == crate::queuesubsys_host::DAF_LIVE
+                    && more_files_queued
+                    && !latest_nzb.has_live_repair_thread
+                {
+                    host.stream_repair_start_live(nzb.ptr);
+                }
+            }
+
+            let file_crc = if file_status == crate::queuesubsys_host::CF_SUCCESS {
+                file.crc
+            } else {
+                0
+            };
+            host.nzb_push_completed_file(nzb.ptr, file.ptr, &filename, file_status, file_crc);
+        }
+
+        if opts.direct_rename {
+            host.direct_renamer_file_downloaded(dq_ptr, file.ptr);
+        }
+
+        let check_nzb = host.nzb_snap(nzb.ptr, false);
+        if check_nzb.direct_rename_status == crate::queuesubsys_host::TS_RUNNING
+            && !check_nzb.deleting
+            && check_nzb.is_download_completed
+        {
+            self.discard_direct_rename(host, &opts, nzb.ptr);
+        }
+
+        let removed_action = if completed && !file_deleted {
+            crate::queuesubsys_host::ASPECT_FILE_COMPLETED
+        } else {
+            crate::queuesubsys_host::ASPECT_FILE_DELETED
+        };
+        host.nzb_remove_file_and_notify(dq_ptr, nzb.ptr, file.ptr, removed_action);
+    }
+
+    fn demote_misaligned_dupe_neighbors(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb: &mut crate::queuesubsys_host::NzbSnap,
+        file: &mut crate::queuesubsys_host::FileSnap,
+        articles_len: usize,
+        index: usize,
+    ) {
+        let mut neighbors = [None, None];
+        if index > 0 {
+            neighbors[0] = Some(index - 1);
+        }
+        if index + 1 < articles_len {
+            neighbors[1] = Some(index + 1);
+        }
+        for nb_opt in neighbors {
+            let Some(nb_idx) = nb_opt else {
+                continue;
+            };
+            let mut nb = host.article_at(file.ptr, nb_idx);
+            if nb.status != crate::queuesubsys_host::AI_FINISHED
+                || nb.dupe_fallback_round <= 0
+                || crate::dupefallback::segment_aligned_at(
+                    host,
+                    file.ptr,
+                    articles_len,
+                    nb_idx,
+                    &nb,
+                    file.decoded_file_size,
+                )
+            {
+                continue;
+            }
+            let part_num = nb.part_number;
+            self.demote_finished_article(host, nzb, file, &mut nb);
+            let mut msg = b"Discarding misaligned article ".to_vec();
+            msg.extend_from_slice(&file.filename);
+            msg.extend_from_slice(
+                format!(" [{}/{}] from duplicate", part_num, articles_len).as_bytes(),
+            );
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+        }
+    }
+
+    fn validate_completed_file_tiling(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb: &mut crate::queuesubsys_host::NzbSnap,
+        file: &mut crate::queuesubsys_host::FileSnap,
+        articles: &mut [crate::queuesubsys_host::ArticleSnap],
+    ) {
+        if file.success_articles != file.total_articles {
+            return;
+        }
+        if !crate::dupefallback::has_donor_articles_slice(articles) {
+            return;
+        }
+        let Some(untiled_idx) =
+            crate::dupefallback::first_untiled_article_slice(articles, file.decoded_file_size)
+        else {
+            return;
+        };
+        let part_num = articles[untiled_idx].part_number;
+        let total_len = articles.len();
+        self.demote_finished_article(host, nzb, file, &mut articles[untiled_idx]);
+        let mut msg = b"Discarding misaligned article ".to_vec();
+        msg.extend_from_slice(&file.filename);
+        msg.extend_from_slice(
+            format!(
+                " [{}/{}]: decoded bytes do not tile the file (leaving to par-repair)",
+                part_num, total_len
+            )
+            .as_bytes(),
+        );
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+    }
+
+    fn count_as_failed(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb: &mut crate::queuesubsys_host::NzbSnap,
+        file: &mut crate::queuesubsys_host::FileSnap,
+        art: &mut crate::queuesubsys_host::ArticleSnap,
+    ) {
+        art.status = crate::queuesubsys_host::AI_FAILED;
+        host.article_set_int(
+            art.ptr,
+            crate::queuesubsys_host::ART_INT_STATUS,
+            crate::queuesubsys_host::AI_FAILED,
+        );
+        demote_article_counters(
+            art.size,
+            file.par_file,
+            art.dupe_proactive,
+            &art.message_id,
+            &art.dupe_original_message_id,
+            &mut file.success_size,
+            &mut file.failed_size,
+            &mut file.success_articles,
+            &mut file.failed_articles,
+            &mut nzb.current_success_size,
+            &mut nzb.current_failed_size,
+            &mut nzb.par_current_success_size,
+            &mut nzb.par_current_failed_size,
+            &mut nzb.current_success_articles,
+            &mut nzb.current_failed_articles,
+            &mut file.dupe_recovered_articles,
+            &mut nzb.dupe_recovered_articles,
+        );
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_SUCCESS_ARTICLES,
+            file.success_articles,
+        );
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_FAILED_ARTICLES,
+            file.failed_articles,
+        );
+        host.nzb_set_int(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_INT_CUR_SUCCESS_ARTICLES,
+            nzb.current_success_articles,
+        );
+        host.nzb_set_int(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_INT_CUR_FAILED_ARTICLES,
+            nzb.current_failed_articles,
+        );
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_DUPE_RECOVERED_ARTICLES,
+            file.dupe_recovered_articles,
+        );
+        host.nzb_set_int(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_INT_DUPE_RECOVERED_ARTICLES,
+            nzb.dupe_recovered_articles,
+        );
+        host.file_set_i64(
+            file.ptr,
+            crate::queuesubsys_host::FILE_I64_SUCCESS_SIZE,
+            file.success_size,
+        );
+        host.file_set_i64(
+            file.ptr,
+            crate::queuesubsys_host::FILE_I64_FAILED_SIZE,
+            file.failed_size,
+        );
+        host.nzb_set_i64(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_I64_CUR_SUCCESS_SIZE,
+            nzb.current_success_size,
+        );
+        host.nzb_set_i64(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_I64_CUR_FAILED_SIZE,
+            nzb.current_failed_size,
+        );
+        host.nzb_set_i64(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_I64_PAR_CUR_SUCCESS_SIZE,
+            nzb.par_current_success_size,
+        );
+        host.nzb_set_i64(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_I64_PAR_CUR_FAILED_SIZE,
+            nzb.par_current_failed_size,
+        );
+    }
+
+    fn demote_finished_article(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb: &mut crate::queuesubsys_host::NzbSnap,
+        file: &mut crate::queuesubsys_host::FileSnap,
+        art: &mut crate::queuesubsys_host::ArticleSnap,
+    ) {
+        self.discard_article_segment(host, file, art);
+        self.count_as_failed(host, nzb, file, art);
+        if crate::dupefallback::register_lead_failure_host(host, file, art) {
+            let mut msg = b"Switching lead duplicate collection for ".to_vec();
+            msg.extend_from_slice(&file.filename);
+            msg.extend_from_slice(b" (the lead duplicate is missing many articles)");
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+        }
+        file.partial_changed = true;
+        host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 1);
+    }
+
+    fn discard_article_segment(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        file: &mut crate::queuesubsys_host::FileSnap,
+        art: &crate::queuesubsys_host::ArticleSnap,
+    ) {
+        host.article_cache_discard_segment(file.ptr, art.ptr);
+        file.cached_articles = host.file_snap(file.ptr).cached_articles;
+    }
+
+    fn save_queue_if_changed(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        if !host.opts().server_mode {
+            return;
+        }
+        host.with_locked_queue(|dq_ptr| {
+            let qlen = host.queue_len(dq_ptr);
+            let mut has_changes = false;
+            for i in 0..qlen {
+                let nzb = host.nzb_snap(host.queue_at(dq_ptr, i), false);
+                has_changes |= nzb.changed;
+            }
+            if has_changes {
+                host.dq_save(dq_ptr);
+            }
+        });
+    }
+
+    fn save_all_partial_state(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        let opts = host.opts();
+        if !opts.server_mode || !opts.continue_partial {
+            return;
+        }
+        host.with_locked_queue(|dq_ptr| {
+            let qlen = host.queue_len(dq_ptr);
+            for i in 0..qlen {
+                let nzb_ptr = host.queue_at(dq_ptr, i);
+                let flen = host.nzb_file_len(nzb_ptr);
+                for j in 0..flen {
+                    self.save_partial_state(host, host.nzb_file_at(nzb_ptr, j));
+                }
+            }
+            host.dq_save_changed(dq_ptr);
+        });
+    }
+
+    fn save_partial_state(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        file_ptr: usize,
+    ) {
+        let file = host.file_snap(file_ptr);
+        if file.partial_changed {
+            let mut dbg = b"Saving partial state for ".to_vec();
+            dbg.extend_from_slice(&file.filename);
+            host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
+            if file.partial_state == crate::queuesubsys_host::PARTIAL_COMPLETED {
+                host.disk_discard_file(file.id, false, false, true);
+            }
+            host.disk_save_file_state(file.ptr, false);
+            host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 0);
+            host.file_set_int(
+                file.ptr,
+                crate::queuesubsys_host::FILE_INT_PARTIAL_STATE,
+                crate::queuesubsys_host::PARTIAL_PARTIAL,
+            );
+        }
+    }
+
+    fn load_partial_state(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+        file_ptr: usize,
+    ) {
+        let file = host.file_snap(file_ptr);
+        if file.partial_state == crate::queuesubsys_host::PARTIAL_PARTIAL {
+            host.disk_load_file_state(file.ptr, false);
+            let f2 = host.file_snap(file.ptr);
+            if (opts.direct_write || f2.force_direct_write) && !f2.output_initialized {
+                let out_tmp = join_path(&nzb.dest_dir, format!("{}.out.tmp", f2.id).as_bytes());
+                if crate::fsops::file_exists(&out_tmp, &crate::fsops::posix_stat) {
+                    host.file_set_str(
+                        file.ptr,
+                        crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
+                        Some(&out_tmp),
+                    );
+                    host.file_set_int(
+                        file.ptr,
+                        crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
+                        1,
+                    );
+                } else if f2.force_direct_write {
+                    let out_fn = join_path(&nzb.dest_dir, &f2.filename);
+                    if crate::fsops::file_exists(&out_fn, &crate::fsops::posix_stat) {
+                        host.file_set_str(
+                            file.ptr,
+                            crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
+                            Some(&out_fn),
+                        );
+                        host.file_set_int(
+                            file.ptr,
+                            crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
+                            1,
+                        );
+                    }
+                }
+            }
+        } else if file.partial_state == crate::queuesubsys_host::PARTIAL_COMPLETED {
+            host.disk_load_file_state(file.ptr, true);
+            let f2 = host.file_snap(file.ptr);
+            let out_fn = join_path(&nzb.dest_dir, &f2.filename);
+            host.file_set_str(
+                file.ptr,
+                crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
+                Some(&out_fn),
+            );
+            host.file_set_int(
+                file.ptr,
+                crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
+                1,
+            );
+            host.file_set_int(
+                file.ptr,
+                crate::queuesubsys_host::FILE_INT_FORCE_DIRECT_WRITE,
+                1,
+            );
+            host.file_set_int(
+                file.ptr,
+                crate::queuesubsys_host::FILE_INT_FILENAME_CONFIRMED,
+                1,
+            );
+        }
+    }
+
+    fn save_all_file_state(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        if host.opts().server_mode && host.coord_dq_state_changed() {
+            host.with_locked_queue(|dq_ptr| {
+                host.disk_save_all_file_infos(dq_ptr);
+            });
+        }
+    }
+
+    fn check_health(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        dq_ptr: usize,
+        file_ptr: usize,
+    ) {
+        let file = host.file_snap(file_ptr);
+        let nzb = host.nzb_snap(file.nzb_ptr, false);
+        let dl_crit = self.download_critical_health(host, opts, dq_ptr, &nzb);
+        if should_skip_health_check(
+            opts.health_check,
+            crate::queuesubsys_host::HC_NONE,
+            crate::queuesubsys_host::HC_PARK,
+            opts.par_scan,
+            crate::queuesubsys_host::PS_DUPE,
+            nzb.health_paused,
+            nzb.delete_status,
+            crate::queuesubsys_host::DS_HEALTH,
+            nzb.health,
+            dl_crit,
+            nzb.success_articles,
+            nzb.total_articles,
+        ) {
+            return;
+        }
+
+        if opts.health_check == crate::queuesubsys_host::HC_PAUSE {
+            let mut msg = b"Pausing ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(
+                format!(
+                    " due to health {:.1}% below critical {:.1}%",
+                    (nzb.health as f64) / 10.0,
+                    (nzb.critical_health_opt as f64) / 10.0
+                )
+                .as_bytes(),
+            );
+            host.log(crate::queuesubsys_host::MK_WARNING, &msg);
+            host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_HEALTH_PAUSED, 1);
+            host.dq_edit_entry(
+                dq_ptr,
+                nzb.id,
+                crate::queuesubsys_host::EA_GROUP_PAUSE,
+                None,
+            );
+        } else if opts.health_check == crate::queuesubsys_host::HC_DELETE
+            || opts.health_check == crate::queuesubsys_host::HC_PARK
+        {
+            let mut msg = b"Cancelling download and deleting ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(
+                format!(
+                    " due to health {:.1}% below critical {:.1}%",
+                    (nzb.health as f64) / 10.0,
+                    (nzb.critical_health_opt as f64) / 10.0
+                )
+                .as_bytes(),
+            );
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+            host.nzb_set_int(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                crate::queuesubsys_host::DS_HEALTH,
+            );
+            host.dq_edit_entry(
+                dq_ptr,
+                nzb.id,
+                if opts.health_check == crate::queuesubsys_host::HC_PARK {
+                    crate::queuesubsys_host::EA_GROUP_PARK_DELETE
+                } else {
+                    crate::queuesubsys_host::EA_GROUP_DELETE
+                },
+                None,
+            );
+        } else if opts.health_check == crate::queuesubsys_host::HC_DUPE {
+            self.check_dupe_failover(host, opts, dq_ptr, &nzb);
+        }
+    }
+
+    fn download_critical_health(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        dq_ptr: usize,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) -> i32 {
+        if opts.health_check == crate::queuesubsys_host::HC_DUPE
+            && nzb.critical_health_exact == 1000
+            && Self::certainly_parless(host, nzb)
+            && !Self::has_size_twin(host, dq_ptr, nzb)
+        {
+            return 1000;
+        }
+        nzb.critical_health_opt
+    }
+
+    fn certainly_parless(
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) -> bool {
+        if crate::dupefallback::has_par2_host(host, nzb) {
+            return false;
+        }
+        let mut files = 0i32;
+        let flen = host.nzb_file_len(nzb.ptr);
+        for i in 0..flen {
+            let f = host.file_snap(host.nzb_file_at(nzb.ptr, i));
+            if !is_data_filename(&f.filename) {
+                return false;
+            }
+            files += 1;
+        }
+        for cf in host.nzb_completed_files(nzb.ptr) {
+            if !is_data_filename(&cf.filename) {
+                return false;
+            }
+            files += 1;
+        }
+        files > 0
+    }
+
+    fn has_size_twin(
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) -> bool {
+        let mut largest = 0i64;
+        let flen = host.nzb_file_len(nzb.ptr);
+        for i in 0..flen {
+            let f = host.file_snap(host.nzb_file_at(nzb.ptr, i));
+            largest = largest.max(f.size);
+        }
+        if largest <= 0 {
+            return false;
+        }
+        let check_other = |other_ptr: usize| -> bool {
+            if other_ptr == 0 || other_ptr == nzb.ptr {
+                return false;
+            }
+            let other = host.nzb_snap(other_ptr, false);
+            let same_key = crate::dupecoord::same_name_or_key(
+                &other.name,
+                &other.dupe_key,
+                &nzb.name,
+                &nzb.dupe_key,
+            );
+            let oflen = host.nzb_file_len(other_ptr);
+            let mut sizes = Vec::with_capacity(oflen);
+            for j in 0..oflen {
+                sizes.push(host.file_snap(host.nzb_file_at(other_ptr, j)).size);
+            }
+            is_size_twin(
+                other_ptr == nzb.ptr,
+                same_key,
+                nzb.size,
+                other.size,
+                other.par_size,
+                largest,
+                &sizes,
+            )
+        };
+        let qlen = host.queue_len(dq_ptr);
+        for i in 0..qlen {
+            if check_other(host.queue_at(dq_ptr, i)) {
+                return true;
+            }
+        }
+        let hlen = host.history_len(dq_ptr);
+        for i in 0..hlen {
+            let hi = host.history_at(dq_ptr, i);
+            if hi.kind == crate::queuesubsys_host::HK_NZB && check_other(hi.inner_ptr) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn has_active_dupe(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) -> bool {
+        if nzb.dupe_key.is_empty() {
+            return false;
+        }
+        if nzb.has_extra_priority
+            || (nzb.has_post_info
+                && (nzb.post_working || nzb.post_stage != crate::queuesubsys_host::PT_QUEUED))
+        {
+            return false;
+        }
+        let self_completed_empty = host.nzb_completed_files(nzb.ptr).is_empty();
+        let qlen = host.queue_len(dq_ptr);
+        for i in 0..qlen {
+            let qp = host.queue_at(dq_ptr, i);
+            if qp == 0 || qp == nzb.ptr {
+                continue;
+            }
+            let queued = host.nzb_snap(qp, false);
+            if !queued.dupe_key.is_empty() && queued.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key) {
+                if is_queued_dupe_active(
+                    queued.deleting,
+                    queued.delete_status,
+                    crate::queuesubsys_host::DS_NONE,
+                    queued.active_downloads,
+                    queued.has_post_info,
+                    queued.post_working,
+                    queued.post_stage,
+                    crate::queuesubsys_host::PT_QUEUED,
+                    queued.has_extra_priority,
+                    self_completed_empty,
+                    queued.direct_unpack_status,
+                    crate::queuesubsys_host::NS_RUNNING,
+                ) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn check_dupe_failover(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        dq_ptr: usize,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) {
+        if nzb.deleting || nzb.parking {
+            return;
+        }
+        let attempted = nzb.dupe_attempted_articles + nzb.dupe_unsourced_articles;
+        let recovered = nzb.dupe_recovered_articles;
+        let failed = nzb.current_failed_articles;
+        let (defer, upd_checked) = should_defer_dupe_failover(
+            opts.dupe_article_fallback != crate::queuesubsys_host::DAF_NONE,
+            attempted,
+            recovered,
+            DUPE_FAILOVER_SAMPLE,
+            nzb.dupe_par_defer_state,
+            crate::queuesubsys_host::DP_DEFERRED,
+            crate::dupefallback::par_cannot_cover_snap(nzb, true),
+            failed,
+            nzb.dupe_failover_checked,
+        );
+        if defer {
+            return;
+        }
+        if upd_checked {
+            host.nzb_set_int(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_INT_DUPE_FAILOVER_CHECKED,
+                failed,
+            );
+        }
+
+        let backup = if crate::dupecoord::fails_over_snap(opts, nzb) {
+            crate::dupecoord::find_dupe_backup_host(
+                host,
+                opts,
+                dq_ptr,
+                nzb.ptr,
+                &nzb.name,
+                &nzb.dupe_key,
+            )
+        } else {
+            None
+        };
+
+        let dl_crit = self.download_critical_health(host, opts, dq_ptr, nzb);
+        let effective_failover_health = if dl_crit > nzb.critical_health_opt {
+            0
+        } else {
+            nzb.health
+        };
+
+        if let Some((_, backup_nzb)) = backup {
+            if crate::dupecoord::dupe_failover_warranted_inline(
+                nzb.dupe_score,
+                effective_failover_health,
+                backup_nzb.dupe_score,
+            ) {
+                let mut msg = b"Failing over ".to_vec();
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(b" to duplicate ");
+                msg.extend_from_slice(&backup_nzb.name);
+                msg.extend_from_slice(
+                    format!(
+                        ": health {:.1}% below critical {:.1}%, {} of {} missing article(s) recovered from duplicates",
+                        (nzb.health as f64) / 10.0,
+                        (dl_crit as f64) / 10.0,
+                        recovered,
+                        attempted
+                    )
+                    .as_bytes(),
+                );
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+                host.nzb_set_int(
+                    nzb.ptr,
+                    crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                    crate::queuesubsys_host::DS_HEALTH,
+                );
+                host.dq_edit_entry(
+                    dq_ptr,
+                    nzb.id,
+                    crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
+                    None,
+                );
+                return;
+            }
+        }
+
+        if download_hopeless(
+            nzb.total_articles,
+            nzb.current_success_articles,
+            nzb.current_failed_articles,
+        ) {
+            let tried = nzb.current_success_articles + nzb.current_failed_articles;
+            let reason = crate::dupecoord::no_backup_reason_host(host, opts, dq_ptr, nzb);
+            let mut msg = b"Parking ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(
+                format!(
+                    ": health {:.1}% below critical {:.1}%, {} of {} missing article(s) recovered from duplicates, {} of {} tried article(s) exist and no better duplicate in history (",
+                    (nzb.health as f64) / 10.0,
+                    (dl_crit as f64) / 10.0,
+                    recovered,
+                    attempted,
+                    nzb.current_success_articles,
+                    tried
+                )
+                .as_bytes(),
+            );
+            msg.extend_from_slice(&reason);
+            msg.push(b')');
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+            host.nzb_set_int(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                crate::queuesubsys_host::DS_HEALTH,
+            );
+            host.dq_edit_entry(
+                dq_ptr,
+                nzb.id,
+                crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
+                None,
+            );
+        }
+    }
+
+    fn check_dead_download(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        dq_ptr: usize,
+        nzb_ptr: usize,
+    ) {
+        let nzb = host.nzb_snap(nzb_ptr, false);
+        if opts.health_check != crate::queuesubsys_host::HC_DUPE
+            || !opts.dupe_check
+            || !crate::dupecoord::fails_over_snap(opts, &nzb)
+            || nzb.kind != crate::queuesubsys_host::NK_NZB
+            || nzb.deleting
+            || nzb.parking
+            || nzb.delete_status != crate::queuesubsys_host::DS_NONE
+        {
+            return;
+        }
+
+        let critical = self.download_critical_health(host, opts, dq_ptr, &nzb);
+        let probing = crate::dupeprobe::probe_probing_for(nzb.id);
+        let failed = nzb.current_failed_articles;
+        let files_tried = Self::files_tried(host, &nzb);
+        let eval = eval_dead_download(
+            nzb.current_success_articles,
+            nzb.dupe_recovered_articles,
+            failed,
+            nzb.file_count,
+            nzb.dupe_failed_run,
+            crate::dupefallback::par_cannot_cover_snap(&nzb, false),
+            critical,
+            crate::dupefallback::PAR_EDGE_MARGIN,
+            files_tried,
+            probing,
+        );
+        let dead = eval.dead != 0;
+        let doomed = eval.doomed != 0;
+        let hopeless = eval.hopeless != 0;
+        let dead_rate = eval.dead_rate != 0;
+        let far_below = eval.far_below != 0;
+        let below = eval.below != 0;
+
+        if !dead && !doomed && self.check_par_damage(host, opts, dq_ptr, &nzb) {
+            return;
+        }
+        if (!dead && !doomed) || (probing >= 0 && !hopeless) {
+            return;
+        }
+
+        let backup = crate::dupecoord::find_dupe_backup_host(
+            host,
+            opts,
+            dq_ptr,
+            nzb.ptr,
+            &nzb.name,
+            &nzb.dupe_key,
+        );
+        let Some((_, backup_nzb)) = backup else {
+            let attempted = nzb.dupe_attempted_articles + nzb.dupe_unsourced_articles;
+            if should_park_dead_without_backup(
+                opts.dupe_article_fallback != crate::queuesubsys_host::DAF_NONE,
+                nzb.dupe_par_defer_state,
+                crate::queuesubsys_host::DP_DEFERRED,
+                attempted,
+                nzb.dupe_recovered_articles,
+                eval.tried,
+                PROJECTED_FAILURE_SAMPLE,
+                files_tried,
+                far_below,
+                below,
+            ) {
+                let reason = crate::dupecoord::no_backup_reason_host(host, opts, dq_ptr, &nzb);
+                let mut msg = b"Parking ".to_vec();
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(
+                    format!(
+                        ": {} of {} tried article(s) of its own arrived, projected health {:.1}% {} critical {:.1}%, and no duplicate in history to fail over to (",
+                        eval.own,
+                        eval.tried,
+                        (eval.projected as f64) / 10.0,
+                        if far_below { "far below" } else { "below" },
+                        (critical as f64) / 10.0
+                    )
+                    .as_bytes(),
+                );
+                msg.extend_from_slice(&reason);
+                msg.push(b')');
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+                host.nzb_set_int(
+                    nzb.ptr,
+                    crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                    crate::queuesubsys_host::DS_HEALTH,
+                );
+                host.dq_edit_entry(
+                    dq_ptr,
+                    nzb.id,
+                    crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
+                    None,
+                );
+            }
+            return;
+        };
+
+        if dead {
+            if !crate::dupecoord::dupe_failover_warranted_inline(
+                nzb.dupe_score,
+                0,
+                backup_nzb.dupe_score,
+            ) {
+                return;
+            }
+            let mut msg = b"Failing over ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(b" to duplicate ");
+            msg.extend_from_slice(&backup_nzb.name);
+            if dead_rate {
+                msg.extend_from_slice(
+                    format!(
+                        ": {} of its own articles downloaded, {} failed",
+                        eval.own, failed
+                    )
+                    .as_bytes(),
+                );
+            } else {
+                msg.extend_from_slice(
+                    format!(
+                        ": {} of its articles failed in a row ({} of {} tried arrived)",
+                        nzb.dupe_failed_run, eval.own, eval.tried
+                    )
+                    .as_bytes(),
+                );
+            }
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        } else {
+            let backup_alive = backup_alive_permille(host, backup_nzb.ptr);
+            if backup_alive < eval.projected + BACKUP_LEAD
+                || backup_alive < critical
+                || !crate::dupecoord::dupe_failover_warranted_inline(
+                    nzb.dupe_score,
+                    eval.projected,
+                    backup_nzb.dupe_score,
+                )
+            {
+                return;
+            }
+            let mut msg = b"Failing over ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(b" to duplicate ");
+            msg.extend_from_slice(&backup_nzb.name);
+            msg.extend_from_slice(
+                format!(
+                    ": {} of {} tried article(s) of its own arrived, projected health {:.1}% {} critical {:.1}%; the duplicate is {:.0}% alive",
+                    eval.own,
+                    eval.tried,
+                    (eval.projected as f64) / 10.0,
+                    if eval.projected < critical {
+                        "below"
+                    } else {
+                        "near"
+                    },
+                    (critical as f64) / 10.0,
+                    (backup_alive as f64) / 10.0
+                )
+                .as_bytes(),
+            );
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        }
+        host.nzb_set_int(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+            crate::queuesubsys_host::DS_HEALTH,
+        );
+        host.dq_edit_entry(
+            dq_ptr,
+            nzb.id,
+            crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
+            None,
+        );
+    }
+
+    fn check_par_damage(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        dq_ptr: usize,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) -> bool {
+        let verdict = crate::dupefallback::par_damage_judge_host(host, nzb);
+        let certain = verdict.certain();
+        if !certain && !verdict.projected() {
+            return false;
+        }
+        if should_wait_for_borrowing_on_par_damage(
+            opts.dupe_article_fallback != crate::queuesubsys_host::DAF_NONE,
+            opts.raw_article,
+            nzb.dupe_mode,
+            crate::queuesubsys_host::DM_FORCE,
+            crate::dupefallback::has_par2_host(host, nzb),
+            nzb.dupe_par_defer_state,
+            crate::queuesubsys_host::DP_DEFERRED,
+            nzb.dupe_attempted_articles + nzb.dupe_unsourced_articles,
+            DUPE_FAILOVER_SAMPLE,
+            nzb.dupe_recovered_articles,
+        ) {
+            return false;
+        }
+
+        let qlen = host.queue_len(dq_ptr);
+        for i in 0..qlen {
+            let qp = host.queue_at(dq_ptr, i);
+            if qp == 0 || qp == nzb.ptr {
+                continue;
+            }
+            let queued = host.nzb_snap(qp, false);
+            if queued.paused_size < queued.remaining_size
+                && crate::dupecoord::same_name_or_key(
+                    &queued.name,
+                    &queued.dupe_key,
+                    &nzb.name,
+                    &nzb.dupe_key,
+                )
+            {
+                return false;
+            }
+        }
+
+        let backup = crate::dupecoord::find_dupe_backup_host(
+            host,
+            opts,
+            dq_ptr,
+            nzb.ptr,
+            &nzb.name,
+            &nzb.dupe_key,
+        );
+        let damage = format_par_damage_summary(
+            certain,
+            verdict.damaged_blocks,
+            verdict.projected_blocks,
+            verdict.block_size as i64,
+            verdict.recovery_blocks,
+        );
+        let Some((_, backup_nzb)) = backup else {
+            if crate::pardamage::first_report(nzb.id) {
+                let mut msg = nzb.name.clone();
+                msg.extend_from_slice(b": ");
+                msg.extend_from_slice(&damage);
+                msg.extend_from_slice(b"; no duplicate in history to fail over to");
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+            }
+            return false;
+        };
+
+        let backup_alive = backup_alive_permille(host, backup_nzb.ptr);
+        if (!certain && backup_alive < 999)
+            || !crate::dupecoord::dupe_failover_warranted_inline(
+                nzb.dupe_score,
+                0,
+                backup_nzb.dupe_score,
+            )
+        {
+            return false;
+        }
+
+        let mut msg = b"Failing over ".to_vec();
+        msg.extend_from_slice(&nzb.name);
+        msg.extend_from_slice(b" to duplicate ");
+        msg.extend_from_slice(&backup_nzb.name);
+        msg.extend_from_slice(b": ");
+        msg.extend_from_slice(&damage);
+        msg.extend_from_slice(b", par-repair can't fix it");
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &msg);
+        crate::dupefallback::par_damage_forget_all(nzb.id);
+        host.nzb_set_int(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+            crate::queuesubsys_host::DS_HEALTH,
+        );
+        host.dq_edit_entry(
+            dq_ptr,
+            nzb.id,
+            crate::queuesubsys_host::EA_GROUP_PARK_DELETE,
+            None,
+        );
+        true
+    }
+
+    fn files_tried(
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) -> i32 {
+        let mut files = host.nzb_completed_files(nzb.ptr).len() as i32;
+        let flen = host.nzb_file_len(nzb.ptr);
+        for i in 0..flen {
+            let f = host.file_snap(host.nzb_file_at(nzb.ptr, i));
+            if f.success_articles + f.failed_articles > 0 {
+                files += 1;
+            }
+        }
+        files
+    }
+
+    fn start_dead_pick_probe(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        dq_ptr: usize,
+        nzb: &crate::queuesubsys_host::NzbSnap,
+    ) {
+        if opts.health_check != crate::queuesubsys_host::HC_DUPE
+            || !opts.dupe_check
+            || nzb.dead_pick_probed
+            || !crate::dupecoord::fails_over_snap(opts, nzb)
+            || nzb.kind != crate::queuesubsys_host::NK_NZB
+            || nzb.deleting
+            || nzb.parking
+            || nzb.delete_status != crate::queuesubsys_host::DS_NONE
+        {
+            return;
+        }
+        host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_DEAD_PICK_PROBED, 1);
+        if nzb.current_success_articles > 0 {
+            return;
+        }
+        if crate::dupecoord::find_dupe_backup_host(
+            host,
+            opts,
+            dq_ptr,
+            nzb.ptr,
+            &nzb.name,
+            &nzb.dupe_key,
+        )
+        .is_none()
+        {
+            return;
+        }
+
+        let flen = host.nzb_file_len(nzb.ptr);
+        let mut files: Vec<crate::queuesubsys_host::FileSnap> = Vec::new();
+        for pass in 0..2 {
+            if !files.is_empty() {
+                break;
+            }
+            for i in 0..flen {
+                let f = host.file_snap(host.nzb_file_at(nzb.ptr, i));
+                if !f.deleted && !f.paused && f.total_articles > 0 && (pass == 1 || !f.par_file) {
+                    files.push(f);
+                }
+            }
+        }
+
+        let total: usize = files
+            .iter()
+            .map(|f| f.total_articles.max(0) as usize)
+            .sum();
+        if total < DUPE_PROBE_MIN_ARTICLES {
+            return;
+        }
+
+        let indexes = crate::dupeprobe::sample_indexes(total, DUPE_PROBE_SAMPLE_COUNT);
+        let mut samples: Vec<(Vec<u8>, Vec<Vec<u8>>)> = Vec::with_capacity(indexes.len());
+        for pos in indexes {
+            let mut offset = 0usize;
+            for f in &mut files {
+                let count = f.total_articles.max(0) as usize;
+                if pos >= offset + count {
+                    offset += count;
+                    continue;
+                }
+                if f.articles_len == 0 && opts.server_mode {
+                    host.disk_load_articles(f.ptr);
+                    self.load_partial_state(host, opts, nzb, f.ptr);
+                    *f = host.file_snap(f.ptr);
+                }
+                let idx = pos - offset;
+                if idx < f.articles_len {
+                    let art = host.article_at(f.ptr, idx);
+                    let groups = host.file_groups(f.ptr);
+                    samples.push((art.message_id, groups));
+                }
+                break;
+            }
+        }
+        if samples.len() < DUPE_PROBE_MIN_ARTICLES {
+            return;
+        }
+
+        let mut probe = Box::new(crate::dupeprobe::NzbgetRsDupeProbe::new(
+            nzb.id,
+            false,
+            nzb.dupe_recovered_articles,
+        ));
+        for (msg_id, groups) in samples {
+            probe.add_sample(msg_id, groups);
+        }
+        host.launch_dupe_probe(probe);
+    }
+
+    fn reset_hanging_downloads(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        let opts = host.opts();
+        if opts.article_timeout == 0 {
+            return;
+        }
+        host.with_locked_queue(|_| {
+            let tm = host.opts().cur_time;
+            let n = host.active_downloads_len();
+            for i in 0..n {
+                let ad = host.active_download_at(i);
+                if is_hanging_download(
+                    tm,
+                    ad.last_update_time,
+                    opts.article_timeout,
+                    ad.status == crate::queuesubsys_host::AD_RUNNING,
+                ) {
+                    host.ad_action(
+                        ad.ad_ptr,
+                        crate::queuesubsys_host::AD_ACT_CANCEL_HANGING,
+                        0,
+                    );
+                }
+            }
+        });
+    }
+
+    pub(crate) fn direct_rename_completed(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        nzb_ptr: usize,
+    ) {
+        let opts = host.opts();
+        let flen = host.nzb_file_len(nzb_ptr);
+        for i in 0..flen {
+            let fp = host.nzb_file_at(nzb_ptr, i);
+            let f = host.file_snap(fp);
+            if opts.server_mode && f.articles_len > 0 {
+                host.disk_save_file(fp);
+            }
+        }
+
+        self.discard_direct_rename(host, &opts, nzb_ptr);
+
+        let nzb = host.nzb_snap(nzb_ptr, false);
+        host.nzb_set_int(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_INT_DIRECT_RENAME_STATUS,
+            crate::queuesubsys_host::TS_SUCCESS,
+        );
+
+        if opts.par_check != crate::queuesubsys_host::PC_FORCE {
+            host.dq_edit_entry(
+                dq_ptr,
+                nzb.id,
+                crate::queuesubsys_host::EA_GROUP_RESUME,
+                None,
+            );
+            host.dq_edit_entry(
+                dq_ptr,
+                nzb.id,
+                crate::queuesubsys_host::EA_GROUP_PAUSE_ALL_PARS,
+                None,
+            );
+        }
+
+        if opts.reorder_files {
+            let mut msg = b"Reordering files for ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            host.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_INFO, &msg);
+            host.dq_edit_entry(
+                dq_ptr,
+                nzb.id,
+                crate::queuesubsys_host::EA_GROUP_SORT_FILES,
+                None,
+            );
+        }
+
+        host.nzb_set_int(nzb_ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+        host.dq_save_changed(dq_ptr);
+
+        host.dq_notify(
+            dq_ptr,
+            crate::queuesubsys_host::ASPECT_NZB_NAMED,
+            nzb_ptr,
+            0,
+        );
+    }
+
+    fn discard_direct_rename(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        nzb_ptr: usize,
+    ) {
+        let mut discarded_size = 0i64;
+        let mut discarded_count = 0i32;
+        let flen = host.nzb_file_len(nzb_ptr);
+
+        for i in 0..flen {
+            let fp = host.nzb_file_at(nzb_ptr, i);
+            let f = host.file_snap(fp);
+            let (discard_par, discard_infos) = eval_discard_direct_rename_file(
+                f.par_file,
+                f.completed_articles,
+                f.active_downloads,
+                opts.server_mode,
+                f.articles_len > 0,
+                opts.continue_partial,
+                f.cached_articles,
+            );
+
+            if discard_par && host.file_try_acquire_flush_lock(fp) {
+                discarded_size += f.success_size;
+                discarded_count += 1;
+                self.discard_downloaded_articles(host, opts, nzb_ptr, fp);
+                host.file_release_flush_lock(fp);
+            }
+
+            let f_after = host.file_snap(fp);
+            if discard_infos && f_after.articles_len > 0 {
+                let nzb = host.nzb_snap(nzb_ptr, false);
+                let mut dbg = b"Discarding article infos for ".to_vec();
+                dbg.extend_from_slice(&nzb.name);
+                dbg.push(b'/');
+                dbg.extend_from_slice(&f_after.filename);
+                host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
+                host.file_set_int(fp, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 1);
+                self.save_partial_state(host, fp);
+                host.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES, 0);
+            }
+        }
+
+        if discarded_size > 0 {
+            let fmt_sz = crate::util::format_size(discarded_size);
+            let mut msg = b"Discarded ".to_vec();
+            msg.extend_from_slice(&fmt_sz);
+            msg.extend_from_slice(
+                format!(" from {} files used for direct renaming", discarded_count).as_bytes(),
+            );
+            host.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+        }
+    }
+
+    fn discard_downloaded_articles(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+        nzb_ptr: usize,
+        file_ptr: usize,
+    ) {
+        host.file_action(
+            file_ptr,
+            crate::queuesubsys_host::FILE_ACT_SUBTRACT_AND_CLEAR_SERVER_STATS,
+            nzb_ptr,
+        );
+        let nzb = host.nzb_snap(nzb_ptr, false);
+        let file = host.file_snap(file_ptr);
+        let (
+            next_nzb_rem_size,
+            next_nzb_paused_size,
+            next_nzb_cur_succ_art,
+            next_nzb_cur_succ_size,
+            next_nzb_par_cur_succ_size,
+            next_nzb_cur_fail_art,
+            next_nzb_cur_fail_size,
+            next_nzb_par_cur_fail_size,
+            next_file_rem_size,
+        ) = discard_downloaded_articles_counters(
+            nzb.remaining_size,
+            nzb.paused_size,
+            nzb.current_success_articles,
+            nzb.current_success_size,
+            nzb.par_current_success_size,
+            nzb.current_failed_articles,
+            nzb.current_failed_size,
+            nzb.par_current_failed_size,
+            i32::from(file.paused),
+            file.success_articles,
+            file.success_size,
+            file.failed_articles,
+            file.failed_size,
+            file.size,
+            file.missed_size,
+        );
+
+        host.nzb_set_i64(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_I64_REMAINING_SIZE,
+            next_nzb_rem_size,
+        );
+        host.nzb_set_i64(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_I64_PAUSED_SIZE,
+            next_nzb_paused_size,
+        );
+        host.nzb_set_int(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_INT_CUR_SUCCESS_ARTICLES,
+            next_nzb_cur_succ_art,
+        );
+        host.nzb_set_i64(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_I64_CUR_SUCCESS_SIZE,
+            next_nzb_cur_succ_size,
+        );
+        host.nzb_set_i64(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_I64_PAR_CUR_SUCCESS_SIZE,
+            next_nzb_par_cur_succ_size,
+        );
+        host.file_set_i64(file_ptr, crate::queuesubsys_host::FILE_I64_SUCCESS_SIZE, 0);
+        host.file_set_int(
+            file_ptr,
+            crate::queuesubsys_host::FILE_INT_SUCCESS_ARTICLES,
+            0,
+        );
+        host.nzb_set_int(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_INT_CUR_FAILED_ARTICLES,
+            next_nzb_cur_fail_art,
+        );
+        host.nzb_set_i64(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_I64_CUR_FAILED_SIZE,
+            next_nzb_cur_fail_size,
+        );
+        host.nzb_set_i64(
+            nzb_ptr,
+            crate::queuesubsys_host::NZB_I64_PAR_CUR_FAILED_SIZE,
+            next_nzb_par_cur_fail_size,
+        );
+        host.file_set_i64(file_ptr, crate::queuesubsys_host::FILE_I64_FAILED_SIZE, 0);
+        host.file_set_int(
+            file_ptr,
+            crate::queuesubsys_host::FILE_INT_FAILED_ARTICLES,
+            0,
+        );
+        host.file_set_int(
+            file_ptr,
+            crate::queuesubsys_host::FILE_INT_COMPLETED_ARTICLES,
+            0,
+        );
+        host.file_set_i64(
+            file_ptr,
+            crate::queuesubsys_host::FILE_I64_REMAINING_SIZE,
+            next_file_rem_size,
+        );
+
+        self.discard_temp_files(host, opts, &file);
+        host.disk_discard_file(file.id, false, true, false);
+
+        host.file_set_str(
+            file_ptr,
+            crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
+            None,
+        );
+        host.file_set_int(
+            file_ptr,
+            crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
+            0,
+        );
+        host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_CACHED_ARTICLES, 0);
+        host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 0);
+        host.file_set_int(
+            file_ptr,
+            crate::queuesubsys_host::FILE_INT_PARTIAL_STATE,
+            crate::queuesubsys_host::PARTIAL_NONE,
+        );
+
+        if opts.server_mode {
+            host.file_action(
+                file_ptr,
+                crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES,
+                0,
+            );
+        } else {
+            host.file_action(
+                file_ptr,
+                crate::queuesubsys_host::FILE_ACT_RESET_ARTICLES_NONSERV,
+                0,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn exec(
+        &self,
+        op: std::ffi::c_int,
+        a1: std::ffi::c_int,
+        _a2: std::ffi::c_int,
+        p1: usize,
+        p2: usize,
+        p3: usize,
+        s1: *const c_char,
+        ints: *const std::ffi::c_int,
+        host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
+        ctx: *mut std::ffi::c_void,
+    ) -> usize {
+        let Some(cb) = host_cb else {
+            return 0;
+        };
+        let host = crate::queuesubsys_host::QueueSubsysHost::new(ctx, cb);
+        let b1 = if s1.is_null() {
+            &[][..]
+        } else {
+            CStr::from_ptr(s1).to_bytes()
+        };
+        match op {
+            0 => {
+                self.init(&host);
+                0
+            }
+            1 => {
+                self.destroy(&host);
+                0
+            }
+            2 => {
+                self.run(&host);
+                0
+            }
+            3 => self.add_nzb_file_to_queue(&host, p1, p2, a1 != 0),
+            4 => {
+                self.check_dupe_file_infos(&host, p1);
+                0
+            }
+            5 => {
+                self.stop(&host);
+                0
+            }
+            6 => {
+                self.article_completed(&host, p1);
+                0
+            }
+            7 => {
+                let (samples, missing_servers, active_servers, recovered_at_start) =
+                    if ints.is_null() {
+                        (0, 0, 0, 0)
+                    } else {
+                        let sl = std::slice::from_raw_parts(ints, 4);
+                        (sl[0], sl[1], sl[2], sl[3])
+                    };
+                self.fail_over_dead_pick(
+                    &host,
+                    p1,
+                    a1,
+                    samples,
+                    missing_servers,
+                    active_servers,
+                    recovered_at_start,
+                );
+                0
+            }
+            8 => usize::from(self.delete_queue_entry(&host, p1, p2)),
+            9 => usize::from(self.set_queue_entry_category(&host, p2, b1)),
+            10 => usize::from(self.set_queue_entry_name(&host, p2, b1)),
+            11 => usize::from(self.merge_queue_entries(&host, p1, p2, p3)),
+            12 => usize::from(self.split_queue_entries(
+                &host,
+                p1,
+                p2,
+                b1,
+                p3 as *mut usize,
+            )),
+            13 => {
+                self.log_debug_info(&host);
+                0
+            }
+            14 => {
+                self.direct_rename_completed(&host, p1, p2);
+                0
+            }
+            _ => 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1210,5 +4764,78 @@ mod tests {
             delay,
             nfo_posted + delay as i64 + 1
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_hanging_downloads_uses_minimal_running_snapshot() {
+        use std::ffi::{c_char, c_int, c_void};
+        struct State {
+            cancelled: Vec<usize>,
+            saw_non_null_strs_on_running_snap: bool,
+        }
+        unsafe extern "C" fn cb(
+            ctx: *mut c_void,
+            op: c_int,
+            a1: c_int,
+            _a2: c_int,
+            p1: usize,
+            p2: usize,
+            _s1: *const c_char,
+            _s2: *const c_char,
+            ints: *mut c_int,
+            i64s: *mut i64,
+            strs: *mut *const c_char,
+        ) -> usize {
+            let st = &mut *(ctx as *mut State);
+            match op {
+                1 => {
+                    *ints.add(13) = 30; // article_timeout
+                    *i64s = 1_000; // cur_time
+                    0
+                }
+                20 => {
+                    let f: unsafe extern "C" fn(*mut c_void, usize) = std::mem::transmute(p1);
+                    f(p2 as *mut c_void, 0xDEAD);
+                    0
+                }
+                50 => {
+                    if a1 < 0 {
+                        return 2;
+                    }
+                    if !strs.is_null() {
+                        st.saw_non_null_strs_on_running_snap = true;
+                    }
+                    if a1 == 0 {
+                        *ints = crate::queuesubsys_host::AD_RUNNING;
+                        *i64s = 0x100;
+                        *i64s.add(1) = 990; // fresh: not hanging
+                        0xAD01
+                    } else {
+                        *ints = crate::queuesubsys_host::AD_RUNNING;
+                        *i64s = 0x200;
+                        *i64s.add(1) = 900; // stale > 30s: hanging
+                        0xAD02
+                    }
+                }
+                51 => {
+                    if a1 == crate::queuesubsys_host::AD_ACT_CANCEL_HANGING {
+                        st.cancelled.push(p1);
+                    }
+                    0
+                }
+                _ => 0,
+            }
+        }
+        let mut st = State {
+            cancelled: Vec::new(),
+            saw_non_null_strs_on_running_snap: false,
+        };
+        let host =
+            crate::queuesubsys_host::QueueSubsysHost::new(&mut st as *mut State as *mut c_void, cb);
+        let coord = NzbgetRsQueueCoordinator::new();
+        coord.reset_hanging_downloads(&host);
+        assert!(!st.saw_non_null_strs_on_running_snap);
+        assert_eq!(st.cancelled, vec![0xAD02]);
     }
 }

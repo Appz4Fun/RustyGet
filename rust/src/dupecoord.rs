@@ -806,6 +806,982 @@ pub fn resolve_history_mark(
     (mark_name, dup_status, post_action)
 }
 
+#[cfg(unix)]
+#[inline]
+pub(crate) fn dupe_failover_warranted_inline(
+    item_score: i32,
+    health: i32,
+    backup_score: i32,
+) -> bool {
+    backup_score > item_score || health < 1000
+}
+
+#[cfg(unix)]
+pub(crate) fn parse_alive_permille_bytes(bytes: &[u8]) -> i32 {
+    let Some(percent) = parse_f64_prefix(bytes) else {
+        return -1;
+    };
+    if percent.is_nan() {
+        return -1;
+    }
+    let clamped = percent.clamp(0.0, 100.0);
+    (clamped * 10.0).round() as i32
+}
+
+#[cfg(unix)]
+pub(crate) fn alive_permille_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+) -> i32 {
+    match host.nzb_get_param(nzb_ptr, b"DupeAlive") {
+        Some(v) => parse_alive_permille_bytes(&v),
+        None => -1,
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn fails_over_snap(
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> bool {
+    opts.dupe_check
+        && (nzb.dupe_mode == crate::queuesubsys_host::DM_SCORE
+            || (nzb.dupe_mode == crate::queuesubsys_host::DM_FORCE
+                && opts.health_check == crate::queuesubsys_host::HC_DUPE))
+}
+
+#[cfg(unix)]
+fn downloaded_on_disk_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    dq_ptr: usize,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> Option<crate::queuesubsys_host::NzbSnap> {
+    if (opts.health_check != crate::queuesubsys_host::HC_DUPE
+        && opts.health_check != crate::queuesubsys_host::HC_PARK)
+        || nzb.dupe_key.is_empty()
+    {
+        return None;
+    }
+    let hlen = host.history_len(dq_ptr);
+    for i in 0..hlen {
+        let hi = host.history_at(dq_ptr, i);
+        if hi.kind != crate::queuesubsys_host::HK_NZB || hi.inner_ptr == 0 {
+            continue;
+        }
+        if hi.inner_ptr == nzb.ptr {
+            continue;
+        }
+        let item = host.nzb_snap(hi.inner_ptr, false);
+        if item.delete_status == crate::queuesubsys_host::DS_NONE
+            && item.is_dupe_success
+            && item.mark_status != crate::queuesubsys_host::KS_BAD
+            && item.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
+            && files_on_disk(&item.final_dir, &item.dest_dir, &opts.ext_cleanup_disk)
+        {
+            return Some(item);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+pub(crate) fn no_backup_reason_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    dq_ptr: usize,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> Vec<u8> {
+    let hlen = host.history_len(dq_ptr);
+    let mut history_candidates = Vec::with_capacity(hlen);
+    let mut queued_filenames: Vec<Vec<u8>> = Vec::with_capacity(hlen);
+    for i in 0..hlen {
+        let hi = host.history_at(dq_ptr, i);
+        let mut c = NzbgetRsDupeHistoryCandidate {
+            kind: hi.kind,
+            dupe_mode: 0,
+            dupe_score: 0,
+            is_dupe_success: 0,
+            mark_status: 0,
+            delete_status: 0,
+            dup_status: 0,
+            full_content_hash: 0,
+            alive_permille: 0,
+            health: 0,
+            critical_health: 0,
+            same_name_or_key: 0,
+        };
+        let mut qfn = Vec::new();
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
+            let item = host.nzb_snap(hi.inner_ptr, false);
+            c.dupe_mode = item.dupe_mode;
+            c.mark_status = item.mark_status;
+            c.delete_status = item.delete_status;
+            c.alive_permille = alive_permille_host(host, item.ptr);
+            c.health = item.health;
+            c.critical_health = item.critical_health_opt;
+            c.same_name_or_key = i32::from(
+                item.ptr != nzb.ptr
+                    && same_name_or_key(&item.name, &item.dupe_key, &nzb.name, &nzb.dupe_key),
+            );
+            qfn = item.queued_filename;
+        }
+        history_candidates.push(c);
+        queued_filenames.push(qfn);
+    }
+    no_backup_reason(
+        fails_over_snap(opts, nzb),
+        nzb.dupe_mode,
+        &history_candidates,
+        |idx| {
+            queued_filenames
+                .get(idx)
+                .is_some_and(|p| !p.is_empty() && crate::fsops::file_exists(p, &crate::fsops::posix_stat))
+        },
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn find_dupe_backup_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    dq_ptr: usize,
+    nzb_ptr: usize,
+    nzb_name: &[u8],
+    dupe_key: &[u8],
+) -> Option<(crate::queuesubsys_host::HistEntrySnap, crate::queuesubsys_host::NzbSnap)> {
+    let self_snap = if nzb_ptr != 0 {
+        Some(host.nzb_snap(nzb_ptr, false))
+    } else {
+        None
+    };
+    let hlen = host.history_len(dq_ptr);
+    let mut history_entries = Vec::with_capacity(hlen);
+    let mut history_candidates = Vec::with_capacity(hlen);
+    let mut queued_filenames: Vec<Vec<u8>> = Vec::with_capacity(hlen);
+    for i in 0..hlen {
+        let hi = host.history_at(dq_ptr, i);
+        let mut c = NzbgetRsDupeHistoryCandidate {
+            kind: hi.kind,
+            dupe_mode: 0,
+            dupe_score: 0,
+            is_dupe_success: 0,
+            mark_status: 0,
+            delete_status: 0,
+            dup_status: 0,
+            full_content_hash: 0,
+            alive_permille: 0,
+            health: 0,
+            critical_health: 0,
+            same_name_or_key: 0,
+        };
+        let mut qfn = Vec::new();
+        if (hi.kind == crate::queuesubsys_host::HK_NZB
+            || hi.kind == crate::queuesubsys_host::HK_URL)
+            && hi.inner_ptr != 0
+        {
+            let item = host.nzb_snap(hi.inner_ptr, false);
+            c.dupe_mode = item.dupe_mode;
+            c.dupe_score = item.dupe_score;
+            c.is_dupe_success = i32::from(item.is_dupe_success);
+            c.mark_status = item.mark_status;
+            c.delete_status = item.delete_status;
+            c.full_content_hash = item.full_content_hash;
+            c.alive_permille = alive_permille_host(host, item.ptr);
+            c.health = item.health;
+            c.critical_health = item.critical_health_opt;
+            c.same_name_or_key =
+                i32::from(same_name_or_key(&item.name, &item.dupe_key, nzb_name, dupe_key));
+            qfn = item.queued_filename;
+        } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
+            let dup = host.dup_snap(hi.inner_ptr);
+            c.dupe_mode = dup.dupe_mode;
+            c.dupe_score = dup.dupe_score;
+            c.dup_status = dup.status;
+            c.same_name_or_key =
+                i32::from(same_name_or_key(&dup.name, &dup.dupe_key, nzb_name, dupe_key));
+        }
+        history_entries.push(hi);
+        history_candidates.push(c);
+        queued_filenames.push(qfn);
+    }
+
+    let qlen = host.queue_len(dq_ptr);
+    let mut queue_candidates = Vec::with_capacity(qlen);
+    for i in 0..qlen {
+        let qp = host.queue_at(dq_ptr, i);
+        let q = host.nzb_snap(qp, false);
+        queue_candidates.push(NzbgetRsDupeQueueCandidate {
+            is_self: i32::from(qp == nzb_ptr && nzb_ptr != 0),
+            is_nzb_kind: i32::from(q.kind == crate::queuesubsys_host::NK_NZB),
+            dupe_mode: q.dupe_mode,
+            dupe_score: q.dupe_score,
+            same_name_or_key: i32::from(same_name_or_key(
+                &q.name,
+                &q.dupe_key,
+                nzb_name,
+                dupe_key,
+            )),
+        });
+    }
+
+    let winner = select_dupe_backup(
+        self_snap.is_some(),
+        self_snap.as_ref().map_or(0, |s| s.full_content_hash),
+        opts.health_check == crate::queuesubsys_host::HC_DUPE,
+        &history_candidates,
+        &queue_candidates,
+        |idx| {
+            queued_filenames
+                .get(idx)
+                .is_some_and(|p| !p.is_empty() && crate::fsops::file_exists(p, &crate::fsops::posix_stat))
+        },
+    );
+    if winner >= 0 && (winner as usize) < history_entries.len() {
+        let hi = history_entries[winner as usize].clone();
+        let nzb_snap = if hi.inner_ptr != 0 {
+            host.nzb_snap(hi.inner_ptr, false)
+        } else {
+            crate::queuesubsys_host::NzbSnap::default()
+        };
+        Some((hi, nzb_snap))
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn return_best_dupe_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    dq_ptr: usize,
+    nzb_ptr: usize,
+    nzb_name: &[u8],
+    dupe_key: &[u8],
+) {
+    if let Some((hi, backup_nzb)) =
+        find_dupe_backup_host(host, opts, dq_ptr, nzb_ptr, nzb_name, dupe_key)
+    {
+        let mut msg = b"Found duplicate ".to_vec();
+        msg.extend_from_slice(&backup_nzb.name);
+        msg.extend_from_slice(b" for ");
+        msg.extend_from_slice(nzb_name);
+        host.log(crate::queuesubsys_host::MK_INFO, &msg);
+        host.nzb_set_int(
+            backup_nzb.ptr,
+            crate::queuesubsys_host::NZB_INT_DUPE_HINT,
+            crate::queuesubsys_host::DH_REDOWNLOAD_AUTO,
+        );
+        host.history_redownload(dq_ptr, hi.hi_ptr);
+    }
+}
+
+#[cfg(unix)]
+fn history_cleanup_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    mark_hi_ptr: usize,
+    nzb_name: &[u8],
+    dupe_key: &[u8],
+) {
+    let mut changed = false;
+    let mut rindex = 0usize;
+    loop {
+        let hlen = host.history_len(dq_ptr);
+        if rindex >= hlen {
+            break;
+        }
+        let fwd_idx = hlen - 1 - rindex;
+        let hi = host.history_at(dq_ptr, fwd_idx);
+        let is_nzb_or_url = hi.kind == crate::queuesubsys_host::HK_NZB
+            || hi.kind == crate::queuesubsys_host::HK_URL;
+        if is_nzb_or_url && hi.inner_ptr != 0 && hi.hi_ptr != mark_hi_ptr {
+            let item = host.nzb_snap(hi.inner_ptr, false);
+            if item.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                && item.delete_status == crate::queuesubsys_host::DS_DUPE
+                && same_name_or_key(&item.name, &item.dupe_key, nzb_name, dupe_key)
+            {
+                host.history_hide(dq_ptr, hi.hi_ptr, rindex as i32);
+                rindex += 1;
+                changed = true;
+                continue;
+            }
+        }
+        rindex += 1;
+    }
+    if changed {
+        host.dq_history_changed(dq_ptr);
+        host.dq_save(dq_ptr);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn nzb_found_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    nzb_ptr: usize,
+) {
+    if dq_ptr == 0 || nzb_ptr == 0 {
+        return;
+    }
+    let opts = host.opts();
+    let mut nzb = host.nzb_snap(nzb_ptr, false);
+
+    let mut dbg = b"Checking duplicates for ".to_vec();
+    dbg.extend_from_slice(&nzb.name);
+    host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
+
+    if nzb.kind == crate::queuesubsys_host::NK_NZB
+        && nzb.dupe_mode != crate::queuesubsys_host::DM_FORCE
+    {
+        if let Some(downloaded) = downloaded_on_disk_host(host, &opts, dq_ptr, &nzb) {
+            let mut msg = b"Not downloading ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(b": ");
+            msg.extend_from_slice(&downloaded.name);
+            msg.extend_from_slice(b" is downloaded and on disk");
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+            host.nzb_set_int(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                crate::queuesubsys_host::DS_DUPE,
+            );
+            return;
+        }
+    }
+
+    let qlen = host.queue_len(dq_ptr);
+    for i in 0..qlen {
+        let qp = host.queue_at(dq_ptr, i);
+        if qp == 0 || qp == nzb.ptr {
+            continue;
+        }
+        let q = host.nzb_snap(qp, false);
+        let same_content = (nzb.full_content_hash > 0
+            && nzb.full_content_hash == q.full_content_hash)
+            || (nzb.filtered_content_hash > 0
+                && nzb.filtered_content_hash == q.filtered_content_hash);
+        if same_content && nzb.kind == crate::queuesubsys_host::NK_NZB {
+            let message = format_dupe_skip_message(&nzb.name, &q.name, false, true, false);
+            if nzb.feed_id != 0 {
+                host.log(crate::queuesubsys_host::MK_WARNING, &message);
+                host.nzb_set_int(
+                    nzb.ptr,
+                    crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                    crate::queuesubsys_host::DS_MANUAL,
+                );
+                host.history_delete_disk_files(nzb.ptr);
+            } else {
+                host.nzb_set_int(
+                    nzb.ptr,
+                    crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                    crate::queuesubsys_host::DS_COPY,
+                );
+                host.nzb_add_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &message);
+            }
+            return;
+        }
+    }
+
+    let try_inherit = |nzb: &mut crate::queuesubsys_host::NzbSnap,
+                       other_name: &[u8],
+                       other_key: &[u8],
+                       other_score: i32,
+                       source_label: &[u8]|
+     -> bool {
+        if nzb.name == other_name && (!other_key.is_empty() || other_score != 0) {
+            nzb.dupe_key = other_key.to_vec();
+            nzb.dupe_score = other_score;
+            host.nzb_set_str(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_STR_DUPE_KEY,
+                &nzb.dupe_key,
+            );
+            host.nzb_set_int(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_INT_DUPE_SCORE,
+                nzb.dupe_score,
+            );
+            let mut msg = b"Assigning dupekey ".to_vec();
+            msg.extend_from_slice(&nzb.dupe_key);
+            msg.extend_from_slice(format!(" and dupescore {} to ", nzb.dupe_score).as_bytes());
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(b" from existing ");
+            msg.extend_from_slice(source_label);
+            msg.extend_from_slice(b" item with the same name");
+            host.log(crate::queuesubsys_host::MK_INFO, &msg);
+            return true;
+        }
+        false
+    };
+
+    if nzb.dupe_key.is_empty() && nzb.dupe_score == 0 {
+        for i in 0..qlen {
+            let qp = host.queue_at(dq_ptr, i);
+            let q = host.nzb_snap(qp, false);
+            if try_inherit(&mut nzb, &q.name, &q.dupe_key, q.dupe_score, b"queue") {
+                break;
+            }
+        }
+    }
+    if nzb.dupe_key.is_empty() && nzb.dupe_score == 0 {
+        let hlen = host.history_len(dq_ptr);
+        for i in 0..hlen {
+            let hi = host.history_at(dq_ptr, i);
+            if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
+                let hn = host.nzb_snap(hi.inner_ptr, false);
+                if try_inherit(&mut nzb, &hn.name, &hn.dupe_key, hn.dupe_score, b"history") {
+                    break;
+                }
+            } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
+                let hd = host.dup_snap(hi.inner_ptr);
+                if try_inherit(&mut nzb, &hd.name, &hd.dupe_key, hd.dupe_score, b"history") {
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut skip = false;
+    let mut good = false;
+    let mut same_content = false;
+    let mut dupe_name: Vec<u8> = Vec::new();
+
+    let hlen = host.history_len(dq_ptr);
+    for i in 0..hlen {
+        let hi = host.history_at(dq_ptr, i);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
+            let item = host.nzb_snap(hi.inner_ptr, false);
+            if (item.full_content_hash > 0 && item.full_content_hash == nzb.full_content_hash)
+                || (item.filtered_content_hash > 0
+                    && item.filtered_content_hash == nzb.filtered_content_hash)
+            {
+                skip = true;
+                same_content = true;
+                dupe_name = item.name;
+                break;
+            }
+            if item.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                && item.mark_status == crate::queuesubsys_host::KS_GOOD
+                && same_name_or_key(&item.name, &item.dupe_key, &nzb.name, &nzb.dupe_key)
+            {
+                skip = true;
+                good = true;
+                dupe_name = item.name;
+                break;
+            }
+        } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
+            let dup = host.dup_snap(hi.inner_ptr);
+            if (dup.full_content_hash > 0 && dup.full_content_hash == nzb.full_content_hash)
+                || (dup.filtered_content_hash > 0
+                    && dup.filtered_content_hash == nzb.filtered_content_hash)
+            {
+                skip = true;
+                same_content = true;
+                dupe_name = dup.name;
+                break;
+            }
+            if dup.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                && same_name_or_key(&dup.name, &dup.dupe_key, &nzb.name, &nzb.dupe_key)
+                && (dup.status == crate::queuesubsys_host::DUP_GOOD
+                    || (nzb.dupe_mode == crate::queuesubsys_host::DM_SCORE
+                        && dup.status == crate::queuesubsys_host::DUP_SUCCESS
+                        && nzb.dupe_score <= dup.dupe_score))
+            {
+                skip = true;
+                good = dup.status == crate::queuesubsys_host::DUP_GOOD;
+                dupe_name = dup.name;
+                break;
+            }
+        }
+    }
+
+    let mut return_backup = false;
+    if skip
+        && same_content
+        && opts.health_check == crate::queuesubsys_host::HC_DUPE
+        && nzb.kind == crate::queuesubsys_host::NK_NZB
+        && nzb.dupe_hint == crate::queuesubsys_host::DH_NONE
+    {
+        let mut succeeded = false;
+        let mut failed = false;
+        for i in 0..hlen {
+            let hi = host.history_at(dq_ptr, i);
+            if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
+                let item = host.nzb_snap(hi.inner_ptr, false);
+                if (item.full_content_hash > 0 && item.full_content_hash == nzb.full_content_hash)
+                    || (item.filtered_content_hash > 0
+                        && item.filtered_content_hash == nzb.filtered_content_hash)
+                {
+                    if item.delete_status != crate::queuesubsys_host::DS_DUPE
+                        && item.delete_status != crate::queuesubsys_host::DS_COPY
+                        && item.delete_status != crate::queuesubsys_host::DS_MANUAL
+                    {
+                        if item.is_dupe_success {
+                            succeeded = true;
+                        } else {
+                            failed = true;
+                        }
+                    }
+                }
+            } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
+                let dup = host.dup_snap(hi.inner_ptr);
+                if (dup.full_content_hash > 0 && dup.full_content_hash == nzb.full_content_hash)
+                    || (dup.filtered_content_hash > 0
+                        && dup.filtered_content_hash == nzb.filtered_content_hash)
+                {
+                    if dup.status == crate::queuesubsys_host::DUP_SUCCESS
+                        || dup.status == crate::queuesubsys_host::DUP_GOOD
+                    {
+                        succeeded = true;
+                    } else if dup.status == crate::queuesubsys_host::DUP_FAILED
+                        || dup.status == crate::queuesubsys_host::DUP_BAD
+                    {
+                        failed = true;
+                    }
+                }
+            }
+        }
+        if !succeeded && !failed {
+            let mut msg = b"Adding ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(b": the same content waits in history only as an untried backup");
+            host.log(crate::queuesubsys_host::MK_INFO, &msg);
+            skip = false;
+            same_content = false;
+        } else if failed && !succeeded {
+            let mut any_queued = false;
+            let cur_qlen = host.queue_len(dq_ptr);
+            for i in 0..cur_qlen {
+                let qp = host.queue_at(dq_ptr, i);
+                if qp == 0 || qp == nzb.ptr {
+                    continue;
+                }
+                let q = host.nzb_snap(qp, false);
+                if q.delete_status == crate::queuesubsys_host::DS_NONE
+                    && same_name_or_key(&q.name, &q.dupe_key, &nzb.name, &nzb.dupe_key)
+                {
+                    any_queued = true;
+                    break;
+                }
+            }
+            return_backup = !any_queued;
+        }
+    }
+
+    if !same_content && nzb.dupe_hint != crate::queuesubsys_host::DH_NONE {
+        return;
+    }
+
+    if !same_content && !good && nzb.dupe_mode == crate::queuesubsys_host::DM_SCORE {
+        for i in 0..hlen {
+            let hi = host.history_at(dq_ptr, i);
+            if (hi.kind == crate::queuesubsys_host::HK_NZB
+                || hi.kind == crate::queuesubsys_host::HK_URL)
+                && hi.inner_ptr != 0
+            {
+                let item = host.nzb_snap(hi.inner_ptr, false);
+                if item.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                    && same_name_or_key(&item.name, &item.dupe_key, &nzb.name, &nzb.dupe_key)
+                    && nzb.dupe_score <= item.dupe_score
+                    && item.is_dupe_success
+                {
+                    host.nzb_set_int(
+                        nzb.ptr,
+                        crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                        crate::queuesubsys_host::DS_DUPE,
+                    );
+                    let mut msg = b"Collection ".to_vec();
+                    msg.extend_from_slice(&nzb.name);
+                    msg.extend_from_slice(b" is a duplicate to ");
+                    msg.extend_from_slice(&item.name);
+                    host.log(crate::queuesubsys_host::MK_INFO, &msg);
+                    return;
+                }
+            }
+        }
+    }
+
+    if skip {
+        let message = format_dupe_skip_message(&nzb.name, &dupe_name, true, same_content, good);
+        if nzb.feed_id != 0 && nzb.dupe_hint == crate::queuesubsys_host::DH_NONE {
+            host.nzb_set_int(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                crate::queuesubsys_host::DS_MANUAL,
+            );
+            host.log(crate::queuesubsys_host::MK_WARNING, &message);
+            host.history_delete_disk_files(nzb.ptr);
+        } else {
+            let ds = if same_content {
+                crate::queuesubsys_host::DS_COPY
+            } else {
+                crate::queuesubsys_host::DS_GOOD
+            };
+            host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_DELETE_STATUS, ds);
+            host.nzb_add_message(nzb.ptr, crate::queuesubsys_host::MK_WARNING, &message);
+        }
+
+        if return_backup {
+            let mut msg = nzb.name.clone();
+            msg.extend_from_slice(
+                b" is the same posting as a failed download: fetching the best backup instead",
+            );
+            host.log(crate::queuesubsys_host::MK_INFO, &msg);
+            return_best_dupe_host(host, &opts, dq_ptr, nzb.ptr, &nzb.name, &nzb.dupe_key);
+        }
+        return;
+    }
+
+    if nzb.dupe_mode == crate::queuesubsys_host::DM_SCORE {
+        let mut index = 0usize;
+        loop {
+            let cur_qlen = host.queue_len(dq_ptr);
+            if index >= cur_qlen {
+                break;
+            }
+            let qp = host.queue_at(dq_ptr, index);
+            if qp == 0 || qp == nzb.ptr {
+                index += 1;
+                continue;
+            }
+            let q = host.nzb_snap(qp, false);
+            if q.delete_status == crate::queuesubsys_host::DS_NONE
+                && (q.kind == crate::queuesubsys_host::NK_NZB
+                    || (q.kind == crate::queuesubsys_host::NK_URL
+                        && nzb.kind == crate::queuesubsys_host::NK_URL))
+                && q.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                && same_name_or_key(&q.name, &q.dupe_key, &nzb.name, &nzb.dupe_key)
+            {
+                let keep_returned = opts.health_check == crate::queuesubsys_host::HC_DUPE
+                    && q.dupe_hint == crate::queuesubsys_host::DH_REDOWNLOAD_AUTO
+                    && q.current_success_articles > 0
+                    && q.health >= q.critical_health_opt;
+                if nzb.dupe_score <= q.dupe_score || keep_returned {
+                    host.nzb_set_int(
+                        nzb.ptr,
+                        crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                        crate::queuesubsys_host::DS_DUPE,
+                    );
+                    let mut msg = b"Collection ".to_vec();
+                    msg.extend_from_slice(&nzb.name);
+                    msg.extend_from_slice(b" is a duplicate to ");
+                    msg.extend_from_slice(&q.name);
+                    host.log(crate::queuesubsys_host::MK_INFO, &msg);
+                    return;
+                } else if !q.has_post_info {
+                    let mut msg = b"Moving collection ".to_vec();
+                    msg.extend_from_slice(&q.name);
+                    msg.extend_from_slice(b" with lower duplicate score to history");
+                    host.log(crate::queuesubsys_host::MK_INFO, &msg);
+                    host.nzb_set_int(
+                        q.ptr,
+                        crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                        crate::queuesubsys_host::DS_DUPE,
+                    );
+                    let old_size = cur_qlen;
+                    host.dq_edit_entry(
+                        dq_ptr,
+                        q.id,
+                        crate::queuesubsys_host::EA_GROUP_DELETE,
+                        None,
+                    );
+                    let new_size = host.queue_len(dq_ptr);
+                    if old_size == new_size {
+                        index += 1;
+                    }
+                    continue;
+                }
+            }
+            index += 1;
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn nzb_completed_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    nzb_ptr: usize,
+) {
+    if dq_ptr == 0 || nzb_ptr == 0 {
+        return;
+    }
+    let opts = host.opts();
+    let nzb = host.nzb_snap(nzb_ptr, false);
+
+    let mut dbg = b"Processing duplicates for ".to_vec();
+    dbg.extend_from_slice(&nzb.name);
+    host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
+
+    if fails_over_snap(&opts, &nzb) && !nzb.is_dupe_success {
+        return_best_dupe_host(host, &opts, dq_ptr, nzb.ptr, &nzb.name, &nzb.dupe_key);
+    }
+
+    let dupe_health = opts.health_check == crate::queuesubsys_host::HC_DUPE
+        || opts.health_check == crate::queuesubsys_host::HC_PARK;
+    if dupe_health
+        && !nzb.dupe_key.is_empty()
+        && nzb.delete_status == crate::queuesubsys_host::DS_NONE
+        && nzb.is_dupe_success
+        && files_on_disk(&nzb.final_dir, &nzb.dest_dir, &opts.ext_cleanup_disk)
+    {
+        let delete_action = if opts.health_check == crate::queuesubsys_host::HC_PARK {
+            crate::queuesubsys_host::EA_GROUP_PARK_DELETE
+        } else {
+            crate::queuesubsys_host::EA_GROUP_DUPE_DELETE
+        };
+        let mut others: Vec<(i32, bool)> = Vec::new();
+        let qlen = host.queue_len(dq_ptr);
+        for i in 0..qlen {
+            let qp = host.queue_at(dq_ptr, i);
+            if qp == 0 || qp == nzb.ptr {
+                continue;
+            }
+            let queued = host.nzb_snap(qp, false);
+            if queued.kind == crate::queuesubsys_host::NK_NZB
+                && !queued.deleting
+                && queued.delete_status == crate::queuesubsys_host::DS_NONE
+                && queued.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                && queued.dupe_key.eq_ignore_ascii_case(&nzb.dupe_key)
+            {
+                let mut msg = b"Stopping ".to_vec();
+                msg.extend_from_slice(&queued.name);
+                msg.extend_from_slice(b": ");
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(b" is downloaded and on disk");
+                host.nzb_print_message(queued.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+                host.nzb_set_int(
+                    queued.ptr,
+                    crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                    crate::queuesubsys_host::DS_DUPE,
+                );
+                others.push((queued.id, queued.has_post_info));
+            }
+        }
+        for (other_id, in_post) in others {
+            host.dq_edit_entry(
+                dq_ptr,
+                other_id,
+                if in_post {
+                    crate::queuesubsys_host::EA_POST_DELETE
+                } else {
+                    delete_action
+                },
+                None,
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn history_mark_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    hi_ptr: usize,
+    mark_status: i32,
+) {
+    if dq_ptr == 0 || hi_ptr == 0 {
+        return;
+    }
+    let opts = host.opts();
+    let hi = host.hist_item_snap(hi_ptr);
+
+    let mark_status_name: &[u8] = if mark_status == crate::queuesubsys_host::KS_BAD {
+        b"bad"
+    } else if mark_status == crate::queuesubsys_host::KS_GOOD {
+        b"good"
+    } else if mark_status == crate::queuesubsys_host::KS_SUCCESS {
+        b"success"
+    } else {
+        b"NONE"
+    };
+    let mut msg = b"Marking ".to_vec();
+    msg.extend_from_slice(&hi.name);
+    msg.extend_from_slice(b" as ");
+    msg.extend_from_slice(mark_status_name);
+    host.log(crate::queuesubsys_host::MK_INFO, &msg);
+
+    let (dupe_mode, dupe_key, item_name) =
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
+            let nzb = host.nzb_snap(hi.inner_ptr, false);
+            host.nzb_set_int(
+                hi.inner_ptr,
+                crate::queuesubsys_host::NZB_INT_MARK_STATUS,
+                mark_status,
+            );
+            host.queue_script_enqueue(hi.inner_ptr, crate::queuesubsys_host::QE_NZB_MARKED);
+            (nzb.dupe_mode, nzb.dupe_key, nzb.name)
+        } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
+            let dup = host.dup_snap(hi.inner_ptr);
+            let ds = if mark_status == crate::queuesubsys_host::KS_GOOD {
+                crate::queuesubsys_host::DUP_GOOD
+            } else if mark_status == crate::queuesubsys_host::KS_SUCCESS {
+                crate::queuesubsys_host::DUP_SUCCESS
+            } else {
+                crate::queuesubsys_host::DUP_BAD
+            };
+            host.dup_set_status(hi.inner_ptr, ds);
+            (dup.dupe_mode, dup.dupe_key, dup.name)
+        } else {
+            let mut err = b"Could not mark ".to_vec();
+            err.extend_from_slice(&hi.name);
+            err.extend_from_slice(b" as bad: history item has wrong type");
+            host.log(crate::queuesubsys_host::MK_ERROR, &err);
+            return;
+        };
+
+    if !opts.dupe_check || dupe_mode == crate::queuesubsys_host::DM_FORCE {
+        return;
+    }
+
+    if mark_status == crate::queuesubsys_host::KS_GOOD {
+        history_cleanup_host(host, dq_ptr, hi.hi_ptr, &item_name, &dupe_key);
+    } else if mark_status == crate::queuesubsys_host::KS_BAD {
+        return_best_dupe_host(host, &opts, dq_ptr, 0, &hi.name, &dupe_key);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn get_dupe_status_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    name: &[u8],
+    dupe_key: &[u8],
+) -> i32 {
+    if dq_ptr == 0 {
+        return DUPE_STATUS_NONE;
+    }
+    let mut statuses = DUPE_STATUS_NONE;
+
+    let qlen = host.queue_len(dq_ptr);
+    for i in 0..qlen {
+        let qp = host.queue_at(dq_ptr, i);
+        let nzb = host.nzb_snap(qp, false);
+        if same_name_or_key(name, dupe_key, &nzb.name, &nzb.dupe_key) {
+            statuses |= if nzb.success_articles + nzb.failed_articles > 0 {
+                DUPE_STATUS_DOWNLOADING
+            } else {
+                DUPE_STATUS_QUEUED
+            };
+        }
+    }
+
+    let hlen = host.history_len(dq_ptr);
+    for i in 0..hlen {
+        let hi = host.history_at(dq_ptr, i);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
+            let item = host.nzb_snap(hi.inner_ptr, true);
+            if same_name_or_key(name, dupe_key, &item.name, &item.dupe_key) {
+                statuses |= status_from_text(&item.text_status);
+            }
+        } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
+            let dup = host.dup_snap(hi.inner_ptr);
+            if same_name_or_key(name, dupe_key, &dup.name, &dup.dupe_key) {
+                if dup.status == crate::queuesubsys_host::DUP_SUCCESS
+                    || dup.status == crate::queuesubsys_host::DUP_GOOD
+                {
+                    statuses |= DUPE_STATUS_SUCCESS;
+                } else if dup.status == crate::queuesubsys_host::DUP_FAILED
+                    || dup.status == crate::queuesubsys_host::DUP_BAD
+                {
+                    statuses |= DUPE_STATUS_FAILURE;
+                }
+            }
+        }
+    }
+
+    statuses
+}
+
+#[cfg(unix)]
+pub(crate) fn list_history_dupes_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    nzb_ptr: usize,
+    out_raw_nzb_list_ptr: usize,
+) {
+    if dq_ptr == 0 || nzb_ptr == 0 || out_raw_nzb_list_ptr == 0 {
+        return;
+    }
+    let nzb = host.nzb_snap(nzb_ptr, false);
+    if nzb.dupe_mode == crate::queuesubsys_host::DM_FORCE {
+        return;
+    }
+    let hlen = host.history_len(dq_ptr);
+    for i in 0..hlen {
+        let hi = host.history_at(dq_ptr, i);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
+            let item = host.nzb_snap(hi.inner_ptr, false);
+            if item.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                && same_name_or_key(&item.name, &item.dupe_key, &nzb.name, &nzb.dupe_key)
+            {
+                host.push_raw_nzb_list(out_raw_nzb_list_ptr, hi.inner_ptr);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+pub unsafe fn dupe_coord_exec(
+    op: std::ffi::c_int,
+    a1: std::ffi::c_int,
+    p1: usize,
+    p2: usize,
+    p3: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
+) -> usize {
+    let Some(cb) = host_cb else {
+        return 0;
+    };
+    let host = crate::queuesubsys_host::QueueSubsysHost::new(std::ptr::null_mut(), cb);
+    let b1 = if s1.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s1).to_bytes()
+    };
+    let b2 = if s2.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s2).to_bytes()
+    };
+    match op {
+        0 => {
+            if p1 == 0 {
+                return 0;
+            }
+            let opts = host.opts();
+            let nzb = host.nzb_snap(p1, false);
+            usize::from(fails_over_snap(&opts, &nzb))
+        }
+        1 => {
+            nzb_found_host(&host, p1, p2);
+            0
+        }
+        2 => {
+            nzb_completed_host(&host, p1, p2);
+            0
+        }
+        3 => {
+            let opts = host.opts();
+            find_dupe_backup_host(&host, &opts, p1, p2, b1, b2)
+                .map_or(0, |(hi, _)| hi.hi_ptr)
+        }
+        4 => {
+            history_mark_host(&host, p1, p2, a1);
+            0
+        }
+        5 => get_dupe_status_host(&host, p1, b1, b2) as usize,
+        6 => {
+            list_history_dupes_host(&host, p1, p2, p3);
+            0
+        }
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

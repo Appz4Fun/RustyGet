@@ -873,6 +873,7 @@ pub fn fetch_entry(
 #[derive(Clone, Debug)]
 pub struct DonorParsedFile {
     pub filename: Vec<u8>,
+    pub subject: Vec<u8>,
     pub size: i64,
     pub par_file: bool,
     pub total_articles: i32,
@@ -990,6 +991,7 @@ pub fn parse_donor_nzb_file(
             .collect();
         files.push(DonorParsedFile {
             filename: f.filename.into_bytes(),
+            subject: f.subject.into_bytes(),
             size: f.size,
             par_file: f.par_file,
             total_articles: f.total_articles,

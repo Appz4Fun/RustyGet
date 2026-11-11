@@ -77,6 +77,7 @@ pub mod streamrepair;
 #[cfg(unix)]
 pub mod streamrepair_coord;
 pub mod postrepair;
+pub(crate) mod queuesubsys_host;
 pub mod queuecoord;
 pub mod artwritercore;
 pub mod xmlrpc_format;

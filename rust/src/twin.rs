@@ -1236,6 +1236,10 @@ fn ensure_store_open(host_cb: Option<NzbgetRsTwinHostFn>) -> bool {
         );
     }
     let qdir = unsafe { twin_cstr_bytes(strs[0]) };
+    ensure_store_open_dir(qdir)
+}
+
+pub(crate) fn ensure_store_open_dir(qdir: &[u8]) -> bool {
     if qdir.is_empty() {
         return false;
     }
@@ -1251,6 +1255,65 @@ fn ensure_store_open(host_cb: Option<NzbgetRsTwinHostFn>) -> bool {
         *opened = full_path;
     }
     true
+}
+
+pub(crate) fn store_kind_dir(
+    qdir: &[u8],
+    primary_id: i32,
+    primary_print: &[u8],
+    dupe_id: i32,
+    dupe_print: &[u8],
+) -> Vec<u8> {
+    if !ensure_store_open_dir(qdir) {
+        return Vec::new();
+    }
+    let pp = decode_utf8_chunks(primary_print);
+    let dp = decode_utf8_chunks(dupe_print);
+    let guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(store) = guard.as_ref() else {
+        return Vec::new();
+    };
+    kind(store.get(primary_id, &pp), store.get(dupe_id, &dp)).into_bytes()
+}
+
+pub(crate) fn store_match_dir(
+    qdir: &[u8],
+    own_id: i32,
+    own_print: &[u8],
+    target: &[u8],
+    target_alt: &[u8],
+    donor_id: i32,
+    donor_print: &[u8],
+) -> Vec<u8> {
+    if !ensure_store_open_dir(qdir) {
+        return Vec::new();
+    }
+    let op = decode_utf8_chunks(own_print);
+    let dp = decode_utf8_chunks(donor_print);
+    let tgt = decode_utf8_chunks(target);
+    let alt = decode_utf8_chunks(target_alt);
+    let found = {
+        let guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().and_then(|store| {
+            match_by_content(store.get(own_id, &op), &tgt, &alt, store.get(donor_id, &dp))
+        })
+    };
+    match found {
+        None => Vec::new(),
+        Some(name) if name.is_empty() => b"-".to_vec(),
+        Some(name) => name.into_bytes(),
+    }
+}
+
+pub(crate) fn reset_all() {
+    let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+    guard.stopping = false;
+}
+
+pub(crate) fn wait_all() {
+    while TWIN_JOB_COUNT.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 fn store_has_sigs(host_cb: Option<NzbgetRsTwinHostFn>, id: i32, print: &[u8]) -> i32 {

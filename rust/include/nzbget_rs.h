@@ -28,10 +28,6 @@ NzbgetRsBuf nzbget_rs_format_size(long long size);
 // NULL strings are empty; non-NULL strings must be readable and NUL-terminated.
 int nzbget_rs_match_file_ext(const char* filename, const char* extensionList, const char* listSeparator);
 
-// Deobfuscation (rust/src/deobfuscation.rs): text as pointer and length.
-// NULL means empty regardless of len; otherwise len bytes must be readable.
-int nzbget_rs_is_excessively_obfuscated(const char* str, size_t len);
-
 // FileTypes (rust/src/filetypes.rs): name checks by number, in FileTypes.h's
 // order (IsSevenZipExt 0 ... IsKnownCollectionExt 25). Inputs are borrowed byte spans;
 // NULL means empty regardless of len. Panics abort at the ABI boundary.
@@ -345,59 +341,9 @@ typedef struct {
     int64_t size;
 } NzbgetRsByteRange;
 
-
-uint64_t nzbget_rs_dupe_fallback_steps_hash(const int* sizes, size_t count);
-
-typedef struct {
-    const char* filename;
-    const char* subject;
-    int32_t total_articles;
-    int64_t size;
-    int32_t is_par_file;
-    const int32_t* parts;
-    const int32_t* sizes;
-    size_t article_count;
-} NzbgetRsDonorFileSpec;
-
-ptrdiff_t nzbget_rs_dupe_fallback_match_donor_file(
-    const NzbgetRsDonorFileSpec* target,
-    const char* target_nzb_filename,
-    const char* by_content,
-    int twin_allowed,
-    int twin_only,
-    const NzbgetRsDonorFileSpec* donor_files,
-    size_t donor_count);
-
-
-
-
-
 // ============================================================================
 // Post-Repair & DupeCoordinator Hot-Path FFI (`rust/src/postrepair.rs`)
 // ============================================================================
-
-typedef struct NzbgetRsDupeHistoryCandidate {
-    int32_t kind;
-    int32_t dupe_mode;
-    int32_t dupe_score;
-    int32_t is_dupe_success;
-    int32_t mark_status;
-    int32_t dup_status;
-    int32_t delete_status;
-    uint32_t full_content_hash;
-    int32_t alive_permille;
-    int32_t health;
-    int32_t critical_health;
-    int32_t same_name_or_key;
-} NzbgetRsDupeHistoryCandidate;
-
-typedef struct NzbgetRsDupeQueueCandidate {
-    int32_t is_self;
-    int32_t is_nzb_kind;
-    int32_t dupe_mode;
-    int32_t dupe_score;
-    int32_t same_name_or_key;
-} NzbgetRsDupeQueueCandidate;
 
 typedef struct NzbgetRsParSegment {
     int32_t success;
@@ -421,12 +367,6 @@ typedef struct NzbgetRsUnpackMessageInfo {
     int32_t crc_or_volume_error;
     int32_t all_ok;
 } NzbgetRsUnpackMessageInfo;
-
-int nzbget_rs_dupecoord_select_dupe_backup(
-    int has_self_nzb, uint32_t self_full_content_hash, int dupe_health,
-    const NzbgetRsDupeHistoryCandidate* history,
-    const char* const* queued_filenames, size_t history_count,
-    const NzbgetRsDupeQueueCandidate* queue, size_t queue_count);
 
 typedef struct NzbgetRsParRepairer NzbgetRsParRepairer;
 enum {
@@ -482,34 +422,6 @@ uint32_t nzbget_rs_par_repairer_recovery_block_count(const NzbgetRsParRepairer* 
 int64_t nzbget_rs_par_repairer_block_size(const NzbgetRsParRepairer* handle);
 NzbgetRsBuf nzbget_rs_par_repairer_creator(const NzbgetRsParRepairer* handle);
 size_t nzbget_rs_par_repairer_source_file_count(const NzbgetRsParRepairer* handle);
-
-int nzbget_rs_streaming_par_has_session(int nzb_id);
-int nzbget_rs_streaming_par_start(int nzb_id, const char* par2_path, const char* base_dir);
-int nzbget_rs_streaming_par_register_queued_volume(
-    int nzb_id, uint64_t volume_id, int blocks, int paused);
-int nzbget_rs_streaming_par_on_article_finished_by_name(
-    int nzb_id,
-    const char* name,
-    uint64_t offset,
-    uint64_t size,
-    uint32_t crc32,
-    const uint8_t* bytes,
-    size_t bytes_len);
-int nzbget_rs_streaming_par_on_article_failed_permanently_by_name(
-    int nzb_id,
-    const char* name,
-    uint64_t offset,
-    uint64_t size);
-int nzbget_rs_streaming_par_on_recovery_volume_arrived(
-    int nzb_id,
-    const char* path,
-    uint64_t queued_id,
-    int has_queued_id);
-size_t nzbget_rs_streaming_par_take_unpause_ids(
-    int nzb_id,
-    uint64_t* out_ids,
-    size_t max_ids);
-void nzbget_rs_streaming_par_forget(int nzb_id);
 
 void nzbget_rs_unpack_parse_message(
     const char* text, const char* unpack_extended_dir, int is_seven_zip,
@@ -1022,60 +934,6 @@ typedef struct {
 NzbgetRsBuf nzbget_rs_cmdline_format_usage(
     const char* base_name, char path_sep, int include_daemon);
 
-size_t nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
-    const char* path, const char* dest_dir, const char* filename,
-    const int32_t* statuses, const int32_t* donor_ids, const int32_t* fallback_rounds,
-    const int64_t* segment_offsets, const int32_t* segment_sizes, size_t article_count,
-    int32_t* out_indices, size_t out_cap);
-
-typedef struct NzbgetRsParDamageQueuedFile {
-    const char* filename;
-    int confirmed;
-    int64_t size;
-} NzbgetRsParDamageQueuedFile;
-
-typedef struct NzbgetRsParDamageCompletedFile {
-    const char* filename;
-    int not_failed;
-} NzbgetRsParDamageCompletedFile;
-
-typedef struct NzbgetRsParDamageVerdict {
-    int known;
-    uint64_t block_size;
-    int damaged_blocks;
-    int recovery_blocks;
-    int64_t done_bytes;
-    int64_t total_bytes;
-    int projected_blocks;
-} NzbgetRsParDamageVerdict;
-
-void nzbget_rs_par_damage_file_completed(
-    int nzb_id,
-    int is_par,
-    int failed_plus_missed,
-    int64_t decoded_size,
-    int success_articles,
-    int64_t file_size,
-    const char* filename,
-    const NzbgetRsByteRange* holes,
-    size_t holes_count);
-
-int nzbget_rs_par_damage_has_damage(int nzb_id);
-
-void nzbget_rs_par_damage_judge(
-    int nzb_id,
-    const char* dest_dir,
-    int64_t nzb_size,
-    int64_t nzb_par_size,
-    const NzbgetRsParDamageQueuedFile* queued,
-    size_t queued_count,
-    const NzbgetRsParDamageCompletedFile* completed,
-    size_t completed_count,
-    NzbgetRsParDamageVerdict* out_verdict);
-
-int nzbget_rs_par_damage_first_report(int nzb_id);
-void nzbget_rs_par_damage_forget(int nzb_id);
-
 int nzbget_rs_move_controller_move_files(
     const char* inter_dir,
     const char* dest_dir,
@@ -1483,15 +1341,6 @@ int nzbget_rs_nzbfile_parser_get_message(
 int nzbget_rs_nzbfile_parser_get_file(
     const NzbgetRsNzbFileParser* parser, size_t index,
     NzbgetRsNzbKeptFileView* out_view);
-
-
-
-int nzbget_rs_dupecoord_files_on_disk(
-    const char* final_dir, const char* dest_dir, const char* ext_cleanup_disk);
-NzbgetRsBuf nzbget_rs_dupecoord_no_backup_reason(
-    int fails_over_flag, int dupe_mode, const NzbgetRsDupeHistoryCandidate* history,
-    const char* const* queued_filenames, size_t history_len);
-
 
 void nzbget_rs_queue_editor_visit_category_ext_diff(
     const char* old_ext, const char* new_ext, void* ctx,
@@ -1958,44 +1807,6 @@ void nzbget_rs_server_stat_apply_op(
     int stat_op, int delta_success, int delta_failed,
     int* inout_success, int* inout_failed);
 int nzbget_rs_script_calc_total_status(const int* statuses, size_t count);
-size_t nzbget_rs_stream_repair_compute_holes(
-    const NzbgetRsByteRange* covered, size_t count, int64_t file_size,
-    NzbgetRsByteRange* out_holes, size_t max_holes);
-int nzbget_rs_queue_coord_is_data_filename(const char* filename);
-
-typedef struct NzbgetRsArticleGeom {
-    int32_t part_number;
-    int32_t status;
-    int64_t segment_offset;
-    int32_t segment_size;
-    int32_t fallback_round;
-} NzbgetRsArticleGeom;
-
-int nzbget_rs_dupe_fallback_is_par_file(
-    int par_file, int first_content, int fc_par2, int filename_confirmed, const char* filename);
-int nzbget_rs_dupe_fallback_par_cannot_cover(
-    int64_t par_size, int64_t par_failed_size, int64_t current_failed_size,
-    int64_t current_success_size, int64_t par_current_success_size, int64_t total_size,
-    int current_success_articles, int current_failed_articles, int with_margin);
-int nzbget_rs_dupe_fallback_check_try_preconditions(
-    int first_content, int fc_par2, int fc_unknown, int part_number, const char* filename,
-    int file_deleted, int nzb_deleting, int nzb_parking, int delete_status, int ds_none,
-    int dupe_mode, int dm_force);
-void nzbget_rs_dupe_fallback_compute_pin_lead_state(
-    const int* contributors, size_t count, int cur_file_lead_donor_id,
-    int* out_lead_snapshot, int* out_next_lead, int* out_donor_count, int* out_new_file_lead);
-int nzbget_rs_dupe_fallback_register_lead_failure(
-    int fallback_round, int lead_snapshot, int donor_count, int next_lead,
-    int* inout_lead_donor_id, int* inout_lead_failures, int* inout_lead_switches);
-void nzbget_rs_dupe_fallback_register_lead_success(
-    int fallback_round, int lead_snapshot, int lead_donor_id,
-    int64_t expected_offset, int64_t expected_end,
-    int* inout_lead_failures, int* inout_lead_switches);
-ptrdiff_t nzbget_rs_dupe_fallback_first_untiled_article(
-    const NzbgetRsArticleGeom* articles, size_t count, int64_t decoded_size);
-int nzbget_rs_dupe_fallback_merge_decoded_file_size(
-    int64_t* inout_decoded_file_size, int64_t article_file_size);
-int nzbget_rs_dupe_fallback_classify_first_head(const uint8_t* head, size_t len);
 int nzbget_rs_script_parse_nzb_cmd(
     int scope, const char* msg_text, int event, int qe_nzb_downloaded,
     size_t* out_key_off, size_t* out_key_len, size_t* out_val_off, int* out_int_val);
@@ -2171,51 +1982,6 @@ typedef struct RsPostJobCandidate {
     uint8_t download_completed;
 } RsPostJobCandidate;
 
-typedef struct NzbgetRsNzbMergeSplitCounters {
-    int32_t file_count;
-    int32_t active_downloads;
-    uint32_t full_content_hash;
-    uint32_t filtered_content_hash;
-    int64_t size;
-    int64_t remaining_size;
-    int32_t paused_file_count;
-    int64_t paused_size;
-    int64_t success_size;
-    int64_t current_success_size;
-    int64_t failed_size;
-    int64_t current_failed_size;
-    int64_t par_size;
-    int64_t par_success_size;
-    int64_t par_current_success_size;
-    int64_t par_failed_size;
-    int64_t par_current_failed_size;
-    int32_t remaining_par_count;
-    int32_t total_articles;
-    int32_t success_articles;
-    int32_t failed_articles;
-    int32_t current_success_articles;
-    int32_t current_failed_articles;
-    int64_t min_time;
-    int64_t max_time;
-    int64_t downloaded_size;
-    int32_t download_sec;
-    int64_t download_start_time;
-} NzbgetRsNzbMergeSplitCounters;
-
-typedef struct NzbgetRsSplitFileCounters {
-    int64_t size;
-    int64_t remaining_size;
-    int64_t success_size;
-    int64_t failed_size;
-    int64_t missed_size;
-    int32_t total_articles;
-    int32_t missed_articles;
-    int32_t success_articles;
-    int32_t failed_articles;
-    int32_t par_file;
-    int32_t paused;
-} NzbgetRsSplitFileCounters;
-
 typedef struct NzbgetRsDaemonEnv {
     void* ctx; int a1; int a2; int a3; int a4; int a5; int a6;
     const char* s1; const char* s2; const char* s3; const char* s4; const char* s5;
@@ -2234,21 +2000,6 @@ void nzbget_rs_prepost_delete_cleanup(
 int nzbget_rs_prepost_pick_next_job(
     const RsPostJobCandidate* candidates, size_t len,
     int allow_par, int has_active_unpack, int pause_post_process);
-int nzbget_rs_queue_coord_op(
-    int op, int a, int b, int c, int d, int e, int f, int g, int h, int i, int j,
-    int64_t t1, int64_t t2, int64_t t3, int64_t t4,
-    const char* s1, const char* s2, const char* const* cstr_arr,
-    const int* i32_1, const int* i32_2, const uint8_t* u8_1, const int64_t* i64_1, size_t len,
-    int* out1, int* out2, int* out3, int* out_arr);
-NzbgetRsBuf nzbget_rs_queue_coord_str_op(
-    int op, int a, int b, int c, int64_t t1,
-    const char* s1, const char* s2, const char* s3, const int* i32_arr, size_t len,
-    int* out_unique, size_t* out_unique_len);
-int nzbget_rs_queue_coord_counters_op(
-    int op, int a, int b, int c, int d, int64_t t1, int64_t t2,
-    const char* s1, const char* s2,
-    NzbgetRsNzbMergeSplitCounters* ms1, NzbgetRsNzbMergeSplitCounters* ms2,
-    const NzbgetRsSplitFileCounters* sf, int* i32_inout, int64_t* i64_inout);
 int nzbget_rs_repair_ctrl_op(
     int op, int a, int b, int c, int d, int e, int f,
     int64_t t1, int64_t t2, int64_t t3, int64_t t4,
@@ -2530,6 +2281,22 @@ int nzbget_rs_fleet_append(
     const char* dupe_key, const char* category, int priority, int timeout_sec,
     const NzbgetRsRpcFleetReqMember* members, size_t members_len,
     void* emit_ctx, NzbgetRsXmlRpcEmitFn emit_cb);
+
+typedef struct NzbgetRsQueueCoordinator NzbgetRsQueueCoordinator;
+typedef uintptr_t (*NzbgetRsQueueSubsysHostFn)(
+    void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+    const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
+int nzbget_rs_dupe_fallback_op(
+    int op, int a1, uintptr_t p1, NzbgetRsQueueSubsysHostFn host_cb);
+uintptr_t nzbget_rs_dupe_coord_exec(
+    int op, int a1, uintptr_t p1, uintptr_t p2, uintptr_t p3,
+    const char* s1, const char* s2, NzbgetRsQueueSubsysHostFn host_cb);
+NzbgetRsQueueCoordinator* nzbget_rs_queue_coord_new(void);
+void nzbget_rs_queue_coord_free(NzbgetRsQueueCoordinator* ptr);
+uintptr_t nzbget_rs_queue_coord_exec(
+    const NzbgetRsQueueCoordinator* ptr, int op, int a1, int a2,
+    uintptr_t p1, uintptr_t p2, uintptr_t p3, const char* s1, const int* ints,
+    NzbgetRsQueueSubsysHostFn host_cb, void* ctx);
 
 #include "nzbget_tls_cipher.h"
 

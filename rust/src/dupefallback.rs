@@ -1553,20 +1553,6 @@ pub struct DonorFileSpec<'a> {
     pub sizes: &'a [i32],
 }
 
-/// FFI-compatible descriptor for a target or donor file in `nzbget_rs_dupe_fallback_match_donor_file`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct NzbgetRsDonorFileSpec {
-    pub filename: *const std::ffi::c_char,
-    pub subject: *const std::ffi::c_char,
-    pub total_articles: i32,
-    pub size: i64,
-    pub is_par_file: i32,
-    pub parts: *const i32,
-    pub sizes: *const i32,
-    pub article_count: usize,
-}
-
 /// `DupeArticleFallback::MatchDonorFile`:
 /// Finds the index of the donor file in `donor_files` corresponding to `target`:
 /// 1. Rejects PAR2 targets or `twin_only` when `!twin_allowed`.
@@ -1710,6 +1696,1395 @@ where
     let idx = find_rotate_offset(&donor_ids, lead_nzb_id);
     if idx > 0 && idx < donors.len() {
         donors.rotate_left(idx);
+    }
+}
+
+pub(crate) const CUTOVER_THRESHOLD: i32 = 3;
+const MAX_CACHED_DONORS: usize = 16;
+const BAD_DONOR_RETRY_SEC: i64 = 600;
+
+#[cfg(unix)]
+#[derive(Default)]
+pub(crate) struct DonorCacheState {
+    parsed_donors: BTreeMap<i32, std::sync::Arc<crate::articlefetcher::DonorParsedNzb>>,
+    bad_donors: BTreeMap<i32, i64>,
+    file_parts_sizes: Option<(i32, i32, usize, Vec<i32>, Vec<i32>)>,
+}
+
+#[cfg(unix)]
+impl DonorCacheState {
+    pub(crate) fn get_parsed_donor(
+        &mut self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        donor: &crate::queuesubsys_host::NzbSnap,
+        opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    ) -> Option<std::sync::Arc<crate::articlefetcher::DonorParsedNzb>> {
+        if let Some(&bad_ts) = self.bad_donors.get(&donor.id) {
+            if opts.cur_time - bad_ts < BAD_DONOR_RETRY_SEC {
+                return None;
+            }
+        }
+        if let Some(cached) = self.parsed_donors.get(&donor.id) {
+            return Some(std::sync::Arc::clone(cached));
+        }
+        let parsed = crate::articlefetcher::parse_donor_nzb_file(
+            &donor.queued_filename,
+            &opts.par_ignore_ext,
+            |msg| host.log(crate::queuesubsys_host::MK_DETAIL, msg),
+        );
+        let Some(nzb) = parsed else {
+            self.bad_donors.insert(donor.id, opts.cur_time);
+            return None;
+        };
+        if self.parsed_donors.len() >= MAX_CACHED_DONORS {
+            self.parsed_donors.pop_first();
+        }
+        let arc = std::sync::Arc::new(nzb);
+        self.parsed_donors
+            .insert(donor.id, std::sync::Arc::clone(&arc));
+        Some(arc)
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn file_is_par_snap(f: &crate::queuesubsys_host::FileSnap) -> bool {
+    is_par_file(
+        f.par_file,
+        f.first_content,
+        crate::queuesubsys_host::FC_PAR2,
+        f.filename_confirmed,
+        &f.filename,
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn completed_file_is_par2_snap(cf: &crate::queuesubsys_host::CompletedFileSnap) -> bool {
+    is_par_file(cf.par_file, 0, 1, true, &cf.filename)
+}
+
+#[cfg(unix)]
+pub(crate) fn has_par2_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> bool {
+    if nzb.par_size > 0 {
+        return true;
+    }
+    let flen = host.nzb_file_len(nzb.ptr);
+    for i in 0..flen {
+        let f = host.file_snap(host.nzb_file_at(nzb.ptr, i));
+        if file_is_par_snap(&f) {
+            return true;
+        }
+    }
+    for cf in host.nzb_completed_files(nzb.ptr) {
+        if completed_file_is_par2_snap(&cf) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+pub(crate) fn should_defer_to_par_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+) -> bool {
+    if nzb_ptr == 0 {
+        return false;
+    }
+    let nzb = host.nzb_snap(nzb_ptr, false);
+    should_defer_to_par_snap(host, &nzb)
+}
+
+#[cfg(unix)]
+pub(crate) fn should_defer_to_par_snap(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> bool {
+    if nzb.ptr == 0 {
+        return false;
+    }
+    if nzb.direct_rename_status == crate::queuesubsys_host::TS_RUNNING && !nzb.all_first {
+        return true;
+    }
+    if nzb.par_status == crate::queuesubsys_host::PS_FAILURE {
+        return false;
+    }
+    if nzb.par_size > 0 {
+        return true;
+    }
+    let flen = host.nzb_file_len(nzb.ptr);
+    for i in 0..flen {
+        let f = host.file_snap(host.nzb_file_at(nzb.ptr, i));
+        if !f.deleted && file_is_par_snap(&f) {
+            return true;
+        }
+    }
+    for cf in host.nzb_completed_files(nzb.ptr) {
+        if completed_file_is_par2_snap(&cf) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+pub(crate) fn par_cannot_cover_snap(
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    with_margin: bool,
+) -> bool {
+    par_cannot_cover(
+        nzb.par_size,
+        nzb.par_current_failed_size,
+        nzb.current_failed_size,
+        nzb.current_success_size,
+        nzb.par_current_success_size,
+        nzb.size,
+        nzb.current_success_articles,
+        nzb.current_failed_articles,
+        with_margin,
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn article_size_steps_hash_slice(
+    articles: &[crate::queuesubsys_host::ArticleSnap],
+) -> u64 {
+    if articles.len() < MIN_STEP_FINGERPRINT_ARTICLES {
+        return 0;
+    }
+    let sizes: Vec<i32> = articles.iter().map(|a| a.size).collect();
+    article_size_steps_hash(&sizes)
+}
+
+#[cfg(unix)]
+pub(crate) fn compute_holes_slice(
+    articles: &[crate::queuesubsys_host::ArticleSnap],
+    file_size: i64,
+) -> Vec<NzbgetRsByteRange> {
+    if file_size <= 0 {
+        return Vec::new();
+    }
+    let mut covered = Vec::with_capacity(articles.len());
+    for a in articles {
+        if a.status == crate::queuesubsys_host::AI_FINISHED
+            && a.segment_size > 0
+            && a.segment_offset >= 0
+        {
+            covered.push(NzbgetRsByteRange {
+                offset: a.segment_offset,
+                size: i64::from(a.segment_size),
+            });
+        }
+    }
+    crate::streamrepair::compute_holes(&covered, file_size)
+}
+
+#[cfg(unix)]
+pub(crate) fn build_repair_job_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    file: &crate::queuesubsys_host::FileSnap,
+    articles: &[crate::queuesubsys_host::ArticleSnap],
+    disk_basename: &[u8],
+) -> bool {
+    let ends_with_par2 = disk_basename.len() >= 5
+        && disk_basename[disk_basename.len() - 5..].eq_ignore_ascii_case(b".par2");
+    if opts.dupe_article_fallback < crate::queuesubsys_host::DAF_STREAM
+        || opts.raw_article
+        || file_is_par_snap(file)
+        || ends_with_par2
+        || disk_basename.is_empty()
+        || articles.is_empty()
+        || nzb.ptr == 0
+        || nzb.has_post_info
+    {
+        return false;
+    }
+    let health_cancel = nzb.delete_status == crate::queuesubsys_host::DS_HEALTH;
+    if !health_cancel
+        && (nzb.deleting
+            || nzb.parking
+            || nzb.delete_status != crate::queuesubsys_host::DS_NONE)
+    {
+        return false;
+    }
+
+    if file.success_articles == 0 {
+        if file.size <= 0 {
+            return false;
+        }
+        host.nzb_push_stream_repair_job(
+            nzb.ptr,
+            file.id,
+            disk_basename,
+            0,
+            file.failed_size,
+            file.missed_size,
+            file.failed_articles + file.missed_articles,
+            file.par_file,
+            &[],
+            article_size_steps_hash_slice(articles),
+        );
+        return true;
+    }
+    if file.decoded_file_size <= 0 {
+        return false;
+    }
+
+    let holes = compute_holes_slice(articles, file.decoded_file_size);
+    if holes.is_empty() {
+        return false;
+    }
+
+    host.nzb_push_stream_repair_job(
+        nzb.ptr,
+        file.id,
+        disk_basename,
+        file.decoded_file_size,
+        file.failed_size,
+        file.missed_size,
+        file.failed_articles + file.missed_articles,
+        file.par_file,
+        &holes,
+        article_size_steps_hash_slice(articles),
+    );
+    true
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ParDamageVerdict {
+    pub known: bool,
+    pub block_size: u64,
+    pub damaged_blocks: i32,
+    pub recovery_blocks: i32,
+    pub done_bytes: i64,
+    pub total_bytes: i64,
+    pub projected_blocks: i32,
+}
+
+#[cfg(unix)]
+impl ParDamageVerdict {
+    pub fn certain(&self) -> bool {
+        self.known && self.damaged_blocks > self.recovery_blocks
+    }
+    pub fn projected(&self) -> bool {
+        self.known
+            && self.done_bytes.saturating_mul(5) >= self.total_bytes
+            && i64::from(self.projected_blocks) * 4 > i64::from(self.recovery_blocks) * 5 + 8
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn par_damage_file_completed_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    file: &crate::queuesubsys_host::FileSnap,
+    articles: &[crate::queuesubsys_host::ArticleSnap],
+    filename: &[u8],
+) {
+    let is_par = file.par_file || file_is_par_snap(file);
+    let failed_plus_missed = file.failed_articles + file.missed_articles;
+    let decoded_size = file.decoded_file_size;
+    let holes = if !is_par && failed_plus_missed > 0 && decoded_size > 0 {
+        compute_holes_slice(articles, decoded_size)
+    } else {
+        Vec::new()
+    };
+    crate::pardamage::file_completed(
+        nzb.id,
+        is_par,
+        failed_plus_missed,
+        decoded_size,
+        file.success_articles,
+        file.size,
+        filename,
+        &holes,
+    );
+
+    if is_par && failed_plus_missed == 0 && !filename.is_empty() {
+        if !crate::parchecker::streaming_session_has_session(nzb.id) {
+            if crate::parchecker::streaming_session_start(
+                nzb.id,
+                crate::fsops::path(filename),
+                crate::fsops::path(&nzb.dest_dir),
+                crate::parchecker::SessionOptions::default(),
+            )
+            .is_ok()
+            {
+                let flen = host.nzb_file_len(nzb.ptr);
+                for i in 0..flen {
+                    let qf_ptr = host.nzb_file_at(nzb.ptr, i);
+                    if qf_ptr == 0 || qf_ptr == file.ptr {
+                        continue;
+                    }
+                    let qf = host.file_snap(qf_ptr);
+                    if qf.deleted {
+                        continue;
+                    }
+                    if let Some((_, blocks)) =
+                        crate::parparser::parse_par_filename(&qf.filename, qf.filename_confirmed)
+                    {
+                        if blocks != 0
+                            && crate::parparser::same_par_collection(
+                                &file.filename,
+                                &qf.filename,
+                                file.filename_confirmed && qf.filename_confirmed,
+                            )
+                        {
+                            crate::parchecker::streaming_session_register_queued_volume(
+                                nzb.id,
+                                qf.id as u64,
+                                if blocks > 0 { blocks } else { 1 },
+                                qf.paused,
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            let _ = crate::parchecker::streaming_session_on_recovery_volume_arrived(
+                nzb.id,
+                crate::fsops::path(filename),
+                Some(file.id as u64),
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn par_damage_judge_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> ParDamageVerdict {
+    if !crate::pardamage::has_damage(nzb.id) {
+        return ParDamageVerdict::default();
+    }
+    let flen = host.nzb_file_len(nzb.ptr);
+    let mut q_snaps = Vec::with_capacity(flen);
+    for i in 0..flen {
+        q_snaps.push(host.file_snap(host.nzb_file_at(nzb.ptr, i)));
+    }
+    let q_candidates: Vec<crate::pardamage::QueuedParCandidate<'_>> = q_snaps
+        .iter()
+        .map(|f| crate::pardamage::QueuedParCandidate {
+            filename: &f.filename,
+            confirmed: f.filename_confirmed,
+            size: f.size,
+        })
+        .collect();
+    let c_snaps = host.nzb_completed_files(nzb.ptr);
+    let c_candidates: Vec<crate::pardamage::CompletedParCandidate<'_>> = c_snaps
+        .iter()
+        .map(|c| crate::pardamage::CompletedParCandidate {
+            filename: &c.filename,
+            not_failed: c.status != crate::queuesubsys_host::CF_FAILURE,
+        })
+        .collect();
+    let raw = crate::pardamage::judge(
+        nzb.id,
+        crate::fsops::path(&nzb.dest_dir),
+        nzb.size,
+        nzb.par_size,
+        &q_candidates,
+        &c_candidates,
+    );
+    ParDamageVerdict {
+        known: raw.known != 0,
+        block_size: raw.block_size,
+        damaged_blocks: raw.damaged_blocks,
+        recovery_blocks: raw.recovery_blocks,
+        done_bytes: raw.done_bytes,
+        total_bytes: raw.total_bytes,
+        projected_blocks: raw.projected_blocks,
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn par_damage_forget_all(nzb_id: i32) {
+    crate::pardamage::forget(nzb_id);
+    crate::parchecker::streaming_session_forget(nzb_id);
+}
+
+#[cfg(unix)]
+pub(crate) fn expected_segment_offset_at(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    file_ptr: usize,
+    articles_len: usize,
+    index: usize,
+    art: &crate::queuesubsys_host::ArticleSnap,
+) -> i64 {
+    if index >= articles_len {
+        return -1;
+    }
+    if index == 0 {
+        return if art.part_number == 1 { 0 } else { -1 };
+    }
+    let prev = host.article_at(file_ptr, index - 1);
+    if prev.part_number + 1 == art.part_number
+        && prev.status == crate::queuesubsys_host::AI_FINISHED
+        && prev.segment_size > 0
+        && prev.segment_offset >= 0
+    {
+        return prev.segment_offset + i64::from(prev.segment_size);
+    }
+    -1
+}
+
+#[cfg(unix)]
+pub(crate) fn expected_segment_end_at(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    file_ptr: usize,
+    articles_len: usize,
+    index: usize,
+    art: &crate::queuesubsys_host::ArticleSnap,
+    decoded_file_size: i64,
+) -> i64 {
+    if index >= articles_len {
+        return -1;
+    }
+    if index + 1 == articles_len {
+        return if decoded_file_size > 0 {
+            decoded_file_size
+        } else {
+            -1
+        };
+    }
+    let next = host.article_at(file_ptr, index + 1);
+    if art.part_number + 1 == next.part_number
+        && next.status == crate::queuesubsys_host::AI_FINISHED
+        && next.segment_size > 0
+        && next.segment_offset > 0
+    {
+        return next.segment_offset;
+    }
+    -1
+}
+
+#[cfg(unix)]
+pub(crate) fn segment_aligned_at(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    file_ptr: usize,
+    articles_len: usize,
+    index: usize,
+    art: &crate::queuesubsys_host::ArticleSnap,
+    decoded_file_size: i64,
+) -> bool {
+    if index >= articles_len {
+        return true;
+    }
+    let size = art.segment_size;
+    if size <= 0 {
+        return true;
+    }
+    let begin = art.segment_offset;
+    if begin < 0 {
+        return false;
+    }
+    let expected_begin = expected_segment_offset_at(host, file_ptr, articles_len, index, art);
+    if expected_begin >= 0 && begin != expected_begin {
+        return false;
+    }
+    let expected_end =
+        expected_segment_end_at(host, file_ptr, articles_len, index, art, decoded_file_size);
+    if expected_end >= 0 && begin + i64::from(size) != expected_end {
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+pub(crate) fn first_untiled_article_slice(
+    articles: &[crate::queuesubsys_host::ArticleSnap],
+    decoded_size: i64,
+) -> Option<usize> {
+    if decoded_size <= 0 {
+        return None;
+    }
+    let geom: Vec<NzbgetRsArticleGeom> = articles
+        .iter()
+        .map(|a| NzbgetRsArticleGeom {
+            part_number: a.part_number,
+            status: a.status,
+            segment_offset: a.segment_offset,
+            segment_size: a.segment_size,
+            fallback_round: a.dupe_fallback_round,
+        })
+        .collect();
+    let idx = first_untiled_article(&geom, decoded_size);
+    if idx >= 0 && (idx as usize) < articles.len() {
+        Some(idx as usize)
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn has_donor_articles_slice(articles: &[crate::queuesubsys_host::ArticleSnap]) -> bool {
+    articles.iter().any(|a| a.dupe_fallback_round > 0)
+}
+
+#[cfg(unix)]
+pub(crate) fn borrowed_par2_mismatches_slice(
+    articles: &[crate::queuesubsys_host::ArticleSnap],
+    path: &[u8],
+    dest_dir: &[u8],
+    filename: &[u8],
+) -> Vec<usize> {
+    if articles.is_empty() || path.is_empty() || dest_dir.is_empty() {
+        return Vec::new();
+    }
+    let mut statuses = Vec::with_capacity(articles.len());
+    let mut donor_ids = Vec::with_capacity(articles.len());
+    let mut fallback_rounds = Vec::with_capacity(articles.len());
+    let mut segment_offsets = Vec::with_capacity(articles.len());
+    let mut segment_sizes = Vec::with_capacity(articles.len());
+    for a in articles {
+        statuses.push(a.status);
+        donor_ids.push(a.dupe_donor_id);
+        fallback_rounds.push(a.dupe_fallback_round);
+        segment_offsets.push(a.segment_offset);
+        segment_sizes.push(a.segment_size);
+    }
+    let raw = borrowed_par2_mismatches_with_crc(
+        crate::fsops::path(path),
+        crate::fsops::path(dest_dir),
+        filename,
+        &statuses,
+        &donor_ids,
+        &fallback_rounds,
+        &segment_offsets,
+        &segment_sizes,
+        crc32_ieee,
+    );
+    raw.into_iter()
+        .filter_map(|idx| {
+            if idx >= 0 && (idx as usize) < articles.len() {
+                Some(idx as usize)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+pub(crate) fn merge_decoded_file_size_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    file: &mut crate::queuesubsys_host::FileSnap,
+    article_file_size: i64,
+) -> bool {
+    let (conflict, next_size) = merge_decoded_file_size(file.decoded_file_size, article_file_size);
+    if next_size != file.decoded_file_size {
+        file.decoded_file_size = next_size;
+        host.file_set_i64(
+            file.ptr,
+            crate::queuesubsys_host::FILE_I64_DECODED_FILE_SIZE,
+            next_size,
+        );
+    }
+    conflict
+}
+
+#[cfg(unix)]
+pub(crate) fn first_content_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    file: &mut crate::queuesubsys_host::FileSnap,
+) -> i32 {
+    if file.first_content != crate::queuesubsys_host::FC_UNKNOWN {
+        return file.first_content;
+    }
+    if file.articles_len == 0 || file.output_filename.is_empty() {
+        return crate::queuesubsys_host::FC_UNKNOWN;
+    }
+    let a0 = host.article_at(file.ptr, 0);
+    if a0.part_number != 1 || a0.status != crate::queuesubsys_host::AI_FINISHED {
+        return crate::queuesubsys_host::FC_UNKNOWN;
+    }
+    let Ok(mut f) = File::open(crate::fsops::path(&file.output_filename)) else {
+        return crate::queuesubsys_host::FC_UNKNOWN;
+    };
+    let mut head = [0u8; 8];
+    if f.read_exact(&mut head).is_err() {
+        return crate::queuesubsys_host::FC_UNKNOWN;
+    }
+    let cls = classify_first_head(&head);
+    if cls == 0 {
+        return crate::queuesubsys_host::FC_UNKNOWN;
+    }
+    let fc = if cls == 1 {
+        crate::queuesubsys_host::FC_PAR2
+    } else {
+        crate::queuesubsys_host::FC_OTHER
+    };
+    file.first_content = fc;
+    host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_FIRST_CONTENT, fc);
+    fc
+}
+
+#[cfg(unix)]
+pub(crate) fn register_lead_failure_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    file: &mut crate::queuesubsys_host::FileSnap,
+    art: &crate::queuesubsys_host::ArticleSnap,
+) -> bool {
+    let mut lead_donor_id = file.dupe_lead_donor_id;
+    let mut lead_failures = file.dupe_lead_failures;
+    let mut lead_switches = file.dupe_lead_switches;
+    let rotated = register_lead_failure(
+        art.dupe_fallback_round,
+        art.dupe_lead_snapshot,
+        art.dupe_donor_count,
+        art.dupe_next_lead,
+        &mut lead_donor_id,
+        &mut lead_failures,
+        &mut lead_switches,
+    );
+    file.dupe_lead_donor_id = lead_donor_id;
+    file.dupe_lead_failures = lead_failures;
+    file.dupe_lead_switches = lead_switches;
+    host.file_set_int(
+        file.ptr,
+        crate::queuesubsys_host::FILE_INT_DUPE_LEAD_DONOR_ID,
+        lead_donor_id,
+    );
+    host.file_set_int(
+        file.ptr,
+        crate::queuesubsys_host::FILE_INT_DUPE_LEAD_FAILURES,
+        lead_failures,
+    );
+    host.file_set_int(
+        file.ptr,
+        crate::queuesubsys_host::FILE_INT_DUPE_LEAD_SWITCHES,
+        lead_switches,
+    );
+    rotated
+}
+
+#[cfg(unix)]
+pub(crate) fn register_lead_success_at(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    file: &mut crate::queuesubsys_host::FileSnap,
+    articles_len: usize,
+    art_idx: usize,
+    art: &crate::queuesubsys_host::ArticleSnap,
+) {
+    if art_idx >= articles_len {
+        return;
+    }
+    if art.dupe_fallback_round != 1
+        || art.dupe_lead_snapshot <= 0
+        || art.dupe_lead_snapshot != file.dupe_lead_donor_id
+    {
+        return;
+    }
+    let exp_off = expected_segment_offset_at(host, file.ptr, articles_len, art_idx, art);
+    let exp_end =
+        expected_segment_end_at(host, file.ptr, articles_len, art_idx, art, file.decoded_file_size);
+    let mut lead_failures = file.dupe_lead_failures;
+    let mut lead_switches = file.dupe_lead_switches;
+    register_lead_success(
+        art.dupe_fallback_round,
+        art.dupe_lead_snapshot,
+        file.dupe_lead_donor_id,
+        exp_off,
+        exp_end,
+        &mut lead_failures,
+        &mut lead_switches,
+    );
+    file.dupe_lead_failures = lead_failures;
+    file.dupe_lead_switches = lead_switches;
+    host.file_set_int(
+        file.ptr,
+        crate::queuesubsys_host::FILE_INT_DUPE_LEAD_FAILURES,
+        lead_failures,
+    );
+    host.file_set_int(
+        file.ptr,
+        crate::queuesubsys_host::FILE_INT_DUPE_LEAD_SWITCHES,
+        lead_switches,
+    );
+}
+
+#[cfg(unix)]
+pub(crate) fn twin_identity_of(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> Vec<u8> {
+    let files_param = host.nzb_get_param(nzb.ptr, b"DupeFiles");
+    let posting = nzb.full_content_hash.to_string();
+    crate::twin::format_identity(files_param.as_deref().unwrap_or(b""), posting.as_bytes())
+}
+
+#[cfg(unix)]
+pub(crate) fn collect_donors_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    qdir: &[u8],
+) -> Vec<crate::queuesubsys_host::NzbSnap> {
+    let mut donors = Vec::new();
+    if dq_ptr == 0 {
+        return donors;
+    }
+    let qlen = host.queue_len(dq_ptr);
+    for i in 0..qlen {
+        let q_ptr = host.queue_at(dq_ptr, i);
+        if q_ptr == 0 || q_ptr == nzb.ptr {
+            continue;
+        }
+        let q = host.nzb_snap(q_ptr, false);
+        if q.kind == crate::queuesubsys_host::NK_NZB
+            && q.dupe_mode != crate::queuesubsys_host::DM_FORCE
+            && crate::dupecoord::same_name_or_key(&q.name, &q.dupe_key, &nzb.name, &nzb.dupe_key)
+        {
+            donors.push(q);
+        }
+    }
+
+    let hlen = host.history_len(dq_ptr);
+    for i in 0..hlen {
+        let hi = host.history_at(dq_ptr, i);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
+            let hn = host.nzb_snap(hi.inner_ptr, false);
+            if hn.dupe_mode != crate::queuesubsys_host::DM_FORCE
+                && crate::dupecoord::same_name_or_key(
+                    &hn.name,
+                    &hn.dupe_key,
+                    &nzb.name,
+                    &nzb.dupe_key,
+                )
+            {
+                donors.push(hn);
+            }
+        }
+    }
+
+    let own_identity = twin_identity_of(host, nzb);
+    let mut twin_ptrs = BTreeSet::new();
+    if !own_identity.is_empty() {
+        for donor in &donors {
+            if nzb.full_content_hash > 0 && nzb.full_content_hash == donor.full_content_hash {
+                continue;
+            }
+            let donor_identity = twin_identity_of(host, donor);
+            if !donor_identity.is_empty() {
+                let kind =
+                    crate::twin::store_kind_dir(qdir, nzb.id, &own_identity, donor.id, &donor_identity);
+                if kind.starts_with(b"twin") {
+                    twin_ptrs.insert(donor.ptr);
+                }
+            }
+        }
+    }
+
+    donors.sort_by(|d1, d2| {
+        let t1 = twin_ptrs.contains(&d1.ptr);
+        let t2 = twin_ptrs.contains(&d2.ptr);
+        if t1 != t2 {
+            return if t1 {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            };
+        }
+        if d1.dupe_score != d2.dupe_score {
+            return d2.dupe_score.cmp(&d1.dupe_score);
+        }
+        d1.id.cmp(&d2.id)
+    });
+
+    donors
+}
+
+#[cfg(unix)]
+fn nzb_filename_of_host(
+    cache: &mut DonorCacheState,
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    own_nzb: &crate::queuesubsys_host::NzbSnap,
+    file_ptr: usize,
+    articles_len: usize,
+) -> Vec<u8> {
+    if articles_len == 0 {
+        return Vec::new();
+    }
+    let Some(parsed_own) = cache.get_parsed_donor(host, own_nzb, opts) else {
+        return Vec::new();
+    };
+    let mut probed: Vec<Option<crate::queuesubsys_host::ArticleSnap>> = vec![None; articles_len];
+    for own_file in &parsed_own.files {
+        if own_file.article_parts.len() != articles_len
+            || own_file.article_msg_ids.len() != articles_len
+        {
+            continue;
+        }
+        for i in 0..articles_len {
+            let article = probed[i].get_or_insert_with(|| host.article_at(file_ptr, i));
+            let msg_id = if !article.dupe_original_message_id.is_empty() {
+                article.dupe_original_message_id.as_slice()
+            } else {
+                article.message_id.as_slice()
+            };
+            if own_file.article_parts[i] == article.part_number && !msg_id.is_empty() {
+                if own_file.article_msg_ids[i].as_slice() == msg_id {
+                    return own_file.filename.clone();
+                }
+                break;
+            }
+        }
+    }
+    Vec::new()
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn match_donor_file_parsed<'a>(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    qdir: &[u8],
+    own_nzb: &crate::queuesubsys_host::NzbSnap,
+    target_file: &crate::queuesubsys_host::FileSnap,
+    target_parts: &[i32],
+    target_sizes: &[i32],
+    parsed_donor: &'a crate::articlefetcher::DonorParsedNzb,
+    target_nzb_filename: &[u8],
+    donor_nzb_id: i32,
+    donor_print: &[u8],
+    twin_only: bool,
+) -> Option<&'a crate::articlefetcher::DonorParsedFile> {
+    if file_is_par_snap(target_file) {
+        return None;
+    }
+    let own_identity = if own_nzb.ptr != 0 {
+        twin_identity_of(host, own_nzb)
+    } else {
+        Vec::new()
+    };
+    let mut twin_allowed = false;
+    if twin_only {
+        let kind = if donor_nzb_id != 0 && !own_identity.is_empty() && !donor_print.is_empty() {
+            crate::twin::store_kind_dir(
+                qdir,
+                own_nzb.id,
+                &own_identity,
+                donor_nzb_id,
+                donor_print,
+            )
+        } else {
+            Vec::new()
+        };
+        twin_allowed = donor_nzb_id != 0
+            && !own_identity.is_empty()
+            && !donor_print.is_empty()
+            && kind.starts_with(b"twin");
+        if !twin_allowed {
+            return None;
+        }
+    }
+    let by_content = if donor_nzb_id != 0 && !own_identity.is_empty() && !donor_print.is_empty() {
+        crate::twin::store_match_dir(
+            qdir,
+            own_nzb.id,
+            &own_identity,
+            &target_file.filename,
+            target_nzb_filename,
+            donor_nzb_id,
+            donor_print,
+        )
+    } else {
+        Vec::new()
+    };
+
+    let target_spec = DonorFileSpec {
+        filename: &target_file.filename,
+        subject: &target_file.subject,
+        total_articles: target_file.total_articles,
+        size: target_file.size,
+        is_par_file: false,
+        parts: target_parts,
+        sizes: target_sizes,
+    };
+
+    let donor_specs: Vec<DonorFileSpec<'_>> = parsed_donor
+        .files
+        .iter()
+        .map(|df| DonorFileSpec {
+            filename: &df.filename,
+            subject: &df.subject,
+            total_articles: df.total_articles,
+            size: df.size,
+            is_par_file: is_par_file(df.par_file, 0, 1, false, &df.filename),
+            parts: &df.article_parts,
+            sizes: &df.article_sizes,
+        })
+        .collect();
+
+    let idx = match_donor_file(
+        &target_spec,
+        target_nzb_filename,
+        &by_content,
+        twin_allowed,
+        twin_only,
+        &donor_specs,
+    )?;
+    parsed_donor.files.get(idx)
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn pin_sources_host(
+    cache: &mut DonorCacheState,
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    dq_ptr: usize,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+    file: &mut crate::queuesubsys_host::FileSnap,
+    art: &mut crate::queuesubsys_host::ArticleSnap,
+    twin_only: bool,
+) {
+    let mut donors = collect_donors_host(host, dq_ptr, nzb, &opts.queue_dir);
+
+    // VacateGhostLead
+    if file.dupe_lead_donor_id != 0 {
+        let lead_id = file.dupe_lead_donor_id;
+        let barred = nzb.ptr != 0 && host.nzb_blocked_donor_op(nzb.ptr, false, lead_id);
+        let present = donors.iter().any(|d| d.id == lead_id);
+        if barred || !present {
+            file.dupe_lead_donor_id = 0;
+            file.dupe_lead_failures = 0;
+            file.dupe_lead_switches = 0;
+            host.file_set_int(
+                file.ptr,
+                crate::queuesubsys_host::FILE_INT_DUPE_LEAD_DONOR_ID,
+                0,
+            );
+            host.file_set_int(
+                file.ptr,
+                crate::queuesubsys_host::FILE_INT_DUPE_LEAD_FAILURES,
+                0,
+            );
+            host.file_set_int(
+                file.ptr,
+                crate::queuesubsys_host::FILE_INT_DUPE_LEAD_SWITCHES,
+                0,
+            );
+        }
+    }
+
+    if twin_only && file.dupe_lead_donor_id != 0 {
+        let own_identity = twin_identity_of(host, nzb);
+        let lead_id = file.dupe_lead_donor_id;
+        let lead_identity = donors
+            .iter()
+            .find(|d| d.id == lead_id)
+            .map(|d| twin_identity_of(host, d))
+            .unwrap_or_default();
+        let lead_kind = if !own_identity.is_empty() && !lead_identity.is_empty() {
+            crate::twin::store_kind_dir(
+                &opts.queue_dir,
+                nzb.id,
+                &own_identity,
+                lead_id,
+                &lead_identity,
+            )
+        } else {
+            Vec::new()
+        };
+        if own_identity.is_empty() || lead_identity.is_empty() || !lead_kind.starts_with(b"twin") {
+            file.dupe_lead_donor_id = 0;
+            file.dupe_lead_failures = 0;
+            file.dupe_lead_switches = 0;
+            host.file_set_int(
+                file.ptr,
+                crate::queuesubsys_host::FILE_INT_DUPE_LEAD_DONOR_ID,
+                0,
+            );
+            host.file_set_int(
+                file.ptr,
+                crate::queuesubsys_host::FILE_INT_DUPE_LEAD_FAILURES,
+                0,
+            );
+            host.file_set_int(
+                file.ptr,
+                crate::queuesubsys_host::FILE_INT_DUPE_LEAD_SWITCHES,
+                0,
+            );
+        }
+    }
+
+    rotate_to_lead(&mut donors, file.dupe_lead_donor_id, |d| d.id);
+
+    let target_nzb_filename = if donors.is_empty() {
+        Vec::new()
+    } else {
+        nzb_filename_of_host(cache, host, opts, nzb, file.ptr, file.articles_len)
+    };
+
+    let (target_parts, target_sizes) = if donors.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let hit = cache.file_parts_sizes.as_ref().is_some_and(|c| {
+            c.0 == nzb.id && c.1 == file.id && c.2 == file.articles_len
+        });
+        if !hit {
+            let mut parts = Vec::with_capacity(file.articles_len);
+            let mut sizes = Vec::with_capacity(file.articles_len);
+            for i in 0..file.articles_len {
+                let a = host.article_at(file.ptr, i);
+                parts.push(a.part_number);
+                sizes.push(a.size);
+            }
+            cache.file_parts_sizes = Some((nzb.id, file.id, file.articles_len, parts, sizes));
+        }
+        let cached = cache.file_parts_sizes.as_ref().unwrap();
+        (cached.3.clone(), cached.4.clone())
+    };
+
+    let part_number = art.part_number;
+    let mut candidates: Vec<Vec<u8>> = Vec::new();
+    let mut contributors: Vec<i32> = Vec::new();
+    let mut same_posting = 0i32;
+    let mut unparsed = 0i32;
+
+    for donor in &donors {
+        if host.nzb_blocked_donor_op(nzb.ptr, false, donor.id) {
+            continue;
+        }
+        if nzb.full_content_hash > 0 && nzb.full_content_hash == donor.full_content_hash {
+            same_posting += 1;
+            continue;
+        }
+        if let Some(parsed_donor) = cache.get_parsed_donor(host, donor, opts) {
+            let donor_identity = twin_identity_of(host, donor);
+            if let Some(df) = match_donor_file_parsed(
+                host,
+                &opts.queue_dir,
+                nzb,
+                file,
+                &target_parts,
+                &target_sizes,
+                &parsed_donor,
+                &target_nzb_filename,
+                donor.id,
+                &donor_identity,
+                twin_only,
+            ) {
+                let mut found_msg: Option<&[u8]> = None;
+                for (j, &part) in df.article_parts.iter().enumerate() {
+                    if part == part_number {
+                        if let Some(m) = df.article_msg_ids.get(j) {
+                            if !m.is_empty() {
+                                found_msg = Some(m.as_slice());
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(msg_id) = found_msg {
+                    if !candidates.iter().any(|c| c.as_slice() == msg_id) {
+                        candidates.push(msg_id.to_vec());
+                        contributors.push(donor.id);
+                    }
+                }
+            }
+        } else {
+            unparsed += 1;
+        }
+    }
+
+    if !twin_only && candidates.is_empty() && !donors.is_empty() && !file.dupe_no_source_logged {
+        file.dupe_no_source_logged = true;
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_DUPE_NO_SOURCE_LOGGED,
+            1,
+        );
+        let nzb_name_disp: &[u8] = if target_nzb_filename.is_empty() {
+            b"unknown"
+        } else {
+            &target_nzb_filename
+        };
+        let mut msg = b"No duplicate source for ".to_vec();
+        msg.extend_from_slice(&file.filename);
+        msg.extend_from_slice(
+            format!(
+                " [{}]: {} duplicate(s), {} same posting, {} without readable nzb-file, none with a matching file (nzb name: ",
+                part_number,
+                donors.len(),
+                same_posting,
+                unparsed
+            )
+            .as_bytes(),
+        );
+        msg.extend_from_slice(nzb_name_disp);
+        msg.extend_from_slice(b"); not repeated for its other articles");
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+    }
+
+    // FinishPin
+    let (lead_snapshot, next_lead, donor_count, new_file_lead) =
+        compute_pin_lead_state(&contributors, file.dupe_lead_donor_id);
+    file.dupe_lead_donor_id = new_file_lead;
+    host.file_set_int(
+        file.ptr,
+        crate::queuesubsys_host::FILE_INT_DUPE_LEAD_DONOR_ID,
+        new_file_lead,
+    );
+
+    let append_primary = file.dupe_cutover && !candidates.is_empty();
+    let mut sources = candidates;
+    if append_primary {
+        sources.push(art.dupe_original_message_id.clone());
+    }
+    art.dupe_lead_snapshot = lead_snapshot;
+    art.dupe_next_lead = next_lead;
+    art.dupe_donor_count = donor_count;
+    host.article_store_pin(
+        art.ptr,
+        lead_snapshot,
+        next_lead,
+        donor_count,
+        &sources,
+        &contributors,
+    );
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_fallback_host(
+    cache: &mut DonorCacheState,
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    dq_ptr: usize,
+    nzb: &mut crate::queuesubsys_host::NzbSnap,
+    file: &mut crate::queuesubsys_host::FileSnap,
+    art_idx: usize,
+    art: &mut crate::queuesubsys_host::ArticleSnap,
+) -> bool {
+    if art_idx >= file.articles_len {
+        return false;
+    }
+    if opts.dupe_article_fallback == crate::queuesubsys_host::DAF_NONE
+        || opts.raw_article
+        || file_is_par_snap(file)
+    {
+        return false;
+    }
+
+    let content = first_content_host(host, file);
+    if !check_try_preconditions(
+        opts.dupe_article_fallback,
+        crate::queuesubsys_host::DAF_NONE,
+        opts.raw_article,
+        false,
+        content,
+        crate::queuesubsys_host::FC_PAR2,
+        crate::queuesubsys_host::FC_UNKNOWN,
+        art.part_number,
+        &file.filename,
+        file.deleted,
+        nzb.deleting,
+        nzb.parking,
+        nzb.delete_status,
+        crate::queuesubsys_host::DS_NONE,
+        nzb.dupe_mode,
+        crate::queuesubsys_host::DM_FORCE,
+    ) {
+        return false;
+    }
+
+    if !has_par2_host(host, nzb) {
+        if !nzb.dupe_no_par_noted {
+            nzb.dupe_no_par_noted = true;
+            host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_DUPE_NO_PAR_NOTED, 1);
+            let mut msg = b"Not borrowing articles of ".to_vec();
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(b" from duplicates: it has no par2 files to check them");
+            host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+        }
+        return false;
+    }
+
+    let mut defer = false;
+    if opts.dupe_article_fallback >= crate::queuesubsys_host::DAF_STREAM {
+        let par_defer = opts.par_check != crate::queuesubsys_host::PC_MANUAL
+            && should_defer_to_par_snap(host, nzb);
+        let damage = if par_defer {
+            par_damage_judge_host(host, nzb)
+        } else {
+            ParDamageVerdict::default()
+        };
+        defer = par_defer
+            && art.part_number != 1
+            && nzb.dupe_par_defer_state != crate::queuesubsys_host::DP_LIFTED
+            && !par_cannot_cover_snap(nzb, true)
+            && !damage.certain()
+            && !damage.projected();
+        if par_defer && !defer && art.part_number != 1 {
+            if nzb.dupe_par_defer_state == crate::queuesubsys_host::DP_DEFERRED {
+                let mut msg = b"Damage of ".to_vec();
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(
+                    b" exceeds its par2 recovery data (or will, judged by the articles tried so far), recovering missing articles from duplicates",
+                );
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+            }
+            nzb.dupe_par_defer_state = crate::queuesubsys_host::DP_LIFTED;
+            host.nzb_set_int(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_INT_DUPE_PAR_DEFER_STATE,
+                crate::queuesubsys_host::DP_LIFTED,
+            );
+        }
+    }
+
+    let mut round = art.dupe_fallback_round;
+    if defer {
+        if round == 0 && dq_ptr == 0 {
+            return false;
+        }
+        if round > 0 {
+            let (_, source_donors) = host.article_pinned_sources(art.ptr);
+            if source_donors.is_empty() {
+                return false;
+            }
+        }
+    }
+
+    if art.dupe_original_message_id.is_empty() {
+        let orig = art.message_id.clone();
+        art.dupe_original_message_id = orig.clone();
+        host.article_set_str(
+            art.ptr,
+            crate::queuesubsys_host::ART_STR_DUPE_ORIG_MESSAGE_ID,
+            Some(&orig),
+        );
+    }
+
+    if round == 0 {
+        pin_sources_host(cache, host, opts, dq_ptr, nzb, file, art, defer);
+    } else if round == 1 && register_lead_failure_host(host, file, art) {
+        let mut msg = b"Switching lead duplicate collection for ".to_vec();
+        msg.extend_from_slice(&file.filename);
+        msg.extend_from_slice(b" (the lead duplicate is missing many articles)");
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+    }
+
+    let (sources, source_donors) = host.article_pinned_sources(art.ptr);
+    let pinned_round = round;
+    while round >= 0
+        && (round as usize) < sources.len()
+        && (round as usize) < source_donors.len()
+        && host.nzb_blocked_donor_op(nzb.ptr, false, source_donors[round as usize])
+    {
+        round += 1;
+    }
+
+    if round < 0 || (round as usize) >= sources.len() {
+        if defer {
+            if !art.dupe_proactive
+                && nzb.dupe_par_defer_state == crate::queuesubsys_host::DP_NONE
+                && dq_ptr != 0
+                && !collect_donors_host(host, dq_ptr, nzb, &opts.queue_dir).is_empty()
+            {
+                nzb.dupe_par_defer_state = crate::queuesubsys_host::DP_DEFERRED;
+                host.nzb_set_int(
+                    nzb.ptr,
+                    crate::queuesubsys_host::NZB_INT_DUPE_PAR_DEFER_STATE,
+                    crate::queuesubsys_host::DP_DEFERRED,
+                );
+                let mut msg = b"Deferring duplicate recovery for ".to_vec();
+                msg.extend_from_slice(&nzb.name);
+                msg.extend_from_slice(b" to par-check (its par2 files may cover the damage)");
+                host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+            }
+            if pinned_round > 0 && !art.dupe_original_message_id.is_empty() {
+                let orig = art.dupe_original_message_id.clone();
+                art.message_id = orig.clone();
+                host.article_set_str(
+                    art.ptr,
+                    crate::queuesubsys_host::ART_STR_MESSAGE_ID,
+                    Some(&orig),
+                );
+            }
+        } else if pinned_round == 0 && !art.dupe_proactive {
+            nzb.dupe_unsourced_articles += 1;
+            host.nzb_set_int(
+                nzb.ptr,
+                crate::queuesubsys_host::NZB_INT_DUPE_UNSOURCED_ARTICLES,
+                nzb.dupe_unsourced_articles,
+            );
+        } else if !art.dupe_original_message_id.is_empty() {
+            let orig = art.dupe_original_message_id.clone();
+            art.message_id = orig.clone();
+            host.article_set_str(
+                art.ptr,
+                crate::queuesubsys_host::ART_STR_MESSAGE_ID,
+                Some(&orig),
+            );
+        }
+        return false;
+    }
+
+    if pinned_round == 0 && !art.dupe_proactive {
+        file.dupe_attempted_articles += 1;
+        nzb.dupe_attempted_articles += 1;
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_DUPE_ATTEMPTED_ARTICLES,
+            file.dupe_attempted_articles,
+        );
+        host.nzb_set_int(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_INT_DUPE_ATTEMPTED_ARTICLES,
+            nzb.dupe_attempted_articles,
+        );
+    }
+
+    let exp_off = expected_segment_offset_at(host, file.ptr, file.articles_len, art_idx, art);
+    let exp_end =
+        expected_segment_end_at(host, file.ptr, file.articles_len, art_idx, art, file.decoded_file_size);
+    host.article_set_i64_pair(art.ptr, exp_off, exp_end);
+
+    let chosen = sources[round as usize].clone();
+    art.message_id = chosen.clone();
+    art.dupe_fallback_round = round + 1;
+    host.article_set_str(
+        art.ptr,
+        crate::queuesubsys_host::ART_STR_MESSAGE_ID,
+        Some(&chosen),
+    );
+    host.article_set_int(
+        art.ptr,
+        crate::queuesubsys_host::ART_INT_DUPE_FALLBACK_ROUND,
+        round + 1,
+    );
+    true
+}
+
+#[cfg(unix)]
+pub fn dupe_fallback_static_op(
+    op: std::ffi::c_int,
+    a1: std::ffi::c_int,
+    p1: usize,
+    host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
+) -> std::ffi::c_int {
+    match op {
+        0 => {
+            par_damage_forget_all(a1);
+            0
+        }
+        1 => {
+            let Some(cb) = host_cb else {
+                return 0;
+            };
+            let host = crate::queuesubsys_host::QueueSubsysHost::new(std::ptr::null_mut(), cb);
+            std::ffi::c_int::from(should_defer_to_par_host(&host, p1))
+        }
+        _ => 0,
     }
 }
 

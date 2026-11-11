@@ -808,7 +808,7 @@ private:
 			return 0;
 		}
 		case 12:
-			ScriptController::TerminateAll();
+			nzbget_rs_script_terminate_all(&ScriptHostCb);
 			self->StopRemoteServer();
 			if (self->m_frontend)
 			{

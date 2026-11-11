@@ -4663,459 +4663,24 @@ fn run_post_renamer_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, is_
     });
 }
 
-fn run_post_script_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
-    let script_comma_list = with_dq_guard(ctx, host_cb, |_| {
-        let param_count = unsafe {
-            host_cb(
-                ctx,
-                1,
-                0,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) as usize
-        };
-        let mut list = Vec::new();
-        for idx in 0..param_count {
-            let mut strs = [ptr::null() as *const c_char; 2];
-            unsafe {
-                host_cb(
-                    ctx,
-                    1,
-                    1,
-                    idx as c_int,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                );
-            }
-            let pname = unsafe { ptr_bytes(strs[0]) };
-            let pval = unsafe { ptr_bytes(strs[1]) };
-            if !pname.is_empty()
-                && pname[0] != b'*'
-                && pname[pname.len() - 1] == b':'
-                && (pval.eq_ignore_ascii_case(b"yes")
-                    || pval.eq_ignore_ascii_case(b"on")
-                    || pval == b"1")
-            {
-                list.extend_from_slice(&pname[..pname.len() - 1]);
-                list.push(b',');
-            }
-        }
-        list
-    });
-
-    let c_list = to_c_buf(&script_comma_list);
-    unsafe {
-        host_cb(
-            ctx,
-            1,
-            2,
-            0,
-            0,
-            0,
-            c_list.as_ptr() as *const c_char,
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    }
-}
-
-fn exec_post_script_one(
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn post_script_add_message_inner(
     ctx: *mut c_void,
     host_cb: NzbgetRsRepairCtrlHostFn,
-    parcheck_enabled: bool,
-) {
-    let mut ints = [0 as c_int; 2];
-    let mut strs = [ptr::null() as *const c_char; 4];
-    unsafe {
-        host_cb(
-            ctx,
-            4,
-            0,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ints.as_mut_ptr(),
-            ptr::null_mut(),
-            strs.as_mut_ptr(),
-        );
-    }
-    if ints[0] == 0 || ints[1] != 0 {
-        return;
-    }
-    let script_name = unsafe { ptr_bytes(strs[0]) };
-    let display_name = unsafe { ptr_bytes(strs[1]) };
-    let entry = unsafe { ptr_bytes(strs[2]) };
-    let nzb_name = unsafe { ptr_bytes(strs[3]) };
-
-    let exec_msg = [
-        b"Executing post-process-script ",
-        script_name.as_slice(),
-        b" for ",
-        nzb_name.as_slice(),
-    ]
-    .concat();
-    emit_job_msg(ctx, host_cb, MK_INFO, &exec_msg);
-
-    let prog_lbl = trunc_1023([b"Executing post-process-script ", script_name.as_slice()].concat());
-    let c_prog = to_c_buf(&prog_lbl);
-    with_dq_guard(ctx, host_cb, |_| unsafe {
-        host_cb(
-            ctx,
-            4,
-            1,
-            0,
-            0,
-            0,
-            c_prog.as_ptr() as *const c_char,
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    });
-
-    let info_name = trunc_1023(
-        [
-            b"post-process-script ",
-            script_name.as_slice(),
-            b" for ",
-            nzb_name.as_slice(),
-        ]
-        .concat(),
-    );
-    let prefix_len = (display_name.len() + 2) as c_int;
-    let c_entry = to_c_buf(&entry);
-    let c_info = to_c_buf(&info_name);
-    let c_disp = to_c_buf(&display_name);
-    unsafe {
-        host_cb(
-            ctx,
-            4,
-            2,
-            prefix_len,
-            c_disp.as_ptr() as usize,
-            0,
-            c_entry.as_ptr() as *const c_char,
-            c_info.as_ptr() as *const c_char,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    }
-
-    with_dq_guard(ctx, host_cb, |_| {
-        let mut env_ints = [0 as c_int; 13];
-        let mut env_strs = [ptr::null() as *const c_char; 9];
-        let mut status_buf = Vec::new();
-        extern "C" fn set_vec(vec_ptr: usize, s: *const c_char) {
-            let v = unsafe { &mut *(vec_ptr as *mut Vec<u8>) };
-            *v = unsafe { ptr_bytes(s) };
-        }
-        unsafe {
-            host_cb(
-                ctx,
-                4,
-                3,
-                0,
-                (&mut status_buf as *mut Vec<u8>) as usize,
-                set_vec as *const () as usize,
-                ptr::null(),
-                ptr::null(),
-                env_ints.as_mut_ptr(),
-                ptr::null_mut(),
-                env_strs.as_mut_ptr(),
-            );
-        }
-        let srv_count = env_ints[12].max(0) as usize;
-        let mut srv_ids = Vec::with_capacity(srv_count);
-        let mut srv_succ = Vec::with_capacity(srv_count);
-        let mut srv_fail = Vec::with_capacity(srv_count);
-        for i in 0..srv_count {
-            let mut si = [0 as c_int; 3];
-            unsafe {
-                host_cb(
-                    ctx,
-                    4,
-                    4,
-                    i as c_int,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    si.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-            srv_ids.push(si[0]);
-            srv_succ.push(si[1]);
-            srv_fail.push(si[2]);
-        }
-
-        let c_status = to_c_buf(&status_buf);
-        let cstr_or_empty = |p: *const c_char| -> &CStr {
-            if p.is_null() {
-                c""
-            } else {
-                unsafe { CStr::from_ptr(p) }
-            }
-        };
-        let status_cstr = CStr::from_bytes_with_nul(&c_status).unwrap_or(c"");
-        let inp = crate::extension::PostScriptEnvInput {
-            nzb_id: env_ints[0],
-            nzb_name: cstr_or_empty(env_strs[0]),
-            dest_dir: cstr_or_empty(env_strs[1]),
-            filename: cstr_or_empty(env_strs[2]),
-            queued_filename: cstr_or_empty(env_strs[3]),
-            url: cstr_or_empty(env_strs[4]),
-            final_dir: cstr_or_empty(env_strs[5]),
-            category: cstr_or_empty(env_strs[6]),
-            health: env_ints[1],
-            critical_health: env_ints[2],
-            dupe_key: cstr_or_empty(env_strs[7]),
-            dupe_score: env_ints[3],
-            dupe_mode: env_ints[4],
-            status: status_cstr,
-            script_status: env_ints[5],
-            par_status: env_ints[6],
-            unpack_status: env_ints[7],
-            delete_status: env_ints[8],
-            mark_status: env_ints[9],
-            total_articles: env_ints[10],
-            success_articles: env_ints[11],
-            failed_articles: unsafe {
-                host_cb(
-                    ctx,
-                    4,
-                    5,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                ) as c_int
-            },
-            server_ids: &srv_ids,
-            server_success_articles: &srv_succ,
-            server_failed_articles: &srv_fail,
-        };
-
-        crate::extension::post_script_prepare_env(
-            &inp,
-            |name, val| unsafe {
-                host_cb(
-                    ctx,
-                    4,
-                    6,
-                    0,
-                    0,
-                    0,
-                    name.as_ptr(),
-                    val.as_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            },
-            |name, val| unsafe {
-                host_cb(
-                    ctx,
-                    4,
-                    7,
-                    val,
-                    0,
-                    0,
-                    name.as_ptr(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            },
-        );
-
-        let c_sname = to_c_buf(&script_name);
-        unsafe {
-            host_cb(
-                ctx,
-                4,
-                8,
-                0,
-                0,
-                0,
-                c_sname.as_ptr() as *const c_char,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
-    });
-
-    let mut exec_out = [0 as c_int; 2];
-    unsafe {
-        host_cb(
-            ctx,
-            4,
-            9,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            exec_out.as_mut_ptr(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    }
-    let exit_code = exec_out[0];
-    let par_status = exec_out[1];
-
-    let mut up_info_name = info_name;
-    if let Some(first) = up_info_name.first_mut() {
-        *first = b'P';
-    }
-
-    let (st, action, req_par) = crate::extension::analyse_post_script_exit_code(
-        exit_code,
-        par_status,
-        1,
-        parcheck_enabled,
-        0,
-        1,
-        2,
-    );
-    match action {
-        1 => emit_job_msg(
-            ctx,
-            host_cb,
-            MK_INFO,
-            &[up_info_name.as_slice(), b" successful"].concat(),
-        ),
-        2 => emit_job_msg(
-            ctx,
-            host_cb,
-            MK_ERROR,
-            &[up_info_name.as_slice(), b" failed"].concat(),
-        ),
-        3 => emit_job_msg(
-            ctx,
-            host_cb,
-            MK_INFO,
-            &[up_info_name.as_slice(), b" skipped"].concat(),
-        ),
-        4 => emit_job_msg(
-            ctx,
-            host_cb,
-            MK_ERROR,
-            &[
-                up_info_name.as_slice(),
-                b" requested par-check/repair, but the collection was already checked",
-            ]
-            .concat(),
-        ),
-        5 => emit_job_msg(
-            ctx,
-            host_cb,
-            MK_INFO,
-            &[up_info_name.as_slice(), b" requested par-check/repair"].concat(),
-        ),
-        _ => emit_job_msg(
-            ctx,
-            host_cb,
-            MK_ERROR,
-            &[
-                up_info_name.as_slice(),
-                b" failed (terminated with unknown status)",
-            ]
-            .concat(),
-        ),
-    }
-
-    let c_sname = to_c_buf(&script_name);
-    with_dq_guard(ctx, host_cb, |_| unsafe {
-        host_cb(
-            ctx,
-            4,
-            10,
-            st,
-            usize::from(req_par),
-            0,
-            c_sname.as_ptr() as *const c_char,
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    });
-}
-
-fn post_script_add_message(
-    ctx: *mut c_void,
-    host_cb: NzbgetRsRepairCtrlHostFn,
+    script_host_cb: crate::script::NzbgetRsScriptHostFn,
+    prefix_len: usize,
+    info_name: &[u8],
+    nzb_name: &[u8],
     kind: i32,
     text: &[u8],
 ) {
-    let mut ints = [0 as c_int; 2];
-    let mut strs = [ptr::null() as *const c_char; 2];
-    unsafe {
-        host_cb(
-            ctx,
-            5,
-            0,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ints.as_mut_ptr(),
-            ptr::null_mut(),
-            strs.as_mut_ptr(),
-        );
-    }
-    let prefix_len = ints[0].max(0) as usize;
-    let info_name = unsafe { ptr_bytes(strs[0]) };
-    let nzb_name = unsafe { ptr_bytes(strs[1]) };
-
     let msg_text = &text[prefix_len.min(text.len())..];
     let cmd = crate::extension::parse_post_script_cmd(msg_text);
     if cmd.kind != 0 {
         if msg_text.len() >= 6 {
             let dbg = [b"Command ", &msg_text[6..], b" detected"].concat();
-            let c_dbg = to_c_buf(&dbg);
-            unsafe {
-                host_cb(
-                    ctx,
-                    5,
-                    1,
-                    0,
-                    0,
-                    0,
-                    c_dbg.as_ptr() as *const c_char,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            crate::script::host_log(ptr::null_mut(), script_host_cb, MK_DEBUG, &dbg);
         }
         match cmd.kind {
             1 => {
@@ -5175,23 +4740,17 @@ fn post_script_add_message(
                 });
             }
             4 => {
-                let mark_msg = [b"Marking ", nzb_name.as_slice(), b" as bad"].concat();
-                let c_mark = to_c_buf(&mark_msg);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        5,
-                        3,
-                        MK_WARNING,
-                        1,
-                        0,
-                        c_mark.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                let mark_msg = [b"Marking ", nzb_name, b" as bad"].concat();
+                post_script_add_message_inner(
+                    ctx,
+                    host_cb,
+                    script_host_cb,
+                    0,
+                    info_name,
+                    nzb_name,
+                    MK_WARNING,
+                    &mark_msg,
+                );
                 with_dq_guard(ctx, host_cb, |_| unsafe {
                     host_cb(
                         ctx,
@@ -5200,7 +4759,7 @@ fn post_script_add_message(
                         1,
                         0,
                         0,
-                        c_mark.as_ptr() as *const c_char,
+                        ptr::null(),
                         ptr::null(),
                         ptr::null_mut(),
                         ptr::null_mut(),
@@ -5213,7 +4772,7 @@ fn post_script_add_message(
                     b"Invalid command \"",
                     msg_text,
                     b"\" received from ",
-                    info_name.as_slice(),
+                    info_name,
                 ]
                 .concat();
                 let c_err = to_c_buf(&err_msg);
@@ -5341,11 +4900,392 @@ fn post_script_add_message(
     }
 }
 
+#[cfg(unix)]
+pub unsafe fn post_script_run(
+    runner_ptr: *mut crate::script::NzbgetRsScriptRunner,
+    ext_mgr_ptr: *const crate::extension::RsExtensionManager,
+    parcheck_enabled: bool,
+    ctx: *mut c_void,
+    host_cb: Option<NzbgetRsRepairCtrlHostFn>,
+    script_host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
+) {
+    let (Some(cb), Some(shcb)) = (host_cb, script_host_cb) else {
+        return;
+    };
+
+    let script_comma_list = with_dq_guard(ctx, cb, |_| {
+        let param_count = unsafe {
+            cb(
+                ctx,
+                1,
+                0,
+                0,
+                0,
+                0,
+                ptr::null(),
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ) as usize
+        };
+        let mut list = Vec::new();
+        for idx in 0..param_count {
+            let mut strs = [ptr::null() as *const c_char; 2];
+            unsafe {
+                cb(
+                    ctx,
+                    1,
+                    1,
+                    idx as c_int,
+                    0,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    strs.as_mut_ptr(),
+                );
+            }
+            let pname = unsafe { ptr_bytes(strs[0]) };
+            let pval = unsafe { ptr_bytes(strs[1]) };
+            if !pname.is_empty()
+                && pname[0] != b'*'
+                && pname[pname.len() - 1] == b':'
+                && (pval.eq_ignore_ascii_case(b"yes")
+                    || pval.eq_ignore_ascii_case(b"on")
+                    || pval == b"1")
+            {
+                list.extend_from_slice(&pname[..pname.len() - 1]);
+                list.push(b',');
+            }
+        }
+        list
+    });
+
+    if let (Some(runner), Some(ext_mgr)) = (runner_ptr.as_ref(), ext_mgr_ptr.as_ref()) {
+        let mut cfg = crate::script::ScriptExecEnv::new(ptr::null_mut(), shcb);
+
+        ext_mgr.execute_script_list(&script_comma_list, |ext| {
+            if !ext.post_script {
+                return;
+            }
+            let mut ints = [0 as c_int; 1];
+            let mut strs = [ptr::null() as *const c_char; 1];
+            unsafe {
+                cb(
+                    ctx,
+                    4,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ints.as_mut_ptr(),
+                    ptr::null_mut(),
+                    strs.as_mut_ptr(),
+                );
+            }
+            if ints[0] != 0 {
+                return;
+            }
+            let nzb_name = unsafe { ptr_bytes(strs[0]) };
+            let info_name = trunc_1023(
+                [
+                    b"post-process-script ",
+                    ext.name.as_slice(),
+                    b" for ",
+                    nzb_name.as_slice(),
+                ]
+                .concat(),
+            );
+
+            let exec_msg = [
+                b"Executing post-process-script ",
+                ext.name.as_slice(),
+                b" for ",
+                nzb_name.as_slice(),
+            ]
+            .concat();
+            post_script_add_message_inner(
+                ctx, cb, shcb, 0, &info_name, &nzb_name, MK_INFO, &exec_msg,
+            );
+
+            let prog_lbl =
+                trunc_1023([b"Executing post-process-script ", ext.name.as_slice()].concat());
+            let c_prog = to_c_buf(&prog_lbl);
+            with_dq_guard(ctx, cb, |_| unsafe {
+                cb(
+                    ctx,
+                    4,
+                    1,
+                    0,
+                    0,
+                    0,
+                    c_prog.as_ptr() as *const c_char,
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            });
+
+            runner.inner.set_info_name(&info_name);
+            cfg.args = vec![ext.entry.clone()];
+            cfg.log_prefix = Some(ext.display_name.clone());
+            let prefix_len = ext.display_name.len() + 2;
+
+            with_dq_guard(ctx, cb, |_| {
+                cfg.reset_env(ptr::null_mut(), shcb);
+                let mut env_ints = [0 as c_int; 14];
+                let mut env_strs = [ptr::null() as *const c_char; 8];
+                let mut status_buf = Vec::new();
+                extern "C" fn set_vec(vec_ptr: usize, s: *const c_char) {
+                    let v = unsafe { &mut *(vec_ptr as *mut Vec<u8>) };
+                    *v = unsafe { ptr_bytes(s) };
+                }
+                unsafe {
+                    cb(
+                        ctx,
+                        4,
+                        3,
+                        0,
+                        (&mut status_buf as *mut Vec<u8>) as usize,
+                        set_vec as *const () as usize,
+                        ptr::null(),
+                        ptr::null(),
+                        env_ints.as_mut_ptr(),
+                        ptr::null_mut(),
+                        env_strs.as_mut_ptr(),
+                    );
+                }
+                let srv_count = env_ints[12].max(0) as usize;
+                let mut srv_ids = Vec::with_capacity(srv_count);
+                let mut srv_succ = Vec::with_capacity(srv_count);
+                let mut srv_fail = Vec::with_capacity(srv_count);
+                for i in 0..srv_count {
+                    let mut si = [0 as c_int; 3];
+                    unsafe {
+                        cb(
+                            ctx,
+                            4,
+                            4,
+                            i as c_int,
+                            0,
+                            0,
+                            ptr::null(),
+                            ptr::null(),
+                            si.as_mut_ptr(),
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                        );
+                    }
+                    srv_ids.push(si[0]);
+                    srv_succ.push(si[1]);
+                    srv_fail.push(si[2]);
+                }
+
+                let param_count = env_ints[13].max(0) as usize;
+                let mut params = Vec::with_capacity(param_count);
+                for idx in 0..param_count {
+                    let mut pstrs = [ptr::null() as *const c_char; 2];
+                    unsafe {
+                        cb(
+                            ctx,
+                            1,
+                            1,
+                            idx as c_int,
+                            0,
+                            0,
+                            ptr::null(),
+                            ptr::null(),
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                            pstrs.as_mut_ptr(),
+                        );
+                    }
+                    params.push((unsafe { ptr_bytes(pstrs[0]) }, unsafe {
+                        ptr_bytes(pstrs[1])
+                    }));
+                }
+
+                let c_status = to_c_buf(&status_buf);
+                let cstr_or_empty = |p: *const c_char| -> &CStr {
+                    if p.is_null() {
+                        c""
+                    } else {
+                        unsafe { CStr::from_ptr(p) }
+                    }
+                };
+                let status_cstr = CStr::from_bytes_with_nul(&c_status).unwrap_or(c"");
+                let inp = crate::extension::PostScriptEnvInput {
+                    nzb_id: env_ints[0],
+                    nzb_name: cstr_or_empty(env_strs[0]),
+                    dest_dir: cstr_or_empty(env_strs[1]),
+                    filename: cstr_or_empty(env_strs[2]),
+                    queued_filename: cstr_or_empty(env_strs[3]),
+                    url: cstr_or_empty(env_strs[4]),
+                    final_dir: cstr_or_empty(env_strs[5]),
+                    category: cstr_or_empty(env_strs[6]),
+                    health: env_ints[1],
+                    critical_health: env_ints[2],
+                    dupe_key: cstr_or_empty(env_strs[7]),
+                    dupe_score: env_ints[3],
+                    dupe_mode: env_ints[4],
+                    status: status_cstr,
+                    script_status: env_ints[5],
+                    par_status: env_ints[6],
+                    unpack_status: env_ints[7],
+                    delete_status: env_ints[8],
+                    mark_status: env_ints[9],
+                    total_articles: env_ints[10],
+                    success_articles: env_ints[11],
+                    failed_articles: unsafe {
+                        cb(
+                            ctx,
+                            4,
+                            5,
+                            0,
+                            0,
+                            0,
+                            ptr::null(),
+                            ptr::null(),
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                        ) as c_int
+                    },
+                    server_ids: &srv_ids,
+                    server_success_articles: &srv_succ,
+                    server_failed_articles: &srv_fail,
+                };
+
+                let cfg_cell = std::cell::RefCell::new(&mut cfg);
+                crate::extension::post_script_prepare_env(
+                    &inp,
+                    |name, val| {
+                        cfg_cell
+                            .borrow_mut()
+                            .set_env_var(name.to_bytes(), val.to_bytes());
+                    },
+                    |name, val| {
+                        cfg_cell.borrow_mut().set_int_env_var(name.to_bytes(), val);
+                    },
+                );
+                cfg.prepare_env_script(Some(&params), &ext.name, ptr::null_mut(), shcb);
+            });
+
+            let exit_code =
+                runner
+                    .inner
+                    .execute(&mut cfg, ptr::null_mut(), shcb, &mut |kind, text| {
+                        let cur_info = runner.inner.get_info_name();
+                        post_script_add_message_inner(
+                            ctx, cb, shcb, prefix_len, &cur_info, &nzb_name, kind, text,
+                        );
+                    });
+            cfg.log_prefix = None;
+
+            let par_status = unsafe {
+                cb(
+                    ctx,
+                    4,
+                    9,
+                    0,
+                    0,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ) as c_int
+            };
+
+            let mut up_info_name = info_name.clone();
+            if let Some(first) = up_info_name.first_mut() {
+                *first = b'P';
+            }
+
+            let (st, action, req_par) = crate::extension::analyse_post_script_exit_code(
+                exit_code,
+                par_status,
+                1,
+                parcheck_enabled,
+                0,
+                1,
+                2,
+            );
+            let (res_kind, res_msg) = match action {
+                1 => (MK_INFO, [up_info_name.as_slice(), b" successful"].concat()),
+                2 => (MK_ERROR, [up_info_name.as_slice(), b" failed"].concat()),
+                3 => (MK_INFO, [up_info_name.as_slice(), b" skipped"].concat()),
+                4 => (
+                    MK_ERROR,
+                    [
+                        up_info_name.as_slice(),
+                        b" requested par-check/repair, but the collection was already checked",
+                    ]
+                    .concat(),
+                ),
+                5 => (
+                    MK_INFO,
+                    [up_info_name.as_slice(), b" requested par-check/repair"].concat(),
+                ),
+                _ => (
+                    MK_ERROR,
+                    [
+                        up_info_name.as_slice(),
+                        b" failed (terminated with unknown status)",
+                    ]
+                    .concat(),
+                ),
+            };
+            post_script_add_message_inner(
+                ctx, cb, shcb, 0, &info_name, &nzb_name, res_kind, &res_msg,
+            );
+
+            let c_sname = to_c_buf(&ext.name);
+            with_dq_guard(ctx, cb, |_| unsafe {
+                cb(
+                    ctx,
+                    4,
+                    10,
+                    st,
+                    usize::from(req_par),
+                    0,
+                    c_sname.as_ptr() as *const c_char,
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            });
+        });
+    }
+
+    unsafe {
+        cb(
+            ctx,
+            1,
+            2,
+            0,
+            0,
+            0,
+            ptr::null(),
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        );
+    }
+}
+
 pub unsafe fn post_job_exec(
     job: c_int,
     a1: c_int,
     a2: c_int,
-    s1: *const c_char,
     host_cb: Option<NzbgetRsRepairCtrlHostFn>,
     ctx: *mut c_void,
 ) -> c_int {
@@ -5357,9 +5297,6 @@ pub unsafe fn post_job_exec(
         1 => run_cleanup_job(ctx, cb),
         2 => run_rename_job(ctx, cb, a1, a2),
         3 => run_post_renamer_job(ctx, cb, a1 != 0),
-        4 => run_post_script_job(ctx, cb),
-        5 => exec_post_script_one(ctx, cb, a1 != 0),
-        6 => post_script_add_message(ctx, cb, a1, &unsafe { ptr_bytes(s1) }),
         _ => {}
     }
     0

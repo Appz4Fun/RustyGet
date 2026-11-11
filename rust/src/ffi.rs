@@ -4462,269 +4462,6 @@ pub unsafe extern "C" fn nzbget_rs_options_convert_old_options(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_mgr_prepare_update(
-    ext_name: *const c_char,
-    found: c_int,
-    use_count: i64,
-    target_path: *const c_char,
-    archive_path: *const c_char,
-    out_backup_path: *mut RsBuf,
-) -> RsBuf {
-    let en = if ext_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(ext_name).to_bytes()
-    };
-    let tp = if target_path.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(target_path).to_bytes()
-    };
-    let ap = if archive_path.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(archive_path).to_bytes()
-    };
-    let (backup, err) = crate::extension::ext_mgr_prepare_update(en, found != 0, use_count, tp, ap);
-    if !out_backup_path.is_null() {
-        *out_backup_path = into_buf(backup);
-    }
-    match err {
-        Some(e) => into_buf(e),
-        None => RsBuf {
-            data: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        },
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_mgr_finish_update(
-    target_path: *const c_char,
-    backup_path: *const c_char,
-    archive_path: *const c_char,
-    install_err: *const c_char,
-) -> RsBuf {
-    let tp = if target_path.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(target_path).to_bytes()
-    };
-    let bp = if backup_path.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(backup_path).to_bytes()
-    };
-    let ap = if archive_path.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(archive_path).to_bytes()
-    };
-    let ie = if install_err.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(install_err).to_bytes())
-    };
-    match crate::extension::ext_mgr_finish_update(tp, bp, ap, ie) {
-        Some(e) => into_buf(e),
-        None => RsBuf {
-            data: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        },
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_mgr_delete_extension(
-    ext_name: *const c_char,
-    found: c_int,
-    use_count: i64,
-    target_path: *const c_char,
-) -> RsBuf {
-    let en = if ext_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(ext_name).to_bytes()
-    };
-    let tp = if target_path.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(target_path).to_bytes()
-    };
-    match crate::extension::ext_mgr_delete_extension(en, found != 0, use_count, tp) {
-        Some(e) => into_buf(e),
-        None => RsBuf {
-            data: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        },
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_mgr_install_extension(
-    file_path: *const c_char,
-    dest_path: *const c_char,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-    log_ctx: *mut std::ffi::c_void,
-) -> RsBuf {
-    let fp = if file_path.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(file_path).to_bytes()
-    };
-    let dp = if dest_path.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_path).to_bytes()
-    };
-    match crate::extension::ext_mgr_install_extension(fp, dp, |kind, msg| {
-        if let Some(cb) = log_cb {
-            let mut buf: Vec<u8> = msg.bytes().filter(|&b| b != 0).collect();
-            buf.push(0);
-            cb(log_ctx, kind, buf.as_ptr().cast::<c_char>());
-        }
-    }) {
-        Some(err) => into_buf(err),
-        None => RsBuf {
-            data: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        },
-    }
-}
-
-pub type NzbScriptSetEnvSpecialCb = Option<
-    unsafe extern "C" fn(
-        ctx: *mut std::ffi::c_void,
-        prefix: *const c_char,
-        name: *const c_char,
-        value: *const c_char,
-    ),
->;
-
-pub type NzbScriptPrepareOptionsCb =
-    Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, strip_prefix: *const c_char)>;
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_script_prepare_env(
-    script_name: *const c_char,
-    has_parameters: c_int,
-    param_names: *const *const c_char,
-    param_values: *const *const c_char,
-    param_count: usize,
-    ctx: *mut std::ffi::c_void,
-    set_env_special_cb: NzbScriptSetEnvSpecialCb,
-    prepare_options_cb: NzbScriptPrepareOptionsCb,
-) {
-    let sn = if script_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(script_name).to_bytes()
-    };
-    let mut names = Vec::with_capacity(param_count);
-    let mut vals = Vec::with_capacity(param_count);
-    if !param_names.is_null() && !param_values.is_null() {
-        let n_slice = std::slice::from_raw_parts(param_names, param_count);
-        let v_slice = std::slice::from_raw_parts(param_values, param_count);
-        for i in 0..param_count {
-            let n_cstr = if n_slice[i].is_null() {
-                c""
-            } else {
-                CStr::from_ptr(n_slice[i])
-            };
-            let v_cstr = if v_slice[i].is_null() {
-                c""
-            } else {
-                CStr::from_ptr(v_slice[i])
-            };
-            names.push(n_cstr);
-            vals.push(v_cstr);
-        }
-    }
-    crate::extension::nzb_script_prepare_env(
-        sn,
-        has_parameters != 0,
-        &names,
-        &vals,
-        |prefix, name, val| {
-            if let Some(cb) = set_env_special_cb {
-                cb(ctx, prefix.as_ptr(), name.as_ptr(), val.as_ptr());
-            }
-        },
-        |strip_prefix| {
-            if let Some(cb) = prepare_options_cb {
-                cb(ctx, strip_prefix.as_ptr());
-            }
-        },
-    );
-}
-
-pub type ScriptSetEnvVarCb = Option<
-    unsafe extern "C" fn(ctx: *mut std::ffi::c_void, name: *const c_char, value: *const c_char),
->;
-
-pub type ScriptSetIntEnvVarCb =
-    Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, name: *const c_char, value: c_int)>;
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_scan_script_prepare_env(
-    nzb_filename: *const c_char,
-    base_filename: *const c_char,
-    url: *const c_char,
-    nzb_name: *const c_char,
-    category: *const c_char,
-    priority: c_int,
-    add_top: c_int,
-    add_paused: c_int,
-    dupe_key: *const c_char,
-    dupe_score: c_int,
-    dupe_mode: c_int,
-    directory: *const c_char,
-    path_sep: c_char,
-    ctx: *mut std::ffi::c_void,
-    set_env_cb: ScriptSetEnvVarCb,
-    set_int_env_cb: ScriptSetIntEnvVarCb,
-) {
-    let cstr_or_empty = |p: *const c_char| -> &CStr {
-        if p.is_null() {
-            c""
-        } else {
-            CStr::from_ptr(p)
-        }
-    };
-    let dir_bytes = cstr_or_empty(directory).to_bytes();
-    crate::extension::scan_script_prepare_env(
-        cstr_or_empty(nzb_filename),
-        cstr_or_empty(base_filename),
-        cstr_or_empty(url),
-        cstr_or_empty(nzb_name),
-        cstr_or_empty(category),
-        priority,
-        add_top != 0,
-        add_paused != 0,
-        cstr_or_empty(dupe_key),
-        dupe_score,
-        dupe_mode,
-        dir_bytes,
-        path_sep as u8,
-        |name, val| {
-            if let Some(cb) = set_env_cb {
-                cb(ctx, name.as_ptr(), val.as_ptr());
-            }
-        },
-        |name, val| {
-            if let Some(cb) = set_int_env_cb {
-                cb(ctx, name.as_ptr(), val);
-            }
-        },
-    );
-}
-
 // ============================================================================
 // NzbFileParser, UrlCoordinator & DirectRenamer End-to-End FFI
 // ============================================================================
@@ -4939,122 +4676,6 @@ pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_get_file(
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_alloc_buf(data: *const c_char, len: usize) -> RsBuf {
     into_buf(bytes(data, len).to_vec())
-}
-
-#[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_mgr_load_extensions(
-    script_dir: *const c_char,
-    script_order: *const c_char,
-    path_sep: c_char,
-    ctx: *mut std::ffi::c_void,
-    on_error: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-    on_extension: Option<
-        unsafe extern "C" fn(
-            ctx: *mut std::ffi::c_void,
-            entry: *const c_char,
-            entry_len: usize,
-            location: *const c_char,
-            location_len: usize,
-            root_dir: *const c_char,
-            root_dir_len: usize,
-            name: *const c_char,
-            name_len: usize,
-            display_name: *const c_char,
-            display_name_len: usize,
-            queue_events: *const c_char,
-            queue_events_len: usize,
-            task_time: *const c_char,
-            task_time_len: usize,
-            post_script: c_int,
-            scan_script: c_int,
-            queue_script: c_int,
-            scheduler_script: c_int,
-            feed_script: c_int,
-            json_ptr: *const c_char,
-            json_len: usize,
-            xml_ptr: *const c_char,
-            xml_len: usize,
-        ),
-    >,
-) -> RsBuf {
-    let dir_bytes = input(script_dir);
-    let order_bytes = input(script_order);
-    let loaded = match crate::extension::ext_mgr_load_extensions_with(
-        dir_bytes,
-        order_bytes,
-        path_sep as u8,
-        |err_msg| {
-            if let Some(cb) = on_error {
-                let c_msg = nul(err_msg);
-                cb(ctx, c_msg.as_ptr().cast());
-            }
-        },
-    ) {
-        Ok(list) => list,
-        Err(err) => return into_buf(err.into_bytes()),
-    };
-    if let Some(cb) = on_extension {
-        for ext in &loaded {
-            let json = crate::extension::extension_to_json(ext);
-            let xml = crate::extension::extension_to_xml(ext);
-            cb(
-                ctx,
-                ext.entry.as_ptr().cast(),
-                ext.entry.len(),
-                ext.location.as_ptr().cast(),
-                ext.location.len(),
-                ext.root_dir.as_ptr().cast(),
-                ext.root_dir.len(),
-                ext.name.as_ptr().cast(),
-                ext.name.len(),
-                ext.display_name.as_ptr().cast(),
-                ext.display_name.len(),
-                ext.queue_events.as_ptr().cast(),
-                ext.queue_events.len(),
-                ext.task_time.as_ptr().cast(),
-                ext.task_time.len(),
-                i32::from(ext.post_script),
-                i32::from(ext.scan_script),
-                i32::from(ext.queue_script),
-                i32::from(ext.scheduler_script),
-                i32::from(ext.feed_script),
-                json.as_ptr().cast(),
-                json.len(),
-                xml.as_ptr().cast(),
-                xml.len(),
-            );
-        }
-    }
-    RsBuf {
-        data: std::ptr::null_mut(),
-        len: 0,
-        cap: 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_mgr_resolve_extension_path(
-    ext_loc_ptr: *const c_char,
-    ext_loc_len: usize,
-    ext_entry_ptr: *const c_char,
-    ext_entry_len: usize,
-    all_locs_ptrs: *const *const c_char,
-    all_locs_lens: *const usize,
-    all_locs_count: usize,
-) -> RsBuf {
-    let mut locs = Vec::with_capacity(all_locs_count);
-    for i in 0..all_locs_count {
-        if !all_locs_ptrs.is_null() && !all_locs_lens.is_null() {
-            locs.push(bytes(*all_locs_ptrs.add(i), *all_locs_lens.add(i)));
-        }
-    }
-    let resolved = crate::extension::ext_mgr_resolve_extension_path(
-        bytes(ext_loc_ptr, ext_loc_len),
-        bytes(ext_entry_ptr, ext_entry_len),
-        &locs,
-    );
-    into_buf(resolved.to_vec())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6637,28 +6258,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_update_deleted_stats(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_util_find_executor_program(
-    filename: *const c_char,
-    custom_path: *const c_char,
-    out_found: *mut c_int,
-) -> RsBuf {
-    match crate::util::util_find_executor_program(input(filename), input(custom_path)) {
-        Some(v) => {
-            if !out_found.is_null() {
-                *out_found = 1;
-            }
-            into_buf(v)
-        }
-        None => {
-            if !out_found.is_null() {
-                *out_found = 0;
-            }
-            into_buf(Vec::new())
-        }
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_util_format_time(
     time_sec: i64,
     buffer: *mut c_char,
@@ -6691,7 +6290,6 @@ pub unsafe extern "C" fn nzbget_rs_fs_string_op(
                 return into_buf(Vec::new());
             }
         },
-        1 => crate::fsops::get_current_directory(),
         2 => {
             let opt = if path.is_null() {
                 None
@@ -6787,10 +6385,6 @@ pub unsafe extern "C" fn nzbget_rs_fs_op_with_err(
                     slice,
                 ))
             }
-        }
-        7 => {
-            crate::fsops::fix_exec_permission(input(p1));
-            1
         }
         8 => {
             if p1.is_null() {
@@ -6970,52 +6564,6 @@ pub unsafe extern "C" fn nzbget_rs_script_calc_total_status(
         std::slice::from_raw_parts(statuses, count)
     };
     crate::downloadinfo::script_calc_total_status(slice)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_script_parse_nzb_cmd(
-    scope: c_int,
-    msg_text: *const c_char,
-    event: c_int,
-    qe_nzb_downloaded: c_int,
-    out_key_off: *mut usize,
-    out_key_len: *mut usize,
-    out_val_off: *mut usize,
-    out_int_val: *mut c_int,
-) -> c_int {
-    let bytes = if msg_text.is_null() {
-        &[][..]
-    } else {
-        input(msg_text)
-    };
-    let (kind, k_off, k_len, v_off, i_val) = match scope {
-        0 => {
-            let r = crate::extension::parse_queue_script_cmd(bytes, event, qe_nzb_downloaded);
-            (r.kind, r.key_offset, r.key_len, r.val_offset, 0)
-        }
-        1 => {
-            let r = crate::extension::parse_post_script_cmd(bytes);
-            (r.kind, r.key_offset, r.key_len, r.val_offset, 0)
-        }
-        2 => {
-            let r = crate::extension::parse_scan_script_cmd(bytes);
-            (r.kind, r.key_offset, r.key_len, r.val_offset, r.int_val)
-        }
-        _ => (0, 0, 0, 0, 0),
-    };
-    if !out_key_off.is_null() {
-        *out_key_off = k_off;
-    }
-    if !out_key_len.is_null() {
-        *out_key_len = k_len;
-    }
-    if !out_val_off.is_null() {
-        *out_val_off = v_off;
-    }
-    if !out_int_val.is_null() {
-        *out_int_val = i_val;
-    }
-    kind
 }
 
 #[unsafe(no_mangle)]
@@ -7505,12 +7053,32 @@ pub unsafe extern "C" fn nzbget_rs_post_job_exec(
     job: c_int,
     a1: c_int,
     a2: c_int,
-    s1: *const c_char,
     host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
     ctx: *mut c_void,
 ) -> c_int {
     let _cancel_guard = PosixCancelGuard::disable();
-    crate::postproc::post_job_exec(job, a1, a2, s1, host_cb, ctx)
+    crate::postproc::post_job_exec(job, a1, a2, host_cb, ctx)
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_post_script_run(
+    runner: *mut crate::script::NzbgetRsScriptRunner,
+    ext_mgr: *const crate::extension::RsExtensionManager,
+    parcheck_enabled: c_int,
+    ctx: *mut c_void,
+    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
+    script_host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
+) {
+    let _cancel_guard = PosixCancelGuard::disable();
+    crate::postproc::post_script_run(
+        runner,
+        ext_mgr,
+        parcheck_enabled != 0,
+        ctx,
+        host_cb,
+        script_host_cb,
+    );
 }
 
 #[cfg(unix)]
@@ -7555,103 +7123,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_exec(
 ) -> c_int {
     let _cancel_guard = PosixCancelGuard::disable();
     crate::streamrepair_coord::stream_repair_ctrl_exec(ctrl, op, host_cb, ctx)
-}
-
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
-    op: c_int,
-    _a: c_int,
-    _b: c_int,
-    _c: c_int,
-    _d: c_int,
-    _e: c_int,
-    _f: c_int,
-    _t1: i64,
-    _t2: i64,
-    _t3: i64,
-    _t4: i64,
-    s1: *const c_char,
-    s2: *const c_char,
-    _i32_arr: *const c_int,
-    _u8_arr: *const u8,
-    _i64_arr: *const i64,
-    _len: usize,
-    out1: *mut c_int,
-    out2: *mut c_int,
-    _out3: *mut c_int,
-    _out4: *mut c_int,
-    _out_arr: *mut c_int,
-    _out_i64_arr: *mut i64,
-) -> c_int {
-    let s1_bytes = if s1.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(s1).to_bytes()
-    };
-    let s2_bytes = if s2.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(s2).to_bytes()
-    };
-    match op {
-        23 => c_int::from(crate::extension::ext_is_in_list(s1_bytes, s2_bytes)),
-        25 => c_int::from(crate::extension::is_nzbget_internal_env_var(s1_bytes)),
-        26 => {
-            let (trimmed_len, mk, text_off) =
-                crate::extension::classify_script_output_line(s1_bytes);
-            if trimmed_len == 0 {
-                return -1;
-            }
-            if !out1.is_null() {
-                *out1 = trimmed_len as c_int;
-            }
-            if !out2.is_null() {
-                *out2 = text_off as c_int;
-            }
-            mk
-        }
-        _ => 0,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_op(
-    op: c_int,
-    _a: c_int,
-    _b: c_int,
-    _c: c_int,
-    _d: c_int,
-    _e: c_int,
-    _t1: i64,
-    _t2: i64,
-    _t3: i64,
-    _f1: f64,
-    s1: *const c_char,
-    _cstr_arr: *const *const c_char,
-    _i64_arr: *const i64,
-    _len: usize,
-    _out1: *mut c_int,
-    _out2: *mut c_int,
-    _i64_inout: *mut i64,
-    out_buf: *mut RsBuf,
-) -> c_int {
-    let s1_bytes = if s1.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(s1).to_bytes()
-    };
-    if op == 10 {
-        let norm = crate::extension::normalize_special_env_var_name(s1_bytes);
-        if norm.as_slice() != s1_bytes {
-            if !out_buf.is_null() {
-                *out_buf = into_buf(norm);
-            }
-            return 1;
-        }
-    }
-    0
 }
 
 #[unsafe(no_mangle)]
@@ -7767,13 +7238,13 @@ pub struct NzbgetRsConnEnv {
 }
 
 #[cfg(unix)]
-struct PosixCancelGuard {
+pub(crate) struct PosixCancelGuard {
     old_state: c_int,
 }
 
 #[cfg(unix)]
 impl PosixCancelGuard {
-    unsafe fn disable() -> Self {
+    pub(crate) unsafe fn disable() -> Self {
         extern "C" {
             fn pthread_setcancelstate(state: c_int, oldstate: *mut c_int) -> c_int;
         }

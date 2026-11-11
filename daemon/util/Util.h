@@ -572,15 +572,6 @@ public:
 		return *this;
 	}
 	CString& operator=(const char* str) { Set(str); return *this; }
-	static CString FormatStr(const char* format, ...)
-	{
-		CString result;
-		va_list ap;
-		va_start(ap, format);
-		result.FormatV(format, ap);
-		va_end(ap);
-		return result;
-	}
 	operator char*() const { return m_data; }
 	char* operator*() const { return m_data; }
 	const char* Str() const { return m_data ? m_data : ""; }
@@ -728,21 +719,6 @@ protected:
 class Util
 {
 public:
-	static std::optional<std::string>
-	FindExecutorProgram(const std::string& filename, const std::string& customPath)
-	{
-		int found = 0;
-		NzbgetRsBuf buf = nzbget_rs_util_find_executor_program(
-			filename.c_str(), customPath.c_str(), &found);
-		std::optional<std::string> out;
-		if (found)
-		{
-			out = std::string(buf.data ? buf.data : "", buf.len);
-		}
-		nzbget_rs_free(buf);
-		return out;
-	}
-
 	static bool EmptyStr(const char* str) { return !str || !*str; }
 
 	template <typename From, typename To,
@@ -940,14 +916,6 @@ public:
 		return ok;
 	}
 
-	static CString GetCurrentDirectory()
-	{
-		NzbgetRsBuf buf = nzbget_rs_fs_string_op(1, nullptr, nullptr);
-		CString result(buf.data, (int)buf.len);
-		nzbget_rs_free(buf);
-		return result;
-	}
-
 	static std::optional<DiskState> GetDiskState(const char* path)
 	{
 		int64 avail = 0, total = 0;
@@ -966,10 +934,6 @@ public:
 		return result;
 	}
 
-	static void FixExecPermission(const char* filename)
-	{
-		nzbget_rs_fs_op_with_err(7, filename, nullptr, 0, nullptr);
-	}
 	static inline mode_t uMask;
 
 	static CString ExpandFileName(const char* filename)
@@ -1692,7 +1656,6 @@ public:
 	void SetDirectClientMode(bool directClientMode) { m_directClientMode = directClientMode; }
 	bool GetDirectClientMode() const { return m_directClientMode; }
 
-	const fs::path& GetTempDirPath() const { return m_tempDirPath; }
 	const char* GetUnrarPath() const { return m_unrarPath ? *m_unrarPath : ""; }
 	const char* GetSevenZipPath() const { return m_sevenZipPath ? *m_sevenZipPath : ""; }
 	const std::vector<fs::path>& GetScriptDirPaths() const { return m_scriptDirPaths; }
@@ -1707,7 +1670,6 @@ private:
 	Extender* m_extender;
 
 	// Options
-	fs::path m_tempDirPath;
 	std::vector<fs::path> m_scriptDirPaths;
 
 	bool m_configErrors = false;
@@ -2108,8 +2070,6 @@ private:
 		CheckDir(m_webDir, WEBDIR.data(), nullptr, true, false);
 		CheckScriptDir();
 		CheckDir(m_nzbDir, NZBDIR.data(), m_mainDir, false, true);
-
-		m_tempDirPath = fs::u8path(*m_tempDir);
 
 		Tokenizer tokDir(g_Options->GetScriptDir(), ",;");
 		while (const char* scriptDir = tokDir.Next())
@@ -10539,299 +10499,104 @@ extern PrePostProcessor* g_PrePostProcessor;
 #ifndef EXTENSION_MANAGER_H
 #define EXTENSION_MANAGER_H
 
-namespace Extension
+extern void ExitProc();
+extern int g_ArgumentCount;
+extern char* (*g_Arguments)[];
+extern char* (*g_EnvironmentVariables)[];
+
+inline uintptr_t ScriptHostCb(
+	void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+	const char* s1, const char* s2, int* ints, const char** strs);
+
+class ScriptJobThread final : public Thread
 {
-	struct Kind
-	{
-		bool post = false;
-		bool scan = false;
-		bool queue = false;
-		bool scheduler = false;
-		bool feed = false;
-	};
+public:
+	explicit ScriptJobThread(uintptr_t jobPtr) : m_jobPtr(jobPtr) {}
+	void Run() override { nzbget_rs_script_run_job(m_jobPtr, &ScriptHostCb); }
 
-	class Script final
-	{
-	public:
-		Script() = default;
-		~Script() = default;
-
-		Script& operator=(const Script&) = delete;
-		Script(const Script&) = delete;
-
-		Script(Script&& other) = default;
-		Script& operator=(Script&& other) = delete;
-
-		void SetEntry(std::string entry) { m_entry = std::move(entry); }
-		const char* GetEntry() const { return m_entry.c_str(); }
-		void SetLocation(std::string location) { m_location = std::move(location); }
-		const char* GetLocation() const { return m_location.c_str(); }
-		void SetRootDir(std::string dir) { m_rootDir = std::move(dir); }
-		const char* GetRootDir() const { return m_rootDir.c_str(); }
-		void SetName(std::string name) { m_name = std::move(name); }
-		const char* GetName() const { return m_name.c_str(); }
-		void SetDisplayName(std::string displayName) { m_displayName = std::move(displayName); }
-		const char* GetDisplayName() const { return m_displayName.c_str(); }
-		void SetKind(Kind kind) { m_kind = std::move(kind); }
-		bool GetPostScript() const { return m_kind.post; }
-		bool GetScanScript() const { return m_kind.scan; }
-		bool GetQueueScript() const { return m_kind.queue; }
-		bool GetSchedulerScript() const { return m_kind.scheduler; }
-		bool GetFeedScript() const { return m_kind.feed; }
-		void SetQueueEvents(std::string queueEvents) { m_queueEvents = std::move(queueEvents); }
-		const char* GetQueueEvents() const { return m_queueEvents.c_str(); }
-		void SetTaskTime(std::string taskTime) { m_taskTime = std::move(taskTime); }
-		const char* GetTaskTime() const { return m_taskTime.c_str(); }
-		void SetJsonStr(std::string json) { m_json = std::move(json); }
-		const std::string& GetJsonStr() const { return m_json; }
-		void SetXmlStr(std::string xml) { m_xml = std::move(xml); }
-		const std::string& GetXmlStr() const { return m_xml; }
-
-	private:
-		Kind m_kind;
-		std::string m_entry;
-		std::string m_location;
-		std::string m_rootDir;
-		std::string m_name;
-		std::string m_displayName;
-		std::string m_queueEvents;
-		std::string m_taskTime;
-		std::string m_json;
-		std::string m_xml;
-	};
-
-	inline std::string ToJsonStr(const Script& script)
-	{
-		return script.GetJsonStr();
-	}
-
-	inline std::string ToXmlStr(const Script& script)
-	{
-		return script.GetXmlStr();
-	}
-}
+private:
+	uintptr_t m_jobPtr;
+};
 
 namespace ExtensionManager
 {
-	using ExtensionPtr = std::shared_ptr<const Extension::Script>;
-	using Extensions = std::vector<ExtensionPtr>;
-
 	class Manager final
 	{
 	public:
-		Manager() = default;
-		~Manager() = default;
+		Manager() : m_rs(nzbget_rs_ext_mgr_new()) {}
+		~Manager() { nzbget_rs_ext_mgr_free(m_rs); }
 
 		Manager(const Manager&) = delete;
 		Manager& operator=(const Manager&) = delete;
 
-		Manager(Manager&&) = delete;
-		Manager& operator=(Manager&&) = delete;
+		NzbgetRsExtManager* Handle() const { return m_rs; }
 
-		std::optional<std::string> 
-		InstallExtension(const fs::path& file, const fs::path& dest)
+		std::optional<std::string>
+		InstallOrUpdate(int isUpdate, const fs::path& file, const char* arg2)
 		{
 			std::string fileStr = fs::u8string(file);
-			std::string destStr = fs::u8string(dest);
-			NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_install_extension(
-				fileStr.c_str(),
-				destStr.c_str(),
-				[](void*, int kind, const char* msg) {
-					const char* text = msg ? msg : "";
-					if (kind == 1)
-					{
-						error("%s", text);
-					}
-					else if (kind == 2)
-					{
-						warn("%s", text);
-					}
-					else if (kind == 0)
-					{
-						info("%s", text);
-					}
-					else
-					{
-						detail("%s", text);
-					}
-				},
-				nullptr);
-			if (errBuf.data)
-			{
-				std::string err(errBuf.data, errBuf.len);
-				nzbget_rs_free(errBuf);
-				return err;
-			}
+			NzbgetRsBuf errBuf{};
+			int ok = nzbget_rs_ext_mgr_op(
+				m_rs, 3, isUpdate, 0, 0, fileStr.c_str(), arg2 ? arg2 : "",
+				nullptr, nullptr, nullptr, &ScriptHostCb, &errBuf);
+			std::optional<std::string> err;
+			if (!ok && errBuf.data) err.emplace(errBuf.data, errBuf.len);
 			nzbget_rs_free(errBuf);
-			return std::nullopt;
-		}
-
-		std::optional<std::string> 
-		UpdateExtension(const fs::path& filename, const std::string& extName)
-		{
-			std::unique_lock<std::shared_mutex> lock{m_mutex};
-
-			auto extensionIt = GetByName(extName);
-			bool found = extensionIt != std::end(m_extensions);
-			int64_t useCount = found ? extensionIt->use_count() : 0;
-			fs::path targetPath;
-			if (found)
-			{
-				GetExtensionPath(*(*extensionIt), targetPath);
-			}
-			std::string targetPathStr = fs::u8string(targetPath);
-			std::string archiveStr = fs::u8string(filename);
-
-			NzbgetRsBuf backupBuf{};
-			NzbgetRsBuf prepErrBuf = nzbget_rs_ext_mgr_prepare_update(
-				extName.c_str(),
-				found ? 1 : 0,
-				useCount,
-				targetPathStr.c_str(),
-				archiveStr.c_str(),
-				&backupBuf);
-			std::string backupPathStr(backupBuf.data ? backupBuf.data : "", backupBuf.len);
-			nzbget_rs_free(backupBuf);
-
-			if (prepErrBuf.data)
-			{
-				std::string err(prepErrBuf.data, prepErrBuf.len);
-				nzbget_rs_free(prepErrBuf);
-				return err;
-			}
-			nzbget_rs_free(prepErrBuf);
-
-			const auto rootDir = (*extensionIt)->GetRootDir();
-			const auto installExtError = InstallExtension(filename, rootDir);
-			NzbgetRsBuf finishErrBuf = nzbget_rs_ext_mgr_finish_update(
-				targetPathStr.c_str(),
-				backupPathStr.c_str(),
-				archiveStr.c_str(),
-				installExtError ? installExtError->c_str() : nullptr);
-			if (finishErrBuf.data)
-			{
-				std::string err(finishErrBuf.data, finishErrBuf.len);
-				nzbget_rs_free(finishErrBuf);
-				return err;
-			}
-			nzbget_rs_free(finishErrBuf);
-
-			m_extensions.erase(extensionIt);
-			return std::nullopt;
+			return err;
 		}
 
 		std::optional<std::string>
 		DeleteExtension(const std::string& name)
 		{
-			std::unique_lock<std::shared_mutex> lock{m_mutex};
-
-			auto extensionIt = GetByName(name);
-			bool found = extensionIt != std::end(m_extensions);
-			int64_t useCount = found ? extensionIt->use_count() : 0;
-			fs::path targetPath;
-			if (found)
-			{
-				GetExtensionPath(*(*extensionIt), targetPath);
-			}
-			std::string targetPathStr = fs::u8string(targetPath);
-
-			NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_delete_extension(
-				name.c_str(),
-				found ? 1 : 0,
-				useCount,
-				targetPathStr.c_str());
-			if (errBuf.data)
-			{
-				std::string err(errBuf.data, errBuf.len);
-				nzbget_rs_free(errBuf);
-				return err;
-			}
+			NzbgetRsBuf errBuf{};
+			int ok = nzbget_rs_ext_mgr_op(
+				m_rs, 2, 0, 0, 0, name.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, &errBuf);
+			std::optional<std::string> err;
+			if (!ok && errBuf.data) err.emplace(errBuf.data, errBuf.len);
 			nzbget_rs_free(errBuf);
-
-			m_extensions.erase(extensionIt);
-			return std::nullopt;
+			return err;
 		}
 
 		std::optional<std::string>
 		LoadExtensions()
 		{
-			const char* scriptDir = g_Options->GetScriptDir();
-			if (Util::EmptyStr(scriptDir))
-			{
-				return std::string("\"ScriptDir\" is not specified");
-			}
-
-			std::unique_lock<std::shared_mutex> lock{m_mutex};
-
-			m_extensions.clear();
-
-			NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_load_extensions(
-				scriptDir,
-				g_Options->GetScriptOrder(),
-				PATH_SEPARATOR,
-				this,
-				[](void*, const char* msg)
+			auto createTaskCb = +[](void*, const char* taskTime, const char* extName) {
+				if (g_Options)
 				{
-					error("%s", msg ? msg : "");
-				},
-				[](
-					void* ctx,
-					const char* entryPtr, size_t entryLen,
-					const char* locPtr, size_t locLen,
-					const char* rootPtr, size_t rootLen,
-					const char* namePtr, size_t nameLen,
-					const char* dispPtr, size_t dispLen,
-					const char* qeventsPtr, size_t qeventsLen,
-					const char* taskTimePtr, size_t taskTimeLen,
-					int postScript, int scanScript, int queueScript, int schedScript, int feedScript,
-					const char* jsonPtr, size_t jsonLen,
-					const char* xmlPtr, size_t xmlLen)
-				{
-					auto* mgr = static_cast<Manager*>(ctx);
-					Extension::Script ext;
-					ext.SetEntry(std::string(entryPtr ? entryPtr : "", entryLen));
-					ext.SetLocation(std::string(locPtr ? locPtr : "", locLen));
-					ext.SetRootDir(std::string(rootPtr ? rootPtr : "", rootLen));
-					ext.SetName(std::string(namePtr ? namePtr : "", nameLen));
-					ext.SetDisplayName(std::string(dispPtr ? dispPtr : "", dispLen));
-					ext.SetKind({
-						postScript != 0,
-						scanScript != 0,
-						queueScript != 0,
-						schedScript != 0,
-						feedScript != 0
-					});
-					ext.SetQueueEvents(std::string(qeventsPtr ? qeventsPtr : "", qeventsLen));
-					ext.SetTaskTime(std::string(taskTimePtr ? taskTimePtr : "", taskTimeLen));
-					ext.SetJsonStr(std::string(jsonPtr ? jsonPtr : "", jsonLen));
-					ext.SetXmlStr(std::string(xmlPtr ? xmlPtr : "", xmlLen));
-					mgr->m_extensions.emplace_back(std::make_shared<Extension::Script>(std::move(ext)));
-				});
-			if (errBuf.data)
-			{
-				std::string err(errBuf.data, errBuf.len);
-				nzbget_rs_free(errBuf);
-				return err;
-			}
+					g_Options->CreateSchedulerTask(0, taskTime, nullptr, Options::scScript, extName);
+				}
+			};
+			NzbgetRsBuf errBuf{};
+			int ok = nzbget_rs_ext_mgr_op(
+				m_rs, 0, PATH_SEPARATOR, 0, reinterpret_cast<uintptr_t>(createTaskCb),
+				g_Options ? g_Options->GetScriptDir() : "",
+				g_Options ? g_Options->GetScriptOrder() : "",
+				g_Options ? g_Options->GetExtensions() : "",
+				nullptr, nullptr, &ScriptHostCb, &errBuf);
+			std::optional<std::string> err;
+			if (!ok && errBuf.data) err.emplace(errBuf.data, errBuf.len);
 			nzbget_rs_free(errBuf);
+			return err;
+		}
 
-			CreateTasks();
-			m_extensions.shrink_to_fit();
-
-			return std::nullopt;
+		NzbgetRsBuf SerializeList(bool isJson) const
+		{
+			NzbgetRsBuf out{};
+			nzbget_rs_ext_mgr_op(
+				m_rs, 1, isJson ? 1 : 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &out);
+			return out;
 		}
 
 		std::pair<WebDownloader::EStatus, fs::path>
 		DownloadExtension(const std::string& url, const std::string& extName)
 		{
-			// a name of our own, not the extension's: that one comes from the request
-			// ("../x" wrote anywhere the daemon can), and two downloads of one
-			// extension at once wrote the same file
-			static std::atomic<int> counter{0};
-			fs::path tmpFileName = g_Options->GetTempDirPath() /
-				("ext-" + std::to_string(static_cast<int64_t>(Util::CurrentTime())) + "-" + std::to_string(++counter) + ".zip");
-
-			const auto tmpFileNameStr = fs::u8string(tmpFileName);
+			NzbgetRsBuf pathBuf{};
+			nzbget_rs_ext_mgr_op(
+				nullptr, 4, PATH_SEPARATOR, 0, 0,
+				g_Options ? g_Options->GetTempDir() : "",
+				nullptr, nullptr, nullptr, nullptr, nullptr, &pathBuf);
+			std::string tmpFileNameStr(pathBuf.data ? pathBuf.data : "", pathBuf.len);
+			nzbget_rs_free(pathBuf);
 
 			std::unique_ptr<WebDownloader> downloader = std::make_unique<WebDownloader>();
 			downloader->SetUrl(url.c_str());
@@ -10843,878 +10608,15 @@ namespace ExtensionManager
 			WebDownloader::EStatus status = downloader->DownloadWithRedirects(5);
 			downloader.reset();
 
-			return std::make_pair(status, std::move(tmpFileName));
-		}
-
-		void ForEach(std::function<void(const ExtensionPtr)> callback) const
-		{
-			std::shared_lock<std::shared_mutex> lock{ m_mutex };
-
-			std::for_each(std::cbegin(m_extensions), std::cend(m_extensions), callback);
-		}
-
-		std::optional<ExtensionPtr> 
-		FindIf(std::function<bool(ExtensionPtr)> comparator) const
-		{
-			std::shared_lock<std::shared_mutex> lock{ m_mutex };
-
-			auto found = std::find_if(std::cbegin(m_extensions), std::cend(m_extensions), comparator);
-			if (found != std::cend(m_extensions))
-			{
-				return *found;
-			}
-
-			return std::nullopt;
+			return std::make_pair(status, fs::u8path(tmpFileNameStr));
 		}
 
 	private:
-		void CreateTasks() const
-		{
-			for (const auto& extension : m_extensions)
-			{
-				if (extension->GetSchedulerScript() &&
-					!Util::EmptyStr(extension->GetTaskTime()) &&
-					nzbget_rs_repair_ctrl_op(23, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-						g_Options->GetExtensions(), extension->GetName(), nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) != 0)
-				{
-					g_Options->CreateSchedulerTask(
-						0,
-						extension->GetTaskTime(),
-						nullptr,
-						Options::scScript,
-						extension->GetName()
-					);
-				}
-			}
-		}
-
-		Extensions::const_iterator GetByName(const std::string& name) const
-		{
-			return std::find_if(
-				std::begin(m_extensions),
-				std::end(m_extensions),
-				[&name](const auto& ext)
-				{
-					return ext->GetName() == name;
-				}
-			);
-		}
-
-		std::optional<std::string>
-		GetExtensionPath(const Extension::Script& extension, fs::path& path)
-		{
-			const char* location = extension.GetLocation() ? extension.GetLocation() : "";
-			const char* entry = extension.GetEntry() ? extension.GetEntry() : "";
-
-			std::vector<const char*> allLocs;
-			std::vector<size_t> allLens;
-			allLocs.reserve(m_extensions.size());
-			allLens.reserve(m_extensions.size());
-			for (const auto& ext : m_extensions)
-			{
-				const char* l = ext->GetLocation() ? ext->GetLocation() : "";
-				allLocs.push_back(l);
-				allLens.push_back(strlen(l));
-			}
-
-			NzbgetRsBuf buf = nzbget_rs_ext_mgr_resolve_extension_path(
-				location, strlen(location),
-				entry, strlen(entry),
-				allLocs.empty() ? nullptr : allLocs.data(),
-				allLens.empty() ? nullptr : allLens.data(),
-				allLocs.size());
-			path = fs::path(std::string(buf.data ? buf.data : "", buf.len));
-			nzbget_rs_free(buf);
-			return std::nullopt;
-		}
-
-		Extensions m_extensions;
-		mutable std::shared_mutex m_mutex;
+		NzbgetRsExtManager* m_rs = nullptr;
 	};
 }
 
 extern ExtensionManager::Manager* g_ExtensionManager;
-
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2007-2017 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *  Copyright (C) 2024-2026 Denis <denis@nzbget.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-
-#ifndef SCRIPTCONTROLLER_H
-#define SCRIPTCONTROLLER_H
-
-// System global variable holding environments variables
-extern char** environ;
-extern char* (*g_EnvironmentVariables)[];
-
-inline constexpr int FORK_ERROR_EXIT_CODE = 254;
-
-#ifdef CHILD_WATCHDOG
-class ChildWatchDog : public Thread
-{
-public:
-	void SetProcessId(pid_t processId) { m_processId = processId; }
-	void SetInfoName(const char* infoName) { m_infoName = infoName; }
-protected:
-	virtual void Run()
-	{
-		static const int WAIT_SECONDS = 60;
-		time_t start = Util::CurrentTime();
-		while (!IsStopped() && (Util::CurrentTime() - start) < WAIT_SECONDS)
-		{
-			Util::Sleep(10);
-		}
-
-		if (!IsStopped())
-		{
-			info("Restarting hanging child process for %s", *m_infoName);
-			kill(m_processId, SIGKILL);
-		}
-	}
-private:
-	pid_t m_processId;
-	CString m_infoName;
-};
-#endif
-
-class EnvironmentStrings
-{
-public:
-	void Clear()
-	{
-		m_strings.clear();
-	}
-	void InitFromCurrentProcess()
-	{
-		if (!g_EnvironmentVariables)
-			return;
-
-		for (int i = 0; (*g_EnvironmentVariables)[i]; i++)
-		{
-			char* var = (*g_EnvironmentVariables)[i];
-			if (nzbget_rs_repair_ctrl_op(25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-				var, nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) == 0)
-			{
-				Append(var);
-			}
-		}
-	}
-	void Append(const char* envstr)
-	{
-		m_strings.emplace_back(envstr);
-	}
-	void Append(CString&& envstr)
-	{
-		m_strings.push_back(std::move(envstr));
-	}
-	/*
-	 * Returns environment block in format suitable for using with execve.
-	 */
-	std::vector<char*> GetStrings()
-	{
-		std::vector<char*> strings;
-		strings.reserve(m_strings.size() + 1);
-		std::copy(m_strings.begin(), m_strings.end(), std::back_inserter(strings));
-		strings.push_back(nullptr);
-		return strings;
-	}
-
-private:
-	typedef std::vector<CString> Strings;
-
-	Strings m_strings;
-};
-
-class ScriptController
-{
-public:
-	typedef std::vector<CString> ArgList;
-
-	ScriptController()
-	{
-		ResetEnv();
-
-		Guard guard(m_runningMutex);
-		m_runningScripts.push_back(this);
-	}
-	virtual ~ScriptController()
-	{
-		UnregisterRunningScript();
-	}
-	int Execute()
-	{
-		PrepareEnvOptions(nullptr);
-		PrepareArgs();
-
-		m_completed = false;
-		m_processId = 0;
-		if (m_terminated)
-		{
-			m_completed = true;
-			return -1;
-		}
-		int exitCode = 0;
-
-#ifdef CHILD_WATCHDOG
-		bool childConfirmed = false;
-		while (!childConfirmed && !m_terminated)
-		{
-#endif
-
-		int pipein = -1, pipeout = -1;
-		StartProcess(&pipein, &pipeout);
-		if (pipein == -1)
-		{
-			m_completed = true;
-			return -1;
-		}
-
-		// open the read end
-		m_readpipe = fdopen(pipein, "r");
-		if (!m_readpipe)
-		{
-			PrintMessage(Message::mkError, "Could not open read pipe to %s", *m_infoName);
-			close(pipein);
-			if (pipeout != -1)
-			{
-				close(pipeout);
-			}
-			m_completed = true;
-			return -1;
-		}
-
-		m_writepipe = 0;
-		if (m_needWrite)
-		{
-			// open the write end
-			m_writepipe = fdopen(pipeout, "w");
-			if (!m_writepipe)
-			{
-				PrintMessage(Message::mkError, "Could not open write pipe to %s", *m_infoName);
-				fclose(m_readpipe.exchange(nullptr));
-				close(pipeout);
-				m_completed = true;
-				return -1;
-			}
-		}
-
-#ifdef CHILD_WATCHDOG
-		debug("Creating child watchdog");
-		ChildWatchDog watchDog;
-		watchDog.SetAutoDestroy(false);
-		watchDog.SetProcessId(m_processId);
-		watchDog.SetInfoName(m_infoName);
-		watchDog.Start();
-#endif
-
-		CharBuffer buf(1024 * 10);
-
-		debug("Entering pipe-loop");
-		bool firstLine = true;
-		bool startError = false;
-		while (!m_terminated && !m_detached)
-		{
-			FILE* readpipe = m_readpipe;
-			if (!readpipe || feof(readpipe))
-			{
-				break;
-			}
-			if (ReadLine(buf, buf.Size(), readpipe) && m_readpipe)
-			{
-#ifdef CHILD_WATCHDOG
-				if (!childConfirmed)
-				{
-					childConfirmed = true;
-					watchDog.Stop();
-					debug("Child confirmed");
-					continue;
-				}
-#endif
-				if (firstLine && !strncmp(buf, "[ERROR] Could not start ", 24))
-				{
-					startError = true;
-				}
-				ProcessOutput(buf);
-				firstLine = false;
-			}
-		}
-		debug("Exited pipe-loop");
-
-#ifdef CHILD_WATCHDOG
-		debug("Destroying WatchDog");
-		if (!childConfirmed)
-		{
-			watchDog.Stop();
-		}
-		while (watchDog.IsRunning())
-		{
-			Util::Sleep(5);
-		}
-#endif
-
-		if (FILE* readpipe = m_readpipe.exchange(nullptr))
-		{
-			fclose(readpipe);
-		}
-
-		if (m_writepipe)
-		{
-			fclose(m_writepipe);
-		}
-
-		if (m_terminated && m_infoName)
-		{
-			warn("Interrupted %s", *m_infoName);
-		}
-
-		exitCode = 0;
-
-		if (!m_detached)
-		{
-			exitCode = WaitProcess();
-			if (exitCode == FORK_ERROR_EXIT_CODE && startError)
-			{
-				exitCode = -1;
-			}
-		}
-
-#ifdef CHILD_WATCHDOG
-		}	// while (!bChildConfirmed && !m_bTerminated)
-#endif
-
-		debug("Exit code %i", exitCode);
-		m_completed = true;
-		m_processId = 0;
-		return exitCode;
-	}
-	void Terminate()
-	{
-		debug("Stopping %s", *m_infoName);
-		m_terminated = true;
-
-		pid_t childPid = m_processId.load();
-		pid_t killId = (childPid > 0 && getpgid(childPid) == childPid) ? -childPid : childPid;
-		int killRes = childPid > 0 ? kill(killId, SIGKILL) : 0;
-		bool ok = childPid <= 0 || killRes == 0 || m_completed;
-
-		if (ok)
-		{
-			debug("Terminated %s", *m_infoName);
-		}
-		else
-		{
-			error("Could not terminate %s", *m_infoName);
-		}
-
-		debug("Stopped %s", *m_infoName);
-	}
-	bool Break()
-	{
-		debug("Sending break signal to %s", *m_infoName);
-
-		pid_t pid = m_processId.load();
-		bool ok = pid > 0 && !m_completed && kill(pid, SIGINT) == 0;
-
-		if (ok)
-		{
-			debug("Sent break signal to %s", *m_infoName);
-		}
-		else
-		{
-			warn("Could not send break signal to %s", *m_infoName);
-		}
-
-		return ok;
-	}
-	void Detach()
-	{
-		debug("Detaching %s", *m_infoName);
-		m_detached = true;
-		if (FILE* readpipe = m_readpipe.exchange(nullptr))
-		{
-			fclose(readpipe);
-		}
-	}
-	static void TerminateAll()
-	{
-		Guard guard(m_runningMutex);
-		for (ScriptController* script : m_runningScripts)
-		{
-			if (script->HasActiveProcess() && !script->m_detached)
-			{
-				// send break signal and wait up to 5 seconds for graceful termination
-				if (script->Break())
-				{
-					time_t curtime = Util::CurrentTime();
-					while (!script->m_completed && std::abs(curtime - Util::CurrentTime()) <= 10)
-					{
-						Util::Sleep(100);
-					}
-				}
-				script->Terminate();
-			}
-		}
-	}
-
-	const char* GetScript() { return !m_args.empty() ? *m_args[0] : nullptr; }
-	void SetArgs(ArgList&& args) { m_args = std::move(args); }
-	void SetInfoName(const char* infoName) { m_infoName = infoName; }
-	const char* GetInfoName() { return m_infoName; }
-	void SetLogPrefix(const char* logPrefix) { m_logPrefix = logPrefix; }
-	void SetEnvVar(const char* name, const char* value)
-	{
-		m_environmentStrings.Append(CString::FormatStr("%s=%s", name ? name : "", value ? value : ""));
-	}
-	void SetEnvVarSpecial(const char* prefix, const char* name, const char* value)
-	{
-		BString<1024> varname("%s_%s", prefix ? prefix : "", name ? name : "");
-		SetEnvVar(varname, value);
-		NzbgetRsBuf normBuf{};
-		if (nzbget_rs_stream_repair_ctrl_op(10, 0, 0, 0, 0, 0, 0, 0, 0, 0.0,
-			varname, nullptr, nullptr, 0, nullptr, nullptr, nullptr, &normBuf) != 0)
-		{
-			SetEnvVar(normBuf.data ? normBuf.data : "", value);
-			nzbget_rs_free(normBuf);
-		}
-	}
-	void SetIntEnvVar(const char* name, int value)
-	{
-		SetEnvVar(name, BString<100>("%i", value));
-	}
-	bool HasActiveProcess()
-	{
-		return m_processId.load() > 0 && !m_completed;
-	}
-
-protected:
-	void ProcessOutput(char* text)
-	{
-		debug("Processing output received from script");
-		int trimmedLen = 0, textOff = 0;
-		int mk = nzbget_rs_repair_ctrl_op(26, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-			text, nullptr, nullptr, nullptr, nullptr, 0, &trimmedLen, &textOff, nullptr, nullptr, nullptr, nullptr);
-		if (mk < 0)
-		{
-			return;
-		}
-		text[trimmedLen] = '\0';
-		static const Message::EKind kinds[] = {
-			Message::mkInfo, Message::mkWarning, Message::mkError, Message::mkDetail, Message::mkDebug
-		};
-		PrintMessage(kinds[mk], "%s", text + textOff);
-		debug("Processing output received from script - completed");
-	}
-	virtual bool ReadLine(char* buf, int bufSize, FILE* stream)
-	{
-		return fgets(buf, bufSize, stream);
-	}
-	void PrintMessage(Message::EKind kind, const char* format, ...) PRINTF_SYNTAX(3)
-	{
-		// not cut to a fixed size: subclasses parse commands ("[NZB] ...") from it
-		CString tmp2;
-
-		va_list ap;
-		va_start(ap, format);
-		tmp2.FormatV(format, ap);
-		va_end(ap);
-
-		if (m_logPrefix)
-		{
-			CString tmp3 = CString::FormatStr("%s: %s", m_logPrefix, *tmp2);
-			AddMessage(kind, tmp3);
-		}
-		else
-		{
-			AddMessage(kind, tmp2);
-		}
-	}
-	virtual void AddMessage(Message::EKind kind, const char* text)
-	{
-		switch (kind)
-		{
-			case Message::mkDetail:
-				detail("%s", text);
-				break;
-
-			case Message::mkInfo:
-				info("%s", text);
-				break;
-
-			case Message::mkWarning:
-				warn("%s", text);
-				break;
-
-			case Message::mkError:
-				error("%s", text);
-				break;
-
-			case Message::mkDebug:
-				debug("%s", text);
-				break;
-		}
-	}
-	void ResetEnv()
-	{
-		m_environmentStrings.Clear();
-		m_environmentStrings.InitFromCurrentProcess();
-	}
-	/**
-	 * If szStripPrefix is not nullptr, only options, whose names start with the prefix
-	 * are processed. The prefix is then stripped from the names.
-	 * If szStripPrefix is nullptr, all options are processed; without stripping.
-	 */
-	void PrepareEnvOptions(const char* stripPrefix)
-	{
-		int prefixLen = stripPrefix ? (int)strlen(stripPrefix) : 0;
-
-		for (Options::OptEntry& optEntry : g_Options->GuardOptEntries())
-		{
-			const char* value = GetOptValue(optEntry.GetName(), optEntry.GetValue());
-			if (stripPrefix && !strncmp(optEntry.GetName(), stripPrefix, prefixLen) &&
-				(int)strlen(optEntry.GetName()) > prefixLen)
-			{
-				SetEnvVarSpecial("NZBPO", optEntry.GetName() + prefixLen, value);
-			}
-			else if (!stripPrefix)
-			{
-				SetEnvVarSpecial("NZBOP", optEntry.GetName(), value);
-			}
-		}
-	}
-	void PrepareArgs()
-	{
-		*m_cmdLine = '\0';
-		m_cmdArgs.clear();
-
-		if (m_args.size() == 1)
-		{
-			const auto found = Util::FindExecutorProgram(m_args[0].Str(), g_Options->GetShellOverride());
-			strncpy(m_cmdLine, found ? found.value().c_str() : (const char*)m_args[0], sizeof(m_cmdLine) - 1);
-			// an interpreter goes before the script; a script run directly is
-			// argv[0] already (m_args), not its own first argument too
-			if (found && found.value() != m_args[0].Str())
-			{
-				m_cmdArgs.emplace_back(found.value().c_str());
-			}
-
-			debug("CmdLine: %s", m_cmdLine);
-		}
-		else
-		{
-			strncpy(m_cmdLine, m_args[0], sizeof(m_cmdLine) - 1);
-		}
-	}
-	virtual const char* GetOptValue([[maybe_unused]] const char* name, const char* value) { return value; }
-	/*
-	* Returns file descriptor of the read-pipe or -1 on error.
-	*/
-	void StartProcess(int* pipein, int* pipeout)
-	{
-		CString workingDir = FileSystem::GetCurrentDirectory();
-
-		const char* script = m_args[0];
-
-		int pin[] = {-1, -1};
-		int pout[] = {-1, -1};
-
-		// create the pipes, close-on-exec: a script another thread starts at the
-		// same time would otherwise inherit our write end and keep it open for as
-		// long as it runs - we'd see no end of output until that script ended too.
-		// dup2() onto the child's stdin/stdout/stderr clears the flag there.
-		auto makePipe = [](int fds[2])
-		{
-#ifdef __linux__
-			return pipe2(fds, O_CLOEXEC);
-#else
-			if (pipe(fds))
-			{
-				return -1;
-			}
-			fcntl(fds[0], F_SETFD, FD_CLOEXEC);
-			fcntl(fds[1], F_SETFD, FD_CLOEXEC);
-			return 0;
-#endif
-		};
-		if (makePipe(pin))
-		{
-			PrintMessage(Message::mkError, "Could not open read pipe: errno %i", errno);
-			return;
-		}
-		if (m_needWrite && makePipe(pout))
-		{
-			PrintMessage(Message::mkError, "Could not open write pipe: errno %i", errno);
-			close(pin[0]);
-			close(pin[1]);
-			return;
-		}
-
-		std::vector<char*> environmentStrings = m_environmentStrings.GetStrings();
-		char** envdata = environmentStrings.data();
-
-		CheckEnvSize(environmentStrings);
-
-		std::copy(std::begin(m_args), std::end(m_args), std::back_inserter(m_cmdArgs));
-		m_cmdArgs.emplace_back(nullptr);
-		char* const* argdata = (char* const*)m_cmdArgs.data();
-
-#ifdef DEBUG
-		debug("Starting  process: %s", script);
-		for (const char* arg : m_args)
-		{
-			debug("arg: %s", arg);
-		}
-#endif
-
-		debug("forking");
-		pid_t pid = fork();
-
-		if (pid == -1)
-		{
-			PrintMessage(Message::mkError, "Could not start %s: errno %i", *m_infoName, errno);
-			close(pin[0]);
-			close(pin[1]);
-			if (m_needWrite)
-			{
-				close(pout[0]);
-				close(pout[1]);
-			}
-			return;
-		}
-		else if (pid == 0)
-		{
-			// here goes the second instance
-
-			// only certain functions may be used here or the program may hang.
-			// for a list of functions see chapter "async-signal-safe functions" in
-			// http://man7.org/linux/man-pages/man7/signal.7.html
-
-			// create new process group (see Terminate() where it is used)
-			setsid();
-
-			// make the pipeout to be the same as stdout and stderr
-			dup2(pin[1], 1);
-			dup2(pin[1], 2);
-			close(pin[0]);
-			close(pin[1]);
-
-			if (m_needWrite)
-			{
-				// make the pipein to be the same as stdin
-				dup2(pout[0], 0);
-				close(pout[0]);
-				close(pout[1]);
-			}
-
-#ifdef CHILD_WATCHDOG
-			write(1, "\n", 1);
-			fsync(1);
-#endif
-
-			chdir(workingDir);
-			environ = envdata;
-
-			execvp(m_cmdLine, argdata);
-
-			if (errno == EACCES)
-			{
-				write(1, "[WARNING] Fixing permissions for", 32);
-				write(1, script, strlen(script));
-				write(1, "\n", 1);
-				fsync(1);
-				FileSystem::FixExecPermission(script);
-				execvp(m_cmdLine, argdata);
-			}
-
-			// NOTE: the text "[ERROR] Could not start " is checked later,
-			// by changing adjust the dependent code below.
-			write(1, "[ERROR] Could not start ", 24);
-			write(1, script, strlen(script));
-			write(1, ": ", 2);
-			char* errtext = strerror(errno);
-			write(1, errtext, strlen(errtext));
-			write(1, "\n", 1);
-			fsync(1);
-			_exit(FORK_ERROR_EXIT_CODE);
-		}
-
-		// continue the first instance
-		debug("forked");
-		debug("Child Process-ID: %i", (int)pid);
-
-		m_processId = pid;
-
-		// close unused pipe ends; the caller gets the others only now: on a
-		// failed fork they were closed already
-		close(pin[1]);
-		if (m_needWrite)
-		{
-			close(pout[0]);
-		}
-		*pipein = pin[0];
-		*pipeout = pout[1];
-	}
-	int WaitProcess()
-	{
-		int status = 0;
-		pid_t res;
-		do
-		{
-			res = waitpid(m_processId, &status, 0);
-		} while (res == -1 && errno == EINTR);
-		if (res == -1)
-		{
-			return -1;
-		}
-		if (WIFEXITED(status))
-		{
-			int exitCode = WEXITSTATUS(status);
-			return exitCode;
-		}
-		if (WIFSIGNALED(status))
-		{
-			// not a success: a crashed or killed program used to read as exit
-			// code 0. The shell's convention, 128 + signal.
-			if (!m_terminated)
-			{
-				PrintMessage(Message::mkWarning, "%s was killed by signal %i", *m_infoName, WTERMSIG(status));
-			}
-			return 128 + WTERMSIG(status);
-		}
-		return -1;
-	}
-	void UnregisterRunningScript()
-	{
-		Guard guard(m_runningMutex);
-		m_runningScripts.erase(std::remove(m_runningScripts.begin(), m_runningScripts.end(), this), m_runningScripts.end());
-	}
-
-private:
-	void CheckEnvSize(const std::vector<char*>& envs)
-	{
-		if (ARGS_LIMIT_SIZE <= 0) return;
-
-		size_t totalEnvSize = 0;
-		size_t limit = static_cast<size_t>(ARGS_LIMIT_SIZE);
-
-		for (const auto& var : envs)
-		{
-			if (!var) continue;
-			totalEnvSize += strlen(var) + 1 + sizeof(char*);
-			if (totalEnvSize > limit)
-			{
-				PrintMessage(Message::EKind::mkWarning,
-							 "Total environment size (%zu bytes) exceeds OS limit (%zu bytes): %s",
-							 totalEnvSize, limit, "This may cause process creation to fail");
-				break;
-			}
-		}
-	}
-
-	ArgList m_args;
-	ArgList m_cmdArgs;
-	CString m_infoName;
-	const char* m_logPrefix = nullptr;
-	EnvironmentStrings m_environmentStrings;
-	std::atomic<bool> m_terminated{false};
-	std::atomic<bool> m_completed{false};
-	std::atomic<bool> m_detached{false};
-	std::atomic<bool> m_needWrite{false};
-	// taken with exchange(): Detach() from another thread and Execute() each
-	// close it, and only the one that gets it may
-	std::atomic<FILE*> m_readpipe{nullptr};
-	FILE* m_writepipe = 0;
-	char m_cmdLine[2048];
-	std::atomic<pid_t> m_processId{0};
-
-	inline static const long ARGS_LIMIT_SIZE = []() -> long
-	{
-		return sysconf(_SC_ARG_MAX);
-	}();
-
-	typedef std::vector<ScriptController*> RunningScripts;
-
-	inline static RunningScripts m_runningScripts{};
-	inline static Mutex m_runningMutex{};
-};
-
-#endif
-
-
-class NzbScriptController : public ScriptController
-{
-protected:
-	void PrepareEnvScript(NzbParameterList* parameters, const char* scriptName)
-	{
-		std::vector<const char*> pnames;
-		std::vector<const char*> pvals;
-		if (parameters)
-		{
-			pnames.reserve(parameters->size());
-			pvals.reserve(parameters->size());
-			for (NzbParameter& parameter : parameters)
-			{
-				pnames.push_back(parameter.GetName());
-				pvals.push_back(parameter.GetValue());
-			}
-		}
-		nzbget_rs_nzb_script_prepare_env(
-			scriptName ? scriptName : "",
-			parameters != nullptr ? 1 : 0,
-			pnames.data(),
-			pvals.data(),
-			pnames.size(),
-			this,
-			[](void* ctx, const char* prefix, const char* name, const char* value)
-			{
-				static_cast<NzbScriptController*>(ctx)->SetEnvVarSpecial(prefix, name, value);
-			},
-			[](void* ctx, const char* stripPrefix)
-			{
-				static_cast<NzbScriptController*>(ctx)->PrepareEnvOptions(stripPrefix);
-			});
-	}
-
-	void ExecuteScriptList(const char* scriptList)
-	{
-		if (Util::EmptyStr(scriptList))
-		{
-			return;
-		}
-
-		Tokenizer tok(scriptList, ",;");
-		while (const char* scriptName = tok.Next())
-		{
-			auto found = g_ExtensionManager->FindIf([&scriptName](auto script)
-				{
-					return strcmp(scriptName, script->GetName()) == 0;
-				}
-			);
-
-			if (found)
-			{
-				ExecuteScript(std::move(found.value()));
-			}
-		}
-	}
-
-	virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script) = 0;
-};
 
 #ifndef COMMANDSCRIPT_H
 #define COMMANDSCRIPT_H
@@ -11751,123 +10653,7 @@ private:
 
 extern CommandScriptLog* g_CommandScriptLog;
 
-class CommandScriptController : public Thread, public NzbScriptController
-{
-public:
-	static constexpr int COMMANDPROCESS_SUCCESS = 93;
-	static constexpr int COMMANDPROCESS_ERROR = 94;
-
-	virtual void Run()
-	{
-		ExecuteScriptList(m_script);
-	}
-
-	static bool StartScript(const char* scriptName, const char* command, std::unique_ptr<Options::OptEntries> modifiedOptions)
-	{
-		CommandScriptController* scriptController = new CommandScriptController();
-		scriptController->m_script = scriptName;
-		scriptController->m_command = command;
-		scriptController->m_logId = g_CommandScriptLog->Reset();
-		scriptController->m_modifiedOptions = std::move(modifiedOptions);
-
-		scriptController->SetAutoDestroy(true);
-
-		scriptController->Start();
-
-		auto found = g_ExtensionManager->FindIf([&](auto script)
-			{
-				return strcmp(scriptName, script->GetName()) == 0;
-			}
-		);
-
-		return found.has_value();
-	}
-
-protected:
-	virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script)
-	{
-		PrintMessage(Message::mkInfo, "Executing script %s with command %s", script->GetName(), *m_command);
-
-		SetArgs({script->GetEntry()});
-
-		BString<1024> infoName("script %s with command %s", script->GetName(), *m_command);
-		SetInfoName(infoName);
-
-		SetLogPrefix(script->GetDisplayName());
-		PrepareParams(script->GetName());
-
-		int exitCode = Execute();
-
-		infoName[0] = 'S';
-		SetLogPrefix(nullptr);
-
-		switch (exitCode)
-		{
-			case COMMANDPROCESS_SUCCESS:
-				PrintMessage(Message::mkInfo, "%s successful", *infoName);
-				break;
-
-			case COMMANDPROCESS_ERROR:
-			case -1:
-				PrintMessage(Message::mkError, "%s failed", *infoName);
-				break;
-
-			default:
-				PrintMessage(Message::mkError, "%s failed (terminated with unknown status)", *infoName);
-				break;
-		}
-	}
-
-	virtual void AddMessage(Message::EKind kind, const char* text)
-	{
-		NzbScriptController::AddMessage(kind, text);
-		g_CommandScriptLog->AddMessage(m_logId, kind, text);
-	}
-
-	virtual const char* GetOptValue(const char* name, const char* value)
-	{
-		Options::OptEntry* entry = m_modifiedOptions->FindOption(name);
-		return entry ? entry->GetValue() : value;
-	}
-
-private:
-	CString m_script;
-	CString m_command;
-	int m_logId;
-	std::unique_ptr<Options::OptEntries> m_modifiedOptions;
-
-	void PrepareParams(const char* scriptName)
-	{
-		ResetEnv();
-
-		SetEnvVar("NZBCP_COMMAND", m_command);
-
-		PrepareEnvScript(nullptr, scriptName);
-	}
-};
-
 #endif
-
-
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2007-2017 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
-
 
 #ifndef QUEUESCRIPT_H
 #define QUEUESCRIPT_H
@@ -11890,7 +10676,7 @@ public:
 	};
 
 	QueueScriptCoordinator() : m_rs(nzbget_rs_queue_script_new()) {}
-	~QueueScriptCoordinator() { nzbget_rs_queue_script_free(m_rs, DropScriptCb); }
+	~QueueScriptCoordinator() { nzbget_rs_queue_script_free(m_rs); }
 	QueueScriptCoordinator(const QueueScriptCoordinator&) = delete;
 	QueueScriptCoordinator& operator=(const QueueScriptCoordinator&) = delete;
 
@@ -11901,149 +10687,15 @@ public:
 		return nullptr;
 	}
 
-	class QueueScriptController : public Thread, public NzbScriptController
-	{
-	public:
-		virtual void Run() override
-		{
-			ExecuteScript(m_script);
-			SetLogPrefix(nullptr);
-			if (m_markBad)
-			{
-				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-				if (NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_id))
-				{
-					nzbInfo->PrintMessage(Message::mkWarning, "Cancelling download and deleting %s", *m_nzbName);
-					nzbInfo->SetDeleteStatus(NzbInfo::dsBad);
-					downloadQueue->EditEntry(m_id, DownloadQueue::eaGroupDelete, nullptr);
-				}
-			}
-			g_QueueScriptCoordinator->CheckQueue();
-		}
-		static void StartScript(NzbInfo* nzbInfo, std::shared_ptr<const Extension::Script> script, QueueScriptCoordinator::EEvent event)
-		{
-			if (!nzbInfo || nzbInfo->GetSkipScriptProcessing()) return;
-			QueueScriptController* sc = new QueueScriptController();
-			sc->m_nzbName = nzbInfo->GetName();
-			sc->m_nzbFilename = nzbInfo->GetFilename();
-			sc->m_url = nzbInfo->GetUrl();
-			sc->m_category = nzbInfo->GetCategory();
-			sc->m_destDir = nzbInfo->GetDestDir();
-			sc->m_queuedFilename = nzbInfo->GetQueuedFilename();
-			sc->m_id = nzbInfo->GetId();
-			sc->m_priority = nzbInfo->GetPriority();
-			sc->m_dupeKey = nzbInfo->GetDupeKey();
-			sc->m_dupeMode = nzbInfo->GetDupeMode();
-			sc->m_dupeScore = nzbInfo->GetDupeScore();
-			sc->m_parameters.CopyFrom(nzbInfo->GetParameters());
-			sc->m_script = std::move(script);
-			sc->m_event = event;
-			sc->m_prefixLen = 0;
-			sc->m_markBad = false;
-			sc->m_deleteStatus = nzbInfo->GetDeleteStatus();
-			sc->m_urlStatus = nzbInfo->GetUrlStatus();
-			sc->m_markStatus = nzbInfo->GetMarkStatus();
-			sc->SetAutoDestroy(true);
-			sc->Start();
-		}
-
-	protected:
-		virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script) override
-		{
-			ResetEnv();
-			NzbgetRsQueueScriptCoordEnv env{};
-			env.ctx = static_cast<QueueScriptController*>(this);
-			env.p1 = reinterpret_cast<uintptr_t>(static_cast<const char*>(m_dupeKey));
-			env.a1 = m_id;
-			env.a2 = m_priority;
-			env.a3 = m_dupeScore;
-			env.a4 = static_cast<int>(m_event);
-			env.a5 = static_cast<int>(m_dupeMode);
-			env.a6 = (static_cast<int>(m_deleteStatus) & 0xff) |
-				((static_cast<int>(m_urlStatus) & 0xff) << 8) |
-				((static_cast<int>(m_markStatus) & 0xff) << 16);
-			env.s1 = m_nzbName;
-			env.s2 = m_nzbFilename;
-			env.s3 = m_destDir;
-			env.s4 = m_queuedFilename;
-			env.s5 = m_url;
-			env.s6 = m_category;
-			env.s7 = script->GetName();
-			env.action_cb = &QueueScriptController::CtrlActionCb;
-			nzbget_rs_queue_script_exec(nullptr, 7, &env);
-
-			SetArgs({script->GetEntry()});
-			SetLogPrefix(script->GetDisplayName());
-			m_prefixLen = static_cast<int>(strlen(script->GetDisplayName())) + 2;
-			PrepareEnvScript(&m_parameters, script->GetName());
-			Execute();
-			SetLogPrefix(nullptr);
-		}
-		virtual void AddMessage(Message::EKind kind, const char* text) override
-		{
-			NzbgetRsQueueScriptCoordEnv env{};
-			env.ctx = static_cast<QueueScriptController*>(this);
-			env.a2 = m_prefixLen;
-			env.a3 = static_cast<int>(m_event);
-			env.s1 = text;
-			env.s2 = m_nzbName;
-			env.s3 = GetInfoName();
-			env.action_cb = &QueueScriptController::CtrlActionCb;
-			if (nzbget_rs_queue_script_exec(nullptr, 8, &env) != 0) return;
-
-			NzbInfo* nzbInfo = nullptr;
-			{
-				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-				nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
-				if (nzbInfo) nzbInfo->AddMessage(kind, text);
-			}
-			if (!nzbInfo) ScriptController::AddMessage(kind, text);
-		}
-
-	private:
-		CString m_nzbName, m_nzbFilename, m_url, m_category, m_destDir, m_queuedFilename, m_dupeKey;
-		int m_id, m_priority, m_dupeScore, m_prefixLen;
-		EDupeMode m_dupeMode;
-		NzbParameterList m_parameters;
-		std::shared_ptr<const Extension::Script> m_script;
-		QueueScriptCoordinator::EEvent m_event;
-		bool m_markBad;
-		NzbInfo::EDeleteStatus m_deleteStatus;
-		NzbInfo::EUrlStatus m_urlStatus;
-		NzbInfo::EMarkStatus m_markStatus;
-
-		static uintptr_t CtrlActionCb(void* ctx, int sub, int a1, int, uintptr_t, uintptr_t,
-			const char* s1, const char* s2, const char*, int*, const char**)
-		{
-			auto* self = static_cast<QueueScriptController*>(ctx);
-			if (sub == 6) { self->PrintMessage(a1 != 0 ? Message::mkDetail : Message::mkInfo, "%s", s1); self->SetInfoName(s2); }
-			else if (sub == 7) self->SetEnvVar(s1, s2);
-			else if (sub == 8) self->SetIntEnvVar(s1, a1);
-			else if (sub == 9) debug("%s", s1);
-			else if (sub == 10)
-			{
-				if (a1 == 3) self->m_markBad = true;
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				if (NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(dq, self->m_id))
-				{
-					if (a1 == 1) nzbInfo->GetParameters()->SetParameter(s1, s2);
-					else if (a1 == 2) nzbInfo->SetFinalDir(s2);
-					else if (a1 == 3) { nzbInfo->PrintMessage(Message::mkWarning, "%s", s2); nzbInfo->SetMarkStatus(NzbInfo::ksBad); }
-				}
-			}
-			else if (sub == 11) error("%s", s1);
-			return 0;
-		}
-	};
-
 	void Stop() { nzbget_rs_queue_script_exec(m_rs, 0, nullptr); }
+
 	void InitOptions()
 	{
-		auto found = g_ExtensionManager->FindIf([&](auto script) { return script->GetQueueScript() == true; });
 		NzbgetRsQueueScriptCoordEnv env{};
-		env.a1 = found.has_value() ? 1 : 0;
+		env.ext_mgr = g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr;
 		nzbget_rs_queue_script_exec(m_rs, 1, &env);
 	}
+
 	void EnqueueScript(NzbInfo* nzbInfo, EEvent event)
 	{
 		if (!nzbInfo || nzbInfo->GetSkipScriptProcessing()) return;
@@ -12056,31 +10708,31 @@ public:
 				postScript = cat->GetExtensions();
 			}
 		}
-		std::vector<std::shared_ptr<const Extension::Script>> scripts;
 		NzbgetRsQueueScriptCoordEnv env{};
-		env.ctx = &scripts;
+		env.ext_mgr = g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr;
 		env.p1 = reinterpret_cast<uintptr_t>(nzbInfo);
 		env.a1 = static_cast<int>(event);
-		env.a2 = 0;
 		env.a3 = nzbInfo->GetId();
 		env.a4 = g_Options ? g_Options->GetEventInterval() : 0;
 		env.t1 = static_cast<int64_t>(Util::CurrentTime());
 		env.t2 = static_cast<int64_t>(nzbInfo->GetQueueScriptTime());
 		env.s1 = postScript;
-		env.drop_script_cb = DropScriptCb;
+		env.host_cb = &ScriptHostCb;
 		env.action_cb = &QueueScriptCoordinator::CoordActionCb;
 		nzbget_rs_queue_script_exec(m_rs, 4, &env);
 	}
+
 	void CheckQueue()
 	{
 		if (nzbget_rs_queue_script_exec(m_rs, 6, nullptr) != 0) return;
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 		NzbgetRsQueueScriptCoordEnv env{};
 		env.p1 = reinterpret_cast<uintptr_t>(static_cast<DownloadQueue*>(downloadQueue));
-		env.drop_script_cb = DropScriptCb;
+		env.host_cb = &ScriptHostCb;
 		env.action_cb = &QueueScriptCoordinator::CoordActionCb;
 		nzbget_rs_queue_script_exec(m_rs, 5, &env);
 	}
+
 	bool HasJob(int nzbId, bool* active)
 	{
 		int act = 0;
@@ -12091,51 +10743,167 @@ public:
 		if (active) *active = act != 0;
 		return working;
 	}
+
 	int GetQueueSize() { return nzbget_rs_queue_script_exec(m_rs, 3, nullptr); }
 
 private:
-	using ScriptPtr = std::shared_ptr<const Extension::Script>;
 	NzbgetRsQueueScriptCoord* m_rs;
 
-	static void DropScriptCb(uintptr_t p) { delete reinterpret_cast<ScriptPtr*>(p); }
-
-	static uintptr_t CoordActionCb(void* ctx, int sub, int a1, int, uintptr_t p1, uintptr_t p2,
-		const char*, const char*, const char*, int* ints, const char** strs)
+	static uintptr_t CoordActionCb(void*, int sub, int a1, uintptr_t p1,
+		const char* s1, int* ints, const char** strs)
 	{
-		auto* scripts = static_cast<std::vector<ScriptPtr>*>(ctx);
-		if (sub == 0)
-		{
-			if (g_ExtensionManager) g_ExtensionManager->ForEach([&](auto s) { scripts->push_back(std::move(s)); });
-			return scripts->size();
-		}
 		if (sub == 1)
 		{
-			const ScriptPtr& s = (*scripts)[static_cast<size_t>(a1)];
-			auto* nzb = reinterpret_cast<NzbInfo*>(p1);
-			ints[0] = s->GetQueueScript() ? 1 : 0;
-			const char* sn = s->GetName() ? s->GetName() : "";
-			strs[0] = sn;
-			strs[1] = s->GetQueueEvents();
-			BString<1024> paramName("%s:", sn);
-			NzbParameter* p = nzb->GetParameters()->Find(*paramName);
-			strs[2] = p ? p->GetValue() : nullptr;
-			return reinterpret_cast<uintptr_t>(s.get());
+			NzbParameter* p = reinterpret_cast<NzbInfo*>(p1)->GetParameters()->Find(s1);
+			strs[0] = p ? p->GetValue() : nullptr;
+			return 1;
 		}
-		if (sub == 2) return reinterpret_cast<uintptr_t>(new ScriptPtr((*scripts)[static_cast<size_t>(a1)]));
-		if (sub == 3) QueueScriptController::StartScript(reinterpret_cast<NzbInfo*>(p1), *reinterpret_cast<ScriptPtr*>(p2), static_cast<EEvent>(a1));
-		else if (sub == 4) reinterpret_cast<NzbInfo*>(p1)->SetQueueScriptTime(Util::CurrentTime());
-		else if (sub == 5)
+		if (sub == 3)
+		{
+			auto* n = reinterpret_cast<NzbInfo*>(p1);
+			if (!n) return 0;
+			ints[0] = n->GetSkipScriptProcessing() ? 1 : 0;
+			if (ints[0]) return 1;
+			ints[1] = n->GetId();
+			ints[2] = n->GetPriority();
+			ints[3] = n->GetDupeScore();
+			ints[4] = static_cast<int>(n->GetDupeMode());
+			ints[5] = static_cast<int>(n->GetDeleteStatus());
+			ints[6] = static_cast<int>(n->GetUrlStatus());
+			ints[7] = static_cast<int>(n->GetMarkStatus());
+			ints[8] = static_cast<int>(n->GetParameters()->size());
+			strs[0] = n->GetName();
+			strs[1] = n->GetFilename();
+			strs[2] = n->GetUrl();
+			strs[3] = n->GetCategory();
+			strs[4] = n->GetDestDir();
+			strs[5] = n->GetQueuedFilename();
+			strs[6] = n->GetDupeKey();
+			return 1;
+		}
+		if (sub == 4)
+		{
+			reinterpret_cast<NzbInfo*>(p1)->SetQueueScriptTime(Util::CurrentTime());
+			return 1;
+		}
+		if (sub == 5)
 		{
 			NzbInfo* nzb = FindNzbInfo(reinterpret_cast<DownloadQueue*>(p1), a1);
 			ints[0] = nzb ? static_cast<int>(nzb->GetDeleteStatus()) : 0;
 			ints[1] = nzb ? static_cast<int>(nzb->GetMarkStatus()) : 0;
 			return reinterpret_cast<uintptr_t>(nzb);
 		}
+		if (sub == 6)
+		{
+			NzbParameter& p = (*reinterpret_cast<NzbInfo*>(p1)->GetParameters())[static_cast<size_t>(a1)];
+			strs[0] = p.GetName();
+			strs[1] = p.GetValue();
+			return 1;
+		}
 		return 0;
 	}
 };
 
-using QueueScriptController = QueueScriptCoordinator::QueueScriptController;
+inline uintptr_t ScriptHostCb(
+	void* /*ctx*/, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+	const char* s1, const char* s2, int* /*ints*/, const char** strs)
+{
+	switch (op)
+	{
+	case 0: {
+		const char* text = s1 ? s1 : "";
+		if (a1 == (int)Message::mkDetail) detail("%s", text);
+		else if (a1 == (int)Message::mkInfo) info("%s", text);
+		else if (a1 == (int)Message::mkWarning) warn("%s", text);
+		else if (a1 == (int)Message::mkError) error("%s", text);
+		else debug("%s", text);
+		return 0;
+	}
+	case 1:
+		return g_EnvironmentVariables ? reinterpret_cast<uintptr_t>(*g_EnvironmentVariables) : 0;
+	case 2:
+		if (a1 == 0)
+		{
+			strs[0] = g_Options ? g_Options->GetShellOverride().c_str() : "";
+		}
+		else if (a1 == 1 && g_Options)
+		{
+			auto fn = reinterpret_cast<void(*)(uintptr_t, const char*, const char*)>(p2);
+			for (Options::OptEntry& e : g_Options->GuardOptEntries())
+			{
+				fn(p1, e.GetName(), e.GetValue());
+			}
+		}
+		return 0;
+	case 3: {
+		auto* t = new ScriptJobThread(p1);
+		t->SetAutoDestroy(true);
+		t->Start();
+		return 0;
+	}
+	case 4:
+		if (g_CommandScriptLog)
+		{
+			g_CommandScriptLog->AddMessage(a1, (Message::EKind)a2, s1 ? s1 : "");
+		}
+		return 0;
+	case 5: {
+		if (a1 == 0)
+		{
+			GuardedDownloadQueue dq = DownloadQueue::Guard();
+			if (NzbInfo* n = QueueScriptCoordinator::FindNzbInfo(dq, (int)p1))
+			{
+				n->AddMessage((Message::EKind)a2, s1 ? s1 : "");
+				return 1;
+			}
+			return 0;
+		}
+		if (a1 == 1)
+		{
+			GuardedDownloadQueue dq = DownloadQueue::Guard();
+			if (NzbInfo* n = QueueScriptCoordinator::FindNzbInfo(dq, (int)p1))
+			{
+				if (a2 == 1) n->GetParameters()->SetParameter(s1 ? s1 : "", s2 ? s2 : "");
+				else if (a2 == 2) n->SetFinalDir(s2 ? s2 : "");
+				else if (a2 == 3)
+				{
+					n->PrintMessage(Message::mkWarning, "%s", s2 ? s2 : "");
+					n->SetMarkStatus(NzbInfo::ksBad);
+				}
+			}
+			return 0;
+		}
+		if (a1 == 2)
+		{
+			GuardedDownloadQueue dq = DownloadQueue::Guard();
+			if (NzbInfo* n = dq->GetQueue()->Find((int)p1))
+			{
+				n->PrintMessage(Message::mkWarning, "Cancelling download and deleting %s", s1 ? s1 : "");
+				n->SetDeleteStatus(NzbInfo::dsBad);
+				dq->EditEntry((int)p1, DownloadQueue::eaGroupDelete, nullptr);
+			}
+			return 0;
+		}
+		if (a1 == 3 && g_QueueScriptCoordinator)
+		{
+			g_QueueScriptCoordinator->CheckQueue();
+		}
+		return 0;
+	}
+	case 6:
+		if (a1 < 0)
+		{
+			return (g_Arguments && g_ArgumentCount > 0) ? (uintptr_t)g_ArgumentCount : 0;
+		}
+		strs[0] = (g_Arguments && a1 < g_ArgumentCount) ? (*g_Arguments)[a1] : nullptr;
+		return 0;
+	case 7:
+		ExitProc();
+		return 0;
+	default:
+		return 0;
+	}
+}
 
 #endif
 
@@ -13122,7 +11890,7 @@ public:
 		moveController->Start();
 	}
 
-	void Run() override { nzbget_rs_post_job_exec(0, 0, 0, nullptr, &HostCb, this); }
+	void Run() override { nzbget_rs_post_job_exec(0, 0, 0, &HostCb, this); }
 
 private:
 	PostInfo* m_postInfo = nullptr;
@@ -13187,7 +11955,7 @@ public:
 		cleanupController->Start();
 	}
 
-	void Run() override { nzbget_rs_post_job_exec(1, 0, 0, nullptr, &HostCb, this); }
+	void Run() override { nzbget_rs_post_job_exec(1, 0, 0, &HostCb, this); }
 
 private:
 	PostInfo* m_postInfo = nullptr;
@@ -13254,7 +12022,7 @@ public:
 	#ifndef DISABLE_TLS
 		flags |= 2;
 	#endif
-		nzbget_rs_post_job_exec(2, (int)m_kind, flags, nullptr, &HostCb, this);
+		nzbget_rs_post_job_exec(2, (int)m_kind, flags, &HostCb, this);
 	}
 
 private:
@@ -13341,7 +12109,7 @@ public:
 		controller->Start();
 	}
 
-	void Run() override { nzbget_rs_post_job_exec(3, m_postUnpack ? 1 : 0, 0, nullptr, &HostCb, this); }
+	void Run() override { nzbget_rs_post_job_exec(3, m_postUnpack ? 1 : 0, 0, &HostCb, this); }
 
 private:
 	PostInfo* m_postInfo = nullptr;
@@ -13383,9 +12151,12 @@ private:
 	}
 };
 
-class PostScriptController : public Thread, public NzbScriptController
+class PostScriptController : public Thread
 {
 public:
+	PostScriptController() : m_runner(nzbget_rs_script_runner_new()) {}
+	~PostScriptController() override { nzbget_rs_script_runner_free(m_runner); }
+
 	static void StartJob(PostInfo* postInfo)
 	{
 		if (!postInfo || (postInfo->GetNzbInfo() && postInfo->GetNzbInfo()->GetSkipScriptProcessing()))
@@ -13397,36 +12168,27 @@ public:
 		scriptController->Start();
 	}
 
-	void Run() override { nzbget_rs_post_job_exec(4, 0, 0, nullptr, &HostCb, this); }
+	void Run() override
+	{
+		int parcheckEnabled = 1;
+#ifdef DISABLE_PARCHECK
+		parcheckEnabled = 0;
+#endif
+		nzbget_rs_post_script_run(
+			m_runner, g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr,
+			parcheckEnabled, this, &HostCb, &ScriptHostCb);
+	}
 
 	void Stop() override
 	{
 		debug("Stopping post-process-script");
 		Thread::Stop();
-		Terminate();
-	}
-
-protected:
-	void ExecuteScript(std::shared_ptr<const Extension::Script> script) override
-	{
-		if (!script->GetPostScript() || m_postInfo->GetRequestParCheck()) return;
-		m_script = std::move(script);
-		int parcheckEnabled = 1;
-	#ifdef DISABLE_PARCHECK
-		parcheckEnabled = 0;
-	#endif
-		nzbget_rs_post_job_exec(5, parcheckEnabled, 0, nullptr, &HostCb, this);
-	}
-
-	void AddMessage(Message::EKind kind, const char* text) override
-	{
-		nzbget_rs_post_job_exec(6, (int)kind, 0, text, &HostCb, this);
+		nzbget_rs_script_runner_terminate(m_runner, &ScriptHostCb);
 	}
 
 private:
 	PostInfo* m_postInfo = nullptr;
-	int m_prefixLen = 0;
-	std::shared_ptr<const Extension::Script> m_script;
+	NzbgetRsScriptRunner* m_runner = nullptr;
 
 	static uintptr_t HostCb(void* rawCtx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
 		const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs)
@@ -13449,42 +12211,23 @@ private:
 				strs[1] = p.GetValue();
 				return 0;
 			}
-			c->ExecuteScriptList(s1 ? s1 : "");
 			c->m_postInfo->SetStage(PostInfo::ptFinished);
 			c->m_postInfo->SetWorking(false);
 			return 0;
 		}
 		case 2:
-			if (a1 == 0) return c->IsStopped() ? 1 : 0;
-			if (a1 == 1) c->PrintMessage((Message::EKind)a2, "%s", s1 ? s1 : "");
-			return 0;
+			return (a1 == 0 && c->IsStopped()) ? 1 : 0;
 		case 4: {
 			NzbInfo* n = c->m_postInfo->GetNzbInfo();
 			if (a1 == 0)
 			{
-				ints[0] = (c->m_script && c->m_script->GetPostScript()) ? 1 : 0;
-				ints[1] = c->m_postInfo->GetRequestParCheck() ? 1 : 0;
-				if (ints[0] && !ints[1])
-				{
-					strs[0] = c->m_script->GetName();
-					strs[1] = c->m_script->GetDisplayName();
-					strs[2] = c->m_script->GetEntry();
-					strs[3] = n->GetName();
-				}
+				ints[0] = c->m_postInfo->GetRequestParCheck() ? 1 : 0;
+				strs[0] = n->GetName();
 				return 0;
 			}
 			if (a1 == 1) { c->m_postInfo->SetProgressLabel(s1 ? s1 : ""); return 0; }
-			if (a1 == 2)
-			{
-				c->SetArgs({s1 ? s1 : ""});
-				c->SetInfoName(s2 ? s2 : "");
-				c->SetLogPrefix(c->m_script->GetDisplayName());
-				c->m_prefixLen = a2;
-				return 0;
-			}
 			if (a1 == 3)
 			{
-				c->ResetEnv();
 				BString<1024> st = n->MakeTextStatus(true);
 				reinterpret_cast<void(*)(uintptr_t, const char*)>(p2)(p1, *st);
 				ints[0] = n->GetId();
@@ -13500,6 +12243,7 @@ private:
 				ints[10] = n->GetTotalArticles();
 				ints[11] = n->GetSuccessArticles();
 				ints[12] = (int)n->GetServerStats()->size();
+				ints[13] = (int)n->GetParameters()->size();
 				strs[0] = n->GetName();
 				strs[1] = n->GetDestDir();
 				strs[2] = n->GetFilename();
@@ -13508,7 +12252,6 @@ private:
 				strs[5] = n->GetFinalDir();
 				strs[6] = n->GetCategory();
 				strs[7] = n->GetDupeKey();
-				strs[8] = nullptr;
 				return 0;
 			}
 			if (a1 == 4)
@@ -13520,17 +12263,7 @@ private:
 				return 0;
 			}
 			if (a1 == 5) return (uintptr_t)n->GetFailedArticles();
-			if (a1 == 6) { c->SetEnvVar(s1, s2); return 0; }
-			if (a1 == 7) { c->SetIntEnvVar(s1, a2); return 0; }
-			if (a1 == 8) { c->PrepareEnvScript(n->GetParameters(), s1); return 0; }
-			if (a1 == 9)
-			{
-				ints[0] = c->Execute();
-				c->SetLogPrefix(nullptr);
-				c->m_prefixLen = 0;
-				ints[1] = (int)n->GetParStatus();
-				return 0;
-			}
+			if (a1 == 9) return (uintptr_t)n->GetParStatus();
 			if (a1 == 10)
 			{
 				if (p1) { c->m_postInfo->SetRequestParCheck(true); c->m_postInfo->SetForceRepair(true); }
@@ -13540,15 +12273,6 @@ private:
 		}
 		case 5: {
 			NzbInfo* n = c->m_postInfo->GetNzbInfo();
-			if (a1 == 0)
-			{
-				ints[0] = c->m_prefixLen;
-				ints[1] = 0;
-				strs[0] = c->GetInfoName();
-				strs[1] = n->GetName();
-				return 0;
-			}
-			if (a1 == 1) { debug("%s", s1 ? s1 : ""); return 0; }
 			if (a1 == 2)
 			{
 				if (a2 == 1) n->SetFinalDir(s1 ? s1 : "");
@@ -13558,19 +12282,7 @@ private:
 			}
 			if (a1 == 3)
 			{
-				if (p1)
-				{
-					int saved = c->m_prefixLen;
-					c->SetLogPrefix(nullptr);
-					c->m_prefixLen = 0;
-					c->PrintMessage((Message::EKind)a2, "%s", s1 ? s1 : "");
-					c->SetLogPrefix(c->m_script->GetDisplayName());
-					c->m_prefixLen = saved;
-				}
-				else
-				{
-					n->AddMessage((Message::EKind)a2, s1 ? s1 : "");
-				}
+				n->AddMessage((Message::EKind)a2, s1 ? s1 : "");
 				return 0;
 			}
 			if (a1 == 4)
@@ -13695,205 +12407,33 @@ public:
 	Scanner(const Scanner&) = delete;
 	Scanner& operator=(const Scanner&) = delete;
 
-	class ScanScriptController;
-
-	class ScanScriptCheck : public NzbScriptController
-	{
-	protected:
-		virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script) { has |= script->GetScanScript(); }
-		bool has = false;
-		friend class ScanScriptController;
-	};
-
-	class ScanScriptController : public NzbScriptController
-	{
-	public:
-		ScanScriptController(
-			std::string& nzbName,
-			std::string& category,
-			std::string& dupeKey)
-			: m_nzbFilename(nullptr)
-			, m_url(nullptr)
-			, m_directory(nullptr)
-			, m_nzbName{ nzbName }
-			, m_category{ category }
-			, m_dupeKey{ dupeKey }
-			, m_priority(nullptr)
-			, m_dupeScore(nullptr)
-			, m_addTop(nullptr)
-			, m_addPaused(nullptr)
-			, m_dupeMode(nullptr)
-			, m_parameters(nullptr) {}
-
-		static void ExecuteScripts(
-			const char* nzbFilename,
-			NzbInfo* nzbInfo,
-			const char* directory,
-			std::string& nzbName,
-			std::string& category,
-			int* priority,
-			NzbParameterList* parameters,
-			bool* addTop,
-			bool* addPaused,
-			std::string& dupeKey,
-			int* dupeScore,
-			EDupeMode* dupeMode)
-		{
-			if (nzbInfo && nzbInfo->GetSkipScriptProcessing())
-			{
-				return;
-			}
-
-			ScanScriptController scriptController(nzbName, category, dupeKey);
-			scriptController.m_nzbFilename = nzbFilename;
-			scriptController.m_url = nzbInfo ? nzbInfo->GetUrl() : "";
-			scriptController.m_directory = directory;
-			scriptController.m_parameters = parameters;
-			scriptController.m_priority = priority;
-			scriptController.m_addTop = addTop;
-			scriptController.m_addPaused = addPaused;
-			scriptController.m_dupeScore = dupeScore;
-			scriptController.m_dupeMode = dupeMode;
-			scriptController.m_prefixLen = 0;
-
-			const char* extensions = g_Options->GetExtensions();
-
-			if (!category.empty())
-			{
-				Options::Category* categoryObj = g_Options->FindCategory(category.c_str(), false);
-				if (categoryObj && !Util::EmptyStr(categoryObj->GetExtensions()))
-				{
-					extensions = categoryObj->GetExtensions();
-				}
-			}
-
-			scriptController.ExecuteScriptList(extensions);
-		}
-
-		static bool HasScripts()
-		{
-			ScanScriptCheck check;
-			check.ExecuteScriptList(g_Options->GetExtensions());
-			// a category's extensions replace the global ones for its nzbs
-			for (Options::Category& category : g_Options->GetCategories())
-			{
-				check.ExecuteScriptList(category.GetExtensions());
-			}
-			return check.has;
-		}
-
-	protected:
-		void ExecuteScript(std::shared_ptr<const Extension::Script> script) override
-		{
-			if (!script->GetScanScript() || !FileSystem::FileExists(m_nzbFilename))
-			{
-				return;
-			}
-
-			PrintMessage(Message::mkInfo, "Executing scan-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
-
-			SetArgs({script->GetEntry()});
-
-			BString<1024> infoName("scan-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
-			SetInfoName(infoName);
-
-			SetLogPrefix(script->GetDisplayName());
-			m_prefixLen = static_cast<int>(strlen(script->GetDisplayName())) + 2; // 2 = strlen(": ");
-			PrepareParams(script->GetName());
-
-			Execute();
-
-			SetLogPrefix(nullptr);
-		}
-
-		void AddMessage(Message::EKind kind, const char* text) override
-		{
-			const char* msgText = text + m_prefixLen;
-			size_t keyOff = 0, keyLen = 0, valOff = 0;
-			int intVal = 0;
-			int cmdKind = nzbget_rs_script_parse_nzb_cmd(2, msgText, 0, 0, &keyOff, &keyLen, &valOff, &intVal);
-			if (cmdKind != 0)
-			{
-				debug("Command %s detected", msgText + 6);
-				const char* val = msgText + valOff;
-				if (cmdKind == 1) m_nzbName = val;
-				else if (cmdKind == 2) { m_category = val; g_Scanner->InitPPParameters(m_category.c_str(), m_parameters, true); }
-				else if (cmdKind == 3) m_parameters->SetParameter(std::string(msgText + keyOff, keyLen).c_str(), val);
-				else if (cmdKind == 4) *m_priority = intVal;
-				else if (cmdKind == 5) *m_addTop = intVal != 0;
-				else if (cmdKind == 6) *m_addPaused = intVal != 0;
-				else if (cmdKind == 7) m_dupeKey = val;
-				else if (cmdKind == 8) *m_dupeScore = intVal;
-				else if (cmdKind == 9) *m_dupeMode = intVal == 0 ? dmScore : (intVal == 1 ? dmAll : dmForce);
-				else if (cmdKind == -2) error("Invalid value \"%s\" for command \"DUPEMODE\" received from %s", val, GetInfoName());
-				else error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
-				return;
-			}
-			ScriptController::AddMessage(kind, text);
-		}
-
-	private:
-		const char* m_nzbFilename;
-		const char* m_url;
-		const char* m_directory;
-		std::string& m_nzbName;
-		std::string& m_category;
-		std::string& m_dupeKey;
-		int* m_priority;
-		int* m_dupeScore;
-		bool* m_addTop;
-		bool* m_addPaused;
-		EDupeMode* m_dupeMode;
-		NzbParameterList* m_parameters;
-		int m_prefixLen = 0;
-
-		void PrepareParams(const char* scriptName)
-		{
-			ResetEnv();
-
-			nzbget_rs_scan_script_prepare_env(
-				m_nzbFilename,
-				FileSystem::BaseFileName(m_nzbFilename),
-				m_url,
-				m_nzbName.c_str(),
-				m_category.c_str(),
-				*m_priority,
-				*m_addTop ? 1 : 0,
-				*m_addPaused ? 1 : 0,
-				m_dupeKey.c_str(),
-				*m_dupeScore,
-				static_cast<int>(*m_dupeMode),
-				m_directory,
-				PATH_SEPARATOR,
-				this,
-				[](void* ctx, const char* name, const char* value)
-				{
-					static_cast<ScanScriptController*>(ctx)->SetEnvVar(name, value);
-				},
-				[](void* ctx, const char* name, int value)
-				{
-					static_cast<ScanScriptController*>(ctx)->SetIntEnvVar(name, value);
-				});
-
-			PrepareEnvScript(m_parameters, scriptName);
-		}
-	};
-
 	void InitOptions()
 	{
+		std::vector<const char*> catExts;
+		if (g_Options)
+		{
+			for (Options::Category& category : g_Options->GetCategories())
+			{
+				catExts.push_back(category.GetExtensions());
+			}
+		}
+		int hasScripts = (g_ExtensionManager && g_Options)
+			? nzbget_rs_ext_mgr_op(
+				g_ExtensionManager->Handle(), 6, static_cast<int>(catExts.size()), 0, 0,
+				g_Options->GetExtensions(), nullptr, nullptr,
+				catExts.empty() ? nullptr : catExts.data(), nullptr, nullptr, nullptr)
+			: 0;
 		NzbgetRsScannerEnv env = MakeEnv();
-		nzbget_rs_scanner_exec(m_rsScanner, 0, &env, ScanScriptController::HasScripts() ? 1 : 0, 0, 0);
+		nzbget_rs_scanner_exec(m_rsScanner, 0, &env, hasScripts != 0 ? 1 : 0, 0, 0);
 	}
 
 	void InitPPParameters(const char* category, NzbParameterList* parameters, bool reset)
 	{
 		bool unpack = g_Options->GetUnpack();
 		const char* extensions = g_Options->GetExtensions();
-
 		if (!Util::EmptyStr(category))
 		{
-			Options::Category* categoryObj = g_Options->FindCategory(category, false);
-			if (categoryObj)
+			if (Options::Category* categoryObj = g_Options->FindCategory(category, false))
 			{
 				unpack = categoryObj->GetUnpack();
 				if (!Util::EmptyStr(categoryObj->GetExtensions()))
@@ -13902,35 +12442,22 @@ public:
 				}
 			}
 		}
-
-		if (reset)
+		auto paramCb = +[](void* raw, int op, const char* name, const char* val) -> int {
+			auto* params = static_cast<NzbParameterList*>(raw);
+			if (op == 0) return params->Find(name) != nullptr ? 1 : 0;
+			params->SetParameter(name, val);
+			return 0;
+		};
+		if (g_ExtensionManager)
 		{
-			g_ExtensionManager->ForEach([&parameters](auto script)
-				{
-					BString<1024> paramName("%s:", script->GetName());
-					parameters->SetParameter(paramName, nullptr);
-				}
-			);
+			nzbget_rs_ext_mgr_op(
+				g_ExtensionManager->Handle(), 5, unpack ? 1 : 0, reset ? 1 : 0,
+				reinterpret_cast<uintptr_t>(paramCb), extensions, nullptr, nullptr,
+				nullptr, parameters, nullptr, nullptr);
 		}
-
-		if (!parameters->Find("*Unpack:"))
+		else if (!parameters->Find("*Unpack:"))
 		{
 			parameters->SetParameter("*Unpack:", unpack ? "yes" : "no");
-		}
-
-		if (!Util::EmptyStr(extensions))
-		{
-			g_ExtensionManager->ForEach(
-				[&](auto script)
-				{
-					BString<1024> paramName("%s:", script->GetName());
-					if ((script->GetPostScript() || script->GetQueueScript()) && !parameters->Find(paramName) &&
-						nzbget_rs_repair_ctrl_op(23, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-							extensions, script->GetName(), nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) != 0)
-					{
-						parameters->SetParameter(paramName, "yes");
-					}
-				});
 		}
 	}
 
@@ -14047,21 +12574,65 @@ private:
 			void* strCtx, void (*setStr)(void*, int, const char*),
 			int* priority, int* addTop, int* addPaused, int* dupeScore, int* dupeMode)
 		{
+			auto* nzbInfo = static_cast<NzbInfo*>(urlInfo);
+			if (nzbInfo && nzbInfo->GetSkipScriptProcessing()) return;
 			auto* self = static_cast<Scanner*>(ctx);
-			std::string nzbName = initName ? initName : "";
-			std::string nzbCat = initCat ? initCat : "";
-			std::string dupeKey = initKey ? initKey : "";
-			bool top = *addTop != 0, paused = *addPaused != 0;
-			auto mode = static_cast<EDupeMode>(*dupeMode);
-			ScanScriptController::ExecuteScripts(
-				fullFilename, static_cast<NzbInfo*>(urlInfo), directory,
-				nzbName, nzbCat, priority, &self->m_workParams, &top, &paused, dupeKey, dupeScore, &mode);
-			*addTop = top ? 1 : 0;
-			*addPaused = paused ? 1 : 0;
-			*dupeMode = static_cast<int>(mode);
-			setStr(strCtx, 0, nzbName.c_str());
-			setStr(strCtx, 1, nzbCat.c_str());
-			setStr(strCtx, 2, dupeKey.c_str());
+			struct ScanCtx
+			{
+				Scanner* self;
+				std::string nzbName, nzbCat, dupeKey;
+				int* priority; int* addTop; int* addPaused; int* dupeScore; int* dupeMode;
+			} sc{self, initName ? initName : "", initCat ? initCat : "", initKey ? initKey : "",
+				priority, addTop, addPaused, dupeScore, dupeMode};
+			const char* extensions = g_Options ? g_Options->GetExtensions() : "";
+			if (g_Options && !sc.nzbCat.empty())
+			{
+				if (Options::Category* catObj = g_Options->FindCategory(sc.nzbCat.c_str(), false);
+					catObj && !Util::EmptyStr(catObj->GetExtensions()))
+				{
+					extensions = catObj->GetExtensions();
+				}
+			}
+			nzbget_rs_scan_scripts_exec(
+				g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr,
+				extensions, fullFilename, nzbInfo ? nzbInfo->GetUrl() : "", directory, &sc,
+				[](void* raw, int op, int a1, const char* s1, const char* s2, int* ints, const char** strs) {
+					auto* s = static_cast<ScanCtx*>(raw);
+					if (op == 0)
+					{
+						strs[0] = s->nzbName.c_str();
+						strs[1] = s->nzbCat.c_str();
+						strs[2] = s->dupeKey.c_str();
+						ints[0] = *s->priority;
+						ints[1] = *s->addTop;
+						ints[2] = *s->addPaused;
+						ints[3] = *s->dupeScore;
+						ints[4] = *s->dupeMode;
+						ints[5] = static_cast<int>(s->self->m_workParams.size());
+					}
+					else if (op == 1)
+					{
+						NzbParameter& p = s->self->m_workParams[static_cast<size_t>(a1)];
+						strs[0] = p.GetName();
+						strs[1] = p.GetValue();
+					}
+					else if (op == 2)
+					{
+						if (a1 == 1) s->nzbName = s2 ? s2 : "";
+						else if (a1 == 2) { s->nzbCat = s2 ? s2 : ""; s->self->InitPPParameters(s->nzbCat.c_str(), &s->self->m_workParams, true); }
+						else if (a1 == 3) s->self->m_workParams.SetParameter(s1 ? s1 : "", s2 ? s2 : "");
+						else if (a1 == 4) *s->priority = ints[0];
+						else if (a1 == 5) *s->addTop = ints[0] != 0 ? 1 : 0;
+						else if (a1 == 6) *s->addPaused = ints[0] != 0 ? 1 : 0;
+						else if (a1 == 7) s->dupeKey = s2 ? s2 : "";
+						else if (a1 == 8) *s->dupeScore = ints[0];
+						else if (a1 == 9) *s->dupeMode = static_cast<int>(ints[0] == 0 ? dmScore : (ints[0] == 1 ? dmAll : dmForce));
+					}
+				},
+				&ScriptHostCb);
+			setStr(strCtx, 0, sc.nzbName.c_str());
+			setStr(strCtx, 1, sc.nzbCat.c_str());
+			setStr(strCtx, 2, sc.dupeKey.c_str());
 		};
 		env.parse_nzb_cb = [](void* ctx, const char* filename, const char* category, const char** outDetectedCat) -> int
 		{
@@ -16152,71 +14723,6 @@ inline DupeCoordinator::EDupeStatus DupeCoordinator::GetDupeStatus(DownloadQueue
 #ifndef FEEDCOORDINATOR_H
 #define FEEDCOORDINATOR_H
 
-class FeedScriptController : public NzbScriptController
-{
-public:
-	static constexpr int FEED_SUCCESS = 93;
-
-	static void ExecuteScripts(const char* feedScript, const char* feedFile, int feedId, bool* success)
-	{
-		FeedScriptController scriptController;
-		scriptController.m_feedFile = feedFile;
-		scriptController.m_feedId = feedId;
-
-		scriptController.ExecuteScriptList(feedScript);
-
-		if (success)
-		{
-			*success = scriptController.m_success;
-		}
-	}
-
-protected:
-	virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script)
-	{
-		if (!script->GetFeedScript())
-		{
-			return;
-		}
-
-		PrintMessage(Message::mkInfo, "Executing feed-script %s for Feed%i", script->GetName(), m_feedId);
-
-		SetArgs({script->GetEntry()});
-
-		BString<1024> infoName("feed-script %s for Feed%i", script->GetName(), m_feedId);
-		SetInfoName(infoName);
-
-		SetLogPrefix(script->GetDisplayName());
-		PrepareParams(script->GetName());
-
-		int exitCode = Execute();
-
-		if (exitCode != FEED_SUCCESS)
-		{
-			infoName[0] = 'F';
-			PrintMessage(Message::mkError, "%s failed", *infoName);
-			m_success = false;
-		}
-
-		SetLogPrefix(nullptr);
-	}
-
-private:
-	const char* m_feedFile;
-	int m_feedId;
-	bool m_success = true;
-
-	void PrepareParams(const char* scriptName)
-	{
-		ResetEnv();
-
-		SetEnvVar("NZBFP_FILENAME", m_feedFile);
-		SetIntEnvVar("NZBFP_FEEDID", m_feedId);
-
-		PrepareEnvScript(nullptr, scriptName);
-	}
-};
-
 class FeedCoordinator : public Thread, public Observer, public Subject, public Debuggable
 {
 public:
@@ -16418,9 +14924,10 @@ private:
 			if (op == 2) return static_cast<uintptr_t>(g_DupeCoordinator->GetDupeStatus(DownloadQueue::Guard(), s1 ? s1 : "", s2 ? s2 : ""));
 			if (op == 3)
 			{
-				bool ok = true;
-				FeedScriptController::ExecuteScripts(s1 ? s1 : "", s2 ? s2 : "", a1, a2 != 0 ? &ok : nullptr);
-				return ok ? 1 : 0;
+				int ok = nzbget_rs_feed_scripts_exec(
+					g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr,
+					s1 ? s1 : "", s2 ? s2 : "", a1, &ScriptHostCb);
+				return (a2 == 0 || ok != 0) ? 1 : 0;
 			}
 			if (op == 4)
 			{
@@ -16473,90 +14980,6 @@ extern FeedCoordinator* g_FeedCoordinator;
 
 #ifndef SCHEDULER_H
 #define SCHEDULER_H
-
-class SchedulerScriptController : public Thread, public NzbScriptController
-{
-public:
-	virtual void Run()
-	{
-		if (m_externalProcess) ExecuteExternalProcess();
-		else ExecuteScriptList(m_script);
-	}
-
-	static void StartFromArgs(const char* param, bool externalProcess, int taskId, const char* const* words, size_t wordCount)
-	{
-		SchedulerScriptController* sc = new SchedulerScriptController();
-		sc->m_externalProcess = externalProcess;
-		sc->m_script = param ? param : "";
-		sc->m_taskId = taskId;
-		if (externalProcess)
-		{
-			std::vector<CString> argv;
-			argv.reserve(wordCount);
-			for (size_t i = 0; i < wordCount; ++i) argv.emplace_back(words[i]);
-			sc->SetArgs(std::move(argv));
-		}
-		sc->SetAutoDestroy(true);
-		sc->Start();
-	}
-
-protected:
-	virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script)
-	{
-		if (!script->GetSchedulerScript()) return;
-		struct Ctx { SchedulerScriptController* self; const Extension::Script* s; } ctx{this, script.get()};
-		NzbgetRsSchedulerEnv env{};
-		env.ctx = &ctx;
-		env.a1 = 0;
-		env.a2 = m_taskId;
-		env.s1 = script->GetName();
-		env.action_cb = +[](void* raw, int sub, int, int, const char* const* ptrs, size_t, int*, int64_t*, const char** strs) -> int {
-			auto* c = static_cast<Ctx*>(raw);
-			if (sub == 8) { strs[0] = c->s->GetDisplayName(); return 1; }
-			if (sub == 7)
-			{
-				c->self->PrintMessage(Message::mkInfo, "%s", ptrs[0]);
-				c->self->SetArgs({c->s->GetEntry()});
-				c->self->SetInfoName(ptrs[1]);
-				c->self->SetLogPrefix(ptrs[2]);
-				c->self->ResetEnv();
-				c->self->SetIntEnvVar("NZBSP_TASKID", c->self->m_taskId);
-				c->self->PrepareEnvScript(nullptr, c->s->GetName());
-				c->self->Execute();
-				c->self->SetLogPrefix(nullptr);
-			}
-			return 1;
-		};
-		nzbget_rs_scheduler_exec(nullptr, 4, &env);
-	}
-
-private:
-	CString m_script;
-	bool m_externalProcess;
-	int m_taskId;
-
-	void ExecuteExternalProcess()
-	{
-		NzbgetRsSchedulerEnv env{};
-		env.ctx = static_cast<SchedulerScriptController*>(this);
-		env.a1 = 1;
-		env.a2 = m_taskId;
-		env.s1 = GetScript();
-		env.action_cb = +[](void* raw, int sub, int, int, const char* const* ptrs, size_t, int*, int64_t*, const char** strs) -> int {
-			auto* self = static_cast<SchedulerScriptController*>(raw);
-			if (sub == 8) { strs[0] = ""; return 1; }
-			if (sub == 7)
-			{
-				info("%s", ptrs[0]);
-				self->SetInfoName(ptrs[1]);
-				self->SetLogPrefix(ptrs[2]);
-				self->Execute();
-			}
-			return 1;
-		};
-		nzbget_rs_scheduler_exec(nullptr, 4, &env);
-	}
-};
 
 class Scheduler : public Service
 {
@@ -16665,7 +15088,13 @@ protected:
 				if (a1 == 3) { g_ServerPool->Changed(); return 1; }
 			}
 			if (sub == 3) { g_FeedCoordinator->FetchFeedList(ptrs[0]); return 1; }
-			if (sub == 4) { SchedulerScriptController::StartFromArgs(ptrs[0], a1 != 0, a2, ptrs + 1, len > 0 ? len - 1 : 0); return 1; }
+			if (sub == 4)
+			{
+				nzbget_rs_scheduler_script_start(
+					g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr,
+					ptrs[0], a1, a2, ptrs + 1, len > 0 ? len - 1 : 0, &ScriptHostCb);
+				return 1;
+			}
 			if (sub == 6) { i64s[0] = static_cast<int64_t>(Util::CurrentTime()); return 1; }
 			return 0;
 		};
@@ -16942,7 +15371,7 @@ public:
 	~Maintenance()
 	{
 		NzbgetRsMaintenanceEnv env{};
-		env.action_cb = &Maintenance::MaintActionCb;
+		env.script_host_cb = &ScriptHostCb;
 		nzbget_rs_maintenance_exec(m_rs, 0, &env);
 		nzbget_rs_maintenance_free(m_rs);
 	}
@@ -16964,14 +15393,12 @@ public:
 		NzbgetRsMaintenanceEnv env{};
 		env.a1 = static_cast<int>(branch);
 		env.a2 = PATH_SEPARATOR;
+		env.a3 = g_Options->GetDaemonMode() ? 1 : 0;
 		env.s1 = g_Options->GetWebDir();
 		env.s2 = g_Options->GetAppDir();
-		env.log_cb = &Maintenance::MaintLogCb;
-		env.action_cb = &Maintenance::MaintActionCb;
+		env.script_host_cb = &ScriptHostCb;
 		return nzbget_rs_maintenance_exec(m_rs, 4, &env) != 0;
 	}
-
-	void ResetUpdateController() { nzbget_rs_maintenance_exec(m_rs, 1, nullptr); }
 
 	bool CheckUpdates(CString& updateInfo)
 	{
@@ -16981,8 +15408,7 @@ public:
 		env.a2 = PATH_SEPARATOR;
 		env.s1 = g_Options->GetWebDir();
 		env.out_buf = &buf;
-		env.log_cb = &Maintenance::MaintLogCb;
-		env.action_cb = &Maintenance::MaintActionCb;
+		env.script_host_cb = &ScriptHostCb;
 		if (nzbget_rs_maintenance_exec(m_rs, 5, &env) != 0 && buf.len > 0)
 			updateInfo.Set(buf.data ? buf.data : "", static_cast<int>(buf.len));
 		nzbget_rs_free(buf);
@@ -17002,113 +15428,8 @@ public:
 private:
 	NzbgetRsMaintenance* m_rs;
 
-	static void MaintLogCb(void*, int level, const char* msg)
+	static uintptr_t MaintActionCb(void*, int sub, const char* s1, const char* s2, const uint8_t* bytes, size_t len)
 	{
-		const char* s = msg ? msg : "";
-		if (level == 0) debug("%s", s);
-		else if (level == 1) detail("%s", s);
-		else if (level == 4) error("%s", s);
-	}
-
-	class UpdateScriptController : public Thread, public ScriptController
-	{
-	public:
-		virtual void Run() override
-		{
-			UnregisterRunningScript();
-			NzbgetRsMaintenanceEnv env{};
-			env.ctx = static_cast<UpdateScriptController*>(this);
-			env.a1 = static_cast<int>(m_branch);
-			env.a2 = g_Options->GetDaemonMode() ? 1 : 0;
-			env.s1 = GetScript();
-			env.log_cb = &Maintenance::MaintLogCb;
-			env.action_cb = &Maintenance::MaintActionCb;
-			m_prefixLen = nzbget_rs_maintenance_exec(g_Maintenance->m_rs, 6, &env);
-			Execute();
-			g_Maintenance->ResetUpdateController();
-		}
-
-		void SetBranch(Maintenance::EBranch branch) { m_branch = branch; }
-		void PrintBanner(const char* s) { PrintMessage(Message::mkInfo, "%s", s); }
-		void BaseAdd(Message::EKind k, const char* s) { ScriptController::AddMessage(k, s); }
-
-	protected:
-		virtual void AddMessage(Message::EKind kind, const char* text) override
-		{
-			NzbgetRsMaintenanceEnv env{};
-			env.ctx = static_cast<UpdateScriptController*>(this);
-			env.a1 = static_cast<int>(kind);
-			env.a2 = m_prefixLen;
-			env.s1 = text;
-			env.log_cb = &Maintenance::MaintLogCb;
-			env.action_cb = &Maintenance::MaintActionCb;
-			nzbget_rs_maintenance_exec(g_Maintenance->m_rs, 7, &env);
-		}
-
-	private:
-		Maintenance::EBranch m_branch = brStable;
-		int m_prefixLen = 0;
-	};
-
-	static uintptr_t MaintActionCb(void* ctx, int sub, int a1, uintptr_t p1,
-		const char* s1, const char* s2, const char* s3, const uint8_t* bytes, size_t len)
-	{
-		if (sub == 0) { reinterpret_cast<UpdateScriptController*>(p1)->Detach(); return 1; }
-		if (sub == 1)
-		{
-			auto* ctrl = new UpdateScriptController();
-			ctrl->SetArgs({s1 ? s1 : ""});
-			ctrl->SetBranch(static_cast<EBranch>(a1));
-			ctrl->SetAutoDestroy(true);
-			return reinterpret_cast<uintptr_t>(ctrl);
-		}
-		if (sub == 2) { reinterpret_cast<UpdateScriptController*>(p1)->Start(); return 1; }
-		if (sub == 3)
-		{
-			struct InfoController : public ScriptController
-			{
-				NzbgetRsMaintenance* m_maint = nullptr;
-				int m_prefixLen = 0;
-				uintptr_t m_accPtr = 0;
-				void AddMessage(Message::EKind kind, const char* text) override
-				{
-					NzbgetRsMaintenanceEnv env{};
-					env.ctx = static_cast<ScriptController*>(this);
-					env.p1 = m_accPtr;
-					env.a1 = static_cast<int>(kind);
-					env.a2 = m_prefixLen;
-					env.a4 = 1;
-					env.s1 = text;
-					env.s2 = GetInfoName();
-					env.log_cb = &Maintenance::MaintLogCb;
-					env.action_cb = +[](void* raw, int s, int k, uintptr_t, const char* msg, const char*, const char*, const uint8_t*, size_t) -> uintptr_t {
-						if (s == 7) static_cast<InfoController*>(static_cast<ScriptController*>(raw))->BaseAdd(static_cast<Message::EKind>(k), msg);
-						return 1;
-					};
-					nzbget_rs_maintenance_exec(m_maint, 6, &env);
-				}
-				void BaseAdd(Message::EKind k, const char* msg) { ScriptController::AddMessage(k, msg); }
-			} ic;
-			ic.m_maint = static_cast<Maintenance*>(ctx)->m_rs;
-			ic.m_prefixLen = a1;
-			ic.m_accPtr = p1;
-			ic.SetArgs({s1 ? s1 : ""});
-			ic.SetInfoName(s2);
-			ic.SetLogPrefix(s3);
-			ic.Execute();
-			return 1;
-		}
-		if (sub == 4)
-		{
-			auto* self = static_cast<UpdateScriptController*>(ctx);
-			self->PrintBanner(s1);
-			self->SetInfoName(s2);
-			self->SetLogPrefix(s3);
-			for (int i = 0; i < g_ArgumentCount; i++)
-				self->SetEnvVar(BString<100>("NZBUP_CMDLINE%i", i), (*g_Arguments)[i]);
-			return 1;
-		}
-		if (sub == 5) { static_cast<UpdateScriptController*>(ctx)->SetEnvVar(s1, s2); return 1; }
 		if (sub == 6)
 		{
 #ifndef DISABLE_TLS
@@ -17130,8 +15451,6 @@ private:
 			return 0;
 #endif
 		}
-		if (sub == 7) { static_cast<UpdateScriptController*>(ctx)->BaseAdd(static_cast<Message::EKind>(a1), s1); return 1; }
-		if (sub == 8) { static_cast<UpdateScriptController*>(ctx)->Detach(); ExitProc(); return 1; }
 		return 0;
 	}
 };
@@ -17598,15 +15917,7 @@ private:
 							return 0;
 						}
 					}
-					bool isJson = a2 != 0;
-					std::string out = isJson ? "[\n" : "<array><data>\n";
-					int idx = 0;
-					g_ExtensionManager->ForEach([&](auto ext) {
-						if (isJson && idx++ > 0) out += ",\n";
-						out += isJson ? Extension::ToJsonStr(*ext) : Extension::ToXmlStr(*ext);
-					});
-					out += isJson ? "\n]" : "</data></array>\n";
-					setBuf(out.data(), out.size());
+					if (outBuf) *outBuf = g_ExtensionManager->SerializeList(a2 != 0);
 					return 1;
 				}
 				case 15: {
@@ -17622,7 +15933,8 @@ private:
 					if (a1 == 0)
 					{
 						if (g_Options->GetScriptDirPaths().empty()) { rmDl(); const char* m = "\"ScriptDir\" is not specified"; setBuf(m, strlen(m)); return 0; }
-						if (const auto err = g_ExtensionManager->InstallExtension(filename, g_Options->GetScriptDirPaths().front()))
+						std::string destStr = fs::u8string(g_Options->GetScriptDirPaths().front());
+						if (const auto err = g_ExtensionManager->InstallOrUpdate(0, filename, destStr.c_str()))
 						{
 							rmDl();
 							setBuf(err->data(), err->size());
@@ -17630,7 +15942,7 @@ private:
 						}
 						return 1;
 					}
-					if (const auto err = g_ExtensionManager->UpdateExtension(filename, s2 ? s2 : "")) { setBuf(err->data(), err->size()); return 0; }
+					if (const auto err = g_ExtensionManager->InstallOrUpdate(1, filename, s2 ? s2 : "")) { setBuf(err->data(), err->size()); return 0; }
 					return 1;
 				}
 				case 16: g_FeedCoordinator->FetchFeed(a1); return 1;
@@ -17767,11 +16079,11 @@ private:
 					if (outF64) *outF64 = duration<double>(steady_clock::now() - start).count();
 					return 1;
 				}
-				case 26: {
-					auto optEntries = std::make_unique<Options::OptEntries>();
-					for (size_t i = 0; i < paramsLen; i++) optEntries->emplace_back(params[i].name, params[i].value);
-					return CommandScriptController::StartScript(s1 ? s1 : "", s2 ? s2 : "", std::move(optEntries)) ? 1 : 0;
-				}
+				case 26:
+					return nzbget_rs_command_script_start(
+						g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr,
+						s1 ? s1 : "", s2 ? s2 : "", g_CommandScriptLog->Reset(),
+						params, paramsLen, &ScriptHostCb) != 0 ? 1 : 0;
 				default: return 0;
 			}
 		};

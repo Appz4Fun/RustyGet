@@ -817,57 +817,53 @@ NzbgetRsBuf nzbget_rs_system_health_diagnose(
     void* ctx,
     void (*log_cb)(void* ctx, int severity, const char* msg));
 
-/* Extension & Script Subsystem End-to-End C ABI (`rust/src/extension.rs`, `rust/src/options.rs`) */
+/* Extension & Script Subsystem End-to-End C ABI (`rust/src/extension.rs`, `rust/src/script.rs`, `rust/src/options.rs`) */
 void nzbget_rs_options_convert_old_options(
     const char* const* names, const char* const* values, size_t count,
     void* ctx,
     void (*update_cb)(void* ctx, size_t idx, const char* name, const char* value));
 
-
-NzbgetRsBuf nzbget_rs_ext_mgr_prepare_update(
-    const char* ext_name, int found, int64_t use_count,
-    const char* target_path, const char* archive_path,
-    NzbgetRsBuf* out_backup_path);
-
-NzbgetRsBuf nzbget_rs_ext_mgr_finish_update(
-    const char* target_path, const char* backup_path,
-    const char* archive_path, const char* install_err);
-
-NzbgetRsBuf nzbget_rs_ext_mgr_delete_extension(
-    const char* ext_name, int found, int64_t use_count,
-    const char* target_path);
-
-NzbgetRsBuf nzbget_rs_ext_mgr_install_extension(
-    const char* file_path, const char* dest_path,
-    void (*log_cb)(void* ctx, int kind, const char* msg), void* log_ctx);
-
-void nzbget_rs_nzb_script_prepare_env(
-    const char* script_name, int has_parameters,
-    const char* const* param_names, const char* const* param_values, size_t param_count,
-    void* ctx,
-    void (*set_env_special_cb)(void* ctx, const char* prefix, const char* name, const char* value),
-    void (*prepare_options_cb)(void* ctx, const char* strip_prefix));
-
-void nzbget_rs_scan_script_prepare_env(
-    const char* nzb_filename, const char* base_filename,
-    const char* url, const char* nzb_name, const char* category,
-    int priority, int add_top, int add_paused,
-    const char* dupe_key, int dupe_score, int dupe_mode,
-    const char* directory, char path_sep,
-    void* ctx,
-    void (*set_env_cb)(void* ctx, const char* name, const char* value),
-    void (*set_int_env_cb)(void* ctx, const char* name, int value));
+typedef struct NzbgetRsExtManager NzbgetRsExtManager;
+typedef struct NzbgetRsScriptRunner NzbgetRsScriptRunner;
+typedef uintptr_t (*NzbgetRsScriptHostFn)(
+    void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+    const char* s1, const char* s2, int* ints, const char** strs);
+NzbgetRsExtManager* nzbget_rs_ext_mgr_new(void);
+void nzbget_rs_ext_mgr_free(NzbgetRsExtManager* mgr);
+int nzbget_rs_ext_mgr_op(
+    NzbgetRsExtManager* mgr, int op, int a1, int a2, uintptr_t p1,
+    const char* s1, const char* s2, const char* s3, const char* const* strs,
+    void* ctx, NzbgetRsScriptHostFn host_cb, NzbgetRsBuf* out_buf);
+NzbgetRsScriptRunner* nzbget_rs_script_runner_new(void);
+void nzbget_rs_script_runner_free(NzbgetRsScriptRunner* r);
+void nzbget_rs_script_runner_terminate(NzbgetRsScriptRunner* r, NzbgetRsScriptHostFn host_cb);
+void nzbget_rs_script_terminate_all(NzbgetRsScriptHostFn host_cb);
+void nzbget_rs_script_run_job(uintptr_t job_ptr, NzbgetRsScriptHostFn host_cb);
+int nzbget_rs_command_script_start(
+    const NzbgetRsExtManager* ext_mgr, const char* script_name, const char* command,
+    int log_id, const NzbgetRsRpcParamItem* params, size_t params_len,
+    NzbgetRsScriptHostFn host_cb);
+int nzbget_rs_feed_scripts_exec(
+    const NzbgetRsExtManager* ext_mgr, const char* feed_script, const char* feed_file,
+    int feed_id, NzbgetRsScriptHostFn host_cb);
+void nzbget_rs_scheduler_script_start(
+    const NzbgetRsExtManager* ext_mgr, const char* param, int external_process,
+    int task_id, const char* const* words, size_t word_count, NzbgetRsScriptHostFn host_cb);
+void nzbget_rs_scan_scripts_exec(
+    const NzbgetRsExtManager* ext_mgr, const char* extensions, const char* nzb_filename,
+    const char* url, const char* directory, void* scan_ctx,
+    void (*scan_cb)(void*, int, int, const char*, const char*, int*, const char**),
+    NzbgetRsScriptHostFn host_cb);
 
 typedef struct NzbgetRsQueueScriptCoord NzbgetRsQueueScriptCoord;
 typedef struct NzbgetRsQueueScriptCoordEnv {
-    void* ctx; uintptr_t p1; uintptr_t p2;
-    int a1; int a2; int a3; int a4; int a5; int a6; int64_t t1; int64_t t2;
-    const char* s1; const char* s2; const char* s3; const char* s4; const char* s5; const char* s6; const char* s7;
-    int* out_i32; void (*drop_script_cb)(uintptr_t);
-    uintptr_t (*action_cb)(void*, int, int, int, uintptr_t, uintptr_t, const char*, const char*, const char*, int*, const char**);
+    void* ctx; const NzbgetRsExtManager* ext_mgr; uintptr_t p1;
+    int a1; int a2; int a3; int a4; int64_t t1; int64_t t2;
+    const char* s1; int* out_i32; NzbgetRsScriptHostFn host_cb;
+    uintptr_t (*action_cb)(void*, int, int, uintptr_t, const char*, int*, const char**);
 } NzbgetRsQueueScriptCoordEnv;
 NzbgetRsQueueScriptCoord* nzbget_rs_queue_script_new(void);
-void nzbget_rs_queue_script_free(NzbgetRsQueueScriptCoord* h, void (*drop_script_cb)(uintptr_t));
+void nzbget_rs_queue_script_free(NzbgetRsQueueScriptCoord* h);
 int nzbget_rs_queue_script_exec(NzbgetRsQueueScriptCoord* h, int op, const NzbgetRsQueueScriptCoordEnv* env);
 
 /* ============================================================================
@@ -966,26 +962,6 @@ int nzbget_rs_nzbfile_parser_get_file(
     NzbgetRsNzbKeptFileView* out_view);
 
 NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
-
-NzbgetRsBuf nzbget_rs_ext_mgr_load_extensions(
-    const char* script_dir, const char* script_order, char path_sep, void* ctx,
-    void (*on_error)(void* ctx, const char* msg),
-    void (*on_extension)(
-        void* ctx,
-        const char* entry_ptr, size_t entry_len,
-        const char* loc_ptr, size_t loc_len,
-        const char* root_ptr, size_t root_len,
-        const char* name_ptr, size_t name_len,
-        const char* disp_ptr, size_t disp_len,
-        const char* qevents_ptr, size_t qevents_len,
-        const char* task_time_ptr, size_t task_time_len,
-        int post_script, int scan_script, int queue_script, int sched_script, int feed_script,
-        const char* json_ptr, size_t json_len,
-        const char* xml_ptr, size_t xml_len));
-NzbgetRsBuf nzbget_rs_ext_mgr_resolve_extension_path(
-    const char* ext_loc_ptr, size_t ext_loc_len,
-    const char* ext_entry_ptr, size_t ext_entry_len,
-    const char* const* all_locs_ptrs, const size_t* all_locs_lens, size_t all_locs_count);
 NzbgetRsBuf nzbget_rs_system_info_format(
     int mode,
     const char* uts_sysname,
@@ -1244,8 +1220,6 @@ void nzbget_rs_nzb_update_deleted_stats(
     int64_t* inout_par_size, int64_t* inout_par_cur_success_size, int64_t* inout_par_failed_size,
     int64_t* inout_par_cur_failed_size, int* inout_paused_file_count, int64_t* inout_paused_size);
 
-NzbgetRsBuf nzbget_rs_util_find_executor_program(
-    const char* filename, const char* custom_path, int* out_found);
 void nzbget_rs_util_format_time(int64_t time_sec, char* buffer, int bufsize);
 
 typedef struct RsDownloadCurrentStatsAcc {
@@ -1284,9 +1258,6 @@ void nzbget_rs_server_stat_apply_op(
     int stat_op, int delta_success, int delta_failed,
     int* inout_success, int* inout_failed);
 int nzbget_rs_script_calc_total_status(const int* statuses, size_t count);
-int nzbget_rs_script_parse_nzb_cmd(
-    int scope, const char* msg_text, int event, int qe_nzb_downloaded,
-    size_t* out_key_off, size_t* out_key_len, size_t* out_val_off, int* out_int_val);
 
 typedef struct NzbgetRsServerMatchItem {
     int id;
@@ -1433,16 +1404,6 @@ typedef struct NzbgetRsDaemonEnv {
     void (*log_cb)(void*, int, const char*); int (*action_cb)(void*, int, int, const char*, const char*);
 } NzbgetRsDaemonEnv;
 int nzbget_rs_daemon_exec(int op, const NzbgetRsDaemonEnv* env);
-int nzbget_rs_repair_ctrl_op(
-    int op, int a, int b, int c, int d, int e, int f,
-    int64_t t1, int64_t t2, int64_t t3, int64_t t4,
-    const char* s1, const char* s2, const int* i32_arr, const uint8_t* u8_arr, const int64_t* i64_arr, size_t len,
-    int* out1, int* out2, int* out3, int* out4, int* out_arr, int64_t* out_i64_arr);
-int nzbget_rs_stream_repair_ctrl_op(
-    int op, int a, int b, int c, int d, int e,
-    int64_t t1, int64_t t2, int64_t t3, double f1,
-    const char* s1, const char* const* cstr_arr, const int64_t* i64_arr, size_t len,
-    int* out1, int* out2, int64_t* i64_inout, NzbgetRsBuf* out_buf);
 typedef struct NzbgetRsRepairController NzbgetRsRepairController;
 typedef uintptr_t (*NzbgetRsRepairCtrlHostFn)(
     void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
@@ -1471,8 +1432,10 @@ int nzbget_rs_direct_unpack_exec(
     const NzbgetRsDirectUnpack* ctrl, int op, uintptr_t p1, uintptr_t p2,
     NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
 int nzbget_rs_post_job_exec(
-    int job, int a1, int a2, const char* s1,
-    NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
+    int job, int a1, int a2, NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
+void nzbget_rs_post_script_run(
+    NzbgetRsScriptRunner* runner, const NzbgetRsExtManager* ext_mgr, int parcheck_enabled,
+    void* ctx, NzbgetRsRepairCtrlHostFn host_cb, NzbgetRsScriptHostFn script_host_cb);
 typedef struct NzbgetRsStreamRepairCtrl NzbgetRsStreamRepairCtrl;
 typedef uintptr_t (*NzbgetRsStreamRepairHostFn)(
     void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
@@ -1713,8 +1676,8 @@ typedef struct NzbgetRsMaintenance NzbgetRsMaintenance;
 typedef struct NzbgetRsMaintenanceEnv {
     void* ctx; uintptr_t p1; int a1; int a2; int a3; int a4; int64_t t1;
     const char* s1; const char* s2; const char* s3; NzbgetRsBuf* out_buf;
-    void* emit_ctx; NzbgetRsXmlRpcEmitFn emit_cb; void (*log_cb)(void*, int, const char*);
-    uintptr_t (*action_cb)(void*, int, int, uintptr_t, const char*, const char*, const char*, const uint8_t*, size_t);
+    void* emit_ctx; NzbgetRsXmlRpcEmitFn emit_cb; NzbgetRsScriptHostFn script_host_cb;
+    uintptr_t (*action_cb)(void*, int, const char*, const char*, const uint8_t*, size_t);
 } NzbgetRsMaintenanceEnv;
 NzbgetRsMaintenance* nzbget_rs_maintenance_new(void);
 void nzbget_rs_maintenance_free(NzbgetRsMaintenance* h);

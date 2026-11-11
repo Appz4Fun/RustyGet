@@ -91,9 +91,7 @@ pub fn script_config_parse_bytes(raw: &[u8]) -> Vec<(CString, CString)> {
         if line.is_empty() || line[0] == b'#' {
             continue;
         }
-        if let Some((raw_name, raw_val)) =
-            crate::options::options_split_option_string(line)
-        {
+        if let Some((raw_name, raw_val)) = crate::options::options_split_option_string(line) {
             let name_c = cstring_lossy(raw_name);
             let val_c = cstring_lossy(raw_val);
             let (conv_name, conv_val) = crate::options::convert_old_option(&name_c, &val_c);
@@ -158,8 +156,7 @@ pub fn script_config_merge_bytes(raw: &[u8], entries: &[(&[u8], &[u8])]) -> Vec<
             {
                 trimmed = &trimmed[..trimmed.len() - 1];
             }
-            if let Some((raw_name, raw_val)) =
-                crate::options::options_split_option_string(trimmed)
+            if let Some((raw_name, raw_val)) = crate::options::options_split_option_string(trimmed)
             {
                 let name_c = cstring_lossy(raw_name);
                 let val_c = cstring_lossy(raw_val);
@@ -364,12 +361,7 @@ mod cipher_atomic {
         ) -> c_int;
         pub fn unlinkat(dirfd: c_int, pathname: *const c_char, flags: c_int) -> c_int;
         #[cfg(target_os = "macos")]
-        fn fcopyfile(
-            from: c_int,
-            to: c_int,
-            state: *mut std::ffi::c_void,
-            flags: u32,
-        ) -> c_int;
+        fn fcopyfile(from: c_int, to: c_int, state: *mut std::ffi::c_void, flags: u32) -> c_int;
         #[cfg(target_os = "linux")]
         fn flistxattr(fd: c_int, list: *mut c_char, size: usize) -> isize;
         #[cfg(target_os = "linux")]
@@ -402,9 +394,7 @@ mod cipher_atomic {
             && a.ctime_nsec() == b.ctime_nsec()
     }
 
-    pub fn read_cipher_descriptor(
-        file: &std::fs::File,
-    ) -> Option<(Vec<u8>, std::fs::Metadata)> {
+    pub fn read_cipher_descriptor(file: &std::fs::File) -> Option<(Vec<u8>, std::fs::Metadata)> {
         let before = file.metadata().ok()?;
         if !before.file_type().is_file() || before.size() > 16 * 1024 * 1024 {
             return None;
@@ -473,9 +463,7 @@ mod cipher_atomic {
             let Ok(got) = get_fn(source, name_cstr, value.as_mut_ptr(), value.len()) else {
                 return false;
             };
-            if got != bytes
-                || set_fn(target, name_cstr, value.as_ptr(), value.len(), 0).is_err()
-            {
+            if got != bytes || set_fn(target, name_cstr, value.as_ptr(), value.len(), 0).is_err() {
                 return false;
             }
             total += value.len();
@@ -581,17 +569,13 @@ mod cipher_atomic {
         let parent_bytes = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
-            .map_or(&b"."[..], |p| crate::cleanup::os_str_to_bytes(p.as_os_str()));
+            .map_or(&b"."[..], |p| {
+                crate::cleanup::os_str_to_bytes(p.as_os_str())
+            });
         let parent_c = cstring_lossy(parent_bytes);
         let leaf_c = cstring_lossy(leaf_bytes);
 
-        let parent_fd = unsafe {
-            open(
-                parent_c.as_ptr(),
-                O_RDONLY | O_DIRECTORY | O_CLOEXEC,
-                0,
-            )
-        };
+        let parent_fd = unsafe { open(parent_c.as_ptr(), O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0) };
         if parent_fd < 0 {
             return RsCipherCommit::Failed;
         }
@@ -1003,8 +987,7 @@ pub fn maintenance_prepare_signature_inputs(
     drop(in_file);
 
     let base_idx = crate::paths::base_file_name(in_filename);
-    let mut sig_title =
-        crate::systemhealth::maintenance_format_sig_title(&in_filename[base_idx..]);
+    let mut sig_title = crate::systemhealth::maintenance_format_sig_title(&in_filename[base_idx..]);
     if sig_title.len() > 1023 {
         sig_title.truncate(1023);
     }
@@ -1154,7 +1137,11 @@ pub fn ext_mgr_delete_extension(
     if let Err(ec) = fs_remove_all(&target) {
         let target_str = String::from_utf8_lossy(target_path);
         return Some(
-            format!("Cannot delete directory '{target_str}': {}", io_err_msg(&ec)).into_bytes(),
+            format!(
+                "Cannot delete directory '{target_str}': {}",
+                io_err_msg(&ec)
+            )
+            .into_bytes(),
         );
     }
     None
@@ -1696,10 +1683,7 @@ pub fn should_ignore_queued_script_event(
 // ============================================================================
 
 /// Builds the comma-separated list of enabled post-script names in `PostScriptController::Run`.
-pub fn build_enabled_script_comma_list(
-    param_names: &[&[u8]],
-    param_values: &[&[u8]],
-) -> Vec<u8> {
+pub fn build_enabled_script_comma_list(param_names: &[&[u8]], param_values: &[&[u8]]) -> Vec<u8> {
     let count = param_names.len().min(param_values.len());
     let mut out = Vec::new();
     for i in 0..count {
@@ -2002,10 +1986,7 @@ pub fn build_cipher_baseline(names: &[&[u8]], values: &[&[u8]]) -> Vec<u8> {
             Some(pos) => 6 + pos,
             None => continue,
         };
-        if dot == 6
-            || name[6] == b'0'
-            || !name[6..dot].iter().all(|&c| c.is_ascii_digit())
-        {
+        if dot == 6 || name[6] == b'0' || !name[6..dot].iter().all(|&c| c.is_ascii_digit()) {
             continue;
         }
         let suffix = &name[dot + 1..];
@@ -2062,7 +2043,7 @@ pub fn normalize_special_env_var_name(varname: &[u8]) -> Vec<u8> {
 /// - `2`: `mkError`
 /// - `3`: `mkDetail`
 /// - `4`: `mkDebug`
-pub fn classify_script_output_line(line: &[u8]) -> ( usize, i32, usize) {
+pub fn classify_script_output_line(line: &[u8]) -> (usize, i32, usize) {
     let mut trimmed_len = line.len();
     while trimmed_len > 0 {
         let last = line[trimmed_len - 1];
@@ -2099,7 +2080,10 @@ pub fn check_env_size_limit(env_lens: &[usize], ptr_size: usize, limit: usize) -
     }
     let mut total = 0usize;
     for &len in env_lens {
-        total = total.saturating_add(len).saturating_add(1).saturating_add(ptr_size);
+        total = total
+            .saturating_add(len)
+            .saturating_add(1)
+            .saturating_add(ptr_size);
         if total > limit {
             return Some(total);
         }
@@ -2610,7 +2594,10 @@ pub fn ext_loader_v2_load_from_dir_with_error(
     let m = match crate::manifest::load(&raw, limits) {
         crate::manifest::Outcome::Loaded(m) => m,
         crate::manifest::Outcome::Syntax => {
-            on_error(&format_manifest_parse_error(&manifest_file_bytes, b". Syntax error."));
+            on_error(&format_manifest_parse_error(
+                &manifest_file_bytes,
+                b". Syntax error.",
+            ));
             return None;
         }
         crate::manifest::Outcome::NotObject => {
@@ -2621,7 +2608,10 @@ pub fn ext_loader_v2_load_from_dir_with_error(
             return None;
         }
         crate::manifest::Outcome::ElementNotObject(_) => {
-            on_error(&format_manifest_parse_error(&manifest_file_bytes, b": not an object"));
+            on_error(&format_manifest_parse_error(
+                &manifest_file_bytes,
+                b": not an object",
+            ));
             return None;
         }
         crate::manifest::Outcome::Refused(_) => return None,
@@ -2734,7 +2724,10 @@ pub fn ext_loader_v1_load_from_file(
     let display_name = stripped[base_off..].to_vec();
 
     let mut about = parsed.about;
-    while about.last().is_some_and(|&b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
+    while about
+        .last()
+        .is_some_and(|&b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+    {
         about.pop();
     }
 
@@ -2983,6 +2976,136 @@ impl RsExtensionManager {
         }
         Ok(())
     }
+
+    pub fn load_with_cb(
+        &self,
+        script_dir: &[u8],
+        script_order: &[u8],
+        path_sep: u8,
+        on_error: impl FnMut(&[u8]),
+    ) -> Result<Vec<std::sync::Arc<ExtensionScriptView>>, Vec<u8>> {
+        let mut guard = self.extensions.write().unwrap_or_else(|e| e.into_inner());
+        guard.clear();
+        let loaded = ext_mgr_load_extensions_with(script_dir, script_order, path_sep, on_error)
+            .map_err(String::into_bytes)?;
+        *guard = loaded.clone();
+        Ok(loaded)
+    }
+
+    pub fn serialize_list(&self, is_json: bool) -> Vec<u8> {
+        let guard = self.extensions.read().unwrap_or_else(|e| e.into_inner());
+        let mut out = if is_json {
+            b"[\n".to_vec()
+        } else {
+            b"<array><data>\n".to_vec()
+        };
+        for (idx, ext) in guard.iter().enumerate() {
+            if is_json && idx > 0 {
+                out.extend_from_slice(b",\n");
+            }
+            if is_json {
+                out.extend_from_slice(&extension_to_json(ext));
+            } else {
+                out.extend_from_slice(&extension_to_xml(ext));
+            }
+        }
+        if is_json {
+            out.extend_from_slice(b"\n]");
+        } else {
+            out.extend_from_slice(b"</data></array>\n");
+        }
+        out
+    }
+
+    pub fn find_by_name(&self, name: &[u8]) -> Option<std::sync::Arc<ExtensionScriptView>> {
+        let guard = self.extensions.read().unwrap_or_else(|e| e.into_inner());
+        guard.iter().find(|e| e.name.as_slice() == name).cloned()
+    }
+
+    pub fn snapshot(&self) -> Vec<std::sync::Arc<ExtensionScriptView>> {
+        self.extensions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn execute_script_list(
+        &self,
+        list: &[u8],
+        mut f: impl FnMut(std::sync::Arc<ExtensionScriptView>),
+    ) {
+        let mut pos = 0usize;
+        while pos < list.len() {
+            let Some((tok_start, tok_end, next_pos)) =
+                crate::util::tokenizer_find_next_token(&list[pos..], b",;")
+            else {
+                break;
+            };
+            let tok = &list[pos + tok_start..pos + tok_end];
+            pos += next_pos;
+            if let Some(ext) = self.find_by_name(tok) {
+                f(ext);
+            }
+        }
+    }
+
+    pub fn delete_bytes(&self, name: &[u8]) -> Result<(), Vec<u8>> {
+        let mut guard = self.extensions.write().unwrap_or_else(|e| e.into_inner());
+        let pos = guard.iter().position(|e| e.name.as_slice() == name);
+        let found = pos.is_some();
+        let use_count = pos.map_or(0, |i| std::sync::Arc::strong_count(&guard[i]) as i64);
+        let target_path = if let Some(i) = pos {
+            let all_locs: Vec<&[u8]> = guard.iter().map(|e| e.location.as_slice()).collect();
+            ext_mgr_resolve_extension_path(&guard[i].location, &guard[i].entry, &all_locs).to_vec()
+        } else {
+            Vec::new()
+        };
+        if let Some(err_bytes) = ext_mgr_delete_extension(name, found, use_count, &target_path) {
+            return Err(err_bytes);
+        }
+        if let Some(i) = pos {
+            guard.remove(i);
+        }
+        Ok(())
+    }
+
+    pub fn update_bytes(
+        &self,
+        archive_path: &[u8],
+        ext_name: &[u8],
+        on_log: impl FnMut(i32, &str),
+    ) -> Result<(), Vec<u8>> {
+        let mut guard = self.extensions.write().unwrap_or_else(|e| e.into_inner());
+        let pos = guard.iter().position(|e| e.name.as_slice() == ext_name);
+        let found = pos.is_some();
+        let use_count = pos.map_or(0, |i| std::sync::Arc::strong_count(&guard[i]) as i64);
+        let (target_path, root_dir) = if let Some(i) = pos {
+            let all_locs: Vec<&[u8]> = guard.iter().map(|e| e.location.as_slice()).collect();
+            let tp = ext_mgr_resolve_extension_path(&guard[i].location, &guard[i].entry, &all_locs)
+                .to_vec();
+            (tp, guard[i].root_dir.clone())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let (backup_path, prep_err) =
+            ext_mgr_prepare_update(ext_name, found, use_count, &target_path, archive_path);
+        if let Some(err_bytes) = prep_err {
+            return Err(err_bytes);
+        }
+        let install_err = ext_mgr_install_extension(archive_path, &root_dir, on_log);
+        if let Some(finish_err) = ext_mgr_finish_update(
+            &target_path,
+            &backup_path,
+            archive_path,
+            install_err.as_deref(),
+        ) {
+            return Err(finish_err);
+        }
+        if let Some(i) = pos {
+            guard.remove(i);
+        }
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -2996,35 +3119,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[repr(C)]
 pub struct NzbgetRsQueueScriptCoordEnv {
     pub ctx: *mut c_void,
+    pub ext_mgr: *const RsExtensionManager,
     pub p1: usize,
-    pub p2: usize,
     pub a1: c_int,
     pub a2: c_int,
     pub a3: c_int,
     pub a4: c_int,
-    pub a5: c_int,
-    pub a6: c_int,
     pub t1: i64,
     pub t2: i64,
     pub s1: *const c_char,
-    pub s2: *const c_char,
-    pub s3: *const c_char,
-    pub s4: *const c_char,
-    pub s5: *const c_char,
-    pub s6: *const c_char,
-    pub s7: *const c_char,
     pub out_i32: *mut c_int,
-    pub drop_script_cb: Option<unsafe extern "C" fn(usize)>,
+    #[cfg(unix)]
+    pub host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
+    #[cfg(not(unix))]
+    pub host_cb: usize,
     pub action_cb: Option<
         unsafe extern "C" fn(
             *mut c_void,
             c_int,
             c_int,
-            c_int,
             usize,
-            usize,
-            *const c_char,
-            *const c_char,
             *const c_char,
             *mut c_int,
             *mut *const c_char,
@@ -3034,8 +3148,7 @@ pub struct NzbgetRsQueueScriptCoordEnv {
 
 struct QueueScriptItem {
     nzb_id: i32,
-    script_raw_ptr: usize,
-    script_box_ptr: usize,
+    script: std::sync::Arc<ExtensionScriptView>,
     event: i32,
 }
 
@@ -3067,14 +3180,6 @@ unsafe fn opt_cstr_bytes<'a>(p: *const c_char) -> &'a [u8] {
     }
 }
 
-unsafe fn opt_cstr_ref<'a>(p: *const c_char) -> &'a CStr {
-    if p.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(p)
-    }
-}
-
 impl NzbgetRsQueueScriptCoord {
     fn new() -> Self {
         Self {
@@ -3084,18 +3189,79 @@ impl NzbgetRsQueueScriptCoord {
         }
     }
 
-    unsafe fn drop_all(&self, drop_cb: Option<unsafe extern "C" fn(usize)>) {
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(cur) = g.cur_item.take() {
-            if let Some(cb) = drop_cb {
-                cb(cur.script_box_ptr);
-            }
+    unsafe fn start_script_job(
+        env: &NzbgetRsQueueScriptCoordEnv,
+        nzb_ptr: usize,
+        script: std::sync::Arc<ExtensionScriptView>,
+        event: i32,
+    ) {
+        let Some(cb) = env.action_cb else {
+            return;
+        };
+        let mut ints = [0i32; 9];
+        let mut strs: [*const c_char; 7] = [std::ptr::null(); 7];
+        // sub = 3: snapshot NzbInfo (`ints[0]=skip, [1]=id, [2]=priority, [3]=dupeScore,
+        // [4]=dupeMode, [5]=deleteStatus, [6]=urlStatus, [7]=markStatus, [8]=paramCount`;
+        // `strs[0]=name, [1]=filename, [2]=url, [3]=category, [4]=destDir, [5]=queuedFn, [6]=dupeKey`)
+        if cb(
+            env.ctx,
+            3,
+            event,
+            nzb_ptr,
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            strs.as_mut_ptr(),
+        ) == 0
+            || ints[0] != 0
+        {
+            return;
         }
-        while let Some(item) = g.queue.pop_front() {
-            if let Some(cb) = drop_cb {
-                cb(item.script_box_ptr);
+        #[cfg(unix)]
+        if let Some(hcb) = env.host_cb {
+            let pcount = ints[8].max(0) as usize;
+            let mut params = Vec::with_capacity(pcount);
+            for i in 0..pcount {
+                let mut pstrs: [*const c_char; 2] = [std::ptr::null(); 2];
+                cb(
+                    env.ctx,
+                    6,
+                    i as c_int,
+                    nzb_ptr,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    pstrs.as_mut_ptr(),
+                );
+                params.push((
+                    opt_cstr_bytes(pstrs[0]).to_vec(),
+                    opt_cstr_bytes(pstrs[1]).to_vec(),
+                ));
             }
+            crate::script::spawn_background_job(
+                crate::script::BackgroundScriptJob::Queue {
+                    script,
+                    event,
+                    nzb_id: ints[1],
+                    nzb_name: opt_cstr_bytes(strs[0]).to_vec(),
+                    nzb_filename: opt_cstr_bytes(strs[1]).to_vec(),
+                    url: opt_cstr_bytes(strs[2]).to_vec(),
+                    category: opt_cstr_bytes(strs[3]).to_vec(),
+                    dest_dir: opt_cstr_bytes(strs[4]).to_vec(),
+                    queued_filename: opt_cstr_bytes(strs[5]).to_vec(),
+                    priority: ints[2],
+                    dupe_key: opt_cstr_bytes(strs[6]).to_vec(),
+                    dupe_mode: ints[4],
+                    dupe_score: ints[3],
+                    delete_status: ints[5],
+                    url_status: ints[6],
+                    mark_status: ints[7],
+                    parameters: params,
+                },
+                std::ptr::null_mut(),
+                hcb,
+            );
         }
+        #[cfg(not(unix))]
+        let _ = script;
     }
 
     unsafe fn enqueue_script(&self, env: &NzbgetRsQueueScriptCoordEnv) {
@@ -3105,81 +3271,66 @@ impl NzbgetRsQueueScriptCoord {
         let Some(cb) = env.action_cb else {
             return;
         };
+        let Some(ext_mgr) = env.ext_mgr.as_ref() else {
+            return;
+        };
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let event = env.a1;
         let nzb_id = env.a3;
 
         if event == 5 {
-            let mut idx = 0usize;
-            while idx < g.queue.len() {
-                if g.queue[idx].nzb_id == nzb_id {
-                    let removed = g.queue.remove(idx).unwrap();
-                    if let Some(drop_cb) = env.drop_script_cb {
-                        drop_cb(removed.script_box_ptr);
-                    }
-                } else {
-                    idx += 1;
-                }
-            }
+            g.queue.retain(|it| it.nzb_id != nzb_id);
         }
 
         if should_skip_queue_event_interval(event, 0, env.a4, env.t1, env.t2) {
             return;
         }
 
-        let script_count = cb(
-            env.ctx,
-            0,
-            0,
-            0,
-            env.p1,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) as i32;
-
         let resolved_ext = opt_cstr_bytes(env.s1);
+        let snap = ext_mgr.snapshot();
 
-        for sidx in 0..script_count {
-            let mut ints = [0i32; 2];
-            let mut strs: [*const c_char; 3] = [std::ptr::null(); 3];
-            let script_raw_ptr = cb(
-                env.ctx,
-                1,
-                sidx,
-                0,
-                env.p1,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                strs.as_mut_ptr(),
-            );
-            if ints[0] == 0 {
+        for ext in snap {
+            if !ext.queue_script {
                 continue;
             }
-            let script_name = opt_cstr_bytes(strs[0]);
-            let queue_events = opt_cstr_bytes(strs[1]);
-            let param_val = opt_cstr_bytes(strs[2]);
-
             let event_name = if event >= 0 && (event as usize) < QUEUE_EVENT_NAMES.len() {
                 QUEUE_EVENT_NAMES[event as usize]
             } else {
                 b"UNKNOWN"
             };
-            if !queue_events.is_empty()
-                && !queue_events.windows(event_name.len()).any(|w| w == event_name)
+            if !ext.queue_events.is_empty()
+                && !ext
+                    .queue_events
+                    .windows(event_name.len())
+                    .any(|w| w == event_name)
             {
                 continue;
             }
+
+            let mut param_name = Vec::with_capacity(ext.name.len() + 2);
+            param_name.extend_from_slice(&ext.name);
+            param_name.push(b':');
+            if param_name.len() > 1023 {
+                param_name.truncate(1023);
+            }
+            param_name.push(0);
+            let mut strs: [*const c_char; 1] = [std::ptr::null()];
+            // sub = 1: look up `nzb->GetParameters()->Find(param_name)` into `strs[0]`
+            cb(
+                env.ctx,
+                1,
+                0,
+                env.p1,
+                param_name.as_ptr().cast(),
+                std::ptr::null_mut(),
+                strs.as_mut_ptr(),
+            );
+            let param_val = opt_cstr_bytes(strs[0]);
+
             let usable = if is_param_enabled_value(param_val) {
                 true
             } else if event == 1 {
-                ext_is_in_list(resolved_ext, script_name)
+                ext_is_in_list(resolved_ext, &ext.name)
             } else {
                 false
             };
@@ -3190,57 +3341,28 @@ impl NzbgetRsQueueScriptCoord {
             let already_queued = event == 0
                 && g.queue
                     .iter()
-                    .any(|qi| qi.nzb_id == nzb_id && qi.script_raw_ptr == script_raw_ptr);
+                    .any(|qi| qi.nzb_id == nzb_id && std::sync::Arc::ptr_eq(&qi.script, &ext));
 
             if !already_queued {
-                let script_box_ptr = cb(
-                    env.ctx,
-                    2,
-                    sidx,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
                 let item = QueueScriptItem {
                     nzb_id,
-                    script_raw_ptr,
-                    script_box_ptr,
+                    script: std::sync::Arc::clone(&ext),
                     event,
                 };
                 if g.cur_item.is_some() {
                     g.queue.push_back(item);
                 } else {
                     g.cur_item = Some(item);
-                    cb(
-                        env.ctx,
-                        3,
-                        event,
-                        0,
-                        env.p1,
-                        script_box_ptr,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    );
+                    Self::start_script_job(env, env.p1, ext, event);
                 }
             }
 
+            // sub = 4: `nzbInfo->SetQueueScriptTime(Util::CurrentTime())`
             cb(
                 env.ctx,
                 4,
                 0,
-                0,
                 env.p1,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
                 std::ptr::null(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -3253,11 +3375,7 @@ impl NzbgetRsQueueScriptCoord {
             return;
         };
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(old) = g.cur_item.take() {
-            if let Some(drop_cb) = env.drop_script_cb {
-                drop_cb(old.script_box_ptr);
-            }
-        }
+        let _ = g.cur_item.take();
 
         let mut best_idx: Option<usize> = None;
         let mut best_nzb: usize = 0;
@@ -3272,29 +3390,13 @@ impl NzbgetRsQueueScriptCoord {
                 env.ctx,
                 5,
                 nzb_id,
-                0,
                 env.p1,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
                 std::ptr::null(),
                 ints.as_mut_ptr(),
                 std::ptr::null_mut(),
             );
-            if should_ignore_queued_script_event(
-                nzb_ptr != 0,
-                ints[0],
-                0,
-                ints[1],
-                1,
-                ev,
-                6,
-                2,
-            ) {
-                let removed = g.queue.remove(idx).unwrap();
-                if let Some(drop_cb) = env.drop_script_cb {
-                    drop_cb(removed.script_box_ptr);
-                }
+            if should_ignore_queued_script_event(nzb_ptr != 0, ints[0], 0, ints[1], 1, ev, 6, 2) {
+                g.queue.remove(idx);
                 if best_idx.is_some() {
                     best_idx = None;
                     best_nzb = 0;
@@ -3312,22 +3414,10 @@ impl NzbgetRsQueueScriptCoord {
 
         if let Some(bidx) = best_idx {
             let chosen = g.queue.remove(bidx).unwrap();
-            let box_ptr = chosen.script_box_ptr;
+            let script = std::sync::Arc::clone(&chosen.script);
             let ev = chosen.event;
             g.cur_item = Some(chosen);
-            cb(
-                env.ctx,
-                3,
-                ev,
-                0,
-                best_nzb,
-                box_ptr,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+            Self::start_script_job(env, best_nzb, script, ev);
         }
     }
 }
@@ -3338,214 +3428,26 @@ pub extern "C" fn nzbget_rs_queue_script_new() -> *mut NzbgetRsQueueScriptCoord 
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_queue_script_free(
-    h: *mut NzbgetRsQueueScriptCoord,
-    drop_script_cb: Option<unsafe extern "C" fn(usize)>,
-) {
+pub unsafe extern "C" fn nzbget_rs_queue_script_free(h: *mut NzbgetRsQueueScriptCoord) {
     if !h.is_null() {
-        let boxed = Box::from_raw(h);
-        boxed.drop_all(drop_script_cb);
+        drop(Box::from_raw(h));
     }
 }
 
-/// Executes `QueueScriptCoordinator` / `QueueScriptController` operations:
+/// Executes `QueueScriptCoordinator` operations:
 /// - `0`: `Stop()`
-/// - `1`: `InitOptions(a1 = has_queue_scripts)`
+/// - `1`: `InitOptions(env.ext_mgr / a1)`
 /// - `2`: `HasJob(a1 = nzb_id, out_i32 = active)`
 /// - `3`: `GetQueueSize()`
 /// - `4`: `EnqueueScript`
 /// - `5`: `CheckQueue`
 /// - `6`: `IsStopped()`
-/// - `7` (stateless): `QueueScriptController` `ExecuteScript` labels + `PrepareParams`
-/// - `8` (stateless): `QueueScriptController::AddMessage` `[NZB] ` parser & dispatch
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_queue_script_exec(
     h: *mut NzbgetRsQueueScriptCoord,
     op: c_int,
     env: *const NzbgetRsQueueScriptCoordEnv,
 ) -> c_int {
-    if op == 7 {
-        let Some(e) = env.as_ref() else {
-            return 0;
-        };
-        let Some(cb) = e.action_cb else {
-            return 0;
-        };
-        let script_name = opt_cstr_bytes(e.s7);
-        let nzb_name = opt_cstr_bytes(e.s1);
-        let base_nzb = &nzb_name[crate::paths::base_file_name(nzb_name)..];
-
-        let mut exec_msg = b"Executing queue-script ".to_vec();
-        exec_msg.extend_from_slice(script_name);
-        exec_msg.extend_from_slice(b" for ");
-        exec_msg.extend_from_slice(base_nzb);
-
-        let mut info_name = b"queue-script ".to_vec();
-        info_name.extend_from_slice(script_name);
-        info_name.extend_from_slice(b" for ");
-        info_name.extend_from_slice(base_nzb);
-        if info_name.len() > 1023 {
-            info_name.truncate(1023);
-        }
-
-        let c_exec = cbuf_from_bytes(&exec_msg);
-        let c_info = cbuf_from_bytes(&info_name);
-        cb(
-            e.ctx,
-            6,
-            c_int::from(e.a4 == 0),
-            0,
-            0,
-            0,
-            c_exec.as_ptr() as *const c_char,
-            c_info.as_ptr() as *const c_char,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-
-        let inp = QueueScriptEnvInput {
-            nzb_name: opt_cstr_ref(e.s1),
-            nzb_id: e.a1,
-            filename: opt_cstr_ref(e.s2),
-            dest_dir: opt_cstr_ref(e.s3),
-            queued_filename: opt_cstr_ref(e.s4),
-            url: opt_cstr_ref(e.s5),
-            category: opt_cstr_ref(e.s6),
-            priority: e.a2,
-            dupe_key: opt_cstr_ref(if e.p1 == 0 {
-                std::ptr::null()
-            } else {
-                e.p1 as *const c_char
-            }),
-            dupe_score: e.a3,
-            dupe_mode: e.a5,
-            event: e.a4,
-            delete_status: e.a6 & 0xff,
-            url_status: (e.a6 >> 8) & 0xff,
-            mark_status: (e.a6 >> 16) & 0xff,
-        };
-        queue_script_prepare_env(
-            &inp,
-            |k, v| {
-                cb(
-                    e.ctx,
-                    7,
-                    0,
-                    0,
-                    0,
-                    0,
-                    k.as_ptr(),
-                    v.as_ptr(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-            },
-            |k, iv| {
-                cb(
-                    e.ctx,
-                    8,
-                    iv,
-                    0,
-                    0,
-                    0,
-                    k.as_ptr(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-            },
-        );
-        return 1;
-    }
-
-    if op == 8 {
-        let Some(e) = env.as_ref() else {
-            return 0;
-        };
-        let Some(cb) = e.action_cb else {
-            return 0;
-        };
-        let full_text = opt_cstr_bytes(e.s1);
-        let pref = (e.a2.max(0) as usize).min(full_text.len());
-        let msg_text = &full_text[pref..];
-        let cmd = parse_queue_script_cmd(msg_text, e.a3, 5);
-        if cmd.kind != 0 {
-            let det = {
-                let mut v = b"Command ".to_vec();
-                v.extend_from_slice(&msg_text[6..]);
-                v.extend_from_slice(b" detected");
-                cbuf_from_bytes(&v)
-            };
-            cb(
-                e.ctx,
-                9,
-                0,
-                0,
-                0,
-                0,
-                det.as_ptr() as *const c_char,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-            if cmd.kind > 0 {
-                let key_c = if cmd.kind == 1 {
-                    cbuf_from_bytes(&msg_text[cmd.key_offset..cmd.key_offset + cmd.key_len])
-                } else {
-                    vec![0]
-                };
-                let val_c = if cmd.kind == 1 || cmd.kind == 2 {
-                    cbuf_from_bytes(&msg_text[cmd.val_offset..])
-                } else {
-                    let nzb_name = opt_cstr_bytes(e.s2);
-                    let mut warn_msg = b"Marking ".to_vec();
-                    warn_msg.extend_from_slice(nzb_name);
-                    warn_msg.extend_from_slice(b" as bad");
-                    cbuf_from_bytes(&warn_msg)
-                };
-                cb(
-                    e.ctx,
-                    10,
-                    cmd.kind,
-                    0,
-                    0,
-                    0,
-                    key_c.as_ptr() as *const c_char,
-                    val_c.as_ptr() as *const c_char,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-            } else {
-                let info_name = opt_cstr_bytes(e.s3);
-                let mut err_msg = b"Invalid command \"".to_vec();
-                err_msg.extend_from_slice(msg_text);
-                err_msg.extend_from_slice(b"\" received from ");
-                err_msg.extend_from_slice(info_name);
-                let err_c = cbuf_from_bytes(&err_msg);
-                cb(
-                    e.ctx,
-                    11,
-                    0,
-                    0,
-                    0,
-                    0,
-                    err_c.as_ptr() as *const c_char,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-            }
-            return 1;
-        }
-        return 0;
-    }
-
     let Some(qs) = h.as_ref() else {
         return 0;
     };
@@ -3556,7 +3458,11 @@ pub unsafe extern "C" fn nzbget_rs_queue_script_exec(
         }
         1 => {
             if let Some(e) = env.as_ref() {
-                qs.has_queue_scripts.store(e.a1 != 0, Ordering::SeqCst);
+                let has = match e.ext_mgr.as_ref() {
+                    Some(m) => m.find_if(|ext| ext.queue_script).is_some(),
+                    None => e.a1 != 0,
+                };
+                qs.has_queue_scripts.store(has, Ordering::SeqCst);
             }
             1
         }
@@ -3610,14 +3516,14 @@ pub struct NzbgetRsMaintenanceEnv {
     pub out_buf: *mut crate::ffi::RsBuf,
     pub emit_ctx: *mut c_void,
     pub emit_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn>,
-    pub log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
+    #[cfg(unix)]
+    pub script_host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
+    #[cfg(not(unix))]
+    pub script_host_cb: usize,
     pub action_cb: Option<
         unsafe extern "C" fn(
             *mut c_void,
             c_int,
-            c_int,
-            usize,
-            *const c_char,
             *const c_char,
             *const c_char,
             *const u8,
@@ -3635,10 +3541,13 @@ struct MaintMessage {
 
 pub struct NzbgetRsMaintenance {
     messages: std::sync::Mutex<(u32, Vec<MaintMessage>)>,
-    controller_ptr: std::sync::Mutex<usize>,
+    #[cfg(unix)]
+    controller: std::sync::Mutex<Option<std::sync::Arc<crate::script::ScriptRunner>>>,
+    #[cfg(not(unix))]
+    controller: std::sync::Mutex<Option<usize>>,
 }
 
-fn format_maint_script_prefix(
+pub(crate) fn format_maint_script_prefix(
     is_info_script: bool,
     base_script: &[u8],
     max_prefix_len: usize,
@@ -3659,11 +3568,13 @@ fn format_maint_script_prefix(
     (info_name, log_prefix, prefix_len)
 }
 
-unsafe fn emit_maint_log(env: &NzbgetRsMaintenanceEnv, level: c_int, msg: &[u8]) {
-    if let Some(cb) = env.log_cb {
-        let c = cbuf_from_bytes(msg);
-        cb(env.ctx, level, c.as_ptr() as *const c_char);
+unsafe fn emit_maint_log(env: &NzbgetRsMaintenanceEnv, kind: c_int, msg: &[u8]) {
+    #[cfg(unix)]
+    if let Some(hcb) = env.script_host_cb {
+        crate::script::host_log(env.ctx, hcb, kind, msg);
     }
+    #[cfg(not(unix))]
+    let _ = (env, kind, msg);
 }
 
 unsafe fn read_pkg_info_logged(
@@ -3681,7 +3592,7 @@ unsafe fn read_pkg_info_logged(
                 b"Could not parse file ".to_vec()
             };
             m.extend_from_slice(&fn_bytes);
-            emit_maint_log(env, 4, &m);
+            emit_maint_log(env, 2, &m);
             None
         }
     }
@@ -3691,8 +3602,16 @@ impl NzbgetRsMaintenance {
     fn new() -> Self {
         Self {
             messages: std::sync::Mutex::new((0, Vec::new())),
-            controller_ptr: std::sync::Mutex::new(0),
+            controller: std::sync::Mutex::new(None),
         }
+    }
+
+    pub(crate) fn add_message_pub(&self, kind: c_int, time: i64, text: &[u8]) {
+        self.add_message(kind, time, text);
+    }
+
+    pub(crate) fn clear_update_controller(&self) {
+        *self.controller.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     fn add_message(&self, kind: c_int, mut time: i64, text: &[u8]) {
@@ -3728,13 +3647,10 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_free(h: *mut NzbgetRsMaintenance)
 
 /// Executes `Maintenance` operations:
 /// - `0`: `~Maintenance()` detach & wait loop
-/// - `1`: `ResetUpdateController()`
 /// - `2`: `AddMessage(a1 = kind, t1 = time, s1 = text)`
 /// - `3`: `CollectMessages(a3 = id_from, a4 = nr_entries)` -> `emit_cb`
-/// - `4`: `StartUpdate(a1 = branch, a2 = sep, s1 = web_dir, s2 = app_dir)`
+/// - `4`: `StartUpdate(a1 = branch, a2 = sep, a3 = daemon_mode, s1 = web_dir, s2 = app_dir)`
 /// - `5`: `CheckUpdates(a2 = sep, s1 = web_dir, out_buf)`
-/// - `6`: `UpdateScriptController::Run` env & prefix setup (or `a4 == 1` `InfoController::AddMessage`)
-/// - `7`: `UpdateScriptController::AddMessage` (`a1 = kind, a2 = prefix_len, s1 = text`)
 /// - `8` (stateless): `VerifySignature(s1 = in, s2 = sig, s3 = pubkey)`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_maintenance_exec(
@@ -3759,11 +3675,8 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_exec(
         let r = cb(
             e.ctx,
             6,
-            0,
-            0,
             in_hash.as_ptr() as *const c_char,
             sig.as_ptr() as *const c_char,
-            std::ptr::null(),
             pub_key.as_ptr(),
             pub_key.len(),
         );
@@ -3775,41 +3688,31 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_exec(
     };
     match op {
         0 => {
-            let mut wait = false;
+            #[cfg(unix)]
             {
-                let g = m.controller_ptr.lock().unwrap_or_else(|err| err.into_inner());
-                if *g != 0 {
+                let active = m
+                    .controller
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .clone();
+                if let Some(runner) = active {
                     if let Some(e) = env.as_ref() {
-                        if let Some(cb) = e.action_cb {
-                            cb(
-                                e.ctx,
-                                0,
-                                0,
-                                *g,
-                                std::ptr::null(),
-                                std::ptr::null(),
-                                std::ptr::null(),
-                                std::ptr::null(),
-                                0,
-                            );
+                        if let Some(hcb) = e.script_host_cb {
+                            runner.detach(e.ctx, hcb);
                         }
                     }
-                    wait = true;
-                }
-            }
-            if wait {
-                loop {
-                    let cur = *m.controller_ptr.lock().unwrap_or_else(|err| err.into_inner());
-                    if cur == 0 {
-                        break;
+                    while m
+                        .controller
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .is_some()
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
                 }
             }
-            1
-        }
-        1 => {
-            *m.controller_ptr.lock().unwrap_or_else(|err| err.into_inner()) = 0;
+            #[cfg(not(unix))]
+            let _ = env;
             1
         }
         2 => {
@@ -3875,268 +3778,106 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_exec(
             1
         }
         4 => {
-            let Some(e) = env.as_ref() else {
-                return 0;
-            };
-            let Some(cb) = e.action_cb else {
-                return 0;
-            };
-            let mut ctrl = m.controller_ptr.lock().unwrap_or_else(|err| err.into_inner());
-            if *ctrl != 0 {
-                emit_maint_log(
-                    e,
-                    4,
-                    b"Could not start update-script: update-script is already running",
-                );
-                return 0;
-            }
-            let sep = e.a2 as u8;
-            let Some(mut script_path) =
-                read_pkg_info_logged(e, opt_cstr_bytes(e.s1), sep, b"install-script")
-            else {
-                return 0;
-            };
-            if script_path.first().copied() != Some(sep) {
-                let app_dir = opt_cstr_bytes(e.s2);
-                let mut full = Vec::with_capacity(app_dir.len() + 1 + script_path.len());
-                full.extend_from_slice(app_dir);
-                full.push(sep);
-                full.extend_from_slice(&script_path);
-                script_path = full;
-            }
+            #[cfg(unix)]
             {
-                let mut mg = m.messages.lock().unwrap_or_else(|err| err.into_inner());
-                mg.1.clear();
+                let Some(e) = env.as_ref() else {
+                    return 0;
+                };
+                let Some(hcb) = e.script_host_cb else {
+                    return 0;
+                };
+                let mut ctrl = m.controller.lock().unwrap_or_else(|err| err.into_inner());
+                if ctrl.is_some() {
+                    emit_maint_log(
+                        e,
+                        2,
+                        b"Could not start update-script: update-script is already running",
+                    );
+                    return 0;
+                }
+                let sep = e.a2 as u8;
+                let Some(mut script_path) =
+                    read_pkg_info_logged(e, opt_cstr_bytes(e.s1), sep, b"install-script")
+                else {
+                    return 0;
+                };
+                if script_path.first().copied() != Some(sep) {
+                    let app_dir = opt_cstr_bytes(e.s2);
+                    let mut full = Vec::with_capacity(app_dir.len() + 1 + script_path.len());
+                    full.extend_from_slice(app_dir);
+                    full.push(sep);
+                    full.extend_from_slice(&script_path);
+                    script_path = full;
+                }
+                {
+                    let mut mg = m.messages.lock().unwrap_or_else(|err| err.into_inner());
+                    mg.1.clear();
+                }
+                let runner = crate::script::ScriptRunner::new(false);
+                *ctrl = Some(std::sync::Arc::clone(&runner));
+                drop(ctrl);
+                crate::script::spawn_background_job(
+                    crate::script::BackgroundScriptJob::MaintenanceUpdate {
+                        maint: h,
+                        runner,
+                        script_path,
+                        branch: e.a1,
+                        daemon_mode: e.a3 != 0,
+                    },
+                    e.ctx,
+                    hcb,
+                );
+                1
             }
-            let script_c = cbuf_from_bytes(&script_path);
-            let created_ptr = cb(
-                e.ctx,
-                1,
-                e.a1,
-                0,
-                script_c.as_ptr() as *const c_char,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-            );
-            *ctrl = created_ptr;
-            cb(
-                e.ctx,
-                2,
-                0,
-                created_ptr,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-            );
-            1
+            #[cfg(not(unix))]
+            {
+                let _ = env;
+                0
+            }
         }
         5 => {
-            let Some(e) = env.as_ref() else {
-                return 0;
-            };
-            let Some(cb) = e.action_cb else {
-                return 0;
-            };
-            let sep = e.a2 as u8;
-            let Some(info_script) =
-                read_pkg_info_logged(e, opt_cstr_bytes(e.s1), sep, b"update-info-script")
-            else {
-                return 0;
-            };
-            let base = &info_script[crate::paths::base_file_name(&info_script)..];
-            let mut det = b"Executing update-info-script ".to_vec();
-            det.extend_from_slice(base);
-            emit_maint_log(e, 1, &det);
-
-            let (info_name, log_prefix, prefix_len) = format_maint_script_prefix(true, base, 1023);
-            let c_script = cbuf_from_bytes(&info_script);
-            let c_info = cbuf_from_bytes(&info_name);
-            let c_pref = cbuf_from_bytes(&log_prefix);
-
-            let mut acc: Vec<u8> = Vec::new();
-            cb(
-                e.ctx,
-                3,
-                prefix_len,
-                (&mut acc as *mut Vec<u8>) as usize,
-                c_script.as_ptr() as *const c_char,
-                c_info.as_ptr() as *const c_char,
-                c_pref.as_ptr() as *const c_char,
-                std::ptr::null(),
-                0,
-            );
-            if acc.is_empty() {
-                return 0;
-            }
-            if !e.out_buf.is_null() {
-                *e.out_buf = crate::ffi::into_buf(acc);
-            }
-            1
-        }
-        6 => {
-            let Some(e) = env.as_ref() else {
-                return 0;
-            };
-            let Some(cb) = e.action_cb else {
-                return 0;
-            };
-            if e.a4 == 1 {
-                let full_text = opt_cstr_bytes(e.s1);
-                let pref = (e.a2.max(0) as usize).min(full_text.len());
-                let text = &full_text[pref..];
-                if text.starts_with(b"[NZB] ") {
-                    let mut dm = b"Command ".to_vec();
-                    dm.extend_from_slice(&text[6..]);
-                    dm.extend_from_slice(b" detected");
-                    emit_maint_log(e, 0, &dm);
-                    if text[6..].starts_with(b"[UPDATEINFO]") {
-                        let acc = &mut *(e.p1 as *mut Vec<u8>);
-                        acc.extend_from_slice(&text[18..]);
-                    } else {
-                        let info_nm = opt_cstr_bytes(e.s2);
-                        let mut em = b"Invalid command \"".to_vec();
-                        em.extend_from_slice(text);
-                        em.extend_from_slice(b"\" received from ");
-                        em.extend_from_slice(info_nm);
-                        emit_maint_log(e, 4, &em);
-                    }
-                    return 1;
-                }
-                let sliced_c = cbuf_from_bytes(text);
-                cb(
-                    e.ctx,
-                    7,
-                    e.a1,
-                    0,
-                    sliced_c.as_ptr() as *const c_char,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    0,
-                );
-                return 1;
-            }
-
-            let script_bytes = opt_cstr_bytes(e.s1);
-            let base = &script_bytes[crate::paths::base_file_name(script_bytes)..];
-            let mut exec_msg = b"Executing update-script ".to_vec();
-            exec_msg.extend_from_slice(script_bytes);
-            let (info_name, log_prefix, prefix_len) = format_maint_script_prefix(false, base, 99);
-            let c_exec = cbuf_from_bytes(&exec_msg);
-            let c_info = cbuf_from_bytes(&info_name);
-            let c_pref = cbuf_from_bytes(&log_prefix);
-
-            let branch_c: &CStr = match e.a1 {
-                1 => c"TESTING",
-                2 => c"DEVEL",
-                _ => c"STABLE",
-            };
-            let runmode_c: &CStr = if e.a2 != 0 { c"DAEMON" } else { c"SERVER" };
-
-            cb(
-                e.ctx,
-                4,
-                prefix_len,
-                0,
-                c_exec.as_ptr() as *const c_char,
-                c_info.as_ptr() as *const c_char,
-                c_pref.as_ptr() as *const c_char,
-                std::ptr::null(),
-                0,
-            );
-            cb(
-                e.ctx,
-                5,
-                0,
-                0,
-                c"NZBUP_BRANCH".as_ptr(),
-                branch_c.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-            );
-            cb(
-                e.ctx,
-                5,
-                0,
-                0,
-                c"NZBUP_RUNMODE".as_ptr(),
-                runmode_c.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-            );
             #[cfg(unix)]
-            let pid = libc::getpid();
-            #[cfg(not(unix))]
-            let pid = std::process::id() as c_int;
-            let pid_s = format!("{pid}\0");
-            cb(
-                e.ctx,
-                5,
-                0,
-                0,
-                c"NZBUP_PROCESSID".as_ptr(),
-                pid_s.as_ptr() as *const c_char,
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-            );
-            prefix_len
-        }
-        7 => {
-            let Some(e) = env.as_ref() else {
-                return 0;
-            };
-            let Some(cb) = e.action_cb else {
-                return 0;
-            };
-            let full_text = opt_cstr_bytes(e.s1);
-            let pref = (e.a2.max(0) as usize).min(full_text.len());
-            let text = &full_text[pref..];
-            if text.starts_with(b"[NZB] ") {
-                let mut dm = b"Command ".to_vec();
-                dm.extend_from_slice(&text[6..]);
-                dm.extend_from_slice(b" detected");
-                emit_maint_log(e, 0, &dm);
-                if &text[6..] == b"QUIT" {
-                    cb(
-                        e.ctx,
-                        8,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        0,
-                    );
-                } else {
-                    let mut em = b"Invalid command \"".to_vec();
-                    em.extend_from_slice(text);
-                    em.extend_from_slice(b"\" received");
-                    emit_maint_log(e, 4, &em);
+            {
+                let Some(e) = env.as_ref() else {
+                    return 0;
+                };
+                let Some(hcb) = e.script_host_cb else {
+                    return 0;
+                };
+                let sep = e.a2 as u8;
+                let Some(info_script) =
+                    read_pkg_info_logged(e, opt_cstr_bytes(e.s1), sep, b"update-info-script")
+                else {
+                    return 0;
+                };
+                let base = &info_script[crate::paths::base_file_name(&info_script)..];
+                let mut det = b"Executing update-info-script ".to_vec();
+                det.extend_from_slice(base);
+                emit_maint_log(e, 4, &det);
+
+                let (info_name, log_prefix, prefix_len) =
+                    format_maint_script_prefix(true, base, 1023);
+                let acc = crate::script::run_maint_info_script(
+                    &info_script,
+                    &info_name,
+                    &log_prefix,
+                    prefix_len.max(0) as usize,
+                    e.ctx,
+                    hcb,
+                );
+                if acc.is_empty() {
+                    return 0;
                 }
-                return 1;
+                if !e.out_buf.is_null() {
+                    *e.out_buf = crate::ffi::into_buf(acc);
+                }
+                1
             }
-            m.add_message(e.a1, 0, text);
-            let sliced_c = cbuf_from_bytes(text);
-            cb(
-                e.ctx,
-                7,
-                e.a1,
-                0,
-                sliced_c.as_ptr() as *const c_char,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-            );
-            1
+            #[cfg(not(unix))]
+            {
+                let _ = env;
+                0
+            }
         }
         _ => 0,
     }
@@ -4198,7 +3939,11 @@ mod tests {
         assert_eq!(vars.len(), 6);
         assert_eq!(
             vars[5],
-            ("NZBPR".to_string(), "Verbose".to_string(), "true".to_string())
+            (
+                "NZBPR".to_string(),
+                "Verbose".to_string(),
+                "true".to_string()
+            )
         );
     }
 
@@ -4290,17 +4035,26 @@ mod tests {
         let msg = b"[NZB] NZBNAME=my download";
         let cmd = parse_scan_script_cmd(msg);
         assert_eq!(cmd.kind, 1);
-        assert_eq!(&msg[cmd.val_offset..cmd.val_offset + cmd.val_len], b"my download");
+        assert_eq!(
+            &msg[cmd.val_offset..cmd.val_offset + cmd.val_len],
+            b"my download"
+        );
 
         let msg = b"[NZB] CATEGORY=my category";
         let cmd = parse_scan_script_cmd(msg);
         assert_eq!(cmd.kind, 2);
-        assert_eq!(&msg[cmd.val_offset..cmd.val_offset + cmd.val_len], b"my category");
+        assert_eq!(
+            &msg[cmd.val_offset..cmd.val_offset + cmd.val_len],
+            b"my category"
+        );
 
         let msg = b"[NZB] DUPEKEY=tv show s01e02";
         let cmd = parse_scan_script_cmd(msg);
         assert_eq!(cmd.kind, 7);
-        assert_eq!(&msg[cmd.val_offset..cmd.val_offset + cmd.val_len], b"tv show s01e02");
+        assert_eq!(
+            &msg[cmd.val_offset..cmd.val_offset + cmd.val_len],
+            b"tv show s01e02"
+        );
 
         let msg = b"[NZB] PRIORITY=50";
         let cmd = parse_scan_script_cmd(msg);
@@ -4331,7 +4085,10 @@ mod tests {
         let cmd = parse_scan_script_cmd(msg);
         assert_eq!(cmd.kind, 3);
         assert_eq!(&msg[cmd.key_offset..cmd.key_offset + cmd.key_len], b"myvar");
-        assert_eq!(&msg[cmd.val_offset..cmd.val_offset + cmd.val_len], b"my value");
+        assert_eq!(
+            &msg[cmd.val_offset..cmd.val_offset + cmd.val_len],
+            b"my value"
+        );
     }
 
     #[test]
@@ -4434,10 +4191,7 @@ mod tests {
                 display_name: b"displayName".to_vec(),
                 description: vec![b"description".to_vec()],
                 value: ExtensionSelectVal::Num(5.0),
-                select: vec![
-                    ExtensionSelectVal::Num(0.0),
-                    ExtensionSelectVal::Num(10.0),
-                ],
+                select: vec![ExtensionSelectVal::Num(0.0), ExtensionSelectVal::Num(10.0)],
                 section: ExtensionSectionView {
                     multi: true,
                     prefix: b"Prefix".to_vec(),
@@ -4575,11 +4329,9 @@ mod tests {
         // 1. LoadExtensionsTest
         {
             let manager = RsExtensionManager::new();
-            assert!(
-                manager
-                    .load_extensions(scripts_dir.as_os_str().as_bytes(), order, b'/')
-                    .is_ok()
-            );
+            assert!(manager
+                .load_extensions(scripts_dir.as_os_str().as_bytes(), order, b'/')
+                .is_ok());
             let correct_order = [b"Extension2".as_slice(), b"Extension1", b"email"];
             let mut idx = 0usize;
             manager.for_each(|script| {
@@ -4594,11 +4346,9 @@ mod tests {
         // 2. ShouldNotDeleteExtensionIfExtensionIsBusyTest
         {
             let manager = RsExtensionManager::new();
-            assert!(
-                manager
-                    .load_extensions(scripts_dir.as_os_str().as_bytes(), order, b'/')
-                    .is_ok()
-            );
+            assert!(manager
+                .load_extensions(scripts_dir.as_os_str().as_bytes(), order, b'/')
+                .is_ok());
             let busy_ext = manager.find_if(|_| true).unwrap();
             let err = manager.delete_extension(&busy_ext.name).unwrap_err();
             let expected_err = format!(
@@ -4610,19 +4360,15 @@ mod tests {
 
         // 3. DeleteExtensionTest
         {
-            let working_dir = std::env::temp_dir().join(format!(
-                "nzbget_rs_delete_ext_test_{}",
-                std::process::id()
-            ));
+            let working_dir = std::env::temp_dir()
+                .join(format!("nzbget_rs_delete_ext_test_{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&working_dir);
             copy_dir_recursive(&scripts_dir, &working_dir);
 
             let manager = RsExtensionManager::new();
-            assert!(
-                manager
-                    .load_extensions(working_dir.as_os_str().as_bytes(), order, b'/')
-                    .is_ok()
-            );
+            assert!(manager
+                .load_extensions(working_dir.as_os_str().as_bytes(), order, b'/')
+                .is_ok());
             assert!(manager.delete_extension(b"email").is_ok());
             assert!(manager.find_if(|s| s.name == b"email").is_none());
             assert!(!working_dir.join("email").exists());
@@ -4640,11 +4386,9 @@ mod tests {
             copy_dir_recursive(&scripts_dir, &working_dir);
 
             let manager = RsExtensionManager::new();
-            assert!(
-                manager
-                    .load_extensions(working_dir.as_os_str().as_bytes(), order, b'/')
-                    .is_ok()
-            );
+            assert!(manager
+                .load_extensions(working_dir.as_os_str().as_bytes(), order, b'/')
+                .is_ok());
             let location = {
                 let email = manager.find_if(|s| s.name == b"email").unwrap();
                 PathBuf::from(std::ffi::OsStr::from_bytes(&email.location))
@@ -4654,11 +4398,9 @@ mod tests {
             let archive = working_dir.join("update.zip");
             std::fs::write(&archive, b"not an archive").unwrap();
 
-            let res = manager.update_extension(
-                archive.as_os_str().as_bytes(),
-                b"email",
-                |_, _| Some(b"Failed to extract archive".to_vec()),
-            );
+            let res = manager.update_extension(archive.as_os_str().as_bytes(), b"email", |_, _| {
+                Some(b"Failed to extract archive".to_vec())
+            });
             assert!(res.is_err());
             assert!(location.exists());
             let mut backup = location.as_os_str().to_os_string();
@@ -4814,9 +4556,8 @@ mod tests {
                                         && name == CIPHER_ATTR_NAME,
                                 );
                                 if gets == 1 {
-                                    valid_arguments.set(
-                                        valid_arguments.get() && value.is_null() && size == 0,
-                                    );
+                                    valid_arguments
+                                        .set(valid_arguments.get() && value.is_null() && size == 0);
                                     if stage == CipherAttributeFailure::GetSize {
                                         return Err(error);
                                     }
@@ -4932,10 +4673,7 @@ mod tests {
                 assert!(target_fd >= 0 && target_fd != source_fd.get());
                 assert_eq!(observed_value, CIPHER_ATTR_VALUE);
             }
-            let prefix = format!(
-                ".{}.tls-",
-                file.path.file_name().unwrap().to_string_lossy()
-            );
+            let prefix = format!(".{}.tls-", file.path.file_name().unwrap().to_string_lossy());
             for entry in std::fs::read_dir(file.path.parent().unwrap()).unwrap() {
                 let entry = entry.unwrap();
                 assert!(!entry.file_name().to_string_lossy().starts_with(&prefix));
@@ -5170,8 +4908,7 @@ mod tests {
                 .map(|(k, v)| (k.as_bytes(), v.as_bytes()))
                 .collect();
             entry_pairs.push((b"Server1.Cipher", b"ordinary"));
-            let (saved_ok, conflict) =
-                script_config_save(file.bytes(), &entry_pairs, Some(&token));
+            let (saved_ok, conflict) = script_config_save(file.bytes(), &entry_pairs, Some(&token));
             assert!(saved_ok);
             assert!(!conflict);
             assert_eq!(
@@ -5258,10 +4995,7 @@ mod tests {
 
     #[test]
     fn maintenance_read_package_info_str_truncates_json_decoded_escapes() {
-        let dir = std::env::temp_dir().join(format!(
-            "nzbget_rs_pkginfo_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("nzbget_rs_pkginfo_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let pkg_path = dir.join("package-info.json");
@@ -5282,36 +5016,25 @@ mod tests {
 
     #[test]
     fn queue_script_and_maintenance_exec_lifecycle() {
-        static DROPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        unsafe extern "C" fn mock_drop(ptr: usize) {
-            DROPPED.fetch_add(ptr, Ordering::SeqCst);
-        }
         unsafe extern "C" fn mock_qs_action(
             _ctx: *mut c_void,
             sub: c_int,
             _a1: c_int,
-            _a2: c_int,
             _p1: usize,
-            _p2: usize,
             _s1: *const c_char,
-            _s2: *const c_char,
-            _s3: *const c_char,
             ints: *mut c_int,
             strs: *mut *const c_char,
         ) -> usize {
             match sub {
-                0 => 1,
                 1 => {
-                    let is = std::slice::from_raw_parts_mut(ints, 2);
-                    is[0] = 1;
-                    is[1] = 0;
-                    let ss = std::slice::from_raw_parts_mut(strs, 3);
-                    ss[0] = c"qs.py".as_ptr();
-                    ss[1] = c"NZB_ADDED".as_ptr();
-                    ss[2] = c"yes".as_ptr();
-                    77
+                    *strs = c"yes".as_ptr();
+                    1
                 }
-                2 => 84,
+                3 => {
+                    // Mark skipped so no background thread needs spawning in unit test
+                    *ints = 1;
+                    0
+                }
                 _ => 0,
             }
         }
@@ -5342,39 +5065,52 @@ mod tests {
         ) {
             assert_eq!(sub, 2);
             let out = &mut *(emit_ctx as *mut Vec<(i32, i32, Vec<u8>)>);
-            let slice =
-                std::slice::from_raw_parts(ptr1 as *const crate::xmlrpc_format::NzbgetRsRpcLogEntry, len1);
+            let slice = std::slice::from_raw_parts(
+                ptr1 as *const crate::xmlrpc_format::NzbgetRsRpcLogEntry,
+                len1,
+            );
             for e in slice {
                 let b = CStr::from_ptr(e.text).to_bytes().to_vec();
                 out.push((e.id, e.kind, b));
             }
         }
 
+        let dir = std::env::temp_dir().join(format!("nzbget_rs_qslife_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("qs.py"),
+            b"#!/usr/bin/env python3\n### NZBGET QUEUE SCRIPT\n# QueueEvents=NZB_ADDED\n### NZBGET QUEUE SCRIPT\n",
+        )
+        .unwrap();
+        let mgr = RsExtensionManager::new();
+        mgr.load_with_cb(
+            crate::cleanup::os_str_to_bytes(dir.as_os_str()),
+            b"",
+            std::path::MAIN_SEPARATOR as u8,
+            |_| {},
+        )
+        .unwrap();
+
         unsafe {
-            DROPPED.store(0, Ordering::SeqCst);
             let qs = nzbget_rs_queue_script_new();
             assert!(!qs.is_null());
             let mut qs_env = NzbgetRsQueueScriptCoordEnv {
                 ctx: std::ptr::null_mut(),
+                ext_mgr: &mgr,
                 p1: 42,
-                p2: 84,
                 a1: 100,
-                a2: 1,
-                a3: 0,
+                a2: 0,
+                a3: 100,
                 a4: 0,
-                a5: 0,
-                a6: 0,
                 t1: 0,
                 t2: 0,
                 s1: std::ptr::null(),
-                s2: std::ptr::null(),
-                s3: std::ptr::null(),
-                s4: std::ptr::null(),
-                s5: std::ptr::null(),
-                s6: std::ptr::null(),
-                s7: std::ptr::null(),
                 out_i32: std::ptr::null_mut(),
-                drop_script_cb: Some(mock_drop),
+                #[cfg(unix)]
+                host_cb: None,
+                #[cfg(not(unix))]
+                host_cb: 0,
                 action_cb: Some(mock_qs_action),
             };
             assert_eq!(nzbget_rs_queue_script_exec(qs, 1, &qs_env), 1);
@@ -5391,26 +5127,22 @@ mod tests {
             assert_eq!(nzbget_rs_queue_script_exec(qs, 6, std::ptr::null()), 0);
             assert_eq!(nzbget_rs_queue_script_exec(qs, 0, std::ptr::null()), 1);
             assert_eq!(nzbget_rs_queue_script_exec(qs, 6, std::ptr::null()), 1);
-            nzbget_rs_queue_script_free(qs, Some(mock_drop));
-            assert_eq!(DROPPED.load(Ordering::SeqCst), 84);
+            nzbget_rs_queue_script_free(qs);
 
             let m = nzbget_rs_maintenance_new();
             assert!(!m.is_null());
             unsafe extern "C" fn mock_maint_action(
                 _ctx: *mut c_void,
                 _sub: c_int,
-                _a1: c_int,
-                _p1: usize,
                 _s1: *const c_char,
                 _s2: *const c_char,
-                _s3: *const c_char,
                 _bytes: *const u8,
                 _len: usize,
             ) -> usize {
                 1
             }
             let m1 = b"first line\0";
-            let m2 = b"upd: second line\0";
+            let m2 = b"second line\0";
             let mut menv = NzbgetRsMaintenanceEnv {
                 ctx: std::ptr::null_mut(),
                 p1: 0,
@@ -5425,14 +5157,16 @@ mod tests {
                 out_buf: std::ptr::null_mut(),
                 emit_ctx: std::ptr::null_mut(),
                 emit_cb: None,
-                log_cb: None,
+                #[cfg(unix)]
+                script_host_cb: None,
+                #[cfg(not(unix))]
+                script_host_cb: 0,
                 action_cb: Some(mock_maint_action),
             };
             assert_eq!(nzbget_rs_maintenance_exec(m, 2, &menv), 1);
             menv.a1 = 1;
-            menv.a2 = 5;
             menv.s1 = m2.as_ptr() as *const c_char;
-            assert_eq!(nzbget_rs_maintenance_exec(m, 7, &menv), 1);
+            assert_eq!(nzbget_rs_maintenance_exec(m, 2, &menv), 1);
 
             let mut collected: Vec<(i32, i32, Vec<u8>)> = Vec::new();
             menv.a3 = 0;
@@ -5446,5 +5180,6 @@ mod tests {
 
             nzbget_rs_maintenance_free(m);
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

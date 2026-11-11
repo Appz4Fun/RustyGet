@@ -107,11 +107,17 @@ pub struct Check {
 /// Nine entries per task normally suffice, but libc's TZif leap corrections
 /// can repeat calendar dates and make this bound invalid.
 pub fn check_tasks(
-    tasks: &mut [Task], last_check: &mut i64, current: i64,
-    current_offset: i64, last_check_offset: i64,
+    tasks: &mut [Task],
+    last_check: &mut i64,
+    current: i64,
+    current_offset: i64,
+    last_check_offset: i64,
     gmtime: impl Fn(i64) -> Tm,
 ) -> Check {
-    let mut r = Check { due: Vec::new(), reset: false };
+    let mut r = Check {
+        due: Vec::new(),
+        reset: false,
+    };
     if !tasks.is_empty() {
         let diff = current - *last_check;
         if !(0..=60 * 90).contains(&diff) {
@@ -137,10 +143,18 @@ pub fn check_tasks(
                 }
                 // the loop day's date with the task's time (the weekday is the
                 // loop day's: Timegm doesn't recompute it)
-                let appoint = timegm(&Tm { hour: task.hours as i64, min: task.minutes as i64, sec: 0, ..tm_loop });
+                let appoint = timegm(&Tm {
+                    hour: task.hours as i64,
+                    min: task.minutes as i64,
+                    sec: 0,
+                    ..tm_loop
+                });
                 let week_day = if tm_loop.wday == 0 { 7 } else { tm_loop.wday };
                 let week_ok = task.week_days == 0 || task.week_days & (1 << (week_day - 1)) != 0;
-                let due = (task.hours >= 0 && week_ok && local_last_check < appoint && appoint <= local_current)
+                let due = (task.hours >= 0
+                    && week_ok
+                    && local_last_check < appoint
+                    && appoint <= local_current)
                     || (task.hours == STARTUP_TASK && task.last_executed == 0);
                 if due {
                     r.due.push(k);
@@ -592,7 +606,8 @@ impl NzbgetRsScheduler {
                         } else {
                             let c_words: Vec<Vec<u8>> =
                                 words.iter().map(|w| make_c_buf(w)).collect();
-                            let mut ptrs: Vec<*const c_char> = Vec::with_capacity(c_words.len() + 1);
+                            let mut ptrs: Vec<*const c_char> =
+                                Vec::with_capacity(c_words.len() + 1);
                             ptrs.push(param_c.as_ptr() as *const c_char);
                             for w in &c_words {
                                 ptrs.push(w.as_ptr() as *const c_char);
@@ -999,8 +1014,10 @@ impl NzbgetRsScheduler {
 
         // ScheduleNextWork
         let now_next = current_unix_time(env);
-        self.service_interval
-            .store(scheduler_calc_next_work_interval(now_next), Ordering::SeqCst);
+        self.service_interval.store(
+            scheduler_calc_next_work_interval(now_next),
+            Ordering::SeqCst,
+        );
     }
 }
 
@@ -1077,65 +1094,12 @@ pub unsafe extern "C" fn nzbget_rs_scheduler_free(h: *mut NzbgetRsScheduler) {
 /// - `op = 1` (`ServiceInterval`): returns `m_serviceInterval`.
 /// - `op = 2` (`ServiceWork`): executes `Scheduler::ServiceWork` (`env.a5 != 0` = debug build).
 /// - `op = 3` (`EmitHealthTasks`): emits all tasks via `action_cb(5, ...)`.
-/// - `op = 4` (stateless `h = null`, `SchedulerScriptController` labels): formats `(exec_msg, info_name, log_prefix)` and passes them to `action_cb(7, ...)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_scheduler_exec(
     h: *mut NzbgetRsScheduler,
     op: c_int,
     env: *const NzbgetRsSchedulerEnv,
 ) -> c_int {
-    if op == 4 {
-        let Some(env_ref) = env.as_ref() else {
-            return 0;
-        };
-        let Some(cb) = env_ref.action_cb else {
-            return 0;
-        };
-        let s1_bytes = if env_ref.s1.is_null() {
-            &[][..]
-        } else {
-            CStr::from_ptr(env_ref.s1).to_bytes()
-        };
-        let mut disp_ptr: [*const c_char; 1] = [std::ptr::null()];
-        cb(
-            env_ref.ctx,
-            8,
-            0,
-            0,
-            std::ptr::null(),
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            disp_ptr.as_mut_ptr(),
-        );
-        let disp_bytes = if disp_ptr[0].is_null() {
-            &[][..]
-        } else {
-            CStr::from_ptr(disp_ptr[0]).to_bytes()
-        };
-        let (exec_msg, info_name, prefix) =
-            format_scheduler_script_labels(env_ref.a1 != 0, env_ref.a2, s1_bytes, disp_bytes);
-        let c0 = make_c_buf(&exec_msg);
-        let c1 = make_c_buf(&info_name);
-        let c2 = make_c_buf(&prefix);
-        let ptrs = [
-            c0.as_ptr() as *const c_char,
-            c1.as_ptr() as *const c_char,
-            c2.as_ptr() as *const c_char,
-        ];
-        return cb(
-            env_ref.ctx,
-            7,
-            0,
-            0,
-            ptrs.as_ptr(),
-            ptrs.len(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-    }
-
     let Some(sched) = h.as_ref() else {
         return 0;
     };
@@ -1180,7 +1144,10 @@ mod tests {
         // 2026-10-10 12:34:56 UTC, a Saturday
         let t = 1_791_635_696;
         let tm = gmtime(t);
-        assert_eq!((tm.year, tm.mon, tm.mday, tm.hour, tm.min, tm.sec, tm.wday), (2026, 9, 10, 12, 34, 56, 6));
+        assert_eq!(
+            (tm.year, tm.mon, tm.mday, tm.hour, tm.min, tm.sec, tm.wday),
+            (2026, 9, 10, 12, 34, 56, 6)
+        );
         assert_eq!(timegm(&tm), t);
         assert_eq!(gmtime(0).wday, 4);
         assert_eq!(gmtime(-1).year, 1969);
@@ -1190,9 +1157,24 @@ mod tests {
     fn due() {
         let now = 1_791_635_696; // Saturday 12:34:56
         let mut tasks = [
-            Task { hours: 12, minutes: 30, week_days: 0, last_executed: 0 },
-            Task { hours: 12, minutes: 40, week_days: 0, last_executed: 0 },
-            Task { hours: STARTUP_TASK, minutes: 0, week_days: 0, last_executed: 0 },
+            Task {
+                hours: 12,
+                minutes: 30,
+                week_days: 0,
+                last_executed: 0,
+            },
+            Task {
+                hours: 12,
+                minutes: 40,
+                week_days: 0,
+                last_executed: 0,
+            },
+            Task {
+                hours: STARTUP_TASK,
+                minutes: 0,
+                week_days: 0,
+                last_executed: 0,
+            },
         ];
         let mut last = now - 600;
         let c = check_tasks(&mut tasks, &mut last, now, 0, 0, gmtime);

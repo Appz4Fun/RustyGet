@@ -1100,28 +1100,6 @@ pub unsafe extern "C" fn nzbget_rs_parse_par_filename(
     }
 }
 
-/// ParParser::SameParCollection (0 for null names).
-///
-/// # Safety
-/// Each name is null or readable through its first NUL or 1023 bytes. Inputs stay borrowed.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_same_par_collection(
-    name1: *const c_char,
-    name2: *const c_char,
-    confirmed: c_int,
-) -> c_int {
-    if name1.is_null() || name2.is_null() {
-        return 0;
-    }
-    let name1 = par_filename_input(name1);
-    let name2 = par_filename_input(name2);
-    crate::parparser::same_par_collection(
-        CStr::from_ptr(name1.as_ptr().cast()).to_bytes(),
-        CStr::from_ptr(name2.as_ptr().cast()).to_bytes(),
-        confirmed != 0,
-    ) as c_int
-}
-
 /// ParParser::FindMainPars: scans `path` for confirmed `.par2` files,
 /// invoking `add_file(ctx, name, len)` for each unique collection when
 /// `collect != 0`.
@@ -1332,98 +1310,6 @@ pub unsafe extern "C" fn nzbget_rs_rename_analyzer_finish(
     std::ptr::copy_nonoverlapping(h.as_ptr().cast(), hash, h.len());
 }
 
-/// Reads the par2 hash at an index of DirectRenamer's FileHashList.
-pub type ParHashAt =
-    unsafe extern "C" fn(*mut std::ffi::c_void, usize, *mut *const c_char, *mut *const c_char);
-
-/// DirectRenamer::BuildNewRegularName: the index of the par2 hash whose file
-/// name the file gets, or -1 to keep its name.
-///
-/// # Safety
-/// `old_name` and `hash16k` are null (empty) or NUL-terminated. `at` writes,
-/// for every index below `count`, a filename and hash that are null (empty)
-/// or NUL-terminated and stay valid until this returns; it must not unwind.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_direct_regular_name(
-    old_name: *const c_char,
-    hash16k: *const c_char,
-    count: usize,
-    at: Option<ParHashAt>,
-    ctx: *mut std::ffi::c_void,
-) -> isize {
-    let as_c = |p: *const c_char| if p.is_null() { c"" } else { CStr::from_ptr(p) };
-    let Some(at) = at else { return -1 };
-    let hashes = (0..count).map(|i| {
-        let (mut filename, mut hash) = (std::ptr::null(), std::ptr::null());
-        at(ctx, i, &mut filename, &mut hash);
-        (as_c(filename), as_c(hash))
-    });
-    crate::directrenamer::regular_name(as_c(old_name), as_c(hash16k), hashes)
-        .map_or(-1, |i| i as isize)
-}
-
-/// DirectRenamer::BuildNewParName; free the name with nzbget_rs_free.
-///
-/// # Safety
-/// The names are null (empty) or NUL-terminated; `vol` is null (counting
-/// from 1, not written back) or a valid int.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_direct_par_name(
-    old_name: *const c_char,
-    dest_dir: *const c_char,
-    set_id: *const c_char,
-    separator: c_char,
-    vol: *mut c_int,
-) -> RsBuf {
-    let mut local = 1;
-    let vol = if vol.is_null() { &mut local } else { &mut *vol };
-    let name = crate::directrenamer::par_name_on_disk(
-        input(old_name),
-        input(dest_dir),
-        input(set_id),
-        separator as u8,
-        vol,
-    );
-    into_buf(name)
-}
-
-/// NzbgetRsParName: a par2 file of a download.
-#[repr(C)]
-pub struct ParName {
-    pub filename: *const c_char,
-    pub set_id: *const c_char,
-}
-
-/// DirectRenamer::NeedRenamePars: 1 when the par2 files need new names.
-///
-/// # Safety
-/// `pars` is null or `count` readable entries; their filenames are null or
-/// NUL-terminated (null: needs renaming), set ids null (empty) or
-/// NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_direct_need_rename_pars(
-    pars: *const ParName,
-    count: usize,
-) -> c_int {
-    if pars.is_null() {
-        return 0;
-    }
-    let pars: Vec<_> = std::slice::from_raw_parts(pars, count)
-        .iter()
-        .map(|p| {
-            (
-                (!p.filename.is_null()).then(|| CStr::from_ptr(p.filename)),
-                if p.set_id.is_null() {
-                    c""
-                } else {
-                    CStr::from_ptr(p.set_id)
-                },
-            )
-        })
-        .collect();
-    crate::directrenamer::need_rename_pars(&pars) as c_int
-}
-
 fn nul(s: &[u8]) -> Vec<u8> {
     let mut v: Vec<u8> = s.iter().take_while(|&&b| b != 0).copied().collect();
     v.push(0);
@@ -1503,76 +1389,6 @@ pub unsafe extern "C" fn nzbget_rs_par_renamer_execute(
     if !out_has_damaged_par_files.is_null() {
         *out_has_damaged_par_files = state.has_damaged_par_files as c_int;
     }
-}
-
-/// `ParRenamer::ListParredFiles`: loads description packets from `par_filename` (if at most
-/// `max_index_par_size` bytes) and emits each base filename via `add_cb`.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_renamer_list_parred_files(
-    par_filename: *const c_char,
-    max_index_par_size: i64,
-    ctx: *mut std::ffi::c_void,
-    add_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-) -> c_int {
-    if par_filename.is_null() {
-        return 0;
-    }
-    let path = cstr_to_path_buf(par_filename);
-    let Some(files) = crate::parrenamer::list_parred_files(&path, max_index_par_size) else {
-        return 0;
-    };
-    if let Some(cb) = add_cb {
-        for f in files {
-            let c_name = nul(&f);
-            cb(ctx, c_name.as_ptr().cast());
-        }
-    }
-    1
-}
-
-/// `DirectParLoader::LoadParFile`: parses `par_filename`'s PAR2 packets in Rust and emits
-/// each entry (`damaged = 1` or `damaged = 0` with translated local `filename` and 16k `hash`)
-/// to `entry_cb`. Returns `1` if the file was loaded, `0` if missing or empty.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_renamer_load_par_entries(
-    par_filename: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    on_loaded_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    entry_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char, *const c_char) -> c_int,
-    >,
-) -> c_int {
-    if par_filename.is_null() {
-        return 0;
-    }
-    let path = cstr_to_path_buf(par_filename);
-    let Some(entries) = crate::parrenamer::load_par_entries_from_file(&path) else {
-        return 0;
-    };
-    if let Some(loaded) = on_loaded_cb {
-        if loaded(ctx) == 0 {
-            return 1;
-        }
-    }
-    if let Some(cb) = entry_cb {
-        for entry in entries {
-            match entry {
-                crate::parrenamer::ParEntry::Damaged => {
-                    if cb(ctx, 1, std::ptr::null(), std::ptr::null()) == 0 {
-                        break;
-                    }
-                }
-                crate::parrenamer::ParEntry::File { name, hash } => {
-                    let c_name = nul(&name);
-                    let c_hash = nul(&hash);
-                    if cb(ctx, 0, c_name.as_ptr().cast(), c_hash.as_ptr().cast()) == 0 {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    1
 }
 
 /// FileSystem::DeleteDirectoryWithContent: 1 all deleted, 0 not.
@@ -1698,30 +1514,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn dir_browser_and_regex_ffi_roundtrip() {
-        use std::ptr::null;
-        unsafe {
-            let null_browser = nzbget_rs_dir_browser_new(null(), 1);
-            assert!(nzbget_rs_dir_browser_next(null_browser).is_null());
-            nzbget_rs_dir_browser_free(null_browser);
-
-            let dot_browser = nzbget_rs_dir_browser_new(c".".as_ptr(), 1);
-            let first = nzbget_rs_dir_browser_next(dot_browser);
-            assert!(!first.is_null());
-            let first_bytes = CStr::from_ptr(first).to_bytes();
-            assert!(!first_bytes.is_empty() && first_bytes != b"." && first_bytes != b"..");
-            nzbget_rs_dir_browser_free(dot_browser);
-
-            let rx = nzbget_rs_regex_new(c"^foo([0-9]+)$".as_ptr(), 10);
-            assert_eq!(nzbget_rs_regex_is_valid(rx), 1);
-            assert_eq!(nzbget_rs_regex_match(rx, c"FOO42".as_ptr()), 1);
-            assert_eq!(nzbget_rs_regex_match(rx, c"bar".as_ptr()), 0);
-            nzbget_rs_regex_free(rx);
-        }
-    }
-
     #[test]
     fn parrenamer_ffi_nulls() {
         use std::ptr::{null, null_mut};
@@ -1746,14 +1538,6 @@ mod tests {
                 &mut damaged,
             );
             assert_eq!((renamed, missed, damaged), (0, 0, 0));
-            assert_eq!(
-                nzbget_rs_par_renamer_list_parred_files(null(), 1024, null_mut(), None),
-                0
-            );
-            assert_eq!(
-                nzbget_rs_par_renamer_load_par_entries(null(), null_mut(), None, None),
-                0
-            );
         }
     }
 
@@ -1831,14 +1615,6 @@ mod tests {
                 nzbget_rs_parse_par_filename(c"a.par2".as_ptr(), 1, null_mut(), null_mut()),
                 1
             );
-            assert_eq!(
-                nzbget_rs_same_par_collection(null(), c"a.par2".as_ptr(), 1),
-                0
-            );
-            assert_eq!(
-                nzbget_rs_same_par_collection(c"a.par2".as_ptr(), null(), 1),
-                0
-            );
 
             let mut name = [b'a'; crate::parparser::BSTRING_MAX];
             name[1018..].copy_from_slice(b".par2");
@@ -1847,10 +1623,7 @@ mod tests {
                 1
             );
             assert_eq!(output, 1018);
-            assert_eq!(
-                nzbget_rs_same_par_collection(name.as_ptr().cast(), name.as_ptr().cast(), 1),
-                1
-            );
+            assert!(crate::parparser::same_par_collection(&name, &name, true));
         }
     }
 
@@ -4536,13 +4309,12 @@ pub unsafe extern "C" fn nzbget_rs_dupe_coord_exec(
     a1: c_int,
     p1: usize,
     p2: usize,
-    p3: usize,
     s1: *const c_char,
     s2: *const c_char,
     host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
 ) -> usize {
     let _cancel_guard = PosixCancelGuard::disable();
-    crate::dupecoord::dupe_coord_exec(op, a1, p1, p2, p3, s1, s2, host_cb)
+    crate::dupecoord::dupe_coord_exec(op, a1, p1, p2, s1, s2, host_cb)
 }
 
 #[cfg(unix)]
@@ -6854,29 +6626,6 @@ pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_get_file(
 // ============================================================================
 
 
-// ============================================================================
-// DirectUnpack & UnpackController (`rust/src/unpack.rs`)
-// ============================================================================
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_queue_editor_visit_category_ext_diff(
-    old_ext: *const c_char,
-    new_ext: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char)>,
-) {
-    let Some(cb) = cb else { return };
-    crate::queueeditor::visit_category_ext_diff(input(old_ext), input(new_ext), |name, val| {
-        let mut c_name = Vec::with_capacity(name.len() + 1);
-        c_name.extend_from_slice(name);
-        c_name.push(0);
-        let mut c_val = Vec::with_capacity(val.len() + 1);
-        c_val.extend_from_slice(val);
-        c_val.push(0);
-        cb(ctx, c_name.as_ptr().cast(), c_val.as_ptr().cast());
-    });
-}
-
 // =========================================================================
 // Consolidated RepairController (`repair.rs`), ContentMap (`streamrepair.rs`),
 // and TwinCheck (`twin.rs`) FFI
@@ -6890,102 +6639,6 @@ unsafe fn cstr_to_path_buf(ptr: *const c_char) -> std::path::PathBuf {
     #[cfg(not(unix))]
     {
         std::path::PathBuf::from(String::from_utf8_lossy(input(ptr)).into_owned())
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_regex_new(
-    pattern: *const c_char,
-    match_buf_size: c_int,
-) -> *mut std::ffi::c_void {
-    let rx = if pattern.is_null() {
-        crate::util::PosixRegEx::new_with(false, match_buf_size)
-    } else {
-        #[cfg(unix)]
-        {
-            crate::util::PosixRegEx::compile(CStr::from_ptr(pattern), match_buf_size)
-        }
-        #[cfg(not(unix))]
-        {
-            crate::util::PosixRegEx::new_with(false, match_buf_size)
-        }
-    };
-    Box::into_raw(Box::new(rx)).cast()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_regex_free(handle: *mut std::ffi::c_void) {
-    if !handle.is_null() {
-        drop(Box::from_raw(handle.cast::<crate::util::PosixRegEx>()));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_regex_is_valid(handle: *const std::ffi::c_void) -> c_int {
-    if handle.is_null() {
-        return 0;
-    }
-    let rx = &*handle.cast::<crate::util::PosixRegEx>();
-    if rx.is_valid() {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_regex_match(
-    handle: *mut std::ffi::c_void,
-    str_ptr: *const c_char,
-) -> c_int {
-    if handle.is_null() || str_ptr.is_null() {
-        return 0;
-    }
-    let rx = &mut *handle.cast::<crate::util::PosixRegEx>();
-    #[cfg(unix)]
-    {
-        c_int::from(rx.match_cstr(CStr::from_ptr(str_ptr)))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = rx;
-        0
-    }
-}
-
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dir_browser_new(
-    path: *const c_char,
-    snapshot: c_int,
-) -> *mut std::ffi::c_void {
-    let p = (!path.is_null()).then(|| CStr::from_ptr(path));
-    Box::into_raw(Box::new(crate::fsops::PosixDirBrowser::new(
-        p,
-        snapshot != 0,
-    )))
-    .cast()
-}
-
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dir_browser_next(
-    handle: *mut std::ffi::c_void,
-) -> *const c_char {
-    if handle.is_null() {
-        return std::ptr::null();
-    }
-    let browser = &mut *handle.cast::<crate::fsops::PosixDirBrowser>();
-    browser.next_ptr()
-}
-
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dir_browser_free(handle: *mut std::ffi::c_void) {
-    if !handle.is_null() {
-        drop(Box::from_raw(
-            handle.cast::<crate::fsops::PosixDirBrowser>(),
-        ));
     }
 }
 
@@ -9495,127 +9148,6 @@ pub unsafe extern "C" fn nzbget_rs_dupe_probe_exec(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_queue_editor_op(
-    op: c_int,
-    a: c_int,
-    b: c_int,
-    c: c_int,
-    f1: i64,
-    f2: i64,
-    s1: *const c_char,
-    s2: *const c_char,
-    in1: *const c_int,
-    len1: usize,
-    in2: *const c_int,
-    len2: usize,
-    inout1: *mut c_int,
-    inout2: *mut c_int,
-) -> c_int {
-    if op == 9 {
-        if !s1.is_null() && !s2.is_null() && !in1.is_null() && !inout1.is_null() && len1 > 0 {
-            let is_par = std::slice::from_raw_parts(s1 as *const u8, len1);
-            let has_vol = std::slice::from_raw_parts(s2 as *const u8, len1);
-            let sizes = std::slice::from_raw_parts(in1 as *const i64, len1);
-            let out_pause = std::slice::from_raw_parts_mut(inout1 as *mut u8, len1);
-            crate::queueeditor::select_pars_to_pause(is_par, has_vol, sizes, a != 0, out_pause);
-        }
-        return 0;
-    }
-    let b1 = if s1.is_null() { &[][..] } else { input(s1) };
-    let b2 = if s2.is_null() { &[][..] } else { input(s2) };
-    let sl1 = if in1.is_null() || len1 == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(in1, len1)
-    };
-    let sl2 = if in2.is_null() || len2 == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(in2, len2)
-    };
-    match op {
-        0 => match crate::queueeditor::parse_sort_spec(b1) {
-            Some((crit, order)) => {
-                if !inout1.is_null() {
-                    *inout1 = crit;
-                }
-                if !inout2.is_null() {
-                    *inout2 = order;
-                }
-                1
-            }
-            None => 0,
-        },
-        1 => {
-            let cmp = match b1.cmp(b2) {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            };
-            let p2 = if inout1.is_null() { 0 } else { *inout1 };
-            c_int::from(crate::queueeditor::group_sorter_compare_values(
-                a, b, 1, cmp, f1, f2, f1, f2, f1, f2, cmp, c, p2,
-            ))
-        }
-        2 => {
-            if inout1.is_null() {
-                return 0;
-            }
-            let (work_offset, new_last) = crate::queueeditor::clamp_move_offset(a, b, c, *inout1);
-            *inout1 = new_last;
-            work_offset
-        }
-        3 => c_int::from(crate::queueeditor::filename_has_vol(b1)),
-        4 => {
-            let (new_target, new_before, offset) =
-                crate::queueeditor::resolve_move_groups_target(a, sl1, sl2, b != 0, c);
-            if !inout1.is_null() {
-                *inout1 = new_target;
-            }
-            if !inout2.is_null() {
-                *inout2 = c_int::from(new_before);
-            }
-            offset
-        }
-        5 => crate::queueeditor::calc_move_groups_to_offset(sl1, a, b, c != 0, len2),
-        6 => c_int::from(crate::queueeditor::compare_inner_files(
-            b1,
-            a != 0,
-            f1,
-            b2,
-            b != 0,
-            f2,
-            c != 0,
-        )),
-        7 => crate::queueeditor::parse_dupe_mode(b1).unwrap_or(-1),
-        8 => {
-            let is_group_del = (18..=21).contains(&a);
-            if is_group_del && !inout1.is_null() {
-                let (parking, avoid_hist, set_dupe, cleanup_disk) =
-                    crate::queueeditor::eval_group_delete_flags(
-                        a,
-                        19,
-                        20,
-                        21,
-                        b,
-                        c != 0,
-                        f1 as i32,
-                    );
-                *inout1 = 1
-                    | (c_int::from(parking) << 1)
-                    | (c_int::from(avoid_hist) << 2)
-                    | (c_int::from(set_dupe) << 3)
-                    | (c_int::from(cleanup_disk) << 4);
-            } else if !inout1.is_null() {
-                *inout1 = 0;
-            }
-            crate::queueeditor::map_group_to_file_action(a)
-        }
-        _ => 0,
-    }
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_transient_retries_op(
     handle: *mut c_void,
     op: c_int,
@@ -9813,404 +9345,46 @@ pub unsafe extern "C" fn nzbget_rs_scanner_exec(
     unsafe { crate::scanner::scanner_exec(scanner, op, env, a1, a2, a3) }
 }
 
+#[cfg(unix)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_prepost_op(
-    op: c_int,
-    a: c_int,
-    b: c_int,
-    c: c_int,
-    d: c_int,
-    e: c_int,
-    f: c_int,
-    g: c_int,
-    h: c_int,
-    i: c_int,
-    t1: i64,
-    t2: i64,
-    s1: *const c_char,
-    s2: *const c_char,
-    s3: *const c_char,
-    arr: *const c_int,
-    len: usize,
-    out1: *mut c_int,
-    out2: *mut c_int,
-    out3: *mut c_int,
-    out4: *mut c_int,
-    out5: *mut c_int,
-    out6: *mut c_int,
-) -> c_int {
-    let s1_bytes = if s1.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(s1).to_bytes()
-    };
-    let s2_bytes = if s2.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(s2).to_bytes()
-    };
-    let s3_bytes = if s3.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(s3).to_bytes()
-    };
-    let stages = if arr.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(arr, len)
-    };
-    match op {
-        0 => c_int::from(crate::prepost::should_complete_after_direct_rename(
-            a != 0,
-            b,
-            3,
-            c != 0,
-            d,
-            0,
-            e != 0,
-            f != 0,
-            g != 0,
-            h != 0,
-            i != 0,
-        )),
-        1 => {
-            let (route, enq_del, set_par_skip) = crate::prepost::classify_nzb_downloaded_entry(
-                a != 0,
-                b != 0,
-                c != 0,
-                d,
-                2,
-                4,
-                e != 0,
-                f != 0,
-                g,
-                0,
-                h,
-                1,
-                2,
-            );
-            if !out1.is_null() {
-                *out1 = c_int::from(enq_del);
-            }
-            if !out2.is_null() {
-                *out2 = c_int::from(set_par_skip);
-            }
-            route
-        }
-        2 => {
-            let (new_stage, req_par) =
-                crate::prepost::sanitise_post_stage(a, 11, 12, 0, b != 0, c != 0, d, 1);
-            if !out1.is_null() {
-                *out1 = c_int::from(req_par);
-            }
-            new_stage
-        }
-        3 => crate::prepost::classify_file_event(
-            a != 0,
-            b != 0,
-            c != 0,
-            d,
-            0,
-            2,
-            e != 0,
-            f != 0,
-            g != 0,
-        ),
-        4 => {
-            let (new_status, call_dl) = crate::prepost::resolve_nzb_deleted_route(a, 0, 1, 2, 4);
-            if !out1.is_null() {
-                *out1 = c_int::from(call_dl);
-            }
-            new_status
-        }
-        5 => {
-            let (add_hist, call_dupe, enq_del, need_save) = crate::prepost::eval_nzb_completed(
-                a,
-                2,
-                b,
-                c != 0,
-                d != 0,
-                e,
-                2,
-                f != 0,
-                g,
-                0,
-                2,
-                4,
-                7,
-                6,
-            );
-            if !out1.is_null() {
-                *out1 = c_int::from(add_hist);
-            }
-            if !out2.is_null() {
-                *out2 = c_int::from(call_dupe);
-            }
-            if !out3.is_null() {
-                *out3 = c_int::from(enq_del);
-            }
-            if !out4.is_null() {
-                *out4 = c_int::from(need_save);
-            }
-            c_int::from(add_hist)
-        }
-        6 => {
-            let (act, new_force_full) = crate::prepost::classify_request_par_action(
-                a != 0,
-                b,
-                1,
-                c != 0,
-                d != 0,
-                e,
-                3,
-                f != 0,
-                g != 0,
-            );
-            if !out1.is_null() {
-                *out1 = c_int::from(new_force_full);
-            }
-            act
-        }
-        7 => {
-            let (ready, upd_sec, is_comp, new_sec) =
-                crate::prepost::eval_cleanup_job_state(a != 0, b != 0, c, 12, d != 0, t1, t2, e);
-            if !out1.is_null() {
-                *out1 = c_int::from(upd_sec);
-            }
-            if !out2.is_null() {
-                *out2 = c_int::from(is_comp);
-            }
-            if !out3.is_null() {
-                *out3 = new_sec;
-            }
-            c_int::from(ready)
-        }
-        8 => {
-            let (can_run, allow_par) = crate::prepost::can_run_more_jobs(stages, 1, 4, 3, a);
-            if !out1.is_null() {
-                *out1 = c_int::from(allow_par);
-            }
-            c_int::from(can_run)
-        }
-        9 => crate::prepost::classify_skipped_par_health(a, 1, b, 3, c, d, t1, t2),
-        10 => {
-            let (want_unpack, unpack, start_rar_rename) =
-                crate::prepost::eval_want_unpack_and_rar_rename(
-                    a != 0,
-                    s1_bytes,
-                    b,
-                    0,
-                    c,
-                    0,
-                    d,
-                    0,
-                    e != 0,
-                );
-            if !out1.is_null() {
-                *out1 = c_int::from(want_unpack);
-            }
-            if !out2.is_null() {
-                *out2 = c_int::from(unpack);
-            }
-            if !out3.is_null() {
-                *out3 = c_int::from(start_rar_rename);
-            }
-            c_int::from(start_rar_rename)
-        }
-        11 => {
-            let opt_post_dl_ren = (t1 & 1) != 0;
-            let post_dl_ren_status = ((t1 >> 1) & 0xFF) as i32;
-            let opt_ren_after_unpack = ((t1 >> 9) & 1) != 0;
-            let post_unpack_ren_status = ((t1 >> 10) & 0xFF) as i32;
-            let dec = crate::prepost::eval_post_stages(
-                a != 0,
-                b,
-                c,
-                d,
-                e,
-                f != 0,
-                g,
-                h,
-                s1_bytes,
-                s2_bytes,
-                crate::paths::PATH_SEPARATOR,
-                i,
-                opt_post_dl_ren,
-                post_dl_ren_status,
-                !s1_bytes.is_empty(),
-                !s3_bytes.is_empty(),
-                opt_ren_after_unpack,
-                post_unpack_ren_status,
-            );
-            if !out1.is_null() {
-                *out1 = dec.unpack;
-            }
-            if !out2.is_null() {
-                *out2 = dec.skip_unpack_due_to_par;
-            }
-            if !out3.is_null() {
-                *out3 = dec.cleanup;
-            }
-            if !out4.is_null() {
-                *out4 = dec.move_inter;
-            }
-            if !out5.is_null() {
-                *out5 = dec.post_download_renaming;
-            }
-            if !out6.is_null() {
-                *out6 = dec.post_unpack_renaming;
-            }
-            dec.unpack
-        }
-        12 => c_int::from(crate::prepost::calc_post_pause_state(
-            stages,
-            a != 0,
-            b != 0,
-            c != 0,
-        )),
-        13 => crate::prepost::classify_file_downloaded_direct_unpack(
-            a != 0,
-            b != 0,
-            c != 0,
-            d != 0,
-            e,
-            0,
-            1,
-            f,
-            1,
-            g != 0,
-        ),
-        _ => 0,
-    }
+pub extern "C" fn nzbget_rs_prepost_new(
+    owner: usize,
+) -> *mut crate::prepost::NzbgetRsPrePostProcessor {
+    Box::into_raw(Box::new(crate::prepost::NzbgetRsPrePostProcessor::new(
+        owner,
+    )))
 }
 
+#[cfg(unix)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_prepost_delete_cleanup(
-    cleanup_disk: c_int,
-    delete_status: c_int,
-    parking: c_int,
-    skip_disk_write: c_int,
-    opt_skip_write: c_int,
-    dest_dir: *const c_char,
-    final_dir: *const c_char,
-    completed_files: *const *const c_char,
-    completed_count: usize,
-    ctx: *mut c_void,
-    log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char, *const c_char)>,
+pub unsafe extern "C" fn nzbget_rs_prepost_free(
+    ptr: *mut crate::prepost::NzbgetRsPrePostProcessor,
 ) {
-    let mode = crate::prepost::classify_delete_cleanup_mode(
-        cleanup_disk != 0,
-        delete_status,
-        3,
-        parking != 0,
-        skip_disk_write != 0,
-        opt_skip_write != 0,
-    );
-    if mode == 0 || dest_dir.is_null() {
-        return;
-    }
-    let dest_cstr = CStr::from_ptr(dest_dir);
-    let dest_bytes = dest_cstr.to_bytes();
-    let sep = crate::paths::PATH_SEPARATOR;
-    if mode == 1 {
-        if crate::fsops::directory_exists(dest_bytes, &crate::fsops::posix_stat) {
-            if let Some(cb) = log_cb {
-                cb(ctx, 0, c"Deleting dir %s".as_ptr(), dest_dir);
-            }
-            let mut errmsg = Vec::new();
-            if !crate::fsdelete::delete_directory_with_content(
-                &mut crate::fsops::PosixFsOps,
-                dest_bytes,
-                sep,
-                &mut errmsg,
-            )
-            .unwrap_or(false)
-            {
-                if let Some(cb) = log_cb {
-                    if let Ok(err_c) = CString::new(errmsg) {
-                        cb(ctx, 1, dest_dir, err_c.as_ptr());
-                    }
-                }
-            }
-        }
-        return;
-    }
-
-    if !completed_files.is_null() && completed_count > 0 {
-        let slice = std::slice::from_raw_parts(completed_files, completed_count);
-        for &cf_ptr in slice {
-            if cf_ptr.is_null() {
-                continue;
-            }
-            let cf_bytes = CStr::from_ptr(cf_ptr).to_bytes();
-            let mut full = Vec::with_capacity(dest_bytes.len() + 1 + cf_bytes.len());
-            full.extend_from_slice(dest_bytes);
-            full.push(sep);
-            full.extend_from_slice(cf_bytes);
-            if crate::fsops::file_exists(&full, &crate::fsops::posix_stat) {
-                if let Some(cb) = log_cb {
-                    cb(ctx, 0, c"Deleting file %s".as_ptr(), cf_ptr);
-                }
-                if let Ok(full_c) = CString::new(full) {
-                    let _ = crate::fsops::delete_file(&full_c);
-                }
-            }
-        }
-    }
-
-    let mut dir = crate::fsops::PosixDirBrowser::new(Some(dest_cstr), false);
-    loop {
-        let fn_ptr = dir.next_ptr();
-        if fn_ptr.is_null() {
-            break;
-        }
-        let fn_bytes = CStr::from_ptr(fn_ptr).to_bytes();
-        if fn_bytes.ends_with(b".out.tmp") {
-            let mut full = Vec::with_capacity(dest_bytes.len() + 1 + fn_bytes.len());
-            full.extend_from_slice(dest_bytes);
-            full.push(sep);
-            full.extend_from_slice(fn_bytes);
-            if let Some(cb) = log_cb {
-                cb(ctx, 0, c"Deleting file %s".as_ptr(), fn_ptr);
-            }
-            if let Ok(full_c) = CString::new(full) {
-                let _ = crate::fsops::delete_file(&full_c);
-            }
-        }
-    }
-
-    let _ = crate::fsdelete::delete_directory(&mut crate::fsops::PosixFsOps, dest_bytes, sep);
-    if !final_dir.is_null() {
-        let final_cstr = CStr::from_ptr(final_dir);
-        let final_bytes = final_cstr.to_bytes();
-        if final_bytes != dest_bytes
-            && crate::fsops::directory_exists(final_bytes, &crate::fsops::posix_stat)
-        {
-            let _ =
-                crate::fsdelete::delete_directory(&mut crate::fsops::PosixFsOps, final_bytes, sep);
-        }
+    if !ptr.is_null() {
+        drop(Box::from_raw(ptr));
     }
 }
 
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_prepost_pick_next_job(
-    candidates: *const crate::prepost::RsPostJobCandidate,
-    len: usize,
-    allow_par: c_int,
-    has_active_unpack: c_int,
-    pause_post_process: c_int,
-) -> c_int {
-    let slice = if candidates.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(candidates, len)
+pub unsafe extern "C" fn nzbget_rs_prepost_exec(
+    ptr: *const crate::prepost::NzbgetRsPrePostProcessor,
+    op: c_int,
+    a1: c_int,
+    a2: c_int,
+    p1: usize,
+    p2: usize,
+    p3: usize,
+    s1: *const c_char,
+    host_ctx: *mut c_void,
+    host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
+) -> usize {
+    let (Some(proc_ref), Some(cb)) = (ptr.as_ref(), host_cb) else {
+        return 0;
     };
-    crate::prepost::pick_next_post_job(
-        slice,
-        allow_par != 0,
-        has_active_unpack != 0,
-        pause_post_process != 0,
-    )
+    let _cancel_guard = PosixCancelGuard::disable();
+    proc_ref.exec(op, a1, a2, p1, p2, p3, s1, host_ctx, cb)
 }
 
 #[cfg(unix)]
@@ -10333,7 +9507,6 @@ pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
         CStr::from_ptr(s2).to_bytes()
     };
     match op {
-        14 => c_int::from(crate::unpack::has_completed_archive_ext(s1_bytes)),
         15 => c_int::from(crate::unpack::use_inter_dir(
             s1_bytes,
             s2_bytes,

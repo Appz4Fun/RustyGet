@@ -196,7 +196,6 @@ int nzbget_rs_force_directories(const char* path, NzbgetRsBuf* errmsg);
 // table: glibc's tolower table (*__ctype_tolower_loc()) read for a char of
 // the given signedness instead of calling fold per byte; NULL calls fold.
 int nzbget_rs_parse_par_filename(const char* name, int confirmed, int* baseLen, int* blocks);
-int nzbget_rs_same_par_collection(const char* name1, const char* name2, int confirmed);
 int nzbget_rs_find_main_pars(const char* path, int collect,
 	void (*addFile)(void* ctx, const char* name, size_t len), void* ctx);
 
@@ -233,33 +232,7 @@ void nzbget_rs_rename_analyzer_reset(NzbgetRsRenameAnalyzer* a);
 int nzbget_rs_rename_analyzer_append(NzbgetRsRenameAnalyzer* a, const char* buf, int len, char* setId);
 void nzbget_rs_rename_analyzer_finish(NzbgetRsRenameAnalyzer* a, char* hash);
 
-// DirectRenamer's new names (rust/src/directrenamer.rs), comparing in the
-// current locale. Strings are borrowed for the call; NULL strings are empty.
-// direct_regular_name: the index of the par2 hash whose filename the file
-// gets, or -1 to keep its name; at writes index's filename and hash (borrowed
-// until the call returns) for every index below count; NULL at returns -1.
-// direct_par_name: the par2 file's new name (free with nzbget_rs_free), *vol
-// counted up for every name tried (NULL vol: from 1); exists gets the full
-// path (NULL: nothing exists). format is NULL for classic formatting, or
-// writes a borrowed candidate buffer and length (valid until the next
-// callback), returning 1 on success, 0 to stop the search. Callbacks must
-// not access *vol. direct_need_rename_pars: 1 when the par2 files
-// need new names; a NULL filename needs one; NULL pars/fold return 0. fold is
-// ParParser::FilenameFold. Callbacks must not throw; panics abort.
-typedef void (*NzbgetRsParHashAt)(void* ctx, size_t index, const char** filename, const char** hash);
-ptrdiff_t nzbget_rs_direct_regular_name(const char* oldName, const char* hash16k, size_t count,
-	NzbgetRsParHashAt at, void* ctx);
-NzbgetRsBuf nzbget_rs_direct_par_name(const char* oldName, const char* destDir, const char* setId,
-	char separator, int* vol);
-typedef struct NzbgetRsParName
-{
-	const char* filename;
-	const char* setId;
-} NzbgetRsParName;
-int nzbget_rs_direct_need_rename_pars(const NzbgetRsParName* pars, size_t count);
-
-// ParRenamer::Execute, ParRenamer::ListParredFiles, and DirectParLoader::LoadParFile
-// (rust/src/parrenamer.rs).
+// ParRenamer::Execute (rust/src/parrenamer.rs).
 void nzbget_rs_par_renamer_execute(
 	const char* infoName, const char* destDir, const char* ignoreExt,
 	int detectMissing, char separator, void* ctx,
@@ -269,13 +242,6 @@ void nzbget_rs_par_renamer_execute(
 	void (*registerParredCb)(void* ctx, const char* name),
 	void (*registerRenamedCb)(void* ctx, const char* oldRel, const char* newRel),
 	int* outRenamedCount, int* outHasMissedFiles, int* outHasDamagedParFiles);
-int nzbget_rs_par_renamer_list_parred_files(
-	const char* parFilename, int64_t maxIndexParSize, void* ctx,
-	void (*addCb)(void* ctx, const char* name));
-int nzbget_rs_par_renamer_load_par_entries(
-	const char* parFilename, void* ctx,
-	int (*onLoadedCb)(void* ctx),
-	int (*entryCb)(void* ctx, int damaged, const char* name, const char* hash));
 
 // NzbFile (rust/src/nzbfile.rs), under the C library's ctype: classes are
 // isspace/isdigit's classes of bytes 0..255 (masks space and digit), lower
@@ -1342,19 +1308,6 @@ int nzbget_rs_nzbfile_parser_get_file(
     const NzbgetRsNzbFileParser* parser, size_t index,
     NzbgetRsNzbKeptFileView* out_view);
 
-void nzbget_rs_queue_editor_visit_category_ext_diff(
-    const char* old_ext, const char* new_ext, void* ctx,
-    void (*cb)(void* ctx, const char* param_name, const char* param_val));
-
-void* nzbget_rs_regex_new(const char* pattern, int match_buf_size);
-void nzbget_rs_regex_free(void* handle);
-int nzbget_rs_regex_is_valid(const void* handle);
-int nzbget_rs_regex_match(void* handle, const char* str_ptr);
-
-void* nzbget_rs_dir_browser_new(const char* path, int snapshot);
-const char* nzbget_rs_dir_browser_next(void* handle);
-void nzbget_rs_dir_browser_free(void* handle);
-
 NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
 
 NzbgetRsBuf nzbget_rs_ext_mgr_load_extensions(
@@ -1926,9 +1879,6 @@ typedef struct NzbgetRsHistoryCoordEnv {
     uintptr_t (*action_cb)(void*, int, int, int, uintptr_t, uintptr_t, const char*, const char*, int*, int64_t*, const char**, uint8_t*, size_t);
 } NzbgetRsHistoryCoordEnv;
 int nzbget_rs_history_coord_exec(int op, const NzbgetRsHistoryCoordEnv* env);
-int nzbget_rs_queue_editor_op(
-    int op, int a, int b, int c, int64_t f1, int64_t f2, const char* s1, const char* s2,
-    const int* in1, size_t len1, const int* in2, size_t len2, int* inout1, int* inout2);
 intptr_t nzbget_rs_transient_retries_op(
     void* handle, int op, uintptr_t a, int64_t b, uintptr_t* out_arr, size_t out_cap);
 int nzbget_rs_article_dl_op(
@@ -1968,20 +1918,6 @@ NzbgetRsScheduler* nzbget_rs_scheduler_new(void);
 void nzbget_rs_scheduler_free(NzbgetRsScheduler* h);
 int nzbget_rs_scheduler_exec(NzbgetRsScheduler* h, int op, const NzbgetRsSchedulerEnv* env);
 
-typedef struct RsPostJobCandidate {
-    uint8_t has_post_info;
-    uint8_t working;
-    uint8_t has_queue_script_job;
-    uint8_t direct_unpack_running;
-    uint8_t has_live_repair_thread;
-    int32_t priority;
-    uint8_t force_priority;
-    uint8_t need_par_check;
-    uint8_t need_unpack;
-    uint8_t in_active_jobs;
-    uint8_t download_completed;
-} RsPostJobCandidate;
-
 typedef struct NzbgetRsDaemonEnv {
     void* ctx; int a1; int a2; int a3; int a4; int a5; int a6;
     const char* s1; const char* s2; const char* s3; const char* s4; const char* s5;
@@ -1989,17 +1925,6 @@ typedef struct NzbgetRsDaemonEnv {
     void (*log_cb)(void*, int, const char*); int (*action_cb)(void*, int, int, const char*, const char*);
 } NzbgetRsDaemonEnv;
 int nzbget_rs_daemon_exec(int op, const NzbgetRsDaemonEnv* env);
-int nzbget_rs_prepost_op(
-    int op, int a, int b, int c, int d, int e, int f, int g, int h, int i,
-    int64_t t1, int64_t t2, const char* s1, const char* s2, const char* s3,
-    const int* arr, size_t len, int* out1, int* out2, int* out3, int* out4, int* out5, int* out6);
-void nzbget_rs_prepost_delete_cleanup(
-    int cleanup_disk, int delete_status, int parking, int skip_disk_write, int opt_skip_write,
-    const char* dest_dir, const char* final_dir, const char* const* completed_files, size_t completed_count,
-    void* ctx, void (*log_cb)(void*, int, const char*, const char*));
-int nzbget_rs_prepost_pick_next_job(
-    const RsPostJobCandidate* candidates, size_t len,
-    int allow_par, int has_active_unpack, int pause_post_process);
 int nzbget_rs_repair_ctrl_op(
     int op, int a, int b, int c, int d, int e, int f,
     int64_t t1, int64_t t2, int64_t t3, int64_t t4,
@@ -2283,13 +2208,14 @@ int nzbget_rs_fleet_append(
     void* emit_ctx, NzbgetRsXmlRpcEmitFn emit_cb);
 
 typedef struct NzbgetRsQueueCoordinator NzbgetRsQueueCoordinator;
+typedef struct NzbgetRsPrePostProcessor NzbgetRsPrePostProcessor;
 typedef uintptr_t (*NzbgetRsQueueSubsysHostFn)(
     void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
     const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
 int nzbget_rs_dupe_fallback_op(
     int op, int a1, uintptr_t p1, NzbgetRsQueueSubsysHostFn host_cb);
 uintptr_t nzbget_rs_dupe_coord_exec(
-    int op, int a1, uintptr_t p1, uintptr_t p2, uintptr_t p3,
+    int op, int a1, uintptr_t p1, uintptr_t p2,
     const char* s1, const char* s2, NzbgetRsQueueSubsysHostFn host_cb);
 NzbgetRsQueueCoordinator* nzbget_rs_queue_coord_new(void);
 void nzbget_rs_queue_coord_free(NzbgetRsQueueCoordinator* ptr);
@@ -2297,6 +2223,12 @@ uintptr_t nzbget_rs_queue_coord_exec(
     const NzbgetRsQueueCoordinator* ptr, int op, int a1, int a2,
     uintptr_t p1, uintptr_t p2, uintptr_t p3, const char* s1, const int* ints,
     NzbgetRsQueueSubsysHostFn host_cb, void* ctx);
+NzbgetRsPrePostProcessor* nzbget_rs_prepost_new(uintptr_t owner);
+void nzbget_rs_prepost_free(NzbgetRsPrePostProcessor* ptr);
+uintptr_t nzbget_rs_prepost_exec(
+    const NzbgetRsPrePostProcessor* ptr, int op, int a1, int a2,
+    uintptr_t p1, uintptr_t p2, uintptr_t p3, const char* s1,
+    void* host_ctx, NzbgetRsQueueSubsysHostFn host_cb);
 
 #include "nzbget_tls_cipher.h"
 

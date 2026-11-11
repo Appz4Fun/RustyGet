@@ -1699,14 +1699,14 @@ pub(crate) fn list_history_dupes_host(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
     nzb_ptr: usize,
-    out_raw_nzb_list_ptr: usize,
-) {
-    if dq_ptr == 0 || nzb_ptr == 0 || out_raw_nzb_list_ptr == 0 {
-        return;
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    if dq_ptr == 0 || nzb_ptr == 0 {
+        return out;
     }
     let nzb = host.nzb_snap(nzb_ptr, false);
     if nzb.dupe_mode == crate::queuesubsys_host::DM_FORCE {
-        return;
+        return out;
     }
     let hlen = host.history_len(dq_ptr);
     for i in 0..hlen {
@@ -1716,10 +1716,11 @@ pub(crate) fn list_history_dupes_host(
             if item.dupe_mode != crate::queuesubsys_host::DM_FORCE
                 && same_name_or_key(&item.name, &item.dupe_key, &nzb.name, &nzb.dupe_key)
             {
-                host.push_raw_nzb_list(out_raw_nzb_list_ptr, hi.inner_ptr);
+                out.push(hi.inner_ptr);
             }
         }
     }
+    out
 }
 
 #[cfg(unix)]
@@ -1728,7 +1729,6 @@ pub unsafe fn dupe_coord_exec(
     a1: std::ffi::c_int,
     p1: usize,
     p2: usize,
-    p3: usize,
     s1: *const c_char,
     s2: *const c_char,
     host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
@@ -1748,22 +1748,6 @@ pub unsafe fn dupe_coord_exec(
         CStr::from_ptr(s2).to_bytes()
     };
     match op {
-        0 => {
-            if p1 == 0 {
-                return 0;
-            }
-            let opts = host.opts();
-            let nzb = host.nzb_snap(p1, false);
-            usize::from(fails_over_snap(&opts, &nzb))
-        }
-        1 => {
-            nzb_found_host(&host, p1, p2);
-            0
-        }
-        2 => {
-            nzb_completed_host(&host, p1, p2);
-            0
-        }
         3 => {
             let opts = host.opts();
             find_dupe_backup_host(&host, &opts, p1, p2, b1, b2)
@@ -1774,10 +1758,6 @@ pub unsafe fn dupe_coord_exec(
             0
         }
         5 => get_dupe_status_host(&host, p1, b1, b2) as usize,
-        6 => {
-            list_history_dupes_host(&host, p1, p2, p3);
-            0
-        }
         _ => 0,
     }
 }

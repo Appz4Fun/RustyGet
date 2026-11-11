@@ -1141,6 +1141,25 @@ pub struct NzbgetRsQueueCoordinator {
     server_config_generation: std::sync::atomic::AtomicI32,
     propagation_wait_logged_id: std::sync::atomic::AtomicI32,
     donor_cache: std::sync::Mutex<crate::dupefallback::DonorCacheState>,
+    par_loaders_stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    par_loaders: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+#[cfg(unix)]
+impl Drop for NzbgetRsQueueCoordinator {
+    fn drop(&mut self) {
+        self.par_loaders_stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        let handles: Vec<_> = self
+            .par_loaders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        for h in handles {
+            let _ = h.join();
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1230,7 +1249,39 @@ impl NzbgetRsQueueCoordinator {
             server_config_generation: std::sync::atomic::AtomicI32::new(0),
             propagation_wait_logged_id: std::sync::atomic::AtomicI32::new(0),
             donor_cache: std::sync::Mutex::new(crate::dupefallback::DonorCacheState::default()),
+            par_loaders_stopped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            par_loaders: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn spawn_par_loader(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        nzb_id: i32,
+        par_files: Vec<Vec<u8>>,
+    ) {
+        let mut guard = self.par_loaders.lock().unwrap_or_else(|e| e.into_inner());
+        let mut alive = Vec::with_capacity(guard.len() + 1);
+        for h in guard.drain(..) {
+            if h.is_finished() {
+                let _ = h.join();
+            } else {
+                alive.push(h);
+            }
+        }
+        let ctx_addr = host.ctx as usize;
+        let cb = host.cb;
+        let stopped = std::sync::Arc::clone(&self.par_loaders_stopped);
+        if let Ok(handle) = std::thread::Builder::new().spawn(move || {
+            let loader_host = crate::queuesubsys_host::QueueSubsysHost::new(
+                ctx_addr as *mut std::ffi::c_void,
+                cb,
+            );
+            crate::directrenamer::run_par_loader(loader_host, &stopped, nzb_id, par_files);
+        }) {
+            alive.push(handle);
+        }
+        *guard = alive;
     }
 
     fn with_donor_cache<R>(
@@ -1245,6 +1296,8 @@ impl NzbgetRsQueueCoordinator {
     }
 
     pub(crate) fn init(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        self.par_loaders_stopped
+            .store(false, std::sync::atomic::Ordering::Release);
         host.log(
             crate::queuesubsys_host::MK_DEBUG,
             b"Creating QueueCoordinator",
@@ -1260,6 +1313,17 @@ impl NzbgetRsQueueCoordinator {
             crate::queuesubsys_host::MK_DEBUG,
             b"Destroying QueueCoordinator",
         );
+        self.par_loaders_stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        let loader_handles: Vec<_> = self
+            .par_loaders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        for h in loader_handles {
+            let _ = h.join();
+        }
         crate::dupeprobe::probe_wait_all();
         crate::twin::wait_all();
         host.delete_all_active_downloads();
@@ -1271,6 +1335,8 @@ impl NzbgetRsQueueCoordinator {
     }
 
     pub(crate) fn stop(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        self.par_loaders_stopped
+            .store(true, std::sync::atomic::Ordering::Release);
         crate::dupeprobe::probe_stop_all();
         host.log(
             crate::queuesubsys_host::MK_DEBUG,
@@ -1656,23 +1722,7 @@ impl NzbgetRsQueueCoordinator {
         opts: &crate::queuesubsys_host::GlobalOptsSnap,
         file: &crate::queuesubsys_host::FileSnap,
     ) {
-        let unlink_bytes = |b: &[u8]| {
-            let c = crate::queuesubsys_host::c_bytes(b);
-            if let Ok(cs) = CStr::from_bytes_with_nul(&c) {
-                let _ = crate::fsops::delete_file(cs);
-            }
-        };
-        host.file_action(
-            file.ptr,
-            crate::queuesubsys_host::FILE_ACT_DISCARD_TEMP_ARTICLES,
-            usize::from(!opts.direct_write && !file.force_direct_write),
-        );
-        if opts.direct_write && !file.output_filename.is_empty() && !file.force_direct_write {
-            unlink_bytes(&file.output_filename);
-            if file.is_hard_linked && !file.hard_link_path.is_empty() {
-                unlink_bytes(&file.hard_link_path);
-            }
-        }
+        discard_temp_files_host(host, opts, file);
     }
 
     pub(crate) fn fail_over_dead_pick(
@@ -1921,15 +1971,13 @@ impl NzbgetRsQueueCoordinator {
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
-        raw_file_list_ptr: usize,
+        file_ptrs: &[usize],
         name: &[u8],
-        out_new_nzb_ptr: *mut usize,
     ) -> bool {
-        let file_ptrs = host.raw_file_list_vec(raw_file_list_ptr);
         let mut src_nzb_ptr = 0usize;
         let mut file_snaps = Vec::with_capacity(file_ptrs.len());
 
-        for &fp in &file_ptrs {
+        for &fp in file_ptrs {
             let f = host.file_snap(fp);
             let f_nzb = host.nzb_snap(f.nzb_ptr, false);
             let same_src = src_nzb_ptr == 0 || f.nzb_ptr == src_nzb_ptr;
@@ -2049,11 +2097,6 @@ impl NzbgetRsQueueCoordinator {
             host.queue_remove(dq_ptr, src_nzb_ptr);
         }
 
-        if !out_new_nzb_ptr.is_null() {
-            unsafe {
-                *out_new_nzb_ptr = new_nzb_ptr;
-            }
-        }
         host.finish_new_nzb_uptr(dq_ptr, uptr_addr);
         true
     }
@@ -2782,10 +2825,14 @@ impl NzbgetRsQueueCoordinator {
                 file.first_content = fc;
                 host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_FIRST_CONTENT, fc);
                 if opts.direct_rename {
-                    host.ad_action(
-                        ad_ptr,
-                        crate::queuesubsys_host::AD_ACT_DIRECT_RENAME_ARTICLE,
+                    crate::directrenamer::article_downloaded_host(
+                        self,
+                        host,
+                        &opts,
                         dq_ptr,
+                        file.ptr,
+                        art.size,
+                        ad_ptr,
                     );
                 }
             }
@@ -3200,7 +3247,7 @@ impl NzbgetRsQueueCoordinator {
         }
 
         if opts.direct_rename {
-            host.direct_renamer_file_downloaded(dq_ptr, file.ptr);
+            crate::directrenamer::file_downloaded_host(self, host, &opts, dq_ptr, file.ptr);
         }
 
         let check_nzb = host.nzb_snap(nzb.ptr, false);
@@ -3459,22 +3506,7 @@ impl NzbgetRsQueueCoordinator {
         host: &crate::queuesubsys_host::QueueSubsysHost,
         file_ptr: usize,
     ) {
-        let file = host.file_snap(file_ptr);
-        if file.partial_changed {
-            let mut dbg = b"Saving partial state for ".to_vec();
-            dbg.extend_from_slice(&file.filename);
-            host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
-            if file.partial_state == crate::queuesubsys_host::PARTIAL_COMPLETED {
-                host.disk_discard_file(file.id, false, false, true);
-            }
-            host.disk_save_file_state(file.ptr, false);
-            host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 0);
-            host.file_set_int(
-                file.ptr,
-                crate::queuesubsys_host::FILE_INT_PARTIAL_STATE,
-                crate::queuesubsys_host::PARTIAL_PARTIAL,
-            );
-        }
+        save_partial_state_host(host, file_ptr);
     }
 
     fn load_partial_state(
@@ -4327,263 +4359,13 @@ impl NzbgetRsQueueCoordinator {
         });
     }
 
-    pub(crate) fn direct_rename_completed(
-        &self,
-        host: &crate::queuesubsys_host::QueueSubsysHost,
-        dq_ptr: usize,
-        nzb_ptr: usize,
-    ) {
-        let opts = host.opts();
-        let flen = host.nzb_file_len(nzb_ptr);
-        for i in 0..flen {
-            let fp = host.nzb_file_at(nzb_ptr, i);
-            let f = host.file_snap(fp);
-            if opts.server_mode && f.articles_len > 0 {
-                host.disk_save_file(fp);
-            }
-        }
-
-        self.discard_direct_rename(host, &opts, nzb_ptr);
-
-        let nzb = host.nzb_snap(nzb_ptr, false);
-        host.nzb_set_int(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_INT_DIRECT_RENAME_STATUS,
-            crate::queuesubsys_host::TS_SUCCESS,
-        );
-
-        if opts.par_check != crate::queuesubsys_host::PC_FORCE {
-            host.dq_edit_entry(
-                dq_ptr,
-                nzb.id,
-                crate::queuesubsys_host::EA_GROUP_RESUME,
-                None,
-            );
-            host.dq_edit_entry(
-                dq_ptr,
-                nzb.id,
-                crate::queuesubsys_host::EA_GROUP_PAUSE_ALL_PARS,
-                None,
-            );
-        }
-
-        if opts.reorder_files {
-            let mut msg = b"Reordering files for ".to_vec();
-            msg.extend_from_slice(&nzb.name);
-            host.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_INFO, &msg);
-            host.dq_edit_entry(
-                dq_ptr,
-                nzb.id,
-                crate::queuesubsys_host::EA_GROUP_SORT_FILES,
-                None,
-            );
-        }
-
-        host.nzb_set_int(nzb_ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
-        host.dq_save_changed(dq_ptr);
-
-        host.dq_notify(
-            dq_ptr,
-            crate::queuesubsys_host::ASPECT_NZB_NAMED,
-            nzb_ptr,
-            0,
-        );
-    }
-
     fn discard_direct_rename(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         opts: &crate::queuesubsys_host::GlobalOptsSnap,
         nzb_ptr: usize,
     ) {
-        let mut discarded_size = 0i64;
-        let mut discarded_count = 0i32;
-        let flen = host.nzb_file_len(nzb_ptr);
-
-        for i in 0..flen {
-            let fp = host.nzb_file_at(nzb_ptr, i);
-            let f = host.file_snap(fp);
-            let (discard_par, discard_infos) = eval_discard_direct_rename_file(
-                f.par_file,
-                f.completed_articles,
-                f.active_downloads,
-                opts.server_mode,
-                f.articles_len > 0,
-                opts.continue_partial,
-                f.cached_articles,
-            );
-
-            if discard_par && host.file_try_acquire_flush_lock(fp) {
-                discarded_size += f.success_size;
-                discarded_count += 1;
-                self.discard_downloaded_articles(host, opts, nzb_ptr, fp);
-                host.file_release_flush_lock(fp);
-            }
-
-            let f_after = host.file_snap(fp);
-            if discard_infos && f_after.articles_len > 0 {
-                let nzb = host.nzb_snap(nzb_ptr, false);
-                let mut dbg = b"Discarding article infos for ".to_vec();
-                dbg.extend_from_slice(&nzb.name);
-                dbg.push(b'/');
-                dbg.extend_from_slice(&f_after.filename);
-                host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
-                host.file_set_int(fp, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 1);
-                self.save_partial_state(host, fp);
-                host.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES, 0);
-            }
-        }
-
-        if discarded_size > 0 {
-            let fmt_sz = crate::util::format_size(discarded_size);
-            let mut msg = b"Discarded ".to_vec();
-            msg.extend_from_slice(&fmt_sz);
-            msg.extend_from_slice(
-                format!(" from {} files used for direct renaming", discarded_count).as_bytes(),
-            );
-            host.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
-        }
-    }
-
-    fn discard_downloaded_articles(
-        &self,
-        host: &crate::queuesubsys_host::QueueSubsysHost,
-        opts: &crate::queuesubsys_host::GlobalOptsSnap,
-        nzb_ptr: usize,
-        file_ptr: usize,
-    ) {
-        host.file_action(
-            file_ptr,
-            crate::queuesubsys_host::FILE_ACT_SUBTRACT_AND_CLEAR_SERVER_STATS,
-            nzb_ptr,
-        );
-        let nzb = host.nzb_snap(nzb_ptr, false);
-        let file = host.file_snap(file_ptr);
-        let (
-            next_nzb_rem_size,
-            next_nzb_paused_size,
-            next_nzb_cur_succ_art,
-            next_nzb_cur_succ_size,
-            next_nzb_par_cur_succ_size,
-            next_nzb_cur_fail_art,
-            next_nzb_cur_fail_size,
-            next_nzb_par_cur_fail_size,
-            next_file_rem_size,
-        ) = discard_downloaded_articles_counters(
-            nzb.remaining_size,
-            nzb.paused_size,
-            nzb.current_success_articles,
-            nzb.current_success_size,
-            nzb.par_current_success_size,
-            nzb.current_failed_articles,
-            nzb.current_failed_size,
-            nzb.par_current_failed_size,
-            i32::from(file.paused),
-            file.success_articles,
-            file.success_size,
-            file.failed_articles,
-            file.failed_size,
-            file.size,
-            file.missed_size,
-        );
-
-        host.nzb_set_i64(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_I64_REMAINING_SIZE,
-            next_nzb_rem_size,
-        );
-        host.nzb_set_i64(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_I64_PAUSED_SIZE,
-            next_nzb_paused_size,
-        );
-        host.nzb_set_int(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_INT_CUR_SUCCESS_ARTICLES,
-            next_nzb_cur_succ_art,
-        );
-        host.nzb_set_i64(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_I64_CUR_SUCCESS_SIZE,
-            next_nzb_cur_succ_size,
-        );
-        host.nzb_set_i64(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_I64_PAR_CUR_SUCCESS_SIZE,
-            next_nzb_par_cur_succ_size,
-        );
-        host.file_set_i64(file_ptr, crate::queuesubsys_host::FILE_I64_SUCCESS_SIZE, 0);
-        host.file_set_int(
-            file_ptr,
-            crate::queuesubsys_host::FILE_INT_SUCCESS_ARTICLES,
-            0,
-        );
-        host.nzb_set_int(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_INT_CUR_FAILED_ARTICLES,
-            next_nzb_cur_fail_art,
-        );
-        host.nzb_set_i64(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_I64_CUR_FAILED_SIZE,
-            next_nzb_cur_fail_size,
-        );
-        host.nzb_set_i64(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_I64_PAR_CUR_FAILED_SIZE,
-            next_nzb_par_cur_fail_size,
-        );
-        host.file_set_i64(file_ptr, crate::queuesubsys_host::FILE_I64_FAILED_SIZE, 0);
-        host.file_set_int(
-            file_ptr,
-            crate::queuesubsys_host::FILE_INT_FAILED_ARTICLES,
-            0,
-        );
-        host.file_set_int(
-            file_ptr,
-            crate::queuesubsys_host::FILE_INT_COMPLETED_ARTICLES,
-            0,
-        );
-        host.file_set_i64(
-            file_ptr,
-            crate::queuesubsys_host::FILE_I64_REMAINING_SIZE,
-            next_file_rem_size,
-        );
-
-        self.discard_temp_files(host, opts, &file);
-        host.disk_discard_file(file.id, false, true, false);
-
-        host.file_set_str(
-            file_ptr,
-            crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
-            None,
-        );
-        host.file_set_int(
-            file_ptr,
-            crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
-            0,
-        );
-        host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_CACHED_ARTICLES, 0);
-        host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 0);
-        host.file_set_int(
-            file_ptr,
-            crate::queuesubsys_host::FILE_INT_PARTIAL_STATE,
-            crate::queuesubsys_host::PARTIAL_NONE,
-        );
-
-        if opts.server_mode {
-            host.file_action(
-                file_ptr,
-                crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES,
-                0,
-            );
-        } else {
-            host.file_action(
-                file_ptr,
-                crate::queuesubsys_host::FILE_ACT_RESET_ARTICLES_NONSERV,
-                0,
-            );
-        }
+        discard_direct_rename_host(host, opts, nzb_ptr);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4591,7 +4373,7 @@ impl NzbgetRsQueueCoordinator {
         &self,
         op: std::ffi::c_int,
         a1: std::ffi::c_int,
-        _a2: std::ffi::c_int,
+        a2: std::ffi::c_int,
         p1: usize,
         p2: usize,
         p3: usize,
@@ -4604,10 +4386,10 @@ impl NzbgetRsQueueCoordinator {
             return 0;
         };
         let host = crate::queuesubsys_host::QueueSubsysHost::new(ctx, cb);
-        let b1 = if s1.is_null() {
-            &[][..]
+        let args_opt = if s1.is_null() {
+            None
         } else {
-            CStr::from_ptr(s1).to_bytes()
+            Some(CStr::from_ptr(s1).to_bytes())
         };
         match op {
             0 => {
@@ -4654,27 +4436,354 @@ impl NzbgetRsQueueCoordinator {
                 );
                 0
             }
-            8 => usize::from(self.delete_queue_entry(&host, p1, p2)),
-            9 => usize::from(self.set_queue_entry_category(&host, p2, b1)),
-            10 => usize::from(self.set_queue_entry_name(&host, p2, b1)),
-            11 => usize::from(self.merge_queue_entries(&host, p1, p2, p3)),
-            12 => usize::from(self.split_queue_entries(
-                &host,
-                p1,
-                p2,
-                b1,
-                p3 as *mut usize,
+            8 => usize::from(crate::queueeditor::edit_entry_host(
+                self, &host, p1, a1, a2, args_opt,
             )),
-            13 => {
-                self.log_debug_info(&host);
-                0
+            9 => {
+                let ids_opt = if ints.is_null() {
+                    None
+                } else if p2 == 0 {
+                    Some(&[][..])
+                } else {
+                    Some(std::slice::from_raw_parts(ints, p2))
+                };
+                let mut names_vec: Vec<&[u8]> = Vec::new();
+                let names_opt = if p3 == 0 {
+                    None
+                } else {
+                    let nlen = a1.max(0) as usize;
+                    if nlen > 0 {
+                        let c_ptrs = std::slice::from_raw_parts(p3 as *const *const c_char, nlen);
+                        names_vec.reserve(nlen);
+                        for &cp in c_ptrs {
+                            if cp.is_null() {
+                                names_vec.push(b"");
+                            } else {
+                                names_vec.push(CStr::from_ptr(cp).to_bytes());
+                            }
+                        }
+                    }
+                    Some(names_vec.as_slice())
+                };
+                let match_mode = (a2 >> 16) & 0xFFFF;
+                let action = a2 & 0xFFFF;
+                usize::from(crate::queueeditor::edit_list_host(
+                    self, &host, p1, ids_opt, names_opt, match_mode, action, args_opt,
+                ))
             }
-            14 => {
-                self.direct_rename_completed(&host, p1, p2);
+            10 => {
+                self.log_debug_info(&host);
                 0
             }
             _ => 0,
         }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn direct_rename_completed_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    dq_ptr: usize,
+    nzb_ptr: usize,
+) {
+    let flen = host.nzb_file_len(nzb_ptr);
+    for i in 0..flen {
+        let fp = host.nzb_file_at(nzb_ptr, i);
+        let f = host.file_snap(fp);
+        if opts.server_mode && f.articles_len > 0 {
+            host.disk_save_file(fp);
+        }
+    }
+
+    discard_direct_rename_host(host, opts, nzb_ptr);
+
+    let nzb = host.nzb_snap(nzb_ptr, false);
+    host.nzb_set_int(
+        nzb_ptr,
+        crate::queuesubsys_host::NZB_INT_DIRECT_RENAME_STATUS,
+        crate::queuesubsys_host::TS_SUCCESS,
+    );
+
+    if opts.par_check != crate::queuesubsys_host::PC_FORCE {
+        host.dq_edit_entry(
+            dq_ptr,
+            nzb.id,
+            crate::queuesubsys_host::EA_GROUP_RESUME,
+            None,
+        );
+        host.dq_edit_entry(
+            dq_ptr,
+            nzb.id,
+            crate::queuesubsys_host::EA_GROUP_PAUSE_ALL_PARS,
+            None,
+        );
+    }
+
+    if opts.reorder_files {
+        let mut msg = b"Reordering files for ".to_vec();
+        msg.extend_from_slice(&nzb.name);
+        host.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_INFO, &msg);
+        host.dq_edit_entry(
+            dq_ptr,
+            nzb.id,
+            crate::queuesubsys_host::EA_GROUP_SORT_FILES,
+            None,
+        );
+    }
+
+    host.nzb_set_int(nzb_ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+    host.dq_save_changed(dq_ptr);
+
+    host.dq_notify(
+        dq_ptr,
+        crate::queuesubsys_host::ASPECT_NZB_NAMED,
+        nzb_ptr,
+        0,
+    );
+}
+
+#[cfg(unix)]
+fn discard_direct_rename_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    nzb_ptr: usize,
+) {
+    let mut discarded_size = 0i64;
+    let mut discarded_count = 0i32;
+    let flen = host.nzb_file_len(nzb_ptr);
+
+    for i in 0..flen {
+        let fp = host.nzb_file_at(nzb_ptr, i);
+        let f = host.file_snap(fp);
+        let (discard_par, discard_infos) = eval_discard_direct_rename_file(
+            f.par_file,
+            f.completed_articles,
+            f.active_downloads,
+            opts.server_mode,
+            f.articles_len > 0,
+            opts.continue_partial,
+            f.cached_articles,
+        );
+
+        if discard_par && host.file_try_acquire_flush_lock(fp) {
+            discarded_size += f.success_size;
+            discarded_count += 1;
+            discard_downloaded_articles_host(host, opts, nzb_ptr, fp);
+            host.file_release_flush_lock(fp);
+        }
+
+        let f_after = host.file_snap(fp);
+        if discard_infos && f_after.articles_len > 0 {
+            let nzb = host.nzb_snap(nzb_ptr, false);
+            let mut dbg = b"Discarding article infos for ".to_vec();
+            dbg.extend_from_slice(&nzb.name);
+            dbg.push(b'/');
+            dbg.extend_from_slice(&f_after.filename);
+            host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
+            host.file_set_int(fp, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 1);
+            save_partial_state_host(host, fp);
+            host.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES, 0);
+        }
+    }
+
+    if discarded_size > 0 {
+        let fmt_sz = crate::util::format_size(discarded_size);
+        let mut msg = b"Discarded ".to_vec();
+        msg.extend_from_slice(&fmt_sz);
+        msg.extend_from_slice(
+            format!(" from {} files used for direct renaming", discarded_count).as_bytes(),
+        );
+        host.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+    }
+}
+
+#[cfg(unix)]
+fn discard_downloaded_articles_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    nzb_ptr: usize,
+    file_ptr: usize,
+) {
+    host.file_action(
+        file_ptr,
+        crate::queuesubsys_host::FILE_ACT_SUBTRACT_AND_CLEAR_SERVER_STATS,
+        nzb_ptr,
+    );
+    let nzb = host.nzb_snap(nzb_ptr, false);
+    let file = host.file_snap(file_ptr);
+    let (
+        next_nzb_rem_size,
+        next_nzb_paused_size,
+        next_nzb_cur_succ_art,
+        next_nzb_cur_succ_size,
+        next_nzb_par_cur_succ_size,
+        next_nzb_cur_fail_art,
+        next_nzb_cur_fail_size,
+        next_nzb_par_cur_fail_size,
+        next_file_rem_size,
+    ) = discard_downloaded_articles_counters(
+        nzb.remaining_size,
+        nzb.paused_size,
+        nzb.current_success_articles,
+        nzb.current_success_size,
+        nzb.par_current_success_size,
+        nzb.current_failed_articles,
+        nzb.current_failed_size,
+        nzb.par_current_failed_size,
+        i32::from(file.paused),
+        file.success_articles,
+        file.success_size,
+        file.failed_articles,
+        file.failed_size,
+        file.size,
+        file.missed_size,
+    );
+
+    host.nzb_set_i64(
+        nzb_ptr,
+        crate::queuesubsys_host::NZB_I64_REMAINING_SIZE,
+        next_nzb_rem_size,
+    );
+    host.nzb_set_i64(
+        nzb_ptr,
+        crate::queuesubsys_host::NZB_I64_PAUSED_SIZE,
+        next_nzb_paused_size,
+    );
+    host.nzb_set_int(
+        nzb_ptr,
+        crate::queuesubsys_host::NZB_INT_CUR_SUCCESS_ARTICLES,
+        next_nzb_cur_succ_art,
+    );
+    host.nzb_set_i64(
+        nzb_ptr,
+        crate::queuesubsys_host::NZB_I64_CUR_SUCCESS_SIZE,
+        next_nzb_cur_succ_size,
+    );
+    host.nzb_set_i64(
+        nzb_ptr,
+        crate::queuesubsys_host::NZB_I64_PAR_CUR_SUCCESS_SIZE,
+        next_nzb_par_cur_succ_size,
+    );
+    host.file_set_i64(file_ptr, crate::queuesubsys_host::FILE_I64_SUCCESS_SIZE, 0);
+    host.file_set_int(
+        file_ptr,
+        crate::queuesubsys_host::FILE_INT_SUCCESS_ARTICLES,
+        0,
+    );
+    host.nzb_set_int(
+        nzb_ptr,
+        crate::queuesubsys_host::NZB_INT_CUR_FAILED_ARTICLES,
+        next_nzb_cur_fail_art,
+    );
+    host.nzb_set_i64(
+        nzb_ptr,
+        crate::queuesubsys_host::NZB_I64_CUR_FAILED_SIZE,
+        next_nzb_cur_fail_size,
+    );
+    host.nzb_set_i64(
+        nzb_ptr,
+        crate::queuesubsys_host::NZB_I64_PAR_CUR_FAILED_SIZE,
+        next_nzb_par_cur_fail_size,
+    );
+    host.file_set_i64(file_ptr, crate::queuesubsys_host::FILE_I64_FAILED_SIZE, 0);
+    host.file_set_int(
+        file_ptr,
+        crate::queuesubsys_host::FILE_INT_FAILED_ARTICLES,
+        0,
+    );
+    host.file_set_int(
+        file_ptr,
+        crate::queuesubsys_host::FILE_INT_COMPLETED_ARTICLES,
+        0,
+    );
+    host.file_set_i64(
+        file_ptr,
+        crate::queuesubsys_host::FILE_I64_REMAINING_SIZE,
+        next_file_rem_size,
+    );
+
+    discard_temp_files_host(host, opts, &file);
+    host.disk_discard_file(file.id, false, true, false);
+
+    host.file_set_str(
+        file_ptr,
+        crate::queuesubsys_host::FILE_STR_OUTPUT_FILENAME,
+        None,
+    );
+    host.file_set_int(
+        file_ptr,
+        crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
+        0,
+    );
+    host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_CACHED_ARTICLES, 0);
+    host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 0);
+    host.file_set_int(
+        file_ptr,
+        crate::queuesubsys_host::FILE_INT_PARTIAL_STATE,
+        crate::queuesubsys_host::PARTIAL_NONE,
+    );
+
+    if opts.server_mode {
+        host.file_action(
+            file_ptr,
+            crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES,
+            0,
+        );
+    } else {
+        host.file_action(
+            file_ptr,
+            crate::queuesubsys_host::FILE_ACT_RESET_ARTICLES_NONSERV,
+            0,
+        );
+    }
+}
+
+#[cfg(unix)]
+fn discard_temp_files_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    file: &crate::queuesubsys_host::FileSnap,
+) {
+    let unlink_bytes = |b: &[u8]| {
+        let c = crate::queuesubsys_host::c_bytes(b);
+        if let Ok(cs) = CStr::from_bytes_with_nul(&c) {
+            let _ = crate::fsops::delete_file(cs);
+        }
+    };
+    host.file_action(
+        file.ptr,
+        crate::queuesubsys_host::FILE_ACT_DISCARD_TEMP_ARTICLES,
+        usize::from(!opts.direct_write && !file.force_direct_write),
+    );
+    if opts.direct_write && !file.output_filename.is_empty() && !file.force_direct_write {
+        unlink_bytes(&file.output_filename);
+        if file.is_hard_linked && !file.hard_link_path.is_empty() {
+            unlink_bytes(&file.hard_link_path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn save_partial_state_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    file_ptr: usize,
+) {
+    let file = host.file_snap(file_ptr);
+    if file.partial_changed {
+        let mut dbg = b"Saving partial state for ".to_vec();
+        dbg.extend_from_slice(&file.filename);
+        host.log(crate::queuesubsys_host::MK_DEBUG, &dbg);
+        if file.partial_state == crate::queuesubsys_host::PARTIAL_COMPLETED {
+            host.disk_discard_file(file.id, false, false, true);
+        }
+        host.disk_save_file_state(file.ptr, false);
+        host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 0);
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_PARTIAL_STATE,
+            crate::queuesubsys_host::PARTIAL_PARTIAL,
+        );
     }
 }
 

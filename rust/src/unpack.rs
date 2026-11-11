@@ -1751,16 +1751,6 @@ fn cstr_to_path(ptr: *const c_char) -> Option<std::path::PathBuf> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_can_extract_with_zipfast(
-    archive_path: *const c_char,
-) -> c_int {
-    let Some(path) = cstr_to_path(archive_path) else {
-        return 0;
-    };
-    i32::from(can_extract_with_zipfast(&path))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_unpack_extract_with_zipfast(
     archive_path: *const c_char,
     output_dir: *const c_char,

@@ -47,45 +47,6 @@ NzbgetRsBuf nzbget_rs_format_size(long long size);
 // NULL strings are empty; non-NULL strings must be readable and NUL-terminated.
 int nzbget_rs_match_file_ext(const char* filename, const char* extensionList, const char* listSeparator);
 
-// FeedFilter (rust/src/feedfilter.rs): the feed item stays in C++ and is read
-// and changed through these callbacks, in the C++ order. Fields: title,
-// filename, category, url, size, age, imdbid, rageid, tvdbid, tvmazeid,
-// description, season, episode, priority, dupekey, dupescore, dupestatus,
-// attr- (0..17). Match status: 0 ignored, 1 accepted, 2 rejected.
-// Callbacks must not throw/unwind or reenter/free the same filter. Callback
-// strings are borrowed: returned strings stay valid until the next callback;
-// strings passed to callbacks are valid only for that call and must be copied
-// if retained. regexNew handles must stay valid for this filter's lifetime.
-typedef struct NzbgetRsFeedOptions
-{
-	int hasPause, pause;
-	int hasCategory; const char* category;
-	int hasPriority, priority;
-	int hasAddPriority, addPriority;
-	int hasDupeScore, dupeScore;
-	int hasAddDupeScore, addDupeScore;
-	int hasBuildDupeKey; const char* ids[4]; // rageid, tvdbid, tvmazeid, series
-	int hasDupeKey; const char* dupeKey;
-	int hasAddDupeKey; const char* addDupeKey;
-	int hasDupeMode, dupeMode;
-} NzbgetRsFeedOptions;
-typedef struct NzbgetRsFeedItem
-{
-	void* user;
-	void (*field)(void* user, int field, const char* attr, const char** str, long long* num);
-	const char* (*seasonEpisode)(void* user, int episode);
-	void (*apply)(void* user, const NzbgetRsFeedOptions* options);
-	void (*setMatch)(void* user, int status, int rule);
-} NzbgetRsFeedItem;
-typedef struct NzbgetRsFeedFilter NzbgetRsFeedFilter;
-// Copies filter (NULL means empty). The opaque handle is owned by Rust and
-// must only be released with feed_filter_free; free(NULL) is harmless.
-NzbgetRsFeedFilter* nzbget_rs_feed_filter_new(const char* filter);
-void nzbget_rs_feed_filter_free(NzbgetRsFeedFilter* filter);
-// NULL filter/item or missing callbacks are a no-op. All callbacks are
-// required. Matching requires exclusive access to the filter and its regex handles.
-void nzbget_rs_feed_filter_match(NzbgetRsFeedFilter* filter, const NzbgetRsFeedItem* item);
-
 // Deobfuscation (rust/src/deobfuscation.rs): text as pointer and length.
 // NULL means empty regardless of len; otherwise len bytes must be readable.
 int nzbget_rs_is_excessively_obfuscated(const char* str, size_t len);
@@ -402,18 +363,6 @@ typedef struct
 	const int* lower;
 	int charSigned;
 } NzbgetRsCtype;
-
-// UrlCoordinator (rust/src/urlcoord.rs). dnzb_header: UrlDownloader's
-// X-DNZB headers; 1 with *start and *length the trimmed value of
-// X-DNZB-Category within line (nothing is allocated), 2 with *name "*DNZB:"
-// and the header's name (cut to 99 bytes) and *value its value after the
-// colon's spaces, right-trimmed, Latin-1 to UTF-8; 0 for another line
-// (outputs untouched). Free name and value with nzbget_rs_free; NULL outputs
-// aren't written, a NULL line is empty. completed: the URL and delete
-// statuses UrlCompleted leaves for the downloader's status
-// (WebDownloader::EStatus) and whether the fetch is retried; NULL pointers
-// read as 0 and aren't written.
-int nzbget_rs_url_dnzb_header(const char* line, size_t* start, size_t* length, NzbgetRsBuf* name, NzbgetRsBuf* value);
 
 // ---- dupesearch (daemon/dupesearch/) ----
 // DonorScore (rust/src/donorscore.rs): Base, Target (twin 0/1) and Rerank;
@@ -758,27 +707,15 @@ void nzbget_rs_unpack_parse_message(
 
 
 
-typedef struct NzbgetRsNntpCache NzbgetRsNntpCache;
-NzbgetRsNntpCache* nzbget_rs_nntp_cache_new(void);
-void nzbget_rs_nntp_cache_free(NzbgetRsNntpCache* cache);
-int nzbget_rs_nntp_processor_handle_line(
-    int server_id, const char* data_dir, const char* cache_dir,
-    int latency, int speed, const NzbgetRsNntpCache* cache,
-    const char* raw_line, void* ctx,
-    void (*write_line_cb)(void* ctx, const char* line),
-    void (*send_cb)(void* ctx, const char* buf, int size),
-    void (*log_cb)(void* ctx, int kind, const char* msg));
-typedef struct NzbgetRsNservOpts NzbgetRsNservOpts;
-NzbgetRsNservOpts* nzbget_rs_nserv_opts_new(
-    int argc, const char* const* argv, void* ctx,
-    void (*write_stdout_cb)(const char* data, size_t len),
-    void (*log_cb)(int level, const char* msg),
-    void (*push_opt_cb)(void* ctx, const char* opt));
-int nzbget_rs_nserv_opts_post_setup(
-    const NzbgetRsNservOpts* opts, void (*log_cb)(int level, const char* msg));
-const char* nzbget_rs_nserv_opts_str(const NzbgetRsNservOpts* opts, int field);
-int nzbget_rs_nserv_opts_int(const NzbgetRsNservOpts* opts, int field);
-void nzbget_rs_nserv_opts_free(NzbgetRsNservOpts* opts);
+typedef struct NzbgetRsNservEnv {
+    void* ctx;
+    const char* version;
+    void (*write_stdout_cb)(const char* data, size_t len);
+    void (*log_cb)(void* ctx, int level, const char* msg);
+    void (*runtime_cb)(void* ctx, int op, int arg, const char* const* opts, size_t opt_len);
+    uintptr_t (*conn_cb)(uintptr_t conn, int op, int a1, int a2, const char* s1, const char* s2, char* out_buf);
+} NzbgetRsNservEnv;
+int nzbget_rs_nserv_run(int argc, const char* const* argv, const NzbgetRsNservEnv* env);
 
 typedef struct NzbgetRsProcessArticleItem {
     int64_t segment_offset;
@@ -1722,35 +1659,31 @@ void nzbget_rs_queue_script_prepare_env(
  * Feed Subsystem (`rust/src/feed.rs`)
  * ============================================================================ */
 
-typedef struct NzbgetRsFeedFileParser NzbgetRsFeedFileParser;
+typedef struct NzbgetRsFeedCoord NzbgetRsFeedCoord;
+typedef struct NzbgetRsFeedCoordEnv {
+    void* ctx; uintptr_t p1; int a1; int a2; int a3; int a4; int a5; int a6; uint32_t u1;
+    const char* s1; const char* s2; const char* s3; const char* s4; const char* s5; const char* s6;
+    void (*log_cb)(void* ctx, int level, const char* msg);
+    uintptr_t (*query_cb)(void* ctx, int op, uintptr_t ptr, int* out_ints, int64_t* out_i64s, const char** out_strs);
+    uintptr_t (*action_cb)(void* ctx, int op, uintptr_t p1, int a1, int a2, int a3, int64_t t1, int64_t t2, const char* s1, const char* s2, const char* s3, const char* s4);
+    void (*rpc_emit_cb)(void* ctx, const NzbgetRsRpcFeedItem* item);
+    void (*health_emit_cb)(void* ctx, int id, const char* name, size_t name_len, const char* url, size_t url_len, int interval, uint32_t cert_verif_level);
+} NzbgetRsFeedCoordEnv;
+NzbgetRsFeedCoord* nzbget_rs_feed_coord_new(void);
+void nzbget_rs_feed_coord_free(NzbgetRsFeedCoord* coord);
+int nzbget_rs_feed_coord_exec(const NzbgetRsFeedCoord* coord, int op, const NzbgetRsFeedCoordEnv* env);
 
-typedef struct NzbgetRsParsedFeedItemView {
-    const char* title;
-    const char* filename;
-    const char* url;
-    const char* category;
-    const char* description;
-    const char* season;
-    const char* episode;
-    int has_season;
-    int has_episode;
-    int64_t time;
-    int64_t size;
-    int imdb_id;
-    int rage_id;
-    int tvdb_id;
-    int tvmaze_id;
-    const char* const* attr_names;
-    const char* const* attr_values;
-    size_t attr_count;
-} NzbgetRsParsedFeedItemView;
-
-NzbgetRsFeedFileParser* nzbget_rs_feed_file_parser_parse_file(const char* filename);
-void nzbget_rs_feed_file_parser_free(NzbgetRsFeedFileParser* parser);
-size_t nzbget_rs_feed_file_parser_finalize(NzbgetRsFeedFileParser* parser);
-int nzbget_rs_feed_file_parser_get_item(
-    const NzbgetRsFeedFileParser* parser, size_t index,
-    NzbgetRsParsedFeedItemView* out_view);
+typedef struct NzbgetRsUrlCoord NzbgetRsUrlCoord;
+typedef struct NzbgetRsUrlCoordEnv {
+    void* ctx; uintptr_t p1; uintptr_t p2; int a1; int a2; const char* s1;
+    void (*with_queue_guard_cb)(void* ctx, void* inner_ctx, void (*fn_cb)(void* inner_ctx, uintptr_t dq_ptr));
+    void (*log_cb)(void* ctx, int level, const char* msg);
+    uintptr_t (*query_cb)(void* ctx, int op, uintptr_t ptr, int* out_ints, int64_t* out_i64s, const char** out_strs);
+    uintptr_t (*action_cb)(void* ctx, int op, uintptr_t p1, uintptr_t p2, int a1, int a2, const char* s1, const char* s2, const char* s3);
+} NzbgetRsUrlCoordEnv;
+NzbgetRsUrlCoord* nzbget_rs_url_coord_new(void);
+void nzbget_rs_url_coord_free(NzbgetRsUrlCoord* coord);
+int nzbget_rs_url_coord_exec(const NzbgetRsUrlCoord* coord, int op, const NzbgetRsUrlCoordEnv* env);
 
 // NzbFileParser, UrlCoordinator & DirectRenamer End-to-End FFI
 typedef struct NzbgetRsNzbFileParser NzbgetRsNzbFileParser;
@@ -2197,7 +2130,6 @@ void nzbget_rs_options_create_scheduler_task(
     const NzbgetRsOptionsHost* host, int id, const char* time,
     const char* week_days, int command, const char* param);
 
-int nzbget_rs_unpack_can_extract_with_zipfast(const char* archive_path);
 int nzbget_rs_unpack_extract_with_zipfast(
     const char* archive_path, const char* output_dir, const char* password,
     int overwrite_mode, int cleanup_disk,
@@ -2744,23 +2676,12 @@ int nzbget_rs_article_dl_op(
     int op, int a, const char* response, int64_t begin_pos, int64_t end_pos,
     int64_t article_file_size, int64_t expected_file_size, int64_t dupe_expected_offset,
     int64_t dupe_expected_end, int64_t* out_offset, int* out_size);
-int nzbget_rs_feed_op(
-    int op, int a, int b, int c, int d, int64_t t1, int64_t t2,
-    const char* s1, const char* s2, const char* s3, const char* s4, int* out_i32);
-NzbgetRsBuf nzbget_rs_feed_str_op(
-    int op, int a, int b, int c, int d, int e, int f,
-    const char* s1, const char* s2, const char* s3, const char* s4, const char* s5, const char* s6,
-    NzbgetRsBuf* out_buf2, uint32_t* out_u32);
 int nzbget_rs_twin_service_op(
     int op, int a, int b, int c, int d, int64_t f1, int64_t f2,
     const char* s1, const char* s2, const char* s3, const uint8_t* u8_1, const uint8_t* u8_2,
     const int* i32_1, const int64_t* i64_1, size_t len, NzbgetRsBuf* out_buf);
 int nzbget_rs_socket_deadline_wait(
     int fd, int read, int write, void* ctx, int64_t (*rem_cb)(void*));
-intptr_t nzbget_rs_url_coord_op(
-    int op, int a, int b, int c, int64_t t1, int64_t t2, const char* s1,
-    const int* arr1, const int* arr2, const int* arr3, const int* arr4, size_t len,
-    int* out_i32_1, int* out_i32_2, int* out_i32_3, NzbgetRsBuf* out_buf);
 typedef struct NzbgetRsScanner NzbgetRsScanner;
 typedef struct NzbgetRsScannerEnv {
     void* ctx; const char* nzb_dir; const char* temp_dir; const char* filename; const char* nzb_name; const char* category; const char* dupe_key; const char* buf_ptr;

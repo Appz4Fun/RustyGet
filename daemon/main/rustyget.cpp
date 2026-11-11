@@ -24,274 +24,95 @@
 #include "nzbget_rs.h"
 
 #ifndef DISABLE_NSERV
-class NntpProcessor : public Thread
-{
-public:
-	NntpProcessor(int id, int serverId, const char* dataDir, const char* cacheDir,
-		const char* secureCert, const char* secureKey, int latency, int speed, const NzbgetRsNntpCache* cache) :
-		m_id(id), m_serverId(serverId), m_dataDir(dataDir), m_cacheDir(cacheDir),
-		m_secureCert(secureCert), m_secureKey(secureKey), m_latency(latency),
-		m_speed(speed), m_cache(cache) {}
-	~NntpProcessor()
-	{
-		m_connection->Disconnect();
-
-#ifndef DISABLE_TLS
-		OpenSSL::StopSSLThread();
-#endif
-	}
-
-	void Run() override
-	{
-		m_connection->SetSuppressErrors(false);
-
-#ifndef DISABLE_TLS
-		if (m_secureCert && !m_connection->StartTls(false, m_secureCert, m_secureKey))
-		{
-			error("Could not establish secure connection to nntp-client: Start TLS failed");
-			return;
-		}
-#endif
-
-		info("%s [%i] Incoming connection from: %s", *Util::FormatTime(Util::CurrentTime()), m_id, m_connection->GetHost());
-		m_connection->WriteLine("200 Welcome (NServ)\r\n");
-
-		CharBuffer buf(1024);
-		int bytesRead = 0;
-		while (CString line = m_connection->ReadLine(buf, 1024, &bytesRead))
-		{
-			int keepGoing = nzbget_rs_nntp_processor_handle_line(
-				m_serverId,
-				m_dataDir,
-				m_cacheDir,
-				m_latency,
-				m_speed,
-				m_cache,
-				*line,
-				this,
-				[](void* rawCtx, const char* replyLine) {
-					static_cast<NntpProcessor*>(rawCtx)->m_connection->WriteLine(replyLine ? replyLine : "");
-				},
-				[](void* rawCtx, const char* data, int size) {
-					static_cast<NntpProcessor*>(rawCtx)->m_connection->Send(data, size);
-				},
-				[](void* rawCtx, int kind, const char* msg) {
-					auto* self = static_cast<NntpProcessor*>(rawCtx);
-					switch (kind)
-					{
-					case 0:
-						detail("%s [%i] %s", *Util::FormatTime(Util::CurrentTime()), self->m_id, msg ? msg : "");
-						break;
-					case 1:
-						detail("[%i] %s", self->m_id, msg ? msg : "");
-						break;
-					case 2:
-						warn("[%i] %s", self->m_id, msg ? msg : "");
-						break;
-					case 3:
-						error("%s", msg ? msg : "");
-						break;
-					}
-				});
-			if (!keepGoing)
-			{
-				break;
-			}
-		}
-
-		m_connection->SetGracefull(true);
-		m_connection->Disconnect();
-	}
-
-	void SetConnection(std::unique_ptr<Connection>&& connection) { m_connection = std::move(connection); }
-
-private:
-	int m_id;
-	int m_serverId;
-	std::unique_ptr<Connection> m_connection;
-	const char* m_dataDir;
-	const char* m_cacheDir;
-	const char* m_secureCert;
-	const char* m_secureKey;
-	int m_latency;
-	int m_speed;
-	const NzbgetRsNntpCache* m_cache;
-};
-
-class NntpServer : public Thread
-{
-public:
-	NntpServer(int id, const char* host, int port, const char* secureCert,
-		const char* secureKey, const char* dataDir, const char* cacheDir,
-		int latency, int speed, const NzbgetRsNntpCache* cache) :
-		m_id(id), m_host(host), m_port(port), m_secureCert(secureCert),
-		m_secureKey(secureKey), m_dataDir(dataDir), m_cacheDir(cacheDir),
-		m_latency(latency), m_speed(speed), m_cache(cache) {}
-
-	virtual void Run()
-	{
-		debug("Entering NntpServer-loop");
-
-		info("%s Listening on port %i", *Util::FormatTime(Util::CurrentTime()), m_port);
-
-		int num = 1;
-
-		while (!IsStopped())
-		{
-			bool bind = true;
-
-			if (!m_connection)
-			{
-				m_connection = std::make_unique<Connection>(m_host, m_port, m_secureCert);
-				m_connection->SetTimeout(10);
-				m_connection->SetSuppressErrors(false);
-				bind = m_connection->Bind();
-			}
-
-			// Accept connections and store the new Connection
-			std::unique_ptr<Connection> acceptedConnection;
-			if (bind)
-			{
-				acceptedConnection = m_connection->Accept();
-			}
-			if (!bind || !acceptedConnection)
-			{
-				// Server could not bind or accept connection, waiting 1/2 sec and try again
-				if (IsStopped())
-				{
-					break;
-				}
-				m_connection.reset();
-				Util::Sleep(500);
-				continue;
-			}
-
-			NntpProcessor* commandThread = new NntpProcessor(num++, m_id, m_dataDir,
-				m_cacheDir, m_secureCert, m_secureKey, m_latency, m_speed, m_cache);
-			commandThread->SetAutoDestroy(true);
-			commandThread->SetConnection(std::move(acceptedConnection));
-			commandThread->Start();
-		}
-
-		if (m_connection)
-		{
-			m_connection->Disconnect();
-		}
-
-		debug("Exiting NntpServer-loop");
-	}
-
-	virtual void Stop()
-	{
-		Thread::Stop();
-		if (m_connection)
-		{
-			m_connection->SetSuppressErrors(true);
-			m_connection->Cancel();
-		}
-	}
-
-private:
-	int m_id;
-	CString m_host;
-	int m_port;
-	CString m_secureCert;
-	CString m_secureKey;
-	std::unique_ptr<Connection> m_connection;
-	CString m_dataDir;
-	CString m_cacheDir;
-	int m_latency;
-	int m_speed;
-	const NzbgetRsNntpCache* m_cache;
-};
-
 inline int NServMain(int argc, char* argv[])
 {
 	Log log;
+	struct NServCtx
+	{
+		Log* log;
+		std::unique_ptr<Options> options;
+		std::unique_ptr<Frontend> frontend;
+	} ctx{&log, nullptr, nullptr};
 
-	info("%s NServ %s (Test NNTP server)", *Util::FormatTime(Util::CurrentTime()), Util::VersionRevision());
-
-	auto logCb = +[](int level, const char* msg) {
-		switch (level)
-		{
-		case 1: detail("%s", msg); break;
-		case 2: info("%s", msg); break;
-		case 4: error("%s", msg); break;
-		}
+	NzbgetRsNservEnv env{};
+	env.ctx = &ctx;
+	env.version = Util::VersionRevision();
+	env.write_stdout_cb = +[](const char* data, size_t len) { fwrite(data, 1, len, stdout); };
+	env.log_cb = +[](void*, int level, const char* msg) {
+		const char* s = msg ? msg : "";
+		if (level == 0) debug("%s", s);
+		else if (level == 1) detail("%s", s);
+		else if (level == 2) info("%s", s);
+		else if (level == 3) warn("%s", s);
+		else if (level == 4) error("%s", s);
 	};
-
-	Options::CmdOptList cmdOpts;
-	std::unique_ptr<NzbgetRsNservOpts, decltype(&nzbget_rs_nserv_opts_free)> opts(
-		nzbget_rs_nserv_opts_new(
-			argc, const_cast<const char* const*>(argv), &cmdOpts,
-			+[](const char* data, size_t len) { fwrite(data, 1, len, stdout); },
-			logCb,
-			+[](void* ctx, const char* opt) { static_cast<Options::CmdOptList*>(ctx)->push_back(opt); }),
-		nzbget_rs_nserv_opts_free);
-	if (!opts)
-	{
-		return 1;
-	}
-
-	Options options(&cmdOpts, nullptr);
-
-	log.InitOptions();
-	Connection::Init();
-#ifndef DISABLE_TLS
-	TlsSocket::Init();
-#endif
-
-	signal(SIGPIPE, SIG_IGN);
-
-	Frontend frontend(3);
-	frontend.Start();
-
-	if (nzbget_rs_nserv_opts_post_setup(opts.get(), logCb))
-	{
-		frontend.Stop();
-		while (frontend.IsRunning()) Util::Sleep(20);
-		return 0;
-	}
-
-	std::vector<std::unique_ptr<NntpServer>> instances;
-	std::unique_ptr<NzbgetRsNntpCache, decltype(&nzbget_rs_nntp_cache_free)> cache(
-		nzbget_rs_nserv_opts_int(opts.get(), 4) ? nzbget_rs_nntp_cache_new() : nullptr,
-		nzbget_rs_nntp_cache_free);
-
-	int instCount = nzbget_rs_nserv_opts_int(opts.get(), 0);
-	int firstPort = nzbget_rs_nserv_opts_int(opts.get(), 1);
-	for (int i = 0; i < instCount; i++)
-	{
-		instances.emplace_back(std::make_unique<NntpServer>(i + 1,
-			nzbget_rs_nserv_opts_str(opts.get(), 0), firstPort + i,
-			nzbget_rs_nserv_opts_str(opts.get(), 1), nzbget_rs_nserv_opts_str(opts.get(), 2),
-			nzbget_rs_nserv_opts_str(opts.get(), 3), nzbget_rs_nserv_opts_str(opts.get(), 4),
-			nzbget_rs_nserv_opts_int(opts.get(), 2), nzbget_rs_nserv_opts_int(opts.get(), 3),
-			cache.get()));
-		instances.back()->Start();
-	}
-
-	info("Press Ctrl+C to quit");
-	while (getchar()) Util::Sleep(200);
-
-	for (std::unique_ptr<NntpServer>& serv: instances)
-	{
-		serv->Stop();
-	}
-	frontend.Stop();
-
-	bool hasRunning = false;
-	do
-	{
-		hasRunning = frontend.IsRunning();
-		for (std::unique_ptr<NntpServer>& serv : instances)
+	env.runtime_cb = +[](void* raw, int op, int arg, const char* const* opts, size_t optLen) {
+		auto* c = static_cast<NServCtx*>(raw);
+		if (op == 0)
 		{
-			hasRunning |= serv->IsRunning();
+			Options::CmdOptList cmdOpts;
+			for (size_t i = 0; i < optLen; ++i) cmdOpts.push_back(opts[i]);
+			c->options = std::make_unique<Options>(&cmdOpts, nullptr);
+			c->log->InitOptions();
+			Connection::Init();
+#ifndef DISABLE_TLS
+			TlsSocket::Init();
+#endif
+			signal(SIGPIPE, SIG_IGN);
+			c->frontend = std::make_unique<Frontend>(3);
+			c->frontend->Start();
 		}
-		Util::Sleep(50);
-	} while (hasRunning);
-
-	return 0;
+		else if (op == 1) { if (c->frontend) c->frontend->Stop(); }
+		else if (op == 2) { while (c->frontend && c->frontend->IsRunning()) Util::Sleep(arg); }
+		else if (op == 3) { while (getchar()) Util::Sleep(200); }
+	};
+	env.conn_cb = +[](uintptr_t rawConn, int op, int a1, int a2, const char* s1, const char* s2, char* outBuf) -> uintptr_t {
+		if (op == 0)
+		{
+			auto* conn = new Connection(s1 ? s1 : "", a1, s2 != nullptr);
+			conn->SetTimeout(10);
+			conn->SetSuppressErrors(false);
+			return reinterpret_cast<uintptr_t>(conn);
+		}
+		auto* conn = reinterpret_cast<Connection*>(rawConn);
+		if (!conn) return 0;
+		if (op == 1) return conn->Bind() ? 1 : 0;
+		if (op == 2) return reinterpret_cast<uintptr_t>(conn->Accept().release());
+		if (op == 3) { conn->SetSuppressErrors(true); conn->Cancel(); return 1; }
+		if (op == 4)
+		{
+			if (a1 == 1) conn->SetGracefull(true);
+			if (a1 == 1 || a1 == 2 || a2 == 1) conn->Disconnect();
+			delete conn;
+#ifndef DISABLE_TLS
+			if (a2 == 1) OpenSSL::StopSSLThread();
+#endif
+			return 0;
+		}
+		if (op == 5)
+		{
+			conn->SetSuppressErrors(false);
+#ifndef DISABLE_TLS
+			if (s1 && !conn->StartTls(false, s1, s2)) return 0;
+#endif
+			const char* host = conn->GetHost();
+			if (outBuf && a1 > 0) snprintf(outBuf, static_cast<size_t>(a1), "%s", host ? host : "");
+			return 1;
+		}
+		if (op == 6)
+		{
+			int bytesRead = 0;
+			return conn->ReadLine(outBuf, a1, &bytesRead) ? 1 : 0;
+		}
+		if (op == 7)
+		{
+			if (a2 != 0) conn->WriteLine(s1 ? s1 : "");
+			else if (s1 && a1 > 0) conn->Send(s1, a1);
+			return 1;
+		}
+		return 0;
+	};
+	return nzbget_rs_nserv_run(argc, const_cast<const char* const*>(argv), &env);
 }
 #endif
 
@@ -477,7 +298,7 @@ public:
 			m_systemHealth = std::make_unique<SystemHealth::Service>(
 				*g_Options,
 				*g_ServerPool->GetServers(),
-				*g_FeedCoordinator->GetFeeds(),
+				*g_FeedCoordinator,
 				m_scheduler->GetTasks(),
 				*g_Log);
 			g_SystemHealth = m_systemHealth.get();
@@ -727,11 +548,11 @@ public:
 
 	void AddFeed(int id, const char* name, const char* url, int interval,
 		const char* filter, bool backlog, bool pauseNzb, const char* category,
-		FeedInfo::CategorySource categorySource, int priority, const char* feedScript,
+		int categorySource, int priority, const char* feedScript,
 		unsigned int certVerifLevel) override
 	{
-		m_feedCoordinator->AddFeed(std::make_unique<FeedInfo>(id, name, url, backlog, interval, filter,
-			pauseNzb, category, categorySource, priority, feedScript, certVerifLevel));
+		m_feedCoordinator->AddFeed(id, name, url, backlog, interval, filter,
+			pauseNzb, category, categorySource, priority, feedScript, certVerifLevel);
 	}
 
 	void AddTask(int id, int hours, int minutes, int weekDaysBits,

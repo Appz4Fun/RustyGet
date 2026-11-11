@@ -998,105 +998,1909 @@ pub fn is_feed_url_and_filter_updated(
 }
 
 // ============================================================================
-// 4. C ABI Boundary (`nzbget_rs_feed_*`)
+// 4. End-to-End FeedCoordinator, FeedInfo, FeedItemInfo, FeedFilter & FeedHistory Engine
 // ============================================================================
 
-/// View of a parsed RSS feed item returned across FFI to `FeedFile::Parse`.
-#[repr(C)]
-pub struct NzbgetRsParsedFeedItemView {
-    pub title: *const c_char,
-    pub filename: *const c_char,
-    pub url: *const c_char,
-    pub category: *const c_char,
-    pub description: *const c_char,
-    pub season: *const c_char,
-    pub episode: *const c_char,
-    pub has_season: c_int,
-    pub has_episode: c_int,
-    pub time: i64,
-    pub size: i64,
-    pub imdb_id: c_int,
-    pub rage_id: c_int,
-    pub tvdb_id: c_int,
-    pub tvmaze_id: c_int,
-    pub attr_names: *const *const c_char,
-    pub attr_values: *const *const c_char,
-    pub attr_count: usize,
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+const FS_UNDEFINED: i32 = 0;
+const FS_RUNNING: i32 = 1;
+const FS_FINISHED: i32 = 2;
+const FS_FAILED: i32 = 3;
+
+const AD_RUNNING: i32 = 1;
+const AD_FINISHED: i32 = 2;
+const AD_FAILED: i32 = 3;
+const AD_RETRY: i32 = 4;
+
+const MS_IGNORED: i32 = 0;
+const MS_ACCEPTED: i32 = 1;
+const MS_REJECTED: i32 = 2;
+
+const HS_FETCHED: i32 = 2;
+const EA_URL_COMPLETED: i32 = 10;
+
+fn feed_bytes_to_cstr(raw: &[u8]) -> CString {
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    unsafe { CString::from_vec_unchecked(raw[..end].to_vec()) }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_file_parser_parse_file(
-    filename: *const c_char,
-) -> *mut FeedFileParser {
-    let bytes = crate::diskstate_format::cstr_to_bytes(filename);
-    if bytes.is_empty() {
-        return std::ptr::null_mut();
+fn feed_cstr_bytes<'a>(p: *const c_char) -> &'a [u8] {
+    if p.is_null() {
+        b""
+    } else {
+        unsafe { CStr::from_ptr(p) }.to_bytes()
     }
+}
+
+fn feed_now_sec() -> i64 {
     #[cfg(unix)]
-    let path = {
-        use std::os::unix::ffi::OsStrExt;
-        std::path::Path::new(std::ffi::OsStr::from_bytes(bytes))
+    unsafe {
+        libc::time(std::ptr::null_mut()) as i64
+    }
+    #[cfg(not(unix))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+}
+
+fn feed_rand_int() -> i32 {
+    #[cfg(unix)]
+    unsafe {
+        libc::rand()
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+#[cfg(unix)]
+fn feed_bytes_to_path(bytes: &[u8]) -> &std::path::Path {
+    use std::os::unix::ffi::OsStrExt;
+    std::path::Path::new(std::ffi::OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn feed_bytes_to_path(bytes: &[u8]) -> &std::path::Path {
+    std::path::Path::new(std::str::from_utf8(bytes).unwrap_or(""))
+}
+
+#[derive(Clone)]
+struct RsFeedConfig {
+    id: i32,
+    name: CString,
+    url: CString,
+    filter: Vec<u8>,
+    category: Vec<u8>,
+    extensions: Vec<u8>,
+    filter_hash: u32,
+    category_source: i32,
+    interval: i32,
+    priority: i32,
+    backlog: bool,
+    pause_nzb: bool,
+    cert_verif_level: u32,
+}
+
+struct RsFeedInfo {
+    cfg: RsFeedConfig,
+    output_filename: Vec<u8>,
+    last_update: i64,
+    next_update: i64,
+    last_interval: i32,
+    status: i32,
+    fetch: bool,
+    force: bool,
+}
+
+struct PreviewFeedSlot {
+    cfg: RsFeedConfig,
+    status: AtomicI32,
+    last_interval: AtomicI32,
+    output_filename: Mutex<Vec<u8>>,
+}
+
+#[derive(Clone)]
+enum ActiveFeedTarget {
+    Configured(usize),
+    Preview(Arc<PreviewFeedSlot>),
+}
+
+struct ActiveFeedDownload {
+    dl_ptr: usize,
+    target: ActiveFeedTarget,
+}
+
+#[derive(Clone)]
+struct RsFeedAttr {
+    name: CString,
+    value: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct RsFeedItem {
+    title: Vec<u8>,
+    filename: Vec<u8>,
+    url: Vec<u8>,
+    category: Vec<u8>,
+    description: Vec<u8>,
+    season: Vec<u8>,
+    episode: Vec<u8>,
+    add_category: Vec<u8>,
+    dupe_key: Vec<u8>,
+    dupe_status: Vec<u8>,
+    time: i64,
+    size: i64,
+    imdb_id: i32,
+    rage_id: i32,
+    tvdb_id: i32,
+    tvmaze_id: i32,
+    season_num: i32,
+    episode_num: i32,
+    season_episode_parsed: bool,
+    pause_nzb: bool,
+    priority: i32,
+    status: i32,
+    match_status: i32,
+    match_rule: i32,
+    dupe_score: i32,
+    dupe_mode: i32,
+    attrs: Vec<RsFeedAttr>,
+}
+
+impl RsFeedItem {
+    fn from_parsed(p: &ParsedFeedItem) -> Self {
+        let season = if p.has_season {
+            p.season.as_bytes().to_vec()
+        } else {
+            Vec::new()
+        };
+        let season_num = if p.has_season {
+            parse_prefixed_int(&season)
+        } else {
+            0
+        };
+        let episode = if p.has_episode {
+            p.episode.as_bytes().to_vec()
+        } else {
+            Vec::new()
+        };
+        let episode_num = if p.has_episode {
+            parse_prefixed_int(&episode)
+        } else {
+            0
+        };
+        let attrs = p
+            .attr_names
+            .iter()
+            .zip(p.attr_values.iter())
+            .map(|(n, v)| RsFeedAttr {
+                name: n.clone(),
+                value: v.as_bytes().to_vec(),
+            })
+            .collect();
+        Self {
+            title: p.title.as_bytes().to_vec(),
+            filename: p.filename.as_bytes().to_vec(),
+            url: p.url.as_bytes().to_vec(),
+            category: p.category.as_bytes().to_vec(),
+            description: p.description.as_bytes().to_vec(),
+            season,
+            episode,
+            add_category: Vec::new(),
+            dupe_key: Vec::new(),
+            dupe_status: Vec::new(),
+            time: p.time,
+            size: p.size,
+            imdb_id: p.imdb_id,
+            rage_id: p.rage_id,
+            tvdb_id: p.tvdb_id,
+            tvmaze_id: p.tvmaze_id,
+            season_num,
+            episode_num,
+            season_episode_parsed: false,
+            pause_nzb: false,
+            priority: 0,
+            status: 0,
+            match_status: MS_IGNORED,
+            match_rule: 0,
+            dupe_score: 0,
+            dupe_mode: 0,
+            attrs,
+        }
+    }
+
+    fn set_season(&mut self, s: Vec<u8>) {
+        self.season_num = parse_prefixed_int(&s);
+        self.season = s;
+    }
+
+    fn set_episode(&mut self, e: Vec<u8>) {
+        self.episode_num = parse_prefixed_int(&e);
+        self.episode = e;
+    }
+
+    fn parse_season_episode_lazy(&mut self) {
+        self.season_episode_parsed = true;
+        if let Some((s, e)) = parse_season_episode(&self.title) {
+            self.set_season(s);
+            self.set_episode(e);
+        }
+    }
+
+    fn get_season_num(&mut self) -> i32 {
+        if self.season.is_empty() && !self.season_episode_parsed {
+            self.parse_season_episode_lazy();
+        }
+        self.season_num
+    }
+
+    fn get_episode_num(&mut self) -> i32 {
+        if self.episode.is_empty() && !self.season_episode_parsed {
+            self.parse_season_episode_lazy();
+        }
+        self.episode_num
+    }
+
+    fn build_dupe_key(&mut self, rage_id: &[u8], tvdb_id: &[u8], tvmaze_id: &[u8], series: &[u8]) {
+        let any_series = has_any_series_id(
+            series,
+            rage_id,
+            tvdb_id,
+            tvmaze_id,
+            self.rage_id,
+            self.tvdb_id,
+            self.tvmaze_id,
+        );
+        let s_num = if any_series { self.get_season_num() } else { 0 };
+        let e_num = if any_series && s_num != 0 {
+            self.get_episode_num()
+        } else {
+            0
+        };
+        self.dupe_key = build_feed_dupe_key(
+            rage_id,
+            tvdb_id,
+            tvmaze_id,
+            series,
+            self.rage_id,
+            self.tvdb_id,
+            self.tvmaze_id,
+            self.imdb_id,
+            s_num,
+            e_num,
+            &self.season,
+            &self.episode,
+        );
+    }
+
+    fn append_dupe_key(&mut self, extra: &[u8]) {
+        if !self.dupe_key.is_empty() && !extra.is_empty() {
+            self.dupe_key.push(b'-');
+            self.dupe_key.extend_from_slice(extra);
+        }
+    }
+
+    fn find_attr(&self, target: &[u8]) -> Option<&[u8]> {
+        let target_c = feed_bytes_to_cstr(target);
+        for a in &self.attrs {
+            if unsafe { attr_name_eq_ignore_case(a.name.as_ptr(), target_c.as_ptr()) } {
+                return Some(&a.value);
+            }
+        }
+        None
+    }
+}
+
+struct FilterItemAdapter<'a, 'b> {
+    item: &'a mut RsFeedItem,
+    calc_dupe: &'b mut dyn FnMut(&[u8], &[u8]) -> i32,
+}
+
+impl crate::feedfilter::Item for FilterItemAdapter<'_, '_> {
+    fn field(&mut self, field: crate::feedfilter::Field, attr: &[u8]) -> (Option<Vec<u8>>, i64) {
+        use crate::feedfilter::Field;
+        match field {
+            Field::Title => (Some(self.item.title.clone()), 0),
+            Field::Filename => (Some(self.item.filename.clone()), 0),
+            Field::Category => (Some(self.item.category.clone()), 0),
+            Field::Url => (Some(self.item.url.clone()), 0),
+            Field::Size => (None, self.item.size),
+            Field::Age => (None, feed_now_sec().wrapping_sub(self.item.time)),
+            Field::ImdbId => (None, i64::from(self.item.imdb_id)),
+            Field::RageId => (None, i64::from(self.item.rage_id)),
+            Field::TvdbId => (None, i64::from(self.item.tvdb_id)),
+            Field::TvmazeId => (None, i64::from(self.item.tvmaze_id)),
+            Field::Description => (Some(self.item.description.clone()), 0),
+            Field::Season => (None, i64::from(self.item.get_season_num())),
+            Field::Episode => (None, i64::from(self.item.get_episode_num())),
+            Field::Priority => (None, i64::from(self.item.priority)),
+            Field::DupeKey => (Some(self.item.dupe_key.clone()), 0),
+            Field::DupeScore => (None, i64::from(self.item.dupe_score)),
+            Field::DupeStatus => {
+                if self.item.dupe_status.is_empty() {
+                    let mask = (self.calc_dupe)(&self.item.title, &self.item.dupe_key);
+                    self.item.dupe_status = format_dupe_status_mask(mask);
+                }
+                (Some(self.item.dupe_status.clone()), 0)
+            }
+            Field::Attr => (self.item.find_attr(attr).map(<[u8]>::to_vec), 0),
+        }
+    }
+
+    fn season_episode(&mut self, episode: bool) -> Option<Vec<u8>> {
+        if episode {
+            self.item.get_episode_num();
+            Some(self.item.episode.clone())
+        } else {
+            self.item.get_season_num();
+            Some(self.item.season.clone())
+        }
+    }
+
+    fn apply(&mut self, o: &crate::feedfilter::Applied<'_>) {
+        if let Some(p) = o.pause {
+            self.item.pause_nzb = p;
+        }
+        if let Some(cat) = o.category {
+            self.item.add_category = cat.unwrap_or(b"").to_vec();
+        }
+        if let Some(prio) = o.priority {
+            self.item.priority = prio;
+        }
+        if let Some(ap) = o.add_priority {
+            self.item.priority = self.item.priority.wrapping_add(ap);
+        }
+        if let Some(ds) = o.dupe_score {
+            self.item.dupe_score = ds;
+        }
+        if let Some(ads) = o.add_dupe_score {
+            self.item.dupe_score = self.item.dupe_score.wrapping_add(ads);
+        }
+        if let Some(ids) = o.build_dupe_key {
+            self.item.build_dupe_key(
+                ids[0].unwrap_or(b""),
+                ids[1].unwrap_or(b""),
+                ids[2].unwrap_or(b""),
+                ids[3].unwrap_or(b""),
+            );
+        }
+        if let Some(dk) = o.dupe_key {
+            self.item.dupe_key = dk.unwrap_or(b"").to_vec();
+        }
+        if let Some(adk) = o.add_dupe_key {
+            self.item.append_dupe_key(adk.unwrap_or(b""));
+        }
+        if let Some(dm) = o.dupe_mode {
+            self.item.dupe_mode = dm as i32;
+        }
+    }
+
+    fn set_match(&mut self, status: i32, rule: i32) {
+        self.item.match_status = match status {
+            1 => MS_ACCEPTED,
+            2 => MS_REJECTED,
+            _ => MS_IGNORED,
+        };
+        self.item.match_rule = rule;
+    }
+}
+
+struct RsFeedHistoryEntry {
+    url: Vec<u8>,
+    status: i32,
+    last_seen: i64,
+}
+
+struct RsFeedCacheEntry {
+    url: Vec<u8>,
+    cache_time_sec: i32,
+    cache_id: Vec<u8>,
+    last_usage: i64,
+    items: Arc<Mutex<Vec<RsFeedItem>>>,
+}
+
+struct FeedCoordInner {
+    feeds: Vec<RsFeedInfo>,
+    active: Vec<ActiveFeedDownload>,
+    history: Vec<RsFeedHistoryEntry>,
+    cache: Vec<RsFeedCacheEntry>,
+    save: bool,
+}
+
+/// Stateful Rust engine backing `FeedCoordinator`, `FeedInfo`, `FeedItemInfo`, `FeedFilter`, and `FeedHistory`.
+pub struct NzbgetRsFeedCoord {
+    state: Mutex<FeedCoordInner>,
+    wait_cv: Condvar,
+    force: AtomicBool,
+    preview_num: AtomicI32,
+}
+
+impl Default for NzbgetRsFeedCoord {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Host C++ callback environment for `nzbget_rs_feed_coord_exec`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NzbgetRsFeedCoordEnv {
+    pub ctx: *mut c_void,
+    pub p1: usize,
+    pub a1: c_int,
+    pub a2: c_int,
+    pub a3: c_int,
+    pub a4: c_int,
+    pub a5: c_int,
+    pub a6: c_int,
+    pub u1: u32,
+    pub s1: *const c_char,
+    pub s2: *const c_char,
+    pub s3: *const c_char,
+    pub s4: *const c_char,
+    pub s5: *const c_char,
+    pub s6: *const c_char,
+    pub log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
+    pub query_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            usize,
+            *mut c_int,
+            *mut i64,
+            *mut *const c_char,
+        ) -> usize,
+    >,
+    pub action_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            usize,
+            c_int,
+            c_int,
+            c_int,
+            i64,
+            i64,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+        ) -> usize,
+    >,
+    pub rpc_emit_cb:
+        Option<unsafe extern "C" fn(*mut c_void, *const crate::xmlrpc_format::NzbgetRsRpcFeedItem)>,
+    pub health_emit_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            c_int,
+            u32,
+        ),
+    >,
+}
+
+fn feed_emit_log(env: &NzbgetRsFeedCoordEnv, level: i32, parts: &[&[u8]]) {
+    let Some(cb) = env.log_cb else {
+        return;
     };
-    #[cfg(not(unix))]
-    let path_buf = std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned());
-    #[cfg(not(unix))]
-    let path = path_buf.as_path();
+    let joined: Vec<u8> = parts.concat();
+    let cstr = feed_bytes_to_cstr(&joined);
+    unsafe { cb(env.ctx, level as c_int, cstr.as_ptr()) };
+}
 
-    match FeedFileParser::parse_file(path) {
-        Some(parser) => Box::into_raw(Box::new(parser)),
-        None => std::ptr::null_mut(),
+struct RuntimeOpts {
+    server_mode: bool,
+    pause_download: bool,
+    url_force: bool,
+    url_connections: i32,
+    url_timeout: i32,
+    feed_history_days: i32,
+    flush_queue: bool,
+    path_sep: u8,
+    temp_dir: Vec<u8>,
+    queue_dir: Vec<u8>,
+    extensions: Vec<u8>,
+}
+
+fn query_runtime_opts(env: &NzbgetRsFeedCoordEnv) -> RuntimeOpts {
+    let mut ints = [0 as c_int; 8];
+    let mut strs = [std::ptr::null::<c_char>(); 4];
+    if let Some(q) = env.query_cb {
+        unsafe {
+            q(
+                env.ctx,
+                2,
+                0,
+                ints.as_mut_ptr(),
+                std::ptr::null_mut(),
+                strs.as_mut_ptr(),
+            );
+        }
+    }
+    RuntimeOpts {
+        server_mode: ints[0] != 0,
+        pause_download: ints[1] != 0,
+        url_force: ints[2] != 0,
+        url_connections: ints[3],
+        url_timeout: ints[4],
+        feed_history_days: ints[5],
+        flush_queue: ints[6] != 0,
+        path_sep: ints[7] as u8,
+        temp_dir: feed_cstr_bytes(strs[0]).to_vec(),
+        queue_dir: feed_cstr_bytes(strs[1]).to_vec(),
+        extensions: feed_cstr_bytes(strs[2]).to_vec(),
+    }
+}
+
+struct DiskBridgeCtx<'a> {
+    inner: &'a mut FeedCoordInner,
+    env: &'a NzbgetRsFeedCoordEnv,
+}
+
+unsafe extern "C" fn feed_disk_log_cb(raw: *mut c_void, level: c_int, msg: *const c_char) {
+    let bridge = unsafe { &*raw.cast::<DiskBridgeCtx<'_>>() };
+    if let Some(cb) = bridge.env.log_cb {
+        unsafe { cb(bridge.env.ctx, level, msg) };
+    }
+}
+
+unsafe extern "C" fn feed_disk_aux_cb(
+    raw: *mut c_void,
+    op: c_int,
+    a1: c_int,
+    a2: c_int,
+    u1: u32,
+    s1: *const c_char,
+    s2: *const c_char,
+    _vol_item: *const crate::diskstate_format::NzbgetRsDiskVolumeStatInput,
+    sink_ctx: *mut c_void,
+    sink_fn: Option<crate::diskstate_format::DiskAuxSinkFn>,
+) {
+    let bridge = unsafe { &mut *raw.cast::<DiskBridgeCtx<'_>>() };
+    match op {
+        1 => {
+            let Some(sink) = sink_fn else {
+                return;
+            };
+            for fi in &bridge.inner.feeds {
+                unsafe {
+                    sink(
+                        sink_ctx,
+                        0,
+                        fi.last_update as c_int,
+                        0,
+                        fi.cfg.filter_hash,
+                        fi.cfg.url.as_ptr(),
+                        std::ptr::null(),
+                        0,
+                        std::ptr::null(),
+                        0,
+                    );
+                }
+            }
+            for h in &bridge.inner.history {
+                let c_url = feed_bytes_to_cstr(&h.url);
+                unsafe {
+                    sink(
+                        sink_ctx,
+                        1,
+                        h.status as c_int,
+                        h.last_seen as c_int,
+                        0,
+                        c_url.as_ptr(),
+                        std::ptr::null(),
+                        0,
+                        std::ptr::null(),
+                        0,
+                    );
+                }
+            }
+        }
+        2 => {
+            let url = feed_cstr_bytes(s1);
+            let filter = feed_cstr_bytes(s2);
+            for fi in &mut bridge.inner.feeds {
+                if fi.cfg.url.as_bytes() == url
+                    && (a2 == 1
+                        || (a2 == 2 && fi.cfg.filter == filter)
+                        || (a2 >= 3 && fi.cfg.filter_hash == u1))
+                {
+                    fi.last_update = i64::from(a1);
+                }
+            }
+        }
+        3 => {
+            let url = feed_cstr_bytes(s1).to_vec();
+            bridge.inner.history.push(RsFeedHistoryEntry {
+                url,
+                status: a1,
+                last_seen: i64::from(a2),
+            });
+        }
+        _ => {}
+    }
+}
+
+fn run_diskstate_feeds(inner: &mut FeedCoordInner, env: &NzbgetRsFeedCoordEnv, save: bool) {
+    let opts = query_runtime_opts(env);
+    let qdir_c = feed_bytes_to_cstr(&opts.queue_dir);
+    let mut bridge = DiskBridgeCtx { inner, env };
+    let mut ds_env: crate::diskstate_format::NzbgetRsDiskStateEnv = unsafe { std::mem::zeroed() };
+    ds_env.ctx = (&mut bridge as *mut DiskBridgeCtx<'_>).cast();
+    ds_env.queue_dir = qdir_c.as_ptr();
+    ds_env.sep = c_int::from(opts.path_sep);
+    ds_env.flush_queue = c_int::from(opts.flush_queue);
+    ds_env.log_cb = Some(feed_disk_log_cb);
+    ds_env.aux_cb = Some(feed_disk_aux_cb);
+    unsafe {
+        crate::diskstate_format::diskstate_exec(if save { 9 } else { 10 }, &ds_env);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_feed_config(
+    id: i32,
+    name: &[u8],
+    url: &[u8],
+    backlog: bool,
+    interval: i32,
+    filter: &[u8],
+    pause_nzb: bool,
+    category: &[u8],
+    category_source: i32,
+    priority: i32,
+    extensions: &[u8],
+    cert_verif_level: u32,
+) -> RsFeedConfig {
+    let (def_name, filter_hash) = feed_info_init(id, name, filter);
+    let final_name = def_name.unwrap_or_else(|| name.to_vec());
+    RsFeedConfig {
+        id,
+        name: feed_bytes_to_cstr(&final_name),
+        url: feed_bytes_to_cstr(url),
+        filter: filter.to_vec(),
+        category: category.to_vec(),
+        extensions: extensions.to_vec(),
+        filter_hash,
+        category_source,
+        interval,
+        priority,
+        backlog,
+        pause_nzb,
+        cert_verif_level,
+    }
+}
+
+impl NzbgetRsFeedCoord {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(FeedCoordInner {
+                feeds: Vec::new(),
+                active: Vec::new(),
+                history: Vec::new(),
+                cache: Vec::new(),
+                save: false,
+            }),
+            wait_cv: Condvar::new(),
+            force: AtomicBool::new(false),
+            preview_num: AtomicI32::new(0),
+        }
+    }
+
+    fn is_stopped(&self, env: &NzbgetRsFeedCoordEnv) -> bool {
+        let Some(q) = env.query_cb else {
+            return true;
+        };
+        unsafe {
+            q(
+                env.ctx,
+                1,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) != 0
+        }
+    }
+
+    fn add_feed(&self, env: &NzbgetRsFeedCoordEnv) {
+        let cfg = build_feed_config(
+            env.a1,
+            feed_cstr_bytes(env.s1),
+            feed_cstr_bytes(env.s2),
+            (env.a5 & 1) != 0,
+            env.a2,
+            feed_cstr_bytes(env.s3),
+            (env.a5 & 2) != 0,
+            feed_cstr_bytes(env.s4),
+            env.a3,
+            env.a4,
+            feed_cstr_bytes(env.s5),
+            env.u1,
+        );
+        if let Ok(mut st) = self.state.lock() {
+            st.feeds.push(RsFeedInfo {
+                cfg,
+                output_filename: Vec::new(),
+                last_update: 0,
+                next_update: 0,
+                last_interval: 0,
+                status: FS_UNDEFINED,
+                fetch: false,
+                force: false,
+            });
+        }
+    }
+
+    fn spawn_downloader(
+        &self,
+        st: &mut FeedCoordInner,
+        target: ActiveFeedTarget,
+        cfg: &RsFeedConfig,
+        preview: bool,
+        force: bool,
+        opts: &RuntimeOpts,
+        env: &NzbgetRsFeedCoordEnv,
+    ) -> usize {
+        let Some(act) = env.action_cb else {
+            return 0;
+        };
+        feed_emit_log(
+            env,
+            0,
+            &[b"Starting new FeedDownloader for ", cfg.name.as_bytes()],
+        );
+        let pnum = self.preview_num.fetch_add(1, Ordering::Relaxed) + 1;
+        let out_fn = format_temp_filename(
+            &opts.temp_dir,
+            opts.path_sep,
+            cfg.id,
+            preview,
+            feed_now_sec() as i32,
+            feed_rand_int(),
+            pnum,
+        );
+        let out_c = feed_bytes_to_cstr(&out_fn);
+        let eff_force = c_int::from(force || opts.url_force);
+        let dl_ptr = unsafe {
+            act(
+                env.ctx,
+                0,
+                0,
+                eff_force,
+                cfg.cert_verif_level as c_int,
+                0,
+                0,
+                0,
+                cfg.url.as_ptr(),
+                cfg.name.as_ptr(),
+                out_c.as_ptr(),
+                std::ptr::null(),
+            )
+        };
+        if dl_ptr != 0 {
+            match &target {
+                ActiveFeedTarget::Configured(idx) => {
+                    if let Some(fi) = st.feeds.get_mut(*idx) {
+                        fi.status = FS_RUNNING;
+                        fi.force = force;
+                        fi.fetch = false;
+                    }
+                }
+                ActiveFeedTarget::Preview(slot) => {
+                    slot.status.store(FS_RUNNING, Ordering::Release);
+                }
+            }
+            st.active.push(ActiveFeedDownload { dl_ptr, target });
+            unsafe {
+                act(
+                    env.ctx,
+                    1,
+                    dl_ptr,
+                    3,
+                    0,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
+            }
+        }
+        dl_ptr
+    }
+
+    fn check_save_feeds(&self, env: &NzbgetRsFeedCoordEnv) {
+        let Ok(mut st) = self.state.lock() else {
+            return;
+        };
+        if st.save {
+            feed_emit_log(env, 0, &[b"CheckSaveFeeds: save"]);
+            let opts = query_runtime_opts(env);
+            if opts.server_mode {
+                run_diskstate_feeds(&mut st, env, true);
+            }
+            st.save = false;
+        }
+    }
+
+    fn reset_hanging_downloads(&self, env: &NzbgetRsFeedCoordEnv) {
+        let (Some(q), Some(act)) = (env.query_cb, env.action_cb) else {
+            return;
+        };
+        let opts = query_runtime_opts(env);
+        if opts.url_timeout == 0 {
+            return;
+        }
+        let Ok(st) = self.state.lock() else {
+            return;
+        };
+        let tm = feed_now_sec();
+        for active in &st.active {
+            let dl_ptr = active.dl_ptr;
+            let mut dl_ints = [0 as c_int; 4];
+            let mut last_upd: i64 = 0;
+            let mut dl_strs = [std::ptr::null::<c_char>(); 4];
+            unsafe {
+                q(
+                    env.ctx,
+                    3,
+                    dl_ptr,
+                    dl_ints.as_mut_ptr(),
+                    &mut last_upd,
+                    dl_strs.as_mut_ptr(),
+                );
+            }
+            if is_feed_download_hanging(tm, last_upd, opts.url_timeout, dl_ints[0], AD_RUNNING) {
+                let info_name = feed_cstr_bytes(dl_strs[0]).to_vec();
+                feed_emit_log(
+                    env,
+                    4,
+                    &[b"Cancelling hanging feed download ", &info_name],
+                );
+                unsafe {
+                    act(
+                        env.ctx,
+                        1,
+                        dl_ptr,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn cleanup_history(&self, env: &NzbgetRsFeedCoordEnv) {
+        feed_emit_log(env, 0, &[b"CleanupHistory"]);
+        let opts = query_runtime_opts(env);
+        let Ok(mut st) = self.state.lock() else {
+            return;
+        };
+        let updates: Vec<i64> = st.feeds.iter().map(|f| f.last_update).collect();
+        let border = calc_history_border_date(feed_now_sec(), &updates, opts.feed_history_days);
+        let mut changed = false;
+        st.history.retain(|entry| {
+            if let Some(prefix_len) =
+                should_delete_history_entry(entry.last_seen, border, &entry.url)
+            {
+                feed_emit_log(
+                    env,
+                    1,
+                    &[b"Deleting ", &entry.url[..prefix_len], b" from feed history"],
+                );
+                changed = true;
+                false
+            } else {
+                true
+            }
+        });
+        if changed {
+            st.save = true;
+        }
+    }
+
+    fn cleanup_cache(&self, env: &NzbgetRsFeedCoordEnv) {
+        feed_emit_log(env, 0, &[b"CleanupCache"]);
+        let Ok(mut st) = self.state.lock() else {
+            return;
+        };
+        let cur_time = feed_now_sec();
+        st.cache.retain(|item| {
+            if is_feed_cache_expired(item.last_usage, item.cache_time_sec, cur_time) {
+                feed_emit_log(
+                    env,
+                    0,
+                    &[b"Deleting ", &item.url, b" from feed cache"],
+                );
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn parse_feed_items(
+        output_filename: &[u8],
+        info_name: &[u8],
+        env: &NzbgetRsFeedCoordEnv,
+    ) -> Option<Vec<RsFeedItem>> {
+        feed_emit_log(env, 0, &[b"Creating FeedFile"]);
+        if output_filename.is_empty() {
+            feed_emit_log(env, 4, &[b"Failed to parse rss feed ", info_name]);
+            feed_emit_log(
+                env,
+                4,
+                &[
+                    b"Feed file ",
+                    output_filename,
+                    b" kept for troubleshooting (will be deleted on next successful feed fetch)",
+                ],
+            );
+            return None;
+        }
+        let Some(mut parser) = FeedFileParser::parse_file(feed_bytes_to_path(output_filename))
+        else {
+            feed_emit_log(env, 4, &[b"Failed to parse rss feed ", info_name]);
+            feed_emit_log(
+                env,
+                4,
+                &[
+                    b"Feed file ",
+                    output_filename,
+                    b" kept for troubleshooting (will be deleted on next successful feed fetch)",
+                ],
+            );
+            return None;
+        };
+        let parsed = parser.finalize_items();
+        let out: Vec<RsFeedItem> = parsed.iter().map(RsFeedItem::from_parsed).collect();
+        let fn_c = feed_bytes_to_cstr(output_filename);
+        crate::fsops::delete_file(&fn_c);
+        Some(out)
+    }
+
+    fn filter_feed_items(
+        cfg: &RsFeedConfig,
+        items: &mut [RsFeedItem],
+        env: &NzbgetRsFeedCoordEnv,
+    ) {
+        feed_emit_log(env, 0, &[b"Filtering feed ", cfg.name.as_bytes()]);
+        let mut filter =
+            (!cfg.filter.is_empty()).then(|| crate::feedfilter::FeedFilter::new(&cfg.filter));
+        let mut calc_dupe = |title: &[u8], dupe_key: &[u8]| -> i32 {
+            let Some(act) = env.action_cb else {
+                return 0;
+            };
+            let t_c = feed_bytes_to_cstr(title);
+            let k_c = feed_bytes_to_cstr(dupe_key);
+            unsafe {
+                act(
+                    env.ctx,
+                    2,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    t_c.as_ptr(),
+                    k_c.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                ) as i32
+            }
+        };
+
+        for item in items.iter_mut() {
+            item.match_status = MS_ACCEPTED;
+            item.match_rule = 0;
+            item.pause_nzb = cfg.pause_nzb;
+            item.priority = cfg.priority;
+            item.add_category =
+                resolve_category(&cfg.category, cfg.category_source, &item.category).to_vec();
+            item.dupe_score = 0;
+            item.dupe_mode = 0;
+            item.build_dupe_key(b"", b"", b"", b"");
+            if let Some(ref mut ff) = filter {
+                let mut adapter = FilterItemAdapter {
+                    item,
+                    calc_dupe: &mut calc_dupe,
+                };
+                ff.matches(&mut adapter);
+            }
+        }
+    }
+
+    fn run_loop(&self, env: &NzbgetRsFeedCoordEnv) {
+        let Some(q) = env.query_cb else {
+            return;
+        };
+        feed_emit_log(env, 0, &[b"Entering FeedCoordinator-loop"]);
+
+        while unsafe {
+            q(
+                env.ctx,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let init_opts = query_runtime_opts(env);
+        if init_opts.server_mode {
+            if let Ok(mut st) = self.state.lock() {
+                run_diskstate_feeds(&mut st, env, false);
+            }
+        }
+
+        let mut last_cleanup: i64 = 0;
+        while !self.is_stopped(env) {
+            let opts = query_runtime_opts(env);
+            if !opts.pause_download || self.force.load(Ordering::SeqCst) || opts.url_force {
+                if let Ok(mut st) = self.state.lock() {
+                    let current = feed_now_sec();
+                    if (st.active.len() as i32) < opts.url_connections {
+                        self.force.store(false, Ordering::SeqCst);
+                        let mut to_start = Vec::new();
+                        for (idx, fi) in st.feeds.iter().enumerate() {
+                            let (do_start, set_force) = should_start_feed(
+                                fi.cfg.interval,
+                                fi.next_update,
+                                current,
+                                fi.fetch,
+                                fi.status,
+                                FS_RUNNING,
+                            );
+                            if do_start {
+                                to_start.push((idx, fi.fetch, fi.cfg.clone()));
+                            } else if set_force {
+                                self.force.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        for (idx, force_flag, cfg_clone) in to_start {
+                            let _ = self.spawn_downloader(
+                                &mut st,
+                                ActiveFeedTarget::Configured(idx),
+                                &cfg_clone,
+                                false,
+                                force_flag,
+                                &opts,
+                                env,
+                            );
+                        }
+                    }
+                }
+            }
+
+            self.check_save_feeds(env);
+            self.reset_hanging_downloads(env);
+
+            let now = feed_now_sec();
+            if (now - last_cleanup).abs() >= 60 {
+                self.cleanup_history(env);
+                self.cleanup_cache(env);
+                self.check_save_feeds(env);
+                last_cleanup = feed_now_sec();
+            }
+
+            if let Ok(lk) = self.state.lock() {
+                if self.force.load(Ordering::SeqCst) {
+                    let _ = self.wait_cv.wait_timeout_while(
+                        lk,
+                        Duration::from_millis(1000),
+                        |_| !self.is_stopped(env),
+                    );
+                } else {
+                    let wait_ms = if opts.url_force || lk.feeds.is_empty() {
+                        60_000
+                    } else {
+                        5_000
+                    };
+                    let _ = self.wait_cv.wait_timeout_while(
+                        lk,
+                        Duration::from_millis(wait_ms),
+                        |_| !self.force.load(Ordering::SeqCst) && !self.is_stopped(env),
+                    );
+                }
+            }
+        }
+
+        feed_emit_log(
+            env,
+            0,
+            &[b"FeedCoordinator: waiting for Downloads to complete"],
+        );
+        loop {
+            let completed = self
+                .state
+                .lock()
+                .map(|st| st.active.is_empty())
+                .unwrap_or(true);
+            self.check_save_feeds(env);
+            if completed {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            self.reset_hanging_downloads(env);
+        }
+        feed_emit_log(env, 0, &[b"FeedCoordinator: Downloads are completed"]);
+        feed_emit_log(env, 0, &[b"Exiting FeedCoordinator-loop"]);
+    }
+
+    fn stop_downloads(&self, env: &NzbgetRsFeedCoordEnv) {
+        let Some(act) = env.action_cb else {
+            return;
+        };
+        feed_emit_log(env, 0, &[b"Stopping UrlDownloads"]);
+        if let Ok(st) = self.state.lock() {
+            for active in &st.active {
+                unsafe {
+                    act(
+                        env.ctx,
+                        1,
+                        active.dl_ptr,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    );
+                }
+            }
+            feed_emit_log(env, 0, &[b"UrlDownloads are notified"]);
+            self.wait_cv.notify_all();
+        }
+    }
+
+    fn on_downloader_update(&self, env: &NzbgetRsFeedCoordEnv) {
+        feed_emit_log(env, 0, &[b"Notification from FeedDownloader received"]);
+        let dl_ptr = env.p1;
+        let (Some(q), Some(act)) = (env.query_cb, env.action_cb) else {
+            return;
+        };
+
+        let mut dl_ints = [0 as c_int; 4];
+        let mut last_upd: i64 = 0;
+        let mut dl_strs = [std::ptr::null::<c_char>(); 4];
+        unsafe {
+            q(
+                env.ctx,
+                3,
+                dl_ptr,
+                dl_ints.as_mut_ptr(),
+                &mut last_upd,
+                dl_strs.as_mut_ptr(),
+            );
+        }
+        let st_code = dl_ints[0];
+        if st_code != AD_FINISHED && st_code != AD_FAILED && st_code != AD_RETRY {
+            return;
+        }
+
+        feed_emit_log(env, 0, &[b"Feed downloaded"]);
+        let status_ok = st_code == AD_FINISHED;
+        let out_fn = feed_cstr_bytes(dl_strs[1]).to_vec();
+
+        let removed_target = {
+            let Ok(mut st) = self.state.lock() else {
+                return;
+            };
+            let Some(pos) = st.active.iter().position(|a| a.dl_ptr == dl_ptr) else {
+                return;
+            };
+            let target = st.active.remove(pos).target;
+            match &target {
+                ActiveFeedTarget::Configured(idx) => {
+                    if let Some(fi) = st.feeds.get_mut(*idx) {
+                        if status_ok {
+                            fi.output_filename = out_fn.clone();
+                        }
+                        let (interval, new_last) =
+                            calc_feed_next_interval(status_ok, fi.cfg.interval, fi.last_interval);
+                        fi.last_interval = new_last;
+                        fi.next_update = feed_now_sec().wrapping_add(i64::from(interval));
+                        let name_bytes = fi.cfg.name.as_bytes().to_vec();
+                        feed_emit_log(
+                            env,
+                            1,
+                            &[
+                                b"Scheduling update for feed ",
+                                &name_bytes,
+                                format!(" in {} minute(s)", interval / 60).as_bytes(),
+                            ],
+                        );
+                    }
+                }
+                ActiveFeedTarget::Preview(slot) => {
+                    if status_ok {
+                        if let Ok(mut g) = slot.output_filename.lock() {
+                            *g = out_fn.clone();
+                        }
+                    }
+                    let prev_last = slot.last_interval.load(Ordering::Relaxed);
+                    let (interval, new_last) =
+                        calc_feed_next_interval(status_ok, slot.cfg.interval, prev_last);
+                    slot.last_interval.store(new_last, Ordering::Relaxed);
+                    feed_emit_log(
+                        env,
+                        1,
+                        &[
+                            b"Scheduling update for feed ",
+                            slot.cfg.name.as_bytes(),
+                            format!(" in {} minute(s)", interval / 60).as_bytes(),
+                        ],
+                    );
+                }
+            }
+            target
+        };
+
+        match removed_target {
+            ActiveFeedTarget::Preview(slot) => {
+                slot.status.store(
+                    if status_ok { FS_FINISHED } else { FS_FAILED },
+                    Ordering::Release,
+                );
+            }
+            ActiveFeedTarget::Configured(idx) => {
+                if !status_ok {
+                    if let Ok(mut st) = self.state.lock() {
+                        if let Some(fi) = st.feeds.get_mut(idx) {
+                            fi.status = FS_FAILED;
+                        }
+                    }
+                    return;
+                }
+
+                let (cfg, feed_out_fn) = {
+                    let Ok(st) = self.state.lock() else {
+                        return;
+                    };
+                    let Some(fi) = st.feeds.get(idx) else {
+                        return;
+                    };
+                    (fi.cfg.clone(), fi.output_filename.clone())
+                };
+
+                let opts = query_runtime_opts(env);
+                let eff_ext = if !cfg.extensions.is_empty() {
+                    &cfg.extensions
+                } else {
+                    &opts.extensions
+                };
+                let ext_c = feed_bytes_to_cstr(eff_ext);
+                let out_c = feed_bytes_to_cstr(&feed_out_fn);
+                let script_ok = unsafe {
+                    act(
+                        env.ctx,
+                        3,
+                        0,
+                        cfg.id,
+                        1,
+                        0,
+                        0,
+                        0,
+                        ext_c.as_ptr(),
+                        out_c.as_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    ) != 0
+                };
+                if !script_ok {
+                    if let Ok(mut st) = self.state.lock() {
+                        if let Some(fi) = st.feeds.get_mut(idx) {
+                            fi.status = FS_FAILED;
+                        }
+                    }
+                    return;
+                }
+
+                let mut parsed_items =
+                    Self::parse_feed_items(&feed_out_fn, cfg.name.as_bytes(), env);
+                if let Some(ref mut items) = parsed_items {
+                    feed_emit_log(env, 0, &[b"Process feed ", cfg.name.as_bytes()]);
+                    Self::filter_feed_items(&cfg, items, env);
+                }
+
+                let mut added_nzbs = Vec::new();
+                if let Ok(mut st) = self.state.lock() {
+                    if let Some(items) = parsed_items {
+                        let first_fetch = st
+                            .feeds
+                            .get(idx)
+                            .map(|f| f.last_update == 0)
+                            .unwrap_or(true);
+                        let feed_in = FeedCreationInput {
+                            id: cfg.id,
+                            category: &cfg.category,
+                            category_source: cfg.category_source,
+                        };
+                        let now_ts = feed_now_sec();
+                        for item in &items {
+                            if item.match_status != MS_ACCEPTED {
+                                continue;
+                            }
+                            let hist_pos = st.history.iter().position(|h| h.url == item.url);
+                            let (hist_st, should_add) =
+                                classify_item_history(first_fetch, cfg.backlog, hist_pos.is_some());
+                            if should_add {
+                                feed_emit_log(
+                                    env,
+                                    0,
+                                    &[b"Download ", &item.url, b" from ", cfg.name.as_bytes()],
+                                );
+                                let item_in = FeedItemCreationInput {
+                                    url: &item.url,
+                                    filename: &item.filename,
+                                    category: &item.category,
+                                    add_category: &item.add_category,
+                                    size: item.size,
+                                    time: item.time,
+                                    priority: item.priority,
+                                    pause_nzb: item.pause_nzb,
+                                    dupe_key: &item.dupe_key,
+                                    dupe_score: item.dupe_score,
+                                    dupe_mode: item.dupe_mode,
+                                };
+                                added_nzbs.push(create_nzb_info(&feed_in, &item_in));
+                            }
+                            if let Some(hp) = hist_pos {
+                                st.history[hp].last_seen = now_ts;
+                            } else {
+                                st.history.push(RsFeedHistoryEntry {
+                                    url: item.url.clone(),
+                                    status: hist_st,
+                                    last_seen: now_ts,
+                                });
+                            }
+                        }
+
+                        if !added_nzbs.is_empty() {
+                            feed_emit_log(
+                                env,
+                                2,
+                                &[
+                                    cfg.name.as_bytes(),
+                                    format!(" has {} new item(s)", added_nzbs.len()).as_bytes(),
+                                ],
+                            );
+                        } else {
+                            feed_emit_log(
+                                env,
+                                1,
+                                &[cfg.name.as_bytes(), b" has no new items"],
+                            );
+                        }
+                    }
+
+                    if let Some(fi) = st.feeds.get_mut(idx) {
+                        fi.last_update = feed_now_sec();
+                        fi.force = false;
+                    }
+                    st.save = true;
+                }
+
+                for created in &added_nzbs {
+                    let url_c = feed_bytes_to_cstr(&created.url);
+                    let fn_c = feed_bytes_to_cstr(&created.filename);
+                    let cat_c = feed_bytes_to_cstr(&created.category);
+                    let dk_c = feed_bytes_to_cstr(&created.dupe_key);
+                    let packed_flags =
+                        (c_int::from(created.add_url_paused) & 1) | ((created.dupe_mode & 0xff) << 1);
+                    unsafe {
+                        act(
+                            env.ctx,
+                            4,
+                            created.feed_id as usize,
+                            packed_flags,
+                            created.priority,
+                            created.dupe_score,
+                            created.size,
+                            created.min_time,
+                            url_c.as_ptr(),
+                            fn_c.as_ptr(),
+                            cat_c.as_ptr(),
+                            dk_c.as_ptr(),
+                        );
+                    }
+                }
+
+                if let Ok(mut st) = self.state.lock() {
+                    if let Some(fi) = st.feeds.get_mut(idx) {
+                        fi.status = FS_FINISHED;
+                    }
+                }
+            }
+        }
+    }
+
+    fn on_queue_update(&self, env: &NzbgetRsFeedCoordEnv) {
+        feed_emit_log(env, 0, &[b"Notification from URL-Coordinator received"]);
+        if env.a1 == EA_URL_COMPLETED {
+            let url = feed_cstr_bytes(env.s1).to_vec();
+            if let Ok(mut st) = self.state.lock() {
+                if let Some(h) = st.history.iter_mut().find(|h| h.url == url) {
+                    h.status = HS_FETCHED;
+                } else {
+                    st.history.push(RsFeedHistoryEntry {
+                        url,
+                        status: HS_FETCHED,
+                        last_seen: feed_now_sec(),
+                    });
+                }
+                st.save = true;
+            }
+        }
+    }
+
+    fn on_work_state_update(&self) {
+        if let Ok(_st) = self.state.lock() {
+            self.force.store(true, Ordering::SeqCst);
+            self.wait_cv.notify_all();
+        }
+    }
+
+    fn fetch_feed(&self, env: &NzbgetRsFeedCoordEnv, target_id: i32) {
+        feed_emit_log(env, 0, &[b"FetchFeeds"]);
+        if let Ok(mut st) = self.state.lock() {
+            for fi in &mut st.feeds {
+                if fi.cfg.id == target_id || target_id == 0 {
+                    fi.fetch = true;
+                    self.force.store(true, Ordering::SeqCst);
+                }
+            }
+            self.wait_cv.notify_all();
+        }
+    }
+
+    fn fetch_feed_list(&self, env: &NzbgetRsFeedCoordEnv) {
+        let feed_list = feed_cstr_bytes(env.s1);
+        for tok in crate::util::tokens(feed_list, b",;") {
+            let tok_c = feed_bytes_to_cstr(tok);
+            let parsed_id = c_atoi_bytes(tok);
+            let matched_fetch_id = self.state.lock().ok().and_then(|st| {
+                for fi in &st.feeds {
+                    let (matched, fetch_id) = unsafe {
+                        crate::scheduler::scheduler_matches_feed_ref(
+                            parsed_id,
+                            fi.cfg.id,
+                            fi.cfg.name.as_ptr(),
+                            tok_c.as_ptr(),
+                        )
+                    };
+                    if matched {
+                        return Some(fetch_id);
+                    }
+                }
+                None
+            });
+            if let Some(fid) = matched_fetch_id {
+                self.fetch_feed(env, fid);
+            }
+        }
+    }
+
+    fn view_or_preview(&self, env: &NzbgetRsFeedCoordEnv) -> c_int {
+        let Some(act) = env.action_cb else {
+            return 0;
+        };
+        let flags = env.a1;
+        let is_preview = (flags & 1) != 0;
+        let incl_non_match = (flags & 8) != 0;
+
+        let (cfg, cache_time_sec, cache_id) = if !is_preview {
+            let id = env.a2;
+            let Ok(st) = self.state.lock() else {
+                return 0;
+            };
+            if id < 1 || (id as usize) > st.feeds.len() {
+                return 0;
+            }
+            let existing = st.feeds[(id - 1) as usize].cfg.clone();
+            (existing, 0, Vec::new())
+        } else {
+            let id = env.a2;
+            let cert_level = self
+                .state
+                .lock()
+                .ok()
+                .and_then(|st| {
+                    if id >= 1 && (id as usize) <= st.feeds.len() {
+                        Some(st.feeds[(id - 1) as usize].cfg.cert_verif_level)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(2);
+            let cfg = build_feed_config(
+                id,
+                feed_cstr_bytes(env.s1),
+                feed_cstr_bytes(env.s2),
+                (flags & 2) != 0,
+                env.a5,
+                feed_cstr_bytes(env.s3),
+                (flags & 4) != 0,
+                feed_cstr_bytes(env.s4),
+                env.a3,
+                env.a4,
+                feed_cstr_bytes(env.s5),
+                cert_level,
+            );
+            (cfg, env.a6, feed_cstr_bytes(env.s6).to_vec())
+        };
+
+        feed_emit_log(env, 0, &[b"Preview feed ", cfg.name.as_bytes()]);
+
+        let mut cached_arc: Option<Arc<Mutex<Vec<RsFeedItem>>>> = None;
+        if cache_time_sec > 0 && !cache_id.is_empty() {
+            if let Ok(mut st) = self.state.lock() {
+                if let Some(entry) = st.cache.iter_mut().find(|c| c.cache_id == cache_id) {
+                    entry.last_usage = feed_now_sec();
+                    cached_arc = Some(Arc::clone(&entry.items));
+                }
+            }
+        }
+        let has_cache = cached_arc.is_some();
+
+        let items_arc = if let Some(arc) = cached_arc {
+            arc
+        } else {
+            let opts = query_runtime_opts(env);
+            let slot = Arc::new(PreviewFeedSlot {
+                cfg: cfg.clone(),
+                status: AtomicI32::new(FS_UNDEFINED),
+                last_interval: AtomicI32::new(0),
+                output_filename: Mutex::new(Vec::new()),
+            });
+
+            let first_fetch = {
+                let Ok(mut st) = self.state.lock() else {
+                    return 0;
+                };
+                let mut ff = true;
+                for fi2 in &st.feeds {
+                    if is_feed_url_and_filter_updated(
+                        fi2.cfg.url.as_bytes(),
+                        cfg.url.as_bytes(),
+                        &fi2.cfg.filter,
+                        &cfg.filter,
+                        fi2.last_update,
+                    ) {
+                        ff = false;
+                        break;
+                    }
+                }
+                let _ = self.spawn_downloader(
+                    &mut st,
+                    ActiveFeedTarget::Preview(Arc::clone(&slot)),
+                    &cfg,
+                    true,
+                    true,
+                    &opts,
+                    env,
+                );
+                self.force.store(true, Ordering::SeqCst);
+                self.wait_cv.notify_all();
+                ff
+            };
+
+            while slot.status.load(Ordering::Acquire) == FS_RUNNING {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+
+            if slot.status.load(Ordering::Acquire) != FS_FINISHED {
+                return 0;
+            }
+
+            let out_fn = slot
+                .output_filename
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            let eff_ext = if !cfg.extensions.is_empty() {
+                &cfg.extensions
+            } else {
+                &opts.extensions
+            };
+            let ext_c = feed_bytes_to_cstr(eff_ext);
+            let out_c = feed_bytes_to_cstr(&out_fn);
+            unsafe {
+                act(
+                    env.ctx,
+                    3,
+                    0,
+                    cfg.id,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ext_c.as_ptr(),
+                    out_c.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
+            }
+
+            let Some(mut parsed_items) = Self::parse_feed_items(&out_fn, cfg.name.as_bytes(), env)
+            else {
+                return 0;
+            };
+
+            if let Ok(st) = self.state.lock() {
+                for item in &mut parsed_items {
+                    let hist = st.history.iter().find(|h| h.url == item.url);
+                    item.status = resolve_preview_item_status(
+                        hist.is_some(),
+                        hist.map_or(0, |h| h.status),
+                        first_fetch,
+                        cfg.backlog,
+                    );
+                }
+            }
+
+            Arc::new(Mutex::new(parsed_items))
+        };
+
+        if let Ok(mut items_guard) = items_arc.lock() {
+            Self::filter_feed_items(&cfg, &mut items_guard, env);
+            if let Some(emit_cb) = env.rpc_emit_cb {
+                for fi in items_guard.iter() {
+                    if incl_non_match || fi.match_status == MS_ACCEPTED {
+                        let title_c = feed_bytes_to_cstr(&fi.title);
+                        let fn_c = feed_bytes_to_cstr(&fi.filename);
+                        let url_c = feed_bytes_to_cstr(&fi.url);
+                        let cat_c = feed_bytes_to_cstr(&fi.category);
+                        let add_cat_c = feed_bytes_to_cstr(&fi.add_category);
+                        let dk_c = feed_bytes_to_cstr(&fi.dupe_key);
+                        let rpc_item = crate::xmlrpc_format::NzbgetRsRpcFeedItem {
+                            title: title_c.as_ptr(),
+                            filename: fn_c.as_ptr(),
+                            url: url_c.as_ptr(),
+                            size: fi.size,
+                            size_mb: (fi.size / 1024 / 1024) as c_int,
+                            category: cat_c.as_ptr(),
+                            add_category: add_cat_c.as_ptr(),
+                            pause_nzb: c_int::from(fi.pause_nzb),
+                            priority: fi.priority,
+                            time: fi.time as c_int,
+                            match_status: fi.match_status,
+                            match_rule: fi.match_rule,
+                            dupe_key: dk_c.as_ptr(),
+                            dupe_score: fi.dupe_score,
+                            dupe_mode: fi.dupe_mode,
+                            status: fi.status,
+                        };
+                        unsafe { emit_cb(env.ctx, &rpc_item) };
+                    }
+                }
+            }
+        }
+
+        if !has_cache && cache_time_sec > 0 && !cache_id.is_empty() {
+            if let Ok(mut st) = self.state.lock() {
+                st.cache.push(RsFeedCacheEntry {
+                    url: cfg.url.as_bytes().to_vec(),
+                    cache_time_sec,
+                    cache_id,
+                    last_usage: feed_now_sec(),
+                    items: items_arc,
+                });
+            }
+        }
+
+        1
+    }
+
+    fn emit_health_feeds(&self, env: &NzbgetRsFeedCoordEnv) {
+        let Some(cb) = env.health_emit_cb else {
+            return;
+        };
+        if let Ok(st) = self.state.lock() {
+            for fi in &st.feeds {
+                unsafe {
+                    cb(
+                        env.ctx,
+                        fi.cfg.id,
+                        fi.cfg.name.as_ptr(),
+                        fi.cfg.name.as_bytes().len(),
+                        fi.cfg.url.as_ptr(),
+                        fi.cfg.url.as_bytes().len(),
+                        fi.cfg.interval,
+                        fi.cfg.cert_verif_level,
+                    );
+                }
+            }
+        }
+    }
+
+    fn log_debug_info(&self, env: &NzbgetRsFeedCoordEnv) {
+        let Some(act) = env.action_cb else {
+            return;
+        };
+        feed_emit_log(env, 2, &[b"   ---------- FeedCoordinator"]);
+        if let Ok(st) = self.state.lock() {
+            feed_emit_log(
+                env,
+                2,
+                &[format!("    Active Downloads: {}", st.active.len()).as_bytes()],
+            );
+            for active in &st.active {
+                unsafe {
+                    act(
+                        env.ctx,
+                        1,
+                        active.dl_ptr,
+                        1,
+                        0,
+                        0,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn destroy_remaining(&self, env: &NzbgetRsFeedCoordEnv) {
+        feed_emit_log(env, 0, &[b"Destroying FeedCoordinator"]);
+        if let Some(act) = env.action_cb {
+            let dl_ptrs: Vec<usize> = self
+                .state
+                .lock()
+                .map(|mut st| st.active.drain(..).map(|a| a.dl_ptr).collect())
+                .unwrap_or_default();
+            for dl_ptr in dl_ptrs {
+                unsafe {
+                    act(
+                        env.ctx,
+                        1,
+                        dl_ptr,
+                        2,
+                        0,
+                        0,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    );
+                }
+            }
+        }
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_file_parser_free(parser: *mut FeedFileParser) {
-    if !parser.is_null() {
-        drop(Box::from_raw(parser));
-    }
+pub extern "C" fn nzbget_rs_feed_coord_new() -> *mut NzbgetRsFeedCoord {
+    Box::into_raw(Box::new(NzbgetRsFeedCoord::new()))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_file_parser_finalize(parser: *mut FeedFileParser) -> usize {
-    if parser.is_null() {
-        return 0;
+pub unsafe extern "C" fn nzbget_rs_feed_coord_free(coord: *mut NzbgetRsFeedCoord) {
+    if !coord.is_null() {
+        drop(Box::from_raw(coord));
     }
-    (*parser).finalize_items().len()
 }
 
+/// Dispatches `FeedCoordinator` operations:
+/// - `0`: `AddFeed`
+/// - `1`: `Run()`
+/// - `2`: `Stop()`
+/// - `3`: `Update(dl_ptr)` (`FeedCompleted`)
+/// - `4`: `DownloadQueueUpdate(action, url)`
+/// - `5`: `WorkStateUpdate()`
+/// - `6`: `FetchFeed(id)`
+/// - `7`: `FetchFeedList(feed_list)`
+/// - `8`: `HasActiveDownloads() -> 1/0`
+/// - `9`: `ViewOrPreviewFeed(...) -> 1/0`
+/// - `10`: `EmitHealthFeeds(...)`
+/// - `11`: `LogDebugInfo()`
+/// - `12`: `~FeedCoordinator()` cleanup
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_file_parser_get_item(
-    parser: *const FeedFileParser,
-    index: usize,
-    out_view: *mut NzbgetRsParsedFeedItemView,
+pub unsafe extern "C" fn nzbget_rs_feed_coord_exec(
+    coord: *const NzbgetRsFeedCoord,
+    op: c_int,
+    env: *const NzbgetRsFeedCoordEnv,
 ) -> c_int {
-    if parser.is_null() || out_view.is_null() {
+    let Some(coord) = coord.as_ref() else {
         return 0;
+    };
+    if op == 5 {
+        coord.on_work_state_update();
+        return 1;
     }
-    let parser_ref = &*parser;
-    let Some(item) = parser_ref.items.get(index) else {
+    if op == 8 {
+        return c_int::from(
+            coord
+                .state
+                .lock()
+                .map(|st| !st.active.is_empty())
+                .unwrap_or(false),
+        );
+    }
+    let Some(env) = env.as_ref() else {
         return 0;
     };
-    *out_view = NzbgetRsParsedFeedItemView {
-        title: item.title.as_ptr(),
-        filename: item.filename.as_ptr(),
-        url: item.url.as_ptr(),
-        category: item.category.as_ptr(),
-        description: item.description.as_ptr(),
-        season: item.season.as_ptr(),
-        episode: item.episode.as_ptr(),
-        has_season: i32::from(item.has_season),
-        has_episode: i32::from(item.has_episode),
-        time: item.time,
-        size: item.size,
-        imdb_id: item.imdb_id,
-        rage_id: item.rage_id,
-        tvdb_id: item.tvdb_id,
-        tvmaze_id: item.tvmaze_id,
-        attr_names: item.attr_name_ptrs.as_ptr(),
-        attr_values: item.attr_value_ptrs.as_ptr(),
-        attr_count: item.attr_name_ptrs.len(),
-    };
-    1
+    match op {
+        0 => {
+            coord.add_feed(env);
+            1
+        }
+        1 => {
+            coord.run_loop(env);
+            1
+        }
+        2 => {
+            coord.stop_downloads(env);
+            1
+        }
+        3 => {
+            coord.on_downloader_update(env);
+            1
+        }
+        4 => {
+            coord.on_queue_update(env);
+            1
+        }
+        6 => {
+            coord.fetch_feed(env, env.a1);
+            1
+        }
+        7 => {
+            coord.fetch_feed_list(env);
+            1
+        }
+        9 => coord.view_or_preview(env),
+        10 => {
+            coord.emit_health_feeds(env);
+            1
+        }
+        11 => {
+            coord.log_debug_info(env);
+            1
+        }
+        12 => {
+            coord.destroy_remaining(env);
+            1
+        }
+        _ => 0,
+    }
 }
 
 #[cfg(test)]

@@ -1304,6 +1304,507 @@ impl NServOptsHandle {
     }
 }
 
+// ============================================================================
+// End-to-End NServ Server & Client Session Runner (`NServMain`, `NntpServer`, `NntpProcessor`)
+// ============================================================================
+
+/// Host C++ callback table for `nzbget_rs_nserv_run`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NzbgetRsNservEnv {
+    pub ctx: *mut std::ffi::c_void,
+    pub version: *const std::ffi::c_char,
+    pub write_stdout_cb: Option<unsafe extern "C" fn(*const std::ffi::c_char, usize)>,
+    pub log_cb: Option<
+        unsafe extern "C" fn(*mut std::ffi::c_void, std::ffi::c_int, *const std::ffi::c_char),
+    >,
+    pub runtime_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            std::ffi::c_int,
+            std::ffi::c_int,
+            *const *const std::ffi::c_char,
+            usize,
+        ),
+    >,
+    pub conn_cb: Option<
+        unsafe extern "C" fn(
+            usize,
+            std::ffi::c_int,
+            std::ffi::c_int,
+            std::ffi::c_int,
+            *const std::ffi::c_char,
+            *const std::ffi::c_char,
+            *mut std::ffi::c_char,
+        ) -> usize,
+    >,
+}
+
+#[derive(Clone, Copy)]
+struct NservEnvSend(NzbgetRsNservEnv);
+unsafe impl Send for NservEnvSend {}
+unsafe impl Sync for NservEnvSend {}
+
+fn nserv_now_formatted() -> Vec<u8> {
+    #[cfg(unix)]
+    let now = unsafe { libc::time(std::ptr::null_mut()) } as i64;
+    #[cfg(not(unix))]
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut buf = [0u8; 50];
+    crate::util::util_format_time(now, &mut buf);
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(0);
+    buf[..end].to_vec()
+}
+
+fn nserv_env_log(env: &NzbgetRsNservEnv, level: i32, parts: &[&[u8]]) {
+    let Some(cb) = env.log_cb else {
+        return;
+    };
+    let joined: Vec<u8> = parts.concat();
+    let cstr = nserv_bytes_to_cstring(&joined);
+    unsafe { cb(env.ctx, level as std::ffi::c_int, cstr.as_ptr()) };
+}
+
+struct NservSharedState {
+    env: NservEnvSend,
+    bind_address: std::ffi::CString,
+    secure_cert: Option<std::ffi::CString>,
+    secure_key: Option<std::ffi::CString>,
+    data_dir: Option<Vec<u8>>,
+    cache_dir: Option<Vec<u8>>,
+    latency: i32,
+    speed: i32,
+    cache: Option<std::sync::Arc<NntpCache>>,
+    stopped: std::sync::atomic::AtomicBool,
+}
+
+fn run_nntp_processor_session(
+    shared: std::sync::Arc<NservSharedState>,
+    proc_id: i32,
+    server_id: i32,
+    conn: usize,
+) {
+    let env = &shared.env.0;
+    let Some(conn_cb) = env.conn_cb else {
+        return;
+    };
+    let cert_ptr = shared
+        .secure_cert
+        .as_ref()
+        .map_or(std::ptr::null(), |s| s.as_ptr());
+    let key_ptr = shared
+        .secure_key
+        .as_ref()
+        .map_or(std::ptr::null(), |s| s.as_ptr());
+
+    let mut host_buf = [0 as std::ffi::c_char; 256];
+    let started = unsafe {
+        conn_cb(
+            conn,
+            5,
+            host_buf.len() as std::ffi::c_int,
+            0,
+            cert_ptr,
+            key_ptr,
+            host_buf.as_mut_ptr(),
+        )
+    };
+    if started == 0 {
+        nserv_env_log(
+            env,
+            4,
+            &[b"Could not establish secure connection to nntp-client: Start TLS failed"],
+        );
+        unsafe { conn_cb(conn, 4, 0, 1, std::ptr::null(), std::ptr::null(), std::ptr::null_mut()) };
+        return;
+    }
+
+    let host_bytes = unsafe { CStr::from_ptr(host_buf.as_ptr()) }.to_bytes();
+    let ts = nserv_now_formatted();
+    nserv_env_log(
+        env,
+        2,
+        &[
+            &ts,
+            format!(" [{proc_id}] Incoming connection from: ").as_bytes(),
+            host_bytes,
+        ],
+    );
+
+    unsafe {
+        conn_cb(
+            conn,
+            7,
+            0,
+            1,
+            c"200 Welcome (NServ)\r\n".as_ptr(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    let mut line_buf = [0 as std::ffi::c_char; 1024];
+    loop {
+        let got = unsafe {
+            conn_cb(
+                conn,
+                6,
+                1024,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                line_buf.as_mut_ptr(),
+            )
+        };
+        if got == 0 {
+            break;
+        }
+        let raw_line = unsafe { CStr::from_ptr(line_buf.as_ptr()) }.to_bytes();
+        let mut write_line_fn = |reply: &[u8]| {
+            let cstr = nserv_bytes_to_cstring(reply);
+            unsafe {
+                conn_cb(
+                    conn,
+                    7,
+                    0,
+                    1,
+                    cstr.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                );
+            }
+        };
+        let mut send_fn = |chunk: &[u8]| unsafe {
+            conn_cb(
+                conn,
+                7,
+                chunk.len() as std::ffi::c_int,
+                0,
+                chunk.as_ptr().cast(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            );
+        };
+        let mut log_fn = |kind: i32, msg: &[u8]| match kind {
+            0 => {
+                let ts = nserv_now_formatted();
+                nserv_env_log(
+                    env,
+                    1,
+                    &[&ts, format!(" [{proc_id}] ").as_bytes(), msg],
+                );
+            }
+            1 => nserv_env_log(env, 1, &[format!("[{proc_id}] ").as_bytes(), msg]),
+            2 => nserv_env_log(env, 3, &[format!("[{proc_id}] ").as_bytes(), msg]),
+            3 => nserv_env_log(env, 4, &[msg]),
+            _ => {}
+        };
+
+        let keep_going = nntp_processor_handle_line(
+            server_id,
+            shared.data_dir.as_deref(),
+            shared.cache_dir.as_deref(),
+            shared.latency,
+            shared.speed,
+            shared.cache.as_deref(),
+            raw_line,
+            &mut write_line_fn,
+            &mut send_fn,
+            &mut log_fn,
+        );
+        if !keep_going {
+            break;
+        }
+    }
+
+    unsafe { conn_cb(conn, 4, 1, 1, std::ptr::null(), std::ptr::null(), std::ptr::null_mut()) };
+}
+
+fn run_nntp_server_instance(
+    shared: std::sync::Arc<NservSharedState>,
+    server_id: i32,
+    port: i32,
+    listener_slot: std::sync::Arc<Mutex<usize>>,
+) {
+    use std::sync::atomic::Ordering;
+    let env = &shared.env.0;
+    let Some(conn_cb) = env.conn_cb else {
+        return;
+    };
+
+    nserv_env_log(env, 0, &[b"Entering NntpServer-loop"]);
+    let ts = nserv_now_formatted();
+    nserv_env_log(
+        env,
+        2,
+        &[&ts, format!(" Listening on port {port}").as_bytes()],
+    );
+
+    let cert_ptr = shared
+        .secure_cert
+        .as_ref()
+        .map_or(std::ptr::null(), |s| s.as_ptr());
+    let mut num: i32 = 1;
+
+    while !shared.stopped.load(Ordering::SeqCst) {
+        let mut conn = listener_slot.lock().map(|g| *g).unwrap_or(0);
+        let bind = if conn == 0 {
+            let created = unsafe {
+                conn_cb(
+                    0,
+                    0,
+                    port as std::ffi::c_int,
+                    0,
+                    shared.bind_address.as_ptr(),
+                    cert_ptr,
+                    std::ptr::null_mut(),
+                )
+            };
+            let bound = created != 0
+                && unsafe {
+                    conn_cb(
+                        created,
+                        1,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                    )
+                } != 0;
+            if let Ok(mut g) = listener_slot.lock() {
+                *g = created;
+                if shared.stopped.load(Ordering::SeqCst) && created != 0 {
+                    unsafe {
+                        conn_cb(
+                            created,
+                            3,
+                            0,
+                            0,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                        );
+                    }
+                }
+            }
+            conn = created;
+            bound
+        } else {
+            true
+        };
+
+        let accepted = if bind && !shared.stopped.load(Ordering::SeqCst) {
+            unsafe {
+                conn_cb(
+                    conn,
+                    2,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                )
+            }
+        } else {
+            0
+        };
+
+        if !bind || accepted == 0 {
+            if shared.stopped.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Ok(mut g) = listener_slot.lock() {
+                let old = std::mem::replace(&mut *g, 0);
+                if old != 0 {
+                    unsafe {
+                        conn_cb(
+                            old,
+                            4,
+                            0,
+                            0,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                        );
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+
+        let proc_id = num;
+        num = num.wrapping_add(1);
+        let shared_clone = std::sync::Arc::clone(&shared);
+        std::thread::spawn(move || {
+            run_nntp_processor_session(shared_clone, proc_id, server_id, accepted);
+        });
+    }
+
+    if let Ok(mut g) = listener_slot.lock() {
+        let old = std::mem::replace(&mut *g, 0);
+        if old != 0 {
+            unsafe {
+                conn_cb(
+                    old,
+                    4,
+                    2,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                );
+            }
+        }
+    }
+
+    nserv_env_log(env, 0, &[b"Exiting NntpServer-loop"]);
+}
+
+/// Runs `NServMain` (`--nserv`) end-to-end: CLI parsing/validation, NZB generation (`-z`/`-q`),
+/// multi-instance `NntpServer` accept loops, and per-client `NntpProcessor` sessions.
+///
+/// # Safety
+/// `argv` (when `argc > 0`) and `env` must be valid for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nserv_run(
+    argc: std::ffi::c_int,
+    argv: *const *const std::ffi::c_char,
+    env: *const NzbgetRsNservEnv,
+) -> std::ffi::c_int {
+    let Some(env) = env.as_ref() else {
+        return 1;
+    };
+    let ver_bytes = if env.version.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(env.version).to_bytes()
+    };
+    let ts = nserv_now_formatted();
+    nserv_env_log(
+        env,
+        2,
+        &[&ts, b" NServ ", ver_bytes, b" (Test NNTP server)"],
+    );
+
+    let mut arg_slices: Vec<&[u8]> = Vec::new();
+    if argc > 0 && !argv.is_null() {
+        for i in 0..argc as usize {
+            let p = *argv.add(i);
+            arg_slices.push(if p.is_null() { b"" } else { CStr::from_ptr(p).to_bytes() });
+        }
+    }
+
+    let Some(handle) = NServOptsHandle::parse_and_validate(
+        &arg_slices,
+        |data| {
+            if let Some(cb) = env.write_stdout_cb {
+                cb(data.as_ptr().cast(), data.len());
+            }
+        },
+        |level, msg| {
+            if let Some(cb) = env.log_cb {
+                cb(env.ctx, level as std::ffi::c_int, msg.as_ptr());
+            }
+        },
+    ) else {
+        return 1;
+    };
+
+    let opt_ptrs: Vec<*const std::ffi::c_char> =
+        handle.c_cmd_opts.iter().map(|c| c.as_ptr()).collect();
+    if let Some(rt_cb) = env.runtime_cb {
+        rt_cb(env.ctx, 0, 0, opt_ptrs.as_ptr(), opt_ptrs.len());
+    }
+
+    let quit_now = handle.run_post_frontend_setup(|level, msg| {
+        if let Some(cb) = env.log_cb {
+            cb(env.ctx, level as std::ffi::c_int, msg.as_ptr());
+        }
+    });
+    if quit_now {
+        if let Some(rt_cb) = env.runtime_cb {
+            rt_cb(env.ctx, 1, 0, std::ptr::null(), 0);
+            rt_cb(env.ctx, 2, 20, std::ptr::null(), 0);
+        }
+        return 0;
+    }
+
+    let shared = std::sync::Arc::new(NservSharedState {
+        env: NservEnvSend(*env),
+        bind_address: handle.c_bind_address.clone(),
+        secure_cert: handle.c_secure_cert.clone(),
+        secure_key: handle.c_secure_key.clone(),
+        data_dir: (!handle.parsed.data_dir.is_empty()).then(|| handle.parsed.data_dir.clone()),
+        cache_dir: (!handle.parsed.cache_dir.is_empty()).then(|| handle.parsed.cache_dir.clone()),
+        latency: handle.parsed.latency,
+        speed: handle.parsed.speed,
+        cache: handle
+            .parsed
+            .mem_cache
+            .then(|| std::sync::Arc::new(NntpCache::new())),
+        stopped: std::sync::atomic::AtomicBool::new(false),
+    });
+
+    let inst_count = handle.parsed.instances.max(0) as usize;
+    let first_port = handle.parsed.first_port;
+    let mut slots = Vec::with_capacity(inst_count);
+    let mut threads = Vec::with_capacity(inst_count);
+
+    for i in 0..inst_count {
+        let slot = std::sync::Arc::new(Mutex::new(0usize));
+        slots.push(std::sync::Arc::clone(&slot));
+        let shared_clone = std::sync::Arc::clone(&shared);
+        let server_id = (i as i32) + 1;
+        let port = first_port.wrapping_add(i as i32);
+        threads.push(std::thread::spawn(move || {
+            run_nntp_server_instance(shared_clone, server_id, port, slot);
+        }));
+    }
+
+    nserv_env_log(env, 2, &[b"Press Ctrl+C to quit"]);
+    if let Some(rt_cb) = env.runtime_cb {
+        rt_cb(env.ctx, 3, 0, std::ptr::null(), 0);
+    }
+
+    shared
+        .stopped
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(conn_cb) = env.conn_cb {
+        for slot in &slots {
+            if let Ok(g) = slot.lock() {
+                if *g != 0 {
+                    conn_cb(
+                        *g,
+                        3,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(rt_cb) = env.runtime_cb {
+        rt_cb(env.ctx, 1, 0, std::ptr::null(), 0);
+    }
+    for th in threads {
+        let _ = th.join();
+    }
+    if let Some(rt_cb) = env.runtime_cb {
+        rt_cb(env.ctx, 2, 50, std::ptr::null(), 0);
+    }
+
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1557,6 +2058,104 @@ mod tests {
         assert!(!handle.run_post_frontend_setup(|lvl, m| logs.push((lvl, m.to_bytes().to_vec()))));
         assert!(cache_sub.is_dir());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_nserv_run_shutdown_during_bind_does_not_hang_accept() {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        struct MockState {
+            status: AtomicI32, // 0=init, 1=listening, 2=cancelled, 3=freed
+            accept_calls: AtomicI32,
+            entered_bind: std::sync::Barrier,
+            allow_bind_finish: std::sync::Barrier,
+        }
+        static MOCK: std::sync::OnceLock<MockState> = std::sync::OnceLock::new();
+        let mock = MOCK.get_or_init(|| MockState {
+            status: AtomicI32::new(0),
+            accept_calls: AtomicI32::new(0),
+            entered_bind: std::sync::Barrier::new(2),
+            allow_bind_finish: std::sync::Barrier::new(2),
+        });
+
+        unsafe extern "C" fn mock_rt(_: *mut std::ffi::c_void, op: std::ffi::c_int, _: std::ffi::c_int, _: *const *const std::ffi::c_char, _: usize) {
+            if op == 3 {
+                let m = MOCK.get().unwrap();
+                m.entered_bind.wait();
+                // Return from getchar() immediately while Bind() is still in flight!
+            }
+        }
+
+        unsafe extern "C" fn mock_conn(
+            raw: usize,
+            op: std::ffi::c_int,
+            _: std::ffi::c_int,
+            _: std::ffi::c_int,
+            _: *const std::ffi::c_char,
+            _: *const std::ffi::c_char,
+            _: *mut std::ffi::c_char,
+        ) -> usize {
+            let m = MOCK.get().unwrap();
+            match op {
+                0 => 0x1234,
+                1 => {
+                    m.entered_bind.wait();
+                    // Give main thread time to set shared.stopped = true and attempt slot cancellation
+                    std::thread::sleep(Duration::from_millis(25));
+                    m.allow_bind_finish.wait();
+                    // Overwrite status with LISTENING just like socket::bind_listener does
+                    m.status.store(1, Ordering::SeqCst);
+                    1
+                }
+                2 => {
+                    m.accept_calls.fetch_add(1, Ordering::SeqCst);
+                    // Would hang forever if called while status == 1 (LISTENING)!
+                    while m.status.load(Ordering::SeqCst) == 1 {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    0
+                }
+                3 => {
+                    assert_eq!(raw, 0x1234);
+                    m.status.store(2, Ordering::SeqCst);
+                    1
+                }
+                4 => {
+                    assert_eq!(raw, 0x1234);
+                    m.status.store(3, Ordering::SeqCst);
+                    0
+                }
+                _ => 0,
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("nzbget_nserv_race_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d_cstr = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+        let a0 = std::ffi::CString::new("rustyget").unwrap();
+        let a1 = std::ffi::CString::new("--nserv").unwrap();
+        let a2 = std::ffi::CString::new("-d").unwrap();
+        let argv = [a0.as_ptr(), a1.as_ptr(), a2.as_ptr(), d_cstr.as_ptr()];
+        let ver = std::ffi::CString::new("27.0").unwrap();
+
+        let release_thread = std::thread::spawn(move || {
+            MOCK.get().unwrap().allow_bind_finish.wait();
+        });
+
+        let env = NzbgetRsNservEnv {
+            ctx: std::ptr::null_mut(),
+            version: ver.as_ptr(),
+            write_stdout_cb: None,
+            log_cb: None,
+            runtime_cb: Some(mock_rt),
+            conn_cb: Some(mock_conn),
+        };
+        let rc = unsafe { nzbget_rs_nserv_run(argv.len() as std::ffi::c_int, argv.as_ptr(), &env) };
+        release_thread.join().unwrap();
+        assert_eq!(rc, 0);
+        assert_eq!(mock.accept_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(mock.status.load(Ordering::SeqCst), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

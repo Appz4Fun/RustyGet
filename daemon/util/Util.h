@@ -1360,373 +1360,6 @@ enum EDupeMode
 };
 #endif
 
-class FeedInfo
-{
-public:
-	enum EStatus
-	{
-		fsUndefined,
-		fsRunning,
-		fsFinished,
-		fsFailed
-	};
-
-	enum class CategorySource
-	{
-		Auto,
-		NZBFile,
-		FeedFile
-	};
-
-	FeedInfo(
-		int id,
-		const char* name,
-		const char* url,
-		bool backlog,
-		int interval,
-		const char* filter,
-		bool pauseNzb,
-		const char* category,
-		CategorySource categorySource,
-		int priority,
-		const char* extensions,
-		unsigned int certVerifLevel
-	)
-		: m_id{ id }
-		, m_name{ name ? name : "" }
-		, m_url{ url ? url : "" }
-		, m_filter{ filter ? filter : "" }
-		, m_category{ category ? category : "" }
-		, m_categorySource{ categorySource }
-		, m_extensions{ extensions ? extensions : "" }
-		, m_backlog{ backlog }
-		, m_interval{ interval }
-		, m_pauseNzb{ pauseNzb }
-		, m_priority{ priority }
-		, m_certVerifLevel{ certVerifLevel }
-	{
-		NzbgetRsBuf defaultName = nzbget_rs_feed_str_op(0, m_id, 0, 0, 0, 0, 0,
-			m_name.c_str(), m_filter.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, &m_filterHash);
-		if (defaultName.data) m_name.assign(defaultName.data, defaultName.len);
-		nzbget_rs_free(defaultName);
-	}
-	int GetId() const { return m_id; }
-	const char* GetName() const { return m_name.c_str(); }
-	const char* GetUrl() const { return m_url.c_str(); }
-	int GetInterval() const { return m_interval; }
-	const char* GetFilter() const { return m_filter.c_str(); }
-	uint32 GetFilterHash() { return m_filterHash; }
-	bool GetPauseNzb() const { return m_pauseNzb; }
-	const char* GetCategory() const { return m_category.c_str(); }
-	int GetPriority() const { return m_priority; }
-	const char* GetExtensions() const { return m_extensions.c_str(); }
-	unsigned int GetCertVerificationLevel() const { return m_certVerifLevel; }
-	time_t GetLastUpdate() { return m_lastUpdate; }
-	void SetLastUpdate(time_t lastUpdate) { m_lastUpdate = lastUpdate; }
-	time_t GetNextUpdate() { return m_nextUpdate; }
-	void SetNextUpdate(time_t nextUpdate) { m_nextUpdate = nextUpdate; }
-	int GetLastInterval() { return m_lastInterval; }
-	void SetLastInterval(int lastInterval) { m_lastInterval = lastInterval; }
-	bool GetPreview() { return m_preview; }
-	void SetPreview(bool preview) { m_preview = preview; }
-	EStatus GetStatus() { return m_status; }
-	void SetStatus(EStatus Status) { m_status = Status; }
-	const char* GetOutputFilename() const { return m_outputFilename.c_str(); }
-	void SetOutputFilename(const char* outputFilename) { m_outputFilename = outputFilename ? outputFilename : ""; }
-	bool GetFetch() { return m_fetch; }
-	void SetFetch(bool fetch) { m_fetch = fetch; }
-	void SetForce(bool force) { m_force = force; }
-	bool GetBacklog() { return m_backlog; }
-	CategorySource GetCategorySource() const { return m_categorySource; }
-
-private:
-	int m_id;
-	std::string m_name;
-	std::string m_url;
-	std::string m_category;
-	std::string m_extensions;
-	std::string m_filter;
-	std::string m_outputFilename;
-	time_t m_lastUpdate = 0;
-	time_t m_nextUpdate = 0;
-	uint32 m_filterHash;
-	std::atomic<EStatus> m_status{fsUndefined};
-	CategorySource m_categorySource = CategorySource::NZBFile;
-	int m_interval;
-	int m_priority;
-	int m_lastInterval = 0;
-	bool m_backlog;
-	bool m_pauseNzb;
-	bool m_preview = false;
-	bool m_fetch = false;
-	bool m_force = false;
-	unsigned int m_certVerifLevel;
-};
-
-typedef std::deque<std::unique_ptr<FeedInfo>> Feeds;
-
-class FeedFilterHelper
-{
-public:
-	virtual void CalcDupeStatus(const char* title, const char* dupeKey, char* statusBuf, int bufLen) = 0;
-};
-
-class FeedItemInfo
-{
-public:
-	enum EStatus
-	{
-		isUnknown,
-		isBacklog,
-		isFetched,
-		isNew
-	};
-
-	enum EMatchStatus
-	{
-		msIgnored,
-		msAccepted,
-		msRejected
-	};
-
-	class Attr
-	{
-	public:
-		Attr(const char* name, const char* value)
-			: m_name(name ? name : "")
-			, m_value(value ? value : "") 
-		{ }
-		const char* GetName() const { return m_name.c_str(); }
-		const char* GetValue() const { return m_value.c_str(); }
-	private:
-		std::string m_name;
-		std::string m_value;
-	};
-
-	typedef std::deque<Attr> AttributesBase;
-
-	class Attributes: public AttributesBase
-	{
-	public:
-		Attr* Find(const char* name)
-		{
-			if (!name)
-			{
-				return nullptr;
-			}
-			for (Attr& attr : *this)
-			{
-				if (!strcasecmp(attr.GetName(), name))
-				{
-					return &attr;
-				}
-			}
-			return nullptr;
-		}
-	};
-
-	FeedItemInfo() {}
-	FeedItemInfo(FeedItemInfo&&) = delete;
-	void SetFeedFilterHelper(FeedFilterHelper* feedFilterHelper) { m_feedFilterHelper = feedFilterHelper; }
-	const char* GetTitle() const { return m_title.c_str(); }
-	void SetTitle(const char* title) { m_title = title ? title : ""; }
-	const char* GetFilename() const { return m_filename.c_str(); }
-	void SetFilename(const char* filename) { m_filename = filename ? filename : ""; }
-	const char* GetUrl() const { return m_url.c_str(); }
-	void SetUrl(const char* url) { m_url = url ? url : ""; }
-	int64 GetSize() const { return m_size; }
-	void SetSize(int64 size) { m_size = size; }
-	const char* GetCategory() const { return m_category.c_str(); }
-	void SetCategory(const char* category) { m_category = category ? category : ""; }
-	int GetImdbId() { return m_imdbId; }
-	void SetImdbId(int imdbId) { m_imdbId = imdbId; }
-	int GetRageId() { return m_rageId; }
-	void SetRageId(int rageId) { m_rageId = rageId; }
-	int GetTvdbId() { return m_tvdbId; }
-	void SetTvdbId(int tvdbId) { m_tvdbId = tvdbId; }
-	int GetTvmazeId() { return m_tvmazeId; }
-	void SetTvmazeId(int tvmazeId) { m_tvmazeId = tvmazeId; }
-	const char* GetDescription() const { return m_description.c_str(); }
-	void SetDescription(const char* description) { m_description = description ? description: ""; }
-	const char* GetSeason() const { return m_season.c_str(); }
-	void SetSeason(const char* season)
-	{
-		m_season = season ? season : "";
-		m_seasonNum = season ? ParsePrefixedInt(season) : 0;
-	}
-	const char* GetEpisode() const { return m_episode.c_str(); }
-	void SetEpisode(const char* episode)
-	{
-		m_episode = episode ? episode : "";
-		m_episodeNum = episode ? ParsePrefixedInt(episode) : 0;
-	}
-	int GetSeasonNum()
-	{
-		if (m_season.empty() && !m_seasonEpisodeParsed)
-		{
-			ParseSeasonEpisode();
-		}
-		return m_seasonNum;
-	}
-	int GetEpisodeNum()
-	{
-		if (m_episode.empty() && !m_seasonEpisodeParsed)
-		{
-			ParseSeasonEpisode();
-		}
-		return m_episodeNum;
-	}
-	const std::string& GetAddCategory() const { return m_addCategory; }
-	void SetAddCategory(const char* addCategory) { m_addCategory = addCategory ? addCategory : ""; }
-	bool GetPauseNzb() const { return m_pauseNzb; }
-	void SetPauseNzb(bool pauseNzb) { m_pauseNzb = pauseNzb; }
-	int GetPriority() const { return m_priority; }
-	void SetPriority(int priority) { m_priority = priority; }
-	time_t GetTime() const { return m_time; }
-	void SetTime(time_t time) { m_time = time; }
-	EStatus GetStatus() { return m_status; }
-	void SetStatus(EStatus status) { m_status = status; }
-	EMatchStatus GetMatchStatus() { return m_matchStatus; }
-	void SetMatchStatus(EMatchStatus matchStatus) { m_matchStatus = matchStatus; }
-	int GetMatchRule() { return m_matchRule; }
-	void SetMatchRule(int matchRule) { m_matchRule = matchRule; }
-	const char* GetDupeKey() const { return m_dupeKey.c_str(); }
-	void SetDupeKey(const char* dupeKey) { m_dupeKey = dupeKey ? dupeKey : ""; }
-	void AppendDupeKey(const char* extraDupeKey)
-	{
-		if (!m_dupeKey.empty() && !Util::EmptyStr(extraDupeKey))
-		{
-			m_dupeKey += "-";
-			m_dupeKey += extraDupeKey;
-		}
-	}
-	void BuildDupeKey(const char* rageId, const char* tvdbId, const char* tvmazeId, const char* series)
-	{
-		bool anySeriesId = nzbget_rs_feed_op(1, m_rageId, m_tvdbId, m_tvmazeId, 0, 0, 0,
-			rageId, tvdbId, tvmazeId, series, nullptr) != 0;
-		int seasonNum = anySeriesId ? GetSeasonNum() : 0;
-		int episodeNum = (anySeriesId && seasonNum != 0) ? GetEpisodeNum() : 0;
-		NzbgetRsBuf buf = nzbget_rs_feed_str_op(2, m_rageId, m_tvdbId, m_tvmazeId, m_imdbId, seasonNum, episodeNum,
-			rageId, tvdbId, tvmazeId, series, m_season.c_str(), m_episode.c_str(), nullptr, nullptr);
-		m_dupeKey.assign(buf.data ? buf.data : "", buf.len);
-		nzbget_rs_free(buf);
-		m_dupeKey.shrink_to_fit();
-	}
-	int GetDupeScore() const { return m_dupeScore; }
-	void SetDupeScore(int dupeScore) { m_dupeScore = dupeScore; }
-	EDupeMode GetDupeMode() const { return m_dupeMode; }
-	void SetDupeMode(EDupeMode dupeMode) { m_dupeMode = dupeMode; }
-	const char* GetDupeStatus()
-	{
-		if (m_dupeStatus.empty())
-		{
-			BString<1024> statuses;
-			m_feedFilterHelper->CalcDupeStatus(m_title.c_str(), m_dupeKey.c_str(), statuses, statuses.Capacity());
-			m_dupeStatus = statuses;
-		}
-		return m_dupeStatus.c_str();
-	}
-	Attributes* GetAttributes() { return &m_attributes; }
-
-private:
-	std::string m_title;
-	std::string m_filename;
-	std::string m_url;
-	std::string m_category;
-	std::string m_description;
-	std::string m_season;
-	std::string m_episode;
-	std::string m_addCategory;
-	std::string m_dupeKey;
-	std::string m_dupeStatus;
-	time_t m_time = 0;
-	int64 m_size = 0;
-	int m_imdbId = 0;
-	int m_rageId = 0;
-	int m_tvdbId = 0;
-	int m_tvmazeId = 0;
-	int m_seasonNum = 0;
-	int m_episodeNum = 0;
-	bool m_seasonEpisodeParsed = false;
-	bool m_pauseNzb = false;
-	int m_priority = 0;
-	EStatus m_status = isUnknown;
-	EMatchStatus m_matchStatus = msIgnored;
-	int m_matchRule = 0;
-	int m_dupeScore = 0;
-	EDupeMode m_dupeMode = dmScore;
-	FeedFilterHelper* m_feedFilterHelper = nullptr;
-	Attributes m_attributes;
-
-	int ParsePrefixedInt(const char *value)
-	{
-		return nzbget_rs_feed_op(0, 0, 0, 0, 0, 0, 0, value, nullptr, nullptr, nullptr, nullptr);
-	}
-
-	void ParseSeasonEpisode()
-	{
-		if (!m_feedFilterHelper) return;
-		m_seasonEpisodeParsed = true;
-		NzbgetRsBuf epBuf{nullptr, 0, 0};
-		NzbgetRsBuf sBuf = nzbget_rs_feed_str_op(1, 0, 0, 0, 0, 0, 0,
-			m_title.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, &epBuf, nullptr);
-		if (sBuf.data) SetSeason(sBuf.data);
-		if (epBuf.data) SetEpisode(epBuf.data);
-		nzbget_rs_free(sBuf);
-		nzbget_rs_free(epBuf);
-	}
-};
-
-typedef std::deque<FeedItemInfo> FeedItemList;
-
-class FeedHistoryInfo
-{
-public:
-	enum EStatus
-	{
-		hsUnknown,
-		hsBacklog,
-		hsFetched
-	};
-
-	FeedHistoryInfo(const char* url, EStatus status, time_t lastSeen) 
-		: m_url{ url ? url : "" }
-		, m_status{ status }
-		, m_lastSeen{ lastSeen } {}
-	const char* GetUrl() const { return m_url.c_str(); }
-	EStatus GetStatus() { return m_status; }
-	void SetStatus(EStatus Status) { m_status = Status; }
-	time_t GetLastSeen() { return m_lastSeen; }
-	void SetLastSeen(time_t lastSeen) { m_lastSeen = lastSeen; }
-
-private:
-	std::string m_url;
-	EStatus m_status;
-	time_t m_lastSeen;
-};
-
-typedef std::deque<FeedHistoryInfo> FeedHistoryBase;
-
-class FeedHistory : public FeedHistoryBase
-{
-public:
-	FeedHistoryInfo* Find(const char* url)
-	{
-		if (!url)
-		{
-			return nullptr;
-		}
-		for (FeedHistoryInfo& feedHistoryInfo : *this)
-		{
-			if (!strcmp(feedHistoryInfo.GetUrl(), url))
-			{
-				return &feedHistoryInfo;
-			}
-		}
-		return nullptr;
-	}
-};
-
 #endif
 
 
@@ -2037,7 +1670,7 @@ public:
 			bool backlog,
 			bool pauseNzb,
 			const char* category,
-			FeedInfo::CategorySource categorySource,
+			int categorySource,
 			int priority,
 			const char* extensions,
 			unsigned int certVeriflevel
@@ -2518,7 +2151,7 @@ private:
 			if (self->m_extender)
 			{
 				self->m_extender->AddFeed(id, name, url, interval, filter, backlog != 0, pauseNzb != 0,
-					category, static_cast<FeedInfo::CategorySource>(categorySource), priority,
+					category, categorySource, priority,
 					extensions, certVerifLevel);
 			}
 		};
@@ -7255,24 +6888,6 @@ public:
 		nzbget_rs_diskstate_exec(8, &env);
 	}
 
-	bool SaveFeeds(Feeds* feeds, FeedHistory* feedHistory)
-	{
-		ExecCtx ctx;
-		ctx.feeds = feeds;
-		ctx.feedHistory = feedHistory;
-		NzbgetRsDiskStateEnv env = MakeEnv(&ctx);
-		return nzbget_rs_diskstate_exec(9, &env) != 0;
-	}
-
-	bool LoadFeeds(Feeds* feeds, FeedHistory* feedHistory)
-	{
-		ExecCtx ctx;
-		ctx.feeds = feeds;
-		ctx.feedHistory = feedHistory;
-		NzbgetRsDiskStateEnv env = MakeEnv(&ctx);
-		return nzbget_rs_diskstate_exec(10, &env) != 0;
-	}
-
 	bool SaveAllFileInfos(DownloadQueue* downloadQueue)
 	{
 		ExecCtx ctx;
@@ -7351,8 +6966,6 @@ private:
 		DownloadQueue* queue = nullptr;
 		Servers* servers = nullptr;
 		ServerVolumes* volumes = nullptr;
-		Feeds* feeds = nullptr;
-		FeedHistory* feedHistory = nullptr;
 		MessageList* messages = nullptr;
 		FileInfo* targetFile = nullptr;
 		NzbInfo* targetNzb = nullptr;
@@ -8075,23 +7688,6 @@ private:
 					for (CompletedFile& cf : n->GetCompletedFiles()) sinkFn(sinkCtx, 0, cf.GetId(), 0, 0, nullptr, nullptr, 0, nullptr, 0);
 				}
 			}
-			break;
-		case 1:
-			for (FeedInfo* fi : c->feeds) sinkFn(sinkCtx, 0, (int)fi->GetLastUpdate(), 0, fi->GetFilterHash(), fi->GetUrl(), nullptr, 0, nullptr, 0);
-			for (FeedHistoryInfo& fhi : *c->feedHistory) sinkFn(sinkCtx, 1, (int)fhi.GetStatus(), (int)fhi.GetLastSeen(), 0, fhi.GetUrl(), nullptr, 0, nullptr, 0);
-			break;
-		case 2:
-			for (FeedInfo* fi : c->feeds)
-			{
-				if (!strcmp(fi->GetUrl(), s1) &&
-					(a2 == 1 || (a2 == 2 && !strcmp(fi->GetFilter(), s2)) || (a2 >= 3 && fi->GetFilterHash() == u1)))
-				{
-					fi->SetLastUpdate((time_t)a1);
-				}
-			}
-			break;
-		case 3:
-			c->feedHistory->emplace_back(s1, (FeedHistoryInfo::EStatus)a1, (time_t)a2);
 			break;
 		case 4:
 		{
@@ -29422,44 +29018,10 @@ private:
 	}
 };
 
-class UrlDownloader : public WebDownloader
-{
-public:
-	void SetNzbInfo(NzbInfo* nzbInfo) { m_nzbInfo = nzbInfo; }
-	NzbInfo* GetNzbInfo() { return m_nzbInfo; }
-	const char* GetCategory() const { return m_category; }
-
-protected:
-	void ProcessHeader(const char* line) override
-	{
-		size_t start, length;
-		NzbgetRsBuf name{}, value{};
-		switch (nzbget_rs_url_dnzb_header(line, &start, &length, &name, &value))
-		{
-			case 1:
-				m_category = length > 0 ? CString(line + start, (int)length) : CString("");
-				debug("Category: %s", *m_category);
-				break;
-
-			case 2:
-				debug("X-DNZB: %s", name.data);
-				debug("Value: %s", value.data);
-				m_nzbInfo->GetParameters()->SetParameter(name.data, value.data);
-				nzbget_rs_free(name);
-				nzbget_rs_free(value);
-				break;
-		}
-	}
-
-private:
-	NzbInfo* m_nzbInfo;
-	CString m_category;
-};
-
 class UrlCoordinator : public Thread, public Observer, public Debuggable
 {
 public:
-	UrlCoordinator()
+	UrlCoordinator() : m_rs(nzbget_rs_url_coord_new())
 	{
 		m_downloadQueueObserver.m_owner = this;
 		DownloadQueue::Guard()->Attach(&m_downloadQueueObserver);
@@ -29467,400 +29029,217 @@ public:
 
 	~UrlCoordinator() override
 	{
-		debug("Destroying UrlCoordinator");
-
-		for (UrlDownloader* urlDownloader : m_activeDownloads)
-		{
-			delete urlDownloader;
-		}
-		m_activeDownloads.clear();
-
-		debug("UrlCoordinator destroyed");
+		NzbgetRsUrlCoordEnv env = MakeEnv();
+		nzbget_rs_url_coord_exec(m_rs, 9, &env);
+		nzbget_rs_url_coord_free(m_rs);
 	}
 
-	void Run() override
-	{
-		debug("Entering UrlCoordinator-loop");
-
-		while (!DownloadQueue::IsLoaded())
-		{
-			Util::Sleep(20);
-		}
-
-		time_t lastReset = 0;
-		while (!IsStopped())
-		{
-			bool downloadStarted = false;
-
-			{
-				NzbInfo* nzbInfo = nullptr;
-				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-				if ((int)m_activeDownloads.size() < g_Options->GetUrlConnections())
-				{
-					nzbInfo = GetNextUrl(downloadQueue);
-					if (nzbInfo && (!g_WorkState->GetPauseDownload() || g_Options->GetUrlForce()))
-					{
-						StartUrlDownload(nzbInfo);
-						downloadStarted = true;
-					}
-				}
-				m_hasMoreJobs = !m_activeDownloads.empty() || nzbInfo != nullptr;
-			}
-
-			if (lastReset != Util::CurrentTime())
-			{
-				ResetHangingDownloads();
-				lastReset = Util::CurrentTime();
-			}
-
-			if (!m_hasMoreJobs && !IsStopped())
-			{
-				std::unique_lock<std::mutex> lk(m_waitMutex);
-				m_waitCond.wait(lk, [&] { return m_hasMoreJobs || IsStopped(); });
-			}
-			else
-			{
-				Util::Sleep(downloadStarted ? 0 : 100);
-			}
-		}
-
-		WaitJobs();
-
-		debug("Exiting UrlCoordinator-loop");
-	}
+	void Run() override { NzbgetRsUrlCoordEnv env = MakeEnv(); nzbget_rs_url_coord_exec(m_rs, 0, &env); }
 
 	void Stop() override
 	{
 		Thread::Stop();
-
-		debug("Stopping UrlDownloads");
-		{
-			GuardedDownloadQueue guard = DownloadQueue::Guard();
-			for (UrlDownloader* urlDownloader : m_activeDownloads)
-			{
-				urlDownloader->Stop();
-			}
-		}
-		debug("UrlDownloads are notified");
-
-		std::lock_guard<std::mutex> guard(m_waitMutex);
-		m_waitCond.notify_all();
+		NzbgetRsUrlCoordEnv env = MakeEnv();
+		nzbget_rs_url_coord_exec(m_rs, 1, &env);
 	}
 
 	void Update(Subject* caller, void*) override
 	{
-		debug("Notification from UrlDownloader received");
-
-		UrlDownloader* urlDownloader = (UrlDownloader*)caller;
-		if (urlDownloader->GetStatus() == WebDownloader::adFinished ||
-			urlDownloader->GetStatus() == WebDownloader::adFailed ||
-			urlDownloader->GetStatus() == WebDownloader::adRetry)
-		{
-			UrlCompleted(urlDownloader);
-		}
+		NzbgetRsUrlCoordEnv env = MakeEnv();
+		env.p1 = reinterpret_cast<uintptr_t>(static_cast<UrlDownloader*>(caller));
+		nzbget_rs_url_coord_exec(m_rs, 4, &env);
 	}
 
-	bool HasMoreJobs() const { return m_hasMoreJobs; }
+	bool HasMoreJobs() const { return nzbget_rs_url_coord_exec(m_rs, 7, nullptr) != 0; }
 
 	bool DeleteQueueEntry(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, bool avoidHistory)
 	{
-		if (nzbInfo->GetActiveDownloads() > 0)
-		{
-			info("Deleting active URL %s", nzbInfo->GetName());
-			nzbInfo->SetDeleting(true);
-			nzbInfo->SetAvoidHistory(avoidHistory);
-
-			for (UrlDownloader* urlDownloader : m_activeDownloads)
-			{
-				if (urlDownloader->GetNzbInfo() == nzbInfo)
-				{
-					urlDownloader->Stop();
-					return true;
-				}
-			}
-
-			return false;
-		}
-
-		info("Deleting URL %s", nzbInfo->GetName());
-
-		if (nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
-		{
-			nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
-		}
-		nzbInfo->SetUrlStatus(NzbInfo::lsNone);
-
-		DownloadQueue::Aspect deletedAspect = {DownloadQueue::eaUrlDeleted, downloadQueue, nzbInfo, nullptr};
-		downloadQueue->Notify(&deletedAspect);
-
-		return true;
+		NzbgetRsUrlCoordEnv env = MakeEnv();
+		env.p1 = reinterpret_cast<uintptr_t>(downloadQueue);
+		env.p2 = reinterpret_cast<uintptr_t>(nzbInfo);
+		env.a1 = avoidHistory ? 1 : 0;
+		return nzbget_rs_url_coord_exec(m_rs, 5, &env) != 0;
 	}
 
 	void AddUrlToQueue(std::unique_ptr<NzbInfo> nzbInfo, bool addFirst)
 	{
-		debug("Adding URL to queue");
-
-		NzbInfo* addedNzb = nzbInfo.get();
-
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-		DownloadQueue::Aspect foundAspect = {DownloadQueue::eaUrlFound, downloadQueue, addedNzb, nullptr};
-		downloadQueue->Notify(&foundAspect);
-
-		if (addedNzb->GetDeleteStatus() != NzbInfo::dsManual)
-		{
-			downloadQueue->GetQueue()->Add(std::move(nzbInfo), addFirst);
-
-			DownloadQueue::Aspect addedAspect = {DownloadQueue::eaUrlAdded, downloadQueue, addedNzb, nullptr};
-			downloadQueue->Notify(&addedAspect);
-		}
-
-		downloadQueue->Save();
+		NzbgetRsUrlCoordEnv env = MakeEnv();
+		env.p1 = reinterpret_cast<uintptr_t>(nzbInfo.get());
+		env.p2 = reinterpret_cast<uintptr_t>(&nzbInfo);
+		env.a1 = addFirst ? 1 : 0;
+		nzbget_rs_url_coord_exec(m_rs, 6, &env);
 	}
 
 protected:
-	void LogDebugInfo() override
-	{
-		info("   ---------- UrlCoordinator");
-
-		GuardedDownloadQueue guard = DownloadQueue::Guard();
-		info("    Active Downloads: %i", (int)m_activeDownloads.size());
-		for (UrlDownloader* urlDownloader : m_activeDownloads)
-		{
-			urlDownloader->LogDebugInfo();
-		}
-	}
+	void LogDebugInfo() override { NzbgetRsUrlCoordEnv env = MakeEnv(); nzbget_rs_url_coord_exec(m_rs, 8, &env); }
 
 private:
-	using ActiveDownloads = std::list<UrlDownloader*>;
+	class UrlDownloader final : public WebDownloader
+	{
+	public:
+		UrlDownloader(UrlCoordinator* owner, NzbInfo* nzbInfo) : m_owner(owner), m_nzbInfo(nzbInfo) {}
+		NzbInfo* GetNzbInfo() const { return m_nzbInfo; }
+	protected:
+		void ProcessHeader(const char* line) override { m_owner->OnUrlHeader(this, m_nzbInfo, line); }
+	private:
+		UrlCoordinator* m_owner;
+		NzbInfo* m_nzbInfo;
+	};
 
 	class DownloadQueueObserver final : public Observer
 	{
 	public:
 		UrlCoordinator* m_owner;
-		void Update(Subject* caller, void* aspect) override { m_owner->DownloadQueueUpdate(caller, aspect); }
+		void Update(Subject*, void* aspect) override
+		{
+			NzbgetRsUrlCoordEnv env = m_owner->MakeEnv();
+			env.a1 = static_cast<int>(static_cast<DownloadQueue::Aspect*>(aspect)->action);
+			nzbget_rs_url_coord_exec(m_owner->m_rs, 2, &env);
+		}
 	};
 
-	ActiveDownloads m_activeDownloads;
-	std::atomic<bool> m_hasMoreJobs{true};
-	std::mutex m_waitMutex;
-	std::condition_variable m_waitCond;
+	NzbgetRsUrlCoord* m_rs;
 	DownloadQueueObserver m_downloadQueueObserver;
 
-	void WaitJobs()
+	void OnUrlHeader(UrlDownloader* dl, NzbInfo* nzbInfo, const char* line)
 	{
-		debug("UrlCoordinator: waiting for Downloads to complete");
+		NzbgetRsUrlCoordEnv env = MakeEnv();
+		env.p1 = reinterpret_cast<uintptr_t>(dl);
+		env.p2 = reinterpret_cast<uintptr_t>(nzbInfo);
+		env.s1 = line;
+		nzbget_rs_url_coord_exec(m_rs, 3, &env);
+	}
 
-		while (true)
-		{
+	NzbgetRsUrlCoordEnv MakeEnv()
+	{
+		NzbgetRsUrlCoordEnv env{};
+		env.ctx = this;
+		env.with_queue_guard_cb = +[](void*, void* inner, void (*fnCb)(void*, uintptr_t)) {
+			GuardedDownloadQueue dq = DownloadQueue::Guard();
+			fnCb(inner, reinterpret_cast<uintptr_t>(static_cast<DownloadQueue*>(dq)));
+		};
+		env.log_cb = +[](void*, int level, const char* msg) {
+			if (level == 0) debug("%s", msg);
+			else if (level == 1) detail("%s", msg);
+			else if (level == 2) info("%s", msg);
+			else if (level == 3) warn("%s", msg);
+			else if (level == 4) error("%s", msg);
+		};
+		env.query_cb = +[](void* raw, int op, uintptr_t ptr, int* outInts, int64_t* outI64s, const char** outStrs) -> uintptr_t {
+			if (op == 0) return DownloadQueue::IsLoaded() ? 1 : 0;
+			if (op == 1) return static_cast<UrlCoordinator*>(raw)->IsStopped() ? 1 : 0;
+			if (op == 2)
 			{
-				GuardedDownloadQueue guard = DownloadQueue::Guard();
-				if (m_activeDownloads.empty())
+				outInts[0] = g_Options->GetUrlConnections();
+				outInts[1] = g_WorkState->GetPauseDownload() ? 1 : 0;
+				outInts[2] = g_Options->GetUrlForce() ? 1 : 0;
+				outInts[3] = g_Options->GetUrlTimeout();
+				outInts[4] = static_cast<int>(PATH_SEPARATOR);
+				outStrs[0] = g_Options->GetTempDir();
+				return 1;
+			}
+			if (op == 3) return reinterpret_cast<DownloadQueue*>(ptr)->GetQueue()->size();
+			if (op == 4)
+			{
+				NzbInfo* n = (*reinterpret_cast<DownloadQueue*>(ptr)->GetQueue())[static_cast<size_t>(outInts[0])].get();
+				outInts[0] = static_cast<int>(n->GetKind());
+				outInts[1] = static_cast<int>(n->GetUrlStatus());
+				outInts[2] = static_cast<int>(n->GetDeleteStatus());
+				outInts[3] = n->GetPriority();
+				outInts[4] = n->GetId();
+				return reinterpret_cast<uintptr_t>(n);
+			}
+			if (op == 5)
+			{
+				auto* dl = reinterpret_cast<UrlDownloader*>(ptr);
+				outInts[0] = static_cast<int>(dl->GetStatus());
+				if (outI64s) outI64s[0] = static_cast<int64_t>(dl->GetLastUpdateTime());
+				outStrs[0] = dl->GetInfoName();
+				outStrs[1] = dl->GetOriginalFilename();
+				outStrs[2] = dl->GetOutputFilename();
+				return reinterpret_cast<uintptr_t>(dl->GetNzbInfo());
+			}
+			if (op == 6)
+			{
+				auto* n = reinterpret_cast<NzbInfo*>(ptr);
+				outInts[0] = static_cast<int>(n->GetUrlStatus());
+				outInts[1] = static_cast<int>(n->GetDeleteStatus());
+				outInts[2] = n->GetDeleting() ? 1 : 0;
+				outInts[3] = n->GetActiveDownloads();
+				outStrs[0] = n->GetUrl();
+				outStrs[1] = n->GetFilename();
+				outStrs[2] = n->GetCategory();
+				outStrs[3] = n->GetName();
+				return 1;
+			}
+			return 0;
+		};
+		env.action_cb = +[](void* raw, int op, uintptr_t p1, uintptr_t p2, int a1, int a2, const char* s1, const char* s2, const char* s3) -> uintptr_t {
+			if (op == 0)
+			{
+				auto* self = static_cast<UrlCoordinator*>(raw);
+				auto* n = reinterpret_cast<NzbInfo*>(p1);
+				auto* dl = new UrlDownloader(self, n);
+				dl->SetAutoDestroy(true);
+				dl->Attach(self);
+				dl->SetUrl(n->GetUrl());
+				dl->SetForce(g_Options->GetUrlForce());
+				dl->SetInfoName(n->MakeNiceUrlName(n->GetUrl(), n->GetFilename()));
+				dl->SetOutputFilename(s1 ? s1 : "");
+				n->SetActiveDownloads(1);
+				n->SetUrlStatus(NzbInfo::lsRunning);
+				return reinterpret_cast<uintptr_t>(dl);
+			}
+			if (op == 1)
+			{
+				auto* dl = reinterpret_cast<UrlDownloader*>(p1);
+				if (a1 == 0) dl->Stop();
+				else if (a1 == 1) dl->LogDebugInfo();
+				else if (a1 == 2) delete dl;
+				else if (a1 == 3) dl->Start();
+				return 1;
+			}
+			if (op == 2) { reinterpret_cast<NzbInfo*>(p1)->GetParameters()->SetParameter(s1, s2); return 1; }
+			if (op == 3)
+			{
+				auto* n = reinterpret_cast<NzbInfo*>(p1);
+				if (a1 == 0) n->SetActiveDownloads(a2);
+				else if (a1 == 1) n->SetUrlStatus(static_cast<NzbInfo::EUrlStatus>(a2));
+				else if (a1 == 2) n->SetDeleteStatus(static_cast<NzbInfo::EDeleteStatus>(a2));
+				else if (a1 == 3) n->SetDeleting(a2 != 0);
+				else if (a1 == 4) n->SetAvoidHistory(a2 != 0);
+				return 1;
+			}
+			if (op == 4)
+			{
+				auto* dq = reinterpret_cast<DownloadQueue*>(p1);
+				DownloadQueue::Aspect aspect = {static_cast<DownloadQueue::EAspectAction>(a1), dq, reinterpret_cast<NzbInfo*>(p2), nullptr};
+				dq->Notify(&aspect);
+				return 1;
+			}
+			if (op == 5)
+			{
+				auto* n = reinterpret_cast<NzbInfo*>(p1);
+				Scanner::EAddStatus st = a1 != 0
+					? g_Scanner->AddArchive(s1, s2, n->GetAutoCategory(), n->GetPriority(), n->GetDupeKey(), n->GetDupeScore(), n->GetDupeMode(), n->GetParameters(), false, n->GetAddUrlPaused(), n, s3)
+					: g_Scanner->AddExternalFile(s1, s2, n->GetAutoCategory(), n->GetPriority(), n->GetDupeKey(), n->GetDupeScore(), n->GetDupeMode(), n->GetParameters(), false, n->GetAddUrlPaused(), n, s3, nullptr, 0, nullptr);
+				return static_cast<uintptr_t>(st);
+			}
+			if (op == 6) { g_QueueScriptCoordinator->EnqueueScript(reinterpret_cast<NzbInfo*>(p1), QueueScriptCoordinator::qeUrlCompleted); return 1; }
+			if (op == 7)
+			{
+				auto* dq = reinterpret_cast<DownloadQueue*>(p1);
+				if (a1 == 2) dq->Save();
+				else if (a1 != 0)
 				{
-					break;
+					auto* holder = reinterpret_cast<std::unique_ptr<NzbInfo>*>(p2);
+					if (holder && *holder) dq->GetQueue()->Add(std::move(*holder), a2 != 0);
 				}
+				return 1;
 			}
-			Util::Sleep(100);
-			ResetHangingDownloads();
-		}
-
-		debug("UrlCoordinator: Downloads are completed");
-	}
-
-	void DownloadQueueUpdate(Subject*, void* aspect)
-	{
-		debug("Notification from download queue received");
-
-		DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
-		if (queueAspect->action == DownloadQueue::eaUrlAdded ||
-			queueAspect->action == DownloadQueue::eaUrlReturned)
-		{
-			std::lock_guard<std::mutex> guard(m_waitMutex);
-			m_hasMoreJobs = true;
-			m_waitCond.notify_all();
-		}
-	}
-
-	void ResetHangingDownloads()
-	{
-		if (g_Options->GetUrlTimeout() == 0)
-		{
-			return;
-		}
-
-		GuardedDownloadQueue guard = DownloadQueue::Guard();
-		time_t tm = Util::CurrentTime();
-
-		for (UrlDownloader* urlDownloader : m_activeDownloads)
-		{
-			if (nzbget_rs_url_coord_op(
-				2, g_Options->GetUrlTimeout(), (int)urlDownloader->GetStatus(), 0,
-				tm, urlDownloader->GetLastUpdateTime(), nullptr, nullptr, nullptr, nullptr, nullptr, 0,
-				nullptr, nullptr, nullptr, nullptr) != 0)
-			{
-				error("Cancelling hanging url download %s", urlDownloader->GetInfoName());
-				urlDownloader->Stop();
-			}
-		}
-	}
-
-	NzbInfo* GetNextUrl(DownloadQueue* downloadQueue)
-	{
-		size_t count = downloadQueue->GetQueue()->size();
-		if (count == 0)
-		{
-			return nullptr;
-		}
-		std::vector<int> kinds(count), urlSt(count), delSt(count), prios(count);
-		size_t idx = 0;
-		for (NzbInfo* nzbInfo1 : downloadQueue->GetQueue())
-		{
-			kinds[idx] = (int)nzbInfo1->GetKind();
-			urlSt[idx] = (int)nzbInfo1->GetUrlStatus();
-			delSt[idx] = (int)nzbInfo1->GetDeleteStatus();
-			prios[idx] = nzbInfo1->GetPriority();
-			idx++;
-		}
-		intptr_t chosen = nzbget_rs_url_coord_op(
-			1, 0, 0, 0, 0, 0, nullptr, kinds.data(), urlSt.data(), delSt.data(), prios.data(), count,
-			nullptr, nullptr, nullptr, nullptr);
-		return chosen >= 0 ? (*downloadQueue->GetQueue())[(size_t)chosen].get() : nullptr;
-	}
-
-	void StartUrlDownload(NzbInfo* nzbInfo)
-	{
-		debug("Starting new UrlDownloader");
-
-		UrlDownloader* urlDownloader = new UrlDownloader();
-		urlDownloader->SetAutoDestroy(true);
-		urlDownloader->Attach(this);
-		urlDownloader->SetNzbInfo(nzbInfo);
-		urlDownloader->SetUrl(nzbInfo->GetUrl());
-		urlDownloader->SetForce(g_Options->GetUrlForce());
-		urlDownloader->SetInfoName(nzbInfo->MakeNiceUrlName(nzbInfo->GetUrl(), nzbInfo->GetFilename()));
-		NzbgetRsBuf tmpBuf{};
-		nzbget_rs_url_coord_op(
-			3, (int)PATH_SEPARATOR, nzbInfo->GetId(), 0, 0, 0, g_Options->GetTempDir(),
-			nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, &tmpBuf);
-		urlDownloader->SetOutputFilename(tmpBuf.data ? tmpBuf.data : "");
-		nzbget_rs_free(tmpBuf);
-
-		nzbInfo->SetActiveDownloads(1);
-		nzbInfo->SetUrlStatus(NzbInfo::lsRunning);
-
-		m_activeDownloads.push_back(urlDownloader);
-		urlDownloader->Start();
-	}
-
-	void UrlCompleted(UrlDownloader* urlDownloader)
-	{
-		debug("URL downloaded");
-
-		NzbInfo* nzbInfo = urlDownloader->GetNzbInfo();
-		const char* origname = urlDownloader->GetOriginalFilename()
-			? urlDownloader->GetOriginalFilename()
-			: FileSystem::BaseFileName(nzbInfo->GetUrl());
-		CString filename = FileSystem::MakeValidFilename(origname);
-
-		debug("Filename: [%s]", *filename);
-
-		bool retry;
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-			m_activeDownloads.erase(std::find(m_activeDownloads.begin(), m_activeDownloads.end(), urlDownloader));
-
-			int newDel = (int)nzbInfo->GetDeleteStatus();
-			int newUrl = (int)nzbInfo->GetUrlStatus();
-			int clearDel = 0;
-			retry = nzbget_rs_url_coord_op(
-				0, (int)urlDownloader->GetStatus(), nzbInfo->GetDeleting() ? 1 : 0, (int)nzbInfo->GetDeleteStatus(),
-				0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, 0, &newDel, &newUrl, &clearDel, nullptr) != 0;
-			nzbInfo->SetDeleteStatus((NzbInfo::EDeleteStatus)newDel);
-			if (clearDel)
-			{
-				nzbInfo->SetDeleting(false);
-			}
-			nzbInfo->SetUrlStatus((NzbInfo::EUrlStatus)newUrl);
-
-			if (!retry)
-			{
-				DownloadQueue::Aspect aspect = {DownloadQueue::eaUrlCompleted, downloadQueue, nzbInfo, nullptr};
-				downloadQueue->Notify(&aspect);
-			}
-		}
-
-		if (retry)
-		{
-			nzbInfo->SetActiveDownloads(0);
-			return;
-		}
-
-		if (nzbInfo->GetUrlStatus() == NzbInfo::lsFinished)
-		{
-			const char* name = !Util::EmptyStr(nzbInfo->GetFilename())
-				? nzbInfo->GetFilename() : *filename;
-			const char* category = !Util::EmptyStr(nzbInfo->GetCategory())
-				? nzbInfo->GetCategory() : urlDownloader->GetCategory();
-
-			Scanner::EAddStatus addStatus;
-			if (nzbget_rs_unpack_can_extract_with_zipfast(name) != 0)
-			{
-				addStatus = g_Scanner->AddArchive(
-					name,
-					category,
-					nzbInfo->GetAutoCategory(),
-					nzbInfo->GetPriority(),
-					nzbInfo->GetDupeKey(),
-					nzbInfo->GetDupeScore(),
-					nzbInfo->GetDupeMode(),
-					nzbInfo->GetParameters(),
-					false,
-					nzbInfo->GetAddUrlPaused(),
-					nzbInfo,
-					urlDownloader->GetOutputFilename()
-				);
-			}
-			else 
-			{
-				addStatus = g_Scanner->AddExternalFile(
-					name,
-					category,
-					nzbInfo->GetAutoCategory(),
-					nzbInfo->GetPriority(),
-					nzbInfo->GetDupeKey(),
-					nzbInfo->GetDupeScore(),
-					nzbInfo->GetDupeMode(),
-					nzbInfo->GetParameters(),
-					false,
-					nzbInfo->GetAddUrlPaused(),
-					nzbInfo,
-					urlDownloader->GetOutputFilename(),
-					nullptr,
-					0,
-					nullptr
-				);
-			}
-
-			if (addStatus == Scanner::asSuccess)
-			{
-				return;
-			}
-
-			nzbInfo->SetUrlStatus(addStatus == Scanner::asFailed
-				? NzbInfo::lsScanFailed : NzbInfo::lsScanSkipped);
-		}
-
-		g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeUrlCompleted);
-
-		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-			nzbInfo->SetActiveDownloads(0);
-
-			DownloadQueue::Aspect aspect = {DownloadQueue::eaUrlFailed, downloadQueue, nzbInfo, nullptr};
-			downloadQueue->Notify(&aspect);
-		}
+			return 0;
+		};
+		return env;
 	}
 };
 
@@ -34799,157 +34178,6 @@ inline void QueueCoordinator::DeleteFileInfo(DownloadQueue* downloadQueue, FileI
 #ifndef FEEDCOORDINATOR_H
 #define FEEDCOORDINATOR_H
 
-struct NzbgetRsFeedFileParser;
-
-// rust/src/feedfilter.rs
-class FeedFilter
-{
-public:
-	FeedFilter(const char* filter) :
-		m_filter(nzbget_rs_feed_filter_new(filter))
-	{
-	}
-
-	~FeedFilter()
-	{
-		nzbget_rs_feed_filter_free(m_filter);
-	}
-
-	FeedFilter(const FeedFilter&) = delete;
-	FeedFilter& operator=(const FeedFilter&) = delete;
-
-	void Match(FeedItemInfo& feedItemInfo)
-	{
-		NzbgetRsFeedItem item{};
-		item.user = &feedItemInfo;
-		item.field = Field;
-		item.seasonEpisode = SeasonEpisode;
-		item.apply = Apply;
-		item.setMatch = SetMatch;
-		nzbget_rs_feed_filter_match(m_filter, &item);
-	}
-
-private:
-	NzbgetRsFeedFilter* m_filter;
-
-	// Allocation failures and helper exceptions must not unwind through Rust.
-	static void Field(void* user, int field, const char* attr, const char** str, long long* num) noexcept
-	{
-		FeedItemInfo* item = static_cast<FeedItemInfo*>(user);
-		*str = nullptr;
-		*num = 0;
-		switch (field)
-		{
-			case 0: *str = item->GetTitle(); break;
-			case 1: *str = item->GetFilename(); break;
-			case 2: *str = item->GetCategory(); break;
-			case 3: *str = item->GetUrl(); break;
-			case 4: *num = item->GetSize(); break;
-			case 5:
-				*num = static_cast<time_t>(
-					static_cast<uint64_t>(Util::CurrentTime()) - static_cast<uint64_t>(item->GetTime()));
-				break;
-			case 6: *num = item->GetImdbId(); break;
-			case 7: *num = item->GetRageId(); break;
-			case 8: *num = item->GetTvdbId(); break;
-			case 9: *num = item->GetTvmazeId(); break;
-			case 10: *str = item->GetDescription(); break;
-			case 11: *num = item->GetSeasonNum(); break;
-			case 12: *num = item->GetEpisodeNum(); break;
-			case 13: *num = item->GetPriority(); break;
-			case 14: *str = item->GetDupeKey(); break;
-			case 15: *num = item->GetDupeScore(); break;
-			case 16: *str = item->GetDupeStatus(); break;
-			case 17:
-			{
-				FeedItemInfo::Attr* a = item->GetAttributes()->Find(attr);
-				*str = a ? a->GetValue() : nullptr;
-				break;
-			}
-		}
-	}
-
-	static const char* SeasonEpisode(void* user, int episode) noexcept
-	{
-		FeedItemInfo* item = static_cast<FeedItemInfo*>(user);
-		// GetSeasonNum/GetEpisodeNum parse the title
-		if (episode)
-		{
-			item->GetEpisodeNum();
-			return item->GetEpisode();
-		}
-		item->GetSeasonNum();
-		return item->GetSeason();
-	}
-
-	static void Apply(void* user, const struct NzbgetRsFeedOptions* o) noexcept
-	{
-		FeedItemInfo* item = static_cast<FeedItemInfo*>(user);
-		if (o->hasPause)
-		{
-			item->SetPauseNzb(o->pause != 0);
-		}
-		if (o->hasCategory)
-		{
-			item->SetAddCategory(o->category);
-		}
-		if (o->hasPriority)
-		{
-			item->SetPriority(o->priority);
-		}
-		if (o->hasAddPriority)
-		{
-			item->SetPriority(static_cast<int>(
-				static_cast<uint32_t>(item->GetPriority()) + static_cast<uint32_t>(o->addPriority)));
-		}
-		if (o->hasDupeScore)
-		{
-			item->SetDupeScore(o->dupeScore);
-		}
-		if (o->hasAddDupeScore)
-		{
-			item->SetDupeScore(static_cast<int>(
-				static_cast<uint32_t>(item->GetDupeScore()) + static_cast<uint32_t>(o->addDupeScore)));
-		}
-		if (o->hasBuildDupeKey)
-		{
-			item->BuildDupeKey(o->ids[0], o->ids[1], o->ids[2], o->ids[3]);
-		}
-		if (o->hasDupeKey)
-		{
-			item->SetDupeKey(o->dupeKey);
-		}
-		if (o->hasAddDupeKey)
-		{
-			item->AppendDupeKey(o->addDupeKey);
-		}
-		if (o->hasDupeMode)
-		{
-			item->SetDupeMode(static_cast<EDupeMode>(o->dupeMode));
-		}
-	}
-
-	static void SetMatch(void* user, int status, int rule) noexcept
-	{
-		FeedItemInfo* item = static_cast<FeedItemInfo*>(user);
-		item->SetMatchStatus(
-			status == 1 ? FeedItemInfo::msAccepted :
-			status == 2 ? FeedItemInfo::msRejected :
-			FeedItemInfo::msIgnored);
-		item->SetMatchRule(rule);
-	}
-};
-
-class FeedDownloader : public WebDownloader
-{
-public:
-	void SetFeedInfo(FeedInfo* feedInfo) { m_feedInfo = feedInfo; }
-	FeedInfo* GetFeedInfo() { return m_feedInfo; }
-
-private:
-	FeedInfo* m_feedInfo;
-};
-
 class FeedScriptController : public NzbScriptController
 {
 public:
@@ -35018,722 +34246,230 @@ private:
 class FeedCoordinator : public Thread, public Observer, public Subject, public Debuggable
 {
 public:
-	FeedCoordinator()
+	FeedCoordinator() : m_rs(nzbget_rs_feed_coord_new())
 	{
 		debug("Creating FeedCoordinator");
-
 		m_downloadQueueObserver.m_owner = this;
 		DownloadQueue::Guard()->Attach(&m_downloadQueueObserver);
-
 		m_workStateObserver.m_owner = this;
 		g_WorkState->Attach(&m_workStateObserver);
 	}
 
 	~FeedCoordinator() override
 	{
-		debug("Destroying FeedCoordinator");
-
-		for (FeedDownloader* feedDownloader : m_activeDownloads)
-		{
-			delete feedDownloader;
-		}
-		m_activeDownloads.clear();
+		CallCtx cc{this, nullptr, nullptr};
+		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
+		nzbget_rs_feed_coord_exec(m_rs, 12, &env);
+		nzbget_rs_feed_coord_free(m_rs);
 	}
 
-	void Run() override
-	{
-		debug("Entering FeedCoordinator-loop");
-
-		while (!DownloadQueue::IsLoaded())
-		{
-			Util::Sleep(20);
-		}
-
-		if (g_Options->GetServerMode())
-		{
-			std::lock_guard<std::mutex> guard(m_downloadsMutex);
-			g_DiskState->LoadFeeds(&m_feeds, &m_feedHistory);
-		}
-
-		time_t lastCleanup = 0;
-		while (!IsStopped())
-		{
-			if (!g_WorkState->GetPauseDownload() || m_force || g_Options->GetUrlForce())
-			{
-				std::lock_guard<std::mutex> guard(m_downloadsMutex);
-
-				time_t current = Util::CurrentTime();
-				if ((int)m_activeDownloads.size() < g_Options->GetUrlConnections())
-				{
-					m_force = false;
-					for (FeedInfo* feedInfo : &m_feeds)
-					{
-						int setForce = 0;
-						if (nzbget_rs_feed_op(2, feedInfo->GetInterval(), feedInfo->GetFetch() ? 1 : 0,
-							(int)feedInfo->GetStatus(), (int)FeedInfo::fsRunning,
-							(int64_t)feedInfo->GetNextUpdate(), (int64_t)current,
-							nullptr, nullptr, nullptr, nullptr, &setForce) != 0)
-						{
-							StartFeedDownload(feedInfo, feedInfo->GetFetch());
-						}
-						else if (setForce != 0)
-						{
-							m_force = true;
-						}
-					}
-				}
-			}
-
-			CheckSaveFeeds();
-			ResetHangingDownloads();
-
-			time_t now = Util::CurrentTime();
-			if (std::abs(now - lastCleanup) >= 60)
-			{
-				CleanupHistory();
-				CleanupCache();
-				CheckSaveFeeds();
-				lastCleanup = Util::CurrentTime();
-			}
-
-			std::unique_lock<std::mutex> lk(m_downloadsMutex);
-			if (m_force)
-			{
-				m_waitCond.wait_for(lk, std::chrono::milliseconds(1000), [&]{ return IsStopped(); });
-			}
-			else
-			{
-				int waitInterval = (g_Options->GetUrlForce() || m_feeds.empty()) ? 60000 : 5000;
-				m_waitCond.wait_for(lk, std::chrono::milliseconds(waitInterval), [&]{ return m_force || IsStopped(); });
-			}
-		}
-
-		debug("FeedCoordinator: waiting for Downloads to complete");
-		bool completed = false;
-		while (!completed)
-		{
-			{
-				std::lock_guard<std::mutex> guard(m_downloadsMutex);
-				completed = m_activeDownloads.empty();
-			}
-			CheckSaveFeeds();
-			Util::Sleep(100);
-			ResetHangingDownloads();
-		}
-		debug("FeedCoordinator: Downloads are completed");
-
-		debug("Exiting FeedCoordinator-loop");
-	}
+	void Run() override { CallCtx cc{this, nullptr, nullptr}; NzbgetRsFeedCoordEnv env = MakeEnv(&cc); nzbget_rs_feed_coord_exec(m_rs, 1, &env); }
 
 	void Stop() override
 	{
 		Thread::Stop();
-
-		debug("Stopping UrlDownloads");
-
-		std::lock_guard<std::mutex> guard(m_downloadsMutex);
-		for (FeedDownloader* feedDownloader : m_activeDownloads)
-		{
-			feedDownloader->Stop();
-		}
-		debug("UrlDownloads are notified");
-
-		m_waitCond.notify_all();
+		CallCtx cc{this, nullptr, nullptr};
+		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
+		nzbget_rs_feed_coord_exec(m_rs, 2, &env);
 	}
 
 	void Update(Subject* caller, void*) override
 	{
-		debug("Notification from FeedDownloader received");
-
-		FeedDownloader* feedDownloader = (FeedDownloader*) caller;
-		WebDownloader::EStatus st = feedDownloader->GetStatus();
-		if (st == WebDownloader::adFinished || st == WebDownloader::adFailed || st == WebDownloader::adRetry)
-		{
-			FeedCompleted(feedDownloader);
-		}
+		CallCtx cc{this, nullptr, nullptr};
+		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
+		env.p1 = reinterpret_cast<uintptr_t>(static_cast<WebDownloader*>(caller));
+		nzbget_rs_feed_coord_exec(m_rs, 3, &env);
 	}
 
-	void AddFeed(std::unique_ptr<FeedInfo> feedInfo) { m_feeds.push_back(std::move(feedInfo)); }
-
-	/* may return empty pointer on error */
-	std::shared_ptr<FeedItemList> PreviewFeed(int id, const char* name, const char* url,
-		const char* filter, bool backlog, bool pauseNzb, const char* category, FeedInfo::CategorySource categorySource, int priority,
-		int interval, const char* feedScript, int cacheTimeSec, const char* cacheId)
+	void AddFeed(int id, const char* name, const char* url, bool backlog, int interval,
+		const char* filter, bool pauseNzb, const char* category, int categorySource,
+		int priority, const char* extensions, unsigned int certVerifLevel)
 	{
-		debug("Preview feed %s", name);
-
-		unsigned int certVerifLevel = Options::ECertVerifLevel::cvStrict;
-		if (id >= 1 && id <= static_cast<int>(m_feeds.size()))
-		{
-			certVerifLevel = m_feeds[static_cast<size_t>(id - 1)]->GetCertVerificationLevel();
-		}
-
-		std::unique_ptr<FeedInfo> feedInfo = std::make_unique<FeedInfo>(id, name, url, backlog, interval,
-			filter, pauseNzb, category, categorySource, priority, feedScript, certVerifLevel);
-		feedInfo->SetPreview(true);
-
-		std::shared_ptr<FeedItemList> feedItems;
-		bool hasCache = false;
-		if (cacheTimeSec > 0 && !Util::EmptyStr(cacheId))
-		{
-			std::lock_guard<std::mutex> guard(m_downloadsMutex);
-			for (FeedCacheItem& feedCacheItem : m_feedCache)
-			{
-				if (!strcmp(feedCacheItem.m_cacheId, cacheId))
-				{
-					feedCacheItem.m_lastUsage = Util::CurrentTime();
-					feedItems = feedCacheItem.m_feedItems;
-					hasCache = true;
-					break;
-				}
-			}
-		}
-
-		if (!hasCache)
-		{
-			bool firstFetch = true;
-
-			{
-				std::lock_guard<std::mutex> guard(m_downloadsMutex);
-
-				for (FeedInfo* feedInfo2 : &m_feeds)
-				{
-					if (nzbget_rs_feed_op(8, 0, 0, 0, 0, (int64_t)feedInfo2->GetLastUpdate(), 0,
-						feedInfo2->GetUrl(), feedInfo->GetUrl(), feedInfo2->GetFilter(), feedInfo->GetFilter(), nullptr) != 0)
-					{
-						firstFetch = false;
-						break;
-					}
-				}
-
-				StartFeedDownload(feedInfo.get(), true);
-
-				m_force = true;
-				m_waitCond.notify_all();
-			}
-
-			while (feedInfo->GetStatus() == FeedInfo::fsRunning)
-			{
-				Util::Sleep(100);
-			}
-
-			if (feedInfo->GetStatus() != FeedInfo::fsFinished)
-			{
-				return nullptr;
-			}
-
-			const char* extensions = !Util::EmptyStr(feedInfo->GetExtensions())
-				? feedInfo->GetExtensions()
-				: g_Options->GetExtensions();
-			FeedScriptController::ExecuteScripts(
-				extensions, feedInfo->GetOutputFilename(), feedInfo->GetId(), nullptr);
-
-			std::unique_ptr<FeedItemList> parsedItems = parseFeed(feedInfo.get());
-			if (!parsedItems)
-			{
-				return nullptr;
-			}
-			feedItems = std::move(parsedItems);
-
-			std::lock_guard<std::mutex> guard(m_downloadsMutex);
-			for (FeedItemInfo& feedItemInfo : feedItems.get())
-			{
-				FeedHistoryInfo* feedHistoryInfo = m_feedHistory.Find(feedItemInfo.GetUrl());
-				feedItemInfo.SetStatus((FeedItemInfo::EStatus)nzbget_rs_feed_op(5, feedHistoryInfo ? 1 : 0,
-					feedHistoryInfo ? (int)feedHistoryInfo->GetStatus() : 0, firstFetch ? 1 : 0,
-					feedInfo->GetBacklog() ? 1 : 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr));
-			}
-		}
-
-		FilterFeed(feedInfo.get(), feedItems.get());
-		feedInfo.reset();
-
-		if (!hasCache && cacheTimeSec > 0 && !Util::EmptyStr(cacheId))
-		{
-			std::lock_guard<std::mutex> guard(m_downloadsMutex);
-			m_feedCache.push_back(FeedCacheItem{url, cacheTimeSec, cacheId, Util::CurrentTime(), feedItems});
-		}
-
-		return feedItems;
-	}
-
-	/* may return empty pointer on error */
-	std::shared_ptr<FeedItemList> ViewFeed(int id)
-	{
-		if (id < 1 || id > static_cast<int>(m_feeds.size()))
-		{
-			return nullptr;
-		}
-
-		std::unique_ptr<FeedInfo>& feedInfo = m_feeds[static_cast<size_t>(id - 1)];
-
-		return PreviewFeed(feedInfo->GetId(), feedInfo->GetName(), feedInfo->GetUrl(), feedInfo->GetFilter(),
-			feedInfo->GetBacklog(), feedInfo->GetPauseNzb(), feedInfo->GetCategory(), feedInfo->GetCategorySource(),
-			feedInfo->GetPriority(), feedInfo->GetInterval(), feedInfo->GetExtensions(), 0, nullptr);
+		CallCtx cc{this, nullptr, nullptr};
+		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
+		env.a1 = id; env.a2 = interval; env.a3 = categorySource; env.a4 = priority;
+		env.a5 = (backlog ? 1 : 0) | (pauseNzb ? 2 : 0);
+		env.u1 = certVerifLevel;
+		env.s1 = name; env.s2 = url; env.s3 = filter; env.s4 = category; env.s5 = extensions;
+		nzbget_rs_feed_coord_exec(m_rs, 0, &env);
 	}
 
 	void FetchFeed(int id)
 	{
-		debug("FetchFeeds");
-
-		std::lock_guard<std::mutex> guard(m_downloadsMutex);
-		for (FeedInfo* feedInfo : &m_feeds)
-		{
-			if (feedInfo->GetId() == id || id == 0)
-			{
-				feedInfo->SetFetch(true);
-				m_force = true;
-			}
-		}
-
-		m_waitCond.notify_all();
+		CallCtx cc{this, nullptr, nullptr};
+		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
+		env.a1 = id;
+		nzbget_rs_feed_coord_exec(m_rs, 6, &env);
 	}
 
-	bool HasActiveDownloads()
+	void FetchFeedList(const char* feedList)
 	{
-		std::lock_guard<std::mutex> guard(m_downloadsMutex);
-		return !m_activeDownloads.empty();
+		CallCtx cc{this, nullptr, nullptr};
+		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
+		env.s1 = feedList;
+		nzbget_rs_feed_coord_exec(m_rs, 7, &env);
 	}
 
-	Feeds* GetFeeds() { return &m_feeds; }
+	bool HasActiveDownloads() const { return nzbget_rs_feed_coord_exec(m_rs, 8, nullptr) != 0; }
+
+	int EmitViewOrPreview(int flags, int id, int categorySource, int priority, int interval,
+		int cacheTimeSec, const char* name, const char* url, const char* filter,
+		const char* category, const char* extensions, const char* cacheId,
+		void* rpcUser, void (*onItem)(void*, const NzbgetRsRpcFeedItem*))
+	{
+		CallCtx cc{this, rpcUser, onItem};
+		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
+		env.a1 = flags; env.a2 = id; env.a3 = categorySource;
+		env.a4 = priority; env.a5 = interval; env.a6 = cacheTimeSec;
+		env.s1 = name; env.s2 = url; env.s3 = filter;
+		env.s4 = category; env.s5 = extensions; env.s6 = cacheId;
+		env.rpc_emit_cb = +[](void* raw, const NzbgetRsRpcFeedItem* item) {
+			auto* c = static_cast<CallCtx*>(raw);
+			if (c->onItem) c->onItem(c->user, item);
+		};
+		return nzbget_rs_feed_coord_exec(m_rs, 9, &env);
+	}
+
+	void EmitHealthFeeds(std::deque<std::string>& strOwner, std::vector<NzbgetRsHealthFeedInput>& out) const
+	{
+		struct HealthEmit { std::deque<std::string>* strs; std::vector<NzbgetRsHealthFeedInput>* vec; } h{&strOwner, &out};
+		CallCtx cc{const_cast<FeedCoordinator*>(this), &h, nullptr};
+		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
+		env.health_emit_cb = +[](void* raw, int id, const char* name, size_t nameLen, const char* url, size_t urlLen, int interval, uint32_t certLvl) {
+			auto* he = static_cast<HealthEmit*>(static_cast<CallCtx*>(raw)->user);
+			const auto& ns = he->strs->emplace_back(name ? name : "", nameLen);
+			const auto& us = he->strs->emplace_back(url ? url : "", urlLen);
+			he->vec->push_back(NzbgetRsHealthFeedInput{id, ns.data(), ns.size(), us.data(), us.size(), interval, certLvl});
+		};
+		nzbget_rs_feed_coord_exec(m_rs, 10, &env);
+	}
 
 protected:
-	void LogDebugInfo() override
-	{
-		info("   ---------- FeedCoordinator");
-
-		std::lock_guard<std::mutex> guard(m_downloadsMutex);
-		info("    Active Downloads: %i", (int)m_activeDownloads.size());
-		for (FeedDownloader* feedDownloader : m_activeDownloads)
-		{
-			feedDownloader->LogDebugInfo();
-		}
-	}
+	void LogDebugInfo() override { CallCtx cc{this, nullptr, nullptr}; NzbgetRsFeedCoordEnv env = MakeEnv(&cc); nzbget_rs_feed_coord_exec(m_rs, 11, &env); }
 
 private:
-	class DownloadQueueObserver: public Observer
+	struct CallCtx { FeedCoordinator* self; void* user; void (*onItem)(void*, const NzbgetRsRpcFeedItem*); };
+
+	class DownloadQueueObserver final : public Observer
 	{
 	public:
 		FeedCoordinator* m_owner;
-		virtual void Update(Subject* caller, void* aspect) { m_owner->DownloadQueueUpdate(caller, aspect); }
-	};
-
-	class WorkStateObserver: public Observer
-	{
-	public:
-		FeedCoordinator* m_owner;
-		virtual void Update(Subject* caller, void* aspect) { m_owner->WorkStateUpdate(caller, aspect); }
-	};
-
-	struct FeedCacheItem
-	{
-		CString m_url;
-		int m_cacheTimeSec;
-		CString m_cacheId;
-		time_t m_lastUsage;
-		std::shared_ptr<FeedItemList> m_feedItems;
-	};
-
-	class FilterHelper : public FeedFilterHelper
-	{
-	public:
-		virtual void CalcDupeStatus(const char* title, const char* dupeKey, char* statusBuf, int bufLen)
+		void Update(Subject*, void* aspect) override
 		{
-			DupeCoordinator::EDupeStatus dupeStatus = g_DupeCoordinator->GetDupeStatus(DownloadQueue::Guard(), title, dupeKey);
-			NzbgetRsBuf buf = nzbget_rs_feed_str_op(3, (int)dupeStatus, 0, 0, 0, 0, 0,
-				nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
-			strncpy(statusBuf, buf.data ? buf.data : "", bufLen);
-			nzbget_rs_free(buf);
+			auto* qa = static_cast<DownloadQueue::Aspect*>(aspect);
+			CallCtx cc{m_owner, nullptr, nullptr};
+			NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
+			env.a1 = static_cast<int>(qa->action);
+			env.s1 = (qa->action == DownloadQueue::eaUrlCompleted && qa->nzbInfo) ? qa->nzbInfo->GetUrl() : nullptr;
+			nzbget_rs_feed_coord_exec(m_owner->m_rs, 4, &env);
 		}
 	};
 
-	typedef std::list<FeedCacheItem> FeedCache;
-	typedef std::deque<FeedDownloader*> ActiveDownloads;
+	class WorkStateObserver final : public Observer
+	{
+	public:
+		FeedCoordinator* m_owner;
+		void Update(Subject*, void*) override { nzbget_rs_feed_coord_exec(m_owner->m_rs, 5, nullptr); }
+	};
 
-	Feeds m_feeds;
-	ActiveDownloads m_activeDownloads;
-	FeedHistory m_feedHistory;
-	std::mutex m_downloadsMutex;
+	NzbgetRsFeedCoord* m_rs;
 	DownloadQueueObserver m_downloadQueueObserver;
 	WorkStateObserver m_workStateObserver;
-	FeedCache m_feedCache;
-	std::condition_variable m_waitCond;
-	std::atomic<bool> m_force{false};
-	bool m_save = false;
 
-	void StartFeedDownload(FeedInfo* feedInfo, bool force)
+	static NzbgetRsFeedCoordEnv MakeEnv(CallCtx* cc)
 	{
-		debug("Starting new FeedDownloader for %s", feedInfo->GetName());
-
-		FeedDownloader* feedDownloader = new FeedDownloader();
-		feedDownloader->SetAutoDestroy(true);
-		feedDownloader->Attach(this);
-		feedDownloader->SetFeedInfo(feedInfo);
-		feedDownloader->SetUrl(feedInfo->GetUrl());
-		feedDownloader->SetInfoName(feedInfo->GetName());
-		feedDownloader->SetForce(force || g_Options->GetUrlForce());
+		NzbgetRsFeedCoordEnv env{};
+		env.ctx = cc;
+		env.log_cb = +[](void*, int level, const char* msg) {
+			if (level == 0) debug("%s", msg);
+			else if (level == 1) detail("%s", msg);
+			else if (level == 2) info("%s", msg);
+			else if (level == 3) warn("%s", msg);
+			else if (level == 4) error("%s", msg);
+		};
+		env.query_cb = +[](void* raw, int op, uintptr_t ptr, int* outInts, int64_t* outI64s, const char** outStrs) -> uintptr_t {
+			if (op == 0) return DownloadQueue::IsLoaded() ? 1 : 0;
+			if (op == 1) return static_cast<CallCtx*>(raw)->self->IsStopped() ? 1 : 0;
+			if (op == 2)
+			{
+				outInts[0] = g_Options->GetServerMode() ? 1 : 0;
+				outInts[1] = g_WorkState->GetPauseDownload() ? 1 : 0;
+				outInts[2] = g_Options->GetUrlForce() ? 1 : 0;
+				outInts[3] = g_Options->GetUrlConnections();
+				outInts[4] = g_Options->GetUrlTimeout();
+				outInts[5] = g_Options->GetFeedHistory();
+				outInts[6] = g_Options->GetFlushQueue() ? 1 : 0;
+				outInts[7] = static_cast<int>(PATH_SEPARATOR);
+				outStrs[0] = g_Options->GetTempDir();
+				outStrs[1] = g_Options->GetQueueDir();
+				outStrs[2] = g_Options->GetExtensions();
+				return 1;
+			}
+			if (op == 3)
+			{
+				auto* dl = reinterpret_cast<WebDownloader*>(ptr);
+				outInts[0] = static_cast<int>(dl->GetStatus());
+				if (outI64s) outI64s[0] = static_cast<int64_t>(dl->GetLastUpdateTime());
+				outStrs[0] = dl->GetInfoName();
+				outStrs[1] = dl->GetOutputFilename();
+				return 1;
+			}
+			return 0;
+		};
+		env.action_cb = +[](void* raw, int op, uintptr_t p1, int a1, int a2, int a3, int64_t t1, int64_t t2, const char* s1, const char* s2, const char* s3, const char* s4) -> uintptr_t {
+			auto* self = static_cast<CallCtx*>(raw)->self;
+			if (op == 0)
+			{
+				auto* dl = new WebDownloader();
+				dl->SetAutoDestroy(true);
+				dl->Attach(self);
+				dl->SetUrl(s1 ? s1 : "");
+				dl->SetInfoName(s2 ? s2 : "");
+				dl->SetForce(a1 != 0);
 #ifndef DISABLE_TLS
-		feedDownloader->SetCertVerifLevel(feedInfo->GetCertVerificationLevel());
+				dl->SetCertVerifLevel(static_cast<unsigned int>(a2));
 #endif
-
-		static std::atomic<int> previewNum{0};
-		NzbgetRsBuf outFn = nzbget_rs_feed_str_op(6, (int)PATH_SEPARATOR, feedInfo->GetId(),
-			feedInfo->GetPreview() ? 1 : 0, (int)Util::CurrentTime(), rand(), ++previewNum,
-			g_Options->GetTempDir(), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
-		feedDownloader->SetOutputFilename(outFn.data ? outFn.data : "");
-		nzbget_rs_free(outFn);
-
-		feedInfo->SetStatus(FeedInfo::fsRunning);
-		feedInfo->SetForce(force);
-		feedInfo->SetFetch(false);
-
-		m_activeDownloads.push_back(feedDownloader);
-		feedDownloader->Start();
-	}
-
-	void FeedCompleted(FeedDownloader* feedDownloader)
-	{
-		debug("Feed downloaded");
-
-		FeedInfo* feedInfo = feedDownloader->GetFeedInfo();
-		bool statusOK = feedDownloader->GetStatus() == WebDownloader::adFinished;
-		if (statusOK)
-		{
-			feedInfo->SetOutputFilename(feedDownloader->GetOutputFilename());
-		}
-
-		{
-			std::lock_guard<std::mutex> guard(m_downloadsMutex);
-			m_activeDownloads.erase(std::find(m_activeDownloads.begin(), m_activeDownloads.end(), feedDownloader));
-		}
-
-		SchedulerNextUpdate(feedInfo, statusOK);
-
-		if (statusOK)
-		{
-			if (!feedInfo->GetPreview())
-			{
-				bool scriptSuccess = true;
-				const char* extensions = !Util::EmptyStr(feedInfo->GetExtensions())
-					? feedInfo->GetExtensions()
-					: g_Options->GetExtensions();
-				FeedScriptController::ExecuteScripts(
-					extensions, feedInfo->GetOutputFilename(), feedInfo->GetId(), &scriptSuccess);
-				if (!scriptSuccess)
-				{
-					feedInfo->SetStatus(FeedInfo::fsFailed);
-					return;
-				}
-
-				std::unique_ptr<FeedItemList> feedItems = parseFeed(feedInfo);
-				std::vector<std::unique_ptr<NzbInfo>> addedNzbs;
-
-				{
-					std::lock_guard<std::mutex> guard(m_downloadsMutex);
-					if (feedItems)
-					{
-						addedNzbs = ProcessFeed(feedInfo, feedItems.get());
-						feedItems.reset();
-					}
-					feedInfo->SetLastUpdate(Util::CurrentTime());
-					feedInfo->SetForce(false);
-					m_save = true;
-				}
-
-				for (std::unique_ptr<NzbInfo>& nzbInfo : addedNzbs)
-				{
-					g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), false);
-				}
+				dl->SetOutputFilename(s3 ? s3 : "");
+				return reinterpret_cast<uintptr_t>(dl);
 			}
-			feedInfo->SetStatus(FeedInfo::fsFinished);
-		}
-		else
-		{
-			feedInfo->SetStatus(FeedInfo::fsFailed);
-		}
-	}
-
-	void FilterFeed(FeedInfo* feedInfo, FeedItemList* feedItems)
-	{
-		debug("Filtering feed %s", feedInfo->GetName());
-
-		FilterHelper filterHelper;
-		std::unique_ptr<FeedFilter> feedFilter;
-
-		if (!Util::EmptyStr(feedInfo->GetFilter()))
-		{
-			feedFilter = std::make_unique<FeedFilter>(feedInfo->GetFilter());
-		}
-
-		for (FeedItemInfo& feedItemInfo : feedItems)
-		{
-			feedItemInfo.SetMatchStatus(FeedItemInfo::msAccepted);
-			feedItemInfo.SetMatchRule(0);
-			feedItemInfo.SetPauseNzb(feedInfo->GetPauseNzb());
-			feedItemInfo.SetPriority(feedInfo->GetPriority());
-			NzbgetRsBuf catBuf = nzbget_rs_feed_str_op(4, (int)feedInfo->GetCategorySource(), 0, 0, 0, 0, 0,
-				feedInfo->GetCategory(), feedItemInfo.GetCategory(), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
-			feedItemInfo.SetAddCategory(catBuf.data ? catBuf.data : "");
-			nzbget_rs_free(catBuf);
-			feedItemInfo.SetDupeScore(0);
-			feedItemInfo.SetDupeMode(dmScore);
-			feedItemInfo.SetFeedFilterHelper(&filterHelper);
-			feedItemInfo.BuildDupeKey(nullptr, nullptr, nullptr, nullptr);
-			if (feedFilter)
+			if (op == 1)
 			{
-				feedFilter->Match(feedItemInfo);
+				auto* dl = reinterpret_cast<WebDownloader*>(p1);
+				if (a1 == 0) dl->Stop();
+				else if (a1 == 1) dl->LogDebugInfo();
+				else if (a1 == 2) delete dl;
+				else if (a1 == 3) dl->Start();
+				return 1;
 			}
-		}
-	}
-
-	std::vector<std::unique_ptr<NzbInfo>> ProcessFeed(FeedInfo* feedInfo, FeedItemList* feedItems)
-	{
-		debug("Process feed %s", feedInfo->GetName());
-
-		FilterFeed(feedInfo, feedItems);
-
-		std::vector<std::unique_ptr<NzbInfo>> addedNzbs;
-		bool firstFetch = feedInfo->GetLastUpdate() == 0;
-		int added = 0;
-
-		for (FeedItemInfo& feedItemInfo : feedItems)
-		{
-			if (feedItemInfo.GetMatchStatus() == FeedItemInfo::msAccepted)
+			if (op == 2) return static_cast<uintptr_t>(g_DupeCoordinator->GetDupeStatus(DownloadQueue::Guard(), s1 ? s1 : "", s2 ? s2 : ""));
+			if (op == 3)
 			{
-				FeedHistoryInfo* feedHistoryInfo = m_feedHistory.Find(feedItemInfo.GetUrl());
-				int shouldAdd = 0;
-				FeedHistoryInfo::EStatus status = (FeedHistoryInfo::EStatus)nzbget_rs_feed_op(4,
-					firstFetch ? 1 : 0, feedInfo->GetBacklog() ? 1 : 0, feedHistoryInfo ? 1 : 0,
-					0, 0, 0, nullptr, nullptr, nullptr, nullptr, &shouldAdd);
-				if (shouldAdd)
-				{
-					debug("Download %s from %s", feedItemInfo.GetUrl(), feedInfo->GetName());
-
-					std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
-					nzbInfo->SetKind(NzbInfo::nkUrl);
-					nzbInfo->SetFeedId(feedInfo->GetId());
-					nzbInfo->SetUrl(feedItemInfo.GetUrl());
-					NzbgetRsBuf catBuf{nullptr, 0, 0};
-					NzbgetRsBuf fnBuf = nzbget_rs_feed_str_op(5, (int)feedInfo->GetCategorySource(), 0, 0, 0, 0, 0,
-						feedItemInfo.GetFilename(), feedItemInfo.GetAddCategory().c_str(),
-						feedInfo->GetCategory(), feedItemInfo.GetCategory(), nullptr, nullptr, &catBuf, nullptr);
-					if (fnBuf.len > 0) nzbInfo->SetFilename(fnBuf.data);
-					nzbInfo->SetCategory(catBuf.data ? catBuf.data : "");
-					nzbget_rs_free(fnBuf);
-					nzbget_rs_free(catBuf);
-
-					nzbInfo->SetPriority(feedItemInfo.GetPriority());
-					nzbInfo->SetAddUrlPaused(feedItemInfo.GetPauseNzb());
-					nzbInfo->SetDupeKey(feedItemInfo.GetDupeKey());
-					nzbInfo->SetDupeScore(feedItemInfo.GetDupeScore());
-					nzbInfo->SetDupeMode(feedItemInfo.GetDupeMode());
-					nzbInfo->SetSize(feedItemInfo.GetSize());
-					nzbInfo->SetMinTime(feedItemInfo.GetTime());
-					nzbInfo->SetMaxTime(feedItemInfo.GetTime());
-
-					addedNzbs.push_back(std::move(nzbInfo));
-					added++;
-				}
-
-				if (feedHistoryInfo)
-				{
-					feedHistoryInfo->SetLastSeen(Util::CurrentTime());
-				}
-				else
-				{
-					m_feedHistory.emplace_back(feedItemInfo.GetUrl(), status, Util::CurrentTime());
-				}
+				bool ok = true;
+				FeedScriptController::ExecuteScripts(s1 ? s1 : "", s2 ? s2 : "", a1, a2 != 0 ? &ok : nullptr);
+				return ok ? 1 : 0;
 			}
-		}
-
-		if (added)
-		{
-			info("%s has %i new item(s)", feedInfo->GetName(), added);
-		}
-		else
-		{
-			detail("%s has no new items", feedInfo->GetName());
-		}
-
-		return addedNzbs;
-	}
-
-	void ResetHangingDownloads()
-	{
-		int urlTimeout = g_Options->GetUrlTimeout();
-		if (urlTimeout == 0) return;
-		std::lock_guard<std::mutex> guard(m_downloadsMutex);
-		time_t tm = Util::CurrentTime();
-		for (FeedDownloader* feedDownloader: m_activeDownloads)
-		{
-			if (nzbget_rs_feed_op(7, urlTimeout, (int)feedDownloader->GetStatus(), (int)FeedDownloader::adRunning, 0,
-				(int64_t)tm, (int64_t)feedDownloader->GetLastUpdateTime(), nullptr, nullptr, nullptr, nullptr, nullptr) != 0)
+			if (op == 4)
 			{
-				error("Cancelling hanging feed download %s", feedDownloader->GetInfoName());
-				feedDownloader->Stop();
+				auto nzbInfo = std::make_unique<NzbInfo>();
+				nzbInfo->SetKind(NzbInfo::nkUrl);
+				nzbInfo->SetFeedId(static_cast<int>(p1));
+				nzbInfo->SetUrl(s1 ? s1 : "");
+				if (s2 && *s2) nzbInfo->SetFilename(s2);
+				nzbInfo->SetCategory(s3 ? s3 : "");
+				nzbInfo->SetPriority(a2);
+				nzbInfo->SetAddUrlPaused((a1 & 1) != 0);
+				nzbInfo->SetDupeKey(s4 ? s4 : "");
+				nzbInfo->SetDupeScore(a3);
+				nzbInfo->SetDupeMode(static_cast<EDupeMode>((a1 >> 1) & 0xff));
+				nzbInfo->SetSize(t1);
+				nzbInfo->SetMinTime(static_cast<time_t>(t2));
+				nzbInfo->SetMaxTime(static_cast<time_t>(t2));
+				g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), false);
+				return 1;
 			}
-		}
-	}
-
-	void DownloadQueueUpdate(Subject*, void* aspect)
-	{
-		debug("Notification from URL-Coordinator received");
-
-		DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
-		if (queueAspect->action == DownloadQueue::eaUrlCompleted)
-		{
-			std::lock_guard<std::mutex> guard(m_downloadsMutex);
-			FeedHistoryInfo* feedHistoryInfo = m_feedHistory.Find(queueAspect->nzbInfo->GetUrl());
-			if (feedHistoryInfo)
-			{
-				feedHistoryInfo->SetStatus(FeedHistoryInfo::hsFetched);
-			}
-			else
-			{
-				m_feedHistory.emplace_back(queueAspect->nzbInfo->GetUrl(), FeedHistoryInfo::hsFetched, Util::CurrentTime());
-			}
-			m_save = true;
-		}
-	}
-
-	void CleanupHistory()
-	{
-		debug("CleanupHistory");
-
-		std::lock_guard<std::mutex> guard(m_downloadsMutex);
-
-		time_t oldestUpdate = Util::CurrentTime();
-		for (FeedInfo* feedInfo : &m_feeds)
-		{
-			if (feedInfo->GetLastUpdate() < oldestUpdate)
-			{
-				oldestUpdate = feedInfo->GetLastUpdate();
-			}
-		}
-		time_t borderDate = oldestUpdate - (time_t)g_Options->GetFeedHistory() * 60 * 60 * 24;
-
-		m_feedHistory.erase(std::remove_if(m_feedHistory.begin(), m_feedHistory.end(),
-			[borderDate, this](FeedHistoryInfo& feedHistoryInfo)
-			{
-				if (feedHistoryInfo.GetLastSeen() < borderDate)
-				{
-					const char* url = feedHistoryInfo.GetUrl();
-					const char* q = strchr(url, '?');
-					detail("Deleting %.*s from feed history",
-						(int)(q ? (size_t)(q - url) : strlen(url)), url);
-					m_save = true;
-					return true;
-				}
-				return false;
-			}),
-			m_feedHistory.end());
-	}
-
-	void CleanupCache()
-	{
-		debug("CleanupCache");
-
-		std::lock_guard<std::mutex> guard(m_downloadsMutex);
-
-		time_t curTime = Util::CurrentTime();
-
-		m_feedCache.remove_if(
-			[curTime](FeedCacheItem& feedCacheItem)
-			{
-				if (nzbget_rs_feed_op(6, feedCacheItem.m_cacheTimeSec, 0, 0, 0,
-					(int64_t)feedCacheItem.m_lastUsage, (int64_t)curTime, nullptr, nullptr, nullptr, nullptr, nullptr) != 0)
-				{
-					debug("Deleting %s from feed cache", *feedCacheItem.m_url);
-					return true;
-				}
-				return false;
-			});
-	}
-
-	void CheckSaveFeeds()
-	{
-		std::lock_guard<std::mutex> guard(m_downloadsMutex);
-		if (m_save)
-		{
-			debug("CheckSaveFeeds: save");
-			if (g_Options->GetServerMode())
-			{
-				g_DiskState->SaveFeeds(&m_feeds, &m_feedHistory);
-			}
-			m_save = false;
-		}
-	}
-
-	std::unique_ptr<FeedItemList> parseFeed(FeedInfo* feedInfo)
-	{
-		debug("Creating FeedFile");
-		const char* fileName = feedInfo->GetOutputFilename() ? feedInfo->GetOutputFilename() : "";
-		const char* infoName = feedInfo->GetName() ? feedInfo->GetName() : "";
-		NzbgetRsFeedFileParser* parser = nzbget_rs_feed_file_parser_parse_file(fileName);
-		if (!parser)
-		{
-			error("Failed to parse rss feed %s", infoName);
-			error("Feed file %s kept for troubleshooting (will be deleted on next successful feed fetch)", feedInfo->GetOutputFilename());
-			return nullptr;
-		}
-
-		std::unique_ptr<FeedItemList> feedItems = std::make_unique<FeedItemList>();
-		size_t count = nzbget_rs_feed_file_parser_finalize(parser);
-		for (size_t i = 0; i < count; ++i)
-		{
-			NzbgetRsParsedFeedItemView view{};
-			if (nzbget_rs_feed_file_parser_get_item(parser, i, &view) == 0)
-			{
-				continue;
-			}
-			feedItems->emplace_back();
-			FeedItemInfo& item = feedItems->back();
-			item.SetTitle(view.title);
-			item.SetFilename(view.filename);
-			item.SetUrl(view.url);
-			item.SetCategory(view.category);
-			item.SetDescription(view.description);
-			if (view.has_season != 0)
-			{
-				item.SetSeason(view.season);
-			}
-			if (view.has_episode != 0)
-			{
-				item.SetEpisode(view.episode);
-			}
-			item.SetTime((time_t)view.time);
-			item.SetSize(view.size);
-			item.SetImdbId(view.imdb_id);
-			item.SetRageId(view.rage_id);
-			item.SetTvdbId(view.tvdb_id);
-			item.SetTvmazeId(view.tvmaze_id);
-			for (size_t k = 0; k < view.attr_count; ++k)
-			{
-				item.GetAttributes()->emplace_back(view.attr_names[k], view.attr_values[k]);
-			}
-		}
-
-		nzbget_rs_feed_file_parser_free(parser);
-		FileSystem::DeleteFile(feedInfo->GetOutputFilename());
-		return feedItems;
-	}
-
-	void SchedulerNextUpdate(FeedInfo* feedInfo, bool success)
-	{
-		time_t current = Util::CurrentTime();
-		int newLast = 0;
-		int interval = nzbget_rs_feed_op(3, success ? 1 : 0, feedInfo->GetInterval(), feedInfo->GetLastInterval(),
-			0, 0, 0, nullptr, nullptr, nullptr, nullptr, &newLast);
-		feedInfo->SetLastInterval(newLast);
-		detail("Scheduling update for feed %s in %i minute(s)", feedInfo->GetName(), interval / 60);
-		feedInfo->SetNextUpdate(current + interval);
-	}
-
-	void WorkStateUpdate(Subject*, void*)
-	{
-		std::lock_guard<std::mutex> guard(m_downloadsMutex);
-		m_force = true;
-		m_waitCond.notify_all();
+			return 0;
+		};
+		return env;
 	}
 };
 
@@ -36162,20 +34898,7 @@ private:
 
 	void FetchFeed(const char* feedList)
 	{
-		Tokenizer tok(feedList, ",;");
-		while (const char* feedRef = tok.Next())
-		{
-			for (FeedInfo* feed : g_FeedCoordinator->GetFeeds())
-			{
-				int fetchId = 0;
-				if (nzbget_rs_scheduler_service_op(
-					4, feed->GetId(), 0, 0, 0, 0, 0, feed->GetName(), feedRef, &fetchId) != 0)
-				{
-					g_FeedCoordinator->FetchFeed(fetchId);
-					break;
-				}
-			}
-		}
+		g_FeedCoordinator->FetchFeedList(feedList);
 	}
 
 	void CheckScheduledResume()
@@ -36224,9 +34947,9 @@ namespace SystemHealth
 class Service
 {
 public:
-	Service(const Options& options, const Servers& servers, const ::Feeds& feeds,
+	Service(const Options& options, const Servers& servers, const ::FeedCoordinator& feedCoordinator,
 			const ::Scheduler::TaskList& tasks, const ::Log& log)
-		: m_options(options), m_servers(servers), m_feeds(feeds), m_tasks(tasks), m_log(log)
+		: m_options(options), m_servers(servers), m_feedCoordinator(feedCoordinator), m_tasks(tasks), m_log(log)
 	{
 	}
 
@@ -36322,20 +35045,9 @@ private:
 			}
 		}
 
+		std::deque<std::string> feedStrs;
 		std::vector<NzbgetRsHealthFeedInput> feeds;
-		feeds.reserve(m_feeds.size());
-		for (const auto& feed : m_feeds)
-		{
-			std::string_view name = sv(feed->GetName());
-			std::string_view url = sv(feed->GetUrl());
-			feeds.push_back(NzbgetRsHealthFeedInput{
-				feed->GetId(),
-				name.data(), name.size(),
-				url.data(), url.size(),
-				feed->GetInterval(),
-				static_cast<uint32_t>(feed->GetCertVerificationLevel())
-			});
-		}
+		m_feedCoordinator.EmitHealthFeeds(feedStrs, feeds);
 
 		NzbgetRsSystemHealthConfig cfg{};
 		setStr(m_options.GetMainDir(), cfg.main_dir, cfg.main_dir_len);
@@ -36467,7 +35179,7 @@ private:
 
 	const Options& m_options;
 	const Servers& m_servers;
-	const ::Feeds& m_feeds;
+	const ::FeedCoordinator& m_feedCoordinator;
 	const ::Scheduler::TaskList& m_tasks;
 	const ::Log& m_log;
 };
@@ -37731,28 +36443,13 @@ private:
 					return 1;
 				}
 				case 11: {
-					bool preview = (a1 & 1) != 0, backlog = (a1 & 2) != 0, pauseNzb = (a1 & 4) != 0, inclNonMatch = (a1 & 8) != 0;
-					std::shared_ptr<FeedItemList> feedItems = preview
-						? g_FeedCoordinator->PreviewFeed(a2, s1 ? s1 : "", s2 ? s2 : "", s3 ? s3 : "",
-							backlog, pauseNzb, s4 ? s4 : "", (FeedInfo::CategorySource)a3, a4, a5, s5, (int)n1, s6 ? s6 : "")
-						: g_FeedCoordinator->ViewFeed(a2);
-					if (!feedItems) return 0;
-					for (FeedItemInfo& fi : feedItems.get())
-					{
-						if (inclNonMatch || fi.GetMatchStatus() == FeedItemInfo::msAccepted)
-						{
-							NzbgetRsRpcFeedItem item{
-								fi.GetTitle(), fi.GetFilename(), fi.GetUrl(), fi.GetSize(),
-								(int)(fi.GetSize() / 1024 / 1024), fi.GetCategory(), fi.GetAddCategory().c_str(),
-								fi.GetPauseNzb() ? 1 : 0, fi.GetPriority(), (int)fi.GetTime(),
-								(int)fi.GetMatchStatus(), fi.GetMatchRule(), fi.GetDupeKey(),
-								fi.GetDupeScore(), (int)fi.GetDupeMode(), (int)fi.GetStatus()
-							};
-							emitCb(emitCtx, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
-								&item, 0, nullptr, 0, nullptr, 0, nullptr, 0);
-						}
-					}
-					return 1;
+					struct RpcFeedEmit { decltype(emitCb) cb; void* ctx; } rctx{emitCb, emitCtx};
+					return g_FeedCoordinator->EmitViewOrPreview(a1, a2, a3, a4, a5, (int)n1, s1, s2, s3, s4, s5, s6, &rctx,
+						+[](void* raw, const NzbgetRsRpcFeedItem* item) {
+							auto* r = static_cast<RpcFeedEmit*>(raw);
+							r->cb(r->ctx, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
+								item, 0, nullptr, 0, nullptr, 0, nullptr, 0);
+						});
 				}
 				case 12: {
 					int index = 0;

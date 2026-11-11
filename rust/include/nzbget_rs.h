@@ -46,29 +46,6 @@ size_t nzbget_rs_path_position(int op, const char* str, size_t len);
 // path is NULL (no-op) or a writable NUL-terminated string, owned by the caller.
 void nzbget_rs_normalize_path_separators(char* path);
 
-// Decoder (rust/src/decoder.rs), with rapidyenc's incremental decoder (its
-// state as an int) and CRC. Get: 0 format, 1 begin, 2 end, 3 size,
-// 4 expected CRC, 5 calculated CRC, 6 EOF. Set: 0 CRC check, 1 raw mode.
-// Handles are Rust-owned, freed once with decoder_free, never used concurrently.
-// NULL callbacks make new return NULL; NULL handles/inputs are accepted as no-ops
-// (check returns UnknownError, getters return zero/an empty borrowed string).
-// decode: buffer is caller-owned and disjoint from the decoder. It must fit the
-// input AND output (up to input length + 63 for a buffered UU line; Connection
-// reserves 128). In line mode len==0 means strlen(buffer), as in StringBuilder.
-// Negative lengths are ignored. Callbacks must not unwind; Rust panics abort.
-// filename is borrowed until the decoder changes; do not free it.
-typedef struct NzbgetRsDecoder NzbgetRsDecoder;
-typedef int (*NzbgetRsYencDecode)(const void** src, void** dst, size_t len, int* state);
-typedef unsigned int (*NzbgetRsCrc)(const void* src, size_t len, unsigned int init);
-NzbgetRsDecoder* nzbget_rs_decoder_new(NzbgetRsYencDecode decode, NzbgetRsCrc crc);
-void nzbget_rs_decoder_free(NzbgetRsDecoder* decoder);
-void nzbget_rs_decoder_clear(NzbgetRsDecoder* decoder);
-int nzbget_rs_decoder_decode(NzbgetRsDecoder* decoder, char* buffer, int len);
-int nzbget_rs_decoder_check(NzbgetRsDecoder* decoder);
-void nzbget_rs_decoder_set(NzbgetRsDecoder* decoder, int which, int value);
-long long nzbget_rs_decoder_get(NzbgetRsDecoder* decoder, int which);
-const char* nzbget_rs_decoder_filename(NzbgetRsDecoder* decoder);
-
 // Util text helpers (rust/src/util.rs). split_command_line: the words, each
 // NUL-terminated, back to back (len covers all). trim_line: TrimRight(char*)
 // (rightOnly) or Trim(char*) in place, returning the start. trim_string:
@@ -174,12 +151,9 @@ int nzbget_rs_cmdline_run_client(
 	void (*write_stdout_cb)(void* ctx, const char* ptr, size_t len),
 	void (*write_perror_cb)(void* ctx, const char* msg), void* ctx);
 
-// FileSystem's file operations (rust/src/fsops.rs, POSIX). error_message:
-// writes at most 1022 bytes plus NUL (the original BString capacity argument)
-// to a 1024-byte buffer; NULL is a no-op. Buffers returned by these functions
-// are Rust-owned and must be freed with nzbget_rs_free, never free/delete.
-// Panics abort; they do not unwind across the ABI.
-void nzbget_rs_error_message(int errnum, char* buf);
+// FileSystem's file operations (rust/src/fsops.rs, POSIX). Buffers returned by
+// these functions are Rust-owned and must be freed with nzbget_rs_free, never
+// free/delete. Panics abort; they do not unwind across the ABI.
 // NULL paths return 0.
 int nzbget_rs_file_exists(const char* path);
 int nzbget_rs_directory_exists(const char* path);
@@ -215,23 +189,6 @@ int nzbget_rs_rar_renamer_execute(
 	const NzbgetRsRarRenamerRunEnv* env, const char* destDir, const char* infoName,
 	const char* password, const char* ignoreExt, int tlsEnabled, int* renamedCount);
 
-// DirectRenamer's RenameContentAnalyzer (rust/src/renameanalyzer.rs): the PAR2
-// packet header and MD5 of a file's first 16 KiB, fed article by article.
-// append returns 1 when it recognized a PAR2 header (setId: 32 hex digits and
-// a NUL); finish writes the printed MD5 (32 hex digits and a NUL).
-// The caller owns these 33-byte output buffers; no buffer is retained or freed.
-// Output buffers must not overlap the input or analyzer. NULL outputs discard
-// the set id; NULL hash makes finish a no-op. NULL analyzers are accepted as
-// no-ops, as are negative lengths and NULL input with positive length. NULL
-// input with zero length is an ordinary empty piece (it may recognize a header).
-// Use only new/free for analyzer ownership, with exclusive access on each call.
-typedef struct NzbgetRsRenameAnalyzer NzbgetRsRenameAnalyzer;
-NzbgetRsRenameAnalyzer* nzbget_rs_rename_analyzer_new(void);
-void nzbget_rs_rename_analyzer_free(NzbgetRsRenameAnalyzer* a);
-void nzbget_rs_rename_analyzer_reset(NzbgetRsRenameAnalyzer* a);
-int nzbget_rs_rename_analyzer_append(NzbgetRsRenameAnalyzer* a, const char* buf, int len, char* setId);
-void nzbget_rs_rename_analyzer_finish(NzbgetRsRenameAnalyzer* a, char* hash);
-
 // ParRenamer::Execute (rust/src/parrenamer.rs).
 void nzbget_rs_par_renamer_execute(
 	const char* infoName, const char* destDir, const char* ignoreExt,
@@ -265,18 +222,6 @@ typedef struct
 
 // ---- dupesearch (daemon/dupesearch/) ----
 // DonorScore (rust/src/donorscore.rs): Base, Target (twin 0/1) and Rerank;
-// Memory Pressure Monitor C ABI (Requirement R8)
-typedef enum {
-    NZBGET_RS_PRESSURE_NORMAL = 0,
-    NZBGET_RS_PRESSURE_CONSTRAINED = 1,
-    NZBGET_RS_PRESSURE_CRITICAL = 2
-} NzbgetRsPressureTier;
-
-int32_t nzbget_rs_memory_pressure_sample(void);
-uint32_t nzbget_rs_memory_pressure_effective_cache(uint32_t configured_mb);
-uint32_t nzbget_rs_memory_pressure_effective_par_buffer(uint32_t configured_mb);
-void nzbget_rs_memory_pressure_set_mock_root(const char* mock_root);
-void nzbget_rs_memory_pressure_trim_heap(void);
 
 // ============================================================================
 // Daemon Lifecycle Coordination C ABI (Requirement R2, Milestone M5)
@@ -426,89 +371,6 @@ typedef struct NzbgetRsNservEnv {
     uintptr_t (*conn_cb)(uintptr_t conn, int op, int a1, int a2, const char* s1, const char* s2, char* out_buf);
 } NzbgetRsNservEnv;
 int nzbget_rs_nserv_run(int argc, const char* const* argv, const NzbgetRsNservEnv* env);
-
-typedef struct NzbgetRsProcessArticleItem {
-    int64_t segment_offset;
-    int32_t segment_size;
-    uint32_t crc;
-    int32_t part_number;
-    int32_t dupe_fallback_round;
-    const uint8_t* segment_content;
-    const char* result_filename;
-} NzbgetRsProcessArticleItem;
-
-int nzbget_rs_awc_article_writer_build_output_filenames(
-    const char* tmp_dir, const char* dest_dir, char sep, int file_id, int part_num,
-    int direct_write, int force_direct_write, const char* existing_output_filename,
-    int output_initialized, const char* file_filename,
-    NzbgetRsBuf* out_result_filename, NzbgetRsBuf* out_temp_filename,
-    NzbgetRsBuf* out_output_filename, int* out_has_output_filename,
-    int* out_update_file_info_output_filename);
-int nzbget_rs_awc_article_writer_execute_setup_output_file(
-    const char* dest_dir, size_t dest_dir_len,
-    const char* filename, size_t filename_len,
-    char sep, int raw_article, int direct_write, int force_direct_write,
-    const char* output_filename, size_t output_filename_len,
-    void* cb_ctx,
-    int (*open_file_cb)(void* ctx, const char* path, int read_write),
-    NzbgetRsBuf* out_final_path, NzbgetRsBuf* out_temp_path,
-    NzbgetRsBuf* out_updated_output_filename);
-void nzbget_rs_awc_article_writer_execute_cleanup_old_data(
-    int direct_write,
-    const char* nzb_dest_dir, size_t nzb_dest_dir_len,
-    const char* final_output_path, size_t final_output_path_len,
-    const char* output_filename, size_t output_filename_len,
-    int is_hard_linked, int inter_dir_empty, char sep1, char sep2,
-    const int* dupe_fallback_rounds, const char* const* result_filenames, size_t articles_len,
-    void* log_ctx, void (*log_cb)(void* ctx, int is_debug, const char* msg),
-    int* out_clear_output_filename);
-uint32_t nzbget_rs_awc_article_writer_process_articles(
-    const NzbgetRsProcessArticleItem* items, size_t items_len,
-    size_t total_articles_count,
-    const char* info_filename, size_t info_filename_len,
-    const char* final_output_path, size_t final_output_path_len,
-    int raw_article, int direct_write, int skip_disk_write, int is_yenc,
-    void* ctx,
-    int64_t (*io_cb)(void* ctx, int op, int64_t val, const void* ptr, size_t len),
-    int* out_commit_error, int* out_failed_delta);
-int nzbget_rs_awc_article_writer_move_completed_files(
-    const char* dest_dir, const char* old_dest_dir,
-    const char* const* completed_filenames, size_t completed_len,
-    void* ctx,
-    int (*cb)(void* ctx, const char* err_msg_or_null));
-int nzbget_rs_awc_article_writer_create_output_file(
-    const char* output_filename, int64_t size, NzbgetRsBuf* out_err);
-
-typedef struct NzbgetRsFlushArticleItem {
-    int64_t segment_offset;
-    int32_t segment_size;
-    const uint8_t* segment_content;
-    const char* result_filename;
-} NzbgetRsFlushArticleItem;
-
-void nzbget_rs_awc_article_writer_flush_cache(
-    const NzbgetRsFlushArticleItem* items, size_t items_len,
-    int direct_write, int skip_disk_write,
-    const char* output_filename, size_t output_filename_len,
-    void* ctx,
-    int (*cb)(void* ctx, int op, size_t idx, const char* msg),
-    int* out_flushed_articles, int64_t* out_flushed_size);
-int nzbget_rs_awc_article_writer_post_process_rename_and_hardlink(
-    const char* original_filename, size_t original_filename_len,
-    const char* current_filename,
-    const char* nzb_dest_dir, size_t nzb_dest_dir_len,
-    const char* file_output_filename, size_t file_output_filename_len,
-    const char* writer_output_filename, size_t writer_output_filename_len,
-    int is_hard_linked, int inter_dir_empty,
-    void* ctx, void (*log_err_cb)(void* ctx, const char* msg),
-    NzbgetRsBuf* out_updated_output_filename, int* out_has_updated_output_filename);
-void nzbget_rs_awc_article_writer_finish_disk_ops(
-    int success, int skip_disk_write, int raw_article, int direct_write, int has_cached_data,
-    const char* temp_filename, size_t temp_filename_len,
-    const char* result_filename, size_t result_filename_len,
-    void* ctx, void (*log_err_cb)(void* ctx, const char* msg));
-
-
 
 /* Consolidated WebDownloader & StatMeter FFI (`webdownload.rs`, `statmeter.rs`) */
 
@@ -1340,21 +1202,6 @@ NzbgetRsBuf nzbget_rs_system_info_format(
     const char* pub_ip_ptr, size_t pub_ip_len,
     const char* priv_ip_ptr, size_t priv_ip_len);
 
-int nzbget_rs_server_pool_select_connection(
-    int start_level,
-    const int32_t* levels_ptr, size_t levels_len,
-    const int32_t* srv_ids, const int32_t* srv_groups, const int32_t* srv_norm_levels,
-    const uint8_t* srv_active, const uint8_t* srv_optional, const uint8_t* srv_blocked,
-    size_t srv_count,
-    const size_t* conn_srv_indices, const uint8_t* conn_in_use, const uint8_t* conn_connected,
-    size_t conn_count,
-    int has_want, int32_t want_id, int32_t want_group,
-    const int32_t* ign_ids, const int32_t* ign_groups, const int32_t* ign_norm_levels,
-    size_t ign_count,
-    int rand_val,
-    size_t* out_unblock_indices, size_t* out_unblock_count,
-    size_t* out_conn_index, int32_t* out_chosen_level);
-
 int nzbget_rs_script_config_read_cipher_snapshot(
     const char* filename, NzbgetRsBuf* out_bytes);
 int nzbget_rs_script_config_commit_cipher_patch(
@@ -1852,11 +1699,6 @@ typedef struct NzbgetRsDiskStateEnv {
 } NzbgetRsDiskStateEnv;
 
 int nzbget_rs_diskstate_exec(int op, const NzbgetRsDiskStateEnv* env);
-int nzbget_rs_server_pool_op(
-    int op, int64_t a, int64_t b, int c, const int* ptr1, const uint8_t* ptr2, size_t len, int* out_ptr);
-int nzbget_rs_server_pool_normalize_levels(
-    const int* levels, const uint8_t* active, const int* max_conns, size_t len,
-    size_t* out_sorted_indices, int* out_norm_levels);
 typedef uintptr_t (*NzbgetRsNntpFetchHostFn)(
     int op, int a1, int a2, uintptr_t p1, const char* s1,
     int* ints, int64_t* i64s, const char** strs, uint8_t* buf, size_t buf_len);
@@ -1864,8 +1706,6 @@ int nzbget_rs_statmeter_op(
     int op, int64_t loc_or_cur_time, int64_t a_i64, int64_t b_i64, int64_t c_i64,
     int a_i32, int b_i32, int c_i32, const int64_t* slice_ptr, size_t slice_len,
     int64_t* out_i64_1, int64_t* out_i64_2, int* out_i32);
-int nzbget_rs_memory_and_cache_op(
-    int op, size_t a, size_t b, int tier, int flag1, int flag2, int flag3, int* inout1, int* inout2);
 typedef struct NzbgetRsDupeProbe NzbgetRsDupeProbe;
 typedef uintptr_t (*NzbgetRsDupeProbeHostFn)(void*, int, int, int, int, uintptr_t, uintptr_t, const char*, int*, const char**);
 NzbgetRsDupeProbe* nzbget_rs_dupe_probe_new(int nzb_id, int count_all, int recovered_at_start);
@@ -1879,12 +1719,6 @@ typedef struct NzbgetRsHistoryCoordEnv {
     uintptr_t (*action_cb)(void*, int, int, int, uintptr_t, uintptr_t, const char*, const char*, int*, int64_t*, const char**, uint8_t*, size_t);
 } NzbgetRsHistoryCoordEnv;
 int nzbget_rs_history_coord_exec(int op, const NzbgetRsHistoryCoordEnv* env);
-intptr_t nzbget_rs_transient_retries_op(
-    void* handle, int op, uintptr_t a, int64_t b, uintptr_t* out_arr, size_t out_cap);
-int nzbget_rs_article_dl_op(
-    int op, int a, const char* response, int64_t begin_pos, int64_t end_pos,
-    int64_t article_file_size, int64_t expected_file_size, int64_t dupe_expected_offset,
-    int64_t dupe_expected_end, int64_t* out_offset, int* out_size);
 typedef uintptr_t (*NzbgetRsTwinHostFn)(
     int op, int a1, int a2, uintptr_t p1,
     const char* s1, const char* s2, const char* s3, const char* s4,
@@ -2229,6 +2063,14 @@ uintptr_t nzbget_rs_prepost_exec(
     const NzbgetRsPrePostProcessor* ptr, int op, int a1, int a2,
     uintptr_t p1, uintptr_t p2, uintptr_t p3, const char* s1,
     void* host_ctx, NzbgetRsQueueSubsysHostFn host_cb);
+typedef struct NzbgetRsArticleDownloader NzbgetRsArticleDownloader;
+NzbgetRsArticleDownloader* nzbget_rs_article_dl_new(
+    int has_analyzer, int parcheck_enabled, uintptr_t initial_conn, const char* info_name);
+void nzbget_rs_article_dl_free(NzbgetRsArticleDownloader* ptr);
+uintptr_t nzbget_rs_article_dl_exec(
+    NzbgetRsArticleDownloader* ptr, int op, int a1, int a2,
+    uintptr_t p1, uintptr_t p2, const char* s1,
+    NzbgetRsQueueSubsysHostFn host_cb, void* ctx);
 
 #include "nzbget_tls_cipher.h"
 

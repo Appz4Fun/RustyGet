@@ -1158,29 +1158,16 @@ mod tests {
     }
 
     #[test]
-    fn ffi_nulls_and_zero_length_line() {
-        use crate::ffi::*;
-        use std::ptr::null_mut;
+    fn zero_length_line_and_filename_c() {
         unsafe {
-            assert!(nzbget_rs_decoder_new(None, Some(crc)).is_null());
-            assert!(nzbget_rs_decoder_new(Some(decode), None).is_null());
-            nzbget_rs_decoder_clear(null_mut());
-            nzbget_rs_decoder_set(null_mut(), 0, 1);
-            assert_eq!(nzbget_rs_decoder_get(null_mut(), 0), 0);
-            assert_eq!(nzbget_rs_decoder_check(null_mut()), Status::UnknownError as c_int);
-            assert_eq!(CStr::from_ptr(nzbget_rs_decoder_filename(null_mut())).to_bytes(), b"");
-            assert_eq!(nzbget_rs_decoder_decode(null_mut(), null_mut(), 1), 0);
-            nzbget_rs_decoder_free(null_mut());
-            let d = nzbget_rs_decoder_new(Some(decode), Some(crc));
-            for len in [-1, 0, 10] {
-                assert_eq!(nzbget_rs_decoder_decode(d, null_mut(), len), 0);
-            }
+            let mut d = Decoder::new(decode, crc);
+            assert_eq!(CStr::from_ptr(d.filename_c().cast()).to_bytes(), b"");
             let mut b = [0u8; 256];
             let input = b"begin 644 x\r\n#04)#\r\n`\r\n\0";
             b[..input.len()].copy_from_slice(input);
-            assert_eq!(nzbget_rs_decoder_decode(d, b.as_mut_ptr().cast(), 0), 3);
+            assert_eq!(d.decode_buffer(b.as_mut_ptr(), 0), 3);
             assert_eq!(&b[..3], b"ABC");
-            nzbget_rs_decoder_free(d);
+            assert_eq!(CStr::from_ptr(d.filename_c().cast()).to_bytes(), b"x");
         }
     }
 

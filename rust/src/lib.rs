@@ -3,6 +3,8 @@
 
 pub mod archive_native;
 #[cfg(unix)]
+pub mod articledl;
+#[cfg(unix)]
 pub mod articlefetcher;
 pub mod binrpc;
 pub mod bytes;

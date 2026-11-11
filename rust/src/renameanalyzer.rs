@@ -127,41 +127,23 @@ mod tests {
     }
 
     #[test]
-    fn ffi_buffers_and_invalid_inputs() {
-        use crate::ffi::*;
-        use std::ptr::{null, null_mut};
-        // Exercise the real ABI, including caller-owned buffers with canaries.
-        unsafe {
-            nzbget_rs_rename_analyzer_free(null_mut());
-            nzbget_rs_rename_analyzer_reset(null_mut());
-            nzbget_rs_rename_analyzer_finish(null_mut(), null_mut());
-            assert_eq!(nzbget_rs_rename_analyzer_append(null_mut(), null(), 0, null_mut()), 0);
-            let a = nzbget_rs_rename_analyzer_new();
-            let mut out = [0x55u8; 35];
-            let dest = out.as_mut_ptr().add(1).cast();
-            assert_eq!(nzbget_rs_rename_analyzer_append(a, null(), 99, dest), 0);
-            assert_eq!(nzbget_rs_rename_analyzer_append(a, null(), -1, dest), 0);
-            assert_eq!(nzbget_rs_rename_analyzer_append(a, null(), 0, dest), 0);
-            assert_eq!(out, [0x55; 35]);
-            nzbget_rs_rename_analyzer_finish(a, null_mut());
-            nzbget_rs_rename_analyzer_finish(a, dest);
-            assert_eq!(&out[1..34], b"7E42F8EC980980E904B2008FD98C1DD4\0");
-            assert_eq!((out[0], out[34]), (0x55, 0x55));
+    fn reset_preserves_par_recognition_and_empty_inputs() {
+        let mut a = Analyzer::default();
+        assert!(!a.append(b""));
+        assert_eq!(&a.finish(), b"7E42F8EC980980E904B2008FD98C1DD4\0");
 
-            nzbget_rs_rename_analyzer_reset(a);
-            let mut header = [0u8; 64];
-            header[..8].copy_from_slice(MAGIC);
-            for (i, b) in header[32..48].iter_mut().enumerate() { *b = i as u8; }
-            assert_eq!(nzbget_rs_rename_analyzer_append(a, header.as_ptr().cast(), 64, dest), 1);
-            assert_eq!(nzbget_rs_rename_analyzer_append(a, null(), 0, null_mut()), 1);
-            assert_eq!(nzbget_rs_rename_analyzer_append(a, null(), 0, dest), 1);
-            assert_eq!(&out[1..34], b"0F0E0D0C0B0A09080706050403020100\0");
-            assert_eq!((out[0], out[34]), (0x55, 0x55));
-            nzbget_rs_rename_analyzer_reset(a);
-            assert!((*a).par_file);
-            assert_eq!((*a).par_set_id.as_ref().unwrap(), &out[1..34]);
-            nzbget_rs_rename_analyzer_free(a);
+        a.reset();
+        let mut header = [0u8; 64];
+        header[..8].copy_from_slice(MAGIC);
+        for (i, b) in header[32..48].iter_mut().enumerate() {
+            *b = i as u8;
         }
+        assert!(a.append(&header));
+        assert!(a.append(b""));
+        assert_eq!(a.par_set_id.as_ref(), Some(b"0F0E0D0C0B0A09080706050403020100\0"));
+        a.reset();
+        assert!(a.par_file);
+        assert_eq!(a.par_set_id.as_ref(), Some(b"0F0E0D0C0B0A09080706050403020100\0"));
     }
 
     #[test]
@@ -185,21 +167,6 @@ mod tests {
             assert!(!a.append(&header[..split]));assert!(!a.par_file);
             assert!(a.append(&header[split..]));assert!(a.par_file);
             assert_eq!(a.finish(),print(&Md5::digest(header)));
-        }
-    }
-
-    #[test]
-    fn early_recognition_preserves_ffi_set_id_canaries() {
-        use crate::ffi::*;
-        let mut header=[0u8;HEADER];header[..8].copy_from_slice(MAGIC);
-        for (i,b) in header[32..48].iter_mut().enumerate() {*b=i as u8;}
-        unsafe {
-            let a=nzbget_rs_rename_analyzer_new();
-            let mut out=[0x55u8;35];
-            assert_eq!(nzbget_rs_rename_analyzer_append(a,header.as_ptr().cast(),HEADER as i32,out.as_mut_ptr().add(1).cast()),1);
-            assert_eq!(&out[1..34],b"0F0E0D0C0B0A09080706050403020100\0");
-            assert_eq!((out[0],out[34]),(0x55,0x55));
-            nzbget_rs_rename_analyzer_free(a);
         }
     }
 

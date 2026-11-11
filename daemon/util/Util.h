@@ -325,12 +325,10 @@ class Guard
 {
 public:
 	Guard(Mutex& mutex) : m_mutex(&mutex) { if (m_mutex) m_mutex->Lock(); }
-	Guard(Mutex* mutex) : m_mutex(mutex) { if (m_mutex) m_mutex->Lock(); }
 	Guard(std::unique_ptr<Mutex>& mutex) : m_mutex(mutex.get()) { if (m_mutex) m_mutex->Lock(); }
 	Guard(Guard&& other) : m_mutex(other.m_mutex) { other.m_mutex = nullptr; }
 	Guard(const Guard&) = delete;
 	~Guard() { Unlock(); }
-	operator bool() { return m_mutex; }
 
 private:
 	Mutex* m_mutex;
@@ -574,10 +572,6 @@ public:
 		return *this;
 	}
 	CString& operator=(const char* str) { Set(str); return *this; }
-	bool operator==(const char* other) const
-	{
-		return (!m_data && !other) || (m_data && other && !strcmp(m_data, other));
-	}
 	static CString FormatStr(const char* format, ...)
 	{
 		CString result;
@@ -969,13 +963,6 @@ class FileSystem
 	};
 
 public:
-	static CString GetLastErrorMessage()
-	{
-		BString<1024> msg;
-		nzbget_rs_error_message(errno, msg);
-		return *msg;
-	}
-
 	static char* BaseFileName(const char* filename)
 	{
 		return const_cast<char*>(filename) + nzbget_rs_path_position(0, filename, strlen(filename));
@@ -1015,11 +1002,6 @@ public:
 		CString result(buf.data, static_cast<int>(buf.len));
 		nzbget_rs_free(buf);
 		return result;
-	}
-
-	static bool MoveFile(const char* srcFilename, const char* dstFilename)
-	{
-		return nzbget_rs_fs_op_with_err(4, srcFilename, dstFilename, 0, nullptr) != 0;
 	}
 
 	static bool DeleteFile(const char* filename) { return filename && unlink(filename) == 0; }
@@ -1119,7 +1101,7 @@ public:
 
 	DiskFile() = default;
 	DiskFile(const DiskFile&) = delete;
-	virtual ~DiskFile()
+	~DiskFile()
 	{
 		if (m_file)
 		{
@@ -1157,11 +1139,6 @@ public:
 		return false;
 	}
 
-	bool Active() { return m_file != nullptr; }
-	int64 Read(void* buffer, int64 size) { return fread(buffer, 1, (size_t)size, m_file); }
-	int64 Write(const void* buffer, int64 size) { return fwrite(buffer, 1, (size_t)size, m_file); }
-	int64 Position() { return ftell(m_file); }
-
 	bool Seek(int64 position, ESeekOrigin origin = soSet)
 	{
 		return fseek(m_file, position,
@@ -1177,8 +1154,6 @@ public:
 		return ret;
 	}
 
-	virtual char* ReadLine(char* buffer, int64 size) { return fgets(buffer, (int)size, m_file); }
-	bool SetWriteBuffer(int size) { return setvbuf(m_file, nullptr, _IOFBF, size) == 0; }
 	bool Flush() { return fflush(m_file) == 0; }
 	int GetFileDescriptor() const { return m_file ? fileno(m_file) : -1; }
 
@@ -3011,54 +2986,6 @@ inline void Service::WakeUp() { g_ServiceCoordinator->WakeUp(); }
 
 #endif
 
-#ifndef DECODER_H
-#define DECODER_H
-
-class Decoder
-{
-public:
-	enum EStatus
-	{
-		dsUnknownError,
-		dsFinished,
-		dsArticleIncomplete,
-		dsCrcError,
-		dsInvalidSize,
-		dsNoBinaryData
-	};
-
-	enum EFormat
-	{
-		efUnknown,
-		efYenc,
-		efUx,
-	};
-
-	// rust/src/decoder.rs
-	Decoder() : m_decoder(nzbget_rs_decoder_new(nullptr, nullptr)) {}
-	~Decoder() { nzbget_rs_decoder_free(m_decoder); }
-	Decoder(const Decoder&) = delete;
-	Decoder& operator=(const Decoder&) = delete;
-	EStatus Check() { return static_cast<EStatus>(nzbget_rs_decoder_check(m_decoder)); }
-	void Clear() { nzbget_rs_decoder_clear(m_decoder); }
-	int DecodeBuffer(char* buffer, int len) { return nzbget_rs_decoder_decode(m_decoder, buffer, len); }
-	void SetCrcCheck(bool crcCheck) { nzbget_rs_decoder_set(m_decoder, 0, crcCheck); }
-	void SetRawMode(bool rawMode) { nzbget_rs_decoder_set(m_decoder, 1, rawMode); }
-	EFormat GetFormat() { return static_cast<EFormat>(nzbget_rs_decoder_get(m_decoder, 0)); }
-	int64 GetBeginPos() { return nzbget_rs_decoder_get(m_decoder, 1); }
-	int64 GetEndPos() { return nzbget_rs_decoder_get(m_decoder, 2); }
-	int64 GetSize() { return nzbget_rs_decoder_get(m_decoder, 3); }
-	uint32 GetExpectedCrc() { return static_cast<uint32>(nzbget_rs_decoder_get(m_decoder, 4)); }
-	uint32 GetCalculatedCrc() { return static_cast<uint32>(nzbget_rs_decoder_get(m_decoder, 5)); }
-	bool GetEof() { return nzbget_rs_decoder_get(m_decoder, 6) != 0; }
-	const char* GetArticleFilename() { return nzbget_rs_decoder_filename(m_decoder); }
-
-private:
-	struct NzbgetRsDecoder* m_decoder;
-};
-
-#endif
-
 #ifndef PARPARSER_H
 #define PARPARSER_H
 
@@ -4815,7 +4742,6 @@ public:
 	const char* GetSubject() { return m_subject; }
 	void SetSubject(const char* subject) { m_subject = subject; }
 	const char* GetFilename() { return m_filename.c_str(); }
-	void SetFilename(std::string filename) { m_filename = std::move(filename); }
 	void SetFilename(const char* filename) { m_filename = filename ? filename : ""; }
 	void SetOrigname(const char* origname) { m_origname = origname; }
 	const char* GetOrigname() { return m_origname; }
@@ -4880,7 +4806,6 @@ public:
 	Guard GuardOutputFile() { return Guard(m_outputFileMutex); }
 	const std::string& GetOutputFilename() const { return m_outputFilename; }
 	void SetOutputFilename(const char* outputFilename) { m_outputFilename = outputFilename ? outputFilename : ""; }
-	void SetOutputFilename(std::string outputFilename) { m_outputFilename = std::move(outputFilename); }
 	bool GetOutputInitialized() { return m_outputInitialized; }
 	void SetOutputInitialized(bool outputInitialized) { m_outputInitialized = outputInitialized; }
 	bool GetExtraPriority() { return m_extraPriority; }
@@ -7932,7 +7857,8 @@ private:
 
 #endif
 
-inline constexpr int CONNECTION_HOLD_SECODNS = 5;
+inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
 
 class ServerPool : public Debuggable
 {
@@ -7953,49 +7879,8 @@ public:
 	void InitConnections()
 	{
 		debug("Initializing connections in ServerPool");
-
 		Guard guard(m_connectionsMutex);
-
-		NormalizeLevels();
-		m_levels.clear();
-
-		for (NewsServer* newsServer : m_sortedServers)
-		{
-			newsServer->SetBlockTime(0);
-			int normLevel = newsServer->GetNormLevel();
-			if (newsServer->GetNormLevel() > -1)
-			{
-				if ((int)m_levels.size() <= normLevel)
-				{
-					m_levels.push_back(0);
-				}
-
-				if (newsServer->GetActive())
-				{
-					int connections = 0;
-
-					for (PooledConnection* connection : &m_connections)
-					{
-						if (connection->GetNewsServer() == newsServer)
-						{
-							connections++;
-						}
-					}
-
-					for (int i = connections; i < newsServer->GetMaxConnections(); i++)
-					{
-						std::unique_ptr<PooledConnection> connection = std::make_unique<PooledConnection>(newsServer);
-						connection->SetTimeout(m_timeout);
-						m_connections.push_back(std::move(connection));
-						connections++;
-					}
-
-					m_levels[normLevel] += connections;
-				}
-			}
-		}
-
-		m_generation++;
+		nzbget_rs_article_dl_exec(nullptr, 120, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, nullptr);
 	}
 
 	int GetMaxNormLevel() { return m_maxNormLevel; }
@@ -8023,114 +7908,9 @@ public:
 	NntpConnection* GetConnection(int level, NewsServer* wantServer, RawServerList* ignoreServers)
 	{
 		Guard guard(m_connectionsMutex);
-
-		if (level < 0 || m_sortedServers.empty() || m_connections.empty())
-		{
-			return nullptr;
-		}
-
-		size_t srvCount = m_sortedServers.size();
-		std::vector<int32_t> srvIds(srvCount);
-		std::vector<int32_t> srvGroups(srvCount);
-		std::vector<int32_t> srvNormLevels(srvCount);
-		std::vector<uint8_t> srvActive(srvCount);
-		std::vector<uint8_t> srvOptional(srvCount);
-		std::vector<uint8_t> srvBlocked(srvCount);
-		for (size_t i = 0; i < srvCount; ++i)
-		{
-			NewsServer* srv = m_sortedServers[i];
-			srvIds[i] = srv->GetId();
-			srvGroups[i] = srv->GetGroup();
-			srvNormLevels[i] = srv->GetNormLevel();
-			srvActive[i] = srv->GetActive() ? 1 : 0;
-			srvOptional[i] = srv->GetOptional() ? 1 : 0;
-			srvBlocked[i] = IsServerBlocked(srv) ? 1 : 0;
-		}
-
-		size_t connCount = m_connections.size();
-		std::vector<size_t> connSrvIndices(connCount);
-		std::vector<uint8_t> connInUse(connCount);
-		std::vector<uint8_t> connConnected(connCount);
-		for (size_t i = 0; i < connCount; ++i)
-		{
-			PooledConnection* conn = m_connections[i].get();
-			NewsServer* srv = conn->GetNewsServer();
-			size_t sIdx = srvCount;
-			for (size_t j = 0; j < srvCount; ++j)
-			{
-				if (m_sortedServers[j] == srv)
-				{
-					sIdx = j;
-					break;
-				}
-			}
-			connSrvIndices[i] = sIdx;
-			connInUse[i] = conn->GetInUse() ? 1 : 0;
-			connConnected[i] = conn->GetStatus() == Connection::csConnected ? 1 : 0;
-		}
-
-		std::vector<int32_t> ignIds;
-		std::vector<int32_t> ignGroups;
-		std::vector<int32_t> ignNormLevels;
-		if (ignoreServers && !wantServer)
-		{
-			ignIds.reserve(ignoreServers->size());
-			ignGroups.reserve(ignoreServers->size());
-			ignNormLevels.reserve(ignoreServers->size());
-			for (NewsServer* ign : *ignoreServers)
-			{
-				ignIds.push_back(ign->GetId());
-				ignGroups.push_back(ign->GetGroup());
-				ignNormLevels.push_back(ign->GetNormLevel());
-			}
-		}
-
-		std::vector<size_t> unblockIndices(srvCount);
-		size_t unblockCount = 0;
-		size_t chosenConnIdx = 0;
-		int32_t chosenLevel = 0;
-		int found = nzbget_rs_server_pool_select_connection(
-			level,
-			m_levels.empty() ? nullptr : m_levels.data(),
-			m_levels.size(),
-			srvIds.data(),
-			srvGroups.data(),
-			srvNormLevels.data(),
-			srvActive.data(),
-			srvOptional.data(),
-			srvBlocked.data(),
-			srvCount,
-			connSrvIndices.data(),
-			connInUse.data(),
-			connConnected.data(),
-			connCount,
-			wantServer ? 1 : 0,
-			wantServer ? wantServer->GetId() : 0,
-			wantServer ? wantServer->GetGroup() : 0,
-			ignIds.empty() ? nullptr : ignIds.data(),
-			ignGroups.empty() ? nullptr : ignGroups.data(),
-			ignNormLevels.empty() ? nullptr : ignNormLevels.data(),
-			ignIds.size(),
-			rand(),
-			unblockIndices.data(),
-			&unblockCount,
-			&chosenConnIdx,
-			&chosenLevel);
-
-		for (size_t i = 0; i < unblockCount; ++i)
-		{
-			m_sortedServers[unblockIndices[i]]->SetBlockTime(0);
-		}
-
-		if (found != 0)
-		{
-			PooledConnection* connection = m_connections[chosenConnIdx].get();
-			connection->SetInUse(true);
-			m_levels[chosenLevel]--;
-			return connection;
-		}
-
-		return nullptr;
+		return reinterpret_cast<NntpConnection*>(nzbget_rs_article_dl_exec(
+			nullptr, 121, level, 0, reinterpret_cast<uintptr_t>(wantServer),
+			reinterpret_cast<uintptr_t>(ignoreServers), nullptr, NzbgetCArticleDlHost, nullptr));
 	}
 
 	void FreeConnection(NntpConnection* connection, bool used)
@@ -8139,71 +7919,15 @@ public:
 		{
 			debug("Freeing used connection");
 		}
-
 		Guard guard(m_connectionsMutex);
-
-		((PooledConnection*)connection)->SetInUse(false);
-		if (used)
-		{
-			((PooledConnection*)connection)->SetFreeTimeNow();
-		}
-
-		if (connection->GetNewsServer()->GetNormLevel() > -1 && connection->GetNewsServer()->GetActive())
-		{
-			m_levels[connection->GetNewsServer()->GetNormLevel()]++;
-		}
+		nzbget_rs_article_dl_exec(nullptr, 122, 0, 0, reinterpret_cast<uintptr_t>(connection),
+			used ? 1 : 0, nullptr, NzbgetCArticleDlHost, nullptr);
 	}
 
 	void CloseUnusedConnections()
 	{
 		Guard guard(m_connectionsMutex);
-
-		time_t curtime = Util::CurrentTime();
-
-		m_connections.erase(std::remove_if(m_connections.begin(), m_connections.end(),
-			[](std::unique_ptr<PooledConnection>& connection)
-			{
-				if (!connection->GetInUse() &&
-					(connection->GetNewsServer()->GetNormLevel() == -1 || !connection->GetNewsServer()->GetActive()))
-				{
-					debug("Closing (and deleting) unused connection to server%i", connection->GetNewsServer()->GetId());
-					if (connection->GetStatus() == Connection::csConnected)
-					{
-						connection->Disconnect();
-					}
-					return true;
-				}
-				return false;
-			}),
-			m_connections.end());
-
-		for (int level = 0; level <= m_maxNormLevel; level++)
-		{
-			std::vector<uint8_t> inUse, connected;
-			std::vector<int64_t> freeTimes;
-			for (PooledConnection* connection : &m_connections)
-			{
-				if (connection->GetNewsServer()->GetNormLevel() == level)
-				{
-					inUse.push_back(connection->GetInUse() ? 1 : 0);
-					connected.push_back(connection->GetStatus() == Connection::csConnected ? 1 : 0);
-					freeTimes.push_back((int64_t)connection->GetFreeTime());
-				}
-			}
-			if (nzbget_rs_server_pool_op(1, (int64)curtime, CONNECTION_HOLD_SECODNS, 0,
-				(const int*)freeTimes.data(), inUse.data(), inUse.size(), (int*)connected.data()))
-			{
-				for (PooledConnection* connection : &m_connections)
-				{
-					if (connection->GetNewsServer()->GetNormLevel() == level &&
-						connection->GetStatus() == Connection::csConnected)
-					{
-						debug("Closing (and keeping) unused connection to server%i", connection->GetNewsServer()->GetId());
-						connection->Disconnect();
-					}
-				}
-			}
-		}
+		nzbget_rs_article_dl_exec(nullptr, 123, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, nullptr);
 	}
 
 	void Changed()
@@ -8218,75 +7942,22 @@ public:
 
 	void BlockServer(NewsServer* newsServer)
 	{
-		bool shouldWarn = false;
-		{
-			Guard guard(m_connectionsMutex);
-			time_t curTime = Util::CurrentTime();
-			bool newBlock = newsServer->GetBlockTime() != curTime;
-			shouldWarn = newBlock && m_retryInterval > 0;
-			newsServer->SetBlockTime(curTime);
-		}
-
-		if (shouldWarn)
-		{
-			warn("Blocking %s (%s) for %i sec", newsServer->GetName(), newsServer->GetHost(), m_retryInterval);
-		}
+		nzbget_rs_article_dl_exec(nullptr, 124, 0, 0, reinterpret_cast<uintptr_t>(newsServer),
+			0, nullptr, NzbgetCArticleDlHost, nullptr);
 	}
 
 	bool IsServerBlocked(NewsServer* newsServer)
 	{
-		return nzbget_rs_server_pool_op(
-			0, (int64)newsServer->GetBlockTime(), (int64)Util::CurrentTime(), m_retryInterval, nullptr, nullptr, 0, nullptr) != 0;
+		return nzbget_rs_article_dl_exec(nullptr, 125, m_retryInterval, 0,
+			(uintptr_t)(int64)newsServer->GetBlockTime(), (uintptr_t)(int64)Util::CurrentTime(),
+			nullptr, nullptr, nullptr) != 0;
 	}
 
 protected:
 	virtual void LogDebugInfo()
 	{
-		info("   ---------- ServerPool");
-
-		info("    Max-Level: %i", m_maxNormLevel);
-
 		Guard guard(m_connectionsMutex);
-
-		time_t curTime = Util::CurrentTime();
-
-		info("    Servers: %i", (int)m_servers.size());
-		for (NewsServer* newsServer : &m_servers)
-		{
-			int blockSec = 0;
-			int64 blockTime = (int64)newsServer->GetBlockTime();
-			if (blockTime != 0)
-			{
-				int64 end = (m_retryInterval > 0 && blockTime > INT64_MAX - (int64)m_retryInterval) ?
-					INT64_MAX :
-					((m_retryInterval < 0 && blockTime < INT64_MIN - (int64)m_retryInterval) ?
-						INT64_MIN : blockTime + (int64)m_retryInterval);
-				if (end > (int64)curTime)
-				{
-					uint64 diff = (uint64)end - (uint64)curTime;
-					blockSec = diff > (uint64)INT32_MAX ? INT32_MAX : (int)diff;
-				}
-			}
-			info("      %i) %s (%s): Level=%i, NormLevel=%i, BlockSec=%i", newsServer->GetId(), newsServer->GetName(),
-				newsServer->GetHost(), newsServer->GetLevel(), newsServer->GetNormLevel(), blockSec);
-		}
-
-		info("    Levels: %i", (int)m_levels.size());
-		int index = 0;
-		for (int size : m_levels)
-		{
-			info("      %i: Free connections=%i", index, size);
-			index++;
-		}
-
-		info("    Connections: %i", (int)m_connections.size());
-		for (PooledConnection* connection : &m_connections)
-		{
-			info("      %i) %s (%s): Level=%i, NormLevel=%i, InUse:%i", connection->GetNewsServer()->GetId(),
-				connection->GetNewsServer()->GetName(), connection->GetNewsServer()->GetHost(),
-				connection->GetNewsServer()->GetLevel(), connection->GetNewsServer()->GetNormLevel(),
-				(int)connection->GetInUse());
-		}
+		nzbget_rs_article_dl_exec(nullptr, 126, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, nullptr);
 	}
 
 private:
@@ -8316,28 +7987,8 @@ private:
 	int m_retryInterval = 0;
 	int m_generation = 0;
 
-	void NormalizeLevels()
-	{
-		if (m_servers.empty()) return;
-		std::vector<int> levels(m_sortedServers.size()), maxConns(m_sortedServers.size()), normLevels(m_sortedServers.size());
-		std::vector<uint8_t> active(m_sortedServers.size());
-		std::vector<size_t> sortedIdx(m_sortedServers.size());
-		for (size_t i = 0; i < m_sortedServers.size(); i++)
-		{
-			levels[i] = m_sortedServers[i]->GetLevel();
-			active[i] = m_sortedServers[i]->GetActive() ? 1 : 0;
-			maxConns[i] = m_sortedServers[i]->GetMaxConnections();
-		}
-		m_maxNormLevel = nzbget_rs_server_pool_normalize_levels(
-			levels.data(), active.data(), maxConns.data(), m_sortedServers.size(), sortedIdx.data(), normLevels.data());
-		RawServerList newSorted(m_sortedServers.size());
-		for (size_t i = 0; i < m_sortedServers.size(); i++)
-		{
-			m_sortedServers[i]->SetNormLevel(normLevels[i]);
-			newSorted[i] = m_sortedServers[sortedIdx[i]];
-		}
-		m_sortedServers = std::move(newSorted);
-	}
+	friend uintptr_t NzbgetCArticleDlHost(void*, int, int, int, uintptr_t, uintptr_t,
+		const char*, const char*, int*, int64_t*, const char**);
 };
 
 extern ServerPool* g_ServerPool;
@@ -8939,26 +8590,6 @@ extern ArticleCache* g_ArticleCache;
 class ArticleCache final : public Thread
 {
 public:
-	class FlushGuard
-	{
-	public:
-		FlushGuard(FlushGuard&& other) = default;
-		~FlushGuard()
-		{
-			if (m_guard)
-			{
-				g_ArticleCache->m_flushing = false;
-			}
-		}
-	private:
-		Guard m_guard;
-		FlushGuard(Mutex& mutex) : m_guard(&mutex)
-		{
-			g_ArticleCache->m_flushing = true;
-		}
-		friend class ArticleCache;
-	};
-
 	void Run() override;
 
 	void Stop() override
@@ -9003,9 +8634,20 @@ public:
 		}
 	}
 
-	FlushGuard GuardFlush() { return FlushGuard(m_flushMutex); }
+	void LockFlush()
+	{
+		m_flushMutex.Lock();
+		m_flushing.store(true, std::memory_order_release);
+	}
+
+	void UnlockFlush()
+	{
+		m_flushing.store(false, std::memory_order_release);
+		m_flushMutex.Unlock();
+	}
+
 	Guard GuardContent() { return Guard(m_contentMutex); }
-	bool GetFlushing() { return m_flushing; }
+	bool GetFlushing() { return m_flushing.load(std::memory_order_acquire); }
 	size_t GetAllocated() { return m_allocated; }
 	bool FileBusy(FileInfo* fileInfo) { return fileInfo == m_fileInfo; }
 	void WakeupFlush()
@@ -9021,10 +8663,12 @@ private:
 	std::condition_variable m_allocCond;
 	Mutex m_flushMutex;
 	Mutex m_contentMutex;
-	bool m_flushing = false;
+	std::atomic<bool> m_flushing{false};
+	std::vector<ArticleInfo*> m_flushArticles;
 
 	size_t GetEffectiveLimit() const;
-	bool CheckFlush(bool flushEverything);
+	friend uintptr_t NzbgetCArticleDlHost(void*, int, int, int, uintptr_t, uintptr_t,
+		const char*, const char*, int*, int64_t*, const char**);
 };
 
 inline CachedSegmentData::~CachedSegmentData()
@@ -9053,7 +8697,7 @@ class MemoryMonitor final : public Thread
 public:
 	MemoryMonitor()
 	{
-		InitOptions();
+		nzbget_rs_article_dl_exec(nullptr, 100, 1, 0, 0, 0, nullptr, NzbgetCArticleDlHost, this);
 	}
 
 	~MemoryMonitor() override
@@ -9070,37 +8714,12 @@ public:
 
 	void InitOptions()
 	{
-		if (g_Options && !Util::EmptyStr(g_Options->GetMemoryPressurePath()))
-		{
-			nzbget_rs_memory_pressure_set_mock_root(g_Options->GetMemoryPressurePath());
-		}
-		else if (g_Options)
-		{
-			nzbget_rs_memory_pressure_set_mock_root(nullptr);
-		}
-		UpdateState();
+		nzbget_rs_article_dl_exec(nullptr, 100, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, this);
 	}
 
 	void Run() override
 	{
-		debug("MemoryMonitor thread started");
-
-		while (!IsStopped())
-		{
-			UpdateState();
-
-			int interval = g_Options ? g_Options->GetMemoryPressureInterval() : 500;
-			if (interval < 100) interval = 100;
-
-			int slept = 0;
-			while (!IsStopped() && slept < interval)
-			{
-				Util::Sleep(50);
-				slept += 50;
-			}
-		}
-
-		debug("MemoryMonitor thread stopped");
+		nzbget_rs_article_dl_exec(nullptr, 101, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, this);
 	}
 
 	void Stop() override
@@ -9108,102 +8727,32 @@ public:
 		Thread::Stop();
 	}
 
-	NzbgetRsPressureTier GetTier() const { return (NzbgetRsPressureTier)m_tier.load(std::memory_order_acquire); }
+	int GetTier() const { return (int)nzbget_rs_article_dl_exec(nullptr, 102, 0, 0, 0, 0, nullptr, nullptr, nullptr); }
 	const char* GetTierName() const
 	{
-		NzbgetRsPressureTier tier = GetTier();
-		return tier == NZBGET_RS_PRESSURE_CRITICAL ? "CRITICAL" :
-			tier == NZBGET_RS_PRESSURE_CONSTRAINED ? "CONSTRAINED" : "NORMAL";
+		return reinterpret_cast<const char*>(nzbget_rs_article_dl_exec(nullptr, 103, 0, 0, 0, 0, nullptr, nullptr, nullptr));
 	}
 
 	size_t GetEffectiveArticleCacheBytes() const
 	{
-		return (size_t)std::max(0, (int)m_effectiveCacheMB.load(std::memory_order_acquire)) * 1024 * 1024;
+		return (size_t)std::max(0, GetEffectiveArticleCacheMB()) * 1024 * 1024;
 	}
 	int GetEffectiveArticleCacheMB() const
 	{
-		return (int)m_effectiveCacheMB.load(std::memory_order_acquire);
+		return (int)nzbget_rs_article_dl_exec(nullptr, 104, 0, 0, 0, 0, nullptr, nullptr, nullptr);
 	}
 	int GetEffectiveParBufferMB(int configuredMB) const
 	{
-		int tier = m_tier.load(std::memory_order_acquire);
-		if (tier == NZBGET_RS_PRESSURE_CRITICAL)
-		{
-			return configuredMB == 0 ? 0 : std::max(8, std::min(16, configuredMB));
-		}
-		if (tier == NZBGET_RS_PRESSURE_NORMAL)
-		{
-			return configuredMB;
-		}
-		return (int)nzbget_rs_memory_pressure_effective_par_buffer((uint32_t)configuredMB);
+		return (int)nzbget_rs_article_dl_exec(nullptr, 105, configuredMB, 0, 0, 0, nullptr, nullptr, nullptr);
 	}
 	int GetEffectiveDownloadsLimit(int configuredLimit) const
 	{
-		int tier = m_tier.load(std::memory_order_acquire);
-		return tier == NZBGET_RS_PRESSURE_CRITICAL ? std::max(1, configuredLimit / 4) :
-			tier == NZBGET_RS_PRESSURE_CONSTRAINED ? std::max(2, configuredLimit / 2) :
-			configuredLimit;
+		return (int)nzbget_rs_article_dl_exec(nullptr, 106, configuredLimit, 0, 0, 0, nullptr, nullptr, nullptr);
 	}
 
 	static void TrimHeap()
 	{
-		nzbget_rs_memory_pressure_trim_heap();
-	}
-
-private:
-	std::atomic<int> m_tier{NZBGET_RS_PRESSURE_NORMAL};
-	std::atomic<uint32_t> m_effectiveCacheMB{0};
-
-	int m_consecutiveSamples = 0;
-	int m_candidateTier = NZBGET_RS_PRESSURE_NORMAL;
-
-	void UpdateState()
-	{
-		int rawSample = nzbget_rs_memory_pressure_sample();
-		int currentTier = m_tier.load(std::memory_order_relaxed);
-		int packed = nzbget_rs_memory_and_cache_op(
-			0, 0, 0, rawSample, currentTier, 0, 0, &m_candidateTier, &m_consecutiveSamples);
-		int nextTier = packed & 0xff;
-		bool transitioned = (packed & 0x100) != 0;
-
-		uint32_t cfgCache = g_Options ? (uint32_t)g_Options->GetArticleCache() : 0;
-		uint32_t effCache = nextTier == NZBGET_RS_PRESSURE_CRITICAL ? 0 :
-			nextTier == NZBGET_RS_PRESSURE_NORMAL ? cfgCache :
-			rawSample == nextTier ? nzbget_rs_memory_pressure_effective_cache(cfgCache) :
-			cfgCache / 2;
-		m_effectiveCacheMB.store(effCache, std::memory_order_release);
-
-		if (transitioned)
-		{
-			m_tier.store(nextTier, std::memory_order_release);
-			ApplyTierTransition((NzbgetRsPressureTier)currentTier, (NzbgetRsPressureTier)nextTier);
-		}
-	}
-
-	void ApplyTierTransition(NzbgetRsPressureTier oldTier, NzbgetRsPressureTier newTier)
-	{
-		if (newTier == NZBGET_RS_PRESSURE_CRITICAL)
-		{
-			warn("System memory pressure CRITICAL (>=90%%): shedding article cache and throttling downloads");
-			if (g_ArticleCache)
-			{
-				g_ArticleCache->WakeupFlush();
-			}
-			TrimHeap();
-		}
-		else if (newTier == NZBGET_RS_PRESSURE_CONSTRAINED)
-		{
-			detail("System memory pressure CONSTRAINED: shrinking article cache ceiling");
-			if (g_ArticleCache)
-			{
-				g_ArticleCache->WakeupFlush();
-			}
-		}
-		else if (newTier == NZBGET_RS_PRESSURE_NORMAL && oldTier != NZBGET_RS_PRESSURE_NORMAL)
-		{
-			detail("System memory pressure returned to NORMAL: restoring cache and download capacity");
-			TrimHeap();
-		}
+		nzbget_rs_article_dl_exec(nullptr, 107, 0, 0, 0, 0, nullptr, nullptr, nullptr);
 	}
 };
 
@@ -9249,905 +8798,7 @@ inline CachedSegmentData ArticleCache::Alloc(int size)
 
 inline void ArticleCache::Run()
 {
-	int resetCounter = 0;
-	bool justFlushed = false;
-	while (!IsStopped() || m_allocated > 0)
-	{
-		size_t effectiveLimit = GetEffectiveLimit();
-		int tier = g_MemoryMonitor ? (int)g_MemoryMonitor->GetTier() : (int)NZBGET_RS_PRESSURE_NORMAL;
-		int directWrite = g_Options->GetDirectWrite() ? 1 : 0;
-		int flags = nzbget_rs_memory_and_cache_op(
-			1, m_allocated.load(), effectiveLimit, tier, justFlushed ? 1 : 0,
-			resetCounter, IsStopped() ? 1 : 0, &directWrite, nullptr);
-		bool shouldFlush = (flags & 1) != 0;
-		bool flushEverything = (flags & 2) != 0;
-		bool needEmergencyFlush = (flags & 4) != 0;
-		if (shouldFlush)
-		{
-			justFlushed = CheckFlush(flushEverything);
-			resetCounter = 0;
-
-			if (needEmergencyFlush && m_allocated == 0)
-			{
-				MemoryMonitor::TrimHeap();
-			}
-			else if (!justFlushed && !IsStopped())
-			{
-				Util::Sleep(5);
-			}
-		}
-		else if (!m_allocated)
-		{
-			std::unique_lock<std::mutex> lk(m_allocMutex);
-			m_allocCond.wait(lk, [&] { return IsStopped() || m_allocated > 0; });
-			resetCounter = 0;
-		}
-		else
-		{
-			Util::Sleep(5);
-			resetCounter += 5;
-		}
-	}
-}
-
-class ArticleWriter
-{
-public:
-	// more bytes decoded than the article's range holds (they weren't written)
-	bool GetRangeExceeded() { return m_articlePtr > m_articleSize; }
-	struct OutputPaths 
-	{
-	    std::string finalPath;
-	    std::string tempPath;
-	};
-	void SetInfoName(const char* infoName) { m_infoName = infoName ? infoName : ""; }
-	void SetFileInfo(FileInfo* fileInfo) { m_fileInfo = fileInfo; }
-	void SetArticleInfo(ArticleInfo* articleInfo) { m_articleInfo = articleInfo; }
-
-	void Prepare()
-	{
-		BuildOutputFilename();
-		m_resultFilename = m_articleInfo->GetResultFilename()
-			? m_articleInfo->GetResultFilename()
-			: "";
-	}
-
-	bool GetDuplicate() { return m_duplicate; }
-	bool HasCachedBuffer() { return m_articleData.GetData() != nullptr; }
-
-	bool Start(Decoder::EFormat format, const char* filename, int64 fileSize,
-		int64 articleOffset, int articleSize)
-	{
-		m_outFile.Close();
-		m_format = format;
-		m_articleOffset = articleOffset;
-		m_articleSize = articleSize > 0 ? articleSize : m_articleInfo->GetSize();
-		m_articlePtr = 0;
-
-		// prepare file for writing
-		if (m_format == Decoder::efYenc)
-		{
-			if (g_Options->GetDupeCheck() &&
-				m_fileInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
-				!m_fileInfo->GetNzbInfo()->GetManyDupeFiles())
-			{
-				bool outputInitialized;
-				{
-					Guard guard = m_fileInfo->GuardOutputFile();
-					outputInitialized = m_fileInfo->GetOutputInitialized();
-					if (!g_Options->GetDirectWrite() && !m_fileInfo->GetForceDirectWrite())
-					{
-						m_fileInfo->SetOutputInitialized(true);
-					}
-				}
-
-				BString<1024> destFilePath;
-				if (filename)
-				{
-					destFilePath.Format("%s%c%s", m_fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, filename);
-				}
-				bool isOwnOutputFile = false;
-				if (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite())
-				{
-					Guard guard = m_fileInfo->GuardOutputFile();
-					isOwnOutputFile = m_fileInfo->GetForceDirectWrite() ||
-						(!m_fileInfo->GetOutputFilename().empty() &&
-						 FileSystem::SameFilename(m_fileInfo->GetOutputFilename().c_str(), destFilePath));
-				}
-
-				if (!outputInitialized && !isOwnOutputFile && filename &&
-					FileSystem::FileExists(destFilePath))
-				{
-					m_duplicate = true;
-					return false;
-				}
-			}
-
-			if (g_Options->GetDirectWrite() && !IsDupeFallbackArticle())
-			{
-				Guard guard = m_fileInfo->GuardOutputFile();
-				if (!m_fileInfo->GetOutputInitialized() ||
-					(!GetSkipDiskWrite() && !FileSystem::FileExists(m_outputFilename.c_str())))
-				{
-					if (!GetSkipDiskWrite() && !CreateOutputFile(fileSize))
-					{
-						return false;
-					}
-					m_fileInfo->SetOutputInitialized(true);
-				}
-			}
-		}
-
-		// allocate cache buffer; yEnc only: a cached article is written at its offset,
-		bool isCritical = g_MemoryMonitor &&
-			g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL;
-
-		// allocate cache buffer; yEnc only: a cached article is written at its offset,
-		// and only yEnc tells it (uuencoded parts all have 0 and overwrote each other,
-		// uncached they're appended in order)
-		if (g_Options->GetArticleCache() > 0 && !g_Options->GetRawArticle() &&
-			m_format == Decoder::efYenc && !IsDupeFallbackArticle() && !isCritical)
-		{
-			m_articleData = g_ArticleCache->Alloc(m_articleSize);
-
-			while (!m_articleData.GetData() && g_ArticleCache->GetFlushing() &&
-				!(g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL))
-			{
-				Util::Sleep(5);
-				m_articleData = g_ArticleCache->Alloc(m_articleSize);
-			}
-
-			if (!m_articleData.GetData())
-			{
-				detail("Article cache is full, using disk for %s", m_infoName.c_str());
-			}
-		}
-
-		if (!m_articleData.GetData())
-		{
-			if (GetSkipDiskWrite())
-			{
-				return true;
-			}
-
-			bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
-				m_format == Decoder::efYenc && !IsDupeFallbackArticle();
-			const char* outFilename = directWrite ? m_outputFilename.c_str() : m_tempFilename.c_str();
-			if (!m_outFile.Open(outFilename, directWrite ? DiskFile::omReadWrite : DiskFile::omWrite))
-			{
-				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-					"Could not %s file %s: %s", directWrite ? "open" : "create", outFilename,
-					*FileSystem::GetLastErrorMessage());
-				return false;
-			}
-			SetWriteBuffer(m_outFile, m_articleInfo->GetSize());
-
-			if (directWrite)
-			{
-				m_outFile.Seek(m_articleOffset);
-			}
-		}
-
-		return true;
-	}
-
-	bool Write(char* buffer, int len)
-	{
-		if (!g_Options->GetRawArticle())
-		{
-			m_articlePtr = (int)((uint32)m_articlePtr + (uint32)len);
-		}
-		if (!g_Options->GetRawArticle() && m_articlePtr > m_articleSize)
-		{
-			return true;
-		}
-
-		if (!g_Options->GetRawArticle() && m_articleData.GetData())
-		{
-			memcpy(m_articleData.GetData() + m_articlePtr - len, buffer, len);
-			return true;
-		}
-
-		if (GetSkipDiskWrite())
-		{
-			return true;
-		}
-
-		return m_outFile.Write(buffer, len) > 0;
-	}
-
-	void Finish(bool success)
-	{
-		m_outFile.Close();
-
-		bool rawArticle = g_Options->GetRawArticle();
-		bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
-			m_format == Decoder::efYenc && !IsDupeFallbackArticle();
-		bool hasCached = m_articleData.GetData() != nullptr;
-
-		nzbget_rs_awc_article_writer_finish_disk_ops(
-			success ? 1 : 0, GetSkipDiskWrite() ? 1 : 0, rawArticle ? 1 : 0,
-			directWrite ? 1 : 0, hasCached ? 1 : 0,
-			m_tempFilename.data(), m_tempFilename.size(),
-			m_resultFilename.data(), m_resultFilename.size(),
-			m_fileInfo->GetNzbInfo(),
-			+[](void* ctx, const char* msg) {
-				static_cast<NzbInfo*>(ctx)->PrintMessage(Message::mkError, "%s", msg);
-			});
-
-		if (!success || rawArticle)
-		{
-			return;
-		}
-
-		if (hasCached)
-		{
-			if (m_articleSize != m_articlePtr)
-			{
-				g_ArticleCache->Realloc(&m_articleData, m_articlePtr);
-			}
-			Guard contentGuard = g_ArticleCache->GuardContent();
-			m_articleInfo->AttachSegment(std::make_unique<CachedSegmentData>(std::move(m_articleData)), m_articleOffset, m_articlePtr);
-			m_fileInfo->SetCachedArticles(m_fileInfo->GetCachedArticles() + 1);
-		}
-		else
-		{
-			m_articleInfo->SetSegmentOffset(m_articleOffset);
-			m_articleInfo->SetSegmentSize(m_articlePtr);
-		}
-	}
-
-	bool CompleteFileParts()
-	{
-		debug("Completing file parts");
-		m_commitError = false;
-		debug("ArticleFilename: %s", m_fileInfo->GetFilename());
-
-		// 1. Gather context & configuration
-		std::string nzbDestDir;
-		std::string nzbName;
-		std::string filename;
-
-		{
-			GuardedDownloadQueue guard = DownloadQueue::Guard();
-			nzbName = m_fileInfo->GetNzbInfo()->GetName();
-			nzbDestDir = m_fileInfo->GetNzbInfo()->GetDestDir();
-			filename = m_fileInfo->GetFilename();
-		}
-
-		if (m_outputFilename.empty() && !m_fileInfo->GetOutputFilename().empty())
-		{
-			m_outputFilename = m_fileInfo->GetOutputFilename();
-		}
-		bool directWriteOpt = g_Options->GetDirectWrite();
-		bool forceDirectWrite = m_fileInfo->GetForceDirectWrite();
-		bool curOutputInit = m_fileInfo->GetOutputInitialized();
-		bool hasOwnOut = false;
-		bool hasForceDest = false;
-		if ((directWriteOpt || forceDirectWrite) && !curOutputInit)
-		{
-			BString<1024> destPath("%s%c%s", nzbDestDir.c_str(), PATH_SEPARATOR, filename.c_str());
-			hasOwnOut = !m_outputFilename.empty() && FileSystem::FileExists(m_outputFilename.c_str());
-			hasForceDest = !hasOwnOut && forceDirectWrite && FileSystem::FileExists(destPath);
-		}
-		bool wantDirect = directWriteOpt || forceDirectWrite;
-		if (wantDirect && !curOutputInit && (hasOwnOut || (forceDirectWrite && hasForceDest)))
-		{
-			curOutputInit = true;
-			m_fileInfo->SetOutputInitialized(true);
-		}
-		bool directWrite = wantDirect && curOutputInit;
-		bool cached = m_fileInfo->GetCachedArticles() > 0;
-
-		std::string fullInfoPath = nzbName + PATH_SEPARATOR + filename;
-		LogStartMessage(fullInfoPath, directWrite, cached);
-
-		// 2. Return if no successful articles
-		if (m_fileInfo->GetSuccessArticles() == 0)
-		{
-			detail("Skipping file parts completion for %s: no successful articles", fullInfoPath.c_str());
-			if (!GetSkipDiskWrite())
-			{
-				CleanupOldData(directWrite, nzbDestDir, "");
-			}
-			ReportCompletionStatus(fullInfoPath);
-			return true;
-		}
-
-		// 3. Skip all filesystem work when SkipWrite is active
-		if (GetSkipDiskWrite())
-		{
-			ReportCompletionStatus(fullInfoPath);
-			// Update in-memory FileInfo state only
-			{
-				GuardedDownloadQueue guard = DownloadQueue::Guard();
-				m_fileInfo->SetCrc(0); // CRC not computed in SkipWrite mode
-				m_fileInfo->SetOutputFilename("");
-			}
-			return true;
-		}
-
-		// 4. Prepare directory
-		CString errmsg;
-		if (!FileSystem::ForceDirectories(nzbDestDir.c_str(), errmsg))
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not create directory %s: %s", nzbDestDir.c_str(), *errmsg);
-			return false;
-		}
-
-		// 5. Setup output file
-		DiskFile outfile;
-		auto pathsOpt = SetupOutputFile(outfile, nzbDestDir, filename, fullInfoPath, directWrite, cached);
-		if (!pathsOpt)
-		{
-			return false;
-		}
-
-		const auto& [finalOutputPath, tempDestPath] = *pathsOpt;
-
-		// 6. Process data (Write/Join/Move Articles)
-		uint32 crc = ProcessArticles(outfile, fullInfoPath, finalOutputPath, directWrite, cached);
-		if (m_commitError)
-		{
-			outfile.Close();
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-				"Could not commit all article data for %s", fullInfoPath.c_str());
-			return false;
-		}
-
-		// 7. Finalize file (Close & Move Temp to Final)
-		if (!CommitDiskFile(outfile, tempDestPath, finalOutputPath, directWrite))
-		{
-			return false;
-		}
-
-		// 8. Cleanup (Delete parts or old dirs)
-		if (!CleanupOldData(directWrite, nzbDestDir, finalOutputPath))
-		{
-			return false;
-		}
-
-		// 9. Report results
-		ReportCompletionStatus(fullInfoPath);
-
-		// 10. Post Processing (Renames, Hardlinks, Moves)
-		HandlePostProcessing(crc, finalOutputPath, filename, nzbDestDir);
-		return true;
-	}
-
-	void LogStartMessage(std::string_view infoFilename, bool directWrite, bool cached)
-	{
-		if (g_Options->GetRawArticle())
-		{
-			detail("Moving articles for %s", infoFilename.data());
-		}
-		else if (directWrite && cached)
-		{
-			detail("Writing articles for %s", infoFilename.data());
-		}
-		else if (directWrite)
-		{
-			detail("Checking articles for %s", infoFilename.data());
-		}
-		else
-		{
-			detail("Joining articles for %s", infoFilename.data());
-		}
-	}
-
-	std::optional<OutputPaths> SetupOutputFile(DiskFile &outfile,
-								std::string_view destDir,
-								std::string_view filename,
-								std::string_view infoFilename,
-								bool directWrite,
-								bool cached)
-	{
-		struct Ctx { ArticleWriter* self; DiskFile* outfile; } ctx{ this, &outfile };
-		auto openFileCb = [](void* rawCtx, const char* path, int readWrite) -> int {
-			auto* c = static_cast<Ctx*>(rawCtx);
-			if (readWrite < 0)
-			{
-				c->self->m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "%s", path);
-				return 0;
-			}
-			return c->outfile->Open(path, readWrite ? DiskFile::omReadWrite : DiskFile::omWrite) ? 1 : 0;
-		};
-
-		NzbgetRsBuf finalBuf{}, tempBuf{}, updatedOutBuf{};
-		int ok = nzbget_rs_awc_article_writer_execute_setup_output_file(
-			destDir.data(), destDir.size(), filename.data(), filename.size(), PATH_SEPARATOR,
-			g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0,
-			m_fileInfo->GetForceDirectWrite() ? 1 : 0,
-			m_outputFilename.data(), m_outputFilename.size(), &ctx, openFileCb,
-			&finalBuf, &tempBuf, &updatedOutBuf);
-
-		OutputPaths paths;
-		paths.finalPath.assign(finalBuf.data ? finalBuf.data : "", finalBuf.len);
-		nzbget_rs_free(finalBuf);
-		paths.tempPath.assign(tempBuf.data ? tempBuf.data : "", tempBuf.len);
-		nzbget_rs_free(tempBuf);
-		m_outputFilename.assign(updatedOutBuf.data ? updatedOutBuf.data : "", updatedOutBuf.len);
-		nzbget_rs_free(updatedOutBuf);
-
-		if (!ok)
-		{
-			return std::nullopt;
-		}
-		if (outfile.Active())
-		{
-			SetWriteBuffer(outfile, 0);
-		}
-		return paths;
-	}
-
-	uint32 ProcessArticles(DiskFile& outfile,
-								std::string_view infoFilename,
-								std::string_view finalOutputPath,
-								bool directWrite,
-								bool cached)
-	{
-		std::unique_ptr<ArticleCache::FlushGuard> flushGuard;
-		if (cached)
-		{
-			flushGuard = std::make_unique<ArticleCache::FlushGuard>(g_ArticleCache->GuardFlush());
-		}
-
-		std::vector<NzbgetRsProcessArticleItem> items;
-		std::vector<ArticleInfo*> finished;
-		items.reserve(m_fileInfo->GetArticles()->size());
-		finished.reserve(m_fileInfo->GetArticles()->size());
-		for (ArticleInfo* pa : m_fileInfo->GetArticles())
-		{
-			if (pa->GetStatus() != ArticleInfo::aiFinished) continue;
-			items.push_back(NzbgetRsProcessArticleItem{
-				pa->GetSegmentOffset(),
-				pa->GetSegmentSize(),
-				pa->GetCrc(),
-				pa->GetPartNumber(),
-				pa->GetDupeFallbackRound(),
-				reinterpret_cast<const uint8_t*>(pa->GetSegmentContent()),
-				pa->GetResultFilename()
-			});
-			finished.push_back(pa);
-		}
-
-		struct Ctx { ArticleWriter* self; DiskFile* outfile; std::vector<ArticleInfo*>* finished; } ctx{ this, &outfile, &finished };
-		auto ioCb = [](void* rawCtx, int op, int64_t val, const void* ptr, size_t len) -> int64_t {
-			auto* c = static_cast<Ctx*>(rawCtx);
-			if (op == 0) return c->outfile->Position();
-			if (op == 1) return c->outfile->Seek(val) ? 1 : 0;
-			if (op == 2) return c->outfile->Write(ptr, static_cast<int64>(len));
-			if (op == 3) { (*c->finished)[static_cast<size_t>(val)]->DiscardSegment(); return 0; }
-			if (op == 4) c->self->m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "%s", static_cast<const char*>(ptr));
-			return 0;
-		};
-
-		int commitErr = 0, failedDelta = 0;
-		uint32 crc = nzbget_rs_awc_article_writer_process_articles(
-			items.data(), items.size(), m_fileInfo->GetArticles()->size(),
-			infoFilename.data(), infoFilename.size(),
-			finalOutputPath.data(), finalOutputPath.size(),
-			g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0,
-			GetSkipDiskWrite() ? 1 : 0, m_format == Decoder::efYenc ? 1 : 0,
-			&ctx, ioCb, &commitErr, &failedDelta);
-		if (commitErr)
-		{
-			m_commitError = true;
-		}
-		if (failedDelta > 0)
-		{
-			m_fileInfo->SetFailedArticles(m_fileInfo->GetFailedArticles() + failedDelta);
-			m_fileInfo->SetSuccessArticles(m_fileInfo->GetSuccessArticles() - failedDelta);
-		}
-		return crc;
-	}
-
-	bool CommitDiskFile(DiskFile& outfile,
-						std::string_view tempDestPath,
-						std::string_view finalOutputPath,
-						bool directWrite)
-	{
-		if (!outfile.Active()) return true;
-
-		bool flushed = outfile.Flush();
-		bool closed = outfile.Close();
-		if (!flushed || !closed)
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-				"Could not flush completed output file %s", finalOutputPath.data());
-			return false;
-		}
-
-		if (!directWrite)
-		{
-			// a failed rename leaves the complete data under its temporary name
-			// (as it always has): it is not a data-commit failure, and failing the
-			// file would discard data that par-rename/par-check can still use
-			if (!FileSystem::MoveFile(tempDestPath.data(), finalOutputPath.data()))
-			{
-				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not move file %s to %s: %s",
-						tempDestPath.data(), finalOutputPath.data(), *FileSystem::GetLastErrorMessage());
-			}
-		}
-		return true;
-	}
-
-	bool CleanupOldData(bool directWrite,
-						std::string_view nzbDestDir,
-						std::string_view finalOutputPath)
-	{
-		std::vector<int> dupeFallbackRounds;
-		std::vector<const char*> resultFilenames;
-		dupeFallbackRounds.reserve(m_fileInfo->GetArticles()->size());
-		resultFilenames.reserve(m_fileInfo->GetArticles()->size());
-		for (ArticleInfo* pa : m_fileInfo->GetArticles())
-		{
-			dupeFallbackRounds.push_back(pa->GetDupeFallbackRound());
-			resultFilenames.push_back(pa->GetResultFilename());
-		}
-
-		int clearOutputFilename = 0;
-		nzbget_rs_awc_article_writer_execute_cleanup_old_data(
-			directWrite ? 1 : 0, nzbDestDir.data(), nzbDestDir.size(),
-			finalOutputPath.data(), finalOutputPath.size(),
-			m_outputFilename.data(), m_outputFilename.size(),
-			m_fileInfo->IsHardLinked() ? 1 : 0,
-			Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0,
-			PATH_SEPARATOR, ALT_PATH_SEPARATOR,
-			dupeFallbackRounds.data(), resultFilenames.data(), dupeFallbackRounds.size(),
-			m_fileInfo->GetNzbInfo(),
-			+[](void* ctx, int isDebug, const char* msg) {
-				if (isDebug)
-					debug("%s", msg);
-				else
-					static_cast<NzbInfo*>(ctx)->PrintMessage(Message::mkError, "%s", msg);
-			},
-			&clearOutputFilename);
-
-		if (clearOutputFilename)
-		{
-			m_fileInfo->SetOutputFilename(nullptr);
-		}
-		return true;
-	}
-
-	void ReportCompletionStatus(std::string_view infoFilename)
-	{
-		if (m_fileInfo->GetTotalArticles() == m_fileInfo->GetSuccessArticles())
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkInfo, "Successfully downloaded %s", infoFilename.data());
-		}
-		else if ((int64)m_fileInfo->GetMissedArticles() + (int64)m_fileInfo->GetFailedArticles() > 0)
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkWarning, "%i of %i article downloads failed for \"%s\"",
-				m_fileInfo->GetMissedArticles() + m_fileInfo->GetFailedArticles(),
-				m_fileInfo->GetTotalArticles(), infoFilename.data());
-		}
-		else
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkInfo, "Partially downloaded %s", infoFilename.data());
-		}
-	}
-
-	void HandlePostProcessing(uint32 crc,
-								std::string_view currentPath,
-								std::string_view originalFilename,
-								std::string_view nzbDestDir)
-	{
-		GuardedDownloadQueue guard = DownloadQueue::Guard();
-		m_fileInfo->SetCrc(crc);
-		m_fileInfo->SetOutputFilename(currentPath.data());
-
-		const std::string& curOutFn = m_fileInfo->GetOutputFilename();
-		NzbgetRsBuf updatedOfnBuf{};
-		int hasUpdatedOfn = 0;
-		int clearAndReturn = nzbget_rs_awc_article_writer_post_process_rename_and_hardlink(
-			originalFilename.data(), originalFilename.size(),
-			m_fileInfo->GetFilename(),
-			nzbDestDir.data(), nzbDestDir.size(),
-			curOutFn.data(), curOutFn.size(),
-			m_outputFilename.data(), m_outputFilename.size(),
-			m_fileInfo->IsHardLinked() ? 1 : 0,
-			Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0,
-			m_fileInfo->GetNzbInfo(),
-			+[](void* ctx, const char* msg) {
-				static_cast<NzbInfo*>(ctx)->PrintMessage(Message::mkError, "%s", msg);
-			},
-			&updatedOfnBuf, &hasUpdatedOfn);
-		if (hasUpdatedOfn)
-		{
-			m_fileInfo->SetOutputFilename(std::string(updatedOfnBuf.data ? updatedOfnBuf.data : "", updatedOfnBuf.len));
-		}
-		nzbget_rs_free(updatedOfnBuf);
-		if (clearAndReturn)
-		{
-			m_fileInfo->SetOutputFilename(nullptr);
-			return;
-		}
-
-		if (nzbDestDir != m_fileInfo->GetNzbInfo()->GetDestDir())
-		{
-			MoveCompletedFiles(m_fileInfo->GetNzbInfo(), nzbDestDir.data());
-		}
-	}
-
-	void FlushCache()
-	{
-		detail("Flushing cache for %s", m_infoName.c_str());
-
-		// a file being retried writes into its existing output (ForceDirectWrite), as
-		// Start and Finish do: flushed to temporary files instead, its cached articles
-		// were never written to the file although marked done
-		bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
-			m_fileInfo->GetOutputInitialized();
-		int flushedArticles = 0;
-		int64 flushedSize = 0;
-
-		{
-			ArticleCache::FlushGuard flushGuard = g_ArticleCache->GuardFlush();
-
-			std::vector<ArticleInfo*> cachedArticles;
-			std::vector<NzbgetRsFlushArticleItem> items;
-
-			{
-				Guard contentGuard = g_ArticleCache->GuardContent();
-
-				if (m_fileInfo->GetFlushLocked())
-				{
-					return;
-				}
-
-				m_fileInfo->SetFlushLocked(true);
-
-				cachedArticles.reserve(m_fileInfo->GetArticles()->size());
-				items.reserve(m_fileInfo->GetArticles()->size());
-				for (ArticleInfo* pa : m_fileInfo->GetArticles())
-				{
-					if (pa->GetSegmentContent())
-					{
-						cachedArticles.push_back(pa);
-						items.push_back(NzbgetRsFlushArticleItem{
-							pa->GetSegmentOffset(),
-							pa->GetSegmentSize(),
-							reinterpret_cast<const uint8_t*>(pa->GetSegmentContent()),
-							pa->GetResultFilename()
-						});
-					}
-				}
-			}
-
-			const std::string& outputFilename = m_fileInfo->GetOutputFilename();
-			struct Ctx { ArticleWriter* self; std::vector<ArticleInfo*>* cached; } ctx{ this, &cachedArticles };
-			nzbget_rs_awc_article_writer_flush_cache(
-				items.data(), items.size(),
-				directWrite ? 1 : 0, GetSkipDiskWrite() ? 1 : 0,
-				outputFilename.data(), outputFilename.size(),
-				&ctx,
-				+[](void* rawCtx, int op, size_t idx, const char* msg) -> int {
-					auto* c = static_cast<Ctx*>(rawCtx);
-					if (op == 0) return (c->self->m_fileInfo->GetDeleted() && !c->self->m_fileInfo->GetNzbInfo()->GetParking()) ? 1 : 0;
-					if (op == 1) { (*c->cached)[idx]->DiscardSegment(); return 0; }
-					if (op == 2) c->self->m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "%s", msg);
-					return 0;
-				},
-				&flushedArticles, &flushedSize);
-
-			{
-				Guard contentGuard = g_ArticleCache->GuardContent();
-				m_fileInfo->SetCachedArticles(m_fileInfo->GetCachedArticles() - flushedArticles);
-				m_fileInfo->SetFlushLocked(false);
-			}
-		}
-
-		double flushedMb = (double)flushedSize / 1024.0 / 1024.0;
-		if (GetSkipDiskWrite())
-		{
-			detail("Discarded %i articles (%.2f MB) from cache (SkipWrite) for %s", flushedArticles,
-				flushedMb, m_infoName.c_str());
-		}
-		else
-		{
-			detail("Saved %i articles (%.2f MB) from cache into disk for %s", flushedArticles,
-				flushedMb, m_infoName.c_str());
-		}
-	}
-
-	static bool MoveCompletedFiles(NzbInfo* nzbInfo, const char* oldDestDir)
-	{
-		if (nzbInfo->GetSkipDiskWrite() || nzbInfo->GetCompletedFiles()->empty())
-		{
-			return true;
-		}
-		std::vector<const char*> completedFilenames;
-		completedFilenames.reserve(nzbInfo->GetCompletedFiles()->size());
-		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-		{
-			completedFilenames.push_back(completedFile.GetFilename());
-		}
-		return nzbget_rs_awc_article_writer_move_completed_files(
-			nzbInfo->GetDestDir(),
-			oldDestDir,
-			completedFilenames.data(),
-			completedFilenames.size(),
-			nzbInfo,
-			+[](void* ctx, const char* errMsgOrNull) -> int {
-				auto* info = static_cast<NzbInfo*>(ctx);
-				if (errMsgOrNull && *errMsgOrNull)
-				{
-					info->PrintMessage(Message::mkError, "%s", errMsgOrNull);
-					return 0;
-				}
-				for (FileInfo* fileInfo : info->GetFileList())
-				{
-					if (fileInfo->GetOutputInitialized() && !fileInfo->GetOutputFilename().empty() &&
-						fileInfo->GetActiveDownloads() > 0)
-					{
-						Guard guard = fileInfo->GuardOutputFile();
-						if (fileInfo->GetOutputInitialized())
-						{
-							return 1;
-						}
-					}
-				}
-				return 0;
-			}) != 0;
-	}
-
-private:
-	bool IsDupeFallbackArticle() const
-	{
-		return m_articleInfo && m_articleInfo->GetDupeFallbackRound() > 0;
-	}
-
-	bool GetSkipDiskWrite()
-	{
-		return (m_fileInfo && m_fileInfo->GetNzbInfo() && m_fileInfo->GetNzbInfo()->GetSkipDiskWrite()) ||
-			g_Options->GetSkipWrite();
-	}
-
-	/* creates output file and subdirectores */
-	bool CreateOutputFile(int64 size)
-	{
-		NzbgetRsBuf errBuf{};
-		bool ok = nzbget_rs_awc_article_writer_create_output_file(
-			m_outputFilename.c_str(), size, &errBuf) != 0;
-		if (!ok && errBuf.data && *errBuf.data)
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "%s", errBuf.data);
-		}
-		nzbget_rs_free(errBuf);
-		return ok;
-	}
-
-	void BuildOutputFilename()
-	{
-		if (!m_fileInfo || !m_articleInfo)
-			return;
-
-		const char* tmpDir = g_Options->GetTempDir();
-		const char* destDir = m_fileInfo->GetNzbInfo()->GetDestDir();
-		const bool directWrite = g_Options->GetDirectWrite();
-		const bool forceDirectWrite = m_fileInfo->GetForceDirectWrite();
-		std::optional<Guard> guard;
-		if (m_fileInfo->GetActiveDownloads() > 0)
-		{
-			guard.emplace(m_fileInfo->GuardOutputFile());
-		}
-		const std::string& existingOutputFilename = m_fileInfo->GetOutputFilename();
-
-		NzbgetRsBuf resultBuf{};
-		NzbgetRsBuf tempBuf{};
-		NzbgetRsBuf outputBuf{};
-		int hasOutputFilename = 0;
-		int updateFileInfoOutput = 0;
-		if (!nzbget_rs_awc_article_writer_build_output_filenames(
-			tmpDir,
-			destDir,
-			PATH_SEPARATOR,
-			m_fileInfo->GetId(),
-			m_articleInfo->GetPartNumber(),
-			directWrite ? 1 : 0,
-			forceDirectWrite ? 1 : 0,
-			existingOutputFilename.c_str(),
-			m_fileInfo->GetOutputInitialized() ? 1 : 0,
-			m_fileInfo->GetFilename(),
-			&resultBuf,
-			&tempBuf,
-			&outputBuf,
-			&hasOutputFilename,
-			&updateFileInfoOutput))
-		{
-			return;
-		}
-
-		std::string resultFilename(resultBuf.data ? resultBuf.data : "", resultBuf.len);
-		nzbget_rs_free(resultBuf);
-		m_articleInfo->SetResultFilename(resultFilename.c_str());
-
-		m_tempFilename.assign(tempBuf.data ? tempBuf.data : "", tempBuf.len);
-		nzbget_rs_free(tempBuf);
-
-		if (hasOutputFilename)
-		{
-			m_outputFilename.assign(outputBuf.data ? outputBuf.data : "", outputBuf.len);
-			if (updateFileInfoOutput)
-			{
-				m_fileInfo->SetOutputFilename(m_outputFilename);
-			}
-		}
-		nzbget_rs_free(outputBuf);
-	}
-
-	void SetWriteBuffer(DiskFile& outFile, int recSize)
-	{
-		int writeBufferKb = g_Options->GetWriteBuffer();
-		if (writeBufferKb > 0)
-		{
-			int maxBytes = (int)std::min<int64>((int64)writeBufferKb * 1024, INT32_MAX);
-			int bufSize = (recSize > 0 && recSize < maxBytes) ? recSize : maxBytes;
-			outFile.SetWriteBuffer(bufSize);
-		}
-	}
-
-	FileInfo* m_fileInfo;
-	ArticleInfo* m_articleInfo;
-	DiskFile m_outFile;
-	std::string m_tempFilename;
-	std::string m_outputFilename;
-	std::string m_resultFilename;
-	std::string m_infoName;
-	Decoder::EFormat m_format = Decoder::efUnknown;
-	CachedSegmentData m_articleData;
-	int64 m_articleOffset;
-	int m_articleSize;
-	int m_articlePtr;
-	bool m_duplicate = false;
-	bool m_commitError = false;
-};
-
-inline bool ArticleCache::CheckFlush(bool flushEverything)
-{
-	debug("Checking cache, Allocated: %i, FlushEverything: %i", (int)m_allocated, (int)flushEverything);
-
-	CString infoName;
-
-	{
-		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-		{
-			if (m_fileInfo)
-			{
-				break;
-			}
-
-			for (FileInfo* fileInfo : nzbInfo->GetFileList())
-			{
-				if (fileInfo->GetCachedArticles() > 0 &&
-					(fileInfo->GetActiveDownloads() == 0 || flushEverything) &&
-					(!fileInfo->GetNzbInfo()->GetSkipDiskWrite() || flushEverything))
-				{
-					m_fileInfo = fileInfo;
-					infoName.Format("%s%c%s",
-						m_fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR, m_fileInfo->GetFilename());
-					break;
-				}
-			}
-		}
-	}
-
-	if (m_fileInfo)
-	{
-		ArticleWriter articleWriter;
-		articleWriter.SetFileInfo(m_fileInfo);
-		articleWriter.SetInfoName(infoName);
-		articleWriter.FlushCache();
-		m_fileInfo = nullptr;
-		return true;
-	}
-
-	debug("Checking cache... nothing to flush");
-
-	return false;
+	nzbget_rs_article_dl_exec(nullptr, 110, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, nullptr);
 }
 
 #endif
@@ -10716,54 +9367,6 @@ using ParDamage = DupeArticleFallback::ParDamage;
 #ifndef ARTICLEDOWNLOADER_H
 #define ARTICLEDOWNLOADER_H
 
-class RenameContentAnalyzer
-{
-public:
-	void Reset()
-	{
-#ifndef DISABLE_PARCHECK
-		nzbget_rs_rename_analyzer_reset(m_rs.get());
-#endif
-	}
-
-	void Append(const void* buffer, int len)
-	{
-#ifndef DISABLE_PARCHECK
-		char setId[33];
-		if (nzbget_rs_rename_analyzer_append(m_rs.get(), (const char*)buffer, len, setId))
-		{
-			m_parFile = true;
-			m_parSetId = setId;
-		}
-#else
-		(void)buffer;
-		(void)len;
-#endif
-	}
-
-	void Finish()
-	{
-#ifndef DISABLE_PARCHECK
-		char hash[33];
-		nzbget_rs_rename_analyzer_finish(m_rs.get(), hash);
-		m_hash16k = hash;
-#endif
-	}
-
-	const char* GetHash16k() { return m_hash16k; }
-	bool GetParFile() { return m_parFile; }
-	const char* GetParSetId() { return m_parSetId; }
-
-private:
-#ifndef DISABLE_PARCHECK
-	std::unique_ptr<NzbgetRsRenameAnalyzer, void (*)(NzbgetRsRenameAnalyzer*)> m_rs{
-		nzbget_rs_rename_analyzer_new(), nzbget_rs_rename_analyzer_free};
-#endif
-	CString m_hash16k;
-	CString m_parSetId;
-	bool m_parFile = false;
-};
-
 class ArticleDownloader final : public Thread, public Subject
 {
 public:
@@ -10782,716 +9385,790 @@ public:
 		adFatalError
 	};
 
-
-	void SetFileInfo(FileInfo* fileInfo) { m_fileInfo = fileInfo; }
-	FileInfo* GetFileInfo() { return m_fileInfo; }
-	void SetArticleInfo(ArticleInfo* articleInfo) { m_articleInfo = articleInfo; }
-	ArticleInfo* GetArticleInfo() { return m_articleInfo; }
-	EStatus GetStatus() { return m_status.load(); }
-	ServerStatList* GetServerStats() { return &m_serverStats; }
-	time_t GetLastUpdateTime() { return m_lastUpdateTime; }
-	const char* GetArticleFilename() { return m_articleFilename; }
-	const char* GetInfoName() { return m_infoName; }
-	CString CopyConnectionName() { Guard guard(m_connectionMutex); return m_connectionName.Str() ? m_connectionName.Str() : ""; }
-	void SetConnection(NntpConnection* connection) { m_connection = connection; }
-	bool CompleteFileParts() { return m_articleWriter.CompleteFileParts(); }
-	int GetDownloadedSize() { return m_downloadedSize; }
-	int64 GetDecodedFileSize() { return m_decodedFileSize; }
-	void SetContentAnalyzer(std::unique_ptr<RenameContentAnalyzer> contentAnalyzer) { m_contentAnalyzer = std::move(contentAnalyzer); }
-	RenameContentAnalyzer* GetContentAnalyzer() { return m_contentAnalyzer.get(); }
-
-	ArticleDownloader() : m_fileInfo(nullptr) , m_articleInfo(nullptr) , m_writingStarted(false)
+	ArticleDownloader(FileInfo* fileInfo, ArticleInfo* articleInfo, NntpConnection* connection,
+		bool hasAnalyzer, const char* infoName)
+		: m_fileInfo(fileInfo), m_articleInfo(articleInfo), m_lastUpdateTime(Util::CurrentTime())
 	{
 		debug("Creating ArticleDownloader");
-
-		SetLastUpdateTimeNow();
+#ifndef DISABLE_PARCHECK
+		constexpr int parEnabled = 1;
+#else
+		constexpr int parEnabled = 0;
+#endif
+		m_rs = nzbget_rs_article_dl_new(hasAnalyzer ? 1 : 0, parEnabled,
+			reinterpret_cast<uintptr_t>(connection), infoName ? infoName : "");
 	}
 
-	virtual ~ArticleDownloader()
+	~ArticleDownloader() override
 	{
 		debug("Destroying ArticleDownloader");
-
-	#ifndef DISABLE_TLS
+		nzbget_rs_article_dl_free(m_rs);
+#ifndef DISABLE_TLS
 		OpenSSL::StopSSLThread();
-	#endif
+#endif
 	}
 
-	void SetInfoName(const char* infoName)
+	FileInfo* GetFileInfo() { return m_fileInfo; }
+	ArticleInfo* GetArticleInfo() { return m_articleInfo; }
+	EStatus GetStatus() { return m_status.load(); }
+	time_t GetLastUpdateTime() { return m_lastUpdateTime.load(); }
+
+	uintptr_t ExecRs(int op, int a1 = 0, uintptr_t p1 = 0, uintptr_t p2 = 0, const char* s1 = nullptr)
 	{
-		m_infoName = infoName;
-		m_articleWriter.SetInfoName(m_infoName);
+		return nzbget_rs_article_dl_exec(m_rs, op, a1, 0, p1, p2, s1, NzbgetCArticleDlHost, this);
 	}
 
-	void Run() override
-	{
-		debug("Entering ArticleDownloader-loop");
-
-		SetStatus(adRunning);
-
-		m_articleWriter.SetFileInfo(m_fileInfo);
-		m_articleWriter.SetArticleInfo(m_articleInfo);
-		m_articleWriter.Prepare();
-
-		EStatus status = adFailed;
-		int retries = g_Options->GetArticleRetries() > 0 ? g_Options->GetArticleRetries() : 1;
-		int remainedRetries = retries;
-		struct TransientRetriesGuard
-		{
-			void* h;
-			~TransientRetriesGuard() { nzbget_rs_transient_retries_op(h, 1, 0, 0, nullptr, 0); }
-		} transientRetries{reinterpret_cast<void*>(nzbget_rs_transient_retries_op(nullptr, 0,
-			(uintptr_t)retries, g_Options->GetArticleInterval() > 0 ? g_Options->GetArticleInterval() : 0, nullptr, 0))};
-		ServerPool::RawServerList failedServers;
-		failedServers.reserve(g_ServerPool->GetServers()->size());
-		NewsServer* wantServer = nullptr;
-		NewsServer* lastServer = nullptr;
-		int level = 0;
-		int serverConfigGeneration = g_ServerPool->GetGeneration();
-		bool force = m_fileInfo->GetNzbInfo()->GetForcePriority();
-
-		while (!IsStopped())
-		{
-			status = adFailed;
-
-			SetStatus(adWaiting);
-			while (!m_connection && !IsStopped() && serverConfigGeneration == g_ServerPool->GetGeneration())
-			{
-				if (nzbget_rs_transient_retries_op(transientRetries.h, 5, 0, 0, nullptr, 0))
-				{
-					m_connection = g_ServerPool->GetConnection(level, wantServer, &failedServers);
-				}
-				else
-				{
-					ServerPool::RawServerList ignoreServers = failedServers;
-					std::vector<uintptr_t> waiting(g_ServerPool->GetServers()->size() + 8);
-					intptr_t res = nzbget_rs_transient_retries_op(transientRetries.h, 7,
-						reinterpret_cast<uintptr_t>(wantServer), (int64_t)Util::CurrentTime(), waiting.data(), waiting.size());
-					for (size_t i = 0, n = (size_t)(res >> 1); i < n; i++)
-					{
-						ignoreServers.push_back(reinterpret_cast<NewsServer*>(waiting[i]));
-					}
-					if ((res & 1) == 0)
-					{
-						m_connection = g_ServerPool->GetConnection(level, wantServer, &ignoreServers);
-					}
-				}
-				Util::Sleep(5);
-			}
-			SetLastUpdateTimeNow();
-			SetStatus(adRunning);
-
-			if (IsStopped() ||
-				((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
-				(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
-				serverConfigGeneration != g_ServerPool->GetGeneration())
-			{
-				status = adRetry;
-				break;
-			}
-
-			lastServer = m_connection->GetNewsServer();
-			level = lastServer->GetNormLevel();
-			remainedRetries = (int)nzbget_rs_transient_retries_op(transientRetries.h, 3,
-				reinterpret_cast<uintptr_t>(lastServer), 0, nullptr, 0);
-
-			m_connection->SetSuppressErrors(false);
-
-	#ifndef DISABLE_TLS
-			m_connection->SetCertVerifLevel(lastServer->GetCertVerificationLevel());
-	#endif
-
-			{ Guard guard(m_connectionMutex); m_connectionName.Format("%s (%s)", m_connection->GetNewsServer()->GetName(), m_connection->GetHost()); }
-
-			// check server retention
-			int retention = m_connection->GetNewsServer()->GetRetention();
-			time_t fileTime = m_fileInfo->GetTime();
-			int fileAgeDays = (retention > 0 && fileTime > 0)
-				? (int)std::clamp<int64>(((int64)Util::CurrentTime() - (int64)fileTime) / 86400, INT32_MIN, INT32_MAX)
-				: 0;
-			bool retentionFailure = retention > 0 && fileTime > 0 && fileAgeDays > retention;
-			if (retentionFailure)
-			{
-				detail("Article %s @ %s failed: out of server retention (file age: %i, configured retention: %i)",
-					*m_infoName, *m_connectionName, fileAgeDays, retention);
-				status = adFailed;
-				FreeConnection(true);
-			}
-
-			if (m_connection && !IsStopped())
-			{
-				detail("Downloading %s @ %s", *m_infoName, *m_connectionName);
-			}
-
-			// test connection
-			bool connected = m_connection && m_connection->Connect();
-			bool transientRetryScheduled = false;
-			bool authRejected = false;
-			if (!connected && m_connection && m_connection->GetAuthRejected())
-			{
-				if (nzbget_rs_transient_retries_op(transientRetries.h, 2,
-					reinterpret_cast<uintptr_t>(lastServer), (int64_t)Util::CurrentTime(), nullptr, 0))
-				{
-					transientRetryScheduled = true;
-				}
-				else
-				{
-					authRejected = true;
-				}
-			}
-			if (connected && !IsStopped())
-			{
-				NewsServer* newsServer = m_connection->GetNewsServer();
-
-				// Download article
-				status = Download();
-
-				if (status == adTransientError)
-				{
-					if (nzbget_rs_transient_retries_op(transientRetries.h, 2,
-						reinterpret_cast<uintptr_t>(newsServer), (int64_t)Util::CurrentTime(), nullptr, 0))
-					{
-						status = adConnectError;
-						transientRetryScheduled = true;
-					}
-					else
-					{
-						status = adFailed;
-						remainedRetries = 0;
-					}
-				}
-
-				if (status == adFinished || status == adFailed || status == adNotFound || status == adCrcError)
-				{
-					int success = status == adFinished ? 1 : 0;
-					int failed = status == adFinished ? 0 : 1;
-					int serverId = newsServer->GetId();
-					m_serverStats.StatOp(serverId, success, failed, ServerStatList::soSet);
-					ServerVolume::Stats stats;
-					stats.bytes = 0;
-					stats.articles.failed = failed;
-					stats.articles.success = success;
-					g_StatMeter->AddServerStats(stats, serverId);
-				}
-			}
-
-			if (m_connection)
-			{
-				AddServerStats();
-			}
-
-			if (m_contentRejected)
-			{
-				FreeConnection(false);
-				status = adFailed;
-				if (m_articleInfo->GetDupeFallbackRound() > 0)
-				{
-					break;
-				}
-				m_contentRejected = false;
-				remainedRetries = 0;
-			}
-
-			if (!connected && m_connection)
-			{
-				detail("Article %s @ %s failed: could not establish connection", *m_infoName, *m_connectionName);
-			}
-
-			if (status == adConnectError)
-			{
-				connected = false;
-				status = adFailed;
-			}
-
-			if (connected && status == adFailed)
-			{
-				remainedRetries--;
-			}
-			nzbget_rs_transient_retries_op(transientRetries.h, 4,
-				reinterpret_cast<uintptr_t>(lastServer), remainedRetries, nullptr, 0);
-
-			bool optionalBlocked = false;
-			if (!connected && m_connection && !IsStopped())
-			{
-				g_ServerPool->BlockServer(lastServer);
-				optionalBlocked = lastServer->GetOptional();
-			}
-
-			wantServer = nullptr;
-			if (connected && status == adFailed && remainedRetries > 0 && !retentionFailure)
-			{
-				wantServer = lastServer;
-			}
-			else
-			{
-				FreeConnection(status == adFinished || status == adNotFound);
-				if (transientRetryScheduled && m_fileInfo->GetNzbInfo()->HasDesiredServer())
-				{
-					wantServer = lastServer;
-				}
-			}
-
-			if (status == adFinished || status == adFatalError)
-			{
-				break;
-			}
-
-			if (IsStopped() ||
-				((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
-				(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
-				serverConfigGeneration != g_ServerPool->GetGeneration())
-			{
-				status = adRetry;
-				break;
-			}
-
-			if (!wantServer && m_fileInfo->GetNzbInfo()->HasDesiredServer())
-			{
-				status = adFailed;
-				break;
-			}
-
-			if (!wantServer && (connected || retentionFailure || optionalBlocked || authRejected))
-			{
-				if (!optionalBlocked)
-				{
-					failedServers.push_back(lastServer);
-				}
-
-				bool allServersOnLevelFailed = true;
-				for (NewsServer* candidateServer : g_ServerPool->GetServers())
-				{
-					if (candidateServer->GetNormLevel() == level &&
-						candidateServer->GetActive() &&
-						candidateServer->GetMaxConnections() != 0 &&
-						!(candidateServer->GetOptional() && g_ServerPool->IsServerBlocked(candidateServer)))
-					{
-						bool candidateFailed = false;
-						for (NewsServer* ignoreServer : failedServers)
-						{
-							if (ignoreServer == candidateServer ||
-								(ignoreServer->GetGroup() > 0 &&
-								 ignoreServer->GetGroup() == candidateServer->GetGroup() &&
-								 ignoreServer->GetNormLevel() == candidateServer->GetNormLevel()))
-							{
-								candidateFailed = true;
-								break;
-							}
-						}
-						if (!candidateFailed)
-						{
-							allServersOnLevelFailed = false;
-							break;
-						}
-					}
-				}
-
-				if (allServersOnLevelFailed)
-				{
-					if (level < g_ServerPool->GetMaxNormLevel())
-					{
-						detail("Article %s @ all level %i servers failed, increasing level", *m_infoName, level);
-						level++;
-					}
-					else
-					{
-						detail("Article %s @ all servers failed", *m_infoName);
-						status = adFailed;
-						break;
-					}
-				}
-
-				remainedRetries = retries;
-			}
-		}
-
-		FreeConnection(status == adFinished);
-
-		if (m_articleWriter.GetDuplicate())
-		{
-			status = adFinished;
-		}
-		if (status != adFinished && status != adRetry && status != adFatalError)
-		{
-			status = adFailed;
-		}
-		if (IsStopped())
-		{
-			detail("Download %s cancelled", *m_infoName);
-			status = adRetry;
-		}
-
-		if (status == adFailed && nzbget_rs_transient_retries_op(transientRetries.h, 6, 0, 0, nullptr, 0))
-		{
-			detail("Download %s failed: temporary server errors outlasted all attempts, the article may still exist", *m_infoName);
-		}
-		else if (status == adFailed)
-		{
-			detail("Download %s failed", *m_infoName);
-		}
-
-		SetStatus(status);
-		Notify(nullptr);
-
-		debug("Exiting ArticleDownloader-loop");
-	}
-
-	void SetLastUpdateTimeNow()
-	{
-		m_lastUpdateTime = Util::CurrentTime();
-	}
-
-	void LogDebugInfo()
-	{
-		info("      Download: status=%i, LastUpdateTime=%s, InfoName=%s", (int)m_status.load(),
-			 *Util::FormatTime(m_lastUpdateTime.load()), *m_infoName);
-	}
+	void Run() override { ExecRs(0); }
 
 	void Stop() override
 	{
 		debug("Trying to stop ArticleDownloader");
 		Thread::Stop();
-		Guard guard(m_connectionMutex);
-		if (m_connection)
-		{
-			m_connection->SetSuppressErrors(true);
-			m_connection->Cancel();
-		}
+		ExecRs(16);
 		debug("ArticleDownloader stopped successfully");
 	}
 
 private:
-	FileInfo* m_fileInfo;
-	ArticleInfo* m_articleInfo;
-	NntpConnection* m_connection = nullptr;
+	FileInfo* m_fileInfo = nullptr;
+	ArticleInfo* m_articleInfo = nullptr;
 	std::atomic<EStatus> m_status{adUndefined};
-	Mutex m_connectionMutex;
-	CString m_infoName;
-	CString m_connectionName;
-	CString m_articleFilename;
-	std::atomic<time_t> m_lastUpdateTime;
-	Decoder m_decoder;
-	ArticleWriter m_articleWriter;
-	ServerStatList m_serverStats;
-	bool m_writingStarted;
-	// Distinguish local output failures from malformed/source articles.  Only
-	// the former must bypass duplicate fallback.
-	bool m_localWriteError = false;
-	bool m_contentRejected = false;
-	int m_downloadedSize = 0;
-	int64 m_decodedFileSize = 0;
-	std::unique_ptr<RenameContentAnalyzer> m_contentAnalyzer;
+	std::atomic<time_t> m_lastUpdateTime{0};
+	CachedSegmentData m_cachedData;
+	NzbgetRsArticleDownloader* m_rs = nullptr;
 
-	void SetStatus(EStatus status) { m_status.store(status); }
+	friend uintptr_t NzbgetCArticleDlHost(void*, int, int, int, uintptr_t, uintptr_t,
+		const char*, const char*, int*, int64_t*, const char**);
+};
 
-	EStatus Download()
+inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs)
+{
+	switch (op)
 	{
-		const char* response = nullptr;
-		EStatus status = adRunning;
-		m_writingStarted = false;
-		m_localWriteError = false;
-		m_contentRejected = false;
-		m_articleInfo->SetCrc(0);
-
-		if (m_contentAnalyzer)
+	case 1: {
+		if (a1 == 10) { i64s[0] = (int64_t)Util::CurrentTime(); return 0; }
+		if (a1 == 11) { Util::Sleep(a2); return 0; }
+		if (a1 == 12)
 		{
-			m_contentAnalyzer->Reset();
+			info("      Download: status=%i, LastUpdateTime=%s, InfoName=%s",
+				a2, *Util::FormatTime((time_t)i64s[0]), s1 ? s1 : "");
+			return 0;
 		}
-
-		if (m_connection->GetNewsServer()->GetJoinGroup() && !m_fileInfo->GetGroups()->empty())
+		const char* msg = s1 ? s1 : "";
+		if (p1 != 0) reinterpret_cast<NzbInfo*>(p1)->PrintMessage((Message::EKind)a1, "%s", msg);
+		else if (a1 == Message::mkInfo) info("%s", msg);
+		else if (a1 == Message::mkWarning) warn("%s", msg);
+		else if (a1 == Message::mkError) error("%s", msg);
+		else if (a1 == Message::mkDebug) debug("%s", msg);
+		else if (a1 == Message::mkDetail) detail("%s", msg);
+		return 0;
+	}
+	case 2: {
+		if (a1 == 0)
 		{
-			for (CString& group : m_fileInfo->GetGroups())
+			if (!g_Options) { ints[0] = 0; ints[1] = 500; strs[0] = nullptr; return 0; }
+			ints[0] = g_Options->GetArticleCache();
+			ints[1] = g_Options->GetMemoryPressureInterval();
+			strs[0] = g_Options->GetMemoryPressurePath();
+			return 1;
+		}
+		if (a1 == 1) return static_cast<MemoryMonitor*>(ctx)->IsStopped() ? 1 : 0;
+		if (a1 == 2) { if (g_ArticleCache) g_ArticleCache->WakeupFlush(); return 0; }
+		if (a1 == 3)
+		{
+			i64s[0] = (int64_t)g_ArticleCache->m_allocated.load();
+			i64s[1] = (int64_t)g_ArticleCache->GetEffectiveLimit();
+			ints[0] = g_ArticleCache->IsStopped() ? 1 : 0;
+			ints[1] = (g_Options && g_Options->GetDirectWrite()) ? 1 : 0;
+			ints[2] = g_MemoryMonitor ? g_MemoryMonitor->GetTier() : 0;
+			return 0;
+		}
+		if (a1 == 4)
+		{
+			std::unique_lock<std::mutex> lk(g_ArticleCache->m_allocMutex);
+			g_ArticleCache->m_allocCond.wait(lk, [] {
+				return g_ArticleCache->IsStopped() || g_ArticleCache->m_allocated > 0;
+			});
+			return 0;
+		}
+		if (a1 == 5)
+		{
+			bool flushEverything = a2 != 0;
+			static thread_local CString s_infoName;
 			{
-				response = m_connection->JoinGroup(group);
-				if (response && response[0] == '2')
+				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 				{
-					break;
+					if (g_ArticleCache->m_fileInfo) break;
+					for (FileInfo* fileInfo : nzbInfo->GetFileList())
+					{
+						if (fileInfo->GetCachedArticles() > 0 &&
+							(fileInfo->GetActiveDownloads() == 0 || flushEverything) &&
+							(!fileInfo->GetNzbInfo()->GetSkipDiskWrite() || flushEverything))
+						{
+							g_ArticleCache->m_fileInfo = fileInfo;
+							s_infoName.Format("%s%c%s",
+								fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR, fileInfo->GetFilename());
+							break;
+						}
+					}
 				}
 			}
-
-			status = CheckResponse(response, "could not join group");
-			if (status != adFinished)
+			if (!g_ArticleCache->m_fileInfo) return 0;
+			strs[0] = *s_infoName;
+			return reinterpret_cast<uintptr_t>(g_ArticleCache->m_fileInfo);
+		}
+		if (a1 == 6) { g_ArticleCache->m_fileInfo = nullptr; return 0; }
+		if (a1 == 7)
+		{
+			FileInfo* f = reinterpret_cast<FileInfo*>(p1);
+			static thread_local std::string s_outFn;
+			bool outInit = false;
 			{
-				return status;
+				Guard og = f->GuardOutputFile();
+				outInit = f->GetOutputInitialized();
+				s_outFn = f->GetOutputFilename();
 			}
+			g_ArticleCache->LockFlush();
+			{
+				Guard cg = g_ArticleCache->GuardContent();
+				if (f->GetFlushLocked())
+				{
+					g_ArticleCache->UnlockFlush();
+					return 0;
+				}
+				f->SetFlushLocked(true);
+				g_ArticleCache->m_flushArticles.clear();
+				g_ArticleCache->m_flushArticles.reserve(f->GetArticles()->size());
+				for (ArticleInfo* pa : f->GetArticles())
+				{
+					if (pa->GetSegmentContent()) g_ArticleCache->m_flushArticles.push_back(pa);
+				}
+			}
+			bool directWrite = (g_Options->GetDirectWrite() || f->GetForceDirectWrite()) && outInit;
+			bool skipDiskWrite = (f->GetNzbInfo() && f->GetNzbInfo()->GetSkipDiskWrite()) || g_Options->GetSkipWrite();
+			ints[0] = directWrite ? 1 : 0;
+			ints[1] = skipDiskWrite ? 1 : 0;
+			ints[2] = (int)g_ArticleCache->m_flushArticles.size();
+			i64s[0] = (int64_t)s_outFn.size();
+			i64s[1] = (int64_t)reinterpret_cast<uintptr_t>(f->GetNzbInfo());
+			strs[0] = s_outFn.data();
+			return 1;
 		}
-
-		// retrieve article
-		CString cmd = CString::FormatStr("%s %s\r\n",
-			g_Options->GetRawArticle() ? "ARTICLE" : "BODY",
-			m_articleInfo->GetMessageId() ? m_articleInfo->GetMessageId() : "");
-		response = m_connection->Request(cmd);
-
-		status = CheckResponse(response, "could not fetch article");
-		if (status != adFinished)
+		if (a1 == 8)
 		{
-			return status;
+			ArticleInfo* pa = g_ArticleCache->m_flushArticles[(size_t)a2];
+			i64s[0] = pa->GetSegmentOffset();
+			ints[0] = pa->GetSegmentSize();
+			strs[0] = pa->GetSegmentContent();
+			strs[1] = pa->GetResultFilename();
+			return 0;
 		}
-
-		m_decoder.Clear();
-		m_decoder.SetCrcCheck(g_Options->GetCrcCheck());
-		m_decoder.SetRawMode(g_Options->GetRawArticle());
-
-		status = adRunning;
-		int readChunk = g_Options->GetArticleReadChunkSize();
-		CharBuffer lineBuf(readChunk + 128);
-
-		while (!IsStopped() && !m_decoder.GetEof())
+		if (a1 == 9)
 		{
-			if (!IsStopped() && !m_articleWriter.HasCachedBuffer() &&
-				g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL &&
+			FileInfo* f = reinterpret_cast<FileInfo*>(p1);
+			if (a2 < 0) return (f->GetDeleted() && !f->GetNzbInfo()->GetParking()) ? 1 : 0;
+			g_ArticleCache->m_flushArticles[(size_t)a2]->DiscardSegment();
+			return 0;
+		}
+		if (a1 == 10)
+		{
+			FileInfo* f = reinterpret_cast<FileInfo*>(p1);
+			{
+				Guard cg = g_ArticleCache->GuardContent();
+				f->SetCachedArticles(f->GetCachedArticles() - a2);
+				f->SetFlushLocked(false);
+			}
+			g_ArticleCache->m_flushArticles.clear();
+			g_ArticleCache->UnlockFlush();
+			ints[0] = ((f->GetNzbInfo() && f->GetNzbInfo()->GetSkipDiskWrite()) || g_Options->GetSkipWrite()) ? 1 : 0;
+			return 0;
+		}
+		return 0;
+	}
+	case 3: {
+		if (a1 == 0)
+		{
+			ints[0] = (int)g_ServerPool->m_sortedServers.size();
+			ints[1] = (int)g_ServerPool->m_connections.size();
+			ints[2] = (int)g_ServerPool->m_levels.size();
+			ints[3] = g_ServerPool->m_maxNormLevel;
+			ints[4] = g_ServerPool->m_retryInterval;
+			ints[5] = g_ServerPool->m_timeout;
+			ints[6] = (int)g_ServerPool->m_servers.size();
+			i64s[0] = (int64_t)Util::CurrentTime();
+			return 0;
+		}
+		if (a1 == 1)
+		{
+			NewsServer* s = a2 < 0 ? reinterpret_cast<NewsServer*>(p1) :
+				(p2 != 0 ? g_ServerPool->m_servers[(size_t)a2].get() : g_ServerPool->m_sortedServers[(size_t)a2]);
+			ints[0] = s->GetId();
+			ints[1] = s->GetLevel();
+			ints[2] = s->GetNormLevel();
+			ints[3] = s->GetActive() ? 1 : 0;
+			ints[4] = s->GetOptional() ? 1 : 0;
+			ints[5] = s->GetGroup();
+			ints[6] = s->GetMaxConnections();
+			i64s[0] = (int64_t)s->GetBlockTime();
+			strs[0] = s->GetName();
+			strs[1] = s->GetHost();
+			return reinterpret_cast<uintptr_t>(s);
+		}
+		if (a1 == 2)
+		{
+			if (a2 == 0) g_ServerPool->m_sortedServers[p1]->SetNormLevel((int)p2);
+			else if (a2 == 1)
+			{
+				if (p1 > 0)
+				{
+					ServerPool::RawServerList newSorted(p1);
+					for (size_t i = 0; i < p1; i++) newSorted[i] = g_ServerPool->m_sortedServers[(size_t)ints[i]];
+					g_ServerPool->m_sortedServers = std::move(newSorted);
+					g_ServerPool->m_maxNormLevel = (int)p2;
+				}
+				g_ServerPool->m_levels.clear();
+			}
+			else if (a2 == 2)
+			{
+				NewsServer* ns = g_ServerPool->m_sortedServers[p1];
+				ns->SetBlockTime(0);
+				int normLevel = ints[0];
+				if (normLevel > -1)
+				{
+					if ((int)g_ServerPool->m_levels.size() <= normLevel) g_ServerPool->m_levels.push_back(0);
+					if (ints[2] != 0)
+					{
+						for (size_t k = 0; k < p2; k++)
+						{
+							auto conn = std::make_unique<ServerPool::PooledConnection>(ns);
+							conn->SetTimeout(g_ServerPool->m_timeout);
+							g_ServerPool->m_connections.push_back(std::move(conn));
+						}
+						g_ServerPool->m_levels[(size_t)normLevel] += ints[1];
+					}
+				}
+			}
+			else if (a2 == 3) g_ServerPool->m_generation++;
+			return 0;
+		}
+		if (a1 == 3)
+		{
+			auto* c = g_ServerPool->m_connections[(size_t)a2].get();
+			NewsServer* s = c->GetNewsServer();
+			ints[0] = c->GetInUse() ? 1 : 0;
+			ints[1] = c->GetStatus() == Connection::csConnected ? 1 : 0;
+			ints[2] = s->GetId();
+			ints[3] = s->GetLevel();
+			ints[4] = s->GetNormLevel();
+			i64s[0] = (int64_t)c->GetFreeTime();
+			strs[0] = s->GetName();
+			strs[1] = s->GetHost();
+			return reinterpret_cast<uintptr_t>(s);
+		}
+		if (a1 == 4)
+		{
+			auto* lst = reinterpret_cast<ServerPool::RawServerList*>(p1);
+			if (a2 < 0) return lst ? lst->size() : 0;
+			NewsServer* s = (*lst)[(size_t)a2];
+			ints[0] = s->GetId();
+			ints[1] = s->GetGroup();
+			ints[2] = s->GetNormLevel();
+			return 0;
+		}
+		if (a1 == 5)
+		{
+			if (a2 == 0) { g_ServerPool->m_sortedServers[p1]->SetBlockTime((time_t)i64s[0]); return 0; }
+			if (a2 == 1)
+			{
+				auto* c = g_ServerPool->m_connections[p1].get();
+				c->SetInUse(true);
+				g_ServerPool->m_levels[p2]--;
+				return reinterpret_cast<uintptr_t>(static_cast<NntpConnection*>(c));
+			}
+			if (a2 == 2)
+			{
+				auto* c = static_cast<ServerPool::PooledConnection*>(reinterpret_cast<NntpConnection*>(p1));
+				c->SetInUse(false);
+				if (p2 != 0) c->SetFreeTimeNow();
+				NewsServer* s = c->GetNewsServer();
+				if (s->GetNormLevel() > -1 && s->GetActive()) g_ServerPool->m_levels[(size_t)s->GetNormLevel()]++;
+				return 0;
+			}
+			if (a2 == 3)
+			{
+				g_ServerPool->m_connections.erase(std::remove_if(
+					g_ServerPool->m_connections.begin(), g_ServerPool->m_connections.end(),
+					[](std::unique_ptr<ServerPool::PooledConnection>& connection)
+					{
+						if (!connection->GetInUse() &&
+							(connection->GetNewsServer()->GetNormLevel() == -1 || !connection->GetNewsServer()->GetActive()))
+						{
+							debug("Closing (and deleting) unused connection to server%i", connection->GetNewsServer()->GetId());
+							if (connection->GetStatus() == Connection::csConnected) connection->Disconnect();
+							return true;
+						}
+						return false;
+					}),
+					g_ServerPool->m_connections.end());
+				return 0;
+			}
+			if (a2 == 4) { g_ServerPool->m_connections[p1]->Disconnect(); return 0; }
+			if (a2 == 5)
+			{
+				NewsServer* s = reinterpret_cast<NewsServer*>(p1);
+				Guard guard(g_ServerPool->m_connectionsMutex);
+				time_t curTime = Util::CurrentTime();
+				i64s[0] = (int64_t)s->GetBlockTime();
+				i64s[1] = (int64_t)curTime;
+				s->SetBlockTime(curTime);
+				ints[0] = g_ServerPool->m_retryInterval;
+				strs[0] = s->GetName();
+				strs[1] = s->GetHost();
+				return 0;
+			}
+			if (a2 == 6) return (uintptr_t)g_ServerPool->m_levels[p1];
+		}
+		return 0;
+	}
+	case 4: {
+		auto* ad = static_cast<ArticleDownloader*>(ctx);
+		if (a1 == 0)
+		{
+			ints[0] = g_Options->GetArticleRetries() > 0 ? g_Options->GetArticleRetries() : 1;
+			ints[1] = g_Options->GetArticleInterval() > 0 ? g_Options->GetArticleInterval() : 0;
+			ints[2] = g_ServerPool->GetGeneration();
+			ints[3] = (int)g_ServerPool->GetServers()->size();
+			ints[4] = ad->m_fileInfo->GetNzbInfo()->GetForcePriority() ? 1 : 0;
+			ints[5] = ad->m_fileInfo->GetExtraPriority() ? 1 : 0;
+			ints[6] = ad->m_fileInfo->GetNzbInfo()->HasDesiredServer() ? 1 : 0;
+			ints[7] = ad->m_articleInfo->GetDupeFallbackRound();
+			i64s[0] = (int64_t)ad->m_fileInfo->GetTime();
+			return 0;
+		}
+		if (a1 == 1)
+		{
+			if (a2 == 0)
+			{
+				if (!ad->m_fileInfo || !ad->m_articleInfo) return 0;
+				std::optional<Guard> guard;
+				if (ad->m_fileInfo->GetActiveDownloads() > 0) guard.emplace(ad->m_fileInfo->GuardOutputFile());
+				ad->ExecRs(17);
+				return 0;
+			}
+			if (a2 == 1)
+			{
+				ints[0] = ad->m_fileInfo->GetId();
+				ints[1] = ad->m_articleInfo->GetPartNumber();
+				ints[2] = g_Options->GetDirectWrite() ? 1 : 0;
+				ints[3] = ad->m_fileInfo->GetForceDirectWrite() ? 1 : 0;
+				ints[4] = ad->m_fileInfo->GetOutputInitialized() ? 1 : 0;
+				strs[0] = g_Options->GetTempDir();
+				strs[1] = ad->m_fileInfo->GetNzbInfo()->GetDestDir();
+				strs[2] = ad->m_fileInfo->GetOutputFilename().c_str();
+				strs[3] = ad->m_fileInfo->GetFilename();
+				return 0;
+			}
+			if (a2 == 2) { strs[0] = ad->m_articleInfo->GetResultFilename(); return 0; }
+			return 0;
+		}
+		if (a1 == 2)
+		{
+			ints[0] = ad->IsStopped() ? 1 : 0;
+			ints[1] = (g_WorkState && (g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached())) ? 1 : 0;
+			ints[2] = (g_WorkState && g_WorkState->GetDownloadHeld()) ? 1 : 0;
+			ints[3] = g_ServerPool->GetGeneration();
+			ints[4] = g_ServerPool->GetMaxNormLevel();
+			ints[5] = (int)g_ServerPool->GetServers()->size();
+			i64s[0] = (int64_t)Util::CurrentTime();
+			return 0;
+		}
+		if (a1 == 3)
+		{
+			if (p1 & 1) ad->m_lastUpdateTime = (time_t)i64s[0];
+			ad->m_status.store((ArticleDownloader::EStatus)a2);
+			if (p1 & 2) ad->Notify(nullptr);
+			return 0;
+		}
+		if (a1 == 4)
+		{
+			ServerPool::RawServerList ign;
+			if (i64s && p2 > 0)
+			{
+				ign.reserve(p2);
+				for (size_t i = 0; i < p2; i++) ign.push_back(reinterpret_cast<NewsServer*>((uintptr_t)i64s[i]));
+			}
+			return reinterpret_cast<uintptr_t>(g_ServerPool->GetConnection(
+				a2, reinterpret_cast<NewsServer*>(p1), &ign));
+		}
+		if (a1 == 5)
+		{
+			NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
+			NewsServer* srv = conn->GetNewsServer();
+			conn->SetSuppressErrors(false);
+#ifndef DISABLE_TLS
+			conn->SetCertVerifLevel(srv->GetCertVerificationLevel());
+#endif
+			ints[0] = srv->GetNormLevel();
+			ints[1] = srv->GetRetention();
+			ints[2] = srv->GetId();
+			ints[3] = 0;
+			ints[4] = srv->GetJoinGroup() ? 1 : 0;
+			strs[0] = srv->GetName();
+			strs[1] = conn->GetHost();
+			return reinterpret_cast<uintptr_t>(srv);
+		}
+		if (a1 == 6)
+		{
+			NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
+			bool ok = conn->Connect();
+			ints[0] = conn->GetAuthRejected() ? 1 : 0;
+			return ok ? 1 : 0;
+		}
+		if (a1 == 7)
+		{
+			if (a2 == 0)
+			{
+				NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
+				int serverId = conn->GetNewsServer()->GetId();
+				int bytesRead = conn->FetchTotalBytesRead();
+				ServerVolume::Stats stats{};
+				stats.bytes = Util::SafeIntCast<int, uint32>(bytesRead);
+				g_StatMeter->AddServerStats(stats, serverId);
+				ints[0] = bytesRead;
+			}
+			else
+			{
+				ServerVolume::Stats stats{};
+				stats.articles.success = ints[0];
+				stats.articles.failed = ints[1];
+				g_StatMeter->AddServerStats(stats, (int)p1);
+			}
+			return 0;
+		}
+		if (a1 == 8)
+		{
+			NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
+			if (!a2 || conn->GetStatus() == Connection::csCancelled) conn->Disconnect();
+			int serverId = conn->GetNewsServer()->GetId();
+			int bytesRead = conn->FetchTotalBytesRead();
+			ServerVolume::Stats stats{};
+			stats.bytes = Util::SafeIntCast<int, uint32>(bytesRead);
+			g_StatMeter->AddServerStats(stats, serverId);
+			g_ServerPool->FreeConnection(conn, true);
+			ints[0] = bytesRead;
+			return 0;
+		}
+		if (a1 == 9)
+		{
+			NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
+			conn->SetSuppressErrors(true);
+			conn->Cancel();
+			return 0;
+		}
+		if (a1 == 10)
+		{
+			NewsServer* srv = reinterpret_cast<NewsServer*>(p1);
+			g_ServerPool->BlockServer(srv);
+			return srv->GetOptional() ? 1 : 0;
+		}
+		if (a1 == 11)
+		{
+			NewsServer* s = g_ServerPool->GetServers()->at((size_t)a2).get();
+			ints[0] = s->GetId();
+			ints[1] = s->GetNormLevel();
+			ints[2] = s->GetGroup();
+			ints[3] = (s->GetActive() && s->GetMaxConnections() != 0 &&
+				!(s->GetOptional() && g_ServerPool->IsServerBlocked(s))) ? 1 : 0;
+			return reinterpret_cast<uintptr_t>(s);
+		}
+		if (a1 == 12)
+		{
+			if (a2 == 0)
+			{
+				ad->m_articleInfo->SetCrc(0);
+				ints[0] = g_Options->GetRawArticle() ? 1 : 0;
+				ints[1] = g_Options->GetCrcCheck() ? 1 : 0;
+				ints[2] = g_Options->GetArticleReadChunkSize();
+				ints[3] = (int)ad->m_fileInfo->GetGroups()->size();
+				ints[4] = ((ad->m_fileInfo->GetNzbInfo() && ad->m_fileInfo->GetNzbInfo()->GetSkipDiskWrite()) ||
+					g_Options->GetSkipWrite()) ? 1 : 0;
+				strs[0] = ad->m_articleInfo->GetMessageId();
+			}
+			else if (a2 == 1)
+			{
+				NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
+				strs[0] = conn->JoinGroup(ad->m_fileInfo->GetGroups()->at(p2));
+				ints[0] = conn->GetAuthError() ? 1 : 0;
+			}
+			else if (a2 == 2)
+			{
+				NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
+				strs[0] = conn->Request(s1);
+				ints[0] = conn->GetAuthError() ? 1 : 0;
+			}
+			return 0;
+		}
+		if (a1 == 13)
+		{
+			NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
+			if (!ad->IsStopped() && !a2 &&
+				g_MemoryMonitor && g_MemoryMonitor->GetTier() == 2 &&
 				g_ArticleCache && g_ArticleCache->GetFlushing())
 			{
 				Util::Sleep(10);
 			}
-
-			// throttle the bandwidth
-			while (!IsStopped() && (g_WorkState->GetSpeedLimit() > 0.0f) &&
+			while (!ad->IsStopped() && (g_WorkState->GetSpeedLimit() > 0.0f) &&
 				(g_StatMeter->CalcCurrentDownloadSpeed() > g_WorkState->GetSpeedLimit() ||
 				 g_StatMeter->CalcMomentaryDownloadSpeed() > g_WorkState->GetSpeedLimit()))
 			{
-				SetLastUpdateTimeNow();
+				ad->m_lastUpdateTime = Util::CurrentTime();
 				Util::Sleep(10);
 			}
-
-			char* buffer;
-			int len;
-			m_connection->ReadBuffer(&buffer, &len);
+			char* buffer = nullptr;
+			int len = 0;
+			conn->ReadBuffer(&buffer, &len);
 			if (len == 0)
 			{
-				len = m_connection->TryRecv(lineBuf, readChunk);
+				char* lineBuf = const_cast<char*>(s2);
+				len = conn->TryRecv(lineBuf, (int)p2);
 				buffer = lineBuf;
 			}
-
-			// have we encountered a timeout?
 			if (len <= 0)
 			{
-				if (!IsStopped())
-				{
-					detail("Article %s @ %s failed: Unexpected end of article", *m_infoName, *m_connectionName);
-				}
-				m_connection->SetBroken();
-				m_connection->Disconnect();
-				status = adFailed;
-				break;
+				ints[1] = ad->IsStopped() ? 0 : 1;
+				conn->SetBroken();
+				conn->Disconnect();
+				return 0;
 			}
-
 			g_StatMeter->AddSpeedReading(len);
-			time_t oldTime = m_lastUpdateTime;
-			SetLastUpdateTimeNow();
-			if (oldTime != m_lastUpdateTime)
+			time_t oldTime = ad->m_lastUpdateTime.load();
+			time_t nowTime = Util::CurrentTime();
+			ad->m_lastUpdateTime = nowTime;
+			ints[0] = len;
+			ints[1] = (oldTime != nowTime) ? 1 : 0;
+			strs[0] = buffer;
+			return 1;
+		}
+		if (a1 == 14)
+		{
+			ints[0] = ad->m_articleInfo->GetDupeFallbackRound();
+			i64s[0] = ad->m_fileInfo->GetDecodedFileSize();
+			i64s[1] = ad->m_articleInfo->GetDupeExpectedOffset();
+			i64s[2] = ad->m_articleInfo->GetDupeExpectedEnd();
+			return 0;
+		}
+		if (a1 == 15)
+		{
+			NzbInfo* nzb = ad->m_fileInfo->GetNzbInfo();
+			ints[0] = g_Options->GetDupeCheck() ? 1 : 0;
+			ints[1] = (int)nzb->GetDupeMode();
+			ints[2] = nzb->GetManyDupeFiles() ? 1 : 0;
+			ints[3] = g_Options->GetDirectWrite() ? 1 : 0;
+			ints[4] = ad->m_fileInfo->GetForceDirectWrite() ? 1 : 0;
+			ints[5] = (nzb->GetSkipDiskWrite() || g_Options->GetSkipWrite()) ? 1 : 0;
+			ints[6] = g_Options->GetArticleCache();
+			ints[7] = g_Options->GetRawArticle() ? 1 : 0;
+			ints[8] = g_Options->GetWriteBuffer();
+			ints[9] = ad->m_articleInfo->GetSize();
+			ints[10] = ad->m_articleInfo->GetDupeFallbackRound();
+			strs[0] = nzb->GetDestDir();
+			return reinterpret_cast<uintptr_t>(nzb);
+		}
+		if (a1 == 16)
+		{
+			bool outputInitialized = false;
 			{
-				AddServerStats();
-			}
-
-			// decode article data
-			len = m_decoder.DecodeBuffer(buffer, len);
-
-			// write to output file
-			if (len > 0 && !Write(buffer, len))
-			{
-				if (m_localWriteError)
+				Guard guard = ad->m_fileInfo->GuardOutputFile();
+				outputInitialized = ad->m_fileInfo->GetOutputInitialized();
+				if (!g_Options->GetDirectWrite() && !ad->m_fileInfo->GetForceDirectWrite())
 				{
-					status = adFatalError;
-				}
-				else
-				{
-					status = adFailed;
-					m_contentRejected = true;
-				}
-				break;
-			}
-		}
-
-		if (IsStopped())
-		{
-			status = adFailed;
-		}
-
-		if (status == adRunning)
-		{
-			FreeConnection(true);
-			status = DecodeCheck();
-		}
-
-		if (m_writingStarted)
-		{
-			m_articleWriter.Finish(status == adFinished);
-		}
-
-		if (status == adFinished)
-		{
-			detail("Successfully downloaded %s", *m_infoName);
-		}
-
-		return status;
-	}
-
-	EStatus CheckResponse(const char* response, const char* comment)
-	{
-		EStatus status = (EStatus)nzbget_rs_article_dl_op(0, m_connection->GetAuthError() ? 1 : 0,
-			response, 0, 0, 0, 0, 0, 0, nullptr, nullptr);
-		if (status != adFinished)
-		{
-			if (!response && !IsStopped())
-			{
-				detail("Article %s @ %s failed, %s: Connection closed by remote host",
-					*m_infoName, *m_connectionName, comment);
-			}
-			else if (response)
-			{
-				detail("Article %s @ %s failed, %s: %s", *m_infoName, *m_connectionName, comment, response);
-			}
-		}
-		return status;
-	}
-
-	bool Write(char* buffer, int len)
-	{
-		const char* articleFilename = nullptr;
-		int64 articleFileSize = 0;
-		int64 articleOffset = 0;
-		int articleSize = 0;
-
-		if (!m_writingStarted)
-		{
-			if (!g_Options->GetRawArticle())
-			{
-				articleFilename = m_decoder.GetArticleFilename();
-				if (m_decoder.GetFormat() == Decoder::efYenc)
-				{
-					int64 beginPos = m_decoder.GetBeginPos();
-					int64 endPos = m_decoder.GetEndPos();
-					articleFileSize = m_decoder.GetSize();
-					int64 expectedFileSize = m_fileInfo->GetDecodedFileSize();
-					int64 dupeExpectedOffset = m_articleInfo->GetDupeExpectedOffset();
-					int64 dupeExpectedEnd = m_articleInfo->GetDupeExpectedEnd();
-					int rc = nzbget_rs_article_dl_op(1, m_articleInfo->GetDupeFallbackRound(), nullptr,
-						beginPos, endPos, articleFileSize, expectedFileSize, dupeExpectedOffset, dupeExpectedEnd,
-						&articleOffset, &articleSize);
-					if (rc == 1) return false;
-					if (rc == 2)
-					{
-						warn("Malformed article %s: range %lli-%lli out of range (file size %lli)", *m_infoName,
-							(long long)beginPos, (long long)endPos, (long long)articleFileSize);
-						return false;
-					}
-					m_decodedFileSize = articleFileSize;
-					if (rc == 3)
-					{
-						detail("Discarding article %s from duplicate: file size mismatch (%lli vs %lli)",
-							*m_infoName, (long long)articleFileSize, (long long)expectedFileSize);
-						return false;
-					}
-					if (rc == 4)
-					{
-						detail("Discarding article %s from duplicate: decoded offset mismatch (%lli vs %lli)",
-							*m_infoName, (long long)articleOffset, (long long)dupeExpectedOffset);
-						return false;
-					}
-					if (rc == 5)
-					{
-						detail("Discarding article %s from duplicate: decoded end mismatch (%lli vs %lli)",
-							*m_infoName, (long long)endPos, (long long)dupeExpectedEnd);
-						return false;
-					}
+					ad->m_fileInfo->SetOutputInitialized(true);
 				}
 			}
-
-			if (!m_articleWriter.Start(m_decoder.GetFormat(), articleFilename, articleFileSize, articleOffset, articleSize))
+			bool isOwnOutputFile = false;
+			if (g_Options->GetDirectWrite() || ad->m_fileInfo->GetForceDirectWrite())
 			{
-				m_localWriteError = true;
-				return false;
+				Guard guard = ad->m_fileInfo->GuardOutputFile();
+				isOwnOutputFile = ad->m_fileInfo->GetForceDirectWrite() ||
+					(s1 && !ad->m_fileInfo->GetOutputFilename().empty() &&
+					 FileSystem::SameFilename(ad->m_fileInfo->GetOutputFilename().c_str(), s1));
 			}
-			m_writingStarted = true;
+			ints[0] = outputInitialized ? 1 : 0;
+			ints[1] = isOwnOutputFile ? 1 : 0;
+			return 0;
 		}
-
-		bool ok = m_articleWriter.Write(buffer, len);
-		if (!ok)
+		if (a1 == 17)
 		{
-			m_localWriteError = true;
-		}
-
-		if (m_contentAnalyzer)
-		{
-			m_contentAnalyzer->Append(buffer, len);
-		}
-
-		return ok;
-	}
-
-	EStatus DecodeCheck()
-	{
-		bool rawArticle = g_Options->GetRawArticle();
-		if (rawArticle)
-		{
-			return adFinished;
-		}
-		Decoder::EStatus status = m_decoder.Check();
-		bool isYenc = m_decoder.GetFormat() == Decoder::efYenc;
-		switch (status)
-		{
-			case Decoder::dsFinished:
-				if (isYenc && m_articleWriter.GetRangeExceeded())
-				{
-					detail("Decoding %s failed: more data than its range", *m_infoName);
-					return adFailed;
-				}
-				if (m_decoder.GetArticleFilename())
-				{
-					m_articleFilename = m_decoder.GetArticleFilename();
-				}
-				if (isYenc)
-				{
-					m_articleInfo->SetCrc(g_Options->GetCrcCheck() ?
-						m_decoder.GetCalculatedCrc() : m_decoder.GetExpectedCrc());
-				}
-				return adFinished;
-			case Decoder::dsCrcError:
-				detail("Decoding %s failed: CRC-Error", *m_infoName);
-				return adCrcError;
-			case Decoder::dsArticleIncomplete:
-				detail("Decoding %s failed: article incomplete", *m_infoName);
-				return adFailed;
-			case Decoder::dsInvalidSize:
-				detail("Decoding %s failed: size mismatch", *m_infoName);
-				return adFailed;
-			case Decoder::dsNoBinaryData:
-				detail("Decoding %s failed: no binary data found", *m_infoName);
-				return adFailed;
-			default:
-				detail("Decoding %s failed", *m_infoName);
-				return adFailed;
-		}
-	}
-
-	void FreeConnection(bool keepConnected)
-	{
-		if (m_connection)
-		{
-			debug("Releasing connection");
-			Guard guard(m_connectionMutex);
-			if (!keepConnected || m_connection->GetStatus() == Connection::csCancelled)
+			Guard guard = ad->m_fileInfo->GuardOutputFile();
+			bool skipDiskWrite = a2 != 0;
+			if (!ad->m_fileInfo->GetOutputInitialized() ||
+				(!skipDiskWrite && !FileSystem::FileExists(s1 ? s1 : "")))
 			{
-				m_connection->Disconnect();
+				if (!skipDiskWrite &&
+					nzbget_rs_article_dl_exec(nullptr, 20, 0, 0,
+						reinterpret_cast<uintptr_t>(ad->m_fileInfo->GetNzbInfo()),
+						(uintptr_t)i64s[0], s1 ? s1 : "", NzbgetCArticleDlHost, nullptr) == 0)
+				{
+					return 0;
+				}
+				ad->m_fileInfo->SetOutputInitialized(true);
 			}
-			AddServerStats();
-			g_ServerPool->FreeConnection(m_connection, true);
-			m_connection = nullptr;
+			return 1;
 		}
+		if (a1 == 18)
+		{
+			if (a2 == 0) ad->m_cachedData = CachedSegmentData();
+			else if (a2 == 1)
+			{
+				ad->m_cachedData = g_ArticleCache->Alloc((int)p1);
+				ints[0] = g_ArticleCache->GetFlushing() ? 1 : 0;
+				return reinterpret_cast<uintptr_t>(ad->m_cachedData.GetData());
+			}
+			else if (a2 == 2)
+			{
+				if ((int)p2 != (int)p1) g_ArticleCache->Realloc(&ad->m_cachedData, (int)p1);
+				Guard cg = g_ArticleCache->GuardContent();
+				ad->m_articleInfo->AttachSegment(
+					std::make_unique<CachedSegmentData>(std::move(ad->m_cachedData)), i64s[0], (int)p1);
+				ad->m_fileInfo->SetCachedArticles(ad->m_fileInfo->GetCachedArticles() + 1);
+			}
+			else if (a2 == 3)
+			{
+				ad->m_articleInfo->SetSegmentOffset(i64s[0]);
+				ad->m_articleInfo->SetSegmentSize((int)p1);
+			}
+			else if (a2 == 4) ad->m_articleInfo->SetCrc((uint32)p1);
+			else if (a2 == 5) ad->m_articleInfo->SetResultFilename(s1);
+			else if (a2 == 6) ad->m_fileInfo->SetOutputFilename(s1);
+			return 0;
+		}
+		if (a1 == 19)
+		{
+			FileInfo* f = ad->m_fileInfo;
+			if (a2 == 0)
+			{
+				NzbInfo* nzb = f->GetNzbInfo();
+				static thread_local std::string s_nzbName, s_nzbDestDir, s_filename, s_fileOutFn;
+				{
+					GuardedDownloadQueue guard = DownloadQueue::Guard();
+					s_nzbName = nzb->GetName();
+					s_nzbDestDir = nzb->GetDestDir();
+					s_filename = f->GetFilename();
+				}
+				s_fileOutFn = f->GetOutputFilename();
+				ints[0] = g_Options->GetDirectWrite() ? 1 : 0;
+				ints[1] = f->GetForceDirectWrite() ? 1 : 0;
+				ints[2] = f->GetOutputInitialized() ? 1 : 0;
+				ints[3] = f->GetCachedArticles();
+				ints[4] = f->GetSuccessArticles();
+				ints[5] = f->GetFailedArticles();
+				ints[6] = f->GetMissedArticles();
+				ints[7] = f->GetTotalArticles();
+				ints[8] = f->IsHardLinked() ? 1 : 0;
+				ints[9] = Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0;
+				ints[10] = g_Options->GetRawArticle() ? 1 : 0;
+				ints[11] = (nzb->GetSkipDiskWrite() || g_Options->GetSkipWrite()) ? 1 : 0;
+				ints[12] = g_Options->GetWriteBuffer();
+				ints[15] = (int)f->GetArticles()->size();
+				strs[0] = s_nzbName.c_str();
+				strs[1] = s_nzbDestDir.c_str();
+				strs[2] = s_filename.c_str();
+				strs[3] = s_fileOutFn.c_str();
+				return reinterpret_cast<uintptr_t>(nzb);
+			}
+			if (a2 == 1) { f->SetOutputInitialized(true); return 0; }
+			if (a2 == 2)
+			{
+				GuardedDownloadQueue guard = DownloadQueue::Guard();
+				f->SetCrc(0);
+				f->SetOutputFilename("");
+				return 0;
+			}
+			if (a2 == 3) { if (p1 != 0) g_ArticleCache->LockFlush(); else g_ArticleCache->UnlockFlush(); return 0; }
+			if (a2 == 4)
+			{
+				ArticleInfo* pa = f->GetArticles()->at(p1).get();
+				ints[0] = (int)pa->GetStatus();
+				ints[1] = pa->GetSegmentSize();
+				ints[2] = (int)pa->GetCrc();
+				ints[3] = pa->GetPartNumber();
+				ints[4] = pa->GetDupeFallbackRound();
+				i64s[0] = pa->GetSegmentOffset();
+				strs[0] = pa->GetSegmentContent();
+				strs[1] = pa->GetResultFilename();
+				return pa->GetStatus() == ArticleInfo::aiFinished ? 1 : 0;
+			}
+			if (a2 == 5) { f->GetArticles()->at(p1)->DiscardSegment(); return 0; }
+			if (a2 == 6)
+			{
+				f->SetFailedArticles(f->GetFailedArticles() + (int)p1);
+				f->SetSuccessArticles(f->GetSuccessArticles() - (int)p1);
+				return 0;
+			}
+			if (a2 == 7)
+			{
+				GuardedDownloadQueue guard = DownloadQueue::Guard();
+				ad->ExecRs(22);
+				return 0;
+			}
+			if (a2 == 8)
+			{
+				NzbInfo* nzb = f->GetNzbInfo();
+				f->SetCrc((uint32)p1);
+				f->SetOutputFilename(s1 ? s1 : "");
+				ints[0] = f->IsHardLinked() ? 1 : 0;
+				ints[1] = Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0;
+				strs[0] = f->GetFilename();
+				strs[1] = f->GetOutputFilename().c_str();
+				strs[2] = nzb->GetDestDir();
+				return reinterpret_cast<uintptr_t>(nzb);
+			}
+			return 0;
+		}
+		if (a1 == 20)
+		{
+			FileInfo* f = ad->m_fileInfo;
+			f->GetServerStats()->StatOp(ints[0], ints[1], ints[2], ServerStatList::soAdd);
+			f->GetNzbInfo()->GetCurrentServerStats()->StatOp(ints[0], ints[1], ints[2], ServerStatList::soAdd);
+			return 0;
+		}
+		if (a1 == 21) { ad->Stop(); return 0; }
+		return 0;
 	}
-
-	void AddServerStats()
-	{
-		int serverId = m_connection->GetNewsServer()->GetId();
-		int bytesRead = m_connection->FetchTotalBytesRead();
-		ServerVolume::Stats stats;
-		stats.bytes = Util::SafeIntCast<int, uint32>(bytesRead);
-		stats.articles.failed = 0;
-		stats.articles.success = 0;
-		g_StatMeter->AddServerStats(stats, serverId);
-		m_downloadedSize += bytesRead;
+	case 5: {
+		NzbInfo* nzb = reinterpret_cast<NzbInfo*>(p1);
+		if (a1 == 0)
+		{
+			ints[0] = nzb->GetSkipDiskWrite() ? 1 : 0;
+			ints[1] = (int)nzb->GetCompletedFiles()->size();
+			strs[0] = nzb->GetDestDir();
+			return 0;
+		}
+		if (a1 == 1)
+		{
+			strs[0] = nzb->GetCompletedFiles()->at((size_t)a2).GetFilename();
+			return 0;
+		}
+		if (a1 == 2)
+		{
+			for (FileInfo* fileInfo : nzb->GetFileList())
+			{
+				if (fileInfo->GetOutputInitialized() && !fileInfo->GetOutputFilename().empty() &&
+					fileInfo->GetActiveDownloads() > 0)
+				{
+					Guard guard = fileInfo->GuardOutputFile();
+					if (fileInfo->GetOutputInitialized()) return 1;
+				}
+			}
+			return 0;
+		}
+		return 0;
 	}
-};
+	default:
+		return 0;
+	}
+}
 #endif
 
 #ifndef QUEUECOORDINATOR_H
@@ -19256,7 +17933,7 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 		else if (a1 == 3 && g_PrePostProcessor) g_PrePostProcessor->CheckDownloadCompleted(reinterpret_cast<DownloadQueue*>(p1), reinterpret_cast<NzbInfo*>(p2));
 		else if (a1 == 4 && g_QueueScriptCoordinator) g_QueueScriptCoordinator->EnqueueScript(reinterpret_cast<NzbInfo*>(p1), (QueueScriptCoordinator::EEvent)a2);
 		else if (a1 == 5) StreamRepairController::StartLive(reinterpret_cast<NzbInfo*>(p1));
-		else if (a1 == 6) return ArticleWriter::MoveCompletedFiles(reinterpret_cast<NzbInfo*>(p1), s1 ? s1 : "") ? 1 : 0;
+		else if (a1 == 6) return nzbget_rs_article_dl_exec(nullptr, 23, 0, 0, p1, 0, s1 ? s1 : "", NzbgetCArticleDlHost, nullptr);
 		else if (a1 == 7) DupeProbe::LaunchRs(reinterpret_cast<NzbgetRsDupeProbe*>(p1));
 		else if (a1 == 8 && g_HistoryCoordinator) g_HistoryCoordinator->AddToHistory(reinterpret_cast<DownloadQueue*>(p1), reinterpret_cast<NzbInfo*>(p2));
 		else if (a1 == 9)
@@ -19832,29 +18509,18 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 		ArticleDownloader* ad = reinterpret_cast<ArticleDownloader*>(p1);
 		if (a1 == 0)
 		{
-			ints[0] = (int)ad->GetStatus(); ints[1] = ad->GetContentAnalyzer() ? 1 : 0;
-			ints[2] = (ad->GetContentAnalyzer() && ad->GetContentAnalyzer()->GetParFile()) ? 1 : 0;
-			ints[3] = ad->GetArticleFilename() ? 1 : 0;
-			i64s[0] = (int64_t)reinterpret_cast<uintptr_t>(ad->GetFileInfo()); i64s[1] = (int64_t)reinterpret_cast<uintptr_t>(ad->GetArticleInfo());
-			i64s[2] = ad->GetDecodedFileSize(); i64s[3] = ad->GetDownloadedSize();
-			strs[0] = ad->GetArticleFilename();
+			i64s[0] = (int64_t)reinterpret_cast<uintptr_t>(ad->GetFileInfo());
+			i64s[1] = (int64_t)reinterpret_cast<uintptr_t>(ad->GetArticleInfo());
+			ad->ExecRs(10, (int)ad->GetStatus(), reinterpret_cast<uintptr_t>(ints),
+				reinterpret_cast<uintptr_t>(i64s), reinterpret_cast<const char*>(strs));
 			return reinterpret_cast<uintptr_t>(ad);
 		}
 		if (a1 == 1) ad->Stop();
-		else if (a1 == 2) ad->LogDebugInfo();
-		else if (a1 == 3) { FileInfo* f = ad->GetFileInfo(); f->GetServerStats()->ListOp(ad->GetServerStats(), ServerStatList::soAdd); f->GetNzbInfo()->GetCurrentServerStats()->ListOp(ad->GetServerStats(), ServerStatList::soAdd); }
-		else if (a1 == 4)
-		{
-			RenameContentAnalyzer* ca = ad->GetContentAnalyzer();
-			if (!ca) return 0;
-			ca->Finish();
-			ints[0] = ca->GetParFile() ? 1 : 0;
-			strs[0] = ca->GetHash16k();
-			strs[1] = ca->GetParSetId();
-			return 1;
-		}
-		else if (a1 == 5) return ad->CompleteFileParts() ? 1 : 0;
-		else if (a1 == 6) { error("Cancelling hanging download %s @ %s", ad->GetInfoName(), *ad->CopyConnectionName()); ad->Stop(); }
+		else if (a1 == 2) ad->ExecRs(14, (int)ad->GetStatus(), (uintptr_t)(int64_t)ad->GetLastUpdateTime());
+		else if (a1 == 3) ad->ExecRs(12);
+		else if (a1 == 4) return ad->ExecRs(11, 0, reinterpret_cast<uintptr_t>(ints), 0, reinterpret_cast<const char*>(strs));
+		else if (a1 == 5) return ad->ExecRs(13);
+		else if (a1 == 6) ad->ExecRs(15);
 		return 0;
 	}
 	case 52: {
@@ -19862,14 +18528,10 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 		debug("Starting new ArticleDownloader");
 		FileInfo* f = reinterpret_cast<FileInfo*>(p1);
 		ArticleInfo* a = reinterpret_cast<ArticleInfo*>(p2);
-		auto* ad = new ArticleDownloader();
+		auto* ad = new ArticleDownloader(f, a, reinterpret_cast<NntpConnection*>((uintptr_t)i64s[0]),
+			a1 != 0, s1 ? s1 : "");
 		ad->SetAutoDestroy(true);
 		ad->Attach(self);
-		ad->SetFileInfo(f);
-		ad->SetArticleInfo(a);
-		ad->SetConnection(reinterpret_cast<NntpConnection*>((uintptr_t)i64s[0]));
-		if (a1 != 0) ad->SetContentAnalyzer(std::make_unique<RenameContentAnalyzer>());
-		ad->SetInfoName(s1 ? s1 : "");
 		a->SetStatus(ArticleInfo::aiRunning);
 		f->SetActiveDownloads(f->GetActiveDownloads() + 1);
 		f->GetNzbInfo()->SetActiveDownloads(f->GetNzbInfo()->GetActiveDownloads() + 1);

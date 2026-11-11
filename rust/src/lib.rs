@@ -16,6 +16,7 @@ pub mod donorscore;
 pub mod downloadinfo;
 pub mod dupecoord;
 pub mod dupeprobe;
+pub mod dupesearch_coord;
 pub mod dupesearch_nzb;
 pub mod escape;
 pub mod extension;

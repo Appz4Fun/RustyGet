@@ -1877,13 +1877,13 @@ pub fn dupe_write_atomic(path: &std::path::Path, data: &[u8]) -> bool {
 }
 
 #[cfg(unix)]
-fn dupe_bytes_to_path(bytes: &[u8]) -> &std::path::Path {
+pub(crate) fn dupe_bytes_to_path(bytes: &[u8]) -> &std::path::Path {
     use std::os::unix::ffi::OsStrExt;
     std::path::Path::new(std::ffi::OsStr::from_bytes(bytes))
 }
 
 #[cfg(not(unix))]
-fn dupe_bytes_to_path(bytes: &[u8]) -> &std::path::Path {
+pub(crate) fn dupe_bytes_to_path(bytes: &[u8]) -> &std::path::Path {
     std::path::Path::new(std::str::from_utf8(bytes).unwrap_or(""))
 }
 
@@ -1902,7 +1902,7 @@ pub fn dupe_read_all_bytes(path_bytes: &[u8]) -> Vec<u8> {
 }
 
 pub struct NzbFetcherCore {
-    state_path: std::sync::Mutex<String>,
+    state_path: std::sync::Mutex<Vec<u8>>,
     refused_until: std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, i64>>,
     indexer_locks:
         std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, std::sync::Arc<std::sync::Mutex<()>>>>,
@@ -1917,15 +1917,15 @@ impl Default for NzbFetcherCore {
 impl NzbFetcherCore {
     pub fn new() -> Self {
         Self {
-            state_path: std::sync::Mutex::new(String::new()),
+            state_path: std::sync::Mutex::new(Vec::new()),
             refused_until: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             indexer_locks: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
-    pub fn set_state_path(&self, path: &str) {
+    pub fn set_state_path_bytes(&self, path: &[u8]) {
         if let Ok(mut guard) = self.state_path.lock() {
-            *guard = path.to_string();
+            *guard = path.to_vec();
         }
     }
 
@@ -1938,7 +1938,7 @@ impl NzbFetcherCore {
         if path.is_empty() {
             return;
         }
-        let Ok(content) = std::fs::read(&path) else {
+        let Ok(content) = std::fs::read(dupe_bytes_to_path(&path)) else {
             return;
         };
         let mut map = self
@@ -1956,7 +1956,7 @@ impl NzbFetcherCore {
         &self,
         map: &std::collections::BTreeMap<Vec<u8>, i64>,
         now: i64,
-    ) -> Result<(), String> {
+    ) -> Result<(), Vec<u8>> {
         let path = self
             .state_path
             .lock()
@@ -1972,13 +1972,13 @@ impl NzbFetcherCore {
                 text.extend_from_slice(&line);
             }
         }
-        if !dupe_write_atomic(std::path::Path::new(&path), &text) {
+        if !dupe_write_atomic(dupe_bytes_to_path(&path), &text) {
             return Err(path);
         }
         Ok(())
     }
 
-    pub fn save(&self, now: i64) -> Result<(), String> {
+    pub fn save(&self, now: i64) -> Result<(), Vec<u8>> {
         let map = self
             .refused_until
             .lock()
@@ -2005,7 +2005,7 @@ impl NzbFetcherCore {
         map.get(indexer).is_some_and(|&until| until > now)
     }
 
-    pub fn refuse(&self, indexer: &[u8], now: i64) -> Result<(), String> {
+    pub fn refuse(&self, indexer: &[u8], now: i64) -> Result<(), Vec<u8>> {
         let mut map = self
             .refused_until
             .lock()
@@ -2035,8 +2035,8 @@ impl NzbFetcherCore {
         S: Fn() -> bool,
         W: Fn(),
         H: FnMut(&[u8], &[u8], usize, i64) -> (bool, i32, Vec<u8>),
-        LI: FnMut(&str),
-        LW: FnMut(&str),
+        LI: FnMut(&[u8]),
+        LW: FnMut(&[u8]),
     {
         let mut fetched = NzbFetched {
             listing: listing.clone(),
@@ -2089,20 +2089,19 @@ impl NzbFetcherCore {
                     return fetched;
                 }
                 fetched.reason = NzbFetchReason::Parse;
-                String::from_utf8_lossy(&nzb_fetcher_format_parse_err(&reply_body)).into_owned()
+                nzb_fetcher_format_parse_err(&reply_body)
             } else {
                 status = reply_status;
                 fetched.reason = NzbFetchReason::Fetch;
-                String::from_utf8_lossy(&nzb_fetcher_format_http_status_err(reply_status))
-                    .into_owned()
+                nzb_fetcher_format_http_status_err(reply_status)
             };
-            log_info_fn(&format!(
-                "DupeSearch: the nzb-file of {} from {} failed (attempt {}): {}",
-                String::from_utf8_lossy(&listing.title),
-                String::from_utf8_lossy(&listing.indexer),
-                attempt + 1,
-                why
-            ));
+            let mut msg = b"DupeSearch: the nzb-file of ".to_vec();
+            msg.extend_from_slice(&listing.title);
+            msg.extend_from_slice(b" from ");
+            msg.extend_from_slice(&listing.indexer);
+            msg.extend_from_slice(format!(" failed (attempt {}): ", attempt + 1).as_bytes());
+            msg.extend_from_slice(&why);
+            log_info_fn(&msg);
 
             if let Some(b) = budget {
                 if b.spent() {
@@ -2127,14 +2126,21 @@ impl NzbFetcherCore {
 
         if (status == 403 || status == 429) && !listing.indexer.is_empty() {
             if let Err(failed_path) = self.refuse(&listing.indexer, now_fn()) {
-                log_warn_fn(&format!("DupeSearch: could not save {failed_path}"));
+                let mut warn_msg = b"DupeSearch: could not save ".to_vec();
+                warn_msg.extend_from_slice(&failed_path);
+                log_warn_fn(&warn_msg);
             }
-            log_info_fn(&format!(
-                "DupeSearch: indexer {} refused nzb-file downloads (HTTP {}): not asking it for {} minutes",
-                String::from_utf8_lossy(&listing.indexer),
-                status,
-                NZB_FETCHER_COOLDOWN_SEC / 60
-            ));
+            let mut info_msg = b"DupeSearch: indexer ".to_vec();
+            info_msg.extend_from_slice(&listing.indexer);
+            info_msg.extend_from_slice(
+                format!(
+                    " refused nzb-file downloads (HTTP {}): not asking it for {} minutes",
+                    status,
+                    NZB_FETCHER_COOLDOWN_SEC / 60
+                )
+                .as_bytes(),
+            );
+            log_info_fn(&info_msg);
         }
         fetched
     }
@@ -2160,8 +2166,8 @@ impl NzbFetcherCore {
         S: Fn() -> bool + Copy,
         W: Fn() + Copy,
         H: FnMut(&[u8], &[u8], usize, i64) -> (bool, i32, Vec<u8>),
-        LI: FnMut(&str),
-        LW: FnMut(&str),
+        LI: FnMut(&[u8]),
+        LW: FnMut(&[u8]),
     {
         let mut last = NzbFetched::default();
         if listings.is_empty() {
@@ -3717,71 +3723,6 @@ pub fn parse_newznab_response(xml: &[u8]) -> Option<NewznabPage> {
     (saw_root && root_closed && depth == 0).then_some(page)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_newznab_parse_response(
-    xml_ptr: *const u8,
-    xml_len: usize,
-    ctx: *mut std::ffi::c_void,
-    on_error: Option<
-        unsafe extern "C" fn(
-            ctx: *mut std::ffi::c_void,
-            error_code: std::ffi::c_int,
-            error_text_ptr: *const u8,
-            error_text_len: usize,
-        ),
-    >,
-    on_item: Option<
-        unsafe extern "C" fn(
-            ctx: *mut std::ffi::c_void,
-            title_ptr: *const u8,
-            title_len: usize,
-            link_ptr: *const u8,
-            link_len: usize,
-            size: i64,
-            grabs: i32,
-            date: i64,
-            indexer_ptr: *const u8,
-            indexer_len: usize,
-        ),
-    >,
-) -> std::ffi::c_int {
-    let xml = if xml_ptr.is_null() || xml_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(xml_ptr, xml_len)
-    };
-    let Some(page) = parse_newznab_response(xml) else {
-        return 0;
-    };
-    if page.error {
-        if let Some(cb) = on_error {
-            cb(
-                ctx,
-                page.error_code,
-                page.error_text.as_ptr(),
-                page.error_text.len(),
-            );
-        }
-    }
-    if let Some(cb) = on_item {
-        for item in &page.items {
-            cb(
-                ctx,
-                item.title.as_ptr(),
-                item.title.len(),
-                item.link.as_ptr(),
-                item.link.len(),
-                item.size,
-                item.grabs,
-                item.date,
-                item.indexer.as_ptr(),
-                item.indexer.len(),
-            );
-        }
-    }
-    1
-}
-
 /// First segment of a file in an NZB summary (`NzbSummary::Head` in `NzbReader.h`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NzbSummaryHead {
@@ -4268,178 +4209,6 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
     }
 
     Some(out)
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RsNzbSummaryScalars {
-    pub files: i32,
-    pub total_bytes: i64,
-    pub data_files: i32,
-    pub data_bytes: i64,
-    pub listed_parts: u64,
-    pub declared_parts: u64,
-    pub data_listed_parts: u64,
-    pub data_declared_parts: u64,
-    pub article_bytes: u64,
-    pub geometry_valid: i32,
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn emit_nzb_summary_to_ffi(
-    summary: &NzbSummaryData,
-    out_scalars: *mut RsNzbSummaryScalars,
-    ctx: *mut std::ffi::c_void,
-    on_strings: Option<
-        unsafe extern "C" fn(
-            ctx: *mut std::ffi::c_void,
-            poster_ptr: *const u8,
-            poster_len: usize,
-            main_name_ptr: *const u8,
-            main_name_len: usize,
-            par_name_ptr: *const u8,
-            par_name_len: usize,
-            par_id_ptr: *const u8,
-            par_id_len: usize,
-            par_bytes: i64,
-        ),
-    >,
-    on_slice: Option<
-        unsafe extern "C" fn(
-            ctx: *mut std::ffi::c_void,
-            kind: std::ffi::c_int,
-            ptr1: *const u8,
-            len1: usize,
-            ptr2: *const u8,
-            len2: usize,
-            bytes: i64,
-        ),
-    >,
-    on_recovery_bytes: Option<
-        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, ptr: *const u64, len: usize),
-    >,
-) {
-    if !out_scalars.is_null() {
-        *out_scalars = RsNzbSummaryScalars {
-            files: summary.files,
-            total_bytes: summary.total_bytes,
-            data_files: summary.data_files,
-            data_bytes: summary.data_bytes,
-            listed_parts: summary.listed_parts,
-            declared_parts: summary.declared_parts,
-            data_listed_parts: summary.data_listed_parts,
-            data_declared_parts: summary.data_declared_parts,
-            article_bytes: summary.article_bytes,
-            geometry_valid: i32::from(summary.geometry_valid),
-        };
-    }
-    if let Some(cb) = on_strings {
-        cb(
-            ctx,
-            summary.poster.as_ptr(),
-            summary.poster.len(),
-            summary.main_name.as_ptr(),
-            summary.main_name.len(),
-            summary.par_index.name.as_ptr(),
-            summary.par_index.name.len(),
-            summary.par_index.id.as_ptr(),
-            summary.par_index.id.len(),
-            summary.par_index.bytes,
-        );
-    }
-    if let Some(cb) = on_slice {
-        // kind: 1 = group, 2 = meta, 3 = filename, 4 = message_id, 5 = data_message_id, 6 = head
-        for g in &summary.groups {
-            cb(ctx, 1, g.as_ptr(), g.len(), std::ptr::null(), 0, 0);
-        }
-        for (k, v) in &summary.meta {
-            cb(ctx, 2, k.as_ptr(), k.len(), v.as_ptr(), v.len(), 0);
-        }
-        for f in &summary.filenames {
-            cb(ctx, 3, f.as_ptr(), f.len(), std::ptr::null(), 0, 0);
-        }
-        for id in &summary.message_ids {
-            cb(ctx, 4, id.as_ptr(), id.len(), std::ptr::null(), 0, 0);
-        }
-        for id in &summary.data_message_ids {
-            cb(ctx, 5, id.as_ptr(), id.len(), std::ptr::null(), 0, 0);
-        }
-        for h in &summary.heads {
-            cb(
-                ctx,
-                6,
-                h.name.as_ptr(),
-                h.name.len(),
-                h.id.as_ptr(),
-                h.id.len(),
-                h.bytes,
-            );
-        }
-    }
-    if let Some(cb) = on_recovery_bytes {
-        if !summary.recovery_bytes.is_empty() {
-            cb(
-                ctx,
-                summary.recovery_bytes.as_ptr(),
-                summary.recovery_bytes.len(),
-            );
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_reader_parse(
-    xml_ptr: *const u8,
-    xml_len: usize,
-    out_scalars: *mut RsNzbSummaryScalars,
-    ctx: *mut std::ffi::c_void,
-    on_strings: Option<
-        unsafe extern "C" fn(
-            ctx: *mut std::ffi::c_void,
-            poster_ptr: *const u8,
-            poster_len: usize,
-            main_name_ptr: *const u8,
-            main_name_len: usize,
-            par_name_ptr: *const u8,
-            par_name_len: usize,
-            par_id_ptr: *const u8,
-            par_id_len: usize,
-            par_bytes: i64,
-        ),
-    >,
-    on_slice: Option<
-        unsafe extern "C" fn(
-            ctx: *mut std::ffi::c_void,
-            kind: std::ffi::c_int,
-            ptr1: *const u8,
-            len1: usize,
-            ptr2: *const u8,
-            len2: usize,
-            bytes: i64,
-        ),
-    >,
-    on_recovery_bytes: Option<
-        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, ptr: *const u64, len: usize),
-    >,
-) -> std::ffi::c_int {
-    let xml = if xml_ptr.is_null() || xml_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(xml_ptr, xml_len)
-    };
-    let Some(summary) = parse_nzb_summary(xml) else {
-        return 0;
-    };
-    emit_nzb_summary_to_ffi(
-        &summary,
-        out_scalars,
-        ctx,
-        on_strings,
-        on_slice,
-        on_recovery_bytes,
-    );
-    1
 }
 
 /// Reads a temporary HTTP response file if its size is `<= max_bytes`, and deletes the file

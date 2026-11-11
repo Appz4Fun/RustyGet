@@ -2730,423 +2730,6 @@ mod tests {
     }
 }
 
-// ---- dupesearch (daemon/dupesearch/) ----
-
-/// The bytes of a (pointer, length) argument; NULL is empty.
-unsafe fn arg<'a>(data: *const c_char, len: usize) -> &'a [u8] {
-    if data.is_null() || len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(data.cast(), len)
-    }
-}
-
-/// ReleaseName::Normalize.
-///
-/// # Safety
-/// `name` must be readable for `len` bytes (or NULL).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_releasename_normalize(name: *const c_char, len: usize) -> RsBuf {
-    into_buf(crate::releasename::normalize(arg(name, len)))
-}
-
-/// ReleaseName::Readable.
-///
-/// # Safety
-/// `name` must be readable for `len` bytes (or NULL).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_releasename_readable(name: *const c_char, len: usize) -> c_int {
-    c_int::from(crate::releasename::readable(arg(name, len)))
-}
-
-/// ReleaseName::SameRelease.
-///
-/// # Safety
-/// `a` and `b` must be readable for `alen` and `blen` bytes (or NULL).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_releasename_same_release(
-    a: *const c_char,
-    alen: usize,
-    b: *const c_char,
-    blen: usize,
-) -> c_int {
-    c_int::from(crate::releasename::same_release(arg(a, alen), arg(b, blen)))
-}
-
-/// One search result across the C ABI, as Posting's grouping and ordering read it.
-#[repr(C)]
-pub struct NzbgetRsListing {
-    pub link: *const c_char,
-    pub link_len: usize,
-    pub size: i64,
-    pub grabs: i32,
-    pub date: i64,
-}
-
-/// The strings of (pointer, length) arrays; NULL arrays are empty.
-unsafe fn strings<'a>(data: *const *const c_char, lens: *const usize, n: usize) -> Vec<&'a [u8]> {
-    if n == 0 || data.is_null() || lens.is_null() {
-        return Vec::new();
-    }
-    let (data, lens) = (
-        std::slice::from_raw_parts(data, n),
-        std::slice::from_raw_parts(lens, n),
-    );
-    data.iter().zip(lens).map(|(&p, &l)| arg(p, l)).collect()
-}
-
-unsafe fn listings<'a>(raw: *const NzbgetRsListing, n: usize) -> Vec<crate::posting::Listing<'a>> {
-    if n == 0 || raw.is_null() {
-        return Vec::new();
-    }
-    std::slice::from_raw_parts(raw, n)
-        .iter()
-        .map(|l| crate::posting::Listing {
-            link: arg(l.link, l.link_len),
-            size: l.size,
-            grabs: l.grabs,
-            date: l.date,
-        })
-        .collect()
-}
-
-/// Writes groups of indices: `indices` (writable for n) gets them group after
-/// group, `group_sizes` (writable for n) each group's length, `*groups` the
-/// number of groups; returns the indices written.
-unsafe fn write_groups(
-    groups: Vec<Vec<usize>>,
-    indices: *mut usize,
-    group_sizes: *mut usize,
-    count: *mut usize,
-) -> usize {
-    let mut written = 0;
-    for (g, group) in groups.iter().enumerate() {
-        *group_sizes.add(g) = group.len();
-        for &i in group {
-            *indices.add(written) = i;
-            written += 1;
-        }
-    }
-    *count = groups.len();
-    written
-}
-
-/// Posting::MakeSketch: `out` (writable for 64) gets the sketch, `*out_len` its length.
-///
-/// # Safety
-/// `ids`/`lens` readable for `n`; `out` writable for 64; `out_len` writable.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_posting_sketch(
-    ids: *const *const c_char,
-    lens: *const usize,
-    n: usize,
-    out: *mut u32,
-    out_len: *mut usize,
-) {
-    let sketch = crate::posting::make_sketch(strings(ids, lens, n));
-    std::ptr::copy_nonoverlapping(sketch.as_ptr(), out, sketch.len());
-    *out_len = sketch.len();
-}
-
-/// Posting::SameSketch.
-///
-/// # Safety
-/// `a` and `b` readable for `na` and `nb` (NULL when 0).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_posting_same_sketch(
-    a: *const u32,
-    na: usize,
-    b: *const u32,
-    nb: usize,
-) -> c_int {
-    let s = |p: *const u32, n: usize| {
-        if n == 0 || p.is_null() {
-            &[][..]
-        } else {
-            std::slice::from_raw_parts(p, n)
-        }
-    };
-    c_int::from(crate::posting::same_sketch(s(a, na), s(b, nb)))
-}
-
-/// Posting::SamePosting (both lists sorted).
-///
-/// # Safety
-/// The arrays must be readable for their counts.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_posting_same_posting(
-    a: *const *const c_char,
-    alens: *const usize,
-    na: usize,
-    b: *const *const c_char,
-    blens: *const usize,
-    nb: usize,
-) -> c_int {
-    c_int::from(crate::posting::same_posting(
-        &strings(a, alens, na),
-        &strings(b, blens, nb),
-    ))
-}
-
-/// Posting::ListingMismatch.
-#[no_mangle]
-pub extern "C" fn nzbget_rs_posting_listing_mismatch(listing_size: i64, nzb_bytes: i64) -> c_int {
-    c_int::from(crate::posting::listing_mismatch(listing_size, nzb_bytes))
-}
-
-/// Posting::OrderPostings (see write_groups).
-///
-/// # Safety
-/// `listings` readable for `n`; `indices` and `group_sizes` writable for `n`; `groups` writable.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_posting_order(
-    raw: *const NzbgetRsListing,
-    n: usize,
-    pick_bytes: i64,
-    max_postings: c_int,
-    indices: *mut usize,
-    group_sizes: *mut usize,
-    groups: *mut usize,
-) -> usize {
-    write_groups(
-        crate::posting::order_postings(&listings(raw, n), pick_bytes, max_postings),
-        indices,
-        group_sizes,
-        groups,
-    )
-}
-
-// Native duplicate-discovery identity (rust/src/dupeidentity.rs).
-#[repr(C)]
-pub struct DupeIdentityInput {
-    pub bytes: u64,
-    pub name: *const c_char,
-    pub name_len: usize,
-    pub extension: *const c_char,
-    pub extension_len: usize,
-}
-
-unsafe fn dupe_identity_input(
-    raw: *const DupeIdentityInput,
-) -> Option<crate::dupeidentity::Identity> {
-    if raw.is_null() {
-        return None;
-    }
-    let raw = &*raw;
-    if raw.bytes == 0 {
-        return None;
-    }
-    Some(crate::dupeidentity::Identity {
-        bytes: raw.bytes,
-        name: arg(raw.name, raw.name_len).to_vec(),
-        extension: arg(raw.extension, raw.extension_len).to_vec(),
-    })
-}
-
-/// # Safety
-/// Names are readable for their lengths, or NULL (empty).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_candidate(
-    title: *const c_char,
-    title_len: usize,
-    bytes: u64,
-    name: *const c_char,
-    name_len: usize,
-    size: u64,
-) -> c_int {
-    c_int::from(crate::dupeidentity::candidate_ok(
-        arg(title, title_len),
-        bytes,
-        arg(name, name_len),
-        size,
-        0.0,
-        true,
-    ))
-}
-
-/// # Safety
-/// Names readable for their lengths; identities NULL or valid with readable fields.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_lenient_ok(
-    title: *const c_char,
-    title_len: usize,
-    main_name: *const c_char,
-    main_len: usize,
-    mine: *const DupeIdentityInput,
-    theirs: *const DupeIdentityInput,
-) -> c_int {
-    let mine = dupe_identity_input(mine);
-    let theirs = dupe_identity_input(theirs);
-    c_int::from(crate::dupeidentity::lenient_ok(
-        arg(title, title_len),
-        arg(main_name, main_len),
-        mine.as_ref(),
-        theirs.as_ref(),
-    ))
-}
-
-// Native duplicate-discovery watcher and per-search fetch budget.
-#[repr(C)]
-pub struct DupeWatchPeer {
-    pub id: i32,
-    pub score: i32,
-    pub flags: u32,
-    pub key: *const c_char,
-    pub key_len: usize,
-}
-
-/// Eligibility with an unchanged identity and an existing search stamp, before
-/// peer snapshots are needed. This scalar boundary does not read queue memory.
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dupe_watch_stamped(
-    flags: u32,
-    score: i32,
-    now: i64,
-    previous_score: i32,
-    previous_time: i64,
-) -> c_int {
-    crate::dupewatch::decide(
-        flags,
-        score,
-        None,
-        now,
-        Some(crate::dupewatch::SearchStamp {
-            score: previous_score,
-            time: previous_time,
-        }),
-        false,
-    ) as c_int
-}
-
-#[inline(never)]
-unsafe fn dupe_watch_has_higher(
-    pick: &DupeWatchPeer,
-    peers: *const DupeWatchPeer,
-    count: usize,
-) -> bool {
-    use crate::dupewatch::{self, Snapshot};
-    let mine = Snapshot {
-        id: pick.id,
-        score: pick.score,
-        flags: pick.flags,
-        key: arg(pick.key, pick.key_len),
-    };
-    for peer in std::slice::from_raw_parts(peers, count) {
-        if peer.id == pick.id || peer.score <= pick.score {
-            continue;
-        }
-        let other = Snapshot {
-            id: peer.id,
-            score: peer.score,
-            flags: peer.flags,
-            key: arg(peer.key, peer.key_len),
-        };
-        if dupewatch::higher_peer(mine, other, true) {
-            return true;
-        }
-    }
-    false
-}
-
-/// # Safety
-/// Peer records and key buffers valid for their counts; pick is non-NULL.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_watch(
-    pick: *const DupeWatchPeer,
-    peers: *const DupeWatchPeer,
-    count: usize,
-    now: i64,
-    previous_score: i32,
-    previous_time: i64,
-    has_previous: c_int,
-    identity_changed: c_int,
-) -> c_int {
-    use crate::dupewatch::{self, Decision};
-    if pick.is_null() {
-        return 0;
-    }
-    let pick = &*pick;
-    // Changed identities never use the previous stamp; avoid irrelevant time
-    // arithmetic as well as peer/key work on these common fast paths.
-    let previous = if has_previous != 0 && identity_changed == 0 {
-        Some(dupewatch::SearchStamp {
-            score: previous_score,
-            time: previous_time,
-        })
-    } else {
-        None
-    };
-    let preliminary = dupewatch::decide(
-        pick.flags,
-        pick.score,
-        None,
-        now,
-        previous,
-        identity_changed != 0,
-    );
-    if preliminary != Decision::Search || count == 0 || peers.is_null() {
-        return preliminary as c_int;
-    }
-    // Keep the key scan out of the entry's register-save/prologue fast path.
-    if dupe_watch_has_higher(pick, peers, count) {
-        return Decision::Skip as c_int;
-    }
-    Decision::Search as c_int
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dupe_budget_new(max_donors: u32) -> *mut crate::dupewatch::FetchBudget {
-    Box::into_raw(Box::new(crate::dupewatch::FetchBudget::from_max_donors(
-        max_donors as usize,
-    )))
-}
-
-/// # Safety
-/// Budget is a live pointer returned by nzbget_rs_dupe_budget_new; callers have joined users before freeing.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_budget_free(budget: *mut crate::dupewatch::FetchBudget) {
-    if !budget.is_null() {
-        drop(Box::from_raw(budget));
-    }
-}
-
-/// # Safety
-/// Budget is live; concurrent calls are allowed, but free must not run concurrently.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_budget_spent(
-    budget: *const crate::dupewatch::FetchBudget,
-) -> c_int {
-    if budget.is_null() {
-        return 1;
-    }
-    c_int::from((*budget).spent())
-}
-
-/// # Safety
-/// The decoded body is readable for len, or NULL (empty).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_par_block(data: *const c_char, len: usize) -> u64 {
-    crate::twin::block_size(arg(data, len))
-}
-/// # Safety
-/// Names readable for their lengths, or NULL (empty).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_outer_ok(
-    title: *const c_char,
-    title_len: usize,
-    name: *const c_char,
-    len: usize,
-) -> c_int {
-    let title = arg(title, title_len);
-    let name = arg(name, len);
-    c_int::from(
-        !crate::dupeidentity::conflicts(title, name)
-            && !crate::dupeidentity::other_title(title, name)
-            && (!crate::releasename::readable(name)
-                || crate::dupeidentity::consistent(title, name)),
-    )
-}
-
 // Memory Pressure Monitor C ABI (Requirement R8)
 
 #[no_mangle]
@@ -6373,65 +5956,6 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
 }
 
 #[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_df_build_newznab_queries(
-    title_ptr: *const c_char,
-    title_len: usize,
-    imdb_ptr: *const c_char,
-    imdb_len: usize,
-    tvdb_ptr: *const c_char,
-    tvdb_len: usize,
-    ctx: *mut std::ffi::c_void,
-    visit: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const *const c_char,
-            *const usize,
-            *const *const c_char,
-            *const usize,
-            usize,
-        ),
-    >,
-) {
-    let Some(cb) = visit else { return };
-    let title = if title_ptr.is_null() || title_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(title_ptr.cast::<u8>(), title_len)
-    };
-    let imdb = if imdb_ptr.is_null() || imdb_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(imdb_ptr.cast::<u8>(), imdb_len)
-    };
-    let tvdb = if tvdb_ptr.is_null() || tvdb_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(tvdb_ptr.cast::<u8>(), tvdb_len)
-    };
-    for query in crate::dupesearch_nzb::build_newznab_queries(title, imdb, tvdb) {
-        let mut key_ptrs = Vec::with_capacity(query.len());
-        let mut key_lens = Vec::with_capacity(query.len());
-        let mut val_ptrs = Vec::with_capacity(query.len());
-        let mut val_lens = Vec::with_capacity(query.len());
-        for (k, v) in &query {
-            key_ptrs.push(k.as_ptr().cast::<c_char>());
-            key_lens.push(k.len());
-            val_ptrs.push(v.as_ptr().cast::<c_char>());
-            val_lens.push(v.len());
-        }
-        cb(
-            ctx,
-            key_ptrs.as_ptr(),
-            key_lens.as_ptr(),
-            val_ptrs.as_ptr(),
-            val_lens.as_ptr(),
-            query.len(),
-        );
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_twin_visit_par2_sigs(
     data: *const u8,
     len: usize,
@@ -6709,59 +6233,6 @@ pub unsafe extern "C" fn nzbget_rs_options_load_config_file(
             }
         },
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_util_write_atomic(
-    path: *const c_char,
-    path_len: usize,
-    data: *const c_char,
-    data_len: usize,
-) -> c_int {
-    let p = if path.is_null() || path_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(path as *const u8, path_len)
-    };
-    let d = if data.is_null() || data_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(data as *const u8, data_len)
-    };
-    c_int::from(crate::dupesearch_nzb::dupe_write_atomic_bytes(p, d))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_util_read_all(
-    path: *const c_char,
-    path_len: usize,
-) -> RsBuf {
-    let p = if path.is_null() || path_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(path as *const u8, path_len)
-    };
-    into_buf(crate::dupesearch_nzb::dupe_read_all_bytes(p))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_visit_expand_queries(
-    name: *const c_char,
-    name_len: usize,
-    ctx: *mut std::ffi::c_void,
-    cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize)>,
-) {
-    let Some(cb) = cb else {
-        return;
-    };
-    let n = if name.is_null() || name_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(name as *const u8, name_len)
-    };
-    crate::dupesearch_nzb::dupesearch_visit_expand_queries(n, |q| {
-        cb(ctx, q.as_ptr() as *const c_char, q.len());
-    });
 }
 
 #[repr(C)]
@@ -8312,816 +7783,6 @@ pub unsafe extern "C" fn nzbget_rs_dupematcher_filter_dupe_sources(
         std::ptr::copy_nonoverlapping(usable.as_ptr(), out_indices, n);
     }
     n
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_now_ms() -> i64 {
-    crate::dupesearch_nzb::donor_now_ms()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_stop_all() {
-    crate::dupesearch_nzb::donor_stop_all();
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_wait_all() {
-    crate::dupesearch_nzb::donor_wait_all();
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_reset() {
-    crate::dupesearch_nzb::donor_reset();
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_stopping() -> c_int {
-    i32::from(crate::dupesearch_nzb::donor_stopping())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_body_gate_done(rust_gate: *mut c_void) -> c_int {
-    if rust_gate.is_null() {
-        return 0;
-    }
-    let gate = &*(rust_gate as *const crate::dupesearch_nzb::DonorBodyGate);
-    i32::from(gate.done())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_body_once(
-    rust_gate: *mut c_void,
-    ctx: *mut c_void,
-    download_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
-) -> c_int {
-    if rust_gate.is_null() {
-        return 4;
-    }
-    let gate = &*(rust_gate as *const crate::dupesearch_nzb::DonorBodyGate);
-    match gate.body_once_fallible(|| {
-        let code = download_cb.map_or(4, |cb| unsafe { cb(ctx) });
-        if code < 0 {
-            return Err(code);
-        }
-        Ok(match code {
-            0 => crate::dupesearch_nzb::DonorAnswer::None,
-            1 => crate::dupesearch_nzb::DonorAnswer::Present,
-            2 => crate::dupesearch_nzb::DonorAnswer::Missing,
-            3 => crate::dupesearch_nzb::DonorAnswer::BodyBad,
-            _ => crate::dupesearch_nzb::DonorAnswer::Error,
-        })
-    }) {
-        Ok(ans) => ans as c_int,
-        Err(err_code) => err_code,
-    }
-}
-
-struct CppDonorTransport {
-    cpp_server: usize,
-    exchange_cb: unsafe extern "C" fn(
-        *mut c_void,
-        usize,
-        *const *const c_char,
-        *const usize,
-        *const *mut c_void,
-        *const *const *const c_char,
-        *const *const usize,
-        *const usize,
-        *mut c_int,
-        *mut usize,
-        *mut c_int,
-    ) -> c_int,
-}
-
-impl crate::dupesearch_nzb::DonorServerExchange for CppDonorTransport {
-    fn exchange(
-        &self,
-        batch: &[crate::dupesearch_nzb::DonorRequest],
-    ) -> Result<Vec<crate::dupesearch_nzb::DonorAnswer>, crate::dupesearch_nzb::DonorExchangeError>
-    {
-        let count = batch.len();
-        let mut msg_ptrs = Vec::with_capacity(count);
-        let mut msg_lens = Vec::with_capacity(count);
-        let mut gate_ptrs = Vec::with_capacity(count);
-        let mut group_str_vecs: Vec<Vec<*const c_char>> = Vec::with_capacity(count);
-        let mut group_len_vecs: Vec<Vec<usize>> = Vec::with_capacity(count);
-        for req in batch {
-            msg_ptrs.push(req.message_id.as_ptr().cast::<c_char>());
-            msg_lens.push(req.message_id.len());
-            gate_ptrs.push(req.gate.as_ref().map_or(std::ptr::null_mut(), |g| {
-                std::sync::Arc::as_ptr(g) as *mut c_void
-            }));
-            let mut g_ptrs = Vec::with_capacity(req.groups.len());
-            let mut g_lens = Vec::with_capacity(req.groups.len());
-            for g in req.groups.iter() {
-                g_ptrs.push(g.as_ptr().cast::<c_char>());
-                g_lens.push(g.len());
-            }
-            group_str_vecs.push(g_ptrs);
-            group_len_vecs.push(g_lens);
-        }
-        let mut group_ptrs_outer = Vec::with_capacity(count);
-        let mut group_lens_outer = Vec::with_capacity(count);
-        let mut group_counts = Vec::with_capacity(count);
-        for i in 0..count {
-            group_ptrs_outer.push(group_str_vecs[i].as_ptr());
-            group_lens_outer.push(group_len_vecs[i].as_ptr());
-            group_counts.push(group_str_vecs[i].len());
-        }
-
-        let mut out_answers = vec![0 as c_int; count];
-        let mut out_count: usize = 0;
-        let mut out_busy: c_int = 0;
-        let threw = unsafe {
-            (self.exchange_cb)(
-                self.cpp_server as *mut c_void,
-                count,
-                msg_ptrs.as_ptr(),
-                msg_lens.as_ptr(),
-                gate_ptrs.as_ptr(),
-                group_ptrs_outer.as_ptr(),
-                group_lens_outer.as_ptr(),
-                group_counts.as_ptr(),
-                out_answers.as_mut_ptr(),
-                &mut out_count,
-                &mut out_busy,
-            )
-        };
-        let to_answer = |v: c_int| match v {
-            0 => crate::dupesearch_nzb::DonorAnswer::None,
-            1 => crate::dupesearch_nzb::DonorAnswer::Present,
-            2 => crate::dupesearch_nzb::DonorAnswer::Missing,
-            3 => crate::dupesearch_nzb::DonorAnswer::BodyBad,
-            _ => crate::dupesearch_nzb::DonorAnswer::Error,
-        };
-        let answers: Vec<crate::dupesearch_nzb::DonorAnswer> = out_answers
-            .into_iter()
-            .take(out_count.min(count))
-            .map(to_answer)
-            .collect();
-        if threw != 0 {
-            Err(crate::dupesearch_nzb::DonorExchangeError {
-                answers,
-                busy: out_busy != 0,
-            })
-        } else {
-            Ok(answers)
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_server_new(
-    cpp_server: *mut c_void,
-    cap: c_int,
-    exchange_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            usize,
-            *const *const c_char,
-            *const usize,
-            *const *mut c_void,
-            *const *const *const c_char,
-            *const *const usize,
-            *const usize,
-            *mut c_int,
-            *mut usize,
-            *mut c_int,
-        ) -> c_int,
-    >,
-) -> *mut c_void {
-    let Some(cb) = exchange_cb else {
-        return std::ptr::null_mut();
-    };
-    let srv = std::sync::Arc::new(crate::dupesearch_nzb::DonorServer::new(
-        cap,
-        CppDonorTransport {
-            cpp_server: cpp_server as usize,
-            exchange_cb: cb,
-        },
-    ));
-    Box::into_raw(Box::new(srv)).cast::<c_void>()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_server_free(handle: *mut c_void) {
-    if !handle.is_null() {
-        drop(Box::from_raw(
-            handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>(),
-        ));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_server_cap(handle: *const c_void) -> c_int {
-    if handle.is_null() {
-        return 1;
-    }
-    let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
-    srv.cap()
-}
-
-struct CppKeepAlive {
-    ptr: usize,
-    drop_fn: unsafe extern "C" fn(*mut c_void),
-}
-
-impl Drop for CppKeepAlive {
-    fn drop(&mut self) {
-        if self.ptr != 0 {
-            unsafe { (self.drop_fn)(self.ptr as *mut c_void) };
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_check_posting(
-    server_handles: *const *mut c_void,
-    server_count: usize,
-    keepalive_ptr: *mut c_void,
-    keepalive_drop: Option<unsafe extern "C" fn(*mut c_void)>,
-    ids_ptr: *const *const c_char,
-    ids_lens: *const usize,
-    ids_count: usize,
-    group_ptrs: *const *const c_char,
-    group_lens: *const usize,
-    group_count: usize,
-    percent: c_int,
-    minimum: c_int,
-    maximum: c_int,
-    body_percent: c_int,
-    max_body: c_int,
-    seed: u32,
-    probe: c_int,
-    budget_ms: c_int,
-    deadline_ms: i64,
-    full: c_int,
-    out_checked: *mut c_int,
-    out_present: *mut c_int,
-    out_missing: *mut c_int,
-    out_error: *mut c_int,
-    out_body_checked: *mut c_int,
-    out_body_bad: *mut c_int,
-) {
-    let keepalive: Option<std::sync::Arc<dyn Send + Sync>> = keepalive_drop.map(|drop_fn| {
-        std::sync::Arc::new(CppKeepAlive {
-            ptr: keepalive_ptr as usize,
-            drop_fn,
-        }) as std::sync::Arc<dyn Send + Sync>
-    });
-    let mut servers = Vec::with_capacity(server_count);
-    if !server_handles.is_null() {
-        for i in 0..server_count {
-            let h = *server_handles.add(i);
-            if !h.is_null() {
-                let srv = &*h.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
-                servers.push(srv.clone());
-            }
-        }
-    }
-    let mut ids = Vec::with_capacity(ids_count);
-    if !ids_ptr.is_null() && !ids_lens.is_null() {
-        for i in 0..ids_count {
-            ids.push(
-                String::from_utf8_lossy(bytes(*ids_ptr.add(i), *ids_lens.add(i))).into_owned(),
-            );
-        }
-    }
-    let mut groups = Vec::with_capacity(group_count);
-    if !group_ptrs.is_null() && !group_lens.is_null() {
-        for i in 0..group_count {
-            groups.push(
-                String::from_utf8_lossy(bytes(*group_ptrs.add(i), *group_lens.add(i))).into_owned(),
-            );
-        }
-    }
-    let options = crate::dupesearch_nzb::DonorOptions {
-        sample: crate::dupesearch_nzb::DonorSampleOptions {
-            percent,
-            minimum,
-            maximum,
-            body_percent,
-            max_body,
-            seed,
-        },
-        probe,
-        budget_ms,
-        deadline_ms,
-    };
-    let res = crate::dupesearch_nzb::donor_check_posting_guarded(
-        &servers,
-        &ids,
-        &std::sync::Arc::new(groups),
-        &options,
-        full != 0,
-        keepalive,
-    );
-    if !out_checked.is_null() {
-        *out_checked = res.checked;
-    }
-    if !out_present.is_null() {
-        *out_present = res.present;
-    }
-    if !out_missing.is_null() {
-        *out_missing = res.missing;
-    }
-    if !out_error.is_null() {
-        *out_error = res.error;
-    }
-    if !out_body_checked.is_null() {
-        *out_body_checked = res.body_checked;
-    }
-    if !out_body_bad.is_null() {
-        *out_body_bad = res.body_bad;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_check_postings(
-    server_handles: *const *mut c_void,
-    server_count: usize,
-    keepalive_ptr: *mut c_void,
-    keepalive_drop: Option<unsafe extern "C" fn(*mut c_void)>,
-    posting_count: usize,
-    key_ptrs: *const *const c_char,
-    key_lens: *const usize,
-    ids_ptrs: *const *const *const c_char,
-    ids_lens: *const *const usize,
-    ids_counts: *const usize,
-    group_ptrs: *const *const *const c_char,
-    group_lens: *const *const usize,
-    group_counts: *const usize,
-    percent: c_int,
-    minimum: c_int,
-    maximum: c_int,
-    body_percent: c_int,
-    max_body: c_int,
-    seed: u32,
-    probe: c_int,
-    budget_ms: c_int,
-    deadline_ms: i64,
-    full: c_int,
-    concurrency: c_int,
-    emit_ctx: *mut c_void,
-    emit_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *const c_char,
-            usize,
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-        ),
-    >,
-) {
-    let keepalive: Option<std::sync::Arc<dyn Send + Sync>> = keepalive_drop.map(|drop_fn| {
-        std::sync::Arc::new(CppKeepAlive {
-            ptr: keepalive_ptr as usize,
-            drop_fn,
-        }) as std::sync::Arc<dyn Send + Sync>
-    });
-    let mut servers = Vec::with_capacity(server_count);
-    if !server_handles.is_null() {
-        for i in 0..server_count {
-            let h = *server_handles.add(i);
-            if !h.is_null() {
-                let srv = &*h.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
-                servers.push(srv.clone());
-            }
-        }
-    }
-    let mut postings = Vec::with_capacity(posting_count);
-    for i in 0..posting_count {
-        let key = if !key_ptrs.is_null() && !key_lens.is_null() {
-            String::from_utf8_lossy(bytes(*key_ptrs.add(i), *key_lens.add(i))).into_owned()
-        } else {
-            String::new()
-        };
-        let mut ids = Vec::new();
-        if !ids_ptrs.is_null() && !ids_lens.is_null() && !ids_counts.is_null() {
-            let cnt = *ids_counts.add(i);
-            let p = *ids_ptrs.add(i);
-            let l = *ids_lens.add(i);
-            if !p.is_null() && !l.is_null() {
-                for j in 0..cnt {
-                    ids.push(String::from_utf8_lossy(bytes(*p.add(j), *l.add(j))).into_owned());
-                }
-            }
-        }
-        let mut groups = Vec::new();
-        if !group_ptrs.is_null() && !group_lens.is_null() && !group_counts.is_null() {
-            let cnt = *group_counts.add(i);
-            let p = *group_ptrs.add(i);
-            let l = *group_lens.add(i);
-            if !p.is_null() && !l.is_null() {
-                for j in 0..cnt {
-                    groups.push(String::from_utf8_lossy(bytes(*p.add(j), *l.add(j))).into_owned());
-                }
-            }
-        }
-        postings.push(crate::dupesearch_nzb::DonorPosting {
-            key,
-            ids,
-            groups: std::sync::Arc::new(groups),
-        });
-    }
-    let options = crate::dupesearch_nzb::DonorOptions {
-        sample: crate::dupesearch_nzb::DonorSampleOptions {
-            percent,
-            minimum,
-            maximum,
-            body_percent,
-            max_body,
-            seed,
-        },
-        probe,
-        budget_ms,
-        deadline_ms,
-    };
-    let emit_ctx_addr = emit_ctx as usize;
-    crate::dupesearch_nzb::donor_check_postings_guarded(
-        &servers,
-        &postings,
-        &options,
-        full != 0,
-        concurrency,
-        keepalive,
-        |key, h| {
-            if let Some(cb) = emit_cb {
-                unsafe {
-                    cb(
-                        emit_ctx_addr as *mut c_void,
-                        key.as_ptr().cast::<c_char>(),
-                        key.len(),
-                        h.checked,
-                        h.present,
-                        h.missing,
-                        h.error,
-                        h.body_checked,
-                        h.body_bad,
-                    );
-                }
-            }
-        },
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_new() -> *mut c_void {
-    Box::into_raw(Box::new(crate::dupesearch_nzb::NzbFetcherCore::new())).cast::<c_void>()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_free(handle: *mut c_void) {
-    if !handle.is_null() {
-        drop(Box::from_raw(
-            handle.cast::<crate::dupesearch_nzb::NzbFetcherCore>(),
-        ));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_set_state_path(
-    handle: *mut c_void,
-    path: *const c_char,
-    path_len: usize,
-) {
-    if !handle.is_null() {
-        let core = &*handle.cast::<crate::dupesearch_nzb::NzbFetcherCore>();
-        let s = String::from_utf8_lossy(bytes(path, path_len));
-        core.set_state_path(&s);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_load(handle: *mut c_void, now: i64) {
-    if !handle.is_null() {
-        let core = &*handle.cast::<crate::dupesearch_nzb::NzbFetcherCore>();
-        core.load(now);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_fetch(
-    handle: *mut c_void,
-    indexer: *const c_char,
-    indexer_len: usize,
-    title: *const c_char,
-    title_len: usize,
-    link: *const c_char,
-    link_len: usize,
-    size: i64,
-    grabs: c_int,
-    date: i64,
-    deadline: i64,
-    retries: c_int,
-    budget_handle: *mut c_void,
-    ctx: *mut c_void,
-    now_cb: Option<unsafe extern "C" fn(*mut c_void) -> i64>,
-    stopped_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
-    sleep_100ms_cb: Option<unsafe extern "C" fn(*mut c_void)>,
-    http_fetch_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *const c_char,
-            usize,
-            *const c_char,
-            usize,
-            usize,
-            i64,
-            *mut c_int,
-            *mut *const c_char,
-            *mut usize,
-        ) -> c_int,
-    >,
-    log_info_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
-    log_warn_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
-    out_data: *mut RsBuf,
-    out_scalars: *mut crate::dupesearch_nzb::RsNzbSummaryScalars,
-    summary_ctx: *mut c_void,
-    on_strings: Option<
-        unsafe extern "C" fn(
-            ctx: *mut c_void,
-            poster_ptr: *const u8,
-            poster_len: usize,
-            main_name_ptr: *const u8,
-            main_name_len: usize,
-            par_name_ptr: *const u8,
-            par_name_len: usize,
-            par_id_ptr: *const u8,
-            par_id_len: usize,
-            par_bytes: i64,
-        ),
-    >,
-    on_slice: Option<
-        unsafe extern "C" fn(
-            ctx: *mut c_void,
-            kind: c_int,
-            ptr1: *const u8,
-            len1: usize,
-            ptr2: *const u8,
-            len2: usize,
-            bytes: i64,
-        ),
-    >,
-    on_recovery_bytes: Option<unsafe extern "C" fn(ctx: *mut c_void, ptr: *const u64, len: usize)>,
-) -> c_int {
-    if handle.is_null() {
-        return 1;
-    }
-    let core = &*handle.cast::<crate::dupesearch_nzb::NzbFetcherCore>();
-    let budget = if budget_handle.is_null() {
-        None
-    } else {
-        Some(&*budget_handle.cast::<crate::dupewatch::FetchBudget>())
-    };
-    let listing = crate::dupesearch_nzb::NewznabResult {
-        indexer: bytes(indexer, indexer_len).to_vec(),
-        title: bytes(title, title_len).to_vec(),
-        link: bytes(link, link_len).to_vec(),
-        size,
-        grabs,
-        date,
-        ..Default::default()
-    };
-    let fetched = core.fetch_with(
-        &listing,
-        deadline,
-        retries,
-        budget,
-        || now_cb.map_or(0, |cb| unsafe { cb(ctx) }),
-        crate::dupesearch_nzb::donor_now_ms,
-        || stopped_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 }),
-        || {
-            if let Some(cb) = sleep_100ms_cb {
-                unsafe { cb(ctx) };
-            }
-        },
-        |url, label, max_bytes, deadline_ms| {
-            let Some(cb) = http_fetch_cb else {
-                return (false, 0, Vec::new());
-            };
-            let mut status: c_int = 0;
-            let mut body_ptr: *const c_char = std::ptr::null();
-            let mut body_len: usize = 0;
-            let ok = unsafe {
-                cb(
-                    ctx,
-                    url.as_ptr().cast::<c_char>(),
-                    url.len(),
-                    label.as_ptr().cast::<c_char>(),
-                    label.len(),
-                    max_bytes,
-                    deadline_ms,
-                    &mut status,
-                    &mut body_ptr,
-                    &mut body_len,
-                )
-            };
-            let body_vec = bytes(body_ptr, body_len).to_vec();
-            (ok != 0, status, body_vec)
-        },
-        |msg| {
-            if let Some(cb) = log_info_cb {
-                if let Ok(c_msg) = std::ffi::CString::new(msg) {
-                    unsafe { cb(ctx, c_msg.as_ptr()) };
-                }
-            }
-        },
-        |msg| {
-            if let Some(cb) = log_warn_cb {
-                if let Ok(c_msg) = std::ffi::CString::new(msg) {
-                    unsafe { cb(ctx, c_msg.as_ptr()) };
-                }
-            }
-        },
-    );
-    if fetched.reason == crate::dupesearch_nzb::NzbFetchReason::Ok {
-        crate::dupesearch_nzb::emit_nzb_summary_to_ffi(
-            &fetched.info,
-            out_scalars,
-            summary_ctx,
-            on_strings,
-            on_slice,
-            on_recovery_bytes,
-        );
-        if !out_data.is_null() {
-            *out_data = into_buf(fetched.data);
-        }
-    }
-    fetched.reason as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_identity_fetch_article(
-    msg_id: *const c_char,
-    msg_id_len: usize,
-    deadline: i64,
-    ctx: *mut c_void,
-    now_cb: Option<unsafe extern "C" fn(*mut c_void) -> i64>,
-    stopped_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
-    fetch_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *const c_char,
-            usize,
-            *mut c_int,
-            *mut i64,
-            *mut i64,
-        ) -> c_int,
-    >,
-    stop_fetch_cb: Option<unsafe extern "C" fn(*mut c_void)>,
-) -> c_int {
-    struct SendCtx(*mut c_void);
-    unsafe impl Send for SendCtx {}
-    unsafe impl Sync for SendCtx {}
-    let send_ctx = SendCtx(ctx);
-    let groups: [String; 0] = [];
-    let res = crate::dupesearch_nzb::dupe_identity_fetch_article(
-        bytes(msg_id, msg_id_len),
-        &groups,
-        deadline,
-        || now_cb.map_or(0, |cb| unsafe { cb(send_ctx.0) }),
-        || stopped_cb.is_some_and(|cb| unsafe { cb(send_ctx.0) != 0 }),
-        |bracketed_id, _groups| {
-            let sctx = &send_ctx;
-            let Some(cb) = fetch_cb else {
-                return Err(());
-            };
-            let mut success: c_int = 0;
-            let mut offset: i64 = 0;
-            let mut file_size: i64 = 0;
-            let ok = unsafe {
-                cb(
-                    sctx.0,
-                    bracketed_id.as_ptr().cast::<c_char>(),
-                    bracketed_id.len(),
-                    &mut success,
-                    &mut offset,
-                    &mut file_size,
-                )
-            };
-            if ok == 0 {
-                return Err(());
-            }
-            Ok(crate::dupesearch_nzb::FetchedArticleResult {
-                success: success != 0,
-                data: Vec::new(),
-                offset,
-                file_size,
-            })
-        },
-        || {
-            if let Some(cb) = stop_fetch_cb {
-                unsafe { cb(send_ctx.0) };
-            }
-        },
-    );
-    i32::from(res.success)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_identity_read(
-    data_bytes: i64,
-    head_names: *const *const c_char,
-    head_name_lens: *const usize,
-    head_msg_ids: *const *const c_char,
-    head_msg_id_lens: *const usize,
-    head_bytes: *const i64,
-    head_count: usize,
-    deadline: i64,
-    ctx: *mut c_void,
-    now_cb: Option<unsafe extern "C" fn(*mut c_void) -> i64>,
-    stopped_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
-    fetch_head_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *const c_char,
-            usize,
-            i64,
-            *mut c_int,
-            *mut i64,
-            *mut *const c_char,
-            *mut usize,
-        ),
-    >,
-    out_name: *mut RsBuf,
-    out_ext: *mut RsBuf,
-    out_bytes: *mut u64,
-) -> c_int {
-    let mut heads = Vec::with_capacity(head_count);
-    for i in 0..head_count {
-        let name = if head_names.is_null() || head_name_lens.is_null() {
-            Vec::new()
-        } else {
-            bytes(*head_names.add(i), *head_name_lens.add(i)).to_vec()
-        };
-        let mid = if head_msg_ids.is_null() || head_msg_id_lens.is_null() {
-            Vec::new()
-        } else {
-            bytes(*head_msg_ids.add(i), *head_msg_id_lens.add(i)).to_vec()
-        };
-        let b = if head_bytes.is_null() {
-            0
-        } else {
-            *head_bytes.add(i)
-        };
-        heads.push((name, mid, b));
-    }
-    let groups: [String; 0] = [];
-    let found = crate::dupesearch_nzb::dupe_identity_read(
-        data_bytes,
-        &heads,
-        &groups,
-        deadline,
-        || now_cb.map_or(0, |cb| unsafe { cb(ctx) }),
-        || stopped_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 }),
-        |msg_id, _groups, dl| {
-            let Some(cb) = fetch_head_cb else {
-                return crate::dupesearch_nzb::FetchedArticleResult::default();
-            };
-            let mut success: c_int = 0;
-            let mut file_size: i64 = 0;
-            let mut data_ptr: *const c_char = std::ptr::null();
-            let mut data_len: usize = 0;
-            unsafe {
-                cb(
-                    ctx,
-                    msg_id.as_ptr().cast::<c_char>(),
-                    msg_id.len(),
-                    dl,
-                    &mut success,
-                    &mut file_size,
-                    &mut data_ptr,
-                    &mut data_len,
-                );
-            }
-            let data = bytes(data_ptr, data_len).to_vec();
-            crate::dupesearch_nzb::FetchedArticleResult {
-                success: success != 0,
-                data,
-                offset: 0,
-                file_size,
-            }
-        },
-    );
-    if let Some(ident) = found {
-        if !out_name.is_null() {
-            *out_name = into_buf(ident.name);
-        }
-        if !out_ext.is_null() {
-            *out_ext = into_buf(ident.extension);
-        }
-        if !out_bytes.is_null() {
-            *out_bytes = ident.bytes;
-        }
-        1
-    } else {
-        0
-    }
 }
 
 #[no_mangle]
@@ -12157,188 +10818,6 @@ pub unsafe extern "C" fn nzbget_rs_post_script_analyse_exit_code(
     status
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_summary_fingerprint(
-    ids_ptr: *const *const c_char,
-    ids_lens: *const usize,
-    count: usize,
-    out_hex16: *mut c_char,
-) {
-    let mut slices: Vec<&[u8]> = Vec::with_capacity(count);
-    if !ids_ptr.is_null() && !ids_lens.is_null() {
-        for i in 0..count {
-            let p = *ids_ptr.add(i);
-            let l = *ids_lens.add(i);
-            if p.is_null() || l == 0 {
-                slices.push(&[]);
-            } else {
-                slices.push(std::slice::from_raw_parts(p as *const u8, l));
-            }
-        }
-    }
-    let hex = crate::dupesearch_nzb::fnv1a_fingerprint(&slices);
-    if !out_hex16.is_null() {
-        std::ptr::copy_nonoverlapping(hex.as_ptr(), out_hex16 as *mut u8, 16);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_newznab_mask(text: *const c_char, len: usize) -> RsBuf {
-    let slice = if text.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(text as *const u8, len)
-    };
-    into_buf(crate::dupesearch_nzb::mask_newznab_text(slice))
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct NzbgetRsDonorScoreEntry {
-    pub score: c_int,
-    pub alive: f64,
-    pub twin: c_int,
-    pub bytes: i64,
-    pub grabs: c_int,
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_score_calc(
-    op: c_int,
-    pick_score: c_int,
-    alive: f64,
-    twin: c_int,
-    used_ptr: *const c_int,
-    used_len: usize,
-) -> c_int {
-    match op {
-        0 => crate::donorscore::base(pick_score),
-        1 => crate::donorscore::target(alive, twin != 0),
-        2 => {
-            let used = if used_ptr.is_null() || used_len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(used_ptr, used_len)
-            };
-            crate::donorscore::take_rank(alive, twin != 0, used)
-        }
-        _ => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_score_rerank(
-    entries: *const NzbgetRsDonorScoreEntry,
-    count: usize,
-    pick_bytes: i64,
-    out_scores: *mut c_int,
-) {
-    if entries.is_null() || out_scores.is_null() || count == 0 {
-        return;
-    }
-    let slice = std::slice::from_raw_parts(entries, count);
-    let rs_entries: Vec<crate::donorscore::Entry> = slice
-        .iter()
-        .map(|e| crate::donorscore::Entry {
-            score: e.score,
-            alive: e.alive,
-            twin: e.twin != 0,
-            bytes: e.bytes,
-            grabs: e.grabs,
-        })
-        .collect();
-    let scores = crate::donorscore::rerank(&rs_entries, pick_bytes);
-    std::slice::from_raw_parts_mut(out_scores, count).copy_from_slice(&scores);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_parse_pending_meta(
-    meta_ptr: *const c_char,
-    meta_len: usize,
-    out_title_off: *mut usize,
-    out_title_len: *mut usize,
-    out_indexer_off: *mut usize,
-    out_indexer_len: *mut usize,
-    out_grabs: *mut c_int,
-    out_size: *mut i64,
-    out_date: *mut i64,
-) {
-    let slice = if meta_ptr.is_null() || meta_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(meta_ptr as *const u8, meta_len)
-    };
-    let r = crate::dupesearch_nzb::parse_pending_meta(slice);
-    if !out_title_off.is_null() {
-        *out_title_off = r.title_offset;
-    }
-    if !out_title_len.is_null() {
-        *out_title_len = r.title_len;
-    }
-    if !out_indexer_off.is_null() {
-        *out_indexer_off = r.indexer_offset;
-    }
-    if !out_indexer_len.is_null() {
-        *out_indexer_len = r.indexer_len;
-    }
-    if !out_grabs.is_null() {
-        *out_grabs = r.grabs;
-    }
-    if !out_size.is_null() {
-        *out_size = r.size;
-    }
-    if !out_date.is_null() {
-        *out_date = r.date;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_parse_state_line(
-    line_ptr: *const c_char,
-    line_len: usize,
-    now: i64,
-    ttl_sec: i64,
-    out_key_off: *mut usize,
-    out_key_len: *mut usize,
-    out_score: *mut c_int,
-    out_time: *mut i64,
-    out_title_off: *mut usize,
-    out_title_len: *mut usize,
-    out_retryable: *mut c_int,
-) -> c_int {
-    let slice = if line_ptr.is_null() || line_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(line_ptr as *const u8, line_len)
-    };
-    let r = crate::dupesearch_nzb::parse_dupesearch_state_line(slice, now, ttl_sec);
-    if r.valid == 0 || r.within_ttl == 0 {
-        return 0;
-    }
-    if !out_key_off.is_null() {
-        *out_key_off = r.key_offset;
-    }
-    if !out_key_len.is_null() {
-        *out_key_len = r.key_len;
-    }
-    if !out_score.is_null() {
-        *out_score = r.score;
-    }
-    if !out_time.is_null() {
-        *out_time = r.time;
-    }
-    if !out_title_off.is_null() {
-        *out_title_off = r.title_offset;
-    }
-    if !out_title_len.is_null() {
-        *out_title_len = r.title_len;
-    }
-    if !out_retryable.is_null() {
-        *out_retryable = r.retryable;
-    }
-    1
-}
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_diskstate_exec(
     op: c_int,
@@ -12562,88 +11041,117 @@ pub unsafe extern "C" fn nzbget_rs_memory_and_cache_op(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupe_probe_op(
-    op: c_int,
-    a: usize,
-    b: c_int,
-    c: c_int,
-    d: c_int,
-    str_arg: *const c_char,
-    in_a: *const u8,
-    in_b: *const c_int,
-    in_c: *const c_int,
-    out_ptr: *mut usize,
-) -> c_int {
-    match op {
-        0 => {
-            let idxs = crate::dupeprobe::sample_indexes(a, b);
-            if !out_ptr.is_null() && !idxs.is_empty() {
-                std::slice::from_raw_parts_mut(out_ptr, idxs.len()).copy_from_slice(&idxs);
-            }
-            idxs.len() as c_int
-        }
-        1 => {
-            let resp = if str_arg.is_null() {
-                None
-            } else {
-                Some(input(str_arg))
-            };
-            crate::dupeprobe::classify(resp)
-        }
-        2 => c_int::from(crate::dupeprobe::is_dead(b, c, d)),
-        4 => {
-            if in_a.is_null() || in_b.is_null() || in_c.is_null() || out_ptr.is_null() || a == 0 {
-                return 0;
-            }
-            let active = std::slice::from_raw_parts(in_a, a);
-            let groups = std::slice::from_raw_parts(in_b, a);
-            let norm_levels = std::slice::from_raw_parts(in_c, a);
-            let ids_inout = std::slice::from_raw_parts_mut(out_ptr as *mut c_int, a);
-            let order =
-                crate::dupeprobe::select_server_order(active, groups, norm_levels, ids_inout);
-            ids_inout[..order.len()].copy_from_slice(&order);
-            order.len() as c_int
-        }
-        _ => 0,
+pub unsafe extern "C" fn nzbget_rs_dupe_probe_new(
+    nzb_id: c_int,
+    count_all: c_int,
+    recovered_at_start: c_int,
+) -> *mut crate::dupeprobe::NzbgetRsDupeProbe {
+    Box::into_raw(Box::new(crate::dupeprobe::NzbgetRsDupeProbe::new(
+        nzb_id,
+        count_all != 0,
+        recovered_at_start,
+    )))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_dupe_probe_free(
+    p: *mut crate::dupeprobe::NzbgetRsDupeProbe,
+) {
+    if !p.is_null() {
+        drop(Box::from_raw(p));
     }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupe_probe_eval_outcome(
+pub unsafe extern "C" fn nzbget_rs_dupe_probe_exec(
+    p: *mut crate::dupeprobe::NzbgetRsDupeProbe,
     op: c_int,
-    existing: c_int,
-    sampled: c_int,
-    missing_servers: c_int,
-    active_servers: c_int,
-    unreachable_servers: c_int,
-    reached_servers: c_int,
-    finished: c_int,
-    str_arg: *const c_char,
-    out_outcome: *mut c_int,
-) -> RsBuf {
-    let s = if str_arg.is_null() {
-        &[][..]
-    } else {
-        input(str_arg)
-    };
-    let (code, msg) = if op == 0 {
-        crate::dupeprobe::eval_run_outcome(
-            existing,
-            sampled,
-            missing_servers,
-            active_servers,
-            unreachable_servers,
-            reached_servers,
-            finished != 0,
-            s,
-        )
-    } else {
-        crate::dupeprobe::eval_recheck_outcome(existing, sampled, reached_servers, s)
-    };
-    if !out_outcome.is_null() {
-        *out_outcome = code;
+    n: usize,
+    a1: c_int,
+    a2: c_int,
+    p1: usize,
+    s1: *const c_char,
+    groups: *const *const c_char,
+    out_idx: *mut usize,
+    ctx: *mut c_void,
+    host_cb: Option<crate::dupeprobe::DupeProbeHostFn>,
+) -> c_int {
+    match op {
+        0 => {
+            let idxs = crate::dupeprobe::sample_indexes(n, a1);
+            if !out_idx.is_null() && !idxs.is_empty() {
+                std::slice::from_raw_parts_mut(out_idx, idxs.len()).copy_from_slice(&idxs);
+            }
+            idxs.len() as c_int
+        }
+        1 => {
+            let Some(probe) = p.as_mut() else {
+                return 0;
+            };
+            let msg_id = if s1.is_null() {
+                Vec::new()
+            } else {
+                input(s1).to_vec()
+            };
+            let mut grps = Vec::with_capacity(n);
+            if !groups.is_null() && n > 0 {
+                let slice = std::slice::from_raw_parts(groups, n);
+                for &gp in slice {
+                    if !gp.is_null() {
+                        grps.push(input(gp).to_vec());
+                    }
+                }
+            }
+            probe.add_sample(msg_id, grps);
+            1
+        }
+        2 => {
+            let (Some(probe), Some(cb)) = (p.as_mut(), host_cb) else {
+                return 0;
+            };
+            c_int::from(probe.register(p1, cb))
+        }
+        3 => {
+            let (Some(probe), Some(cb)) = (p.as_mut(), host_cb) else {
+                return 0;
+            };
+            probe.run(ctx, cb);
+            1
+        }
+        4 => {
+            let (Some(probe), Some(cb)) = (p.as_mut(), host_cb) else {
+                return 0;
+            };
+            c_int::from(probe.check(a1, ctx, cb))
+        }
+        5 => {
+            let Some(cb) = host_cb else {
+                return 0;
+            };
+            let (existing, reached) = if !out_idx.is_null() {
+                let ints = out_idx as *const c_int;
+                (*ints, *ints.add(1))
+            } else {
+                (0, 0)
+            };
+            crate::dupeprobe::probe_recheck_locked(p1, a1, a2, existing, reached, ctx, cb);
+            1
+        }
+        6 => {
+            crate::dupeprobe::probe_reset();
+            1
+        }
+        7 => crate::dupeprobe::probe_probing_for(a1),
+        8 => {
+            crate::dupeprobe::probe_stop_all();
+            1
+        }
+        9 => {
+            crate::dupeprobe::probe_wait_all();
+            1
+        }
+        _ => 0,
     }
-    into_buf(msg)
 }
 
 #[unsafe(no_mangle)]
@@ -12765,139 +11273,6 @@ pub unsafe extern "C" fn nzbget_rs_queue_editor_op(
         }
         _ => 0,
     }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupe_identity_calc(
-    op: c_int,
-    present: c_int,
-    missing: c_int,
-    error: c_int,
-    listed_parts: u64,
-    declared_parts: u64,
-    total_or_data_bytes: i64,
-    article_bytes: u64,
-    block_or_min: u64,
-    alive_in: f64,
-    rec_ptr: *const u64,
-    rec_len: usize,
-    out_f64: *mut f64,
-) -> u64 {
-    match op {
-        0 => {
-            if total_or_data_bytes <= 0 {
-                0
-            } else {
-                crate::dupewatch::whole_bytes(
-                    total_or_data_bytes as u64,
-                    listed_parts,
-                    declared_parts,
-                )
-            }
-        }
-        1 => {
-            let v = crate::dupewatch::effective_alive(
-                present,
-                missing,
-                error,
-                listed_parts,
-                declared_parts,
-            );
-            if !out_f64.is_null() {
-                *out_f64 = v;
-            }
-            u64::from(v >= 0.0)
-        }
-        2 => u64::from(crate::dupewatch::dead_donor(
-            present,
-            missing,
-            error,
-            listed_parts,
-            declared_parts,
-            block_or_min as i32,
-        )),
-        3 => crate::dupewatch::unlisted_missing(present, listed_parts, declared_parts) as u64,
-        4 => {
-            let vols = if rec_ptr.is_null() || rec_len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(rec_ptr, rec_len)
-            };
-            u64::from(crate::dupewatch::par_doomed(
-                total_or_data_bytes.max(0) as u64,
-                article_bytes,
-                vols,
-                alive_in,
-                block_or_min,
-            ))
-        }
-        _ => 0,
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupe_watch_item_flags(
-    kind: c_int,
-    in_history: c_int,
-    dupe_success: c_int,
-    deleting: c_int,
-    delete_status: c_int,
-    has_post_info: c_int,
-    dupe_mode: c_int,
-    is_donor: c_int,
-    dupe_hint: c_int,
-    has_dupe_fleet: c_int,
-) -> u32 {
-    crate::dupewatch::build_item_flags(
-        kind,
-        in_history != 0,
-        dupe_success != 0,
-        deleting != 0,
-        delete_status,
-        has_post_info != 0,
-        dupe_mode,
-        is_donor != 0,
-        dupe_hint,
-        has_dupe_fleet != 0,
-    )
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupe_watch_is_live_fleet_peer(
-    peer_key: *const c_char,
-    peer_len: usize,
-    pick_key: *const c_char,
-    pick_len: usize,
-    peer_flags: u32,
-) -> c_int {
-    c_int::from(crate::dupewatch::is_live_fleet_peer(
-        bytes(peer_key, peer_len),
-        bytes(pick_key, pick_len),
-        peer_flags,
-    ))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupe_watch_format_state_line(
-    now: i64,
-    ttl_sec: i64,
-    key: *const c_char,
-    key_len: usize,
-    score: c_int,
-    time: i64,
-    title: *const c_char,
-    title_len: usize,
-    retryable: c_int,
-) -> RsBuf {
-    into_buf(crate::dupewatch::format_searched_state_line(
-        now,
-        ttl_sec,
-        bytes(key, key_len),
-        score,
-        time,
-        bytes(title, title_len),
-        retryable != 0,
-    ))
 }
 
 #[unsafe(no_mangle)]
@@ -14566,423 +12941,82 @@ pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_op(
 }
 
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_op(
+pub unsafe extern "C" fn nzbget_rs_dupesearch_new() -> *mut crate::dupesearch_coord::NzbgetRsDupeSearch {
+    Box::into_raw(Box::new(crate::dupesearch_coord::NzbgetRsDupeSearch::new()))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_dupesearch_free(
+    ptr: *mut crate::dupesearch_coord::NzbgetRsDupeSearch,
+) {
+    if !ptr.is_null() {
+        drop(Box::from_raw(ptr));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_dupesearch_exec(
+    ptr: *mut crate::dupesearch_coord::NzbgetRsDupeSearch,
     op: c_int,
-    a: c_int,
-    b: c_int,
-    c: c_int,
-    d: c_int,
-    e: c_int,
-    f: c_int,
-    g: c_int,
-    t1: i64,
-    t2: i64,
-    f1: f64,
-    s1: *const c_char,
-    s2: *const c_char,
-    s3: *const c_char,
-    s4: *const c_char,
-    cstr1: *const *const c_char,
-    cstr2: *const *const c_char,
-    u8_1: *const u8,
-    u8_2: *const u8,
-    i32_1: *const c_int,
-    i32_2: *const c_int,
-    i64_1: *const i64,
-    i64_2: *const i64,
-    len: usize,
-    out1: *mut c_int,
-    out2: *mut c_int,
-    out_arr: *mut c_int,
-    out_i64: *mut i64,
-    out_buf: *mut RsBuf,
-) -> c_int {
-    let b_or_empty = |p: *const c_char| -> &[u8] {
-        if p.is_null() {
-            &[][..]
-        } else {
-            CStr::from_ptr(p).to_bytes()
-        }
+    a1: c_int,
+    p1: usize,
+    p2: usize,
+    host_ctx: *mut c_void,
+    host_cb: Option<crate::dupesearch_coord::DupeHostFn>,
+) {
+    let Some(ds) = ptr.as_ref() else {
+        return;
     };
-    let s1_bytes = b_or_empty(s1);
-    let s2_bytes = b_or_empty(s2);
-    let s3_bytes = b_or_empty(s3);
-    let s4_bytes = b_or_empty(s4);
     match op {
-        0 => {
-            let mut keys = Vec::with_capacity(len);
-            let mut vals = Vec::with_capacity(len);
-            if !cstr1.is_null() && !cstr2.is_null() && len > 0 {
-                let ks = std::slice::from_raw_parts(cstr1, len);
-                let vs = std::slice::from_raw_parts(cstr2, len);
-                for i in 0..len {
-                    keys.push(b_or_empty(ks[i]));
-                    vals.push(b_or_empty(vs[i]));
-                }
+        0 => ds.stop(),
+        1 => {
+            if let Some(cb) = host_cb {
+                ds.notify_name_changed(a1, host_ctx, cb);
             }
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::dupesearch_nzb::build_newznab_url_percent(
-                    s1_bytes, &keys, &vals, s2_bytes,
-                ));
-            }
-            0
         }
-        1 => c_int::from(crate::dupesearch_nzb::saved_history_backup(
-            a != 0,
-            b as u32,
-            c,
-            d as u32,
-            3,
-            6,
-        )),
         2 => {
-            let qf_exists = !s1_bytes.is_empty()
-                && crate::fsops::file_exists(s1_bytes, &crate::fsops::posix_stat);
-            let has_marked_alive = !s2.is_null();
-            let marked_alive_val = if has_marked_alive {
-                crate::dupesearch_nzb::parse_atoi_bytes(s2_bytes)
-            } else {
-                0
-            };
-            c_int::from(crate::dupesearch_nzb::placement_available(
-                (a & 1) != 0,
-                (a & 2) != 0,
-                (a & 4) != 0,
-                b,
-                0,
-                1,
-                3,
-                6,
-                c,
-                1,
-                d,
-                2,
-                (a & 8) != 0,
-                (a & 16) != 0,
-                (a & 32) != 0,
-                (a & 64) != 0,
-                (a & 128) != 0,
-                e as u32,
-                f as u32,
-                qf_exists,
-                g,
-                t1 as i32,
-                (a & 256) != 0,
-                has_marked_alive,
-                marked_alive_val,
-            ))
+            if let Some(cb) = host_cb {
+                ds.download_queue_update(a1, p1, p2, host_ctx, cb);
+            }
         }
         3 => {
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::dupesearch_nzb::lower_key(s1_bytes));
+            if let Some(cb) = host_cb {
+                ds.run(host_ctx, cb);
             }
-            0
         }
-        4 => {
-            let qf = if !cstr1.is_null() {
-                b_or_empty(*cstr1)
-            } else {
-                &[][..]
-            };
-            let item_low = crate::dupesearch_nzb::lower_key(s1_bytes);
-            let same_key = item_low.as_slice() == s2_bytes;
-            let same_rel = crate::releasename::same_release(s3_bytes, s4_bytes);
-            let add_known = d == 0 && !qf.is_empty() && f != 1 && (same_key || same_rel);
-            let item_score = (t1 >> 32) as i32;
-            let pick_score = (t1 as u32) as i32;
-            let item_hash = (t2 >> 32) as u32;
-            let pick_hash = t2 as u32;
-            let add_member = if a == 0 {
-                crate::dupesearch_nzb::dupesearch_is_rank_only_queued_member(
-                    b != 0,
-                    c != 0,
-                    d,
-                    0,
-                    e,
-                    0,
-                    g != 0,
-                    f,
-                    0,
-                    3,
-                    item_score,
-                    pick_score,
-                ) && same_key
-                    && same_rel
-                    && !qf.is_empty()
-                    && !qf.contains(&b'|')
-            } else {
-                c == 0
-                    && crate::dupesearch_nzb::saved_history_backup(
-                        true, pick_hash, f, item_hash, 3, 6,
-                    )
-                    && same_key
-                    && same_rel
-                    && !qf.is_empty()
-                    && !qf.contains(&b'|')
-            };
-            c_int::from(add_known) | (c_int::from(add_member) << 1)
-        }
-        5 => crate::dupesearch_nzb::dupesearch_calc_expand_budget_ms(a, t1, t2),
-        6 => {
-            let reason = crate::dupesearch_nzb::dupesearch_classify_search_retry_reason(
-                a,
-                b,
-                c != 0,
-                d != 0,
-                e,
-                f,
-                g,
-            );
-            if reason != 0 && !out_buf.is_null() {
-                let msg: &[u8] = match reason {
-                    1 => b"no indexer answered",
-                    2 => b"an indexer query failed and nothing came back",
-                    _ => b"no posting could be fetched",
-                };
-                *out_buf = into_buf(msg.to_vec());
-            }
-            reason
-        }
-        7 => {
-            if !i64_1.is_null()
-                && !i32_1.is_null()
-                && !i64_2.is_null()
-                && !out_arr.is_null()
-                && len > 0
-            {
-                let tb = std::slice::from_raw_parts(i64_1, len);
-                let gr = std::slice::from_raw_parts(i32_1, len);
-                let dt = std::slice::from_raw_parts(i64_2, len);
-                let mut order = vec![0usize; len];
-                crate::dupesearch_nzb::sort_verified_postings(tb, gr, dt, t1, &mut order);
-                let out_s = std::slice::from_raw_parts_mut(out_arr, len);
-                for i in 0..len {
-                    out_s[i] = order[i] as c_int;
-                }
-            }
-            0
-        }
-        8 => {
-            let (score, pct, add_zero) =
-                crate::dupesearch_nzb::eval_member_rerank(a, b, c, d, f1, e != 0);
-            if !out1.is_null() {
-                *out1 = pct;
-            }
-            if !out2.is_null() {
-                *out2 = c_int::from(add_zero);
-            }
-            score
-        }
-        9 => {
-            let mut keys = Vec::with_capacity(len);
-            let counts = if i32_1.is_null() || len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(i32_1, len)
-            };
-            if !cstr1.is_null() && len > 0 {
-                for &p in std::slice::from_raw_parts(cstr1, len) {
-                    keys.push(b_or_empty(p));
-                }
-            }
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::dupesearch_nzb::dupesearch_format_rejected_outcome(
-                    &keys, counts,
-                ));
-            }
-            0
-        }
-        10 => {
-            let (_, retry_disc, rank_inc) = crate::dupesearch_nzb::dupesearch_eval_post_place_retry(
-                a != 0,
-                b != 0,
-                c != 0,
-                d as usize,
-            );
-            if !out1.is_null() {
-                *out1 = c_int::from(retry_disc);
-            }
-            if !out2.is_null() {
-                *out2 = c_int::from(rank_inc);
-            }
-            0
-        }
-        11 => {
-            let pick_norm = crate::releasename::normalize(s3_bytes);
-            let job_norm = crate::releasename::normalize(s4_bytes);
-            let code = crate::dupesearch_nzb::eval_pick_gone(
-                a != 0,
-                b != 0,
-                c,
-                1,
-                s1_bytes,
-                s2_bytes,
-                &pick_norm,
-                &job_norm,
-            );
-            if code != 0 && !out_buf.is_null() {
-                let msg: &[u8] = match code {
-                    1 => b"the pick was deleted",
-                    2 => b"the duplicate key of the pick changed",
-                    _ => b"the name of the pick changed",
-                };
-                *out_buf = into_buf(msg.to_vec());
-            }
-            code
-        }
-        12 => c_int::from(crate::dupesearch_nzb::mark_searching_pending(
-            s1_bytes,
-            s2_bytes,
-            s3_bytes,
-            a != 0,
-        )),
-        13 => c_int::from(crate::dupesearch_nzb::save_pending_header(
-            s1_bytes, s2_bytes, s3_bytes, s4_bytes,
-        )),
-        14 => {
-            let data = if u8_1.is_null() || len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(u8_1, len)
-            };
-            c_int::from(crate::dupesearch_nzb::save_pending_item(
-                s1_bytes,
-                a as usize,
-                s2_bytes,
-                s3_bytes,
-                b,
-                t1,
-                t2,
-                data,
-                c != 0,
-            ))
-        }
-        15 => c_int::from(crate::dupesearch_nzb::save_pending_finish(s1_bytes)),
-        16 => crate::dupesearch_nzb::dupesearch_parse_pending_dir_id(s1_bytes),
-        17 => c_int::from(crate::dupesearch_nzb::check_pending_identity(
-            s1_bytes, s2_bytes, s3_bytes, s4_bytes,
-        )),
-        18 => {
-            let (alive, dead, comp) =
-                crate::dupesearch_nzb::eval_fleet_member_health(a != 0, b != 0, c, d, e, f, g);
-            if !out1.is_null() {
-                *out1 = alive;
-            }
-            if !out2.is_null() {
-                *out2 = c_int::from(dead);
-            }
-            c_int::from(comp)
-        }
-        19 => {
-            if !u8_1.is_null()
-                && !i32_1.is_null()
-                && !u8_2.is_null()
-                && !i32_2.is_null()
-                && !i64_1.is_null()
-                && !out_arr.is_null()
-                && len > 0
-            {
-                let has_err = std::slice::from_raw_parts(u8_1, len);
-                let same_as = std::slice::from_raw_parts(i32_1, len);
-                let dead = std::slice::from_raw_parts(u8_2, len);
-                let alive = std::slice::from_raw_parts(i32_2, len);
-                let tb = std::slice::from_raw_parts(i64_1, len);
-                let mut ranked = vec![0usize; len];
-                let n = crate::dupesearch_nzb::rank_fleet_candidates(
-                    has_err,
-                    same_as,
-                    dead,
-                    alive,
-                    tb,
-                    &mut ranked,
-                );
-                let out_s = std::slice::from_raw_parts_mut(out_arr, n);
-                for i in 0..n {
-                    out_s[i] = ranked[i] as c_int;
-                }
-                return n as c_int;
-            }
-            0
-        }
-        20 => {
-            if a != 0 || !s1_bytes.eq_ignore_ascii_case(s2_bytes) {
-                return 0;
-            }
-            if !out1.is_null() && !out2.is_null() && !out_arr.is_null() && !out_i64.is_null() {
-                let (nt, nl, nrid, nrsc) = crate::dupesearch_nzb::fleet_update_key_score_bounds(
-                    *out_i64,
-                    *out1,
-                    g != 0,
-                    b != 0,
-                    c != 0,
-                    d,
-                    0,
-                    *out2,
-                    *out_arr,
-                    e,
-                    f,
-                );
-                *out_i64 = nt;
-                *out1 = nl;
-                *out2 = nrid;
-                *out_arr = nrsc;
-            }
-            1
-        }
-        21 => crate::dupesearch_nzb::fleet_calc_member_add_score(a, b, t1, c),
-        22 => {
-            let mut reason_bytes = s2_bytes.to_vec();
-            let mut updated_reason = 0;
-            if a == 0 && reason_bytes.is_empty() {
-                let code = crate::dupesearch_nzb::eval_fleet_outcome_reason(
-                    c != 0,
-                    d != 0,
-                    e != 0,
-                    f != 0,
-                );
-                let r: &[u8] = match code {
-                    0 => b"NO_USABLE_MEMBERS",
-                    1 => b"INCOMPLETE",
-                    2 => b"ALL_DEAD",
-                    3 => b"ALREADY_DOWNLOADED",
-                    _ => b"NOT_QUEUED",
-                };
-                reason_bytes = r.to_vec();
-                updated_reason = 1;
-                if !out1.is_null() {
-                    *out1 = code;
-                }
-            }
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::dupesearch_nzb::fleet_format_summary_log(
-                    g,
-                    s1_bytes,
-                    a,
-                    &reason_bytes,
-                    b != 0,
-                ));
-            }
-            updated_reason
-        }
-        23 => c_int::from(
-            crate::dupesearch_nzb::dupesearch_is_better_parent_candidate(
-                a != 0,
-                b,
-                0,
-                c != 0,
-                d,
-                0,
-                e != 0,
-                crate::dupesearch_nzb::lower_key(s1_bytes).as_slice() == s2_bytes,
-                f,
-                g,
-                t1 != 0,
-                t2 as i32,
-            ),
-        ),
-        _ => 0,
+        _ => {}
     }
+}
+
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_fleet_append(
+    host_ctx: *mut c_void,
+    host_cb: Option<crate::dupesearch_coord::DupeHostFn>,
+    dupe_key: *const c_char,
+    category: *const c_char,
+    priority: c_int,
+    timeout_sec: c_int,
+    members: *const crate::xmlrpc_format::NzbgetRsRpcFleetReqMember,
+    members_len: usize,
+    emit_ctx: *mut c_void,
+    emit_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn>,
+) -> c_int {
+    let (Some(hcb), Some(ecb)) = (host_cb, emit_cb) else {
+        return 0;
+    };
+    crate::dupesearch_coord::fleet_append(
+        host_ctx,
+        hcb,
+        dupe_key,
+        category,
+        priority,
+        timeout_sec,
+        members,
+        members_len,
+        emit_ctx,
+        ecb,
+    )
 }
 
 #[cfg(unix)]

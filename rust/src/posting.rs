@@ -201,54 +201,6 @@ pub fn sketch_of_file(path: &std::path::Path) -> Option<Vec<u32>> {
     Some(sketch)
 }
 
-#[cfg(unix)]
-unsafe fn c_path_to_path(path: *const std::ffi::c_char) -> Option<std::path::PathBuf> {
-    use std::os::unix::ffi::OsStrExt;
-    if path.is_null() {
-        return None;
-    }
-    let bytes = std::ffi::CStr::from_ptr(path).to_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
-}
-
-#[cfg(not(unix))]
-unsafe fn c_path_to_path(path: *const std::ffi::c_char) -> Option<std::path::PathBuf> {
-    if path.is_null() {
-        return None;
-    }
-    let s = std::ffi::CStr::from_ptr(path).to_string_lossy();
-    if s.is_empty() {
-        return None;
-    }
-    Some(std::path::PathBuf::from(s.as_ref()))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_posting_sketch_of_file(
-    path: *const std::ffi::c_char,
-    out: *mut u32,
-    cap: usize,
-    out_len: *mut usize,
-) -> std::ffi::c_int {
-    let Some(path_buf) = c_path_to_path(path) else {
-        return 0;
-    };
-    let Some(sketch) = sketch_of_file(&path_buf) else {
-        return 0;
-    };
-    let n = sketch.len().min(cap);
-    if !out.is_null() && n > 0 {
-        std::ptr::copy_nonoverlapping(sketch.as_ptr(), out, n);
-    }
-    if !out_len.is_null() {
-        *out_len = n;
-    }
-    1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

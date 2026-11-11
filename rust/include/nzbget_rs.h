@@ -382,10 +382,6 @@ int nzbget_rs_par_renamer_load_par_entries(
 // sink and add/set are valid only during their list/lastError call. Strings
 // passed to add/set are copied before that function returns.
 int nzbget_rs_delete_directory_with_content(const char* dir, char separator, NzbgetRsBuf* errmsg);
-int nzbget_rs_rename_bak(const char* filename, const char* bakPart, int removeOldExtension,
-	NzbgetRsBuf* newName);
-// FileSystem::GetFileExtension: the offset of the last '.', or -1.
-ptrdiff_t nzbget_rs_file_extension(const char* name, size_t len);
 
 // NzbFile (rust/src/nzbfile.rs), under the C library's ctype: classes are
 // isspace/isdigit's classes of bytes 0..255 (masks space and digit), lower
@@ -535,8 +531,6 @@ void nzbget_rs_memory_pressure_trim_heap(void);
 // ============================================================================
 // Daemon Lifecycle Coordination C ABI (Requirement R2, Milestone M5)
 // ============================================================================
-
-void nzbget_rs_signal_notify(int signum);
 
 // C++ subsystem bridge functions exported to Rust
 void nzbget_c_set_process_args(int argc, char* argv[], char* argp[]);
@@ -1848,12 +1842,6 @@ size_t nzbget_rs_dupematcher_filter_dupe_sources(
     const char* const* dupe_dirs, size_t dupe_count, size_t* out_indices,
     void (*on_message)(void* ctx, int kind, const char* msg), void* ctx);
 
-int nzbget_rs_archive_processor_process(
-    const char* archive_file, const char* unpack_dir, const char* dest_dir,
-    const char* processed_dir, const char* broken_dir, int config_action, void* ctx,
-    void (*log_cb)(void* ctx, int kind, const char* msg),
-    void (*moved_cb)(void* ctx, const char* moved_path));
-
 int64_t nzbget_rs_donor_now_ms(void);
 void nzbget_rs_donor_stop_all(void);
 void nzbget_rs_donor_wait_all(void);
@@ -2603,8 +2591,6 @@ int nzbget_rs_script_parse_nzb_cmd(
 int nzbget_rs_post_script_analyse_exit_code(
     int exit_code, int par_status, int ps_skipped, int parcheck_enabled,
     int sr_none, int sr_failure, int sr_success, int* out_msg_action, int* out_req_par_check);
-NzbgetRsBuf nzbget_rs_scanner_prepare_external_name(
-    const char* nzb_name, int is_from_disk, const char* buf_ptr, int buf_size, int* inout_is_nzb);
 void nzbget_rs_nzb_summary_fingerprint(
     const char* const* ids_ptr, const size_t* ids_lens, size_t count, char* out_hex16);
 NzbgetRsBuf nzbget_rs_newznab_mask(const char* text, size_t len);
@@ -2775,9 +2761,19 @@ intptr_t nzbget_rs_url_coord_op(
     int op, int a, int b, int c, int64_t t1, int64_t t2, const char* s1,
     const int* arr1, const int* arr2, const int* arr3, const int* arr4, size_t len,
     int* out_i32_1, int* out_i32_2, int* out_i32_3, NzbgetRsBuf* out_buf);
-int nzbget_rs_scanner_op(
-    int op, int a, int b, int c, int d, int64_t t1, int64_t t2, int64_t t3, int64_t t4,
-    const char* s1, const int* arr, size_t len, int* out_i32, int64_t* out_i64_1, int64_t* out_i64_2);
+typedef struct NzbgetRsScanner NzbgetRsScanner;
+typedef struct NzbgetRsScannerEnv {
+    void* ctx; const char* nzb_dir; const char* temp_dir; const char* filename; const char* nzb_name; const char* category; const char* dupe_key; const char* buf_ptr;
+    int buf_len; int priority; int dupe_score; int dupe_mode; int auto_category; int add_top; int add_paused; int nzb_dir_interval; int nzb_dir_file_age; int archive_scan; int archive_action; int queue_loaded; int pause_scan; char path_sep;
+    void* parameters; void* url_info; int* out_nzb_id; void (*wake_cb)(void*); void (*log_cb)(void*, int, const char*); const char* (*find_category_cb)(void*, const char*, int);
+    void (*iter_params_cb)(void*, void*, void (*)(void*, const char*, const char*)); void (*work_params_cb)(void*, int, const char*, const char*);
+    void (*scan_script_cb)(void*, const char*, void*, const char*, const char*, const char*, const char*, void*, void (*)(void*, int, const char*), int*, int*, int*, int*, int*);
+    int (*parse_nzb_cb)(void*, const char*, const char*, const char**);
+    int (*commit_nzb_cb)(void*, int, const char*, const char*, int, const char*, int, const char*, int, int, int, int, void*);
+} NzbgetRsScannerEnv;
+NzbgetRsScanner* nzbget_rs_scanner_new(void);
+void nzbget_rs_scanner_free(NzbgetRsScanner* scanner);
+int nzbget_rs_scanner_exec(NzbgetRsScanner* scanner, int op, const NzbgetRsScannerEnv* env, int a1, int a2, int a3);
 int nzbget_rs_scheduler_service_op(
     int op, int a, int b, int c, int d, int64_t t1, int64_t t2,
     const char* s1, const char* s2, int* out_i32);

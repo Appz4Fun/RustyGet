@@ -28,39 +28,8 @@
 #define PACKAGE "rustyget"
 #define VERSION "27.0"
 #define PACKAGE_BUGREPORT "https://github.com/xbmc4lyfe/RustyGet/issues"
-#define SIGCHLD_HANDLER 1
 #define FUNCTION_MACRO_NAME __FUNCTION__
-#define HAVE_CTIME_R_2 1
-#define HAVE_FDATASYNC 1
-#define HAVE_FSEEKO 1
-#ifdef __APPLE__
-#define HAVE_FULLFSYNC 1
-#endif
-#define HAVE_GETADDRINFO 1
-#define HAVE_GETOPT 1
-#define HAVE_GETOPT_H 1
-#define HAVE_GETOPT_LONG 1
-#define HAVE_INTTYPES_H 1
-#define HAVE_LOCKF 1
-#define HAVE_NCURSES_H 1
-#define HAVE_PTHREAD_CANCEL 1
-#define HAVE_REGEX_H 1
-#define HAVE_SC_NPROCESSORS_ONLN 1
-#define HAVE_STDIO_H 1
-#define HAVE_STDLIB_H 1
-#define HAVE_STRINGS_H 1
-#define HAVE_STRING_H 1
-#ifdef __linux__
-#define HAVE_SYS_PRCTL_H 1
-#define HAVE_ENDIAN_H 1
-#endif
-#define HAVE_SYS_STAT_H 1
-#define HAVE_SYS_TYPES_H 1
-#define HAVE_UNISTD_H 1
-#define HAVE_ALLOCA_H 1
-#define HAVE_VARIADIC_MACROS 1
 #define HAVE_X509_CHECK_HOST 1
-#define SOCKLEN_T socklen_t
 #ifndef NZBGET_USE_RUST
 #define NZBGET_USE_RUST 1
 #endif
@@ -81,24 +50,6 @@
 #include <netinet/in.h>
 #include <dirent.h>
 #include <poll.h>
-
-#ifndef __linux__
-#include <sys/sysctl.h>
-#endif
-
-#define __BSD__ (__FreeBSD__ || __NetBSD__ || __OpenBSD__ || __DragonFly__)
-
-#ifdef HAVE_SYS_PRCTL_H
-#include <sys/prctl.h>
-#endif
-
-#ifdef HAVE_ENDIAN_H
-#include <endian.h>
-#endif
-
-#ifdef HAVE_BACKTRACE
-#include <execinfo.h>
-#endif
 
 // COMMON INCLUDES
 
@@ -187,8 +138,6 @@ namespace OpenSSL
 #define INVALID_SOCKET (-1)
 #define PATH_SEPARATOR '/'
 #define ALT_PATH_SEPARATOR '\\'
-#define MAX_PATH 1024
-#define S_DIRMODE (S_IRWXU | S_IRWXG | S_IRWXO)
 #define LINE_ENDING "\n"
 #define FOPEN_RB "rb"
 #define FOPEN_RBP "rb+"
@@ -221,19 +170,10 @@ using uint64 = uint64_t;
 
 typedef unsigned char uchar;
 
-// Assume little endian if byte order is not defined
-#ifndef __BYTE_ORDER
-#define __LITTLE_ENDIAN 1234
-#define __BIG_ENDIAN    4321
-#define __BYTE_ORDER __LITTLE_ENDIAN
-#endif
-
 #ifdef __GNUC__
 #define PRINTF_SYNTAX(strindex) __attribute__ ((format (printf, strindex, strindex+1)))
-#define SCANF_SYNTAX(strindex) __attribute__ ((format (scanf, strindex, strindex+1)))
 #else
 #define PRINTF_SYNTAX(strindex)
-#define SCANF_SYNTAX(strindex)
 #endif
 
 #ifndef OBSERVER_H
@@ -851,7 +791,6 @@ public:
 		m_size = 0;
 	}
 	operator char*() const { return m_data; }
-	char* operator*() const { return m_data; }
 
 protected:
 	char* m_data = nullptr;
@@ -1062,25 +1001,6 @@ using errc = std::errc;
 
 inline fs::path u8path(std::string_view pathStr) { return fs::path(pathStr); }
 inline std::string u8string(const path& p) { return p.string(); }
-
-inline path make_unique_filename()
-{
-	return std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-}
-
-inline void move_file(const fs::path& src, const fs::path& dest, fs::error_code& ec) noexcept
-{
-	int err = (int)nzbget_rs_fs_op_with_err(5, src.c_str(), dest.c_str(), 0, nullptr);
-	if (err == 0)
-	{
-		ec.clear();
-	}
-	else
-	{
-		errno = err;
-		ec = std::make_error_code(static_cast<std::errc>(err));
-	}
-}
 }
 
 class DirBrowser
@@ -1257,19 +1177,6 @@ public:
 			return DiskState{ avail, total };
 		}
 		return std::nullopt;
-	}
-
-	static bool RenameBak(const char* filename, const char* bakPart, bool removeOldExtension, CString& newName)
-	{
-		if (!filename || !bakPart)
-		{
-			return false;
-		}
-		NzbgetRsBuf name{};
-		int result = nzbget_rs_rename_bak(filename, bakPart, removeOldExtension, &name);
-		newName.Set(name.data, (int)name.len);
-		nzbget_rs_free(name);
-		return result == 1;
 	}
 
 	static CString ExpandHomePath(const char* filename)
@@ -1883,7 +1790,6 @@ public:
 	static constexpr std::string_view CERTSTORE = "CertStore";
 	static constexpr std::string_view AUTHORIZEDIP = "AuthorizedIP";
 	static constexpr std::string_view RENAMEIGNOREEXT = "RenameIgnoreExt";
-	static constexpr std::string_view NZBDIRARCHIVESCAN = "NzbDirArchiveScan";
 	static constexpr std::string_view UNRARCMD = "UnrarCmd";
 	static constexpr std::string_view SEVENZIPCMD = "SevenZipCmd";
 	static constexpr std::string_view UNPACKPASSFILE = "UnpackPassFile";
@@ -2384,7 +2290,6 @@ public:
 	bool GetDirectClientMode() const { return m_directClientMode; }
 
 	const fs::path& GetTempDirPath() const { return m_tempDirPath; }
-	const fs::path& GetNzbDirPath() const { return m_nzbDirPath; }
 	const char* GetUnrarPath() const { return m_unrarPath ? *m_unrarPath : ""; }
 	const char* GetSevenZipPath() const { return m_sevenZipPath ? *m_sevenZipPath : ""; }
 	const std::vector<fs::path>& GetScriptDirPaths() const { return m_scriptDirPaths; }
@@ -2400,7 +2305,6 @@ private:
 
 	// Options
 	fs::path m_tempDirPath;
-	fs::path m_nzbDirPath;
 	std::vector<fs::path> m_scriptDirPaths;
 
 	bool m_configErrors = false;
@@ -2803,7 +2707,6 @@ private:
 		CheckDir(m_nzbDir, NZBDIR.data(), m_mainDir, false, true);
 
 		m_tempDirPath = fs::u8path(*m_tempDir);
-		m_nzbDirPath = fs::u8path(*m_nzbDir);
 
 		Tokenizer tokDir(g_Options->GetScriptDir(), ",;");
 		while (const char* scriptDir = tokDir.Next())
@@ -29032,16 +28935,17 @@ extern Scanner* g_Scanner;
 class Scanner final : public Service
 {
 public:
-	static constexpr std::string_view PROCESSED_DIR = "_processed";
-	static constexpr std::string_view BROKEN_DIR = "_broken";
-	static constexpr std::string_view UNPACK_DIR = "_unpack";
-
 	enum EAddStatus
 	{
 		asSkipped,
 		asSuccess,
 		asFailed
 	};
+
+	Scanner() : m_rsScanner(nzbget_rs_scanner_new()) {}
+	~Scanner() override { nzbget_rs_scanner_free(m_rsScanner); }
+	Scanner(const Scanner&) = delete;
+	Scanner& operator=(const Scanner&) = delete;
 
 	class ScanScriptController;
 
@@ -29227,522 +29131,12 @@ public:
 		}
 	};
 
-private:
-	class FileData
-	{
-	public:
-		FileData(const char* filename, int64 size, time_t lastChange)
-			: m_filename{ filename ? filename : "" }
-			, m_size{ size }
-			, m_lastChange{ lastChange } {}
-		const char* GetFilename() const { return m_filename.c_str(); }
-		int64 GetSize() { return m_size; }
-		void SetSize(int64 size) { m_size = size; }
-		time_t GetLastChange() { return m_lastChange; }
-		void SetLastChange(time_t lastChange) { m_lastChange = lastChange; }
-	private:
-		std::string m_filename;
-		int64 m_size;
-		time_t m_lastChange;
-	};
-
-	using FileList = std::deque<FileData>;
-
-	class QueueData
-	{
-	public:
-		QueueData(
-			const char* filename,
-			const char* nzbName,
-			const char* category,
-			bool autoCategory,
-			int priority,
-			const char* dupeKey,
-			int dupeScore,
-			EDupeMode dupeMode,
-			NzbParameterList* parameters,
-			bool addTop,
-			bool addPaused,
-			NzbInfo* urlInfo,
-			EAddStatus* addStatus,
-			int* nzbId)
-			: m_filename{ filename ? filename : "" }
-			, m_nzbName{ nzbName ? nzbName : "" }
-			, m_category{ category ? category : "" }
-			, m_autoCategory{ autoCategory }
-			, m_priority{ priority }
-			, m_dupeKey{ dupeKey ? dupeKey : "" }
-			, m_dupeScore{ dupeScore }
-			, m_dupeMode{ dupeMode }
-			, m_addTop{ addTop }
-			, m_addPaused{ addPaused }
-			, m_urlInfo{ urlInfo }
-			, m_addStatus{ addStatus }
-			, m_nzbId{ nzbId }
-		{
-			if (parameters)
-			{
-				m_parameters.CopyFrom(parameters);
-			}
-		}
-		const char* GetFilename() const { return m_filename.c_str(); }
-		const char* GetNzbName() const { return m_nzbName.c_str(); }
-		const char* GetCategory() const { return m_category.c_str(); }
-		int GetPriority() { return m_priority; }
-		const char* GetDupeKey() const { return m_dupeKey.c_str(); }
-		int GetDupeScore() { return m_dupeScore; }
-		EDupeMode GetDupeMode() { return m_dupeMode; }
-		NzbParameterList* GetParameters() { return &m_parameters; }
-		bool GetAddTop() { return m_addTop; }
-		bool GetAddPaused() { return m_addPaused; }
-		bool GetAutoCategory() const { return m_autoCategory; }
-		NzbInfo* GetUrlInfo() { return m_urlInfo; }
-		void SetAddStatus(EAddStatus addStatus)
-		{
-			if (m_addStatus)
-			{
-				*m_addStatus = addStatus;
-			}
-		}
-		void SetNzbId(int nzbId)
-		{
-			if (m_nzbId)
-			{
-				*m_nzbId = nzbId;
-			}
-		}
-	private:
-		NzbParameterList m_parameters;
-		std::string m_filename;
-		std::string m_nzbName;
-		std::string m_category;
-		std::string m_dupeKey;
-		int m_priority;
-		int m_dupeScore;
-		bool m_autoCategory;
-		bool m_addTop;
-		bool m_addPaused;
-		EDupeMode m_dupeMode;
-		NzbInfo* m_urlInfo;
-		EAddStatus* m_addStatus;
-		int* m_nzbId;
-	};
-
-	using QueueList = std::deque<QueueData>;
-
-	FileList m_fileList;
-	QueueList m_queueList;
-	std::mutex m_scanMutex;
-	std::atomic<bool> m_requestedNzbDirScan{false};
-	std::atomic<bool> m_scanning{false};
-	inline static int m_idGen = 0;
-	int m_nzbDirInterval = 0;
-	int m_pass = 0;
-	bool m_scanScript = false;
-
-public:
 	void InitOptions()
 	{
-		m_nzbDirInterval = 1;
-		m_scanScript = ScanScriptController::HasScripts();
-
-		CleanupStaleUnpackDir();
+		NzbgetRsScannerEnv env = MakeEnv();
+		nzbget_rs_scanner_exec(m_rsScanner, 0, &env, ScanScriptController::HasScripts() ? 1 : 0, 0, 0);
 	}
 
-protected:
-	int ServiceInterval() override
-	{
-		return m_requestedNzbDirScan ? Service::Now :
-			g_Options->GetNzbDirInterval() <= 0 ? Service::Sleep :
-			m_nzbDirInterval;
-	}
-
-	void ServiceWork() override
-	{
-		debug("Scanner service work");
-
-		if (!DownloadQueue::IsLoaded())
-		{
-			return;
-		}
-
-		m_nzbDirInterval = g_Options->GetNzbDirInterval();
-
-		if (g_WorkState->GetPauseScan() && !m_requestedNzbDirScan)
-		{
-			return;
-		}
-
-		debug("Scanner service work: doing work");
-
-		std::lock_guard<std::mutex> guard{m_scanMutex};
-
-		// check nzbdir every g_Options->GetNzbDirInterval() seconds or if requested
-		bool checkStat = !m_requestedNzbDirScan;
-		m_requestedNzbDirScan = false;
-		m_scanning = true;
-
-		if (g_Options->GetNzbDirArchiveScan())
-		{
-			CheckIncomingArchives(g_Options->GetNzbDirPath(), checkStat);
-		}
-
-		CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
-		if (!checkStat && m_scanScript)
-		{
-			// if immediate scan requested, we need second scan to process files extracted by scan-scripts
-			CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
-		}
-		m_scanning = false;
-
-		m_nzbDirInterval = nzbget_rs_scanner_op(
-			0, g_Options->GetNzbDirInterval(), g_Options->GetNzbDirFileAge(), m_scanScript ? 1 : 0, m_pass,
-			0, 0, 0, 0, nullptr, nullptr, 0, &m_pass, nullptr, nullptr);
-
-		DropOldFiles();
-		m_queueList.clear();
-	}
-
-private:
-	void CheckIncomingArchives(const fs::path& dir, bool checkStat)
-	{
-		const auto archives = FindArchives(dir, checkStat);
-		UnpackArchives(archives);
-	}
-
-	std::vector<fs::path> FindArchives(const fs::path& dir, bool checkStat)
-	{
-		// the non-throwing forms: an unreadable subdirectory (lost+found, a
-		// folder of another user) or one removed during the walk threw out of
-		// the scanner thread and ended the program
-		std::vector<fs::path> archives;
-		fs::error_code ec;
-		auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, ec);
-		for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
-		{
-			const auto& path = it->path();
-			const std::string filename = fs::u8string(path.filename());
-			fs::error_code typeEc;
-
-			if (ShouldSkipItem(filename))
-			{
-				if (it->is_directory(typeEc))
-				{
-					it.disable_recursion_pending();
-				}
-				continue;
-			}
-
-			if (!it->is_regular_file(typeEc))
-			{
-				continue;
-			}
-
-			// like an nzb, an archive is taken once it stopped changing: one
-			// still being copied in failed to extract and was moved aside for good
-			const std::string pathStr = fs::u8string(path);
-			if (nzbget_rs_unpack_can_extract_with_zipfast(pathStr.c_str()) != 0 &&
-				CanProcessFile(pathStr.c_str(), checkStat))
-			{
-				archives.push_back(path);
-			}
-		}
-		if (ec)
-		{
-			warn("Could not scan %s for archives: %s", fs::u8string(dir).c_str(), ec.message().c_str());
-		}
-
-		archives.shrink_to_fit();
-		return archives;
-	}
-
-	std::optional<std::vector<fs::path>> ProcessArchive(const fs::path& archiveFile, const fs::path& destDir)
-	{
-		const auto unpackDir = (g_Options->GetTempDirPath() / UNPACK_DIR) / fs::make_unique_filename();
-		std::vector<fs::path> to;
-		const std::string archiveStr = fs::u8string(archiveFile);
-		const std::string unpackStr = fs::u8string(unpackDir);
-		const std::string destStr = fs::u8string(destDir);
-		const std::string processedStr = fs::u8string(g_Options->GetNzbDirPath() / PROCESSED_DIR);
-		const std::string brokenStr = fs::u8string(g_Options->GetNzbDirPath() / BROKEN_DIR);
-
-		if (!nzbget_rs_archive_processor_process(
-			archiveStr.c_str(),
-			unpackStr.c_str(),
-			destStr.c_str(),
-			processedStr.c_str(),
-			brokenStr.c_str(),
-			(int)g_Options->GetNzbDirArchiveAction(),
-			&to,
-			[](void* /*ctx*/, int kind, const char* msg) {
-				const char* text = msg ? msg : "";
-				if (kind == 1)
-				{
-					warn("%s", text);
-				}
-				else if (kind == 2)
-				{
-					error("%s", text);
-				}
-				else if (kind == 3)
-				{
-					detail("%s", text);
-				}
-				else
-				{
-					info("%s", text);
-				}
-			},
-			[](void* rawCtx, const char* movedPath) {
-				auto* out = static_cast<std::vector<fs::path>*>(rawCtx);
-				if (movedPath)
-				{
-					out->push_back(fs::u8path(movedPath));
-				}
-			}))
-		{
-			return std::nullopt;
-		}
-
-		return to;
-	}
-
-	void UnpackArchives(const std::vector<fs::path>& archives)
-	{
-		if (archives.empty()) return;
-
-		for (const auto& archive : archives)
-		{
-			ProcessArchive(archive, archive.parent_path());
-		}
-	}
-
-	void CleanupStaleUnpackDir()
-	{
-		const fs::path unpackDir = g_Options->GetTempDirPath() / UNPACK_DIR;
-		fs::error_code ec;
-		fs::remove_all(unpackDir, ec);
-		if (ec)
-		{
-			warn("Could not remove stale unpack directory '%s/%s': %s (code %d)", 
-				g_Options->GetTempDir(), UNPACK_DIR.data(), ec.message().c_str(), ec.value());	
-		}
-	}
-
-	/**
-	* Check if there are files in directory for incoming nzb-files
-	* and add them to download queue
-	*/
-	void CheckIncomingNzbs(const char* directory, const char* category, bool checkStat)
-	{
-		DirBrowser dir(directory);
-		while (const char* filename = dir.Next())
-		{
-			if (ShouldSkipItem(filename))
-			{
-				continue;
-			}
-
-			BString<1024> fullfilename("%s%c%s", directory, PATH_SEPARATOR, filename);
-			bool isDirectory = FileSystem::DirectoryExists(fullfilename);
-
-			if (isDirectory)
-			{
-				ProcessSubdirectory(fullfilename, filename, category, checkStat);
-			}
-			else if (!isDirectory && CanProcessFile(fullfilename, checkStat))
-			{
-				ProcessIncomingFile(directory, filename, fullfilename, category);
-			}
-		}
-	}
-
-	void ProcessSubdirectory(const char* fullPath, const char* filename, const char* category, bool checkStat)
-	{
-		BString<1024> subCategory;
-		if (category && category[0] != '\0')
-		{
-			subCategory.Format("%s%c%s", category, PATH_SEPARATOR, filename);
-		}
-		else
-		{
-			subCategory = filename;
-		}
-		CheckIncomingNzbs(fullPath, subCategory, checkStat);
-	}
-
-	bool CanProcessFile(const char* fullFilename, bool checkStat)
-	{
-		if (nzbget_rs_scanner_op(1, 0, 0, 0, 0, 0, 0, 0, 0, fullFilename, nullptr, 0, nullptr, nullptr, nullptr) == 0)
-		{
-			return false;
-		}
-		if (!checkStat)
-		{
-			return true;
-		}
-
-		int64 size = FileSystem::FileSize(fullFilename);
-		time_t current = Util::CurrentTime();
-		for (FileList::iterator it = m_fileList.begin(); it != m_fileList.end(); ++it)
-		{
-			FileData& fileData = *it;
-			if (!strcmp(fileData.GetFilename(), fullFilename))
-			{
-				int64 updSize = fileData.GetSize();
-				int64 updLastChange = fileData.GetLastChange();
-				if (nzbget_rs_scanner_op(2, g_Options->GetNzbDirFileAge(), 0, 0, 0,
-					fileData.GetSize(), size, fileData.GetLastChange(), current,
-					nullptr, nullptr, 0, nullptr, &updSize, &updLastChange) != 0)
-				{
-					m_fileList.erase(it);
-					return true;
-				}
-				fileData.SetSize(updSize);
-				fileData.SetLastChange((time_t)updLastChange);
-				return false;
-			}
-		}
-		m_fileList.emplace_back(fullFilename, size, current);
-		return false;
-	}
-
-	void DropOldFiles()
-	{
-		time_t current = Util::CurrentTime();
-		m_fileList.erase(std::remove_if(m_fileList.begin(), m_fileList.end(),
-			[current](FileData& fileData)
-			{
-				if (nzbget_rs_scanner_op(3, g_Options->GetNzbDirInterval(), g_Options->GetNzbDirFileAge(), 0, 0,
-					fileData.GetLastChange(), current, 0, 0, nullptr, nullptr, 0, nullptr, nullptr, nullptr) != 0)
-				{
-					debug("Removing file %s from scan file list", fileData.GetFilename());
-					return true;
-				}
-				return false;
-			}),
-			m_fileList.end());
-	}
-
-	bool ShouldSkipItem(std::string_view filename)
-	{
-		std::string name(filename);
-		return nzbget_rs_scanner_op(4, 0, 0, 0, 0, 0, 0, 0, 0, name.c_str(), nullptr, 0, nullptr, nullptr, nullptr) != 0;
-	}
-
-	void ProcessIncomingFile(
-		const char* directory,
-		const char* baseFilename,
-		const char* fullFilename,
-		const char* category
-	)
-	{
-		const char* extension = strrchr(baseFilename, '.');
-		if (!extension)
-		{
-			return;
-		}
-
-		std::string nzbName;
-		std::string nzbCategory = category ? category : "";
-		std::string dupeKey;
-		NzbParameterList parameters;
-		int priority = 0;
-		bool addTop = false;
-		bool addPaused = false;
-		bool autoCategory = nzbCategory.empty();
-		int dupeScore = 0;
-		EDupeMode dupeMode = dmScore;
-		EAddStatus addStatus = asSkipped;
-		QueueData* queueData = nullptr;
-		NzbInfo* nzbInfo = nullptr;
-		int nzbId = 0;
-
-		for (QueueData& queueData1 : m_queueList)
-		{
-			if (FileSystem::SameFilename(queueData1.GetFilename(), fullFilename))
-			{
-				queueData = &queueData1;
-				nzbName = queueData->GetNzbName();
-				nzbCategory = queueData->GetCategory();
-				priority = queueData->GetPriority();
-				dupeKey = queueData->GetDupeKey();
-				dupeScore = queueData->GetDupeScore();
-				dupeMode = queueData->GetDupeMode();
-				addTop = queueData->GetAddTop();
-				addPaused = queueData->GetAddPaused();
-				parameters.CopyFrom(queueData->GetParameters());
-				nzbInfo = queueData->GetUrlInfo();
-				autoCategory = queueData->GetAutoCategory();
-			}
-		}
-
-		InitPPParameters(nzbCategory.c_str(), &parameters, false);
-
-		bool exists = true;
-
-		bool ranScanScript = m_scanScript && strcasecmp(extension, ".nzb_processed");
-		if (ranScanScript)
-		{
-			ScanScriptController::ExecuteScripts(fullFilename,
-				nzbInfo,
-				directory,
-				nzbName,
-				nzbCategory,
-				&priority,
-				&parameters,
-				&addTop,
-				&addPaused,
-				dupeKey,
-				&dupeScore,
-				&dupeMode
-			);
-			exists = FileSystem::FileExists(fullFilename);
-		}
-		int renameToProcessed = 0;
-		int extAction = nzbget_rs_scanner_op(
-			5, ranScanScript ? 1 : 0, exists ? 1 : 0, 0, 0,
-			0, 0, 0, 0, extension, nullptr, 0, &renameToProcessed, nullptr, nullptr);
-		if (renameToProcessed)
-		{
-			CString bakname2;
-			if (!FileSystem::RenameBak(fullFilename, "processed", false, bakname2))
-			{
-				error("Could not rename file %s to %s: %s", fullFilename, *bakname2, *FileSystem::GetLastErrorMessage());
-			}
-		}
-		if (extAction == 1)
-		{
-			CString renamedName;
-			if (FileSystem::RenameBak(fullFilename, "nzb", true, renamedName))
-			{
-				addStatus = AddFileToQueue(
-					renamedName, nzbName.c_str(), nzbCategory.c_str(), autoCategory, priority,
-					dupeKey.c_str(), dupeScore, dupeMode, &parameters, addTop, addPaused, nzbInfo, &nzbId
-				) ? asSuccess : asFailed;
-			}
-			else
-			{
-				error("Could not rename file %s to %s: %s", fullFilename, *renamedName, *FileSystem::GetLastErrorMessage());
-				addStatus = asFailed;
-			}
-		}
-		else if (extAction == 2)
-		{
-			addStatus = AddFileToQueue(
-				fullFilename, nzbName.c_str(), nzbCategory.c_str(), autoCategory, priority,
-				dupeKey.c_str(), dupeScore, dupeMode, &parameters, addTop, addPaused, nzbInfo, &nzbId
-			) ? asSuccess : asFailed;
-		}
-
-		if (queueData)
-		{
-			queueData->SetAddStatus(addStatus);
-			queueData->SetNzbId(nzbId);
-		}
-	}
-
-public:
 	void InitPPParameters(const char* category, NzbParameterList* parameters, bool reset)
 	{
 		bool unpack = g_Options->GetUnpack();
@@ -29792,181 +29186,10 @@ public:
 		}
 	}
 
-	CString ResolveCategory(const char* category, const char* filename)
-	{
-		CString useCategory = category ? category : "";
-		Options::Category* categoryObj = g_Options->FindCategory(useCategory, true);
-		if (categoryObj && strcmp(useCategory, categoryObj->GetName()) != 0)
-		{
-			useCategory = categoryObj->GetName();
-			detail("Category '%s' matched to '%s' for '%s'", category, *useCategory, filename);
-		}
-		return useCategory;
-	}
-
-private:
-	void DetectAndSetCategory(const NzbFile& nzbFile, NzbInfo& nzbInfo, const char* nzbName)
-	{
-		const std::string& nzbCategory = nzbFile.GetCategoryFromFile();
-		if (nzbCategory.empty())
-		{
-			detail("Auto-category: no category detected in '%s'", nzbName);
-			return;
-		}
-		Options::Category* categoryObj = g_Options->FindCategory(nzbCategory.c_str(), true);
-		if (categoryObj)
-		{
-			const char* category = categoryObj->GetName();
-			detail("Category '%s' matched to '%s' for '%s'", category, nzbCategory.c_str(), nzbName);
-			nzbInfo.SetCategory(category);
-		}
-		else
-		{
-			detail("Auto-category: using detected category '%s' for '%s'", nzbCategory.c_str(), nzbName);
-			nzbInfo.SetCategory(nzbCategory.c_str());
-		}
-	}
-
-	bool AddFileToQueue(
-		const char* filename,
-		const char* nzbName,
-		const char* category,
-		bool autoCategory,
-		int priority,
-		const char* dupeKey,
-		int dupeScore,
-		EDupeMode dupeMode,
-		NzbParameterList* parameters,
-		bool addTop,
-		bool addPaused,
-		NzbInfo* urlInfo,
-		int* nzbId
-	)
-	{
-		const char* basename = FileSystem::BaseFileName(filename);
-
-		info("Adding collection %s to queue", basename);
-
-		NzbFile nzbFile(filename, category);
-		bool ok = nzbFile.Parse();
-		if (!ok)
-		{
-			error("Could not add collection %s to queue", basename);
-		}
-
-		CString bakname2;
-		const char* bakSuffix = ok ? "queued" : "error";
-		if (!FileSystem::RenameBak(filename, bakSuffix, false, bakname2))
-		{
-			ok = false;
-			error("Could not rename file %s to %s: %s", filename, *bakname2,
-				*FileSystem::GetLastErrorMessage());
-		}
-
-		std::unique_ptr<NzbInfo> nzbInfo = nzbFile.DetachNzbInfo();
-		nzbInfo->SetQueuedFilename(bakname2);
-
-		if (autoCategory)
-		{
-			DetectAndSetCategory(nzbFile, *nzbInfo, nzbName);
-			InitPPParameters(nzbInfo->GetCategory(), parameters, true);
-		}
-
-		if (!Util::EmptyStr(nzbName))
-		{
-			nzbInfo->SetName(nullptr);
-			nzbInfo->SetFilename(nzbName);
-			nzbInfo->BuildDestDirName();
-		}
-
-		if (ok)
-		{
-			for (FileInfo* fileInfo : nzbInfo->GetFileList())
-			{
-				int sev = nzbget_rs_scanner_op(
-					6, fileInfo->GetMissedArticles(), fileInfo->GetTotalArticles(),
-					nzbFile.GetCutShortFiles().count(fileInfo) > 0 ? 1 : 0, 0,
-					0, 0, 0, 0, nullptr, nullptr, 0, nullptr, nullptr, nullptr);
-				if (sev > 0)
-				{
-					int presentArticles = fileInfo->GetTotalArticles() - fileInfo->GetMissedArticles();
-					nzbInfo->PrintMessage(
-						sev == 2 ? Message::mkWarning : Message::mkDetail,
-						"Collection %s lists only %i of the %i articles of %s: the missing ones count as failed",
-						nzbInfo->GetName(), presentArticles,
-						fileInfo->GetTotalArticles(), fileInfo->GetFilename());
-				}
-			}
-		}
-
-		nzbInfo->SetDupeKey(dupeKey);
-		nzbInfo->SetDupeScore(dupeScore);
-		nzbInfo->SetDupeMode(dupeMode);
-		nzbInfo->SetPriority(priority);
-		if (urlInfo)
-		{
-			nzbInfo->SetUrl(urlInfo->GetUrl());
-			nzbInfo->SetUrlStatus(urlInfo->GetUrlStatus());
-			nzbInfo->SetFeedId(urlInfo->GetFeedId());
-			nzbInfo->SetDupeHint(urlInfo->GetDupeHint());
-			nzbInfo->SetDesiredServerId(urlInfo->GetDesiredServerId());
-			nzbInfo->SetSkipScriptProcessing(urlInfo->GetSkipScriptProcessing());
-			nzbInfo->SetSkipDiskWrite(urlInfo->GetSkipDiskWrite());
-		}
-
-		if (!nzbFile.GetPassword().empty())
-		{
-			nzbInfo->GetParameters()->SetParameter("*Unpack:Password", nzbFile.GetPassword().c_str());
-		}
-
-		nzbInfo->GetParameters()->CopyFrom(parameters);
-
-		for (FileInfo* fileInfo : nzbInfo->GetFileList())
-		{
-			fileInfo->SetPaused(addPaused);
-		}
-
-		NzbInfo* addedNzb = nullptr;
-
-		if (ok)
-		{
-			addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
-		}
-		else if (urlInfo)
-		{
-			for (Message& message : nzbInfo->GuardCachedMessages())
-			{
-				urlInfo->AddMessage(message.GetKind(), message.GetText(), false);
-			}
-		}
-		else
-		{
-			nzbInfo->SetDeleteStatus(NzbInfo::dsScan);
-			addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
-		}
-
-		if (nzbId)
-		{
-			*nzbId = addedNzb ? addedNzb->GetId() : 0;
-		}
-
-		return ok;
-	}
-
-public:
 	void ScanNzbDir(bool syncMode)
 	{
-		{
-			std::lock_guard<std::mutex> guard{m_scanMutex};
-			m_scanning = true;
-			m_requestedNzbDirScan = true;
-			WakeUp();
-		}
-
-		while (syncMode && (m_scanning || m_requestedNzbDirScan))
-		{
-			Util::Sleep(100);
-		}
+		NzbgetRsScannerEnv env = MakeEnv();
+		nzbget_rs_scanner_exec(m_rsScanner, 3, &env, syncMode ? 1 : 0, 0, 0);
 	}
 
 	EAddStatus AddArchive(const char* filename, const char* category,
@@ -29975,282 +29198,229 @@ public:
 		NzbParameterList* parameters, bool addTop, bool addPaused,
 		NzbInfo* urlInfo, const char* buffer, int bufSize)
 	{
-		if (Util::EmptyStr(filename))
-		{
-			error("Failed to add the archive to the download queue: Archive filename cannot be empty");
-			return EAddStatus::asFailed;
-		}
-
-		if (g_Options->GetTempDirPath().empty())
-		{
-			error("Failed to create file '%s': '%s' is required and cannot be empty",
-				filename, Options::TEMPDIR.data());
-			return EAddStatus::asFailed;
-		}
-
-		if (g_Options->GetNzbDirPath().empty())
-		{
-			error("Failed to create file '%s': '%s' is required and cannot be empty",
-				filename, Options::NZBDIR.data());
-			return EAddStatus::asFailed;
-		}
-
-		const auto archiveFilename = FileSystem::MakeValidFilename(filename);
-		const auto archiveFilePath = g_Options->GetTempDirPath() / *archiveFilename;
-
-		fs::error_code ec;
-		{
-			std::ofstream file(archiveFilePath.c_str(), std::ios::binary);
-			if (!file.is_open())
-			{
-				error("Failed to create archive file '%s' in temporary directory: %s",
-					*archiveFilename, std::strerror(errno));
-				return EAddStatus::asFailed;
-			}
-
-			file.write(buffer, bufSize);
-			file.close();
-			if (!file)
-			{
-				error("Failed to write data to archive file '%s': %s",
-					*archiveFilename, std::strerror(errno));
-				fs::remove(archiveFilePath, ec);
-				return EAddStatus::asFailed;
-			}
-		}
-
-		if (!g_Options->GetNzbDirArchiveScan()) 
-		{
-			const auto finalArchiveFilePath = g_Options->GetNzbDirPath() / *archiveFilename;
-			fs::move_file(archiveFilePath, finalArchiveFilePath, ec);
-			if (ec)
-			{
-				error("Failed to move file '%s' to %s: %s",
-					*archiveFilename, Options::NZBDIR.data(), ec.message().c_str());
-				return EAddStatus::asFailed;
-			}
-
-			info("Skipping processing of '%s': option '%s' is disabled",
-				*archiveFilename, Options::NZBDIRARCHIVESCAN.data());
-			return EAddStatus::asSkipped;
-		}
-
-		std::vector<EAddStatus> statuses;
-		{
-			std::lock_guard<std::mutex> guard{m_scanMutex};
-
-			auto nzbFiles = ProcessArchive(archiveFilePath, g_Options->GetNzbDirPath());
-			if (!nzbFiles)
-			{
-				return EAddStatus::asFailed;
-			}
-
-			if (nzbFiles->empty())
-			{
-				return EAddStatus::asSkipped;
-			}
-
-			// the url item goes with the first nzb only: adding it takes the item
-			// out of the queue and frees it, and the next nzb of the archive read
-			// the freed item (and could take another queue entry out with it).
-			// Each nzb reports how it went (sized up front: the entries point here)
-			statuses.assign(nzbFiles->size(), EAddStatus::asSkipped);
-			size_t index = 0;
-			for (const auto& nzbFile : *nzbFiles)
-			{
-				const auto nzbFilePathStr = fs::u8string(nzbFile);
-				const auto fileName = fs::u8string(nzbFile.filename());
-				const CString useCategory = ResolveCategory(category, fileName.c_str());
-				m_queueList.emplace_back(
-					nzbFilePathStr.c_str(), fileName.c_str(), useCategory,
-					autoCategory, priority, dupeKey, dupeScore, dupeMode,
-					parameters, addTop, addPaused,
-					index == 0 ? urlInfo : nullptr,
-					&statuses[index], nullptr);
-				index++;
-			}
-			// requested under the lock, as in AddExternalFile: a periodic scan
-			// waiting for the lock skipped the young files, cleared their entries
-			// and they were added later without category, key, score or url (F14)
-			m_requestedNzbDirScan = true;
-		}
-
-		ScanNzbDir(true);
-
-		std::vector<int> intStatuses(statuses.begin(), statuses.end());
-		return (EAddStatus)nzbget_rs_scanner_op(
-			7, urlInfo != nullptr ? 1 : 0, (int)EAddStatus::asSuccess, (int)EAddStatus::asSkipped, 0,
-			0, 0, 0, 0, nullptr, intStatuses.empty() ? nullptr : intStatuses.data(), intStatuses.size(),
-			nullptr, nullptr, nullptr);
+		NzbgetRsScannerEnv env = MakeAddEnv(
+			filename, nullptr, category, autoCategory, priority, dupeKey,
+			dupeScore, dupeMode, parameters, addTop, addPaused, urlInfo);
+		env.buf_ptr = buffer;
+		env.buf_len = bufSize;
+		return static_cast<EAddStatus>(nzbget_rs_scanner_exec(m_rsScanner, 4, &env, 0, 0, 0));
 	}
 
-	EAddStatus AddArchive(
-		const char* filename,
-		const char* category,
-		bool autoCategory,
-		int priority,
-		const char* dupeKey,
-		int dupeScore,
-		EDupeMode dupeMode,
-		NzbParameterList* parameters,
-		bool addTop,
-		bool addPaused,
-		NzbInfo* urlInfo,
-		const char* tmpFilename)
+	EAddStatus AddArchive(const char* filename, const char* category,
+		bool autoCategory, int priority, const char* dupeKey,
+		int dupeScore, EDupeMode dupeMode,
+		NzbParameterList* parameters, bool addTop, bool addPaused,
+		NzbInfo* urlInfo, const char* tmpFilename)
 	{
-		CharBuffer buffer;
-		if (!FileSystem::LoadFileIntoBuffer(tmpFilename, buffer, false))
-		{
-			error("Could not open file '%s'", tmpFilename);
-			return EAddStatus::asFailed;
-		}
-		fs::error_code ec;
-		fs::remove(tmpFilename, ec);
-		if (ec)
-		{
-			const auto msg = ec.message();
-			error("Failed to remove '%s': %s (code %d)", tmpFilename, msg.c_str(), ec.value());
-		}
-
-		return AddArchive(
-			filename,
-			category,
-			autoCategory,
-			priority,
-			dupeKey,
-			dupeScore,
-			dupeMode,
-			parameters,
-			addTop,
-			addPaused,
-			urlInfo,
-			*buffer,
-			buffer.Size()
-		);
+		NzbgetRsScannerEnv env = MakeAddEnv(
+			filename, tmpFilename, category, autoCategory, priority, dupeKey,
+			dupeScore, dupeMode, parameters, addTop, addPaused, urlInfo);
+		return static_cast<EAddStatus>(nzbget_rs_scanner_exec(m_rsScanner, 5, &env, 0, 0, 0));
 	}
 
-	EAddStatus AddExternalFile(
-		const char* nzbName,
-		const char* category,
-		bool autoCategory,
-		int priority,
-		const char* dupeKey,
-		int dupeScore,
-		EDupeMode dupeMode,
-		NzbParameterList* parameters,
-		bool addTop,
-		bool addPaused,
-		NzbInfo* urlInfo,
-		const char* fileName,
-		const char* buffer,
-		int bufSize,
-		int* nzbId
-	)
+	EAddStatus AddExternalFile(const char* nzbName, const char* category,
+		bool autoCategory, int priority, const char* dupeKey,
+		int dupeScore, EDupeMode dupeMode,
+		NzbParameterList* parameters, bool addTop, bool addPaused,
+		NzbInfo* urlInfo, const char* fileName, const char* buffer,
+		int bufSize, int* nzbId)
 	{
-		bool nzb = false;
-		BString<1024> tempFileName;
+		NzbgetRsScannerEnv env = MakeAddEnv(
+			fileName, nzbName, category, autoCategory, priority, dupeKey,
+			dupeScore, dupeMode, parameters, addTop, addPaused, urlInfo);
+		env.buf_ptr = buffer;
+		env.buf_len = bufSize;
+		env.out_nzb_id = nzbId;
+		return static_cast<EAddStatus>(nzbget_rs_scanner_exec(m_rsScanner, 6, &env, 0, 0, 0));
+	}
 
-		// the names are picked and taken under the lock: two appends at once picked the
-		// same temporary or queue file name, one overwrote the other and returned -1 (F14)
-		std::unique_lock<std::mutex> guard{m_scanMutex};
+protected:
+	int ServiceInterval() override
+	{
+		return nzbget_rs_scanner_exec(m_rsScanner, 1, nullptr, g_Options ? g_Options->GetNzbDirInterval() : 0, 0, 0);
+	}
 
-		if (fileName)
+	void ServiceWork() override
+	{
+		NzbgetRsScannerEnv env = MakeEnv();
+		nzbget_rs_scanner_exec(m_rsScanner, 2, &env, 0, 0, 0);
+	}
+
+private:
+	NzbgetRsScanner* m_rsScanner = nullptr;
+	NzbParameterList m_workParams;
+	std::unique_ptr<NzbFile> m_activeNzb;
+
+	NzbgetRsScannerEnv MakeEnv()
+	{
+		NzbgetRsScannerEnv env{};
+		env.ctx = this;
+		env.nzb_dir = g_Options ? g_Options->GetNzbDir() : nullptr;
+		env.temp_dir = g_Options ? g_Options->GetTempDir() : nullptr;
+		env.nzb_dir_interval = g_Options ? g_Options->GetNzbDirInterval() : 0;
+		env.nzb_dir_file_age = g_Options ? g_Options->GetNzbDirFileAge() : 0;
+		env.archive_scan = (g_Options && g_Options->GetNzbDirArchiveScan()) ? 1 : 0;
+		env.archive_action = g_Options ? static_cast<int>(g_Options->GetNzbDirArchiveAction()) : 0;
+		env.queue_loaded = DownloadQueue::IsLoaded() ? 1 : 0;
+		env.pause_scan = (g_WorkState && g_WorkState->GetPauseScan()) ? 1 : 0;
+		env.path_sep = PATH_SEPARATOR;
+		env.wake_cb = [](void* ctx) { static_cast<Scanner*>(ctx)->WakeUp(); };
+		env.log_cb = [](void*, int kind, const char* msg)
 		{
-			tempFileName = fileName;
-		}
-		else
+			const char* text = msg ? msg : "";
+			if (kind == 0) { debug("%s", text); }
+			else if (kind == 1) { detail("%s", text); }
+			else if (kind == 2) { info("%s", text); }
+			else if (kind == 3) { warn("%s", text); }
+			else { error("%s", text); }
+		};
+		env.find_category_cb = [](void*, const char* category, int searchAliases) -> const char*
 		{
-			int num = ++m_idGen;
-			while (tempFileName.Empty() || FileSystem::FileExists(tempFileName))
+			Options::Category* c = g_Options ? g_Options->FindCategory(category ? category : "", searchAliases != 0) : nullptr;
+			return c ? c->GetName() : nullptr;
+		};
+		env.iter_params_cb = [](void* rawParams, void* outCtx, void (*push)(void*, const char*, const char*))
+		{
+			for (NzbParameter& p : *static_cast<NzbParameterList*>(rawParams))
 			{
-				tempFileName.Format("%s%cnzb-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, num);
-				num++;
+				push(outCtx, p.GetName(), p.GetValue());
 			}
-
-			if (!FileSystem::SaveBufferIntoFile(tempFileName, buffer, bufSize))
-			{
-				error("Could not create file %s", *tempFileName);
-				return asFailed;
-			}
-		}
-
-		// move file into NzbDir, make sure the file name is unique
-		int isNzbFlag = nzb ? 1 : 0;
-		NzbgetRsBuf normBuf = nzbget_rs_scanner_prepare_external_name(
-			nzbName, fileName != nullptr ? 1 : 0, buffer, bufSize, &isNzbFlag);
-		nzb = isNzbFlag != 0;
-		CString validNzbName = normBuf.data ? normBuf.data : "";
-		nzbget_rs_free(normBuf);
-
-		BString<1024> scanFileName("%s%c%s", g_Options->GetNzbDir(), PATH_SEPARATOR, *validNzbName);
-
-		const char* validCStr = validNzbName ? *validNzbName : "";
-		size_t validLen = strlen(validCStr);
-		ptrdiff_t dotOff = nzbget_rs_file_extension(validCStr, validLen);
-		bool hasExt = dotOff >= 0;
-		std::string basePart(validCStr, hasExt ? (size_t)dotOff : validLen);
-		std::string extPart = hasExt ? std::string(validCStr + dotOff + 1) : std::string();
-
-		int num = 2;
-		while (FileSystem::FileExists(scanFileName))
+		};
+		env.work_params_cb = [](void* ctx, int op, const char* s1, const char* s2)
 		{
-			if (hasExt)
+			auto* self = static_cast<Scanner*>(ctx);
+			if (op == 0) self->m_workParams.clear();
+			else if (op == 1) self->m_workParams.SetParameter(s1, s2);
+			else if (op == 2) self->InitPPParameters(s1, &self->m_workParams, false);
+			else if (op == 3) self->InitPPParameters(s1, &self->m_workParams, true);
+		};
+		env.scan_script_cb = [](void* ctx, const char* fullFilename, void* urlInfo, const char* directory,
+			const char* initName, const char* initCat, const char* initKey,
+			void* strCtx, void (*setStr)(void*, int, const char*),
+			int* priority, int* addTop, int* addPaused, int* dupeScore, int* dupeMode)
+		{
+			auto* self = static_cast<Scanner*>(ctx);
+			std::string nzbName = initName ? initName : "";
+			std::string nzbCat = initCat ? initCat : "";
+			std::string dupeKey = initKey ? initKey : "";
+			bool top = *addTop != 0, paused = *addPaused != 0;
+			auto mode = static_cast<EDupeMode>(*dupeMode);
+			ScanScriptController::ExecuteScripts(
+				fullFilename, static_cast<NzbInfo*>(urlInfo), directory,
+				nzbName, nzbCat, priority, &self->m_workParams, &top, &paused, dupeKey, dupeScore, &mode);
+			*addTop = top ? 1 : 0;
+			*addPaused = paused ? 1 : 0;
+			*dupeMode = static_cast<int>(mode);
+			setStr(strCtx, 0, nzbName.c_str());
+			setStr(strCtx, 1, nzbCat.c_str());
+			setStr(strCtx, 2, dupeKey.c_str());
+		};
+		env.parse_nzb_cb = [](void* ctx, const char* filename, const char* category, const char** outDetectedCat) -> int
+		{
+			auto* self = static_cast<Scanner*>(ctx);
+			self->m_activeNzb = std::make_unique<NzbFile>(filename, category);
+			bool ok = self->m_activeNzb->Parse();
+			if (outDetectedCat) *outDetectedCat = self->m_activeNzb->GetCategoryFromFile().c_str();
+			return ok ? 1 : 0;
+		};
+		env.commit_nzb_cb = [](void* ctx, int okFlag, const char* queued, const char* autoCat,
+			int hasAuto, const char* nzbName, int priority, const char* dupeKey,
+			int dupeScore, int dupeMode, int addTop, int addPaused, void* rawUrlInfo) -> int
+		{
+			auto* self = static_cast<Scanner*>(ctx);
+			bool ok = okFlag != 0;
+			auto* urlInfo = static_cast<NzbInfo*>(rawUrlInfo);
+			std::unique_ptr<NzbInfo> nzbInfo = self->m_activeNzb->DetachNzbInfo();
+			nzbInfo->SetQueuedFilename(queued);
+			if (hasAuto && autoCat) nzbInfo->SetCategory(autoCat);
+			if (!Util::EmptyStr(nzbName))
 			{
-				scanFileName.Format("%s%c%s_%i.%s", g_Options->GetNzbDir(), PATH_SEPARATOR,
-					basePart.c_str(), num, extPart.c_str());
+				nzbInfo->SetName(nullptr);
+				nzbInfo->SetFilename(nzbName);
+				nzbInfo->BuildDestDirName();
+			}
+			if (ok)
+			{
+				for (FileInfo* fileInfo : nzbInfo->GetFileList())
+				{
+					int sev = nzbget_rs_scanner_exec(
+						nullptr, 9, nullptr, fileInfo->GetMissedArticles(), fileInfo->GetTotalArticles(),
+						self->m_activeNzb->GetCutShortFiles().count(fileInfo) > 0 ? 1 : 0);
+					if (sev > 0)
+					{
+						nzbInfo->PrintMessage(
+							sev == 2 ? Message::mkWarning : Message::mkDetail,
+							"Collection %s lists only %i of the %i articles of %s: the missing ones count as failed",
+							nzbInfo->GetName(), fileInfo->GetTotalArticles() - fileInfo->GetMissedArticles(),
+							fileInfo->GetTotalArticles(), fileInfo->GetFilename());
+					}
+				}
+			}
+			nzbInfo->SetDupeKey(dupeKey);
+			nzbInfo->SetDupeScore(dupeScore);
+			nzbInfo->SetDupeMode(static_cast<EDupeMode>(dupeMode));
+			nzbInfo->SetPriority(priority);
+			if (urlInfo)
+			{
+				nzbInfo->SetUrl(urlInfo->GetUrl());
+				nzbInfo->SetUrlStatus(urlInfo->GetUrlStatus());
+				nzbInfo->SetFeedId(urlInfo->GetFeedId());
+				nzbInfo->SetDupeHint(urlInfo->GetDupeHint());
+				nzbInfo->SetDesiredServerId(urlInfo->GetDesiredServerId());
+				nzbInfo->SetSkipScriptProcessing(urlInfo->GetSkipScriptProcessing());
+				nzbInfo->SetSkipDiskWrite(urlInfo->GetSkipDiskWrite());
+			}
+			if (!self->m_activeNzb->GetPassword().empty())
+			{
+				nzbInfo->GetParameters()->SetParameter("*Unpack:Password", self->m_activeNzb->GetPassword().c_str());
+			}
+			nzbInfo->GetParameters()->CopyFrom(&self->m_workParams);
+			self->m_activeNzb.reset();
+			for (FileInfo* fileInfo : nzbInfo->GetFileList()) fileInfo->SetPaused(addPaused != 0);
+			NzbInfo* addedNzb = nullptr;
+			if (ok)
+			{
+				addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), urlInfo, addTop != 0);
+			}
+			else if (urlInfo)
+			{
+				for (Message& message : nzbInfo->GuardCachedMessages())
+				{
+					urlInfo->AddMessage(message.GetKind(), message.GetText(), false);
+				}
 			}
 			else
 			{
-				scanFileName.Format("%s%c%s_%i", g_Options->GetNzbDir(), PATH_SEPARATOR,
-					basePart.c_str(), num);
+				nzbInfo->SetDeleteStatus(NzbInfo::dsScan);
+				addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), urlInfo, addTop != 0);
 			}
-			num++;
-		}
+			return addedNzb ? addedNzb->GetId() : 0;
+		};
+		return env;
+	}
 
-		EAddStatus addStatus;
-
-		{
-			if (!FileSystem::MoveFile(tempFileName, scanFileName))
-			{
-				error("Could not move file %s to %s: %s", *tempFileName, *scanFileName,
-					*FileSystem::GetLastErrorMessage());
-				FileSystem::DeleteFile(tempFileName);
-				return asFailed;
-			}
-
-			CString useCategory = ResolveCategory(category, nzbName);
-
-			addStatus = asSkipped;
-			m_queueList.emplace_back(
-				scanFileName,
-				nzbName,
-				useCategory,
-				autoCategory,
-				priority,
-				dupeKey,
-				dupeScore,
-				dupeMode,
-				parameters,
-				addTop,
-				addPaused,
-				urlInfo,
-				&addStatus,
-				nzbId
-			);
-			// requested under the lock: a periodic scan that took the lock first skipped
-			// the file (too young) and cleared its entry, and the file was added later
-			// without the name, key and score it was sent with (F14)
-			m_requestedNzbDirScan = true;
-		}
-		guard.unlock();
-
-		ScanNzbDir(true);
-
-		return addStatus;
+	NzbgetRsScannerEnv MakeAddEnv(
+		const char* filename, const char* nzbName, const char* category,
+		bool autoCategory, int priority, const char* dupeKey,
+		int dupeScore, EDupeMode dupeMode,
+		NzbParameterList* parameters, bool addTop, bool addPaused, NzbInfo* urlInfo)
+	{
+		NzbgetRsScannerEnv env = MakeEnv();
+		env.filename = filename;
+		env.nzb_name = nzbName;
+		env.category = category;
+		env.dupe_key = dupeKey;
+		env.priority = priority;
+		env.dupe_score = dupeScore;
+		env.dupe_mode = static_cast<int>(dupeMode);
+		env.auto_category = autoCategory ? 1 : 0;
+		env.add_top = addTop ? 1 : 0;
+		env.add_paused = addPaused ? 1 : 0;
+		env.parameters = parameters;
+		env.url_info = urlInfo;
+		return env;
 	}
 };
-
-using ScanScriptController = Scanner::ScanScriptController;
 
 class UrlDownloader : public WebDownloader
 {

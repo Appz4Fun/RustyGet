@@ -1962,46 +1962,6 @@ pub unsafe extern "C" fn nzbget_rs_delete_directory_with_content(
 /// `new_name` (null: not written) gets the name tried last; free it with
 /// nzbget_rs_free.
 ///
-/// # Safety
-/// `filename`/`bak_part` are null or NUL-terminated; `new_name` is null or writable.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rename_bak(
-    filename: *const c_char,
-    bak_part: *const c_char,
-    remove_old_extension: c_int,
-    new_name: *mut RsBuf,
-) -> c_int {
-    if filename.is_null() || bak_part.is_null() {
-        if !new_name.is_null() {
-            new_name.write(into_buf(Vec::new()));
-        }
-        return 0;
-    }
-    let mut name = Vec::new();
-    let done = crate::fsdelete::rename_bak(
-        &mut crate::fsops::PosixFsOps,
-        input(filename),
-        input(bak_part),
-        remove_old_extension != 0,
-        &mut name,
-    )
-    .unwrap_or(false);
-    if !new_name.is_null() {
-        new_name.write(into_buf(name));
-    }
-    done as c_int
-}
-
-/// FileSystem::GetFileExtension: the offset of the last '.', or -1.
-///
-/// # Safety
-/// `name` is null (with `len` 0) or `len` readable bytes.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_file_extension(name: *const c_char, len: usize) -> isize {
-    let name = bytes_arg(name.cast(), len);
-    crate::fsdelete::file_extension(name).map_or(-1, |ext| (name.len() - ext.len()) as isize)
-}
-
 /// UrlDownloader::ProcessHeader's X-DNZB headers: 1 with `*start` and
 /// `*length` the trimmed value of X-DNZB-Category in `line` (nothing is
 /// allocated), 2 with `name` the parameter's name and `value` its value, 0
@@ -2116,18 +2076,12 @@ mod tests {
             );
             assert!(input(error.data).starts_with(b"could not delete (null): "));
             nzbget_rs_free(error);
-            let mut name = poison();
-            assert_eq!(nzbget_rs_rename_bak(null(), null(), 0, &mut name), 0);
-            assert_eq!(name.len, 0);
-            assert_eq!(input(name.data), b"");
-            nzbget_rs_free(name);
             assert_eq!(
                 nzbget_rs_delete_directory_with_content(null(), 0, null_mut()),
                 0
             );
-            assert_eq!(nzbget_rs_rename_bak(null(), null(), 0, null_mut()), 0);
-            assert_eq!(nzbget_rs_file_extension(null(), 0), -1);
-            assert_eq!(nzbget_rs_file_extension(b"a.\0b.c".as_ptr().cast(), 6), 4);
+            assert!(crate::fsdelete::file_extension(b"").is_none());
+            assert_eq!(crate::fsdelete::file_extension(b"a.\0b.c"), Some(&b".c"[..]));
         }
     }
 
@@ -5439,15 +5393,8 @@ pub unsafe extern "C" fn nzbget_rs_register_lifecycle_hooks(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_signal_notify(signum: std::ffi::c_int) {
-    crate::lifecycle::LifecycleManager::global().notify_signal(signum);
-}
-
 #[cfg(test)]
 mod lifecycle_ffi_tests {
-    use super::*;
-
     #[test]
     fn test_lifecycle_ffi_queries() {
         let _guard = crate::lifecycle::TEST_MUTEX
@@ -5462,7 +5409,7 @@ mod lifecycle_ffi_tests {
         assert!(!mgr.is_reloading());
         assert!(!mgr.is_stopping());
 
-        nzbget_rs_signal_notify(0); // no-op for signum 0
+        mgr.notify_signal(0);
     }
 }
 
@@ -8919,73 +8866,6 @@ pub unsafe extern "C" fn nzbget_rs_dupematcher_filter_dupe_sources(
         std::ptr::copy_nonoverlapping(usable.as_ptr(), out_indices, n);
     }
     n
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_archive_processor_process(
-    archive_file: *const c_char,
-    unpack_dir: *const c_char,
-    dest_dir: *const c_char,
-    processed_dir: *const c_char,
-    broken_dir: *const c_char,
-    config_action: c_int,
-    ctx: *mut c_void,
-    log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
-    moved_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
-) -> c_int {
-    let archive_path = cstr_to_path_buf(archive_file);
-    let unpack_path = cstr_to_path_buf(unpack_dir);
-    let dest_path = cstr_to_path_buf(dest_dir);
-    let processed_path = cstr_to_path_buf(processed_dir);
-    let broken_path = cstr_to_path_buf(broken_dir);
-
-    let ok = crate::cleanup::archive_processor_process(
-        &archive_path,
-        &unpack_path,
-        &dest_path,
-        &processed_path,
-        &broken_path,
-        config_action,
-        |arc_path, _| {
-            if let Some(cb) = log_cb {
-                let archive_name = arc_path
-                    .file_name()
-                    .map(crate::cleanup::os_str_to_bytes)
-                    .unwrap_or(b"");
-                let ext = arc_path
-                    .extension()
-                    .map(crate::cleanup::os_str_to_bytes)
-                    .unwrap_or(b"");
-                let mut msg = b"Unpack: Could not process '".to_vec();
-                msg.extend_from_slice(archive_name);
-                msg.extend_from_slice(b"': Unsupported archive format: ");
-                if !ext.is_empty() {
-                    msg.push(b'.');
-                    msg.extend_from_slice(ext);
-                }
-                let c_msg = cstring_lossy(&msg);
-                cb(
-                    ctx,
-                    crate::cleanup::CleanupLogKind::Error as c_int,
-                    c_msg.as_ptr(),
-                );
-            }
-            (false, false)
-        },
-        |kind, msg| {
-            if let Some(cb) = log_cb {
-                let c_msg = cstring_lossy(msg);
-                cb(ctx, kind as c_int, c_msg.as_ptr());
-            }
-        },
-        |moved_path| {
-            if let Some(cb) = moved_cb {
-                let c_path = cstring_lossy(moved_path);
-                cb(ctx, c_path.as_ptr());
-            }
-        },
-    );
-    i32::from(ok)
 }
 
 #[no_mangle]
@@ -12892,46 +12772,6 @@ pub unsafe extern "C" fn nzbget_rs_post_script_analyse_exit_code(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_scanner_prepare_external_name(
-    nzb_name: *const c_char,
-    is_from_disk: c_int,
-    buf_ptr: *const c_char,
-    buf_size: c_int,
-    inout_is_nzb: *mut c_int,
-) -> RsBuf {
-    let mut is_nzb = if !inout_is_nzb.is_null() {
-        *inout_is_nzb != 0
-    } else {
-        false
-    };
-    if is_from_disk == 0 {
-        let slice = if buf_ptr.is_null() || buf_size <= 0 {
-            &[][..]
-        } else {
-            std::slice::from_raw_parts(buf_ptr as *const u8, buf_size as usize)
-        };
-        is_nzb = crate::scanner::is_nzb_xml_prefix(slice);
-        if !inout_is_nzb.is_null() {
-            *inout_is_nzb = c_int::from(is_nzb);
-        }
-    }
-    let name_bytes = if nzb_name.is_null() {
-        &[][..]
-    } else {
-        input(nzb_name)
-    };
-    let raw_for_valid = if crate::scanner::is_absolute_nzb_name(name_bytes) {
-        &name_bytes[crate::paths::base_file_name(name_bytes)..]
-    } else {
-        name_bytes
-    };
-    let valid = crate::paths::make_valid_filename(raw_for_valid, false);
-    into_buf(crate::scanner::normalize_external_nzb_name(
-        name_bytes, &valid, is_nzb,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_nzb_summary_fingerprint(
     ids_ptr: *const *const c_char,
     ids_lens: *const usize,
@@ -14274,68 +14114,30 @@ pub unsafe extern "C" fn nzbget_rs_url_coord_op(
     }
 }
 
+pub use crate::scanner::{NzbgetRsScanner, NzbgetRsScannerEnv};
+
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_scanner_op(
-    op: c_int,
-    a: c_int,
-    b: c_int,
-    c: c_int,
-    d: c_int,
-    t1: i64,
-    t2: i64,
-    t3: i64,
-    t4: i64,
-    s1: *const c_char,
-    arr: *const c_int,
-    len: usize,
-    out_i32: *mut c_int,
-    out_i64_1: *mut i64,
-    out_i64_2: *mut i64,
-) -> c_int {
-    let b1 = if s1.is_null() { &[][..] } else { input(s1) };
-    match op {
-        0 => {
-            let (next_int, next_pass) = crate::scanner::next_pass(a, b, c != 0, d);
-            if !out_i32.is_null() {
-                *out_i32 = next_pass;
-            }
-            next_int
-        }
-        1 => c_int::from(crate::scanner::can_process_extension(b1)),
-        2 => {
-            let (can_proc, upd_sz, upd_lc) = crate::scanner::eval_file_age(t1, t2, t3, t4, a);
-            if !out_i64_1.is_null() {
-                *out_i64_1 = upd_sz;
-            }
-            if !out_i64_2.is_null() {
-                *out_i64_2 = upd_lc;
-            }
-            c_int::from(can_proc)
-        }
-        3 => c_int::from(crate::scanner::should_drop_scan_file(t1, t2, a, b)),
-        4 => c_int::from(crate::scanner::should_skip_item(
-            b1,
-            b"_processed",
-            b"_broken",
-        )),
-        5 => {
-            let (ren_proc, act) = crate::scanner::classify_incoming_extension(a != 0, b != 0, b1);
-            if !out_i32.is_null() {
-                *out_i32 = c_int::from(ren_proc);
-            }
-            act
-        }
-        6 => crate::scanner::classify_missed_articles(a, b, c != 0),
-        7 => {
-            let statuses = if arr.is_null() || len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(arr, len)
-            };
-            crate::scanner::resolve_archive_add_status(a != 0, statuses, b, c)
-        }
-        _ => 0,
+pub extern "C" fn nzbget_rs_scanner_new() -> *mut NzbgetRsScanner {
+    Box::into_raw(Box::new(NzbgetRsScanner::new()))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_scanner_free(scanner: *mut NzbgetRsScanner) {
+    if !scanner.is_null() {
+        drop(unsafe { Box::from_raw(scanner) });
     }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_scanner_exec(
+    scanner: *mut NzbgetRsScanner,
+    op: c_int,
+    env: *const NzbgetRsScannerEnv,
+    a1: c_int,
+    a2: c_int,
+    a3: c_int,
+) -> c_int {
+    unsafe { crate::scanner::scanner_exec(scanner, op, env, a1, a2, a3) }
 }
 
 #[unsafe(no_mangle)]
@@ -14419,11 +14221,10 @@ pub unsafe extern "C" fn nzbget_rs_daemon_service_op(
 ) -> c_int {
     match op {
         0 => {
-            if a != 0 {
-                crate::lifecycle::enable_core_dump();
-            }
+            crate::lifecycle::install_error_handler(a != 0, b != 0, cb);
             0
         }
+        8 => crate::lifecycle::signal_state_op(a),
         1 => {
             let lock_file = if s1.is_null() {
                 c""

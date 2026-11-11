@@ -332,116 +332,10 @@ char* (*g_Arguments)[] = nullptr;
 
 extern void ExitProc();
 extern void Reload();
-std::atomic<bool> g_SigHupPending{false};
-std::atomic<bool> g_SigExitPending{false};
-static std::atomic<bool> s_shutdownInitiated{false};
 
-static void PrintBacktrace()
+static int SigOp(int sub)
 {
-#ifdef HAVE_BACKTRACE
-	printf("Segmentation fault, tracing...\n");
-
-	void *array[100];
-	size_t size = backtrace(array, 100);
-	char **strings = backtrace_symbols(array, size);
-
-	printf("Obtained %zu stack frames\n", size);
-	for (size_t i = 0; i < size; i++)
-	{
-		printf("%s\n", strings[i]);
-	}
-
-	error("Segmentation fault, tracing...");
-	error("Obtained %zd stack frames", size);
-	for (size_t i = 0; i < size; i++)
-	{
-		error("Stacktrace: %s", strings[i]);
-	}
-
-	free(strings);
-#else
-	error("Segmentation fault");
-#endif
-}
-
-static void SignalProc(int signum)
-{
-	switch (signum)
-	{
-#ifdef SIGHUP
-		case SIGHUP:
-			if (s_shutdownInitiated.load(std::memory_order_relaxed))
-			{
-				return;
-			}
-			g_SigHupPending.store(true, std::memory_order_seq_cst);
-			nzbget_rs_signal_notify(signum);
-			break;
-#endif
-
-		case SIGINT:
-		case SIGTERM:
-		{
-			if (s_shutdownInitiated.exchange(true, std::memory_order_seq_cst))
-			{
-				return;
-			}
-			signal(SIGINT, SIG_IGN);
-			signal(SIGTERM, SIG_IGN);
-#ifdef SIGHUP
-			signal(SIGHUP, SIG_IGN);
-#endif
-			g_SigExitPending.store(true, std::memory_order_seq_cst);
-			nzbget_rs_signal_notify(signum);
-			break;
-		}
-
-		case SIGCHLD:
-			break;
-
-#ifdef DEBUG
-		case SIGSEGV:
-			signal(SIGSEGV, SIG_DFL);
-			PrintBacktrace();
-			break;
-#endif
-	}
-}
-
-static void InstallErrorHandler()
-{
-	nzbget_rs_daemon_service_op(0, g_Options->GetCrashDump() ? 1 : 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
-
-	bool exitPending = g_SigExitPending.load(std::memory_order_seq_cst);
-	s_shutdownInitiated.store(exitPending, std::memory_order_seq_cst);
-	g_SigHupPending.store(false, std::memory_order_seq_cst);
-
-	struct sigaction sa;
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = SignalProc;
-	sigemptyset(&sa.sa_mask);
-	sigaddset(&sa.sa_mask, SIGINT);
-	sigaddset(&sa.sa_mask, SIGTERM);
-#ifdef SIGHUP
-	sigaddset(&sa.sa_mask, SIGHUP);
-#endif
-	sa.sa_flags = SA_RESTART;
-
-	sigaction(SIGINT, &sa, nullptr);
-	sigaction(SIGTERM, &sa, nullptr);
-#ifdef SIGHUP
-	sigaction(SIGHUP, &sa, nullptr);
-#endif
-	signal(SIGPIPE, SIG_IGN);
-#ifdef DEBUG
-	if (g_Options->GetCrashTrace())
-	{
-		signal(SIGSEGV, SignalProc);
-	}
-#endif
-#ifdef SIGCHLD_HANDLER
-	signal(SIGCHLD, SignalProc);
-#endif
+	return nzbget_rs_daemon_service_op(8, sub, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 }
 
 #ifdef DEBUG
@@ -650,7 +544,12 @@ public:
 
 		m_reloading = false;
 
-		InstallErrorHandler();
+		int crashTrace = 0;
+#ifdef DEBUG
+		crashTrace = g_Options->GetCrashTrace() ? 1 : 0;
+#endif
+		nzbget_rs_daemon_service_op(0, g_Options->GetCrashDump() ? 1 : 0, crashTrace, 0, 0, 0,
+			nullptr, nullptr, nullptr, nullptr, nullptr, [](void*, const char* m) { error("%s", m); });
 
 		return 0;
 	}
@@ -673,7 +572,7 @@ public:
 
 		if (!nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6))
 		{
-			if (!nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 4) && !g_SigExitPending.load())
+			if (!nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 4) && !SigOp(0))
 			{
 				const char* rawCat = nzbget_rs_cmdline_get_str(m_cmdLine.get(), 34);
 				const char* category = rawCat ? rawCat : "";
@@ -699,17 +598,17 @@ public:
 		}
 		else
 		{
-			if (g_SigExitPending.exchange(false))
+			if (SigOp(1))
 			{
 				ExitProc();
 			}
 			while (m_frontend && !m_stopped && !m_reloading && m_frontend->IsRunning())
 			{
-				if (g_SigExitPending.exchange(false))
+				if (SigOp(1))
 				{
 					ExitProc();
 				}
-				else if (g_SigHupPending.exchange(false))
+				else if (SigOp(2))
 				{
 					Reload();
 				}
@@ -750,7 +649,7 @@ public:
 		if (!reload)
 		{
 			nzbget_rs_lifecycle_reload_op(1, nullptr);
-			nzbget_rs_signal_notify(SIGTERM);
+			SigOp(5);
 		}
 
 		{
@@ -765,22 +664,22 @@ public:
 
 		if (!m_reloading)
 		{
-			g_SigHupPending.store(false);
+			SigOp(3);
 			info("Stopping, please wait...");
 		}
 
 		if (m_reloading && m_prePostProcessor && m_prePostProcessor->HasActiveUnpack(false))
 		{
 			info("Waiting for active unpack to complete before in-process reload...");
-			while (m_prePostProcessor && m_prePostProcessor->HasActiveUnpack(false) && !g_SigExitPending.load())
+			while (m_prePostProcessor && m_prePostProcessor->HasActiveUnpack(false) && !SigOp(0))
 			{
 				Util::Sleep(100);
 			}
 		}
-		if (g_SigExitPending.exchange(false))
+		if (SigOp(1))
 		{
 			m_reloading = false;
-			nzbget_rs_signal_notify(SIGTERM);
+			SigOp(5);
 		}
 		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6))
 		{
@@ -1216,7 +1115,7 @@ private:
 			}
 			while (m_frontend->IsRunning())
 			{
-				if (g_SigExitPending.exchange(false))
+				if (SigOp(1))
 				{
 					ExitProc();
 				}
@@ -1255,11 +1154,11 @@ private:
 			(m_memoryMonitor && m_memoryMonitor->IsRunning()) ||
 			m_articleCache->IsRunning())
 		{
-			if (g_SigExitPending.exchange(false))
+			if (SigOp(1))
 			{
 				ExitProc();
 			}
-			else if (g_SigHupPending.exchange(false))
+			else if (SigOp(2))
 			{
 				Reload();
 			}
@@ -1312,15 +1211,15 @@ private:
 					{
 						std::unique_lock<std::mutex> lk(m_waitMutex);
 						m_waitCond.wait_for(lk, std::chrono::milliseconds(50), [&]{
-							return m_stopped || g_SigExitPending.load() || g_SigHupPending.load();
+							return m_stopped || SigOp(4);
 						});
 					}
 
-					if (g_SigExitPending.exchange(false))
+					if (SigOp(1))
 					{
 						ExitProc();
 					}
-					else if (g_SigHupPending.exchange(false))
+					else if (SigOp(2))
 					{
 						Reload();
 					}
@@ -1360,7 +1259,7 @@ void Reload()
 		switch (action)
 		{
 			case 0:
-				return (!g_RustyGet || g_RustyGet->GetReloading() || g_RustyGet->GetStopped() || g_SigExitPending.load()) ? 1 : 0;
+				return (!g_RustyGet || g_RustyGet->GetReloading() || g_RustyGet->GetStopped() || SigOp(0)) ? 1 : 0;
 			case 1:
 				debug("Daemon is already reloading or stopping");
 				return 0;
@@ -1368,7 +1267,7 @@ void Reload()
 				debug("Reload request debounced, target extended");
 				return 0;
 			case 3:
-				return g_SigExitPending.load() ? 1 : 0;
+				return SigOp(0);
 			case 4:
 				return ((g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack(false)) ? 1 : 0) |
 					((!g_RustyGet || g_RustyGet->GetReloading()) ? 2 : 0);
@@ -1376,7 +1275,7 @@ void Reload()
 				info("Unpack is actively executing; deferring reload until unpack completes...");
 				return 0;
 			case 6:
-				return g_SigExitPending.exchange(false) ? 1 : 0;
+				return SigOp(1);
 			case 7:
 				ExitProc();
 				return 0;
@@ -1396,7 +1295,7 @@ void Reload()
 void ExitProc()
 {
 	nzbget_rs_lifecycle_reload_op(1, nullptr);
-	nzbget_rs_signal_notify(SIGTERM);
+	SigOp(5);
 
 	if (g_RustyGet)
 	{

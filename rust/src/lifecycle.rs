@@ -307,6 +307,134 @@ impl LifecycleManager {
     }
 }
 
+static SIG_HUP_PENDING: AtomicBool = AtomicBool::new(false);
+static SIG_EXIT_PENDING: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_INITIATED: AtomicBool = AtomicBool::new(false);
+static SIGSEGV_LOG_CB: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(unix)]
+fn record_signal_flags(signum: c_int) -> c_int {
+    match signum {
+        libc::SIGHUP => {
+            if SHUTDOWN_INITIATED.load(Ordering::Relaxed) {
+                return 0;
+            }
+            SIG_HUP_PENDING.store(true, Ordering::SeqCst);
+            LifecycleManager::global().notify_signal(signum);
+            1
+        }
+        libc::SIGINT | libc::SIGTERM => {
+            if SHUTDOWN_INITIATED.swap(true, Ordering::SeqCst) {
+                return 0;
+            }
+            SIG_EXIT_PENDING.store(true, Ordering::SeqCst);
+            LifecycleManager::global().notify_signal(signum);
+            2
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn posix_signal_proc(signum: c_int) {
+    unsafe {
+        match signum {
+            libc::SIGHUP => {
+                let _ = record_signal_flags(signum);
+            }
+            libc::SIGINT | libc::SIGTERM => {
+                if record_signal_flags(signum) == 2 {
+                    let _ = libc::signal(libc::SIGINT, libc::SIG_IGN);
+                    let _ = libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    let _ = libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                }
+            }
+            libc::SIGCHLD => {}
+            libc::SIGSEGV => {
+                let _ = libc::signal(libc::SIGSEGV, libc::SIG_DFL);
+                let addr = SIGSEGV_LOG_CB.load(Ordering::Relaxed);
+                if addr != 0 {
+                    let cb: unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) =
+                        std::mem::transmute(addr);
+                    cb(std::ptr::null_mut(), c"Segmentation fault".as_ptr());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Installs daemon POSIX signal handlers (`SIGINT`, `SIGTERM`, `SIGHUP`, `SIGPIPE`, `SIGCHLD`,
+/// and debug `SIGSEGV`) and optionally enables core dumps (`CrashDump`).
+pub fn install_error_handler(
+    crash_dump: bool,
+    crash_trace: bool,
+    segv_log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) {
+    if crash_dump {
+        enable_core_dump();
+    }
+    let cb_addr = segv_log_cb.map_or(0usize, |f| f as usize);
+    SIGSEGV_LOG_CB.store(cb_addr, Ordering::SeqCst);
+
+    let exit_pending = SIG_EXIT_PENDING.load(Ordering::SeqCst);
+    SHUTDOWN_INITIATED.store(exit_pending, Ordering::SeqCst);
+    SIG_HUP_PENDING.store(false, Ordering::SeqCst);
+
+    #[cfg(unix)]
+    unsafe {
+        let handler = posix_signal_proc as *const () as libc::sighandler_t;
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = handler;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaddset(&mut sa.sa_mask, libc::SIGINT);
+        libc::sigaddset(&mut sa.sa_mask, libc::SIGTERM);
+        libc::sigaddset(&mut sa.sa_mask, libc::SIGHUP);
+        sa.sa_flags = libc::SA_RESTART;
+
+        let _ = libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+        let _ = libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        let _ = libc::sigaction(libc::SIGHUP, &sa, std::ptr::null_mut());
+        let _ = libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        if crash_trace {
+            let _ = libc::signal(libc::SIGSEGV, handler);
+        }
+        let _ = libc::signal(libc::SIGCHLD, handler);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = crash_trace;
+    }
+}
+
+/// Queries or updates pending daemon signal state:
+/// - `0`: load `SIG_EXIT_PENDING`
+/// - `1`: swap `SIG_EXIT_PENDING` with `false`
+/// - `2`: swap `SIG_HUP_PENDING` with `false`
+/// - `3`: clear `SIG_HUP_PENDING`
+/// - `4`: load `SIG_EXIT_PENDING || SIG_HUP_PENDING`
+/// - `5`: notify `LifecycleManager` of `SIGTERM` shutdown
+pub fn signal_state_op(sub_op: c_int) -> c_int {
+    match sub_op {
+        0 => c_int::from(SIG_EXIT_PENDING.load(Ordering::SeqCst)),
+        1 => c_int::from(SIG_EXIT_PENDING.swap(false, Ordering::SeqCst)),
+        2 => c_int::from(SIG_HUP_PENDING.swap(false, Ordering::SeqCst)),
+        3 => {
+            SIG_HUP_PENDING.store(false, Ordering::SeqCst);
+            0
+        }
+        4 => c_int::from(
+            SIG_EXIT_PENDING.load(Ordering::SeqCst) || SIG_HUP_PENDING.load(Ordering::SeqCst),
+        ),
+        5 => {
+            #[cfg(unix)]
+            LifecycleManager::global().notify_signal(SIGTERM);
+            0
+        }
+        _ => 0,
+    }
+}
+
 /// Enables core dumps (`setrlimit(RLIMIT_CORE, RLIM_INFINITY)` on Unix + `prctl(PR_SET_DUMPABLE, 1)` on Linux).
 pub fn enable_core_dump() {
     #[cfg(unix)]
@@ -1015,5 +1143,39 @@ mod tests {
             recorded.contains(&8),
             "expected Stop(true) trigger: {recorded:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_signal_state_ops_and_shutdown_gating() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        SIG_HUP_PENDING.store(false, Ordering::SeqCst);
+        SIG_EXIT_PENDING.store(false, Ordering::SeqCst);
+        SHUTDOWN_INITIATED.store(false, Ordering::SeqCst);
+        LifecycleManager::global().set_reloading(false);
+        LifecycleManager::global().set_stopping(false);
+
+        assert_eq!(signal_state_op(0), 0);
+        assert_eq!(signal_state_op(4), 0);
+
+        assert_eq!(record_signal_flags(libc::SIGHUP), 1);
+        assert_eq!(signal_state_op(4), 1);
+        assert_eq!(signal_state_op(2), 1);
+        assert_eq!(signal_state_op(2), 0);
+        LifecycleManager::global().set_reloading(false);
+
+        assert_eq!(record_signal_flags(libc::SIGTERM), 2);
+        assert_eq!(record_signal_flags(libc::SIGINT), 0);
+        assert_eq!(record_signal_flags(libc::SIGHUP), 0);
+        assert_eq!(signal_state_op(0), 1);
+        assert_eq!(signal_state_op(2), 0);
+        assert_eq!(signal_state_op(1), 1);
+        assert_eq!(signal_state_op(0), 0);
+
+        SIG_HUP_PENDING.store(false, Ordering::SeqCst);
+        SIG_EXIT_PENDING.store(false, Ordering::SeqCst);
+        SHUTDOWN_INITIATED.store(false, Ordering::SeqCst);
+        LifecycleManager::global().set_reloading(false);
+        LifecycleManager::global().set_stopping(false);
     }
 }

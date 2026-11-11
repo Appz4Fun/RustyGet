@@ -25,13 +25,6 @@ void nzbget_rs_free(NzbgetRsBuf buf);
 // copy and release with nzbget_rs_free. Numeric formatting uses LC_NUMERIC.
 // Panics abort and never unwind through C++.
 NzbgetRsBuf nzbget_rs_format_size(long long size);
-// NULL strings are empty; non-NULL strings must be readable and NUL-terminated.
-int nzbget_rs_match_file_ext(const char* filename, const char* extensionList, const char* listSeparator);
-
-// FileTypes (rust/src/filetypes.rs): name checks by number, in FileTypes.h's
-// order (IsSevenZipExt 0 ... IsKnownCollectionExt 25). Inputs are borrowed byte spans;
-// NULL means empty regardless of len. Panics abort at the ABI boundary.
-int nzbget_rs_file_type(int which, const char* str, size_t len);
 
 // FileSystem's path texts (rust/src/paths.rs): op 0 MakeValidFilename (flag:
 // allow slashes), 1 SanitizePathSegment, 2 SanitizeRelativePath,
@@ -167,39 +160,6 @@ int nzbget_rs_force_directories(const char* path, NzbgetRsBuf* errmsg);
 // unwind. NULL names/fold return 0. Outputs are optional, writable C ints;
 // they may alias each other (blocks is written last), and change only on success.
 // No ownership transfer or allocation crosses the ABI; panics abort.
-// table: glibc's tolower table (*__ctype_tolower_loc()) read for a char of
-// the given signedness instead of calling fold per byte; NULL calls fold.
-int nzbget_rs_parse_par_filename(const char* name, int confirmed, int* baseLen, int* blocks);
-int nzbget_rs_find_main_pars(const char* path, int collect,
-	void (*addFile)(void* ctx, const char* name, size_t len), void* ctx);
-
-// RarRenamer::Execute (rust/src/rarrenamer.rs): recursively scans dest_dir,
-// parses RAR3/RAR5 volumes, and renames misnamed archive sets. Callbacks return
-// 0 on success or nonzero if an exception occurred (stopped returns 0 for false,
-// 1 for true, or -1 on exception).
-typedef struct NzbgetRsRarRenamerRunEnv
-{
-	void* ctx;
-	int (*stopped)(void* ctx);
-	int (*progress)(void* ctx, const char* label, int stageProgress);
-	int (*message)(void* ctx, int kind, const char* text);
-	int (*registerRenamed)(void* ctx, const char* oldBase, const char* newBase);
-} NzbgetRsRarRenamerRunEnv;
-int nzbget_rs_rar_renamer_execute(
-	const NzbgetRsRarRenamerRunEnv* env, const char* destDir, const char* infoName,
-	const char* password, const char* ignoreExt, int tlsEnabled, int* renamedCount);
-
-// ParRenamer::Execute (rust/src/parrenamer.rs).
-void nzbget_rs_par_renamer_execute(
-	const char* infoName, const char* destDir, const char* ignoreExt,
-	int detectMissing, char separator, void* ctx,
-	int (*isStoppedCb)(void* ctx),
-	void (*updateProgressCb)(void* ctx, const char* label, int stage),
-	void (*printMessageCb)(void* ctx, int kind, const char* text),
-	void (*registerParredCb)(void* ctx, const char* name),
-	void (*registerRenamedCb)(void* ctx, const char* oldRel, const char* newRel),
-	int* outRenamedCount, int* outHasMissedFiles, int* outHasDamagedParFiles);
-
 // NzbFile (rust/src/nzbfile.rs), under the C library's ctype: classes are
 // isspace/isdigit's classes of bytes 0..255 (masks space and digit), lower
 // is tolower's table of -128..255 at index 0, charSigned whether char is
@@ -251,103 +211,6 @@ typedef struct {
     int64_t offset;
     int64_t size;
 } NzbgetRsByteRange;
-
-// ============================================================================
-// Post-Repair & DupeCoordinator Hot-Path FFI (`rust/src/postrepair.rs`)
-// ============================================================================
-
-typedef struct NzbgetRsParSegment {
-    int32_t success;
-    int64_t offset;
-    int32_t size;
-    uint32_t crc;
-} NzbgetRsParSegment;
-
-typedef struct NzbgetRsUnpackMessageInfo {
-    int32_t strip_extracting_dir;
-    size_t stripped_suffix_offset;
-    int32_t is_insert_disk;
-    size_t insert_disk_name_offset;
-    size_t insert_disk_name_len;
-    int32_t reset_stage_time;
-    int32_t has_extracting_progress;
-    int32_t has_extracting_from;
-    int32_t decrypt_error;
-    int32_t password_error;
-    int32_t direct_password_error;
-    int32_t crc_or_volume_error;
-    int32_t all_ok;
-} NzbgetRsUnpackMessageInfo;
-
-typedef struct NzbgetRsParRepairer NzbgetRsParRepairer;
-enum {
-    NZBGET_RS_PAR_RESULT_SUCCESS = 0, NZBGET_RS_PAR_RESULT_REPAIR_POSSIBLE = 1, NZBGET_RS_PAR_RESULT_REPAIR_NOT_POSSIBLE = 2,
-    NZBGET_RS_PAR_RESULT_INVALID_ARGS = 3, NZBGET_RS_PAR_RESULT_INSUFFICIENT_CRITICAL_DATA = 4, NZBGET_RS_PAR_RESULT_REPAIR_FAILED = 5,
-    NZBGET_RS_PAR_RESULT_FILE_IO_ERROR = 6, NZBGET_RS_PAR_RESULT_LOGIC_ERROR = 7, NZBGET_RS_PAR_RESULT_MEMORY_ERROR = 8,
-};
-
-typedef struct NzbgetRsParCallbacks {
-    void* ctx;
-    void (*on_filename)(void* ctx, const char* name);
-    void (*on_progress)(void* ctx, int progress);
-    void (*on_done)(void* ctx, const char* name, int available, int total, int target_exists, int is_complete);
-    int (*on_quick_verify)(
-        void* ctx,
-        const char* name,
-        uint32_t* out_crc,
-        const NzbgetRsParSegment** out_segs,
-        size_t* out_seg_len);
-    void (*on_quick_verified_inc)(void* ctx);
-} NzbgetRsParCallbacks;
-
-NzbgetRsParRepairer* nzbget_rs_par_repairer_new(
-    const char* base_dir,
-    int threads_to_use,
-    int mem_to_use_mb,
-    int par_quick,
-    int par_scan_full,
-    const char* par_ignore_ext);
-void nzbget_rs_par_repairer_free(NzbgetRsParRepairer* handle);
-void nzbget_rs_par_repairer_cancel(const NzbgetRsParRepairer* handle);
-int nzbget_rs_par_repairer_preprocess(
-    NzbgetRsParRepairer* handle,
-    const char* par_filename,
-    const NzbgetRsParCallbacks* cbs);
-int nzbget_rs_par_repairer_process(
-    NzbgetRsParRepairer* handle,
-    int do_repair,
-    const NzbgetRsParCallbacks* cbs);
-int nzbget_rs_par_repairer_load_extra_par2_file(
-    NzbgetRsParRepairer* handle,
-    const char* path,
-    const NzbgetRsParCallbacks* cbs);
-int nzbget_rs_par_repairer_verify_extra_file(
-    NzbgetRsParRepairer* handle,
-    const char* path,
-    int is_split_fragment,
-    const NzbgetRsParCallbacks* cbs);
-uint32_t nzbget_rs_par_repairer_missing_file_count(const NzbgetRsParRepairer* handle);
-uint32_t nzbget_rs_par_repairer_damaged_file_count(const NzbgetRsParRepairer* handle);
-uint32_t nzbget_rs_par_repairer_missing_block_count(const NzbgetRsParRepairer* handle);
-uint32_t nzbget_rs_par_repairer_recovery_block_count(const NzbgetRsParRepairer* handle);
-int64_t nzbget_rs_par_repairer_block_size(const NzbgetRsParRepairer* handle);
-NzbgetRsBuf nzbget_rs_par_repairer_creator(const NzbgetRsParRepairer* handle);
-size_t nzbget_rs_par_repairer_source_file_count(const NzbgetRsParRepairer* handle);
-
-void nzbget_rs_unpack_parse_message(
-    const char* text, const char* unpack_extended_dir, int is_seven_zip,
-    NzbgetRsUnpackMessageInfo* out_info);
-
-// ============================================================================
-// QueueCoordinator, ArticleWriter, HistoryCoordinator, QueueEditor &
-// DownloadInfo Hot-Path FFI (`rust/src/queuehotpath.rs`)
-// ============================================================================
-
-
-// ============================================================================
-// DiskState, PrePostProcessor, Scanner & TwinCheck Hot-Path FFI (`rust/src/diskstatepp.rs`)
-// ============================================================================
-
 
 // ============================================================================
 // DupeSearch, Fleet, DonorHealth, Newznab, FeedCoordinator, FeedInfo &
@@ -762,40 +625,6 @@ typedef struct {
 NzbgetRsBuf nzbget_rs_cmdline_format_usage(
     const char* base_name, char path_sep, int include_daemon);
 
-int nzbget_rs_move_controller_move_files(
-    const char* inter_dir,
-    const char* dest_dir,
-    void* ctx,
-    int (*is_stopped_cb)(void* ctx),
-    void (*log_cb)(void* ctx, int kind, const char* msg),
-    void (*rename_cb)(void* ctx, const char* old_rel, const char* new_rel));
-
-void nzbget_rs_move_controller_remove_stale_hardlinks(
-    const char* hard_link_path,
-    const char* dest_dir,
-    void* ctx,
-    void (*log_cb)(void* ctx, int kind, const char* msg));
-
-int nzbget_rs_cleanup_controller_run(
-    const char* dest_dir,
-    const char* final_dir,
-    const char* ext_cleanup_disk,
-    void* ctx,
-    void (*log_cb)(void* ctx, int kind, const char* msg),
-    int* out_cleanup_status);
-
-int nzbget_rs_post_renamer_run(
-    int is_post_unpack,
-    const char* meta_name,
-    const char* nzb_name,
-    const char* dst_dir,
-    const char* ignore_ext,
-    void* ctx,
-    void (*info_name_cb)(void* ctx, const char* info_name),
-    int (*is_stopped_cb)(void* ctx),
-    void (*log_cb)(void* ctx, int kind, const char* msg),
-    void (*rename_cb)(void* ctx, const char* old_name, const char* new_name));
-
 typedef struct NzbgetRsHealthServerInput {
     int id;
     int active;
@@ -1026,40 +855,6 @@ void nzbget_rs_scan_script_prepare_env(
     const char* dupe_key, int dupe_score, int dupe_mode,
     const char* directory, char path_sep,
     void* ctx,
-    void (*set_env_cb)(void* ctx, const char* name, const char* value),
-    void (*set_int_env_cb)(void* ctx, const char* name, int value));
-
-typedef struct NzbgetRsPostScriptEnv {
-    int nzb_id;
-    const char* nzb_name;
-    const char* dest_dir;
-    const char* filename;
-    const char* queued_filename;
-    const char* url;
-    const char* final_dir;
-    const char* category;
-    int health;
-    int critical_health;
-    const char* dupe_key;
-    int dupe_score;
-    int dupe_mode;
-    const char* status;
-    int script_status;
-    int par_status;
-    int unpack_status;
-    int delete_status;
-    int mark_status;
-    int total_articles;
-    int success_articles;
-    int failed_articles;
-    const int* server_ids;
-    const int* server_success_articles;
-    const int* server_failed_articles;
-    size_t server_count;
-} NzbgetRsPostScriptEnv;
-
-void nzbget_rs_post_script_prepare_env(
-    const NzbgetRsPostScriptEnv* env, void* ctx,
     void (*set_env_cb)(void* ctx, const char* name, const char* value),
     void (*set_int_env_cb)(void* ctx, const char* name, int value));
 
@@ -1391,120 +1186,7 @@ void nzbget_rs_options_create_scheduler_task(
     const NzbgetRsOptionsHost* host, int id, const char* time,
     const char* week_days, int command, const char* param);
 
-int nzbget_rs_unpack_extract_with_zipfast(
-    const char* archive_path, const char* output_dir, const char* password,
-    int overwrite_mode, int cleanup_disk,
-    void (*log_cb)(void* ctx, int kind, const char* msg), void* log_ctx,
-    int (*is_stopped_cb)(void* ctx));
-
-void nzbget_rs_unpack_controller_check_archive_files(
-    const char* dest_dir,
-    int use_temp_unpack_dir,
-    const char* const* downloaded_files,
-    size_t downloaded_len,
-    const char* const* extracted_archives,
-    size_t extracted_len,
-    const char* unpack_ignore_ext,
-    int* out_has_rar_files,
-    int* out_has_not_unpacked_rar_files,
-    int* out_has_renamed_archive_files,
-    int* out_has_seven_zip_files,
-    int* out_has_seven_zip_multi_files,
-    int* out_has_splitted_files);
-int nzbget_rs_unpack_controller_extract_archives(
-    const char* dest_dir,
-    const char* unpack_dir,
-    const char* password,
-    int is_seven_zip,
-    int multi_volumes,
-    int use_temp_unpack_dir,
-    int cleanup_disk,
-    const char* const* downloaded_files,
-    size_t downloaded_len,
-    void* ctx,
-    void (*reset_all_ok_cb)(void* ctx),
-    int (*has_all_ok_cb)(void* ctx),
-    void (*log_cb)(void* ctx, int kind, const char* msg),
-    int (*is_stopped_cb)(void* ctx));
-int nzbget_rs_unpack_controller_join_splitted_files(
-    const char* dest_dir,
-    const char* unpack_dir,
-    int par_success,
-    int write_buffer_kb,
-    void* ctx,
-    void (*log_cb)(void* ctx, int kind, const char* msg),
-    void (*progress_cb)(void* ctx, const char* label, int stage_progress),
-    void (*add_joined_cb)(void* ctx, const char* piece_name));
-int nzbget_rs_unpack_controller_cleanup(
-    const char* dest_dir,
-    const char* final_dir,
-    const char* unpack_dir,
-    int unpack_ok,
-    int use_temp_unpack_dir,
-    int final_dir_created,
-    int unpack_cleanup_disk,
-    int inter_dir,
-    int has_splitted_files,
-    uint32_t umask,
-    const char* const* downloaded_files,
-    size_t downloaded_len,
-    const char* const* joined_files,
-    size_t joined_len,
-    int* out_cleaned_up_disk,
-    void* ctx,
-    void (*log_cb)(void* ctx, int kind, const char* msg));
-int nzbget_rs_direct_unpack_is_main_archive(const char* filename);
-void nzbget_rs_direct_unpack_find_archive_files(
-    const char* dest_dir,
-    void* ctx,
-    void (*add_archive_cb)(void* ctx, const char* archive_name));
-void nzbget_rs_direct_unpack_cleanup(
-    int use_temp_unpack_dir,
-    const char* unpack_dir,
-    int final_dir_created,
-    const char* final_dir,
-    void* ctx,
-    void (*log_cb)(void* ctx, int kind, const char* msg));
-
 uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
-
-void nzbget_rs_par_repairer_delete_leftovers(
-    const NzbgetRsParRepairer* handle,
-    void* ctx,
-    void (*log_cb)(void* ctx, const char* msg));
-int nzbget_rs_par_repairer_check_empty_files(
-    const NzbgetRsParRepairer* handle,
-    const char* const* processed_files,
-    size_t processed_len,
-    void* ctx,
-    void (*log_cb)(void* ctx, const char* msg));
-int nzbget_rs_par_repairer_target_file_exists_by_basename(
-    const NzbgetRsParRepairer* handle,
-    const char* file_name);
-void nzbget_rs_par_repairer_for_each_target_verification(
-    const NzbgetRsParRepairer* handle,
-    int set_succeeded,
-    void* ctx,
-    void (*cb)(void* ctx, const char* target_path, int keep_verified));
-void nzbget_rs_par_repairer_discover_splitted_fragments(
-    const NzbgetRsParRepairer* handle,
-    const char* dest_dir,
-    const char* const* processed_files,
-    size_t processed_len,
-    void* ctx,
-    int (*is_parred_cb)(void* ctx, const char* filename),
-    const char* (*find_origname_cb)(void* ctx, const char* current),
-    void (*detail_cb)(void* ctx, const char* msg),
-    void (*add_fragment_cb)(void* ctx, const char* full_path));
-void nzbget_rs_par_repairer_find_and_sort_extra_files(
-    const char* directory,
-    int external_dir,
-    const char* par_filename,
-    const char* const* processed_files,
-    size_t processed_len,
-    void* ctx,
-    int (*is_parred_cb)(void* ctx, const char* filename),
-    void (*add_extra_cb)(void* ctx, const char* full_path));
 
 int nzbget_rs_system_info_fetch_network(
     const char* host, int use_tls, int include_gzip, const char* version_rev,
@@ -1513,11 +1195,6 @@ int nzbget_rs_system_info_fetch_network(
         void* ctx, int fd, const char* host, const char* req, size_t req_len,
         NzbgetRsBuf* out_resp),
     NzbgetRsBuf* out_public_ip, NzbgetRsBuf* out_private_ip, NzbgetRsBuf* out_err);
-
-int nzbget_rs_unpack_controller_try_password_file(
-    const char* path, void* ctx,
-    int (*should_continue_cb)(void*),
-    void (*try_password_cb)(void*, const char*));
 
 NzbgetRsBuf nzbget_rs_log_rotate_log_file(
     const char* log_file, char sep, int64_t cur_time, int rotate_log,
@@ -1610,9 +1287,6 @@ int nzbget_rs_script_calc_total_status(const int* statuses, size_t count);
 int nzbget_rs_script_parse_nzb_cmd(
     int scope, const char* msg_text, int event, int qe_nzb_downloaded,
     size_t* out_key_off, size_t* out_key_len, size_t* out_val_off, int* out_int_val);
-int nzbget_rs_post_script_analyse_exit_code(
-    int exit_code, int par_status, int ps_skipped, int parcheck_enabled,
-    int sr_none, int sr_failure, int sr_success, int* out_msg_action, int* out_req_par_check);
 
 typedef struct NzbgetRsServerMatchItem {
     int id;
@@ -1776,8 +1450,29 @@ typedef uintptr_t (*NzbgetRsRepairCtrlHostFn)(
 NzbgetRsRepairController* nzbget_rs_repair_ctrl_new(NzbgetRsNntpFetchHostFn nntp_host);
 void nzbget_rs_repair_ctrl_free(NzbgetRsRepairController* ctrl);
 int nzbget_rs_repair_ctrl_exec(
-    const NzbgetRsRepairController* ctrl, int op, int a1, uintptr_t p1, uintptr_t p2,
-    const char* s1, const char** out_str, NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
+    const NzbgetRsRepairController* ctrl, int op, int a1, uintptr_t p1,
+    NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
+typedef struct NzbgetRsParChecker NzbgetRsParChecker;
+NzbgetRsParChecker* nzbget_rs_par_checker_new(void);
+void nzbget_rs_par_checker_free(NzbgetRsParChecker* ctrl);
+int nzbget_rs_par_checker_exec(
+    const NzbgetRsParChecker* ctrl, int op, int a1, const char* s1,
+    NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
+typedef struct NzbgetRsUnpackController NzbgetRsUnpackController;
+NzbgetRsUnpackController* nzbget_rs_unpack_ctrl_new(void);
+void nzbget_rs_unpack_ctrl_free(NzbgetRsUnpackController* ctrl);
+int nzbget_rs_unpack_ctrl_exec(
+    const NzbgetRsUnpackController* ctrl, int op,
+    NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
+typedef struct NzbgetRsDirectUnpack NzbgetRsDirectUnpack;
+NzbgetRsDirectUnpack* nzbget_rs_direct_unpack_new(int nzb_id);
+void nzbget_rs_direct_unpack_free(NzbgetRsDirectUnpack* ctrl);
+int nzbget_rs_direct_unpack_exec(
+    const NzbgetRsDirectUnpack* ctrl, int op, uintptr_t p1, uintptr_t p2,
+    NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
+int nzbget_rs_post_job_exec(
+    int job, int a1, int a2, const char* s1,
+    NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
 typedef struct NzbgetRsStreamRepairCtrl NzbgetRsStreamRepairCtrl;
 typedef uintptr_t (*NzbgetRsStreamRepairHostFn)(
     void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,

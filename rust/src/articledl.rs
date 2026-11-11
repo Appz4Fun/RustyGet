@@ -12,12 +12,12 @@ use crate::artwritercore::{
     article_writer_advance_and_check_range, article_writer_build_output_filenames,
     article_writer_classify_completion_status, article_writer_create_output_file,
     article_writer_execute_cleanup_old_data, article_writer_execute_setup_output_file,
-    article_writer_finish_disk_ops, article_writer_flush_cache, article_writer_format_dest_file_path,
-    article_writer_format_info_path, article_writer_move_completed_files,
-    article_writer_post_process_rename_and_hardlink, article_writer_process_articles,
-    article_writer_resolve_direct_write_ready, calc_write_buffer_size, join_c_slices,
-    memory_monitor_step, ArticleWriterFlushItem, ArticleWriterProcessItem, PRESSURE_CONSTRAINED,
-    PRESSURE_CRITICAL, PRESSURE_NORMAL,
+    article_writer_finish_disk_ops, article_writer_flush_cache,
+    article_writer_format_dest_file_path, article_writer_format_info_path,
+    article_writer_move_completed_files, article_writer_post_process_rename_and_hardlink,
+    article_writer_process_articles, article_writer_resolve_direct_write_ready,
+    calc_write_buffer_size, join_c_slices, memory_monitor_step, ArticleWriterFlushItem,
+    ArticleWriterProcessItem, PRESSURE_CONSTRAINED, PRESSURE_CRITICAL, PRESSURE_NORMAL,
 };
 use crate::decoder::{Decoder, Format};
 use crate::dupefallback::{
@@ -337,7 +337,10 @@ fn memory_monitor_init_options(host: &DlHost, reset_state: bool) {
             if strs[0].is_null() {
                 None
             } else {
-                CStr::from_ptr(strs[0]).to_str().ok().filter(|s| !s.is_empty())
+                CStr::from_ptr(strs[0])
+                    .to_str()
+                    .ok()
+                    .filter(|s| !s.is_empty())
             }
         };
         crate::memory_pressure::set_mock_root(path_opt);
@@ -541,7 +544,9 @@ fn article_cache_check_flush(host: &DlHost, allocated: usize, flush_everything: 
         let prefix = if skip_after {
             format!("Discarded {flushed_articles} articles ({flushed_mb:.2} MB) from cache (SkipWrite) for ")
         } else {
-            format!("Saved {flushed_articles} articles ({flushed_mb:.2} MB) from cache into disk for ")
+            format!(
+                "Saved {flushed_articles} articles ({flushed_mb:.2} MB) from cache into disk for "
+            )
         };
         host.log(MK_DETAIL, &join_c_slices(&[prefix.as_bytes(), &info_name]));
     }
@@ -895,7 +900,10 @@ fn server_pool_get_connection(
             i64s.as_mut_ptr(),
             strs.as_mut_ptr(),
         );
-        let server_index = srv_ptrs.iter().position(|&p| p == sptr).unwrap_or(srv_count);
+        let server_index = srv_ptrs
+            .iter()
+            .position(|&p| p == sptr)
+            .unwrap_or(srv_count);
         conn_views.push(ServerPoolConnView {
             server_index,
             in_use: ints[0] != 0,
@@ -1151,8 +1159,14 @@ fn server_pool_log_debug(host: &DlHost) {
     let cur_time = now_arr[0];
 
     host.log(MK_INFO, b"   ---------- ServerPool");
-    host.log(MK_INFO, format!("    Max-Level: {max_norm_level}").as_bytes());
-    host.log(MK_INFO, format!("    Servers: {raw_servers_len}").as_bytes());
+    host.log(
+        MK_INFO,
+        format!("    Max-Level: {max_norm_level}").as_bytes(),
+    );
+    host.log(
+        MK_INFO,
+        format!("    Servers: {raw_servers_len}").as_bytes(),
+    );
 
     for i in 0..raw_servers_len {
         let mut ints = [0i32; 7];
@@ -1260,7 +1274,12 @@ struct BufferedDiskFile {
 }
 
 impl BufferedDiskFile {
-    fn open(path: &[u8], read_write: bool, write_buffer_kb: i32, rec_size: i32) -> Result<Self, i32> {
+    fn open(
+        path: &[u8],
+        read_write: bool,
+        write_buffer_kb: i32,
+        rec_size: i32,
+    ) -> Result<Self, i32> {
         let clean = c_bytes(path);
         let Ok(c_path) = CString::new(clean) else {
             return Err(libc::EINVAL);
@@ -1681,10 +1700,7 @@ impl RsArticleWriter {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
             );
-            while p == 0
-                && fl_ints[0] != 0
-                && memory_monitor_tier() != PRESSURE_CRITICAL
-            {
+            while p == 0 && fl_ints[0] != 0 && memory_monitor_tier() != PRESSURE_CRITICAL {
                 host.sleep_ms(5);
                 p = host.raw(
                     4,
@@ -1990,10 +2006,7 @@ impl RsArticleWriter {
             );
         }
         if let Some(del_dir) = res.deleted_old_dest_dir {
-            host.log(
-                MK_DEBUG,
-                &join_c_slices(&[b"Deleting old dir: ", &del_dir]),
-            );
+            host.log(MK_DEBUG, &join_c_slices(&[b"Deleting old dir: ", &del_dir]));
         }
         if res.clear_output_filename {
             host.raw(
@@ -2248,10 +2261,7 @@ impl RsArticleWriter {
         let filename = unsafe { cstr_or_empty(strs[2]) };
         let file_out_fn = unsafe { cstr_or_empty(strs[3]) };
 
-        host.log(
-            MK_DEBUG,
-            &join_c_slices(&[b"ArticleFilename: ", &filename]),
-        );
+        host.log(MK_DEBUG, &join_c_slices(&[b"ArticleFilename: ", &filename]));
 
         if self.output_filename.is_empty() && !file_out_fn.is_empty() {
             self.output_filename = file_out_fn;
@@ -2425,10 +2435,7 @@ impl RsArticleWriter {
             |p| {
                 if let Ok(cp) = CString::new(c_bytes(p)) {
                     let _ = unsafe {
-                        libc::mkdir(
-                            cp.as_ptr(),
-                            libc::S_IRWXU | libc::S_IRWXG | libc::S_IRWXO,
-                        )
+                        libc::mkdir(cp.as_ptr(), libc::S_IRWXU | libc::S_IRWXG | libc::S_IRWXO)
                     };
                 }
                 crate::fsops::directory_exists(p, &crate::fsops::posix_stat)
@@ -2537,7 +2544,10 @@ impl RsArticleWriter {
                 host.log_nzb(
                     nzb_ptr,
                     MK_ERROR,
-                    &join_c_slices(&[b"Could not flush completed output file ", &final_output_path]),
+                    &join_c_slices(&[
+                        b"Could not flush completed output file ",
+                        &final_output_path,
+                    ]),
                 );
                 return (false, false);
             }
@@ -2607,11 +2617,7 @@ impl RsArticleWriter {
     }
 }
 
-fn move_completed_files_on_host(
-    host: &DlHost,
-    nzb_ptr: usize,
-    old_dest_dir: &[u8],
-) -> bool {
+fn move_completed_files_on_host(host: &DlHost, nzb_ptr: usize, old_dest_dir: &[u8]) -> bool {
     let mut ints = [0i32; 2];
     let mut strs = [std::ptr::null::<c_char>(); 1];
     host.raw(
@@ -2732,24 +2738,15 @@ impl NzbgetRsArticleDownloader {
     }
 
     fn conn_ptr(&self) -> usize {
-        self.conn_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .0
+        self.conn_state.lock().unwrap_or_else(|e| e.into_inner()).0
     }
 
     fn set_conn_ptr(&self, ptr: usize) {
-        self.conn_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .0 = ptr;
+        self.conn_state.lock().unwrap_or_else(|e| e.into_inner()).0 = ptr;
     }
 
     fn set_conn_name(&self, name: Vec<u8>) {
-        self.conn_state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .1 = name;
+        self.conn_state.lock().unwrap_or_else(|e| e.into_inner()).1 = name;
     }
 
     fn copy_conn_name(&self) -> Vec<u8> {
@@ -2985,14 +2982,24 @@ impl NzbgetRsArticleDownloader {
         ok
     }
 
-    fn decode_check(&self, w: &mut DlWorker, host: &DlHost, raw_article: bool, crc_check: bool) -> i32 {
+    fn decode_check(
+        &self,
+        w: &mut DlWorker,
+        host: &DlHost,
+        raw_article: bool,
+        crc_check: bool,
+    ) -> i32 {
         if raw_article {
             return AD_FINISHED;
         }
         let dec_st = w.decoder.check() as i32;
         let is_yenc = w.decoder.format == Format::Yenc;
-        match article_dl_classify_decode_status(raw_article, dec_st, is_yenc, w.writer.range_exceeded())
-        {
+        match article_dl_classify_decode_status(
+            raw_article,
+            dec_st,
+            is_yenc,
+            w.writer.range_exceeded(),
+        ) {
             1 => {
                 w.article_filename_c = Some(nul_vec(&w.decoder.article_filename));
                 if is_yenc {
@@ -3352,7 +3359,15 @@ impl NzbgetRsArticleDownloader {
                     tm.as_mut_ptr(),
                     std::ptr::null_mut(),
                 );
-                (fl[0] != 0, fl[1] != 0, fl[2] != 0, fl[3], fl[4], fl[5], tm[0])
+                (
+                    fl[0] != 0,
+                    fl[1] != 0,
+                    fl[2] != 0,
+                    fl[3],
+                    fl[4],
+                    fl[5],
+                    tm[0],
+                )
             };
 
             loop {
@@ -3603,13 +3618,14 @@ impl NzbgetRsArticleDownloader {
                     );
                 }
 
-                let (new_conn, new_st, new_rem) = article_dl_normalize_connect_and_decrement_retries(
-                    connected,
-                    status,
-                    AD_CONNECT_ERROR,
-                    AD_FAILED,
-                    remained_retries,
-                );
+                let (new_conn, new_st, new_rem) =
+                    article_dl_normalize_connect_and_decrement_retries(
+                        connected,
+                        status,
+                        AD_CONNECT_ERROR,
+                        AD_FAILED,
+                        remained_retries,
+                    );
                 connected = new_conn;
                 status = new_st;
                 remained_retries = new_rem;
@@ -3810,10 +3826,6 @@ pub fn article_dl_exec(
         104 => return memory_monitor_effective_cache_mb() as usize,
         105 => return memory_monitor_effective_par_buffer_mb(a1) as usize,
         106 => return memory_monitor_effective_downloads_limit(a1) as usize,
-        107 => {
-            crate::memory_pressure::trim_heap();
-            return 0;
-        }
         125 => return usize::from(server_pool_is_blocked(p1 as i64, p2 as i64, a1)),
         _ => {}
     }
@@ -4086,7 +4098,10 @@ mod tests {
             .expect("open ok.bin");
         assert_eq!(ok_file.write_bytes(b"hello world"), 11);
         assert!(ok_file.flush_and_close());
-        assert_eq!(std::fs::read(&ok_path).expect("read ok.bin"), b"hello world");
+        assert_eq!(
+            std::fs::read(&ok_path).expect("read ok.bin"),
+            b"hello world"
+        );
 
         let mut fail_file = BufferedDiskFile::open(fail_path.as_os_str().as_bytes(), false, 64, 0)
             .expect("open fail.bin");

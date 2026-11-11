@@ -153,19 +153,6 @@ pub(crate) unsafe fn input<'a>(raw: *const c_char) -> &'a [u8] {
 
 // ---- twins and alts (twin.rs); lists cross the ABI as text lines ----
 
-/// A file system path from C bytes, kept byte for byte (paths needn't be UTF-8).
-unsafe fn path_arg(raw: *const c_char) -> std::path::PathBuf {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        std::path::PathBuf::from(std::ffi::OsStr::from_bytes(input(raw)))
-    }
-    #[cfg(not(unix))]
-    {
-        std::path::PathBuf::from(String::from_utf8_lossy(input(raw)).into_owned())
-    }
-}
-
 #[cfg(test)]
 unsafe fn bytes_arg<'a>(data: *const u8, len: usize) -> &'a [u8] {
     if data.is_null() {
@@ -246,8 +233,8 @@ pub extern "C" fn nzbget_rs_format_size(size: i64) -> RsBuf {
 ///
 /// # Safety
 /// The strings are null or NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_match_file_ext(
+#[cfg(test)]
+pub(super) unsafe extern "C" fn nzbget_rs_match_file_ext(
     filename: *const c_char,
     list: *const c_char,
     separators: *const c_char,
@@ -283,8 +270,12 @@ pub(super) unsafe extern "C" fn nzbget_rs_is_excessively_obfuscated(
 ///
 /// # Safety
 /// `s` is null or readable for `len` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_file_type(which: c_int, s: *const c_char, len: usize) -> c_int {
+#[cfg(test)]
+pub(super) unsafe extern "C" fn nzbget_rs_file_type(
+    which: c_int,
+    s: *const c_char,
+    len: usize,
+) -> c_int {
     use crate::filetypes::*;
     const CHECKS: [fn(&[u8]) -> bool; 26] = [
         is_seven_zip_ext,
@@ -912,265 +903,10 @@ pub unsafe extern "C" fn nzbget_rs_force_directories(
     ok as c_int
 }
 
-// Copy exactly the bounded input BString<1024>::Set read. CStr::from_ptr on
-// the original pointer would scan beyond that bound, possibly off its allocation.
-unsafe fn par_filename_input(name: *const c_char) -> [u8; crate::parparser::BSTRING_MAX + 1] {
-    let mut copy = [0; crate::parparser::BSTRING_MAX + 1];
-    for (i, byte) in copy[..crate::parparser::BSTRING_MAX].iter_mut().enumerate() {
-        *byte = name.add(i).read() as u8;
-        if *byte == 0 {
-            break;
-        }
-    }
-    copy
-}
-
-/// ParParser::ParseParFilename: 1 for a par2 name, else 0. Optional outputs
-/// are written only on success, base_len then blocks, even if they alias.
-///
-/// # Safety
-/// `name` is null or readable through the first NUL or 1023 bytes, whichever
-/// comes first. Outputs are null or aligned writable C ints. All storage stays
-/// caller-owned.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_parse_par_filename(
-    name: *const c_char,
-    confirmed: c_int,
-    base_len: *mut c_int,
-    blocks: *mut c_int,
-) -> c_int {
-    if name.is_null() {
-        return 0;
-    }
-    let name = par_filename_input(name);
-    match crate::parparser::parse_par_filename(&name, confirmed != 0) {
-        Some((len, b)) => {
-            if !base_len.is_null() {
-                base_len.write(len as c_int);
-            }
-            if !blocks.is_null() {
-                blocks.write(b);
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-/// ParParser::FindMainPars: scans `path` for confirmed `.par2` files,
-/// invoking `add_file(ctx, name, len)` for each unique collection when
-/// `collect != 0`.
-///
-/// # Safety
-/// `path` is null or a valid NUL-terminated string; `add_file`, if supplied, must not unwind.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_find_main_pars(
-    path: *const c_char,
-    collect: c_int,
-    add_file: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize)>,
-    ctx: *mut std::ffi::c_void,
-) -> c_int {
-    if path.is_null() {
-        return 0;
-    }
-    let dir_path = path_arg(path);
-    i32::from(crate::parparser::find_main_pars(
-        &dir_path,
-        collect != 0,
-        |name| {
-            if let Some(cb) = add_file {
-                cb(ctx, name.as_ptr().cast(), name.len());
-            }
-        },
-    ))
-}
-
-fn c_string(b: &[u8]) -> std::ffi::CString {
-    // the names come from C strings (no NUL inside)
-    std::ffi::CString::new(b).unwrap_or_default()
-}
-
-/// NzbgetRsRarRenamerRunEnv
-#[repr(C)]
-pub struct RarRenamerRunEnv {
-    pub ctx: *mut std::ffi::c_void,
-    pub stopped: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    pub progress:
-        Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int) -> c_int>,
-    pub message: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char) -> c_int>,
-    pub register_renamed:
-        Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char) -> c_int>,
-}
-
-struct FfiRarRenamerRun<'a>(&'a RarRenamerRunEnv);
-
-impl crate::rarrenamer::RunCallbacks for FfiRarRenamerRun<'_> {
-    fn stopped(&mut self) -> Result<bool, ()> {
-        let Some(f) = self.0.stopped else {
-            return Ok(false);
-        };
-        match unsafe { f(self.0.ctx) } {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(()),
-        }
-    }
-    fn progress(&mut self, label: &[u8], stage_progress: i32) -> Result<(), ()> {
-        let Some(f) = self.0.progress else {
-            return Ok(());
-        };
-        let l = c_string(label);
-        if unsafe { f(self.0.ctx, l.as_ptr(), stage_progress) } == 0 {
-            Ok(())
-        } else {
-            Err(())
-        }
-    }
-    fn message(&mut self, kind: i32, text: &[u8]) -> Result<(), ()> {
-        let Some(f) = self.0.message else {
-            return Ok(());
-        };
-        let t = c_string(text);
-        if unsafe { f(self.0.ctx, kind, t.as_ptr()) } == 0 {
-            Ok(())
-        } else {
-            Err(())
-        }
-    }
-    fn register_renamed(&mut self, old_base: &[u8], new_base: &[u8]) -> Result<(), ()> {
-        let Some(f) = self.0.register_renamed else {
-            return Ok(());
-        };
-        let o = c_string(old_base);
-        let n = c_string(new_base);
-        if unsafe { f(self.0.ctx, o.as_ptr(), n.as_ptr()) } == 0 {
-            Ok(())
-        } else {
-            Err(())
-        }
-    }
-}
-
-/// RarRenamer::Execute (`rust/src/rarrenamer.rs`): recursively scans `dest_dir`,
-/// parses RAR3/RAR5 volumes, and renames misnamed archive sets. Returns 0 on
-/// completion or -1 if a callback returned nonzero (exception).
-///
-/// # Safety
-/// `env` and `renamed_count` must be valid pointers; string arguments are null or
-/// NUL-terminated.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rar_renamer_execute(
-    env: *const RarRenamerRunEnv,
-    dest_dir: *const c_char,
-    info_name: *const c_char,
-    password: *const c_char,
-    ignore_ext: *const c_char,
-    tls_enabled: c_int,
-    renamed_count: *mut c_int,
-) -> c_int {
-    let (Some(env), Some(renamed_count)) = (env.as_ref(), renamed_count.as_mut()) else {
-        return -1;
-    };
-    let info = if info_name.is_null() {
-        &b"(null)"[..]
-    } else {
-        input(info_name)
-    };
-    let res = crate::rarrenamer::execute_all(
-        input(dest_dir),
-        info,
-        input(password),
-        input(ignore_ext),
-        tls_enabled != 0,
-        renamed_count,
-        &mut FfiRarRenamerRun(env),
-    );
-    if res.is_ok() {
-        0
-    } else {
-        -1
-    }
-}
-
 fn nul(s: &[u8]) -> Vec<u8> {
     let mut v: Vec<u8> = s.iter().take_while(|&&b| b != 0).copied().collect();
     v.push(0);
     v
-}
-
-/// Runs `ParRenamer::Execute` end-to-end on the filesystem in Rust.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_renamer_execute(
-    info_name: *const c_char,
-    dest_dir: *const c_char,
-    ignore_ext: *const c_char,
-    detect_missing: c_int,
-    separator: c_char,
-    ctx: *mut std::ffi::c_void,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    update_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int)>,
-    print_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-    register_parred_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-    register_renamed_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char),
-    >,
-    out_renamed_count: *mut c_int,
-    out_has_missed_files: *mut c_int,
-    out_has_damaged_par_files: *mut c_int,
-) {
-    let info_bytes = input(info_name).to_vec();
-    let dest_bytes = input(dest_dir).to_vec();
-    let ignore_bytes = input(ignore_ext).to_vec();
-
-    let mut is_stopped = || is_stopped_cb.is_some_and(|cb| cb(ctx) != 0);
-    let mut on_progress = |label: &[u8], stage: i32| {
-        if let Some(cb) = update_progress_cb {
-            let c_label = nul(label);
-            cb(ctx, c_label.as_ptr().cast(), stage);
-        }
-    };
-    let mut on_message = |kind: crate::parrenamer::Kind, text: &[u8]| {
-        if let Some(cb) = print_message_cb {
-            let c_text = nul(text);
-            cb(ctx, kind as c_int, c_text.as_ptr().cast());
-        }
-    };
-    let mut on_register_parred = |name: &[u8]| {
-        if let Some(cb) = register_parred_cb {
-            let c_name = nul(name);
-            cb(ctx, c_name.as_ptr().cast());
-        }
-    };
-    let mut on_register_renamed = |old_rel: &[u8], new_rel: &[u8]| {
-        if let Some(cb) = register_renamed_cb {
-            let c_old = nul(old_rel);
-            let c_new = nul(new_rel);
-            cb(ctx, c_old.as_ptr().cast(), c_new.as_ptr().cast());
-        }
-    };
-
-    let state = crate::parrenamer::execute_all(
-        &info_bytes,
-        &dest_bytes,
-        &ignore_bytes,
-        detect_missing != 0,
-        separator as u8,
-        &mut is_stopped,
-        &mut on_progress,
-        &mut on_message,
-        &mut on_register_parred,
-        &mut on_register_renamed,
-    );
-
-    if !out_renamed_count.is_null() {
-        *out_renamed_count = state.renamed_count;
-    }
-    if !out_has_missed_files.is_null() {
-        *out_has_missed_files = state.has_missed_files as c_int;
-    }
-    if !out_has_damaged_par_files.is_null() {
-        *out_has_damaged_par_files = state.has_damaged_par_files as c_int;
-    }
 }
 
 /// FileSystem::DeleteDirectoryWithContent: 1 all deleted, 0 not.
@@ -1292,121 +1028,94 @@ mod tests {
                 0
             );
             assert!(crate::fsdelete::file_extension(b"").is_none());
-            assert_eq!(crate::fsdelete::file_extension(b"a.\0b.c"), Some(&b".c"[..]));
+            assert_eq!(
+                crate::fsdelete::file_extension(b"a.\0b.c"),
+                Some(&b".c"[..])
+            );
         }
     }
 
     #[test]
     fn parrenamer_ffi_nulls() {
-        use std::ptr::{null, null_mut};
-        unsafe {
-            let mut renamed = -1;
-            let mut missed = -1;
-            let mut damaged = -1;
-            nzbget_rs_par_renamer_execute(
-                null(),
-                null(),
-                null(),
-                0,
-                b'/' as c_char,
-                null_mut(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                &mut renamed,
-                &mut missed,
-                &mut damaged,
-            );
-            assert_eq!((renamed, missed, damaged), (0, 0, 0));
-        }
+        let mut is_stopped = || false;
+        let mut on_progress = |_: &[u8], _: i32| {};
+        let mut on_message = |_: crate::parrenamer::Kind, _: &[u8]| {};
+        let mut on_parred = |_: &[u8]| {};
+        let mut on_renamed = |_: &[u8], _: &[u8]| {};
+        let st = crate::parrenamer::execute_all(
+            b"",
+            b"",
+            b"",
+            false,
+            b'/',
+            &mut is_stopped,
+            &mut on_progress,
+            &mut on_message,
+            &mut on_parred,
+            &mut on_renamed,
+        );
+        assert_eq!(
+            (
+                st.renamed_count,
+                st.has_missed_files,
+                st.has_damaged_par_files
+            ),
+            (0, false, false)
+        );
     }
 
     #[test]
     fn rarrenamer_nulls_and_borrowed_callback_strings() {
-        use std::ptr::{null, null_mut};
-        unsafe extern "C" fn progress(
-            ctx: *mut std::ffi::c_void,
-            label: *const c_char,
-            stage: c_int,
-        ) -> c_int {
-            let out = &mut *ctx.cast::<Vec<(Vec<u8>, c_int)>>();
-            out.push((CStr::from_ptr(label).to_bytes().to_vec(), stage));
-            0
+        struct Probe(Vec<(Vec<u8>, c_int)>);
+        impl crate::rarrenamer::RunCallbacks for Probe {
+            fn stopped(&mut self) -> Result<bool, ()> {
+                Ok(false)
+            }
+            fn progress(&mut self, label: &[u8], stage: i32) -> Result<(), ()> {
+                self.0.push((label.to_vec(), stage));
+                Ok(())
+            }
+            fn message(&mut self, _kind: i32, _text: &[u8]) -> Result<(), ()> {
+                Ok(())
+            }
+            fn register_renamed(&mut self, _old: &[u8], _new: &[u8]) -> Result<(), ()> {
+                Ok(())
+            }
         }
-        let mut out: Vec<(Vec<u8>, c_int)> = Vec::new();
-        let env = RarRenamerRunEnv {
-            ctx: (&mut out as *mut Vec<(Vec<u8>, c_int)>).cast(),
-            stopped: None,
-            progress: Some(progress),
-            message: None,
-            register_renamed: None,
-        };
+        let mut probe = Probe(Vec::new());
         let mut renamed = 0;
-        unsafe {
-            assert_eq!(
-                nzbget_rs_rar_renamer_execute(
-                    null(),
-                    null(),
-                    null(),
-                    null(),
-                    null(),
-                    1,
-                    null_mut()
-                ),
-                -1
-            );
-            assert_eq!(
-                nzbget_rs_rar_renamer_execute(&env, null(), null(), null(), null(), 1, null_mut()),
-                -1
-            );
-            assert_eq!(
-                nzbget_rs_rar_renamer_execute(
-                    &env,
-                    c"/nonexistent_dir_12345".as_ptr(),
-                    c"job".as_ptr(),
-                    null(),
-                    null(),
-                    1,
-                    &mut renamed
-                ),
-                0
-            );
-            assert_eq!(renamed, 0);
-            assert_eq!(out, vec![(b"Checkingrar-files for job".to_vec(), 0)]);
-        }
+        assert!(crate::rarrenamer::execute_all(
+            b"/nonexistent_dir_12345",
+            b"job",
+            b"",
+            b"",
+            true,
+            &mut renamed,
+            &mut probe,
+        )
+        .is_ok());
+        assert_eq!(renamed, 0);
+        assert_eq!(probe.0, vec![(b"Checkingrar-files for job".to_vec(), 0)]);
     }
 
     #[test]
     fn parparser_bounded_input_and_outputs() {
-        use std::ptr::{null, null_mut};
-        unsafe {
-            let mut output = 77;
-            let p = &mut output as *mut c_int;
-            for name in [null(), c"bad".as_ptr()] {
-                assert_eq!(nzbget_rs_parse_par_filename(name, 1, p, p), 0);
-                assert_eq!(output, 77);
-            }
-            assert_eq!(
-                nzbget_rs_parse_par_filename(c"a.vol+2.par2".as_ptr(), -1, p, p),
-                1
-            );
-            assert_eq!(output, -1); // blocks wins when outputs alias
-            assert_eq!(
-                nzbget_rs_parse_par_filename(c"a.par2".as_ptr(), 1, null_mut(), null_mut()),
-                1
-            );
-
-            let mut name = [b'a'; crate::parparser::BSTRING_MAX];
-            name[1018..].copy_from_slice(b".par2");
-            assert_eq!(
-                nzbget_rs_parse_par_filename(name.as_ptr().cast(), 1, p, null_mut()),
-                1
-            );
-            assert_eq!(output, 1018);
-            assert!(crate::parparser::same_par_collection(&name, &name, true));
-        }
+        assert!(crate::parparser::parse_par_filename(b"bad", true).is_none());
+        assert_eq!(
+            crate::parparser::parse_par_filename(b"a.vol+2.par2", true),
+            Some((1, -1))
+        );
+        assert_eq!(
+            crate::parparser::parse_par_filename(b"a.par2", true),
+            Some((1, 0))
+        );
+        let mut name = [b'a'; crate::parparser::BSTRING_MAX];
+        name[1018..].copy_from_slice(b".par2");
+        assert_eq!(
+            crate::parparser::parse_par_filename(&name, true),
+            Some((1018, 0))
+        );
+        assert!(crate::parparser::same_par_collection(&name, &name, true));
     }
 
     #[cfg(unix)]
@@ -4100,204 +3809,6 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_exec(
     coord.exec(op, a1, a2, p1, p2, p3, s1, ints, host_cb, ctx)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_new(
-    base_dir: *const c_char,
-    threads_to_use: c_int,
-    mem_to_use_mb: c_int,
-    par_quick: c_int,
-    par_scan_full: c_int,
-    par_ignore_ext: *const c_char,
-) -> *mut crate::parchecker::RustParRepairer {
-    let dir_path = cstr_to_path_buf(base_dir);
-    let ignore_bytes = if par_ignore_ext.is_null() {
-        Vec::new()
-    } else {
-        CStr::from_ptr(par_ignore_ext).to_bytes().to_vec()
-    };
-    Box::into_raw(Box::new(crate::parchecker::RustParRepairer::new(
-        dir_path,
-        threads_to_use,
-        mem_to_use_mb,
-        par_quick != 0,
-        par_scan_full != 0,
-        ignore_bytes,
-    )))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_free(
-    handle: *mut crate::parchecker::RustParRepairer,
-) {
-    if !handle.is_null() {
-        drop(Box::from_raw(handle));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_cancel(
-    handle: *const crate::parchecker::RustParRepairer,
-) {
-    if let Some(r) = handle.as_ref() {
-        r.cancel();
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_preprocess(
-    handle: *mut crate::parchecker::RustParRepairer,
-    par_filename: *const c_char,
-    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
-) -> c_int {
-    let Some(r) = handle.as_mut() else {
-        return crate::parchecker::PAR_RESULT_LOGIC_ERROR;
-    };
-    if par_filename.is_null() {
-        return crate::parchecker::PAR_RESULT_INVALID_ARGS;
-    }
-    let pf_path = cstr_to_path_buf(par_filename);
-    r.preprocess(&pf_path, cbs.as_ref())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_process(
-    handle: *mut crate::parchecker::RustParRepairer,
-    do_repair: c_int,
-    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
-) -> c_int {
-    let Some(r) = handle.as_mut() else {
-        return crate::parchecker::PAR_RESULT_LOGIC_ERROR;
-    };
-    let empty_cbs = crate::parchecker::NzbgetRsParCallbacks {
-        ctx: std::ptr::null_mut(),
-        on_filename: None,
-        on_progress: None,
-        on_done: None,
-        on_quick_verify: None,
-        on_quick_verified_inc: None,
-    };
-    let cbs_ref = cbs.as_ref().unwrap_or(&empty_cbs);
-    r.process(do_repair != 0, cbs_ref)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_load_extra_par2_file(
-    handle: *mut crate::parchecker::RustParRepairer,
-    path: *const c_char,
-    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
-) -> c_int {
-    let Some(r) = handle.as_mut() else {
-        return 0;
-    };
-    if path.is_null() {
-        return 0;
-    }
-    let p_path = cstr_to_path_buf(path);
-    c_int::from(r.load_extra_par2_file(&p_path, cbs.as_ref()))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_verify_extra_file(
-    handle: *mut crate::parchecker::RustParRepairer,
-    path: *const c_char,
-    is_split_fragment: c_int,
-    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
-) -> c_int {
-    let Some(r) = handle.as_mut() else {
-        return 0;
-    };
-    if path.is_null() {
-        return 0;
-    }
-    let p_path = cstr_to_path_buf(path);
-    let empty_cbs = crate::parchecker::NzbgetRsParCallbacks {
-        ctx: std::ptr::null_mut(),
-        on_filename: None,
-        on_progress: None,
-        on_done: None,
-        on_quick_verify: None,
-        on_quick_verified_inc: None,
-    };
-    let cbs_ref = cbs.as_ref().unwrap_or(&empty_cbs);
-    c_int::from(r.verify_extra_file(&p_path, is_split_fragment != 0, cbs_ref))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_missing_file_count(
-    handle: *const crate::parchecker::RustParRepairer,
-) -> u32 {
-    handle.as_ref().map_or(0, |r| r.missing_file_count())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_damaged_file_count(
-    handle: *const crate::parchecker::RustParRepairer,
-) -> u32 {
-    handle.as_ref().map_or(0, |r| r.damaged_file_count())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_missing_block_count(
-    handle: *const crate::parchecker::RustParRepairer,
-) -> u32 {
-    handle.as_ref().map_or(0, |r| r.missing_block_count())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_recovery_block_count(
-    handle: *const crate::parchecker::RustParRepairer,
-) -> u32 {
-    handle.as_ref().map_or(0, |r| r.recovery_block_count())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_block_size(
-    handle: *const crate::parchecker::RustParRepairer,
-) -> i64 {
-    handle.as_ref().map_or(0, |r| r.block_size())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_creator(
-    handle: *const crate::parchecker::RustParRepairer,
-) -> RsBuf {
-    let Some(r) = handle.as_ref() else {
-        return into_buf(Vec::new());
-    };
-    into_buf(r.creator().into_bytes())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_source_file_count(
-    handle: *const crate::parchecker::RustParRepairer,
-) -> usize {
-    handle.as_ref().map_or(0, |r| r.source_files().len())
-}
-
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_parse_message(
-    text: *const c_char,
-    unpack_extended_dir: *const c_char,
-    is_seven_zip: c_int,
-    out_info: *mut crate::unpack::NzbgetRsUnpackMessageInfo,
-) {
-    if out_info.is_null() {
-        return;
-    }
-    let t = if text.is_null() {
-        b""
-    } else {
-        CStr::from_ptr(text).to_bytes()
-    };
-    let d = if unpack_extended_dir.is_null() {
-        b""
-    } else {
-        CStr::from_ptr(unpack_extended_dir).to_bytes()
-    };
-    *out_info = crate::unpack::parse_unpack_message(t, d, is_seven_zip != 0);
-}
-
 // ============================================================================
 // QueueCoordinator, ArticleWriter, HistoryCoordinator, QueueEditor &
 // DownloadInfo Hot-Path FFI (`rust/src/queuehotpath.rs`)
@@ -4368,7 +3879,6 @@ pub unsafe extern "C" fn nzbget_rs_cmdline_format_usage(
         include_daemon != 0,
     ))
 }
-
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_log_rotate_log_file(
@@ -4450,170 +3960,7 @@ pub unsafe extern "C" fn nzbget_rs_options_load_config_file(
     ))
 }
 
-
 // =========================================================================
-// End-to-End MoveController, CleanupController, and RenameController FFI
-// =========================================================================
-
-fn bytes_to_cstr_buf(bytes: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(bytes.len() + 1);
-    for &b in bytes {
-        if b != 0 {
-            buf.push(b);
-        }
-    }
-    buf.push(0);
-    buf
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_move_controller_move_files(
-    inter_dir: *const c_char,
-    dest_dir: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-    rename_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char)>,
-) -> c_int {
-    let inter_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(inter_dir));
-    let dest_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
-    let ok = crate::cleanup::move_files(
-        &inter_path,
-        &dest_path,
-        || {
-            if let Some(cb) = is_stopped_cb {
-                cb(ctx) != 0
-            } else {
-                false
-            }
-        },
-        |kind, msg| {
-            if let Some(cb) = log_cb {
-                let c_msg = bytes_to_cstr_buf(msg);
-                cb(ctx, kind as c_int, c_msg.as_ptr() as *const c_char);
-            }
-        },
-        |old_rel, new_rel| {
-            if let Some(cb) = rename_cb {
-                let c_old = bytes_to_cstr_buf(old_rel);
-                let c_new = bytes_to_cstr_buf(new_rel);
-                cb(
-                    ctx,
-                    c_old.as_ptr() as *const c_char,
-                    c_new.as_ptr() as *const c_char,
-                );
-            }
-        },
-    );
-    i32::from(ok)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_move_controller_remove_stale_hardlinks(
-    hard_link_path: *const c_char,
-    dest_dir: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-) {
-    let hl_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(hard_link_path));
-    let dst_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
-    crate::cleanup::remove_stale_hardlinks(&hl_path, &dst_path, |kind, msg| {
-        if let Some(cb) = log_cb {
-            let c_msg = bytes_to_cstr_buf(msg);
-            cb(ctx, kind as c_int, c_msg.as_ptr() as *const c_char);
-        }
-    });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cleanup_controller_run(
-    dest_dir: *const c_char,
-    final_dir: *const c_char,
-    ext_cleanup_disk: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-    out_cleanup_status: *mut c_int,
-) -> c_int {
-    let dst_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
-    let fin_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(final_dir));
-    let ext_bytes = crate::diskstate_format::cstr_to_bytes(ext_cleanup_disk);
-    let (outcome, status) =
-        crate::cleanup::run_cleanup(&dst_path, &fin_path, ext_bytes, |kind, msg| {
-            if let Some(cb) = log_cb {
-                let c_msg = bytes_to_cstr_buf(msg);
-                cb(ctx, kind as c_int, c_msg.as_ptr() as *const c_char);
-            }
-        });
-    if !out_cleanup_status.is_null() {
-        *out_cleanup_status = status;
-    }
-    outcome
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_post_renamer_run(
-    is_post_unpack: c_int,
-    meta_name: *const c_char,
-    nzb_name: *const c_char,
-    dst_dir: *const c_char,
-    ignore_ext: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    info_name_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-    rename_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char)>,
-) -> c_int {
-    let meta_bytes = crate::diskstate_format::cstr_to_bytes(meta_name);
-    let nzb_bytes = crate::diskstate_format::cstr_to_bytes(nzb_name);
-    let dst_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dst_dir));
-    let ignore_bytes = crate::diskstate_format::cstr_to_bytes(ignore_ext);
-
-    crate::cleanup::run_post_renamer(
-        is_post_unpack != 0,
-        meta_bytes,
-        nzb_bytes,
-        &dst_path,
-        ignore_bytes,
-        |info| {
-            if let Some(cb) = info_name_cb {
-                let c_info = bytes_to_cstr_buf(info);
-                cb(ctx, c_info.as_ptr() as *const c_char);
-            }
-        },
-        || {
-            if let Some(cb) = is_stopped_cb {
-                cb(ctx) != 0
-            } else {
-                false
-            }
-        },
-        |kind, msg| {
-            if let Some(cb) = log_cb {
-                let c_msg = bytes_to_cstr_buf(msg);
-                cb(ctx, kind as c_int, c_msg.as_ptr() as *const c_char);
-            }
-        },
-        |old_name, new_name| {
-            if let Some(cb) = rename_cb {
-                let c_old = bytes_to_cstr_buf(old_name);
-                let c_new = bytes_to_cstr_buf(new_name);
-                cb(
-                    ctx,
-                    c_old.as_ptr() as *const c_char,
-                    c_new.as_ptr() as *const c_char,
-                );
-            }
-        },
-    )
-}
-
 // ============================================================================
 // SystemHealth (`rust/src/systemhealth.rs`)
 // ============================================================================
@@ -5378,111 +4725,6 @@ pub unsafe extern "C" fn nzbget_rs_scan_script_prepare_env(
     );
 }
 
-#[repr(C)]
-pub struct NzbgetRsPostScriptEnv {
-    pub nzb_id: c_int,
-    pub nzb_name: *const c_char,
-    pub dest_dir: *const c_char,
-    pub filename: *const c_char,
-    pub queued_filename: *const c_char,
-    pub url: *const c_char,
-    pub final_dir: *const c_char,
-    pub category: *const c_char,
-    pub health: c_int,
-    pub critical_health: c_int,
-    pub dupe_key: *const c_char,
-    pub dupe_score: c_int,
-    pub dupe_mode: c_int,
-    pub status: *const c_char,
-    pub script_status: c_int,
-    pub par_status: c_int,
-    pub unpack_status: c_int,
-    pub delete_status: c_int,
-    pub mark_status: c_int,
-    pub total_articles: c_int,
-    pub success_articles: c_int,
-    pub failed_articles: c_int,
-    pub server_ids: *const c_int,
-    pub server_success_articles: *const c_int,
-    pub server_failed_articles: *const c_int,
-    pub server_count: usize,
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_post_script_prepare_env(
-    env: *const NzbgetRsPostScriptEnv,
-    ctx: *mut std::ffi::c_void,
-    set_env_cb: ScriptSetEnvVarCb,
-    set_int_env_cb: ScriptSetIntEnvVarCb,
-) {
-    if env.is_null() {
-        return;
-    }
-    let e = &*env;
-    let cstr_or_empty = |p: *const c_char| -> &CStr {
-        if p.is_null() {
-            c""
-        } else {
-            CStr::from_ptr(p)
-        }
-    };
-    let srv_ids = if e.server_ids.is_null() || e.server_count == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(e.server_ids, e.server_count)
-    };
-    let srv_succ = if e.server_success_articles.is_null() || e.server_count == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(e.server_success_articles, e.server_count)
-    };
-    let srv_fail = if e.server_failed_articles.is_null() || e.server_count == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(e.server_failed_articles, e.server_count)
-    };
-    let inp = crate::extension::PostScriptEnvInput {
-        nzb_id: e.nzb_id,
-        nzb_name: cstr_or_empty(e.nzb_name),
-        dest_dir: cstr_or_empty(e.dest_dir),
-        filename: cstr_or_empty(e.filename),
-        queued_filename: cstr_or_empty(e.queued_filename),
-        url: cstr_or_empty(e.url),
-        final_dir: cstr_or_empty(e.final_dir),
-        category: cstr_or_empty(e.category),
-        health: e.health,
-        critical_health: e.critical_health,
-        dupe_key: cstr_or_empty(e.dupe_key),
-        dupe_score: e.dupe_score,
-        dupe_mode: e.dupe_mode,
-        status: cstr_or_empty(e.status),
-        script_status: e.script_status,
-        par_status: e.par_status,
-        unpack_status: e.unpack_status,
-        delete_status: e.delete_status,
-        mark_status: e.mark_status,
-        total_articles: e.total_articles,
-        success_articles: e.success_articles,
-        failed_articles: e.failed_articles,
-        server_ids: srv_ids,
-        server_success_articles: srv_succ,
-        server_failed_articles: srv_fail,
-    };
-    crate::extension::post_script_prepare_env(
-        &inp,
-        |name, val| {
-            if let Some(cb) = set_env_cb {
-                cb(ctx, name.as_ptr(), val.as_ptr());
-            }
-        },
-        |name, val| {
-            if let Some(cb) = set_int_env_cb {
-                cb(ctx, name.as_ptr(), val);
-            }
-        },
-    );
-}
-
 // ============================================================================
 // NzbFileParser, UrlCoordinator & DirectRenamer End-to-End FFI
 // ============================================================================
@@ -5689,22 +4931,10 @@ pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_get_file(
 // DownloadInfo, DupeProbe & DupeCoordinator End-to-End FFI
 // ============================================================================
 
-
 // =========================================================================
 // Consolidated RepairController (`repair.rs`), ContentMap (`streamrepair.rs`),
 // and TwinCheck (`twin.rs`) FFI
 // =========================================================================
-unsafe fn cstr_to_path_buf(ptr: *const c_char) -> std::path::PathBuf {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        std::path::PathBuf::from(std::ffi::OsStr::from_bytes(input(ptr)))
-    }
-    #[cfg(not(unix))]
-    {
-        std::path::PathBuf::from(String::from_utf8_lossy(input(ptr)).into_owned())
-    }
-}
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_alloc_buf(data: *const c_char, len: usize) -> RsBuf {
@@ -7120,7 +6350,6 @@ pub unsafe extern "C" fn nzbget_rs_system_info_fetch_network(
     }
 }
 
-
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_nzb_format_name(
     op: c_int,
@@ -7789,36 +7018,6 @@ pub unsafe extern "C" fn nzbget_rs_script_parse_nzb_cmd(
     kind
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_post_script_analyse_exit_code(
-    exit_code: c_int,
-    par_status: c_int,
-    ps_skipped: c_int,
-    parcheck_enabled: c_int,
-    sr_none: c_int,
-    sr_failure: c_int,
-    sr_success: c_int,
-    out_msg_action: *mut c_int,
-    out_req_par_check: *mut c_int,
-) -> c_int {
-    let (status, action, req) = crate::extension::analyse_post_script_exit_code(
-        exit_code,
-        par_status,
-        ps_skipped,
-        parcheck_enabled != 0,
-        sr_none,
-        sr_failure,
-        sr_success,
-    );
-    if !out_msg_action.is_null() {
-        *out_msg_action = action;
-    }
-    if !out_req_par_check.is_null() {
-        *out_req_par_check = c_int::from(req);
-    }
-    status
-}
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_diskstate_exec(
     op: c_int,
@@ -7913,9 +7112,7 @@ pub unsafe extern "C" fn nzbget_rs_dupe_probe_new(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupe_probe_free(
-    p: *mut crate::dupeprobe::NzbgetRsDupeProbe,
-) {
+pub unsafe extern "C" fn nzbget_rs_dupe_probe_free(p: *mut crate::dupeprobe::NzbgetRsDupeProbe) {
     if !p.is_null() {
         drop(Box::from_raw(p));
     }
@@ -8198,21 +7395,122 @@ pub unsafe extern "C" fn nzbget_rs_repair_ctrl_free(
 }
 
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_repair_ctrl_exec(
     ctrl: *const crate::repair::NzbgetRsRepairController,
     op: c_int,
     a1: c_int,
     p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    out_str: *mut *const c_char,
     host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
     ctx: *mut c_void,
 ) -> c_int {
     let _cancel_guard = PosixCancelGuard::disable();
-    crate::repair::repair_ctrl_exec(ctrl, op, a1, p1, p2, s1, out_str, host_cb, ctx)
+    crate::repair::repair_ctrl_exec(ctrl, op, a1, p1, host_cb, ctx)
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_par_checker_new() -> *mut crate::postproc::NzbgetRsParChecker {
+    Box::into_raw(Box::new(crate::postproc::NzbgetRsParChecker::new()))
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_par_checker_free(
+    ctrl: *mut crate::postproc::NzbgetRsParChecker,
+) {
+    if !ctrl.is_null() {
+        drop(Box::from_raw(ctrl));
+    }
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_par_checker_exec(
+    ctrl: *const crate::postproc::NzbgetRsParChecker,
+    op: c_int,
+    a1: c_int,
+    s1: *const c_char,
+    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
+    ctx: *mut c_void,
+) -> c_int {
+    let _cancel_guard = PosixCancelGuard::disable();
+    crate::postproc::par_checker_exec(ctrl, op, a1, s1, host_cb, ctx)
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_unpack_ctrl_new(
+) -> *mut crate::postproc::NzbgetRsUnpackController {
+    Box::into_raw(Box::new(crate::postproc::NzbgetRsUnpackController::new()))
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_unpack_ctrl_free(
+    ctrl: *mut crate::postproc::NzbgetRsUnpackController,
+) {
+    if !ctrl.is_null() {
+        drop(Box::from_raw(ctrl));
+    }
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_unpack_ctrl_exec(
+    ctrl: *const crate::postproc::NzbgetRsUnpackController,
+    op: c_int,
+    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
+    ctx: *mut c_void,
+) -> c_int {
+    let _cancel_guard = PosixCancelGuard::disable();
+    crate::postproc::unpack_ctrl_exec(ctrl, op, host_cb, ctx)
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_direct_unpack_new(
+    nzb_id: c_int,
+) -> *mut crate::postproc::NzbgetRsDirectUnpack {
+    Box::into_raw(Box::new(crate::postproc::NzbgetRsDirectUnpack::new(nzb_id)))
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_direct_unpack_free(
+    ctrl: *mut crate::postproc::NzbgetRsDirectUnpack,
+) {
+    if !ctrl.is_null() {
+        drop(Box::from_raw(ctrl));
+    }
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_direct_unpack_exec(
+    ctrl: *const crate::postproc::NzbgetRsDirectUnpack,
+    op: c_int,
+    p1: usize,
+    p2: usize,
+    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
+    ctx: *mut c_void,
+) -> c_int {
+    let _cancel_guard = PosixCancelGuard::disable();
+    crate::postproc::direct_unpack_exec(ctrl, op, p1, p2, host_cb, ctx)
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_post_job_exec(
+    job: c_int,
+    a1: c_int,
+    a2: c_int,
+    s1: *const c_char,
+    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
+    ctx: *mut c_void,
+) -> c_int {
+    let _cancel_guard = PosixCancelGuard::disable();
+    crate::postproc::post_job_exec(job, a1, a2, s1, host_cb, ctx)
 }
 
 #[cfg(unix)]
@@ -8263,13 +7561,13 @@ pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_exec(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
     op: c_int,
-    a: c_int,
-    b: c_int,
-    c: c_int,
-    d: c_int,
-    e: c_int,
-    f: c_int,
-    t1: i64,
+    _a: c_int,
+    _b: c_int,
+    _c: c_int,
+    _d: c_int,
+    _e: c_int,
+    _f: c_int,
+    _t1: i64,
     _t2: i64,
     _t3: i64,
     _t4: i64,
@@ -8297,81 +7595,7 @@ pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
         CStr::from_ptr(s2).to_bytes()
     };
     match op {
-        15 => c_int::from(crate::unpack::use_inter_dir(
-            s1_bytes,
-            s2_bytes,
-            crate::paths::PATH_SEPARATOR,
-        )),
-        16 => {
-            let (outcome, move_status) = crate::cleanup::decide_move_outcome(a != 0, b != 0);
-            if !out1.is_null() {
-                *out1 = move_status;
-            }
-            outcome
-        }
-        17 => crate::cleanup::rename_classify_run_outcome(a != 0, b),
-        18 => {
-            let (use_final, detect_missing) =
-                crate::cleanup::rename_eval_par_config(a, b, c, d != 0);
-            if !out1.is_null() {
-                *out1 = c_int::from(detect_missing);
-            }
-            c_int::from(use_final)
-        }
-        19 => {
-            let (init_status, req_extra, req_par_check) =
-                crate::cleanup::rename_complete_action(a, b, c != 0, d, e != 0, f);
-            if !out1.is_null() {
-                *out1 = c_int::from(req_extra);
-            }
-            if !out2.is_null() {
-                *out2 = c_int::from(req_par_check);
-            }
-            init_status
-        }
-        20 => c_int::from(crate::cleanup::rename_should_reset_par_status(t1)),
-        21 => c_int::from(crate::unpack::is_unpack_space_error(a != 0, s1_bytes)),
-        22 => {
-            let (req_par, force_rep, st) = crate::unpack::eval_unpack_completed_failure(
-                a != 0,
-                b != 0,
-                c,
-                1,
-                d != 0,
-                (e & 1) != 0,
-                (e & 2) != 0,
-                (e & 4) != 0,
-                (e & 8) != 0,
-                (e & 16) != 0,
-                (e & 32) != 0,
-                (e & 64) != 0,
-                (f & 1) != 0,
-                (f & 2) != 0,
-                (f & 4) != 0,
-                (f & 8) != 0,
-            );
-            if !out1.is_null() {
-                *out1 = c_int::from(req_par);
-            }
-            if !out2.is_null() {
-                *out2 = c_int::from(force_rep);
-            }
-            st
-        }
         23 => c_int::from(crate::extension::ext_is_in_list(s1_bytes, s2_bytes)),
-        24 => {
-            if !s1_bytes.is_empty()
-                && s1_bytes[0] != b'*'
-                && s1_bytes[s1_bytes.len() - 1] == b':'
-                && (s2_bytes.eq_ignore_ascii_case(b"yes")
-                    || s2_bytes.eq_ignore_ascii_case(b"on")
-                    || s2_bytes == b"1")
-            {
-                (s1_bytes.len() - 1) as c_int
-            } else {
-                0
-            }
-        }
         25 => c_int::from(crate::extension::is_nzbget_internal_env_var(s1_bytes)),
         26 => {
             let (trimmed_len, mk, text_off) =
@@ -8431,7 +7655,8 @@ pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_op(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_new() -> *mut crate::dupesearch_coord::NzbgetRsDupeSearch {
+pub unsafe extern "C" fn nzbget_rs_dupesearch_new(
+) -> *mut crate::dupesearch_coord::NzbgetRsDupeSearch {
     Box::into_raw(Box::new(crate::dupesearch_coord::NzbgetRsDupeSearch::new()))
 }
 

@@ -12,7 +12,6 @@
 
 use crate::postrepair::{strncasecmp_prefix, NzbgetRsParSegment};
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -42,8 +41,8 @@ pub use par_rs::repairer::{
     Stage as ParStage, VerifyResult,
 };
 pub use par_rs::stream::{
-    FileLayout, SliceState as StreamSliceState, StreamEvent, StreamStatus,
-    StreamingSliceAssembler, SyndromeBank,
+    FileLayout, SliceState as StreamSliceState, StreamEvent, StreamStatus, StreamingSliceAssembler,
+    SyndromeBank,
 };
 pub use par_rs::streaming::{
     ArticleOutcome, EarlyRepairReport, LiveStatus, QueuedVolume, SessionOptions, SliceEvent,
@@ -326,12 +325,11 @@ pub fn streaming_session_try_splice_live_slice(
 ) -> Option<Result<Vec<usize>, RepairError>> {
     let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
     let entry = map.get(&nzb_id)?;
-    Some(entry.session.try_splice_live_slice(
-        file_id,
-        hole_range,
-        candidate_bytes,
-        disk_file,
-    ))
+    Some(
+        entry
+            .session
+            .try_splice_live_slice(file_id, hole_range, candidate_bytes, disk_file),
+    )
 }
 
 /// Takes up to `max_ids` pending volume IDs recommended for unpausing by
@@ -404,11 +402,12 @@ impl MemoryStreamingSession {
         let mut files = Vec::with_capacity(main.recoverable_file_ids.len());
         let mut file_ids = Vec::with_capacity(main.recoverable_file_ids.len());
         for id in &main.recoverable_file_ids {
-            let fd = set.file_descs.get(id).ok_or_else(|| {
-                RepairError::IncompleteMetadata {
+            let fd = set
+                .file_descs
+                .get(id)
+                .ok_or_else(|| RepairError::IncompleteMetadata {
                     missing_descriptions: vec![*id],
-                }
-            })?;
+                })?;
             let block_count = main.slice_count_for(fd.file_length) as usize;
             let slices = match set.ifscs.get(id) {
                 Some(ifsc) if ifsc.slices.len() == block_count => ifsc.slices.clone(),
@@ -499,136 +498,72 @@ impl MemoryStreamingSession {
 // 3. Post-Download `Par2Repairer` Engine (`RustParRepairer`)
 // =============================================================================================
 
-/// C callback table passed from `ParChecker.cpp` to `RustParRepairer`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct NzbgetRsParCallbacks {
-    pub ctx: *mut c_void,
-    pub on_filename: Option< unsafe extern "C" fn(ctx: *mut c_void, name: *const c_char)>,
-    pub on_progress: Option<unsafe extern "C" fn(ctx: *mut c_void, progress: c_int)>,
-    pub on_done: Option<
-        unsafe extern "C" fn(
-            ctx: *mut c_void,
-            name: *const c_char,
-            available: c_int,
-            total: c_int,
-            target_exists: c_int,
-            is_complete: c_int,
-        ),
-    >,
-    pub on_quick_verify: Option<
-        unsafe extern "C" fn(
-            ctx: *mut c_void,
-            name: *const c_char,
-            out_crc: *mut u32,
-            out_segs: *mut *const NzbgetRsParSegment,
-            out_seg_len: *mut usize,
-        ) -> c_int,
-    >,
-    pub on_quick_verified_inc: Option<unsafe extern "C" fn(ctx: *mut c_void)>,
+#[inline]
+fn os_str_bytes(s: &std::ffi::OsStr) -> &[u8] {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        s.as_bytes()
+    }
+    #[cfg(not(unix))]
+    {
+        s.to_str().unwrap_or_default().as_bytes()
+    }
 }
 
+/// Safe Rust event sink for [`RustParRepairer`].
+pub trait ParRepairEvents {
+    fn on_filename(&self, _name: &[u8]) {}
+    fn on_progress(&self, _progress: i32) {}
+    fn on_done(&self, _name: &[u8], _available: i32, _total: i32, _target_exists: bool) {}
+    fn on_quick_verify(&self, _name: &[u8]) -> Option<QuickInfo> {
+        None
+    }
+    fn on_quick_verified_inc(&self) {}
+}
+
+pub struct NoopParEvents;
+impl ParRepairEvents for NoopParEvents {}
+
 struct CallbackObserver<'a> {
-    cbs: &'a NzbgetRsParCallbacks,
+    events: &'a dyn ParRepairEvents,
     emit_file_signals: bool,
 }
 
 impl RepairObserver for CallbackObserver<'_> {
     fn progress(&mut self, permille: u32, _label: &str) {
-        if let Some(cb) = self.cbs.on_progress {
-            unsafe {
-                cb(self.cbs.ctx, permille as c_int);
-            }
-        }
+        self.events.on_progress(permille as i32);
     }
 
     fn file_verified(&mut self, file: &SourceFileState) {
         if !self.emit_file_signals {
             return;
         }
-        let Ok(c_name) = std::ffi::CString::new(file.target_filename.as_bytes()) else {
-            return;
-        };
+        let name = file.target_filename.as_bytes();
         if file.target_exists {
-            if let Some(cb) = self.cbs.on_filename {
-                unsafe {
-                    cb(self.cbs.ctx, c_name.as_ptr());
-                }
-            }
+            self.events.on_filename(name);
         }
         if file.quick_verified {
-            if let Some(cb) = self.cbs.on_quick_verified_inc {
-                unsafe {
-                    cb(self.cbs.ctx);
-                }
-            }
+            self.events.on_quick_verified_inc();
         }
-        if let Some(cb) = self.cbs.on_done {
-            unsafe {
-                cb(
-                    self.cbs.ctx,
-                    c_name.as_ptr(),
-                    file.available_blocks as c_int,
-                    file.block_count as c_int,
-                    i32::from(file.target_exists),
-                    i32::from(file.status == FileStatus::Complete),
-                );
-            }
-        }
-        if let Some(cb) = self.cbs.on_progress {
-            unsafe {
-                cb(self.cbs.ctx, 1000);
-            }
-        }
+        let file_exists = file.target_exists || crate::paths::base_file_name(name) > 0;
+        self.events.on_done(
+            name,
+            file.available_blocks as i32,
+            file.block_count as i32,
+            file_exists,
+        );
+        self.events.on_progress(1000);
     }
 }
 
 struct CallbackQuickVerifier<'a> {
-    cbs: &'a NzbgetRsParCallbacks,
+    events: &'a dyn ParRepairEvents,
 }
 
 impl QuickVerifier for CallbackQuickVerifier<'_> {
     fn quick_info(&mut self, target_filename: &str) -> Option<QuickInfo> {
-        let cb = self.cbs.on_quick_verify?;
-        let c_name = std::ffi::CString::new(target_filename.as_bytes()).ok()?;
-        let mut crc = 0u32;
-        let mut segs_ptr: *const NzbgetRsParSegment = std::ptr::null();
-        let mut segs_len = 0usize;
-        let status = unsafe {
-            cb(
-                self.cbs.ctx,
-                c_name.as_ptr(),
-                &mut crc,
-                &mut segs_ptr,
-                &mut segs_len,
-            )
-        };
-        match status {
-            // fsSuccess = 1
-            1 => Some(QuickInfo::Success { crc }),
-            // fsPartial = 2
-            2 => {
-                let raw_segs = if !segs_ptr.is_null() && segs_len > 0 {
-                    unsafe { std::slice::from_raw_parts(segs_ptr, segs_len) }
-                } else {
-                    &[]
-                };
-                let segments = raw_segs
-                    .iter()
-                    .filter(|s| s.offset >= 0 && s.size >= 0)
-                    .map(|s| ParSegment {
-                        success: s.success != 0,
-                        offset: s.offset,
-                        size: s.size as i64,
-                        crc: s.crc,
-                    })
-                    .collect();
-                Some(QuickInfo::Partial { segments })
-            }
-            // fsFailure = 3
-            3 => Some(QuickInfo::Failure),
-            _ => None,
-        }
+        self.events.on_quick_verify(target_filename.as_bytes())
     }
 }
 
@@ -682,43 +617,35 @@ impl RustParRepairer {
         }
     }
 
-    pub fn preprocess(&mut self, par_filename: &Path, cbs: Option<&NzbgetRsParCallbacks>) -> i32 {
+    pub fn preprocess(&mut self, par_filename: &Path, events: Option<&dyn ParRepairEvents>) -> i32 {
         if !par_filename.is_file() {
             return PAR_RESULT_INSUFFICIENT_CRITICAL_DATA;
         }
         if self.repairer.load_par2_set(par_filename).is_err() {
             return PAR_RESULT_INSUFFICIENT_CRITICAL_DATA;
         }
-        if let Some(cbs) = cbs {
-            if let Some(cb) = cbs.on_filename {
-                let main_name = par_filename
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-                if let Ok(c_name) = std::ffi::CString::new(main_name.as_bytes()) {
-                    unsafe {
-                        cb(cbs.ctx, c_name.as_ptr());
-                    }
-                }
-                if let Some(parent) = par_filename.parent() {
-                    if let Ok(entries) = std::fs::read_dir(parent) {
-                        for entry in entries.flatten() {
-                            let p = entry.path();
-                            if p == par_filename || !p.is_file() {
-                                continue;
-                            }
-                            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
-                                continue;
-                            };
-                            if name.to_ascii_lowercase().ends_with(".par2")
-                                && same_par_collection(name.as_bytes(), main_name.as_bytes(), false)
-                            {
-                                if let Ok(c_name) = std::ffi::CString::new(name.as_bytes()) {
-                                    unsafe {
-                                        cb(cbs.ctx, c_name.as_ptr());
-                                    }
-                                }
-                            }
+        if let Some(events) = events {
+            let main_name = par_filename
+                .file_name()
+                .map(os_str_bytes)
+                .unwrap_or_default();
+            events.on_filename(main_name);
+            if let Some(parent) = par_filename.parent() {
+                if let Ok(entries) = std::fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p == par_filename || !p.is_file() {
+                            continue;
+                        }
+                        let Some(os_name) = p.file_name() else {
+                            continue;
+                        };
+                        let name = os_str_bytes(os_name);
+                        if name.len() >= 5
+                            && name[name.len() - 5..].eq_ignore_ascii_case(b".par2")
+                            && same_par_collection(name, main_name, false)
+                        {
+                            events.on_filename(name);
                         }
                     }
                 }
@@ -730,15 +657,15 @@ impl RustParRepairer {
         }
     }
 
-    pub fn process(&mut self, do_repair: bool, cbs: &NzbgetRsParCallbacks) -> i32 {
+    pub fn process(&mut self, do_repair: bool, events: &dyn ParRepairEvents) -> i32 {
         if !do_repair {
             if !self.has_verified {
                 let mut obs = CallbackObserver {
-                    cbs,
+                    events,
                     emit_file_signals: true,
                 };
                 let res = if self.par_quick {
-                    let mut qv = CallbackQuickVerifier { cbs };
+                    let mut qv = CallbackQuickVerifier { events };
                     self.repairer.verify(Some(&mut qv), &mut obs)
                 } else {
                     self.repairer.verify(None, &mut obs)
@@ -748,7 +675,7 @@ impl RustParRepairer {
                 }
                 if self.par_scan_full {
                     let mut extra_obs = CallbackObserver {
-                        cbs,
+                        events,
                         emit_file_signals: false,
                     };
                     let _ = self
@@ -767,15 +694,15 @@ impl RustParRepairer {
             }
         } else {
             let mut obs = CallbackObserver {
-                cbs,
+                events,
                 emit_file_signals: false,
             };
-            let repaired_filenames: Vec<std::ffi::CString> = self
+            let repaired_filenames: Vec<Vec<u8>> = self
                 .repairer
                 .source_files()
                 .iter()
                 .filter(|sf| sf.status != FileStatus::Complete)
-                .filter_map(|sf| std::ffi::CString::new(sf.target_filename.as_bytes()).ok())
+                .map(|sf| sf.target_filename.as_bytes().to_vec())
                 .collect();
             let used_split_fragments: Vec<PathBuf> = self
                 .split_candidates
@@ -805,12 +732,8 @@ impl RustParRepairer {
             match self.repairer.repair(&mut obs) {
                 Ok(RepairResult::NotNeeded) => PAR_RESULT_SUCCESS,
                 Ok(RepairResult::Repaired { mut leftovers, .. }) => {
-                    if let Some(cb) = cbs.on_filename {
-                        for c_name in &repaired_filenames {
-                            unsafe {
-                                cb(cbs.ctx, c_name.as_ptr());
-                            }
-                        }
+                    for name in &repaired_filenames {
+                        events.on_filename(name);
                     }
                     for frag in used_split_fragments {
                         if frag.is_file() && !leftovers.contains(&frag) {
@@ -825,7 +748,11 @@ impl RustParRepairer {
         }
     }
 
-    pub fn load_extra_par2_file(&mut self, path: &Path, cbs: Option<&NzbgetRsParCallbacks>) -> bool {
+    pub fn load_extra_par2_file(
+        &mut self,
+        path: &Path,
+        events: Option<&dyn ParRepairEvents>,
+    ) -> bool {
         if !path.is_file() {
             return false;
         }
@@ -845,15 +772,9 @@ impl RustParRepairer {
             Err(_) => false,
         };
         if ok {
-            if let Some(cbs) = cbs {
-                if let Some(cb) = cbs.on_filename {
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if let Ok(c_name) = std::ffi::CString::new(name.as_bytes()) {
-                            unsafe {
-                                cb(cbs.ctx, c_name.as_ptr());
-                            }
-                        }
-                    }
+            if let Some(events) = events {
+                if let Some(name) = path.file_name() {
+                    events.on_filename(os_str_bytes(name));
                 }
             }
         }
@@ -864,47 +785,36 @@ impl RustParRepairer {
         &mut self,
         path: &Path,
         is_split_fragment: bool,
-        cbs: &NzbgetRsParCallbacks,
+        events: &dyn ParRepairEvents,
     ) -> bool {
         if !path.is_file() {
             return false;
         }
         let base_name = path
             .file_name()
-            .and_then(|n| n.to_str())
+            .map(os_str_bytes)
             .unwrap_or_default()
-            .to_string();
-        if let Ok(c_name) = std::ffi::CString::new(base_name.as_bytes()) {
-            if let Some(cb) = cbs.on_filename {
-                unsafe {
-                    cb(cbs.ctx, c_name.as_ptr());
-                }
-            }
-        }
+            .to_vec();
+        events.on_filename(&base_name);
         let was_missing_files = self.missing_file_count();
         let mut obs = CallbackObserver {
-            cbs,
+            events,
             emit_file_signals: false,
         };
-        let gained = self
-            .repairer
-            .add_extra_file(path, &mut obs)
-            .unwrap_or(0);
+        let gained = self.repairer.add_extra_file(path, &mut obs).unwrap_or(0);
         if is_split_fragment && gained > 0 && !self.split_candidates.iter().any(|p| p == path) {
             self.split_candidates.push(path.to_path_buf());
         }
-        if let Ok(c_name) = std::ffi::CString::new(base_name.as_bytes()) {
-            if let Some(cb) = cbs.on_done {
-                unsafe {
-                    cb(cbs.ctx, c_name.as_ptr(), gained as c_int, gained as c_int, 1, 0);
-                }
-            }
-        }
+        events.on_done(&base_name, gained as i32, gained as i32, true);
         gained > 0 || self.missing_file_count() < was_missing_files
     }
 
     pub fn cancel(&self) {
         self.repairer.cancel();
+    }
+
+    pub fn cancel_token(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.repairer.cancel_token()
     }
 
     pub fn creator(&self) -> String {
@@ -1636,10 +1546,7 @@ pub fn compute_valid_blocks(
         let mut cur_offset = 0i64;
         for seg in segments {
             let seg_end = seg.offset + (seg.size as i64);
-            if !block_ok
-                && seg.success != 0
-                && seg.offset <= block_start
-                && seg_end >= block_start
+            if !block_ok && seg.success != 0 && seg.offset <= block_start && seg_end >= block_start
             {
                 block_ok = true;
                 cur_offset = seg.offset;
@@ -1681,10 +1588,7 @@ pub fn next_valid_block_run(
         .position(|&v| v == 0)
         .unwrap_or(len - block_start);
     let block_end = block_start + rel_len - 1;
-    let par_crc = combine_block_crcs(
-        &block_crcs[block_start..=block_end],
-        block_size as u64,
-    );
+    let par_crc = combine_block_crcs(&block_crcs[block_start..=block_end], block_size as u64);
     let bytes_start = (block_start as i64).wrapping_mul(block_size);
     let bytes_end = (block_end as i64)
         .wrapping_mul(block_size)
@@ -1741,219 +1645,13 @@ where
 
         if seg_end > end {
             let partial_crc = dumb_calc_cb(seg.offset, end)?;
-            download_crc = crate::crc::combine(
-                download_crc,
-                partial_crc,
-                (end - seg.offset + 1) as u32,
-            );
+            download_crc =
+                crate::crc::combine(download_crc, partial_crc, (end - seg.offset + 1) as u32);
             break;
         }
     }
 
     Some(download_crc)
-}
-
-unsafe fn collect_cstr_slice<'a>(ptrs: *const *const c_char, len: usize) -> Vec<&'a [u8]> {
-    if ptrs.is_null() || len == 0 {
-        return Vec::new();
-    }
-    let slice = unsafe { std::slice::from_raw_parts(ptrs, len) };
-    let mut out = Vec::with_capacity(len);
-    for &p in slice {
-        if !p.is_null() {
-            out.push(unsafe { std::ffi::CStr::from_ptr(p).to_bytes() });
-        }
-    }
-    out
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_delete_leftovers(
-    handle: *const RustParRepairer,
-    ctx: *mut c_void,
-    log_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
-) {
-    let Some(r) = (unsafe { handle.as_ref() }) else {
-        return;
-    };
-    let mut emit_log = |msg: &[u8]| {
-        if let Some(cb) = log_cb {
-            if let Ok(cmsg) = std::ffi::CString::new(msg) {
-                unsafe { cb(ctx, cmsg.as_ptr()) };
-            }
-        }
-    };
-    r.delete_leftovers(&mut emit_log);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_check_empty_files(
-    handle: *const RustParRepairer,
-    processed_files: *const *const c_char,
-    processed_len: usize,
-    ctx: *mut c_void,
-    log_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
-) -> c_int {
-    let Some(r) = (unsafe { handle.as_ref() }) else {
-        return 0;
-    };
-    let processed = unsafe { collect_cstr_slice(processed_files, processed_len) };
-    let mut emit_log = |msg: &[u8]| {
-        if let Some(cb) = log_cb {
-            if let Ok(cmsg) = std::ffi::CString::new(msg) {
-                unsafe { cb(ctx, cmsg.as_ptr()) };
-            }
-        }
-    };
-    c_int::from(r.check_empty_files(&processed, &mut emit_log))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_target_file_exists_by_basename(
-    handle: *const RustParRepairer,
-    file_name: *const c_char,
-) -> c_int {
-    let Some(r) = (unsafe { handle.as_ref() }) else {
-        return 1;
-    };
-    if file_name.is_null() {
-        return 1;
-    }
-    let fname = unsafe { std::ffi::CStr::from_ptr(file_name).to_bytes() };
-    c_int::from(r.target_file_exists_by_basename(fname))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_for_each_target_verification(
-    handle: *const RustParRepairer,
-    set_succeeded: c_int,
-    ctx: *mut c_void,
-    cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, c_int)>,
-) {
-    let Some(r) = (unsafe { handle.as_ref() }) else {
-        return;
-    };
-    let Some(cb_fn) = cb else {
-        return;
-    };
-    let mut invoke = |path_bytes: &[u8], keep_verified: bool| {
-        if let Ok(cpath) = std::ffi::CString::new(path_bytes) {
-            unsafe { cb_fn(ctx, cpath.as_ptr(), c_int::from(keep_verified)) };
-        }
-    };
-    r.for_each_target_verification(set_succeeded != 0, &mut invoke);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_discover_splitted_fragments(
-    handle: *const RustParRepairer,
-    dest_dir: *const c_char,
-    processed_files: *const *const c_char,
-    processed_len: usize,
-    ctx: *mut c_void,
-    is_parred_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int>,
-    find_origname_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> *const c_char>,
-    detail_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
-    add_fragment_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
-) {
-    let Some(r) = (unsafe { handle.as_ref() }) else {
-        return;
-    };
-    if dest_dir.is_null() {
-        return;
-    }
-    let dest_bytes = unsafe { std::ffi::CStr::from_ptr(dest_dir).to_bytes() };
-    let processed = unsafe { collect_cstr_slice(processed_files, processed_len) };
-
-    let mut is_parred = |fname: &[u8]| -> bool {
-        let Some(cb) = is_parred_cb else {
-            return false;
-        };
-        let Ok(cf) = std::ffi::CString::new(fname) else {
-            return false;
-        };
-        unsafe { cb(ctx, cf.as_ptr()) != 0 }
-    };
-    let mut find_orig = |current: &[u8]| -> Option<Vec<u8>> {
-        let cb = find_origname_cb?;
-        let cf = std::ffi::CString::new(current).ok()?;
-        let ptr = unsafe { cb(ctx, cf.as_ptr()) };
-        if ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { std::ffi::CStr::from_ptr(ptr).to_bytes().to_vec() })
-        }
-    };
-    let mut emit_detail = |msg: &[u8]| {
-        if let Some(cb) = detail_cb {
-            if let Ok(cmsg) = std::ffi::CString::new(msg) {
-                unsafe { cb(ctx, cmsg.as_ptr()) };
-            }
-        }
-    };
-
-    let fragments = r.discover_splitted_fragments(
-        dest_bytes,
-        &processed,
-        &mut is_parred,
-        &mut find_orig,
-        &mut emit_detail,
-    );
-    if let Some(cb) = add_fragment_cb {
-        for frag in fragments {
-            if let Ok(cfrag) = std::ffi::CString::new(frag) {
-                unsafe { cb(ctx, cfrag.as_ptr()) };
-            }
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_repairer_find_and_sort_extra_files(
-    directory: *const c_char,
-    external_dir: c_int,
-    par_filename: *const c_char,
-    processed_files: *const *const c_char,
-    processed_len: usize,
-    ctx: *mut c_void,
-    is_parred_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int>,
-    add_extra_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
-) {
-    if directory.is_null() {
-        return;
-    }
-    let dir_bytes = unsafe { std::ffi::CStr::from_ptr(directory).to_bytes() };
-    let par_bytes = if par_filename.is_null() {
-        &b""[..]
-    } else {
-        unsafe { std::ffi::CStr::from_ptr(par_filename).to_bytes() }
-    };
-    let processed = unsafe { collect_cstr_slice(processed_files, processed_len) };
-
-    let mut is_parred = |fname: &[u8]| -> bool {
-        let Some(cb) = is_parred_cb else {
-            return false;
-        };
-        let Ok(cf) = std::ffi::CString::new(fname) else {
-            return false;
-        };
-        unsafe { cb(ctx, cf.as_ptr()) != 0 }
-    };
-
-    let extra_files = find_and_sort_extra_files(
-        dir_bytes,
-        external_dir != 0,
-        par_bytes,
-        &processed,
-        &mut is_parred,
-    );
-    if let Some(cb) = add_extra_cb {
-        for f in extra_files {
-            if let Ok(cf) = std::ffi::CString::new(f) {
-                unsafe { cb(ctx, cf.as_ptr()) };
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1964,7 +1662,10 @@ mod tests {
     fn test_parse_ignore_ext_tokens_keeps_wildcard_masks() {
         // Tokens are nzbget's: split on `,` / `;`, trimmed, otherwise verbatim (a space inside a
         // token is part of it; nothing is prefixed or dropped).
-        assert_eq!(parse_ignore_ext_tokens(b".sfv, nfo;.NZB"), vec![".sfv", "nfo", ".NZB"]);
+        assert_eq!(
+            parse_ignore_ext_tokens(b".sfv, nfo;.NZB"),
+            vec![".sfv", "nfo", ".NZB"]
+        );
         assert_eq!(
             parse_ignore_ext_tokens(b"*, *.nfo ; sample##.mkv,my file.txt, readme.nfo"),
             vec!["*", "*.nfo", "sample##.mkv", "my file.txt", "readme.nfo"]
@@ -1973,14 +1674,20 @@ mod tests {
         assert!(parse_ignore_ext_tokens(b" ,; ").is_empty());
         assert!(parse_ignore_ext_tokens(&[0xFF, 0xFE]).is_empty());
         // One bad token does not take the good ones with it.
-        assert_eq!(parse_ignore_ext_tokens(b"*.nfo,\xff,.sfv"), vec!["*.nfo", ".sfv"]);
+        assert_eq!(
+            parse_ignore_ext_tokens(b"*.nfo,\xff,.sfv"),
+            vec!["*.nfo", ".sfv"]
+        );
         // par-rs applies MatchFileExt + WildMask semantics to each token.
         let m = par_rs::repairer::ignore_name_matches;
         for token in parse_ignore_ext_tokens(b"*, *.nfo, nfo, .NFO") {
             assert!(m("release.nfo", &token), "{token}");
         }
         assert!(m("readme.nfo", "readme.nfo"), "literal file name");
-        assert!(!m("extras/clip.mkv", "clip*"), "masks see the whole local name, as nzbget's do");
+        assert!(
+            !m("extras/clip.mkv", "clip*"),
+            "masks see the whole local name, as nzbget's do"
+        );
         assert!(m("sample01.mkv", "sample##.*"), "# is one digit");
         assert!(!m("sample1.mkv", "sample##.*"));
         assert!(!m("release.rar", "*.nfo"));
@@ -2013,18 +1720,14 @@ mod tests {
             eval_extra_file_step(2, 1, 10, 5, false, false, false),
             (true, true, true, 5, true, 0)
         );
-        assert_eq!(
-            eval_extra_file_step(1, 0, 10, 5, false, false, true).5,
-            1
-        );
+        assert_eq!(eval_extra_file_step(1, 0, 10, 5, false, false, true).5, 1);
     }
 
     #[test]
     fn test_next_valid_block_run() {
         let valid = [0u8, 1, 1, 0, 1];
         let crcs = [0x11u32, 0x22, 0x33, 0x44, 0x55];
-        let (end, _crc, bs, ce, pad) =
-            next_valid_block_run(&valid, &crcs, 0, 1000, 4500).unwrap();
+        let (end, _crc, bs, ce, pad) = next_valid_block_run(&valid, &crcs, 0, 1000, 4500).unwrap();
         assert_eq!(end, 2);
         assert_eq!(bs, 1000);
         assert_eq!(ce, 2999);
@@ -2484,17 +2187,13 @@ mod tests {
         // Put `sample.mkv` in `dupe_dir` (missing from main `dir`)
         std::fs::write(dupe_dir.join("dupe_sample.mkv"), &data_b).unwrap();
 
-        let empty_cbs = NzbgetRsParCallbacks {
-            ctx: std::ptr::null_mut(),
-            on_filename: None,
-            on_progress: None,
-            on_done: None,
-            on_quick_verify: None,
-            on_quick_verified_inc: None,
-        };
+        let empty_cbs = NoopParEvents;
 
         let mut r = RustParRepairer::new(dir.clone(), 2, 64, false, false, Vec::new());
-        assert_eq!(r.preprocess(&index_path, Some(&empty_cbs)), PAR_RESULT_SUCCESS);
+        assert_eq!(
+            r.preprocess(&index_path, Some(&empty_cbs)),
+            PAR_RESULT_SUCCESS
+        );
         assert_eq!(r.creator(), "rustyget-escalation-test");
         assert_eq!(r.block_size(), 4096);
 
@@ -2523,7 +2222,8 @@ mod tests {
             .iter()
             .map(|(vname, _)| volume_blocks_bytes(vname.as_bytes()).unwrap() as i32)
             .collect();
-        let (chosen, block_found) = select_more_pars(&vol_counts, r.repairer.blocks_needed() as i32);
+        let (chosen, block_found) =
+            select_more_pars(&vol_counts, r.repairer.blocks_needed() as i32);
         assert_eq!(block_found, 7);
         assert_eq!(chosen, vec![1]);
         for idx in chosen {
@@ -2573,7 +2273,10 @@ mod tests {
             b"Archive.R00",
             &[b"/tmp/sub/archive.r00", b"/tmp/sub/other.r01"]
         ));
-        assert!(!is_processed_file(b"missing.r02", &[b"/tmp/sub/archive.r00"]));
+        assert!(!is_processed_file(
+            b"missing.r02",
+            &[b"/tmp/sub/archive.r00"]
+        ));
 
         let data_a = make_deterministic_bytes(8192, 909);
         let built = build_set(
@@ -2597,17 +2300,13 @@ mod tests {
         std::fs::write(dir.join("hlp.nfo"), b"info").unwrap();
         std::fs::write(dir.join("zzz.txt"), b"other").unwrap();
 
-        let empty_cbs = NzbgetRsParCallbacks {
-            ctx: std::ptr::null_mut(),
-            on_filename: None,
-            on_progress: None,
-            on_done: None,
-            on_quick_verify: None,
-            on_quick_verified_inc: None,
-        };
+        let empty_cbs = NoopParEvents;
 
         let mut r = RustParRepairer::new(dir.clone(), 1, 16, false, false, Vec::new());
-        assert_eq!(r.preprocess(&index_path, Some(&empty_cbs)), PAR_RESULT_SUCCESS);
+        assert_eq!(
+            r.preprocess(&index_path, Some(&empty_cbs)),
+            PAR_RESULT_SUCCESS
+        );
         let _ = r.process(false, &empty_cbs);
         assert!(!r.target_file_exists_by_basename(b"archive.bin"));
 

@@ -494,6 +494,11 @@ struct CtrlSnapshot {
     force_par_full: bool,
     force_repair: bool,
     post_stage: i32,
+    par_buffer: i32,
+    has_memory_monitor: bool,
+    par_threads: i32,
+    par_scan: i32,
+    par_repair: bool,
     cur_time: i64,
     block_size: i64,
     post_stage_time: i64,
@@ -503,6 +508,7 @@ struct CtrlSnapshot {
     par_filename: Vec<u8>,
     checker_dest_dir: Vec<u8>,
     unrar_cmd: Vec<u8>,
+    par_ignore_ext: Vec<u8>,
 }
 
 struct NzbSnapshot {
@@ -529,10 +535,14 @@ struct NzbSnapshot {
     twin_files_param: Vec<u8>,
 }
 
-fn inspect_ctrl(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> CtrlSnapshot {
+fn inspect_ctrl(
+    par_checker: &crate::postproc::NzbgetRsParChecker,
+    ctx: *mut c_void,
+    host_cb: NzbgetRsRepairCtrlHostFn,
+) -> CtrlSnapshot {
     let mut ints = [0 as c_int; 12];
-    let mut i64s = [0i64; 4];
-    let mut strs = [ptr::null::<c_char>(); 5];
+    let mut i64s = [0i64; 3];
+    let mut strs = [ptr::null::<c_char>(); 2];
     let nzb_ptr = unsafe {
         host_cb(
             ctx,
@@ -550,27 +560,33 @@ fn inspect_ctrl(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> CtrlSnap
     };
     CtrlSnapshot {
         nzb_ptr,
-        checker_status: ints[0],
-        checker_stage: ints[1],
-        file_progress: ints[2],
-        stage_progress: ints[3],
-        par_full: ints[4] != 0,
-        is_stopped: ints[5] != 0,
-        par_quick_opt: ints[6] != 0,
-        par_time_limit: ints[7],
-        pause_post_process: ints[8] != 0,
-        force_par_full: ints[9] != 0,
-        force_repair: ints[10] != 0,
-        post_stage: ints[11],
+        checker_status: par_checker.status(),
+        checker_stage: par_checker.stage(),
+        file_progress: par_checker.file_progress(),
+        stage_progress: par_checker.stage_progress(),
+        par_full: par_checker.par_full(),
+        is_stopped: ints[0] != 0,
+        par_quick_opt: ints[1] != 0,
+        par_time_limit: ints[2],
+        pause_post_process: ints[3] != 0,
+        force_par_full: ints[4] != 0,
+        force_repair: ints[5] != 0,
+        post_stage: ints[6],
+        par_buffer: ints[7],
+        has_memory_monitor: ints[8] != 0,
+        par_threads: ints[9],
+        par_scan: ints[10],
+        par_repair: ints[11] != 0,
         cur_time: i64s[0],
-        block_size: i64s[1],
-        post_stage_time: i64s[2],
-        post_start_time: i64s[3],
-        progress_label: unsafe { ptr_bytes(strs[0]) },
-        info_name: unsafe { ptr_bytes(strs[1]) },
-        par_filename: unsafe { ptr_bytes(strs[2]) },
-        checker_dest_dir: unsafe { ptr_bytes(strs[3]) },
-        unrar_cmd: unsafe { ptr_bytes(strs[4]) },
+        block_size: par_checker.block_size(),
+        post_stage_time: i64s[1],
+        post_start_time: i64s[2],
+        progress_label: par_checker.progress_label(),
+        info_name: par_checker.info_name(),
+        par_filename: par_checker.par_filename(),
+        checker_dest_dir: par_checker.dest_dir(),
+        unrar_cmd: unsafe { ptr_bytes(strs[0]) },
+        par_ignore_ext: unsafe { ptr_bytes(strs[1]) },
     }
 }
 
@@ -656,6 +672,31 @@ fn emit_debug(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, text: &[u8]) 
     }
 }
 
+fn emit_global_log(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, kind: c_int, text: &[u8]) {
+    let sub = match kind {
+        0 => 7, // info
+        3 => 5, // debug
+        4 => 8, // detail
+        _ => return,
+    };
+    let c_text = to_c_buf(text);
+    unsafe {
+        host_cb(
+            ctx,
+            7,
+            sub,
+            0,
+            0,
+            0,
+            c_text.as_ptr() as *const c_char,
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        );
+    }
+}
+
 #[derive(Default)]
 struct RepairCtrlState {
     par_time: i64,
@@ -666,13 +707,11 @@ struct RepairCtrlState {
     twin_index: Vec<u8>,
     twin_block_size: u64,
     twin_files: Vec<Vec<u8>>,
-    last_origname: Option<Box<[u8]>>,
-    last_twin_path: Option<Box<[u8]>>,
-    last_twin_vols: Vec<Box<[u8]>>,
 }
 
 pub struct NzbgetRsRepairController {
     twin_fetcher: ArticleFetcher,
+    par_checker: crate::postproc::NzbgetRsParChecker,
     state: std::sync::Mutex<RepairCtrlState>,
 }
 
@@ -680,6 +719,7 @@ impl NzbgetRsRepairController {
     pub fn new(nntp_host: NzbgetRsNntpFetchHostFn) -> Self {
         Self {
             twin_fetcher: ArticleFetcher::new(nntp_host),
+            par_checker: crate::postproc::NzbgetRsParChecker::new(),
             state: std::sync::Mutex::new(RepairCtrlState::default()),
         }
     }
@@ -689,8 +729,14 @@ impl NzbgetRsRepairController {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    #[inline]
+    fn snap(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> CtrlSnapshot {
+        inspect_ctrl(&self.par_checker, ctx, host_cb)
+    }
+
     pub fn stop(&self) {
         self.twin_fetcher.stop();
+        self.par_checker.cancel();
     }
 
     fn delete_twin_files(&self) {
@@ -710,26 +756,34 @@ impl NzbgetRsRepairController {
         }
     }
 
-    fn is_stopped(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> bool {
-        inspect_ctrl(ctx, host_cb).is_stopped
+    fn is_stopped(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) -> bool {
+        self.snap(ctx, host_cb).is_stopped
     }
 
     pub fn run(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
-        let (nzb_name, dest_dir, dupe_repaired, dl_sec, par_quick_opt, force_par_full, force_repair, cur_time) =
-            with_dq_guard(ctx, host_cb, |_dq| {
-                let ctrl = inspect_ctrl(ctx, host_cb);
-                let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
-                (
-                    nzb.name,
-                    nzb.dest_dir,
-                    nzb.dupe_recovered_bytes > 0,
-                    nzb.download_sec,
-                    ctrl.par_quick_opt,
-                    ctrl.force_par_full,
-                    ctrl.force_repair,
-                    ctrl.cur_time,
-                )
-            });
+        let (
+            nzb_name,
+            dest_dir,
+            dupe_repaired,
+            dl_sec,
+            par_quick_opt,
+            force_par_full,
+            force_repair,
+            cur_time,
+        ) = with_dq_guard(ctx, host_cb, |_dq| {
+            let ctrl = self.snap(ctx, host_cb);
+            let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
+            (
+                nzb.name,
+                nzb.dest_dir,
+                nzb.dupe_recovered_bytes > 0,
+                nzb.download_sec,
+                ctrl.par_quick_opt,
+                ctrl.force_par_full,
+                ctrl.force_repair,
+                ctrl.cur_time,
+            )
+        });
 
         {
             let mut st = self.lock_state();
@@ -737,23 +791,19 @@ impl NzbgetRsRepairController {
             st.download_sec = dl_sec;
         }
         let par_quick = should_use_par_quick(par_quick_opt, force_par_full, dupe_repaired);
-        let c_dest = to_c_buf(&dest_dir);
-        let c_name = to_c_buf(&nzb_name);
-        unsafe {
-            host_cb(
-                ctx,
-                3,
-                c_int::from(par_quick),
-                c_int::from(force_repair),
-                0,
-                0,
-                c_dest.as_ptr() as *const c_char,
-                c_name.as_ptr() as *const c_char,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
+        self.par_checker.set_dest_dir(dest_dir);
+        self.par_checker.set_nzb_name(nzb_name.clone());
+        self.par_checker.set_par_quick(par_quick);
+        self.par_checker.set_force_repair(force_repair);
+        let mut msg = b"Checking pars for ".to_vec();
+        msg.extend_from_slice(&nzb_name);
+        emit_msg(ctx, host_cb, MK_INFO, &msg);
+        let hooks = RepairParHooks {
+            ctrl: self,
+            ctx,
+            host_cb,
+        };
+        self.par_checker.execute(&hooks);
     }
 
     pub fn add_par(
@@ -787,38 +837,9 @@ impl NzbgetRsRepairController {
                 crate::paths::PATH_SEPARATOR,
                 &filename,
             );
-            let c_full = to_c_buf(&full);
-            unsafe {
-                host_cb(
-                    ctx,
-                    4,
-                    1,
-                    0,
-                    0,
-                    0,
-                    c_full.as_ptr() as *const c_char,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            self.par_checker.add_par_file(full);
         } else {
-            unsafe {
-                host_cb(
-                    ctx,
-                    4,
-                    2,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
+            self.par_checker.queue_changed();
         }
         same_collection
     }
@@ -830,7 +851,7 @@ impl NzbgetRsRepairController {
             (st.download_sec, st.par_time)
         };
         with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = inspect_ctrl(ctx, host_cb);
+            let ctrl = self.snap(ctx, host_cb);
             let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
             let (new_status, set_rep, rep_val, wait_time, par_sec) = complete_par_check(
                 ctrl.checker_status,
@@ -921,10 +942,11 @@ impl NzbgetRsRepairController {
             let file_size = f_i64s[0];
             let filename = unsafe { ptr_bytes(f_strs[0]) };
 
-            let (parsed, raw_blocks) = match crate::parparser::parse_par_filename(&filename, confirmed) {
-                Some((_, bc)) => (true, bc),
-                None => (false, 0),
-            };
+            let (parsed, raw_blocks) =
+                match crate::parparser::parse_par_filename(&filename, confirmed) {
+                    Some((_, bc)) => (true, bc),
+                    None => (false, 0),
+                };
             let (usable, eff_blocks, strict_ok) = eval_find_pars_candidate(
                 parsed,
                 raw_blocks,
@@ -952,7 +974,7 @@ impl NzbgetRsRepairController {
         block_needed: i32,
     ) -> (bool, i32) {
         with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = inspect_ctrl(ctx, host_cb);
+            let ctrl = self.snap(ctx, host_cb);
             let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
             let mut available: Vec<(usize, usize, i32, bool, Vec<u8>)> = Vec::new();
             let mut block_found = Self::find_pars_pass(
@@ -1061,15 +1083,11 @@ impl NzbgetRsRepairController {
         })
     }
 
-    pub fn update_par_check_progress(
-        &self,
-        ctx: *mut c_void,
-        host_cb: NzbgetRsRepairCtrlHostFn,
-    ) {
+    pub fn update_par_check_progress(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
         let cur_repair_time = self.lock_state().repair_time;
         let mut updated_repair_time = cur_repair_time;
         with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = inspect_ctrl(ctx, host_cb);
+            let ctrl = self.snap(ctx, host_cb);
             let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
             let label_c = if ctrl.file_progress == 0 {
                 Some(to_c_buf(&ctrl.progress_label))
@@ -1165,7 +1183,7 @@ impl NzbgetRsRepairController {
     }
 
     fn check_pause_state(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
-        let ctrl0 = inspect_ctrl(ctx, host_cb);
+        let ctrl0 = self.snap(ctx, host_cb);
         let nzb0 = inspect_nzb(ctx, host_cb, ctrl0.nzb_ptr);
         if !ctrl0.pause_post_process || nzb0.force_priority {
             return;
@@ -1179,13 +1197,13 @@ impl NzbgetRsRepairController {
         let wait_time = ctrl0.cur_time;
 
         loop {
-            let c_check = inspect_ctrl(ctx, host_cb);
+            let c_check = self.snap(ctx, host_cb);
             let n_check = inspect_nzb(ctx, host_cb, c_check.nzb_ptr);
             if !c_check.pause_post_process || n_check.force_priority || c_check.is_stopped {
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
-            let c_after = inspect_ctrl(ctx, host_cb);
+            let c_after = self.snap(ctx, host_cb);
             let (s_stage, s_start, s_par, s_rep) = calc_paused_timestamps(
                 c_after.cur_time,
                 wait_time,
@@ -1231,7 +1249,7 @@ impl NzbgetRsRepairController {
         let verified_path =
             crate::fsops::get_real_path(filename).unwrap_or_else(|| filename.to_vec());
         with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = inspect_ctrl(ctx, host_cb);
+            let ctrl = self.snap(ctx, host_cb);
             let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
             for job_idx in (0..nzb.jobs_len).rev() {
                 let mut j_ints = [0 as c_int; 1];
@@ -1351,16 +1369,14 @@ impl NzbgetRsRepairController {
         false
     }
 
-    pub fn find_file_crc(
+    pub fn find_file_quick_info(
         &self,
         ctx: *mut c_void,
         host_cb: NzbgetRsRepairCtrlHostFn,
         filename: &[u8],
-        out_crc: *mut u32,
-        segments_ptr: usize,
-    ) -> i32 {
+    ) -> Option<crate::parchecker::QuickInfo> {
         let found = with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = inspect_ctrl(ctx, host_cb);
+            let ctrl = self.snap(ctx, host_cb);
             let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
             for cf_idx in 0..nzb.completed_len {
                 let mut c_ints = [0 as c_int; 3];
@@ -1388,17 +1404,23 @@ impl NzbgetRsRepairController {
             None
         });
 
-        let Some((id, status, crc, reprocess)) = found else {
-            return 0; // ParChecker::fsUnknown
-        };
-        if !out_crc.is_null() {
-            unsafe { *out_crc = crc };
-        }
+        let (id, status, crc, reprocess) = found?;
 
         let mut dbg = b"Found completed file: ".to_vec();
         dbg.extend_from_slice(filename);
         dbg.extend_from_slice(format!(", CRC: {crc:08x}, Status: {status}").as_bytes());
         emit_debug(ctx, host_cb, &dbg);
+
+        let mut raw_segs: Vec<crate::postrepair::NzbgetRsParSegment> = Vec::new();
+        extern "C" fn push_seg(vec_ptr: usize, s: c_int, off: i64, sz: c_int, c: u32) {
+            let v = unsafe { &mut *(vec_ptr as *mut Vec<crate::postrepair::NzbgetRsParSegment>) };
+            v.push(crate::postrepair::NzbgetRsParSegment {
+                success: s,
+                offset: off,
+                size: sz,
+                crc: c,
+            });
+        }
 
         let mut has_segments = false;
         if should_load_partial_segments(status, 2, id, reprocess) {
@@ -1408,22 +1430,23 @@ impl NzbgetRsRepairController {
                     9,
                     6,
                     id,
-                    segments_ptr,
+                    (&mut raw_segs as *mut Vec<crate::postrepair::NzbgetRsParSegment>) as usize,
                     0,
                     ptr::null(),
-                    ptr::null(),
+                    push_seg as *const () as *const c_char,
                     ptr::null_mut(),
                     ptr::null_mut(),
                     ptr::null_mut(),
                 )
             };
             if loaded == 0 {
-                return 0; // ParChecker::fsUnknown
+                return None;
             }
             has_segments = loaded >= 2;
         }
 
-        classify_file_crc_status(status, reprocess, has_segments, 1, 3, 2, 1, 3, 2, 0)
+        let st = classify_file_crc_status(status, reprocess, has_segments, 1, 3, 2, 1, 3, 2, 0);
+        crate::postproc::quick_info_from_status(st, crc, &raw_segs)
     }
 
     pub fn find_file_origname(
@@ -1431,9 +1454,9 @@ impl NzbgetRsRepairController {
         ctx: *mut c_void,
         host_cb: NzbgetRsRepairCtrlHostFn,
         filename: &[u8],
-    ) -> *const c_char {
-        let orig = with_dq_guard(ctx, host_cb, |_dq| {
-            let ctrl = inspect_ctrl(ctx, host_cb);
+    ) -> Option<Vec<u8>> {
+        with_dq_guard(ctx, host_cb, |_dq| {
+            let ctrl = self.snap(ctx, host_cb);
             let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
             for cf_idx in 0..nzb.completed_len {
                 let mut c_ints = [0 as c_int; 3];
@@ -1462,26 +1485,17 @@ impl NzbgetRsRepairController {
                 }
             }
             None
-        });
-        match orig {
-            Some(bytes) => {
-                let boxed = to_c_buf(&bytes).into_boxed_slice();
-                let p = boxed.as_ptr() as *const c_char;
-                self.lock_state().last_origname = Some(boxed);
-                p
-            }
-            None => ptr::null(),
-        }
+        })
     }
 
     pub fn request_dupe_sources(
         &self,
         ctx: *mut c_void,
         host_cb: NzbgetRsRepairCtrlHostFn,
-        dupe_source_list_ptr: usize,
-    ) {
+    ) -> Vec<crate::postproc::ParDupeSource> {
+        let mut out = Vec::new();
         with_dq_guard(ctx, host_cb, |dq_ptr| {
-            let ctrl = inspect_ctrl(ctx, host_cb);
+            let ctrl = self.snap(ctx, host_cb);
             let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
             if nzb.dupe_mode == crate::dupecoord::DUPE_MODE_FORCE {
                 return;
@@ -1557,50 +1571,25 @@ impl NzbgetRsRepairController {
             );
             for u_idx in usable {
                 let (dupe_id, ref dupe_dir) = dupes[u_idx];
-                let c_dir = to_c_buf(dupe_dir);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        10,
-                        5,
-                        dupe_id,
-                        dupe_source_list_ptr,
-                        0,
-                        c_dir.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
+                out.push(crate::postproc::ParDupeSource {
+                    id: dupe_id,
+                    used_blocks: 0,
+                    directory: dupe_dir.clone(),
+                });
             }
         });
+        out
     }
 
     pub fn stat_dupe_sources(
         &self,
         ctx: *mut c_void,
         host_cb: NzbgetRsRepairCtrlHostFn,
-        dupe_source_list_ptr: usize,
+        sources: &[crate::postproc::ParDupeSource],
     ) {
         with_dq_guard(ctx, host_cb, |dq_ptr| {
-            let ctrl = inspect_ctrl(ctx, host_cb);
+            let ctrl = self.snap(ctx, host_cb);
             let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
-            let ds_len = unsafe {
-                host_cb(
-                    ctx,
-                    10,
-                    6,
-                    -1,
-                    dupe_source_list_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            };
             let mut q_ints = [0 as c_int; 2];
             unsafe {
                 host_cb(
@@ -1620,25 +1609,9 @@ impl NzbgetRsRepairController {
             let hist_len = q_ints[1].max(0) as usize;
 
             let mut total_extra = 0i32;
-            for idx in 0..ds_len {
-                let mut ds_ints = [0 as c_int; 2];
-                unsafe {
-                    host_cb(
-                        ctx,
-                        10,
-                        6,
-                        idx as c_int,
-                        dupe_source_list_ptr,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ds_ints.as_mut_ptr(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
-                let ds_id = ds_ints[0];
-                let used_blocks = ds_ints[1];
+            for src in sources {
+                let ds_id = src.id;
+                let used_blocks = src.used_blocks;
                 if used_blocks > 0 {
                     for h_idx in 0..hist_len {
                         let item_ptr = unsafe {
@@ -1705,9 +1678,9 @@ impl NzbgetRsRepairController {
         entry: &NzbEntry,
     ) -> Option<(Vec<u8>, Vec<u8>)> {
         let data = fetch_entry(&self.twin_fetcher, entry, MAX_TWIN_FETCH_SIZE, || {
-            Self::is_stopped(ctx, host_cb)
+            self.is_stopped(ctx, host_cb)
         })?;
-        let ctrl = inspect_ctrl(ctx, host_cb);
+        let ctrl = self.snap(ctx, host_cb);
         let count = self.lock_state().twin_files.len();
         let name = build_twin_filename(entry.filename.as_bytes(), count);
         let path = crate::artwritercore::article_writer_format_dest_file_path(
@@ -1728,31 +1701,19 @@ impl NzbgetRsRepairController {
         &self,
         ctx: *mut c_void,
         host_cb: NzbgetRsRepairCtrlHostFn,
-    ) -> *const c_char {
-        let empty_cstr = || -> *const c_char {
-            let boxed = vec![0u8].into_boxed_slice();
-            let p = boxed.as_ptr() as *const c_char;
-            self.lock_state().last_twin_path = Some(boxed);
-            p
-        };
-
-        let ctrl0 = inspect_ctrl(ctx, host_cb);
+    ) -> Vec<u8> {
+        let ctrl0 = self.snap(ctx, host_cb);
         let c_par_fn = to_c_buf(&ctrl0.par_filename);
         let mut par_buf = Vec::new();
         if let Ok(cs) = CStr::from_bytes_with_nul(&c_par_fn) {
-            crate::fsops::load_file_into_buffer(
-                cs,
-                false,
-                &crate::fsops::posix_stat,
-                |buf_size| {
-                    if buf_size <= 0 {
-                        ptr::null_mut()
-                    } else {
-                        par_buf.resize(buf_size as usize, 0);
-                        par_buf.as_mut_ptr()
-                    }
-                },
-            );
+            crate::fsops::load_file_into_buffer(cs, false, &crate::fsops::posix_stat, |buf_size| {
+                if buf_size <= 0 {
+                    ptr::null_mut()
+                } else {
+                    par_buf.resize(buf_size as usize, 0);
+                    par_buf.as_mut_ptr()
+                }
+            });
         }
         let own = if par_buf.is_empty() {
             Vec::new()
@@ -1761,11 +1722,11 @@ impl NzbgetRsRepairController {
         };
         let own_print = twin_fingerprint(&own);
         if own_print.is_empty() {
-            return empty_cstr();
+            return Vec::new();
         }
 
         let mut candidates: Vec<(Vec<u8>, Vec<u8>, bool)> = with_dq_guard(ctx, host_cb, |dq_ptr| {
-            let ctrl = inspect_ctrl(ctx, host_cb);
+            let ctrl = self.snap(ctx, host_cb);
             let nzb = inspect_nzb(ctx, host_cb, ctrl.nzb_ptr);
             let mut q_ints = [0 as c_int; 2];
             unsafe {
@@ -1811,8 +1772,10 @@ impl NzbgetRsRepairController {
                     &other.queued_filename,
                     has_print,
                     print_matches,
-                ) || !crate::fsops::file_exists(&other.queued_filename, &crate::fsops::posix_stat)
-                {
+                ) || !crate::fsops::file_exists(
+                    &other.queued_filename,
+                    &crate::fsops::posix_stat,
+                ) {
                     return;
                 }
                 out.push((other.name, other.queued_filename, has_print));
@@ -1863,7 +1826,7 @@ impl NzbgetRsRepairController {
         let own_md5s: Vec<&[u8]> = own.iter().map(|s| s.md5.as_bytes()).collect();
 
         for (cand_name, cand_nzb_fn, _) in candidates {
-            if Self::is_stopped(ctx, host_cb) {
+            if self.is_stopped(ctx, host_cb) {
                 break;
             }
             let Ok(xml) = std::fs::read(crate::fsops::path(&cand_nzb_fn)) else {
@@ -1903,18 +1866,15 @@ impl NzbgetRsRepairController {
             msg.extend_from_slice(format!(" (blocks of {mb:.1} MB)").as_bytes());
             emit_msg(ctx, host_cb, MK_INFO, &msg);
 
-            let boxed = to_c_buf(&path).into_boxed_slice();
-            let p = boxed.as_ptr() as *const c_char;
             let mut st = self.lock_state();
             st.twin_name = cand_name;
             st.twin_entries = entries;
             st.twin_index = index_entry.filename.into_bytes();
             st.twin_block_size = blk_sz;
-            st.last_twin_path = Some(boxed);
-            return p;
+            return path;
         }
 
-        empty_cstr()
+        Vec::new()
     }
 
     pub fn request_twin_volumes(
@@ -1922,10 +1882,9 @@ impl NzbgetRsRepairController {
         ctx: *mut c_void,
         host_cb: NzbgetRsRepairCtrlHostFn,
         block_needed: i32,
-    ) -> usize {
+    ) -> Vec<Vec<u8>> {
         let (twin_entries, twin_index, twin_block_size, twin_name) = {
-            let mut st = self.lock_state();
-            st.last_twin_vols.clear();
+            let st = self.lock_state();
             (
                 st.twin_entries.clone(),
                 st.twin_index.clone(),
@@ -1942,8 +1901,8 @@ impl NzbgetRsRepairController {
             ) {
                 continue;
             }
-            let mut blocks = volume_blocks_bytes(entry.filename.as_bytes())
-                .map_or(-1, |b| b as i32);
+            let mut blocks =
+                volume_blocks_bytes(entry.filename.as_bytes()).map_or(-1, |b| b as i32);
             if blocks < 0 && twin_block_size > 0 {
                 blocks = estimate_twin_vol_blocks(entry.size() as i64, twin_block_size);
             }
@@ -1963,12 +1922,12 @@ impl NzbgetRsRepairController {
                     .as_bytes(),
             );
             emit_msg(ctx, host_cb, MK_INFO, &msg);
-            return 0;
+            return Vec::new();
         }
 
-        let mut fetched_vols: Vec<Box<[u8]>> = Vec::new();
+        let mut fetched_vols: Vec<Vec<u8>> = Vec::new();
         let mut left = block_needed;
-        while left > 0 && !volumes.is_empty() && !Self::is_stopped(ctx, host_cb) {
+        while left > 0 && !volumes.is_empty() && !self.is_stopped(ctx, host_cb) {
             let vol_blocks: Vec<i32> = volumes.iter().map(|v| v.1).collect();
             let pick_idx = pick_twin_volume(&vol_blocks, left).unwrap_or(volumes.len() - 1);
             let (entry, blocks) = volumes.remove(pick_idx);
@@ -1979,13 +1938,111 @@ impl NzbgetRsRepairController {
             msg.extend_from_slice(format!(" for par-repair ({blocks} block(s))").as_bytes());
             emit_msg(ctx, host_cb, MK_INFO, &msg);
             if let Some((path, _)) = self.fetch_twin_file(ctx, host_cb, &entry) {
-                fetched_vols.push(to_c_buf(&path).into_boxed_slice());
+                fetched_vols.push(path);
                 left -= blocks;
             }
         }
-        let len = fetched_vols.len();
-        self.lock_state().last_twin_vols = fetched_vols;
-        len
+        fetched_vols
+    }
+}
+
+struct RepairParHooks<'a> {
+    ctrl: &'a NzbgetRsRepairController,
+    ctx: *mut c_void,
+    host_cb: NzbgetRsRepairCtrlHostFn,
+}
+
+impl crate::postproc::ParCheckerHooks for RepairParHooks<'_> {
+    fn read_options(&self) -> crate::postproc::ParCheckerOptions {
+        let ctrl = self.ctrl.snap(self.ctx, self.host_cb);
+        crate::postproc::ParCheckerOptions {
+            par_buffer_mb: ctrl.par_buffer,
+            has_memory_monitor: ctrl.has_memory_monitor,
+            par_threads: ctrl.par_threads,
+            par_scan: ctrl.par_scan,
+            par_repair: ctrl.par_repair,
+            par_ignore_ext: ctrl.par_ignore_ext,
+        }
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.ctrl.is_stopped(self.ctx, self.host_cb)
+    }
+
+    fn request_more_pars(&self, block_needed: i32) -> (bool, i32) {
+        self.ctrl
+            .request_more_pars(self.ctx, self.host_cb, block_needed)
+    }
+
+    fn update_progress(&self) {
+        self.ctrl.update_par_check_progress(self.ctx, self.host_cb);
+    }
+
+    fn completed(&self) {
+        self.ctrl.par_check_completed(self.ctx, self.host_cb);
+    }
+
+    fn print_message(&self, kind: i32, msg: &[u8]) {
+        emit_msg(self.ctx, self.host_cb, kind, msg);
+    }
+
+    fn global_log(&self, kind: i32, msg: &[u8]) {
+        emit_global_log(self.ctx, self.host_cb, kind, msg);
+    }
+
+    fn register_parred_file(&self, filename: &[u8]) {
+        let c_fn = to_c_buf(filename);
+        unsafe {
+            (self.host_cb)(
+                self.ctx,
+                9,
+                0,
+                0,
+                0,
+                0,
+                c_fn.as_ptr() as *const c_char,
+                ptr::null(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+        }
+    }
+
+    fn register_verified_file(&self, filename: &[u8]) {
+        self.ctrl
+            .register_verified_file(self.ctx, self.host_cb, filename);
+    }
+
+    fn is_parred_file(&self, filename: &[u8]) -> bool {
+        self.ctrl.is_parred_file(self.ctx, self.host_cb, filename)
+    }
+
+    fn find_file_quick_info(&self, filename: &[u8]) -> Option<crate::parchecker::QuickInfo> {
+        self.ctrl
+            .find_file_quick_info(self.ctx, self.host_cb, filename)
+    }
+
+    fn find_file_origname(&self, filename: &[u8]) -> Option<Vec<u8>> {
+        self.ctrl
+            .find_file_origname(self.ctx, self.host_cb, filename)
+    }
+
+    fn request_dupe_sources(&self) -> Vec<crate::postproc::ParDupeSource> {
+        self.ctrl.request_dupe_sources(self.ctx, self.host_cb)
+    }
+
+    fn stat_dupe_sources(&self, sources: &[crate::postproc::ParDupeSource]) {
+        self.ctrl.stat_dupe_sources(self.ctx, self.host_cb, sources);
+    }
+
+    fn request_twin_index(&self) -> Vec<u8> {
+        self.ctrl.request_twin_index(self.ctx, self.host_cb)
+    }
+
+    fn request_twin_volumes(&self, block_needed: i32) -> Vec<Vec<u8>> {
+        self.ctrl
+            .request_twin_volumes(self.ctx, self.host_cb, block_needed)
     }
 }
 
@@ -1993,27 +2050,11 @@ impl NzbgetRsRepairController {
 /// - `op == 0`: `Stop()`
 /// - `op == 1`: `Run()`
 /// - `op == 2`: `AddPar(file_ptr=p1, deleted=a1 != 0)` -> returns `same_collection` (`0`/`1`)
-/// - `op == 3`: `ParCheckCompleted()`
-/// - `op == 4`: `RequestMorePars(block_needed=a1)` -> writes `*p1` (`int* blockFoundOut`), returns `0`/`1`
-/// - `op == 5`: `UpdateParCheckProgress()` (including `CheckPauseState`)
-/// - `op == 6`: `FindFileCrc(filename=s1, crc=p1 as *mut u32, segments=p2)` -> returns `ParChecker::EFileStatus`
-/// - `op == 7`: `FindFileOrigname(filename=s1)` -> writes `*out_str` (`nullptr` if none)
-/// - `op == 8`: `RequestDupeSources(dupeSourceList=p1)`
-/// - `op == 9`: `RequestTwinIndex()` -> writes `*out_str`
-/// - `op == 10`: `RequestTwinVolumes(block_needed=a1)` -> returns fetched volume count
-/// - `op == 11`: get fetched twin volume path at `a1` -> writes `*out_str`
-/// - `op == 12`: `StatDupeSources(dupeSourceList=p1)`
-/// - `op == 13`: `RegisterVerifiedFile(filename=s1)`
-/// - `op == 14`: `IsParredFile(filename=s1)` -> returns `0`/`1`
-#[allow(clippy::too_many_arguments)]
 pub unsafe fn repair_ctrl_exec(
     ctrl: *const NzbgetRsRepairController,
     op: c_int,
     a1: c_int,
     p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    out_str: *mut *const c_char,
     host_cb: Option<NzbgetRsRepairCtrlHostFn>,
     ctx: *mut c_void,
 ) -> c_int {
@@ -2037,101 +2078,6 @@ pub unsafe fn repair_ctrl_exec(
             } else {
                 0
             }
-        }
-        3 => {
-            if let Some(cb) = host_cb {
-                c.par_check_completed(ctx, cb);
-            }
-            0
-        }
-        4 => {
-            let Some(cb) = host_cb else {
-                return 0;
-            };
-            let (ok, found) = c.request_more_pars(ctx, cb, a1);
-            if p1 != 0 {
-                unsafe { *(p1 as *mut c_int) = found };
-            }
-            c_int::from(ok)
-        }
-        5 => {
-            if let Some(cb) = host_cb {
-                c.update_par_check_progress(ctx, cb);
-            }
-            0
-        }
-        6 => {
-            let Some(cb) = host_cb else {
-                return 0;
-            };
-            let fname = unsafe { ptr_bytes(s1) };
-            c.find_file_crc(ctx, cb, &fname, p1 as *mut u32, p2)
-        }
-        7 => {
-            let Some(cb) = host_cb else {
-                return 0;
-            };
-            let fname = unsafe { ptr_bytes(s1) };
-            let ptr_val = c.find_file_origname(ctx, cb, &fname);
-            if !out_str.is_null() {
-                unsafe { *out_str = ptr_val };
-            }
-            c_int::from(!ptr_val.is_null())
-        }
-        8 => {
-            if let Some(cb) = host_cb {
-                c.request_dupe_sources(ctx, cb, p1);
-            }
-            0
-        }
-        9 => {
-            let Some(cb) = host_cb else {
-                return 0;
-            };
-            let ptr_val = c.request_twin_index(ctx, cb);
-            if !out_str.is_null() {
-                unsafe { *out_str = ptr_val };
-            }
-            0
-        }
-        10 => {
-            let Some(cb) = host_cb else {
-                return 0;
-            };
-            c.request_twin_volumes(ctx, cb, a1) as c_int
-        }
-        11 => {
-            let idx = a1.max(0) as usize;
-            if !out_str.is_null() {
-                let st = c.lock_state();
-                unsafe {
-                    *out_str = st
-                        .last_twin_vols
-                        .get(idx)
-                        .map_or(ptr::null(), |v| v.as_ptr() as *const c_char);
-                }
-            }
-            0
-        }
-        12 => {
-            if let Some(cb) = host_cb {
-                c.stat_dupe_sources(ctx, cb, p1);
-            }
-            0
-        }
-        13 => {
-            if let Some(cb) = host_cb {
-                let fname = unsafe { ptr_bytes(s1) };
-                c.register_verified_file(ctx, cb, &fname);
-            }
-            0
-        }
-        14 => {
-            let Some(cb) = host_cb else {
-                return 0;
-            };
-            let fname = unsafe { ptr_bytes(s1) };
-            c_int::from(c.is_parred_file(ctx, cb, &fname))
         }
         _ => 0,
     }
@@ -2185,7 +2131,9 @@ mod tests {
         assert_eq!(par_sec, 80);
 
         let (new_stage, changed, set_rt, new_rsec, cancel, est_sec, est_min) =
-            eval_par_progress_update(2, 1, 10, 20, 30, 40, 2000, 1000, 0, 5, false, 10, false, 500);
+            eval_par_progress_update(
+                2, 1, 10, 20, 30, 40, 2000, 1000, 0, 5, false, 10, false, 500,
+            );
         assert_eq!(new_stage, 30);
         assert!(changed);
         assert!(set_rt);

@@ -46,6 +46,8 @@ pub mod parparser;
 pub mod parrenamer;
 pub mod paths;
 pub mod posting;
+#[cfg(unix)]
+pub mod postproc;
 pub mod prepost;
 pub mod queueeditor;
 pub mod rarreader;
@@ -73,18 +75,18 @@ pub mod webserver;
 pub mod webutil;
 pub mod wildmask;
 
-pub mod dupeidentity;
+pub mod artwritercore;
+pub mod diskstate_format;
 pub mod dupefallback;
+pub mod dupeidentity;
+pub mod ncurses_format;
+pub mod postrepair;
+pub mod queuecoord;
+pub(crate) mod queuesubsys_host;
 pub mod streamrepair;
 #[cfg(unix)]
 pub mod streamrepair_coord;
-pub mod postrepair;
-pub(crate) mod queuesubsys_host;
-pub mod queuecoord;
-pub mod artwritercore;
 pub mod xmlrpc_format;
-pub mod diskstate_format;
-pub mod ncurses_format;
 
 pub mod deadpostings;
 pub mod dupewatch;
@@ -97,6 +99,6 @@ pub mod dupepurge;
 mod allocation_probe;
 pub mod purgejournal;
 
-pub mod memory_pressure;
-pub mod lifecycle;
 pub mod entrypoint;
+pub mod lifecycle;
+pub mod memory_pressure;

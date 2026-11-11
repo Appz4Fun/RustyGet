@@ -1,8 +1,6 @@
 //! `DirectUnpack` (`daemon/postprocess/DirectUnpack.cpp`) and `UnpackController`
 //! (`daemon/postprocess/UnpackController.cpp`) end-to-end Rust implementation.
 
-use std::ffi::{c_char, c_int, CStr};
-
 pub use crate::postrepair::NzbgetRsUnpackMessageInfo;
 
 #[inline]
@@ -121,7 +119,8 @@ pub fn parse_unpack_message(
         info.reset_stage_time = 1;
     }
 
-    if !is_seven_zip && (info.strip_extracting_dir != 0 || text.starts_with(b"Unrar: Extracting ")) {
+    if !is_seven_zip && (info.strip_extracting_dir != 0 || text.starts_with(b"Unrar: Extracting "))
+    {
         info.has_extracting_progress = 1;
     }
 
@@ -246,10 +245,7 @@ pub fn direct_unpack_readline_step(
         return (i + 1, true);
     }
     if i > 35 && ch == i32::from(b' ') {
-        let nul_end = buf[..=i + 1]
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(i + 1);
+        let nul_end = buf[..=i + 1].iter().position(|&b| b == 0).unwrap_or(i + 1);
         if is_insert_disk_prompt(&buf[..nul_end], i, ch) {
             return (i + 1, true);
         }
@@ -651,7 +647,11 @@ fn path_filename(path: &[u8]) -> &[u8] {
 /// `Unpack::SevenZip::IsSupported(const fs::path& path)`.
 pub fn sevenzip_is_supported(path: &[u8]) -> bool {
     let filename = path_filename(path);
-    if filename.is_empty() || filename == b"." || filename == b".." || !filename[1..].contains(&b'.') {
+    if filename.is_empty()
+        || filename == b"."
+        || filename == b".."
+        || !filename[1..].contains(&b'.')
+    {
         return false;
     }
     crate::filetypes::is_seven_zip_file(filename)
@@ -751,12 +751,12 @@ fn is_image_ext(ext: &[u8]) -> bool {
 
 fn entry_base_and_lower_ext(name: &str) -> (&str, Vec<u8>) {
     let trimmed = name.trim_end_matches(['/', '\\']);
-    let base = trimmed
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(trimmed);
+    let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
     let ext = match base.rfind('.') {
-        Some(pos) if pos > 0 => base[pos..].bytes().map(|b| b.to_ascii_lowercase()).collect(),
+        Some(pos) if pos > 0 => base[pos..]
+            .bytes()
+            .map(|b| b.to_ascii_lowercase())
+            .collect(),
         _ => Vec::new(),
     };
     (base, ext)
@@ -1208,7 +1208,10 @@ where
     }
 
     if let Err(e) = std::fs::create_dir_all(output_dir) {
-        let msg = format!("Could not create output directory {}: {e}", output_dir.display());
+        let msg = format!(
+            "Could not create output directory {}: {e}",
+            output_dir.display()
+        );
         log_cb(1, &msg);
         return Err(msg);
     }
@@ -1500,12 +1503,17 @@ fn normalize_unpacked_permissions_excluding(
             if !excluded.contains(&path) {
                 let new_mode = (cur_mode & 0o2000) | (0o755 & allowed_mask);
                 if cur_mode != new_mode {
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(new_mode));
+                    let _ =
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(new_mode));
                 }
             }
             normalize_unpacked_permissions_excluding(&path, excluded, Some(allowed_mask));
         } else if meta.is_file() && !excluded.contains(&path) {
-            let base_mode = if (cur_mode & 0o111) != 0 { 0o755 } else { 0o644 };
+            let base_mode = if (cur_mode & 0o111) != 0 {
+                0o755
+            } else {
+                0o644
+            };
             let new_mode = base_mode & allowed_mask;
             if (cur_mode & 0o777) != new_mode {
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(new_mode));
@@ -1593,7 +1601,9 @@ where
         std::collections::BTreeSet::new();
     collect_existing_paths_in_dir(output_dir, &mut pre_existing);
     let outer_volumes: std::collections::BTreeSet<std::path::PathBuf> =
-        collect_nested_archive_volumes(archive_path).into_iter().collect();
+        collect_nested_archive_volumes(archive_path)
+            .into_iter()
+            .collect();
     let mut processed_nested = pre_existing.clone();
     processed_nested.extend(outer_volumes.iter().cloned());
 
@@ -1644,17 +1654,16 @@ where
                 return Err("Aborted".to_string());
             }
             processed_nested.insert(nested_arch.clone());
-            let target_dir = nested_arch
-                .parent()
-                .unwrap_or(output_dir)
-                .to_path_buf();
+            let target_dir = nested_arch.parent().unwrap_or(output_dir).to_path_buf();
             let nested_name = nested_arch
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("nested");
             log_cb(
                 0,
-                &format!("Extended Unpacker (depth {depth}): unpacking nested archive {nested_name}"),
+                &format!(
+                    "Extended Unpacker (depth {depth}): unpacking nested archive {nested_name}"
+                ),
             );
             let volumes = collect_nested_archive_volumes(&nested_arch);
             let mut sub_extracted = Vec::new();
@@ -1723,86 +1732,6 @@ where
     log_cb(4, "Unrar: All OK");
     log_cb(4, "7-Zip: Everything is Ok");
     Ok(summary)
-}
-
-#[cfg(unix)]
-fn cstr_to_path(ptr: *const c_char) -> Option<std::path::PathBuf> {
-    if ptr.is_null() {
-        return None;
-    }
-    use std::os::unix::ffi::OsStrExt;
-    let bytes = unsafe { CStr::from_ptr(ptr).to_bytes() };
-    if bytes.is_empty() {
-        return None;
-    }
-    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
-}
-
-#[cfg(not(unix))]
-fn cstr_to_path(ptr: *const c_char) -> Option<std::path::PathBuf> {
-    if ptr.is_null() {
-        return None;
-    }
-    let s = unsafe { CStr::from_ptr(ptr).to_str().ok()? };
-    if s.is_empty() {
-        return None;
-    }
-    Some(std::path::PathBuf::from(s))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_extract_with_zipfast(
-    archive_path: *const c_char,
-    output_dir: *const c_char,
-    password: *const c_char,
-    overwrite_mode: c_int,
-    cleanup_disk: c_int,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-    log_ctx: *mut std::ffi::c_void,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-) -> c_int {
-    let Some(arch) = cstr_to_path(archive_path) else {
-        return 0;
-    };
-    let Some(out) = cstr_to_path(output_dir) else {
-        return 0;
-    };
-    let pw = if password.is_null() {
-        ""
-    } else {
-        unsafe { CStr::from_ptr(password).to_str().unwrap_or("") }
-    };
-    let mut is_cancelled = || {
-        is_stopped_cb.is_some_and(|cb| unsafe { cb(log_ctx) != 0 })
-    };
-    let emit_log = |kind: i32, msg: &str| {
-        if let Some(cb) = log_cb {
-            if let Ok(cmsg) = std::ffi::CString::new(msg) {
-                unsafe { cb(log_ctx, kind, cmsg.as_ptr()) };
-            }
-        }
-    };
-    let res = if cleanup_disk < 0 {
-        extract_single_archive_with_zipfast_cancellable(
-            &arch,
-            &out,
-            pw,
-            overwrite_mode,
-            emit_log,
-            &mut is_cancelled,
-        )
-    } else {
-        extract_archive_with_zipfast_cancellable(
-            &arch,
-            &out,
-            pw,
-            overwrite_mode,
-            cleanup_disk != 0,
-            emit_log,
-            &mut is_cancelled,
-        )
-    };
-    i32::from(res.is_ok())
 }
 
 // ============================================================================
@@ -2355,7 +2284,8 @@ pub fn unpack_controller_cleanup(
             let full = [dest_dir, &[sep], &filename].concat();
             let is_dir = crate::fsops::directory_exists(&full, &crate::fsops::posix_stat);
             let in_extracted = extracted_files.iter().any(|f| f == &filename);
-            let is_downloaded = is_downloaded_file(&filename, use_temp_unpack_dir, downloaded_files);
+            let is_downloaded =
+                is_downloaded_file(&filename, use_temp_unpack_dir, downloaded_files);
             let in_joined = joined_files.contains(&filename.as_slice());
 
             let cleanup_kind = classify_cleanup_archive_file(
@@ -2455,340 +2385,6 @@ pub fn direct_unpack_cleanup(
         let mut ops = crate::fsops::PosixFsOps;
         let _ = crate::fsdelete::delete_directory(&mut ops, final_dir, sep);
     }
-}
-
-unsafe fn collect_cstr_slice<'a>(
-    ptrs: *const *const c_char,
-    len: usize,
-) -> Vec<&'a [u8]> {
-    if ptrs.is_null() || len == 0 {
-        return Vec::new();
-    }
-    let slice = unsafe { std::slice::from_raw_parts(ptrs, len) };
-    let mut out = Vec::with_capacity(len);
-    for &p in slice {
-        if !p.is_null() {
-            out.push(unsafe { CStr::from_ptr(p).to_bytes() });
-        }
-    }
-    out
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_controller_check_archive_files(
-    dest_dir: *const c_char,
-    use_temp_unpack_dir: c_int,
-    downloaded_files: *const *const c_char,
-    downloaded_len: usize,
-    extracted_archives: *const *const c_char,
-    extracted_len: usize,
-    unpack_ignore_ext: *const c_char,
-    out_has_rar_files: *mut c_int,
-    out_has_not_unpacked_rar_files: *mut c_int,
-    out_has_renamed_archive_files: *mut c_int,
-    out_has_seven_zip_files: *mut c_int,
-    out_has_seven_zip_multi_files: *mut c_int,
-    out_has_splitted_files: *mut c_int,
-) {
-    let dest = if dest_dir.is_null() {
-        &b""[..]
-    } else {
-        unsafe { CStr::from_ptr(dest_dir).to_bytes() }
-    };
-    let ignore = if unpack_ignore_ext.is_null() {
-        &b""[..]
-    } else {
-        unsafe { CStr::from_ptr(unpack_ignore_ext).to_bytes() }
-    };
-    let downloaded = unsafe { collect_cstr_slice(downloaded_files, downloaded_len) };
-    let extracted = unsafe { collect_cstr_slice(extracted_archives, extracted_len) };
-    let res = check_archive_files(
-        dest,
-        use_temp_unpack_dir != 0,
-        &downloaded,
-        &extracted,
-        ignore,
-    );
-    unsafe {
-        if !out_has_rar_files.is_null() {
-            *out_has_rar_files = c_int::from(res.has_rar_files);
-        }
-        if !out_has_not_unpacked_rar_files.is_null() {
-            *out_has_not_unpacked_rar_files = c_int::from(res.has_not_unpacked_rar_files);
-        }
-        if !out_has_renamed_archive_files.is_null() {
-            *out_has_renamed_archive_files = c_int::from(res.has_renamed_archive_files);
-        }
-        if !out_has_seven_zip_files.is_null() {
-            *out_has_seven_zip_files = c_int::from(res.has_seven_zip_files);
-        }
-        if !out_has_seven_zip_multi_files.is_null() {
-            *out_has_seven_zip_multi_files = c_int::from(res.has_seven_zip_multi_files);
-        }
-        if !out_has_splitted_files.is_null() {
-            *out_has_splitted_files = c_int::from(res.has_splitted_files);
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_controller_extract_archives(
-    dest_dir: *const c_char,
-    unpack_dir: *const c_char,
-    password: *const c_char,
-    is_seven_zip: c_int,
-    multi_volumes: c_int,
-    use_temp_unpack_dir: c_int,
-    cleanup_disk: c_int,
-    downloaded_files: *const *const c_char,
-    downloaded_len: usize,
-    ctx: *mut std::ffi::c_void,
-    reset_all_ok_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    has_all_ok_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-) -> c_int {
-    if dest_dir.is_null() {
-        return 0;
-    }
-    let Some(out_dir) = cstr_to_path(unpack_dir) else {
-        return 0;
-    };
-    let dest_bytes = unsafe { CStr::from_ptr(dest_dir).to_bytes() };
-    let pw = if password.is_null() {
-        ""
-    } else {
-        unsafe { CStr::from_ptr(password).to_str().unwrap_or("") }
-    };
-    let downloaded = unsafe { collect_cstr_slice(downloaded_files, downloaded_len) };
-
-    let mut reset_all_ok = || {
-        if let Some(cb) = reset_all_ok_cb {
-            unsafe { cb(ctx) };
-        }
-    };
-    let mut has_all_ok = || {
-        has_all_ok_cb.is_none_or(|cb| unsafe { cb(ctx) != 0 })
-    };
-    let mut emit_log = |kind: i32, msg: &str| {
-        if let Some(cb) = log_cb {
-            if let Ok(cmsg) = std::ffi::CString::new(msg) {
-                unsafe { cb(ctx, kind, cmsg.as_ptr()) };
-            }
-        }
-    };
-    let mut is_stopped = || {
-        is_stopped_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 })
-    };
-
-    c_int::from(extract_discovered_archives(
-        dest_bytes,
-        &out_dir,
-        pw,
-        is_seven_zip != 0,
-        multi_volumes != 0,
-        use_temp_unpack_dir != 0,
-        cleanup_disk != 0,
-        &downloaded,
-        &mut reset_all_ok,
-        &mut has_all_ok,
-        &mut emit_log,
-        &mut is_stopped,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_controller_join_splitted_files(
-    dest_dir: *const c_char,
-    unpack_dir: *const c_char,
-    par_success: c_int,
-    write_buffer_kb: c_int,
-    ctx: *mut std::ffi::c_void,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-    progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int)>,
-    add_joined_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-) -> c_int {
-    if dest_dir.is_null() || unpack_dir.is_null() {
-        return 0;
-    }
-    let dest_bytes = unsafe { CStr::from_ptr(dest_dir).to_bytes() };
-    let unpack_bytes = unsafe { CStr::from_ptr(unpack_dir).to_bytes() };
-    let mut joined_files = Vec::new();
-
-    let mut emit_log = |kind: i32, msg: &[u8]| {
-        if let Some(cb) = log_cb {
-            if let Ok(cmsg) = std::ffi::CString::new(msg) {
-                unsafe { cb(ctx, kind, cmsg.as_ptr()) };
-            }
-        }
-    };
-    let mut emit_progress = |label: Option<&[u8]>, stage_progress: i32| {
-        if let Some(cb) = progress_cb {
-            match label {
-                Some(s) => {
-                    if let Ok(clabel) = std::ffi::CString::new(s) {
-                        unsafe { cb(ctx, clabel.as_ptr(), stage_progress) };
-                    }
-                }
-                None => unsafe { cb(ctx, std::ptr::null(), stage_progress) },
-            }
-        }
-    };
-
-    let ok = join_splitted_files(
-        dest_bytes,
-        unpack_bytes,
-        par_success != 0,
-        write_buffer_kb,
-        &mut joined_files,
-        &mut emit_log,
-        &mut emit_progress,
-    );
-
-    if let Some(cb) = add_joined_cb {
-        for piece in joined_files {
-            if let Ok(cpiece) = std::ffi::CString::new(piece) {
-                unsafe { cb(ctx, cpiece.as_ptr()) };
-            }
-        }
-    }
-
-    c_int::from(ok)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_controller_cleanup(
-    dest_dir: *const c_char,
-    final_dir: *const c_char,
-    unpack_dir: *const c_char,
-    unpack_ok: c_int,
-    use_temp_unpack_dir: c_int,
-    final_dir_created: c_int,
-    unpack_cleanup_disk: c_int,
-    inter_dir: c_int,
-    has_splitted_files: c_int,
-    umask: u32,
-    downloaded_files: *const *const c_char,
-    downloaded_len: usize,
-    joined_files: *const *const c_char,
-    joined_len: usize,
-    out_cleaned_up_disk: *mut c_int,
-    ctx: *mut std::ffi::c_void,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-) -> c_int {
-    let dest_bytes = if dest_dir.is_null() {
-        &b""[..]
-    } else {
-        unsafe { CStr::from_ptr(dest_dir).to_bytes() }
-    };
-    let final_bytes = if final_dir.is_null() {
-        &b""[..]
-    } else {
-        unsafe { CStr::from_ptr(final_dir).to_bytes() }
-    };
-    let unpack_bytes = if unpack_dir.is_null() {
-        &b""[..]
-    } else {
-        unsafe { CStr::from_ptr(unpack_dir).to_bytes() }
-    };
-    let downloaded = unsafe { collect_cstr_slice(downloaded_files, downloaded_len) };
-    let joined = unsafe { collect_cstr_slice(joined_files, joined_len) };
-
-    let mut emit_log = |kind: i32, msg: &[u8]| {
-        if let Some(cb) = log_cb {
-            if let Ok(cmsg) = std::ffi::CString::new(msg) {
-                unsafe { cb(ctx, kind, cmsg.as_ptr()) };
-            }
-        }
-    };
-
-    let (ok, cleaned_up) = unpack_controller_cleanup(
-        dest_bytes,
-        final_bytes,
-        unpack_bytes,
-        unpack_ok != 0,
-        use_temp_unpack_dir != 0,
-        final_dir_created != 0,
-        unpack_cleanup_disk != 0,
-        inter_dir != 0,
-        has_splitted_files != 0,
-        umask,
-        &downloaded,
-        &joined,
-        &mut emit_log,
-    );
-
-    if !out_cleaned_up_disk.is_null() && cleaned_up {
-        unsafe { *out_cleaned_up_disk = 1 };
-    }
-
-    c_int::from(ok)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_direct_unpack_is_main_archive(
-    filename: *const c_char,
-) -> c_int {
-    if filename.is_null() {
-        return 0;
-    }
-    let bytes = unsafe { CStr::from_ptr(filename).to_bytes() };
-    c_int::from(direct_unpack_is_main_archive(bytes))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_direct_unpack_find_archive_files(
-    dest_dir: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    add_archive_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-) {
-    if dest_dir.is_null() {
-        return;
-    }
-    let dest_bytes = unsafe { CStr::from_ptr(dest_dir).to_bytes() };
-    let archives = direct_unpack_find_archive_files(dest_bytes);
-    if let Some(cb) = add_archive_cb {
-        for arch in archives {
-            if let Ok(carch) = std::ffi::CString::new(arch) {
-                unsafe { cb(ctx, carch.as_ptr()) };
-            }
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_direct_unpack_cleanup(
-    use_temp_unpack_dir: c_int,
-    unpack_dir: *const c_char,
-    final_dir_created: c_int,
-    final_dir: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
-) {
-    let unpack_bytes = if unpack_dir.is_null() {
-        &b""[..]
-    } else {
-        unsafe { CStr::from_ptr(unpack_dir).to_bytes() }
-    };
-    let final_bytes = if final_dir.is_null() {
-        &b""[..]
-    } else {
-        unsafe { CStr::from_ptr(final_dir).to_bytes() }
-    };
-    let mut emit_log = |kind: i32, msg: &[u8]| {
-        if let Some(cb) = log_cb {
-            if let Ok(cmsg) = std::ffi::CString::new(msg) {
-                unsafe { cb(ctx, kind, cmsg.as_ptr()) };
-            }
-        }
-    };
-    direct_unpack_cleanup(
-        use_temp_unpack_dir != 0,
-        unpack_bytes,
-        final_dir_created != 0,
-        final_bytes,
-        &mut emit_log,
-    );
 }
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
@@ -2910,33 +2506,6 @@ pub fn eval_unpack_completed_failure(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_controller_try_password_file(
-    path: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    should_continue_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    try_password_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-) -> c_int {
-    let Some(file_path) = cstr_to_path(path) else {
-        return 0;
-    };
-    let mut should_continue = || {
-        should_continue_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 })
-    };
-    let mut try_pw = |pw: &[u8]| {
-        if let Some(cb) = try_password_cb {
-            if let Ok(cpw) = std::ffi::CString::new(pw) {
-                unsafe { cb(ctx, cpw.as_ptr()) };
-            }
-        }
-    };
-    c_int::from(try_passwords_from_file(
-        &file_path,
-        &mut should_continue,
-        &mut try_pw,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3004,7 +2573,10 @@ mod tests {
         // MakePasswordTest
         assert_eq!(extractor_make_password(b""), b"-p-");
         assert_eq!(extractor_make_password(b"mysecret"), b"-pmysecret");
-        assert_eq!(extractor_make_password(b"pass with space"), b"-ppass with space");
+        assert_eq!(
+            extractor_make_password(b"pass with space"),
+            b"-ppass with space"
+        );
     }
 
     #[test]
@@ -3054,7 +2626,13 @@ mod tests {
             &mut max,
             &mut dif_size_min
         ));
-        assert!(check_joinable_fragments(count, min, max, dif_size_min, false));
+        assert!(check_joinable_fragments(
+            count,
+            min,
+            max,
+            dif_size_min,
+            false
+        ));
     }
 
     fn test_crc32(data: &[u8]) -> u32 {
@@ -3102,7 +2680,11 @@ mod tests {
             out.extend_from_slice(stored_bytes);
 
             // Central directory header
-            let version_made_by: u16 = if unix_mode.is_some() { (3 << 8) | 20 } else { 20 };
+            let version_made_by: u16 = if unix_mode.is_some() {
+                (3 << 8) | 20
+            } else {
+                20
+            };
             let ext_attr: u32 = unix_mode.map_or(0, |m| m << 16);
             cd.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
             cd.extend_from_slice(&version_made_by.to_le_bytes());
@@ -3275,25 +2857,16 @@ mod tests {
 
         // 8. Range-based ZipIndex & ZipIndexOpener match in-memory ZipReader
         for archive in [
-            &empty_zip,
-            &nzb_zip,
-            &ext_zip,
-            &media_zip,
-            &epub_zip,
-            &cbz_zip,
-            &sym_zip,
-            &enc_zip,
+            &empty_zip, &nzb_zip, &ext_zip, &media_zip, &epub_zip, &cbz_zip, &sym_zip, &enc_zip,
         ] {
             let mem_info = inspect_zip_bytes(archive).unwrap();
-            let range_info = inspect_zip_range(
-                archive.len() as u64,
-                |offset, buf| -> std::io::Result<()> {
+            let range_info =
+                inspect_zip_range(archive.len() as u64, |offset, buf| -> std::io::Result<()> {
                     let start = offset as usize;
                     buf.copy_from_slice(&archive[start..start + buf.len()]);
                     Ok(())
-                },
-            )
-            .unwrap();
+                })
+                .unwrap();
             assert_eq!(range_info, mem_info);
 
             let staged_index = open_zip_index_staged(
@@ -3541,7 +3114,10 @@ mod tests {
         let skip_summary =
             extract_archive_with_zipfast(&zip_path, &out_dir, "", 0, |_, _| {}).unwrap();
         assert_eq!(skip_summary.skipped, 2);
-        assert_eq!(std::fs::read(out_dir.join("root.nzb")).unwrap(), b"modified");
+        assert_eq!(
+            std::fs::read(out_dir.join("root.nzb")).unwrap(),
+            b"modified"
+        );
 
         // OverwriteMode::Overwrite (1) replaces modified file on disk
         let ov_summary =
@@ -3572,9 +3148,7 @@ mod tests {
             plain
         );
 
-        assert!(
-            read_zip_entry_file(&enc_zip_path, "missing.mkv", Some("correct-pw")).is_err()
-        );
+        assert!(read_zip_entry_file(&enc_zip_path, "missing.mkv", Some("correct-pw")).is_err());
 
         let mut wrong_pw_logs = Vec::new();
         assert!(extract_archive_with_zipfast(
@@ -3631,7 +3205,13 @@ mod tests {
         assert!(inspect_zip_file(&rar5_path).is_err());
 
         // 4b. Extended Unpacker (nested archive inside ZIP) + Permission Fixer (0o400 -> 0o644)
-        let inner_zip = build_test_zip(&[("inner_movie.mkv", b"nested movie data", Some(0o100400), 0, None)]);
+        let inner_zip = build_test_zip(&[(
+            "inner_movie.mkv",
+            b"nested movie data",
+            Some(0o100400),
+            0,
+            None,
+        )]);
         let outer_zip_path = work_dir.join("outer_nested.zip");
         let nested_out_dir = work_dir.join("nested_out");
         std::fs::write(
@@ -3660,23 +3240,35 @@ mod tests {
             let untouched_file = nested_out_dir.join("unrelated_secret.txt");
             let untouched_dir = nested_out_dir.join("private_subdir");
             std::fs::write(&untouched_file, b"secret").unwrap();
-            std::fs::set_permissions(&untouched_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::set_permissions(&untouched_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
             std::fs::create_dir_all(&untouched_dir).unwrap();
-            std::fs::set_permissions(&untouched_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-            extract_archive_with_zipfast(&outer_zip_path, &nested_out_dir, "", 1, |_, _| {}).unwrap();
+            std::fs::set_permissions(&untouched_dir, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            extract_archive_with_zipfast(&outer_zip_path, &nested_out_dir, "", 1, |_, _| {})
+                .unwrap();
             assert_eq!(
-                std::fs::metadata(&untouched_file).unwrap().permissions().mode() & 0o777,
+                std::fs::metadata(&untouched_file)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
                 0o600
             );
             assert_eq!(
-                std::fs::metadata(&untouched_dir).unwrap().permissions().mode() & 0o777,
+                std::fs::metadata(&untouched_dir)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
                 0o700
             );
 
             // Pre-existing leftover nested archive is still unpacked when overwritten
             let _ = std::fs::remove_file(nested_out_dir.join("inner_movie.mkv"));
             std::fs::write(nested_out_dir.join("subarchive.zip"), b"stale leftover").unwrap();
-            extract_archive_with_zipfast(&outer_zip_path, &nested_out_dir, "", 1, |_, _| {}).unwrap();
+            extract_archive_with_zipfast(&outer_zip_path, &nested_out_dir, "", 1, |_, _| {})
+                .unwrap();
             assert!(nested_out_dir.join("inner_movie.mkv").exists());
             assert!(!nested_out_dir.join("subarchive.zip").exists());
 
@@ -3701,42 +3293,61 @@ mod tests {
             let bad_nested_out = work_dir.join("bad_nested_out");
             std::fs::write(
                 &bad_outer_path,
-                build_test_zip(&[("broken_inner.7z", b"7z\xbc\xaf\x27\x1c\x00\x04corrupt", Some(0o100644), 0, None)]),
+                build_test_zip(&[(
+                    "broken_inner.7z",
+                    b"7z\xbc\xaf\x27\x1c\x00\x04corrupt",
+                    Some(0o100644),
+                    0,
+                    None,
+                )]),
             )
             .unwrap();
             let mut bad_logs = Vec::new();
-            assert!(extract_archive_with_zipfast(&bad_outer_path, &bad_nested_out, "", 1, |k, m| {
-                bad_logs.push((k, m.to_string()));
-            })
+            assert!(extract_archive_with_zipfast(
+                &bad_outer_path,
+                &bad_nested_out,
+                "",
+                1,
+                |k, m| {
+                    bad_logs.push((k, m.to_string()));
+                }
+            )
             .is_err());
-            assert!(!bad_logs.iter().any(|(_, m)| m.contains("All OK") || m.contains("Everything is Ok")));
+            assert!(!bad_logs
+                .iter()
+                .any(|(_, m)| m.contains("All OK") || m.contains("Everything is Ok")));
         }
 
         // 4c. Real multi-volume RAR3/4, RAR5, and 7z fixtures from tests/testdata
-        let testdata_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata");
+        let testdata_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/testdata");
         let rar3_fixture = testdata_dir.join("rarrenamer/testfile3.part01.rar");
         if rar3_fixture.exists() {
             let rar3_out = work_dir.join("rar3_out");
-            let s = extract_archive_with_zipfast(&rar3_fixture, &rar3_out, "", 1, |_, _| {}).unwrap();
+            let s =
+                extract_archive_with_zipfast(&rar3_fixture, &rar3_out, "", 1, |_, _| {}).unwrap();
             assert_eq!(s.files, 1);
             assert_eq!(s.volumes, 3);
             assert!(rar3_out.join("testfile3.dat").exists());
 
             let rar3_old = testdata_dir.join("rarrenamer/testfile3oldnam.rar");
             let rar3_old_out = work_dir.join("rar3_old_out");
-            let s_old = extract_archive_with_zipfast(&rar3_old, &rar3_old_out, "", 1, |_, _| {}).unwrap();
+            let s_old =
+                extract_archive_with_zipfast(&rar3_old, &rar3_old_out, "", 1, |_, _| {}).unwrap();
             assert_eq!(s_old.files, 1);
             assert!(rar3_old_out.join("testfile3oldnam.dat").exists());
 
             let rar3_enc = testdata_dir.join("rarrenamer/testfile3encdata.part01.rar");
             let rar3_enc_out = work_dir.join("rar3_enc_out");
-            let s_enc = extract_archive_with_zipfast(&rar3_enc, &rar3_enc_out, "123", 1, |_, _| {}).unwrap();
+            let s_enc = extract_archive_with_zipfast(&rar3_enc, &rar3_enc_out, "123", 1, |_, _| {})
+                .unwrap();
             assert_eq!(s_enc.files, 1);
             assert!(rar3_enc_out.join("testfile3encdata.dat").exists());
 
             let rar3_hp = testdata_dir.join("rarrenamer/testfile3encnam.part01.rar");
             let rar3_hp_out = work_dir.join("rar3_hp_out");
-            let s_hp = extract_archive_with_zipfast(&rar3_hp, &rar3_hp_out, "123", 1, |_, _| {}).unwrap();
+            let s_hp =
+                extract_archive_with_zipfast(&rar3_hp, &rar3_hp_out, "123", 1, |_, _| {}).unwrap();
             assert_eq!(s_hp.files, 1);
             assert!(rar3_hp_out.join("testfile3encnam.dat").exists());
         }
@@ -3819,7 +3430,8 @@ mod tests {
         let rar5_fixture = testdata_dir.join("rarrenamer/testfile5.part01.rar");
         if rar5_fixture.exists() {
             let rar5_out = work_dir.join("rar5_out");
-            let s5 = extract_archive_with_zipfast(&rar5_fixture, &rar5_out, "", 1, |_, _| {}).unwrap();
+            let s5 =
+                extract_archive_with_zipfast(&rar5_fixture, &rar5_out, "", 1, |_, _| {}).unwrap();
             assert_eq!(s5.files, 1);
             assert!(rar5_out.join("testfile5.dat").exists());
 
@@ -4155,10 +3767,19 @@ mod tests {
         assert!(!du_final.exists());
 
         // 8. Space error classification, password file iteration, and completed failure evaluation
-        assert!(is_unpack_space_error(true, b"Unrar: write error (No space left on device)"));
-        assert!(is_unpack_space_error(true, b"7-Zip: StorageFull while extracting"));
+        assert!(is_unpack_space_error(
+            true,
+            b"Unrar: write error (No space left on device)"
+        ));
+        assert!(is_unpack_space_error(
+            true,
+            b"7-Zip: StorageFull while extracting"
+        ));
         assert!(!is_unpack_space_error(false, b"No space left on device"));
-        assert!(!is_unpack_space_error(true, b"CRC failed in encrypted file"));
+        assert!(!is_unpack_space_error(
+            true,
+            b"CRC failed in encrypted file"
+        ));
 
         let pw_file = work_dir.join("passwords.txt");
         std::fs::write(&pw_file, b"\r\nfirst_pass\r\nsecond_pass\n\nthird_pass\n").unwrap();

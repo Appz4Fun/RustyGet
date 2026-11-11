@@ -1197,39 +1197,22 @@ impl DonorServerExchange for NntpHealthTransportShared {
             let res = gate.body_once_fallible(|| {
                 let bracketed =
                     crate::nntp::nntp_health_format_bracketed_id(batch[i].message_id.as_bytes());
-                let bracketed_c = c_bytes(&bracketed);
                 let bg_vecs: Vec<Vec<u8>> = batch[i]
                     .groups
                     .iter()
-                    .map(|g| c_bytes(g.as_bytes()))
+                    .map(|g| g.as_bytes().to_vec())
                     .collect();
-                let mut bg_ptrs: Vec<*const c_char> =
-                    bg_vecs.iter().map(|v| v.as_ptr() as *const c_char).collect();
-                let code = unsafe {
-                    host_cb(
-                        ctx,
-                        15,
-                        bg_ptrs.len() as c_int,
-                        0,
-                        conn_ptr,
-                        0,
-                        bracketed_c.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        if bg_ptrs.is_empty() {
-                            ptr::null_mut()
-                        } else {
-                            bg_ptrs.as_mut_ptr()
-                        },
-                        ptr::null(),
-                        0,
-                    )
+                let Some(nntp_host) = get_nntp_fetch_host(ctx, host_cb) else {
+                    return Ok(DonorAnswer::BodyBad);
                 };
-                match code {
-                    1 => Ok(DonorAnswer::Present),
-                    2 => Err(()),
-                    _ => Ok(DonorAnswer::BodyBad),
+                let art = crate::articlefetcher::ArticleFetcher::new(nntp_host)
+                    .fetch_from_connection(conn_ptr, &bracketed, &bg_vecs);
+                if art.success {
+                    Ok(DonorAnswer::Present)
+                } else if art.transient {
+                    Err(())
+                } else {
+                    Ok(DonorAnswer::BodyBad)
                 }
             });
             match res {
@@ -1257,17 +1240,14 @@ impl DonorServerExchange for NntpHealthTransportShared {
 // DupeIdentity::FetchArticle / Read / ParDoomed via host callback
 // ============================================================================
 
-fn fetch_article_via_host(
+fn get_nntp_fetch_host(
     host_ctx: *mut c_void,
     host_cb: DupeHostFn,
-    message_id: &[u8],
-    groups: &[String],
-    deadline: i64,
-) -> FetchedArticleResult {
-    let fetcher_ptr = unsafe {
+) -> Option<crate::articlefetcher::NzbgetRsNntpFetchHostFn> {
+    let raw = unsafe {
         host_cb(
             host_ctx,
-            16,
+            15,
             0,
             0,
             0,
@@ -1281,40 +1261,27 @@ fn fetch_article_via_host(
             0,
         )
     };
-    if fetcher_ptr == 0 {
+    if raw == 0 {
+        None
+    } else {
+        Some(unsafe {
+            std::mem::transmute::<usize, crate::articlefetcher::NzbgetRsNntpFetchHostFn>(raw)
+        })
+    }
+}
+
+fn fetch_article_via_host(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    message_id: &[u8],
+    groups: &[String],
+    deadline: i64,
+) -> FetchedArticleResult {
+    let Some(nntp_host) = get_nntp_fetch_host(host_ctx, host_cb) else {
         return FetchedArticleResult::default();
-    }
-    struct FetcherDrop {
-        fetcher_ptr: usize,
-        ctx: *mut c_void,
-        host_cb: DupeHostFn,
-    }
-    impl Drop for FetcherDrop {
-        fn drop(&mut self) {
-            unsafe {
-                (self.host_cb)(
-                    self.ctx,
-                    18,
-                    0,
-                    0,
-                    self.fetcher_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                    0,
-                );
-            }
-        }
-    }
-    let _drop = FetcherDrop {
-        fetcher_ptr,
-        ctx: host_ctx,
-        host_cb,
     };
+    let fetcher = Arc::new(crate::articlefetcher::ArticleFetcher::new(nntp_host));
+    let fetcher_stop = Arc::clone(&fetcher);
     let ctx_addr = host_ctx as usize;
     dupe_identity_fetch_article(
         message_id,
@@ -1323,86 +1290,16 @@ fn fetch_article_via_host(
         || host_now(ctx_addr as *mut c_void, host_cb),
         http_stopped,
         move |bracketed_id, grp_slice| {
-            let bid_c = c_bytes(bracketed_id);
-            let g_vecs: Vec<Vec<u8>> = grp_slice.iter().map(|g| c_bytes(g.as_bytes())).collect();
-            let mut g_ptrs: Vec<*const c_char> =
-                g_vecs.iter().map(|v| v.as_ptr() as *const c_char).collect();
-            let mut ints = [0 as c_int; 1];
-            let mut i64s = [0i64; 3];
-            let mut strs = [ptr::null::<c_char>(); 1];
-            let art_ptr = unsafe {
-                host_cb(
-                    ctx_addr as *mut c_void,
-                    19,
-                    g_ptrs.len() as c_int,
-                    0,
-                    fetcher_ptr,
-                    0,
-                    bid_c.as_ptr() as *const c_char,
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    i64s.as_mut_ptr(),
-                    if g_ptrs.is_empty() {
-                        strs.as_mut_ptr()
-                    } else {
-                        // pass g_ptrs in and receive data ptr in strs[0] via separate buffer:
-                        g_ptrs.as_mut_ptr()
-                    },
-                    (&raw mut strs[0]) as *const u8,
-                    0,
-                )
-            };
-            if art_ptr == 0 {
-                return Err(());
-            }
-            let data = if strs[0].is_null() || i64s[2] <= 0 {
-                Vec::new()
-            } else {
-                unsafe {
-                    std::slice::from_raw_parts(strs[0] as *const u8, i64s[2] as usize).to_vec()
-                }
-            };
-            unsafe {
-                host_cb(
-                    ctx_addr as *mut c_void,
-                    18,
-                    0,
-                    0,
-                    0,
-                    art_ptr,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                    0,
-                );
-            }
+            let g_vecs: Vec<Vec<u8>> = grp_slice.iter().map(|g| g.as_bytes().to_vec()).collect();
+            let art = fetcher.fetch(bracketed_id, &g_vecs);
             Ok(FetchedArticleResult {
-                success: ints[0] != 0,
-                offset: i64s[0],
-                file_size: i64s[1],
-                data,
+                success: art.success,
+                offset: art.offset,
+                file_size: art.file_size,
+                data: art.data,
             })
         },
-        || unsafe {
-            host_cb(
-                ctx_addr as *mut c_void,
-                17,
-                0,
-                0,
-                fetcher_ptr,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null(),
-                0,
-            );
-        },
+        move || fetcher_stop.stop(),
     )
 }
 

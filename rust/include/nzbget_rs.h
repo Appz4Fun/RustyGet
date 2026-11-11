@@ -17,25 +17,6 @@ typedef struct
 	size_t cap;
 } NzbgetRsBuf;
 
-// Twins and alts (rust/src/twin.rs). Lists are text lines: a file list is
-// "length\tmd5\tname" per file. A download is given by its id and its
-// identity "fingerprint#posting" (DupeFiles and the posting's message-id
-// hash): a stored list is used only for the posting it was made for.
-void nzbget_rs_twin_open(const char* path);
-// returns "fingerprint\tcomplete" (complete: 1 or 0)
-NzbgetRsBuf nzbget_rs_twin_put_par2(int id, const char* posting, const unsigned char* data, size_t len);
-// 0: no list stored for this fingerprint, 1: a partial one, 2: a complete one
-int nzbget_rs_twin_has(int id, const char* print);
-// keeps the lists of the postings given as "id\tfingerprint" lines
-void nzbget_rs_twin_prune(const char* lines);
-// The fingerprint of count files given as md5 texts (NULL entries empty) and
-// lengths; their names are not part of it.
-NzbgetRsBuf nzbget_rs_twin_fingerprint(const char* const* md5s, const unsigned long long* lengths, size_t count);
-unsigned long long nzbget_rs_par2_block_size(const unsigned char* data, size_t len);
-int nzbget_rs_par2_volume_blocks(const char* filename);
-NzbgetRsBuf nzbget_rs_twin_kind(int primary, const char* primaryPrint, int dupe, const char* dupePrint);
-NzbgetRsBuf nzbget_rs_twin_match(int own, const char* ownPrint, const char* target, const char* targetAlt,
-	int donor, const char* donorPrint);
 // Release each result exactly once, with all fields unchanged. A zero buffer
 // is also accepted. Copy the bytes before freeing if they must outlive the result.
 void nzbget_rs_free(NzbgetRsBuf buf);
@@ -1047,43 +1028,6 @@ size_t nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
     const int64_t* segment_offsets, const int32_t* segment_sizes, size_t article_count,
     int32_t* out_indices, size_t out_cap);
 
-void nzbget_rs_twin_visit_par2_sigs(
-    const uint8_t* data, size_t len, void* ctx,
-    void (*visit)(
-        void* ctx, uint64_t length,
-        const char* md5_ptr, size_t md5_len,
-        const char* name_ptr, size_t name_len));
-void nzbget_rs_twin_visit_nzb_entries(
-    const char* path, void* ctx,
-    void (*on_entry)(
-        void* ctx, int64_t size, int32_t par2,
-        const char* fname_ptr, size_t fname_len,
-        const char* subj_ptr, size_t subj_len),
-    void (*on_group)(void* ctx, const char* group_ptr, size_t group_len),
-    void (*on_segment)(void* ctx, int64_t bytes, const char* id_ptr, size_t id_len));
-
-NzbgetRsBuf nzbget_rs_stream_build_donor_key(
-    const char* password,
-    const char* const* file_names_ptr,
-    const int64_t* file_sizes_ptr,
-    const uint8_t* file_is_par_ptr,
-    const size_t* file_group_counts_ptr,
-    size_t file_count,
-    const char* const* groups_ptr,
-    size_t total_groups,
-    const size_t* file_article_counts_ptr,
-    const int32_t* art_part_numbers_ptr,
-    const int32_t* art_sizes_ptr,
-    const char* const* art_message_ids_ptr,
-    size_t total_articles);
-int32_t nzbget_rs_twin_compare_par2_data(
-    const char* const* own_names_ptr,
-    const char* const* own_md5s_ptr,
-    size_t own_count,
-    const char* own_print_ptr,
-    const uint8_t* twin_data_ptr,
-    size_t twin_data_len);
-
 typedef struct NzbgetRsParDamageQueuedFile {
     const char* filename;
     int confirmed;
@@ -1553,18 +1497,6 @@ void nzbget_rs_queue_editor_visit_category_ext_diff(
     const char* old_ext, const char* new_ext, void* ctx,
     void (*cb)(void* ctx, const char* param_name, const char* param_val));
 
-int nzbget_rs_twin_sample_indices(
-    const size_t* primary_seg_counts, const int64_t* primary_seg_bytes, size_t primary_seg_bytes_len,
-    size_t primary_files, const size_t* dupe_seg_counts, const int64_t* dupe_seg_bytes,
-    size_t dupe_seg_bytes_len, size_t dupe_files, size_t sample_count,
-    size_t* out_file_indices, size_t* out_seg_indices);
-
-
-size_t nzbget_rs_dupematcher_filter_dupe_sources(
-    const char* nzb_name, const char* dest_dir, int64_t expected_size, const char* unrar_cmd,
-    const char* const* dupe_dirs, size_t dupe_count, size_t* out_indices,
-    void (*on_message)(void* ctx, int kind, const char* msg), void* ctx);
-
 void* nzbget_rs_regex_new(const char* pattern, int match_buf_size);
 void nzbget_rs_regex_free(void* handle);
 int nzbget_rs_regex_is_valid(const void* handle);
@@ -1574,28 +1506,6 @@ void* nzbget_rs_dir_browser_new(const char* path, int snapshot);
 const char* nzbget_rs_dir_browser_next(void* handle);
 void nzbget_rs_dir_browser_free(void* handle);
 
-void* nzbget_rs_article_batch_fetcher_new(
-    void* ctx,
-    int (*fetch_cb)(
-        void* ctx, size_t worker_idx, const char* msg_id,
-        const char* const* groups, size_t group_count,
-        NzbgetRsBuf* out_data, int64_t* out_offset, int64_t* out_file_size,
-        int* out_success, int* out_retry, int* out_transient),
-    void (*stop_cb)(void* ctx));
-void nzbget_rs_article_batch_fetcher_free(void* handle);
-void nzbget_rs_article_batch_fetcher_set_worker_count(void* handle, int worker_count);
-void nzbget_rs_article_batch_fetcher_begin(
-    void* handle, size_t req_count, void* ctx,
-    size_t (*get_req_cb)(
-        void* ctx, size_t idx, const char** out_mid_ptr, size_t* out_mid_len),
-    void (*get_group_cb)(
-        void* ctx, size_t req_idx, size_t grp_idx,
-        const char** out_grp_ptr, size_t* out_grp_len));
-int nzbget_rs_article_batch_fetcher_next(
-    void* handle, NzbgetRsBuf* out_data, int64_t* out_offset, int64_t* out_file_size,
-    int* out_success, int* out_retry, int* out_transient);
-void nzbget_rs_article_batch_fetcher_cancel_remaining(void* handle);
-void nzbget_rs_article_batch_fetcher_stop(void* handle);
 NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
 
 NzbgetRsBuf nzbget_rs_ext_mgr_load_extensions(
@@ -1907,125 +1817,6 @@ void nzbget_rs_direct_unpack_cleanup(
     void* ctx,
     void (*log_cb)(void* ctx, int kind, const char* msg));
 
-void nzbget_rs_stream_repair_process_donor(
-    const char* dest_dir,
-    int live_mode,
-    const char* const* member_names,
-    size_t member_count,
-    const char* const* target_filenames,
-    const int64_t* target_encoded_sizes,
-    const int64_t* target_decoded_sizes,
-    const int* target_article_counts,
-    const int* target_positional_ranks,
-    const int* target_positional_windows,
-    const uint64_t* target_steps_hashes,
-    const uint8_t* target_patch_eligible,
-    const size_t* target_hole_counts,
-    const NzbgetRsByteRange* target_holes_flat,
-    size_t target_count,
-    const char* donor_info_name,
-    const char* const* donor_file_names,
-    const int64_t* donor_file_sizes,
-    const uint8_t* donor_file_is_par,
-    const uint64_t* donor_file_steps_hashes,
-    const size_t* donor_article_counts,
-    const int32_t* donor_article_sizes_flat,
-    size_t donor_file_count,
-    void* ctx,
-    int (*is_stopped_cb)(void* ctx),
-    const char* (*refresh_live_name_cb)(void* ctx, size_t target_index),
-    void (*begin_member_batch_cb)(void* ctx, int32_t member_index, const int32_t* part_indices, size_t count),
-    int (*next_article_cb)(
-        void* ctx,
-        int* out_success,
-        int64_t* out_offset,
-        int64_t* out_file_size,
-        const uint8_t** out_data,
-        size_t* out_data_len),
-    void (*cancel_batch_cb)(void* ctx),
-    void (*add_progress_cb)(void* ctx, int64_t bytes),
-    void (*add_recovered_cb)(void* ctx, int64_t bytes),
-    void (*sync_target_cb)(
-        void* ctx,
-        size_t target_index,
-        const char* filename,
-        int64_t decoded_file_size,
-        int recreated,
-        const NzbgetRsByteRange* holes,
-        size_t hole_count),
-    void (*emit_message_cb)(void* ctx, int32_t kind, const char* text));
-
-typedef struct NzbgetRsCrossPackSession NzbgetRsCrossPackSession;
-
-NzbgetRsCrossPackSession* nzbget_rs_cross_pack_session_new(
-    const char* dest_dir,
-    const char* const* member_names,
-    size_t member_count,
-    const char* const* target_filenames,
-    const int64_t* target_decoded_sizes,
-    const uint8_t* target_patch_eligible,
-    const size_t* target_hole_counts,
-    const NzbgetRsByteRange* target_holes_flat,
-    size_t target_count,
-    const char* target_password,
-    void* ctx,
-    int (*is_stopped_cb)(void* ctx),
-    void (*emit_message_cb)(void* ctx, int32_t kind, const char* text),
-    void (*emit_debug_cb)(void* ctx, const char* text));
-
-void nzbget_rs_cross_pack_session_free(NzbgetRsCrossPackSession* session);
-
-int nzbget_rs_cross_pack_session_has_inner_holes(const NzbgetRsCrossPackSession* session);
-
-void nzbget_rs_cross_pack_session_process_donor(
-    NzbgetRsCrossPackSession* session,
-    const char* donor_queued_filename,
-    const char* donor_info_name,
-    const char* donor_password,
-    const char* const* donor_file_names,
-    const int64_t* donor_file_sizes,
-    const size_t* donor_article_counts,
-    const int32_t* donor_article_sizes_flat,
-    size_t donor_file_count,
-    int allow_decompress,
-    void* ctx,
-    int (*is_stopped_cb)(void* ctx),
-    int (*fetch_part_cb)(
-        void* ctx,
-        int32_t member_index,
-        int32_t part_index,
-        int* out_success,
-        int64_t* out_offset,
-        int64_t* out_file_size,
-        const uint8_t** out_data,
-        size_t* out_data_len),
-    void (*begin_prefetch_cb)(
-        void* ctx,
-        int32_t member_index,
-        const int32_t* part_indices,
-        size_t count),
-    int (*next_batch_cb)(
-        void* ctx,
-        int* out_success,
-        int64_t* out_offset,
-        int64_t* out_file_size,
-        const uint8_t** out_data,
-        size_t* out_data_len),
-    void (*cancel_batch_cb)(void* ctx),
-    void (*begin_materialize_member_cb)(void* ctx, int32_t member_index),
-    void (*set_progress_cb)(void* ctx, const char* label, int32_t stage_progress),
-    void (*set_materializing_cb)(void* ctx, int32_t delta),
-    void (*add_recovered_cb)(void* ctx, int64_t bytes, int32_t holes),
-    void (*sync_target_holes_cb)(
-        void* ctx,
-        const size_t* updated_counts,
-        const NzbgetRsByteRange* updated_flat,
-        size_t target_count),
-    void (*emit_message_cb)(void* ctx, int32_t kind, const char* text),
-    void (*emit_extractor_log_cb)(void* ctx, int32_t kind, const char* text),
-    void (*emit_debug_cb)(void* ctx, const char* text));
-
-
 uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
 
 void nzbget_rs_par_repairer_delete_leftovers(
@@ -2302,8 +2093,9 @@ int nzbget_rs_server_pool_op(
 int nzbget_rs_server_pool_normalize_levels(
     const int* levels, const uint8_t* active, const int* max_conns, size_t len,
     size_t* out_sorted_indices, int* out_norm_levels);
-int nzbget_rs_article_fetch_limit_op(
-    int op, int64_t* inout_bytes, int64_t bytes, int64_t begin, int64_t end, int64_t file_size);
+typedef uintptr_t (*NzbgetRsNntpFetchHostFn)(
+    int op, int a1, int a2, uintptr_t p1, const char* s1,
+    int* ints, int64_t* i64s, const char** strs, uint8_t* buf, size_t buf_len);
 int nzbget_rs_statmeter_op(
     int op, int64_t loc_or_cur_time, int64_t a_i64, int64_t b_i64, int64_t c_i64,
     int a_i32, int b_i32, int c_i32, const int64_t* slice_ptr, size_t slice_len,
@@ -2332,10 +2124,14 @@ int nzbget_rs_article_dl_op(
     int op, int a, const char* response, int64_t begin_pos, int64_t end_pos,
     int64_t article_file_size, int64_t expected_file_size, int64_t dupe_expected_offset,
     int64_t dupe_expected_end, int64_t* out_offset, int* out_size);
-int nzbget_rs_twin_service_op(
-    int op, int a, int b, int c, int d, int64_t f1, int64_t f2,
-    const char* s1, const char* s2, const char* s3, const uint8_t* u8_1, const uint8_t* u8_2,
-    const int* i32_1, const int64_t* i64_1, size_t len, NzbgetRsBuf* out_buf);
+typedef uintptr_t (*NzbgetRsTwinHostFn)(
+    int op, int a1, int a2, uintptr_t p1,
+    const char* s1, const char* s2, const char* s3, const char* s4,
+    int* ints, int64_t* i64s, const char** strs);
+int nzbget_rs_twin_exec(
+    int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+    const char* s1, const char* s2, const char* s3, const char* s4,
+    NzbgetRsNntpFetchHostFn nntp_host, NzbgetRsTwinHostFn host_cb, NzbgetRsBuf* out_buf);
 int nzbget_rs_socket_deadline_wait(
     int fd, int read, int write, void* ctx, int64_t (*rem_cb)(void*));
 typedef struct NzbgetRsScanner NzbgetRsScanner;
@@ -2463,6 +2259,26 @@ int nzbget_rs_stream_repair_ctrl_op(
     int64_t t1, int64_t t2, int64_t t3, double f1,
     const char* s1, const char* const* cstr_arr, const int64_t* i64_arr, size_t len,
     int* out1, int* out2, int64_t* i64_inout, NzbgetRsBuf* out_buf);
+typedef struct NzbgetRsRepairController NzbgetRsRepairController;
+typedef uintptr_t (*NzbgetRsRepairCtrlHostFn)(
+    void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+    const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
+NzbgetRsRepairController* nzbget_rs_repair_ctrl_new(NzbgetRsNntpFetchHostFn nntp_host);
+void nzbget_rs_repair_ctrl_free(NzbgetRsRepairController* ctrl);
+int nzbget_rs_repair_ctrl_exec(
+    const NzbgetRsRepairController* ctrl, int op, int a1, uintptr_t p1, uintptr_t p2,
+    const char* s1, const char** out_str, NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
+typedef struct NzbgetRsStreamRepairCtrl NzbgetRsStreamRepairCtrl;
+typedef uintptr_t (*NzbgetRsStreamRepairHostFn)(
+    void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+    const char* s1, int* ints, int64_t* i64s, const char** strs);
+NzbgetRsStreamRepairCtrl* nzbget_rs_stream_repair_ctrl_new(
+    int live_mode, int nzb_id, NzbgetRsNntpFetchHostFn nntp_host,
+    NzbgetRsDupeProbeHostFn probe_host, int tls_enabled, int debug_enabled);
+void nzbget_rs_stream_repair_ctrl_free(NzbgetRsStreamRepairCtrl* ctrl);
+int nzbget_rs_stream_repair_ctrl_exec(
+    const NzbgetRsStreamRepairCtrl* ctrl, int op,
+    NzbgetRsStreamRepairHostFn host_cb, void* ctx);
 
 typedef struct NzbgetRsConnEnv {
     void* ctx;

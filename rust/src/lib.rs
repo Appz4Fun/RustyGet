@@ -2,6 +2,8 @@
 //! Each module replaces one C++ routine and must match its output byte for byte.
 
 pub mod archive_native;
+#[cfg(unix)]
+pub mod articlefetcher;
 pub mod binrpc;
 pub mod bytes;
 pub mod cleanup;
@@ -72,6 +74,8 @@ pub mod wildmask;
 pub mod dupeidentity;
 pub mod dupefallback;
 pub mod streamrepair;
+#[cfg(unix)]
+pub mod streamrepair_coord;
 pub mod postrepair;
 pub mod queuecoord;
 pub mod artwritercore;

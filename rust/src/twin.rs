@@ -1091,6 +1091,1126 @@ pub fn resolve_kind(
     Vec::new()
 }
 
+// ============================================================================
+// Native TwinCheck Coordinator & TwinCheckJob Orchestration
+// ============================================================================
+
+pub const SAMPLE_COUNT: usize = 6;
+pub const MAX_INDEX_SIZE: i64 = 16 * 1024 * 1024;
+pub const MAX_RUNNING: usize = 2;
+pub const MAX_ATTEMPTS: i32 = 3;
+
+pub type NzbgetRsTwinHostFn = unsafe extern "C" fn(
+    op: std::ffi::c_int,
+    a1: std::ffi::c_int,
+    a2: std::ffi::c_int,
+    p1: usize,
+    s1: *const std::ffi::c_char,
+    s2: *const std::ffi::c_char,
+    s3: *const std::ffi::c_char,
+    s4: *const std::ffi::c_char,
+    ints: *mut std::ffi::c_int,
+    i64s: *mut i64,
+    strs: *mut *const std::ffi::c_char,
+) -> usize;
+
+#[derive(Clone)]
+struct ScheduledTwinJob {
+    nzb_id: i32,
+    nzb_filename: Vec<u8>,
+    hinted: bool,
+    primary_id: i32,
+    primary_nzb_filename: Vec<u8>,
+    posting: Vec<u8>,
+    rank: i32,
+}
+
+struct ActiveTwinJob {
+    thread_ptr: usize,
+    fetcher: std::sync::Arc<crate::articlefetcher::ArticleFetcher>,
+    spec: ScheduledTwinJob,
+}
+
+#[derive(Default)]
+struct TwinCoordState {
+    stopping: bool,
+    instance_ptr: usize,
+    jobs: std::collections::BTreeMap<usize, ActiveTwinJob>,
+    checking: std::collections::BTreeSet<i32>,
+    failed_attempts: std::collections::BTreeMap<i32, i32>,
+}
+
+static OPENED_STORE_PATH: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static TWIN_COORD: std::sync::OnceLock<Mutex<TwinCoordState>> = std::sync::OnceLock::new();
+static NEXT_TWIN_JOB_TOKEN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(1);
+static TWIN_JOB_COUNT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static TWIN_NUDGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TWIN_LAST_PRUNE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn twin_coord() -> &'static Mutex<TwinCoordState> {
+    TWIN_COORD.get_or_init(|| Mutex::new(TwinCoordState::default()))
+}
+
+#[inline]
+fn decode_utf8_chunks(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        out.push_str(chunk.valid());
+        if !chunk.invalid().is_empty() {
+            out.push('\u{FFFD}');
+        }
+    }
+    out
+}
+
+#[inline]
+unsafe fn twin_cstr_bytes<'a>(p: *const std::ffi::c_char) -> &'a [u8] {
+    if p.is_null() {
+        &[]
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(p).to_bytes() }
+    }
+}
+
+#[inline]
+fn twin_to_c_bytes(bytes: &[u8]) -> Vec<u8> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let mut out = Vec::with_capacity(end + 1);
+    out.extend_from_slice(&bytes[..end]);
+    out.push(0);
+    out
+}
+
+#[inline]
+fn lower_dupe_key_bytes(raw: &[u8]) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        raw.iter()
+            .map(|&b| unsafe { libc::tolower(std::ffi::c_int::from(b)) as u8 })
+            .collect()
+    }
+    #[cfg(not(unix))]
+    {
+        raw.iter().map(u8::to_ascii_lowercase).collect()
+    }
+}
+
+fn twin_file_exists(path: &[u8]) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        crate::fsops::file_exists(path, &crate::fsops::posix_stat)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::metadata(crate::fsops::path(path)).is_ok_and(|m| m.is_file())
+    }
+}
+
+fn ensure_store_open(host_cb: Option<NzbgetRsTwinHostFn>) -> bool {
+    let Some(cb) = host_cb else {
+        return false;
+    };
+    let mut ints = [0 as std::ffi::c_int; 1];
+    let mut i64s = [0i64; 1];
+    let mut strs = [std::ptr::null::<std::ffi::c_char>(); 1];
+    unsafe {
+        cb(
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            i64s.as_mut_ptr(),
+            strs.as_mut_ptr(),
+        );
+    }
+    let qdir = unsafe { twin_cstr_bytes(strs[0]) };
+    if qdir.is_empty() {
+        return false;
+    }
+    let mut full_path = Vec::with_capacity(qdir.len() + 12);
+    full_path.extend_from_slice(qdir);
+    full_path.push(crate::paths::PATH_SEPARATOR);
+    full_path.extend_from_slice(b"twincheck");
+
+    let mut opened = OPENED_STORE_PATH.lock().unwrap_or_else(|e| e.into_inner());
+    if *opened != full_path {
+        let store = Store::open(crate::fsops::path(&full_path).to_path_buf());
+        *STORE.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
+        *opened = full_path;
+    }
+    true
+}
+
+fn store_has_sigs(host_cb: Option<NzbgetRsTwinHostFn>, id: i32, print: &[u8]) -> i32 {
+    if !ensure_store_open(host_cb) {
+        return 0;
+    }
+    let print_s = decode_utf8_chunks(print);
+    let guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(store) = guard.as_ref() else {
+        return 0;
+    };
+    let listed = store.get(id, &print_s);
+    if listed.sigs.is_empty() {
+        0
+    } else if listed.complete {
+        2
+    } else {
+        1
+    }
+}
+
+fn store_kind(
+    host_cb: Option<NzbgetRsTwinHostFn>,
+    primary_id: i32,
+    primary_print: &[u8],
+    dupe_id: i32,
+    dupe_print: &[u8],
+) -> Vec<u8> {
+    if !ensure_store_open(host_cb) {
+        return Vec::new();
+    }
+    let pp = decode_utf8_chunks(primary_print);
+    let dp = decode_utf8_chunks(dupe_print);
+    let guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(store) = guard.as_ref() else {
+        return Vec::new();
+    };
+    kind(store.get(primary_id, &pp), store.get(dupe_id, &dp)).into_bytes()
+}
+
+fn store_match(
+    host_cb: Option<NzbgetRsTwinHostFn>,
+    own_id: i32,
+    own_print: &[u8],
+    target: &[u8],
+    target_alt: &[u8],
+    donor_id: i32,
+    donor_print: &[u8],
+) -> Vec<u8> {
+    if !ensure_store_open(host_cb) {
+        return Vec::new();
+    }
+    let op = decode_utf8_chunks(own_print);
+    let dp = decode_utf8_chunks(donor_print);
+    let tgt = decode_utf8_chunks(target);
+    let alt = decode_utf8_chunks(target_alt);
+    let found = {
+        let guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().and_then(|store| {
+            match_by_content(store.get(own_id, &op), &tgt, &alt, store.get(donor_id, &dp))
+        })
+    };
+    match found {
+        None => Vec::new(),
+        Some(name) if name.is_empty() => b"-".to_vec(),
+        Some(name) => name.into_bytes(),
+    }
+}
+
+fn store_put_par2(
+    host_cb: Option<NzbgetRsTwinHostFn>,
+    id: i32,
+    posting: &[u8],
+    data: &[u8],
+) -> (String, bool) {
+    if data.is_empty() || !ensure_store_open(host_cb) {
+        return (String::new(), false);
+    }
+    let (mut sigs, complete) = par2_set(data);
+    let posting_s = decode_utf8_chunks(posting);
+    if !complete {
+        let earlier = {
+            let guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+            guard
+                .as_ref()
+                .and_then(|store| store.partial_of(id, &posting_s).map(|l| l.sigs.clone()))
+        };
+        if let Some(prev) = earlier {
+            sigs = merge(&prev, &sigs);
+        }
+    }
+    let print = fingerprint(&sigs);
+    if !sigs.is_empty() {
+        let identity = format!("{print}#{posting_s}");
+        let listed = Listed {
+            sigs,
+            complete,
+            print: identity,
+        };
+        let mut guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(store) = guard.as_mut() {
+            store.put(id, listed);
+        }
+    }
+    (print, complete)
+}
+
+fn store_prune(host_cb: Option<NzbgetRsTwinHostFn>, live: &[(i32, String)]) {
+    if !ensure_store_open(host_cb) {
+        return;
+    }
+    let mut guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(store) = guard.as_mut() {
+        store.prune(live);
+    }
+}
+
+fn twin_attempts(nzb_id: i32) -> i32 {
+    let guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+    guard.failed_attempts.get(&nzb_id).copied().unwrap_or(0)
+}
+
+struct TwinQueueItem {
+    nzb_ptr: usize,
+    id: i32,
+    queued: bool,
+    rank: i32,
+    is_dupe: bool,
+    dupe_score: i32,
+    hinted: bool,
+    posting: Vec<u8>,
+    name: Vec<u8>,
+    queued_filename: Vec<u8>,
+    files_param: Vec<u8>,
+    has_sampled: bool,
+    sampled_param: Vec<u8>,
+    has_sampled_of: bool,
+    sampled_of_param: Vec<u8>,
+    kind_param: Vec<u8>,
+}
+
+struct TwinLockedWorkCtx {
+    prune: bool,
+    cur_time: i64,
+    host_cb: NzbgetRsTwinHostFn,
+    prune_ran: bool,
+    live: Vec<(i32, String)>,
+    jobs: Vec<ScheduledTwinJob>,
+}
+
+fn run_service_work_locked(ctx: &mut TwinLockedWorkCtx, dq_ptr: usize) {
+    let cb = ctx.host_cb;
+    let mut counts = [0 as std::ffi::c_int; 4];
+    unsafe {
+        cb(
+            4,
+            0,
+            0,
+            dq_ptr,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            counts.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+    let queue_len = counts[0].max(0) as usize;
+    let history_len = counts[1].max(0) as usize;
+    let ds_dupe = counts[2];
+    let ds_copy = counts[3];
+
+    if ctx.prune {
+        TWIN_LAST_PRUNE.store(ctx.cur_time, std::sync::atomic::Ordering::SeqCst);
+        ctx.prune_ran = true;
+    }
+
+    let mut keys: std::collections::BTreeMap<Vec<u8>, Vec<TwinQueueItem>> =
+        std::collections::BTreeMap::new();
+
+    let mut fetch_item = |op_code: std::ffi::c_int, idx: usize, queued: bool, rank: i32| {
+        let mut ints = [0 as std::ffi::c_int; 7];
+        let mut i64s = [0i64; 2];
+        let mut strs = [std::ptr::null::<std::ffi::c_char>(); 7];
+        let nzb_ptr = unsafe {
+            cb(
+                op_code,
+                idx as std::ffi::c_int,
+                0,
+                dq_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                ints.as_mut_ptr(),
+                i64s.as_mut_ptr(),
+                strs.as_mut_ptr(),
+            )
+        };
+        if nzb_ptr == 0 {
+            return;
+        }
+        let id = ints[0];
+        let posting = (ints[3] as u32).to_string().into_bytes();
+        let files_param = unsafe { twin_cstr_bytes(strs[3]) }.to_vec();
+        if ctx.prune {
+            let ident = format_identity(&files_param, &posting);
+            if !ident.is_empty() {
+                ctx.live.push((id, decode_utf8_chunks(&ident)));
+            }
+        }
+        let is_nk_nzb = ints[5] != 0;
+        if !is_nk_nzb {
+            return;
+        }
+        let raw_key = unsafe { twin_cstr_bytes(strs[1]) };
+        let key = lower_dupe_key_bytes(raw_key);
+        if key.is_empty() {
+            return;
+        }
+        let is_dupe = is_dupe_item(queued, i64s[0], i64s[1], ints[1], ds_dupe, ds_copy);
+        let item = TwinQueueItem {
+            nzb_ptr,
+            id,
+            queued,
+            rank,
+            is_dupe,
+            dupe_score: ints[2],
+            hinted: ints[4] != 0,
+            posting,
+            name: unsafe { twin_cstr_bytes(strs[0]) }.to_vec(),
+            queued_filename: unsafe { twin_cstr_bytes(strs[2]) }.to_vec(),
+            files_param,
+            has_sampled: (ints[6] & 1) != 0,
+            sampled_param: unsafe { twin_cstr_bytes(strs[4]) }.to_vec(),
+            has_sampled_of: (ints[6] & 2) != 0,
+            sampled_of_param: unsafe { twin_cstr_bytes(strs[5]) }.to_vec(),
+            kind_param: unsafe { twin_cstr_bytes(strs[6]) }.to_vec(),
+        };
+        keys.entry(key).or_default().push(item);
+    };
+
+    for idx in 0..queue_len {
+        fetch_item(5, idx, true, 0);
+    }
+    for idx in 0..history_len {
+        fetch_item(6, idx, false, (idx + 1) as i32);
+    }
+
+    let mut changed = false;
+    let host_opt = Some(cb);
+
+    for (_key, mut items) in keys {
+        items.retain(|it| !it.queued_filename.contains(&b'|'));
+        if items.len() < 2 {
+            continue;
+        }
+        let first_job = ctx.jobs.len();
+        let key_rank = items.iter().map(|it| it.rank).min().unwrap_or(i32::MAX);
+
+        for item in &items {
+            let ident = format_identity(&item.files_param, &item.posting);
+            let listless = is_print_usable(&item.files_param)
+                && store_has_sigs(host_opt, item.id, &ident) < 2
+                && twin_attempts(item.id) < MAX_ATTEMPTS;
+            let is_merged = item.queued_filename.contains(&b'|');
+            if (item.files_param.is_empty() || listless)
+                && !is_merged
+                && twin_file_exists(&item.queued_filename)
+            {
+                ctx.jobs.push(ScheduledTwinJob {
+                    nzb_id: item.id,
+                    nzb_filename: item.queued_filename.clone(),
+                    hinted: item.hinted,
+                    primary_id: 0,
+                    primary_nzb_filename: Vec::new(),
+                    posting: item.posting.clone(),
+                    rank: 0,
+                });
+            }
+        }
+
+        let item_queued: Vec<u8> = items.iter().map(|it| u8::from(it.queued)).collect();
+        let item_dupe: Vec<u8> = items.iter().map(|it| u8::from(it.is_dupe)).collect();
+        let item_scores: Vec<i32> = items.iter().map(|it| it.dupe_score).collect();
+        let primary_idx = select_primary(&item_queued, &item_dupe, &item_scores);
+        let primary_usize = if primary_idx >= 0 && (primary_idx as usize) < items.len() {
+            Some(primary_idx as usize)
+        } else {
+            None
+        };
+
+        let primary_print: Vec<u8> = primary_usize
+            .map(|pi| items[pi].files_param.clone())
+            .unwrap_or_default();
+        let primary_ok = primary_usize.is_some_and(|pi| {
+            !items[pi].queued_filename.contains(&b'|')
+                && twin_file_exists(&items[pi].queued_filename)
+        });
+        let primary_id_bytes: Vec<u8> = primary_usize
+            .map(|pi| items[pi].id.to_string().into_bytes())
+            .unwrap_or_default();
+        let primary_ident: Vec<u8> = primary_usize
+            .map(|pi| format_identity(&items[pi].files_param, &items[pi].posting))
+            .unwrap_or_default();
+
+        for (idx, item) in items.iter().enumerate() {
+            let is_primary = primary_usize == Some(idx);
+            let by_par2 = is_print_usable(&primary_print) && is_print_usable(&item.files_param);
+            let (sampleable, sampled_now) = eval_sampleable(
+                primary_ok,
+                is_primary,
+                item.is_dupe,
+                item.files_param.is_empty(),
+                primary_print.is_empty(),
+                by_par2,
+                item.has_sampled,
+                item.has_sampled_of.then_some(item.sampled_of_param.as_slice()),
+                &primary_id_bytes,
+            );
+            let is_merged = item.queued_filename.contains(&b'|');
+            if sampleable && !sampled_now && !is_merged && twin_file_exists(&item.queued_filename) {
+                if let Some(pi) = primary_usize {
+                    ctx.jobs.push(ScheduledTwinJob {
+                        nzb_id: item.id,
+                        nzb_filename: item.queued_filename.clone(),
+                        hinted: false,
+                        primary_id: items[pi].id,
+                        primary_nzb_filename: items[pi].queued_filename.clone(),
+                        posting: Vec::new(),
+                        rank: 0,
+                    });
+                }
+            }
+
+            let mut by_files = Vec::new();
+            let mut listed = false;
+            if !is_primary && item.is_dupe && by_par2 {
+                if let Some(pi) = primary_usize {
+                    let item_ident = format_identity(&item.files_param, &item.posting);
+                    by_files = store_kind(
+                        host_opt,
+                        items[pi].id,
+                        &primary_ident,
+                        item.id,
+                        &item_ident,
+                    );
+                    listed = store_has_sigs(host_opt, items[pi].id, &primary_ident) > 0
+                        || store_has_sigs(host_opt, item.id, &item_ident) > 0;
+                }
+            }
+
+            let resolved_kind = resolve_kind(
+                is_primary,
+                item.is_dupe,
+                by_par2,
+                &by_files,
+                listed,
+                item.files_param == primary_print,
+                sampleable,
+                sampled_now && item.has_sampled,
+                &item.sampled_param,
+            );
+            if item.kind_param != resolved_kind {
+                let kind_c = twin_to_c_bytes(&resolved_kind);
+                let msg_c = if !resolved_kind.is_empty() {
+                    let p_name = primary_usize
+                        .map(|pi| items[pi].name.as_slice())
+                        .unwrap_or(&[]);
+                    Some(twin_to_c_bytes(&format_twin_kind_message(
+                        &item.name,
+                        p_name,
+                        &resolved_kind,
+                        by_par2,
+                    )))
+                } else {
+                    None
+                };
+                unsafe {
+                    cb(
+                        7,
+                        0,
+                        0,
+                        item.nzb_ptr,
+                        kind_c.as_ptr() as *const std::ffi::c_char,
+                        msg_c
+                            .as_ref()
+                            .map_or(std::ptr::null(), |m| m.as_ptr() as *const std::ffi::c_char),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    );
+                }
+                changed = true;
+            }
+        }
+
+        for j in &mut ctx.jobs[first_job..] {
+            j.rank = key_rank;
+        }
+    }
+
+    if changed {
+        unsafe {
+            cb(
+                8,
+                0,
+                0,
+                dq_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+    }
+}
+
+fn run_service_work(
+    nntp_host: crate::articlefetcher::NzbgetRsNntpFetchHostFn,
+    host_cb: NzbgetRsTwinHostFn,
+) {
+    TWIN_NUDGED.store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut ints = [0 as std::ffi::c_int; 1];
+    let mut i64s = [0i64; 1];
+    let mut strs = [std::ptr::null::<std::ffi::c_char>(); 1];
+    unsafe {
+        host_cb(
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            i64s.as_mut_ptr(),
+            strs.as_mut_ptr(),
+        );
+    }
+    if ints[0] == 0 {
+        return;
+    }
+    let cur_time = i64s[0];
+    let last_prune = TWIN_LAST_PRUNE.load(std::sync::atomic::Ordering::SeqCst);
+    let prune = cur_time - last_prune >= 60 * 60
+        && TWIN_JOB_COUNT.load(std::sync::atomic::Ordering::SeqCst) == 0;
+
+    let mut work_ctx = TwinLockedWorkCtx {
+        prune,
+        cur_time,
+        host_cb,
+        prune_ran: false,
+        live: Vec::new(),
+        jobs: Vec::new(),
+    };
+    unsafe {
+        host_cb(
+            3,
+            0,
+            0,
+            (&mut work_ctx as *mut TwinLockedWorkCtx) as usize,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    if work_ctx.prune_ran {
+        let can_prune = {
+            let guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+            if guard.jobs.is_empty() {
+                true
+            } else {
+                TWIN_LAST_PRUNE.store(0, std::sync::atomic::Ordering::SeqCst);
+                false
+            }
+        };
+        if can_prune {
+            store_prune(Some(host_cb), &work_ctx.live);
+        }
+    }
+
+    work_ctx.jobs.sort_by(|a, b| {
+        if a.rank != b.rank {
+            a.rank.cmp(&b.rank)
+        } else {
+            b.hinted.cmp(&a.hinted)
+        }
+    });
+
+    let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+    for job in work_ctx.jobs {
+        if guard.stopping || guard.jobs.len() >= MAX_RUNNING {
+            break;
+        }
+        if guard.checking.contains(&job.nzb_id) {
+            continue;
+        }
+        let token = NEXT_TWIN_JOB_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let fetcher = std::sync::Arc::new(crate::articlefetcher::ArticleFetcher::new(nntp_host));
+        let thread_ptr = unsafe {
+            host_cb(
+                9,
+                0,
+                0,
+                token,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if thread_ptr == 0 {
+            continue;
+        }
+        let nzb_id = job.nzb_id;
+        guard.jobs.insert(
+            token,
+            ActiveTwinJob {
+                thread_ptr,
+                fetcher,
+                spec: job,
+            },
+        );
+        guard.checking.insert(nzb_id);
+        TWIN_JOB_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            host_cb(
+                10,
+                0,
+                0,
+                thread_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+    }
+}
+
+fn read_nzb_entries_from_disk(path: &[u8]) -> Vec<NzbEntry> {
+    match std::fs::read(crate::fsops::path(path)) {
+        Ok(xml) => read_nzb(&xml),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn run_twin_job(token: usize, host_cb: NzbgetRsTwinHostFn) {
+    let (spec, fetcher, thread_ptr) = {
+        let guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+        let Some(active) = guard.jobs.get(&token) else {
+            return;
+        };
+        (
+            active.spec.clone(),
+            std::sync::Arc::clone(&active.fetcher),
+            active.thread_ptr,
+        )
+    };
+
+    struct UnregisterGuard {
+        token: usize,
+        nzb_id: i32,
+        stored: bool,
+        host_cb: NzbgetRsTwinHostFn,
+    }
+    impl Drop for UnregisterGuard {
+        fn drop(&mut self) {
+            let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+            guard.jobs.remove(&self.token);
+            guard.checking.remove(&self.nzb_id);
+            TWIN_JOB_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            if !guard.stopping && self.stored {
+                TWIN_NUDGED.store(true, std::sync::atomic::Ordering::SeqCst);
+                if guard.instance_ptr != 0 {
+                    unsafe {
+                        (self.host_cb)(
+                            2,
+                            0,
+                            0,
+                            guard.instance_ptr,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let mut unreg = UnregisterGuard {
+        token,
+        nzb_id: spec.nzb_id,
+        stored: false,
+        host_cb,
+    };
+
+    let is_stopped = || -> bool {
+        if fetcher.is_stopped() {
+            return true;
+        }
+        unsafe {
+            host_cb(
+                11,
+                0,
+                0,
+                thread_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) != 0
+        }
+    };
+
+    if spec.primary_id != 0 {
+        let load_data_files = |nzb_path: &[u8]| -> Vec<NzbEntry> {
+            let mut files: Vec<NzbEntry> = read_nzb_entries_from_disk(nzb_path)
+                .into_iter()
+                .filter(|e| !e.is_par2())
+                .collect();
+            files.sort_by(|a, b| {
+                if compare_entry_names(
+                    a.filename.as_bytes(),
+                    a.subject.as_bytes(),
+                    b.filename.as_bytes(),
+                    b.subject.as_bytes(),
+                ) {
+                    std::cmp::Ordering::Less
+                } else if compare_entry_names(
+                    b.filename.as_bytes(),
+                    b.subject.as_bytes(),
+                    a.filename.as_bytes(),
+                    a.subject.as_bytes(),
+                ) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            });
+            files
+        };
+
+        let primary = load_data_files(&spec.primary_nzb_filename);
+        let dupe = load_data_files(&spec.nzb_filename);
+        let primary_id_c = twin_to_c_bytes(spec.primary_id.to_string().as_bytes());
+
+        let flatten = |entries: &[NzbEntry]| -> (Vec<usize>, Vec<i64>) {
+            let mut counts = Vec::with_capacity(entries.len());
+            let mut bytes = Vec::new();
+            for e in entries {
+                counts.push(e.segments.len());
+                for &(b, _) in &e.segments {
+                    bytes.push(b as i64);
+                }
+            }
+            (counts, bytes)
+        };
+        let (p_counts, p_bytes) = flatten(&primary);
+        let (d_counts, d_bytes) = flatten(&dupe);
+
+        let store_sample = |val: &[u8]| -> bool {
+            let n1 = b"DupeSampled\0";
+            let v1 = twin_to_c_bytes(val);
+            let n2 = b"DupeSampledOf\0";
+            unsafe {
+                host_cb(
+                    12,
+                    spec.nzb_id,
+                    0,
+                    0,
+                    n1.as_ptr() as *const std::ffi::c_char,
+                    v1.as_ptr() as *const std::ffi::c_char,
+                    n2.as_ptr() as *const std::ffi::c_char,
+                    primary_id_c.as_ptr() as *const std::ffi::c_char,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ) != 0
+            }
+        };
+
+        let Some(pairs) = sample_indices(&p_counts, &p_bytes, &d_counts, &d_bytes, SAMPLE_COUNT)
+        else {
+            if store_sample(b"none") {
+                unreg.stored = true;
+            }
+            return;
+        };
+
+        let mut compared = 0i32;
+        let mut differ = 0i32;
+        for (file_idx, seg_idx) in pairs {
+            if is_stopped() {
+                break;
+            }
+            let a = &primary[file_idx];
+            let b = &dupe[file_idx];
+            let a_groups: Vec<Vec<u8>> = a.groups.iter().map(|g| g.as_bytes().to_vec()).collect();
+            let b_groups: Vec<Vec<u8>> = b.groups.iter().map(|g| g.as_bytes().to_vec()).collect();
+            let part_a = fetcher.fetch(a.segments[seg_idx].1.as_bytes(), &a_groups);
+            let part_b = fetcher.fetch(b.segments[seg_idx].1.as_bytes(), &b_groups);
+            let (c_next, d_next) = compare_sampled_pair(
+                i32::from(part_a.success),
+                i32::from(part_b.success),
+                part_a.offset,
+                part_b.offset,
+                i32::from(part_a.data == part_b.data),
+                compared,
+                differ,
+            );
+            compared = c_next;
+            differ = d_next;
+        }
+
+        let verdict = eval_sample_verdict(is_stopped(), compared, differ, SAMPLE_COUNT as i32);
+        if verdict == 0 {
+            return;
+        }
+        let sampled_val: &[u8] = if verdict == 2 { b"alt" } else { b"twin" };
+        if store_sample(sampled_val) {
+            unreg.stored = true;
+        }
+        return;
+    }
+
+    let entries = read_nzb_entries_from_disk(&spec.nzb_filename);
+    let is_par2: Vec<u8> = entries.iter().map(|e| u8::from(e.is_par2())).collect();
+    let sizes: Vec<i64> = entries.iter().map(|e| e.size() as i64).collect();
+    let best_idx = select_min_par2_index(&is_par2, &sizes, MAX_INDEX_SIZE);
+    let (data_opt, fetched) = if best_idx < 0 {
+        (None, false)
+    } else {
+        (
+            crate::articlefetcher::fetch_entry(
+                &fetcher,
+                &entries[best_idx as usize],
+                MAX_INDEX_SIZE,
+                is_stopped,
+            ),
+            true,
+        )
+    };
+    if is_stopped() {
+        return;
+    }
+    let (mut fp, complete) = match data_opt {
+        Some(ref data) => store_put_par2(Some(host_cb), spec.nzb_id, &spec.posting, data),
+        None => (String::new(), false),
+    };
+    let known = !fp.is_empty();
+    if fetched && (!known || !complete) {
+        let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+        let att = guard.failed_attempts.entry(spec.nzb_id).or_insert(0);
+        *att += 1;
+        if *att < MAX_ATTEMPTS {
+            return;
+        }
+    }
+    if !known {
+        fp = if fetched {
+            "lost".to_string()
+        } else {
+            "none".to_string()
+        };
+    }
+    let files = if known {
+        parse_fingerprint_files(fp.as_bytes())
+    } else {
+        0
+    };
+    let fp_c = twin_to_c_bytes(fp.as_bytes());
+    let stored_ok = unsafe {
+        host_cb(
+            13,
+            spec.nzb_id,
+            files,
+            0,
+            fp_c.as_ptr() as *const std::ffi::c_char,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
+    };
+    if stored_ok {
+        unreg.stored = true;
+    }
+}
+
+/// Unified Rust dispatcher for `TwinCheck`:
+/// - `op == 0`: `Identity(files_param=s1, posting=s2)` -> returns bytes in `out_vec`
+/// - `op == 1`: `Kind(primary_id=a1, primary_print=s1, dupe_id=a2, dupe_print=s2)` -> `out_vec`
+/// - `op == 2`: `MatchByContent(own_id=a1, own_print=s1, target=s2, target_alt=s3, donor_id=a2, donor_print=s4)` -> `out_vec`
+/// - `op == 3`: `Reset()`
+/// - `op == 4`: `StopAll(host_cb)`
+/// - `op == 5`: `WaitAll()`
+/// - `op == 6`: `AttachInstance(p1=instance_ptr)`
+/// - `op == 7`: `DetachInstance(p1=instance_ptr)`
+/// - `op == 8`: `Nudge()`
+/// - `op == 9`: `ServiceInterval()` -> returns `1000` or `15000`
+/// - `op == 10`: `ServiceWork(nntp_host, host_cb)`
+/// - `op == 11`: `ServiceWorkLocked(p1=ctx_ptr, p2=dq_ptr)`
+/// - `op == 12`: `TwinCheckJob::Run(p1=job_token, host_cb)`
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn twin_exec(
+    op: std::ffi::c_int,
+    a1: std::ffi::c_int,
+    a2: std::ffi::c_int,
+    p1: usize,
+    p2: usize,
+    s1: *const std::ffi::c_char,
+    s2: *const std::ffi::c_char,
+    s3: *const std::ffi::c_char,
+    s4: *const std::ffi::c_char,
+    nntp_host: Option<crate::articlefetcher::NzbgetRsNntpFetchHostFn>,
+    host_cb: Option<NzbgetRsTwinHostFn>,
+) -> (std::ffi::c_int, Option<Vec<u8>>) {
+    match op {
+        0 => {
+            let id_bytes = format_identity(unsafe { twin_cstr_bytes(s1) }, unsafe {
+                twin_cstr_bytes(s2)
+            });
+            (0, Some(id_bytes))
+        }
+        1 => {
+            let k = store_kind(
+                host_cb,
+                a1,
+                unsafe { twin_cstr_bytes(s1) },
+                a2,
+                unsafe { twin_cstr_bytes(s2) },
+            );
+            (0, Some(k))
+        }
+        2 => {
+            let m = store_match(
+                host_cb,
+                a1,
+                unsafe { twin_cstr_bytes(s1) },
+                unsafe { twin_cstr_bytes(s2) },
+                unsafe { twin_cstr_bytes(s3) },
+                a2,
+                unsafe { twin_cstr_bytes(s4) },
+            );
+            (0, Some(m))
+        }
+        3 => {
+            let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+            guard.stopping = false;
+            (0, None)
+        }
+        4 => {
+            let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+            guard.stopping = true;
+            for job in guard.jobs.values() {
+                if let Some(cb) = host_cb {
+                    unsafe {
+                        cb(
+                            1,
+                            0,
+                            0,
+                            job.thread_ptr,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                        );
+                    }
+                }
+                job.fetcher.stop();
+            }
+            (0, None)
+        }
+        5 => {
+            while TWIN_JOB_COUNT.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            (0, None)
+        }
+        6 => {
+            let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+            guard.stopping = false;
+            guard.instance_ptr = p1;
+            (0, None)
+        }
+        7 => {
+            let mut guard = twin_coord().lock().unwrap_or_else(|e| e.into_inner());
+            if guard.instance_ptr == p1 {
+                guard.instance_ptr = 0;
+            }
+            (0, None)
+        }
+        8 => {
+            TWIN_NUDGED.store(true, std::sync::atomic::Ordering::SeqCst);
+            (0, None)
+        }
+        9 => {
+            let interval = if TWIN_NUDGED.load(std::sync::atomic::Ordering::SeqCst) {
+                1000
+            } else {
+                15000
+            };
+            (interval, None)
+        }
+        10 => {
+            if let (Some(nh), Some(cb)) = (nntp_host, host_cb) {
+                run_service_work(nh, cb);
+            }
+            (0, None)
+        }
+        11 => {
+            if p1 != 0 && p2 != 0 {
+                let ctx = unsafe { &mut *(p1 as *mut TwinLockedWorkCtx) };
+                run_service_work_locked(ctx, p2);
+            }
+            (0, None)
+        }
+        12 => {
+            if let Some(cb) = host_cb {
+                run_twin_job(p1, cb);
+            }
+            (0, None)
+        }
+        _ => (0, None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

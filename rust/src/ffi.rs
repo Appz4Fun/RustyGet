@@ -153,11 +153,6 @@ pub(crate) unsafe fn input<'a>(raw: *const c_char) -> &'a [u8] {
 
 // ---- twins and alts (twin.rs); lists cross the ABI as text lines ----
 
-fn with_store<T>(f: impl FnOnce(&mut crate::twin::Store) -> T) -> Option<T> {
-    let mut guard = crate::twin::STORE.lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_mut().map(f)
-}
-
 /// A file system path from C bytes, kept byte for byte (paths needn't be UTF-8).
 unsafe fn path_arg(raw: *const c_char) -> std::path::PathBuf {
     #[cfg(unix)]
@@ -171,10 +166,7 @@ unsafe fn path_arg(raw: *const c_char) -> std::path::PathBuf {
     }
 }
 
-unsafe fn str_arg(raw: *const c_char) -> String {
-    String::from_utf8_lossy(input(raw)).into_owned()
-}
-
+#[cfg(test)]
 unsafe fn bytes_arg<'a>(data: *const u8, len: usize) -> &'a [u8] {
     if data.is_null() {
         &[]
@@ -183,103 +175,14 @@ unsafe fn bytes_arg<'a>(data: *const u8, len: usize) -> &'a [u8] {
     }
 }
 
-/// Opens (or reopens) the store of par2 file lists at `path`.
-///
-/// # Safety
-/// `path` is null or a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_open(path: *const c_char) {
-    let store = crate::twin::Store::open(path_arg(path));
-    *crate::twin::STORE.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
-}
-
-/// Parses the par2 data, stores its file list for download `id` (bound to the
-/// posting: "fingerprint#posting", when it has files) and returns "fingerprint\tcomplete" (an
-/// empty fingerprint for none; complete is 1 or 0).
-///
-/// # Safety
-/// `posting` is null or a valid NUL-terminated string; `data` points to `len`
-/// readable bytes (or is null with `len` 0).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_put_par2(
-    id: i32,
-    posting: *const c_char,
-    data: *const u8,
-    len: usize,
-) -> RsBuf {
-    let (mut sigs, complete) = crate::twin::par2_set(bytes_arg(data, len));
-    let posting = str_arg(posting);
-    // a partial list adds to the posting's partial list from an earlier try (that
-    // one may have seen articles this one didn't); a complete one replaces it
-    if !complete {
-        if let Some(earlier) =
-            with_store(|store| store.partial_of(id, &posting).map(|l| l.sigs.clone())).flatten()
-        {
-            sigs = crate::twin::merge(&earlier, &sigs);
-        }
-    }
-    let print = crate::twin::fingerprint(&sigs);
-    if !sigs.is_empty() {
-        // bound to the posting: its fingerprint and the posting's own id (a hash of
-        // its message-ids), which differently named twins don't share
-        let identity = format!("{print}#{posting}");
-        let listed = crate::twin::Listed {
-            sigs,
-            complete,
-            print: identity,
-        };
-        with_store(|store| store.put(id, listed));
-    }
-    // "fingerprint\tcomplete": a partial list is fetched again
-    into_buf(format!("{print}\t{}", u8::from(complete)).into_bytes())
-}
-
-/// What's stored of download `id` for fingerprint `print`: 0 nothing, 1 a
-/// partial list, 2 a complete one.
-///
-/// # Safety
-/// `print` is null or a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_has(id: i32, print: *const c_char) -> i32 {
-    let print = str_arg(print);
-    with_store(|store| {
-        let listed = store.get(id, &print);
-        if listed.sigs.is_empty() {
-            0
-        } else if listed.complete {
-            2
-        } else {
-            1
-        }
-    })
-    .unwrap_or(0)
-}
-
-/// Keeps the stored lists of the postings given as "id\tfingerprint" lines
-/// (those in queue and history), drops the rest and rewrites the file.
-///
-/// # Safety
-/// `lines` is null or a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_prune(lines: *const c_char) {
-    let live: Vec<(i32, String)> = String::from_utf8_lossy(input(lines))
-        .lines()
-        .filter_map(|line| {
-            let (id, print) = line.split_once('\t')?;
-            Some((id.parse().ok()?, print.to_string()))
-        })
-        .collect();
-    with_store(|store| store.prune(&live));
-}
-
 /// The fingerprint of `count` files given as md5 texts and lengths (the
 /// names are not part of it).
 ///
 /// # Safety
 /// `md5s` points to `count` valid NUL-terminated strings (null entries are
 /// empty) and `lengths` to `count` values; both may be null for 0.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_fingerprint(
+#[cfg(test)]
+unsafe fn nzbget_rs_twin_fingerprint(
     md5s: *const *const c_char,
     lengths: *const u64,
     count: usize,
@@ -294,81 +197,6 @@ pub unsafe extern "C" fn nzbget_rs_twin_fingerprint(
         )
     });
     into_buf(crate::twin::fingerprint_cow(files).into_bytes())
-}
-
-/// The block size of the par2 set in the data, 0 if none.
-///
-/// # Safety
-/// `data` points to `len` readable bytes (or is null with `len` 0).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par2_block_size(data: *const u8, len: usize) -> u64 {
-    crate::twin::block_size(bytes_arg(data, len))
-}
-
-/// The recovery blocks a par2-volume's name gives ("x.vol03+04.par2": 4), -1 if none.
-///
-/// # Safety
-/// `filename` is null or a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par2_volume_blocks(filename: *const c_char) -> i32 {
-    crate::twin::volume_blocks_bytes(input(filename))
-        .map_or(-1, |b| i32::try_from(b).unwrap_or(i32::MAX))
-}
-
-/// The label of download `dupe` against `primary` (each by id and fingerprint):
-/// "twin", "twin:N/M", "alt", or "" when it can't be told.
-///
-/// # Safety
-/// `primary_print` and `dupe_print` are null or valid NUL-terminated strings.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_kind(
-    primary: i32,
-    primary_print: *const c_char,
-    dupe: i32,
-    dupe_print: *const c_char,
-) -> RsBuf {
-    let (primary_print, dupe_print) = (str_arg(primary_print), str_arg(dupe_print));
-    let kind = with_store(|store| {
-        crate::twin::kind(
-            store.get(primary, &primary_print),
-            store.get(dupe, &dupe_print),
-        )
-    })
-    .unwrap_or_default();
-    into_buf(kind.into_bytes())
-}
-
-/// The file of download `donor` holding the bytes of our file `target` (or
-/// `target_alt`) of download `own` (each by id and fingerprint): its name; "-"
-/// when the donor's complete list has no file with these bytes; "" when not known.
-///
-/// # Safety
-/// Every pointer is null or a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_match(
-    own: i32,
-    own_print: *const c_char,
-    target: *const c_char,
-    target_alt: *const c_char,
-    donor: i32,
-    donor_print: *const c_char,
-) -> RsBuf {
-    let (own_print, donor_print) = (str_arg(own_print), str_arg(donor_print));
-    let (target, target_alt) = (str_arg(target), str_arg(target_alt));
-    let found = with_store(|store| {
-        crate::twin::match_by_content(
-            store.get(own, &own_print),
-            &target,
-            &target_alt,
-            store.get(donor, &donor_print),
-        )
-    })
-    .flatten();
-    into_buf(match found {
-        None => Vec::new(),
-        Some(name) if name.is_empty() => b"-".to_vec(),
-        Some(name) => name.into_bytes(),
-    })
 }
 
 /// # Safety
@@ -5956,206 +5784,6 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_visit_par2_sigs(
-    data: *const u8,
-    len: usize,
-    ctx: *mut std::ffi::c_void,
-    visit: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            u64,
-            *const c_char,
-            usize,
-            *const c_char,
-            usize,
-        ),
-    >,
-) {
-    let Some(cb) = visit else { return };
-    for s in crate::twin::par2_sigs(bytes_arg(data, len)) {
-        let name: Vec<u8> = s
-            .name
-            .bytes()
-            .map(|b| {
-                if matches!(b, b'\n' | b'\t' | b'\r') {
-                    b'_'
-                } else {
-                    b
-                }
-            })
-            .collect();
-        cb(
-            ctx,
-            s.length,
-            s.md5.as_ptr().cast::<c_char>(),
-            s.md5.len(),
-            name.as_ptr().cast::<c_char>(),
-            name.len(),
-        );
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_visit_nzb_entries(
-    path: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    on_entry: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            i64,
-            i32,
-            *const c_char,
-            usize,
-            *const c_char,
-            usize,
-        ),
-    >,
-    on_group: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize)>,
-    on_segment: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *const c_char, usize)>,
-) {
-    let xml = std::fs::read(path_arg(path)).unwrap_or_default();
-    let clean = |s: &str| s.replace(['\n', '\t', '\r'], "_");
-    for e in crate::twin::read_nzb(&xml) {
-        let fname = clean(&e.filename);
-        let subj = clean(&e.subject);
-        if let Some(cb) = on_entry {
-            cb(
-                ctx,
-                e.size() as i64,
-                i32::from(e.is_par2()),
-                fname.as_ptr().cast::<c_char>(),
-                fname.len(),
-                subj.as_ptr().cast::<c_char>(),
-                subj.len(),
-            );
-        }
-        if let Some(cb) = on_group {
-            for g in &e.groups {
-                let g_clean = clean(g);
-                cb(ctx, g_clean.as_ptr().cast::<c_char>(), g_clean.len());
-            }
-        }
-        if let Some(cb) = on_segment {
-            for (bytes, id) in &e.segments {
-                let id_clean = clean(id);
-                cb(
-                    ctx,
-                    *bytes as i64,
-                    id_clean.as_ptr().cast::<c_char>(),
-                    id_clean.len(),
-                );
-            }
-        }
-    }
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_stream_build_donor_key(
-    password: *const c_char,
-    file_names_ptr: *const *const c_char,
-    file_sizes_ptr: *const i64,
-    file_is_par_ptr: *const u8,
-    file_group_counts_ptr: *const usize,
-    file_count: usize,
-    groups_ptr: *const *const c_char,
-    total_groups: usize,
-    file_article_counts_ptr: *const usize,
-    art_part_numbers_ptr: *const i32,
-    art_sizes_ptr: *const i32,
-    art_message_ids_ptr: *const *const c_char,
-    total_articles: usize,
-) -> RsBuf {
-    let pwd = input(password);
-    let mut file_names = Vec::with_capacity(file_count);
-    if !file_names_ptr.is_null() {
-        for i in 0..file_count {
-            file_names.push(input(*file_names_ptr.add(i)));
-        }
-    }
-    let file_sizes = if file_sizes_ptr.is_null() || file_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(file_sizes_ptr, file_count)
-    };
-    let file_is_par = if file_is_par_ptr.is_null() || file_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(file_is_par_ptr, file_count)
-    };
-    let file_group_counts = if file_group_counts_ptr.is_null() || file_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(file_group_counts_ptr, file_count)
-    };
-    let mut groups = Vec::with_capacity(total_groups);
-    if !groups_ptr.is_null() {
-        for i in 0..total_groups {
-            groups.push(input(*groups_ptr.add(i)));
-        }
-    }
-    let file_article_counts = if file_article_counts_ptr.is_null() || file_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(file_article_counts_ptr, file_count)
-    };
-    let art_part_numbers = if art_part_numbers_ptr.is_null() || total_articles == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(art_part_numbers_ptr, total_articles)
-    };
-    let art_sizes = if art_sizes_ptr.is_null() || total_articles == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(art_sizes_ptr, total_articles)
-    };
-    let mut art_message_ids = Vec::with_capacity(total_articles);
-    if !art_message_ids_ptr.is_null() {
-        for i in 0..total_articles {
-            art_message_ids.push(input(*art_message_ids_ptr.add(i)));
-        }
-    }
-    into_buf(crate::streamrepair::build_donor_key(
-        pwd,
-        &file_names,
-        file_sizes,
-        file_is_par,
-        file_group_counts,
-        &groups,
-        file_article_counts,
-        art_part_numbers,
-        art_sizes,
-        &art_message_ids,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_compare_par2_data(
-    own_names_ptr: *const *const c_char,
-    own_md5s_ptr: *const *const c_char,
-    own_count: usize,
-    own_print_ptr: *const c_char,
-    twin_data_ptr: *const u8,
-    twin_data_len: usize,
-) -> i32 {
-    let mut own_names = Vec::with_capacity(own_count);
-    let mut own_md5s = Vec::with_capacity(own_count);
-    if !own_names_ptr.is_null() && !own_md5s_ptr.is_null() {
-        for i in 0..own_count {
-            own_names.push(input(*own_names_ptr.add(i)));
-            own_md5s.push(input(*own_md5s_ptr.add(i)));
-        }
-    }
-    let own_print = input(own_print_ptr);
-    let twin_data = if twin_data_ptr.is_null() || twin_data_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(twin_data_ptr, twin_data_len)
-    };
-    crate::twin::compare_twin_par2_data(&own_names, &own_md5s, own_print, twin_data)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_log_rotate_log_file(
     log_file: *const c_char,
     sep: c_char,
@@ -7672,60 +7300,10 @@ pub unsafe extern "C" fn nzbget_rs_queue_editor_visit_category_ext_diff(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 // =========================================================================
 // Consolidated RepairController (`repair.rs`), ContentMap (`streamrepair.rs`),
 // and TwinCheck (`twin.rs`) FFI
 // =========================================================================
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_twin_sample_indices(
-    primary_seg_counts: *const usize,
-    primary_seg_bytes: *const i64,
-    primary_seg_bytes_len: usize,
-    primary_files: usize,
-    dupe_seg_counts: *const usize,
-    dupe_seg_bytes: *const i64,
-    dupe_seg_bytes_len: usize,
-    dupe_files: usize,
-    sample_count: usize,
-    out_file_indices: *mut usize,
-    out_seg_indices: *mut usize,
-) -> c_int {
-    if primary_files == 0
-        || dupe_files == 0
-        || sample_count == 0
-        || primary_seg_counts.is_null()
-        || dupe_seg_counts.is_null()
-        || out_file_indices.is_null()
-        || out_seg_indices.is_null()
-    {
-        return 0;
-    }
-    let p_counts = std::slice::from_raw_parts(primary_seg_counts, primary_files);
-    let d_counts = std::slice::from_raw_parts(dupe_seg_counts, dupe_files);
-    let p_bytes = if primary_seg_bytes.is_null() || primary_seg_bytes_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(primary_seg_bytes, primary_seg_bytes_len)
-    };
-    let d_bytes = if dupe_seg_bytes.is_null() || dupe_seg_bytes_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(dupe_seg_bytes, dupe_seg_bytes_len)
-    };
-    if let Some(indices) =
-        crate::twin::sample_indices(p_counts, p_bytes, d_counts, d_bytes, sample_count)
-    {
-        for (i, (f_idx, s_idx)) in indices.into_iter().enumerate() {
-            *out_file_indices.add(i) = f_idx;
-            *out_seg_indices.add(i) = s_idx;
-        }
-        1
-    } else {
-        0
-    }
-}
-
 unsafe fn cstr_to_path_buf(ptr: *const c_char) -> std::path::PathBuf {
     #[cfg(unix)]
     {
@@ -7736,53 +7314,6 @@ unsafe fn cstr_to_path_buf(ptr: *const c_char) -> std::path::PathBuf {
     {
         std::path::PathBuf::from(String::from_utf8_lossy(input(ptr)).into_owned())
     }
-}
-
-fn cstring_lossy(bytes: &[u8]) -> std::ffi::CString {
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    std::ffi::CString::new(&bytes[..end]).unwrap_or_default()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupematcher_filter_dupe_sources(
-    nzb_name: *const c_char,
-    dest_dir: *const c_char,
-    expected_size: i64,
-    unrar_cmd: *const c_char,
-    dupe_dirs: *const *const c_char,
-    dupe_count: usize,
-    out_indices: *mut usize,
-    on_message: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
-    ctx: *mut c_void,
-) -> usize {
-    if dest_dir.is_null() || dupe_dirs.is_null() || out_indices.is_null() || dupe_count == 0 {
-        return 0;
-    }
-    let dir_path = cstr_to_path_buf(dest_dir);
-    let nzb_name_bytes = input(nzb_name);
-    let unrar_bytes = input(unrar_cmd);
-    let mut dirs_vec = Vec::with_capacity(dupe_count);
-    for &ptr in std::slice::from_raw_parts(dupe_dirs, dupe_count) {
-        dirs_vec.push(input(ptr));
-    }
-    let usable = crate::pardamage::dupe_matcher_filter_dupe_sources(
-        nzb_name_bytes,
-        &dir_path,
-        expected_size,
-        unrar_bytes,
-        &dirs_vec,
-        |kind, msg| {
-            if let Some(log_cb) = on_message {
-                let c_msg = cstring_lossy(msg);
-                log_cb(ctx, kind, c_msg.as_ptr());
-            }
-        },
-    );
-    let n = usable.len().min(dupe_count);
-    if n > 0 {
-        std::ptr::copy_nonoverlapping(usable.as_ptr(), out_indices, n);
-    }
-    n
 }
 
 #[no_mangle]
@@ -7878,217 +7409,6 @@ pub unsafe extern "C" fn nzbget_rs_dir_browser_free(handle: *mut std::ffi::c_voi
         drop(Box::from_raw(
             handle.cast::<crate::fsops::PosixDirBrowser>(),
         ));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_new(
-    ctx: *mut std::ffi::c_void,
-    fetch_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            *const c_char,
-            *const *const c_char,
-            usize,
-            *mut RsBuf,
-            *mut i64,
-            *mut i64,
-            *mut c_int,
-            *mut c_int,
-            *mut c_int,
-        ) -> c_int,
-    >,
-    stop_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-) -> *mut std::ffi::c_void {
-    let ctx_addr = ctx as usize;
-    let hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>> = stop_cb.map(|cb| {
-        std::sync::Arc::new(move || unsafe {
-            cb(ctx_addr as *mut std::ffi::c_void);
-        }) as std::sync::Arc<dyn Fn() + Send + Sync>
-    });
-    let batch = crate::nntp::ArticleBatchFetcher::new(
-        move |worker_idx, req| {
-            let Some(cb) = fetch_cb else {
-                return Err("no fetch callback".to_string());
-            };
-            let mut mid_c = Vec::with_capacity(req.message_id.len() + 1);
-            mid_c.extend_from_slice(&req.message_id);
-            mid_c.push(0);
-
-            let mut grp_c: Vec<Vec<u8>> = Vec::with_capacity(req.groups.len());
-            for g in req.groups.iter() {
-                let mut gc = Vec::with_capacity(g.len() + 1);
-                gc.extend_from_slice(g);
-                gc.push(0);
-                grp_c.push(gc);
-            }
-            let grp_ptrs: Vec<*const c_char> =
-                grp_c.iter().map(|g| g.as_ptr().cast::<c_char>()).collect();
-
-            let mut data_buf = RsBuf {
-                data: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            let mut offset: i64 = 0;
-            let mut file_size: i64 = 0;
-            let mut success: c_int = 0;
-            let mut retry: c_int = 0;
-            let mut transient: c_int = 0;
-            let ok = unsafe {
-                cb(
-                    ctx_addr as *mut std::ffi::c_void,
-                    worker_idx,
-                    mid_c.as_ptr().cast::<c_char>(),
-                    grp_ptrs.as_ptr(),
-                    grp_ptrs.len(),
-                    &mut data_buf,
-                    &mut offset,
-                    &mut file_size,
-                    &mut success,
-                    &mut retry,
-                    &mut transient,
-                )
-            };
-            let data = if !data_buf.data.is_null() {
-                unsafe {
-                    Vec::from_raw_parts(data_buf.data.cast::<u8>(), data_buf.len, data_buf.cap)
-                }
-            } else {
-                Vec::new()
-            };
-            if ok == 0 {
-                return Err("fetch exception".to_string());
-            }
-            Ok(crate::nntp::BatchFetchedArticle {
-                data,
-                offset,
-                file_size,
-                success: success != 0,
-                retry: retry != 0,
-                transient: transient != 0,
-            })
-        },
-        hook,
-    );
-    Box::into_raw(Box::new(batch)).cast()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_free(handle: *mut std::ffi::c_void) {
-    if !handle.is_null() {
-        drop(Box::from_raw(
-            handle.cast::<crate::nntp::ArticleBatchFetcher>(),
-        ));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_set_worker_count(
-    handle: *mut std::ffi::c_void,
-    worker_count: c_int,
-) {
-    if !handle.is_null() {
-        let batch = &*handle.cast::<crate::nntp::ArticleBatchFetcher>();
-        batch.set_worker_count(worker_count);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_begin(
-    handle: *mut std::ffi::c_void,
-    req_count: usize,
-    ctx: *mut std::ffi::c_void,
-    get_req_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, usize, *mut *const c_char, *mut usize) -> usize,
-    >,
-    get_group_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, usize, usize, *mut *const c_char, *mut usize),
-    >,
-) {
-    if handle.is_null() {
-        return;
-    }
-    let batch = &*handle.cast::<crate::nntp::ArticleBatchFetcher>();
-    let mut requests = Vec::with_capacity(req_count);
-    for i in 0..req_count {
-        let mut mid_ptr: *const c_char = std::ptr::null();
-        let mut mid_len: usize = 0;
-        let grp_count =
-            get_req_cb.map_or(0, |cb| unsafe { cb(ctx, i, &mut mid_ptr, &mut mid_len) });
-        let mut groups = Vec::with_capacity(grp_count);
-        if let Some(gcb) = get_group_cb {
-            for g in 0..grp_count {
-                let mut g_ptr: *const c_char = std::ptr::null();
-                let mut g_len: usize = 0;
-                unsafe { gcb(ctx, i, g, &mut g_ptr, &mut g_len) };
-                groups.push(bytes(g_ptr, g_len).to_vec());
-            }
-        }
-        requests.push(crate::nntp::BatchRequest {
-            message_id: bytes(mid_ptr, mid_len).to_vec(),
-            groups: std::sync::Arc::new(groups),
-        });
-    }
-    batch.begin(requests);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_next(
-    handle: *mut std::ffi::c_void,
-    out_data: *mut RsBuf,
-    out_offset: *mut i64,
-    out_file_size: *mut i64,
-    out_success: *mut c_int,
-    out_retry: *mut c_int,
-    out_transient: *mut c_int,
-) -> c_int {
-    if handle.is_null() {
-        return 0;
-    }
-    let batch = &*handle.cast::<crate::nntp::ArticleBatchFetcher>();
-    match batch.next() {
-        Some(res) => {
-            if !out_data.is_null() {
-                *out_data = into_buf(res.data);
-            }
-            if !out_offset.is_null() {
-                *out_offset = res.offset;
-            }
-            if !out_file_size.is_null() {
-                *out_file_size = res.file_size;
-            }
-            if !out_success.is_null() {
-                *out_success = if res.success { 1 } else { 0 };
-            }
-            if !out_retry.is_null() {
-                *out_retry = if res.retry { 1 } else { 0 };
-            }
-            if !out_transient.is_null() {
-                *out_transient = if res.transient { 1 } else { 0 };
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_cancel_remaining(
-    handle: *mut std::ffi::c_void,
-) {
-    if !handle.is_null() {
-        let batch = &*handle.cast::<crate::nntp::ArticleBatchFetcher>();
-        batch.cancel_remaining();
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_stop(handle: *mut std::ffi::c_void) {
-    if !handle.is_null() {
-        let batch = &*handle.cast::<crate::nntp::ArticleBatchFetcher>();
-        batch.stop();
     }
 }
 
@@ -9071,7 +8391,8 @@ pub unsafe extern "C" fn nzbget_rs_options_create_scheduler_task(
     );
 }
 
-type DonorNextArticleFn = Option<
+#[cfg(test)]
+pub(crate) type DonorNextArticleFn = Option<
     unsafe extern "C" fn(
         *mut std::ffi::c_void,
         *mut c_int,
@@ -9082,297 +8403,15 @@ type DonorNextArticleFn = Option<
     ) -> c_int,
 >;
 
-type DonorBeginMemberBatchFn =
+#[cfg(test)]
+pub(crate) type DonorBeginMemberBatchFn =
     Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const i32, usize)>;
 
-struct FfiM1DonorEnv {
-    ctx: *mut std::ffi::c_void,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    refresh_live_name_cb:
-        Option<unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> *const c_char>,
-    begin_member_batch_cb: DonorBeginMemberBatchFn,
-    next_article_cb: DonorNextArticleFn,
-    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    add_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
-    add_recovered_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
-    emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
-}
+#[cfg(test)]
+pub(crate) struct NzbgetRsCrossPackSession(crate::streamrepair::CrossPackRepairSession);
 
-impl crate::streamrepair::M1DonorEnv for FfiM1DonorEnv {
-    fn is_stopped(&self) -> bool {
-        self.is_stopped_cb
-            .is_some_and(|cb| unsafe { cb(self.ctx) != 0 })
-    }
-
-    fn refresh_live_target_name(&mut self, target_index: usize) -> Option<Vec<u8>> {
-        let cb = self.refresh_live_name_cb?;
-        let ptr = unsafe { cb(self.ctx, target_index) };
-        if ptr.is_null() {
-            None
-        } else {
-            Some(unsafe { input(ptr).to_vec() })
-        }
-    }
-
-    fn begin_member_batch(&mut self, donor_file_index: i32, part_indices: &[i32]) {
-        if let Some(cb) = self.begin_member_batch_cb {
-            unsafe {
-                cb(
-                    self.ctx,
-                    donor_file_index,
-                    part_indices.as_ptr(),
-                    part_indices.len(),
-                );
-            }
-        }
-    }
-
-    fn next_article(&mut self) -> Option<crate::streamrepair::FetchedDonorArticle> {
-        let cb = self.next_article_cb?;
-        let mut success: c_int = 0;
-        let mut offset: i64 = 0;
-        let mut file_size: i64 = 0;
-        let mut data_ptr: *const u8 = std::ptr::null();
-        let mut data_len: usize = 0;
-        let ok = unsafe {
-            cb(
-                self.ctx,
-                &mut success,
-                &mut offset,
-                &mut file_size,
-                &mut data_ptr,
-                &mut data_len,
-            )
-        };
-        if ok == 0 {
-            return None;
-        }
-        let data = if data_ptr.is_null() || data_len == 0 {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(data_ptr, data_len).to_vec() }
-        };
-        Some(crate::streamrepair::FetchedDonorArticle {
-            success: success != 0,
-            offset,
-            file_size,
-            data,
-        })
-    }
-
-    fn cancel_remaining(&mut self) {
-        if let Some(cb) = self.cancel_batch_cb {
-            unsafe { cb(self.ctx) };
-        }
-    }
-
-    fn add_progress_bytes(&mut self, bytes: i64) {
-        if let Some(cb) = self.add_progress_cb {
-            unsafe { cb(self.ctx, bytes) };
-        }
-    }
-
-    fn add_recovered_bytes(&mut self, bytes: i64) {
-        if let Some(cb) = self.add_recovered_cb {
-            unsafe { cb(self.ctx, bytes) };
-        }
-    }
-
-    fn emit_message_bytes(&mut self, kind: crate::streamrepair::TargetMessageKind, text: &[u8]) {
-        let Some(cb) = self.emit_message_cb else {
-            return;
-        };
-        let mut buf: Vec<u8> = text.iter().copied().filter(|&b| b != 0).collect();
-        buf.push(0);
-        unsafe { cb(self.ctx, kind as i32, buf.as_ptr().cast::<c_char>()) };
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_repair_process_donor(
-    dest_dir: *const c_char,
-    live_mode: c_int,
-    member_names: *const *const c_char,
-    member_count: usize,
-    target_filenames: *const *const c_char,
-    target_encoded_sizes: *const i64,
-    target_decoded_sizes: *const i64,
-    target_article_counts: *const c_int,
-    target_positional_ranks: *const c_int,
-    target_positional_windows: *const c_int,
-    target_steps_hashes: *const u64,
-    target_patch_eligible: *const u8,
-    target_hole_counts: *const usize,
-    target_holes_flat: *const crate::dupefallback::NzbgetRsByteRange,
-    target_count: usize,
-    donor_info_name: *const c_char,
-    donor_file_names: *const *const c_char,
-    donor_file_sizes: *const i64,
-    donor_file_is_par: *const u8,
-    donor_file_steps_hashes: *const u64,
-    donor_article_counts: *const usize,
-    donor_article_sizes_flat: *const i32,
-    donor_file_count: usize,
-    ctx: *mut std::ffi::c_void,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    refresh_live_name_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, usize) -> *const c_char,
-    >,
-    begin_member_batch_cb: DonorBeginMemberBatchFn,
-    next_article_cb: DonorNextArticleFn,
-    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    add_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
-    add_recovered_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
-    sync_target_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            usize,
-            *const c_char,
-            i64,
-            c_int,
-            *const crate::dupefallback::NzbgetRsByteRange,
-            usize,
-        ),
-    >,
-    emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
-) {
-    let mut member_names_vec = Vec::with_capacity(member_count);
-    if !member_names.is_null() && member_count > 0 {
-        for &ptr in std::slice::from_raw_parts(member_names, member_count) {
-            member_names_vec.push(input(ptr));
-        }
-    }
-    let mut targets_vec = Vec::with_capacity(target_count);
-    if target_count > 0
-        && !target_filenames.is_null()
-        && !target_encoded_sizes.is_null()
-        && !target_decoded_sizes.is_null()
-        && !target_article_counts.is_null()
-        && !target_positional_ranks.is_null()
-        && !target_positional_windows.is_null()
-        && !target_steps_hashes.is_null()
-        && !target_patch_eligible.is_null()
-        && !target_hole_counts.is_null()
-    {
-        let fnames = std::slice::from_raw_parts(target_filenames, target_count);
-        let esizes = std::slice::from_raw_parts(target_encoded_sizes, target_count);
-        let dsizes = std::slice::from_raw_parts(target_decoded_sizes, target_count);
-        let acounts = std::slice::from_raw_parts(target_article_counts, target_count);
-        let pranks = std::slice::from_raw_parts(target_positional_ranks, target_count);
-        let pwindows = std::slice::from_raw_parts(target_positional_windows, target_count);
-        let shashes = std::slice::from_raw_parts(target_steps_hashes, target_count);
-        let peligible = std::slice::from_raw_parts(target_patch_eligible, target_count);
-        let hcounts = std::slice::from_raw_parts(target_hole_counts, target_count);
-        let total_holes: usize = hcounts.iter().copied().sum();
-        let flat = if target_holes_flat.is_null() || total_holes == 0 {
-            &[]
-        } else {
-            std::slice::from_raw_parts(target_holes_flat, total_holes)
-        };
-        let mut cursor = 0usize;
-        for t in 0..target_count {
-            let cnt = hcounts[t];
-            let end = cursor.saturating_add(cnt).min(flat.len());
-            targets_vec.push(crate::streamrepair::M1RepairTarget {
-                filename: input(fnames[t]).to_vec(),
-                decoded_file_size: dsizes[t],
-                holes: flat[cursor..end].to_vec(),
-                encoded_size: esizes[t],
-                article_count: acounts[t],
-                recreated: false,
-                donor_set: Vec::new(),
-                patch_eligible: peligible[t] != 0,
-                positional_rank: pranks[t],
-                positional_window: pwindows[t],
-                steps_hash: shashes[t],
-            });
-            cursor = end;
-        }
-    }
-
-    let mut donor_names_vec = Vec::with_capacity(donor_file_count);
-    if !donor_file_names.is_null() && donor_file_count > 0 {
-        for &ptr in std::slice::from_raw_parts(donor_file_names, donor_file_count) {
-            donor_names_vec.push(input(ptr));
-        }
-    }
-    let donor_sizes_slice = if donor_file_sizes.is_null() || donor_file_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(donor_file_sizes, donor_file_count)
-    };
-    let donor_is_par_slice = if donor_file_is_par.is_null() || donor_file_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(donor_file_is_par, donor_file_count)
-    };
-    let donor_hashes_slice = if donor_file_steps_hashes.is_null() || donor_file_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(donor_file_steps_hashes, donor_file_count)
-    };
-    let mut donor_articles_vec = Vec::with_capacity(donor_file_count);
-    if !donor_article_counts.is_null() && donor_file_count > 0 {
-        let counts = std::slice::from_raw_parts(donor_article_counts, donor_file_count);
-        let total_arts: usize = counts.iter().copied().sum();
-        let flat = if donor_article_sizes_flat.is_null() || total_arts == 0 {
-            &[]
-        } else {
-            std::slice::from_raw_parts(donor_article_sizes_flat, total_arts)
-        };
-        let mut cursor = 0usize;
-        for &cnt in counts {
-            let end = cursor.saturating_add(cnt).min(flat.len());
-            donor_articles_vec.push(flat[cursor..end].to_vec());
-            cursor = end;
-        }
-    }
-
-    let mut env = FfiM1DonorEnv {
-        ctx,
-        is_stopped_cb,
-        refresh_live_name_cb,
-        begin_member_batch_cb,
-        next_article_cb,
-        cancel_batch_cb,
-        add_progress_cb,
-        add_recovered_cb,
-        emit_message_cb,
-    };
-    crate::streamrepair::process_m1_donor(
-        input(dest_dir),
-        live_mode != 0,
-        &mut targets_vec,
-        &member_names_vec,
-        input(donor_info_name),
-        &donor_names_vec,
-        donor_sizes_slice,
-        donor_is_par_slice,
-        donor_hashes_slice,
-        &donor_articles_vec,
-        &mut env,
-    );
-    if let Some(cb) = sync_target_cb {
-        for (idx, t) in targets_vec.iter().enumerate() {
-            let mut fn_buf: Vec<u8> = t.filename.iter().copied().filter(|&b| b != 0).collect();
-            fn_buf.push(0);
-            cb(
-                ctx,
-                idx,
-                fn_buf.as_ptr().cast::<c_char>(),
-                t.decoded_file_size,
-                c_int::from(t.recreated),
-                t.holes.as_ptr(),
-                t.holes.len(),
-            );
-        }
-    }
-}
-
-pub struct NzbgetRsCrossPackSession(crate::streamrepair::CrossPackRepairSession);
-
-type DonorFetchMemberPartFn = Option<
+#[cfg(test)]
+pub(crate) type DonorFetchMemberPartFn = Option<
     unsafe extern "C" fn(
         *mut std::ffi::c_void,
         i32,
@@ -9385,6 +8424,7 @@ type DonorFetchMemberPartFn = Option<
     ) -> c_int,
 >;
 
+#[cfg(test)]
 struct FfiCrossPackDonorEnv {
     ctx: *mut std::ffi::c_void,
     is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
@@ -9409,6 +8449,7 @@ struct FfiCrossPackDonorEnv {
     emit_debug_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
 }
 
+#[cfg(test)]
 impl crate::streamrepair::CrossPackDonorEnv for FfiCrossPackDonorEnv {
     fn is_stopped(&mut self) -> bool {
         self.is_stopped_cb
@@ -9594,9 +8635,9 @@ impl crate::streamrepair::CrossPackDonorEnv for FfiCrossPackDonorEnv {
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cross_pack_session_new(
+pub(crate) unsafe fn nzbget_rs_cross_pack_session_new(
     dest_dir: *const c_char,
     member_names: *const *const c_char,
     member_count: usize,
@@ -9694,15 +8735,15 @@ pub unsafe extern "C" fn nzbget_rs_cross_pack_session_new(
     Box::into_raw(Box::new(NzbgetRsCrossPackSession(session)))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cross_pack_session_free(session: *mut NzbgetRsCrossPackSession) {
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_cross_pack_session_free(session: *mut NzbgetRsCrossPackSession) {
     if !session.is_null() {
         drop(Box::from_raw(session));
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cross_pack_session_has_inner_holes(
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_cross_pack_session_has_inner_holes(
     session: *const NzbgetRsCrossPackSession,
 ) -> c_int {
     let Some(s) = session.as_ref() else {
@@ -9711,9 +8752,9 @@ pub unsafe extern "C" fn nzbget_rs_cross_pack_session_has_inner_holes(
     c_int::from(s.0.has_inner_holes())
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cross_pack_session_process_donor(
+pub(crate) unsafe fn nzbget_rs_cross_pack_session_process_donor(
     session: *mut NzbgetRsCrossPackSession,
     donor_queued_filename: *const c_char,
     donor_info_name: *const c_char,
@@ -10892,45 +9933,6 @@ pub unsafe extern "C" fn nzbget_rs_server_pool_normalize_levels(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_article_fetch_limit_op(
-    op: c_int,
-    inout_bytes: *mut i64,
-    bytes: i64,
-    begin: i64,
-    end: i64,
-    file_size: i64,
-) -> c_int {
-    match op {
-        0 => {
-            if inout_bytes.is_null() {
-                return 0;
-            }
-            c_int::from(crate::dupefallback::article_fetch_add_raw_bytes(
-                &mut *inout_bytes,
-                bytes,
-            ))
-        }
-        1 => c_int::from(crate::dupefallback::article_fetch_header_within_limit(
-            begin,
-            bytes != 0,
-        )),
-        2 => {
-            if inout_bytes.is_null() {
-                return 0;
-            }
-            c_int::from(crate::dupefallback::article_fetch_add_decoded_bytes(
-                &mut *inout_bytes,
-                bytes,
-                begin,
-                end,
-                file_size,
-            ))
-        }
-        _ => 0,
-    }
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_statmeter_op(
     op: c_int,
     loc_or_cur_time: i64,
@@ -11400,84 +10402,32 @@ pub unsafe extern "C" fn nzbget_rs_article_dl_op(
     }
 }
 
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_twin_service_op(
+pub unsafe extern "C" fn nzbget_rs_twin_exec(
     op: c_int,
-    a: c_int,
-    b: c_int,
-    c: c_int,
-    d: c_int,
-    f1: i64,
-    f2: i64,
+    a1: c_int,
+    a2: c_int,
+    p1: usize,
+    p2: usize,
     s1: *const c_char,
     s2: *const c_char,
     s3: *const c_char,
-    u8_1: *const u8,
-    u8_2: *const u8,
-    i32_1: *const c_int,
-    i64_1: *const i64,
-    len: usize,
+    s4: *const c_char,
+    nntp_host: Option<crate::articlefetcher::NzbgetRsNntpFetchHostFn>,
+    host_cb: Option<crate::twin::NzbgetRsTwinHostFn>,
     out_buf: *mut RsBuf,
 ) -> c_int {
-    let b1 = if s1.is_null() { &[][..] } else { input(s1) };
-    let b2 = if s2.is_null() { &[][..] } else { input(s2) };
-    let b3 = if s3.is_null() { &[][..] } else { input(s3) };
-    match op {
-        0 => c_int::from(crate::twin::is_dupe_item(a != 0, f1, f2, b, c, d)),
-        1 => c_int::from(crate::twin::is_print_usable(b1)),
-        2 => {
-            if u8_1.is_null() || u8_2.is_null() || i32_1.is_null() || len == 0 {
-                return -1;
-            }
-            crate::twin::select_primary(
-                std::slice::from_raw_parts(u8_1, len),
-                std::slice::from_raw_parts(u8_2, len),
-                std::slice::from_raw_parts(i32_1, len),
-            )
+    let _cancel_guard = PosixCancelGuard::disable();
+    let (rc, bytes) =
+        crate::twin::twin_exec(op, a1, a2, p1, p2, s1, s2, s3, s4, nntp_host, host_cb);
+    if let Some(vec) = bytes {
+        if !out_buf.is_null() {
+            *out_buf = into_buf(vec);
         }
-        3 => {
-            let kind = crate::twin::resolve_kind(
-                a != 0,
-                b != 0,
-                c != 0,
-                b1,
-                d != 0,
-                f1 != 0,
-                f2 != 0,
-                f2 != 0,
-                b2,
-            );
-            let non_empty = !kind.is_empty();
-            if !out_buf.is_null() {
-                *out_buf = into_buf(kind);
-            }
-            c_int::from(non_empty)
-        }
-        4 => {
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::twin::format_twin_kind_message(b1, b2, b3, a != 0));
-            }
-            1
-        }
-        5 => crate::twin::parse_fingerprint_files(b1),
-        6 => {
-            if u8_1.is_null() || i64_1.is_null() || len == 0 {
-                return -1;
-            }
-            crate::twin::select_min_par2_index(
-                std::slice::from_raw_parts(u8_1, len),
-                std::slice::from_raw_parts(i64_1, len),
-                f1,
-            )
-        }
-        7 => {
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::twin::format_identity(b1, b2));
-            }
-            1
-        }
-        _ => 0,
     }
+    rc
 }
 
 #[unsafe(no_mangle)]
@@ -12467,6 +11417,89 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_counters_op(
     }
 }
 
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_repair_ctrl_new(
+    nntp_host: crate::articlefetcher::NzbgetRsNntpFetchHostFn,
+) -> *mut crate::repair::NzbgetRsRepairController {
+    Box::into_raw(Box::new(crate::repair::NzbgetRsRepairController::new(
+        nntp_host,
+    )))
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_repair_ctrl_free(
+    ctrl: *mut crate::repair::NzbgetRsRepairController,
+) {
+    if !ctrl.is_null() {
+        drop(Box::from_raw(ctrl));
+    }
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_repair_ctrl_exec(
+    ctrl: *const crate::repair::NzbgetRsRepairController,
+    op: c_int,
+    a1: c_int,
+    p1: usize,
+    p2: usize,
+    s1: *const c_char,
+    out_str: *mut *const c_char,
+    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
+    ctx: *mut c_void,
+) -> c_int {
+    let _cancel_guard = PosixCancelGuard::disable();
+    crate::repair::repair_ctrl_exec(ctrl, op, a1, p1, p2, s1, out_str, host_cb, ctx)
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_new(
+    live_mode: c_int,
+    nzb_id: c_int,
+    nntp_host: crate::articlefetcher::NzbgetRsNntpFetchHostFn,
+    probe_host: crate::dupeprobe::DupeProbeHostFn,
+    tls_enabled: c_int,
+    debug_enabled: c_int,
+) -> *mut crate::streamrepair_coord::NzbgetRsStreamRepairCtrl {
+    Box::into_raw(Box::new(
+        crate::streamrepair_coord::NzbgetRsStreamRepairCtrl::new(
+            live_mode != 0,
+            nzb_id,
+            nntp_host,
+            probe_host,
+            tls_enabled != 0,
+            debug_enabled != 0,
+        ),
+    ))
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_free(
+    ctrl: *mut crate::streamrepair_coord::NzbgetRsStreamRepairCtrl,
+) {
+    if !ctrl.is_null() {
+        drop(Box::from_raw(ctrl));
+    }
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_exec(
+    ctrl: *const crate::streamrepair_coord::NzbgetRsStreamRepairCtrl,
+    op: c_int,
+    host_cb: Option<crate::streamrepair_coord::NzbgetRsStreamRepairHostFn>,
+    ctx: *mut c_void,
+) -> c_int {
+    let _cancel_guard = PosixCancelGuard::disable();
+    crate::streamrepair_coord::stream_repair_ctrl_exec(ctrl, op, host_cb, ctx)
+}
+
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
     op: c_int,
@@ -12477,21 +11510,21 @@ pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
     e: c_int,
     f: c_int,
     t1: i64,
-    t2: i64,
-    t3: i64,
-    t4: i64,
+    _t2: i64,
+    _t3: i64,
+    _t4: i64,
     s1: *const c_char,
     s2: *const c_char,
-    i32_arr: *const c_int,
-    u8_arr: *const u8,
-    i64_arr: *const i64,
-    len: usize,
+    _i32_arr: *const c_int,
+    _u8_arr: *const u8,
+    _i64_arr: *const i64,
+    _len: usize,
     out1: *mut c_int,
     out2: *mut c_int,
-    out3: *mut c_int,
-    out4: *mut c_int,
-    out_arr: *mut c_int,
-    out_i64_arr: *mut i64,
+    _out3: *mut c_int,
+    _out4: *mut c_int,
+    _out_arr: *mut c_int,
+    _out_i64_arr: *mut i64,
 ) -> c_int {
     let s1_bytes = if s1.is_null() {
         &[][..]
@@ -12504,157 +11537,6 @@ pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
         CStr::from_ptr(s2).to_bytes()
     };
     match op {
-        0 => c_int::from(crate::repair::should_use_par_quick(a != 0, b != 0, c != 0)),
-        1 => {
-            let (new_status, set_rep, rep_val, wait_time, par_sec) =
-                crate::repair::complete_par_check(a, b, 2, 3, 1, 1, 3, 4, 2, c, d, t1, t2);
-            if !out1.is_null() {
-                *out1 = c_int::from(set_rep);
-            }
-            if !out2.is_null() {
-                *out2 = c_int::from(rep_val);
-            }
-            if !out3.is_null() {
-                *out3 = wait_time;
-            }
-            if !out4.is_null() {
-                *out4 = par_sec;
-            }
-            new_status
-        }
-        2 => {
-            let counts = if i32_arr.is_null() || len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(i32_arr, len)
-            };
-            let (selected, rem_needed) = crate::repair::select_more_pars(counts, a);
-            if !out1.is_null() {
-                *out1 = rem_needed;
-            }
-            let copy_len = selected.len().min(len);
-            if !out_arr.is_null() && copy_len > 0 {
-                for (i, &idx) in selected.iter().take(copy_len).enumerate() {
-                    *out_arr.add(i) = idx as c_int;
-                }
-            }
-            copy_len as c_int
-        }
-        3 => {
-            let (new_stage, changed, set_rt, new_rsec, cancel, est_sec, est_min) =
-                crate::repair::eval_par_progress_update(
-                    a,
-                    b,
-                    1,
-                    2,
-                    3,
-                    4,
-                    t1,
-                    t2,
-                    t3,
-                    c,
-                    d != 0,
-                    e,
-                    f != 0,
-                    t4 as i32,
-                );
-            if !out1.is_null() {
-                *out1 = new_stage;
-            }
-            if !out2.is_null() {
-                *out2 =
-                    c_int::from(changed) | (c_int::from(set_rt) << 1) | (c_int::from(cancel) << 2);
-            }
-            if !out3.is_null() {
-                *out3 = new_rsec;
-            }
-            if !out4.is_null() {
-                *out4 = est_sec;
-            }
-            est_min
-        }
-        4 => {
-            if !out_i64_arr.is_null() {
-                let ts = std::slice::from_raw_parts_mut(out_i64_arr, 4);
-                let (s_stage, s_start, s_par, s_rep) =
-                    crate::repair::calc_paused_timestamps(t1, t2, ts[0], ts[1], ts[2], ts[3]);
-                ts[0] = s_stage;
-                ts[1] = s_start;
-                ts[2] = s_par;
-                ts[3] = s_rep;
-            }
-            0
-        }
-        5 => c_int::from(crate::repair::should_load_partial_segments(a, 2, b, c != 0)),
-        6 => crate::repair::classify_file_crc_status(a, b != 0, c != 0, 1, 3, 2, 1, 3, 2, 0),
-        7 => c_int::from(crate::repair::should_consider_twin_candidate(
-            a != 0,
-            b,
-            c,
-            d != 0,
-            s1_bytes,
-            e != 0,
-            f != 0,
-        )),
-        8 => {
-            let is_par2 = if u8_arr.is_null() || len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(u8_arr, len)
-            };
-            let sizes = if i64_arr.is_null() || len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(i64_arr, len)
-            };
-            crate::repair::select_best_twin_par2_index(is_par2, sizes, t1)
-                .map_or(-1, |idx| idx as c_int)
-        }
-        9 => c_int::from(crate::repair::should_skip_twin_volume_entry(
-            a != 0,
-            s1_bytes,
-            s2_bytes,
-        )),
-        10 => crate::repair::estimate_twin_vol_blocks(t1, t2 as u64),
-        11 => {
-            let blocks = if i32_arr.is_null() || len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(i32_arr, len)
-            };
-            let (avail, covers) = crate::repair::sum_and_check_twin_blocks(blocks, a);
-            if !out1.is_null() {
-                *out1 = avail;
-            }
-            c_int::from(covers)
-        }
-        12 => {
-            let blocks = if i32_arr.is_null() || len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(i32_arr, len)
-            };
-            crate::repair::pick_twin_volume(blocks, a).map_or(-1, |idx| idx as c_int)
-        }
-        13 => {
-            let (usable, eff_blocks, strict_ok) = crate::repair::eval_find_pars_candidate(
-                a != 0,
-                b,
-                t1,
-                t2,
-                c != 0,
-                d != 0,
-                s1_bytes,
-                s2_bytes,
-            );
-            if !out1.is_null() {
-                *out1 = eff_blocks;
-            }
-            if !out2.is_null() {
-                *out2 = c_int::from(strict_ok);
-            }
-            c_int::from(usable)
-        }
         14 => c_int::from(crate::unpack::has_completed_archive_ext(s1_bytes)),
         15 => c_int::from(crate::unpack::use_inter_dir(
             s1_bytes,
@@ -12750,25 +11632,26 @@ pub unsafe extern "C" fn nzbget_rs_repair_ctrl_op(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_op(
     op: c_int,
-    a: c_int,
-    b: c_int,
-    c: c_int,
-    d: c_int,
-    e: c_int,
-    t1: i64,
-    t2: i64,
-    t3: i64,
-    f1: f64,
+    _a: c_int,
+    _b: c_int,
+    _c: c_int,
+    _d: c_int,
+    _e: c_int,
+    _t1: i64,
+    _t2: i64,
+    _t3: i64,
+    _f1: f64,
     s1: *const c_char,
-    cstr_arr: *const *const c_char,
-    i64_arr: *const i64,
-    len: usize,
-    out1: *mut c_int,
-    out2: *mut c_int,
-    i64_inout: *mut i64,
+    _cstr_arr: *const *const c_char,
+    _i64_arr: *const i64,
+    _len: usize,
+    _out1: *mut c_int,
+    _out2: *mut c_int,
+    _i64_inout: *mut i64,
     out_buf: *mut RsBuf,
 ) -> c_int {
     let s1_bytes = if s1.is_null() {
@@ -12776,168 +11659,16 @@ pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_op(
     } else {
         CStr::from_ptr(s1).to_bytes()
     };
-    match op {
-        0 => c_int::from(crate::streamrepair::is_par2_job_or_file(a != 0, s1_bytes)),
-        1 => {
-            let mut names = Vec::with_capacity(len);
-            if !cstr_arr.is_null() {
-                for &p in std::slice::from_raw_parts(cstr_arr, len) {
-                    names.push(if p.is_null() {
-                        &[][..]
-                    } else {
-                        CStr::from_ptr(p).to_bytes()
-                    });
-                }
-            }
-            let sizes = if i64_arr.is_null() || len == 0 {
-                &[][..]
-            } else {
-                std::slice::from_raw_parts(i64_arr, len)
-            };
-            let (rank, win) =
-                crate::streamrepair::compute_positional_rank(&names, sizes, s1_bytes, t1);
-            if !out1.is_null() {
-                *out1 = rank;
-            }
-            if !out2.is_null() {
-                *out2 = win;
-            }
-            rank
-        }
-        2 => {
-            if !out1.is_null() && !i64_inout.is_null() {
-                let i64s = std::slice::from_raw_parts_mut(i64_inout, 2);
-                let (outcome, new_art, new_fsz, new_pfsz) =
-                    crate::streamrepair::classify_remaining_hole_target(
-                        a != 0,
-                        t1,
-                        b != 0,
-                        c != 0,
-                        d,
-                        t2,
-                        t3,
-                        *out1,
-                        i64s[0],
-                        i64s[1],
-                    );
-                *out1 = new_art;
-                i64s[0] = new_fsz;
-                i64s[1] = new_pfsz;
-                return outcome;
-            }
-            0
-        }
-        3 => c_int::from(crate::streamrepair::is_incomplete_nzb_hole(t1, t2)),
-        4 => {
-            if !i64_inout.is_null() {
-                let s = std::slice::from_raw_parts_mut(i64_inout, 8);
-                let (nf, ns, ncf, ncs, npf, nps, npcf, npcs) =
-                    crate::streamrepair::credit_repaired_sizes(
-                        t1, t2, s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
-                    );
-                s[0] = nf;
-                s[1] = ns;
-                s[2] = ncf;
-                s[3] = ncs;
-                s[4] = npf;
-                s[5] = nps;
-                s[6] = npcf;
-                s[7] = npcs;
-            }
-            0
-        }
-        5 => {
-            let (reset_pr, set_ps, new_ps, set_fpf, clr_rpc, chk_mp) =
-                crate::streamrepair::resolve_completion_par_action(
-                    t1,
-                    a != 0,
-                    b,
-                    0,
-                    c,
-                    1,
-                    d,
-                    e,
-                    5,
-                    0,
-                );
-            if !out1.is_null() {
-                *out1 = c_int::from(reset_pr)
-                    | (c_int::from(set_ps) << 1)
-                    | (c_int::from(set_fpf) << 2)
-                    | (c_int::from(clr_rpc) << 3)
-                    | (c_int::from(chk_mp) << 4);
-            }
-            new_ps
-        }
-        6 => {
-            if !i64_inout.is_null() && !i64_arr.is_null() {
-                let ins = std::slice::from_raw_parts(i64_arr, 6);
-                let mut new_prog = 0i64;
-                let mut reset_last = false;
-                let reason = crate::streamrepair::watchdog_eval_tick(
-                    t1,
-                    t2,
-                    a != 0,
-                    b,
-                    ins[0],
-                    ins[1],
-                    ins[2],
-                    f1,
-                    c,
-                    d,
-                    e,
-                    len as i32,
-                    ins[3],
-                    ins[4],
-                    ins[5],
-                    &mut new_prog,
-                    &mut reset_last,
-                );
-                *i64_inout = new_prog;
-                if !out1.is_null() {
-                    *out1 = c_int::from(reset_last);
-                }
-                if let Some(msg) = reason {
-                    if !out_buf.is_null() {
-                        *out_buf = into_buf(msg);
-                    }
-                    return 1;
-                }
-            }
-            0
-        }
-        7 => {
+    if op == 10 {
+        let norm = crate::extension::normalize_special_env_var_name(s1_bytes);
+        if norm.as_slice() != s1_bytes {
             if !out_buf.is_null() {
-                *out_buf = into_buf(crate::streamrepair::format_whole_files_suffix(a));
+                *out_buf = into_buf(norm);
             }
-            0
+            return 1;
         }
-        8 => {
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::repair::build_twin_filename(s1_bytes, len));
-            }
-            0
-        }
-        9 => {
-            if !out_buf.is_null() {
-                let reason = crate::repair::twin_par2_reject_reason(a);
-                let end = reason.iter().position(|&b| b == 0).unwrap_or(reason.len());
-                *out_buf = into_buf(reason[..end].to_vec());
-            }
-            0
-        }
-        10 => {
-            let norm = crate::extension::normalize_special_env_var_name(s1_bytes);
-            if norm.as_slice() != s1_bytes {
-                if !out_buf.is_null() {
-                    *out_buf = into_buf(norm);
-                }
-                return 1;
-            }
-            0
-        }
-        _ => 0,
     }
+    0
 }
 
 #[unsafe(no_mangle)]

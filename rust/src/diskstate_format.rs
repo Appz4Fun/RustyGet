@@ -1,9 +1,9 @@
 //! DiskState record serialization and helpers (`daemon/queue/DiskState.cpp`).
 
-use std::ffi::{c_char, c_int};
+use std::ffi::{c_char, c_int, c_void};
 use std::io::Write;
 
-use crate::ffi::{input, into_buf, RsBuf};
+use crate::ffi::input;
 
 #[repr(C)]
 pub struct NzbgetRsDiskCompletedFile {
@@ -221,8 +221,8 @@ fn write_sanitized_line(raw: &[u8], out: &mut Vec<u8>) {
 
 /// # Safety
 /// `inp` and all slice pointers must be valid for the call duration.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_format_nzb_info(
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn format_nzb_info_bytes(
     inp: *const NzbgetRsDiskNzbInfoInput,
     completed: *const NzbgetRsDiskCompletedFile,
     completed_len: usize,
@@ -234,9 +234,9 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_nzb_info(
     stats_len: usize,
     files: *const NzbgetRsDiskFileStub,
     files_len: usize,
-) -> RsBuf {
+) -> Vec<u8> {
     if inp.is_null() {
-        return into_buf(Vec::new());
+        return Vec::new();
     }
     let n = unsafe { &*inp };
     let mut out = Vec::with_capacity(2048);
@@ -402,19 +402,18 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_nzb_info(
         let _ = writeln!(out, "{},{},{}", f.id, f.paused, f.extra_priority);
     }
 
-    into_buf(out)
+    out
 }
 
 /// # Safety
 /// `jobs` must be valid for `jobs_len` items.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_format_dupe_extras(
+pub unsafe fn format_dupe_extras_bytes(
     recovered_articles: c_int,
     recovered_bytes: i64,
     recovered_holes: c_int,
     jobs: *const NzbgetRsDiskRepairJob,
     jobs_len: usize,
-) -> RsBuf {
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(512);
     let (rec_hi, rec_lo) = split_i64(recovered_bytes);
     let _ = writeln!(
@@ -462,22 +461,21 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_dupe_extras(
             let _ = writeln!(out, "{},{},{},{}", off_hi, off_lo, sz_hi, sz_lo);
         }
     }
-    into_buf(out)
+    out
 }
 
 /// # Safety
 /// `inp`, `groups`, and `articles` must be valid for the call duration.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_format_file_info(
+pub unsafe fn format_file_info_bytes(
     inp: *const NzbgetRsDiskFileInfoInput,
     groups: *const *const c_char,
     groups_len: usize,
     include_articles: c_int,
     articles: *const NzbgetRsDiskArticleInfo,
     articles_len: usize,
-) -> RsBuf {
+) -> Vec<u8> {
     if inp.is_null() {
-        return into_buf(Vec::new());
+        return Vec::new();
     }
     let f = unsafe { &*inp };
     let mut out = Vec::with_capacity(articles_len * 64 + 512);
@@ -525,21 +523,20 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_file_info(
         }
     }
 
-    into_buf(out)
+    out
 }
 
 /// # Safety
 /// `inp`, `stats`, and `articles` must be valid for the call duration.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_format_file_state(
+pub unsafe fn format_file_state_bytes(
     inp: *const NzbgetRsDiskFileStateInput,
     stats: *const NzbgetRsDiskServerStat,
     stats_len: usize,
     articles: *const NzbgetRsDiskArticleState,
     articles_len: usize,
-) -> RsBuf {
+) -> Vec<u8> {
     if inp.is_null() {
-        return into_buf(Vec::new());
+        return Vec::new();
     }
     let f = unsafe { &*inp };
     let mut out = Vec::with_capacity(articles_len * 40 + 512);
@@ -596,13 +593,13 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_file_state(
     let _ = writeln!(out, "#decoded {},{}", dec_hi, dec_lo);
     let _ = writeln!(out, "OutputInitialized={}", f.output_initialized);
 
-    into_buf(out)
+    out
 }
 
 /// # Safety
 /// `name` and `dupe_key` are null or valid NUL-terminated strings.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_format_dup_info(
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn format_dup_info_bytes(
     status: c_int,
     size: i64,
     full_content_hash: u32,
@@ -611,7 +608,7 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_dup_info(
     dupe_mode: c_int,
     name: *const c_char,
     dupe_key: *const c_char,
-) -> RsBuf {
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
     let (sz_hi, sz_lo) = split_i64(size);
     let _ = writeln!(
@@ -627,17 +624,14 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_dup_info(
     );
     write_sanitized_line(unsafe { input(name) }, &mut out);
     write_sanitized_line(unsafe { input(dupe_key) }, &mut out);
-    into_buf(out)
+    out
 }
 
 /// # Safety
 /// `inp` and all slice pointers must be valid for the call duration.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_format_volume_stat_item(
-    inp: *const NzbgetRsDiskVolumeStatInput,
-) -> RsBuf {
+pub unsafe fn format_volume_stat_item_bytes(inp: *const NzbgetRsDiskVolumeStatInput) -> Vec<u8> {
     if inp.is_null() {
-        return into_buf(Vec::new());
+        return Vec::new();
     }
     let v = unsafe { &*inp };
     let mut out = Vec::with_capacity(2048);
@@ -682,11 +676,10 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_volume_stat_item(
         let _ = writeln!(out, "{},{}", art.failed, art.success);
     }
 
-    into_buf(out)
+    out
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_format_unpack_trailer_item(
+pub unsafe fn format_unpack_trailer_item_bytes(
     id: c_int,
     direct_unpack_status: c_int,
     unpack_tried: c_int,
@@ -694,7 +687,7 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_unpack_trailer_item(
     last_unpack_status: c_int,
     archives: *const *const c_char,
     archives_len: usize,
-) -> RsBuf {
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(128);
     let unpack_tried_flags = pack_unpack_tried_flags(
         unpack_tried != 0,
@@ -717,16 +710,15 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_unpack_trailer_item(
         write_sanitized_bytes(unsafe { input(arc_ptr) }, &mut out);
     }
     out.push(b'\n');
-    into_buf(out)
+    out
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_format_feed_status(
+pub unsafe fn format_feed_status_bytes(
     urls: *const *const c_char,
     filter_hashes: *const u32,
     last_updates: *const c_int,
     len: usize,
-) -> RsBuf {
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(len.saturating_mul(64) + 16);
     let _ = writeln!(out, "{}", len as c_int);
     if !urls.is_null() && !filter_hashes.is_null() && !last_updates.is_null() && len > 0 {
@@ -739,16 +731,15 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_feed_status(
             let _ = writeln!(out, "{}", t_slice[i]);
         }
     }
-    into_buf(out)
+    out
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_format_feed_history(
+pub unsafe fn format_feed_history_bytes(
     statuses: *const c_int,
     last_seens: *const c_int,
     urls: *const *const c_char,
     len: usize,
-) -> RsBuf {
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(len.saturating_mul(64) + 16);
     let _ = writeln!(out, "{}", len as c_int);
     if !statuses.is_null() && !last_seens.is_null() && !urls.is_null() && len > 0 {
@@ -760,17 +751,16 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_feed_history(
             write_sanitized_line(unsafe { input(u_slice[i]) }, &mut out);
         }
     }
-    into_buf(out)
+    out
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_format_server_info(
+pub unsafe fn format_server_info_bytes(
     names: *const *const c_char,
     hosts: *const *const c_char,
     ports: *const c_int,
     users: *const *const c_char,
     len: usize,
-) -> RsBuf {
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(len.saturating_mul(64) + 16);
     let _ = writeln!(out, "{}", len as c_int);
     if !names.is_null() && !hosts.is_null() && !ports.is_null() && !users.is_null() && len > 0 {
@@ -785,17 +775,16 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_server_info(
             write_sanitized_line(unsafe { input(u_slice[i]) }, &mut out);
         }
     }
-    into_buf(out)
+    out
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_format_nzb_message_line(
+pub unsafe fn format_nzb_message_line_bytes(
     time_str: *const c_char,
     tm: c_int,
     kind: c_int,
     text: *const c_char,
     line_ending: *const c_char,
-) -> RsBuf {
+) -> Vec<u8> {
     const MESSAGE_TYPES: [&[u8]; 5] = [b"INFO", b"WARNING", b"ERROR", b"DEBUG", b"DETAIL"];
     let kind_bytes = if (0..5).contains(&kind) {
         MESSAGE_TYPES[kind as usize]
@@ -816,7 +805,7 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_nzb_message_line(
     out.push(b'\t');
     out.extend_from_slice(&clean_text);
     out.extend_from_slice(unsafe { input(line_ending) });
-    into_buf(out)
+    out
 }
 
 fn parse_c_int_field(field: &[u8]) -> Option<c_int> {
@@ -3946,15 +3935,2942 @@ pub unsafe fn load_file_state(
     true
 }
 
+const DISKSTATE_QUEUE_VERSION: i32 = 64;
+const DISKSTATE_QUEUE_LEGACY_VERSION: i32 = 66;
+const DISKSTATE_FILE_VERSION: i32 = 7;
+const DISKSTATE_FILE_LEGACY_VERSION: i32 = 9;
+const DISKSTATE_STATS_VERSION: i32 = 4;
+const DISKSTATE_FEEDS_VERSION: i32 = 3;
+const DUPESTATE_TRAILER: &[u8] = b"#dupestate 1";
+const UNPACKSTATE_TRAILER: &[u8] = b"#unpackstate 1";
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NzbgetRsServerMatchItem {
+    pub id: c_int,
+    pub port: c_int,
+    pub name: *const c_char,
+    pub host: *const c_char,
+    pub user: *const c_char,
+}
+
+#[repr(C)]
+pub struct NzbgetRsDiskNzbExport {
+    pub hist_id: c_int,
+    pub hist_kind: c_int,
+    pub hist_time: c_int,
+    pub changed: c_int,
+    pub info: NzbgetRsDiskNzbInfoInput,
+    pub completed: *const NzbgetRsDiskCompletedFile,
+    pub completed_len: usize,
+    pub params: *const NzbgetRsDiskParam,
+    pub params_len: usize,
+    pub scripts: *const NzbgetRsDiskScriptStatus,
+    pub scripts_len: usize,
+    pub stats: *const NzbgetRsDiskServerStat,
+    pub stats_len: usize,
+    pub files: *const NzbgetRsDiskFileStub,
+    pub files_len: usize,
+    pub dupe_recovered_articles: c_int,
+    pub dupe_recovered_bytes: i64,
+    pub dupe_recovered_holes: c_int,
+    pub jobs: *const NzbgetRsDiskRepairJob,
+    pub jobs_len: usize,
+    pub direct_unpack_status: c_int,
+    pub unpack_tried: c_int,
+    pub par_repaired: c_int,
+    pub last_unpack_status: c_int,
+    pub archives: *const *const c_char,
+    pub archives_len: usize,
+}
+
+#[repr(C)]
+pub struct NzbgetRsDiskFileExport {
+    pub file_id: c_int,
+    pub has_articles: c_int,
+    pub articles_len_count: c_int,
+    pub force_direct_write: c_int,
+    pub info: NzbgetRsDiskFileInfoInput,
+    pub groups: *const *const c_char,
+    pub groups_len: usize,
+    pub articles: *const NzbgetRsDiskArticleInfo,
+    pub articles_len: usize,
+    pub state: NzbgetRsDiskFileStateInput,
+    pub stats: *const NzbgetRsDiskServerStat,
+    pub stats_len: usize,
+    pub article_states: *const NzbgetRsDiskArticleState,
+    pub article_states_len: usize,
+}
+
+pub type DiskLogFn = unsafe extern "C" fn(ctx: *mut c_void, level: c_int, msg: *const c_char);
+pub type DiskCtrlFn = unsafe extern "C" fn(
+    ctx: *mut c_void,
+    cmd: c_int,
+    a1: c_int,
+    a2: c_int,
+    a3: i64,
+    s1: *const c_char,
+) -> c_int;
+pub type DiskNzbSinkFn =
+    unsafe extern "C" fn(sink_ctx: *mut c_void, exp: *const NzbgetRsDiskNzbExport);
+pub type DiskExportNzbFn = unsafe extern "C" fn(
+    ctx: *mut c_void,
+    source: c_int,
+    idx: usize,
+    sink_ctx: *mut c_void,
+    sink_fn: DiskNzbSinkFn,
+);
+pub type DiskApplyNzbFn = unsafe extern "C" fn(
+    ctx: *mut c_void,
+    mode: c_int,
+    inp: *const NzbgetRsDiskNzbInfoInput,
+    flags: c_int,
+    completed: *const NzbgetRsDiskCompletedFile,
+    completed_len: usize,
+    params: *const NzbgetRsDiskParam,
+    params_len: usize,
+    scripts: *const NzbgetRsDiskScriptStatus,
+    scripts_len: usize,
+    stats: *const NzbgetRsDiskServerStat,
+    stats_len: usize,
+    files: *const NzbgetRsDiskFileStub,
+    file_times: *const c_int,
+    files_len: usize,
+    job: *const NzbgetRsDiskRepairJob,
+);
+pub type DiskFileSinkFn =
+    unsafe extern "C" fn(sink_ctx: *mut c_void, exp: *const NzbgetRsDiskFileExport);
+pub type DiskExportFileFn = unsafe extern "C" fn(
+    ctx: *mut c_void,
+    mode: c_int,
+    sink_ctx: *mut c_void,
+    sink_fn: DiskFileSinkFn,
+);
+pub type DiskApplyFileFn = unsafe extern "C" fn(
+    ctx: *mut c_void,
+    mode: c_int,
+    idx_or_flags: c_int,
+    extra_i32: c_int,
+    seg_offset: i64,
+    crc: u32,
+    str_arg: *const c_char,
+    finfo: *const NzbgetRsDiskFileInfoInput,
+    art_info: *const NzbgetRsDiskArticleInfo,
+    fstate: *const NzbgetRsDiskFileStateInput,
+    stats: *const NzbgetRsDiskServerStat,
+    stats_len: usize,
+) -> c_int;
+pub type DiskAuxSinkFn = unsafe extern "C" fn(
+    sink_ctx: *mut c_void,
+    kind: c_int,
+    a1: c_int,
+    a2: c_int,
+    u1: u32,
+    s1: *const c_char,
+    srv_items: *const NzbgetRsServerMatchItem,
+    srv_len: usize,
+    vol_items: *const NzbgetRsDiskVolumeStatInput,
+    vol_len: usize,
+);
+pub type DiskAuxFn = unsafe extern "C" fn(
+    ctx: *mut c_void,
+    op: c_int,
+    a1: c_int,
+    a2: c_int,
+    u1: u32,
+    s1: *const c_char,
+    s2: *const c_char,
+    vol_item: *const NzbgetRsDiskVolumeStatInput,
+    sink_ctx: *mut c_void,
+    sink_fn: Option<DiskAuxSinkFn>,
+);
+
+#[repr(C)]
+pub struct NzbgetRsDiskStateEnv {
+    pub ctx: *mut c_void,
+    pub queue_dir: *const c_char,
+    pub temp_dir: *const c_char,
+    pub line_ending: *const c_char,
+    pub time_str: *const c_char,
+    pub text: *const c_char,
+    pub sep: c_int,
+    pub has_options: c_int,
+    pub flush_queue: c_int,
+    pub direct_write: c_int,
+    pub continue_partial: c_int,
+    pub pt_finished: c_int,
+    pub ns_running: c_int,
+    pub ns_none: c_int,
+    pub a1: c_int,
+    pub a2: c_int,
+    pub a3: c_int,
+    pub a4: c_int,
+    pub now: i64,
+    pub out_flag: *mut c_int,
+    pub log_cb: Option<DiskLogFn>,
+    pub ctrl_cb: Option<DiskCtrlFn>,
+    pub export_nzb_cb: Option<DiskExportNzbFn>,
+    pub apply_nzb_cb: Option<DiskApplyNzbFn>,
+    pub export_file_cb: Option<DiskExportFileFn>,
+    pub apply_file_cb: Option<DiskApplyFileFn>,
+    pub aux_cb: Option<DiskAuxFn>,
+}
+
+fn bytes_to_cstring_trunc(raw: &[u8]) -> std::ffi::CString {
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    unsafe { std::ffi::CString::from_vec_unchecked(raw[..end].to_vec()) }
+}
+
+unsafe fn emit_log(env: &NzbgetRsDiskStateEnv, level: c_int, msg: &[u8]) {
+    if let Some(cb) = env.log_cb {
+        let cstr = bytes_to_cstring_trunc(msg);
+        unsafe { cb(env.ctx, level, cstr.as_ptr()) };
+    }
+}
+
+unsafe fn emit_log_parts(env: &NzbgetRsDiskStateEnv, level: c_int, parts: &[&[u8]]) {
+    let joined: Vec<u8> = parts.concat();
+    unsafe { emit_log(env, level, &joined) };
+}
+
+unsafe fn call_ctrl(
+    env: &NzbgetRsDiskStateEnv,
+    cmd: c_int,
+    a1: c_int,
+    a2: c_int,
+    a3: i64,
+    s1: *const c_char,
+) -> c_int {
+    if let Some(cb) = env.ctrl_cb {
+        unsafe { cb(env.ctx, cmd, a1, a2, a3, s1) }
+    } else {
+        0
+    }
+}
+
+struct RsStateReader {
+    reader: std::io::BufReader<std::fs::File>,
+    raw_buf: Vec<u8>,
+    cstr_buf: Vec<u8>,
+}
+
+impl RsStateReader {
+    fn open(path_c: &std::ffi::CStr) -> Result<Self, i32> {
+        let fd = crate::fsops::open_cloexec_fd(path_c, 0, 0, 1, 2);
+        if fd == -1 {
+            return Err(crate::fsops::last_errno());
+        }
+        let file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
+        Ok(Self {
+            reader: std::io::BufReader::new(file),
+            raw_buf: Vec::with_capacity(1024),
+            cstr_buf: Vec::with_capacity(1024),
+        })
+    }
+
+    fn read_line(&mut self, max_size: usize) -> Option<&[u8]> {
+        use std::io::BufRead;
+        if max_size == 0 {
+            return None;
+        }
+        let cap = max_size - 1;
+        self.raw_buf.clear();
+        if cap == 0 {
+            return match self.reader.fill_buf() {
+                Ok([]) | Err(_) => None,
+                Ok(_) => Some(&[]),
+            };
+        }
+        let mut saw_any = false;
+        let mut saw_newline = false;
+        while self.raw_buf.len() < cap {
+            let avail = match self.reader.fill_buf() {
+                Ok([]) => break,
+                Ok(buf) => buf,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return None,
+            };
+            saw_any = true;
+            let rem = cap - self.raw_buf.len();
+            let window = &avail[..avail.len().min(rem)];
+            if let Some(nl_pos) = window.iter().position(|&b| b == b'\n') {
+                self.raw_buf.extend_from_slice(&window[..=nl_pos]);
+                self.reader.consume(nl_pos + 1);
+                saw_newline = true;
+                break;
+            }
+            let take = window.len();
+            self.raw_buf.extend_from_slice(window);
+            self.reader.consume(take);
+        }
+        if !saw_any {
+            return None;
+        }
+        if !saw_newline {
+            loop {
+                let avail = match self.reader.fill_buf() {
+                    Ok([]) => break,
+                    Ok(buf) => buf,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                };
+                if let Some(nl_pos) = avail.iter().position(|&b| b == b'\n') {
+                    self.reader.consume(nl_pos + 1);
+                    break;
+                }
+                let take = avail.len();
+                self.reader.consume(take);
+            }
+        }
+        let nul_len = self
+            .raw_buf
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(self.raw_buf.len());
+        if nul_len > 0 {
+            Some(&self.raw_buf[..nul_len - 1])
+        } else {
+            Some(&[])
+        }
+    }
+
+    fn scan_i32(&mut self) -> Option<i32> {
+        let line = self.read_line(1024)?;
+        ScanCursor(line).i32(false)
+    }
+
+    fn as_ctx(&mut self) -> *mut c_void {
+        (self as *mut Self).cast()
+    }
+
+    unsafe extern "C" fn read_line_cb(ctx: *mut c_void, max_size: c_int) -> *const c_char {
+        let this = unsafe { &mut *ctx.cast::<Self>() };
+        let eff_max = if max_size > 0 {
+            max_size as usize
+        } else {
+            10240
+        };
+        let Some(slice) = this.read_line(eff_max) else {
+            return std::ptr::null();
+        };
+        let slice_vec = slice.to_vec();
+        this.cstr_buf.clear();
+        this.cstr_buf.extend_from_slice(&slice_vec);
+        this.cstr_buf.push(0);
+        this.cstr_buf.as_ptr().cast()
+    }
+}
+
+struct RsStateFile {
+    dest: Vec<u8>,
+    temp: Vec<u8>,
+    dest_c: std::ffi::CString,
+    temp_c: std::ffi::CString,
+    sep: u8,
+    format_version: i32,
+    read_version: i32,
+    transactional: bool,
+    flush: bool,
+    file_version: i32,
+}
+
+impl RsStateFile {
+    fn new(
+        qdir: &[u8],
+        sep: u8,
+        filename: &[u8],
+        format_version: i32,
+        transactional: bool,
+        read_version: i32,
+    ) -> Self {
+        let dest =
+            crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, filename);
+        let temp = if transactional {
+            diskstate_format_new_path(&dest)
+        } else {
+            dest.clone()
+        };
+        let dest_c = bytes_to_cstring_trunc(&dest);
+        let temp_c = bytes_to_cstring_trunc(&temp);
+        Self {
+            dest,
+            temp,
+            dest_c,
+            temp_c,
+            sep,
+            format_version,
+            read_version: if read_version != 0 {
+                read_version
+            } else {
+                format_version
+            },
+            transactional,
+            flush: true,
+            file_version: 0,
+        }
+    }
+
+    fn discard(&self) {
+        crate::fsops::delete_file(&self.dest_c);
+        if self.transactional {
+            crate::fsops::delete_file(&self.temp_c);
+        }
+    }
+
+    fn file_exists(&self) -> bool {
+        crate::fsops::posix_stat(&self.dest) == 1
+            || (self.transactional && crate::fsops::posix_stat(&self.temp) == 1)
+    }
+
+    unsafe fn begin_write(
+        &self,
+        env: &NzbgetRsDiskStateEnv,
+    ) -> Option<std::io::BufWriter<std::fs::File>> {
+        let fd = crate::fsops::open_cloexec_fd(&self.temp_c, 2, 0, 1, 2);
+        if fd == -1 {
+            let err = crate::fsops::error_message(crate::fsops::last_errno());
+            unsafe {
+                emit_log_parts(
+                    env,
+                    4,
+                    &[
+                        b"Error saving diskstate: Could not create file ",
+                        &self.temp,
+                        b": ",
+                        &err,
+                    ],
+                );
+            }
+            return None;
+        }
+        let file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
+        let mut w = std::io::BufWriter::new(file);
+        let _ = writeln!(w, "nzbget diskstate file version {}", self.format_version);
+        Some(w)
+    }
+
+    unsafe fn finish_write(
+        &self,
+        env: &NzbgetRsDiskStateEnv,
+        mut w: std::io::BufWriter<std::fs::File>,
+        flush_queue: bool,
+    ) -> bool {
+        let _ = w.flush();
+        if !self.transactional {
+            drop(w);
+            return true;
+        }
+
+        if self.flush && flush_queue {
+            unsafe {
+                emit_log_parts(
+                    env,
+                    0,
+                    &[
+                        b"Flushing data for file ",
+                        crate::nserv::base_file_name(&self.temp),
+                    ],
+                );
+            }
+            let mut errmsg = Vec::new();
+            let fd = std::os::unix::io::AsRawFd::as_raw_fd(w.get_ref());
+            if !crate::fsops::flush_file_buffers(fd, &mut errmsg) {
+                unsafe {
+                    emit_log_parts(
+                        env,
+                        3,
+                        &[
+                            b"Could not flush file ",
+                            &self.temp,
+                            b" into disk: ",
+                            &errmsg,
+                        ],
+                    );
+                }
+            }
+        }
+
+        drop(w);
+
+        crate::fsops::delete_file(&self.dest_c);
+        if !crate::fsops::move_file(&self.temp_c, &self.dest_c) {
+            let err = crate::fsops::error_message(crate::fsops::last_errno());
+            unsafe {
+                emit_log_parts(
+                    env,
+                    4,
+                    &[
+                        b"Error saving diskstate: Could not rename file ",
+                        &self.temp,
+                        b" to ",
+                        &self.dest,
+                        b": ",
+                        &err,
+                    ],
+                );
+            }
+            return false;
+        }
+
+        if self.flush && flush_queue {
+            unsafe {
+                emit_log_parts(
+                    env,
+                    0,
+                    &[
+                        b"Flushing directory for file ",
+                        crate::nserv::base_file_name(&self.dest),
+                    ],
+                );
+            }
+            let mut errmsg = Vec::new();
+            if !crate::fsops::flush_dir_buffers(&self.dest_c, self.sep, &mut errmsg) {
+                unsafe {
+                    emit_log_parts(
+                        env,
+                        3,
+                        &[
+                            b"Could not flush directory buffers for file ",
+                            &self.dest,
+                            b" into disk: ",
+                            &errmsg,
+                        ],
+                    );
+                }
+            }
+        }
+
+        true
+    }
+
+    unsafe fn begin_read(&mut self, env: &NzbgetRsDiskStateEnv) -> Option<RsStateReader> {
+        let dest_exists = crate::fsops::posix_stat(&self.dest) == 1;
+        let temp_exists = crate::fsops::posix_stat(&self.temp) == 1;
+        if self.transactional && dest_exists && temp_exists {
+            crate::fsops::delete_file(&self.temp_c);
+        } else if !dest_exists && temp_exists {
+            unsafe {
+                emit_log_parts(
+                    env,
+                    3,
+                    &[
+                        b"Restoring diskstate file ",
+                        crate::nserv::base_file_name(&self.dest),
+                        b" from ",
+                        crate::nserv::base_file_name(&self.temp),
+                    ],
+                );
+            }
+            if !crate::fsops::move_file(&self.temp_c, &self.dest_c) {
+                let err = crate::fsops::error_message(crate::fsops::last_errno());
+                unsafe {
+                    emit_log_parts(
+                        env,
+                        4,
+                        &[
+                            b"Error restoring diskstate: Could not rename file ",
+                            &self.temp,
+                            b" to ",
+                            &self.dest,
+                            b": ",
+                            &err,
+                        ],
+                    );
+                }
+                return None;
+            }
+        }
+
+        let mut reader = match RsStateReader::open(&self.dest_c) {
+            Ok(r) => r,
+            Err(errno) => {
+                let err = crate::fsops::error_message(errno);
+                unsafe {
+                    emit_log_parts(
+                        env,
+                        4,
+                        &[
+                            b"Error reading diskstate: could not open file ",
+                            &self.dest,
+                            b": ",
+                            &err,
+                        ],
+                    );
+                }
+                return None;
+            }
+        };
+
+        let sig = reader.read_line(128).unwrap_or(b"");
+        self.file_version = parse_format_version(sig);
+        if self.file_version > self.read_version {
+            unsafe {
+                emit_log_parts(
+                    env,
+                    4,
+                    &[
+                        b"Could not load diskstate file ",
+                        &self.dest,
+                        b" due to file version mismatch",
+                    ],
+                );
+            }
+            return None;
+        }
+
+        Some(reader)
+    }
+}
+
+#[derive(Default)]
+struct TrailerAccum {
+    dupe_count: i32,
+    dupe_bytes: Vec<u8>,
+    unpack_count: i32,
+    unpack_bytes: Vec<u8>,
+}
+
+impl TrailerAccum {
+    unsafe fn push_nzb(&mut self, exp: &NzbgetRsDiskNzbExport) {
+        if has_dupe_extras(
+            exp.dupe_recovered_articles,
+            exp.dupe_recovered_bytes,
+            exp.dupe_recovered_holes,
+            exp.jobs_len,
+        ) {
+            self.dupe_count += 1;
+            let _ = writeln!(self.dupe_bytes, "{}", exp.info.id);
+            let extras = unsafe {
+                format_dupe_extras_bytes(
+                    exp.dupe_recovered_articles,
+                    exp.dupe_recovered_bytes,
+                    exp.dupe_recovered_holes,
+                    exp.jobs,
+                    exp.jobs_len,
+                )
+            };
+            self.dupe_bytes.extend_from_slice(&extras);
+        }
+        self.unpack_count += 1;
+        let unpack = unsafe {
+            format_unpack_trailer_item_bytes(
+                exp.info.id,
+                exp.direct_unpack_status,
+                exp.unpack_tried,
+                exp.par_repaired,
+                exp.last_unpack_status,
+                exp.archives,
+                exp.archives_len,
+            )
+        };
+        self.unpack_bytes.extend_from_slice(&unpack);
+    }
+
+    fn write_to<W: Write>(&self, w: &mut W) {
+        let _ = w.write_all(DUPESTATE_TRAILER);
+        let _ = writeln!(w, "\n{}", self.dupe_count);
+        let _ = w.write_all(&self.dupe_bytes);
+        let _ = w.write_all(UNPACKSTATE_TRAILER);
+        let _ = writeln!(w, "\n{}", self.unpack_count);
+        let _ = w.write_all(&self.unpack_bytes);
+    }
+}
+
+unsafe fn save_nzb_section(
+    env: &NzbgetRsDiskStateEnv,
+    w: &mut std::io::BufWriter<std::fs::File>,
+    source: c_int,
+    header_count: i32,
+) {
+    let Some(export_cb) = env.export_nzb_cb else {
+        return;
+    };
+    let iter_len = if source == 1 {
+        unsafe { call_ctrl(env, 1, 0, 0, 0, std::ptr::null()) as usize }
+    } else {
+        unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) as usize }
+    };
+    let _ = writeln!(w, "{header_count}");
+
+    struct SinkState<'a> {
+        w: &'a mut std::io::BufWriter<std::fs::File>,
+        source: c_int,
+        remaining_progress: i32,
+        trailer: TrailerAccum,
+    }
+    unsafe extern "C" fn sink_cb(sink_ctx: *mut c_void, exp_ptr: *const NzbgetRsDiskNzbExport) {
+        if exp_ptr.is_null() {
+            return;
+        }
+        let st = unsafe { &mut *sink_ctx.cast::<SinkState<'_>>() };
+        let exp = unsafe { &*exp_ptr };
+        if st.source == 0 {
+            let bytes = unsafe {
+                format_nzb_info_bytes(
+                    &exp.info,
+                    exp.completed,
+                    exp.completed_len,
+                    exp.params,
+                    exp.params_len,
+                    exp.scripts,
+                    exp.scripts_len,
+                    exp.stats,
+                    exp.stats_len,
+                    exp.files,
+                    exp.files_len,
+                )
+            };
+            let _ = st.w.write_all(&bytes);
+            unsafe { st.trailer.push_nzb(exp) };
+        } else if st.source == 2 {
+            if exp.changed != 0 && st.remaining_progress > 0 {
+                st.remaining_progress -= 1;
+                let _ = writeln!(st.w, "{}", exp.info.id);
+                let bytes = unsafe {
+                    format_nzb_info_bytes(
+                        &exp.info,
+                        exp.completed,
+                        exp.completed_len,
+                        exp.params,
+                        exp.params_len,
+                        exp.scripts,
+                        exp.scripts_len,
+                        exp.stats,
+                        exp.stats_len,
+                        exp.files,
+                        exp.files_len,
+                    )
+                };
+                let _ = st.w.write_all(&bytes);
+                unsafe { st.trailer.push_nzb(exp) };
+            }
+        } else if st.source == 1 {
+            let _ = writeln!(st.w, "{},{},{}", exp.hist_id, exp.hist_kind, exp.hist_time);
+            if exp.hist_kind == 1 || exp.hist_kind == 2 {
+                let bytes = unsafe {
+                    format_nzb_info_bytes(
+                        &exp.info,
+                        exp.completed,
+                        exp.completed_len,
+                        exp.params,
+                        exp.params_len,
+                        exp.scripts,
+                        exp.scripts_len,
+                        exp.stats,
+                        exp.stats_len,
+                        exp.files,
+                        exp.files_len,
+                    )
+                };
+                let _ = st.w.write_all(&bytes);
+                unsafe { st.trailer.push_nzb(exp) };
+            } else if exp.hist_kind == 3 {
+                let bytes = unsafe {
+                    format_dup_info_bytes(
+                        exp.info.par_status,
+                        exp.info.size,
+                        exp.info.full_content_hash,
+                        exp.info.filtered_content_hash,
+                        exp.info.dupe_score,
+                        exp.info.dupe_mode,
+                        exp.info.name,
+                        exp.info.dupe_key,
+                    )
+                };
+                let _ = st.w.write_all(&bytes);
+            }
+        }
+    }
+
+    let mut state = SinkState {
+        w,
+        source,
+        remaining_progress: header_count,
+        trailer: TrailerAccum::default(),
+    };
+    for idx in 0..iter_len {
+        unsafe {
+            export_cb(
+                env.ctx,
+                source,
+                idx,
+                (&mut state as *mut SinkState<'_>).cast(),
+                sink_cb,
+            );
+        }
+    }
+    state.trailer.write_to(state.w);
+}
+
+unsafe fn empty_nzb_input() -> NzbgetRsDiskNzbInfoInput {
+    unsafe { std::mem::zeroed() }
+}
+
+unsafe fn load_dupe_extras_into_target(
+    env: &NzbgetRsDiskStateEnv,
+    r: &mut RsStateReader,
+    format_version: i32,
+) -> bool {
+    unsafe extern "C" fn on_hdr(
+        ctx: *mut c_void,
+        rec_articles: c_int,
+        rec_bytes: i64,
+        rec_holes: c_int,
+    ) {
+        let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
+        if let Some(cb) = env.apply_nzb_cb {
+            let mut inp = unsafe { empty_nzb_input() };
+            inp.total_articles = rec_articles;
+            inp.size = rec_bytes;
+            inp.failed_articles = rec_holes;
+            unsafe {
+                cb(
+                    env.ctx,
+                    1,
+                    &inp,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                );
+            }
+        }
+    }
+    unsafe extern "C" fn on_job(ctx: *mut c_void, job: *const NzbgetRsDiskRepairJob) {
+        let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
+        if let Some(cb) = env.apply_nzb_cb {
+            let inp = unsafe { empty_nzb_input() };
+            unsafe {
+                cb(
+                    env.ctx,
+                    2,
+                    &inp,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    job,
+                );
+            }
+        }
+    }
+    unsafe {
+        load_dupe_extras(
+            r.as_ctx(),
+            RsStateReader::read_line_cb,
+            format_version,
+            (env as *const NzbgetRsDiskStateEnv).cast_mut().cast(),
+            on_hdr,
+            on_job,
+        )
+    }
+}
+
+unsafe fn parse_unpack_state_into_target(
+    env: &NzbgetRsDiskStateEnv,
+    r: &mut RsStateReader,
+) -> bool {
+    let Some(l1) = r.read_line(1024).map(|b| b.to_vec()) else {
+        return false;
+    };
+    let Some(l2) = r.read_line(1024).map(|b| b.to_vec()) else {
+        return false;
+    };
+    let Some(l3) = r.read_line(1024).map(|b| b.to_vec()) else {
+        return false;
+    };
+    let Some((direct, tried, repaired, last)) =
+        parse_unpack_state_lines(&l1, &l2, &l3, env.ns_running, env.ns_none)
+    else {
+        return false;
+    };
+    let Some(l4) = r.read_line(65536).map(|b| b.to_vec()) else {
+        return false;
+    };
+    if let Some(cb) = env.apply_nzb_cb {
+        let mut inp = unsafe { empty_nzb_input() };
+        inp.par_status = direct;
+        inp.unpack_status = c_int::from(tried);
+        inp.move_status = c_int::from(repaired);
+        inp.delete_status = last;
+        unsafe {
+            cb(
+                env.ctx,
+                3,
+                &inp,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            );
+        }
+        let archives = l4.strip_prefix(b"ExtractedArchives=").unwrap_or(&l4);
+        let mut cursor = 0;
+        while let Some((start, len, next)) = diskstate_next_comma_token(archives, cursor) {
+            let mut tok_inp = unsafe { empty_nzb_input() };
+            tok_inp.name = unsafe { archives.as_ptr().add(start).cast() };
+            unsafe {
+                cb(
+                    env.ctx,
+                    4,
+                    &tok_inp,
+                    len as c_int,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                );
+            }
+            cursor = next;
+        }
+    }
+    true
+}
+
+unsafe fn load_nzb_info_into_target(
+    env: &NzbgetRsDiskStateEnv,
+    r: &mut RsStateReader,
+    format_version: i32,
+) -> bool {
+    unsafe extern "C" fn on_loaded(
+        ctx: *mut c_void,
+        inp: *const NzbgetRsDiskNzbInfoInput,
+        flags: c_int,
+        completed: *const NzbgetRsDiskCompletedFile,
+        completed_len: usize,
+        params: *const NzbgetRsDiskParam,
+        params_len: usize,
+        scripts: *const NzbgetRsDiskScriptStatus,
+        scripts_len: usize,
+        stats: *const NzbgetRsDiskServerStat,
+        stats_len: usize,
+        files: *const NzbgetRsDiskFileStub,
+        file_times: *const c_int,
+        files_len: usize,
+    ) {
+        let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
+        if let Some(cb) = env.apply_nzb_cb {
+            unsafe {
+                cb(
+                    env.ctx,
+                    0,
+                    inp,
+                    flags,
+                    completed,
+                    completed_len,
+                    params,
+                    params_len,
+                    scripts,
+                    scripts_len,
+                    stats,
+                    stats_len,
+                    files,
+                    file_times,
+                    files_len,
+                    std::ptr::null(),
+                );
+            }
+        }
+    }
+
+    let ok = unsafe {
+        load_nzb_info(
+            r.as_ctx(),
+            RsStateReader::read_line_cb,
+            format_version,
+            env.pt_finished,
+            (env as *const NzbgetRsDiskStateEnv).cast_mut().cast(),
+            on_loaded,
+        )
+    } && (!matches!(format_version, 65 | 66)
+        || unsafe { load_dupe_extras_into_target(env, r, format_version) })
+        && (format_version < 67 || unsafe { parse_unpack_state_into_target(env, r) });
+
+    if !ok {
+        unsafe { emit_log(env, 4, b"Error reading nzb info from disk") };
+    }
+    ok
+}
+
+unsafe fn load_dupe_trailer_section(
+    env: &NzbgetRsDiskStateEnv,
+    r: &mut RsStateReader,
+    is_history: bool,
+) -> bool {
+    let Some(first) = r.read_line(1024).map(|b| b.to_vec()) else {
+        return true;
+    };
+    if first != DUPESTATE_TRAILER {
+        return true;
+    }
+    let ok = (|| -> bool {
+        let Some(count) = r.scan_i32() else {
+            return false;
+        };
+        if count < 0 {
+            return false;
+        }
+        let target_src = c_int::from(is_history);
+        for _ in 0..count {
+            let Some(id) = r.scan_i32() else {
+                return false;
+            };
+            unsafe { call_ctrl(env, 13, target_src, id, 0, std::ptr::null()) };
+            if !unsafe { load_dupe_extras_into_target(env, r, DISKSTATE_QUEUE_LEGACY_VERSION) } {
+                return false;
+            }
+        }
+        if let Some(next_line) = r.read_line(1024).map(|b| b.to_vec()) {
+            if next_line == UNPACKSTATE_TRAILER {
+                let Some(unpack_count) = r.scan_i32() else {
+                    return false;
+                };
+                if unpack_count < 0 {
+                    return false;
+                }
+                for _ in 0..unpack_count {
+                    let Some(id) = r.scan_i32() else {
+                        return false;
+                    };
+                    unsafe { call_ctrl(env, 13, target_src, id, 0, std::ptr::null()) };
+                    if !unsafe { parse_unpack_state_into_target(env, r) } {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    })();
+    if !ok {
+        unsafe { emit_log(env, 4, b"Error reading duplicate repair state from disk") };
+    }
+    ok
+}
+
+unsafe fn load_queue_section(
+    env: &NzbgetRsDiskStateEnv,
+    r: &mut RsStateReader,
+    format_version: i32,
+) -> bool {
+    unsafe { emit_log(env, 0, b"Loading nzb list from disk") };
+    let ok = (|| -> bool {
+        let Some(size) = r.scan_i32() else {
+            return false;
+        };
+        for _ in 0..size {
+            unsafe { call_ctrl(env, 9, 0, 0, 0, std::ptr::null()) };
+            if !unsafe { load_nzb_info_into_target(env, r, format_version) } {
+                return false;
+            }
+            unsafe { call_ctrl(env, 10, 0, 0, 0, std::ptr::null()) };
+        }
+        if (57..=DISKSTATE_QUEUE_VERSION).contains(&format_version)
+            && !unsafe { load_dupe_trailer_section(env, r, false) }
+        {
+            return false;
+        }
+        true
+    })();
+    if !ok {
+        unsafe { emit_log(env, 4, b"Error reading nzb list from disk") };
+    }
+    ok
+}
+
+unsafe fn load_progress_section(
+    env: &NzbgetRsDiskStateEnv,
+    r: &mut RsStateReader,
+    format_version: i32,
+) -> bool {
+    unsafe { emit_log(env, 0, b"Loading nzb progress from disk") };
+    let ok = (|| -> bool {
+        let Some(size) = r.scan_i32() else {
+            return false;
+        };
+        for _ in 0..size {
+            let Some(id) = r.scan_i32() else {
+                return false;
+            };
+            let found = unsafe { call_ctrl(env, 11, id, 0, 0, std::ptr::null()) != 0 };
+            if !found {
+                unsafe {
+                    emit_log(
+                        env,
+                        3,
+                        format!(
+                            "Skipping saved progress of NZB with id {id}, which is no longer queued"
+                        )
+                        .as_bytes(),
+                    );
+                }
+            }
+            if !unsafe { load_nzb_info_into_target(env, r, format_version) } {
+                return false;
+            }
+        }
+        if format_version <= DISKSTATE_QUEUE_VERSION
+            && !unsafe { load_dupe_trailer_section(env, r, false) }
+        {
+            return false;
+        }
+        true
+    })();
+    if !ok {
+        unsafe { emit_log(env, 4, b"Error reading nzb progress from disk") };
+    }
+    ok
+}
+
+unsafe fn load_history_section(
+    env: &NzbgetRsDiskStateEnv,
+    r: &mut RsStateReader,
+    format_version: i32,
+) -> bool {
+    unsafe { emit_log(env, 0, b"Loading history from disk") };
+    let ok = (|| -> bool {
+        let Some(size) = r.scan_i32() else {
+            return false;
+        };
+        for _ in 0..size {
+            let Some(hdr) = r.read_line(1024).map(|b| b.to_vec()) else {
+                return false;
+            };
+            let mut sc = ScanCursor(&hdr);
+            let (Some(id), Some(kindval), Some(time)) = (sc.i32(false), sc.i32(true), sc.i32(true))
+            else {
+                return false;
+            };
+            if kindval == 1 || kindval == 2 {
+                unsafe { call_ctrl(env, 9, 0, 0, 0, std::ptr::null()) };
+                if !unsafe { load_nzb_info_into_target(env, r, format_version) } {
+                    return false;
+                }
+                unsafe { call_ctrl(env, 12, kindval, time, 0, std::ptr::null()) };
+            } else if kindval == 3 {
+                struct DupCtx<'a> {
+                    env: &'a NzbgetRsDiskStateEnv,
+                    id: c_int,
+                    time: c_int,
+                }
+                unsafe extern "C" fn on_dup(
+                    ctx: *mut c_void,
+                    status: c_int,
+                    dupe_score: c_int,
+                    dupe_mode: c_int,
+                    full_hash: u32,
+                    filt_hash: u32,
+                    size: i64,
+                    name: *const c_char,
+                    dupe_key: *const c_char,
+                ) {
+                    let dc = unsafe { &*ctx.cast::<DupCtx<'_>>() };
+                    if let Some(cb) = dc.env.apply_nzb_cb {
+                        let mut inp = unsafe { empty_nzb_input() };
+                        inp.id = dc.id;
+                        inp.feed_id = dc.time;
+                        inp.par_status = status;
+                        inp.size = size;
+                        inp.full_content_hash = full_hash;
+                        inp.filtered_content_hash = filt_hash;
+                        inp.dupe_score = dupe_score;
+                        inp.dupe_mode = dupe_mode;
+                        inp.name = name;
+                        inp.dupe_key = dupe_key;
+                        unsafe {
+                            cb(
+                                dc.env.ctx,
+                                5,
+                                &inp,
+                                0,
+                                std::ptr::null(),
+                                0,
+                                std::ptr::null(),
+                                0,
+                                std::ptr::null(),
+                                0,
+                                std::ptr::null(),
+                                0,
+                                std::ptr::null(),
+                                std::ptr::null(),
+                                0,
+                                std::ptr::null(),
+                            );
+                        }
+                    }
+                }
+                let mut dc = DupCtx { env, id, time };
+                if !unsafe {
+                    load_section(
+                        0,
+                        r.as_ctx(),
+                        Some(RsStateReader::read_line_cb),
+                        format_version,
+                        &[],
+                        0,
+                        0,
+                        (&mut dc as *mut DupCtx<'_>).cast(),
+                        on_dup,
+                    )
+                } {
+                    return false;
+                }
+            } else {
+                unsafe {
+                    emit_log(
+                        env,
+                        4,
+                        format!("Unknown history record kind {kindval}").as_bytes(),
+                    );
+                }
+                return false;
+            }
+        }
+        if (57..=DISKSTATE_QUEUE_VERSION).contains(&format_version)
+            && !unsafe { load_dupe_trailer_section(env, r, true) }
+        {
+            return false;
+        }
+        true
+    })();
+    if !ok {
+        unsafe { emit_log(env, 4, b"Error reading diskstate for history") };
+    }
+    ok
+}
+
+struct QueriedFileMeta {
+    file_id: i32,
+    has_articles: i32,
+    articles_len: i32,
+    force_direct_write: i32,
+    output_initialized: i32,
+    dest_dir: Vec<u8>,
+    filename: Vec<u8>,
+    output_filename: Vec<u8>,
+}
+
+unsafe fn query_target_file_meta(env: &NzbgetRsDiskStateEnv) -> QueriedFileMeta {
+    let mut meta = QueriedFileMeta {
+        file_id: 0,
+        has_articles: 0,
+        articles_len: 0,
+        force_direct_write: 0,
+        output_initialized: 0,
+        dest_dir: Vec::new(),
+        filename: Vec::new(),
+        output_filename: Vec::new(),
+    };
+    unsafe extern "C" fn sink(sink_ctx: *mut c_void, exp_ptr: *const NzbgetRsDiskFileExport) {
+        if exp_ptr.is_null() {
+            return;
+        }
+        let m = unsafe { &mut *sink_ctx.cast::<QueriedFileMeta>() };
+        let exp = unsafe { &*exp_ptr };
+        m.file_id = exp.file_id;
+        m.has_articles = exp.has_articles;
+        m.articles_len = exp.articles_len_count;
+        m.force_direct_write = exp.force_direct_write;
+        m.output_initialized = exp.info.output_initialized;
+        m.dest_dir = unsafe { cstr_to_bytes(exp.info.subject) }.to_vec();
+        m.filename = unsafe { cstr_to_bytes(exp.info.filename) }.to_vec();
+        m.output_filename = unsafe { cstr_to_bytes(exp.info.output_filename) }.to_vec();
+    }
+    if let Some(cb) = env.export_file_cb {
+        unsafe { cb(env.ctx, 4, (&mut meta as *mut QueriedFileMeta).cast(), sink) };
+    }
+    meta
+}
+
+unsafe fn format_target_file_bytes(env: &NzbgetRsDiskStateEnv, mode: c_int) -> (i32, Vec<u8>) {
+    struct Out {
+        file_id: i32,
+        mode: c_int,
+        bytes: Vec<u8>,
+    }
+    unsafe extern "C" fn sink(sink_ctx: *mut c_void, exp_ptr: *const NzbgetRsDiskFileExport) {
+        if exp_ptr.is_null() {
+            return;
+        }
+        let o = unsafe { &mut *sink_ctx.cast::<Out>() };
+        let exp = unsafe { &*exp_ptr };
+        o.file_id = exp.file_id;
+        if o.mode == 0 || o.mode == 1 {
+            let incl = c_int::from(o.mode == 0);
+            o.bytes = unsafe {
+                format_file_info_bytes(
+                    &exp.info,
+                    exp.groups,
+                    exp.groups_len,
+                    incl,
+                    exp.articles,
+                    exp.articles_len,
+                )
+            };
+        } else {
+            o.bytes = unsafe {
+                format_file_state_bytes(
+                    &exp.state,
+                    exp.stats,
+                    exp.stats_len,
+                    exp.article_states,
+                    exp.article_states_len,
+                )
+            };
+        }
+    }
+    let mut out = Out {
+        file_id: 0,
+        mode,
+        bytes: Vec::new(),
+    };
+    if let Some(cb) = env.export_file_cb {
+        unsafe { cb(env.ctx, mode, (&mut out as *mut Out).cast(), sink) };
+    }
+    (out.file_id, out.bytes)
+}
+
+unsafe fn load_file_info_from_reader(
+    env: &NzbgetRsDiskStateEnv,
+    r: &mut RsStateReader,
+    format_version: i32,
+    file_summary: bool,
+    articles: bool,
+) -> bool {
+    let meta = unsafe { query_target_file_meta(env) };
+    struct Ctx<'a> {
+        env: &'a NzbgetRsDiskStateEnv,
+        summary: c_int,
+    }
+    unsafe extern "C" fn on_sum(
+        ctx: *mut c_void,
+        fields: *const NzbgetRsDiskFileInfoInput,
+        flags: c_int,
+    ) {
+        let c = unsafe { &*ctx.cast::<Ctx<'_>>() };
+        if let Some(cb) = c.env.apply_file_cb {
+            unsafe {
+                cb(
+                    c.env.ctx,
+                    0,
+                    flags,
+                    c.summary,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    fields,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                );
+            }
+        }
+    }
+    unsafe extern "C" fn on_item(
+        ctx: *mut c_void,
+        grp: *const c_char,
+        art: *const NzbgetRsDiskArticleInfo,
+    ) {
+        let c = unsafe { &*ctx.cast::<Ctx<'_>>() };
+        if let Some(cb) = c.env.apply_file_cb {
+            unsafe {
+                cb(
+                    c.env.ctx,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    grp,
+                    std::ptr::null(),
+                    art,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                );
+            }
+        }
+    }
+    let mut fctx = Ctx {
+        env,
+        summary: c_int::from(file_summary),
+    };
+    let ok = unsafe {
+        load_file_info(
+            r.as_ctx(),
+            RsStateReader::read_line_cb,
+            format_version,
+            c_int::from(file_summary),
+            c_int::from(articles),
+            meta.file_id,
+            env.direct_write,
+            meta.force_direct_write,
+            env.sep as u8,
+            &meta.dest_dir,
+            &meta.filename,
+            &meta.output_filename,
+            (&mut fctx as *mut Ctx<'_>).cast(),
+            on_sum,
+            on_item,
+        )
+    };
+    if !ok {
+        unsafe {
+            emit_log(
+                env,
+                4,
+                format!("Error reading diskstate for file {}", meta.file_id).as_bytes(),
+            );
+        }
+    }
+    ok
+}
+
+unsafe fn load_file_state_from_reader(
+    env: &NzbgetRsDiskStateEnv,
+    r: &mut RsStateReader,
+    format_version: i32,
+    completed: bool,
+    temp_dir: &[u8],
+) -> bool {
+    let meta = unsafe { query_target_file_meta(env) };
+    struct Ctx<'a> {
+        env: &'a NzbgetRsDiskStateEnv,
+        ver: i32,
+        has_art: i32,
+    }
+    unsafe extern "C" fn art_cb(
+        ctx: *mut c_void,
+        op: c_int,
+        idx: c_int,
+        status: c_int,
+        seg_offset: i64,
+        seg_size: c_int,
+        crc: u32,
+        fb_round: c_int,
+        res_fn: *const c_char,
+    ) -> c_int {
+        let c = unsafe { &*ctx.cast::<Ctx<'_>>() };
+        let Some(cb) = c.env.apply_file_cb else {
+            return 0;
+        };
+        if op == 0 {
+            unsafe {
+                cb(
+                    c.env.ctx,
+                    2,
+                    idx,
+                    c.has_art,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                )
+            }
+        } else {
+            let st = NzbgetRsDiskFileStateInput {
+                success_articles: seg_size,
+                failed_articles: fb_round,
+                remaining_size: 0,
+                success_size: 0,
+                failed_size: 0,
+                filename: std::ptr::null(),
+                hash16k: std::ptr::null(),
+                par_set_id: std::ptr::null(),
+                par_file: status,
+                decoded_file_size: 0,
+                output_initialized: 0,
+            };
+            unsafe {
+                cb(
+                    c.env.ctx,
+                    3,
+                    idx,
+                    c.ver,
+                    seg_offset,
+                    crc,
+                    res_fn,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    &st,
+                    std::ptr::null(),
+                    0,
+                )
+            }
+        }
+    }
+    unsafe extern "C" fn sum_cb(
+        ctx: *mut c_void,
+        fields: *const NzbgetRsDiskFileStateInput,
+        flags: c_int,
+        completed_articles: c_int,
+        new_out_fn: *const c_char,
+        stats: *const NzbgetRsDiskServerStat,
+        stats_len: usize,
+    ) {
+        let c = unsafe { &*ctx.cast::<Ctx<'_>>() };
+        if let Some(cb) = c.env.apply_file_cb {
+            unsafe {
+                cb(
+                    c.env.ctx,
+                    4,
+                    flags,
+                    completed_articles,
+                    0,
+                    0,
+                    new_out_fn,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    fields,
+                    stats,
+                    stats_len,
+                );
+            }
+        }
+    }
+    let mut sctx = Ctx {
+        env,
+        ver: format_version,
+        has_art: meta.has_articles,
+    };
+    let ok = unsafe {
+        load_file_state(
+            r.as_ctx(),
+            RsStateReader::read_line_cb,
+            format_version,
+            c_int::from(completed),
+            meta.file_id,
+            meta.has_articles,
+            meta.articles_len,
+            env.has_options,
+            env.direct_write,
+            meta.force_direct_write,
+            meta.output_initialized,
+            env.sep as u8,
+            temp_dir,
+            &meta.dest_dir,
+            &meta.filename,
+            &meta.output_filename,
+            (&mut sctx as *mut Ctx<'_>).cast(),
+            art_cb,
+            sum_cb,
+        )
+    };
+    if !ok {
+        unsafe {
+            emit_log(
+                env,
+                4,
+                format!("Error reading diskstate for file {}", meta.file_id).as_bytes(),
+            );
+        }
+    }
+    ok
+}
+
+unsafe fn save_single_file_or_state(
+    env: &NzbgetRsDiskStateEnv,
+    qdir: &[u8],
+    sep: u8,
+    mode: c_int,
+    replace: bool,
+) -> bool {
+    let export_mode = if mode == 0 {
+        0
+    } else if mode == 2 {
+        3
+    } else {
+        2
+    };
+    let (file_id, bytes) = unsafe { format_target_file_bytes(env, export_mode) };
+    if mode == 0 {
+        unsafe {
+            emit_log(
+                env,
+                0,
+                format!("Saving FileInfo {file_id} to disk").as_bytes(),
+            );
+        }
+    } else {
+        unsafe {
+            emit_log(
+                env,
+                0,
+                format!("Saving FileState {file_id} to disk").as_bytes(),
+            );
+        }
+    }
+    let fname = if mode == 0 {
+        format!("{file_id}").into_bytes()
+    } else {
+        diskstate_format_file_state_name(file_id, mode == 2)
+    };
+    let mut sf = RsStateFile::new(
+        qdir,
+        sep,
+        &fname,
+        DISKSTATE_FILE_VERSION,
+        replace,
+        DISKSTATE_FILE_VERSION,
+    );
+    sf.flush = !replace;
+    let Some(mut w) = (unsafe { sf.begin_write(env) }) else {
+        return false;
+    };
+    let _ = w.write_all(&bytes);
+    unsafe { sf.finish_write(env, w, env.flush_queue != 0) }
+}
+
+unsafe fn load_single_file_or_state(
+    env: &NzbgetRsDiskStateEnv,
+    qdir: &[u8],
+    temp_dir: &[u8],
+    sep: u8,
+    mode: c_int,
+    file_summary: bool,
+    articles: bool,
+    out_ver: &mut i32,
+) -> bool {
+    let meta = unsafe { query_target_file_meta(env) };
+    unsafe {
+        emit_log(
+            env,
+            0,
+            format!("Loading FileInfo {} from disk", meta.file_id).as_bytes(),
+        );
+    }
+    let fname = if mode == 0 {
+        format!("{}", meta.file_id).into_bytes()
+    } else {
+        diskstate_format_file_state_name(meta.file_id, mode == 2)
+    };
+    let mut sf = RsStateFile::new(
+        qdir,
+        sep,
+        &fname,
+        DISKSTATE_FILE_VERSION,
+        false,
+        DISKSTATE_FILE_LEGACY_VERSION,
+    );
+    let Some(mut r) = (unsafe { sf.begin_read(env) }) else {
+        return false;
+    };
+    *out_ver = sf.file_version;
+    if mode == 0 {
+        unsafe { load_file_info_from_reader(env, &mut r, sf.file_version, file_summary, articles) }
+    } else {
+        unsafe {
+            load_file_state_from_reader(env, &mut r, sf.file_version, mode == 2, temp_dir)
+        }
+    }
+}
+
+unsafe fn load_all_file_infos_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u8) {
+    let nzb_count = unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) };
+    if nzb_count <= 0 {
+        return;
+    }
+
+    let mut sf = RsStateFile::new(
+        qdir,
+        sep,
+        b"files",
+        DISKSTATE_FILE_VERSION,
+        false,
+        DISKSTATE_FILE_LEGACY_VERSION,
+    );
+    let mut hib_reader: Option<RsStateReader> = None;
+    let mut hib_ver = 0;
+    if sf.file_exists() {
+        if let Some(mut r) = unsafe { sf.begin_read(env) } {
+            let total_files = unsafe { call_ctrl(env, 4, 0, 0, 0, std::ptr::null()) };
+            if r.scan_i32() == Some(total_files) {
+                hib_ver = sf.file_version;
+                hib_reader = Some(r);
+            }
+        }
+        if hib_reader.is_none() {
+            sf.discard();
+        }
+    }
+
+    for nzb_idx in 0..nzb_count {
+        let fl_len = unsafe { call_ctrl(env, 5, nzb_idx, 0, 0, std::ptr::null()) };
+        let mut broken_ids = Vec::new();
+        for file_idx in 0..fl_len {
+            let file_id = unsafe { call_ctrl(env, 6, nzb_idx, file_idx, 0, std::ptr::null()) };
+            let mut res = false;
+            if let Some(ref mut r) = hib_reader {
+                let scanned_id = r.scan_i32().unwrap_or(0);
+                if scanned_id == file_id {
+                    res = unsafe { load_file_info_from_reader(env, r, hib_ver, true, false) };
+                }
+            }
+            if !res {
+                let mut dummy_ver = 0;
+                res = unsafe {
+                    load_single_file_or_state(env, qdir, &[], sep, 0, true, false, &mut dummy_ver)
+                };
+            }
+            if !res {
+                broken_ids.push(file_id);
+            }
+        }
+        for bad_id in broken_ids {
+            unsafe { call_ctrl(env, 7, nzb_idx, bad_id, 0, std::ptr::null()) };
+        }
+    }
+}
+
+unsafe fn cleanup_queue_dir_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u8) {
+    struct IdLists {
+        nzb_ids: Vec<i32>,
+        file_ids: Vec<i32>,
+    }
+    unsafe extern "C" fn collect_sink(
+        sink_ctx: *mut c_void,
+        kind: c_int,
+        id: c_int,
+        _a2: c_int,
+        _u1: u32,
+        _s1: *const c_char,
+        _srv: *const NzbgetRsServerMatchItem,
+        _srv_len: usize,
+        _vol: *const NzbgetRsDiskVolumeStatInput,
+        _vol_len: usize,
+    ) {
+        let lists = unsafe { &mut *sink_ctx.cast::<IdLists>() };
+        if kind != 0 {
+            lists.nzb_ids.push(id);
+        } else {
+            lists.file_ids.push(id);
+        }
+    }
+    let mut lists = IdLists {
+        nzb_ids: Vec::new(),
+        file_ids: Vec::new(),
+    };
+    if let Some(aux) = env.aux_cb {
+        unsafe {
+            aux(
+                env.ctx,
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                (&mut lists as *mut IdLists).cast(),
+                Some(collect_sink),
+            );
+        }
+    }
+    lists.nzb_ids.sort_unstable();
+    lists.file_ids.sort_unstable();
+
+    let mut deleted_files = 0i32;
+    for filename in crate::fsops::list_dir_entries(qdir) {
+        if is_orphan_queue_file(&filename, &lists.file_ids, &lists.nzb_ids) {
+            unsafe {
+                emit_log_parts(
+                    env,
+                    1,
+                    &[b"Deleting orphaned diskstate file ", &filename],
+                );
+            }
+            let p =
+                crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, &filename);
+            crate::fsops::delete_file(&bytes_to_cstring_trunc(&p));
+            deleted_files += 1;
+        }
+    }
+    if deleted_files > 0 {
+        unsafe {
+            emit_log(
+                env,
+                2,
+                format!("Deleted {deleted_files} orphaned diskstate file(s)").as_bytes(),
+            );
+        }
+    }
+}
+
+unsafe fn load_all_file_states_op(
+    env: &NzbgetRsDiskStateEnv,
+    qdir: &[u8],
+    temp_dir: &[u8],
+    sep: u8,
+) -> bool {
+    let mut o1 = 0;
+    let mut o2 = 0;
+    let cache_was_active = diskstate_fs_op(6, qdir, sep, 0, 0, 0, 0, &mut o1, &mut o2) != 0;
+
+    for filename in crate::fsops::list_dir_entries(qdir) {
+        if let Some((id, suffix)) = diskstate_parse_queue_file_id_and_suffix(&filename) {
+            if suffix == b'c' || (env.continue_partial != 0 && !cache_was_active) {
+                let found = unsafe { call_ctrl(env, 14, id, 0, 0, std::ptr::null()) != 0 };
+                if found {
+                    let completed = suffix == b'c';
+                    let mode = if completed { 2 } else { 1 };
+                    let mut state_ver = 0;
+                    if !unsafe {
+                        load_single_file_or_state(
+                            env,
+                            qdir,
+                            temp_dir,
+                            sep,
+                            mode,
+                            false,
+                            false,
+                            &mut state_ver,
+                        )
+                    } {
+                        unsafe {
+                            emit_log_parts(
+                                env,
+                                3,
+                                &[b"Discarding damaged download state ", &filename],
+                            );
+                            call_ctrl(env, 15, 0, 0, 0, std::ptr::null());
+                        }
+                        let p = crate::artwritercore::article_writer_format_dest_file_path(
+                            qdir, sep, &filename,
+                        );
+                        crate::fsops::delete_file(&bytes_to_cstring_trunc(&p));
+                        continue;
+                    }
+                    if state_ver > DISKSTATE_FILE_VERSION {
+                        let _ = unsafe { save_single_file_or_state(env, qdir, sep, mode, false) };
+                    }
+                    unsafe {
+                        call_ctrl(env, 16, c_int::from(completed), 0, 0, std::ptr::null());
+                    }
+                }
+            } else {
+                let p = crate::artwritercore::article_writer_format_dest_file_path(
+                    qdir, sep, &filename,
+                );
+                crate::fsops::delete_file(&bytes_to_cstring_trunc(&p));
+            }
+        }
+    }
+    true
+}
+
+unsafe fn convert_legacy_file_states_op(
+    env: &NzbgetRsDiskStateEnv,
+    qdir: &[u8],
+    temp_dir: &[u8],
+    sep: u8,
+) {
+    let mut legacy: Vec<(i32, i32)> = Vec::new();
+    unsafe extern "C" fn push_legacy(
+        ctx: *mut c_void,
+        id: c_int,
+        suffix_kind: c_int,
+        _a3: c_int,
+        _u1: u32,
+        _u2: u32,
+        _i64_1: i64,
+        _s1: *const c_char,
+        _s2: *const c_char,
+    ) {
+        unsafe { (*ctx.cast::<Vec<(i32, i32)>>()).push((id, suffix_kind)) };
+    }
+    unsafe {
+        load_section(
+            4,
+            std::ptr::null_mut(),
+            None,
+            DISKSTATE_FILE_VERSION,
+            qdir,
+            sep,
+            i64::from(DISKSTATE_FILE_LEGACY_VERSION),
+            (&mut legacy as *mut Vec<(i32, i32)>).cast(),
+            push_legacy,
+        );
+    }
+    if legacy.is_empty() {
+        return;
+    }
+
+    let mut converted = 0i32;
+    for &(id, suffix_kind) in &legacy {
+        unsafe { call_ctrl(env, 17, id, 0, 0, std::ptr::null()) };
+        let mut dummy_ver = 0;
+        let ok = if suffix_kind == 0 {
+            unsafe {
+                load_single_file_or_state(env, qdir, temp_dir, sep, 0, true, true, &mut dummy_ver)
+                    && save_single_file_or_state(env, qdir, sep, 0, true)
+            }
+        } else {
+            let mode = if suffix_kind == 2 { 2 } else { 1 };
+            unsafe {
+                load_single_file_or_state(env, qdir, temp_dir, sep, 0, false, true, &mut dummy_ver)
+                    && load_single_file_or_state(
+                        env,
+                        qdir,
+                        temp_dir,
+                        sep,
+                        mode,
+                        false,
+                        false,
+                        &mut dummy_ver,
+                    )
+                    && save_single_file_or_state(env, qdir, sep, mode, true)
+            }
+        };
+        if ok {
+            converted += 1;
+        }
+    }
+    unsafe {
+        emit_log(
+            env,
+            2,
+            format!(
+                "Converted {} of {} file state(s) of an earlier build to the upstream format",
+                converted,
+                legacy.len()
+            )
+            .as_bytes(),
+        );
+    }
+}
+
+unsafe fn set_aside_queue_files_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u8) {
+    unsafe extern "C" fn log_kept(
+        ctx: *mut c_void,
+        _a1: c_int,
+        _a2: c_int,
+        _a3: c_int,
+        _u1: u32,
+        _u2: u32,
+        _i64_1: i64,
+        name: *const c_char,
+        kept_base: *const c_char,
+    ) {
+        let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
+        unsafe {
+            emit_log_parts(
+                env,
+                4,
+                &[
+                    b"Diskstate file ",
+                    cstr_to_bytes(name),
+                    b" could not be read; it is kept as ",
+                    cstr_to_bytes(kept_base),
+                ],
+            );
+        }
+    }
+    unsafe {
+        load_section(
+            5,
+            std::ptr::null_mut(),
+            None,
+            0,
+            qdir,
+            sep,
+            env.now,
+            (env as *const NzbgetRsDiskStateEnv).cast_mut().cast(),
+            log_kept,
+        );
+    }
+}
+
+/// Unified entry point for all `DiskState` operations:
+/// - `0`: `DiscardDownloadQueue`
+/// - `1`: `DownloadQueueExists`
+/// - `2`: `DiscardFile`
+/// - `3`: `DeleteCacheFlag`
+/// - `4`: `WriteCacheFlag`
+/// - `5`: `DeleteQueueNzbLog` (`DiscardFiles` log deletion)
+/// - `6`: `AppendNzbMessage`
+/// - `7`: `LoadNzbMessages`
+/// - `8`: `CleanupTempDir`
+/// - `9`: `SaveFeeds`
+/// - `10`: `LoadFeeds`
+/// - `11`: `SaveStats`
+/// - `12`: `LoadStats`
+/// - `13`: `SaveFile` (`a1=0`) / `SaveFileState` (`a1=1` partial, `a1=2` completed; `a2=replace`)
+/// - `14`: `LoadFile` (`a1=0`, `a2=summary`, `a3=articles`) / `LoadFileState` (`a1=1` partial, `a1=2` completed)
+/// - `15`: `SaveDownloadQueue` (`a1=0, a2=saveHistory`) / `SaveDownloadProgress` (`a1=1`) / `SaveAllFileInfos` (`a1=2`)
+/// - `16`: `LoadDownloadQueue`
+pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
+    let qdir = unsafe { cstr_to_bytes(env.queue_dir) };
+    let tdir = unsafe { cstr_to_bytes(env.temp_dir) };
+    let sep = env.sep as u8;
+    let mut o1 = 0;
+    let mut o2 = 0;
+
+    match op {
+        0 => {
+            unsafe { emit_log(env, 0, b"Discarding queue") };
+            diskstate_fs_op(0, qdir, sep, 0, 0, 0, 0, &mut o1, &mut o2)
+        }
+        1 => {
+            unsafe { emit_log(env, 0, b"Checking if a saved queue exists on disk") };
+            diskstate_fs_op(1, qdir, sep, 0, 0, 0, 0, &mut o1, &mut o2)
+        }
+        2 => diskstate_fs_op(
+            2, qdir, sep, env.a1, env.a2, env.a3, env.a4, &mut o1, &mut o2,
+        ),
+        3 => diskstate_fs_op(3, qdir, sep, 0, 0, 0, 0, &mut o1, &mut o2),
+        4 => {
+            let flag_p =
+                crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, b"acache");
+            let flag_c = bytes_to_cstring_trunc(&flag_p);
+            let fd = crate::fsops::open_cloexec_fd(&flag_c, 2, 0, 1, 2);
+            if fd == -1 {
+                unsafe {
+                    emit_log_parts(
+                        env,
+                        4,
+                        &[b"Error saving diskstate: Could not create file ", &flag_p],
+                    );
+                }
+                0
+            } else {
+                unsafe { crate::fsops::sys::close(fd) };
+                1
+            }
+        }
+        5 => diskstate_fs_op(7, qdir, sep, env.a1, 0, 0, 0, &mut o1, &mut o2),
+        6 => {
+            let log_name = format!("n{}.log", env.a1);
+            let log_p = crate::artwritercore::article_writer_format_dest_file_path(
+                qdir,
+                sep,
+                log_name.as_bytes(),
+            );
+            let log_c = bytes_to_cstring_trunc(&log_p);
+            let fd = crate::fsops::open_cloexec_fd(&log_c, 3, 0, 1, 2);
+            if fd == -1 {
+                unsafe {
+                    emit_log_parts(
+                        env,
+                        4,
+                        &[b"Error saving log: Could not create file ", &log_p],
+                    );
+                }
+                return 0;
+            }
+            let line = unsafe {
+                format_nzb_message_line_bytes(
+                    env.time_str,
+                    env.a2,
+                    env.a3,
+                    env.text,
+                    env.line_ending,
+                )
+            };
+            let mut file: std::fs::File = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
+            let _ = file.write_all(&line);
+            1
+        }
+        7 => {
+            let log_name = format!("n{}.log", env.a1);
+            let log_p = crate::artwritercore::article_writer_format_dest_file_path(
+                qdir,
+                sep,
+                log_name.as_bytes(),
+            );
+            if crate::fsops::posix_stat(&log_p) != 1 {
+                return 1;
+            }
+            let log_c = bytes_to_cstring_trunc(&log_p);
+            let Ok(mut r) = RsStateReader::open(&log_c) else {
+                unsafe {
+                    emit_log_parts(
+                        env,
+                        4,
+                        &[b"Error reading log: could not open file ", &log_p],
+                    );
+                }
+                return 0;
+            };
+            let mut id = 0i32;
+            while let Some(raw_line) = r.read_line(1024) {
+                let trimmed = &raw_line[..crate::util::trim_right_line(raw_line)];
+                let Some((time, kind, text_off)) = parse_log_line(trimmed) else {
+                    break;
+                };
+                id += 1;
+                let text_c = bytes_to_cstring_trunc(&trimmed[text_off..]);
+                unsafe { call_ctrl(env, 19, id, kind, i64::from(time), text_c.as_ptr()) };
+            }
+            1
+        }
+        8 => {
+            for filename in crate::fsops::list_dir_entries(tdir) {
+                let (kind, id, _) = classify_temp_file(&filename);
+                let garbage = kind == 1
+                    || (kind == 2
+                        && unsafe { call_ctrl(env, 8, id, 0, 0, std::ptr::null()) == 0 });
+                if garbage {
+                    let p = crate::artwritercore::article_writer_format_dest_file_path(
+                        tdir, sep, &filename,
+                    );
+                    crate::fsops::delete_file(&bytes_to_cstring_trunc(&p));
+                }
+            }
+            1
+        }
+        9 => {
+            unsafe { emit_log(env, 0, b"Saving feeds state to disk") };
+            struct FeedOut {
+                urls: Vec<std::ffi::CString>,
+                hashes: Vec<u32>,
+                updates: Vec<c_int>,
+                statuses: Vec<c_int>,
+                seens: Vec<c_int>,
+                hist_urls: Vec<std::ffi::CString>,
+            }
+            unsafe extern "C" fn feed_sink(
+                sink_ctx: *mut c_void,
+                kind: c_int,
+                a1: c_int,
+                a2: c_int,
+                u1: u32,
+                s1: *const c_char,
+                _srv: *const NzbgetRsServerMatchItem,
+                _srv_len: usize,
+                _vol: *const NzbgetRsDiskVolumeStatInput,
+                _vol_len: usize,
+            ) {
+                let fo = unsafe { &mut *sink_ctx.cast::<FeedOut>() };
+                let c = bytes_to_cstring_trunc(unsafe { cstr_to_bytes(s1) });
+                if kind == 0 {
+                    fo.urls.push(c);
+                    fo.hashes.push(u1);
+                    fo.updates.push(a1);
+                } else {
+                    fo.statuses.push(a1);
+                    fo.seens.push(a2);
+                    fo.hist_urls.push(c);
+                }
+            }
+            let mut fo = FeedOut {
+                urls: Vec::new(),
+                hashes: Vec::new(),
+                updates: Vec::new(),
+                statuses: Vec::new(),
+                seens: Vec::new(),
+                hist_urls: Vec::new(),
+            };
+            if let Some(aux) = env.aux_cb {
+                unsafe {
+                    aux(
+                        env.ctx,
+                        1,
+                        0,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        (&mut fo as *mut FeedOut).cast(),
+                        Some(feed_sink),
+                    );
+                }
+            }
+            let sf = RsStateFile::new(
+                qdir,
+                sep,
+                b"feeds",
+                DISKSTATE_FEEDS_VERSION,
+                true,
+                DISKSTATE_FEEDS_VERSION,
+            );
+            if fo.urls.is_empty() && fo.hist_urls.is_empty() {
+                sf.discard();
+                return 1;
+            }
+            let Some(mut w) = (unsafe { sf.begin_write(env) }) else {
+                return 0;
+            };
+            unsafe { emit_log(env, 0, b"Saving feed status to disk") };
+            let url_ptrs: Vec<*const c_char> = fo.urls.iter().map(|c| c.as_ptr()).collect();
+            let status_bytes = unsafe {
+                format_feed_status_bytes(
+                    url_ptrs.as_ptr(),
+                    fo.hashes.as_ptr(),
+                    fo.updates.as_ptr(),
+                    url_ptrs.len(),
+                )
+            };
+            let _ = w.write_all(&status_bytes);
+
+            unsafe { emit_log(env, 0, b"Saving feed history to disk") };
+            let hist_ptrs: Vec<*const c_char> = fo.hist_urls.iter().map(|c| c.as_ptr()).collect();
+            let hist_bytes = unsafe {
+                format_feed_history_bytes(
+                    fo.statuses.as_ptr(),
+                    fo.seens.as_ptr(),
+                    hist_ptrs.as_ptr(),
+                    hist_ptrs.len(),
+                )
+            };
+            let _ = w.write_all(&hist_bytes);
+            c_int::from(unsafe { sf.finish_write(env, w, env.flush_queue != 0) })
+        }
+        10 => {
+            unsafe { emit_log(env, 0, b"Loading feeds state from disk") };
+            let mut sf = RsStateFile::new(
+                qdir,
+                sep,
+                b"feeds",
+                DISKSTATE_FEEDS_VERSION,
+                true,
+                DISKSTATE_FEEDS_VERSION,
+            );
+            if !sf.file_exists() {
+                return 1;
+            }
+            let Some(mut r) = (unsafe { sf.begin_read(env) }) else {
+                return 0;
+            };
+            let ver = sf.file_version;
+            unsafe extern "C" fn on_feed_status(
+                ctx: *mut c_void,
+                last_update: c_int,
+                ver: c_int,
+                _a3: c_int,
+                filter_hash: u32,
+                _u2: u32,
+                _i64_1: i64,
+                url: *const c_char,
+                filter: *const c_char,
+            ) {
+                let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
+                if let Some(aux) = env.aux_cb {
+                    unsafe {
+                        aux(
+                            env.ctx,
+                            2,
+                            last_update,
+                            ver,
+                            filter_hash,
+                            url,
+                            filter,
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                            None,
+                        );
+                    }
+                }
+            }
+            unsafe extern "C" fn on_feed_hist(
+                ctx: *mut c_void,
+                status: c_int,
+                last_seen: c_int,
+                _a3: c_int,
+                _u1: u32,
+                _u2: u32,
+                _i64_1: i64,
+                url: *const c_char,
+                _s2: *const c_char,
+            ) {
+                let env = unsafe { &*ctx.cast::<NzbgetRsDiskStateEnv>() };
+                if let Some(aux) = env.aux_cb {
+                    unsafe {
+                        aux(
+                            env.ctx,
+                            3,
+                            status,
+                            last_seen,
+                            0,
+                            url,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                            None,
+                        );
+                    }
+                }
+            }
+            let env_ptr: *mut c_void = (env as *const NzbgetRsDiskStateEnv).cast_mut().cast();
+            unsafe { emit_log(env, 0, b"Loading feed status from disk") };
+            if !unsafe {
+                load_section(
+                    1,
+                    r.as_ctx(),
+                    Some(RsStateReader::read_line_cb),
+                    ver,
+                    &[],
+                    0,
+                    0,
+                    env_ptr,
+                    on_feed_status,
+                )
+            } {
+                unsafe {
+                    emit_log(env, 4, b"Error reading feed status from disk");
+                    emit_log(env, 4, b"Error reading diskstate for feeds");
+                }
+                return 0;
+            }
+            unsafe { emit_log(env, 0, b"Loading feed history from disk") };
+            if !unsafe {
+                load_section(
+                    2,
+                    r.as_ctx(),
+                    Some(RsStateReader::read_line_cb),
+                    ver,
+                    &[],
+                    0,
+                    0,
+                    env_ptr,
+                    on_feed_hist,
+                )
+            } {
+                unsafe {
+                    emit_log(env, 4, b"Error reading feed history from disk");
+                    emit_log(env, 4, b"Error reading diskstate for feeds");
+                }
+                return 0;
+            }
+            1
+        }
+        11 => {
+            unsafe { emit_log(env, 0, b"Saving stats to disk") };
+            struct StatsSaveOut {
+                has_servers: bool,
+                srv_bytes: Vec<u8>,
+                vol_count: usize,
+                vol_bytes: Vec<u8>,
+            }
+            unsafe extern "C" fn stats_save_sink(
+                sink_ctx: *mut c_void,
+                _kind: c_int,
+                _a1: c_int,
+                _a2: c_int,
+                _u1: u32,
+                _s1: *const c_char,
+                srv_items: *const NzbgetRsServerMatchItem,
+                srv_len: usize,
+                vol_items: *const NzbgetRsDiskVolumeStatInput,
+                vol_len: usize,
+            ) {
+                let so = unsafe { &mut *sink_ctx.cast::<StatsSaveOut>() };
+                if srv_items.is_null() || srv_len == 0 {
+                    return;
+                }
+                so.has_servers = true;
+                let srvs = unsafe { std::slice::from_raw_parts(srv_items, srv_len) };
+                let names: Vec<*const c_char> = srvs.iter().map(|s| s.name).collect();
+                let hosts: Vec<*const c_char> = srvs.iter().map(|s| s.host).collect();
+                let ports: Vec<c_int> = srvs.iter().map(|s| s.port).collect();
+                let users: Vec<*const c_char> = srvs.iter().map(|s| s.user).collect();
+                so.srv_bytes = unsafe {
+                    format_server_info_bytes(
+                        names.as_ptr(),
+                        hosts.as_ptr(),
+                        ports.as_ptr(),
+                        users.as_ptr(),
+                        srvs.len(),
+                    )
+                };
+                if !vol_items.is_null() && vol_len > 0 {
+                    so.vol_count = vol_len;
+                    for i in 0..vol_len {
+                        let b =
+                            unsafe { format_volume_stat_item_bytes(vol_items.add(i)) };
+                        so.vol_bytes.extend_from_slice(&b);
+                    }
+                }
+            }
+            let mut so = StatsSaveOut {
+                has_servers: false,
+                srv_bytes: Vec::new(),
+                vol_count: 0,
+                vol_bytes: Vec::new(),
+            };
+            if let Some(aux) = env.aux_cb {
+                unsafe {
+                    aux(
+                        env.ctx,
+                        4,
+                        1,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        (&mut so as *mut StatsSaveOut).cast(),
+                        Some(stats_save_sink),
+                    );
+                }
+            }
+            let sf = RsStateFile::new(
+                qdir,
+                sep,
+                b"stats",
+                DISKSTATE_STATS_VERSION,
+                true,
+                DISKSTATE_STATS_VERSION,
+            );
+            if !so.has_servers {
+                sf.discard();
+                return 1;
+            }
+            let Some(mut w) = (unsafe { sf.begin_write(env) }) else {
+                return 0;
+            };
+            unsafe { emit_log(env, 0, b"Saving server info to disk") };
+            let _ = w.write_all(&so.srv_bytes);
+            unsafe { emit_log(env, 0, b"Saving volume stats to disk") };
+            let _ = writeln!(w, "{}", so.vol_count as c_int);
+            let _ = w.write_all(&so.vol_bytes);
+            c_int::from(unsafe { sf.finish_write(env, w, env.flush_queue != 0) })
+        }
+        12 => {
+            unsafe { emit_log(env, 0, b"Loading stats from disk") };
+            let mut sf = RsStateFile::new(
+                qdir,
+                sep,
+                b"stats",
+                DISKSTATE_STATS_VERSION,
+                true,
+                DISKSTATE_STATS_VERSION,
+            );
+            if !sf.file_exists() {
+                return 1;
+            }
+            let Some(mut r) = (unsafe { sf.begin_read(env) }) else {
+                return 0;
+            };
+            let ver = sf.file_version;
+            unsafe { emit_log(env, 0, b"Loading server info from disk") };
+            struct SrvMeta {
+                id: c_int,
+                port: c_int,
+                name: Vec<u8>,
+                host: Vec<u8>,
+                user: Vec<u8>,
+            }
+            unsafe extern "C" fn srv_load_sink(
+                sink_ctx: *mut c_void,
+                _kind: c_int,
+                _a1: c_int,
+                _a2: c_int,
+                _u1: u32,
+                _s1: *const c_char,
+                srv_items: *const NzbgetRsServerMatchItem,
+                srv_len: usize,
+                _vol: *const NzbgetRsDiskVolumeStatInput,
+                _vol_len: usize,
+            ) {
+                let vec = unsafe { &mut *sink_ctx.cast::<Vec<SrvMeta>>() };
+                if !srv_items.is_null() && srv_len > 0 {
+                    for s in unsafe { std::slice::from_raw_parts(srv_items, srv_len) } {
+                        vec.push(SrvMeta {
+                            id: s.id,
+                            port: s.port,
+                            name: unsafe { cstr_to_bytes(s.name) }.to_vec(),
+                            host: unsafe { cstr_to_bytes(s.host) }.to_vec(),
+                            user: unsafe { cstr_to_bytes(s.user) }.to_vec(),
+                        });
+                    }
+                }
+            }
+            let mut srvs: Vec<SrvMeta> = Vec::new();
+            if let Some(aux) = env.aux_cb {
+                unsafe {
+                    aux(
+                        env.ctx,
+                        4,
+                        0,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        (&mut srvs as *mut Vec<SrvMeta>).cast(),
+                        Some(srv_load_sink),
+                    );
+                }
+            }
+            let inputs: Vec<ServerMatchInput<'_>> = srvs
+                .iter()
+                .map(|s| ServerMatchInput {
+                    name: &s.name,
+                    host: &s.host,
+                    port: s.port,
+                    user: &s.user,
+                })
+                .collect();
+            let mut state_ids = vec![0i32; inputs.len()];
+            let Some(perfect) = (unsafe {
+                load_server_refs_and_match(
+                    &inputs,
+                    r.as_ctx(),
+                    RsStateReader::read_line_cb,
+                    &mut state_ids,
+                )
+            }) else {
+                unsafe {
+                    emit_log(env, 4, b"Error reading server info from disk");
+                    emit_log(env, 4, b"Error reading diskstate for statistics");
+                }
+                return 0;
+            };
+            if !env.out_flag.is_null() {
+                unsafe { *env.out_flag = c_int::from(perfect) };
+            }
+            if let Some(aux) = env.aux_cb {
+                for (idx, &st_id) in state_ids.iter().enumerate() {
+                    unsafe {
+                        aux(
+                            env.ctx,
+                            5,
+                            idx as c_int,
+                            st_id,
+                            0,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                            None,
+                        );
+                    }
+                }
+            }
+            unsafe { emit_log(env, 0, b"******** MATCHING NEWS-SERVERS **********") };
+            for (idx, s) in srvs.iter().enumerate() {
+                unsafe {
+                    emit_log(
+                        env,
+                        0,
+                        format!("Server {} -> {}", s.id, state_ids[idx]).as_bytes(),
+                    );
+                    emit_log_parts(
+                        env,
+                        0,
+                        &[format!("Server {}.Name: ", s.id).as_bytes(), &s.name],
+                    );
+                    emit_log_parts(
+                        env,
+                        0,
+                        &[
+                            format!("Server {}.Host: ", s.id).as_bytes(),
+                            &s.host,
+                            format!(":{}", s.port).as_bytes(),
+                        ],
+                    );
+                }
+            }
+            unsafe {
+                emit_log(
+                    env,
+                    0,
+                    if perfect {
+                        b"All servers perfectly matched: yes"
+                    } else {
+                        b"All servers perfectly matched: no"
+                    },
+                );
+            }
+
+            if ver >= 2 {
+                unsafe { emit_log(env, 0, b"Loading volume stats from disk") };
+                struct VolCtx<'a> {
+                    env: &'a NzbgetRsDiskStateEnv,
+                    ver: i32,
+                }
+                unsafe extern "C" fn on_vol(
+                    ctx: *mut c_void,
+                    slot_idx: c_int,
+                    item: *const NzbgetRsDiskVolumeStatInput,
+                    has_custom_times: c_int,
+                ) {
+                    let vc = unsafe { &*ctx.cast::<VolCtx<'_>>() };
+                    if let Some(aux) = vc.env.aux_cb {
+                        unsafe {
+                            aux(
+                                vc.env.ctx,
+                                6,
+                                slot_idx,
+                                (vc.ver << 1) | (has_custom_times & 1),
+                                0,
+                                std::ptr::null(),
+                                std::ptr::null(),
+                                item,
+                                std::ptr::null_mut(),
+                                None,
+                            );
+                        }
+                    }
+                }
+                let mut vc = VolCtx { env, ver };
+                if !unsafe {
+                    load_volume_stat(
+                        r.as_ctx(),
+                        RsStateReader::read_line_cb,
+                        ver,
+                        (&mut vc as *mut VolCtx<'_>).cast(),
+                        on_vol,
+                    )
+                } {
+                    unsafe {
+                        emit_log(env, 4, b"Error reading volume stats from disk");
+                        emit_log(env, 4, b"Error reading diskstate for statistics");
+                    }
+                    return 0;
+                }
+            }
+            1
+        }
+        13 => c_int::from(unsafe {
+            save_single_file_or_state(env, qdir, sep, env.a1, env.a2 != 0)
+        }),
+        14 => {
+            let mut ver = 0;
+            let ok = unsafe {
+                load_single_file_or_state(
+                    env,
+                    qdir,
+                    tdir,
+                    sep,
+                    env.a1,
+                    env.a2 != 0,
+                    env.a3 != 0,
+                    &mut ver,
+                )
+            };
+            if !env.out_flag.is_null() && env.a1 != 0 && ver != 0 {
+                unsafe { *env.out_flag = ver };
+            }
+            c_int::from(ok)
+        }
+        15 => {
+            let flush_queue = env.flush_queue != 0;
+            if env.a1 == 0 {
+                unsafe { emit_log(env, 0, b"Saving queue and history to disk") };
+                let mut ok = true;
+                let queue_len = unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) };
+                let q_sf = RsStateFile::new(
+                    qdir,
+                    sep,
+                    b"queue",
+                    DISKSTATE_QUEUE_VERSION,
+                    true,
+                    DISKSTATE_QUEUE_VERSION,
+                );
+                if queue_len > 0 {
+                    let Some(mut w) = (unsafe { q_sf.begin_write(env) }) else {
+                        return 0;
+                    };
+                    unsafe {
+                        emit_log(env, 0, b"Saving nzb list to disk");
+                        save_nzb_section(env, &mut w, 0, queue_len);
+                    }
+                    ok = unsafe { q_sf.finish_write(env, w, flush_queue) };
+                } else {
+                    q_sf.discard();
+                }
+
+                if env.a2 != 0 {
+                    let hist_len = unsafe { call_ctrl(env, 1, 0, 0, 0, std::ptr::null()) };
+                    let h_sf = RsStateFile::new(
+                        qdir,
+                        sep,
+                        b"history",
+                        DISKSTATE_QUEUE_VERSION,
+                        true,
+                        DISKSTATE_QUEUE_VERSION,
+                    );
+                    if hist_len > 0 {
+                        let Some(mut w) = (unsafe { h_sf.begin_write(env) }) else {
+                            return 0;
+                        };
+                        unsafe {
+                            emit_log(env, 0, b"Saving history to disk");
+                            save_nzb_section(env, &mut w, 1, hist_len);
+                        }
+                        ok &= unsafe { h_sf.finish_write(env, w, flush_queue) };
+                    } else {
+                        h_sf.discard();
+                    }
+                }
+
+                let p_sf = RsStateFile::new(
+                    qdir,
+                    sep,
+                    b"progress",
+                    DISKSTATE_QUEUE_VERSION,
+                    true,
+                    DISKSTATE_QUEUE_VERSION,
+                );
+                p_sf.discard();
+
+                let last_nzb = unsafe { call_ctrl(env, 2, 0, 0, 0, std::ptr::null()) };
+                let last_file = unsafe { call_ctrl(env, 3, 0, 0, 0, std::ptr::null()) };
+                let _ = save_id_floor_file(qdir, sep, last_nzb, last_file);
+                c_int::from(ok)
+            } else if env.a1 == 1 {
+                let changed_count = unsafe { call_ctrl(env, 20, 0, 0, 0, std::ptr::null()) };
+                unsafe { emit_log(env, 0, b"Saving queue progress to disk") };
+                let p_sf = RsStateFile::new(
+                    qdir,
+                    sep,
+                    b"progress",
+                    DISKSTATE_QUEUE_VERSION,
+                    true,
+                    DISKSTATE_QUEUE_VERSION,
+                );
+                if changed_count > 0 {
+                    let Some(mut w) = (unsafe { p_sf.begin_write(env) }) else {
+                        return 0;
+                    };
+                    unsafe {
+                        emit_log(env, 0, b"Saving nzb progress to disk");
+                        save_nzb_section(env, &mut w, 2, changed_count);
+                    }
+                    c_int::from(unsafe { p_sf.finish_write(env, w, flush_queue) })
+                } else {
+                    p_sf.discard();
+                    1
+                }
+            } else {
+                let nzb_count = unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) };
+                let f_sf = RsStateFile::new(
+                    qdir,
+                    sep,
+                    b"files",
+                    DISKSTATE_FILE_VERSION,
+                    true,
+                    DISKSTATE_FILE_VERSION,
+                );
+                if nzb_count > 0 {
+                    let Some(mut w) = (unsafe { f_sf.begin_write(env) }) else {
+                        return 0;
+                    };
+                    let total_files = unsafe { call_ctrl(env, 4, 0, 0, 0, std::ptr::null()) };
+                    let _ = writeln!(w, "{total_files}");
+                    for nzb_idx in 0..nzb_count {
+                        let fl_len =
+                            unsafe { call_ctrl(env, 5, nzb_idx, 0, 0, std::ptr::null()) };
+                        for file_idx in 0..fl_len {
+                            let file_id = unsafe {
+                                call_ctrl(env, 6, nzb_idx, file_idx, 0, std::ptr::null())
+                            };
+                            let _ = writeln!(w, "{file_id}");
+                            let (_, bytes) = unsafe { format_target_file_bytes(env, 1) };
+                            let _ = w.write_all(&bytes);
+                        }
+                    }
+                    c_int::from(unsafe { f_sf.finish_write(env, w, flush_queue) })
+                } else {
+                    f_sf.discard();
+                    1
+                }
+            }
+        }
+        16 => {
+            unsafe { emit_log(env, 0, b"Loading queue from disk") };
+            let mut queue_files_failed = false;
+            let mut file_infos_loaded = false;
+            let mut format_version = 0i32;
+            let mut legacy_queue_read = false;
+
+            let ok = 'load: {
+                let mut q_sf = RsStateFile::new(
+                    qdir,
+                    sep,
+                    b"queue",
+                    DISKSTATE_QUEUE_VERSION,
+                    true,
+                    DISKSTATE_QUEUE_LEGACY_VERSION,
+                );
+                if q_sf.file_exists() {
+                    let Some(mut r) = (unsafe { q_sf.begin_read(env) }) else {
+                        queue_files_failed = true;
+                        break 'load false;
+                    };
+                    format_version = q_sf.file_version;
+                    let (ver_err, is_legacy, need_inline_hist) =
+                        check_queue_format_version(format_version, DISKSTATE_QUEUE_VERSION);
+                    legacy_queue_read |= is_legacy;
+                    if ver_err == 1 {
+                        unsafe {
+                            emit_log(env, 4, b"Failed to read queue: diskstate file is corrupted");
+                        }
+                        queue_files_failed = true;
+                        break 'load false;
+                    } else if ver_err == 2 {
+                        unsafe {
+                            emit_log(
+                                env,
+                                4,
+                                b"Failed to read queue and history data. Only queue and history from NZBGet v13 or newer can be converted by this RustyGet version. Old queue and history data still can be converted using NZBGet v16 as an intermediate version.",
+                            );
+                        }
+                        queue_files_failed = true;
+                        break 'load false;
+                    }
+                    if !unsafe { load_queue_section(env, &mut r, format_version) } {
+                        queue_files_failed = true;
+                        break 'load false;
+                    }
+                    if need_inline_hist
+                        && !unsafe { load_history_section(env, &mut r, format_version) }
+                    {
+                        queue_files_failed = true;
+                        break 'load false;
+                    }
+                }
+
+                let mut p_sf = RsStateFile::new(
+                    qdir,
+                    sep,
+                    b"progress",
+                    DISKSTATE_QUEUE_VERSION,
+                    true,
+                    DISKSTATE_QUEUE_LEGACY_VERSION,
+                );
+                if p_sf.file_exists() {
+                    let Some(mut r) = (unsafe { p_sf.begin_read(env) }) else {
+                        queue_files_failed = true;
+                        break 'load false;
+                    };
+                    if p_sf.file_version <= 0 {
+                        unsafe {
+                            emit_log(env, 4, b"Failed to read queue: diskstate file is corrupted");
+                        }
+                        queue_files_failed = true;
+                        break 'load false;
+                    }
+                    legacy_queue_read |= p_sf.file_version != DISKSTATE_QUEUE_VERSION;
+                    if !unsafe { load_progress_section(env, &mut r, p_sf.file_version) } {
+                        queue_files_failed = true;
+                        break 'load false;
+                    }
+                }
+
+                if format_version == 0 || format_version >= 57 {
+                    let mut h_sf = RsStateFile::new(
+                        qdir,
+                        sep,
+                        b"history",
+                        DISKSTATE_QUEUE_VERSION,
+                        true,
+                        DISKSTATE_QUEUE_LEGACY_VERSION,
+                    );
+                    if h_sf.file_exists() {
+                        let Some(mut r) = (unsafe { h_sf.begin_read(env) }) else {
+                            queue_files_failed = true;
+                            break 'load false;
+                        };
+                        if h_sf.file_version <= 0 {
+                            unsafe {
+                                emit_log(
+                                    env,
+                                    4,
+                                    b"Failed to read queue: diskstate file is corrupted",
+                                );
+                            }
+                            queue_files_failed = true;
+                            break 'load false;
+                        }
+                        legacy_queue_read |= h_sf.file_version != DISKSTATE_QUEUE_VERSION;
+                        if !unsafe { load_history_section(env, &mut r, h_sf.file_version) } {
+                            queue_files_failed = true;
+                            break 'load false;
+                        }
+                    }
+                }
+
+                unsafe { load_all_file_infos_op(env, qdir, sep) };
+                file_infos_loaded = true;
+
+                unsafe { cleanup_queue_dir_op(env, qdir, sep) };
+
+                if !unsafe { load_all_file_states_op(env, qdir, tdir, sep) } {
+                    break 'load false;
+                }
+
+                unsafe { convert_legacy_file_states_op(env, qdir, tdir, sep) };
+                true
+            };
+
+            if legacy_queue_read && !env.out_flag.is_null() {
+                unsafe { *env.out_flag = 1 };
+            }
+            if !ok {
+                unsafe {
+                    emit_log(
+                        env,
+                        4,
+                        b"Error reading diskstate for download queue and history",
+                    );
+                }
+            }
+            if !file_infos_loaded
+                && unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) > 0 }
+            {
+                unsafe { load_all_file_infos_op(env, qdir, sep) };
+            }
+            if queue_files_failed {
+                unsafe { set_aside_queue_files_op(env, qdir, sep) };
+            }
+            let mut max_nzb = -1;
+            let mut max_file = -1;
+            diskstate_fs_op(4, qdir, sep, 0, 0, 0, 0, &mut max_nzb, &mut max_file);
+            unsafe { call_ctrl(env, 18, max_nzb, max_file, 0, std::ptr::null()) };
+            c_int::from(ok)
+        }
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::CString;
 
-    unsafe fn buf_to_string(b: RsBuf) -> String {
-        let s = String::from_utf8_lossy(std::slice::from_raw_parts(b.data as *const u8, b.len)).into_owned();
-        crate::ffi::nzbget_rs_free(b);
-        s
+    fn vec_to_string(b: Vec<u8>) -> String {
+        String::from_utf8(b).unwrap()
     }
 
     #[test]
@@ -3962,7 +6878,7 @@ mod tests {
         unsafe {
             let name = CString::new("Release\nName").unwrap();
             let key = CString::new("series=1\r2").unwrap();
-            let s = buf_to_string(nzbget_rs_diskstate_format_dup_info(
+            let s = vec_to_string(format_dup_info_bytes(
                 1,
                 (2i64 << 32) | 5,
                 100,
@@ -4007,7 +6923,7 @@ mod tests {
                 crc: 0x12345678,
                 staged_fallback: 0,
             };
-            let s = buf_to_string(nzbget_rs_diskstate_format_file_state(&inp, &stat, 1, &art, 1));
+            let s = vec_to_string(format_file_state_bytes(&inp, &stat, 1, &art, 1));
             assert!(s.contains("10,1\n0,1024,0,2048,0,512\npart01.rar\ndeadbeef\nparset1\n0\n"));
             assert!(s.contains("#decoded 0,4096\nOutputInitialized=1\n"));
         }
@@ -4046,7 +6962,7 @@ mod tests {
             let a1 = CString::new("a\n.rar").unwrap();
             let a2 = CString::new("b\r.rar").unwrap();
             let arcs = [a1.as_ptr(), a2.as_ptr()];
-            let trailer = buf_to_string(nzbget_rs_diskstate_format_unpack_trailer_item(
+            let trailer = vec_to_string(format_unpack_trailer_item_bytes(
                 7,
                 2,
                 1,
@@ -4064,7 +6980,7 @@ mod tests {
             let urls = [url.as_ptr()];
             let hashes = [12345u32];
             let updates = [1700000000];
-            let feed_status = buf_to_string(nzbget_rs_diskstate_format_feed_status(
+            let feed_status = vec_to_string(format_feed_status_bytes(
                 urls.as_ptr(),
                 hashes.as_ptr(),
                 updates.as_ptr(),
@@ -4074,7 +6990,7 @@ mod tests {
 
             let statuses = [2];
             let seens = [1700000001];
-            let feed_hist = buf_to_string(nzbget_rs_diskstate_format_feed_history(
+            let feed_hist = vec_to_string(format_feed_history_bytes(
                 statuses.as_ptr(),
                 seens.as_ptr(),
                 urls.as_ptr(),
@@ -4089,7 +7005,7 @@ mod tests {
             let hosts = [srv_host.as_ptr()];
             let ports = [563];
             let users = [srv_user.as_ptr()];
-            let srv_info = buf_to_string(nzbget_rs_diskstate_format_server_info(
+            let srv_info = vec_to_string(format_server_info_bytes(
                 names.as_ptr(),
                 hosts.as_ptr(),
                 ports.as_ptr(),
@@ -4098,6 +7014,94 @@ mod tests {
             ));
             assert_eq!(srv_info, "1\nServer 1\nnews.example .com\n563\nuser name\n");
         }
+    }
+
+    #[test]
+    fn test_state_reader_overlong_scroll_and_state_file_recovery() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget_statefile_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let qdir_bytes = dir.as_os_str().as_bytes().to_vec();
+        let qdir_c = bytes_to_cstring_trunc(&qdir_bytes);
+        let logs: std::cell::RefCell<Vec<(c_int, Vec<u8>)>> = std::cell::RefCell::new(Vec::new());
+
+        unsafe extern "C" fn log_cb(ctx: *mut c_void, level: c_int, msg: *const c_char) {
+            let v = unsafe { &*ctx.cast::<std::cell::RefCell<Vec<(c_int, Vec<u8>)>>>() };
+            v.borrow_mut()
+                .push((level, unsafe { cstr_to_bytes(msg) }.to_vec()));
+        }
+
+        let mut env: NzbgetRsDiskStateEnv = unsafe { std::mem::zeroed() };
+        env.ctx = &logs as *const _ as *mut c_void;
+        env.queue_dir = qdir_c.as_ptr();
+        env.sep = b'/' as c_int;
+        env.flush_queue = 1;
+        env.now = 1700000099;
+        env.log_cb = Some(log_cb);
+
+        // 1. Transactional write, fsync, and read-only destination overwrite (replace=true)
+        unsafe {
+            let sf = RsStateFile::new(&qdir_bytes, b'/', b"77s", 7, true, 7);
+            let mut w = sf.begin_write(&env).unwrap();
+            writeln!(w, "{}", "x".repeat(300)).unwrap();
+            writeln!(w, "after_overlong").unwrap();
+            assert!(sf.finish_write(&env, w, true));
+
+            let dest_path = dir.join("77s");
+            let mut perms = std::fs::metadata(&dest_path).unwrap().permissions();
+            perms.set_mode(0o444);
+            std::fs::set_permissions(&dest_path, perms).unwrap();
+
+            let mut sf_rep = RsStateFile::new(&qdir_bytes, b'/', b"77s", 7, true, 7);
+            sf_rep.flush = false;
+            let mut w2 = sf_rep.begin_write(&env).unwrap();
+            writeln!(w2, "{}", "y".repeat(256 * 1024)).unwrap();
+            writeln!(w2, "second_line").unwrap();
+            assert!(sf_rep.finish_write(&env, w2, true));
+
+            let mut sf_rd = RsStateFile::new(&qdir_bytes, b'/', b"77s", 7, false, 9);
+            let mut r = sf_rd.begin_read(&env).unwrap();
+            assert_eq!(sf_rd.file_version, 7);
+            let cut = r.read_line(32).unwrap().to_vec();
+            assert_eq!(cut, vec![b'y'; 30]);
+            assert!(r.raw_buf.capacity() <= 1024);
+            let next = r.read_line(128).unwrap();
+            assert_eq!(next, b"second_line");
+            assert!(r.read_line(128).is_none());
+        }
+
+        // 2. Disaster recovery from .new when dest is missing, and version mismatch refusal
+        unsafe {
+            std::fs::write(
+                dir.join("queue.new"),
+                b"nzbget diskstate file version 64\n0\n",
+            )
+            .unwrap();
+            let mut sf_rec = RsStateFile::new(&qdir_bytes, b'/', b"queue", 64, true, 66);
+            assert!(sf_rec.file_exists());
+            let mut r = sf_rec.begin_read(&env).unwrap();
+            assert_eq!(r.scan_i32(), Some(0));
+            assert!(dir.join("queue").exists());
+            assert!(!dir.join("queue.new").exists());
+
+            std::fs::write(dir.join("queue"), b"nzbget diskstate file version 99\n0\n").unwrap();
+            let mut out_legacy = 0;
+            env.out_flag = &mut out_legacy;
+            assert_eq!(diskstate_exec(16, &env), 0);
+            assert!(dir.join("queue.unreadable-1700000099").exists());
+            assert!(!dir.join("queue").exists());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

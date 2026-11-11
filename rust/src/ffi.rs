@@ -942,29 +942,6 @@ pub unsafe extern "C" fn nzbget_rs_split_command_line(s: *const c_char) -> RsBuf
     into_buf(v)
 }
 
-/// Util::TrimRight(char*) (`right_only`) or Util::Trim(char*): trims CR, LF,
-/// space and tab in place and returns where the text starts.
-///
-/// # Safety
-/// `s` is null or a writable NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_trim_line(s: *mut c_char, right_only: c_int) -> *mut c_char {
-    if s.is_null() {
-        return s;
-    }
-    let text = CStr::from_ptr(s).to_bytes();
-    let len = text.len();
-    let (start, end) = if right_only != 0 {
-        (0, crate::util::trim_right_line(text))
-    } else {
-        crate::util::trim_line(text)
-    };
-    // The legacy helper zeroes every removed byte, not just the new terminator.
-    // The shared CStr borrow ends before these writes.
-    std::ptr::write_bytes(s.add(end), 0, len - end);
-    s.add(start)
-}
-
 /// ServerVolume::CalcSlots: the slots of a local time; updates `*first_day`.
 ///
 /// # Safety
@@ -2559,24 +2536,10 @@ mod tests {
     fn textutil_in_place_ranges_nulls_and_ownership() {
         unsafe {
             let null = std::ptr::null_mut();
-            assert!(nzbget_rs_trim_line(null, 0).is_null());
             let buf = nzbget_rs_split_command_line(null);
             assert_eq!(buf.len, 0);
             assert_eq!(*buf.data, 0);
             nzbget_rs_free(buf);
-            for (source, expected, offset) in [
-                (b"! x \t\r\n\0!".as_slice(), b"! x\0\0\0\0\0!".as_slice(), 1),
-                (b"! \t\r\n\0!", b"!\0\0\0\0\0!", 0),
-                (b"!\0!", b"!\0!", 0),
-            ] {
-                for right_only in [0, 1] {
-                    let mut buf = source.to_vec();
-                    let base = buf.as_mut_ptr().add(1).cast();
-                    let result = nzbget_rs_trim_line(base, right_only);
-                    assert_eq!(result, base.add(if right_only == 0 { offset } else { 0 }));
-                    assert_eq!(buf, expected);
-                }
-            }
             let mut source = b"a 'b c'\0".to_vec();
             let words = nzbget_rs_split_command_line(source.as_ptr().cast());
             source.fill(b'x');
@@ -6003,27 +5966,6 @@ pub unsafe extern "C" fn nzbget_rs_unpack_parse_message(
 // ============================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_generator_execute(
-    data_dir: *const c_char,
-    segment_size: c_int,
-    log_cb: Option<unsafe extern "C" fn(c_int, *const c_char)>,
-) {
-    if data_dir.is_null() {
-        return;
-    }
-    let path = path_arg(data_dir);
-    let dir_bytes = input(data_dir);
-    crate::nserv::execute_nzb_generator(&path, dir_bytes, segment_size, |kind, msg| {
-        if let Some(cb) = log_cb {
-            let mut c_msg = Vec::with_capacity(msg.len() + 1);
-            c_msg.extend_from_slice(msg);
-            c_msg.push(0);
-            cb(kind as c_int, c_msg.as_ptr().cast());
-        }
-    });
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_nntp_cache_new() -> *mut crate::nserv::NntpCache {
     Box::into_raw(Box::new(crate::nserv::NntpCache::new()))
 }
@@ -6098,34 +6040,15 @@ pub unsafe extern "C" fn nzbget_rs_nntp_processor_handle_line(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nserv_parse_args(
+pub unsafe extern "C" fn nzbget_rs_nserv_opts_new(
     argc: c_int,
     argv: *const *const c_char,
     ctx: *mut std::ffi::c_void,
-    set_fields_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            c_int,
-            c_int,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-        ),
-    >,
+    write_stdout_cb: Option<unsafe extern "C" fn(*const c_char, usize)>,
+    log_cb: Option<unsafe extern "C" fn(c_int, *const c_char)>,
     push_opt_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-) {
+) -> *mut crate::nserv::NServOptsHandle {
     let mut arg_slices: Vec<&[u8]> = Vec::new();
     if argc > 0 && !argv.is_null() {
         for i in 0..argc as usize {
@@ -6133,47 +6056,86 @@ pub unsafe extern "C" fn nzbget_rs_nserv_parse_args(
             arg_slices.push(if p.is_null() { b"" } else { input(p) });
         }
     }
-    let mut parsed = crate::nserv::nserv_parse_args(&arg_slices);
-    if let Some(cb) = set_fields_cb {
-        let to_opt_ptr = |v: &mut Vec<u8>| -> *const c_char {
-            if v.is_empty() {
-                std::ptr::null()
-            } else {
-                v.push(0);
-                v.as_ptr().cast()
+    let Some(handle) = crate::nserv::NServOptsHandle::parse_and_validate(
+        &arg_slices,
+        |data| {
+            if let Some(cb) = write_stdout_cb {
+                cb(data.as_ptr().cast(), data.len());
             }
-        };
-        let data_ptr = to_opt_ptr(&mut parsed.data_dir);
-        let cache_ptr = to_opt_ptr(&mut parsed.cache_dir);
-        parsed.bind_address.push(0);
-        let bind_ptr: *const c_char = parsed.bind_address.as_ptr().cast();
-        let log_ptr = to_opt_ptr(&mut parsed.log_file);
-        let cert_ptr = to_opt_ptr(&mut parsed.secure_cert);
-        let key_ptr = to_opt_ptr(&mut parsed.secure_key);
-        cb(
-            ctx,
-            data_ptr,
-            cache_ptr,
-            bind_ptr,
-            parsed.first_port,
-            parsed.instances,
-            log_ptr,
-            cert_ptr,
-            key_ptr,
-            c_int::from(parsed.generate_nzb),
-            parsed.segment_size,
-            c_int::from(parsed.quit),
-            parsed.latency,
-            parsed.speed,
-            c_int::from(parsed.mem_cache),
-            c_int::from(parsed.param_error),
-        );
-    }
+        },
+        |level, msg| {
+            if let Some(cb) = log_cb {
+                cb(level as c_int, msg.as_ptr());
+            }
+        },
+    ) else {
+        return std::ptr::null_mut();
+    };
     if let Some(cb) = push_opt_cb {
-        for mut opt in parsed.cmd_opts {
-            opt.push(0);
-            cb(ctx, opt.as_ptr().cast());
+        for opt in &handle.c_cmd_opts {
+            cb(ctx, opt.as_ptr());
         }
+    }
+    Box::into_raw(Box::new(handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nserv_opts_post_setup(
+    opts: *const crate::nserv::NServOptsHandle,
+    log_cb: Option<unsafe extern "C" fn(c_int, *const c_char)>,
+) -> c_int {
+    if opts.is_null() {
+        return 0;
+    }
+    c_int::from((*opts).run_post_frontend_setup(|level, msg| {
+        if let Some(cb) = log_cb {
+            cb(level as c_int, msg.as_ptr());
+        }
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nserv_opts_str(
+    opts: *const crate::nserv::NServOptsHandle,
+    field: c_int,
+) -> *const c_char {
+    if opts.is_null() {
+        return std::ptr::null();
+    }
+    let o = &*opts;
+    match field {
+        0 => o.c_bind_address.as_ptr(),
+        1 => o.c_secure_cert.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+        2 => o.c_secure_key.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+        3 => o.c_data_dir.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+        4 => o.c_cache_dir.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+        _ => std::ptr::null(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nserv_opts_int(
+    opts: *const crate::nserv::NServOptsHandle,
+    field: c_int,
+) -> c_int {
+    if opts.is_null() {
+        return 0;
+    }
+    let p = &(*opts).parsed;
+    match field {
+        0 => p.instances,
+        1 => p.first_port,
+        2 => p.latency,
+        3 => p.speed,
+        4 => c_int::from(p.mem_cache),
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nserv_opts_free(opts: *mut crate::nserv::NServOptsHandle) {
+    if !opts.is_null() {
+        drop(Box::from_raw(opts));
     }
 }
 
@@ -6897,11 +6859,6 @@ pub unsafe extern "C" fn nzbget_rs_cmdline_format_usage(
         path_sep as u8,
         include_daemon != 0,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nserv_format_usage(base_name: *const c_char) -> RsBuf {
-    into_buf(crate::cmdline::format_nserv_usage(input(base_name)))
 }
 
 #[no_mangle]
@@ -12649,48 +12606,6 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_is_data_filename(filename: *const
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_diskstate_parse_unpack_state(
-    line1: *const c_char,
-    line2: *const c_char,
-    line3: *const c_char,
-    ns_running: c_int,
-    ns_none: c_int,
-    ctx: *mut c_void,
-    on_parsed_and_read_archives_cb: Option<
-        unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int, c_int) -> *const c_char,
-    >,
-    add_archive_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize)>,
-) -> c_int {
-    let l1 = crate::diskstate_format::cstr_to_bytes(line1);
-    let l2 = crate::diskstate_format::cstr_to_bytes(line2);
-    let l3 = crate::diskstate_format::cstr_to_bytes(line3);
-    let Some((direct, tried, repaired, last)) =
-        crate::diskstate_format::parse_unpack_state_lines(l1, l2, l3, ns_running, ns_none)
-    else {
-        return 0;
-    };
-    let Some(read_cb) = on_parsed_and_read_archives_cb else {
-        return 0;
-    };
-    let line4 = read_cb(ctx, direct, c_int::from(tried), c_int::from(repaired), last);
-    if line4.is_null() {
-        return 0;
-    }
-    if let Some(cb) = add_archive_cb {
-        let l4 = crate::diskstate_format::cstr_to_bytes(line4);
-        let archives = l4.strip_prefix(b"ExtractedArchives=").unwrap_or(l4);
-        let mut cursor = 0;
-        while let Some((start, len, next)) =
-            crate::diskstate_format::diskstate_next_comma_token(archives, cursor)
-        {
-            cb(ctx, archives.as_ptr().add(start) as *const c_char, len);
-            cursor = next;
-        }
-    }
-    1
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupe_fallback_is_par_file(
     par_file: c_int,
     first_content: c_int,
@@ -13198,512 +13113,15 @@ pub unsafe extern "C" fn nzbget_rs_dupesearch_parse_state_line(
     1
 }
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct RsServerMatchItem {
-    pub name: *const c_char,
-    pub host: *const c_char,
-    pub port: c_int,
-    pub user: *const c_char,
-}
-
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_classify_temp_or_legacy(
+pub unsafe extern "C" fn nzbget_rs_diskstate_exec(
     op: c_int,
-    filename: *const c_char,
-    header: *const c_char,
-    file_ver: c_int,
-    legacy_ver: c_int,
-    out_a: *mut c_int,
-    out_b: *mut c_int,
+    env: *const crate::diskstate_format::NzbgetRsDiskStateEnv,
 ) -> c_int {
-    let fname = if filename.is_null() {
-        &[][..]
-    } else {
-        input(filename)
-    };
-    match op {
-        0 => {
-            let (kind, id, part) = crate::diskstate_format::classify_temp_file(fname);
-            if !out_a.is_null() {
-                *out_a = id;
-            }
-            if !out_b.is_null() {
-                *out_b = part;
-            }
-            kind
-        }
-        1 => match crate::diskstate_format::classify_queue_dir_id(fname) {
-            Some((id, is_nzb_log)) => {
-                if !out_a.is_null() {
-                    *out_a = id;
-                }
-                if !out_b.is_null() {
-                    *out_b = c_int::from(is_nzb_log);
-                }
-                1
-            }
-            None => 0,
-        },
-        2 => {
-            let hdr = if header.is_null() {
-                &[][..]
-            } else {
-                input(header)
-            };
-            match crate::diskstate_format::classify_legacy_file_state(
-                fname, hdr, file_ver, legacy_ver,
-            ) {
-                Some((id, suffix_kind)) => {
-                    if !out_a.is_null() {
-                        *out_a = id;
-                    }
-                    if !out_b.is_null() {
-                        *out_b = suffix_kind;
-                    }
-                    1
-                }
-                None => 0,
-            }
-        }
-        3 => {
-            let hdr = if header.is_null() {
-                &[][..]
-            } else {
-                input(header)
-            };
-            crate::diskstate_format::parse_format_version(hdr)
-        }
-        4 => {
-            let (err, is_legacy, need_inline_history) =
-                crate::diskstate_format::check_queue_format_version(file_ver, legacy_ver);
-            if !out_a.is_null() {
-                *out_a = c_int::from(is_legacy);
-            }
-            if !out_b.is_null() {
-                *out_b = c_int::from(need_inline_history);
-            }
-            err
-        }
-        5 => match crate::diskstate_format::diskstate_parse_queue_file_id_and_suffix(fname) {
-            Some((id, suffix)) => {
-                if !out_a.is_null() {
-                    *out_a = id;
-                }
-                if !out_b.is_null() {
-                    *out_b = c_int::from(suffix);
-                }
-                1
-            }
-            None => 0,
-        },
-        _ => 0,
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_parse_log_line(
-    line: *const c_char,
-    out_time: *mut c_int,
-    out_kind: *mut c_int,
-    out_text_off: *mut usize,
-) -> c_int {
-    if line.is_null() {
+    if env.is_null() {
         return 0;
     }
-    match crate::diskstate_format::parse_log_line(input(line)) {
-        Some((time, kind, off)) => {
-            if !out_time.is_null() {
-                *out_time = time;
-            }
-            if !out_kind.is_null() {
-                *out_kind = kind;
-            }
-            if !out_text_off.is_null() {
-                *out_text_off = off;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_is_orphan_queue_file(
-    filename: *const c_char,
-    file_ids: *const c_int,
-    file_len: usize,
-    nzb_ids: *const c_int,
-    nzb_len: usize,
-) -> c_int {
-    if filename.is_null() {
-        return 0;
-    }
-    let f_slice = if file_ids.is_null() || file_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(file_ids, file_len)
-    };
-    let n_slice = if nzb_ids.is_null() || nzb_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(nzb_ids, nzb_len)
-    };
-    c_int::from(crate::diskstate_format::is_orphan_queue_file(
-        input(filename),
-        f_slice,
-        n_slice,
-    ))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_load_nzb_info(
-    infile_ctx: *mut c_void,
-    read_line_cb: crate::diskstate_format::ReadLineFn,
-    format_version: c_int,
-    pt_finished: c_int,
-    target_ctx: *mut c_void,
-    on_loaded_cb: unsafe extern "C" fn(
-        ctx: *mut c_void,
-        inp: *const crate::diskstate_format::NzbgetRsDiskNzbInfoInput,
-        flags: c_int,
-        completed: *const crate::diskstate_format::NzbgetRsDiskCompletedFile,
-        completed_len: usize,
-        params: *const crate::diskstate_format::NzbgetRsDiskParam,
-        params_len: usize,
-        scripts: *const crate::diskstate_format::NzbgetRsDiskScriptStatus,
-        scripts_len: usize,
-        stats: *const crate::diskstate_format::NzbgetRsDiskServerStat,
-        stats_len: usize,
-        files: *const crate::diskstate_format::NzbgetRsDiskFileStub,
-        file_times: *const c_int,
-        files_len: usize,
-    ),
-) -> c_int {
-    c_int::from(crate::diskstate_format::load_nzb_info(
-        infile_ctx,
-        read_line_cb,
-        format_version,
-        pt_finished,
-        target_ctx,
-        on_loaded_cb,
-    ))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_load_file_state(
-    infile_ctx: *mut c_void,
-    read_line_cb: crate::diskstate_format::ReadLineFn,
-    format_version: c_int,
-    completed: c_int,
-    file_id: c_int,
-    has_articles: c_int,
-    articles_len: c_int,
-    has_options: c_int,
-    direct_write: c_int,
-    force_direct_write: c_int,
-    cur_output_initialized: c_int,
-    sep: c_int,
-    temp_dir: *const c_char,
-    dest_dir: *const c_char,
-    cur_filename: *const c_char,
-    cur_output_filename: *const c_char,
-    target_ctx: *mut c_void,
-    article_cb: unsafe extern "C" fn(
-        ctx: *mut c_void,
-        op: c_int,
-        idx: c_int,
-        status: c_int,
-        seg_offset: i64,
-        seg_size: c_int,
-        crc: u32,
-        fallback_round: c_int,
-        result_filename: *const c_char,
-    ) -> c_int,
-    on_summary_cb: unsafe extern "C" fn(
-        ctx: *mut c_void,
-        fields: *const crate::diskstate_format::NzbgetRsDiskFileStateInput,
-        flags: c_int,
-        completed_articles: c_int,
-        new_output_filename: *const c_char,
-        stats: *const crate::diskstate_format::NzbgetRsDiskServerStat,
-        stats_len: usize,
-    ),
-) -> c_int {
-    let tdir = if temp_dir.is_null() {
-        &[][..]
-    } else {
-        input(temp_dir)
-    };
-    let ddir = if dest_dir.is_null() {
-        &[][..]
-    } else {
-        input(dest_dir)
-    };
-    let cfn = if cur_filename.is_null() {
-        &[][..]
-    } else {
-        input(cur_filename)
-    };
-    let cofn = if cur_output_filename.is_null() {
-        &[][..]
-    } else {
-        input(cur_output_filename)
-    };
-    c_int::from(crate::diskstate_format::load_file_state(
-        infile_ctx,
-        read_line_cb,
-        format_version,
-        completed,
-        file_id,
-        has_articles,
-        articles_len,
-        has_options,
-        direct_write,
-        force_direct_write,
-        cur_output_initialized,
-        sep as u8,
-        tdir,
-        ddir,
-        cfn,
-        cofn,
-        target_ctx,
-        article_cb,
-        on_summary_cb,
-    ))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_match_servers(
-    servers: *const RsServerMatchItem,
-    server_count: usize,
-    infile_ctx: *mut c_void,
-    read_line_cb: crate::diskstate_format::ReadLineFn,
-    out_state_ids: *mut c_int,
-    out_perfect_match: *mut c_int,
-) -> c_int {
-    let srv_slice = if servers.is_null() || server_count == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(servers, server_count)
-    };
-    let mut srv_inputs = Vec::with_capacity(srv_slice.len());
-    for s in srv_slice {
-        srv_inputs.push(crate::diskstate_format::ServerMatchInput {
-            name: if s.name.is_null() {
-                &[][..]
-            } else {
-                input(s.name)
-            },
-            host: if s.host.is_null() {
-                &[][..]
-            } else {
-                input(s.host)
-            },
-            port: s.port,
-            user: if s.user.is_null() {
-                &[][..]
-            } else {
-                input(s.user)
-            },
-        });
-    }
-    let mut state_ids = vec![0i32; srv_inputs.len()];
-    let Some(perfect) = crate::diskstate_format::load_server_refs_and_match(
-        &srv_inputs,
-        infile_ctx,
-        read_line_cb,
-        &mut state_ids,
-    ) else {
-        return 0;
-    };
-    if !out_state_ids.is_null() && !state_ids.is_empty() {
-        std::slice::from_raw_parts_mut(out_state_ids, state_ids.len()).copy_from_slice(&state_ids);
-    }
-    if !out_perfect_match.is_null() {
-        *out_perfect_match = c_int::from(perfect);
-    }
-    1
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_fs_op(
-    op: c_int,
-    queue_dir: *const c_char,
-    sep: c_int,
-    a1: c_int,
-    a2: c_int,
-    a3: c_int,
-    a4: c_int,
-    out1: *mut c_int,
-    out2: *mut c_int,
-) -> c_int {
-    let qdir = if queue_dir.is_null() {
-        &[][..]
-    } else {
-        input(queue_dir)
-    };
-    let mut o1 = 0;
-    let mut o2 = 0;
-    let res = crate::diskstate_format::diskstate_fs_op(
-        op, qdir, sep as u8, a1, a2, a3, a4, &mut o1, &mut o2,
-    );
-    if !out1.is_null() {
-        *out1 = o1;
-    }
-    if !out2.is_null() {
-        *out2 = o2;
-    }
-    res
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_load_dupe_extras(
-    infile_ctx: *mut c_void,
-    read_line_cb: crate::diskstate_format::ReadLineFn,
-    format_version: c_int,
-    target_ctx: *mut c_void,
-    on_header_cb: unsafe extern "C" fn(
-        ctx: *mut c_void,
-        rec_articles: c_int,
-        rec_bytes: i64,
-        rec_holes: c_int,
-    ),
-    on_job_cb: unsafe extern "C" fn(
-        ctx: *mut c_void,
-        job: *const crate::diskstate_format::NzbgetRsDiskRepairJob,
-    ),
-) -> c_int {
-    c_int::from(crate::diskstate_format::load_dupe_extras(
-        infile_ctx,
-        read_line_cb,
-        format_version,
-        target_ctx,
-        on_header_cb,
-        on_job_cb,
-    ))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_load_volume_stat(
-    infile_ctx: *mut c_void,
-    read_line_cb: crate::diskstate_format::ReadLineFn,
-    format_version: c_int,
-    target_ctx: *mut c_void,
-    on_item_cb: unsafe extern "C" fn(
-        ctx: *mut c_void,
-        slot_idx: c_int,
-        item: *const crate::diskstate_format::NzbgetRsDiskVolumeStatInput,
-        has_custom_times: c_int,
-    ),
-) -> c_int {
-    c_int::from(crate::diskstate_format::load_volume_stat(
-        infile_ctx,
-        read_line_cb,
-        format_version,
-        target_ctx,
-        on_item_cb,
-    ))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_load_file_info(
-    infile_ctx: *mut c_void,
-    read_line_cb: crate::diskstate_format::ReadLineFn,
-    format_version: c_int,
-    file_summary: c_int,
-    articles: c_int,
-    file_id: c_int,
-    direct_write_opt: c_int,
-    force_direct_write: c_int,
-    sep: c_int,
-    dest_dir: *const c_char,
-    cur_filename: *const c_char,
-    cur_output_filename: *const c_char,
-    target_ctx: *mut c_void,
-    on_summary_cb: unsafe extern "C" fn(
-        ctx: *mut c_void,
-        fields: *const crate::diskstate_format::NzbgetRsDiskFileInfoInput,
-        flags: c_int,
-    ),
-    on_item_cb: unsafe extern "C" fn(
-        ctx: *mut c_void,
-        group_or_null: *const c_char,
-        art_or_null: *const crate::diskstate_format::NzbgetRsDiskArticleInfo,
-    ),
-) -> c_int {
-    let ddir = if dest_dir.is_null() {
-        &[][..]
-    } else {
-        input(dest_dir)
-    };
-    let cfn = if cur_filename.is_null() {
-        &[][..]
-    } else {
-        input(cur_filename)
-    };
-    let cofn = if cur_output_filename.is_null() {
-        &[][..]
-    } else {
-        input(cur_output_filename)
-    };
-    c_int::from(crate::diskstate_format::load_file_info(
-        infile_ctx,
-        read_line_cb,
-        format_version,
-        file_summary,
-        articles,
-        file_id,
-        direct_write_opt,
-        force_direct_write,
-        sep as u8,
-        ddir,
-        cfn,
-        cofn,
-        target_ctx,
-        on_summary_cb,
-        on_item_cb,
-    ))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_load_section(
-    kind: c_int,
-    infile_ctx: *mut c_void,
-    read_line_cb: Option<crate::diskstate_format::ReadLineFn>,
-    format_version: c_int,
-    queue_dir: *const c_char,
-    sep: c_int,
-    now: i64,
-    target_ctx: *mut c_void,
-    on_entry_cb: unsafe extern "C" fn(
-        ctx: *mut c_void,
-        a1: c_int,
-        a2: c_int,
-        a3: c_int,
-        u1: u32,
-        u2: u32,
-        i64_1: i64,
-        s1: *const c_char,
-        s2: *const c_char,
-    ),
-) -> c_int {
-    let qdir = if queue_dir.is_null() {
-        &[][..]
-    } else {
-        input(queue_dir)
-    };
-    c_int::from(crate::diskstate_format::load_section(
-        kind,
-        infile_ctx,
-        read_line_cb,
-        format_version,
-        qdir,
-        sep as u8,
-        now,
-        target_ctx,
-        on_entry_cb,
-    ))
+    crate::diskstate_format::diskstate_exec(op, &*env)
 }
 
 #[unsafe(no_mangle)]

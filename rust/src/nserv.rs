@@ -1152,6 +1152,158 @@ pub fn nserv_parse_args(args: &[&[u8]]) -> NServParsedArgs {
     out
 }
 
+fn nserv_bytes_to_cstring(raw: &[u8]) -> std::ffi::CString {
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    unsafe { std::ffi::CString::from_vec_unchecked(raw[..end].to_vec()) }
+}
+
+fn nserv_emit_log<L: FnMut(i32, &CStr)>(log_fn: &mut L, level: i32, parts: &[&[u8]]) {
+    let joined: Vec<u8> = parts.concat();
+    let cstr = nserv_bytes_to_cstring(&joined);
+    log_fn(level, &cstr);
+}
+
+/// Opaque parsed and validated NServ options handle for `NServMain`.
+pub struct NServOptsHandle {
+    pub parsed: NServParsedArgs,
+    pub c_data_dir: Option<std::ffi::CString>,
+    pub c_cache_dir: Option<std::ffi::CString>,
+    pub c_bind_address: std::ffi::CString,
+    pub c_secure_cert: Option<std::ffi::CString>,
+    pub c_secure_key: Option<std::ffi::CString>,
+    pub c_cmd_opts: Vec<std::ffi::CString>,
+}
+
+impl NServOptsHandle {
+    /// Parses `args`; if `data_dir` is empty or `param_error`, writes formatted usage via
+    /// `write_stdout` and returns `None`. Otherwise validates `data_dir` and returns `Some`.
+    pub fn parse_and_validate<W, L>(
+        args: &[&[u8]],
+        mut write_stdout: W,
+        mut log_fn: L,
+    ) -> Option<Self>
+    where
+        W: FnMut(&[u8]),
+        L: FnMut(i32, &CStr),
+    {
+        let parsed = nserv_parse_args(args);
+        if parsed.data_dir.is_empty() || parsed.param_error {
+            let argv0 = args.first().copied().unwrap_or(b"rustyget");
+            let usage = crate::cmdline::format_nserv_usage(base_file_name(argv0));
+            write_stdout(&usage);
+            return None;
+        }
+
+        let st = crate::fsops::posix_stat(&parsed.data_dir);
+        if st != 2 {
+            if st == 1 {
+                nserv_emit_log(
+                    &mut log_fn,
+                    4,
+                    &[
+                        b"Specified data-dir ",
+                        &parsed.data_dir,
+                        b" is not a directory, but a file",
+                    ],
+                );
+            } else {
+                nserv_emit_log(
+                    &mut log_fn,
+                    4,
+                    &[b"Specified data-dir ", &parsed.data_dir, b" does not exist"],
+                );
+            }
+        }
+
+        let opt_cstr = |v: &[u8]| -> Option<std::ffi::CString> {
+            if v.is_empty() {
+                None
+            } else {
+                Some(nserv_bytes_to_cstring(v))
+            }
+        };
+        let c_data_dir = opt_cstr(&parsed.data_dir);
+        let c_cache_dir = opt_cstr(&parsed.cache_dir);
+        let c_bind_address = nserv_bytes_to_cstring(if parsed.bind_address.is_empty() {
+            b"0.0.0.0"
+        } else {
+            &parsed.bind_address
+        });
+        let c_secure_cert = opt_cstr(&parsed.secure_cert);
+        let c_secure_key = opt_cstr(&parsed.secure_key);
+        let c_cmd_opts = parsed
+            .cmd_opts
+            .iter()
+            .map(|o| nserv_bytes_to_cstring(o))
+            .collect();
+
+        Some(Self {
+            parsed,
+            c_data_dir,
+            c_cache_dir,
+            c_bind_address,
+            c_secure_cert,
+            c_secure_key,
+            c_cmd_opts,
+        })
+    }
+
+    /// Runs post-frontend setup (`NzbGenerator` if `-z` was given, returning `true` when `-q`
+    /// requests immediate exit; otherwise creates `cache_dir` when specified and returns `false`).
+    pub fn run_post_frontend_setup<L: FnMut(i32, &CStr)>(&self, mut log_fn: L) -> bool {
+        if self.parsed.generate_nzb {
+            let dir_path = bytes_to_path_buf(&self.parsed.data_dir);
+            execute_nzb_generator(
+                &dir_path,
+                &self.parsed.data_dir,
+                self.parsed.segment_size,
+                |kind, msg| match kind {
+                    NzbGenLogKind::StartDir => {
+                        nserv_emit_log(&mut log_fn, 2, &[b"Generating nzbs for ", msg]);
+                    }
+                    NzbGenLogKind::GeneratingFor => {
+                        nserv_emit_log(&mut log_fn, 2, &[b"Generating nzb for ", msg]);
+                    }
+                    NzbGenLogKind::CreateError => {
+                        nserv_emit_log(&mut log_fn, 4, &[b"Could not create file ", msg]);
+                    }
+                    NzbGenLogKind::ProcessingFile => {
+                        nserv_emit_log(&mut log_fn, 1, &[b"Processing ", msg]);
+                    }
+                    NzbGenLogKind::Finished => {
+                        nserv_emit_log(&mut log_fn, 2, &[b"Nzb generation finished"]);
+                    }
+                },
+            );
+            if self.parsed.quit {
+                return true;
+            }
+        }
+
+        if !self.parsed.cache_dir.is_empty() {
+            let mut errmsg = Vec::new();
+            if !crate::fsops::force_directories(
+                &self.parsed.cache_dir,
+                &mut errmsg,
+                &crate::fsops::posix_stat,
+            ) {
+                nserv_emit_log(
+                    &mut log_fn,
+                    4,
+                    &[
+                        b"Could not create directory ",
+                        &self.parsed.cache_dir,
+                        b": ",
+                        &errmsg,
+                    ],
+                );
+            }
+        }
+
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1379,6 +1531,31 @@ mod tests {
 
         let trailing = nserv_parse_args(&[b"rustyget", b"--nserv", b"-d", b"/tmp/data", b"extra"]);
         assert!(trailing.param_error);
+
+        let mut usage_out = Vec::new();
+        let mut logs = Vec::new();
+        assert!(NServOptsHandle::parse_and_validate(
+            &[b"rustyget", b"--nserv"],
+            |b| usage_out.extend_from_slice(b),
+            |lvl, m| logs.push((lvl, m.to_bytes().to_vec())),
+        )
+        .is_none());
+        assert!(!usage_out.is_empty());
+
+        let cache_sub = dir.join("cache_created");
+        let d_str = dir.to_str().unwrap().as_bytes();
+        let c_str = cache_sub.to_str().unwrap().as_bytes();
+        let handle = NServOptsHandle::parse_and_validate(
+            &[b"rustyget", b"--nserv", b"-d", d_str, b"-c", c_str, b"-v", b"3"],
+            |_| {},
+            |lvl, m| logs.push((lvl, m.to_bytes().to_vec())),
+        )
+        .unwrap();
+        assert!(logs.is_empty());
+        assert_eq!(handle.c_bind_address.to_bytes(), b"0.0.0.0");
+        assert_eq!(handle.c_cmd_opts.len(), 2);
+        assert!(!handle.run_post_frontend_setup(|lvl, m| logs.push((lvl, m.to_bytes().to_vec()))));
+        assert!(cache_sub.is_dir());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

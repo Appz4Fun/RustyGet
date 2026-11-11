@@ -24,8 +24,6 @@
 #include "nzbget_rs.h"
 
 #ifndef DISABLE_NSERV
-struct NzbgetRsNntpCache;
-
 class NntpProcessor : public Thread
 {
 public:
@@ -207,109 +205,32 @@ private:
 	const NzbgetRsNntpCache* m_cache;
 };
 
-struct NServOpts
-{
-	CString dataDir;
-	CString cacheDir;
-	CString bindAddress;
-	int firstPort = 6791;
-	int instances = 1;
-	CString logFile;
-	CString secureCert;
-	CString secureKey;
-	std::deque<CString> ownedOpts;
-	bool generateNzb = false;
-	int segmentSize = 500000;
-	bool quit = false;
-	int latency = 0;
-	int speed = 0;
-	bool memCache = false;
-	bool paramError = false;
-
-	NServOpts(int argc, char* argv[], Options::CmdOptList& cmdOpts)
-		: bindAddress("0.0.0.0")
-	{
-		struct ParseCtx
-		{
-			NServOpts& self;
-			Options::CmdOptList& list;
-		} parseCtx{*this, cmdOpts};
-
-		nzbget_rs_nserv_parse_args(
-			argc,
-			const_cast<const char* const*>(argv),
-			&parseCtx,
-			[](void* rawCtx,
-				const char* dDir,
-				const char* cDir,
-				const char* bAddr,
-				int fPort,
-				int inst,
-				const char* lFile,
-				const char* sCert,
-				const char* sKey,
-				int genNzb,
-				int segSize,
-				int q,
-				int lat,
-				int spd,
-				int mCache,
-				int pErr) {
-				auto& s = static_cast<ParseCtx*>(rawCtx)->self;
-				s.dataDir = dDir;
-				s.cacheDir = cDir;
-				s.bindAddress = bAddr ? bAddr : "0.0.0.0";
-				s.firstPort = fPort;
-				s.instances = inst;
-				s.logFile = lFile;
-				s.secureCert = sCert;
-				s.secureKey = sKey;
-				s.generateNzb = genNzb != 0;
-				s.segmentSize = segSize;
-				s.quit = q != 0;
-				s.latency = lat;
-				s.speed = spd;
-				s.memCache = mCache != 0;
-				s.paramError = pErr != 0;
-			},
-			[](void* rawCtx, const char* opt) {
-				auto* ctx = static_cast<ParseCtx*>(rawCtx);
-				ctx->self.ownedOpts.emplace_back(opt ? opt : "");
-				ctx->list.push_back(*ctx->self.ownedOpts.back());
-			});
-	}
-};
-
 inline int NServMain(int argc, char* argv[])
 {
 	Log log;
 
 	info("%s NServ %s (Test NNTP server)", *Util::FormatTime(Util::CurrentTime()), Util::VersionRevision());
 
+	auto logCb = +[](int level, const char* msg) {
+		switch (level)
+		{
+		case 1: detail("%s", msg); break;
+		case 2: info("%s", msg); break;
+		case 4: error("%s", msg); break;
+		}
+	};
+
 	Options::CmdOptList cmdOpts;
-	NServOpts opts(argc, argv, cmdOpts);
-
-	if (opts.dataDir.Empty() || opts.paramError)
+	std::unique_ptr<NzbgetRsNservOpts, decltype(&nzbget_rs_nserv_opts_free)> opts(
+		nzbget_rs_nserv_opts_new(
+			argc, const_cast<const char* const*>(argv), &cmdOpts,
+			+[](const char* data, size_t len) { fwrite(data, 1, len, stdout); },
+			logCb,
+			+[](void* ctx, const char* opt) { static_cast<Options::CmdOptList*>(ctx)->push_back(opt); }),
+		nzbget_rs_nserv_opts_free);
+	if (!opts)
 	{
-		NzbgetRsBuf buf = nzbget_rs_nserv_format_usage(FileSystem::BaseFileName(argv[0]));
-		if (buf.data)
-		{
-			fwrite(buf.data, 1, buf.len, stdout);
-		}
-		nzbget_rs_free(buf);
 		return 1;
-	}
-
-	if (!FileSystem::DirectoryExists(opts.dataDir))
-	{
-		if (FileSystem::FileExists(opts.dataDir))
-		{
-			error("Specified data-dir %s is not a directory, but a file", *opts.dataDir);
-		}
-		else
-		{
-			error("Specified data-dir %s does not exist", *opts.dataDir);
-		}
 	}
 
 	Options options(&cmdOpts, nullptr);
@@ -325,52 +246,28 @@ inline int NServMain(int argc, char* argv[])
 	Frontend frontend(3);
 	frontend.Start();
 
-	if (opts.generateNzb)
+	if (nzbget_rs_nserv_opts_post_setup(opts.get(), logCb))
 	{
-		nzbget_rs_nzb_generator_execute(opts.dataDir, opts.segmentSize, +[](int kind, const char* msg)
-		{
-			switch (kind)
-			{
-			case 0:
-				info("Generating nzbs for %s", msg);
-				break;
-			case 1:
-				info("Generating nzb for %s", msg);
-				break;
-			case 2:
-				error("Could not create file %s", msg);
-				break;
-			case 3:
-				detail("Processing %s", msg);
-				break;
-			case 4:
-				info("Nzb generation finished");
-				break;
-			}
-		});
-		if (opts.quit)
-		{
-			frontend.Stop();
-			while (frontend.IsRunning()) Util::Sleep(20);
-			return 0;
-		}
-	}
-
-	CString errmsg;
-	if (opts.cacheDir && !FileSystem::ForceDirectories(opts.cacheDir, errmsg))
-	{
-		error("Could not create directory %s: %s", *opts.cacheDir, *errmsg);
+		frontend.Stop();
+		while (frontend.IsRunning()) Util::Sleep(20);
+		return 0;
 	}
 
 	std::vector<std::unique_ptr<NntpServer>> instances;
 	std::unique_ptr<NzbgetRsNntpCache, decltype(&nzbget_rs_nntp_cache_free)> cache(
-		opts.memCache ? nzbget_rs_nntp_cache_new() : nullptr, nzbget_rs_nntp_cache_free);
+		nzbget_rs_nserv_opts_int(opts.get(), 4) ? nzbget_rs_nntp_cache_new() : nullptr,
+		nzbget_rs_nntp_cache_free);
 
-	for (int i = 0; i < opts.instances; i++)
+	int instCount = nzbget_rs_nserv_opts_int(opts.get(), 0);
+	int firstPort = nzbget_rs_nserv_opts_int(opts.get(), 1);
+	for (int i = 0; i < instCount; i++)
 	{
-		instances.emplace_back(std::make_unique<NntpServer>(i + 1, opts.bindAddress,
-			opts.firstPort + i, opts.secureCert, opts.secureKey, opts.dataDir, opts.cacheDir,
-			opts.latency, opts.speed, cache.get()));
+		instances.emplace_back(std::make_unique<NntpServer>(i + 1,
+			nzbget_rs_nserv_opts_str(opts.get(), 0), firstPort + i,
+			nzbget_rs_nserv_opts_str(opts.get(), 1), nzbget_rs_nserv_opts_str(opts.get(), 2),
+			nzbget_rs_nserv_opts_str(opts.get(), 3), nzbget_rs_nserv_opts_str(opts.get(), 4),
+			nzbget_rs_nserv_opts_int(opts.get(), 2), nzbget_rs_nserv_opts_int(opts.get(), 3),
+			cache.get()));
 		instances.back()->Start();
 	}
 

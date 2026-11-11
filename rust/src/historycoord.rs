@@ -529,10 +529,9 @@ mod tests {
     use crate::diskstate_format::{
         calc_staged_fallback, diskstate_format_file_state_name, diskstate_format_staged_part_path,
         diskstate_select_original_or_current_msg_id, eval_article_load_state,
-        need_staged_file_check, nzbget_rs_diskstate_format_file_info,
-        nzbget_rs_diskstate_format_file_state, parse_ids_file, save_id_floor_file,
-        NzbgetRsDiskArticleInfo, NzbgetRsDiskArticleState, NzbgetRsDiskFileInfoInput,
-        NzbgetRsDiskFileStateInput,
+        format_file_info_bytes, format_file_state_bytes, need_staged_file_check, parse_ids_file,
+        save_id_floor_file, NzbgetRsDiskArticleInfo, NzbgetRsDiskArticleState,
+        NzbgetRsDiskFileInfoInput, NzbgetRsDiskFileStateInput,
     };
     use crate::downloadinfo::is_download_completed;
     use crate::queuecoord::PARTIAL_STATE_COMPLETED;
@@ -668,8 +667,8 @@ mod tests {
                 total_articles: 4,
                 missed_articles: if failed_article { 1 } else { 2 },
             };
-            let finfo_buf = unsafe {
-                nzbget_rs_diskstate_format_file_info(
+            let finfo_bytes = unsafe {
+                format_file_info_bytes(
                     &finfo_in,
                     std::ptr::null(),
                     0,
@@ -678,14 +677,7 @@ mod tests {
                     disk_articles.len(),
                 )
             };
-            let finfo_text = unsafe {
-                String::from_utf8_lossy(std::slice::from_raw_parts(
-                    finfo_buf.data as *const u8,
-                    finfo_buf.len,
-                ))
-                .into_owned()
-            };
-            unsafe { crate::ffi::nzbget_rs_free(finfo_buf) };
+            let finfo_text = String::from_utf8(finfo_bytes).unwrap();
             std::fs::write(queue_dir.join(file_id.to_string()), &finfo_text).unwrap();
 
             assert!(eval_requeue_loaded_file(
@@ -868,8 +860,8 @@ mod tests {
                 decoded_file_size: 12,
                 output_initialized: 0,
             };
-            let state_buf = unsafe {
-                nzbget_rs_diskstate_format_file_state(
+            let state_bytes = unsafe {
+                format_file_state_bytes(
                     &fstate_in,
                     std::ptr::null(),
                     0,
@@ -877,14 +869,7 @@ mod tests {
                     art_states.len(),
                 )
             };
-            let state_text = unsafe {
-                String::from_utf8_lossy(std::slice::from_raw_parts(
-                    state_buf.data as *const u8,
-                    state_buf.len,
-                ))
-                .into_owned()
-            };
-            unsafe { crate::ffi::nzbget_rs_free(state_buf) };
+            let state_text = String::from_utf8(state_bytes).unwrap();
             let state_fname = String::from_utf8(diskstate_format_file_state_name(file_id, false)).unwrap();
             std::fs::write(queue_dir.join(&state_fname), &state_text).unwrap();
 

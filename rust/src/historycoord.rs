@@ -523,6 +523,1910 @@ pub fn split_param_assignment(text: &[u8]) -> Option<(&[u8], &[u8])> {
         .map(|eq| (&text[..eq], &text[eq + 1..]))
 }
 
+// ============================================================================
+// End-to-end `HistoryCoordinator` FFI coordinator (`daemon/queue/HistoryCoordinator.cpp`)
+// ============================================================================
+
+use std::ffi::{c_char, c_int, c_void, CStr};
+
+#[repr(C)]
+pub struct NzbgetRsHistoryCoordEnv {
+    pub ctx: *mut c_void,
+    pub p1: usize,
+    pub p2: usize,
+    pub a1: c_int,
+    pub a2: c_int,
+    pub a3: c_int,
+    pub a4: c_int,
+    pub a5: c_int,
+    pub a6: c_int,
+    pub t1: i64,
+    pub s1: *const c_char,
+    pub int_arr: *const c_int,
+    pub int_len: usize,
+    pub log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
+    pub action_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            c_int,
+            c_int,
+            usize,
+            usize,
+            *const c_char,
+            *const c_char,
+            *mut c_int,
+            *mut i64,
+            *mut *const c_char,
+            *mut u8,
+            usize,
+        ) -> usize,
+    >,
+}
+
+fn hc_cbuf(bytes: &[u8]) -> Vec<u8> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let mut v = Vec::with_capacity(end + 1);
+    v.extend_from_slice(&bytes[..end]);
+    v.push(0);
+    v
+}
+
+unsafe fn hc_cstr_bytes<'a>(p: *const c_char) -> &'a [u8] {
+    if p.is_null() {
+        &[]
+    } else {
+        CStr::from_ptr(p).to_bytes()
+    }
+}
+
+fn hc_bytes_as_cstr(buf: &[u8]) -> &CStr {
+    CStr::from_bytes_with_nul(buf).unwrap_or(c"")
+}
+
+unsafe fn hc_log(env: &NzbgetRsHistoryCoordEnv, level: c_int, msg: &[u8]) {
+    if let Some(cb) = env.log_cb {
+        let c = hc_cbuf(msg);
+        cb(env.ctx, level, c.as_ptr() as *const c_char);
+    }
+}
+
+unsafe fn hc_nzb_msg(
+    env: &NzbgetRsHistoryCoordEnv,
+    nzb_ptr: usize,
+    kind: c_int,
+    msg: &[u8],
+) {
+    if let Some(cb) = env.action_cb {
+        let c = hc_cbuf(msg);
+        cb(
+            env.ctx,
+            4,
+            kind,
+            0,
+            0,
+            nzb_ptr,
+            c.as_ptr() as *const c_char,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+}
+
+unsafe fn hc_delete_disk_files(
+    env: &NzbgetRsHistoryCoordEnv,
+    nzb_ptr: usize,
+    server_mode: bool,
+    nzb_cleanup_disk: bool,
+) {
+    let Some(cb) = env.action_cb else {
+        return;
+    };
+    if nzb_ptr == 0 {
+        return;
+    }
+    if server_mode {
+        cb(
+            env.ctx,
+            0,
+            1,
+            0,
+            0,
+            nzb_ptr,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+    let mut strs: [*const c_char; 1] = [std::ptr::null()];
+    cb(
+        env.ctx,
+        1,
+        0,
+        0,
+        0,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        strs.as_mut_ptr(),
+        std::ptr::null_mut(),
+        0,
+    );
+    if !nzb_cleanup_disk {
+        return;
+    }
+    let queued_fn = hc_cstr_bytes(strs[0]).to_vec();
+    let mut pos = 0usize;
+    while pos <= queued_fn.len() {
+        let Some((ts, te, next_pos)) =
+            crate::util::tokenizer_find_next_token(&queued_fn[pos..], b"|")
+        else {
+            break;
+        };
+        let name1 = &queued_fn[pos + ts..pos + te];
+        pos += next_pos;
+        if crate::fsops::file_exists(name1, &crate::fsops::posix_stat) {
+            let name_c = hc_cbuf(name1);
+            let cstr = hc_bytes_as_cstr(&name_c);
+            let mut msg = b"Deleting file ".to_vec();
+            msg.extend_from_slice(name1);
+            hc_log(env, 2, &msg);
+            crate::fsops::delete_file(cstr);
+        }
+    }
+}
+
+unsafe fn hc_delete_dest_dir_if_present(
+    env: &NzbgetRsHistoryCoordEnv,
+    dest_dir: &[u8],
+    sep: u8,
+    log_level: c_int,
+) {
+    if crate::fsops::directory_exists(dest_dir, &crate::fsops::posix_stat) {
+        let mut msg = b"Deleting ".to_vec();
+        msg.extend_from_slice(dest_dir);
+        hc_log(env, log_level, &msg);
+        let mut err_text = Vec::new();
+        let done = crate::fsdelete::delete_directory_with_content(
+            &mut crate::fsops::PosixFsOps,
+            dest_dir,
+            sep,
+            &mut err_text,
+        )
+        .unwrap_or(false);
+        if !done {
+            let mut em = b"Could not delete directory ".to_vec();
+            em.extend_from_slice(dest_dir);
+            em.extend_from_slice(b": ");
+            let end = err_text
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(err_text.len());
+            em.extend_from_slice(&err_text[..end]);
+            hc_log(env, 4, &em);
+        }
+    }
+}
+
+unsafe fn hc_recheck_failed_articles(
+    env: &NzbgetRsHistoryCoordEnv,
+    dq_ptr: usize,
+    nzb_ptr: usize,
+) {
+    let Some(cb) = env.action_cb else {
+        return;
+    };
+    let mut ints = [0i32; 7];
+    let mut strs: [*const c_char; 2] = [std::ptr::null(); 2];
+    let mut status_buf = [0u8; 64];
+    cb(
+        env.ctx,
+        7,
+        0,
+        0,
+        dq_ptr,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        ints.as_mut_ptr(),
+        std::ptr::null_mut(),
+        strs.as_mut_ptr(),
+        status_buf.as_mut_ptr(),
+        status_buf.len(),
+    );
+    let st_end = status_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(status_buf.len());
+    if !should_recheck_failed_articles(
+        ints[0] == 0,
+        ints[1] == 4,
+        ints[2] == 0,
+        ints[3],
+        &status_buf[..st_end],
+        ints[4] != 0,
+    ) {
+        return;
+    }
+
+    let self_name = hc_cstr_bytes(strs[0]).to_vec();
+    let self_key = hc_cstr_bytes(strs[1]).to_vec();
+    let queue_len = ints[6];
+    for qidx in 0..queue_len {
+        let mut qstrs: [*const c_char; 2] = [std::ptr::null(); 2];
+        cb(
+            env.ctx,
+            8,
+            qidx,
+            0,
+            dq_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            qstrs.as_mut_ptr(),
+            std::ptr::null_mut(),
+            0,
+        );
+        if crate::dupecoord::same_name_or_key(
+            hc_cstr_bytes(qstrs[0]),
+            hc_cstr_bytes(qstrs[1]),
+            &self_name,
+            &self_key,
+        ) {
+            return;
+        }
+    }
+
+    if ints[5] != 0
+        && cb(
+            env.ctx,
+            9,
+            0,
+            0,
+            dq_ptr,
+            nzb_ptr,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+    {
+        return;
+    }
+
+    let mut c_ints = [0i32; 1];
+    let vec_ptr = cb(
+        env.ctx,
+        10,
+        0,
+        0,
+        dq_ptr,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        c_ints.as_mut_ptr(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+    );
+    if vec_ptr == 0 || c_ints[0] < 2 {
+        return;
+    }
+    let idxs = crate::dupeprobe::sample_indexes(c_ints[0] as usize, 10);
+    let mut idx_i32: Vec<c_int> = idxs.into_iter().map(|i| i as c_int).collect();
+    cb(
+        env.ctx,
+        11,
+        0,
+        0,
+        vec_ptr,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        idx_i32.as_mut_ptr(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        idx_i32.len(),
+    );
+}
+
+unsafe fn hc_history_hide(
+    env: &NzbgetRsHistoryCoordEnv,
+    dq_ptr: usize,
+    hist_ptr: usize,
+    rindex: c_int,
+    server_mode: bool,
+    nzb_cleanup_disk: bool,
+) {
+    let Some(cb) = env.action_cb else {
+        return;
+    };
+    let mut ints = [0i32; 3];
+    let mut strs: [*const c_char; 1] = [std::ptr::null()];
+    let nzb_ptr = cb(
+        env.ctx,
+        12,
+        0,
+        0,
+        dq_ptr,
+        hist_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        ints.as_mut_ptr(),
+        std::ptr::null_mut(),
+        strs.as_mut_ptr(),
+        std::ptr::null_mut(),
+        0,
+    );
+    let hist_name = hc_cstr_bytes(strs[0]).to_vec();
+    let dup_status = classify_dup_status(ints[0], ints[1], ints[2] != 0);
+
+    hc_delete_disk_files(env, nzb_ptr, server_mode, nzb_cleanup_disk);
+
+    let mut msg = b"Collection ".to_vec();
+    msg.extend_from_slice(&hist_name);
+    msg.extend_from_slice(b" removed from history");
+    hc_log(env, 2, &msg);
+
+    cb(
+        env.ctx,
+        13,
+        dup_status,
+        rindex,
+        dq_ptr,
+        hist_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+    );
+}
+
+unsafe fn hc_move_to_queue(
+    env: &NzbgetRsHistoryCoordEnv,
+    dq_ptr: usize,
+    hist_ptr: usize,
+    hidx: c_int,
+    nzb_ptr: usize,
+    hist_name: &[u8],
+    reprocess: bool,
+) {
+    let Some(cb) = env.action_cb else {
+        return;
+    };
+    let mut dbg_msg = b"Returning ".to_vec();
+    dbg_msg.extend_from_slice(hist_name);
+    dbg_msg.extend_from_slice(b" from history back to download queue");
+    hc_log(env, 0, &dbg_msg);
+
+    let nicename = hist_name.to_vec();
+
+    let mut ints = [0i32; 6];
+    let mut strs: [*const c_char; 1] = [std::ptr::null()];
+    cb(
+        env.ctx,
+        21,
+        -1,
+        0,
+        0,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        ints.as_mut_ptr(),
+        std::ptr::null_mut(),
+        strs.as_mut_ptr(),
+        std::ptr::null_mut(),
+        0,
+    );
+    let unpack_cleaned_up_disk = ints[0] != 0;
+    let post_total_sec = ints[1];
+    let unpack_sec = ints[2];
+    let par_sec = ints[3];
+    let move_status = ints[4];
+    let file_count = ints[5];
+    let dest_dir = hc_cstr_bytes(strs[0]).to_vec();
+
+    for fidx in 0..file_count {
+        let mut fstrs: [*const c_char; 1] = [std::ptr::null()];
+        cb(
+            env.ctx,
+            21,
+            fidx,
+            0,
+            0,
+            nzb_ptr,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            fstrs.as_mut_ptr(),
+            std::ptr::null_mut(),
+            0,
+        );
+        let mut unpark = b"Unparking file ".to_vec();
+        unpark.extend_from_slice(hc_cstr_bytes(fstrs[0]));
+        hc_nzb_msg(env, nzb_ptr, 1, &unpark);
+    }
+
+    let has_main_pars = if !unpack_cleaned_up_disk {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let p = std::path::Path::new(std::ffi::OsStr::from_bytes(&dest_dir));
+            crate::parparser::find_main_pars(p, false, |_| {})
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    } else {
+        false
+    };
+
+    let (new_post_total_sec, new_move_status) = calc_move_to_queue_reset(
+        unpack_cleaned_up_disk,
+        post_total_sec,
+        unpack_sec,
+        has_main_pars,
+        par_sec,
+        move_status,
+        1,
+        0,
+    );
+    let mut apply_ints = [
+        c_int::from(has_main_pars),
+        new_post_total_sec,
+        new_move_status,
+    ];
+    cb(
+        env.ctx,
+        22,
+        hidx,
+        c_int::from(reprocess),
+        dq_ptr,
+        hist_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        apply_ints.as_mut_ptr(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+    );
+
+    let mut ret_msg = nicename.clone();
+    ret_msg.extend_from_slice(b" returned from history back to download queue");
+    hc_nzb_msg(env, nzb_ptr, 2, &ret_msg);
+
+    if reprocess {
+        let mut rst_msg = b"Restarting postprocessing for ".to_vec();
+        rst_msg.extend_from_slice(&nicename);
+        hc_log(env, 0, &rst_msg);
+        cb(
+            env.ctx,
+            23,
+            0,
+            0,
+            dq_ptr,
+            nzb_ptr,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+}
+
+unsafe fn hc_history_redownload(
+    env: &NzbgetRsHistoryCoordEnv,
+    dq_ptr: usize,
+    hist_ptr: usize,
+    hidx: c_int,
+    kind: c_int,
+    nzb_ptr: usize,
+    hist_name: &[u8],
+    restore_pause_state: bool,
+) {
+    let Some(cb) = env.action_cb else {
+        return;
+    };
+    if kind == 2 {
+        cb(
+            env.ctx,
+            25,
+            hidx,
+            0,
+            dq_ptr,
+            hist_ptr,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+        return;
+    }
+    if kind != 1 {
+        let mut em = b"Could not download again ".to_vec();
+        em.extend_from_slice(hist_name);
+        em.extend_from_slice(b": history item has wrong type");
+        hc_log(env, 4, &em);
+        return;
+    }
+
+    let mut ints = [0i32; 2];
+    let mut strs: [*const c_char; 3] = [std::ptr::null(); 3];
+    cb(
+        env.ctx,
+        26,
+        0,
+        0,
+        0,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        ints.as_mut_ptr(),
+        std::ptr::null_mut(),
+        strs.as_mut_ptr(),
+        std::ptr::null_mut(),
+        0,
+    );
+    let paused = restore_pause_state && ints[0] != 0;
+    let nzb_name = hc_cstr_bytes(strs[0]).to_vec();
+    let queued_fn = hc_cstr_bytes(strs[1]).to_vec();
+    let old_dest_dir = hc_cstr_bytes(strs[2]).to_vec();
+
+    let qf_c = hc_cbuf(&queued_fn);
+    if !crate::fsops::file_exists(&queued_fn, &crate::fsops::posix_stat) {
+        let mut em = b"Could not download again ".to_vec();
+        em.extend_from_slice(&nzb_name);
+        em.extend_from_slice(b": could not find source nzb-file ");
+        em.extend_from_slice(&queued_fn);
+        hc_log(env, 4, &em);
+        return;
+    }
+
+    let new_nzb_ptr = cb(
+        env.ctx,
+        27,
+        0,
+        0,
+        0,
+        0,
+        qf_c.as_ptr() as *const c_char,
+        std::ptr::null(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+    );
+    if new_nzb_ptr == 0 {
+        let mut em = b"Could not download again ".to_vec();
+        em.extend_from_slice(&nzb_name);
+        em.extend_from_slice(b": could not parse nzb-file");
+        hc_log(env, 4, &em);
+        return;
+    }
+
+    let mut info_m = b"Downloading again ".to_vec();
+    info_m.extend_from_slice(&nzb_name);
+    hc_log(env, 2, &info_m);
+
+    let sep = env.a5 as u8;
+    hc_delete_dest_dir_if_present(env, &old_dest_dir, sep, 1);
+
+    let mut dstrs: [*const c_char; 1] = [std::ptr::null()];
+    cb(
+        env.ctx,
+        24,
+        0,
+        0,
+        0,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        dstrs.as_mut_ptr(),
+        std::ptr::null_mut(),
+        0,
+    );
+    let new_dest_dir = hc_cstr_bytes(dstrs[0]).to_vec();
+    hc_delete_dest_dir_if_present(env, &new_dest_dir, sep, 1);
+
+    cb(
+        env.ctx,
+        28,
+        c_int::from(paused),
+        0,
+        new_nzb_ptr,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+    );
+
+    hc_move_to_queue(env, dq_ptr, hist_ptr, hidx, nzb_ptr, hist_name, false);
+
+    cb(
+        env.ctx,
+        23,
+        1,
+        0,
+        dq_ptr,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn hc_history_retry(
+    env: &NzbgetRsHistoryCoordEnv,
+    dq_ptr: usize,
+    hist_ptr: usize,
+    hidx: c_int,
+    kind: c_int,
+    nzb_ptr: usize,
+    hist_name: &[u8],
+    reset_failed: bool,
+    reprocess: bool,
+) {
+    let Some(cb) = env.action_cb else {
+        return;
+    };
+    let (wrong_type, missing_dir, start_msg) = retry_action_labels(reset_failed, reprocess);
+    if kind != 1 {
+        let mut em = b"Could not ".to_vec();
+        em.extend_from_slice(&wrong_type[..wrong_type.len() - 1]);
+        em.extend_from_slice(b" for ");
+        em.extend_from_slice(hist_name);
+        em.extend_from_slice(b": history item has wrong type");
+        hc_log(env, 4, &em);
+        return;
+    }
+
+    let mut ints = [0i32; 2];
+    let mut strs: [*const c_char; 3] = [std::ptr::null(); 3];
+    cb(
+        env.ctx,
+        26,
+        0,
+        0,
+        0,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        ints.as_mut_ptr(),
+        std::ptr::null_mut(),
+        strs.as_mut_ptr(),
+        std::ptr::null_mut(),
+        0,
+    );
+    let nzb_name = hc_cstr_bytes(strs[0]).to_vec();
+    let dest_dir = hc_cstr_bytes(strs[2]).to_vec();
+
+    if !crate::fsops::directory_exists(&dest_dir, &crate::fsops::posix_stat) {
+        let mut em = b"Could not ".to_vec();
+        em.extend_from_slice(&missing_dir[..missing_dir.len() - 1]);
+        em.push(b' ');
+        em.extend_from_slice(hist_name);
+        em.extend_from_slice(b": destination directory ");
+        em.extend_from_slice(&dest_dir);
+        em.extend_from_slice(b" doesn't exist");
+        hc_log(env, 4, &em);
+        return;
+    }
+
+    let mut sm = start_msg[..start_msg.len() - 1].to_vec();
+    sm.push(b' ');
+    sm.extend_from_slice(&nzb_name);
+    hc_nzb_msg(env, nzb_ptr, 2, &sm);
+
+    let sep = env.a5 as u8;
+    let mut requeued: Vec<c_int> = Vec::new();
+    let mut cidx = 0i32;
+
+    loop {
+        let mut cf_ints = [0i32; 2];
+        let mut cf_strs: [*const c_char; 1] = [std::ptr::null()];
+        let exists = cb(
+            env.ctx,
+            3,
+            cidx,
+            0,
+            0,
+            nzb_ptr,
+            std::ptr::null(),
+            std::ptr::null(),
+            cf_ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            cf_strs.as_mut_ptr(),
+            std::ptr::null_mut(),
+            0,
+        );
+        if exists == 0 {
+            break;
+        }
+        let cf_status = cf_ints[0];
+        let cf_id = cf_ints[1];
+        let recorded_name = hc_cstr_bytes(cf_strs[0]).to_vec();
+
+        if cf_status != 1 && (cf_status != 3 || reset_failed) && cf_id > 0 {
+            let mut f_ints = [0i32; 12];
+            let mut f_i64s = [0i64; 9];
+            let mut f_strs: [*const c_char; 1] = [std::ptr::null()];
+            let file_ptr = cb(
+                env.ctx,
+                30,
+                cf_id,
+                cf_status,
+                0,
+                nzb_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                f_ints.as_mut_ptr(),
+                f_i64s.as_mut_ptr(),
+                f_strs.as_mut_ptr(),
+                std::ptr::null_mut(),
+                0,
+            );
+            if file_ptr != 0 {
+                let state_loaded = f_ints[0] != 0;
+                let success_articles = f_ints[1];
+                let cur_partial_state = f_ints[2];
+                let article_count = f_ints[3].max(0) as usize;
+                let is_par_file = f_ints[4] != 0;
+                let total_articles = f_ints[5];
+                let missed_articles = f_ints[6];
+                let mut file_failed_articles = f_ints[7];
+                let mut file_completed_articles = f_ints[8];
+                let mut file_success_articles = f_ints[9];
+                let mut nzb_failed_articles = f_ints[10];
+                let mut nzb_success_articles = f_ints[11];
+
+                let file_size = f_i64s[0];
+                let file_missed_size = f_i64s[1];
+                let mut file_failed_size = f_i64s[2];
+                let mut file_remaining_size = f_i64s[3];
+                let mut file_success_size = f_i64s[4];
+                let mut nzb_failed_size = f_i64s[5];
+                let mut nzb_success_size = f_i64s[6];
+                let mut nzb_par_failed_size = f_i64s[7];
+                let mut nzb_par_success_size = f_i64s[8];
+
+                let cur_filename = hc_cstr_bytes(f_strs[0]).to_vec();
+
+                if eval_requeue_loaded_file(
+                    cf_status,
+                    0,
+                    3,
+                    2,
+                    reset_failed,
+                    state_loaded,
+                    file_remaining_size,
+                ) {
+                    let mut st_sz = vec![0i32; article_count * 2];
+                    if article_count > 0 {
+                        cb(
+                            env.ctx,
+                            32,
+                            0,
+                            0,
+                            0,
+                            file_ptr,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            st_sz.as_mut_ptr(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            article_count,
+                        );
+                    }
+                    let (statuses_slice, sizes_slice) = st_sz.split_at_mut(article_count);
+
+                    let prep = prepare_requeued_loaded_file(
+                        &dest_dir,
+                        sep,
+                        &recorded_name,
+                        &cur_filename,
+                        success_articles,
+                        cur_partial_state,
+                        0,
+                        2,
+                        reprocess,
+                        reset_failed,
+                        statuses_slice,
+                        ARTICLE_UNDEFINED,
+                        ARTICLE_FAILED,
+                        |p| {
+                            let pc = hc_cbuf(p);
+                            crate::fsops::file_size(hc_bytes_as_cstr(&pc))
+                        },
+                        |p| {
+                            let pc = hc_cbuf(p);
+                            crate::fsops::delete_file(hc_bytes_as_cstr(&pc));
+                        },
+                        |p| crate::fsops::file_exists(p, &crate::fsops::posix_stat),
+                    );
+
+                    let effective_filename = if prep.set_recorded_filename {
+                        let rec_c = hc_cbuf(&recorded_name);
+                        cb(
+                            env.ctx,
+                            31,
+                            1,
+                            0,
+                            0,
+                            file_ptr,
+                            rec_c.as_ptr() as *const c_char,
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            0,
+                        );
+                        recorded_name.clone()
+                    } else {
+                        cur_filename
+                    };
+
+                    if prep.warn_missing_on_disk {
+                        let mut wm = b"File ".to_vec();
+                        wm.extend_from_slice(&effective_filename);
+                        wm.extend_from_slice(b" could not be found on disk, downloading again");
+                        hc_nzb_msg(env, nzb_ptr, 3, &wm);
+                    }
+
+                    if prep.no_retryable_articles {
+                        cb(
+                            env.ctx,
+                            31,
+                            0,
+                            0,
+                            0,
+                            file_ptr,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            0,
+                        );
+                        cidx += 1;
+                        continue;
+                    }
+
+                    let mut reset_flags = vec![0u8; article_count];
+                    reset_articles_batch(
+                        cf_status == 3,
+                        reset_failed,
+                        is_par_file,
+                        prep.new_partial_state,
+                        file_size,
+                        file_missed_size,
+                        total_articles,
+                        missed_articles,
+                        &mut file_failed_size,
+                        &mut file_failed_articles,
+                        &mut file_remaining_size,
+                        &mut file_completed_articles,
+                        &mut file_success_size,
+                        &mut file_success_articles,
+                        &mut nzb_failed_size,
+                        &mut nzb_success_size,
+                        &mut nzb_failed_articles,
+                        &mut nzb_success_articles,
+                        &mut nzb_par_failed_size,
+                        &mut nzb_par_success_size,
+                        statuses_slice,
+                        sizes_slice,
+                        &mut reset_flags,
+                    );
+
+                    let mut out_ints = [
+                        file_failed_articles,
+                        file_completed_articles,
+                        file_success_articles,
+                        nzb_failed_articles,
+                        nzb_success_articles,
+                    ];
+                    let mut out_i64s = [
+                        file_failed_size,
+                        file_remaining_size,
+                        file_success_size,
+                        nzb_failed_size,
+                        nzb_success_size,
+                        nzb_par_failed_size,
+                        nzb_par_success_size,
+                    ];
+                    let req_id = cb(
+                        env.ctx,
+                        33,
+                        cidx,
+                        prep.new_partial_state,
+                        file_ptr,
+                        nzb_ptr,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        out_ints.as_mut_ptr(),
+                        out_i64s.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                        reset_flags.as_mut_ptr(),
+                        article_count,
+                    ) as c_int;
+                    requeued.push(req_id);
+                    continue;
+                }
+
+                cb(
+                    env.ctx,
+                    31,
+                    0,
+                    0,
+                    0,
+                    file_ptr,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+        }
+        cidx += 1;
+    }
+
+    let mut fin_i64s = [0i64; 2];
+    cb(
+        env.ctx,
+        34,
+        c_int::from(!reset_failed && !reprocess),
+        0,
+        0,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        requeued.as_mut_ptr(),
+        fin_i64s.as_mut_ptr(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        requeued.len(),
+    );
+    let is_completed = fin_i64s[0] != 0;
+    let nzb_id = fin_i64s[1] as c_int;
+
+    hc_move_to_queue(
+        env,
+        dq_ptr,
+        hist_ptr,
+        hidx,
+        nzb_ptr,
+        hist_name,
+        reprocess || is_completed,
+    );
+
+    if env.a6 != 0 {
+        cb(
+            env.ctx,
+            35,
+            nzb_id,
+            0,
+            dq_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+}
+
+unsafe fn hc_set_parameter(
+    env: &NzbgetRsHistoryCoordEnv,
+    hist_ptr: usize,
+    kind: c_int,
+    nzb_ptr: usize,
+    hist_name: &[u8],
+    text_ptr: *const c_char,
+) -> bool {
+    let Some(cb) = env.action_cb else {
+        return false;
+    };
+    let text = hc_cstr_bytes(text_ptr);
+    let mut dm = b"Setting post-process-parameter '".to_vec();
+    dm.extend_from_slice(text);
+    dm.extend_from_slice(b"' for '");
+    dm.extend_from_slice(hist_name);
+    dm.push(b'\'');
+    hc_log(env, 0, &dm);
+
+    if kind != 1 && kind != 2 {
+        let mut em = b"Could not set post-process-parameter for ".to_vec();
+        em.extend_from_slice(hist_name);
+        em.extend_from_slice(b": history item has wrong type");
+        hc_log(env, 4, &em);
+        return false;
+    }
+
+    if !text_ptr.is_null() {
+        if let Some((name, val)) = split_param_assignment(text) {
+            let k_c = hc_cbuf(name);
+            let v_c = hc_cbuf(val);
+            cb(
+                env.ctx,
+                36,
+                0,
+                0,
+                0,
+                hist_ptr,
+                k_c.as_ptr() as *const c_char,
+                v_c.as_ptr() as *const c_char,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            );
+            return true;
+        }
+    }
+
+    let mut strs: [*const c_char; 3] = [std::ptr::null(); 3];
+    let mut ints = [0i32; 2];
+    cb(
+        env.ctx,
+        26,
+        0,
+        0,
+        0,
+        nzb_ptr,
+        std::ptr::null(),
+        std::ptr::null(),
+        ints.as_mut_ptr(),
+        std::ptr::null_mut(),
+        strs.as_mut_ptr(),
+        std::ptr::null_mut(),
+        0,
+    );
+    let mut em = b"Could not set post-process-parameter for ".to_vec();
+    em.extend_from_slice(hc_cstr_bytes(strs[0]));
+    em.extend_from_slice(b": invalid argument: ");
+    em.extend_from_slice(text);
+    hc_log(env, 4, &em);
+    true
+}
+
+unsafe fn hc_set_category(
+    env: &NzbgetRsHistoryCoordEnv,
+    hist_ptr: usize,
+    kind: c_int,
+    hist_name: &[u8],
+    text_ptr: *const c_char,
+) -> bool {
+    let Some(cb) = env.action_cb else {
+        return false;
+    };
+    let text = hc_cstr_bytes(text_ptr);
+    let mut dm = b"Setting category '".to_vec();
+    dm.extend_from_slice(text);
+    dm.extend_from_slice(b"' for '");
+    dm.extend_from_slice(hist_name);
+    dm.push(b'\'');
+    hc_log(env, 0, &dm);
+
+    if kind != 1 && kind != 2 {
+        let mut em = b"Could not set category for ".to_vec();
+        em.extend_from_slice(hist_name);
+        em.extend_from_slice(b": history item has wrong type");
+        hc_log(env, 4, &em);
+        return false;
+    }
+
+    let t_c = hc_cbuf(text);
+    cb(
+        env.ctx,
+        36,
+        1,
+        0,
+        0,
+        hist_ptr,
+        t_c.as_ptr() as *const c_char,
+        std::ptr::null(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+    );
+    true
+}
+
+unsafe fn hc_set_name(
+    env: &NzbgetRsHistoryCoordEnv,
+    hist_ptr: usize,
+    hist_name: &[u8],
+    text_ptr: *const c_char,
+) -> bool {
+    let Some(cb) = env.action_cb else {
+        return false;
+    };
+    let text = hc_cstr_bytes(text_ptr);
+    let mut dm = b"Setting name '".to_vec();
+    dm.extend_from_slice(text);
+    dm.extend_from_slice(b"' for '");
+    dm.extend_from_slice(hist_name);
+    dm.push(b'\'');
+    hc_log(env, 0, &dm);
+
+    if text.is_empty() {
+        let mut em = b"Could not rename ".to_vec();
+        em.extend_from_slice(hist_name);
+        em.extend_from_slice(b". The new name cannot be empty");
+        hc_log(env, 4, &em);
+        return false;
+    }
+
+    let t_c = hc_cbuf(text);
+    cb(
+        env.ctx,
+        36,
+        2,
+        0,
+        0,
+        hist_ptr,
+        t_c.as_ptr() as *const c_char,
+        std::ptr::null(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        0,
+    );
+    true
+}
+
+unsafe fn hc_set_dupe_param(
+    env: &NzbgetRsHistoryCoordEnv,
+    hist_ptr: usize,
+    kind: c_int,
+    delete_status: c_int,
+    hist_name: &[u8],
+    action: c_int,
+    text_ptr: *const c_char,
+) {
+    let Some(cb) = env.action_cb else {
+        return;
+    };
+    let text = hc_cstr_bytes(text_ptr);
+    let mut dm = format!("Setting dupe-parameter '{action}'='").into_bytes();
+    dm.extend_from_slice(text);
+    dm.extend_from_slice(b"' for '");
+    dm.extend_from_slice(hist_name);
+    dm.push(b'\'');
+    hc_log(env, 0, &dm);
+
+    let mut mode = 0i32;
+    if action == 45 {
+        let Some(parsed) = crate::queueeditor::parse_dupe_mode(text) else {
+            let mut em = b"Could not set duplicate mode for ".to_vec();
+            em.extend_from_slice(hist_name);
+            em.extend_from_slice(b": incorrect mode (");
+            em.extend_from_slice(text);
+            em.push(b')');
+            hc_log(env, 4, &em);
+            return;
+        };
+        mode = parsed;
+    }
+
+    let t_c = hc_cbuf(text);
+    let score = if text_ptr.is_null() {
+        0
+    } else {
+        libc::atoi(t_c.as_ptr() as *const c_char)
+    };
+
+    if kind == 1 || kind == 2 {
+        match action {
+            43 => {
+                cb(
+                    env.ctx,
+                    36,
+                    3,
+                    0,
+                    0,
+                    hist_ptr,
+                    t_c.as_ptr() as *const c_char,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+            44 => {
+                cb(
+                    env.ctx,
+                    36,
+                    4,
+                    score,
+                    0,
+                    hist_ptr,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+            45 => {
+                cb(
+                    env.ctx,
+                    36,
+                    5,
+                    mode,
+                    0,
+                    hist_ptr,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+            46 => {
+                if kind == 2 {
+                    let mut em = b"Could not set duplicate parameter for ".to_vec();
+                    em.extend_from_slice(hist_name);
+                    em.extend_from_slice(b": history item has wrong type");
+                    hc_log(env, 4, &em);
+                    return;
+                }
+                if delete_status != 3 && delete_status != 1 {
+                    let mut em = b"Could not set duplicate parameter for ".to_vec();
+                    em.extend_from_slice(hist_name);
+                    em.extend_from_slice(b": history item has wrong delete status");
+                    hc_log(env, 4, &em);
+                    return;
+                }
+                let new_ds = parse_dupe_backup_flag(text, 3, 1);
+                cb(
+                    env.ctx,
+                    36,
+                    6,
+                    new_ds,
+                    0,
+                    hist_ptr,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+            _ => {}
+        }
+    } else if kind == 3 {
+        match action {
+            43 => {
+                cb(
+                    env.ctx,
+                    36,
+                    7,
+                    0,
+                    0,
+                    hist_ptr,
+                    t_c.as_ptr() as *const c_char,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+            44 => {
+                cb(
+                    env.ctx,
+                    36,
+                    8,
+                    score,
+                    0,
+                    hist_ptr,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+            45 => {
+                cb(
+                    env.ctx,
+                    36,
+                    9,
+                    mode,
+                    0,
+                    hist_ptr,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+            46 => {
+                let mut em = b"Could not set duplicate parameter for ".to_vec();
+                em.extend_from_slice(hist_name);
+                em.extend_from_slice(b": history item has wrong type");
+                hc_log(env, 4, &em);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Executes `HistoryCoordinator` operations (`daemon/queue/HistoryCoordinator.cpp`):
+/// - `0`: `DeleteDiskFiles`
+/// - `1`: `AddToHistory` (+ `RecheckFailedArticles`)
+/// - `2`: `HistoryHide`
+/// - `3`: `ServiceWork`
+/// - `4`: `Redownload`
+/// - `5`: `EditList`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_history_coord_exec(
+    op: c_int,
+    env: *const NzbgetRsHistoryCoordEnv,
+) -> c_int {
+    let Some(e) = env.as_ref() else {
+        return 0;
+    };
+    let Some(cb) = e.action_cb else {
+        return 0;
+    };
+    match op {
+        0 => {
+            hc_delete_disk_files(e, e.p2, e.a1 != 0, e.a2 != 0);
+            1
+        }
+        1 => {
+            let mut ints = [0i32; 6];
+            let mut i64s = [0i64; 2];
+            let mut strs: [*const c_char; 1] = [std::ptr::null()];
+            cb(
+                e.ctx,
+                2,
+                0,
+                0,
+                e.p1,
+                e.p2,
+                std::ptr::null(),
+                std::ptr::null(),
+                ints.as_mut_ptr(),
+                i64s.as_mut_ptr(),
+                strs.as_mut_ptr(),
+                std::ptr::null_mut(),
+                0,
+            );
+            let par_status = ints[0];
+            let unpack_status = ints[1];
+            let delete_status = ints[2];
+            let parking = ints[3];
+            let unpack_cleaned_up = ints[4];
+            let mut completed_count = ints[5];
+            let failed_size = i64s[0];
+            let par_failed_size = i64s[1];
+            let nzb_name = hc_cstr_bytes(strs[0]).to_vec();
+
+            let cleanup = par_status == 3
+                || unpack_status == 3
+                || (par_status == 0 && unpack_status == 0 && (failed_size - par_failed_size) == 0)
+                || (delete_status != 0 && parking == 0)
+                || unpack_cleaned_up != 0;
+            if cleanup {
+                cb(
+                    e.ctx,
+                    0,
+                    0,
+                    0,
+                    0,
+                    e.p2,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+                completed_count = 0;
+            }
+
+            let mut parked_count = 0i32;
+            for cidx in 0..completed_count {
+                let mut cf_ints = [0i32; 2];
+                let mut cf_strs: [*const c_char; 1] = [std::ptr::null()];
+                cb(
+                    e.ctx,
+                    3,
+                    cidx,
+                    0,
+                    0,
+                    e.p2,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    cf_ints.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    cf_strs.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+                let is_last = cidx + 1 == completed_count;
+                if should_park_completed_file(cf_ints[0], 0, 2, is_last) {
+                    let mut pm = b"Parking file ".to_vec();
+                    pm.extend_from_slice(hc_cstr_bytes(cf_strs[0]));
+                    hc_nzb_msg(e, e.p2, 1, &pm);
+                    parked_count += 1;
+                }
+            }
+
+            cb(
+                e.ctx,
+                5,
+                parked_count,
+                0,
+                0,
+                e.p2,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            );
+
+            let mut added = b"Collection ".to_vec();
+            added.extend_from_slice(&nzb_name);
+            added.extend_from_slice(b" added to history");
+            hc_nzb_msg(e, e.p2, 2, &added);
+
+            hc_recheck_failed_articles(e, e.p1, e.p2);
+
+            cb(
+                e.ctx,
+                6,
+                0,
+                0,
+                0,
+                e.p2,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            );
+            1
+        }
+        2 => {
+            hc_history_hide(e, e.p1, e.p2, e.a1, e.a2 != 0, e.a3 != 0);
+            1
+        }
+        3 => {
+            let min_time = calc_min_time(e.t1, e.a1);
+            let dupe_check = e.a2 != 0;
+            let server_mode = e.a3 != 0;
+            let nzb_cleanup_disk = e.a4 != 0;
+            let mut changed = false;
+            let mut rindex = 0i32;
+
+            loop {
+                let mut ints = [0i32; 1];
+                let mut i64s = [0i64; 2];
+                let mut strs: [*const c_char; 1] = [std::ptr::null()];
+                let hist_ptr = cb(
+                    e.ctx,
+                    14,
+                    rindex,
+                    0,
+                    e.p1,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    ints.as_mut_ptr(),
+                    i64s.as_mut_ptr(),
+                    strs.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+                if hist_ptr == 0 {
+                    break;
+                }
+                let act = classify_service_work_item(ints[0], 3, 1, i64s[0], min_time, dupe_check);
+                if act != 0 {
+                    if act == 1 {
+                        hc_history_hide(e, e.p1, hist_ptr, rindex, server_mode, nzb_cleanup_disk);
+                        rindex += 1;
+                    } else {
+                        let hist_name = hc_cstr_bytes(strs[0]).to_vec();
+                        if act == 2 {
+                            hc_delete_disk_files(
+                                e,
+                                i64s[1] as usize,
+                                server_mode,
+                                nzb_cleanup_disk,
+                            );
+                        }
+                        let mut rm = b"Collection ".to_vec();
+                        rm.extend_from_slice(&hist_name);
+                        rm.extend_from_slice(b" removed from history");
+                        hc_log(e, 2, &rm);
+                        cb(
+                            e.ctx,
+                            15,
+                            rindex,
+                            1,
+                            e.p1,
+                            0,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            0,
+                        );
+                    }
+                    changed = true;
+                } else {
+                    rindex += 1;
+                }
+            }
+
+            if changed {
+                cb(
+                    e.ctx,
+                    16,
+                    0,
+                    0,
+                    e.p1,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+            1
+        }
+        4 => {
+            let mut ints = [0i32; 7];
+            let mut i64s = [0i64; 1];
+            let mut strs: [*const c_char; 2] = [std::ptr::null(); 2];
+            let found = cb(
+                e.ctx,
+                18,
+                0,
+                1,
+                e.p1,
+                e.p2,
+                std::ptr::null(),
+                std::ptr::null(),
+                ints.as_mut_ptr(),
+                i64s.as_mut_ptr(),
+                strs.as_mut_ptr(),
+                std::ptr::null_mut(),
+                0,
+            );
+            if found != 0 {
+                let hist_name = hc_cstr_bytes(strs[0]).to_vec();
+                hc_history_redownload(
+                    e,
+                    e.p1,
+                    found,
+                    ints[0],
+                    ints[2],
+                    i64s[0] as usize,
+                    &hist_name,
+                    true,
+                );
+            }
+            1
+        }
+        5 => {
+            let ids = if e.int_arr.is_null() || e.int_len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(e.int_arr, e.int_len)
+            };
+            let action = e.a1;
+            let dupe_check = e.a2 != 0;
+            let server_mode = e.a3 != 0;
+            let nzb_cleanup_disk = e.a4 != 0;
+            let sep = e.a5 as u8;
+
+            if action == 47 {
+                for &id in ids {
+                    cb(
+                        e.ctx,
+                        17,
+                        id,
+                        0,
+                        e.p1,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        0,
+                    );
+                }
+            }
+
+            let mut ok = false;
+            for &id in ids {
+                let mut ints = [0i32; 7];
+                let mut i64s = [0i64; 1];
+                let mut strs: [*const c_char; 2] = [std::ptr::null(); 2];
+                let hist_ptr = cb(
+                    e.ctx,
+                    18,
+                    id,
+                    0,
+                    e.p1,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    ints.as_mut_ptr(),
+                    i64s.as_mut_ptr(),
+                    strs.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+                if hist_ptr == 0 {
+                    continue;
+                }
+                let hidx = ints[0];
+                let hist_len = ints[1];
+                let kind = ints[2];
+                let delete_status = ints[3];
+                let par_status = ints[4];
+                let unpack_status = ints[5];
+                let parked_count = ints[6];
+                let nzb_ptr = i64s[0] as usize;
+                let hist_name = hc_cstr_bytes(strs[0]).to_vec();
+                let dest_dir = hc_cstr_bytes(strs[1]).to_vec();
+
+                let mut done = true;
+                match action {
+                    36 | 37 => {
+                        let is_final = action == 37;
+                        let mut dm = b"Deleting ".to_vec();
+                        dm.extend_from_slice(&hist_name);
+                        dm.extend_from_slice(b" from history");
+                        hc_log(e, 2, &dm);
+
+                        if kind == 1 {
+                            hc_delete_disk_files(e, nzb_ptr, server_mode, nzb_cleanup_disk);
+                            let dir_exists = crate::fsops::directory_exists(
+                                &dest_dir,
+                                &crate::fsops::posix_stat,
+                            );
+                            if should_delete_dest_dir(
+                                true,
+                                delete_status,
+                                0,
+                                par_status,
+                                2,
+                                unpack_status,
+                                2,
+                                5,
+                                dir_exists,
+                            ) {
+                                hc_delete_dest_dir_if_present(e, &dest_dir, sep, 2);
+                            }
+                        }
+
+                        if is_final || !dupe_check || kind == 2 {
+                            cb(
+                                e.ctx,
+                                15,
+                                hidx,
+                                0,
+                                e.p1,
+                                0,
+                                std::ptr::null(),
+                                std::ptr::null(),
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                                0,
+                            );
+                        } else if kind == 1 {
+                            let rindex = hist_len - 1 - hidx;
+                            hc_history_hide(
+                                e,
+                                e.p1,
+                                hist_ptr,
+                                rindex,
+                                server_mode,
+                                nzb_cleanup_disk,
+                            );
+                        }
+                    }
+                    38 => {
+                        if kind == 2 {
+                            hc_history_redownload(
+                                e, e.p1, hist_ptr, hidx, kind, nzb_ptr, &hist_name, false,
+                            );
+                        } else if kind == 1 && parked_count == 0 {
+                            let mut wm = b"Could not download remaining files for ".to_vec();
+                            wm.extend_from_slice(&hist_name);
+                            wm.extend_from_slice(
+                                b": history item does not have any files left for download",
+                            );
+                            hc_log(e, 3, &wm);
+                        } else if kind == 1 {
+                            hc_history_retry(
+                                e, e.p1, hist_ptr, hidx, kind, nzb_ptr, &hist_name, false, false,
+                            );
+                        } else {
+                            let mut em = b"Could not download remaining files for ".to_vec();
+                            em.extend_from_slice(&hist_name);
+                            em.extend_from_slice(b": history item has wrong type");
+                            hc_log(e, 4, &em);
+                        }
+                    }
+                    39 => {
+                        if kind != 1 {
+                            let mut em = b"Could not post-process again ".to_vec();
+                            em.extend_from_slice(&hist_name);
+                            em.extend_from_slice(b": history item has wrong type");
+                            hc_log(e, 4, &em);
+                        } else {
+                            hc_history_retry(
+                                e, e.p1, hist_ptr, hidx, kind, nzb_ptr, &hist_name, false, true,
+                            );
+                        }
+                    }
+                    40 => {
+                        hc_history_redownload(
+                            e, e.p1, hist_ptr, hidx, kind, nzb_ptr, &hist_name, false,
+                        );
+                    }
+                    41 => {
+                        hc_history_retry(
+                            e, e.p1, hist_ptr, hidx, kind, nzb_ptr, &hist_name, true, false,
+                        );
+                    }
+                    42 => {
+                        done = hc_set_parameter(e, hist_ptr, kind, nzb_ptr, &hist_name, e.s1);
+                    }
+                    50 => {
+                        done = hc_set_category(e, hist_ptr, kind, &hist_name, e.s1);
+                    }
+                    51 => {
+                        done = hc_set_name(e, hist_ptr, &hist_name, e.s1);
+                    }
+                    43..=46 => {
+                        hc_set_dupe_param(
+                            e,
+                            hist_ptr,
+                            kind,
+                            delete_status,
+                            &hist_name,
+                            action,
+                            e.s1,
+                        );
+                    }
+                    47..=49 => {
+                        cb(
+                            e.ctx,
+                            19,
+                            action - 46,
+                            0,
+                            e.p1,
+                            hist_ptr,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            0,
+                        );
+                    }
+                    _ => {}
+                }
+                ok = ok || done;
+            }
+
+            if ok {
+                cb(
+                    e.ctx,
+                    16,
+                    0,
+                    0,
+                    e.p1,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+            c_int::from(ok)
+        }
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -984,5 +2888,99 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn history_coord_exec_service_work_hides_and_purges_expired() {
+        struct MockHist {
+            items: Vec<(i32, i64, &'static [u8])>,
+            saved: bool,
+        }
+        unsafe extern "C" fn mock_hc_action(
+            raw: *mut c_void,
+            sub: c_int,
+            a1: c_int,
+            a2: c_int,
+            _p1: usize,
+            p2: usize,
+            _s1: *const c_char,
+            _s2: *const c_char,
+            ints: *mut c_int,
+            i64s: *mut i64,
+            strs: *mut *const c_char,
+            _u8s: *mut u8,
+            _len: usize,
+        ) -> usize {
+            let h = &mut *(raw as *mut MockHist);
+            match sub {
+                12 => {
+                    let it = &h.items[p2 - 1];
+                    let is = std::slice::from_raw_parts_mut(ints, 3);
+                    is[0] = 0;
+                    is[1] = 0;
+                    is[2] = 1;
+                    *strs = it.2.as_ptr() as *const c_char;
+                    0
+                }
+                13 => {
+                    h.items[a2 as usize].0 = 3;
+                    1
+                }
+                14 => {
+                    if (a1 as usize) >= h.items.len() {
+                        return 0;
+                    }
+                    let it = &h.items[a1 as usize];
+                    *ints = it.0;
+                    let ts = std::slice::from_raw_parts_mut(i64s, 2);
+                    ts[0] = it.1;
+                    ts[1] = 0;
+                    *strs = it.2.as_ptr() as *const c_char;
+                    (a1 as usize) + 1
+                }
+                15 => {
+                    h.items.remove(a1 as usize);
+                    1
+                }
+                16 => {
+                    h.saved = true;
+                    1
+                }
+                _ => 0,
+            }
+        }
+
+        unsafe {
+            let mut mock = MockHist {
+                items: vec![
+                    (1, 1_000_000 - 10 * 86_400, b"expired-nzb\0"),
+                    (2, 1_000_000 - 10 * 86_400, b"expired-url\0"),
+                    (1, 1_000_000 - 86_400, b"recent-nzb\0"),
+                ],
+                saved: false,
+            };
+            let env = NzbgetRsHistoryCoordEnv {
+                ctx: (&mut mock as *mut MockHist).cast(),
+                p1: 1,
+                p2: 0,
+                a1: 7,
+                a2: 1,
+                a3: 0,
+                a4: 0,
+                a5: b'/' as c_int,
+                a6: 0,
+                t1: 1_000_000,
+                s1: std::ptr::null(),
+                int_arr: std::ptr::null(),
+                int_len: 0,
+                log_cb: None,
+                action_cb: Some(mock_hc_action),
+            };
+            assert_eq!(nzbget_rs_history_coord_exec(3, &env), 1);
+            assert!(mock.saved);
+            assert_eq!(mock.items.len(), 2);
+            assert_eq!(mock.items[0].0, 3);
+            assert_eq!(mock.items[1].0, 1);
+        }
     }
 }

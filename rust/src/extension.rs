@@ -2985,6 +2985,1163 @@ impl RsExtensionManager {
     }
 }
 
+// ============================================================================
+// End-to-end `QueueScriptCoordinator` & `Maintenance` coordinators
+// ============================================================================
+
+use std::collections::VecDeque;
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[repr(C)]
+pub struct NzbgetRsQueueScriptCoordEnv {
+    pub ctx: *mut c_void,
+    pub p1: usize,
+    pub p2: usize,
+    pub a1: c_int,
+    pub a2: c_int,
+    pub a3: c_int,
+    pub a4: c_int,
+    pub a5: c_int,
+    pub a6: c_int,
+    pub t1: i64,
+    pub t2: i64,
+    pub s1: *const c_char,
+    pub s2: *const c_char,
+    pub s3: *const c_char,
+    pub s4: *const c_char,
+    pub s5: *const c_char,
+    pub s6: *const c_char,
+    pub s7: *const c_char,
+    pub out_i32: *mut c_int,
+    pub drop_script_cb: Option<unsafe extern "C" fn(usize)>,
+    pub action_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            c_int,
+            c_int,
+            usize,
+            usize,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *mut c_int,
+            *mut *const c_char,
+        ) -> usize,
+    >,
+}
+
+struct QueueScriptItem {
+    nzb_id: i32,
+    script_raw_ptr: usize,
+    script_box_ptr: usize,
+    event: i32,
+}
+
+#[derive(Default)]
+struct QueueScriptCoordInner {
+    queue: VecDeque<QueueScriptItem>,
+    cur_item: Option<QueueScriptItem>,
+}
+
+pub struct NzbgetRsQueueScriptCoord {
+    stopped: AtomicBool,
+    has_queue_scripts: AtomicBool,
+    inner: std::sync::Mutex<QueueScriptCoordInner>,
+}
+
+fn cbuf_from_bytes(bytes: &[u8]) -> Vec<u8> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let mut v = Vec::with_capacity(end + 1);
+    v.extend_from_slice(&bytes[..end]);
+    v.push(0);
+    v
+}
+
+unsafe fn opt_cstr_bytes<'a>(p: *const c_char) -> &'a [u8] {
+    if p.is_null() {
+        &[]
+    } else {
+        CStr::from_ptr(p).to_bytes()
+    }
+}
+
+unsafe fn opt_cstr_ref<'a>(p: *const c_char) -> &'a CStr {
+    if p.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(p)
+    }
+}
+
+impl NzbgetRsQueueScriptCoord {
+    fn new() -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+            has_queue_scripts: AtomicBool::new(false),
+            inner: std::sync::Mutex::new(QueueScriptCoordInner::default()),
+        }
+    }
+
+    unsafe fn drop_all(&self, drop_cb: Option<unsafe extern "C" fn(usize)>) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cur) = g.cur_item.take() {
+            if let Some(cb) = drop_cb {
+                cb(cur.script_box_ptr);
+            }
+        }
+        while let Some(item) = g.queue.pop_front() {
+            if let Some(cb) = drop_cb {
+                cb(item.script_box_ptr);
+            }
+        }
+    }
+
+    unsafe fn enqueue_script(&self, env: &NzbgetRsQueueScriptCoordEnv) {
+        if !self.has_queue_scripts.load(Ordering::SeqCst) || env.p1 == 0 || env.a2 != 0 {
+            return;
+        }
+        let Some(cb) = env.action_cb else {
+            return;
+        };
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let event = env.a1;
+        let nzb_id = env.a3;
+
+        if event == 5 {
+            let mut idx = 0usize;
+            while idx < g.queue.len() {
+                if g.queue[idx].nzb_id == nzb_id {
+                    let removed = g.queue.remove(idx).unwrap();
+                    if let Some(drop_cb) = env.drop_script_cb {
+                        drop_cb(removed.script_box_ptr);
+                    }
+                } else {
+                    idx += 1;
+                }
+            }
+        }
+
+        if should_skip_queue_event_interval(event, 0, env.a4, env.t1, env.t2) {
+            return;
+        }
+
+        let script_count = cb(
+            env.ctx,
+            0,
+            0,
+            0,
+            env.p1,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) as i32;
+
+        let resolved_ext = opt_cstr_bytes(env.s1);
+
+        for sidx in 0..script_count {
+            let mut ints = [0i32; 2];
+            let mut strs: [*const c_char; 3] = [std::ptr::null(); 3];
+            let script_raw_ptr = cb(
+                env.ctx,
+                1,
+                sidx,
+                0,
+                env.p1,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                ints.as_mut_ptr(),
+                strs.as_mut_ptr(),
+            );
+            if ints[0] == 0 {
+                continue;
+            }
+            let script_name = opt_cstr_bytes(strs[0]);
+            let queue_events = opt_cstr_bytes(strs[1]);
+            let param_val = opt_cstr_bytes(strs[2]);
+
+            let event_name = if event >= 0 && (event as usize) < QUEUE_EVENT_NAMES.len() {
+                QUEUE_EVENT_NAMES[event as usize]
+            } else {
+                b"UNKNOWN"
+            };
+            if !queue_events.is_empty()
+                && !queue_events.windows(event_name.len()).any(|w| w == event_name)
+            {
+                continue;
+            }
+            let usable = if is_param_enabled_value(param_val) {
+                true
+            } else if event == 1 {
+                ext_is_in_list(resolved_ext, script_name)
+            } else {
+                false
+            };
+            if !usable {
+                continue;
+            }
+
+            let already_queued = event == 0
+                && g.queue
+                    .iter()
+                    .any(|qi| qi.nzb_id == nzb_id && qi.script_raw_ptr == script_raw_ptr);
+
+            if !already_queued {
+                let script_box_ptr = cb(
+                    env.ctx,
+                    2,
+                    sidx,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+                let item = QueueScriptItem {
+                    nzb_id,
+                    script_raw_ptr,
+                    script_box_ptr,
+                    event,
+                };
+                if g.cur_item.is_some() {
+                    g.queue.push_back(item);
+                } else {
+                    g.cur_item = Some(item);
+                    cb(
+                        env.ctx,
+                        3,
+                        event,
+                        0,
+                        env.p1,
+                        script_box_ptr,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    );
+                }
+            }
+
+            cb(
+                env.ctx,
+                4,
+                0,
+                0,
+                env.p1,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+    }
+
+    unsafe fn check_queue(&self, env: &NzbgetRsQueueScriptCoordEnv) {
+        let Some(cb) = env.action_cb else {
+            return;
+        };
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old) = g.cur_item.take() {
+            if let Some(drop_cb) = env.drop_script_cb {
+                drop_cb(old.script_box_ptr);
+            }
+        }
+
+        let mut best_idx: Option<usize> = None;
+        let mut best_nzb: usize = 0;
+        let mut max_event: i32 = 0;
+
+        let mut idx = 0usize;
+        while idx < g.queue.len() {
+            let nzb_id = g.queue[idx].nzb_id;
+            let ev = g.queue[idx].event;
+            let mut ints = [0i32; 2];
+            let nzb_ptr = cb(
+                env.ctx,
+                5,
+                nzb_id,
+                0,
+                env.p1,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                ints.as_mut_ptr(),
+                std::ptr::null_mut(),
+            );
+            if should_ignore_queued_script_event(
+                nzb_ptr != 0,
+                ints[0],
+                0,
+                ints[1],
+                1,
+                ev,
+                6,
+                2,
+            ) {
+                let removed = g.queue.remove(idx).unwrap();
+                if let Some(drop_cb) = env.drop_script_cb {
+                    drop_cb(removed.script_box_ptr);
+                }
+                if best_idx.is_some() {
+                    best_idx = None;
+                    best_nzb = 0;
+                    idx = 0;
+                }
+                continue;
+            }
+            if best_idx.is_none() || ev > max_event {
+                best_idx = Some(idx);
+                best_nzb = nzb_ptr;
+                max_event = ev;
+            }
+            idx += 1;
+        }
+
+        if let Some(bidx) = best_idx {
+            let chosen = g.queue.remove(bidx).unwrap();
+            let box_ptr = chosen.script_box_ptr;
+            let ev = chosen.event;
+            g.cur_item = Some(chosen);
+            cb(
+                env.ctx,
+                3,
+                ev,
+                0,
+                best_nzb,
+                box_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nzbget_rs_queue_script_new() -> *mut NzbgetRsQueueScriptCoord {
+    Box::into_raw(Box::new(NzbgetRsQueueScriptCoord::new()))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_queue_script_free(
+    h: *mut NzbgetRsQueueScriptCoord,
+    drop_script_cb: Option<unsafe extern "C" fn(usize)>,
+) {
+    if !h.is_null() {
+        let boxed = Box::from_raw(h);
+        boxed.drop_all(drop_script_cb);
+    }
+}
+
+/// Executes `QueueScriptCoordinator` / `QueueScriptController` operations:
+/// - `0`: `Stop()`
+/// - `1`: `InitOptions(a1 = has_queue_scripts)`
+/// - `2`: `HasJob(a1 = nzb_id, out_i32 = active)`
+/// - `3`: `GetQueueSize()`
+/// - `4`: `EnqueueScript`
+/// - `5`: `CheckQueue`
+/// - `6`: `IsStopped()`
+/// - `7` (stateless): `QueueScriptController` `ExecuteScript` labels + `PrepareParams`
+/// - `8` (stateless): `QueueScriptController::AddMessage` `[NZB] ` parser & dispatch
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_queue_script_exec(
+    h: *mut NzbgetRsQueueScriptCoord,
+    op: c_int,
+    env: *const NzbgetRsQueueScriptCoordEnv,
+) -> c_int {
+    if op == 7 {
+        let Some(e) = env.as_ref() else {
+            return 0;
+        };
+        let Some(cb) = e.action_cb else {
+            return 0;
+        };
+        let script_name = opt_cstr_bytes(e.s7);
+        let nzb_name = opt_cstr_bytes(e.s1);
+        let base_nzb = &nzb_name[crate::paths::base_file_name(nzb_name)..];
+
+        let mut exec_msg = b"Executing queue-script ".to_vec();
+        exec_msg.extend_from_slice(script_name);
+        exec_msg.extend_from_slice(b" for ");
+        exec_msg.extend_from_slice(base_nzb);
+
+        let mut info_name = b"queue-script ".to_vec();
+        info_name.extend_from_slice(script_name);
+        info_name.extend_from_slice(b" for ");
+        info_name.extend_from_slice(base_nzb);
+        if info_name.len() > 1023 {
+            info_name.truncate(1023);
+        }
+
+        let c_exec = cbuf_from_bytes(&exec_msg);
+        let c_info = cbuf_from_bytes(&info_name);
+        cb(
+            e.ctx,
+            6,
+            c_int::from(e.a4 == 0),
+            0,
+            0,
+            0,
+            c_exec.as_ptr() as *const c_char,
+            c_info.as_ptr() as *const c_char,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+
+        let inp = QueueScriptEnvInput {
+            nzb_name: opt_cstr_ref(e.s1),
+            nzb_id: e.a1,
+            filename: opt_cstr_ref(e.s2),
+            dest_dir: opt_cstr_ref(e.s3),
+            queued_filename: opt_cstr_ref(e.s4),
+            url: opt_cstr_ref(e.s5),
+            category: opt_cstr_ref(e.s6),
+            priority: e.a2,
+            dupe_key: opt_cstr_ref(if e.p1 == 0 {
+                std::ptr::null()
+            } else {
+                e.p1 as *const c_char
+            }),
+            dupe_score: e.a3,
+            dupe_mode: e.a5,
+            event: e.a4,
+            delete_status: e.a6 & 0xff,
+            url_status: (e.a6 >> 8) & 0xff,
+            mark_status: (e.a6 >> 16) & 0xff,
+        };
+        queue_script_prepare_env(
+            &inp,
+            |k, v| {
+                cb(
+                    e.ctx,
+                    7,
+                    0,
+                    0,
+                    0,
+                    0,
+                    k.as_ptr(),
+                    v.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+            },
+            |k, iv| {
+                cb(
+                    e.ctx,
+                    8,
+                    iv,
+                    0,
+                    0,
+                    0,
+                    k.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+            },
+        );
+        return 1;
+    }
+
+    if op == 8 {
+        let Some(e) = env.as_ref() else {
+            return 0;
+        };
+        let Some(cb) = e.action_cb else {
+            return 0;
+        };
+        let full_text = opt_cstr_bytes(e.s1);
+        let pref = (e.a2.max(0) as usize).min(full_text.len());
+        let msg_text = &full_text[pref..];
+        let cmd = parse_queue_script_cmd(msg_text, e.a3, 5);
+        if cmd.kind != 0 {
+            let det = {
+                let mut v = b"Command ".to_vec();
+                v.extend_from_slice(&msg_text[6..]);
+                v.extend_from_slice(b" detected");
+                cbuf_from_bytes(&v)
+            };
+            cb(
+                e.ctx,
+                9,
+                0,
+                0,
+                0,
+                0,
+                det.as_ptr() as *const c_char,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            if cmd.kind > 0 {
+                let key_c = if cmd.kind == 1 {
+                    cbuf_from_bytes(&msg_text[cmd.key_offset..cmd.key_offset + cmd.key_len])
+                } else {
+                    vec![0]
+                };
+                let val_c = if cmd.kind == 1 || cmd.kind == 2 {
+                    cbuf_from_bytes(&msg_text[cmd.val_offset..])
+                } else {
+                    let nzb_name = opt_cstr_bytes(e.s2);
+                    let mut warn_msg = b"Marking ".to_vec();
+                    warn_msg.extend_from_slice(nzb_name);
+                    warn_msg.extend_from_slice(b" as bad");
+                    cbuf_from_bytes(&warn_msg)
+                };
+                cb(
+                    e.ctx,
+                    10,
+                    cmd.kind,
+                    0,
+                    0,
+                    0,
+                    key_c.as_ptr() as *const c_char,
+                    val_c.as_ptr() as *const c_char,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+            } else {
+                let info_name = opt_cstr_bytes(e.s3);
+                let mut err_msg = b"Invalid command \"".to_vec();
+                err_msg.extend_from_slice(msg_text);
+                err_msg.extend_from_slice(b"\" received from ");
+                err_msg.extend_from_slice(info_name);
+                let err_c = cbuf_from_bytes(&err_msg);
+                cb(
+                    e.ctx,
+                    11,
+                    0,
+                    0,
+                    0,
+                    0,
+                    err_c.as_ptr() as *const c_char,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+            }
+            return 1;
+        }
+        return 0;
+    }
+
+    let Some(qs) = h.as_ref() else {
+        return 0;
+    };
+    match op {
+        0 => {
+            qs.stopped.store(true, Ordering::SeqCst);
+            1
+        }
+        1 => {
+            if let Some(e) = env.as_ref() {
+                qs.has_queue_scripts.store(e.a1 != 0, Ordering::SeqCst);
+            }
+            1
+        }
+        2 => {
+            let Some(e) = env.as_ref() else {
+                return 0;
+            };
+            let g = qs.inner.lock().unwrap_or_else(|err| err.into_inner());
+            let active = g.cur_item.as_ref().is_some_and(|it| it.nzb_id == e.a1);
+            if !e.out_i32.is_null() {
+                *e.out_i32 = c_int::from(active);
+            }
+            let working = active || g.queue.iter().any(|it| it.nzb_id == e.a1);
+            c_int::from(working)
+        }
+        3 => {
+            let g = qs.inner.lock().unwrap_or_else(|err| err.into_inner());
+            (g.queue.len() + usize::from(g.cur_item.is_some())) as c_int
+        }
+        4 => {
+            if let Some(e) = env.as_ref() {
+                qs.enqueue_script(e);
+            }
+            1
+        }
+        5 => {
+            if let Some(e) = env.as_ref() {
+                qs.check_queue(e);
+            }
+            1
+        }
+        6 => c_int::from(qs.stopped.load(Ordering::SeqCst)),
+        _ => 0,
+    }
+}
+
+// --- Maintenance coordinator ---
+
+#[repr(C)]
+pub struct NzbgetRsMaintenanceEnv {
+    pub ctx: *mut c_void,
+    pub p1: usize,
+    pub a1: c_int,
+    pub a2: c_int,
+    pub a3: c_int,
+    pub a4: c_int,
+    pub t1: i64,
+    pub s1: *const c_char,
+    pub s2: *const c_char,
+    pub s3: *const c_char,
+    pub out_buf: *mut crate::ffi::RsBuf,
+    pub emit_ctx: *mut c_void,
+    pub emit_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn>,
+    pub log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
+    pub action_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            c_int,
+            usize,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            *const u8,
+            usize,
+        ) -> usize,
+    >,
+}
+
+struct MaintMessage {
+    id: u32,
+    kind: c_int,
+    time: c_int,
+    text: Vec<u8>,
+}
+
+pub struct NzbgetRsMaintenance {
+    messages: std::sync::Mutex<(u32, Vec<MaintMessage>)>,
+    controller_ptr: std::sync::Mutex<usize>,
+}
+
+fn format_maint_script_prefix(
+    is_info_script: bool,
+    base_script: &[u8],
+    max_prefix_len: usize,
+) -> (Vec<u8>, Vec<u8>, i32) {
+    let mut info_name = if is_info_script {
+        b"update-info-script ".to_vec()
+    } else {
+        b"update-script ".to_vec()
+    };
+    info_name.extend_from_slice(base_script);
+
+    let bounded_len = base_script.len().min(max_prefix_len);
+    let mut log_prefix = base_script[..bounded_len].to_vec();
+    if let Some(dot) = log_prefix.iter().rposition(|&b| b == b'.') {
+        log_prefix.truncate(dot);
+    }
+    let prefix_len = (log_prefix.len() + 2) as i32;
+    (info_name, log_prefix, prefix_len)
+}
+
+unsafe fn emit_maint_log(env: &NzbgetRsMaintenanceEnv, level: c_int, msg: &[u8]) {
+    if let Some(cb) = env.log_cb {
+        let c = cbuf_from_bytes(msg);
+        cb(env.ctx, level, c.as_ptr() as *const c_char);
+    }
+}
+
+unsafe fn read_pkg_info_logged(
+    env: &NzbgetRsMaintenanceEnv,
+    web_dir: &[u8],
+    sep: u8,
+    key: &[u8],
+) -> Option<Vec<u8>> {
+    match maintenance_read_package_info_str(web_dir, sep, key) {
+        Ok(val) => Some(val),
+        Err((err_kind, fn_bytes)) => {
+            let mut m = if err_kind == 1 {
+                b"Could not load file ".to_vec()
+            } else {
+                b"Could not parse file ".to_vec()
+            };
+            m.extend_from_slice(&fn_bytes);
+            emit_maint_log(env, 4, &m);
+            None
+        }
+    }
+}
+
+impl NzbgetRsMaintenance {
+    fn new() -> Self {
+        Self {
+            messages: std::sync::Mutex::new((0, Vec::new())),
+            controller_ptr: std::sync::Mutex::new(0),
+        }
+    }
+
+    fn add_message(&self, kind: c_int, mut time: i64, text: &[u8]) {
+        if time == 0 {
+            #[cfg(unix)]
+            unsafe {
+                time = libc::time(std::ptr::null_mut()) as i64;
+            }
+        }
+        let mut g = self.messages.lock().unwrap_or_else(|e| e.into_inner());
+        g.0 = g.0.wrapping_add(1);
+        let id = g.0;
+        g.1.push(MaintMessage {
+            id,
+            kind,
+            time: time as c_int,
+            text: cbuf_from_bytes(text),
+        });
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nzbget_rs_maintenance_new() -> *mut NzbgetRsMaintenance {
+    Box::into_raw(Box::new(NzbgetRsMaintenance::new()))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_maintenance_free(h: *mut NzbgetRsMaintenance) {
+    if !h.is_null() {
+        drop(Box::from_raw(h));
+    }
+}
+
+/// Executes `Maintenance` operations:
+/// - `0`: `~Maintenance()` detach & wait loop
+/// - `1`: `ResetUpdateController()`
+/// - `2`: `AddMessage(a1 = kind, t1 = time, s1 = text)`
+/// - `3`: `CollectMessages(a3 = id_from, a4 = nr_entries)` -> `emit_cb`
+/// - `4`: `StartUpdate(a1 = branch, a2 = sep, s1 = web_dir, s2 = app_dir)`
+/// - `5`: `CheckUpdates(a2 = sep, s1 = web_dir, out_buf)`
+/// - `6`: `UpdateScriptController::Run` env & prefix setup (or `a4 == 1` `InfoController::AddMessage`)
+/// - `7`: `UpdateScriptController::AddMessage` (`a1 = kind, a2 = prefix_len, s1 = text`)
+/// - `8` (stateless): `VerifySignature(s1 = in, s2 = sig, s3 = pubkey)`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_maintenance_exec(
+    h: *mut NzbgetRsMaintenance,
+    op: c_int,
+    env: *const NzbgetRsMaintenanceEnv,
+) -> c_int {
+    if op == 8 {
+        let Some(e) = env.as_ref() else {
+            return 0;
+        };
+        let Some(cb) = e.action_cb else {
+            return 0;
+        };
+        let Some((in_hash, sig, pub_key)) = maintenance_prepare_signature_inputs(
+            opt_cstr_bytes(e.s1),
+            opt_cstr_bytes(e.s2),
+            opt_cstr_bytes(e.s3),
+        ) else {
+            return 0;
+        };
+        let r = cb(
+            e.ctx,
+            6,
+            0,
+            0,
+            in_hash.as_ptr() as *const c_char,
+            sig.as_ptr() as *const c_char,
+            std::ptr::null(),
+            pub_key.as_ptr(),
+            pub_key.len(),
+        );
+        return c_int::from(r != 0);
+    }
+
+    let Some(m) = h.as_ref() else {
+        return 0;
+    };
+    match op {
+        0 => {
+            let mut wait = false;
+            {
+                let g = m.controller_ptr.lock().unwrap_or_else(|err| err.into_inner());
+                if *g != 0 {
+                    if let Some(e) = env.as_ref() {
+                        if let Some(cb) = e.action_cb {
+                            cb(
+                                e.ctx,
+                                0,
+                                0,
+                                *g,
+                                std::ptr::null(),
+                                std::ptr::null(),
+                                std::ptr::null(),
+                                std::ptr::null(),
+                                0,
+                            );
+                        }
+                    }
+                    wait = true;
+                }
+            }
+            if wait {
+                loop {
+                    let cur = *m.controller_ptr.lock().unwrap_or_else(|err| err.into_inner());
+                    if cur == 0 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+            1
+        }
+        1 => {
+            *m.controller_ptr.lock().unwrap_or_else(|err| err.into_inner()) = 0;
+            1
+        }
+        2 => {
+            if let Some(e) = env.as_ref() {
+                m.add_message(e.a1, e.t1, opt_cstr_bytes(e.s1));
+            }
+            1
+        }
+        3 => {
+            let Some(e) = env.as_ref() else {
+                return 0;
+            };
+            let Some(emit) = e.emit_cb else {
+                return 0;
+            };
+            let g = m.messages.lock().unwrap_or_else(|err| err.into_inner());
+            let list = &g.1;
+            let len = list.len() as i32;
+            let mut start = len;
+            if e.a4 > 0 {
+                start = len - e.a4.min(len);
+            }
+            if e.a3 > 0 && !list.is_empty() {
+                start = (e.a3 - list[0].id as i32).max(0);
+            }
+            let mut entries = Vec::new();
+            if (start as usize) < list.len() {
+                entries.reserve(list.len() - start as usize);
+                for msg in &list[start as usize..] {
+                    entries.push(crate::xmlrpc_format::NzbgetRsRpcLogEntry {
+                        id: msg.id as c_int,
+                        kind: msg.kind,
+                        time: msg.time,
+                        text: msg.text.as_ptr() as *const c_char,
+                    });
+                }
+            }
+            emit(
+                e.emit_ctx,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                entries.as_ptr() as *const c_void,
+                entries.len(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+            1
+        }
+        4 => {
+            let Some(e) = env.as_ref() else {
+                return 0;
+            };
+            let Some(cb) = e.action_cb else {
+                return 0;
+            };
+            let mut ctrl = m.controller_ptr.lock().unwrap_or_else(|err| err.into_inner());
+            if *ctrl != 0 {
+                emit_maint_log(
+                    e,
+                    4,
+                    b"Could not start update-script: update-script is already running",
+                );
+                return 0;
+            }
+            let sep = e.a2 as u8;
+            let Some(mut script_path) =
+                read_pkg_info_logged(e, opt_cstr_bytes(e.s1), sep, b"install-script")
+            else {
+                return 0;
+            };
+            if script_path.first().copied() != Some(sep) {
+                let app_dir = opt_cstr_bytes(e.s2);
+                let mut full = Vec::with_capacity(app_dir.len() + 1 + script_path.len());
+                full.extend_from_slice(app_dir);
+                full.push(sep);
+                full.extend_from_slice(&script_path);
+                script_path = full;
+            }
+            {
+                let mut mg = m.messages.lock().unwrap_or_else(|err| err.into_inner());
+                mg.1.clear();
+            }
+            let script_c = cbuf_from_bytes(&script_path);
+            let created_ptr = cb(
+                e.ctx,
+                1,
+                e.a1,
+                0,
+                script_c.as_ptr() as *const c_char,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            );
+            *ctrl = created_ptr;
+            cb(
+                e.ctx,
+                2,
+                0,
+                created_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            );
+            1
+        }
+        5 => {
+            let Some(e) = env.as_ref() else {
+                return 0;
+            };
+            let Some(cb) = e.action_cb else {
+                return 0;
+            };
+            let sep = e.a2 as u8;
+            let Some(info_script) =
+                read_pkg_info_logged(e, opt_cstr_bytes(e.s1), sep, b"update-info-script")
+            else {
+                return 0;
+            };
+            let base = &info_script[crate::paths::base_file_name(&info_script)..];
+            let mut det = b"Executing update-info-script ".to_vec();
+            det.extend_from_slice(base);
+            emit_maint_log(e, 1, &det);
+
+            let (info_name, log_prefix, prefix_len) = format_maint_script_prefix(true, base, 1023);
+            let c_script = cbuf_from_bytes(&info_script);
+            let c_info = cbuf_from_bytes(&info_name);
+            let c_pref = cbuf_from_bytes(&log_prefix);
+
+            let mut acc: Vec<u8> = Vec::new();
+            cb(
+                e.ctx,
+                3,
+                prefix_len,
+                (&mut acc as *mut Vec<u8>) as usize,
+                c_script.as_ptr() as *const c_char,
+                c_info.as_ptr() as *const c_char,
+                c_pref.as_ptr() as *const c_char,
+                std::ptr::null(),
+                0,
+            );
+            if acc.is_empty() {
+                return 0;
+            }
+            if !e.out_buf.is_null() {
+                *e.out_buf = crate::ffi::into_buf(acc);
+            }
+            1
+        }
+        6 => {
+            let Some(e) = env.as_ref() else {
+                return 0;
+            };
+            let Some(cb) = e.action_cb else {
+                return 0;
+            };
+            if e.a4 == 1 {
+                let full_text = opt_cstr_bytes(e.s1);
+                let pref = (e.a2.max(0) as usize).min(full_text.len());
+                let text = &full_text[pref..];
+                if text.starts_with(b"[NZB] ") {
+                    let mut dm = b"Command ".to_vec();
+                    dm.extend_from_slice(&text[6..]);
+                    dm.extend_from_slice(b" detected");
+                    emit_maint_log(e, 0, &dm);
+                    if text[6..].starts_with(b"[UPDATEINFO]") {
+                        let acc = &mut *(e.p1 as *mut Vec<u8>);
+                        acc.extend_from_slice(&text[18..]);
+                    } else {
+                        let info_nm = opt_cstr_bytes(e.s2);
+                        let mut em = b"Invalid command \"".to_vec();
+                        em.extend_from_slice(text);
+                        em.extend_from_slice(b"\" received from ");
+                        em.extend_from_slice(info_nm);
+                        emit_maint_log(e, 4, &em);
+                    }
+                    return 1;
+                }
+                let sliced_c = cbuf_from_bytes(text);
+                cb(
+                    e.ctx,
+                    7,
+                    e.a1,
+                    0,
+                    sliced_c.as_ptr() as *const c_char,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                );
+                return 1;
+            }
+
+            let script_bytes = opt_cstr_bytes(e.s1);
+            let base = &script_bytes[crate::paths::base_file_name(script_bytes)..];
+            let mut exec_msg = b"Executing update-script ".to_vec();
+            exec_msg.extend_from_slice(script_bytes);
+            let (info_name, log_prefix, prefix_len) = format_maint_script_prefix(false, base, 99);
+            let c_exec = cbuf_from_bytes(&exec_msg);
+            let c_info = cbuf_from_bytes(&info_name);
+            let c_pref = cbuf_from_bytes(&log_prefix);
+
+            let branch_c: &CStr = match e.a1 {
+                1 => c"TESTING",
+                2 => c"DEVEL",
+                _ => c"STABLE",
+            };
+            let runmode_c: &CStr = if e.a2 != 0 { c"DAEMON" } else { c"SERVER" };
+
+            cb(
+                e.ctx,
+                4,
+                prefix_len,
+                0,
+                c_exec.as_ptr() as *const c_char,
+                c_info.as_ptr() as *const c_char,
+                c_pref.as_ptr() as *const c_char,
+                std::ptr::null(),
+                0,
+            );
+            cb(
+                e.ctx,
+                5,
+                0,
+                0,
+                c"NZBUP_BRANCH".as_ptr(),
+                branch_c.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            );
+            cb(
+                e.ctx,
+                5,
+                0,
+                0,
+                c"NZBUP_RUNMODE".as_ptr(),
+                runmode_c.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            );
+            #[cfg(unix)]
+            let pid = libc::getpid();
+            #[cfg(not(unix))]
+            let pid = std::process::id() as c_int;
+            let pid_s = format!("{pid}\0");
+            cb(
+                e.ctx,
+                5,
+                0,
+                0,
+                c"NZBUP_PROCESSID".as_ptr(),
+                pid_s.as_ptr() as *const c_char,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            );
+            prefix_len
+        }
+        7 => {
+            let Some(e) = env.as_ref() else {
+                return 0;
+            };
+            let Some(cb) = e.action_cb else {
+                return 0;
+            };
+            let full_text = opt_cstr_bytes(e.s1);
+            let pref = (e.a2.max(0) as usize).min(full_text.len());
+            let text = &full_text[pref..];
+            if text.starts_with(b"[NZB] ") {
+                let mut dm = b"Command ".to_vec();
+                dm.extend_from_slice(&text[6..]);
+                dm.extend_from_slice(b" detected");
+                emit_maint_log(e, 0, &dm);
+                if &text[6..] == b"QUIT" {
+                    cb(
+                        e.ctx,
+                        8,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        0,
+                    );
+                } else {
+                    let mut em = b"Invalid command \"".to_vec();
+                    em.extend_from_slice(text);
+                    em.extend_from_slice(b"\" received");
+                    emit_maint_log(e, 4, &em);
+                }
+                return 1;
+            }
+            m.add_message(e.a1, 0, text);
+            let sliced_c = cbuf_from_bytes(text);
+            cb(
+                e.ctx,
+                7,
+                e.a1,
+                0,
+                sliced_c.as_ptr() as *const c_char,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            );
+            1
+        }
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4121,5 +5278,173 @@ mod tests {
         .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(val, b"https://example.com/update.sh");
+    }
+
+    #[test]
+    fn queue_script_and_maintenance_exec_lifecycle() {
+        static DROPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        unsafe extern "C" fn mock_drop(ptr: usize) {
+            DROPPED.fetch_add(ptr, Ordering::SeqCst);
+        }
+        unsafe extern "C" fn mock_qs_action(
+            _ctx: *mut c_void,
+            sub: c_int,
+            _a1: c_int,
+            _a2: c_int,
+            _p1: usize,
+            _p2: usize,
+            _s1: *const c_char,
+            _s2: *const c_char,
+            _s3: *const c_char,
+            ints: *mut c_int,
+            strs: *mut *const c_char,
+        ) -> usize {
+            match sub {
+                0 => 1,
+                1 => {
+                    let is = std::slice::from_raw_parts_mut(ints, 2);
+                    is[0] = 1;
+                    is[1] = 0;
+                    let ss = std::slice::from_raw_parts_mut(strs, 3);
+                    ss[0] = c"qs.py".as_ptr();
+                    ss[1] = c"NZB_ADDED".as_ptr();
+                    ss[2] = c"yes".as_ptr();
+                    77
+                }
+                2 => 84,
+                _ => 0,
+            }
+        }
+        unsafe extern "C" fn mock_maint_emit(
+            emit_ctx: *mut c_void,
+            sub: c_int,
+            _a1: c_int,
+            _a2: c_int,
+            _a3: c_int,
+            _a4: c_int,
+            _a5: c_int,
+            _a6: c_int,
+            _i1: i64,
+            _i2: i64,
+            _i3: i64,
+            _s1: *const c_char,
+            _s2: *const c_char,
+            _s3: *const c_char,
+            _s4: *const c_char,
+            ptr1: *const c_void,
+            len1: usize,
+            _ptr2: *const c_void,
+            _len2: usize,
+            _ptr3: *const c_void,
+            _len3: usize,
+            _ptr4: *const c_void,
+            _len4: usize,
+        ) {
+            assert_eq!(sub, 2);
+            let out = &mut *(emit_ctx as *mut Vec<(i32, i32, Vec<u8>)>);
+            let slice =
+                std::slice::from_raw_parts(ptr1 as *const crate::xmlrpc_format::NzbgetRsRpcLogEntry, len1);
+            for e in slice {
+                let b = CStr::from_ptr(e.text).to_bytes().to_vec();
+                out.push((e.id, e.kind, b));
+            }
+        }
+
+        unsafe {
+            DROPPED.store(0, Ordering::SeqCst);
+            let qs = nzbget_rs_queue_script_new();
+            assert!(!qs.is_null());
+            let mut qs_env = NzbgetRsQueueScriptCoordEnv {
+                ctx: std::ptr::null_mut(),
+                p1: 42,
+                p2: 84,
+                a1: 100,
+                a2: 1,
+                a3: 0,
+                a4: 0,
+                a5: 0,
+                a6: 0,
+                t1: 0,
+                t2: 0,
+                s1: std::ptr::null(),
+                s2: std::ptr::null(),
+                s3: std::ptr::null(),
+                s4: std::ptr::null(),
+                s5: std::ptr::null(),
+                s6: std::ptr::null(),
+                s7: std::ptr::null(),
+                out_i32: std::ptr::null_mut(),
+                drop_script_cb: Some(mock_drop),
+                action_cb: Some(mock_qs_action),
+            };
+            assert_eq!(nzbget_rs_queue_script_exec(qs, 1, &qs_env), 1);
+            qs_env.a1 = 3;
+            qs_env.a2 = 0;
+            qs_env.a3 = 100;
+            assert_eq!(nzbget_rs_queue_script_exec(qs, 4, &qs_env), 1);
+            assert_eq!(nzbget_rs_queue_script_exec(qs, 3, std::ptr::null()), 1);
+            let mut active = 0i32;
+            qs_env.a1 = 100;
+            qs_env.out_i32 = &mut active;
+            assert_eq!(nzbget_rs_queue_script_exec(qs, 2, &qs_env), 1);
+            assert_eq!(active, 1);
+            assert_eq!(nzbget_rs_queue_script_exec(qs, 6, std::ptr::null()), 0);
+            assert_eq!(nzbget_rs_queue_script_exec(qs, 0, std::ptr::null()), 1);
+            assert_eq!(nzbget_rs_queue_script_exec(qs, 6, std::ptr::null()), 1);
+            nzbget_rs_queue_script_free(qs, Some(mock_drop));
+            assert_eq!(DROPPED.load(Ordering::SeqCst), 84);
+
+            let m = nzbget_rs_maintenance_new();
+            assert!(!m.is_null());
+            unsafe extern "C" fn mock_maint_action(
+                _ctx: *mut c_void,
+                _sub: c_int,
+                _a1: c_int,
+                _p1: usize,
+                _s1: *const c_char,
+                _s2: *const c_char,
+                _s3: *const c_char,
+                _bytes: *const u8,
+                _len: usize,
+            ) -> usize {
+                1
+            }
+            let m1 = b"first line\0";
+            let m2 = b"upd: second line\0";
+            let mut menv = NzbgetRsMaintenanceEnv {
+                ctx: std::ptr::null_mut(),
+                p1: 0,
+                a1: 0,
+                a2: 0,
+                a3: 0,
+                a4: 0,
+                t1: 1000,
+                s1: m1.as_ptr() as *const c_char,
+                s2: std::ptr::null(),
+                s3: std::ptr::null(),
+                out_buf: std::ptr::null_mut(),
+                emit_ctx: std::ptr::null_mut(),
+                emit_cb: None,
+                log_cb: None,
+                action_cb: Some(mock_maint_action),
+            };
+            assert_eq!(nzbget_rs_maintenance_exec(m, 2, &menv), 1);
+            menv.a1 = 1;
+            menv.a2 = 5;
+            menv.s1 = m2.as_ptr() as *const c_char;
+            assert_eq!(nzbget_rs_maintenance_exec(m, 7, &menv), 1);
+
+            let mut collected: Vec<(i32, i32, Vec<u8>)> = Vec::new();
+            menv.a3 = 0;
+            menv.a4 = 10;
+            menv.emit_ctx = (&mut collected as *mut Vec<(i32, i32, Vec<u8>)>).cast();
+            menv.emit_cb = Some(mock_maint_emit);
+            assert_eq!(nzbget_rs_maintenance_exec(m, 3, &menv), 1);
+            assert_eq!(collected.len(), 2);
+            assert_eq!(collected[0], (1, 0, b"first line".to_vec()));
+            assert_eq!(collected[1], (2, 1, b"second line".to_vec()));
+
+            nzbget_rs_maintenance_free(m);
+        }
     }
 }

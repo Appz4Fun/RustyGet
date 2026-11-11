@@ -154,10 +154,18 @@ char* (*g_Arguments)[] = nullptr;
 extern void ExitProc();
 extern void Reload();
 
-static int SigOp(int sub)
+static void DaemonGlobalLogCb(int level, const char* msg)
 {
-	return nzbget_rs_daemon_service_op(8, sub, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+	const char* s = msg ? msg : "";
+	if (level == 0) debug("%s", s);
+	else if (level == 1) detail("%s", s);
+	else if (level == 2) info("%s", s);
+	else if (level == 3) warn("%s", s);
+	else if (level == 4) error("%s", s);
 }
+
+static void DaemonLogCb(void*, int level, const char* msg) { DaemonGlobalLogCb(level, msg); }
+static int DaemonReloadCb(int sub);
 
 #ifdef DEBUG
 static void TestSegFault()
@@ -170,61 +178,32 @@ static void TestSegFault()
 class DiskService : public Service, public Observer
 {
 public:
-	DiskService()
-	{
-		g_WorkState->Attach(this);
-	}
+	DiskService() { g_WorkState->Attach(this); }
 
 protected:
 	int ServiceInterval() override
 	{
-		return m_waitingRequiredDir ? 1 :
-			g_Options->GetDiskSpace() > 0 && g_WorkState->GetDownloading() ? 1 :
-			Service::Sleep;
+		NzbgetRsDaemonEnv env{};
+		env.a1 = g_Options->GetDiskSpace();
+		env.a2 = g_WorkState->GetDownloading() ? 1 : 0;
+		return nzbget_rs_daemon_exec(0, &env);
 	}
 
 	void ServiceWork() override
 	{
-		debug("Disk service work");
-
-		if (g_Options->GetDiskSpace() > 0 && g_WorkState->GetDownloading())
-		{
-			debug("Disk service work: check disk space");
-			int destLow = 0, interLow = 0;
-			nzbget_rs_daemon_service_op(2, g_Options->GetDiskSpace(), 0, 0, 0, 0,
-				g_Options->GetDestDir(), g_Options->GetInterDir(), &destLow, &interLow, nullptr, nullptr);
-			if (destLow)
-			{
-				warn("Low disk space on %s. Pausing download", g_Options->GetDestDir());
-				g_WorkState->SetPauseDownload(true);
-			}
-			if (interLow)
-			{
-				warn("Low disk space on %s. Pausing download", g_Options->GetInterDir());
-				g_WorkState->SetPauseDownload(true);
-			}
-		}
-
-		if (m_waitingRequiredDir)
-		{
-			debug("Disk service work: check required dir");
-			int nextReported = m_waitingReported ? 1 : 0;
-			if (!nzbget_rs_daemon_service_op(3, m_waitingReported ? 1 : 0, 0, 0, 0, 0,
-				g_Options->GetRequiredDir(), nullptr, &nextReported, nullptr, nullptr,
-				[](void*, const char* dir) { info("Waiting for required directory %s", dir); }))
-			{
-				m_waitingReported = nextReported != 0;
-				return;
-			}
-
-			if (m_waitingReported)
-			{
-				info("All required directories available");
-			}
-			g_WorkState->SetTempPauseDownload(false);
-			g_WorkState->SetTempPausePostprocess(false);
-			m_waitingRequiredDir = false;
-		}
+		NzbgetRsDaemonEnv env{};
+		env.a1 = g_Options->GetDiskSpace();
+		env.a2 = g_WorkState->GetDownloading() ? 1 : 0;
+		env.s1 = g_Options->GetDestDir();
+		env.s2 = g_Options->GetInterDir();
+		env.s3 = g_Options->GetRequiredDir();
+		env.log_cb = DaemonLogCb;
+		env.action_cb = +[](void*, int sub, int, const char*, const char*) -> int {
+			if (sub == 0) g_WorkState->SetPauseDownload(true);
+			else if (sub == 1) { g_WorkState->SetTempPauseDownload(false); g_WorkState->SetTempPausePostprocess(false); }
+			return 0;
+		};
+		nzbget_rs_daemon_exec(1, &env);
 	}
 
 	void Update(Subject* caller, void* aspect) override
@@ -232,36 +211,32 @@ protected:
 		(void)caller; (void)aspect;
 		WakeUp();
 	}
-
-private:
-	bool m_waitingRequiredDir = true;
-	bool m_waitingReported = false;
 };
-
-// the daemon holds the lock on the lock-file: only then is it ours to delete
-// at shutdown. Not a member: a reload makes a new NZBGet without daemonizing,
-// and a second daemon that fails to get the lock must leave it in place.
-static bool g_LockFileOwned = false;
 
 class RustyGet final : public Options::Extender
 {
 public:
-	~RustyGet() override
-	{
-		Cleanup();
-	}
+	~RustyGet() override { Cleanup(); }
 
-	bool GetReloading() { return m_reloading; }
-	bool GetStopped() const { return m_stopped; }
+	bool GetReloading() const
+	{
+		NzbgetRsDaemonEnv env{};
+		env.a1 = 0;
+		return nzbget_rs_daemon_exec(3, &env) != 0;
+	}
 
 	int Phase1_Init(bool reload)
 	{
-		m_reloading = reload;
+		{
+			NzbgetRsDaemonEnv rst{};
+			rst.a1 = reload ? 1 : 0;
+			nzbget_rs_daemon_exec(2, &rst);
+		}
 		m_log = std::make_unique<Log>();
 
 		debug("RustyGet %s", Util::VersionRevision());
 
-		if (!m_reloading)
+		if (!reload)
 		{
 			Connection::Init();
 #ifndef DISABLE_TLS
@@ -270,20 +245,19 @@ public:
 		}
 
 		CreateGlobals();
-
 		BootConfig();
 
-		if (m_memoryMonitor)
+		if (m_memoryMonitor) m_memoryMonitor->InitOptions();
+
 		{
-			m_memoryMonitor->InitOptions();
-		}
-
-		FileSystem::uMask = static_cast<mode_t>(nzbget_rs_daemon_service_op(
-			7, m_options->GetUMask(), 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr));
-
+			NzbgetRsDaemonEnv uenv{};
+			uenv.a1 = m_options->GetUMask();
 #ifdef DEBUG
-		debug("Using %o umask", FileSystem::uMask);
+			uenv.a2 = 1;
 #endif
+			uenv.log_cb = DaemonLogCb;
+			FileSystem::uMask = static_cast<mode_t>(nzbget_rs_daemon_exec(4, &uenv));
+		}
 
 		m_scanner->InitOptions();
 		m_queueScriptCoordinator->InitOptions();
@@ -296,83 +270,30 @@ public:
 		if (g_Options->GetServerMode() && g_Options->GetSystemHealthCheck())
 		{
 			m_systemHealth = std::make_unique<SystemHealth::Service>(
-				*g_Options,
-				*g_ServerPool->GetServers(),
-				*g_FeedCoordinator,
-				m_scheduler->GetTasks(),
-				*g_Log);
+				*g_Options, *g_ServerPool->GetServers(), *g_FeedCoordinator, *m_scheduler, *g_Log);
 			g_SystemHealth = m_systemHealth.get();
-
 			m_systemHealth->DiagnoseAndLog();
 		}
 
-		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 5))
-		{
-			if (!m_reloading)
-			{
-				int f = fork();
-				if (f < 0) exit(1); /* fork error */
-				if (f > 0) exit(0); /* parent exits */
-
-				/* child (daemon) continues */
-				setsid();
-
-				int owned = 0, truncFailed = 0;
-				int err = nzbget_rs_daemon_service_op(1, 0, 0, 0, 0, 0,
-					m_options->GetLockFile(), m_options->GetDaemonUsername(), &owned, &truncFailed, nullptr, nullptr);
-				if (err != 0)
-				{
-					const char* msg = err == 1 ? "could not create lock-file %s" :
-						err == 2 ? "lock-file %s is not a regular file" :
-						err == 3 ? "could not acquire lock on lock-file %s" :
-						err == 4 ? "invalid DaemonUsername" : "could not drop privileges";
-					error("%s", *(err <= 3 ? BString<1024>("Starting daemon failed: %s", *BString<1024>(msg, m_options->GetLockFile()))
-						: BString<1024>("Starting daemon failed: %s", msg)));
-					exit(1);
-				}
-				g_LockFileOwned = owned != 0;
-				if (truncFailed)
-				{
-					warn("Could not truncate lock-file %s", m_options->GetLockFile());
-				}
-			}
-			info("RustyGet %s daemon-mode", Util::VersionRevision());
-		}
-		else if (m_options->GetServerMode())
-		{
-			info("RustyGet %s server-mode", Util::VersionRevision());
-		}
-		else if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6))
-		{
-			info("RustyGet %s remote-mode", Util::VersionRevision());
-		}
-
-		if (m_options->GetServerMode())
-		{
-			info("using %s", m_options->GetConfigFilename());
-			info("RustyGet runs on %s:%i", m_options->GetControlIp(), m_options->GetControlPort());
-		}
-
+		NzbgetRsDaemonEnv act{};
+		act.ctx = this;
+		act.a1 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 5);
+		act.a2 = m_options->GetServerMode() ? 1 : 0;
+		act.a3 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6);
+		act.a4 = g_Options->GetCrashDump() ? 1 : 0;
 #ifdef DEBUG
-		std::stringstream ss;
-		ss << *m_systemInfo;
-		std::string line;
-		while (std::getline(ss, line))
-		{
-			detail("%s", line.c_str());
-		}
+		act.a5 = g_Options->GetCrashTrace() ? 1 : 0;
 #endif
-
-		m_reloading = false;
-
-		int crashTrace = 0;
-#ifdef DEBUG
-		crashTrace = g_Options->GetCrashTrace() ? 1 : 0;
-#endif
-		nzbget_rs_daemon_service_op(0, g_Options->GetCrashDump() ? 1 : 0, crashTrace, 0, 0, 0,
-			nullptr, nullptr, nullptr, nullptr, nullptr, [](void*, const char* m) { error("%s", m); });
-
-		return 0;
+		act.a6 = m_options->GetControlPort();
+		act.s1 = Util::VersionRevision();
+		act.s2 = m_options->GetLockFile();
+		act.s3 = m_options->GetDaemonUsername();
+		act.s4 = m_options->GetConfigFilename();
+		act.s5 = m_options->GetControlIp();
+		act.segv_cb = +[](void*, const char* m) { error("%s", m); };
+		act.log_cb = DaemonLogCb;
+		act.action_cb = &RustyGet::DaemonActionCb;
+		return nzbget_rs_daemon_exec(5, &act);
 	}
 
 	int Phase2_SubsystemsAndState(bool reload)
@@ -391,67 +312,31 @@ public:
 		StartRemoteServer();
 		StartFrontend();
 
-		if (!nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6))
-		{
-			if (!nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 4) && !SigOp(0))
-			{
-				const char* rawCat = nzbget_rs_cmdline_get_str(m_cmdLine.get(), 34);
-				const char* category = rawCat ? rawCat : "";
-				const char* argFilename = nzbget_rs_cmdline_get_str(m_cmdLine.get(), 36);
-				NzbFile nzbFile(argFilename, category);
-				if (!nzbFile.Parse())
-				{
-					printf("Parsing NZB-document %s failed\n\n", argFilename ? argFilename : "N/A");
-				}
-				else
-				{
-					std::unique_ptr<NzbInfo> nzbInfo = nzbFile.DetachNzbInfo();
-					if (!nzbFile.GetPassword().empty())
-					{
-						nzbInfo->GetParameters()->SetParameter("*Unpack:Password", nzbFile.GetPassword().c_str());
-					}
-					m_scanner->InitPPParameters(category, nzbInfo->GetParameters(), false);
-					m_queueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), nullptr, false);
-				}
-			}
-
-			DoMainLoop();
-		}
-		else
-		{
-			if (SigOp(1))
-			{
-				ExitProc();
-			}
-			while (m_frontend && !m_stopped && !m_reloading && m_frontend->IsRunning())
-			{
-				if (SigOp(1))
-				{
-					ExitProc();
-				}
-				else if (SigOp(2))
-				{
-					Reload();
-				}
-				Util::Sleep(50);
-			}
-		}
-
-		return 0;
+		NzbgetRsDaemonEnv env{};
+		env.ctx = this;
+		env.a1 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6);
+		env.a2 = m_options->GetServerMode() ? 1 : 0;
+		env.a3 = !nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 4) ? 1 : 0;
+		env.s1 = nzbget_rs_cmdline_get_str(m_cmdLine.get(), 34);
+		env.s2 = nzbget_rs_cmdline_get_str(m_cmdLine.get(), 36);
+		env.global_log_cb = DaemonGlobalLogCb;
+		env.reload_cb = DaemonReloadCb;
+		env.log_cb = DaemonLogCb;
+		env.action_cb = &RustyGet::DaemonActionCb;
+		return nzbget_rs_daemon_exec(7, &env);
 	}
 
 	void Phase4_Shutdown(bool reload)
 	{
-		m_reloading = reload;
-		nzbget_rs_lifecycle_reload_op(2, nullptr);
-		ScriptController::TerminateAll();
-
-		StopRemoteServer();
-		StopFrontend();
-		nzbget_rs_lifecycle_reload_op(2, nullptr);
+		NzbgetRsDaemonEnv env{};
+		env.ctx = this;
+		env.a1 = reload ? 1 : 0;
+		env.a2 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6);
+		env.action_cb = &RustyGet::DaemonActionCb;
+		nzbget_rs_daemon_exec(11, &env);
 
 		TlsCipherBackend::Shutdown();
-		if (!m_reloading)
+		if (!GetReloading())
 		{
 #ifndef DISABLE_TLS
 			TlsSocket::Final();
@@ -467,73 +352,13 @@ public:
 
 	void Stop(bool reload)
 	{
-		if (!reload)
-		{
-			nzbget_rs_lifecycle_reload_op(1, nullptr);
-			SigOp(5);
-		}
-
-		{
-			std::lock_guard<std::mutex> guard(m_waitMutex);
-			if (m_stopped && !m_reloading && reload)
-			{
-				debug("Ignoring reload request because shutdown is already in progress");
-				return;
-			}
-			m_reloading = reload;
-		}
-
-		if (!m_reloading)
-		{
-			SigOp(3);
-			info("Stopping, please wait...");
-		}
-
-		if (m_reloading && m_prePostProcessor && m_prePostProcessor->HasActiveUnpack(false))
-		{
-			info("Waiting for active unpack to complete before in-process reload...");
-			while (m_prePostProcessor && m_prePostProcessor->HasActiveUnpack(false) && !SigOp(0))
-			{
-				Util::Sleep(100);
-			}
-		}
-		if (SigOp(1))
-		{
-			m_reloading = false;
-			SigOp(5);
-		}
-		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6))
-		{
-			if (m_frontend)
-			{
-				debug("Stopping Frontend");
-				m_frontend->Stop();
-			}
-		}
-		else
-		{
-			if (m_queueCoordinator)
-			{
-				debug("Stopping QueueCoordinator");
-				m_serviceCoordinator->Stop();
-				m_queueCoordinator->Stop();
-				m_urlCoordinator->Stop();
-				m_dupeSearch->Stop();
-				m_prePostProcessor->Stop();
-				m_feedCoordinator->Stop();
-				m_articleCache->Stop();
-				if (m_memoryMonitor)
-				{
-					m_memoryMonitor->Stop();
-				}
-				m_queueScriptCoordinator->Stop();
-			}
-		}
-
-		// trigger stop/reload signal
-		std::lock_guard<std::mutex> guard(m_waitMutex);
-		m_stopped = true;
-		m_waitCond.notify_all();
+		NzbgetRsDaemonEnv env{};
+		env.ctx = this;
+		env.a1 = reload ? 1 : 0;
+		env.a2 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6);
+		env.log_cb = DaemonLogCb;
+		env.action_cb = &RustyGet::DaemonActionCb;
+		nzbget_rs_daemon_exec(8, &env);
 	}
 
 	// Options::Extender
@@ -558,8 +383,7 @@ public:
 	void AddTask(int id, int hours, int minutes, int weekDaysBits,
 		Options::ESchedulerCommand command, const char* param) override
 	{
-		m_scheduler->AddTask(std::make_unique<Scheduler::Task>(id, hours, minutes, weekDaysBits,
-			(Scheduler::ECommand)command, param));
+		m_scheduler->AddTask(id, hours, minutes, weekDaysBits, (Scheduler::ECommand)command, param);
 	}
 
 private:
@@ -597,11 +421,6 @@ private:
 	std::unique_ptr<DiskService> m_diskService;
 	std::unique_ptr<Scheduler> m_scheduler;
 	std::unique_ptr<NzbgetRsCmdline, decltype(&nzbget_rs_cmdline_free)> m_cmdLine{nullptr, nzbget_rs_cmdline_free};
-
-	bool m_reloading = false;
-	bool m_stopped = false;
-	std::mutex m_waitMutex;
-	std::condition_variable m_waitCond;
 
 	void CreateGlobals()
 	{
@@ -761,13 +580,11 @@ private:
 
 	void Cleanup()
 	{
-		debug("Cleaning up global objects");
-
-		if (m_options && !m_reloading && g_LockFileOwned)
-		{
-			info("Deleting lock file");
-			FileSystem::DeleteFile(m_options->GetLockFile());
-		}
+		NzbgetRsDaemonEnv env{};
+		env.a1 = m_options ? 1 : 0;
+		env.s1 = m_options ? m_options->GetLockFile() : nullptr;
+		env.log_cb = DaemonLogCb;
+		nzbget_rs_daemon_exec(12, &env);
 
 		g_UrlCoordinator = nullptr;
 		g_DupeSearch = nullptr;
@@ -855,10 +672,7 @@ private:
 
 	void StartRemoteServer()
 	{
-		if (!m_options->GetServerMode())
-		{
-			return;
-		}
+		if (!m_options->GetServerMode()) return;
 
 		NzbgetRsWebServeEnv webInit{};
 		webInit.log_cb = [](void*, int, const char* m) { error("%s", m); };
@@ -866,8 +680,10 @@ private:
 		m_remoteServer = std::make_unique<RemoteServer>(false);
 		m_remoteServer->Start();
 
-		if (nzbget_rs_daemon_service_op(4, m_options->GetSecureControl() ? 1 : 0, 0, 0, 0, 0,
-			m_options->GetControlIp(), nullptr, nullptr, nullptr, nullptr, nullptr))
+		NzbgetRsDaemonEnv senv{};
+		senv.a1 = m_options->GetSecureControl() ? 1 : 0;
+		senv.s1 = m_options->GetControlIp();
+		if (nzbget_rs_daemon_exec(6, &senv))
 		{
 			m_remoteSecureServer = std::make_unique<RemoteServer>(true);
 			m_remoteSecureServer->Start();
@@ -876,24 +692,13 @@ private:
 
 	void StopRemoteServer()
 	{
-		if (m_remoteServer)
-		{
-			debug("stopping RemoteServer");
-			m_remoteServer->Stop();
-		}
-
-		if (m_remoteSecureServer)
-		{
-			debug("stopping RemoteSecureServer");
-			m_remoteSecureServer->Stop();
-		}
-
+		if (m_remoteServer) { debug("stopping RemoteServer"); m_remoteServer->Stop(); }
+		if (m_remoteSecureServer) { debug("stopping RemoteSecureServer"); m_remoteSecureServer->Stop(); }
 		while ((m_remoteServer && m_remoteServer->IsRunning()) ||
 			(m_remoteSecureServer && m_remoteSecureServer->IsRunning()))
 		{
 			Util::Sleep(50);
 		}
-
 		debug("RemoteServer stopped");
 	}
 
@@ -908,164 +713,132 @@ private:
 				m_frontend = std::make_unique<Frontend>(2);
 				break;
 #endif
-
 			case Options::omColored:
 				m_frontend = std::make_unique<Frontend>(1);
 				break;
-
 			case Options::omLoggable:
 				m_frontend = std::make_unique<Frontend>(0);
 				break;
 			}
 		}
-
-		if (m_frontend)
-		{
-			m_frontend->Start();
-		}
+		if (m_frontend) m_frontend->Start();
 	}
 
-	void StopFrontend()
+	static int DaemonActionCb(void* raw, int sub, int a2, const char* s1, const char* s2)
 	{
-		if (m_frontend)
+		auto* self = static_cast<RustyGet*>(raw);
+		switch (sub)
 		{
-			if (!nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6) || m_stopped)
-			{
-				debug("Stopping Frontend");
-				m_frontend->Stop();
-			}
-			while (m_frontend->IsRunning())
-			{
-				if (SigOp(1))
-				{
-					ExitProc();
-				}
-				Util::Sleep(50);
-			}
-			debug("Frontend stopped");
+		case 2: {
+#ifdef DEBUG
+			std::stringstream ss;
+			ss << *self->m_systemInfo;
+			std::string line;
+			while (std::getline(ss, line)) detail("%s", line.c_str());
+#endif
+			return 0;
 		}
-	}
-
-	void DoMainLoop()
-	{
-		debug("Entering main program loop");
-
-		m_queueCoordinator->Start();
-		m_urlCoordinator->Start();
-		m_dupeSearch->Start();
-		m_prePostProcessor->Start();
-		m_feedCoordinator->Start();
-		m_serviceCoordinator->Start();
-		if (m_options->GetArticleCache() > 0)
-		{
-			m_articleCache->Start();
+		case 3:
+			return (self->m_frontend && self->m_frontend->IsRunning()) ? 1 : 0;
+		case 4:
+			self->m_queueCoordinator->Start();
+			self->m_urlCoordinator->Start();
+			self->m_dupeSearch->Start();
+			self->m_prePostProcessor->Start();
+			self->m_feedCoordinator->Start();
+			self->m_serviceCoordinator->Start();
+			if (self->m_options->GetArticleCache() > 0) self->m_articleCache->Start();
+			if (self->m_memoryMonitor) self->m_memoryMonitor->Start();
+			return 0;
+		case 5:
+			if (a2 == 0)
+				return (self->m_queueCoordinator->IsRunning() || self->m_urlCoordinator->IsRunning() ||
+					self->m_dupeSearch->IsRunning() || self->m_prePostProcessor->IsRunning() ||
+					self->m_feedCoordinator->IsRunning() || self->m_serviceCoordinator->IsRunning() ||
+					(self->m_memoryMonitor && self->m_memoryMonitor->IsRunning()) || self->m_articleCache->IsRunning()) ? 1 : 0;
+			return (self->m_queueCoordinator->HasMoreJobs() ? 1 : 0) |
+				(self->m_urlCoordinator->HasMoreJobs() ? 2 : 0) |
+				(self->m_prePostProcessor->HasMoreJobs() ? 4 : 0);
+		case 6:
+			if (!self->m_queueCoordinator->IsStopped()) self->m_queueCoordinator->Stop();
+			if (!self->m_urlCoordinator->IsStopped()) self->m_urlCoordinator->Stop();
+			if (!self->m_dupeSearch->IsStopped()) self->m_dupeSearch->Stop();
+			if (!self->m_prePostProcessor->IsStopped()) self->m_prePostProcessor->Stop();
+			if (!self->m_feedCoordinator->IsStopped()) self->m_feedCoordinator->Stop();
+			if (!self->m_articleCache->IsStopped()) self->m_articleCache->Stop();
+			if (self->m_memoryMonitor && !self->m_memoryMonitor->IsStopped()) self->m_memoryMonitor->Stop();
+			if (!self->m_serviceCoordinator->IsStopped()) self->m_serviceCoordinator->Stop();
+			return 0;
+		case 7:
+			return (self->m_prePostProcessor && self->m_prePostProcessor->HasActiveUnpack(false)) ? 1 : 0;
+		case 8:
+			if (a2 != 0)
+			{
+				if (self->m_frontend) { debug("Stopping Frontend"); self->m_frontend->Stop(); }
+			}
+			else if (self->m_queueCoordinator)
+			{
+				debug("Stopping QueueCoordinator");
+				self->m_serviceCoordinator->Stop();
+				self->m_queueCoordinator->Stop();
+				self->m_urlCoordinator->Stop();
+				self->m_dupeSearch->Stop();
+				self->m_prePostProcessor->Stop();
+				self->m_feedCoordinator->Stop();
+				self->m_articleCache->Stop();
+				if (self->m_memoryMonitor) self->m_memoryMonitor->Stop();
+				self->m_queueScriptCoordinator->Stop();
+			}
+			return 0;
+		case 10:
+			ExitProc();
+			return 0;
+		case 11: {
+			const char* cat = s1 ? s1 : "";
+			NzbFile nzbFile(s2, cat);
+			if (!nzbFile.Parse()) printf("Parsing NZB-document %s failed\n\n", s2 ? s2 : "N/A");
+			else
+			{
+				std::unique_ptr<NzbInfo> nzbInfo = nzbFile.DetachNzbInfo();
+				if (!nzbFile.GetPassword().empty())
+					nzbInfo->GetParameters()->SetParameter("*Unpack:Password", nzbFile.GetPassword().c_str());
+				self->m_scanner->InitPPParameters(cat, nzbInfo->GetParameters(), false);
+				self->m_queueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), nullptr, false);
+			}
+			return 0;
 		}
-		if (m_memoryMonitor)
-		{
-			m_memoryMonitor->Start();
+		case 12:
+			ScriptController::TerminateAll();
+			self->StopRemoteServer();
+			if (self->m_frontend)
+			{
+				if (a2 != 0) { debug("Stopping Frontend"); self->m_frontend->Stop(); }
+				while (self->m_frontend->IsRunning())
+				{
+					NzbgetRsDaemonEnv q{};
+					q.a1 = 2;
+					q.a2 = 1;
+					if (nzbget_rs_daemon_exec(3, &q)) ExitProc();
+					Util::Sleep(50);
+				}
+				debug("Frontend stopped");
+			}
+			return 0;
+		default:
+			return 0;
 		}
-
-		// enter main program-loop
-		while (m_queueCoordinator->IsRunning() ||
-			m_urlCoordinator->IsRunning() ||
-			m_dupeSearch->IsRunning() ||
-			m_prePostProcessor->IsRunning() ||
-			m_feedCoordinator->IsRunning() ||
-			m_serviceCoordinator->IsRunning() ||
-			(m_memoryMonitor && m_memoryMonitor->IsRunning()) ||
-			m_articleCache->IsRunning())
-		{
-			if (SigOp(1))
-			{
-				ExitProc();
-			}
-			else if (SigOp(2))
-			{
-				Reload();
-			}
-
-			if (nzbget_rs_daemon_service_op(5, m_options->GetServerMode() ? 1 : 0,
-				m_queueCoordinator->HasMoreJobs() ? 1 : 0, m_urlCoordinator->HasMoreJobs() ? 1 : 0,
-				m_prePostProcessor->HasMoreJobs() ? 1 : 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr))
-			{
-				// Standalone-mode: download completed
-				if (!m_queueCoordinator->IsStopped())
-				{
-					m_queueCoordinator->Stop();
-				}
-				if (!m_urlCoordinator->IsStopped())
-				{
-					m_urlCoordinator->Stop();
-				}
-				if (!m_dupeSearch->IsStopped())
-				{
-					m_dupeSearch->Stop();
-				}
-				if (!m_prePostProcessor->IsStopped())
-				{
-					m_prePostProcessor->Stop();
-				}
-				if (!m_feedCoordinator->IsStopped())
-				{
-					m_feedCoordinator->Stop();
-				}
-				if (!m_articleCache->IsStopped())
-				{
-					m_articleCache->Stop();
-				}
-				if (m_memoryMonitor && !m_memoryMonitor->IsStopped())
-				{
-					m_memoryMonitor->Stop();
-				}
-				if (!m_serviceCoordinator->IsStopped())
-				{
-					m_serviceCoordinator->Stop();
-				}
-			}
-			Util::Sleep(100);
-
-			if (m_options->GetServerMode() && !m_stopped)
-			{
-				// wait for stop signal or pending POSIX signal
-				while (!m_stopped)
-				{
-					{
-						std::unique_lock<std::mutex> lk(m_waitMutex);
-						m_waitCond.wait_for(lk, std::chrono::milliseconds(50), [&]{
-							return m_stopped || SigOp(4);
-						});
-					}
-
-					if (SigOp(1))
-					{
-						ExitProc();
-					}
-					else if (SigOp(2))
-					{
-						Reload();
-					}
-				}
-			}
-		}
-
-		debug("Main program loop terminated");
 	}
 
 	void ProcessClientRequest()
 	{
-		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 7) == 0)
-		{
-			return;
-		}
+		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 7) == 0) return;
 		bool ok = nzbget_rs_cmdline_run_client(
 			m_cmdLine.get(),
 			m_options->GetControlIp(),
 			m_options->GetControlPort(),
 			m_options->GetControlUsername(),
 			m_options->GetControlPassword(),
-			[](void*, const char* ptr, size_t len) {
-				if (ptr && len > 0) fwrite(ptr, 1, len, stdout);
-			},
+			[](void*, const char* ptr, size_t len) { if (ptr && len > 0) fwrite(ptr, 1, len, stdout); },
 			[](void*, const char* msg) { ::perror(msg); },
 			nullptr) != 0;
 		exit(ok ? 0 : 1);
@@ -1074,54 +847,28 @@ private:
 
 std::unique_ptr<RustyGet> g_RustyGet;
 
+static int DaemonReloadCb(int sub)
+{
+	if (sub == 0) return (g_RustyGet ? 1 : 0) | ((g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack(false)) ? 2 : 0);
+	if (sub == 1 && g_RustyGet) g_RustyGet->Stop(true);
+	else if (sub == 3 && g_RustyGet) g_RustyGet->Stop(false);
+	return 0;
+}
+
 void Reload()
 {
-	nzbget_rs_lifecycle_reload_op(0, [](int action) -> int {
-		switch (action)
-		{
-			case 0:
-				return (!g_RustyGet || g_RustyGet->GetReloading() || g_RustyGet->GetStopped() || SigOp(0)) ? 1 : 0;
-			case 1:
-				debug("Daemon is already reloading or stopping");
-				return 0;
-			case 2:
-				debug("Reload request debounced, target extended");
-				return 0;
-			case 3:
-				return SigOp(0);
-			case 4:
-				return ((g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack(false)) ? 1 : 0) |
-					((!g_RustyGet || g_RustyGet->GetReloading()) ? 2 : 0);
-			case 5:
-				info("Unpack is actively executing; deferring reload until unpack completes...");
-				return 0;
-			case 6:
-				return SigOp(1);
-			case 7:
-				ExitProc();
-				return 0;
-			case 8:
-				if (g_RustyGet && !g_RustyGet->GetReloading())
-				{
-					info("Reloading...");
-					g_RustyGet->Stop(true);
-				}
-				return 0;
-			default:
-				return 0;
-		}
-	});
+	NzbgetRsDaemonEnv env{};
+	env.global_log_cb = DaemonGlobalLogCb;
+	env.reload_cb = DaemonReloadCb;
+	nzbget_rs_daemon_exec(9, &env);
 }
 
 void ExitProc()
 {
-	nzbget_rs_lifecycle_reload_op(1, nullptr);
-	SigOp(5);
-
-	if (g_RustyGet)
-	{
-		g_RustyGet->Stop(false);
-	}
+	NzbgetRsDaemonEnv env{};
+	env.global_log_cb = DaemonGlobalLogCb;
+	env.reload_cb = DaemonReloadCb;
+	nzbget_rs_daemon_exec(10, &env);
 }
 
 extern "C" {

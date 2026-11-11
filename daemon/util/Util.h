@@ -722,7 +722,6 @@ public:
 			}
 		}
 	}
-	bool Empty() const { return m_length == 0; }
 	void Clear()
 	{
 		free(m_data);
@@ -827,26 +826,6 @@ public:
 		}
 		nzbget_rs_free(buf);
 		return out;
-	}
-
-	static std::vector<CString> SplitCommandLine(const char* commandLine)
-	{
-		NzbgetRsBuf words = nzbget_rs_split_command_line(commandLine);
-		std::vector<CString> result;
-		try
-		{
-			for (size_t i = 0; i < words.len; i += strlen(words.data + i) + 1)
-			{
-				result.emplace_back(words.data + i);
-			}
-		}
-		catch (...)
-		{
-			nzbget_rs_free(words);
-			throw;
-		}
-		nzbget_rs_free(words);
-		return result;
 	}
 
 	static bool EmptyStr(const char* str) { return !str || !*str; }
@@ -15052,7 +15031,6 @@ public:
 		bool Dead() const { return Finished && IsDead(Existing, MissingServers, ActiveServers); }
 	};
 
-	static constexpr int RecheckSampleCount = 10;
 	static constexpr int RecheckLimitSec = 60;
 
 	static std::vector<size_t> SampleIndexes(size_t total, int count)
@@ -15575,305 +15553,60 @@ private:
 class HistoryCoordinator : public Service
 {
 public:
+	static_assert(DownloadQueue::eaHistoryDelete == 36 && DownloadQueue::eaHistorySetName == 51);
+	static_assert(HistoryInfo::hkNzb == 1 && HistoryInfo::hkUrl == 2 && HistoryInfo::hkDup == 3);
+
 	void DeleteDiskFiles(NzbInfo* nzbInfo)
 	{
-		if (g_Options->GetServerMode())
-		{
-			// delete parked files
-			g_DiskState->DiscardFiles(nzbInfo);
-		}
-		nzbInfo->GetFileList()->clear();
-
-		// delete nzb-file
-		if (!g_Options->GetNzbCleanupDisk())
-		{
-			return;
-		}
-
-		// QueuedFile may contain one filename or several filenames separated
-		// with "|"-character (for merged groups)
-		const char* filename = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
-		Tokenizer tok(filename, "|");
-		while (const char* name1 = tok.Next())
-		{
-			if (FileSystem::FileExists(name1))
-			{
-				info("Deleting file %s", name1);
-				FileSystem::DeleteFile(name1);
-			}
-		}
+		NzbgetRsHistoryCoordEnv env = BaseEnv();
+		env.p2 = reinterpret_cast<uintptr_t>(nzbInfo);
+		env.a1 = g_Options->GetServerMode() ? 1 : 0;
+		env.a2 = g_Options->GetNzbCleanupDisk() ? 1 : 0;
+		nzbget_rs_history_coord_exec(0, &env);
 	}
 
 	void AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	{
-		// catch-all for every path into history: a still-attached live
-		// stream-repair thread (option <DupeArticleFallback> value "live") could
-		// never find this collection by id again (the pass searches the QUEUE),
-		// so it would self-destruct and leave this slot a dangling pointer
-		if (nzbInfo->GetLiveRepairThread())
-		{
-			Thread* liveRepairThread = nzbInfo->GetLiveRepairThread();
-			nzbInfo->SetLiveRepairThread(nullptr);
-			liveRepairThread->Stop();
-		}
-
-		std::unique_ptr<NzbInfo> oldNzbInfo = downloadQueue->GetQueue()->Remove(nzbInfo);
-		std::unique_ptr<HistoryInfo> historyInfo = std::make_unique<HistoryInfo>(std::move(oldNzbInfo));
-		historyInfo->SetTime(Util::CurrentTime());
-		downloadQueue->GetHistory()->Add(std::move(historyInfo), true);
-		downloadQueue->HistoryChanged();
-
-		// park remaining files
-		for (FileInfo* fileInfo : nzbInfo->GetFileList())
-		{
-			nzbInfo->UpdateCompletedStats(fileInfo);
-			nzbInfo->GetCompletedFiles()->emplace_back(
-				fileInfo->GetId(),
-				fileInfo->GetFilename(),
-				fileInfo->GetOrigname() ? fileInfo->GetOrigname() : "",
-				CompletedFile::cfNone,
-				0,
-				fileInfo->GetParFile(),
-				fileInfo->GetHash16k() ? fileInfo->GetHash16k() : "",
-				fileInfo->GetParSetId() ? fileInfo->GetParSetId() : ""
-			);
-		}
-
-		if (nzbget_rs_history_coord_op(0, (int)nzbInfo->GetParStatus(), (int)nzbInfo->GetUnpackStatus(),
-			(int)nzbInfo->GetDeleteStatus(), nzbInfo->GetParking() ? 1 : 0,
-			nzbInfo->GetUnpackCleanedUpDisk() ? 1 : 0, nzbInfo->GetFailedSize(), nzbInfo->GetParFailedSize(), nullptr))
-		{
-			g_DiskState->DiscardFiles(nzbInfo, false);
-			nzbInfo->GetCompletedFiles()->clear();
-		}
-
-		nzbInfo->SetParkedFileCount(0);
-		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-		{
-			bool isLast = &completedFile == &*nzbInfo->GetCompletedFiles()->rbegin();
-			if (nzbget_rs_history_coord_op(1, (int)completedFile.GetStatus(), isLast ? 1 : 0, 0, 0, 0, 0, 0, nullptr))
-			{
-				nzbInfo->PrintMessage(Message::mkDetail, "Parking file %s", completedFile.GetFilename());
-				nzbInfo->SetParkedFileCount(nzbInfo->GetParkedFileCount() + 1);
-			}
-		}
-
-		nzbInfo->GetFileList()->clear();
-		nzbInfo->SetRemainingParCount(0);
-		nzbInfo->SetParking(false);
-
-		if (nzbInfo->GetDirectRenameStatus() == NzbInfo::tsRunning)
-		{
-			nzbInfo->SetDirectRenameStatus(NzbInfo::tsFailure);
-		}
-		if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsRunning)
-		{
-			nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
-		}
-
-		nzbInfo->SetDupeHint(NzbInfo::dhNone);
-
-		nzbInfo->PrintMessage(Message::mkInfo, "Collection %s added to history", nzbInfo->GetName());
-
-		RecheckFailedArticles(downloadQueue, nzbInfo);
-		ParDamage::Forget(nzbInfo->GetId());
-	}
-
-	void RecheckFailedArticles(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-	{
-		CString textStatus = nzbInfo->MakeTextStatus(true);
-		if (!nzbget_rs_history_coord_op(2, (int)g_Options->GetDupeArticleFallback(), (int)g_Options->GetHealthCheck(),
-			(int)nzbInfo->GetKind(), nzbInfo->GetFailedArticles(),
-			nzbInfo->GetParameters()->Find("*DupeRecheck") != nullptr ? 1 : 0, 0, 0, *textStatus))
-		{
-			return;
-		}
-		for (NzbInfo* queued : downloadQueue->GetQueue())
-		{
-			if (DupeCoordinator::SameNameOrKey(queued->GetName(), queued->GetDupeKey(),
-				nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-			{
-				return;	// a duplicate downloads in its place
-			}
-		}
-		// a duplicate waits in history: nzbget fetches it in its place (B39)
-		if (g_Options->GetDupeCheck() &&
-			nzbInfo->GetDupeMode() == dmScore &&
-			g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-		{
-			return;
-		}
-		// once per download
-		nzbInfo->GetParameters()->SetParameter("*DupeRecheck", "1");
-
-		std::vector<DupeProbe::Sample> failed;
-		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-		{
-			if ((completedFile.GetStatus() != CompletedFile::cfPartial &&
-				 completedFile.GetStatus() != CompletedFile::cfFailure) ||
-				completedFile.GetId() <= 0)
-			{
-				continue;
-			}
-			bool partial = completedFile.GetStatus() == CompletedFile::cfPartial;
-			FileInfo fileInfo(completedFile.GetId());
-			if (!g_DiskState->LoadFile(&fileInfo, false, true) ||
-				(partial && !g_DiskState->LoadFileState(&fileInfo, g_ServerPool->GetServers(), true)))
-			{
-				continue;
-			}
-			auto groups = std::make_shared<std::vector<CString>>();
-			for (const CString& group : *fileInfo.GetGroups())
-			{
-				groups->emplace_back(*group);
-			}
-			for (ArticleInfo* article : fileInfo.GetArticles())
-			{
-				if ((!partial || article->GetStatus() == ArticleInfo::aiFailed) &&
-					!Util::EmptyStr(article->GetMessageId()))
-				{
-					DupeProbe::Sample sample;
-					sample.MessageId = article->GetMessageId();
-					sample.Groups = groups;
-					failed.push_back(std::move(sample));
-				}
-			}
-		}
-		if (failed.size() < 2)
-		{
-			return;
-		}
-
-		std::vector<DupeProbe::Sample> samples;
-		for (size_t index : DupeProbe::SampleIndexes(failed.size(), DupeProbe::RecheckSampleCount))
-		{
-			samples.push_back(std::move(failed[index]));	// the indexes are distinct
-		}
-		DupeProbe::StartRecheck(nzbInfo->GetId(), std::move(samples));
+		NzbgetRsHistoryCoordEnv env = BaseEnv();
+		env.p1 = reinterpret_cast<uintptr_t>(downloadQueue);
+		env.p2 = reinterpret_cast<uintptr_t>(nzbInfo);
+		nzbget_rs_history_coord_exec(1, &env);
 	}
 
 	void HistoryHide(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, int rindex)
 	{
-		// replace history element
-		std::unique_ptr<DupInfo> dupInfo = std::make_unique<DupInfo>();
-		dupInfo->SetId(historyInfo->GetNzbInfo()->GetId());
-		dupInfo->SetName(historyInfo->GetNzbInfo()->GetName());
-		dupInfo->SetDupeKey(historyInfo->GetNzbInfo()->GetDupeKey());
-		dupInfo->SetDupeScore(historyInfo->GetNzbInfo()->GetDupeScore());
-		dupInfo->SetDupeMode(historyInfo->GetNzbInfo()->GetDupeMode());
-		dupInfo->SetSize(historyInfo->GetNzbInfo()->GetSize());
-		dupInfo->SetFullContentHash(historyInfo->GetNzbInfo()->GetFullContentHash());
-		dupInfo->SetFilteredContentHash(historyInfo->GetNzbInfo()->GetFilteredContentHash());
-
-		NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-		dupInfo->SetStatus((DupInfo::EStatus)nzbget_rs_history_coord_op(
-			3, (int)nzbInfo->GetMarkStatus(), (int)nzbInfo->GetDeleteStatus(),
-			nzbInfo->IsDupeSuccess() ? 1 : 0, 0, 0, 0, 0, nullptr));
-
-		std::unique_ptr<HistoryInfo> newHistoryInfo = std::make_unique<HistoryInfo>(std::move(dupInfo));
-		newHistoryInfo->SetTime(historyInfo->GetTime());
-
-		DeleteDiskFiles(historyInfo->GetNzbInfo());
-
-		info("Collection %s removed from history", historyInfo->GetName());
-
-		(*downloadQueue->GetHistory())[downloadQueue->GetHistory()->size() - 1 - rindex] = std::move(newHistoryInfo);
+		NzbgetRsHistoryCoordEnv env = BaseEnv();
+		env.p1 = reinterpret_cast<uintptr_t>(downloadQueue);
+		env.p2 = reinterpret_cast<uintptr_t>(historyInfo);
+		env.a1 = rindex;
+		env.a2 = g_Options->GetServerMode() ? 1 : 0;
+		env.a3 = g_Options->GetNzbCleanupDisk() ? 1 : 0;
+		nzbget_rs_history_coord_exec(2, &env);
 	}
 
 	bool EditList(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action, const char* args)
 	{
-		bool ok = false;
-		PrepareEdit(downloadQueue, idList, action);
-
-		for (int id : *idList)
-		{
-			for (HistoryList::iterator itHistory = downloadQueue->GetHistory()->begin(); itHistory != downloadQueue->GetHistory()->end(); ++itHistory)
-			{
-				HistoryInfo* historyInfo = (*itHistory).get();
-				if (historyInfo->GetId() == id)
-				{
-					// one item's edit failing doesn't undo (or leave unsaved) the
-					// others: the list counts as edited when any item was
-					bool done = true;
-
-					switch (action)
-					{
-						case DownloadQueue::eaHistoryDelete:
-						case DownloadQueue::eaHistoryFinalDelete:
-							HistoryDelete(downloadQueue, itHistory, historyInfo, action == DownloadQueue::eaHistoryFinalDelete);
-							break;
-
-						case DownloadQueue::eaHistoryReturn:
-							HistoryReturn(downloadQueue, itHistory, historyInfo);
-							break;
-
-						case DownloadQueue::eaHistoryProcess:
-							HistoryProcess(downloadQueue, itHistory, historyInfo);
-							break;
-
-						case DownloadQueue::eaHistoryRedownload:
-							HistoryRedownload(downloadQueue, itHistory, historyInfo, false);
-							break;
-
-						case DownloadQueue::eaHistoryRetryFailed:
-							HistoryRetry(downloadQueue, itHistory, historyInfo, true, false);
-							break;
-
-						case DownloadQueue::eaHistorySetParameter:
-							done = HistorySetParameter(historyInfo, args);
-							break;
-
-	 					case DownloadQueue::eaHistorySetCategory:
-							done = HistorySetCategory(historyInfo, args);
-							break;
-
-	 					case DownloadQueue::eaHistorySetName:
-							done = HistorySetName(historyInfo, args);
-							break;
-
-						case DownloadQueue::eaHistorySetDupeKey:
-						case DownloadQueue::eaHistorySetDupeScore:
-						case DownloadQueue::eaHistorySetDupeMode:
-						case DownloadQueue::eaHistorySetDupeBackup:
-							HistorySetDupeParam(historyInfo, action, args);
-							break;
-
-						case DownloadQueue::eaHistoryMarkBad:
-							g_DupeCoordinator->HistoryMark(downloadQueue, historyInfo, NzbInfo::ksBad);
-							break;
-
-						case DownloadQueue::eaHistoryMarkGood:
-							g_DupeCoordinator->HistoryMark(downloadQueue, historyInfo, NzbInfo::ksGood);
-							break;
-
-						case DownloadQueue::eaHistoryMarkSuccess:
-							g_DupeCoordinator->HistoryMark(downloadQueue, historyInfo, NzbInfo::ksSuccess);
-							break;
-
-						default:
-							// nothing, just to avoid compiler warning
-							break;
-					}
-
-					ok = ok || done;
-					break;
-				}
-			}
-		}
-
-		if (ok)
-		{
-			downloadQueue->HistoryChanged();
-			downloadQueue->Save();
-		}
-
-		return ok;
+		NzbgetRsHistoryCoordEnv env = BaseEnv();
+		env.p1 = reinterpret_cast<uintptr_t>(downloadQueue);
+		env.a1 = static_cast<int>(action);
+		env.a2 = g_Options->GetDupeCheck() ? 1 : 0;
+		env.a3 = g_Options->GetServerMode() ? 1 : 0;
+		env.a4 = g_Options->GetNzbCleanupDisk() ? 1 : 0;
+		env.a5 = PATH_SEPARATOR;
+		env.a6 = g_Options->GetParCheck() != Options::pcForce ? 1 : 0;
+		env.s1 = args;
+		env.int_arr = idList ? idList->data() : nullptr;
+		env.int_len = idList ? idList->size() : 0;
+		return nzbget_rs_history_coord_exec(5, &env) != 0;
 	}
 
 	void Redownload(DownloadQueue* downloadQueue, HistoryInfo* historyInfo)
 	{
-		HistoryList::iterator it = downloadQueue->GetHistory()->Find(historyInfo);
-		HistoryRedownload(downloadQueue, it, historyInfo, true);
+		NzbgetRsHistoryCoordEnv env = BaseEnv();
+		env.p1 = reinterpret_cast<uintptr_t>(downloadQueue);
+		env.p2 = reinterpret_cast<uintptr_t>(historyInfo);
+		env.a5 = PATH_SEPARATOR;
+		nzbget_rs_history_coord_exec(4, &env);
 	}
 
 protected:
@@ -15882,208 +15615,34 @@ protected:
 	virtual void ServiceWork()
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-		time_t curTime = Util::CurrentTime();
-		bool changed = false;
-		int index = 0;
-
-		// traversing in a reverse order to delete items in order they were added to history
-		// (just to produce the log-messages in a more logical order)
-		for (HistoryList::reverse_iterator it = downloadQueue->GetHistory()->rbegin(); it != downloadQueue->GetHistory()->rend(); )
-		{
-			HistoryInfo* historyInfo = (*it).get();
-			int act = nzbget_rs_history_coord_op(4, (int)historyInfo->GetKind(), g_Options->GetKeepHistory(),
-				g_Options->GetDupeCheck() ? 1 : 0, (int)HistoryInfo::hkDup, (int)HistoryInfo::hkNzb, (int64)curTime, (int64)historyInfo->GetTime(), nullptr);
-			if (act != 0)
-			{
-				if (act == 1)
-				{
-					HistoryHide(downloadQueue, historyInfo, index);
-					index++;
-				}
-				else
-				{
-					if (act == 2) DeleteDiskFiles(historyInfo->GetNzbInfo());
-					info("Collection %s removed from history", historyInfo->GetName());
-					downloadQueue->GetHistory()->erase(downloadQueue->GetHistory()->end() - 1 - index);
-				}
-				it = downloadQueue->GetHistory()->rbegin() + index;
-				changed = true;
-			}
-			else
-			{
-				++it;
-				index++;
-			}
-		}
-
-		if (changed)
-		{
-			downloadQueue->HistoryChanged();
-			downloadQueue->Save();
-		}
+		NzbgetRsHistoryCoordEnv env = BaseEnv();
+		env.p1 = reinterpret_cast<uintptr_t>(static_cast<DownloadQueue*>(downloadQueue));
+		env.a1 = g_Options->GetKeepHistory();
+		env.a2 = g_Options->GetDupeCheck() ? 1 : 0;
+		env.a3 = g_Options->GetServerMode() ? 1 : 0;
+		env.a4 = g_Options->GetNzbCleanupDisk() ? 1 : 0;
+		env.t1 = static_cast<int64_t>(Util::CurrentTime());
+		nzbget_rs_history_coord_exec(3, &env);
 	}
 
 private:
-	void PrepareEdit(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action)
+	static NzbgetRsHistoryCoordEnv BaseEnv()
 	{
-		// First pass: when marking multiple items - mark them bad without performing the mark-logic,
-		// this will later (on second step) avoid moving other items to download queue, if they are marked bad too.
-		for (int id : *idList)
-		{
-			HistoryInfo* historyInfo = downloadQueue->GetHistory()->Find(id);
-			if (action == DownloadQueue::eaHistoryMarkBad &&
-				historyInfo && historyInfo->GetKind() == HistoryInfo::hkNzb)
-			{
-				historyInfo->GetNzbInfo()->SetMarkStatus(NzbInfo::ksBad);
-			}
-		}
+		NzbgetRsHistoryCoordEnv env{};
+		env.log_cb = +[](void*, int level, const char* msg) {
+			const char* s = msg ? msg : "";
+			if (level == 0) debug("%s", s);
+			else if (level == 1) detail("%s", s);
+			else if (level == 2) info("%s", s);
+			else if (level == 3) warn("%s", s);
+			else if (level == 4) error("%s", s);
+		};
+		env.action_cb = &HistoryCoordinator::ActionCb;
+		return env;
 	}
 
-	void HistoryDelete(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool final)
-	{
-		info("Deleting %s from history", historyInfo->GetName());
-
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-		{
-			DeleteDiskFiles(historyInfo->GetNzbInfo());
-		}
-
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
-			nzbget_rs_history_coord_op(5, 0, (int)historyInfo->GetNzbInfo()->GetDeleteStatus(),
-				(int)historyInfo->GetNzbInfo()->GetParStatus(), (int)historyInfo->GetNzbInfo()->GetUnpackStatus(),
-				FileSystem::DirectoryExists(historyInfo->GetNzbInfo()->GetDestDir()) ? 1 : 0, 0, 0, nullptr))
-		{
-			info("Deleting %s", historyInfo->GetNzbInfo()->GetDestDir());
-			CString errmsg;
-			if (!FileSystem::DeleteDirectoryWithContent(historyInfo->GetNzbInfo()->GetDestDir(), errmsg))
-			{
-				error("Could not delete directory %s: %s", historyInfo->GetNzbInfo()->GetDestDir(), *errmsg);
-			}
-		}
-
-		if (final || !g_Options->GetDupeCheck() || historyInfo->GetKind() == HistoryInfo::hkUrl)
-		{
-			downloadQueue->GetHistory()->erase(itHistory);
-		}
-		else if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-		{
-			// replace history element
-			int rindex = (int)downloadQueue->GetHistory()->size() - 1 - (int)(itHistory - downloadQueue->GetHistory()->begin());
-			HistoryHide(downloadQueue, historyInfo, rindex);
-		}
-	}
-
-	void MoveToQueue(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool reprocess);
-
-	void HistoryRedownload(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool restorePauseState);
-
-	void HistoryReturn(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo);
-
-	void HistoryProcess(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo);
-
-	void HistoryRetry(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool resetFailed, bool reprocess);
-
-	void ResetArticles(FileInfo* fileInfo, bool allFailed, bool resetFailed)
-	{
-		NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
-		ArticleList* articles = fileInfo->GetArticles();
-		nzbInfo->GetServerStats()->ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
-
-		int64 fileFailedSize = fileInfo->GetFailedSize(), fileRemainingSize = fileInfo->GetRemainingSize(), fileSuccessSize = fileInfo->GetSuccessSize();
-		int fileFailedArticles = fileInfo->GetFailedArticles(), fileCompletedArticles = fileInfo->GetCompletedArticles(), fileSuccessArticles = fileInfo->GetSuccessArticles();
-		int64 nzbFailedSize = nzbInfo->GetFailedSize(), nzbSuccessSize = nzbInfo->GetSuccessSize();
-		int nzbFailedArticles = nzbInfo->GetFailedArticles(), nzbSuccessArticles = nzbInfo->GetSuccessArticles();
-		int64 nzbParFailedSize = nzbInfo->GetParFailedSize(), nzbParSuccessSize = nzbInfo->GetParSuccessSize();
-
-		std::vector<int> statuses(articles->size()), sizes(articles->size());
-		std::vector<uint8_t> resetFlags(articles->size(), 0);
-		for (size_t i = 0; i < articles->size(); i++)
-		{
-			statuses[i] = (int)articles->at(i)->GetStatus();
-			sizes[i] = articles->at(i)->GetSize();
-		}
-
-		nzbget_rs_history_reset_articles_batch(
-			allFailed ? 1 : 0, resetFailed ? 1 : 0, fileInfo->GetParFile() ? 1 : 0,
-			(int)fileInfo->GetPartialState(), fileInfo->GetSize(), fileInfo->GetMissedSize(),
-			fileInfo->GetTotalArticles(), fileInfo->GetMissedArticles(),
-			&fileFailedSize, &fileFailedArticles, &fileRemainingSize, &fileCompletedArticles,
-			&fileSuccessSize, &fileSuccessArticles, &nzbFailedSize, &nzbSuccessSize,
-			&nzbFailedArticles, &nzbSuccessArticles, &nzbParFailedSize, &nzbParSuccessSize,
-			statuses.data(), sizes.data(), resetFlags.data(), articles->size());
-
-		nzbInfo->SetFailedSize(nzbFailedSize);
-		nzbInfo->SetSuccessSize(nzbSuccessSize);
-		nzbInfo->SetFailedArticles(nzbFailedArticles);
-		nzbInfo->SetSuccessArticles(nzbSuccessArticles);
-		nzbInfo->SetParFailedSize(nzbParFailedSize);
-		nzbInfo->SetParSuccessSize(nzbParSuccessSize);
-
-		for (size_t i = 0; i < articles->size(); i++)
-		{
-			if (resetFlags[i])
-			{
-				ArticleInfo* pa = articles->at(i).get();
-				pa->SetStatus(ArticleInfo::aiUndefined);
-				pa->SetCrc(0);
-				pa->SetSegmentOffset(0);
-				pa->SetSegmentSize(0);
-				pa->SetDupeExpectedOffset(-1);
-				pa->SetDupeExpectedEnd(-1);
-			}
-		}
-
-		fileInfo->SetFailedSize(fileFailedSize);
-		fileInfo->SetFailedArticles(fileFailedArticles);
-		fileInfo->SetRemainingSize(fileRemainingSize);
-		fileInfo->SetCompletedArticles(fileCompletedArticles);
-		fileInfo->SetSuccessSize(fileSuccessSize);
-		fileInfo->SetSuccessArticles(fileSuccessArticles);
-	}
-
-	bool HistorySetParameter(HistoryInfo* historyInfo, const char* text)
-	{
-		debug("Setting post-process-parameter '%s' for '%s'", text, historyInfo->GetName());
-
-		if (historyInfo->GetKind() != HistoryInfo::hkNzb && historyInfo->GetKind() != HistoryInfo::hkUrl)
-		{
-			error("Could not set post-process-parameter for %s: history item has wrong type", historyInfo->GetName());
-			return false;
-		}
-
-		const char* eq = text ? strchr(text, '=') : nullptr;
-		if (eq)
-		{
-			std::string name(text, (size_t)(eq - text));
-			historyInfo->GetNzbInfo()->GetParameters()->SetParameter(name.c_str(), eq + 1);
-		}
-		else
-		{
-			error("Could not set post-process-parameter for %s: invalid argument: %s", historyInfo->GetNzbInfo()->GetName(), text);
-		}
-
-		return true;
-	}
-
-	bool HistorySetCategory(HistoryInfo* historyInfo, const char* text)
-	{
-		debug("Setting category '%s' for '%s'", text, historyInfo->GetName());
-
-		if (historyInfo->GetKind() != HistoryInfo::hkNzb && historyInfo->GetKind() != HistoryInfo::hkUrl)
-		{
-			error("Could not set category for %s: history item has wrong type", historyInfo->GetName());
-			return false;
-		}
-
-		historyInfo->GetNzbInfo()->SetCategory(text);
-
-		return true;
-	}
-
-	bool HistorySetName(HistoryInfo* historyInfo, const char* text);
-
-	void HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQueue::EEditAction action, const char* text);
+	static uintptr_t ActionCb(void* ctx, int sub, int a1, int a2, uintptr_t p1, uintptr_t p2,
+		const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs, uint8_t* bytes, size_t len);
 };
 
 inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
@@ -21215,20 +20774,15 @@ public:
 		qeNzbDeleted // highest priority
 	};
 
+	QueueScriptCoordinator() : m_rs(nzbget_rs_queue_script_new()) {}
+	~QueueScriptCoordinator() { nzbget_rs_queue_script_free(m_rs, DropScriptCb); }
+	QueueScriptCoordinator(const QueueScriptCoordinator&) = delete;
+	QueueScriptCoordinator& operator=(const QueueScriptCoordinator&) = delete;
+
 	static NzbInfo* FindNzbInfo(DownloadQueue* downloadQueue, int nzbId)
 	{
-		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(nzbId);
-		if (nzbInfo)
-		{
-			return nzbInfo;
-		}
-
-		HistoryInfo* historyInfo = downloadQueue->GetHistory()->Find(nzbId);
-		if (historyInfo)
-		{
-			return historyInfo->GetNzbInfo();
-		}
-
+		if (NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(nzbId)) return nzbInfo;
+		if (HistoryInfo* historyInfo = downloadQueue->GetHistory()->Find(nzbId)) return historyInfo->GetNzbInfo();
 		return nullptr;
 	}
 
@@ -21238,134 +20792,104 @@ public:
 		virtual void Run() override
 		{
 			ExecuteScript(m_script);
-
 			SetLogPrefix(nullptr);
-
 			if (m_markBad)
 			{
 				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-				NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_id);
-				if (nzbInfo)
+				if (NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_id))
 				{
 					nzbInfo->PrintMessage(Message::mkWarning, "Cancelling download and deleting %s", *m_nzbName);
 					nzbInfo->SetDeleteStatus(NzbInfo::dsBad);
 					downloadQueue->EditEntry(m_id, DownloadQueue::eaGroupDelete, nullptr);
 				}
 			}
-
 			g_QueueScriptCoordinator->CheckQueue();
 		}
 		static void StartScript(NzbInfo* nzbInfo, std::shared_ptr<const Extension::Script> script, QueueScriptCoordinator::EEvent event)
 		{
-			if (!nzbInfo || nzbInfo->GetSkipScriptProcessing())
-			{
-				return;
-			}
-
-			QueueScriptController* scriptController = new QueueScriptController();
-
-			scriptController->m_nzbName = nzbInfo->GetName();
-			scriptController->m_nzbFilename = nzbInfo->GetFilename();
-			scriptController->m_url = nzbInfo->GetUrl();
-			scriptController->m_category = nzbInfo->GetCategory();
-			scriptController->m_destDir = nzbInfo->GetDestDir();
-			scriptController->m_queuedFilename = nzbInfo->GetQueuedFilename();
-			scriptController->m_id = nzbInfo->GetId();
-			scriptController->m_priority = nzbInfo->GetPriority();
-			scriptController->m_dupeKey = nzbInfo->GetDupeKey();
-			scriptController->m_dupeMode = nzbInfo->GetDupeMode();
-			scriptController->m_dupeScore = nzbInfo->GetDupeScore();
-			scriptController->m_parameters.CopyFrom(nzbInfo->GetParameters());
-			scriptController->m_script = std::move(script);
-			scriptController->m_event = event;
-			scriptController->m_prefixLen = 0;
-			scriptController->m_markBad = false;
-			scriptController->m_deleteStatus = nzbInfo->GetDeleteStatus();
-			scriptController->m_urlStatus = nzbInfo->GetUrlStatus();
-			scriptController->m_markStatus = nzbInfo->GetMarkStatus();
-			scriptController->SetAutoDestroy(true);
-
-			scriptController->Start();
+			if (!nzbInfo || nzbInfo->GetSkipScriptProcessing()) return;
+			QueueScriptController* sc = new QueueScriptController();
+			sc->m_nzbName = nzbInfo->GetName();
+			sc->m_nzbFilename = nzbInfo->GetFilename();
+			sc->m_url = nzbInfo->GetUrl();
+			sc->m_category = nzbInfo->GetCategory();
+			sc->m_destDir = nzbInfo->GetDestDir();
+			sc->m_queuedFilename = nzbInfo->GetQueuedFilename();
+			sc->m_id = nzbInfo->GetId();
+			sc->m_priority = nzbInfo->GetPriority();
+			sc->m_dupeKey = nzbInfo->GetDupeKey();
+			sc->m_dupeMode = nzbInfo->GetDupeMode();
+			sc->m_dupeScore = nzbInfo->GetDupeScore();
+			sc->m_parameters.CopyFrom(nzbInfo->GetParameters());
+			sc->m_script = std::move(script);
+			sc->m_event = event;
+			sc->m_prefixLen = 0;
+			sc->m_markBad = false;
+			sc->m_deleteStatus = nzbInfo->GetDeleteStatus();
+			sc->m_urlStatus = nzbInfo->GetUrlStatus();
+			sc->m_markStatus = nzbInfo->GetMarkStatus();
+			sc->SetAutoDestroy(true);
+			sc->Start();
 		}
 
 	protected:
 		virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script) override
 		{
-			PrintMessage(m_event == QueueScriptCoordinator::qeFileDownloaded ? Message::mkDetail : Message::mkInfo,
-				"Executing queue-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbName));
+			ResetEnv();
+			NzbgetRsQueueScriptCoordEnv env{};
+			env.ctx = static_cast<QueueScriptController*>(this);
+			env.p1 = reinterpret_cast<uintptr_t>(static_cast<const char*>(m_dupeKey));
+			env.a1 = m_id;
+			env.a2 = m_priority;
+			env.a3 = m_dupeScore;
+			env.a4 = static_cast<int>(m_event);
+			env.a5 = static_cast<int>(m_dupeMode);
+			env.a6 = (static_cast<int>(m_deleteStatus) & 0xff) |
+				((static_cast<int>(m_urlStatus) & 0xff) << 8) |
+				((static_cast<int>(m_markStatus) & 0xff) << 16);
+			env.s1 = m_nzbName;
+			env.s2 = m_nzbFilename;
+			env.s3 = m_destDir;
+			env.s4 = m_queuedFilename;
+			env.s5 = m_url;
+			env.s6 = m_category;
+			env.s7 = script->GetName();
+			env.action_cb = &QueueScriptController::CtrlActionCb;
+			nzbget_rs_queue_script_exec(nullptr, 7, &env);
 
 			SetArgs({script->GetEntry()});
-
-			BString<1024> infoName("queue-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbName));
-			SetInfoName(infoName);
-
 			SetLogPrefix(script->GetDisplayName());
-			m_prefixLen = static_cast<int>(strlen(script->GetDisplayName())) + 2; // 2 = strlen(": ");
-			PrepareParams(script->GetName());
-
+			m_prefixLen = static_cast<int>(strlen(script->GetDisplayName())) + 2;
+			PrepareEnvScript(&m_parameters, script->GetName());
 			Execute();
-
 			SetLogPrefix(nullptr);
 		}
 		virtual void AddMessage(Message::EKind kind, const char* text) override
 		{
-			const char* msgText = text + m_prefixLen;
-			size_t keyOff = 0, keyLen = 0, valOff = 0;
-			int cmdKind = nzbget_rs_script_parse_nzb_cmd(
-				0, msgText, (int)m_event, (int)QueueScriptCoordinator::qeNzbDownloaded,
-				&keyOff, &keyLen, &valOff, nullptr);
-			if (cmdKind != 0)
-			{
-				debug("Command %s detected", msgText + 6);
-				if (cmdKind > 0)
-				{
-					if (cmdKind == 3) m_markBad = true;
-					GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-					if (NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id))
-					{
-						if (cmdKind == 1) nzbInfo->GetParameters()->SetParameter(std::string(msgText + keyOff, keyLen).c_str(), msgText + valOff);
-						else if (cmdKind == 2) nzbInfo->SetFinalDir(msgText + valOff);
-						else if (cmdKind == 3) { nzbInfo->PrintMessage(Message::mkWarning, "Marking %s as bad", *m_nzbName); nzbInfo->SetMarkStatus(NzbInfo::ksBad); }
-					}
-				}
-				else
-				{
-					error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
-				}
-				return;
-			}
-			{
-				NzbInfo* nzbInfo = nullptr;
-				{
-					GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-					nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
-					if (nzbInfo)
-					{
-						nzbInfo->AddMessage(kind, text);
-					}
-				}
+			NzbgetRsQueueScriptCoordEnv env{};
+			env.ctx = static_cast<QueueScriptController*>(this);
+			env.a2 = m_prefixLen;
+			env.a3 = static_cast<int>(m_event);
+			env.s1 = text;
+			env.s2 = m_nzbName;
+			env.s3 = GetInfoName();
+			env.action_cb = &QueueScriptController::CtrlActionCb;
+			if (nzbget_rs_queue_script_exec(nullptr, 8, &env) != 0) return;
 
-				if (!nzbInfo)
-				{
-					ScriptController::AddMessage(kind, text);
-				}
+			NzbInfo* nzbInfo = nullptr;
+			{
+				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+				nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
+				if (nzbInfo) nzbInfo->AddMessage(kind, text);
 			}
+			if (!nzbInfo) ScriptController::AddMessage(kind, text);
 		}
 
 	private:
-		CString m_nzbName;
-		CString m_nzbFilename;
-		CString m_url;
-		CString m_category;
-		CString m_destDir;
-		CString m_queuedFilename;
-		int m_id;
-		int m_priority;
-		CString m_dupeKey;
+		CString m_nzbName, m_nzbFilename, m_url, m_category, m_destDir, m_queuedFilename, m_dupeKey;
+		int m_id, m_priority, m_dupeScore, m_prefixLen;
 		EDupeMode m_dupeMode;
-		int m_dupeScore;
 		NzbParameterList m_parameters;
-		int m_prefixLen;
 		std::shared_ptr<const Extension::Script> m_script;
 		QueueScriptCoordinator::EEvent m_event;
 		bool m_markBad;
@@ -21373,242 +20897,126 @@ public:
 		NzbInfo::EUrlStatus m_urlStatus;
 		NzbInfo::EMarkStatus m_markStatus;
 
-		void PrepareParams(const char* scriptName)
+		static uintptr_t CtrlActionCb(void* ctx, int sub, int a1, int, uintptr_t, uintptr_t,
+			const char* s1, const char* s2, const char*, int*, const char**)
 		{
-			ResetEnv();
-
-			NzbgetRsQueueScriptEnv env{};
-			env.nzb_name = m_nzbName;
-			env.nzb_id = m_id;
-			env.filename = m_nzbFilename;
-			env.dest_dir = m_destDir;
-			env.queued_filename = m_queuedFilename;
-			env.url = m_url;
-			env.category = m_category;
-			env.priority = m_priority;
-			env.dupe_key = m_dupeKey;
-			env.dupe_score = m_dupeScore;
-			env.dupe_mode = static_cast<int>(m_dupeMode);
-			env.event = static_cast<int>(m_event);
-			env.delete_status = static_cast<int>(m_deleteStatus);
-			env.url_status = static_cast<int>(m_urlStatus);
-			env.mark_status = static_cast<int>(m_markStatus);
-
-			nzbget_rs_queue_script_prepare_env(
-				&env,
-				this,
-				[](void* ctx, const char* name, const char* value)
+			auto* self = static_cast<QueueScriptController*>(ctx);
+			if (sub == 6) { self->PrintMessage(a1 != 0 ? Message::mkDetail : Message::mkInfo, "%s", s1); self->SetInfoName(s2); }
+			else if (sub == 7) self->SetEnvVar(s1, s2);
+			else if (sub == 8) self->SetIntEnvVar(s1, a1);
+			else if (sub == 9) debug("%s", s1);
+			else if (sub == 10)
+			{
+				if (a1 == 3) self->m_markBad = true;
+				GuardedDownloadQueue dq = DownloadQueue::Guard();
+				if (NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(dq, self->m_id))
 				{
-					static_cast<QueueScriptController*>(ctx)->SetEnvVar(name, value);
-				},
-				[](void* ctx, const char* name, int value)
-				{
-					static_cast<QueueScriptController*>(ctx)->SetIntEnvVar(name, value);
-				});
-
-			PrepareEnvScript(&m_parameters, scriptName);
+					if (a1 == 1) nzbInfo->GetParameters()->SetParameter(s1, s2);
+					else if (a1 == 2) nzbInfo->SetFinalDir(s2);
+					else if (a1 == 3) { nzbInfo->PrintMessage(Message::mkWarning, "%s", s2); nzbInfo->SetMarkStatus(NzbInfo::ksBad); }
+				}
+			}
+			else if (sub == 11) error("%s", s1);
+			return 0;
 		}
 	};
 
-	void Stop() { m_stopped = true; }
+	void Stop() { nzbget_rs_queue_script_exec(m_rs, 0, nullptr); }
 	void InitOptions()
 	{
-		auto found = g_ExtensionManager->FindIf([&](auto script)
-			{
-				return script->GetQueueScript() == true;
-			}
-		);
-
-		m_hasQueueScripts = found.has_value();
+		auto found = g_ExtensionManager->FindIf([&](auto script) { return script->GetQueueScript() == true; });
+		NzbgetRsQueueScriptCoordEnv env{};
+		env.a1 = found.has_value() ? 1 : 0;
+		nzbget_rs_queue_script_exec(m_rs, 1, &env);
 	}
 	void EnqueueScript(NzbInfo* nzbInfo, EEvent event)
 	{
-		if (!m_hasQueueScripts || !nzbInfo || nzbInfo->GetSkipScriptProcessing())
+		if (!nzbInfo || nzbInfo->GetSkipScriptProcessing()) return;
+		const char* postScript = g_Options ? g_Options->GetExtensions() : "";
+		if (g_Options && !Util::EmptyStr(nzbInfo->GetCategory()))
 		{
-			return;
-		}
-
-		Guard guard(m_queueMutex);
-
-		if (event == qeNzbDownloaded)
-		{
-			m_queue.erase(std::remove_if(m_queue.begin(), m_queue.end(),
-				[nzbInfo](std::unique_ptr<QueueItem>& queueItem)
-				{
-					return queueItem->GetNzbId() == nzbInfo->GetId();
-				}),
-				m_queue.end());
-		}
-
-		if (nzbget_rs_repair_ctrl_op(27, (int)event, (int)qeFileDownloaded, g_Options->GetEventInterval(),
-			0, 0, 0, (int64_t)Util::CurrentTime(), (int64_t)nzbInfo->GetQueueScriptTime(), 0, 0,
-			nullptr, nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) != 0)
-		{
-			return;
-		}
-
-		g_ExtensionManager->ForEach([&](auto script)
+			if (Options::Category* cat = g_Options->FindCategory(nzbInfo->GetCategory(), false);
+				cat && !Util::EmptyStr(cat->GetExtensions()))
 			{
-				if (UsableScript(script, nzbInfo, event))
-				{
-					bool alreadyQueued = false;
-					if (event == qeFileDownloaded)
-					{
-						for (QueueItem* queueItem : &m_queue)
-						{
-							if (queueItem->GetNzbId() == nzbInfo->GetId() && queueItem->GetScript() == script)
-							{
-								alreadyQueued = true;
-								break;
-							}
-						}
-					}
-
-					if (!alreadyQueued)
-					{
-						std::unique_ptr<QueueItem> queueItem = std::make_unique<QueueItem>(nzbInfo->GetId(), script, event);
-						if (m_curItem)
-						{
-							m_queue.push_back(std::move(queueItem));
-						}
-						else
-						{
-							m_curItem = std::move(queueItem);
-							QueueScriptController::StartScript(nzbInfo, m_curItem->GetScript(), m_curItem->GetEvent());
-						}
-					}
-
-					nzbInfo->SetQueueScriptTime(Util::CurrentTime());
-				}
+				postScript = cat->GetExtensions();
 			}
-		);
+		}
+		std::vector<std::shared_ptr<const Extension::Script>> scripts;
+		NzbgetRsQueueScriptCoordEnv env{};
+		env.ctx = &scripts;
+		env.p1 = reinterpret_cast<uintptr_t>(nzbInfo);
+		env.a1 = static_cast<int>(event);
+		env.a2 = 0;
+		env.a3 = nzbInfo->GetId();
+		env.a4 = g_Options ? g_Options->GetEventInterval() : 0;
+		env.t1 = static_cast<int64_t>(Util::CurrentTime());
+		env.t2 = static_cast<int64_t>(nzbInfo->GetQueueScriptTime());
+		env.s1 = postScript;
+		env.drop_script_cb = DropScriptCb;
+		env.action_cb = &QueueScriptCoordinator::CoordActionCb;
+		nzbget_rs_queue_script_exec(m_rs, 4, &env);
 	}
 	void CheckQueue()
 	{
-		if (m_stopped)
-		{
-			return;
-		}
-
+		if (nzbget_rs_queue_script_exec(m_rs, 6, nullptr) != 0) return;
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		Guard guard(m_queueMutex);
-
-		m_curItem.reset();
-		NzbInfo* curNzbInfo = nullptr;
-		EEvent maxEvent = EEvent::qeFileDownloaded;
-		Queue::iterator itCurItem;
-
-		for (Queue::iterator it = m_queue.begin(); it != m_queue.end(); )
-		{
-			std::unique_ptr<QueueItem>& queueItem = *it;
-
-			NzbInfo* nzbInfo = FindNzbInfo(downloadQueue, queueItem->GetNzbId());
-			if (nzbget_rs_repair_ctrl_op(28, nzbInfo != nullptr ? 1 : 0,
-				nzbInfo ? (int)nzbInfo->GetDeleteStatus() : 0, nzbInfo ? (int)nzbInfo->GetMarkStatus() : 0,
-				(int)queueItem->GetEvent(), 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) != 0)
-			{
-				it = m_queue.erase(it);
-				if (curNzbInfo)
-				{
-					curNzbInfo = nullptr;
-					it = m_queue.begin();
-				}
-				continue;
-			}
-
-			if (!curNzbInfo || queueItem->GetEvent() > maxEvent)
-			{
-				itCurItem = it;
-				curNzbInfo = nzbInfo;
-				maxEvent = queueItem->GetEvent();
-			}
-
-			++it;
-		}
-
-		if (curNzbInfo)
-		{
-			m_curItem = std::move(*itCurItem);
-			m_queue.erase(itCurItem);
-			QueueScriptController::StartScript(curNzbInfo, m_curItem->GetScript(), m_curItem->GetEvent());
-		}
+		NzbgetRsQueueScriptCoordEnv env{};
+		env.p1 = reinterpret_cast<uintptr_t>(static_cast<DownloadQueue*>(downloadQueue));
+		env.drop_script_cb = DropScriptCb;
+		env.action_cb = &QueueScriptCoordinator::CoordActionCb;
+		nzbget_rs_queue_script_exec(m_rs, 5, &env);
 	}
 	bool HasJob(int nzbId, bool* active)
 	{
-		Guard guard(m_queueMutex);
-
-		bool working = m_curItem && m_curItem->GetNzbId() == nzbId;
-		if (active)
-		{
-			*active = working;
-		}
-		if (!working)
-		{
-			for (QueueItem* queueItem : &m_queue)
-			{
-				working = queueItem->GetNzbId() == nzbId;
-				if (working)
-				{
-					break;
-				}
-			}
-		}
-
+		int act = 0;
+		NzbgetRsQueueScriptCoordEnv env{};
+		env.a1 = nzbId;
+		env.out_i32 = &act;
+		bool working = nzbget_rs_queue_script_exec(m_rs, 2, &env) != 0;
+		if (active) *active = act != 0;
 		return working;
 	}
-	int GetQueueSize()
-	{
-		Guard guard(m_queueMutex);
-
-		return static_cast<int>(m_queue.size()) + (m_curItem ? 1 : 0);
-	}
+	int GetQueueSize() { return nzbget_rs_queue_script_exec(m_rs, 3, nullptr); }
 
 private:
-	class QueueItem
+	using ScriptPtr = std::shared_ptr<const Extension::Script>;
+	NzbgetRsQueueScriptCoord* m_rs;
+
+	static void DropScriptCb(uintptr_t p) { delete reinterpret_cast<ScriptPtr*>(p); }
+
+	static uintptr_t CoordActionCb(void* ctx, int sub, int a1, int, uintptr_t p1, uintptr_t p2,
+		const char*, const char*, const char*, int* ints, const char** strs)
 	{
-	public:
-		QueueItem(int nzbId, std::shared_ptr<const Extension::Script> script, EEvent event) :
-			m_nzbId(nzbId), m_script(std::move(script)), m_event(event) {}
-		int GetNzbId() { return m_nzbId; }
-		const std::shared_ptr<const Extension::Script>& GetScript() const { return m_script; }
-		EEvent GetEvent() { return m_event; }
-	private:
-		int m_nzbId;
-		std::shared_ptr<const Extension::Script> m_script;
-		EEvent m_event;
-	};
-
-	typedef std::deque<std::unique_ptr<QueueItem>> Queue;
-
-	Queue m_queue;
-	Mutex m_queueMutex;
-	std::unique_ptr<QueueItem> m_curItem;
-	bool m_hasQueueScripts = false;
-	bool m_stopped = false;
-
-	bool UsableScript(std::shared_ptr<const Extension::Script> script, NzbInfo* nzbInfo, EEvent event)
-	{
-		const char* scriptName = script->GetName() ? script->GetName() : "";
-		BString<1024> paramName("%s:", scriptName);
-		NzbParameter* parameter = nzbInfo->GetParameters()->Find(*paramName);
-		int st = nzbget_rs_repair_ctrl_op(29, script->GetQueueScript() ? 1 : 0, (int)event,
-			0, 0, 0, 0, 0, 0, 0, 0, script->GetQueueEvents(), parameter ? parameter->GetValue() : nullptr,
-			nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
-		if (st <= 1)
+		auto* scripts = static_cast<std::vector<ScriptPtr>*>(ctx);
+		if (sub == 0)
 		{
-			return st == 1;
+			if (g_ExtensionManager) g_ExtensionManager->ForEach([&](auto s) { scripts->push_back(std::move(s)); });
+			return scripts->size();
 		}
-		const char* postScript = g_Options->GetExtensions();
-		if (!Util::EmptyStr(nzbInfo->GetCategory()))
+		if (sub == 1)
 		{
-			Options::Category* categoryObj = g_Options->FindCategory(nzbInfo->GetCategory(), false);
-			if (categoryObj && !Util::EmptyStr(categoryObj->GetExtensions()))
-			{
-				postScript = categoryObj->GetExtensions();
-			}
+			const ScriptPtr& s = (*scripts)[static_cast<size_t>(a1)];
+			auto* nzb = reinterpret_cast<NzbInfo*>(p1);
+			ints[0] = s->GetQueueScript() ? 1 : 0;
+			const char* sn = s->GetName() ? s->GetName() : "";
+			strs[0] = sn;
+			strs[1] = s->GetQueueEvents();
+			BString<1024> paramName("%s:", sn);
+			NzbParameter* p = nzb->GetParameters()->Find(*paramName);
+			strs[2] = p ? p->GetValue() : nullptr;
+			return reinterpret_cast<uintptr_t>(s.get());
 		}
-		return nzbget_rs_repair_ctrl_op(23, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-			postScript, scriptName, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) != 0;
+		if (sub == 2) return reinterpret_cast<uintptr_t>(new ScriptPtr((*scripts)[static_cast<size_t>(a1)]));
+		if (sub == 3) QueueScriptController::StartScript(reinterpret_cast<NzbInfo*>(p1), *reinterpret_cast<ScriptPtr*>(p2), static_cast<EEvent>(a1));
+		else if (sub == 4) reinterpret_cast<NzbInfo*>(p1)->SetQueueScriptTime(Util::CurrentTime());
+		else if (sub == 5)
+		{
+			NzbInfo* nzb = FindNzbInfo(reinterpret_cast<DownloadQueue*>(p1), a1);
+			ints[0] = nzb ? static_cast<int>(nzb->GetDeleteStatus()) : 0;
+			ints[1] = nzb ? static_cast<int>(nzb->GetMarkStatus()) : 0;
+			return reinterpret_cast<uintptr_t>(nzb);
+		}
+		return 0;
 	}
 };
 
@@ -33385,474 +32793,491 @@ public:
 	}
 };
 
-inline void HistoryCoordinator::MoveToQueue(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo, bool reprocess)
+inline uintptr_t HistoryCoordinator::ActionCb(
+	void*, int sub, int a1, int a2, uintptr_t p1, uintptr_t p2,
+	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs, uint8_t* bytes, size_t len)
 {
-	debug("Returning %s from history back to download queue", historyInfo->GetName());
-	CString nicename = historyInfo->GetName();
-	NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-
-	// unpark files
-	for (FileInfo* fileInfo : nzbInfo->GetFileList())
+	switch (sub)
 	{
-		nzbInfo->PrintMessage(Message::mkDetail, "Unparking file %s", fileInfo->GetFilename());
-	}
-
-	downloadQueue->GetQueue()->Add(std::unique_ptr<NzbInfo>(nzbInfo), true);
-	historyInfo->DiscardNzbInfo();
-
-	// reset postprocessing status variables
-	if (!nzbInfo->GetUnpackCleanedUpDisk())
-	{
-		nzbInfo->SetUnpackStatus(NzbInfo::usNone);
-		nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
-		nzbInfo->SetParRepaired(false);
-		nzbInfo->SetUnpackTried(false);
-		nzbInfo->SetLastUnpackStatus(0);
-		nzbInfo->GetExtractedArchives()->clear();
-		nzbInfo->SetCleanupStatus(NzbInfo::csNone);
-		nzbInfo->SetParRenameStatus(NzbInfo::rsNone);
-		nzbInfo->SetRarRenameStatus(NzbInfo::rsNone);
-		nzbInfo->SetPostTotalSec(nzbInfo->GetPostTotalSec() - nzbInfo->GetUnpackSec());
-		nzbInfo->SetUnpackSec(0);
-
-		if (ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
-		{
-			nzbInfo->SetPostTotalSec(nzbInfo->GetPostTotalSec() - nzbInfo->GetParSec());
-			nzbInfo->SetParStatus(NzbInfo::psNone);
-			nzbInfo->SetParSec(0);
-			nzbInfo->SetRepairSec(0);
-			nzbInfo->SetParFull(false);
+		case 0:
+			g_DiskState->DiscardFiles(reinterpret_cast<NzbInfo*>(p2), a1 != 0);
+			return 0;
+		case 1: {
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			nzb->GetFileList()->clear();
+			strs[0] = nzb->GetQueuedFilename() ? nzb->GetQueuedFilename() : "";
+			return 0;
 		}
-	}
-	nzbInfo->SetDeleteStatus(NzbInfo::dsNone);
-	nzbInfo->SetDeletePaused(false);
-	nzbInfo->SetDupeFailoverChecked(-1);
-	nzbInfo->SetDeadPickProbed(false);
-	nzbInfo->SetDupeAttemptedArticles(0);
-	nzbInfo->SetDupeUnsourcedArticles(0);
-	nzbInfo->SetDupeFailedRun(0);
-	nzbInfo->SetDupeParDeferState(NzbInfo::dpNone);
-	nzbInfo->SetMarkStatus(NzbInfo::ksNone);
-	nzbInfo->GetScriptStatuses()->clear();
-	nzbInfo->SetParkedFileCount(0);
-	if (nzbInfo->GetMoveStatus() == NzbInfo::msFailure)
-	{
-		nzbInfo->SetMoveStatus(NzbInfo::msNone);
-	}
-	nzbInfo->SetReprocess(reprocess);
-	nzbInfo->SetFinalDir("");
-
-	downloadQueue->GetHistory()->erase(itHistory);
-	// the object "pHistoryInfo" is released few lines later, after the call to "NZBDownloaded"
-	nzbInfo->PrintMessage(Message::mkInfo, "%s returned from history back to download queue", *nicename);
-
-	if (reprocess)
-	{
-		// start postprocessing
-		debug("Restarting postprocessing for %s", *nicename);
-		g_PrePostProcessor->NzbDownloaded(downloadQueue, nzbInfo);
-		DownloadQueue::Aspect aspect = {DownloadQueue::eaNzbReturned, downloadQueue, nzbInfo, nullptr};
-		downloadQueue->Notify(&aspect);
-	}
-}
-
-inline void HistoryCoordinator::HistoryRedownload(DownloadQueue* downloadQueue, HistoryList::iterator itHistory,
-	HistoryInfo* historyInfo, bool restorePauseState)
-{
-	if (historyInfo->GetKind() == HistoryInfo::hkUrl)
-	{
-		NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-		historyInfo->DiscardNzbInfo();
-		nzbInfo->SetUrlStatus(NzbInfo::lsNone);
-		nzbInfo->SetDeleteStatus(NzbInfo::dsNone);
-		if (nzbInfo->GetDupeHint() == NzbInfo::dhNone)
-		{
-			nzbInfo->SetDupeHint(NzbInfo::dhRedownloadManual);
-		}
-		downloadQueue->GetQueue()->Add(std::unique_ptr<NzbInfo>(nzbInfo), true);
-		downloadQueue->GetHistory()->erase(itHistory);
-
-		DownloadQueue::Aspect aspect = {DownloadQueue::eaUrlReturned, downloadQueue, nzbInfo, nullptr};
-		downloadQueue->Notify(&aspect);
-
-		return;
-	}
-
-	if (historyInfo->GetKind() != HistoryInfo::hkNzb)
-	{
-		error("Could not download again %s: history item has wrong type", historyInfo->GetName());
-		return;
-	}
-
-	NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-	bool paused = restorePauseState && nzbInfo->GetDeletePaused();
-
-	if (!FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
-	{
-		error("Could not download again %s: could not find source nzb-file %s",
-			nzbInfo->GetName(), nzbInfo->GetQueuedFilename());
-		return;
-	}
-
-	NzbFile nzbFile(nzbInfo->GetQueuedFilename(), "");
-	if (!nzbFile.Parse())
-	{
-		error("Could not download again %s: could not parse nzb-file", nzbInfo->GetName());
-		return;
-	}
-
-	info("Downloading again %s", nzbInfo->GetName());
-
-	std::unique_ptr<NzbInfo> newNzbInfo = nzbFile.DetachNzbInfo();
-
-	for (FileInfo* fileInfo : newNzbInfo->GetFileList())
-	{
-		fileInfo->SetPaused(paused);
-	}
-
-	auto deleteDestDirIfPresent = [nzbInfo]()
-	{
-		if (FileSystem::DirectoryExists(nzbInfo->GetDestDir()))
-		{
-			detail("Deleting %s", nzbInfo->GetDestDir());
-			CString errmsg;
-			if (!FileSystem::DeleteDirectoryWithContent(nzbInfo->GetDestDir(), errmsg))
+		case 2: {
+			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			if (Thread* t = nzb->GetLiveRepairThread()) { nzb->SetLiveRepairThread(nullptr); t->Stop(); }
+			std::unique_ptr<NzbInfo> oldNzb = dq->GetQueue()->Remove(nzb);
+			auto hist = std::make_unique<HistoryInfo>(std::move(oldNzb));
+			hist->SetTime(Util::CurrentTime());
+			dq->GetHistory()->Add(std::move(hist), true);
+			dq->HistoryChanged();
+			for (FileInfo* fi : nzb->GetFileList())
 			{
-				error("Could not delete directory %s: %s", nzbInfo->GetDestDir(), *errmsg);
+				nzb->UpdateCompletedStats(fi);
+				nzb->GetCompletedFiles()->emplace_back(fi->GetId(), fi->GetFilename(),
+					fi->GetOrigname() ? fi->GetOrigname() : "", CompletedFile::cfNone, 0,
+					fi->GetParFile(), fi->GetHash16k() ? fi->GetHash16k() : "",
+					fi->GetParSetId() ? fi->GetParSetId() : "");
 			}
+			ints[0] = static_cast<int>(nzb->GetParStatus());
+			ints[1] = static_cast<int>(nzb->GetUnpackStatus());
+			ints[2] = static_cast<int>(nzb->GetDeleteStatus());
+			ints[3] = nzb->GetParking() ? 1 : 0;
+			ints[4] = nzb->GetUnpackCleanedUpDisk() ? 1 : 0;
+			ints[5] = static_cast<int>(nzb->GetCompletedFiles()->size());
+			i64s[0] = nzb->GetFailedSize();
+			i64s[1] = nzb->GetParFailedSize();
+			strs[0] = nzb->GetName();
+			return 0;
 		}
-	};
-	deleteDestDirIfPresent();
-	nzbInfo->BuildDestDirName();
-	deleteDestDirIfPresent();
-
-	g_DiskState->DiscardFiles(nzbInfo);
-
-	// reset status fields (which are not reset by "MoveToQueue")
-	nzbInfo->SetMoveStatus(NzbInfo::msNone);
-	nzbInfo->SetUnpackCleanedUpDisk(false);
-	nzbInfo->SetParStatus(NzbInfo::psNone);
-	nzbInfo->SetParRenameStatus(NzbInfo::rsNone);
-	nzbInfo->SetRarRenameStatus(NzbInfo::rsNone);
-	nzbInfo->SetDirectRenameStatus(NzbInfo::tsNone);
-	nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
-	nzbInfo->SetParRepaired(false);
-	nzbInfo->SetUnpackTried(false);
-	nzbInfo->SetLastUnpackStatus(0);
-	nzbInfo->GetExtractedArchives()->clear();
-	nzbInfo->SetHealthPaused(false);
-	nzbInfo->SetDownloadedSize(0);
-	nzbInfo->SetDownloadSec(0);
-	nzbInfo->SetPostTotalSec(0);
-	nzbInfo->SetParSec(0);
-	nzbInfo->SetRepairSec(0);
-	nzbInfo->SetUnpackSec(0);
-	nzbInfo->SetExtraParBlocks(0);
-	nzbInfo->SetAllFirst(false);
-	nzbInfo->SetWaitingPar(false);
-	nzbInfo->SetLoadingPar(false);
-	nzbInfo->GetCompletedFiles()->clear();
-	// stream-repair jobs captured for the previous download attempt are stale
-	nzbInfo->GetStreamRepairJobs()->clear();
-	// and so are its duplicate recoveries: the failover gates weigh them against
-	// this attempt's article counts, which start at 0 - a stale count made a
-	// download that arrives look dead (failed over to the next backup), or a dead
-	// one look borrowed enough to be spared. Blocked donors stay blocked: they
-	// were proven to hold other bytes
-	nzbInfo->SetDupeRecoveredArticles(0);
-	nzbInfo->SetDupeRecoveredBytes(0);
-	nzbInfo->SetDupeRecoveredHoles(0);
-	nzbInfo->SetDupeParDeferState(NzbInfo::dpNone);
-	nzbInfo->SetDupeNoParNoted(false);
-	nzbInfo->GetServerStats()->clear();
-	nzbInfo->GetCurrentServerStats()->clear();
-
-	nzbInfo->MoveFileList(newNzbInfo.get());
-
-	g_QueueCoordinator->CheckDupeFileInfos(nzbInfo);
-
-	MoveToQueue(downloadQueue, itHistory, historyInfo, false);
-
-	g_PrePostProcessor->NzbAdded(downloadQueue, nzbInfo);
-
-	DownloadQueue::Aspect aspect = {DownloadQueue::eaNzbReturned, downloadQueue, nzbInfo, nullptr};
-	downloadQueue->Notify(&aspect);
-}
-
-inline void HistoryCoordinator::HistoryReturn(DownloadQueue* downloadQueue, HistoryList::iterator itHistory,
-	HistoryInfo* historyInfo)
-{
-	if (historyInfo->GetKind() == HistoryInfo::hkUrl)
-	{
-		HistoryRedownload(downloadQueue, itHistory, historyInfo, false);
-	}
-	else if (historyInfo->GetKind() == HistoryInfo::hkNzb && historyInfo->GetNzbInfo()->GetParkedFileCount() == 0)
-	{
-		warn("Could not download remaining files for %s: history item does not have any files left for download", historyInfo->GetName());
-	}
-	else if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-	{
-		HistoryRetry(downloadQueue, itHistory, historyInfo, false, false);
-	}
-	else
-	{
-		error("Could not download remaining files for %s: history item has wrong type", historyInfo->GetName());
-	}
-}
-
-inline void HistoryCoordinator::HistoryProcess(DownloadQueue* downloadQueue, HistoryList::iterator itHistory, HistoryInfo* historyInfo)
-{
-	if (historyInfo->GetKind() != HistoryInfo::hkNzb)
-	{
-		error("Could not post-process again %s: history item has wrong type", historyInfo->GetName());
-		return;
-	}
-
-	HistoryRetry(downloadQueue, itHistory, historyInfo, false, true);
-}
-
-inline void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList::iterator itHistory,
-	HistoryInfo* historyInfo, bool resetFailed, bool reprocess)
-{
-	if (historyInfo->GetKind() != HistoryInfo::hkNzb)
-	{
-		error("Could not %s for %s: history item has wrong type",
-			resetFailed ? "retry failed articles" : "download remaining files",
-			historyInfo->GetName());
-		return;
-	}
-
-	NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-
-	if (!FileSystem::DirectoryExists(nzbInfo->GetDestDir()))
-	{
-		error("Could not %s %s: destination directory %s doesn't exist",
-			resetFailed ? "retry failed articles for" : (reprocess ? "post-process again" : "download remaining files for"),
-			historyInfo->GetName(), nzbInfo->GetDestDir());
-		return;
-	}
-
-	nzbInfo->PrintMessage(Message::mkInfo, "%s %s",
-		resetFailed ? "Retrying failed articles for" : (reprocess ? "Post-processing again" : "Downloading remaining files for"),
-		nzbInfo->GetName());
-
-	// the files that download again: their repair jobs describe the old attempt
-	std::set<int> requeued;
-
-	// move failed completed files to (parked) file list
-	for (CompletedFileList::iterator it = nzbInfo->GetCompletedFiles()->begin(); it != nzbInfo->GetCompletedFiles()->end(); )
-	{
-		CompletedFile& completedFile = *it;
-		if (completedFile.GetStatus() != CompletedFile::cfSuccess &&
-			(completedFile.GetStatus() != CompletedFile::cfFailure || resetFailed) &&
-			completedFile.GetId() > 0)
-		{
-			std::unique_ptr<FileInfo> fileInfo = std::make_unique<FileInfo>();
-			fileInfo->SetId(completedFile.GetId());
-			bool fileLoaded = g_DiskState->LoadFile(fileInfo.get(), true, true);
-			bool stateLoaded = fileLoaded &&
-				completedFile.GetStatus() == CompletedFile::cfPartial &&
-				g_DiskState->LoadFileState(fileInfo.get(), g_ServerPool->GetServers(), true);
-			if (fileLoaded && nzbget_rs_history_coord_op(6, completedFile.GetStatus(),
-				resetFailed ? 1 : 0, stateLoaded ? 1 : 0, 0, 0, fileInfo->GetRemainingSize(), 0, nullptr))
+		case 3: {
+			auto* cfs = reinterpret_cast<NzbInfo*>(p2)->GetCompletedFiles();
+			if (a1 < 0 || static_cast<size_t>(a1) >= cfs->size()) return 0;
+			CompletedFile& cf = (*cfs)[static_cast<size_t>(a1)];
+			ints[0] = static_cast<int>(cf.GetStatus());
+			ints[1] = cf.GetId();
+			strs[0] = cf.GetFilename();
+			return 1;
+		}
+		case 4: {
+			Message::EKind mk = a1 == 1 ? Message::mkDetail : (a1 == 3 ? Message::mkWarning : Message::mkInfo);
+			reinterpret_cast<NzbInfo*>(p2)->PrintMessage(mk, "%s", s1 ? s1 : "");
+			return 0;
+		}
+		case 5: {
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			nzb->SetParkedFileCount(a1);
+			nzb->GetFileList()->clear();
+			nzb->SetRemainingParCount(0);
+			nzb->SetParking(false);
+			if (nzb->GetDirectRenameStatus() == NzbInfo::tsRunning) nzb->SetDirectRenameStatus(NzbInfo::tsFailure);
+			if (nzb->GetDirectUnpackStatus() == NzbInfo::nsRunning) nzb->SetDirectUnpackStatus(NzbInfo::nsNone);
+			nzb->SetDupeHint(NzbInfo::dhNone);
+			return 0;
+		}
+		case 6:
+			ParDamage::Forget(reinterpret_cast<NzbInfo*>(p2)->GetId());
+			return 0;
+		case 7: {
+			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			CString ts = nzb->MakeTextStatus(true);
+			snprintf(reinterpret_cast<char*>(bytes), len, "%s", *ts ? *ts : "");
+			ints[0] = static_cast<int>(g_Options->GetDupeArticleFallback());
+			ints[1] = static_cast<int>(g_Options->GetHealthCheck());
+			ints[2] = static_cast<int>(nzb->GetKind());
+			ints[3] = nzb->GetFailedArticles();
+			ints[4] = nzb->GetParameters()->Find("*DupeRecheck") != nullptr ? 1 : 0;
+			ints[5] = (g_Options->GetDupeCheck() && nzb->GetDupeMode() == dmScore) ? 1 : 0;
+			ints[6] = static_cast<int>(dq->GetQueue()->size());
+			strs[0] = nzb->GetName();
+			strs[1] = nzb->GetDupeKey();
+			return 0;
+		}
+		case 8: {
+			NzbInfo* q = (*reinterpret_cast<DownloadQueue*>(p1)->GetQueue())[static_cast<size_t>(a1)].get();
+			strs[0] = q->GetName();
+			strs[1] = q->GetDupeKey();
+			return 0;
+		}
+		case 9: {
+			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			return g_DupeCoordinator->FindDupeBackup(dq, nzb, nzb->GetName(), nzb->GetDupeKey()) ? 1 : 0;
+		}
+		case 10: {
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			nzb->GetParameters()->SetParameter("*DupeRecheck", "1");
+			auto* failed = new std::vector<DupeProbe::Sample>();
+			for (CompletedFile& cf : nzb->GetCompletedFiles())
 			{
-				// a file parked while it downloaded is recorded by its temporary output
-				// name ("<id>.out.tmp"): its data is there, but it keeps the name its
-				// nzb-file gives it, which a recreation from a duplicate pairs by
-				std::string recordedName = completedFile.GetFilename();
-				const char* curFilename = fileInfo->GetFilename() ? fileInfo->GetFilename() : "";
-				if (!nzbget_rs_history_coord_op(7, 0, 0, 0, 0, 0, 0, 0, recordedName.c_str()) || !*curFilename)
+				if ((cf.GetStatus() != CompletedFile::cfPartial && cf.GetStatus() != CompletedFile::cfFailure) || cf.GetId() <= 0) continue;
+				bool partial = cf.GetStatus() == CompletedFile::cfPartial;
+				FileInfo fi(cf.GetId());
+				if (!g_DiskState->LoadFile(&fi, false, true) || (partial && !g_DiskState->LoadFileState(&fi, g_ServerPool->GetServers(), true))) continue;
+				auto groups = std::make_shared<std::vector<CString>>();
+				for (const CString& g : *fi.GetGroups()) groups->emplace_back(*g);
+				for (ArticleInfo* art : fi.GetArticles())
 				{
-					fileInfo->SetFilename(recordedName.c_str());
+					if ((!partial || art->GetStatus() == ArticleInfo::aiFailed) && !Util::EmptyStr(art->GetMessageId()))
+						failed->push_back({art->GetMessageId(), groups});
 				}
-				fileInfo->SetNzbInfo(nzbInfo);
-
-				BString<1024> outputFilename("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, recordedName.c_str());
-				int64 outFileSize = fileInfo->GetSuccessArticles() == 0 ? 0 : FileSystem::FileSize(outputFilename);
-				if (fileInfo->GetSuccessArticles() == 0 || outFileSize == 0)
-				{
-					FileSystem::DeleteFile(outputFilename);
-				}
-
-				if (fileInfo->GetSuccessArticles() > 0)
-				{
-					if (FileSystem::FileExists(outputFilename))
-					{
-						fileInfo->SetPartialState(FileInfo::psCompleted);
-					}
-					else if (!reprocess)
-					{
-						nzbInfo->PrintMessage(Message::mkWarning, "File %s could not be found on disk, downloading again", fileInfo->GetFilename());
-						fileInfo->SetPartialState(FileInfo::psNone);
-					}
-				}
-
-				// A partial file may contain only entries missing from the NZB.
-				// They have no message IDs to retry. Keep its completed record and
-				// statistics intact instead of queueing an all-finished article list.
-				bool hasRetryable = false;
-				for (const std::unique_ptr<ArticleInfo>& article : *fileInfo->GetArticles())
-				{
-					ArticleInfo::EStatus st = article->GetStatus();
-					if (st == ArticleInfo::aiUndefined || (resetFailed && st == ArticleInfo::aiFailed))
-					{
-						hasRetryable = true;
-						break;
-					}
-				}
-				if (fileInfo->GetPartialState() == FileInfo::psCompleted && !hasRetryable)
-				{
-					++it;
-					continue;
-				}
-
-				ResetArticles(fileInfo.get(), completedFile.GetStatus() == CompletedFile::cfFailure, resetFailed);
-
-				g_DiskState->DiscardFile(fileInfo->GetId(), false, true, fileInfo->GetPartialState() != FileInfo::psCompleted);
-				if (fileInfo->GetPartialState() == FileInfo::psCompleted)
-				{
-					g_DiskState->SaveFileState(fileInfo.get(), true);
-				}
-				fileInfo->GetArticles()->clear();
-
-				requeued.insert(fileInfo->GetId());
-				nzbInfo->GetFileList()->Add(std::move(fileInfo), false);
-
-				it = nzbInfo->GetCompletedFiles()->erase(it);
-				continue;
 			}
+			if (failed->size() < 2) { delete failed; ints[0] = 0; return 0; }
+			ints[0] = static_cast<int>(failed->size());
+			return reinterpret_cast<uintptr_t>(failed);
 		}
-		++it;
-	}
-
-	// the repair jobs of files that download again are stale (a new one is built
-	// when the file completes); the others keep their holes for post-processing:
-	// a finished file that isn't downloaded again would otherwise never be repaired
-	StreamRepairJobList* jobs = nzbInfo->GetStreamRepairJobs();
-	jobs->erase(std::remove_if(jobs->begin(), jobs->end(),
-		[&requeued](const StreamRepairJob& job) { return requeued.count(job.GetFileId()) > 0; }), jobs->end());
-
-	nzbInfo->UpdateCurrentStats();
-	if (!resetFailed && !reprocess)
-	{
-		// The user explicitly requested the remaining files; do not park the
-		// download again because of the health failure being overridden.
-		nzbInfo->SetHealthPaused(true);
-	}
-
-	// With no download work left there will be no article-completion event to
-	// start post-processing. Paused spare PAR files do not block that transition.
-	MoveToQueue(downloadQueue, itHistory, historyInfo, reprocess || nzbInfo->IsDownloadCompleted(true));
-
-	if (g_Options->GetParCheck() != Options::pcForce)
-	{
-		downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
-	}
-}
-
-inline bool HistoryCoordinator::HistorySetName(HistoryInfo* historyInfo, const char* text)
-{
-	debug("Setting name '%s' for '%s'", text, historyInfo->GetName());
-
-	if (Util::EmptyStr(text))
-	{
-		error("Could not rename %s. The new name cannot be empty", historyInfo->GetName());
-		return false;
-	}
-
-	if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
-	{
-		std::string previous = historyInfo->GetNzbInfo()->GetName();
-		historyInfo->GetNzbInfo()->SetName(text);
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb && g_DupeSearch && previous != historyInfo->GetNzbInfo()->GetName())
-            g_DupeSearch->NotifyNameChanged(historyInfo->GetNzbInfo()->GetId());
-	}
-	else if (historyInfo->GetKind() == HistoryInfo::hkDup)
-	{
-		historyInfo->GetDupInfo()->SetName(text);
-	}
-
-	return true;
-}
-
-inline void HistoryCoordinator::HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQueue::EEditAction action, const char* text)
-{
-	debug("Setting dupe-parameter '%i'='%s' for '%s'", (int)action, text, historyInfo->GetName());
-
-	EDupeMode mode = dmScore;
-	if (action == DownloadQueue::eaHistorySetDupeMode)
-	{
-		int parsed = nzbget_rs_queue_editor_op(7, 0, 0, 0, 0, 0, text, nullptr, nullptr, 0, nullptr, 0, nullptr, nullptr);
-		if (parsed < 0)
-		{
-			error("Could not set duplicate mode for %s: incorrect mode (%s)", historyInfo->GetName(), text);
-			return;
+		case 11: {
+			auto* failed = reinterpret_cast<std::vector<DupeProbe::Sample>*>(p1);
+			std::vector<DupeProbe::Sample> samples;
+			samples.reserve(len);
+			for (size_t i = 0; i < len; ++i) samples.push_back(std::move((*failed)[static_cast<size_t>(ints[i])]));
+			delete failed;
+			DupeProbe::StartRecheck(reinterpret_cast<NzbInfo*>(p2)->GetId(), std::move(samples));
+			return 0;
 		}
-		mode = (EDupeMode)parsed;
-	}
-
-	if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
-	{
-		switch (action)
-		{
-			case DownloadQueue::eaHistorySetDupeKey:
-                historyInfo->GetNzbInfo()->GetParameters()->SetParameter(DupeSearch::OwnedKeyParam, nullptr);
-				historyInfo->GetNzbInfo()->SetDupeKey(text);
-				break;
-
-			case DownloadQueue::eaHistorySetDupeScore:
-				historyInfo->GetNzbInfo()->SetDupeScore(text ? atoi(text) : 0);
-				break;
-
-			case DownloadQueue::eaHistorySetDupeMode:
-				historyInfo->GetNzbInfo()->SetDupeMode(mode);
-				break;
-
-			case DownloadQueue::eaHistorySetDupeBackup:
-				if (historyInfo->GetKind() == HistoryInfo::hkUrl)
+		case 12: {
+			auto* hist = reinterpret_cast<HistoryInfo*>(p2);
+			NzbInfo* nzb = hist->GetNzbInfo();
+			ints[0] = static_cast<int>(nzb->GetMarkStatus());
+			ints[1] = static_cast<int>(nzb->GetDeleteStatus());
+			ints[2] = nzb->IsDupeSuccess() ? 1 : 0;
+			strs[0] = hist->GetName();
+			return reinterpret_cast<uintptr_t>(nzb);
+		}
+		case 13: {
+			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
+			auto* hist = reinterpret_cast<HistoryInfo*>(p2);
+			NzbInfo* nzb = hist->GetNzbInfo();
+			auto dup = std::make_unique<DupInfo>();
+			dup->SetId(nzb->GetId());
+			dup->SetName(nzb->GetName());
+			dup->SetDupeKey(nzb->GetDupeKey());
+			dup->SetDupeScore(nzb->GetDupeScore());
+			dup->SetDupeMode(nzb->GetDupeMode());
+			dup->SetSize(nzb->GetSize());
+			dup->SetFullContentHash(nzb->GetFullContentHash());
+			dup->SetFilteredContentHash(nzb->GetFilteredContentHash());
+			dup->SetStatus(static_cast<DupInfo::EStatus>(a1));
+			auto newHist = std::make_unique<HistoryInfo>(std::move(dup));
+			newHist->SetTime(hist->GetTime());
+			(*dq->GetHistory())[dq->GetHistory()->size() - 1 - static_cast<size_t>(a2)] = std::move(newHist);
+			return 0;
+		}
+		case 14: {
+			auto* hl = reinterpret_cast<DownloadQueue*>(p1)->GetHistory();
+			if (a1 < 0 || static_cast<size_t>(a1) >= hl->size()) return 0;
+			HistoryInfo* hist = (*hl)[hl->size() - 1 - static_cast<size_t>(a1)].get();
+			ints[0] = static_cast<int>(hist->GetKind());
+			i64s[0] = static_cast<int64_t>(hist->GetTime());
+			i64s[1] = hist->GetKind() == HistoryInfo::hkNzb ? static_cast<int64_t>(reinterpret_cast<uintptr_t>(hist->GetNzbInfo())) : 0;
+			strs[0] = hist->GetName();
+			return reinterpret_cast<uintptr_t>(hist);
+		}
+		case 15: {
+			auto* hl = reinterpret_cast<DownloadQueue*>(p1)->GetHistory();
+			size_t pos = a2 != 0 ? (hl->size() - 1 - static_cast<size_t>(a1)) : static_cast<size_t>(a1);
+			hl->erase(hl->begin() + static_cast<ptrdiff_t>(pos));
+			return 0;
+		}
+		case 16: {
+			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
+			dq->HistoryChanged();
+			dq->Save();
+			return 0;
+		}
+		case 17: {
+			HistoryInfo* hist = reinterpret_cast<DownloadQueue*>(p1)->GetHistory()->Find(a1);
+			if (hist && hist->GetKind() == HistoryInfo::hkNzb) hist->GetNzbInfo()->SetMarkStatus(NzbInfo::ksBad);
+			return 0;
+		}
+		case 18: {
+			auto* hl = reinterpret_cast<DownloadQueue*>(p1)->GetHistory();
+			HistoryList::iterator it = a2 != 0 ? hl->Find(reinterpret_cast<HistoryInfo*>(p2)) : hl->end();
+			if (a2 == 0)
+			{
+				for (auto cur = hl->begin(); cur != hl->end(); ++cur)
+					if ((*cur)->GetId() == a1) { it = cur; break; }
+			}
+			if (it == hl->end()) return 0;
+			HistoryInfo* hist = (*it).get();
+			NzbInfo* nzb = (hist->GetKind() == HistoryInfo::hkNzb || hist->GetKind() == HistoryInfo::hkUrl) ? hist->GetNzbInfo() : nullptr;
+			ints[0] = static_cast<int>(it - hl->begin());
+			ints[1] = static_cast<int>(hl->size());
+			ints[2] = static_cast<int>(hist->GetKind());
+			ints[3] = nzb ? static_cast<int>(nzb->GetDeleteStatus()) : 0;
+			ints[4] = nzb ? static_cast<int>(nzb->GetParStatus()) : 0;
+			ints[5] = nzb ? static_cast<int>(nzb->GetUnpackStatus()) : 0;
+			ints[6] = nzb ? nzb->GetParkedFileCount() : 0;
+			i64s[0] = static_cast<int64_t>(reinterpret_cast<uintptr_t>(nzb));
+			strs[0] = hist->GetName();
+			strs[1] = nzb ? nzb->GetDestDir() : "";
+			return reinterpret_cast<uintptr_t>(hist);
+		}
+		case 19:
+			g_DupeCoordinator->HistoryMark(reinterpret_cast<DownloadQueue*>(p1),
+				reinterpret_cast<HistoryInfo*>(p2), static_cast<NzbInfo::EMarkStatus>(a1));
+			return 0;
+		case 21: {
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			if (a1 < 0)
+			{
+				ints[0] = nzb->GetUnpackCleanedUpDisk() ? 1 : 0;
+				ints[1] = nzb->GetPostTotalSec();
+				ints[2] = nzb->GetUnpackSec();
+				ints[3] = nzb->GetParSec();
+				ints[4] = static_cast<int>(nzb->GetMoveStatus());
+				ints[5] = static_cast<int>(nzb->GetFileList()->size());
+				strs[0] = nzb->GetDestDir();
+			}
+			else
+			{
+				strs[0] = (*nzb->GetFileList())[static_cast<size_t>(a1)]->GetFilename();
+			}
+			return 0;
+		}
+		case 22: {
+			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
+			auto* hist = reinterpret_cast<HistoryInfo*>(p2);
+			NzbInfo* nzb = hist->GetNzbInfo();
+			dq->GetQueue()->Add(std::unique_ptr<NzbInfo>(nzb), true);
+			hist->DiscardNzbInfo();
+			if (!nzb->GetUnpackCleanedUpDisk())
+			{
+				nzb->SetUnpackStatus(NzbInfo::usNone);
+				nzb->SetDirectUnpackStatus(NzbInfo::nsNone);
+				nzb->SetParRepaired(false);
+				nzb->SetUnpackTried(false);
+				nzb->SetLastUnpackStatus(0);
+				nzb->GetExtractedArchives()->clear();
+				nzb->SetCleanupStatus(NzbInfo::csNone);
+				nzb->SetParRenameStatus(NzbInfo::rsNone);
+				nzb->SetRarRenameStatus(NzbInfo::rsNone);
+				nzb->SetPostTotalSec(ints[1]);
+				nzb->SetUnpackSec(0);
+				if (ints[0] != 0)
 				{
-					error("Could not set duplicate parameter for %s: history item has wrong type", historyInfo->GetName());
-					return;
+					nzb->SetParStatus(NzbInfo::psNone);
+					nzb->SetParSec(0);
+					nzb->SetRepairSec(0);
+					nzb->SetParFull(false);
 				}
-				else if (historyInfo->GetNzbInfo()->GetDeleteStatus() != NzbInfo::dsDupe &&
-					historyInfo->GetNzbInfo()->GetDeleteStatus() != NzbInfo::dsManual)
+			}
+			nzb->SetDeleteStatus(NzbInfo::dsNone);
+			nzb->SetDeletePaused(false);
+			nzb->SetDupeFailoverChecked(-1);
+			nzb->SetDeadPickProbed(false);
+			nzb->SetDupeAttemptedArticles(0);
+			nzb->SetDupeUnsourcedArticles(0);
+			nzb->SetDupeFailedRun(0);
+			nzb->SetDupeParDeferState(NzbInfo::dpNone);
+			nzb->SetMarkStatus(NzbInfo::ksNone);
+			nzb->GetScriptStatuses()->clear();
+			nzb->SetParkedFileCount(0);
+			nzb->SetMoveStatus(static_cast<NzbInfo::EMoveStatus>(ints[2]));
+			nzb->SetReprocess(a2 != 0);
+			nzb->SetFinalDir("");
+			dq->GetHistory()->erase(dq->GetHistory()->begin() + a1);
+			return 0;
+		}
+		case 23: {
+			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			if (a1 != 0) g_PrePostProcessor->NzbAdded(dq, nzb);
+			else g_PrePostProcessor->NzbDownloaded(dq, nzb);
+			DownloadQueue::Aspect aspect = {DownloadQueue::eaNzbReturned, dq, nzb, nullptr};
+			dq->Notify(&aspect);
+			return 0;
+		}
+		case 24: {
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			nzb->BuildDestDirName();
+			strs[0] = nzb->GetDestDir();
+			return 0;
+		}
+		case 25: {
+			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
+			auto* hist = reinterpret_cast<HistoryInfo*>(p2);
+			NzbInfo* nzb = hist->GetNzbInfo();
+			hist->DiscardNzbInfo();
+			nzb->SetUrlStatus(NzbInfo::lsNone);
+			nzb->SetDeleteStatus(NzbInfo::dsNone);
+			if (nzb->GetDupeHint() == NzbInfo::dhNone) nzb->SetDupeHint(NzbInfo::dhRedownloadManual);
+			dq->GetQueue()->Add(std::unique_ptr<NzbInfo>(nzb), true);
+			dq->GetHistory()->erase(dq->GetHistory()->begin() + a1);
+			DownloadQueue::Aspect aspect = {DownloadQueue::eaUrlReturned, dq, nzb, nullptr};
+			dq->Notify(&aspect);
+			return 0;
+		}
+		case 26: {
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			ints[0] = nzb->GetDeletePaused() ? 1 : 0;
+			strs[0] = nzb->GetName();
+			strs[1] = nzb->GetQueuedFilename();
+			strs[2] = nzb->GetDestDir();
+			return 0;
+		}
+		case 27: {
+			NzbFile nzbFile(s1 ? s1 : "", "");
+			return nzbFile.Parse() ? reinterpret_cast<uintptr_t>(nzbFile.DetachNzbInfo().release()) : 0;
+		}
+		case 28: {
+			std::unique_ptr<NzbInfo> newNzb(reinterpret_cast<NzbInfo*>(p1));
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			for (FileInfo* fi : newNzb->GetFileList()) fi->SetPaused(a1 != 0);
+			g_DiskState->DiscardFiles(nzb);
+			nzb->SetMoveStatus(NzbInfo::msNone);
+			nzb->SetUnpackCleanedUpDisk(false);
+			nzb->SetParStatus(NzbInfo::psNone);
+			nzb->SetParRenameStatus(NzbInfo::rsNone);
+			nzb->SetRarRenameStatus(NzbInfo::rsNone);
+			nzb->SetDirectRenameStatus(NzbInfo::tsNone);
+			nzb->SetDirectUnpackStatus(NzbInfo::nsNone);
+			nzb->SetParRepaired(false);
+			nzb->SetUnpackTried(false);
+			nzb->SetLastUnpackStatus(0);
+			nzb->GetExtractedArchives()->clear();
+			nzb->SetHealthPaused(false);
+			nzb->SetDownloadedSize(0);
+			nzb->SetDownloadSec(0);
+			nzb->SetPostTotalSec(0);
+			nzb->SetParSec(0);
+			nzb->SetRepairSec(0);
+			nzb->SetUnpackSec(0);
+			nzb->SetExtraParBlocks(0);
+			nzb->SetAllFirst(false);
+			nzb->SetWaitingPar(false);
+			nzb->SetLoadingPar(false);
+			nzb->GetCompletedFiles()->clear();
+			nzb->GetStreamRepairJobs()->clear();
+			nzb->SetDupeRecoveredArticles(0);
+			nzb->SetDupeRecoveredBytes(0);
+			nzb->SetDupeRecoveredHoles(0);
+			nzb->SetDupeParDeferState(NzbInfo::dpNone);
+			nzb->SetDupeNoParNoted(false);
+			nzb->GetServerStats()->clear();
+			nzb->GetCurrentServerStats()->clear();
+			nzb->MoveFileList(newNzb.get());
+			g_QueueCoordinator->CheckDupeFileInfos(nzb);
+			return 0;
+		}
+		case 30: {
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			auto fi = std::make_unique<FileInfo>();
+			fi->SetId(a1);
+			if (!g_DiskState->LoadFile(fi.get(), true, true)) return 0;
+			bool stateLoaded = a2 == static_cast<int>(CompletedFile::cfPartial) &&
+				g_DiskState->LoadFileState(fi.get(), g_ServerPool->GetServers(), true);
+			fi->SetNzbInfo(nzb);
+			ints[0] = stateLoaded ? 1 : 0;
+			ints[1] = fi->GetSuccessArticles();
+			ints[2] = static_cast<int>(fi->GetPartialState());
+			ints[3] = static_cast<int>(fi->GetArticles()->size());
+			ints[4] = fi->GetParFile() ? 1 : 0;
+			ints[5] = fi->GetTotalArticles();
+			ints[6] = fi->GetMissedArticles();
+			ints[7] = fi->GetFailedArticles();
+			ints[8] = fi->GetCompletedArticles();
+			ints[9] = fi->GetSuccessArticles();
+			ints[10] = nzb->GetFailedArticles();
+			ints[11] = nzb->GetSuccessArticles();
+			i64s[0] = fi->GetSize();
+			i64s[1] = fi->GetMissedSize();
+			i64s[2] = fi->GetFailedSize();
+			i64s[3] = fi->GetRemainingSize();
+			i64s[4] = fi->GetSuccessSize();
+			i64s[5] = nzb->GetFailedSize();
+			i64s[6] = nzb->GetSuccessSize();
+			i64s[7] = nzb->GetParFailedSize();
+			i64s[8] = nzb->GetParSuccessSize();
+			strs[0] = fi->GetFilename() ? fi->GetFilename() : "";
+			return reinterpret_cast<uintptr_t>(fi.release());
+		}
+		case 31: {
+			auto* fi = reinterpret_cast<FileInfo*>(p2);
+			if (a1 == 0) delete fi;
+			else fi->SetFilename(s1 ? s1 : "");
+			return 0;
+		}
+		case 32: {
+			auto* arts = reinterpret_cast<FileInfo*>(p2)->GetArticles();
+			for (size_t i = 0; i < len; ++i)
+			{
+				ints[i] = static_cast<int>(arts->at(i)->GetStatus());
+				ints[len + i] = arts->at(i)->GetSize();
+			}
+			return 0;
+		}
+		case 33: {
+			std::unique_ptr<FileInfo> fi(reinterpret_cast<FileInfo*>(p1));
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			fi->SetPartialState(static_cast<FileInfo::EPartialState>(a2));
+			nzb->GetServerStats()->ListOp(fi->GetServerStats(), ServerStatList::soSubtract);
+			nzb->SetFailedSize(i64s[3]);
+			nzb->SetSuccessSize(i64s[4]);
+			nzb->SetFailedArticles(ints[3]);
+			nzb->SetSuccessArticles(ints[4]);
+			nzb->SetParFailedSize(i64s[5]);
+			nzb->SetParSuccessSize(i64s[6]);
+			ArticleList* arts = fi->GetArticles();
+			for (size_t i = 0; i < len; ++i)
+			{
+				if (bytes[i])
 				{
-					error("Could not set duplicate parameter for %s: history item has wrong delete status", historyInfo->GetName());
-					return;
+					ArticleInfo* pa = arts->at(i).get();
+					pa->SetStatus(ArticleInfo::aiUndefined);
+					pa->SetCrc(0);
+					pa->SetSegmentOffset(0);
+					pa->SetSegmentSize(0);
+					pa->SetDupeExpectedOffset(-1);
+					pa->SetDupeExpectedEnd(-1);
 				}
-				historyInfo->GetNzbInfo()->SetDeleteStatus(
-					(NzbInfo::EDeleteStatus)nzbget_rs_history_coord_op(8, 0, 0, 0, 0, 0, 0, 0, text));
-				break;
-
-			default:
-				// suppress compiler warning
-				break;
+			}
+			fi->SetFailedSize(i64s[0]);
+			fi->SetRemainingSize(i64s[1]);
+			fi->SetSuccessSize(i64s[2]);
+			fi->SetFailedArticles(ints[0]);
+			fi->SetCompletedArticles(ints[1]);
+			fi->SetSuccessArticles(ints[2]);
+			g_DiskState->DiscardFile(fi->GetId(), false, true, fi->GetPartialState() != FileInfo::psCompleted);
+			if (fi->GetPartialState() == FileInfo::psCompleted) g_DiskState->SaveFileState(fi.get(), true);
+			fi->GetArticles()->clear();
+			int fid = fi->GetId();
+			nzb->GetFileList()->Add(std::move(fi), false);
+			nzb->GetCompletedFiles()->erase(nzb->GetCompletedFiles()->begin() + a1);
+			return static_cast<uintptr_t>(fid);
 		}
-	}
-	else if (historyInfo->GetKind() == HistoryInfo::hkDup)
-	{
-		switch (action)
-		{
-			case DownloadQueue::eaHistorySetDupeKey:
-				historyInfo->GetDupInfo()->SetDupeKey(text);
-				break;
-
-			case DownloadQueue::eaHistorySetDupeScore:
-				historyInfo->GetDupInfo()->SetDupeScore(text ? atoi(text) : 0);
-				break;
-
-			case DownloadQueue::eaHistorySetDupeMode:
-				historyInfo->GetDupInfo()->SetDupeMode(mode);
-				break;
-
-			case DownloadQueue::eaHistorySetDupeBackup:
-				error("Could not set duplicate parameter for %s: history item has wrong type", historyInfo->GetName());
-				return;
-
-			default:
-				// suppress compiler warning
-				break;
+		case 34: {
+			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
+			std::set<int> req(ints, ints + len);
+			StreamRepairJobList* jobs = nzb->GetStreamRepairJobs();
+			jobs->erase(std::remove_if(jobs->begin(), jobs->end(),
+				[&req](const StreamRepairJob& job) { return req.count(job.GetFileId()) > 0; }), jobs->end());
+			nzb->UpdateCurrentStats();
+			if (a1 != 0) nzb->SetHealthPaused(true);
+			i64s[0] = nzb->IsDownloadCompleted(true) ? 1 : 0;
+			i64s[1] = nzb->GetId();
+			return 0;
 		}
+		case 35:
+			reinterpret_cast<DownloadQueue*>(p1)->EditEntry(a1, DownloadQueue::eaGroupPauseExtraPars, nullptr);
+			return 0;
+		case 36: {
+			auto* hist = reinterpret_cast<HistoryInfo*>(p2);
+			if (a1 == 0) hist->GetNzbInfo()->GetParameters()->SetParameter(s1 ? s1 : "", s2 ? s2 : "");
+			else if (a1 == 1) hist->GetNzbInfo()->SetCategory(s1 ? s1 : "");
+			else if (a1 == 2)
+			{
+				if (hist->GetKind() == HistoryInfo::hkNzb || hist->GetKind() == HistoryInfo::hkUrl)
+				{
+					std::string prev = hist->GetNzbInfo()->GetName();
+					hist->GetNzbInfo()->SetName(s1 ? s1 : "");
+					if (hist->GetKind() == HistoryInfo::hkNzb && g_DupeSearch && prev != hist->GetNzbInfo()->GetName())
+						g_DupeSearch->NotifyNameChanged(hist->GetNzbInfo()->GetId());
+				}
+				else if (hist->GetKind() == HistoryInfo::hkDup) hist->GetDupInfo()->SetName(s1 ? s1 : "");
+			}
+			else if (a1 == 3)
+			{
+				hist->GetNzbInfo()->GetParameters()->SetParameter(DupeSearch::OwnedKeyParam, nullptr);
+				hist->GetNzbInfo()->SetDupeKey(s1 ? s1 : "");
+			}
+			else if (a1 == 4) hist->GetNzbInfo()->SetDupeScore(a2);
+			else if (a1 == 5) hist->GetNzbInfo()->SetDupeMode(static_cast<EDupeMode>(a2));
+			else if (a1 == 6) hist->GetNzbInfo()->SetDeleteStatus(static_cast<NzbInfo::EDeleteStatus>(a2));
+			else if (a1 == 7) hist->GetDupInfo()->SetDupeKey(s1 ? s1 : "");
+			else if (a1 == 8) hist->GetDupInfo()->SetDupeScore(a2);
+			else if (a1 == 9) hist->GetDupInfo()->SetDupeMode(static_cast<EDupeMode>(a2));
+			return 0;
+		}
+		default:
+			return 0;
 	}
 }
 #endif
@@ -34505,72 +33930,55 @@ class SchedulerScriptController : public Thread, public NzbScriptController
 public:
 	virtual void Run()
 	{
-		if (m_externalProcess)
-		{
-			ExecuteExternalProcess();
-		}
-		else
-		{
-			ExecuteScriptList(m_script);
-		}
+		if (m_externalProcess) ExecuteExternalProcess();
+		else ExecuteScriptList(m_script);
 	}
 
-	static void StartScript(const char* param, bool externalProcess, int taskId)
+	static void StartFromArgs(const char* param, bool externalProcess, int taskId, const char* const* words, size_t wordCount)
 	{
-		std::vector<CString> argv;
-		if (externalProcess && (argv = Util::SplitCommandLine(param)).empty())
-		{
-			error("Could not execute scheduled process-script, failed to parse command line: %s", param);
-			return;
-		}
-
-		SchedulerScriptController* scriptController = new SchedulerScriptController();
-
-		scriptController->m_externalProcess = externalProcess;
-		scriptController->m_script = param;
-		scriptController->m_taskId = taskId;
-
+		SchedulerScriptController* sc = new SchedulerScriptController();
+		sc->m_externalProcess = externalProcess;
+		sc->m_script = param ? param : "";
+		sc->m_taskId = taskId;
 		if (externalProcess)
 		{
-			scriptController->SetArgs(std::move(argv));
+			std::vector<CString> argv;
+			argv.reserve(wordCount);
+			for (size_t i = 0; i < wordCount; ++i) argv.emplace_back(words[i]);
+			sc->SetArgs(std::move(argv));
 		}
-
-		scriptController->SetAutoDestroy(true);
-
-		scriptController->Start();
+		sc->SetAutoDestroy(true);
+		sc->Start();
 	}
 
 protected:
 	virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script)
 	{
-		if (!script->GetSchedulerScript())
-		{
-			return;
-		}
-
-		BString<1024> taskName;
-		if (m_taskId > 0)
-		{
-			taskName.Format(" for Task%i", m_taskId);
-		}
-		else
-		{
-			taskName = "";
-		}
-
-		PrintMessage(Message::mkInfo, "Executing scheduler-script %s%s", script->GetName(), *taskName);
-
-		SetArgs({script->GetEntry()});
-
-		BString<1024> infoName("scheduler-script %s%s", script->GetName(), *taskName);
-		SetInfoName(infoName);
-
-		SetLogPrefix(script->GetDisplayName());
-		PrepareParams(script->GetName());
-
-		Execute();
-
-		SetLogPrefix(nullptr);
+		if (!script->GetSchedulerScript()) return;
+		struct Ctx { SchedulerScriptController* self; const Extension::Script* s; } ctx{this, script.get()};
+		NzbgetRsSchedulerEnv env{};
+		env.ctx = &ctx;
+		env.a1 = 0;
+		env.a2 = m_taskId;
+		env.s1 = script->GetName();
+		env.action_cb = +[](void* raw, int sub, int, int, const char* const* ptrs, size_t, int*, int64_t*, const char** strs) -> int {
+			auto* c = static_cast<Ctx*>(raw);
+			if (sub == 8) { strs[0] = c->s->GetDisplayName(); return 1; }
+			if (sub == 7)
+			{
+				c->self->PrintMessage(Message::mkInfo, "%s", ptrs[0]);
+				c->self->SetArgs({c->s->GetEntry()});
+				c->self->SetInfoName(ptrs[1]);
+				c->self->SetLogPrefix(ptrs[2]);
+				c->self->ResetEnv();
+				c->self->SetIntEnvVar("NZBSP_TASKID", c->self->m_taskId);
+				c->self->PrepareEnvScript(nullptr, c->s->GetName());
+				c->self->Execute();
+				c->self->SetLogPrefix(nullptr);
+			}
+			return 1;
+		};
+		nzbget_rs_scheduler_exec(nullptr, 4, &env);
 	}
 
 private:
@@ -34578,27 +33986,26 @@ private:
 	bool m_externalProcess;
 	int m_taskId;
 
-	void PrepareParams(const char* scriptName)
-	{
-		ResetEnv();
-
-		SetIntEnvVar("NZBSP_TASKID", m_taskId);
-
-		PrepareEnvScript(nullptr, scriptName);
-	}
-
 	void ExecuteExternalProcess()
 	{
-		info("Executing scheduled process-script %s for Task%i", FileSystem::BaseFileName(GetScript()), m_taskId);
-
-		BString<1024> infoName("scheduled process-script %s for Task%i", FileSystem::BaseFileName(GetScript()), m_taskId);
-		SetInfoName(infoName);
-
-		BString<1024> logPrefix = FileSystem::BaseFileName(GetScript());
-		if (char* ext = strrchr(logPrefix, '.')) *ext = '\0';
-		SetLogPrefix(logPrefix);
-
-		Execute();
+		NzbgetRsSchedulerEnv env{};
+		env.ctx = static_cast<SchedulerScriptController*>(this);
+		env.a1 = 1;
+		env.a2 = m_taskId;
+		env.s1 = GetScript();
+		env.action_cb = +[](void* raw, int sub, int, int, const char* const* ptrs, size_t, int*, int64_t*, const char** strs) -> int {
+			auto* self = static_cast<SchedulerScriptController*>(raw);
+			if (sub == 8) { strs[0] = ""; return 1; }
+			if (sub == 7)
+			{
+				info("%s", ptrs[0]);
+				self->SetInfoName(ptrs[1]);
+				self->SetLogPrefix(ptrs[2]);
+				self->Execute();
+			}
+			return 1;
+		};
+		nzbget_rs_scheduler_exec(nullptr, 4, &env);
 	}
 };
 
@@ -34621,322 +34028,103 @@ public:
 		scFetchFeed
 	};
 
-	class Task
+	Scheduler() : m_rs(nzbget_rs_scheduler_new()) {}
+	~Scheduler() override { nzbget_rs_scheduler_free(m_rs); }
+	Scheduler(const Scheduler&) = delete;
+	Scheduler& operator=(const Scheduler&) = delete;
+
+	void AddTask(int id, int hours, int minutes, int weekDaysBits, ECommand command, const char* param)
 	{
-	public:
-		Task(int id, int hours, int minutes, int weekDaysBits, ECommand command, const char* param)
-			: m_id(id),
-			  m_hours(hours),
-			  m_minutes(minutes),
-			  m_weekDaysBits(weekDaysBits),
-			  m_command(command),
-			  m_param(param ? param : "")
-		{
-		}
-		friend class Scheduler;
-		int GetId() const { return m_id; }
-		int GetHours() const { return m_hours; }
-		int GetMinutes() const { return m_minutes; }
-		int GetWeeDaysBits() const { return m_weekDaysBits; }
+		NzbgetRsSchedulerEnv env{};
+		env.a1 = id;
+		env.a2 = hours;
+		env.a3 = minutes;
+		env.a4 = weekDaysBits;
+		env.a5 = static_cast<int>(command);
+		env.s1 = param;
+		nzbget_rs_scheduler_exec(m_rs, 0, &env);
+	}
 
-	private:
-		const int m_id;
-		const int m_hours;
-		const int m_minutes;
-		const int m_weekDaysBits;
-		const ECommand m_command;
-		const std::string m_param;
-		time_t m_lastExecuted = 0;
-	};
-
-	using TaskList = std::vector<std::unique_ptr<Task>>;
-
-	const TaskList& GetTasks() const { return m_taskList; }
-	void AddTask(std::unique_ptr<Task> task)
+	void EmitHealthTasks(std::vector<NzbgetRsHealthTaskInput>& out) const
 	{
-		Guard guard(m_taskListMutex);
-		m_taskList.push_back(std::move(task));
+		NzbgetRsSchedulerEnv env{};
+		env.ctx = &out;
+		env.action_cb = +[](void* raw, int sub, int, int, const char* const*, size_t, int* ints, int64_t*, const char**) -> int {
+			if (sub == 5)
+				static_cast<std::vector<NzbgetRsHealthTaskInput>*>(raw)->push_back({ints[0], ints[1], ints[2], ints[3]});
+			return 1;
+		};
+		nzbget_rs_scheduler_exec(m_rs, 3, &env);
 	}
 
 protected:
-	int ServiceInterval() override { return m_serviceInterval; }
+	int ServiceInterval() override { return nzbget_rs_scheduler_exec(m_rs, 1, nullptr); }
+
 	void ServiceWork() override
 	{
-		debug("Scheduler service work");
-
-		if (!DownloadQueue::IsLoaded())
-		{
-			return;
-		}
-
-		debug("Scheduler service work: doing work");
-
-		if (!m_firstChecked)
-		{
-			FirstCheck();
-			m_firstChecked = true;
-			return;
-		}
-
-		m_executeProcess = true;
-		CheckTasks();
-		CheckScheduledResume();
-		ScheduleNextWork();
+		NzbgetRsSchedulerEnv env{};
+#ifdef DEBUG
+		env.a5 = 1;
+#endif
+		env.log_cb = +[](void*, int level, const char* msg) {
+			const char* s = msg ? msg : "";
+			if (level == 0) debug("%s", s);
+			else if (level == 2) info("%s", s);
+			else if (level == 4) error("%s", s);
+		};
+		env.action_cb = +[](void*, int sub, int a1, int a2, const char* const* ptrs, size_t len, int* ints, int64_t* i64s, const char** strs) -> int {
+			if (sub == 0)
+			{
+				if (!DownloadQueue::IsLoaded()) return 0;
+				ints[0] = g_WorkState->GetLocalTimeOffset();
+				ints[1] = g_WorkState->GetLocalTimeOffset();
+				ints[2] = g_WorkState->GetSpeedLimit();
+				ints[3] = g_WorkState->GetPauseDownload() ? 1 : 0;
+				ints[4] = g_WorkState->GetPausePostProcess() ? 1 : 0;
+				ints[5] = g_WorkState->GetPauseScan() ? 1 : 0;
+				i64s[0] = static_cast<int64_t>(g_WorkState->GetResumeTime());
+				return 1;
+			}
+			if (sub == 1)
+			{
+				if (a1 == 0) g_WorkState->SetSpeedLimit(a2);
+				else if (a1 == 1) g_WorkState->SetPauseDownload(a2 != 0);
+				else if (a1 == 2) g_WorkState->SetPausePostProcess(a2 != 0);
+				else if (a1 == 3) g_WorkState->SetPauseScan(a2 != 0);
+				else if (a1 == 4)
+				{
+					g_WorkState->SetResumeTime(0);
+					g_WorkState->SetPauseDownload(false);
+					g_WorkState->SetPausePostProcess(false);
+					g_WorkState->SetPauseScan(false);
+				}
+				return 1;
+			}
+			if (sub == 2)
+			{
+				Servers* srvs = g_ServerPool->GetServers();
+				if (a1 == 0) return static_cast<int>(srvs->size());
+				if (a1 == 1)
+				{
+					NewsServer* srv = (*srvs)[static_cast<size_t>(a2)].get();
+					ints[0] = srv->GetId();
+					ints[1] = srv->GetActive() ? 1 : 0;
+					strs[0] = srv->GetName();
+					return 1;
+				}
+				if (a1 == 2) { (*srvs)[static_cast<size_t>(a2)]->SetActive(ints[0] != 0); return 1; }
+				if (a1 == 3) { g_ServerPool->Changed(); return 1; }
+			}
+			if (sub == 3) { g_FeedCoordinator->FetchFeedList(ptrs[0]); return 1; }
+			if (sub == 4) { SchedulerScriptController::StartFromArgs(ptrs[0], a1 != 0, a2, ptrs + 1, len > 0 ? len - 1 : 0); return 1; }
+			if (sub == 6) { i64s[0] = static_cast<int64_t>(Util::CurrentTime()); return 1; }
+			return 0;
+		};
+		nzbget_rs_scheduler_exec(m_rs, 2, &env);
 	}
 
 private:
-	using ServerStatusList = std::vector<bool>;
-
-	TaskList m_taskList;
-	Mutex m_taskListMutex;
-	time_t m_lastCheck = 0;
-	bool m_downloadRateChanged;
-	bool m_executeProcess;
-	bool m_pauseDownloadChanged;
-	bool m_pausePostProcessChanged;
-	bool m_pauseScanChanged;
-	bool m_serverChanged;
-	ServerStatusList m_serverStatusList;
-	bool m_firstChecked = false;
-	int m_serviceInterval = 1;
-
-	void ExecuteTask(Task* task)
-	{
-#ifdef DEBUG
-		debug("Executing scheduled command: %s", nzbget_rs_scheduler_service_str(2, (int)task->m_command));
-#endif
-
-		bool executeProcess = nzbget_rs_scheduler_service_op(
-			1, m_executeProcess ? 1 : 0, task->m_hours, 0, 0, 0, 0, nullptr, nullptr, nullptr) != 0;
-
-		switch (task->m_command)
-		{
-			case scDownloadRate:
-				if (!task->m_param.empty())
-				{
-					g_WorkState->SetSpeedLimit(nzbget_rs_scheduler_service_op(
-						2, 0, 0, 0, 0, 0, 0, task->m_param.c_str(), nullptr, nullptr));
-					m_downloadRateChanged = true;
-				}
-				break;
-
-			case scPauseDownload:
-			case scUnpauseDownload:
-				g_WorkState->SetPauseDownload(task->m_command == scPauseDownload);
-				m_pauseDownloadChanged = true;
-				break;
-
-			case scPausePostProcess:
-			case scUnpausePostProcess:
-				g_WorkState->SetPausePostProcess(task->m_command == scPausePostProcess);
-				m_pausePostProcessChanged = true;
-				break;
-
-			case scPauseScan:
-			case scUnpauseScan:
-				g_WorkState->SetPauseScan(task->m_command == scPauseScan);
-				m_pauseScanChanged = true;
-				break;
-
-			case scExtensions:
-			case scProcess:
-				if (executeProcess)
-				{
-					SchedulerScriptController::StartScript(task->m_param.c_str(), task->m_command == scProcess, task->m_id);
-				}
-				break;
-
-			case scActivateServer:
-			case scDeactivateServer:
-				EditServer(task->m_command == scActivateServer, task->m_param.c_str());
-				break;
-
-			case scFetchFeed:
-				if (executeProcess)
-				{
-					FetchFeed(task->m_param.c_str());
-					break;
-				}
-		}
-	}
-
-	void CheckTasks()
-	{
-		PrepareLog();
-
-		{
-			Guard guard(m_taskListMutex);
-
-			time_t current = Util::CurrentTime();
-
-			std::vector<NzbgetRsSchedTask> tasks;
-			tasks.reserve(m_taskList.size());
-			for (Task* task : &m_taskList)
-			{
-				tasks.push_back({task->m_hours, task->m_minutes, task->m_weekDaysBits,
-					static_cast<long long>(task->m_lastExecuted)});
-			}
-			std::vector<size_t> due(m_taskList.size() * 9);
-			long long lastCheck = m_lastCheck;
-			int reset = 0;
-			// StatMeter can change the atomic offset between these two readings.
-			// Preserve the original readings and reuse them if the buffer grows.
-			int currentOffset = tasks.empty() ? 0 : g_WorkState->GetLocalTimeOffset();
-			int lastCheckOffset = tasks.empty() ? 0 : g_WorkState->GetLocalTimeOffset();
-			auto calendar = [](long long value, NzbgetRsSchedTm* result)
-			{
-				time_t time = static_cast<time_t>(value);
-				tm fields{};
-				gmtime_r(&time, &fields);
-				*result = {static_cast<long long>(fields.tm_year) + 1900, fields.tm_mon,
-					fields.tm_mday, fields.tm_hour, fields.tm_min, fields.tm_sec, fields.tm_wday};
-			};
-			size_t dueCount;
-			while (true)
-			{
-				dueCount = nzbget_rs_scheduler_check(tasks.data(), tasks.size(), &lastCheck, current,
-					currentOffset, lastCheckOffset, due.data(), due.size(), &reset, calendar);
-				if (dueCount <= due.size())
-				{
-					break;
-				}
-				// Leap corrections in libc's calendar can exceed the usual count * 9.
-				// An undersized output leaves all input state unchanged for this retry.
-				due.resize(dueCount);
-			}
-
-			if (reset)
-			{
-				debug("Reset scheduled tasks (detected clock change greater than 90 minutes or negative)");
-				m_executeProcess = false;
-			}
-			for (size_t i = 0; i < tasks.size(); i++)
-			{
-				m_taskList[i]->m_lastExecuted = static_cast<time_t>(tasks[i].lastExecuted);
-			}
-			for (size_t i = 0; i < dueCount; i++)
-			{
-				ExecuteTask(m_taskList[due[i]].get());
-			}
-			m_lastCheck = static_cast<time_t>(lastCheck);
-		}
-
-		PrintLog();
-	}
-
-	void PrepareLog()
-	{
-		m_downloadRateChanged = false;
-		m_pauseDownloadChanged = false;
-		m_pausePostProcessChanged = false;
-		m_pauseScanChanged = false;
-		m_serverChanged = false;
-	}
-
-	void PrintLog()
-	{
-		if (m_downloadRateChanged)
-		{
-			info("Scheduler: setting download rate to %i KB/s",
-				nzbget_rs_scheduler_service_op(6, g_WorkState->GetSpeedLimit(), 0, 0, 0, 0, 0, nullptr, nullptr, nullptr));
-		}
-		if (m_pauseDownloadChanged)
-		{
-			info("Scheduler: %s download", nzbget_rs_scheduler_service_str(0, g_WorkState->GetPauseDownload() ? 1 : 0));
-		}
-		if (m_pausePostProcessChanged)
-		{
-			info("Scheduler: %s post-processing", nzbget_rs_scheduler_service_str(0, g_WorkState->GetPausePostProcess() ? 1 : 0));
-		}
-		if (m_pauseScanChanged)
-		{
-			info("Scheduler: %s scan", nzbget_rs_scheduler_service_str(0, g_WorkState->GetPauseScan() ? 1 : 0));
-		}
-		if (m_serverChanged)
-		{
-			int index = 0;
-			for (NewsServer* server : g_ServerPool->GetServers())
-			{
-				if (server->GetActive() != m_serverStatusList[index])
-				{
-					info("Scheduler: %s %s",
-						nzbget_rs_scheduler_service_str(1, server->GetActive() ? 1 : 0),
-						server->GetName());
-				}
-				index++;
-			}
-			g_ServerPool->Changed();
-		}
-	}
-
-	void EditServer(bool active, const char* serverList)
-	{
-		Tokenizer tok(serverList, ",;");
-		while (const char* serverRef = tok.Next())
-		{
-			for (NewsServer* server : g_ServerPool->GetServers())
-			{
-				if (nzbget_rs_scheduler_service_op(
-					3, server->GetId(), 0, 0, 0, 0, 0, server->GetName(), serverRef, nullptr) != 0)
-				{
-					if (!m_serverChanged)
-					{
-						m_serverStatusList.clear();
-						m_serverStatusList.reserve(g_ServerPool->GetServers()->size());
-						for (NewsServer* server2 : g_ServerPool->GetServers())
-						{
-							m_serverStatusList.push_back(server2->GetActive());
-						}
-					}
-					m_serverChanged = true;
-					server->SetActive(active);
-					break;
-				}
-			}
-		}
-	}
-
-	void FetchFeed(const char* feedList)
-	{
-		g_FeedCoordinator->FetchFeedList(feedList);
-	}
-
-	void CheckScheduledResume()
-	{
-		if (nzbget_rs_scheduler_service_op(
-			5, 0, 0, 0, 0, g_WorkState->GetResumeTime(), Util::CurrentTime(), nullptr, nullptr, nullptr) != 0)
-		{
-			info("Autoresume");
-			g_WorkState->SetResumeTime(0);
-			g_WorkState->SetPauseDownload(false);
-			g_WorkState->SetPausePostProcess(false);
-			g_WorkState->SetPauseScan(false);
-		}
-	}
-
-	void FirstCheck()
-	{
-		{
-			Guard guard(m_taskListMutex);
-
-			std::sort(m_taskList.begin(), m_taskList.end(),
-				[](const std::unique_ptr<Task>& task1, const std::unique_ptr<Task>& task2)
-			{
-				return nzbget_rs_scheduler_service_op(
-					0, task1->m_hours, task1->m_minutes, task2->m_hours, task2->m_minutes,
-					0, 0, nullptr, nullptr, nullptr) != 0;
-			});
-		}
-
-		// check all tasks for the last week
-		CheckTasks();
-	}
-
-	void ScheduleNextWork()
-	{
-		m_serviceInterval = nzbget_rs_scheduler_service_op(
-			7, 0, 0, 0, 0, Util::CurrentTime(), 0, nullptr, nullptr, nullptr);
-	}
+	NzbgetRsScheduler* m_rs;
 };
 
 #ifndef SYSTEM_HEALTH_H
@@ -34948,8 +34136,8 @@ class Service
 {
 public:
 	Service(const Options& options, const Servers& servers, const ::FeedCoordinator& feedCoordinator,
-			const ::Scheduler::TaskList& tasks, const ::Log& log)
-		: m_options(options), m_servers(servers), m_feedCoordinator(feedCoordinator), m_tasks(tasks), m_log(log)
+			const ::Scheduler& scheduler, const ::Log& log)
+		: m_options(options), m_servers(servers), m_feedCoordinator(feedCoordinator), m_scheduler(scheduler), m_log(log)
 	{
 	}
 
@@ -35020,16 +34208,7 @@ private:
 		}
 
 		std::vector<NzbgetRsHealthTaskInput> tasks;
-		tasks.reserve(m_tasks.size());
-		for (const auto& task : m_tasks)
-		{
-			tasks.push_back(NzbgetRsHealthTaskInput{
-				task->GetId(),
-				task->GetHours(),
-				task->GetMinutes(),
-				task->GetWeeDaysBits()
-			});
-		}
+		m_scheduler.EmitHealthTasks(tasks);
 
 		std::vector<NzbgetRsHealthCategoryInput> categories;
 		if (const auto* cats = m_options.GetCategories())
@@ -35180,7 +34359,7 @@ private:
 	const Options& m_options;
 	const Servers& m_servers;
 	const ::FeedCoordinator& m_feedCoordinator;
-	const ::Scheduler::TaskList& m_tasks;
+	const ::Scheduler& m_scheduler;
 	const ::Log& m_log;
 };
 }  // namespace SystemHealth
@@ -35210,282 +34389,201 @@ public:
 		brDevel
 	};
 
+	Maintenance() : m_rs(nzbget_rs_maintenance_new()) {}
 	~Maintenance()
 	{
-		bool waitScript = false;
-		{
-			Guard guard(m_controllerMutex);
-			if (m_updateScriptController)
-			{
-				m_updateScriptController->Detach();
-				waitScript = true;
-			}
-		}
-
-		if (waitScript)
-		{
-			while (m_updateScriptController)
-			{
-				Util::Sleep(20);
-			}
-		}
+		NzbgetRsMaintenanceEnv env{};
+		env.action_cb = &Maintenance::MaintActionCb;
+		nzbget_rs_maintenance_exec(m_rs, 0, &env);
+		nzbget_rs_maintenance_free(m_rs);
 	}
+	Maintenance(const Maintenance&) = delete;
+	Maintenance& operator=(const Maintenance&) = delete;
 
-	void AddMessage(Message::EKind kind, time_t time, const char* text)
+	void CollectMessages(int idFrom, int nrEntries, void* emitCtx, NzbgetRsXmlRpcEmitFn emitCb)
 	{
-		if (time == 0)
-		{
-			time = Util::CurrentTime();
-		}
-
-		Guard guard(m_logMutex);
-		m_messages.emplace_back(++m_idMessageGen, kind, time, text);
+		NzbgetRsMaintenanceEnv env{};
+		env.a3 = idFrom;
+		env.a4 = nrEntries;
+		env.emit_ctx = emitCtx;
+		env.emit_cb = emitCb;
+		nzbget_rs_maintenance_exec(m_rs, 3, &env);
 	}
-
-	GuardedMessageList GuardMessages() { return GuardedMessageList(&m_messages, &m_logMutex); }
 
 	bool StartUpdate(EBranch branch)
 	{
-		Guard guard(m_controllerMutex);
-
-		if (m_updateScriptController)
-		{
-			error("Could not start update-script: update-script is already running");
-			return false;
-		}
-
-		if (!ReadPackageInfoStr("install-script", m_updateScript))
-		{
-			return false;
-		}
-
-		if (m_updateScript[0] != PATH_SEPARATOR)
-		{
-			m_updateScript = CString::FormatStr("%s%c%s", g_Options->GetAppDir(), PATH_SEPARATOR, *m_updateScript);
-		}
-
-		{
-			Guard logGuard(m_logMutex);
-			m_messages.clear();
-		}
-
-		m_updateScriptController = new UpdateScriptController();
-		m_updateScriptController->SetArgs({*m_updateScript});
-		m_updateScriptController->SetBranch(branch);
-		m_updateScriptController->SetAutoDestroy(true);
-
-		m_updateScriptController->Start();
-
-		return true;
+		NzbgetRsMaintenanceEnv env{};
+		env.a1 = static_cast<int>(branch);
+		env.a2 = PATH_SEPARATOR;
+		env.s1 = g_Options->GetWebDir();
+		env.s2 = g_Options->GetAppDir();
+		env.log_cb = &Maintenance::MaintLogCb;
+		env.action_cb = &Maintenance::MaintActionCb;
+		return nzbget_rs_maintenance_exec(m_rs, 4, &env) != 0;
 	}
 
-	void ResetUpdateController()
-	{
-		Guard guard(m_controllerMutex);
-		m_updateScriptController = nullptr;
-	}
+	void ResetUpdateController() { nzbget_rs_maintenance_exec(m_rs, 1, nullptr); }
 
 	bool CheckUpdates(CString& updateInfo)
 	{
-		CString updateInfoScript;
-		if (!ReadPackageInfoStr("update-info-script", updateInfoScript))
-		{
-			return false;
-		}
-
-		struct InfoController : public ScriptController
-		{
-			int m_prefixLen = 0;
-			StringBuilder m_updateInfo;
-
-			void AddMessage(Message::EKind kind, const char* text) override
-			{
-				text = text + m_prefixLen;
-
-				if (!strncmp(text, "[NZB] ", 6))
-				{
-					debug("Command %s detected", text + 6);
-					if (!strncmp(text + 6, "[UPDATEINFO]", 12))
-					{
-						m_updateInfo.Append(text + 6 + 12);
-					}
-					else
-					{
-						error("Invalid command \"%s\" received from %s", text, GetInfoName());
-					}
-				}
-				else
-				{
-					ScriptController::AddMessage(kind, text);
-				}
-			}
-		};
-
-		const char* baseScript = FileSystem::BaseFileName(updateInfoScript);
-		detail("Executing update-info-script %s", baseScript);
-
-		InfoController scriptController;
-		scriptController.SetArgs({*updateInfoScript});
-		scriptController.m_prefixLen = InitScriptInfoAndLogPrefix(scriptController, 1, baseScript, 1023);
-
-		scriptController.Execute();
-
-		if (!scriptController.m_updateInfo.Empty())
-		{
-			updateInfo = scriptController.m_updateInfo;
-		}
-
+		NzbgetRsBuf buf{};
+		NzbgetRsMaintenanceEnv env{};
+		env.ctx = this;
+		env.a2 = PATH_SEPARATOR;
+		env.s1 = g_Options->GetWebDir();
+		env.out_buf = &buf;
+		env.log_cb = &Maintenance::MaintLogCb;
+		env.action_cb = &Maintenance::MaintActionCb;
+		if (nzbget_rs_maintenance_exec(m_rs, 5, &env) != 0 && buf.len > 0)
+			updateInfo.Set(buf.data ? buf.data : "", static_cast<int>(buf.len));
+		nzbget_rs_free(buf);
 		return !updateInfo.Empty();
 	}
 
 	static bool VerifySignature(const char* inFilename, const char* sigFilename, const char* pubKeyFilename)
 	{
-#ifndef DISABLE_TLS
-		uint8_t inHash[32]{};
-		uint8_t signature[256]{};
-		NzbgetRsBuf pubKeyBuf{};
-		if (!nzbget_rs_maintenance_prepare_signature_inputs(
-			inFilename, sigFilename, pubKeyFilename, inHash, signature, &pubKeyBuf))
-		{
-			nzbget_rs_free(pubKeyBuf);
-			return false;
-		}
-		BIO* mem = BIO_new_mem_buf(pubKeyBuf.data, static_cast<int>(pubKeyBuf.len));
-		EVP_PKEY* pubKey = PEM_read_bio_PUBKEY(mem, nullptr, nullptr, nullptr);
-		BIO_free(mem);
-		nzbget_rs_free(pubKeyBuf);
-		if (!pubKey)
-		{
-			return false;
-		}
-		EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new(pubKey, nullptr);
-		if (!pctx)
-		{
-			EVP_PKEY_free(pubKey);
-			return false;
-		}
-		bool ok = EVP_PKEY_verify_init(pctx) == 1 &&
-			EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING) > 0 &&
-			EVP_PKEY_CTX_set_signature_md(pctx, EVP_sha256()) > 0 &&
-			EVP_PKEY_verify(pctx, signature, sizeof(signature), inHash, sizeof(inHash)) == 1;
-		EVP_PKEY_CTX_free(pctx);
-		EVP_PKEY_free(pubKey);
-		return ok;
-#else
-		(void)inFilename;
-		(void)sigFilename;
-		(void)pubKeyFilename;
-		return false;
-#endif
+		NzbgetRsMaintenanceEnv env{};
+		env.s1 = inFilename;
+		env.s2 = sigFilename;
+		env.s3 = pubKeyFilename;
+		env.action_cb = &Maintenance::MaintActionCb;
+		return nzbget_rs_maintenance_exec(nullptr, 8, &env) != 0;
 	}
 
 private:
-	static int InitScriptInfoAndLogPrefix(ScriptController& sc, int isInfoScript, const char* baseScript, size_t maxPrefixLen)
-	{
-		sc.SetInfoName(CString::FormatStr("%s %s", isInfoScript ? "update-info-script" : "update-script", baseScript));
+	NzbgetRsMaintenance* m_rs;
 
-		size_t boundedLen = std::min(strlen(baseScript), maxPrefixLen);
-		CString logPrefix;
-		logPrefix.Set(baseScript, (int)boundedLen);
-		if (char* ext = strrchr(logPrefix, '.')) *ext = '\0';
-		sc.SetLogPrefix(logPrefix);
-		return strlen(logPrefix) + 2;
+	static void MaintLogCb(void*, int level, const char* msg)
+	{
+		const char* s = msg ? msg : "";
+		if (level == 0) debug("%s", s);
+		else if (level == 1) detail("%s", s);
+		else if (level == 4) error("%s", s);
 	}
 
 	class UpdateScriptController : public Thread, public ScriptController
 	{
 	public:
-		virtual void Run()
+		virtual void Run() override
 		{
 			UnregisterRunningScript();
-
-			m_prefixLen = 0;
-			PrintMessage(Message::mkInfo, "Executing update-script %s", GetScript());
-
-			const char* baseScript = FileSystem::BaseFileName(GetScript());
-			m_prefixLen = InitScriptInfoAndLogPrefix(*this, 0, baseScript, 99);
-
-			static const char* BranchNames[] = { "STABLE", "TESTING", "DEVEL" };
-			SetEnvVar("NZBUP_BRANCH", BranchNames[m_branch]);
-
-			SetEnvVar("NZBUP_RUNMODE", g_Options->GetDaemonMode() ? "DAEMON" : "SERVER");
-
-			for (int i = 0; i < g_ArgumentCount; i++)
-			{
-				SetEnvVar(BString<100>("NZBUP_CMDLINE%i", i), (*g_Arguments)[i]);
-			}
-
-			SetIntEnvVar("NZBUP_PROCESSID", (int)getpid());
-
+			NzbgetRsMaintenanceEnv env{};
+			env.ctx = static_cast<UpdateScriptController*>(this);
+			env.a1 = static_cast<int>(m_branch);
+			env.a2 = g_Options->GetDaemonMode() ? 1 : 0;
+			env.s1 = GetScript();
+			env.log_cb = &Maintenance::MaintLogCb;
+			env.action_cb = &Maintenance::MaintActionCb;
+			m_prefixLen = nzbget_rs_maintenance_exec(g_Maintenance->m_rs, 6, &env);
 			Execute();
-
 			g_Maintenance->ResetUpdateController();
 		}
 
 		void SetBranch(Maintenance::EBranch branch) { m_branch = branch; }
+		void PrintBanner(const char* s) { PrintMessage(Message::mkInfo, "%s", s); }
+		void BaseAdd(Message::EKind k, const char* s) { ScriptController::AddMessage(k, s); }
 
 	protected:
-		virtual void AddMessage(Message::EKind kind, const char* text)
+		virtual void AddMessage(Message::EKind kind, const char* text) override
 		{
-			text = text + m_prefixLen;
-
-			if (!strncmp(text, "[NZB] ", 6))
-			{
-				debug("Command %s detected", text + 6);
-				if (!strcmp(text + 6, "QUIT"))
-				{
-					Detach();
-					ExitProc();
-				}
-				else
-				{
-					error("Invalid command \"%s\" received", text);
-				}
-			}
-			else
-			{
-				g_Maintenance->AddMessage(kind, Util::CurrentTime(), text);
-				ScriptController::AddMessage(kind, text);
-			}
+			NzbgetRsMaintenanceEnv env{};
+			env.ctx = static_cast<UpdateScriptController*>(this);
+			env.a1 = static_cast<int>(kind);
+			env.a2 = m_prefixLen;
+			env.s1 = text;
+			env.log_cb = &Maintenance::MaintLogCb;
+			env.action_cb = &Maintenance::MaintActionCb;
+			nzbget_rs_maintenance_exec(g_Maintenance->m_rs, 7, &env);
 		}
 
 	private:
-		Maintenance::EBranch m_branch;
-		int m_prefixLen;
+		Maintenance::EBranch m_branch = brStable;
+		int m_prefixLen = 0;
 	};
 
-	MessageList m_messages;
-	Mutex m_logMutex;
-	Mutex m_controllerMutex;
-	int m_idMessageGen = 0;
-	UpdateScriptController* m_updateScriptController = nullptr;
-	CString m_updateScript;
-
-	bool ReadPackageInfoStr(const char* key, CString& value)
+	static uintptr_t MaintActionCb(void* ctx, int sub, int a1, uintptr_t p1,
+		const char* s1, const char* s2, const char* s3, const uint8_t* bytes, size_t len)
 	{
-		int errKind = 0;
-		NzbgetRsBuf fnBuf{};
-		NzbgetRsBuf valBuf = nzbget_rs_maintenance_read_package_info_str(
-			g_Options->GetWebDir(), PATH_SEPARATOR, key, &errKind, &fnBuf);
-		if (errKind != 0)
+		if (sub == 0) { reinterpret_cast<UpdateScriptController*>(p1)->Detach(); return 1; }
+		if (sub == 1)
 		{
-			const char* fn = fnBuf.data ? fnBuf.data : "";
-			if (errKind == 1)
-			{
-				error("Could not load file %s", fn);
-			}
-			else
-			{
-				error("Could not parse file %s", fn);
-			}
-			nzbget_rs_free(fnBuf);
-			nzbget_rs_free(valBuf);
-			return false;
+			auto* ctrl = new UpdateScriptController();
+			ctrl->SetArgs({s1 ? s1 : ""});
+			ctrl->SetBranch(static_cast<EBranch>(a1));
+			ctrl->SetAutoDestroy(true);
+			return reinterpret_cast<uintptr_t>(ctrl);
 		}
-		value.Set(valBuf.data ? valBuf.data : "", static_cast<int>(valBuf.len));
-		nzbget_rs_free(fnBuf);
-		nzbget_rs_free(valBuf);
-		return true;
+		if (sub == 2) { reinterpret_cast<UpdateScriptController*>(p1)->Start(); return 1; }
+		if (sub == 3)
+		{
+			struct InfoController : public ScriptController
+			{
+				NzbgetRsMaintenance* m_maint = nullptr;
+				int m_prefixLen = 0;
+				uintptr_t m_accPtr = 0;
+				void AddMessage(Message::EKind kind, const char* text) override
+				{
+					NzbgetRsMaintenanceEnv env{};
+					env.ctx = static_cast<ScriptController*>(this);
+					env.p1 = m_accPtr;
+					env.a1 = static_cast<int>(kind);
+					env.a2 = m_prefixLen;
+					env.a4 = 1;
+					env.s1 = text;
+					env.s2 = GetInfoName();
+					env.log_cb = &Maintenance::MaintLogCb;
+					env.action_cb = +[](void* raw, int s, int k, uintptr_t, const char* msg, const char*, const char*, const uint8_t*, size_t) -> uintptr_t {
+						if (s == 7) static_cast<InfoController*>(static_cast<ScriptController*>(raw))->BaseAdd(static_cast<Message::EKind>(k), msg);
+						return 1;
+					};
+					nzbget_rs_maintenance_exec(m_maint, 6, &env);
+				}
+				void BaseAdd(Message::EKind k, const char* msg) { ScriptController::AddMessage(k, msg); }
+			} ic;
+			ic.m_maint = static_cast<Maintenance*>(ctx)->m_rs;
+			ic.m_prefixLen = a1;
+			ic.m_accPtr = p1;
+			ic.SetArgs({s1 ? s1 : ""});
+			ic.SetInfoName(s2);
+			ic.SetLogPrefix(s3);
+			ic.Execute();
+			return 1;
+		}
+		if (sub == 4)
+		{
+			auto* self = static_cast<UpdateScriptController*>(ctx);
+			self->PrintBanner(s1);
+			self->SetInfoName(s2);
+			self->SetLogPrefix(s3);
+			for (int i = 0; i < g_ArgumentCount; i++)
+				self->SetEnvVar(BString<100>("NZBUP_CMDLINE%i", i), (*g_Arguments)[i]);
+			return 1;
+		}
+		if (sub == 5) { static_cast<UpdateScriptController*>(ctx)->SetEnvVar(s1, s2); return 1; }
+		if (sub == 6)
+		{
+#ifndef DISABLE_TLS
+			BIO* mem = BIO_new_mem_buf(bytes, static_cast<int>(len));
+			EVP_PKEY* pubKey = PEM_read_bio_PUBKEY(mem, nullptr, nullptr, nullptr);
+			BIO_free(mem);
+			if (!pubKey) return 0;
+			EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new(pubKey, nullptr);
+			bool ok = pctx &&
+				EVP_PKEY_verify_init(pctx) == 1 &&
+				EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING) > 0 &&
+				EVP_PKEY_CTX_set_signature_md(pctx, EVP_sha256()) > 0 &&
+				EVP_PKEY_verify(pctx, reinterpret_cast<const uint8_t*>(s2), 256, reinterpret_cast<const uint8_t*>(s1), 32) == 1;
+			if (pctx) EVP_PKEY_CTX_free(pctx);
+			EVP_PKEY_free(pubKey);
+			return ok ? 1 : 0;
+#else
+			(void)s1; (void)s2; (void)bytes; (void)len;
+			return 0;
+#endif
+		}
+		if (sub == 7) { static_cast<UpdateScriptController*>(ctx)->BaseAdd(static_cast<Message::EKind>(a1), s1); return 1; }
+		if (sub == 8) { static_cast<UpdateScriptController*>(ctx)->Detach(); ExitProc(); return 1; }
+		return 0;
 	}
 };
 
@@ -36256,10 +35354,10 @@ private:
 					return 1;
 				}
 				case 2: {
+					if (a1 == 1) { g_Maintenance->CollectMessages(a3, a4, emitCtx, emitCb); return 1; }
 					MessageList diskMessages;
 					std::unique_ptr<GuardedDownloadQueue> dq;
 					auto guardMessages = [&]() -> GuardedMessageList {
-						if (a1 == 1) return g_Maintenance->GuardMessages();
 						if (a1 == 2) return g_CommandScriptLog->GuardMessages();
 						if (a1 == 3)
 						{

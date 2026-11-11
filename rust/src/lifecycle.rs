@@ -796,6 +796,633 @@ pub fn reload_coordinator_op(op: c_int, state_cb: Option<unsafe extern "C" fn(c_
     }
 }
 
+// ============================================================================
+// End-to-end `DiskService` & `RustyGet` daemon state/loop coordinator
+// ============================================================================
+
+#[repr(C)]
+pub struct NzbgetRsDaemonEnv {
+    pub ctx: *mut std::ffi::c_void,
+    pub a1: c_int,
+    pub a2: c_int,
+    pub a3: c_int,
+    pub a4: c_int,
+    pub a5: c_int,
+    pub a6: c_int,
+    pub s1: *const c_char,
+    pub s2: *const c_char,
+    pub s3: *const c_char,
+    pub s4: *const c_char,
+    pub s5: *const c_char,
+    pub segv_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+    pub global_log_cb: Option<unsafe extern "C" fn(c_int, *const c_char)>,
+    pub reload_cb: Option<unsafe extern "C" fn(c_int) -> c_int>,
+    pub log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+    pub action_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            c_int,
+            c_int,
+            *const c_char,
+            *const c_char,
+        ) -> c_int,
+    >,
+}
+
+struct DiskServiceState {
+    waiting_required_dir: bool,
+    waiting_reported: bool,
+}
+
+struct DaemonWaitState {
+    reloading: bool,
+    stopped: bool,
+}
+
+struct DaemonInstanceState {
+    disk: std::sync::Mutex<DiskServiceState>,
+    wait_mutex: std::sync::Mutex<DaemonWaitState>,
+    wait_cond: std::sync::Condvar,
+    lock_file_owned: AtomicBool,
+}
+
+static DAEMON_INSTANCE: DaemonInstanceState = DaemonInstanceState {
+    disk: std::sync::Mutex::new(DiskServiceState {
+        waiting_required_dir: true,
+        waiting_reported: false,
+    }),
+    wait_mutex: std::sync::Mutex::new(DaemonWaitState {
+        reloading: false,
+        stopped: false,
+    }),
+    wait_cond: std::sync::Condvar::new(),
+    lock_file_owned: AtomicBool::new(false),
+};
+
+fn dm_cbuf(bytes: &[u8]) -> Vec<u8> {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let mut v = Vec::with_capacity(end + 1);
+    v.extend_from_slice(&bytes[..end]);
+    v.push(0);
+    v
+}
+
+unsafe fn dm_cstr_bytes<'a>(p: *const c_char) -> &'a [u8] {
+    if p.is_null() {
+        &[]
+    } else {
+        std::ffi::CStr::from_ptr(p).to_bytes()
+    }
+}
+
+unsafe fn dm_opt_cstr<'a>(p: *const c_char) -> &'a std::ffi::CStr {
+    if p.is_null() {
+        c""
+    } else {
+        std::ffi::CStr::from_ptr(p)
+    }
+}
+
+unsafe fn dm_log(env: &NzbgetRsDaemonEnv, level: c_int, msg: &[u8]) {
+    let c = dm_cbuf(msg);
+    if let Some(cb) = env.log_cb {
+        cb(env.ctx, level, c.as_ptr() as *const c_char);
+    } else if let Some(gcb) = env.global_log_cb {
+        gcb(level, c.as_ptr() as *const c_char);
+    }
+}
+
+fn dm_is_stopped() -> bool {
+    DAEMON_INSTANCE
+        .wait_mutex
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .stopped
+}
+
+fn dm_is_reloading() -> bool {
+    DAEMON_INSTANCE
+        .wait_mutex
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .reloading
+}
+
+unsafe fn dm_trigger_exit(env: &NzbgetRsDaemonEnv) {
+    RELOAD_COORDINATOR.cancel_pending();
+    signal_state_op(5);
+    if let Some(rcb) = env.reload_cb {
+        rcb(3);
+    } else if let Some(acb) = env.action_cb {
+        acb(env.ctx, 10, 0, std::ptr::null(), std::ptr::null());
+    }
+}
+
+unsafe fn dm_trigger_reload(
+    reload_cb: Option<unsafe extern "C" fn(c_int) -> c_int>,
+    global_log_cb: Option<unsafe extern "C" fn(c_int, *const c_char)>,
+) {
+    let Some(rcb) = reload_cb else {
+        return;
+    };
+    RELOAD_COORDINATOR.request_reload(move |action| match action {
+        0 => {
+            let flags = rcb(0);
+            let has_inst = (flags & 1) != 0;
+            c_int::from(!has_inst || dm_is_reloading() || dm_is_stopped() || signal_state_op(0) != 0)
+        }
+        1 => {
+            if let Some(lcb) = global_log_cb {
+                lcb(0, c"Daemon is already reloading or stopping".as_ptr());
+            }
+            0
+        }
+        2 => {
+            if let Some(lcb) = global_log_cb {
+                lcb(0, c"Reload request debounced, target extended".as_ptr());
+            }
+            0
+        }
+        3 => signal_state_op(0),
+        4 => {
+            let flags = rcb(0);
+            let has_inst = (flags & 1) != 0;
+            let active_unpack = (flags & 2) != 0;
+            c_int::from(active_unpack) | (if !has_inst || dm_is_reloading() { 2 } else { 0 })
+        }
+        5 => {
+            if let Some(lcb) = global_log_cb {
+                lcb(
+                    2,
+                    c"Unpack is actively executing; deferring reload until unpack completes..."
+                        .as_ptr(),
+                );
+            }
+            0
+        }
+        6 => signal_state_op(1),
+        7 => {
+            RELOAD_COORDINATOR.cancel_pending();
+            signal_state_op(5);
+            rcb(3);
+            0
+        }
+        8 => {
+            let flags = rcb(0);
+            if (flags & 1) != 0 && !dm_is_reloading() {
+                if let Some(lcb) = global_log_cb {
+                    lcb(2, c"Reloading...".as_ptr());
+                }
+                rcb(1);
+            }
+            0
+        }
+        _ => 0,
+    });
+}
+
+/// Executes `DiskService` and `RustyGet` daemon lifecycle operations (`daemon/main/rustyget.cpp`):
+/// - `0`: `DiskService::ServiceInterval`
+/// - `1`: `DiskService::ServiceWork`
+/// - `2`: `ResetInstance(a1 = reload)`
+/// - `3`: `QueryState` (`0`: `reloading`, `1`: `stopped`, `2`: `signal_state_op(a2)`)
+/// - `4`: `Phase1ApplyUmask(a1 = opt_umask, a2 = is_debug)`
+/// - `5`: `Phase1DaemonizeAndActivate`
+/// - `6`: `ShouldStartSecureServer`
+/// - `7`: `Phase3Run` (standalone/server `DoMainLoop` + `remote-mode` loop)
+/// - `8`: `Stop(a1 = reload, a2 = remote_mode)`
+/// - `9`: `Reload()`
+/// - `10`: `ExitProc()`
+/// - `11`: `Phase4Shutdown`
+/// - `12`: `CleanupLockFile`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_daemon_exec(
+    op: c_int,
+    env: *const NzbgetRsDaemonEnv,
+) -> c_int {
+    let Some(e) = env.as_ref() else {
+        return 0;
+    };
+    match op {
+        0 => {
+            let waiting = DAEMON_INSTANCE
+                .disk
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .waiting_required_dir;
+            if waiting || (e.a1 > 0 && e.a2 != 0) {
+                1
+            } else {
+                -1
+            }
+        }
+        1 => {
+            dm_log(e, 0, b"Disk service work");
+            if e.a1 > 0 && e.a2 != 0 {
+                dm_log(e, 0, b"Disk service work: check disk space");
+                let inter_opt = if e.s2.is_null() {
+                    None
+                } else {
+                    Some(std::ffi::CStr::from_ptr(e.s2))
+                };
+                let (dest_low, inter_low) = crate::fsops::disk_service_check_disk_space(
+                    dm_opt_cstr(e.s1),
+                    inter_opt,
+                    e.a1,
+                );
+                if dest_low {
+                    let mut wm = b"Low disk space on ".to_vec();
+                    wm.extend_from_slice(dm_cstr_bytes(e.s1));
+                    wm.extend_from_slice(b". Pausing download");
+                    dm_log(e, 3, &wm);
+                    if let Some(cb) = e.action_cb {
+                        cb(e.ctx, 0, 0, std::ptr::null(), std::ptr::null());
+                    }
+                }
+                if inter_low {
+                    let mut wm = b"Low disk space on ".to_vec();
+                    wm.extend_from_slice(dm_cstr_bytes(e.s2));
+                    wm.extend_from_slice(b". Pausing download");
+                    dm_log(e, 3, &wm);
+                    if let Some(cb) = e.action_cb {
+                        cb(e.ctx, 0, 0, std::ptr::null(), std::ptr::null());
+                    }
+                }
+            }
+
+            let (waiting_req, prev_reported) = {
+                let dg = DAEMON_INSTANCE
+                    .disk
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                (dg.waiting_required_dir, dg.waiting_reported)
+            };
+            if waiting_req {
+                dm_log(e, 0, b"Disk service work: check required dir");
+                let (all_exist, next_reported) = crate::fsops::disk_service_check_required_dirs(
+                    dm_cstr_bytes(e.s3),
+                    prev_reported,
+                    |dir_cstr| {
+                        let mut im = b"Waiting for required directory ".to_vec();
+                        im.extend_from_slice(dir_cstr.to_bytes());
+                        dm_log(e, 2, &im);
+                    },
+                );
+                if !all_exist {
+                    DAEMON_INSTANCE
+                        .disk
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .waiting_reported = next_reported;
+                    return 0;
+                }
+                if prev_reported {
+                    dm_log(e, 2, b"All required directories available");
+                }
+                if let Some(cb) = e.action_cb {
+                    cb(e.ctx, 1, 0, std::ptr::null(), std::ptr::null());
+                }
+                let mut dg = DAEMON_INSTANCE
+                    .disk
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                dg.waiting_required_dir = false;
+                dg.waiting_reported = next_reported;
+            }
+            1
+        }
+        2 => {
+            {
+                let mut dg = DAEMON_INSTANCE
+                    .disk
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                dg.waiting_required_dir = true;
+                dg.waiting_reported = false;
+            }
+            let mut wg = DAEMON_INSTANCE
+                .wait_mutex
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            wg.reloading = e.a1 != 0;
+            wg.stopped = false;
+            1
+        }
+        3 => match e.a1 {
+            0 => c_int::from(dm_is_reloading()),
+            1 => c_int::from(dm_is_stopped()),
+            2 => signal_state_op(e.a2),
+            _ => 0,
+        },
+        4 => {
+            #[cfg(unix)]
+            let eff = {
+                let umask_val = e.a1 as u32;
+                let res = if crate::options::nzbget_is_valid_umask(umask_val) {
+                    let m = umask_val as libc::mode_t;
+                    libc::umask(m);
+                    m
+                } else {
+                    let m = libc::umask(0);
+                    libc::umask(m);
+                    m
+                };
+                res as c_int
+            };
+            #[cfg(not(unix))]
+            let eff = 0;
+
+            if e.a2 != 0 {
+                let msg = format!("Using {:o} umask", eff as u32);
+                dm_log(e, 0, msg.as_bytes());
+            }
+            eff
+        }
+        5 => {
+            let was_reloading = dm_is_reloading();
+            let ver = dm_cstr_bytes(e.s1);
+            let lock_file = dm_opt_cstr(e.s2);
+            let daemon_user = dm_opt_cstr(e.s3);
+
+            if e.a1 != 0 {
+                if !was_reloading {
+                    #[cfg(unix)]
+                    {
+                        let f = libc::fork();
+                        if f < 0 {
+                            libc::exit(1);
+                        }
+                        if f > 0 {
+                            libc::exit(0);
+                        }
+                        libc::setsid();
+                    }
+                    match daemonize_setup(lock_file, daemon_user) {
+                        Ok((owned, trunc_failed)) => {
+                            DAEMON_INSTANCE
+                                .lock_file_owned
+                                .store(owned, Ordering::SeqCst);
+                            if trunc_failed {
+                                let mut wm = b"Could not truncate lock-file ".to_vec();
+                                wm.extend_from_slice(lock_file.to_bytes());
+                                dm_log(e, 3, &wm);
+                            }
+                        }
+                        Err(code) => {
+                            let mut em = b"Starting daemon failed: ".to_vec();
+                            match code {
+                                1 => {
+                                    em.extend_from_slice(b"could not create lock-file ");
+                                    em.extend_from_slice(lock_file.to_bytes());
+                                }
+                                2 => {
+                                    em.extend_from_slice(b"lock-file ");
+                                    em.extend_from_slice(lock_file.to_bytes());
+                                    em.extend_from_slice(b" is not a regular file");
+                                }
+                                3 => {
+                                    em.extend_from_slice(
+                                        b"could not acquire lock on lock-file ",
+                                    );
+                                    em.extend_from_slice(lock_file.to_bytes());
+                                }
+                                4 => em.extend_from_slice(b"invalid DaemonUsername"),
+                                _ => em.extend_from_slice(b"could not drop privileges"),
+                            }
+                            dm_log(e, 4, &em);
+                            libc::exit(1);
+                        }
+                    }
+                }
+                let mut im = b"RustyGet ".to_vec();
+                im.extend_from_slice(ver);
+                im.extend_from_slice(b" daemon-mode");
+                dm_log(e, 2, &im);
+            } else if e.a2 != 0 {
+                let mut im = b"RustyGet ".to_vec();
+                im.extend_from_slice(ver);
+                im.extend_from_slice(b" server-mode");
+                dm_log(e, 2, &im);
+            } else if e.a3 != 0 {
+                let mut im = b"RustyGet ".to_vec();
+                im.extend_from_slice(ver);
+                im.extend_from_slice(b" remote-mode");
+                dm_log(e, 2, &im);
+            }
+
+            if e.a2 != 0 {
+                let mut u = b"using ".to_vec();
+                u.extend_from_slice(dm_cstr_bytes(e.s4));
+                dm_log(e, 2, &u);
+
+                let mut r = b"RustyGet runs on ".to_vec();
+                r.extend_from_slice(dm_cstr_bytes(e.s5));
+                r.extend_from_slice(format!(":{}", e.a6).as_bytes());
+                dm_log(e, 2, &r);
+            }
+
+            if let Some(cb) = e.action_cb {
+                cb(e.ctx, 2, 0, std::ptr::null(), std::ptr::null());
+            }
+
+            DAEMON_INSTANCE
+                .wait_mutex
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .reloading = false;
+
+            install_error_handler(e.a4 != 0, e.a5 != 0, e.segv_cb);
+            0
+        }
+        6 => c_int::from(crate::options::nzbget_should_start_secure_server(
+            e.a1 != 0,
+            cfg!(unix),
+            dm_cstr_bytes(e.s1),
+        )),
+        7 => {
+            let Some(cb) = e.action_cb else {
+                return 0;
+            };
+            if e.a1 == 0 {
+                if e.a3 != 0 && signal_state_op(0) == 0 {
+                    cb(e.ctx, 11, 0, e.s1, e.s2);
+                }
+
+                dm_log(e, 0, b"Entering main program loop");
+                cb(e.ctx, 4, 0, std::ptr::null(), std::ptr::null());
+
+                loop {
+                    let st_mask = cb(e.ctx, 5, 0, std::ptr::null(), std::ptr::null());
+                    if (st_mask & 1) == 0 {
+                        break;
+                    }
+                    if signal_state_op(1) != 0 {
+                        dm_trigger_exit(e);
+                    } else if signal_state_op(2) != 0 {
+                        dm_trigger_reload(e.reload_cb, e.global_log_cb);
+                    }
+
+                    let st_jobs = cb(e.ctx, 5, 1, std::ptr::null(), std::ptr::null());
+                    if crate::options::nzbget_should_stop_standalone(
+                        e.a2 != 0,
+                        (st_jobs & 1) != 0,
+                        (st_jobs & 2) != 0,
+                        (st_jobs & 4) != 0,
+                    ) {
+                        cb(e.ctx, 6, 0, std::ptr::null(), std::ptr::null());
+                    }
+
+                    std::thread::sleep(Duration::from_millis(100));
+
+                    if e.a2 != 0 && !dm_is_stopped() {
+                        while !dm_is_stopped() {
+                            {
+                                let wg = DAEMON_INSTANCE
+                                    .wait_mutex
+                                    .lock()
+                                    .unwrap_or_else(|err| err.into_inner());
+                                if !wg.stopped && signal_state_op(4) == 0 {
+                                    let _ = DAEMON_INSTANCE
+                                        .wait_cond
+                                        .wait_timeout(wg, Duration::from_millis(50))
+                                        .unwrap_or_else(|err| err.into_inner());
+                                }
+                            }
+                            if signal_state_op(1) != 0 {
+                                dm_trigger_exit(e);
+                            } else if signal_state_op(2) != 0 {
+                                dm_trigger_reload(e.reload_cb, e.global_log_cb);
+                            }
+                        }
+                    }
+                }
+
+                dm_log(e, 0, b"Main program loop terminated");
+            } else {
+                if signal_state_op(1) != 0 {
+                    dm_trigger_exit(e);
+                }
+                while !dm_is_stopped()
+                    && !dm_is_reloading()
+                    && cb(e.ctx, 3, 0, std::ptr::null(), std::ptr::null()) != 0
+                {
+                    if signal_state_op(1) != 0 {
+                        dm_trigger_exit(e);
+                    } else if signal_state_op(2) != 0 {
+                        dm_trigger_reload(e.reload_cb, e.global_log_cb);
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+            0
+        }
+        8 => {
+            let reload = e.a1 != 0;
+            if !reload {
+                RELOAD_COORDINATOR.cancel_pending();
+                signal_state_op(5);
+            }
+
+            {
+                let mut wg = DAEMON_INSTANCE
+                    .wait_mutex
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                if wg.stopped && !wg.reloading && reload {
+                    drop(wg);
+                    dm_log(
+                        e,
+                        0,
+                        b"Ignoring reload request because shutdown is already in progress",
+                    );
+                    return 0;
+                }
+                wg.reloading = reload;
+            }
+
+            if !dm_is_reloading() {
+                signal_state_op(3);
+                dm_log(e, 2, b"Stopping, please wait...");
+            }
+
+            if let Some(cb) = e.action_cb {
+                if dm_is_reloading() && cb(e.ctx, 7, 0, std::ptr::null(), std::ptr::null()) != 0 {
+                    dm_log(
+                        e,
+                        2,
+                        b"Waiting for active unpack to complete before in-process reload...",
+                    );
+                    while cb(e.ctx, 7, 0, std::ptr::null(), std::ptr::null()) != 0
+                        && signal_state_op(0) == 0
+                    {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }
+
+            if signal_state_op(1) != 0 {
+                DAEMON_INSTANCE
+                    .wait_mutex
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .reloading = false;
+                signal_state_op(5);
+            }
+
+            if let Some(cb) = e.action_cb {
+                cb(e.ctx, 8, e.a2, std::ptr::null(), std::ptr::null());
+            }
+
+            let mut wg = DAEMON_INSTANCE
+                .wait_mutex
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            wg.stopped = true;
+            DAEMON_INSTANCE.wait_cond.notify_all();
+            1
+        }
+        9 => {
+            dm_trigger_reload(e.reload_cb, e.global_log_cb);
+            1
+        }
+        10 => {
+            dm_trigger_exit(e);
+            1
+        }
+        11 => {
+            DAEMON_INSTANCE
+                .wait_mutex
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .reloading = e.a1 != 0;
+            RELOAD_COORDINATOR.cancel_and_join();
+            if let Some(cb) = e.action_cb {
+                cb(
+                    e.ctx,
+                    12,
+                    c_int::from(e.a2 == 0 || dm_is_stopped()),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
+            }
+            RELOAD_COORDINATOR.cancel_and_join();
+            1
+        }
+        12 => {
+            dm_log(e, 0, b"Cleaning up global objects");
+            if e.a1 != 0
+                && !dm_is_reloading()
+                && DAEMON_INSTANCE.lock_file_owned.load(Ordering::SeqCst)
+            {
+                dm_log(e, 2, b"Deleting lock file");
+                crate::fsops::delete_file(dm_opt_cstr(e.s1));
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 pub(crate) static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -1177,5 +1804,75 @@ mod tests {
         SHUTDOWN_INITIATED.store(false, Ordering::SeqCst);
         LifecycleManager::global().set_reloading(false);
         LifecycleManager::global().set_stopping(false);
+    }
+
+    #[test]
+    fn test_daemon_exec_reset_stop_add_task_and_cleanup_lockfile() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe extern "C" fn mock_dm_action(
+            raw: *mut std::ffi::c_void,
+            sub: c_int,
+            a1: c_int,
+            _s1: *const c_char,
+            _s2: *const c_char,
+        ) -> c_int {
+            let vec = &mut *(raw as *mut Vec<(c_int, c_int)>);
+            vec.push((sub, a1));
+            1
+        }
+
+        let lock_path =
+            std::env::temp_dir().join(format!("nzbget_rs_dm_lock_{}.lock", std::process::id()));
+        std::fs::write(&lock_path, b"123\n").unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        let mut lock_c = lock_path.as_os_str().as_bytes().to_vec();
+        lock_c.push(0);
+
+        unsafe {
+            let mut calls: Vec<(c_int, c_int)> = Vec::new();
+            let mut env = NzbgetRsDaemonEnv {
+                ctx: (&mut calls as *mut Vec<(c_int, c_int)>).cast(),
+                a1: 0,
+                a2: 0,
+                a3: 0,
+                a4: 0,
+                a5: 0,
+                a6: 0,
+                s1: std::ptr::null(),
+                s2: std::ptr::null(),
+                s3: std::ptr::null(),
+                s4: std::ptr::null(),
+                s5: std::ptr::null(),
+                segv_cb: None,
+                global_log_cb: None,
+                reload_cb: None,
+                log_cb: None,
+                action_cb: Some(mock_dm_action),
+            };
+            assert_eq!(nzbget_rs_daemon_exec(2, &env), 1);
+            env.a1 = 1;
+            assert_eq!(nzbget_rs_daemon_exec(3, &env), 0);
+
+            env.a1 = 1;
+            env.s1 = c"".as_ptr();
+            assert_eq!(nzbget_rs_daemon_exec(6, &env), 1);
+
+            env.a1 = 0;
+            env.a2 = 1;
+            assert_eq!(nzbget_rs_daemon_exec(8, &env), 1);
+            assert_eq!(calls, vec![(8, 1)]);
+            env.a1 = 1;
+            assert_eq!(nzbget_rs_daemon_exec(3, &env), 1);
+
+            DAEMON_INSTANCE.lock_file_owned.store(true, Ordering::SeqCst);
+            env.a1 = 1;
+            env.s1 = lock_c.as_ptr() as *const c_char;
+            assert_eq!(nzbget_rs_daemon_exec(12, &env), 1);
+            assert!(!lock_path.exists());
+
+            env.a1 = 0;
+            env.s1 = std::ptr::null();
+            let _ = nzbget_rs_daemon_exec(2, &env);
+        }
     }
 }

@@ -231,10 +231,21 @@ struct HostOpts {
     ext_cleanup_disk: Vec<u8>,
 }
 
-fn read_host_opts(host_ctx: *mut c_void, host_cb: DupeHostFn) -> HostOpts {
-    let mut ints = [0 as c_int; 16];
-    let mut i64s = [0i64; 1];
-    let mut strs = [ptr::null::<c_char>(); 5];
+fn now_unix_sec() -> i64 {
+    #[cfg(unix)]
+    unsafe {
+        libc::time(ptr::null_mut()) as i64
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+fn query_host_stopped(host_ctx: *mut c_void, host_cb: DupeHostFn) -> bool {
+    if host_ctx.is_null() {
+        return false;
+    }
     unsafe {
         host_cb(
             host_ctx,
@@ -245,68 +256,69 @@ fn read_host_opts(host_ctx: *mut c_void, host_cb: DupeHostFn) -> HostOpts {
             0,
             ptr::null(),
             ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
             ptr::null(),
             0,
-        );
+        ) != 0
     }
+}
+
+fn read_host_opts(host_ctx: *mut c_void, host_cb: DupeHostFn) -> HostOpts {
+    let opts = crate::options::active_options();
+    let sc = opts.as_deref().map(|o| *o.scalars());
     HostOpts {
-        dupe_search: ints[0] != 0,
-        dupe_check: ints[1] != 0,
-        dry_run: ints[2] != 0,
-        delay_sec: ints[3],
-        max_donors: ints[4],
-        fast_donors: ints[5],
-        min_alive: ints[6],
-        health_percent: ints[7],
-        health_min: ints[8],
-        health_max: ints[9],
-        body_checks: ints[10],
-        health_budget_sec: ints[11],
-        health_check_mode: ints[12],
-        queue_loaded: ints[13] != 0,
-        stopped: ints[14] != 0,
-        sep: if ints[15] != 0 { ints[15] as u8 } else { b'/' },
-        now: i64s[0],
-        queue_dir: unsafe { ptr_bytes(strs[0]) },
-        temp_dir: unsafe { ptr_bytes(strs[1]) },
-        search_url: unsafe { ptr_bytes(strs[2]) },
-        api_key: unsafe { ptr_bytes(strs[3]) },
-        ext_cleanup_disk: unsafe { ptr_bytes(strs[4]) },
+        dupe_search: sc.is_some_and(|s| s.dupe_search != 0),
+        dupe_check: sc.is_some_and(|s| s.dupe_check != 0),
+        dry_run: sc.is_some_and(|s| s.dupe_search_dry_run != 0),
+        delay_sec: sc.map_or(0, |s| s.dupe_search_delay),
+        max_donors: sc.map_or(0, |s| s.dupe_search_max_donors),
+        fast_donors: sc.map_or(0, |s| s.dupe_fast_donors),
+        min_alive: sc.map_or(0, |s| s.dupe_min_alive),
+        health_percent: sc.map_or(0, |s| s.dupe_health_percent),
+        health_min: sc.map_or(0, |s| s.dupe_health_min),
+        health_max: sc.map_or(0, |s| s.dupe_health_max),
+        body_checks: sc.map_or(0, |s| s.dupe_body_checks),
+        health_budget_sec: sc.map_or(0, |s| s.dupe_health_budget),
+        health_check_mode: sc.map_or(0, |s| s.health_check),
+        queue_loaded: crate::ffi::is_queue_loaded(),
+        stopped: query_host_stopped(host_ctx, host_cb),
+        sep: crate::paths::PATH_SEPARATOR as u8,
+        now: now_unix_sec(),
+        queue_dir: opts
+            .as_deref()
+            .map_or_else(Vec::new, |o| o.str_bytes(6).to_vec()),
+        temp_dir: opts
+            .as_deref()
+            .map_or_else(Vec::new, |o| o.str_bytes(5).to_vec()),
+        search_url: opts
+            .as_deref()
+            .map_or_else(Vec::new, |o| o.str_bytes(12).to_vec()),
+        api_key: opts
+            .as_deref()
+            .map_or_else(Vec::new, |o| o.str_bytes(13).to_vec()),
+        ext_cleanup_disk: opts
+            .as_deref()
+            .map_or_else(Vec::new, |o| o.str_bytes(32).to_vec()),
     }
 }
 
 #[inline]
-fn host_now(host_ctx: *mut c_void, host_cb: DupeHostFn) -> i64 {
-    read_host_opts(host_ctx, host_cb).now
+fn host_now(_host_ctx: *mut c_void, _host_cb: DupeHostFn) -> i64 {
+    now_unix_sec()
 }
 
 #[inline]
 fn host_stopped(host_ctx: *mut c_void, host_cb: DupeHostFn) -> bool {
-    read_host_opts(host_ctx, host_cb).stopped
+    query_host_stopped(host_ctx, host_cb)
 }
 
-fn host_log(host_ctx: *mut c_void, host_cb: DupeHostFn, kind: c_int, msg: &[u8]) {
-    let c = c_bytes(msg);
-    unsafe {
-        host_cb(
-            host_ctx,
-            1,
-            kind,
-            0,
-            0,
-            0,
-            c.as_ptr() as *const c_char,
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null(),
-            0,
-        );
-    }
+fn host_log(_host_ctx: *mut c_void, _host_cb: DupeHostFn, kind: c_int, msg: &[u8]) {
+    #[cfg(unix)]
+    crate::log::log_active_bytes(kind, msg);
+    #[cfg(not(unix))]
+    let _ = (kind, msg);
 }
 
 fn with_guarded_queue<R, F: FnOnce(usize) -> R>(
@@ -590,8 +602,8 @@ fn check_placement_available(
 }
 
 fn scanner_add_external(
-    host_ctx: *mut c_void,
-    host_cb: DupeHostFn,
+    _host_ctx: *mut c_void,
+    _host_cb: DupeHostFn,
     name: &[u8],
     category: &[u8],
     priority: i32,
@@ -600,43 +612,14 @@ fn scanner_add_external(
     params: &[(&[u8], &[u8])],
     data: &[u8],
 ) -> i32 {
-    let name_c = c_bytes(name);
-    let cat_c = c_bytes(category);
-    let dk_c = c_bytes(dupe_key);
-    let mut param_bufs = Vec::with_capacity(params.len() * 2);
-    for &(k, v) in params {
-        param_bufs.push(c_bytes(k));
-        param_bufs.push(c_bytes(v));
-    }
-    let mut strs = Vec::with_capacity(1 + param_bufs.len());
-    strs.push(dk_c.as_ptr() as *const c_char);
-    for b in &param_bufs {
-        strs.push(b.as_ptr() as *const c_char);
-    }
-    let mut out_id = [0 as c_int; 1];
-    let ok = unsafe {
-        host_cb(
-            host_ctx,
-            7,
-            priority,
-            score,
-            params.len(),
-            0,
-            name_c.as_ptr() as *const c_char,
-            cat_c.as_ptr() as *const c_char,
-            out_id.as_mut_ptr(),
-            ptr::null_mut(),
-            strs.as_mut_ptr(),
-            if data.is_empty() {
-                ptr::null()
-            } else {
-                data.as_ptr()
-            },
-            data.len(),
-        )
+    let Some(sc) = crate::scanner::active_scanner() else {
+        return 0;
     };
-    if ok != 0 && out_id[0] != 0 {
-        out_id[0]
+    let (st, out_id) = sc.add_external_bytes_active(
+        name, category, false, priority, dupe_key, score, 0, params, false, false, data,
+    );
+    if st == crate::scanner::AS_SUCCESS && out_id != 0 {
+        out_id
     } else {
         0
     }
@@ -717,9 +700,12 @@ fn fleet_key_lock(key: &[u8]) -> Arc<TimedMutex> {
 
 static HTTP_STOPPED: AtomicBool = AtomicBool::new(false);
 static HTTP_COUNTER: AtomicI32 = AtomicI32::new(0);
-static HTTP_ACTIVE: OnceLock<Mutex<BTreeMap<usize, (usize, DupeHostFn)>>> = OnceLock::new();
+#[cfg(unix)]
+static HTTP_ACTIVE: OnceLock<Mutex<BTreeMap<usize, Arc<crate::net::NzbgetRsWebDl>>>> =
+    OnceLock::new();
 
-fn http_active_map() -> &'static Mutex<BTreeMap<usize, (usize, DupeHostFn)>> {
+#[cfg(unix)]
+fn http_active_map() -> &'static Mutex<BTreeMap<usize, Arc<crate::net::NzbgetRsWebDl>>> {
     HTTP_ACTIVE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
@@ -732,27 +718,16 @@ pub fn http_stopped() -> bool {
 }
 
 pub fn http_stop_all() {
-    let map = http_active_map().lock().unwrap_or_else(|e| e.into_inner());
-    HTTP_STOPPED.store(true, Ordering::SeqCst);
-    for (&dl_ptr, &(ctx, cb)) in map.iter() {
-        unsafe {
-            cb(
-                ctx as *mut c_void,
-                3,
-                1,
-                0,
-                dl_ptr,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null(),
-                0,
-            );
+    #[cfg(unix)]
+    {
+        let map = http_active_map().lock().unwrap_or_else(|e| e.into_inner());
+        HTTP_STOPPED.store(true, Ordering::SeqCst);
+        for dl in map.values() {
+            dl.stop();
         }
     }
+    #[cfg(not(unix))]
+    HTTP_STOPPED.store(true, Ordering::SeqCst);
 }
 
 pub fn http_fetch(
@@ -763,165 +738,84 @@ pub fn http_fetch(
     max_bytes: usize,
     deadline_ms: i64,
 ) -> (bool, i32, Vec<u8>) {
-    if http_stopped() {
-        return (false, 0, Vec::new());
-    }
-    let opts = read_host_opts(host_ctx, host_cb);
-    let counter = HTTP_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
-    let path = http_get_format_temp_path(&opts.temp_dir, opts.sep, opts.now as i32, counter);
-    let url_c = c_bytes(url);
-    let info_c = c_bytes(info_name);
-    let path_c = c_bytes(&path);
-    let mut path_ptr = [path_c.as_ptr() as *const c_char];
-    let dl_ptr = unsafe {
-        host_cb(
-            host_ctx,
-            2,
-            0,
-            0,
-            0,
-            0,
-            url_c.as_ptr() as *const c_char,
-            info_c.as_ptr() as *const c_char,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            path_ptr.as_mut_ptr(),
-            ptr::null(),
-            0,
-        )
-    };
-    if dl_ptr == 0 {
-        return (false, 0, Vec::new());
-    }
+    #[cfg(not(unix))]
     {
-        let mut active = http_active_map().lock().unwrap_or_else(|e| e.into_inner());
+        let _ = (host_ctx, host_cb, url, info_name, max_bytes, deadline_ms);
+        return (false, 0, Vec::new());
+    }
+    #[cfg(unix)]
+    {
         if http_stopped() {
-            drop(active);
-            unsafe {
-                host_cb(
-                    host_ctx,
-                    3,
-                    2,
-                    0,
-                    dl_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                    0,
-                );
-            }
             return (false, 0, Vec::new());
         }
-        active.insert(dl_ptr, (host_ctx as usize, host_cb));
-    }
-
-    let ctx_addr = host_ctx as usize;
-    let done_mutex = Mutex::new(false);
-    let done_cond = Condvar::new();
-    let mut finished = false;
-    let mut http_status = 0i32;
-
-    std::thread::scope(|s| {
-        let dm = &done_mutex;
-        let dc = &done_cond;
-        let path_ref = path.as_slice();
-        s.spawn(move || {
-            let mut done = dm.lock().unwrap_or_else(|e| e.into_inner());
-            while !*done {
-                let now_ms = donor_now_ms();
-                let file_size = std::fs::metadata(dupe_bytes_to_path(path_ref))
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                if (deadline_ms > 0 && now_ms >= deadline_ms)
-                    || (file_size > 0 && (file_size as usize) > max_bytes)
-                {
-                    unsafe {
-                        host_cb(
-                            ctx_addr as *mut c_void,
-                            3,
-                            1,
-                            0,
-                            dl_ptr,
-                            0,
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null(),
-                            0,
-                        );
-                    }
-                    return;
-                }
-                let wait_ms = if deadline_ms > 0 {
-                    (deadline_ms - now_ms).clamp(1, 250) as u64
-                } else {
-                    250
-                };
-                let (nd, _) = dc
-                    .wait_timeout(done, Duration::from_millis(wait_ms))
-                    .unwrap_or_else(|e| e.into_inner());
-                done = nd;
+        let opts = read_host_opts(host_ctx, host_cb);
+        let counter = HTTP_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+        let path = http_get_format_temp_path(&opts.temp_dir, opts.sep, opts.now as i32, counter);
+        let dl = Arc::new(crate::net::NzbgetRsWebDl::new_configured(
+            url, info_name, &path, true, false, 2, None, None,
+        ));
+        let dl_key = Arc::as_ptr(&dl) as usize;
+        {
+            let mut active = http_active_map().lock().unwrap_or_else(|e| e.into_inner());
+            if http_stopped() {
+                return (false, 0, Vec::new());
             }
+            active.insert(dl_key, Arc::clone(&dl));
+        }
+
+        let done_mutex = Mutex::new(false);
+        let done_cond = Condvar::new();
+        let mut finished = false;
+        let mut http_status = 0i32;
+
+        std::thread::scope(|s| {
+            let dm = &done_mutex;
+            let dc = &done_cond;
+            let path_ref = path.as_slice();
+            let dl_watch = Arc::clone(&dl);
+            s.spawn(move || {
+                let mut done = dm.lock().unwrap_or_else(|e| e.into_inner());
+                while !*done {
+                    let now_ms = donor_now_ms();
+                    let file_size = std::fs::metadata(dupe_bytes_to_path(path_ref))
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    if (deadline_ms > 0 && now_ms >= deadline_ms)
+                        || (file_size > 0 && (file_size as usize) > max_bytes)
+                    {
+                        dl_watch.stop();
+                        return;
+                    }
+                    let wait_ms = if deadline_ms > 0 {
+                        (deadline_ms - now_ms).clamp(1, 250) as u64
+                    } else {
+                        250
+                    };
+                    let (nd, _) = dc
+                        .wait_timeout(done, Duration::from_millis(wait_ms))
+                        .unwrap_or_else(|e| e.into_inner());
+                    done = nd;
+                }
+            });
+
+            finished = dl.download_sync(5) == crate::webdownload::WebDlStatus::AdFinished as c_int;
+            http_status = dl.http_status();
+            {
+                let mut done = dm.lock().unwrap_or_else(|e| e.into_inner());
+                *done = true;
+            }
+            dc.notify_all();
         });
 
-        let mut st = [0 as c_int; 1];
-        let ret = unsafe {
-            host_cb(
-                ctx_addr as *mut c_void,
-                3,
-                0,
-                0,
-                dl_ptr,
-                0,
-                ptr::null(),
-                ptr::null(),
-                st.as_mut_ptr(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null(),
-                0,
-            )
-        };
-        finished = ret != 0;
-        http_status = st[0];
         {
-            let mut done = dm.lock().unwrap_or_else(|e| e.into_inner());
-            *done = true;
+            let mut active = http_active_map().lock().unwrap_or_else(|e| e.into_inner());
+            active.remove(&dl_key);
         }
-        dc.notify_all();
-    });
 
-    {
-        let mut active = http_active_map().lock().unwrap_or_else(|e| e.into_inner());
-        active.remove(&dl_ptr);
-    }
-    unsafe {
-        host_cb(
-            host_ctx,
-            3,
-            2,
-            0,
-            dl_ptr,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null(),
-            0,
-        );
-    }
-
-    match http_get_read_and_delete(&path, max_bytes, finished) {
-        Some(body) => (true, http_status, body),
-        None => (false, http_status, Vec::new()),
+        match http_get_read_and_delete(&path, max_bytes, finished) {
+            Some(body) => (true, http_status, body),
+            None => (false, http_status, Vec::new()),
+        }
     }
 }
 
@@ -5052,52 +4946,18 @@ pub unsafe fn fleet_append(
         };
         let checked_map = Mutex::new(BTreeMap::<usize, DonorHealthResult>::new());
         {
-            struct FleetHoldGuard {
-                ctx: *mut c_void,
-                cb: DupeHostFn,
-            }
+            struct FleetHoldGuard;
             impl Drop for FleetHoldGuard {
                 fn drop(&mut self) {
-                    unsafe {
-                        (self.cb)(
-                            self.ctx,
-                            8,
-                            0,
-                            0,
-                            0,
-                            0,
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null(),
-                            0,
-                        );
+                    if let Some(ws) = crate::ffi::active_workstate() {
+                        ws.hold_download_for_fleet(false);
                     }
                 }
             }
-            unsafe {
-                host_cb(
-                    host_ctx,
-                    8,
-                    1,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                    0,
-                );
+            if let Some(ws) = crate::ffi::active_workstate() {
+                ws.hold_download_for_fleet(true);
             }
-            let _hold = FleetHoldGuard {
-                ctx: host_ctx,
-                cb: host_cb,
-            };
+            let _hold = FleetHoldGuard;
             donor_check_postings(
                 &servers,
                 &postings,

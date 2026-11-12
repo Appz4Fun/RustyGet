@@ -3794,6 +3794,8 @@ pub struct NzbgetRsOptions {
     strs: [Option<CString>; OPT_STR_COUNT],
     no_disk_access: bool,
     no_config: bool,
+    daemon_subsystems: bool,
+    default_diag_sink: bool,
     fatal_error: bool,
     config_errors: std::sync::atomic::AtomicBool,
     mode_flags: std::sync::atomic::AtomicU8,
@@ -3802,6 +3804,7 @@ pub struct NzbgetRsOptions {
     out_scalars: *mut NzbgetRsParsedOptions,
     cb_ctx: *mut std::ffi::c_void,
     cb_fn: NzbgetRsOptionsHostFn,
+    diag_cb: NzbgetRsOptionsHostFn,
 }
 
 unsafe impl Send for NzbgetRsOptions {}
@@ -3822,6 +3825,23 @@ impl NzbgetRsOptions {
         &self.scalars
     }
 
+    pub(crate) fn has_fatal_error(&self) -> bool {
+        self.fatal_error
+    }
+
+    pub(crate) fn set_mode_flag(&self, idx: usize, val: bool) {
+        if idx < 4 {
+            let bit = 1u8 << idx;
+            if val {
+                self.mode_flags
+                    .fetch_or(bit, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                self.mode_flags
+                    .fetch_and(!bit, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
     pub(crate) fn server_mode(&self) -> bool {
         (self.mode_flags.load(std::sync::atomic::Ordering::Relaxed) & 1) != 0
     }
@@ -3832,6 +3852,10 @@ impl NzbgetRsOptions {
 
     pub(crate) fn remote_client_mode(&self) -> bool {
         (self.mode_flags.load(std::sync::atomic::Ordering::Relaxed) & 4) != 0
+    }
+
+    pub(crate) fn direct_client_mode(&self) -> bool {
+        (self.mode_flags.load(std::sync::atomic::Ordering::Relaxed) & 8) != 0
     }
 
     pub(crate) fn for_each_option(&self, mut cb: impl FnMut(&CStr, &CStr, c_int)) {
@@ -3885,6 +3909,32 @@ impl NzbgetRsOptions {
         }
     }
 
+    fn emit_default_diag(op: c_int, s0: *const c_char) {
+        if s0.is_null() {
+            return;
+        }
+        unsafe {
+            let bytes = CStr::from_ptr(s0).to_bytes();
+            match op {
+                0 => {
+                    libc::printf(c"%s\n".as_ptr(), s0);
+                }
+                1 => {
+                    libc::printf(c"%s\n".as_ptr(), s0);
+                    crate::log::log_active_bytes(2, bytes);
+                }
+                2 => {
+                    libc::printf(c"%s\n".as_ptr(), s0);
+                    crate::log::log_active_bytes(1, bytes);
+                }
+                3 => {
+                    crate::log::log_active_bytes(1, bytes);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn emit_host(&self, op: c_int, ints: &[c_int], strs: &[*const c_char], count: usize) {
         if let Some(cb) = self.cb_fn {
             let ints_ptr = if ints.is_empty() {
@@ -3898,6 +3948,10 @@ impl NzbgetRsOptions {
                 strs.as_ptr()
             };
             unsafe { cb(self.cb_ctx, op, ints_ptr, strs_ptr, count) };
+        } else if self.default_diag_sink {
+            if let Some(&s0) = strs.first() {
+                Self::emit_default_diag(op, s0);
+            }
         }
     }
 
@@ -4226,16 +4280,17 @@ impl NzbgetRsOptions {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn run_runtime_scheduler_task(
+    pub(crate) fn has_config_errors(&self) -> bool {
+        self.config_errors.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn create_scheduler_task_active(
         &self,
         id: i32,
         time: Option<&CStr>,
         week_days: Option<&CStr>,
         command: i32,
         param: Option<&CStr>,
-        cb_ctx: *mut std::ffi::c_void,
-        cb_fn: NzbgetRsOptionsHostFn,
     ) {
         let line_no = if id == 0 { 0 } else { self.config_line };
         let emit_err = |msg: &CStr| {
@@ -4253,17 +4308,24 @@ impl NzbgetRsOptions {
             let line_s = line_no.to_string();
             let formatted = format_bytes_msg(&[base, b"(", line_s.as_bytes(), b"): ", &trunc]);
             let ptrs = [formatted.as_ptr()];
-            if let Some(cb) = cb_fn {
-                unsafe { cb(cb_ctx, 1, std::ptr::null(), ptrs.as_ptr(), 1) };
+            if let Some(cb) = self.diag_cb {
+                unsafe { cb(std::ptr::null_mut(), 1, std::ptr::null(), ptrs.as_ptr(), 1) };
+            } else if self.default_diag_sink {
+                Self::emit_default_diag(1, formatted.as_ptr());
             }
             self.config_errors
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         };
         let emit_task = |hours: i32, minutes: i32, wd_bits: i32| {
-            if let Some(cb) = cb_fn {
-                let ints = [id, hours, minutes, wd_bits, command];
-                let ptrs = [param.map_or(std::ptr::null(), CStr::as_ptr)];
-                unsafe { cb(cb_ctx, 9, ints.as_ptr(), ptrs.as_ptr(), 1) };
+            if let Some(sched) = crate::scheduler::active_scheduler() {
+                sched.add_task(
+                    id,
+                    hours,
+                    minutes,
+                    wd_bits,
+                    command,
+                    param.map_or(&[][..], CStr::to_bytes),
+                );
             }
         };
 
@@ -4418,6 +4480,34 @@ impl OptionsHost for NzbgetRsOptions {
         optional: bool,
         cert_verif_level: u32,
     ) {
+        if self.daemon_subsystems {
+            #[cfg(unix)]
+            if let Some(pool) = crate::net::active_server_pool() {
+                unsafe {
+                    crate::net::nzbget_rs_serverpool_add(
+                        std::sync::Arc::as_ptr(&pool),
+                        id,
+                        c_int::from(active),
+                        name.map_or(std::ptr::null(), CStr::as_ptr),
+                        host.map_or(std::ptr::null(), CStr::as_ptr),
+                        port,
+                        ip_version,
+                        user.map_or(std::ptr::null(), CStr::as_ptr),
+                        pass.map_or(std::ptr::null(), CStr::as_ptr),
+                        c_int::from(join_group),
+                        c_int::from(tls),
+                        cipher.map_or(std::ptr::null(), CStr::as_ptr),
+                        max_connections,
+                        retention,
+                        level,
+                        group,
+                        c_int::from(optional),
+                        cert_verif_level,
+                    );
+                }
+            }
+            return;
+        }
         let ints = [
             id,
             c_int::from(active),
@@ -4457,6 +4547,25 @@ impl OptionsHost for NzbgetRsOptions {
         extensions: Option<&CStr>,
         cert_verif_level: u32,
     ) {
+        if self.daemon_subsystems {
+            if let Some(fc) = crate::feed::active_feed_coord() {
+                fc.add_feed_direct(
+                    id,
+                    name.map_or(&[][..], CStr::to_bytes),
+                    url.map_or(&[][..], CStr::to_bytes),
+                    backlog,
+                    interval,
+                    filter.map_or(&[][..], CStr::to_bytes),
+                    pause_nzb,
+                    category.map_or(&[][..], CStr::to_bytes),
+                    category_source,
+                    priority,
+                    extensions.map_or(&[][..], CStr::to_bytes),
+                    cert_verif_level,
+                );
+            }
+            return;
+        }
         let ints = [
             id,
             interval,
@@ -4485,6 +4594,19 @@ impl OptionsHost for NzbgetRsOptions {
         command: i32,
         param: Option<&CStr>,
     ) {
+        if self.daemon_subsystems {
+            if let Some(sched) = crate::scheduler::active_scheduler() {
+                sched.add_task(
+                    id,
+                    hours,
+                    minutes,
+                    week_days_bits,
+                    command,
+                    param.map_or(&[][..], CStr::to_bytes),
+                );
+            }
+            return;
+        }
         let ints = [id, hours, minutes, week_days_bits, command];
         let ptrs = [param.map_or(std::ptr::null(), CStr::as_ptr)];
         self.emit_host(9, &ints, &ptrs, 1);
@@ -4523,37 +4645,65 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
     out_scalars: *mut NzbgetRsParsedOptions,
     out_state_flags: *mut c_int,
 ) -> *mut NzbgetRsOptions {
-    let exe_bytes = if exe_name.is_null() {
-        &[][..]
+    #[cfg(unix)]
+    let daemon_snap = if no_config < 0 {
+        crate::lifecycle::daemon_cmdline_options_inputs()
     } else {
-        CStr::from_ptr(exe_name).to_bytes()
-    };
-    let cf_opt = if config_filename.is_null() {
         None
+    };
+    #[cfg(not(unix))]
+    let daemon_snap: Option<(Vec<u8>, Option<CString>, bool, Vec<CString>)> = None;
+
+    let (exe_bytes, cf_opt, eff_no_config, cmd_vec, eff_daemon_subsys): (
+        &[u8],
+        Option<&CStr>,
+        bool,
+        Vec<&CStr>,
+        bool,
+    ) = if let Some((ref exe_v, ref cf_v, nc, ref c_list)) = daemon_snap {
+        (
+            exe_v.as_slice(),
+            cf_v.as_deref(),
+            nc,
+            c_list.iter().map(CString::as_c_str).collect(),
+            true,
+        )
     } else {
-        Some(CStr::from_ptr(config_filename))
+        let eb = if exe_name.is_null() {
+            &[][..]
+        } else {
+            CStr::from_ptr(exe_name).to_bytes()
+        };
+        let cf = if config_filename.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(config_filename))
+        };
+        let mut cv = Vec::with_capacity(cmd_opts_len);
+        if !cmd_opts.is_null() {
+            for i in 0..cmd_opts_len {
+                let p = *cmd_opts.add(i);
+                if !p.is_null() {
+                    cv.push(CStr::from_ptr(p));
+                }
+            }
+        }
+        (eb, cf, no_config != 0, cv, (flags & 16) != 0)
     };
     let ver_cstr = if version.is_null() {
-        c""
+        crate::ffi::build_version_cstr()
     } else {
         CStr::from_ptr(version)
     };
-    let mut cmd_vec = Vec::with_capacity(cmd_opts_len);
-    if !cmd_opts.is_null() {
-        for i in 0..cmd_opts_len {
-            let p = *cmd_opts.add(i);
-            if !p.is_null() {
-                cmd_vec.push(CStr::from_ptr(p));
-            }
-        }
-    }
     let mut opts = NzbgetRsOptions {
         opt_entries: Vec::new(),
         categories: Vec::new(),
         script_dir_paths: Vec::new(),
         strs: std::array::from_fn(|_| None),
         no_disk_access: no_disk_access != 0,
-        no_config: no_config != 0,
+        no_config: eff_no_config,
+        daemon_subsystems: eff_daemon_subsys,
+        default_diag_sink: (flags & 32) != 0 || daemon_snap.is_some(),
         fatal_error: false,
         config_errors: std::sync::atomic::AtomicBool::new(false),
         mode_flags: std::sync::atomic::AtomicU8::new(0),
@@ -4562,15 +4712,16 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
         out_scalars,
         cb_ctx,
         cb_fn,
+        diag_cb: cb_fn,
     };
     opts.sync_scalars_to_host();
     opts.init_daemon(
         exe_bytes,
         cf_opt,
-        no_config != 0,
+        eff_no_config,
         no_disk_access != 0,
         &cmd_vec,
-        flags,
+        flags & !(16 | 32),
         ver_cstr,
     );
     opts.sync_scalars_to_host();
@@ -4615,39 +4766,6 @@ pub unsafe extern "C" fn nzbget_rs_options_str(
     (*handle).strs[id as usize]
         .as_deref()
         .map_or(std::ptr::null(), CStr::as_ptr)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_options_task(
-    handle: *const NzbgetRsOptions,
-    id: c_int,
-    time: *const c_char,
-    week_days: *const c_char,
-    command: c_int,
-    param: *const c_char,
-    cb_ctx: *mut std::ffi::c_void,
-    cb_fn: NzbgetRsOptionsHostFn,
-) -> c_int {
-    let Some(opts) = handle.as_ref() else {
-        return 0;
-    };
-    let time_opt = if time.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(time))
-    };
-    let wd_opt = if week_days.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(week_days))
-    };
-    let param_opt = if param.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(param))
-    };
-    opts.run_runtime_scheduler_task(id, time_opt, wd_opt, command, param_opt, cb_ctx, cb_fn);
-    c_int::from(opts.config_errors.load(std::sync::atomic::Ordering::SeqCst))
 }
 
 #[allow(clippy::too_many_arguments)]

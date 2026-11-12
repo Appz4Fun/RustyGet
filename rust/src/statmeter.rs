@@ -881,6 +881,8 @@ mod runtime {
 
     static ACTIVE_STATMETER: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsStatMeter>>> =
         std::sync::RwLock::new(None);
+    static DAEMON_STATMETER: std::sync::RwLock<Option<std::sync::Arc<NzbgetRsStatMeter>>> =
+        std::sync::RwLock::new(None);
 
     pub(crate) fn active_statmeter() -> Option<std::sync::Arc<NzbgetRsStatMeter>> {
         ACTIVE_STATMETER
@@ -889,8 +891,224 @@ mod runtime {
             .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
     }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn nzbget_rs_statmeter_new(
+    pub(crate) fn create_daemon_statmeter() {
+        let lg = crate::log::active_log();
+        let opts = crate::options::active_options();
+        let arc = std::sync::Arc::new(NzbgetRsStatMeter::new(lg.as_deref(), opts.as_deref()));
+        if let Some(ref l) = lg {
+            l.register_debuggable(1);
+        }
+        if let Ok(mut g) = ACTIVE_STATMETER.write() {
+            *g = Some(std::sync::Arc::downgrade(&arc));
+        }
+        if let Ok(mut g) = DAEMON_STATMETER.write() {
+            *g = Some(arc);
+        }
+    }
+
+    pub(crate) fn init_daemon_statmeter() {
+        let Some(sm) = active_statmeter() else {
+            return;
+        };
+        let opts = crate::options::active_options();
+        let lg = crate::log::active_log();
+        let srv_cnt = crate::net::active_server_pool()
+            .map(|p| p.servers_snapshot().len() as c_int)
+            .unwrap_or(0);
+        let mut total_offset: c_int = 0;
+        unsafe {
+            nzbget_rs_statmeter_ctl(
+                std::sync::Arc::as_ptr(&sm),
+                0,
+                srv_cnt,
+                0,
+                0,
+                0,
+                0,
+                opts.as_deref()
+                    .map_or(ptr::null(), |o| o as *const NzbgetRsOptions),
+                lg.as_deref()
+                    .map_or(ptr::null(), |l| l as *const NzbgetRsLog),
+                &mut total_offset,
+                ptr::null_mut(),
+            );
+        }
+        if let Some(ws) = crate::ffi::active_workstate() {
+            ws.set_local_time_offset(total_offset);
+        }
+    }
+
+    pub(crate) fn shutdown_daemon_statmeter() {
+        if let Some(lg) = crate::log::active_log() {
+            lg.unregister_debuggable(1);
+        }
+        let dropped = DAEMON_STATMETER.write().ok().and_then(|mut g| g.take());
+        if let Some(arc) = dropped {
+            let wk = std::sync::Arc::downgrade(&arc);
+            if let Ok(mut g) = ACTIVE_STATMETER.write() {
+                if g.as_ref()
+                    .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+                {
+                    *g = None;
+                }
+            }
+            drop(arc);
+        }
+    }
+
+    pub(crate) fn log_active_statmeter_debug_info() {
+        let Some(sm) = active_statmeter() else {
+            return;
+        };
+        let opts = crate::options::active_options();
+        let lg = crate::log::active_log();
+        unsafe {
+            nzbget_rs_statmeter_ctl(
+                std::sync::Arc::as_ptr(&sm),
+                6,
+                0,
+                0,
+                0,
+                0,
+                0,
+                opts.as_deref()
+                    .map_or(ptr::null(), |o| o as *const NzbgetRsOptions),
+                lg.as_deref()
+                    .map_or(ptr::null(), |l| l as *const NzbgetRsLog),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            );
+        }
+    }
+
+    pub(crate) fn save_active_statmeter() {
+        let Some(sm) = active_statmeter() else {
+            return;
+        };
+        let opts = crate::options::active_options();
+        let Some(ref o) = opts else {
+            return;
+        };
+        if !o.server_mode() {
+            return;
+        }
+        let lg = crate::log::active_log();
+        let pool = crate::net::active_server_pool();
+        let lto = crate::ffi::active_workstate().map_or(0, |w| w.local_time_offset());
+        unsafe {
+            nzbget_rs_statmeter_disk(
+                std::sync::Arc::as_ptr(&sm),
+                0,
+                1,
+                lto,
+                std::sync::Arc::as_ptr(o),
+                lg.as_deref()
+                    .map_or(ptr::null(), |l| l as *const NzbgetRsLog),
+                pool.as_ref()
+                    .map_or(ptr::null(), |p| std::sync::Arc::as_ptr(p)),
+                ptr::null_mut(),
+            );
+        }
+    }
+
+    pub(crate) fn load_active_statmeter(perfect_match: &mut bool) -> bool {
+        let Some(sm) = active_statmeter() else {
+            return false;
+        };
+        let opts = crate::options::active_options();
+        let lg = crate::log::active_log();
+        let pool = crate::net::active_server_pool();
+        let srv_mode = opts.as_deref().map_or(0, |o| c_int::from(o.server_mode()));
+        let lto = crate::ffi::active_workstate().map_or(0, |w| w.local_time_offset());
+        let mut pm = c_int::from(*perfect_match);
+        let ok = unsafe {
+            nzbget_rs_statmeter_disk(
+                std::sync::Arc::as_ptr(&sm),
+                1,
+                srv_mode,
+                lto,
+                opts.as_deref()
+                    .map_or(ptr::null(), |o| o as *const NzbgetRsOptions),
+                lg.as_deref()
+                    .map_or(ptr::null(), |l| l as *const NzbgetRsLog),
+                pool.as_ref()
+                    .map_or(ptr::null(), |p| std::sync::Arc::as_ptr(p)),
+                &mut pm,
+            ) != 0
+        };
+        *perfect_match = pm != 0;
+        ok
+    }
+
+    pub(crate) fn interval_check_active_statmeter() {
+        let Some(sm) = active_statmeter() else {
+            return;
+        };
+        let opts = crate::options::active_options();
+        let lg = crate::log::active_log();
+        let ws = crate::ffi::active_workstate();
+        let (lto, qr) = ws.as_ref().map_or((0, 0), |w| {
+            (w.local_time_offset(), c_int::from(w.quota_reached()))
+        });
+        let mut out = [0 as c_int; 2];
+        let mask = unsafe {
+            nzbget_rs_statmeter_ctl(
+                std::sync::Arc::as_ptr(&sm),
+                4,
+                lto,
+                qr,
+                0,
+                0,
+                0,
+                opts.as_deref()
+                    .map_or(ptr::null(), |o| o as *const NzbgetRsOptions),
+                lg.as_deref()
+                    .map_or(ptr::null(), |l| l as *const NzbgetRsLog),
+                out.as_mut_ptr(),
+                ptr::null_mut(),
+            )
+        };
+        if let Some(ref w) = ws {
+            if (mask & 1) != 0 {
+                w.set_local_time_offset(out[0]);
+            }
+            if (mask & 2) != 0 {
+                w.set_quota_reached(out[1] != 0);
+            }
+        }
+        if (mask & 4) != 0 {
+            save_active_statmeter();
+        }
+    }
+
+    pub(crate) fn enter_leave_standby_active_statmeter(enter: bool) {
+        if let Some(sm) = active_statmeter() {
+            unsafe {
+                nzbget_rs_statmeter_ctl(
+                    std::sync::Arc::as_ptr(&sm),
+                    5,
+                    c_int::from(enter),
+                    0,
+                    0,
+                    0,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+        }
+    }
+
+    pub(crate) fn add_speed_reading_active_statmeter(bytes: i32) {
+        if let Some(sm) = active_statmeter() {
+            sm.add_speed_reading_locked(bytes);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) unsafe fn nzbget_rs_statmeter_new(
         log: *const NzbgetRsLog,
         opts: *const NzbgetRsOptions,
     ) -> *mut NzbgetRsStatMeter {
@@ -901,8 +1119,8 @@ mod runtime {
         std::sync::Arc::into_raw(arc).cast_mut()
     }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn nzbget_rs_statmeter_free(sm: *mut NzbgetRsStatMeter) {
+    #[cfg(test)]
+    pub(crate) unsafe fn nzbget_rs_statmeter_free(sm: *mut NzbgetRsStatMeter) {
         if !sm.is_null() {
             let arc = std::sync::Arc::from_raw(sm.cast_const());
             let wk = std::sync::Arc::downgrade(&arc);
@@ -938,8 +1156,7 @@ mod runtime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[no_mangle]
-    pub unsafe extern "C" fn nzbget_rs_statmeter_ctl(
+    pub(crate) unsafe fn nzbget_rs_statmeter_ctl(
         sm: *const NzbgetRsStatMeter,
         op: c_int,
         a1: c_int,
@@ -1337,8 +1554,7 @@ mod runtime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[no_mangle]
-    pub unsafe extern "C" fn nzbget_rs_statmeter_disk(
+    pub(crate) unsafe fn nzbget_rs_statmeter_disk(
         sm: *const NzbgetRsStatMeter,
         op: c_int,
         server_mode: c_int,
@@ -1548,14 +1764,19 @@ mod runtime {
     }
 }
 
+#[cfg(unix)]
+pub use runtime::NzbgetRsStatMeter;
+#[cfg(unix)]
+pub(crate) use runtime::{
+    active_statmeter, add_speed_reading_active_statmeter, create_daemon_statmeter,
+    enter_leave_standby_active_statmeter, init_daemon_statmeter, interval_check_active_statmeter,
+    load_active_statmeter, log_active_statmeter_debug_info, nzbget_rs_statmeter_rpc,
+    save_active_statmeter, shutdown_daemon_statmeter,
+};
 #[cfg(all(unix, test))]
-pub(crate) use runtime::nzbget_rs_statmeter_speed;
-#[cfg(unix)]
-pub(crate) use runtime::{active_statmeter, nzbget_rs_statmeter_rpc};
-#[cfg(unix)]
-pub use runtime::{
+pub(crate) use runtime::{
     nzbget_rs_statmeter_ctl, nzbget_rs_statmeter_disk, nzbget_rs_statmeter_free,
-    nzbget_rs_statmeter_new, NzbgetRsStatMeter,
+    nzbget_rs_statmeter_new, nzbget_rs_statmeter_speed,
 };
 
 #[cfg(test)]
@@ -1814,7 +2035,7 @@ mod tests {
         let mut scalars = NzbgetRsParsedOptions::default();
         let mut flags = 0;
         unsafe {
-            let log = nzbget_rs_log_new(0);
+            let log = nzbget_rs_log_new(0, None);
             let opts = nzbget_rs_options_new(
                 c"rustyget".as_ptr(),
                 ptr::null(),

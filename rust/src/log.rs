@@ -98,15 +98,22 @@ impl LogInner {
     }
 }
 
+pub type NzbgetRsDebuggableFn = Option<unsafe extern "C" fn(usize)>;
+
 pub struct NzbgetRsLog {
     inner: Mutex<LogInner>,
     path: Mutex<CString>,
     debuggables: Mutex<Vec<usize>>,
+    debug_cb: NzbgetRsDebuggableFn,
     debug_build: bool,
 }
 
 impl NzbgetRsLog {
     pub fn new(debug_build: bool) -> Self {
+        Self::with_debug_cb(debug_build, None)
+    }
+
+    pub fn with_debug_cb(debug_build: bool, debug_cb: NzbgetRsDebuggableFn) -> Self {
         let extra_debug = if debug_build {
             crate::fsops::file_exists(b"extradebug", &crate::fsops::posix_stat)
         } else {
@@ -123,8 +130,60 @@ impl NzbgetRsLog {
             }),
             path: Mutex::new(c"".to_owned()),
             debuggables: Mutex::new(Vec::new()),
+            debug_cb,
             debug_build,
         }
+    }
+
+    pub(crate) fn register_debuggable(&self, ptr: usize) {
+        if let Ok(mut dbg) = self.debuggables.lock() {
+            dbg.push(ptr);
+        }
+    }
+
+    pub(crate) fn unregister_debuggable(&self, ptr: usize) {
+        if let Ok(mut dbg) = self.debuggables.lock() {
+            dbg.retain(|&x| x != ptr);
+        }
+    }
+
+    pub(crate) fn interval_check_active(&self) {
+        let opts = crate::options::active_options();
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if inner.log_file.is_some() {
+            let corr = opts.as_deref().map_or(0, |o| o.scalars().time_correction) as i64;
+            let cur_time = current_unix_time() + corr;
+            if crate::util::log_should_close_idle(cur_time, inner.last_written) {
+                inner.log_file = None;
+            }
+        }
+    }
+
+    pub(crate) fn log_debug_info_active(&self) {
+        let opts = crate::options::active_options();
+        let opt_ref = opts.as_deref();
+        let sep = c"--------------------------------------------";
+        emit_message(self, 0, self.debug_build, opt_ref, sep);
+        emit_message(
+            self,
+            0,
+            self.debug_build,
+            opt_ref,
+            c"Dumping debug info to log",
+        );
+        emit_message(self, 0, self.debug_build, opt_ref, sep);
+        if let Ok(dbg) = self.debuggables.lock() {
+            for &item in dbg.iter() {
+                if item == 1 {
+                    crate::statmeter::log_active_statmeter_debug_info();
+                } else if let Some(cb) = self.debug_cb {
+                    unsafe { cb(item) };
+                }
+            }
+        }
+        emit_message(self, 0, self.debug_build, opt_ref, sep);
     }
 
     pub(crate) fn log_filename_bytes(&self) -> Vec<u8> {
@@ -136,6 +195,26 @@ impl NzbgetRsLog {
     pub(crate) fn emit_bytes(&self, kind: i32, options: Option<&NzbgetRsOptions>, text: &[u8]) {
         let cstr = cstring_lossless(text);
         emit_message(self, kind, self.debug_build, options, &cstr);
+    }
+
+    pub(crate) fn init_options_active(&self) {
+        let opts = crate::options::active_options();
+        let flags = opts.as_deref().map_or(0, |o| {
+            c_int::from(o.server_mode())
+                | (c_int::from(o.remote_client_mode()) << 1)
+                | (c_int::from(o.direct_client_mode()) << 2)
+        });
+        unsafe {
+            nzbget_rs_log_ctl(
+                self,
+                1,
+                flags,
+                0,
+                opts.as_deref().map_or(ptr::null(), |o| o as *const _),
+                ptr::null(),
+                None,
+            );
+        }
     }
 }
 
@@ -429,8 +508,11 @@ pub(crate) fn log_active_bytes(kind: i32, bytes: &[u8]) {
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_log_new(debug_build: c_int) -> *mut NzbgetRsLog {
-    let arc = std::sync::Arc::new(NzbgetRsLog::new(debug_build != 0));
+pub extern "C" fn nzbget_rs_log_new(
+    debug_build: c_int,
+    debug_cb: NzbgetRsDebuggableFn,
+) -> *mut NzbgetRsLog {
+    let arc = std::sync::Arc::new(NzbgetRsLog::with_debug_cb(debug_build != 0, debug_cb));
     if let Ok(mut g) = ACTIVE_LOG.write() {
         *g = Some(std::sync::Arc::downgrade(&arc));
     }
@@ -784,7 +866,7 @@ mod tests {
         let log_path = dir.join("nzbget.log");
         let _ = std::fs::write(&log_path, b"stale line\n");
 
-        let log = nzbget_rs_log_new(0);
+        let log = nzbget_rs_log_new(0, None);
         unsafe {
             // Startup messages before Options exist:
             // info (kind 0) -> mtScreen, detail (kind 4) -> mtScreen, error (kind 2) -> mtBoth

@@ -466,7 +466,7 @@ impl NzbgetRsScheduler {
         }
     }
 
-    fn add_task(
+    pub(crate) fn add_task(
         &self,
         id: i32,
         hours: i32,
@@ -485,6 +485,10 @@ impl NzbgetRsScheduler {
             param: param.to_vec(),
             last_executed: 0,
         });
+    }
+
+    pub(crate) fn service_interval_val(&self) -> i32 {
+        self.service_interval.load(Ordering::SeqCst)
     }
 
     pub(crate) fn collect_health_tasks(&self) -> Vec<crate::systemhealth::HealthTaskInput> {
@@ -1073,6 +1077,128 @@ impl NzbgetRsScheduler {
             Ordering::SeqCst,
         );
     }
+
+    #[cfg(unix)]
+    pub(crate) unsafe fn service_work_active(&self) {
+        unsafe extern "C" fn active_log_cb(_ctx: *mut c_void, level: c_int, msg: *const c_char) {
+            let bytes = if msg.is_null() {
+                &[][..]
+            } else {
+                unsafe { CStr::from_ptr(msg).to_bytes() }
+            };
+            let kind = match level {
+                0 => 3,
+                2 => 0,
+                4 => 1,
+                _ => return,
+            };
+            crate::log::log_active_bytes(kind, bytes);
+        }
+
+        unsafe extern "C" fn active_action_cb(
+            _ctx: *mut c_void,
+            sub: c_int,
+            a1: c_int,
+            a2: c_int,
+            ptrs: *const *const c_char,
+            len: usize,
+            ints: *mut c_int,
+            i64s: *mut i64,
+            _strs: *mut *const c_char,
+        ) -> c_int {
+            match sub {
+                0 => {
+                    if !crate::ffi::is_queue_loaded() {
+                        return 0;
+                    }
+                    let Some(ws) = crate::ffi::active_workstate() else {
+                        return 0;
+                    };
+                    let out = unsafe { std::slice::from_raw_parts_mut(ints, 6) };
+                    let lto = ws.local_time_offset();
+                    out[0] = lto;
+                    out[1] = lto;
+                    out[2] = ws.speed_limit();
+                    out[3] = c_int::from(ws.pause_download());
+                    out[4] = c_int::from(ws.pause_post_process());
+                    out[5] = c_int::from(ws.pause_scan());
+                    unsafe {
+                        *i64s = ws.resume_time();
+                    }
+                    1
+                }
+                1 => {
+                    if let Some(ws) = crate::ffi::active_workstate() {
+                        match a1 {
+                            0 => ws.set_speed_limit(a2),
+                            1 => ws.set_pause_download(a2 != 0),
+                            2 => ws.set_pause_post_process(a2 != 0),
+                            3 => ws.set_pause_scan(a2 != 0),
+                            4 => {
+                                ws.set_resume_time(0);
+                                ws.set_pause_download(false);
+                                ws.set_pause_post_process(false);
+                                ws.set_pause_scan(false);
+                            }
+                            _ => {}
+                        }
+                    }
+                    1
+                }
+                3 => {
+                    if !ptrs.is_null() {
+                        let p0 = unsafe { *ptrs };
+                        if !p0.is_null() {
+                            if let Some(fc) = crate::feed::active_feed_coord() {
+                                fc.fetch_feed_list_bytes(unsafe { CStr::from_ptr(p0).to_bytes() });
+                            }
+                        }
+                    }
+                    1
+                }
+                4 => {
+                    if !ptrs.is_null() && len > 0 {
+                        let p0 = unsafe { *ptrs };
+                        let words = if len > 1 {
+                            unsafe { ptrs.add(1) }
+                        } else {
+                            std::ptr::null()
+                        };
+                        unsafe {
+                            crate::script::scheduler_script_start_active(
+                                p0,
+                                a1 != 0,
+                                a2,
+                                words,
+                                len.saturating_sub(1),
+                            );
+                        }
+                    }
+                    1
+                }
+                6 => {
+                    unsafe {
+                        *i64s = service_coord_now();
+                    }
+                    1
+                }
+                _ => 0,
+            }
+        }
+
+        let env = NzbgetRsSchedulerEnv {
+            ctx: std::ptr::null_mut(),
+            a1: 0,
+            a2: 0,
+            a3: 0,
+            a4: 0,
+            a5: c_int::from(crate::log::active_debug_build()),
+            s1: std::ptr::null(),
+            log_cb: Some(active_log_cb),
+            action_cb: Some(active_action_cb),
+        };
+        self.service_work(&env);
+    }
 }
 
 /// Formats `(exec_message, info_name, log_prefix)` for `SchedulerScriptController`:
@@ -1133,6 +1259,8 @@ pub fn format_scheduler_script_labels(
 
 static ACTIVE_SCHEDULER: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsScheduler>>> =
     std::sync::RwLock::new(None);
+static DAEMON_SCHEDULER: std::sync::RwLock<Option<std::sync::Arc<NzbgetRsScheduler>>> =
+    std::sync::RwLock::new(None);
 
 pub(crate) fn active_scheduler() -> Option<std::sync::Arc<NzbgetRsScheduler>> {
     ACTIVE_SCHEDULER
@@ -1141,8 +1269,33 @@ pub(crate) fn active_scheduler() -> Option<std::sync::Arc<NzbgetRsScheduler>> {
         .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn nzbget_rs_scheduler_new() -> *mut NzbgetRsScheduler {
+pub(crate) fn create_daemon_scheduler() -> std::sync::Arc<NzbgetRsScheduler> {
+    let arc = std::sync::Arc::new(NzbgetRsScheduler::new());
+    if let Ok(mut g) = ACTIVE_SCHEDULER.write() {
+        *g = Some(std::sync::Arc::downgrade(&arc));
+    }
+    if let Ok(mut dg) = DAEMON_SCHEDULER.write() {
+        *dg = Some(std::sync::Arc::clone(&arc));
+    }
+    arc
+}
+
+pub(crate) fn shutdown_daemon_scheduler() {
+    let prev = DAEMON_SCHEDULER.write().ok().and_then(|mut g| g.take());
+    if let Some(arc) = prev {
+        let wk = std::sync::Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_SCHEDULER.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn nzbget_rs_scheduler_new() -> *mut NzbgetRsScheduler {
     let arc = std::sync::Arc::new(NzbgetRsScheduler::new());
     if let Ok(mut g) = ACTIVE_SCHEDULER.write() {
         *g = Some(std::sync::Arc::downgrade(&arc));
@@ -1150,8 +1303,8 @@ pub extern "C" fn nzbget_rs_scheduler_new() -> *mut NzbgetRsScheduler {
     std::sync::Arc::into_raw(arc).cast_mut()
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_scheduler_free(h: *mut NzbgetRsScheduler) {
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_scheduler_free(h: *mut NzbgetRsScheduler) {
     if !h.is_null() {
         let arc = std::sync::Arc::from_raw(h.cast_const());
         let wk = std::sync::Arc::downgrade(&arc);
@@ -1170,8 +1323,8 @@ pub unsafe extern "C" fn nzbget_rs_scheduler_free(h: *mut NzbgetRsScheduler) {
 /// - `op = 0` (`AddTask`): adds `(a1=id, a2=hours, a3=minutes, a4=weekDaysBits, a5=command, s1=param)`.
 /// - `op = 1` (`ServiceInterval`): returns `m_serviceInterval`.
 /// - `op = 2` (`ServiceWork`): executes `Scheduler::ServiceWork` (`env.a5 != 0` = debug build).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_scheduler_exec(
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_scheduler_exec(
     h: *mut NzbgetRsScheduler,
     op: c_int,
     env: *const NzbgetRsSchedulerEnv,
@@ -1219,6 +1372,22 @@ pub struct NzbgetRsServiceCoord {
 
 static ACTIVE_SERVICE_COORD: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsServiceCoord>>> =
     std::sync::RwLock::new(None);
+
+#[cfg(unix)]
+pub(crate) fn wake_active_service_coord() {
+    let Some(sc) = ACTIVE_SERVICE_COORD
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+    else {
+        return;
+    };
+    crate::log::log_active_bytes(3, b"Waking up ServiceCoordinator");
+    if let Ok(mut woken) = sc.wait_mutex.lock() {
+        *woken = true;
+        sc.wait_cond.notify_all();
+    };
+}
 
 pub(crate) fn wake_active_disk_service() {
     let Some(sc) = ACTIVE_SERVICE_COORD
@@ -1306,7 +1475,17 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
             }
         }
         4 => {
+            #[cfg(unix)]
+            {
+                crate::statmeter::create_daemon_statmeter();
+                crate::extension::create_daemon_maintenance();
+                let _ = create_daemon_scheduler();
+            }
             if let Ok(mut srvs) = sc.services.lock() {
+                srvs.push(ServiceSlot {
+                    ptr: 1,
+                    last_work: 0,
+                });
                 srvs.push(ServiceSlot {
                     ptr: 0,
                     last_work: 0,
@@ -1315,6 +1494,7 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
             sc.disk_service_attached.store(true, Ordering::Release);
         }
         1 => {
+            #[cfg(unix)]
             crate::log::log_active_bytes(3, b"Waking up ServiceCoordinator");
             if let Ok(mut woken) = sc.wait_mutex.lock() {
                 *woken = true;
@@ -1330,6 +1510,7 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
             let Some(host_cb) = cb else {
                 return;
             };
+            #[cfg(unix)]
             crate::log::log_active_bytes(3, b"Entering ServiceCoordinator-loop");
             while host_cb(ctx, std::ptr::null_mut(), 0) == 0 {
                 let count = sc.services.lock().map_or(0, |g| g.len());
@@ -1344,6 +1525,8 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
                     };
                     let service_interval = if svc_ptr.is_null() {
                         crate::lifecycle::disk_service_interval_active()
+                    } else if svc_ptr as usize == 1 {
+                        active_scheduler().map_or(-1, |s| s.service_interval_val())
                     } else {
                         host_cb(ctx, svc_ptr, 1)
                     };
@@ -1352,6 +1535,11 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
                     {
                         if svc_ptr.is_null() {
                             crate::lifecycle::disk_service_work_active();
+                        } else if svc_ptr as usize == 1 {
+                            #[cfg(unix)]
+                            if let Some(s) = active_scheduler() {
+                                s.service_work_active();
+                            }
                         } else {
                             host_cb(ctx, svc_ptr, 2);
                         }
@@ -1367,7 +1555,10 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
                 let mut wait_interval: i32 = 60 * 60 * 24;
                 let cur_time = service_coord_now();
                 let count2 = sc.services.lock().map_or(0, |g| g.len());
+                #[cfg(unix)]
                 let debug_on = crate::log::active_debug_build();
+                #[cfg(not(unix))]
+                let debug_on = false;
                 for idx in 0..count2 {
                     let Some((svc_ptr, last_work)) = sc
                         .services
@@ -1379,6 +1570,8 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
                     };
                     let service_interval = if svc_ptr.is_null() {
                         crate::lifecycle::disk_service_interval_active()
+                    } else if svc_ptr as usize == 1 {
+                        active_scheduler().map_or(-1, |s| s.service_interval_val())
                     } else {
                         host_cb(ctx, svc_ptr, 1)
                     };

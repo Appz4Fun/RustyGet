@@ -3217,7 +3217,7 @@ impl NzbgetRsQueueScriptCoord {
             return;
         }
         #[cfg(unix)]
-        if let Some(hcb) = env.host_cb {
+        if let Some(hcb) = env.host_cb.or_else(crate::ffi::script_host_cb) {
             let pcount = ints[8].max(0) as usize;
             let mut params = Vec::with_capacity(pcount);
             for i in 0..pcount {
@@ -3271,8 +3271,23 @@ impl NzbgetRsQueueScriptCoord {
         let Some(cb) = env.action_cb else {
             return;
         };
-        let Some(ext_mgr) = env.ext_mgr.as_ref() else {
-            return;
+        let active_mgr;
+        let use_active = env.ext_mgr.is_null();
+        let ext_mgr: &RsExtensionManager = if let Some(m) = env.ext_mgr.as_ref() {
+            m
+        } else {
+            #[cfg(unix)]
+            {
+                let Some(m) = crate::script::active_ext_mgr() else {
+                    return;
+                };
+                active_mgr = m;
+                active_mgr.as_ref()
+            }
+            #[cfg(not(unix))]
+            {
+                return;
+            }
         };
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let event = env.a1;
@@ -3282,11 +3297,49 @@ impl NzbgetRsQueueScriptCoord {
             g.queue.retain(|it| it.nzb_id != nzb_id);
         }
 
-        if should_skip_queue_event_interval(event, 0, env.a4, env.t1, env.t2) {
+        let active_opts = if use_active {
+            crate::options::active_options()
+        } else {
+            None
+        };
+        let (event_interval, now_sec) = if use_active {
+            let iv = active_opts
+                .as_deref()
+                .map_or(0, |o| o.scalars().event_interval);
+            #[cfg(unix)]
+            let now = libc::time(std::ptr::null_mut()) as i64;
+            #[cfg(not(unix))]
+            let now = 0i64;
+            (iv, now)
+        } else {
+            (env.a4, env.t1)
+        };
+
+        if should_skip_queue_event_interval(event, 0, event_interval, now_sec, env.t2) {
             return;
         }
 
-        let resolved_ext = opt_cstr_bytes(env.s1);
+        let resolved_ext: &[u8] = if use_active {
+            if let Some(o) = active_opts.as_deref() {
+                let mut exts = o.str_bytes(29);
+                if !env.s1.is_null() {
+                    let cat_cstr = CStr::from_ptr(env.s1);
+                    if !cat_cstr.to_bytes().is_empty() {
+                        if let Some(cat) = o.find_category(cat_cstr, false) {
+                            let ce = cat.extensions.to_bytes();
+                            if !ce.is_empty() {
+                                exts = ce;
+                            }
+                        }
+                    }
+                }
+                exts
+            } else {
+                &[]
+            }
+        } else {
+            opt_cstr_bytes(env.s1)
+        };
         let snap = ext_mgr.snapshot();
 
         for ext in snap {
@@ -3422,15 +3475,67 @@ impl NzbgetRsQueueScriptCoord {
     }
 }
 
+static ACTIVE_QUEUE_SCRIPT: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsQueueScriptCoord>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn active_queue_script() -> Option<std::sync::Arc<NzbgetRsQueueScriptCoord>> {
+    ACTIVE_QUEUE_SCRIPT
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+}
+
+pub(crate) fn init_active_queue_script_options() {
+    if let Some(qs) = active_queue_script() {
+        #[cfg(unix)]
+        let has = crate::script::active_ext_mgr()
+            .is_some_and(|m| m.find_if(|ext| ext.queue_script).is_some());
+        #[cfg(not(unix))]
+        let has = false;
+        qs.has_queue_scripts.store(has, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn active_queue_script_size() -> c_int {
+    active_queue_script().map_or(0, |qs| {
+        let g = qs.inner.lock().unwrap_or_else(|e| e.into_inner());
+        (g.queue.len() + usize::from(g.cur_item.is_some())) as c_int
+    })
+}
+
+pub(crate) fn active_queue_script_has_job(nzb_id: i32, out_active: &mut bool) -> bool {
+    let Some(qs) = active_queue_script() else {
+        *out_active = false;
+        return false;
+    };
+    let g = qs.inner.lock().unwrap_or_else(|e| e.into_inner());
+    let active = g.cur_item.as_ref().is_some_and(|it| it.nzb_id == nzb_id);
+    *out_active = active;
+    active || g.queue.iter().any(|it| it.nzb_id == nzb_id)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_queue_script_new() -> *mut NzbgetRsQueueScriptCoord {
-    Box::into_raw(Box::new(NzbgetRsQueueScriptCoord::new()))
+    let arc = std::sync::Arc::new(NzbgetRsQueueScriptCoord::new());
+    if let Ok(mut g) = ACTIVE_QUEUE_SCRIPT.write() {
+        *g = Some(std::sync::Arc::downgrade(&arc));
+    }
+    std::sync::Arc::into_raw(arc).cast_mut()
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_queue_script_free(h: *mut NzbgetRsQueueScriptCoord) {
     if !h.is_null() {
-        drop(Box::from_raw(h));
+        let arc = std::sync::Arc::from_raw(h.cast_const());
+        let wk = std::sync::Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_QUEUE_SCRIPT.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+        drop(arc);
     }
 }
 
@@ -3501,8 +3606,9 @@ pub unsafe extern "C" fn nzbget_rs_queue_script_exec(
 
 // --- Maintenance coordinator ---
 
+#[cfg(test)]
 #[repr(C)]
-pub struct NzbgetRsMaintenanceEnv {
+pub(crate) struct NzbgetRsMaintenanceEnv {
     pub ctx: *mut c_void,
     pub p1: usize,
     pub a1: c_int,
@@ -3544,7 +3650,50 @@ pub struct NzbgetRsMaintenance {
     #[cfg(unix)]
     controller: std::sync::Mutex<Option<std::sync::Arc<crate::script::ScriptRunner>>>,
     #[cfg(not(unix))]
+    #[allow(dead_code)]
     controller: std::sync::Mutex<Option<usize>>,
+}
+
+static DAEMON_MAINTENANCE: std::sync::RwLock<Option<std::sync::Arc<NzbgetRsMaintenance>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn create_daemon_maintenance() {
+    if let Ok(mut g) = DAEMON_MAINTENANCE.write() {
+        *g = Some(std::sync::Arc::new(NzbgetRsMaintenance::new()));
+    }
+}
+
+pub(crate) fn active_maintenance() -> Option<std::sync::Arc<NzbgetRsMaintenance>> {
+    DAEMON_MAINTENANCE.read().ok().and_then(|g| g.clone())
+}
+
+pub(crate) fn shutdown_daemon_maintenance() {
+    if let Some(m) = active_maintenance() {
+        #[cfg(unix)]
+        {
+            let active = m
+                .controller
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone();
+            if let Some(runner) = active {
+                if let Some(hcb) = crate::ffi::script_host_cb() {
+                    runner.detach(std::ptr::null_mut(), hcb);
+                }
+                while m
+                    .controller
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .is_some()
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+    }
+    if let Ok(mut g) = DAEMON_MAINTENANCE.write() {
+        *g = None;
+    }
 }
 
 pub(crate) fn format_maint_script_prefix(
@@ -3568,6 +3717,501 @@ pub(crate) fn format_maint_script_prefix(
     (info_name, log_prefix, prefix_len)
 }
 
+#[cfg(unix)]
+fn read_pkg_info_active(web_dir: &[u8], sep: u8, key: &[u8]) -> Option<Vec<u8>> {
+    match maintenance_read_package_info_str(web_dir, sep, key) {
+        Ok(val) => Some(val),
+        Err((err_kind, fn_bytes)) => {
+            let mut m = if err_kind == 1 {
+                b"Could not load file ".to_vec()
+            } else {
+                b"Could not parse file ".to_vec()
+            };
+            m.extend_from_slice(&fn_bytes);
+            crate::log::log_active_bytes(2, &m);
+            None
+        }
+    }
+}
+
+pub(crate) unsafe fn collect_maint_messages_active(
+    id_from: c_int,
+    nr_entries: c_int,
+    emit_ctx: *mut c_void,
+    emit_cb: crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn,
+) {
+    let mut entries = Vec::new();
+    let kept = active_maintenance();
+    let guard = kept
+        .as_deref()
+        .map(|m| m.messages.lock().unwrap_or_else(|err| err.into_inner()));
+    if let Some(ref g) = guard {
+        let list = &g.1;
+        let len = list.len() as i32;
+        let mut start = len;
+        if nr_entries > 0 {
+            start = len - nr_entries.min(len);
+        }
+        if id_from > 0 && !list.is_empty() {
+            start = (id_from - list[0].id as i32).max(0);
+        }
+        if (start as usize) < list.len() {
+            entries.reserve(list.len() - start as usize);
+            for msg in &list[start as usize..] {
+                entries.push(crate::xmlrpc_format::NzbgetRsRpcLogEntry {
+                    id: msg.id as c_int,
+                    kind: msg.kind,
+                    time: msg.time,
+                    text: msg.text.as_ptr() as *const c_char,
+                });
+            }
+        }
+    }
+    emit_cb(
+        emit_ctx,
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        entries.as_ptr() as *const c_void,
+        entries.len(),
+        std::ptr::null(),
+        0,
+        std::ptr::null(),
+        0,
+        std::ptr::null(),
+        0,
+    );
+}
+
+#[cfg(unix)]
+pub(crate) unsafe fn start_update_active(branch: c_int) -> bool {
+    let (Some(m), Some(hcb), Some(opts)) = (
+        active_maintenance(),
+        crate::ffi::script_host_cb(),
+        crate::options::active_options(),
+    ) else {
+        return false;
+    };
+    let mut ctrl = m.controller.lock().unwrap_or_else(|err| err.into_inner());
+    if ctrl.is_some() {
+        crate::log::log_active_bytes(
+            2,
+            b"Could not start update-script: update-script is already running",
+        );
+        return false;
+    }
+    let sep = crate::paths::PATH_SEPARATOR as u8;
+    let Some(mut script_path) = read_pkg_info_active(opts.str_bytes(8), sep, b"install-script")
+    else {
+        return false;
+    };
+    if script_path.first().copied() != Some(sep) {
+        let app_dir = opts.str_bytes(1);
+        let mut full = Vec::with_capacity(app_dir.len() + 1 + script_path.len());
+        full.extend_from_slice(app_dir);
+        full.push(sep);
+        full.extend_from_slice(&script_path);
+        script_path = full;
+    }
+    {
+        let mut mg = m.messages.lock().unwrap_or_else(|err| err.into_inner());
+        mg.1.clear();
+    }
+    let runner = crate::script::ScriptRunner::new(false);
+    *ctrl = Some(std::sync::Arc::clone(&runner));
+    drop(ctrl);
+    crate::script::spawn_background_job(
+        crate::script::BackgroundScriptJob::MaintenanceUpdate {
+            maint: m,
+            runner,
+            script_path,
+            branch,
+            daemon_mode: opts.daemon_mode(),
+        },
+        std::ptr::null_mut(),
+        hcb,
+    );
+    true
+}
+
+#[cfg(unix)]
+pub(crate) unsafe fn check_updates_active() -> Option<Vec<u8>> {
+    let (Some(hcb), Some(opts)) = (
+        crate::ffi::script_host_cb(),
+        crate::options::active_options(),
+    ) else {
+        return None;
+    };
+    let sep = crate::paths::PATH_SEPARATOR as u8;
+    let info_script = read_pkg_info_active(opts.str_bytes(8), sep, b"update-info-script")?;
+    let base = &info_script[crate::paths::base_file_name(&info_script)..];
+    let mut det = b"Executing update-info-script ".to_vec();
+    det.extend_from_slice(base);
+    crate::log::log_active_bytes(4, &det);
+
+    let (info_name, log_prefix, prefix_len) = format_maint_script_prefix(true, base, 1023);
+    let acc = crate::script::run_maint_info_script(
+        &info_script,
+        &info_name,
+        &log_prefix,
+        prefix_len.max(0) as usize,
+        std::ptr::null_mut(),
+        hcb,
+    );
+    if acc.is_empty() {
+        None
+    } else {
+        Some(acc)
+    }
+}
+
+fn decode_strict_base64(clean: &[u8]) -> Option<Vec<u8>> {
+    if clean.is_empty() || clean.len() % 4 != 0 {
+        return None;
+    }
+    fn b64_val(b: u8) -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(clean.len() / 4 * 3);
+    let chunks = clean.len() / 4;
+    for (idx, q) in clean.chunks_exact(4).enumerate() {
+        let last = idx + 1 == chunks;
+        let a = b64_val(q[0])?;
+        let b = b64_val(q[1])?;
+        if q[2] == b'=' {
+            if !last || q[3] != b'=' || (b & 0x0f) != 0 {
+                return None;
+            }
+            out.push((a << 2) | (b >> 4));
+        } else if q[3] == b'=' {
+            if !last {
+                return None;
+            }
+            let c = b64_val(q[2])?;
+            if (c & 0x03) != 0 {
+                return None;
+            }
+            out.push((a << 2) | (b >> 4));
+            out.push((b << 4) | (c >> 2));
+        } else {
+            let c = b64_val(q[2])?;
+            let d = b64_val(q[3])?;
+            out.push((a << 2) | (b >> 4));
+            out.push((b << 4) | (c >> 2));
+            out.push((c << 6) | d);
+        }
+    }
+    Some(out)
+}
+
+fn parse_spki_pem(pem: &[u8]) -> Option<Vec<u8>> {
+    const BEGIN: &[u8] = b"-----BEGIN PUBLIC KEY-----";
+    const END: &[u8] = b"-----END PUBLIC KEY-----";
+    let mut in_body = false;
+    let mut b64 = Vec::new();
+    for raw_line in pem.split(|&b| b == b'\n') {
+        let mut line = raw_line;
+        while let Some(&last) = line.last() {
+            if matches!(last, b'\r' | b' ' | b'\t') {
+                line = &line[..line.len() - 1];
+            } else {
+                break;
+            }
+        }
+        if !in_body {
+            if line == BEGIN {
+                in_body = true;
+            }
+        } else if line == END {
+            return decode_strict_base64(&b64);
+        } else {
+            for &ch in line {
+                if !matches!(ch, b' ' | b'\t' | b'\r') {
+                    b64.push(ch);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn read_der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    if input.len() < 2 {
+        return None;
+    }
+    let tag = input[0];
+    let len_byte = input[1];
+    let (hdr_len, content_len) = if (len_byte & 0x80) == 0 {
+        (2usize, len_byte as usize)
+    } else {
+        let num_octets = (len_byte & 0x7f) as usize;
+        if num_octets == 0 || num_octets > 4 || input.len() < 2 + num_octets {
+            return None;
+        }
+        if input[2] == 0 {
+            return None;
+        }
+        let mut len = 0usize;
+        for &b in &input[2..2 + num_octets] {
+            len = (len << 8) | (b as usize);
+        }
+        if len < 0x80 {
+            return None;
+        }
+        (2 + num_octets, len)
+    };
+    if input.len() < hdr_len.checked_add(content_len)? {
+        return None;
+    }
+    Some((
+        tag,
+        &input[hdr_len..hdr_len + content_len],
+        &input[hdr_len + content_len..],
+    ))
+}
+
+fn read_der_positive_int(input: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (tag, content, rest) = read_der_tlv(input)?;
+    if tag != 0x02 || content.is_empty() || (content[0] & 0x80) != 0 {
+        return None;
+    }
+    if content.len() > 1 && content[0] == 0x00 && (content[1] & 0x80) == 0 {
+        return None;
+    }
+    let mag = if content[0] == 0x00 {
+        &content[1..]
+    } else {
+        content
+    };
+    if mag.is_empty() {
+        return None;
+    }
+    Some((mag, rest))
+}
+
+fn parse_rsa2048_spki_der(der: &[u8]) -> Option<([u8; 256], Vec<u8>)> {
+    const OID_RSA_ENCRYPTION: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+    let (outer_tag, spki, outer_rest) = read_der_tlv(der)?;
+    if outer_tag != 0x30 || !outer_rest.is_empty() {
+        return None;
+    }
+    let (alg_tag, alg_body, spki_rest) = read_der_tlv(spki)?;
+    if alg_tag != 0x30 {
+        return None;
+    }
+    let (oid_tag, oid_bytes, alg_params) = read_der_tlv(alg_body)?;
+    if oid_tag != 0x06 || oid_bytes != OID_RSA_ENCRYPTION {
+        return None;
+    }
+    if !alg_params.is_empty() && alg_params != [0x05, 0x00] {
+        return None;
+    }
+    let (bs_tag, bs_body, spki_tail) = read_der_tlv(spki_rest)?;
+    if bs_tag != 0x03 || !spki_tail.is_empty() || bs_body.first().copied() != Some(0x00) {
+        return None;
+    }
+    let (rsa_tag, rsa_body, rsa_tail) = read_der_tlv(&bs_body[1..])?;
+    if rsa_tag != 0x30 || !rsa_tail.is_empty() {
+        return None;
+    }
+    let (n_mag, rsa_rest1) = read_der_positive_int(rsa_body)?;
+    let (e_mag, rsa_rest2) = read_der_positive_int(rsa_rest1)?;
+    if !rsa_rest2.is_empty() || n_mag.len() != 256 || n_mag[0] == 0 || (n_mag[255] & 1) == 0 {
+        return None;
+    }
+    if e_mag.is_empty()
+        || e_mag.len() > 256
+        || (e_mag[e_mag.len() - 1] & 1) == 0
+        || (e_mag.len() == 1 && e_mag[0] < 3)
+        || (e_mag.len() == 256 && e_mag >= n_mag)
+    {
+        return None;
+    }
+    let mut n = [0u8; 256];
+    n.copy_from_slice(n_mag);
+    Some((n, e_mag.to_vec()))
+}
+
+fn limbs_from_be_256(bytes: &[u8; 256]) -> [u64; 32] {
+    let mut limbs = [0u64; 32];
+    for (i, chunk) in bytes.rchunks_exact(8).enumerate() {
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(chunk);
+        limbs[i] = u64::from_be_bytes(arr);
+    }
+    limbs
+}
+
+fn limbs_to_be_256(limbs: &[u64; 32]) -> [u8; 256] {
+    let mut out = [0u8; 256];
+    for (i, &limb) in limbs.iter().rev().enumerate() {
+        out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_be_bytes());
+    }
+    out
+}
+
+fn ge_2048(a: &[u64; 32], b: &[u64; 32]) -> bool {
+    for i in (0..32).rev() {
+        if a[i] != b[i] {
+            return a[i] > b[i];
+        }
+    }
+    true
+}
+
+fn sub_assign_2048(a: &mut [u64; 32], b: &[u64; 32]) {
+    let mut borrow = 0u64;
+    for i in 0..32 {
+        let (d1, b1) = a[i].overflowing_sub(b[i]);
+        let (d2, b2) = d1.overflowing_sub(borrow);
+        a[i] = d2;
+        borrow = u64::from(b1 || b2);
+    }
+}
+
+fn add_assign_2048(a: &mut [u64; 32], b: &[u64; 32]) -> bool {
+    let mut carry = 0u64;
+    for i in 0..32 {
+        let (s1, c1) = a[i].overflowing_add(b[i]);
+        let (s2, c2) = s1.overflowing_add(carry);
+        a[i] = s2;
+        carry = u64::from(c1 || c2);
+    }
+    carry != 0
+}
+
+fn shl1_2048(a: &mut [u64; 32]) -> bool {
+    let mut carry = 0u64;
+    for limb in a.iter_mut() {
+        let next = *limb >> 63;
+        *limb = (*limb << 1) | carry;
+        carry = next;
+    }
+    carry != 0
+}
+
+fn mul_mod_2048(a: &[u64; 32], b: &[u64; 32], n: &[u64; 32]) -> [u64; 32] {
+    let mut acc = [0u64; 32];
+    for bit in (0..2048).rev() {
+        let c1 = shl1_2048(&mut acc);
+        if c1 || ge_2048(&acc, n) {
+            sub_assign_2048(&mut acc, n);
+        }
+        if ((b[bit / 64] >> (bit % 64)) & 1) != 0 {
+            let c2 = add_assign_2048(&mut acc, a);
+            if c2 || ge_2048(&acc, n) {
+                sub_assign_2048(&mut acc, n);
+            }
+        }
+    }
+    acc
+}
+
+/// Verifies an RSA-2048 RSASSA-PKCS1-v1_5 SHA-256 signature against a PEM-encoded
+/// X.509 SubjectPublicKeyInfo public key (`pubkey.pem`).
+pub fn verify_rsa2048_pkcs1_sha256(
+    in_hash: &[u8; 32],
+    sig: &[u8; 256],
+    pub_key_pem: &[u8],
+) -> bool {
+    const DIGEST_INFO_SHA256_NULL: [u8; 19] = [
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20,
+    ];
+    const DIGEST_INFO_SHA256_NO_NULL: [u8; 17] = [
+        0x30, 0x2f, 0x30, 0x0b, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x04, 0x20,
+    ];
+
+    let Some(der) = parse_spki_pem(pub_key_pem) else {
+        return false;
+    };
+    let Some((n_be, e_be)) = parse_rsa2048_spki_der(&der) else {
+        return false;
+    };
+    if sig[..] >= n_be[..] {
+        return false;
+    }
+
+    let n = limbs_from_be_256(&n_be);
+    let base = limbs_from_be_256(sig);
+    let mut result = [0u64; 32];
+    result[0] = 1;
+
+    let mut started = false;
+    for &byte in &e_be {
+        for shift in (0..8).rev() {
+            let bit = (byte >> shift) & 1;
+            if !started {
+                if bit != 0 {
+                    started = true;
+                    result = base;
+                }
+                continue;
+            }
+            result = mul_mod_2048(&result, &result, &n);
+            if bit != 0 {
+                result = mul_mod_2048(&result, &base, &n);
+            }
+        }
+    }
+
+    let em = limbs_to_be_256(&result);
+    let mut expected_null = [0xffu8; 256];
+    expected_null[0] = 0x00;
+    expected_null[1] = 0x01;
+    expected_null[204] = 0x00;
+    expected_null[205..224].copy_from_slice(&DIGEST_INFO_SHA256_NULL);
+    expected_null[224..256].copy_from_slice(in_hash);
+    if em == expected_null {
+        return true;
+    }
+
+    let mut expected_no_null = [0xffu8; 256];
+    expected_no_null[0] = 0x00;
+    expected_no_null[1] = 0x01;
+    expected_no_null[206] = 0x00;
+    expected_no_null[207..224].copy_from_slice(&DIGEST_INFO_SHA256_NO_NULL);
+    expected_no_null[224..256].copy_from_slice(in_hash);
+    em == expected_no_null
+}
+
+#[cfg(unix)]
+pub(crate) fn verify_signature_active(
+    in_filename: &[u8],
+    sig_filename: &[u8],
+    pub_key_filename: &[u8],
+) -> bool {
+    if crate::ffi::build_tls_disabled() {
+        return false;
+    }
+    let Some((in_hash, sig, pub_key)) =
+        maintenance_prepare_signature_inputs(in_filename, sig_filename, pub_key_filename)
+    else {
+        return false;
+    };
+    verify_rsa2048_pkcs1_sha256(&in_hash, &sig, &pub_key)
+}
+
+#[cfg(test)]
 unsafe fn emit_maint_log(env: &NzbgetRsMaintenanceEnv, kind: c_int, msg: &[u8]) {
     #[cfg(unix)]
     if let Some(hcb) = env.script_host_cb {
@@ -3579,6 +4223,7 @@ unsafe fn emit_maint_log(env: &NzbgetRsMaintenanceEnv, kind: c_int, msg: &[u8]) 
     let _ = (env, kind, msg);
 }
 
+#[cfg(test)]
 unsafe fn read_pkg_info_logged(
     env: &NzbgetRsMaintenanceEnv,
     web_dir: &[u8],
@@ -3635,36 +4280,26 @@ impl NzbgetRsMaintenance {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn nzbget_rs_maintenance_new() -> *mut NzbgetRsMaintenance {
-    Box::into_raw(Box::new(NzbgetRsMaintenance::new()))
+#[cfg(test)]
+pub(crate) fn nzbget_rs_maintenance_new() -> *mut NzbgetRsMaintenance {
+    std::sync::Arc::into_raw(std::sync::Arc::new(NzbgetRsMaintenance::new())).cast_mut()
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_maintenance_free(h: *mut NzbgetRsMaintenance) {
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_maintenance_free(h: *mut NzbgetRsMaintenance) {
     if !h.is_null() {
-        drop(Box::from_raw(h));
+        drop(std::sync::Arc::from_raw(h.cast_const()));
     }
 }
 
-/// Executes `Maintenance` operations:
-/// - `0`: `~Maintenance()` detach & wait loop
-/// - `2`: `AddMessage(a1 = kind, t1 = time, s1 = text)`
-/// - `3`: `CollectMessages(a3 = id_from, a4 = nr_entries)` -> `emit_cb`
-/// - `4`: `StartUpdate(a1 = branch, a2 = sep, a3 = daemon_mode, s1 = web_dir, s2 = app_dir)`
-/// - `5`: `CheckUpdates(a2 = sep, s1 = web_dir, out_buf)`
-/// - `8` (stateless): `VerifySignature(s1 = in, s2 = sig, s3 = pubkey)`
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_maintenance_exec(
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_maintenance_exec(
     h: *mut NzbgetRsMaintenance,
     op: c_int,
     env: *const NzbgetRsMaintenanceEnv,
 ) -> c_int {
     if op == 8 {
         let Some(e) = env.as_ref() else {
-            return 0;
-        };
-        let Some(cb) = e.action_cb else {
             return 0;
         };
         let Some((in_hash, sig, pub_key)) = maintenance_prepare_signature_inputs(
@@ -3674,15 +4309,18 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_exec(
         ) else {
             return 0;
         };
-        let r = cb(
-            e.ctx,
-            6,
-            in_hash.as_ptr() as *const c_char,
-            sig.as_ptr() as *const c_char,
-            pub_key.as_ptr(),
-            pub_key.len(),
-        );
-        return c_int::from(r != 0);
+        if let Some(cb) = e.action_cb {
+            let r = cb(
+                e.ctx,
+                6,
+                in_hash.as_ptr() as *const c_char,
+                sig.as_ptr() as *const c_char,
+                pub_key.as_ptr(),
+                pub_key.len(),
+            );
+            return c_int::from(r != 0);
+        }
+        return c_int::from(verify_rsa2048_pkcs1_sha256(&in_hash, &sig, &pub_key));
     }
 
     let Some(m) = h.as_ref() else {
@@ -3818,9 +4456,11 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_exec(
                 let runner = crate::script::ScriptRunner::new(false);
                 *ctrl = Some(std::sync::Arc::clone(&runner));
                 drop(ctrl);
+                std::sync::Arc::increment_strong_count(h.cast_const());
+                let maint_arc = std::sync::Arc::from_raw(h.cast_const());
                 crate::script::spawn_background_job(
                     crate::script::BackgroundScriptJob::MaintenanceUpdate {
-                        maint: h,
+                        maint: maint_arc,
                         runner,
                         script_path,
                         branch: e.a1,
@@ -5262,6 +5902,84 @@ mod tests {
 
             nzbget_rs_maintenance_free(m);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_verify_rsa2048_signature_end_to_end() {
+        const PUB_PEM: &[u8] = b"-----BEGIN PUBLIC KEY-----\n\
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2BlAPZqJ3S+PgPuCPtxJ\n\
+PNi9ext3OeyPMhAa1w2LSGGwsJQh0s2tiHKTvDt8Wx4u10CGAeRZ5JEL2HWptxLP\n\
+tPtw1vjXQ66nT+mNiQlCxaFK5QGwPnnflklrlxk8gncF8vT8iDYqo6Q49ToVS00D\n\
++UAp3KepTzXnzSjVvrYgtCOAJ0DUMclY3lhrJkbKxK79x+yciaCoIRk7foUTaAVu\n\
+a0tBmtjbEVz6emPeX9nb6o13TJ23SX0MsCqF9l9/f2GUvVr6fkQIREjP/QdQBKiC\n\
+8+yg51ygeuhM2uPd+d/vSnl0i79K3CBB4b9GZSQYu/wy7CwixNRMzioFa3qtHCXU\n\
+5wIDAQAB\n\
+-----END PUBLIC KEY-----\n";
+        const SIG_HEX: &[u8] = b"05a927b3549d9225a695eeb2bc3f2c1dbb87d236b226da565451b8eb0b7b5db5\
+9d4d08a86abc4a4ea9bfeaf7987d51ed5a2cf6e0184aee23d24d3f0c4de96131\
+f92cede14cd5cff044e1ce25a2d1231b05bb5caabeb7163dfb46d8a01ba27806\
+26462b95ce92c0c31bdb376dbb280a84f3efbcda9f98e595e1c79ef23d8a6d39\
+89736872b16199a1d2e7a18973c9487714c3135c417bed23122037dd78f74099\
+5ba52fab0eb227191612dcb7cd6ef425a3dcee2ca9162ba5a1a792c8d2f89743\
+cf99de5cd44e3f1d97c5aa1183310f8eb72d89cccbbc7c091de074556823da77\
+001eddd3e196e54ebca418a5f93a1f06c93ab3a9f6a033402b6d46e8adbf8026";
+        const PAYLOAD: &[u8] =
+            b"RustyGet installer payload for RSA-2048 PKCS#1 v1.5 SHA-256 test\n";
+
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget_sig_verify_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let in_path = dir.join("nzbget-27.0-bin-linux.run");
+        let sig_path = dir.join("nzbget-27.0.sig.txt");
+        let pub_path = dir.join("pubkey.pem");
+        std::fs::write(&in_path, PAYLOAD).unwrap();
+        let mut sig_file_bytes = b"\"RSA-SHA256(nzbget-27.0-bin-linux.run)\" : \"".to_vec();
+        sig_file_bytes.extend_from_slice(SIG_HEX);
+        sig_file_bytes.extend_from_slice(b"\"\n");
+        std::fs::write(&sig_path, &sig_file_bytes).unwrap();
+        std::fs::write(&pub_path, PUB_PEM).unwrap();
+
+        let (hash, mut sig, pub_key) = maintenance_prepare_signature_inputs(
+            in_path.to_str().unwrap().as_bytes(),
+            sig_path.to_str().unwrap().as_bytes(),
+            pub_path.to_str().unwrap().as_bytes(),
+        )
+        .unwrap();
+        assert!(verify_rsa2048_pkcs1_sha256(&hash, &sig, &pub_key));
+
+        #[cfg(unix)]
+        assert!(verify_signature_active(
+            in_path.to_str().unwrap().as_bytes(),
+            sig_path.to_str().unwrap().as_bytes(),
+            pub_path.to_str().unwrap().as_bytes(),
+        ));
+
+        let mut bad_hash = hash;
+        bad_hash[0] ^= 0x01;
+        assert!(!verify_rsa2048_pkcs1_sha256(&bad_hash, &sig, &pub_key));
+
+        sig[255] ^= 0x01;
+        assert!(!verify_rsa2048_pkcs1_sha256(&hash, &sig, &pub_key));
+        sig[255] ^= 0x01;
+
+        let max_sig = [0xffu8; 256];
+        assert!(!verify_rsa2048_pkcs1_sha256(&hash, &max_sig, &pub_key));
+
+        let repo_pubkey = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("pubkey.pem");
+        let repo_pem = std::fs::read(repo_pubkey).unwrap();
+        assert!(parse_rsa2048_spki_der(&parse_spki_pem(&repo_pem).unwrap()).is_some());
+        assert!(!verify_rsa2048_pkcs1_sha256(&hash, &sig, &repo_pem));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

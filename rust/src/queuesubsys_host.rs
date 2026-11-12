@@ -663,6 +663,7 @@ pub(crate) struct ActiveDownloadSnap {
 pub(crate) struct QueueSubsysHost {
     pub ctx: *mut c_void,
     pub cb: NzbgetRsQueueSubsysHostFn,
+    pub use_active: bool,
 }
 
 unsafe extern "C" fn locked_queue_trampoline<F: FnOnce(usize)>(
@@ -678,7 +679,21 @@ unsafe extern "C" fn locked_queue_trampoline<F: FnOnce(usize)>(
 impl QueueSubsysHost {
     #[inline]
     pub fn new(ctx: *mut c_void, cb: NzbgetRsQueueSubsysHostFn) -> Self {
-        Self { ctx, cb }
+        Self {
+            ctx,
+            cb,
+            use_active: true,
+        }
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub fn new_mock(ctx: *mut c_void, cb: NzbgetRsQueueSubsysHostFn) -> Self {
+        Self {
+            ctx,
+            cb,
+            use_active: false,
+        }
     }
 
     #[inline]
@@ -700,6 +715,95 @@ impl QueueSubsysHost {
     }
 
     pub fn opts(&self) -> GlobalOptsSnap {
+        if self.use_active {
+            let opts = crate::options::active_options();
+            let ws = crate::ffi::active_workstate();
+            let cur_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let parcheck_enabled = crate::ffi::build_parcheck_enabled();
+            let (
+                pause_download,
+                temp_pause_download,
+                quota_reached,
+                download_held,
+                pause_post_process,
+                pause_scan,
+                temp_pause_postprocess,
+            ) = ws
+                .as_ref()
+                .map_or((false, false, false, false, false, false, false), |w| {
+                    (
+                        w.pause_download(),
+                        w.temp_pause_download(),
+                        w.quota_reached(),
+                        w.download_held(),
+                        w.pause_post_process(),
+                        w.pause_scan(),
+                        w.temp_pause_postprocess(),
+                    )
+                });
+            if let Some(ref o) = opts {
+                let sc = o.scalars();
+                return GlobalOptsSnap {
+                    dupe_article_fallback: sc.dupe_article_fallback,
+                    par_check: sc.par_check,
+                    par_scan: sc.par_scan,
+                    health_check: sc.health_check,
+                    dupe_check: sc.dupe_check != 0,
+                    server_mode: o.server_mode(),
+                    continue_partial: sc.continue_partial != 0,
+                    direct_write: sc.direct_write != 0,
+                    direct_rename: sc.direct_rename != 0,
+                    raw_article: sc.raw_article != 0,
+                    reorder_files: sc.reorder_files != 0,
+                    file_naming: sc.file_naming,
+                    propagation_delay: sc.propagation_delay,
+                    article_timeout: sc.article_timeout,
+                    pause_download,
+                    temp_pause_download,
+                    quota_reached,
+                    download_held,
+                    pause_post_process,
+                    pause_scan,
+                    temp_pause_postprocess,
+                    keep_history: sc.keep_history,
+                    post_strategy: sc.post_strategy,
+                    skip_write: sc.skip_write != 0,
+                    par_rename: sc.par_rename != 0,
+                    rar_rename: sc.rar_rename != 0,
+                    direct_unpack: sc.direct_unpack != 0,
+                    par_pause_queue: sc.par_pause_queue != 0,
+                    unpack_pause_queue: sc.unpack_pause_queue != 0,
+                    script_pause_queue: sc.script_pause_queue != 0,
+                    post_download_rename: sc.post_download_rename != 0,
+                    rename_after_unpack: sc.rename_after_unpack != 0,
+                    hard_linking: sc.hard_linking != 0,
+                    unpack: sc.unpack != 0,
+                    parcheck_enabled,
+                    cur_time,
+                    queue_dir: o.str_bytes(6).to_vec(),
+                    par_ignore_ext: o.str_bytes(33).to_vec(),
+                    ext_cleanup_disk: o.str_bytes(32).to_vec(),
+                    inter_dir: o.str_bytes(4).to_vec(),
+                    hard_linking_ignore_ext: o.str_bytes(37).to_vec(),
+                    extensions: o.str_bytes(29).to_vec(),
+                };
+            }
+            return GlobalOptsSnap {
+                parcheck_enabled,
+                cur_time,
+                pause_download,
+                temp_pause_download,
+                quota_reached,
+                download_held,
+                pause_post_process,
+                pause_scan,
+                temp_pause_postprocess,
+                ..GlobalOptsSnap::default()
+            };
+        }
         let mut ints = [0i32; 35];
         let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 6];
@@ -764,6 +868,10 @@ impl QueueSubsysHost {
     }
 
     pub fn log(&self, kind: i32, msg: &[u8]) {
+        if self.use_active {
+            crate::log::log_active_bytes(kind, msg);
+            return;
+        }
         let c = c_bytes(msg);
         self.raw(
             2,
@@ -818,6 +926,12 @@ impl QueueSubsysHost {
     }
 
     pub fn sleep_ms(&self, ms: i32) {
+        if self.use_active {
+            if ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+            }
+            return;
+        }
         self.raw(
             3,
             0,
@@ -833,6 +947,10 @@ impl QueueSubsysHost {
     }
 
     pub fn set_standby_mode(&self, standby: bool) {
+        if self.use_active {
+            let _ = standby;
+            return;
+        }
         self.raw(
             3,
             1,
@@ -848,6 +966,12 @@ impl QueueSubsysHost {
     }
 
     pub fn stat_meter_load(&self) -> (bool, bool) {
+        #[cfg(unix)]
+        if self.use_active {
+            let mut perfect = true;
+            let loaded = crate::statmeter::load_active_statmeter(&mut perfect);
+            return (loaded, perfect);
+        }
         let mut ints = [1i32, 1i32];
         self.raw(
             3,
@@ -865,6 +989,11 @@ impl QueueSubsysHost {
     }
 
     pub fn stat_meter_save(&self) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::statmeter::save_active_statmeter();
+            return;
+        }
         self.raw(
             3,
             2,
@@ -880,6 +1009,11 @@ impl QueueSubsysHost {
     }
 
     pub fn stat_meter_interval_check(&self) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::statmeter::interval_check_active_statmeter();
+            return;
+        }
         self.raw(
             3,
             2,
@@ -895,6 +1029,11 @@ impl QueueSubsysHost {
     }
 
     pub fn stat_meter_enter_leave_standby(&self, enter: bool) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::statmeter::enter_leave_standby_active_statmeter(enter);
+            return;
+        }
         self.raw(
             3,
             2,
@@ -910,6 +1049,11 @@ impl QueueSubsysHost {
     }
 
     pub fn stat_meter_add_zero_speed(&self) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::statmeter::add_speed_reading_active_statmeter(0);
+            return;
+        }
         self.raw(
             3,
             2,
@@ -925,6 +1069,12 @@ impl QueueSubsysHost {
     }
 
     pub fn log_interval_check(&self) {
+        if self.use_active {
+            if let Some(lg) = crate::log::active_log() {
+                lg.interval_check_active();
+            }
+            return;
+        }
         self.raw(
             3,
             3,
@@ -940,6 +1090,12 @@ impl QueueSubsysHost {
     }
 
     pub fn work_state_set_downloading(&self, downloading: bool) {
+        if self.use_active {
+            if let Some(ws) = crate::ffi::active_workstate() {
+                ws.set_downloading(downloading);
+            }
+            return;
+        }
         self.raw(
             3,
             4,
@@ -970,6 +1126,9 @@ impl QueueSubsysHost {
     }
 
     pub fn effective_downloads_limit(&self, limit: i32) -> i32 {
+        if self.use_active {
+            return crate::articledl::memory_monitor_effective_downloads_limit(limit);
+        }
         self.raw(
             3,
             5,
@@ -985,6 +1144,12 @@ impl QueueSubsysHost {
     }
 
     pub fn work_state_set_temp_pause_download(&self, pause: bool) {
+        if self.use_active {
+            if let Some(ws) = crate::ffi::active_workstate() {
+                ws.set_temp_pause_download(pause);
+            }
+            return;
+        }
         self.raw(
             3,
             4,
@@ -1000,6 +1165,14 @@ impl QueueSubsysHost {
     }
 
     pub fn find_category(&self, cat_name: &[u8]) -> Option<(bool, Vec<u8>)> {
+        if self.use_active {
+            let c = c_bytes(cat_name);
+            let cs = unsafe { std::ffi::CStr::from_ptr(c.as_ptr() as *const c_char) };
+            return crate::options::active_options().and_then(|o| {
+                o.find_category(cs, false)
+                    .map(|cat| (cat.unpack, cat.extensions.to_bytes().to_vec()))
+            });
+        }
         let c = c_bytes(cat_name);
         let mut ints = [0i32; 1];
         let mut strs = [std::ptr::null(); 1];
@@ -1023,6 +1196,9 @@ impl QueueSubsysHost {
     }
 
     pub fn dq_is_loaded(&self) -> bool {
+        if self.use_active {
+            return crate::ffi::is_queue_loaded();
+        }
         self.raw(
             3,
             7,
@@ -1570,6 +1746,10 @@ impl QueueSubsysHost {
         nzb_ptr: usize,
         avoid_history: bool,
     ) -> bool {
+        if self.use_active {
+            return crate::urlcoord::active_url_coord()
+                .is_some_and(|uc| uc.delete_queue_entry_active(dq_ptr, nzb_ptr, avoid_history));
+        }
         self.raw(
             6,
             11,
@@ -1600,6 +1780,11 @@ impl QueueSubsysHost {
     }
 
     pub fn queue_script_has_job(&self, nzb_id: i32) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            let mut active = false;
+            return crate::extension::active_queue_script_has_job(nzb_id, &mut active);
+        }
         self.raw(
             6,
             13,

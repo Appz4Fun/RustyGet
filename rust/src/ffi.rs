@@ -442,110 +442,6 @@ pub(super) unsafe extern "C" fn nzbget_rs_split_command_line(s: *const c_char) -
     into_buf(v)
 }
 
-#[repr(C)]
-pub struct NzbgetRsCmdline(crate::cmdline::CmdlineHandle);
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cmdline_new(
-    argc: c_int,
-    argv: *const *const c_char,
-    write_stdout_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize)>,
-    ctx: *mut c_void,
-) -> *mut NzbgetRsCmdline {
-    match crate::cmdline::CmdlineHandle::parse_argv(argc, argv, |bytes| {
-        if let Some(cb) = write_stdout_cb {
-            if !bytes.is_empty() {
-                cb(ctx, bytes.as_ptr().cast(), bytes.len());
-            }
-        }
-    }) {
-        Some(h) => Box::into_raw(Box::new(NzbgetRsCmdline(h))),
-        None => std::ptr::null_mut(),
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cmdline_free(cmd: *mut NzbgetRsCmdline) {
-    if !cmd.is_null() {
-        drop(Box::from_raw(cmd));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cmdline_get_flag(
-    cmd: *const NzbgetRsCmdline,
-    field: c_int,
-) -> c_int {
-    match cmd.as_ref() {
-        Some(c) => c.0.get_flag(field),
-        None => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cmdline_get_str(
-    cmd: *const NzbgetRsCmdline,
-    field: c_int,
-) -> *const c_char {
-    match cmd.as_ref() {
-        Some(c) => c.0.get_cstr_ptr(field),
-        None => std::ptr::null(),
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cmdline_run_client(
-    cmd: *const NzbgetRsCmdline,
-    control_ip: *const c_char,
-    control_port: c_int,
-    control_username: *const c_char,
-    control_password: *const c_char,
-    write_stdout_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize)>,
-    write_perror_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
-    ctx: *mut c_void,
-) -> c_int {
-    #[cfg(unix)]
-    {
-        let _cancel_guard = PosixCancelGuard::disable();
-        let Some(c) = cmd.as_ref() else {
-            return 0;
-        };
-        let ok = c.0.execute_client(
-            input(control_ip),
-            control_port,
-            input(control_username),
-            input(control_password),
-            |bytes| {
-                if let Some(cb) = write_stdout_cb {
-                    if !bytes.is_empty() {
-                        cb(ctx, bytes.as_ptr().cast(), bytes.len());
-                    }
-                }
-            },
-            |cmsg| {
-                if let Some(cb) = write_perror_cb {
-                    cb(ctx, cmsg.as_ptr());
-                }
-            },
-        );
-        return c_int::from(ok);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (
-            cmd,
-            control_ip,
-            control_port,
-            control_username,
-            control_password,
-            write_stdout_cb,
-            write_perror_cb,
-            ctx,
-        );
-        0
-    }
-}
-
 /// FileSystem::FileExists (0 for null).
 ///
 /// # Safety
@@ -3298,28 +3194,6 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_exec(
 // ============================================================================
 
 // ============================================================================
-// DupeSearch Consolidated FFI (`rust/src/dupesearch_nzb.rs`)
-// ============================================================================
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cmdline_format_usage(
-    base_name: *const c_char,
-    path_sep: c_char,
-    include_daemon: c_int,
-) -> RsBuf {
-    let name = if base_name.is_null() {
-        b""
-    } else {
-        CStr::from_ptr(base_name).to_bytes()
-    };
-    into_buf(crate::cmdline::format_usage(
-        name,
-        path_sep as u8,
-        include_daemon != 0,
-    ))
-}
-
-// ============================================================================
 // SystemHealth (`rust/src/systemhealth.rs`)
 // ============================================================================
 
@@ -3764,11 +3638,13 @@ struct BuildEnvRuntime {
     ssl_lib_name: CString,
     ssl_raw_version: CString,
     tls_host_cb: crate::net::NzbgetRsConnHostFn,
+    script_host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
     write_stdout_cb: Option<unsafe extern "C" fn(*const c_char, usize, c_int)>,
 }
 
 static BUILD_FLAGS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static BUILD_VERSION: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+static QUEUE_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(unix)]
 static BUILD_ENV: std::sync::RwLock<Option<BuildEnvRuntime>> = std::sync::RwLock::new(None);
 
@@ -3780,6 +3656,7 @@ pub unsafe extern "C" fn nzbget_rs_build_env_init(
     ssl_lib_name: *const c_char,
     ssl_raw_version: *const c_char,
     tls_host_cb: crate::net::NzbgetRsConnHostFn,
+    script_host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
     write_stdout_cb: Option<unsafe extern "C" fn(*const c_char, usize, c_int)>,
 ) {
     BUILD_FLAGS.store(flags, std::sync::atomic::Ordering::SeqCst);
@@ -3789,6 +3666,7 @@ pub unsafe extern "C" fn nzbget_rs_build_env_init(
             ssl_lib_name: to_nul_cvec(input(ssl_lib_name)),
             ssl_raw_version: to_nul_cvec(input(ssl_raw_version)),
             tls_host_cb,
+            script_host_cb,
             write_stdout_cb,
         });
     }
@@ -3808,6 +3686,22 @@ pub(crate) fn build_gzip_disabled() -> bool {
 
 fn build_ssl_extract_after_space() -> bool {
     (BUILD_FLAGS.load(std::sync::atomic::Ordering::Relaxed) & 8) != 0
+}
+
+pub(crate) fn build_parcheck_enabled() -> bool {
+    (BUILD_FLAGS.load(std::sync::atomic::Ordering::Relaxed) & 16) == 0
+}
+
+pub(crate) fn is_queue_loaded() -> bool {
+    QUEUE_LOADED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+pub(crate) fn script_host_cb() -> Option<crate::script::NzbgetRsScriptHostFn> {
+    BUILD_ENV
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|e| e.script_host_cb))
 }
 
 pub(crate) fn build_version_cstr() -> &'static CStr {
@@ -3920,6 +3814,15 @@ pub extern "C" fn nzbget_rs_thread_count_op(op: c_int) -> c_int {
         1 => THREAD_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
         -1 => THREAD_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) - 1,
         2 => c_int::from(is_rust_thread_stopped()),
+        3 => {
+            QUEUE_LOADED.store(true, std::sync::atomic::Ordering::SeqCst);
+            1
+        }
+        4 => {
+            QUEUE_LOADED.store(false, std::sync::atomic::Ordering::SeqCst);
+            0
+        }
+        5 => c_int::from(is_queue_loaded()),
         _ => current_thread_count(),
     }
 }
@@ -4146,6 +4049,16 @@ impl NzbgetRsWorkState {
         self.quota_reached.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    pub(crate) fn temp_pause_download(&self) -> bool {
+        self.temp_pause_download
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn temp_pause_postprocess(&self) -> bool {
+        self.temp_pause_postprocess
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub(crate) fn download_held(&self) -> bool {
         self.temp_pause_download
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -4204,6 +4117,32 @@ impl NzbgetRsWorkState {
     pub(crate) fn set_resume_time(&self, val: i64) {
         self.resume_time
             .store(val, std::sync::atomic::Ordering::SeqCst);
+        self.notify();
+    }
+
+    pub(crate) fn set_local_time_offset(&self, val: i32) {
+        self.local_time_offset
+            .store(val, std::sync::atomic::Ordering::SeqCst);
+        self.notify();
+    }
+
+    pub(crate) fn set_quota_reached(&self, val: bool) {
+        self.quota_reached
+            .store(val, std::sync::atomic::Ordering::SeqCst);
+        self.notify();
+    }
+
+    pub(crate) fn set_downloading(&self, val: bool) {
+        self.downloading
+            .store(val, std::sync::atomic::Ordering::SeqCst);
+        self.notify();
+    }
+
+    pub(crate) fn hold_download_for_fleet(&self, hold: bool) {
+        self.fleet_hold.fetch_add(
+            if hold { 1 } else { -1 },
+            std::sync::atomic::Ordering::SeqCst,
+        );
         self.notify();
     }
 }
@@ -5492,13 +5431,17 @@ pub use crate::scanner::{NzbgetRsScanner, NzbgetRsScannerEnv};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_scanner_new() -> *mut NzbgetRsScanner {
-    Box::into_raw(Box::new(NzbgetRsScanner::new()))
+    let arc = std::sync::Arc::new(NzbgetRsScanner::new());
+    crate::scanner::register_active_scanner(std::sync::Arc::clone(&arc));
+    std::sync::Arc::into_raw(arc).cast_mut()
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_scanner_free(scanner: *mut NzbgetRsScanner) {
     if !scanner.is_null() {
-        drop(unsafe { Box::from_raw(scanner) });
+        let arc = unsafe { std::sync::Arc::from_raw(scanner.cast_const()) };
+        crate::scanner::unregister_active_scanner(std::sync::Arc::as_ptr(&arc));
+        drop(arc);
     }
 }
 
@@ -5746,20 +5689,20 @@ pub unsafe extern "C" fn nzbget_rs_post_job_exec(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_post_script_run(
     runner: *mut crate::script::NzbgetRsScriptRunner,
-    ext_mgr: *const crate::extension::RsExtensionManager,
-    parcheck_enabled: c_int,
     ctx: *mut c_void,
     host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
-    script_host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
 ) {
     let _cancel_guard = PosixCancelGuard::disable();
+    let ext_mgr = crate::script::active_ext_mgr();
     crate::postproc::post_script_run(
         runner,
-        ext_mgr,
-        parcheck_enabled != 0,
+        ext_mgr
+            .as_deref()
+            .map_or(std::ptr::null(), |m| m as *const _),
+        build_parcheck_enabled(),
         ctx,
         host_cb,
-        script_host_cb,
+        script_host_cb(),
     );
 }
 
@@ -5806,9 +5749,22 @@ pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_exec(
     crate::streamrepair_coord::stream_repair_ctrl_exec(ctrl, op, host_cb, ctx)
 }
 
+static DUPESEARCH_HOST_CB: std::sync::RwLock<Option<crate::dupesearch_coord::DupeHostFn>> =
+    std::sync::RwLock::new(None);
+
+fn dupesearch_host_cb() -> Option<crate::dupesearch_coord::DupeHostFn> {
+    DUPESEARCH_HOST_CB.read().ok().and_then(|g| *g)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_dupesearch_new(
+    host_cb: Option<crate::dupesearch_coord::DupeHostFn>,
 ) -> *mut crate::dupesearch_coord::NzbgetRsDupeSearch {
+    if host_cb.is_some() {
+        if let Ok(mut g) = DUPESEARCH_HOST_CB.write() {
+            *g = host_cb;
+        }
+    }
     Box::into_raw(Box::new(crate::dupesearch_coord::NzbgetRsDupeSearch::new()))
 }
 
@@ -5834,56 +5790,26 @@ pub unsafe extern "C" fn nzbget_rs_dupesearch_exec(
     let Some(ds) = ptr.as_ref() else {
         return;
     };
+    let eff_cb = host_cb.or_else(dupesearch_host_cb);
     match op {
         0 => ds.stop(),
         1 => {
-            if let Some(cb) = host_cb {
+            if let Some(cb) = eff_cb {
                 ds.notify_name_changed(a1, host_ctx, cb);
             }
         }
         2 => {
-            if let Some(cb) = host_cb {
+            if let Some(cb) = eff_cb {
                 ds.download_queue_update(a1, p1, p2, host_ctx, cb);
             }
         }
         3 => {
-            if let Some(cb) = host_cb {
+            if let Some(cb) = eff_cb {
                 ds.run(host_ctx, cb);
             }
         }
         _ => {}
     }
-}
-
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_fleet_append(
-    host_ctx: *mut c_void,
-    host_cb: Option<crate::dupesearch_coord::DupeHostFn>,
-    dupe_key: *const c_char,
-    category: *const c_char,
-    priority: c_int,
-    timeout_sec: c_int,
-    members: *const crate::xmlrpc_format::NzbgetRsRpcFleetReqMember,
-    members_len: usize,
-    emit_ctx: *mut c_void,
-    emit_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn>,
-) -> c_int {
-    let (Some(hcb), Some(ecb)) = (host_cb, emit_cb) else {
-        return 0;
-    };
-    crate::dupesearch_coord::fleet_append(
-        host_ctx,
-        hcb,
-        dupe_key,
-        category,
-        priority,
-        timeout_sec,
-        members,
-        members_len,
-        emit_ctx,
-        ecb,
-    )
 }
 
 #[cfg(unix)]
@@ -6119,6 +6045,34 @@ unsafe extern "C" fn web_rpc_action_bridge(
             }
             1
         }
+        4 => {
+            if let Some(hooks) =
+                crate::lifecycle::get_hooks().or_else(crate::lifecycle::resolve_hooks)
+            {
+                if let Some(exit_fn) = hooks.exit_proc {
+                    exit_fn();
+                    return 1;
+                }
+            }
+            0
+        }
+        5 => {
+            if let Some(hooks) =
+                crate::lifecycle::get_hooks().or_else(crate::lifecycle::resolve_hooks)
+            {
+                if let Some(reload_fn) = hooks.reload {
+                    reload_fn();
+                    return 1;
+                }
+            }
+            0
+        }
+        6 => {
+            if let Some(lg) = crate::log::active_log() {
+                lg.log_debug_info_active();
+            }
+            1
+        }
         7 => {
             if let Some(ws) = active_workstate() {
                 ws.set_speed_limit(a1);
@@ -6144,6 +6098,33 @@ unsafe extern "C" fn web_rpc_action_bridge(
         }
         12 => {
             crate::log::clear_active_log();
+            1
+        }
+        13 => {
+            if let Some(sc) = crate::scanner::active_scanner() {
+                sc.scan_nzb_dir_active(a1 != 0);
+            }
+            1
+        }
+        14 => {
+            if a1 != 0 {
+                if let Err(err) = crate::script::load_extensions_active() {
+                    if !out_buf.is_null() {
+                        *out_buf = into_buf(err);
+                    }
+                    return 0;
+                }
+            }
+            if !out_buf.is_null() {
+                *out_buf = into_buf(crate::script::serialize_extensions_active(a2 != 0));
+            }
+            1
+        }
+        15 => crate::script::rpc_extension_action_active(a1, s1, s2, out_buf),
+        16 => {
+            if let Some(fc) = crate::feed::active_feed_coord() {
+                fc.fetch_feed_active(a1);
+            }
             1
         }
         17 => {
@@ -6183,6 +6164,17 @@ unsafe extern "C" fn web_rpc_action_bridge(
             }
             c_int::from(ok != 0)
         }
+        19 => match crate::extension::check_updates_active() {
+            Some(info) => {
+                let nul = info.iter().position(|&b| b == 0).unwrap_or(info.len());
+                if !out_buf.is_null() {
+                    *out_buf = into_buf(info[..nul].to_vec());
+                }
+                1
+            }
+            None => 0,
+        },
+        20 => c_int::from(crate::extension::start_update_active(a1)),
         21 => {
             let Some(sm) = crate::statmeter::active_statmeter() else {
                 return 0;
@@ -6269,6 +6261,9 @@ unsafe extern "C" fn web_rpc_action_bridge(
             })
         }
         25 => crate::net::nzbget_rs_net_speedtest_iter(body, body_len, a1, out_u32, out_f64),
+        26 => {
+            c_int::from(crate::script::command_script_start_active(s1, s2, params, params_len) != 0)
+        }
         _ => host.rpc_action_cb.map_or(0, |cb| {
             cb(
                 std::ptr::null_mut(),
@@ -6414,7 +6409,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 server_time: libc::time(std::ptr::null_mut()) as c_int,
                 resume_time: ws.as_deref().map_or(0, |w| w.resume_time() as c_int),
                 feed_active: c_int::from(fc.as_deref().is_some_and(|f| f.has_active_downloads())),
-                queued_scripts: qst.queued_scripts,
+                queued_scripts: crate::extension::active_queue_script_size(),
             };
 
             let mut srvs: Vec<crate::xmlrpc_format::NzbgetRsRpcServerStatus> = Vec::new();
@@ -6462,8 +6457,10 @@ unsafe extern "C" fn web_rpc_collect_bridge(
             );
             1
         }
-        2 if a1 != 1 && a1 != 3 => {
-            if a1 == 2 {
+        2 if a1 != 3 => {
+            if a1 == 1 {
+                crate::extension::collect_maint_messages_active(a3, a4, emit_ctx, emit_cb);
+            } else if a1 == 2 {
                 crate::log::nzbget_rs_log_collect(
                     1,
                     std::ptr::null(),
@@ -6492,6 +6489,92 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 );
             }
             1
+        }
+        4 => {
+            struct ListGroupsWrap {
+                ctx: *mut c_void,
+                cb: crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn,
+            }
+            unsafe extern "C" fn wrap_emit(
+                raw: *mut c_void,
+                sub: c_int,
+                a1: c_int,
+                a2: c_int,
+                a3: c_int,
+                a4: c_int,
+                a5: c_int,
+                a6: c_int,
+                i1: i64,
+                i2: i64,
+                i3: i64,
+                s1: *const c_char,
+                s2: *const c_char,
+                s3: *const c_char,
+                s4: *const c_char,
+                p1: *const c_void,
+                n1: usize,
+                p2: *const c_void,
+                n2: usize,
+                p3: *const c_void,
+                n3: usize,
+                p4: *const c_void,
+                n4: usize,
+            ) {
+                let w = &*(raw as *const ListGroupsWrap);
+                let eff_a6 = if sub == 4 && (a6 & 1) != 0 && ((a6 >> 4) & 0xff) == 0 {
+                    let mut qs_act = false;
+                    let has_qs = crate::extension::active_queue_script_has_job(a1, &mut qs_act);
+                    a6 | (if has_qs { 2 } else { 0 }) | (if qs_act { 4 } else { 0 })
+                } else {
+                    a6
+                };
+                (w.cb)(
+                    w.ctx, sub, a1, a2, a3, a4, a5, eff_a6, i1, i2, i3, s1, s2, s3, s4, p1, n1, p2,
+                    n2, p3, n3, p4, n4,
+                );
+            }
+            let mut w = ListGroupsWrap {
+                ctx: emit_ctx,
+                cb: emit_cb,
+            };
+            host.rpc_collect_cb.map_or(0, |cb| {
+                cb(
+                    std::ptr::null_mut(),
+                    4,
+                    a1,
+                    a2,
+                    a3,
+                    a4,
+                    a5,
+                    s1,
+                    s2,
+                    s3,
+                    s4,
+                    s5,
+                    s6,
+                    p1,
+                    n1,
+                    (&mut w as *mut ListGroupsWrap).cast(),
+                    wrap_emit,
+                )
+            })
+        }
+        8 => {
+            let Some(hcb) = dupesearch_host_cb() else {
+                return 0;
+            };
+            crate::dupesearch_coord::fleet_append(
+                std::ptr::null_mut(),
+                hcb,
+                s1,
+                s2,
+                a1,
+                a2,
+                p1.cast(),
+                n1,
+                emit_ctx,
+                emit_cb,
+            )
         }
         9 => {
             let opts = crate::options::active_options();
@@ -6533,6 +6616,66 @@ unsafe extern "C" fn web_rpc_collect_bridge(
             1
         }
         10 => script_config_emit_templates(a1 != 0, emit_ctx, Some(emit_cb)),
+        11 => {
+            let Some(fc) = crate::feed::active_feed_coord() else {
+                return 0;
+            };
+            struct RpcFeedEmit {
+                ctx: *mut c_void,
+                cb: crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn,
+            }
+            unsafe extern "C" fn on_feed_item(
+                raw: *mut c_void,
+                item: *const crate::xmlrpc_format::NzbgetRsRpcFeedItem,
+            ) {
+                let r = &*(raw as *const RpcFeedEmit);
+                (r.cb)(
+                    r.ctx,
+                    13,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    item.cast(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                );
+            }
+            let mut rctx = RpcFeedEmit {
+                ctx: emit_ctx,
+                cb: emit_cb,
+            };
+            fc.emit_view_or_preview_active(
+                a1,
+                a2,
+                a3,
+                a4,
+                a5,
+                n1 as c_int,
+                s1,
+                s2,
+                s3,
+                s4,
+                s5,
+                s6,
+                (&mut rctx as *mut RpcFeedEmit).cast(),
+                Some(on_feed_item),
+            )
+        }
         12 => {
             let Some(sm) = crate::statmeter::active_statmeter() else {
                 return 0;
@@ -6865,6 +7008,27 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn, host: &N
             crate::log::log_active_bytes(kind, msg);
         },
         |kind, a1, a2, a3, a4, s1, s2, s3, body, ids, names| {
+            if kind == 1 && (a1 & 8) == 0 {
+                let Some(sc) = crate::scanner::active_scanner() else {
+                    return false;
+                };
+                return sc
+                    .add_external_bytes_active(
+                        s1,
+                        s2,
+                        (a1 & 4) != 0,
+                        a2,
+                        s3,
+                        a3,
+                        a4,
+                        &[],
+                        (a1 & 1) != 0,
+                        (a1 & 2) != 0,
+                        body,
+                    )
+                    .0
+                    != crate::scanner::AS_FAILED;
+            }
             if kind == 2 {
                 if let Some(ws) = active_workstate() {
                     ws.set_resume_time(0);
@@ -6880,6 +7044,38 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn, host: &N
             if kind == 4 {
                 if let Some(ws) = active_workstate() {
                     ws.set_speed_limit(a1);
+                }
+                return true;
+            }
+            if kind == 5 {
+                if let Some(lg) = crate::log::active_log() {
+                    lg.log_debug_info_active();
+                }
+                return true;
+            }
+            if kind == 8 {
+                if let Some(hooks) =
+                    crate::lifecycle::get_hooks().or_else(crate::lifecycle::resolve_hooks)
+                {
+                    if let Some(exit_fn) = hooks.exit_proc {
+                        exit_fn();
+                    }
+                }
+                return true;
+            }
+            if kind == 9 {
+                if let Some(hooks) =
+                    crate::lifecycle::get_hooks().or_else(crate::lifecycle::resolve_hooks)
+                {
+                    if let Some(reload_fn) = hooks.reload {
+                        reload_fn();
+                    }
+                }
+                return true;
+            }
+            if kind == 13 {
+                if let Some(sc) = crate::scanner::active_scanner() {
+                    sc.scan_nzb_dir_active(a1 != 0);
                 }
                 return true;
             }

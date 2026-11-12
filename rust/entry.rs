@@ -11,7 +11,7 @@ pub struct LifecycleHooks {
     pub util_init: unsafe extern "C" fn(),
     pub nserv_main: unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int,
     pub phase1_init: unsafe extern "C" fn(bool) -> c_int,
-    pub phase2_subsystems_create_and_recover: unsafe extern "C" fn(bool) -> c_int,
+    pub phase2_subsystems_create_and_recover: Option<unsafe extern "C" fn(bool) -> c_int>,
     pub phase3_server_activate: unsafe extern "C" fn() -> c_int,
     pub phase4_shutdown: unsafe extern "C" fn(bool),
     pub has_active_unpack: unsafe extern "C" fn() -> bool,
@@ -26,7 +26,6 @@ extern "C" {
     fn nzbget_c_util_init();
     fn nzbget_c_nserv_main(argc: c_int, argv: *mut *mut c_char) -> c_int;
     fn nzbget_c_phase1_init(reloading: bool) -> c_int;
-    fn nzbget_c_phase2_subsystems_create_and_recover(reloading: bool) -> c_int;
     fn nzbget_c_phase3_server_activate() -> c_int;
     fn nzbget_c_phase4_shutdown(reloading: bool);
     fn nzbget_c_has_active_unpack() -> bool;
@@ -44,7 +43,7 @@ static HOOKS: LifecycleHooks = LifecycleHooks {
     util_init: nzbget_c_util_init,
     nserv_main: nzbget_c_nserv_main,
     phase1_init: nzbget_c_phase1_init,
-    phase2_subsystems_create_and_recover: nzbget_c_phase2_subsystems_create_and_recover,
+    phase2_subsystems_create_and_recover: None,
     phase3_server_activate: nzbget_c_phase3_server_activate,
     phase4_shutdown: nzbget_c_phase4_shutdown,
     has_active_unpack: nzbget_c_has_active_unpack,

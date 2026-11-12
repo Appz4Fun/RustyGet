@@ -74,8 +74,6 @@ inline int NServMain(int argc, char* argv[])
 }
 #endif
 
-#include <locale>
-
 // Globals
 Log* g_Log;
 Options* g_Options;
@@ -83,18 +81,14 @@ WorkState* g_WorkState;
 ServerPool* g_ServerPool;
 QueueCoordinator* g_QueueCoordinator;
 UrlCoordinator* g_UrlCoordinator;
-StatMeter* g_StatMeter;
 PrePostProcessor* g_PrePostProcessor;
 HistoryCoordinator* g_HistoryCoordinator;
 DupeCoordinator* g_DupeCoordinator;
 DiskState* g_DiskState;
 Scanner* g_Scanner;
-FeedCoordinator* g_FeedCoordinator;
-Maintenance* g_Maintenance;
 ArticleCache* g_ArticleCache;
 QueueScriptCoordinator* g_QueueScriptCoordinator;
 ServiceCoordinator* g_ServiceCoordinator;
-ExtensionManager::Manager* g_ExtensionManager;
 
 int g_ArgumentCount;
 char* (*g_EnvironmentVariables)[] = nullptr;
@@ -105,18 +99,10 @@ extern void Reload();
 
 static int DaemonReloadCb(int sub);
 
-#ifdef DEBUG
-static void TestSegFault()
-{
-	char* N = nullptr;
-	*N = '\0';
-}
-#endif
-
-class RustyGet final : public Options::Extender
+class RustyGet final
 {
 public:
-	~RustyGet() override { Cleanup(); }
+	~RustyGet() { Cleanup(); }
 
 	bool GetReloading() const
 	{
@@ -145,59 +131,58 @@ public:
 		}
 
 		CreateGlobals();
-		BootConfig();
 
-		if (m_memoryMonitor) m_memoryMonitor->InitOptions();
+		NzbgetRsDaemonEnv cenv{};
+		cenv.a1 = g_ArgumentCount;
+		cenv.ctx = (g_Arguments && *g_Arguments) ? *g_Arguments : nullptr;
+		int rc = nzbget_rs_daemon_exec(13, &cenv);
+		if (rc == -1) throw std::invalid_argument("Invalid command line");
+		if (rc < 0) throw std::runtime_error("Command line parsing failed");
 
-		{
-			NzbgetRsDaemonEnv uenv{};
-			uenv.a1 = -1;
-#ifdef DEBUG
-			uenv.a2 = 1;
-#endif
-			FileSystem::uMask = static_cast<mode_t>(nzbget_rs_daemon_exec(4, &uenv));
-		}
+		m_options = std::make_unique<Options>();
+		FileSystem::uMask = static_cast<mode_t>(nzbget_rs_daemon_exec(14, &cenv));
 
-		m_scanner->InitOptions();
-		m_queueScriptCoordinator->InitOptions();
 #ifndef DISABLE_TLS
 		TlsSocket::InitOptions(g_Options->GetCertCheck() ? g_Options->GetCertStore() : "");
 #endif
 
-		ProcessDirect();
-
 		NzbgetRsDaemonEnv act{};
 		act.ctx = this;
-		act.a1 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 5);
-		act.a3 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6);
+		act.a1 = -1;
 		act.segv_cb = +[](void*, const char* m) { error("%s", m); };
 		act.action_cb = &RustyGet::DaemonActionCb;
 		return nzbget_rs_daemon_exec(5, &act);
 	}
 
-	int Phase2_SubsystemsAndState(bool reload)
-	{
-		(void)reload;
-		if (!nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6))
-		{
-			m_serverPool->InitConnections();
-			m_statMeter->Init();
-		}
-		return 0;
-	}
-
 	int Phase3_ServerActivation()
 	{
-		StartRemoteServer();
-		StartFrontend();
+		if (m_options->GetServerMode())
+		{
+			const NzbgetRsRpcHost rpcHost = BuildRpcHost();
+			nzbget_rs_remote_srv_ctl(0, &rpcHost);
+		}
+		if (!m_options->GetDaemonMode())
+		{
+			switch (m_options->GetOutputMode())
+			{
+			case Options::omNCurses:
+#ifndef DISABLE_CURSES
+				m_frontend = std::make_unique<Frontend>(2);
+				break;
+#endif
+			case Options::omColored:
+				m_frontend = std::make_unique<Frontend>(1);
+				break;
+			case Options::omLoggable:
+				m_frontend = std::make_unique<Frontend>(0);
+				break;
+			}
+		}
+		if (m_frontend) m_frontend->Start();
 
 		NzbgetRsDaemonEnv env{};
 		env.ctx = this;
-		env.a1 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6);
-		env.a2 = m_options->GetServerMode() ? 1 : 0;
-		env.a3 = !nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 4) ? 1 : 0;
-		env.s1 = nzbget_rs_cmdline_get_str(m_cmdLine.get(), 34);
-		env.s2 = nzbget_rs_cmdline_get_str(m_cmdLine.get(), 36);
+		env.a1 = -1;
 		env.reload_cb = DaemonReloadCb;
 		env.action_cb = &RustyGet::DaemonActionCb;
 		return nzbget_rs_daemon_exec(7, &env);
@@ -208,7 +193,7 @@ public:
 		NzbgetRsDaemonEnv env{};
 		env.ctx = this;
 		env.a1 = reload ? 1 : 0;
-		env.a2 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6);
+		env.a2 = -1;
 		env.action_cb = &RustyGet::DaemonActionCb;
 		nzbget_rs_daemon_exec(11, &env);
 
@@ -231,33 +216,9 @@ public:
 		NzbgetRsDaemonEnv env{};
 		env.ctx = this;
 		env.a1 = reload ? 1 : 0;
-		env.a2 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6);
+		env.a2 = -1;
 		env.action_cb = &RustyGet::DaemonActionCb;
 		nzbget_rs_daemon_exec(8, &env);
-	}
-
-	// Options::Extender
-	void AddNewsServer(int id, bool active, const char* name, const char* host,
-		int port, int ipVersion, const char* user, const char* pass, bool joinGroup,
-		bool tls, const char* cipher, int maxConnections, int retention,
-		int level, int group, bool optional, unsigned int certVerificationfLevel) override
-	{
-		m_serverPool->AddServer(id, active, name, host, port, ipVersion, user, pass, joinGroup, tls, cipher, maxConnections, retention, level, group, optional, certVerificationfLevel);
-	}
-
-	void AddFeed(int id, const char* name, const char* url, int interval,
-		const char* filter, bool backlog, bool pauseNzb, const char* category,
-		int categorySource, int priority, const char* feedScript,
-		unsigned int certVerifLevel) override
-	{
-		m_feedCoordinator->AddFeed(id, name, url, backlog, interval, filter,
-			pauseNzb, category, categorySource, priority, feedScript, certVerifLevel);
-	}
-
-	void AddTask(int id, int hours, int minutes, int weekDaysBits,
-		Options::ESchedulerCommand command, const char* param) override
-	{
-		m_scheduler->AddTask(id, hours, minutes, weekDaysBits, (Scheduler::ECommand)command, param);
 	}
 
 private:
@@ -269,7 +230,6 @@ private:
 	std::unique_ptr<QueueCoordinator> m_queueCoordinator;
 	std::unique_ptr<UrlCoordinator> m_urlCoordinator;
 	std::unique_ptr<DupeSearch> m_dupeSearch;
-	std::unique_ptr<StatMeter> m_statMeter;
 	std::unique_ptr<PrePostProcessor> m_prePostProcessor;
 	std::unique_ptr<HistoryCoordinator> m_historyCoordinator;
 	std::unique_ptr<TwinCheck> m_twinCheck;
@@ -277,17 +237,12 @@ private:
 	std::unique_ptr<DiskState> m_diskState;
 	std::unique_ptr<Scanner> m_scanner;
 	std::unique_ptr<FeedCoordinator> m_feedCoordinator;
-	std::unique_ptr<Maintenance> m_maintenance;
 	std::unique_ptr<ArticleCache> m_articleCache;
 	std::unique_ptr<QueueScriptCoordinator> m_queueScriptCoordinator;
 	std::unique_ptr<ServiceCoordinator> m_serviceCoordinator;
 	std::unique_ptr<ExtensionManager::Manager> m_extensionManager;
 	std::unique_ptr<MemoryMonitor> m_memoryMonitor;
-
-	// non-globals
 	std::unique_ptr<Thread> m_frontend;
-	std::unique_ptr<Scheduler> m_scheduler;
-	std::unique_ptr<NzbgetRsCmdline, decltype(&nzbget_rs_cmdline_free)> m_cmdLine{nullptr, nzbget_rs_cmdline_free};
 
 	void CreateGlobals()
 	{
@@ -302,9 +257,6 @@ private:
 
 		m_queueCoordinator = std::make_unique<QueueCoordinator>();
 		g_QueueCoordinator = m_queueCoordinator.get();
-
-		m_statMeter = std::make_unique<StatMeter>();
-		g_StatMeter = m_statMeter.get();
 
 		m_scanner = std::make_unique<Scanner>();
 		g_Scanner = m_scanner.get();
@@ -326,16 +278,12 @@ private:
 		g_DupeSearch = m_dupeSearch.get();
 
 		m_feedCoordinator = std::make_unique<FeedCoordinator>();
-		g_FeedCoordinator = m_feedCoordinator.get();
 
 		m_articleCache = std::make_unique<ArticleCache>();
 		g_ArticleCache = m_articleCache.get();
 
 		m_memoryMonitor = std::make_unique<MemoryMonitor>();
 		g_MemoryMonitor = m_memoryMonitor.get();
-
-		m_maintenance = std::make_unique<Maintenance>();
-		g_Maintenance = m_maintenance.get();
 
 		m_queueScriptCoordinator = std::make_unique<QueueScriptCoordinator>();
 		g_QueueScriptCoordinator = m_queueScriptCoordinator.get();
@@ -344,93 +292,8 @@ private:
 		g_DiskState = m_diskState.get();
 
 		m_extensionManager = std::make_unique<ExtensionManager::Manager>();
-		g_ExtensionManager = m_extensionManager.get();
-
-		m_scheduler = std::make_unique<Scheduler>();
 
 		nzbget_rs_service_coord_ctl(m_serviceCoordinator->RsHandle(), 4, nullptr, nullptr);
-	}
-
-	void BootConfig()
-	{
-		debug("Parsing command line");
-		if (g_ArgumentCount < 1 || !g_Arguments || !*g_Arguments)
-		{
-			throw std::invalid_argument("Invalid command line");
-		}
-		m_cmdLine.reset(nzbget_rs_cmdline_new(
-			g_ArgumentCount,
-			(const char* const*)(*g_Arguments),
-			[](void*, const char* ptr, size_t len) {
-				if (ptr && len > 0) fwrite(ptr, 1, len, stdout);
-			},
-			nullptr));
-		if (!m_cmdLine)
-		{
-			throw std::runtime_error("Command line parsing failed");
-		}
-		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 2))
-		{
-			printf("RustyGet version: %s\n", Util::VersionRevision());
-			exit(0);
-		}
-		bool printUsage = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 1) != 0;
-		if (printUsage || nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 23) || g_ArgumentCount <= 1)
-		{
-			NzbgetRsBuf buf = nzbget_rs_cmdline_format_usage(
-				FileSystem::BaseFileName(((const char**)(*g_Arguments))[0]), PATH_SEPARATOR, 1);
-			if (buf.data) printf("%s", buf.data);
-			nzbget_rs_free(buf);
-			exit(printUsage ? 0 : 1);
-		}
-
-		debug("Reading options");
-		Options::CmdOptList cmdOptList;
-		for (int i = 0; const char* opt = nzbget_rs_cmdline_get_str(m_cmdLine.get(), 1000 + i); i++)
-		{
-			cmdOptList.push_back(opt);
-		}
-		m_options = std::make_unique<Options>((*g_Arguments)[0],
-			nzbget_rs_cmdline_get_str(m_cmdLine.get(), 30),
-			nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 0) != 0,
-			&cmdOptList, this);
-		m_options->SetRemoteClientMode(nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6) != 0);
-		m_options->SetServerMode(nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 4) != 0);
-		m_options->SetDaemonMode(nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 5) != 0);
-		bool testBacktrace = false;
-#ifdef DEBUG
-		testBacktrace = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 15) != 0;
-#endif
-		int clientOp = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 7);
-		m_options->SetDirectClientMode(
-			testBacktrace ||
-			nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 16) != 0 ||
-			nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 17) != 0 ||
-			clientOp != 0 ||
-			nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 3) != 0);
-		m_workState->SetPauseDownload(nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 22) != 0);
-		m_workState->SetSpeedLimit(g_Options->GetDownloadRate());
-
-		m_log->InitOptions();
-
-		if (m_options->GetFatalError())
-		{
-			exit(1);
-		}
-		else if (m_options->GetConfigErrors() && clientOp == 0)
-		{
-			info("Pausing all activities due to errors in configuration");
-			m_workState->SetPauseDownload(true);
-			m_workState->SetPausePostProcess(true);
-			m_workState->SetPauseScan(true);
-		}
-
-		m_serverPool->SetTimeout(m_options->GetArticleTimeout());
-		m_serverPool->SetRetryInterval(m_options->GetArticleInterval());
-
-		nzbget_rs_script_config_exec(0, nullptr, 0, nullptr, 0, nullptr, nullptr, nullptr);
-
-		m_extensionManager->LoadExtensions();
 	}
 
 	void Cleanup()
@@ -448,7 +311,6 @@ private:
 		g_QueueCoordinator = nullptr;
 		g_DiskState = nullptr;
 		g_ServerPool = nullptr;
-		g_FeedCoordinator = nullptr;
 		g_ArticleCache = nullptr;
 		if (m_memoryMonitor)
 		{
@@ -461,96 +323,6 @@ private:
 		g_MemoryMonitor = nullptr;
 		m_memoryMonitor.reset();
 		g_QueueScriptCoordinator = nullptr;
-		// destroyed while the global still points to it: its destructor waits for
-		// a running update-script, whose thread finishes through g_Maintenance
-		m_maintenance.reset();
-		g_Maintenance = nullptr;
-		g_StatMeter = nullptr;
-		g_ExtensionManager = nullptr;
-	}
-
-	void ProcessDirect()
-	{
-#ifdef DEBUG
-		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 15))
-		{
-			TestSegFault(); // never returns
-		}
-#endif
-
-		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 16))
-		{
-			WebDownloader downloader;
-			downloader.SetUrl(nzbget_rs_cmdline_get_str(m_cmdLine.get(), 35));
-			downloader.SetForce(true);
-			downloader.SetRetry(false);
-			downloader.SetOutputFilename(nzbget_rs_cmdline_get_str(m_cmdLine.get(), 31));
-			downloader.SetInfoName("WebGet");
-
-			WebDownloader::EStatus status = downloader.DownloadWithRedirects(5);
-			exit(status == WebDownloader::adFinished ? 0 : 1);
-		}
-
-		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 17))
-		{
-#ifndef DISABLE_TLS
-			bool ok = Maintenance::VerifySignature(
-				nzbget_rs_cmdline_get_str(m_cmdLine.get(), 35),
-				nzbget_rs_cmdline_get_str(m_cmdLine.get(), 33),
-				nzbget_rs_cmdline_get_str(m_cmdLine.get(), 32));
-			exit(ok ? 93 : 1);
-#else
-			printf("ERROR: Could not verify signature, the program was compiled without OpenSSL support\n");
-			exit(1);
-#endif
-		}
-
-		// client request
-		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 7) != 0)
-		{
-			ProcessClientRequest(); // never returns
-		}
-
-		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 3))
-		{
-			nzbget_rs_options_query(g_Options->RsHandle(), 1, nullptr, 0, nullptr, nullptr, 0,
-				+[](uintptr_t, const char* n, const char* v, int) { printf("%s = \"%s\"\n", n, v); });
-			exit(0);
-		}
-	}
-
-	void StartRemoteServer()
-	{
-		if (!m_options->GetServerMode()) return;
-		const NzbgetRsRpcHost rpcHost = BuildRpcHost();
-		nzbget_rs_remote_srv_ctl(0, &rpcHost);
-	}
-
-	void StopRemoteServer()
-	{
-		nzbget_rs_remote_srv_ctl(1, nullptr);
-	}
-
-	void StartFrontend()
-	{
-		if (!nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 5))
-		{
-			switch (m_options->GetOutputMode())
-			{
-			case Options::omNCurses:
-#ifndef DISABLE_CURSES
-				m_frontend = std::make_unique<Frontend>(2);
-				break;
-#endif
-			case Options::omColored:
-				m_frontend = std::make_unique<Frontend>(1);
-				break;
-			case Options::omLoggable:
-				m_frontend = std::make_unique<Frontend>(0);
-				break;
-			}
-		}
-		if (m_frontend) m_frontend->Start();
 	}
 
 	static int DaemonActionCb(void* raw, int sub, int a2, const char* s1, const char* s2)
@@ -628,8 +400,6 @@ private:
 			return 0;
 		}
 		case 12:
-			nzbget_rs_script_terminate_all(&ScriptHostCb);
-			self->StopRemoteServer();
 			if (self->m_frontend)
 			{
 				if (a2 != 0) { debug("Stopping Frontend"); self->m_frontend->Stop(); }
@@ -647,21 +417,6 @@ private:
 		default:
 			return 0;
 		}
-	}
-
-	void ProcessClientRequest()
-	{
-		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 7) == 0) return;
-		bool ok = nzbget_rs_cmdline_run_client(
-			m_cmdLine.get(),
-			m_options->GetControlIp(),
-			m_options->GetControlPort(),
-			m_options->GetControlUsername(),
-			m_options->GetControlPassword(),
-			[](void*, const char* ptr, size_t len) { if (ptr && len > 0) fwrite(ptr, 1, len, stdout); },
-			[](void*, const char* msg) { ::perror(msg); },
-			nullptr) != 0;
-		exit(ok ? 0 : 1);
 	}
 };
 
@@ -725,11 +480,6 @@ int nzbget_c_phase1_init(bool reloading)
 
 	g_RustyGet = std::make_unique<RustyGet>();
 	return g_RustyGet->Phase1_Init(reloading);
-}
-
-int nzbget_c_phase2_subsystems_create_and_recover(bool reloading)
-{
-	return g_RustyGet ? g_RustyGet->Phase2_SubsystemsAndState(reloading) : 0;
 }
 
 int nzbget_c_phase3_server_activate(void)

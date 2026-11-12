@@ -720,34 +720,6 @@ class Util
 public:
 	static bool EmptyStr(const char* str) { return !str || !*str; }
 
-	template <typename From, typename To,
-		typename std::enable_if_t<std::is_integral_v<From> && std::is_integral_v<To>, bool> = true>
-	static constexpr To SafeIntCast(From num) noexcept
-	{
-		if constexpr (std::is_unsigned_v<From> && std::is_signed_v<To>)
-		{
-			return static_cast<uint64_t>(num) > static_cast<uint64_t>(std::numeric_limits<To>::max())
-				? 0 : static_cast<To>(num);
-		}
-		else if constexpr (std::is_signed_v<From> && std::is_unsigned_v<To>)
-		{
-			return (num < 0 || static_cast<uint64_t>(num) > static_cast<uint64_t>(std::numeric_limits<To>::max()))
-				? 0 : static_cast<To>(num);
-		}
-		else if constexpr (std::is_signed_v<From> && std::is_signed_v<To>)
-		{
-			return (static_cast<int64_t>(num) < static_cast<int64_t>(std::numeric_limits<To>::min()) ||
-				static_cast<int64_t>(num) > static_cast<int64_t>(std::numeric_limits<To>::max()))
-				? 0 : static_cast<To>(num);
-		}
-		else
-		{
-			return static_cast<uint64_t>(num) > static_cast<uint64_t>(std::numeric_limits<To>::max())
-				? 0 : static_cast<To>(num);
-		}
-	}
-
-	static void SetStandByMode([[maybe_unused]] bool standBy) {}
 	static time_t CurrentTime() { return ::time(nullptr); }
 
 	static int64 CurrentTicks()
@@ -934,69 +906,15 @@ public:
 		dafLive
 	};
 	enum EHealthCheck { hcPause, hcDelete, hcPark, hcNone, hcDupe };
-	enum ESchedulerCommand
-	{
-		scPauseDownload,
-		scUnpauseDownload,
-		scPausePostProcess,
-		scUnpausePostProcess,
-		scDownloadRate,
-		scScript,
-		scProcess,
-		scPauseScan,
-		scUnpauseScan,
-		scActivateServer,
-		scDeactivateServer,
-		scFetchFeed
-	};
-	enum EPostStrategy { ppSequential, ppBalanced, ppAggressive, ppRocket };
-	enum EFileNaming { nfAuto, nfArticle, nfNzb };
 	enum ECertVerifLevel { cvNone, cvMinimal, cvStrict, Count };
-	enum ENzbDirArchiveAction { Delete, Move };
 
 	typedef std::vector<const char*> CmdOptList;
 
-	class Extender
-	{
-	public:
-		virtual void AddNewsServer(int id, bool active, const char* name, const char* host,
-			int port, int ipVersion, const char* user, const char* pass, bool joinGroup,
-			bool tls, const char* cipher, int maxConnections, int retention,
-			int level, int group, bool optional, unsigned int certVerificationfLevel) = 0;
-		virtual ~Extender() = default;
-		virtual void AddFeed(
-			int id,
-			const char* name,
-			const char* url,
-			int interval,
-			const char* filter,
-			bool backlog,
-			bool pauseNzb,
-			const char* category,
-			int categorySource,
-			int priority,
-			const char* extensions,
-			unsigned int certVeriflevel
-		) = 0;
-		virtual void AddTask(
-			int id,
-			int hours,
-			int minutes,
-			int weekDaysBits,
-			ESchedulerCommand command,
-			const char* param
-		) = 0;
-	};
+	Options() { Init(nullptr, nullptr, -1, nullptr, false); }
 
-	Options(const char* exeName, const char* configFilename, bool noConfig,
-		CmdOptList* commandLineOptions, Extender* extender)
+	Options(CmdOptList* commandLineOptions, void* = nullptr)
 	{
-		Init(exeName, configFilename, noConfig, commandLineOptions, false, extender);
-	}
-
-	Options(CmdOptList* commandLineOptions, Extender* extender)
-	{
-		Init("rustyget/rustyget", nullptr, true, commandLineOptions, true, extender);
+		Init("rustyget/rustyget", nullptr, 1, commandLineOptions, true);
 	}
 
 	~Options()
@@ -1006,7 +924,6 @@ public:
 	}
 
 	const NzbgetRsOptions* RsHandle() const { return m_rs; }
-	bool GetFatalError() { return m_fatalError; }
 
 	bool QueryCategory(const char* name, bool searchAliases, int* outUnpack, const char** outStrs) const
 	{
@@ -1014,133 +931,67 @@ public:
 			m_rs, 0, name, searchAliases ? 1 : 0, outUnpack, outStrs, 0, nullptr) != 0;
 	}
 
-	void CreateSchedulerTask(int id, const char* time, const char* weekDays,
-		ESchedulerCommand command, const char* param)
-	{
-		m_configErrors = nzbget_rs_options_task(
-			m_rs, id, time, weekDays, static_cast<int>(command), param, this, &HostCb) != 0;
-	}
-
-	bool GetConfigErrors() const { return m_configErrors; }
-	const char* GetAppDir() const { return Str(1); }
 	const char* GetDestDir() const { return Str(3); }
 	const char* GetInterDir() const { return Str(4); }
 	const char* GetTempDir() const { return Str(5); }
 	const char* GetQueueDir() const { return Str(6); }
-	const char* GetNzbDir() const { return Str(7); }
-	const char* GetWebDir() const { return Str(8); }
-	const char* GetScriptDir() const { return Str(10); }
 	bool GetNzbLog() const { return m_scalars.nzb_log != 0; }
-	int GetArticleTimeout() const { return m_scalars.article_timeout; }
-	int GetUrlTimeout() const { return m_scalars.url_timeout; }
 	bool GetRawArticle() const { return m_scalars.raw_article != 0; }
 	bool GetSkipWrite() const { return m_scalars.skip_write != 0; }
 	bool GetAppendCategoryDir() const { return m_scalars.append_category_dir != 0; }
 	bool GetContinuePartial() const { return m_scalars.continue_partial != 0; }
-	int GetArticleInterval() const { return m_scalars.article_interval; }
 	bool GetFlushQueue() const { return m_scalars.flush_queue != 0; }
 	bool GetDupeCheck() const { return m_scalars.dupe_check != 0; }
 	EDupeArticleFallback GetDupeArticleFallback() const { return (EDupeArticleFallback)m_scalars.dupe_article_fallback; }
-	bool GetDupeSearch() const { return m_scalars.dupe_search != 0; }
-	bool GetDupeSearchDryRun() const { return m_scalars.dupe_search_dry_run != 0; }
-	const char* GetDupeSearchUrl() const { return Str(12); }
-	const char* GetDupeSearchApiKey() const { return Str(13); }
-	int GetDupeSearchDelay() const { return m_scalars.dupe_search_delay; }
-	int GetDupeSearchMaxDonors() const { return m_scalars.dupe_search_max_donors; }
-	int GetDupeHealthPercent() const { return m_scalars.dupe_health_percent; }
-	int GetDupeHealthMin() const { return m_scalars.dupe_health_min; }
-	int GetDupeHealthMax() const { return m_scalars.dupe_health_max; }
-	int GetDupeBodyChecks() const { return m_scalars.dupe_body_checks; }
-	int GetDupeHealthBudget() const { return m_scalars.dupe_health_budget; }
-	int GetDupeMinAlive() const { return m_scalars.dupe_min_alive; }
-	int GetDupeFastDonors() const { return m_scalars.dupe_fast_donors; }
-	const char* GetControlIp() const { return Str(14); }
-	const char* GetControlUsername() const { return Str(15); }
-	const char* GetControlPassword() const { return Str(16); }
-	int GetControlPort() const { return m_scalars.control_port; }
 	const char* GetCertStore() const { return Str(23); }
 	bool GetCertCheck() const { return m_scalars.cert_check != 0; }
 	EOutputMode GetOutputMode() const { return (EOutputMode)m_scalars.output_mode; }
-	int GetUrlConnections() const { return m_scalars.url_connections; }
 	int GetLogBuffer() const { return m_scalars.log_buffer; }
 	EParCheck GetParCheck() const { return (EParCheck)m_scalars.par_check; }
 	bool GetParRepair() const { return m_scalars.par_repair != 0; }
 	EParScan GetParScan() const { return (EParScan)m_scalars.par_scan; }
 	bool GetParQuick() const { return m_scalars.par_quick != 0; }
-	EPostStrategy GetPostStrategy() const { return (EPostStrategy)m_scalars.post_strategy; }
 	bool GetParRename() const { return m_scalars.par_rename != 0; }
 	int GetParBuffer() const { return m_scalars.par_buffer; }
 	int GetParThreads() const { return m_scalars.par_threads; }
-	bool GetRarRename() const { return m_scalars.rar_rename != 0; }
 	EHealthCheck GetHealthCheck() const { return (EHealthCheck)m_scalars.health_check; }
-	const char* GetScriptOrder() const { return Str(28); }
-	const char* GetExtensions() const { return Str(29); }
 	bool GetDirectWrite() const { return m_scalars.direct_write != 0; }
 	int GetWriteBuffer() const { return m_scalars.write_buffer; }
-	int GetNzbDirInterval() const { return m_scalars.nzb_dir_interval; }
-	int GetNzbDirFileAge() const { return m_scalars.nzb_dir_file_age; }
-	bool GetNzbDirArchiveScan() const { return m_scalars.nzb_dir_archive_scan != 0; }
-	ENzbDirArchiveAction GetNzbDirArchiveAction() const { return (ENzbDirArchiveAction)m_scalars.nzb_dir_archive_action; }
-	bool GetParPauseQueue() const { return m_scalars.par_pause_queue != 0; }
-	bool GetScriptPauseQueue() const { return m_scalars.script_pause_queue != 0; }
 	bool GetNzbCleanupDisk() const { return m_scalars.nzb_cleanup_disk != 0; }
 	int GetParTimeLimit() const { return m_scalars.par_time_limit; }
 	int GetKeepHistory() const { return m_scalars.keep_history; }
-	bool GetUnpack() const { return m_scalars.unpack != 0; }
-	bool GetDirectUnpack() const { return m_scalars.direct_unpack != 0; }
 	bool GetUseTempUnpackDir() const { return m_scalars.use_temp_unpack_dir != 0; }
 	bool GetUnpackCleanupDisk() const { return m_scalars.unpack_cleanup_disk != 0; }
 	const char* GetUnrarCmd() const { return Str(30); }
 	const char* GetUnpackPassFile() const { return Str(31); }
-	bool GetUnpackPauseQueue() const { return m_scalars.unpack_pause_queue != 0; }
 	const char* GetExtCleanupDisk() const { return Str(32); }
 	const char* GetParIgnoreExt() const { return Str(33); }
-	bool GetPostDownloadRename() const { return m_scalars.post_download_rename != 0; }
-	bool GetRenameAfterUnpack() const { return m_scalars.rename_after_unpack != 0; }
 	const char* GetRenameIgnoreExt() const { return Str(34); }
 	const char* GetUnpackIgnoreExt() const { return Str(35); }
-	int GetFeedHistory() const { return m_scalars.feed_history; }
-	bool GetUrlForce() const { return m_scalars.url_force != 0; }
 	int GetTimeCorrection() const { return m_scalars.time_correction; }
-	int GetPropagationDelay() const { return m_scalars.propagation_delay; }
 	int GetArticleCache() const { return m_scalars.article_cache; }
-	int GetEventInterval() const { return m_scalars.event_interval; }
-	bool GetDirectRename() const { return m_scalars.direct_rename != 0; }
-	bool GetHardLinking() const { return m_scalars.hard_linking != 0; }
-	const char* GetHardLinkingIgnoreExt() const { return Str(37); }
-	bool GetReorderFiles() const { return m_scalars.reorder_files != 0; }
-	EFileNaming GetFileNaming() const { return (EFileNaming)m_scalars.file_naming; }
-	int GetDownloadRate() const { return m_scalars.download_rate; }
 
-	void SetServerMode(bool v) { Mode(0, true, v); }
 	bool GetServerMode() const { return Mode(0); }
-	void SetDaemonMode(bool v) { Mode(1, true, v); }
 	bool GetDaemonMode() const { return Mode(1); }
-	void SetRemoteClientMode(bool v) { Mode(2, true, v); }
 	bool GetRemoteClientMode() const { return Mode(2); }
-	void SetDirectClientMode(bool v) { Mode(3, true, v); }
 	bool GetDirectClientMode() const { return Mode(3); }
 
 private:
 	NzbgetRsOptions* m_rs = nullptr;
-	Extender* m_extender = nullptr;
 	NzbgetRsParsedOptions m_scalars{};
-	bool m_fatalError = false;
-	bool m_configErrors = false;
 
 	const char* Str(int id) const { return nzbget_rs_options_str(m_rs, id); }
-	bool Mode(int idx, bool set = false, bool val = false) const
+	bool Mode(int idx) const
 	{
 		return nzbget_rs_options_query(
-			m_rs, 4, nullptr, idx | (set ? (0x10 | (val ? 0x20 : 0)) : 0), nullptr, nullptr, 0, nullptr) != 0;
+			m_rs, 4, nullptr, idx, nullptr, nullptr, 0, nullptr) != 0;
 	}
 
-	void Init(const char* exeName, const char* configFilename, bool noConfig,
-		CmdOptList* commandLineOptions, bool noDiskAccess, Extender* extender)
+	void Init(const char* exeName, const char* configFilename, int noConfig,
+		CmdOptList* commandLineOptions, bool noDiskAccess)
 	{
 		g_Options = this;
-		m_extender = extender;
-		int flags = 0;
+		int flags = 32;
 #ifdef DISABLE_CURSES
 		flags |= 1;
 #endif
@@ -1155,38 +1006,10 @@ private:
 #endif
 		int stateFlags = 0;
 		m_rs = nzbget_rs_options_new(
-			exeName, configFilename, noConfig ? 1 : 0, noDiskAccess ? 1 : 0,
+			exeName, configFilename, noConfig, noDiskAccess ? 1 : 0,
 			commandLineOptions && !commandLineOptions->empty() ? commandLineOptions->data() : nullptr,
 			commandLineOptions ? commandLineOptions->size() : 0,
-			flags, Util::VersionRevision(), this, &HostCb, &m_scalars, &stateFlags);
-		m_fatalError = (stateFlags & 1) != 0;
-		m_configErrors = (stateFlags & 2) != 0;
-	}
-
-	static void HostCb(void* ctx, int op, const int* ints, const char* const* strs, size_t)
-	{
-		auto* self = static_cast<Options*>(ctx);
-		if (op == 0) { printf("%s\n", strs[0]); return; }
-		if (op == 1) { printf("%s\n", strs[0]); error("%s", strs[0]); return; }
-		if (op == 2) { printf("%s\n", strs[0]); warn("%s", strs[0]); return; }
-		if (op == 3) { warn("%s", strs[0]); return; }
-		if (!self->m_extender) return;
-		if (op == 7)
-		{
-			self->m_extender->AddNewsServer(ints[0], ints[1] != 0, strs[0], strs[1], ints[2], ints[3],
-				strs[2], strs[3], ints[4] != 0, ints[5] != 0, strs[4], ints[6], ints[7],
-				ints[8], ints[9], ints[10] != 0, static_cast<unsigned int>(ints[11]));
-		}
-		else if (op == 8)
-		{
-			self->m_extender->AddFeed(ints[0], strs[0], strs[1], ints[1], strs[2], ints[2] != 0,
-				ints[3] != 0, strs[3], ints[4], ints[5], strs[4], static_cast<unsigned int>(ints[6]));
-		}
-		else if (op == 9)
-		{
-			self->m_extender->AddTask(ints[0], ints[1], ints[2], ints[3],
-				static_cast<ESchedulerCommand>(ints[4]), strs[0]);
-		}
+			flags, Util::VersionRevision(), nullptr, nullptr, &m_scalars, &stateFlags);
 	}
 };
 
@@ -1199,25 +1022,13 @@ extern Log* g_Log;
 class Log
 {
 public:
-	Log()
-	{
-		g_Log = this;
-#ifdef DEBUG
-		m_rs = nzbget_rs_log_new(1);
-#else
-		m_rs = nzbget_rs_log_new(0);
-#endif
-	}
+	Log();
 
 	~Log()
 	{
 		nzbget_rs_log_free(m_rs);
 		g_Log = nullptr;
 	}
-
-	const NzbgetRsLog* RsHandle() const { return m_rs; }
-
-	void Clear() { nzbget_rs_log_ctl(m_rs, 0, 0, 0, OptRs(), nullptr, nullptr); }
 
 	void InitOptions()
 	{
@@ -1235,13 +1046,6 @@ public:
 	void UnregisterDebuggable(Debuggable* debuggable)
 	{
 		nzbget_rs_log_ctl(m_rs, 6, 0, reinterpret_cast<uintptr_t>(debuggable), nullptr, nullptr, nullptr);
-	}
-
-	void LogDebugInfo();
-
-	void IntervalCheck()
-	{
-		nzbget_rs_log_ctl(m_rs, 2, 0, 0, OptRs(), nullptr, nullptr);
 	}
 
 private:
@@ -1276,10 +1080,15 @@ protected:
 	friend class Log;
 };
 
-inline void Log::LogDebugInfo()
+inline Log::Log()
 {
-	nzbget_rs_log_ctl(m_rs, 7, 0, 0, OptRs(), nullptr,
-		+[](uintptr_t p) { reinterpret_cast<Debuggable*>(p)->LogDebugInfo(); });
+	g_Log = this;
+	auto dbgCb = +[](uintptr_t p) { reinterpret_cast<Debuggable*>(p)->LogDebugInfo(); };
+#ifdef DEBUG
+	m_rs = nzbget_rs_log_new(1, dbgCb);
+#else
+	m_rs = nzbget_rs_log_new(0, dbgCb);
+#endif
 }
 
 #ifdef DEBUG
@@ -1404,27 +1213,9 @@ public:
 		+[](uintptr_t c) { reinterpret_cast<WorkState*>(c)->Notify(nullptr); })) {}
 	~WorkState() { nzbget_rs_workstate_free(m_rs); }
 
-	void SetPauseDownload(bool v) { Ctl(0, 1, v ? 1 : 0); }
-	bool GetPauseDownload() const { return Ctl(0) != 0; }
-	void SetPausePostProcess(bool v) { Ctl(1, 1, v ? 1 : 0); }
 	bool GetPausePostProcess() const { return Ctl(1) != 0; }
-	void SetPauseScan(bool v) { Ctl(2, 1, v ? 1 : 0); }
-	bool GetPauseScan() const { return Ctl(2) != 0; }
-	void SetTempPauseDownload(bool v) { Ctl(3, 1, v ? 1 : 0); }
-	bool GetTempPauseDownload() const { return Ctl(3) != 0; }
-	void HoldDownloadForFleet(bool hold) { Ctl(4, 1, hold ? 1 : 0); }
-	bool GetDownloadHeld() const { return Ctl(4) != 0; }
 	void SetTempPausePostprocess(bool v) { Ctl(5, 1, v ? 1 : 0); }
 	bool GetTempPausePostprocess() const { return Ctl(5) != 0; }
-	void SetSpeedLimit(int v) { Ctl(7, 1, v); }
-	int GetSpeedLimit() const { return static_cast<int>(Ctl(7)); }
-	void SetResumeTime(time_t v) { Ctl(8, 1, static_cast<int64_t>(v)); }
-	time_t GetResumeTime() const { return static_cast<time_t>(Ctl(8)); }
-	void SetLocalTimeOffset(int v) { Ctl(9, 1, v); }
-	int GetLocalTimeOffset() { return static_cast<int>(Ctl(9)); }
-	void SetQuotaReached(bool v) { Ctl(10, 1, v ? 1 : 0); }
-	bool GetQuotaReached() { return Ctl(10) != 0; }
-	void SetDownloading(bool v) { Ctl(11, 1, v ? 1 : 0); }
 
 private:
 	NzbgetRsWorkState* m_rs = nullptr;
@@ -1974,6 +1765,10 @@ inline intptr_t TlsHostCb(void*, int op, int a1, int a2, uintptr_t p1,
 	return 0;
 }
 
+inline uintptr_t ScriptHostCb(
+	void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+	const char* s1, const char* s2, int* ints, const char** strs);
+
 inline void InitRsBuildEnv()
 {
 	static std::once_flag once;
@@ -1987,6 +1782,9 @@ inline void InitRsBuildEnv()
 #endif
 #ifdef DISABLE_GZIP
 		flags |= 4;
+#endif
+#ifdef DISABLE_PARCHECK
+		flags |= 16;
 #endif
 		const char* sslLib = "";
 		const char* sslVer = "";
@@ -2004,7 +1802,7 @@ inline void InitRsBuildEnv()
 		flags |= 8;
 #endif
 #endif
-		nzbget_rs_build_env_init(flags, Util::VersionRevision(), sslLib, sslVer, &TlsHostCb,
+		nzbget_rs_build_env_init(flags, Util::VersionRevision(), sslLib, sslVer, &TlsHostCb, &ScriptHostCb,
 			+[](const char* ptr, size_t len, int doFlush) {
 				if (ptr && len > 0) fwrite(ptr, 1, len, stdout);
 				if (doFlush) fflush(stdout);
@@ -2013,75 +1811,6 @@ inline void InitRsBuildEnv()
 }
 
 namespace System { class SystemInfo; }
-
-class WebDownloader : public Thread, public Subject
-{
-public:
-	enum EStatus
-	{
-		adUndefined,
-		adRunning,
-		adFinished,
-		adFailed,
-		adRetry,
-		adNotFound,
-		adRedirect,
-		adConnectError,
-		adFatalError
-	};
-
-	WebDownloader() : m_rs(nzbget_rs_webdl_new(this, &HostCb)) {}
-	~WebDownloader() override { nzbget_rs_webdl_free(m_rs); }
-	EStatus GetStatus() { return static_cast<EStatus>(nzbget_rs_webdl_ctl(m_rs, 3, 0, nullptr, nullptr, nullptr)); }
-	void Run() override { nzbget_rs_webdl_ctl(m_rs, 1, 0, nullptr, nullptr, nullptr); }
-	void Stop() override { Thread::Stop(); nzbget_rs_webdl_ctl(m_rs, 2, 0, nullptr, nullptr, nullptr); }
-	EStatus DownloadWithRedirects(int maxRedirects)
-	{
-		return static_cast<EStatus>(nzbget_rs_webdl_ctl(m_rs, 0, maxRedirects, nullptr, nullptr, nullptr));
-	}
-	void SetInfoName(const char* infoName) { nzbget_rs_webdl_ctl(m_rs, 11, 0, infoName ? infoName : "", nullptr, nullptr); }
-	const char* GetInfoName() { return reinterpret_cast<const char*>(nzbget_rs_webdl_ctl(m_rs, 11, 0, nullptr, nullptr, nullptr)); }
-	void SetUrl(const char* url) { nzbget_rs_webdl_ctl(m_rs, 10, 0, url ? url : "", nullptr, nullptr); }
-	const char* GetOutputFilename() { return reinterpret_cast<const char*>(nzbget_rs_webdl_ctl(m_rs, 12, 0, nullptr, nullptr, nullptr)); }
-	void SetOutputFilename(const char* outputFilename) { nzbget_rs_webdl_ctl(m_rs, 12, 0, outputFilename ? outputFilename : "", nullptr, nullptr); }
-	time_t GetLastUpdateTime()
-	{
-		int64_t t = 0;
-		nzbget_rs_webdl_ctl(m_rs, 5, 0, nullptr, &t, nullptr);
-		return static_cast<time_t>(t);
-	}
-	int GetHttpStatus() const { return static_cast<int>(nzbget_rs_webdl_ctl(m_rs, 4, 0, nullptr, nullptr, nullptr)); }
-	const char* GetOriginalFilename()
-	{
-		NzbgetRsBuf buf{};
-		nzbget_rs_webdl_ctl(m_rs, 13, 0, nullptr, nullptr, &buf);
-		m_originalFilename.Set(buf.data ? buf.data : "", static_cast<int>(buf.len));
-		nzbget_rs_free(buf);
-		return m_originalFilename;
-	}
-	void SetForce(bool force) { nzbget_rs_webdl_ctl(m_rs, 7, force ? 1 : 0, nullptr, nullptr, nullptr); }
-	void SetRetry(bool retry) { nzbget_rs_webdl_ctl(m_rs, 8, retry ? 1 : 0, nullptr, nullptr, nullptr); }
-#ifndef DISABLE_TLS
-	void SetCertVerifLevel(unsigned int level) { nzbget_rs_webdl_ctl(m_rs, 9, static_cast<int>(level), nullptr, nullptr, nullptr); }
-#endif
-	void LogDebugInfo() { nzbget_rs_webdl_ctl(m_rs, 14, 0, nullptr, nullptr, nullptr); }
-
-	static int HostCb(void* ctx, int op, const char* s1)
-	{
-		auto* self = static_cast<WebDownloader*>(ctx);
-		if (op == 1) return ((self && self->IsStopped()) || Thread::IsCurrentThreadStopped()) ? 1 : 0;
-		if (op == 3) { if (self) self->Notify(nullptr); return 0; }
-		if (op == 4) { if (self) self->ProcessHeader(s1); return 0; }
-		return 0;
-	}
-
-protected:
-	virtual void ProcessHeader([[maybe_unused]] const char* line) {}
-
-private:
-	NzbgetRsWebDl* m_rs = nullptr;
-	CString m_originalFilename;
-};
 
 #endif
 
@@ -3913,9 +3642,9 @@ protected:
 	// a reload creates the queue anew: until it is loaded again, threads
 	// waiting for IsLoaded() (the post-processor's queue sanitising, for
 	// one) must not take the previous queue's state for it
-	static void Init(DownloadQueue* globalInstance) { g_DownloadQueue = globalInstance; g_Loaded = false; }
-	static void Final() { g_DownloadQueue = nullptr; }
-	static void Loaded() { g_Loaded = true; }
+	static void Init(DownloadQueue* globalInstance) { g_DownloadQueue = globalInstance; g_Loaded = false; nzbget_rs_thread_count_op(4); }
+	static void Final() { g_DownloadQueue = nullptr; g_Loaded = false; nzbget_rs_thread_count_op(4); }
+	static void Loaded() { g_Loaded = true; nzbget_rs_thread_count_op(3); }
 
 private:
 	NzbList m_queue;
@@ -4923,20 +4652,6 @@ public:
 	~ServerPool() override { nzbget_rs_serverpool_free(m_rs); }
 	const NzbgetRsServerPool* RsHandle() const { return m_rs; }
 
-	void AddServer(int id, bool active, const char* name, const char* host, int port, int ipVersion,
-		const char* user, const char* pass, bool joinGroup, bool tls, const char* cipher,
-		int maxConnections, int retention, int level, int group, bool optional, unsigned int certVerifLevel)
-	{
-		nzbget_rs_serverpool_add(m_rs, id, active ? 1 : 0, name, host, port, ipVersion,
-			user, pass, joinGroup ? 1 : 0, tls ? 1 : 0, cipher, maxConnections, retention,
-			level, group, optional ? 1 : 0, certVerifLevel);
-	}
-
-	void SetTimeout(int timeout) { nzbget_rs_serverpool_ctl(m_rs, 0, timeout, 0, 0, 0); }
-	void SetRetryInterval(int retryInterval) { nzbget_rs_serverpool_ctl(m_rs, 1, retryInterval, 0, 0, 0); }
-	void InitConnections() { nzbget_rs_serverpool_ctl(m_rs, 2, 0, 0, 0, 0); }
-	size_t ServerCount() const { return static_cast<size_t>(nzbget_rs_serverpool_ctl(m_rs, 9, 0, 0, 0, 0)); }
-
 protected:
 	void LogDebugInfo() override { nzbget_rs_serverpool_ctl(m_rs, 5, 0, 0, 0, 0); }
 
@@ -5182,76 +4897,7 @@ namespace TlsCipherBackend
 #ifndef STATMETER_H
 #define STATMETER_H
 
-class StatMeter : public Debuggable
-{
-public:
-	StatMeter() : m_rs(nzbget_rs_statmeter_new(LogRs(), OptRs())) {}
-	~StatMeter() override { nzbget_rs_statmeter_free(m_rs); }
-	StatMeter(const StatMeter&) = delete;
-	StatMeter& operator=(const StatMeter&) = delete;
-
-	const NzbgetRsStatMeter* RsHandle() const { return m_rs; }
-
-	void Init()
-	{
-		int totalOffset = 0;
-		nzbget_rs_statmeter_ctl(m_rs, 0, (int)g_ServerPool->ServerCount(), 0, 0, 0, 0,
-			OptRs(), LogRs(), &totalOffset, nullptr);
-		g_WorkState->SetLocalTimeOffset(totalOffset);
-	}
-
-	void AddSpeedReading(int bytes) { nzbget_rs_statmeter_ctl(m_rs, 7, bytes, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr); }
-
-	void IntervalCheck()
-	{
-		int out[2]{};
-		int mask = nzbget_rs_statmeter_ctl(
-			m_rs, 4, g_WorkState->GetLocalTimeOffset(), g_WorkState->GetQuotaReached() ? 1 : 0,
-			0, 0, 0, OptRs(), LogRs(), out, nullptr);
-		if (mask & 1) g_WorkState->SetLocalTimeOffset(out[0]);
-		if (mask & 2) g_WorkState->SetQuotaReached(out[1] != 0);
-		if (mask & 4) Save();
-	}
-
-	void EnterLeaveStandBy(bool enter)
-	{
-		nzbget_rs_statmeter_ctl(m_rs, 5, enter ? 1 : 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr);
-	}
-
-	void Save()
-	{
-		if (!g_Options || !g_Options->GetServerMode()) return;
-		nzbget_rs_statmeter_disk(
-			m_rs, 0, 1, g_WorkState->GetLocalTimeOffset(), OptRs(), LogRs(),
-			g_ServerPool ? g_ServerPool->RsHandle() : nullptr, nullptr);
-	}
-
-	bool Load(bool* perfectServerMatch)
-	{
-		int pm = (perfectServerMatch && *perfectServerMatch) ? 1 : 0;
-		bool ok = nzbget_rs_statmeter_disk(
-			m_rs, 1, g_Options ? (g_Options->GetServerMode() ? 1 : 0) : 0,
-			g_WorkState->GetLocalTimeOffset(), OptRs(), LogRs(),
-			g_ServerPool ? g_ServerPool->RsHandle() : nullptr,
-			perfectServerMatch ? &pm : nullptr) != 0;
-		if (perfectServerMatch) *perfectServerMatch = pm != 0;
-		return ok;
-	}
-
-protected:
-	void LogDebugInfo() override
-	{
-		nzbget_rs_statmeter_ctl(m_rs, 6, 0, 0, 0, 0, 0, OptRs(), LogRs(), nullptr, nullptr);
-	}
-
-private:
-	NzbgetRsStatMeter* m_rs = nullptr;
-
-	static const NzbgetRsOptions* OptRs() { return g_Options ? g_Options->RsHandle() : nullptr; }
-	static const NzbgetRsLog* LogRs() { return g_Log ? g_Log->RsHandle() : nullptr; }
-};
-
-extern StatMeter* g_StatMeter;
+class StatMeter;
 
 #endif
 
@@ -5316,18 +4962,7 @@ public:
 		nzbget_rs_article_dl_exec(nullptr, 107, 0, 0, 0, 0, nullptr, nullptr, nullptr);
 	}
 
-	void InitOptions() { nzbget_rs_article_dl_exec(nullptr, 100, 0, 0, 0, 0, nullptr, nullptr, nullptr); }
 	void Run() override { nzbget_rs_article_dl_exec(nullptr, 101, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, this); }
-	void Stop() override { Thread::Stop(); }
-
-	int GetEffectiveParBufferMB(int configuredMB) const
-	{
-		return (int)nzbget_rs_article_dl_exec(nullptr, 105, configuredMB, 0, 0, 0, nullptr, nullptr, nullptr);
-	}
-	int GetEffectiveDownloadsLimit(int configuredLimit) const
-	{
-		return (int)nzbget_rs_article_dl_exec(nullptr, 106, configuredLimit, 0, 0, 0, nullptr, nullptr, nullptr);
-	}
 };
 
 inline MemoryMonitor* g_MemoryMonitor = nullptr;
@@ -6682,109 +6317,20 @@ extern int g_ArgumentCount;
 extern char* (*g_Arguments)[];
 extern char* (*g_EnvironmentVariables)[];
 
-inline uintptr_t ScriptHostCb(
-	void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-	const char* s1, const char* s2, int* ints, const char** strs);
-
 namespace ExtensionManager
 {
 	class Manager final
 	{
 	public:
-		Manager() : m_rs(nzbget_rs_ext_mgr_new()) {}
+		Manager() { InitRsBuildEnv(); m_rs = nzbget_rs_ext_mgr_new(); }
 		~Manager() { nzbget_rs_ext_mgr_free(m_rs); }
-
 		Manager(const Manager&) = delete;
 		Manager& operator=(const Manager&) = delete;
-
-		NzbgetRsExtManager* Handle() const { return m_rs; }
-
-		std::optional<std::string>
-		InstallOrUpdate(int isUpdate, const fs::path& file, const char* arg2)
-		{
-			std::string fileStr = fs::u8string(file);
-			NzbgetRsBuf errBuf{};
-			int ok = nzbget_rs_ext_mgr_op(
-				m_rs, 3, isUpdate, 0, 0, fileStr.c_str(), arg2 ? arg2 : "",
-				nullptr, nullptr, nullptr, &ScriptHostCb, &errBuf);
-			std::optional<std::string> err;
-			if (!ok && errBuf.data) err.emplace(errBuf.data, errBuf.len);
-			nzbget_rs_free(errBuf);
-			return err;
-		}
-
-		std::optional<std::string>
-		DeleteExtension(const std::string& name)
-		{
-			NzbgetRsBuf errBuf{};
-			int ok = nzbget_rs_ext_mgr_op(
-				m_rs, 2, 0, 0, 0, name.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, &errBuf);
-			std::optional<std::string> err;
-			if (!ok && errBuf.data) err.emplace(errBuf.data, errBuf.len);
-			nzbget_rs_free(errBuf);
-			return err;
-		}
-
-		std::optional<std::string>
-		LoadExtensions()
-		{
-			auto createTaskCb = +[](void*, const char* taskTime, const char* extName) {
-				if (g_Options)
-				{
-					g_Options->CreateSchedulerTask(0, taskTime, nullptr, Options::scScript, extName);
-				}
-			};
-			NzbgetRsBuf errBuf{};
-			int ok = nzbget_rs_ext_mgr_op(
-				m_rs, 0, PATH_SEPARATOR, 0, reinterpret_cast<uintptr_t>(createTaskCb),
-				g_Options ? g_Options->GetScriptDir() : "",
-				g_Options ? g_Options->GetScriptOrder() : "",
-				g_Options ? g_Options->GetExtensions() : "",
-				nullptr, nullptr, &ScriptHostCb, &errBuf);
-			std::optional<std::string> err;
-			if (!ok && errBuf.data) err.emplace(errBuf.data, errBuf.len);
-			nzbget_rs_free(errBuf);
-			return err;
-		}
-
-		NzbgetRsBuf SerializeList(bool isJson) const
-		{
-			NzbgetRsBuf out{};
-			nzbget_rs_ext_mgr_op(
-				m_rs, 1, isJson ? 1 : 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &out);
-			return out;
-		}
-
-		std::pair<WebDownloader::EStatus, fs::path>
-		DownloadExtension(const std::string& url, const std::string& extName)
-		{
-			NzbgetRsBuf pathBuf{};
-			nzbget_rs_ext_mgr_op(
-				nullptr, 4, PATH_SEPARATOR, 0, 0,
-				g_Options ? g_Options->GetTempDir() : "",
-				nullptr, nullptr, nullptr, nullptr, nullptr, &pathBuf);
-			std::string tmpFileNameStr(pathBuf.data ? pathBuf.data : "", pathBuf.len);
-			nzbget_rs_free(pathBuf);
-
-			std::unique_ptr<WebDownloader> downloader = std::make_unique<WebDownloader>();
-			downloader->SetUrl(url.c_str());
-			downloader->SetForce(true);
-			downloader->SetRetry(false);
-			downloader->SetOutputFilename(tmpFileNameStr.c_str());
-			downloader->SetInfoName(extName.c_str());
-
-			WebDownloader::EStatus status = downloader->DownloadWithRedirects(5);
-			downloader.reset();
-
-			return std::make_pair(status, fs::u8path(tmpFileNameStr));
-		}
 
 	private:
 		NzbgetRsExtManager* m_rs = nullptr;
 	};
 }
-
-extern ExtensionManager::Manager* g_ExtensionManager;
 
 class CommandScriptLog;
 
@@ -6808,7 +6354,7 @@ public:
 		qeNzbDeleted // highest priority
 	};
 
-	QueueScriptCoordinator() : m_rs(nzbget_rs_queue_script_new()) {}
+	QueueScriptCoordinator() { InitRsBuildEnv(); m_rs = nzbget_rs_queue_script_new(); }
 	~QueueScriptCoordinator() { nzbget_rs_queue_script_free(m_rs); }
 	QueueScriptCoordinator(const QueueScriptCoordinator&) = delete;
 	QueueScriptCoordinator& operator=(const QueueScriptCoordinator&) = delete;
@@ -6822,36 +6368,15 @@ public:
 
 	void Stop() { nzbget_rs_queue_script_exec(m_rs, 0, nullptr); }
 
-	void InitOptions()
-	{
-		NzbgetRsQueueScriptCoordEnv env{};
-		env.ext_mgr = g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr;
-		nzbget_rs_queue_script_exec(m_rs, 1, &env);
-	}
-
 	void EnqueueScript(NzbInfo* nzbInfo, EEvent event)
 	{
 		if (!nzbInfo || nzbInfo->GetSkipScriptProcessing()) return;
-		const char* postScript = g_Options ? g_Options->GetExtensions() : "";
-		if (g_Options && !Util::EmptyStr(nzbInfo->GetCategory()))
-		{
-			const char* strs[3]{};
-			if (g_Options->QueryCategory(nzbInfo->GetCategory(), false, nullptr, strs) &&
-				!Util::EmptyStr(strs[2]))
-			{
-				postScript = strs[2];
-			}
-		}
 		NzbgetRsQueueScriptCoordEnv env{};
-		env.ext_mgr = g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr;
 		env.p1 = reinterpret_cast<uintptr_t>(nzbInfo);
 		env.a1 = static_cast<int>(event);
 		env.a3 = nzbInfo->GetId();
-		env.a4 = g_Options ? g_Options->GetEventInterval() : 0;
-		env.t1 = static_cast<int64_t>(Util::CurrentTime());
 		env.t2 = static_cast<int64_t>(nzbInfo->GetQueueScriptTime());
-		env.s1 = postScript;
-		env.host_cb = &ScriptHostCb;
+		env.s1 = nzbInfo->GetCategory();
 		env.action_cb = &QueueScriptCoordinator::CoordActionCb;
 		nzbget_rs_queue_script_exec(m_rs, 4, &env);
 	}
@@ -6862,23 +6387,9 @@ public:
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 		NzbgetRsQueueScriptCoordEnv env{};
 		env.p1 = reinterpret_cast<uintptr_t>(static_cast<DownloadQueue*>(downloadQueue));
-		env.host_cb = &ScriptHostCb;
 		env.action_cb = &QueueScriptCoordinator::CoordActionCb;
 		nzbget_rs_queue_script_exec(m_rs, 5, &env);
 	}
-
-	bool HasJob(int nzbId, bool* active)
-	{
-		int act = 0;
-		NzbgetRsQueueScriptCoordEnv env{};
-		env.a1 = nzbId;
-		env.out_i32 = &act;
-		bool working = nzbget_rs_queue_script_exec(m_rs, 2, &env) != 0;
-		if (active) *active = act != 0;
-		return working;
-	}
-
-	int GetQueueSize() { return nzbget_rs_queue_script_exec(m_rs, 3, nullptr); }
 
 private:
 	NzbgetRsQueueScriptCoord* m_rs;
@@ -8252,20 +7763,15 @@ public:
 
 	void Run() override
 	{
-		int parcheckEnabled = 1;
-#ifdef DISABLE_PARCHECK
-		parcheckEnabled = 0;
-#endif
-		nzbget_rs_post_script_run(
-			m_runner, g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr,
-			parcheckEnabled, this, &HostCb, &ScriptHostCb);
+		InitRsBuildEnv();
+		nzbget_rs_post_script_run(m_runner, this, &HostCb);
 	}
 
 	void Stop() override
 	{
 		debug("Stopping post-process-script");
 		Thread::Stop();
-		nzbget_rs_script_runner_terminate(m_runner, &ScriptHostCb);
+		nzbget_rs_script_runner_terminate(m_runner);
 	}
 
 private:
@@ -8484,69 +7990,29 @@ public:
 		asFailed
 	};
 
-	Scanner() : m_rsScanner(nzbget_rs_scanner_new()) {}
+	Scanner() : m_rsScanner(nzbget_rs_scanner_new())
+	{
+		InitRsBuildEnv();
+		NzbgetRsScannerEnv env = MakeEnv();
+		nzbget_rs_scanner_exec(m_rsScanner, 8, &env, 0, 0, 0);
+	}
 	~Scanner() override { nzbget_rs_scanner_free(m_rsScanner); }
 	Scanner(const Scanner&) = delete;
 	Scanner& operator=(const Scanner&) = delete;
 
-	void InitOptions()
-	{
-		std::vector<const char*> catExts;
-		if (g_Options)
-		{
-			nzbget_rs_options_query(g_Options->RsHandle(), 2, nullptr, 0, nullptr, nullptr,
-				reinterpret_cast<uintptr_t>(&catExts),
-				+[](uintptr_t raw, const char*, const char* ext, int) {
-					reinterpret_cast<std::vector<const char*>*>(raw)->push_back(ext);
-				});
-		}
-		int hasScripts = (g_ExtensionManager && g_Options)
-			? nzbget_rs_ext_mgr_op(
-				g_ExtensionManager->Handle(), 6, static_cast<int>(catExts.size()), 0, 0,
-				g_Options->GetExtensions(), nullptr, nullptr,
-				catExts.empty() ? nullptr : catExts.data(), nullptr, nullptr, nullptr)
-			: 0;
-		NzbgetRsScannerEnv env = MakeEnv();
-		nzbget_rs_scanner_exec(m_rsScanner, 0, &env, hasScripts != 0 ? 1 : 0, 0, 0);
-	}
-
 	void InitPPParameters(const char* category, NzbParameterList* parameters, bool reset)
 	{
-		bool unpack = g_Options->GetUnpack();
-		const char* extensions = g_Options->GetExtensions();
-		if (!Util::EmptyStr(category))
-		{
-			int catUnpack = 0;
-			const char* strs[3]{};
-			if (g_Options->QueryCategory(category, false, &catUnpack, strs))
-			{
-				unpack = catUnpack != 0;
-				if (!Util::EmptyStr(strs[2])) extensions = strs[2];
-			}
-		}
 		auto paramCb = +[](void* raw, int op, const char* name, const char* val) -> int {
 			auto* params = static_cast<NzbParameterList*>(raw);
 			if (op == 0) return params->Find(name) != nullptr ? 1 : 0;
 			params->SetParameter(name, val);
 			return 0;
 		};
-		if (g_ExtensionManager)
-		{
-			nzbget_rs_ext_mgr_op(
-				g_ExtensionManager->Handle(), 5, unpack ? 1 : 0, reset ? 1 : 0,
-				reinterpret_cast<uintptr_t>(paramCb), extensions, nullptr, nullptr,
-				nullptr, parameters, nullptr, nullptr);
-		}
-		else if (!parameters->Find("*Unpack:"))
-		{
-			parameters->SetParameter("*Unpack:", unpack ? "yes" : "no");
-		}
-	}
-
-	void ScanNzbDir(bool syncMode)
-	{
-		NzbgetRsScannerEnv env = MakeEnv();
-		nzbget_rs_scanner_exec(m_rsScanner, 3, &env, syncMode ? 1 : 0, 0, 0);
+		NzbgetRsScannerEnv env{};
+		env.ctx = reinterpret_cast<void*>(paramCb);
+		env.category = category;
+		env.parameters = parameters;
+		nzbget_rs_scanner_exec(nullptr, 7, &env, reset ? 1 : 0, 0, 0);
 	}
 
 	EAddStatus AddArchive(const char* filename, const char* category,
@@ -8592,16 +8058,9 @@ public:
 	}
 
 protected:
-	int ServiceInterval() override
-	{
-		return nzbget_rs_scanner_exec(m_rsScanner, 1, nullptr, g_Options ? g_Options->GetNzbDirInterval() : 0, 0, 0);
-	}
+	int ServiceInterval() override { return nzbget_rs_scanner_exec(m_rsScanner, 1, nullptr, -1, 0, 0); }
 
-	void ServiceWork() override
-	{
-		NzbgetRsScannerEnv env = MakeEnv();
-		nzbget_rs_scanner_exec(m_rsScanner, 2, &env, 0, 0, 0);
-	}
+	void ServiceWork() override { nzbget_rs_scanner_exec(m_rsScanner, 2, nullptr, 0, 0, 0); }
 
 private:
 	NzbgetRsScanner* m_rsScanner = nullptr;
@@ -8612,31 +8071,7 @@ private:
 	{
 		NzbgetRsScannerEnv env{};
 		env.ctx = this;
-		env.nzb_dir = g_Options ? g_Options->GetNzbDir() : nullptr;
-		env.temp_dir = g_Options ? g_Options->GetTempDir() : nullptr;
-		env.nzb_dir_interval = g_Options ? g_Options->GetNzbDirInterval() : 0;
-		env.nzb_dir_file_age = g_Options ? g_Options->GetNzbDirFileAge() : 0;
-		env.archive_scan = (g_Options && g_Options->GetNzbDirArchiveScan()) ? 1 : 0;
-		env.archive_action = g_Options ? static_cast<int>(g_Options->GetNzbDirArchiveAction()) : 0;
-		env.queue_loaded = DownloadQueue::IsLoaded() ? 1 : 0;
-		env.pause_scan = (g_WorkState && g_WorkState->GetPauseScan()) ? 1 : 0;
-		env.path_sep = PATH_SEPARATOR;
 		env.wake_cb = [](void* ctx) { static_cast<Scanner*>(ctx)->WakeUp(); };
-		env.log_cb = [](void*, int kind, const char* msg)
-		{
-			const char* text = msg ? msg : "";
-			if (kind == 0) { debug("%s", text); }
-			else if (kind == 1) { detail("%s", text); }
-			else if (kind == 2) { info("%s", text); }
-			else if (kind == 3) { warn("%s", text); }
-			else { error("%s", text); }
-		};
-		env.find_category_cb = [](void*, const char* category, int searchAliases) -> const char*
-		{
-			const char* strs[3]{};
-			return (g_Options && g_Options->QueryCategory(category ? category : "", searchAliases != 0, nullptr, strs))
-				? strs[0] : nullptr;
-		};
 		env.iter_params_cb = [](void* rawParams, void* outCtx, void (*push)(void*, const char*, const char*))
 		{
 			for (NzbParameter& p : *static_cast<NzbParameterList*>(rawParams))
@@ -8667,19 +8102,8 @@ private:
 				int* priority; int* addTop; int* addPaused; int* dupeScore; int* dupeMode;
 			} sc{self, initName ? initName : "", initCat ? initCat : "", initKey ? initKey : "",
 				priority, addTop, addPaused, dupeScore, dupeMode};
-			const char* extensions = g_Options ? g_Options->GetExtensions() : "";
-			if (g_Options && !sc.nzbCat.empty())
-			{
-				const char* strs[3]{};
-				if (g_Options->QueryCategory(sc.nzbCat.c_str(), false, nullptr, strs) &&
-					!Util::EmptyStr(strs[2]))
-				{
-					extensions = strs[2];
-				}
-			}
 			nzbget_rs_scan_scripts_exec(
-				g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr,
-				extensions, fullFilename, nzbInfo ? nzbInfo->GetUrl() : "", directory, &sc,
+				fullFilename, nzbInfo ? nzbInfo->GetUrl() : "", directory, &sc,
 				[](void* raw, int op, int a1, const char* s1, const char* s2, int* ints, const char** strs) {
 					auto* s = static_cast<ScanCtx*>(raw);
 					if (op == 0)
@@ -8712,8 +8136,7 @@ private:
 						else if (a1 == 8) *s->dupeScore = ints[0];
 						else if (a1 == 9) *s->dupeMode = static_cast<int>(ints[0] == 0 ? dmScore : (ints[0] == 1 ? dmAll : dmForce));
 					}
-				},
-				&ScriptHostCb);
+				});
 			setStr(strCtx, 0, sc.nzbName.c_str());
 			setStr(strCtx, 1, sc.nzbCat.c_str());
 			setStr(strCtx, 2, sc.dupeKey.c_str());
@@ -8825,52 +8248,37 @@ private:
 	}
 };
 
-class UrlCoordinator : public Thread, public Observer, public Debuggable
+class UrlCoordinator : public Thread, public Debuggable
 {
 public:
 	UrlCoordinator() : m_rs(nzbget_rs_url_coord_new())
 	{
+		InitRsBuildEnv();
+		NzbgetRsUrlCoordEnv env = MakeEnv();
+		nzbget_rs_url_coord_exec(m_rs, 10, &env);
 		m_downloadQueueObserver.m_owner = this;
 		DownloadQueue::Guard()->Attach(&m_downloadQueueObserver);
 	}
 
 	~UrlCoordinator() override
 	{
-		NzbgetRsUrlCoordEnv env = MakeEnv();
-		nzbget_rs_url_coord_exec(m_rs, 9, &env);
+		nzbget_rs_url_coord_exec(m_rs, 9, nullptr);
 		nzbget_rs_url_coord_free(m_rs);
 	}
 
-	void Run() override { NzbgetRsUrlCoordEnv env = MakeEnv(); nzbget_rs_url_coord_exec(m_rs, 0, &env); }
+	void Run() override { nzbget_rs_url_coord_exec(m_rs, 0, nullptr); }
 
 	void Stop() override
 	{
 		Thread::Stop();
-		NzbgetRsUrlCoordEnv env = MakeEnv();
-		nzbget_rs_url_coord_exec(m_rs, 1, &env);
-	}
-
-	void Update(Subject* caller, void*) override
-	{
-		NzbgetRsUrlCoordEnv env = MakeEnv();
-		env.p1 = reinterpret_cast<uintptr_t>(static_cast<UrlDownloader*>(caller));
-		nzbget_rs_url_coord_exec(m_rs, 4, &env);
+		nzbget_rs_url_coord_exec(m_rs, 1, nullptr);
 	}
 
 	bool HasMoreJobs() const { return nzbget_rs_url_coord_exec(m_rs, 7, nullptr) != 0; }
 
-	bool DeleteQueueEntry(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, bool avoidHistory)
-	{
-		NzbgetRsUrlCoordEnv env = MakeEnv();
-		env.p1 = reinterpret_cast<uintptr_t>(downloadQueue);
-		env.p2 = reinterpret_cast<uintptr_t>(nzbInfo);
-		env.a1 = avoidHistory ? 1 : 0;
-		return nzbget_rs_url_coord_exec(m_rs, 5, &env) != 0;
-	}
-
 	void AddUrlToQueue(std::unique_ptr<NzbInfo> nzbInfo, bool addFirst)
 	{
-		NzbgetRsUrlCoordEnv env = MakeEnv();
+		NzbgetRsUrlCoordEnv env{};
 		env.p1 = reinterpret_cast<uintptr_t>(nzbInfo.get());
 		env.p2 = reinterpret_cast<uintptr_t>(&nzbInfo);
 		env.a1 = addFirst ? 1 : 0;
@@ -8878,28 +8286,16 @@ public:
 	}
 
 protected:
-	void LogDebugInfo() override { NzbgetRsUrlCoordEnv env = MakeEnv(); nzbget_rs_url_coord_exec(m_rs, 8, &env); }
+	void LogDebugInfo() override { nzbget_rs_url_coord_exec(m_rs, 8, nullptr); }
 
 private:
-	class UrlDownloader final : public WebDownloader
-	{
-	public:
-		UrlDownloader(UrlCoordinator* owner, NzbInfo* nzbInfo) : m_owner(owner), m_nzbInfo(nzbInfo) {}
-		NzbInfo* GetNzbInfo() const { return m_nzbInfo; }
-	protected:
-		void ProcessHeader(const char* line) override { m_owner->OnUrlHeader(this, m_nzbInfo, line); }
-	private:
-		UrlCoordinator* m_owner;
-		NzbInfo* m_nzbInfo;
-	};
-
 	class DownloadQueueObserver final : public Observer
 	{
 	public:
 		UrlCoordinator* m_owner;
 		void Update(Subject*, void* aspect) override
 		{
-			NzbgetRsUrlCoordEnv env = m_owner->MakeEnv();
+			NzbgetRsUrlCoordEnv env{};
 			env.a1 = static_cast<int>(static_cast<DownloadQueue::Aspect*>(aspect)->action);
 			nzbget_rs_url_coord_exec(m_owner->m_rs, 2, &env);
 		}
@@ -8907,15 +8303,6 @@ private:
 
 	NzbgetRsUrlCoord* m_rs;
 	DownloadQueueObserver m_downloadQueueObserver;
-
-	void OnUrlHeader(UrlDownloader* dl, NzbInfo* nzbInfo, const char* line)
-	{
-		NzbgetRsUrlCoordEnv env = MakeEnv();
-		env.p1 = reinterpret_cast<uintptr_t>(dl);
-		env.p2 = reinterpret_cast<uintptr_t>(nzbInfo);
-		env.s1 = line;
-		nzbget_rs_url_coord_exec(m_rs, 3, &env);
-	}
 
 	NzbgetRsUrlCoordEnv MakeEnv()
 	{
@@ -8925,26 +8312,8 @@ private:
 			GuardedDownloadQueue dq = DownloadQueue::Guard();
 			fnCb(inner, reinterpret_cast<uintptr_t>(static_cast<DownloadQueue*>(dq)));
 		};
-		env.log_cb = +[](void*, int level, const char* msg) {
-			if (level == 0) debug("%s", msg);
-			else if (level == 1) detail("%s", msg);
-			else if (level == 2) info("%s", msg);
-			else if (level == 3) warn("%s", msg);
-			else if (level == 4) error("%s", msg);
-		};
-		env.query_cb = +[](void* raw, int op, uintptr_t ptr, int* outInts, int64_t* outI64s, const char** outStrs) -> uintptr_t {
-			if (op == 0) return DownloadQueue::IsLoaded() ? 1 : 0;
+		env.query_cb = +[](void* raw, int op, uintptr_t ptr, int* outInts, int64_t*, const char** outStrs) -> uintptr_t {
 			if (op == 1) return static_cast<UrlCoordinator*>(raw)->IsStopped() ? 1 : 0;
-			if (op == 2)
-			{
-				outInts[0] = g_Options->GetUrlConnections();
-				outInts[1] = g_WorkState->GetPauseDownload() ? 1 : 0;
-				outInts[2] = g_Options->GetUrlForce() ? 1 : 0;
-				outInts[3] = g_Options->GetUrlTimeout();
-				outInts[4] = static_cast<int>(PATH_SEPARATOR);
-				outStrs[0] = g_Options->GetTempDir();
-				return 1;
-			}
 			if (op == 3) return reinterpret_cast<DownloadQueue*>(ptr)->GetQueue()->size();
 			if (op == 4)
 			{
@@ -8955,16 +8324,6 @@ private:
 				outInts[3] = n->GetPriority();
 				outInts[4] = n->GetId();
 				return reinterpret_cast<uintptr_t>(n);
-			}
-			if (op == 5)
-			{
-				auto* dl = reinterpret_cast<UrlDownloader*>(ptr);
-				outInts[0] = static_cast<int>(dl->GetStatus());
-				if (outI64s) outI64s[0] = static_cast<int64_t>(dl->GetLastUpdateTime());
-				outStrs[0] = dl->GetInfoName();
-				outStrs[1] = dl->GetOriginalFilename();
-				outStrs[2] = dl->GetOutputFilename();
-				return reinterpret_cast<uintptr_t>(dl->GetNzbInfo());
 			}
 			if (op == 6)
 			{
@@ -8981,31 +8340,7 @@ private:
 			}
 			return 0;
 		};
-		env.action_cb = +[](void* raw, int op, uintptr_t p1, uintptr_t p2, int a1, int a2, const char* s1, const char* s2, const char* s3) -> uintptr_t {
-			if (op == 0)
-			{
-				auto* self = static_cast<UrlCoordinator*>(raw);
-				auto* n = reinterpret_cast<NzbInfo*>(p1);
-				auto* dl = new UrlDownloader(self, n);
-				dl->SetAutoDestroy(true);
-				dl->Attach(self);
-				dl->SetUrl(n->GetUrl());
-				dl->SetForce(g_Options->GetUrlForce());
-				dl->SetInfoName(n->MakeNiceUrlName(n->GetUrl(), n->GetFilename()));
-				dl->SetOutputFilename(s1 ? s1 : "");
-				n->SetActiveDownloads(1);
-				n->SetUrlStatus(NzbInfo::lsRunning);
-				return reinterpret_cast<uintptr_t>(dl);
-			}
-			if (op == 1)
-			{
-				auto* dl = reinterpret_cast<UrlDownloader*>(p1);
-				if (a1 == 0) dl->Stop();
-				else if (a1 == 1) dl->LogDebugInfo();
-				else if (a1 == 2) delete dl;
-				else if (a1 == 3) dl->Start();
-				return 1;
-			}
+		env.action_cb = +[](void*, int op, uintptr_t p1, uintptr_t p2, int a1, int a2, const char* s1, const char* s2, const char* s3) -> uintptr_t {
 			if (op == 2) { reinterpret_cast<NzbInfo*>(p1)->GetParameters()->SetParameter(s1, s2); return 1; }
 			if (op == 3)
 			{
@@ -9103,8 +8438,9 @@ class DupeSearch final : public Thread
 public:
 	static constexpr const char* OwnedKeyParam = "DupeSearchOwnedKey";
 
-	DupeSearch() : m_rs(nzbget_rs_dupesearch_new())
+	DupeSearch() : m_rs(nzbget_rs_dupesearch_new(&HostCb))
 	{
+		InitRsBuildEnv();
 		m_observer.m_owner = this;
 		DownloadQueue::Guard()->Attach(&m_observer);
 	}
@@ -9135,63 +8471,13 @@ public:
 	static uintptr_t HostCb(
 		void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
 		const char* s1, const char* s2, int* ints, int64_t* i64s,
-		const char** strs, const uint8_t* bytes, size_t len)
+		const char** strs, const uint8_t*, size_t)
 	{
 		auto* self = static_cast<DupeSearch*>(ctx);
 		switch (op)
 		{
-			case 0: {
-				ints[0] = g_Options->GetDupeSearch() ? 1 : 0;
-				ints[1] = g_Options->GetDupeCheck() ? 1 : 0;
-				ints[2] = g_Options->GetDupeSearchDryRun() ? 1 : 0;
-				ints[3] = g_Options->GetDupeSearchDelay();
-				ints[4] = g_Options->GetDupeSearchMaxDonors();
-				ints[5] = g_Options->GetDupeFastDonors();
-				ints[6] = g_Options->GetDupeMinAlive();
-				ints[7] = g_Options->GetDupeHealthPercent();
-				ints[8] = g_Options->GetDupeHealthMin();
-				ints[9] = g_Options->GetDupeHealthMax();
-				ints[10] = g_Options->GetDupeBodyChecks();
-				ints[11] = g_Options->GetDupeHealthBudget();
-				ints[12] = (int)g_Options->GetHealthCheck();
-				ints[13] = DownloadQueue::IsLoaded() ? 1 : 0;
-				ints[14] = (self && self->IsStopped()) ? 1 : 0;
-				ints[15] = (int)PATH_SEPARATOR;
-				i64s[0] = (int64_t)Util::CurrentTime();
-				strs[0] = g_Options->GetQueueDir() ? g_Options->GetQueueDir() : "";
-				strs[1] = g_Options->GetTempDir() ? g_Options->GetTempDir() : "";
-				strs[2] = g_Options->GetDupeSearchUrl() ? g_Options->GetDupeSearchUrl() : "";
-				strs[3] = g_Options->GetDupeSearchApiKey() ? g_Options->GetDupeSearchApiKey() : "";
-				strs[4] = g_Options->GetExtCleanupDisk() ? g_Options->GetExtCleanupDisk() : "";
-				return 0;
-			}
-			case 1:
-				if (a1 == 0) info("%s", s1 ? s1 : "");
-				else if (a1 == 1) warn("%s", s1 ? s1 : "");
-				else if (a1 == 2) error("%s", s1 ? s1 : "");
-				else if (a1 == 3) debug("%s", s1 ? s1 : "");
-				else detail("%s", s1 ? s1 : "");
-				return 0;
-			case 2: {
-				auto* dl = new WebDownloader();
-				dl->SetUrl(s1);
-				dl->SetInfoName(s2);
-				dl->SetOutputFilename(strs[0]);
-				dl->SetForce(true);
-				dl->SetRetry(false);
-				return uintptr_t(dl);
-			}
-			case 3: {
-				auto* dl = reinterpret_cast<WebDownloader*>(p1);
-				if (a1 == 0) {
-					bool ok = dl->DownloadWithRedirects(5) == WebDownloader::adFinished;
-					ints[0] = dl->GetHttpStatus();
-					return ok ? 1 : 0;
-				}
-				if (a1 == 1) { dl->Stop(); return 0; }
-				delete dl;
-				return 0;
-			}
+			case 0:
+				return (self && self->IsStopped()) ? 1 : 0;
 			case 4: {
 				GuardedDownloadQueue dq = DownloadQueue::Guard();
 				reinterpret_cast<void(*)(void*, uintptr_t)>(p2)(
@@ -9291,18 +8577,6 @@ public:
 				}
 				return 0;
 			}
-			case 7: {
-				NzbParameterList parameters;
-				for (size_t i = 0; i < (size_t)p1; i++)
-					parameters.SetParameter(strs[1 + i * 2], strs[2 + i * 2]);
-				ints[0] = 0;
-				return g_Scanner->AddExternalFile(s1, s2, false, a1, strs[0], a2, dmScore,
-					&parameters, false, false, nullptr, nullptr,
-					reinterpret_cast<const char*>(bytes), (int)len, &ints[0]) == Scanner::asSuccess ? 1 : 0;
-			}
-			case 8:
-				g_WorkState->HoldDownloadForFleet(a1 != 0);
-				return 0;
 			default:
 				return 0;
 		}
@@ -9824,114 +9098,22 @@ inline uintptr_t HistoryCoordinator::ActionCb(
 inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
 	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs)
 {
-	static_assert(Message::mkInfo == 0 && Message::mkDetail == 4, "Message::EKind");
-	static_assert(Options::dafNone == 0 && Options::dafStream == 2 && Options::dafLive == 3, "EDupeArticleFallback");
-	static_assert(Options::hcPause == 0 && Options::hcDupe == 4, "EHealthCheck");
-	static_assert(ArticleDownloader::adRunning == 1 && ArticleDownloader::adFinished == 3 &&
-		ArticleDownloader::adFailed == 4 && ArticleDownloader::adRetry == 5 &&
-		ArticleDownloader::adFatalError == 10, "ArticleDownloader::EStatus");
-	static_assert(DownloadQueue::eaGroupPause == 16 && DownloadQueue::eaGroupSortFiles == 34 &&
-		DownloadQueue::eaPostDelete == 35, "DownloadQueue::EEditAction");
-
 	auto* self = static_cast<QueueCoordinator*>(ctx);
 	switch (op)
 	{
-	case 1: {
-		ints[0] = (int)g_Options->GetDupeArticleFallback();
-		ints[1] = (int)g_Options->GetParCheck();
-		ints[2] = (int)g_Options->GetParScan();
-		ints[3] = (int)g_Options->GetHealthCheck();
-		ints[4] = g_Options->GetDupeCheck() ? 1 : 0;
-		ints[5] = g_Options->GetServerMode() ? 1 : 0;
-		ints[6] = g_Options->GetContinuePartial() ? 1 : 0;
-		ints[7] = g_Options->GetDirectWrite() ? 1 : 0;
-		ints[8] = g_Options->GetDirectRename() ? 1 : 0;
-		ints[9] = g_Options->GetRawArticle() ? 1 : 0;
-		ints[10] = g_Options->GetReorderFiles() ? 1 : 0;
-		ints[11] = (int)g_Options->GetFileNaming();
-		ints[12] = g_Options->GetPropagationDelay();
-		ints[13] = g_Options->GetArticleTimeout();
-		ints[14] = (g_WorkState && g_WorkState->GetPauseDownload()) ? 1 : 0;
-		ints[15] = (g_WorkState && g_WorkState->GetTempPauseDownload()) ? 1 : 0;
-		ints[16] = (g_WorkState && g_WorkState->GetQuotaReached()) ? 1 : 0;
-		ints[17] = (g_WorkState && g_WorkState->GetDownloadHeld()) ? 1 : 0;
-		ints[18] = (g_WorkState && g_WorkState->GetPausePostProcess()) ? 1 : 0;
-		ints[19] = (g_WorkState && g_WorkState->GetPauseScan()) ? 1 : 0;
-		ints[20] = (g_WorkState && g_WorkState->GetTempPausePostprocess()) ? 1 : 0;
-		ints[21] = g_Options->GetKeepHistory();
-		ints[22] = (int)g_Options->GetPostStrategy();
-		ints[23] = g_Options->GetSkipWrite() ? 1 : 0;
-		ints[24] = g_Options->GetParRename() ? 1 : 0;
-		ints[25] = g_Options->GetRarRename() ? 1 : 0;
-		ints[26] = g_Options->GetDirectUnpack() ? 1 : 0;
-		ints[27] = g_Options->GetParPauseQueue() ? 1 : 0;
-		ints[28] = g_Options->GetUnpackPauseQueue() ? 1 : 0;
-		ints[29] = g_Options->GetScriptPauseQueue() ? 1 : 0;
-		ints[30] = g_Options->GetPostDownloadRename() ? 1 : 0;
-		ints[31] = g_Options->GetRenameAfterUnpack() ? 1 : 0;
-		ints[32] = g_Options->GetHardLinking() ? 1 : 0;
-		ints[33] = g_Options->GetUnpack() ? 1 : 0;
-#ifndef DISABLE_PARCHECK
-		ints[34] = 1;
-#else
-		ints[34] = 0;
-#endif
-		i64s[0] = (int64_t)Util::CurrentTime();
-		strs[0] = g_Options->GetQueueDir();
-		strs[1] = g_Options->GetParIgnoreExt();
-		strs[2] = g_Options->GetExtCleanupDisk();
-		strs[3] = g_Options->GetInterDir();
-		strs[4] = g_Options->GetHardLinkingIgnoreExt();
-		strs[5] = g_Options->GetExtensions();
-		return 0;
-	}
 	case 2: {
-		const char* msg = s1 ? s1 : "";
 		if (p1 != 0)
 		{
+			const char* msg = s1 ? s1 : "";
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
 			if (a2 == 1) n->AddMessage((Message::EKind)a1, msg);
 			else n->PrintMessage((Message::EKind)a1, "%s", msg);
 		}
-		else
-		{
-			if (a1 == Message::mkInfo) info("%s", msg);
-			else if (a1 == Message::mkWarning) warn("%s", msg);
-			else if (a1 == Message::mkError) error("%s", msg);
-			else if (a1 == Message::mkDebug) debug("%s", msg);
-			else if (a1 == Message::mkDetail) detail("%s", msg);
-		}
 		return 0;
 	}
-	case 3: {
-		if (a1 == 0) Util::Sleep(a2);
-		else if (a1 == 1) Util::SetStandByMode(a2 != 0);
-		else if (a1 == 2 && g_StatMeter)
-		{
-			if (a2 == 0) { bool perfect = true; bool loaded = g_StatMeter->Load(&perfect); ints[0] = loaded ? 1 : 0; ints[1] = perfect ? 1 : 0; }
-			else if (a2 == 1) g_StatMeter->Save();
-			else if (a2 == 2) g_StatMeter->IntervalCheck();
-			else if (a2 == 3) g_StatMeter->EnterLeaveStandBy(p1 != 0);
-			else if (a2 == 4) g_StatMeter->AddSpeedReading(0);
-		}
-		else if (a1 == 3 && g_Log) g_Log->IntervalCheck();
-		else if (a1 == 4 && g_WorkState)
-		{
-			if (a2 == 0) g_WorkState->SetDownloading(p1 != 0);
-			else if (a2 == 1 && self) g_WorkState->Attach(self);
-			else if (a2 == 2) g_WorkState->SetTempPauseDownload(p1 != 0);
-		}
-		else if (a1 == 5) return (uintptr_t)(g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveDownloadsLimit(a2) : a2);
-		else if (a1 == 6)
-		{
-			const char* catStrs[3]{};
-			if (!g_Options || !g_Options->QueryCategory(s1 ? s1 : "", false, ints, catStrs)) return 0;
-			strs[0] = catStrs[2];
-			return 1;
-		}
-		else if (a1 == 7) return DownloadQueue::IsLoaded() ? 1 : 0;
+	case 3:
+		if (a1 == 4 && a2 == 1 && self && g_WorkState) g_WorkState->Attach(self);
 		return 0;
-	}
 	case 5: {
 		if (!g_DiskState) return 0;
 		if (a1 == 0) return g_DiskState->DownloadQueueExists() ? 1 : 0;
@@ -9977,9 +9159,7 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 			if (ints && a2 > 0) idList.assign(ints, ints + a2);
 			return g_PrePostProcessor->EditList(reinterpret_cast<DownloadQueue*>(p1), &idList, (DownloadQueue::EEditAction)p2, s1) ? 1 : 0;
 		}
-		else if (a1 == 11) return g_UrlCoordinator ? (g_UrlCoordinator->DeleteQueueEntry(reinterpret_cast<DownloadQueue*>(p1), reinterpret_cast<NzbInfo*>(p2), a2 != 0) ? 1 : 0) : 0;
 		else if (a1 == 12 && g_DupeSearch) g_DupeSearch->NotifyNameChanged(a2);
-		else if (a1 == 13) return (g_QueueScriptCoordinator && g_QueueScriptCoordinator->HasJob(a2, nullptr)) ? 1 : 0;
 		return 0;
 	}
 	case 20: {
@@ -10693,30 +9873,6 @@ inline DupeCoordinator::EDupeStatus DupeCoordinator::GetDupeStatus(DownloadQueue
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
  *
- *  Copyright (C) 2012-2017 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *  Copyright (C) 2024-2026 Denis <denis@nzbget.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-
-#ifndef WEBSERVER_H
-#define WEBSERVER_H
-
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
  *  Copyright (C) 2013-2019 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *  Copyright (C) 2024-2026 Denis <denis@nzbget.com>
  *
@@ -10738,12 +9894,15 @@ inline DupeCoordinator::EDupeStatus DupeCoordinator::GetDupeStatus(DownloadQueue
 #ifndef FEEDCOORDINATOR_H
 #define FEEDCOORDINATOR_H
 
-class FeedCoordinator : public Thread, public Observer, public Subject, public Debuggable
+class FeedCoordinator : public Thread, public Debuggable
 {
 public:
 	FeedCoordinator() : m_rs(nzbget_rs_feed_coord_new())
 	{
+		InitRsBuildEnv();
 		debug("Creating FeedCoordinator");
+		NzbgetRsFeedCoordEnv env = MakeEnv();
+		nzbget_rs_feed_coord_exec(m_rs, 13, &env);
 		m_downloadQueueObserver.m_owner = this;
 		DownloadQueue::Guard()->Attach(&m_downloadQueueObserver);
 		m_workStateObserver.m_owner = this;
@@ -10752,85 +9911,22 @@ public:
 
 	~FeedCoordinator() override
 	{
-		CallCtx cc{this, nullptr, nullptr};
-		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
-		nzbget_rs_feed_coord_exec(m_rs, 12, &env);
+		nzbget_rs_feed_coord_exec(m_rs, 12, nullptr);
 		nzbget_rs_feed_coord_free(m_rs);
 	}
 
-	void Run() override { CallCtx cc{this, nullptr, nullptr}; NzbgetRsFeedCoordEnv env = MakeEnv(&cc); nzbget_rs_feed_coord_exec(m_rs, 1, &env); }
+	void Run() override { nzbget_rs_feed_coord_exec(m_rs, 1, nullptr); }
 
 	void Stop() override
 	{
 		Thread::Stop();
-		CallCtx cc{this, nullptr, nullptr};
-		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
-		nzbget_rs_feed_coord_exec(m_rs, 2, &env);
+		nzbget_rs_feed_coord_exec(m_rs, 2, nullptr);
 	}
-
-	void Update(Subject* caller, void*) override
-	{
-		CallCtx cc{this, nullptr, nullptr};
-		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
-		env.p1 = reinterpret_cast<uintptr_t>(static_cast<WebDownloader*>(caller));
-		nzbget_rs_feed_coord_exec(m_rs, 3, &env);
-	}
-
-	void AddFeed(int id, const char* name, const char* url, bool backlog, int interval,
-		const char* filter, bool pauseNzb, const char* category, int categorySource,
-		int priority, const char* extensions, unsigned int certVerifLevel)
-	{
-		CallCtx cc{this, nullptr, nullptr};
-		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
-		env.a1 = id; env.a2 = interval; env.a3 = categorySource; env.a4 = priority;
-		env.a5 = (backlog ? 1 : 0) | (pauseNzb ? 2 : 0);
-		env.u1 = certVerifLevel;
-		env.s1 = name; env.s2 = url; env.s3 = filter; env.s4 = category; env.s5 = extensions;
-		nzbget_rs_feed_coord_exec(m_rs, 0, &env);
-	}
-
-	void FetchFeed(int id)
-	{
-		CallCtx cc{this, nullptr, nullptr};
-		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
-		env.a1 = id;
-		nzbget_rs_feed_coord_exec(m_rs, 6, &env);
-	}
-
-	void FetchFeedList(const char* feedList)
-	{
-		CallCtx cc{this, nullptr, nullptr};
-		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
-		env.s1 = feedList;
-		nzbget_rs_feed_coord_exec(m_rs, 7, &env);
-	}
-
-	int EmitViewOrPreview(int flags, int id, int categorySource, int priority, int interval,
-		int cacheTimeSec, const char* name, const char* url, const char* filter,
-		const char* category, const char* extensions, const char* cacheId,
-		void* rpcUser, void (*onItem)(void*, const NzbgetRsRpcFeedItem*))
-	{
-		CallCtx cc{this, rpcUser, onItem};
-		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
-		env.a1 = flags; env.a2 = id; env.a3 = categorySource;
-		env.a4 = priority; env.a5 = interval; env.a6 = cacheTimeSec;
-		env.s1 = name; env.s2 = url; env.s3 = filter;
-		env.s4 = category; env.s5 = extensions; env.s6 = cacheId;
-		env.rpc_emit_cb = +[](void* raw, const NzbgetRsRpcFeedItem* item) {
-			auto* c = static_cast<CallCtx*>(raw);
-			if (c->onItem) c->onItem(c->user, item);
-		};
-		return nzbget_rs_feed_coord_exec(m_rs, 9, &env);
-	}
-
-	const NzbgetRsFeedCoord* RsHandle() const { return m_rs; }
 
 protected:
-	void LogDebugInfo() override { CallCtx cc{this, nullptr, nullptr}; NzbgetRsFeedCoordEnv env = MakeEnv(&cc); nzbget_rs_feed_coord_exec(m_rs, 11, &env); }
+	void LogDebugInfo() override { nzbget_rs_feed_coord_exec(m_rs, 11, nullptr); }
 
 private:
-	struct CallCtx { FeedCoordinator* self; void* user; void (*onItem)(void*, const NzbgetRsRpcFeedItem*); };
-
 	class DownloadQueueObserver final : public Observer
 	{
 	public:
@@ -10838,8 +9934,7 @@ private:
 		void Update(Subject*, void* aspect) override
 		{
 			auto* qa = static_cast<DownloadQueue::Aspect*>(aspect);
-			CallCtx cc{m_owner, nullptr, nullptr};
-			NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
+			NzbgetRsFeedCoordEnv env{};
 			env.a1 = static_cast<int>(qa->action);
 			env.s1 = (qa->action == DownloadQueue::eaUrlCompleted && qa->nzbInfo) ? qa->nzbInfo->GetUrl() : nullptr;
 			nzbget_rs_feed_coord_exec(m_owner->m_rs, 4, &env);
@@ -10857,79 +9952,16 @@ private:
 	DownloadQueueObserver m_downloadQueueObserver;
 	WorkStateObserver m_workStateObserver;
 
-	static NzbgetRsFeedCoordEnv MakeEnv(CallCtx* cc)
+	NzbgetRsFeedCoordEnv MakeEnv()
 	{
 		NzbgetRsFeedCoordEnv env{};
-		env.ctx = cc;
-		env.log_cb = +[](void*, int level, const char* msg) {
-			if (level == 0) debug("%s", msg);
-			else if (level == 1) detail("%s", msg);
-			else if (level == 2) info("%s", msg);
-			else if (level == 3) warn("%s", msg);
-			else if (level == 4) error("%s", msg);
-		};
-		env.query_cb = +[](void* raw, int op, uintptr_t ptr, int* outInts, int64_t* outI64s, const char** outStrs) -> uintptr_t {
-			if (op == 0) return DownloadQueue::IsLoaded() ? 1 : 0;
-			if (op == 1) return static_cast<CallCtx*>(raw)->self->IsStopped() ? 1 : 0;
-			if (op == 2)
-			{
-				outInts[0] = g_Options->GetServerMode() ? 1 : 0;
-				outInts[1] = g_WorkState->GetPauseDownload() ? 1 : 0;
-				outInts[2] = g_Options->GetUrlForce() ? 1 : 0;
-				outInts[3] = g_Options->GetUrlConnections();
-				outInts[4] = g_Options->GetUrlTimeout();
-				outInts[5] = g_Options->GetFeedHistory();
-				outInts[6] = g_Options->GetFlushQueue() ? 1 : 0;
-				outInts[7] = static_cast<int>(PATH_SEPARATOR);
-				outStrs[0] = g_Options->GetTempDir();
-				outStrs[1] = g_Options->GetQueueDir();
-				outStrs[2] = g_Options->GetExtensions();
-				return 1;
-			}
-			if (op == 3)
-			{
-				auto* dl = reinterpret_cast<WebDownloader*>(ptr);
-				outInts[0] = static_cast<int>(dl->GetStatus());
-				if (outI64s) outI64s[0] = static_cast<int64_t>(dl->GetLastUpdateTime());
-				outStrs[0] = dl->GetInfoName();
-				outStrs[1] = dl->GetOutputFilename();
-				return 1;
-			}
+		env.ctx = this;
+		env.query_cb = +[](void* raw, int op, uintptr_t, int*, int64_t*, const char**) -> uintptr_t {
+			if (op == 1) return static_cast<FeedCoordinator*>(raw)->IsStopped() ? 1 : 0;
 			return 0;
 		};
-		env.action_cb = +[](void* raw, int op, uintptr_t p1, int a1, int a2, int a3, int64_t t1, int64_t t2, const char* s1, const char* s2, const char* s3, const char* s4) -> uintptr_t {
-			auto* self = static_cast<CallCtx*>(raw)->self;
-			if (op == 0)
-			{
-				auto* dl = new WebDownloader();
-				dl->SetAutoDestroy(true);
-				dl->Attach(self);
-				dl->SetUrl(s1 ? s1 : "");
-				dl->SetInfoName(s2 ? s2 : "");
-				dl->SetForce(a1 != 0);
-#ifndef DISABLE_TLS
-				dl->SetCertVerifLevel(static_cast<unsigned int>(a2));
-#endif
-				dl->SetOutputFilename(s3 ? s3 : "");
-				return reinterpret_cast<uintptr_t>(dl);
-			}
-			if (op == 1)
-			{
-				auto* dl = reinterpret_cast<WebDownloader*>(p1);
-				if (a1 == 0) dl->Stop();
-				else if (a1 == 1) dl->LogDebugInfo();
-				else if (a1 == 2) delete dl;
-				else if (a1 == 3) dl->Start();
-				return 1;
-			}
+		env.action_cb = +[](void*, int op, uintptr_t p1, int a1, int a2, int a3, int64_t t1, int64_t t2, const char* s1, const char* s2, const char* s3, const char* s4) -> uintptr_t {
 			if (op == 2) return static_cast<uintptr_t>(g_DupeCoordinator->GetDupeStatus(DownloadQueue::Guard(), s1 ? s1 : "", s2 ? s2 : ""));
-			if (op == 3)
-			{
-				int ok = nzbget_rs_feed_scripts_exec(
-					g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr,
-					s1 ? s1 : "", s2 ? s2 : "", a1, &ScriptHostCb);
-				return (a2 == 0 || ok != 0) ? 1 : 0;
-			}
 			if (op == 4)
 			{
 				auto nzbInfo = std::make_unique<NzbInfo>();
@@ -10955,247 +9987,8 @@ private:
 	}
 };
 
-extern FeedCoordinator* g_FeedCoordinator;
-
-#
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2008-2019 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *  Copyright (C) 2025 Denis <denis@nzbget.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-
-#ifndef SCHEDULER_H
-#define SCHEDULER_H
-
-class Scheduler : public Service
-{
-public:
-	enum ECommand
-	{
-		scPauseDownload,
-		scUnpauseDownload,
-		scPausePostProcess,
-		scUnpausePostProcess,
-		scDownloadRate,
-		scExtensions,
-		scProcess,
-		scPauseScan,
-		scUnpauseScan,
-		scActivateServer,
-		scDeactivateServer,
-		scFetchFeed
-	};
-
-	Scheduler() : m_rs(nzbget_rs_scheduler_new()) {}
-	~Scheduler() override { nzbget_rs_scheduler_free(m_rs); }
-	Scheduler(const Scheduler&) = delete;
-	Scheduler& operator=(const Scheduler&) = delete;
-
-	void AddTask(int id, int hours, int minutes, int weekDaysBits, ECommand command, const char* param)
-	{
-		NzbgetRsSchedulerEnv env{};
-		env.a1 = id;
-		env.a2 = hours;
-		env.a3 = minutes;
-		env.a4 = weekDaysBits;
-		env.a5 = static_cast<int>(command);
-		env.s1 = param;
-		nzbget_rs_scheduler_exec(m_rs, 0, &env);
-	}
-
-	const NzbgetRsScheduler* RsHandle() const { return m_rs; }
-
-protected:
-	int ServiceInterval() override { return nzbget_rs_scheduler_exec(m_rs, 1, nullptr); }
-
-	void ServiceWork() override
-	{
-		NzbgetRsSchedulerEnv env{};
-#ifdef DEBUG
-		env.a5 = 1;
-#endif
-		env.log_cb = +[](void*, int level, const char* msg) {
-			const char* s = msg ? msg : "";
-			if (level == 0) debug("%s", s);
-			else if (level == 2) info("%s", s);
-			else if (level == 4) error("%s", s);
-		};
-		env.action_cb = +[](void*, int sub, int a1, int a2, const char* const* ptrs, size_t len, int* ints, int64_t* i64s, const char** strs) -> int {
-			if (sub == 0)
-			{
-				if (!DownloadQueue::IsLoaded()) return 0;
-				ints[0] = g_WorkState->GetLocalTimeOffset();
-				ints[1] = g_WorkState->GetLocalTimeOffset();
-				ints[2] = g_WorkState->GetSpeedLimit();
-				ints[3] = g_WorkState->GetPauseDownload() ? 1 : 0;
-				ints[4] = g_WorkState->GetPausePostProcess() ? 1 : 0;
-				ints[5] = g_WorkState->GetPauseScan() ? 1 : 0;
-				i64s[0] = static_cast<int64_t>(g_WorkState->GetResumeTime());
-				return 1;
-			}
-			if (sub == 1)
-			{
-				if (a1 == 0) g_WorkState->SetSpeedLimit(a2);
-				else if (a1 == 1) g_WorkState->SetPauseDownload(a2 != 0);
-				else if (a1 == 2) g_WorkState->SetPausePostProcess(a2 != 0);
-				else if (a1 == 3) g_WorkState->SetPauseScan(a2 != 0);
-				else if (a1 == 4)
-				{
-					g_WorkState->SetResumeTime(0);
-					g_WorkState->SetPauseDownload(false);
-					g_WorkState->SetPausePostProcess(false);
-					g_WorkState->SetPauseScan(false);
-				}
-				return 1;
-			}
-			if (sub == 3) { g_FeedCoordinator->FetchFeedList(ptrs[0]); return 1; }
-			if (sub == 4)
-			{
-				nzbget_rs_scheduler_script_start(
-					g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr,
-					ptrs[0], a1, a2, ptrs + 1, len > 0 ? len - 1 : 0, &ScriptHostCb);
-				return 1;
-			}
-			if (sub == 6) { i64s[0] = static_cast<int64_t>(Util::CurrentTime()); return 1; }
-			return 0;
-		};
-		nzbget_rs_scheduler_exec(m_rs, 2, &env);
-	}
-
-private:
-	NzbgetRsScheduler* m_rs;
-};
-
 namespace SystemHealth { class Service; }
-
-#ifndef MAINTENANCE_H
-#define MAINTENANCE_H
-
-
-extern void ExitProc();
-extern int g_ArgumentCount;
-extern char* (*g_Arguments)[];
-
 class Maintenance;
-extern Maintenance* g_Maintenance;
-
-class Maintenance
-{
-public:
-	enum EBranch
-	{
-		brStable,
-		brTesting,
-		brDevel
-	};
-
-	Maintenance() : m_rs(nzbget_rs_maintenance_new()) {}
-	~Maintenance()
-	{
-		NzbgetRsMaintenanceEnv env{};
-		env.script_host_cb = &ScriptHostCb;
-		nzbget_rs_maintenance_exec(m_rs, 0, &env);
-		nzbget_rs_maintenance_free(m_rs);
-	}
-	Maintenance(const Maintenance&) = delete;
-	Maintenance& operator=(const Maintenance&) = delete;
-
-	void CollectMessages(int idFrom, int nrEntries, void* emitCtx, NzbgetRsXmlRpcEmitFn emitCb)
-	{
-		NzbgetRsMaintenanceEnv env{};
-		env.a3 = idFrom;
-		env.a4 = nrEntries;
-		env.emit_ctx = emitCtx;
-		env.emit_cb = emitCb;
-		nzbget_rs_maintenance_exec(m_rs, 3, &env);
-	}
-
-	bool StartUpdate(EBranch branch)
-	{
-		NzbgetRsMaintenanceEnv env{};
-		env.a1 = static_cast<int>(branch);
-		env.a2 = PATH_SEPARATOR;
-		env.a3 = g_Options->GetDaemonMode() ? 1 : 0;
-		env.s1 = g_Options->GetWebDir();
-		env.s2 = g_Options->GetAppDir();
-		env.script_host_cb = &ScriptHostCb;
-		return nzbget_rs_maintenance_exec(m_rs, 4, &env) != 0;
-	}
-
-	bool CheckUpdates(CString& updateInfo)
-	{
-		NzbgetRsBuf buf{};
-		NzbgetRsMaintenanceEnv env{};
-		env.a2 = PATH_SEPARATOR;
-		env.s1 = g_Options->GetWebDir();
-		env.out_buf = &buf;
-		env.script_host_cb = &ScriptHostCb;
-		if (nzbget_rs_maintenance_exec(m_rs, 5, &env) != 0 && buf.len > 0)
-			updateInfo.Set(buf.data ? buf.data : "", static_cast<int>(buf.len));
-		nzbget_rs_free(buf);
-		return !updateInfo.Empty();
-	}
-
-	static bool VerifySignature(const char* inFilename, const char* sigFilename, const char* pubKeyFilename)
-	{
-		NzbgetRsMaintenanceEnv env{};
-		env.s1 = inFilename;
-		env.s2 = sigFilename;
-		env.s3 = pubKeyFilename;
-		env.action_cb = &Maintenance::MaintActionCb;
-		return nzbget_rs_maintenance_exec(nullptr, 8, &env) != 0;
-	}
-
-private:
-	NzbgetRsMaintenance* m_rs;
-
-	static uintptr_t MaintActionCb(void*, int sub, const char* s1, const char* s2, const uint8_t* bytes, size_t len)
-	{
-		if (sub == 6)
-		{
-#ifndef DISABLE_TLS
-			BIO* mem = BIO_new_mem_buf(bytes, static_cast<int>(len));
-			EVP_PKEY* pubKey = PEM_read_bio_PUBKEY(mem, nullptr, nullptr, nullptr);
-			BIO_free(mem);
-			if (!pubKey) return 0;
-			EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new(pubKey, nullptr);
-			bool ok = pctx &&
-				EVP_PKEY_verify_init(pctx) == 1 &&
-				EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING) > 0 &&
-				EVP_PKEY_CTX_set_signature_md(pctx, EVP_sha256()) > 0 &&
-				EVP_PKEY_verify(pctx, reinterpret_cast<const uint8_t*>(s2), 256, reinterpret_cast<const uint8_t*>(s1), 32) == 1;
-			if (pctx) EVP_PKEY_CTX_free(pctx);
-			EVP_PKEY_free(pubKey);
-			return ok ? 1 : 0;
-#else
-			(void)s1; (void)s2; (void)bytes; (void)len;
-			return 0;
-#endif
-		}
-		return 0;
-	}
-};
-
-#endif
-
-#endif
-
-#endif
 #include <system_error>
 
 /*
@@ -11345,9 +10138,6 @@ inline NzbgetRsRpcHost BuildRpcHost()
 		};
 		switch (op)
 		{
-			case 4: ExitProc(); return 1;
-			case 5: Reload(); return 1;
-			case 6: g_Log->LogDebugInfo(); return 1;
 			case 10: {
 				IdList idList(ids, ids + idsLen);
 				return DownloadQueue::Guard()->EditList(&idList, nullptr, DownloadQueue::mmId,
@@ -11391,54 +10181,6 @@ inline NzbgetRsRpcHost BuildRpcHost()
 				if (outU32) *outU32 = (uint32_t)nzbId;
 				return nzbId > 0 ? 1 : 0;
 			}
-			case 13: g_Scanner->ScanNzbDir(a1 != 0); return 1;
-			case 14: {
-				if (a1)
-				{
-					if (const auto& err = g_ExtensionManager->LoadExtensions())
-					{
-						setBuf(err->data(), err->size());
-						return 0;
-					}
-				}
-				if (outBuf) *outBuf = g_ExtensionManager->SerializeList(a2 != 0);
-				return 1;
-			}
-			case 15: {
-				if (a1 == 2)
-				{
-					if (const auto err = g_ExtensionManager->DeleteExtension(s1 ? s1 : "")) { setBuf(err->data(), err->size()); return 0; }
-					return 1;
-				}
-				if (a1 == 0 && Util::EmptyStr(g_Options->GetTempDir())) { const char* m = "\"TempDir\" is not specified"; setBuf(m, strlen(m)); return 0; }
-				const auto [status, filename] = g_ExtensionManager->DownloadExtension(s1 ? s1 : "", s2 ? s2 : "");
-				auto rmDl = [&]() { fs::error_code ec; fs::remove(filename, ec); };
-				if (status != WebDownloader::adFinished) { rmDl(); const char* m = "Failed to read URL"; setBuf(m, strlen(m)); return 0; }
-				if (a1 == 0)
-				{
-					const char* firstDir = nullptr;
-					if (nzbget_rs_options_query(g_Options->RsHandle(), 3, nullptr, 0, nullptr, &firstDir, 0, nullptr) == 0 || !firstDir)
-					{ rmDl(); const char* m = "\"ScriptDir\" is not specified"; setBuf(m, strlen(m)); return 0; }
-					if (const auto err = g_ExtensionManager->InstallOrUpdate(0, filename, firstDir))
-					{
-						rmDl();
-						setBuf(err->data(), err->size());
-						return 0;
-					}
-					return 1;
-				}
-				if (const auto err = g_ExtensionManager->InstallOrUpdate(1, filename, s2 ? s2 : "")) { setBuf(err->data(), err->size()); return 0; }
-				return 1;
-			}
-			case 16: g_FeedCoordinator->FetchFeed(a1); return 1;
-			case 19: {
-				CString updateInfo;
-				if (!g_Maintenance->CheckUpdates(updateInfo)) return 0;
-				const char* p = *updateInfo ? *updateInfo : "";
-				setBuf(p, strlen(p));
-				return 1;
-			}
-			case 20: return g_Maintenance->StartUpdate((Maintenance::EBranch)a1) ? 1 : 0;
 			case 22: {
 				std::string r = a1 == 0 ? TlsCipherBackend::Start() :
 					a1 == 1 ? TlsCipherBackend::Status(s1) : TlsCipherBackend::Cancel(s1 ? s1 : "");
@@ -11460,16 +10202,12 @@ inline NzbgetRsRpcHost BuildRpcHost()
 				g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), true);
 				return 1;
 			}
-			case 26:
-				return nzbget_rs_command_script_start(
-					g_ExtensionManager ? g_ExtensionManager->Handle() : nullptr,
-					s1 ? s1 : "", s2 ? s2 : "", params, paramsLen, &ScriptHostCb) != 0 ? 1 : 0;
 			default: return 0;
 		}
 	};
-	host.rpc_collect_cb = +[](void*, int kind, int a1, int a2, int a3, int a4, int a5,
-		const char* s1, const char* s2, const char* s3, const char* s4, const char* s5, const char* s6,
-		const void* p1, size_t n1, void* emitCtx, NzbgetRsXmlRpcEmitFn emitCb) -> int {
+	host.rpc_collect_cb = +[](void*, int kind, int a1, int a2, int a3, int a4, int,
+		const char*, const char*, const char*, const char*, const char*, const char*,
+		const void*, size_t, void* emitCtx, NzbgetRsXmlRpcEmitFn emitCb) -> int {
 		auto withNzb = [&](NzbInfo* nzbInfo, auto&& fn) {
 			time_t postStartTime = nzbInfo->GetPostInfo() ? nzbInfo->GetPostInfo()->GetStartTime() : 0;
 			time_t curTime = postStartTime ? Util::CurrentTime() : 0;
@@ -11543,20 +10281,16 @@ inline NzbgetRsRpcHost BuildRpcHost()
 		{
 			case 1: {
 				auto* qst = static_cast<NzbgetRsRpcQueueStatus*>(emitCtx);
+				GuardedDownloadQueue dq = DownloadQueue::Guard();
+				for (NzbInfo* n : dq->GetQueue())
 				{
-					GuardedDownloadQueue dq = DownloadQueue::Guard();
-					for (NzbInfo* n : dq->GetQueue())
-					{
-						qst->post_job_count += n->GetPostInfo() != nullptr ? 1 : 0;
-						qst->url_count += n->GetKind() == NzbInfo::nkUrl ? 1 : 0;
-					}
-					dq->CalcRemainingSize(&qst->remaining_size, &qst->forced_size);
+					qst->post_job_count += n->GetPostInfo() != nullptr ? 1 : 0;
+					qst->url_count += n->GetKind() == NzbInfo::nkUrl ? 1 : 0;
 				}
-				qst->queued_scripts = g_QueueScriptCoordinator->GetQueueSize();
+				dq->CalcRemainingSize(&qst->remaining_size, &qst->forced_size);
 				return 1;
 			}
 			case 2: {
-				if (a1 == 1) { g_Maintenance->CollectMessages(a3, a4, emitCtx, emitCb); return 1; }
 				MessageList diskMessages;
 				std::unique_ptr<GuardedDownloadQueue> dq;
 				auto guardMessages = [&]() -> GuardedMessageList {
@@ -11620,10 +10354,7 @@ inline NzbgetRsRpcHost BuildRpcHost()
 				{
 					bool hasPost = nzbInfo->GetPostInfo() != nullptr;
 					int postStage = hasPost ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
-					bool qsActive = false;
-					bool hasQs = hasPost && postStage == (int)PostInfo::ptQueued &&
-						g_QueueScriptCoordinator->HasJob(nzbInfo->GetId(), &qsActive);
-					int flags = (hasPost ? 1 : 0) | (hasQs ? 2 : 0) | (qsActive ? 4 : 0) |
+					int flags = (hasPost ? 1 : 0) |
 						((postStage & 0xff) << 4) | (((int)nzbInfo->GetDirectUnpackStatus() & 0xff) << 12) |
 						(((int)nzbInfo->GetKind() & 0xff) << 20);
 					withNzb(nzbInfo, [&](const auto& f, const auto& prms, const auto& scrs, const auto& sts) {
@@ -11690,51 +10421,29 @@ inline NzbgetRsRpcHost BuildRpcHost()
 				}
 				return 1;
 			}
-			case 8:
-				return nzbget_rs_fleet_append(
-					nullptr, &DupeSearch::HostCb, s1, s2, a1, a2,
-					static_cast<const NzbgetRsRpcFleetReqMember*>(p1), n1, emitCtx, emitCb);
-			case 11: {
-				struct RpcFeedEmit { decltype(emitCb) cb; void* ctx; } rctx{emitCb, emitCtx};
-				return g_FeedCoordinator->EmitViewOrPreview(a1, a2, a3, a4, a5, (int)n1, s1, s2, s3, s4, s5, s6, &rctx,
-					+[](void* raw, const NzbgetRsRpcFeedItem* item) {
-						auto* r = static_cast<RpcFeedEmit*>(raw);
-						r->cb(r->ctx, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
-							item, 0, nullptr, 0, nullptr, 0, nullptr, 0);
-					});
-			}
 			default: return 0;
 		}
 	};
 	host.binrpc_action_cb = +[](int kind, int a1, int a2, int a3, int a4,
-		const char* s1, const char* s2, const char* s3, const char* body, int bodyLen,
+		const char* s1, const char* s2, const char* s3, const char* body, int,
 		const int32_t* ids, size_t idsLen, const char* const* names, size_t namesLen) -> int {
 		switch (kind)
 		{
 			case 1: {
-				bool addTop = (a1 & 1) != 0, addPaused = (a1 & 2) != 0;
-				bool autoCategory = (a1 & 4) != 0, isUrl = (a1 & 8) != 0;
-				if (isUrl)
-				{
-					auto nzbInfo = std::make_unique<NzbInfo>();
-					nzbInfo->SetKind(NzbInfo::nkUrl);
-					nzbInfo->SetUrl(body);
-					nzbInfo->SetFilename(s1);
-					nzbInfo->SetCategory(s2);
-					nzbInfo->SetAutoCategory(autoCategory);
-					nzbInfo->SetPriority(a2);
-					nzbInfo->SetAddUrlPaused(addPaused);
-					nzbInfo->SetDupeKey(s3);
-					nzbInfo->SetDupeScore(a3);
-					nzbInfo->SetDupeMode((EDupeMode)a4);
-					g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), addTop);
-					return 1;
-				}
-				return g_Scanner->AddExternalFile(
-					s1, s2, autoCategory, a2, s3, a3, (EDupeMode)a4,
-					nullptr, addTop, addPaused, nullptr, nullptr, body, bodyLen, nullptr) != Scanner::asFailed ? 1 : 0;
+				auto nzbInfo = std::make_unique<NzbInfo>();
+				nzbInfo->SetKind(NzbInfo::nkUrl);
+				nzbInfo->SetUrl(body);
+				nzbInfo->SetFilename(s1);
+				nzbInfo->SetCategory(s2);
+				nzbInfo->SetAutoCategory((a1 & 4) != 0);
+				nzbInfo->SetPriority(a2);
+				nzbInfo->SetAddUrlPaused((a1 & 2) != 0);
+				nzbInfo->SetDupeKey(s3);
+				nzbInfo->SetDupeScore(a3);
+				nzbInfo->SetDupeMode((EDupeMode)a4);
+				g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), (a1 & 1) != 0);
+				return 1;
 			}
-			case 5: g_Log->LogDebugInfo(); return 1;
 			case 6: {
 				IdList cIdList(ids, ids + idsLen);
 				NameList cNameList;
@@ -11744,9 +10453,6 @@ inline NzbgetRsRpcHost BuildRpcHost()
 					idsLen > 0 ? &cIdList : nullptr, namesLen > 0 ? &cNameList : nullptr,
 					(DownloadQueue::EMatchMode)a2, (DownloadQueue::EEditAction)a1, s1) ? 1 : 0;
 			}
-			case 8: ExitProc(); return 1;
-			case 9: Reload(); return 1;
-			case 13: g_Scanner->ScanNzbDir(a1 != 0); return 1;
 			default: return 0;
 		}
 	};

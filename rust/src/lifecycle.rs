@@ -252,6 +252,14 @@ impl LifecycleManager {
                     exit_code = p2_rc;
                     break;
                 }
+            } else {
+                #[cfg(unix)]
+                if crate::options::active_options().is_some_and(|o| !o.remote_client_mode()) {
+                    if let Some(sp) = crate::net::active_server_pool() {
+                        sp.init_connections();
+                    }
+                    crate::statmeter::init_daemon_statmeter();
+                }
             }
 
             // Phase 3: Server Activation & Wait
@@ -844,6 +852,7 @@ struct DaemonInstanceState {
     wait_mutex: std::sync::Mutex<DaemonWaitState>,
     wait_cond: std::sync::Condvar,
     lock_file_owned: AtomicBool,
+    cmdline: std::sync::Mutex<Option<(Vec<u8>, crate::cmdline::CmdlineHandle)>>,
 }
 
 static DAEMON_INSTANCE: DaemonInstanceState = DaemonInstanceState {
@@ -857,7 +866,109 @@ static DAEMON_INSTANCE: DaemonInstanceState = DaemonInstanceState {
     }),
     wait_cond: std::sync::Condvar::new(),
     lock_file_owned: AtomicBool::new(false),
+    cmdline: std::sync::Mutex::new(None),
 };
+
+#[cfg(unix)]
+pub(crate) fn daemon_cmdline_options_inputs() -> Option<(
+    Vec<u8>,
+    Option<std::ffi::CString>,
+    bool,
+    Vec<std::ffi::CString>,
+)> {
+    let g = DAEMON_INSTANCE.cmdline.lock().ok()?;
+    let (exe, cmd) = g.as_ref()?;
+    Some((
+        exe.clone(),
+        cmd.config_filename.clone(),
+        cmd.no_config,
+        cmd.option_list.clone(),
+    ))
+}
+
+#[cfg(unix)]
+fn daemon_cmdline_clone() -> Option<crate::cmdline::CmdlineHandle> {
+    DAEMON_INSTANCE
+        .cmdline
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|(_, c)| c.clone()))
+}
+
+#[cfg(unix)]
+unsafe fn daemon_process_direct(cmd: &crate::cmdline::CmdlineHandle) {
+    if crate::ffi::build_debug_enabled() && cmd.test_backtrace {
+        libc::raise(libc::SIGSEGV);
+        libc::abort();
+    }
+
+    if cmd.web_get {
+        let url = cmd
+            .last_arg
+            .as_deref()
+            .map_or(&[][..], std::ffi::CStr::to_bytes);
+        let out_fn = cmd
+            .web_get_filename
+            .as_deref()
+            .map_or(&[][..], std::ffi::CStr::to_bytes);
+        let dl = crate::net::NzbgetRsWebDl::new_configured(
+            url, b"WebGet", out_fn, true, false, 2, None, None,
+        );
+        let st = dl.download_sync(5);
+        libc::exit(
+            if st == crate::webdownload::WebDlStatus::AdFinished as c_int {
+                0
+            } else {
+                1
+            },
+        );
+    }
+
+    if cmd.sig_verify {
+        if crate::ffi::build_tls_disabled() {
+            libc::printf(
+                c"ERROR: Could not verify signature, the program was compiled without OpenSSL support\n"
+                    .as_ptr(),
+            );
+            libc::exit(1);
+        }
+        let in_fn = cmd.last_arg.as_deref().map_or(c"", |c| c);
+        let sig_fn = cmd.sig_filename.as_deref().map_or(c"", |c| c);
+        let pub_fn = cmd.pub_key_filename.as_deref().map_or(c"", |c| c);
+        let ok = crate::extension::verify_signature_active(
+            in_fn.to_bytes(),
+            sig_fn.to_bytes(),
+            pub_fn.to_bytes(),
+        );
+        libc::exit(if ok { 93 } else { 1 });
+    }
+
+    if cmd.client_operation != 0 {
+        let opts = crate::options::active_options();
+        let ctrl_ip = opts.as_deref().map_or(&[][..], |o| o.str_bytes(14));
+        let ctrl_port = opts.as_deref().map_or(0, |o| o.scalars().control_port);
+        let ctrl_user = opts.as_deref().map_or(&[][..], |o| o.str_bytes(15));
+        let ctrl_pass = opts.as_deref().map_or(&[][..], |o| o.str_bytes(16));
+        let ok = cmd.execute_client(
+            ctrl_ip,
+            ctrl_port,
+            ctrl_user,
+            ctrl_pass,
+            |bytes| crate::ffi::write_stdout_bytes(bytes, false),
+            |cmsg| libc::perror(cmsg.as_ptr()),
+        );
+        libc::exit(if ok { 0 } else { 1 });
+    }
+
+    if cmd.print_options {
+        if let Some(opts) = crate::options::active_options() {
+            opts.for_each_option(|n, v, _| {
+                libc::printf(c"%s = \"%s\"\n".as_ptr(), n.as_ptr(), v.as_ptr());
+            });
+        }
+        libc::exit(0);
+    }
+}
 
 fn dm_cbuf(bytes: &[u8]) -> Vec<u8> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
@@ -1282,6 +1393,20 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             eff
         }
         5 => {
+            #[cfg(unix)]
+            let (daemon_mode, remote_mode) = if e.s1.is_null() && e.a1 < 0 {
+                if let Some(cmd) = daemon_cmdline_clone() {
+                    daemon_process_direct(&cmd);
+                    (cmd.daemon_mode, cmd.remote_client_mode)
+                } else {
+                    (false, false)
+                }
+            } else {
+                (e.a1 != 0, e.a3 != 0)
+            };
+            #[cfg(not(unix))]
+            let (daemon_mode, remote_mode) = (e.a1 != 0, e.a3 != 0);
+
             let was_reloading = dm_is_reloading();
             #[cfg(unix)]
             let active_opts = if e.s1.is_null() {
@@ -1355,7 +1480,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 e.a5 != 0,
             );
 
-            if e.a1 != 0 {
+            if daemon_mode {
                 if !was_reloading {
                     #[cfg(unix)]
                     {
@@ -1412,7 +1537,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 im.extend_from_slice(ver);
                 im.extend_from_slice(b" server-mode");
                 dm_log(e, 2, &im);
-            } else if e.a3 != 0 {
+            } else if remote_mode {
                 let mut im = b"RustyGet ".to_vec();
                 im.extend_from_slice(ver);
                 im.extend_from_slice(b" remote-mode");
@@ -1468,9 +1593,38 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             let Some(cb) = e.action_cb else {
                 return 0;
             };
-            if e.a1 == 0 {
-                if e.a3 != 0 && signal_state_op(0) == 0 {
-                    cb(e.ctx, 11, 0, e.s1, e.s2);
+            #[cfg(unix)]
+            let cmd_opt = if e.a1 < 0 {
+                daemon_cmdline_clone()
+            } else {
+                None
+            };
+            #[cfg(unix)]
+            let (remote_mode, server_mode, standalone_add, cat_ptr, nzb_ptr) =
+                if let Some(ref cmd) = cmd_opt {
+                    let srv_mode =
+                        crate::options::active_options().is_some_and(|o| o.server_mode());
+                    (
+                        cmd.remote_client_mode,
+                        srv_mode,
+                        !cmd.server_mode,
+                        cmd.add_category
+                            .as_deref()
+                            .map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
+                        cmd.arg_filename
+                            .as_deref()
+                            .map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
+                    )
+                } else {
+                    (e.a1 != 0, e.a2 != 0, e.a3 != 0, e.s1, e.s2)
+                };
+            #[cfg(not(unix))]
+            let (remote_mode, server_mode, standalone_add, cat_ptr, nzb_ptr) =
+                (e.a1 != 0, e.a2 != 0, e.a3 != 0, e.s1, e.s2);
+
+            if !remote_mode {
+                if standalone_add && signal_state_op(0) == 0 {
+                    cb(e.ctx, 11, 0, cat_ptr, nzb_ptr);
                 }
 
                 dm_log(e, 0, b"Entering main program loop");
@@ -1489,7 +1643,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
 
                     let st_jobs = cb(e.ctx, 5, 1, std::ptr::null(), std::ptr::null());
                     if crate::options::nzbget_should_stop_standalone(
-                        e.a2 != 0,
+                        server_mode,
                         (st_jobs & 1) != 0,
                         (st_jobs & 2) != 0,
                         (st_jobs & 4) != 0,
@@ -1499,7 +1653,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
 
                     std::thread::sleep(Duration::from_millis(100));
 
-                    if e.a2 != 0 && !dm_is_stopped() {
+                    if server_mode && !dm_is_stopped() {
                         while !dm_is_stopped() {
                             {
                                 let wg = DAEMON_INSTANCE
@@ -1542,6 +1696,14 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             0
         }
         8 => {
+            #[cfg(unix)]
+            let eff_remote_mode = if e.a2 < 0 {
+                c_int::from(daemon_cmdline_clone().is_some_and(|c| c.remote_client_mode))
+            } else {
+                e.a2
+            };
+            #[cfg(not(unix))]
+            let eff_remote_mode = e.a2;
             let reload = e.a1 != 0;
             if !reload {
                 RELOAD_COORDINATOR.cancel_pending();
@@ -1595,7 +1757,13 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             }
 
             if let Some(cb) = e.action_cb {
-                cb(e.ctx, 8, e.a2, std::ptr::null(), std::ptr::null());
+                cb(
+                    e.ctx,
+                    8,
+                    eff_remote_mode,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
             }
 
             let mut wg = DAEMON_INSTANCE
@@ -1615,17 +1783,30 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             1
         }
         11 => {
+            #[cfg(unix)]
+            let eff_remote_mode = if e.a2 < 0 {
+                c_int::from(daemon_cmdline_clone().is_some_and(|c| c.remote_client_mode))
+            } else {
+                e.a2
+            };
+            #[cfg(not(unix))]
+            let eff_remote_mode = e.a2;
             DAEMON_INSTANCE
                 .wait_mutex
                 .lock()
                 .unwrap_or_else(|err| err.into_inner())
                 .reloading = e.a1 != 0;
             RELOAD_COORDINATOR.cancel_and_join();
+            #[cfg(unix)]
+            if e.a2 < 0 {
+                crate::script::terminate_all_active();
+                crate::net::nzbget_rs_remote_srv_ctl(1, std::ptr::null());
+            }
             if let Some(cb) = e.action_cb {
                 cb(
                     e.ctx,
                     12,
-                    c_int::from(e.a2 == 0 || dm_is_stopped()),
+                    c_int::from(eff_remote_mode == 0 || dm_is_stopped()),
                     std::ptr::null(),
                     std::ptr::null(),
                 );
@@ -1635,6 +1816,15 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
         }
         12 => {
             dm_log(e, 0, b"Cleaning up global objects");
+            #[cfg(unix)]
+            if e.s1.is_null() {
+                if let Ok(mut g) = DAEMON_INSTANCE.cmdline.lock() {
+                    *g = None;
+                }
+                crate::extension::shutdown_daemon_maintenance();
+                crate::statmeter::shutdown_daemon_statmeter();
+                crate::scheduler::shutdown_daemon_scheduler();
+            }
             if e.a1 != 0
                 && !dm_is_reloading()
                 && DAEMON_INSTANCE.lock_file_owned.load(Ordering::SeqCst)
@@ -1652,6 +1842,121 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 }
             }
             1
+        }
+        #[cfg(unix)]
+        13 => {
+            dm_emit_active_log(0, b"Parsing command line");
+            let argv = e.ctx.cast::<*const c_char>();
+            if e.a1 < 1 || argv.is_null() {
+                return -1;
+            }
+            let Some(cmd) = crate::cmdline::CmdlineHandle::parse_argv(e.a1, argv, |bytes| {
+                crate::ffi::write_stdout_bytes(bytes, false);
+            }) else {
+                return -2;
+            };
+            let arg0 = if (*argv).is_null() {
+                Vec::new()
+            } else {
+                std::ffi::CStr::from_ptr(*argv).to_bytes().to_vec()
+            };
+            if cmd.print_version {
+                libc::printf(
+                    c"RustyGet version: %s\n".as_ptr(),
+                    crate::ffi::build_version_cstr().as_ptr(),
+                );
+                libc::exit(0);
+            }
+            if cmd.print_usage || cmd.errors || e.a1 <= 1 {
+                let base_idx = crate::paths::base_file_name(&arg0);
+                let usage = crate::cmdline::format_usage(
+                    &arg0[base_idx..],
+                    crate::paths::PATH_SEPARATOR as u8,
+                    true,
+                );
+                let usage_c = dm_cbuf(&usage);
+                libc::printf(c"%s".as_ptr(), usage_c.as_ptr().cast::<c_char>());
+                libc::exit(if cmd.print_usage { 0 } else { 1 });
+            }
+            if let Ok(mut g) = DAEMON_INSTANCE.cmdline.lock() {
+                *g = Some((arg0, cmd));
+            }
+            dm_emit_active_log(0, b"Reading options");
+            1
+        }
+        #[cfg(unix)]
+        14 => {
+            let Some(cmd) = daemon_cmdline_clone() else {
+                return 0;
+            };
+            let Some(opts) = crate::options::active_options() else {
+                return 0;
+            };
+            opts.set_mode_flag(2, cmd.remote_client_mode);
+            opts.set_mode_flag(0, cmd.server_mode);
+            opts.set_mode_flag(1, cmd.daemon_mode);
+            let test_bt = crate::ffi::build_debug_enabled() && cmd.test_backtrace;
+            let direct_mode = test_bt
+                || cmd.web_get
+                || cmd.sig_verify
+                || cmd.client_operation != 0
+                || cmd.print_options;
+            opts.set_mode_flag(3, direct_mode);
+
+            if let Some(ws) = crate::ffi::active_workstate() {
+                ws.set_pause_download(cmd.pause_download);
+                ws.set_speed_limit(opts.scalars().download_rate);
+            }
+            if let Some(lg) = crate::log::active_log() {
+                lg.init_options_active();
+            }
+            if opts.has_fatal_error() {
+                libc::exit(1);
+            }
+            if opts.has_config_errors() && cmd.client_operation == 0 {
+                dm_emit_active_log(2, b"Pausing all activities due to errors in configuration");
+                if let Some(ws) = crate::ffi::active_workstate() {
+                    ws.set_pause_download(true);
+                    ws.set_pause_post_process(true);
+                    ws.set_pause_scan(true);
+                }
+            }
+            if let Some(sp) = crate::net::active_server_pool() {
+                sp.set_timeout(opts.scalars().article_timeout);
+                sp.set_retry_interval(opts.scalars().article_interval);
+            }
+            crate::ffi::nzbget_rs_script_config_exec(
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                None,
+                std::ptr::null_mut(),
+            );
+            let _ = crate::script::load_extensions_active();
+            if crate::articledl::memory_monitor_active() {
+                crate::articledl::memory_monitor_init_options(false);
+            }
+            let umask_raw = opts.scalars().umask as u32;
+            let eff_umask = if crate::options::nzbget_is_valid_umask(umask_raw) {
+                let m = umask_raw as libc::mode_t;
+                libc::umask(m);
+                m
+            } else {
+                let m = libc::umask(0);
+                libc::umask(m);
+                m
+            } as c_int;
+            if crate::ffi::build_debug_enabled() {
+                dm_emit_active_log(0, format!("Using {:o} umask", eff_umask as u32).as_bytes());
+            }
+            if let Some(sc) = crate::scanner::active_scanner() {
+                sc.init_options_active();
+            }
+            crate::extension::init_active_queue_script_options();
+            eff_umask
         }
         _ => 0,
     }

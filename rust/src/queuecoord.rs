@@ -165,8 +165,7 @@ pub fn calc_downloads_limit(norm_levels: &[i32], actives: &[u8], max_conns: &[i3
 /// `QueueCoordinator::IsPropagationWait` (`QueueCoordinator.cpp`).
 #[inline]
 pub fn is_propagation_wait(post_time: i64, propagation_delay: i32, cur_date: i64) -> bool {
-    propagation_delay > 0
-        && (post_time as i32).wrapping_add(propagation_delay) >= (cur_date as i32)
+    propagation_delay > 0 && (post_time as i32).wrapping_add(propagation_delay) >= (cur_date as i32)
 }
 
 #[repr(C)]
@@ -237,9 +236,9 @@ pub fn is_data_filename(filename: &[u8]) -> bool {
         return false;
     }
     const EXTENSIONS: &[&[u8]] = &[
-        b".mkv", b".mp4", b".avi", b".m4v", b".ts", b".m2ts", b".mov", b".wmv", b".mpg",
-        b".mpeg", b".iso", b".rar", b".7z", b".zip", b".nfo", b".sfv", b".srr", b".srt",
-        b".sub", b".idx", b".jpg", b".png", b".txt", b".flac", b".mp3", b".m4a",
+        b".mkv", b".mp4", b".avi", b".m4v", b".ts", b".m2ts", b".mov", b".wmv", b".mpg", b".mpeg",
+        b".iso", b".rar", b".7z", b".zip", b".nfo", b".sfv", b".srr", b".srt", b".sub", b".idx",
+        b".jpg", b".png", b".txt", b".flac", b".mp3", b".m4a",
     ];
     for &known in EXTENSIONS {
         if strcasecmp_bytes(ext, known) {
@@ -310,8 +309,8 @@ pub fn eval_dead_download(
     let failed = current_failed;
     let tried = own + failed;
 
-    let dead_rate = failed >= DEAD_DOWNLOAD_FAILURES + file_count
-        && (own as i64) * 100 < (failed as i64);
+    let dead_rate =
+        failed >= DEAD_DOWNLOAD_FAILURES + file_count && (own as i64) * 100 < (failed as i64);
     let dead_run = dupe_failed_run >= DEAD_RUN_FAILURES && par_cannot_cover_exact;
     let dead = dead_rate || dead_run;
 
@@ -370,7 +369,12 @@ pub fn is_side_file(filename: &[u8], ext_cleanup_disk: &[u8]) -> bool {
 
 /// `QueueCoordinator::ResetHangingDownloads` (`QueueCoordinator.cpp`).
 #[inline]
-pub fn is_hanging_download(now: i64, last_update: i64, article_timeout: i32, is_running: bool) -> bool {
+pub fn is_hanging_download(
+    now: i64,
+    last_update: i64,
+    article_timeout: i32,
+    is_running: bool,
+) -> bool {
     is_running && article_timeout > 0 && (now - last_update) > (article_timeout as i64) + 1
 }
 
@@ -392,7 +396,10 @@ pub fn find_dupe_file_indices(
     let mut by_name: std::collections::HashMap<&[u8], Vec<(i32, usize)>> =
         std::collections::HashMap::with_capacity(n);
     for (idx, &name) in filenames.iter().enumerate().take(n) {
-        by_name.entry(name).or_default().push(((idx + 1) as i32, idx));
+        by_name
+            .entry(name)
+            .or_default()
+            .push(((idx + 1) as i32, idx));
     }
     let mut written = 0usize;
     for (idx, &name) in filenames.iter().enumerate().take(n) {
@@ -961,9 +968,13 @@ pub fn merge_counters(
     dest.paused_size = dest.paused_size.wrapping_add(src.paused_size);
 
     dest.success_size = dest.success_size.wrapping_add(src.success_size);
-    dest.current_success_size = dest.current_success_size.wrapping_add(src.current_success_size);
+    dest.current_success_size = dest
+        .current_success_size
+        .wrapping_add(src.current_success_size);
     dest.failed_size = dest.failed_size.wrapping_add(src.failed_size);
-    dest.current_failed_size = dest.current_failed_size.wrapping_add(src.current_failed_size);
+    dest.current_failed_size = dest
+        .current_failed_size
+        .wrapping_add(src.current_failed_size);
 
     dest.par_size = dest.par_size.wrapping_add(src.par_size);
     dest.par_success_size = dest.par_success_size.wrapping_add(src.par_success_size);
@@ -974,7 +985,9 @@ pub fn merge_counters(
     dest.par_current_failed_size = dest
         .par_current_failed_size
         .wrapping_add(src.par_current_failed_size);
-    dest.remaining_par_count = dest.remaining_par_count.wrapping_add(src.remaining_par_count);
+    dest.remaining_par_count = dest
+        .remaining_par_count
+        .wrapping_add(src.remaining_par_count);
 
     dest.total_articles = dest.total_articles.wrapping_add(src.total_articles);
     dest.success_articles = dest.success_articles.wrapping_add(src.success_articles);
@@ -1228,10 +1241,7 @@ fn join_path(dir: &[u8], name: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(unix)]
-fn backup_alive_permille(
-    host: &crate::queuesubsys_host::QueueSubsysHost,
-    nzb_ptr: usize,
-) -> i32 {
+fn backup_alive_permille(host: &crate::queuesubsys_host::QueueSubsysHost, nzb_ptr: usize) -> i32 {
     let mut best = -1i32;
     for key in [b"DupeAlive".as_slice(), b"DupeHealth".as_slice()] {
         if let Some(val) = host.nzb_get_param(nzb_ptr, key) {
@@ -1288,10 +1298,7 @@ impl NzbgetRsQueueCoordinator {
         &self,
         f: impl FnOnce(&mut crate::dupefallback::DonorCacheState) -> R,
     ) -> R {
-        let mut guard = self
-            .donor_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.donor_cache.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
     }
 
@@ -1700,9 +1707,7 @@ impl NzbgetRsQueueCoordinator {
             let f = &snaps[idx];
             let mut msg = b"File \"".to_vec();
             msg.extend_from_slice(&f.filename);
-            msg.extend_from_slice(
-                b"\" appears twice in collection, adding only the biggest file",
-            );
+            msg.extend_from_slice(b"\" appears twice in collection, adding only the biggest file");
             host.log(crate::queuesubsys_host::MK_WARNING, &msg);
             host.nzb_action(
                 nzb_ptr,
@@ -1740,10 +1745,7 @@ impl NzbgetRsQueueCoordinator {
             return;
         }
         let nzb = host.nzb_snap(nzb_ptr, false);
-        if nzb.deleting
-            || nzb.parking
-            || nzb.delete_status != crate::queuesubsys_host::DS_NONE
-        {
+        if nzb.deleting || nzb.parking || nzb.delete_status != crate::queuesubsys_host::DS_NONE {
             return;
         }
         let own_success = nzb.current_success_articles
@@ -1836,16 +1838,8 @@ impl NzbgetRsQueueCoordinator {
             return false;
         }
         let old_dest_dir = nzb.dest_dir;
-        host.nzb_set_str(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_STR_CATEGORY,
-            category,
-        );
-        host.nzb_action(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR,
-            0,
-        );
+        host.nzb_set_str(nzb_ptr, crate::queuesubsys_host::NZB_STR_CATEGORY, category);
+        host.nzb_action(nzb_ptr, crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR, 0);
         let new_nzb = host.nzb_snap(nzb_ptr, false);
         new_nzb.dest_dir == old_dest_dir || host.move_completed_files(nzb_ptr, &old_dest_dir)
     }
@@ -1882,11 +1876,7 @@ impl NzbgetRsQueueCoordinator {
         }
 
         let old_dest_dir = nzb.dest_dir;
-        host.nzb_action(
-            nzb_ptr,
-            crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR,
-            0,
-        );
+        host.nzb_action(nzb_ptr, crate::queuesubsys_host::NZB_ACT_BUILD_DEST_DIR, 0);
         let new_nzb = host.nzb_snap(nzb_ptr, false);
         new_nzb.dest_dir == old_dest_dir || host.move_completed_files(nzb_ptr, &old_dest_dir)
     }
@@ -2104,16 +2094,17 @@ impl NzbgetRsQueueCoordinator {
     pub(crate) fn log_debug_info(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
         host.with_locked_queue(|dq_ptr| {
             let opts = host.opts();
-            host.log(
-                crate::queuesubsys_host::MK_INFO,
-                b"   ---------- Queue",
-            );
+            host.log(crate::queuesubsys_host::MK_INFO, b"   ---------- Queue");
             let (remaining, remaining_forced) = host.dq_calc_remaining_size(dq_ptr);
             let rem_mb = (remaining as f64) / 1024.0 / 1024.0;
             let forced_mb = (remaining_forced as f64) / 1024.0 / 1024.0;
             host.log(
                 crate::queuesubsys_host::MK_INFO,
-                format!("     Remaining: {:.1} MB, Forced: {:.1} MB", rem_mb, forced_mb).as_bytes(),
+                format!(
+                    "     Remaining: {:.1} MB, Forced: {:.1} MB",
+                    rem_mb, forced_mb
+                )
+                .as_bytes(),
             );
             let dl_state = if opts.pause_download {
                 "paused"
@@ -2168,8 +2159,10 @@ impl NzbgetRsQueueCoordinator {
         let cur_date = opts.cur_time;
 
         loop {
-            let mut best_file: Option<(crate::queuesubsys_host::NzbSnap, crate::queuesubsys_host::FileSnap)> =
-                None;
+            let mut best_file: Option<(
+                crate::queuesubsys_host::NzbSnap,
+                crate::queuesubsys_host::FileSnap,
+            )> = None;
             let mut prop_wait_file: Option<(
                 crate::queuesubsys_host::NzbSnap,
                 crate::queuesubsys_host::FileSnap,
@@ -2293,14 +2286,7 @@ impl NzbgetRsQueueCoordinator {
                     );
                     let ok = self.with_donor_cache(|cache| {
                         crate::dupefallback::try_fallback_host(
-                            cache,
-                            host,
-                            opts,
-                            dq_ptr,
-                            &mut nzb,
-                            &mut file,
-                            idx,
-                            &mut art,
+                            cache, host, opts, dq_ptr, &mut nzb, &mut file, idx, &mut art,
                         )
                     });
                     art.dupe_proactive = ok;
@@ -2381,9 +2367,8 @@ impl NzbgetRsQueueCoordinator {
         let mut info_name = nzb.name.clone();
         info_name.push(crate::paths::PATH_SEPARATOR);
         info_name.extend_from_slice(&file.filename);
-        info_name.extend_from_slice(
-            format!(" [{}/{}]", art.part_number, file.articles_len).as_bytes(),
-        );
+        info_name
+            .extend_from_slice(format!(" [{}/{}]", art.part_number, file.articles_len).as_bytes());
 
         host.start_article_download(file.ptr, art.ptr, conn_ptr, attach_analyzer, &info_name);
     }
@@ -2973,7 +2958,11 @@ impl NzbgetRsQueueCoordinator {
                 return;
             }
 
-            host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 0);
+            host.file_set_int(
+                file_ptr,
+                crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED,
+                0,
+            );
 
             let (mut path, dest_dir, filename, articles, daf_mode) = {
                 let mut tup = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0i32);
@@ -3453,7 +3442,11 @@ impl NzbgetRsQueueCoordinator {
             host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
         }
         file.partial_changed = true;
-        host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 1);
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED,
+            1,
+        );
     }
 
     fn discard_article_segment(
@@ -3501,11 +3494,7 @@ impl NzbgetRsQueueCoordinator {
         });
     }
 
-    fn save_partial_state(
-        &self,
-        host: &crate::queuesubsys_host::QueueSubsysHost,
-        file_ptr: usize,
-    ) {
+    fn save_partial_state(&self, host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: usize) {
         save_partial_state_host(host, file_ptr);
     }
 
@@ -4255,7 +4244,11 @@ impl NzbgetRsQueueCoordinator {
         {
             return;
         }
-        host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_DEAD_PICK_PROBED, 1);
+        host.nzb_set_int(
+            nzb.ptr,
+            crate::queuesubsys_host::NZB_INT_DEAD_PICK_PROBED,
+            1,
+        );
         if nzb.current_success_articles > 0 {
             return;
         }
@@ -4286,10 +4279,7 @@ impl NzbgetRsQueueCoordinator {
             }
         }
 
-        let total: usize = files
-            .iter()
-            .map(|f| f.total_articles.max(0) as usize)
-            .sum();
+        let total: usize = files.iter().map(|f| f.total_articles.max(0) as usize).sum();
         if total < DUPE_PROBE_MIN_ARTICLES {
             return;
         }
@@ -4349,11 +4339,7 @@ impl NzbgetRsQueueCoordinator {
                     opts.article_timeout,
                     ad.status == crate::queuesubsys_host::AD_RUNNING,
                 ) {
-                    host.ad_action(
-                        ad.ad_ptr,
-                        crate::queuesubsys_host::AD_ACT_CANCEL_HANGING,
-                        0,
-                    );
+                    host.ad_action(ad.ad_ptr, crate::queuesubsys_host::AD_ACT_CANCEL_HANGING, 0);
                 }
             }
         });
@@ -4716,8 +4702,16 @@ fn discard_downloaded_articles_host(
         crate::queuesubsys_host::FILE_INT_OUTPUT_INITIALIZED,
         0,
     );
-    host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_CACHED_ARTICLES, 0);
-    host.file_set_int(file_ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 0);
+    host.file_set_int(
+        file_ptr,
+        crate::queuesubsys_host::FILE_INT_CACHED_ARTICLES,
+        0,
+    );
+    host.file_set_int(
+        file_ptr,
+        crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED,
+        0,
+    );
     host.file_set_int(
         file_ptr,
         crate::queuesubsys_host::FILE_INT_PARTIAL_STATE,
@@ -4765,10 +4759,7 @@ fn discard_temp_files_host(
 }
 
 #[cfg(unix)]
-fn save_partial_state_host(
-    host: &crate::queuesubsys_host::QueueSubsysHost,
-    file_ptr: usize,
-) {
+fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: usize) {
     let file = host.file_snap(file_ptr);
     if file.partial_changed {
         let mut dbg = b"Saving partial state for ".to_vec();
@@ -4778,7 +4769,11 @@ fn save_partial_state_host(
             host.disk_discard_file(file.id, false, false, true);
         }
         host.disk_save_file_state(file.ptr, false);
-        host.file_set_int(file.ptr, crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED, 0);
+        host.file_set_int(
+            file.ptr,
+            crate::queuesubsys_host::FILE_INT_PARTIAL_CHANGED,
+            0,
+        );
         host.file_set_int(
             file.ptr,
             crate::queuesubsys_host::FILE_INT_PARTIAL_STATE,
@@ -4834,7 +4829,10 @@ mod tests {
             ..Default::default()
         };
         merge_counters(&mut d, &s);
-        assert_eq!((d.file_count, d.size, d.min_time, d.max_time), (5, 300, 40, 80));
+        assert_eq!(
+            (d.file_count, d.size, d.min_time, d.max_time),
+            (5, 300, 40, 80)
+        );
     }
 
     #[test]
@@ -4940,8 +4938,10 @@ mod tests {
             cancelled: Vec::new(),
             saw_non_null_strs_on_running_snap: false,
         };
-        let host =
-            crate::queuesubsys_host::QueueSubsysHost::new(&mut st as *mut State as *mut c_void, cb);
+        let host = crate::queuesubsys_host::QueueSubsysHost::new_mock(
+            &mut st as *mut State as *mut c_void,
+            cb,
+        );
         let coord = NzbgetRsQueueCoordinator::new();
         coord.reset_hanging_downloads(&host);
         assert!(!st.saw_non_null_strs_on_running_snap);

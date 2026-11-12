@@ -43,31 +43,156 @@ const NO_ARGUMENT: c_int = 0;
 const REQUIRED_ARGUMENT: c_int = 1;
 
 static LONG_OPTIONS: [LongOption; 25] = [
-    LongOption { name: c"help".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'h' as c_int },
-    LongOption { name: c"configfile".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'c' as c_int },
-    LongOption { name: c"noconfigfile".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'n' as c_int },
-    LongOption { name: c"printconfig".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'p' as c_int },
-    LongOption { name: c"server".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b's' as c_int },
-    LongOption { name: c"daemon".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'D' as c_int },
-    LongOption { name: c"version".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'v' as c_int },
-    LongOption { name: c"serverversion".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'V' as c_int },
-    LongOption { name: c"option".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'o' as c_int },
-    LongOption { name: c"append".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'A' as c_int },
-    LongOption { name: c"list".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'L' as c_int },
-    LongOption { name: c"pause".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'P' as c_int },
-    LongOption { name: c"unpause".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'U' as c_int },
-    LongOption { name: c"rate".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'R' as c_int },
-    LongOption { name: c"system".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'B' as c_int },
-    LongOption { name: c"log".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'G' as c_int },
-    LongOption { name: c"top".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'T' as c_int },
-    LongOption { name: c"edit".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'E' as c_int },
-    LongOption { name: c"connect".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'C' as c_int },
-    LongOption { name: c"quit".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'Q' as c_int },
-    LongOption { name: c"reload".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'O' as c_int },
-    LongOption { name: c"write".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'W' as c_int },
-    LongOption { name: c"category".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'K' as c_int },
-    LongOption { name: c"scan".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'S' as c_int },
-    LongOption { name: std::ptr::null(), has_arg: 0, flag: std::ptr::null_mut(), val: 0 },
+    LongOption {
+        name: c"help".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'h' as c_int,
+    },
+    LongOption {
+        name: c"configfile".as_ptr(),
+        has_arg: REQUIRED_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'c' as c_int,
+    },
+    LongOption {
+        name: c"noconfigfile".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'n' as c_int,
+    },
+    LongOption {
+        name: c"printconfig".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'p' as c_int,
+    },
+    LongOption {
+        name: c"server".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b's' as c_int,
+    },
+    LongOption {
+        name: c"daemon".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'D' as c_int,
+    },
+    LongOption {
+        name: c"version".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'v' as c_int,
+    },
+    LongOption {
+        name: c"serverversion".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'V' as c_int,
+    },
+    LongOption {
+        name: c"option".as_ptr(),
+        has_arg: REQUIRED_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'o' as c_int,
+    },
+    LongOption {
+        name: c"append".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'A' as c_int,
+    },
+    LongOption {
+        name: c"list".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'L' as c_int,
+    },
+    LongOption {
+        name: c"pause".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'P' as c_int,
+    },
+    LongOption {
+        name: c"unpause".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'U' as c_int,
+    },
+    LongOption {
+        name: c"rate".as_ptr(),
+        has_arg: REQUIRED_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'R' as c_int,
+    },
+    LongOption {
+        name: c"system".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'B' as c_int,
+    },
+    LongOption {
+        name: c"log".as_ptr(),
+        has_arg: REQUIRED_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'G' as c_int,
+    },
+    LongOption {
+        name: c"top".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'T' as c_int,
+    },
+    LongOption {
+        name: c"edit".as_ptr(),
+        has_arg: REQUIRED_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'E' as c_int,
+    },
+    LongOption {
+        name: c"connect".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'C' as c_int,
+    },
+    LongOption {
+        name: c"quit".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'Q' as c_int,
+    },
+    LongOption {
+        name: c"reload".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'O' as c_int,
+    },
+    LongOption {
+        name: c"write".as_ptr(),
+        has_arg: REQUIRED_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'W' as c_int,
+    },
+    LongOption {
+        name: c"category".as_ptr(),
+        has_arg: REQUIRED_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'K' as c_int,
+    },
+    LongOption {
+        name: c"scan".as_ptr(),
+        has_arg: NO_ARGUMENT,
+        flag: std::ptr::null_mut(),
+        val: b'S' as c_int,
+    },
+    LongOption {
+        name: std::ptr::null(),
+        has_arg: 0,
+        flag: std::ptr::null_mut(),
+        val: 0,
+    },
 ];
 
 pub unsafe fn default_getopt_long(argc: c_int, argv: *mut *mut c_char) -> c_int {
@@ -267,7 +392,11 @@ impl State<'_> {
     fn next_arg(&self) -> *mut c_char {
         unsafe {
             optind += 1;
-            if optind > self.argc { std::ptr::null_mut() } else { self.arg(optind - 1) }
+            if optind > self.argc {
+                std::ptr::null_mut()
+            } else {
+                self.arg(optind - 1)
+            }
         }
     }
 
@@ -405,16 +534,33 @@ fn pause(s: &mut State, c: u8) -> Result<Flow, Abort> {
     unsafe { optarg = a };
     let p = c == b'P';
     if starts_dash(a) || eq(a, c"D") {
-        s.set(field::CLIENT_OPERATION, if p { op::DOWNLOAD_PAUSE } else { op::DOWNLOAD_UNPAUSE })?;
+        s.set(
+            field::CLIENT_OPERATION,
+            if p {
+                op::DOWNLOAD_PAUSE
+            } else {
+                op::DOWNLOAD_UNPAUSE
+            },
+        )?;
         if starts_dash(a) {
             unsafe { optind -= 1 };
         }
     } else if eq(a, c"O") {
-        s.set(field::CLIENT_OPERATION, if p { op::POST_PAUSE } else { op::POST_UNPAUSE })?;
+        s.set(
+            field::CLIENT_OPERATION,
+            if p { op::POST_PAUSE } else { op::POST_UNPAUSE },
+        )?;
     } else if eq(a, c"S") {
-        s.set(field::CLIENT_OPERATION, if p { op::SCAN_PAUSE } else { op::SCAN_UNPAUSE })?;
+        s.set(
+            field::CLIENT_OPERATION,
+            if p { op::SCAN_PAUSE } else { op::SCAN_UNPAUSE },
+        )?;
     } else {
-        s.sink.error(if p { c"Could not parse value of option 'P'\n" } else { c"Could not parse value of option 'U'" })?;
+        s.sink.error(if p {
+            c"Could not parse value of option 'P'\n"
+        } else {
+            c"Could not parse value of option 'U'"
+        })?;
         return Ok(Flow::Stop);
     }
     Ok(Flow::Next)
@@ -486,7 +632,8 @@ fn edit(s: &mut State, arg: *mut c_char) -> Result<Flow, Abort> {
         a = s.arg(unsafe { optind } - 1);
         unsafe { optarg = a };
     }
-    let has_eq = |t: *const c_char| !t.is_null() && unsafe { CStr::from_ptr(t) }.to_bytes().contains(&b'=');
+    let has_eq =
+        |t: *const c_char| !t.is_null() && unsafe { CStr::from_ptr(t) }.to_bytes().contains(&b'=');
     let pick = |g: i32, f: i32| if group { g } else { f };
     let action = if post {
         if eq(a, c"D") {
@@ -550,15 +697,30 @@ fn edit(s: &mut State, arg: *mut c_char) -> Result<Flow, Abort> {
             s.sink.error(c"Category can be set only for groups")?;
             return Ok(Flow::Stop);
         }
-        s.set(field::EDIT_ACTION, if eq(a, c"CP") { GROUP_APPLY_CATEGORY } else { GROUP_SET_CATEGORY })?;
-        return Ok(if edit_value(s)? { Flow::Next } else { Flow::Stop });
+        s.set(
+            field::EDIT_ACTION,
+            if eq(a, c"CP") {
+                GROUP_APPLY_CATEGORY
+            } else {
+                GROUP_SET_CATEGORY
+            },
+        )?;
+        return Ok(if edit_value(s)? {
+            Flow::Next
+        } else {
+            Flow::Stop
+        });
     } else if eq(a, c"N") {
         if !group {
             s.sink.error(c"Only groups can be renamed")?;
             return Ok(Flow::Stop);
         }
         s.set(field::EDIT_ACTION, GROUP_SET_NAME)?;
-        return Ok(if edit_value(s)? { Flow::Next } else { Flow::Stop });
+        return Ok(if edit_value(s)? {
+            Flow::Next
+        } else {
+            Flow::Stop
+        });
     } else if eq(a, c"M") {
         if !group {
             s.sink.error(c"Only groups can be merged")?;
@@ -567,10 +729,15 @@ fn edit(s: &mut State, arg: *mut c_char) -> Result<Flow, Abort> {
         GROUP_MERGE
     } else if eq(a, c"S") {
         s.set(field::EDIT_ACTION, FILE_SPLIT)?;
-        return Ok(if edit_value(s)? { Flow::Next } else { Flow::Stop });
+        return Ok(if edit_value(s)? {
+            Flow::Next
+        } else {
+            Flow::Stop
+        });
     } else if eq(a, c"O") {
         if !group {
-            s.sink.error(c"Post-process parameter can be set only for groups")?;
+            s.sink
+                .error(c"Post-process parameter can be set only for groups")?;
             return Ok(Flow::Stop);
         }
         s.set(field::EDIT_ACTION, GROUP_SET_PARAMETER)?;
@@ -601,7 +768,11 @@ fn edit(s: &mut State, arg: *mut c_char) -> Result<Flow, Abort> {
         }
         return Ok(Flow::Next);
     } else {
-        let offset = if a.is_null() { 0 } else { unsafe { c_atoi_ptr(a) } };
+        let offset = if a.is_null() {
+            0
+        } else {
+            unsafe { c_atoi_ptr(a) }
+        };
         s.set(field::EDIT_OFFSET, offset)?;
         if offset == 0 {
             s.sink.error(err)?;
@@ -709,7 +880,9 @@ fn init_command_line(s: &mut State, use_long: bool) -> Result<(), Abort> {
             }
             b'W' => {
                 s.set(field::CLIENT_OPERATION, op::WRITE_LOG)?;
-                let kind = [c"I", c"W", c"E", c"D", c"G"].iter().position(|k| eq(arg, k));
+                let kind = [c"I", c"W", c"E", c"D", c"G"]
+                    .iter()
+                    .position(|k| eq(arg, k));
                 match kind {
                     Some(k) => {
                         s.set(field::WRITE_LOG_KIND, k as i32)?;
@@ -760,7 +933,8 @@ fn init_command_line(s: &mut State, use_long: bool) -> Result<(), Abort> {
 
 /// strtok(list, ", ") tokens of a C string
 fn tokens(s: &[u8]) -> impl Iterator<Item = &[u8]> {
-    s.split(|&b| b == b',' || b == b' ').filter(|t| !t.is_empty())
+    s.split(|&b| b == b',' || b == b' ')
+        .filter(|t| !t.is_empty())
 }
 
 fn atoi_bytes(b: &[u8]) -> i32 {
@@ -772,7 +946,11 @@ fn file_id_list(s: &mut State, from: c_int) -> Result<(), Abort> {
     for i in from..s.argc {
         let a = s.arg(i);
         // a moved-out argument is a null CString: strtok finds nothing in it
-        let text = if a.is_null() { &b""[..] } else { unsafe { CStr::from_ptr(a) }.to_bytes() };
+        let text = if a.is_null() {
+            &b""[..]
+        } else {
+            unsafe { CStr::from_ptr(a) }.to_bytes()
+        };
         for t in tokens(text) {
             let (from_id, to_id) = match t.iter().position(|&b| b == b'-') {
                 Some(dash) => {
@@ -795,9 +973,17 @@ fn file_id_list(s: &mut State, from: c_int) -> Result<(), Abort> {
                     (a, a)
                 }
             };
-            let count = if from_id < to_id { to_id - from_id + 1 } else { from_id - to_id + 1 };
+            let count = if from_id < to_id {
+                to_id - from_id + 1
+            } else {
+                from_id - to_id + 1
+            };
             for k in 0..count {
-                s.sink.push_id(if from_id < to_id { from_id + k } else { from_id - k })?;
+                s.sink.push_id(if from_id < to_id {
+                    from_id + k
+                } else {
+                    from_id - k
+                })?;
             }
         }
     }
@@ -810,7 +996,11 @@ fn init_file_arg(s: &mut State) -> Result<(), Abort> {
     let client_ok = |op: i32| op == op::NONE || op == op::DOWNLOAD || op == op::WRITE_LOG;
     if idx >= s.argc {
         if !s.server_mode && !s.remote_client_mode && client_ok(s.client_operation) {
-            s.sink.error(if s.client_operation == op::WRITE_LOG { c"Log-text not specified" } else { c"Nzb-file or Url not specified" })?;
+            s.sink.error(if s.client_operation == op::WRITE_LOG {
+                c"Log-text not specified"
+            } else {
+                c"Nzb-file or Url not specified"
+            })?;
         }
     } else if s.client_operation == op::EDIT_QUEUE {
         if s.match_mode == 1 {
@@ -825,7 +1015,11 @@ fn init_file_arg(s: &mut State) -> Result<(), Abort> {
         let a = s.arg(idx);
         s.sink.set_str(field::LAST_ARG, a)?;
         // a moved-out argument (null) read as empty
-        let name: &CStr = if a.is_null() { c"" } else { unsafe { CStr::from_ptr(a) } };
+        let name: &CStr = if a.is_null() {
+            c""
+        } else {
+            unsafe { CStr::from_ptr(a) }
+        };
         let nb = name.to_bytes();
         let absolute = nb.first() == Some(&b'/')
             || (nb.len() >= 6 && nb[..6].eq_ignore_ascii_case(b"http:/"))
@@ -868,7 +1062,12 @@ fn init_file_arg(s: &mut State) -> Result<(), Abort> {
 /// may move entries already consumed by getopt, nulling them and retaining
 /// their strings until the destination is overwritten or parsing finishes.
 /// Callbacks must preserve unread arguments; getopt globals are exclusive.
-pub unsafe fn parse(argc: c_int, argv: *mut *mut c_char, use_long: bool, sink: &mut dyn Sink) -> Result<(), Abort> {
+pub unsafe fn parse(
+    argc: c_int,
+    argv: *mut *mut c_char,
+    use_long: bool,
+    sink: &mut dyn Sink,
+) -> Result<(), Abort> {
     let mut s = State {
         sink,
         argc,
@@ -1106,7 +1305,10 @@ pub fn parse_command_line(args: &[&[u8]], use_long: bool) -> ParsedCommandLine {
             let mut next = vec![None; moved.len()];
             for (i, ptr) in self.argv[..moved.len()].iter().copied().enumerate() {
                 if !ptr.is_null() {
-                    if let Some(pos) = moved.iter().position(|c| c.as_ref().is_some_and(|cs| cs.as_ptr().cast_mut() == ptr)) {
+                    if let Some(pos) = moved
+                        .iter()
+                        .position(|c| c.as_ref().is_some_and(|cs| cs.as_ptr().cast_mut() == ptr))
+                    {
                         next[i] = moved[pos].take();
                     }
                 }
@@ -1148,7 +1350,8 @@ pub fn parse_command_line(args: &[&[u8]], use_long: bool) -> ParsedCommandLine {
             Ok(())
         }
         fn set_str(&mut self, f: i32, value: *const c_char) -> Result<(), Abort> {
-            let bytes = (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_bytes().to_vec());
+            let bytes =
+                (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_bytes().to_vec());
             match f {
                 field::CONFIG_FILENAME => self.out.config_filename = bytes,
                 field::WEB_GET_FILENAME => self.out.web_get_filename = bytes,
@@ -1161,7 +1364,9 @@ pub fn parse_command_line(args: &[&[u8]], use_long: bool) -> ParsedCommandLine {
                 field::LAST_ARG => self.out.last_arg = bytes,
                 field::ARG_FILENAME => self.out.arg_filename = bytes,
                 field::SET_RATE_ARG => {
-                    let s = bytes.and_then(|b| String::from_utf8(b).ok()).unwrap_or_default();
+                    let s = bytes
+                        .and_then(|b| String::from_utf8(b).ok())
+                        .unwrap_or_default();
                     let rate = s.trim().parse::<f64>().unwrap_or(0.0);
                     self.out.set_rate = (rate * 1024.0) as i32;
                 }
@@ -1196,7 +1401,9 @@ pub fn parse_command_line(args: &[&[u8]], use_long: bool) -> ParsedCommandLine {
         }
         fn push_option(&mut self, value: *const c_char) -> Result<(), Abort> {
             if !value.is_null() {
-                self.out.option_list.push(unsafe { CStr::from_ptr(value) }.to_bytes().to_vec());
+                self.out
+                    .option_list
+                    .push(unsafe { CStr::from_ptr(value) }.to_bytes().to_vec());
             }
             Ok(())
         }
@@ -1206,7 +1413,9 @@ pub fn parse_command_line(args: &[&[u8]], use_long: bool) -> ParsedCommandLine {
         }
         fn push_name(&mut self, value: *const c_char) -> Result<(), Abort> {
             if !value.is_null() {
-                self.out.edit_queue_name_list.push(unsafe { CStr::from_ptr(value) }.to_bytes().to_vec());
+                self.out
+                    .edit_queue_name_list
+                    .push(unsafe { CStr::from_ptr(value) }.to_bytes().to_vec());
             }
             Ok(())
         }
@@ -1254,7 +1463,7 @@ const DOWNLOAD_QUEUE_EDIT_ACTIONS: [i32; 35] = [
 const WRITE_LOG_KINDS: [i32; 5] = [0, 1, 2, 4, 3];
 
 /// Owned command-line parser state backing `NzbgetRsCmdline` (`daemon/main/rustyget.cpp`).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct CmdlineHandle {
     pub no_config: bool,
     pub print_usage: bool,
@@ -1497,9 +1706,8 @@ impl CmdlineHandle {
     }
 
     pub fn get_cstr_ptr(&self, f: i32) -> *const c_char {
-        let opt_ptr = |o: &Option<std::ffi::CString>| {
-            o.as_ref().map_or(std::ptr::null(), |c| c.as_ptr())
-        };
+        let opt_ptr =
+            |o: &Option<std::ffi::CString>| o.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
         if f >= 1000 {
             return self
                 .option_list
@@ -1691,7 +1899,9 @@ mod tests {
                 self.step()
             }
         }
-        let sample = ["nzbget", "-A", "N", "name", "-o", "X=1", "-c", "conf", "file"];
+        let sample = [
+            "nzbget", "-A", "N", "name", "-o", "X=1", "-c", "conf", "file",
+        ];
         let strings: Vec<_> = sample
             .iter()
             .map(|s| std::ffi::CString::new(*s).unwrap())
@@ -1723,7 +1933,8 @@ mod tests {
         let out = format_usage(b"nzbget", b'/', true);
         let text = String::from_utf8(out).unwrap();
         assert!(text.starts_with("Usage:\n  nzbget [switches]\n\nSwitches:\n"));
-        assert!(text.contains("  -D, --daemon              Start RustyGet as a server in daemon-mode\n"));
+        assert!(text
+            .contains("  -D, --daemon              Start RustyGet as a server in daemon-mode\n"));
         assert!(text.contains("e. g.: \"my nzb download/myfile.nfo\" \"another nzb\"\n"));
 
         let out_no_daemon = format_usage(b"nzbget.exe", b'\\', false);
@@ -1744,7 +1955,10 @@ mod tests {
 
         // 2. InitializingWithtConfigurationFile
         let p = parse_command_line(&[b"nzbget", b"-c", b"/home/user/nzbget.conf", b"-p"], true);
-        assert_eq!(p.config_filename.as_deref(), Some(b"/home/user/nzbget.conf".as_slice()));
+        assert_eq!(
+            p.config_filename.as_deref(),
+            Some(b"/home/user/nzbget.conf".as_slice())
+        );
         assert_eq!(p.client_operation, op::NONE);
 
         // 3. ServerMode
@@ -1758,7 +1972,15 @@ mod tests {
 
         // 5. ExtraOption1
         let p = parse_command_line(
-            &[b"nzbget", b"-n", b"-o", b"myoption1=yes", b"-o", b"myoption2=no", b"-p"],
+            &[
+                b"nzbget",
+                b"-n",
+                b"-o",
+                b"myoption1=yes",
+                b"-o",
+                b"myoption2=no",
+                b"-p",
+            ],
             true,
         );
         assert_eq!(
@@ -1792,10 +2014,19 @@ mod tests {
 
         // 7. OptionAfterArguments
         let add_p = parse_command_line(
-            &[b"nzbget", b"-A", b"/tmp/file.nzb", b"-c", b"/etc/nzbget.conf"],
+            &[
+                b"nzbget",
+                b"-A",
+                b"/tmp/file.nzb",
+                b"-c",
+                b"/etc/nzbget.conf",
+            ],
             true,
         );
-        assert_eq!(add_p.arg_filename.as_deref(), Some(b"/tmp/file.nzb".as_slice()));
+        assert_eq!(
+            add_p.arg_filename.as_deref(),
+            Some(b"/tmp/file.nzb".as_slice())
+        );
         assert_eq!(
             add_p.config_filename.as_deref(),
             Some(b"/etc/nzbget.conf".as_slice())

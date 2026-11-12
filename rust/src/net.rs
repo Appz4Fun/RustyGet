@@ -1242,14 +1242,8 @@ unsafe impl crate::nntp::Io for DirectNntpIo<'_> {
     }
 }
 
-/// Host callback for `NzbgetRsWebDl`.
-///
-/// Operations:
-/// - `1`: `is_stopped()` -> `1` / `0`
-/// - `3`: `Notify(nullptr)` on status update
-/// - `4`: `ProcessHeader(s1)`
-pub type NzbgetRsWebDlHostFn =
-    Option<unsafe extern "C" fn(ctx: *mut c_void, op: c_int, s1: *const c_char) -> c_int>;
+pub(crate) type WebDlStatusHook = Box<dyn Fn(&NzbgetRsWebDl, WebDlStatus) + Send + Sync>;
+pub(crate) type WebDlHeaderHook = Box<dyn Fn(&NzbgetRsWebDl, &[u8]) + Send + Sync>;
 
 fn now_unix_sec() -> i64 {
     #[cfg(unix)]
@@ -1264,25 +1258,102 @@ fn now_unix_sec() -> i64 {
 
 pub struct NzbgetRsWebDl {
     url: Mutex<CString>,
-    output_filename: UnsafeCell<CString>,
-    info_name: UnsafeCell<CString>,
-    original_filename: Mutex<CString>,
+    output_filename: Mutex<CString>,
+    info_name: Mutex<CString>,
+    original_filename: Mutex<Option<CString>>,
     status: AtomicI32,
     last_update_time: AtomicI64,
     http_status: AtomicI32,
     force: AtomicBool,
     retry: AtomicBool,
     cert_verif_level: AtomicI32,
+    stopped: AtomicBool,
     active_slot: Mutex<Option<Arc<ConnCancelSlot>>>,
     debug_on: bool,
     conn_host_cb: NzbgetRsConnHostFn,
-    webdl_ctx: usize,
-    webdl_cb: NzbgetRsWebDlHostFn,
+    on_status: Option<WebDlStatusHook>,
+    on_header: Option<WebDlHeaderHook>,
 }
 
-unsafe impl Sync for NzbgetRsWebDl {}
-
 impl NzbgetRsWebDl {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_configured(
+        url: &[u8],
+        info_name: &[u8],
+        output_filename: &[u8],
+        force: bool,
+        retry: bool,
+        cert_verif_level: c_int,
+        on_status: Option<WebDlStatusHook>,
+        on_header: Option<WebDlHeaderHook>,
+    ) -> Self {
+        let dl = Self {
+            url: Mutex::new(bytes_to_cstring(url)),
+            output_filename: Mutex::new(bytes_to_cstring(output_filename)),
+            info_name: Mutex::new(bytes_to_cstring(info_name)),
+            original_filename: Mutex::new(None),
+            status: AtomicI32::new(WebDlStatus::AdUndefined as i32),
+            last_update_time: AtomicI64::new(now_unix_sec()),
+            http_status: AtomicI32::new(0),
+            force: AtomicBool::new(force),
+            retry: AtomicBool::new(retry),
+            cert_verif_level: AtomicI32::new(cert_verif_level),
+            stopped: AtomicBool::new(false),
+            active_slot: Mutex::new(None),
+            debug_on: crate::ffi::build_debug_enabled(),
+            conn_host_cb: crate::ffi::tls_host_cb(),
+            on_status,
+            on_header,
+        };
+        dl.emit_log(0, b"Creating WebDownloader");
+        dl
+    }
+
+    pub(crate) fn spawn(dl: Arc<Self>) {
+        std::thread::spawn(move || {
+            let _tg = crate::ffi::RustThreadGuard::enter(&dl.stopped);
+            dl.execute(1, 5);
+            crate::ffi::stop_ssl_thread();
+        });
+    }
+
+    pub(crate) fn download_sync(&self, max_redirects: c_int) -> c_int {
+        self.execute(0, max_redirects)
+    }
+
+    pub(crate) fn status_code(&self) -> c_int {
+        self.status.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn http_status(&self) -> c_int {
+        self.http_status.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn last_update_time(&self) -> i64 {
+        self.last_update_time.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn info_name_bytes(&self) -> Vec<u8> {
+        self.info_name
+            .lock()
+            .map(|g| g.to_bytes().to_vec())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn output_filename_bytes(&self) -> Vec<u8> {
+        self.output_filename
+            .lock()
+            .map(|g| g.to_bytes().to_vec())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn original_filename_bytes(&self) -> Option<Vec<u8>> {
+        self.original_filename
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.to_bytes().to_vec()))
+    }
+
     fn emit_log(&self, level: c_int, msg: &[u8]) {
         if level == 0 && !self.debug_on {
             return;
@@ -1322,13 +1393,13 @@ impl NzbgetRsWebDl {
             .lock()
             .map(|g| g.to_bytes().to_vec())
             .unwrap_or_default();
-        let out_fn = unsafe { (*self.output_filename.get()).to_bytes() };
-        let info_nm = unsafe { (*self.info_name.get()).to_bytes() };
+        let out_fn = self.output_filename_bytes();
+        let info_nm = self.info_name_bytes();
         let cfg = WebDlConfig {
             initial_url: &initial_url,
-            output_filename: out_fn,
-            info_name: info_nm,
-            version: &ver_bytes,
+            output_filename: &out_fn,
+            info_name: &info_nm,
+            version: ver_bytes,
             write_buffer_kb,
             url_retries,
             url_interval_sec,
@@ -1353,7 +1424,8 @@ impl NzbgetRsWebDl {
         st as c_int
     }
 
-    fn stop(&self) {
+    pub(crate) fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
         self.emit_log(0, b"Trying to stop WebDownloader");
         if let Ok(g) = self.active_slot.lock() {
             if let Some(slot) = g.as_ref() {
@@ -1363,12 +1435,12 @@ impl NzbgetRsWebDl {
         self.emit_log(0, b"WebDownloader stopped successfully");
     }
 
-    fn log_debug_info(&self) {
+    pub(crate) fn log_debug_info(&self) {
         let mut tbuf = [0u8; 50];
         crate::util::util_format_time(self.last_update_time.load(Ordering::SeqCst), &mut tbuf);
         let tlen = tbuf.iter().position(|&b| b == 0).unwrap_or(0);
-        let out_b = unsafe { (*self.output_filename.get()).to_bytes() };
-        let base = &out_b[crate::paths::base_file_name(out_b)..];
+        let out_b = self.output_filename_bytes();
+        let base = &out_b[crate::paths::base_file_name(&out_b)..];
         let st_s = self.status.load(Ordering::SeqCst).to_string();
         let msg = join_c_slices(&[
             b"      Web-Download: status=",
@@ -1465,12 +1537,7 @@ impl WebDlIo for DirectWebDlIo<'_> {
     }
 
     fn is_stopped(&mut self) -> bool {
-        if crate::ffi::is_rust_thread_stopped() {
-            return true;
-        }
-        self.dl.webdl_cb.map_or(false, |cb| unsafe {
-            cb(self.dl.webdl_ctx as *mut c_void, 1, ptr::null()) != 0
-        })
+        crate::ffi::is_rust_thread_stopped() || self.dl.stopped.load(Ordering::SeqCst)
     }
 
     fn is_paused(&mut self) -> bool {
@@ -1497,10 +1564,8 @@ impl WebDlIo for DirectWebDlIo<'_> {
     fn set_status(&mut self, status: WebDlStatus) {
         let s = status as c_int;
         self.dl.status.store(s, Ordering::SeqCst);
-        if let Some(cb) = self.dl.webdl_cb {
-            unsafe {
-                cb(self.dl.webdl_ctx as *mut c_void, 3, ptr::null());
-            }
+        if let Some(ref cb) = self.dl.on_status {
+            cb(self.dl, status);
         }
     }
 
@@ -1510,7 +1575,7 @@ impl WebDlIo for DirectWebDlIo<'_> {
 
     fn set_original_filename(&mut self, filename: &[u8]) {
         if let Ok(mut g) = self.dl.original_filename.lock() {
-            *g = bytes_to_cstring(filename);
+            *g = Some(bytes_to_cstring(filename));
         }
     }
 
@@ -1521,10 +1586,8 @@ impl WebDlIo for DirectWebDlIo<'_> {
     }
 
     fn on_header(&mut self, line: &CStr) {
-        if let Some(cb) = self.dl.webdl_cb {
-            unsafe {
-                cb(self.dl.webdl_ctx as *mut c_void, 4, line.as_ptr());
-            }
+        if let Some(ref cb) = self.dl.on_header {
+            cb(self.dl, line.to_bytes());
         }
     }
 
@@ -2737,6 +2800,16 @@ impl NzbgetRsServerPool {
         self.retry_interval.load(Ordering::SeqCst)
     }
 
+    #[inline]
+    pub(crate) fn set_timeout(&self, timeout: i32) {
+        self.timeout.store(timeout, Ordering::SeqCst);
+    }
+
+    #[inline]
+    pub(crate) fn set_retry_interval(&self, retry_interval: i32) {
+        self.retry_interval.store(retry_interval, Ordering::SeqCst);
+    }
+
     pub fn server_count(&self) -> usize {
         self.servers.read().map_or(0, |g| g.len())
     }
@@ -3189,8 +3262,7 @@ pub unsafe extern "C" fn nzbget_rs_serverpool_free(pool: *mut NzbgetRsServerPool
 }
 
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_serverpool_add(
+pub(crate) unsafe fn nzbget_rs_serverpool_add(
     pool: *const NzbgetRsServerPool,
     id: c_int,
     active: c_int,
@@ -3625,117 +3697,6 @@ pub unsafe extern "C" fn nzbget_rs_serverpool_probe_tls(
     result
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_webdl_new(
-    webdl_ctx: *mut c_void,
-    webdl_cb: NzbgetRsWebDlHostFn,
-) -> *mut NzbgetRsWebDl {
-    let dl = Box::new(NzbgetRsWebDl {
-        url: Mutex::new(CString::default()),
-        output_filename: UnsafeCell::new(CString::default()),
-        info_name: UnsafeCell::new(CString::default()),
-        original_filename: Mutex::new(CString::default()),
-        status: AtomicI32::new(WebDlStatus::AdUndefined as i32),
-        last_update_time: AtomicI64::new(now_unix_sec()),
-        http_status: AtomicI32::new(0),
-        force: AtomicBool::new(false),
-        retry: AtomicBool::new(true),
-        cert_verif_level: AtomicI32::new(2),
-        active_slot: Mutex::new(None),
-        debug_on: crate::ffi::build_debug_enabled(),
-        conn_host_cb: crate::ffi::tls_host_cb(),
-        webdl_ctx: webdl_ctx as usize,
-        webdl_cb,
-    });
-    dl.emit_log(0, b"Creating WebDownloader");
-    Box::into_raw(dl)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_webdl_free(dl: *mut NzbgetRsWebDl) {
-    if !dl.is_null() {
-        drop(Box::from_raw(dl));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_webdl_ctl(
-    dl: *mut NzbgetRsWebDl,
-    op: c_int,
-    a1: c_int,
-    s1: *const c_char,
-    out_i64: *mut i64,
-    out_buf: *mut crate::ffi::RsBuf,
-) -> isize {
-    if dl.is_null() {
-        return 0;
-    }
-    let d = &*(dl as *const NzbgetRsWebDl);
-    match op {
-        0 => d.execute(0, a1) as isize,
-        1 => d.execute(1, 5) as isize,
-        2 => {
-            d.stop();
-            1
-        }
-        3 => d.status.load(Ordering::SeqCst) as isize,
-        4 => d.http_status.load(Ordering::SeqCst) as isize,
-        5 => {
-            if !out_i64.is_null() {
-                *out_i64 = d.last_update_time.load(Ordering::SeqCst);
-            }
-            1
-        }
-        6 => {
-            d.last_update_time.store(now_unix_sec(), Ordering::SeqCst);
-            1
-        }
-        7 => {
-            d.force.store(a1 != 0, Ordering::SeqCst);
-            1
-        }
-        8 => {
-            d.retry.store(a1 != 0, Ordering::SeqCst);
-            1
-        }
-        9 => {
-            d.cert_verif_level.store(a1, Ordering::SeqCst);
-            1
-        }
-        10 => {
-            if let Ok(mut g) = d.url.lock() {
-                *g = bytes_to_cstring(opt_bytes(s1));
-            }
-            1
-        }
-        11 => {
-            if !s1.is_null() {
-                *d.info_name.get() = bytes_to_cstring(opt_bytes(s1));
-            }
-            (*d.info_name.get()).as_ptr() as isize
-        }
-        12 => {
-            if !s1.is_null() {
-                *d.output_filename.get() = bytes_to_cstring(opt_bytes(s1));
-            }
-            (*d.output_filename.get()).as_ptr() as isize
-        }
-        13 => {
-            if let Ok(g) = d.original_filename.lock() {
-                if !out_buf.is_null() {
-                    out_buf.write(crate::ffi::into_buf(g.to_bytes().to_vec()));
-                }
-            }
-            1
-        }
-        14 => {
-            d.log_debug_info();
-            1
-        }
-        _ => 0,
-    }
-}
-
 /// Executes RPC `readurl` (creating a unique `readurl-N.tmp` file in `temp_dir`,
 /// downloading with up to 5 redirects, loading up to the first NUL into `out_buf`,
 /// and removing the temporary file).
@@ -3756,17 +3717,17 @@ pub(crate) unsafe fn nzbget_rs_webdl_read_temp_url(
         }
         num += 1;
     };
-    let dl = nzbget_rs_webdl_new(ptr::null_mut(), None);
-    let d = &*(dl as *const NzbgetRsWebDl);
-    d.force.store(true, Ordering::SeqCst);
-    d.retry.store(false, Ordering::SeqCst);
-    if let Ok(mut g) = d.url.lock() {
-        *g = bytes_to_cstring(opt_bytes(url));
-    }
-    *d.output_filename.get() = bytes_to_cstring(&tmp_path);
-    *d.info_name.get() = bytes_to_cstring(opt_bytes(info_name));
-    let ok = d.execute(0, 5) == (WebDlStatus::AdFinished as c_int);
-    nzbget_rs_webdl_free(dl);
+    let dl = NzbgetRsWebDl::new_configured(
+        opt_bytes(url),
+        opt_bytes(info_name),
+        &tmp_path,
+        true,
+        false,
+        2,
+        None,
+        None,
+    );
+    let ok = dl.download_sync(5) == (WebDlStatus::AdFinished as c_int);
 
     if ok && !out_buf.is_null() {
         #[cfg(unix)]

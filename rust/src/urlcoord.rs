@@ -123,9 +123,7 @@ pub fn is_hanging_url_download(
     status: i32,
     ad_running: i32,
 ) -> bool {
-    url_timeout > 0
-        && now - last_update_time > i64::from(url_timeout) + 10
-        && status == ad_running
+    url_timeout > 0 && now - last_update_time > i64::from(url_timeout) + 10 && status == ad_running
 }
 
 /// Formats the temporary URL download path (`"%s%curl-%i.tmp"`) for `UrlCoordinator::StartUrlDownload`.
@@ -144,10 +142,11 @@ pub fn format_temp_url_path(temp_dir: &[u8], sep: u8, id: i32) -> Vec<u8> {
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 const AD_RUNNING: i32 = 1;
+const LS_RUNNING: i32 = 1;
 const LS_SCAN_SKIPPED: i32 = 5;
 const LS_SCAN_FAILED: i32 = 6;
 const NK_URL: i32 = 1;
@@ -161,6 +160,9 @@ const EA_URL_FAILED: i32 = 11;
 const EA_URL_RETURNED: i32 = 12;
 
 struct ActiveUrlSlot {
+    #[cfg(unix)]
+    dl: Arc<crate::net::NzbgetRsWebDl>,
+    #[cfg(not(unix))]
     dl_ptr: usize,
     nzb_ptr: usize,
     category: Vec<u8>,
@@ -172,6 +174,8 @@ pub struct NzbgetRsUrlCoord {
     has_more_jobs: AtomicBool,
     wait_mu: Mutex<()>,
     wait_cv: Condvar,
+    host_env: Mutex<Option<NzbgetRsUrlCoordEnv>>,
+    self_weak: Mutex<std::sync::Weak<NzbgetRsUrlCoord>>,
 }
 
 impl Default for NzbgetRsUrlCoord {
@@ -223,6 +227,9 @@ pub struct NzbgetRsUrlCoordEnv {
     >,
 }
 
+unsafe impl Send for NzbgetRsUrlCoordEnv {}
+unsafe impl Sync for NzbgetRsUrlCoordEnv {}
+
 fn url_bytes_to_cstring(raw: &[u8]) -> std::ffi::CString {
     let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
     unsafe { std::ffi::CString::from_vec_unchecked(raw[..end].to_vec()) }
@@ -251,12 +258,64 @@ fn url_now_sec() -> i64 {
 }
 
 fn url_emit_log(env: &NzbgetRsUrlCoordEnv, level: i32, parts: &[&[u8]]) {
-    let Some(cb) = env.log_cb else {
+    if let Some(cb) = env.log_cb {
+        let joined: Vec<u8> = parts.concat();
+        let cstr = url_bytes_to_cstring(&joined);
+        unsafe { cb(env.ctx, level as c_int, cstr.as_ptr()) };
         return;
-    };
-    let joined: Vec<u8> = parts.concat();
-    let cstr = url_bytes_to_cstring(&joined);
-    unsafe { cb(env.ctx, level as c_int, cstr.as_ptr()) };
+    }
+    #[cfg(unix)]
+    {
+        if level == 0 && !crate::log::active_debug_build() {
+            return;
+        }
+        let kind = match level {
+            0 => 3,
+            1 => 4,
+            2 => 0,
+            3 => 1,
+            _ => 2,
+        };
+        let joined: Vec<u8> = parts.concat();
+        crate::log::log_active_bytes(kind, &joined);
+    }
+}
+
+fn url_runtime_opts(env: &NzbgetRsUrlCoordEnv) -> (i32, bool, bool, i32, u8, Vec<u8>) {
+    if let Some(opts) = crate::options::active_options() {
+        let sc = opts.scalars();
+        let pause_download = crate::ffi::active_workstate().is_some_and(|w| w.pause_download());
+        return (
+            sc.url_connections,
+            pause_download,
+            sc.url_force != 0,
+            sc.url_timeout,
+            crate::paths::PATH_SEPARATOR as u8,
+            opts.str_bytes(5).to_vec(),
+        );
+    }
+    let mut opts_ints = [0 as c_int; 5];
+    let mut opts_strs = [std::ptr::null::<c_char>(); 4];
+    if let Some(q) = env.query_cb {
+        unsafe {
+            q(
+                env.ctx,
+                2,
+                0,
+                opts_ints.as_mut_ptr(),
+                std::ptr::null_mut(),
+                opts_strs.as_mut_ptr(),
+            );
+        }
+    }
+    (
+        opts_ints[0],
+        opts_ints[1] != 0,
+        opts_ints[2] != 0,
+        opts_ints[3],
+        opts_ints[4] as u8,
+        url_cstr_bytes(opts_strs[0]).to_vec(),
+    )
 }
 
 fn with_dq_guard<F: FnOnce(usize)>(env: &NzbgetRsUrlCoordEnv, f: F) {
@@ -289,7 +348,44 @@ impl NzbgetRsUrlCoord {
             has_more_jobs: AtomicBool::new(true),
             wait_mu: Mutex::new(()),
             wait_cv: Condvar::new(),
+            host_env: Mutex::new(None),
+            self_weak: Mutex::new(std::sync::Weak::new()),
         }
+    }
+
+    fn effective_env(&self, caller: Option<&NzbgetRsUrlCoordEnv>) -> NzbgetRsUrlCoordEnv {
+        let mut base = self
+            .host_env
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .unwrap_or_else(|| unsafe { std::mem::zeroed() });
+        if let Some(c) = caller {
+            base.p1 = c.p1;
+            base.p2 = c.p2;
+            base.a1 = c.a1;
+            base.a2 = c.a2;
+            base.s1 = c.s1;
+            if c.with_queue_guard_cb.is_some() {
+                base.with_queue_guard_cb = c.with_queue_guard_cb;
+            }
+            if c.log_cb.is_some() {
+                base.log_cb = c.log_cb;
+            }
+            if c.query_cb.is_some() {
+                base.query_cb = c.query_cb;
+                if !c.ctx.is_null() {
+                    base.ctx = c.ctx;
+                }
+            }
+            if c.action_cb.is_some() {
+                base.action_cb = c.action_cb;
+                if !c.ctx.is_null() {
+                    base.ctx = c.ctx;
+                }
+            }
+        }
+        base
     }
 
     fn is_stopped(&self, env: &NzbgetRsUrlCoordEnv) -> bool {
@@ -309,73 +405,44 @@ impl NzbgetRsUrlCoord {
     }
 
     fn reset_hanging_downloads(&self, env: &NzbgetRsUrlCoordEnv) {
-        let (Some(q), Some(act)) = (env.query_cb, env.action_cb) else {
-            return;
-        };
-        let mut opts_ints = [0 as c_int; 5];
-        let mut opts_strs = [std::ptr::null::<c_char>(); 4];
-        unsafe {
-            q(
-                env.ctx,
-                2,
-                0,
-                opts_ints.as_mut_ptr(),
-                std::ptr::null_mut(),
-                opts_strs.as_mut_ptr(),
-            );
-        }
-        let url_timeout = opts_ints[3];
+        let (_, _, _, url_timeout, _, _) = url_runtime_opts(env);
         if url_timeout == 0 {
             return;
         }
         with_dq_guard(env, |_dq_ptr| {
             let tm = url_now_sec();
-            let dl_ptrs: Vec<usize> = self
-                .active
-                .lock()
-                .map(|g| g.iter().map(|s| s.dl_ptr).collect())
-                .unwrap_or_default();
-            for dl_ptr in dl_ptrs {
-                let mut dl_ints = [0 as c_int; 4];
-                let mut last_upd: i64 = 0;
-                let mut dl_strs = [std::ptr::null::<c_char>(); 4];
-                unsafe {
-                    q(
-                        env.ctx,
-                        5,
-                        dl_ptr,
-                        dl_ints.as_mut_ptr(),
-                        &mut last_upd,
-                        dl_strs.as_mut_ptr(),
-                    );
-                }
-                if is_hanging_url_download(tm, last_upd, url_timeout, dl_ints[0], AD_RUNNING) {
-                    let info_name = url_cstr_bytes(dl_strs[0]).to_vec();
-                    url_emit_log(
-                        env,
-                        4,
-                        &[b"Cancelling hanging url download ", &info_name],
-                    );
-                    unsafe {
-                        act(
-                            env.ctx,
-                            1,
-                            dl_ptr,
-                            0,
-                            0,
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                        );
+            #[cfg(unix)]
+            {
+                let dls: Vec<Arc<crate::net::NzbgetRsWebDl>> = self
+                    .active
+                    .lock()
+                    .map(|g| g.iter().map(|s| Arc::clone(&s.dl)).collect())
+                    .unwrap_or_default();
+                for dl in dls {
+                    if is_hanging_url_download(
+                        tm,
+                        dl.last_update_time(),
+                        url_timeout,
+                        dl.status_code(),
+                        AD_RUNNING,
+                    ) {
+                        let info_name = dl.info_name_bytes();
+                        url_emit_log(env, 4, &[b"Cancelling hanging url download ", &info_name]);
+                        dl.stop();
                     }
                 }
             }
+            #[cfg(not(unix))]
+            let _ = tm;
         });
     }
 
     fn wait_jobs(&self, env: &NzbgetRsUrlCoordEnv) {
-        url_emit_log(env, 0, &[b"UrlCoordinator: waiting for Downloads to complete"]);
+        url_emit_log(
+            env,
+            0,
+            &[b"UrlCoordinator: waiting for Downloads to complete"],
+        );
         loop {
             let mut is_empty = true;
             with_dq_guard(env, |_dq_ptr| {
@@ -396,17 +463,20 @@ impl NzbgetRsUrlCoord {
         };
         url_emit_log(env, 0, &[b"Entering UrlCoordinator-loop"]);
 
-        while unsafe {
-            q(
-                env.ctx,
-                0,
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        } == 0
-        {
+        while !crate::ffi::is_queue_loaded() {
+            if unsafe {
+                q(
+                    env.ctx,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            } != 0
+            {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
 
@@ -415,23 +485,8 @@ impl NzbgetRsUrlCoord {
             let mut download_started = false;
 
             with_dq_guard(env, |dq_ptr| {
-                let mut opts_ints = [0 as c_int; 5];
-                let mut opts_strs = [std::ptr::null::<c_char>(); 4];
-                unsafe {
-                    q(
-                        env.ctx,
-                        2,
-                        0,
-                        opts_ints.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                        opts_strs.as_mut_ptr(),
-                    );
-                }
-                let url_connections = opts_ints[0];
-                let pause_download = opts_ints[1] != 0;
-                let url_force = opts_ints[2] != 0;
-                let sep = opts_ints[4] as u8;
-                let temp_dir = url_cstr_bytes(opts_strs[0]).to_vec();
+                let (url_connections, pause_download, url_force, _, sep, temp_dir) =
+                    url_runtime_opts(env);
 
                 let active_len = self.active.lock().map(|g| g.len() as i32).unwrap_or(0);
                 let mut chosen_nzb: usize = 0;
@@ -485,44 +540,83 @@ impl NzbgetRsUrlCoord {
 
                     if chosen_nzb != 0 && (!pause_download || url_force) {
                         url_emit_log(env, 0, &[b"Starting new UrlDownloader"]);
-                        let tmp_path =
-                            url_bytes_to_cstring(&format_temp_url_path(&temp_dir, sep, chosen_id));
-                        let dl_ptr = unsafe {
+                        let tmp_path = format_temp_url_path(&temp_dir, sep, chosen_id);
+                        let mut nzb_ints = [0 as c_int; 4];
+                        let mut nzb_strs = [std::ptr::null::<c_char>(); 4];
+                        unsafe {
+                            q(
+                                env.ctx,
+                                6,
+                                chosen_nzb,
+                                nzb_ints.as_mut_ptr(),
+                                std::ptr::null_mut(),
+                                nzb_strs.as_mut_ptr(),
+                            );
+                        }
+                        let url_bytes = url_cstr_bytes(nzb_strs[0]).to_vec();
+                        let fn_bytes = url_cstr_bytes(nzb_strs[1]).to_vec();
+                        let url_c = url_bytes_to_cstring(&url_bytes);
+                        let info_name =
+                            crate::downloadinfo::make_nice_url_name(Some(&url_c), &fn_bytes);
+                        unsafe {
                             act(
                                 env.ctx,
-                                0,
+                                3,
                                 chosen_nzb,
                                 0,
                                 0,
+                                1,
+                                std::ptr::null(),
+                                std::ptr::null(),
+                                std::ptr::null(),
+                            );
+                            act(
+                                env.ctx,
+                                3,
+                                chosen_nzb,
                                 0,
-                                tmp_path.as_ptr(),
+                                1,
+                                LS_RUNNING,
                                 std::ptr::null(),
                                 std::ptr::null(),
-                            )
-                        };
-                        if dl_ptr != 0 {
+                                std::ptr::null(),
+                            );
+                        }
+                        #[cfg(unix)]
+                        {
+                            let weak_s =
+                                self.self_weak.lock().map(|g| g.clone()).unwrap_or_default();
+                            let weak_h = weak_s.clone();
+                            let dl = Arc::new(crate::net::NzbgetRsWebDl::new_configured(
+                                &url_bytes,
+                                &info_name,
+                                &tmp_path,
+                                url_force,
+                                true,
+                                2,
+                                Some(Box::new(move |dl_ref, st_enum| {
+                                    if let Some(uc) = weak_s.upgrade() {
+                                        uc.on_webdl_status(dl_ref, chosen_nzb, st_enum as i32);
+                                    }
+                                })),
+                                Some(Box::new(move |dl_ref, hdr_line| {
+                                    if let Some(uc) = weak_h.upgrade() {
+                                        uc.on_webdl_header(dl_ref, chosen_nzb, hdr_line);
+                                    }
+                                })),
+                            ));
                             if let Ok(mut g) = self.active.lock() {
                                 g.push(ActiveUrlSlot {
-                                    dl_ptr,
+                                    dl: Arc::clone(&dl),
                                     nzb_ptr: chosen_nzb,
                                     category: Vec::new(),
                                 });
                             }
-                            unsafe {
-                                act(
-                                    env.ctx,
-                                    1,
-                                    dl_ptr,
-                                    0,
-                                    3,
-                                    0,
-                                    std::ptr::null(),
-                                    std::ptr::null(),
-                                    std::ptr::null(),
-                                );
-                            }
+                            crate::net::NzbgetRsWebDl::spawn(dl);
                             download_started = true;
                         }
+                        #[cfg(not(unix))]
+                        let _ = (info_name, tmp_path);
                     }
                 }
 
@@ -558,29 +652,17 @@ impl NzbgetRsUrlCoord {
     }
 
     fn stop_downloads(&self, env: &NzbgetRsUrlCoordEnv) {
-        let Some(act) = env.action_cb else {
-            return;
-        };
         url_emit_log(env, 0, &[b"Stopping UrlDownloads"]);
         with_dq_guard(env, |_dq_ptr| {
-            let dl_ptrs: Vec<usize> = self
-                .active
-                .lock()
-                .map(|g| g.iter().map(|s| s.dl_ptr).collect())
-                .unwrap_or_default();
-            for dl_ptr in dl_ptrs {
-                unsafe {
-                    act(
-                        env.ctx,
-                        1,
-                        dl_ptr,
-                        0,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                    );
+            #[cfg(unix)]
+            {
+                let dls: Vec<Arc<crate::net::NzbgetRsWebDl>> = self
+                    .active
+                    .lock()
+                    .map(|g| g.iter().map(|s| Arc::clone(&s.dl)).collect())
+                    .unwrap_or_default();
+                for dl in dls {
+                    dl.stop();
                 }
             }
         });
@@ -598,22 +680,24 @@ impl NzbgetRsUrlCoord {
         }
     }
 
-    fn on_process_header(&self, env: &NzbgetRsUrlCoordEnv) {
-        let line = url_cstr_bytes(env.s1);
+    #[cfg(unix)]
+    fn on_webdl_header(&self, dl: &crate::net::NzbgetRsWebDl, nzb_ptr: usize, line: &[u8]) {
+        let env = self.effective_env(None);
+        let dl_key = dl as *const crate::net::NzbgetRsWebDl;
         match dnzb_header(line) {
             Dnzb::None => {}
             Dnzb::Category(from, to) => {
                 let cat = line[from..to].to_vec();
                 if let Ok(mut g) = self.active.lock() {
-                    if let Some(slot) = g.iter_mut().find(|s| s.dl_ptr == env.p1) {
+                    if let Some(slot) = g.iter_mut().find(|s| Arc::as_ptr(&s.dl) == dl_key) {
                         slot.category = cat.clone();
                     }
                 }
-                url_emit_log(env, 0, &[b"Category: ", &cat]);
+                url_emit_log(&env, 0, &[b"Category: ", &cat]);
             }
             Dnzb::Param(name, val) => {
-                url_emit_log(env, 0, &[b"X-DNZB: ", &name]);
-                url_emit_log(env, 0, &[b"Value: ", &val]);
+                url_emit_log(&env, 0, &[b"X-DNZB: ", &name]);
+                url_emit_log(&env, 0, &[b"Value: ", &val]);
                 if let Some(act) = env.action_cb {
                     let c_name = url_bytes_to_cstring(&name);
                     let c_val = url_bytes_to_cstring(&val);
@@ -621,7 +705,7 @@ impl NzbgetRsUrlCoord {
                         act(
                             env.ctx,
                             2,
-                            env.p2,
+                            nzb_ptr,
                             0,
                             0,
                             0,
@@ -635,34 +719,22 @@ impl NzbgetRsUrlCoord {
         }
     }
 
-    fn on_downloader_update(&self, env: &NzbgetRsUrlCoordEnv) {
-        url_emit_log(env, 0, &[b"Notification from UrlDownloader received"]);
-        let dl_ptr = env.p1;
+    #[cfg(unix)]
+    fn on_webdl_status(&self, dl: &crate::net::NzbgetRsWebDl, nzb_ptr: usize, status: i32) {
+        let env = self.effective_env(None);
+        url_emit_log(&env, 0, &[b"Notification from UrlDownloader received"]);
         let (Some(q), Some(act)) = (env.query_cb, env.action_cb) else {
             return;
         };
-        let mut dl_ints = [0 as c_int; 4];
-        let mut last_upd: i64 = 0;
-        let mut dl_strs = [std::ptr::null::<c_char>(); 4];
-        let nzb_ptr = unsafe {
-            q(
-                env.ctx,
-                5,
-                dl_ptr,
-                dl_ints.as_mut_ptr(),
-                &mut last_upd,
-                dl_strs.as_mut_ptr(),
-            )
-        };
-        let status = dl_ints[0];
         if status != AD_FINISHED && status != AD_FAILED && status != AD_RETRY {
             return;
         }
 
-        url_emit_log(env, 0, &[b"URL downloaded"]);
+        url_emit_log(&env, 0, &[b"URL downloaded"]);
 
-        let orig_fn_ptr = dl_strs[1];
-        let out_fn_bytes = url_cstr_bytes(dl_strs[2]).to_vec();
+        let orig_fn_opt = dl.original_filename_bytes();
+        let out_fn_bytes = dl.output_filename_bytes();
+        let dl_key = dl as *const crate::net::NzbgetRsWebDl;
 
         let mut nzb_ints = [0 as c_int; 4];
         let mut nzb_strs = [std::ptr::null::<c_char>(); 4];
@@ -677,21 +749,18 @@ impl NzbgetRsUrlCoord {
             );
         }
         let nzb_url = url_cstr_bytes(nzb_strs[0]).to_vec();
-        let origname: Vec<u8> = if !orig_fn_ptr.is_null() {
-            url_cstr_bytes(orig_fn_ptr).to_vec()
-        } else {
-            crate::nserv::base_file_name(&nzb_url).to_vec()
-        };
+        let origname: Vec<u8> =
+            orig_fn_opt.unwrap_or_else(|| crate::nserv::base_file_name(&nzb_url).to_vec());
         let valid_filename = crate::paths::make_valid_filename(&origname, false);
-        url_emit_log(env, 0, &[b"Filename: [", &valid_filename, b"]"]);
+        url_emit_log(&env, 0, &[b"Filename: [", &valid_filename, b"]"]);
 
         let mut retry = false;
         let mut dnzb_cat = Vec::new();
         let mut final_url_status = LS_NONE;
 
-        with_dq_guard(env, |dq_ptr| {
+        with_dq_guard(&env, |dq_ptr| {
             if let Ok(mut g) = self.active.lock() {
-                if let Some(pos) = g.iter().position(|s| s.dl_ptr == dl_ptr) {
+                if let Some(pos) = g.iter().position(|s| Arc::as_ptr(&s.dl) == dl_key) {
                     let removed = g.remove(pos);
                     dnzb_cat = removed.category;
                 }
@@ -818,21 +887,10 @@ impl NzbgetRsUrlCoord {
             let is_archive = if c_name.as_bytes().is_empty() {
                 false
             } else {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStrExt;
-                    crate::unpack::can_extract_with_zipfast(std::path::Path::new(
-                        std::ffi::OsStr::from_bytes(c_name.as_bytes()),
-                    ))
-                }
-                #[cfg(not(unix))]
-                {
-                    std::str::from_utf8(c_name.as_bytes())
-                        .ok()
-                        .is_some_and(|s| {
-                            crate::unpack::can_extract_with_zipfast(std::path::Path::new(s))
-                        })
-                }
+                use std::os::unix::ffi::OsStrExt;
+                crate::unpack::can_extract_with_zipfast(std::path::Path::new(
+                    std::ffi::OsStr::from_bytes(c_name.as_bytes()),
+                ))
             };
 
             let add_status = unsafe {
@@ -887,7 +945,7 @@ impl NzbgetRsUrlCoord {
             );
         }
 
-        with_dq_guard(env, |dq_ptr| unsafe {
+        with_dq_guard(&env, |dq_ptr| unsafe {
             act(
                 env.ctx,
                 3,
@@ -961,26 +1019,17 @@ impl NzbgetRsUrlCoord {
                     std::ptr::null(),
                 );
             }
-            let found_dl = self
-                .active
-                .lock()
-                .ok()
-                .and_then(|g| g.iter().find(|s| s.nzb_ptr == nzb_ptr).map(|s| s.dl_ptr));
-            if let Some(dl_ptr) = found_dl {
-                unsafe {
-                    act(
-                        env.ctx,
-                        1,
-                        dl_ptr,
-                        0,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                    );
+            #[cfg(unix)]
+            {
+                let found_dl = self.active.lock().ok().and_then(|g| {
+                    g.iter()
+                        .find(|s| s.nzb_ptr == nzb_ptr)
+                        .map(|s| Arc::clone(&s.dl))
+                });
+                if let Some(dl) = found_dl {
+                    dl.stop();
+                    return 1;
                 }
-                return 1;
             }
             return 0;
         }
@@ -1097,34 +1146,22 @@ impl NzbgetRsUrlCoord {
     }
 
     fn log_debug_info(&self, env: &NzbgetRsUrlCoordEnv) {
-        let Some(act) = env.action_cb else {
-            return;
-        };
         url_emit_log(env, 2, &[b"   ---------- UrlCoordinator"]);
         with_dq_guard(env, |_dq_ptr| {
-            let dl_ptrs: Vec<usize> = self
-                .active
-                .lock()
-                .map(|g| g.iter().map(|s| s.dl_ptr).collect())
-                .unwrap_or_default();
-            url_emit_log(
-                env,
-                2,
-                &[format!("    Active Downloads: {}", dl_ptrs.len()).as_bytes()],
-            );
-            for dl_ptr in dl_ptrs {
-                unsafe {
-                    act(
-                        env.ctx,
-                        1,
-                        dl_ptr,
-                        0,
-                        1,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                    );
+            #[cfg(unix)]
+            {
+                let dls: Vec<Arc<crate::net::NzbgetRsWebDl>> = self
+                    .active
+                    .lock()
+                    .map(|g| g.iter().map(|s| Arc::clone(&s.dl)).collect())
+                    .unwrap_or_default();
+                url_emit_log(
+                    env,
+                    2,
+                    &[format!("    Active Downloads: {}", dls.len()).as_bytes()],
+                );
+                for dl in dls {
+                    dl.log_debug_info();
                 }
             }
         });
@@ -1132,41 +1169,63 @@ impl NzbgetRsUrlCoord {
 
     fn destroy_remaining(&self, env: &NzbgetRsUrlCoordEnv) {
         url_emit_log(env, 0, &[b"Destroying UrlCoordinator"]);
-        if let Some(act) = env.action_cb {
-            let dl_ptrs: Vec<usize> = self
-                .active
-                .lock()
-                .map(|mut g| g.drain(..).map(|s| s.dl_ptr).collect())
-                .unwrap_or_default();
-            for dl_ptr in dl_ptrs {
-                unsafe {
-                    act(
-                        env.ctx,
-                        1,
-                        dl_ptr,
-                        0,
-                        2,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                    );
-                }
-            }
+        if let Ok(mut g) = self.active.lock() {
+            g.clear();
         }
         url_emit_log(env, 0, &[b"UrlCoordinator destroyed"]);
     }
 }
 
+static ACTIVE_URL_COORD: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsUrlCoord>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn active_url_coord() -> Option<Arc<NzbgetRsUrlCoord>> {
+    ACTIVE_URL_COORD
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+}
+
+impl NzbgetRsUrlCoord {
+    pub(crate) fn delete_queue_entry_active(
+        &self,
+        dq_ptr: usize,
+        nzb_ptr: usize,
+        avoid_history: bool,
+    ) -> bool {
+        let mut env = self.effective_env(None);
+        env.p1 = dq_ptr;
+        env.p2 = nzb_ptr;
+        env.a1 = c_int::from(avoid_history);
+        self.delete_queue_entry(&env) != 0
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn nzbget_rs_url_coord_new() -> *mut NzbgetRsUrlCoord {
-    Box::into_raw(Box::new(NzbgetRsUrlCoord::new()))
+    let arc = Arc::new(NzbgetRsUrlCoord::new());
+    if let Ok(mut w) = arc.self_weak.lock() {
+        *w = Arc::downgrade(&arc);
+    }
+    if let Ok(mut g) = ACTIVE_URL_COORD.write() {
+        *g = Some(Arc::downgrade(&arc));
+    }
+    Arc::into_raw(arc).cast_mut()
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_url_coord_free(coord: *mut NzbgetRsUrlCoord) {
     if !coord.is_null() {
-        drop(Box::from_raw(coord));
+        let arc = Arc::from_raw(coord.cast_const());
+        let wk = Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_URL_COORD.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+        drop(arc);
     }
 }
 
@@ -1174,13 +1233,12 @@ pub unsafe extern "C" fn nzbget_rs_url_coord_free(coord: *mut NzbgetRsUrlCoord) 
 /// - `0`: `Run()`
 /// - `1`: `Stop()`
 /// - `2`: `DownloadQueueUpdate(action)`
-/// - `3`: `UrlDownloader::ProcessHeader(dl_ptr, nzb_ptr, line)`
-/// - `4`: `Update(dl_ptr)` (`UrlCompleted`)
 /// - `5`: `DeleteQueueEntry(dq_ptr, nzb_ptr, avoid_history) -> 1/0`
 /// - `6`: `AddUrlToQueue(nzb_ptr, holder_ptr, add_first)`
 /// - `7`: `HasMoreJobs() -> 1/0`
 /// - `8`: `LogDebugInfo()`
 /// - `9`: `~UrlCoordinator()` cleanup
+/// - `10`: bind host environment (`ctx`, `with_queue_guard_cb`, `query_cb`, `action_cb`)
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_url_coord_exec(
     coord: *const NzbgetRsUrlCoord,
@@ -1193,41 +1251,39 @@ pub unsafe extern "C" fn nzbget_rs_url_coord_exec(
     if op == 7 {
         return c_int::from(coord.has_more_jobs.load(Ordering::SeqCst));
     }
-    let Some(env) = env.as_ref() else {
-        return 0;
-    };
+    if op == 10 {
+        if let Some(e) = env.as_ref() {
+            if let Ok(mut g) = coord.host_env.lock() {
+                *g = Some(*e);
+            }
+        }
+        return 1;
+    }
+    let eff = coord.effective_env(env.as_ref());
     match op {
         0 => {
-            coord.run_loop(env);
+            coord.run_loop(&eff);
             1
         }
         1 => {
-            coord.stop_downloads(env);
+            coord.stop_downloads(&eff);
             1
         }
         2 => {
-            coord.on_queue_update(env);
+            coord.on_queue_update(&eff);
             1
         }
-        3 => {
-            coord.on_process_header(env);
-            1
-        }
-        4 => {
-            coord.on_downloader_update(env);
-            1
-        }
-        5 => coord.delete_queue_entry(env),
+        5 => coord.delete_queue_entry(&eff),
         6 => {
-            coord.add_url_to_queue(env);
+            coord.add_url_to_queue(&eff);
             1
         }
         8 => {
-            coord.log_debug_info(env);
+            coord.log_debug_info(&eff);
             1
         }
         9 => {
-            coord.destroy_remaining(env);
+            coord.destroy_remaining(&eff);
             1
         }
         _ => 0,
@@ -1249,7 +1305,10 @@ mod tests {
             Dnzb::Category(18, 20)
         );
         assert_eq!(dnzb_header(b"X-DNZB-Category:"), Dnzb::Category(16, 16));
-        assert_eq!(dnzb_header(b"X-DNZB-Category: \r\n"), Dnzb::Category(16, 16));
+        assert_eq!(
+            dnzb_header(b"X-DNZB-Category: \r\n"),
+            Dnzb::Category(16, 16)
+        );
         assert_eq!(
             dnzb_header(b"X-DNZB-Name:  Some Show \r\n"),
             param(b"*DNZB:Name", b"Some Show")

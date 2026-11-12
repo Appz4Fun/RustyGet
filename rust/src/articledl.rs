@@ -416,7 +416,7 @@ fn memory_monitor_update_state() -> i32 {
     interval
 }
 
-fn memory_monitor_init_options(reset_state: bool) {
+pub(crate) fn memory_monitor_init_options(reset_state: bool) {
     MEM_ACTIVE.store(true, Ordering::Release);
     if reset_state {
         MEM_TIER.store(PRESSURE_NORMAL, Ordering::Release);

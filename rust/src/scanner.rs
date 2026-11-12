@@ -221,6 +221,7 @@ static SCANNER_ID_GEN: AtomicI32 = AtomicI32::new(0);
 static SCANNER_UNPACK_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct NzbgetRsScannerEnv {
     pub ctx: *mut c_void,
     pub nzb_dir: *const c_char,
@@ -305,6 +306,9 @@ pub struct NzbgetRsScannerEnv {
     >,
 }
 
+unsafe impl Send for NzbgetRsScannerEnv {}
+unsafe impl Sync for NzbgetRsScannerEnv {}
+
 struct ScanFileData {
     filename: Vec<u8>,
     size: i64,
@@ -338,9 +342,91 @@ struct ScannerInner {
 
 pub struct NzbgetRsScanner {
     inner: Mutex<ScannerInner>,
+    host_env: Mutex<Option<NzbgetRsScannerEnv>>,
     requested_nzb_dir_scan: AtomicBool,
     scanning: AtomicBool,
     nzb_dir_interval: AtomicI32,
+}
+
+static ACTIVE_SCANNER: std::sync::OnceLock<Mutex<Option<Arc<NzbgetRsScanner>>>> =
+    std::sync::OnceLock::new();
+
+fn active_scanner_slot() -> &'static Mutex<Option<Arc<NzbgetRsScanner>>> {
+    ACTIVE_SCANNER.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn register_active_scanner(scanner: Arc<NzbgetRsScanner>) {
+    *active_scanner_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(scanner);
+}
+
+pub(crate) fn unregister_active_scanner(raw: *const NzbgetRsScanner) {
+    let mut slot = active_scanner_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if slot.as_ref().is_some_and(|arc| Arc::as_ptr(arc) == raw) {
+        *slot = None;
+    }
+}
+
+pub(crate) fn active_scanner() -> Option<Arc<NzbgetRsScanner>> {
+    active_scanner_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+struct ScannerRuntimeOpts {
+    nzb_dir: Vec<u8>,
+    temp_dir: Vec<u8>,
+    nzb_dir_interval: i32,
+    nzb_dir_file_age: i32,
+    archive_scan: bool,
+    archive_action: i32,
+    queue_loaded: bool,
+    pause_scan: bool,
+    sep: u8,
+}
+
+fn resolve_runtime_opts(env: &NzbgetRsScannerEnv) -> ScannerRuntimeOpts {
+    if !env.nzb_dir.is_null() {
+        return ScannerRuntimeOpts {
+            nzb_dir: cstr_bytes(env.nzb_dir).to_vec(),
+            temp_dir: cstr_bytes(env.temp_dir).to_vec(),
+            nzb_dir_interval: env.nzb_dir_interval,
+            nzb_dir_file_age: env.nzb_dir_file_age,
+            archive_scan: env.archive_scan != 0,
+            archive_action: env.archive_action,
+            queue_loaded: env.queue_loaded != 0,
+            pause_scan: env.pause_scan != 0,
+            sep: if env.path_sep == 0 {
+                b'/'
+            } else {
+                env.path_sep as u8
+            },
+        };
+    }
+    let opts = crate::options::active_options();
+    ScannerRuntimeOpts {
+        nzb_dir: opts
+            .as_deref()
+            .map_or_else(Vec::new, |o| o.str_bytes(7).to_vec()),
+        temp_dir: opts
+            .as_deref()
+            .map_or_else(Vec::new, |o| o.str_bytes(5).to_vec()),
+        nzb_dir_interval: opts.as_deref().map_or(0, |o| o.scalars().nzb_dir_interval),
+        nzb_dir_file_age: opts.as_deref().map_or(0, |o| o.scalars().nzb_dir_file_age),
+        archive_scan: opts
+            .as_deref()
+            .is_some_and(|o| o.scalars().nzb_dir_archive_scan != 0),
+        archive_action: opts
+            .as_deref()
+            .map_or(0, |o| o.scalars().nzb_dir_archive_action),
+        queue_loaded: crate::ffi::is_queue_loaded(),
+        pause_scan: crate::ffi::active_workstate().is_some_and(|ws| ws.pause_scan()),
+        sep: crate::paths::PATH_SEPARATOR as u8,
+    }
 }
 
 fn cstr_bytes<'a>(ptr: *const c_char) -> &'a [u8] {
@@ -371,6 +457,18 @@ fn emit_log(env: &NzbgetRsScannerEnv, kind: c_int, msg: &[u8]) {
     if let Some(cb) = env.log_cb {
         let c = to_cstr_sanitized(msg);
         unsafe { cb(env.ctx, kind, c.as_ptr()) };
+    } else if env.nzb_dir.is_null() {
+        #[cfg(unix)]
+        {
+            let active_kind = match kind {
+                LOG_DEBUG => 3,
+                LOG_DETAIL => 4,
+                LOG_INFO => 0,
+                LOG_WARN => 1,
+                _ => 2,
+            };
+            crate::log::log_active_bytes(active_kind, msg);
+        }
     }
 }
 
@@ -405,23 +503,37 @@ fn capture_params(env: &NzbgetRsScannerEnv) -> Vec<(CString, CString)> {
     list
 }
 
-fn resolve_category(env: &NzbgetRsScannerEnv, category: &[u8], filename: &[u8]) -> Vec<u8> {
-    let cat_c = to_cstr_sanitized(category);
+fn find_matched_category(env: &NzbgetRsScannerEnv, cat_c: &CStr) -> Option<Vec<u8>> {
     if let Some(find_cb) = env.find_category_cb {
         let matched_ptr = unsafe { find_cb(env.ctx, cat_c.as_ptr(), 1) };
         if !matched_ptr.is_null() {
-            let matched = cstr_bytes(matched_ptr);
-            if matched != category {
-                let mut msg = b"Category '".to_vec();
-                msg.extend_from_slice(category);
-                msg.extend_from_slice(b"' matched to '");
-                msg.extend_from_slice(matched);
-                msg.extend_from_slice(b"' for '");
-                msg.extend_from_slice(filename);
-                msg.push(b'\'');
-                emit_log(env, LOG_DETAIL, &msg);
-                return matched.to_vec();
+            return Some(cstr_bytes(matched_ptr).to_vec());
+        }
+        return None;
+    }
+    if env.nzb_dir.is_null() {
+        if let Some(opts) = crate::options::active_options() {
+            if let Some(cat) = opts.find_category(cat_c, true) {
+                return Some(cat.name.to_bytes().to_vec());
             }
+        }
+    }
+    None
+}
+
+fn resolve_category(env: &NzbgetRsScannerEnv, category: &[u8], filename: &[u8]) -> Vec<u8> {
+    let cat_c = to_cstr_sanitized(category);
+    if let Some(matched) = find_matched_category(env, &cat_c) {
+        if matched.as_slice() != category {
+            let mut msg = b"Category '".to_vec();
+            msg.extend_from_slice(category);
+            msg.extend_from_slice(b"' matched to '");
+            msg.extend_from_slice(&matched);
+            msg.extend_from_slice(b"' for '");
+            msg.extend_from_slice(filename);
+            msg.push(b'\'');
+            emit_log(env, LOG_DETAIL, &msg);
+            return matched;
         }
     }
     category.to_vec()
@@ -713,7 +825,14 @@ fn add_file_to_queue(
     let cat_c = to_cstr_sanitized(category);
     let mut detected_cat_ptr: *const c_char = std::ptr::null();
     let mut ok = if let Some(parse_cb) = env.parse_nzb_cb {
-        unsafe { parse_cb(env.ctx, file_c.as_ptr(), cat_c.as_ptr(), &mut detected_cat_ptr) != 0 }
+        unsafe {
+            parse_cb(
+                env.ctx,
+                file_c.as_ptr(),
+                cat_c.as_ptr(),
+                &mut detected_cat_ptr,
+            ) != 0
+        }
     } else {
         false
     };
@@ -757,12 +876,7 @@ fn add_file_to_queue(
             category.to_vec()
         } else {
             let det_c = to_cstr_sanitized(&detected_cat);
-            let matched_ptr = env
-                .find_category_cb
-                .map(|cb| unsafe { cb(env.ctx, det_c.as_ptr(), 1) })
-                .unwrap_or(std::ptr::null());
-            if !matched_ptr.is_null() {
-                let matched = cstr_bytes(matched_ptr).to_vec();
+            if let Some(matched) = find_matched_category(env, &det_c) {
                 let mut msg = b"Category '".to_vec();
                 msg.extend_from_slice(&matched);
                 msg.extend_from_slice(b"' matched to '");
@@ -831,9 +945,51 @@ impl NzbgetRsScanner {
                 pass: 0,
                 scan_script: false,
             }),
+            host_env: Mutex::new(None),
             requested_nzb_dir_scan: AtomicBool::new(false),
             scanning: AtomicBool::new(false),
             nzb_dir_interval: AtomicI32::new(0),
+        }
+    }
+
+    fn effective_env(&self, caller: Option<&NzbgetRsScannerEnv>) -> Option<NzbgetRsScannerEnv> {
+        match caller {
+            Some(c) => {
+                let mut merged = *c;
+                if merged.parse_nzb_cb.is_none() {
+                    if let Some(stored) = *self.host_env.lock().unwrap_or_else(|e| e.into_inner()) {
+                        if merged.ctx.is_null() {
+                            merged.ctx = stored.ctx;
+                        }
+                        if merged.iter_params_cb.is_none() {
+                            merged.iter_params_cb = stored.iter_params_cb;
+                        }
+                        if merged.work_params_cb.is_none() {
+                            merged.work_params_cb = stored.work_params_cb;
+                        }
+                        if merged.scan_script_cb.is_none() {
+                            merged.scan_script_cb = stored.scan_script_cb;
+                        }
+                        if merged.parse_nzb_cb.is_none() {
+                            merged.parse_nzb_cb = stored.parse_nzb_cb;
+                        }
+                        if merged.commit_nzb_cb.is_none() {
+                            merged.commit_nzb_cb = stored.commit_nzb_cb;
+                        }
+                        if merged.wake_cb.is_none() {
+                            merged.wake_cb = stored.wake_cb;
+                        }
+                        if merged.log_cb.is_none() {
+                            merged.log_cb = stored.log_cb;
+                        }
+                        if merged.find_category_cb.is_none() {
+                            merged.find_category_cb = stored.find_category_cb;
+                        }
+                    }
+                }
+                Some(merged)
+            }
+            None => *self.host_env.lock().unwrap_or_else(|e| e.into_inner()),
         }
     }
 
@@ -843,7 +999,19 @@ impl NzbgetRsScanner {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             inner.scan_script = has_scan_script;
         }
-        cleanup_stale_unpack_dir(cstr_bytes(env.temp_dir), env);
+        let rt = resolve_runtime_opts(env);
+        cleanup_stale_unpack_dir(&rt.temp_dir, env);
+    }
+
+    pub(crate) fn init_options_active(&self) {
+        #[cfg(unix)]
+        let has_scan = crate::script::has_scan_scripts_active();
+        #[cfg(not(unix))]
+        let has_scan = false;
+        let env = self
+            .effective_env(None)
+            .unwrap_or_else(|| unsafe { std::mem::zeroed() });
+        self.init_options(has_scan, &env);
     }
 
     fn service_interval(&self, opt_nzb_dir_interval: i32) -> i32 {
@@ -856,6 +1024,11 @@ impl NzbgetRsScanner {
         }
     }
 
+    pub(crate) fn service_interval_active(&self) -> i32 {
+        let opt_iv = crate::options::active_options().map_or(0, |o| o.scalars().nzb_dir_interval);
+        self.service_interval(opt_iv)
+    }
+
     fn scan_nzb_dir(&self, sync_mode: bool, env: &NzbgetRsScannerEnv) {
         {
             let _guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -863,6 +1036,8 @@ impl NzbgetRsScanner {
             self.requested_nzb_dir_scan.store(true, Ordering::SeqCst);
             if let Some(wake) = env.wake_cb {
                 unsafe { wake(env.ctx) };
+            } else if env.nzb_dir.is_null() {
+                crate::scheduler::wake_active_service_coord();
             }
         }
         while sync_mode
@@ -873,17 +1048,25 @@ impl NzbgetRsScanner {
         }
     }
 
+    pub(crate) fn scan_nzb_dir_active(&self, sync_mode: bool) {
+        let env = self
+            .effective_env(None)
+            .unwrap_or_else(|| unsafe { std::mem::zeroed() });
+        self.scan_nzb_dir(sync_mode, &env);
+    }
+
     fn service_work(&self, env: &NzbgetRsScannerEnv) {
         emit_log(env, LOG_DEBUG, b"Scanner service work");
 
-        if env.queue_loaded == 0 {
+        let rt = resolve_runtime_opts(env);
+        if !rt.queue_loaded {
             return;
         }
 
         self.nzb_dir_interval
-            .store(env.nzb_dir_interval, Ordering::SeqCst);
+            .store(rt.nzb_dir_interval, Ordering::SeqCst);
 
-        if env.pause_scan != 0 && !self.requested_nzb_dir_scan.load(Ordering::SeqCst) {
+        if rt.pause_scan && !self.requested_nzb_dir_scan.load(Ordering::SeqCst) {
             return;
         }
 
@@ -894,46 +1077,53 @@ impl NzbgetRsScanner {
         let check_stat = !self.requested_nzb_dir_scan.swap(false, Ordering::SeqCst);
         self.scanning.store(true, Ordering::SeqCst);
 
-        let nzb_dir = cstr_bytes(env.nzb_dir);
-        let temp_dir = cstr_bytes(env.temp_dir);
-        let sep = if env.path_sep == 0 {
-            b'/'
-        } else {
-            env.path_sep as u8
-        };
+        let nzb_dir = rt.nzb_dir.as_slice();
+        let temp_dir = rt.temp_dir.as_slice();
+        let sep = rt.sep;
 
-        if env.archive_scan != 0 {
+        if rt.archive_scan {
             let nzb_dir_path = crate::fsops::path(nzb_dir);
             let archives = find_archives(
                 nzb_dir_path,
                 check_stat,
-                env.nzb_dir_file_age,
+                rt.nzb_dir_file_age,
                 &mut inner.file_list,
                 env,
             );
             for archive in &archives {
                 let parent = archive.parent().unwrap_or(nzb_dir_path);
-                let _ = process_archive(
-                    archive,
-                    parent,
-                    temp_dir,
-                    nzb_dir,
-                    env.archive_action,
-                    env,
-                );
+                let _ = process_archive(archive, parent, temp_dir, nzb_dir, rt.archive_action, env);
             }
         }
 
-        Self::check_incoming_nzbs(&mut inner, nzb_dir, b"", check_stat, sep, env, 0);
+        Self::check_incoming_nzbs(
+            &mut inner,
+            nzb_dir,
+            b"",
+            check_stat,
+            sep,
+            rt.nzb_dir_file_age,
+            env,
+            0,
+        );
         if !check_stat && inner.scan_script {
-            Self::check_incoming_nzbs(&mut inner, nzb_dir, b"", check_stat, sep, env, 0);
+            Self::check_incoming_nzbs(
+                &mut inner,
+                nzb_dir,
+                b"",
+                check_stat,
+                sep,
+                rt.nzb_dir_file_age,
+                env,
+                0,
+            );
         }
 
         self.scanning.store(false, Ordering::SeqCst);
 
         let (next_iv, next_p) = next_pass(
-            env.nzb_dir_interval,
-            env.nzb_dir_file_age,
+            rt.nzb_dir_interval,
+            rt.nzb_dir_file_age,
             inner.scan_script,
             inner.pass,
         );
@@ -942,19 +1132,21 @@ impl NzbgetRsScanner {
 
         drop_old_files(
             &mut inner.file_list,
-            env.nzb_dir_interval,
-            env.nzb_dir_file_age,
+            rt.nzb_dir_interval,
+            rt.nzb_dir_file_age,
             env,
         );
         inner.queue_list.clear();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check_incoming_nzbs(
         inner: &mut ScannerInner,
         directory: &[u8],
         category: &[u8],
         check_stat: bool,
         sep: u8,
+        file_age: i32,
         env: &NzbgetRsScannerEnv,
         depth: usize,
     ) {
@@ -973,8 +1165,7 @@ impl NzbgetRsScanner {
                 continue;
             }
             let full_filename = join_sep(directory, sep, &filename);
-            let is_dir =
-                crate::fsops::directory_exists(&full_filename, &crate::fsops::posix_stat);
+            let is_dir = crate::fsops::directory_exists(&full_filename, &crate::fsops::posix_stat);
             if is_dir {
                 let sub_cat = if !category.is_empty() {
                     join_sep(category, sep, &filename)
@@ -987,15 +1178,11 @@ impl NzbgetRsScanner {
                     &sub_cat,
                     check_stat,
                     sep,
+                    file_age,
                     env,
                     depth + 1,
                 );
-            } else if can_process_file(
-                &mut inner.file_list,
-                &full_filename,
-                check_stat,
-                env.nzb_dir_file_age,
-            ) {
+            } else if can_process_file(&mut inner.file_list, &full_filename, check_stat, file_age) {
                 Self::process_incoming_file(
                     inner,
                     directory,
@@ -1067,7 +1254,8 @@ impl NzbgetRsScanner {
         }
 
         let mut exists = true;
-        let ran_scan_script = inner.scan_script && !extension.eq_ignore_ascii_case(b".nzb_processed");
+        let ran_scan_script =
+            inner.scan_script && !extension.eq_ignore_ascii_case(b".nzb_processed");
         if ran_scan_script {
             struct ScriptStrings<'a> {
                 nzb_name: &'a mut Vec<u8>,
@@ -1236,7 +1424,8 @@ impl NzbgetRsScanner {
             );
             return AS_FAILED;
         }
-        let temp_dir = cstr_bytes(env.temp_dir);
+        let rt = resolve_runtime_opts(env);
+        let temp_dir = rt.temp_dir.as_slice();
         if temp_dir.is_empty() {
             let mut msg = b"Failed to create file '".to_vec();
             msg.extend_from_slice(filename);
@@ -1244,7 +1433,7 @@ impl NzbgetRsScanner {
             emit_log(env, LOG_ERROR, &msg);
             return AS_FAILED;
         }
-        let nzb_dir = cstr_bytes(env.nzb_dir);
+        let nzb_dir = rt.nzb_dir.as_slice();
         if nzb_dir.is_empty() {
             let mut msg = b"Failed to create file '".to_vec();
             msg.extend_from_slice(filename);
@@ -1262,8 +1451,7 @@ impl NzbgetRsScanner {
             let mut f = match std::fs::File::create(&archive_file_path) {
                 Ok(f) => f,
                 Err(e) => {
-                    let err_bytes =
-                        crate::fsops::error_message(e.raw_os_error().unwrap_or(1));
+                    let err_bytes = crate::fsops::error_message(e.raw_os_error().unwrap_or(1));
                     let mut msg = b"Failed to create archive file '".to_vec();
                     msg.extend_from_slice(&archive_filename);
                     msg.extend_from_slice(b"' in temporary directory: ");
@@ -1285,7 +1473,7 @@ impl NzbgetRsScanner {
             }
         }
 
-        if env.archive_scan == 0 {
+        if !rt.archive_scan {
             let final_path =
                 crate::fsops::path(nzb_dir).join(crate::fsops::path(&archive_filename));
             let src_c = to_cstr_sanitized(crate::fsops::path_to_bytes(&archive_file_path));
@@ -1317,7 +1505,7 @@ impl NzbgetRsScanner {
                 crate::fsops::path(nzb_dir),
                 temp_dir,
                 nzb_dir,
-                env.archive_action,
+                rt.archive_action,
                 env,
             ) else {
                 return AS_FAILED;
@@ -1348,11 +1536,7 @@ impl NzbgetRsScanner {
                     add_top: env.add_top != 0,
                     add_paused: env.add_paused != 0,
                     params: captured_params.clone(),
-                    url_info: if index == 0 {
-                        env.url_info as usize
-                    } else {
-                        0
-                    },
+                    url_info: if index == 0 { env.url_info as usize } else { 0 },
                     result_slot: Some(slots[index].clone()),
                 });
             }
@@ -1405,13 +1589,19 @@ impl NzbgetRsScanner {
     }
 
     fn add_external_file(&self, env: &NzbgetRsScannerEnv) -> c_int {
-        let sep = if env.path_sep == 0 {
-            b'/'
-        } else {
-            env.path_sep as u8
-        };
-        let nzb_dir = cstr_bytes(env.nzb_dir);
-        let temp_dir = cstr_bytes(env.temp_dir);
+        let captured_params = capture_params(env);
+        self.add_external_with_params(env, captured_params)
+    }
+
+    fn add_external_with_params(
+        &self,
+        env: &NzbgetRsScannerEnv,
+        captured_params: Vec<(CString, CString)>,
+    ) -> c_int {
+        let rt = resolve_runtime_opts(env);
+        let sep = rt.sep;
+        let nzb_dir = rt.nzb_dir.as_slice();
+        let temp_dir = rt.temp_dir.as_slice();
         let nzb_name = cstr_bytes(env.nzb_name);
         let category = cstr_bytes(env.category);
         let dupe_key = cstr_bytes(env.dupe_key);
@@ -1421,7 +1611,6 @@ impl NzbgetRsScanner {
         } else {
             unsafe { std::slice::from_raw_parts(env.buf_ptr.cast::<u8>(), env.buf_len as usize) }
         };
-        let captured_params = capture_params(env);
         let slot: ResultSlot = Arc::new(Mutex::new((AS_SKIPPED, None)));
 
         {
@@ -1429,7 +1618,9 @@ impl NzbgetRsScanner {
             let (temp_file_name, is_nzb) = if has_disk_file {
                 (cstr_bytes(env.filename).to_vec(), false)
             } else {
-                let mut num = SCANNER_ID_GEN.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+                let mut num = SCANNER_ID_GEN
+                    .fetch_add(1, Ordering::Relaxed)
+                    .wrapping_add(1);
                 let mut candidate: Vec<u8> = Vec::new();
                 while candidate.is_empty()
                     || crate::fsops::file_exists(&candidate, &crate::fsops::posix_stat)
@@ -1522,6 +1713,55 @@ impl NzbgetRsScanner {
         }
         status
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_external_bytes_active(
+        &self,
+        nzb_name: &[u8],
+        category: &[u8],
+        auto_category: bool,
+        priority: c_int,
+        dupe_key: &[u8],
+        dupe_score: c_int,
+        dupe_mode: c_int,
+        params: &[(&[u8], &[u8])],
+        add_top: bool,
+        add_paused: bool,
+        data: &[u8],
+    ) -> (c_int, c_int) {
+        let Some(mut env) = self.effective_env(None) else {
+            return (AS_FAILED, 0);
+        };
+        let name_c = to_cstr_sanitized(nzb_name);
+        let cat_c = to_cstr_sanitized(category);
+        let dk_c = to_cstr_sanitized(dupe_key);
+        let mut out_id: c_int = 0;
+        env.filename = std::ptr::null();
+        env.nzb_name = name_c.as_ptr();
+        env.category = cat_c.as_ptr();
+        env.dupe_key = dk_c.as_ptr();
+        env.priority = priority;
+        env.dupe_score = dupe_score;
+        env.dupe_mode = dupe_mode;
+        env.auto_category = c_int::from(auto_category);
+        env.add_top = c_int::from(add_top);
+        env.add_paused = c_int::from(add_paused);
+        env.parameters = std::ptr::null_mut();
+        env.url_info = std::ptr::null_mut();
+        env.buf_ptr = if data.is_empty() {
+            std::ptr::null()
+        } else {
+            data.as_ptr().cast()
+        };
+        env.buf_len = data.len() as c_int;
+        env.out_nzb_id = &mut out_id;
+        let captured_params: Vec<(CString, CString)> = params
+            .iter()
+            .map(|&(k, v)| (to_cstr_sanitized(k), to_cstr_sanitized(v)))
+            .collect();
+        let st = self.add_external_with_params(&env, captured_params);
+        (st, out_id)
+    }
 }
 
 impl Default for NzbgetRsScanner {
@@ -1541,46 +1781,74 @@ pub unsafe fn scanner_exec(
     if op == 9 {
         return classify_missed_articles(a1, a2, a3 != 0);
     }
+    if op == 7 {
+        #[cfg(unix)]
+        if let Some(env_ref) = unsafe { env.as_ref() } {
+            type ParamCb =
+                unsafe extern "C" fn(*mut c_void, c_int, *const c_char, *const c_char) -> c_int;
+            if !env_ref.ctx.is_null() {
+                let param_cb: ParamCb = unsafe { std::mem::transmute(env_ref.ctx) };
+                let raw_params = env_ref.parameters;
+                let cat_bytes = cstr_bytes(env_ref.category);
+                crate::script::init_pp_params_active(cat_bytes, a1 != 0, |pop, name, val| unsafe {
+                    param_cb(
+                        raw_params,
+                        pop,
+                        name.as_ptr(),
+                        val.map_or(std::ptr::null(), CStr::as_ptr),
+                    ) != 0
+                });
+            }
+        }
+        return 0;
+    }
     let Some(sc) = (unsafe { scanner.as_ref() }) else {
         return 0;
     };
     if op == 1 {
-        return sc.service_interval(a1);
+        return if a1 < 0 {
+            sc.service_interval_active()
+        } else {
+            sc.service_interval(a1)
+        };
     }
-    let Some(env_ref) = (unsafe { env.as_ref() }) else {
+    if op == 8 {
+        if let Some(env_ref) = unsafe { env.as_ref() } {
+            *sc.host_env.lock().unwrap_or_else(|e| e.into_inner()) = Some(*env_ref);
+        }
+        return 0;
+    }
+    let Some(eff) = sc.effective_env(unsafe { env.as_ref() }) else {
         return 0;
     };
     match op {
         0 => {
-            sc.init_options(a1 != 0, env_ref);
+            sc.init_options(a1 != 0, &eff);
             0
         }
         2 => {
-            sc.service_work(env_ref);
+            sc.service_work(&eff);
             0
         }
         3 => {
-            sc.scan_nzb_dir(a1 != 0, env_ref);
+            sc.scan_nzb_dir(a1 != 0, &eff);
             0
         }
         4 => {
-            if env_ref.buf_len < 0 || (env_ref.buf_len > 0 && env_ref.buf_ptr.is_null()) {
+            if eff.buf_len < 0 || (eff.buf_len > 0 && eff.buf_ptr.is_null()) {
                 return AS_FAILED;
             }
-            let slice = if env_ref.buf_ptr.is_null() || env_ref.buf_len == 0 {
+            let slice = if eff.buf_ptr.is_null() || eff.buf_len == 0 {
                 &[][..]
             } else {
                 unsafe {
-                    std::slice::from_raw_parts(
-                        env_ref.buf_ptr.cast::<u8>(),
-                        env_ref.buf_len as usize,
-                    )
+                    std::slice::from_raw_parts(eff.buf_ptr.cast::<u8>(), eff.buf_len as usize)
                 }
             };
-            sc.add_archive_bytes(slice, env_ref)
+            sc.add_archive_bytes(slice, &eff)
         }
-        5 => sc.add_archive_tmp_file(env_ref),
-        6 => sc.add_external_file(env_ref),
+        5 => sc.add_archive_tmp_file(&eff),
+        6 => sc.add_external_file(&eff),
         _ => 0,
     }
 }

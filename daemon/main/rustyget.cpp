@@ -54,7 +54,7 @@ inline int NServMain(int argc, char* argv[])
 			for (size_t i = 0; i < optLen; ++i) cmdOpts.push_back(opts[i]);
 			c->options = std::make_unique<Options>(&cmdOpts, nullptr);
 			c->log->InitOptions();
-			Connection::Init();
+			debug("Initializing global connection data");
 #ifndef DISABLE_TLS
 			TlsSocket::Init();
 #endif
@@ -66,17 +66,12 @@ inline int NServMain(int argc, char* argv[])
 		else if (op == 2) { while (c->frontend && c->frontend->IsRunning()) Util::Sleep(arg); }
 		else if (op == 3) { while (getchar()) Util::Sleep(200); }
 	};
-	env.tls_host_cb = &Connection::HostCb;
+	env.tls_host_cb = &TlsHostCb;
 #ifdef DEBUG
 	env.debug_on = 1;
 #endif
 	return nzbget_rs_nserv_run(argc, const_cast<const char* const*>(argv), &env);
 }
-#endif
-
-#ifdef DEBUG
-#include <sstream>
-#include <iostream>
 #endif
 
 #include <locale>
@@ -99,11 +94,7 @@ Maintenance* g_Maintenance;
 ArticleCache* g_ArticleCache;
 QueueScriptCoordinator* g_QueueScriptCoordinator;
 ServiceCoordinator* g_ServiceCoordinator;
-ScriptConfig* g_ScriptConfig;
-CommandScriptLog* g_CommandScriptLog;
 ExtensionManager::Manager* g_ExtensionManager;
-System::SystemInfo* g_SystemInfo;
-SystemHealth::Service* g_SystemHealth;
 
 int g_ArgumentCount;
 char* (*g_EnvironmentVariables)[] = nullptr;
@@ -112,17 +103,6 @@ char* (*g_Arguments)[] = nullptr;
 extern void ExitProc();
 extern void Reload();
 
-static void DaemonGlobalLogCb(int level, const char* msg)
-{
-	const char* s = msg ? msg : "";
-	if (level == 0) debug("%s", s);
-	else if (level == 1) detail("%s", s);
-	else if (level == 2) info("%s", s);
-	else if (level == 3) warn("%s", s);
-	else if (level == 4) error("%s", s);
-}
-
-static void DaemonLogCb(void*, int level, const char* msg) { DaemonGlobalLogCb(level, msg); }
 static int DaemonReloadCb(int sub);
 
 #ifdef DEBUG
@@ -132,44 +112,6 @@ static void TestSegFault()
 	*N = '\0';
 }
 #endif
-
-class DiskService : public Service, public Observer
-{
-public:
-	DiskService() { g_WorkState->Attach(this); }
-
-protected:
-	int ServiceInterval() override
-	{
-		NzbgetRsDaemonEnv env{};
-		env.a1 = g_Options->GetDiskSpace();
-		env.a2 = g_WorkState->GetDownloading() ? 1 : 0;
-		return nzbget_rs_daemon_exec(0, &env);
-	}
-
-	void ServiceWork() override
-	{
-		NzbgetRsDaemonEnv env{};
-		env.a1 = g_Options->GetDiskSpace();
-		env.a2 = g_WorkState->GetDownloading() ? 1 : 0;
-		env.s1 = g_Options->GetDestDir();
-		env.s2 = g_Options->GetInterDir();
-		env.s3 = g_Options->GetRequiredDir();
-		env.log_cb = DaemonLogCb;
-		env.action_cb = +[](void*, int sub, int, const char*, const char*) -> int {
-			if (sub == 0) g_WorkState->SetPauseDownload(true);
-			else if (sub == 1) { g_WorkState->SetTempPauseDownload(false); g_WorkState->SetTempPausePostprocess(false); }
-			return 0;
-		};
-		nzbget_rs_daemon_exec(1, &env);
-	}
-
-	void Update(Subject* caller, void* aspect) override
-	{
-		(void)caller; (void)aspect;
-		WakeUp();
-	}
-};
 
 class RustyGet final : public Options::Extender
 {
@@ -196,7 +138,7 @@ public:
 
 		if (!reload)
 		{
-			Connection::Init();
+			debug("Initializing global connection data");
 #ifndef DISABLE_TLS
 			TlsSocket::Init();
 #endif
@@ -209,11 +151,10 @@ public:
 
 		{
 			NzbgetRsDaemonEnv uenv{};
-			uenv.a1 = m_options->GetUMask();
+			uenv.a1 = -1;
 #ifdef DEBUG
 			uenv.a2 = 1;
 #endif
-			uenv.log_cb = DaemonLogCb;
 			FileSystem::uMask = static_cast<mode_t>(nzbget_rs_daemon_exec(4, &uenv));
 		}
 
@@ -225,31 +166,11 @@ public:
 
 		ProcessDirect();
 
-		if (g_Options->GetServerMode() && g_Options->GetSystemHealthCheck())
-		{
-			m_systemHealth = std::make_unique<SystemHealth::Service>(
-				*g_Options, *g_ServerPool, *g_FeedCoordinator, *m_scheduler, *g_Log);
-			g_SystemHealth = m_systemHealth.get();
-			m_systemHealth->DiagnoseAndLog();
-		}
-
 		NzbgetRsDaemonEnv act{};
 		act.ctx = this;
 		act.a1 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 5);
-		act.a2 = m_options->GetServerMode() ? 1 : 0;
 		act.a3 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6);
-		act.a4 = g_Options->GetCrashDump() ? 1 : 0;
-#ifdef DEBUG
-		act.a5 = g_Options->GetCrashTrace() ? 1 : 0;
-#endif
-		act.a6 = m_options->GetControlPort();
-		act.s1 = Util::VersionRevision();
-		act.s2 = m_options->GetLockFile();
-		act.s3 = m_options->GetDaemonUsername();
-		act.s4 = m_options->GetConfigFilename();
-		act.s5 = m_options->GetControlIp();
 		act.segv_cb = +[](void*, const char* m) { error("%s", m); };
-		act.log_cb = DaemonLogCb;
 		act.action_cb = &RustyGet::DaemonActionCb;
 		return nzbget_rs_daemon_exec(5, &act);
 	}
@@ -277,9 +198,7 @@ public:
 		env.a3 = !nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 4) ? 1 : 0;
 		env.s1 = nzbget_rs_cmdline_get_str(m_cmdLine.get(), 34);
 		env.s2 = nzbget_rs_cmdline_get_str(m_cmdLine.get(), 36);
-		env.global_log_cb = DaemonGlobalLogCb;
 		env.reload_cb = DaemonReloadCb;
-		env.log_cb = DaemonLogCb;
 		env.action_cb = &RustyGet::DaemonActionCb;
 		return nzbget_rs_daemon_exec(7, &env);
 	}
@@ -299,7 +218,6 @@ public:
 #ifndef DISABLE_TLS
 			TlsSocket::Final();
 #endif
-			Connection::Final();
 		}
 	}
 
@@ -314,7 +232,6 @@ public:
 		env.ctx = this;
 		env.a1 = reload ? 1 : 0;
 		env.a2 = nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 6);
-		env.log_cb = DaemonLogCb;
 		env.action_cb = &RustyGet::DaemonActionCb;
 		nzbget_rs_daemon_exec(8, &env);
 	}
@@ -364,18 +281,11 @@ private:
 	std::unique_ptr<ArticleCache> m_articleCache;
 	std::unique_ptr<QueueScriptCoordinator> m_queueScriptCoordinator;
 	std::unique_ptr<ServiceCoordinator> m_serviceCoordinator;
-	std::unique_ptr<ScriptConfig> m_scriptConfig;
-	std::unique_ptr<CommandScriptLog> m_commandScriptLog;
 	std::unique_ptr<ExtensionManager::Manager> m_extensionManager;
-	std::unique_ptr<System::SystemInfo> m_systemInfo;
-	std::unique_ptr<SystemHealth::Service> m_systemHealth;
 	std::unique_ptr<MemoryMonitor> m_memoryMonitor;
 
 	// non-globals
 	std::unique_ptr<Thread> m_frontend;
-	std::unique_ptr<RemoteServer> m_remoteServer;
-	std::unique_ptr<RemoteServer> m_remoteSecureServer;
-	std::unique_ptr<DiskService> m_diskService;
 	std::unique_ptr<Scheduler> m_scheduler;
 	std::unique_ptr<NzbgetRsCmdline, decltype(&nzbget_rs_cmdline_free)> m_cmdLine{nullptr, nzbget_rs_cmdline_free};
 
@@ -433,21 +343,12 @@ private:
 		m_diskState = std::make_unique<DiskState>();
 		g_DiskState = m_diskState.get();
 
-		m_scriptConfig = std::make_unique<ScriptConfig>();
-		g_ScriptConfig = m_scriptConfig.get();
-
-		m_commandScriptLog = std::make_unique<CommandScriptLog>();
-		g_CommandScriptLog = m_commandScriptLog.get();
-
 		m_extensionManager = std::make_unique<ExtensionManager::Manager>();
 		g_ExtensionManager = m_extensionManager.get();
 
-		m_systemInfo = std::make_unique<System::SystemInfo>();
-		g_SystemInfo = m_systemInfo.get();
-
 		m_scheduler = std::make_unique<Scheduler>();
 
-		m_diskService = std::make_unique<DiskService>();
+		nzbget_rs_service_coord_ctl(m_serviceCoordinator->RsHandle(), 4, nullptr, nullptr);
 	}
 
 	void BootConfig()
@@ -527,7 +428,7 @@ private:
 		m_serverPool->SetTimeout(m_options->GetArticleTimeout());
 		m_serverPool->SetRetryInterval(m_options->GetArticleInterval());
 
-		m_scriptConfig->InitOptions();
+		nzbget_rs_script_config_exec(0, nullptr, 0, nullptr, 0, nullptr, nullptr, nullptr);
 
 		m_extensionManager->LoadExtensions();
 	}
@@ -536,8 +437,6 @@ private:
 	{
 		NzbgetRsDaemonEnv env{};
 		env.a1 = m_options ? 1 : 0;
-		env.s1 = m_options ? m_options->GetLockFile() : nullptr;
-		env.log_cb = DaemonLogCb;
 		nzbget_rs_daemon_exec(12, &env);
 
 		g_UrlCoordinator = nullptr;
@@ -548,7 +447,6 @@ private:
 		g_DupeCoordinator = nullptr;
 		g_QueueCoordinator = nullptr;
 		g_DiskState = nullptr;
-		g_ScriptConfig = nullptr;
 		g_ServerPool = nullptr;
 		g_FeedCoordinator = nullptr;
 		g_ArticleCache = nullptr;
@@ -568,7 +466,6 @@ private:
 		m_maintenance.reset();
 		g_Maintenance = nullptr;
 		g_StatMeter = nullptr;
-		g_CommandScriptLog = nullptr;
 		g_ExtensionManager = nullptr;
 	}
 
@@ -625,33 +522,13 @@ private:
 	void StartRemoteServer()
 	{
 		if (!m_options->GetServerMode()) return;
-
-		NzbgetRsWebServeEnv webInit{};
-		webInit.log_cb = [](void*, int, const char* m) { error("%s", m); };
-		nzbget_rs_web_serve(0, &webInit);
-		m_remoteServer = std::make_unique<RemoteServer>(false);
-		m_remoteServer->Start();
-
-		NzbgetRsDaemonEnv senv{};
-		senv.a1 = m_options->GetSecureControl() ? 1 : 0;
-		senv.s1 = m_options->GetControlIp();
-		if (nzbget_rs_daemon_exec(6, &senv))
-		{
-			m_remoteSecureServer = std::make_unique<RemoteServer>(true);
-			m_remoteSecureServer->Start();
-		}
+		const NzbgetRsRpcHost rpcHost = BuildRpcHost();
+		nzbget_rs_remote_srv_ctl(0, &rpcHost);
 	}
 
 	void StopRemoteServer()
 	{
-		if (m_remoteServer) { debug("stopping RemoteServer"); m_remoteServer->Stop(); }
-		if (m_remoteSecureServer) { debug("stopping RemoteSecureServer"); m_remoteSecureServer->Stop(); }
-		while ((m_remoteServer && m_remoteServer->IsRunning()) ||
-			(m_remoteSecureServer && m_remoteSecureServer->IsRunning()))
-		{
-			Util::Sleep(50);
-		}
-		debug("RemoteServer stopped");
+		nzbget_rs_remote_srv_ctl(1, nullptr);
 	}
 
 	void StartFrontend()
@@ -681,15 +558,6 @@ private:
 		auto* self = static_cast<RustyGet*>(raw);
 		switch (sub)
 		{
-		case 2: {
-#ifdef DEBUG
-			std::stringstream ss;
-			ss << *self->m_systemInfo;
-			std::string line;
-			while (std::getline(ss, line)) detail("%s", line.c_str());
-#endif
-			return 0;
-		}
 		case 3:
 			return (self->m_frontend && self->m_frontend->IsRunning()) ? 1 : 0;
 		case 4:
@@ -810,7 +678,6 @@ static int DaemonReloadCb(int sub)
 void Reload()
 {
 	NzbgetRsDaemonEnv env{};
-	env.global_log_cb = DaemonGlobalLogCb;
 	env.reload_cb = DaemonReloadCb;
 	nzbget_rs_daemon_exec(9, &env);
 }
@@ -818,7 +685,6 @@ void Reload()
 void ExitProc()
 {
 	NzbgetRsDaemonEnv env{};
-	env.global_log_cb = DaemonGlobalLogCb;
 	env.reload_cb = DaemonReloadCb;
 	nzbget_rs_daemon_exec(10, &env);
 }

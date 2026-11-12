@@ -93,6 +93,10 @@ fn current_time_sec() -> i64 {
 
 #[inline]
 pub(crate) fn host_log(ctx: *mut c_void, host_cb: NzbgetRsScriptHostFn, kind: c_int, msg: &[u8]) {
+    if ctx.is_null() {
+        crate::log::log_active_bytes(kind, msg);
+        return;
+    }
     let c = c_buf(msg);
     unsafe {
         host_cb(
@@ -415,23 +419,31 @@ impl ScriptExecEnv {
         host_cb: NzbgetRsScriptHostFn,
     ) {
         let mut raw_opts: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        extern "C" fn push_opt(vec_ptr: usize, name: *const c_char, val: *const c_char) {
-            let v = unsafe { &mut *(vec_ptr as *mut Vec<(Vec<u8>, Vec<u8>)>) };
-            v.push(unsafe { (opt_bytes(name), opt_bytes(val)) });
-        }
-        unsafe {
-            host_cb(
-                ctx,
-                2,
-                1,
-                0,
-                (&mut raw_opts as *mut Vec<(Vec<u8>, Vec<u8>)>) as usize,
-                push_opt as *const () as usize,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
+        if ctx.is_null() {
+            if let Some(opts) = crate::options::active_options() {
+                opts.for_each_option(|n, v, _| {
+                    raw_opts.push((n.to_bytes().to_vec(), v.to_bytes().to_vec()));
+                });
+            }
+        } else {
+            extern "C" fn push_opt(vec_ptr: usize, name: *const c_char, val: *const c_char) {
+                let v = unsafe { &mut *(vec_ptr as *mut Vec<(Vec<u8>, Vec<u8>)>) };
+                v.push(unsafe { (opt_bytes(name), opt_bytes(val)) });
+            }
+            unsafe {
+                host_cb(
+                    ctx,
+                    2,
+                    1,
+                    0,
+                    (&mut raw_opts as *mut Vec<(Vec<u8>, Vec<u8>)>) as usize,
+                    push_opt as *const () as usize,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
         }
         for (name, def_val) in &raw_opts {
             let val = self.resolve_opt_value(name, def_val).to_vec();
@@ -740,22 +752,26 @@ impl ScriptRunner {
         cfg.prepare_env_options(None, ctx, host_cb);
 
         // PrepareArgs
-        let mut strs = [ptr::null() as *const c_char; 1];
-        unsafe {
-            host_cb(
-                ctx,
-                2,
-                0,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                strs.as_mut_ptr(),
-            );
-        }
-        let shell_override = unsafe { opt_bytes(strs[0]) };
+        let shell_override = if ctx.is_null() {
+            crate::options::active_options().map_or_else(Vec::new, |o| o.str_bytes(40).to_vec())
+        } else {
+            let mut strs = [ptr::null() as *const c_char; 1];
+            unsafe {
+                host_cb(
+                    ctx,
+                    2,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    strs.as_mut_ptr(),
+                );
+                opt_bytes(strs[0])
+            }
+        };
 
         let mut cmd_args_prefix: Vec<Vec<u8>> = Vec::new();
         let cmd_line: Vec<u8> = if cfg.args.len() == 1 {
@@ -1099,24 +1115,13 @@ pub enum BackgroundScriptJob {
 
 pub(crate) fn spawn_background_job(
     job: BackgroundScriptJob,
-    ctx: *mut c_void,
+    _ctx: *mut c_void,
     host_cb: NzbgetRsScriptHostFn,
 ) {
     let job_ptr = Box::into_raw(Box::new(job)) as usize;
-    unsafe {
-        host_cb(
-            ctx,
-            3,
-            0,
-            0,
-            job_ptr,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    }
+    std::thread::spawn(move || unsafe {
+        run_background_script_job(job_ptr, host_cb);
+    });
 }
 
 fn run_command_job(
@@ -1137,21 +1142,7 @@ fn run_command_job(
 
     let mut add_msg = |kind: c_int, text: &[u8]| {
         host_log(ctx, host_cb, kind, text);
-        let c_txt = c_buf(text);
-        unsafe {
-            host_cb(
-                ctx,
-                4,
-                log_id,
-                kind,
-                0,
-                0,
-                c_txt.as_ptr().cast(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
+        crate::log::active_cmd_script_log().add_message_bytes(log_id, kind, text);
     };
 
     ext_mgr.execute_script_list(&script_name, |ext| {
@@ -1699,7 +1690,9 @@ pub unsafe extern "C" fn nzbget_rs_ext_mgr_op(
             let enabled_exts = opt_slice(s3);
             let res = m.load_with_cb(script_dir, script_order, a1 as u8, |err_msg| {
                 if let Some(cb) = host_cb {
-                    host_log(ctx, cb, MK_ERROR, err_msg);
+                    host_log(ptr::null_mut(), cb, MK_ERROR, err_msg);
+                } else {
+                    crate::log::log_active_bytes(MK_ERROR, err_msg);
                 }
             });
             match res {
@@ -1749,14 +1742,16 @@ pub unsafe extern "C" fn nzbget_rs_ext_mgr_op(
         },
         3 => {
             let log_unpack = |kind: i32, msg: &str| {
+                let mk = match kind {
+                    1 => MK_ERROR,
+                    2 => MK_WARNING,
+                    0 => MK_INFO,
+                    _ => MK_DETAIL,
+                };
                 if let Some(cb) = host_cb {
-                    let mk = match kind {
-                        1 => MK_ERROR,
-                        2 => MK_WARNING,
-                        0 => MK_INFO,
-                        _ => MK_DETAIL,
-                    };
-                    host_log(ctx, cb, mk, msg.as_bytes());
+                    host_log(ptr::null_mut(), cb, mk, msg.as_bytes());
+                } else {
+                    crate::log::log_active_bytes(mk, msg.as_bytes());
                 }
             };
             let res = if a1 == 0 {
@@ -1868,11 +1863,12 @@ pub unsafe extern "C" fn nzbget_rs_script_terminate_all(host_cb: NzbgetRsScriptH
     ScriptRunner::terminate_all(ptr::null_mut(), host_cb);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_script_run_job(job_ptr: usize, host_cb: NzbgetRsScriptHostFn) {
+unsafe fn run_background_script_job(job_ptr: usize, host_cb: NzbgetRsScriptHostFn) {
     if job_ptr == 0 {
         return;
     }
+    let stopped = AtomicBool::new(false);
+    let _thread_guard = crate::ffi::RustThreadGuard::enter(&stopped);
     let _cancel_guard = crate::ffi::PosixCancelGuard::disable();
     let job = *Box::from_raw(job_ptr as *mut BackgroundScriptJob);
     match job {
@@ -1961,6 +1957,7 @@ pub unsafe extern "C" fn nzbget_rs_script_run_job(job_ptr: usize, host_cb: Nzbge
             host_cb,
         ),
     }
+    crate::ffi::stop_ssl_thread();
 }
 
 #[no_mangle]
@@ -1968,11 +1965,11 @@ pub unsafe extern "C" fn nzbget_rs_command_script_start(
     ext_mgr: *const RsExtensionManager,
     script_name: *const c_char,
     command: *const c_char,
-    log_id: c_int,
     params: *const crate::xmlrpc_format::NzbgetRsRpcParamItem,
     params_len: usize,
     host_cb: NzbgetRsScriptHostFn,
 ) -> c_int {
+    let log_id = crate::log::active_cmd_script_log().reset_script();
     let sname = opt_bytes(script_name);
     let cmd = opt_bytes(command);
     let mut mod_opts = Vec::with_capacity(params_len);

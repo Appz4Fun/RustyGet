@@ -484,13 +484,18 @@ typedef struct NzbgetRsOptions NzbgetRsOptions;
 typedef struct NzbgetRsFeedCoord NzbgetRsFeedCoord;
 typedef struct NzbgetRsScheduler NzbgetRsScheduler;
 typedef struct NzbgetRsLog NzbgetRsLog;
-typedef struct NzbgetRsCmdScriptLog NzbgetRsCmdScriptLog;
 typedef struct NzbgetRsStatMeter NzbgetRsStatMeter;
 typedef struct NzbgetRsWorkState NzbgetRsWorkState;
-typedef struct NzbgetRsScriptConfig NzbgetRsScriptConfig;
 typedef struct NzbgetRsServerPool NzbgetRsServerPool;
 typedef struct NzbgetRsServiceCoord NzbgetRsServiceCoord;
 typedef int (*NzbgetRsServiceCoordFn)(void* ctx, void* svc, int op);
+
+void nzbget_rs_build_env_init(
+    int flags, const char* version, const char* ssl_lib_name, const char* ssl_raw_version,
+    NzbgetRsConnHostFn tls_host_cb,
+    void (*write_stdout_cb)(const char* ptr, size_t len, int do_flush));
+int nzbget_rs_thread_count_op(int op);
+int nzbget_rs_tls_suppressed(uintptr_t slot);
 
 NzbgetRsWorkState* nzbget_rs_workstate_new(uintptr_t notify_ctx, void (*notify_cb)(uintptr_t));
 void nzbget_rs_workstate_free(NzbgetRsWorkState* ws);
@@ -500,7 +505,7 @@ NzbgetRsServiceCoord* nzbget_rs_service_coord_new(void);
 void nzbget_rs_service_coord_free(NzbgetRsServiceCoord* h);
 void nzbget_rs_service_coord_ctl(NzbgetRsServiceCoord* h, int op, void* ctx, NzbgetRsServiceCoordFn cb);
 
-NzbgetRsServerPool* nzbget_rs_serverpool_new(NzbgetRsConnHostFn conn_host_cb);
+NzbgetRsServerPool* nzbget_rs_serverpool_new(void);
 void nzbget_rs_serverpool_free(NzbgetRsServerPool* pool);
 void nzbget_rs_serverpool_add(
     const NzbgetRsServerPool* pool, int id, int active, const char* name, const char* host,
@@ -509,21 +514,9 @@ void nzbget_rs_serverpool_add(
     int optional, uint32_t cert_verif_level);
 intptr_t nzbget_rs_serverpool_ctl(
     const NzbgetRsServerPool* pool, int op, int a1, int a2, uintptr_t p1, uintptr_t p2);
-int nzbget_rs_serverpool_test(
-    const char* host, int port, const char* user, const char* pass, int tls,
-    const char* cipher, int timeout, uint32_t cert_verif_level,
-    NzbgetRsConnHostFn conn_host_cb, NzbgetRsBuf* out_err);
 int nzbget_rs_serverpool_probe_tls(
     const NzbgetTlsServer* server, const char* cipher, int expected_ver,
-    const char* numeric, uintptr_t deadline_ptr, NzbgetRsConnHostFn conn_host_cb);
-
-NzbgetRsBuf nzbget_rs_system_health_diagnose(
-    const NzbgetRsOptions* opts_ptr,
-    const NzbgetRsServerPool* pool_ptr,
-    const NzbgetRsFeedCoord* feed_coord_ptr,
-    const NzbgetRsScheduler* sched_ptr,
-    const NzbgetRsLog* log_ptr,
-    int daemon_mode, int format_mode);
+    const char* numeric, uintptr_t deadline_ptr);
 
 /* Extension & Script Subsystem End-to-End C ABI (`rust/src/extension.rs`, `rust/src/script.rs`, `rust/src/options.rs`) */
 
@@ -542,10 +535,9 @@ NzbgetRsScriptRunner* nzbget_rs_script_runner_new(void);
 void nzbget_rs_script_runner_free(NzbgetRsScriptRunner* r);
 void nzbget_rs_script_runner_terminate(NzbgetRsScriptRunner* r, NzbgetRsScriptHostFn host_cb);
 void nzbget_rs_script_terminate_all(NzbgetRsScriptHostFn host_cb);
-void nzbget_rs_script_run_job(uintptr_t job_ptr, NzbgetRsScriptHostFn host_cb);
 int nzbget_rs_command_script_start(
     const NzbgetRsExtManager* ext_mgr, const char* script_name, const char* command,
-    int log_id, const NzbgetRsRpcParamItem* params, size_t params_len,
+    const NzbgetRsRpcParamItem* params, size_t params_len,
     NzbgetRsScriptHostFn host_cb);
 int nzbget_rs_feed_scripts_exec(
     const NzbgetRsExtManager* ext_mgr, const char* feed_script, const char* feed_file,
@@ -664,15 +656,6 @@ int nzbget_rs_nzbfile_parser_get_file(
     NzbgetRsNzbKeptFileView* out_view);
 
 NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
-NzbgetRsBuf nzbget_rs_system_info_format(
-    int mode, int with_network, int use_tls, int include_gzip,
-    const char* version_rev, const char* ssl_lib_name,
-    const char* ssl_raw_version, int ssl_extract_after_space,
-    NzbgetRsConnHostFn conn_host_cb,
-    const NzbgetRsLog* log, const NzbgetRsOptions* opts);
-
-NzbgetRsScriptConfig* nzbget_rs_script_config_new(void);
-void nzbget_rs_script_config_free(NzbgetRsScriptConfig* sc);
 
 typedef struct NzbgetRsParsedOptions {
     int32_t download_rate;
@@ -801,11 +784,6 @@ void nzbget_rs_log_emit(
 void nzbget_rs_log_ctl(
     const NzbgetRsLog* log, int op, int a1, uintptr_t p1,
     const NzbgetRsOptions* options, const char* s1, void (*debug_cb)(uintptr_t));
-void nzbget_rs_log_collect(
-    int mode, const NzbgetRsLog* log, const NzbgetRsCmdScriptLog* cmd_log,
-    int a1, int a2, uint32_t u1, int* out_int, void* ctx, uintptr_t fn1, uintptr_t fn2);
-uintptr_t nzbget_rs_cmd_script_log_op(
-    int op, NzbgetRsCmdScriptLog* handle, int script_id, int kind, const char* text);
 
 uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
 
@@ -865,11 +843,6 @@ typedef struct RsDownloadCurrentStatsAcc {
     int32_t _pad;
 } RsDownloadCurrentStatsAcc;
 
-int nzbget_rs_fs_load_file_into_buffer(
-    const char* filename, int add_trailing_null, void* ctx,
-    uint8_t* (*reserve_cb)(void*, int));
-int nzbget_rs_fs_get_disk_state(
-    const char* path, int64_t* out_avail, int64_t* out_total);
 void nzbget_rs_nzb_update_current_stats_step(
     RsDownloadCurrentStatsAcc* acc, int64_t file_remaining_size,
     int file_success_articles, int file_failed_articles,
@@ -961,7 +934,6 @@ typedef struct NzbgetRsDiskStateEnv {
 int nzbget_rs_diskstate_exec(int op, const NzbgetRsDiskStateEnv* env);
 NzbgetRsStatMeter* nzbget_rs_statmeter_new(const NzbgetRsLog* log, const NzbgetRsOptions* opts);
 void nzbget_rs_statmeter_free(NzbgetRsStatMeter* sm);
-int64_t nzbget_rs_statmeter_speed(const NzbgetRsStatMeter* sm, int op, int bytes);
 int nzbget_rs_statmeter_ctl(
     const NzbgetRsStatMeter* sm, int op, int a1, int a2,
     uint32_t u1, uint32_t u2, uint32_t u3,
@@ -1067,45 +1039,12 @@ int nzbget_rs_stream_repair_ctrl_exec(
     const NzbgetRsStreamRepairCtrl* ctrl, int op,
     NzbgetRsStreamRepairHostFn host_cb, void* ctx);
 
-typedef struct NzbgetRsCancelReg NzbgetRsCancelReg;
-NzbgetRsCancelReg* nzbget_rs_cancel_reg_new(void);
-void nzbget_rs_cancel_reg_stop(const NzbgetRsCancelReg* reg);
-void nzbget_rs_cancel_reg_free(NzbgetRsCancelReg* reg);
-typedef struct NzbgetRsConn NzbgetRsConn;
-void nzbget_rs_conn_free(NzbgetRsConn* conn);
-intptr_t nzbget_rs_conn_ctl(
-    NzbgetRsConn* conn, int op, int a1, uintptr_t p1,
-    const char* s1, const char* s2, const char* const* addrs, size_t addrs_len);
-int nzbget_rs_conn_io(
-    NzbgetRsConn* conn, int op, char* buf, int size, int* out_int);
 typedef struct NzbgetRsWebDl NzbgetRsWebDl;
-typedef int (*NzbgetRsWebDlHostFn)(
-    void* ctx, int op, int a1, const char* s1, int* out_ints, const char** out_str);
-NzbgetRsWebDl* nzbget_rs_webdl_new(
-    int debug_on, NzbgetRsConnHostFn conn_host_cb, void* webdl_ctx, NzbgetRsWebDlHostFn webdl_cb);
+typedef int (*NzbgetRsWebDlHostFn)(void* ctx, int op, const char* s1);
+NzbgetRsWebDl* nzbget_rs_webdl_new(void* webdl_ctx, NzbgetRsWebDlHostFn webdl_cb);
 void nzbget_rs_webdl_free(NzbgetRsWebDl* dl);
 intptr_t nzbget_rs_webdl_ctl(
     NzbgetRsWebDl* dl, int op, int a1, const char* s1, int64_t* out_i64, NzbgetRsBuf* out_buf);
-int nzbget_rs_webdl_read_temp_url(
-    const char* url, const char* info_name, const char* temp_dir, int debug_on,
-    NzbgetRsConnHostFn conn_host_cb, void* webdl_ctx, NzbgetRsWebDlHostFn webdl_cb,
-    NzbgetRsBuf* out_buf);
-int nzbget_rs_net_speedtest_iter(
-    const char* body, size_t body_len, int duration_sec, int tls_disabled, int debug_on,
-    NzbgetRsConnHostFn conn_host_cb, uint32_t* out_bytes, double* out_secs);
-void nzbget_rs_req_proc_exec(
-    NzbgetRsConn* conn, const NzbgetRsCancelReg* reg, int tls, int tls_disabled,
-    int secure_port, int control_port, const char* secure_cert, const char* secure_key,
-    void* proc_ctx, void (*serv_binrpc_cb)(void*),
-    int (*serv_web_cb)(void*, const char*), void (*log_cb)(void*, int, const char*));
-typedef struct NzbgetRsRemoteServer NzbgetRsRemoteServer;
-typedef uintptr_t (*NzbgetRsRemoteSrvHostFn)(
-    void* ctx, int op, int a1, uintptr_t p1, const char* s1,
-    int* out_ints, const char** out_strs);
-NzbgetRsRemoteServer* nzbget_rs_remote_srv_new(
-    int tls, int tls_disabled, int debug_on, NzbgetRsConnHostFn conn_host_cb,
-    void* srv_ctx, NzbgetRsRemoteSrvHostFn srv_cb);
-void nzbget_rs_remote_srv_op(NzbgetRsRemoteServer* srv, int op, uintptr_t proc_ptr);
 
 typedef int (*NzbgetRsXmlRpcActionFn)(
     void* ctx, int op, int a1, int a2, int a3, int a4,
@@ -1130,46 +1069,9 @@ typedef int (*NzbgetRsXmlRpcCollectFn)(
     const void* p1, size_t n1,
     void* emit_ctx, NzbgetRsXmlRpcEmitFn emit_cb);
 
-typedef struct NzbgetRsWebServeEnv {
-    void* ctx;
-    const char* signature;
-    const char* remote_addr;
-    const char* version;
-    const char* web_dir;
-    const char* const* script_dirs;
-    size_t script_dirs_count;
-    const char* control_username;
-    const char* control_password;
-    const char* restricted_username;
-    const char* restricted_password;
-    const char* add_username;
-    const char* add_password;
-    const char* authorized_ip;
-    const char* config_filename;
-    const char* shell_override;
-    int control_port;
-    int form_auth;
-    int gzip_enabled;
-    int json_p;
-    int debug_build;
-    int (*read_line_cb)(void* ctx, char* buf, int size);
-    int (*recv_cb)(void* ctx, char* buf, int size);
-    int (*send_cb)(void* ctx, const char* buf, int size);
-    void (*log_cb)(void* ctx, int level, const char* msg);
-    NzbgetRsXmlRpcActionFn rpc_action_cb;
-    NzbgetRsXmlRpcCollectFn rpc_collect_cb;
-} NzbgetRsWebServeEnv;
-
 int nzbget_rs_script_config_exec(
-    const NzbgetRsScriptConfig* sc, int op, int a1,
-    const char* p1, size_t n1, const char* p2, size_t n2,
-    void* ctx, int (*cancel_cb)(void*),
-    NzbgetRsXmlRpcEmitFn emit_cb, NzbgetRsBuf* out_buf);
-int nzbget_rs_web_serve(int op, const NzbgetRsWebServeEnv* env);
-int nzbget_rs_statmeter_rpc(
-    const NzbgetRsStatMeter* sm, int op, int local_time_offset,
-    int a1, int a2, int a3, int a4, int a5,
-    void* emit_ctx, NzbgetRsXmlRpcEmitFn emit_cb);
+    int op, const char* p1, size_t n1, const char* p2, size_t n2,
+    void* ctx, int (*cancel_cb)(void*), NzbgetRsBuf* out_buf);
 
 typedef void (*NzbgetRsBinRpcListPushNzbFn)(
     void* b_ctx, uint32_t id, uint32_t kind, int64_t size, int64_t rem_size, int64_t paused_size,
@@ -1182,14 +1084,6 @@ typedef void (*NzbgetRsBinRpcListPushFileFn)(
     void* b_ctx, uint32_t id, uint32_t nzb_idx, int64_t size, int64_t rem_size,
     uint32_t paused, uint32_t fn_confirmed, uint32_t active_dl,
     const char* nzb_name, const char* subject, const char* filename);
-typedef void (*NzbgetRsBinRpcListSetStateFn)(
-    void* b_ctx, int64_t rem_size, uint32_t dl_rate, int dl_limit, int dl_paused,
-    int post_paused, int scan_paused, int thread_cnt, int post_jobs,
-    int up_sec, int dn_sec, int stand_by, int64_t all_bytes);
-typedef void (*NzbgetRsBinRpcLogBeginFn)(
-    void* enc_ctx, int msg_count, uint32_t first_id, int* out_start);
-typedef void (*NzbgetRsBinRpcLogPushFn)(
-    void* enc_ctx, uint32_t id, uint32_t kind, uint32_t time, const char* text);
 typedef void (*NzbgetRsBinRpcPostPushFn)(
     void* enc_ctx, uint32_t id, uint32_t stage, uint32_t stage_prog, uint32_t file_prog,
     uint32_t start_sec, uint32_t stage_sec, const char* filename, const char* name,
@@ -1199,70 +1093,40 @@ typedef void (*NzbgetRsBinRpcHistPushFn)(
     uint32_t file_cnt, uint32_t par_status, uint32_t script_status,
     uint32_t url_status, const char* name);
 
-typedef struct NzbgetRsBinRpcServeEnv {
-    void* ctx;
-    const char* remote_addr;
-    const char* control_user;
-    const char* control_password;
-    const char* version;
-    int control_port;
-    int (*recv_cb)(void* ctx, char* buf, int size);
-    int (*send_cb)(void* ctx, const char* buf, int size);
-    void (*log_cb)(void* ctx, int kind, const char* msg);
-    int (*action_cb)(
-        void* ctx, int kind, int a1, int a2, int a3, int a4,
+typedef struct NzbgetRsRpcQueueStatus {
+    int post_job_count;
+    int url_count;
+    int queued_scripts;
+    int64_t remaining_size;
+    int64_t forced_size;
+} NzbgetRsRpcQueueStatus;
+
+typedef struct NzbgetRsRpcHost {
+    NzbgetRsXmlRpcActionFn rpc_action_cb;
+    NzbgetRsXmlRpcCollectFn rpc_collect_cb;
+    int (*binrpc_action_cb)(
+        int kind, int a1, int a2, int a3, int a4,
         const char* s1, const char* s2, const char* s3,
         const char* body, int body_len,
         const int32_t* ids, size_t ids_len,
         const char* const* names, size_t names_len);
-    void (*collect_list_cb)(
-        void* ctx, int want_files, int want_state, void* b_ctx,
-        NzbgetRsBinRpcListPushNzbFn push_nzb, NzbgetRsBinRpcListPushParamFn push_param,
-        NzbgetRsBinRpcListPushFileFn push_file, NzbgetRsBinRpcListSetStateFn set_state);
-    void (*collect_log_cb)(
-        void* ctx, int lines, uint32_t id_from, void* enc_ctx,
-        NzbgetRsBinRpcLogBeginFn begin_log, NzbgetRsBinRpcLogPushFn push_log);
-    void (*collect_post_cb)(
-        void* ctx, void* enc_ctx, NzbgetRsBinRpcPostPushFn push_post);
-    void (*collect_history_cb)(
-        void* ctx, int show_hidden, void* enc_ctx, NzbgetRsBinRpcHistPushFn push_hist);
-} NzbgetRsBinRpcServeEnv;
+    void (*binrpc_list_cb)(
+        int want_files, void* b_ctx,
+        NzbgetRsBinRpcListPushNzbFn push_nzb,
+        NzbgetRsBinRpcListPushParamFn push_param,
+        NzbgetRsBinRpcListPushFileFn push_file,
+        int* out_post_jobs, int64_t* out_rem_size);
+    void (*binrpc_post_cb)(void* enc_ctx, NzbgetRsBinRpcPostPushFn push_post);
+    void (*binrpc_history_cb)(int show_hidden, void* enc_ctx, NzbgetRsBinRpcHistPushFn push_hist);
+} NzbgetRsRpcHost;
 
-void nzbget_rs_binrpc_serve(const NzbgetRsBinRpcServeEnv* env);
+void nzbget_rs_remote_srv_ctl(int op, const NzbgetRsRpcHost* host);
 
-typedef struct NzbgetRsFrontendSummary {
-    int64_t current_download_speed;
-    int64_t remaining_size;
-    int64_t all_bytes;
-    int32_t pause_download;
-    int32_t download_limit;
-    int32_t thread_count;
-    int32_t post_job_count;
-    int32_t up_time_sec;
-    int32_t dn_time_sec;
-    int32_t stand_by;
-} NzbgetRsFrontendSummary;
-
-typedef struct NzbgetRsFrontendEnv {
+typedef struct NzbgetRsFrontendHost {
     void* ctx;
-    int remote_mode;
-    int update_interval;
     int use_color;
-    int show_nzbname;
-    int show_timestamp;
-    int group_files;
-    int time_correction;
-    uint8_t path_sep;
-    const char* control_ip;
-    int control_port;
-    const char* control_username;
-    const char* control_password;
-    void (*write_stdout_cb)(void* ctx, const char* ptr, size_t len, int do_flush);
     int64_t (*action_cb)(void* ctx, int op, int a1, int a2, int a3);
-    void (*local_summary_cb)(void* ctx, NzbgetRsFrontendSummary* out_summary);
-    void (*local_messages_cb)(
-        void* ctx, int tail_mode, uint32_t arg, int* out_skipped, void* emit_ctx,
-        void (*emit_cb)(void* emit_ctx, uint32_t id, int kind, int64_t time, const char* text));
+    void (*queue_stats_cb)(void* ctx, int* out_post_jobs, int64_t* out_rem_size);
     void (*local_queue_cb)(
         void* ctx, void* emit_ctx,
         void (*emit_nzb_cb)(
@@ -1272,9 +1136,9 @@ typedef struct NzbgetRsFrontendEnv {
         void (*emit_file_cb)(
             void* emit_ctx, size_t nzb_idx, int id, int active_dl,
             int paused, int64_t size, int64_t rem_size, const char* filename));
-} NzbgetRsFrontendEnv;
+} NzbgetRsFrontendHost;
 
-int nzbget_rs_frontend_op(int op, const NzbgetRsFrontendEnv* env);
+int nzbget_rs_frontend_op(int op, const NzbgetRsFrontendHost* host);
 
 typedef struct NzbgetRsMaintenance NzbgetRsMaintenance;
 typedef struct NzbgetRsMaintenanceEnv {

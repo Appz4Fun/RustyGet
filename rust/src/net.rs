@@ -1152,6 +1152,30 @@ impl NzbgetRsConn {
             }),
         }
     }
+
+    pub(crate) unsafe fn remote_addr_bytes(&self) -> Vec<u8> {
+        (*self.session.get())
+            .core
+            .get_remote_addr()
+            .to_bytes()
+            .to_vec()
+    }
+
+    pub(crate) unsafe fn read_line_web(&self, dst: &mut [u8]) -> bool {
+        (*self.session.get()).core.read_line_slice(dst).is_some()
+    }
+
+    pub(crate) unsafe fn recv_exact_web(&self, dst: &mut [u8]) -> bool {
+        if dst.is_empty() {
+            true
+        } else {
+            (*self.session.get()).core.recv_exact_slice(dst)
+        }
+    }
+
+    pub(crate) unsafe fn send_web(&self, src: &[u8]) -> bool {
+        (*self.session.get()).core.send_bytes(src)
+    }
 }
 
 struct DirectNntpIo<'a> {
@@ -1221,22 +1245,11 @@ unsafe impl crate::nntp::Io for DirectNntpIo<'_> {
 /// Host callback for `NzbgetRsWebDl`.
 ///
 /// Operations:
-/// - `0`: query runtime options (`out_ints`: `[write_buffer_kb, url_retries, url_interval_sec, url_timeout, tls_disabled, gzip_disabled]`, `out_str`: `version`)
 /// - `1`: `is_stopped()` -> `1` / `0`
-/// - `2`: `is_paused()` -> `1` / `0`
-/// - `3`: `Notify(nullptr)` on status update (`a1 = status`)
+/// - `3`: `Notify(nullptr)` on status update
 /// - `4`: `ProcessHeader(s1)`
-/// - `5`: `log(level=a1, msg=s1)` (`0=debug, 1=detail, 2=warn, 3=error, 4=info`)
-pub type NzbgetRsWebDlHostFn = Option<
-    unsafe extern "C" fn(
-        ctx: *mut c_void,
-        op: c_int,
-        a1: c_int,
-        s1: *const c_char,
-        out_ints: *mut c_int,
-        out_str: *mut *const c_char,
-    ) -> c_int,
->;
+pub type NzbgetRsWebDlHostFn =
+    Option<unsafe extern "C" fn(ctx: *mut c_void, op: c_int, s1: *const c_char) -> c_int>;
 
 fn now_unix_sec() -> i64 {
     #[cfg(unix)]
@@ -1274,19 +1287,14 @@ impl NzbgetRsWebDl {
         if level == 0 && !self.debug_on {
             return;
         }
-        if let Some(cb) = self.webdl_cb {
-            let cs = bytes_to_cstring(msg);
-            unsafe {
-                cb(
-                    self.webdl_ctx as *mut c_void,
-                    5,
-                    level,
-                    cs.as_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-        }
+        let kind = match level {
+            0 => 3,
+            1 => 4,
+            2 => 1,
+            3 => 2,
+            _ => 0,
+        };
+        crate::log::log_active_bytes(kind, msg);
     }
 
     fn execute(&self, op: c_int, max_redirects: c_int) -> c_int {
@@ -1295,21 +1303,20 @@ impl NzbgetRsWebDl {
         if op == 1 {
             self.emit_log(0, b"Entering WebDownloader-loop");
         }
-        let mut ints = [0, 1, 0, 60, 0, 0];
-        let mut ver_ptr: *const c_char = ptr::null();
-        if let Some(cb) = self.webdl_cb {
-            unsafe {
-                cb(
-                    self.webdl_ctx as *mut c_void,
-                    0,
-                    0,
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    &mut ver_ptr,
-                );
-            }
-        }
-        let ver_bytes = unsafe { opt_bytes(ver_ptr) };
+        let opts = crate::options::active_options();
+        let (write_buffer_kb, url_retries, url_interval_sec, url_timeout) =
+            opts.as_deref().map_or((0, 1, 0, 60), |o| {
+                let sc = o.scalars();
+                (
+                    sc.write_buffer,
+                    sc.url_retries,
+                    sc.url_interval,
+                    sc.url_timeout,
+                )
+            });
+        let ver_bytes = crate::ffi::build_version_bytes();
+        let tls_disabled = crate::ffi::build_tls_disabled();
+        let gzip_disabled = crate::ffi::build_gzip_disabled();
         let initial_url = self
             .url
             .lock()
@@ -1321,19 +1328,19 @@ impl NzbgetRsWebDl {
             initial_url: &initial_url,
             output_filename: out_fn,
             info_name: info_nm,
-            version: ver_bytes,
-            write_buffer_kb: ints[0],
-            url_retries: ints[1],
-            url_interval_sec: ints[2],
+            version: &ver_bytes,
+            write_buffer_kb,
+            url_retries,
+            url_interval_sec,
             retry: self.retry.load(Ordering::SeqCst),
             force: self.force.load(Ordering::SeqCst),
-            tls_disabled: ints[4] != 0,
-            gzip_disabled: ints[5] != 0,
+            tls_disabled,
+            gzip_disabled,
         };
         let mut io = DirectWebDlIo {
             dl: self,
             conn: None,
-            url_timeout: ints[3],
+            url_timeout,
         };
         let st = if op == 1 {
             webdl_run_loop(&cfg, &mut io)
@@ -1458,29 +1465,23 @@ impl WebDlIo for DirectWebDlIo<'_> {
     }
 
     fn is_stopped(&mut self) -> bool {
+        if crate::ffi::is_rust_thread_stopped() {
+            return true;
+        }
         self.dl.webdl_cb.map_or(false, |cb| unsafe {
-            cb(
-                self.dl.webdl_ctx as *mut c_void,
-                1,
-                0,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) != 0
+            cb(self.dl.webdl_ctx as *mut c_void, 1, ptr::null()) != 0
         })
     }
 
     fn is_paused(&mut self) -> bool {
-        self.dl.webdl_cb.map_or(false, |cb| unsafe {
-            cb(
-                self.dl.webdl_ctx as *mut c_void,
-                2,
-                0,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) != 0
-        })
+        #[cfg(unix)]
+        {
+            crate::ffi::active_workstate().is_some_and(|w| w.pause_download())
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     fn touch_time(&mut self) {
@@ -1498,14 +1499,7 @@ impl WebDlIo for DirectWebDlIo<'_> {
         self.dl.status.store(s, Ordering::SeqCst);
         if let Some(cb) = self.dl.webdl_cb {
             unsafe {
-                cb(
-                    self.dl.webdl_ctx as *mut c_void,
-                    3,
-                    s,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
+                cb(self.dl.webdl_ctx as *mut c_void, 3, ptr::null());
             }
         }
     }
@@ -1529,14 +1523,7 @@ impl WebDlIo for DirectWebDlIo<'_> {
     fn on_header(&mut self, line: &CStr) {
         if let Some(cb) = self.dl.webdl_cb {
             unsafe {
-                cb(
-                    self.dl.webdl_ctx as *mut c_void,
-                    4,
-                    0,
-                    line.as_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
+                cb(self.dl.webdl_ctx as *mut c_void, 4, line.as_ptr());
             }
         }
     }
@@ -1546,99 +1533,86 @@ impl WebDlIo for DirectWebDlIo<'_> {
     }
 }
 
-/// Host callback for `NzbgetRsRemoteServer`.
-///
-/// Operations:
-/// - `0`: query config (`out_ints`: `[port, remote_timeout, is_stopped]`, `out_strs`: `[control_ip, secure_cert, secure_key]`)
-/// - `1`: `is_stopped()` -> `1` / `0`
-/// - `2`: spawn `RequestProcessor` for `accepted_conn = p1 as *mut NzbgetRsConn`, `tls = a1 != 0` -> returns `proc_ptr` (`0` on `std::system_error`)
-/// - `3`: stop `RequestProcessor` at `proc_ptr = p1`
-/// - `4`: `log(level=a1, msg=s1)` (`0=debug, 1=warn, 2=error`)
-pub type NzbgetRsRemoteSrvHostFn = Option<
-    unsafe extern "C" fn(
-        ctx: *mut c_void,
-        op: c_int,
-        a1: c_int,
-        p1: usize,
-        s1: *const c_char,
-        out_ints: *mut c_int,
-        out_strs: *mut *const c_char,
-    ) -> usize,
->;
+struct ActiveProc {
+    id: u64,
+    stopped: Arc<AtomicBool>,
+    conn_slot: Arc<ConnCancelSlot>,
+    cancel_reg: Arc<NzbgetRsCancelReg>,
+}
 
 struct RemoteSrvState {
     listener_slot: Option<Arc<ConnCancelSlot>>,
-    active_processors: Vec<usize>,
+    active_processors: Vec<ActiveProc>,
+    next_proc_id: u64,
     last_cap_warning: i64,
 }
 
-pub struct NzbgetRsRemoteServer {
+struct RemoteSrvInstance {
     tls: bool,
     tls_disabled: bool,
     debug_on: bool,
     conn_host_cb: NzbgetRsConnHostFn,
-    srv_ctx: usize,
-    srv_cb: NzbgetRsRemoteSrvHostFn,
+    rpc_host: crate::ffi::NzbgetRsRpcHost,
+    stopped: AtomicBool,
     state: Mutex<RemoteSrvState>,
 }
 
-impl NzbgetRsRemoteServer {
+impl RemoteSrvInstance {
+    fn new(tls: bool, rpc_host: crate::ffi::NzbgetRsRpcHost) -> Arc<Self> {
+        Arc::new(Self {
+            tls,
+            tls_disabled: crate::ffi::build_tls_disabled(),
+            debug_on: crate::ffi::build_debug_enabled(),
+            conn_host_cb: crate::ffi::tls_host_cb(),
+            rpc_host,
+            stopped: AtomicBool::new(false),
+            state: Mutex::new(RemoteSrvState {
+                listener_slot: None,
+                active_processors: Vec::new(),
+                next_proc_id: 1,
+                last_cap_warning: 0,
+            }),
+        })
+    }
+
     fn emit_log(&self, level: c_int, msg: &[u8]) {
         if level == 0 && !self.debug_on {
             return;
         }
-        if let Some(cb) = self.srv_cb {
-            let cs = bytes_to_cstring(msg);
-            unsafe {
-                cb(
-                    self.srv_ctx as *mut c_void,
-                    4,
-                    level,
-                    0,
-                    cs.as_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
-        }
+        let kind = match level {
+            0 => 3,
+            1 => 1,
+            _ => 2,
+        };
+        crate::log::log_active_bytes(kind, msg);
     }
 
+    #[inline]
     fn is_stopped(&self) -> bool {
-        self.srv_cb.map_or(true, |cb| unsafe {
-            cb(
-                self.srv_ctx as *mut c_void,
-                1,
-                0,
-                0,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) != 0
-        })
+        self.stopped.load(Ordering::SeqCst)
     }
 
-    fn run_loop(&self) {
+    fn run_loop(self: &Arc<Self>) {
         self.emit_log(0, b"Entering RemoteServer-loop");
-        let mut ints = [0, 60, 0];
-        let mut strs = [ptr::null(); 3];
-        if let Some(cb) = self.srv_cb {
-            unsafe {
-                cb(
-                    self.srv_ctx as *mut c_void,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    strs.as_mut_ptr(),
-                );
-            }
-        }
-        let port = ints[0];
-        let remote_timeout = ints[1];
-        let control_ip = unsafe { opt_bytes(strs[0]) }.to_vec();
-        let secure_cert = unsafe { opt_bytes(strs[1]) }.to_vec();
-        let secure_key = unsafe { opt_bytes(strs[2]) }.to_vec();
+        let opts = crate::options::active_options();
+        let (port, remote_timeout, control_ip, secure_cert, secure_key) =
+            opts.as_deref().map_or_else(
+                || (0, 60, Vec::new(), Vec::new(), Vec::new()),
+                |o| {
+                    let sc = o.scalars();
+                    (
+                        if self.tls {
+                            sc.secure_port
+                        } else {
+                            sc.control_port
+                        },
+                        sc.remote_timeout,
+                        o.str_bytes(14).to_vec(),
+                        o.str_bytes(21).to_vec(),
+                        o.str_bytes(22).to_vec(),
+                    )
+                },
+            );
 
         if self.tls && !self.tls_disabled {
             if secure_cert.is_empty()
@@ -1753,21 +1727,33 @@ impl NzbgetRsRemoteServer {
                     drop(acc);
                     continue;
                 }
-                let raw_acc = Box::into_raw(acc) as usize;
-                let proc_ptr = self.srv_cb.map_or(0, |cb| unsafe {
-                    cb(
-                        self.srv_ctx as *mut c_void,
-                        2,
-                        c_int::from(self.tls),
-                        raw_acc,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    )
+                let proc_id = g.next_proc_id;
+                g.next_proc_id = g.next_proc_id.wrapping_add(1);
+                let proc_stopped = Arc::new(AtomicBool::new(false));
+                let proc_reg = Arc::new(NzbgetRsCancelReg::new());
+                let proc_slot = Arc::clone(&acc.slot);
+                g.active_processors.push(ActiveProc {
+                    id: proc_id,
+                    stopped: Arc::clone(&proc_stopped),
+                    conn_slot: proc_slot,
+                    cancel_reg: Arc::clone(&proc_reg),
                 });
-                if proc_ptr != 0 {
-                    g.active_processors.push(proc_ptr);
-                } else {
+                let srv_clone = Arc::clone(self);
+                let spawn_res = std::thread::Builder::new().spawn(move || {
+                    #[cfg(unix)]
+                    let _tg = crate::ffi::RustThreadGuard::enter(&proc_stopped);
+                    unsafe {
+                        run_request_processor(*acc, &proc_reg, srv_clone.tls, &srv_clone.rpc_host);
+                    }
+                    drop(proc_reg);
+                    crate::ffi::stop_ssl_thread();
+                    srv_clone.on_processor_done(proc_id);
+                });
+                if let Err(e) = spawn_res {
+                    g.active_processors.retain(|p| p.id != proc_id);
+                    let msg =
+                        format!("Could not start a thread for a web interface/API connection: {e}");
+                    self.emit_log(1, msg.as_bytes());
                     spawn_failed = true;
                 }
             }
@@ -1803,38 +1789,205 @@ impl NzbgetRsRemoteServer {
     }
 
     fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
         self.emit_log(0, b"Stopping RequestProcessors");
         if let Ok(g) = self.state.lock() {
             if let Some(slot) = g.listener_slot.as_ref() {
                 slot.cancel(true, self.conn_host_cb);
             }
-            if let Some(cb) = self.srv_cb {
-                for &proc_ptr in &g.active_processors {
-                    unsafe {
-                        cb(
-                            self.srv_ctx as *mut c_void,
-                            3,
-                            0,
-                            proc_ptr,
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
-                }
+            for p in &g.active_processors {
+                p.stopped.store(true, Ordering::SeqCst);
+                p.conn_slot.cancel(false, self.conn_host_cb);
+                p.cancel_reg.stop_all();
             }
         }
         self.emit_log(0, b"RequestProcessors are notified");
         self.emit_log(0, b"RemoteServer stop end");
     }
 
-    fn on_processor_done(&self, proc_ptr: usize) {
+    fn on_processor_done(&self, proc_id: u64) {
         self.emit_log(0, b"Notification from RequestProcessor received");
         if let Ok(mut g) = self.state.lock() {
-            if let Some(pos) = g.active_processors.iter().position(|&p| p == proc_ptr) {
+            if let Some(pos) = g.active_processors.iter().position(|p| p.id == proc_id) {
                 g.active_processors.remove(pos);
             }
         }
+    }
+}
+
+unsafe fn exec_request_processor(
+    conn: &mut NzbgetRsConn,
+    tls: bool,
+    rpc_host: &crate::ffi::NzbgetRsRpcHost,
+) {
+    conn.slot.set_suppress_errors(true);
+    let debug_on = conn.slot.debug_on;
+    let emit = |lvl: c_int, msg: &[u8]| {
+        if lvl == 0 && !debug_on {
+            return;
+        }
+        let kind = if lvl == 0 { 3 } else { 1 };
+        crate::log::log_active_bytes(kind, msg);
+    };
+
+    let opts = crate::options::active_options();
+    if tls && !crate::ffi::build_tls_disabled() {
+        let cert = opts.as_deref().and_then(|o| o.str_cstr(21)).unwrap_or(c"");
+        let key = opts.as_deref().and_then(|o| o.str_cstr(22)).unwrap_or(c"");
+        let started = conn.session.get_mut().core.start_tls(false, cert, key);
+        if !started {
+            emit(
+                0,
+                b"Could not establish secure connection to web-client: Start TLS failed",
+            );
+            return;
+        }
+    }
+
+    let mut sig = [0u8; 4];
+    if !conn.session.get_mut().core.recv_exact_slice(&mut sig) {
+        emit(0, b"Could not read request signature");
+        return;
+    }
+
+    let mut ok = false;
+    if u32::from_be_bytes(sig) == NZBMESSAGE_SIGNATURE {
+        ok = true;
+        #[cfg(unix)]
+        crate::ffi::serve_binrpc_conn(conn, rpc_host);
+    } else if &sig == b"POST" || &sig == b"GET " || &sig == b"OPTI" {
+        ok = true;
+        #[cfg(unix)]
+        loop {
+            if !crate::ffi::serve_web_conn(conn, &sig, rpc_host) {
+                break;
+            }
+            if !conn.session.get_mut().core.recv_exact_slice(&mut sig) {
+                emit(0, b"Could not read request signature");
+                break;
+            }
+        }
+        let core = &mut conn.session.get_mut().core;
+        core.graceful = true;
+        core.disconnect_base();
+    }
+
+    if !ok {
+        let port = opts.as_deref().map_or(0, |o| {
+            let sc = o.scalars();
+            if tls {
+                sc.secure_port
+            } else {
+                sc.control_port
+            }
+        });
+        let ra = conn
+            .session
+            .get_mut()
+            .core
+            .get_remote_addr()
+            .to_bytes()
+            .to_vec();
+        let ps = port.to_string();
+        let msg = join_c_slices(&[
+            b"Non-RustyGet request received on port ",
+            ps.as_bytes(),
+            b" from ",
+            &ra,
+        ]);
+        emit(1, &msg);
+    }
+}
+
+unsafe fn run_request_processor(
+    mut conn: NzbgetRsConn,
+    cancel_reg: &Arc<NzbgetRsCancelReg>,
+    tls: bool,
+    rpc_host: &crate::ffi::NzbgetRsRpcHost,
+) {
+    let _scope = CancelRegScope::enter(Arc::clone(cancel_reg));
+    exec_request_processor(&mut conn, tls, rpc_host);
+    conn.session.get_mut().core.disconnect_base();
+}
+
+struct ActiveRemoteServers {
+    plain: Option<(Arc<RemoteSrvInstance>, std::thread::JoinHandle<()>)>,
+    secure: Option<(Arc<RemoteSrvInstance>, std::thread::JoinHandle<()>)>,
+}
+
+static ACTIVE_REMOTE_SERVERS: Mutex<ActiveRemoteServers> = Mutex::new(ActiveRemoteServers {
+    plain: None,
+    secure: None,
+});
+
+fn spawn_remote_server_listener(
+    tls: bool,
+    rpc_host: crate::ffi::NzbgetRsRpcHost,
+) -> Option<(Arc<RemoteSrvInstance>, std::thread::JoinHandle<()>)> {
+    let srv = RemoteSrvInstance::new(tls, rpc_host);
+    let srv_thread = Arc::clone(&srv);
+    let handle = std::thread::Builder::new()
+        .spawn(move || {
+            #[cfg(unix)]
+            let _tg = crate::ffi::RustThreadGuard::enter(&srv_thread.stopped);
+            srv_thread.run_loop();
+            crate::ffi::stop_ssl_thread();
+        })
+        .ok()?;
+    Some((srv, handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_remote_srv_ctl(
+    op: c_int,
+    host: *const crate::ffi::NzbgetRsRpcHost,
+) {
+    match op {
+        0 => {
+            if !crate::options::active_options().is_some_and(|o| o.server_mode()) {
+                return;
+            }
+            let rpc_host = host.as_ref().copied().unwrap_or_default();
+            crate::webserver::init_server_tokens(|m| crate::log::log_active_bytes(2, m));
+            let plain = spawn_remote_server_listener(false, rpc_host);
+            let secure = if crate::lifecycle::should_start_secure_server_active() {
+                spawn_remote_server_listener(true, rpc_host)
+            } else {
+                None
+            };
+            if let Ok(mut g) = ACTIVE_REMOTE_SERVERS.lock() {
+                g.plain = plain;
+                g.secure = secure;
+            }
+        }
+        1 => {
+            let (plain, secure) = match ACTIVE_REMOTE_SERVERS.lock() {
+                Ok(mut g) => (g.plain.take(), g.secure.take()),
+                Err(_) => return,
+            };
+            if let Some((ref srv, _)) = plain {
+                if crate::ffi::build_debug_enabled() {
+                    crate::log::log_active_bytes(3, b"stopping RemoteServer");
+                }
+                srv.stop();
+            }
+            if let Some((ref srv, _)) = secure {
+                if crate::ffi::build_debug_enabled() {
+                    crate::log::log_active_bytes(3, b"stopping RemoteSecureServer");
+                }
+                srv.stop();
+            }
+            if let Some((_, h)) = plain {
+                let _ = h.join();
+            }
+            if let Some((_, h)) = secure {
+                let _ = h.join();
+            }
+            if crate::ffi::build_debug_enabled() {
+                crate::log::log_active_bytes(3, b"RemoteServer stopped");
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1972,21 +2125,11 @@ pub unsafe extern "C" fn nserv_default_conn_cb(
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cancel_reg_new() -> *mut Arc<NzbgetRsCancelReg> {
-    Box::into_raw(Box::new(Arc::new(NzbgetRsCancelReg::new())))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cancel_reg_stop(reg: *const Arc<NzbgetRsCancelReg>) {
-    if !reg.is_null() {
-        (*reg).stop_all();
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cancel_reg_free(reg: *mut Arc<NzbgetRsCancelReg>) {
-    if !reg.is_null() {
-        drop(Box::from_raw(reg));
+pub unsafe extern "C" fn nzbget_rs_tls_suppressed(slot: usize) -> c_int {
+    if slot == 0 {
+        0
+    } else {
+        c_int::from((&*(slot as *const AtomicBool)).load(Ordering::SeqCst))
     }
 }
 
@@ -2030,15 +2173,15 @@ pub(crate) unsafe fn nzbget_rs_conn_from_fd(
     )))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_conn_free(conn: *mut NzbgetRsConn) {
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_conn_free(conn: *mut NzbgetRsConn) {
     if !conn.is_null() {
         drop(Box::from_raw(conn));
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_conn_ctl(
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_conn_ctl(
     conn: *mut NzbgetRsConn,
     op: c_int,
     a1: c_int,
@@ -2187,8 +2330,8 @@ pub unsafe extern "C" fn nzbget_rs_conn_ctl(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_conn_io(
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_conn_io(
     conn: *mut NzbgetRsConn,
     op: c_int,
     buf: *mut c_char,
@@ -3021,10 +3164,8 @@ impl NzbgetRsServerPool {
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_serverpool_new(
-    conn_host_cb: NzbgetRsConnHostFn,
-) -> *mut NzbgetRsServerPool {
-    let arc = Arc::new(NzbgetRsServerPool::new(conn_host_cb));
+pub extern "C" fn nzbget_rs_serverpool_new() -> *mut NzbgetRsServerPool {
+    let arc = Arc::new(NzbgetRsServerPool::new(crate::ffi::tls_host_cb()));
     if let Ok(mut g) = ACTIVE_SERVER_POOL.write() {
         *g = Some(Arc::downgrade(&arc));
     }
@@ -3246,8 +3387,7 @@ unsafe extern "C" fn test_conn_host_cb(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_serverpool_test(
+pub(crate) unsafe fn nzbget_rs_serverpool_test(
     host: *const c_char,
     port: c_int,
     user: *const c_char,
@@ -3256,9 +3396,9 @@ pub unsafe extern "C" fn nzbget_rs_serverpool_test(
     cipher: *const c_char,
     timeout: c_int,
     cert_verif_level: u32,
-    conn_host_cb: NzbgetRsConnHostFn,
     out_err: *mut crate::ffi::RsBuf,
 ) -> c_int {
+    let conn_host_cb = crate::ffi::tls_host_cb();
     let srv = RsNewsServer::new(
         0,
         true,
@@ -3368,7 +3508,6 @@ pub struct NzbgetTlsServer {
     pub password: *const c_char,
 }
 
-#[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_serverpool_probe_tls(
     server: *const NzbgetTlsServer,
@@ -3376,8 +3515,8 @@ pub unsafe extern "C" fn nzbget_rs_serverpool_probe_tls(
     expected_ver: c_int,
     numeric: *const c_char,
     deadline_ptr: usize,
-    conn_host_cb: NzbgetRsConnHostFn,
 ) -> c_int {
+    let conn_host_cb = crate::ffi::tls_host_cb();
     let Some(srv_in) = server.as_ref() else {
         return -1;
     };
@@ -3488,8 +3627,6 @@ pub unsafe extern "C" fn nzbget_rs_serverpool_probe_tls(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_webdl_new(
-    debug_on: c_int,
-    conn_host_cb: NzbgetRsConnHostFn,
     webdl_ctx: *mut c_void,
     webdl_cb: NzbgetRsWebDlHostFn,
 ) -> *mut NzbgetRsWebDl {
@@ -3505,8 +3642,8 @@ pub unsafe extern "C" fn nzbget_rs_webdl_new(
         retry: AtomicBool::new(true),
         cert_verif_level: AtomicI32::new(2),
         active_slot: Mutex::new(None),
-        debug_on: debug_on != 0,
-        conn_host_cb,
+        debug_on: crate::ffi::build_debug_enabled(),
+        conn_host_cb: crate::ffi::tls_host_cb(),
         webdl_ctx: webdl_ctx as usize,
         webdl_cb,
     });
@@ -3602,15 +3739,10 @@ pub unsafe extern "C" fn nzbget_rs_webdl_ctl(
 /// Executes RPC `readurl` (creating a unique `readurl-N.tmp` file in `temp_dir`,
 /// downloading with up to 5 redirects, loading up to the first NUL into `out_buf`,
 /// and removing the temporary file).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_webdl_read_temp_url(
+pub(crate) unsafe fn nzbget_rs_webdl_read_temp_url(
     url: *const c_char,
     info_name: *const c_char,
     temp_dir: *const c_char,
-    debug_on: c_int,
-    conn_host_cb: NzbgetRsConnHostFn,
-    webdl_ctx: *mut c_void,
-    webdl_cb: NzbgetRsWebDlHostFn,
     out_buf: *mut crate::ffi::RsBuf,
 ) -> c_int {
     let tdir = opt_bytes(temp_dir);
@@ -3619,15 +3751,12 @@ pub unsafe extern "C" fn nzbget_rs_webdl_read_temp_url(
     let tmp_path = loop {
         let ns = num.to_string();
         let cand = join_c_slices(&[tdir, &[sep], b"readurl-", ns.as_bytes(), b".tmp"]);
-        if num > 1 && !crate::fsops::file_exists(&cand, &crate::fsops::posix_stat) {
-            break cand;
-        }
-        if num == 1 && !crate::fsops::file_exists(&cand, &crate::fsops::posix_stat) {
+        if !crate::fsops::file_exists(&cand, &crate::fsops::posix_stat) {
             break cand;
         }
         num += 1;
     };
-    let dl = nzbget_rs_webdl_new(debug_on, conn_host_cb, webdl_ctx, webdl_cb);
+    let dl = nzbget_rs_webdl_new(ptr::null_mut(), None);
     let d = &*(dl as *const NzbgetRsWebDl);
     d.force.store(true, Ordering::SeqCst);
     d.retry.store(false, Ordering::SeqCst);
@@ -3658,18 +3787,14 @@ pub unsafe extern "C" fn nzbget_rs_webdl_read_temp_url(
 }
 
 /// Executes one RPC speed-test HTTP iteration against `speed.cloudflare.com`.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_net_speedtest_iter(
+pub(crate) unsafe fn nzbget_rs_net_speedtest_iter(
     body: *const c_char,
     body_len: usize,
     duration_sec: c_int,
-    tls_disabled: c_int,
-    debug_on: c_int,
-    conn_host_cb: NzbgetRsConnHostFn,
     out_bytes: *mut u32,
     out_secs: *mut f64,
 ) -> c_int {
-    let (port, use_tls) = if tls_disabled != 0 {
+    let (port, use_tls) = if crate::ffi::build_tls_disabled() {
         (80, false)
     } else {
         (443, true)
@@ -3679,9 +3804,9 @@ pub unsafe extern "C" fn nzbget_rs_net_speedtest_iter(
         port,
         use_tls,
         true,
-        debug_on != 0,
+        crate::ffi::build_debug_enabled(),
         0,
-        conn_host_cb,
+        crate::ffi::tls_host_cb(),
     );
     let core = &mut conn.session.get_mut().core;
     core.timeout = 1;
@@ -3717,161 +3842,6 @@ pub unsafe extern "C" fn nzbget_rs_net_speedtest_iter(
         *out_secs = start.elapsed().as_secs_f64();
     }
     1
-}
-
-/// Executes `RequestProcessor::Run` (`RegistryScope` + TLS handshake + signature dispatch).
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_req_proc_exec(
-    conn: *mut NzbgetRsConn,
-    reg: *const Arc<NzbgetRsCancelReg>,
-    tls: c_int,
-    tls_disabled: c_int,
-    secure_port: c_int,
-    control_port: c_int,
-    secure_cert: *const c_char,
-    secure_key: *const c_char,
-    proc_ctx: *mut c_void,
-    serv_binrpc_cb: Option<unsafe extern "C" fn(*mut c_void)>,
-    serv_web_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int>,
-    log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
-) {
-    if conn.is_null() {
-        return;
-    }
-    let _scope = if reg.is_null() {
-        None
-    } else {
-        Some(CancelRegScope::enter(Arc::clone(&*reg)))
-    };
-    let c = &*(conn as *const NzbgetRsConn);
-    c.slot.set_suppress_errors(true);
-    let debug_on = c.slot.debug_on;
-
-    let emit = |lvl: c_int, msg: &[u8]| {
-        if lvl == 0 && !debug_on {
-            return;
-        }
-        if let Some(cb) = log_cb {
-            let cs = bytes_to_cstring(msg);
-            cb(proc_ctx, lvl, cs.as_ptr());
-        }
-    };
-
-    if tls != 0 && tls_disabled == 0 {
-        let cert = if secure_cert.is_null() {
-            c""
-        } else {
-            CStr::from_ptr(secure_cert)
-        };
-        let key = if secure_key.is_null() {
-            c""
-        } else {
-            CStr::from_ptr(secure_key)
-        };
-        let started = { (*c.session.get()).core.start_tls(false, cert, key) };
-        if !started {
-            emit(
-                0,
-                b"Could not establish secure connection to web-client: Start TLS failed",
-            );
-            return;
-        }
-    }
-
-    let mut sig = [0u8; 4];
-    let got_sig = { (*c.session.get()).core.recv_exact_slice(&mut sig) };
-    if !got_sig {
-        emit(0, b"Could not read request signature");
-        return;
-    }
-
-    let mut ok = false;
-    if u32::from_be_bytes(sig) == NZBMESSAGE_SIGNATURE {
-        ok = true;
-        if let Some(cb) = serv_binrpc_cb {
-            cb(proc_ctx);
-        }
-    } else if &sig == b"POST" || &sig == b"GET " || &sig == b"OPTI" {
-        ok = true;
-        if let Some(cb) = serv_web_cb {
-            loop {
-                let mut sig_nul = [0u8; 5];
-                sig_nul[..4].copy_from_slice(&sig);
-                if cb(proc_ctx, sig_nul.as_ptr().cast::<c_char>()) == 0 {
-                    break;
-                }
-                let next_ok = { (*c.session.get()).core.recv_exact_slice(&mut sig) };
-                if !next_ok {
-                    emit(0, b"Could not read request signature");
-                    break;
-                }
-            }
-        }
-        let core = &mut (*c.session.get()).core;
-        core.graceful = true;
-        core.disconnect_base();
-    }
-
-    if !ok {
-        let port = if tls != 0 { secure_port } else { control_port };
-        let ra = {
-            (*c.session.get())
-                .core
-                .get_remote_addr()
-                .to_bytes()
-                .to_vec()
-        };
-        let ps = port.to_string();
-        let msg = join_c_slices(&[
-            b"Non-RustyGet request received on port ",
-            ps.as_bytes(),
-            b" from ",
-            &ra,
-        ]);
-        emit(1, &msg);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_remote_srv_new(
-    tls: c_int,
-    tls_disabled: c_int,
-    debug_on: c_int,
-    conn_host_cb: NzbgetRsConnHostFn,
-    srv_ctx: *mut c_void,
-    srv_cb: NzbgetRsRemoteSrvHostFn,
-) -> *mut NzbgetRsRemoteServer {
-    Box::into_raw(Box::new(NzbgetRsRemoteServer {
-        tls: tls != 0,
-        tls_disabled: tls_disabled != 0,
-        debug_on: debug_on != 0,
-        conn_host_cb,
-        srv_ctx: srv_ctx as usize,
-        srv_cb,
-        state: Mutex::new(RemoteSrvState {
-            listener_slot: None,
-            active_processors: Vec::new(),
-            last_cap_warning: 0,
-        }),
-    }))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_remote_srv_op(
-    srv: *mut NzbgetRsRemoteServer,
-    op: c_int,
-    proc_ptr: usize,
-) {
-    if srv.is_null() {
-        return;
-    }
-    match op {
-        0 => (&*(srv as *const NzbgetRsRemoteServer)).run_loop(),
-        1 => (&*(srv as *const NzbgetRsRemoteServer)).stop(),
-        2 => (&*(srv as *const NzbgetRsRemoteServer)).on_processor_done(proc_ptr),
-        3 => drop(Box::from_raw(srv)),
-        _ => {}
-    }
 }
 
 #[cfg(test)]

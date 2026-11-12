@@ -2780,15 +2780,47 @@ impl NzbgetRsFeedCoord {
     }
 }
 
+static ACTIVE_FEED_COORD: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsFeedCoord>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn active_feed_coord() -> Option<Arc<NzbgetRsFeedCoord>> {
+    ACTIVE_FEED_COORD
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+}
+
+impl NzbgetRsFeedCoord {
+    pub(crate) fn has_active_downloads(&self) -> bool {
+        self.state
+            .lock()
+            .map(|st| !st.active.is_empty())
+            .unwrap_or(false)
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn nzbget_rs_feed_coord_new() -> *mut NzbgetRsFeedCoord {
-    Box::into_raw(Box::new(NzbgetRsFeedCoord::new()))
+    let arc = Arc::new(NzbgetRsFeedCoord::new());
+    if let Ok(mut g) = ACTIVE_FEED_COORD.write() {
+        *g = Some(Arc::downgrade(&arc));
+    }
+    Arc::into_raw(arc).cast_mut()
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_feed_coord_free(coord: *mut NzbgetRsFeedCoord) {
     if !coord.is_null() {
-        drop(Box::from_raw(coord));
+        let arc = Arc::from_raw(coord.cast_const());
+        let wk = Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_FEED_COORD.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+        drop(arc);
     }
 }
 

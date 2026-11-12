@@ -324,7 +324,7 @@ pub fn scheduler_calc_next_work_interval(cur_time: i64) -> i32 {
 // ============================================================================
 
 use std::ffi::{c_char, c_int, c_void, CStr};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
 
 #[repr(C)]
@@ -1131,15 +1131,38 @@ pub fn format_scheduler_script_labels(
     }
 }
 
+static ACTIVE_SCHEDULER: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsScheduler>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn active_scheduler() -> Option<std::sync::Arc<NzbgetRsScheduler>> {
+    ACTIVE_SCHEDULER
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_scheduler_new() -> *mut NzbgetRsScheduler {
-    Box::into_raw(Box::new(NzbgetRsScheduler::new()))
+    let arc = std::sync::Arc::new(NzbgetRsScheduler::new());
+    if let Ok(mut g) = ACTIVE_SCHEDULER.write() {
+        *g = Some(std::sync::Arc::downgrade(&arc));
+    }
+    std::sync::Arc::into_raw(arc).cast_mut()
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_scheduler_free(h: *mut NzbgetRsScheduler) {
     if !h.is_null() {
-        drop(Box::from_raw(h));
+        let arc = std::sync::Arc::from_raw(h.cast_const());
+        let wk = std::sync::Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_SCHEDULER.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+        drop(arc);
     }
 }
 
@@ -1191,6 +1214,27 @@ pub struct NzbgetRsServiceCoord {
     services: Mutex<Vec<ServiceSlot>>,
     wait_mutex: Mutex<bool>,
     wait_cond: std::sync::Condvar,
+    disk_service_attached: AtomicBool,
+}
+
+static ACTIVE_SERVICE_COORD: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsServiceCoord>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn wake_active_disk_service() {
+    let Some(sc) = ACTIVE_SERVICE_COORD
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+    else {
+        return;
+    };
+    if sc.disk_service_attached.load(Ordering::Acquire) {
+        crate::log::log_active_bytes(3, b"Waking up ServiceCoordinator");
+        if let Ok(mut woken) = sc.wait_mutex.lock() {
+            *woken = true;
+            sc.wait_cond.notify_all();
+        }
+    }
 }
 
 pub type NzbgetRsServiceCoordFn =
@@ -1213,18 +1257,32 @@ fn service_coord_now() -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn nzbget_rs_service_coord_new() -> *mut NzbgetRsServiceCoord {
     crate::log::log_active_bytes(3, b"Creating ServiceCoordinator");
-    Box::into_raw(Box::new(NzbgetRsServiceCoord {
+    let arc = std::sync::Arc::new(NzbgetRsServiceCoord {
         services: Mutex::new(Vec::new()),
         wait_mutex: Mutex::new(false),
         wait_cond: std::sync::Condvar::new(),
-    }))
+        disk_service_attached: AtomicBool::new(false),
+    });
+    if let Ok(mut g) = ACTIVE_SERVICE_COORD.write() {
+        *g = Some(std::sync::Arc::downgrade(&arc));
+    }
+    std::sync::Arc::into_raw(arc).cast_mut()
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_service_coord_free(h: *mut NzbgetRsServiceCoord) {
     if !h.is_null() {
         crate::log::log_active_bytes(3, b"Destroying ServiceCoordinator");
-        drop(Box::from_raw(h));
+        let arc = std::sync::Arc::from_raw(h.cast_const());
+        let wk = std::sync::Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_SERVICE_COORD.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+        drop(arc);
     }
 }
 
@@ -1246,6 +1304,15 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
                     last_work: 0,
                 });
             }
+        }
+        4 => {
+            if let Ok(mut srvs) = sc.services.lock() {
+                srvs.push(ServiceSlot {
+                    ptr: 0,
+                    last_work: 0,
+                });
+            }
+            sc.disk_service_attached.store(true, Ordering::Release);
         }
         1 => {
             crate::log::log_active_bytes(3, b"Waking up ServiceCoordinator");
@@ -1275,11 +1342,19 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
                     else {
                         continue;
                     };
-                    let service_interval = host_cb(ctx, svc_ptr, 1);
+                    let service_interval = if svc_ptr.is_null() {
+                        crate::lifecycle::disk_service_interval_active()
+                    } else {
+                        host_cb(ctx, svc_ptr, 1)
+                    };
                     if service_interval >= 0
                         && (service_coord_now() - last_work).abs() >= i64::from(service_interval)
                     {
-                        host_cb(ctx, svc_ptr, 2);
+                        if svc_ptr.is_null() {
+                            crate::lifecycle::disk_service_work_active();
+                        } else {
+                            host_cb(ctx, svc_ptr, 2);
+                        }
                         let done_at = service_coord_now();
                         if let Ok(mut g) = sc.services.lock() {
                             if let Some(slot) = g.get_mut(idx) {
@@ -1302,7 +1377,11 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
                     else {
                         continue;
                     };
-                    let service_interval = host_cb(ctx, svc_ptr, 1);
+                    let service_interval = if svc_ptr.is_null() {
+                        crate::lifecycle::disk_service_interval_active()
+                    } else {
+                        host_cb(ctx, svc_ptr, 1)
+                    };
                     let mut remaining: i32 = -1;
                     if service_interval >= 0 {
                         let elapsed = (cur_time - last_work) as i32;

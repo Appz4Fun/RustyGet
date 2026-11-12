@@ -16,7 +16,9 @@ use crate::articlefetcher::{
 };
 use crate::dupecoord::same_name_or_key;
 use crate::dupefallback::NzbgetRsByteRange;
-use crate::dupeprobe::{sample_indexes, DupeProbeHostFn, NzbgetRsDupeProbe, MIN_ARTICLES, SAMPLE_COUNT};
+use crate::dupeprobe::{
+    sample_indexes, DupeProbeHostFn, NzbgetRsDupeProbe, MIN_ARTICLES, SAMPLE_COUNT,
+};
 use crate::nntp::BatchRequest;
 use crate::streamrepair::{
     build_donor_key, classify_remaining_hole_target, compute_positional_rank,
@@ -289,12 +291,7 @@ impl NzbgetRsStreamRepairCtrl {
         unsafe { self.host_is_stopped(ctx, cb) && !self.timed_out.load(Ordering::SeqCst) }
     }
 
-    unsafe fn set_info_name(
-        &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
-        name: &[u8],
-    ) {
+    unsafe fn set_info_name(&self, ctx: *mut c_void, cb: NzbgetRsStreamRepairHostFn, name: &[u8]) {
         let name_c = to_c_bytes(name);
         unsafe {
             cb(
@@ -386,34 +383,35 @@ impl NzbgetRsStreamRepairCtrl {
 
     unsafe fn query_host_options(
         &self,
-        ctx: *mut c_void,
-        cb: NzbgetRsStreamRepairHostFn,
+        _ctx: *mut c_void,
+        _cb: NzbgetRsStreamRepairHostFn,
     ) -> HostOptions {
-        let mut ints = [0 as c_int; 5];
-        let mut i64s = [0i64; 1];
-        let mut strs = [ptr::null::<c_char>(); 1];
-        unsafe {
-            cb(
-                ctx,
-                6,
-                0,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                strs.as_mut_ptr(),
-            );
-        }
+        let opts = crate::options::active_options();
+        let primary_connections = crate::net::active_server_pool().map_or(0, |p| unsafe {
+            crate::net::nzbget_rs_serverpool_ctl(Arc::as_ptr(&p), 6, 0, 0, 0, 0) as c_int
+        });
+        let download_rate = crate::statmeter::active_statmeter().map_or(0, |sm| {
+            let (_up, dn_sec, all_bytes, _sb) = sm.total_stat_snapshot();
+            if dn_sec > 0 {
+                all_bytes / i64::from(dn_sec)
+            } else {
+                0
+            }
+        });
         HostOptions {
-            timeout_sec: ints[0],
-            allow_decompress_opt: ints[1] != 0,
-            primary_connections: ints[2],
-            par_check: ints[3],
-            pc_manual: ints[4],
-            download_rate: i64s[0],
-            par_ignore_ext: unsafe { ptr_to_bytes(strs[0]) },
+            timeout_sec: opts
+                .as_deref()
+                .map_or(0, |o| o.scalars().dupe_stream_timeout),
+            allow_decompress_opt: opts
+                .as_deref()
+                .is_some_and(|o| o.scalars().dupe_stream_decompress != 0),
+            primary_connections,
+            par_check: opts.as_deref().map_or(0, |o| o.scalars().par_check),
+            pc_manual: 3,
+            download_rate,
+            par_ignore_ext: opts
+                .as_deref()
+                .map_or_else(Vec::new, |o| o.str_bytes(33).to_vec()),
         }
     }
 
@@ -425,7 +423,13 @@ impl NzbgetRsStreamRepairCtrl {
         set_init_label: bool,
         mark_live_attempted: bool,
         counters: &mut RunCounters,
-    ) -> Option<(Vec<u8>, Vec<u8>, Vec<RepairTarget>, Vec<DonorSource>, Vec<Vec<u8>>)> {
+    ) -> Option<(
+        Vec<u8>,
+        Vec<u8>,
+        Vec<RepairTarget>,
+        Vec<DonorSource>,
+        Vec<Vec<u8>>,
+    )> {
         let mut ints = [0 as c_int; 6];
         let mut i64s = [0i64; 1];
         let mut strs = [ptr::null::<c_char>(); 4];
@@ -519,11 +523,8 @@ impl NzbgetRsStreamRepairCtrl {
             }
             let holes: Vec<NzbgetRsByteRange> = if hole_count > 0 && !j_strs[1].is_null() {
                 unsafe {
-                    std::slice::from_raw_parts(
-                        j_strs[1] as *const NzbgetRsByteRange,
-                        hole_count,
-                    )
-                    .to_vec()
+                    std::slice::from_raw_parts(j_strs[1] as *const NzbgetRsByteRange, hole_count)
+                        .to_vec()
                 }
             } else {
                 Vec::new()
@@ -703,11 +704,7 @@ impl NzbgetRsStreamRepairCtrl {
                         ptr::null_mut(),
                         cf_strs.as_mut_ptr(),
                     );
-                    completed_files.push((
-                        cf_ints[0],
-                        cf_ints[1] != 0,
-                        ptr_to_bytes(cf_strs[0]),
-                    ));
+                    completed_files.push((cf_ints[0], cf_ints[1] != 0, ptr_to_bytes(cf_strs[0])));
                 }
                 for target in targets.iter_mut() {
                     for (cf_id, cf_par, cf_name) in &completed_files {
@@ -791,9 +788,8 @@ impl NzbgetRsStreamRepairCtrl {
             let full_path =
                 crate::artwritercore::article_writer_format_dest_file_path(dest_dir, sep, m);
             let full_c = to_c_bytes(&full_path);
-            let sz = crate::fsops::file_size(unsafe {
-                CStr::from_bytes_with_nul_unchecked(&full_c)
-            });
+            let sz =
+                crate::fsops::file_size(unsafe { CStr::from_bytes_with_nul_unchecked(&full_c) });
             sizes.push(sz);
             name_refs.push(m.as_slice());
         }
@@ -1138,16 +1134,14 @@ impl NzbgetRsStreamRepairCtrl {
             if unsafe { self.host_is_stopped(ctx, cb) } {
                 break;
             }
-            let any_holes = targets
-                .iter()
-                .any(|t| t.patch_eligible && t.needs_repair());
+            let any_holes = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
             if !any_holes {
                 break;
             }
 
-            let Some(donor_nzb) =
-                (unsafe { self.parse_donor(ctx, cb, &donor.queued_filename, &opts.par_ignore_ext) })
-            else {
+            let Some(donor_nzb) = (unsafe {
+                self.parse_donor(ctx, cb, &donor.queued_filename, &opts.par_ignore_ext)
+            }) else {
                 continue;
             };
             let donor_key = Self::build_parsed_donor_key(&donor_nzb, &donor.password);
@@ -1188,8 +1182,11 @@ impl NzbgetRsStreamRepairCtrl {
             let mut live_filenames: Vec<Vec<u8>> =
                 targets.iter().map(|t| t.filename.clone()).collect();
 
-            let donor_file_names: Vec<&[u8]> =
-                donor_nzb.files.iter().map(|f| f.filename.as_slice()).collect();
+            let donor_file_names: Vec<&[u8]> = donor_nzb
+                .files
+                .iter()
+                .map(|f| f.filename.as_slice())
+                .collect();
             let donor_file_sizes: Vec<i64> = donor_nzb.files.iter().map(|f| f.size).collect();
             let donor_file_is_par: Vec<u8> = donor_nzb
                 .files
@@ -1343,19 +1340,20 @@ impl NzbgetRsStreamRepairCtrl {
                 holes: t.holes.clone(),
             })
             .collect();
-        let pw = (!counters.target_password.is_empty())
-            .then_some(counters.target_password.as_slice());
+        let pw =
+            (!counters.target_password.is_empty()).then_some(counters.target_password.as_slice());
 
         let aborted = || unsafe { self.host_is_stopped(ctx, cb) };
         let mut emit_msg = |kind: TargetMessageKind, text: &[u8]| unsafe {
             self.print_message(ctx, cb, map_target_msg_kind(kind), text);
         };
-        let rar_vol_cb =
-            |member_name: &[u8], vol: &crate::rarreader::Volume, files: &[crate::rarreader::RarFile]| {
-                for line in format_rar_volume_debug_lines(member_name, vol, files) {
-                    unsafe { self.global_log(ctx, cb, 4, &line) };
-                }
-            };
+        let rar_vol_cb = |member_name: &[u8],
+                          vol: &crate::rarreader::Volume,
+                          files: &[crate::rarreader::RarFile]| {
+            for line in format_rar_volume_debug_lines(member_name, vol, files) {
+                unsafe { self.global_log(ctx, cb, 4, &line) };
+            }
+        };
         let rar_vol_ref: Option<
             &dyn Fn(&[u8], &crate::rarreader::Volume, &[crate::rarreader::RarFile]),
         > = self.debug_enabled.then_some(
@@ -1383,9 +1381,9 @@ impl NzbgetRsStreamRepairCtrl {
                 break;
             }
 
-            let Some(donor_nzb) =
-                (unsafe { self.parse_donor(ctx, cb, &donor.queued_filename, &opts.par_ignore_ext) })
-            else {
+            let Some(donor_nzb) = (unsafe {
+                self.parse_donor(ctx, cb, &donor.queued_filename, &opts.par_ignore_ext)
+            }) else {
                 continue;
             };
             let donor_key = Self::build_parsed_donor_key(&donor_nzb, &donor.password);
@@ -1399,8 +1397,11 @@ impl NzbgetRsStreamRepairCtrl {
                 continue;
             }
 
-            let donor_file_names: Vec<&[u8]> =
-                donor_nzb.files.iter().map(|f| f.filename.as_slice()).collect();
+            let donor_file_names: Vec<&[u8]> = donor_nzb
+                .files
+                .iter()
+                .map(|f| f.filename.as_slice())
+                .collect();
             let donor_file_sizes: Vec<i64> = donor_nzb.files.iter().map(|f| f.size).collect();
             let donor_article_sizes: Vec<Vec<i32>> = donor_nzb
                 .files
@@ -1599,7 +1600,8 @@ impl NzbgetRsStreamRepairCtrl {
                 .filter(|t| t.decoded_file_size <= 0 || !t.holes.is_empty())
                 .count() as i32;
             counters.holes_remain |= unfinished > 0;
-            let msg = format!("Stream repair interrupted with {unfinished} file(s) still incomplete");
+            let msg =
+                format!("Stream repair interrupted with {unfinished} file(s) still incomplete");
             unsafe { self.print_message(ctx, cb, MK_INFO, msg.as_bytes()) };
         }
 
@@ -1890,11 +1892,7 @@ impl NzbgetRsStreamRepairCtrl {
                     par_flags |= 8;
                 }
                 if check_main_pars
-                    && crate::parparser::find_main_pars(
-                        crate::fsops::path(dest_dir),
-                        false,
-                        |_| {},
-                    )
+                    && crate::parparser::find_main_pars(crate::fsops::path(dest_dir), false, |_| {})
                 {
                     par_flags |= 16;
                 }
@@ -2124,9 +2122,7 @@ impl NzbgetRsStreamRepairCtrl {
         info_name.extend_from_slice(&nzb_name);
         unsafe { self.set_info_name(ctx, cb, &info_name) };
 
-        let any_eligible = targets
-            .iter()
-            .any(|t| t.patch_eligible && t.needs_repair());
+        let any_eligible = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
         if any_eligible && !donors.is_empty() {
             let mut msg = b"Starting live stream repair for ".to_vec();
             msg.extend_from_slice(&nzb_name);
@@ -2147,9 +2143,7 @@ impl NzbgetRsStreamRepairCtrl {
                     &mut counters,
                 );
             }
-            let any_holes = targets
-                .iter()
-                .any(|t| t.patch_eligible && t.needs_repair());
+            let any_holes = targets.iter().any(|t| t.patch_eligible && t.needs_repair());
             if any_holes && unsafe { !self.host_is_stopped(ctx, cb) } {
                 unsafe {
                     self.refresh_live_names(ctx, cb, &mut targets, &mut member_names);

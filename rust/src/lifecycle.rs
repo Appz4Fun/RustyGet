@@ -883,12 +883,34 @@ unsafe fn dm_opt_cstr<'a>(p: *const c_char) -> &'a std::ffi::CStr {
     }
 }
 
+fn dm_emit_active_log(level: c_int, msg: &[u8]) {
+    #[cfg(unix)]
+    {
+        let kind = match level {
+            0 => 3,
+            1 => 4,
+            2 => 0,
+            3 => 1,
+            4 => 2,
+            _ => return,
+        };
+        crate::log::log_active_bytes(kind, msg);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (level, msg);
+    }
+}
+
 unsafe fn dm_log(env: &NzbgetRsDaemonEnv, level: c_int, msg: &[u8]) {
-    let c = dm_cbuf(msg);
     if let Some(cb) = env.log_cb {
+        let c = dm_cbuf(msg);
         cb(env.ctx, level, c.as_ptr() as *const c_char);
     } else if let Some(gcb) = env.global_log_cb {
+        let c = dm_cbuf(msg);
         gcb(level, c.as_ptr() as *const c_char);
+    } else {
+        dm_emit_active_log(level, msg);
     }
 }
 
@@ -929,17 +951,23 @@ unsafe fn dm_trigger_reload(
         0 => {
             let flags = rcb(0);
             let has_inst = (flags & 1) != 0;
-            c_int::from(!has_inst || dm_is_reloading() || dm_is_stopped() || signal_state_op(0) != 0)
+            c_int::from(
+                !has_inst || dm_is_reloading() || dm_is_stopped() || signal_state_op(0) != 0,
+            )
         }
         1 => {
             if let Some(lcb) = global_log_cb {
                 lcb(0, c"Daemon is already reloading or stopping".as_ptr());
+            } else {
+                dm_emit_active_log(0, b"Daemon is already reloading or stopping");
             }
             0
         }
         2 => {
             if let Some(lcb) = global_log_cb {
                 lcb(0, c"Reload request debounced, target extended".as_ptr());
+            } else {
+                dm_emit_active_log(0, b"Reload request debounced, target extended");
             }
             0
         }
@@ -957,6 +985,11 @@ unsafe fn dm_trigger_reload(
                     c"Unpack is actively executing; deferring reload until unpack completes..."
                         .as_ptr(),
                 );
+            } else {
+                dm_emit_active_log(
+                    2,
+                    b"Unpack is actively executing; deferring reload until unpack completes...",
+                );
             }
             0
         }
@@ -972,6 +1005,8 @@ unsafe fn dm_trigger_reload(
             if (flags & 1) != 0 && !dm_is_reloading() {
                 if let Some(lcb) = global_log_cb {
                     lcb(2, c"Reloading...".as_ptr());
+                } else {
+                    dm_emit_active_log(2, b"Reloading...");
                 }
                 rcb(1);
             }
@@ -979,6 +1014,109 @@ unsafe fn dm_trigger_reload(
         }
         _ => 0,
     });
+}
+
+#[cfg(unix)]
+pub(crate) fn disk_service_interval_active() -> c_int {
+    let waiting = DAEMON_INSTANCE
+        .disk
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .waiting_required_dir;
+    let disk_space = crate::options::active_options().map_or(0, |o| o.scalars().disk_space);
+    let downloading = crate::ffi::active_workstate().is_some_and(|w| w.downloading());
+    if waiting || (disk_space > 0 && downloading) {
+        1
+    } else {
+        -1
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn disk_service_work_active() {
+    dm_emit_active_log(0, b"Disk service work");
+    let opts = crate::options::active_options();
+    let ws = crate::ffi::active_workstate();
+    let disk_space = opts.as_ref().map_or(0, |o| o.scalars().disk_space);
+    let downloading = ws.as_ref().is_some_and(|w| w.downloading());
+    if disk_space > 0 && downloading {
+        dm_emit_active_log(0, b"Disk service work: check disk space");
+        let dest_c = opts.as_ref().and_then(|o| o.str_cstr(3)).unwrap_or(c"");
+        let dest_b = opts.as_ref().map_or(&[][..], |o| o.str_bytes(3));
+        let inter_c = opts.as_ref().and_then(|o| o.str_cstr(4));
+        let inter_b = opts.as_ref().map_or(&[][..], |o| o.str_bytes(4));
+        let (dest_low, inter_low) =
+            crate::fsops::disk_service_check_disk_space(dest_c, inter_c, disk_space);
+        if dest_low {
+            let mut wm = b"Low disk space on ".to_vec();
+            wm.extend_from_slice(dest_b);
+            wm.extend_from_slice(b". Pausing download");
+            dm_emit_active_log(3, &wm);
+            if let Some(w) = ws.as_ref() {
+                w.set_pause_download(true);
+            }
+        }
+        if inter_low {
+            let mut wm = b"Low disk space on ".to_vec();
+            wm.extend_from_slice(inter_b);
+            wm.extend_from_slice(b". Pausing download");
+            dm_emit_active_log(3, &wm);
+            if let Some(w) = ws.as_ref() {
+                w.set_pause_download(true);
+            }
+        }
+    }
+
+    let (waiting_req, prev_reported) = {
+        let dg = DAEMON_INSTANCE
+            .disk
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        (dg.waiting_required_dir, dg.waiting_reported)
+    };
+    if waiting_req {
+        dm_emit_active_log(0, b"Disk service work: check required dir");
+        let req_b = opts.as_ref().map_or(&[][..], |o| o.str_bytes(11));
+        let (all_exist, next_reported) =
+            crate::fsops::disk_service_check_required_dirs(req_b, prev_reported, |dir_cstr| {
+                let mut im = b"Waiting for required directory ".to_vec();
+                im.extend_from_slice(dir_cstr.to_bytes());
+                dm_emit_active_log(2, &im);
+            });
+        if !all_exist {
+            DAEMON_INSTANCE
+                .disk
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .waiting_reported = next_reported;
+            return;
+        }
+        if prev_reported {
+            dm_emit_active_log(2, b"All required directories available");
+        }
+        if let Some(w) = ws.as_ref() {
+            w.set_temp_pause_download(false);
+            w.set_temp_pause_postprocess(false);
+        }
+        let mut dg = DAEMON_INSTANCE
+            .disk
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        dg.waiting_required_dir = false;
+        dg.waiting_reported = next_reported;
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn should_start_secure_server_active() -> bool {
+    let Some(opts) = crate::options::active_options() else {
+        return false;
+    };
+    crate::options::nzbget_should_start_secure_server(
+        opts.scalars().secure_control != 0,
+        true,
+        opts.str_bytes(14),
+    )
 }
 
 /// Executes `DiskService` and `RustyGet` daemon lifecycle operations (`daemon/main/rustyget.cpp`):
@@ -996,10 +1134,7 @@ unsafe fn dm_trigger_reload(
 /// - `11`: `Phase4Shutdown`
 /// - `12`: `CleanupLockFile`
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_daemon_exec(
-    op: c_int,
-    env: *const NzbgetRsDaemonEnv,
-) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDaemonEnv) -> c_int {
     let Some(e) = env.as_ref() else {
         return 0;
     };
@@ -1025,11 +1160,8 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(
                 } else {
                     Some(std::ffi::CStr::from_ptr(e.s2))
                 };
-                let (dest_low, inter_low) = crate::fsops::disk_service_check_disk_space(
-                    dm_opt_cstr(e.s1),
-                    inter_opt,
-                    e.a1,
-                );
+                let (dest_low, inter_low) =
+                    crate::fsops::disk_service_check_disk_space(dm_opt_cstr(e.s1), inter_opt, e.a1);
                 if dest_low {
                     let mut wm = b"Low disk space on ".to_vec();
                     wm.extend_from_slice(dm_cstr_bytes(e.s1));
@@ -1092,6 +1224,8 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(
             1
         }
         2 => {
+            #[cfg(unix)]
+            crate::log::active_cmd_script_log().reset_all();
             {
                 let mut dg = DAEMON_INSTANCE
                     .disk
@@ -1116,8 +1250,17 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(
         },
         4 => {
             #[cfg(unix)]
+            let (umask_raw, is_debug) = if e.a1 < 0 {
+                (
+                    crate::options::active_options().map_or(0o1000, |o| o.scalars().umask),
+                    crate::ffi::build_debug_enabled(),
+                )
+            } else {
+                (e.a1, e.a2 != 0)
+            };
+            #[cfg(unix)]
             let eff = {
-                let umask_val = e.a1 as u32;
+                let umask_val = umask_raw as u32;
                 let res = if crate::options::nzbget_is_valid_umask(umask_val) {
                     let m = umask_val as libc::mode_t;
                     libc::umask(m);
@@ -1130,9 +1273,9 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(
                 res as c_int
             };
             #[cfg(not(unix))]
-            let eff = 0;
+            let (eff, is_debug) = (0, e.a2 != 0);
 
-            if e.a2 != 0 {
+            if is_debug {
                 let msg = format!("Using {:o} umask", eff as u32);
                 dm_log(e, 0, msg.as_bytes());
             }
@@ -1140,9 +1283,77 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(
         }
         5 => {
             let was_reloading = dm_is_reloading();
-            let ver = dm_cstr_bytes(e.s1);
-            let lock_file = dm_opt_cstr(e.s2);
-            let daemon_user = dm_opt_cstr(e.s3);
+            #[cfg(unix)]
+            let active_opts = if e.s1.is_null() {
+                crate::options::active_options()
+            } else {
+                None
+            };
+            #[cfg(unix)]
+            if let Some(opts) = active_opts.as_ref() {
+                if opts.server_mode() && opts.scalars().system_health_check != 0 {
+                    let _ = crate::ffi::system_health_diagnose_bytes(0);
+                }
+            }
+            #[cfg(unix)]
+            let (
+                ver,
+                lock_file,
+                daemon_user,
+                server_mode,
+                cfg_fn,
+                ctrl_ip,
+                ctrl_port,
+                crash_dump,
+                crash_trace,
+            ) = if let Some(opts) = active_opts.as_ref() {
+                let sc = opts.scalars();
+                (
+                    crate::ffi::build_version_bytes(),
+                    opts.str_cstr(25).unwrap_or(c""),
+                    opts.str_cstr(26).unwrap_or(c""),
+                    opts.server_mode(),
+                    opts.str_bytes(0),
+                    opts.str_bytes(14),
+                    sc.control_port,
+                    sc.crash_dump != 0,
+                    crate::ffi::build_debug_enabled() && sc.crash_trace != 0,
+                )
+            } else {
+                (
+                    dm_cstr_bytes(e.s1),
+                    dm_opt_cstr(e.s2),
+                    dm_opt_cstr(e.s3),
+                    e.a2 != 0,
+                    dm_cstr_bytes(e.s4),
+                    dm_cstr_bytes(e.s5),
+                    e.a6,
+                    e.a4 != 0,
+                    e.a5 != 0,
+                )
+            };
+            #[cfg(not(unix))]
+            let (
+                ver,
+                lock_file,
+                daemon_user,
+                server_mode,
+                cfg_fn,
+                ctrl_ip,
+                ctrl_port,
+                crash_dump,
+                crash_trace,
+            ) = (
+                dm_cstr_bytes(e.s1),
+                dm_opt_cstr(e.s2),
+                dm_opt_cstr(e.s3),
+                e.a2 != 0,
+                dm_cstr_bytes(e.s4),
+                dm_cstr_bytes(e.s5),
+                e.a6,
+                e.a4 != 0,
+                e.a5 != 0,
+            );
 
             if e.a1 != 0 {
                 if !was_reloading {
@@ -1181,9 +1392,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(
                                     em.extend_from_slice(b" is not a regular file");
                                 }
                                 3 => {
-                                    em.extend_from_slice(
-                                        b"could not acquire lock on lock-file ",
-                                    );
+                                    em.extend_from_slice(b"could not acquire lock on lock-file ");
                                     em.extend_from_slice(lock_file.to_bytes());
                                 }
                                 4 => em.extend_from_slice(b"invalid DaemonUsername"),
@@ -1198,7 +1407,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(
                 im.extend_from_slice(ver);
                 im.extend_from_slice(b" daemon-mode");
                 dm_log(e, 2, &im);
-            } else if e.a2 != 0 {
+            } else if server_mode {
                 let mut im = b"RustyGet ".to_vec();
                 im.extend_from_slice(ver);
                 im.extend_from_slice(b" server-mode");
@@ -1210,17 +1419,33 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(
                 dm_log(e, 2, &im);
             }
 
-            if e.a2 != 0 {
+            if server_mode {
                 let mut u = b"using ".to_vec();
-                u.extend_from_slice(dm_cstr_bytes(e.s4));
+                u.extend_from_slice(cfg_fn);
                 dm_log(e, 2, &u);
 
                 let mut r = b"RustyGet runs on ".to_vec();
-                r.extend_from_slice(dm_cstr_bytes(e.s5));
-                r.extend_from_slice(format!(":{}", e.a6).as_bytes());
+                r.extend_from_slice(ctrl_ip);
+                r.extend_from_slice(format!(":{ctrl_port}").as_bytes());
                 dm_log(e, 2, &r);
             }
 
+            #[cfg(unix)]
+            if e.s1.is_null() && crate::ffi::build_debug_enabled() {
+                let sys_bytes = crate::ffi::format_system_info_bytes(0, false);
+                let mut pos = 0;
+                while pos < sys_bytes.len() {
+                    let end = sys_bytes[pos..]
+                        .iter()
+                        .position(|&b| b == b'\n')
+                        .map_or(sys_bytes.len(), |d| pos + d);
+                    dm_emit_active_log(1, &sys_bytes[pos..end]);
+                    if end == sys_bytes.len() {
+                        break;
+                    }
+                    pos = end + 1;
+                }
+            }
             if let Some(cb) = e.action_cb {
                 cb(e.ctx, 2, 0, std::ptr::null(), std::ptr::null());
             }
@@ -1231,7 +1456,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(
                 .unwrap_or_else(|err| err.into_inner())
                 .reloading = false;
 
-            install_error_handler(e.a4 != 0, e.a5 != 0, e.segv_cb);
+            install_error_handler(crash_dump, crash_trace, e.segv_cb);
             0
         }
         6 => c_int::from(crate::options::nzbget_should_start_secure_server(
@@ -1415,7 +1640,16 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(
                 && DAEMON_INSTANCE.lock_file_owned.load(Ordering::SeqCst)
             {
                 dm_log(e, 2, b"Deleting lock file");
-                crate::fsops::delete_file(dm_opt_cstr(e.s1));
+                if !e.s1.is_null() {
+                    crate::fsops::delete_file(dm_opt_cstr(e.s1));
+                } else {
+                    #[cfg(unix)]
+                    if let Some(opts) = crate::options::active_options() {
+                        if let Some(lf) = opts.str_cstr(25) {
+                            crate::fsops::delete_file(lf);
+                        }
+                    }
+                }
             }
             1
         }
@@ -1864,7 +2098,9 @@ mod tests {
             env.a1 = 1;
             assert_eq!(nzbget_rs_daemon_exec(3, &env), 1);
 
-            DAEMON_INSTANCE.lock_file_owned.store(true, Ordering::SeqCst);
+            DAEMON_INSTANCE
+                .lock_file_owned
+                .store(true, Ordering::SeqCst);
             env.a1 = 1;
             env.s1 = lock_c.as_ptr() as *const c_char;
             assert_eq!(nzbget_rs_daemon_exec(12, &env), 1);

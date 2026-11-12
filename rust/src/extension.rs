@@ -3571,7 +3571,9 @@ pub(crate) fn format_maint_script_prefix(
 unsafe fn emit_maint_log(env: &NzbgetRsMaintenanceEnv, kind: c_int, msg: &[u8]) {
     #[cfg(unix)]
     if let Some(hcb) = env.script_host_cb {
-        crate::script::host_log(env.ctx, hcb, kind, msg);
+        crate::script::host_log(std::ptr::null_mut(), hcb, kind, msg);
+    } else {
+        crate::log::log_active_bytes(kind, msg);
     }
     #[cfg(not(unix))]
     let _ = (env, kind, msg);
@@ -3698,7 +3700,7 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_exec(
                 if let Some(runner) = active {
                     if let Some(e) = env.as_ref() {
                         if let Some(hcb) = e.script_host_cb {
-                            runner.detach(e.ctx, hcb);
+                            runner.detach(std::ptr::null_mut(), hcb);
                         }
                     }
                     while m
@@ -3824,7 +3826,7 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_exec(
                         branch: e.a1,
                         daemon_mode: e.a3 != 0,
                     },
-                    e.ctx,
+                    std::ptr::null_mut(),
                     hcb,
                 );
                 1
@@ -3862,7 +3864,7 @@ pub unsafe extern "C" fn nzbget_rs_maintenance_exec(
                     &info_name,
                     &log_prefix,
                     prefix_len.max(0) as usize,
-                    e.ctx,
+                    std::ptr::null_mut(),
                     hcb,
                 );
                 if acc.is_empty() {
@@ -5177,6 +5179,86 @@ mod tests {
             assert_eq!(collected.len(), 2);
             assert_eq!(collected[0], (1, 0, b"first line".to_vec()));
             assert_eq!(collected[1], (2, 1, b"second line".to_vec()));
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                static LEGACY_HOST_OP_CALLED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                unsafe extern "C" fn strict_prod_script_host_cb(
+                    _ctx: *mut c_void,
+                    op: c_int,
+                    _a1: c_int,
+                    _a2: c_int,
+                    _p1: usize,
+                    _p2: usize,
+                    _s1: *const c_char,
+                    _s2: *const c_char,
+                    _ints: *mut c_int,
+                    _strs: *mut *const c_char,
+                ) -> usize {
+                    if op == 0 || op == 2 {
+                        LEGACY_HOST_OP_CALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    0
+                }
+
+                let script_path = dir.join("update-info.sh");
+                std::fs::write(
+                    &script_path,
+                    b"#!/bin/sh\necho '[NZB] [UPDATEINFO]version=27.0'\n",
+                )
+                .unwrap();
+                std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                let pkg_json = format!(
+                    "{{\"update-info-script\":\"{}\"}}",
+                    script_path.to_str().unwrap()
+                );
+                std::fs::write(dir.join("package-info.json"), pkg_json.as_bytes()).unwrap();
+
+                let mut web_dir_c = dir.to_str().unwrap().as_bytes().to_vec();
+                web_dir_c.push(0);
+                let mut out_buf = crate::ffi::RsBuf {
+                    data: std::ptr::null_mut(),
+                    len: 0,
+                    cap: 0,
+                };
+                let mut sentinel = 1u8;
+                LEGACY_HOST_OP_CALLED.store(false, std::sync::atomic::Ordering::SeqCst);
+                let check_env = NzbgetRsMaintenanceEnv {
+                    ctx: (&mut sentinel as *mut u8).cast(),
+                    p1: 0,
+                    a1: 0,
+                    a2: b'/' as c_int,
+                    a3: 0,
+                    a4: 0,
+                    t1: 0,
+                    s1: web_dir_c.as_ptr().cast(),
+                    s2: std::ptr::null(),
+                    s3: std::ptr::null(),
+                    out_buf: &mut out_buf,
+                    emit_ctx: std::ptr::null_mut(),
+                    emit_cb: None,
+                    script_host_cb: Some(strict_prod_script_host_cb),
+                    action_cb: None,
+                };
+                assert_eq!(nzbget_rs_maintenance_exec(m, 5, &check_env), 1);
+                assert!(
+                    !LEGACY_HOST_OP_CALLED.load(std::sync::atomic::Ordering::SeqCst),
+                    "CheckUpdates must use active runtime options/logging even with non-null env.ctx"
+                );
+                let out_str =
+                    std::slice::from_raw_parts(out_buf.data.cast::<u8>(), out_buf.len).to_vec();
+                crate::ffi::nzbget_rs_free(out_buf);
+                assert!(
+                    out_str
+                        .windows(b"version=27.0".len())
+                        .any(|w| w == b"version=27.0"),
+                    "unexpected CheckUpdates output: {:?}",
+                    out_str
+                );
+            }
 
             nzbget_rs_maintenance_free(m);
         }

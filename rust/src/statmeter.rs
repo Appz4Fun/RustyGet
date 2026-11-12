@@ -826,6 +826,33 @@ mod runtime {
             (month_bytes, day_bytes)
         }
 
+        pub(crate) fn total_stat_snapshot(&self) -> (i32, i32, i64, bool) {
+            let cur_time = current_unix_time();
+            let stand_by = self.stand_by.load(Ordering::SeqCst);
+            let (up_sec, dn_sec) = calc_total_stat(
+                cur_time,
+                self.start_server.load(Ordering::SeqCst),
+                self.start_download.load(Ordering::SeqCst),
+                self.paused_from.load(Ordering::SeqCst),
+                stand_by,
+            );
+            (
+                up_sec,
+                dn_sec,
+                self.all_bytes.load(Ordering::SeqCst),
+                stand_by,
+            )
+        }
+
+        pub(crate) fn calc_quota_usage(
+            &self,
+            local_time_offset: i32,
+            opts: Option<&NzbgetRsOptions>,
+            log: Option<&NzbgetRsLog>,
+        ) -> (i64, i64) {
+            self.calc_quota_usage_inner(local_time_offset, opts, log)
+        }
+
         pub(crate) fn add_server_stats(
             &self,
             bytes_read: i32,
@@ -890,8 +917,8 @@ mod runtime {
         }
     }
 
-    #[no_mangle]
-    pub unsafe extern "C" fn nzbget_rs_statmeter_speed(
+    #[cfg(test)]
+    pub(crate) unsafe fn nzbget_rs_statmeter_speed(
         sm: *const NzbgetRsStatMeter,
         op: c_int,
         bytes: c_int,
@@ -1119,6 +1146,10 @@ mod runtime {
                     lg.emit_bytes(0, opt_ref, format!("      ServerVolume {index}").as_bytes());
                     sv.log_debug_info(lg, opt_ref);
                 }
+                1
+            }
+            7 => {
+                s.add_speed_reading_locked(a1);
                 1
             }
             _ => 0,
@@ -1401,8 +1432,7 @@ mod runtime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[no_mangle]
-    pub unsafe extern "C" fn nzbget_rs_statmeter_rpc(
+    pub(crate) unsafe fn nzbget_rs_statmeter_rpc(
         sm: *const NzbgetRsStatMeter,
         op: c_int,
         local_time_offset: c_int,
@@ -1518,12 +1548,14 @@ mod runtime {
     }
 }
 
+#[cfg(all(unix, test))]
+pub(crate) use runtime::nzbget_rs_statmeter_speed;
 #[cfg(unix)]
-pub(crate) use runtime::active_statmeter;
+pub(crate) use runtime::{active_statmeter, nzbget_rs_statmeter_rpc};
 #[cfg(unix)]
 pub use runtime::{
     nzbget_rs_statmeter_ctl, nzbget_rs_statmeter_disk, nzbget_rs_statmeter_free,
-    nzbget_rs_statmeter_new, nzbget_rs_statmeter_rpc, nzbget_rs_statmeter_speed, NzbgetRsStatMeter,
+    nzbget_rs_statmeter_new, NzbgetRsStatMeter,
 };
 
 #[cfg(test)]
@@ -1858,7 +1890,7 @@ mod tests {
             assert_eq!(tot_ints[2], 0);
             assert_eq!(all_b, 8192);
 
-            let pool = crate::net::nzbget_rs_serverpool_new(None);
+            let pool = crate::net::nzbget_rs_serverpool_new();
             crate::net::nzbget_rs_serverpool_add(
                 pool,
                 1,

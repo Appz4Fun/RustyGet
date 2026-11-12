@@ -157,6 +157,14 @@ static CACHE_FLUSHING: AtomicBool = AtomicBool::new(false);
 static CACHE_ALLOC_LOCK: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 static CACHE_FLUSH_LOCK: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 
+pub(crate) fn article_cache_allocated() -> usize {
+    CACHE_ALLOCATED.load(Ordering::Acquire)
+}
+
+pub(crate) fn memory_monitor_active() -> bool {
+    MEM_ACTIVE.load(Ordering::Acquire)
+}
+
 pub fn memory_monitor_tier() -> i32 {
     if MEM_ACTIVE.load(Ordering::Acquire) {
         MEM_TIER.load(Ordering::Acquire)

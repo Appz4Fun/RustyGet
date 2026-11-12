@@ -6,9 +6,11 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 use std::sync::Mutex;
 
-use crate::ffi::{NzbgetRsBinRpcLogBeginFn, NzbgetRsBinRpcLogPushFn};
 use crate::options::NzbgetRsOptions;
 use crate::xmlrpc_format::{NzbgetRsRpcLogEntry, NzbgetRsXmlRpcEmitFn};
+
+type BinRpcLogBeginFn = unsafe extern "C" fn(*mut c_void, c_int, u32, *mut c_int);
+type BinRpcLogPushFn = unsafe extern "C" fn(*mut c_void, u32, u32, u32, *const c_char);
 
 const MESSAGE_PREFIXES: [&[u8]; 5] = [b"INFO", b"WARNING", b"ERROR", b"DEBUG", b"DETAIL"];
 
@@ -593,9 +595,56 @@ pub unsafe extern "C" fn nzbget_rs_log_ctl(
     }
 }
 
+pub(crate) fn clear_active_log() {
+    if let Some(lg) = active_log() {
+        if let Ok(mut inner) = lg.inner.lock() {
+            inner.messages.clear();
+        }
+    }
+}
+
+pub(crate) fn active_cmd_script_log() -> &'static NzbgetRsCmdScriptLog {
+    static LOG: std::sync::OnceLock<NzbgetRsCmdScriptLog> = std::sync::OnceLock::new();
+    LOG.get_or_init(NzbgetRsCmdScriptLog::new)
+}
+
+impl NzbgetRsCmdScriptLog {
+    pub(crate) fn reset_all(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.messages.clear();
+            inner.id_script_gen = 0;
+            inner.id_message_gen = 0;
+        }
+    }
+
+    pub(crate) fn reset_script(&self) -> c_int {
+        let Ok(mut inner) = self.inner.lock() else {
+            return 0;
+        };
+        inner.messages.clear();
+        inner.id_script_gen = inner.id_script_gen.wrapping_add(1);
+        inner.id_script_gen
+    }
+
+    pub(crate) fn add_message_bytes(&self, script_id: c_int, kind: c_int, bytes: &[u8]) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if script_id == inner.id_script_gen {
+            inner.id_message_gen = inner.id_message_gen.wrapping_add(1);
+            let msg_id = inner.id_message_gen as u32;
+            inner.messages.push_back(RsLogMessage {
+                id: msg_id,
+                kind,
+                time: current_unix_time(),
+                text: cstring_lossless(bytes),
+            });
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_log_collect(
+pub(crate) unsafe fn nzbget_rs_log_collect(
     mode: c_int,
     log: *const NzbgetRsLog,
     cmd_log: *const NzbgetRsCmdScriptLog,
@@ -663,8 +712,8 @@ pub unsafe extern "C" fn nzbget_rs_log_collect(
             if fn1 == 0 || fn2 == 0 {
                 return;
             }
-            let begin_log: NzbgetRsBinRpcLogBeginFn = std::mem::transmute(fn1);
-            let push_log: NzbgetRsBinRpcLogPushFn = std::mem::transmute(fn2);
+            let begin_log: BinRpcLogBeginFn = std::mem::transmute(fn1);
+            let push_log: BinRpcLogPushFn = std::mem::transmute(fn2);
             let Ok(inner) = lg.inner.lock() else {
                 return;
             };
@@ -687,8 +736,8 @@ pub unsafe extern "C" fn nzbget_rs_log_collect(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cmd_script_log_op(
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_cmd_script_log_op(
     op: c_int,
     handle: *mut NzbgetRsCmdScriptLog,
     script_id: c_int,
@@ -703,38 +752,15 @@ pub unsafe extern "C" fn nzbget_rs_cmd_script_log_op(
             }
             0
         }
-        2 => {
-            let Some(h) = handle.as_ref() else {
-                return 0;
-            };
-            let Ok(mut inner) = h.inner.lock() else {
-                return 0;
-            };
-            inner.messages.clear();
-            inner.id_script_gen = inner.id_script_gen.wrapping_add(1);
-            inner.id_script_gen as usize
-        }
+        2 => handle.as_ref().map_or(0, |h| h.reset_script() as usize),
         3 => {
-            let Some(h) = handle.as_ref() else {
-                return 0;
-            };
-            let Ok(mut inner) = h.inner.lock() else {
-                return 0;
-            };
-            if script_id == inner.id_script_gen {
-                inner.id_message_gen = inner.id_message_gen.wrapping_add(1);
-                let msg_id = inner.id_message_gen as u32;
+            if let Some(h) = handle.as_ref() {
                 let bytes = if text.is_null() {
                     &[][..]
                 } else {
                     CStr::from_ptr(text).to_bytes()
                 };
-                inner.messages.push_back(RsLogMessage {
-                    id: msg_id,
-                    kind,
-                    time: current_unix_time(),
-                    text: cstring_lossless(bytes),
-                });
+                h.add_message_bytes(script_id, kind, bytes);
             }
             0
         }

@@ -3826,6 +3826,23 @@ impl NzbgetRsOptions {
         (self.mode_flags.load(std::sync::atomic::Ordering::Relaxed) & 1) != 0
     }
 
+    pub(crate) fn daemon_mode(&self) -> bool {
+        (self.mode_flags.load(std::sync::atomic::Ordering::Relaxed) & 2) != 0
+    }
+
+    pub(crate) fn remote_client_mode(&self) -> bool {
+        (self.mode_flags.load(std::sync::atomic::Ordering::Relaxed) & 4) != 0
+    }
+
+    pub(crate) fn for_each_option(&self, mut cb: impl FnMut(&CStr, &CStr, c_int)) {
+        let signed_char = c_char::MIN < 0;
+        for e in &self.opt_entries {
+            let val = e.value.as_deref().unwrap_or(c"");
+            let restr = c_int::from(option_restricted(&e.name, signed_char));
+            cb(&e.name, val, restr);
+        }
+    }
+
     pub(crate) fn str_cstr(&self, id: usize) -> Option<&CStr> {
         self.strs.get(id).and_then(|s| s.as_deref())
     }

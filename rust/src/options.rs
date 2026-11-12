@@ -3795,7 +3795,7 @@ pub struct NzbgetRsOptions {
     no_disk_access: bool,
     no_config: bool,
     fatal_error: bool,
-    config_errors: bool,
+    config_errors: std::sync::atomic::AtomicBool,
     config_line: i32,
     scalars: NzbgetRsParsedOptions,
     out_scalars: *mut NzbgetRsParsedOptions,
@@ -3804,6 +3804,44 @@ pub struct NzbgetRsOptions {
 }
 
 impl NzbgetRsOptions {
+    pub(crate) fn scalars(&self) -> &NzbgetRsParsedOptions {
+        &self.scalars
+    }
+
+    pub(crate) fn str_cstr(&self, id: usize) -> Option<&CStr> {
+        self.strs.get(id).and_then(|s| s.as_deref())
+    }
+
+    pub(crate) fn str_bytes(&self, id: usize) -> &[u8] {
+        self.str_cstr(id).map_or(&[], CStr::to_bytes)
+    }
+
+    pub(crate) fn categories(&self) -> &[RustCategory] {
+        &self.categories
+    }
+
+    pub(crate) fn script_dir_paths(&self) -> &[CString] {
+        &self.script_dir_paths
+    }
+
+    pub(crate) fn find_category(&self, name: &CStr, search_aliases: bool) -> Option<&RustCategory> {
+        for cat in &self.categories {
+            if eq(&cat.name, name) {
+                return Some(cat);
+            }
+        }
+        if search_aliases {
+            let name_bytes = name.to_bytes();
+            for cat in &self.categories {
+                let alias_slices: Vec<&[u8]> = cat.aliases.iter().map(|a| a.to_bytes()).collect();
+                if category_alias_list_matches(&alias_slices, name_bytes, c_char::MIN < 0) {
+                    return Some(cat);
+                }
+            }
+        }
+        None
+    }
+
     fn sync_scalars_to_host(&self) {
         if !self.out_scalars.is_null() {
             unsafe {
@@ -3892,7 +3930,6 @@ impl NzbgetRsOptions {
 
         self.init_opt_file();
         if self.fatal_error {
-            self.sync_entries_to_host();
             return;
         }
 
@@ -3914,7 +3951,6 @@ impl NzbgetRsOptions {
                 self.emit_host(0, &[], &pl, 1);
             }
             self.fatal_error = true;
-            self.sync_entries_to_host();
             return;
         }
 
@@ -3982,8 +4018,6 @@ impl NzbgetRsOptions {
         init_categories_host(self, no_disk, dest_dir.as_deref());
         init_scheduler_host(self);
         init_feeds_host(self);
-
-        self.sync_entries_to_host();
     }
 
     fn init_opt_file(&mut self) {
@@ -4157,33 +4191,88 @@ impl NzbgetRsOptions {
         }
     }
 
-    fn sync_entries_to_host(&self) {
-        for e in &self.opt_entries {
-            let ints = [e.line_no];
-            let ptrs = [
-                e.name.as_ptr(),
-                e.value.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
-                e.def_value
-                    .as_ref()
-                    .map_or(std::ptr::null(), |s| s.as_ptr()),
-            ];
-            self.emit_host(4, &ints, &ptrs, 3);
-        }
-        for c in &self.categories {
-            let ints = [c_int::from(c.unpack)];
-            let mut ptrs = Vec::with_capacity(3 + c.aliases.len());
-            ptrs.push(c.name.as_ptr());
-            ptrs.push(c.dest_dir.as_ptr());
-            ptrs.push(c.extensions.as_ptr());
-            for a in &c.aliases {
-                ptrs.push(a.as_ptr());
+    #[allow(clippy::too_many_arguments)]
+    fn run_runtime_scheduler_task(
+        &self,
+        id: i32,
+        time: Option<&CStr>,
+        week_days: Option<&CStr>,
+        command: i32,
+        param: Option<&CStr>,
+        cb_ctx: *mut std::ffi::c_void,
+        cb_fn: NzbgetRsOptionsHostFn,
+    ) {
+        let line_no = if id == 0 { 0 } else { self.config_line };
+        let emit_err = |msg: &CStr| {
+            let mut trunc = msg.to_bytes().to_vec();
+            if trunc.len() > 1023 {
+                trunc.truncate(1023);
             }
-            self.emit_host(5, &ints, &ptrs, c.aliases.len());
+            let base: &[u8] = match self.strs[0].as_deref() {
+                Some(cf) => {
+                    let raw = cf.to_bytes();
+                    &raw[crate::paths::base_file_name(raw)..]
+                }
+                None => b"<noconfig>",
+            };
+            let line_s = line_no.to_string();
+            let formatted = format_bytes_msg(&[base, b"(", line_s.as_bytes(), b"): ", &trunc]);
+            let ptrs = [formatted.as_ptr()];
+            if let Some(cb) = cb_fn {
+                unsafe { cb(cb_ctx, 1, std::ptr::null(), ptrs.as_ptr(), 1) };
+            }
+            self.config_errors
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        };
+        let emit_task = |hours: i32, minutes: i32, wd_bits: i32| {
+            if let Some(cb) = cb_fn {
+                let ints = [id, hours, minutes, wd_bits, command];
+                let ptrs = [param.map_or(std::ptr::null(), CStr::as_ptr)];
+                unsafe { cb(cb_ctx, 9, ints.as_ptr(), ptrs.as_ptr(), 1) };
+            }
+        };
+
+        let mut week_days_val = 0;
+        if let Some(wd) = week_days {
+            if !parse_week_days(wd.to_bytes(), &mut week_days_val) {
+                let id_str = id.to_string();
+                let msg = format_bytes_msg(&[
+                    b"Invalid value for option \"Task",
+                    id_str.as_bytes(),
+                    b".WeekDays\": \"",
+                    wd.to_bytes(),
+                    b"\"",
+                ]);
+                emit_err(&msg);
+                return;
+            }
         }
-        if !self.script_dir_paths.is_empty() {
-            let ptrs: Vec<*const c_char> =
-                self.script_dir_paths.iter().map(|p| p.as_ptr()).collect();
-            self.emit_host(6, &[], &ptrs, ptrs.len());
+
+        let Some(time_cstr) = time else {
+            return;
+        };
+        for one_time in crate::util::tokens(time_cstr.to_bytes(), b";,") {
+            let one_time_cstr = cstring(one_time.to_vec());
+            let (mut hours, mut minutes) = (0, 0);
+            if !parse_time(&one_time_cstr, &mut hours, &mut minutes) {
+                let id_str = id.to_string();
+                let msg = format_bytes_msg(&[
+                    b"Invalid value for option \"Task",
+                    id_str.as_bytes(),
+                    b".Time\": \"",
+                    one_time_cstr.to_bytes(),
+                    b"\"",
+                ]);
+                emit_err(&msg);
+                return;
+            }
+            if options_is_every_hour_task(hours) {
+                for every_hour in 0..24 {
+                    emit_task(every_hour, minutes, week_days_val);
+                }
+            } else {
+                emit_task(hours, minutes, week_days_val);
+            }
         }
     }
 }
@@ -4243,7 +4332,8 @@ impl OptionsHost for NzbgetRsOptions {
 
     fn config_error(&mut self, msg: &CStr) {
         self.emit_diag(1, msg);
-        self.config_errors = true;
+        self.config_errors
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn config_warn(&mut self, msg: &CStr) {
@@ -4430,7 +4520,7 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
         no_disk_access: no_disk_access != 0,
         no_config: no_config != 0,
         fatal_error: false,
-        config_errors: false,
+        config_errors: std::sync::atomic::AtomicBool::new(false),
         config_line: 0,
         scalars: NzbgetRsParsedOptions::with_defaults(),
         out_scalars,
@@ -4449,7 +4539,8 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
     );
     opts.sync_scalars_to_host();
     if !out_state_flags.is_null() {
-        *out_state_flags = c_int::from(opts.fatal_error) | (c_int::from(opts.config_errors) << 1);
+        let had_err = opts.config_errors.load(std::sync::atomic::Ordering::SeqCst);
+        *out_state_flags = c_int::from(opts.fatal_error) | (c_int::from(had_err) << 1);
     }
     opts.out_scalars = std::ptr::null_mut();
     opts.cb_ctx = std::ptr::null_mut();
@@ -4479,7 +4570,7 @@ pub unsafe extern "C" fn nzbget_rs_options_str(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_options_task(
-    handle: *mut NzbgetRsOptions,
+    handle: *const NzbgetRsOptions,
     id: c_int,
     time: *const c_char,
     week_days: *const c_char,
@@ -4488,12 +4579,9 @@ pub unsafe extern "C" fn nzbget_rs_options_task(
     cb_ctx: *mut std::ffi::c_void,
     cb_fn: NzbgetRsOptionsHostFn,
 ) -> c_int {
-    if handle.is_null() {
+    let Some(opts) = handle.as_ref() else {
         return 0;
-    }
-    let opts = &mut *handle;
-    opts.cb_ctx = cb_ctx;
-    opts.cb_fn = cb_fn;
+    };
     let time_opt = if time.is_null() {
         None
     } else {
@@ -4509,10 +4597,80 @@ pub unsafe extern "C" fn nzbget_rs_options_task(
     } else {
         Some(CStr::from_ptr(param))
     };
-    create_scheduler_task_host(opts, id, time_opt, wd_opt, command, param_opt);
-    opts.cb_ctx = std::ptr::null_mut();
-    opts.cb_fn = None;
-    c_int::from(opts.config_errors)
+    opts.run_runtime_scheduler_task(id, time_opt, wd_opt, command, param_opt, cb_ctx, cb_fn);
+    c_int::from(opts.config_errors.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_query(
+    handle: *const NzbgetRsOptions,
+    op: c_int,
+    s1: *const c_char,
+    a1: c_int,
+    out_int: *mut c_int,
+    out_strs: *mut *const c_char,
+    ctx: usize,
+    cb: Option<unsafe extern "C" fn(usize, *const c_char, *const c_char, c_int)>,
+) -> c_int {
+    let Some(opts) = handle.as_ref() else {
+        return 0;
+    };
+    match op {
+        0 => {
+            if s1.is_null() {
+                return 0;
+            }
+            let Some(cat) = opts.find_category(CStr::from_ptr(s1), a1 != 0) else {
+                return 0;
+            };
+            if !out_int.is_null() {
+                *out_int = c_int::from(cat.unpack);
+            }
+            if !out_strs.is_null() {
+                *out_strs.add(0) = cat.name.as_ptr();
+                *out_strs.add(1) = cat.dest_dir.as_ptr();
+                *out_strs.add(2) = cat.extensions.as_ptr();
+            }
+            1
+        }
+        1 => {
+            if let Some(f) = cb {
+                let signed_char = c_char::MIN < 0;
+                for e in &opts.opt_entries {
+                    let val = e.value.as_deref().unwrap_or(c"");
+                    let restr = c_int::from(option_restricted(&e.name, signed_char));
+                    f(ctx, e.name.as_ptr(), val.as_ptr(), restr);
+                }
+            }
+            opts.opt_entries.len() as c_int
+        }
+        2 => {
+            if let Some(f) = cb {
+                for cat in &opts.categories {
+                    f(
+                        ctx,
+                        cat.name.as_ptr(),
+                        cat.extensions.as_ptr(),
+                        c_int::from(cat.unpack),
+                    );
+                }
+            }
+            opts.categories.len() as c_int
+        }
+        3 => {
+            if let Some(f) = cb {
+                for p in &opts.script_dir_paths {
+                    f(ctx, p.as_ptr(), c"".as_ptr(), 0);
+                }
+            }
+            if !out_strs.is_null() && a1 >= 0 && (a1 as usize) < opts.script_dir_paths.len() {
+                *out_strs = opts.script_dir_paths[a1 as usize].as_ptr();
+            }
+            opts.script_dir_paths.len() as c_int
+        }
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -5050,5 +5208,120 @@ mod options_full_suite_port_from_cpp {
         assert_eq!(srv_ev.0, 1);
         assert_eq!(srv_ev.1, 3);
         assert_eq!(srv_ev.2, 2);
+    }
+
+    #[test]
+    fn options_query_serves_entries_categories_and_script_dirs() {
+        assert!(option_restricted(c"Server1.Password", true));
+        assert!(!option_restricted(c"Server1.Host", true));
+
+        let cmd_opts = [
+            c"Server1.Host=news.example.com".as_ptr(),
+            c"Server1.Port=119".as_ptr(),
+            c"Server1.Connections=2".as_ptr(),
+            c"Server1.Password=secret".as_ptr(),
+            c"Category1.Name=Movies".as_ptr(),
+            c"Category1.DestDir=/dl/movies".as_ptr(),
+            c"Category1.Unpack=no".as_ptr(),
+            c"Category1.Aliases=Films*;HD*".as_ptr(),
+            c"ScriptDir=/scripts/a;/scripts/b".as_ptr(),
+        ];
+        let mut scalars = NzbgetRsParsedOptions::default();
+        let mut state_flags: c_int = 0;
+        let handle = unsafe {
+            nzbget_rs_options_new(
+                c"rustyget".as_ptr(),
+                std::ptr::null(),
+                1,
+                1,
+                cmd_opts.as_ptr(),
+                cmd_opts.len(),
+                0,
+                c"1.0".as_ptr(),
+                std::ptr::null_mut(),
+                None,
+                &mut scalars,
+                &mut state_flags,
+            )
+        };
+        unsafe {
+            let mut unpack: c_int = 1;
+            let mut strs = [std::ptr::null(); 3];
+            assert_eq!(
+                nzbget_rs_options_query(
+                    handle,
+                    0,
+                    c"films-1080p".as_ptr(),
+                    1,
+                    &mut unpack,
+                    strs.as_mut_ptr(),
+                    0,
+                    None,
+                ),
+                1
+            );
+            assert_eq!(unpack, 0);
+            assert_eq!(CStr::from_ptr(strs[0]), c"Movies");
+            assert_eq!(CStr::from_ptr(strs[1]), c"/dl/movies");
+            assert_eq!(
+                nzbget_rs_options_query(
+                    handle,
+                    0,
+                    c"films-1080p".as_ptr(),
+                    0,
+                    &mut unpack,
+                    strs.as_mut_ptr(),
+                    0,
+                    None,
+                ),
+                0
+            );
+
+            unsafe extern "C" fn collect_entry(
+                ctx: usize,
+                name: *const c_char,
+                val: *const c_char,
+                restr: c_int,
+            ) {
+                let v = &mut *(ctx as *mut Vec<(String, String, i32)>);
+                v.push((
+                    CStr::from_ptr(name).to_str().unwrap().to_owned(),
+                    CStr::from_ptr(val).to_str().unwrap().to_owned(),
+                    restr,
+                ));
+            }
+            let mut entries: Vec<(String, String, i32)> = Vec::new();
+            let count = nzbget_rs_options_query(
+                handle,
+                1,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                (&mut entries as *mut Vec<_>) as usize,
+                Some(collect_entry),
+            );
+            assert_eq!(count as usize, entries.len());
+            assert!(entries
+                .iter()
+                .any(|(n, v, r)| n == "Server1.Password" && v == "secret" && *r == 1));
+
+            let mut first_dir = std::ptr::null();
+            assert_eq!(
+                nzbget_rs_options_query(
+                    handle,
+                    3,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut first_dir,
+                    0,
+                    None,
+                ),
+                2
+            );
+            assert_eq!(CStr::from_ptr(first_dir), c"/scripts/a");
+            nzbget_rs_options_free(handle);
+        }
     }
 }

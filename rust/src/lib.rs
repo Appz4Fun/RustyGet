@@ -34,6 +34,8 @@ pub mod fsdelete;
 pub mod fsops;
 pub mod historycoord;
 pub mod json;
+#[cfg(unix)]
+pub mod log;
 pub mod manifest;
 #[cfg(unix)]
 pub mod net;

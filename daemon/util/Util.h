@@ -897,86 +897,6 @@ public:
 	static inline mode_t uMask;
 };
 
-class DiskFile
-{
-public:
-	enum EOpenMode
-	{
-		omRead, // file must exist
-		omReadWrite, // file must exist
-		omWrite, // create new or overwrite existing
-		omAppend // create new or append to existing
-	};
-
-	enum ESeekOrigin
-	{
-		soSet,
-		soCur,
-		soEnd
-	};
-
-	DiskFile() = default;
-	DiskFile(const DiskFile&) = delete;
-	~DiskFile()
-	{
-		if (m_file)
-		{
-			Close();
-		}
-	}
-
-	bool Open(const char* filename, EOpenMode mode)
-	{
-		int fd = (int)nzbget_rs_fs_op_with_err(8, filename, nullptr, (int)mode, nullptr);
-		if (fd == -1)
-		{
-			return false;
-		}
-		const char* strmode = mode == omRead ? FOPEN_RB : mode == omReadWrite ?
-			FOPEN_RBP : mode == omWrite ? FOPEN_WB : FOPEN_AB;
-		m_file = fdopen(fd, strmode);
-		if (!m_file)
-		{
-			int error = errno;
-			close(fd);
-			errno = error;
-		}
-		return m_file;
-	}
-
-	bool Close()
-	{
-		if (m_file)
-		{
-			int ret = fclose(m_file);
-			m_file = nullptr;
-			return ret == 0;
-		}
-		return false;
-	}
-
-	bool Seek(int64 position, ESeekOrigin origin = soSet)
-	{
-		return fseek(m_file, position,
-			origin == soCur ? SEEK_CUR : origin == soEnd ? SEEK_END : SEEK_SET) == 0;
-	}
-
-	int64 Print(const char* format, ...) PRINTF_SYNTAX(2)
-	{
-		va_list ap;
-		va_start(ap, format);
-		int ret = vfprintf(m_file, format, ap);
-		va_end(ap);
-		return ret;
-	}
-
-	bool Flush() { return fflush(m_file) == 0; }
-	int GetFileDescriptor() const { return m_file ? fileno(m_file) : -1; }
-
-private:
-	FILE* m_file = nullptr;
-};
-
 #endif /* FILESYSTEM_H */
 
 #ifndef LOG_H
@@ -1083,131 +1003,7 @@ public:
 	enum ECertVerifLevel { cvNone, cvMinimal, cvStrict, Count };
 	enum ENzbDirArchiveAction { Delete, Move };
 
-	class OptEntry
-	{
-	public:
-		OptEntry(const char* name, const char* value) :
-			m_name(name), m_value(value) {}
-		void SetName(const char* name) { m_name = name; }
-		const char* GetName() const { return m_name; }
-		void SetValue(const char* value)
-		{
-			m_value = value;
-			if (!m_defValue)
-			{
-				m_defValue = value;
-			}
-		}
-		const char* GetValue() const { return m_value; }
-		const char* GetDefValue() const { return m_defValue; }
-		int GetLineNo() const { return m_lineNo; }
-		bool Restricted() { return nzbget_rs_option_restricted(m_name, (char)-1 < 0) != 0; }
-
-	private:
-		CString m_name;
-		CString m_value;
-		CString m_defValue;
-		int m_lineNo = 0;
-
-		void SetLineNo(int lineNo) { m_lineNo = lineNo; }
-
-		friend class Options;
-	};
-
-	typedef std::deque<OptEntry> OptEntriesBase;
-
-	class OptEntries: public OptEntriesBase
-	{
-	public:
-		OptEntry* FindOption(const char* name)
-		{
-			if (!name)
-			{
-				return nullptr;
-			}
-
-			for (OptEntry& optEntry : *this)
-			{
-				if (!strcasecmp(optEntry.GetName(), name))
-				{
-					return &optEntry;
-				}
-			}
-
-			return nullptr;
-		}
-	};
-
-	typedef GuardedPtr<OptEntries> GuardedOptEntries;
-
-	typedef std::vector<CString> NameList;
 	typedef std::vector<const char*> CmdOptList;
-
-	class Category
-	{
-	public:
-		Category(const char* name, const char* destDir, bool unpack, const char* extensions)
-			: m_name(name ? name : ""),
-			  m_destDir(destDir ? destDir : ""),
-			  m_extensions(extensions ? extensions : ""),
-			  m_unpack(unpack)
-		{
-		}
-		const char* GetName() const { return m_name.c_str(); }
-		const char* GetDestDir() const { return m_destDir.c_str(); }
-		bool GetUnpack() const { return m_unpack; }
-		const char* GetExtensions() const { return m_extensions.c_str(); }
-		NameList* GetAliases() { return &m_aliases; }
-
-	private:
-		const std::string m_name;
-		const std::string m_destDir;
-		const std::string m_extensions;
-		NameList m_aliases;
-		const bool m_unpack;
-	};
-
-	typedef std::deque<Category> CategoriesBase;
-
-	class Categories: public CategoriesBase
-	{
-	public:
-		Category* FindCategory(const char* name, bool searchAliases)
-		{
-			if (!name)
-			{
-				return nullptr;
-			}
-
-			for (Category& category : *this)
-			{
-				if (!strcasecmp(category.GetName(), name))
-				{
-					return &category;
-				}
-			}
-
-			if (searchAliases)
-			{
-				for (Category& category : *this)
-				{
-					std::vector<const char*> aliasPtrs;
-					aliasPtrs.reserve(category.GetAliases()->size());
-					for (const CString& alias : *category.GetAliases())
-					{
-						aliasPtrs.push_back(alias ? *alias : "");
-					}
-					if (nzbget_rs_options_category_alias_list_matches(
-						aliasPtrs.data(), aliasPtrs.size(), name, (char)-1 < 0) != 0)
-					{
-						return &category;
-					}
-				}
-			}
-
-			return nullptr;
-		}
-	};
 
 	class Extender
 	{
@@ -1258,8 +1054,14 @@ public:
 		g_Options = nullptr;
 	}
 
+	const NzbgetRsOptions* RsHandle() const { return m_rs; }
 	bool GetFatalError() { return m_fatalError; }
-	GuardedOptEntries GuardOptEntries() { return GuardedOptEntries(&m_optEntries, &m_optEntriesMutex); }
+
+	bool QueryCategory(const char* name, bool searchAliases, int* outUnpack, const char** outStrs) const
+	{
+		return nzbget_rs_options_query(
+			m_rs, 0, name, searchAliases ? 1 : 0, outUnpack, outStrs, 0, nullptr) != 0;
+	}
 
 	void CreateSchedulerTask(int id, const char* time, const char* weekDays,
 		ESchedulerCommand command, const char* param)
@@ -1407,10 +1209,6 @@ public:
 	EFileNaming GetFileNaming() const { return (EFileNaming)m_scalars.file_naming; }
 	int GetDownloadRate() const { return m_scalars.download_rate; }
 
-	Categories* GetCategories() { return &m_categories; }
-	const Categories* GetCategories() const { return &m_categories; }
-	Category* FindCategory(const char* name, bool searchAliases) { return m_categories.FindCategory(name, searchAliases); }
-
 	void SetServerMode(bool serverMode) { m_serverMode = serverMode; }
 	bool GetServerMode() const { return m_serverMode; }
 	void SetDaemonMode(bool daemonMode) { m_daemonMode = daemonMode; }
@@ -1422,14 +1220,9 @@ public:
 
 	const char* GetUnrarPath() const { const char* s = Str(38); return s ? s : ""; }
 	const char* GetSevenZipPath() const { const char* s = Str(39); return s ? s : ""; }
-	const std::vector<fs::path>& GetScriptDirPaths() const { return m_scriptDirPaths; }
 
 private:
 	NzbgetRsOptions* m_rs = nullptr;
-	OptEntries m_optEntries;
-	Mutex m_optEntriesMutex;
-	Categories m_categories;
-	std::vector<fs::path> m_scriptDirPaths;
 	Extender* m_extender = nullptr;
 	NzbgetRsParsedOptions m_scalars{};
 	bool m_fatalError = false;
@@ -1469,33 +1262,13 @@ private:
 		m_configErrors = (stateFlags & 2) != 0;
 	}
 
-	static void HostCb(void* ctx, int op, const int* ints, const char* const* strs, size_t count)
+	static void HostCb(void* ctx, int op, const int* ints, const char* const* strs, size_t)
 	{
 		auto* self = static_cast<Options*>(ctx);
 		if (op == 0) { printf("%s\n", strs[0]); return; }
 		if (op == 1) { printf("%s\n", strs[0]); error("%s", strs[0]); return; }
 		if (op == 2) { printf("%s\n", strs[0]); warn("%s", strs[0]); return; }
 		if (op == 3) { warn("%s", strs[0]); return; }
-		if (op == 4)
-		{
-			self->m_optEntries.emplace_back(strs[0], strs[1]);
-			auto& e = self->m_optEntries.back();
-			e.m_defValue = strs[2];
-			e.m_lineNo = ints[0];
-			return;
-		}
-		if (op == 5)
-		{
-			self->m_categories.emplace_back(strs[0], strs[1], ints[0] != 0, strs[2]);
-			auto& cat = self->m_categories.back();
-			for (size_t i = 0; i < count; ++i) cat.GetAliases()->emplace_back(strs[3 + i]);
-			return;
-		}
-		if (op == 6)
-		{
-			for (size_t i = 0; i < count; ++i) self->m_scriptDirPaths.push_back(fs::u8path(strs[i]));
-			return;
-		}
 		if (!self->m_extender) return;
 		if (op == 7)
 		{
@@ -1528,256 +1301,59 @@ public:
 	Log()
 	{
 		g_Log = this;
-
 #ifdef DEBUG
-		m_extraDebug = FileSystem::FileExists("extradebug");
+		m_rs = nzbget_rs_log_new(1);
+#else
+		m_rs = nzbget_rs_log_new(0);
 #endif
 	}
 
-	~Log() { g_Log = nullptr; }
-
-	GuardedMessageList GuardMessages() { return GuardedMessageList(&m_messages, &m_logMutex); }
-
-	void Clear()
+	~Log()
 	{
-		Guard guard(m_logMutex);
-		m_messages.clear();
+		nzbget_rs_log_free(m_rs);
+		g_Log = nullptr;
 	}
 
-	void ResetLog() { FileSystem::DeleteFile(g_Options->GetLogFile()); }
+	const NzbgetRsLog* RsHandle() const { return m_rs; }
+
+	void Clear() { nzbget_rs_log_ctl(m_rs, 0, 0, 0, OptRs(), nullptr, nullptr); }
 
 	void InitOptions()
 	{
-		const char* messageType[] = { "INFO", "WARNING", "ERROR", "DEBUG", "DETAIL"};
-
-		if (!g_Options->GetRemoteClientMode() && !g_Options->GetDirectClientMode() &&
-			g_Options->GetWriteLog() != Options::wlNone && g_Options->GetLogFile())
-		{
-			UpdateLogPath(g_Options->GetLogFile());
-
-			if (g_Options->GetServerMode() && g_Options->GetWriteLog() == Options::wlReset)
-			{
-				g_Log->ResetLog();
-			}
-		}
-
-		m_idGen = 0;
-
-		for (uint32 i = 0; i < m_messages.size(); )
-		{
-			Message& message = m_messages.at(i);
-			Options::EMessageTarget target = Options::mtNone;
-			switch (message.GetKind())
-			{
-				case Message::mkDebug:
-					target = g_Options->GetDebugTarget();
-					break;
-				case Message::mkDetail:
-					target = g_Options->GetDetailTarget();
-					break;
-				case Message::mkInfo:
-					target = g_Options->GetInfoTarget();
-					break;
-				case Message::mkWarning:
-					target = g_Options->GetWarningTarget();
-					break;
-				case Message::mkError:
-					target = g_Options->GetErrorTarget();
-					break;
-			}
-
-			if (target == Options::mtLog || target == Options::mtBoth)
-			{
-				Filelog("%s\t%s", messageType[message.GetKind()], message.GetText());
-			}
-
-			if (target != Options::mtScreen && target != Options::mtBoth)
-			{
-				m_messages.erase(m_messages.begin() + i);
-			}
-			else
-			{
-				message.m_id = ++m_idGen;
-				i++;
-			}
-		}
-
-		m_optInit = true;
+		int flags = (g_Options->GetServerMode() ? 1 : 0) |
+			(g_Options->GetRemoteClientMode() ? 2 : 0) |
+			(g_Options->GetDirectClientMode() ? 4 : 0);
+		nzbget_rs_log_ctl(m_rs, 1, flags, 0, OptRs(), nullptr, nullptr);
 	}
 
 	void RegisterDebuggable(Debuggable* debuggable)
 	{
-		std::lock_guard<std::mutex> guard(m_debugMutex);
-		m_debuggables.push_back(debuggable);
+		nzbget_rs_log_ctl(m_rs, 5, 0, reinterpret_cast<uintptr_t>(debuggable), nullptr, nullptr, nullptr);
 	}
 
 	void UnregisterDebuggable(Debuggable* debuggable)
 	{
-		std::lock_guard<std::mutex> guard(m_debugMutex);
-		m_debuggables.remove(debuggable);
+		nzbget_rs_log_ctl(m_rs, 6, 0, reinterpret_cast<uintptr_t>(debuggable), nullptr, nullptr, nullptr);
 	}
 
 	void LogDebugInfo();
 
 	void IntervalCheck()
 	{
-		Guard guard(m_logMutex);
-		if (m_logFile)
-		{
-			time_t curTime = Util::CurrentTime() + g_Options->GetTimeCorrection();
-			if (std::abs(curTime - m_lastWritten.load()) > 1)
-			{
-				m_logFile.reset();
-			}
-		}
-	}
-
-	std::string GetLogFilename() const
-	{
-		std::lock_guard<std::mutex> guard(m_pathMutex);
-		return m_logFilename;
-	}
-
-	void UpdateLogPath(const char* newPath)
-	{
-		std::lock_guard<std::mutex> guard(m_pathMutex);
-		m_logFilename = newPath;
+		nzbget_rs_log_ctl(m_rs, 2, 0, 0, OptRs(), nullptr, nullptr);
 	}
 
 private:
-	typedef std::list<Debuggable*> Debuggables;
+	NzbgetRsLog* m_rs = nullptr;
 
-	mutable std::mutex m_pathMutex;
-	std::mutex m_debugMutex;
-	Mutex m_logMutex;
-	MessageList m_messages;
-	Debuggables m_debuggables;
-	std::string m_logFilename;
-	std::unique_ptr<DiskFile> m_logFile;
-	uint32 m_idGen = 0;
-	std::atomic<time_t> m_lastWritten{0};
-	bool m_optInit = false;
-#ifdef DEBUG
-	bool m_extraDebug;
-#endif
+	static const NzbgetRsOptions* OptRs() { return g_Options ? g_Options->RsHandle() : nullptr; }
 
-	void Filelog(const char* msg, ...) PRINTF_SYNTAX(2)
-	{
-		if (m_logFilename.empty())
-		{
-			return;
-		}
-
-		char tmp2[1024];
-
-		va_list ap;
-		va_start(ap, msg);
-		vsnprintf(tmp2, 1024, msg, ap);
-		tmp2[1024-1] = '\0';
-		va_end(ap);
-
-		time_t rawtime = Util::CurrentTime() + g_Options->GetTimeCorrection();
-
-		char time[50];
-		Util::FormatTime(rawtime, time, 50);
-
-		if (((int)rawtime / 86400 != (int)m_lastWritten.load() / 86400) &&
-			g_Options->GetWriteLog() == Options::wlRotate)
-		{
-			if (m_logFile)
-			{
-				m_logFile.reset();
-			}
-			RotateLog();
-		}
-
-		m_lastWritten = rawtime;
-
-		if (!m_logFile)
-		{
-			m_logFile = std::make_unique<DiskFile>();
-			if (!m_logFile->Open(m_logFilename.c_str(), DiskFile::omAppend))
-			{
-				perror(m_logFilename.c_str());
-				m_logFile.reset();
-				return;
-			}
-
-			if (getuid() == 0 || geteuid() == 0)
-			{
-				struct passwd* pwd = getpwnam(g_Options->GetDaemonUsername());
-				int fileDescriptor = m_logFile->GetFileDescriptor();
-				if (pwd != nullptr && fileDescriptor >= 0)
-				{
-					fchown(fileDescriptor, pwd->pw_uid, pwd->pw_gid);
-				}
-			}
-		}
-
-		m_logFile->Seek(0, DiskFile::soEnd);
-
-#ifdef DEBUG
-		uint64 processId = (uint64)getpid();
-		uint64 threadId = (uint64)pthread_self();
-		m_logFile->Print("%s\t%" PRIu64 "\t%" PRIu64 "\t%s%s", time, processId, threadId, tmp2, LINE_ENDING);
-#else
-		m_logFile->Print("%s\t%s%s", time, tmp2, LINE_ENDING);
-#endif
-
-		m_logFile->Flush();
-	}
-
-	void AddMessage(Message::EKind kind, const char* text)
-	{
-		m_messages.emplace_back(++m_idGen, kind, Util::CurrentTime(), text);
-
-		if (m_optInit && g_Options)
-		{
-			while (m_messages.size() > (uint32)g_Options->GetLogBuffer())
-			{
-				m_messages.pop_front();
-			}
-		}
-	}
-
-	static void RotateInfoCallback(void*, const char* msg)
-	{
-		if (g_Log && msg)
-		{
-			g_Log->AddMessage(Message::mkInfo, msg);
-		}
-	}
-
-	void RotateLog()
-	{
-		time_t curTime = Util::CurrentTime() + g_Options->GetTimeCorrection();
-		NzbgetRsBuf rotBuf = nzbget_rs_log_rotate_log_file(
-			g_Options->GetLogFile(),
-			PATH_SEPARATOR,
-			static_cast<int64_t>(curTime),
-			g_Options->GetRotateLog(),
-			nullptr,
-			&Log::RotateInfoCallback);
-		UpdateLogPath(rotBuf.data ? rotBuf.data : "");
-		nzbget_rs_free(rotBuf);
-	}
-
-	void EmitV(Message::EKind kind, const char* prefix, Options::EMessageTarget target, const char* msg, va_list ap)
+	void EmitV(Message::EKind kind, const char* msg, va_list ap)
 	{
 		char tmp2[1024];
 		vsnprintf(tmp2, 1024, msg, ap);
 		tmp2[1024 - 1] = '\0';
-
-		Guard guard(m_logMutex);
-
-		if (target == Options::mtScreen || target == Options::mtBoth)
-		{
-			AddMessage(kind, tmp2);
-		}
-		if (target == Options::mtLog || target == Options::mtBoth)
-		{
-			Filelog("%s\t%s", prefix, tmp2);
-		}
+		nzbget_rs_log_emit(m_rs, static_cast<int>(kind), OptRs(), tmp2);
 	}
 
 	friend void error(const char* msg, ...);
@@ -1801,61 +1377,24 @@ protected:
 
 inline void Log::LogDebugInfo()
 {
-	info("--------------------------------------------");
-	info("Dumping debug info to log");
-	info("--------------------------------------------");
-
-	std::lock_guard<std::mutex> guard(m_debugMutex);
-	for (Debuggable* debuggable : m_debuggables)
-	{
-		debuggable->LogDebugInfo();
-	}
-
-	info("--------------------------------------------");
+	nzbget_rs_log_ctl(m_rs, 7, 0, 0, OptRs(), nullptr,
+		+[](uintptr_t p) { reinterpret_cast<Debuggable*>(p)->LogDebugInfo(); });
 }
 
 #ifdef DEBUG
 inline void debug(const char* filename, const char* funcname, int lineNr, const char* msg, ...)
 {
-	if (!g_Log)
-	{
-		return;
-	}
-
+	if (!g_Log) return;
 	char tmp1[1024];
-
 	va_list ap;
 	va_start(ap, msg);
 	vsnprintf(tmp1, 1024, msg, ap);
-	tmp1[1024-1] = '\0';
+	tmp1[1024 - 1] = '\0';
 	va_end(ap);
-
 	BString<1024> tmp2;
-	if (funcname)
-	{
-		tmp2.Format("%s (%s:%i:%s)", tmp1, FileSystem::BaseFileName(filename), lineNr, funcname);
-	}
-	else
-	{
-		tmp2.Format("%s (%s:%i)", tmp1, FileSystem::BaseFileName(filename), lineNr);
-	}
-
-	Guard guard(g_Log->m_logMutex);
-
-	if (!g_Options && g_Log->m_extraDebug)
-	{
-		printf("%s\n", *tmp2);
-	}
-
-	Options::EMessageTarget messageTarget = g_Options ? g_Options->GetDebugTarget() : Options::mtScreen;
-	if (messageTarget == Options::mtScreen || messageTarget == Options::mtBoth)
-	{
-		g_Log->AddMessage(Message::mkDebug, tmp2);
-	}
-	if (messageTarget == Options::mtLog || messageTarget == Options::mtBoth)
-	{
-		g_Log->Filelog("DEBUG\t%s", *tmp2);
-	}
+	if (funcname) tmp2.Format("%s (%s:%i:%s)", tmp1, FileSystem::BaseFileName(filename), lineNr, funcname);
+	else tmp2.Format("%s (%s:%i)", tmp1, FileSystem::BaseFileName(filename), lineNr);
+	nzbget_rs_log_emit(g_Log->m_rs, static_cast<int>(Message::mkDebug), Log::OptRs(), *tmp2);
 }
 #endif
 
@@ -1863,7 +1402,7 @@ inline void error(const char* msg, ...)
 {
 	va_list ap;
 	va_start(ap, msg);
-	g_Log->EmitV(Message::mkError, "ERROR", g_Options ? g_Options->GetErrorTarget() : Options::mtBoth, msg, ap);
+	g_Log->EmitV(Message::mkError, msg, ap);
 	va_end(ap);
 }
 
@@ -1871,7 +1410,7 @@ inline void warn(const char* msg, ...)
 {
 	va_list ap;
 	va_start(ap, msg);
-	g_Log->EmitV(Message::mkWarning, "WARNING", g_Options ? g_Options->GetWarningTarget() : Options::mtScreen, msg, ap);
+	g_Log->EmitV(Message::mkWarning, msg, ap);
 	va_end(ap);
 }
 
@@ -1879,7 +1418,7 @@ inline void info(const char* msg, ...)
 {
 	va_list ap;
 	va_start(ap, msg);
-	g_Log->EmitV(Message::mkInfo, "INFO", g_Options ? g_Options->GetInfoTarget() : Options::mtScreen, msg, ap);
+	g_Log->EmitV(Message::mkInfo, msg, ap);
 	va_end(ap);
 }
 
@@ -1887,7 +1426,7 @@ inline void detail(const char* msg, ...)
 {
 	va_list ap;
 	va_start(ap, msg);
-	g_Log->EmitV(Message::mkDetail, "DETAIL", g_Options ? g_Options->GetDetailTarget() : Options::mtScreen, msg, ap);
+	g_Log->EmitV(Message::mkDetail, msg, ap);
 	va_end(ap);
 }
 
@@ -2729,205 +2268,6 @@ private:
 
 #endif
 
-#ifndef SYSTEM_INFO_H
-#define SYSTEM_INFO_H
-
-#include <ostream>
-
-namespace System
-{
-	inline const char* IP_SERVICE = "ip.nzbget.com";
-
-	struct Network
-	{
-		std::string publicIP;
-		std::string privateIP;
-	};
-
-	inline Network GetNetwork()
-	{
-		Network network;
-
-#ifndef DISABLE_TLS
-		int useTls = 1;
-#else
-		int useTls = 0;
-#endif
-#ifndef DISABLE_GZIP
-		int includeGzip = 1;
-#else
-		int includeGzip = 0;
-#endif
-		NzbgetRsBuf pubBuf{};
-		NzbgetRsBuf privBuf{};
-		NzbgetRsBuf errBuf{};
-		int ok = nzbget_rs_system_info_fetch_network(
-			IP_SERVICE,
-			useTls,
-			includeGzip,
-			Util::VersionRevision(),
-			nullptr,
-			[](void*, int fd, const char* host, const char* req, size_t reqLen, NzbgetRsBuf* outResp) -> int
-			{
-#ifndef DISABLE_TLS
-				SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
-				if (!ctx)
-				{
-					const char* msg = "Failed to create SSL_CTX";
-					*outResp = nzbget_rs_alloc_buf(msg, strlen(msg));
-					return 0;
-				}
-				SSL_CTX_set_default_verify_paths(ctx);
-				SSL* ssl = SSL_new(ctx);
-				if (!ssl)
-				{
-					SSL_CTX_free(ctx);
-					const char* msg = "Failed to create SSL";
-					*outResp = nzbget_rs_alloc_buf(msg, strlen(msg));
-					return 0;
-				}
-				SSL_set_fd(ssl, fd);
-				SSL_set_tlsext_host_name(ssl, host);
-				if (SSL_connect(ssl) != 1)
-				{
-					SSL_free(ssl);
-					SSL_CTX_free(ctx);
-					OpenSSL::StopSSLThread();
-					const char* msg = "TLS handshake failed";
-					*outResp = nzbget_rs_alloc_buf(msg, strlen(msg));
-					return 0;
-				}
-
-				size_t written = 0;
-				while (written < reqLen)
-				{
-					int n = SSL_write(ssl, req + written, static_cast<int>(reqLen - written));
-					if (n <= 0) break;
-					written += static_cast<size_t>(n);
-				}
-
-				std::string rawResp;
-				char chunk[4096];
-				for (;;)
-				{
-					int n = SSL_read(ssl, chunk, sizeof(chunk));
-					if (n <= 0) break;
-					rawResp.append(chunk, static_cast<size_t>(n));
-				}
-
-				SSL_shutdown(ssl);
-				SSL_free(ssl);
-				SSL_CTX_free(ctx);
-				OpenSSL::StopSSLThread();
-				*outResp = nzbget_rs_alloc_buf(rawResp.data(), rawResp.size());
-				return 1;
-#else
-				(void)fd;
-				(void)host;
-				(void)req;
-				(void)reqLen;
-				(void)outResp;
-				return 0;
-#endif
-			},
-			&pubBuf,
-			&privBuf,
-			&errBuf);
-		if (ok)
-		{
-			network.publicIP.assign(pubBuf.data ? pubBuf.data : "", pubBuf.len);
-			network.privateIP.assign(privBuf.data ? privBuf.data : "", privBuf.len);
-		}
-		else if (errBuf.data && errBuf.len > 0)
-		{
-			detail("Failed to get public and private IP: %s", errBuf.data);
-		}
-		nzbget_rs_free(pubBuf);
-		nzbget_rs_free(privBuf);
-		nzbget_rs_free(errBuf);
-
-		return network;
-	}
-
-	class SystemInfo final
-	{
-	public:
-		SystemInfo(std::function<Network()> networkFetcher = GetNetwork)
-			: m_networkFetcher{std::move(networkFetcher)}
-		{
-#ifndef DISABLE_TLS
-#ifdef LIBRESSL_VERSION_TEXT
-			m_sslLibName = "LibreSSL";
-			m_sslRawVersion = LIBRESSL_VERSION_TEXT;
-			m_sslExtractAfterSpace = true;
-#elif defined(OPENSSL_FULL_VERSION_STR)
-			m_sslLibName = "OpenSSL";
-			m_sslRawVersion = OPENSSL_FULL_VERSION_STR;
-			m_sslExtractAfterSpace = false;
-#else
-			m_sslLibName = "OpenSSL";
-			m_sslRawVersion = OPENSSL_VERSION_TEXT;
-			m_sslExtractAfterSpace = true;
-#endif
-#endif
-		}
-
-		~SystemInfo() = default;
-
-		Network GetNetworkInfo() const
-		{
-			return m_networkFetcher();
-		}
-
-		std::string Format(int mode, bool withNetwork) const
-		{
-			Network net = withNetwork ? GetNetworkInfo() : Network{};
-			NzbgetRsBuf buf = nzbget_rs_system_info_format(
-				mode,
-				"",
-				"",
-				"",
-				m_sslLibName.c_str(),
-				m_sslRawVersion.c_str(),
-				m_sslExtractAfterSpace ? 1 : 0,
-				net.publicIP.data(), net.publicIP.size(),
-				net.privateIP.data(), net.privateIP.size());
-			std::string result(buf.data ? buf.data : "", buf.len);
-			nzbget_rs_free(buf);
-			return result;
-		}
-
-		friend std::ostream& operator<<(std::ostream& os, const SystemInfo& sysinfo)
-		{
-			std::string text = sysinfo.Format(0, false);
-			if (!text.empty())
-			{
-				os.write(text.data(), static_cast<std::streamsize>(text.size()));
-			}
-			return os;
-		}
-
-	private:
-		std::string m_sslLibName;
-		std::string m_sslRawVersion;
-		bool m_sslExtractAfterSpace = false;
-		std::function<Network()> m_networkFetcher;
-	};
-
-	inline std::string ToJsonStr(const SystemInfo& sysInfo)
-	{
-		return sysInfo.Format(1, true);
-	}
-
-	inline std::string ToXmlStr(const SystemInfo& sysInfo)
-	{
-		return sysInfo.Format(2, true);
-	}
-}
-
-extern System::SystemInfo* g_SystemInfo;
-
-#endif
 #endif
 
 
@@ -3096,6 +2436,73 @@ protected:
 
 	virtual void PrintError(const char* errMsg) { error("%s", errMsg); }
 };
+
+#ifndef SYSTEM_INFO_H
+#define SYSTEM_INFO_H
+
+#include <ostream>
+
+namespace System
+{
+	class SystemInfo final
+	{
+	public:
+		SystemInfo()
+		{
+#ifndef DISABLE_TLS
+#ifdef LIBRESSL_VERSION_TEXT
+			m_sslLibName = "LibreSSL";
+			m_sslRawVersion = LIBRESSL_VERSION_TEXT;
+			m_sslExtractAfterSpace = true;
+#elif defined(OPENSSL_FULL_VERSION_STR)
+			m_sslLibName = "OpenSSL";
+			m_sslRawVersion = OPENSSL_FULL_VERSION_STR;
+			m_sslExtractAfterSpace = false;
+#else
+			m_sslLibName = "OpenSSL";
+			m_sslRawVersion = OPENSSL_VERSION_TEXT;
+			m_sslExtractAfterSpace = true;
+#endif
+#endif
+		}
+
+		NzbgetRsBuf FormatBuf(int mode, bool withNetwork) const
+		{
+#ifndef DISABLE_TLS
+			int useTls = 1;
+#else
+			int useTls = 0;
+#endif
+#ifndef DISABLE_GZIP
+			int includeGzip = 1;
+#else
+			int includeGzip = 0;
+#endif
+			return nzbget_rs_system_info_format(
+				mode, withNetwork ? 1 : 0, useTls, includeGzip, Util::VersionRevision(),
+				m_sslLibName, m_sslRawVersion, m_sslExtractAfterSpace ? 1 : 0,
+				&Connection::HostCb, g_Log ? g_Log->RsHandle() : nullptr,
+				g_Options ? g_Options->RsHandle() : nullptr);
+		}
+
+		friend std::ostream& operator<<(std::ostream& os, const SystemInfo& sysinfo)
+		{
+			NzbgetRsBuf buf = sysinfo.FormatBuf(0, false);
+			if (buf.data && buf.len > 0) os.write(buf.data, static_cast<std::streamsize>(buf.len));
+			nzbget_rs_free(buf);
+			return os;
+		}
+
+	private:
+		const char* m_sslLibName = "";
+		const char* m_sslRawVersion = "";
+		bool m_sslExtractAfterSpace = false;
+	};
+}
+
+extern System::SystemInfo* g_SystemInfo;
+
+#endif
 
 class WebDownloader : public Thread, public Subject
 {
@@ -4139,10 +3546,10 @@ public:
 		const char* categoryDestDir = nullptr;
 		if (!m_category.Empty())
 		{
-			Options::Category* category = g_Options->FindCategory(m_category, false);
-			if (category && !Util::EmptyStr(category->GetDestDir()))
+			const char* strs[3]{};
+			if (g_Options->QueryCategory(m_category, false, nullptr, strs) && !Util::EmptyStr(strs[1]))
 			{
-				categoryDestDir = category->GetDestDir();
+				categoryDestDir = strs[1];
 			}
 		}
 		NzbgetRsBuf buf = nzbget_rs_nzb_format_name(
@@ -4157,10 +3564,10 @@ public:
 		const char* categoryDestDir = nullptr;
 		if (Util::EmptyStr(g_Options->GetInterDir()) && !m_category.Empty())
 		{
-			Options::Category* category = g_Options->FindCategory(m_category, false);
-			if (category && !Util::EmptyStr(category->GetDestDir()))
+			const char* strs[3]{};
+			if (g_Options->QueryCategory(m_category, false, nullptr, strs) && !Util::EmptyStr(strs[1]))
 			{
-				categoryDestDir = category->GetDestDir();
+				categoryDestDir = strs[1];
 			}
 		}
 		NzbgetRsBuf buf = nzbget_rs_nzb_format_name(
@@ -5039,187 +4446,6 @@ private:
 };
 
 
-class ServerVolume
-{
-public:
-	struct Articles
-	{
-		uint32 failed;
-		uint32 success;
-	};
-	struct Stats
-	{
-		uint32 bytes;
-		Articles articles;
-	};
-
-	using VolumeArray = std::vector<int64>;
-	using ArticlesArray = std::vector<Articles>;
-
-	VolumeArray* BytesPerSeconds() { return &m_bytesPerSeconds; }
-	VolumeArray* BytesPerMinutes() { return &m_bytesPerMinutes; }
-	VolumeArray* BytesPerHours() { return &m_bytesPerHours; }
-	VolumeArray* BytesPerDays() { return &m_bytesPerDays; }
-
-	const ArticlesArray& GetArticlesPerDays() const { return m_articlesPerDays; }
-	void SetArticlesPerDays(ArticlesArray articles) { m_articlesPerDays = std::move(articles); }
-	void SetFirstDay(int firstDay) { m_firstDay = firstDay; }
-	int GetFirstDay() { return m_firstDay; }
-	void SetTotalBytes(int64 totalBytes) { m_totalBytes = totalBytes; }
-	int64 GetTotalBytes() { return m_totalBytes; }
-	void SetCustomBytes(int64 customBytes) { m_customBytes = customBytes; }
-	int64 GetCustomBytes() { return m_customBytes; }
-	int GetSecSlot() { return m_secSlot; }
-	int GetMinSlot() { return m_minSlot; }
-	int GetHourSlot() { return m_hourSlot; }
-	int GetDaySlot() { return m_daySlot; }
-	time_t GetDataTime() { return m_dataTime; }
-	void SetDataTime(time_t dataTime) { m_dataTime = dataTime; }
-	time_t GetCustomTime() { return m_customTime; }
-	void SetCustomTime(time_t customTime) { m_customTime = customTime; }
-	time_t GetCountersResetTime() { return m_countersResetTime; }
-	void SetCountersResetTime(time_t time) { m_countersResetTime = time; }
-
-	void CalcSlots(time_t locCurTime)
-	{
-		NzbgetRsVolumeSlots slots;
-		nzbget_rs_volume_calc_slots(locCurTime, &m_firstDay, &slots);
-		m_secSlot = slots.sec;
-		m_minSlot = slots.min;
-		m_hourSlot = slots.hour;
-		m_daySlot = slots.day;
-		if (slots.inRange)
-		{
-			size_t needed = (size_t)std::max<int64>(0, std::min<int64>((int64)m_daySlot + 1, INT32_MAX));
-			if (m_bytesPerDays.size() < needed)
-			{
-				m_bytesPerDays.resize(needed);
-			}
-
-			if (m_articlesPerDays.size() < needed)
-			{
-				m_articlesPerDays.resize(needed);
-			}
-		}
-	}
-
-	void AddStats(Stats stats)
-	{
-		time_t curTime = Util::CurrentTime();
-		time_t locCurTime = curTime + g_WorkState->GetLocalTimeOffset();
-		time_t locDataTime = m_dataTime + g_WorkState->GetLocalTimeOffset();
-
-		int lastMinSlot = m_minSlot;
-		int lastHourSlot = m_hourSlot;
-
-		CalcSlots(locCurTime);
-
-		int64 bytes = static_cast<int64>(stats.bytes);
-		NzbgetRsVolumeSlots slots{m_secSlot, m_minSlot, m_hourSlot, m_daySlot, 0};
-		nzbget_rs_volume_add(m_bytesPerSeconds.data(), m_bytesPerSeconds.size(), m_bytesPerMinutes.data(),
-			m_bytesPerMinutes.size(), m_bytesPerHours.data(), m_bytesPerHours.size(), &slots, lastMinSlot,
-			lastHourSlot, locCurTime, locDataTime, bytes);
-		if (m_daySlot >= 0)
-		{
-			size_t daySlotIdx = static_cast<size_t>(m_daySlot);
-			m_bytesPerDays[daySlotIdx] += bytes;
-			m_articlesPerDays[daySlotIdx].failed += stats.articles.failed;
-			m_articlesPerDays[daySlotIdx].success += stats.articles.success;
-		}
-		m_totalBytes += bytes;
-		m_customBytes += bytes;
-
-		m_dataTime = curTime;
-	}
-
-	void Reset()
-	{
-		m_totalBytes = 0;
-		m_dataTime = 0;
-		m_firstDay = 0;
-		m_countersResetTime = Util::CurrentTime();
-
-		ResetVolume(m_bytesPerSeconds);
-		ResetVolume(m_bytesPerMinutes);
-		ResetVolume(m_bytesPerHours);
-		ResetVolume(m_bytesPerDays);
-
-		ResetArticles();
-		ResetCustom();
-	}
-
-	void ResetCustom()
-	{
-		m_customBytes = 0;
-		m_customTime = Util::CurrentTime();
-	}
-
-	void LogDebugInfo()
-	{
-		info("   ---------- ServerVolume");
-
-		auto formatLine = [](int firstIdx, const VolumeArray& values)
-		{
-			std::string msg;
-			for (size_t i = 0; i < values.size(); i++)
-			{
-				BString<100> m("[%i]=%" PRId64 " ", firstIdx + (int)i, values[i]);
-				msg += *m;
-			}
-			return msg;
-		};
-
-		info("Secs: %s", formatLine(0, m_bytesPerSeconds).c_str());
-		info("Mins: %s", formatLine(0, m_bytesPerMinutes).c_str());
-		info("Hours: %s", formatLine(0, m_bytesPerHours).c_str());
-		info("Days: %s", formatLine(m_firstDay, m_bytesPerDays).c_str());
-	}
-
-private:
-	void ResetVolume(VolumeArray& volume)
-	{
-		for (int64& size : volume)
-		{
-			size = 0;
-		}
-	}
-
-	void ResetArticles()
-	{
-		for (Articles& articles : m_articlesPerDays)
-		{
-			articles.failed = 0;
-			articles.success = 0;
-		}
-	}
-
-	VolumeArray m_bytesPerSeconds = VolumeArray(60);
-	VolumeArray m_bytesPerMinutes = VolumeArray(60);
-	VolumeArray m_bytesPerHours = VolumeArray(24);
-	VolumeArray m_bytesPerDays;
-	ArticlesArray m_articlesPerDays;
-
-	int m_firstDay = 0;
-	int64 m_totalBytes = 0;
-	int64 m_customBytes = 0;
-
-	/** Date/time when the data was last updated (time is in C/Unix format) */
-	time_t m_dataTime = 0;
-
-	/** Date/time of the last reset of custom counter (time is in C/Unix format) */
-	time_t m_customTime = Util::CurrentTime();
-
-	/** Date/time of the last reset of all counters (time is in C/Unix format) */
-	time_t m_countersResetTime = Util::CurrentTime();
-
-	int m_secSlot = 0;
-	int m_minSlot = 0;
-	int m_hourSlot = 0;
-	int m_daySlot = 0;
-};
-
-using ServerVolumes = std::vector<ServerVolume>;
-
 class DiskState
 {
 public:
@@ -5367,28 +4593,6 @@ public:
 		return nzbget_rs_diskstate_exec(15, &env) != 0;
 	}
 
-	bool SaveStats(Servers* servers, ServerVolumes* serverVolumes)
-	{
-		ExecCtx ctx;
-		ctx.servers = servers;
-		ctx.volumes = serverVolumes;
-		NzbgetRsDiskStateEnv env = MakeEnv(&ctx);
-		return nzbget_rs_diskstate_exec(11, &env) != 0;
-	}
-
-	bool LoadStats(Servers* servers, ServerVolumes* serverVolumes, bool* perfectMatch)
-	{
-		ExecCtx ctx;
-		ctx.servers = servers;
-		ctx.volumes = serverVolumes;
-		NzbgetRsDiskStateEnv env = MakeEnv(&ctx);
-		int pm = (perfectMatch && *perfectMatch) ? 1 : 0;
-		env.out_flag = perfectMatch ? &pm : nullptr;
-		bool ok = nzbget_rs_diskstate_exec(12, &env) != 0;
-		if (perfectMatch) *perfectMatch = pm != 0;
-		return ok;
-	}
-
 	void WriteCacheFlag()
 	{
 		ExecCtx ctx;
@@ -5435,7 +4639,6 @@ private:
 	{
 		DownloadQueue* queue = nullptr;
 		Servers* servers = nullptr;
-		ServerVolumes* volumes = nullptr;
 		MessageList* messages = nullptr;
 		FileInfo* targetFile = nullptr;
 		NzbInfo* targetNzb = nullptr;
@@ -6134,108 +5337,27 @@ private:
 		return 0;
 	}
 
-	static void AuxCb(void* rawCtx, int op, int a1, int a2, uint32_t u1, const char* s1, const char* s2,
-		const NzbgetRsDiskVolumeStatInput* volItem, void* sinkCtx,
-		void (*sinkFn)(void*, int, int, int, uint32_t, const char*, const NzbgetRsServerMatchItem*, size_t, const NzbgetRsDiskVolumeStatInput*, size_t))
+	static void AuxCb(void* rawCtx, int op, int, int, uint32_t, const char*, const char*,
+		const void*, void* sinkCtx,
+		void (*sinkFn)(void*, int, int, int, uint32_t, const char*, const NzbgetRsServerMatchItem*, size_t, const void*, size_t))
 	{
+		if (op != 0) return;
 		auto* c = static_cast<ExecCtx*>(rawCtx);
-		switch (op)
+		for (NzbInfo* n : c->queue->GetQueue())
 		{
-		case 0:
-			for (NzbInfo* n : c->queue->GetQueue())
+			sinkFn(sinkCtx, 1, n->GetId(), 0, 0, nullptr, nullptr, 0, nullptr, 0);
+			for (FileInfo* fi : n->GetFileList()) sinkFn(sinkCtx, 0, fi->GetId(), 0, 0, nullptr, nullptr, 0, nullptr, 0);
+			for (CompletedFile& cf : n->GetCompletedFiles()) sinkFn(sinkCtx, 0, cf.GetId(), 0, 0, nullptr, nullptr, 0, nullptr, 0);
+		}
+		for (HistoryInfo* hi : c->queue->GetHistory())
+		{
+			if (hi->GetKind() == HistoryInfo::hkNzb || hi->GetKind() == HistoryInfo::hkUrl)
 			{
+				NzbInfo* n = hi->GetNzbInfo();
 				sinkFn(sinkCtx, 1, n->GetId(), 0, 0, nullptr, nullptr, 0, nullptr, 0);
 				for (FileInfo* fi : n->GetFileList()) sinkFn(sinkCtx, 0, fi->GetId(), 0, 0, nullptr, nullptr, 0, nullptr, 0);
 				for (CompletedFile& cf : n->GetCompletedFiles()) sinkFn(sinkCtx, 0, cf.GetId(), 0, 0, nullptr, nullptr, 0, nullptr, 0);
 			}
-			for (HistoryInfo* hi : c->queue->GetHistory())
-			{
-				if (hi->GetKind() == HistoryInfo::hkNzb || hi->GetKind() == HistoryInfo::hkUrl)
-				{
-					NzbInfo* n = hi->GetNzbInfo();
-					sinkFn(sinkCtx, 1, n->GetId(), 0, 0, nullptr, nullptr, 0, nullptr, 0);
-					for (FileInfo* fi : n->GetFileList()) sinkFn(sinkCtx, 0, fi->GetId(), 0, 0, nullptr, nullptr, 0, nullptr, 0);
-					for (CompletedFile& cf : n->GetCompletedFiles()) sinkFn(sinkCtx, 0, cf.GetId(), 0, 0, nullptr, nullptr, 0, nullptr, 0);
-				}
-			}
-			break;
-		case 4:
-		{
-			std::vector<NzbgetRsServerMatchItem> srvItems;
-			srvItems.reserve(c->servers->size());
-			for (NewsServer* ns : c->servers)
-			{
-				srvItems.push_back({ ns->GetId(), ns->GetPort(), ns->GetName(), ns->GetHost(), ns->GetUser() });
-			}
-			if (a1 == 0 || srvItems.empty())
-			{
-				sinkFn(sinkCtx, 0, 0, 0, 0, nullptr, srvItems.data(), srvItems.size(), nullptr, 0);
-				break;
-			}
-			size_t totalArtPairs = 0;
-			for (ServerVolume& sv : *c->volumes) totalArtPairs += sv.GetArticlesPerDays().size();
-			std::vector<NzbgetRsRpcArticlePair> allArtPairs;
-			allArtPairs.reserve(totalArtPairs);
-			std::vector<NzbgetRsDiskVolumeStatInput> volItems;
-			volItems.reserve(c->volumes->size());
-			for (ServerVolume& sv : *c->volumes)
-			{
-				const auto& apd = sv.GetArticlesPerDays();
-				size_t startIdx = allArtPairs.size();
-				for (const ServerVolume::Articles& art : apd) allArtPairs.push_back({ art.failed, art.success });
-				const ServerVolume::VolumeArray* bps = sv.BytesPerSeconds();
-				const ServerVolume::VolumeArray* bpm = sv.BytesPerMinutes();
-				const ServerVolume::VolumeArray* bph = sv.BytesPerHours();
-				const ServerVolume::VolumeArray* bpd = sv.BytesPerDays();
-				volItems.push_back({ sv.GetFirstDay(), (int)sv.GetDataTime(), (int)sv.GetCustomTime(),
-					(int)sv.GetCountersResetTime(), sv.GetTotalBytes(), sv.GetCustomBytes(),
-					bps->data(), bps->size(), bpm->data(), bpm->size(), bph->data(), bph->size(),
-					bpd->data(), bpd->size(), apd.empty() ? nullptr : &allArtPairs[startIdx], apd.size() });
-			}
-			sinkFn(sinkCtx, 0, 0, 0, 0, nullptr, srvItems.data(), srvItems.size(), volItems.data(), volItems.size());
-			break;
-		}
-		case 5:
-			c->servers->at(a1)->SetStateId(a2);
-			break;
-		case 6:
-		{
-			ServerVolume* sv = nullptr;
-			if (a1 == 0) sv = &c->volumes->at(0);
-			else
-			{
-				for (NewsServer* ns : c->servers)
-				{
-					if (ns->GetStateId() == a1) sv = &c->volumes->at(ns->GetId());
-				}
-			}
-			if (!sv) break;
-			int formatVer = a2 >> 1;
-			if (a2 & 1)
-			{
-				sv->SetCustomTime((time_t)volItem->custom_time);
-				sv->SetCountersResetTime((time_t)volItem->counters_reset_time);
-			}
-			sv->SetFirstDay(volItem->first_day);
-			sv->SetDataTime((time_t)volItem->data_time);
-			sv->SetTotalBytes(volItem->total_bytes);
-			sv->SetCustomBytes(volItem->custom_bytes);
-			sv->BytesPerSeconds()->assign(volItem->bytes_per_seconds, volItem->bytes_per_seconds + volItem->bytes_per_seconds_len);
-			sv->BytesPerMinutes()->assign(volItem->bytes_per_minutes, volItem->bytes_per_minutes + volItem->bytes_per_minutes_len);
-			sv->BytesPerHours()->assign(volItem->bytes_per_hours, volItem->bytes_per_hours + volItem->bytes_per_hours_len);
-			sv->BytesPerDays()->assign(volItem->bytes_per_days, volItem->bytes_per_days + volItem->bytes_per_days_len);
-			if (formatVer >= 4)
-			{
-				ServerVolume::ArticlesArray articlesArr;
-				articlesArr.reserve(volItem->articles_per_days_len);
-				for (size_t k = 0; k < volItem->articles_per_days_len; k++)
-				{
-					articlesArr.push_back({ volItem->articles_per_days[k].failed, volItem->articles_per_days[k].success });
-				}
-				sv->SetArticlesPerDays(std::move(articlesArr));
-			}
-			break;
-		}
 		}
 	}
 
@@ -6764,319 +5886,113 @@ namespace TlsCipherBackend
 #ifndef STATMETER_H
 #define STATMETER_H
 
-using GuardedServerVolumes = GuardedPtr<ServerVolumes>;
-
 class StatMeter : public Debuggable
 {
 public:
-	StatMeter()
-	{
-		debug("Creating StatMeter");
+	StatMeter() : m_rs(nzbget_rs_statmeter_new(LogRs(), OptRs())) {}
+	~StatMeter() override { nzbget_rs_statmeter_free(m_rs); }
+	StatMeter(const StatMeter&) = delete;
+	StatMeter& operator=(const StatMeter&) = delete;
 
-		ResetSpeedStat();
-	}
+	const NzbgetRsStatMeter* RsHandle() const { return m_rs; }
 
 	void Init()
 	{
-		m_startServer = Util::CurrentTime();
-		m_lastCheck = m_startServer.load();
-		AdjustTimeOffset();
-
-		m_serverVolumes.resize(1 + g_ServerPool->GetServers()->size());
+		int totalOffset = 0;
+		nzbget_rs_statmeter_ctl(m_rs, 0, (int)g_ServerPool->GetServers()->size(), 0, 0, 0, 0,
+			OptRs(), LogRs(), &totalOffset, nullptr);
+		g_WorkState->SetLocalTimeOffset(totalOffset);
 	}
 
-	int64 CalcCurrentDownloadSpeed()
+	int64 CalcCurrentDownloadSpeed() { return nzbget_rs_statmeter_speed(m_rs, 0, 0); }
+	int64 CalcMomentaryDownloadSpeed() { return nzbget_rs_statmeter_speed(m_rs, 1, 0); }
+	void AddSpeedReading(int bytes) { nzbget_rs_statmeter_speed(m_rs, 2, bytes); }
+
+	void AddServerStats(uint32 bytes, uint32 failed, uint32 success, int serverId)
 	{
-		if (m_standBy)
-		{
-			return 0;
-		}
-		int64 timeDiff = (int64)Util::CurrentTime() - (int64)m_speedStartTime.load() * SPEEDMETER_SLOTSIZE;
-		if (timeDiff == 0)
-		{
-			return 0;
-		}
-		return m_speedTotalBytes.load() / timeDiff;
-	}
-
-	int64 CalcMomentaryDownloadSpeed()
-	{
-		time_t curTime = Util::CurrentTime();
-		return curTime == m_curSecTime.load() ? m_curSecBytes.load() : 0;
-	}
-
-	void AddSpeedReading(int bytes)
-	{
-		std::lock_guard<std::mutex> guard{m_speedTotalBytesMtx};
-
-		time_t curTime = Util::CurrentTime();
-		int nowSlot = (int)curTime / SPEEDMETER_SLOTSIZE;
-
-		if (curTime != m_curSecTime.load())
-		{
-			m_curSecTime = curTime;
-			m_curSecBytes = 0;
-		}
-		m_curSecBytes += bytes;
-
-		int idx = m_speedBytesIndex.load();
-		if (idx < 0) idx = 0;
-		else if (idx >= SPEEDMETER_SLOTS) idx = SPEEDMETER_SLOTS - 1;
-		while (nowSlot > m_speedTime[idx].load())
-		{
-			idx++;
-			if (idx >= SPEEDMETER_SLOTS)
-			{
-				idx = 0;
-			}
-			m_speedTotalBytes -= m_speedBytes[idx].load();
-			m_speedStartTime = m_speedTime[idx].load();
-			m_speedBytes[idx] = 0;
-			m_speedTime[idx] = nowSlot;
-		}
-		m_speedBytesIndex = idx;
-
-		if (curTime > m_speedCorrection.load())
-		{
-			int64 total = 0;
-			for (int i = 0; i < SPEEDMETER_SLOTS; i++)
-			{
-				total += m_speedBytes[i].load();
-			}
-			m_speedTotalBytes = total;
-			m_speedCorrection = curTime;
-		}
-
-		if (m_speedTotalBytes.load() == 0)
-		{
-			m_speedStartTime = nowSlot;
-		}
-		m_speedBytes[idx] += bytes;
-		m_speedTotalBytes += bytes;
-		m_allBytes += bytes;
-	}
-
-	void AddServerStats(ServerVolume::Stats stats, int serverId)
-	{
-		Guard guard(m_volumeMutex);
-		m_serverVolumes[0].AddStats(stats);
-		m_serverVolumes[serverId].AddStats(stats);
-		m_statChanged = true;
+		nzbget_rs_statmeter_ctl(m_rs, 1, serverId, g_WorkState->GetLocalTimeOffset(),
+			bytes, failed, success, nullptr, nullptr, nullptr, nullptr);
 	}
 
 	void CalcTotalStat(int* upTimeSec, int* dnTimeSec, int64* allBytes, bool* standBy)
 	{
-		time_t curTime = Util::CurrentTime();
-		time_t startServer = m_startServer.load();
-		*standBy = m_standBy;
-		*upTimeSec = startServer > 0 ? (int)(curTime - startServer) : 0;
-		*dnTimeSec = *standBy ? (int)(m_pausedFrom.load() - m_startDownload.load()) : (int)(curTime - m_startDownload.load());
-		*allBytes = m_allBytes;
+		int out[3]{};
+		nzbget_rs_statmeter_ctl(m_rs, 2, 0, 0, 0, 0, 0, nullptr, nullptr, out, allBytes);
+		if (upTimeSec) *upTimeSec = out[0];
+		if (dnTimeSec) *dnTimeSec = out[1];
+		if (standBy) *standBy = out[2] != 0;
 	}
 
 	void CalcQuotaUsage(int64& monthBytes, int64& dayBytes)
 	{
-		Guard guard(m_volumeMutex);
-
-		ServerVolume totalVolume = m_serverVolumes[0];
-		time_t locTime = Util::CurrentTime() + g_WorkState->GetLocalTimeOffset();
-		const auto& bytesPerDays = *totalVolume.BytesPerDays();
-		nzbget_rs_statmeter_op(
-			0, (int64)locTime, 0, 0, 0, totalVolume.GetFirstDay(), g_Options->GetQuotaStartDay(), 0,
-			bytesPerDays.data(), bytesPerDays.size(), &monthBytes, &dayBytes, nullptr);
-		debug("month volume: %i MB", (int)(monthBytes / 1024 / 1024));
+		int64 out[2]{};
+		nzbget_rs_statmeter_ctl(
+			m_rs, 3, g_WorkState->GetLocalTimeOffset(), 0, 0, 0, 0, OptRs(), LogRs(), nullptr, out);
+		monthBytes = out[0];
+		dayBytes = out[1];
 	}
 
 	void IntervalCheck()
 	{
-		time_t m_curTime = Util::CurrentTime();
-		int64 delta = 0;
-		int mask = nzbget_rs_statmeter_op(
-			1, (int64)m_curTime, (int64)m_lastCheck, (int64)m_lastTimeOffset,
-			(int64)m_startDownload.load(), m_standBy ? 1 : 0, 0, 0, nullptr, 0, &delta, nullptr, nullptr);
-		if (mask & 1) m_startServer += (time_t)delta;
-		if (mask & 2) m_startDownload += (time_t)delta;
-		if (mask & 4) AdjustTimeOffset();
-
-		m_lastCheck = m_curTime;
-
-		CheckQuota();
-
-		if (m_statChanged)
-		{
-			Save();
-		}
+		int out[2]{};
+		int mask = nzbget_rs_statmeter_ctl(
+			m_rs, 4, g_WorkState->GetLocalTimeOffset(), g_WorkState->GetQuotaReached() ? 1 : 0,
+			0, 0, 0, OptRs(), LogRs(), out, nullptr);
+		if (mask & 1) g_WorkState->SetLocalTimeOffset(out[0]);
+		if (mask & 2) g_WorkState->SetQuotaReached(out[1] != 0);
+		if (mask & 4) Save();
 	}
 
 	void EnterLeaveStandBy(bool enter)
 	{
-		m_standBy = enter;
-		if (enter)
-		{
-			m_pausedFrom = Util::CurrentTime();
-		}
-		else
-		{
-			time_t startDownload = 0;
-			if (!m_startDownload.compare_exchange_strong(startDownload, Util::CurrentTime()))
-			{
-				m_startDownload += Util::CurrentTime() - m_pausedFrom.load();
-			}
-
-			m_pausedFrom = 0;
-			ResetSpeedStat();
-		}
+		nzbget_rs_statmeter_ctl(m_rs, 5, enter ? 1 : 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr);
 	}
-
-	GuardedServerVolumes GuardServerVolumes()
-	{
-		GuardedServerVolumes serverVolumes(&m_serverVolumes, &m_volumeMutex);
-
-		for (ServerVolume& serverVolume : m_serverVolumes)
-		{
-			ServerVolume::Stats stats;
-			stats.bytes = 0;
-			stats.articles.failed = 0;
-			stats.articles.success = 0;
-			serverVolume.AddStats(stats);
-		}
-
-		return serverVolumes;
-	}
-
-	// the next interval check saves the volumes (changed through the guard)
-	void MarkChanged() { m_statChanged = true; }
 
 	void Save()
 	{
-		if (!g_Options->GetServerMode())
-		{
-			return;
-		}
-
-		Guard guard(m_volumeMutex);
-		g_DiskState->SaveStats(g_ServerPool->GetServers(), &m_serverVolumes);
-		m_statChanged = false;
+		if (!g_Options || !g_Options->GetServerMode()) return;
+		std::vector<NzbgetRsServerMatchItem> srvs = BuildServers();
+		nzbget_rs_statmeter_disk(
+			m_rs, 0, 1, g_WorkState->GetLocalTimeOffset(), OptRs(), LogRs(),
+			srvs.data(), srvs.size(), nullptr, nullptr);
 	}
 
 	bool Load(bool* perfectServerMatch)
 	{
-		Guard guard(m_volumeMutex);
-
-		bool ok = g_DiskState->LoadStats(g_ServerPool->GetServers(), &m_serverVolumes, perfectServerMatch);
-
-		for (ServerVolume& serverVolume : m_serverVolumes)
-		{
-			serverVolume.CalcSlots(serverVolume.GetDataTime() + g_WorkState->GetLocalTimeOffset());
-		}
-
+		Servers* servers = g_ServerPool->GetServers();
+		std::vector<NzbgetRsServerMatchItem> srvs = BuildServers();
+		std::vector<int> stateIds(srvs.size(), -1);
+		int pm = (perfectServerMatch && *perfectServerMatch) ? 1 : 0;
+		bool ok = nzbget_rs_statmeter_disk(
+			m_rs, 1, g_Options ? (g_Options->GetServerMode() ? 1 : 0) : 0,
+			g_WorkState->GetLocalTimeOffset(), OptRs(), LogRs(),
+			srvs.data(), srvs.size(), stateIds.data(), perfectServerMatch ? &pm : nullptr) != 0;
+		for (size_t i = 0; i < srvs.size(); i++)
+			if (stateIds[i] >= 0) (*servers)[i]->SetStateId(stateIds[i]);
+		if (perfectServerMatch) *perfectServerMatch = pm != 0;
 		return ok;
 	}
 
 protected:
-	virtual void LogDebugInfo()
+	void LogDebugInfo() override
 	{
-		info("   ---------- SpeedMeter");
-		info("      Speed: %i", (int)(CalcCurrentDownloadSpeed() / 1024));
-		info("      SpeedStartTime: %i", m_speedStartTime.load());
-		info("      SpeedTotalBytes: %" PRIi64, m_speedTotalBytes.load());
-		info("      SpeedBytesIndex: %i", m_speedBytesIndex.load());
-		info("      AllBytes: %" PRIi64, m_allBytes.load());
-		int curTimeInt = (int)Util::CurrentTime();
-		info("      Time: %i", curTimeInt);
-		info("      TimeDiff: %i", (int)((uint32)curTimeInt - (uint32)m_speedStartTime.load() * (uint32)SPEEDMETER_SLOTSIZE));
-		for (int i=0; i < SPEEDMETER_SLOTS; i++)
-		{
-			info("      Bytes[%i]: %i, Time[%i]: %i", i, m_speedBytes[i].load(), i, m_speedTime[i].load());
-		}
-
-		Guard guard(m_volumeMutex);
-		int index = 0;
-		for (ServerVolume& serverVolume : m_serverVolumes)
-		{
-			info("      ServerVolume %i", index);
-			serverVolume.LogDebugInfo();
-			index++;
-		}
+		nzbget_rs_statmeter_ctl(m_rs, 6, 0, 0, 0, 0, 0, OptRs(), LogRs(), nullptr, nullptr);
 	}
 
 private:
-	// speed meter
-	static const int SPEEDMETER_SLOTS = 30;
-	static const int SPEEDMETER_SLOTSIZE = 1; //Split elapsed time into this number of secs.
-	std::array<std::atomic<int>, SPEEDMETER_SLOTS> m_speedBytes;
-	std::array<std::atomic<int>, SPEEDMETER_SLOTS> m_speedTime;
-	std::atomic<time_t> m_speedCorrection{0};
-	std::atomic<time_t> m_curSecTime{0};
-	std::atomic<int64> m_speedTotalBytes{0};
-	std::atomic<int> m_speedBytesIndex{0};
-	std::atomic<int> m_curSecBytes{0};
-	std::atomic<int> m_speedStartTime{0};
-	std::mutex m_speedTotalBytesMtx;
+	NzbgetRsStatMeter* m_rs = nullptr;
 
-	// time
-	std::atomic<int64> m_allBytes{0};
-	std::atomic<time_t> m_startServer{0};
-	std::atomic<time_t> m_pausedFrom{0};
-	std::atomic<time_t> m_startDownload{0};
-	std::atomic<bool> m_standBy{true};
-	time_t m_lastCheck = 0;
-	time_t m_lastTimeOffset = 0;
+	static const NzbgetRsOptions* OptRs() { return g_Options ? g_Options->RsHandle() : nullptr; }
+	static const NzbgetRsLog* LogRs() { return g_Log ? g_Log->RsHandle() : nullptr; }
 
-	// data volume
-	std::atomic<bool> m_statChanged{false};
-	ServerVolumes m_serverVolumes;
-	Mutex m_volumeMutex;
-
-	void ResetSpeedStat()
+	static std::vector<NzbgetRsServerMatchItem> BuildServers()
 	{
-		time_t curTime = Util::CurrentTime();
-		m_speedStartTime = (int)curTime / SPEEDMETER_SLOTSIZE - 1;
-		for (int i = 0; i < SPEEDMETER_SLOTS; i++)
-		{
-			m_speedBytes[i] = 0;
-			m_speedTime[i] = m_speedStartTime.load();
-		}
-		m_speedBytesIndex = 0;
-		m_speedTotalBytes = 0;
-		m_speedCorrection = curTime;
-		m_curSecTime = 0;
-		m_curSecBytes = 0;
-	}
-
-	void AdjustTimeOffset()
-	{
-		time_t utcTime = Util::CurrentTime();
-		tm tmSplittedTime;
-		gmtime_r(&utcTime, &tmSplittedTime);
-		tmSplittedTime.tm_isdst = -1;
-		time_t locTime = mktime(&tmSplittedTime);
-		int localDelta = (int)(utcTime - locTime);
-		int totalOffset = localDelta + g_Options->GetTimeCorrection();
-		g_WorkState->SetLocalTimeOffset(totalOffset);
-		m_lastTimeOffset = utcTime;
-
-		debug("UTC delta: %i (%i+%i)", g_WorkState->GetLocalTimeOffset(), localDelta, g_Options->GetTimeCorrection());
-	}
-
-	void CheckQuota()
-	{
-		if (g_Options->GetDailyQuota() == 0 && g_Options->GetMonthlyQuota() == 0)
-		{
-			return;
-		}
-
-		int64 monthBytes, dayBytes;
-		CalcQuotaUsage(monthBytes, dayBytes);
-
-		int action = 0;
-		bool reached = nzbget_rs_statmeter_op(
-			2, 0, monthBytes, dayBytes, 0, g_Options->GetMonthlyQuota(), g_Options->GetDailyQuota(),
-			g_WorkState->GetQuotaReached() ? 1 : 0, nullptr, 0, nullptr, nullptr, &action) != 0;
-		if (action == 1) warn("Monthly quota reached at %s", *Util::FormatSize(monthBytes));
-		else if (action == 2) warn("Daily quota reached at %s", *Util::FormatSize(dayBytes));
-		else if (action == 3) info("Quota lifted");
-		g_WorkState->SetQuotaReached(reached);
+		Servers* servers = g_ServerPool->GetServers();
+		std::vector<NzbgetRsServerMatchItem> out;
+		out.reserve(servers->size());
+		for (NewsServer* ns : servers)
+			out.push_back({ ns->GetId(), ns->GetPort(), ns->GetName(), ns->GetHost(), ns->GetUser() });
+		return out;
 	}
 };
 
@@ -7372,11 +6288,8 @@ inline uintptr_t NzbgetCArticleFetchHost(int op, int a1, int a2, uintptr_t p1, c
 		int bytesRead = conn->FetchTotalBytesRead();
 		if (bytesRead > 0)
 		{
-			ServerVolume::Stats stats;
-			stats.bytes = Util::SafeIntCast<int, uint32>(bytesRead);
-			stats.articles.failed = 0;
-			stats.articles.success = 0;
-			g_StatMeter->AddServerStats(stats, conn->GetNewsServer()->GetId());
+			g_StatMeter->AddServerStats(
+				Util::SafeIntCast<int, uint32>(bytesRead), 0, 0, conn->GetNewsServer()->GetId());
 		}
 		if (!a1 || conn->GetStatus() == Connection::csCancelled) conn->Disconnect();
 		g_ServerPool->FreeConnection(conn, true);
@@ -8347,19 +7260,15 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 			if (a2 == 0)
 			{
 				NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-				int serverId = conn->GetNewsServer()->GetId();
 				int bytesRead = conn->FetchTotalBytesRead();
-				ServerVolume::Stats stats{};
-				stats.bytes = Util::SafeIntCast<int, uint32>(bytesRead);
-				g_StatMeter->AddServerStats(stats, serverId);
+				g_StatMeter->AddServerStats(
+					Util::SafeIntCast<int, uint32>(bytesRead), 0, 0, conn->GetNewsServer()->GetId());
 				ints[0] = bytesRead;
 			}
 			else
 			{
-				ServerVolume::Stats stats{};
-				stats.articles.success = ints[0];
-				stats.articles.failed = ints[1];
-				g_StatMeter->AddServerStats(stats, (int)p1);
+				g_StatMeter->AddServerStats(
+					0, static_cast<uint32>(ints[1]), static_cast<uint32>(ints[0]), (int)p1);
 			}
 			return 0;
 		}
@@ -8367,11 +7276,9 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 		{
 			NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
 			if (!a2 || conn->GetStatus() == Connection::csCancelled) conn->Disconnect();
-			int serverId = conn->GetNewsServer()->GetId();
 			int bytesRead = conn->FetchTotalBytesRead();
-			ServerVolume::Stats stats{};
-			stats.bytes = Util::SafeIntCast<int, uint32>(bytesRead);
-			g_StatMeter->AddServerStats(stats, serverId);
+			g_StatMeter->AddServerStats(
+				Util::SafeIntCast<int, uint32>(bytesRead), 0, 0, conn->GetNewsServer()->GetId());
 			g_ServerPool->FreeConnection(conn, true);
 			ints[0] = bytesRead;
 			return 0;
@@ -9310,31 +8217,23 @@ extern ExtensionManager::Manager* g_ExtensionManager;
 class CommandScriptLog
 {
 public:
-	GuardedMessageList GuardMessages() { return GuardedMessageList(&m_messages, &m_logMutex); }
-
-	int Reset()
+	CommandScriptLog()
+		: m_rs(reinterpret_cast<NzbgetRsCmdScriptLog*>(nzbget_rs_cmd_script_log_op(0, nullptr, 0, 0, nullptr)))
 	{
-		Guard guard(m_logMutex);
-		m_messages.clear();
-		return ++m_idScriptGen;
 	}
+	~CommandScriptLog() { nzbget_rs_cmd_script_log_op(1, m_rs, 0, 0, nullptr); }
+	CommandScriptLog(const CommandScriptLog&) = delete;
+	CommandScriptLog& operator=(const CommandScriptLog&) = delete;
 
+	const NzbgetRsCmdScriptLog* RsHandle() const { return m_rs; }
+	int Reset() { return static_cast<int>(nzbget_rs_cmd_script_log_op(2, m_rs, 0, 0, nullptr)); }
 	void AddMessage(int scriptId, Message::EKind kind, const char* text)
 	{
-		Guard guard(m_logMutex);
-
-		// save only messages from the last started script
-		if (scriptId == m_idScriptGen)
-		{
-			m_messages.emplace_back(++m_idMessageGen, kind, Util::CurrentTime(), text);
-		}
+		nzbget_rs_cmd_script_log_op(3, m_rs, scriptId, static_cast<int>(kind), text);
 	}
 
 private:
-	MessageList m_messages;
-	Mutex m_logMutex;
-	int m_idMessageGen;
-	int m_idScriptGen;
+	NzbgetRsCmdScriptLog* m_rs = nullptr;
 };
 
 extern CommandScriptLog* g_CommandScriptLog;
@@ -9388,10 +8287,11 @@ public:
 		const char* postScript = g_Options ? g_Options->GetExtensions() : "";
 		if (g_Options && !Util::EmptyStr(nzbInfo->GetCategory()))
 		{
-			if (Options::Category* cat = g_Options->FindCategory(nzbInfo->GetCategory(), false);
-				cat && !Util::EmptyStr(cat->GetExtensions()))
+			const char* strs[3]{};
+			if (g_Options->QueryCategory(nzbInfo->GetCategory(), false, nullptr, strs) &&
+				!Util::EmptyStr(strs[2]))
 			{
-				postScript = cat->GetExtensions();
+				postScript = strs[2];
 			}
 		}
 		NzbgetRsQueueScriptCoordEnv env{};
@@ -9514,11 +8414,14 @@ inline uintptr_t ScriptHostCb(
 		}
 		else if (a1 == 1 && g_Options)
 		{
-			auto fn = reinterpret_cast<void(*)(uintptr_t, const char*, const char*)>(p2);
-			for (Options::OptEntry& e : g_Options->GuardOptEntries())
-			{
-				fn(p1, e.GetName(), e.GetValue());
-			}
+			struct OptFwd { uintptr_t p1; void (*fn)(uintptr_t, const char*, const char*); }
+				fwd{p1, reinterpret_cast<void(*)(uintptr_t, const char*, const char*)>(p2)};
+			nzbget_rs_options_query(g_Options->RsHandle(), 1, nullptr, 0, nullptr, nullptr,
+				reinterpret_cast<uintptr_t>(&fwd),
+				+[](uintptr_t raw, const char* n, const char* v, int) {
+					auto* f = reinterpret_cast<OptFwd*>(raw);
+					f->fn(f->p1, n, v);
+				});
 		}
 		return 0;
 	case 3: {
@@ -11098,10 +10001,11 @@ public:
 		std::vector<const char*> catExts;
 		if (g_Options)
 		{
-			for (Options::Category& category : g_Options->GetCategories())
-			{
-				catExts.push_back(category.GetExtensions());
-			}
+			nzbget_rs_options_query(g_Options->RsHandle(), 2, nullptr, 0, nullptr, nullptr,
+				reinterpret_cast<uintptr_t>(&catExts),
+				+[](uintptr_t raw, const char*, const char* ext, int) {
+					reinterpret_cast<std::vector<const char*>*>(raw)->push_back(ext);
+				});
 		}
 		int hasScripts = (g_ExtensionManager && g_Options)
 			? nzbget_rs_ext_mgr_op(
@@ -11119,13 +10023,12 @@ public:
 		const char* extensions = g_Options->GetExtensions();
 		if (!Util::EmptyStr(category))
 		{
-			if (Options::Category* categoryObj = g_Options->FindCategory(category, false))
+			int catUnpack = 0;
+			const char* strs[3]{};
+			if (g_Options->QueryCategory(category, false, &catUnpack, strs))
 			{
-				unpack = categoryObj->GetUnpack();
-				if (!Util::EmptyStr(categoryObj->GetExtensions()))
-				{
-					extensions = categoryObj->GetExtensions();
-				}
+				unpack = catUnpack != 0;
+				if (!Util::EmptyStr(strs[2])) extensions = strs[2];
 			}
 		}
 		auto paramCb = +[](void* raw, int op, const char* name, const char* val) -> int {
@@ -11237,8 +10140,9 @@ private:
 		};
 		env.find_category_cb = [](void*, const char* category, int searchAliases) -> const char*
 		{
-			Options::Category* c = g_Options ? g_Options->FindCategory(category ? category : "", searchAliases != 0) : nullptr;
-			return c ? c->GetName() : nullptr;
+			const char* strs[3]{};
+			return (g_Options && g_Options->QueryCategory(category ? category : "", searchAliases != 0, nullptr, strs))
+				? strs[0] : nullptr;
 		};
 		env.iter_params_cb = [](void* rawParams, void* outCtx, void (*push)(void*, const char*, const char*))
 		{
@@ -11273,10 +10177,11 @@ private:
 			const char* extensions = g_Options ? g_Options->GetExtensions() : "";
 			if (g_Options && !sc.nzbCat.empty())
 			{
-				if (Options::Category* catObj = g_Options->FindCategory(sc.nzbCat.c_str(), false);
-					catObj && !Util::EmptyStr(catObj->GetExtensions()))
+				const char* strs[3]{};
+				if (g_Options->QueryCategory(sc.nzbCat.c_str(), false, nullptr, strs) &&
+					!Util::EmptyStr(strs[2]))
 				{
-					extensions = catObj->GetExtensions();
+					extensions = strs[2];
 				}
 			}
 			nzbget_rs_scan_scripts_exec(
@@ -12571,10 +11476,9 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 		else if (a1 == 5) return (uintptr_t)(g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveDownloadsLimit(a2) : a2);
 		else if (a1 == 6)
 		{
-			Options::Category* cat = g_Options ? g_Options->FindCategory(s1 ? s1 : "", false) : nullptr;
-			if (!cat) return 0;
-			ints[0] = cat->GetUnpack() ? 1 : 0;
-			strs[0] = cat->GetExtensions();
+			const char* catStrs[3]{};
+			if (!g_Options || !g_Options->QueryCategory(s1 ? s1 : "", false, ints, catStrs)) return 0;
+			strs[0] = catStrs[2];
 			return 1;
 		}
 		else if (a1 == 7) return DownloadQueue::IsLoaded() ? 1 : 0;
@@ -13496,19 +12400,7 @@ public:
 		return nzbget_rs_feed_coord_exec(m_rs, 9, &env);
 	}
 
-	void EmitHealthFeeds(std::deque<std::string>& strOwner, std::vector<NzbgetRsHealthFeedInput>& out) const
-	{
-		struct HealthEmit { std::deque<std::string>* strs; std::vector<NzbgetRsHealthFeedInput>* vec; } h{&strOwner, &out};
-		CallCtx cc{const_cast<FeedCoordinator*>(this), &h, nullptr};
-		NzbgetRsFeedCoordEnv env = MakeEnv(&cc);
-		env.health_emit_cb = +[](void* raw, int id, const char* name, size_t nameLen, const char* url, size_t urlLen, int interval, uint32_t certLvl) {
-			auto* he = static_cast<HealthEmit*>(static_cast<CallCtx*>(raw)->user);
-			const auto& ns = he->strs->emplace_back(name ? name : "", nameLen);
-			const auto& us = he->strs->emplace_back(url ? url : "", urlLen);
-			he->vec->push_back(NzbgetRsHealthFeedInput{id, ns.data(), ns.size(), us.data(), us.size(), interval, certLvl});
-		};
-		nzbget_rs_feed_coord_exec(m_rs, 10, &env);
-	}
+	const NzbgetRsFeedCoord* RsHandle() const { return m_rs; }
 
 protected:
 	void LogDebugInfo() override { CallCtx cc{this, nullptr, nullptr}; NzbgetRsFeedCoordEnv env = MakeEnv(&cc); nzbget_rs_feed_coord_exec(m_rs, 11, &env); }
@@ -13703,17 +12595,7 @@ public:
 		nzbget_rs_scheduler_exec(m_rs, 0, &env);
 	}
 
-	void EmitHealthTasks(std::vector<NzbgetRsHealthTaskInput>& out) const
-	{
-		NzbgetRsSchedulerEnv env{};
-		env.ctx = &out;
-		env.action_cb = +[](void* raw, int sub, int, int, const char* const*, size_t, int* ints, int64_t*, const char**) -> int {
-			if (sub == 5)
-				static_cast<std::vector<NzbgetRsHealthTaskInput>*>(raw)->push_back({ints[0], ints[1], ints[2], ints[3]});
-			return 1;
-		};
-		nzbget_rs_scheduler_exec(m_rs, 3, &env);
-	}
+	const NzbgetRsScheduler* RsHandle() const { return m_rs; }
 
 protected:
 	int ServiceInterval() override { return nzbget_rs_scheduler_exec(m_rs, 1, nullptr); }
@@ -13819,205 +12701,22 @@ public:
 private:
 	NzbgetRsBuf RunDiagnose(int formatMode) const
 	{
-		auto sv = [](const char* s) -> std::string_view { return s ? s : ""; };
-		auto setStr = [](const char* s, const char*& outPtr, size_t& outLen) {
-			std::string_view v = s ? s : "";
-			outPtr = v.data();
-			outLen = v.size();
-		};
-		std::string logFile = m_log.GetLogFilename();
-		std::string_view certStore = sv(m_options.GetCertStore());
-
-		const auto& scriptDirPaths = m_options.GetScriptDirPaths();
-		std::vector<std::string> scriptDirStrs;
-		scriptDirStrs.reserve(scriptDirPaths.size());
-		std::vector<const char*> scriptDirPtrs;
-		std::vector<size_t> scriptDirLens;
-		scriptDirPtrs.reserve(scriptDirPaths.size());
-		scriptDirLens.reserve(scriptDirPaths.size());
-		for (const auto& dir : scriptDirPaths)
-		{
-			scriptDirStrs.push_back(dir.string());
-			scriptDirPtrs.push_back(scriptDirStrs.back().data());
-			scriptDirLens.push_back(scriptDirStrs.back().size());
-		}
-
 		std::vector<NzbgetRsHealthServerInput> servers;
 		servers.reserve(m_servers.size());
-		for (const auto& server : m_servers)
+		for (const auto& s : m_servers)
 		{
-			std::string_view name = sv(server->GetName());
-			std::string_view host = sv(server->GetHost());
-			std::string_view user = sv(server->GetUser());
-			std::string_view pass = sv(server->GetPassword());
-			std::string_view cipher = sv(server->GetCipher());
 			servers.push_back(NzbgetRsHealthServerInput{
-				server->GetId(),
-				server->GetActive() ? 1 : 0,
-				name.data(), name.size(),
-				server->GetLevel(),
-				server->GetOptional() ? 1 : 0,
-				server->GetGroup(),
-				host.data(), host.size(),
-				server->GetPort(),
-				user.data(), user.size(),
-				pass.data(), pass.size(),
-				server->GetTls() ? 1 : 0,
-				cipher.data(), cipher.size(),
-				server->GetMaxConnections(),
-				server->GetRetention(),
-				static_cast<uint32_t>(server->GetCertVerificationLevel()),
-				server->GetIpVersion()
+				s->GetId(), s->GetActive() ? 1 : 0, s->GetName(), s->GetLevel(),
+				s->GetOptional() ? 1 : 0, s->GetGroup(), s->GetHost(), s->GetPort(),
+				s->GetUser(), s->GetPassword(), s->GetTls() ? 1 : 0, s->GetCipher(),
+				s->GetMaxConnections(), s->GetRetention(),
+				static_cast<uint32_t>(s->GetCertVerificationLevel()), s->GetIpVersion()
 			});
 		}
-
-		std::vector<NzbgetRsHealthTaskInput> tasks;
-		m_scheduler.EmitHealthTasks(tasks);
-
-		std::vector<NzbgetRsHealthCategoryInput> categories;
-		if (const auto* cats = m_options.GetCategories())
-		{
-			categories.reserve(cats->size());
-			for (const auto& cat : *cats)
-			{
-				std::string_view name = sv(cat.GetName());
-				categories.push_back(NzbgetRsHealthCategoryInput{
-					name.data(), name.size(),
-					cat.GetUnpack() ? 1 : 0
-				});
-			}
-		}
-
-		std::deque<std::string> feedStrs;
-		std::vector<NzbgetRsHealthFeedInput> feeds;
-		m_feedCoordinator.EmitHealthFeeds(feedStrs, feeds);
-
-		NzbgetRsSystemHealthConfig cfg{};
-		setStr(m_options.GetMainDir(), cfg.main_dir, cfg.main_dir_len);
-		setStr(m_options.GetDestDir(), cfg.dest_dir, cfg.dest_dir_len);
-		setStr(m_options.GetInterDir(), cfg.inter_dir, cfg.inter_dir_len);
-		setStr(m_options.GetNzbDir(), cfg.nzb_dir, cfg.nzb_dir_len);
-		setStr(m_options.GetQueueDir(), cfg.queue_dir, cfg.queue_dir_len);
-		setStr(m_options.GetWebDir(), cfg.web_dir, cfg.web_dir_len);
-		setStr(m_options.GetTempDir(), cfg.temp_dir, cfg.temp_dir_len);
-		cfg.script_dir_ptrs = scriptDirPtrs.data();
-		cfg.script_dir_lens = scriptDirLens.data();
-		cfg.script_dir_count = scriptDirPaths.size();
-		setStr(m_options.GetConfigTemplate(), cfg.config_template, cfg.config_template_len);
-		cfg.log_file = logFile.data();
-		cfg.log_file_len = logFile.size();
-		setStr(m_options.GetLogFile(), cfg.options_log_file, cfg.options_log_file_len);
-		cfg.cert_store = certStore.data();
-		cfg.cert_store_len = certStore.size();
-		cfg.cert_store_path = certStore.data();
-		cfg.cert_store_path_len = certStore.size();
-		setStr(m_options.GetConfigFilename(), cfg.config_file, cfg.config_file_len);
-		setStr(m_options.GetLockFile(), cfg.lock_file, cfg.lock_file_len);
-		cfg.write_log = static_cast<int>(m_options.GetWriteLog());
-		cfg.cert_check = m_options.GetCertCheck() ? 1 : 0;
-		cfg.daemon_mode = m_options.GetDaemonMode() ? 1 : 0;
-		cfg.servers = servers.data();
-		cfg.server_count = servers.size();
-		cfg.output_mode = static_cast<int>(m_options.GetOutputMode());
-		cfg.update_interval = m_options.GetUpdateInterval();
-		cfg.curses_nzb_name = m_options.GetCursesNzbName() ? 1 : 0;
-		cfg.curses_group = m_options.GetCursesGroup() ? 1 : 0;
-		cfg.curses_time = m_options.GetCursesTime() ? 1 : 0;
-		cfg.rotate_log = m_options.GetRotateLog();
-		cfg.log_buffer = m_options.GetLogBuffer();
-		cfg.crash_dump = m_options.GetCrashDump() ? 1 : 0;
-		cfg.time_correction = m_options.GetTimeCorrection();
-		cfg.article_retries = m_options.GetArticleRetries();
-		cfg.hc_dupe = m_options.GetHealthCheck() == Options::hcDupe ? 1 : 0;
-		cfg.dupe_search = m_options.GetDupeSearch() ? 1 : 0;
-		cfg.article_interval = m_options.GetArticleInterval();
-		cfg.article_timeout = m_options.GetArticleTimeout();
-		cfg.article_read_chunk_size = m_options.GetArticleReadChunkSize();
-		cfg.url_retries = m_options.GetUrlRetries();
-		cfg.url_interval = m_options.GetUrlInterval();
-		cfg.url_timeout = m_options.GetUrlTimeout();
-		cfg.url_connections = m_options.GetUrlConnections();
-		cfg.remote_timeout = m_options.GetRemoteTimeout();
-		cfg.download_rate = m_options.GetDownloadRate();
-		cfg.monthly_quota = m_options.GetMonthlyQuota();
-		cfg.quota_start_day = m_options.GetQuotaStartDay();
-		cfg.daily_quota = m_options.GetDailyQuota();
-		cfg.flush_queue = m_options.GetFlushQueue() ? 1 : 0;
-		cfg.continue_partial = m_options.GetContinuePartial() ? 1 : 0;
-		cfg.propagation_delay = m_options.GetPropagationDelay();
-		cfg.article_cache = m_options.GetArticleCache();
-		cfg.direct_write = m_options.GetDirectWrite() ? 1 : 0;
-		cfg.write_buffer = m_options.GetWriteBuffer();
-		cfg.file_naming = static_cast<int>(m_options.GetFileNaming());
-		cfg.post_strategy = static_cast<int>(m_options.GetPostStrategy());
-		cfg.disk_space = m_options.GetDiskSpace();
-		cfg.nzb_cleanup_disk = m_options.GetNzbCleanupDisk() ? 1 : 0;
-		cfg.keep_history = m_options.GetKeepHistory();
-		cfg.feed_history = m_options.GetFeedHistory();
-		cfg.skip_write = m_options.GetSkipWrite() ? 1 : 0;
-		cfg.raw_article = m_options.GetRawArticle() ? 1 : 0;
-		setStr(m_options.GetControlIp(), cfg.control_ip, cfg.control_ip_len);
-		cfg.control_port = m_options.GetControlPort();
-		setStr(m_options.GetControlUsername(), cfg.control_username, cfg.control_username_len);
-		setStr(m_options.GetControlPassword(), cfg.control_password, cfg.control_password_len);
-		setStr(m_options.GetRestrictedUsername(), cfg.restricted_username, cfg.restricted_username_len);
-		setStr(m_options.GetRestrictedPassword(), cfg.restricted_password, cfg.restricted_password_len);
-		setStr(m_options.GetAddUsername(), cfg.add_username, cfg.add_username_len);
-		setStr(m_options.GetAddPassword(), cfg.add_password, cfg.add_password_len);
-		cfg.form_auth = m_options.GetFormAuth() ? 1 : 0;
-		cfg.secure_control = m_options.GetSecureControl() ? 1 : 0;
-		setStr(m_options.GetSecureCert(), cfg.secure_cert, cfg.secure_cert_len);
-		setStr(m_options.GetSecureKey(), cfg.secure_key, cfg.secure_key_len);
-		cfg.secure_port = m_options.GetSecurePort();
-		cfg.cert_store_path_empty = certStore.empty() ? 1 : 0;
-		setStr(m_options.GetDaemonUsername(), cfg.daemon_username, cfg.daemon_username_len);
-		cfg.umask = m_options.GetUMask();
-		cfg.append_category_dir = m_options.GetAppendCategoryDir() ? 1 : 0;
-		cfg.nzb_dir_interval = m_options.GetNzbDirInterval();
-		cfg.nzb_dir_file_age = m_options.GetNzbDirFileAge();
-		cfg.dupe_check = m_options.GetDupeCheck() ? 1 : 0;
-		cfg.health_check = static_cast<int>(m_options.GetHealthCheck());
-		cfg.crc_check = m_options.GetCrcCheck() ? 1 : 0;
-		cfg.par_check = static_cast<int>(m_options.GetParCheck());
-		cfg.par_repair = m_options.GetParRepair() ? 1 : 0;
-		cfg.par_quick = m_options.GetParQuick() ? 1 : 0;
-		cfg.par_buffer = m_options.GetParBuffer();
-		cfg.par_threads = m_options.GetParThreads();
-		cfg.hw_threads = std::thread::hardware_concurrency();
-		cfg.par_rename = m_options.GetParRename() ? 1 : 0;
-		cfg.rar_rename = m_options.GetRarRename() ? 1 : 0;
-		cfg.direct_rename = m_options.GetDirectRename() ? 1 : 0;
-		cfg.hard_linking = m_options.GetHardLinking() ? 1 : 0;
-		cfg.par_time_limit = m_options.GetParTimeLimit();
-		cfg.unpack = m_options.GetUnpack() ? 1 : 0;
-		cfg.direct_unpack = m_options.GetDirectUnpack() ? 1 : 0;
-		cfg.unpack_pause_queue = m_options.GetUnpackPauseQueue() ? 1 : 0;
-		setStr(m_options.GetUnrarPath(), cfg.unrar_path, cfg.unrar_path_len);
-		setStr(m_options.GetSevenZipPath(), cfg.seven_zip_path, cfg.seven_zip_path_len);
-		setStr(m_options.GetExtCleanupDisk(), cfg.ext_cleanup_disk, cfg.ext_cleanup_disk_len);
-		setStr(m_options.GetUnpackPassFile(), cfg.unpack_pass_file, cfg.unpack_pass_file_len);
-		setStr(m_options.GetUnpackIgnoreExt(), cfg.unpack_ignore_ext, cfg.unpack_ignore_ext_len);
-		cfg.tasks = tasks.data();
-		cfg.task_count = tasks.size();
-		cfg.categories = categories.data();
-		cfg.category_count = categories.size();
-		cfg.feeds = feeds.data();
-		cfg.feed_count = feeds.size();
-
-		auto logCb = [](void*, int sev, const char* msg)
-		{
-			if (!msg) return;
-			if (sev == 2)
-			{
-				error("%s", msg);
-			}
-			else if (sev == 1)
-			{
-				warn("%s", msg);
-			}
-		};
-
-		return nzbget_rs_system_health_diagnose(&cfg, formatMode, nullptr, logCb);
+		return nzbget_rs_system_health_diagnose(
+			m_options.RsHandle(), servers.data(), servers.size(),
+			m_feedCoordinator.RsHandle(), m_scheduler.RsHandle(), m_log.RsHandle(),
+			m_options.GetDaemonMode() ? 1 : 0, formatMode);
 	}
 
 	const Options& m_options;
@@ -14339,33 +13038,9 @@ protected:
 		};
 		env.local_messages_cb = [](void*, int tailMode, uint32_t arg, int* outSkipped, void* emitCtx,
 			void (*emit)(void*, uint32_t, int, int64_t, const char*)) {
-			GuardedMessageList messages = g_Log->GuardMessages();
-			if (messages->empty())
-			{
-				return;
-			}
-			if (tailMode == 0)
-			{
-				int start = static_cast<int>(arg) - static_cast<int>(messages->front().GetId()) + 1;
-				if (start < 0)
-				{
-					if (outSkipped) *outSkipped = 1;
-					start = 0;
-				}
-				for (uint32 i = static_cast<uint32>(start); i < messages->size(); i++)
-				{
-					Message& m = messages->at(i);
-					emit(emitCtx, m.GetId(), static_cast<int>(m.GetKind()), static_cast<int64_t>(m.GetTime()), m.GetText());
-				}
-			}
-			else
-			{
-				for (uint32 i = 0; i < messages->size(); i++)
-				{
-					Message& m = messages->at(i);
-					emit(emitCtx, m.GetId(), static_cast<int>(m.GetKind()), static_cast<int64_t>(m.GetTime()), m.GetText());
-				}
-			}
+			nzbget_rs_log_collect(
+				0, g_Log ? g_Log->RsHandle() : nullptr, nullptr, tailMode, 0, arg,
+				outSkipped, emitCtx, reinterpret_cast<uintptr_t>(emit), 0);
 		};
 		env.local_queue_cb = [](void*, void* emitCtx,
 			void (*emitNzb)(void*, int, int, int, int64_t, int64_t, int64_t, int, int, const char*),
@@ -14470,16 +13145,12 @@ private:
 
 	bool ServWebRequest(const char* signature)
 	{
-		const auto& scriptDirPaths = g_Options->GetScriptDirPaths();
-		std::vector<std::string> scriptDirStrs;
 		std::vector<const char*> scriptDirPtrs;
-		scriptDirStrs.reserve(scriptDirPaths.size());
-		scriptDirPtrs.reserve(scriptDirPaths.size());
-		for (const auto& p : scriptDirPaths)
-		{
-			scriptDirStrs.push_back(fs::u8string(p));
-			scriptDirPtrs.push_back(scriptDirStrs.back().c_str());
-		}
+		nzbget_rs_options_query(g_Options->RsHandle(), 3, nullptr, 0, nullptr, nullptr,
+			reinterpret_cast<uintptr_t>(&scriptDirPtrs),
+			+[](uintptr_t raw, const char* p, const char*, int) {
+				reinterpret_cast<std::vector<const char*>*>(raw)->push_back(p);
+			});
 
 		NzbgetRsWebServeEnv env{};
 		env.ctx = m_connection.get();
@@ -14549,7 +13220,7 @@ private:
 				case 5: Reload(); return 1;
 				case 6: g_Log->LogDebugInfo(); return 1;
 				case 7: g_WorkState->SetSpeedLimit(a1); return 1;
-				case 8: { std::string r = a1 ? System::ToJsonStr(*g_SystemInfo) : System::ToXmlStr(*g_SystemInfo); setBuf(r.data(), r.size()); return 1; }
+				case 8: if (outBuf) *outBuf = g_SystemInfo->FormatBuf(a1 ? 1 : 2, true); return 1;
 				case 9:
 					if (!g_Options->GetSystemHealthCheck()) return 0;
 					if (outBuf) *outBuf = g_SystemHealth->DiagnoseSerialized(a1 != 0);
@@ -14623,9 +13294,10 @@ private:
 					if (status != WebDownloader::adFinished) { rmDl(); const char* m = "Failed to read URL"; setBuf(m, strlen(m)); return 0; }
 					if (a1 == 0)
 					{
-						if (g_Options->GetScriptDirPaths().empty()) { rmDl(); const char* m = "\"ScriptDir\" is not specified"; setBuf(m, strlen(m)); return 0; }
-						std::string destStr = fs::u8string(g_Options->GetScriptDirPaths().front());
-						if (const auto err = g_ExtensionManager->InstallOrUpdate(0, filename, destStr.c_str()))
+						const char* firstDir = nullptr;
+						if (nzbget_rs_options_query(g_Options->RsHandle(), 3, nullptr, 0, nullptr, &firstDir, 0, nullptr) == 0 || !firstDir)
+						{ rmDl(); const char* m = "\"ScriptDir\" is not specified"; setBuf(m, strlen(m)); return 0; }
+						if (const auto err = g_ExtensionManager->InstallOrUpdate(0, filename, firstDir))
 						{
 							rmDl();
 							setBuf(err->data(), err->size());
@@ -14670,17 +13342,10 @@ private:
 					return 1;
 				}
 				case 20: return g_Maintenance->StartUpdate((Maintenance::EBranch)a1) ? 1 : 0;
-				case 21: {
-					bool ok = false;
-					int idx = 0;
-					for (ServerVolume& sv : g_StatMeter->GuardServerVolumes())
-					{
-						if (idx == a1 || a1 == -1) { if (a2 == 0) sv.Reset(); else sv.ResetCustom(); ok = true; }
-						idx++;
-					}
-					if (ok) g_StatMeter->MarkChanged();
-					return ok ? 1 : 0;
-				}
+				case 21:
+					return nzbget_rs_statmeter_rpc(
+						g_StatMeter->RsHandle(), 0, g_WorkState->GetLocalTimeOffset(),
+						a1, a2, 0, 0, 0, nullptr, nullptr);
 				case 22: {
 					std::string r = a1 == 0 ? TlsCipherBackend::Start() :
 						a1 == 1 ? TlsCipherBackend::Status(s1) : TlsCipherBackend::Cancel(s1 ? s1 : "");
@@ -14886,22 +13551,31 @@ private:
 				}
 				case 2: {
 					if (a1 == 1) { g_Maintenance->CollectMessages(a3, a4, emitCtx, emitCb); return 1; }
+					if (a1 == 2)
+					{
+						nzbget_rs_log_collect(
+							1, nullptr, g_CommandScriptLog->RsHandle(), a3, a4, 0, nullptr,
+							emitCtx, reinterpret_cast<uintptr_t>(emitCb), 0);
+						return 1;
+					}
+					if (a1 != 3)
+					{
+						nzbget_rs_log_collect(
+							1, g_Log->RsHandle(), nullptr, a3, a4, 0, nullptr,
+							emitCtx, reinterpret_cast<uintptr_t>(emitCb), 0);
+						return 1;
+					}
 					MessageList diskMessages;
 					std::unique_ptr<GuardedDownloadQueue> dq;
 					auto guardMessages = [&]() -> GuardedMessageList {
-						if (a1 == 2) return g_CommandScriptLog->GuardMessages();
-						if (a1 == 3)
+						g_DiskState->LoadNzbMessages(a2, &diskMessages);
+						if (diskMessages.empty())
 						{
-							g_DiskState->LoadNzbMessages(a2, &diskMessages);
-							if (diskMessages.empty())
-							{
-								dq = std::make_unique<GuardedDownloadQueue>(DownloadQueue::Guard());
-								if (NzbInfo* n = (*dq)->GetQueue()->Find(a2)) return n->GuardCachedMessages();
-								dq.reset();
-							}
-							return GuardedMessageList(&diskMessages, nullptr);
+							dq = std::make_unique<GuardedDownloadQueue>(DownloadQueue::Guard());
+							if (NzbInfo* n = (*dq)->GetQueue()->Find(a2)) return n->GuardCachedMessages();
+							dq.reset();
 						}
-						return g_Log->GuardMessages();
+						return GuardedMessageList(&diskMessages, nullptr);
 					};
 					GuardedMessageList messages = guardMessages();
 					int start = (int)messages->size();
@@ -15029,10 +13703,12 @@ private:
 						nullptr, &DupeSearch::HostCb, s1, s2, a1, a2,
 						static_cast<const NzbgetRsRpcFleetReqMember*>(p1), n1, emitCtx, emitCb);
 				case 9: {
-					Options::GuardedOptEntries optEntries = g_Options->GuardOptEntries();
 					std::vector<NzbgetRsRpcConfigItem> entries;
-					entries.reserve(optEntries->size());
-					for (Options::OptEntry& o : optEntries) entries.push_back({o.GetName(), o.GetValue(), o.Restricted() ? 1 : 0});
+					nzbget_rs_options_query(g_Options->RsHandle(), 1, nullptr, 0, nullptr, nullptr,
+						reinterpret_cast<uintptr_t>(&entries),
+						+[](uintptr_t raw, const char* n, const char* v, int r) {
+							reinterpret_cast<std::vector<NzbgetRsRpcConfigItem>*>(raw)->push_back({n, v, r});
+						});
 					emitCb(emitCtx, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
 						entries.data(), entries.size(), nullptr, 0, nullptr, 0, nullptr, 0);
 					return 1;
@@ -15061,34 +13737,10 @@ private:
 								item, 0, nullptr, 0, nullptr, 0, nullptr, 0);
 						});
 				}
-				case 12: {
-					int index = 0;
-					for (ServerVolume& sv : g_StatMeter->GuardServerVolumes())
-					{
-						const auto& arts = sv.GetArticlesPerDays();
-						std::vector<NzbgetRsRpcArticlePair> artEntries;
-						if (a5)
-						{
-							artEntries.reserve(arts.size());
-							for (const auto& art : arts) artEntries.push_back({art.failed, art.success});
-						}
-						const auto* bps = sv.BytesPerSeconds();
-						const auto* bpm = sv.BytesPerMinutes();
-						const auto* bph = sv.BytesPerHours();
-						const auto* bpd = sv.BytesPerDays();
-						NzbgetRsRpcServerVolumeItem vf{
-							index++, (int)sv.GetDataTime(), sv.GetFirstDay(), sv.GetTotalBytes(),
-							sv.GetCustomBytes(), (int)sv.GetCustomTime(), (int)sv.GetCountersResetTime(),
-							sv.GetSecSlot(), sv.GetMinSlot(), sv.GetHourSlot(), sv.GetDaySlot(),
-							a1, bps->data(), bps->size(), a2, bpm->data(), bpm->size(),
-							a3, bph->data(), bph->size(), a4, bpd->data(), bpd->size(),
-							a5, artEntries.data(), artEntries.size()
-						};
-						emitCb(emitCtx, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
-							&vf, 0, nullptr, 0, nullptr, 0, nullptr, 0);
-					}
-					return 1;
-				}
+				case 12:
+					return nzbget_rs_statmeter_rpc(
+						g_StatMeter->RsHandle(), 1, g_WorkState->GetLocalTimeOffset(),
+						a1, a2, a3, a4, a5, emitCtx, emitCb);
 				default: return 0;
 			}
 		};
@@ -15256,15 +13908,9 @@ private:
 		};
 		env.collect_log_cb = [](void*, int, uint32_t, void* encCtx,
 			NzbgetRsBinRpcLogBeginFn beginLog, NzbgetRsBinRpcLogPushFn pushLog) {
-			GuardedMessageList messages = g_Log->GuardMessages();
-			int start = 0;
-			beginLog(encCtx, (int)messages->size(),
-				messages->empty() ? 0 : (uint32)messages->front().GetId(), &start);
-			for (uint32 i = (uint32)start; i < messages->size(); i++)
-			{
-				Message& m = messages->at(i);
-				pushLog(encCtx, (uint32)m.GetId(), (uint32)m.GetKind(), (uint32)(int)m.GetTime(), m.GetText());
-			}
+			nzbget_rs_log_collect(
+				2, g_Log ? g_Log->RsHandle() : nullptr, nullptr, 0, 0, 0, nullptr, encCtx,
+				reinterpret_cast<uintptr_t>(beginLog), reinterpret_cast<uintptr_t>(pushLog));
 		};
 		env.collect_post_cb = [](void*, void* encCtx, NzbgetRsBinRpcPostPushFn pushPost) {
 			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();

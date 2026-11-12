@@ -487,25 +487,17 @@ impl NzbgetRsScheduler {
         });
     }
 
-    unsafe fn emit_health_tasks(&self, env: &NzbgetRsSchedulerEnv) {
-        let Some(cb) = env.action_cb else {
-            return;
-        };
+    pub(crate) fn collect_health_tasks(&self) -> Vec<crate::systemhealth::HealthTaskInput> {
         let guard = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        for t in guard.iter() {
-            let mut vals = [t.id, t.hours, t.minutes, t.week_days_bits];
-            cb(
-                env.ctx,
-                5,
-                0,
-                0,
-                std::ptr::null(),
-                0,
-                vals.as_mut_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-        }
+        guard
+            .iter()
+            .map(|t| crate::systemhealth::HealthTaskInput {
+                id: t.id,
+                hours: t.hours,
+                minutes: t.minutes,
+                week_days_bits: t.week_days_bits,
+            })
+            .collect()
     }
 
     unsafe fn execute_task(
@@ -1093,7 +1085,6 @@ pub unsafe extern "C" fn nzbget_rs_scheduler_free(h: *mut NzbgetRsScheduler) {
 /// - `op = 0` (`AddTask`): adds `(a1=id, a2=hours, a3=minutes, a4=weekDaysBits, a5=command, s1=param)`.
 /// - `op = 1` (`ServiceInterval`): returns `m_serviceInterval`.
 /// - `op = 2` (`ServiceWork`): executes `Scheduler::ServiceWork` (`env.a5 != 0` = debug build).
-/// - `op = 3` (`EmitHealthTasks`): emits all tasks via `action_cb(5, ...)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_scheduler_exec(
     h: *mut NzbgetRsScheduler,
@@ -1122,12 +1113,6 @@ pub unsafe extern "C" fn nzbget_rs_scheduler_exec(
         2 => {
             if let Some(env_ref) = env.as_ref() {
                 sched.service_work(env_ref);
-            }
-            1
-        }
-        3 => {
-            if let Some(env_ref) = env.as_ref() {
-                sched.emit_health_tasks(env_ref);
             }
             1
         }
@@ -1272,8 +1257,12 @@ mod tests {
             env.s1 = std::ptr::null();
             assert_eq!(nzbget_rs_scheduler_exec(h, 0, &env), 1);
 
-            assert_eq!(nzbget_rs_scheduler_exec(h, 3, &env), 1);
-            assert_eq!(m.emitted_tasks, vec![[7, -1, 0, 0], [8, 12, 40, 0x7f]]);
+            let tasks_out: Vec<[i32; 4]> = (*h)
+                .collect_health_tasks()
+                .into_iter()
+                .map(|t| [t.id, t.hours, t.minutes, t.week_days_bits])
+                .collect();
+            assert_eq!(tasks_out, vec![[7, -1, 0, 0], [8, 12, 40, 0x7f]]);
 
             env.a5 = 0;
             assert_eq!(nzbget_rs_scheduler_exec(h, 2, &env), 1);

@@ -166,6 +166,7 @@ pub struct NzbgetRsRpcFeedItem {
     pub status: c_int,
 }
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct NzbgetRsRpcArticlePair {
     pub failed: u32,

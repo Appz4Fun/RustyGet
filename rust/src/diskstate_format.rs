@@ -324,13 +324,7 @@ pub unsafe fn format_nzb_info_bytes(
     let _ = writeln!(
         out,
         "{},{},{},{},{},{},{}",
-        dl_hi,
-        dl_lo,
-        n.download_sec,
-        n.post_total_sec,
-        n.par_sec,
-        n.repair_sec,
-        n.unpack_sec
+        dl_hi, dl_lo, n.download_sec, n.post_total_sec, n.par_sec, n.repair_sec, n.unpack_sec
     );
 
     let comp_slice = if completed.is_null() || completed_len == 0 {
@@ -581,11 +575,7 @@ pub unsafe fn format_file_state_bytes(
         let _ = writeln!(
             out,
             "{},{},{},{},{}",
-            art.saved_status,
-            art.segment_offset,
-            art.segment_size,
-            art.crc,
-            art.staged_fallback
+            art.saved_status, art.segment_offset, art.segment_size, art.crc, art.staged_fallback
         );
     }
 
@@ -614,13 +604,7 @@ pub unsafe fn format_dup_info_bytes(
     let _ = writeln!(
         out,
         "{},{},{},{},{},{},{}",
-        status,
-        sz_hi,
-        sz_lo,
-        full_content_hash,
-        filtered_content_hash,
-        dupe_score,
-        dupe_mode
+        status, sz_hi, sz_lo, full_content_hash, filtered_content_hash, dupe_score, dupe_mode
     );
     write_sanitized_line(unsafe { input(name) }, &mut out);
     write_sanitized_line(unsafe { input(dupe_key) }, &mut out);
@@ -689,10 +673,7 @@ pub unsafe fn format_unpack_trailer_item_bytes(
     archives_len: usize,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(128);
-    let unpack_tried_flags = pack_unpack_tried_flags(
-        unpack_tried != 0,
-        par_repaired != 0,
-    );
+    let unpack_tried_flags = pack_unpack_tried_flags(unpack_tried != 0, par_repaired != 0);
     let _ = writeln!(out, "{}", id);
     let _ = writeln!(out, "DirectUnpackStatus={}", direct_unpack_status);
     let _ = writeln!(out, "UnpackTried={}", unpack_tried_flags);
@@ -1087,10 +1068,7 @@ pub fn diskstate_parse_queue_file_id_and_suffix(filename: &[u8]) -> Option<(i32,
 
 /// Finds the next non-empty comma-delimited token `(tok_start, tok_len, next_cursor)` in `s`
 /// starting from `cursor`, for `DiskState::LoadDupeRepairState` and `DiskState::LoadNzbInfo`.
-pub fn diskstate_next_comma_token(
-    s: &[u8],
-    cursor: usize,
-) -> Option<(usize, usize, usize)> {
+pub fn diskstate_next_comma_token(s: &[u8], cursor: usize) -> Option<(usize, usize, usize)> {
     let mut pos = cursor;
     while pos < s.len() {
         while pos < s.len() && s[pos] == b',' {
@@ -1099,11 +1077,7 @@ pub fn diskstate_next_comma_token(
         if pos >= s.len() {
             return None;
         }
-        let end = pos
-            + s[pos..]
-                .iter()
-                .take_while(|&&b| b != b',')
-                .count();
+        let end = pos + s[pos..].iter().take_while(|&&b| b != b',').count();
         let next = if end < s.len() { end + 1 } else { end };
         if end > pos {
             return Some((pos, end - pos, next));
@@ -1144,7 +1118,10 @@ fn ascii_lower(b: u8) -> u8 {
 
 #[inline]
 fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b.iter()).all(|(&x, &y)| ascii_lower(x) == ascii_lower(y))
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(&x, &y)| ascii_lower(x) == ascii_lower(y))
 }
 
 #[inline]
@@ -1356,7 +1333,9 @@ pub fn classify_queue_dir_id(filename: &[u8]) -> Option<(i32, bool)> {
     let mut num_end = 0;
     let mut id: i64 = 0;
     while num_end < p.len() && p[num_end].is_ascii_digit() {
-        id = id.saturating_mul(10).saturating_add((p[num_end] - b'0') as i64);
+        id = id
+            .saturating_mul(10)
+            .saturating_add((p[num_end] - b'0') as i64);
         num_end += 1;
     }
     if id <= 0 || id > i32::MAX as i64 {
@@ -1424,7 +1403,12 @@ pub fn validate_repair_hole(
 ) -> Option<(i64, i64)> {
     let offset = join_i64(offset_hi, offset_lo);
     let size = join_i64(size_hi, size_lo);
-    if offset < 0 || size <= 0 || decoded_size <= 0 || offset > decoded_size || size > decoded_size - offset {
+    if offset < 0
+        || size <= 0
+        || decoded_size <= 0
+        || offset > decoded_size
+        || size > decoded_size - offset
+    {
         None
     } else {
         Some((offset, size))
@@ -1470,7 +1454,12 @@ pub fn parse_unpack_state_lines(
     let unpack_tried = (unpack_tried_flags & 1) != 0;
     let par_repaired = (unpack_tried_flags & 2) != 0;
     let last_unpack_status = parse_prefixed_or_plain_int(line3, b"LastUnpackStatus=")?;
-    Some((direct_status, unpack_tried, par_repaired, last_unpack_status))
+    Some((
+        direct_status,
+        unpack_tried,
+        par_repaired,
+        last_unpack_status,
+    ))
 }
 
 /// `DiskState::LoadNzbInfo` post-stage migration and transient stage clamp.
@@ -1527,15 +1516,20 @@ pub fn eval_article_load_state(
 
     if format_version >= 2 {
         let mut staged_fallback = staged_fallback_in;
-        if (if format_version >= 9 { fields != 5 } else { fields < 4 })
-            || (staged_fallback != 0 && staged_fallback != 1)
+        if (if format_version >= 9 {
+            fields != 5
+        } else {
+            fields < 4
+        }) || (staged_fallback != 0 && staged_fallback != 1)
         {
             return RsArticleLoadEval {
                 valid: 0,
                 ..Default::default()
             };
         }
-        if !completed && (segment_offset < 0 || segment_size < 0 || segment_size > 1024 * 1024 * 1024) {
+        if !completed
+            && (segment_offset < 0 || segment_size < 0 || segment_size > 1024 * 1024 * 1024)
+        {
             status = AI_UNDEFINED;
             staged_fallback = 0;
             segment_offset = 0;
@@ -1620,7 +1614,8 @@ pub fn reconcile_direct_write_output(
         new_init = true;
     }
 
-    let pick_path_kind = if new_init && output_filename_empty && (has_out_tmp || has_completed_dest) {
+    let pick_path_kind = if new_init && output_filename_empty && (has_out_tmp || has_completed_dest)
+    {
         if has_out_tmp {
             1
         } else {
@@ -1957,10 +1952,7 @@ pub fn inspect_read_line(buf: &[u8]) -> (bool, usize) {
 
 /// `DiskState::LoadDownloadQueue` (`DiskState.cpp`):
 /// Evaluates `format_version` against `queue_version` (64).
-pub fn check_queue_format_version(
-    format_version: i32,
-    queue_version: i32,
-) -> (i32, bool, bool) {
+pub fn check_queue_format_version(format_version: i32, queue_version: i32) -> (i32, bool, bool) {
     let is_legacy = format_version != queue_version;
     if format_version <= 0 {
         (1, is_legacy, false)
@@ -2098,10 +2090,7 @@ unsafe fn read_line_cstr(
     Some(v)
 }
 
-unsafe fn scan_one_i32(
-    infile_ctx: *mut std::ffi::c_void,
-    read_line_cb: ReadLineFn,
-) -> Option<i32> {
+unsafe fn scan_one_i32(infile_ctx: *mut std::ffi::c_void, read_line_cb: ReadLineFn) -> Option<i32> {
     let line = unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }?;
     ScanCursor(&line).i32(false)
 }
@@ -2263,10 +2252,7 @@ pub unsafe fn load_dupe_extras(
         rec_bytes: i64,
         rec_holes: c_int,
     ),
-    on_job_cb: unsafe extern "C" fn(
-        ctx: *mut std::ffi::c_void,
-        job: *const NzbgetRsDiskRepairJob,
-    ),
+    on_job_cb: unsafe extern "C" fn(ctx: *mut std::ffi::c_void, job: *const NzbgetRsDiskRepairJob),
 ) -> bool {
     let Some(hdr_line) = (unsafe { read_line_bytes(infile_ctx, read_line_cb, 1024) }) else {
         return false;
@@ -2417,39 +2403,47 @@ pub unsafe fn load_volume_stat(
         };
         let mut tc = ScanCursor(&t_line);
         let mut bc = ScanCursor(&b_line);
-        let (first_day, data_time, custom_time, counters_reset_time, hi1, lo1, hi2, lo2, has_custom) =
-            if format_version >= 4 {
-                let (Some(fd), Some(dt), Some(ct), Some(crt)) =
-                    (tc.i32(false), tc.i32(true), tc.i32(true), tc.i32(true))
-                else {
-                    return false;
-                };
-                let (Some(h1), Some(l1), Some(h2), Some(l2)) =
-                    (bc.u32(false), bc.u32(true), bc.u32(true), bc.u32(true))
-                else {
-                    return false;
-                };
-                (fd, dt, ct, crt, h1, l1, h2, l2, 1)
-            } else if format_version == 3 {
-                let (Some(fd), Some(dt), Some(ct)) = (tc.i32(false), tc.i32(true), tc.i32(true))
-                else {
-                    return false;
-                };
-                let (Some(h1), Some(l1), Some(h2), Some(l2)) =
-                    (bc.u32(false), bc.u32(true), bc.u32(true), bc.u32(true))
-                else {
-                    return false;
-                };
-                (fd, dt, ct, fd.wrapping_mul(86400), h1, l1, h2, l2, 1)
-            } else {
-                let (Some(fd), Some(dt)) = (tc.i32(false), tc.i32(true)) else {
-                    return false;
-                };
-                let (Some(h1), Some(l1)) = (bc.u32(false), bc.u32(true)) else {
-                    return false;
-                };
-                (fd, dt, 0, 0, h1, l1, 0, 0, 0)
+        let (
+            first_day,
+            data_time,
+            custom_time,
+            counters_reset_time,
+            hi1,
+            lo1,
+            hi2,
+            lo2,
+            has_custom,
+        ) = if format_version >= 4 {
+            let (Some(fd), Some(dt), Some(ct), Some(crt)) =
+                (tc.i32(false), tc.i32(true), tc.i32(true), tc.i32(true))
+            else {
+                return false;
             };
+            let (Some(h1), Some(l1), Some(h2), Some(l2)) =
+                (bc.u32(false), bc.u32(true), bc.u32(true), bc.u32(true))
+            else {
+                return false;
+            };
+            (fd, dt, ct, crt, h1, l1, h2, l2, 1)
+        } else if format_version == 3 {
+            let (Some(fd), Some(dt), Some(ct)) = (tc.i32(false), tc.i32(true), tc.i32(true)) else {
+                return false;
+            };
+            let (Some(h1), Some(l1), Some(h2), Some(l2)) =
+                (bc.u32(false), bc.u32(true), bc.u32(true), bc.u32(true))
+            else {
+                return false;
+            };
+            (fd, dt, ct, fd.wrapping_mul(86400), h1, l1, h2, l2, 1)
+        } else {
+            let (Some(fd), Some(dt)) = (tc.i32(false), tc.i32(true)) else {
+                return false;
+            };
+            let (Some(h1), Some(l1)) = (bc.u32(false), bc.u32(true)) else {
+                return false;
+            };
+            (fd, dt, 0, 0, h1, l1, 0, 0, 0)
+        };
 
         let mut slots: [Vec<i64>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         for (k, slot) in slots.iter_mut().enumerate() {
@@ -2709,7 +2703,13 @@ pub unsafe fn load_file_info(
             return false;
         };
         if file_summary != 0 && grp_c.len() > 1 {
-            unsafe { on_item_cb(target_ctx, grp_c.as_ptr().cast::<c_char>(), std::ptr::null()) };
+            unsafe {
+                on_item_cb(
+                    target_ctx,
+                    grp_c.as_ptr().cast::<c_char>(),
+                    std::ptr::null(),
+                )
+            };
         }
     }
 
@@ -2908,9 +2908,8 @@ pub unsafe fn load_section(
                 if !(rem.is_empty() || rem == b"s" || rem == b"c") {
                     continue;
                 }
-                let full_p = crate::artwritercore::article_writer_format_dest_file_path(
-                    qdir, sep, &entry,
-                );
+                let full_p =
+                    crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, &entry);
                 let Ok(mut f) = std::fs::File::open(crate::fsops::path(&full_p)) else {
                     continue;
                 };
@@ -2921,13 +2920,13 @@ pub unsafe fn load_section(
                 if n == 0 {
                     continue;
                 }
-                let line_end = buf[..n].iter().position(|&b| b == b'\n').map_or(n, |p| p + 1);
-                if let Some((id, suffix_kind)) = classify_legacy_file_state(
-                    &entry,
-                    &buf[..line_end],
-                    format_version,
-                    legacy_ver,
-                ) {
+                let line_end = buf[..n]
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(n, |p| p + 1);
+                if let Some((id, suffix_kind)) =
+                    classify_legacy_file_state(&entry, &buf[..line_end], format_version, legacy_ver)
+                {
                     unsafe {
                         on_entry_cb(
                             target_ctx,
@@ -3101,7 +3100,10 @@ pub unsafe fn load_nzb_info(
         0
     };
     let (has_post_info, post_stage) = if raw_post_stage > 0 {
-        (1, normalize_post_stage(raw_post_stage, format_version, pt_finished))
+        (
+            1,
+            normalize_post_stage(raw_post_stage, format_version, pt_finished),
+        )
     } else {
         (0, 0)
     };
@@ -3151,7 +3153,9 @@ pub unsafe fn load_nzb_info(
         return false;
     };
     let message_count = if format_version >= 52 {
-        let Some(mc) = fcc.i32(true) else { return false };
+        let Some(mc) = fcc.i32(true) else {
+            return false;
+        };
         mc
     } else {
         0
@@ -3183,7 +3187,9 @@ pub unsafe fn load_nzb_info(
         force_par_full = fpf;
         force_repair = fr;
         if format_version >= 55 {
-            let Some(epb) = pfc.i32(true) else { return false };
+            let Some(epb) = pfc.i32(true) else {
+                return false;
+            };
             extra_par_blocks = epb;
         }
     }
@@ -3192,8 +3198,7 @@ pub unsafe fn load_nzb_info(
         return false;
     };
     let mut hsc = ScanCursor(&hash_line);
-    let (Some(full_content_hash), Some(filtered_content_hash)) =
-        (hsc.u32(false), hsc.u32(true))
+    let (Some(full_content_hash), Some(filtered_content_hash)) = (hsc.u32(false), hsc.u32(true))
     else {
         return false;
     };
@@ -3256,7 +3261,9 @@ pub unsafe fn load_nzb_info(
         return false;
     };
     let dupe_hint = if format_version >= 61 {
-        let Some(dh) = dpc.i32(true) else { return false };
+        let Some(dh) = dpc.i32(true) else {
+            return false;
+        };
         dh
     } else {
         0
@@ -3274,15 +3281,7 @@ pub unsafe fn load_nzb_info(
             return false;
         };
         let mut dlc = ScanCursor(&dl_line);
-        let (
-            Some(dh4),
-            Some(dl4),
-            Some(dsec),
-            Some(ptsec),
-            Some(psec),
-            Some(rsec),
-            Some(usec),
-        ) = (
+        let (Some(dh4), Some(dl4), Some(dsec), Some(ptsec), Some(psec), Some(rsec), Some(usec)) = (
             dlc.u32(false),
             dlc.u32(true),
             dlc.i32(true),
@@ -3290,8 +3289,7 @@ pub unsafe fn load_nzb_info(
             dlc.i32(true),
             dlc.i32(true),
             dlc.i32(true),
-        )
-        else {
+        ) else {
             return false;
         };
         downloaded_size = join_i64(dh4, dl4);
@@ -4069,7 +4067,7 @@ pub type DiskAuxSinkFn = unsafe extern "C" fn(
     s1: *const c_char,
     srv_items: *const NzbgetRsServerMatchItem,
     srv_len: usize,
-    vol_items: *const NzbgetRsDiskVolumeStatInput,
+    vol_items: *const c_void,
     vol_len: usize,
 );
 pub type DiskAuxFn = unsafe extern "C" fn(
@@ -4080,7 +4078,7 @@ pub type DiskAuxFn = unsafe extern "C" fn(
     u1: u32,
     s1: *const c_char,
     s2: *const c_char,
-    vol_item: *const NzbgetRsDiskVolumeStatInput,
+    vol_item: *const c_void,
     sink_ctx: *mut c_void,
     sink_fn: Option<DiskAuxSinkFn>,
 );
@@ -4283,8 +4281,7 @@ impl RsStateFile {
         transactional: bool,
         read_version: i32,
     ) -> Self {
-        let dest =
-            crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, filename);
+        let dest = crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, filename);
         let temp = if transactional {
             diskstate_format_new_path(&dest)
         } else {
@@ -5597,9 +5594,7 @@ unsafe fn load_single_file_or_state(
     if mode == 0 {
         unsafe { load_file_info_from_reader(env, &mut r, sf.file_version, file_summary, articles) }
     } else {
-        unsafe {
-            load_file_state_from_reader(env, &mut r, sf.file_version, mode == 2, temp_dir)
-        }
+        unsafe { load_file_state_from_reader(env, &mut r, sf.file_version, mode == 2, temp_dir) }
     }
 }
 
@@ -5674,7 +5669,7 @@ unsafe fn cleanup_queue_dir_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u8)
         _s1: *const c_char,
         _srv: *const NzbgetRsServerMatchItem,
         _srv_len: usize,
-        _vol: *const NzbgetRsDiskVolumeStatInput,
+        _vol: *const c_void,
         _vol_len: usize,
     ) {
         let lists = unsafe { &mut *sink_ctx.cast::<IdLists>() };
@@ -5711,11 +5706,7 @@ unsafe fn cleanup_queue_dir_op(env: &NzbgetRsDiskStateEnv, qdir: &[u8], sep: u8)
     for filename in crate::fsops::list_dir_entries(qdir) {
         if is_orphan_queue_file(&filename, &lists.file_ids, &lists.nzb_ids) {
             unsafe {
-                emit_log_parts(
-                    env,
-                    1,
-                    &[b"Deleting orphaned diskstate file ", &filename],
-                );
+                emit_log_parts(env, 1, &[b"Deleting orphaned diskstate file ", &filename]);
             }
             let p =
                 crate::artwritercore::article_writer_format_dest_file_path(qdir, sep, &filename);
@@ -6045,8 +6036,7 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
             for filename in crate::fsops::list_dir_entries(tdir) {
                 let (kind, id, _) = classify_temp_file(&filename);
                 let garbage = kind == 1
-                    || (kind == 2
-                        && unsafe { call_ctrl(env, 8, id, 0, 0, std::ptr::null()) == 0 });
+                    || (kind == 2 && unsafe { call_ctrl(env, 8, id, 0, 0, std::ptr::null()) == 0 });
                 if garbage {
                     let p = crate::artwritercore::article_writer_format_dest_file_path(
                         tdir, sep, &filename,
@@ -6075,7 +6065,7 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
                 s1: *const c_char,
                 _srv: *const NzbgetRsServerMatchItem,
                 _srv_len: usize,
-                _vol: *const NzbgetRsDiskVolumeStatInput,
+                _vol: *const c_void,
                 _vol_len: usize,
             ) {
                 let fo = unsafe { &mut *sink_ctx.cast::<FeedOut>() };
@@ -6289,7 +6279,7 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
                 _s1: *const c_char,
                 srv_items: *const NzbgetRsServerMatchItem,
                 srv_len: usize,
-                vol_items: *const NzbgetRsDiskVolumeStatInput,
+                vol_items: *const c_void,
                 vol_len: usize,
             ) {
                 let so = unsafe { &mut *sink_ctx.cast::<StatsSaveOut>() };
@@ -6312,10 +6302,10 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
                     )
                 };
                 if !vol_items.is_null() && vol_len > 0 {
+                    let vol_items = vol_items.cast::<NzbgetRsDiskVolumeStatInput>();
                     so.vol_count = vol_len;
                     for i in 0..vol_len {
-                        let b =
-                            unsafe { format_volume_stat_item_bytes(vol_items.add(i)) };
+                        let b = unsafe { format_volume_stat_item_bytes(vol_items.add(i)) };
                         so.vol_bytes.extend_from_slice(&b);
                     }
                 }
@@ -6398,7 +6388,7 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
                 _s1: *const c_char,
                 srv_items: *const NzbgetRsServerMatchItem,
                 srv_len: usize,
-                _vol: *const NzbgetRsDiskVolumeStatInput,
+                _vol: *const c_void,
                 _vol_len: usize,
             ) {
                 let vec = unsafe { &mut *sink_ctx.cast::<Vec<SrvMeta>>() };
@@ -6535,7 +6525,7 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
                                 0,
                                 std::ptr::null(),
                                 std::ptr::null(),
-                                item,
+                                item.cast(),
                                 std::ptr::null_mut(),
                                 None,
                             );
@@ -6561,9 +6551,9 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
             }
             1
         }
-        13 => c_int::from(unsafe {
-            save_single_file_or_state(env, qdir, sep, env.a1, env.a2 != 0)
-        }),
+        13 => {
+            c_int::from(unsafe { save_single_file_or_state(env, qdir, sep, env.a1, env.a2 != 0) })
+        }
         14 => {
             let mut ver = 0;
             let ok = unsafe {
@@ -6689,8 +6679,7 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
                     let total_files = unsafe { call_ctrl(env, 4, 0, 0, 0, std::ptr::null()) };
                     let _ = writeln!(w, "{total_files}");
                     for nzb_idx in 0..nzb_count {
-                        let fl_len =
-                            unsafe { call_ctrl(env, 5, nzb_idx, 0, 0, std::ptr::null()) };
+                        let fl_len = unsafe { call_ctrl(env, 5, nzb_idx, 0, 0, std::ptr::null()) };
                         for file_idx in 0..fl_len {
                             let file_id = unsafe {
                                 call_ctrl(env, 6, nzb_idx, file_idx, 0, std::ptr::null())
@@ -6846,9 +6835,7 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
                     );
                 }
             }
-            if !file_infos_loaded
-                && unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) > 0 }
-            {
+            if !file_infos_loaded && unsafe { call_ctrl(env, 0, 0, 0, 0, std::ptr::null()) > 0 } {
                 unsafe { load_all_file_infos_op(env, qdir, sep) };
             }
             if queue_files_failed {
@@ -6986,7 +6973,10 @@ mod tests {
                 updates.as_ptr(),
                 1,
             ));
-            assert_eq!(feed_status, "1\nhttps://example.invalid/feed 1 2\n12345\n1700000000\n");
+            assert_eq!(
+                feed_status,
+                "1\nhttps://example.invalid/feed 1 2\n12345\n1700000000\n"
+            );
 
             let statuses = [2];
             let seens = [1700000001];
@@ -6996,7 +6986,10 @@ mod tests {
                 urls.as_ptr(),
                 1,
             ));
-            assert_eq!(feed_hist, "1\n2,1700000001\nhttps://example.invalid/feed 1 2\n");
+            assert_eq!(
+                feed_hist,
+                "1\n2,1700000001\nhttps://example.invalid/feed 1 2\n"
+            );
 
             let srv_name = CString::new("Server\n1").unwrap();
             let srv_host = CString::new("news.example\r.com").unwrap();
@@ -7129,21 +7122,11 @@ mod tests {
     #[test]
     fn test_diskstate_legacy_and_holes() {
         assert_eq!(
-            classify_legacy_file_state(
-                b"123c",
-                b"nzbget diskstate file version 8\n",
-                7,
-                9
-            ),
+            classify_legacy_file_state(b"123c", b"nzbget diskstate file version 8\n", 7, 9),
             Some((123, 2))
         );
         assert_eq!(
-            classify_legacy_file_state(
-                b"123c",
-                b"nzbget diskstate file version 7\n",
-                7,
-                9
-            ),
+            classify_legacy_file_state(b"123c", b"nzbget diskstate file version 7\n", 7, 9),
             None
         );
 
@@ -7233,28 +7216,42 @@ mod tests {
         assert_eq!(parsed, Some((1793730000, 1, 34)));
         assert!(validate_dupe_extras_header(4, 0, 0));
         assert!(validate_repair_job_header(7, 7, 10, 0, 0));
-        assert!(eval_restored_output_init(1, true, false, true, false, false));
+        assert!(eval_restored_output_init(
+            1, true, false, true, false, false
+        ));
         assert_eq!(calc_staged_fallback(false, 2, 2, 1, true, 0), (1, 0));
         assert!(validate_article_count(50, true, 100));
-        assert!(need_staged_file_check(false, 9, 0, 2, 1024, 512, 1, 3, true, false));
+        assert!(need_staged_file_check(
+            false, 9, 0, 2, 1024, 512, 1, 3, true, false
+        ));
         assert_eq!(calc_volume_slot_size(0, 10), (true, 60));
     }
 
     #[test]
     fn test_diskstate_fs_op_and_set_aside_regular_files() {
-        let dir = std::env::temp_dir().join(format!(
-            "rustyget_diskstate_fs_test_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rustyget_diskstate_fs_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let qdir = dir.to_string_lossy().into_owned().into_bytes();
         let mut o1 = 0;
         let mut o2 = 0;
-        assert_eq!(diskstate_fs_op(1, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2), 0);
-        assert_eq!(diskstate_fs_op(5, &qdir, b'/', 12, 34, 0, 0, &mut o1, &mut o2), 1);
-        assert_eq!(diskstate_fs_op(1, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2), 1);
-        assert_eq!(diskstate_fs_op(4, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2), 1);
+        assert_eq!(
+            diskstate_fs_op(1, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2),
+            0
+        );
+        assert_eq!(
+            diskstate_fs_op(5, &qdir, b'/', 12, 34, 0, 0, &mut o1, &mut o2),
+            1
+        );
+        assert_eq!(
+            diskstate_fs_op(1, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2),
+            1
+        );
+        assert_eq!(
+            diskstate_fs_op(4, &qdir, b'/', 0, 0, 0, 0, &mut o1, &mut o2),
+            1
+        );
         assert_eq!((o1, o2), (12, 34));
         let _ = std::fs::remove_dir_all(&dir);
     }

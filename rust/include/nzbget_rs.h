@@ -52,32 +52,6 @@ void nzbget_rs_normalize_path_separators(char* path);
 // Rust panics abort and never unwind across the ABI.
 // Free returned buffers with nzbget_rs_free.
 
-// ServerVolume's slots (rust/src/statmeter.rs). calc_slots: CalcSlots for a
-// local time (cut to an int as before), updating *firstDay; day is -1 outside
-// the 20 years from 2013, inRange tells whether the day arrays may grow.
-// volume_add: AddStats' clearing of the second/minute/hour slots passed since
-// locDataTime, then adding bytes at the slots; slots outside an array (a time
-// before 1970 or after 2038-01-19 as an int) are skipped.
-// Arrays stay caller-owned, must be disjoint and writable for their lengths
-// (in int64_t elements). NULL arrays are ignored; NULL slots makes add a no-op.
-// The slots descriptor is copied before accessing arrays and may overlap one.
-// calc_slots is a no-op if either output pointer is NULL.
-typedef struct NzbgetRsVolumeSlots
-{
-	int sec, min, hour, day, inRange;
-} NzbgetRsVolumeSlots;
-void nzbget_rs_volume_calc_slots(long long locCurTime, int* firstDay, NzbgetRsVolumeSlots* slots);
-void nzbget_rs_volume_add(int64_t* seconds, size_t secondsLen, int64_t* minutes, size_t minutesLen,
-	int64_t* hours, size_t hoursLen, const NzbgetRsVolumeSlots* slots, int lastMinSlot, int lastHourSlot,
-	long long locCurTime, long long locDataTime, int64_t bytes);
-
-// option_restricted: OptEntry::Restricted, 1 when the value is protected; NULL is 0.
-// signedChar is nonzero when the caller's plain char is signed, including
-// compiler overrides such as -funsigned-char; Rust's target default may differ.
-// A non-NULL name must be readable and NUL-terminated within one allocation,
-// and remain unchanged for the duration of the call.
-int nzbget_rs_option_restricted(const char* name, int signedChar);
-
 typedef struct NzbgetRsCmdline NzbgetRsCmdline;
 NzbgetRsCmdline* nzbget_rs_cmdline_new(
 	int argc, const char* const* argv,
@@ -346,40 +320,6 @@ typedef struct {
 } NzbgetRsRpcFeedItem;
 
 typedef struct {
-    uint32_t failed;
-    uint32_t success;
-} NzbgetRsRpcArticlePair;
-
-typedef struct {
-    int server_id;
-    int data_time;
-    int first_day;
-    int64_t total_bytes;
-    int64_t custom_bytes;
-    int custom_time;
-    int counters_reset_time;
-    int sec_slot;
-    int min_slot;
-    int hour_slot;
-    int day_slot;
-    int include_seconds;
-    const int64_t* bytes_per_seconds;
-    size_t bytes_per_seconds_len;
-    int include_minutes;
-    const int64_t* bytes_per_minutes;
-    size_t bytes_per_minutes_len;
-    int include_hours;
-    const int64_t* bytes_per_hours;
-    size_t bytes_per_hours_len;
-    int include_days;
-    const int64_t* bytes_per_days;
-    size_t bytes_per_days_len;
-    int include_articles;
-    const NzbgetRsRpcArticlePair* articles_per_days;
-    size_t articles_per_days_len;
-} NzbgetRsRpcServerVolumeItem;
-
-typedef struct {
     int nzb_id;
     const char* name;
     int rank;
@@ -556,219 +496,42 @@ typedef struct {
     size_t holes_len;
 } NzbgetRsDiskRepairJob;
 
-typedef struct {
-    int first_day;
-    int data_time;
-    int custom_time;
-    int counters_reset_time;
-    int64_t total_bytes;
-    int64_t custom_bytes;
-    const int64_t* bytes_per_seconds;
-    size_t bytes_per_seconds_len;
-    const int64_t* bytes_per_minutes;
-    size_t bytes_per_minutes_len;
-    const int64_t* bytes_per_hours;
-    size_t bytes_per_hours_len;
-    const int64_t* bytes_per_days;
-    size_t bytes_per_days_len;
-    const NzbgetRsRpcArticlePair* articles_per_days;
-    size_t articles_per_days_len;
-} NzbgetRsDiskVolumeStatInput;
-
 NzbgetRsBuf nzbget_rs_cmdline_format_usage(
     const char* base_name, char path_sep, int include_daemon);
+
+typedef struct NzbgetRsOptions NzbgetRsOptions;
+typedef struct NzbgetRsFeedCoord NzbgetRsFeedCoord;
+typedef struct NzbgetRsScheduler NzbgetRsScheduler;
+typedef struct NzbgetRsLog NzbgetRsLog;
+typedef struct NzbgetRsCmdScriptLog NzbgetRsCmdScriptLog;
+typedef struct NzbgetRsStatMeter NzbgetRsStatMeter;
 
 typedef struct NzbgetRsHealthServerInput {
     int id;
     int active;
     const char* name;
-    size_t name_len;
     int level;
     int optional;
     int group;
     const char* host;
-    size_t host_len;
     int port;
     const char* username;
-    size_t username_len;
     const char* password;
-    size_t password_len;
     int tls;
     const char* cipher;
-    size_t cipher_len;
     int max_connections;
     int retention;
     uint32_t cert_level;
     int ip_version;
 } NzbgetRsHealthServerInput;
 
-typedef struct NzbgetRsHealthTaskInput {
-    int id;
-    int hours;
-    int minutes;
-    int week_days_bits;
-} NzbgetRsHealthTaskInput;
-
-typedef struct NzbgetRsHealthCategoryInput {
-    const char* name;
-    size_t name_len;
-    int unpack;
-} NzbgetRsHealthCategoryInput;
-
-typedef struct NzbgetRsHealthFeedInput {
-    int id;
-    const char* name;
-    size_t name_len;
-    const char* url;
-    size_t url_len;
-    int interval;
-    uint32_t cert_level;
-} NzbgetRsHealthFeedInput;
-
-typedef struct NzbgetRsSystemHealthConfig {
-    const char* main_dir;
-    size_t main_dir_len;
-    const char* dest_dir;
-    size_t dest_dir_len;
-    const char* inter_dir;
-    size_t inter_dir_len;
-    const char* nzb_dir;
-    size_t nzb_dir_len;
-    const char* queue_dir;
-    size_t queue_dir_len;
-    const char* web_dir;
-    size_t web_dir_len;
-    const char* temp_dir;
-    size_t temp_dir_len;
-    const char* const* script_dir_ptrs;
-    const size_t* script_dir_lens;
-    size_t script_dir_count;
-    const char* config_template;
-    size_t config_template_len;
-    const char* log_file;
-    size_t log_file_len;
-    const char* options_log_file;
-    size_t options_log_file_len;
-    const char* cert_store;
-    size_t cert_store_len;
-    const char* cert_store_path;
-    size_t cert_store_path_len;
-    const char* config_file;
-    size_t config_file_len;
-    const char* lock_file;
-    size_t lock_file_len;
-    int write_log;
-    int cert_check;
-    int daemon_mode;
-    const NzbgetRsHealthServerInput* servers;
-    size_t server_count;
-    int output_mode;
-    int update_interval;
-    int curses_nzb_name;
-    int curses_group;
-    int curses_time;
-    int rotate_log;
-    int log_buffer;
-    int crash_dump;
-    int time_correction;
-    int article_retries;
-    int hc_dupe;
-    int dupe_search;
-    int article_interval;
-    int article_timeout;
-    int article_read_chunk_size;
-    int url_retries;
-    int url_interval;
-    int url_timeout;
-    int url_connections;
-    int remote_timeout;
-    int download_rate;
-    int monthly_quota;
-    int quota_start_day;
-    int daily_quota;
-    int flush_queue;
-    int continue_partial;
-    int propagation_delay;
-    int article_cache;
-    int direct_write;
-    int write_buffer;
-    int file_naming;
-    int post_strategy;
-    int disk_space;
-    int nzb_cleanup_disk;
-    int keep_history;
-    int feed_history;
-    int skip_write;
-    int raw_article;
-    const char* control_ip;
-    size_t control_ip_len;
-    int control_port;
-    const char* control_username;
-    size_t control_username_len;
-    const char* control_password;
-    size_t control_password_len;
-    const char* restricted_username;
-    size_t restricted_username_len;
-    const char* restricted_password;
-    size_t restricted_password_len;
-    const char* add_username;
-    size_t add_username_len;
-    const char* add_password;
-    size_t add_password_len;
-    int form_auth;
-    int secure_control;
-    const char* secure_cert;
-    size_t secure_cert_len;
-    const char* secure_key;
-    size_t secure_key_len;
-    int secure_port;
-    int cert_store_path_empty;
-    const char* daemon_username;
-    size_t daemon_username_len;
-    int umask;
-    int append_category_dir;
-    int nzb_dir_interval;
-    int nzb_dir_file_age;
-    int dupe_check;
-    int health_check;
-    int crc_check;
-    int par_check;
-    int par_repair;
-    int par_quick;
-    int par_buffer;
-    int par_threads;
-    size_t hw_threads;
-    int par_rename;
-    int rar_rename;
-    int direct_rename;
-    int hard_linking;
-    int par_time_limit;
-    int unpack;
-    int direct_unpack;
-    int unpack_pause_queue;
-    const char* unrar_path;
-    size_t unrar_path_len;
-    const char* seven_zip_path;
-    size_t seven_zip_path_len;
-    const char* ext_cleanup_disk;
-    size_t ext_cleanup_disk_len;
-    const char* unpack_pass_file;
-    size_t unpack_pass_file_len;
-    const char* unpack_ignore_ext;
-    size_t unpack_ignore_ext_len;
-    const NzbgetRsHealthTaskInput* tasks;
-    size_t task_count;
-    const NzbgetRsHealthCategoryInput* categories;
-    size_t category_count;
-    const NzbgetRsHealthFeedInput* feeds;
-    size_t feed_count;
-} NzbgetRsSystemHealthConfig;
-
 NzbgetRsBuf nzbget_rs_system_health_diagnose(
-    const NzbgetRsSystemHealthConfig* cfg,
-    int format_mode,
-    void* ctx,
-    void (*log_cb)(void* ctx, int severity, const char* msg));
+    const NzbgetRsOptions* opts_ptr,
+    const NzbgetRsHealthServerInput* servers_ptr, size_t server_count,
+    const NzbgetRsFeedCoord* feed_coord_ptr,
+    const NzbgetRsScheduler* sched_ptr,
+    const NzbgetRsLog* log_ptr,
+    int daemon_mode, int format_mode);
 
 /* Extension & Script Subsystem End-to-End C ABI (`rust/src/extension.rs`, `rust/src/script.rs`, `rust/src/options.rs`) */
 
@@ -819,7 +582,6 @@ int nzbget_rs_queue_script_exec(NzbgetRsQueueScriptCoord* h, int op, const Nzbge
  * Feed Subsystem (`rust/src/feed.rs`)
  * ============================================================================ */
 
-typedef struct NzbgetRsFeedCoord NzbgetRsFeedCoord;
 typedef struct NzbgetRsFeedCoordEnv {
     void* ctx; uintptr_t p1; int a1; int a2; int a3; int a4; int a5; int a6; uint32_t u1;
     const char* s1; const char* s2; const char* s3; const char* s4; const char* s5; const char* s6;
@@ -827,7 +589,6 @@ typedef struct NzbgetRsFeedCoordEnv {
     uintptr_t (*query_cb)(void* ctx, int op, uintptr_t ptr, int* out_ints, int64_t* out_i64s, const char** out_strs);
     uintptr_t (*action_cb)(void* ctx, int op, uintptr_t p1, int a1, int a2, int a3, int64_t t1, int64_t t2, const char* s1, const char* s2, const char* s3, const char* s4);
     void (*rpc_emit_cb)(void* ctx, const NzbgetRsRpcFeedItem* item);
-    void (*health_emit_cb)(void* ctx, int id, const char* name, size_t name_len, const char* url, size_t url_len, int interval, uint32_t cert_verif_level);
 } NzbgetRsFeedCoordEnv;
 NzbgetRsFeedCoord* nzbget_rs_feed_coord_new(void);
 void nzbget_rs_feed_coord_free(NzbgetRsFeedCoord* coord);
@@ -912,15 +673,11 @@ int nzbget_rs_nzbfile_parser_get_file(
 
 NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
 NzbgetRsBuf nzbget_rs_system_info_format(
-    int mode,
-    const char* uts_sysname,
-    const char* uts_release,
-    const char* uts_machine,
-    const char* ssl_lib_name,
-    const char* ssl_raw_version,
-    int ssl_extract_after_space,
-    const char* pub_ip_ptr, size_t pub_ip_len,
-    const char* priv_ip_ptr, size_t priv_ip_len);
+    int mode, int with_network, int use_tls, int include_gzip,
+    const char* version_rev, const char* ssl_lib_name,
+    const char* ssl_raw_version, int ssl_extract_after_space,
+    NzbgetRsConnHostFn conn_host_cb,
+    const NzbgetRsLog* log, const NzbgetRsOptions* opts);
 
 int nzbget_rs_script_config_read_cipher_snapshot(
     const char* filename, NzbgetRsBuf* out_bytes);
@@ -1035,7 +792,6 @@ typedef struct NzbgetRsParsedOptions {
     int32_t tls;
 } NzbgetRsParsedOptions;
 
-typedef struct NzbgetRsOptions NzbgetRsOptions;
 typedef void (*NzbgetRsOptionsHostFn)(
     void* ctx, int op, const int* ints, const char* const* strs, size_t count);
 NzbgetRsOptions* nzbget_rs_options_new(
@@ -1046,24 +802,27 @@ NzbgetRsOptions* nzbget_rs_options_new(
 void nzbget_rs_options_free(NzbgetRsOptions* handle);
 const char* nzbget_rs_options_str(const NzbgetRsOptions* handle, int id);
 int nzbget_rs_options_task(
-    NzbgetRsOptions* handle, int id, const char* time, const char* week_days,
+    const NzbgetRsOptions* handle, int id, const char* time, const char* week_days,
     int command, const char* param, void* cb_ctx, NzbgetRsOptionsHostFn cb_fn);
-int nzbget_rs_options_category_alias_list_matches(
-    const char* const* aliases, size_t aliases_len, const char* name, int signed_char);
+int nzbget_rs_options_query(
+    const NzbgetRsOptions* handle, int op, const char* s1, int a1,
+    int* out_int, const char** out_strs, uintptr_t ctx,
+    void (*cb)(uintptr_t, const char*, const char*, int));
+
+NzbgetRsLog* nzbget_rs_log_new(int debug_build);
+void nzbget_rs_log_free(NzbgetRsLog* log);
+void nzbget_rs_log_emit(
+    const NzbgetRsLog* log, int kind, const NzbgetRsOptions* options, const char* text);
+void nzbget_rs_log_ctl(
+    const NzbgetRsLog* log, int op, int a1, uintptr_t p1,
+    const NzbgetRsOptions* options, const char* s1, void (*debug_cb)(uintptr_t));
+void nzbget_rs_log_collect(
+    int mode, const NzbgetRsLog* log, const NzbgetRsCmdScriptLog* cmd_log,
+    int a1, int a2, uint32_t u1, int* out_int, void* ctx, uintptr_t fn1, uintptr_t fn2);
+uintptr_t nzbget_rs_cmd_script_log_op(
+    int op, NzbgetRsCmdScriptLog* handle, int script_id, int kind, const char* text);
 
 uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
-
-int nzbget_rs_system_info_fetch_network(
-    const char* host, int use_tls, int include_gzip, const char* version_rev,
-    void* ctx,
-    int (*tls_cb)(
-        void* ctx, int fd, const char* host, const char* req, size_t req_len,
-        NzbgetRsBuf* out_resp),
-    NzbgetRsBuf* out_public_ip, NzbgetRsBuf* out_private_ip, NzbgetRsBuf* out_err);
-
-NzbgetRsBuf nzbget_rs_log_rotate_log_file(
-    const char* log_file, char sep, int64_t cur_time, int rotate_log,
-    void* ctx, void (*on_info_cb)(void*, const char*));
 
 NzbgetRsBuf nzbget_rs_nzb_format_name(
     int op, const char* s1, const char* s2, const char* s3,
@@ -1121,8 +880,6 @@ typedef struct RsDownloadCurrentStatsAcc {
     int32_t _pad;
 } RsDownloadCurrentStatsAcc;
 
-int64_t nzbget_rs_fs_op_with_err(
-    int op, const char* p1, const char* p2, int64_t val, NzbgetRsBuf* out_errmsg);
 int nzbget_rs_fs_load_file_into_buffer(
     const char* filename, int add_trailing_null, void* ctx,
     uint8_t* (*reserve_cb)(void*, int));
@@ -1221,17 +978,26 @@ typedef struct NzbgetRsDiskStateEnv {
     void (*apply_nzb_cb)(void* ctx, int mode, const NzbgetRsDiskNzbInfoInput* inp, int flags, const NzbgetRsDiskCompletedFile* completed, size_t completed_len, const NzbgetRsDiskParam* params, size_t params_len, const NzbgetRsDiskScriptStatus* scripts, size_t scripts_len, const NzbgetRsDiskServerStat* stats, size_t stats_len, const NzbgetRsDiskFileStub* files, const int* file_times, size_t files_len, const NzbgetRsDiskRepairJob* job);
     void (*export_file_cb)(void* ctx, int mode, void* sink_ctx, void (*sink_fn)(void*, const NzbgetRsDiskFileExport*));
     int (*apply_file_cb)(void* ctx, int mode, int idx_or_flags, int extra_i32, int64_t seg_offset, uint32_t crc, const char* str_arg, const NzbgetRsDiskFileInfoInput* finfo, const NzbgetRsDiskArticleInfo* art_info, const NzbgetRsDiskFileStateInput* fstate, const NzbgetRsDiskServerStat* stats, size_t stats_len);
-    void (*aux_cb)(void* ctx, int op, int a1, int a2, uint32_t u1, const char* s1, const char* s2, const NzbgetRsDiskVolumeStatInput* vol_item, void* sink_ctx, void (*sink_fn)(void*, int, int, int, uint32_t, const char*, const NzbgetRsServerMatchItem*, size_t, const NzbgetRsDiskVolumeStatInput*, size_t));
+    void (*aux_cb)(void* ctx, int op, int a1, int a2, uint32_t u1, const char* s1, const char* s2, const void* vol_item, void* sink_ctx, void (*sink_fn)(void*, int, int, int, uint32_t, const char*, const NzbgetRsServerMatchItem*, size_t, const void*, size_t));
 } NzbgetRsDiskStateEnv;
 
 int nzbget_rs_diskstate_exec(int op, const NzbgetRsDiskStateEnv* env);
 typedef uintptr_t (*NzbgetRsNntpFetchHostFn)(
     int op, int a1, int a2, uintptr_t p1, const char* s1,
     int* ints, int64_t* i64s, const char** strs, uint8_t* buf, size_t buf_len);
-int nzbget_rs_statmeter_op(
-    int op, int64_t loc_or_cur_time, int64_t a_i64, int64_t b_i64, int64_t c_i64,
-    int a_i32, int b_i32, int c_i32, const int64_t* slice_ptr, size_t slice_len,
-    int64_t* out_i64_1, int64_t* out_i64_2, int* out_i32);
+NzbgetRsStatMeter* nzbget_rs_statmeter_new(const NzbgetRsLog* log, const NzbgetRsOptions* opts);
+void nzbget_rs_statmeter_free(NzbgetRsStatMeter* sm);
+int64_t nzbget_rs_statmeter_speed(const NzbgetRsStatMeter* sm, int op, int bytes);
+int nzbget_rs_statmeter_ctl(
+    const NzbgetRsStatMeter* sm, int op, int a1, int a2,
+    uint32_t u1, uint32_t u2, uint32_t u3,
+    const NzbgetRsOptions* opts, const NzbgetRsLog* log,
+    int* out_ints, int64_t* out_i64s);
+int nzbget_rs_statmeter_disk(
+    const NzbgetRsStatMeter* sm, int op, int server_mode, int local_time_offset,
+    const NzbgetRsOptions* opts, const NzbgetRsLog* log,
+    const NzbgetRsServerMatchItem* servers, size_t servers_len,
+    int* out_state_ids, int* inout_perfect);
 typedef struct NzbgetRsDupeProbe NzbgetRsDupeProbe;
 typedef uintptr_t (*NzbgetRsDupeProbeHostFn)(void*, int, int, int, int, uintptr_t, uintptr_t, const char*, int*, const char**);
 NzbgetRsDupeProbe* nzbget_rs_dupe_probe_new(int nzb_id, int count_all, int recovered_at_start);
@@ -1268,7 +1034,6 @@ typedef struct NzbgetRsScannerEnv {
 NzbgetRsScanner* nzbget_rs_scanner_new(void);
 void nzbget_rs_scanner_free(NzbgetRsScanner* scanner);
 int nzbget_rs_scanner_exec(NzbgetRsScanner* scanner, int op, const NzbgetRsScannerEnv* env, int a1, int a2, int a3);
-typedef struct NzbgetRsScheduler NzbgetRsScheduler;
 typedef struct NzbgetRsSchedulerEnv {
     void* ctx; int a1; int a2; int a3; int a4; int a5; const char* s1;
     void (*log_cb)(void*, int, const char*);
@@ -1433,6 +1198,10 @@ typedef struct NzbgetRsWebServeEnv {
 } NzbgetRsWebServeEnv;
 
 int nzbget_rs_web_serve(int op, const NzbgetRsWebServeEnv* env);
+int nzbget_rs_statmeter_rpc(
+    const NzbgetRsStatMeter* sm, int op, int local_time_offset,
+    int a1, int a2, int a3, int a4, int a5,
+    void* emit_ctx, NzbgetRsXmlRpcEmitFn emit_cb);
 
 typedef void (*NzbgetRsBinRpcListPushNzbFn)(
     void* b_ctx, uint32_t id, uint32_t kind, int64_t size, int64_t rem_size, int64_t paused_size,

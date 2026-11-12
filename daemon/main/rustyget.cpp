@@ -479,10 +479,7 @@ private:
 		{
 			NzbgetRsBuf buf = nzbget_rs_cmdline_format_usage(
 				FileSystem::BaseFileName(((const char**)(*g_Arguments))[0]), PATH_SEPARATOR, 1);
-			if (buf.data)
-			{
-				printf("%s", buf.data);
-			}
+			if (buf.data) printf("%s", buf.data);
 			nzbget_rs_free(buf);
 			exit(printUsage ? 0 : 1);
 		}
@@ -620,10 +617,8 @@ private:
 
 		if (nzbget_rs_cmdline_get_flag(m_cmdLine.get(), 3))
 		{
-			for (Options::OptEntry& optEntry : g_Options->GuardOptEntries())
-			{
-				printf("%s = \"%s\"\n", optEntry.GetName(), optEntry.GetValue());
-			}
+			nzbget_rs_options_query(g_Options->RsHandle(), 1, nullptr, 0, nullptr, nullptr, 0,
+				+[](uintptr_t, const char* n, const char* v, int) { printf("%s = \"%s\"\n", n, v); });
 			exit(0);
 		}
 	}

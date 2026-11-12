@@ -160,8 +160,9 @@ pub fn parse_season_episode(title: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let s2_start = rx.match_start(2).max(0) as usize;
     let s2_len = rx.match_len(2).max(0) as usize;
     let season_slice = title.get(s1_start..)?;
-    let season_num = crate::util::util_str_to_i64_checked(season_slice, i32::MIN as i64, i32::MAX as i64)
-        .unwrap_or(0) as i32;
+    let season_num =
+        crate::util::util_str_to_i64_checked(season_slice, i32::MIN as i64, i32::MAX as i64)
+            .unwrap_or(0) as i32;
     let ep_slice = title.get(s2_start..s2_start.saturating_add(s2_len))?;
     Some(format_season_episode(season_num, ep_slice))
 }
@@ -626,7 +627,10 @@ impl FeedFileParser {
                     let norm = Self::normalize_xml_eol(&decoded);
                     if depth == 0 {
                         let rest = norm.strip_prefix('\u{feff}').unwrap_or(&norm);
-                        if !rest.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
+                        if !rest
+                            .bytes()
+                            .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                        {
                             return None;
                         }
                     } else {
@@ -954,11 +958,7 @@ pub fn calc_history_border_date(
 
 /// Evaluates whether a feed history entry is older than `border_date` (`FeedCoordinator::CleanupHistory`),
 /// returning `Some(url_len_without_query)` when it should be deleted, or `None` to keep it.
-pub fn should_delete_history_entry(
-    last_seen: i64,
-    border_date: i64,
-    url: &[u8],
-) -> Option<usize> {
+pub fn should_delete_history_entry(last_seen: i64, border_date: i64, url: &[u8]) -> Option<usize> {
     if last_seen < border_date {
         Some(url.iter().position(|&b| b == b'?').unwrap_or(url.len()))
     } else {
@@ -1477,18 +1477,6 @@ pub struct NzbgetRsFeedCoordEnv {
     >,
     pub rpc_emit_cb:
         Option<unsafe extern "C" fn(*mut c_void, *const crate::xmlrpc_format::NzbgetRsRpcFeedItem)>,
-    pub health_emit_cb: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            c_int,
-            *const c_char,
-            usize,
-            *const c_char,
-            usize,
-            c_int,
-            u32,
-        ),
-    >,
 }
 
 fn feed_emit_log(env: &NzbgetRsFeedCoordEnv, level: i32, parts: &[&[u8]]) {
@@ -1564,7 +1552,7 @@ unsafe extern "C" fn feed_disk_aux_cb(
     u1: u32,
     s1: *const c_char,
     s2: *const c_char,
-    _vol_item: *const crate::diskstate_format::NzbgetRsDiskVolumeStatInput,
+    _vol_item: *const c_void,
     sink_ctx: *mut c_void,
     sink_fn: Option<crate::diskstate_format::DiskAuxSinkFn>,
 ) {
@@ -1867,11 +1855,7 @@ impl NzbgetRsFeedCoord {
             }
             if is_feed_download_hanging(tm, last_upd, opts.url_timeout, dl_ints[0], AD_RUNNING) {
                 let info_name = feed_cstr_bytes(dl_strs[0]).to_vec();
-                feed_emit_log(
-                    env,
-                    4,
-                    &[b"Cancelling hanging feed download ", &info_name],
-                );
+                feed_emit_log(env, 4, &[b"Cancelling hanging feed download ", &info_name]);
                 unsafe {
                     act(
                         env.ctx,
@@ -1908,7 +1892,11 @@ impl NzbgetRsFeedCoord {
                 feed_emit_log(
                     env,
                     1,
-                    &[b"Deleting ", &entry.url[..prefix_len], b" from feed history"],
+                    &[
+                        b"Deleting ",
+                        &entry.url[..prefix_len],
+                        b" from feed history",
+                    ],
                 );
                 changed = true;
                 false
@@ -1929,11 +1917,7 @@ impl NzbgetRsFeedCoord {
         let cur_time = feed_now_sec();
         st.cache.retain(|item| {
             if is_feed_cache_expired(item.last_usage, item.cache_time_sec, cur_time) {
-                feed_emit_log(
-                    env,
-                    0,
-                    &[b"Deleting ", &item.url, b" from feed cache"],
-                );
+                feed_emit_log(env, 0, &[b"Deleting ", &item.url, b" from feed cache"]);
                 false
             } else {
                 true
@@ -1981,11 +1965,7 @@ impl NzbgetRsFeedCoord {
         Some(out)
     }
 
-    fn filter_feed_items(
-        cfg: &RsFeedConfig,
-        items: &mut [RsFeedItem],
-        env: &NzbgetRsFeedCoordEnv,
-    ) {
+    fn filter_feed_items(cfg: &RsFeedConfig, items: &mut [RsFeedItem], env: &NzbgetRsFeedCoordEnv) {
         feed_emit_log(env, 0, &[b"Filtering feed ", cfg.name.as_bytes()]);
         let mut filter =
             (!cfg.filter.is_empty()).then(|| crate::feedfilter::FeedFilter::new(&cfg.filter));
@@ -2112,22 +2092,22 @@ impl NzbgetRsFeedCoord {
 
             if let Ok(lk) = self.state.lock() {
                 if self.force.load(Ordering::SeqCst) {
-                    let _ = self.wait_cv.wait_timeout_while(
-                        lk,
-                        Duration::from_millis(1000),
-                        |_| !self.is_stopped(env),
-                    );
+                    let _ =
+                        self.wait_cv
+                            .wait_timeout_while(lk, Duration::from_millis(1000), |_| {
+                                !self.is_stopped(env)
+                            });
                 } else {
                     let wait_ms = if opts.url_force || lk.feeds.is_empty() {
                         60_000
                     } else {
                         5_000
                     };
-                    let _ = self.wait_cv.wait_timeout_while(
-                        lk,
-                        Duration::from_millis(wait_ms),
-                        |_| !self.force.load(Ordering::SeqCst) && !self.is_stopped(env),
-                    );
+                    let _ =
+                        self.wait_cv
+                            .wait_timeout_while(lk, Duration::from_millis(wait_ms), |_| {
+                                !self.force.load(Ordering::SeqCst) && !self.is_stopped(env)
+                            });
                 }
             }
         }
@@ -2396,11 +2376,7 @@ impl NzbgetRsFeedCoord {
                                 ],
                             );
                         } else {
-                            feed_emit_log(
-                                env,
-                                1,
-                                &[cfg.name.as_bytes(), b" has no new items"],
-                            );
+                            feed_emit_log(env, 1, &[cfg.name.as_bytes(), b" has no new items"]);
                         }
                     }
 
@@ -2416,8 +2392,8 @@ impl NzbgetRsFeedCoord {
                     let fn_c = feed_bytes_to_cstr(&created.filename);
                     let cat_c = feed_bytes_to_cstr(&created.category);
                     let dk_c = feed_bytes_to_cstr(&created.dupe_key);
-                    let packed_flags =
-                        (c_int::from(created.add_url_paused) & 1) | ((created.dupe_mode & 0xff) << 1);
+                    let packed_flags = (c_int::from(created.add_url_paused) & 1)
+                        | ((created.dupe_mode & 0xff) << 1);
                     unsafe {
                         act(
                             env.ctx,
@@ -2722,26 +2698,24 @@ impl NzbgetRsFeedCoord {
         1
     }
 
-    fn emit_health_feeds(&self, env: &NzbgetRsFeedCoordEnv) {
-        let Some(cb) = env.health_emit_cb else {
-            return;
-        };
-        if let Ok(st) = self.state.lock() {
-            for fi in &st.feeds {
-                unsafe {
-                    cb(
-                        env.ctx,
-                        fi.cfg.id,
-                        fi.cfg.name.as_ptr(),
-                        fi.cfg.name.as_bytes().len(),
-                        fi.cfg.url.as_ptr(),
-                        fi.cfg.url.as_bytes().len(),
-                        fi.cfg.interval,
-                        fi.cfg.cert_verif_level,
-                    );
-                }
-            }
-        }
+    pub(crate) fn collect_health_feeds(&self) -> Vec<(i32, Vec<u8>, Vec<u8>, i32, u32)> {
+        self.state
+            .lock()
+            .map(|st| {
+                st.feeds
+                    .iter()
+                    .map(|fi| {
+                        (
+                            fi.cfg.id,
+                            fi.cfg.name.to_bytes().to_vec(),
+                            fi.cfg.url.to_bytes().to_vec(),
+                            fi.cfg.interval,
+                            fi.cfg.cert_verif_level,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn log_debug_info(&self, env: &NzbgetRsFeedCoordEnv) {
@@ -2887,10 +2861,6 @@ pub unsafe extern "C" fn nzbget_rs_feed_coord_exec(
             1
         }
         9 => coord.view_or_preview(env),
-        10 => {
-            coord.emit_health_feeds(env);
-            1
-        }
         11 => {
             coord.log_debug_info(env);
             1
@@ -2923,9 +2893,7 @@ mod tests {
 
         assert!(has_any_series_id(b"", b"", b"", b"", 0, 439270, 0));
         assert_eq!(
-            build_feed_dupe_key(
-                b"", b"", b"", b"", 0, 439270, 0, 28369634, 2, 69, b"S02", b"E69"
-            ),
+            build_feed_dupe_key(b"", b"", b"", b"", 0, 439270, 0, 28369634, 2, 69, b"S02", b"E69"),
             b"tvdbid=439270-S02-E69"
         );
     }
@@ -2976,7 +2944,10 @@ mod tests {
         );
         assert_eq!(resolve_category(b"", 0, b"Movies"), b"Movies");
         assert_eq!(resolve_category(b"", 2, b"Movies"), b"");
-        assert_eq!(should_start_feed(15, 1000, 1200, false, 0, 1), (true, false));
+        assert_eq!(
+            should_start_feed(15, 1000, 1200, false, 0, 1),
+            (true, false)
+        );
         assert_eq!(calc_feed_next_interval(false, 15, 60), (120, 120));
         assert_eq!(classify_item_history(true, true, false), (1, false));
         assert_eq!(classify_item_history(false, true, false), (2, true));
@@ -3010,9 +2981,8 @@ mod tests {
         let movie = build_feed_dupe_key(b"", b"", b"", b"", 0, 0, 0, 28369634, 0, 0, b"", b"");
         assert_eq!(movie, b"imdb=28369634");
 
-        let ep_no_series = build_feed_dupe_key(
-            b"", b"", b"", b"", 0, 0, 0, 28369634, 2, 69, b"S02", b"E69",
-        );
+        let ep_no_series =
+            build_feed_dupe_key(b"", b"", b"", b"", 0, 0, 0, 28369634, 2, 69, b"S02", b"E69");
         assert_eq!(ep_no_series, b"imdb=28369634");
 
         // Series identifier priority: series > rageid > tvdbid > tvmazeid
@@ -3046,9 +3016,7 @@ mod tests {
             b"tvdbid=439270-S02-E69"
         );
         assert_eq!(
-            build_feed_dupe_key(
-                b"", b"", b"", b"", 0, 0, 123456, 28369634, 2, 69, b"S02", b"E69"
-            ),
+            build_feed_dupe_key(b"", b"", b"", b"", 0, 0, 123456, 28369634, 2, 69, b"S02", b"E69"),
             b"tvmazeid=123456-S02-E69"
         );
         assert_eq!(
@@ -3104,15 +3072,51 @@ mod tests {
 
         // ApplyCategoryOverridesTest + ApplyCategoryFeedFileSourceTest + ApplyCategoryNzbFileSourceTest + ApplyCategoryAutoSourceTest
         for (feed_cat, source, item_cat, add_cat, expected_cat) in [
-            (&b"FeedCategory"[..], 0, &b"ItemCategory"[..], &b"OverrideCategory"[..], &b"OverrideCategory"[..]),
-            (&b"FeedCategory"[..], 2, &b"ItemCategory"[..], &b""[..], &b"FeedCategory"[..]),
+            (
+                &b"FeedCategory"[..],
+                0,
+                &b"ItemCategory"[..],
+                &b"OverrideCategory"[..],
+                &b"OverrideCategory"[..],
+            ),
+            (
+                &b"FeedCategory"[..],
+                2,
+                &b"ItemCategory"[..],
+                &b""[..],
+                &b"FeedCategory"[..],
+            ),
             (&b""[..], 2, &b"ItemCategory"[..], &b""[..], &b""[..]),
             (&b"   "[..], 2, &b"   "[..], &b""[..], &b"   "[..]),
-            (&b"FeedCategory"[..], 1, &b"ItemCategory"[..], &b""[..], &b"FeedCategory"[..]),
-            (&b""[..], 1, &b"ItemCategory"[..], &b""[..], &b"ItemCategory"[..]),
+            (
+                &b"FeedCategory"[..],
+                1,
+                &b"ItemCategory"[..],
+                &b""[..],
+                &b"FeedCategory"[..],
+            ),
+            (
+                &b""[..],
+                1,
+                &b"ItemCategory"[..],
+                &b""[..],
+                &b"ItemCategory"[..],
+            ),
             (&b""[..], 1, &b""[..], &b""[..], &b""[..]),
-            (&b"FeedCategory"[..], 0, &b"ItemCategory"[..], &b""[..], &b"FeedCategory"[..]),
-            (&b""[..], 0, &b"ItemCategory"[..], &b""[..], &b"ItemCategory"[..]),
+            (
+                &b"FeedCategory"[..],
+                0,
+                &b"ItemCategory"[..],
+                &b""[..],
+                &b"FeedCategory"[..],
+            ),
+            (
+                &b""[..],
+                0,
+                &b"ItemCategory"[..],
+                &b""[..],
+                &b"ItemCategory"[..],
+            ),
             (&b""[..], 0, &b""[..], &b""[..], &b""[..]),
         ] {
             let f = FeedCreationInput {

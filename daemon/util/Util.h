@@ -484,7 +484,6 @@ public:
 	BString(BString&& other) noexcept { Set(other.m_data); }
 	BString& operator=(const char* str) { Set(str); return *this; }
 	int Length() const { return (int)strlen(m_data); }
-	int Capacity() const { return size - 1; }
 	bool Empty() const { return !*m_data; }
 	void Clear() { m_data[0] = '\0'; }
 	operator char*() const { return const_cast<char*>(m_data); }
@@ -773,14 +772,6 @@ public:
 		return result;
 	}
 
-	static CString FormatSize(int64 fileSize)
-	{
-		NzbgetRsBuf buf = nzbget_rs_format_size(fileSize);
-		CString result(buf.data, static_cast<int>(buf.len));
-		nzbget_rs_free(buf);
-		return result;
-	}
-
 	static const char* VersionRevision() { return VersionRevisionBuf; }
 	static inline char VersionRevisionBuf[100];
 
@@ -837,8 +828,6 @@ public:
 		return !strcmp(filename1 ? filename1 : "", filename2 ? filename2 : "");
 	}
 
-	static void NormalizePathSeparators(char* path) { nzbget_rs_normalize_path_separators(path); }
-
 	static bool LoadFileIntoBuffer(const char* filename, CharBuffer& buffer, bool addTrailingNull)
 	{
 		return nzbget_rs_fs_load_file_into_buffer(
@@ -869,19 +858,6 @@ public:
 			mkdir(dirFilename, S_IRWXU | S_IRWXG | S_IRWXO);
 		}
 		return DirectoryExists(dirFilename);
-	}
-
-	static bool ForceDirectories(const char* path, CString& errmsg)
-	{
-		NzbgetRsBuf msg{};
-		bool ok = nzbget_rs_force_directories(path, &msg) != 0;
-		errmsg.Clear();
-		if (!ok)
-		{
-			errmsg = msg.data;
-		}
-		nzbget_rs_free(msg);
-		return ok;
 	}
 
 	static std::optional<DiskState> GetDiskState(const char* path)
@@ -967,8 +943,6 @@ extern Options* g_Options;
 class Options
 {
 public:
-	enum EWriteLog { wlNone, wlAppend, wlReset, wlRotate };
-	enum EMessageTarget { mtNone, mtScreen, mtLog, mtBoth };
 	enum EOutputMode { omLoggable, omColored, omNCurses };
 	enum EParCheck { pcAuto, pcAlways, pcForce, pcManual };
 	enum EParScan { psLimited, psExtended, psFull, psDupe };
@@ -1073,32 +1047,23 @@ public:
 	const char* GetConfigFilename() const { return Str(0); }
 	bool GetConfigErrors() const { return m_configErrors; }
 	const char* GetAppDir() const { return Str(1); }
-	const char* GetMainDir() const { return Str(2); }
 	const char* GetDestDir() const { return Str(3); }
 	const char* GetInterDir() const { return Str(4); }
 	const char* GetTempDir() const { return Str(5); }
 	const char* GetQueueDir() const { return Str(6); }
 	const char* GetNzbDir() const { return Str(7); }
 	const char* GetWebDir() const { return Str(8); }
-	const char* GetConfigTemplate() const { return Str(9); }
 	const char* GetScriptDir() const { return Str(10); }
 	const char* GetRequiredDir() const { return Str(11); }
 	bool GetSystemHealthCheck() const { return m_scalars.system_health_check != 0; }
 	bool GetNzbLog() const { return m_scalars.nzb_log != 0; }
-	EMessageTarget GetInfoTarget() const { return (EMessageTarget)m_scalars.info_target; }
-	EMessageTarget GetWarningTarget() const { return (EMessageTarget)m_scalars.warning_target; }
-	EMessageTarget GetErrorTarget() const { return (EMessageTarget)m_scalars.error_target; }
-	EMessageTarget GetDebugTarget() const { return (EMessageTarget)m_scalars.debug_target; }
-	EMessageTarget GetDetailTarget() const { return (EMessageTarget)m_scalars.detail_target; }
 	int GetArticleTimeout() const { return m_scalars.article_timeout; }
-	int GetArticleReadChunkSize() const { return m_scalars.article_read_chunk_size; }
 	int GetUrlTimeout() const { return m_scalars.url_timeout; }
 	int GetRemoteTimeout() const { return m_scalars.remote_timeout; }
 	bool GetRawArticle() const { return m_scalars.raw_article != 0; }
 	bool GetSkipWrite() const { return m_scalars.skip_write != 0; }
 	bool GetAppendCategoryDir() const { return m_scalars.append_category_dir != 0; }
 	bool GetContinuePartial() const { return m_scalars.continue_partial != 0; }
-	int GetArticleRetries() const { return m_scalars.article_retries; }
 	int GetArticleInterval() const { return m_scalars.article_interval; }
 	int GetUrlRetries() const { return m_scalars.url_retries; }
 	int GetUrlInterval() const { return m_scalars.url_interval; }
@@ -1142,9 +1107,6 @@ public:
 	EOutputMode GetOutputMode() const { return (EOutputMode)m_scalars.output_mode; }
 	int GetUrlConnections() const { return m_scalars.url_connections; }
 	int GetLogBuffer() const { return m_scalars.log_buffer; }
-	EWriteLog GetWriteLog() const { return (EWriteLog)m_scalars.write_log; }
-	const char* GetLogFile() const { return Str(27); }
-	int GetRotateLog() const { return m_scalars.rotate_log; }
 	EParCheck GetParCheck() const { return (EParCheck)m_scalars.par_check; }
 	bool GetParRepair() const { return m_scalars.par_repair != 0; }
 	EParScan GetParScan() const { return (EParScan)m_scalars.par_scan; }
@@ -1162,7 +1124,6 @@ public:
 	bool GetCursesNzbName() const { return m_scalars.curses_nzb_name != 0; }
 	bool GetCursesTime() const { return m_scalars.curses_time != 0; }
 	bool GetCursesGroup() const { return m_scalars.curses_group != 0; }
-	bool GetCrcCheck() const { return m_scalars.crc_check != 0; }
 	bool GetDirectWrite() const { return m_scalars.direct_write != 0; }
 	int GetWriteBuffer() const { return m_scalars.write_buffer; }
 	int GetNzbDirInterval() const { return m_scalars.nzb_dir_interval; }
@@ -1196,12 +1157,7 @@ public:
 	int GetPropagationDelay() const { return m_scalars.propagation_delay; }
 	int GetArticleCache() const { return m_scalars.article_cache; }
 	int GetEventInterval() const { return m_scalars.event_interval; }
-	int GetMemoryPressureInterval() const { return m_scalars.memory_pressure_interval; }
-	const char* GetMemoryPressurePath() const { return Str(36); }
 	const char* GetShellOverride() const { const char* s = Str(40); return s ? s : ""; }
-	int GetMonthlyQuota() const { return m_scalars.monthly_quota; }
-	int GetQuotaStartDay() const { return m_scalars.quota_start_day; }
-	int GetDailyQuota() const { return m_scalars.daily_quota; }
 	bool GetDirectRename() const { return m_scalars.direct_rename != 0; }
 	bool GetHardLinking() const { return m_scalars.hard_linking != 0; }
 	const char* GetHardLinkingIgnoreExt() const { return Str(37); }
@@ -1209,17 +1165,14 @@ public:
 	EFileNaming GetFileNaming() const { return (EFileNaming)m_scalars.file_naming; }
 	int GetDownloadRate() const { return m_scalars.download_rate; }
 
-	void SetServerMode(bool serverMode) { m_serverMode = serverMode; }
-	bool GetServerMode() const { return m_serverMode; }
-	void SetDaemonMode(bool daemonMode) { m_daemonMode = daemonMode; }
-	bool GetDaemonMode() const { return m_daemonMode; }
-	void SetRemoteClientMode(bool remoteClientMode) { m_remoteClientMode = remoteClientMode; }
-	bool GetRemoteClientMode() const { return m_remoteClientMode; }
-	void SetDirectClientMode(bool directClientMode) { m_directClientMode = directClientMode; }
-	bool GetDirectClientMode() const { return m_directClientMode; }
-
-	const char* GetUnrarPath() const { const char* s = Str(38); return s ? s : ""; }
-	const char* GetSevenZipPath() const { const char* s = Str(39); return s ? s : ""; }
+	void SetServerMode(bool v) { Mode(0, true, v); }
+	bool GetServerMode() const { return Mode(0); }
+	void SetDaemonMode(bool v) { Mode(1, true, v); }
+	bool GetDaemonMode() const { return Mode(1); }
+	void SetRemoteClientMode(bool v) { Mode(2, true, v); }
+	bool GetRemoteClientMode() const { return Mode(2); }
+	void SetDirectClientMode(bool v) { Mode(3, true, v); }
+	bool GetDirectClientMode() const { return Mode(3); }
 
 private:
 	NzbgetRsOptions* m_rs = nullptr;
@@ -1227,12 +1180,13 @@ private:
 	NzbgetRsParsedOptions m_scalars{};
 	bool m_fatalError = false;
 	bool m_configErrors = false;
-	bool m_serverMode = false;
-	bool m_daemonMode = false;
-	bool m_remoteClientMode = false;
-	bool m_directClientMode = false;
 
 	const char* Str(int id) const { return nzbget_rs_options_str(m_rs, id); }
+	bool Mode(int idx, bool set = false, bool val = false) const
+	{
+		return nzbget_rs_options_query(
+			m_rs, 4, nullptr, idx | (set ? (0x10 | (val ? 0x20 : 0)) : 0), nullptr, nullptr, 0, nullptr) != 0;
+	}
 
 	void Init(const char* exeName, const char* configFilename, bool noConfig,
 		CmdOptList* commandLineOptions, bool noDiskAccess, Extender* extender)
@@ -1458,86 +1412,30 @@ protected:
 	virtual void ServiceWork() = 0;
 	void WakeUp();
 
-private:
-	time_t m_lastWork = 0;
-
 	friend class ServiceCoordinator;
 };
 
 class ServiceCoordinator : public Thread
 {
 public:
-	using ServiceList = std::vector<Service*>;
+	ServiceCoordinator() : m_rs(nzbget_rs_service_coord_new()) { debug("Creating ServiceCoordinator"); }
+	~ServiceCoordinator() override { debug("Destroying ServiceCoordinator"); nzbget_rs_service_coord_free(m_rs); }
 
-	ServiceCoordinator() { debug("Creating ServiceCoordinator"); }
-	~ServiceCoordinator() override { debug("Destroying ServiceCoordinator"); }
-
-	void Run() override
-	{
-		debug("Entering ServiceCoordinator-loop");
-
-		while (!IsStopped())
-		{
-			for (Service* service : m_services)
-			{
-				int serviceInterval = service->ServiceInterval();
-				if (serviceInterval >= Service::Now &&
-					std::abs(Util::CurrentTime() - service->m_lastWork) >= serviceInterval)
-				{
-					service->ServiceWork();
-					service->m_lastWork = Util::CurrentTime();
-				}
-			}
-
-			int waitInterval = 60 * 60 * 24;
-			time_t curTime = Util::CurrentTime();
-			for (Service* service : m_services)
-			{
-				int serviceInterval = service->ServiceInterval();
-				int remaining = Service::Sleep;
-				if (serviceInterval >= Service::Now)
-				{
-					int elapsed = static_cast<int>(curTime - service->m_lastWork);
-					remaining = std::min(serviceInterval, serviceInterval - elapsed);
-					waitInterval = std::min(waitInterval, remaining);
-				}
-				debug("serviceInterval: %i, remaining: %i", serviceInterval, remaining);
-			}
-
-			debug("Waiting in ServiceCoordinator: %i", waitInterval);
-			if (waitInterval > 0)
-			{
-				std::unique_lock<std::mutex> lk(m_waitMutex);
-				m_waitCond.wait_for(lk, std::chrono::milliseconds(waitInterval * 1000), [&] { return m_workenUp || IsStopped(); });
-				m_workenUp = false;
-			}
-		}
-
-		debug("Exiting ServiceCoordinator-loop");
-	}
-
-	void Stop() override
-	{
-		Thread::Stop();
-
-		std::lock_guard<std::mutex> guard(m_waitMutex);
-		m_waitCond.notify_all();
-	}
+	void Run() override { nzbget_rs_service_coord_ctl(m_rs, 3, this, &HostCb); }
+	void Stop() override { Thread::Stop(); nzbget_rs_service_coord_ctl(m_rs, 2, nullptr, nullptr); }
 
 private:
-	ServiceList m_services;
-	std::mutex m_waitMutex;
-	std::condition_variable m_waitCond;
-	bool m_workenUp = false;
+	NzbgetRsServiceCoord* m_rs = nullptr;
 
-	void RegisterService(Service* service) { m_services.push_back(service); }
+	void RegisterService(Service* service) { nzbget_rs_service_coord_ctl(m_rs, 0, service, nullptr); }
+	void WakeUp() { nzbget_rs_service_coord_ctl(m_rs, 1, nullptr, nullptr); }
 
-	void WakeUp()
+	static int HostCb(void* ctx, void* svc, int op)
 	{
-		debug("Waking up ServiceCoordinator");
-		std::lock_guard<std::mutex> guard(m_waitMutex);
-		m_workenUp = true;
-		m_waitCond.notify_all();
+		if (op == 0) return static_cast<ServiceCoordinator*>(ctx)->IsStopped() ? 1 : 0;
+		if (op == 1) return static_cast<Service*>(svc)->ServiceInterval();
+		static_cast<Service*>(svc)->ServiceWork();
+		return 0;
 	}
 
 	friend class Service;
@@ -1554,120 +1452,40 @@ inline void Service::WakeUp() { g_ServiceCoordinator->WakeUp(); }
 class WorkState final : public Subject
 {
 public:
-	void SetPauseDownload(bool pauseDownload) { m_pauseDownload = pauseDownload; Changed(); }
-	bool GetPauseDownload() const { return m_pauseDownload; }
-	void SetPausePostProcess(bool pausePostProcess) { m_pausePostProcess = pausePostProcess; Changed(); }
-	bool GetPausePostProcess() const { return m_pausePostProcess; }
-	void SetPauseScan(bool pauseScan) { m_pauseScan = pauseScan; Changed(); }
-	bool GetPauseScan() const { return m_pauseScan; }
-	void SetTempPauseDownload(bool tempPauseDownload) { m_tempPauseDownload = tempPauseDownload; Changed(); }
-	bool GetTempPauseDownload() const { return m_tempPauseDownload; }
-	void HoldDownloadForFleet(bool hold) { m_fleetHold += hold ? 1 : -1; Changed(); }
-	bool GetDownloadHeld() const { return m_tempPauseDownload || m_fleetHold > 0; }
-	void SetTempPausePostprocess(bool tempPausePostprocess) { m_tempPausePostprocess = tempPausePostprocess; Changed(); }
-	bool GetTempPausePostprocess() const { return m_tempPausePostprocess; }
-	bool GetPauseFrontend() const { return m_pauseFrontend; }
-	void SetSpeedLimit(int speedLimit) { m_speedLimit = speedLimit; Changed(); }
-	int GetSpeedLimit() const { return m_speedLimit; }
-	void SetResumeTime(time_t resumeTime) { m_resumeTime = resumeTime; Changed(); }
-	time_t GetResumeTime() const { return m_resumeTime; }
-	void SetLocalTimeOffset(int localTimeOffset) { m_localTimeOffset = localTimeOffset; Changed(); }
-	int GetLocalTimeOffset() { return m_localTimeOffset; }
-	void SetQuotaReached(bool quotaReached) { m_quotaReached = quotaReached; Changed(); }
-	bool GetQuotaReached() { return m_quotaReached; }
-	void SetDownloading(bool downloading) { m_downloading = downloading; Changed(); }
-	bool GetDownloading() { return m_downloading; }
+	WorkState() : m_rs(nzbget_rs_workstate_new(reinterpret_cast<uintptr_t>(this),
+		+[](uintptr_t c) { reinterpret_cast<WorkState*>(c)->Notify(nullptr); })) {}
+	~WorkState() { nzbget_rs_workstate_free(m_rs); }
+
+	void SetPauseDownload(bool v) { Ctl(0, 1, v ? 1 : 0); }
+	bool GetPauseDownload() const { return Ctl(0) != 0; }
+	void SetPausePostProcess(bool v) { Ctl(1, 1, v ? 1 : 0); }
+	bool GetPausePostProcess() const { return Ctl(1) != 0; }
+	void SetPauseScan(bool v) { Ctl(2, 1, v ? 1 : 0); }
+	bool GetPauseScan() const { return Ctl(2) != 0; }
+	void SetTempPauseDownload(bool v) { Ctl(3, 1, v ? 1 : 0); }
+	bool GetTempPauseDownload() const { return Ctl(3) != 0; }
+	void HoldDownloadForFleet(bool hold) { Ctl(4, 1, hold ? 1 : 0); }
+	bool GetDownloadHeld() const { return Ctl(4) != 0; }
+	void SetTempPausePostprocess(bool v) { Ctl(5, 1, v ? 1 : 0); }
+	bool GetTempPausePostprocess() const { return Ctl(5) != 0; }
+	bool GetPauseFrontend() const { return Ctl(6) != 0; }
+	void SetSpeedLimit(int v) { Ctl(7, 1, v); }
+	int GetSpeedLimit() const { return static_cast<int>(Ctl(7)); }
+	void SetResumeTime(time_t v) { Ctl(8, 1, static_cast<int64_t>(v)); }
+	time_t GetResumeTime() const { return static_cast<time_t>(Ctl(8)); }
+	void SetLocalTimeOffset(int v) { Ctl(9, 1, v); }
+	int GetLocalTimeOffset() { return static_cast<int>(Ctl(9)); }
+	void SetQuotaReached(bool v) { Ctl(10, 1, v ? 1 : 0); }
+	bool GetQuotaReached() { return Ctl(10) != 0; }
+	void SetDownloading(bool v) { Ctl(11, 1, v ? 1 : 0); }
+	bool GetDownloading() { return Ctl(11) != 0; }
 
 private:
-	std::atomic<time_t> m_resumeTime{0};
-	std::atomic<int> m_localTimeOffset{0};
-	std::atomic<int> m_speedLimit{0};
-	std::atomic<bool> m_tempPauseDownload{true};
-	std::atomic<int> m_fleetHold{0};
-	std::atomic<bool> m_tempPausePostprocess{true};
-	std::atomic<bool> m_pauseDownload{false};
-	std::atomic<bool> m_pausePostProcess{false};
-	std::atomic<bool> m_pauseScan{false};
-	std::atomic<bool> m_pauseFrontend{false};
-	std::atomic<bool> m_downloading{false};
-	std::atomic<bool> m_quotaReached{false};
-
-	void Changed() { Notify(nullptr); }
+	NzbgetRsWorkState* m_rs = nullptr;
+	int64_t Ctl(int id, int write = 0, int64_t val = 0) const { return nzbget_rs_workstate_ctl(m_rs, id, write, val); }
 };
 
 extern WorkState* g_WorkState;
-
-#endif
-
-#ifndef NEWSSERVER_H
-#define NEWSSERVER_H
-
-class NewsServer
-{
-public:
-	NewsServer(int id, bool active, const char* name, const char* host, int port, int ipVersion,
-		const char* user, const char* pass, bool joinGroup,
-		bool tls, const char* cipher, int maxConnections, int retention,
-		int level, int group, bool optional, unsigned int certVerificationfLevel) :
-		m_id(id), m_active(active), m_name(name), m_host(host ? host : ""), m_port(port), m_ipVersion(ipVersion),
-		m_user(user ? user : ""), m_password(pass ? pass : ""), m_joinGroup(joinGroup), m_tls(tls),
-		m_cipher(cipher ? cipher : ""), m_maxConnections(maxConnections), m_retention(retention),
-		m_level(level), m_normLevel(level), m_group(group), m_optional(optional), m_certVerificationfLevel(certVerificationfLevel)
-	{
-		if (m_name.Empty())
-		{
-			m_name.Format("Server%i", id);
-		}
-	}
-	int GetId() const { return m_id; }
-	int GetStateId() const { return m_stateId; }
-	void SetStateId(int stateId) { m_stateId = stateId; }
-	bool GetActive() const { return m_active; }
-	void SetActive(bool active) { m_active = active; }
-	const char* GetName() const { return m_name; }
-	int GetGroup() const { return m_group; }
-	const char* GetHost() const { return m_host; }
-	int GetPort() const { return m_port; }
-	int GetIpVersion() const { return m_ipVersion; }
-	const char* GetUser() const { return m_user; }
-	const char* GetPassword() const { return m_password; }
-	int GetMaxConnections() const { return m_maxConnections; }
-	int GetLevel() const { return m_level; }
-	int GetNormLevel() const { return m_normLevel; }
-	void SetNormLevel(int level) { m_normLevel = level; }
-	bool GetJoinGroup() const { return m_joinGroup; }
-	bool GetTls() const { return m_tls; }
-	const char* GetCipher() const { return m_cipher; }
-	int GetRetention() const { return m_retention; }
-	bool GetOptional() const { return m_optional; }
-	time_t GetBlockTime() const { return m_blockTime; }
-	void SetBlockTime(time_t blockTime) { m_blockTime = blockTime; }
-	unsigned int GetCertVerificationLevel() const { return m_certVerificationfLevel; }
-
-private:
-	int m_id;
-	int m_stateId = 0;
-	bool m_active;
-	CString m_name;
-	CString m_host;
-	int m_port;
-	int m_ipVersion;
-	CString m_user;
-	CString m_password;
-	bool m_joinGroup;
-	bool m_tls;
-	CString m_cipher;
-	int m_maxConnections;
-	int m_retention;
-	int m_level;
-	int m_normLevel;
-	int m_group;
-	bool m_optional = false;
-	time_t m_blockTime = 0;
-	unsigned int m_certVerificationfLevel;
-};
-
-typedef std::vector<std::unique_ptr<NewsServer>> Servers;
 
 #endif
 
@@ -1677,112 +1495,13 @@ typedef std::vector<std::unique_ptr<NewsServer>> Servers;
 class ScriptConfig
 {
 public:
-
-	class ConfigTemplate
-	{
-	public:
-		ConfigTemplate(const char* templ)
-			: m_template(templ) {}
-		const char* GetTemplate() { return m_template; }
-
-	private:
-		CString m_template;
-	};
-
-	using ConfigTemplates = std::deque<ConfigTemplate>;
-
-	void InitOptions()
-	{
-		InitConfigTemplates();
-	}
-
-	enum class CipherCommit { Saved, Unchanged, Conflict, Cancelled, Failed };
-
-	bool ReadCipherSnapshot(std::string& bytes)
-	{
-		if (!g_Options || !g_Options->GetConfigFilename())
-		{
-			return false;
-		}
-		NzbgetRsBuf buf{};
-		if (!nzbget_rs_script_config_read_cipher_snapshot(g_Options->GetConfigFilename(), &buf))
-		{
-			return false;
-		}
-		bytes.assign(buf.data ? buf.data : "", buf.len);
-		nzbget_rs_free(buf);
-		return true;
-	}
-
-	CipherCommit CommitCipherPatch(std::string_view expected, std::string_view replacement, const std::function<bool()>& cancel)
-	{
-		if (!g_Options || !g_Options->GetConfigFilename())
-		{
-			return CipherCommit::Failed;
-		}
-		int res = nzbget_rs_script_config_commit_cipher_patch(
-			g_Options->GetConfigFilename(),
-			expected.data(),
-			expected.size(),
-			replacement.data(),
-			replacement.size(),
-			const_cast<std::function<bool()>*>(&cancel),
-			[](void* ctx) -> int
-			{
-				try
-				{
-					const auto* fn = static_cast<const std::function<bool()>*>(ctx);
-					return (*fn)() ? 1 : 0;
-				}
-				catch (...)
-				{
-					return 1;
-				}
-			},
-			[](void*)
-			{
-				try
-				{
-					warn("TLS cipher settings were replaced, but the configuration directory could not be synchronized");
-				}
-				catch (...)
-				{
-				}
-			});
-		switch (res)
-		{
-			case 0: return CipherCommit::Saved;
-			case 1: return CipherCommit::Unchanged;
-			case 2: return CipherCommit::Conflict;
-			case 3: return CipherCommit::Cancelled;
-			default: return CipherCommit::Failed;
-		}
-	}
-
-	bool LoadConfigTemplates(ConfigTemplates* configTemplates)
-	{
-		CharBuffer buffer;
-		if (!FileSystem::LoadFileIntoBuffer(g_Options->GetConfigTemplate(), buffer, true))
-		{
-			return false;
-		}
-		configTemplates->emplace_back(ConfigTemplate(buffer));
-
-		return true;
-	}
-
-	ConfigTemplates* GetConfigTemplates() { return &m_configTemplates; }
+	ScriptConfig() : m_rs(nzbget_rs_script_config_new()) {}
+	~ScriptConfig() { nzbget_rs_script_config_free(m_rs); }
+	const NzbgetRsScriptConfig* RsHandle() const { return m_rs; }
+	void InitOptions() { nzbget_rs_script_config_exec(m_rs, 0, 0, nullptr, 0, nullptr, 0, nullptr, nullptr, nullptr, nullptr); }
 
 private:
-	ConfigTemplates m_configTemplates;
-
-	void InitConfigTemplates()
-	{
-		if (!LoadConfigTemplates(&m_configTemplates))
-		{
-			error("Could not read configuration templates");
-		}
-	}
+	NzbgetRsScriptConfig* m_rs = nullptr;
 };
 
 extern ScriptConfig* g_ScriptConfig;
@@ -2274,30 +1993,8 @@ private:
 class Connection
 {
 public:
-	enum EStatus
-	{
-		csConnected,
-		csDisconnected,
-		csListening,
-		csCancelled,
-		csBroken
-	};
-
-	enum EIPVersion
-	{
-		ipAuto = 0,
-		ipV4 = 4,
-		ipV6 = 6
-	};
-
 	static void Init() { debug("Initializing global connection data"); }
 	static void Final() {}
-
-	Connection(const char* host, int port, bool tls, bool registerCancel = true) :
-		m_rs(nzbget_rs_conn_new(host ? host : "", port, tls ? 1 : 0, registerCancel ? 1 : 0, RsDbg(), this, &HostCb)) {}
-
-	Connection(SOCKET socket, bool tls) :
-		m_rs(nzbget_rs_conn_from_fd(socket, tls ? 1 : 0, 60, RsDbg(), this, &HostCb)) {}
 
 	explicit Connection(NzbgetRsConn* rs) : m_rs(rs)
 	{
@@ -2307,57 +2004,15 @@ public:
 	virtual ~Connection() { nzbget_rs_conn_free(m_rs); }
 
 	NzbgetRsConn* Handle() const { return m_rs; }
-	void SetSuppressErrors(bool s) { Ctl(5, s ? 1 : 0); }
-	virtual bool Connect() { return Ctl(0) != 0; }
 	virtual bool Disconnect() { return Ctl(1) != 0; }
-	bool Bind() { return Ctl(2) != 0; }
-	int WriteLine(const char* buffer) { return nzbget_rs_conn_io(m_rs, 0, const_cast<char*>(buffer), 0, nullptr); }
 	bool Send(const char* buffer, int size) { return nzbget_rs_conn_io(m_rs, 1, const_cast<char*>(buffer), size, nullptr) != 0; }
 	char* ReadLine(char* buffer, int size, int* bytesReadOut)
 	{
 		return nzbget_rs_conn_io(m_rs, 2, buffer, size, bytesReadOut) != 0 ? buffer : nullptr;
 	}
-	std::unique_ptr<Connection> Accept()
-	{
-		NzbgetRsConn* acc = nzbget_rs_conn_accept(m_rs);
-		return acc ? std::make_unique<Connection>(acc) : nullptr;
-	}
-	int TryRecv(char* buffer, int size) { return nzbget_rs_conn_io(m_rs, 4, buffer, size, nullptr); }
 	bool Recv(char* buffer, int size) { return nzbget_rs_conn_io(m_rs, 3, buffer, size, nullptr) != 0; }
-	const char* GetHost() const { return reinterpret_cast<const char*>(Ctl(19)); }
-	void SetCipher(const char* cipher) { nzbget_rs_conn_ctl(m_rs, 7, 0, 0, cipher, nullptr, nullptr, 0); }
-	void SetTimeout(int timeout) { Ctl(6, timeout); }
-	void SetResolvedAddresses(const std::vector<std::string>& addresses)
-	{
-		std::vector<const char*> ptrs;
-		ptrs.reserve(addresses.size());
-		for (const auto& s : addresses) ptrs.push_back(s.c_str());
-		nzbget_rs_conn_ctl(m_rs, 13, 0, 0, nullptr, nullptr, ptrs.empty() ? nullptr : ptrs.data(), ptrs.size());
-	}
-	void SetDeadline(std::shared_ptr<const SocketDeadline> deadline)
-	{
-		m_deadline = std::move(deadline);
-		nzbget_rs_conn_ctl(m_rs, 12, 0, m_deadline ? reinterpret_cast<uintptr_t>(&m_deadline) : 0, nullptr, nullptr, nullptr, 0);
-	}
-#ifndef DISABLE_TLS
-	const char* GetNegotiatedCipher() const { return reinterpret_cast<const char*>(Ctl(21)); }
-	int GetNegotiatedVersion() const { return static_cast<int>(Ctl(18)); }
-	int GetTlsProbeFailure() const { return static_cast<int>(Ctl(17)); }
-	void SetCertVerifLevel(unsigned int level) { Ctl(9, static_cast<int>(level)); }
-	bool StartTls(bool isClient, const char* certFile, const char* keyFile)
-	{
-		return nzbget_rs_conn_ctl(m_rs, 4, isClient ? 1 : 0, 0, certFile, keyFile, nullptr, 0) != 0;
-	}
-#endif
-	void SetIPVersion(EIPVersion ipVersion) { Ctl(8, static_cast<int>(ipVersion)); }
-	EStatus GetStatus() { return static_cast<EStatus>(Ctl(14)); }
-	bool GetAcceptBusy() { return Ctl(15) != 0; }
-	void SetBroken() { Ctl(11); }
-	void SetGracefull(bool gracefull) { Ctl(10, gracefull ? 1 : 0); }
 	const char* GetRemoteAddr() { return reinterpret_cast<const char*>(Ctl(20)); }
-	int FetchTotalBytesRead() { return static_cast<int>(Ctl(16)); }
 	void Cancel() { Ctl(3); }
-	void ReadBuffer(char** buffer, int* bufLen) { nzbget_rs_conn_io(m_rs, 5, reinterpret_cast<char*>(buffer), 0, bufLen); }
 
 	static int RsDbg()
 	{
@@ -2426,7 +2081,6 @@ public:
 	}
 
 protected:
-	std::shared_ptr<const SocketDeadline> m_deadline;
 	NzbgetRsConn* m_rs = nullptr;
 
 	intptr_t Ctl(int op, int a1 = 0) const
@@ -2540,7 +2194,6 @@ public:
 		nzbget_rs_webdl_ctl(m_rs, 5, 0, nullptr, &t, nullptr);
 		return static_cast<time_t>(t);
 	}
-	void SetLastUpdateTimeNow() { nzbget_rs_webdl_ctl(m_rs, 6, 0, nullptr, nullptr, nullptr); }
 	int GetHttpStatus() const { return static_cast<int>(nzbget_rs_webdl_ctl(m_rs, 4, 0, nullptr, nullptr, nullptr)); }
 	const char* GetOriginalFilename()
 	{
@@ -4461,11 +4114,10 @@ public:
 		return nzbget_rs_diskstate_exec(15, &env) != 0;
 	}
 
-	bool LoadDownloadQueue(DownloadQueue* downloadQueue, Servers* servers)
+	bool LoadDownloadQueue(DownloadQueue* downloadQueue)
 	{
 		ExecCtx ctx;
 		ctx.queue = downloadQueue;
-		ctx.servers = servers;
 		NzbgetRsDiskStateEnv env = MakeEnv(&ctx);
 		int legacy = 0;
 		env.out_flag = &legacy;
@@ -4519,11 +4171,10 @@ public:
 		return nzbget_rs_diskstate_exec(13, &env) != 0;
 	}
 
-	bool LoadFileState(FileInfo* fileInfo, Servers* servers, bool completed)
+	bool LoadFileState(FileInfo* fileInfo, bool completed)
 	{
 		ExecCtx ctx;
 		ctx.targetFile = fileInfo;
-		ctx.servers = servers;
 		NzbgetRsDiskStateEnv env = MakeEnv(&ctx);
 		env.a1 = completed ? 2 : 1;
 		return nzbget_rs_diskstate_exec(14, &env) != 0;
@@ -4593,20 +4244,6 @@ public:
 		return nzbget_rs_diskstate_exec(15, &env) != 0;
 	}
 
-	void WriteCacheFlag()
-	{
-		ExecCtx ctx;
-		NzbgetRsDiskStateEnv env = MakeEnv(&ctx);
-		nzbget_rs_diskstate_exec(4, &env);
-	}
-
-	void DeleteCacheFlag()
-	{
-		ExecCtx ctx;
-		NzbgetRsDiskStateEnv env = MakeEnv(&ctx);
-		nzbget_rs_diskstate_exec(3, &env);
-	}
-
 	void AppendNzbMessage(int nzbId, Message::EKind kind, const char* text)
 	{
 		time_t tm = Util::CurrentTime();
@@ -4638,7 +4275,6 @@ private:
 	struct ExecCtx
 	{
 		DownloadQueue* queue = nullptr;
-		Servers* servers = nullptr;
 		MessageList* messages = nullptr;
 		FileInfo* targetFile = nullptr;
 		NzbInfo* targetNzb = nullptr;
@@ -4651,20 +4287,7 @@ private:
 		int64 snapFailedSize = 0;
 	};
 
-	static void ApplyServerStats(ServerStatList* list, Servers* servers, const NzbgetRsDiskServerStat* stats, size_t len)
-	{
-		if (!servers) return;
-		for (size_t i = 0; i < len; i++)
-		{
-			for (NewsServer* ns : servers)
-			{
-				if (ns->GetStateId() == stats[i].server_id)
-				{
-					list->StatOp(ns->GetId(), stats[i].success_articles, stats[i].failed_articles, ServerStatList::soSet);
-				}
-			}
-		}
-	}
+	static void ApplyServerStats(ServerStatList* list, const NzbgetRsDiskServerStat* stats, size_t len);
 
 	static void LogCb(void*, int level, const char* msg)
 	{
@@ -5150,7 +4773,7 @@ private:
 		for (size_t i = 0; i < paramsLen; i++) n->GetParameters()->SetParameter(params[i].name, params[i].value);
 		n->GetScriptStatuses()->clear();
 		for (size_t i = 0; i < scriptsLen; i++) n->GetScriptStatuses()->emplace_back(scripts[i].name, (ScriptStatus::EStatus)scripts[i].status);
-		ApplyServerStats(n->GetServerStats(), c->servers, stats, statsLen);
+		ApplyServerStats(n->GetServerStats(), stats, statsLen);
 		n->GetCurrentServerStats()->ListOp(n->GetServerStats(), ServerStatList::soSet);
 		n->GetFileList()->clear();
 		for (size_t i = 0; i < filesLen; i++)
@@ -5329,7 +4952,7 @@ private:
 				f->SetParFile((bool)fstate->par_file);
 			}
 			if (idxOrFlags & 8) f->SetParSetId(*fstate->par_set_id ? fstate->par_set_id : nullptr);
-			ApplyServerStats(f->GetServerStats(), c->servers, stats, statsLen);
+			ApplyServerStats(f->GetServerStats(), stats, statsLen);
 			f->SetCompletedArticles(extraI32);
 			if (idxOrFlags & 16) f->SetOutputInitialized((bool)fstate->output_initialized);
 			if (strArg) f->SetOutputFilename(strArg);
@@ -5339,7 +4962,7 @@ private:
 
 	static void AuxCb(void* rawCtx, int op, int, int, uint32_t, const char*, const char*,
 		const void*, void* sinkCtx,
-		void (*sinkFn)(void*, int, int, int, uint32_t, const char*, const NzbgetRsServerMatchItem*, size_t, const void*, size_t))
+		void (*sinkFn)(void*, int, int, int, uint32_t, const char*, const void*, size_t, const void*, size_t))
 	{
 		if (op != 0) return;
 		auto* c = static_cast<ExecCtx*>(rawCtx);
@@ -5462,180 +5085,55 @@ inline void NzbInfo::AddMessage(Message::EKind kind, const char * text, bool pri
 #ifndef SERVERPOOL_H
 #define SERVERPOOL_H
 
-#ifndef NNTPCONNECTION_H
-#define NNTPCONNECTION_H
-
-class NntpConnection : public Connection
-{
-public:
-	NntpConnection(NewsServer* newsServer, bool registerCancel = true) :
-		Connection(newsServer->GetHost(), newsServer->GetPort(), newsServer->GetTls(), registerCancel), m_newsServer(newsServer)
-	{
-		SetCipher(newsServer->GetCipher());
-		SetIPVersion(newsServer->GetIpVersion() == 4 ? Connection::ipV4 :
-			(newsServer->GetIpVersion() == 6 ? Connection::ipV6 : Connection::ipAuto));
-#ifndef DISABLE_TLS
-		SetCertVerifLevel(newsServer->GetCertVerificationLevel());
-#endif
-	}
-
-	virtual bool Connect() override { return CallNntp(0, nullptr) != nullptr; }
-	virtual bool Disconnect() override { return CallNntp(1, nullptr) != nullptr; }
-	NewsServer* GetNewsServer() { return m_newsServer; }
-	const char* Request(const char* req) { return CallNntp(2, req); }
-	const char* JoinGroup(const char* grp) { return CallNntp(3, grp); }
-	bool GetAuthError() { return CallNntp(4, nullptr) != nullptr; }
-	// the server refused the login for good (502), not for now (481: too many connections)
-	bool GetAuthRejected() { return CallNntp(5, nullptr) != nullptr; }
-
-private:
-	NewsServer* m_newsServer;
-
-	const char* CallNntp(int op, const char* arg)
-	{
-		return nzbget_rs_conn_nntp(m_rs, op, arg,
-			m_newsServer->GetUser(), m_newsServer->GetPassword(),
-			m_newsServer->GetName(), m_newsServer->GetHost());
-	}
-};
-
-#endif
-
 inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
 	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
 
 class ServerPool : public Debuggable
 {
 public:
-	typedef std::vector<NewsServer*> RawServerList;
+	ServerPool() : m_rs(nzbget_rs_serverpool_new(&Connection::HostCb)) {}
+	~ServerPool() override { nzbget_rs_serverpool_free(m_rs); }
+	const NzbgetRsServerPool* RsHandle() const { return m_rs; }
 
-	void SetTimeout(int timeout) { m_timeout = timeout; }
-	void SetRetryInterval(int retryInterval) { m_retryInterval = retryInterval; }
-
-	void AddServer(std::unique_ptr<NewsServer> newsServer)
+	void AddServer(int id, bool active, const char* name, const char* host, int port, int ipVersion,
+		const char* user, const char* pass, bool joinGroup, bool tls, const char* cipher,
+		int maxConnections, int retention, int level, int group, bool optional, unsigned int certVerifLevel)
 	{
-		debug("Adding server to ServerPool");
-
-		m_servers.push_back(std::move(newsServer));
-		m_sortedServers.push_back(m_servers.back().get());
+		nzbget_rs_serverpool_add(m_rs, id, active ? 1 : 0, name, host, port, ipVersion,
+			user, pass, joinGroup ? 1 : 0, tls ? 1 : 0, cipher, maxConnections, retention,
+			level, group, optional ? 1 : 0, certVerifLevel);
 	}
 
-	void InitConnections()
-	{
-		debug("Initializing connections in ServerPool");
-		Guard guard(m_connectionsMutex);
-		nzbget_rs_article_dl_exec(nullptr, 120, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, nullptr);
-	}
-
-	int GetMaxNormLevel() { return m_maxNormLevel; }
-	Servers* GetServers() { return &m_servers; }
-
-	NewsServer* GetServerById(int id)
-	{
-		auto serverIt = std::find_if(
-			begin(m_servers),
-			end(m_servers),
-			[&](const std::unique_ptr<NewsServer>& server)
-			{
-				return server->GetId() == id;
-			}
-		);
-
-		if (serverIt != end(m_servers))
-		{
-			return serverIt->get();
-		}
-
-		return nullptr;
-	}
-
-	NntpConnection* GetConnection(int level, NewsServer* wantServer, RawServerList* ignoreServers)
-	{
-		Guard guard(m_connectionsMutex);
-		return reinterpret_cast<NntpConnection*>(nzbget_rs_article_dl_exec(
-			nullptr, 121, level, 0, reinterpret_cast<uintptr_t>(wantServer),
-			reinterpret_cast<uintptr_t>(ignoreServers), nullptr, NzbgetCArticleDlHost, nullptr));
-	}
-
-	void FreeConnection(NntpConnection* connection, bool used)
-	{
-		if (used)
-		{
-			debug("Freeing used connection");
-		}
-		Guard guard(m_connectionsMutex);
-		nzbget_rs_article_dl_exec(nullptr, 122, 0, 0, reinterpret_cast<uintptr_t>(connection),
-			used ? 1 : 0, nullptr, NzbgetCArticleDlHost, nullptr);
-	}
-
-	void CloseUnusedConnections()
-	{
-		Guard guard(m_connectionsMutex);
-		nzbget_rs_article_dl_exec(nullptr, 123, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, nullptr);
-	}
-
-	void Changed()
-	{
-		debug("Server config has been changed");
-
-		InitConnections();
-		CloseUnusedConnections();
-	}
-
-	int GetGeneration() { return m_generation; }
-
-	void BlockServer(NewsServer* newsServer)
-	{
-		nzbget_rs_article_dl_exec(nullptr, 124, 0, 0, reinterpret_cast<uintptr_t>(newsServer),
-			0, nullptr, NzbgetCArticleDlHost, nullptr);
-	}
-
-	bool IsServerBlocked(NewsServer* newsServer)
-	{
-		return nzbget_rs_article_dl_exec(nullptr, 125, m_retryInterval, 0,
-			(uintptr_t)(int64)newsServer->GetBlockTime(), (uintptr_t)(int64)Util::CurrentTime(),
-			nullptr, nullptr, nullptr) != 0;
-	}
+	void SetTimeout(int timeout) { nzbget_rs_serverpool_ctl(m_rs, 0, timeout, 0, 0, 0); }
+	void SetRetryInterval(int retryInterval) { nzbget_rs_serverpool_ctl(m_rs, 1, retryInterval, 0, 0, 0); }
+	void InitConnections() { nzbget_rs_serverpool_ctl(m_rs, 2, 0, 0, 0, 0); }
+	void CloseUnusedConnections() { nzbget_rs_serverpool_ctl(m_rs, 3, 0, 0, 0, 0); }
+	void Changed() { nzbget_rs_serverpool_ctl(m_rs, 4, 0, 0, 0, 0); }
+	int PrimaryConnections() const { return static_cast<int>(nzbget_rs_serverpool_ctl(m_rs, 6, 0, 0, 0, 0)); }
+	size_t ServerCount() const { return static_cast<size_t>(nzbget_rs_serverpool_ctl(m_rs, 9, 0, 0, 0, 0)); }
 
 protected:
-	virtual void LogDebugInfo()
-	{
-		Guard guard(m_connectionsMutex);
-		nzbget_rs_article_dl_exec(nullptr, 126, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, nullptr);
-	}
+	void LogDebugInfo() override { nzbget_rs_serverpool_ctl(m_rs, 5, 0, 0, 0, 0); }
 
 private:
-	class PooledConnection : public NntpConnection
-	{
-	public:
-		explicit PooledConnection(NewsServer* newsServer) : NntpConnection(newsServer, false) {}
-		bool GetInUse() { return m_inUse; }
-		void SetInUse(bool inUse) { m_inUse = inUse; }
-		time_t GetFreeTime() { return m_freeTime; }
-		void SetFreeTimeNow() { m_freeTime = Util::CurrentTime(); }
-	private:
-		bool m_inUse = false;
-		time_t m_freeTime = 0;
-	};
-
-	typedef std::vector<int> Levels;
-	typedef std::vector<std::unique_ptr<PooledConnection>> Connections;
-
-	Servers m_servers;
-	RawServerList m_sortedServers;
-	Connections m_connections;
-	Levels m_levels;
-	int m_maxNormLevel = 0;
-	Mutex m_connectionsMutex;
-	int m_timeout = 60;
-	int m_retryInterval = 0;
-	int m_generation = 0;
-
-	friend uintptr_t NzbgetCArticleDlHost(void*, int, int, int, uintptr_t, uintptr_t,
-		const char*, const char*, int*, int64_t*, const char**);
+	NzbgetRsServerPool* m_rs = nullptr;
 };
 
 extern ServerPool* g_ServerPool;
+
+inline void DiskState::ApplyServerStats(ServerStatList* list, const NzbgetRsDiskServerStat* stats, size_t len)
+{
+	if (!g_ServerPool) return;
+	for (size_t i = 0; i < len; i++)
+	{
+		size_t cursor = 0;
+		while (int id = static_cast<int>(nzbget_rs_serverpool_ctl(
+			g_ServerPool->RsHandle(), 8, stats[i].server_id, 0, reinterpret_cast<uintptr_t>(&cursor), 0)))
+		{
+			list->StatOp(id, stats[i].success_articles, stats[i].failed_articles, ServerStatList::soSet);
+		}
+	}
+}
 
 #ifndef NZBGET_TLS_CIPHER_BACKEND_H
 #define NZBGET_TLS_CIPHER_BACKEND_H
@@ -5733,8 +5231,11 @@ namespace TlsCipherBackend
 		{
 			try
 			{
+				NzbgetRsBuf buf{};
+				if (!nzbget_rs_script_config_exec(nullptr, 1, 0, nullptr, 0, nullptr, 0, nullptr, nullptr, nullptr, &buf)) return 0;
 				auto& value = static_cast<Context*>(context)->snapshot;
-				if (!g_ScriptConfig->ReadCipherSnapshot(value)) return 0;
+				value.assign(buf.data ? buf.data : "", buf.len);
+				nzbget_rs_free(buf);
 				*data = reinterpret_cast<const unsigned char*>(value.data()); *length = value.size(); return 1;
 			}
 			catch (...) { return 0; }
@@ -5784,13 +5285,6 @@ namespace TlsCipherBackend
 		}
 		inline void FreeCrypto(void* context) noexcept { delete static_cast<Crypto*>(context); ERR_clear_error(); }
 
-		class ProbeConnection final : public NntpConnection
-		{
-		public:
-			explicit ProbeConnection(NewsServer* server) : NntpConnection(server) {}
-		protected:
-			void PrintError(const char*) override {}
-		};
 		inline int Probe(void*, const NzbgetTlsServer* server, const char* cipher, int protocol, const char* numeric,
 			uint64_t milliseconds, NzbgetTlsCancelled cancel, void* cancelContext) noexcept
 		{
@@ -5800,31 +5294,18 @@ namespace TlsCipherBackend
 				if (milliseconds == 0) return -3;
 				if (milliseconds > 10000) return -1;
 				if (server->verification && !TlsSocket::HasCertificateStore()) return -4;
-				auto deadline = std::make_shared<SocketDeadline>();
-				deadline->end = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
-				deadline->cancelled = [=] { return cancel(cancelContext) != 0; };
-				NewsServer value(server->id, true, "TLS cipher probe", server->host, server->port, server->ip_version,
-					server->username, server->password, false, true, cipher, 1, 0, 0, 0, false, server->verification);
-				ProbeConnection connection(&value);
-				std::vector<std::string> addresses;
-				std::string remaining(numeric);
-				for (size_t pos = 0; pos < remaining.size();)
-				{
-					size_t end = remaining.find('\n', pos);
-					addresses.push_back(remaining.substr(pos, end == std::string::npos ? end : end - pos));
-					if (end == std::string::npos) break; pos = end + 1;
-				}
-				if (addresses.empty() || addresses.size() > 16) return -2;
-				connection.SetResolvedAddresses(addresses); connection.SetDeadline(deadline);
-				connection.SetSuppressErrors(true); connection.SetTimeout(10);
-				bool connected = connection.Connect();
+				std::shared_ptr<const SocketDeadline> deadline = [&] {
+					auto d = std::make_shared<SocketDeadline>();
+					d->end = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+					d->cancelled = [=] { return cancel(cancelContext) != 0; };
+					return d;
+				}();
 				int expectedVer = protocol == 13 ? TLS1_3_VERSION : TLS1_2_VERSION;
-				int result = (connected && strcmp(connection.GetNegotiatedCipher(), cipher) == 0 &&
-					connection.GetNegotiatedVersion() == expectedVer) ? 1 :
-					connection.GetAuthError() ? -5 : connection.GetTlsProbeFailure();
+				int result = nzbget_rs_serverpool_probe_tls(server, cipher ? cipher : "", expectedVer,
+					numeric ? numeric : "", reinterpret_cast<uintptr_t>(&deadline), &Connection::HostCb);
+				if (result == -2) return -2;
 				if (cancel(cancelContext)) result = -6;
 				else if (std::chrono::steady_clock::now() >= deadline->end) result = -3;
-				connection.SetBroken(); connection.Disconnect();
 				return result;
 			}
 			catch (...) { ERR_clear_error(); return -1; }
@@ -5832,21 +5313,10 @@ namespace TlsCipherBackend
 		inline int Commit(void*, const unsigned char* original, size_t originalLength, const unsigned char* replacement, size_t replacementLength,
 			NzbgetTlsCancelled cancel, void* cancelContext) noexcept
 		{
-			try
-			{
-				auto result = g_ScriptConfig->CommitCipherPatch(
-					std::string_view(reinterpret_cast<const char*>(original), originalLength),
-					std::string_view(reinterpret_cast<const char*>(replacement), replacementLength), [=] { return cancel(cancelContext) != 0; });
-				switch (result)
-				{
-					case ScriptConfig::CipherCommit::Saved: return 1;
-					case ScriptConfig::CipherCommit::Unchanged: return 0;
-					case ScriptConfig::CipherCommit::Conflict: return -2;
-					case ScriptConfig::CipherCommit::Cancelled: return -3;
-					default: return -1;
-				}
-			}
-			catch (...) { return -1; }
+			return nzbget_rs_script_config_exec(nullptr, 2, 0,
+				reinterpret_cast<const char*>(original), originalLength,
+				reinterpret_cast<const char*>(replacement), replacementLength,
+				cancelContext, cancel, nullptr, nullptr);
 		}
 		inline void Destroy(void* context) noexcept { delete static_cast<Context*>(context); }
 		inline std::string Response(NzbgetRsBuf value)
@@ -5899,7 +5369,7 @@ public:
 	void Init()
 	{
 		int totalOffset = 0;
-		nzbget_rs_statmeter_ctl(m_rs, 0, (int)g_ServerPool->GetServers()->size(), 0, 0, 0, 0,
+		nzbget_rs_statmeter_ctl(m_rs, 0, (int)g_ServerPool->ServerCount(), 0, 0, 0, 0,
 			OptRs(), LogRs(), &totalOffset, nullptr);
 		g_WorkState->SetLocalTimeOffset(totalOffset);
 	}
@@ -5951,24 +5421,19 @@ public:
 	void Save()
 	{
 		if (!g_Options || !g_Options->GetServerMode()) return;
-		std::vector<NzbgetRsServerMatchItem> srvs = BuildServers();
 		nzbget_rs_statmeter_disk(
 			m_rs, 0, 1, g_WorkState->GetLocalTimeOffset(), OptRs(), LogRs(),
-			srvs.data(), srvs.size(), nullptr, nullptr);
+			g_ServerPool ? g_ServerPool->RsHandle() : nullptr, nullptr);
 	}
 
 	bool Load(bool* perfectServerMatch)
 	{
-		Servers* servers = g_ServerPool->GetServers();
-		std::vector<NzbgetRsServerMatchItem> srvs = BuildServers();
-		std::vector<int> stateIds(srvs.size(), -1);
 		int pm = (perfectServerMatch && *perfectServerMatch) ? 1 : 0;
 		bool ok = nzbget_rs_statmeter_disk(
 			m_rs, 1, g_Options ? (g_Options->GetServerMode() ? 1 : 0) : 0,
 			g_WorkState->GetLocalTimeOffset(), OptRs(), LogRs(),
-			srvs.data(), srvs.size(), stateIds.data(), perfectServerMatch ? &pm : nullptr) != 0;
-		for (size_t i = 0; i < srvs.size(); i++)
-			if (stateIds[i] >= 0) (*servers)[i]->SetStateId(stateIds[i]);
+			g_ServerPool ? g_ServerPool->RsHandle() : nullptr,
+			perfectServerMatch ? &pm : nullptr) != 0;
 		if (perfectServerMatch) *perfectServerMatch = pm != 0;
 		return ok;
 	}
@@ -5984,16 +5449,6 @@ private:
 
 	static const NzbgetRsOptions* OptRs() { return g_Options ? g_Options->RsHandle() : nullptr; }
 	static const NzbgetRsLog* LogRs() { return g_Log ? g_Log->RsHandle() : nullptr; }
-
-	static std::vector<NzbgetRsServerMatchItem> BuildServers()
-	{
-		Servers* servers = g_ServerPool->GetServers();
-		std::vector<NzbgetRsServerMatchItem> out;
-		out.reserve(servers->size());
-		for (NewsServer* ns : servers)
-			out.push_back({ ns->GetId(), ns->GetPort(), ns->GetName(), ns->GetHost(), ns->GetUser() });
-		return out;
-	}
 };
 
 extern StatMeter* g_StatMeter;
@@ -6011,15 +5466,24 @@ public:
 	CachedSegmentData(const CachedSegmentData&) = delete;
 	CachedSegmentData(CachedSegmentData&& other) :
 		m_data(other.m_data), m_size(other.m_size) { other.m_data = nullptr; other.m_size = 0; }
-	CachedSegmentData& operator=(CachedSegmentData&& other);
-	~CachedSegmentData() override;
+	CachedSegmentData& operator=(CachedSegmentData&& other)
+	{
+		if (m_size) nzbget_rs_article_dl_exec(nullptr, 112, m_size, 0, reinterpret_cast<uintptr_t>(m_data), 0, nullptr, nullptr, nullptr);
+		m_data = other.m_data;
+		m_size = other.m_size;
+		other.m_data = nullptr;
+		other.m_size = 0;
+		return *this;
+	}
+	~CachedSegmentData() override
+	{
+		if (m_size) nzbget_rs_article_dl_exec(nullptr, 112, m_size, 0, reinterpret_cast<uintptr_t>(m_data), 0, nullptr, nullptr, nullptr);
+	}
 	char* GetData() override { return m_data; }
 
 private:
 	char* m_data = nullptr;
 	int m_size = 0;
-
-	friend class ArticleCache;
 };
 
 class ArticleCache;
@@ -6028,152 +5492,39 @@ extern ArticleCache* g_ArticleCache;
 class ArticleCache final : public Thread
 {
 public:
-	void Run() override;
-
-	void Stop() override
-	{
-		Thread::Stop();
-
-		// Resume Run() to exit it
-		std::lock_guard<std::mutex> guard(m_allocMutex);
-		m_allocCond.notify_all();
-	}
-
-	CachedSegmentData Alloc(int size);
-
-	bool Realloc(CachedSegmentData* segment, int newSize)
-	{
-		std::lock_guard<std::mutex> guard(m_allocMutex);
-
-		void* p = realloc(segment->m_data, newSize);
-		if (p)
-		{
-			m_allocated += newSize - segment->m_size;
-			segment->m_size = newSize;
-			segment->m_data = (char*)p;
-		}
-
-		return p;
-	}
-
-	void Free(CachedSegmentData* segment)
-	{
-		if (segment->m_size)
-		{
-			free(segment->m_data);
-
-			std::lock_guard<std::mutex> guard(m_allocMutex);
-			size_t sub = segment->m_size > 0 ? (size_t)segment->m_size : 0;
-			m_allocated = m_allocated >= sub ? (m_allocated - sub) : 0;
-			if (m_allocated == 0 && g_Options->GetServerMode() && g_Options->GetContinuePartial())
-			{
-				g_DiskState->DeleteCacheFlag();
-			}
-		}
-	}
-
-	void LockFlush()
-	{
-		m_flushMutex.Lock();
-		m_flushing.store(true, std::memory_order_release);
-	}
-
-	void UnlockFlush()
-	{
-		m_flushing.store(false, std::memory_order_release);
-		m_flushMutex.Unlock();
-	}
-
+	void Run() override { nzbget_rs_article_dl_exec(nullptr, 110, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, this); }
+	void Stop() override { Thread::Stop(); nzbget_rs_article_dl_exec(nullptr, 113, 0, 0, 0, 0, nullptr, nullptr, nullptr); }
 	Guard GuardContent() { return Guard(m_contentMutex); }
-	bool GetFlushing() { return m_flushing.load(std::memory_order_acquire); }
-	size_t GetAllocated() { return m_allocated; }
-	bool FileBusy(FileInfo* fileInfo) { return fileInfo == m_fileInfo; }
-	void WakeupFlush()
-	{
-		std::lock_guard<std::mutex> guard(m_allocMutex);
-		m_allocCond.notify_all();
-	}
+	size_t GetAllocated() { return nzbget_rs_article_dl_exec(nullptr, 114, 0, 0, 0, 0, nullptr, nullptr, nullptr); }
 
 private:
-	std::atomic<size_t> m_allocated{0};
-	FileInfo* m_fileInfo = nullptr;
-	std::mutex m_allocMutex;
-	std::condition_variable m_allocCond;
-	Mutex m_flushMutex;
 	Mutex m_contentMutex;
-	std::atomic<bool> m_flushing{false};
 	std::vector<ArticleInfo*> m_flushArticles;
 
-	size_t GetEffectiveLimit() const;
 	friend uintptr_t NzbgetCArticleDlHost(void*, int, int, int, uintptr_t, uintptr_t,
 		const char*, const char*, int*, int64_t*, const char**);
 };
 
-inline CachedSegmentData::~CachedSegmentData()
-{
-	if (g_ArticleCache)
-	{
-		g_ArticleCache->Free(this);
-	}
-}
-
-inline CachedSegmentData& CachedSegmentData::operator=(CachedSegmentData&& other)
-{
-	if (g_ArticleCache)
-	{
-		g_ArticleCache->Free(this);
-	}
-	m_data = other.m_data;
-	m_size = other.m_size;
-	other.m_data = nullptr;
-	other.m_size = 0;
-	return *this;
-}
-
 class MemoryMonitor final : public Thread
 {
 public:
-	MemoryMonitor()
-	{
-		nzbget_rs_article_dl_exec(nullptr, 100, 1, 0, 0, 0, nullptr, NzbgetCArticleDlHost, this);
-	}
+	MemoryMonitor() { nzbget_rs_article_dl_exec(nullptr, 100, 1, 0, 0, 0, nullptr, nullptr, nullptr); }
 
 	~MemoryMonitor() override
 	{
-		if (IsRunning())
-		{
-			Stop();
-		}
-		while (IsRunning())
-		{
-			Util::Sleep(10);
-		}
+		if (IsRunning()) Stop();
+		while (IsRunning()) Util::Sleep(10);
+		nzbget_rs_article_dl_exec(nullptr, 107, 0, 0, 0, 0, nullptr, nullptr, nullptr);
 	}
 
-	void InitOptions()
-	{
-		nzbget_rs_article_dl_exec(nullptr, 100, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, this);
-	}
-
-	void Run() override
-	{
-		nzbget_rs_article_dl_exec(nullptr, 101, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, this);
-	}
-
-	void Stop() override
-	{
-		Thread::Stop();
-	}
+	void InitOptions() { nzbget_rs_article_dl_exec(nullptr, 100, 0, 0, 0, 0, nullptr, nullptr, nullptr); }
+	void Run() override { nzbget_rs_article_dl_exec(nullptr, 101, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, this); }
+	void Stop() override { Thread::Stop(); }
 
 	int GetTier() const { return (int)nzbget_rs_article_dl_exec(nullptr, 102, 0, 0, 0, 0, nullptr, nullptr, nullptr); }
 	const char* GetTierName() const
 	{
 		return reinterpret_cast<const char*>(nzbget_rs_article_dl_exec(nullptr, 103, 0, 0, 0, 0, nullptr, nullptr, nullptr));
-	}
-
-	size_t GetEffectiveArticleCacheBytes() const
-	{
-		return (size_t)std::max(0, GetEffectiveArticleCacheMB()) * 1024 * 1024;
 	}
 	int GetEffectiveArticleCacheMB() const
 	{
@@ -6191,159 +5542,7 @@ public:
 
 inline MemoryMonitor* g_MemoryMonitor = nullptr;
 
-inline size_t ArticleCache::GetEffectiveLimit() const
-{
-	return g_MemoryMonitor ?
-		g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
-		(size_t)std::max(0, g_Options->GetArticleCache()) * 1024 * 1024;
-}
-
-inline CachedSegmentData ArticleCache::Alloc(int size)
-{
-	std::lock_guard<std::mutex> guard(m_allocMutex);
-
-	void* p = nullptr;
-	size_t effectiveLimit = GetEffectiveLimit();
-
-	bool wasEmpty = m_allocated == 0;
-	size_t avail = effectiveLimit > m_allocated ? effectiveLimit - m_allocated : 0;
-	if (effectiveLimit > 0 && (size_t)size <= avail)
-	{
-		p = malloc(size);
-		if (p)
-		{
-			if (wasEmpty && g_Options->GetServerMode() &&
-				g_Options->GetContinuePartial() && !g_Options->GetSkipWrite())
-			{
-				g_DiskState->WriteCacheFlag();
-			}
-			if (wasEmpty)
-			{
-				// Resume Run(), the notification arrives later, after releasing m_allocMutex
-				m_allocCond.notify_all();
-			}
-			m_allocated += size;
-		}
-	}
-
-	return CachedSegmentData((char*)p, p ? size : 0);
-}
-
-inline void ArticleCache::Run()
-{
-	nzbget_rs_article_dl_exec(nullptr, 110, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, nullptr);
-}
-
 #endif
-
-inline uintptr_t NzbgetCArticleFetchHost(int op, int a1, int a2, uintptr_t p1, const char* s1,
-	int* ints, int64_t* i64s, const char** strs, uint8_t* buf, size_t bufLen)
-{
-	switch (op)
-	{
-	case 0: {
-		ints[0] = g_ServerPool->GetMaxNormLevel();
-		ints[1] = g_WorkState->GetQuotaReached() ? 1 : 0;
-		ints[2] = g_Options->GetArticleReadChunkSize();
-		ints[3] = (int)g_ServerPool->GetServers()->size();
-		int64 speedLimit = g_WorkState->GetSpeedLimit();
-		i64s[0] = speedLimit;
-		i64s[1] = speedLimit > 0 ? g_StatMeter->CalcCurrentDownloadSpeed() : 0;
-		i64s[2] = speedLimit > 0 ? g_StatMeter->CalcMomentaryDownloadSpeed() : 0;
-		return 0;
-	}
-	case 1: {
-		NewsServer* s = g_ServerPool->GetServers()->at((size_t)a1).get();
-		ints[0] = s->GetActive() ? 1 : 0;
-		ints[1] = s->GetNormLevel();
-		ints[2] = s->GetGroup();
-		ints[3] = s->GetId();
-		ints[4] = s->GetMaxConnections();
-		ints[5] = s->GetJoinGroup() ? 1 : 0;
-		strs[0] = s->GetName();
-		return reinterpret_cast<uintptr_t>(s);
-	}
-	case 2: {
-		ServerPool::RawServerList failed;
-		if (buf && a2 > 0)
-		{
-			const uintptr_t* ptrs = reinterpret_cast<const uintptr_t*>(buf);
-			failed.reserve((size_t)a2);
-			for (int i = 0; i < a2; i++) failed.push_back(reinterpret_cast<NewsServer*>(ptrs[i]));
-		}
-		NntpConnection* conn = g_ServerPool->GetConnection(a1, nullptr, &failed);
-		if (!conn) return 0;
-		NewsServer* s = conn->GetNewsServer();
-		ints[0] = conn->GetStatus() == Connection::csConnected ? 1 : 0;
-		ints[1] = s->GetId();
-		ints[2] = s->GetMaxConnections();
-		ints[3] = s->GetJoinGroup() ? 1 : 0;
-		ints[4] = s->GetGroup();
-		i64s[0] = (int64_t)reinterpret_cast<uintptr_t>(s);
-		strs[0] = s->GetName();
-		return reinterpret_cast<uintptr_t>(conn);
-	}
-	case 3: {
-		NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-		int bytesRead = conn->FetchTotalBytesRead();
-		if (bytesRead > 0)
-		{
-			g_StatMeter->AddServerStats(
-				Util::SafeIntCast<int, uint32>(bytesRead), 0, 0, conn->GetNewsServer()->GetId());
-		}
-		if (!a1 || conn->GetStatus() == Connection::csCancelled) conn->Disconnect();
-		g_ServerPool->FreeConnection(conn, true);
-		return 0;
-	}
-	case 4: {
-		NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-		strs[0] = conn->GetNewsServer()->GetName();
-		ints[0] = conn->GetNewsServer()->GetJoinGroup() ? 1 : 0;
-		return conn->Connect() ? 1 : 0;
-	}
-	case 5: {
-		const char* resp = reinterpret_cast<NntpConnection*>(p1)->JoinGroup(s1 ? s1 : "");
-		strs[0] = resp;
-		return resp ? 1 : 0;
-	}
-	case 6: {
-		const char* resp = reinterpret_cast<NntpConnection*>(p1)->Request(s1 ? s1 : "");
-		strs[0] = resp;
-		return resp ? 1 : 0;
-	}
-	case 7: {
-		NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-		char* buffer = nullptr;
-		int len = 0;
-		conn->ReadBuffer(&buffer, &len);
-		if (len == 0)
-		{
-			len = conn->TryRecv(reinterpret_cast<char*>(buf), (int)bufLen);
-			buffer = reinterpret_cast<char*>(buf);
-		}
-		if (len <= 0) { ints[0] = len; strs[0] = nullptr; return 0; }
-		g_StatMeter->AddSpeedReading(len);
-		ints[0] = len;
-		strs[0] = buffer;
-		return 1;
-	}
-	case 8:
-		reinterpret_cast<NntpConnection*>(p1)->Disconnect();
-		return 0;
-	case 9: {
-		NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-		conn->SetSuppressErrors(true);
-		conn->Cancel();
-		return 0;
-	}
-	case 10:
-		detail("%s", s1 ? s1 : "");
-		return 0;
-	default:
-		return 0;
-	}
-}
-
 #endif
 
 #ifndef NZBFILE_H
@@ -6600,11 +5799,11 @@ public:
 	static constexpr const char* SampledParam = "DupeSampled";
 	static constexpr const char* SampledOfParam = "DupeSampledOf";
 
-	static void StopAll() { nzbget_rs_twin_exec(4, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, &HostCb, nullptr); }
+	static void StopAll() { nzbget_rs_twin_exec(4, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, &HostCb, nullptr); }
 
 	TwinCheck()
 	{
-		nzbget_rs_twin_exec(6, 0, 0, reinterpret_cast<uintptr_t>(this), 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+		nzbget_rs_twin_exec(6, 0, 0, reinterpret_cast<uintptr_t>(this), 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 		m_observer.m_owner = this;
 		DownloadQueue::Guard()->Attach(&m_observer);
 	}
@@ -6612,12 +5811,12 @@ public:
 	~TwinCheck() override
 	{
 		DownloadQueue::Guard()->Detach(&m_observer);
-		nzbget_rs_twin_exec(7, 0, 0, reinterpret_cast<uintptr_t>(this), 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+		nzbget_rs_twin_exec(7, 0, 0, reinterpret_cast<uintptr_t>(this), 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 	}
 
 protected:
-	int ServiceInterval() override { return nzbget_rs_twin_exec(9, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr); }
-	void ServiceWork() override { nzbget_rs_twin_exec(10, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, &NzbgetCArticleFetchHost, &HostCb, nullptr); }
+	int ServiceInterval() override { return nzbget_rs_twin_exec(9, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr); }
+	void ServiceWork() override { nzbget_rs_twin_exec(10, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, &HostCb, nullptr); }
 
 private:
 	class TwinCheckJob : public Thread
@@ -6625,7 +5824,7 @@ private:
 	public:
 		explicit TwinCheckJob(uintptr_t token) : m_token(token) {}
 	protected:
-		void Run() override { nzbget_rs_twin_exec(12, 0, 0, m_token, 0, nullptr, nullptr, nullptr, nullptr, nullptr, &HostCb, nullptr); }
+		void Run() override { nzbget_rs_twin_exec(12, 0, 0, m_token, 0, nullptr, nullptr, nullptr, nullptr, &HostCb, nullptr); }
 	private:
 		uintptr_t m_token;
 	};
@@ -6652,7 +5851,7 @@ private:
 		case 2: reinterpret_cast<TwinCheck*>(p1)->WakeUp(); return 0;
 		case 3: {
 			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			nzbget_rs_twin_exec(11, 0, 0, p1, reinterpret_cast<uintptr_t>((DownloadQueue*)dq), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+			nzbget_rs_twin_exec(11, 0, 0, p1, reinterpret_cast<uintptr_t>((DownloadQueue*)dq), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 			return 0;
 		}
 		case 4: {
@@ -6744,7 +5943,7 @@ private:
 			if (queueAspect->action == DownloadQueue::eaNzbAdded &&
 				queueAspect->nzbInfo && !Util::EmptyStr(queueAspect->nzbInfo->GetDupeKey()))
 			{
-				nzbget_rs_twin_exec(8, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+				nzbget_rs_twin_exec(8, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
 				m_owner->WakeUp();
 			}
 		}
@@ -6815,9 +6014,9 @@ public:
 		adFatalError
 	};
 
-	ArticleDownloader(FileInfo* fileInfo, ArticleInfo* articleInfo, NntpConnection* connection,
+	ArticleDownloader(FileInfo* fileInfo, ArticleInfo* articleInfo, uintptr_t connection,
 		bool hasAnalyzer, const char* infoName)
-		: m_fileInfo(fileInfo), m_articleInfo(articleInfo), m_lastUpdateTime(Util::CurrentTime())
+		: m_fileInfo(fileInfo), m_articleInfo(articleInfo)
 	{
 		debug("Creating ArticleDownloader");
 #ifndef DISABLE_PARCHECK
@@ -6825,8 +6024,7 @@ public:
 #else
 		constexpr int parEnabled = 0;
 #endif
-		m_rs = nzbget_rs_article_dl_new(hasAnalyzer ? 1 : 0, parEnabled,
-			reinterpret_cast<uintptr_t>(connection), infoName ? infoName : "");
+		m_rs = nzbget_rs_article_dl_new(hasAnalyzer ? 1 : 0, parEnabled, connection, infoName ? infoName : "");
 	}
 
 	~ArticleDownloader() override
@@ -6840,8 +6038,8 @@ public:
 
 	FileInfo* GetFileInfo() { return m_fileInfo; }
 	ArticleInfo* GetArticleInfo() { return m_articleInfo; }
-	EStatus GetStatus() { return m_status.load(); }
-	time_t GetLastUpdateTime() { return m_lastUpdateTime.load(); }
+	EStatus GetStatus() { return static_cast<EStatus>(nzbget_rs_article_dl_exec(m_rs, 18, 0, 0, 0, 0, nullptr, nullptr, nullptr)); }
+	time_t GetLastUpdateTime() { return static_cast<time_t>(nzbget_rs_article_dl_exec(m_rs, 19, 0, 0, 0, 0, nullptr, nullptr, nullptr)); }
 
 	uintptr_t ExecRs(int op, int a1 = 0, uintptr_t p1 = 0, uintptr_t p2 = 0, const char* s1 = nullptr)
 	{
@@ -6854,16 +6052,13 @@ public:
 	{
 		debug("Trying to stop ArticleDownloader");
 		Thread::Stop();
-		ExecRs(16);
+		nzbget_rs_article_dl_exec(m_rs, 16, 0, 0, 0, 0, nullptr, nullptr, nullptr);
 		debug("ArticleDownloader stopped successfully");
 	}
 
 private:
 	FileInfo* m_fileInfo = nullptr;
 	ArticleInfo* m_articleInfo = nullptr;
-	std::atomic<EStatus> m_status{adUndefined};
-	std::atomic<time_t> m_lastUpdateTime{0};
-	CachedSegmentData m_cachedData;
 	NzbgetRsArticleDownloader* m_rs = nullptr;
 
 	friend uintptr_t NzbgetCArticleDlHost(void*, int, int, int, uintptr_t, uintptr_t,
@@ -6871,72 +6066,34 @@ private:
 };
 
 inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs)
+	const char* s1, const char*, int* ints, int64_t* i64s, const char** strs)
 {
 	switch (op)
 	{
-	case 1: {
-		if (a1 == 10) { i64s[0] = (int64_t)Util::CurrentTime(); return 0; }
-		if (a1 == 11) { Util::Sleep(a2); return 0; }
-		if (a1 == 12)
-		{
-			info("      Download: status=%i, LastUpdateTime=%s, InfoName=%s",
-				a2, *Util::FormatTime((time_t)i64s[0]), s1 ? s1 : "");
-			return 0;
-		}
-		const char* msg = s1 ? s1 : "";
-		if (p1 != 0) reinterpret_cast<NzbInfo*>(p1)->PrintMessage((Message::EKind)a1, "%s", msg);
-		else if (a1 == Message::mkInfo) info("%s", msg);
-		else if (a1 == Message::mkWarning) warn("%s", msg);
-		else if (a1 == Message::mkError) error("%s", msg);
-		else if (a1 == Message::mkDebug) debug("%s", msg);
-		else if (a1 == Message::mkDetail) detail("%s", msg);
+	case 1:
+		if (p1 != 0) reinterpret_cast<NzbInfo*>(p1)->PrintMessage((Message::EKind)a1, "%s", s1 ? s1 : "");
 		return 0;
-	}
 	case 2: {
-		if (a1 == 0)
-		{
-			if (!g_Options) { ints[0] = 0; ints[1] = 500; strs[0] = nullptr; return 0; }
-			ints[0] = g_Options->GetArticleCache();
-			ints[1] = g_Options->GetMemoryPressureInterval();
-			strs[0] = g_Options->GetMemoryPressurePath();
-			return 1;
-		}
 		if (a1 == 1) return static_cast<MemoryMonitor*>(ctx)->IsStopped() ? 1 : 0;
-		if (a1 == 2) { if (g_ArticleCache) g_ArticleCache->WakeupFlush(); return 0; }
-		if (a1 == 3)
-		{
-			i64s[0] = (int64_t)g_ArticleCache->m_allocated.load();
-			i64s[1] = (int64_t)g_ArticleCache->GetEffectiveLimit();
-			ints[0] = g_ArticleCache->IsStopped() ? 1 : 0;
-			ints[1] = (g_Options && g_Options->GetDirectWrite()) ? 1 : 0;
-			ints[2] = g_MemoryMonitor ? g_MemoryMonitor->GetTier() : 0;
-			return 0;
-		}
-		if (a1 == 4)
-		{
-			std::unique_lock<std::mutex> lk(g_ArticleCache->m_allocMutex);
-			g_ArticleCache->m_allocCond.wait(lk, [] {
-				return g_ArticleCache->IsStopped() || g_ArticleCache->m_allocated > 0;
-			});
-			return 0;
-		}
+		if (a1 == 3) return (ctx ? static_cast<ArticleCache*>(ctx) : g_ArticleCache)->IsStopped() ? 1 : 0;
 		if (a1 == 5)
 		{
 			bool flushEverything = a2 != 0;
 			static thread_local CString s_infoName;
+			FileInfo* found = nullptr;
 			{
 				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 				{
-					if (g_ArticleCache->m_fileInfo) break;
+					if (found) break;
 					for (FileInfo* fileInfo : nzbInfo->GetFileList())
 					{
 						if (fileInfo->GetCachedArticles() > 0 &&
 							(fileInfo->GetActiveDownloads() == 0 || flushEverything) &&
 							(!fileInfo->GetNzbInfo()->GetSkipDiskWrite() || flushEverything))
 						{
-							g_ArticleCache->m_fileInfo = fileInfo;
+							found = fileInfo;
+							nzbget_rs_article_dl_exec(nullptr, 115, 0, 0, reinterpret_cast<uintptr_t>(found), 0, nullptr, nullptr, nullptr);
 							s_infoName.Format("%s%c%s",
 								fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR, fileInfo->GetFilename());
 							break;
@@ -6944,11 +6101,10 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 					}
 				}
 			}
-			if (!g_ArticleCache->m_fileInfo) return 0;
+			if (!found) return 0;
 			strs[0] = *s_infoName;
-			return reinterpret_cast<uintptr_t>(g_ArticleCache->m_fileInfo);
+			return reinterpret_cast<uintptr_t>(found);
 		}
-		if (a1 == 6) { g_ArticleCache->m_fileInfo = nullptr; return 0; }
 		if (a1 == 7)
 		{
 			FileInfo* f = reinterpret_cast<FileInfo*>(p1);
@@ -6959,14 +6115,9 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 				outInit = f->GetOutputInitialized();
 				s_outFn = f->GetOutputFilename();
 			}
-			g_ArticleCache->LockFlush();
 			{
 				Guard cg = g_ArticleCache->GuardContent();
-				if (f->GetFlushLocked())
-				{
-					g_ArticleCache->UnlockFlush();
-					return 0;
-				}
+				if (f->GetFlushLocked()) return 0;
 				f->SetFlushLocked(true);
 				g_ArticleCache->m_flushArticles.clear();
 				g_ArticleCache->m_flushArticles.reserve(f->GetArticles()->size());
@@ -7010,154 +6161,8 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 				f->SetFlushLocked(false);
 			}
 			g_ArticleCache->m_flushArticles.clear();
-			g_ArticleCache->UnlockFlush();
 			ints[0] = ((f->GetNzbInfo() && f->GetNzbInfo()->GetSkipDiskWrite()) || g_Options->GetSkipWrite()) ? 1 : 0;
 			return 0;
-		}
-		return 0;
-	}
-	case 3: {
-		if (a1 == 0)
-		{
-			ints[0] = (int)g_ServerPool->m_sortedServers.size();
-			ints[1] = (int)g_ServerPool->m_connections.size();
-			ints[2] = (int)g_ServerPool->m_levels.size();
-			ints[3] = g_ServerPool->m_maxNormLevel;
-			ints[4] = g_ServerPool->m_retryInterval;
-			ints[5] = g_ServerPool->m_timeout;
-			ints[6] = (int)g_ServerPool->m_servers.size();
-			i64s[0] = (int64_t)Util::CurrentTime();
-			return 0;
-		}
-		if (a1 == 1)
-		{
-			NewsServer* s = a2 < 0 ? reinterpret_cast<NewsServer*>(p1) :
-				(p2 != 0 ? g_ServerPool->m_servers[(size_t)a2].get() : g_ServerPool->m_sortedServers[(size_t)a2]);
-			ints[0] = s->GetId();
-			ints[1] = s->GetLevel();
-			ints[2] = s->GetNormLevel();
-			ints[3] = s->GetActive() ? 1 : 0;
-			ints[4] = s->GetOptional() ? 1 : 0;
-			ints[5] = s->GetGroup();
-			ints[6] = s->GetMaxConnections();
-			i64s[0] = (int64_t)s->GetBlockTime();
-			strs[0] = s->GetName();
-			strs[1] = s->GetHost();
-			return reinterpret_cast<uintptr_t>(s);
-		}
-		if (a1 == 2)
-		{
-			if (a2 == 0) g_ServerPool->m_sortedServers[p1]->SetNormLevel((int)p2);
-			else if (a2 == 1)
-			{
-				if (p1 > 0)
-				{
-					ServerPool::RawServerList newSorted(p1);
-					for (size_t i = 0; i < p1; i++) newSorted[i] = g_ServerPool->m_sortedServers[(size_t)ints[i]];
-					g_ServerPool->m_sortedServers = std::move(newSorted);
-					g_ServerPool->m_maxNormLevel = (int)p2;
-				}
-				g_ServerPool->m_levels.clear();
-			}
-			else if (a2 == 2)
-			{
-				NewsServer* ns = g_ServerPool->m_sortedServers[p1];
-				ns->SetBlockTime(0);
-				int normLevel = ints[0];
-				if (normLevel > -1)
-				{
-					if ((int)g_ServerPool->m_levels.size() <= normLevel) g_ServerPool->m_levels.push_back(0);
-					if (ints[2] != 0)
-					{
-						for (size_t k = 0; k < p2; k++)
-						{
-							auto conn = std::make_unique<ServerPool::PooledConnection>(ns);
-							conn->SetTimeout(g_ServerPool->m_timeout);
-							g_ServerPool->m_connections.push_back(std::move(conn));
-						}
-						g_ServerPool->m_levels[(size_t)normLevel] += ints[1];
-					}
-				}
-			}
-			else if (a2 == 3) g_ServerPool->m_generation++;
-			return 0;
-		}
-		if (a1 == 3)
-		{
-			auto* c = g_ServerPool->m_connections[(size_t)a2].get();
-			NewsServer* s = c->GetNewsServer();
-			ints[0] = c->GetInUse() ? 1 : 0;
-			ints[1] = c->GetStatus() == Connection::csConnected ? 1 : 0;
-			ints[2] = s->GetId();
-			ints[3] = s->GetLevel();
-			ints[4] = s->GetNormLevel();
-			i64s[0] = (int64_t)c->GetFreeTime();
-			strs[0] = s->GetName();
-			strs[1] = s->GetHost();
-			return reinterpret_cast<uintptr_t>(s);
-		}
-		if (a1 == 4)
-		{
-			auto* lst = reinterpret_cast<ServerPool::RawServerList*>(p1);
-			if (a2 < 0) return lst ? lst->size() : 0;
-			NewsServer* s = (*lst)[(size_t)a2];
-			ints[0] = s->GetId();
-			ints[1] = s->GetGroup();
-			ints[2] = s->GetNormLevel();
-			return 0;
-		}
-		if (a1 == 5)
-		{
-			if (a2 == 0) { g_ServerPool->m_sortedServers[p1]->SetBlockTime((time_t)i64s[0]); return 0; }
-			if (a2 == 1)
-			{
-				auto* c = g_ServerPool->m_connections[p1].get();
-				c->SetInUse(true);
-				g_ServerPool->m_levels[p2]--;
-				return reinterpret_cast<uintptr_t>(static_cast<NntpConnection*>(c));
-			}
-			if (a2 == 2)
-			{
-				auto* c = static_cast<ServerPool::PooledConnection*>(reinterpret_cast<NntpConnection*>(p1));
-				c->SetInUse(false);
-				if (p2 != 0) c->SetFreeTimeNow();
-				NewsServer* s = c->GetNewsServer();
-				if (s->GetNormLevel() > -1 && s->GetActive()) g_ServerPool->m_levels[(size_t)s->GetNormLevel()]++;
-				return 0;
-			}
-			if (a2 == 3)
-			{
-				g_ServerPool->m_connections.erase(std::remove_if(
-					g_ServerPool->m_connections.begin(), g_ServerPool->m_connections.end(),
-					[](std::unique_ptr<ServerPool::PooledConnection>& connection)
-					{
-						if (!connection->GetInUse() &&
-							(connection->GetNewsServer()->GetNormLevel() == -1 || !connection->GetNewsServer()->GetActive()))
-						{
-							debug("Closing (and deleting) unused connection to server%i", connection->GetNewsServer()->GetId());
-							if (connection->GetStatus() == Connection::csConnected) connection->Disconnect();
-							return true;
-						}
-						return false;
-					}),
-					g_ServerPool->m_connections.end());
-				return 0;
-			}
-			if (a2 == 4) { g_ServerPool->m_connections[p1]->Disconnect(); return 0; }
-			if (a2 == 5)
-			{
-				NewsServer* s = reinterpret_cast<NewsServer*>(p1);
-				Guard guard(g_ServerPool->m_connectionsMutex);
-				time_t curTime = Util::CurrentTime();
-				i64s[0] = (int64_t)s->GetBlockTime();
-				i64s[1] = (int64_t)curTime;
-				s->SetBlockTime(curTime);
-				ints[0] = g_ServerPool->m_retryInterval;
-				strs[0] = s->GetName();
-				strs[1] = s->GetHost();
-				return 0;
-			}
-			if (a2 == 6) return (uintptr_t)g_ServerPool->m_levels[p1];
 		}
 		return 0;
 	}
@@ -7165,14 +6170,10 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 		auto* ad = static_cast<ArticleDownloader*>(ctx);
 		if (a1 == 0)
 		{
-			ints[0] = g_Options->GetArticleRetries() > 0 ? g_Options->GetArticleRetries() : 1;
-			ints[1] = g_Options->GetArticleInterval() > 0 ? g_Options->GetArticleInterval() : 0;
-			ints[2] = g_ServerPool->GetGeneration();
-			ints[3] = (int)g_ServerPool->GetServers()->size();
-			ints[4] = ad->m_fileInfo->GetNzbInfo()->GetForcePriority() ? 1 : 0;
-			ints[5] = ad->m_fileInfo->GetExtraPriority() ? 1 : 0;
-			ints[6] = ad->m_fileInfo->GetNzbInfo()->HasDesiredServer() ? 1 : 0;
-			ints[7] = ad->m_articleInfo->GetDupeFallbackRound();
+			ints[0] = ad->m_fileInfo->GetNzbInfo()->GetForcePriority() ? 1 : 0;
+			ints[1] = ad->m_fileInfo->GetExtraPriority() ? 1 : 0;
+			ints[2] = ad->m_fileInfo->GetNzbInfo()->HasDesiredServer() ? 1 : 0;
+			ints[3] = ad->m_articleInfo->GetDupeFallbackRound();
 			i64s[0] = (int64_t)ad->m_fileInfo->GetTime();
 			return 0;
 		}
@@ -7190,189 +6191,29 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 			{
 				ints[0] = ad->m_fileInfo->GetId();
 				ints[1] = ad->m_articleInfo->GetPartNumber();
-				ints[2] = g_Options->GetDirectWrite() ? 1 : 0;
-				ints[3] = ad->m_fileInfo->GetForceDirectWrite() ? 1 : 0;
-				ints[4] = ad->m_fileInfo->GetOutputInitialized() ? 1 : 0;
-				strs[0] = g_Options->GetTempDir();
-				strs[1] = ad->m_fileInfo->GetNzbInfo()->GetDestDir();
-				strs[2] = ad->m_fileInfo->GetOutputFilename().c_str();
-				strs[3] = ad->m_fileInfo->GetFilename();
+				ints[2] = ad->m_fileInfo->GetForceDirectWrite() ? 1 : 0;
+				ints[3] = ad->m_fileInfo->GetOutputInitialized() ? 1 : 0;
+				strs[0] = ad->m_fileInfo->GetNzbInfo()->GetDestDir();
+				strs[1] = ad->m_fileInfo->GetOutputFilename().c_str();
+				strs[2] = ad->m_fileInfo->GetFilename();
 				return 0;
 			}
 			if (a2 == 2) { strs[0] = ad->m_articleInfo->GetResultFilename(); return 0; }
 			return 0;
 		}
-		if (a1 == 2)
-		{
-			ints[0] = ad->IsStopped() ? 1 : 0;
-			ints[1] = (g_WorkState && (g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached())) ? 1 : 0;
-			ints[2] = (g_WorkState && g_WorkState->GetDownloadHeld()) ? 1 : 0;
-			ints[3] = g_ServerPool->GetGeneration();
-			ints[4] = g_ServerPool->GetMaxNormLevel();
-			ints[5] = (int)g_ServerPool->GetServers()->size();
-			i64s[0] = (int64_t)Util::CurrentTime();
-			return 0;
-		}
-		if (a1 == 3)
-		{
-			if (p1 & 1) ad->m_lastUpdateTime = (time_t)i64s[0];
-			ad->m_status.store((ArticleDownloader::EStatus)a2);
-			if (p1 & 2) ad->Notify(nullptr);
-			return 0;
-		}
-		if (a1 == 4)
-		{
-			ServerPool::RawServerList ign;
-			if (i64s && p2 > 0)
-			{
-				ign.reserve(p2);
-				for (size_t i = 0; i < p2; i++) ign.push_back(reinterpret_cast<NewsServer*>((uintptr_t)i64s[i]));
-			}
-			return reinterpret_cast<uintptr_t>(g_ServerPool->GetConnection(
-				a2, reinterpret_cast<NewsServer*>(p1), &ign));
-		}
-		if (a1 == 5)
-		{
-			NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-			NewsServer* srv = conn->GetNewsServer();
-			conn->SetSuppressErrors(false);
-#ifndef DISABLE_TLS
-			conn->SetCertVerifLevel(srv->GetCertVerificationLevel());
-#endif
-			ints[0] = srv->GetNormLevel();
-			ints[1] = srv->GetRetention();
-			ints[2] = srv->GetId();
-			ints[3] = 0;
-			ints[4] = srv->GetJoinGroup() ? 1 : 0;
-			strs[0] = srv->GetName();
-			strs[1] = conn->GetHost();
-			return reinterpret_cast<uintptr_t>(srv);
-		}
-		if (a1 == 6)
-		{
-			NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-			bool ok = conn->Connect();
-			ints[0] = conn->GetAuthRejected() ? 1 : 0;
-			return ok ? 1 : 0;
-		}
-		if (a1 == 7)
-		{
-			if (a2 == 0)
-			{
-				NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-				int bytesRead = conn->FetchTotalBytesRead();
-				g_StatMeter->AddServerStats(
-					Util::SafeIntCast<int, uint32>(bytesRead), 0, 0, conn->GetNewsServer()->GetId());
-				ints[0] = bytesRead;
-			}
-			else
-			{
-				g_StatMeter->AddServerStats(
-					0, static_cast<uint32>(ints[1]), static_cast<uint32>(ints[0]), (int)p1);
-			}
-			return 0;
-		}
-		if (a1 == 8)
-		{
-			NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-			if (!a2 || conn->GetStatus() == Connection::csCancelled) conn->Disconnect();
-			int bytesRead = conn->FetchTotalBytesRead();
-			g_StatMeter->AddServerStats(
-				Util::SafeIntCast<int, uint32>(bytesRead), 0, 0, conn->GetNewsServer()->GetId());
-			g_ServerPool->FreeConnection(conn, true);
-			ints[0] = bytesRead;
-			return 0;
-		}
-		if (a1 == 9)
-		{
-			NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-			conn->SetSuppressErrors(true);
-			conn->Cancel();
-			return 0;
-		}
-		if (a1 == 10)
-		{
-			NewsServer* srv = reinterpret_cast<NewsServer*>(p1);
-			g_ServerPool->BlockServer(srv);
-			return srv->GetOptional() ? 1 : 0;
-		}
-		if (a1 == 11)
-		{
-			NewsServer* s = g_ServerPool->GetServers()->at((size_t)a2).get();
-			ints[0] = s->GetId();
-			ints[1] = s->GetNormLevel();
-			ints[2] = s->GetGroup();
-			ints[3] = (s->GetActive() && s->GetMaxConnections() != 0 &&
-				!(s->GetOptional() && g_ServerPool->IsServerBlocked(s))) ? 1 : 0;
-			return reinterpret_cast<uintptr_t>(s);
-		}
+		if (a1 == 2) return ad->IsStopped() ? 1 : 0;
+		if (a1 == 3) { ad->Notify(nullptr); return 0; }
 		if (a1 == 12)
 		{
 			if (a2 == 0)
 			{
 				ad->m_articleInfo->SetCrc(0);
-				ints[0] = g_Options->GetRawArticle() ? 1 : 0;
-				ints[1] = g_Options->GetCrcCheck() ? 1 : 0;
-				ints[2] = g_Options->GetArticleReadChunkSize();
-				ints[3] = (int)ad->m_fileInfo->GetGroups()->size();
-				ints[4] = ((ad->m_fileInfo->GetNzbInfo() && ad->m_fileInfo->GetNzbInfo()->GetSkipDiskWrite()) ||
-					g_Options->GetSkipWrite()) ? 1 : 0;
+				ints[0] = (int)ad->m_fileInfo->GetGroups()->size();
+				ints[1] = (ad->m_fileInfo->GetNzbInfo() && ad->m_fileInfo->GetNzbInfo()->GetSkipDiskWrite()) ? 1 : 0;
 				strs[0] = ad->m_articleInfo->GetMessageId();
 			}
-			else if (a2 == 1)
-			{
-				NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-				strs[0] = conn->JoinGroup(ad->m_fileInfo->GetGroups()->at(p2));
-				ints[0] = conn->GetAuthError() ? 1 : 0;
-			}
-			else if (a2 == 2)
-			{
-				NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-				strs[0] = conn->Request(s1);
-				ints[0] = conn->GetAuthError() ? 1 : 0;
-			}
+			else if (a2 == 1) strs[0] = *ad->m_fileInfo->GetGroups()->at(p2);
 			return 0;
-		}
-		if (a1 == 13)
-		{
-			NntpConnection* conn = reinterpret_cast<NntpConnection*>(p1);
-			if (!ad->IsStopped() && !a2 &&
-				g_MemoryMonitor && g_MemoryMonitor->GetTier() == 2 &&
-				g_ArticleCache && g_ArticleCache->GetFlushing())
-			{
-				Util::Sleep(10);
-			}
-			while (!ad->IsStopped() && (g_WorkState->GetSpeedLimit() > 0.0f) &&
-				(g_StatMeter->CalcCurrentDownloadSpeed() > g_WorkState->GetSpeedLimit() ||
-				 g_StatMeter->CalcMomentaryDownloadSpeed() > g_WorkState->GetSpeedLimit()))
-			{
-				ad->m_lastUpdateTime = Util::CurrentTime();
-				Util::Sleep(10);
-			}
-			char* buffer = nullptr;
-			int len = 0;
-			conn->ReadBuffer(&buffer, &len);
-			if (len == 0)
-			{
-				char* lineBuf = const_cast<char*>(s2);
-				len = conn->TryRecv(lineBuf, (int)p2);
-				buffer = lineBuf;
-			}
-			if (len <= 0)
-			{
-				ints[1] = ad->IsStopped() ? 0 : 1;
-				conn->SetBroken();
-				conn->Disconnect();
-				return 0;
-			}
-			g_StatMeter->AddSpeedReading(len);
-			time_t oldTime = ad->m_lastUpdateTime.load();
-			time_t nowTime = Util::CurrentTime();
-			ad->m_lastUpdateTime = nowTime;
-			ints[0] = len;
-			ints[1] = (oldTime != nowTime) ? 1 : 0;
-			strs[0] = buffer;
-			return 1;
 		}
 		if (a1 == 14)
 		{
@@ -7385,17 +6226,12 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 		if (a1 == 15)
 		{
 			NzbInfo* nzb = ad->m_fileInfo->GetNzbInfo();
-			ints[0] = g_Options->GetDupeCheck() ? 1 : 0;
-			ints[1] = (int)nzb->GetDupeMode();
-			ints[2] = nzb->GetManyDupeFiles() ? 1 : 0;
-			ints[3] = g_Options->GetDirectWrite() ? 1 : 0;
-			ints[4] = ad->m_fileInfo->GetForceDirectWrite() ? 1 : 0;
-			ints[5] = (nzb->GetSkipDiskWrite() || g_Options->GetSkipWrite()) ? 1 : 0;
-			ints[6] = g_Options->GetArticleCache();
-			ints[7] = g_Options->GetRawArticle() ? 1 : 0;
-			ints[8] = g_Options->GetWriteBuffer();
-			ints[9] = ad->m_articleInfo->GetSize();
-			ints[10] = ad->m_articleInfo->GetDupeFallbackRound();
+			ints[0] = (int)nzb->GetDupeMode();
+			ints[1] = nzb->GetManyDupeFiles() ? 1 : 0;
+			ints[2] = ad->m_fileInfo->GetForceDirectWrite() ? 1 : 0;
+			ints[3] = nzb->GetSkipDiskWrite() ? 1 : 0;
+			ints[4] = ad->m_articleInfo->GetSize();
+			ints[5] = ad->m_articleInfo->GetDupeFallbackRound();
 			strs[0] = nzb->GetDestDir();
 			return reinterpret_cast<uintptr_t>(nzb);
 		}
@@ -7442,19 +6278,11 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 		}
 		if (a1 == 18)
 		{
-			if (a2 == 0) ad->m_cachedData = CachedSegmentData();
-			else if (a2 == 1)
+			if (a2 == 2)
 			{
-				ad->m_cachedData = g_ArticleCache->Alloc((int)p1);
-				ints[0] = g_ArticleCache->GetFlushing() ? 1 : 0;
-				return reinterpret_cast<uintptr_t>(ad->m_cachedData.GetData());
-			}
-			else if (a2 == 2)
-			{
-				if ((int)p2 != (int)p1) g_ArticleCache->Realloc(&ad->m_cachedData, (int)p1);
 				Guard cg = g_ArticleCache->GuardContent();
 				ad->m_articleInfo->AttachSegment(
-					std::make_unique<CachedSegmentData>(std::move(ad->m_cachedData)), i64s[0], (int)p1);
+					std::make_unique<CachedSegmentData>(reinterpret_cast<char*>(p1), ints[0]), i64s[0], (int)p2);
 				ad->m_fileInfo->SetCachedArticles(ad->m_fileInfo->GetCachedArticles() + 1);
 			}
 			else if (a2 == 3)
@@ -7509,7 +6337,6 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 				f->SetOutputFilename("");
 				return 0;
 			}
-			if (a2 == 3) { if (p1 != 0) g_ArticleCache->LockFlush(); else g_ArticleCache->UnlockFlush(); return 0; }
 			if (a2 == 4)
 			{
 				ArticleInfo* pa = f->GetArticles()->at(p1).get();
@@ -7675,40 +6502,8 @@ public:
 	{
 		switch (op)
 		{
-		case 0: return g_ServerPool->GetServers()->size();
-		case 1: {
-			NewsServer* s = g_ServerPool->GetServers()->at((size_t)a1).get();
-			ints[0] = s->GetActive() ? 1 : 0; ints[1] = s->GetGroup(); ints[2] = s->GetNormLevel(); ints[3] = s->GetId();
-			return 0;
-		}
-		case 2: return g_ServerPool->GetServerById(a1) != nullptr ? 1 : 0;
-		case 3: {
-			NewsServer* wanted = g_ServerPool->GetServerById(a1);
-			NntpConnection* conn = wanted ? g_ServerPool->GetConnection(wanted->GetNormLevel(), wanted, nullptr) : nullptr;
-			if (!conn) return 0;
-			ints[0] = conn->GetNewsServer()->GetId(); ints[1] = conn->GetNewsServer()->GetJoinGroup() ? 1 : 0;
-			strs[0] = conn->GetNewsServer()->GetName();
-			return reinterpret_cast<uintptr_t>(conn);
-		}
-		case 4: {
-			NewsServer* wanted = g_ServerPool->GetServerById(a1);
-			if (!wanted) return 0;
-			time_t bt = wanted->GetBlockTime();
-			return (g_ServerPool->IsServerBlocked(wanted) || (bt > 0 && Util::CurrentTime() - bt < 60)) ? 1 : 0;
-		}
-		case 5: return reinterpret_cast<NntpConnection*>(p1)->Connect() ? 1 : 0;
-		case 6: strs[0] = reinterpret_cast<NntpConnection*>(p1)->JoinGroup(s1); return strs[0] ? 1 : 0;
-		case 7: strs[0] = reinterpret_cast<NntpConnection*>(p1)->Request(s1); return strs[0] ? 1 : 0;
-		case 8: reinterpret_cast<NntpConnection*>(p1)->Disconnect(); return 0;
-		case 9: {
-			auto* conn = reinterpret_cast<NntpConnection*>(p1);
-			if (a1 || conn->GetStatus() == Connection::csCancelled) conn->Disconnect();
-			g_ServerPool->FreeConnection(conn, true);
-			return 0;
-		}
 		case 10:
 			if (p1) reinterpret_cast<DupeProbe*>(p1)->Thread::Stop();
-			if (p2) { auto* c = reinterpret_cast<NntpConnection*>(p2); c->SetSuppressErrors(true); c->Cancel(); }
 			return 0;
 		case 11: return (p1 && reinterpret_cast<DupeProbe*>(p1)->IsStopped()) ? 1 : 0;
 		case 12: {
@@ -8625,7 +7420,7 @@ public:
 	{
 		debug("Creating RepairController");
 	#ifndef DISABLE_PARCHECK
-		m_rs = nzbget_rs_repair_ctrl_new(&NzbgetCArticleFetchHost);
+		m_rs = nzbget_rs_repair_ctrl_new();
 	#endif
 	}
 
@@ -8807,7 +7602,7 @@ private:
 			}
 			{
 				FileInfo tmpFileInfo(a2);
-				if (!g_DiskState->LoadFileState(&tmpFileInfo, nullptr, true)) return 0;
+				if (!g_DiskState->LoadFileState(&tmpFileInfo, true)) return 0;
 				auto pushFn = reinterpret_cast<void(*)(uintptr_t, int, int64_t, int, uint32_t)>(reinterpret_cast<uintptr_t>(s2));
 				bool any = false;
 				for (ArticleInfo* pa : tmpFileInfo.GetArticles())
@@ -8895,7 +7690,7 @@ private:
 		constexpr int debugEnabled = 0;
 	#endif
 		m_rs = nzbget_rs_stream_repair_ctrl_new(liveMode ? 1 : 0, nzbId,
-			&NzbgetCArticleFetchHost, &DupeProbe::HostCb, tlsEnabled, debugEnabled);
+			&DupeProbe::HostCb, tlsEnabled, debugEnabled);
 	}
 
 	PostInfo* m_postInfo = nullptr;
@@ -8940,9 +7735,7 @@ private:
 			else if (a1 == 4) debug("%s", s1);
 			return 0;
 		case 6: {
-			int primaryConnections = 0;
-			for (NewsServer* s : g_ServerPool->GetServers())
-				if (s->GetActive() && s->GetNormLevel() == 0) primaryConnections += s->GetMaxConnections();
+			int primaryConnections = g_ServerPool ? g_ServerPool->PrimaryConnections() : 0;
 			int upTimeSec = 0, downloadTimeSec = 0;
 			int64 allBytes = 0;
 			bool standBy = false;
@@ -10810,51 +9603,6 @@ public:
 			case 8:
 				g_WorkState->HoldDownloadForFleet(a1 != 0);
 				return 0;
-			case 10: {
-				if (a1 < 0) return g_ServerPool->GetServers()->size();
-				if ((size_t)a1 >= g_ServerPool->GetServers()->size()) return 0;
-				NewsServer* srv = g_ServerPool->GetServers()->at((size_t)a1).get();
-				ints[0] = srv->GetId();
-				ints[1] = srv->GetActive() ? 1 : 0;
-				ints[2] = srv->GetMaxConnections();
-				ints[3] = srv->GetGroup();
-				return 1;
-			}
-			case 11: {
-				NewsServer* srv = g_ServerPool->GetServerById(a1);
-				ints[0] = srv ? 1 : 0;
-				if (!srv) return 0;
-				ints[1] = srv->GetJoinGroup() ? 1 : 0;
-				return uintptr_t(g_ServerPool->GetConnection(srv->GetNormLevel(), srv, nullptr));
-			}
-			case 12: {
-				auto* c = reinterpret_cast<NntpConnection*>(p1);
-				if (a1) c->Disconnect();
-				g_ServerPool->FreeConnection(c, true);
-				return 0;
-			}
-			case 13: {
-				auto* c = reinterpret_cast<NntpConnection*>(p1);
-				if (!c->Connect()) { ints[0] = 1; return 0; }
-				if (a1) {
-					const char* joined = nullptr;
-					for (int i = 0; i < a2; i++) {
-						joined = c->JoinGroup(strs[i]);
-						if (joined && joined[0] == '2') break;
-					}
-					if (!joined || joined[0] != '2') { ints[0] = !joined ? 1 : 0; return 0; }
-				}
-				if (!c->Send(reinterpret_cast<const char*>(bytes), (int)len)) { ints[0] = 1; return 0; }
-				return 1;
-			}
-			case 14: {
-				char line[1024];
-				int length = 0;
-				if (!reinterpret_cast<NntpConnection*>(p1)->ReadLine(line, sizeof(line), &length)) return 0;
-				return !strncmp(line, "223", 3) ? 1 : !strncmp(line, "430", 3) ? 2 : 3;
-			}
-			case 15:
-				return reinterpret_cast<uintptr_t>(&NzbgetCArticleFetchHost);
 			default:
 				return 0;
 		}
@@ -10990,7 +9738,7 @@ inline uintptr_t HistoryCoordinator::ActionCb(
 				if ((cf.GetStatus() != CompletedFile::cfPartial && cf.GetStatus() != CompletedFile::cfFailure) || cf.GetId() <= 0) continue;
 				bool partial = cf.GetStatus() == CompletedFile::cfPartial;
 				FileInfo fi(cf.GetId());
-				if (!g_DiskState->LoadFile(&fi, false, true) || (partial && !g_DiskState->LoadFileState(&fi, g_ServerPool->GetServers(), true))) continue;
+				if (!g_DiskState->LoadFile(&fi, false, true) || (partial && !g_DiskState->LoadFileState(&fi, true))) continue;
 				auto groups = std::make_shared<std::vector<CString>>();
 				for (const CString& g : *fi.GetGroups()) groups->emplace_back(*g);
 				for (ArticleInfo* art : fi.GetArticles())
@@ -11243,7 +9991,7 @@ inline uintptr_t HistoryCoordinator::ActionCb(
 			fi->SetId(a1);
 			if (!g_DiskState->LoadFile(fi.get(), true, true)) return 0;
 			bool stateLoaded = a2 == static_cast<int>(CompletedFile::cfPartial) &&
-				g_DiskState->LoadFileState(fi.get(), g_ServerPool->GetServers(), true);
+				g_DiskState->LoadFileState(fi.get(), true);
 			fi->SetNzbInfo(nzb);
 			ints[0] = stateLoaded ? 1 : 0;
 			ints[1] = fi->GetSuccessArticles();
@@ -11484,31 +10232,10 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 		else if (a1 == 7) return DownloadQueue::IsLoaded() ? 1 : 0;
 		return 0;
 	}
-	case 4: {
-		if (!g_ServerPool) return 0;
-		if (a1 == 0) return (uintptr_t)g_ServerPool->GetGeneration();
-		if (a1 == 1) { g_ServerPool->CloseUnusedConnections(); return 0; }
-		if (a1 == 2)
-		{
-			if (a2 < 0) return g_ServerPool->GetServers()->size();
-			NewsServer* ns = g_ServerPool->GetServers()->at((size_t)a2).get();
-			ints[0] = ns->GetNormLevel(); ints[1] = ns->GetActive() ? 1 : 0; ints[2] = ns->GetMaxConnections();
-			return 0;
-		}
-		if (a1 == 3)
-		{
-			bool hasDesired = a2 != 0;
-			NewsServer* desired = hasDesired ? g_ServerPool->GetServerById((int)p1) : nullptr;
-			bool useSpecific = hasDesired && desired && desired->GetActive();
-			int connLevel = useSpecific ? desired->GetNormLevel() : 0;
-			return reinterpret_cast<uintptr_t>(g_ServerPool->GetConnection(connLevel, useSpecific ? desired : nullptr, nullptr));
-		}
-		return 0;
-	}
 	case 5: {
 		if (!g_DiskState) return 0;
 		if (a1 == 0) return g_DiskState->DownloadQueueExists() ? 1 : 0;
-		if (a1 == 1) return g_DiskState->LoadDownloadQueue(reinterpret_cast<DownloadQueue*>(p1), g_ServerPool->GetServers()) ? 1 : 0;
+		if (a1 == 1) return g_DiskState->LoadDownloadQueue(reinterpret_cast<DownloadQueue*>(p1)) ? 1 : 0;
 		if (a1 == 2) { g_DiskState->DiscardDownloadQueue(); return 0; }
 		if (a1 == 3) return g_DiskState->LegacyQueueRead() ? 1 : 0;
 		if (a1 == 4) { g_DiskState->CleanupTempDir(reinterpret_cast<DownloadQueue*>(p1)); return 0; }
@@ -11517,12 +10244,12 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 		if (a1 == 7) { g_DiskState->DiscardFile(a2, ints[0] != 0, ints[1] != 0, ints[2] != 0); return 0; }
 		if (a1 == 8) { g_DiskState->SaveFile(reinterpret_cast<FileInfo*>(p1)); return 0; }
 		if (a1 == 9) { g_DiskState->SaveFileState(reinterpret_cast<FileInfo*>(p1), a2 != 0); return 0; }
-		if (a1 == 10) return g_DiskState->LoadFileState(reinterpret_cast<FileInfo*>(p1), g_ServerPool->GetServers(), a2 != 0) ? 1 : 0;
+		if (a1 == 10) return g_DiskState->LoadFileState(reinterpret_cast<FileInfo*>(p1), a2 != 0) ? 1 : 0;
 		if (a1 == 11) { g_DiskState->LoadArticles(reinterpret_cast<FileInfo*>(p1)); return 0; }
 		if (a1 == 12)
 		{
 			FileInfo fi(a2);
-			if (g_DiskState->LoadFileState(&fi, g_ServerPool->GetServers(), true)) g_DiskState->SaveFileState(&fi, true);
+			if (g_DiskState->LoadFileState(&fi, true)) g_DiskState->SaveFileState(&fi, true);
 		}
 		return 0;
 	}
@@ -12059,7 +10786,6 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 	}
 	case 44: {
 		FileInfo* f = reinterpret_cast<FileInfo*>(p1);
-		if (a1 == 0) return (g_ArticleCache && g_ArticleCache->FileBusy(f)) ? 1 : 0;
 		if (a1 == 1)
 		{
 			if (!g_ArticleCache) return 0;
@@ -12111,12 +10837,12 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 		{
 			i64s[0] = (int64_t)reinterpret_cast<uintptr_t>(ad->GetFileInfo());
 			i64s[1] = (int64_t)reinterpret_cast<uintptr_t>(ad->GetArticleInfo());
-			ad->ExecRs(10, (int)ad->GetStatus(), reinterpret_cast<uintptr_t>(ints),
+			ad->ExecRs(10, 0, reinterpret_cast<uintptr_t>(ints),
 				reinterpret_cast<uintptr_t>(i64s), reinterpret_cast<const char*>(strs));
 			return reinterpret_cast<uintptr_t>(ad);
 		}
 		if (a1 == 1) ad->Stop();
-		else if (a1 == 2) ad->ExecRs(14, (int)ad->GetStatus(), (uintptr_t)(int64_t)ad->GetLastUpdateTime());
+		else if (a1 == 2) ad->ExecRs(14);
 		else if (a1 == 3) ad->ExecRs(12);
 		else if (a1 == 4) return ad->ExecRs(11, 0, reinterpret_cast<uintptr_t>(ints), 0, reinterpret_cast<const char*>(strs));
 		else if (a1 == 5) return ad->ExecRs(13);
@@ -12128,8 +10854,7 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 		debug("Starting new ArticleDownloader");
 		FileInfo* f = reinterpret_cast<FileInfo*>(p1);
 		ArticleInfo* a = reinterpret_cast<ArticleInfo*>(p2);
-		auto* ad = new ArticleDownloader(f, a, reinterpret_cast<NntpConnection*>((uintptr_t)i64s[0]),
-			a1 != 0, s1 ? s1 : "");
+		auto* ad = new ArticleDownloader(f, a, (uintptr_t)i64s[0], a1 != 0, s1 ? s1 : "");
 		ad->SetAutoDestroy(true);
 		ad->Attach(self);
 		a->SetStatus(ArticleInfo::aiRunning);
@@ -12640,21 +11365,6 @@ protected:
 				}
 				return 1;
 			}
-			if (sub == 2)
-			{
-				Servers* srvs = g_ServerPool->GetServers();
-				if (a1 == 0) return static_cast<int>(srvs->size());
-				if (a1 == 1)
-				{
-					NewsServer* srv = (*srvs)[static_cast<size_t>(a2)].get();
-					ints[0] = srv->GetId();
-					ints[1] = srv->GetActive() ? 1 : 0;
-					strs[0] = srv->GetName();
-					return 1;
-				}
-				if (a1 == 2) { (*srvs)[static_cast<size_t>(a2)]->SetActive(ints[0] != 0); return 1; }
-				if (a1 == 3) { g_ServerPool->Changed(); return 1; }
-			}
 			if (sub == 3) { g_FeedCoordinator->FetchFeedList(ptrs[0]); return 1; }
 			if (sub == 4)
 			{
@@ -12681,46 +11391,24 @@ namespace SystemHealth
 class Service
 {
 public:
-	Service(const Options& options, const Servers& servers, const ::FeedCoordinator& feedCoordinator,
+	Service(const Options& options, const ::ServerPool& serverPool, const ::FeedCoordinator& feedCoordinator,
 			const ::Scheduler& scheduler, const ::Log& log)
-		: m_options(options), m_servers(servers), m_feedCoordinator(feedCoordinator), m_scheduler(scheduler), m_log(log)
-	{
-	}
+		: m_options(options), m_serverPool(serverPool), m_feedCoordinator(feedCoordinator), m_scheduler(scheduler), m_log(log) {}
 
-	void DiagnoseAndLog() const
-	{
-		NzbgetRsBuf buf = RunDiagnose(0);
-		nzbget_rs_free(buf);
-	}
-
-	NzbgetRsBuf DiagnoseSerialized(bool isJson) const
-	{
-		return RunDiagnose(isJson ? 1 : 2);
-	}
+	void DiagnoseAndLog() const { nzbget_rs_free(RunDiagnose(0)); }
+	NzbgetRsBuf DiagnoseSerialized(bool isJson) const { return RunDiagnose(isJson ? 1 : 2); }
 
 private:
 	NzbgetRsBuf RunDiagnose(int formatMode) const
 	{
-		std::vector<NzbgetRsHealthServerInput> servers;
-		servers.reserve(m_servers.size());
-		for (const auto& s : m_servers)
-		{
-			servers.push_back(NzbgetRsHealthServerInput{
-				s->GetId(), s->GetActive() ? 1 : 0, s->GetName(), s->GetLevel(),
-				s->GetOptional() ? 1 : 0, s->GetGroup(), s->GetHost(), s->GetPort(),
-				s->GetUser(), s->GetPassword(), s->GetTls() ? 1 : 0, s->GetCipher(),
-				s->GetMaxConnections(), s->GetRetention(),
-				static_cast<uint32_t>(s->GetCertVerificationLevel()), s->GetIpVersion()
-			});
-		}
 		return nzbget_rs_system_health_diagnose(
-			m_options.RsHandle(), servers.data(), servers.size(),
+			m_options.RsHandle(), m_serverPool.RsHandle(),
 			m_feedCoordinator.RsHandle(), m_scheduler.RsHandle(), m_log.RsHandle(),
 			m_options.GetDaemonMode() ? 1 : 0, formatMode);
 	}
 
 	const Options& m_options;
-	const Servers& m_servers;
+	const ::ServerPool& m_serverPool;
 	const ::FeedCoordinator& m_feedCoordinator;
 	const ::Scheduler& m_scheduler;
 	const ::Log& m_log;
@@ -13309,18 +11997,9 @@ private:
 					return 1;
 				}
 				case 16: g_FeedCoordinator->FetchFeed(a1); return 1;
-				case 17: {
-					bool ok = false;
-					for (size_t i = 0; i + 1 < idsLen; i += 2)
-					{
-						for (NewsServer* srv : g_ServerPool->GetServers())
-						{
-							if (srv->GetId() == ids[i]) { srv->SetActive(ids[i + 1] != 0); ok = true; }
-						}
-					}
-					if (ok) g_ServerPool->Changed();
-					return ok ? 1 : 0;
-				}
+				case 17:
+					return nzbget_rs_serverpool_ctl(
+						g_ServerPool->RsHandle(), 7, 0, 0, reinterpret_cast<uintptr_t>(ids), idsLen) != 0 ? 1 : 0;
 				case 18: {
 #ifdef DEBUG
 					int dbg = 1;
@@ -13353,37 +12032,19 @@ private:
 					return 1;
 				}
 				case 23: {
-					NewsServer server(0, true, "test server", s1 ? s1 : "", a1, 0,
-						s2 ? s2 : "", s3 ? s3 : "", false, a2 != 0, s4 ? s4 : "", 1, 0, 0, 0, false, a4);
-					CString errText;
-					class TestConn final : public NntpConnection
-					{
-					public:
-						TestConn(NewsServer* ns, CString* out) : NntpConnection(ns), m_out(out) {}
-					protected:
-						CString* m_out;
-						void PrintError(const char* m) override { if (m_out->Empty() && m) *m_out = m; }
-					} conn(&server, &errText);
-					conn.SetTimeout(a3 > 0 ? a3 : g_Options->GetArticleTimeout());
-					conn.SetSuppressErrors(false);
-					bool ok = conn.Connect();
-					if (ok)
-					{
-						BString<1024> id;
-						while (id.Length() < 30) id.Append(BString<100>("%i", rand()));
-						const char* resp = conn.Request(BString<1024>("ARTICLE <%s@nzbget.com>\r\n", *id));
-						ok = resp && (*resp == '4' || *resp == '2');
-					}
-					if (!ok && !errText.Empty()) setBuf(*errText, strlen(*errText));
-					return ok ? 1 : 0;
+					NzbgetRsBuf err{};
+					int ok = nzbget_rs_serverpool_test(
+						s1 ? s1 : "", a1, s2 ? s2 : "", s3 ? s3 : "",
+						a2, s4 ? s4 : "", a3, static_cast<uint32_t>(a4), &Connection::HostCb, &err);
+					if (!ok && err.data) setBuf(err.data, err.len);
+					nzbget_rs_free(err);
+					return ok;
 				}
 				case 24: {
-					NewsServer* server = g_ServerPool->GetServerById(a1);
-					if (!server || !server->GetActive() || server->GetMaxConnections() == 0)
+					const char* err = nullptr;
+					if (!nzbget_rs_serverpool_ctl(g_ServerPool->RsHandle(), 10, a1, 0, reinterpret_cast<uintptr_t>(&err), 0))
 					{
-						const char* m = !server ? "Server not found" :
-							!server->GetActive() ? "Server is not active" : "Server has no connections configured";
-						setBuf(m, strlen(m));
+						setBuf(err, strlen(err));
 						return 0;
 					}
 					auto nzbInfo = std::make_unique<NzbInfo>();
@@ -13542,9 +12203,8 @@ private:
 					sf.server_time = (int)Util::CurrentTime(); sf.resume_time = (int)g_WorkState->GetResumeTime();
 					sf.feed_active = g_FeedCoordinator->HasActiveDownloads() ? 1 : 0;
 					sf.queued_scripts = g_QueueScriptCoordinator->GetQueueSize();
-					std::vector<NzbgetRsRpcServerStatus> srvs;
-					srvs.reserve(g_ServerPool->GetServers()->size());
-					for (NewsServer* srv : g_ServerPool->GetServers()) srvs.push_back({srv->GetId(), srv->GetActive() ? 1 : 0});
+					std::vector<NzbgetRsRpcServerStatus> srvs(g_ServerPool->ServerCount());
+					nzbget_rs_serverpool_ctl(g_ServerPool->RsHandle(), 9, 0, 0, reinterpret_cast<uintptr_t>(srvs.data()), srvs.size());
 					emitCb(emitCtx, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
 						&sf, 0, srvs.data(), srvs.size(), nullptr, 0, nullptr, 0);
 					return 1;
@@ -13713,21 +12373,9 @@ private:
 						entries.data(), entries.size(), nullptr, 0, nullptr, 0, nullptr, 0);
 					return 1;
 				}
-				case 10: {
-					ScriptConfig::ConfigTemplates* tmpls = g_ScriptConfig->GetConfigTemplates();
-					ScriptConfig::ConfigTemplates loaded;
-					if (a1)
-					{
-						if (!g_ScriptConfig->LoadConfigTemplates(&loaded)) return 0;
-						tmpls = &loaded;
-					}
-					std::vector<const char*> ptrs;
-					ptrs.reserve(tmpls->size());
-					for (ScriptConfig::ConfigTemplate& ct : tmpls) ptrs.push_back(ct.GetTemplate());
-					emitCb(emitCtx, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
-						ptrs.data(), ptrs.size(), nullptr, 0, nullptr, 0, nullptr, 0);
-					return 1;
-				}
+				case 10:
+					return nzbget_rs_script_config_exec(
+						g_ScriptConfig->RsHandle(), 3, a1, nullptr, 0, nullptr, 0, emitCtx, nullptr, emitCb, nullptr);
 				case 11: {
 					struct RpcFeedEmit { decltype(emitCb) cb; void* ctx; } rctx{emitCb, emitCtx};
 					return g_FeedCoordinator->EmitViewOrPreview(a1, a2, a3, a4, a5, (int)n1, s1, s2, s3, s4, s5, s6, &rctx,

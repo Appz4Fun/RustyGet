@@ -705,7 +705,7 @@ mod runtime {
             self.cur_sec_bytes.store(0, Ordering::SeqCst);
         }
 
-        fn current_download_speed(&self) -> i64 {
+        pub(crate) fn current_download_speed(&self) -> i64 {
             calc_current_download_speed(
                 self.stand_by.load(Ordering::SeqCst),
                 current_unix_time(),
@@ -714,7 +714,7 @@ mod runtime {
             )
         }
 
-        fn momentary_download_speed(&self) -> i64 {
+        pub(crate) fn momentary_download_speed(&self) -> i64 {
             calc_momentary_download_speed(
                 current_unix_time(),
                 self.cur_sec_time.load(Ordering::SeqCst),
@@ -722,7 +722,7 @@ mod runtime {
             )
         }
 
-        fn add_speed_reading_locked(&self, bytes: i32) {
+        pub(crate) fn add_speed_reading_locked(&self, bytes: i32) {
             let _guard = match self.speed_mtx.lock() {
                 Ok(g) => g,
                 Err(e) => e.into_inner(),
@@ -825,6 +825,41 @@ mod runtime {
             }
             (month_bytes, day_bytes)
         }
+
+        pub(crate) fn add_server_stats(
+            &self,
+            bytes_read: i32,
+            failed_articles: u32,
+            success_articles: u32,
+            server_id: i32,
+            local_time_offset: i32,
+        ) {
+            let b_u32 = bytes_read.max(0) as u32;
+            let mut vols = match self.volumes.lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
+            if let Some(v0) = vols.get_mut(0) {
+                v0.add_stats(b_u32, failed_articles, success_articles, local_time_offset);
+            }
+            if let Some(vs) = usize::try_from(server_id)
+                .ok()
+                .and_then(|idx| vols.get_mut(idx))
+            {
+                vs.add_stats(b_u32, failed_articles, success_articles, local_time_offset);
+            }
+            self.stat_changed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    static ACTIVE_STATMETER: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsStatMeter>>> =
+        std::sync::RwLock::new(None);
+
+    pub(crate) fn active_statmeter() -> Option<std::sync::Arc<NzbgetRsStatMeter>> {
+        ACTIVE_STATMETER
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
     }
 
     #[no_mangle]
@@ -832,16 +867,26 @@ mod runtime {
         log: *const NzbgetRsLog,
         opts: *const NzbgetRsOptions,
     ) -> *mut NzbgetRsStatMeter {
-        Box::into_raw(Box::new(NzbgetRsStatMeter::new(
-            log.as_ref(),
-            opts.as_ref(),
-        )))
+        let arc = std::sync::Arc::new(NzbgetRsStatMeter::new(log.as_ref(), opts.as_ref()));
+        if let Ok(mut g) = ACTIVE_STATMETER.write() {
+            *g = Some(std::sync::Arc::downgrade(&arc));
+        }
+        std::sync::Arc::into_raw(arc).cast_mut()
     }
 
     #[no_mangle]
     pub unsafe extern "C" fn nzbget_rs_statmeter_free(sm: *mut NzbgetRsStatMeter) {
         if !sm.is_null() {
-            drop(Box::from_raw(sm));
+            let arc = std::sync::Arc::from_raw(sm.cast_const());
+            let wk = std::sync::Arc::downgrade(&arc);
+            if let Ok(mut g) = ACTIVE_STATMETER.write() {
+                if g.as_ref()
+                    .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+                {
+                    *g = None;
+                }
+            }
+            drop(arc);
         }
     }
 
@@ -1269,9 +1314,7 @@ mod runtime {
         local_time_offset: c_int,
         opts: *const NzbgetRsOptions,
         log: *const NzbgetRsLog,
-        servers: *const NzbgetRsServerMatchItem,
-        servers_len: usize,
-        out_state_ids: *mut c_int,
+        pool: *const crate::net::NzbgetRsServerPool,
         inout_perfect: *mut c_int,
     ) -> c_int {
         let Some(s) = sm.as_ref() else {
@@ -1282,19 +1325,27 @@ mod runtime {
         if op == 0 && (server_mode == 0 || opt_ref.is_none()) {
             return 0;
         }
-        let srv_slice = if servers.is_null() || servers_len == 0 {
-            &[][..]
-        } else {
-            std::slice::from_raw_parts(servers, servers_len)
-        };
+        let pool_srvs = pool
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.servers_snapshot());
+        let srv_items: Vec<NzbgetRsServerMatchItem> = pool_srvs
+            .iter()
+            .map(|ns| NzbgetRsServerMatchItem {
+                id: ns.id,
+                port: ns.port,
+                name: ns.name.as_ptr(),
+                host: ns.host.as_ptr(),
+                user: ns.user.as_ptr(),
+            })
+            .collect();
         let mut vols = match s.volumes.lock() {
             Ok(g) => g,
             Err(e) => e.into_inner(),
         };
         let mut bridge = StatDiskBridge {
             vols: &mut vols,
-            servers: srv_slice,
-            state_ids: vec![-1; srv_slice.len()],
+            servers: &srv_items,
+            state_ids: vec![-1; srv_items.len()],
             opts: opt_ref,
             log: log_ref,
         };
@@ -1330,9 +1381,9 @@ mod runtime {
             }
             1 => {
                 let ok = diskstate_exec(12, &ds_env);
-                if !out_state_ids.is_null() {
-                    for (i, &st_id) in bridge.state_ids.iter().enumerate() {
-                        *out_state_ids.add(i) = st_id;
+                for (ns, &st_id) in pool_srvs.iter().zip(bridge.state_ids.iter()) {
+                    if st_id >= 0 {
+                        ns.state_id.store(st_id, Ordering::SeqCst);
                     }
                 }
                 if !inout_perfect.is_null() {
@@ -1467,6 +1518,8 @@ mod runtime {
     }
 }
 
+#[cfg(unix)]
+pub(crate) use runtime::active_statmeter;
 #[cfg(unix)]
 pub use runtime::{
     nzbget_rs_statmeter_ctl, nzbget_rs_statmeter_disk, nzbget_rs_statmeter_free,
@@ -1702,7 +1755,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn statmeter_runtime_disk_and_rpc_roundtrip() {
-        use crate::diskstate_format::NzbgetRsServerMatchItem;
         use crate::log::{nzbget_rs_log_free, nzbget_rs_log_new};
         use crate::options::{
             nzbget_rs_options_free, nzbget_rs_options_new, NzbgetRsParsedOptions,
@@ -1806,26 +1858,29 @@ mod tests {
             assert_eq!(tot_ints[2], 0);
             assert_eq!(all_b, 8192);
 
-            let srv = [NzbgetRsServerMatchItem {
-                id: 1,
-                port: 563,
-                name: c"News1".as_ptr(),
-                host: c"news.example.com".as_ptr(),
-                user: c"alice".as_ptr(),
-            }];
+            let pool = crate::net::nzbget_rs_serverpool_new(None);
+            crate::net::nzbget_rs_serverpool_add(
+                pool,
+                1,
+                1,
+                c"News1".as_ptr(),
+                c"news.example.com".as_ptr(),
+                563,
+                0,
+                c"alice".as_ptr(),
+                c"".as_ptr(),
+                0,
+                1,
+                c"".as_ptr(),
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+            );
             assert_eq!(
-                nzbget_rs_statmeter_disk(
-                    sm,
-                    0,
-                    1,
-                    init_off,
-                    opts,
-                    log,
-                    srv.as_ptr(),
-                    srv.len(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                ),
+                nzbget_rs_statmeter_disk(sm, 0, 1, init_off, opts, log, pool, ptr::null_mut()),
                 1
             );
 
@@ -1843,25 +1898,21 @@ mod tests {
                 &mut init_off,
                 ptr::null_mut(),
             );
-            let mut state_ids = [0i32; 1];
             let mut perfect = 0i32;
             assert_eq!(
-                nzbget_rs_statmeter_disk(
-                    sm2,
-                    1,
-                    1,
-                    init_off,
-                    opts,
-                    log,
-                    srv.as_ptr(),
-                    srv.len(),
-                    state_ids.as_mut_ptr(),
-                    &mut perfect,
-                ),
+                nzbget_rs_statmeter_disk(sm2, 1, 1, init_off, opts, log, pool, &mut perfect),
                 1
             );
             assert_eq!(perfect, 1);
-            assert_eq!(state_ids[0], 1);
+            assert_eq!(
+                (*pool)
+                    .server_by_id(1)
+                    .unwrap()
+                    .state_id
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            crate::net::nzbget_rs_serverpool_free(pool);
 
             unsafe extern "C" fn capture_vols(
                 ctx: *mut c_void,

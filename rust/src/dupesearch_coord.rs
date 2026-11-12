@@ -5,7 +5,7 @@
 //! `Fleet` in `daemon/util/Util.h`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -13,31 +13,31 @@ use std::time::{Duration, Instant};
 
 use crate::deadpostings::DeadPostingsStore;
 use crate::dupesearch_nzb::{
-    DONOR_MIN_KNOWN, DonorAnswer, DonorExchangeError, DonorHealthResult, DonorOptions,
-    DonorPosting, DonorRequest, DonorSampleOptions, DonorServer, DonorServerExchange,
-    FetchedArticleResult, NewznabResult, NzbFetchReason, NzbFetched,
-    NzbFetcherCore, NzbFetcherStats, NzbSummaryData, build_newznab_queries,
-    build_newznab_url_percent, check_pending_identity, donor_check_posting, donor_check_postings,
-    donor_dead_probe, donor_now_ms, donor_reset, donor_stop_all, donor_stopping, donor_wait_all,
-    dupe_bytes_to_path, dupe_identity_fetch_article, dupe_identity_read, dupe_read_all_bytes,
-    dupe_util_lower, dupe_write_atomic_bytes, dupesearch_calc_expand_budget_ms,
-    dupesearch_classify_search_retry_reason, dupesearch_eval_post_place_retry,
-    dupesearch_format_pending_dir, dupesearch_format_rejected_outcome,
-    dupesearch_is_better_parent_candidate, dupesearch_is_rank_only_queued_member,
-    dupesearch_parse_pending_dir_id, eval_fleet_member_health, eval_fleet_outcome_reason,
-    eval_member_rerank, eval_pick_gone, fleet_calc_member_add_score, fleet_clamp_timeout_sec,
-    fleet_ensure_nzb_ext, fleet_format_fetch_error, fleet_format_summary_log,
-    fleet_update_key_score_bounds, fleet_visit_pipe_names, http_get_format_temp_path,
-    http_get_read_and_delete, lower_key, mark_searching_pending, mask_newznab_text,
-    newznab_format_query_label, newznab_format_search_info_name, parse_atoi_bytes,
-    parse_dupesearch_state_line, parse_newznab_response, parse_nzb_summary, parse_pending_meta,
-    placement_available, rank_fleet_candidates, save_pending_finish, save_pending_header,
-    save_pending_item, saved_history_backup, sort_verified_postings,
+    build_newznab_queries, build_newznab_url_percent, check_pending_identity, donor_check_posting,
+    donor_check_postings, donor_dead_probe, donor_now_ms, donor_reset, donor_stop_all,
+    donor_stopping, donor_wait_all, dupe_bytes_to_path, dupe_identity_fetch_article,
+    dupe_identity_read, dupe_read_all_bytes, dupe_util_lower, dupe_write_atomic_bytes,
+    dupesearch_calc_expand_budget_ms, dupesearch_classify_search_retry_reason,
+    dupesearch_eval_post_place_retry, dupesearch_format_pending_dir,
+    dupesearch_format_rejected_outcome, dupesearch_is_better_parent_candidate,
+    dupesearch_is_rank_only_queued_member, dupesearch_parse_pending_dir_id,
+    eval_fleet_member_health, eval_fleet_outcome_reason, eval_member_rerank, eval_pick_gone,
+    fleet_calc_member_add_score, fleet_clamp_timeout_sec, fleet_ensure_nzb_ext,
+    fleet_format_fetch_error, fleet_format_summary_log, fleet_update_key_score_bounds,
+    fleet_visit_pipe_names, http_get_format_temp_path, http_get_read_and_delete, lower_key,
+    mark_searching_pending, mask_newznab_text, newznab_format_query_label,
+    newznab_format_search_info_name, parse_atoi_bytes, parse_dupesearch_state_line,
+    parse_newznab_response, parse_nzb_summary, parse_pending_meta, placement_available,
+    rank_fleet_candidates, save_pending_finish, save_pending_header, save_pending_item,
+    saved_history_backup, sort_verified_postings, DonorAnswer, DonorExchangeError,
+    DonorHealthResult, DonorOptions, DonorPosting, DonorRequest, DonorSampleOptions, DonorServer,
+    DonorServerExchange, FetchedArticleResult, NewznabResult, NzbFetchReason, NzbFetched,
+    NzbFetcherCore, NzbFetcherStats, NzbSummaryData, DONOR_MIN_KNOWN,
 };
 use crate::dupewatch::{
-    BASE_PICK_SCORE, Decision, FetchBudget, MANAGED_FLEET, SearchStamp, Snapshot,
-    build_item_flags, dead_donor, decide, effective_alive, format_searched_state_line,
-    higher_peer, is_live_fleet_peer, par_doomed, unlisted_missing, whole_bytes,
+    build_item_flags, dead_donor, decide, effective_alive, format_searched_state_line, higher_peer,
+    is_live_fleet_peer, par_doomed, unlisted_missing, whole_bytes, Decision, FetchBudget,
+    SearchStamp, Snapshot, BASE_PICK_SCORE, MANAGED_FLEET,
 };
 use crate::xmlrpc_format::{
     NzbgetRsRpcFleetMember, NzbgetRsRpcFleetReqMember, NzbgetRsXmlRpcEmitFn,
@@ -196,7 +196,9 @@ fn outer_compatible(title: &[u8], name: &[u8]) -> bool {
 }
 
 #[inline]
-fn identity_present(id: &Option<crate::dupeidentity::Identity>) -> Option<&crate::dupeidentity::Identity> {
+fn identity_present(
+    id: &Option<crate::dupeidentity::Identity>,
+) -> Option<&crate::dupeidentity::Identity> {
     match id.as_ref() {
         Some(v) if v.bytes != 0 && !v.extension.is_empty() => Some(v),
         _ => None,
@@ -927,54 +929,75 @@ pub fn http_fetch(
 // NntpHealthServer (`NntpHealthTransportShared` & server pool cache)
 // ============================================================================
 
-static NNTP_KNOWN_SERVERS: OnceLock<Mutex<BTreeMap<(i32, usize), (Arc<DonorServer>, Arc<AtomicUsize>)>>> =
-    OnceLock::new();
+static NNTP_KNOWN_SERVERS: OnceLock<
+    Mutex<BTreeMap<(i32, usize), (Arc<DonorServer>, Arc<AtomicUsize>)>>,
+> = OnceLock::new();
 
 pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Arc<DonorServer>> {
     let map_mutex = NNTP_KNOWN_SERVERS.get_or_init(|| Mutex::new(BTreeMap::new()));
     let mut known = map_mutex.lock().unwrap_or_else(|e| e.into_inner());
-    let count = unsafe {
-        host_cb(
-            host_ctx,
-            10,
-            -1,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null(),
-            0,
-        )
+    let mut raw_servers: Vec<(i32, i32, i32, i32)> = Vec::new();
+    #[cfg(unix)]
+    let used_native = if let Some(pool) = crate::net::active_server_pool() {
+        for s in pool.servers_snapshot() {
+            raw_servers.push((
+                s.id,
+                c_int::from(s.active.load(Ordering::SeqCst)),
+                s.max_connections,
+                s.group,
+            ));
+        }
+        true
+    } else {
+        false
     };
-    let mut list = Vec::new();
-    let mut groups = BTreeSet::new();
-    for idx in 0..count {
-        let mut ints = [0 as c_int; 4];
-        let ok = unsafe {
+    #[cfg(not(unix))]
+    let used_native = false;
+    if !used_native {
+        let count = unsafe {
             host_cb(
                 host_ctx,
                 10,
-                idx as c_int,
+                -1,
                 0,
                 0,
                 0,
                 ptr::null(),
                 ptr::null(),
-                ints.as_mut_ptr(),
+                ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null(),
                 0,
             )
         };
-        if ok == 0 {
-            continue;
+        for idx in 0..count {
+            let mut ints = [0 as c_int; 4];
+            let ok = unsafe {
+                host_cb(
+                    host_ctx,
+                    10,
+                    idx as c_int,
+                    0,
+                    0,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ints.as_mut_ptr(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null(),
+                    0,
+                )
+            };
+            if ok != 0 {
+                raw_servers.push((ints[0], ints[1], ints[2], ints[3]));
+            }
         }
-        let (server_id, active, max_conns, group) = (ints[0], ints[1], ints[2], ints[3]);
+    }
+    let mut list = Vec::new();
+    let mut groups = BTreeSet::new();
+    for (server_id, active, max_conns, group) in raw_servers {
         if active == 0 || max_conns == 0 {
             continue;
         }
@@ -1020,6 +1043,176 @@ impl DonorServerExchange for NntpHealthTransportShared {
         }
         let ctx = self.host_ctx.load(Ordering::SeqCst) as *mut c_void;
         let host_cb = self.host_cb;
+
+        #[cfg(unix)]
+        if let Some(pool) = crate::net::active_server_pool() {
+            let wait_start = host_now(ctx, host_cb);
+            let mut conn_ptr = 0usize;
+            let mut need_join = false;
+            while conn_ptr == 0 && !http_stopped() && host_now(ctx, host_cb) - wait_start <= 10 {
+                let Some(srv) = pool.server_by_id(self.server_id) else {
+                    return Err(DonorExchangeError::default());
+                };
+                need_join = srv.join_group;
+                let nl = srv.norm_level.load(Ordering::SeqCst);
+                let raw = pool.get_connection(nl, Some(&srv), &[]);
+                if !raw.is_null() {
+                    conn_ptr = raw as usize;
+                } else {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            if conn_ptr == 0 {
+                return Err(DonorExchangeError {
+                    answers: Vec::new(),
+                    busy: true,
+                });
+            }
+
+            struct NativeConnRelease {
+                pool: Arc<crate::net::NzbgetRsServerPool>,
+                conn_ptr: usize,
+                broken: bool,
+            }
+            impl Drop for NativeConnRelease {
+                fn drop(&mut self) {
+                    let raw = self.conn_ptr as *mut crate::net::PooledNntpConn;
+                    if self.broken {
+                        unsafe {
+                            (*raw).disconnect();
+                        }
+                    }
+                    self.pool.free_connection(raw, true);
+                }
+            }
+            let mut release = NativeConnRelease {
+                pool,
+                conn_ptr,
+                broken: false,
+            };
+
+            let mut commands = Vec::with_capacity(batch.len() * 48);
+            for req in batch {
+                commands.extend_from_slice(b"STAT ");
+                commands.extend_from_slice(&crate::nntp::nntp_health_format_bracketed_id(
+                    req.message_id.as_bytes(),
+                ));
+                commands.extend_from_slice(b"\r\n");
+            }
+
+            let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
+            unsafe {
+                conn.prepare_for_use();
+            }
+            if !unsafe { conn.connect() } {
+                release.broken = true;
+                return Err(DonorExchangeError::default());
+            }
+            if need_join && !batch[0].groups.is_empty() {
+                let mut joined_ptr: *const c_char = ptr::null();
+                for grp in batch[0].groups.iter() {
+                    let g_c = c_bytes(grp.as_bytes());
+                    joined_ptr = unsafe { conn.join_group(g_c.as_ptr() as *const c_char) };
+                    if !joined_ptr.is_null() && unsafe { *joined_ptr as u8 } == b'2' {
+                        break;
+                    }
+                }
+                let ok_join = !joined_ptr.is_null() && unsafe { *joined_ptr as u8 } == b'2';
+                if !ok_join {
+                    release.broken = joined_ptr.is_null();
+                    return Err(DonorExchangeError::default());
+                }
+            }
+            if !unsafe { conn.send_bytes(&commands) } {
+                release.broken = true;
+                return Err(DonorExchangeError::default());
+            }
+
+            let mut answers = Vec::with_capacity(batch.len());
+            let mut line = [0u8; 1024];
+            for _ in 0..batch.len() {
+                if http_stopped() || donor_stopping() {
+                    release.broken = true;
+                    return Err(DonorExchangeError {
+                        answers,
+                        busy: false,
+                    });
+                }
+                let Some(n) = (unsafe { conn.read_line(&mut line) }) else {
+                    release.broken = true;
+                    return Err(DonorExchangeError {
+                        answers,
+                        busy: false,
+                    });
+                };
+                answers.push(if n >= 3 && &line[..3] == b"223" {
+                    DonorAnswer::Present
+                } else if n >= 3 && &line[..3] == b"430" {
+                    DonorAnswer::Missing
+                } else {
+                    DonorAnswer::Error
+                });
+            }
+
+            for i in 0..batch.len() {
+                if http_stopped() || donor_stopping() {
+                    release.broken = true;
+                    for j in i..batch.len() {
+                        if batch[j].gate.is_some() && answers[j] == DonorAnswer::Present {
+                            answers[j] = DonorAnswer::Error;
+                        }
+                    }
+                    return Err(DonorExchangeError {
+                        answers,
+                        busy: false,
+                    });
+                }
+                let Some(gate) = batch[i].gate.as_ref() else {
+                    continue;
+                };
+                if answers[i] != DonorAnswer::Present {
+                    continue;
+                }
+                let res = gate.body_once_fallible(|| {
+                    let bracketed = crate::nntp::nntp_health_format_bracketed_id(
+                        batch[i].message_id.as_bytes(),
+                    );
+                    let bg_vecs: Vec<Vec<u8>> = batch[i]
+                        .groups
+                        .iter()
+                        .map(|g| g.as_bytes().to_vec())
+                        .collect();
+                    let art = crate::articlefetcher::ArticleFetcher::new(
+                        crate::articlefetcher::native_nntp_fetch_host,
+                    )
+                    .fetch_from_connection(conn_ptr, &bracketed, &bg_vecs);
+                    if art.success {
+                        Ok(DonorAnswer::Present)
+                    } else if art.transient {
+                        Err(())
+                    } else {
+                        Ok(DonorAnswer::BodyBad)
+                    }
+                });
+                match res {
+                    Ok(ans) => answers[i] = ans,
+                    Err(()) => {
+                        release.broken = true;
+                        answers[i] = DonorAnswer::Error;
+                        for j in (i + 1)..batch.len() {
+                            if batch[j].gate.is_some() && answers[j] == DonorAnswer::Present {
+                                answers[j] = DonorAnswer::Error;
+                            }
+                        }
+                        return Err(DonorExchangeError {
+                            answers,
+                            busy: false,
+                        });
+                    }
+                }
+            }
+            return Ok(answers);
+        }
 
         let wait_start = host_now(ctx, host_cb);
         let mut conn_ptr = 0usize;
@@ -1102,7 +1295,11 @@ impl DonorServerExchange for NntpHealthTransportShared {
         }
 
         let g_vecs: Vec<Vec<u8>> = if need_join && !batch[0].groups.is_empty() {
-            batch[0].groups.iter().map(|g| c_bytes(g.as_bytes())).collect()
+            batch[0]
+                .groups
+                .iter()
+                .map(|g| c_bytes(g.as_bytes()))
+                .collect()
         } else {
             Vec::new()
         };
@@ -1244,6 +1441,10 @@ fn get_nntp_fetch_host(
     host_ctx: *mut c_void,
     host_cb: DupeHostFn,
 ) -> Option<crate::articlefetcher::NzbgetRsNntpFetchHostFn> {
+    #[cfg(unix)]
+    if crate::net::active_server_pool().is_some() {
+        return Some(crate::articlefetcher::native_nntp_fetch_host);
+    }
     let raw = unsafe {
         host_cb(
             host_ctx,
@@ -1581,8 +1782,10 @@ impl SearchInner {
 
     fn record_search(&mut self, lower_key: &[u8], searched: SearchedStamp) {
         if !searched.title.is_empty() {
-            self.title_searched
-                .insert((lower_key.to_vec(), searched.title.clone()), searched.clone());
+            self.title_searched.insert(
+                (lower_key.to_vec(), searched.title.clone()),
+                searched.clone(),
+            );
         }
         self.searched.insert(lower_key.to_vec(), searched);
     }
@@ -1756,8 +1959,10 @@ impl NzbgetRsDupeSearch {
             let same_key = item_low == low_key;
             let same_rel = crate::releasename::same_release(&pick.name, &item.name);
             let qf = &item.queued_filename;
-            let add_known =
-                item.kind == 0 && !qf.is_empty() && item.delete_status != 1 && (same_key || same_rel);
+            let add_known = item.kind == 0
+                && !qf.is_empty()
+                && item.delete_status != 1
+                && (same_key || same_rel);
             let add_member = if !in_history {
                 dupesearch_is_rank_only_queued_member(
                     job.rank_only,
@@ -2020,14 +2225,15 @@ impl NzbgetRsDupeSearch {
         {
             Decision::Search
         } else {
-            let prev_stamp = if have_previous && !previous.retryable && !rank_only && !changed_identity {
-                Some(SearchStamp {
-                    score: previous.score,
-                    time: previous.time,
-                })
-            } else {
-                None
-            };
+            let prev_stamp =
+                if have_previous && !previous.retryable && !rank_only && !changed_identity {
+                    Some(SearchStamp {
+                        score: previous.score,
+                        time: previous.time,
+                    })
+                } else {
+                    None
+                };
             let prelim = decide(
                 pick_flags,
                 pick.dupe_score,
@@ -2208,7 +2414,11 @@ impl NzbgetRsDupeSearch {
                     seed: 0,
                 },
                 probe: 10,
-                budget_ms: dupesearch_calc_expand_budget_ms(cur.health_budget_sec, deadline, cur.now),
+                budget_ms: dupesearch_calc_expand_budget_ms(
+                    cur.health_budget_sec,
+                    deadline,
+                    cur.now,
+                ),
                 deadline_ms: 0,
             }
         };
@@ -2271,7 +2481,10 @@ impl NzbgetRsDupeSearch {
                 }
             }
         }
-        if !(job.failed || doomed || (alive.is_finite() && (0.0..0.85).contains(&alive) && missing >= 5)) {
+        if !(job.failed
+            || doomed
+            || (alive.is_finite() && (0.0..0.85).contains(&alive) && missing >= 5))
+        {
             return;
         }
 
@@ -2297,12 +2510,13 @@ impl NzbgetRsDupeSearch {
         };
 
         for posting in fetched.iter() {
-            let sketch = crate::posting::make_sketch(
-                posting.info.message_ids.iter().map(|v| v.as_slice()),
-            );
+            let sketch =
+                crate::posting::make_sketch(posting.info.message_ids.iter().map(|v| v.as_slice()));
             let now_s = host_now(host_ctx, host_cb);
             if self.dead.is_dead(&sketch, now_s)
-                || known.iter().any(|k| crate::posting::same_sketch(&sketch, k))
+                || known
+                    .iter()
+                    .any(|k| crate::posting::same_sketch(&sketch, k))
             {
                 continue;
             }
@@ -2447,8 +2661,10 @@ impl NzbgetRsDupeSearch {
             if c_opts.stopped || budget.spent() || c_opts.now >= deadline {
                 break;
             }
-            let group: Vec<NewznabResult> =
-                group_indices.into_iter().map(|i| accepted[i].clone()).collect();
+            let group: Vec<NewznabResult> = group_indices
+                .into_iter()
+                .map(|i| accepted[i].clone())
+                .collect();
             for r in &group {
                 attempted.insert(r.link.clone());
             }
@@ -2518,7 +2734,14 @@ impl NzbgetRsDupeSearch {
             http_stopped,
             || std::thread::sleep(Duration::from_millis(100)),
             move |url, label, max_bytes, dl_ms| {
-                http_fetch(ctx_addr as *mut c_void, host_cb, url, label, max_bytes, dl_ms)
+                http_fetch(
+                    ctx_addr as *mut c_void,
+                    host_cb,
+                    url,
+                    label,
+                    max_bytes,
+                    dl_ms,
+                )
             },
             move |msg| host_log(ctx_addr as *mut c_void, host_cb, MK_INFO, msg),
             move |msg| host_log(ctx_addr as *mut c_void, host_cb, MK_WARNING, msg),
@@ -2622,7 +2845,11 @@ impl NzbgetRsDupeSearch {
         let mut fetch_stats = NzbFetcherStats::default();
         let mut fetched: Vec<NzbFetched> = Vec::new();
         let mut not_tried = 0i32;
-        let parallel = if opts.max_donors > 0 { 1 } else { FETCH_PARALLEL };
+        let parallel = if opts.max_donors > 0 {
+            1
+        } else {
+            FETCH_PARALLEL
+        };
         let ctx_addr = host_ctx as usize;
 
         std::thread::scope(|outer_scope| {
@@ -2712,17 +2939,19 @@ impl NzbgetRsDupeSearch {
         let mut verified: Vec<NzbFetched> = Vec::new();
         let mut rejected: BTreeMap<Vec<u8>, i32> = BTreeMap::new();
         for posting in fetched.iter() {
-            let sketch = crate::posting::make_sketch(
-                posting.info.message_ids.iter().map(|v| v.as_slice()),
-            );
+            let sketch =
+                crate::posting::make_sketch(posting.info.message_ids.iter().map(|v| v.as_slice()));
             let ids = &posting.info.message_ids;
             let main_readable =
                 !posting.lenient && crate::releasename::readable(&posting.info.main_name);
-            let same_rel =
-                main_readable && crate::releasename::same_release(&job.name, &posting.info.main_name);
+            let same_rel = main_readable
+                && crate::releasename::same_release(&job.name, &posting.info.main_name);
             if main_readable && !same_rel {
                 *rejected.entry(b"other-release".to_vec()).or_insert(0) += 1;
-            } else if known.iter().any(|k| crate::posting::same_sketch(&sketch, k)) {
+            } else if known
+                .iter()
+                .any(|k| crate::posting::same_sketch(&sketch, k))
+            {
                 *rejected.entry(b"in-nzbget".to_vec()).or_insert(0) += 1;
             } else if self.dead.is_dead(&sketch, host_now(host_ctx, host_cb)) {
                 *rejected.entry(b"known-dead".to_vec()).or_insert(0) += 1;
@@ -2780,7 +3009,13 @@ impl NzbgetRsDupeSearch {
         );
     }
 
-    fn record_dead(&self, host_ctx: *mut c_void, host_cb: DupeHostFn, sketch: Vec<u32>, save: bool) {
+    fn record_dead(
+        &self,
+        host_ctx: *mut c_void,
+        host_cb: DupeHostFn,
+        sketch: Vec<u32>,
+        save: bool,
+    ) {
         let opts = read_host_opts(host_ctx, host_cb);
         if !self.dead.add(sketch, opts.now, save) {
             let state_path = path_join(&opts.queue_dir, opts.sep, b"dupesearch-dead");
@@ -2825,7 +3060,9 @@ impl NzbgetRsDupeSearch {
             if s.is_empty() {
                 let mut msg = b"DupeSearch: ".to_vec();
                 push_c_slice(&mut msg, &job.name);
-                msg.extend_from_slice(b": no active news servers, the postings are added unchecked");
+                msg.extend_from_slice(
+                    b": no active news servers, the postings are added unchecked",
+                );
                 self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
             }
             s
@@ -2857,7 +3094,13 @@ impl NzbgetRsDupeSearch {
                 && a.data_files == b.data_files
         };
         let alive_of = |h: &DonorHealthResult, s: &NzbSummaryData| -> f64 {
-            effective_alive(h.present, h.missing, h.error, s.listed_parts, s.declared_parts)
+            effective_alive(
+                h.present,
+                h.missing,
+                h.error,
+                s.listed_parts,
+                s.declared_parts,
+            )
         };
         let is_dead_summary = |h: &DonorHealthResult, s: &NzbSummaryData, min_alive: i32| -> bool {
             dead_donor(
@@ -2958,8 +3201,9 @@ impl NzbgetRsDupeSearch {
                     );
                     if donor_dead_probe(&h) {
                         let dry = read_host_opts(ctx_addr as *mut c_void, host_cb).dry_run;
-                        let sk =
-                            crate::posting::make_sketch(pick.message_ids.iter().map(|v| v.as_slice()));
+                        let sk = crate::posting::make_sketch(
+                            pick.message_ids.iter().map(|v| v.as_slice()),
+                        );
                         self.record_dead(ctx_addr as *mut c_void, host_cb, sk, !dry);
                         let mut msg = b"DupeSearch: ".to_vec();
                         push_c_slice(&mut msg, &job.name);
@@ -3052,15 +3296,7 @@ impl NzbgetRsDupeSearch {
                 let ctx = ctx_addr as *mut c_void;
                 let twin = same_data(pick, &verified[i].info);
                 let score = take_rank_set(&mut st.ranks_used, alive, twin);
-                let id = self.add_donor(
-                    ctx,
-                    host_cb,
-                    job,
-                    pick,
-                    &verified[i],
-                    base + score,
-                    alive,
-                );
+                let id = self.add_donor(ctx, host_cb, job, pick, &verified[i], base + score, alive);
                 if id == 0 {
                     st.ranks_used.remove(&score);
                     return;
@@ -3144,8 +3380,7 @@ impl NzbgetRsDupeSearch {
                                 return;
                             }
                             let alive = alive_of(health, &verified[i].info);
-                            let is_dead =
-                                is_dead_summary(health, &verified[i].info, cur.min_alive);
+                            let is_dead = is_dead_summary(health, &verified[i].info, cur.min_alive);
                             let pct = if alive < 0.0 {
                                 -1
                             } else {
@@ -3189,7 +3424,13 @@ impl NzbgetRsDupeSearch {
                                 let param = format!("DupeAlive={alive_val}").into_bytes();
                                 let params_vec = vec![param];
                                 if alive < 0.0
-                                    || self.set_score(ctx, host_cb, donor_id, base + new_score, &params_vec)
+                                    || self.set_score(
+                                        ctx,
+                                        host_cb,
+                                        donor_id,
+                                        base + new_score,
+                                        &params_vec,
+                                    )
                                 {
                                     if alive < 0.0 {
                                         st.ranks_used.remove(&new_score);
@@ -3231,11 +3472,7 @@ impl NzbgetRsDupeSearch {
                             } else if is_dead {
                                 if cacheable_loss(health, cur.min_alive) {
                                     let sk = crate::posting::make_sketch(
-                                        verified[i]
-                                            .info
-                                            .message_ids
-                                            .iter()
-                                            .map(|m| m.as_slice()),
+                                        verified[i].info.message_ids.iter().map(|m| m.as_slice()),
                                     );
                                     self.record_dead(ctx, host_cb, sk, !cur.dry_run);
                                 }
@@ -3261,21 +3498,22 @@ impl NzbgetRsDupeSearch {
 
             let mut state = state_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
 
-            let check_interrupted = |pc: &mut Option<std::thread::ScopedJoinHandle<'_, ()>>| -> bool {
-                if !host_stopped(host_ctx, host_cb) {
-                    return false;
-                }
-                if let Some(h) = pc.take() {
-                    let _ = h.join();
-                }
-                let mut msg = b"DupeSearch: ".to_vec();
-                push_c_slice(&mut msg, &job.name);
-                msg.extend_from_slice(
-                    b": RustyGet shuts down, the search resumes after the restart",
-                );
-                self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
-                true
-            };
+            let check_interrupted =
+                |pc: &mut Option<std::thread::ScopedJoinHandle<'_, ()>>| -> bool {
+                    if !host_stopped(host_ctx, host_cb) {
+                        return false;
+                    }
+                    if let Some(h) = pc.take() {
+                        let _ = h.join();
+                    }
+                    let mut msg = b"DupeSearch: ".to_vec();
+                    push_c_slice(&mut msg, &job.name);
+                    msg.extend_from_slice(
+                        b": RustyGet shuts down, the search resumes after the restart",
+                    );
+                    self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
+                    true
+                };
 
             if check_interrupted(&mut pick_check) {
                 interrupted_early = true;
@@ -3311,7 +3549,8 @@ impl NzbgetRsDupeSearch {
                 let mut same_as: BTreeMap<usize, usize> = BTreeMap::new();
                 for m in 0..job.members.len() {
                     unchecked_members.insert(m);
-                    let Some(parsed) = parse_nzb_summary(&dupe_read_all_bytes(&job.members[m].1)) else {
+                    let Some(parsed) = parse_nzb_summary(&dupe_read_all_bytes(&job.members[m].1))
+                    else {
                         continue;
                     };
                     if same_posting_vecs(&parsed.message_ids, &pick.message_ids) {
@@ -3436,7 +3675,14 @@ impl NzbgetRsDupeSearch {
                 let wanted = crate::donorscore::rerank(&entries, pick_bytes);
                 let all_dead = wanted.iter().all(|&sc| sc == crate::donorscore::DEAD);
                 for (n, &slot_key) in order2.iter().enumerate() {
-                    let (donor_id, donor_member, donor_old_score, donor_entry_score, donor_alive, donor_title) = {
+                    let (
+                        donor_id,
+                        donor_member,
+                        donor_old_score,
+                        donor_entry_score,
+                        donor_alive,
+                        donor_title,
+                    ) = {
                         let d = &st.placed[&slot_key];
                         (
                             d.id,
@@ -3729,7 +3975,8 @@ impl NzbgetRsDupeSearch {
         let fingerprint = posting.info.fingerprint();
         {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if !g.sent
+            if !g
+                .sent
                 .entry(job.nzb_id)
                 .or_default()
                 .insert(fingerprint.clone())
@@ -3849,8 +4096,10 @@ impl NzbgetRsDupeSearch {
         with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
             let score_c = c_bytes(score.to_string().as_bytes());
             let c_params: Vec<Vec<u8>> = params.iter().map(|p| c_bytes(p)).collect();
-            let mut ptrs: Vec<*const c_char> =
-                c_params.iter().map(|v| v.as_ptr() as *const c_char).collect();
+            let mut ptrs: Vec<*const c_char> = c_params
+                .iter()
+                .map(|v| v.as_ptr() as *const c_char)
+                .collect();
             let ok = unsafe {
                 host_cb(
                     host_ctx,
@@ -4036,8 +4285,7 @@ impl NzbgetRsDupeSearch {
                     {
                         g.rank_pending.insert(nzb_id);
                     }
-                    g.pending
-                        .insert(nzb_id, cur.now + i64::from(cur.delay_sec));
+                    g.pending.insert(nzb_id, cur.now + i64::from(cur.delay_sec));
                     self.cond.notify_all();
                 } else {
                     let key = dupe_read_all_bytes(&path_join(&dir, opts.sep, b"pick-key"));
@@ -4081,7 +4329,8 @@ impl NzbgetRsDupeSearch {
             resume_msg.extend_from_slice(b" after a restart");
             self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &resume_msg);
 
-            let pick = parse_nzb_summary(&dupe_read_all_bytes(&job.queued_file)).unwrap_or_default();
+            let pick =
+                parse_nzb_summary(&dupe_read_all_bytes(&job.queued_file)).unwrap_or_default();
             let pick_fp = pick.fingerprint();
             if !check_pending_identity(&dir, &job.name, &job.dupe_key, &pick_fp) {
                 self.note(
@@ -4170,7 +4419,10 @@ impl NzbgetRsDupeSearch {
                     *rejected.entry(b"already-sent".to_vec()).or_insert(0) += 1;
                     continue;
                 }
-                if known.iter().any(|k| crate::posting::same_sketch(&sketch, k)) {
+                if known
+                    .iter()
+                    .any(|k| crate::posting::same_sketch(&sketch, k))
+                {
                     *rejected.entry(b"in-nzbget".to_vec()).or_insert(0) += 1;
                     continue;
                 }

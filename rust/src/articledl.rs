@@ -1,11 +1,11 @@
-//! Full Rust runtime backing `MemoryMonitor`, `ArticleCache`, `ServerPool`,
+//! Full Rust runtime backing `MemoryMonitor`, `ArticleCache`,
 //! `ArticleWriter`, `RenameContentAnalyzer`, and `ArticleDownloader`.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 
 use crate::artwritercore::{
     article_cache_should_flush, article_dl_format_connection_name, article_dl_format_fetch_command,
@@ -20,18 +20,14 @@ use crate::artwritercore::{
     ArticleWriterProcessItem, PRESSURE_CONSTRAINED, PRESSURE_CRITICAL, PRESSURE_NORMAL,
 };
 use crate::decoder::{Decoder, Format};
-use crate::dupefallback::{
-    article_downloader_check_response, article_downloader_validate_yenc, server_pool_is_blocked,
-    server_pool_level_should_close, server_pool_normalize_levels, NzbgetRsServerNormInput,
-};
+use crate::dupefallback::{article_downloader_check_response, article_downloader_validate_yenc};
 use crate::nntp::{
     article_dl_all_servers_on_level_failed, article_dl_classify_attempt_stat,
     article_dl_classify_decode_status, article_dl_classify_write_failure,
     article_dl_eval_level_exhaustion, article_dl_handle_content_rejected,
     article_dl_is_join_group_ok, article_dl_is_retention_failure,
     article_dl_normalize_connect_and_decrement_retries, article_dl_resolve_final_status,
-    article_dl_should_advance_server_list, server_pool_eval_block_server,
-    server_pool_select_connection, ServerPoolConnView, ServerPoolServerView, TransientRetries,
+    article_dl_should_advance_server_list, TransientRetries,
 };
 use crate::queuesubsys_host::{
     NzbgetRsQueueSubsysHostFn, AD_FAILED, AD_FATAL_ERROR, AD_FINISHED, AD_RETRY, AD_RUNNING,
@@ -45,7 +41,27 @@ const AD_NOT_FOUND: i32 = 7;
 const AD_CONNECT_ERROR: i32 = 8;
 const AD_TRANSIENT_ERROR: i32 = 9;
 const DM_FORCE: i32 = 2;
-const CONNECTION_HOLD_SECONDS: i32 = 5;
+
+#[inline]
+fn now_sec() -> i64 {
+    #[cfg(unix)]
+    unsafe {
+        libc::time(std::ptr::null_mut()) as i64
+    }
+    #[cfg(not(unix))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    }
+}
+
+#[inline]
+fn sleep_ms(ms: i32) {
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    }
+}
 
 fn c_bytes(bytes: &[u8]) -> &[u8] {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
@@ -100,23 +116,16 @@ impl DlHost {
         unsafe { (self.cb)(self.ctx, op, a1, a2, p1, p2, s1, s2, ints, i64s, strs) }
     }
 
+    #[inline]
     fn log(&self, kind: i32, msg: &[u8]) {
-        let c = nul_vec(msg);
-        self.raw(
-            1,
-            kind,
-            0,
-            0,
-            0,
-            c.as_ptr().cast(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        crate::log::log_active_bytes(kind, msg);
     }
 
     fn log_nzb(&self, nzb_ptr: usize, kind: i32, msg: &[u8]) {
+        if nzb_ptr == 0 {
+            crate::log::log_active_bytes(kind, msg);
+            return;
+        }
         let c = nul_vec(msg);
         self.raw(
             1,
@@ -131,50 +140,29 @@ impl DlHost {
             std::ptr::null_mut(),
         );
     }
-
-    fn now(&self) -> i64 {
-        let mut t = [0i64; 1];
-        self.raw(
-            1,
-            10,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            t.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
-        t[0]
-    }
-
-    fn sleep_ms(&self, ms: i32) {
-        self.raw(
-            1,
-            11,
-            ms,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-    }
 }
 
 // ============================================================================
-// MemoryMonitor global runtime state
+// MemoryMonitor + ArticleCache global runtime state
 // ============================================================================
 
+static MEM_ACTIVE: AtomicBool = AtomicBool::new(false);
 static MEM_TIER: AtomicI32 = AtomicI32::new(PRESSURE_NORMAL);
 static MEM_EFFECTIVE_CACHE_MB: AtomicU32 = AtomicU32::new(0);
 static MEM_HYST: Mutex<(i32, i32)> = Mutex::new((PRESSURE_NORMAL, 0));
 
+static CACHE_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+static CACHE_FILE_INFO: AtomicUsize = AtomicUsize::new(0);
+static CACHE_FLUSHING: AtomicBool = AtomicBool::new(false);
+static CACHE_ALLOC_LOCK: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
+static CACHE_FLUSH_LOCK: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
 pub fn memory_monitor_tier() -> i32 {
-    MEM_TIER.load(Ordering::Acquire)
+    if MEM_ACTIVE.load(Ordering::Acquire) {
+        MEM_TIER.load(Ordering::Acquire)
+    } else {
+        PRESSURE_NORMAL
+    }
 }
 
 pub fn memory_monitor_tier_name_c() -> *const c_char {
@@ -187,6 +175,10 @@ pub fn memory_monitor_tier_name_c() -> *const c_char {
 
 pub fn memory_monitor_effective_cache_mb() -> i32 {
     MEM_EFFECTIVE_CACHE_MB.load(Ordering::Acquire) as i32
+}
+
+pub(crate) fn cache_file_busy(file_ptr: usize) -> bool {
+    file_ptr != 0 && file_ptr == CACHE_FILE_INFO.load(Ordering::SeqCst)
 }
 
 pub fn memory_monitor_effective_par_buffer_mb(configured_mb: i32) -> i32 {
@@ -218,23 +210,151 @@ pub fn memory_monitor_effective_downloads_limit(configured_limit: i32) -> i32 {
     }
 }
 
-fn memory_monitor_update_state(host: &DlHost) -> i32 {
-    let mut ints = [0i32; 2];
-    let mut strs = [std::ptr::null::<c_char>(); 1];
-    let _has_opts = host.raw(
-        2,
+fn cache_wakeup_flush() {
+    let _guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+    CACHE_ALLOC_LOCK.1.notify_all();
+}
+
+fn cache_lock_flush() {
+    let mut locked = CACHE_FLUSH_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+    while *locked {
+        locked = CACHE_FLUSH_LOCK
+            .1
+            .wait(locked)
+            .unwrap_or_else(|e| e.into_inner());
+    }
+    *locked = true;
+    CACHE_FLUSHING.store(true, Ordering::Release);
+}
+
+fn cache_unlock_flush() {
+    CACHE_FLUSHING.store(false, Ordering::Release);
+    let mut locked = CACHE_FLUSH_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+    *locked = false;
+    CACHE_FLUSH_LOCK.1.notify_one();
+}
+
+fn cache_effective_limit() -> usize {
+    if MEM_ACTIVE.load(Ordering::Acquire) {
+        (memory_monitor_effective_cache_mb().max(0) as usize) * 1024 * 1024
+    } else {
+        crate::options::active_options().map_or(0, |o| {
+            (o.scalars().article_cache.max(0) as usize) * 1024 * 1024
+        })
+    }
+}
+
+fn write_acache_flag(qdir: &[u8]) {
+    let flag_p =
+        article_writer_format_dest_file_path(qdir, crate::paths::PATH_SEPARATOR, b"acache");
+    if let Ok(flag_c) = CString::new(c_bytes(&flag_p)) {
+        let fd = crate::fsops::open_cloexec_fd(&flag_c, 2, 0, 1, 2);
+        if fd == -1 {
+            crate::log::log_active_bytes(
+                MK_ERROR,
+                &join_c_slices(&[b"Error saving diskstate: Could not create file ", &flag_p]),
+            );
+        } else {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+    }
+}
+
+fn delete_acache_flag(qdir: &[u8]) {
+    let mut o1 = 0;
+    let mut o2 = 0;
+    let _ = crate::diskstate_format::diskstate_fs_op(
+        3,
+        qdir,
+        crate::paths::PATH_SEPARATOR,
         0,
         0,
         0,
         0,
-        std::ptr::null(),
-        std::ptr::null(),
-        ints.as_mut_ptr(),
-        std::ptr::null_mut(),
-        strs.as_mut_ptr(),
+        &mut o1,
+        &mut o2,
     );
-    let cfg_cache = ints[0].max(0) as u32;
-    let interval = ints[1].max(100);
+}
+
+fn cache_alloc(size: i32) -> *mut u8 {
+    if size <= 0 {
+        return std::ptr::null_mut();
+    }
+    let _guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+    let effective_limit = cache_effective_limit();
+    let cur_alloc = CACHE_ALLOCATED.load(Ordering::SeqCst);
+    let was_empty = cur_alloc == 0;
+    let avail = effective_limit.saturating_sub(cur_alloc);
+    let mut p: *mut u8 = std::ptr::null_mut();
+    if effective_limit > 0 && (size as usize) <= avail {
+        p = unsafe { libc::malloc(size as usize).cast::<u8>() };
+        if !p.is_null() {
+            if was_empty {
+                if let Some(opts) = crate::options::active_options() {
+                    if opts.server_mode()
+                        && opts.scalars().continue_partial != 0
+                        && opts.scalars().skip_write == 0
+                    {
+                        write_acache_flag(opts.str_bytes(6));
+                    }
+                }
+                CACHE_ALLOC_LOCK.1.notify_all();
+            }
+            CACHE_ALLOCATED.fetch_add(size as usize, Ordering::SeqCst);
+        }
+    }
+    p
+}
+
+fn cache_realloc(ptr: *mut u8, old_cap: i32, new_size: i32) -> (*mut u8, i32) {
+    if ptr.is_null() || new_size <= 0 || new_size == old_cap {
+        return (ptr, old_cap);
+    }
+    let _guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+    let new_p = unsafe { libc::realloc(ptr.cast::<c_void>(), new_size as usize).cast::<u8>() };
+    if !new_p.is_null() {
+        let cur = CACHE_ALLOCATED.load(Ordering::SeqCst);
+        let next = if new_size >= old_cap {
+            cur.saturating_add((new_size - old_cap) as usize)
+        } else {
+            cur.saturating_sub((old_cap - new_size) as usize)
+        };
+        CACHE_ALLOCATED.store(next, Ordering::SeqCst);
+        (new_p, new_size)
+    } else {
+        (ptr, old_cap)
+    }
+}
+
+fn cache_free(ptr: *mut u8, cap: i32) {
+    if cap > 0 && !ptr.is_null() {
+        unsafe {
+            libc::free(ptr.cast::<c_void>());
+        }
+        let _guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+        let cur = CACHE_ALLOCATED.load(Ordering::SeqCst);
+        let next = cur.saturating_sub(cap as usize);
+        CACHE_ALLOCATED.store(next, Ordering::SeqCst);
+        if next == 0 {
+            if let Some(opts) = crate::options::active_options() {
+                if opts.server_mode() && opts.scalars().continue_partial != 0 {
+                    delete_acache_flag(opts.str_bytes(6));
+                }
+            }
+        }
+    }
+}
+
+fn memory_monitor_update_state() -> i32 {
+    let (cfg_cache, interval) = match crate::options::active_options() {
+        Some(opts) => (
+            opts.scalars().article_cache.max(0) as u32,
+            opts.scalars().memory_pressure_interval.max(100),
+        ),
+        None => (0u32, 500i32),
+    };
 
     let metrics = crate::memory_pressure::sample_system_metrics(None);
     let raw_sample = crate::memory_pressure::evaluate_state(&metrics) as i32;
@@ -264,42 +384,20 @@ fn memory_monitor_update_state(host: &DlHost) -> i32 {
     if transitioned {
         MEM_TIER.store(next_tier, Ordering::Release);
         if next_tier == PRESSURE_CRITICAL {
-            host.log(
+            crate::log::log_active_bytes(
                 MK_WARNING,
                 b"System memory pressure CRITICAL (>=90%): shedding article cache and throttling downloads",
             );
-            host.raw(
-                2,
-                2,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+            cache_wakeup_flush();
             crate::memory_pressure::trim_heap();
         } else if next_tier == PRESSURE_CONSTRAINED {
-            host.log(
+            crate::log::log_active_bytes(
                 MK_DETAIL,
                 b"System memory pressure CONSTRAINED: shrinking article cache ceiling",
             );
-            host.raw(
-                2,
-                2,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+            cache_wakeup_flush();
         } else if next_tier == PRESSURE_NORMAL && current_tier != PRESSURE_NORMAL {
-            host.log(
+            crate::log::log_active_bytes(
                 MK_DETAIL,
                 b"System memory pressure returned to NORMAL: restoring cache and download capacity",
             );
@@ -310,7 +408,8 @@ fn memory_monitor_update_state(host: &DlHost) -> i32 {
     interval
 }
 
-fn memory_monitor_init_options(host: &DlHost, reset_state: bool) {
+fn memory_monitor_init_options(reset_state: bool) {
+    MEM_ACTIVE.store(true, Ordering::Release);
     if reset_state {
         MEM_TIER.store(PRESSURE_NORMAL, Ordering::Release);
         MEM_EFFECTIVE_CACHE_MB.store(0, Ordering::Release);
@@ -318,34 +417,14 @@ fn memory_monitor_init_options(host: &DlHost, reset_state: bool) {
             *hyst = (PRESSURE_NORMAL, 0);
         }
     }
-    let mut ints = [0i32; 2];
-    let mut strs = [std::ptr::null::<c_char>(); 1];
-    let has_opts = host.raw(
-        2,
-        0,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        ints.as_mut_ptr(),
-        std::ptr::null_mut(),
-        strs.as_mut_ptr(),
-    ) != 0;
-    if has_opts {
-        let path_opt = unsafe {
-            if strs[0].is_null() {
-                None
-            } else {
-                CStr::from_ptr(strs[0])
-                    .to_str()
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            }
-        };
+    if let Some(opts) = crate::options::active_options() {
+        let path_opt = opts
+            .str_cstr(36)
+            .and_then(|c| c.to_str().ok())
+            .filter(|s| !s.is_empty());
         crate::memory_pressure::set_mock_root(path_opt);
     }
-    let _ = memory_monitor_update_state(host);
+    let _ = memory_monitor_update_state();
 }
 
 fn memory_monitor_run(host: &DlHost) {
@@ -365,10 +444,10 @@ fn memory_monitor_run(host: &DlHost) {
         ) != 0
     };
     while !is_stopped() {
-        let interval = memory_monitor_update_state(host);
+        let interval = memory_monitor_update_state();
         let mut slept = 0;
         while !is_stopped() && slept < interval {
-            host.sleep_ms(50);
+            sleep_ms(50);
             slept += 50;
         }
     }
@@ -404,10 +483,20 @@ fn article_cache_check_flush(host: &DlHost, allocated: usize, flush_everything: 
         strs.as_mut_ptr(),
     );
     if file_ptr == 0 {
+        CACHE_FILE_INFO.store(0, Ordering::SeqCst);
         host.log(MK_DEBUG, b"Checking cache... nothing to flush");
         return false;
     }
 
+    struct ClearBusyGuard;
+    impl Drop for ClearBusyGuard {
+        fn drop(&mut self) {
+            CACHE_FILE_INFO.store(0, Ordering::SeqCst);
+        }
+    }
+    // Selection callback (op 2, 5) publishes CACHE_FILE_INFO while holding DownloadQueue::Guard().
+    debug_assert_eq!(CACHE_FILE_INFO.load(Ordering::SeqCst), file_ptr);
+    let _busy_guard = ClearBusyGuard;
     let info_name = unsafe { cstr_or_empty(strs[0]) };
     host.log(
         MK_DETAIL,
@@ -417,6 +506,7 @@ fn article_cache_check_flush(host: &DlHost, allocated: usize, flush_everything: 
     let mut ints = [0i32; 4];
     let mut i64s = [0i64; 2];
     let mut fstrs = [std::ptr::null::<c_char>(); 2];
+    cache_lock_flush();
     let locked = host.raw(
         2,
         7,
@@ -429,6 +519,9 @@ fn article_cache_check_flush(host: &DlHost, allocated: usize, flush_everything: 
         i64s.as_mut_ptr(),
         fstrs.as_mut_ptr(),
     ) != 0;
+    if !locked {
+        cache_unlock_flush();
+    }
 
     if locked {
         let direct_write = ints[0] != 0;
@@ -539,7 +632,9 @@ fn article_cache_check_flush(host: &DlHost, allocated: usize, flush_everything: 
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
-        let skip_after = post_ints[0] != 0;
+        cache_unlock_flush();
+        let skip_after = post_ints[0] != 0
+            || crate::options::active_options().is_some_and(|o| o.scalars().skip_write != 0);
         let flushed_mb = (flushed_size as f64) / 1024.0 / 1024.0;
         let prefix = if skip_after {
             format!("Discarded {flushed_articles} articles ({flushed_mb:.2} MB) from cache (SkipWrite) for ")
@@ -551,25 +646,11 @@ fn article_cache_check_flush(host: &DlHost, allocated: usize, flush_everything: 
         host.log(MK_DETAIL, &join_c_slices(&[prefix.as_bytes(), &info_name]));
     }
 
-    host.raw(
-        2,
-        6,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-    );
     true
 }
 
 fn article_cache_run(host: &DlHost) {
-    let snap = || {
-        let mut ints = [0i32; 3];
-        let mut i64s = [0i64; 2];
+    let is_stopped_cb = || {
         host.raw(
             2,
             3,
@@ -578,17 +659,19 @@ fn article_cache_run(host: &DlHost) {
             0,
             std::ptr::null(),
             std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
             std::ptr::null_mut(),
-        );
-        (
-            i64s[0].max(0) as usize,
-            i64s[1].max(0) as usize,
-            ints[0] != 0,
-            ints[1] != 0,
-            ints[2],
-        )
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
+    };
+    let snap = || {
+        let allocated = CACHE_ALLOCATED.load(Ordering::SeqCst);
+        let effective_limit = cache_effective_limit();
+        let is_stopped = is_stopped_cb();
+        let direct_write =
+            crate::options::active_options().is_some_and(|o| o.scalars().direct_write != 0);
+        let tier = memory_monitor_tier();
+        (allocated, effective_limit, is_stopped, direct_write, tier)
     };
 
     let mut reset_counter = 0i32;
@@ -614,651 +697,22 @@ fn article_cache_run(host: &DlHost) {
             if need_emergency_flush && alloc_now == 0 {
                 crate::memory_pressure::trim_heap();
             } else if !just_flushed && !stopped_now {
-                host.sleep_ms(5);
+                sleep_ms(5);
             }
         } else if allocated == 0 {
-            host.raw(
-                2,
-                4,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+            let mut guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+            while CACHE_ALLOCATED.load(Ordering::SeqCst) == 0 && !is_stopped_cb() {
+                guard = CACHE_ALLOC_LOCK
+                    .1
+                    .wait(guard)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+            drop(guard);
             reset_counter = 0;
         } else {
-            host.sleep_ms(5);
+            sleep_ms(5);
             reset_counter += 5;
         }
-    }
-}
-
-// ============================================================================
-// ServerPool Rust runtime operations
-// ============================================================================
-
-fn server_pool_init_connections(host: &DlHost) {
-    let mut meta = [0i32; 7];
-    let mut now_arr = [0i64; 1];
-    host.raw(
-        3,
-        0,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        meta.as_mut_ptr(),
-        now_arr.as_mut_ptr(),
-        std::ptr::null_mut(),
-    );
-    let srv_count = meta[0].max(0) as usize;
-    let conn_count = meta[1].max(0) as usize;
-
-    if srv_count > 0 {
-        let mut inputs = Vec::with_capacity(srv_count);
-        for i in 0..srv_count {
-            let mut ints = [0i32; 7];
-            let mut i64s = [0i64; 1];
-            let mut strs = [std::ptr::null::<c_char>(); 2];
-            host.raw(
-                3,
-                1,
-                i as i32,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                i64s.as_mut_ptr(),
-                strs.as_mut_ptr(),
-            );
-            inputs.push(NzbgetRsServerNormInput {
-                level: ints[1],
-                active: ints[3],
-                max_connections: ints[6],
-            });
-        }
-        let mut sorted_idx = vec![0usize; srv_count];
-        let mut norm_levels = vec![0i32; srv_count];
-        let max_norm = server_pool_normalize_levels(&inputs, &mut sorted_idx, &mut norm_levels);
-        for (i, &nl) in norm_levels.iter().enumerate() {
-            host.raw(
-                3,
-                2,
-                0,
-                i,
-                nl as usize,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-        }
-        let mut order_i32: Vec<c_int> = sorted_idx.iter().map(|&idx| idx as c_int).collect();
-        host.raw(
-            3,
-            2,
-            1,
-            srv_count,
-            max_norm as usize,
-            std::ptr::null(),
-            std::ptr::null(),
-            order_i32.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-    } else {
-        host.raw(
-            3,
-            2,
-            1,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-    }
-
-    let mut conn_srv_ptrs = Vec::with_capacity(conn_count);
-    for i in 0..conn_count {
-        let mut ints = [0i32; 5];
-        let mut i64s = [0i64; 1];
-        let mut strs = [std::ptr::null::<c_char>(); 2];
-        let sptr = host.raw(
-            3,
-            3,
-            i as i32,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
-        conn_srv_ptrs.push(sptr);
-    }
-
-    for i in 0..srv_count {
-        let mut ints = [0i32; 7];
-        let mut i64s = [0i64; 1];
-        let mut strs = [std::ptr::null::<c_char>(); 2];
-        let sptr = host.raw(
-            3,
-            1,
-            i as i32,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
-        let norm_level = ints[2];
-        let active = ints[3] != 0;
-        let max_conns = ints[6];
-        let mut existing = 0i32;
-        let mut to_add = 0usize;
-        if norm_level > -1 && active {
-            existing = conn_srv_ptrs.iter().filter(|&&p| p == sptr).count() as i32;
-            if max_conns > existing {
-                to_add = (max_conns - existing) as usize;
-                existing = max_conns;
-            }
-        }
-        let mut args = [norm_level, existing, i32::from(active)];
-        host.raw(
-            3,
-            2,
-            2,
-            i,
-            to_add,
-            std::ptr::null(),
-            std::ptr::null(),
-            args.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-    }
-
-    host.raw(
-        3,
-        2,
-        3,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-    );
-}
-
-fn server_pool_get_connection(
-    host: &DlHost,
-    level: i32,
-    want_srv_ptr: usize,
-    ignore_list_ptr: usize,
-) -> usize {
-    if level < 0 {
-        return 0;
-    }
-    let mut meta = [0i32; 7];
-    let mut now_arr = [0i64; 1];
-    host.raw(
-        3,
-        0,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        meta.as_mut_ptr(),
-        now_arr.as_mut_ptr(),
-        std::ptr::null_mut(),
-    );
-    let srv_count = meta[0].max(0) as usize;
-    let conn_count = meta[1].max(0) as usize;
-    let levels_len = meta[2].max(0) as usize;
-    let retry_interval = meta[4];
-    let cur_time = now_arr[0];
-    if srv_count == 0 || conn_count == 0 {
-        return 0;
-    }
-
-    let mut levels = Vec::with_capacity(levels_len);
-    for i in 0..levels_len {
-        let v = host.raw(
-            3,
-            5,
-            6,
-            i,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) as i32;
-        levels.push(v);
-    }
-
-    let mut srv_ptrs = Vec::with_capacity(srv_count);
-    let mut srv_views = Vec::with_capacity(srv_count);
-    for i in 0..srv_count {
-        let mut ints = [0i32; 7];
-        let mut i64s = [0i64; 1];
-        let mut strs = [std::ptr::null::<c_char>(); 2];
-        let sptr = host.raw(
-            3,
-            1,
-            i as i32,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
-        srv_ptrs.push(sptr);
-        srv_views.push(ServerPoolServerView {
-            id: ints[0],
-            group: ints[5],
-            norm_level: ints[2],
-            active: ints[3] != 0,
-            optional: ints[4] != 0,
-            blocked: server_pool_is_blocked(i64s[0], cur_time, retry_interval),
-        });
-    }
-
-    let mut conn_views = Vec::with_capacity(conn_count);
-    for i in 0..conn_count {
-        let mut ints = [0i32; 5];
-        let mut i64s = [0i64; 1];
-        let mut strs = [std::ptr::null::<c_char>(); 2];
-        let sptr = host.raw(
-            3,
-            3,
-            i as i32,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
-        let server_index = srv_ptrs
-            .iter()
-            .position(|&p| p == sptr)
-            .unwrap_or(srv_count);
-        conn_views.push(ServerPoolConnView {
-            server_index,
-            in_use: ints[0] != 0,
-            connected: ints[1] != 0,
-        });
-    }
-
-    let want_tuple = if want_srv_ptr != 0 {
-        let mut ints = [0i32; 7];
-        let mut i64s = [0i64; 1];
-        let mut strs = [std::ptr::null::<c_char>(); 2];
-        host.raw(
-            3,
-            1,
-            -1,
-            want_srv_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
-        Some((ints[0], ints[5]))
-    } else {
-        None
-    };
-
-    let mut ignore_tuples = Vec::new();
-    if ignore_list_ptr != 0 && want_srv_ptr == 0 {
-        let ign_len = host.raw(
-            3,
-            4,
-            -1,
-            ignore_list_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        ignore_tuples.reserve(ign_len);
-        for i in 0..ign_len {
-            let mut ints = [0i32; 3];
-            host.raw(
-                3,
-                4,
-                i as i32,
-                ignore_list_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-            ignore_tuples.push((ints[0], ints[1], ints[2]));
-        }
-    }
-
-    let rand_val = unsafe { libc::rand() };
-    let mut unblock = Vec::new();
-    let found = server_pool_select_connection(
-        level,
-        &levels,
-        &srv_views,
-        &conn_views,
-        want_tuple,
-        &ignore_tuples,
-        rand_val,
-        &mut unblock,
-    );
-
-    let mut zero = [0i64; 1];
-    for idx in unblock {
-        host.raw(
-            3,
-            5,
-            0,
-            idx,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            zero.as_mut_ptr(),
-            std::ptr::null_mut(),
-        );
-    }
-
-    if let Some((chosen_conn, chosen_level)) = found {
-        host.raw(
-            3,
-            5,
-            1,
-            chosen_conn,
-            chosen_level as usize,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    } else {
-        0
-    }
-}
-
-fn server_pool_close_unused(host: &DlHost) {
-    let cur_time = host.now();
-    host.raw(
-        3,
-        5,
-        3,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-    );
-
-    let mut meta = [0i32; 7];
-    let mut now_arr = [0i64; 1];
-    host.raw(
-        3,
-        0,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        meta.as_mut_ptr(),
-        now_arr.as_mut_ptr(),
-        std::ptr::null_mut(),
-    );
-    let conn_count = meta[1].max(0) as usize;
-    let max_norm_level = meta[3];
-
-    let mut snaps = Vec::with_capacity(conn_count);
-    for i in 0..conn_count {
-        let mut ints = [0i32; 5];
-        let mut i64s = [0i64; 1];
-        let mut strs = [std::ptr::null::<c_char>(); 2];
-        host.raw(
-            3,
-            3,
-            i as i32,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
-        snaps.push((ints[4], ints[0] as u8, ints[1] as u8, ints[2], i64s[0]));
-    }
-
-    for lvl in 0..=max_norm_level {
-        let mut in_use = Vec::new();
-        let mut connected = Vec::new();
-        let mut free_times = Vec::new();
-        for &(nl, iu, conn, _, ft) in &snaps {
-            if nl == lvl {
-                in_use.push(iu);
-                connected.push(conn);
-                free_times.push(ft);
-            }
-        }
-        if server_pool_level_should_close(
-            &in_use,
-            &connected,
-            &free_times,
-            cur_time,
-            CONNECTION_HOLD_SECONDS,
-        ) {
-            for (idx, &(nl, _, conn, srv_id, _)) in snaps.iter().enumerate() {
-                if nl == lvl && conn != 0 {
-                    host.log(
-                        MK_DEBUG,
-                        format!("Closing (and keeping) unused connection to server{srv_id}")
-                            .as_bytes(),
-                    );
-                    host.raw(
-                        3,
-                        5,
-                        4,
-                        idx,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn server_pool_block_server(host: &DlHost, srv_ptr: usize) {
-    let mut ints = [0i32; 1];
-    let mut i64s = [0i64; 2];
-    let mut strs = [std::ptr::null::<c_char>(); 2];
-    host.raw(
-        3,
-        5,
-        5,
-        srv_ptr,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        ints.as_mut_ptr(),
-        i64s.as_mut_ptr(),
-        strs.as_mut_ptr(),
-    );
-    let retry_interval = ints[0];
-    let (_new_block, should_warn) = server_pool_eval_block_server(i64s[0], i64s[1], retry_interval);
-    if should_warn {
-        let name = unsafe { cstr_or_empty(strs[0]) };
-        let shost = unsafe { cstr_or_empty(strs[1]) };
-        let tail = format!(") for {retry_interval} sec");
-        host.log(
-            MK_WARNING,
-            &join_c_slices(&[b"Blocking ", &name, b" (", &shost, tail.as_bytes()]),
-        );
-    }
-}
-
-fn server_pool_log_debug(host: &DlHost) {
-    let mut meta = [0i32; 7];
-    let mut now_arr = [0i64; 1];
-    host.raw(
-        3,
-        0,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        meta.as_mut_ptr(),
-        now_arr.as_mut_ptr(),
-        std::ptr::null_mut(),
-    );
-    let conn_count = meta[1].max(0) as usize;
-    let levels_len = meta[2].max(0) as usize;
-    let max_norm_level = meta[3];
-    let retry_interval = meta[4];
-    let raw_servers_len = meta[6].max(0) as usize;
-    let cur_time = now_arr[0];
-
-    host.log(MK_INFO, b"   ---------- ServerPool");
-    host.log(
-        MK_INFO,
-        format!("    Max-Level: {max_norm_level}").as_bytes(),
-    );
-    host.log(
-        MK_INFO,
-        format!("    Servers: {raw_servers_len}").as_bytes(),
-    );
-
-    for i in 0..raw_servers_len {
-        let mut ints = [0i32; 7];
-        let mut i64s = [0i64; 1];
-        let mut strs = [std::ptr::null::<c_char>(); 2];
-        host.raw(
-            3,
-            1,
-            i as i32,
-            0,
-            1,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
-        let id = ints[0];
-        let lvl = ints[1];
-        let nlvl = ints[2];
-        let block_time = i64s[0];
-        let mut block_sec = 0i32;
-        if block_time != 0 {
-            let end = block_time.saturating_add(retry_interval as i64);
-            if end > cur_time {
-                let diff = (end as u64).wrapping_sub(cur_time as u64);
-                block_sec = if diff > (i32::MAX as u64) {
-                    i32::MAX
-                } else {
-                    diff as i32
-                };
-            }
-        }
-        let name = unsafe { cstr_or_empty(strs[0]) };
-        let shost = unsafe { cstr_or_empty(strs[1]) };
-        let p1 = format!("      {id}) ");
-        let p2 = format!(": Level={lvl}, NormLevel={nlvl}, BlockSec={block_sec}");
-        host.log(
-            MK_INFO,
-            &join_c_slices(&[p1.as_bytes(), &name, b" (", &shost, b")", p2.as_bytes()]),
-        );
-    }
-
-    host.log(MK_INFO, format!("    Levels: {levels_len}").as_bytes());
-    for idx in 0..levels_len {
-        let sz = host.raw(
-            3,
-            5,
-            6,
-            idx,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) as i32;
-        host.log(
-            MK_INFO,
-            format!("      {idx}: Free connections={sz}").as_bytes(),
-        );
-    }
-
-    host.log(MK_INFO, format!("    Connections: {conn_count}").as_bytes());
-    for i in 0..conn_count {
-        let mut ints = [0i32; 5];
-        let mut i64s = [0i64; 1];
-        let mut strs = [std::ptr::null::<c_char>(); 2];
-        host.raw(
-            3,
-            3,
-            i as i32,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        );
-        let in_use = ints[0];
-        let id = ints[2];
-        let lvl = ints[3];
-        let nlvl = ints[4];
-        let name = unsafe { cstr_or_empty(strs[0]) };
-        let shost = unsafe { cstr_or_empty(strs[1]) };
-        let p1 = format!("      {id}) ");
-        let p2 = format!(": Level={lvl}, NormLevel={nlvl}, InUse:{in_use}");
-        host.log(
-            MK_INFO,
-            &join_c_slices(&[p1.as_bytes(), &name, b" (", &shost, b")", p2.as_bytes()]),
-        );
     }
 }
 
@@ -1411,6 +865,7 @@ struct RsArticleWriter {
     result_filename: Vec<u8>,
     format: Format,
     cached_ptr: *mut u8,
+    cached_cap: i32,
     article_offset: i64,
     article_size: i32,
     article_ptr: i32,
@@ -1434,6 +889,16 @@ struct RsArticleWriter {
 // by this `ArticleDownloader` instance until `Finish(true)` attaches it or `Start`/destructor frees it.
 unsafe impl Send for RsArticleWriter {}
 
+impl Drop for RsArticleWriter {
+    fn drop(&mut self) {
+        if !self.cached_ptr.is_null() {
+            cache_free(self.cached_ptr, self.cached_cap);
+            self.cached_ptr = std::ptr::null_mut();
+            self.cached_cap = 0;
+        }
+    }
+}
+
 impl Default for RsArticleWriter {
     fn default() -> Self {
         Self {
@@ -1442,6 +907,7 @@ impl Default for RsArticleWriter {
             result_filename: Vec::new(),
             format: Format::Unknown,
             cached_ptr: std::ptr::null_mut(),
+            cached_cap: 0,
             article_offset: 0,
             article_size: 0,
             article_ptr: 0,
@@ -1464,6 +930,14 @@ impl Default for RsArticleWriter {
 }
 
 impl RsArticleWriter {
+    fn drop_cached(&mut self) {
+        if !self.cached_ptr.is_null() {
+            cache_free(self.cached_ptr, self.cached_cap);
+            self.cached_ptr = std::ptr::null_mut();
+            self.cached_cap = 0;
+        }
+    }
+
     fn range_exceeded(&self) -> bool {
         self.article_ptr > self.article_size
     }
@@ -1473,8 +947,8 @@ impl RsArticleWriter {
     }
 
     fn build_filenames_locked(&mut self, host: &DlHost) {
-        let mut ints = [0i32; 6];
-        let mut strs = [std::ptr::null::<c_char>(); 5];
+        let mut ints = [0i32; 4];
+        let mut strs = [std::ptr::null::<c_char>(); 3];
         host.raw(
             4,
             1,
@@ -1489,13 +963,15 @@ impl RsArticleWriter {
         );
         let file_id = ints[0];
         let part_num = ints[1];
-        let direct_write = ints[2] != 0;
-        let force_direct_write = ints[3] != 0;
-        let output_initialized = ints[4] != 0;
-        let tmp_dir = unsafe { cstr_or_empty(strs[0]) };
-        let dest_dir = unsafe { cstr_or_empty(strs[1]) };
-        let existing_out = unsafe { cstr_or_empty(strs[2]) };
-        let file_filename = unsafe { cstr_or_empty(strs[3]) };
+        let force_direct_write = ints[2] != 0;
+        let output_initialized = ints[3] != 0;
+        let (direct_write, tmp_dir) = match crate::options::active_options() {
+            Some(opts) => (opts.scalars().direct_write != 0, opts.str_bytes(5).to_vec()),
+            None => (false, Vec::new()),
+        };
+        let dest_dir = unsafe { cstr_or_empty(strs[0]) };
+        let existing_out = unsafe { cstr_or_empty(strs[1]) };
+        let file_filename = unsafe { cstr_or_empty(strs[2]) };
 
         if let Some(built) = article_writer_build_output_filenames(
             &tmp_dir,
@@ -1572,21 +1048,9 @@ impl RsArticleWriter {
         article_size: i32,
     ) -> bool {
         self.out_file = None;
-        self.cached_ptr = std::ptr::null_mut();
-        host.raw(
-            4,
-            18,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        self.drop_cached();
 
-        let mut ints = [0i32; 11];
+        let mut ints = [0i32; 6];
         let mut strs = [std::ptr::null::<c_char>(); 1];
         let nzb_ptr = host.raw(
             4,
@@ -1600,17 +1064,33 @@ impl RsArticleWriter {
             std::ptr::null_mut(),
             strs.as_mut_ptr(),
         );
-        let dupe_check = ints[0] != 0;
-        let dupe_mode = ints[1];
-        let many_dupe_files = ints[2] != 0;
-        let direct_write_opt = ints[3] != 0;
-        let force_direct_write = ints[4] != 0;
-        let skip_disk_write = ints[5] != 0;
-        let article_cache_mb = ints[6];
-        let raw_article = ints[7] != 0;
-        let write_buffer_kb = ints[8];
-        let art_info_size = ints[9];
-        let is_dupe_fallback = ints[10] > 0;
+        let (
+            dupe_check,
+            direct_write_opt,
+            skip_write_opt,
+            article_cache_mb,
+            raw_article,
+            write_buffer_kb,
+        ) = match crate::options::active_options() {
+            Some(opts) => {
+                let sc = opts.scalars();
+                (
+                    sc.dupe_check != 0,
+                    sc.direct_write != 0,
+                    sc.skip_write != 0,
+                    sc.article_cache,
+                    sc.raw_article != 0,
+                    sc.write_buffer,
+                )
+            }
+            None => (false, false, false, 0, false, 0),
+        };
+        let dupe_mode = ints[0];
+        let many_dupe_files = ints[1] != 0;
+        let force_direct_write = ints[2] != 0;
+        let skip_disk_write = ints[3] != 0 || skip_write_opt;
+        let art_info_size = ints[4];
+        let is_dupe_fallback = ints[5] > 0;
         let dest_dir = unsafe { cstr_or_empty(strs[0]) };
 
         self.format = format;
@@ -1687,35 +1167,16 @@ impl RsArticleWriter {
             && !is_dupe_fallback
             && !is_critical
         {
-            let mut fl_ints = [0i32; 1];
-            let mut p = host.raw(
-                4,
-                18,
-                1,
-                self.article_size as usize,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                fl_ints.as_mut_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-            while p == 0 && fl_ints[0] != 0 && memory_monitor_tier() != PRESSURE_CRITICAL {
-                host.sleep_ms(5);
-                p = host.raw(
-                    4,
-                    18,
-                    1,
-                    self.article_size as usize,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    fl_ints.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
+            let mut p = cache_alloc(self.article_size);
+            while p.is_null()
+                && CACHE_FLUSHING.load(Ordering::Acquire)
+                && memory_monitor_tier() != PRESSURE_CRITICAL
+            {
+                sleep_ms(5);
+                p = cache_alloc(self.article_size);
             }
-            self.cached_ptr = p as *mut u8;
+            self.cached_ptr = p;
+            self.cached_cap = if p.is_null() { 0 } else { self.article_size };
             if self.cached_ptr.is_null() {
                 host.log(
                     MK_DETAIL,
@@ -1794,7 +1255,7 @@ impl RsArticleWriter {
     fn finish(&mut self, host: &DlHost, success: bool) {
         self.out_file = None;
 
-        let mut ints = [0i32; 11];
+        let mut ints = [0i32; 6];
         let mut strs = [std::ptr::null::<c_char>(); 1];
         let nzb_ptr = host.raw(
             4,
@@ -1808,11 +1269,21 @@ impl RsArticleWriter {
             std::ptr::null_mut(),
             strs.as_mut_ptr(),
         );
-        let direct_write_opt = ints[3] != 0;
-        let force_direct_write = ints[4] != 0;
-        let skip_disk_write = ints[5] != 0;
-        let raw_article = ints[7] != 0;
-        let is_dupe_fallback = ints[10] > 0;
+        let (direct_write_opt, skip_write_opt, raw_article) = match crate::options::active_options()
+        {
+            Some(opts) => {
+                let sc = opts.scalars();
+                (
+                    sc.direct_write != 0,
+                    sc.skip_write != 0,
+                    sc.raw_article != 0,
+                )
+            }
+            None => (false, false, false),
+        };
+        let force_direct_write = ints[2] != 0;
+        let skip_disk_write = ints[3] != 0 || skip_write_opt;
+        let is_dupe_fallback = ints[5] > 0;
         let direct_write = (direct_write_opt || force_direct_write)
             && self.format == Format::Yenc
             && !is_dupe_fallback;
@@ -1830,36 +1301,30 @@ impl RsArticleWriter {
         );
 
         if !success || raw_article {
-            if has_cached {
-                self.cached_ptr = std::ptr::null_mut();
-                host.raw(
-                    4,
-                    18,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-            }
+            self.drop_cached();
             return;
         }
 
         let mut off = [self.article_offset];
         if has_cached {
+            if self.article_ptr > 0 && self.article_ptr != self.cached_cap {
+                let (np, nc) = cache_realloc(self.cached_ptr, self.cached_cap, self.article_ptr);
+                self.cached_ptr = np;
+                self.cached_cap = nc;
+            }
+            let ptr = self.cached_ptr;
+            let mut cap_arr = [self.cached_cap];
             self.cached_ptr = std::ptr::null_mut();
+            self.cached_cap = 0;
             host.raw(
                 4,
                 18,
                 2,
+                ptr as usize,
                 self.article_ptr as usize,
-                self.article_size as usize,
                 std::ptr::null(),
                 std::ptr::null(),
-                std::ptr::null_mut(),
+                cap_arr.as_mut_ptr(),
                 off.as_mut_ptr(),
                 std::ptr::null_mut(),
             );
@@ -2489,37 +1954,15 @@ impl RsArticleWriter {
         self.proc_outfile = opened_outfile;
         self.proc_crc = 0;
 
-        struct FlushLockGuard<'a>(&'a DlHost);
-        impl Drop for FlushLockGuard<'_> {
+        struct FlushLockGuard;
+        impl Drop for FlushLockGuard {
             fn drop(&mut self) {
-                self.0.raw(
-                    4,
-                    19,
-                    3,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
+                cache_unlock_flush();
             }
         }
         let _flush_guard = if cached {
-            host.raw(
-                4,
-                19,
-                3,
-                1,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-            Some(FlushLockGuard(host))
+            cache_lock_flush();
+            Some(FlushLockGuard)
         } else {
             None
         };
@@ -2695,8 +2138,12 @@ struct DlWorker {
     decoded_file_size: i64,
 }
 
+const AD_UNDEFINED: i32 = 0;
+
 pub struct NzbgetRsArticleDownloader {
     info_name: Vec<u8>,
+    status: AtomicI32,
+    last_update_time: AtomicI64,
     conn_state: Mutex<(usize, Vec<u8>)>,
     worker: Mutex<DlWorker>,
 }
@@ -2710,6 +2157,8 @@ impl NzbgetRsArticleDownloader {
     ) -> Self {
         Self {
             info_name,
+            status: AtomicI32::new(AD_UNDEFINED),
+            last_update_time: AtomicI64::new(now_sec()),
             conn_state: Mutex::new((initial_conn, Vec::new())),
             worker: Mutex::new(DlWorker {
                 decoder: Decoder::new(
@@ -2757,6 +2206,27 @@ impl NzbgetRsArticleDownloader {
             .clone()
     }
 
+    fn set_status(&self, host: &DlHost, st: i32, touch_now: bool, notify: bool) {
+        if touch_now {
+            self.last_update_time.store(now_sec(), Ordering::SeqCst);
+        }
+        self.status.store(st, Ordering::SeqCst);
+        if notify {
+            host.raw(
+                4,
+                3,
+                0,
+                0,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+    }
+
     fn free_connection(&self, host: &DlHost, downloaded_size: &mut i32, keep_connected: bool) {
         if self.conn_ptr() == 0 {
             return;
@@ -2764,43 +2234,38 @@ impl NzbgetRsArticleDownloader {
         host.log(MK_DEBUG, b"Releasing connection");
         let mut cs = self.conn_state.lock().unwrap_or_else(|e| e.into_inner());
         if cs.0 != 0 {
-            let mut ints = [0i32; 1];
-            host.raw(
-                4,
-                8,
-                i32::from(keep_connected),
-                cs.0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-            *downloaded_size = downloaded_size.wrapping_add(ints[0]);
+            let cptr = cs.0 as *mut crate::net::PooledNntpConn;
+            let conn = unsafe { &*cptr };
+            if !keep_connected || conn.is_cancelled() {
+                unsafe {
+                    conn.disconnect();
+                }
+            }
+            let bytes_read = conn.fetch_total_bytes_read();
+            if let Some(sm) = crate::statmeter::active_statmeter() {
+                let off = crate::ffi::active_workstate().map_or(0, |ws| ws.local_time_offset());
+                sm.add_server_stats(bytes_read, 0, 0, conn.server.id, off);
+            }
+            if let Some(pool) = crate::net::active_server_pool() {
+                pool.free_connection(cptr, true);
+            }
+            *downloaded_size = downloaded_size.wrapping_add(bytes_read);
             cs.0 = 0;
         }
     }
 
-    fn add_conn_bytes(&self, host: &DlHost, downloaded_size: &mut i32) {
+    fn add_conn_bytes(&self, downloaded_size: &mut i32) {
         let cptr = self.conn_ptr();
         if cptr == 0 {
             return;
         }
-        let mut ints = [0i32; 2];
-        host.raw(
-            4,
-            7,
-            0,
-            cptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        *downloaded_size = downloaded_size.wrapping_add(ints[0]);
+        let conn = unsafe { &*(cptr as *const crate::net::PooledNntpConn) };
+        let bytes_read = conn.fetch_total_bytes_read();
+        if let Some(sm) = crate::statmeter::active_statmeter() {
+            let off = crate::ffi::active_workstate().map_or(0, |ws| ws.local_time_offset());
+            sm.add_server_stats(bytes_read, 0, 0, conn.server.id, off);
+        }
+        *downloaded_size = downloaded_size.wrapping_add(bytes_read);
     }
 
     fn check_response(
@@ -3082,6 +2547,10 @@ impl NzbgetRsArticleDownloader {
 
     fn download_article(&self, w: &mut DlWorker, host: &DlHost, join_group: bool) -> i32 {
         let cptr = self.conn_ptr();
+        if cptr == 0 {
+            return AD_FAILED;
+        }
+        let conn = unsafe { &*(cptr as *const crate::net::PooledNntpConn) };
         let conn_name = self.copy_conn_name();
         w.writing_started = false;
         w.local_write_error = false;
@@ -3090,13 +2559,13 @@ impl NzbgetRsArticleDownloader {
             ca.reset();
         }
 
-        let mut dints = [0i32; 5];
+        let mut dints = [0i32; 2];
         let mut dstrs = [std::ptr::null::<c_char>(); 1];
         host.raw(
             4,
             12,
             0,
-            cptr,
+            0,
             0,
             std::ptr::null(),
             std::ptr::null(),
@@ -3104,16 +2573,24 @@ impl NzbgetRsArticleDownloader {
             std::ptr::null_mut(),
             dstrs.as_mut_ptr(),
         );
-        let raw_article = dints[0] != 0;
-        let crc_check = dints[1] != 0;
-        let read_chunk = dints[2].max(1);
-        let groups_len = dints[3].max(0) as usize;
-        let skip_disk_write = dints[4] != 0;
+        let opts = crate::options::active_options();
+        let (raw_article, crc_check, read_chunk, opt_skip_write) = match opts.as_deref() {
+            Some(o) => {
+                let s = o.scalars();
+                (
+                    s.raw_article != 0,
+                    s.crc_check != 0,
+                    s.article_read_chunk_size.max(1),
+                    s.skip_write != 0,
+                )
+            }
+            None => (false, true, 4096, false),
+        };
+        let groups_len = dints[0].max(0) as usize;
+        let skip_disk_write = dints[1] != 0 || opt_skip_write;
         let message_id = unsafe { cstr_or_empty(dstrs[0]) };
 
         let is_stopped = || {
-            let mut fl = [0i32; 6];
-            let mut tm = [0i64; 1];
             host.raw(
                 4,
                 2,
@@ -3122,35 +2599,36 @@ impl NzbgetRsArticleDownloader {
                 0,
                 std::ptr::null(),
                 std::ptr::null(),
-                fl.as_mut_ptr(),
-                tm.as_mut_ptr(),
                 std::ptr::null_mut(),
-            );
-            fl[0] != 0
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) != 0
         };
 
         if join_group && groups_len > 0 {
             let mut last_resp: Option<Vec<u8>> = None;
             let mut auth_err = false;
             for gidx in 0..groups_len {
-                let mut gints = [0i32; 1];
                 let mut gstrs = [std::ptr::null::<c_char>(); 1];
                 host.raw(
                     4,
                     12,
                     1,
-                    cptr,
+                    0,
                     gidx,
                     std::ptr::null(),
                     std::ptr::null(),
-                    gints.as_mut_ptr(),
+                    std::ptr::null_mut(),
                     std::ptr::null_mut(),
                     gstrs.as_mut_ptr(),
                 );
-                auth_err = gints[0] != 0;
-                last_resp = unsafe { opt_cstr(gstrs[0]) };
-                if article_dl_is_join_group_ok(last_resp.as_deref()) {
-                    break;
+                if !gstrs[0].is_null() {
+                    let resp_ptr = unsafe { conn.join_group(gstrs[0]) };
+                    auth_err = unsafe { conn.auth_error() };
+                    last_resp = unsafe { opt_cstr(resp_ptr) };
+                    if article_dl_is_join_group_ok(last_resp.as_deref()) {
+                        break;
+                    }
                 }
             }
             let st = self.check_response(
@@ -3168,26 +2646,14 @@ impl NzbgetRsArticleDownloader {
 
         let cmd = article_dl_format_fetch_command(raw_article, &message_id);
         let cmd_c = nul_vec(&cmd);
-        let mut rints = [0i32; 1];
-        let mut rstrs = [std::ptr::null::<c_char>(); 1];
-        host.raw(
-            4,
-            12,
-            2,
-            cptr,
-            0,
-            cmd_c.as_ptr().cast(),
-            std::ptr::null(),
-            rints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            rstrs.as_mut_ptr(),
-        );
-        let fetch_resp = unsafe { opt_cstr(rstrs[0]) };
+        let resp_ptr = unsafe { conn.request(cmd_c.as_ptr().cast()) };
+        let req_auth_err = unsafe { conn.auth_error() };
+        let fetch_resp = unsafe { opt_cstr(resp_ptr) };
         let st = self.check_response(
             host,
             &conn_name,
             fetch_resp.as_deref(),
-            rints[0] != 0,
+            req_auth_err,
             is_stopped(),
             b"could not fetch article",
         );
@@ -3203,23 +2669,41 @@ impl NzbgetRsArticleDownloader {
         let mut line_buf = vec![0u8; (read_chunk as usize) + 128];
 
         while !is_stopped() && !w.decoder.eof {
-            let mut cints = [0i32; 2];
-            let mut cstrs = [std::ptr::null::<c_char>(); 1];
-            let ok = host.raw(
-                4,
-                13,
-                i32::from(w.writer.has_cached_buffer()),
-                cptr,
-                read_chunk as usize,
-                std::ptr::null(),
-                line_buf.as_mut_ptr().cast(),
-                cints.as_mut_ptr(),
-                std::ptr::null_mut(),
-                cstrs.as_mut_ptr(),
-            ) != 0;
+            if !is_stopped()
+                && !w.writer.has_cached_buffer()
+                && memory_monitor_tier() == PRESSURE_CRITICAL
+                && CACHE_FLUSHING.load(Ordering::Acquire)
+            {
+                sleep_ms(10);
+            }
+            loop {
+                if is_stopped() {
+                    break;
+                }
+                let limit = crate::ffi::active_workstate().map_or(0, |ws| ws.speed_limit());
+                if limit <= 0 {
+                    break;
+                }
+                let over = crate::statmeter::active_statmeter().is_some_and(|sm| {
+                    sm.current_download_speed() > i64::from(limit)
+                        || sm.momentary_download_speed() > i64::from(limit)
+                });
+                if !over {
+                    break;
+                }
+                self.last_update_time.store(now_sec(), Ordering::SeqCst);
+                sleep_ms(10);
+            }
 
-            if !ok {
-                if cints[1] != 0 {
+            let (mut buf_ptr, avail) = unsafe { conn.drain_read_buffer() };
+            let mut raw_len = avail as isize;
+            if raw_len == 0 {
+                let n = unsafe { conn.try_recv(&mut line_buf[..read_chunk as usize]) };
+                raw_len = n as isize;
+                buf_ptr = line_buf.as_mut_ptr();
+            }
+            if raw_len <= 0 {
+                if !is_stopped() {
                     host.log(
                         MK_DETAIL,
                         &join_c_slices(&[
@@ -3231,15 +2715,24 @@ impl NzbgetRsArticleDownloader {
                         ]),
                     );
                 }
+                conn.set_broken();
+                unsafe {
+                    conn.disconnect();
+                }
                 status = AD_FAILED;
                 break;
             }
 
-            let raw_len = cints[0] as usize;
-            if cints[1] != 0 {
-                self.add_conn_bytes(host, &mut w.downloaded_size);
+            let raw_len = raw_len as usize;
+            if let Some(sm) = crate::statmeter::active_statmeter() {
+                sm.add_speed_reading_locked(raw_len as i32);
             }
-            let buf_ptr = cstrs[0] as *mut u8;
+            let now_t = now_sec();
+            let old_t = self.last_update_time.swap(now_t, Ordering::SeqCst);
+            if old_t != now_t {
+                self.add_conn_bytes(&mut w.downloaded_size);
+            }
+
             let decoded_len = unsafe { w.decoder.decode_buffer(buf_ptr, raw_len) };
             if decoded_len > 0 {
                 let decoded_slice = unsafe { std::slice::from_raw_parts(buf_ptr, decoded_len) };
@@ -3278,24 +2771,7 @@ impl NzbgetRsArticleDownloader {
     fn run(&self, host: &DlHost) {
         host.log(MK_DEBUG, b"Entering ArticleDownloader-loop");
 
-        let set_status = |st: i32, touch_now: bool, notify: bool| {
-            let mut tm = [if touch_now { host.now() } else { 0 }];
-            let flags = usize::from(touch_now) | (usize::from(notify) << 1);
-            host.raw(
-                4,
-                3,
-                st,
-                flags,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                tm.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
-        };
-
-        set_status(AD_RUNNING, false, false);
+        self.set_status(host, AD_RUNNING, false, false);
 
         host.raw(
             4,
@@ -3313,9 +2789,8 @@ impl NzbgetRsArticleDownloader {
         let final_status = {
             let mut w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
 
-            let mut init_ints = [0i32; 14];
+            let mut init_ints = [0i32; 4];
             let mut init_i64s = [0i64; 1];
-            let mut init_strs = [std::ptr::null::<c_char>(); 4];
             host.raw(
                 4,
                 0,
@@ -3326,17 +2801,36 @@ impl NzbgetRsArticleDownloader {
                 std::ptr::null(),
                 init_ints.as_mut_ptr(),
                 init_i64s.as_mut_ptr(),
-                init_strs.as_mut_ptr(),
+                std::ptr::null_mut(),
             );
-            let retries = init_ints[0];
-            let interval_sec = init_ints[1];
-            let server_config_gen = init_ints[2];
-            let servers_cap = init_ints[3].max(0) as usize;
-            let force = init_ints[4] != 0;
-            let extra_priority = init_ints[5] != 0;
-            let has_desired_server = init_ints[6] != 0;
-            let dupe_fallback_round = init_ints[7];
+            let force = init_ints[0] != 0;
+            let extra_priority = init_ints[1] != 0;
+            let has_desired_server = init_ints[2] != 0;
+            let dupe_fallback_round = init_ints[3];
             let file_time = init_i64s[0];
+
+            let (retries, interval_sec) = match crate::options::active_options().as_deref() {
+                Some(o) => {
+                    let s = o.scalars();
+                    (
+                        if s.article_retries > 0 {
+                            s.article_retries
+                        } else {
+                            1
+                        },
+                        if s.article_interval > 0 {
+                            s.article_interval
+                        } else {
+                            0
+                        },
+                    )
+                }
+                None => (1, 0),
+            };
+            let pool_init = crate::net::active_server_pool();
+            let server_config_gen = pool_init.as_ref().map_or(0, |p| p.generation());
+            let servers_cap = pool_init.as_ref().map_or(0, |p| p.server_count());
+            drop(pool_init);
 
             let mut transient_retries = TransientRetries::new(retries, interval_sec);
             let mut failed_servers: Vec<usize> = Vec::with_capacity(servers_cap);
@@ -3345,9 +2839,7 @@ impl NzbgetRsArticleDownloader {
             let mut status = AD_FAILED;
 
             let runtime_flags = || {
-                let mut fl = [0i32; 6];
-                let mut tm = [0i64; 1];
-                host.raw(
+                let stopped = host.raw(
                     4,
                     2,
                     0,
@@ -3355,19 +2847,60 @@ impl NzbgetRsArticleDownloader {
                     0,
                     std::ptr::null(),
                     std::ptr::null(),
-                    fl.as_mut_ptr(),
-                    tm.as_mut_ptr(),
                     std::ptr::null_mut(),
-                );
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ) != 0;
+                let (paused_or_quota, dl_held) = match crate::ffi::active_workstate().as_deref() {
+                    Some(ws) => (
+                        ws.pause_download() || ws.quota_reached(),
+                        ws.download_held(),
+                    ),
+                    None => (false, false),
+                };
+                let (cur_gen, max_norm_lvl, srv_len) =
+                    match crate::net::active_server_pool().as_deref() {
+                        Some(p) => (p.generation(), p.max_norm_level(), p.server_count() as i32),
+                        None => (0, 0, 0),
+                    };
                 (
-                    fl[0] != 0,
-                    fl[1] != 0,
-                    fl[2] != 0,
-                    fl[3],
-                    fl[4],
-                    fl[5],
-                    tm[0],
+                    stopped,
+                    paused_or_quota,
+                    dl_held,
+                    cur_gen,
+                    max_norm_lvl,
+                    srv_len,
+                    now_sec(),
                 )
+            };
+
+            let try_acquire_conn = |lvl: i32, want_ptr: usize, ignore_ptrs: &[usize]| -> usize {
+                let Some(pool) = crate::net::active_server_pool() else {
+                    return 0;
+                };
+                let srvs = pool.servers_snapshot();
+                let want_srv = if want_ptr != 0 {
+                    srvs.iter()
+                        .find(|s| (std::sync::Arc::as_ptr(s) as usize) == want_ptr)
+                        .map(|s| s.as_ref())
+                } else {
+                    None
+                };
+                if want_ptr != 0 && want_srv.is_none() {
+                    return 0;
+                }
+                let mut ign_refs = Vec::with_capacity(ignore_ptrs.len());
+                if want_srv.is_none() {
+                    for &ip in ignore_ptrs {
+                        if let Some(s) = srvs
+                            .iter()
+                            .find(|s| (std::sync::Arc::as_ptr(s) as usize) == ip)
+                        {
+                            ign_refs.push(s.as_ref());
+                        }
+                    }
+                }
+                pool.get_connection(lvl, want_srv, &ign_refs) as usize
             };
 
             loop {
@@ -3376,7 +2909,7 @@ impl NzbgetRsArticleDownloader {
                     break;
                 }
                 status = AD_FAILED;
-                set_status(AD_WAITING, false, false);
+                self.set_status(host, AD_WAITING, false, false);
 
                 loop {
                     let (st_now, _, _, cur_gen, _, _, now_t) = runtime_flags();
@@ -3384,60 +2917,29 @@ impl NzbgetRsArticleDownloader {
                         break;
                     }
                     if transient_retries.is_empty() {
-                        let mut ign_i64: Vec<i64> =
-                            failed_servers.iter().map(|&p| p as i64).collect();
-                        let got = host.raw(
-                            4,
-                            4,
-                            level,
-                            want_server,
-                            ign_i64.len(),
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                            if ign_i64.is_empty() {
-                                std::ptr::null_mut()
-                            } else {
-                                ign_i64.as_mut_ptr()
-                            },
-                            std::ptr::null_mut(),
-                        );
+                        let got = try_acquire_conn(level, want_server, &failed_servers);
                         if got != 0 {
                             self.set_conn_ptr(got);
                         }
                     } else {
                         let waiting = transient_retries.waiting_servers(now_t);
                         if !waiting.contains(&want_server) {
-                            let mut ign_i64: Vec<i64> = failed_servers
-                                .iter()
-                                .chain(waiting.iter())
-                                .map(|&p| p as i64)
-                                .collect();
-                            let got = host.raw(
-                                4,
-                                4,
-                                level,
-                                want_server,
-                                ign_i64.len(),
-                                std::ptr::null(),
-                                std::ptr::null(),
-                                std::ptr::null_mut(),
-                                if ign_i64.is_empty() {
-                                    std::ptr::null_mut()
-                                } else {
-                                    ign_i64.as_mut_ptr()
-                                },
-                                std::ptr::null_mut(),
-                            );
+                            let mut ign_all =
+                                Vec::with_capacity(failed_servers.len() + waiting.len());
+                            ign_all.extend_from_slice(&failed_servers);
+                            ign_all.extend_from_slice(&waiting);
+                            let got = try_acquire_conn(level, want_server, &ign_all);
                             if got != 0 {
                                 self.set_conn_ptr(got);
                             }
                         }
                     }
-                    host.sleep_ms(5);
+                    if self.conn_ptr() == 0 {
+                        sleep_ms(5);
+                    }
                 }
 
-                set_status(AD_RUNNING, true, false);
+                self.set_status(host, AD_RUNNING, true, false);
 
                 let (st_now, paused_or_quota, dl_held, cur_gen, _, _, now_t) = runtime_flags();
                 if st_now
@@ -3450,29 +2952,26 @@ impl NzbgetRsArticleDownloader {
                 }
 
                 let cptr = self.conn_ptr();
-                let mut sints = [0i32; 5];
-                let mut sstrs = [std::ptr::null::<c_char>(); 2];
-                let last_server = host.raw(
-                    4,
-                    5,
-                    0,
-                    cptr,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    sints.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    sstrs.as_mut_ptr(),
-                );
-                level = sints[0];
-                let retention = sints[1];
-                let server_id = sints[2];
-                let join_group = sints[4] != 0;
+                if cptr == 0 {
+                    status = AD_RETRY;
+                    break;
+                }
+                let conn_ref = unsafe { &*(cptr as *const crate::net::PooledNntpConn) };
+                unsafe {
+                    conn_ref.prepare_for_use();
+                }
+                let srv = &conn_ref.server;
+                let last_server = std::sync::Arc::as_ptr(srv) as usize;
+                level = srv.norm_level.load(Ordering::SeqCst);
+                let retention = srv.retention;
+                let server_id = srv.id;
+                let join_group = srv.join_group;
                 let mut remained_retries = transient_retries.remained_retries(last_server);
 
-                let srv_name = unsafe { cstr_or_empty(sstrs[0]) };
-                let conn_host = unsafe { cstr_or_empty(sstrs[1]) };
-                let conn_name = article_dl_format_connection_name(&srv_name, &conn_host);
+                let conn_name = article_dl_format_connection_name(
+                    srv.name.to_bytes(),
+                    conn_ref.host_cstr().to_bytes(),
+                );
                 self.set_conn_name(conn_name.clone());
 
                 let (retention_failure, file_age_days) =
@@ -3503,27 +3002,19 @@ impl NzbgetRsArticleDownloader {
                     );
                 }
 
-                let mut auth_rej_int = [0i32; 1];
+                let mut auth_rej = false;
                 let mut connected = if self.conn_ptr() != 0 {
-                    host.raw(
-                        4,
-                        6,
-                        0,
-                        self.conn_ptr(),
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        auth_rej_int.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    ) != 0
+                    let c = unsafe { &*(self.conn_ptr() as *const crate::net::PooledNntpConn) };
+                    let ok = unsafe { c.connect() };
+                    auth_rej = unsafe { c.auth_rejected() };
+                    ok
                 } else {
                     false
                 };
                 let mut transient_retry_scheduled = false;
                 let mut auth_rejected = false;
-                if !connected && self.conn_ptr() != 0 && auth_rej_int[0] != 0 {
-                    if transient_retries.register(last_server, host.now()) {
+                if !connected && self.conn_ptr() != 0 && auth_rej {
+                    if transient_retries.register(last_server, now_sec()) {
                         transient_retry_scheduled = true;
                     } else {
                         auth_rejected = true;
@@ -3534,7 +3025,7 @@ impl NzbgetRsArticleDownloader {
                 if connected && !st_after_conn {
                     status = self.download_article(&mut w, host, join_group);
                     if status == AD_TRANSIENT_ERROR {
-                        if transient_retries.register(last_server, host.now()) {
+                        if transient_retries.register(last_server, now_sec()) {
                             status = AD_CONNECT_ERROR;
                             transient_retry_scheduled = true;
                         } else {
@@ -3567,24 +3058,16 @@ impl NzbgetRsArticleDownloader {
                             );
                             w.server_stats.push((server_id, ns, nf));
                         }
-                        let mut st_arr = [succ, fail];
-                        host.raw(
-                            4,
-                            7,
-                            1,
-                            server_id as usize,
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            st_arr.as_mut_ptr(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                        );
+                        if let Some(sm) = crate::statmeter::active_statmeter() {
+                            let off = crate::ffi::active_workstate()
+                                .map_or(0, |ws| ws.local_time_offset());
+                            sm.add_server_stats(0, fail as u32, succ as u32, server_id, off);
+                        }
                     }
                 }
 
                 if self.conn_ptr() != 0 {
-                    self.add_conn_bytes(host, &mut w.downloaded_size);
+                    self.add_conn_bytes(&mut w.downloaded_size);
                 }
 
                 let (handled_rej, break_rej, next_st, next_crej, next_rem) =
@@ -3631,22 +3114,20 @@ impl NzbgetRsArticleDownloader {
                 remained_retries = new_rem;
                 transient_retries.set_remained_retries(last_server, remained_retries);
 
-                let (st_end_iter, paused_end, held_end, gen_end, max_norm_lvl, srv_len, _) =
+                let (st_end_iter, paused_end, held_end, gen_end, max_norm_lvl, _, _) =
                     runtime_flags();
                 let mut optional_blocked = false;
                 if !connected && self.conn_ptr() != 0 && !st_end_iter {
-                    optional_blocked = host.raw(
-                        4,
-                        10,
-                        0,
-                        last_server,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    ) != 0;
+                    if let Some(pool) = crate::net::active_server_pool() {
+                        let srvs = pool.servers_snapshot();
+                        if let Some(s) = srvs
+                            .iter()
+                            .find(|s| (std::sync::Arc::as_ptr(s) as usize) == last_server)
+                        {
+                            pool.block_server(s);
+                            optional_blocked = s.optional;
+                        }
+                    }
                 }
 
                 want_server = 0;
@@ -3693,32 +3174,28 @@ impl NzbgetRsArticleDownloader {
                         failed_servers.push(last_server);
                     }
 
-                    let cnt = srv_len.max(0) as usize;
-                    let mut cand_ids = Vec::with_capacity(cnt);
-                    let mut cand_lvls = Vec::with_capacity(cnt);
-                    let mut cand_grps = Vec::with_capacity(cnt);
-                    let mut cand_avail = Vec::with_capacity(cnt);
-                    let mut cand_ptrs = Vec::with_capacity(cnt);
-                    for si in 0..cnt {
-                        let mut cints = [0i32; 4];
-                        let sp = host.raw(
-                            4,
-                            11,
-                            si as i32,
-                            0,
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            cints.as_mut_ptr(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                        );
-                        cand_ptrs.push(sp);
-                        cand_ids.push(cints[0]);
-                        cand_lvls.push(cints[1]);
-                        cand_grps.push(cints[2]);
-                        cand_avail.push(cints[3] as u8);
-                    }
+                    let (cand_ptrs, cand_ids, cand_lvls, cand_grps, cand_avail) =
+                        crate::net::active_server_pool()
+                            .map(|pool| {
+                                let list = pool.servers_snapshot();
+                                let mut c_ptrs = Vec::with_capacity(list.len());
+                                let mut c_ids = Vec::with_capacity(list.len());
+                                let mut c_lvls = Vec::with_capacity(list.len());
+                                let mut c_grps = Vec::with_capacity(list.len());
+                                let mut c_avail = Vec::with_capacity(list.len());
+                                for s in &list {
+                                    c_ptrs.push(std::sync::Arc::as_ptr(s) as usize);
+                                    c_ids.push(s.id);
+                                    c_lvls.push(s.norm_level.load(Ordering::SeqCst));
+                                    c_grps.push(s.group);
+                                    let avail = s.active.load(Ordering::SeqCst)
+                                        && s.max_connections != 0
+                                        && !(s.optional && pool.is_server_blocked(s));
+                                    c_avail.push(u8::from(avail));
+                                }
+                                (c_ptrs, c_ids, c_lvls, c_grps, c_avail)
+                            })
+                            .unwrap_or_default();
 
                     let mut f_ids = Vec::with_capacity(failed_servers.len());
                     let mut f_lvls = Vec::with_capacity(failed_servers.len());
@@ -3801,7 +3278,7 @@ impl NzbgetRsArticleDownloader {
             status
         };
 
-        set_status(final_status, false, true);
+        self.set_status(host, final_status, false, true);
         host.log(MK_DEBUG, b"Exiting ArticleDownloader-loop");
     }
 }
@@ -3819,15 +3296,113 @@ pub fn article_dl_exec(
     ctx: *mut c_void,
 ) -> usize {
     let _ = a2;
-    // Pure static getters that require no host callback
+    // Static ops that require no host callback
     match op {
+        100 => {
+            memory_monitor_init_options(a1 != 0);
+            return 0;
+        }
         102 => return memory_monitor_tier() as usize,
         103 => return memory_monitor_tier_name_c() as usize,
         104 => return memory_monitor_effective_cache_mb() as usize,
         105 => return memory_monitor_effective_par_buffer_mb(a1) as usize,
         106 => return memory_monitor_effective_downloads_limit(a1) as usize,
-        125 => return usize::from(server_pool_is_blocked(p1 as i64, p2 as i64, a1)),
+        107 => {
+            MEM_ACTIVE.store(false, Ordering::Release);
+            return 0;
+        }
+        112 => {
+            cache_free(p1 as *mut u8, a1);
+            return 0;
+        }
+        113 => {
+            cache_wakeup_flush();
+            return 0;
+        }
+        114 => return CACHE_ALLOCATED.load(Ordering::SeqCst),
+        115 => {
+            CACHE_FILE_INFO.store(p1, Ordering::SeqCst);
+            return 0;
+        }
         _ => {}
+    }
+
+    // Instance ops that require no host callback
+    if !ptr.is_null() {
+        let dl = unsafe { &*ptr };
+        match op {
+            10 => {
+                let w = dl.worker.lock().unwrap_or_else(|e| e.into_inner());
+                let ints_out = unsafe { std::slice::from_raw_parts_mut(p1 as *mut c_int, 4) };
+                let i64s_out = unsafe { std::slice::from_raw_parts_mut(p2 as *mut i64, 4) };
+                let strs_out =
+                    unsafe { std::slice::from_raw_parts_mut(s1 as *mut *const c_char, 1) };
+                ints_out[0] = dl.status.load(Ordering::SeqCst);
+                ints_out[1] = i32::from(w.has_analyzer);
+                ints_out[2] = i32::from(w.analyzer.as_ref().is_some_and(|ca| ca.par_file));
+                if let Some(ref afn) = w.article_filename_c {
+                    ints_out[3] = 1;
+                    strs_out[0] = afn.as_ptr().cast();
+                } else {
+                    ints_out[3] = 0;
+                    strs_out[0] = std::ptr::null();
+                }
+                i64s_out[2] = w.decoded_file_size;
+                i64s_out[3] = w.downloaded_size as i64;
+                return 1;
+            }
+            11 => {
+                let mut w = dl.worker.lock().unwrap_or_else(|e| e.into_inner());
+                if !w.has_analyzer {
+                    return 0;
+                }
+                let ints_out = unsafe { std::slice::from_raw_parts_mut(p1 as *mut c_int, 1) };
+                let strs_out =
+                    unsafe { std::slice::from_raw_parts_mut(s1 as *mut *const c_char, 2) };
+                let mut par_out = 0;
+                if w.parcheck_enabled {
+                    if let Some(ref mut ca) = w.analyzer {
+                        let h = ca.finish();
+                        let par_file = ca.par_file;
+                        let set_id = ca.par_set_id;
+                        w.hash16k_c = h;
+                        if let Some(id) = set_id {
+                            w.par_set_id_c = id;
+                        }
+                        par_out = i32::from(par_file);
+                    }
+                }
+                ints_out[0] = par_out;
+                strs_out[0] = w.hash16k_c.as_ptr().cast();
+                strs_out[1] = w.par_set_id_c.as_ptr().cast();
+                return 1;
+            }
+            14 => {
+                let st = dl.status.load(Ordering::SeqCst);
+                let lut = dl.last_update_time.load(Ordering::SeqCst);
+                let mut tbuf = [0u8; 64];
+                crate::util::util_format_time(lut, &mut tbuf);
+                let tslice = c_bytes(&tbuf);
+                let prefix = format!("      Download: status={st}, LastUpdateTime=");
+                crate::log::log_active_bytes(
+                    MK_INFO,
+                    &join_c_slices(&[prefix.as_bytes(), tslice, b", InfoName=", &dl.info_name]),
+                );
+                return 0;
+            }
+            16 => {
+                let cs = dl.conn_state.lock().unwrap_or_else(|e| e.into_inner());
+                if cs.0 != 0 {
+                    let conn = unsafe { &*(cs.0 as *const crate::net::PooledNntpConn) };
+                    conn.set_suppress_errors(true);
+                    conn.cancel();
+                }
+                return 0;
+            }
+            18 => return dl.status.load(Ordering::SeqCst) as usize,
+            19 => return dl.last_update_time.load(Ordering::SeqCst) as usize,
+            _ => {}
+        }
     }
 
     let Some(cb) = host_cb else {
@@ -3854,10 +3429,6 @@ pub fn article_dl_exec(
                 let old_dir = unsafe { cstr_or_empty(s1) };
                 usize::from(move_completed_files_on_host(&host, p1, &old_dir))
             }
-            100 => {
-                memory_monitor_init_options(&host, a1 != 0);
-                0
-            }
             101 => {
                 memory_monitor_run(&host);
                 0
@@ -3867,38 +3438,6 @@ pub fn article_dl_exec(
                 0
             }
             111 => usize::from(article_cache_check_flush(&host, p1, a1 != 0)),
-            120 => {
-                server_pool_init_connections(&host);
-                0
-            }
-            121 => server_pool_get_connection(&host, a1, p1, p2),
-            122 => {
-                host.raw(
-                    3,
-                    5,
-                    2,
-                    p1,
-                    p2,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-                0
-            }
-            123 => {
-                server_pool_close_unused(&host);
-                0
-            }
-            124 => {
-                server_pool_block_server(&host, p1);
-                0
-            }
-            126 => {
-                server_pool_log_debug(&host);
-                0
-            }
             _ => 0,
         };
     }
@@ -3908,52 +3447,6 @@ pub fn article_dl_exec(
         0 => {
             dl.run(&host);
             0
-        }
-        10 => {
-            // Snapshot for QueueCoordinator (`case 51, a1 == 0`)
-            let w = dl.worker.lock().unwrap_or_else(|e| e.into_inner());
-            let ints_out = unsafe { std::slice::from_raw_parts_mut(p1 as *mut c_int, 4) };
-            let i64s_out = unsafe { std::slice::from_raw_parts_mut(p2 as *mut i64, 4) };
-            let strs_out = unsafe { std::slice::from_raw_parts_mut(s1 as *mut *const c_char, 1) };
-            ints_out[0] = a1; // current atomic status passed by C++
-            ints_out[1] = i32::from(w.has_analyzer);
-            ints_out[2] = i32::from(w.analyzer.as_ref().is_some_and(|ca| ca.par_file));
-            if let Some(ref afn) = w.article_filename_c {
-                ints_out[3] = 1;
-                strs_out[0] = afn.as_ptr().cast();
-            } else {
-                ints_out[3] = 0;
-                strs_out[0] = std::ptr::null();
-            }
-            i64s_out[2] = w.decoded_file_size;
-            i64s_out[3] = w.downloaded_size as i64;
-            1
-        }
-        11 => {
-            // Finish content analyzer (`case 51, a1 == 4`)
-            let mut w = dl.worker.lock().unwrap_or_else(|e| e.into_inner());
-            if !w.has_analyzer {
-                return 0;
-            }
-            let ints_out = unsafe { std::slice::from_raw_parts_mut(p1 as *mut c_int, 1) };
-            let strs_out = unsafe { std::slice::from_raw_parts_mut(s1 as *mut *const c_char, 2) };
-            let mut par_out = 0;
-            if w.parcheck_enabled {
-                if let Some(ref mut ca) = w.analyzer {
-                    let h = ca.finish();
-                    let par_file = ca.par_file;
-                    let set_id = ca.par_set_id;
-                    w.hash16k_c = h;
-                    if let Some(id) = set_id {
-                        w.par_set_id_c = id;
-                    }
-                    par_out = i32::from(par_file);
-                }
-            }
-            ints_out[0] = par_out;
-            strs_out[0] = w.hash16k_c.as_ptr().cast();
-            strs_out[1] = w.par_set_id_c.as_ptr().cast();
-            1
         }
         12 => {
             // Merge per-article server_stats into FileInfo & NzbInfo (`case 51, a1 == 3`)
@@ -3996,24 +3489,6 @@ pub fn article_dl_exec(
             }
             usize::from(ok)
         }
-        14 => {
-            // LogDebugInfo (`a1` = status, `p1` = last_update_time)
-            let info_c = nul_vec(&dl.info_name);
-            let mut t = [p1 as i64];
-            host.raw(
-                1,
-                12,
-                a1,
-                0,
-                0,
-                info_c.as_ptr().cast(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                t.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
-            0
-        }
         15 => {
             // CancelHanging (`case 51, a1 == 6`)
             let cname = dl.copy_conn_name();
@@ -4038,25 +3513,6 @@ pub fn article_dl_exec(
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
             );
-            0
-        }
-        16 => {
-            // Stop connection cancel (`ArticleDownloader::Stop`)
-            let cs = dl.conn_state.lock().unwrap_or_else(|e| e.into_inner());
-            if cs.0 != 0 {
-                host.raw(
-                    4,
-                    9,
-                    0,
-                    cs.0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-            }
             0
         }
         17 => {
@@ -4119,5 +3575,55 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_busy_marker_published_under_selection_lock_and_cleared_after_flush() {
+        static OBSERVED_UNDER_LOCK: AtomicBool = AtomicBool::new(false);
+        unsafe extern "C" fn mock_host(
+            _ctx: *mut c_void,
+            op: c_int,
+            a1: c_int,
+            _a2: c_int,
+            _p1: usize,
+            _p2: usize,
+            _s1: *const c_char,
+            _s2: *const c_char,
+            _ints: *mut c_int,
+            _i64s: *mut i64,
+            strs: *mut *const c_char,
+        ) -> usize {
+            if op == 2 && a1 == 5 {
+                let fake_file = 0xdead_beefusize;
+                crate::ffi::nzbget_rs_article_dl_exec(
+                    std::ptr::null_mut(),
+                    115,
+                    0,
+                    0,
+                    fake_file,
+                    0,
+                    std::ptr::null(),
+                    None,
+                    std::ptr::null_mut(),
+                );
+                // While simulated DownloadQueue::Guard() is still held inside op 2, 5:
+                OBSERVED_UNDER_LOCK.store(cache_file_busy(fake_file), Ordering::SeqCst);
+                if !strs.is_null() {
+                    *strs = c"nzb/file.bin".as_ptr();
+                }
+                return fake_file;
+            }
+            0
+        }
+
+        OBSERVED_UNDER_LOCK.store(false, Ordering::SeqCst);
+        CACHE_FILE_INFO.store(0, Ordering::SeqCst);
+        let host = DlHost {
+            cb: mock_host,
+            ctx: std::ptr::null_mut(),
+        };
+        assert!(article_cache_check_flush(&host, 4096, false));
+        assert!(OBSERVED_UNDER_LOCK.load(Ordering::SeqCst));
+        assert!(!cache_file_busy(0xdead_beefusize));
     }
 }

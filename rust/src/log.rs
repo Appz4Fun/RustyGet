@@ -403,15 +403,51 @@ impl NzbgetRsCmdScriptLog {
     }
 }
 
+static ACTIVE_LOG: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsLog>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn active_log() -> Option<std::sync::Arc<NzbgetRsLog>> {
+    ACTIVE_LOG
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+}
+
+pub(crate) fn active_debug_build() -> bool {
+    active_log().is_some_and(|l| l.debug_build)
+}
+
+pub(crate) fn log_active_bytes(kind: i32, bytes: &[u8]) {
+    let Some(lg) = active_log() else {
+        return;
+    };
+    let opts = crate::options::active_options();
+    let cs = cstring_lossless(bytes);
+    emit_message(&lg, kind, lg.debug_build, opts.as_deref(), &cs);
+}
+
 #[no_mangle]
 pub extern "C" fn nzbget_rs_log_new(debug_build: c_int) -> *mut NzbgetRsLog {
-    Box::into_raw(Box::new(NzbgetRsLog::new(debug_build != 0)))
+    let arc = std::sync::Arc::new(NzbgetRsLog::new(debug_build != 0));
+    if let Ok(mut g) = ACTIVE_LOG.write() {
+        *g = Some(std::sync::Arc::downgrade(&arc));
+    }
+    std::sync::Arc::into_raw(arc).cast_mut()
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_log_free(log: *mut NzbgetRsLog) {
     if !log.is_null() {
-        drop(Box::from_raw(log));
+        let arc = std::sync::Arc::from_raw(log.cast_const());
+        let wk = std::sync::Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_LOG.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+        drop(arc);
     }
 }
 

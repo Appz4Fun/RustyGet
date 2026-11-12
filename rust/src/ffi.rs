@@ -1,7 +1,7 @@
 //! C ABI. Strings come in as NUL-terminated C strings; results go out as a
 //! buffer the caller copies and then frees with nzbget_rs_free.
 
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
 #[path = "tlscipher/native.rs"]
 pub(crate) mod tls_cipher_native;
@@ -214,6 +214,7 @@ pub unsafe extern "C" fn nzbget_rs_crc32_append(block: *const u8, len: u32, init
 
 /// Runs an in-place text helper on the NUL-terminated `raw` and puts the NUL
 /// at the new end.
+#[cfg(test)]
 unsafe fn in_place(raw: *mut c_char, f: impl FnOnce(&mut [u8]) -> usize) {
     if raw.is_null() {
         return;
@@ -221,12 +222,6 @@ unsafe fn in_place(raw: *mut c_char, f: impl FnOnce(&mut [u8]) -> usize) {
     let len = CStr::from_ptr(raw).to_bytes().len();
     let n = f(std::slice::from_raw_parts_mut(raw.cast::<u8>(), len));
     *raw.add(n) = 0;
-}
-
-/// Util::FormatSize; free the result with nzbget_rs_free.
-#[no_mangle]
-pub extern "C" fn nzbget_rs_format_size(size: i64) -> RsBuf {
-    into_buf(crate::util::format_size(size))
 }
 
 /// Util::MatchFileExt.
@@ -359,18 +354,6 @@ pub unsafe extern "C" fn nzbget_rs_path_position(op: c_int, s: *const c_char, le
         2 => crate::paths::extract_file_path_from_cmd(b).len(),
         _ => 0,
     }
-}
-
-/// FileSystem::NormalizePathSeparators, in place.
-///
-/// # Safety
-/// `path` is null or a writable NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_normalize_path_separators(path: *mut c_char) {
-    in_place(path, |b| {
-        crate::paths::normalize_path_separators(b);
-        b.len()
-    })
 }
 
 /// Scheduler::CheckTasks' timing: updates the tasks' last runs and
@@ -590,12 +573,8 @@ pub unsafe extern "C" fn nzbget_rs_directory_exists(path: *const c_char) -> c_in
 /// # Safety
 /// `path` is null or NUL-terminated; `errmsg` is null or writable and disjoint
 /// from the input. Every non-null output is initialized, including on failure.
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_force_directories(
-    path: *const c_char,
-    errmsg: *mut RsBuf,
-) -> c_int {
+#[cfg(all(unix, test))]
+unsafe fn nzbget_rs_force_directories(path: *const c_char, errmsg: *mut RsBuf) -> c_int {
     if errmsg.is_null() {
         return 0;
     }
@@ -1137,23 +1116,6 @@ mod tests {
                     assert_eq!(nzbget_rs_path_position(op, std::ptr::null(), len), expected);
                 }
             }
-            nzbget_rs_normalize_path_separators(std::ptr::null_mut());
-            let mut raw = [
-                b'a',
-                crate::paths::ALT_PATH_SEPARATOR,
-                0,
-                crate::paths::ALT_PATH_SEPARATOR,
-            ];
-            nzbget_rs_normalize_path_separators(raw.as_mut_ptr().cast());
-            assert_eq!(
-                raw,
-                [
-                    b'a',
-                    crate::paths::PATH_SEPARATOR,
-                    0,
-                    crate::paths::ALT_PATH_SEPARATOR
-                ]
-            );
 
             // Length-bounded input need not have a terminator. The result
             // owns its bytes, including embedded NULs, and an extra terminator.
@@ -1239,14 +1201,6 @@ mod tests {
             let mut raw = *b"abc\0";
             crate::util::reduce_str(raw.as_mut_ptr().cast(), std::ptr::null(), c"".as_ptr());
             assert_eq!(&raw, b"abc\0");
-            let first = nzbget_rs_format_size(512);
-            let second = nzbget_rs_format_size(12345);
-            nzbget_rs_free(second);
-            assert_eq!(
-                std::slice::from_raw_parts(first.data.cast::<u8>(), first.len + 1),
-                &b"512 B\0"[..]
-            );
-            nzbget_rs_free(first);
             for list in [c".NZB", c"*.NZ?"] {
                 assert_eq!(
                     nzbget_rs_match_file_ext(c"a.nzb".as_ptr(), list.as_ptr(), c",".as_ptr()),
@@ -3369,33 +3323,12 @@ pub unsafe extern "C" fn nzbget_rs_cmdline_format_usage(
 // SystemHealth (`rust/src/systemhealth.rs`)
 // ============================================================================
 
-#[repr(C)]
-pub struct NzbgetRsHealthServerInput {
-    pub id: c_int,
-    pub active: c_int,
-    pub name: *const c_char,
-    pub level: c_int,
-    pub optional: c_int,
-    pub group: c_int,
-    pub host: *const c_char,
-    pub port: c_int,
-    pub username: *const c_char,
-    pub password: *const c_char,
-    pub tls: c_int,
-    pub cipher: *const c_char,
-    pub max_connections: c_int,
-    pub retention: c_int,
-    pub cert_level: u32,
-    pub ip_version: c_int,
-}
-
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_system_health_diagnose(
     opts_ptr: *const crate::options::NzbgetRsOptions,
-    servers_ptr: *const NzbgetRsHealthServerInput,
-    server_count: usize,
+    pool_ptr: *const crate::net::NzbgetRsServerPool,
     feed_coord_ptr: *const crate::feed::NzbgetRsFeedCoord,
     sched_ptr: *const crate::scheduler::NzbgetRsScheduler,
     log_ptr: *const crate::log::NzbgetRsLog,
@@ -3441,32 +3374,33 @@ pub unsafe extern "C" fn nzbget_rs_system_health_diagnose(
     let seven_zip_p = to_path(opts.str_bytes(39));
     let pass_p = to_path(opts.str_bytes(31));
 
-    let mut servers = Vec::with_capacity(server_count);
-    if !servers_ptr.is_null() && server_count > 0 {
-        for s in std::slice::from_raw_parts(servers_ptr, server_count) {
-            servers.push(crate::systemhealth::HealthServerInput {
-                id: s.id,
-                section: crate::systemhealth::NewsServerSectionInput {
-                    active: s.active != 0,
-                    name: input(s.name),
-                    level: s.level,
-                    optional: s.optional != 0,
-                    group: s.group,
-                    host: input(s.host),
-                    port: s.port,
-                    username: input(s.username),
-                    password: input(s.password),
-                    tls: s.tls != 0,
-                    cipher: input(s.cipher),
-                    max_connections: s.max_connections,
-                    retention: s.retention,
-                    cert_level: s.cert_level,
-                    ip_version: s.ip_version,
-                    dupe_search: sc.dupe_search != 0,
-                },
-            });
-        }
-    }
+    let raw_servers = pool_ptr
+        .as_ref()
+        .map_or_else(Vec::new, |p| p.collect_health_servers());
+    let servers: Vec<crate::systemhealth::HealthServerInput<'_>> = raw_servers
+        .iter()
+        .map(|s| crate::systemhealth::HealthServerInput {
+            id: s.id,
+            section: crate::systemhealth::NewsServerSectionInput {
+                active: s.active,
+                name: s.name.as_slice(),
+                level: s.level,
+                optional: s.optional,
+                group: s.group,
+                host: s.host.as_slice(),
+                port: s.port,
+                username: s.username.as_slice(),
+                password: s.password.as_slice(),
+                tls: s.tls,
+                cipher: s.cipher.as_slice(),
+                max_connections: s.max_connections,
+                retention: s.retention,
+                cert_level: s.cert_level,
+                ip_version: s.ip_version,
+                dupe_search: sc.dupe_search != 0,
+            },
+        })
+        .collect();
 
     let tasks = sched_ptr
         .as_ref()
@@ -4013,53 +3947,353 @@ pub unsafe extern "C" fn nzbget_rs_system_info_format(
     ))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_script_config_read_cipher_snapshot(
-    filename: *const c_char,
-    out_bytes: *mut RsBuf,
-) -> c_int {
-    if filename.is_null() || out_bytes.is_null() {
-        return 0;
-    }
-    let fn_bytes = CStr::from_ptr(filename).to_bytes();
-    match crate::extension::script_config_read_cipher_snapshot(fn_bytes) {
-        Some(buf) => {
-            *out_bytes = into_buf(buf);
-            1
+pub struct NzbgetRsWorkState {
+    resume_time: std::sync::atomic::AtomicI64,
+    local_time_offset: std::sync::atomic::AtomicI32,
+    speed_limit: std::sync::atomic::AtomicI32,
+    temp_pause_download: std::sync::atomic::AtomicBool,
+    fleet_hold: std::sync::atomic::AtomicI32,
+    temp_pause_postprocess: std::sync::atomic::AtomicBool,
+    pause_download: std::sync::atomic::AtomicBool,
+    pause_post_process: std::sync::atomic::AtomicBool,
+    pause_scan: std::sync::atomic::AtomicBool,
+    pause_frontend: std::sync::atomic::AtomicBool,
+    downloading: std::sync::atomic::AtomicBool,
+    quota_reached: std::sync::atomic::AtomicBool,
+    notify_ctx: usize,
+    notify_cb: Option<unsafe extern "C" fn(usize)>,
+}
+
+static ACTIVE_WORKSTATE: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsWorkState>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn active_workstate() -> Option<std::sync::Arc<NzbgetRsWorkState>> {
+    ACTIVE_WORKSTATE
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+}
+
+impl NzbgetRsWorkState {
+    fn notify(&self) {
+        if let Some(cb) = self.notify_cb {
+            unsafe { cb(self.notify_ctx) };
         }
-        None => 0,
+    }
+
+    pub(crate) fn pause_download(&self) -> bool {
+        self.pause_download
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn quota_reached(&self) -> bool {
+        self.quota_reached.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn download_held(&self) -> bool {
+        self.temp_pause_download
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || self.fleet_hold.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
+    pub(crate) fn speed_limit(&self) -> i32 {
+        self.speed_limit.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn local_time_offset(&self) -> i32 {
+        self.local_time_offset
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_script_config_commit_cipher_patch(
-    filename: *const c_char,
-    expected_ptr: *const c_char,
-    expected_len: usize,
-    replacement_ptr: *const c_char,
-    replacement_len: usize,
+pub extern "C" fn nzbget_rs_workstate_new(
+    notify_ctx: usize,
+    notify_cb: Option<unsafe extern "C" fn(usize)>,
+) -> *mut NzbgetRsWorkState {
+    let arc = std::sync::Arc::new(NzbgetRsWorkState {
+        resume_time: std::sync::atomic::AtomicI64::new(0),
+        local_time_offset: std::sync::atomic::AtomicI32::new(0),
+        speed_limit: std::sync::atomic::AtomicI32::new(0),
+        temp_pause_download: std::sync::atomic::AtomicBool::new(true),
+        fleet_hold: std::sync::atomic::AtomicI32::new(0),
+        temp_pause_postprocess: std::sync::atomic::AtomicBool::new(true),
+        pause_download: std::sync::atomic::AtomicBool::new(false),
+        pause_post_process: std::sync::atomic::AtomicBool::new(false),
+        pause_scan: std::sync::atomic::AtomicBool::new(false),
+        pause_frontend: std::sync::atomic::AtomicBool::new(false),
+        downloading: std::sync::atomic::AtomicBool::new(false),
+        quota_reached: std::sync::atomic::AtomicBool::new(false),
+        notify_ctx,
+        notify_cb,
+    });
+    if let Ok(mut g) = ACTIVE_WORKSTATE.write() {
+        *g = Some(std::sync::Arc::downgrade(&arc));
+    }
+    std::sync::Arc::into_raw(arc).cast_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_workstate_free(ws: *mut NzbgetRsWorkState) {
+    if !ws.is_null() {
+        let arc = std::sync::Arc::from_raw(ws.cast_const());
+        let wk = std::sync::Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_WORKSTATE.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+        drop(arc);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_workstate_ctl(
+    ws: *const NzbgetRsWorkState,
+    id: c_int,
+    write: c_int,
+    val: i64,
+) -> i64 {
+    let Some(s) = ws.as_ref() else {
+        return 0;
+    };
+    use std::sync::atomic::Ordering::SeqCst;
+    if write == 0 {
+        return match id {
+            0 => i64::from(s.pause_download.load(SeqCst)),
+            1 => i64::from(s.pause_post_process.load(SeqCst)),
+            2 => i64::from(s.pause_scan.load(SeqCst)),
+            3 => i64::from(s.temp_pause_download.load(SeqCst)),
+            4 => i64::from(s.download_held()),
+            5 => i64::from(s.temp_pause_postprocess.load(SeqCst)),
+            6 => i64::from(s.pause_frontend.load(SeqCst)),
+            7 => s.speed_limit.load(SeqCst) as i64,
+            8 => s.resume_time.load(SeqCst),
+            9 => s.local_time_offset.load(SeqCst) as i64,
+            10 => i64::from(s.quota_reached.load(SeqCst)),
+            11 => i64::from(s.downloading.load(SeqCst)),
+            _ => 0,
+        };
+    }
+    match id {
+        0 => s.pause_download.store(val != 0, SeqCst),
+        1 => s.pause_post_process.store(val != 0, SeqCst),
+        2 => s.pause_scan.store(val != 0, SeqCst),
+        3 => s.temp_pause_download.store(val != 0, SeqCst),
+        4 => {
+            s.fleet_hold
+                .fetch_add(if val != 0 { 1 } else { -1 }, SeqCst);
+        }
+        5 => s.temp_pause_postprocess.store(val != 0, SeqCst),
+        7 => s.speed_limit.store(val as i32, SeqCst),
+        8 => s.resume_time.store(val, SeqCst),
+        9 => s.local_time_offset.store(val as i32, SeqCst),
+        10 => s.quota_reached.store(val != 0, SeqCst),
+        11 => s.downloading.store(val != 0, SeqCst),
+        _ => return 0,
+    }
+    s.notify();
+    0
+}
+
+pub struct NzbgetRsScriptConfig {
+    templates: std::sync::Mutex<Vec<CString>>,
+}
+
+impl NzbgetRsScriptConfig {
+    fn load_template_cstrings() -> Option<Vec<CString>> {
+        let opts = crate::options::active_options()?;
+        let path_bytes = opts.str_bytes(9);
+        if path_bytes.is_empty() {
+            return None;
+        }
+        let raw = std::fs::read(crate::cleanup::bytes_to_path_buf(path_bytes)).ok()?;
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        let mut cbuf = Vec::with_capacity(end + 1);
+        cbuf.extend_from_slice(&raw[..end]);
+        cbuf.push(0);
+        let cs = unsafe { CString::from_vec_with_nul_unchecked(cbuf) };
+        Some(vec![cs])
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_script_config_new() -> *mut NzbgetRsScriptConfig {
+    Box::into_raw(Box::new(NzbgetRsScriptConfig {
+        templates: std::sync::Mutex::new(Vec::new()),
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_script_config_free(sc: *mut NzbgetRsScriptConfig) {
+    if !sc.is_null() {
+        drop(Box::from_raw(sc));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_script_config_exec(
+    sc: *const NzbgetRsScriptConfig,
+    op: c_int,
+    a1: c_int,
+    p1: *const c_char,
+    n1: usize,
+    p2: *const c_char,
+    n2: usize,
     ctx: *mut std::ffi::c_void,
     cancel_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    on_dir_sync_fail_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    emit_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn>,
+    out_buf: *mut RsBuf,
 ) -> c_int {
-    if filename.is_null() {
-        return crate::extension::RsCipherCommit::Failed as c_int;
-    }
-    let fn_bytes = CStr::from_ptr(filename).to_bytes();
-    let expected = bytes(expected_ptr, expected_len);
-    let replacement = bytes(replacement_ptr, replacement_len);
-    let commit = crate::extension::script_config_commit_cipher_patch(
-        fn_bytes,
-        expected,
-        replacement,
-        || cancel_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 }),
-        || {
-            if let Some(cb) = on_dir_sync_fail_cb {
-                unsafe { cb(ctx) };
+    match op {
+        0 => {
+            // InitOptions
+            let Some(s) = sc.as_ref() else {
+                return 0;
+            };
+            match NzbgetRsScriptConfig::load_template_cstrings() {
+                Some(v) => {
+                    if let Ok(mut g) = s.templates.lock() {
+                        *g = v;
+                    }
+                    1
+                }
+                None => {
+                    #[cfg(unix)]
+                    crate::log::log_active_bytes(2, b"Could not read configuration templates");
+                    0
+                }
             }
-        },
-    );
-    commit as c_int
+        }
+        1 => {
+            // ReadCipherSnapshot
+            if out_buf.is_null() {
+                return 0;
+            }
+            let Some(opts) = crate::options::active_options() else {
+                return 0;
+            };
+            let fn_bytes = opts.str_bytes(0);
+            if fn_bytes.is_empty() {
+                return 0;
+            }
+            match crate::extension::script_config_read_cipher_snapshot(fn_bytes) {
+                Some(buf) => {
+                    *out_buf = into_buf(buf);
+                    1
+                }
+                None => 0,
+            }
+        }
+        2 => {
+            // CommitCipherPatch (returns TlsCipherBackend::Detail::Commit codes: 1, 0, -2, -3, -1)
+            let Some(opts) = crate::options::active_options() else {
+                return -1;
+            };
+            let fn_bytes = opts.str_bytes(0);
+            if fn_bytes.is_empty() {
+                return -1;
+            }
+            let expected = bytes(p1, n1);
+            let replacement = bytes(p2, n2);
+            let commit = crate::extension::script_config_commit_cipher_patch(
+                fn_bytes,
+                expected,
+                replacement,
+                || cancel_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 }),
+                || {
+                    #[cfg(unix)]
+                    crate::log::log_active_bytes(
+                        1,
+                        b"TLS cipher settings were replaced, but the configuration directory could not be synchronized",
+                    );
+                },
+            );
+            match commit {
+                crate::extension::RsCipherCommit::Saved => 1,
+                crate::extension::RsCipherCommit::Unchanged => 0,
+                crate::extension::RsCipherCommit::Conflict => -2,
+                crate::extension::RsCipherCommit::Cancelled => -3,
+                crate::extension::RsCipherCommit::Failed => -1,
+            }
+        }
+        3 => {
+            // RPC loadtemplates(loadDescriptions = a1)
+            let Some(s) = sc.as_ref() else {
+                return 0;
+            };
+            let Some(emit) = emit_cb else {
+                return 0;
+            };
+            if a1 != 0 {
+                let Some(loaded) = NzbgetRsScriptConfig::load_template_cstrings() else {
+                    return 0;
+                };
+                let ptrs: Vec<*const c_char> = loaded.iter().map(|c| c.as_ptr()).collect();
+                emit(
+                    ctx,
+                    12,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    ptrs.as_ptr().cast(),
+                    ptrs.len(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                );
+                1
+            } else {
+                let Ok(g) = s.templates.lock() else {
+                    return 0;
+                };
+                let ptrs: Vec<*const c_char> = g.iter().map(|c| c.as_ptr()).collect();
+                emit(
+                    ctx,
+                    12,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    ptrs.as_ptr().cast(),
+                    ptrs.len(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                );
+                1
+            }
+        }
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -5077,13 +5311,23 @@ pub unsafe extern "C" fn nzbget_rs_twin_exec(
     s2: *const c_char,
     s3: *const c_char,
     s4: *const c_char,
-    nntp_host: Option<crate::articlefetcher::NzbgetRsNntpFetchHostFn>,
     host_cb: Option<crate::twin::NzbgetRsTwinHostFn>,
     out_buf: *mut RsBuf,
 ) -> c_int {
     let _cancel_guard = PosixCancelGuard::disable();
-    let (rc, bytes) =
-        crate::twin::twin_exec(op, a1, a2, p1, p2, s1, s2, s3, s4, nntp_host, host_cb);
+    let (rc, bytes) = crate::twin::twin_exec(
+        op,
+        a1,
+        a2,
+        p1,
+        p2,
+        s1,
+        s2,
+        s3,
+        s4,
+        Some(crate::articlefetcher::native_nntp_fetch_host),
+        host_cb,
+    );
     if let Some(vec) = bytes {
         if !out_buf.is_null() {
             *out_buf = into_buf(vec);
@@ -5230,11 +5474,10 @@ pub unsafe extern "C" fn nzbget_rs_article_dl_exec(
 
 #[cfg(unix)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_repair_ctrl_new(
-    nntp_host: crate::articlefetcher::NzbgetRsNntpFetchHostFn,
-) -> *mut crate::repair::NzbgetRsRepairController {
+pub unsafe extern "C" fn nzbget_rs_repair_ctrl_new() -> *mut crate::repair::NzbgetRsRepairController
+{
     Box::into_raw(Box::new(crate::repair::NzbgetRsRepairController::new(
-        nntp_host,
+        crate::articlefetcher::native_nntp_fetch_host,
     )))
 }
 
@@ -5392,7 +5635,6 @@ pub unsafe extern "C" fn nzbget_rs_post_script_run(
 pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_new(
     live_mode: c_int,
     nzb_id: c_int,
-    nntp_host: crate::articlefetcher::NzbgetRsNntpFetchHostFn,
     probe_host: crate::dupeprobe::DupeProbeHostFn,
     tls_enabled: c_int,
     debug_enabled: c_int,
@@ -5401,7 +5643,7 @@ pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_new(
         crate::streamrepair_coord::NzbgetRsStreamRepairCtrl::new(
             live_mode != 0,
             nzb_id,
-            nntp_host,
+            crate::articlefetcher::native_nntp_fetch_host,
             probe_host,
             tls_enabled != 0,
             debug_enabled != 0,

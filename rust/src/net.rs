@@ -1990,8 +1990,8 @@ pub unsafe extern "C" fn nzbget_rs_cancel_reg_free(reg: *mut Arc<NzbgetRsCancelR
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_conn_new(
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_conn_new(
     host: *const c_char,
     port: c_int,
     tls: c_int,
@@ -2011,8 +2011,8 @@ pub unsafe extern "C" fn nzbget_rs_conn_new(
     )))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_conn_from_fd(
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_conn_from_fd(
     fd: c_int,
     tls: c_int,
     timeout: c_int,
@@ -2035,29 +2035,6 @@ pub unsafe extern "C" fn nzbget_rs_conn_free(conn: *mut NzbgetRsConn) {
     if !conn.is_null() {
         drop(Box::from_raw(conn));
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_conn_accept(conn: *mut NzbgetRsConn) -> *mut NzbgetRsConn {
-    if conn.is_null() {
-        return ptr::null_mut();
-    }
-    let c = &*(conn as *const NzbgetRsConn);
-    let (fd, tls, timeout) = {
-        let core = &mut (*c.session.get()).core;
-        (core.accept_fd(), core.tls, core.timeout)
-    };
-    if fd == INVALID_SOCKET {
-        return ptr::null_mut();
-    }
-    Box::into_raw(Box::new(NzbgetRsConn::from_accepted(
-        fd,
-        tls,
-        timeout,
-        c.slot.debug_on,
-        0,
-        c.slot.host_cb,
-    )))
 }
 
 #[no_mangle]
@@ -2296,74 +2273,1217 @@ pub unsafe extern "C" fn nzbget_rs_conn_io(
     }
 }
 
+// ---------------------------------------------------------------------------
+// NewsServer, PooledNntpConn, and NzbgetRsServerPool
+// ---------------------------------------------------------------------------
+
+const POOL_HOLD_SECONDS: i32 = 5;
+
+pub struct RsNewsServer {
+    pub id: i32,
+    pub state_id: AtomicI32,
+    pub active: AtomicBool,
+    pub name: CString,
+    pub host: CString,
+    pub port: i32,
+    pub ip_version: i32,
+    pub user: CString,
+    pub password: CString,
+    pub join_group: bool,
+    pub tls: bool,
+    pub cipher: CString,
+    pub max_connections: i32,
+    pub retention: i32,
+    pub level: i32,
+    pub norm_level: AtomicI32,
+    pub group: i32,
+    pub optional: bool,
+    pub block_time: AtomicI64,
+    pub cert_verif_level: u32,
+}
+
+impl RsNewsServer {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: i32,
+        active: bool,
+        name: &[u8],
+        host: &[u8],
+        port: i32,
+        ip_version: i32,
+        user: &[u8],
+        password: &[u8],
+        join_group: bool,
+        tls: bool,
+        cipher: &[u8],
+        max_connections: i32,
+        retention: i32,
+        level: i32,
+        group: i32,
+        optional: bool,
+        cert_verif_level: u32,
+    ) -> Self {
+        let name_cs = if name.is_empty() || name[0] == 0 {
+            bytes_to_cstring(format!("Server{id}").as_bytes())
+        } else {
+            bytes_to_cstring(name)
+        };
+        Self {
+            id,
+            state_id: AtomicI32::new(0),
+            active: AtomicBool::new(active),
+            name: name_cs,
+            host: bytes_to_cstring(host),
+            port,
+            ip_version,
+            user: bytes_to_cstring(user),
+            password: bytes_to_cstring(password),
+            join_group,
+            tls,
+            cipher: bytes_to_cstring(cipher),
+            max_connections,
+            retention,
+            level,
+            norm_level: AtomicI32::new(level),
+            group,
+            optional,
+            block_time: AtomicI64::new(0),
+            cert_verif_level,
+        }
+    }
+}
+
+pub struct HealthServerSnapshot {
+    pub id: i32,
+    pub active: bool,
+    pub name: Vec<u8>,
+    pub level: i32,
+    pub optional: bool,
+    pub group: i32,
+    pub host: Vec<u8>,
+    pub port: i32,
+    pub username: Vec<u8>,
+    pub password: Vec<u8>,
+    pub tls: bool,
+    pub cipher: Vec<u8>,
+    pub max_connections: i32,
+    pub retention: i32,
+    pub cert_level: u32,
+    pub ip_version: i32,
+}
+
+pub struct PooledNntpConn {
+    pub server: Arc<RsNewsServer>,
+    pub conn: NzbgetRsConn,
+    pub in_use: AtomicBool,
+    pub free_time: AtomicI64,
+}
+
+impl PooledNntpConn {
+    pub fn new(
+        server: Arc<RsNewsServer>,
+        timeout: i32,
+        debug_on: bool,
+        conn_host_cb: NzbgetRsConnHostFn,
+    ) -> Self {
+        let mut conn = NzbgetRsConn::new_client(
+            server.host.to_bytes(),
+            server.port,
+            server.tls,
+            false,
+            debug_on,
+            0,
+            conn_host_cb,
+        );
+        {
+            let core = &mut conn.session.get_mut().core;
+            core.cipher = server.cipher.clone();
+            core.ip_version = match server.ip_version {
+                4 => 4,
+                6 => 6,
+                _ => 0,
+            };
+            core.cert_verif_level = server.cert_verif_level;
+            core.timeout = timeout;
+        }
+        Self {
+            server,
+            conn,
+            in_use: AtomicBool::new(false),
+            free_time: AtomicI64::new(0),
+        }
+    }
+
+    #[inline]
+    pub fn is_connected(&self) -> bool {
+        self.conn.slot.status.load(Ordering::SeqCst) == CS_CONNECTED
+    }
+
+    #[inline]
+    pub fn is_cancelled(&self) -> bool {
+        self.conn.slot.status.load(Ordering::SeqCst) == CS_CANCELLED
+    }
+
+    #[inline]
+    pub fn set_suppress_errors(&self, suppress: bool) {
+        self.conn.slot.set_suppress_errors(suppress);
+    }
+
+    #[inline]
+    pub fn cancel(&self) {
+        self.conn.slot.cancel(false, self.conn.slot.host_cb);
+    }
+
+    #[inline]
+    pub fn set_broken(&self) {
+        self.conn.slot.status.store(CS_BROKEN, Ordering::SeqCst);
+    }
+
+    #[inline]
+    pub fn fetch_total_bytes_read(&self) -> i32 {
+        self.conn.slot.total_bytes_read.swap(0, Ordering::SeqCst)
+    }
+
+    #[inline]
+    pub fn host_cstr(&self) -> &CStr {
+        &self.conn.host
+    }
+
+    /// Owner-thread: prepare cert verification level & clear error suppression before connect/request.
+    pub unsafe fn prepare_for_use(&self) {
+        self.set_suppress_errors(false);
+        (*self.conn.session.get()).core.cert_verif_level = self.server.cert_verif_level;
+    }
+
+    pub unsafe fn set_timeout(&self, timeout: i32) {
+        (*self.conn.session.get()).core.timeout = timeout;
+    }
+
+    pub unsafe fn connect(&self) -> bool {
+        (*self.conn.session.get()).nntp_connect(
+            &self.server.user,
+            &self.server.password,
+            &self.server.name,
+            &self.server.host,
+        )
+    }
+
+    pub unsafe fn disconnect(&self) -> bool {
+        (*self.conn.session.get()).nntp_disconnect(
+            &self.server.user,
+            &self.server.password,
+            &self.server.name,
+            &self.server.host,
+        )
+    }
+
+    pub unsafe fn request(&self, req: *const c_char) -> *const c_char {
+        (*self.conn.session.get()).nntp_request(
+            req,
+            &self.server.user,
+            &self.server.password,
+            &self.server.name,
+            &self.server.host,
+        )
+    }
+
+    pub unsafe fn join_group(&self, grp: *const c_char) -> *const c_char {
+        (*self.conn.session.get()).nntp_join_group(
+            grp,
+            &self.server.user,
+            &self.server.password,
+            &self.server.name,
+            &self.server.host,
+        )
+    }
+
+    pub unsafe fn auth_error(&self) -> bool {
+        (*self.conn.session.get()).nntp_auth.error
+    }
+
+    pub unsafe fn auth_rejected(&self) -> bool {
+        (*self.conn.session.get()).nntp_auth.rejected
+    }
+
+    pub unsafe fn read_line(&self, dst: &mut [u8]) -> Option<usize> {
+        (*self.conn.session.get()).core.read_line_slice(dst)
+    }
+
+    pub unsafe fn drain_read_buffer(&self) -> (*mut u8, usize) {
+        let core = &mut (*self.conn.session.get()).core;
+        let avail = core.buf_avail;
+        let p = core.read_buf.as_mut_ptr().add(core.buf_offset);
+        core.buf_avail = 0;
+        (p, avail)
+    }
+
+    pub unsafe fn try_recv(&self, dst: &mut [u8]) -> c_int {
+        (*self.conn.session.get()).core.try_recv_slice(dst)
+    }
+
+    pub unsafe fn send_bytes(&self, bytes: &[u8]) -> bool {
+        (*self.conn.session.get()).core.send_bytes(bytes)
+    }
+}
+
+struct ServerPoolInner {
+    sorted_servers: Vec<Arc<RsNewsServer>>,
+    connections: Vec<Box<PooledNntpConn>>,
+    levels: Vec<i32>,
+}
+
+pub struct NzbgetRsServerPool {
+    servers: std::sync::RwLock<Vec<Arc<RsNewsServer>>>,
+    inner: Mutex<ServerPoolInner>,
+    max_norm_level: AtomicI32,
+    generation: AtomicI32,
+    timeout: AtomicI32,
+    retry_interval: AtomicI32,
+    conn_host_cb: NzbgetRsConnHostFn,
+}
+
+static ACTIVE_SERVER_POOL: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsServerPool>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn active_server_pool() -> Option<Arc<NzbgetRsServerPool>> {
+    ACTIVE_SERVER_POOL
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+}
+
+impl NzbgetRsServerPool {
+    pub fn new(conn_host_cb: NzbgetRsConnHostFn) -> Self {
+        Self {
+            servers: std::sync::RwLock::new(Vec::new()),
+            inner: Mutex::new(ServerPoolInner {
+                sorted_servers: Vec::new(),
+                connections: Vec::new(),
+                levels: Vec::new(),
+            }),
+            max_norm_level: AtomicI32::new(0),
+            generation: AtomicI32::new(0),
+            timeout: AtomicI32::new(60),
+            retry_interval: AtomicI32::new(0),
+            conn_host_cb,
+        }
+    }
+
+    pub fn add_server(&self, server: Arc<RsNewsServer>) {
+        crate::log::log_active_bytes(3, b"Adding server to ServerPool");
+        if let Ok(mut srvs) = self.servers.write() {
+            srvs.push(Arc::clone(&server));
+        }
+        if let Ok(mut g) = self.inner.lock() {
+            g.sorted_servers.push(server);
+        }
+    }
+
+    #[inline]
+    pub fn max_norm_level(&self) -> i32 {
+        self.max_norm_level.load(Ordering::SeqCst)
+    }
+
+    #[inline]
+    pub fn generation(&self) -> i32 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    #[inline]
+    pub fn retry_interval(&self) -> i32 {
+        self.retry_interval.load(Ordering::SeqCst)
+    }
+
+    pub fn server_count(&self) -> usize {
+        self.servers.read().map_or(0, |g| g.len())
+    }
+
+    pub fn servers_snapshot(&self) -> Vec<Arc<RsNewsServer>> {
+        self.servers
+            .read()
+            .map_or_else(|_| Vec::new(), |g| g.clone())
+    }
+
+    pub fn server_by_id(&self, id: i32) -> Option<Arc<RsNewsServer>> {
+        let g = self.servers.read().ok()?;
+        g.iter().find(|s| s.id == id).cloned()
+    }
+
+    pub fn is_server_blocked(&self, srv: &RsNewsServer) -> bool {
+        crate::dupefallback::server_pool_is_blocked(
+            srv.block_time.load(Ordering::SeqCst),
+            now_unix_sec(),
+            self.retry_interval(),
+        )
+    }
+
+    pub fn block_server(&self, srv: &RsNewsServer) {
+        let retry_interval = self.retry_interval();
+        let prev_block = {
+            let _guard = self.inner.lock();
+            let cur_time = now_unix_sec();
+            let prev = srv.block_time.swap(cur_time, Ordering::SeqCst);
+            (prev, cur_time)
+        };
+        let (_new_block, should_warn) =
+            crate::nntp::server_pool_eval_block_server(prev_block.0, prev_block.1, retry_interval);
+        if should_warn {
+            let tail = format!(") for {retry_interval} sec");
+            crate::log::log_active_bytes(
+                1,
+                &join_c_slices(&[
+                    b"Blocking ",
+                    srv.name.to_bytes(),
+                    b" (",
+                    srv.host.to_bytes(),
+                    tail.as_bytes(),
+                ]),
+            );
+        }
+    }
+
+    pub fn init_connections(&self) {
+        crate::log::log_active_bytes(3, b"Initializing connections in ServerPool");
+        let Ok(mut g) = self.inner.lock() else {
+            return;
+        };
+        let srv_count = g.sorted_servers.len();
+        if srv_count > 0 {
+            let inputs: Vec<crate::dupefallback::NzbgetRsServerNormInput> = g
+                .sorted_servers
+                .iter()
+                .map(|s| crate::dupefallback::NzbgetRsServerNormInput {
+                    level: s.level,
+                    active: i32::from(s.active.load(Ordering::SeqCst)),
+                    max_connections: s.max_connections,
+                })
+                .collect();
+            let mut sorted_idx = vec![0usize; srv_count];
+            let mut norm_levels = vec![0i32; srv_count];
+            let max_norm = crate::dupefallback::server_pool_normalize_levels(
+                &inputs,
+                &mut sorted_idx,
+                &mut norm_levels,
+            );
+            for (i, &nl) in norm_levels.iter().enumerate() {
+                g.sorted_servers[i].norm_level.store(nl, Ordering::SeqCst);
+            }
+            let new_sorted: Vec<Arc<RsNewsServer>> = sorted_idx
+                .into_iter()
+                .map(|idx| Arc::clone(&g.sorted_servers[idx]))
+                .collect();
+            g.sorted_servers = new_sorted;
+            self.max_norm_level.store(max_norm, Ordering::SeqCst);
+        }
+        g.levels.clear();
+
+        let timeout = self.timeout.load(Ordering::SeqCst);
+        let debug_on = crate::log::active_debug_build();
+        let sorted_clone = g.sorted_servers.clone();
+        for ns in &sorted_clone {
+            ns.block_time.store(0, Ordering::SeqCst);
+            let nl = ns.norm_level.load(Ordering::SeqCst);
+            let active = ns.active.load(Ordering::SeqCst);
+            if nl > -1 {
+                if (g.levels.len() as i32) <= nl {
+                    g.levels.push(0);
+                }
+                if active {
+                    let mut existing = 0i32;
+                    let mut free_existing = 0i32;
+                    for c in &g.connections {
+                        if Arc::ptr_eq(&c.server, ns) {
+                            existing += 1;
+                            if !c.in_use.load(Ordering::SeqCst) {
+                                free_existing += 1;
+                            }
+                        }
+                    }
+                    let mut to_add = 0usize;
+                    if ns.max_connections > existing {
+                        to_add = (ns.max_connections - existing) as usize;
+                    }
+                    for _ in 0..to_add {
+                        g.connections.push(Box::new(PooledNntpConn::new(
+                            Arc::clone(ns),
+                            timeout,
+                            debug_on,
+                            self.conn_host_cb,
+                        )));
+                    }
+                    g.levels[nl as usize] += free_existing + (to_add as i32);
+                }
+            }
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn get_connection(
+        &self,
+        level: i32,
+        want_srv: Option<&RsNewsServer>,
+        ignore_srvs: &[&RsNewsServer],
+    ) -> *mut PooledNntpConn {
+        if level < 0 {
+            return ptr::null_mut();
+        }
+        let Ok(mut g) = self.inner.lock() else {
+            return ptr::null_mut();
+        };
+        let srv_count = g.sorted_servers.len();
+        let conn_count = g.connections.len();
+        if srv_count == 0 || conn_count == 0 {
+            return ptr::null_mut();
+        }
+        let cur_time = now_unix_sec();
+        let retry_interval = self.retry_interval();
+
+        let srv_views: Vec<crate::nntp::ServerPoolServerView> = g
+            .sorted_servers
+            .iter()
+            .map(|s| crate::nntp::ServerPoolServerView {
+                id: s.id,
+                group: s.group,
+                norm_level: s.norm_level.load(Ordering::SeqCst),
+                active: s.active.load(Ordering::SeqCst),
+                optional: s.optional,
+                blocked: crate::dupefallback::server_pool_is_blocked(
+                    s.block_time.load(Ordering::SeqCst),
+                    cur_time,
+                    retry_interval,
+                ),
+            })
+            .collect();
+
+        let conn_views: Vec<crate::nntp::ServerPoolConnView> = g
+            .connections
+            .iter()
+            .map(|c| {
+                let server_index = g
+                    .sorted_servers
+                    .iter()
+                    .position(|s| Arc::ptr_eq(s, &c.server))
+                    .unwrap_or(srv_count);
+                crate::nntp::ServerPoolConnView {
+                    server_index,
+                    in_use: c.in_use.load(Ordering::SeqCst),
+                    connected: c.is_connected(),
+                }
+            })
+            .collect();
+
+        let want_tuple = want_srv.map(|s| (s.id, s.group));
+        let ignore_tuples: Vec<(i32, i32, i32)> = if want_srv.is_none() {
+            ignore_srvs
+                .iter()
+                .map(|s| (s.id, s.group, s.norm_level.load(Ordering::SeqCst)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let rand_val = unsafe { libc::rand() };
+        let mut unblock = Vec::new();
+        let found = crate::nntp::server_pool_select_connection(
+            level,
+            &g.levels,
+            &srv_views,
+            &conn_views,
+            want_tuple,
+            &ignore_tuples,
+            rand_val,
+            &mut unblock,
+        );
+        for idx in unblock {
+            g.sorted_servers[idx].block_time.store(0, Ordering::SeqCst);
+        }
+        if let Some((chosen_conn, chosen_level)) = found {
+            g.levels[chosen_level as usize] -= 1;
+            let c = &mut g.connections[chosen_conn];
+            c.in_use.store(true, Ordering::SeqCst);
+            (&mut **c) as *mut PooledNntpConn
+        } else {
+            ptr::null_mut()
+        }
+    }
+
+    pub fn get_connection_by_server_id(&self, server_id: i32) -> *mut PooledNntpConn {
+        let Some(srv) = self.server_by_id(server_id) else {
+            return ptr::null_mut();
+        };
+        let nl = srv.norm_level.load(Ordering::SeqCst);
+        self.get_connection(nl, Some(&srv), &[])
+    }
+
+    pub fn free_connection(&self, conn_ptr: *mut PooledNntpConn, used: bool) {
+        if conn_ptr.is_null() {
+            return;
+        }
+        if used {
+            crate::log::log_active_bytes(3, b"Freeing used connection");
+        }
+        let Ok(mut g) = self.inner.lock() else {
+            return;
+        };
+        let c = unsafe { &*conn_ptr };
+        c.in_use.store(false, Ordering::SeqCst);
+        if used {
+            c.free_time.store(now_unix_sec(), Ordering::SeqCst);
+        }
+        let nl = c.server.norm_level.load(Ordering::SeqCst);
+        if nl > -1 && c.server.active.load(Ordering::SeqCst) {
+            if let Some(slot) = g.levels.get_mut(nl as usize) {
+                *slot += 1;
+            }
+        }
+    }
+
+    pub fn close_unused_connections(&self) {
+        let cur_time = now_unix_sec();
+        let Ok(mut g) = self.inner.lock() else {
+            return;
+        };
+        g.connections.retain(|c| {
+            let in_use = c.in_use.load(Ordering::SeqCst);
+            let nl = c.server.norm_level.load(Ordering::SeqCst);
+            let active = c.server.active.load(Ordering::SeqCst);
+            if !in_use && (nl == -1 || !active) {
+                let msg = format!(
+                    "Closing (and deleting) unused connection to server{}",
+                    c.server.id
+                );
+                crate::log::log_active_bytes(3, msg.as_bytes());
+                if c.is_connected() {
+                    unsafe {
+                        c.disconnect();
+                    }
+                }
+                false
+            } else {
+                true
+            }
+        });
+
+        let max_norm = self.max_norm_level.load(Ordering::SeqCst);
+        for lvl in 0..=max_norm {
+            let mut in_use = Vec::new();
+            let mut connected = Vec::new();
+            let mut free_times = Vec::new();
+            for c in &g.connections {
+                if c.server.norm_level.load(Ordering::SeqCst) == lvl {
+                    in_use.push(u8::from(c.in_use.load(Ordering::SeqCst)));
+                    connected.push(u8::from(c.is_connected()));
+                    free_times.push(c.free_time.load(Ordering::SeqCst));
+                }
+            }
+            if crate::dupefallback::server_pool_level_should_close(
+                &in_use,
+                &connected,
+                &free_times,
+                cur_time,
+                POOL_HOLD_SECONDS,
+            ) {
+                for c in &g.connections {
+                    if c.server.norm_level.load(Ordering::SeqCst) == lvl && c.is_connected() {
+                        let msg = format!(
+                            "Closing (and keeping) unused connection to server{}",
+                            c.server.id
+                        );
+                        crate::log::log_active_bytes(3, msg.as_bytes());
+                        unsafe {
+                            c.disconnect();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn changed(&self) {
+        crate::log::log_active_bytes(3, b"Server config has been changed");
+        self.init_connections();
+        self.close_unused_connections();
+    }
+
+    pub fn primary_connections(&self) -> i32 {
+        let Ok(srvs) = self.servers.read() else {
+            return 0;
+        };
+        srvs.iter()
+            .filter(|s| s.active.load(Ordering::SeqCst) && s.norm_level.load(Ordering::SeqCst) == 0)
+            .map(|s| s.max_connections)
+            .sum()
+    }
+
+    pub fn collect_health_servers(&self) -> Vec<HealthServerSnapshot> {
+        let Ok(srvs) = self.servers.read() else {
+            return Vec::new();
+        };
+        srvs.iter()
+            .map(|s| HealthServerSnapshot {
+                id: s.id,
+                active: s.active.load(Ordering::SeqCst),
+                name: s.name.to_bytes().to_vec(),
+                level: s.level,
+                optional: s.optional,
+                group: s.group,
+                host: s.host.to_bytes().to_vec(),
+                port: s.port,
+                username: s.user.to_bytes().to_vec(),
+                password: s.password.to_bytes().to_vec(),
+                tls: s.tls,
+                cipher: s.cipher.to_bytes().to_vec(),
+                max_connections: s.max_connections,
+                retention: s.retention,
+                cert_level: s.cert_verif_level,
+                ip_version: s.ip_version,
+            })
+            .collect()
+    }
+
+    pub fn log_debug_info(&self) {
+        let srvs = self.servers_snapshot();
+        let Ok(g) = self.inner.lock() else {
+            return;
+        };
+        let cur_time = now_unix_sec();
+        let max_norm_level = self.max_norm_level.load(Ordering::SeqCst);
+        let retry_interval = self.retry_interval();
+        let raw_servers_len = srvs.len();
+        let levels_len = g.levels.len();
+        let conn_count = g.connections.len();
+
+        crate::log::log_active_bytes(0, b"   ---------- ServerPool");
+        crate::log::log_active_bytes(0, format!("    Max-Level: {max_norm_level}").as_bytes());
+        crate::log::log_active_bytes(0, format!("    Servers: {raw_servers_len}").as_bytes());
+
+        for s in &srvs {
+            let id = s.id;
+            let lvl = s.level;
+            let nlvl = s.norm_level.load(Ordering::SeqCst);
+            let block_time = s.block_time.load(Ordering::SeqCst);
+            let mut block_sec = 0i32;
+            if block_time != 0 {
+                let end = block_time.saturating_add(retry_interval as i64);
+                if end > cur_time {
+                    let diff = (end as u64).wrapping_sub(cur_time as u64);
+                    block_sec = if diff > (i32::MAX as u64) {
+                        i32::MAX
+                    } else {
+                        diff as i32
+                    };
+                }
+            }
+            let p1 = format!("      {id}) ");
+            let p2 = format!(": Level={lvl}, NormLevel={nlvl}, BlockSec={block_sec}");
+            crate::log::log_active_bytes(
+                0,
+                &join_c_slices(&[
+                    p1.as_bytes(),
+                    s.name.to_bytes(),
+                    b" (",
+                    s.host.to_bytes(),
+                    b")",
+                    p2.as_bytes(),
+                ]),
+            );
+        }
+
+        crate::log::log_active_bytes(0, format!("    Levels: {levels_len}").as_bytes());
+        for (idx, &sz) in g.levels.iter().enumerate() {
+            crate::log::log_active_bytes(
+                0,
+                format!("      {idx}: Free connections={sz}").as_bytes(),
+            );
+        }
+
+        crate::log::log_active_bytes(0, format!("    Connections: {conn_count}").as_bytes());
+        for c in &g.connections {
+            let in_use = i32::from(c.in_use.load(Ordering::SeqCst));
+            let id = c.server.id;
+            let lvl = c.server.level;
+            let nlvl = c.server.norm_level.load(Ordering::SeqCst);
+            let p1 = format!("      {id}) ");
+            let p2 = format!(": Level={lvl}, NormLevel={nlvl}, InUse:{in_use}");
+            crate::log::log_active_bytes(
+                0,
+                &join_c_slices(&[
+                    p1.as_bytes(),
+                    c.server.name.to_bytes(),
+                    b" (",
+                    c.server.host.to_bytes(),
+                    b")",
+                    p2.as_bytes(),
+                ]),
+            );
+        }
+    }
+}
+
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_conn_nntp(
-    conn: *mut NzbgetRsConn,
-    op: c_int,
-    arg: *const c_char,
+pub extern "C" fn nzbget_rs_serverpool_new(
+    conn_host_cb: NzbgetRsConnHostFn,
+) -> *mut NzbgetRsServerPool {
+    let arc = Arc::new(NzbgetRsServerPool::new(conn_host_cb));
+    if let Ok(mut g) = ACTIVE_SERVER_POOL.write() {
+        *g = Some(Arc::downgrade(&arc));
+    }
+    Arc::into_raw(arc).cast_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_serverpool_free(pool: *mut NzbgetRsServerPool) {
+    if !pool.is_null() {
+        let arc = Arc::from_raw(pool.cast_const());
+        let wk = Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_SERVER_POOL.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+        drop(arc);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_serverpool_add(
+    pool: *const NzbgetRsServerPool,
+    id: c_int,
+    active: c_int,
+    name: *const c_char,
+    host: *const c_char,
+    port: c_int,
+    ip_version: c_int,
     user: *const c_char,
     pass: *const c_char,
-    srv_name: *const c_char,
-    srv_host: *const c_char,
-) -> *const c_char {
-    if conn.is_null() {
-        return ptr::null();
-    }
-    let c = &*(conn as *const NzbgetRsConn);
-    let sess = &mut *c.session.get();
-    let u = if user.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(user)
+    join_group: c_int,
+    tls: c_int,
+    cipher: *const c_char,
+    max_connections: c_int,
+    retention: c_int,
+    level: c_int,
+    group: c_int,
+    optional: c_int,
+    cert_verif_level: u32,
+) {
+    let Some(p) = pool.as_ref() else {
+        return;
     };
-    let p = if pass.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(pass)
-    };
-    let n = if srv_name.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(srv_name)
-    };
-    let h = if srv_host.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(srv_host)
+    p.add_server(Arc::new(RsNewsServer::new(
+        id,
+        active != 0,
+        opt_bytes(name),
+        opt_bytes(host),
+        port,
+        ip_version,
+        opt_bytes(user),
+        opt_bytes(pass),
+        join_group != 0,
+        tls != 0,
+        opt_bytes(cipher),
+        max_connections,
+        retention,
+        level,
+        group,
+        optional != 0,
+        cert_verif_level,
+    )));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_serverpool_ctl(
+    pool: *const NzbgetRsServerPool,
+    op: c_int,
+    a1: c_int,
+    _a2: c_int,
+    p1: usize,
+    p2: usize,
+) -> isize {
+    let Some(p) = pool.as_ref() else {
+        return 0;
     };
     match op {
         0 => {
-            if sess.nntp_connect(u, p, n, h) {
-                c"".as_ptr()
-            } else {
-                ptr::null()
-            }
+            p.timeout.store(a1, Ordering::SeqCst);
+            0
         }
         1 => {
-            if sess.nntp_disconnect(u, p, n, h) {
-                c"".as_ptr()
-            } else {
-                ptr::null()
-            }
+            p.retry_interval.store(a1, Ordering::SeqCst);
+            0
         }
-        2 => sess.nntp_request(arg, u, p, n, h),
-        3 => sess.nntp_join_group(arg, u, p, n, h),
+        2 => {
+            p.init_connections();
+            0
+        }
+        3 => {
+            p.close_unused_connections();
+            0
+        }
         4 => {
-            if sess.nntp_auth.error {
-                c"".as_ptr()
-            } else {
-                ptr::null()
-            }
+            p.changed();
+            0
         }
         5 => {
-            if sess.nntp_auth.rejected {
-                c"".as_ptr()
+            p.log_debug_info();
+            0
+        }
+        6 => p.primary_connections() as isize,
+        7 => {
+            // RPC serveractivate: p1 = *const c_int pairs [id, active, ...], p2 = len
+            if p1 == 0 || p2 < 2 {
+                return 0;
+            }
+            let ids = std::slice::from_raw_parts(p1 as *const c_int, p2);
+            let srvs = p.servers_snapshot();
+            let mut ok = false;
+            let mut i = 0;
+            while i + 1 < ids.len() {
+                for s in &srvs {
+                    if s.id == ids[i] {
+                        s.active.store(ids[i + 1] != 0, Ordering::SeqCst);
+                        ok = true;
+                    }
+                }
+                i += 2;
+            }
+            if ok {
+                p.changed();
+                1
             } else {
-                ptr::null()
+                0
             }
         }
-        _ => ptr::null(),
+        8 => {
+            // ApplyServerStats iterator: a1 = state_id, p1 = *mut usize cursor -> returns matching server id or 0
+            if p1 == 0 {
+                return 0;
+            }
+            let cursor = &mut *(p1 as *mut usize);
+            let Ok(srvs) = p.servers.read() else {
+                return 0;
+            };
+            while *cursor < srvs.len() {
+                let s = &srvs[*cursor];
+                *cursor += 1;
+                if s.state_id.load(Ordering::SeqCst) == a1 {
+                    return s.id as isize;
+                }
+            }
+            0
+        }
+        9 => {
+            // RPC status server list: if p1 == 0 return count; else fill p1 as *mut NzbgetRsRpcServerStatus up to p2
+            let Ok(srvs) = p.servers.read() else {
+                return 0;
+            };
+            if p1 != 0 && p2 > 0 {
+                let out = std::slice::from_raw_parts_mut(
+                    p1 as *mut crate::xmlrpc_format::NzbgetRsRpcServerStatus,
+                    p2.min(srvs.len()),
+                );
+                for (dst, s) in out.iter_mut().zip(srvs.iter()) {
+                    dst.id = s.id;
+                    dst.active = c_int::from(s.active.load(Ordering::SeqCst));
+                }
+            }
+            srvs.len() as isize
+        }
+        10 => {
+            // SpeedTest server validation: a1 = server_id, p1 = *mut *const c_char error_out
+            let err_msg: Option<&CStr> = match p.server_by_id(a1) {
+                None => Some(c"Server not found"),
+                Some(s) if !s.active.load(Ordering::SeqCst) => Some(c"Server is not active"),
+                Some(s) if s.max_connections == 0 => Some(c"Server has no connections configured"),
+                Some(_) => None,
+            };
+            if let Some(m) = err_msg {
+                if p1 != 0 {
+                    *(p1 as *mut *const c_char) = m.as_ptr();
+                }
+                0
+            } else {
+                1
+            }
+        }
+        11 => p.max_norm_level() as isize,
+        12 => p.generation() as isize,
+        _ => 0,
     }
+}
+
+struct TestConnTrap {
+    real_cb: NzbgetRsConnHostFn,
+    first_err: Option<Vec<u8>>,
+}
+
+unsafe extern "C" fn test_conn_host_cb(
+    ctx: *mut c_void,
+    op: c_int,
+    a1: c_int,
+    a2: c_int,
+    p1: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    s3: *const c_char,
+    buf: *mut c_char,
+    out_int: *mut c_int,
+) -> isize {
+    let trap = &mut *(ctx as *mut TestConnTrap);
+    if op == 1 && a1 == 0 {
+        if trap.first_err.is_none() && !s1.is_null() {
+            trap.first_err = Some(CStr::from_ptr(s1).to_bytes().to_vec());
+        }
+        return 0;
+    }
+    if let Some(cb) = trap.real_cb {
+        cb(ptr::null_mut(), op, a1, a2, p1, s1, s2, s3, buf, out_int)
+    } else {
+        0
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_serverpool_test(
+    host: *const c_char,
+    port: c_int,
+    user: *const c_char,
+    pass: *const c_char,
+    tls: c_int,
+    cipher: *const c_char,
+    timeout: c_int,
+    cert_verif_level: u32,
+    conn_host_cb: NzbgetRsConnHostFn,
+    out_err: *mut crate::ffi::RsBuf,
+) -> c_int {
+    let srv = RsNewsServer::new(
+        0,
+        true,
+        b"test server",
+        opt_bytes(host),
+        port,
+        0,
+        opt_bytes(user),
+        opt_bytes(pass),
+        false,
+        tls != 0,
+        opt_bytes(cipher),
+        1,
+        0,
+        0,
+        0,
+        false,
+        cert_verif_level,
+    );
+    let mut trap = TestConnTrap {
+        real_cb: conn_host_cb,
+        first_err: None,
+    };
+    let debug_on = crate::log::active_debug_build();
+    let mut conn = NzbgetRsConn::new_client(
+        srv.host.to_bytes(),
+        srv.port,
+        srv.tls,
+        true,
+        debug_on,
+        (&mut trap as *mut TestConnTrap) as usize,
+        Some(test_conn_host_cb),
+    );
+    let eff_timeout = if timeout > 0 {
+        timeout
+    } else {
+        crate::options::active_options().map_or(60, |o| o.scalars().article_timeout)
+    };
+    {
+        let core = &mut conn.session.get_mut().core;
+        core.cipher = srv.cipher.clone();
+        core.cert_verif_level = srv.cert_verif_level;
+        core.timeout = eff_timeout;
+    }
+    conn.slot.set_suppress_errors(false);
+    let mut ok =
+        conn.session
+            .get_mut()
+            .nntp_connect(&srv.user, &srv.password, &srv.name, &srv.host);
+    if ok {
+        let mut id = String::with_capacity(48);
+        while id.len() < 30 {
+            use std::fmt::Write as _;
+            let _ = write!(id, "{}", libc::rand());
+        }
+        let req = bytes_to_cstring(format!("ARTICLE <{id}@nzbget.com>\r\n").as_bytes());
+        let resp = conn.session.get_mut().nntp_request(
+            req.as_ptr(),
+            &srv.user,
+            &srv.password,
+            &srv.name,
+            &srv.host,
+        );
+        ok = !resp.is_null() && matches!(*resp as u8, b'4' | b'2');
+    }
+    if !ok {
+        if let Some(err) = trap.first_err.take() {
+            if !err.is_empty() && !out_err.is_null() {
+                *out_err = crate::ffi::into_buf(err);
+            }
+        }
+    }
+    c_int::from(ok)
+}
+
+unsafe extern "C" fn probe_conn_host_cb(
+    ctx: *mut c_void,
+    op: c_int,
+    a1: c_int,
+    a2: c_int,
+    p1: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    s3: *const c_char,
+    buf: *mut c_char,
+    out_int: *mut c_int,
+) -> isize {
+    if op == 1 && a1 == 0 {
+        return 0;
+    }
+    let real_cb: NzbgetRsConnHostFn = std::mem::transmute(ctx);
+    if let Some(cb) = real_cb {
+        cb(ptr::null_mut(), op, a1, a2, p1, s1, s2, s3, buf, out_int)
+    } else {
+        0
+    }
+}
+
+#[repr(C)]
+pub struct NzbgetTlsServer {
+    pub id: u32,
+    pub host: *const c_char,
+    pub port: u16,
+    pub ip_version: u8,
+    pub verification: u8,
+    pub username: *const c_char,
+    pub password: *const c_char,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_serverpool_probe_tls(
+    server: *const NzbgetTlsServer,
+    cipher: *const c_char,
+    expected_ver: c_int,
+    numeric: *const c_char,
+    deadline_ptr: usize,
+    conn_host_cb: NzbgetRsConnHostFn,
+) -> c_int {
+    let Some(srv_in) = server.as_ref() else {
+        return -1;
+    };
+    let num_bytes = opt_bytes(numeric);
+    let mut addrs: Vec<Vec<u8>> = Vec::new();
+    let mut pos = 0;
+    while pos < num_bytes.len() {
+        let end = num_bytes[pos..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(num_bytes.len(), |d| pos + d);
+        addrs.push(num_bytes[pos..end].to_vec());
+        if end == num_bytes.len() {
+            break;
+        }
+        pos = end + 1;
+    }
+    if addrs.is_empty() || addrs.len() > 16 {
+        return -2;
+    }
+
+    let srv = RsNewsServer::new(
+        srv_in.id as i32,
+        true,
+        b"TLS cipher probe",
+        opt_bytes(srv_in.host),
+        i32::from(srv_in.port),
+        i32::from(srv_in.ip_version),
+        opt_bytes(srv_in.username),
+        opt_bytes(srv_in.password),
+        false,
+        true,
+        opt_bytes(cipher),
+        1,
+        0,
+        0,
+        0,
+        false,
+        srv_in.verification as u32,
+    );
+    let debug_on = crate::log::active_debug_build();
+    let real_cb_raw: usize = std::mem::transmute(conn_host_cb);
+    let mut conn = NzbgetRsConn::new_client(
+        srv.host.to_bytes(),
+        srv.port,
+        true,
+        true,
+        debug_on,
+        real_cb_raw,
+        Some(probe_conn_host_cb),
+    );
+    {
+        let core = &mut conn.session.get_mut().core;
+        core.cipher = srv.cipher.clone();
+        core.ip_version = match srv.ip_version {
+            4 => 4,
+            6 => 6,
+            _ => 0,
+        };
+        core.cert_verif_level = srv.cert_verif_level;
+        core.resolved_addrs = addrs;
+        core.deadline_ptr = deadline_ptr;
+        core.timeout = 10;
+    }
+    conn.slot.set_suppress_errors(true);
+    let connected =
+        conn.session
+            .get_mut()
+            .nntp_connect(&srv.user, &srv.password, &srv.name, &srv.host);
+
+    let mut neg_ver: c_int = 0;
+    let mut neg_cipher: *const c_char = c"".as_ptr();
+    let tb = conn.session.get_mut().core.tls_box;
+    if tb != 0 {
+        if let Some(cb) = conn_host_cb {
+            let p = cb(
+                ptr::null_mut(),
+                9,
+                0,
+                0,
+                tb,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null_mut(),
+                &mut neg_ver,
+            );
+            if p != 0 {
+                neg_cipher = p as *const c_char;
+            }
+        }
+    }
+    let want_cipher = opt_bytes(cipher);
+    let got_cipher = opt_bytes(neg_cipher);
+    let result = if connected && got_cipher == want_cipher && neg_ver == expected_ver {
+        1
+    } else if conn.session.get_mut().nntp_auth.error {
+        -5
+    } else {
+        conn.slot.tls_probe_failure.load(Ordering::SeqCst)
+    };
+    conn.slot.status.store(CS_BROKEN, Ordering::SeqCst);
+    conn.session
+        .get_mut()
+        .nntp_disconnect(&srv.user, &srv.password, &srv.name, &srv.host);
+    result
 }
 
 #[no_mangle]

@@ -1038,6 +1038,10 @@ impl QueueSubsysHost {
     }
 
     pub fn server_pool_generation(&self) -> i32 {
+        #[cfg(unix)]
+        if let Some(pool) = crate::net::active_server_pool() {
+            return pool.generation();
+        }
         self.raw(
             4,
             0,
@@ -1053,6 +1057,11 @@ impl QueueSubsysHost {
     }
 
     pub fn server_pool_close_unused(&self) {
+        #[cfg(unix)]
+        if let Some(pool) = crate::net::active_server_pool() {
+            pool.close_unused_connections();
+            return;
+        }
         self.raw(
             4,
             1,
@@ -1068,6 +1077,19 @@ impl QueueSubsysHost {
     }
 
     pub fn server_pool_servers(&self) -> (Vec<i32>, Vec<u8>, Vec<i32>) {
+        #[cfg(unix)]
+        if let Some(pool) = crate::net::active_server_pool() {
+            let srvs = pool.servers_snapshot();
+            let mut levels = Vec::with_capacity(srvs.len());
+            let mut actives = Vec::with_capacity(srvs.len());
+            let mut conns = Vec::with_capacity(srvs.len());
+            for s in &srvs {
+                levels.push(s.norm_level.load(std::sync::atomic::Ordering::SeqCst));
+                actives.push(u8::from(s.active.load(std::sync::atomic::Ordering::SeqCst)));
+                conns.push(s.max_connections);
+            }
+            return (levels, actives, conns);
+        }
         let n = self.raw(
             4,
             2,
@@ -1105,6 +1127,30 @@ impl QueueSubsysHost {
     }
 
     pub fn server_pool_get_connection(&self, has_desired: bool, desired_id: i32) -> usize {
+        #[cfg(unix)]
+        if let Some(pool) = crate::net::active_server_pool() {
+            let desired = if has_desired {
+                pool.server_by_id(desired_id)
+            } else {
+                None
+            };
+            let use_specific = desired
+                .as_ref()
+                .is_some_and(|s| s.active.load(std::sync::atomic::Ordering::SeqCst));
+            let conn_level = match desired.as_ref() {
+                Some(d) if use_specific => d.norm_level.load(std::sync::atomic::Ordering::SeqCst),
+                _ => 0,
+            };
+            return pool.get_connection(
+                conn_level,
+                if use_specific {
+                    desired.as_deref()
+                } else {
+                    None
+                },
+                &[],
+            ) as usize;
+        }
         self.raw(
             4,
             3,
@@ -1225,14 +1271,12 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn disk_discard_file(
-        &self,
-        file_id: i32,
-        del_data: bool,
-        del_part: bool,
-        del_compl: bool,
-    ) {
-        let mut ints = [i32::from(del_data), i32::from(del_part), i32::from(del_compl)];
+    pub fn disk_discard_file(&self, file_id: i32, del_data: bool, del_part: bool, del_compl: bool) {
+        let mut ints = [
+            i32::from(del_data),
+            i32::from(del_part),
+            i32::from(del_compl),
+        ];
         self.raw(
             5,
             7,
@@ -1520,7 +1564,12 @@ impl QueueSubsysHost {
         ) != 0
     }
 
-    pub fn url_delete_queue_entry(&self, dq_ptr: usize, nzb_ptr: usize, avoid_history: bool) -> bool {
+    pub fn url_delete_queue_entry(
+        &self,
+        dq_ptr: usize,
+        nzb_ptr: usize,
+        avoid_history: bool,
+    ) -> bool {
         self.raw(
             6,
             11,
@@ -1642,7 +1691,13 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn queue_insert_owned(&self, dq_ptr: usize, uptr_addr: usize, url_ptr: usize, add_first: bool) {
+    pub fn queue_insert_owned(
+        &self,
+        dq_ptr: usize,
+        uptr_addr: usize,
+        url_ptr: usize,
+        add_first: bool,
+    ) {
         let mut i64s = [url_ptr as i64];
         self.raw(
             22,
@@ -2525,7 +2580,12 @@ impl QueueSubsysHost {
     ) {
         let c = c_bytes(filename);
         let mut ints = [file_id, failed_articles, i32::from(par_file)];
-        let mut i64s = [decoded_file_size, failed_size, missed_size, steps_hash as i64];
+        let mut i64s = [
+            decoded_file_size,
+            failed_size,
+            missed_size,
+            steps_hash as i64,
+        ];
         self.raw(
             34,
             8,
@@ -3072,18 +3132,7 @@ impl QueueSubsysHost {
 
     // ArticleCache & flush lock ops (op = 44)
     pub fn article_cache_file_busy(&self, file_ptr: usize) -> bool {
-        self.raw(
-            44,
-            0,
-            0,
-            file_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        crate::articledl::cache_file_busy(file_ptr)
     }
 
     pub fn article_cache_snapshot_segment(

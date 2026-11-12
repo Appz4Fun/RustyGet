@@ -3796,6 +3796,7 @@ pub struct NzbgetRsOptions {
     no_config: bool,
     fatal_error: bool,
     config_errors: std::sync::atomic::AtomicBool,
+    mode_flags: std::sync::atomic::AtomicU8,
     config_line: i32,
     scalars: NzbgetRsParsedOptions,
     out_scalars: *mut NzbgetRsParsedOptions,
@@ -3803,9 +3804,26 @@ pub struct NzbgetRsOptions {
     cb_fn: NzbgetRsOptionsHostFn,
 }
 
+unsafe impl Send for NzbgetRsOptions {}
+unsafe impl Sync for NzbgetRsOptions {}
+
+static ACTIVE_OPTIONS: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsOptions>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn active_options() -> Option<std::sync::Arc<NzbgetRsOptions>> {
+    ACTIVE_OPTIONS
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+}
+
 impl NzbgetRsOptions {
     pub(crate) fn scalars(&self) -> &NzbgetRsParsedOptions {
         &self.scalars
+    }
+
+    pub(crate) fn server_mode(&self) -> bool {
+        (self.mode_flags.load(std::sync::atomic::Ordering::Relaxed) & 1) != 0
     }
 
     pub(crate) fn str_cstr(&self, id: usize) -> Option<&CStr> {
@@ -4512,7 +4530,7 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
             }
         }
     }
-    let mut opts = Box::new(NzbgetRsOptions {
+    let mut opts = NzbgetRsOptions {
         opt_entries: Vec::new(),
         categories: Vec::new(),
         script_dir_paths: Vec::new(),
@@ -4521,12 +4539,13 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
         no_config: no_config != 0,
         fatal_error: false,
         config_errors: std::sync::atomic::AtomicBool::new(false),
+        mode_flags: std::sync::atomic::AtomicU8::new(0),
         config_line: 0,
         scalars: NzbgetRsParsedOptions::with_defaults(),
         out_scalars,
         cb_ctx,
         cb_fn,
-    });
+    };
     opts.sync_scalars_to_host();
     opts.init_daemon(
         exe_bytes,
@@ -4545,13 +4564,26 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
     opts.out_scalars = std::ptr::null_mut();
     opts.cb_ctx = std::ptr::null_mut();
     opts.cb_fn = None;
-    Box::into_raw(opts)
+    let arc = std::sync::Arc::new(opts);
+    if let Ok(mut g) = ACTIVE_OPTIONS.write() {
+        *g = Some(std::sync::Arc::downgrade(&arc));
+    }
+    std::sync::Arc::into_raw(arc).cast_mut()
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_options_free(handle: *mut NzbgetRsOptions) {
     if !handle.is_null() {
-        drop(Box::from_raw(handle));
+        let arc = std::sync::Arc::from_raw(handle.cast_const());
+        let wk = std::sync::Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_OPTIONS.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+        drop(arc);
     }
 }
 
@@ -4668,6 +4700,19 @@ pub unsafe extern "C" fn nzbget_rs_options_query(
                 *out_strs = opts.script_dir_paths[a1 as usize].as_ptr();
             }
             opts.script_dir_paths.len() as c_int
+        }
+        4 => {
+            let bit = 1u8 << ((a1 & 3) as u8);
+            if (a1 & 0x10) != 0 {
+                if (a1 & 0x20) != 0 {
+                    opts.mode_flags
+                        .fetch_or(bit, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    opts.mode_flags
+                        .fetch_and(!bit, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            c_int::from((opts.mode_flags.load(std::sync::atomic::Ordering::SeqCst) & bit) != 0)
         }
         _ => 0,
     }

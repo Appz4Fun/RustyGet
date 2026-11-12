@@ -228,7 +228,7 @@ public:
 		if (g_Options->GetServerMode() && g_Options->GetSystemHealthCheck())
 		{
 			m_systemHealth = std::make_unique<SystemHealth::Service>(
-				*g_Options, *g_ServerPool->GetServers(), *g_FeedCoordinator, *m_scheduler, *g_Log);
+				*g_Options, *g_ServerPool, *g_FeedCoordinator, *m_scheduler, *g_Log);
 			g_SystemHealth = m_systemHealth.get();
 			m_systemHealth->DiagnoseAndLog();
 		}
@@ -325,8 +325,7 @@ public:
 		bool tls, const char* cipher, int maxConnections, int retention,
 		int level, int group, bool optional, unsigned int certVerificationfLevel) override
 	{
-		m_serverPool->AddServer(std::make_unique<NewsServer>(id, active, name, host, port, ipVersion, user, pass, joinGroup,
-			tls, cipher, maxConnections, retention, level, group, optional, certVerificationfLevel));
+		m_serverPool->AddServer(id, active, name, host, port, ipVersion, user, pass, joinGroup, tls, cipher, maxConnections, retention, level, group, optional, certVerificationfLevel);
 	}
 
 	void AddFeed(int id, const char* name, const char* url, int interval,

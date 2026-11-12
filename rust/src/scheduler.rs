@@ -663,6 +663,43 @@ impl NzbgetRsScheduler {
         server_list: &[u8],
         env: &NzbgetRsSchedulerEnv,
     ) {
+        #[cfg(unix)]
+        if let Some(pool) = crate::net::active_server_pool() {
+            let srvs = pool.servers_snapshot();
+            let mut pos = 0usize;
+            while pos <= server_list.len() {
+                let Some((tok_start, tok_end, next_pos)) =
+                    crate::util::tokenizer_find_next_token(&server_list[pos..], b",;")
+                else {
+                    break;
+                };
+                let tok = &server_list[pos + tok_start..pos + tok_end];
+                pos += next_pos;
+                let ref_c = make_c_buf(tok);
+                let ref_id = libc::atoi(ref_c.as_ptr() as *const c_char);
+
+                for s in &srvs {
+                    if scheduler_matches_server_ref(
+                        ref_id,
+                        s.id,
+                        s.name.as_ptr(),
+                        ref_c.as_ptr() as *const c_char,
+                    ) {
+                        if !ws.server_changed {
+                            ws.server_status_list = srvs
+                                .iter()
+                                .map(|srv| srv.active.load(Ordering::SeqCst))
+                                .collect();
+                        }
+                        ws.server_changed = true;
+                        s.active.store(active, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+            return;
+        }
+
         let Some(cb) = env.action_cb else {
             return;
         };
@@ -870,59 +907,84 @@ impl NzbgetRsScheduler {
             }
         }
         if ws.server_changed {
-            let srv_count = cb(
-                env.ctx,
-                2,
-                0,
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-            for idx in 0..srv_count {
-                let mut ints = [0i32; 2];
-                let mut strs: [*const c_char; 1] = [std::ptr::null()];
+            #[cfg(unix)]
+            let handled = if let Some(pool) = crate::net::active_server_pool() {
+                let srvs = pool.servers_snapshot();
+                for (idx, s) in srvs.iter().enumerate() {
+                    let cur_active = s.active.load(Ordering::SeqCst);
+                    if let Some(&prev_active) = ws.server_status_list.get(idx) {
+                        if cur_active != prev_active {
+                            let act = scheduler_server_action_str(cur_active);
+                            let mut msg = b"Scheduler: ".to_vec();
+                            msg.extend_from_slice(&act[..act.len() - 1]);
+                            msg.push(b' ');
+                            msg.extend_from_slice(s.name.to_bytes());
+                            emit_sched_log(env, 2, &msg);
+                        }
+                    }
+                }
+                pool.changed();
+                true
+            } else {
+                false
+            };
+            #[cfg(not(unix))]
+            let handled = false;
+            if !handled {
+                let srv_count = cb(
+                    env.ctx,
+                    2,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+                for idx in 0..srv_count {
+                    let mut ints = [0i32; 2];
+                    let mut strs: [*const c_char; 1] = [std::ptr::null()];
+                    cb(
+                        env.ctx,
+                        2,
+                        1,
+                        idx,
+                        std::ptr::null(),
+                        0,
+                        ints.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                        strs.as_mut_ptr(),
+                    );
+                    let cur_active = ints[1] != 0;
+                    if let Some(&prev_active) = ws.server_status_list.get(idx as usize) {
+                        if cur_active != prev_active {
+                            let act = scheduler_server_action_str(cur_active);
+                            let name_bytes = if strs[0].is_null() {
+                                &[][..]
+                            } else {
+                                CStr::from_ptr(strs[0]).to_bytes()
+                            };
+                            let mut msg = b"Scheduler: ".to_vec();
+                            msg.extend_from_slice(&act[..act.len() - 1]);
+                            msg.push(b' ');
+                            msg.extend_from_slice(name_bytes);
+                            emit_sched_log(env, 2, &msg);
+                        }
+                    }
+                }
                 cb(
                     env.ctx,
                     2,
-                    1,
-                    idx,
+                    3,
+                    0,
                     std::ptr::null(),
                     0,
-                    ints.as_mut_ptr(),
                     std::ptr::null_mut(),
-                    strs.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
                 );
-                let cur_active = ints[1] != 0;
-                if let Some(&prev_active) = ws.server_status_list.get(idx as usize) {
-                    if cur_active != prev_active {
-                        let act = scheduler_server_action_str(cur_active);
-                        let name_bytes = if strs[0].is_null() {
-                            &[][..]
-                        } else {
-                            CStr::from_ptr(strs[0]).to_bytes()
-                        };
-                        let mut msg = b"Scheduler: ".to_vec();
-                        msg.extend_from_slice(&act[..act.len() - 1]);
-                        msg.push(b' ');
-                        msg.extend_from_slice(name_bytes);
-                        emit_sched_log(env, 2, &msg);
-                    }
-                }
             }
-            cb(
-                env.ctx,
-                2,
-                3,
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
         }
     }
 
@@ -1117,6 +1179,169 @@ pub unsafe extern "C" fn nzbget_rs_scheduler_exec(
             1
         }
         _ => 0,
+    }
+}
+
+struct ServiceSlot {
+    ptr: usize,
+    last_work: i64,
+}
+
+pub struct NzbgetRsServiceCoord {
+    services: Mutex<Vec<ServiceSlot>>,
+    wait_mutex: Mutex<bool>,
+    wait_cond: std::sync::Condvar,
+}
+
+pub type NzbgetRsServiceCoordFn =
+    unsafe extern "C" fn(ctx: *mut c_void, svc: *mut c_void, op: c_int) -> c_int;
+
+#[inline]
+fn service_coord_now() -> i64 {
+    #[cfg(unix)]
+    unsafe {
+        libc::time(std::ptr::null_mut()) as i64
+    }
+    #[cfg(not(unix))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn nzbget_rs_service_coord_new() -> *mut NzbgetRsServiceCoord {
+    crate::log::log_active_bytes(3, b"Creating ServiceCoordinator");
+    Box::into_raw(Box::new(NzbgetRsServiceCoord {
+        services: Mutex::new(Vec::new()),
+        wait_mutex: Mutex::new(false),
+        wait_cond: std::sync::Condvar::new(),
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_service_coord_free(h: *mut NzbgetRsServiceCoord) {
+    if !h.is_null() {
+        crate::log::log_active_bytes(3, b"Destroying ServiceCoordinator");
+        drop(Box::from_raw(h));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
+    h: *mut NzbgetRsServiceCoord,
+    op: c_int,
+    ctx: *mut c_void,
+    cb: Option<NzbgetRsServiceCoordFn>,
+) {
+    let Some(sc) = h.as_ref() else {
+        return;
+    };
+    match op {
+        0 => {
+            if let Ok(mut srvs) = sc.services.lock() {
+                srvs.push(ServiceSlot {
+                    ptr: ctx as usize,
+                    last_work: 0,
+                });
+            }
+        }
+        1 => {
+            crate::log::log_active_bytes(3, b"Waking up ServiceCoordinator");
+            if let Ok(mut woken) = sc.wait_mutex.lock() {
+                *woken = true;
+                sc.wait_cond.notify_all();
+            }
+        }
+        2 => {
+            if let Ok(_guard) = sc.wait_mutex.lock() {
+                sc.wait_cond.notify_all();
+            }
+        }
+        3 => {
+            let Some(host_cb) = cb else {
+                return;
+            };
+            crate::log::log_active_bytes(3, b"Entering ServiceCoordinator-loop");
+            while host_cb(ctx, std::ptr::null_mut(), 0) == 0 {
+                let count = sc.services.lock().map_or(0, |g| g.len());
+                for idx in 0..count {
+                    let Some((svc_ptr, last_work)) = sc
+                        .services
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.get(idx).map(|s| (s.ptr as *mut c_void, s.last_work)))
+                    else {
+                        continue;
+                    };
+                    let service_interval = host_cb(ctx, svc_ptr, 1);
+                    if service_interval >= 0
+                        && (service_coord_now() - last_work).abs() >= i64::from(service_interval)
+                    {
+                        host_cb(ctx, svc_ptr, 2);
+                        let done_at = service_coord_now();
+                        if let Ok(mut g) = sc.services.lock() {
+                            if let Some(slot) = g.get_mut(idx) {
+                                slot.last_work = done_at;
+                            }
+                        }
+                    }
+                }
+
+                let mut wait_interval: i32 = 60 * 60 * 24;
+                let cur_time = service_coord_now();
+                let count2 = sc.services.lock().map_or(0, |g| g.len());
+                let debug_on = crate::log::active_debug_build();
+                for idx in 0..count2 {
+                    let Some((svc_ptr, last_work)) = sc
+                        .services
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.get(idx).map(|s| (s.ptr as *mut c_void, s.last_work)))
+                    else {
+                        continue;
+                    };
+                    let service_interval = host_cb(ctx, svc_ptr, 1);
+                    let mut remaining: i32 = -1;
+                    if service_interval >= 0 {
+                        let elapsed = (cur_time - last_work) as i32;
+                        remaining = service_interval.min(service_interval.wrapping_sub(elapsed));
+                        wait_interval = wait_interval.min(remaining);
+                    }
+                    if debug_on {
+                        let msg =
+                            format!("serviceInterval: {service_interval}, remaining: {remaining}");
+                        crate::log::log_active_bytes(3, msg.as_bytes());
+                    }
+                }
+
+                if debug_on {
+                    let msg = format!("Waiting in ServiceCoordinator: {wait_interval}");
+                    crate::log::log_active_bytes(3, msg.as_bytes());
+                }
+                if wait_interval > 0 {
+                    if let Ok(mut guard) = sc.wait_mutex.lock() {
+                        if !*guard && host_cb(ctx, std::ptr::null_mut(), 0) == 0 {
+                            let dur =
+                                std::time::Duration::from_millis((wait_interval as u64) * 1000);
+                            if let Ok((new_guard, _)) =
+                                sc.wait_cond.wait_timeout_while(guard, dur, |woken| {
+                                    !*woken && unsafe { host_cb(ctx, std::ptr::null_mut(), 0) } == 0
+                                })
+                            {
+                                guard = new_guard;
+                            } else {
+                                break;
+                            }
+                        }
+                        *guard = false;
+                    }
+                }
+            }
+            crate::log::log_active_bytes(3, b"Exiting ServiceCoordinator-loop");
+        }
+        _ => {}
     }
 }
 

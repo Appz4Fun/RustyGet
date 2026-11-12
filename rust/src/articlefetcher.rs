@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use crate::decoder::{rust_yenc_crc, rust_yenc_decode_incremental, Decoder, Format, Status};
 use crate::dupefallback::{
-    article_fetch_add_decoded_bytes, article_fetch_add_raw_bytes, article_fetch_header_within_limit,
-    article_size_steps_hash,
+    article_fetch_add_decoded_bytes, article_fetch_add_raw_bytes,
+    article_fetch_header_within_limit, article_size_steps_hash,
 };
 use crate::nntp::{ArticleBatchFetcher, BatchFetchedArticle, BatchRequest};
 use crate::nzbfile::{Ctype, NzbFileParser};
@@ -48,6 +48,196 @@ pub type NzbgetRsNntpFetchHostFn = unsafe extern "C" fn(
     buf: *mut u8,
     buf_len: usize,
 ) -> usize;
+
+/// Pure-Rust NNTP fetch host driving `NzbgetRsServerPool`, `PooledNntpConn`,
+/// `NzbgetRsStatMeter`, `NzbgetRsWorkState`, `NzbgetRsOptions`, and `NzbgetRsLog`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn native_nntp_fetch_host(
+    op: c_int,
+    a1: c_int,
+    a2: c_int,
+    p1: usize,
+    s1: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+    buf: *mut u8,
+    buf_len: usize,
+) -> usize {
+    match op {
+        0 => {
+            let pool = crate::net::active_server_pool();
+            let ws = crate::ffi::active_workstate();
+            let opts = crate::options::active_options();
+            let sm = crate::statmeter::active_statmeter();
+            *ints.add(0) = pool.as_ref().map_or(0, |p| p.max_norm_level());
+            *ints.add(1) = c_int::from(ws.as_ref().is_some_and(|w| w.quota_reached()));
+            *ints.add(2) = opts
+                .as_ref()
+                .map_or(4, |o| o.scalars().article_read_chunk_size);
+            *ints.add(3) = pool.as_ref().map_or(0, |p| p.server_count() as c_int);
+            let speed_limit = ws.as_ref().map_or(0, |w| i64::from(w.speed_limit()));
+            *i64s.add(0) = speed_limit;
+            *i64s.add(1) = if speed_limit > 0 {
+                sm.as_ref().map_or(0, |s| s.current_download_speed())
+            } else {
+                0
+            };
+            *i64s.add(2) = if speed_limit > 0 {
+                sm.as_ref().map_or(0, |s| s.momentary_download_speed())
+            } else {
+                0
+            };
+            0
+        }
+        1 => {
+            let Some(pool) = crate::net::active_server_pool() else {
+                return 0;
+            };
+            let srvs = pool.servers_snapshot();
+            let Some(s) = srvs.get(a1 as usize) else {
+                return 0;
+            };
+            *ints.add(0) = c_int::from(s.active.load(Ordering::SeqCst));
+            *ints.add(1) = s.norm_level.load(Ordering::SeqCst);
+            *ints.add(2) = s.group;
+            *ints.add(3) = s.id;
+            *ints.add(4) = s.max_connections;
+            *ints.add(5) = c_int::from(s.join_group);
+            *strs.add(0) = s.name.as_ptr();
+            Arc::as_ptr(s) as usize
+        }
+        2 => {
+            let Some(pool) = crate::net::active_server_pool() else {
+                return 0;
+            };
+            let mut failed: Vec<&crate::net::RsNewsServer> = Vec::new();
+            if !buf.is_null() && a2 > 0 {
+                let ptrs = std::slice::from_raw_parts(buf.cast::<usize>(), a2 as usize);
+                failed.reserve(ptrs.len());
+                for &raw in ptrs {
+                    if raw != 0 {
+                        failed.push(&*(raw as *const crate::net::RsNewsServer));
+                    }
+                }
+            }
+            let conn_ptr = pool.get_connection(a1, None, &failed);
+            if conn_ptr.is_null() {
+                return 0;
+            }
+            let conn = &*conn_ptr;
+            let s = &conn.server;
+            *ints.add(0) = c_int::from(conn.is_connected());
+            *ints.add(1) = s.id;
+            *ints.add(2) = s.max_connections;
+            *ints.add(3) = c_int::from(s.join_group);
+            *ints.add(4) = s.group;
+            *i64s.add(0) = (Arc::as_ptr(s) as usize) as i64;
+            *strs.add(0) = s.name.as_ptr();
+            conn_ptr as usize
+        }
+        3 => {
+            let conn_ptr = p1 as *mut crate::net::PooledNntpConn;
+            if conn_ptr.is_null() {
+                return 0;
+            }
+            let conn = &*conn_ptr;
+            let bytes_read = conn.fetch_total_bytes_read();
+            if bytes_read > 0 {
+                if let Some(sm) = crate::statmeter::active_statmeter() {
+                    let off = crate::ffi::active_workstate().map_or(0, |w| w.local_time_offset());
+                    sm.add_server_stats(bytes_read, 0, 0, conn.server.id, off);
+                }
+            }
+            if a1 == 0 || conn.is_cancelled() {
+                conn.disconnect();
+            }
+            if let Some(pool) = crate::net::active_server_pool() {
+                pool.free_connection(conn_ptr, true);
+            }
+            0
+        }
+        4 => {
+            if p1 == 0 {
+                return 0;
+            }
+            let conn = &*(p1 as *const crate::net::PooledNntpConn);
+            *strs.add(0) = conn.server.name.as_ptr();
+            *ints.add(0) = c_int::from(conn.server.join_group);
+            usize::from(conn.connect())
+        }
+        5 => {
+            if p1 == 0 {
+                return 0;
+            }
+            let conn = &*(p1 as *const crate::net::PooledNntpConn);
+            let resp = conn.join_group(if s1.is_null() { c"".as_ptr() } else { s1 });
+            *strs.add(0) = resp;
+            usize::from(!resp.is_null())
+        }
+        6 => {
+            if p1 == 0 {
+                return 0;
+            }
+            let conn = &*(p1 as *const crate::net::PooledNntpConn);
+            let resp = conn.request(if s1.is_null() { c"".as_ptr() } else { s1 });
+            *strs.add(0) = resp;
+            usize::from(!resp.is_null())
+        }
+        7 => {
+            if p1 == 0 {
+                return 0;
+            }
+            let conn = &*(p1 as *const crate::net::PooledNntpConn);
+            let (mut buffer, avail) = conn.drain_read_buffer();
+            let mut len = avail as c_int;
+            if len == 0 {
+                let dst = if buf.is_null() || buf_len == 0 {
+                    &mut [][..]
+                } else {
+                    std::slice::from_raw_parts_mut(buf, buf_len)
+                };
+                len = conn.try_recv(dst);
+                buffer = buf;
+            }
+            if len <= 0 {
+                *ints.add(0) = len;
+                *strs.add(0) = ptr::null();
+                return 0;
+            }
+            if let Some(sm) = crate::statmeter::active_statmeter() {
+                sm.add_speed_reading_locked(len);
+            }
+            *ints.add(0) = len;
+            *strs.add(0) = buffer.cast::<c_char>();
+            1
+        }
+        8 => {
+            if p1 != 0 {
+                (*(p1 as *const crate::net::PooledNntpConn)).disconnect();
+            }
+            0
+        }
+        9 => {
+            if p1 != 0 {
+                let conn = &*(p1 as *const crate::net::PooledNntpConn);
+                conn.set_suppress_errors(true);
+                conn.cancel();
+            }
+            0
+        }
+        10 => {
+            let msg = if s1.is_null() {
+                &[][..]
+            } else {
+                CStr::from_ptr(s1).to_bytes()
+            };
+            crate::log::log_active_bytes(4, msg);
+            0
+        }
+        _ => 0,
+    }
+}
 
 pub const MAX_TRANSIENT_ATTEMPTS: i32 = 4;
 
@@ -290,9 +480,9 @@ impl ArticleFetcher {
                     continue;
                 }
                 let s_group = s_ints[2];
-                let server_failed = failed_servers.iter().any(|&(fp, fg, fl)| {
-                    fp == s_ptr || (fg > 0 && fg == s_group && fl == level)
-                });
+                let server_failed = failed_servers
+                    .iter()
+                    .any(|&(fp, fg, fl)| fp == s_ptr || (fg > 0 && fg == s_group && fl == level));
                 if !server_failed {
                     eligible += 1;
                 }
@@ -671,9 +861,8 @@ impl ArticleFetcher {
 
             let buffer_ptr = rd_strs[0] as *mut u8;
             let decoded_len = unsafe { decoder.decode_buffer(buffer_ptr, len as usize) };
-            let declared_range_known = decoder.begin_pos > 0
-                && decoder.end_pos >= decoder.begin_pos
-                && decoder.size > 0;
+            let declared_range_known =
+                decoder.begin_pos > 0 && decoder.end_pos >= decoder.begin_pos && decoder.size > 0;
             if !article_fetch_header_within_limit(raw_bytes, declared_range_known) {
                 let mut log = b"Stream repair: article ".to_vec();
                 log.extend_from_slice(msg_slice);
@@ -1027,7 +1216,11 @@ mod tests {
             }
         }
         out.extend_from_slice(
-            format!("\r\n=yend size={} part=1 pcrc32={crc:08x}\r\n.\r\n", payload.len()).as_bytes(),
+            format!(
+                "\r\n=yend size={} part=1 pcrc32={crc:08x}\r\n.\r\n",
+                payload.len()
+            )
+            .as_bytes(),
         );
         out
     }

@@ -1611,6 +1611,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             };
             #[cfg(unix)]
             if e.a1 < 0 {
+                crate::net::remote_srv_ctl(0);
                 if let Some(opts) = crate::options::active_options() {
                     if !opts.daemon_mode() {
                         let fe_mode = match opts.scalars().output_mode {
@@ -1696,6 +1697,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 cb(e.ctx, 4, 0, std::ptr::null(), std::ptr::null());
                 #[cfg(unix)]
                 if e.a1 < 0 {
+                    crate::articledl::start_daemon_article_cache();
                     crate::scheduler::start_daemon_service_coord();
                     crate::dupesearch_coord::start_daemon_dupesearch();
                     crate::urlcoord::start_daemon_url_coord();
@@ -1707,7 +1709,8 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                     let mut st_mask = cb(e.ctx, 5, 0, std::ptr::null(), std::ptr::null());
                     #[cfg(unix)]
                     if e.a1 < 0
-                        && (crate::scheduler::is_daemon_service_coord_running()
+                        && (crate::articledl::is_daemon_article_cache_running()
+                            || crate::scheduler::is_daemon_service_coord_running()
                             || crate::dupesearch_coord::is_daemon_dupesearch_running()
                             || crate::urlcoord::is_daemon_url_coord_running()
                             || crate::feed::is_daemon_feed_coord_running()
@@ -1738,6 +1741,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                         cb(e.ctx, 6, 0, std::ptr::null(), std::ptr::null());
                         #[cfg(unix)]
                         if e.a1 < 0 {
+                            crate::articledl::stop_daemon_article_cache();
                             crate::scheduler::stop_daemon_service_coord();
                             crate::dupesearch_coord::stop_daemon_dupesearch();
                             crate::urlcoord::stop_daemon_url_coord();
@@ -1876,6 +1880,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             }
             #[cfg(unix)]
             if e.a2 < 0 && eff_remote_mode == 0 {
+                crate::articledl::stop_daemon_article_cache();
                 crate::extension::stop_active_queue_script();
                 crate::scheduler::stop_daemon_service_coord();
                 crate::dupesearch_coord::stop_daemon_dupesearch();
@@ -1918,7 +1923,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             #[cfg(unix)]
             if e.a2 < 0 {
                 crate::script::terminate_all_active();
-                crate::net::nzbget_rs_remote_srv_ctl(1, std::ptr::null());
+                crate::net::remote_srv_ctl(1);
                 if let Some(fe) = daemon_frontend_clone() {
                     if eff_remote_mode == 0 || dm_is_stopped() {
                         dm_log(e, 0, b"Stopping Frontend");
@@ -1966,6 +1971,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 }
                 crate::scheduler::shutdown_daemon_service_coord();
                 crate::scanner::shutdown_daemon_scanner();
+                crate::articledl::shutdown_daemon_article_cache();
                 crate::articledl::shutdown_daemon_memory_monitor();
                 crate::feed::shutdown_daemon_feed_coord();
                 crate::urlcoord::shutdown_daemon_url_coord();
@@ -1998,6 +2004,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
         #[cfg(unix)]
         13 => {
             crate::scheduler::create_daemon_service_coord();
+            crate::articledl::create_daemon_article_cache();
             crate::extension::create_daemon_queue_script();
             dm_emit_active_log(0, b"Parsing command line");
             let (argc, argv) = if e.ctx.is_null() {

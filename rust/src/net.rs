@@ -1615,19 +1615,17 @@ struct RemoteSrvInstance {
     tls_disabled: bool,
     debug_on: bool,
     conn_host_cb: NzbgetRsConnHostFn,
-    rpc_host: crate::ffi::NzbgetRsRpcHost,
     stopped: AtomicBool,
     state: Mutex<RemoteSrvState>,
 }
 
 impl RemoteSrvInstance {
-    fn new(tls: bool, rpc_host: crate::ffi::NzbgetRsRpcHost) -> Arc<Self> {
+    fn new(tls: bool) -> Arc<Self> {
         Arc::new(Self {
             tls,
             tls_disabled: crate::ffi::build_tls_disabled(),
             debug_on: crate::ffi::build_debug_enabled(),
             conn_host_cb: crate::ffi::tls_host_cb(),
-            rpc_host,
             stopped: AtomicBool::new(false),
             state: Mutex::new(RemoteSrvState {
                 listener_slot: None,
@@ -1806,7 +1804,7 @@ impl RemoteSrvInstance {
                     #[cfg(unix)]
                     let _tg = crate::ffi::RustThreadGuard::enter(&proc_stopped);
                     unsafe {
-                        run_request_processor(*acc, &proc_reg, srv_clone.tls, &srv_clone.rpc_host);
+                        run_request_processor(*acc, &proc_reg, srv_clone.tls);
                     }
                     drop(proc_reg);
                     crate::ffi::stop_ssl_thread();
@@ -1878,11 +1876,7 @@ impl RemoteSrvInstance {
     }
 }
 
-unsafe fn exec_request_processor(
-    conn: &mut NzbgetRsConn,
-    tls: bool,
-    rpc_host: &crate::ffi::NzbgetRsRpcHost,
-) {
+unsafe fn exec_request_processor(conn: &mut NzbgetRsConn, tls: bool) {
     conn.slot.set_suppress_errors(true);
     let debug_on = conn.slot.debug_on;
     let emit = |lvl: c_int, msg: &[u8]| {
@@ -1917,12 +1911,12 @@ unsafe fn exec_request_processor(
     if u32::from_be_bytes(sig) == NZBMESSAGE_SIGNATURE {
         ok = true;
         #[cfg(unix)]
-        crate::ffi::serve_binrpc_conn(conn, rpc_host);
+        crate::ffi::serve_binrpc_conn(conn);
     } else if &sig == b"POST" || &sig == b"GET " || &sig == b"OPTI" {
         ok = true;
         #[cfg(unix)]
         loop {
-            if !crate::ffi::serve_web_conn(conn, &sig, rpc_host) {
+            if !crate::ffi::serve_web_conn(conn, &sig) {
                 break;
             }
             if !conn.session.get_mut().core.recv_exact_slice(&mut sig) {
@@ -1966,10 +1960,9 @@ unsafe fn run_request_processor(
     mut conn: NzbgetRsConn,
     cancel_reg: &Arc<NzbgetRsCancelReg>,
     tls: bool,
-    rpc_host: &crate::ffi::NzbgetRsRpcHost,
 ) {
     let _scope = CancelRegScope::enter(Arc::clone(cancel_reg));
-    exec_request_processor(&mut conn, tls, rpc_host);
+    exec_request_processor(&mut conn, tls);
     conn.session.get_mut().core.disconnect_base();
 }
 
@@ -1985,9 +1978,8 @@ static ACTIVE_REMOTE_SERVERS: Mutex<ActiveRemoteServers> = Mutex::new(ActiveRemo
 
 fn spawn_remote_server_listener(
     tls: bool,
-    rpc_host: crate::ffi::NzbgetRsRpcHost,
 ) -> Option<(Arc<RemoteSrvInstance>, std::thread::JoinHandle<()>)> {
-    let srv = RemoteSrvInstance::new(tls, rpc_host);
+    let srv = RemoteSrvInstance::new(tls);
     let srv_thread = Arc::clone(&srv);
     let handle = std::thread::Builder::new()
         .spawn(move || {
@@ -2000,21 +1992,16 @@ fn spawn_remote_server_listener(
     Some((srv, handle))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_remote_srv_ctl(
-    op: c_int,
-    host: *const crate::ffi::NzbgetRsRpcHost,
-) {
+pub(crate) fn remote_srv_ctl(op: c_int) {
     match op {
         0 => {
             if !crate::options::active_options().is_some_and(|o| o.server_mode()) {
                 return;
             }
-            let rpc_host = host.as_ref().copied().unwrap_or_default();
             crate::webserver::init_server_tokens(|m| crate::log::log_active_bytes(2, m));
-            let plain = spawn_remote_server_listener(false, rpc_host);
+            let plain = spawn_remote_server_listener(false);
             let secure = if crate::lifecycle::should_start_secure_server_active() {
-                spawn_remote_server_listener(true, rpc_host)
+                spawn_remote_server_listener(true)
             } else {
                 None
             };

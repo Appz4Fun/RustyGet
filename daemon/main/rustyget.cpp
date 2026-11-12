@@ -57,7 +57,6 @@ WorkState* g_WorkState;
 ServerPool* g_ServerPool;
 QueueCoordinator* g_QueueCoordinator;
 PrePostProcessor* g_PrePostProcessor;
-ArticleCache* g_ArticleCache;
 
 static int DaemonReloadCb(int sub);
 
@@ -116,12 +115,6 @@ public:
 
 	int Phase3_ServerActivation()
 	{
-		if (m_options->GetServerMode())
-		{
-			const NzbgetRsRpcHost rpcHost = BuildRpcHost();
-			nzbget_rs_remote_srv_ctl(0, &rpcHost);
-		}
-
 		NzbgetRsDaemonEnv env{};
 		env.ctx = this;
 		env.a1 = -1;
@@ -171,7 +164,6 @@ private:
 	std::unique_ptr<ServerPool> m_serverPool;
 	std::unique_ptr<QueueCoordinator> m_queueCoordinator;
 	std::unique_ptr<PrePostProcessor> m_prePostProcessor;
-	std::unique_ptr<ArticleCache> m_articleCache;
 
 	void CreateGlobals()
 	{
@@ -186,9 +178,6 @@ private:
 
 		m_prePostProcessor = std::make_unique<PrePostProcessor>();
 		g_PrePostProcessor = m_prePostProcessor.get();
-
-		m_articleCache = std::make_unique<ArticleCache>();
-		g_ArticleCache = m_articleCache.get();
 	}
 
 	void Cleanup()
@@ -200,7 +189,6 @@ private:
 		g_PrePostProcessor = nullptr;
 		g_QueueCoordinator = nullptr;
 		g_ServerPool = nullptr;
-		g_ArticleCache = nullptr;
 	}
 
 	static int DaemonActionCb(void* raw, int sub, int a2, const char*, const char*)
@@ -211,19 +199,16 @@ private:
 		case 4:
 			self->m_queueCoordinator->Start();
 			self->m_prePostProcessor->Start();
-			if (self->m_options->GetArticleCache() > 0) self->m_articleCache->Start();
 			return 0;
 		case 5:
 			if (a2 == 0)
 				return (self->m_queueCoordinator->IsRunning() ||
-					self->m_prePostProcessor->IsRunning() ||
-					self->m_articleCache->IsRunning()) ? 1 : 0;
+					self->m_prePostProcessor->IsRunning()) ? 1 : 0;
 			return (self->m_queueCoordinator->HasMoreJobs() ? 1 : 0) |
 				(self->m_prePostProcessor->HasMoreJobs() ? 4 : 0);
 		case 6:
 			if (!self->m_queueCoordinator->IsStopped()) self->m_queueCoordinator->Stop();
 			if (!self->m_prePostProcessor->IsStopped()) self->m_prePostProcessor->Stop();
-			if (!self->m_articleCache->IsStopped()) self->m_articleCache->Stop();
 			return 0;
 		case 7:
 			return (self->m_prePostProcessor && self->m_prePostProcessor->HasActiveUnpack(false)) ? 1 : 0;
@@ -233,7 +218,6 @@ private:
 				debug("Stopping QueueCoordinator");
 				self->m_queueCoordinator->Stop();
 				self->m_prePostProcessor->Stop();
-				self->m_articleCache->Stop();
 			}
 			return 0;
 		case 10:

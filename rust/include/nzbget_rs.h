@@ -78,12 +78,6 @@ void nzbget_c_exit_proc(void);
 // ArticleDownloader Hot-Path C ABI (rust/src/dupefallback.rs)
 // ============================================================================
 
-
-typedef struct {
-    int64_t offset;
-    int64_t size;
-} NzbgetRsByteRange;
-
 // ============================================================================
 // DupeSearch, Fleet, DonorHealth, Newznab, FeedCoordinator, FeedInfo &
 // FeedFile Hot-Path FFI (`rust/src/dupesearch_nzb.rs` / `rust/src/feed.rs`)
@@ -117,166 +111,6 @@ int nzbget_rs_nserv_run(int argc, const char* const* argv, const NzbgetRsNservEn
 
 // DownloadInfo & DiskState C ABI (rust/src/downloadinfo.rs, rust/src/diskstatepp.rs)
 
-
-
-typedef struct {
-    int64_t remaining_size;
-    int64_t forced_size;
-    int64_t article_cache;
-    const char* memory_pressure;
-    int effective_article_cache_mb;
-    int effective_par_buffer_mb;
-    int64_t download_rate;
-    int download_limit;
-    int thread_count;
-    int post_job_count;
-    int url_count;
-    int up_time_sec;
-    int download_time_sec;
-    int64_t all_bytes;
-    int64_t month_bytes;
-    int64_t day_bytes;
-    int download_paused;
-    int server_stand_by;
-    int post_paused;
-    int scan_paused;
-    int quota_reached;
-    int64_t free_disk_space;
-    int64_t total_disk_space;
-    int inter_dir_empty;
-    int64_t free_inter_disk_space;
-    int64_t total_inter_disk_space;
-    int server_time;
-    int resume_time;
-    int feed_active;
-    int queued_scripts;
-} NzbgetRsRpcStatusInput;
-
-typedef struct {
-    int id;
-    int active;
-} NzbgetRsRpcServerStatus;
-
-typedef struct {
-    int id;
-    int kind;
-    int time;
-    const char* text;
-} NzbgetRsRpcLogEntry;
-
-typedef struct {
-    int id;
-    int64_t file_size;
-    int64_t remaining_size;
-    int post_time;
-    int filename_confirmed;
-    int paused;
-    int nzb_id;
-    const char* nzb_name;
-    const char* nzb_filename;
-    const char* subject;
-    const char* filename;
-    const char* dest_dir;
-    const char* category;
-    int priority;
-    int active_downloads;
-    int progress;
-} NzbgetRsRpcFileItem;
-
-typedef struct {
-    int id;
-    int kind;
-    const char* name;
-    const char* url;
-    const char* filename;
-    const char* dest_dir;
-    const char* final_dir;
-    const char* category;
-    int par_status;
-    int unpack_status;
-    int move_status;
-    int script_status;
-    int delete_status;
-    int mark_status;
-    int url_status;
-    int64_t size;
-    int file_count;
-    int min_time;
-    int max_time;
-    int total_articles;
-    int current_success_articles;
-    int current_failed_articles;
-    int dupe_recovered_articles;
-    int64_t dupe_recovered_bytes;
-    int dupe_recovered_holes;
-    int live_repairing;
-    int health;
-    int critical_health;
-    const char* dupe_key;
-    int dupe_score;
-    int dupe_mode;
-    int64_t downloaded_size;
-    int download_sec;
-    int post_total_sec;
-    int has_post_start_time;
-    int64_t cur_time;
-    int64_t post_start_time;
-    int par_sec;
-    int repair_sec;
-    int unpack_sec;
-    int message_count;
-    int cached_message_count;
-    int extra_par_blocks;
-} NzbgetRsRpcNzbInfoInput;
-
-typedef struct {
-    const char* name;
-    const char* value;
-} NzbgetRsRpcParamItem;
-
-typedef struct {
-    const char* name;
-    int status;
-} NzbgetRsRpcScriptItem;
-
-typedef struct {
-    int server_id;
-    int success_articles;
-    int failed_articles;
-} NzbgetRsRpcServerStatItem;
-
-typedef struct {
-    const char* name;
-    const char* value;
-    int restricted;
-} NzbgetRsRpcConfigItem;
-
-typedef struct {
-    const char* title;
-    const char* filename;
-    const char* url;
-    int64_t size;
-    int size_mb;
-    const char* category;
-    const char* add_category;
-    int pause_nzb;
-    int priority;
-    int time;
-    int match_status;
-    int match_rule;
-    const char* dupe_key;
-    int dupe_score;
-    int dupe_mode;
-    int status;
-} NzbgetRsRpcFeedItem;
-
-typedef struct {
-    const char* name;
-    int is_url;
-    const char* data;
-    size_t data_len;
-} NzbgetRsRpcFleetReqMember;
-
 typedef struct NzbgetRsOptions NzbgetRsOptions;
 typedef struct NzbgetRsLog NzbgetRsLog;
 typedef struct NzbgetRsWorkState NzbgetRsWorkState;
@@ -305,14 +139,6 @@ int nzbget_rs_serverpool_probe_tls(
     const char* numeric, uintptr_t deadline_ptr);
 
 /* Extension & Script Subsystem End-to-End C ABI (`rust/src/extension.rs`, `rust/src/script.rs`, `rust/src/options.rs`) */
-
-typedef struct NzbgetRsExtManager NzbgetRsExtManager;
-NzbgetRsExtManager* nzbget_rs_ext_mgr_new(void);
-void nzbget_rs_ext_mgr_free(NzbgetRsExtManager* mgr);
-
-typedef struct NzbgetRsQueueScriptCoord NzbgetRsQueueScriptCoord;
-NzbgetRsQueueScriptCoord* nzbget_rs_queue_script_new(void);
-void nzbget_rs_queue_script_free(NzbgetRsQueueScriptCoord* h);
 
 NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
 
@@ -538,81 +364,9 @@ NzbgetRsPostJob* nzbget_rs_post_job_new(int kind, uintptr_t thread_ptr, uintptr_
 void nzbget_rs_post_job_free(NzbgetRsPostJob* job);
 int nzbget_rs_post_job_op(const NzbgetRsPostJob* job, int op, int a1, uintptr_t p1);
 
-typedef int (*NzbgetRsXmlRpcActionFn)(
-    void* ctx, int op, int a1, int a2, int a3, int a4,
-    const char* s1, const char* s2, const char* s3, const char* s4,
-    const char* body, size_t body_len,
-    const int32_t* ids, size_t ids_len,
-    const NzbgetRsRpcParamItem* params, size_t params_len,
-    uint32_t* out_u32, double* out_f64, NzbgetRsBuf* out_buf);
-
-typedef void (*NzbgetRsXmlRpcEmitFn)(
-    void* emit_ctx, int sub,
-    int a1, int a2, int a3, int a4, int a5, int a6,
-    int64_t i1, int64_t i2, int64_t i3,
-    const char* s1, const char* s2, const char* s3, const char* s4,
-    const void* p1, size_t n1, const void* p2, size_t n2,
-    const void* p3, size_t n3, const void* p4, size_t n4);
-
-typedef int (*NzbgetRsXmlRpcCollectFn)(
-    void* ctx, int kind, int a1, int a2, int a3, int a4, int a5,
-    const char* s1, const char* s2, const char* s3,
-    const char* s4, const char* s5, const char* s6,
-    const void* p1, size_t n1,
-    void* emit_ctx, NzbgetRsXmlRpcEmitFn emit_cb);
-
 int nzbget_rs_script_config_exec(
     int op, const char* p1, size_t n1, const char* p2, size_t n2,
     void* ctx, int (*cancel_cb)(void*), NzbgetRsBuf* out_buf);
-
-typedef void (*NzbgetRsBinRpcListPushNzbFn)(
-    void* b_ctx, uint32_t id, uint32_t kind, int64_t size, int64_t rem_size, int64_t paused_size,
-    uint32_t paused_files, uint32_t rem_pars, uint32_t priority,
-    const char* filename, const char* name, const char* dest_dir,
-    const char* category, const char* queued_filename);
-typedef void (*NzbgetRsBinRpcListPushParamFn)(
-    void* b_ctx, uint32_t owner_idx, const char* name, const char* value);
-typedef void (*NzbgetRsBinRpcListPushFileFn)(
-    void* b_ctx, uint32_t id, uint32_t nzb_idx, int64_t size, int64_t rem_size,
-    uint32_t paused, uint32_t fn_confirmed, uint32_t active_dl,
-    const char* nzb_name, const char* subject, const char* filename);
-typedef void (*NzbgetRsBinRpcPostPushFn)(
-    void* enc_ctx, uint32_t id, uint32_t stage, uint32_t stage_prog, uint32_t file_prog,
-    uint32_t start_sec, uint32_t stage_sec, const char* filename, const char* name,
-    const char* dest_dir, const char* label);
-typedef void (*NzbgetRsBinRpcHistPushFn)(
-    void* enc_ctx, uint32_t id, uint32_t kind, uint32_t time, int64_t size,
-    uint32_t file_cnt, uint32_t par_status, uint32_t script_status,
-    uint32_t url_status, const char* name);
-
-typedef struct NzbgetRsRpcQueueStatus {
-    int post_job_count;
-    int url_count;
-    int queued_scripts;
-    int64_t remaining_size;
-    int64_t forced_size;
-} NzbgetRsRpcQueueStatus;
-
-typedef struct NzbgetRsRpcHost {
-    NzbgetRsXmlRpcActionFn rpc_action_cb;
-    NzbgetRsXmlRpcCollectFn rpc_collect_cb;
-    int (*binrpc_action_cb)(
-        int kind, int a1, int a2, int a3, int a4,
-        const char* s1, const char* s2, const char* s3,
-        const char* body, int body_len,
-        const int32_t* ids, size_t ids_len,
-        const char* const* names, size_t names_len);
-    void (*binrpc_list_cb)(
-        int want_files, void* b_ctx,
-        NzbgetRsBinRpcListPushNzbFn push_nzb,
-        NzbgetRsBinRpcListPushParamFn push_param,
-        NzbgetRsBinRpcListPushFileFn push_file,
-        int* out_post_jobs, int64_t* out_rem_size);
-    void (*binrpc_post_cb)(void* enc_ctx, NzbgetRsBinRpcPostPushFn push_post);
-    void (*binrpc_history_cb)(int show_hidden, void* enc_ctx, NzbgetRsBinRpcHistPushFn push_hist);
-} NzbgetRsRpcHost;
-
-void nzbget_rs_remote_srv_ctl(int op, const NzbgetRsRpcHost* host);
 
 typedef struct NzbgetRsQueueCoordinator NzbgetRsQueueCoordinator;
 typedef struct NzbgetRsPrePostProcessor NzbgetRsPrePostProcessor;

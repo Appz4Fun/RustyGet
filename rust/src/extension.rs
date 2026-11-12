@@ -3744,8 +3744,8 @@ pub(crate) fn active_queue_script_has_job(nzb_id: i32, out_active: &mut bool) ->
     active || g.queue.iter().any(|it| it.nzb_id == nzb_id)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn nzbget_rs_queue_script_new() -> *mut NzbgetRsQueueScriptCoord {
+#[cfg(test)]
+pub(crate) fn nzbget_rs_queue_script_new() -> *mut NzbgetRsQueueScriptCoord {
     let arc = std::sync::Arc::new(NzbgetRsQueueScriptCoord::new());
     if let Ok(mut g) = ACTIVE_QUEUE_SCRIPT.write() {
         *g = Some(std::sync::Arc::downgrade(&arc));
@@ -3753,8 +3753,8 @@ pub extern "C" fn nzbget_rs_queue_script_new() -> *mut NzbgetRsQueueScriptCoord 
     std::sync::Arc::into_raw(arc).cast_mut()
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_queue_script_free(h: *mut NzbgetRsQueueScriptCoord) {
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_queue_script_free(h: *mut NzbgetRsQueueScriptCoord) {
     if !h.is_null() {
         let arc = std::sync::Arc::from_raw(h.cast_const());
         let wk = std::sync::Arc::downgrade(&arc);

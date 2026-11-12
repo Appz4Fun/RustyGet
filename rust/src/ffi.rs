@@ -5358,136 +5358,9 @@ impl Drop for PosixCancelGuard {
 
 // ---- WebProcessor / BinRpcProcessor / RemoteClient / Frontend FFI ----
 
-pub type NzbgetRsBinRpcListPushNzbFn = unsafe extern "C" fn(
-    *mut c_void,
-    u32,
-    u32,
-    i64,
-    i64,
-    i64,
-    u32,
-    u32,
-    u32,
-    *const c_char,
-    *const c_char,
-    *const c_char,
-    *const c_char,
-    *const c_char,
-);
-pub type NzbgetRsBinRpcListPushParamFn =
-    unsafe extern "C" fn(*mut c_void, u32, *const c_char, *const c_char);
-pub type NzbgetRsBinRpcListPushFileFn = unsafe extern "C" fn(
-    *mut c_void,
-    u32,
-    u32,
-    i64,
-    i64,
-    u32,
-    u32,
-    u32,
-    *const c_char,
-    *const c_char,
-    *const c_char,
-);
-pub type NzbgetRsBinRpcPostPushFn = unsafe extern "C" fn(
-    *mut c_void,
-    u32,
-    u32,
-    u32,
-    u32,
-    u32,
-    u32,
-    *const c_char,
-    *const c_char,
-    *const c_char,
-    *const c_char,
-);
-pub type NzbgetRsBinRpcHistPushFn =
-    unsafe extern "C" fn(*mut c_void, u32, u32, u32, i64, u32, u32, u32, u32, *const c_char);
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct NzbgetRsRpcQueueStatus {
-    pub post_job_count: c_int,
-    pub url_count: c_int,
-    pub queued_scripts: c_int,
-    pub remaining_size: i64,
-    pub forced_size: i64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct NzbgetRsRpcHost {
-    pub rpc_action_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcActionFn>,
-    pub rpc_collect_cb: Option<crate::xmlrpc_format::NzbgetRsXmlRpcCollectFn>,
-    pub binrpc_action_cb: Option<
-        unsafe extern "C" fn(
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-            c_int,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            *const c_char,
-            c_int,
-            *const i32,
-            usize,
-            *const *const c_char,
-            usize,
-        ) -> c_int,
-    >,
-    pub binrpc_list_cb: Option<
-        unsafe extern "C" fn(
-            c_int,
-            *mut c_void,
-            NzbgetRsBinRpcListPushNzbFn,
-            NzbgetRsBinRpcListPushParamFn,
-            NzbgetRsBinRpcListPushFileFn,
-            *mut c_int,
-            *mut i64,
-        ),
-    >,
-    pub binrpc_post_cb: Option<unsafe extern "C" fn(*mut c_void, NzbgetRsBinRpcPostPushFn)>,
-    pub binrpc_history_cb:
-        Option<unsafe extern "C" fn(c_int, *mut c_void, NzbgetRsBinRpcHistPushFn)>,
-}
-
-unsafe impl Send for NzbgetRsRpcHost {}
-unsafe impl Sync for NzbgetRsRpcHost {}
-
 unsafe fn to_nul_cvec(bytes: &[u8]) -> std::ffi::CString {
     let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     std::ffi::CString::from_vec_unchecked(bytes[..nul].to_vec())
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn noop_xmlrpc_emit(
-    _emit_ctx: *mut c_void,
-    _sub: c_int,
-    _a1: c_int,
-    _a2: c_int,
-    _a3: c_int,
-    _a4: c_int,
-    _a5: c_int,
-    _a6: c_int,
-    _i1: i64,
-    _i2: i64,
-    _i3: i64,
-    _s1: *const c_char,
-    _s2: *const c_char,
-    _s3: *const c_char,
-    _s4: *const c_char,
-    _p1: *const c_void,
-    _n1: usize,
-    _p2: *const c_void,
-    _n2: usize,
-    _p3: *const c_void,
-    _n3: usize,
-    _p4: *const c_void,
-    _n4: usize,
-) {
 }
 
 #[cfg(unix)]
@@ -5507,7 +5380,7 @@ unsafe extern "C" fn web_rpc_log_bridge(_ctx: *mut c_void, lvl: c_int, msg: *con
 
 #[cfg(unix)]
 unsafe extern "C" fn web_rpc_action_bridge(
-    ctx: *mut c_void,
+    _ctx: *mut c_void,
     op: c_int,
     a1: c_int,
     a2: c_int,
@@ -5527,7 +5400,6 @@ unsafe extern "C" fn web_rpc_action_bridge(
     out_f64: *mut f64,
     out_buf: *mut RsBuf,
 ) -> c_int {
-    let host = &*ctx.cast::<NzbgetRsRpcHost>();
     match op {
         1 => {
             let Some(ws) = active_workstate() else {
@@ -5864,39 +5736,251 @@ unsafe extern "C" fn web_rpc_action_bridge(
             };
             c_int::from(crate::urlcoord::add_testserver_url_active(a1, url_b))
         }
+        10 => {
+            let Some(qh) = queue_host() else {
+                return 0;
+            };
+            let id_slice = if ids.is_null() || ids_len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(ids, ids_len)
+            };
+            let args_b = input(s1);
+            c_int::from(qh.with_locked_queue(|dq_ptr| {
+                qh.dq_edit_list(dq_ptr, Some(id_slice), None, 0, a1, args_b)
+            }))
+        }
+        22 => {
+            let Some(qh) = queue_host() else {
+                return 0;
+            };
+            qh.raw(
+                7,
+                a1,
+                0,
+                out_buf as usize,
+                0,
+                s1,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) as c_int
+        }
         25 => crate::net::nzbget_rs_net_speedtest_iter(body, body_len, a1, out_u32, out_f64),
         26 => {
             c_int::from(crate::script::command_script_start_active(s1, s2, params, params_len) != 0)
         }
-        _ => host.rpc_action_cb.map_or(0, |cb| {
-            cb(
-                std::ptr::null_mut(),
-                op,
-                a1,
-                a2,
-                a3,
-                a4,
-                s1,
-                s2,
-                s3,
-                s4,
-                body,
-                body_len,
-                ids,
-                ids_len,
-                params,
-                params_len,
-                out_u32,
-                out_f64,
-                out_buf,
-            )
-        }),
+        _ => 0,
     }
 }
 
 #[cfg(unix)]
+unsafe fn emit_rpc_nzb(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+    text_status_mode: i32,
+    f_cb: impl FnOnce(
+        &crate::queuesubsys_host::NzbSnap,
+        *const c_char,
+        &crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput,
+        &[crate::xmlrpc_format::NzbgetRsRpcParamItem],
+        &[crate::xmlrpc_format::NzbgetRsRpcScriptItem],
+        &[crate::xmlrpc_format::NzbgetRsRpcServerStatItem],
+    ),
+) {
+    let n = qh.nzb_snap_mode(nzb_ptr, text_status_mode);
+    let post_start_time = if n.post_info_ptr != 0 {
+        qh.post_snap(n.post_info_ptr).start_time
+    } else {
+        0
+    };
+    let cur_time = if post_start_time != 0 {
+        libc::time(std::ptr::null_mut()) as i64
+    } else {
+        0
+    };
+    let c_name = to_nul_cvec(&n.name);
+    let c_url = to_nul_cvec(&n.url);
+    let c_filename = to_nul_cvec(&n.filename);
+    let c_dest_dir = to_nul_cvec(&n.dest_dir);
+    let c_final_dir = to_nul_cvec(&n.final_dir);
+    let c_category = to_nul_cvec(&n.category);
+    let c_dupe_key = to_nul_cvec(&n.dupe_key);
+    let c_text_status = to_nul_cvec(&n.text_status);
+
+    let f = crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput {
+        id: n.id,
+        kind: n.kind,
+        name: c_name.as_ptr(),
+        url: c_url.as_ptr(),
+        filename: c_filename.as_ptr(),
+        dest_dir: c_dest_dir.as_ptr(),
+        final_dir: c_final_dir.as_ptr(),
+        category: c_category.as_ptr(),
+        par_status: n.par_status,
+        unpack_status: n.unpack_status,
+        move_status: n.move_status,
+        script_status: n.script_total_status,
+        delete_status: n.delete_status,
+        mark_status: n.mark_status,
+        url_status: n.url_status,
+        size: n.size,
+        file_count: n.file_count,
+        min_time: n.min_time as c_int,
+        max_time: n.max_time as c_int,
+        total_articles: n.total_articles,
+        current_success_articles: n.current_success_articles,
+        current_failed_articles: n.current_failed_articles,
+        dupe_recovered_articles: n.dupe_recovered_articles,
+        dupe_recovered_bytes: n.dupe_recovered_bytes,
+        dupe_recovered_holes: n.dupe_recovered_holes,
+        live_repairing: c_int::from(n.has_live_repair_thread),
+        health: n.health,
+        critical_health: n.critical_health_exact,
+        dupe_key: c_dupe_key.as_ptr(),
+        dupe_score: n.dupe_score,
+        dupe_mode: n.dupe_mode,
+        downloaded_size: n.downloaded_size,
+        download_sec: n.download_sec,
+        post_total_sec: n.post_total_sec,
+        has_post_start_time: c_int::from(post_start_time != 0),
+        cur_time,
+        post_start_time,
+        par_sec: n.par_sec,
+        repair_sec: n.repair_sec,
+        unpack_sec: n.unpack_sec,
+        message_count: n.message_count,
+        cached_message_count: n.cached_message_count,
+        extra_par_blocks: n.extra_par_blocks,
+    };
+
+    let plen = qh.nzb_params_len(nzb_ptr);
+    let mut prm_cvecs = Vec::with_capacity(plen);
+    for i in 0..plen {
+        let (k, v) = qh.nzb_param_at(nzb_ptr, i);
+        prm_cvecs.push((to_nul_cvec(&k), to_nul_cvec(&v)));
+    }
+    let prms: Vec<crate::xmlrpc_format::NzbgetRsRpcParamItem> = prm_cvecs
+        .iter()
+        .map(|(k, v)| crate::xmlrpc_format::NzbgetRsRpcParamItem {
+            name: k.as_ptr(),
+            value: v.as_ptr(),
+        })
+        .collect();
+
+    let slen = qh.nzb_script_statuses_len(nzb_ptr);
+    let mut scr_cvecs = Vec::with_capacity(slen);
+    for i in 0..slen {
+        let (st, sname) = qh.nzb_script_status_at(nzb_ptr, i);
+        scr_cvecs.push((to_nul_cvec(&sname), st));
+    }
+    let scrs: Vec<crate::xmlrpc_format::NzbgetRsRpcScriptItem> = scr_cvecs
+        .iter()
+        .map(|(sname, st)| crate::xmlrpc_format::NzbgetRsRpcScriptItem {
+            name: sname.as_ptr(),
+            status: *st,
+        })
+        .collect();
+
+    let stlen = qh.nzb_current_server_stats_len(nzb_ptr);
+    let mut sts = Vec::with_capacity(stlen);
+    for i in 0..stlen {
+        let (sid, succ, fail) = qh.nzb_current_server_stat_at(nzb_ptr, i);
+        sts.push(crate::xmlrpc_format::NzbgetRsRpcServerStatItem {
+            server_id: sid,
+            success_articles: succ,
+            failed_articles: fail,
+        });
+    }
+
+    f_cb(&n, c_text_status.as_ptr(), &f, &prms, &scrs, &sts);
+}
+
+#[cfg(unix)]
+unsafe fn emit_rpc_post(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    post_ptr: usize,
+    log_entries: c_int,
+    post_queue: bool,
+    emit_ctx: *mut c_void,
+    emit_cb: crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn,
+) {
+    if post_ptr == 0 {
+        emit_cb(
+            emit_ctx,
+            5,
+            c_int::from(post_queue),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        );
+        return;
+    }
+    let pi = qh.post_snap(post_ptr);
+    let cur_time = libc::time(std::ptr::null_mut()) as i64;
+    let c_label = to_nul_cvec(&pi.progress_label);
+    let msgs = if log_entries > 0 {
+        qh.nzb_cached_messages_slice(pi.nzb_ptr, 0, log_entries)
+    } else {
+        Vec::new()
+    };
+    let entries: Vec<crate::xmlrpc_format::NzbgetRsRpcLogEntry> = msgs
+        .iter()
+        .map(|m| crate::xmlrpc_format::NzbgetRsRpcLogEntry {
+            id: m.0,
+            kind: m.1,
+            time: m.2,
+            text: m.3.as_ptr(),
+        })
+        .collect();
+    emit_cb(
+        emit_ctx,
+        5,
+        c_int::from(post_queue),
+        1,
+        pi.stage_progress,
+        0,
+        0,
+        0,
+        cur_time,
+        pi.stage_time,
+        pi.start_time,
+        c_label.as_ptr(),
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null(),
+        entries.as_ptr().cast(),
+        entries.len(),
+        std::ptr::null(),
+        0,
+        std::ptr::null(),
+        0,
+        std::ptr::null(),
+        0,
+    );
+}
+
+#[cfg(unix)]
 unsafe extern "C" fn web_rpc_collect_bridge(
-    ctx: *mut c_void,
+    _ctx: *mut c_void,
     kind: c_int,
     a1: c_int,
     a2: c_int,
@@ -5914,31 +5998,30 @@ unsafe extern "C" fn web_rpc_collect_bridge(
     emit_ctx: *mut c_void,
     emit_cb: crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn,
 ) -> c_int {
-    let host = &*ctx.cast::<NzbgetRsRpcHost>();
     match kind {
         1 => {
-            let mut qst = NzbgetRsRpcQueueStatus::default();
-            if let Some(cb) = host.rpc_collect_cb {
-                cb(
-                    std::ptr::null_mut(),
-                    1,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    0,
-                    (&mut qst as *mut NzbgetRsRpcQueueStatus).cast(),
-                    noop_xmlrpc_emit,
-                );
-            }
+            let (post_job_count, url_count, remaining_size, forced_size) =
+                if let Some(qh) = queue_host() {
+                    qh.with_locked_queue(|dq_ptr| {
+                        let mut pjc: c_int = 0;
+                        let mut uc: c_int = 0;
+                        let qlen = qh.queue_len(dq_ptr);
+                        for i in 0..qlen {
+                            let np = qh.queue_at(dq_ptr, i);
+                            let n = qh.nzb_snap(np, false);
+                            if n.has_post_info {
+                                pjc += 1;
+                            }
+                            if n.kind == crate::queuesubsys_host::NK_URL {
+                                uc += 1;
+                            }
+                        }
+                        let (rem, forced) = qh.dq_calc_remaining_size(dq_ptr);
+                        (pjc, uc, rem, forced)
+                    })
+                } else {
+                    (0, 0, 0, 0)
+                };
             let opts = crate::options::active_options();
             let ws = active_workstate();
             let sm = crate::statmeter::active_statmeter();
@@ -5972,8 +6055,8 @@ unsafe extern "C" fn web_rpc_collect_bridge(
             let cfg_par_mb = opts.as_deref().map_or(0, |o| o.scalars().par_buffer);
 
             let sf = crate::xmlrpc_format::NzbgetRsRpcStatusInput {
-                remaining_size: qst.remaining_size,
-                forced_size: qst.forced_size,
+                remaining_size,
+                forced_size,
                 article_cache: crate::articledl::article_cache_allocated() as i64,
                 memory_pressure: if mm_active {
                     crate::articledl::memory_monitor_tier_name_c()
@@ -5993,8 +6076,8 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 download_rate: sm.as_deref().map_or(0, |s| s.current_download_speed()),
                 download_limit: ws.as_deref().map_or(0, |w| w.speed_limit()),
                 thread_count: current_thread_count() - 1,
-                post_job_count: qst.post_job_count,
-                url_count: qst.url_count,
+                post_job_count,
+                url_count,
                 up_time_sec: up_sec,
                 download_time_sec: dn_sec,
                 all_bytes,
@@ -6065,27 +6148,52 @@ unsafe extern "C" fn web_rpc_collect_bridge(
             if a1 == 3 {
                 let disk_msgs = crate::diskstate_format::load_active_nzb_messages(a2);
                 if disk_msgs.is_empty() {
-                    return host.rpc_collect_cb.map_or(0, |cb| {
-                        cb(
-                            std::ptr::null_mut(),
-                            kind,
-                            a1,
-                            a2,
-                            a3,
-                            a4,
-                            a5,
-                            s1,
-                            s2,
-                            s3,
-                            s4,
-                            s5,
-                            s6,
-                            p1,
-                            n1,
-                            emit_ctx,
-                            emit_cb,
-                        )
+                    let Some(qh) = queue_host() else {
+                        return 0;
+                    };
+                    let cached_msgs = qh.with_locked_queue(|dq_ptr| {
+                        let np = qh.queue_find_by_id(dq_ptr, a2);
+                        if np == 0 {
+                            Vec::new()
+                        } else {
+                            qh.nzb_cached_messages_slice(np, a3, a4)
+                        }
                     });
+                    let entries: Vec<crate::xmlrpc_format::NzbgetRsRpcLogEntry> = cached_msgs
+                        .iter()
+                        .map(|m| crate::xmlrpc_format::NzbgetRsRpcLogEntry {
+                            id: m.0,
+                            kind: m.1,
+                            time: m.2,
+                            text: m.3.as_ptr(),
+                        })
+                        .collect();
+                    emit_cb(
+                        emit_ctx,
+                        2,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        entries.as_ptr().cast(),
+                        entries.len(),
+                        std::ptr::null(),
+                        0,
+                        std::ptr::null(),
+                        0,
+                        std::ptr::null(),
+                        0,
+                    );
+                    return 1;
                 }
                 let mut start = disk_msgs.len() as i32;
                 if a4 > 0 {
@@ -6166,74 +6274,329 @@ unsafe extern "C" fn web_rpc_collect_bridge(
             }
             1
         }
-        4 => {
-            struct ListGroupsWrap {
-                ctx: *mut c_void,
-                cb: crate::xmlrpc_format::NzbgetRsXmlRpcEmitFn,
-            }
-            unsafe extern "C" fn wrap_emit(
-                raw: *mut c_void,
-                sub: c_int,
-                a1: c_int,
-                a2: c_int,
-                a3: c_int,
-                a4: c_int,
-                a5: c_int,
-                a6: c_int,
-                i1: i64,
-                i2: i64,
-                i3: i64,
-                s1: *const c_char,
-                s2: *const c_char,
-                s3: *const c_char,
-                s4: *const c_char,
-                p1: *const c_void,
-                n1: usize,
-                p2: *const c_void,
-                n2: usize,
-                p3: *const c_void,
-                n3: usize,
-                p4: *const c_void,
-                n4: usize,
-            ) {
-                let w = &*(raw as *const ListGroupsWrap);
-                let eff_a6 = if sub == 4 && (a6 & 1) != 0 && ((a6 >> 4) & 0xff) == 0 {
-                    let mut qs_act = false;
-                    let has_qs = crate::extension::active_queue_script_has_job(a1, &mut qs_act);
-                    a6 | (if has_qs { 2 } else { 0 }) | (if qs_act { 4 } else { 0 })
-                } else {
-                    a6
-                };
-                (w.cb)(
-                    w.ctx, sub, a1, a2, a3, a4, a5, eff_a6, i1, i2, i3, s1, s2, s3, s4, p1, n1, p2,
-                    n2, p3, n3, p4, n4,
-                );
-            }
-            let mut w = ListGroupsWrap {
-                ctx: emit_ctx,
-                cb: emit_cb,
+        3 => {
+            let Some(qh) = queue_host() else {
+                return 0;
             };
-            host.rpc_collect_cb.map_or(0, |cb| {
-                cb(
-                    std::ptr::null_mut(),
-                    4,
-                    a1,
-                    a2,
-                    a3,
-                    a4,
-                    a5,
-                    s1,
-                    s2,
-                    s3,
-                    s4,
-                    s5,
-                    s6,
-                    p1,
-                    n1,
-                    (&mut w as *mut ListGroupsWrap).cast(),
-                    wrap_emit,
-                )
-            })
+            qh.with_locked_queue(|dq_ptr| {
+                let qlen = qh.queue_len(dq_ptr);
+                for qi in 0..qlen {
+                    let np = qh.queue_at(dq_ptr, qi);
+                    let outer_n = qh.nzb_snap(np, false);
+                    let c_outer_name = to_nul_cvec(&outer_n.name);
+                    let c_outer_fn = to_nul_cvec(&outer_n.filename);
+                    let c_outer_dest = to_nul_cvec(&outer_n.dest_dir);
+                    let c_outer_cat = to_nul_cvec(&outer_n.category);
+                    let flen = qh.nzb_file_len(np);
+                    for fi in 0..flen {
+                        let fp = qh.nzb_file_at(np, fi);
+                        let f = qh.file_snap(fp);
+                        let alt_n = if f.nzb_ptr == np {
+                            None
+                        } else {
+                            Some(qh.nzb_snap(f.nzb_ptr, false))
+                        };
+                        let fnzb_id = alt_n.as_ref().map_or(outer_n.id, |an| an.id);
+                        if !((a3 > 0 && a3 == fnzb_id)
+                            || (a3 == 0 && (a1 == 0 || (a1 <= f.id && f.id <= a2))))
+                        {
+                            continue;
+                        }
+                        let denom = f.size - f.missed_size;
+                        let progress = if (f.failed_size == 0 && f.success_size == 0) || denom <= 0
+                        {
+                            0
+                        } else {
+                            (1000 - f.remaining_size * 1000 / denom) as c_int
+                        };
+                        let alt_c = alt_n.as_ref().map(|an| {
+                            (
+                                to_nul_cvec(&an.name),
+                                to_nul_cvec(&an.filename),
+                                to_nul_cvec(&an.dest_dir),
+                                to_nul_cvec(&an.category),
+                                an.priority,
+                            )
+                        });
+                        let c_subj = to_nul_cvec(&f.subject);
+                        let c_ffn = to_nul_cvec(&f.filename);
+                        let item = crate::xmlrpc_format::NzbgetRsRpcFileItem {
+                            id: f.id,
+                            file_size: f.size,
+                            remaining_size: f.remaining_size,
+                            post_time: f.time as c_int,
+                            filename_confirmed: c_int::from(f.filename_confirmed),
+                            paused: c_int::from(f.paused),
+                            nzb_id: fnzb_id,
+                            nzb_name: alt_c
+                                .as_ref()
+                                .map_or(c_outer_name.as_ptr(), |x| x.0.as_ptr()),
+                            nzb_filename: alt_c
+                                .as_ref()
+                                .map_or(c_outer_fn.as_ptr(), |x| x.1.as_ptr()),
+                            subject: c_subj.as_ptr(),
+                            filename: c_ffn.as_ptr(),
+                            dest_dir: alt_c
+                                .as_ref()
+                                .map_or(c_outer_dest.as_ptr(), |x| x.2.as_ptr()),
+                            category: alt_c
+                                .as_ref()
+                                .map_or(c_outer_cat.as_ptr(), |x| x.3.as_ptr()),
+                            priority: alt_c.as_ref().map_or(outer_n.priority, |x| x.4),
+                            active_downloads: f.active_downloads,
+                            progress,
+                        };
+                        emit_cb(
+                            emit_ctx,
+                            3,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            (&item as *const crate::xmlrpc_format::NzbgetRsRpcFileItem).cast(),
+                            0,
+                            std::ptr::null(),
+                            0,
+                            std::ptr::null(),
+                            0,
+                            std::ptr::null(),
+                            0,
+                        );
+                    }
+                }
+            });
+            1
+        }
+        4 => {
+            let Some(qh) = queue_host() else {
+                return 0;
+            };
+            qh.with_locked_queue(|dq_ptr| {
+                let qlen = qh.queue_len(dq_ptr);
+                for qi in 0..qlen {
+                    let np = qh.queue_at(dq_ptr, qi);
+                    let flen = qh.nzb_file_len(np) as c_int;
+                    let mut post_ptr = 0usize;
+                    emit_rpc_nzb(&qh, np, 0, |n, _, f, prms, scrs, sts| {
+                        post_ptr = n.post_info_ptr;
+                        let has_post = post_ptr != 0;
+                        let post_stage = if has_post { n.post_stage } else { 0 };
+                        let mut flags = (if has_post { 1 } else { 0 })
+                            | ((post_stage & 0xff) << 4)
+                            | ((n.direct_unpack_status & 0xff) << 12)
+                            | ((n.kind & 0xff) << 20);
+                        if has_post && (post_stage & 0xff) == 0 {
+                            let mut qs_act = false;
+                            let has_qs =
+                                crate::extension::active_queue_script_has_job(n.id, &mut qs_act);
+                            flags |= (if has_qs { 2 } else { 0 }) | (if qs_act { 4 } else { 0 });
+                        }
+                        emit_cb(
+                            emit_ctx,
+                            4,
+                            n.id,
+                            flen,
+                            n.remaining_par_count,
+                            n.priority,
+                            n.active_downloads,
+                            flags,
+                            n.remaining_size,
+                            n.paused_size,
+                            0,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            (f as *const crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput).cast(),
+                            0,
+                            prms.as_ptr().cast(),
+                            prms.len(),
+                            scrs.as_ptr().cast(),
+                            scrs.len(),
+                            sts.as_ptr().cast(),
+                            sts.len(),
+                        );
+                    });
+                    emit_rpc_post(&qh, post_ptr, a1, false, emit_ctx, emit_cb);
+                }
+            });
+            1
+        }
+        5 => {
+            let Some(qh) = queue_host() else {
+                return 0;
+            };
+            qh.with_locked_queue(|dq_ptr| {
+                let qlen = qh.queue_len(dq_ptr);
+                for qi in 0..qlen {
+                    let np = qh.queue_at(dq_ptr, qi);
+                    let outer = qh.nzb_snap(np, false);
+                    if outer.post_info_ptr == 0 {
+                        continue;
+                    }
+                    let pi = qh.post_snap(outer.post_info_ptr);
+                    emit_rpc_nzb(&qh, pi.nzb_ptr, 0, |pn, _, f, prms, scrs, sts| {
+                        let c_pname = to_nul_cvec(&pn.name);
+                        emit_cb(
+                            emit_ctx,
+                            6,
+                            outer.id,
+                            pi.stage,
+                            pi.file_progress,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            c_pname.as_ptr(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            (f as *const crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput).cast(),
+                            0,
+                            prms.as_ptr().cast(),
+                            prms.len(),
+                            scrs.as_ptr().cast(),
+                            scrs.len(),
+                            sts.as_ptr().cast(),
+                            sts.len(),
+                        );
+                    });
+                    emit_rpc_post(&qh, outer.post_info_ptr, a1, true, emit_ctx, emit_cb);
+                }
+            });
+            1
+        }
+        6 => {
+            let Some(qh) = queue_host() else {
+                return 0;
+            };
+            qh.with_locked_queue(|dq_ptr| {
+                let hlen = qh.history_len(dq_ptr);
+                for hi in 0..hlen {
+                    let h = qh.history_at(dq_ptr, hi);
+                    if h.kind == crate::queuesubsys_host::HK_DUP && a1 == 0 {
+                        continue;
+                    }
+                    let c_hname = to_nul_cvec(&h.name);
+                    if h.kind == crate::queuesubsys_host::HK_NZB
+                        || h.kind == crate::queuesubsys_host::HK_URL
+                    {
+                        let has_completed =
+                            c_int::from(qh.nzb_completed_files_len(h.inner_ptr) > 0);
+                        emit_rpc_nzb(&qh, h.inner_ptr, 2, |n, status_ptr, f, prms, scrs, sts| {
+                            emit_cb(
+                                emit_ctx,
+                                7,
+                                h.id,
+                                n.parked_file_count,
+                                has_completed,
+                                h.time as c_int,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                c_hname.as_ptr(),
+                                status_ptr,
+                                std::ptr::null(),
+                                std::ptr::null(),
+                                (f as *const crate::xmlrpc_format::NzbgetRsRpcNzbInfoInput).cast(),
+                                0,
+                                prms.as_ptr().cast(),
+                                prms.len(),
+                                scrs.as_ptr().cast(),
+                                scrs.len(),
+                                sts.as_ptr().cast(),
+                                sts.len(),
+                            );
+                        });
+                    } else if h.kind == crate::queuesubsys_host::HK_DUP {
+                        let d = qh.dup_snap(h.inner_ptr);
+                        let c_dkey = to_nul_cvec(&d.dupe_key);
+                        emit_cb(
+                            emit_ctx,
+                            8,
+                            h.id,
+                            h.time as c_int,
+                            d.dupe_score,
+                            d.dupe_mode,
+                            d.status,
+                            0,
+                            d.size,
+                            0,
+                            0,
+                            c_hname.as_ptr(),
+                            c_dkey.as_ptr(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            0,
+                            std::ptr::null(),
+                            0,
+                            std::ptr::null(),
+                            0,
+                            std::ptr::null(),
+                            0,
+                        );
+                    }
+                }
+            });
+            1
+        }
+        7 => {
+            let Some(qh) = queue_host() else {
+                return 0;
+            };
+            qh.with_locked_queue(|dq_ptr| {
+                let qlen = qh.queue_len(dq_ptr);
+                for qi in 0..qlen {
+                    let np = qh.queue_at(dq_ptr, qi);
+                    let n = qh.nzb_snap(np, false);
+                    if n.kind == crate::queuesubsys_host::NK_URL {
+                        let c_fn = to_nul_cvec(&n.filename);
+                        let c_url = to_nul_cvec(&n.url);
+                        let c_name = to_nul_cvec(&n.name);
+                        let c_cat = to_nul_cvec(&n.category);
+                        emit_cb(
+                            emit_ctx,
+                            9,
+                            n.id,
+                            n.priority,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            c_fn.as_ptr(),
+                            c_url.as_ptr(),
+                            c_name.as_ptr(),
+                            c_cat.as_ptr(),
+                            std::ptr::null(),
+                            0,
+                            std::ptr::null(),
+                            0,
+                            std::ptr::null(),
+                            0,
+                            std::ptr::null(),
+                            0,
+                        );
+                    }
+                }
+            });
+            1
         }
         8 => crate::dupesearch_coord::fleet_append(
             std::ptr::null_mut(),
@@ -6365,36 +6728,12 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 Some(emit_cb),
             )
         }
-        _ => host.rpc_collect_cb.map_or(0, |cb| {
-            cb(
-                std::ptr::null_mut(),
-                kind,
-                a1,
-                a2,
-                a3,
-                a4,
-                a5,
-                s1,
-                s2,
-                s3,
-                s4,
-                s5,
-                s6,
-                p1,
-                n1,
-                emit_ctx,
-                emit_cb,
-            )
-        }),
+        _ => 0,
     }
 }
 
 #[cfg(unix)]
-pub(crate) unsafe fn serve_web_conn(
-    conn: &crate::net::NzbgetRsConn,
-    sig: &[u8; 4],
-    host: &NzbgetRsRpcHost,
-) -> bool {
+pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 4]) -> bool {
     let _cancel_guard = PosixCancelGuard::disable();
     let opts = crate::options::active_options();
     let script_vec: Vec<&[u8]> = opts.as_deref().map_or_else(Vec::new, |o| {
@@ -6435,7 +6774,6 @@ pub(crate) unsafe fn serve_web_conn(
         debug_build,
     };
     let lower = crate::wildmask::Lower::Fold(&crate::util::wild_mask_fold_locale);
-    let host_ptr: *mut c_void = (host as *const NzbgetRsRpcHost).cast_mut().cast();
 
     crate::webserver::serve_web_request(
         &cfg,
@@ -6458,7 +6796,7 @@ pub(crate) unsafe fn serve_web_conn(
         },
         |req_body, http_method, user_access, url_c, emit| {
             let (resp, ct, safe) = crate::xmlrpc_format::serve_xmlrpc(
-                host_ptr,
+                std::ptr::null_mut(),
                 req_body,
                 http_method,
                 user_access,
@@ -6479,80 +6817,8 @@ pub(crate) unsafe fn serve_web_conn(
 }
 
 #[cfg(unix)]
-pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn, host: &NzbgetRsRpcHost) {
+pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
     let _cancel_guard = PosixCancelGuard::disable();
-
-    unsafe extern "C" fn list_push_nzb(
-        b_ptr: *mut c_void,
-        id: u32,
-        kind: u32,
-        size: i64,
-        rem_size: i64,
-        paused_size: i64,
-        paused_files: u32,
-        rem_pars: u32,
-        priority: u32,
-        filename: *const c_char,
-        name: *const c_char,
-        dest_dir: *const c_char,
-        category: *const c_char,
-        queued_filename: *const c_char,
-    ) {
-        let b = &mut *b_ptr.cast::<crate::binrpc::BinRpcListBuilder>();
-        b.push_nzb(
-            id,
-            kind,
-            size,
-            rem_size,
-            paused_size,
-            paused_files,
-            rem_pars,
-            priority,
-            input(filename),
-            input(name),
-            input(dest_dir),
-            input(category),
-            input(queued_filename),
-        );
-    }
-
-    unsafe extern "C" fn list_push_param(
-        b_ptr: *mut c_void,
-        owner_idx: u32,
-        name: *const c_char,
-        value: *const c_char,
-    ) {
-        let b = &mut *b_ptr.cast::<crate::binrpc::BinRpcListBuilder>();
-        b.push_param(owner_idx, input(name), input(value));
-    }
-
-    unsafe extern "C" fn list_push_file(
-        b_ptr: *mut c_void,
-        id: u32,
-        nzb_idx: u32,
-        size: i64,
-        rem_size: i64,
-        paused: u32,
-        fn_confirmed: u32,
-        active_dl: u32,
-        nzb_name: *const c_char,
-        subject: *const c_char,
-        filename: *const c_char,
-    ) {
-        let b = &mut *b_ptr.cast::<crate::binrpc::BinRpcListBuilder>();
-        b.push_file(
-            id,
-            nzb_idx,
-            size,
-            rem_size,
-            paused,
-            fn_confirmed,
-            active_dl,
-            input(nzb_name),
-            input(subject),
-            input(filename),
-        );
-    }
 
     struct LogCollectCtx<'a> {
         lines: i32,
@@ -6590,74 +6856,6 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn, host: &N
             texts: [crate::binrpc::Text::new(input(text))],
         };
         lc.enc.push(&entry);
-    }
-
-    struct CountedEncCtx<'a> {
-        nr_entries: &'a mut u32,
-        enc: &'a mut crate::binrpc::WireEntryEncoder,
-    }
-
-    unsafe extern "C" fn post_push(
-        enc_ptr: *mut c_void,
-        id: u32,
-        stage: u32,
-        stage_prog: u32,
-        file_prog: u32,
-        start_sec: u32,
-        stage_sec: u32,
-        filename: *const c_char,
-        name: *const c_char,
-        dest_dir: *const c_char,
-        label: *const c_char,
-    ) {
-        let ce = &mut *enc_ptr.cast::<CountedEncCtx<'_>>();
-        *ce.nr_entries = ce.nr_entries.wrapping_add(1);
-        let entry = crate::binrpc::PostEntry {
-            id,
-            stage,
-            stage_progress: stage_prog,
-            file_progress: file_prog,
-            start_time: start_sec,
-            stage_time: stage_sec,
-            texts: [
-                crate::binrpc::Text::new(input(filename)),
-                crate::binrpc::Text::new(input(name)),
-                crate::binrpc::Text::new(input(dest_dir)),
-                crate::binrpc::Text::new(input(label)),
-            ],
-        };
-        ce.enc.push(&entry);
-    }
-
-    unsafe extern "C" fn hist_push(
-        enc_ptr: *mut c_void,
-        id: u32,
-        kind: u32,
-        time: u32,
-        size: i64,
-        file_cnt: u32,
-        par_status: u32,
-        script_status: u32,
-        url_status: u32,
-        name: *const c_char,
-    ) {
-        let ce = &mut *enc_ptr.cast::<CountedEncCtx<'_>>();
-        *ce.nr_entries = ce.nr_entries.wrapping_add(1);
-        let size_hi = ((size >> 32) & 0xffff_ffff) as u32;
-        let size_lo = (size & 0xffff_ffff) as u32;
-        let entry = crate::binrpc::HistoryEntry {
-            id,
-            kind,
-            time,
-            size_lo,
-            size_hi,
-            file_count: file_cnt,
-            par_status,
-            script_status,
-            url_status,
-            texts: [crate::binrpc::Text::new(input(name))],
-        };
-        ce.enc.push(&entry);
     }
 
     let opts = crate::options::active_options();
@@ -6738,6 +6936,21 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn, host: &N
                 }
                 return true;
             }
+            if kind == 6 {
+                let Some(qh) = queue_host() else {
+                    return false;
+                };
+                return qh.with_locked_queue(|dq_ptr| {
+                    qh.dq_edit_list(
+                        dq_ptr,
+                        if ids.is_empty() { None } else { Some(ids) },
+                        if names.is_empty() { None } else { Some(names) },
+                        a2,
+                        a1,
+                        s1,
+                    )
+                });
+            }
             if kind == 8 {
                 if let Some(hooks) =
                     crate::lifecycle::get_hooks().or_else(crate::lifecycle::resolve_hooks)
@@ -6764,69 +6977,87 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn, host: &N
                 }
                 return true;
             }
-            let Some(cb) = host.binrpc_action_cb else {
-                return false;
-            };
-            let c1 = to_nul_cvec(s1);
-            let c2 = to_nul_cvec(s2);
-            let c3 = to_nul_cvec(s3);
-            let mut body_buf: Vec<u8> = Vec::new();
-            let (body_ptr, body_len) = if body.is_empty() {
-                (c"".as_ptr(), 0)
-            } else {
-                body_buf.reserve_exact(body.len() + 1);
-                body_buf.extend_from_slice(body);
-                body_buf.push(0);
-                (body_buf.as_ptr().cast::<c_char>(), body.len() as c_int)
-            };
-            let name_cvecs: Vec<std::ffi::CString> = names.iter().map(|n| to_nul_cvec(n)).collect();
-            let name_ptrs: Vec<*const c_char> = name_cvecs.iter().map(|c| c.as_ptr()).collect();
-            cb(
-                kind,
-                a1,
-                a2,
-                a3,
-                a4,
-                c1.as_ptr(),
-                c2.as_ptr(),
-                c3.as_ptr(),
-                body_ptr,
-                body_len,
-                if ids.is_empty() {
-                    std::ptr::null()
-                } else {
-                    ids.as_ptr()
-                },
-                ids.len(),
-                if name_ptrs.is_empty() {
-                    std::ptr::null()
-                } else {
-                    name_ptrs.as_ptr()
-                },
-                name_ptrs.len(),
-            ) != 0
+            false
         },
         |want_files, want_state, builder| {
             let mut post_jobs: c_int = 0;
             let mut rem_size: i64 = 0;
-            if let Some(cb) = host.binrpc_list_cb {
-                cb(
-                    c_int::from(want_files),
-                    (builder as *mut crate::binrpc::BinRpcListBuilder).cast(),
-                    list_push_nzb,
-                    list_push_param,
-                    list_push_file,
-                    if want_state {
-                        &mut post_jobs
-                    } else {
-                        std::ptr::null_mut()
-                    },
-                    if want_state {
-                        &mut rem_size
-                    } else {
-                        std::ptr::null_mut()
-                    },
-                );
+            if want_files || want_state {
+                if let Some(qh) = queue_host() {
+                    qh.with_locked_queue(|dq_ptr| {
+                        let qlen = qh.queue_len(dq_ptr);
+                        if want_files {
+                            let mut queue_ptrs = Vec::with_capacity(qlen);
+                            for i in 0..qlen {
+                                queue_ptrs.push(qh.queue_at(dq_ptr, i));
+                            }
+                            let mut owner_index: u32 = 0;
+                            for &np in &queue_ptrs {
+                                owner_index += 1;
+                                let n = qh.nzb_snap(np, false);
+                                builder.push_nzb(
+                                    n.id as u32,
+                                    n.kind as u32,
+                                    n.size,
+                                    n.remaining_size,
+                                    n.paused_size,
+                                    n.paused_file_count as u32,
+                                    n.remaining_par_count as u32,
+                                    n.priority as u32,
+                                    &n.filename,
+                                    &n.name,
+                                    &n.dest_dir,
+                                    &n.category,
+                                    &n.queued_filename,
+                                );
+                                let plen = qh.nzb_params_len(np);
+                                for pi in 0..plen {
+                                    let (pname, pval) = qh.nzb_param_at(np, pi);
+                                    builder.push_param(owner_index, &pname, &pval);
+                                }
+                                let flen = qh.nzb_file_len(np);
+                                for fi in 0..flen {
+                                    let fp = qh.nzb_file_at(np, fi);
+                                    let f = qh.file_snap(fp);
+                                    let (nzb_index, fnzb_name_owned) = if f.nzb_ptr == np {
+                                        (owner_index, None)
+                                    } else {
+                                        let mut idx: u32 = 0;
+                                        for &qp in &queue_ptrs {
+                                            idx += 1;
+                                            if qp == f.nzb_ptr {
+                                                break;
+                                            }
+                                        }
+                                        (idx, Some(qh.nzb_snap(f.nzb_ptr, false).name))
+                                    };
+                                    let fnzb_name = fnzb_name_owned.as_deref().unwrap_or(&n.name);
+                                    builder.push_file(
+                                        f.id as u32,
+                                        nzb_index,
+                                        f.size,
+                                        f.remaining_size,
+                                        u32::from(f.paused),
+                                        u32::from(f.filename_confirmed),
+                                        f.active_downloads as u32,
+                                        fnzb_name,
+                                        &f.subject,
+                                        &f.filename,
+                                    );
+                                }
+                            }
+                        }
+                        if want_state {
+                            for i in 0..qlen {
+                                let np = qh.queue_at(dq_ptr, i);
+                                if qh.nzb_snap(np, false).has_post_info {
+                                    post_jobs += 1;
+                                }
+                            }
+                            rem_size = qh.dq_calc_remaining_size(dq_ptr).0;
+                        }
+                    });
+                }
             }
             if want_state {
                 let sm = crate::statmeter::active_statmeter();
@@ -6874,20 +7105,97 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn, host: &N
             );
         },
         |nr_entries, enc| {
-            if let Some(cb) = host.binrpc_post_cb {
-                let mut ce = CountedEncCtx { nr_entries, enc };
-                cb((&mut ce as *mut CountedEncCtx<'_>).cast(), post_push);
-            }
+            let Some(qh) = queue_host() else {
+                return;
+            };
+            qh.with_locked_queue(|dq_ptr| {
+                let cur_time = libc::time(std::ptr::null_mut()) as i64;
+                let qlen = qh.queue_len(dq_ptr);
+                for i in 0..qlen {
+                    let np = qh.queue_at(dq_ptr, i);
+                    let outer = qh.nzb_snap(np, false);
+                    if outer.post_info_ptr == 0 {
+                        continue;
+                    }
+                    let outer_id = outer.id as u32;
+                    let pi = qh.post_snap(outer.post_info_ptr);
+                    let pn = if pi.nzb_ptr == np {
+                        outer
+                    } else {
+                        qh.nzb_snap(pi.nzb_ptr, false)
+                    };
+                    *nr_entries = nr_entries.wrapping_add(1);
+                    let entry = crate::binrpc::PostEntry {
+                        id: outer_id,
+                        stage: pi.stage as u32,
+                        stage_progress: pi.stage_progress as u32,
+                        file_progress: pi.file_progress as u32,
+                        start_time: if pi.start_time != 0 {
+                            (cur_time - pi.start_time) as u32
+                        } else {
+                            0
+                        },
+                        stage_time: if pi.stage_time != 0 {
+                            (cur_time - pi.stage_time) as u32
+                        } else {
+                            0
+                        },
+                        texts: [
+                            crate::binrpc::Text::new(&pn.filename),
+                            crate::binrpc::Text::new(&pn.name),
+                            crate::binrpc::Text::new(&pn.dest_dir),
+                            crate::binrpc::Text::new(&pi.progress_label),
+                        ],
+                    };
+                    enc.push(&entry);
+                }
+            });
         },
         |show_hidden, nr_entries, enc| {
-            if let Some(cb) = host.binrpc_history_cb {
-                let mut ce = CountedEncCtx { nr_entries, enc };
-                cb(
-                    c_int::from(show_hidden),
-                    (&mut ce as *mut CountedEncCtx<'_>).cast(),
-                    hist_push,
-                );
-            }
+            let Some(qh) = queue_host() else {
+                return;
+            };
+            qh.with_locked_queue(|dq_ptr| {
+                let hlen = qh.history_len(dq_ptr);
+                for i in 0..hlen {
+                    let h = qh.history_at(dq_ptr, i);
+                    if h.kind == crate::queuesubsys_host::HK_DUP && !show_hidden {
+                        continue;
+                    }
+                    let mut size: i64 = 0;
+                    let mut file_cnt: u32 = 0;
+                    let mut par_status: u32 = 0;
+                    let mut script_status: u32 = 0;
+                    let mut url_status: u32 = 0;
+                    if h.kind == crate::queuesubsys_host::HK_NZB {
+                        let n = qh.nzb_snap(h.inner_ptr, false);
+                        size = n.size;
+                        file_cnt = n.file_count as u32;
+                        par_status = n.par_status as u32;
+                        script_status = n.script_total_status as u32;
+                    } else if h.kind == crate::queuesubsys_host::HK_DUP {
+                        size = qh.dup_snap(h.inner_ptr).size;
+                    } else if h.kind == crate::queuesubsys_host::HK_URL {
+                        url_status = qh.nzb_snap(h.inner_ptr, false).url_status as u32;
+                    }
+                    *nr_entries = nr_entries.wrapping_add(1);
+                    let size_hi = ((size >> 32) & 0xffff_ffff) as u32;
+                    let size_lo = (size & 0xffff_ffff) as u32;
+                    let entry = crate::binrpc::HistoryEntry {
+                        id: h.id as u32,
+                        kind: h.kind as u32,
+                        time: (h.time as i32) as u32,
+                        size_lo,
+                        size_hi,
+                        file_count: file_cnt,
+                        par_status,
+                        script_status,
+                        url_status,
+                        texts: [crate::binrpc::Text::new(&h.name)],
+                    };
+                    enc.push(&entry);
+                }
+            });
         },
     );
 }

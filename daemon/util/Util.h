@@ -1808,13 +1808,6 @@ public:
 	}
 };
 
-class SegmentData
-{
-public:
-	virtual char* GetData() = 0;
-	virtual ~SegmentData() {}
-};
-
 class ArticleInfo
 {
 public:
@@ -1826,23 +1819,33 @@ public:
 		aiFailed
 	};
 
+	ArticleInfo() = default;
+	~ArticleInfo() { DiscardSegment(); }
+	ArticleInfo(const ArticleInfo&) = delete;
+	ArticleInfo& operator=(const ArticleInfo&) = delete;
+
 	void SetPartNumber(int s) { m_partNumber = s; }
 	int GetPartNumber() { return m_partNumber; }
 	const char* GetMessageId() { return m_messageId; }
 	void SetMessageId(const char* messageId) { m_messageId = messageId; }
 	void SetSize(int size) { m_size = size; }
 	int GetSize() { return m_size; }
-	void AttachSegment(std::unique_ptr<SegmentData> content, int64 offset, int size)
+	void AttachSegment(char* data, int allocSize, int64 offset, int size)
 	{
-		m_segmentContent = std::move(content);
+		DiscardSegment();
+		m_segmentData = data;
+		m_segmentAllocSize = allocSize;
 		m_segmentOffset = offset;
 		m_segmentSize = size;
 	}
 	void DiscardSegment()
 	{
-		m_segmentContent.reset();
+		if (m_segmentAllocSize)
+			nzbget_rs_article_dl_exec(nullptr, 112, m_segmentAllocSize, 0, reinterpret_cast<uintptr_t>(m_segmentData), 0, nullptr, nullptr, nullptr);
+		m_segmentData = nullptr;
+		m_segmentAllocSize = 0;
 	}
-	const char* GetSegmentContent() { return m_segmentContent ? m_segmentContent->GetData() : nullptr; }
+	const char* GetSegmentContent() { return m_segmentData; }
 	void SetSegmentOffset(int64 segmentOffset) { m_segmentOffset = segmentOffset; }
 	int64 GetSegmentOffset() { return m_segmentOffset; }
 	void SetSegmentSize(int segmentSize) { m_segmentSize = segmentSize; }
@@ -1877,7 +1880,8 @@ public:
 	void SetDupeProactive(bool dupeProactive) { m_dupeProactive = dupeProactive; }
 
 private:
-	std::unique_ptr<SegmentData> m_segmentContent;
+	char* m_segmentData = nullptr;
+	int m_segmentAllocSize = 0;
 	std::atomic<int64> m_segmentOffset{0};
 	std::atomic<int> m_segmentSize{0};
 	std::atomic<uint32> m_crc{0};
@@ -3877,51 +3881,8 @@ class StatMeter;
 #ifndef ARTICLEWRITER_H
 #define ARTICLEWRITER_H
 
-class CachedSegmentData final : public SegmentData
-{
-public:
-	CachedSegmentData() {}
-	CachedSegmentData(char* data, int size) : m_data(data), m_size(size) {}
-	CachedSegmentData(const CachedSegmentData&) = delete;
-	CachedSegmentData(CachedSegmentData&& other) :
-		m_data(other.m_data), m_size(other.m_size) { other.m_data = nullptr; other.m_size = 0; }
-	CachedSegmentData& operator=(CachedSegmentData&& other)
-	{
-		if (m_size) nzbget_rs_article_dl_exec(nullptr, 112, m_size, 0, reinterpret_cast<uintptr_t>(m_data), 0, nullptr, nullptr, nullptr);
-		m_data = other.m_data;
-		m_size = other.m_size;
-		other.m_data = nullptr;
-		other.m_size = 0;
-		return *this;
-	}
-	~CachedSegmentData() override
-	{
-		if (m_size) nzbget_rs_article_dl_exec(nullptr, 112, m_size, 0, reinterpret_cast<uintptr_t>(m_data), 0, nullptr, nullptr, nullptr);
-	}
-	char* GetData() override { return m_data; }
-
-private:
-	char* m_data = nullptr;
-	int m_size = 0;
-};
-
 class ArticleCache;
 extern ArticleCache* g_ArticleCache;
-
-class ArticleCache final : public Thread
-{
-public:
-	void Run() override { nzbget_rs_article_dl_exec(nullptr, 110, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, this); }
-	void Stop() override { Thread::Stop(); nzbget_rs_article_dl_exec(nullptr, 113, 0, 0, 0, 0, nullptr, nullptr, nullptr); }
-	Guard GuardContent() { return Guard(m_contentMutex); }
-
-private:
-	Mutex m_contentMutex;
-	std::vector<ArticleInfo*> m_flushArticles;
-
-	friend uintptr_t NzbgetCArticleDlHost(void*, int, int, int, uintptr_t, uintptr_t,
-		const char*, const char*, int*, int64_t*, const char**);
-};
 
 #endif
 #endif
@@ -4034,98 +3995,6 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 	case 1:
 		if (p1 != 0) reinterpret_cast<NzbInfo*>(p1)->PrintMessage((Message::EKind)a1, "%s", s1 ? s1 : "");
 		return 0;
-	case 2: {
-		if (a1 == 3) return (ctx ? static_cast<ArticleCache*>(ctx) : g_ArticleCache)->IsStopped() ? 1 : 0;
-		if (a1 == 5)
-		{
-			bool flushEverything = a2 != 0;
-			static thread_local CString s_infoName;
-			FileInfo* found = nullptr;
-			{
-				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-				{
-					if (found) break;
-					for (FileInfo* fileInfo : nzbInfo->GetFileList())
-					{
-						if (fileInfo->GetCachedArticles() > 0 &&
-							(fileInfo->GetActiveDownloads() == 0 || flushEverything) &&
-							(!fileInfo->GetNzbInfo()->GetSkipDiskWrite() || flushEverything))
-						{
-							found = fileInfo;
-							nzbget_rs_article_dl_exec(nullptr, 115, 0, 0, reinterpret_cast<uintptr_t>(found), 0, nullptr, nullptr, nullptr);
-							s_infoName.Format("%s%c%s",
-								fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR, fileInfo->GetFilename());
-							break;
-						}
-					}
-				}
-			}
-			if (!found) return 0;
-			strs[0] = *s_infoName;
-			return reinterpret_cast<uintptr_t>(found);
-		}
-		if (a1 == 7)
-		{
-			FileInfo* f = reinterpret_cast<FileInfo*>(p1);
-			static thread_local std::string s_outFn;
-			bool outInit = false;
-			{
-				Guard og = f->GuardOutputFile();
-				outInit = f->GetOutputInitialized();
-				s_outFn = f->GetOutputFilename();
-			}
-			{
-				Guard cg = g_ArticleCache->GuardContent();
-				if (f->GetFlushLocked()) return 0;
-				f->SetFlushLocked(true);
-				g_ArticleCache->m_flushArticles.clear();
-				g_ArticleCache->m_flushArticles.reserve(f->GetArticles()->size());
-				for (ArticleInfo* pa : f->GetArticles())
-				{
-					if (pa->GetSegmentContent()) g_ArticleCache->m_flushArticles.push_back(pa);
-				}
-			}
-			bool directWrite = (g_Options->GetDirectWrite() || f->GetForceDirectWrite()) && outInit;
-			bool skipDiskWrite = (f->GetNzbInfo() && f->GetNzbInfo()->GetSkipDiskWrite()) || g_Options->GetSkipWrite();
-			ints[0] = directWrite ? 1 : 0;
-			ints[1] = skipDiskWrite ? 1 : 0;
-			ints[2] = (int)g_ArticleCache->m_flushArticles.size();
-			i64s[0] = (int64_t)s_outFn.size();
-			i64s[1] = (int64_t)reinterpret_cast<uintptr_t>(f->GetNzbInfo());
-			strs[0] = s_outFn.data();
-			return 1;
-		}
-		if (a1 == 8)
-		{
-			ArticleInfo* pa = g_ArticleCache->m_flushArticles[(size_t)a2];
-			i64s[0] = pa->GetSegmentOffset();
-			ints[0] = pa->GetSegmentSize();
-			strs[0] = pa->GetSegmentContent();
-			strs[1] = pa->GetResultFilename();
-			return 0;
-		}
-		if (a1 == 9)
-		{
-			FileInfo* f = reinterpret_cast<FileInfo*>(p1);
-			if (a2 < 0) return (f->GetDeleted() && !f->GetNzbInfo()->GetParking()) ? 1 : 0;
-			g_ArticleCache->m_flushArticles[(size_t)a2]->DiscardSegment();
-			return 0;
-		}
-		if (a1 == 10)
-		{
-			FileInfo* f = reinterpret_cast<FileInfo*>(p1);
-			{
-				Guard cg = g_ArticleCache->GuardContent();
-				f->SetCachedArticles(f->GetCachedArticles() - a2);
-				f->SetFlushLocked(false);
-			}
-			g_ArticleCache->m_flushArticles.clear();
-			ints[0] = ((f->GetNzbInfo() && f->GetNzbInfo()->GetSkipDiskWrite()) || g_Options->GetSkipWrite()) ? 1 : 0;
-			return 0;
-		}
-		return 0;
-	}
 	case 4: {
 		auto* ad = static_cast<ArticleDownloader*>(ctx);
 		if (a1 == 0)
@@ -4240,9 +4109,7 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 		{
 			if (a2 == 2)
 			{
-				Guard cg = g_ArticleCache->GuardContent();
-				ad->m_articleInfo->AttachSegment(
-					std::make_unique<CachedSegmentData>(reinterpret_cast<char*>(p1), ints[0]), i64s[0], (int)p2);
+				ad->m_articleInfo->AttachSegment(reinterpret_cast<char*>(p1), ints[0], i64s[0], (int)p2);
 				ad->m_fileInfo->SetCachedArticles(ad->m_fileInfo->GetCachedArticles() + 1);
 			}
 			else if (a2 == 3)
@@ -4558,38 +4425,14 @@ extern PrePostProcessor* g_PrePostProcessor;
 #ifndef EXTENSION_MANAGER_H
 #define EXTENSION_MANAGER_H
 
-namespace ExtensionManager
-{
-	class Manager final
-	{
-	public:
-		Manager() { InitRsBuildEnv(); m_rs = nzbget_rs_ext_mgr_new(); }
-		~Manager() { nzbget_rs_ext_mgr_free(m_rs); }
-		Manager(const Manager&) = delete;
-		Manager& operator=(const Manager&) = delete;
-
-	private:
-		NzbgetRsExtManager* m_rs = nullptr;
-	};
-}
+namespace ExtensionManager { class Manager {}; }
 
 class CommandScriptLog;
 
 #ifndef QUEUESCRIPT_H
 #define QUEUESCRIPT_H
 
-class QueueScriptCoordinator
-{
-public:
-	QueueScriptCoordinator() : m_rs(nzbget_rs_queue_script_new()) { InitRsBuildEnv(); }
-	~QueueScriptCoordinator() { nzbget_rs_queue_script_free(m_rs); }
-	QueueScriptCoordinator(const QueueScriptCoordinator&) = delete;
-	QueueScriptCoordinator& operator=(const QueueScriptCoordinator&) = delete;
-
-private:
-	NzbgetRsQueueScriptCoord* m_rs;
-};
-
+class QueueScriptCoordinator {};
 extern QueueScriptCoordinator* g_QueueScriptCoordinator;
 
 #endif
@@ -4721,7 +4564,7 @@ class PostJobThread final : public Thread
 public:
 	PostJobThread(int kind, PostInfo* postInfo, int nzbId) : m_kind(kind)
 	{
-		static_assert(sizeof(StreamRange) == sizeof(NzbgetRsByteRange), "StreamRange ABI match");
+		static_assert(sizeof(StreamRange) == 16, "StreamRange ABI match");
 		InitRsBuildEnv();
 		m_rs = nzbget_rs_post_job_new(kind, reinterpret_cast<uintptr_t>(static_cast<Thread*>(this)),
 			reinterpret_cast<uintptr_t>(postInfo), nzbId);
@@ -4894,6 +4737,12 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		else if (a1 == 6) return nzbget_rs_article_dl_exec(nullptr, 23, 0, 0, p1, 0, s1 ? s1 : "", NzbgetCArticleDlHost, nullptr);
 		return 0;
 	}
+	case 7: {
+		std::string r = a1 == 0 ? TlsCipherBackend::Start() :
+			a1 == 1 ? TlsCipherBackend::Status(s1) : TlsCipherBackend::Cancel(s1 ? s1 : "");
+		if (p1) *reinterpret_cast<NzbgetRsBuf*>(p1) = nzbget_rs_alloc_buf(r.data(), r.size());
+		return 1;
+	}
 	case 20: {
 		GuardedDownloadQueue dq = DownloadQueue::Guard();
 		reinterpret_cast<void(*)(void*, uintptr_t)>(p1)(reinterpret_cast<void*>(p2),
@@ -5043,6 +4892,16 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		else if (a1 == 4) { int64 rem = 0, remF = 0; dq->CalcRemainingSize(&rem, &remF); i64s[0] = rem; i64s[1] = remF; }
 		else if (a1 == 5) dq->HistoryChanged();
 		else if (a1 == 6) { IdList ids{ a2 }; return dq->EditList(&ids, nullptr, DownloadQueue::mmId, (DownloadQueue::EEditAction)ints[0], s1) ? 1 : 0; }
+		else if (a1 == 7)
+		{
+			const int32_t* rawIds = reinterpret_cast<const int32_t*>(p2);
+			IdList cIds;
+			if (rawIds && ints[2] > 0) cIds.assign(rawIds, rawIds + ints[2]);
+			NameList cNames;
+			if (strs && ints[3] > 0) { cNames.reserve((size_t)ints[3]); for (int i = 0; i < ints[3]; i++) cNames.emplace_back(strs[i] ? strs[i] : ""); }
+			return dq->EditList((a2 & 1) ? &cIds : nullptr, (a2 & 2) ? &cNames : nullptr,
+				(DownloadQueue::EMatchMode)ints[1], (DownloadQueue::EEditAction)ints[0], s1 ? s1 : "") ? 1 : 0;
+		}
 		return 0;
 	}
 	case 25: {
@@ -5101,7 +4960,7 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		ints[80] = n->GetAutoCategory() ? 1 : 0; ints[81] = n->GetAddUrlPaused() ? 1 : 0;
 		ints[82] = n->GetMessageCount(); ints[83] = (pi && pi->GetForceParFull()) ? 1 : 0;
 		ints[84] = (pi && pi->GetForceRepair()) ? 1 : 0; ints[85] = n->GetParRepaired() ? 1 : 0;
-		ints[86] = n->GetLastUnpackStatus();
+		ints[86] = n->GetLastUnpackStatus(); ints[87] = n->GetCachedMessageCount();
 		i64s[0] = n->GetSize(); i64s[1] = n->GetRemainingSize(); i64s[2] = n->GetPausedSize();
 		i64s[3] = n->GetSuccessSize(); i64s[4] = n->GetCurrentSuccessSize(); i64s[5] = n->GetFailedSize();
 		i64s[6] = n->GetCurrentFailedSize(); i64s[7] = n->GetParSize(); i64s[8] = n->GetParSuccessSize();
@@ -5114,7 +4973,7 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		i64s[20] = (int64_t)n->GetQueueScriptTime();
 		strs[0] = n->GetName(); strs[1] = n->GetFilename(); strs[2] = n->GetDestDir(); strs[3] = n->GetFinalDir();
 		strs[4] = n->GetCategory(); strs[5] = n->GetDupeKey(); strs[6] = n->GetQueuedFilename();
-		strs[7] = a1 != 0 ? n->MakeTextStatus(true) : nullptr;
+		strs[7] = a1 == 1 ? n->MakeTextStatus(true) : (a1 == 2 ? n->MakeTextStatus(false) : nullptr);
 		strs[8] = n->GetUrl();
 		return 0;
 	}
@@ -5140,6 +4999,23 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		if (a1 == 17) { if (a2 < 0) return n->GetScriptStatuses()->size(); ScriptStatus& s = n->GetScriptStatuses()->at((size_t)a2); ints[0] = (int)s.GetStatus(); strs[0] = s.GetName(); return 0; }
 		if (a1 == 18) { auto* ea = n->GetExtractedArchives(); if (a2 < 0) return ea ? ea->size() : 0; strs[0] = (*ea)[(size_t)a2].Str() ? (*ea)[(size_t)a2].Str() : ""; return 0; }
 		if (a1 == 19) { if (a2 == 0) n->GetServerStats()->StatOp(ints[0], ints[1], ints[2], ServerStatList::soSet); else n->GetCurrentServerStats()->ListOp(n->GetServerStats(), ServerStatList::soSet); return 0; }
+		if (a1 == 20)
+		{
+			GuardedMessageList messages = n->GuardCachedMessages();
+			int sz = (int)messages->size();
+			int start = sz;
+			if (ints[1] > 0) start = sz - std::min(ints[1], sz);
+			if (ints[0] > 0 && sz > 0) start = std::max(0, ints[0] - (int)messages->front().GetId());
+			auto pushFn = reinterpret_cast<void(*)(uintptr_t, int, int, int, const char*)>(reinterpret_cast<uintptr_t>(s1));
+			if ((uint32)start < (uint32)sz)
+				for (uint32 i = (uint32)start; i < (uint32)sz; i++)
+				{
+					Message& m = messages->at(i);
+					pushFn(p2, (int)m.GetId(), (int)m.GetKind(), (int)m.GetTime(), m.GetText());
+				}
+			return 0;
+		}
+		if (a1 == 21) { if (a2 < 0) return n->GetCurrentServerStats()->size(); ServerStat& ss = n->GetCurrentServerStats()->at((size_t)a2); ints[0] = ss.GetServerId(); ints[1] = ss.GetSuccessArticles(); ints[2] = ss.GetFailedArticles(); return 0; }
 		return 0;
 	}
 	case 32: {
@@ -5340,13 +5216,9 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		if (a1 == 8)
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
-			const auto* rawHoles = reinterpret_cast<const NzbgetRsByteRange*>(p2);
+			const auto* rawHoles = reinterpret_cast<const StreamRange*>(p2);
 			StreamRangeList holes;
-			if (rawHoles && a2 > 0)
-			{
-				holes.reserve((size_t)a2);
-				for (int i = 0; i < a2; i++) holes.push_back({ rawHoles[i].offset, rawHoles[i].size });
-			}
+			if (rawHoles && a2 > 0) holes.assign(rawHoles, rawHoles + a2);
 			n->GetStreamRepairJobs()->emplace_back(ints[0], s1 ? s1 : "", i64s[0], i64s[1], i64s[2],
 				ints[1], ints[2] != 0, std::move(holes), (uint64)i64s[3]);
 			return 0;
@@ -5736,9 +5608,7 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		FileInfo* f = reinterpret_cast<FileInfo*>(p1);
 		if (a1 == 1)
 		{
-			if (!g_ArticleCache) return 0;
 			ArticleInfo* a = reinterpret_cast<ArticleInfo*>(p2);
-			Guard cg = g_ArticleCache->GuardContent();
 			if (!f->GetFlushLocked() && a->GetSegmentContent() && a2 > 0)
 			{
 				memcpy(reinterpret_cast<void*>((uintptr_t)i64s[0]), a->GetSegmentContent(), (size_t)a2);
@@ -5749,12 +5619,6 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		if (a1 == 2)
 		{
 			ArticleInfo* a = reinterpret_cast<ArticleInfo*>(p2);
-			if (!g_ArticleCache)
-			{
-				if (a->GetDupeFallbackRound() > 0 && a->GetResultFilename()) FileSystem::DeleteFile(a->GetResultFilename());
-				return 0;
-			}
-			Guard cg = g_ArticleCache->GuardContent();
 			if (a->GetDupeFallbackRound() > 0 && a->GetResultFilename()) FileSystem::DeleteFile(a->GetResultFilename());
 			if (!a->GetSegmentContent() || f->GetFlushLocked()) return 0;
 			a->DiscardSegment();
@@ -5763,11 +5627,44 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		}
 		if (a1 == 3)
 		{
-			if (!g_ArticleCache) return 0;
-			Guard cg = g_ArticleCache->GuardContent();
 			if (a2 != 0) { if (f->GetFlushLocked()) return 0; f->SetFlushLocked(true); return 1; }
 			f->SetFlushLocked(false);
 			return 1;
+		}
+		if (a1 == 4)
+		{
+			static thread_local std::string s_outFn;
+			bool outInit = false;
+			{ Guard og = f->GuardOutputFile(); outInit = f->GetOutputInitialized(); s_outFn = f->GetOutputFilename(); }
+			ints[0] = ((g_Options->GetDirectWrite() || f->GetForceDirectWrite()) && outInit) ? 1 : 0;
+			ints[1] = ((f->GetNzbInfo() && f->GetNzbInfo()->GetSkipDiskWrite()) || g_Options->GetSkipWrite()) ? 1 : 0;
+			i64s[0] = (int64_t)s_outFn.size();
+			i64s[1] = (int64_t)reinterpret_cast<uintptr_t>(f->GetNzbInfo());
+			strs[0] = s_outFn.data();
+			return 1;
+		}
+		if (a1 == 5)
+		{
+			if (f->GetFlushLocked()) return 0;
+			f->SetFlushLocked(true);
+			auto pushSeg = reinterpret_cast<void(*)(uintptr_t, uintptr_t, int64_t, int, const char*, const char*)>(reinterpret_cast<uintptr_t>(s1));
+			for (ArticleInfo* pa : f->GetArticles())
+				if (pa->GetSegmentContent())
+					pushSeg(p2, reinterpret_cast<uintptr_t>(pa), pa->GetSegmentOffset(), pa->GetSegmentSize(), pa->GetSegmentContent(), pa->GetResultFilename());
+			return 1;
+		}
+		if (a1 == 6)
+		{
+			if (a2 == 0) return (f->GetDeleted() && !f->GetNzbInfo()->GetParking()) ? 1 : 0;
+			reinterpret_cast<ArticleInfo*>(p2)->DiscardSegment();
+			return 0;
+		}
+		if (a1 == 7)
+		{
+			f->SetCachedArticles(f->GetCachedArticles() - a2);
+			f->SetFlushLocked(false);
+			ints[0] = ((f->GetNzbInfo() && f->GetNzbInfo()->GetSkipDiskWrite()) || g_Options->GetSkipWrite()) ? 1 : 0;
+			return 0;
 		}
 		return 0;
 	}
@@ -5842,8 +5739,10 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 			ints[15] = pi->GetPassListTried() ? 1 : 0; ints[16] = pi->GetLastUnpackStatus();
 			ints[17] = pi->GetExtractedArchives() ? (int)pi->GetExtractedArchives()->size() : 0;
 			ints[18] = (int)pi->GetParredFiles()->size();
+			ints[19] = pi->GetStageProgress(); ints[20] = pi->GetFileProgress();
 			i64s[0] = (int64_t)pi->GetStartTime(); i64s[1] = (int64_t)reinterpret_cast<uintptr_t>(pi->GetNzbInfo());
 			i64s[2] = (int64_t)pi->GetStageTime();
+			if (strs) strs[0] = pi->GetProgressLabel();
 			return 0;
 		}
 		if (a1 == 1)
@@ -5931,345 +5830,5 @@ class FeedCoordinator;
 namespace SystemHealth { class Service; }
 class Maintenance;
 #include <system_error>
-
-inline NzbgetRsRpcHost BuildRpcHost()
-{
-	NzbgetRsRpcHost host{};
-	host.rpc_action_cb = +[](void*, int op, int a1, int, int, int,
-		const char* s1, const char*, const char*, const char*,
-		const char*, size_t, const int32_t* ids, size_t idsLen,
-		const NzbgetRsRpcParamItem*, size_t,
-		uint32_t*, double*, NzbgetRsBuf* outBuf) -> int {
-		auto setBuf = [&](const char* p, size_t n) {
-			if (outBuf) *outBuf = nzbget_rs_alloc_buf(p, n);
-		};
-		switch (op)
-		{
-			case 10: {
-				IdList idList(ids, ids + idsLen);
-				return DownloadQueue::Guard()->EditList(&idList, nullptr, DownloadQueue::mmId,
-					(DownloadQueue::EEditAction)a1, s1 ? s1 : "") ? 1 : 0;
-			}
-			case 22: {
-				std::string r = a1 == 0 ? TlsCipherBackend::Start() :
-					a1 == 1 ? TlsCipherBackend::Status(s1) : TlsCipherBackend::Cancel(s1 ? s1 : "");
-				setBuf(r.data(), r.size());
-				return 1;
-			}
-			default: return 0;
-		}
-	};
-	host.rpc_collect_cb = +[](void*, int kind, int a1, int a2, int a3, int a4, int,
-		const char*, const char*, const char*, const char*, const char*, const char*,
-		const void*, size_t, void* emitCtx, NzbgetRsXmlRpcEmitFn emitCb) -> int {
-		auto withNzb = [&](NzbInfo* nzbInfo, auto&& fn) {
-			time_t postStartTime = nzbInfo->GetPostInfo() ? nzbInfo->GetPostInfo()->GetStartTime() : 0;
-			time_t curTime = postStartTime ? Util::CurrentTime() : 0;
-			NzbgetRsRpcNzbInfoInput f{};
-			f.id = nzbInfo->GetId(); f.name = nzbInfo->GetName(); f.kind = (int)nzbInfo->GetKind();
-			f.url = nzbInfo->GetUrl(); f.filename = nzbInfo->GetFilename();
-			f.dest_dir = nzbInfo->GetDestDir(); f.final_dir = nzbInfo->GetFinalDir();
-			f.category = nzbInfo->GetCategory(); f.par_status = (int)nzbInfo->GetParStatus();
-			f.extra_par_blocks = nzbInfo->GetExtraParBlocks();
-			f.unpack_status = (int)nzbInfo->GetUnpackStatus(); f.move_status = (int)nzbInfo->GetMoveStatus();
-			f.script_status = (int)nzbInfo->GetScriptStatuses()->CalcTotalStatus();
-			f.delete_status = (int)nzbInfo->GetDeleteStatus(); f.mark_status = (int)nzbInfo->GetMarkStatus();
-			f.url_status = (int)nzbInfo->GetUrlStatus(); f.size = nzbInfo->GetSize();
-			f.file_count = nzbInfo->GetFileCount();
-			f.min_time = (int)nzbInfo->GetMinTime(); f.max_time = (int)nzbInfo->GetMaxTime();
-			f.total_articles = nzbInfo->GetTotalArticles();
-			f.current_success_articles = nzbInfo->GetCurrentSuccessArticles();
-			f.current_failed_articles = nzbInfo->GetCurrentFailedArticles();
-			f.dupe_recovered_articles = nzbInfo->GetDupeRecoveredArticles();
-			f.dupe_recovered_bytes = nzbInfo->GetDupeRecoveredBytes();
-			f.dupe_recovered_holes = nzbInfo->GetDupeRecoveredHoles();
-			f.live_repairing = nzbInfo->GetLiveRepairThread() != nullptr ? 1 : 0;
-			f.health = nzbInfo->CalcHealth(); f.critical_health = nzbInfo->CalcCriticalHealth(false);
-			f.dupe_key = nzbInfo->GetDupeKey(); f.dupe_score = nzbInfo->GetDupeScore();
-			f.dupe_mode = (int)nzbInfo->GetDupeMode(); f.downloaded_size = nzbInfo->GetDownloadedSize();
-			f.download_sec = nzbInfo->GetDownloadSec(); f.post_total_sec = nzbInfo->GetPostTotalSec();
-			f.has_post_start_time = postStartTime != 0 ? 1 : 0;
-			f.cur_time = (int64)curTime; f.post_start_time = (int64)postStartTime;
-			f.par_sec = nzbInfo->GetParSec(); f.repair_sec = nzbInfo->GetRepairSec();
-			f.unpack_sec = nzbInfo->GetUnpackSec();
-			f.message_count = nzbInfo->GetMessageCount();
-			f.cached_message_count = nzbInfo->GetCachedMessageCount();
-			std::vector<NzbgetRsRpcParamItem> prms;
-			prms.reserve(nzbInfo->GetParameters()->size());
-			for (NzbParameter& p : nzbInfo->GetParameters()) prms.push_back({p.GetName(), p.GetValue()});
-			std::vector<NzbgetRsRpcScriptItem> scrs;
-			scrs.reserve(nzbInfo->GetScriptStatuses()->size());
-			for (ScriptStatus& s : nzbInfo->GetScriptStatuses()) scrs.push_back({s.GetName(), (int)s.GetStatus()});
-			std::vector<NzbgetRsRpcServerStatItem> sts;
-			sts.reserve(nzbInfo->GetCurrentServerStats()->size());
-			for (ServerStat& st : nzbInfo->GetCurrentServerStats())
-				sts.push_back({st.GetServerId(), st.GetSuccessArticles(), st.GetFailedArticles()});
-			fn(f, prms, scrs, sts);
-		};
-		auto emitPost = [&](PostInfo* postInfo, int logEntries, bool postQueue) {
-			time_t curTime = postInfo ? Util::CurrentTime() : 0;
-			std::optional<GuardedMessageList> messages;
-			std::vector<NzbgetRsRpcLogEntry> entries;
-			if (logEntries > 0 && postInfo)
-			{
-				messages.emplace(postInfo->GetNzbInfo()->GuardCachedMessages());
-				if (!(*messages)->empty())
-				{
-					int cnt = std::min(logEntries, (int)(*messages)->size());
-					int start = (int)(*messages)->size() - cnt;
-					entries.reserve(cnt);
-					for (uint32 i = (uint32)start; i < (*messages)->size(); i++)
-					{
-						Message& m = (*messages)->at(i);
-						entries.push_back({(int)m.GetId(), (int)m.GetKind(), (int)m.GetTime(), m.GetText()});
-					}
-				}
-			}
-			emitCb(emitCtx, 5, postQueue ? 1 : 0, postInfo ? 1 : 0, postInfo ? postInfo->GetStageProgress() : 0,
-				0, 0, 0, (int64)curTime, postInfo ? (int64)postInfo->GetStageTime() : 0,
-				postInfo ? (int64)postInfo->GetStartTime() : 0,
-				postInfo ? postInfo->GetProgressLabel() : nullptr, nullptr, nullptr, nullptr,
-				entries.data(), entries.size(), nullptr, 0, nullptr, 0, nullptr, 0);
-		};
-		switch (kind)
-		{
-			case 1: {
-				auto* qst = static_cast<NzbgetRsRpcQueueStatus*>(emitCtx);
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				for (NzbInfo* n : dq->GetQueue())
-				{
-					qst->post_job_count += n->GetPostInfo() != nullptr ? 1 : 0;
-					qst->url_count += n->GetKind() == NzbInfo::nkUrl ? 1 : 0;
-				}
-				dq->CalcRemainingSize(&qst->remaining_size, &qst->forced_size);
-				return 1;
-			}
-			case 2: {
-				std::vector<NzbgetRsRpcLogEntry> entries;
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				std::optional<GuardedMessageList> messages;
-				if (NzbInfo* n = dq->GetQueue()->Find(a2)) messages.emplace(n->GuardCachedMessages());
-				if (messages)
-				{
-					int start = (int)(*messages)->size();
-					if (a4 > 0) start = (int)(*messages)->size() - std::min(a4, (int)(*messages)->size());
-					if (a3 > 0 && !(*messages)->empty()) start = std::max(0, a3 - (int)(*messages)->front().GetId());
-					if ((uint32)start < (*messages)->size())
-					{
-						entries.reserve((*messages)->size() - (uint32)start);
-						for (uint32 i = (uint32)start; i < (*messages)->size(); i++)
-						{
-							Message& m = (*messages)->at(i);
-							entries.push_back({(int)m.GetId(), (int)m.GetKind(), (int)m.GetTime(), m.GetText()});
-						}
-					}
-				}
-				emitCb(emitCtx, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
-					entries.data(), entries.size(), nullptr, 0, nullptr, 0, nullptr, 0);
-				return 1;
-			}
-			case 3: {
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				for (NzbInfo* nzbInfo : dq->GetQueue())
-				{
-					for (FileInfo* fi : nzbInfo->GetFileList())
-					{
-						if ((a3 > 0 && a3 == fi->GetNzbInfo()->GetId()) ||
-							(a3 == 0 && (a1 == 0 || (a1 <= fi->GetId() && fi->GetId() <= a2))))
-						{
-							int64 denom = fi->GetSize() - fi->GetMissedSize();
-							int progress = (fi->GetFailedSize() == 0 && fi->GetSuccessSize() == 0) || denom <= 0
-								? 0 : (int)(1000 - fi->GetRemainingSize() * 1000 / denom);
-							NzbgetRsRpcFileItem item{
-								fi->GetId(), fi->GetSize(), fi->GetRemainingSize(), (int)fi->GetTime(),
-								fi->GetFilenameConfirmed() ? 1 : 0, fi->GetPaused() ? 1 : 0,
-								fi->GetNzbInfo()->GetId(), fi->GetNzbInfo()->GetName(),
-								fi->GetNzbInfo()->GetFilename(), fi->GetSubject(), fi->GetFilename(),
-								fi->GetNzbInfo()->GetDestDir(), fi->GetNzbInfo()->GetCategory(),
-								fi->GetNzbInfo()->GetPriority(), fi->GetActiveDownloads(), progress
-							};
-							emitCb(emitCtx, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr,
-								&item, 0, nullptr, 0, nullptr, 0, nullptr, 0);
-						}
-					}
-				}
-				return 1;
-			}
-			case 4: {
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				for (NzbInfo* nzbInfo : dq->GetQueue())
-				{
-					bool hasPost = nzbInfo->GetPostInfo() != nullptr;
-					int postStage = hasPost ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
-					int flags = (hasPost ? 1 : 0) |
-						((postStage & 0xff) << 4) | (((int)nzbInfo->GetDirectUnpackStatus() & 0xff) << 12) |
-						(((int)nzbInfo->GetKind() & 0xff) << 20);
-					withNzb(nzbInfo, [&](const auto& f, const auto& prms, const auto& scrs, const auto& sts) {
-						emitCb(emitCtx, 4, nzbInfo->GetId(), (int)nzbInfo->GetFileList()->size(),
-							nzbInfo->GetRemainingParCount(), nzbInfo->GetPriority(), nzbInfo->GetActiveDownloads(),
-							flags, nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(), 0,
-							nullptr, nullptr, nullptr, nullptr,
-							&f, 0, prms.data(), prms.size(), scrs.data(), scrs.size(), sts.data(), sts.size());
-					});
-					emitPost(nzbInfo->GetPostInfo(), a1, false);
-				}
-				return 1;
-			}
-			case 5: {
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				for (NzbInfo* nzbInfo : dq->GetQueue())
-				{
-					PostInfo* pi = nzbInfo->GetPostInfo();
-					if (!pi) continue;
-					withNzb(pi->GetNzbInfo(), [&](const auto& f, const auto& prms, const auto& scrs, const auto& sts) {
-						emitCb(emitCtx, 6, nzbInfo->GetId(), (int)pi->GetStage(), pi->GetFileProgress(), 0, 0, 0,
-							0, 0, 0, pi->GetNzbInfo()->GetName(), nullptr, nullptr, nullptr,
-							&f, 0, prms.data(), prms.size(), scrs.data(), scrs.size(), sts.data(), sts.size());
-					});
-					emitPost(pi, a1, true);
-				}
-				return 1;
-			}
-			case 6: {
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				for (HistoryInfo* hi : dq->GetHistory())
-				{
-					if (hi->GetKind() == HistoryInfo::hkDup && !a1) continue;
-					if (hi->GetKind() == HistoryInfo::hkNzb || hi->GetKind() == HistoryInfo::hkUrl)
-					{
-						NzbInfo* n = hi->GetNzbInfo();
-						const char* status = n->MakeTextStatus(false);
-						withNzb(n, [&](const auto& f, const auto& prms, const auto& scrs, const auto& sts) {
-							emitCb(emitCtx, 7, hi->GetId(), n->GetParkedFileCount(),
-								!n->GetCompletedFiles()->empty() ? 1 : 0, (int)hi->GetTime(), 0, 0,
-								0, 0, 0, hi->GetName(), status, nullptr, nullptr,
-								&f, 0, prms.data(), prms.size(), scrs.data(), scrs.size(), sts.data(), sts.size());
-						});
-					}
-					else if (hi->GetKind() == HistoryInfo::hkDup)
-					{
-						DupInfo* d = hi->GetDupInfo();
-						emitCb(emitCtx, 8, hi->GetId(), (int)hi->GetTime(), d->GetDupeScore(),
-							(int)d->GetDupeMode(), (int)d->GetStatus(), 0, d->GetSize(), 0, 0,
-							hi->GetName(), d->GetDupeKey(), nullptr, nullptr,
-							nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0);
-					}
-				}
-				return 1;
-			}
-			case 7: {
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				for (NzbInfo* n : dq->GetQueue())
-				{
-					if (n->GetKind() == NzbInfo::nkUrl)
-						emitCb(emitCtx, 9, n->GetId(), n->GetPriority(), 0, 0, 0, 0, 0, 0, 0,
-							n->GetFilename(), n->GetUrl(), n->GetName(), n->GetCategory(),
-							nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0);
-				}
-				return 1;
-			}
-			default: return 0;
-		}
-	};
-	host.binrpc_action_cb = +[](int kind, int a1, int a2, int, int,
-		const char* s1, const char*, const char*, const char*, int,
-		const int32_t* ids, size_t idsLen, const char* const* names, size_t namesLen) -> int {
-		switch (kind)
-		{
-			case 6: {
-				IdList cIdList(ids, ids + idsLen);
-				NameList cNameList;
-				cNameList.reserve(namesLen);
-				for (size_t i = 0; i < namesLen; i++) cNameList.emplace_back(names[i]);
-				return DownloadQueue::Guard()->EditList(
-					idsLen > 0 ? &cIdList : nullptr, namesLen > 0 ? &cNameList : nullptr,
-					(DownloadQueue::EMatchMode)a2, (DownloadQueue::EEditAction)a1, s1) ? 1 : 0;
-			}
-			default: return 0;
-		}
-	};
-	host.binrpc_list_cb = +[](int wantFiles, void* bCtx,
-		NzbgetRsBinRpcListPushNzbFn pushNzb, NzbgetRsBinRpcListPushParamFn pushParam,
-		NzbgetRsBinRpcListPushFileFn pushFile, int* outPostJobs, int64_t* outRemSize) {
-		GuardedDownloadQueue dq = DownloadQueue::Guard();
-		if (wantFiles)
-		{
-			uint32 ownerIndex = 0;
-			for (NzbInfo* nzbInfo : dq->GetQueue())
-			{
-				ownerIndex++;
-				pushNzb(bCtx, (uint32)nzbInfo->GetId(), (uint32)nzbInfo->GetKind(),
-					nzbInfo->GetSize(), nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(),
-					(uint32)nzbInfo->GetPausedFileCount(), (uint32)nzbInfo->GetRemainingParCount(),
-					(uint32)nzbInfo->GetPriority(), nzbInfo->GetFilename(), nzbInfo->GetName(),
-					nzbInfo->GetDestDir(), nzbInfo->GetCategory(), nzbInfo->GetQueuedFilename());
-				for (NzbParameter& p : nzbInfo->GetParameters())
-					pushParam(bCtx, ownerIndex, p.GetName(), p.GetValue());
-				for (FileInfo* fileInfo : nzbInfo->GetFileList())
-				{
-					uint32 nzbIndex = ownerIndex;
-					if (fileInfo->GetNzbInfo() != nzbInfo)
-					{
-						nzbIndex = 0;
-						for (uint32 i = 0; i < dq->GetQueue()->size(); i++)
-						{
-							nzbIndex++;
-							if (dq->GetQueue()->at(i).get() == fileInfo->GetNzbInfo()) break;
-						}
-					}
-					pushFile(bCtx, (uint32)fileInfo->GetId(), nzbIndex,
-						fileInfo->GetSize(), fileInfo->GetRemainingSize(),
-						(uint32)fileInfo->GetPaused(), (uint32)fileInfo->GetFilenameConfirmed(),
-						(uint32)fileInfo->GetActiveDownloads(), fileInfo->GetNzbInfo()->GetName(),
-						fileInfo->GetSubject(), fileInfo->GetFilename());
-				}
-			}
-		}
-		if (outPostJobs)
-		{
-			int postJobs = 0;
-			for (NzbInfo* n : dq->GetQueue()) postJobs += n->GetPostInfo() ? 1 : 0;
-			*outPostJobs = postJobs;
-			dq->CalcRemainingSize(outRemSize, nullptr);
-		}
-	};
-	host.binrpc_post_cb = +[](void* encCtx, NzbgetRsBinRpcPostPushFn pushPost) {
-		GuardedDownloadQueue dq = DownloadQueue::Guard();
-		time_t curTime = Util::CurrentTime();
-		for (NzbInfo* nzbInfo : dq->GetQueue())
-		{
-			PostInfo* postInfo = nzbInfo->GetPostInfo();
-			if (!postInfo) continue;
-			pushPost(encCtx, (uint32)nzbInfo->GetId(), (uint32)postInfo->GetStage(),
-				(uint32)postInfo->GetStageProgress(), (uint32)postInfo->GetFileProgress(),
-				postInfo->GetStartTime() ? (uint32)(curTime - postInfo->GetStartTime()) : 0,
-				postInfo->GetStageTime() ? (uint32)(curTime - postInfo->GetStageTime()) : 0,
-				postInfo->GetNzbInfo()->GetFilename(), postInfo->GetNzbInfo()->GetName(),
-				postInfo->GetNzbInfo()->GetDestDir(), postInfo->GetProgressLabel());
-		}
-	};
-	host.binrpc_history_cb = +[](int showHidden, void* encCtx, NzbgetRsBinRpcHistPushFn pushHist) {
-		GuardedDownloadQueue dq = DownloadQueue::Guard();
-		for (HistoryInfo* h : dq->GetHistory())
-		{
-			if (h->GetKind() == HistoryInfo::hkDup && !showHidden) continue;
-			int64 size = 0;
-			uint32 fileCount = 0, parStatus = 0, scriptStatus = 0, urlStatus = 0;
-			if (h->GetKind() == HistoryInfo::hkNzb)
-			{
-				NzbInfo* nzbInfo = h->GetNzbInfo();
-				size = nzbInfo->GetSize();
-				fileCount = nzbInfo->GetFileCount();
-				parStatus = nzbInfo->GetParStatus();
-				scriptStatus = nzbInfo->GetScriptStatuses()->CalcTotalStatus();
-			}
-			else if (h->GetKind() == HistoryInfo::hkDup) size = h->GetDupInfo()->GetSize();
-			else if (h->GetKind() == HistoryInfo::hkUrl) urlStatus = h->GetNzbInfo()->GetUrlStatus();
-			pushHist(encCtx, (uint32)h->GetId(), (uint32)h->GetKind(), (uint32)(int)h->GetTime(),
-				size, fileCount, parStatus, scriptStatus, urlStatus, h->GetName());
-		}
-	};
-	return host;
-}
 
 #endif

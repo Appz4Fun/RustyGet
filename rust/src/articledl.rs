@@ -156,6 +156,13 @@ static CACHE_FILE_INFO: AtomicUsize = AtomicUsize::new(0);
 static CACHE_FLUSHING: AtomicBool = AtomicBool::new(false);
 static CACHE_ALLOC_LOCK: (Mutex<()>, Condvar) = (Mutex::new(()), Condvar::new());
 static CACHE_FLUSH_LOCK: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+static CACHE_CONTENT_LOCK: Mutex<()> = Mutex::new(());
+
+#[inline]
+pub(crate) fn with_cache_content_lock<R, F: FnOnce() -> R>(f: F) -> R {
+    let _g = CACHE_CONTENT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
 
 pub(crate) fn article_cache_allocated() -> usize {
     CACHE_ALLOCATED.load(Ordering::Acquire)
@@ -506,6 +513,237 @@ pub(crate) fn shutdown_daemon_memory_monitor() {
 // ArticleCache Run + CheckFlush + FlushCache
 // ============================================================================
 
+static DAEMON_CACHE_RUNNING: AtomicBool = AtomicBool::new(false);
+static DAEMON_CACHE_STOPPED: AtomicBool = AtomicBool::new(false);
+static DAEMON_CACHE_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
+pub(crate) fn create_daemon_article_cache() {
+    DAEMON_CACHE_RUNNING.store(false, Ordering::SeqCst);
+    DAEMON_CACHE_STOPPED.store(false, Ordering::SeqCst);
+}
+
+pub(crate) fn start_daemon_article_cache() {
+    if !crate::options::active_options().is_some_and(|o| o.scalars().article_cache > 0) {
+        return;
+    }
+    let mut g = DAEMON_CACHE_HANDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if g.is_some() {
+        return;
+    }
+    DAEMON_CACHE_STOPPED.store(false, Ordering::SeqCst);
+    DAEMON_CACHE_RUNNING.store(true, Ordering::SeqCst);
+    if let Ok(h) = std::thread::Builder::new()
+        .name("article-cache".into())
+        .spawn(|| {
+            struct RunningReset;
+            impl Drop for RunningReset {
+                fn drop(&mut self) {
+                    DAEMON_CACHE_RUNNING.store(false, Ordering::SeqCst);
+                }
+            }
+            let _reset = RunningReset;
+            let _tg = crate::ffi::RustThreadGuard::enter(&DAEMON_CACHE_STOPPED);
+            daemon_article_cache_run();
+        })
+    {
+        *g = Some(h);
+    } else {
+        DAEMON_CACHE_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn stop_daemon_article_cache() {
+    DAEMON_CACHE_STOPPED.store(true, Ordering::SeqCst);
+    cache_wakeup_flush();
+}
+
+pub(crate) fn is_daemon_article_cache_running() -> bool {
+    DAEMON_CACHE_RUNNING.load(Ordering::SeqCst)
+}
+
+pub(crate) fn shutdown_daemon_article_cache() {
+    stop_daemon_article_cache();
+    let handle = DAEMON_CACHE_HANDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(h) = handle {
+        let _ = h.join();
+    }
+    DAEMON_CACHE_RUNNING.store(false, Ordering::SeqCst);
+}
+
+fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) -> bool {
+    let Some(qh) = crate::ffi::queue_host() else {
+        return false;
+    };
+    crate::log::log_active_bytes(
+        MK_DEBUG,
+        format!(
+            "Checking cache, Allocated: {}, FlushEverything: {}",
+            allocated as i32,
+            i32::from(flush_everything)
+        )
+        .as_bytes(),
+    );
+
+    let selected = qh.with_locked_queue(|dq_ptr| {
+        let qlen = qh.queue_len(dq_ptr);
+        for ni in 0..qlen {
+            let nzb_ptr = qh.queue_at(dq_ptr, ni);
+            let nzb = qh.nzb_snap(nzb_ptr, false);
+            if nzb.skip_disk_write && !flush_everything {
+                continue;
+            }
+            let flen = qh.nzb_file_len(nzb_ptr);
+            for fi in 0..flen {
+                let fp = qh.nzb_file_at(nzb_ptr, fi);
+                let f = qh.file_snap(fp);
+                if f.cached_articles > 0 && (f.active_downloads == 0 || flush_everything) {
+                    CACHE_FILE_INFO.store(fp, Ordering::SeqCst);
+                    let info_name = article_writer_format_info_path(
+                        &nzb.name,
+                        crate::paths::PATH_SEPARATOR,
+                        &f.filename,
+                    );
+                    return Some((fp, info_name));
+                }
+            }
+        }
+        None
+    });
+
+    let Some((file_ptr, info_name)) = selected else {
+        CACHE_FILE_INFO.store(0, Ordering::SeqCst);
+        crate::log::log_active_bytes(MK_DEBUG, b"Checking cache... nothing to flush");
+        return false;
+    };
+
+    struct ClearBusyGuard;
+    impl Drop for ClearBusyGuard {
+        fn drop(&mut self) {
+            CACHE_FILE_INFO.store(0, Ordering::SeqCst);
+        }
+    }
+    debug_assert_eq!(CACHE_FILE_INFO.load(Ordering::SeqCst), file_ptr);
+    let _busy_guard = ClearBusyGuard;
+    crate::log::log_active_bytes(
+        MK_DETAIL,
+        &join_c_slices(&[b"Flushing cache for ", &info_name]),
+    );
+
+    cache_lock_flush();
+    let (direct_write, skip_disk_write, nzb_ptr, output_filename) =
+        qh.file_cache_flush_prepare(file_ptr);
+    let Some(metas) = qh.file_cache_flush_lock_collect(file_ptr) else {
+        cache_unlock_flush();
+        return true;
+    };
+
+    let items: Vec<ArticleWriterFlushItem<'_>> = metas
+        .iter()
+        .map(|m| ArticleWriterFlushItem {
+            segment_offset: m.1,
+            segment_size: m.2,
+            segment_content: unsafe {
+                if m.3.is_null() || m.2 <= 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(m.3, m.2 as usize)
+                }
+            },
+            result_filename: m.4.as_deref(),
+        })
+        .collect();
+
+    let (flushed_articles, flushed_size) = article_writer_flush_cache(
+        &items,
+        direct_write,
+        skip_disk_write,
+        &output_filename,
+        || qh.file_cache_is_deleted_unparked(file_ptr),
+        |idx| qh.file_cache_discard_article_segment(file_ptr, metas[idx].0),
+        |msg| {
+            if nzb_ptr != 0 {
+                qh.nzb_print_message(nzb_ptr, MK_ERROR, msg);
+            } else {
+                crate::log::log_active_bytes(MK_ERROR, msg);
+            }
+        },
+    );
+
+    let skip_after = qh.file_cache_flush_finish(file_ptr, flushed_articles)
+        || crate::options::active_options().is_some_and(|o| o.scalars().skip_write != 0);
+    cache_unlock_flush();
+    let flushed_mb = (flushed_size as f64) / 1024.0 / 1024.0;
+    let prefix = if skip_after {
+        format!(
+            "Discarded {flushed_articles} articles ({flushed_mb:.2} MB) from cache (SkipWrite) for "
+        )
+    } else {
+        format!("Saved {flushed_articles} articles ({flushed_mb:.2} MB) from cache into disk for ")
+    };
+    crate::log::log_active_bytes(MK_DETAIL, &join_c_slices(&[prefix.as_bytes(), &info_name]));
+    true
+}
+
+fn daemon_article_cache_run() {
+    let is_stopped_cb = || DAEMON_CACHE_STOPPED.load(Ordering::SeqCst);
+    let snap = || {
+        let allocated = CACHE_ALLOCATED.load(Ordering::SeqCst);
+        let effective_limit = cache_effective_limit();
+        let is_stopped = is_stopped_cb();
+        let direct_write =
+            crate::options::active_options().is_some_and(|o| o.scalars().direct_write != 0);
+        let tier = memory_monitor_tier();
+        (allocated, effective_limit, is_stopped, direct_write, tier)
+    };
+
+    let mut reset_counter = 0i32;
+    let mut just_flushed = false;
+    loop {
+        let (allocated, effective_limit, is_stopped, direct_write, tier) = snap();
+        if is_stopped && allocated == 0 {
+            break;
+        }
+        let (should_flush, flush_everything, need_emergency_flush) = article_cache_should_flush(
+            allocated,
+            effective_limit,
+            tier,
+            just_flushed,
+            reset_counter,
+            is_stopped,
+            direct_write,
+        );
+        if should_flush {
+            just_flushed = daemon_article_cache_check_flush(allocated, flush_everything);
+            reset_counter = 0;
+            let (alloc_now, _, stopped_now, _, _) = snap();
+            if need_emergency_flush && alloc_now == 0 {
+                crate::memory_pressure::trim_heap();
+            } else if !just_flushed && !stopped_now {
+                sleep_ms(5);
+            }
+        } else if allocated == 0 {
+            let mut guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
+            while CACHE_ALLOCATED.load(Ordering::SeqCst) == 0 && !is_stopped_cb() {
+                guard = CACHE_ALLOC_LOCK
+                    .1
+                    .wait(guard)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+            drop(guard);
+            reset_counter = 0;
+        } else {
+            sleep_ms(5);
+            reset_counter += 5;
+        }
+    }
+}
+
+#[cfg(test)]
 fn article_cache_check_flush(host: &DlHost, allocated: usize, flush_everything: bool) -> bool {
     host.log(
         MK_DEBUG,
@@ -695,73 +933,6 @@ fn article_cache_check_flush(host: &DlHost, allocated: usize, flush_everything: 
     }
 
     true
-}
-
-fn article_cache_run(host: &DlHost) {
-    let is_stopped_cb = || {
-        host.raw(
-            2,
-            3,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
-    };
-    let snap = || {
-        let allocated = CACHE_ALLOCATED.load(Ordering::SeqCst);
-        let effective_limit = cache_effective_limit();
-        let is_stopped = is_stopped_cb();
-        let direct_write =
-            crate::options::active_options().is_some_and(|o| o.scalars().direct_write != 0);
-        let tier = memory_monitor_tier();
-        (allocated, effective_limit, is_stopped, direct_write, tier)
-    };
-
-    let mut reset_counter = 0i32;
-    let mut just_flushed = false;
-    loop {
-        let (allocated, effective_limit, is_stopped, direct_write, tier) = snap();
-        if is_stopped && allocated == 0 {
-            break;
-        }
-        let (should_flush, flush_everything, need_emergency_flush) = article_cache_should_flush(
-            allocated,
-            effective_limit,
-            tier,
-            just_flushed,
-            reset_counter,
-            is_stopped,
-            direct_write,
-        );
-        if should_flush {
-            just_flushed = article_cache_check_flush(host, allocated, flush_everything);
-            reset_counter = 0;
-            let (alloc_now, _, stopped_now, _, _) = snap();
-            if need_emergency_flush && alloc_now == 0 {
-                crate::memory_pressure::trim_heap();
-            } else if !just_flushed && !stopped_now {
-                sleep_ms(5);
-            }
-        } else if allocated == 0 {
-            let mut guard = CACHE_ALLOC_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
-            while CACHE_ALLOCATED.load(Ordering::SeqCst) == 0 && !is_stopped_cb() {
-                guard = CACHE_ALLOC_LOCK
-                    .1
-                    .wait(guard)
-                    .unwrap_or_else(|e| e.into_inner());
-            }
-            drop(guard);
-            reset_counter = 0;
-        } else {
-            sleep_ms(5);
-            reset_counter += 5;
-        }
-    }
 }
 
 // ============================================================================
@@ -1362,20 +1533,23 @@ impl RsArticleWriter {
             }
             let ptr = self.cached_ptr;
             let mut cap_arr = [self.cached_cap];
+            let seg_len = self.article_ptr as usize;
             self.cached_ptr = std::ptr::null_mut();
             self.cached_cap = 0;
-            host.raw(
-                4,
-                18,
-                2,
-                ptr as usize,
-                self.article_ptr as usize,
-                std::ptr::null(),
-                std::ptr::null(),
-                cap_arr.as_mut_ptr(),
-                off.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
+            with_cache_content_lock(|| {
+                host.raw(
+                    4,
+                    18,
+                    2,
+                    ptr as usize,
+                    seg_len,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    cap_arr.as_mut_ptr(),
+                    off.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                );
+            });
         } else {
             host.raw(
                 4,
@@ -3464,11 +3638,6 @@ pub fn article_dl_exec(
                 let old_dir = unsafe { cstr_or_empty(s1) };
                 usize::from(move_completed_files_on_host(&host, p1, &old_dir))
             }
-            110 => {
-                article_cache_run(&host);
-                0
-            }
-            111 => usize::from(article_cache_check_flush(&host, p1, a1 != 0)),
             _ => 0,
         };
     }

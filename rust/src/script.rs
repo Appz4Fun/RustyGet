@@ -1646,31 +1646,6 @@ pub(crate) fn shutdown_daemon_ext_mgr() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ext_mgr_new() -> *mut RsExtensionManager {
-    let arc = Arc::new(RsExtensionManager::new());
-    if let Ok(mut g) = ACTIVE_EXT_MGR.write() {
-        *g = Some(Arc::downgrade(&arc));
-    }
-    Arc::into_raw(arc).cast_mut()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ext_mgr_free(mgr: *mut RsExtensionManager) {
-    if !mgr.is_null() {
-        let arc = Arc::from_raw(mgr.cast_const());
-        let wk = Arc::downgrade(&arc);
-        if let Ok(mut g) = ACTIVE_EXT_MGR.write() {
-            if g.as_ref()
-                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
-            {
-                *g = None;
-            }
-        }
-        drop(arc);
-    }
-}
-
 pub(crate) fn load_extensions_active() -> Result<(), Vec<u8>> {
     let Some(m) = active_ext_mgr() else {
         return Ok(());

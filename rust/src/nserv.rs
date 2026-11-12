@@ -1361,8 +1361,8 @@ unsafe fn nserv_conn_op(
     #[cfg(unix)]
     {
         crate::net::nserv_default_conn_cb(
-            env.tls_host_cb,
-            env.debug_on != 0,
+            env.tls_host_cb.or_else(crate::ffi::tls_host_cb),
+            env.debug_on != 0 || crate::ffi::build_debug_enabled(),
             conn,
             op,
             a1,
@@ -1397,13 +1397,32 @@ fn nserv_now_formatted() -> Vec<u8> {
     buf[..end].to_vec()
 }
 
-fn nserv_env_log(env: &NzbgetRsNservEnv, level: i32, parts: &[&[u8]]) {
-    let Some(cb) = env.log_cb else {
+fn nserv_emit_level_bytes(env: &NzbgetRsNservEnv, level: i32, bytes: &[u8]) {
+    if let Some(cb) = env.log_cb {
+        let cstr = nserv_bytes_to_cstring(bytes);
+        unsafe { cb(env.ctx, level as std::ffi::c_int, cstr.as_ptr()) };
         return;
-    };
+    }
+    #[cfg(unix)]
+    if env.conn_cb.is_none() {
+        let kind = match level {
+            0 => 3,
+            1 => 4,
+            2 => 0,
+            3 => 1,
+            4 => 2,
+            _ => return,
+        };
+        crate::log::log_active_bytes(kind, bytes);
+    }
+}
+
+fn nserv_env_log(env: &NzbgetRsNservEnv, level: i32, parts: &[&[u8]]) {
+    if env.log_cb.is_none() && env.conn_cb.is_some() {
+        return;
+    }
     let joined: Vec<u8> = parts.concat();
-    let cstr = nserv_bytes_to_cstring(&joined);
-    unsafe { cb(env.ctx, level as std::ffi::c_int, cstr.as_ptr()) };
+    nserv_emit_level_bytes(env, level, &joined);
 }
 
 struct NservSharedState {
@@ -1741,7 +1760,18 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
         return 1;
     };
     let ver_bytes = if env.version.is_null() {
-        &b""[..]
+        #[cfg(unix)]
+        {
+            if env.conn_cb.is_none() {
+                crate::ffi::build_version_bytes()
+            } else {
+                &b""[..]
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            &b""[..]
+        }
     } else {
         CStr::from_ptr(env.version).to_bytes()
     };
@@ -1769,11 +1799,18 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
         |data| {
             if let Some(cb) = env.write_stdout_cb {
                 cb(data.as_ptr().cast(), data.len());
+            } else {
+                #[cfg(unix)]
+                if env.conn_cb.is_none() {
+                    crate::ffi::write_stdout_bytes(data, false);
+                }
             }
         },
         |level, msg| {
             if let Some(cb) = env.log_cb {
                 cb(env.ctx, level as std::ffi::c_int, msg.as_ptr());
+            } else {
+                nserv_emit_level_bytes(env, level, msg.to_bytes());
             }
         },
     ) else {
@@ -1786,6 +1823,12 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
         rt_cb(env.ctx, 0, 0, opt_ptrs.as_ptr(), opt_ptrs.len());
     }
     #[cfg(unix)]
+    if env.conn_cb.is_none() {
+        if let Some(lg) = crate::log::active_log() {
+            lg.init_options_active();
+        }
+    }
+    #[cfg(unix)]
     let nserv_frontend = env.conn_cb.is_none().then(|| {
         let fe = crate::ffi::FrontendHandle::new(3, None);
         fe.start();
@@ -1795,6 +1838,8 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
     let quit_now = handle.run_post_frontend_setup(|level, msg| {
         if let Some(cb) = env.log_cb {
             cb(env.ctx, level as std::ffi::c_int, msg.as_ptr());
+        } else {
+            nserv_emit_level_bytes(env, level, msg.to_bytes());
         }
     });
     if quit_now {

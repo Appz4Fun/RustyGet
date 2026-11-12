@@ -6851,6 +6851,1815 @@ pub unsafe fn diskstate_exec(op: c_int, env: &NzbgetRsDiskStateEnv) -> c_int {
     }
 }
 
+#[cfg(unix)]
+static ACTIVE_LEGACY_QUEUE_READ: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+pub(crate) fn reset_active_legacy_queue_read() {
+    ACTIVE_LEGACY_QUEUE_READ.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+pub(crate) fn active_legacy_queue_read() -> bool {
+    ACTIVE_LEGACY_QUEUE_READ.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+struct ActiveDiskExecCtx<'a> {
+    qh: Option<&'a crate::queuesubsys_host::QueueSubsysHost>,
+    dq_ptr: usize,
+    messages: Vec<(i32, i32, i32, std::ffi::CString)>,
+    target_file_ptr: usize,
+    target_nzb_ptr: usize,
+    pending_nzb_uptr: usize,
+    staged_file_ptr: usize,
+    snap_success_articles: i32,
+    snap_failed_articles: i32,
+    snap_remaining_size: i64,
+    snap_success_size: i64,
+    snap_failed_size: i64,
+}
+
+#[cfg(unix)]
+impl<'a> ActiveDiskExecCtx<'a> {
+    fn new(qh: Option<&'a crate::queuesubsys_host::QueueSubsysHost>) -> Self {
+        Self {
+            qh,
+            dq_ptr: 0,
+            messages: Vec::new(),
+            target_file_ptr: 0,
+            target_nzb_ptr: 0,
+            pending_nzb_uptr: 0,
+            staged_file_ptr: 0,
+            snap_success_articles: 0,
+            snap_failed_articles: 0,
+            snap_remaining_size: 0,
+            snap_success_size: 0,
+            snap_failed_size: 0,
+        }
+    }
+
+    fn reset_pending_nzb(&mut self, qh: &crate::queuesubsys_host::QueueSubsysHost) {
+        if self.pending_nzb_uptr != 0 {
+            qh.destroy_nzb_uptr(self.pending_nzb_uptr);
+            self.pending_nzb_uptr = 0;
+        }
+        let (uptr, nzb_ptr) = qh.alloc_new_nzb_uptr();
+        self.pending_nzb_uptr = uptr;
+        self.target_nzb_ptr = nzb_ptr;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ActiveDiskExecCtx<'_> {
+    fn drop(&mut self) {
+        if let Some(qh) = self.qh {
+            if self.pending_nzb_uptr != 0 {
+                qh.destroy_nzb_uptr(self.pending_nzb_uptr);
+                self.pending_nzb_uptr = 0;
+            }
+            if self.staged_file_ptr != 0 {
+                qh.delete_file_info(self.staged_file_ptr);
+                self.staged_file_ptr = 0;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn active_disk_log_cb(_ctx: *mut c_void, level: c_int, msg: *const c_char) {
+    let kind = match level {
+        0 => 3,
+        1 => 4,
+        2 => 0,
+        3 => 1,
+        4 => 2,
+        _ => return,
+    };
+    crate::log::log_active_bytes(kind, unsafe { cstr_to_bytes(msg) });
+}
+
+#[cfg(unix)]
+fn apply_active_server_stats_nzb(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+    stats: &[NzbgetRsDiskServerStat],
+) {
+    let Some(sp) = crate::net::active_server_pool() else {
+        return;
+    };
+    for st in stats {
+        sp.for_each_server_with_state_id(st.server_id, |id| {
+            if id != 0 {
+                qh.nzb_server_stat_set(nzb_ptr, id, st.success_articles, st.failed_articles);
+            }
+        });
+    }
+}
+
+#[cfg(unix)]
+fn apply_active_server_stats_file(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    file_ptr: usize,
+    stats: &[NzbgetRsDiskServerStat],
+) {
+    let Some(sp) = crate::net::active_server_pool() else {
+        return;
+    };
+    for st in stats {
+        sp.for_each_server_with_state_id(st.server_id, |id| {
+            if id != 0 {
+                qh.file_server_stat_set(file_ptr, id, st.success_articles, st.failed_articles);
+            }
+        });
+    }
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn active_disk_ctrl_cb(
+    raw_ctx: *mut c_void,
+    cmd: c_int,
+    a1: c_int,
+    a2: c_int,
+    a3: i64,
+    s1: *const c_char,
+) -> c_int {
+    let c = unsafe { &mut *raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
+    if cmd == 19 {
+        let txt = bytes_to_cstring_trunc(unsafe { cstr_to_bytes(s1) });
+        c.messages.push((a1, a2, a3 as i32, txt));
+        return 0;
+    }
+    let Some(qh) = c.qh else {
+        return 0;
+    };
+    match cmd {
+        0 => qh.queue_len(c.dq_ptr) as c_int,
+        1 => qh.history_len(c.dq_ptr) as c_int,
+        2 => qh.id_gen_last().0,
+        3 => qh.id_gen_last().1,
+        4 => {
+            let qlen = qh.queue_len(c.dq_ptr);
+            let mut total = 0i32;
+            for i in 0..qlen {
+                let n = qh.queue_at(c.dq_ptr, i);
+                total += qh.nzb_file_len(n) as i32;
+            }
+            total
+        }
+        5 => {
+            let n = qh.queue_at(c.dq_ptr, a1 as usize);
+            qh.nzb_file_len(n) as c_int
+        }
+        6 => {
+            let n = qh.queue_at(c.dq_ptr, a1 as usize);
+            let fp = qh.nzb_file_at(n, a2 as usize);
+            c.target_file_ptr = fp;
+            qh.file_snap(fp).id
+        }
+        7 => {
+            let n = qh.queue_at(c.dq_ptr, a1 as usize);
+            let flen = qh.nzb_file_len(n);
+            for i in 0..flen {
+                let fp = qh.nzb_file_at(n, i);
+                if qh.file_snap(fp).id == a2 {
+                    qh.nzb_remove_file(n, fp);
+                    break;
+                }
+            }
+            0
+        }
+        8 => {
+            let qlen = qh.queue_len(c.dq_ptr);
+            for i in 0..qlen {
+                let n = qh.queue_at(c.dq_ptr, i);
+                let flen = qh.nzb_file_len(n);
+                for j in 0..flen {
+                    let fp = qh.nzb_file_at(n, j);
+                    if qh.file_snap(fp).id == a1 {
+                        return 1;
+                    }
+                }
+            }
+            0
+        }
+        9 => {
+            c.reset_pending_nzb(qh);
+            0
+        }
+        10 => {
+            let uptr = c.pending_nzb_uptr;
+            c.pending_nzb_uptr = 0;
+            c.target_nzb_ptr = 0;
+            if uptr != 0 {
+                qh.finish_new_nzb_uptr(c.dq_ptr, uptr);
+            }
+            0
+        }
+        11 => {
+            let found = qh.queue_find_by_id(c.dq_ptr, a1);
+            if found != 0 {
+                c.target_nzb_ptr = found;
+                1
+            } else {
+                c.reset_pending_nzb(qh);
+                0
+            }
+        }
+        12 => {
+            if a1 == crate::queuesubsys_host::HK_NZB && c.target_nzb_ptr != 0 {
+                qh.nzb_action(
+                    c.target_nzb_ptr,
+                    crate::queuesubsys_host::NZB_ACT_LEAVE_POST_PROCESS,
+                    0,
+                );
+            }
+            let uptr = c.pending_nzb_uptr;
+            c.pending_nzb_uptr = 0;
+            c.target_nzb_ptr = 0;
+            if uptr != 0 {
+                qh.history_push_nzb_uptr(c.dq_ptr, uptr, a2);
+            }
+            0
+        }
+        13 => {
+            let mut found = 0usize;
+            if a1 == 0 {
+                found = qh.queue_find_by_id(c.dq_ptr, a2);
+            } else {
+                let hlen = qh.history_len(c.dq_ptr);
+                for i in 0..hlen {
+                    let hi = qh.history_at(c.dq_ptr, i);
+                    if (hi.kind == crate::queuesubsys_host::HK_NZB
+                        || hi.kind == crate::queuesubsys_host::HK_URL)
+                        && hi.id == a2
+                    {
+                        found = hi.inner_ptr;
+                        break;
+                    }
+                }
+            }
+            if found != 0 {
+                c.target_nzb_ptr = found;
+                1
+            } else {
+                c.reset_pending_nzb(qh);
+                0
+            }
+        }
+        14 => {
+            let qlen = qh.queue_len(c.dq_ptr);
+            for i in 0..qlen {
+                let n = qh.queue_at(c.dq_ptr, i);
+                let flen = qh.nzb_file_len(n);
+                for j in 0..flen {
+                    let fp = qh.nzb_file_at(n, j);
+                    let fs = qh.file_snap(fp);
+                    if fs.id == a1 {
+                        c.target_file_ptr = fp;
+                        c.snap_success_articles = fs.success_articles;
+                        c.snap_failed_articles = fs.failed_articles;
+                        c.snap_remaining_size = fs.remaining_size;
+                        c.snap_success_size = fs.success_size;
+                        c.snap_failed_size = fs.failed_size;
+                        return 1;
+                    }
+                }
+            }
+            0
+        }
+        15 => {
+            let fp = c.target_file_ptr;
+            qh.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES, 0);
+            qh.file_set_int(
+                fp,
+                crate::queuesubsys_host::FILE_INT_SUCCESS_ARTICLES,
+                c.snap_success_articles,
+            );
+            qh.file_set_int(
+                fp,
+                crate::queuesubsys_host::FILE_INT_FAILED_ARTICLES,
+                c.snap_failed_articles,
+            );
+            qh.file_set_i64(
+                fp,
+                crate::queuesubsys_host::FILE_I64_REMAINING_SIZE,
+                c.snap_remaining_size,
+            );
+            qh.file_set_i64(
+                fp,
+                crate::queuesubsys_host::FILE_I64_SUCCESS_SIZE,
+                c.snap_success_size,
+            );
+            qh.file_set_i64(
+                fp,
+                crate::queuesubsys_host::FILE_I64_FAILED_SIZE,
+                c.snap_failed_size,
+            );
+            0
+        }
+        16 => {
+            let fp = c.target_file_ptr;
+            qh.file_action(fp, crate::queuesubsys_host::FILE_ACT_CLEAR_ARTICLES, 0);
+            qh.file_set_int(
+                fp,
+                crate::queuesubsys_host::FILE_INT_PARTIAL_STATE,
+                if a1 != 0 {
+                    crate::queuesubsys_host::PARTIAL_COMPLETED
+                } else {
+                    crate::queuesubsys_host::PARTIAL_PARTIAL
+                },
+            );
+            0
+        }
+        17 => {
+            if c.staged_file_ptr != 0 {
+                qh.delete_file_info(c.staged_file_ptr);
+                c.staged_file_ptr = 0;
+            }
+            let fp = qh.file_new_standalone(a1, true);
+            c.staged_file_ptr = fp;
+            c.target_file_ptr = fp;
+            0
+        }
+        18 => {
+            qh.id_gen_raise_and_reset(a1, a2);
+            let qlen = qh.queue_len(c.dq_ptr);
+            for i in 0..qlen {
+                let n = qh.queue_at(c.dq_ptr, i);
+                qh.nzb_action(n, crate::queuesubsys_host::NZB_ACT_UPDATE_CURRENT_STATS, 0);
+            }
+            0
+        }
+        20 => {
+            let qlen = qh.queue_len(c.dq_ptr);
+            let mut cnt = 0i32;
+            for i in 0..qlen {
+                let n = qh.queue_at(c.dq_ptr, i);
+                if qh.nzb_snap(n, false).changed {
+                    cnt += 1;
+                }
+            }
+            cnt
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn active_disk_export_nzb_cb(
+    raw_ctx: *mut c_void,
+    source: c_int,
+    idx: usize,
+    sink_ctx: *mut c_void,
+    sink_fn: DiskNzbSinkFn,
+) {
+    let (qh_opt, dq_ptr) = {
+        let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
+        (c.qh, c.dq_ptr)
+    };
+    let Some(qh) = qh_opt else {
+        return;
+    };
+    let mut exp: NzbgetRsDiskNzbExport = unsafe { std::mem::zeroed() };
+    let nzb_ptr: usize;
+    if source == 1 {
+        let hi = qh.history_at(dq_ptr, idx);
+        exp.hist_id = hi.id;
+        exp.hist_kind = hi.kind;
+        exp.hist_time = hi.time as c_int;
+        if hi.kind == crate::queuesubsys_host::HK_DUP {
+            let d = qh.dup_snap(hi.inner_ptr);
+            let name_c = bytes_to_cstring_trunc(&d.name);
+            let dupe_key_c = bytes_to_cstring_trunc(&d.dupe_key);
+            exp.info.par_status = d.status;
+            exp.info.size = d.size;
+            exp.info.full_content_hash = d.full_content_hash;
+            exp.info.filtered_content_hash = d.filtered_content_hash;
+            exp.info.dupe_score = d.dupe_score;
+            exp.info.dupe_mode = d.dupe_mode;
+            exp.info.name = name_c.as_ptr();
+            exp.info.dupe_key = dupe_key_c.as_ptr();
+            unsafe { sink_fn(sink_ctx, &exp) };
+            return;
+        }
+        if hi.kind != crate::queuesubsys_host::HK_NZB && hi.kind != crate::queuesubsys_host::HK_URL
+        {
+            unsafe { sink_fn(sink_ctx, &exp) };
+            return;
+        }
+        nzb_ptr = hi.inner_ptr;
+    } else {
+        nzb_ptr = qh.queue_at(dq_ptr, idx);
+        let changed = qh.nzb_snap(nzb_ptr, false).changed;
+        exp.changed = c_int::from(changed);
+        if source == 2 && !changed {
+            return;
+        }
+    }
+
+    let sn = qh.nzb_snap(nzb_ptr, false);
+    let url_c = bytes_to_cstring_trunc(&sn.url);
+    let fn_c = bytes_to_cstring_trunc(&sn.filename);
+    let dest_c = bytes_to_cstring_trunc(&sn.dest_dir);
+    let final_c = bytes_to_cstring_trunc(&sn.final_dir);
+    let hl_c = bytes_to_cstring_trunc(&qh.nzb_hard_link_path(nzb_ptr));
+    let meta_c = bytes_to_cstring_trunc(&qh.nzb_meta_name(nzb_ptr));
+    let qfn_c = bytes_to_cstring_trunc(&sn.queued_filename);
+    let name_c = bytes_to_cstring_trunc(&sn.name);
+    let cat_c = bytes_to_cstring_trunc(&sn.category);
+    let dkey_c = bytes_to_cstring_trunc(&sn.dupe_key);
+
+    exp.info = NzbgetRsDiskNzbInfoInput {
+        id: sn.id,
+        kind: sn.kind,
+        url: url_c.as_ptr(),
+        filename: fn_c.as_ptr(),
+        dest_dir: dest_c.as_ptr(),
+        final_dir: final_c.as_ptr(),
+        hard_link_path: hl_c.as_ptr(),
+        meta_name: meta_c.as_ptr(),
+        queued_filename: qfn_c.as_ptr(),
+        name: name_c.as_ptr(),
+        category: cat_c.as_ptr(),
+        priority: sn.priority,
+        has_post_info: c_int::from(sn.has_post_info),
+        post_stage: sn.post_stage,
+        delete_paused: c_int::from(sn.delete_paused),
+        many_dupe_files: c_int::from(sn.many_dupe_files),
+        feed_id: sn.feed_id,
+        par_status: sn.par_status,
+        unpack_status: sn.unpack_status,
+        move_status: sn.move_status,
+        par_rename_status: sn.par_rename_status,
+        rar_rename_status: sn.rar_rename_status,
+        direct_rename_status: sn.direct_rename_status,
+        delete_status: sn.delete_status,
+        mark_status: sn.mark_status,
+        url_status: sn.url_status,
+        unpack_cleaned_up_disk: c_int::from(sn.unpack_cleaned_up_disk),
+        health_paused: c_int::from(sn.health_paused),
+        add_url_paused: c_int::from(sn.add_url_paused),
+        file_count: sn.file_count,
+        parked_file_count: sn.parked_file_count,
+        message_count: sn.message_count,
+        min_time: sn.min_time as c_int,
+        max_time: sn.max_time as c_int,
+        par_full: c_int::from(sn.par_full),
+        force_par_full: c_int::from(sn.force_par_full),
+        force_repair: c_int::from(sn.force_repair),
+        extra_par_blocks: sn.extra_par_blocks,
+        full_content_hash: sn.full_content_hash,
+        filtered_content_hash: sn.filtered_content_hash,
+        size: sn.size,
+        success_size: sn.success_size,
+        failed_size: sn.failed_size,
+        par_size: sn.par_size,
+        par_success_size: sn.par_success_size,
+        par_failed_size: sn.par_failed_size,
+        total_articles: sn.total_articles,
+        success_articles: sn.success_articles,
+        failed_articles: sn.failed_articles,
+        dupe_key: dkey_c.as_ptr(),
+        dupe_mode: sn.dupe_mode,
+        dupe_score: sn.dupe_score,
+        dupe_hint: sn.dupe_hint,
+        downloaded_size: sn.downloaded_size,
+        download_sec: sn.download_sec,
+        post_total_sec: sn.post_total_sec,
+        par_sec: sn.par_sec,
+        repair_sec: sn.repair_sec,
+        unpack_sec: sn.unpack_sec,
+        skip_script_processing: c_int::from(sn.skip_script_processing),
+        skip_disk_write: c_int::from(sn.skip_disk_write),
+        desired_server_id: sn.desired_server_id,
+    };
+
+    let cf_snaps = qh.nzb_completed_files(nzb_ptr);
+    let mut cf_strs = Vec::with_capacity(cf_snaps.len() * 4);
+    for cf in &cf_snaps {
+        cf_strs.push(bytes_to_cstring_trunc(&cf.hash16k));
+        cf_strs.push(bytes_to_cstring_trunc(&cf.par_set_id));
+        cf_strs.push(bytes_to_cstring_trunc(&cf.filename));
+        cf_strs.push(bytes_to_cstring_trunc(&cf.origname));
+    }
+    let mut completed = Vec::with_capacity(cf_snaps.len());
+    for (i, cf) in cf_snaps.iter().enumerate() {
+        let base = i * 4;
+        completed.push(NzbgetRsDiskCompletedFile {
+            id: cf.id,
+            status: cf.status,
+            crc: cf.crc,
+            par_file: c_int::from(cf.par_file),
+            hash16k: cf_strs[base].as_ptr(),
+            par_set_id: cf_strs[base + 1].as_ptr(),
+            filename: cf_strs[base + 2].as_ptr(),
+            origname: cf_strs[base + 3].as_ptr(),
+        });
+    }
+
+    let plen = qh.nzb_params_len(nzb_ptr);
+    let mut param_strs = Vec::with_capacity(plen * 2);
+    for i in 0..plen {
+        let (k, v) = qh.nzb_param_at(nzb_ptr, i);
+        param_strs.push(bytes_to_cstring_trunc(&k));
+        param_strs.push(bytes_to_cstring_trunc(&v));
+    }
+    let mut params = Vec::with_capacity(plen);
+    for i in 0..plen {
+        params.push(NzbgetRsDiskParam {
+            name: param_strs[i * 2].as_ptr(),
+            value: param_strs[i * 2 + 1].as_ptr(),
+        });
+    }
+
+    let slen = qh.nzb_script_statuses_len(nzb_ptr);
+    let mut script_strs = Vec::with_capacity(slen);
+    let mut script_statuses = Vec::with_capacity(slen);
+    for i in 0..slen {
+        let (st, nm) = qh.nzb_script_status_at(nzb_ptr, i);
+        script_statuses.push(st);
+        script_strs.push(bytes_to_cstring_trunc(&nm));
+    }
+    let scripts: Vec<NzbgetRsDiskScriptStatus> = script_statuses
+        .iter()
+        .zip(script_strs.iter())
+        .map(|(&status, nm)| NzbgetRsDiskScriptStatus {
+            status,
+            name: nm.as_ptr(),
+        })
+        .collect();
+
+    let stlen = qh.nzb_server_stats_len(nzb_ptr);
+    let mut stats = Vec::with_capacity(stlen);
+    for i in 0..stlen {
+        let (sid, succ, fail) = qh.nzb_server_stat_at(nzb_ptr, i);
+        stats.push(NzbgetRsDiskServerStat {
+            server_id: sid,
+            success_articles: succ,
+            failed_articles: fail,
+        });
+    }
+
+    let flen = qh.nzb_file_len(nzb_ptr);
+    let mut files = Vec::with_capacity(flen);
+    for i in 0..flen {
+        let fp = qh.nzb_file_at(nzb_ptr, i);
+        let fs = qh.file_snap(fp);
+        if !fs.deleted {
+            files.push(NzbgetRsDiskFileStub {
+                id: fs.id,
+                paused: c_int::from(fs.paused),
+                extra_priority: c_int::from(fs.extra_priority),
+            });
+        }
+    }
+
+    let jlen = qh.nzb_stream_repair_jobs_len(nzb_ptr);
+    let mut job_details = Vec::with_capacity(jlen);
+    let mut total_holes = 0usize;
+    for i in 0..jlen {
+        let jd = qh.nzb_stream_repair_job_detail(nzb_ptr, i);
+        total_holes += jd.holes.len();
+        job_details.push(jd);
+    }
+    let mut all_holes = Vec::with_capacity(total_holes);
+    let mut job_fns = Vec::with_capacity(jlen);
+    for jd in &job_details {
+        job_fns.push(bytes_to_cstring_trunc(&jd.filename));
+    }
+    let mut jobs = Vec::with_capacity(jlen);
+    for (i, jd) in job_details.iter().enumerate() {
+        let start_idx = all_holes.len();
+        for h in &jd.holes {
+            all_holes.push(NzbgetRsDiskStreamHole {
+                offset: h.offset,
+                size: h.size,
+            });
+        }
+        jobs.push(NzbgetRsDiskRepairJob {
+            file_id: jd.file_id,
+            decoded_file_size: jd.decoded_file_size,
+            failed_size: jd.failed_size,
+            missed_size: jd.missed_size,
+            par_file: c_int::from(jd.par_file),
+            failed_articles: jd.failed_articles,
+            steps_hash: jd.steps_hash,
+            filename: job_fns[i].as_ptr(),
+            holes: if jd.holes.is_empty() {
+                std::ptr::null()
+            } else {
+                unsafe { all_holes.as_ptr().add(start_idx) }
+            },
+            holes_len: jd.holes.len(),
+        });
+    }
+
+    let alen = qh.nzb_extracted_archives_len(nzb_ptr);
+    let mut archive_strs = Vec::with_capacity(alen);
+    for i in 0..alen {
+        archive_strs.push(bytes_to_cstring_trunc(
+            &qh.nzb_extracted_archive_at(nzb_ptr, i),
+        ));
+    }
+    let archive_ptrs: Vec<*const c_char> = archive_strs.iter().map(|c| c.as_ptr()).collect();
+
+    exp.completed = completed.as_ptr();
+    exp.completed_len = completed.len();
+    exp.params = params.as_ptr();
+    exp.params_len = params.len();
+    exp.scripts = scripts.as_ptr();
+    exp.scripts_len = scripts.len();
+    exp.stats = stats.as_ptr();
+    exp.stats_len = stats.len();
+    exp.files = files.as_ptr();
+    exp.files_len = files.len();
+    exp.dupe_recovered_articles = sn.dupe_recovered_articles;
+    exp.dupe_recovered_bytes = sn.dupe_recovered_bytes;
+    exp.dupe_recovered_holes = sn.dupe_recovered_holes;
+    exp.jobs = jobs.as_ptr();
+    exp.jobs_len = jobs.len();
+    exp.direct_unpack_status = sn.direct_unpack_status;
+    exp.unpack_tried = c_int::from(sn.unpack_tried);
+    exp.par_repaired = c_int::from(sn.par_repaired);
+    exp.last_unpack_status = sn.last_unpack_status;
+    exp.archives = archive_ptrs.as_ptr();
+    exp.archives_len = archive_ptrs.len();
+    unsafe { sink_fn(sink_ctx, &exp) };
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn active_disk_apply_nzb_cb(
+    raw_ctx: *mut c_void,
+    mode: c_int,
+    inp_ptr: *const NzbgetRsDiskNzbInfoInput,
+    flags: c_int,
+    completed: *const NzbgetRsDiskCompletedFile,
+    completed_len: usize,
+    params: *const NzbgetRsDiskParam,
+    params_len: usize,
+    scripts: *const NzbgetRsDiskScriptStatus,
+    scripts_len: usize,
+    stats: *const NzbgetRsDiskServerStat,
+    stats_len: usize,
+    files: *const NzbgetRsDiskFileStub,
+    file_times: *const c_int,
+    files_len: usize,
+    job: *const NzbgetRsDiskRepairJob,
+) {
+    use crate::queuesubsys_host::*;
+    let (qh_opt, dq_ptr, nzb_ptr) = {
+        let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
+        (c.qh, c.dq_ptr, c.target_nzb_ptr)
+    };
+    let Some(qh) = qh_opt else {
+        return;
+    };
+    let inp = unsafe { &*inp_ptr };
+    if mode == 5 {
+        qh.history_push_dup(
+            dq_ptr,
+            inp.id,
+            inp.feed_id,
+            inp.par_status,
+            inp.size,
+            inp.full_content_hash,
+            inp.filtered_content_hash,
+            inp.dupe_score,
+            inp.dupe_mode,
+            inp.name,
+            inp.dupe_key,
+        );
+        return;
+    }
+    if nzb_ptr == 0 {
+        return;
+    }
+    if mode == 1 {
+        qh.nzb_set_int(nzb_ptr, NZB_INT_DUPE_RECOVERED_ARTICLES, inp.total_articles);
+        qh.nzb_set_i64(nzb_ptr, NZB_I64_DUPE_RECOVERED_BYTES, inp.size);
+        qh.nzb_set_int(nzb_ptr, NZB_INT_DUPE_RECOVERED_HOLES, inp.failed_articles);
+        return;
+    }
+    if mode == 2 {
+        let jb = unsafe { &*job };
+        let mut holes = Vec::with_capacity(jb.holes_len);
+        if !jb.holes.is_null() {
+            for k in 0..jb.holes_len {
+                let h = unsafe { &*jb.holes.add(k) };
+                holes.push(crate::dupefallback::NzbgetRsByteRange {
+                    offset: h.offset,
+                    size: h.size,
+                });
+            }
+        }
+        qh.nzb_push_stream_repair_job(
+            nzb_ptr,
+            jb.file_id,
+            unsafe { cstr_to_bytes(jb.filename) },
+            jb.decoded_file_size,
+            jb.failed_size,
+            jb.missed_size,
+            jb.failed_articles,
+            jb.par_file != 0,
+            &holes,
+            jb.steps_hash,
+        );
+        return;
+    }
+    if mode == 3 {
+        qh.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_UNPACK_STATUS, inp.par_status);
+        qh.nzb_set_int(
+            nzb_ptr,
+            NZB_INT_UNPACK_TRIED,
+            c_int::from(inp.unpack_status != 0),
+        );
+        qh.nzb_set_int(
+            nzb_ptr,
+            NZB_INT_PAR_REPAIRED,
+            c_int::from(inp.move_status != 0),
+        );
+        qh.nzb_set_int(nzb_ptr, NZB_INT_LAST_UNPACK_STATUS, inp.delete_status);
+        qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, 0);
+        return;
+    }
+    if mode == 4 {
+        let slice = if inp.name.is_null() || flags <= 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(inp.name.cast::<u8>(), flags as usize) }
+        };
+        qh.nzb_push_extracted_archive(nzb_ptr, slice);
+        return;
+    }
+
+    qh.nzb_set_int(nzb_ptr, NZB_INT_ID, inp.id);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_KIND, inp.kind);
+    qh.nzb_set_str(nzb_ptr, NZB_STR_URL, unsafe { cstr_to_bytes(inp.url) });
+    qh.nzb_set_str(nzb_ptr, NZB_STR_FILENAME, unsafe {
+        cstr_to_bytes(inp.filename)
+    });
+    qh.nzb_set_str(nzb_ptr, NZB_STR_DEST_DIR, unsafe {
+        cstr_to_bytes(inp.dest_dir)
+    });
+    qh.nzb_set_str(nzb_ptr, NZB_STR_FINAL_DIR, unsafe {
+        cstr_to_bytes(inp.final_dir)
+    });
+    if !inp.hard_link_path.is_null() {
+        qh.nzb_set_str(nzb_ptr, NZB_STR_HARD_LINK_PATH, unsafe {
+            cstr_to_bytes(inp.hard_link_path)
+        });
+    }
+    if !inp.meta_name.is_null() {
+        qh.nzb_set_meta_name(nzb_ptr, unsafe { cstr_to_bytes(inp.meta_name) });
+    }
+    qh.nzb_set_str(nzb_ptr, NZB_STR_QUEUED_FILENAME, unsafe {
+        cstr_to_bytes(inp.queued_filename)
+    });
+    if !inp.name.is_null() {
+        qh.nzb_set_str(nzb_ptr, NZB_STR_NAME, unsafe { cstr_to_bytes(inp.name) });
+    }
+    qh.nzb_set_str(nzb_ptr, NZB_STR_CATEGORY, unsafe {
+        cstr_to_bytes(inp.category)
+    });
+    qh.nzb_set_int(nzb_ptr, NZB_INT_PRIORITY, inp.priority);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_DELETE_PAUSED, inp.delete_paused);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_MANY_DUPE_FILES, inp.many_dupe_files);
+    if inp.has_post_info != 0 {
+        qh.nzb_action(nzb_ptr, NZB_ACT_ENTER_POST_PROCESS, 0);
+        qh.nzb_set_int(nzb_ptr, NZB_INT_POST_STAGE, inp.post_stage);
+    }
+    qh.nzb_set_int(nzb_ptr, NZB_INT_FEED_ID, inp.feed_id);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_PAR_STATUS, inp.par_status);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_STATUS, inp.unpack_status);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_MOVE_STATUS, inp.move_status);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_PAR_RENAME_STATUS, inp.par_rename_status);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_RAR_RENAME_STATUS, inp.rar_rename_status);
+    qh.nzb_set_int(
+        nzb_ptr,
+        NZB_INT_DIRECT_RENAME_STATUS,
+        inp.direct_rename_status,
+    );
+    qh.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, inp.delete_status);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_MARK_STATUS, inp.mark_status);
+    if inp.kind == NK_NZB || inp.url_status >= LS_FAILED {
+        qh.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, inp.url_status);
+    }
+    qh.nzb_set_int(
+        nzb_ptr,
+        NZB_INT_UNPACK_CLEANED_UP_DISK,
+        inp.unpack_cleaned_up_disk,
+    );
+    qh.nzb_set_int(nzb_ptr, NZB_INT_HEALTH_PAUSED, inp.health_paused);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_ADD_URL_PAUSED, inp.add_url_paused);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_FILE_COUNT, inp.file_count);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_PARKED_FILE_COUNT, inp.parked_file_count);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_MESSAGE_COUNT, inp.message_count);
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_MIN_TIME, i64::from(inp.min_time));
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_MAX_TIME, i64::from(inp.max_time));
+    if (flags & 1) != 0 {
+        qh.nzb_set_int(nzb_ptr, NZB_INT_PAR_FULL, inp.par_full);
+        qh.nzb_set_int(nzb_ptr, NZB_INT_EXTRA_PAR_BLOCKS, inp.extra_par_blocks);
+        let fbits = (if inp.force_par_full != 0 { 1 } else { 0 })
+            | (if inp.force_repair != 0 { 2 } else { 0 });
+        qh.nzb_set_int(nzb_ptr, NZB_INT_POST_FORCE_FLAGS, fbits);
+    }
+    qh.nzb_set_int(nzb_ptr, NZB_INT_FULL_HASH, inp.full_content_hash as i32);
+    qh.nzb_set_int(
+        nzb_ptr,
+        NZB_INT_FILTERED_HASH,
+        inp.filtered_content_hash as i32,
+    );
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_SIZE, inp.size);
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_SUCCESS_SIZE, inp.success_size);
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_FAILED_SIZE, inp.failed_size);
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_CUR_SUCCESS_SIZE, inp.success_size);
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_CUR_FAILED_SIZE, inp.failed_size);
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_PAR_SIZE, inp.par_size);
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_PAR_SUCCESS_SIZE, inp.par_success_size);
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_PAR_FAILED_SIZE, inp.par_failed_size);
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_PAR_CUR_SUCCESS_SIZE, inp.par_success_size);
+    qh.nzb_set_i64(nzb_ptr, NZB_I64_PAR_CUR_FAILED_SIZE, inp.par_failed_size);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_TOTAL_ARTICLES, inp.total_articles);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_SUCCESS_ARTICLES, inp.success_articles);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_FAILED_ARTICLES, inp.failed_articles);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_CUR_SUCCESS_ARTICLES, inp.success_articles);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_CUR_FAILED_ARTICLES, inp.failed_articles);
+    qh.nzb_set_str(nzb_ptr, NZB_STR_DUPE_KEY, unsafe {
+        cstr_to_bytes(inp.dupe_key)
+    });
+    qh.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, inp.dupe_mode);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_DUPE_SCORE, inp.dupe_score);
+    qh.nzb_set_int(nzb_ptr, NZB_INT_DUPE_HINT, inp.dupe_hint);
+    if (flags & 2) != 0 {
+        qh.nzb_set_i64(nzb_ptr, NZB_I64_DOWNLOADED_SIZE, inp.downloaded_size);
+        qh.nzb_set_int(nzb_ptr, NZB_INT_DOWNLOAD_SEC, inp.download_sec);
+        qh.nzb_set_int(nzb_ptr, NZB_INT_POST_TOTAL_SEC, inp.post_total_sec);
+        qh.nzb_set_int(nzb_ptr, NZB_INT_PAR_SEC, inp.par_sec);
+        qh.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, inp.repair_sec);
+        qh.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_SEC, inp.unpack_sec);
+    }
+    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_COMPLETED_FILES, 0);
+    if !completed.is_null() {
+        for i in 0..completed_len {
+            let cf = unsafe { &*completed.add(i) };
+            qh.nzb_push_completed_file_raw(
+                nzb_ptr,
+                cf.id,
+                cf.status,
+                cf.crc,
+                cf.par_file != 0,
+                cf.filename,
+                cf.origname,
+                cf.hash16k,
+                cf.par_set_id,
+            );
+        }
+    }
+    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_PARAMS, 0);
+    if (flags & 4) != 0 {
+        qh.nzb_set_int(
+            nzb_ptr,
+            NZB_INT_SKIP_SCRIPT_PROCESSING,
+            inp.skip_script_processing,
+        );
+        qh.nzb_set_int(nzb_ptr, NZB_INT_SKIP_DISK_WRITE, inp.skip_disk_write);
+        qh.nzb_set_int(nzb_ptr, NZB_INT_DESIRED_SERVER_ID, inp.desired_server_id);
+    }
+    if !params.is_null() {
+        for i in 0..params_len {
+            let p = unsafe { &*params.add(i) };
+            qh.nzb_set_param(
+                nzb_ptr,
+                unsafe { cstr_to_bytes(p.name) },
+                Some(unsafe { cstr_to_bytes(p.value) }),
+            );
+        }
+    }
+    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES, 0);
+    if !scripts.is_null() {
+        for i in 0..scripts_len {
+            let sc = unsafe { &*scripts.add(i) };
+            qh.nzb_push_script_status(nzb_ptr, unsafe { cstr_to_bytes(sc.name) }, sc.status);
+        }
+    }
+    if !stats.is_null() && stats_len > 0 {
+        let st_slice = unsafe { std::slice::from_raw_parts(stats, stats_len) };
+        apply_active_server_stats_nzb(qh, nzb_ptr, st_slice);
+    }
+    qh.nzb_sync_current_server_stats(nzb_ptr);
+    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_FILE_LIST, 0);
+    if !files.is_null() {
+        for i in 0..files_len {
+            let fs = unsafe { &*files.add(i) };
+            let tm = if (flags & 8) != 0 && !file_times.is_null() {
+                Some(unsafe { *file_times.add(i) })
+            } else {
+                None
+            };
+            qh.nzb_add_stub_file(nzb_ptr, fs.id, fs.paused != 0, tm, fs.extra_priority != 0);
+        }
+    }
+    qh.nzb_action(nzb_ptr, NZB_ACT_CLEAR_REPAIR_JOBS, 0);
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn active_disk_export_file_cb(
+    raw_ctx: *mut c_void,
+    mode: c_int,
+    sink_ctx: *mut c_void,
+    sink_fn: DiskFileSinkFn,
+) {
+    let (qh_opt, fp) = {
+        let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
+        (c.qh, c.target_file_ptr)
+    };
+    let Some(qh) = qh_opt else {
+        return;
+    };
+    if fp == 0 {
+        return;
+    }
+    let fs = qh.file_snap(fp);
+    let mut exp: NzbgetRsDiskFileExport = unsafe { std::mem::zeroed() };
+    exp.file_id = fs.id;
+    exp.has_articles = c_int::from(fs.articles_len > 0);
+    exp.articles_len_count = fs.articles_len as c_int;
+    exp.force_direct_write = c_int::from(fs.force_direct_write);
+
+    let fn_c = bytes_to_cstring_trunc(&fs.filename);
+    let out_c = bytes_to_cstring_trunc(&fs.output_filename);
+    if mode == 4 {
+        let dest_c = if fs.nzb_ptr != 0 {
+            Some(bytes_to_cstring_trunc(
+                &qh.nzb_snap(fs.nzb_ptr, false).dest_dir,
+            ))
+        } else {
+            None
+        };
+        exp.info.subject = dest_c.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+        exp.info.filename = fn_c.as_ptr();
+        exp.info.output_filename = out_c.as_ptr();
+        exp.info.output_initialized = c_int::from(fs.output_initialized);
+        unsafe { sink_fn(sink_ctx, &exp) };
+        return;
+    }
+    if mode == 0 || mode == 1 {
+        let subj_c = bytes_to_cstring_trunc(&fs.subject);
+        let orig_c = bytes_to_cstring_trunc(&fs.origname);
+        exp.info = NzbgetRsDiskFileInfoInput {
+            subject: subj_c.as_ptr(),
+            filename: fn_c.as_ptr(),
+            origname: orig_c.as_ptr(),
+            output_filename: out_c.as_ptr(),
+            filename_confirmed: c_int::from(fs.filename_confirmed),
+            time: fs.time as c_int,
+            output_initialized: c_int::from(fs.output_initialized),
+            size: fs.size,
+            missed_size: fs.missed_size,
+            par_file: c_int::from(fs.par_file),
+            total_articles: fs.total_articles,
+            missed_articles: fs.missed_articles,
+        };
+        let grp_bytes = qh.file_groups(fp);
+        let grp_strs: Vec<std::ffi::CString> = grp_bytes
+            .iter()
+            .map(|g| bytes_to_cstring_trunc(g))
+            .collect();
+        let grp_ptrs: Vec<*const c_char> = grp_strs.iter().map(|g| g.as_ptr()).collect();
+
+        let mut art_mids = Vec::new();
+        let mut art_meta = Vec::new();
+        if mode == 0 {
+            art_mids.reserve(fs.articles_len);
+            art_meta.reserve(fs.articles_len);
+            for i in 0..fs.articles_len {
+                let (art, _) = qh.file_article_raw_at(fp, i);
+                let chosen = if !art.dupe_original_message_id.is_empty() {
+                    &art.dupe_original_message_id
+                } else {
+                    &art.message_id
+                };
+                art_mids.push(bytes_to_cstring_trunc(chosen));
+                art_meta.push((art.part_number, art.size));
+            }
+        }
+        let art_entries: Vec<NzbgetRsDiskArticleInfo> = art_meta
+            .iter()
+            .zip(art_mids.iter())
+            .map(|(&(part_number, size), mid)| NzbgetRsDiskArticleInfo {
+                part_number,
+                size,
+                message_id: mid.as_ptr(),
+            })
+            .collect();
+
+        exp.groups = grp_ptrs.as_ptr();
+        exp.groups_len = grp_ptrs.len();
+        exp.articles = art_entries.as_ptr();
+        exp.articles_len = art_entries.len();
+        unsafe { sink_fn(sink_ctx, &exp) };
+        return;
+    }
+
+    let completed = mode == 3;
+    let h16_c = bytes_to_cstring_trunc(&fs.hash16k);
+    let psid_c = bytes_to_cstring_trunc(&fs.par_set_id);
+    exp.state = NzbgetRsDiskFileStateInput {
+        success_articles: fs.success_articles,
+        failed_articles: fs.failed_articles,
+        remaining_size: fs.remaining_size,
+        success_size: fs.success_size,
+        failed_size: fs.failed_size,
+        filename: fn_c.as_ptr(),
+        hash16k: h16_c.as_ptr(),
+        par_set_id: psid_c.as_ptr(),
+        par_file: c_int::from(fs.par_file),
+        decoded_file_size: fs.decoded_file_size,
+        output_initialized: c_int::from(fs.output_initialized),
+    };
+    let stlen = qh.file_server_stats_len(fp);
+    let mut stats = Vec::with_capacity(stlen);
+    for i in 0..stlen {
+        let (sid, succ, fail) = qh.file_server_stat_at(fp, i);
+        stats.push(NzbgetRsDiskServerStat {
+            server_id: sid,
+            success_articles: succ,
+            failed_articles: fail,
+        });
+    }
+    let mut articles = Vec::with_capacity(fs.articles_len);
+    for i in 0..fs.articles_len {
+        let (art, has_res_fn) = qh.file_article_raw_at(fp, i);
+        let staged_fallback = c_int::from(
+            !completed
+                && art.status == crate::queuesubsys_host::AI_FINISHED
+                && art.dupe_fallback_round > 0
+                && has_res_fn,
+        );
+        let saved_status = if staged_fallback != 0 {
+            crate::queuesubsys_host::AI_UNDEFINED
+        } else {
+            art.status
+        };
+        articles.push(NzbgetRsDiskArticleState {
+            saved_status,
+            segment_offset: art.segment_offset,
+            segment_size: art.segment_size,
+            crc: art.crc,
+            staged_fallback,
+        });
+    }
+    exp.stats = stats.as_ptr();
+    exp.stats_len = stats.len();
+    exp.article_states = articles.as_ptr();
+    exp.article_states_len = articles.len();
+    unsafe { sink_fn(sink_ctx, &exp) };
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn active_disk_apply_file_cb(
+    raw_ctx: *mut c_void,
+    mode: c_int,
+    idx_or_flags: c_int,
+    extra_i32: c_int,
+    seg_offset: i64,
+    crc: u32,
+    str_arg: *const c_char,
+    finfo_ptr: *const NzbgetRsDiskFileInfoInput,
+    art_info_ptr: *const NzbgetRsDiskArticleInfo,
+    fstate_ptr: *const NzbgetRsDiskFileStateInput,
+    stats: *const NzbgetRsDiskServerStat,
+    stats_len: usize,
+) -> c_int {
+    use crate::queuesubsys_host::*;
+    let (qh_opt, fp) = {
+        let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
+        (c.qh, c.target_file_ptr)
+    };
+    let Some(qh) = qh_opt else {
+        return 0;
+    };
+    if fp == 0 {
+        return 0;
+    }
+    if mode == 0 {
+        let finfo = unsafe { &*finfo_ptr };
+        if (idx_or_flags & 1) != 0 {
+            qh.file_set_str(
+                fp,
+                FILE_STR_OUTPUT_FILENAME,
+                Some(unsafe { cstr_to_bytes(finfo.output_filename) }),
+            );
+        }
+        if extra_i32 != 0 {
+            let subj = unsafe { cstr_to_bytes(finfo.subject) };
+            if !subj.is_empty() {
+                qh.file_set_str(fp, FILE_STR_SUBJECT, Some(subj));
+            }
+            let fn_b = unsafe { cstr_to_bytes(finfo.filename) };
+            if !fn_b.is_empty() {
+                qh.file_set_str(fp, FILE_STR_FILENAME, Some(fn_b));
+            }
+            let orig_b = unsafe { cstr_to_bytes(finfo.origname) };
+            if !orig_b.is_empty() {
+                qh.file_set_str(fp, FILE_STR_ORIGNAME, Some(orig_b));
+            }
+            if (idx_or_flags & 2) != 0 {
+                qh.file_set_int(fp, FILE_INT_FILENAME_CONFIRMED, finfo.filename_confirmed);
+            }
+            if (idx_or_flags & 4) != 0 {
+                qh.file_set_i64(fp, FILE_I64_TIME, i64::from(finfo.time));
+            }
+            if (idx_or_flags & 8) != 0 {
+                qh.file_set_int(fp, FILE_INT_OUTPUT_INITIALIZED, finfo.output_initialized);
+            }
+            qh.file_set_i64(fp, FILE_I64_SIZE, finfo.size);
+            qh.file_set_i64(fp, FILE_I64_MISSED_SIZE, finfo.missed_size);
+            qh.file_set_i64(fp, FILE_I64_REMAINING_SIZE, finfo.size - finfo.missed_size);
+            qh.file_set_int(fp, FILE_INT_PAR_FILE, finfo.par_file);
+            qh.file_set_int(fp, FILE_INT_TOTAL_ARTICLES, finfo.total_articles);
+            qh.file_set_int(fp, FILE_INT_MISSED_ARTICLES, finfo.missed_articles);
+        }
+        return 0;
+    }
+    if mode == 1 {
+        if !str_arg.is_null() {
+            qh.file_push_group(fp, str_arg);
+        }
+        if !art_info_ptr.is_null() {
+            let ai = unsafe { &*art_info_ptr };
+            qh.file_push_article_basic(fp, ai.part_number, ai.size, ai.message_id);
+        }
+        return 0;
+    }
+    if mode == 2 {
+        return qh.file_article_disk_op(
+            fp,
+            idx_or_flags,
+            false,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+        );
+    }
+    if mode == 3 {
+        let fst = unsafe { &*fstate_ptr };
+        return qh.file_article_disk_op(
+            fp,
+            idx_or_flags,
+            true,
+            extra_i32,
+            seg_offset,
+            fst.success_articles,
+            crc,
+            fst.failed_articles,
+            fst.par_file,
+            str_arg,
+        );
+    }
+    if mode == 4 {
+        let fst = unsafe { &*fstate_ptr };
+        qh.file_set_int(fp, FILE_INT_SUCCESS_ARTICLES, fst.success_articles);
+        qh.file_set_int(fp, FILE_INT_FAILED_ARTICLES, fst.failed_articles);
+        qh.file_set_i64(fp, FILE_I64_REMAINING_SIZE, fst.remaining_size);
+        qh.file_set_i64(fp, FILE_I64_SUCCESS_SIZE, fst.success_size);
+        qh.file_set_i64(fp, FILE_I64_FAILED_SIZE, fst.failed_size);
+        if (idx_or_flags & 1) != 0 {
+            qh.file_set_i64(fp, FILE_I64_DECODED_FILE_SIZE, fst.decoded_file_size);
+        }
+        if (idx_or_flags & 2) != 0 {
+            qh.file_set_str(
+                fp,
+                FILE_STR_FILENAME,
+                Some(unsafe { cstr_to_bytes(fst.filename) }),
+            );
+        }
+        if (idx_or_flags & 4) != 0 {
+            let h16 = unsafe { cstr_to_bytes(fst.hash16k) };
+            qh.file_set_str(
+                fp,
+                FILE_STR_HASH16K,
+                if h16.is_empty() { None } else { Some(h16) },
+            );
+            qh.file_set_int(fp, FILE_INT_PAR_FILE, fst.par_file);
+        }
+        if (idx_or_flags & 8) != 0 {
+            let psid = unsafe { cstr_to_bytes(fst.par_set_id) };
+            qh.file_set_str(
+                fp,
+                FILE_STR_PAR_SET_ID,
+                if psid.is_empty() { None } else { Some(psid) },
+            );
+        }
+        if !stats.is_null() && stats_len > 0 {
+            let st_slice = unsafe { std::slice::from_raw_parts(stats, stats_len) };
+            apply_active_server_stats_file(qh, fp, st_slice);
+        }
+        qh.file_set_int(fp, FILE_INT_COMPLETED_ARTICLES, extra_i32);
+        if (idx_or_flags & 16) != 0 {
+            qh.file_set_int(fp, FILE_INT_OUTPUT_INITIALIZED, fst.output_initialized);
+        }
+        if !str_arg.is_null() {
+            qh.file_set_str(
+                fp,
+                FILE_STR_OUTPUT_FILENAME,
+                Some(unsafe { cstr_to_bytes(str_arg) }),
+            );
+        }
+    }
+    0
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn active_disk_aux_cb(
+    raw_ctx: *mut c_void,
+    op: c_int,
+    _a1: c_int,
+    _a2: c_int,
+    _u1: u32,
+    _s1: *const c_char,
+    _s2: *const c_char,
+    _vol_item: *const c_void,
+    sink_ctx: *mut c_void,
+    sink_fn_opt: Option<DiskAuxSinkFn>,
+) {
+    if op != 0 {
+        return;
+    }
+    let Some(sink_fn) = sink_fn_opt else {
+        return;
+    };
+    let (qh_opt, dq_ptr) = {
+        let c = unsafe { &*raw_ctx.cast::<ActiveDiskExecCtx<'_>>() };
+        (c.qh, c.dq_ptr)
+    };
+    let Some(qh) = qh_opt else {
+        return;
+    };
+    let emit_nzb = |n: usize| unsafe {
+        let sn = qh.nzb_snap(n, false);
+        sink_fn(
+            sink_ctx,
+            1,
+            sn.id,
+            0,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+        );
+        let flen = qh.nzb_file_len(n);
+        for i in 0..flen {
+            let fp = qh.nzb_file_at(n, i);
+            sink_fn(
+                sink_ctx,
+                0,
+                qh.file_snap(fp).id,
+                0,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+        }
+        let cflen = qh.nzb_completed_files_len(n);
+        for i in 0..cflen {
+            let cf = qh.nzb_completed_file_at(n, i);
+            sink_fn(
+                sink_ctx,
+                0,
+                cf.id,
+                0,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            );
+        }
+    };
+
+    let qlen = qh.queue_len(dq_ptr);
+    for i in 0..qlen {
+        emit_nzb(qh.queue_at(dq_ptr, i));
+    }
+    let hlen = qh.history_len(dq_ptr);
+    for i in 0..hlen {
+        let hi = qh.history_at(dq_ptr, i);
+        if hi.kind == crate::queuesubsys_host::HK_NZB || hi.kind == crate::queuesubsys_host::HK_URL
+        {
+            emit_nzb(hi.inner_ptr);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn run_active_diskstate_exec(
+    op: c_int,
+    ctx: &mut ActiveDiskExecCtx<'_>,
+    a1: c_int,
+    a2: c_int,
+    a3: c_int,
+    a4: c_int,
+    time_str: *const c_char,
+    text: *const c_char,
+    out_flag: *mut c_int,
+) -> c_int {
+    let opts = crate::options::active_options();
+    let qdir_c = opts
+        .as_ref()
+        .map(|o| bytes_to_cstring_trunc(o.str_bytes(6)));
+    let tdir_c = opts
+        .as_ref()
+        .map(|o| bytes_to_cstring_trunc(o.str_bytes(5)));
+    let (has_options, flush_queue, direct_write, continue_partial) = match opts.as_ref() {
+        Some(o) => {
+            let sc = o.scalars();
+            (
+                1,
+                c_int::from(sc.flush_queue != 0),
+                c_int::from(sc.direct_write != 0),
+                c_int::from(sc.continue_partial != 0),
+            )
+        }
+        None => (0, 0, 0, 0),
+    };
+    let now = unsafe { libc::time(std::ptr::null_mut()) } as i64;
+    let env = NzbgetRsDiskStateEnv {
+        ctx: (ctx as *mut ActiveDiskExecCtx<'_>).cast(),
+        queue_dir: qdir_c.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+        temp_dir: tdir_c.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+        line_ending: c"\n".as_ptr(),
+        time_str,
+        text,
+        sep: c_int::from(crate::paths::PATH_SEPARATOR as u8),
+        has_options,
+        flush_queue,
+        direct_write,
+        continue_partial,
+        pt_finished: crate::queuesubsys_host::PT_FINISHED,
+        ns_running: crate::queuesubsys_host::NS_RUNNING,
+        ns_none: crate::queuesubsys_host::NS_NONE,
+        a1,
+        a2,
+        a3,
+        a4,
+        now,
+        out_flag,
+        log_cb: Some(active_disk_log_cb),
+        ctrl_cb: Some(active_disk_ctrl_cb),
+        export_nzb_cb: Some(active_disk_export_nzb_cb),
+        apply_nzb_cb: Some(active_disk_apply_nzb_cb),
+        export_file_cb: Some(active_disk_export_file_cb),
+        apply_file_cb: Some(active_disk_apply_file_cb),
+        aux_cb: Some(active_disk_aux_cb),
+    };
+    unsafe { diskstate_exec(op, &env) }
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_queue_exists() -> bool {
+    let mut ctx = ActiveDiskExecCtx::new(None);
+    run_active_diskstate_exec(
+        1,
+        &mut ctx,
+        0,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    ) != 0
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_discard_queue() {
+    let mut ctx = ActiveDiskExecCtx::new(None);
+    run_active_diskstate_exec(
+        0,
+        &mut ctx,
+        0,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    );
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_discard_file(
+    file_id: i32,
+    del_data: bool,
+    del_part: bool,
+    del_compl: bool,
+) {
+    let mut ctx = ActiveDiskExecCtx::new(None);
+    run_active_diskstate_exec(
+        2,
+        &mut ctx,
+        file_id,
+        c_int::from(del_data),
+        c_int::from(del_part),
+        c_int::from(del_compl),
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    );
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_discard_files(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+    delete_log: bool,
+) {
+    let flen = qh.nzb_file_len(nzb_ptr);
+    for i in 0..flen {
+        let fp = qh.nzb_file_at(nzb_ptr, i);
+        active_disk_discard_file(qh.file_snap(fp).id, true, true, true);
+    }
+    let cflen = qh.nzb_completed_files_len(nzb_ptr);
+    for i in 0..cflen {
+        let cf = qh.nzb_completed_file_at(nzb_ptr, i);
+        if cf.status != crate::queuesubsys_host::CF_SUCCESS {
+            active_disk_discard_file(cf.id, true, true, true);
+        }
+    }
+    if delete_log {
+        let nzb_id = qh.nzb_snap(nzb_ptr, false).id;
+        let mut ctx = ActiveDiskExecCtx::new(None);
+        run_active_diskstate_exec(
+            5,
+            &mut ctx,
+            nzb_id,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+        );
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_load_queue(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+) -> bool {
+    let mut ctx = ActiveDiskExecCtx::new(Some(qh));
+    ctx.dq_ptr = dq_ptr;
+    let mut legacy = 0;
+    let ok = run_active_diskstate_exec(
+        16,
+        &mut ctx,
+        0,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        &mut legacy,
+    ) != 0;
+    if legacy != 0 {
+        ACTIVE_LEGACY_QUEUE_READ.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    ok
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_save_queue(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    save_history: bool,
+) -> bool {
+    let mut ctx = ActiveDiskExecCtx::new(Some(qh));
+    ctx.dq_ptr = dq_ptr;
+    run_active_diskstate_exec(
+        15,
+        &mut ctx,
+        0,
+        c_int::from(save_history),
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    ) != 0
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_save_progress(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+) -> bool {
+    let mut ctx = ActiveDiskExecCtx::new(Some(qh));
+    ctx.dq_ptr = dq_ptr;
+    run_active_diskstate_exec(
+        15,
+        &mut ctx,
+        1,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    ) != 0
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_save_all_file_infos(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+) -> bool {
+    let mut ctx = ActiveDiskExecCtx::new(Some(qh));
+    ctx.dq_ptr = dq_ptr;
+    run_active_diskstate_exec(
+        15,
+        &mut ctx,
+        2,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    ) != 0
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_cleanup_temp_dir(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+) {
+    let mut ctx = ActiveDiskExecCtx::new(Some(qh));
+    ctx.dq_ptr = dq_ptr;
+    run_active_diskstate_exec(
+        8,
+        &mut ctx,
+        0,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    );
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_save_file(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    file_ptr: usize,
+    replace: bool,
+) -> bool {
+    let mut ctx = ActiveDiskExecCtx::new(Some(qh));
+    ctx.target_file_ptr = file_ptr;
+    run_active_diskstate_exec(
+        13,
+        &mut ctx,
+        0,
+        c_int::from(replace),
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    ) != 0
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_load_file(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    file_ptr: usize,
+    file_summary: bool,
+    articles: bool,
+) -> bool {
+    let mut ctx = ActiveDiskExecCtx::new(Some(qh));
+    ctx.target_file_ptr = file_ptr;
+    run_active_diskstate_exec(
+        14,
+        &mut ctx,
+        0,
+        c_int::from(file_summary),
+        c_int::from(articles),
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    ) != 0
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_save_file_state(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    file_ptr: usize,
+    completed: bool,
+    replace: bool,
+) -> bool {
+    let mut ctx = ActiveDiskExecCtx::new(Some(qh));
+    ctx.target_file_ptr = file_ptr;
+    run_active_diskstate_exec(
+        13,
+        &mut ctx,
+        if completed { 2 } else { 1 },
+        c_int::from(replace),
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    ) != 0
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_load_file_state(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    file_ptr: usize,
+    completed: bool,
+) -> bool {
+    let mut ctx = ActiveDiskExecCtx::new(Some(qh));
+    ctx.target_file_ptr = file_ptr;
+    run_active_diskstate_exec(
+        14,
+        &mut ctx,
+        if completed { 2 } else { 1 },
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    ) != 0
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_resave_completed_file_state(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    file_id: i32,
+) {
+    let fi_ptr = qh.file_new_standalone(file_id, false);
+    if fi_ptr == 0 {
+        return;
+    }
+    struct FiGuard<'a>(&'a crate::queuesubsys_host::QueueSubsysHost, usize);
+    impl Drop for FiGuard<'_> {
+        fn drop(&mut self) {
+            self.0.delete_file_info(self.1);
+        }
+    }
+    let _g = FiGuard(qh, fi_ptr);
+    if active_disk_load_file_state(qh, fi_ptr, true) {
+        active_disk_save_file_state(qh, fi_ptr, true, false);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_load_completed_segments(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    file_id: i32,
+    push_ctx: usize,
+    push_fn: usize,
+) -> usize {
+    let fi_ptr = qh.file_new_standalone(file_id, false);
+    if fi_ptr == 0 {
+        return 0;
+    }
+    struct FiGuard<'a>(&'a crate::queuesubsys_host::QueueSubsysHost, usize);
+    impl Drop for FiGuard<'_> {
+        fn drop(&mut self) {
+            self.0.delete_file_info(self.1);
+        }
+    }
+    let _g = FiGuard(qh, fi_ptr);
+    if !active_disk_load_file_state(qh, fi_ptr, true) {
+        return 0;
+    }
+    let push: unsafe extern "C" fn(usize, c_int, i64, c_int, u32) =
+        unsafe { std::mem::transmute(push_fn) };
+    let fs = qh.file_snap(fi_ptr);
+    let mut any = false;
+    for idx in 0..fs.articles_len {
+        let (art, _) = qh.file_article_raw_at(fi_ptr, idx);
+        unsafe {
+            push(
+                push_ctx,
+                c_int::from(art.status == crate::queuesubsys_host::AI_FINISHED),
+                art.segment_offset,
+                art.segment_size,
+                art.crc,
+            );
+        }
+        any = true;
+    }
+    if any {
+        2
+    } else {
+        1
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn active_disk_load_file_for_inspect(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    file_id: i32,
+    load_info_data: bool,
+    try_load_completed_state: bool,
+) -> (usize, bool) {
+    let fi_ptr = qh.file_new_standalone(file_id, load_info_data);
+    if fi_ptr == 0 {
+        return (0, false);
+    }
+    if !active_disk_load_file(qh, fi_ptr, load_info_data, true) {
+        qh.delete_file_info(fi_ptr);
+        return (0, false);
+    }
+    let state_ok = try_load_completed_state && active_disk_load_file_state(qh, fi_ptr, true);
+    (fi_ptr, state_ok)
+}
+
+#[cfg(unix)]
+pub(crate) fn load_active_nzb_messages(nzb_id: i32) -> Vec<(i32, i32, i32, std::ffi::CString)> {
+    let mut ctx = ActiveDiskExecCtx::new(None);
+    run_active_diskstate_exec(
+        7,
+        &mut ctx,
+        nzb_id,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        std::ptr::null(),
+        std::ptr::null_mut(),
+    );
+    std::mem::take(&mut ctx.messages)
+}
+
+#[cfg(unix)]
+pub(crate) unsafe fn append_active_nzb_message(nzb_id: i32, kind: i32, text: *const c_char) {
+    let tm = unsafe { libc::time(std::ptr::null_mut()) } as i64;
+    let corr =
+        crate::options::active_options().map_or(0i64, |o| i64::from(o.scalars().time_correction));
+    let mut time_buf = [0u8; 100];
+    crate::util::util_format_time(tm + corr, &mut time_buf);
+    let mut ctx = ActiveDiskExecCtx::new(None);
+    run_active_diskstate_exec(
+        6,
+        &mut ctx,
+        nzb_id,
+        tm as c_int,
+        kind,
+        0,
+        time_buf.as_ptr().cast(),
+        text,
+        std::ptr::null_mut(),
+    );
+}
+
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nzbget_rs_diskstate_op(
+    op: c_int,
+    p1: usize,
+    a1: c_int,
+    s1: *const c_char,
+) -> c_int {
+    match op {
+        0 => {
+            let Some(qh) = crate::ffi::queue_host() else {
+                return 0;
+            };
+            c_int::from(active_disk_save_queue(&qh, p1, a1 != 0))
+        }
+        1 => {
+            let Some(qh) = crate::ffi::queue_host() else {
+                return 0;
+            };
+            c_int::from(active_disk_save_progress(&qh, p1))
+        }
+        2 => {
+            unsafe { append_active_nzb_message(p1 as i32, a1, s1) };
+            1
+        }
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

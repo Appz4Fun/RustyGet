@@ -2035,7 +2035,7 @@ mod tests {
         let mut scalars = NzbgetRsParsedOptions::default();
         let mut flags = 0;
         unsafe {
-            let log = nzbget_rs_log_new(0, None);
+            let log = nzbget_rs_log_new(0);
             let opts = nzbget_rs_options_new(
                 c"rustyget".as_ptr(),
                 ptr::null(),

@@ -41,6 +41,30 @@ pub unsafe fn inspect_preflight(argc: c_int, argv: *const *mut c_char) -> Entryp
     EntrypointRoute::DaemonLifecycle
 }
 
+struct ProcessArgs {
+    argc: c_int,
+    argv: usize,
+    argp: usize,
+}
+
+static PROCESS_ARGS: std::sync::RwLock<ProcessArgs> = std::sync::RwLock::new(ProcessArgs {
+    argc: 0,
+    argv: 0,
+    argp: 0,
+});
+
+pub(crate) fn process_args() -> (c_int, *mut *mut c_char, *mut *mut c_char) {
+    PROCESS_ARGS
+        .read()
+        .map_or((0, ptr::null_mut(), ptr::null_mut()), |g| {
+            (
+                g.argc,
+                g.argv as *mut *mut c_char,
+                g.argp as *mut *mut c_char,
+            )
+        })
+}
+
 /// Initializes platform, locale, RNG, rapidyenc, and argument globals.
 pub unsafe fn init_platform(argc: c_int, argv: *mut *mut c_char, argp: *mut *mut c_char) {
     #[cfg(windows)]
@@ -56,13 +80,16 @@ pub unsafe fn init_platform(argc: c_int, argv: *mut *mut c_char, argp: *mut *mut
         setlocale(LC_CTYPE, c"".as_ptr());
     }
 
+    if let Ok(mut g) = PROCESS_ARGS.write() {
+        g.argc = argc;
+        g.argv = argv as usize;
+        g.argp = argp as usize;
+    }
+
     let hooks = get_hooks().or_else(resolve_hooks);
     if let Some(hooks) = hooks {
         if let Some(util_init) = hooks.util_init {
             util_init();
-        }
-        if let Some(set_args) = hooks.set_process_args {
-            set_args(argc, argv, argp);
         }
     }
 

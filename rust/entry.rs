@@ -7,7 +7,6 @@ use std::ffi::{c_char, c_int};
 
 #[repr(C)]
 pub struct LifecycleHooks {
-    pub set_process_args: unsafe extern "C" fn(c_int, *mut *mut c_char, *mut *mut c_char),
     pub util_init: unsafe extern "C" fn(),
     pub nserv_main: unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int,
     pub phase1_init: unsafe extern "C" fn(bool) -> c_int,
@@ -22,7 +21,6 @@ pub struct LifecycleHooks {
 }
 
 extern "C" {
-    fn nzbget_c_set_process_args(argc: c_int, argv: *mut *mut c_char, argp: *mut *mut c_char);
     fn nzbget_c_util_init();
     fn nzbget_c_nserv_main(argc: c_int, argv: *mut *mut c_char) -> c_int;
     fn nzbget_c_phase1_init(reloading: bool) -> c_int;
@@ -39,7 +37,6 @@ extern "C" {
 }
 
 static HOOKS: LifecycleHooks = LifecycleHooks {
-    set_process_args: nzbget_c_set_process_args,
     util_init: nzbget_c_util_init,
     nserv_main: nzbget_c_nserv_main,
     phase1_init: nzbget_c_phase1_init,

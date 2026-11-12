@@ -3117,7 +3117,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[repr(C)]
-pub struct NzbgetRsQueueScriptCoordEnv {
+pub(crate) struct NzbgetRsQueueScriptCoordEnv {
     pub ctx: *mut c_void,
     pub ext_mgr: *const RsExtensionManager,
     pub p1: usize,
@@ -3477,12 +3477,242 @@ impl NzbgetRsQueueScriptCoord {
 
 static ACTIVE_QUEUE_SCRIPT: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsQueueScriptCoord>>> =
     std::sync::RwLock::new(None);
+#[cfg(unix)]
+static DAEMON_QUEUE_SCRIPT: std::sync::Mutex<Option<std::sync::Arc<NzbgetRsQueueScriptCoord>>> =
+    std::sync::Mutex::new(None);
 
 pub(crate) fn active_queue_script() -> Option<std::sync::Arc<NzbgetRsQueueScriptCoord>> {
     ACTIVE_QUEUE_SCRIPT
         .read()
         .ok()
         .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+}
+
+#[cfg(unix)]
+pub(crate) fn create_daemon_queue_script() {
+    let arc = std::sync::Arc::new(NzbgetRsQueueScriptCoord::new());
+    if let Ok(mut g) = ACTIVE_QUEUE_SCRIPT.write() {
+        *g = Some(std::sync::Arc::downgrade(&arc));
+    }
+    if let Ok(mut dg) = DAEMON_QUEUE_SCRIPT.lock() {
+        *dg = Some(arc);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn shutdown_daemon_queue_script() {
+    if let Ok(mut dg) = DAEMON_QUEUE_SCRIPT.lock() {
+        if let Some(arc) = dg.take() {
+            let wk = std::sync::Arc::downgrade(&arc);
+            if let Ok(mut g) = ACTIVE_QUEUE_SCRIPT.write() {
+                if g.as_ref()
+                    .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+                {
+                    *g = None;
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn stop_active_queue_script() {
+    if let Some(qs) = active_queue_script() {
+        qs.stopped.store(true, Ordering::SeqCst);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn find_nzb_in_queue_or_history(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    nzb_id: i32,
+) -> usize {
+    let n = qh.queue_find_by_id(dq_ptr, nzb_id);
+    if n != 0 {
+        return n;
+    }
+    let hi = qh.history_find_by_id(dq_ptr, nzb_id);
+    if hi != 0 {
+        let hs = qh.hist_item_snap(hi);
+        if hs.kind == crate::queuesubsys_host::HK_NZB || hs.kind == crate::queuesubsys_host::HK_URL
+        {
+            return hs.inner_ptr;
+        }
+    }
+    0
+}
+
+#[cfg(unix)]
+struct QueueScriptExecArena<'a> {
+    qh: &'a crate::queuesubsys_host::QueueSubsysHost,
+    strings: Vec<std::ffi::CString>,
+}
+
+#[cfg(unix)]
+impl QueueScriptExecArena<'_> {
+    fn alloc_cstr(&mut self, bytes: &[u8]) -> *const c_char {
+        let cstr = std::ffi::CString::from_vec_with_nul(cbuf_from_bytes(bytes))
+            .unwrap_or_else(|_| std::ffi::CString::default());
+        let ptr = cstr.as_ptr();
+        self.strings.push(cstr);
+        ptr
+    }
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn active_queue_script_action_cb(
+    raw: *mut c_void,
+    sub: c_int,
+    a1: c_int,
+    p1: usize,
+    s1: *const c_char,
+    ints: *mut c_int,
+    strs: *mut *const c_char,
+) -> usize {
+    let a = &mut *(raw as *mut QueueScriptExecArena<'_>);
+    match sub {
+        1 => {
+            *strs = match a.qh.nzb_get_param(p1, opt_cstr_bytes(s1)) {
+                Some(v) => a.alloc_cstr(&v),
+                None => std::ptr::null(),
+            };
+            1
+        }
+        3 => {
+            if p1 == 0 {
+                return 0;
+            }
+            let sn = a.qh.nzb_snap(p1, false);
+            *ints.add(0) = c_int::from(sn.skip_script_processing);
+            if sn.skip_script_processing {
+                return 1;
+            }
+            *ints.add(1) = sn.id;
+            *ints.add(2) = sn.priority;
+            *ints.add(3) = sn.dupe_score;
+            *ints.add(4) = sn.dupe_mode;
+            *ints.add(5) = sn.delete_status;
+            *ints.add(6) = sn.url_status;
+            *ints.add(7) = sn.mark_status;
+            *ints.add(8) = a.qh.nzb_params_len(p1) as c_int;
+            *strs.add(0) = a.alloc_cstr(&sn.name);
+            *strs.add(1) = a.alloc_cstr(&sn.filename);
+            *strs.add(2) = a.alloc_cstr(&sn.url);
+            *strs.add(3) = a.alloc_cstr(&sn.category);
+            *strs.add(4) = a.alloc_cstr(&sn.dest_dir);
+            *strs.add(5) = a.alloc_cstr(&sn.queued_filename);
+            *strs.add(6) = a.alloc_cstr(&sn.dupe_key);
+            1
+        }
+        4 => {
+            a.qh.nzb_set_i64(
+                p1,
+                crate::queuesubsys_host::NZB_I64_QUEUE_SCRIPT_TIME,
+                libc::time(std::ptr::null_mut()) as i64,
+            );
+            1
+        }
+        5 => {
+            let nzb = find_nzb_in_queue_or_history(a.qh, p1, a1);
+            if nzb != 0 {
+                let sn = a.qh.nzb_snap(nzb, false);
+                *ints.add(0) = sn.delete_status;
+                *ints.add(1) = sn.mark_status;
+            } else {
+                *ints.add(0) = 0;
+                *ints.add(1) = 0;
+            }
+            nzb
+        }
+        6 => {
+            let (k, v) = a.qh.nzb_param_at(p1, a1 as usize);
+            *strs.add(0) = a.alloc_cstr(&k);
+            *strs.add(1) = a.alloc_cstr(&v);
+            1
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn enqueue_active_queue_script(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+    event: i32,
+) {
+    if nzb_ptr == 0 {
+        return;
+    }
+    let Some(qs) = active_queue_script() else {
+        return;
+    };
+    if !qs.has_queue_scripts.load(Ordering::SeqCst) {
+        return;
+    }
+    let sn = qh.nzb_snap(nzb_ptr, false);
+    if sn.skip_script_processing {
+        return;
+    }
+    let mut arena = QueueScriptExecArena {
+        qh,
+        strings: Vec::new(),
+    };
+    let cat_ptr = arena.alloc_cstr(&sn.category);
+    let env = NzbgetRsQueueScriptCoordEnv {
+        ctx: (&mut arena as *mut QueueScriptExecArena<'_>).cast(),
+        ext_mgr: std::ptr::null(),
+        p1: nzb_ptr,
+        a1: event,
+        a2: 0,
+        a3: sn.id,
+        a4: 0,
+        t1: 0,
+        t2: sn.queue_script_time,
+        s1: cat_ptr,
+        out_i32: std::ptr::null_mut(),
+        host_cb: None,
+        action_cb: Some(active_queue_script_action_cb),
+    };
+    unsafe {
+        qs.enqueue_script(&env);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn check_active_queue_script_queue() {
+    let Some(qs) = active_queue_script() else {
+        return;
+    };
+    if qs.stopped.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(qh) = crate::ffi::queue_host() else {
+        return;
+    };
+    qh.with_locked_queue(|dq_ptr| {
+        let mut arena = QueueScriptExecArena {
+            qh: &qh,
+            strings: Vec::new(),
+        };
+        let env = NzbgetRsQueueScriptCoordEnv {
+            ctx: (&mut arena as *mut QueueScriptExecArena<'_>).cast(),
+            ext_mgr: std::ptr::null(),
+            p1: dq_ptr,
+            a1: 0,
+            a2: 0,
+            a3: 0,
+            a4: 0,
+            t1: 0,
+            t2: 0,
+            s1: std::ptr::null(),
+            out_i32: std::ptr::null_mut(),
+            host_cb: None,
+            action_cb: Some(active_queue_script_action_cb),
+        };
+        unsafe {
+            qs.check_queue(&env);
+        }
+    });
 }
 
 pub(crate) fn init_active_queue_script_options() {
@@ -3547,8 +3777,8 @@ pub unsafe extern "C" fn nzbget_rs_queue_script_free(h: *mut NzbgetRsQueueScript
 /// - `4`: `EnqueueScript`
 /// - `5`: `CheckQueue`
 /// - `6`: `IsStopped()`
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_queue_script_exec(
+#[cfg(test)]
+pub(crate) unsafe fn nzbget_rs_queue_script_exec(
     h: *mut NzbgetRsQueueScriptCoord,
     op: c_int,
     env: *const NzbgetRsQueueScriptCoordEnv,

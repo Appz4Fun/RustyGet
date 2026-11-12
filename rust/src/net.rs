@@ -3234,6 +3234,16 @@ impl NzbgetRsServerPool {
             );
         }
     }
+    pub(crate) fn for_each_server_with_state_id(&self, state_id: i32, mut f: impl FnMut(i32)) {
+        let Ok(srvs) = self.servers.read() else {
+            return;
+        };
+        for s in srvs.iter() {
+            if s.state_id.load(Ordering::SeqCst) == state_id {
+                f(s.id);
+            }
+        }
+    }
 }
 
 #[no_mangle]
@@ -3242,12 +3252,18 @@ pub extern "C" fn nzbget_rs_serverpool_new() -> *mut NzbgetRsServerPool {
     if let Ok(mut g) = ACTIVE_SERVER_POOL.write() {
         *g = Some(Arc::downgrade(&arc));
     }
+    if let Some(lg) = crate::log::active_log() {
+        lg.register_debuggable(4);
+    }
     Arc::into_raw(arc).cast_mut()
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_serverpool_free(pool: *mut NzbgetRsServerPool) {
     if !pool.is_null() {
+        if let Some(lg) = crate::log::active_log() {
+            lg.unregister_debuggable(4);
+        }
         let arc = Arc::from_raw(pool.cast_const());
         let wk = Arc::downgrade(&arc);
         if let Ok(mut g) = ACTIVE_SERVER_POOL.write() {
@@ -3306,8 +3322,7 @@ pub(crate) unsafe fn nzbget_rs_serverpool_add(
     )));
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_serverpool_ctl(
+pub(crate) unsafe fn nzbget_rs_serverpool_ctl(
     pool: *const NzbgetRsServerPool,
     op: c_int,
     a1: c_int,

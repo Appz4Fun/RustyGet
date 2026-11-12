@@ -3093,6 +3093,27 @@ pub(crate) fn active_queue_coord_and_host() -> Option<(
 }
 
 #[cfg(unix)]
+pub(crate) fn log_active_queue_coord_debug_info() {
+    let Some((qc, qh)) = active_queue_coord_and_host() else {
+        return;
+    };
+    unsafe {
+        qc.exec(
+            10,
+            0,
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            Some(qh.cb),
+            qh.ctx,
+        );
+    }
+}
+
+#[cfg(unix)]
 #[no_mangle]
 pub extern "C" fn nzbget_rs_queue_coord_new() -> *mut crate::queuecoord::NzbgetRsQueueCoordinator {
     std::sync::Arc::into_raw(std::sync::Arc::new(
@@ -3107,6 +3128,9 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_free(
     ptr: *mut crate::queuecoord::NzbgetRsQueueCoordinator,
 ) {
     if !ptr.is_null() {
+        if let Some(lg) = crate::log::active_log() {
+            lg.unregister_debuggable(5);
+        }
         if let Ok(mut g) = ACTIVE_QUEUE_COORD.write() {
             *g = None;
         }
@@ -3142,9 +3166,15 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_exec(
         if let Ok(mut g) = ACTIVE_QUEUE_COORD.write() {
             *g = Some((weak, ctx as usize));
         }
+        if let Some(lg) = crate::log::active_log() {
+            lg.register_debuggable(5);
+        }
     }
     let ret = coord.exec(op, a1, a2, p1, p2, p3, s1, ints, host_cb, ctx);
     if op == 1 {
+        if let Some(lg) = crate::log::active_log() {
+            lg.unregister_debuggable(5);
+        }
         if let Ok(mut g) = ACTIVE_QUEUE_COORD.write() {
             *g = None;
         }
@@ -3448,7 +3478,6 @@ struct BuildEnvRuntime {
     ssl_lib_name: CString,
     ssl_raw_version: CString,
     tls_host_cb: crate::net::NzbgetRsConnHostFn,
-    script_host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
     write_stdout_cb: Option<unsafe extern "C" fn(*const c_char, usize, c_int)>,
     queue_host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
 }
@@ -3461,14 +3490,12 @@ static BUILD_ENV: std::sync::RwLock<Option<BuildEnvRuntime>> = std::sync::RwLock
 
 #[cfg(unix)]
 #[no_mangle]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn nzbget_rs_build_env_init(
     flags: c_int,
     version: *const c_char,
     ssl_lib_name: *const c_char,
     ssl_raw_version: *const c_char,
     tls_host_cb: crate::net::NzbgetRsConnHostFn,
-    script_host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
     write_stdout_cb: Option<unsafe extern "C" fn(*const c_char, usize, c_int)>,
     queue_host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
 ) {
@@ -3479,7 +3506,6 @@ pub unsafe extern "C" fn nzbget_rs_build_env_init(
             ssl_lib_name: to_nul_cvec(input(ssl_lib_name)),
             ssl_raw_version: to_nul_cvec(input(ssl_raw_version)),
             tls_host_cb,
-            script_host_cb,
             write_stdout_cb,
             queue_host_cb,
         });
@@ -3516,10 +3542,7 @@ pub(crate) fn is_queue_loaded() -> bool {
 
 #[cfg(unix)]
 pub(crate) fn script_host_cb() -> Option<crate::script::NzbgetRsScriptHostFn> {
-    BUILD_ENV
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|e| e.script_host_cb))
+    Some(crate::script::active_script_host_cb)
 }
 
 pub(crate) fn build_version_cstr() -> &'static CStr {
@@ -5069,17 +5092,6 @@ pub unsafe extern "C" fn nzbget_rs_script_calc_total_status(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_diskstate_exec(
-    op: c_int,
-    env: *const crate::diskstate_format::NzbgetRsDiskStateEnv,
-) -> c_int {
-    if env.is_null() {
-        return 0;
-    }
-    crate::diskstate_format::diskstate_exec(op, &*env)
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_socket_deadline_wait(
     fd: c_int,
     read: c_int,
@@ -6049,7 +6061,79 @@ unsafe extern "C" fn web_rpc_collect_bridge(
             );
             1
         }
-        2 if a1 != 3 => {
+        2 => {
+            if a1 == 3 {
+                let disk_msgs = crate::diskstate_format::load_active_nzb_messages(a2);
+                if disk_msgs.is_empty() {
+                    return host.rpc_collect_cb.map_or(0, |cb| {
+                        cb(
+                            std::ptr::null_mut(),
+                            kind,
+                            a1,
+                            a2,
+                            a3,
+                            a4,
+                            a5,
+                            s1,
+                            s2,
+                            s3,
+                            s4,
+                            s5,
+                            s6,
+                            p1,
+                            n1,
+                            emit_ctx,
+                            emit_cb,
+                        )
+                    });
+                }
+                let mut start = disk_msgs.len() as i32;
+                if a4 > 0 {
+                    start = disk_msgs.len() as i32 - a4.min(disk_msgs.len() as i32);
+                }
+                if a3 > 0 {
+                    start = (a3 - disk_msgs[0].0).max(0);
+                }
+                let mut entries = Vec::new();
+                if start >= 0 && (start as usize) < disk_msgs.len() {
+                    let ustart = start as usize;
+                    entries.reserve(disk_msgs.len() - ustart);
+                    for m in &disk_msgs[ustart..] {
+                        entries.push(crate::xmlrpc_format::NzbgetRsRpcLogEntry {
+                            id: m.0,
+                            kind: m.1,
+                            time: m.2,
+                            text: m.3.as_ptr(),
+                        });
+                    }
+                }
+                emit_cb(
+                    emit_ctx,
+                    2,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    entries.as_ptr().cast(),
+                    entries.len(),
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    0,
+                );
+                return 1;
+            }
             if a1 == 1 {
                 crate::extension::collect_maint_messages_active(a3, a4, emit_ctx, emit_cb);
             } else if a1 == 2 {

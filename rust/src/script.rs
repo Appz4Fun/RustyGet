@@ -2335,6 +2335,151 @@ pub(crate) unsafe fn scan_scripts_exec_active(
     });
 }
 
+#[cfg(unix)]
+pub(crate) unsafe extern "C" fn active_script_host_cb(
+    _ctx: *mut c_void,
+    op: c_int,
+    a1: c_int,
+    a2: c_int,
+    p1: usize,
+    _p2: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    _ints: *mut c_int,
+    strs: *mut *const c_char,
+) -> usize {
+    match op {
+        0 => {
+            crate::log::log_active_bytes(a1, opt_slice(s1));
+            0
+        }
+        1 => {
+            let (_, _, argp) = crate::entrypoint::process_args();
+            if !argp.is_null() {
+                return argp as usize;
+            }
+            #[cfg(target_os = "macos")]
+            {
+                extern "C" {
+                    fn _NSGetEnviron() -> *mut *mut *mut c_char;
+                }
+                let p = _NSGetEnviron();
+                if p.is_null() {
+                    0
+                } else {
+                    (*p) as usize
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                extern "C" {
+                    static environ: *mut *mut c_char;
+                }
+                environ as usize
+            }
+        }
+        5 => {
+            if a1 == 3 {
+                crate::extension::check_active_queue_script_queue();
+                return 0;
+            }
+            let Some(qh) = crate::ffi::queue_host() else {
+                return 0;
+            };
+            if a1 == 0 {
+                return qh.with_locked_queue(|dq| {
+                    let n = crate::extension::find_nzb_in_queue_or_history(&qh, dq, p1 as i32);
+                    if n != 0 {
+                        qh.nzb_add_message(n, a2, opt_slice(s1));
+                        1
+                    } else {
+                        0
+                    }
+                });
+            }
+            if a1 == 1 {
+                qh.with_locked_queue(|dq| {
+                    let n = crate::extension::find_nzb_in_queue_or_history(&qh, dq, p1 as i32);
+                    if n != 0 {
+                        if a2 == 1 {
+                            qh.nzb_set_param(n, opt_slice(s1), Some(opt_slice(s2)));
+                        } else if a2 == 2 {
+                            qh.nzb_set_str(
+                                n,
+                                crate::queuesubsys_host::NZB_STR_FINAL_DIR,
+                                opt_slice(s2),
+                            );
+                        } else if a2 == 3 {
+                            qh.nzb_print_message(
+                                n,
+                                crate::queuesubsys_host::MK_WARNING,
+                                opt_slice(s2),
+                            );
+                            qh.nzb_set_int(
+                                n,
+                                crate::queuesubsys_host::NZB_INT_MARK_STATUS,
+                                crate::queuesubsys_host::KS_BAD,
+                            );
+                        }
+                    }
+                });
+                return 0;
+            }
+            if a1 == 2 {
+                qh.with_locked_queue(|dq| {
+                    let n = qh.queue_find_by_id(dq, p1 as i32);
+                    if n != 0 {
+                        let mut msg = b"Cancelling download and deleting ".to_vec();
+                        msg.extend_from_slice(opt_slice(s1));
+                        qh.nzb_print_message(n, crate::queuesubsys_host::MK_WARNING, &msg);
+                        qh.nzb_set_int(
+                            n,
+                            crate::queuesubsys_host::NZB_INT_DELETE_STATUS,
+                            crate::queuesubsys_host::DS_BAD,
+                        );
+                        qh.dq_edit_entry(
+                            dq,
+                            p1 as i32,
+                            crate::queuesubsys_host::EA_GROUP_DELETE,
+                            None,
+                        );
+                    }
+                });
+            }
+            0
+        }
+        6 => {
+            let (argc, argv, _) = crate::entrypoint::process_args();
+            if a1 < 0 {
+                return if !argv.is_null() && argc > 0 {
+                    argc as usize
+                } else {
+                    0
+                };
+            }
+            if !strs.is_null() {
+                *strs = if !argv.is_null() && a1 < argc {
+                    (*argv.add(a1 as usize)).cast_const()
+                } else {
+                    ptr::null()
+                };
+            }
+            0
+        }
+        7 => {
+            if let Some(hooks) =
+                crate::lifecycle::get_hooks().or_else(crate::lifecycle::resolve_hooks)
+            {
+                if let Some(exit_fn) = hooks.exit_proc {
+                    exit_fn();
+                }
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

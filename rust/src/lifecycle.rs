@@ -57,7 +57,6 @@ impl From<u32> for LifecyclePhase {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LifecycleHooks {
-    pub set_process_args: Option<unsafe extern "C" fn(c_int, *mut *mut c_char, *mut *mut c_char)>,
     pub util_init: Option<unsafe extern "C" fn()>,
     pub nserv_main: Option<unsafe extern "C" fn(c_int, *mut *mut c_char) -> c_int>,
     pub phase1_init: Option<unsafe extern "C" fn(bool) -> c_int>,
@@ -96,7 +95,6 @@ unsafe fn resolve_sym<T: Copy>(name: &[u8]) -> Option<T> {
 pub fn resolve_hooks() -> Option<LifecycleHooks> {
     #[cfg(unix)]
     unsafe {
-        let set_process_args = resolve_sym(b"nzbget_c_set_process_args\0");
         let util_init = resolve_sym(b"nzbget_c_util_init\0");
         let nserv_main = resolve_sym(b"nzbget_c_nserv_main\0");
         let phase1_init = resolve_sym(b"nzbget_c_phase1_init\0");
@@ -112,7 +110,6 @@ pub fn resolve_hooks() -> Option<LifecycleHooks> {
 
         if phase1_init.is_some() && phase3_server_activate.is_some() {
             Some(LifecycleHooks {
-                set_process_args,
                 util_init,
                 nserv_main,
                 phase1_init,
@@ -1351,7 +1348,10 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
         }
         2 => {
             #[cfg(unix)]
-            crate::log::active_cmd_script_log().reset_all();
+            {
+                crate::log::active_cmd_script_log().reset_all();
+                crate::diskstate_format::reset_active_legacy_queue_read();
+            }
             {
                 let mut dg = DAEMON_INSTANCE
                     .disk
@@ -1876,6 +1876,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             }
             #[cfg(unix)]
             if e.a2 < 0 && eff_remote_mode == 0 {
+                crate::extension::stop_active_queue_script();
                 crate::scheduler::stop_daemon_service_coord();
                 crate::dupesearch_coord::stop_daemon_dupesearch();
                 crate::urlcoord::stop_daemon_url_coord();
@@ -1971,6 +1972,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 crate::twin::shutdown_daemon_twincheck();
                 crate::dupesearch_coord::shutdown_daemon_dupesearch();
                 crate::extension::shutdown_daemon_maintenance();
+                crate::extension::shutdown_daemon_queue_script();
                 crate::script::shutdown_daemon_ext_mgr();
                 crate::statmeter::shutdown_daemon_statmeter();
                 crate::scheduler::shutdown_daemon_scheduler();
@@ -1996,12 +1998,18 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
         #[cfg(unix)]
         13 => {
             crate::scheduler::create_daemon_service_coord();
+            crate::extension::create_daemon_queue_script();
             dm_emit_active_log(0, b"Parsing command line");
-            let argv = e.ctx.cast::<*const c_char>();
-            if e.a1 < 1 || argv.is_null() {
+            let (argc, argv) = if e.ctx.is_null() {
+                let (c, v, _) = crate::entrypoint::process_args();
+                (c, v.cast::<*const c_char>())
+            } else {
+                (e.a1, e.ctx.cast::<*const c_char>())
+            };
+            if argc < 1 || argv.is_null() {
                 return -1;
             }
-            let Some(cmd) = crate::cmdline::CmdlineHandle::parse_argv(e.a1, argv, |bytes| {
+            let Some(cmd) = crate::cmdline::CmdlineHandle::parse_argv(argc, argv, |bytes| {
                 crate::ffi::write_stdout_bytes(bytes, false);
             }) else {
                 return -2;
@@ -2018,7 +2026,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 );
                 libc::exit(0);
             }
-            if cmd.print_usage || cmd.errors || e.a1 <= 1 {
+            if cmd.print_usage || cmd.errors || argc <= 1 {
                 let base_idx = crate::paths::base_file_name(&arg0);
                 let usage = crate::cmdline::format_usage(
                     &arg0[base_idx..],
@@ -2218,7 +2226,6 @@ mod tests {
         MOCK_UNPACK_COUNT.store(0, Ordering::SeqCst);
 
         let hooks = LifecycleHooks {
-            set_process_args: None,
             util_init: None,
             nserv_main: None,
             phase1_init: Some(mock_phase1),
@@ -2256,7 +2263,6 @@ mod tests {
     fn test_daemon_loop_early_exit_client_mode() {
         let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let hooks = LifecycleHooks {
-            set_process_args: None,
             util_init: None,
             nserv_main: None,
             phase1_init: Some(mock_phase1_client_exit),
@@ -2304,7 +2310,6 @@ mod tests {
         MOCK_P4_RELOAD.store(false, Ordering::SeqCst);
 
         let hooks = LifecycleHooks {
-            set_process_args: None,
             util_init: None,
             nserv_main: None,
             phase1_init: Some(mock_phase1),

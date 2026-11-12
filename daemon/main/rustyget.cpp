@@ -27,32 +27,17 @@
 inline int NServMain(int argc, char* argv[])
 {
 	Log log;
-	struct NServCtx
-	{
-		Log* log;
-		std::unique_ptr<Options> options;
-	} ctx{&log, nullptr};
+	std::unique_ptr<Options> options;
 
 	NzbgetRsNservEnv env{};
-	env.ctx = &ctx;
-	env.version = Util::VersionRevision();
-	env.write_stdout_cb = +[](const char* data, size_t len) { fwrite(data, 1, len, stdout); };
-	env.log_cb = +[](void*, int level, const char* msg) {
-		const char* s = msg ? msg : "";
-		if (level == 0) debug("%s", s);
-		else if (level == 1) detail("%s", s);
-		else if (level == 2) info("%s", s);
-		else if (level == 3) warn("%s", s);
-		else if (level == 4) error("%s", s);
-	};
+	env.ctx = &options;
 	env.runtime_cb = +[](void* raw, int op, int, const char* const* opts, size_t optLen) {
-		auto* c = static_cast<NServCtx*>(raw);
+		auto* outOpts = static_cast<std::unique_ptr<Options>*>(raw);
 		if (op == 0)
 		{
 			Options::CmdOptList cmdOpts;
 			for (size_t i = 0; i < optLen; ++i) cmdOpts.push_back(opts[i]);
-			c->options = std::make_unique<Options>(&cmdOpts, nullptr);
-			c->log->InitOptions();
+			*outOpts = std::make_unique<Options>(&cmdOpts, nullptr);
 			debug("Initializing global connection data");
 #ifndef DISABLE_TLS
 			TlsSocket::Init();
@@ -61,10 +46,6 @@ inline int NServMain(int argc, char* argv[])
 		}
 		else if (op == 3) { while (getchar()) Util::Sleep(200); }
 	};
-	env.tls_host_cb = &TlsHostCb;
-#ifdef DEBUG
-	env.debug_on = 1;
-#endif
 	return nzbget_rs_nserv_run(argc, const_cast<const char* const*>(argv), &env);
 }
 #endif
@@ -76,16 +57,7 @@ WorkState* g_WorkState;
 ServerPool* g_ServerPool;
 QueueCoordinator* g_QueueCoordinator;
 PrePostProcessor* g_PrePostProcessor;
-DiskState* g_DiskState;
 ArticleCache* g_ArticleCache;
-QueueScriptCoordinator* g_QueueScriptCoordinator;
-
-int g_ArgumentCount;
-char* (*g_EnvironmentVariables)[] = nullptr;
-char* (*g_Arguments)[] = nullptr;
-
-extern void ExitProc();
-extern void Reload();
 
 static int DaemonReloadCb(int sub);
 
@@ -123,8 +95,6 @@ public:
 		CreateGlobals();
 
 		NzbgetRsDaemonEnv cenv{};
-		cenv.a1 = g_ArgumentCount;
-		cenv.ctx = (g_Arguments && *g_Arguments) ? *g_Arguments : nullptr;
 		int rc = nzbget_rs_daemon_exec(13, &cenv);
 		if (rc == -1) throw std::invalid_argument("Invalid command line");
 		if (rc < 0) throw std::runtime_error("Command line parsing failed");
@@ -201,9 +171,7 @@ private:
 	std::unique_ptr<ServerPool> m_serverPool;
 	std::unique_ptr<QueueCoordinator> m_queueCoordinator;
 	std::unique_ptr<PrePostProcessor> m_prePostProcessor;
-	std::unique_ptr<DiskState> m_diskState;
 	std::unique_ptr<ArticleCache> m_articleCache;
-	std::unique_ptr<QueueScriptCoordinator> m_queueScriptCoordinator;
 
 	void CreateGlobals()
 	{
@@ -221,12 +189,6 @@ private:
 
 		m_articleCache = std::make_unique<ArticleCache>();
 		g_ArticleCache = m_articleCache.get();
-
-		m_queueScriptCoordinator = std::make_unique<QueueScriptCoordinator>();
-		g_QueueScriptCoordinator = m_queueScriptCoordinator.get();
-
-		m_diskState = std::make_unique<DiskState>();
-		g_DiskState = m_diskState.get();
 	}
 
 	void Cleanup()
@@ -237,10 +199,8 @@ private:
 
 		g_PrePostProcessor = nullptr;
 		g_QueueCoordinator = nullptr;
-		g_DiskState = nullptr;
 		g_ServerPool = nullptr;
 		g_ArticleCache = nullptr;
-		g_QueueScriptCoordinator = nullptr;
 	}
 
 	static int DaemonActionCb(void* raw, int sub, int a2, const char*, const char*)
@@ -274,11 +234,10 @@ private:
 				self->m_queueCoordinator->Stop();
 				self->m_prePostProcessor->Stop();
 				self->m_articleCache->Stop();
-				self->m_queueScriptCoordinator->Stop();
 			}
 			return 0;
 		case 10:
-			ExitProc();
+			nzbget_c_exit_proc();
 			return 0;
 		default:
 			return 0;
@@ -296,28 +255,7 @@ static int DaemonReloadCb(int sub)
 	return 0;
 }
 
-void Reload()
-{
-	NzbgetRsDaemonEnv env{};
-	env.reload_cb = DaemonReloadCb;
-	nzbget_rs_daemon_exec(9, &env);
-}
-
-void ExitProc()
-{
-	NzbgetRsDaemonEnv env{};
-	env.reload_cb = DaemonReloadCb;
-	nzbget_rs_daemon_exec(10, &env);
-}
-
 extern "C" {
-
-void nzbget_c_set_process_args(int argc, char* argv[], char* argp[])
-{
-	g_ArgumentCount = argc;
-	g_Arguments = (char*(*)[])argv;
-	g_EnvironmentVariables = (char*(*)[])argp;
-}
 
 void nzbget_c_util_init(void)
 {
@@ -382,12 +320,16 @@ void nzbget_c_stop_server(bool reloading)
 
 void nzbget_c_reload(void)
 {
-	Reload();
+	NzbgetRsDaemonEnv env{};
+	env.reload_cb = DaemonReloadCb;
+	nzbget_rs_daemon_exec(9, &env);
 }
 
 void nzbget_c_exit_proc(void)
 {
-	ExitProc();
+	NzbgetRsDaemonEnv env{};
+	env.reload_cb = DaemonReloadCb;
+	nzbget_rs_daemon_exec(10, &env);
 }
 
 }

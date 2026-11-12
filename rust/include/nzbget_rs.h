@@ -62,7 +62,6 @@ int nzbget_rs_directory_exists(const char* path);
 // ============================================================================
 
 // C++ subsystem bridge functions exported to Rust
-void nzbget_c_set_process_args(int argc, char* argv[], char* argp[]);
 void nzbget_c_util_init(void);
 int  nzbget_c_nserv_main(int argc, char* argv[]);
 int  nzbget_c_phase1_init(bool reloading);
@@ -278,180 +277,18 @@ typedef struct {
     size_t data_len;
 } NzbgetRsRpcFleetReqMember;
 
-typedef struct {
-    int id;
-    int status;
-    uint32_t crc;
-    int par_file;
-    const char* hash16k;
-    const char* par_set_id;
-    const char* filename;
-    const char* origname;
-} NzbgetRsDiskCompletedFile;
-
-typedef struct {
-    const char* name;
-    const char* value;
-} NzbgetRsDiskParam;
-
-typedef struct {
-    int status;
-    const char* name;
-} NzbgetRsDiskScriptStatus;
-
-typedef struct {
-    int server_id;
-    int success_articles;
-    int failed_articles;
-} NzbgetRsDiskServerStat;
-
-typedef struct {
-    int id;
-    int paused;
-    int extra_priority;
-} NzbgetRsDiskFileStub;
-
-typedef struct {
-    int id;
-    int kind;
-    const char* url;
-    const char* filename;
-    const char* dest_dir;
-    const char* final_dir;
-    const char* hard_link_path;
-    const char* meta_name;
-    const char* queued_filename;
-    const char* name;
-    const char* category;
-    int priority;
-    int has_post_info;
-    int post_stage;
-    int delete_paused;
-    int many_dupe_files;
-    int feed_id;
-    int par_status;
-    int unpack_status;
-    int move_status;
-    int par_rename_status;
-    int rar_rename_status;
-    int direct_rename_status;
-    int delete_status;
-    int mark_status;
-    int url_status;
-    int unpack_cleaned_up_disk;
-    int health_paused;
-    int add_url_paused;
-    int file_count;
-    int parked_file_count;
-    int message_count;
-    int min_time;
-    int max_time;
-    int par_full;
-    int force_par_full;
-    int force_repair;
-    int extra_par_blocks;
-    uint32_t full_content_hash;
-    uint32_t filtered_content_hash;
-    int64_t size;
-    int64_t success_size;
-    int64_t failed_size;
-    int64_t par_size;
-    int64_t par_success_size;
-    int64_t par_failed_size;
-    int total_articles;
-    int success_articles;
-    int failed_articles;
-    const char* dupe_key;
-    int dupe_mode;
-    int dupe_score;
-    int dupe_hint;
-    int64_t downloaded_size;
-    int download_sec;
-    int post_total_sec;
-    int par_sec;
-    int repair_sec;
-    int unpack_sec;
-    int skip_script_processing;
-    int skip_disk_write;
-    int desired_server_id;
-} NzbgetRsDiskNzbInfoInput;
-
-typedef struct {
-    int part_number;
-    int size;
-    const char* message_id;
-} NzbgetRsDiskArticleInfo;
-
-typedef struct {
-    const char* subject;
-    const char* filename;
-    const char* origname;
-    const char* output_filename;
-    int filename_confirmed;
-    int time;
-    int output_initialized;
-    int64_t size;
-    int64_t missed_size;
-    int par_file;
-    int total_articles;
-    int missed_articles;
-} NzbgetRsDiskFileInfoInput;
-
-typedef struct {
-    int saved_status;
-    int64_t segment_offset;
-    int segment_size;
-    uint32_t crc;
-    int staged_fallback;
-} NzbgetRsDiskArticleState;
-
-typedef struct {
-    int success_articles;
-    int failed_articles;
-    int64_t remaining_size;
-    int64_t success_size;
-    int64_t failed_size;
-    const char* filename;
-    const char* hash16k;
-    const char* par_set_id;
-    int par_file;
-    int64_t decoded_file_size;
-    int output_initialized;
-} NzbgetRsDiskFileStateInput;
-
-typedef struct {
-    int64_t offset;
-    int64_t size;
-} NzbgetRsDiskStreamHole;
-
-typedef struct {
-    int file_id;
-    int64_t decoded_file_size;
-    int64_t failed_size;
-    int64_t missed_size;
-    int par_file;
-    int failed_articles;
-    uint64_t steps_hash;
-    const char* filename;
-    const NzbgetRsDiskStreamHole* holes;
-    size_t holes_len;
-} NzbgetRsDiskRepairJob;
-
 typedef struct NzbgetRsOptions NzbgetRsOptions;
 typedef struct NzbgetRsLog NzbgetRsLog;
 typedef struct NzbgetRsWorkState NzbgetRsWorkState;
 typedef struct NzbgetRsServerPool NzbgetRsServerPool;
 
-typedef uintptr_t (*NzbgetRsScriptHostFn)(
-    void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-    const char* s1, const char* s2, int* ints, const char** strs);
 typedef uintptr_t (*NzbgetRsQueueSubsysHostFn)(
     void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
     const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
 
 void nzbget_rs_build_env_init(
     int flags, const char* version, const char* ssl_lib_name, const char* ssl_raw_version,
-    NzbgetRsConnHostFn tls_host_cb, NzbgetRsScriptHostFn script_host_cb,
+    NzbgetRsConnHostFn tls_host_cb,
     void (*write_stdout_cb)(const char* ptr, size_t len, int do_flush),
     NzbgetRsQueueSubsysHostFn queue_host_cb);
 int nzbget_rs_thread_count_op(int op);
@@ -463,8 +300,6 @@ int64_t nzbget_rs_workstate_ctl(const NzbgetRsWorkState* ws, int id, int write, 
 
 NzbgetRsServerPool* nzbget_rs_serverpool_new(void);
 void nzbget_rs_serverpool_free(NzbgetRsServerPool* pool);
-intptr_t nzbget_rs_serverpool_ctl(
-    const NzbgetRsServerPool* pool, int op, int a1, int a2, uintptr_t p1, uintptr_t p2);
 int nzbget_rs_serverpool_probe_tls(
     const NzbgetTlsServer* server, const char* cipher, int expected_ver,
     const char* numeric, uintptr_t deadline_ptr);
@@ -476,15 +311,8 @@ NzbgetRsExtManager* nzbget_rs_ext_mgr_new(void);
 void nzbget_rs_ext_mgr_free(NzbgetRsExtManager* mgr);
 
 typedef struct NzbgetRsQueueScriptCoord NzbgetRsQueueScriptCoord;
-typedef struct NzbgetRsQueueScriptCoordEnv {
-    void* ctx; const NzbgetRsExtManager* ext_mgr; uintptr_t p1;
-    int a1; int a2; int a3; int a4; int64_t t1; int64_t t2;
-    const char* s1; int* out_i32; NzbgetRsScriptHostFn host_cb;
-    uintptr_t (*action_cb)(void*, int, int, uintptr_t, const char*, int*, const char**);
-} NzbgetRsQueueScriptCoordEnv;
 NzbgetRsQueueScriptCoord* nzbget_rs_queue_script_new(void);
 void nzbget_rs_queue_script_free(NzbgetRsQueueScriptCoord* h);
-int nzbget_rs_queue_script_exec(NzbgetRsQueueScriptCoord* h, int op, const NzbgetRsQueueScriptCoordEnv* env);
 
 NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
 
@@ -605,13 +433,10 @@ int nzbget_rs_options_query(
     int* out_int, const char** out_strs, uintptr_t ctx,
     void (*cb)(uintptr_t, const char*, const char*, int));
 
-NzbgetRsLog* nzbget_rs_log_new(int debug_build, void (*debug_cb)(uintptr_t));
+NzbgetRsLog* nzbget_rs_log_new(int debug_build);
 void nzbget_rs_log_free(NzbgetRsLog* log);
 void nzbget_rs_log_emit(
     const NzbgetRsLog* log, int kind, const NzbgetRsOptions* options, const char* text);
-void nzbget_rs_log_ctl(
-    const NzbgetRsLog* log, int op, int a1, uintptr_t p1,
-    const NzbgetRsOptions* options, const char* s1, void (*debug_cb)(uintptr_t));
 
 uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
 
@@ -683,83 +508,7 @@ void nzbget_rs_server_stat_apply_op(
     int* inout_success, int* inout_failed);
 int nzbget_rs_script_calc_total_status(const int* statuses, size_t count);
 
-typedef struct NzbgetRsDiskNzbExport {
-    int hist_id;
-    int hist_kind;
-    int hist_time;
-    int changed;
-    NzbgetRsDiskNzbInfoInput info;
-    const NzbgetRsDiskCompletedFile* completed;
-    size_t completed_len;
-    const NzbgetRsDiskParam* params;
-    size_t params_len;
-    const NzbgetRsDiskScriptStatus* scripts;
-    size_t scripts_len;
-    const NzbgetRsDiskServerStat* stats;
-    size_t stats_len;
-    const NzbgetRsDiskFileStub* files;
-    size_t files_len;
-    int dupe_recovered_articles;
-    int64_t dupe_recovered_bytes;
-    int dupe_recovered_holes;
-    const NzbgetRsDiskRepairJob* jobs;
-    size_t jobs_len;
-    int direct_unpack_status;
-    int unpack_tried;
-    int par_repaired;
-    int last_unpack_status;
-    const char* const* archives;
-    size_t archives_len;
-} NzbgetRsDiskNzbExport;
-
-typedef struct NzbgetRsDiskFileExport {
-    int file_id;
-    int has_articles;
-    int articles_len_count;
-    int force_direct_write;
-    NzbgetRsDiskFileInfoInput info;
-    const char* const* groups;
-    size_t groups_len;
-    const NzbgetRsDiskArticleInfo* articles;
-    size_t articles_len;
-    NzbgetRsDiskFileStateInput state;
-    const NzbgetRsDiskServerStat* stats;
-    size_t stats_len;
-    const NzbgetRsDiskArticleState* article_states;
-    size_t article_states_len;
-} NzbgetRsDiskFileExport;
-
-typedef struct NzbgetRsDiskStateEnv {
-    void* ctx;
-    const char* queue_dir;
-    const char* temp_dir;
-    const char* line_ending;
-    const char* time_str;
-    const char* text;
-    int sep;
-    int has_options;
-    int flush_queue;
-    int direct_write;
-    int continue_partial;
-    int pt_finished;
-    int ns_running;
-    int ns_none;
-    int a1;
-    int a2;
-    int a3;
-    int a4;
-    int64_t now;
-    int* out_flag;
-    void (*log_cb)(void* ctx, int level, const char* msg);
-    int (*ctrl_cb)(void* ctx, int cmd, int a1, int a2, int64_t a3, const char* s1);
-    void (*export_nzb_cb)(void* ctx, int source, size_t idx, void* sink_ctx, void (*sink_fn)(void*, const NzbgetRsDiskNzbExport*));
-    void (*apply_nzb_cb)(void* ctx, int mode, const NzbgetRsDiskNzbInfoInput* inp, int flags, const NzbgetRsDiskCompletedFile* completed, size_t completed_len, const NzbgetRsDiskParam* params, size_t params_len, const NzbgetRsDiskScriptStatus* scripts, size_t scripts_len, const NzbgetRsDiskServerStat* stats, size_t stats_len, const NzbgetRsDiskFileStub* files, const int* file_times, size_t files_len, const NzbgetRsDiskRepairJob* job);
-    void (*export_file_cb)(void* ctx, int mode, void* sink_ctx, void (*sink_fn)(void*, const NzbgetRsDiskFileExport*));
-    int (*apply_file_cb)(void* ctx, int mode, int idx_or_flags, int extra_i32, int64_t seg_offset, uint32_t crc, const char* str_arg, const NzbgetRsDiskFileInfoInput* finfo, const NzbgetRsDiskArticleInfo* art_info, const NzbgetRsDiskFileStateInput* fstate, const NzbgetRsDiskServerStat* stats, size_t stats_len);
-    void (*aux_cb)(void* ctx, int op, int a1, int a2, uint32_t u1, const char* s1, const char* s2, const void* vol_item, void* sink_ctx, void (*sink_fn)(void*, int, int, int, uint32_t, const char*, const void*, size_t, const void*, size_t));
-} NzbgetRsDiskStateEnv;
-
-int nzbget_rs_diskstate_exec(int op, const NzbgetRsDiskStateEnv* env);
+int nzbget_rs_diskstate_op(int op, uintptr_t p1, int a1, const char* s1);
 int nzbget_rs_socket_deadline_wait(
     int fd, int read, int write, void* ctx, int64_t (*rem_cb)(void*));
 

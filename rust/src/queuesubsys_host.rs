@@ -56,6 +56,7 @@ pub(crate) const DS_NONE: i32 = 0;
 pub(crate) const DS_MANUAL: i32 = 1;
 pub(crate) const DS_HEALTH: i32 = 2;
 pub(crate) const DS_DUPE: i32 = 3;
+pub(crate) const DS_BAD: i32 = 4;
 pub(crate) const DS_GOOD: i32 = 5;
 pub(crate) const DS_COPY: i32 = 6;
 pub(crate) const DS_SCAN: i32 = 7;
@@ -78,6 +79,7 @@ pub(crate) const US_SKIPPED: i32 = 1;
 pub(crate) const US_SUCCESS: i32 = 3;
 
 pub(crate) const LS_NONE: i32 = 0;
+pub(crate) const LS_FAILED: i32 = 3;
 pub(crate) const MS_NONE: i32 = 0;
 pub(crate) const CS_NONE: i32 = 0;
 
@@ -333,6 +335,15 @@ pub(crate) const NZB_INT_SUCCESS_ARTICLES: i32 = 101;
 pub(crate) const NZB_I64_SIZE: i32 = 102;
 pub(crate) const NZB_I64_MIN_TIME: i32 = 103;
 pub(crate) const NZB_I64_MAX_TIME: i32 = 104;
+pub(crate) const NZB_I64_QUEUE_SCRIPT_TIME: i32 = 105;
+pub(crate) const NZB_INT_FILE_COUNT: i32 = 106;
+pub(crate) const NZB_INT_MESSAGE_COUNT: i32 = 107;
+pub(crate) const NZB_INT_TOTAL_ARTICLES: i32 = 108;
+pub(crate) const NZB_INT_POST_STAGE: i32 = 109;
+pub(crate) const NZB_INT_POST_FORCE_FLAGS: i32 = 110;
+pub(crate) const NZB_ACT_CLEAR_PARAMS: i32 = 111;
+pub(crate) const NZB_ACT_CLEAR_REPAIR_JOBS: i32 = 112;
+pub(crate) const NZB_ACT_CLEAR_COMPLETED_FILES: i32 = 113;
 
 // FileInfo field indices (op = 42)
 pub(crate) const FILE_INT_PAUSED: i32 = 0;
@@ -377,6 +388,12 @@ pub(crate) const FILE_ACT_RESET_ARTICLES_NONSERV: i32 = 52;
 pub(crate) const FILE_ACT_SUBTRACT_AND_CLEAR_SERVER_STATS: i32 = 53;
 pub(crate) const FILE_ACT_FAIL_FINISHED_ARTICLES: i32 = 54;
 pub(crate) const FILE_ACT_DISCARD_TEMP_ARTICLES: i32 = 55;
+pub(crate) const FILE_STR_SUBJECT: i32 = 61;
+pub(crate) const FILE_I64_TIME: i32 = 62;
+pub(crate) const FILE_I64_SIZE: i32 = 63;
+pub(crate) const FILE_I64_MISSED_SIZE: i32 = 64;
+pub(crate) const FILE_INT_TOTAL_ARTICLES: i32 = 65;
+pub(crate) const FILE_INT_MISSED_ARTICLES: i32 = 66;
 
 // ArticleInfo field indices (op = 43)
 pub(crate) const ART_INT_STATUS: i32 = 0;
@@ -552,6 +569,11 @@ pub(crate) struct NzbSnap {
     pub cleanup_disk: bool,
     pub unpack_tried: bool,
     pub par_full: bool,
+    pub force_par_full: bool,
+    pub force_repair: bool,
+    pub par_repaired: bool,
+    pub last_unpack_status: i32,
+    pub message_count: i32,
     pub post_total_sec: i32,
     pub par_rename_status: i32,
     pub rar_rename_status: i32,
@@ -594,6 +616,7 @@ pub(crate) struct NzbSnap {
     pub max_time: i64,
     pub download_start_time: i64,
     pub dupe_recovered_bytes: i64,
+    pub queue_script_time: i64,
     pub name: Vec<u8>,
     pub filename: Vec<u8>,
     pub dest_dir: Vec<u8>,
@@ -740,6 +763,7 @@ pub(crate) struct DupSnap {
     pub dupe_mode: i32,
     pub dupe_score: i32,
     pub status: i32,
+    pub size: i64,
     pub full_content_hash: u32,
     pub filtered_content_hash: u32,
     pub name: Vec<u8>,
@@ -1466,6 +1490,10 @@ impl QueueSubsysHost {
 
     // DiskState ops (op = 5)
     pub fn disk_queue_exists(&self) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::diskstate_format::active_disk_queue_exists();
+        }
         self.raw(
             5,
             0,
@@ -1481,6 +1509,10 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_load_queue(&self, dq_ptr: usize) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::diskstate_format::active_disk_load_queue(self, dq_ptr);
+        }
         self.raw(
             5,
             1,
@@ -1496,6 +1528,11 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_discard_queue(&self) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::diskstate_format::active_disk_discard_queue();
+            return;
+        }
         self.raw(
             5,
             2,
@@ -1511,6 +1548,10 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_legacy_queue_read(&self) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::diskstate_format::active_legacy_queue_read();
+        }
         self.raw(
             5,
             3,
@@ -1526,6 +1567,11 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_cleanup_temp_dir(&self, dq_ptr: usize) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::diskstate_format::active_disk_cleanup_temp_dir(self, dq_ptr);
+            return;
+        }
         self.raw(
             5,
             4,
@@ -1541,6 +1587,11 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_save_all_file_infos(&self, dq_ptr: usize) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::diskstate_format::active_disk_save_all_file_infos(self, dq_ptr);
+            return;
+        }
         self.raw(
             5,
             5,
@@ -1560,6 +1611,11 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_discard_files_ex(&self, nzb_ptr: usize, delete_log: bool) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::diskstate_format::active_disk_discard_files(self, nzb_ptr, delete_log);
+            return;
+        }
         self.raw(
             5,
             6,
@@ -1575,6 +1631,13 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_discard_file(&self, file_id: i32, del_data: bool, del_part: bool, del_compl: bool) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::diskstate_format::active_disk_discard_file(
+                file_id, del_data, del_part, del_compl,
+            );
+            return;
+        }
         let mut ints = [
             i32::from(del_data),
             i32::from(del_part),
@@ -1595,6 +1658,11 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_save_file(&self, file_ptr: usize) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::diskstate_format::active_disk_save_file(self, file_ptr, false);
+            return;
+        }
         self.raw(
             5,
             8,
@@ -1610,6 +1678,11 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_save_file_state(&self, file_ptr: usize, completed: bool) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::diskstate_format::active_disk_save_file_state(self, file_ptr, completed, false);
+            return;
+        }
         self.raw(
             5,
             9,
@@ -1625,6 +1698,10 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_load_file_state(&self, file_ptr: usize, completed: bool) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::diskstate_format::active_disk_load_file_state(self, file_ptr, completed);
+        }
         self.raw(
             5,
             10,
@@ -1640,6 +1717,11 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_resave_completed_file_state(&self, file_id: i32) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::diskstate_format::active_disk_resave_completed_file_state(self, file_id);
+            return;
+        }
         self.raw(
             5,
             12,
@@ -1655,6 +1737,11 @@ impl QueueSubsysHost {
     }
 
     pub fn disk_load_articles(&self, file_ptr: usize) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::diskstate_format::active_disk_load_file(self, file_ptr, false, true);
+            return;
+        }
         self.raw(
             5,
             11,
@@ -1675,6 +1762,12 @@ impl QueueSubsysHost {
         push_ctx: usize,
         push_fn: usize,
     ) -> usize {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::diskstate_format::active_disk_load_completed_segments(
+                self, file_id, push_ctx, push_fn,
+            );
+        }
         self.raw(
             5,
             13,
@@ -1695,6 +1788,15 @@ impl QueueSubsysHost {
         load_info_data: bool,
         try_load_completed_state: bool,
     ) -> (usize, bool) {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::diskstate_format::active_disk_load_file_for_inspect(
+                self,
+                file_id,
+                load_info_data,
+                try_load_completed_state,
+            );
+        }
         let mut ints = [
             i32::from(load_info_data),
             i32::from(try_load_completed_state),
@@ -1797,6 +1899,11 @@ impl QueueSubsysHost {
     }
 
     pub fn queue_script_enqueue(&self, nzb_ptr: usize, event: i32) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::extension::enqueue_active_queue_script(self, nzb_ptr, event);
+            return;
+        }
         self.raw(
             6,
             4,
@@ -2254,6 +2361,93 @@ impl QueueSubsysHost {
         );
     }
 
+    pub fn id_gen_last(&self) -> (i32, i32) {
+        let mut ints = [0i32; 2];
+        self.raw(
+            22,
+            7,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        (ints[0], ints[1])
+    }
+
+    pub fn id_gen_raise_and_reset(&self, nzb_id: i32, file_id: i32) {
+        let mut ints = [nzb_id, file_id];
+        self.raw(
+            22,
+            7,
+            1,
+            0,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    pub fn history_push_nzb_uptr(&self, dq_ptr: usize, uptr_addr: usize, hist_time: i32) {
+        self.raw(
+            23,
+            -7,
+            hist_time,
+            dq_ptr,
+            uptr_addr,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn history_push_dup(
+        &self,
+        dq_ptr: usize,
+        id: i32,
+        hist_time: i32,
+        status: i32,
+        size: i64,
+        full_hash: u32,
+        filt_hash: u32,
+        dupe_score: i32,
+        dupe_mode: i32,
+        name: *const c_char,
+        dupe_key: *const c_char,
+    ) {
+        let mut ints = [
+            id,
+            hist_time,
+            status,
+            full_hash as i32,
+            filt_hash as i32,
+            dupe_score,
+            dupe_mode,
+        ];
+        let mut i64s = [size];
+        self.raw(
+            23,
+            -8,
+            0,
+            dq_ptr,
+            0,
+            name,
+            dupe_key,
+            ints.as_mut_ptr(),
+            i64s.as_mut_ptr(),
+            std::ptr::null_mut(),
+        );
+    }
+
     pub fn history_move_queue_item(&self, dq_ptr: usize, nzb_ptr: usize) {
         self.raw(
             23,
@@ -2658,8 +2852,8 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return NzbSnap::default();
         }
-        let mut ints = [0i32; 82];
-        let mut i64s = [0i64; 20];
+        let mut ints = [0i32; 87];
+        let mut i64s = [0i64; 21];
         let mut strs = [std::ptr::null(); 9];
         self.raw(
             30,
@@ -2736,6 +2930,11 @@ impl QueueSubsysHost {
                 cleanup_disk: ints[57] != 0,
                 unpack_tried: ints[58] != 0,
                 par_full: ints[59] != 0,
+                force_par_full: ints[83] != 0,
+                force_repair: ints[84] != 0,
+                par_repaired: ints[85] != 0,
+                last_unpack_status: ints[86],
+                message_count: ints[82],
                 post_total_sec: ints[60],
                 par_rename_status: ints[61],
                 rar_rename_status: ints[62],
@@ -2778,6 +2977,7 @@ impl QueueSubsysHost {
                 max_time: i64s[14],
                 download_start_time: i64s[16],
                 dupe_recovered_bytes: i64s[17],
+                queue_script_time: i64s[20],
                 name: read_cstr(strs[0]),
                 filename: read_cstr(strs[1]),
                 dest_dir: read_cstr(strs[2]),
@@ -3131,6 +3331,108 @@ impl QueueSubsysHost {
             strs.as_mut_ptr(),
         );
         unsafe { read_cstr(strs[0]) }
+    }
+
+    pub fn nzb_script_statuses_len(&self, nzb_ptr: usize) -> usize {
+        if nzb_ptr == 0 {
+            return 0;
+        }
+        self.raw(
+            31,
+            17,
+            -1,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+
+    pub fn nzb_script_status_at(&self, nzb_ptr: usize, idx: usize) -> (i32, Vec<u8>) {
+        let mut ints = [0i32; 1];
+        let mut strs = [std::ptr::null(); 1];
+        self.raw(
+            31,
+            17,
+            idx as i32,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            strs.as_mut_ptr(),
+        );
+        (ints[0], unsafe { read_cstr(strs[0]) })
+    }
+
+    pub fn nzb_extracted_archives_len(&self, nzb_ptr: usize) -> usize {
+        if nzb_ptr == 0 {
+            return 0;
+        }
+        self.raw(
+            31,
+            18,
+            -1,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+
+    pub fn nzb_extracted_archive_at(&self, nzb_ptr: usize, idx: usize) -> Vec<u8> {
+        let mut strs = [std::ptr::null(); 1];
+        self.raw(
+            31,
+            18,
+            idx as i32,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            strs.as_mut_ptr(),
+        );
+        unsafe { read_cstr(strs[0]) }
+    }
+
+    pub fn nzb_server_stat_set(&self, nzb_ptr: usize, server_id: i32, succ: i32, fail: i32) {
+        let mut ints = [server_id, succ, fail];
+        self.raw(
+            31,
+            19,
+            0,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    pub fn nzb_sync_current_server_stats(&self, nzb_ptr: usize) {
+        self.raw(
+            31,
+            19,
+            1,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
     }
 
     pub fn nzb_set_int(&self, nzb_ptr: usize, field: i32, val: i32) {
@@ -3580,7 +3882,7 @@ impl QueueSubsysHost {
 
     pub fn nzb_stream_repair_update_completed_file(&self, nzb_ptr: usize, file_id: i32, mode: i32) {
         let mut ints = [mode];
-        self.raw(
+        if self.raw(
             34,
             12,
             file_id,
@@ -3591,7 +3893,10 @@ impl QueueSubsysHost {
             ints.as_mut_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-        );
+        ) != 0
+        {
+            self.disk_discard_file(file_id, true, true, true);
+        }
     }
 
     pub fn nzb_stream_repair_job_detail(
@@ -3810,11 +4115,69 @@ impl QueueSubsysHost {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn nzb_push_completed_file_raw(
+        &self,
+        nzb_ptr: usize,
+        id: i32,
+        status: i32,
+        crc: u32,
+        par_file: bool,
+        filename: *const c_char,
+        origname: *const c_char,
+        hash16k: *const c_char,
+        par_set_id: *const c_char,
+    ) {
+        let mut ints = [id, status, crc as i32, i32::from(par_file)];
+        let mut strs = [filename, origname, hash16k, par_set_id];
+        self.raw(
+            34,
+            18,
+            0,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            strs.as_mut_ptr(),
+        );
+    }
+
+    pub fn nzb_add_stub_file(
+        &self,
+        nzb_ptr: usize,
+        id: i32,
+        paused: bool,
+        time_opt: Option<i32>,
+        extra_priority: bool,
+    ) {
+        let mut ints = [
+            id,
+            i32::from(paused),
+            time_opt.unwrap_or(0),
+            i32::from(extra_priority),
+        ];
+        self.raw(
+            34,
+            19,
+            i32::from(time_opt.is_some()),
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
     pub fn dup_snap(&self, dup_ptr: usize) -> DupSnap {
         if dup_ptr == 0 {
             return DupSnap::default();
         }
         let mut ints = [0i32; 5];
+        let mut i64s = [0i64; 1];
         let mut strs = [std::ptr::null(); 2];
         self.raw(
             35,
@@ -3825,7 +4188,7 @@ impl QueueSubsysHost {
             std::ptr::null(),
             std::ptr::null(),
             ints.as_mut_ptr(),
-            std::ptr::null_mut(),
+            i64s.as_mut_ptr(),
             strs.as_mut_ptr(),
         );
         unsafe {
@@ -3833,6 +4196,7 @@ impl QueueSubsysHost {
                 dupe_mode: ints[0],
                 dupe_score: ints[1],
                 status: ints[2],
+                size: i64s[0],
                 full_content_hash: ints[3] as u32,
                 filtered_content_hash: ints[4] as u32,
                 name: read_cstr(strs[0]),
@@ -4016,6 +4380,72 @@ impl QueueSubsysHost {
         out
     }
 
+    pub fn file_server_stats_len(&self, file_ptr: usize) -> usize {
+        if file_ptr == 0 {
+            return 0;
+        }
+        self.raw(
+            41,
+            1,
+            -1,
+            file_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+
+    pub fn file_server_stat_at(&self, file_ptr: usize, idx: usize) -> (i32, i32, i32) {
+        let mut ints = [0i32; 3];
+        self.raw(
+            41,
+            1,
+            idx as i32,
+            file_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        (ints[0], ints[1], ints[2])
+    }
+
+    pub fn file_server_stat_set(&self, file_ptr: usize, server_id: i32, succ: i32, fail: i32) {
+        let mut ints = [server_id, succ, fail];
+        self.raw(
+            41,
+            2,
+            0,
+            file_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    pub fn file_push_group(&self, file_ptr: usize, group: *const c_char) {
+        self.raw(
+            41,
+            3,
+            0,
+            file_ptr,
+            0,
+            group,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
     pub fn file_set_int(&self, file_ptr: usize, field: i32, val: i32) {
         self.raw(
             42,
@@ -4142,6 +4572,108 @@ impl QueueSubsysHost {
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
+    }
+
+    pub fn file_new_standalone(&self, id: i32, bump_gen: bool) -> usize {
+        self.raw(
+            42,
+            60,
+            i32::from(bump_gen),
+            0,
+            id as usize,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+
+    pub fn file_article_raw_at(&self, file_ptr: usize, idx: usize) -> (ArticleSnap, bool) {
+        let mut ints = [0i32; 7];
+        let mut i64s = [0i64; 1];
+        let mut strs = [std::ptr::null(); 2];
+        self.raw(
+            43,
+            10,
+            idx as i32,
+            file_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            i64s.as_mut_ptr(),
+            strs.as_mut_ptr(),
+        );
+        unsafe {
+            (
+                ArticleSnap {
+                    ptr: 0,
+                    status: ints[0],
+                    segment_size: ints[1],
+                    crc: ints[2] as u32,
+                    dupe_fallback_round: ints[3],
+                    part_number: ints[5],
+                    size: ints[6],
+                    segment_offset: i64s[0],
+                    message_id: read_cstr(strs[0]),
+                    dupe_original_message_id: read_cstr(strs[1]),
+                    ..Default::default()
+                },
+                ints[4] != 0,
+            )
+        }
+    }
+
+    pub fn file_push_article_basic(
+        &self,
+        file_ptr: usize,
+        part_number: i32,
+        size: i32,
+        message_id: *const c_char,
+    ) {
+        self.raw(
+            43,
+            11,
+            part_number,
+            file_ptr,
+            size as usize,
+            message_id,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn file_article_disk_op(
+        &self,
+        file_ptr: usize,
+        idx: i32,
+        apply: bool,
+        extra_i32: i32,
+        seg_offset: i64,
+        seg_size: i32,
+        crc: u32,
+        dupe_round: i32,
+        status: i32,
+        result_filename: *const c_char,
+    ) -> i32 {
+        let mut ints = [extra_i32, seg_size, crc as i32, dupe_round, status];
+        let mut i64s = [seg_offset];
+        self.raw(
+            43,
+            12,
+            idx,
+            file_ptr,
+            usize::from(apply),
+            result_filename,
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            i64s.as_mut_ptr(),
+            std::ptr::null_mut(),
+        ) as i32
     }
 
     pub fn article_at(&self, file_ptr: usize, idx: usize) -> ArticleSnap {

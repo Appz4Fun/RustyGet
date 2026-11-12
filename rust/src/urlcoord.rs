@@ -145,7 +145,6 @@ use crate::queuesubsys_host::{
     ASPECT_URL_FOUND, ASPECT_URL_RETURNED, NZB_INT_ACTIVE_DOWNLOADS, NZB_INT_AVOID_HISTORY,
     NZB_INT_DELETE_STATUS, NZB_INT_DELETING, NZB_INT_URL_STATUS, QE_URL_COMPLETED,
 };
-use std::ffi::c_int;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -805,16 +804,174 @@ pub(crate) fn log_active_url_debug_info() {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_url_coord_add(
-    nzb_ptr: usize,
-    holder_ptr: usize,
-    add_first: c_int,
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_feed_url_active(
+    feed_id: i32,
+    url: &[u8],
+    filename: &[u8],
+    category: &[u8],
+    priority: i32,
+    add_paused: bool,
+    dupe_key: &[u8],
+    dupe_score: i32,
+    dupe_mode: i32,
+    size: i64,
+    time: i64,
 ) {
-    let _cg = crate::ffi::PosixCancelGuard::disable();
-    if let Some(uc) = active_url_coord() {
-        uc.add_url_to_queue(nzb_ptr, holder_ptr, add_first != 0);
+    use crate::queuesubsys_host::{
+        NK_URL, NZB_I64_MAX_TIME, NZB_I64_MIN_TIME, NZB_I64_SIZE, NZB_INT_ADD_URL_PAUSED,
+        NZB_INT_DUPE_MODE, NZB_INT_DUPE_SCORE, NZB_INT_FEED_ID, NZB_INT_KIND, NZB_INT_PRIORITY,
+        NZB_STR_CATEGORY, NZB_STR_DUPE_KEY, NZB_STR_FILENAME, NZB_STR_URL,
+    };
+    let (Some(host), Some(uc)) = (crate::ffi::queue_host(), active_url_coord()) else {
+        return;
+    };
+    let (uptr_addr, nzb_ptr) = host.alloc_new_nzb_uptr();
+    if uptr_addr == 0 || nzb_ptr == 0 {
+        host.destroy_nzb_uptr(uptr_addr);
+        return;
     }
+    host.nzb_set_int(nzb_ptr, NZB_INT_KIND, NK_URL);
+    host.nzb_set_int(nzb_ptr, NZB_INT_FEED_ID, feed_id);
+    host.nzb_set_str(nzb_ptr, NZB_STR_URL, url);
+    if !filename.is_empty() {
+        host.nzb_set_str(nzb_ptr, NZB_STR_FILENAME, filename);
+    }
+    host.nzb_set_str(nzb_ptr, NZB_STR_CATEGORY, category);
+    host.nzb_set_int(nzb_ptr, NZB_INT_PRIORITY, priority);
+    host.nzb_set_int(nzb_ptr, NZB_INT_ADD_URL_PAUSED, i32::from(add_paused));
+    host.nzb_set_str(nzb_ptr, NZB_STR_DUPE_KEY, dupe_key);
+    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_SCORE, dupe_score);
+    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, dupe_mode);
+    host.nzb_set_i64(nzb_ptr, NZB_I64_SIZE, size);
+    host.nzb_set_i64(nzb_ptr, NZB_I64_MIN_TIME, time);
+    host.nzb_set_i64(nzb_ptr, NZB_I64_MAX_TIME, time);
+    uc.add_url_to_queue(nzb_ptr, uptr_addr, false);
+    host.destroy_nzb_uptr(uptr_addr);
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_rpc_url_active(
+    url: &[u8],
+    filename: &[u8],
+    category: &[u8],
+    auto_category: bool,
+    priority: i32,
+    add_paused: bool,
+    add_top: bool,
+    dupe_key: &[u8],
+    dupe_score: i32,
+    dupe_mode: i32,
+    params: &[(&[u8], &[u8])],
+) -> Option<u32> {
+    use crate::queuesubsys_host::{
+        MK_INFO, NK_URL, NZB_INT_ADD_URL_PAUSED, NZB_INT_AUTO_CATEGORY, NZB_INT_DUPE_MODE,
+        NZB_INT_DUPE_SCORE, NZB_INT_KIND, NZB_INT_PRIORITY, NZB_STR_CATEGORY, NZB_STR_DUPE_KEY,
+        NZB_STR_FILENAME, NZB_STR_URL,
+    };
+    let (Some(host), Some(uc)) = (crate::ffi::queue_host(), active_url_coord()) else {
+        return None;
+    };
+    let (uptr_addr, nzb_ptr) = host.alloc_new_nzb_uptr();
+    if uptr_addr == 0 || nzb_ptr == 0 {
+        host.destroy_nzb_uptr(uptr_addr);
+        return None;
+    }
+    host.nzb_set_int(nzb_ptr, NZB_INT_KIND, NK_URL);
+    host.nzb_set_str(nzb_ptr, NZB_STR_URL, url);
+    host.nzb_set_str(nzb_ptr, NZB_STR_FILENAME, filename);
+    host.nzb_set_str(nzb_ptr, NZB_STR_CATEGORY, category);
+    host.nzb_set_int(nzb_ptr, NZB_INT_AUTO_CATEGORY, i32::from(auto_category));
+    host.nzb_set_int(nzb_ptr, NZB_INT_PRIORITY, priority);
+    host.nzb_set_int(nzb_ptr, NZB_INT_ADD_URL_PAUSED, i32::from(add_paused));
+    host.nzb_set_str(nzb_ptr, NZB_STR_DUPE_KEY, dupe_key);
+    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_SCORE, dupe_score);
+    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, dupe_mode);
+    for &(k, v) in params {
+        host.nzb_set_param(nzb_ptr, k, Some(v));
+    }
+    let nzb_id = host.nzb_snap(nzb_ptr, false).id;
+    let nice = host.nzb_make_nice_url_name(nzb_ptr, url, filename);
+    let mut msg = b"Queue ".to_vec();
+    msg.extend_from_slice(&nice);
+    crate::log::log_active_bytes(MK_INFO, &msg);
+    uc.add_url_to_queue(nzb_ptr, uptr_addr, add_top);
+    host.destroy_nzb_uptr(uptr_addr);
+    Some(nzb_id as u32)
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_binrpc_url_active(
+    url: &[u8],
+    filename: &[u8],
+    category: &[u8],
+    auto_category: bool,
+    priority: i32,
+    add_paused: bool,
+    add_top: bool,
+    dupe_key: &[u8],
+    dupe_score: i32,
+    dupe_mode: i32,
+) -> bool {
+    use crate::queuesubsys_host::{
+        NK_URL, NZB_INT_ADD_URL_PAUSED, NZB_INT_AUTO_CATEGORY, NZB_INT_DUPE_MODE,
+        NZB_INT_DUPE_SCORE, NZB_INT_KIND, NZB_INT_PRIORITY, NZB_STR_CATEGORY, NZB_STR_DUPE_KEY,
+        NZB_STR_FILENAME, NZB_STR_URL,
+    };
+    let (Some(host), Some(uc)) = (crate::ffi::queue_host(), active_url_coord()) else {
+        return false;
+    };
+    let (uptr_addr, nzb_ptr) = host.alloc_new_nzb_uptr();
+    if uptr_addr == 0 || nzb_ptr == 0 {
+        host.destroy_nzb_uptr(uptr_addr);
+        return false;
+    }
+    host.nzb_set_int(nzb_ptr, NZB_INT_KIND, NK_URL);
+    host.nzb_set_str(nzb_ptr, NZB_STR_URL, url);
+    host.nzb_set_str(nzb_ptr, NZB_STR_FILENAME, filename);
+    host.nzb_set_str(nzb_ptr, NZB_STR_CATEGORY, category);
+    host.nzb_set_int(nzb_ptr, NZB_INT_AUTO_CATEGORY, i32::from(auto_category));
+    host.nzb_set_int(nzb_ptr, NZB_INT_PRIORITY, priority);
+    host.nzb_set_int(nzb_ptr, NZB_INT_ADD_URL_PAUSED, i32::from(add_paused));
+    host.nzb_set_str(nzb_ptr, NZB_STR_DUPE_KEY, dupe_key);
+    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_SCORE, dupe_score);
+    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, dupe_mode);
+    uc.add_url_to_queue(nzb_ptr, uptr_addr, add_top);
+    host.destroy_nzb_uptr(uptr_addr);
+    true
+}
+
+#[cfg(unix)]
+pub(crate) fn add_testserver_url_active(server_id: i32, url: &[u8]) -> bool {
+    use crate::queuesubsys_host::{
+        DM_FORCE, NK_URL, NZB_FORCE_PRIORITY, NZB_INT_ADD_URL_PAUSED, NZB_INT_DESIRED_SERVER_ID,
+        NZB_INT_DUPE_MODE, NZB_INT_EXTRA_PRIORITY, NZB_INT_KIND, NZB_INT_PRIORITY,
+        NZB_INT_SKIP_DISK_WRITE, NZB_INT_SKIP_SCRIPT_PROCESSING, NZB_STR_FILENAME, NZB_STR_URL,
+    };
+    let (Some(host), Some(uc)) = (crate::ffi::queue_host(), active_url_coord()) else {
+        return false;
+    };
+    let (uptr_addr, nzb_ptr) = host.alloc_new_nzb_uptr();
+    if uptr_addr == 0 || nzb_ptr == 0 {
+        host.destroy_nzb_uptr(uptr_addr);
+        return false;
+    }
+    host.nzb_set_int(nzb_ptr, NZB_INT_KIND, NK_URL);
+    host.nzb_set_str(nzb_ptr, NZB_STR_URL, url);
+    host.nzb_set_str(nzb_ptr, NZB_STR_FILENAME, url);
+    host.nzb_set_int(nzb_ptr, NZB_INT_PRIORITY, NZB_FORCE_PRIORITY);
+    host.nzb_set_int(nzb_ptr, NZB_INT_EXTRA_PRIORITY, NZB_FORCE_PRIORITY);
+    host.nzb_set_int(nzb_ptr, NZB_INT_ADD_URL_PAUSED, 0);
+    host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_MODE, DM_FORCE);
+    host.nzb_set_int(nzb_ptr, NZB_INT_DESIRED_SERVER_ID, server_id);
+    host.nzb_set_int(nzb_ptr, NZB_INT_SKIP_SCRIPT_PROCESSING, 1);
+    host.nzb_set_int(nzb_ptr, NZB_INT_SKIP_DISK_WRITE, 1);
+    uc.add_url_to_queue(nzb_ptr, uptr_addr, true);
+    host.destroy_nzb_uptr(uptr_addr);
+    true
 }
 
 #[cfg(test)]

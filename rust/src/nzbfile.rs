@@ -7,7 +7,7 @@
 //! extraction and sanitization (`ProcessFiles`).
 
 use std::collections::HashMap;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{c_char, c_int, CStr, CString};
 
 fn cstring_lossy(bytes: &[u8]) -> CString {
     if let Some(nul) = bytes.iter().position(|&b| b == 0) {
@@ -157,12 +157,7 @@ pub struct FileTotals {
 
 /// `NzbFile::AddFileInfo`'s arithmetic over a file's segments (`parts` and
 /// `sizes` in the nzb's order). `None` when no segment is left.
-pub fn file_totals(
-    subject: &[u8],
-    parts: &[i32],
-    sizes: &[i64],
-    ct: &Ctype,
-) -> Option<FileTotals> {
+pub fn file_totals(subject: &[u8], parts: &[i32], sizes: &[i64], ct: &Ctype) -> Option<FileTotals> {
     let mut order: Vec<usize> = (0..parts.len()).collect();
     order.sort_by_key(|&i| parts[i]);
     let mut kept = Vec::with_capacity(order.len());
@@ -681,9 +676,7 @@ impl NzbFileParser {
         let base_name = &file_name_bytes[base_idx..];
 
         if sax_ret != 0 {
-            self.push_error(nzbfile_format_parse_error_msg(
-                base_name, false,
-            ));
+            self.push_error(nzbfile_format_parse_error_msg(base_name, false));
             return false;
         }
 
@@ -741,9 +734,7 @@ impl NzbFileParser {
         }
 
         if parsed_files.is_empty() {
-            self.push_error(nzbfile_format_parse_error_msg(
-                base_name, true,
-            ));
+            self.push_error(nzbfile_format_parse_error_msg(base_name, true));
             return false;
         }
 
@@ -872,8 +863,7 @@ impl NzbFileParser {
         self.meta_title = cstring_lossy(&san_meta_title);
 
         let mut cat_bytes = self.category.as_bytes().to_vec();
-        let (cat_start, cat_end) =
-            crate::util::sanitize_line(&mut cat_bytes, text_right_space);
+        let (cat_start, cat_end) = crate::util::sanitize_line(&mut cat_bytes, text_right_space);
         self.category = cstring_lossy(&cat_bytes[cat_start..cat_end]);
 
         true
@@ -1024,7 +1014,10 @@ impl NzbFileParser {
                     let norm = Self::normalize_xml_eol(&decoded);
                     if depth == 0 {
                         let rest = norm.strip_prefix('\u{feff}').unwrap_or(&norm);
-                        if !rest.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
+                        if !rest
+                            .bytes()
+                            .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                        {
                             self.on_sax_error(b"Extra content at the end of the document");
                             return -1;
                         }
@@ -1072,7 +1065,9 @@ impl NzbFileParser {
                 }
                 Ok(Event::Decl(_)) => {
                     if saw_root {
-                        self.on_sax_error(b"XML declaration allowed only at the start of the document");
+                        self.on_sax_error(
+                            b"XML declaration allowed only at the start of the document",
+                        );
                         return -1;
                     }
                 }
@@ -1112,11 +1107,7 @@ impl NzbFileParser {
 
     /// Parses raw XML bytes into `self` (`xmlSAXUserParseFile` replacement),
     /// returning `0` on success or `-1` on XML syntax/entity error.
-    pub fn parse_xml(
-        &mut self,
-        xml: &[u8],
-        alloc_file_id: impl FnMut() -> i32,
-    ) -> i32 {
+    pub fn parse_xml(&mut self, xml: &[u8], alloc_file_id: impl FnMut() -> i32) -> i32 {
         self.parse_xml_reader(std::io::Cursor::new(xml), alloc_file_id)
     }
 
@@ -1144,6 +1135,189 @@ impl NzbFileParser {
             Err(_) => -1,
         };
         self.finalize_with(sax_ret, par_ignore_ext, ct, on_parsed_subject, sort_indices)
+    }
+}
+
+#[cfg(unix)]
+pub(crate) struct ParsedMaterializedFile {
+    pub file_ptr: usize,
+    pub total_articles: i32,
+    pub missed_articles: i32,
+    pub cut_short: bool,
+}
+
+#[cfg(unix)]
+pub(crate) struct ParsedMaterializedNzb {
+    pub ok: bool,
+    pub uptr_addr: usize,
+    pub nzb_ptr: usize,
+    pub password: Vec<u8>,
+    pub category_from_file: Vec<u8>,
+    pub files: Vec<ParsedMaterializedFile>,
+}
+
+#[cfg(unix)]
+fn with_libc_ctype<R>(f: impl FnOnce(Ctype<'_>) -> R) -> R {
+    let mut classes = [0u16; 256];
+    let mut lower = [0i32; 384];
+    for (c, slot) in classes.iter_mut().enumerate() {
+        let ci = c as c_int;
+        let sp = unsafe { libc::isspace(ci) != 0 };
+        let dg = unsafe { libc::isdigit(ci) != 0 };
+        *slot = u16::from(sp) | (u16::from(dg) << 1);
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        unsafe extern "C" {
+            fn __ctype_tolower_loc() -> *mut *const i32;
+        }
+        let tbl = *__ctype_tolower_loc();
+        for c in -128i32..256i32 {
+            lower[(c + 128) as usize] = *tbl.offset(c as isize);
+        }
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    for c in -128i32..256i32 {
+        lower[(c + 128) as usize] = if c < 0 {
+            c
+        } else {
+            unsafe { libc::tolower(c) }
+        };
+    }
+    let ct = Ctype {
+        classes: &classes,
+        space: 1,
+        digit: 2,
+        lower: &lower,
+        char_signed: (0 as c_char).wrapping_sub(1) < 0,
+    };
+    f(ct)
+}
+
+#[cfg(unix)]
+pub(crate) fn parse_and_materialize_nzb(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    filename: &[u8],
+    category: &[u8],
+) -> ParsedMaterializedNzb {
+    use crate::queuesubsys_host::{
+        FILE_ACT_CLEAR_ARTICLES, MK_ERROR, MK_WARNING, NZB_ACT_BUILD_DEST_DIR,
+        NZB_ACT_UPDATE_MIN_MAX_TIME, NZB_INT_MANY_DUPE_FILES, NZB_STR_CATEGORY, NZB_STR_FILENAME,
+    };
+
+    crate::log::log_active_bytes(3, b"Creating NZBFile");
+    let (uptr_addr, nzb_ptr) = host.alloc_new_nzb_uptr();
+    host.nzb_set_str(nzb_ptr, NZB_STR_FILENAME, filename);
+    host.nzb_set_str(nzb_ptr, NZB_STR_CATEGORY, category);
+    host.nzb_action(nzb_ptr, NZB_ACT_BUILD_DEST_DIR, 0);
+
+    let opts = host.opts();
+
+    let mut parser = NzbFileParser::new(filename);
+    let ok = with_libc_ctype(|ct| {
+        parser.parse_file(
+            &opts.par_ignore_ext,
+            &ct,
+            || host.alloc_file_id(),
+            |subj: &CStr, fname: &CStr| {
+                let mut m1 = b"Extracting a filename from Subject ".to_vec();
+                m1.extend_from_slice(subj.to_bytes());
+                crate::log::log_active_bytes(4, &m1[..m1.len().min(1023)]);
+                let mut m2 = b"Extracted Filename: ".to_vec();
+                m2.extend_from_slice(fname.to_bytes());
+                crate::log::log_active_bytes(4, &m2[..m2.len().min(1023)]);
+            },
+            None::<fn(&[*const c_char], &mut [usize])>,
+        )
+    });
+
+    for msg in &parser.messages {
+        let mk = if msg.kind == 2 { MK_ERROR } else { MK_WARNING };
+        host.nzb_add_message(nzb_ptr, mk, msg.text.to_bytes());
+    }
+
+    if !ok {
+        return ParsedMaterializedNzb {
+            ok: false,
+            uptr_addr,
+            nzb_ptr,
+            password: Vec::new(),
+            category_from_file: Vec::new(),
+            files: Vec::new(),
+        };
+    }
+
+    host.nzb_set_int(
+        nzb_ptr,
+        NZB_INT_MANY_DUPE_FILES,
+        i32::from(parser.many_dupe_files),
+    );
+    let counters = crate::queuecoord::NzbgetRsNzbMergeSplitCounters {
+        file_count: parser.file_count,
+        total_articles: parser.total_articles,
+        failed_articles: parser.failed_articles,
+        current_failed_articles: parser.cur_failed_articles,
+        size: parser.size,
+        remaining_size: parser.remaining_size,
+        failed_size: parser.failed_size,
+        current_failed_size: parser.cur_failed_size,
+        par_size: parser.par_size,
+        par_failed_size: parser.par_failed_size,
+        par_current_failed_size: parser.par_cur_failed_size,
+        remaining_par_count: parser.remaining_par_count,
+        full_content_hash: parser.full_content_hash,
+        filtered_content_hash: parser.filtered_content_hash,
+        ..Default::default()
+    };
+    host.nzb_apply_merge_split_counters(nzb_ptr, &counters);
+
+    let mut files = Vec::with_capacity(parser.files.len());
+    for kf in &parser.files {
+        let file_ptr = host.nzb_add_parsed_file(
+            nzb_ptr,
+            kf.id,
+            kf.subject.as_ptr(),
+            kf.filename.as_ptr(),
+            kf.time,
+            kf.size,
+            kf.remaining_size,
+            kf.missed_size,
+            kf.total_articles,
+            kf.missed_articles,
+            kf.par_file,
+            &kf.group_ptrs,
+            &kf.article_parts,
+            &kf.article_sizes,
+            &kf.article_msg_id_ptrs,
+        );
+        files.push(ParsedMaterializedFile {
+            file_ptr,
+            total_articles: kf.total_articles,
+            missed_articles: kf.missed_articles,
+            cut_short: kf.cut_short,
+        });
+    }
+
+    host.nzb_action(nzb_ptr, NZB_ACT_UPDATE_MIN_MAX_TIME, 0);
+    if opts.server_mode {
+        for f in &files {
+            host.disk_save_file(f.file_ptr);
+            host.file_action(f.file_ptr, FILE_ACT_CLEAR_ARTICLES, 0);
+        }
+    }
+
+    let meta_name = parser.meta_name.to_bytes();
+    if !meta_name.is_empty() {
+        host.nzb_set_meta_name(nzb_ptr, meta_name);
+    }
+
+    ParsedMaterializedNzb {
+        ok: true,
+        uptr_addr,
+        nzb_ptr,
+        password: parser.password.to_bytes().to_vec(),
+        category_from_file: parser.category.to_bytes().to_vec(),
+        files,
     }
 }
 
@@ -1292,10 +1466,7 @@ impl<R: std::io::Read> XmlStreamReader<R> {
         }
         let quote = buf[i];
         let val_start = i + 1;
-        let Some(val_len) = buf[val_start..decl_end]
-            .iter()
-            .position(|&b| b == quote)
-        else {
+        let Some(val_len) = buf[val_start..decl_end].iter().position(|&b| b == quote) else {
             return;
         };
         let val_end = val_start + val_len;
@@ -1535,15 +1706,9 @@ mod tests {
             let mut short = full.clone();
             *short.last_mut().unwrap() = 1000;
             assert_eq!(declared_tail(b"a.rar yEnc (1/3709)", 20, &short, ct), 0);
-            assert_eq!(
-                declared_tail(b"a.rar yEnc (1/3709)", 1, &full[..1], ct),
-                0
-            );
+            assert_eq!(declared_tail(b"a.rar yEnc (1/3709)", 1, &full[..1], ct), 0);
             let mixed: Vec<i64> = (0..20).map(|i| 700_000 + i * 1000).collect();
-            assert_eq!(
-                declared_tail(b"a.rar yEnc (1/3709)", 20, &mixed, ct),
-                3709
-            );
+            assert_eq!(declared_tail(b"a.rar yEnc (1/3709)", 20, &mixed, ct), 3709);
             let long = [vec![b'x'; 1020], b".par2 (1/3709)".to_vec()].concat();
             assert_eq!(declared_tail(&long, 20, &full, ct), 3709);
         });
@@ -1634,7 +1799,10 @@ mod tests {
             assert_eq!(parser.meta_name.as_bytes(), b"My.Release.S01E01.mkv");
             assert_eq!(parser.files.len(), 1);
             assert_eq!(parser.files[0].filename.as_bytes(), b"a.mkv");
-            assert_eq!(parser.files[0].article_msg_ids[0].as_bytes(), b"<msg1@test>");
+            assert_eq!(
+                parser.files[0].article_msg_ids[0].as_bytes(),
+                b"<msg1@test>"
+            );
             assert_eq!(
                 parser.files[0].article_msg_ids[1].as_bytes(),
                 b"<msg2__@test>"
@@ -1814,10 +1982,7 @@ mod tests {
                 format!("C_{sep}Windows{sep}System32")
             );
             assert_eq!(srel("LPT1/subfolder"), format!("_LPT1{sep}subfolder"));
-            assert_eq!(
-                srel("movies/CON/item"),
-                format!("movies{sep}_CON{sep}item")
-            );
+            assert_eq!(srel("movies/CON/item"), format!("movies{sep}_CON{sep}item"));
 
             // Helper to parse inline NZB with given <head> meta content
             let parse_head_nzb = |head_meta: &str| -> NzbFileParser {
@@ -2071,7 +2236,8 @@ mod tests {
                 (true, false, "UTF-16LE"),
                 (false, false, "UTF-16BE"),
             ] {
-                let doc = utf16_doc.replace("encoding=\"UTF-16\"", &format!("encoding=\"{decl_enc}\""));
+                let doc =
+                    utf16_doc.replace("encoding=\"UTF-16\"", &format!("encoding=\"{decl_enc}\""));
                 let bytes = encode_utf16(&doc, le, bom);
                 let tmp_path = std::env::temp_dir().join(format!(
                     "nzbget_utf16_{}_{}_{}.nzb",
@@ -2095,8 +2261,14 @@ mod tests {
                 let _ = std::fs::remove_file(&tmp_path);
                 assert_eq!(p.password.to_str().unwrap(), "s\u{00E9}cret-\u{1F512}");
                 assert_eq!(p.files.len(), 1);
-                assert_eq!(p.files[0].subject.to_str().unwrap(), "\"f\u{00FC}le-\u{1F680}.rar\" yEnc (1/120)");
-                assert_eq!(p.files[0].filename.to_str().unwrap(), "f\u{00FC}le-\u{1F680}.rar");
+                assert_eq!(
+                    p.files[0].subject.to_str().unwrap(),
+                    "\"f\u{00FC}le-\u{1F680}.rar\" yEnc (1/120)"
+                );
+                assert_eq!(
+                    p.files[0].filename.to_str().unwrap(),
+                    "f\u{00FC}le-\u{1F680}.rar"
+                );
                 assert_eq!(p.files[0].total_articles, 120);
                 assert_eq!(p.files[0].size, 120_000);
             }

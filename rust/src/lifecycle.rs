@@ -1682,6 +1682,13 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
 
             if !remote_mode {
                 if standalone_add && signal_state_op(0) == 0 {
+                    #[cfg(unix)]
+                    if e.a1 < 0 {
+                        let _ = crate::scanner::add_cli_nzb_file_active(cat_ptr, nzb_ptr);
+                    } else {
+                        cb(e.ctx, 11, 0, cat_ptr, nzb_ptr);
+                    }
+                    #[cfg(not(unix))]
                     cb(e.ctx, 11, 0, cat_ptr, nzb_ptr);
                 }
 
@@ -1689,6 +1696,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 cb(e.ctx, 4, 0, std::ptr::null(), std::ptr::null());
                 #[cfg(unix)]
                 if e.a1 < 0 {
+                    crate::scheduler::start_daemon_service_coord();
                     crate::dupesearch_coord::start_daemon_dupesearch();
                     crate::urlcoord::start_daemon_url_coord();
                     crate::feed::start_daemon_feed_coord();
@@ -1699,7 +1707,8 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                     let mut st_mask = cb(e.ctx, 5, 0, std::ptr::null(), std::ptr::null());
                     #[cfg(unix)]
                     if e.a1 < 0
-                        && (crate::dupesearch_coord::is_daemon_dupesearch_running()
+                        && (crate::scheduler::is_daemon_service_coord_running()
+                            || crate::dupesearch_coord::is_daemon_dupesearch_running()
                             || crate::urlcoord::is_daemon_url_coord_running()
                             || crate::feed::is_daemon_feed_coord_running()
                             || crate::articledl::is_daemon_memory_monitor_running())
@@ -1729,6 +1738,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                         cb(e.ctx, 6, 0, std::ptr::null(), std::ptr::null());
                         #[cfg(unix)]
                         if e.a1 < 0 {
+                            crate::scheduler::stop_daemon_service_coord();
                             crate::dupesearch_coord::stop_daemon_dupesearch();
                             crate::urlcoord::stop_daemon_url_coord();
                             crate::feed::stop_daemon_feed_coord();
@@ -1866,6 +1876,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             }
             #[cfg(unix)]
             if e.a2 < 0 && eff_remote_mode == 0 {
+                crate::scheduler::stop_daemon_service_coord();
                 crate::dupesearch_coord::stop_daemon_dupesearch();
                 crate::urlcoord::stop_daemon_url_coord();
                 crate::feed::stop_daemon_feed_coord();
@@ -1952,6 +1963,8 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 if let Ok(mut g) = DAEMON_FRONTEND.lock() {
                     let _ = g.take();
                 }
+                crate::scheduler::shutdown_daemon_service_coord();
+                crate::scanner::shutdown_daemon_scanner();
                 crate::articledl::shutdown_daemon_memory_monitor();
                 crate::feed::shutdown_daemon_feed_coord();
                 crate::urlcoord::shutdown_daemon_url_coord();
@@ -1982,6 +1995,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
         }
         #[cfg(unix)]
         13 => {
+            crate::scheduler::create_daemon_service_coord();
             dm_emit_active_log(0, b"Parsing command line");
             let argv = e.ctx.cast::<*const c_char>();
             if e.a1 < 1 || argv.is_null() {

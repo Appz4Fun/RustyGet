@@ -4396,11 +4396,6 @@ impl NzbgetRsQueueCoordinator {
                 self.run(&host);
                 0
             }
-            3 => self.add_nzb_file_to_queue(&host, p1, p2, a1 != 0),
-            4 => {
-                self.check_dupe_file_infos(&host, p1);
-                0
-            }
             5 => {
                 self.stop(&host);
                 0

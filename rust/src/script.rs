@@ -2119,8 +2119,7 @@ pub(crate) unsafe fn scheduler_script_start_active(
 ///   `ints[0]=priority, ints[1]=addTop, ints[2]=addPaused, ints[3]=dupeScore, ints[4]=dupeMode, ints[5]=paramCount`)
 /// - `op = 1`: read parameter `a1` into `strs[0]=name, strs[1]=val`
 /// - `op = 2`: apply `[NZB]` command (`a1 = cmd_kind`, `s1 = key_or_val`, `s2 = val`, `ints[0] = int_val`)
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_scan_scripts_exec(
+pub(crate) unsafe fn scan_scripts_exec_active(
     nzb_filename: *const c_char,
     url: *const c_char,
     directory: *const c_char,

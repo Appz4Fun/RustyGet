@@ -76,12 +76,9 @@ WorkState* g_WorkState;
 ServerPool* g_ServerPool;
 QueueCoordinator* g_QueueCoordinator;
 PrePostProcessor* g_PrePostProcessor;
-HistoryCoordinator* g_HistoryCoordinator;
 DiskState* g_DiskState;
-Scanner* g_Scanner;
 ArticleCache* g_ArticleCache;
 QueueScriptCoordinator* g_QueueScriptCoordinator;
-ServiceCoordinator* g_ServiceCoordinator;
 
 int g_ArgumentCount;
 char* (*g_EnvironmentVariables)[] = nullptr;
@@ -204,20 +201,14 @@ private:
 	std::unique_ptr<ServerPool> m_serverPool;
 	std::unique_ptr<QueueCoordinator> m_queueCoordinator;
 	std::unique_ptr<PrePostProcessor> m_prePostProcessor;
-	std::unique_ptr<HistoryCoordinator> m_historyCoordinator;
 	std::unique_ptr<DiskState> m_diskState;
-	std::unique_ptr<Scanner> m_scanner;
 	std::unique_ptr<ArticleCache> m_articleCache;
 	std::unique_ptr<QueueScriptCoordinator> m_queueScriptCoordinator;
-	std::unique_ptr<ServiceCoordinator> m_serviceCoordinator;
 
 	void CreateGlobals()
 	{
 		m_workState = std::make_unique<WorkState>();
 		g_WorkState = m_workState.get();
-
-		m_serviceCoordinator = std::make_unique<ServiceCoordinator>();
-		g_ServiceCoordinator = m_serviceCoordinator.get();
 
 		m_serverPool = std::make_unique<ServerPool>();
 		g_ServerPool = m_serverPool.get();
@@ -225,14 +216,8 @@ private:
 		m_queueCoordinator = std::make_unique<QueueCoordinator>();
 		g_QueueCoordinator = m_queueCoordinator.get();
 
-		m_scanner = std::make_unique<Scanner>();
-		g_Scanner = m_scanner.get();
-
 		m_prePostProcessor = std::make_unique<PrePostProcessor>();
 		g_PrePostProcessor = m_prePostProcessor.get();
-
-		m_historyCoordinator = std::make_unique<HistoryCoordinator>();
-		g_HistoryCoordinator = m_historyCoordinator.get();
 
 		m_articleCache = std::make_unique<ArticleCache>();
 		g_ArticleCache = m_articleCache.get();
@@ -242,8 +227,6 @@ private:
 
 		m_diskState = std::make_unique<DiskState>();
 		g_DiskState = m_diskState.get();
-
-		nzbget_rs_service_coord_ctl(m_serviceCoordinator->RsHandle(), 4, nullptr, nullptr);
 	}
 
 	void Cleanup()
@@ -253,8 +236,6 @@ private:
 		nzbget_rs_daemon_exec(12, &env);
 
 		g_PrePostProcessor = nullptr;
-		g_Scanner = nullptr;
-		g_HistoryCoordinator = nullptr;
 		g_QueueCoordinator = nullptr;
 		g_DiskState = nullptr;
 		g_ServerPool = nullptr;
@@ -262,7 +243,7 @@ private:
 		g_QueueScriptCoordinator = nullptr;
 	}
 
-	static int DaemonActionCb(void* raw, int sub, int a2, const char* s1, const char* s2)
+	static int DaemonActionCb(void* raw, int sub, int a2, const char*, const char*)
 	{
 		auto* self = static_cast<RustyGet*>(raw);
 		switch (sub)
@@ -270,13 +251,12 @@ private:
 		case 4:
 			self->m_queueCoordinator->Start();
 			self->m_prePostProcessor->Start();
-			self->m_serviceCoordinator->Start();
 			if (self->m_options->GetArticleCache() > 0) self->m_articleCache->Start();
 			return 0;
 		case 5:
 			if (a2 == 0)
 				return (self->m_queueCoordinator->IsRunning() ||
-					self->m_prePostProcessor->IsRunning() || self->m_serviceCoordinator->IsRunning() ||
+					self->m_prePostProcessor->IsRunning() ||
 					self->m_articleCache->IsRunning()) ? 1 : 0;
 			return (self->m_queueCoordinator->HasMoreJobs() ? 1 : 0) |
 				(self->m_prePostProcessor->HasMoreJobs() ? 4 : 0);
@@ -284,7 +264,6 @@ private:
 			if (!self->m_queueCoordinator->IsStopped()) self->m_queueCoordinator->Stop();
 			if (!self->m_prePostProcessor->IsStopped()) self->m_prePostProcessor->Stop();
 			if (!self->m_articleCache->IsStopped()) self->m_articleCache->Stop();
-			if (!self->m_serviceCoordinator->IsStopped()) self->m_serviceCoordinator->Stop();
 			return 0;
 		case 7:
 			return (self->m_prePostProcessor && self->m_prePostProcessor->HasActiveUnpack(false)) ? 1 : 0;
@@ -292,7 +271,6 @@ private:
 			if (a2 == 0 && self->m_queueCoordinator)
 			{
 				debug("Stopping QueueCoordinator");
-				self->m_serviceCoordinator->Stop();
 				self->m_queueCoordinator->Stop();
 				self->m_prePostProcessor->Stop();
 				self->m_articleCache->Stop();
@@ -302,20 +280,6 @@ private:
 		case 10:
 			ExitProc();
 			return 0;
-		case 11: {
-			const char* cat = s1 ? s1 : "";
-			NzbFile nzbFile(s2, cat);
-			if (!nzbFile.Parse()) printf("Parsing NZB-document %s failed\n\n", s2 ? s2 : "N/A");
-			else
-			{
-				std::unique_ptr<NzbInfo> nzbInfo = nzbFile.DetachNzbInfo();
-				if (!nzbFile.GetPassword().empty())
-					nzbInfo->GetParameters()->SetParameter("*Unpack:Password", nzbFile.GetPassword().c_str());
-				self->m_scanner->InitPPParameters(cat, nzbInfo->GetParameters(), false);
-				self->m_queueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), nullptr, false);
-			}
-			return 0;
-		}
 		default:
 			return 0;
 		}

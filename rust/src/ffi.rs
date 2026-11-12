@@ -523,34 +523,6 @@ pub unsafe extern "C" fn nzbget_rs_delete_directory_with_content(
 /// FileSystem::RenameBak: 1 moved, 0 not.
 /// `new_name` (null: not written) gets the name tried last; free it with
 /// nzbget_rs_free.
-///
-/// The C library's ctype under the daemon's locale (NzbFile).
-#[repr(C)]
-pub struct RsCtype {
-    /// isspace/isdigit classes of bytes 0..=255 (glibc's table at index 0).
-    classes: *const u16,
-    space: u16,
-    digit: u16,
-    /// tolower of -128..=255, at index 0 (glibc's table).
-    lower: *const c_int,
-    char_signed: c_int,
-}
-
-/// # Safety
-/// `ct` is null or valid, with its tables readable over their ranges.
-unsafe fn rs_ctype<'a>(ct: *const RsCtype) -> Option<crate::nzbfile::Ctype<'a>> {
-    let ct = ct.as_ref()?;
-    if ct.classes.is_null() || ct.lower.is_null() {
-        return None;
-    }
-    Some(crate::nzbfile::Ctype {
-        classes: std::slice::from_raw_parts(ct.classes, 256),
-        space: ct.space,
-        digit: ct.digit,
-        lower: std::slice::from_raw_parts(ct.lower.sub(128), 384),
-        char_signed: ct.char_signed != 0,
-    })
-}
 
 #[cfg(test)]
 mod tests {
@@ -3079,18 +3051,6 @@ mod lifecycle_ffi_tests {
 // ============================================================================
 
 #[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_fallback_op(
-    op: c_int,
-    a1: c_int,
-    p1: usize,
-    host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
-) -> c_int {
-    let _cancel_guard = PosixCancelGuard::disable();
-    crate::dupefallback::dupe_fallback_static_op(op, a1, p1, host_cb)
-}
-
-#[cfg(unix)]
 static ACTIVE_QUEUE_COORD: std::sync::RwLock<
     Option<(
         std::sync::Weak<crate::queuecoord::NzbgetRsQueueCoordinator>,
@@ -3468,204 +3428,6 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
 // ============================================================================
 // NzbFileParser, UrlCoordinator & DirectRenamer End-to-End FFI
 // ============================================================================
-
-pub type NzbgetRsNzbFileParser = crate::nzbfile::NzbFileParser;
-pub type NzbgetRsAllocFileIdCb = Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>;
-
-#[repr(C)]
-pub struct NzbgetRsNzbFileSummary {
-    pub file_count: c_int,
-    pub total_articles: c_int,
-    pub failed_articles: c_int,
-    pub cur_failed_articles: c_int,
-    pub size: i64,
-    pub remaining_size: i64,
-    pub failed_size: i64,
-    pub cur_failed_size: i64,
-    pub par_size: i64,
-    pub par_failed_size: i64,
-    pub par_cur_failed_size: i64,
-    pub remaining_par_count: c_int,
-    pub full_content_hash: u32,
-    pub filtered_content_hash: u32,
-    pub many_dupe_files: c_int,
-    pub password: *const c_char,
-    pub meta_name: *const c_char,
-    pub meta_title: *const c_char,
-    pub category: *const c_char,
-    pub kept_files_count: usize,
-    pub messages_count: usize,
-}
-
-#[repr(C)]
-pub struct NzbgetRsNzbKeptFileView {
-    pub id: c_int,
-    pub subject: *const c_char,
-    pub filename: *const c_char,
-    pub time: c_int,
-    pub total_articles: c_int,
-    pub missed_articles: c_int,
-    pub size: i64,
-    pub remaining_size: i64,
-    pub missed_size: i64,
-    pub par_file: c_int,
-    pub cut_short: c_int,
-    pub groups_ptrs: *const *const c_char,
-    pub groups_count: usize,
-    pub article_parts: *const c_int,
-    pub article_sizes: *const i64,
-    pub article_msg_ids: *const *const c_char,
-    pub articles_count: usize,
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_new(
-    file_name: *const c_char,
-) -> *mut NzbgetRsNzbFileParser {
-    let fn_bytes = if file_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(file_name).to_bytes()
-    };
-    Box::into_raw(Box::new(crate::nzbfile::NzbFileParser::new(fn_bytes)))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_free(parser: *mut NzbgetRsNzbFileParser) {
-    if !parser.is_null() {
-        drop(Box::from_raw(parser));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_parse_file(
-    parser: *mut NzbgetRsNzbFileParser,
-    par_ignore_ext: *const c_char,
-    ct: *const RsCtype,
-    alloc_ctx: *mut std::ffi::c_void,
-    alloc_file_id_cb: NzbgetRsAllocFileIdCb,
-    on_parsed_subject: Option<unsafe extern "C" fn(*const c_char, *const c_char)>,
-    sort_indices: Option<unsafe extern "C" fn(*const *const c_char, *mut usize, usize)>,
-    out_summary: *mut NzbgetRsNzbFileSummary,
-) -> c_int {
-    if parser.is_null() || out_summary.is_null() {
-        return 0;
-    }
-    let Some(ct_view) = rs_ctype(ct) else {
-        return 0;
-    };
-    let pie_bytes = if par_ignore_ext.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(par_ignore_ext).to_bytes()
-    };
-    let p = &mut *parser;
-    let sort_cb = sort_indices.map(|cb| {
-        move |filenames: &[*const c_char], indices: &mut [usize]| {
-            cb(filenames.as_ptr(), indices.as_mut_ptr(), indices.len());
-        }
-    });
-    let ok = p.parse_file(
-        pie_bytes,
-        &ct_view,
-        || {
-            if let Some(cb) = alloc_file_id_cb {
-                cb(alloc_ctx)
-            } else {
-                0
-            }
-        },
-        |subj, fname| {
-            if let Some(cb) = on_parsed_subject {
-                cb(subj.as_ptr(), fname.as_ptr());
-            }
-        },
-        sort_cb,
-    );
-    *out_summary = NzbgetRsNzbFileSummary {
-        file_count: p.file_count,
-        total_articles: p.total_articles,
-        failed_articles: p.failed_articles,
-        cur_failed_articles: p.cur_failed_articles,
-        size: p.size,
-        remaining_size: p.remaining_size,
-        failed_size: p.failed_size,
-        cur_failed_size: p.cur_failed_size,
-        par_size: p.par_size,
-        par_failed_size: p.par_failed_size,
-        par_cur_failed_size: p.par_cur_failed_size,
-        remaining_par_count: p.remaining_par_count,
-        full_content_hash: p.full_content_hash,
-        filtered_content_hash: p.filtered_content_hash,
-        many_dupe_files: c_int::from(p.many_dupe_files),
-        password: p.password.as_ptr(),
-        meta_name: p.meta_name.as_ptr(),
-        meta_title: p.meta_title.as_ptr(),
-        category: p.category.as_ptr(),
-        kept_files_count: p.files.len(),
-        messages_count: p.messages.len(),
-    };
-    c_int::from(ok)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_get_message(
-    parser: *const NzbgetRsNzbFileParser,
-    index: usize,
-    out_kind: *mut c_int,
-    out_text: *mut *const c_char,
-) -> c_int {
-    let Some(p) = parser.as_ref() else {
-        return 0;
-    };
-    let Some(msg) = p.messages.get(index) else {
-        return 0;
-    };
-    if !out_kind.is_null() {
-        *out_kind = msg.kind;
-    }
-    if !out_text.is_null() {
-        *out_text = msg.text.as_ptr();
-    }
-    1
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_get_file(
-    parser: *const NzbgetRsNzbFileParser,
-    index: usize,
-    out_view: *mut NzbgetRsNzbKeptFileView,
-) -> c_int {
-    if out_view.is_null() {
-        return 0;
-    }
-    let Some(p) = parser.as_ref() else {
-        return 0;
-    };
-    let Some(f) = p.files.get(index) else {
-        return 0;
-    };
-    *out_view = NzbgetRsNzbKeptFileView {
-        id: f.id,
-        subject: f.subject.as_ptr(),
-        filename: f.filename.as_ptr(),
-        time: f.time,
-        total_articles: f.total_articles,
-        missed_articles: f.missed_articles,
-        size: f.size,
-        remaining_size: f.remaining_size,
-        missed_size: f.missed_size,
-        par_file: c_int::from(f.par_file),
-        cut_short: c_int::from(f.cut_short),
-        groups_ptrs: f.group_ptrs.as_ptr(),
-        groups_count: f.group_ptrs.len(),
-        article_parts: f.article_parts.as_ptr(),
-        article_sizes: f.article_sizes.as_ptr(),
-        article_msg_ids: f.article_msg_id_ptrs.as_ptr(),
-        articles_count: f.article_parts.len(),
-    };
-    1
-}
 
 // ============================================================================
 // DownloadInfo, DupeProbe & DupeCoordinator End-to-End FFI
@@ -5336,34 +5098,17 @@ pub unsafe extern "C" fn nzbget_rs_socket_deadline_wait(
     ))
 }
 
-pub use crate::scanner::{NzbgetRsScanner, NzbgetRsScannerEnv};
+#[cfg(unix)]
+static ACTIVE_PREPOST: std::sync::RwLock<
+    Option<std::sync::Weak<crate::prepost::NzbgetRsPrePostProcessor>>,
+> = std::sync::RwLock::new(None);
 
-#[unsafe(no_mangle)]
-pub extern "C" fn nzbget_rs_scanner_new() -> *mut NzbgetRsScanner {
-    let arc = std::sync::Arc::new(NzbgetRsScanner::new());
-    crate::scanner::register_active_scanner(std::sync::Arc::clone(&arc));
-    std::sync::Arc::into_raw(arc).cast_mut()
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_scanner_free(scanner: *mut NzbgetRsScanner) {
-    if !scanner.is_null() {
-        let arc = unsafe { std::sync::Arc::from_raw(scanner.cast_const()) };
-        crate::scanner::unregister_active_scanner(std::sync::Arc::as_ptr(&arc));
-        drop(arc);
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_scanner_exec(
-    scanner: *mut NzbgetRsScanner,
-    op: c_int,
-    env: *const NzbgetRsScannerEnv,
-    a1: c_int,
-    a2: c_int,
-    a3: c_int,
-) -> c_int {
-    unsafe { crate::scanner::scanner_exec(scanner, op, env, a1, a2, a3) }
+#[cfg(unix)]
+pub(crate) fn active_prepost() -> Option<std::sync::Arc<crate::prepost::NzbgetRsPrePostProcessor>> {
+    ACTIVE_PREPOST
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
 }
 
 #[cfg(unix)]
@@ -5371,9 +5116,11 @@ pub unsafe extern "C" fn nzbget_rs_scanner_exec(
 pub extern "C" fn nzbget_rs_prepost_new(
     owner: usize,
 ) -> *mut crate::prepost::NzbgetRsPrePostProcessor {
-    Box::into_raw(Box::new(crate::prepost::NzbgetRsPrePostProcessor::new(
-        owner,
-    )))
+    let arc = std::sync::Arc::new(crate::prepost::NzbgetRsPrePostProcessor::new(owner));
+    if let Ok(mut g) = ACTIVE_PREPOST.write() {
+        *g = Some(std::sync::Arc::downgrade(&arc));
+    }
+    std::sync::Arc::into_raw(arc).cast_mut()
 }
 
 #[cfg(unix)]
@@ -5382,7 +5129,16 @@ pub unsafe extern "C" fn nzbget_rs_prepost_free(
     ptr: *mut crate::prepost::NzbgetRsPrePostProcessor,
 ) {
     if !ptr.is_null() {
-        drop(Box::from_raw(ptr));
+        let arc = std::sync::Arc::from_raw(ptr.cast_const());
+        let wk = std::sync::Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_PREPOST.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+        drop(arc);
     }
 }
 
@@ -5491,8 +5247,11 @@ pub unsafe extern "C" fn nzbget_rs_par_checker_exec(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_direct_unpack_new(
     nzb_id: c_int,
+    thread_ptr: usize,
 ) -> *mut crate::postproc::NzbgetRsDirectUnpack {
-    Box::into_raw(Box::new(crate::postproc::NzbgetRsDirectUnpack::new(nzb_id)))
+    Box::into_raw(Box::new(crate::postproc::NzbgetRsDirectUnpack::new(
+        nzb_id, thread_ptr,
+    )))
 }
 
 #[cfg(unix)]
@@ -5512,11 +5271,12 @@ pub unsafe extern "C" fn nzbget_rs_direct_unpack_exec(
     op: c_int,
     p1: usize,
     p2: usize,
-    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
-    ctx: *mut c_void,
 ) -> c_int {
+    let Some(c) = ctrl.as_ref() else {
+        return 0;
+    };
     let _cancel_guard = PosixCancelGuard::disable();
-    crate::postproc::direct_unpack_exec(ctrl, op, p1, p2, host_cb, ctx)
+    c.exec_active(op, p1, p2)
 }
 
 #[cfg(unix)]
@@ -5839,6 +5599,112 @@ unsafe extern "C" fn web_rpc_action_bridge(
             }
             1
         }
+        11 => {
+            let add_top = (a1 & 1) != 0;
+            let add_paused = (a1 & 2) != 0;
+            let auto_cat = (a1 & 4) != 0;
+            let is_url = (a1 & 8) != 0;
+            let is_zip = (a1 & 16) != 0;
+            let fn_b = if s1.is_null() {
+                &[][..]
+            } else {
+                CStr::from_ptr(s1).to_bytes()
+            };
+            let cat_b = if s2.is_null() {
+                &[][..]
+            } else {
+                CStr::from_ptr(s2).to_bytes()
+            };
+            let dk_b = if s3.is_null() {
+                &[][..]
+            } else {
+                CStr::from_ptr(s3).to_bytes()
+            };
+            let mut param_pairs: Vec<(&[u8], &[u8])> = Vec::new();
+            if !params.is_null() && params_len > 0 {
+                for item in std::slice::from_raw_parts(params, params_len) {
+                    let k = if item.name.is_null() {
+                        &[][..]
+                    } else {
+                        CStr::from_ptr(item.name).to_bytes()
+                    };
+                    let v = if item.value.is_null() {
+                        &[][..]
+                    } else {
+                        CStr::from_ptr(item.value).to_bytes()
+                    };
+                    param_pairs.push((k, v));
+                }
+            }
+            if is_url {
+                let url_b = if body.is_null() {
+                    &[][..]
+                } else {
+                    CStr::from_ptr(body).to_bytes()
+                };
+                let Some(nzb_id) = crate::urlcoord::add_rpc_url_active(
+                    url_b,
+                    fn_b,
+                    cat_b,
+                    auto_cat,
+                    a2,
+                    add_paused,
+                    add_top,
+                    dk_b,
+                    a3,
+                    a4,
+                    &param_pairs,
+                ) else {
+                    return 0;
+                };
+                if !out_u32.is_null() {
+                    *out_u32 = nzb_id;
+                }
+                return 1;
+            }
+            let data_b = if body.is_null() || body_len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(body.cast::<u8>(), body_len)
+            };
+            let Some(sc) = crate::scanner::active_scanner() else {
+                return 0;
+            };
+            if is_zip {
+                return c_int::from(
+                    sc.add_archive_bytes_active(
+                        fn_b,
+                        cat_b,
+                        auto_cat,
+                        a2,
+                        dk_b,
+                        a3,
+                        a4,
+                        &param_pairs,
+                        add_top,
+                        add_paused,
+                        data_b,
+                    ) == crate::scanner::AS_SUCCESS,
+                );
+            }
+            let (_, nzb_id) = sc.add_external_bytes_active(
+                fn_b,
+                cat_b,
+                auto_cat,
+                a2,
+                dk_b,
+                a3,
+                a4,
+                &param_pairs,
+                add_top,
+                add_paused,
+                data_b,
+            );
+            if !out_u32.is_null() {
+                *out_u32 = nzb_id as u32;
+            }
+            c_int::from(nzb_id > 0)
+        }
         12 => {
             crate::log::clear_active_log();
             1
@@ -5979,29 +5845,12 @@ unsafe extern "C" fn web_rpc_action_bridge(
                 }
                 return 0;
             }
-            host.rpc_action_cb.map_or(0, |cb| {
-                cb(
-                    std::ptr::null_mut(),
-                    op,
-                    a1,
-                    a2,
-                    a3,
-                    a4,
-                    s1,
-                    s2,
-                    s3,
-                    s4,
-                    body,
-                    body_len,
-                    ids,
-                    ids_len,
-                    params,
-                    params_len,
-                    out_u32,
-                    out_f64,
-                    out_buf,
-                )
-            })
+            let url_b = if s1.is_null() {
+                &[][..]
+            } else {
+                CStr::from_ptr(s1).to_bytes()
+            };
+            c_int::from(crate::urlcoord::add_testserver_url_active(a1, url_b))
         }
         25 => crate::net::nzbget_rs_net_speedtest_iter(body, body_len, a1, out_u32, out_f64),
         26 => {
@@ -6746,7 +6595,21 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn, host: &N
             crate::log::log_active_bytes(kind, msg);
         },
         |kind, a1, a2, a3, a4, s1, s2, s3, body, ids, names| {
-            if kind == 1 && (a1 & 8) == 0 {
+            if kind == 1 {
+                if (a1 & 8) != 0 {
+                    return crate::urlcoord::add_binrpc_url_active(
+                        body,
+                        s1,
+                        s2,
+                        (a1 & 4) != 0,
+                        a2,
+                        (a1 & 2) != 0,
+                        (a1 & 1) != 0,
+                        s3,
+                        a3,
+                        a4,
+                    );
+                }
                 let Some(sc) = crate::scanner::active_scanner() else {
                     return false;
                 };

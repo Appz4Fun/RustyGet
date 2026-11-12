@@ -2838,6 +2838,7 @@ struct DirectUnpackRunLocal {
 
 pub struct NzbgetRsDirectUnpack {
     nzb_id: i32,
+    thread_ptr: usize,
     vol: Mutex<DirectUnpackVolumeState>,
     extra_start_time: AtomicI64,
     processed: AtomicBool,
@@ -2849,9 +2850,10 @@ pub struct NzbgetRsDirectUnpack {
 }
 
 impl NzbgetRsDirectUnpack {
-    pub fn new(nzb_id: i32) -> Self {
+    pub fn new(nzb_id: i32, thread_ptr: usize) -> Self {
         Self {
             nzb_id,
+            thread_ptr,
             vol: Mutex::new(DirectUnpackVolumeState::default()),
             extra_start_time: AtomicI64::new(0),
             processed: AtomicBool::new(false),
@@ -3846,56 +3848,198 @@ impl NzbgetRsDirectUnpack {
             format!("Exiting DirectUnpack-loop for {}", self.nzb_id).as_bytes(),
         );
     }
+
+    pub fn exec_active(&self, op: c_int, p1: usize, p2: usize) -> c_int {
+        match op {
+            5 => return c_int::from(self.is_unpacking()),
+            6 => return c_int::from(self.is_waiting_volume()),
+            _ => {}
+        }
+        #[cfg(unix)]
+        {
+            let _arena = PostJobArenaGuard::enter();
+            let ctx = (self as *const Self) as *mut c_void;
+            match op {
+                0 => {
+                    self.run(ctx, direct_unpack_host_cb);
+                    0
+                }
+                1 => {
+                    let _ = p1;
+                    self.stop_with_nzb(ctx, direct_unpack_host_cb, p2);
+                    0
+                }
+                2 => {
+                    let _ = p1;
+                    self.file_downloaded(ctx, direct_unpack_host_cb, p2);
+                    0
+                }
+                3 => {
+                    let _ = p1;
+                    self.nzb_downloaded(ctx, direct_unpack_host_cb, p2);
+                    0
+                }
+                4 => {
+                    let _ = p1;
+                    self.nzb_deleted(ctx, direct_unpack_host_cb, p2);
+                    0
+                }
+                _ => 0,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (p1, p2);
+            0
+        }
+    }
 }
 
-pub unsafe fn direct_unpack_exec(
-    ctrl: *const NzbgetRsDirectUnpack,
+#[cfg(unix)]
+unsafe extern "C" fn direct_unpack_host_cb(
+    raw_ctx: *mut c_void,
     op: c_int,
+    a1: c_int,
+    a2: c_int,
     p1: usize,
     p2: usize,
-    host_cb: Option<NzbgetRsRepairCtrlHostFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    let Some(c) = (unsafe { ctrl.as_ref() }) else {
+    s1: *const c_char,
+    s2: *const c_char,
+    ints: *mut c_int,
+    _i64s: *mut i64,
+    strs: *mut *const c_char,
+) -> usize {
+    use crate::queuesubsys_host::{
+        NZB_ACT_CLEAR_UNPACK_THREAD, NZB_INT_DIRECT_UNPACK_STATUS, NZB_INT_POST_TOTAL_SEC,
+        NZB_INT_UNPACK_SEC, POST_INT_WORKING,
+    };
+    if op != 0 {
+        reset_call_arena();
+    }
+    let Some(host) = crate::ffi::queue_host() else {
         return 0;
     };
+    let c = unsafe { &*(raw_ctx as *const NzbgetRsDirectUnpack) };
     match op {
         0 => {
-            if let Some(cb) = host_cb {
-                c.run(ctx, cb);
-            }
+            unsafe { invoke_dq_guard_cb(&host, p1, p2) };
             0
         }
         1 => {
-            if let Some(cb) = host_cb {
-                let _ = p1;
-                c.stop_with_nzb(ctx, cb, p2);
+            if a1 == 0 {
+                let n = host.queue_find_by_id(p1, a2);
+                if n == 0 {
+                    return 0;
+                }
+                let ns = host.nzb_snap(n, false);
+                let pw = host.nzb_get_param(n, b"*Unpack:Password");
+                let opts = crate::options::active_options();
+                let sc = opts.as_ref().map(|o| o.scalars());
+                let ins = unsafe { std::slice::from_raw_parts_mut(ints, 6) };
+                let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 4) };
+                ins[0] = i32::from(pw.is_some());
+                ins[1] = sc
+                    .as_ref()
+                    .map_or(0, |s| i32::from(s.use_temp_unpack_dir != 0));
+                ins[2] = sc
+                    .as_ref()
+                    .map_or(0, |s| i32::from(s.unpack_cleanup_disk != 0));
+                ins[3] = i32::from(host.nzb_unpack_thread_ptr(n) == c.thread_ptr);
+                ins[4] = i32::from(ns.has_post_info);
+                ins[5] = 0;
+                str_out[0] = arena_cstr(&ns.name);
+                str_out[1] = arena_cstr(&ns.dest_dir);
+                str_out[2] = arena_opt_cstr(pw.as_deref());
+                str_out[3] = arena_cstr(opts.as_ref().map_or(b"", |o| o.str_bytes(4)));
+                if p2 != 0 && !s2.is_null() {
+                    let fin = host.nzb_build_final_dir_name(n);
+                    let c_fin = to_c_buf(&fin);
+                    let cb_fn: extern "C" fn(usize, *const c_char) =
+                        unsafe { std::mem::transmute(s2 as usize) };
+                    cb_fn(p2, c_fin.as_ptr() as *const c_char);
+                }
+                return n;
+            }
+            if a1 == 1 {
+                let fs = host.file_snap(p1);
+                let nzb_name = if fs.nzb_ptr != 0 {
+                    host.nzb_snap(fs.nzb_ptr, false).name
+                } else {
+                    Vec::new()
+                };
+                unsafe { *ints = fs.failed_articles };
+                let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 2) };
+                str_out[0] = arena_cstr(&nzb_name);
+                str_out[1] = arena_cstr(&fs.filename);
+                return fs.nzb_ptr;
+            }
+            if a1 == 2 {
+                let ns = host.nzb_snap(p1, false);
+                let ins = unsafe { std::slice::from_raw_parts_mut(ints, 2) };
+                ins[0] = i32::from(ns.has_post_info);
+                ins[1] = 0;
+                let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 2) };
+                str_out[0] = arena_cstr(&ns.name);
+                str_out[1] = ptr::null();
+                return 0;
+            }
+            if a1 == 3 {
+                host.nzb_add_message(p1, a2, &unsafe { ptr_bytes(s1) });
+                return 0;
+            }
+            if a1 == 4 {
+                let ns = host.nzb_snap(p1, false);
+                if ns.post_info_ptr != 0 {
+                    host.post_set_progress_label(ns.post_info_ptr, &unsafe { ptr_bytes(s1) });
+                }
+                return 0;
+            }
+            if a1 == 5 {
+                let ns = host.nzb_snap(p1, false);
+                if (p2 & 2) != 0 {
+                    host.nzb_set_int(p1, NZB_INT_UNPACK_SEC, ns.unpack_sec + a2);
+                    host.nzb_set_int(p1, NZB_INT_POST_TOTAL_SEC, ns.post_total_sec + a2);
+                }
+                if (p2 & 1) != 0 && ns.post_info_ptr != 0 && !ns.has_live_repair_thread {
+                    host.post_set_int(ns.post_info_ptr, POST_INT_WORKING, 0);
+                }
+                return 0;
+            }
+            if a1 == 6 {
+                host.nzb_action(p1, NZB_ACT_CLEAR_UNPACK_THREAD, 0);
+                host.nzb_set_int(p1, NZB_INT_DIRECT_UNPACK_STATUS, 2);
+                return 0;
+            }
+            if a1 == 7 {
+                host.nzb_action(p1, NZB_ACT_CLEAR_UNPACK_THREAD, 0);
+                host.nzb_set_int(p1, NZB_INT_DIRECT_UNPACK_STATUS, a2);
+                return 0;
+            }
+            if a1 == 8 {
+                host.nzb_push_extracted_archive(p1, &unsafe { ptr_bytes(s1) });
+                return 0;
             }
             0
         }
         2 => {
-            if let Some(cb) = host_cb {
-                let _ = p1;
-                c.file_downloaded(ctx, cb, p2);
+            if a1 == 0 {
+                return usize::from(host.thread_is_stopped(c.thread_ptr));
+            }
+            if a1 == 1 {
+                host.thread_stop(c.thread_ptr);
+                return 0;
+            }
+            if a1 == 2 {
+                return usize::from(
+                    crate::ffi::active_prepost()
+                        .is_some_and(|pp| host.prepost_is_stopped(pp.owner_ptr())),
+                );
+            }
+            if a1 == 3 {
+                crate::log::log_active_bytes(a2, &unsafe { ptr_bytes(s1) });
             }
             0
         }
-        3 => {
-            if let Some(cb) = host_cb {
-                let _ = p1;
-                c.nzb_downloaded(ctx, cb, p2);
-            }
-            0
-        }
-        4 => {
-            if let Some(cb) = host_cb {
-                let _ = p1;
-                c.nzb_deleted(ctx, cb, p2);
-            }
-            0
-        }
-        5 => c_int::from(c.is_unpacking()),
-        6 => c_int::from(c.is_waiting_volume()),
         _ => 0,
     }
 }

@@ -1359,7 +1359,7 @@ pub(crate) unsafe fn nzbget_rs_scheduler_exec(
 }
 
 struct ServiceSlot {
-    ptr: usize,
+    kind: u8,
     last_work: i64,
 }
 
@@ -1368,10 +1368,19 @@ pub struct NzbgetRsServiceCoord {
     wait_mutex: Mutex<bool>,
     wait_cond: std::sync::Condvar,
     disk_service_attached: AtomicBool,
+    #[cfg(unix)]
+    daemon_stopped: AtomicBool,
+    #[cfg(unix)]
+    daemon_running: AtomicBool,
 }
 
 static ACTIVE_SERVICE_COORD: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsServiceCoord>>> =
     std::sync::RwLock::new(None);
+#[cfg(unix)]
+static DAEMON_SERVICE_COORD: std::sync::RwLock<Option<std::sync::Arc<NzbgetRsServiceCoord>>> =
+    std::sync::RwLock::new(None);
+#[cfg(unix)]
+static DAEMON_SERVICE_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
 #[cfg(unix)]
 pub(crate) fn wake_active_service_coord() {
@@ -1406,9 +1415,6 @@ pub(crate) fn wake_active_disk_service() {
     }
 }
 
-pub type NzbgetRsServiceCoordFn =
-    unsafe extern "C" fn(ctx: *mut c_void, svc: *mut c_void, op: c_int) -> c_int;
-
 #[inline]
 fn service_coord_now() -> i64 {
     #[cfg(unix)]
@@ -1423,228 +1429,251 @@ fn service_coord_now() -> i64 {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn nzbget_rs_service_coord_new() -> *mut NzbgetRsServiceCoord {
+#[cfg(unix)]
+fn daemon_service_interval(kind: u8) -> i32 {
+    match kind {
+        0 => crate::lifecycle::disk_service_interval_active(),
+        1 => active_scheduler().map_or(-1, |s| s.service_interval_val()),
+        2 => crate::twin::service_interval_active(),
+        3 => 60 * 60,
+        4 => crate::scanner::active_scanner().map_or(-1, |s| s.service_interval_active()),
+        _ => -1,
+    }
+}
+
+#[cfg(unix)]
+fn daemon_service_work(kind: u8) {
+    match kind {
+        0 => crate::lifecycle::disk_service_work_active(),
+        1 => {
+            if let Some(s) = active_scheduler() {
+                unsafe { s.service_work_active() };
+            }
+        }
+        2 => crate::twin::service_work_active(),
+        3 => crate::historycoord::service_work_active(),
+        4 => {
+            if let Some(s) = crate::scanner::active_scanner() {
+                s.service_work_active();
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(unix)]
+impl NzbgetRsServiceCoord {
+    fn run_loop(&self) {
+        crate::log::log_active_bytes(3, b"Entering ServiceCoordinator-loop");
+        while !self.daemon_stopped.load(Ordering::SeqCst) {
+            let count = self.services.lock().map_or(0, |g| g.len());
+            for idx in 0..count {
+                let Some((kind, last_work)) = self
+                    .services
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.get(idx).map(|s| (s.kind, s.last_work)))
+                else {
+                    continue;
+                };
+                let service_interval = daemon_service_interval(kind);
+                if service_interval >= 0
+                    && (service_coord_now() - last_work).abs() >= i64::from(service_interval)
+                {
+                    daemon_service_work(kind);
+                    let done_at = service_coord_now();
+                    if let Ok(mut g) = self.services.lock() {
+                        if let Some(slot) = g.get_mut(idx) {
+                            slot.last_work = done_at;
+                        }
+                    }
+                }
+            }
+
+            let mut wait_interval: i32 = 60 * 60 * 24;
+            let cur_time = service_coord_now();
+            let count2 = self.services.lock().map_or(0, |g| g.len());
+            let debug_on = crate::log::active_debug_build();
+            for idx in 0..count2 {
+                let Some((kind, last_work)) = self
+                    .services
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.get(idx).map(|s| (s.kind, s.last_work)))
+                else {
+                    continue;
+                };
+                let service_interval = daemon_service_interval(kind);
+                let mut remaining: i32 = -1;
+                if service_interval >= 0 {
+                    let elapsed = (cur_time - last_work) as i32;
+                    remaining = service_interval.min(service_interval.wrapping_sub(elapsed));
+                    wait_interval = wait_interval.min(remaining);
+                }
+                if debug_on {
+                    let msg =
+                        format!("serviceInterval: {service_interval}, remaining: {remaining}");
+                    crate::log::log_active_bytes(3, msg.as_bytes());
+                }
+            }
+
+            if debug_on {
+                let msg = format!("Waiting in ServiceCoordinator: {wait_interval}");
+                crate::log::log_active_bytes(3, msg.as_bytes());
+            }
+            if wait_interval > 0 {
+                if let Ok(mut guard) = self.wait_mutex.lock() {
+                    if !*guard && !self.daemon_stopped.load(Ordering::SeqCst) {
+                        let dur = std::time::Duration::from_millis((wait_interval as u64) * 1000);
+                        if let Ok((new_guard, _)) =
+                            self.wait_cond.wait_timeout_while(guard, dur, |woken| {
+                                !*woken && !self.daemon_stopped.load(Ordering::SeqCst)
+                            })
+                        {
+                            guard = new_guard;
+                        } else {
+                            break;
+                        }
+                    }
+                    *guard = false;
+                }
+            }
+        }
+        crate::log::log_active_bytes(3, b"Exiting ServiceCoordinator-loop");
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn create_daemon_service_coord() {
     crate::log::log_active_bytes(3, b"Creating ServiceCoordinator");
     let arc = std::sync::Arc::new(NzbgetRsServiceCoord {
-        services: Mutex::new(Vec::new()),
+        services: Mutex::new(vec![
+            ServiceSlot {
+                kind: 4,
+                last_work: 0,
+            },
+            ServiceSlot {
+                kind: 3,
+                last_work: 0,
+            },
+            ServiceSlot {
+                kind: 2,
+                last_work: 0,
+            },
+            ServiceSlot {
+                kind: 1,
+                last_work: 0,
+            },
+            ServiceSlot {
+                kind: 0,
+                last_work: 0,
+            },
+        ]),
         wait_mutex: Mutex::new(false),
         wait_cond: std::sync::Condvar::new(),
-        disk_service_attached: AtomicBool::new(false),
+        disk_service_attached: AtomicBool::new(true),
+        daemon_stopped: AtomicBool::new(false),
+        daemon_running: AtomicBool::new(false),
     });
     if let Ok(mut g) = ACTIVE_SERVICE_COORD.write() {
         *g = Some(std::sync::Arc::downgrade(&arc));
     }
-    std::sync::Arc::into_raw(arc).cast_mut()
+    if let Ok(mut g) = DAEMON_SERVICE_COORD.write() {
+        *g = Some(arc);
+    }
+    crate::scanner::create_daemon_scanner();
+    crate::script::create_daemon_ext_mgr();
+    crate::twin::create_daemon_twincheck();
+    crate::dupesearch_coord::create_daemon_dupesearch();
+    crate::urlcoord::create_daemon_url_coord();
+    crate::feed::create_daemon_feed_coord();
+    crate::articledl::create_daemon_memory_monitor();
+    crate::statmeter::create_daemon_statmeter();
+    crate::extension::create_daemon_maintenance();
+    let _ = create_daemon_scheduler();
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_service_coord_free(h: *mut NzbgetRsServiceCoord) {
-    if !h.is_null() {
-        crate::log::log_active_bytes(3, b"Destroying ServiceCoordinator");
-        let arc = std::sync::Arc::from_raw(h.cast_const());
-        let wk = std::sync::Arc::downgrade(&arc);
-        if let Ok(mut g) = ACTIVE_SERVICE_COORD.write() {
-            if g.as_ref()
-                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
-            {
-                *g = None;
+#[cfg(unix)]
+pub(crate) fn start_daemon_service_coord() {
+    let Some(sc) = ACTIVE_SERVICE_COORD
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+    else {
+        return;
+    };
+    let mut g = DAEMON_SERVICE_HANDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if g.is_some() {
+        return;
+    }
+    sc.daemon_stopped.store(false, Ordering::SeqCst);
+    sc.daemon_running.store(true, Ordering::SeqCst);
+    let sc_run = std::sync::Arc::clone(&sc);
+    if let Ok(h) = std::thread::Builder::new()
+        .name("service-coord".into())
+        .spawn(move || {
+            struct RunningReset(std::sync::Arc<NzbgetRsServiceCoord>);
+            impl Drop for RunningReset {
+                fn drop(&mut self) {
+                    self.0.daemon_running.store(false, Ordering::SeqCst);
+                }
             }
-        }
-        drop(arc);
+            let _reset = RunningReset(std::sync::Arc::clone(&sc_run));
+            let _tg = crate::ffi::RustThreadGuard::enter(&sc_run.daemon_stopped);
+            sc_run.run_loop();
+        })
+    {
+        *g = Some(h);
+    } else {
+        sc.daemon_running.store(false, Ordering::SeqCst);
     }
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
-    h: *mut NzbgetRsServiceCoord,
-    op: c_int,
-    ctx: *mut c_void,
-    cb: Option<NzbgetRsServiceCoordFn>,
-) {
-    let Some(sc) = h.as_ref() else {
-        return;
-    };
-    match op {
-        0 => {
-            if let Ok(mut srvs) = sc.services.lock() {
-                srvs.push(ServiceSlot {
-                    ptr: ctx as usize,
-                    last_work: 0,
-                });
-            }
+#[cfg(unix)]
+pub(crate) fn stop_daemon_service_coord() {
+    if let Some(sc) = ACTIVE_SERVICE_COORD
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+    {
+        sc.daemon_stopped.store(true, Ordering::SeqCst);
+        if let Ok(_guard) = sc.wait_mutex.lock() {
+            sc.wait_cond.notify_all();
         }
-        4 => {
-            #[cfg(unix)]
-            {
-                crate::script::create_daemon_ext_mgr();
-                crate::twin::create_daemon_twincheck();
-                crate::dupesearch_coord::create_daemon_dupesearch();
-                crate::urlcoord::create_daemon_url_coord();
-                crate::feed::create_daemon_feed_coord();
-                crate::articledl::create_daemon_memory_monitor();
-                crate::statmeter::create_daemon_statmeter();
-                crate::extension::create_daemon_maintenance();
-                let _ = create_daemon_scheduler();
-            }
-            if let Ok(mut srvs) = sc.services.lock() {
-                srvs.push(ServiceSlot {
-                    ptr: 2,
-                    last_work: 0,
-                });
-                srvs.push(ServiceSlot {
-                    ptr: 1,
-                    last_work: 0,
-                });
-                srvs.push(ServiceSlot {
-                    ptr: 0,
-                    last_work: 0,
-                });
-            }
-            sc.disk_service_attached.store(true, Ordering::Release);
-        }
-        1 => {
-            #[cfg(unix)]
-            crate::log::log_active_bytes(3, b"Waking up ServiceCoordinator");
-            if let Ok(mut woken) = sc.wait_mutex.lock() {
-                *woken = true;
-                sc.wait_cond.notify_all();
-            }
-        }
-        2 => {
-            if let Ok(_guard) = sc.wait_mutex.lock() {
-                sc.wait_cond.notify_all();
-            }
-        }
-        3 => {
-            let Some(host_cb) = cb else {
-                return;
-            };
-            #[cfg(unix)]
-            crate::log::log_active_bytes(3, b"Entering ServiceCoordinator-loop");
-            while host_cb(ctx, std::ptr::null_mut(), 0) == 0 {
-                let count = sc.services.lock().map_or(0, |g| g.len());
-                for idx in 0..count {
-                    let Some((svc_ptr, last_work)) = sc
-                        .services
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.get(idx).map(|s| (s.ptr as *mut c_void, s.last_work)))
-                    else {
-                        continue;
-                    };
-                    let service_interval = if svc_ptr.is_null() {
-                        crate::lifecycle::disk_service_interval_active()
-                    } else if svc_ptr as usize == 1 {
-                        active_scheduler().map_or(-1, |s| s.service_interval_val())
-                    } else if svc_ptr as usize == 2 {
-                        #[cfg(unix)]
-                        {
-                            crate::twin::service_interval_active()
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            -1
-                        }
-                    } else {
-                        host_cb(ctx, svc_ptr, 1)
-                    };
-                    if service_interval >= 0
-                        && (service_coord_now() - last_work).abs() >= i64::from(service_interval)
-                    {
-                        if svc_ptr.is_null() {
-                            crate::lifecycle::disk_service_work_active();
-                        } else if svc_ptr as usize == 1 {
-                            #[cfg(unix)]
-                            if let Some(s) = active_scheduler() {
-                                s.service_work_active();
-                            }
-                        } else if svc_ptr as usize == 2 {
-                            #[cfg(unix)]
-                            crate::twin::service_work_active();
-                        } else {
-                            host_cb(ctx, svc_ptr, 2);
-                        }
-                        let done_at = service_coord_now();
-                        if let Ok(mut g) = sc.services.lock() {
-                            if let Some(slot) = g.get_mut(idx) {
-                                slot.last_work = done_at;
-                            }
-                        }
-                    }
-                }
+    }
+}
 
-                let mut wait_interval: i32 = 60 * 60 * 24;
-                let cur_time = service_coord_now();
-                let count2 = sc.services.lock().map_or(0, |g| g.len());
-                #[cfg(unix)]
-                let debug_on = crate::log::active_debug_build();
-                #[cfg(not(unix))]
-                let debug_on = false;
-                for idx in 0..count2 {
-                    let Some((svc_ptr, last_work)) = sc
-                        .services
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.get(idx).map(|s| (s.ptr as *mut c_void, s.last_work)))
-                    else {
-                        continue;
-                    };
-                    let service_interval = if svc_ptr.is_null() {
-                        crate::lifecycle::disk_service_interval_active()
-                    } else if svc_ptr as usize == 1 {
-                        active_scheduler().map_or(-1, |s| s.service_interval_val())
-                    } else if svc_ptr as usize == 2 {
-                        #[cfg(unix)]
-                        {
-                            crate::twin::service_interval_active()
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            -1
-                        }
-                    } else {
-                        host_cb(ctx, svc_ptr, 1)
-                    };
-                    let mut remaining: i32 = -1;
-                    if service_interval >= 0 {
-                        let elapsed = (cur_time - last_work) as i32;
-                        remaining = service_interval.min(service_interval.wrapping_sub(elapsed));
-                        wait_interval = wait_interval.min(remaining);
-                    }
-                    if debug_on {
-                        let msg =
-                            format!("serviceInterval: {service_interval}, remaining: {remaining}");
-                        crate::log::log_active_bytes(3, msg.as_bytes());
-                    }
-                }
+#[cfg(unix)]
+pub(crate) fn is_daemon_service_coord_running() -> bool {
+    ACTIVE_SERVICE_COORD
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+        .is_some_and(|sc| sc.daemon_running.load(Ordering::SeqCst))
+}
 
-                if debug_on {
-                    let msg = format!("Waiting in ServiceCoordinator: {wait_interval}");
-                    crate::log::log_active_bytes(3, msg.as_bytes());
-                }
-                if wait_interval > 0 {
-                    if let Ok(mut guard) = sc.wait_mutex.lock() {
-                        if !*guard && host_cb(ctx, std::ptr::null_mut(), 0) == 0 {
-                            let dur =
-                                std::time::Duration::from_millis((wait_interval as u64) * 1000);
-                            if let Ok((new_guard, _)) =
-                                sc.wait_cond.wait_timeout_while(guard, dur, |woken| {
-                                    !*woken && unsafe { host_cb(ctx, std::ptr::null_mut(), 0) } == 0
-                                })
-                            {
-                                guard = new_guard;
-                            } else {
-                                break;
-                            }
-                        }
-                        *guard = false;
-                    }
-                }
-            }
-            crate::log::log_active_bytes(3, b"Exiting ServiceCoordinator-loop");
-        }
-        _ => {}
+#[cfg(unix)]
+pub(crate) fn shutdown_daemon_service_coord() {
+    stop_daemon_service_coord();
+    let handle = DAEMON_SERVICE_HANDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(h) = handle {
+        let _ = h.join();
+    }
+    if DAEMON_SERVICE_COORD
+        .write()
+        .ok()
+        .and_then(|mut g| g.take())
+        .is_some()
+    {
+        crate::log::log_active_bytes(3, b"Destroying ServiceCoordinator");
+    }
+    if let Ok(mut g) = ACTIVE_SERVICE_COORD.write() {
+        *g = None;
     }
 }
 

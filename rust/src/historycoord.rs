@@ -1912,11 +1912,7 @@ unsafe fn hc_set_dupe_param(
 /// - `3`: `ServiceWork`
 /// - `4`: `Redownload`
 /// - `5`: `EditList`
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_history_coord_exec(
-    op: c_int,
-    env: *const NzbgetRsHistoryCoordEnv,
-) -> c_int {
+pub unsafe fn history_coord_exec(op: c_int, env: *const NzbgetRsHistoryCoordEnv) -> c_int {
     let Some(e) = env.as_ref() else {
         return 0;
     };
@@ -2399,6 +2395,797 @@ pub unsafe extern "C" fn nzbget_rs_history_coord_exec(
         }
         _ => 0,
     }
+}
+
+#[cfg(unix)]
+std::thread_local! {
+    static HC_STR_ARENA: std::cell::RefCell<Vec<std::ffi::CString>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(unix)]
+struct HcArenaGuard;
+
+#[cfg(unix)]
+impl Drop for HcArenaGuard {
+    fn drop(&mut self) {
+        HC_STR_ARENA.with(|a| a.borrow_mut().clear());
+    }
+}
+
+#[cfg(unix)]
+fn hc_stash_str(bytes: &[u8]) -> *const c_char {
+    let cs = if let Some(pos) = bytes.iter().position(|&b| b == 0) {
+        std::ffi::CString::new(&bytes[..pos]).unwrap_or_default()
+    } else {
+        std::ffi::CString::new(bytes).unwrap_or_default()
+    };
+    HC_STR_ARENA.with(|a| {
+        let mut arena = a.borrow_mut();
+        arena.push(cs);
+        arena.last().map_or(std::ptr::null(), |s| s.as_ptr())
+    })
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn hc_native_log_cb(_ctx: *mut c_void, level: c_int, msg: *const c_char) {
+    use crate::queuesubsys_host::{MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING};
+    let mk = match level {
+        0 => MK_DEBUG,
+        1 => MK_DETAIL,
+        2 => MK_INFO,
+        3 => MK_WARNING,
+        4 => MK_ERROR,
+        _ => return,
+    };
+    crate::log::log_active_bytes(mk, hc_cstr_bytes(msg));
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_lines)]
+unsafe extern "C" fn hc_native_action_cb(
+    ctx: *mut c_void,
+    sub: c_int,
+    a1: c_int,
+    a2: c_int,
+    p1: usize,
+    p2: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    ints: *mut c_int,
+    i64s: *mut i64,
+    strs: *mut *const c_char,
+    bytes: *mut u8,
+    len: usize,
+) -> usize {
+    use crate::queuesubsys_host::{
+        QueueSubsysHost, AI_FAILED, AI_UNDEFINED, ASPECT_NZB_RETURNED, ASPECT_URL_RETURNED,
+        CF_FAILURE, CF_NONE, CF_PARTIAL, CS_NONE, DH_NONE, DH_REDOWNLOAD_MANUAL, DP_NONE, DS_NONE,
+        DUP_INT_DUPE_MODE, DUP_INT_DUPE_SCORE, DUP_STR_DUPE_KEY, DUP_STR_NAME,
+        EA_GROUP_PAUSE_EXTRA_PARS, FILE_ACT_CLEAR_ARTICLES, FILE_I64_FAILED_SIZE,
+        FILE_I64_REMAINING_SIZE, FILE_I64_SUCCESS_SIZE, FILE_INT_COMPLETED_ARTICLES,
+        FILE_INT_FAILED_ARTICLES, FILE_INT_PARTIAL_STATE, FILE_INT_PAUSED,
+        FILE_INT_SUCCESS_ARTICLES, FILE_STR_FILENAME, HK_DUP, HK_NZB, HK_URL, KS_BAD, KS_NONE,
+        LS_NONE, MK_DETAIL, MK_INFO, MK_WARNING, MS_NONE, NS_NONE, NS_RUNNING,
+        NZB_ACT_BUILD_DEST_DIR, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, NZB_ACT_CLEAR_FILE_LIST,
+        NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, NZB_ACT_CLEAR_SCRIPT_STATUSES,
+        NZB_ACT_UPDATE_COMPLETED_STATS, NZB_ACT_UPDATE_CURRENT_STATS, NZB_I64_DOWNLOADED_SIZE,
+        NZB_I64_DUPE_RECOVERED_BYTES, NZB_I64_FAILED_SIZE, NZB_I64_PAR_FAILED_SIZE,
+        NZB_I64_PAR_SUCCESS_SIZE, NZB_I64_SUCCESS_SIZE, NZB_INT_ALL_FIRST, NZB_INT_CLEANUP_STATUS,
+        NZB_INT_DEAD_PICK_PROBED, NZB_INT_DELETE_PAUSED, NZB_INT_DELETE_STATUS,
+        NZB_INT_DIRECT_RENAME_STATUS, NZB_INT_DIRECT_UNPACK_STATUS, NZB_INT_DOWNLOAD_SEC,
+        NZB_INT_DUPE_ATTEMPTED_ARTICLES, NZB_INT_DUPE_FAILED_RUN, NZB_INT_DUPE_FAILOVER_CHECKED,
+        NZB_INT_DUPE_HINT, NZB_INT_DUPE_MODE, NZB_INT_DUPE_NO_PAR_NOTED,
+        NZB_INT_DUPE_PAR_DEFER_STATE, NZB_INT_DUPE_RECOVERED_ARTICLES,
+        NZB_INT_DUPE_RECOVERED_HOLES, NZB_INT_DUPE_SCORE, NZB_INT_DUPE_UNSOURCED_ARTICLES,
+        NZB_INT_EXTRA_PAR_BLOCKS, NZB_INT_FAILED_ARTICLES, NZB_INT_HEALTH_PAUSED,
+        NZB_INT_LAST_UNPACK_STATUS, NZB_INT_LOADING_PAR, NZB_INT_MARK_STATUS, NZB_INT_MOVE_STATUS,
+        NZB_INT_PARKED_FILE_COUNT, NZB_INT_PARKING, NZB_INT_PAR_FULL, NZB_INT_PAR_RENAME_STATUS,
+        NZB_INT_PAR_REPAIRED, NZB_INT_PAR_SEC, NZB_INT_PAR_STATUS, NZB_INT_POST_TOTAL_SEC,
+        NZB_INT_RAR_RENAME_STATUS, NZB_INT_REMAINING_PAR_COUNT, NZB_INT_REPAIR_SEC,
+        NZB_INT_REPROCESS, NZB_INT_SUCCESS_ARTICLES, NZB_INT_UNPACK_CLEANED_UP_DISK,
+        NZB_INT_UNPACK_SEC, NZB_INT_UNPACK_STATUS, NZB_INT_UNPACK_TRIED, NZB_INT_URL_STATUS,
+        NZB_INT_WAITING_PAR, NZB_STR_CATEGORY, NZB_STR_DUPE_KEY, NZB_STR_FINAL_DIR, NZB_STR_NAME,
+        PARTIAL_COMPLETED, PAR_STATUS_NONE, RS_NONE, TS_FAILURE, TS_NONE, TS_RUNNING, US_NONE,
+    };
+
+    HC_STR_ARENA.with(|a| a.borrow_mut().clear());
+    if ctx.is_null() {
+        return 0;
+    }
+    let host = &*(ctx as *const QueueSubsysHost);
+    match sub {
+        0 => {
+            host.disk_discard_files_ex(p2, a1 != 0);
+            0
+        }
+        1 => {
+            let nzb = host.nzb_snap(p2, false);
+            host.nzb_action(p2, NZB_ACT_CLEAR_FILE_LIST, 0);
+            *strs.add(0) = hc_stash_str(&nzb.queued_filename);
+            0
+        }
+        2 => {
+            let nzb0 = host.nzb_snap(p2, false);
+            if nzb0.has_live_repair_thread {
+                let t = nzb0.live_repair_thread_ptr;
+                host.nzb_action(p2, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, 0);
+                host.thread_stop(t);
+            }
+            host.history_move_queue_item(p1, p2);
+            host.dq_history_changed(p1);
+            let fn_len = host.nzb_file_len(p2);
+            for i in 0..fn_len {
+                let fp = host.nzb_file_at(p2, i);
+                let fs = host.file_snap(fp);
+                host.nzb_action(p2, NZB_ACT_UPDATE_COMPLETED_STATS, fp);
+                host.nzb_push_completed_file(p2, fp, &fs.filename, CF_NONE, 0);
+            }
+            let nzb = host.nzb_snap(p2, false);
+            let cfs_len = host.nzb_completed_files_len(p2) as c_int;
+            *ints.add(0) = nzb.par_status;
+            *ints.add(1) = nzb.unpack_status;
+            *ints.add(2) = nzb.delete_status;
+            *ints.add(3) = c_int::from(nzb.parking);
+            *ints.add(4) = c_int::from(nzb.unpack_cleaned_up_disk);
+            *ints.add(5) = cfs_len;
+            *i64s.add(0) = nzb.failed_size;
+            *i64s.add(1) = nzb.par_failed_size;
+            *strs.add(0) = hc_stash_str(&nzb.name);
+            0
+        }
+        3 => {
+            let cfs_len = host.nzb_completed_files_len(p2);
+            if a1 < 0 || (a1 as usize) >= cfs_len {
+                return 0;
+            }
+            let cf = host.nzb_completed_file_at(p2, a1 as usize);
+            *ints.add(0) = cf.status;
+            *ints.add(1) = cf.id;
+            *strs.add(0) = hc_stash_str(&cf.filename);
+            1
+        }
+        4 => {
+            let mk = if a1 == 1 {
+                MK_DETAIL
+            } else if a1 == 3 {
+                MK_WARNING
+            } else {
+                MK_INFO
+            };
+            host.nzb_print_message(p2, mk, hc_cstr_bytes(s1));
+            0
+        }
+        5 => {
+            let nzb = host.nzb_snap(p2, false);
+            host.nzb_set_int(p2, NZB_INT_PARKED_FILE_COUNT, a1);
+            host.nzb_action(p2, NZB_ACT_CLEAR_FILE_LIST, 0);
+            host.nzb_set_int(p2, NZB_INT_REMAINING_PAR_COUNT, 0);
+            host.nzb_set_int(p2, NZB_INT_PARKING, 0);
+            if nzb.direct_rename_status == TS_RUNNING {
+                host.nzb_set_int(p2, NZB_INT_DIRECT_RENAME_STATUS, TS_FAILURE);
+            }
+            if nzb.direct_unpack_status == NS_RUNNING {
+                host.nzb_set_int(p2, NZB_INT_DIRECT_UNPACK_STATUS, NS_NONE);
+            }
+            host.nzb_set_int(p2, NZB_INT_DUPE_HINT, DH_NONE);
+            0
+        }
+        6 => {
+            let nzb = host.nzb_snap(p2, false);
+            crate::dupefallback::par_damage_forget_all(nzb.id);
+            0
+        }
+        10 => {
+            host.nzb_set_param(p2, b"*DupeRecheck", Some(b"1"));
+            let emit: unsafe extern "C" fn(
+                *mut c_void,
+                *const c_char,
+                *const *const c_char,
+                usize,
+            ) = std::mem::transmute(s1 as usize);
+            let cfs = host.nzb_completed_files(p2);
+            for cf in cfs {
+                if (cf.status != CF_PARTIAL && cf.status != CF_FAILURE) || cf.id <= 0 {
+                    continue;
+                }
+                let partial = cf.status == CF_PARTIAL;
+                let (fi_ptr, state_loaded) = host.disk_load_file_for_inspect(cf.id, false, partial);
+                if fi_ptr == 0 {
+                    continue;
+                }
+                if partial && !state_loaded {
+                    host.delete_file_info(fi_ptr);
+                    continue;
+                }
+                let groups_vec = host.file_groups(fi_ptr);
+                let group_cstrs: Vec<std::ffi::CString> = groups_vec
+                    .iter()
+                    .map(|g| {
+                        let end = g.iter().position(|&b| b == 0).unwrap_or(g.len());
+                        std::ffi::CString::new(&g[..end]).unwrap_or_default()
+                    })
+                    .collect();
+                let group_ptrs: Vec<*const c_char> =
+                    group_cstrs.iter().map(|c| c.as_ptr()).collect();
+                let fs = host.file_snap(fi_ptr);
+                for aidx in 0..fs.articles_len {
+                    let art = host.article_at(fi_ptr, aidx);
+                    if (!partial || art.status == AI_FAILED) && !art.message_id.is_empty() {
+                        let mid_c = hc_cbuf(&art.message_id);
+                        emit(
+                            p1 as *mut c_void,
+                            mid_c.as_ptr() as *const c_char,
+                            if group_ptrs.is_empty() {
+                                std::ptr::null()
+                            } else {
+                                group_ptrs.as_ptr()
+                            },
+                            group_ptrs.len(),
+                        );
+                    }
+                }
+                host.delete_file_info(fi_ptr);
+            }
+            0
+        }
+        12 => {
+            let hi = host.hist_item_snap(p2);
+            let nzb_ptr = hi.inner_ptr;
+            let nzb = host.nzb_snap(nzb_ptr, false);
+            *ints.add(0) = nzb.mark_status;
+            *ints.add(1) = nzb.delete_status;
+            *ints.add(2) = c_int::from(nzb.is_dupe_success);
+            *strs.add(0) = hc_stash_str(&hi.name);
+            nzb_ptr
+        }
+        13 => {
+            host.history_replace_with_dup(p1, p2, a2 as usize, a1);
+            0
+        }
+        14 => {
+            let hl_len = host.history_len(p1);
+            if a1 < 0 || (a1 as usize) >= hl_len {
+                return 0;
+            }
+            let pos = hl_len - 1 - (a1 as usize);
+            let hi = host.history_at(p1, pos);
+            *ints.add(0) = hi.kind;
+            *i64s.add(0) = hi.time;
+            *i64s.add(1) = if hi.kind == HK_NZB {
+                hi.inner_ptr as i64
+            } else {
+                0
+            };
+            *strs.add(0) = hc_stash_str(&hi.name);
+            hi.hi_ptr
+        }
+        15 => {
+            let hl_len = host.history_len(p1);
+            let pos = if a2 != 0 {
+                hl_len - 1 - (a1 as usize)
+            } else {
+                a1 as usize
+            };
+            host.history_erase_at(p1, pos);
+            0
+        }
+        16 => {
+            host.dq_history_changed(p1);
+            host.dq_save(p1);
+            0
+        }
+        17 => {
+            let hi_ptr = host.history_find_by_id(p1, a1);
+            if hi_ptr != 0 {
+                let hi = host.hist_item_snap(hi_ptr);
+                if hi.kind == HK_NZB && hi.inner_ptr != 0 {
+                    host.nzb_set_int(hi.inner_ptr, NZB_INT_MARK_STATUS, KS_BAD);
+                }
+            }
+            0
+        }
+        18 => {
+            let hl_len = host.history_len(p1);
+            let mut found_idx: Option<usize> = None;
+            let mut found_hi = crate::queuesubsys_host::HistEntrySnap::default();
+            for idx in 0..hl_len {
+                let hi = host.history_at(p1, idx);
+                let m = if a2 != 0 {
+                    hi.hi_ptr == p2
+                } else {
+                    hi.id == a1
+                };
+                if m {
+                    found_idx = Some(idx);
+                    found_hi = hi;
+                    break;
+                }
+            }
+            let Some(idx) = found_idx else {
+                return 0;
+            };
+            let nzb_ptr = if found_hi.kind == HK_NZB || found_hi.kind == HK_URL {
+                found_hi.inner_ptr
+            } else {
+                0
+            };
+            let nzb = if nzb_ptr != 0 {
+                Some(host.nzb_snap(nzb_ptr, false))
+            } else {
+                None
+            };
+            *ints.add(0) = idx as c_int;
+            *ints.add(1) = hl_len as c_int;
+            *ints.add(2) = found_hi.kind;
+            *ints.add(3) = nzb.as_ref().map_or(0, |n| n.delete_status);
+            *ints.add(4) = nzb.as_ref().map_or(0, |n| n.par_status);
+            *ints.add(5) = nzb.as_ref().map_or(0, |n| n.unpack_status);
+            *ints.add(6) = nzb.as_ref().map_or(0, |n| n.parked_file_count);
+            *i64s.add(0) = nzb_ptr as i64;
+            *strs.add(0) = hc_stash_str(&found_hi.name);
+            *strs.add(1) = hc_stash_str(nzb.as_ref().map_or(b"", |n| n.dest_dir.as_slice()));
+            found_hi.hi_ptr
+        }
+        21 => {
+            if a1 < 0 {
+                let nzb = host.nzb_snap(p2, false);
+                *ints.add(0) = c_int::from(nzb.unpack_cleaned_up_disk);
+                *ints.add(1) = nzb.post_total_sec;
+                *ints.add(2) = nzb.unpack_sec;
+                *ints.add(3) = nzb.par_sec;
+                *ints.add(4) = nzb.move_status;
+                *ints.add(5) = host.nzb_file_len(p2) as c_int;
+                *strs.add(0) = hc_stash_str(&nzb.dest_dir);
+            } else {
+                let fp = host.nzb_file_at(p2, a1 as usize);
+                let fs = host.file_snap(fp);
+                *strs.add(0) = hc_stash_str(&fs.filename);
+            }
+            0
+        }
+        22 => {
+            let hi = host.hist_item_snap(p2);
+            let nzb_ptr = hi.inner_ptr;
+            let nzb = host.nzb_snap(nzb_ptr, false);
+            if !nzb.unpack_cleaned_up_disk {
+                host.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_STATUS, US_NONE);
+                host.nzb_set_int(nzb_ptr, NZB_INT_DIRECT_UNPACK_STATUS, NS_NONE);
+                host.nzb_set_int(nzb_ptr, NZB_INT_PAR_REPAIRED, 0);
+                host.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_TRIED, 0);
+                host.nzb_set_int(nzb_ptr, NZB_INT_LAST_UNPACK_STATUS, 0);
+                host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, 0);
+                host.nzb_set_int(nzb_ptr, NZB_INT_CLEANUP_STATUS, CS_NONE);
+                host.nzb_set_int(nzb_ptr, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
+                host.nzb_set_int(nzb_ptr, NZB_INT_RAR_RENAME_STATUS, RS_NONE);
+                host.nzb_set_int(nzb_ptr, NZB_INT_POST_TOTAL_SEC, *ints.add(1));
+                host.nzb_set_int(nzb_ptr, NZB_INT_UNPACK_SEC, 0);
+                if *ints.add(0) != 0 {
+                    host.nzb_set_int(nzb_ptr, NZB_INT_PAR_STATUS, PAR_STATUS_NONE);
+                    host.nzb_set_int(nzb_ptr, NZB_INT_PAR_SEC, 0);
+                    host.nzb_set_int(nzb_ptr, NZB_INT_REPAIR_SEC, 0);
+                    host.nzb_set_int(nzb_ptr, NZB_INT_PAR_FULL, 0);
+                }
+            }
+            host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, DS_NONE);
+            host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_PAUSED, 0);
+            host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_FAILOVER_CHECKED, -1);
+            host.nzb_set_int(nzb_ptr, NZB_INT_DEAD_PICK_PROBED, 0);
+            host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_ATTEMPTED_ARTICLES, 0);
+            host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_UNSOURCED_ARTICLES, 0);
+            host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_FAILED_RUN, 0);
+            host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
+            host.nzb_set_int(nzb_ptr, NZB_INT_MARK_STATUS, KS_NONE);
+            host.nzb_action(nzb_ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES, 0);
+            host.nzb_set_int(nzb_ptr, NZB_INT_PARKED_FILE_COUNT, 0);
+            host.nzb_set_int(nzb_ptr, NZB_INT_MOVE_STATUS, *ints.add(2));
+            host.nzb_set_int(nzb_ptr, NZB_INT_REPROCESS, c_int::from(a2 != 0));
+            host.nzb_set_str(nzb_ptr, NZB_STR_FINAL_DIR, b"");
+            host.history_return_to_queue(p1, p2, a1 as usize);
+            0
+        }
+        23 => {
+            if let Some(pp) = crate::ffi::active_prepost() {
+                if a1 != 0 {
+                    pp.nzb_added(host, p1, p2);
+                } else {
+                    pp.nzb_downloaded(host, p1, p2);
+                }
+            }
+            let mut notify_i64s = [0i64];
+            host.raw(
+                24,
+                3,
+                ASPECT_NZB_RETURNED,
+                p1,
+                p2,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                notify_i64s.as_mut_ptr(),
+                std::ptr::null_mut(),
+            );
+            0
+        }
+        24 => {
+            host.nzb_action(p2, NZB_ACT_BUILD_DEST_DIR, 0);
+            let nzb = host.nzb_snap(p2, false);
+            *strs.add(0) = hc_stash_str(&nzb.dest_dir);
+            0
+        }
+        25 => {
+            let hi = host.hist_item_snap(p2);
+            let nzb_ptr = hi.inner_ptr;
+            let nzb = host.nzb_snap(nzb_ptr, false);
+            host.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, LS_NONE);
+            host.nzb_set_int(nzb_ptr, NZB_INT_DELETE_STATUS, DS_NONE);
+            if nzb.dupe_hint == DH_NONE {
+                host.nzb_set_int(nzb_ptr, NZB_INT_DUPE_HINT, DH_REDOWNLOAD_MANUAL);
+            }
+            host.history_return_to_queue(p1, p2, a1 as usize);
+            let mut notify_i64s = [0i64];
+            host.raw(
+                24,
+                3,
+                ASPECT_URL_RETURNED,
+                p1,
+                nzb_ptr,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                notify_i64s.as_mut_ptr(),
+                std::ptr::null_mut(),
+            );
+            0
+        }
+        26 => {
+            let nzb = host.nzb_snap(p2, false);
+            *ints.add(0) = c_int::from(nzb.delete_paused);
+            *strs.add(0) = hc_stash_str(&nzb.name);
+            *strs.add(1) = hc_stash_str(&nzb.queued_filename);
+            *strs.add(2) = hc_stash_str(&nzb.dest_dir);
+            0
+        }
+        27 => {
+            let parsed = crate::nzbfile::parse_and_materialize_nzb(host, hc_cstr_bytes(s1), b"");
+            if !parsed.ok {
+                host.destroy_nzb_uptr(parsed.uptr_addr);
+                return 0;
+            }
+            parsed.uptr_addr
+        }
+        28 => {
+            let src_nzb_ptr = if p1 != 0 { *(p1 as *const usize) } else { 0 };
+            if src_nzb_ptr != 0 {
+                let n = host.nzb_file_len(src_nzb_ptr);
+                let paused_val = c_int::from(a1 != 0);
+                for idx in 0..n {
+                    let fp = host.nzb_file_at(src_nzb_ptr, idx);
+                    host.file_set_int(fp, FILE_INT_PAUSED, paused_val);
+                }
+            }
+            host.disk_discard_files(p2);
+            host.nzb_set_int(p2, NZB_INT_MOVE_STATUS, MS_NONE);
+            host.nzb_set_int(p2, NZB_INT_UNPACK_CLEANED_UP_DISK, 0);
+            host.nzb_set_int(p2, NZB_INT_PAR_STATUS, PAR_STATUS_NONE);
+            host.nzb_set_int(p2, NZB_INT_PAR_RENAME_STATUS, RS_NONE);
+            host.nzb_set_int(p2, NZB_INT_RAR_RENAME_STATUS, RS_NONE);
+            host.nzb_set_int(p2, NZB_INT_DIRECT_RENAME_STATUS, TS_NONE);
+            host.nzb_set_int(p2, NZB_INT_DIRECT_UNPACK_STATUS, NS_NONE);
+            host.nzb_set_int(p2, NZB_INT_PAR_REPAIRED, 0);
+            host.nzb_set_int(p2, NZB_INT_UNPACK_TRIED, 0);
+            host.nzb_set_int(p2, NZB_INT_LAST_UNPACK_STATUS, 0);
+            host.nzb_action(p2, NZB_ACT_CLEAR_EXTRACTED_ARCHIVES, 0);
+            host.nzb_set_int(p2, NZB_INT_HEALTH_PAUSED, 0);
+            host.nzb_set_i64(p2, NZB_I64_DOWNLOADED_SIZE, 0);
+            host.nzb_set_int(p2, NZB_INT_DOWNLOAD_SEC, 0);
+            host.nzb_set_int(p2, NZB_INT_POST_TOTAL_SEC, 0);
+            host.nzb_set_int(p2, NZB_INT_PAR_SEC, 0);
+            host.nzb_set_int(p2, NZB_INT_REPAIR_SEC, 0);
+            host.nzb_set_int(p2, NZB_INT_UNPACK_SEC, 0);
+            host.nzb_set_int(p2, NZB_INT_EXTRA_PAR_BLOCKS, 0);
+            host.nzb_set_int(p2, NZB_INT_ALL_FIRST, 0);
+            host.nzb_set_int(p2, NZB_INT_WAITING_PAR, 0);
+            host.nzb_set_int(p2, NZB_INT_LOADING_PAR, 0);
+            host.nzb_set_int(p2, NZB_INT_DUPE_RECOVERED_ARTICLES, 0);
+            host.nzb_set_i64(p2, NZB_I64_DUPE_RECOVERED_BYTES, 0);
+            host.nzb_set_int(p2, NZB_INT_DUPE_RECOVERED_HOLES, 0);
+            host.nzb_set_int(p2, NZB_INT_DUPE_PAR_DEFER_STATE, DP_NONE);
+            host.nzb_set_int(p2, NZB_INT_DUPE_NO_PAR_NOTED, 0);
+            host.nzb_redownload_replace_files(p2, src_nzb_ptr);
+            host.destroy_nzb_uptr(p1);
+            if let Some((qc, qh)) = crate::ffi::active_queue_coord_and_host() {
+                qc.check_dupe_file_infos(&qh, p2);
+            }
+            0
+        }
+        30 => {
+            let try_state = a2 == CF_PARTIAL;
+            let (fi_ptr, state_loaded) = host.disk_load_file_for_inspect(a1, true, try_state);
+            if fi_ptr == 0 {
+                return 0;
+            }
+            host.file_set_nzb_info(fi_ptr, p2);
+            let fs = host.file_snap(fi_ptr);
+            let nzb = host.nzb_snap(p2, false);
+            *ints.add(0) = c_int::from(state_loaded);
+            *ints.add(1) = fs.success_articles;
+            *ints.add(2) = fs.partial_state;
+            *ints.add(3) = fs.articles_len as c_int;
+            *ints.add(4) = c_int::from(fs.par_file);
+            *ints.add(5) = fs.total_articles;
+            *ints.add(6) = fs.missed_articles;
+            *ints.add(7) = fs.failed_articles;
+            *ints.add(8) = fs.completed_articles;
+            *ints.add(9) = fs.success_articles;
+            *ints.add(10) = nzb.failed_articles;
+            *ints.add(11) = nzb.success_articles;
+            *i64s.add(0) = fs.size;
+            *i64s.add(1) = fs.missed_size;
+            *i64s.add(2) = fs.failed_size;
+            *i64s.add(3) = fs.remaining_size;
+            *i64s.add(4) = fs.success_size;
+            *i64s.add(5) = nzb.failed_size;
+            *i64s.add(6) = nzb.success_size;
+            *i64s.add(7) = nzb.par_failed_size;
+            *i64s.add(8) = nzb.par_success_size;
+            *strs.add(0) = hc_stash_str(&fs.filename);
+            fi_ptr
+        }
+        31 => {
+            if a1 == 0 {
+                host.delete_file_info(p2);
+            } else {
+                host.file_set_str(p2, FILE_STR_FILENAME, Some(hc_cstr_bytes(s1)));
+            }
+            0
+        }
+        32 => {
+            for idx in 0..len {
+                let art = host.article_at(p2, idx);
+                *ints.add(idx) = art.status;
+                *ints.add(len + idx) = art.size;
+            }
+            0
+        }
+        33 => {
+            host.file_set_int(p1, FILE_INT_PARTIAL_STATE, a2);
+            host.file_subtract_server_stats_from_nzb_total(p1, p2);
+            host.nzb_set_i64(p2, NZB_I64_FAILED_SIZE, *i64s.add(3));
+            host.nzb_set_i64(p2, NZB_I64_SUCCESS_SIZE, *i64s.add(4));
+            host.nzb_set_int(p2, NZB_INT_FAILED_ARTICLES, *ints.add(3));
+            host.nzb_set_int(p2, NZB_INT_SUCCESS_ARTICLES, *ints.add(4));
+            host.nzb_set_i64(p2, NZB_I64_PAR_FAILED_SIZE, *i64s.add(5));
+            host.nzb_set_i64(p2, NZB_I64_PAR_SUCCESS_SIZE, *i64s.add(6));
+            if !bytes.is_null() {
+                for idx in 0..len {
+                    if *bytes.add(idx) != 0 {
+                        let art = host.article_at(p1, idx);
+                        if art.ptr != 0 {
+                            host.article_reset_for_retry(art.ptr);
+                        }
+                    }
+                }
+            }
+            host.file_set_i64(p1, FILE_I64_FAILED_SIZE, *i64s.add(0));
+            host.file_set_i64(p1, FILE_I64_REMAINING_SIZE, *i64s.add(1));
+            host.file_set_i64(p1, FILE_I64_SUCCESS_SIZE, *i64s.add(2));
+            host.file_set_int(p1, FILE_INT_FAILED_ARTICLES, *ints.add(0));
+            host.file_set_int(p1, FILE_INT_COMPLETED_ARTICLES, *ints.add(1));
+            host.file_set_int(p1, FILE_INT_SUCCESS_ARTICLES, *ints.add(2));
+            let fs = host.file_snap(p1);
+            host.disk_discard_file(fs.id, false, true, a2 != PARTIAL_COMPLETED);
+            if a2 == PARTIAL_COMPLETED {
+                host.disk_save_file_state(p1, true);
+            }
+            host.file_action(p1, FILE_ACT_CLEAR_ARTICLES, 0);
+            let fid = fs.id;
+            host.nzb_add_requeued_file(p2, p1);
+            host.nzb_erase_completed_file(p2, a1 as usize);
+            fid as usize
+        }
+        34 => {
+            if len > 0 && !ints.is_null() {
+                let req = std::slice::from_raw_parts(ints, len);
+                let jobs = host.nzb_stream_repair_jobs(p2);
+                for j in (0..jobs.len()).rev() {
+                    if req.contains(&jobs[j].file_id) {
+                        host.nzb_stream_repair_erase_job(p2, j, false);
+                    }
+                }
+            }
+            host.nzb_action(p2, NZB_ACT_UPDATE_CURRENT_STATS, 0);
+            if a1 != 0 {
+                host.nzb_set_int(p2, NZB_INT_HEALTH_PAUSED, 1);
+            }
+            let nzb = host.nzb_snap(p2, false);
+            *i64s.add(0) = i64::from(nzb.is_download_completed);
+            *i64s.add(1) = i64::from(nzb.id);
+            let _ = AI_UNDEFINED;
+            0
+        }
+        35 => {
+            host.dq_edit_entry(p1, a1, EA_GROUP_PAUSE_EXTRA_PARS, None);
+            0
+        }
+        36 => {
+            let hi = host.hist_item_snap(p2);
+            match a1 {
+                0 => {
+                    host.nzb_set_param(hi.inner_ptr, hc_cstr_bytes(s1), Some(hc_cstr_bytes(s2)));
+                }
+                1 => {
+                    host.nzb_set_str(hi.inner_ptr, NZB_STR_CATEGORY, hc_cstr_bytes(s1));
+                }
+                2 => {
+                    if hi.kind == HK_NZB || hi.kind == HK_URL {
+                        let prev = host.nzb_snap(hi.inner_ptr, false).name;
+                        host.nzb_set_str(hi.inner_ptr, NZB_STR_NAME, hc_cstr_bytes(s1));
+                        let after = host.nzb_snap(hi.inner_ptr, false);
+                        if hi.kind == HK_NZB && prev != after.name {
+                            return after.id as usize;
+                        }
+                    } else if hi.kind == HK_DUP {
+                        host.dup_set_str(hi.inner_ptr, DUP_STR_NAME, hc_cstr_bytes(s1));
+                    }
+                }
+                3 => {
+                    host.nzb_set_param(hi.inner_ptr, b"DupeSearchOwnedKey", None);
+                    host.nzb_set_str(hi.inner_ptr, NZB_STR_DUPE_KEY, hc_cstr_bytes(s1));
+                }
+                4 => host.nzb_set_int(hi.inner_ptr, NZB_INT_DUPE_SCORE, a2),
+                5 => host.nzb_set_int(hi.inner_ptr, NZB_INT_DUPE_MODE, a2),
+                6 => host.nzb_set_int(hi.inner_ptr, NZB_INT_DELETE_STATUS, a2),
+                7 => host.dup_set_str(hi.inner_ptr, DUP_STR_DUPE_KEY, hc_cstr_bytes(s1)),
+                8 => host.dup_set_int(hi.inner_ptr, DUP_INT_DUPE_SCORE, a2),
+                9 => host.dup_set_int(hi.inner_ptr, DUP_INT_DUPE_MODE, a2),
+                _ => {}
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(unix)]
+fn hc_make_native_env(host: &crate::queuesubsys_host::QueueSubsysHost) -> NzbgetRsHistoryCoordEnv {
+    NzbgetRsHistoryCoordEnv {
+        ctx: std::ptr::from_ref(host) as *mut c_void,
+        p1: 0,
+        p2: 0,
+        a1: 0,
+        a2: 0,
+        a3: 0,
+        a4: 0,
+        a5: b'/' as c_int,
+        a6: 0,
+        t1: 0,
+        s1: std::ptr::null(),
+        int_arr: std::ptr::null(),
+        int_len: 0,
+        log_cb: Some(hc_native_log_cb),
+        action_cb: Some(hc_native_action_cb),
+    }
+}
+
+#[cfg(unix)]
+fn hc_nzb_cleanup_disk() -> c_int {
+    c_int::from(crate::options::active_options().is_some_and(|o| o.scalars().nzb_cleanup_disk != 0))
+}
+
+#[cfg(unix)]
+pub(crate) fn delete_disk_files_active(nzb_ptr: usize) {
+    let Some(host) = crate::ffi::queue_host() else {
+        return;
+    };
+    let _guard = HcArenaGuard;
+    let opts = host.opts();
+    let mut env = hc_make_native_env(&host);
+    env.p2 = nzb_ptr;
+    env.a1 = c_int::from(opts.server_mode);
+    env.a2 = hc_nzb_cleanup_disk();
+    unsafe {
+        history_coord_exec(0, &env);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn add_to_history_active(dq_ptr: usize, nzb_ptr: usize) {
+    let Some(host) = crate::ffi::queue_host() else {
+        return;
+    };
+    let _guard = HcArenaGuard;
+    let mut env = hc_make_native_env(&host);
+    env.p1 = dq_ptr;
+    env.p2 = nzb_ptr;
+    unsafe {
+        history_coord_exec(1, &env);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn history_hide_active(dq_ptr: usize, hist_ptr: usize, rindex: i32) {
+    let Some(host) = crate::ffi::queue_host() else {
+        return;
+    };
+    let _guard = HcArenaGuard;
+    let opts = host.opts();
+    let mut env = hc_make_native_env(&host);
+    env.p1 = dq_ptr;
+    env.p2 = hist_ptr;
+    env.a1 = rindex;
+    env.a2 = c_int::from(opts.server_mode);
+    env.a3 = hc_nzb_cleanup_disk();
+    unsafe {
+        history_coord_exec(2, &env);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn service_work_active() {
+    let Some(host) = crate::ffi::queue_host() else {
+        return;
+    };
+    host.with_locked_queue(|dq_ptr| {
+        let _guard = HcArenaGuard;
+        let opts = host.opts();
+        let mut env = hc_make_native_env(&host);
+        env.p1 = dq_ptr;
+        env.a1 = opts.keep_history;
+        env.a2 = c_int::from(opts.dupe_check);
+        env.a3 = c_int::from(opts.server_mode);
+        env.a4 = hc_nzb_cleanup_disk();
+        env.t1 = opts.cur_time;
+        unsafe {
+            history_coord_exec(3, &env);
+        }
+    });
+}
+
+#[cfg(unix)]
+pub(crate) fn redownload_active(dq_ptr: usize, hist_ptr: usize) {
+    let Some(host) = crate::ffi::queue_host() else {
+        return;
+    };
+    let _guard = HcArenaGuard;
+    let mut env = hc_make_native_env(&host);
+    env.p1 = dq_ptr;
+    env.p2 = hist_ptr;
+    unsafe {
+        history_coord_exec(4, &env);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn edit_list_active(
+    dq_ptr: usize,
+    ids: &[i32],
+    action: i32,
+    args: Option<&[u8]>,
+) -> bool {
+    let Some(host) = crate::ffi::queue_host() else {
+        return false;
+    };
+    let _guard = HcArenaGuard;
+    let opts = host.opts();
+    let args_c = args.map(hc_cbuf);
+    let mut env = hc_make_native_env(&host);
+    env.p1 = dq_ptr;
+    env.a1 = action;
+    env.a2 = c_int::from(opts.dupe_check);
+    env.a3 = c_int::from(opts.server_mode);
+    env.a4 = hc_nzb_cleanup_disk();
+    env.a6 = c_int::from(opts.par_check != crate::queuesubsys_host::PC_FORCE);
+    env.s1 = args_c
+        .as_ref()
+        .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
+    env.int_arr = if ids.is_empty() {
+        std::ptr::null()
+    } else {
+        ids.as_ptr()
+    };
+    env.int_len = ids.len();
+    unsafe { history_coord_exec(5, &env) != 0 }
 }
 
 #[cfg(test)]
@@ -2951,7 +3738,7 @@ mod tests {
                 log_cb: None,
                 action_cb: Some(mock_hc_action),
             };
-            assert_eq!(nzbget_rs_history_coord_exec(3, &env), 1);
+            assert_eq!(history_coord_exec(3, &env), 1);
             assert!(mock.saved);
             assert_eq!(mock.items.len(), 2);
             assert_eq!(mock.items[0].0, 3);

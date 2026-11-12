@@ -54,32 +54,6 @@ size_t nzbget_rs_path_position(int op, const char* str, size_t len);
 int nzbget_rs_file_exists(const char* path);
 int nzbget_rs_directory_exists(const char* path);
 
-// ParParser's name checks (rust/src/parparser.rs).
-// Names are borrowed and read only through the first NUL or 1023 bytes.
-// fold takes a byte (0..255), applies the caller's tolower(char), and must not
-// unwind. NULL names/fold return 0. Outputs are optional, writable C ints;
-// they may alias each other (blocks is written last), and change only on success.
-// No ownership transfer or allocation crosses the ABI; panics abort.
-// NzbFile (rust/src/nzbfile.rs), under the C library's ctype: classes are
-// isspace/isdigit's classes of bytes 0..255 (masks space and digit), lower
-// is tolower's table of -128..255 at index 0, charSigned whether char is
-// signed (glibc's __ctype_b_loc/__ctype_tolower_loc tables fit). file_totals:
-// a file's count segments (parts and sizes in the nzb's order) as AddFileInfo
-// makes them: 1 with the kept segments' indexes in part order (of two with
-// one number the later) in order[0..totals->kept], the subject's declared
-// tail counted when the nzb plainly stops short (cutShort), and the sizes;
-// 0 (outputs untouched) when no segment is left. duplicate_filenames:
-// HasDuplicateFilenames over count names and subjects (NULL entries empty).
-// declared_parts: DeclaredParts, the "(1/N)" count ending a subject or 0.
-typedef struct
-{
-	const unsigned short* classes;
-	unsigned short space;
-	unsigned short digit;
-	const int* lower;
-	int charSigned;
-} NzbgetRsCtype;
-
 // ---- dupesearch (daemon/dupesearch/) ----
 // DonorScore (rust/src/donorscore.rs): Base, Target (twin 0/1) and Rerank;
 
@@ -467,8 +441,6 @@ typedef struct NzbgetRsOptions NzbgetRsOptions;
 typedef struct NzbgetRsLog NzbgetRsLog;
 typedef struct NzbgetRsWorkState NzbgetRsWorkState;
 typedef struct NzbgetRsServerPool NzbgetRsServerPool;
-typedef struct NzbgetRsServiceCoord NzbgetRsServiceCoord;
-typedef int (*NzbgetRsServiceCoordFn)(void* ctx, void* svc, int op);
 
 typedef uintptr_t (*NzbgetRsScriptHostFn)(
     void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
@@ -489,10 +461,6 @@ NzbgetRsWorkState* nzbget_rs_workstate_new(uintptr_t notify_ctx, void (*notify_c
 void nzbget_rs_workstate_free(NzbgetRsWorkState* ws);
 int64_t nzbget_rs_workstate_ctl(const NzbgetRsWorkState* ws, int id, int write, int64_t val);
 
-NzbgetRsServiceCoord* nzbget_rs_service_coord_new(void);
-void nzbget_rs_service_coord_free(NzbgetRsServiceCoord* h);
-void nzbget_rs_service_coord_ctl(NzbgetRsServiceCoord* h, int op, void* ctx, NzbgetRsServiceCoordFn cb);
-
 NzbgetRsServerPool* nzbget_rs_serverpool_new(void);
 void nzbget_rs_serverpool_free(NzbgetRsServerPool* pool);
 intptr_t nzbget_rs_serverpool_ctl(
@@ -506,9 +474,6 @@ int nzbget_rs_serverpool_probe_tls(
 typedef struct NzbgetRsExtManager NzbgetRsExtManager;
 NzbgetRsExtManager* nzbget_rs_ext_mgr_new(void);
 void nzbget_rs_ext_mgr_free(NzbgetRsExtManager* mgr);
-void nzbget_rs_scan_scripts_exec(
-    const char* nzb_filename, const char* url, const char* directory, void* scan_ctx,
-    void (*scan_cb)(void*, int, int, const char*, const char*, int*, const char**));
 
 typedef struct NzbgetRsQueueScriptCoord NzbgetRsQueueScriptCoord;
 typedef struct NzbgetRsQueueScriptCoordEnv {
@@ -520,73 +485,6 @@ typedef struct NzbgetRsQueueScriptCoordEnv {
 NzbgetRsQueueScriptCoord* nzbget_rs_queue_script_new(void);
 void nzbget_rs_queue_script_free(NzbgetRsQueueScriptCoord* h);
 int nzbget_rs_queue_script_exec(NzbgetRsQueueScriptCoord* h, int op, const NzbgetRsQueueScriptCoordEnv* env);
-
-void nzbget_rs_url_coord_add(uintptr_t nzb_ptr, uintptr_t holder_ptr, int add_first);
-
-// NzbFileParser, UrlCoordinator & DirectRenamer End-to-End FFI
-typedef struct NzbgetRsNzbFileParser NzbgetRsNzbFileParser;
-typedef int (*NzbgetRsAllocFileIdCb)(void* ctx);
-
-typedef struct
-{
-    int file_count;
-    int total_articles;
-    int failed_articles;
-    int cur_failed_articles;
-    int64_t size;
-    int64_t remaining_size;
-    int64_t failed_size;
-    int64_t cur_failed_size;
-    int64_t par_size;
-    int64_t par_failed_size;
-    int64_t par_cur_failed_size;
-    int remaining_par_count;
-    uint32_t full_content_hash;
-    uint32_t filtered_content_hash;
-    int many_dupe_files;
-    const char* password;
-    const char* meta_name;
-    const char* meta_title;
-    const char* category;
-    size_t kept_files_count;
-    size_t messages_count;
-} NzbgetRsNzbFileSummary;
-
-typedef struct
-{
-    int id;
-    const char* subject;
-    const char* filename;
-    int time;
-    int total_articles;
-    int missed_articles;
-    int64_t size;
-    int64_t remaining_size;
-    int64_t missed_size;
-    int par_file;
-    int cut_short;
-    const char* const* groups_ptrs;
-    size_t groups_count;
-    const int* article_parts;
-    const int64_t* article_sizes;
-    const char* const* article_msg_ids;
-    size_t articles_count;
-} NzbgetRsNzbKeptFileView;
-
-NzbgetRsNzbFileParser* nzbget_rs_nzbfile_parser_new(const char* file_name);
-void nzbget_rs_nzbfile_parser_free(NzbgetRsNzbFileParser* parser);
-int nzbget_rs_nzbfile_parser_parse_file(
-    NzbgetRsNzbFileParser* parser, const char* par_ignore_ext,
-    const NzbgetRsCtype* ct, void* alloc_ctx, NzbgetRsAllocFileIdCb alloc_file_id_cb,
-    void (*on_parsed_subject)(const char*, const char*),
-    void (*sort_indices)(const char* const*, size_t*, size_t),
-    NzbgetRsNzbFileSummary* out_summary);
-int nzbget_rs_nzbfile_parser_get_message(
-    const NzbgetRsNzbFileParser* parser, size_t index,
-    int* out_kind, const char** out_text);
-int nzbget_rs_nzbfile_parser_get_file(
-    const NzbgetRsNzbFileParser* parser, size_t index,
-    NzbgetRsNzbKeptFileView* out_view);
 
 NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
 
@@ -862,29 +760,8 @@ typedef struct NzbgetRsDiskStateEnv {
 } NzbgetRsDiskStateEnv;
 
 int nzbget_rs_diskstate_exec(int op, const NzbgetRsDiskStateEnv* env);
-typedef struct NzbgetRsHistoryCoordEnv {
-    void* ctx; uintptr_t p1; uintptr_t p2;
-    int a1; int a2; int a3; int a4; int a5; int a6; int64_t t1;
-    const char* s1; const int* int_arr; size_t int_len;
-    void (*log_cb)(void*, int, const char*);
-    uintptr_t (*action_cb)(void*, int, int, int, uintptr_t, uintptr_t, const char*, const char*, int*, int64_t*, const char**, uint8_t*, size_t);
-} NzbgetRsHistoryCoordEnv;
-int nzbget_rs_history_coord_exec(int op, const NzbgetRsHistoryCoordEnv* env);
 int nzbget_rs_socket_deadline_wait(
     int fd, int read, int write, void* ctx, int64_t (*rem_cb)(void*));
-typedef struct NzbgetRsScanner NzbgetRsScanner;
-typedef struct NzbgetRsScannerEnv {
-    void* ctx; const char* nzb_dir; const char* temp_dir; const char* filename; const char* nzb_name; const char* category; const char* dupe_key; const char* buf_ptr;
-    int buf_len; int priority; int dupe_score; int dupe_mode; int auto_category; int add_top; int add_paused; int nzb_dir_interval; int nzb_dir_file_age; int archive_scan; int archive_action; int queue_loaded; int pause_scan; char path_sep;
-    void* parameters; void* url_info; int* out_nzb_id; void (*wake_cb)(void*); void (*log_cb)(void*, int, const char*); const char* (*find_category_cb)(void*, const char*, int);
-    void (*iter_params_cb)(void*, void*, void (*)(void*, const char*, const char*)); void (*work_params_cb)(void*, int, const char*, const char*);
-    void (*scan_script_cb)(void*, const char*, void*, const char*, const char*, const char*, const char*, void*, void (*)(void*, int, const char*), int*, int*, int*, int*, int*);
-    int (*parse_nzb_cb)(void*, const char*, const char*, const char**);
-    int (*commit_nzb_cb)(void*, int, const char*, const char*, int, const char*, int, const char*, int, int, int, int, void*);
-} NzbgetRsScannerEnv;
-NzbgetRsScanner* nzbget_rs_scanner_new(void);
-void nzbget_rs_scanner_free(NzbgetRsScanner* scanner);
-int nzbget_rs_scanner_exec(NzbgetRsScanner* scanner, int op, const NzbgetRsScannerEnv* env, int a1, int a2, int a3);
 
 typedef struct NzbgetRsDaemonEnv {
     void* ctx; int a1; int a2; int a3; int a4; int a5; int a6;
@@ -903,11 +780,10 @@ int nzbget_rs_par_checker_exec(
     const NzbgetRsParChecker* ctrl, int op, int a1, const char* s1,
     NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
 typedef struct NzbgetRsDirectUnpack NzbgetRsDirectUnpack;
-NzbgetRsDirectUnpack* nzbget_rs_direct_unpack_new(int nzb_id);
+NzbgetRsDirectUnpack* nzbget_rs_direct_unpack_new(int nzb_id, uintptr_t thread_ptr);
 void nzbget_rs_direct_unpack_free(NzbgetRsDirectUnpack* ctrl);
 int nzbget_rs_direct_unpack_exec(
-    const NzbgetRsDirectUnpack* ctrl, int op, uintptr_t p1, uintptr_t p2,
-    NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
+    const NzbgetRsDirectUnpack* ctrl, int op, uintptr_t p1, uintptr_t p2);
 typedef struct NzbgetRsPostJob NzbgetRsPostJob;
 NzbgetRsPostJob* nzbget_rs_post_job_new(int kind, uintptr_t thread_ptr, uintptr_t post_ptr, int nzb_id);
 void nzbget_rs_post_job_free(NzbgetRsPostJob* job);
@@ -991,8 +867,6 @@ void nzbget_rs_remote_srv_ctl(int op, const NzbgetRsRpcHost* host);
 
 typedef struct NzbgetRsQueueCoordinator NzbgetRsQueueCoordinator;
 typedef struct NzbgetRsPrePostProcessor NzbgetRsPrePostProcessor;
-int nzbget_rs_dupe_fallback_op(
-    int op, int a1, uintptr_t p1, NzbgetRsQueueSubsysHostFn host_cb);
 NzbgetRsQueueCoordinator* nzbget_rs_queue_coord_new(void);
 void nzbget_rs_queue_coord_free(NzbgetRsQueueCoordinator* ptr);
 uintptr_t nzbget_rs_queue_coord_exec(

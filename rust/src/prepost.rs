@@ -892,6 +892,7 @@ impl NzbgetRsPrePostProcessor {
         host_cb: crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn,
     ) -> usize {
         use std::sync::atomic::Ordering;
+        let _ = (a2, s1);
         let host = crate::queuesubsys_host::QueueSubsysHost::new(host_ctx, host_cb);
         match op {
             0 => {
@@ -915,30 +916,9 @@ impl NzbgetRsPrePostProcessor {
                     usize::from(self.has_active_unpack(&host, p1, inc))
                 }
             }
-            4 => {
-                self.nzb_added(&host, p1, p2);
-                0
-            }
-            5 => {
-                self.check_download_completed(&host, p1, p2);
-                0
-            }
             6 => {
                 self.nzb_downloaded(&host, p1, p2);
                 0
-            }
-            7 => {
-                let ids = if p2 == 0 || a1 <= 0 {
-                    &[][..]
-                } else {
-                    std::slice::from_raw_parts(p2 as *const i32, a1 as usize)
-                };
-                let args = if s1.is_null() {
-                    None
-                } else {
-                    Some(std::ffi::CStr::from_ptr(s1).to_bytes())
-                };
-                usize::from(self.edit_list(&host, p1, ids, a2, args))
             }
             8 => {
                 self.download_queue_update(&host, a1, p1, p2, p3);
@@ -946,6 +926,10 @@ impl NzbgetRsPrePostProcessor {
             }
             _ => 0,
         }
+    }
+
+    pub(crate) fn owner_ptr(&self) -> usize {
+        self.owner
     }
 
     fn run(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
@@ -1125,10 +1109,8 @@ impl NzbgetRsPrePostProcessor {
                 if nzb.post_info_ptr != 0 {
                     self.queued_jobs.fetch_add(1, Ordering::AcqRel);
                     let ps = host.post_snap(nzb.post_info_ptr);
-                    let dest_exists = crate::fsops::directory_exists(
-                        &nzb.dest_dir,
-                        &crate::fsops::posix_stat,
-                    );
+                    let dest_exists =
+                        crate::fsops::directory_exists(&nzb.dest_dir, &crate::fsops::posix_stat);
                     let (new_stage, req_par) = sanitise_post_stage(
                         ps.stage,
                         PT_EXECUTING_SCRIPT,
@@ -1179,7 +1161,7 @@ impl NzbgetRsPrePostProcessor {
         false
     }
 
-    fn nzb_added(
+    pub(crate) fn nzb_added(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
@@ -1212,7 +1194,7 @@ impl NzbgetRsPrePostProcessor {
         }
     }
 
-    fn check_download_completed(
+    pub(crate) fn check_download_completed(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
@@ -1245,7 +1227,7 @@ impl NzbgetRsPrePostProcessor {
         }
     }
 
-    fn nzb_downloaded(
+    pub(crate) fn nzb_downloaded(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
@@ -1336,7 +1318,7 @@ impl NzbgetRsPrePostProcessor {
         }
     }
 
-    fn edit_list(
+    pub(crate) fn edit_list(
         &self,
         host: &crate::queuesubsys_host::QueueSubsysHost,
         dq_ptr: usize,
@@ -1545,11 +1527,7 @@ impl NzbgetRsPrePostProcessor {
         }
     }
 
-    fn check_request_par(
-        &self,
-        host: &crate::queuesubsys_host::QueueSubsysHost,
-        dq_ptr: usize,
-    ) {
+    fn check_request_par(&self, host: &crate::queuesubsys_host::QueueSubsysHost, dq_ptr: usize) {
         use crate::queuesubsys_host::{
             EA_GROUP_RESUME, MK_INFO, NZB_ACT_CLEAR_SCRIPT_STATUSES, NZB_INT_PAR_STATUS,
             PAR_STATUS_MANUAL, PAR_STATUS_NONE, PAR_STATUS_SKIPPED, PC_MANUAL,
@@ -1581,11 +1559,7 @@ impl NzbgetRsPrePostProcessor {
                 nzb.file_count == 0,
             );
             if act == 1 {
-                host.post_set_int(
-                    ps.ptr,
-                    POST_INT_FORCE_PAR_FULL,
-                    i32::from(new_force_full),
-                );
+                host.post_set_int(ps.ptr, POST_INT_FORCE_PAR_FULL, i32::from(new_force_full));
                 host.nzb_set_int(nzb.ptr, NZB_INT_PAR_STATUS, PAR_STATUS_NONE);
                 host.post_set_int(ps.ptr, POST_INT_REQUEST_PAR_CHECK, 0);
                 host.nzb_action(nzb.ptr, NZB_ACT_CLEAR_SCRIPT_STATUSES, 0);
@@ -1888,9 +1862,7 @@ impl NzbgetRsPrePostProcessor {
                 return;
             }
 
-            if stream_repair
-                && nzb.par_status == PAR_STATUS_SKIPPED
-                && has_main_pars(&nzb.dest_dir)
+            if stream_repair && nzb.par_status == PAR_STATUS_SKIPPED && has_main_pars(&nzb.dest_dir)
             {
                 host.post_set_int(post_ptr, POST_INT_REQUEST_PAR_CHECK, 1);
                 return;

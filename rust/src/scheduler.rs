@@ -1477,8 +1477,10 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
         4 => {
             #[cfg(unix)]
             {
+                crate::script::create_daemon_ext_mgr();
                 crate::twin::create_daemon_twincheck();
                 crate::dupesearch_coord::create_daemon_dupesearch();
+                crate::urlcoord::create_daemon_url_coord();
                 crate::feed::create_daemon_feed_coord();
                 crate::articledl::create_daemon_memory_monitor();
                 crate::statmeter::create_daemon_statmeter();

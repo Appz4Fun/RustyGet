@@ -1003,7 +1003,10 @@ unsafe fn hc_move_to_queue(
             0,
         );
         #[cfg(unix)]
-        crate::feed::notify_active_feed_queue_aspect(4, None);
+        {
+            crate::feed::notify_active_feed_queue_aspect(4, None);
+            crate::urlcoord::notify_active_urlcoord_queue_update(4);
+        }
     }
 }
 
@@ -1037,7 +1040,10 @@ unsafe fn hc_history_redownload(
             0,
         );
         #[cfg(unix)]
-        crate::feed::notify_active_feed_queue_aspect(12, None);
+        {
+            crate::feed::notify_active_feed_queue_aspect(12, None);
+            crate::urlcoord::notify_active_urlcoord_queue_update(12);
+        }
         return;
     }
     if kind != 1 {
@@ -1163,7 +1169,10 @@ unsafe fn hc_history_redownload(
         0,
     );
     #[cfg(unix)]
-    crate::feed::notify_active_feed_queue_aspect(4, None);
+    {
+        crate::feed::notify_active_feed_queue_aspect(4, None);
+        crate::urlcoord::notify_active_urlcoord_queue_update(4);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

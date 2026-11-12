@@ -75,7 +75,6 @@ Options* g_Options;
 WorkState* g_WorkState;
 ServerPool* g_ServerPool;
 QueueCoordinator* g_QueueCoordinator;
-UrlCoordinator* g_UrlCoordinator;
 PrePostProcessor* g_PrePostProcessor;
 HistoryCoordinator* g_HistoryCoordinator;
 DiskState* g_DiskState;
@@ -134,7 +133,7 @@ public:
 		if (rc < 0) throw std::runtime_error("Command line parsing failed");
 
 		m_options = std::make_unique<Options>();
-		FileSystem::uMask = static_cast<mode_t>(nzbget_rs_daemon_exec(14, &cenv));
+		(void)nzbget_rs_daemon_exec(14, &cenv);
 
 #ifndef DISABLE_TLS
 		TlsSocket::InitOptions(g_Options->GetCertCheck() ? g_Options->GetCertStore() : "");
@@ -204,7 +203,6 @@ private:
 	std::unique_ptr<WorkState> m_workState;
 	std::unique_ptr<ServerPool> m_serverPool;
 	std::unique_ptr<QueueCoordinator> m_queueCoordinator;
-	std::unique_ptr<UrlCoordinator> m_urlCoordinator;
 	std::unique_ptr<PrePostProcessor> m_prePostProcessor;
 	std::unique_ptr<HistoryCoordinator> m_historyCoordinator;
 	std::unique_ptr<DiskState> m_diskState;
@@ -212,7 +210,6 @@ private:
 	std::unique_ptr<ArticleCache> m_articleCache;
 	std::unique_ptr<QueueScriptCoordinator> m_queueScriptCoordinator;
 	std::unique_ptr<ServiceCoordinator> m_serviceCoordinator;
-	std::unique_ptr<ExtensionManager::Manager> m_extensionManager;
 
 	void CreateGlobals()
 	{
@@ -237,9 +234,6 @@ private:
 		m_historyCoordinator = std::make_unique<HistoryCoordinator>();
 		g_HistoryCoordinator = m_historyCoordinator.get();
 
-		m_urlCoordinator = std::make_unique<UrlCoordinator>();
-		g_UrlCoordinator = m_urlCoordinator.get();
-
 		m_articleCache = std::make_unique<ArticleCache>();
 		g_ArticleCache = m_articleCache.get();
 
@@ -248,8 +242,6 @@ private:
 
 		m_diskState = std::make_unique<DiskState>();
 		g_DiskState = m_diskState.get();
-
-		m_extensionManager = std::make_unique<ExtensionManager::Manager>();
 
 		nzbget_rs_service_coord_ctl(m_serviceCoordinator->RsHandle(), 4, nullptr, nullptr);
 	}
@@ -260,7 +252,6 @@ private:
 		env.a1 = m_options ? 1 : 0;
 		nzbget_rs_daemon_exec(12, &env);
 
-		g_UrlCoordinator = nullptr;
 		g_PrePostProcessor = nullptr;
 		g_Scanner = nullptr;
 		g_HistoryCoordinator = nullptr;
@@ -278,22 +269,19 @@ private:
 		{
 		case 4:
 			self->m_queueCoordinator->Start();
-			self->m_urlCoordinator->Start();
 			self->m_prePostProcessor->Start();
 			self->m_serviceCoordinator->Start();
 			if (self->m_options->GetArticleCache() > 0) self->m_articleCache->Start();
 			return 0;
 		case 5:
 			if (a2 == 0)
-				return (self->m_queueCoordinator->IsRunning() || self->m_urlCoordinator->IsRunning() ||
+				return (self->m_queueCoordinator->IsRunning() ||
 					self->m_prePostProcessor->IsRunning() || self->m_serviceCoordinator->IsRunning() ||
 					self->m_articleCache->IsRunning()) ? 1 : 0;
 			return (self->m_queueCoordinator->HasMoreJobs() ? 1 : 0) |
-				(self->m_urlCoordinator->HasMoreJobs() ? 2 : 0) |
 				(self->m_prePostProcessor->HasMoreJobs() ? 4 : 0);
 		case 6:
 			if (!self->m_queueCoordinator->IsStopped()) self->m_queueCoordinator->Stop();
-			if (!self->m_urlCoordinator->IsStopped()) self->m_urlCoordinator->Stop();
 			if (!self->m_prePostProcessor->IsStopped()) self->m_prePostProcessor->Stop();
 			if (!self->m_articleCache->IsStopped()) self->m_articleCache->Stop();
 			if (!self->m_serviceCoordinator->IsStopped()) self->m_serviceCoordinator->Stop();
@@ -306,7 +294,6 @@ private:
 				debug("Stopping QueueCoordinator");
 				self->m_serviceCoordinator->Stop();
 				self->m_queueCoordinator->Stop();
-				self->m_urlCoordinator->Stop();
 				self->m_prePostProcessor->Stop();
 				self->m_articleCache->Stop();
 				self->m_queueScriptCoordinator->Stop();

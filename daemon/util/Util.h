@@ -818,8 +818,6 @@ public:
 		}
 		return DirectoryExists(dirFilename);
 	}
-
-	static inline mode_t uMask;
 };
 
 #endif /* FILESYSTEM_H */
@@ -6335,688 +6333,60 @@ private:
 
 #endif
 
-class RepairController : public Thread
+class PostJobThread final : public Thread
 {
 public:
-	RepairController()
+	PostJobThread(int kind, PostInfo* postInfo, int nzbId) : m_kind(kind)
 	{
-		debug("Creating RepairController");
-	#ifndef DISABLE_PARCHECK
-		m_rs = nzbget_rs_repair_ctrl_new();
-	#endif
+		static_assert(sizeof(StreamRange) == sizeof(NzbgetRsByteRange), "StreamRange ABI match");
+		InitRsBuildEnv();
+		m_rs = nzbget_rs_post_job_new(kind, reinterpret_cast<uintptr_t>(static_cast<Thread*>(this)),
+			reinterpret_cast<uintptr_t>(postInfo), nzbId);
 	}
 
-	~RepairController() override
+	~PostJobThread() override
 	{
-	#ifndef DISABLE_PARCHECK
-		nzbget_rs_repair_ctrl_free(m_rs);
-	#endif
-	}
-
-	void Stop() override
-	{
-		debug("Stopping RepairController");
-		Thread::Stop();
-	#ifndef DISABLE_PARCHECK
-		nzbget_rs_repair_ctrl_exec(m_rs, 0, 0, 0, nullptr, nullptr);
-	#endif
-	}
-
-#ifndef DISABLE_PARCHECK
-	static void StartJob(PostInfo* postInfo)
-	{
-		RepairController* repairController = new RepairController();
-		repairController->m_postInfo = postInfo;
-		repairController->SetAutoDestroy(false);
-		postInfo->SetPostThread(repairController);
-		repairController->Start();
-	}
-
-	void Run() override { nzbget_rs_repair_ctrl_exec(m_rs, 1, 0, 0, &HostCb, this); }
-	bool AddPar(FileInfo* fileInfo, bool deleted) { return nzbget_rs_repair_ctrl_exec(m_rs, 2, deleted ? 1 : 0, reinterpret_cast<uintptr_t>(fileInfo), &HostCb, this) != 0; }
-
-private:
-	PostInfo* m_postInfo = nullptr;
-	NzbgetRsRepairController* m_rs = nullptr;
-
-	static uintptr_t HostCb(void* rawCtx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-		const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs)
-	{
-		auto* c = static_cast<RepairController*>(rawCtx);
-		switch (op)
-		{
-		case 0: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			reinterpret_cast<void(*)(uintptr_t, uintptr_t)>(p1)(p2, reinterpret_cast<uintptr_t>((DownloadQueue*)dq));
-			return 0;
-		}
-		case 1: {
-			PostInfo* pi = c->m_postInfo;
-			ints[0] = c->IsStopped() ? 1 : 0;
-			ints[1] = g_Options->GetParQuick() ? 1 : 0;
-			ints[2] = g_Options->GetParTimeLimit();
-			ints[3] = g_WorkState->GetPausePostProcess() ? 1 : 0;
-			ints[4] = pi->GetForceParFull() ? 1 : 0;
-			ints[5] = pi->GetForceRepair() ? 1 : 0;
-			ints[6] = (int)pi->GetStage();
-			ints[7] = g_Options->GetParBuffer();
-			ints[8] = 0;
-			ints[9] = g_Options->GetParThreads();
-			ints[10] = (int)g_Options->GetParScan();
-			ints[11] = g_Options->GetParRepair() ? 1 : 0;
-			i64s[0] = (int64_t)Util::CurrentTime();
-			i64s[1] = (int64_t)pi->GetStageTime();
-			i64s[2] = (int64_t)pi->GetStartTime();
-			strs[0] = g_Options->GetUnrarCmd();
-			strs[1] = g_Options->GetParIgnoreExt();
-			return reinterpret_cast<uintptr_t>(pi->GetNzbInfo());
-		}
-		case 2: {
-			auto* nzb = reinterpret_cast<NzbInfo*>(p1);
-			NzbParameter* tf = nzb->GetParameters()->Find("DupeFiles");
-			ints[0] = nzb->GetId();
-			ints[1] = (int)nzb->GetKind();
-			ints[2] = (int)NzbInfo::nkNzb;
-			ints[3] = nzb->GetDownloadSec();
-			ints[4] = nzb->GetParSec();
-			ints[5] = nzb->GetRepairSec();
-			ints[6] = (int)nzb->GetParStatus();
-			ints[7] = nzb->GetReprocess() ? 1 : 0;
-			ints[8] = nzb->GetForcePriority() ? 1 : 0;
-			ints[9] = nzb->GetExtraParBlocks();
-			ints[10] = (int)nzb->GetFileList()->size();
-			ints[11] = (int)nzb->GetCompletedFiles()->size();
-			ints[12] = (int)nzb->GetStreamRepairJobs()->size();
-			ints[13] = (int)nzb->GetDupeMode();
-			i64s[0] = nzb->GetDupeRecoveredBytes();
-			i64s[1] = nzb->GetSize() - nzb->GetParSize();
-			strs[0] = nzb->GetName();
-			strs[1] = nzb->GetDestDir();
-			strs[2] = nzb->GetDupeKey();
-			strs[3] = nzb->GetQueuedFilename();
-			strs[4] = tf ? tf->GetValue() : nullptr;
-			return 0;
-		}
-		case 4: {
-			auto* fi = reinterpret_cast<FileInfo*>(p1);
-			bool same = fi->GetNzbInfo() == c->m_postInfo->GetNzbInfo();
-			strs[0] = fi->GetNzbInfo()->GetDestDir();
-			strs[1] = fi->GetFilename();
-			return same ? 1 : 0;
-		}
-		case 5: {
-			auto* nzb = reinterpret_cast<NzbInfo*>(p1);
-			PostInfo* pi = c->m_postInfo;
-			nzb->SetParStatus((NzbInfo::EParStatus)ints[0]);
-			if (ints[1]) pi->SetParRepaired(ints[2] != 0);
-			pi->SetStartTime(pi->GetStartTime() + (time_t)ints[3]);
-			nzb->SetParSec(nzb->GetParSec() + ints[4]);
-			nzb->SetParFull(ints[5] != 0);
-			pi->SetWorking(false);
-			return 0;
-		}
-		case 6: {
-			FileInfo* fi = (*reinterpret_cast<NzbInfo*>(p1)->GetFileList())[(size_t)a1].get();
-			if (a2 == 0)
-			{
-				ints[0] = fi->GetFilenameConfirmed() ? 1 : 0;
-				ints[1] = fi->GetPaused() ? 1 : 0;
-				ints[2] = fi->GetParFile() ? 1 : 0;
-				i64s[0] = fi->GetSize();
-				strs[0] = fi->GetFilename();
-				return reinterpret_cast<uintptr_t>(fi);
-			}
-			fi->SetPaused(false);
-			fi->SetExtraPriority(true);
-			return 0;
-		}
-		case 7:
-			if (a1 <= 4) c->m_postInfo->GetNzbInfo()->AddMessage((Message::EKind)a1, s1 ? s1 : "");
-			else if (a1 == 5) debug("%s", s1 ? s1 : "");
-			else if (a1 == 6) c->Stop();
-			else if (a1 == 7) info("%s", s1 ? s1 : "");
-			else if (a1 == 8) detail("%s", s1 ? s1 : "");
-			return 0;
-		case 8: {
-			PostInfo* pi = c->m_postInfo;
-			if (a1 == 0)
-			{
-				if (s1) pi->SetProgressLabel(s1);
-				pi->SetFileProgress(ints[0]);
-				pi->SetStageProgress(ints[1]);
-				if (ints[2] & 1) { pi->SetStage((PostInfo::EStage)ints[3]); pi->SetStageTime((time_t)i64s[0]); }
-				if (ints[2] & 8) pi->GetNzbInfo()->SetRepairSec(ints[4]);
-			}
-			else
-			{
-				if (i64s[0] > 0) pi->SetStageTime((time_t)i64s[0]);
-				if (i64s[1] > 0) pi->SetStartTime((time_t)i64s[1]);
-			}
-			return 0;
-		}
-		case 9:
-			if (a1 == 0) { c->m_postInfo->GetParredFiles()->push_back(s1 ? s1 : ""); return 0; }
-			if (a1 == 1) return c->m_postInfo->GetParredFiles()->size();
-			if (a1 == 2) { strs[0] = (*c->m_postInfo->GetParredFiles())[(size_t)a2]; return 0; }
-			if (a1 == 3)
-			{
-				CompletedFile& cf = (*reinterpret_cast<NzbInfo*>(p1)->GetCompletedFiles())[(size_t)a2];
-				ints[0] = cf.GetId();
-				ints[1] = (int)cf.GetStatus();
-				ints[2] = (int)cf.GetCrc();
-				strs[0] = cf.GetFilename();
-				strs[1] = cf.GetOrigname();
-				return 0;
-			}
-			if (a1 == 4)
-			{
-				StreamRepairJob& j = (*reinterpret_cast<NzbInfo*>(p1)->GetStreamRepairJobs())[(size_t)a2];
-				ints[0] = j.GetFileId();
-				strs[0] = j.GetFilename();
-				return 0;
-			}
-			if (a1 == 5)
-			{
-				auto* nzb = reinterpret_cast<NzbInfo*>(p1);
-				nzb->GetStreamRepairJobs()->erase(nzb->GetStreamRepairJobs()->begin() + a2);
-				nzb->SetChanged(true);
-				return 0;
-			}
-			{
-				FileInfo tmpFileInfo(a2);
-				if (!g_DiskState->LoadFileState(&tmpFileInfo, true)) return 0;
-				auto pushFn = reinterpret_cast<void(*)(uintptr_t, int, int64_t, int, uint32_t)>(reinterpret_cast<uintptr_t>(s2));
-				bool any = false;
-				for (ArticleInfo* pa : tmpFileInfo.GetArticles())
-				{
-					pushFn(p1, pa->GetStatus() == ArticleInfo::aiFinished ? 1 : 0, pa->GetSegmentOffset(), pa->GetSegmentSize(), pa->GetCrc());
-					any = true;
-				}
-				return any ? 2 : 1;
-			}
-		case 10:
-			if (a1 == 0)
-			{
-				auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-				ints[0] = (int)dq->GetQueue()->size();
-				ints[1] = (int)dq->GetHistory()->size();
-				return 0;
-			}
-			if (a1 == 1) return reinterpret_cast<uintptr_t>((*reinterpret_cast<DownloadQueue*>(p1)->GetQueue())[(size_t)a2].get());
-			if (a1 == 2)
-			{
-				HistoryInfo* h = (*reinterpret_cast<DownloadQueue*>(p1)->GetHistory())[(size_t)a2].get();
-				return h->GetKind() == HistoryInfo::hkNzb ? reinterpret_cast<uintptr_t>(h->GetNzbInfo()) : 0;
-			}
-			if (a1 == 7) { reinterpret_cast<NzbInfo*>(p1)->SetExtraParBlocks(a2); return 0; }
-			return 0;
-		default:
-			return 0;
-		}
-	}
+		nzbget_rs_post_job_free(m_rs);
+#ifndef DISABLE_TLS
+		if (m_kind == 4) OpenSSL::StopSSLThread();
 #endif
-};
+	}
 
-class StreamRepairController : public Thread
-{
-public:
-	static void StartJob(PostInfo* postInfo)
+	static void StartPost(PostInfo* postInfo, int kind)
 	{
-		StreamRepairController* ctrl = new StreamRepairController(false, 0);
-		ctrl->m_postInfo = postInfo;
-		ctrl->SetAutoDestroy(false);
-		postInfo->SetPostThread(ctrl);
-		ctrl->Start();
+		if (!postInfo || (kind == 9 && postInfo->GetNzbInfo() && postInfo->GetNzbInfo()->GetSkipScriptProcessing()))
+			return;
+		PostJobThread* job = new PostJobThread(kind, postInfo, 0);
+		job->SetAutoDestroy(false);
+		postInfo->SetPostThread(job);
+		job->Start();
 	}
 
 	static void StartLive(NzbInfo* nzbInfo)
 	{
-		if (DupeArticleFallback::ShouldDeferToPar(nzbInfo))
-		{
-			return;
-		}
-		StreamRepairController* ctrl = new StreamRepairController(true, nzbInfo->GetId());
-		ctrl->SetAutoDestroy(true);
-		nzbInfo->SetLiveRepairThread(ctrl);
-		ctrl->Start();
+		if (!nzbInfo || DupeArticleFallback::ShouldDeferToPar(nzbInfo)) return;
+		PostJobThread* job = new PostJobThread(10, nullptr, nzbInfo->GetId());
+		job->SetAutoDestroy(true);
+		nzbInfo->SetLiveRepairThread(job);
+		job->Start();
 	}
 
-	~StreamRepairController() override
-	{
-		nzbget_rs_stream_repair_ctrl_free(m_rs);
-	}
-
-	void Run() override
-	{
-		nzbget_rs_stream_repair_ctrl_exec(m_rs, 1, &HostCb, this);
-	}
+	void Run() override { nzbget_rs_post_job_op(m_rs, 1, 0, 0); }
 
 	void Stop() override
 	{
-		nzbget_rs_stream_repair_ctrl_exec(m_rs, 0, nullptr, nullptr);
 		Thread::Stop();
+		nzbget_rs_post_job_op(m_rs, 0, 0, 0);
+	}
+
+	bool AddPar(FileInfo* fileInfo, bool deleted)
+	{
+		return nzbget_rs_post_job_op(m_rs, 2, deleted ? 1 : 0, reinterpret_cast<uintptr_t>(fileInfo)) != 0;
 	}
 
 private:
-	StreamRepairController(bool liveMode, int nzbId) : m_liveMode(liveMode), m_nzbId(nzbId)
-	{
-		static_assert(sizeof(StreamRange) == sizeof(NzbgetRsByteRange), "StreamRange ABI match");
-	#ifndef DISABLE_TLS
-		constexpr int tlsEnabled = 1;
-	#else
-		constexpr int tlsEnabled = 0;
-	#endif
-	#ifdef DEBUG
-		constexpr int debugEnabled = 1;
-	#else
-		constexpr int debugEnabled = 0;
-	#endif
-		m_rs = nzbget_rs_stream_repair_ctrl_new(liveMode ? 1 : 0, nzbId, tlsEnabled, debugEnabled);
-	}
-
-	PostInfo* m_postInfo = nullptr;
-	bool m_liveMode = false;
-	int m_nzbId = 0;
-	NzbgetRsStreamRepairCtrl* m_rs = nullptr;
-
-	static uintptr_t HostCb(void* rawCtx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-		const char* s1, int* ints, int64_t* i64s, const char** strs)
-	{
-		auto* self = static_cast<StreamRepairController*>(rawCtx);
-		switch (op)
-		{
-		case 0: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			reinterpret_cast<void(*)(uintptr_t, uintptr_t)>(p1)(p2, reinterpret_cast<uintptr_t>((DownloadQueue*)dq));
-			return 0;
-		}
-		case 1: return self->IsStopped() ? 1 : 0;
-		case 2: self->Stop(); return 0;
-		case 3: return 0;
-		case 4: {
-			const char* msg = s1 ? s1 : "";
-			if (self->m_liveMode)
-			{
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				if (NzbInfo* nzb = dq->GetQueue()->Find(self->m_nzbId))
-					nzb->AddMessage((Message::EKind)a1, msg);
-			}
-			else if (self->m_postInfo && self->m_postInfo->GetNzbInfo())
-			{
-				self->m_postInfo->GetNzbInfo()->AddMessage((Message::EKind)a1, msg);
-			}
-			return 0;
-		}
-		case 5:
-			if (!s1) return 0;
-			if (a1 == 0) info("%s", s1);
-			else if (a1 == 1) error("%s", s1);
-			else if (a1 == 2) warn("%s", s1);
-			else if (a1 == 3) detail("%s", s1);
-			else if (a1 == 4) debug("%s", s1);
-			return 0;
-		case 7: {
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			NzbInfo* nzb = nullptr;
-			if (self->m_liveMode)
-			{
-				nzb = dq->GetQueue()->Find(self->m_nzbId);
-				if (!nzb || nzb->GetLiveRepairThread() != self) return 0;
-			}
-			else
-			{
-				nzb = self->m_postInfo ? self->m_postInfo->GetNzbInfo() : nullptr;
-				if (!nzb) return 0;
-				if (a1) self->m_postInfo->SetProgressLabel("Repairing files from duplicates");
-			}
-			ints[0] = nzb->GetId();
-			ints[1] = nzb->GetParSize() > 0 ? 1 : 0;
-			ints[2] = (int)nzb->GetCompletedFiles()->size();
-			ints[3] = (int)nzb->GetStreamRepairJobs()->size();
-			ints[4] = (int)dq->GetQueue()->size();
-			ints[5] = (int)dq->GetHistory()->size();
-			i64s[0] = nzb->GetFullContentHash();
-			strs[0] = nzb->GetName();
-			strs[1] = nzb->GetDestDir();
-			strs[2] = nzb->GetDupeKey();
-			NzbParameter* pw = nzb->GetParameters()->Find("*Unpack:Password");
-			strs[3] = pw ? pw->GetValue() : nullptr;
-			return reinterpret_cast<uintptr_t>(nzb);
-		}
-		case 8: {
-			CompletedFile& cf = (*reinterpret_cast<NzbInfo*>(p1)->GetCompletedFiles())[(size_t)a1];
-			ints[0] = cf.GetId();
-			ints[1] = cf.GetParFile() ? 1 : 0;
-			ints[2] = (int)cf.GetStatus();
-			strs[0] = cf.GetFilename();
-			return 0;
-		}
-		case 9: {
-			StreamRepairJob& job = (*reinterpret_cast<NzbInfo*>(p1)->GetStreamRepairJobs())[(size_t)a1];
-			if (a2 == 1) { bool prev = job.GetLiveAttempted(); job.SetLiveAttempted(true); return prev ? 1 : 0; }
-			ints[0] = job.GetFileId();
-			ints[1] = job.GetFailedArticles();
-			ints[2] = job.GetParFile() ? 1 : 0;
-			ints[3] = job.GetLiveAttempted() ? 1 : 0;
-			ints[4] = (int)job.GetHoles()->size();
-			i64s[0] = job.GetDecodedFileSize();
-			i64s[1] = job.GetFailedSize();
-			i64s[2] = job.GetMissedSize();
-			i64s[3] = (int64_t)job.GetStepsHash();
-			strs[0] = job.GetFilename();
-			strs[1] = job.GetHoles()->empty() ? nullptr : reinterpret_cast<const char*>(job.GetHoles()->data());
-			return 0;
-		}
-		case 10: {
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			NzbInfo* cand = nullptr;
-			if (a1 == 0)
-			{
-				cand = (*dq->GetQueue())[(size_t)a2].get();
-				if (!cand || cand->GetKind() != NzbInfo::nkNzb) return 0;
-			}
-			else
-			{
-				HistoryInfo* h = (*dq->GetHistory())[(size_t)a2].get();
-				if (!h || h->GetKind() != HistoryInfo::hkNzb) return 0;
-				cand = h->GetNzbInfo();
-			}
-			ints[0] = cand->GetId();
-			ints[1] = cand->GetDupeScore();
-			ints[2] = (int)cand->GetDupeMode();
-			i64s[0] = cand->GetFullContentHash();
-			strs[0] = cand->GetName();
-			strs[1] = cand->GetDupeKey();
-			strs[2] = cand->GetQueuedFilename();
-			NzbParameter* pw = cand->GetParameters()->Find("*Unpack:Password");
-			strs[3] = pw ? pw->GetValue() : nullptr;
-			return reinterpret_cast<uintptr_t>(cand);
-		}
-		case 11:
-			if (self->m_postInfo)
-			{
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				self->m_postInfo->SetProgressLabel(s1 ? s1 : "");
-				self->m_postInfo->SetStageProgress(a1);
-			}
-			return 0;
-		case 12: {
-			auto* nzb = reinterpret_cast<NzbInfo*>(p1);
-			for (CompletedFile& cf : nzb->GetCompletedFiles())
-			{
-				if (cf.GetId() == a1)
-				{
-					if (a2 == 1 && cf.GetStatus() != CompletedFile::cfSuccess)
-					{
-						cf.SetStatus(CompletedFile::cfSuccess);
-						g_DiskState->DiscardFile(a1, true, true, true);
-					}
-					else if (a2 == 2 && cf.GetStatus() == CompletedFile::cfFailure)
-					{
-						cf.SetStatus(CompletedFile::cfPartial);
-					}
-					break;
-				}
-			}
-			return 0;
-		}
-		case 13: {
-			auto* jobs = reinterpret_cast<NzbInfo*>(p1)->GetStreamRepairJobs();
-			if (a2 == 0) { jobs->erase(jobs->begin() + a1); return 0; }
-			StreamRepairJob& job = (*jobs)[(size_t)a1];
-			if (i64s[0] >= 0) job.SetDecodedFileSize(i64s[0]);
-			const auto* ranges = reinterpret_cast<const StreamRange*>(p2);
-			job.SetHoles(ranges && ints[0] > 0 ? StreamRangeList(ranges, ranges + ints[0]) : StreamRangeList());
-			return 0;
-		}
-		case 14: {
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
-			if (a2 == 0)
-			{
-				ints[0] = (int)nzb->GetParRenameStatus();
-				ints[1] = (int)nzb->GetParStatus();
-				i64s[0] = nzb->GetFailedSize();
-				i64s[1] = nzb->GetSuccessSize();
-				i64s[2] = nzb->GetCurrentFailedSize();
-				i64s[3] = nzb->GetCurrentSuccessSize();
-				i64s[4] = nzb->GetParFailedSize();
-				i64s[5] = nzb->GetParSuccessSize();
-				i64s[6] = nzb->GetParCurrentFailedSize();
-				i64s[7] = nzb->GetParCurrentSuccessSize();
-				return 0;
-			}
-			if (ints[0] > 0 || i64s[8] > 0 || ints[1] > 0)
-			{
-				nzb->SetDupeRecoveredArticles(nzb->GetDupeRecoveredArticles() + ints[0]);
-				nzb->SetDupeRecoveredBytes(nzb->GetDupeRecoveredBytes() + i64s[8]);
-				nzb->SetDupeRecoveredHoles(nzb->GetDupeRecoveredHoles() + ints[1]);
-			}
-			if (a1 != 0)
-			{
-				nzb->SetFailedSize(i64s[0]);
-				nzb->SetSuccessSize(i64s[1]);
-				nzb->SetCurrentFailedSize(i64s[2]);
-				nzb->SetCurrentSuccessSize(i64s[3]);
-				nzb->SetParFailedSize(i64s[4]);
-				nzb->SetParSuccessSize(i64s[5]);
-				nzb->SetParCurrentFailedSize(i64s[6]);
-				nzb->SetParCurrentSuccessSize(i64s[7]);
-			}
-			PostInfo* pi = self->m_postInfo;
-			pi->SetStreamRepairDone(true);
-			pi->SetStreamRepairRecovered(i64s[8] > 0);
-			int parFlags = ints[2];
-			if (parFlags & 1) nzb->SetParRenameStatus(NzbInfo::rsNone);
-			if (parFlags & 2) nzb->SetParStatus((NzbInfo::EParStatus)ints[3]);
-			if (parFlags & 4) pi->SetForceParFull(true);
-			if (parFlags & 8) pi->SetRequestParCheck(false);
-			if (parFlags & 16) pi->SetRequestParCheck(true);
-			dq->Save();
-			pi->SetWorking(false);
-			return 0;
-		}
-		case 15: {
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			if (a2 == 0)
-			{
-				NzbInfo* nzb = dq->GetQueue()->Find(self->m_nzbId);
-				if (!nzb) return 0;
-				if (nzb->GetLiveRepairThread() != self)
-				{
-					nzb->SetDupeRecoveredBytes(nzb->GetDupeRecoveredBytes() + i64s[0]);
-					return 0;
-				}
-				if (i64s[0] > 0 || ints[1] > 0)
-				{
-					nzb->SetDupeRecoveredBytes(nzb->GetDupeRecoveredBytes() + i64s[0]);
-					nzb->SetDupeRecoveredHoles(nzb->GetDupeRecoveredHoles() + ints[1]);
-				}
-				ints[0] = (int)nzb->GetStreamRepairJobs()->size();
-				return reinterpret_cast<uintptr_t>(nzb);
-			}
-			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
-			nzb->SetLiveRepairThread(nullptr);
-			if (nzb->GetPostInfo() && !nzb->GetUnpackThread()) nzb->GetPostInfo()->SetWorking(false);
-			dq->Save();
-			return 0;
-		}
-		default:
-			return 0;
-		}
-	}
-};
-
-#include <new>
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2013-2018 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *  Copyright (C) 2025-2026 Denis <denis@nzbget.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-
-#ifndef UNPACK_CONTROLLER_H
-#define UNPACK_CONTROLLER_H
-
-class UnpackController final : public Thread
-{
-public:
-	UnpackController() : m_rs(nzbget_rs_unpack_ctrl_new()) {}
-
-	~UnpackController() override
-	{
-		nzbget_rs_unpack_ctrl_free(m_rs);
-#ifndef DISABLE_TLS
-		OpenSSL::StopSSLThread();
-#endif
-	}
-
-	static void StartJob(PostInfo* postInfo)
-	{
-		UnpackController* unpackController = new UnpackController();
-		unpackController->m_postInfo = postInfo;
-		unpackController->SetAutoDestroy(false);
-		postInfo->SetPostThread(unpackController);
-		unpackController->Start();
-	}
-
-	void Run() override { nzbget_rs_unpack_ctrl_exec(m_rs, 0, &HostCb, this); }
-
-	void Stop() override
-	{
-		debug("Stopping unpack");
-		Thread::Stop();
-		nzbget_rs_unpack_ctrl_exec(m_rs, 1, nullptr, nullptr);
-	}
-
-private:
-	PostInfo* m_postInfo = nullptr;
-	NzbgetRsUnpackController* m_rs = nullptr;
-
-	static uintptr_t HostCb(void* rawCtx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-		const char* s1, const char* /*s2*/, int* ints, int64_t* i64s, const char** strs)
-	{
-		auto* c = static_cast<UnpackController*>(rawCtx);
-		switch (op)
-		{
-		case 0: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			reinterpret_cast<void(*)(uintptr_t, uintptr_t)>(p1)(p2, reinterpret_cast<uintptr_t>((DownloadQueue*)dq));
-			return 0;
-		}
-		case 1: {
-			PostInfo* pi = c->m_postInfo;
-			NzbInfo* n = pi->GetNzbInfo();
-			if (a1 == 0)
-			{
-				NzbParameter* up = n->GetParameters()->Find("*Unpack:");
-				NzbParameter* pw = n->GetParameters()->Find("*Unpack:Password");
-				ints[0] = !(up && !strcasecmp(up->GetValue(), "no")) ? 1 : 0;
-				ints[1] = pw ? 1 : 0;
-				ints[2] = (int)n->GetCompletedFiles()->size();
-				ints[3] = pi->GetExtractedArchives() ? (int)pi->GetExtractedArchives()->size() : 0;
-				ints[4] = pi->GetUnpackTried() ? 1 : 0;
-				ints[5] = pi->GetParRepaired() ? 1 : 0;
-				ints[6] = pi->GetPassListTried() ? 1 : 0;
-				ints[7] = pi->GetLastUnpackStatus();
-				ints[8] = (int)n->GetDirectUnpackStatus();
-				ints[9] = (int)n->GetParStatus();
-				ints[10] = (int)n->GetParRenameStatus();
-				ints[11] = 0;
-				ints[12] = (g_Options && g_Options->GetUseTempUnpackDir()) ? 1 : 0;
-				ints[13] = (g_Options && g_Options->GetUnpackCleanupDisk()) ? 1 : 0;
-				ints[14] = g_Options ? g_Options->GetWriteBuffer() : 0;
-				ints[15] = (g_Options && g_Options->GetParRename()) ? 1 : 0;
-				ints[16] = static_cast<int>(static_cast<uint32_t>(FileSystem::uMask));
-			#ifndef DISABLE_PARCHECK
-				ints[17] = 1;
-			#else
-				ints[17] = 0;
-			#endif
-				strs[0] = n->GetDestDir();
-				strs[1] = n->GetFinalDir();
-				strs[2] = n->GetName();
-				strs[3] = pw ? pw->GetValue() : nullptr;
-				strs[4] = g_Options ? g_Options->GetUnpackPassFile() : "";
-				strs[5] = g_Options ? g_Options->GetUnpackIgnoreExt() : "";
-				strs[6] = g_Options ? g_Options->GetInterDir() : "";
-				return 0;
-			}
-			if (a1 == 1) { strs[0] = (*n->GetCompletedFiles())[(size_t)a2].GetFilename(); return 0; }
-			if (a1 == 2) { strs[0] = *(*pi->GetExtractedArchives())[(size_t)a2]; return 0; }
-			if (a1 == 3 && pi->GetExtractedArchives()) pi->GetExtractedArchives()->clear();
-			return 0;
-		}
-		case 2:
-			if (a1 == 0) return c->IsStopped() ? 1 : 0;
-			if (a1 == 1) { c->Stop(); return 0; }
-			if (a1 == 2) { c->Thread::Resume(); return 0; }
-			if (a1 == 3) { if (c->m_postInfo) c->m_postInfo->GetNzbInfo()->AddMessage((Message::EKind)a2, s1 ? s1 : ""); return 0; }
-			if (a1 == 4) { GuardedDownloadQueue dq = DownloadQueue::Guard(); c->m_postInfo->SetProgressLabel(s1 ? s1 : ""); return 0; }
-			if (a1 == 5) { if (c->m_postInfo) c->m_postInfo->SetStageProgress(a2); return 0; }
-			if (a1 == 6) { if (c->m_postInfo) c->m_postInfo->SetStageTime((time_t)i64s[0]); return 0; }
-			if (a1 == 7) { if (a2 == 3) debug("%s", s1 ? s1 : ""); else if (a2 == 4) detail("%s", s1 ? s1 : ""); return 0; }
-			if (a1 == 8) return (c->m_postInfo && c->m_postInfo->GetDeleted()) ? 1 : 0;
-			return 0;
-		case 3: {
-			PostInfo* pi = c->m_postInfo;
-			NzbInfo* n = pi->GetNzbInfo();
-			if (a1 == 0) { n->SetUnpackStatus((NzbInfo::EPostUnpackStatus)a2); return 0; }
-			if (a1 == 1)
-			{
-				n->SetUnpackStatus(NzbInfo::usSuccess);
-				n->SetUnpackCleanedUpDisk(a2 != 0);
-				if (p1) n->SetParRenameStatus(NzbInfo::rsNone);
-				return 0;
-			}
-			if (a1 == 2)
-			{
-				pi->SetRequestParCheck(true);
-				pi->SetForceRepair(ints[0] != 0);
-				pi->SetUnpackTried(true);
-				pi->SetPassListTried(ints[1] != 0);
-				pi->SetLastUnpackStatus(ints[2]);
-				return 0;
-			}
-			if (a1 == 3)
-			{
-				n->SetUnpackSec(n->GetUnpackSec() + a2);
-				pi->SetWorking(false);
-				return 0;
-			}
-			if (a1 == 4)
-			{
-				ints[0] = (int)n->GetParStatus();
-				ints[1] = n->GetParFull() ? 1 : 0;
-				return 0;
-			}
-			if (a1 == 5)
-			{
-				CString fin = n->BuildFinalDirName();
-				reinterpret_cast<void(*)(uintptr_t, const char*)>(p2)(p1, fin ? *fin : "");
-				return 0;
-			}
-			if (a1 == 6) n->SetFinalDir(s1 ? s1 : "");
-			return 0;
-		}
-		default:
-			return 0;
-		}
-	}
+	int m_kind = 0;
+	NzbgetRsPostJob* m_rs = nullptr;
 };
 
 #ifndef DIRECTUNPACK_H
@@ -7163,439 +6533,6 @@ private:
 };
 
 #endif
-
-#endif
-
-class MoveController : public Thread
-{
-public:
-	static void StartJob(PostInfo* postInfo)
-	{
-		MoveController* moveController = new MoveController();
-		moveController->m_postInfo = postInfo;
-		moveController->SetAutoDestroy(false);
-		postInfo->SetPostThread(moveController);
-		moveController->Start();
-	}
-
-	void Run() override { nzbget_rs_post_job_exec(0, 0, 0, &HostCb, this); }
-
-private:
-	PostInfo* m_postInfo = nullptr;
-
-	static uintptr_t HostCb(void* rawCtx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-		const char* s1, const char* s2, int* /*ints*/, int64_t* /*i64s*/, const char** strs)
-	{
-		auto* c = static_cast<MoveController*>(rawCtx);
-		switch (op)
-		{
-		case 0: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			reinterpret_cast<void(*)(uintptr_t, uintptr_t)>(p1)(p2, reinterpret_cast<uintptr_t>((DownloadQueue*)dq));
-			return 0;
-		}
-		case 1: {
-			if (a1 == 2) return (c->m_postInfo && c->m_postInfo->GetNzbInfo()) ? 1 : 0;
-			NzbInfo* n = c->m_postInfo->GetNzbInfo();
-			if (a1 == 1) { strs[0] = n->GetHardLinkPath().c_str(); return 0; }
-			strs[0] = n->GetName();
-			strs[1] = n->GetDestDir();
-			strs[2] = n->GetFinalDir();
-			if (Util::EmptyStr(strs[2]))
-			{
-				CString fin = n->BuildFinalDirName();
-				reinterpret_cast<void(*)(uintptr_t, const char*)>(p2)(p1, fin ? *fin : "");
-			}
-			return 0;
-		}
-		case 2:
-			if (a1 == 0) return c->IsStopped() ? 1 : 0;
-			if (a1 == 1) { c->m_postInfo->GetNzbInfo()->AddMessage((Message::EKind)a2, s1 ? s1 : ""); return 0; }
-			if (a1 == 2 && c->m_postInfo && c->m_postInfo->GetNzbInfo())
-				c->m_postInfo->GetNzbInfo()->RenameCompletedFile(s1 ? s1 : "", s2 ? s2 : "");
-			return 0;
-		case 3:
-			if (a1 == 0) c->m_postInfo->GetNzbInfo()->SetMoveStatus((NzbInfo::EMoveStatus)a2);
-			else if (a1 == 1)
-			{
-				NzbInfo* n = c->m_postInfo->GetNzbInfo();
-				n->SetDestDir(s1 ? s1 : "");
-				n->SetFinalDir("");
-				n->SetMoveStatus((NzbInfo::EMoveStatus)a2);
-			}
-			else if (a1 == 2) c->m_postInfo->SetWorking(false);
-			return 0;
-		default:
-			return 0;
-		}
-	}
-};
-
-class CleanupController : public Thread
-{
-public:
-	static void StartJob(PostInfo* postInfo)
-	{
-		CleanupController* cleanupController = new CleanupController();
-		cleanupController->m_postInfo = postInfo;
-		cleanupController->SetAutoDestroy(false);
-		postInfo->SetPostThread(cleanupController);
-		cleanupController->Start();
-	}
-
-	void Run() override { nzbget_rs_post_job_exec(1, 0, 0, &HostCb, this); }
-
-private:
-	PostInfo* m_postInfo = nullptr;
-
-	static uintptr_t HostCb(void* rawCtx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-		const char* s1, const char* /*s2*/, int* /*ints*/, int64_t* /*i64s*/, const char** strs)
-	{
-		auto* c = static_cast<CleanupController*>(rawCtx);
-		switch (op)
-		{
-		case 0: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			reinterpret_cast<void(*)(uintptr_t, uintptr_t)>(p1)(p2, reinterpret_cast<uintptr_t>((DownloadQueue*)dq));
-			return 0;
-		}
-		case 1: {
-			NzbInfo* n = c->m_postInfo->GetNzbInfo();
-			strs[0] = n->GetName();
-			strs[1] = n->GetDestDir();
-			strs[2] = n->GetFinalDir();
-			strs[3] = g_Options ? g_Options->GetExtCleanupDisk() : "";
-			return 0;
-		}
-		case 2:
-			if (a1 == 1) c->m_postInfo->GetNzbInfo()->AddMessage((Message::EKind)a2, s1 ? s1 : "");
-			return 0;
-		case 3:
-			c->m_postInfo->GetNzbInfo()->SetCleanupStatus((NzbInfo::ECleanupStatus)a2);
-			c->m_postInfo->SetWorking(false);
-			return 0;
-		default:
-			return 0;
-		}
-	}
-};
-
-class RenameController : public Thread
-{
-public:
-	enum EJobKind
-	{
-		jkPar,
-		jkRar
-	};
-
-	RenameController() { debug("Creating RenameController"); }
-
-	static void StartJob(PostInfo* postInfo, EJobKind kind)
-	{
-		RenameController* renameController = new RenameController();
-		renameController->m_postInfo = postInfo;
-		renameController->m_kind = kind;
-		renameController->SetAutoDestroy(false);
-		postInfo->SetPostThread(renameController);
-		renameController->Start();
-	}
-
-	void Run() override
-	{
-		int flags = 0;
-	#ifndef DISABLE_PARCHECK
-		flags |= 1;
-	#endif
-	#ifndef DISABLE_TLS
-		flags |= 2;
-	#endif
-		nzbget_rs_post_job_exec(2, (int)m_kind, flags, &HostCb, this);
-	}
-
-private:
-	PostInfo* m_postInfo = nullptr;
-	EJobKind m_kind = jkPar;
-
-	static uintptr_t HostCb(void* rawCtx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-		const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs)
-	{
-		auto* c = static_cast<RenameController*>(rawCtx);
-		switch (op)
-		{
-		case 0: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			reinterpret_cast<void(*)(uintptr_t, uintptr_t)>(p1)(p2, reinterpret_cast<uintptr_t>((DownloadQueue*)dq));
-			return 0;
-		}
-		case 1: {
-			NzbInfo* n = c->m_postInfo->GetNzbInfo();
-			if (a1 == 1)
-			{
-				ints[0] = n->GetRemainingParCount();
-				ints[1] = (int)n->GetParStatus();
-				return 0;
-			}
-			NzbParameter* pw = n->GetParameters()->Find("*Unpack:Password");
-			ints[0] = pw ? 1 : 0;
-			ints[1] = (int)n->GetUnpackStatus();
-			strs[0] = n->GetName();
-			strs[1] = n->GetDestDir();
-			strs[2] = n->GetFinalDir();
-			strs[3] = pw ? pw->GetValue() : nullptr;
-			strs[4] = g_Options ? g_Options->GetParIgnoreExt() : "";
-			strs[5] = g_Options ? g_Options->GetUnpackIgnoreExt() : "";
-			return 0;
-		}
-		case 2:
-			if (a1 == 0) return c->IsStopped() ? 1 : 0;
-			if (a1 == 1) { c->m_postInfo->GetNzbInfo()->AddMessage((Message::EKind)a2, s1 ? s1 : ""); return 0; }
-			if (a1 == 2) return c->m_postInfo->GetNzbInfo()->RenameCompletedFile(s1 ? s1 : "", s2 ? s2 : "") ? 1 : 0;
-			if (a1 == 3) { c->m_postInfo->SetProgressLabel(s1 ? s1 : ""); c->m_postInfo->SetStageProgress(a2); return 0; }
-			if (a1 == 4) c->m_postInfo->GetParredFiles()->push_back(s1 ? s1 : "");
-			return 0;
-		case 3: {
-			NzbInfo* n = c->m_postInfo->GetNzbInfo();
-			if (a1 == 1)
-			{
-				auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-				n->SetParRenameStatus((NzbInfo::EPostRenameStatus)a2);
-				dq->EditEntry(n->GetId(), DownloadQueue::eaGroupResume, nullptr);
-				dq->EditEntry(n->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
-				i64s[0] = n->GetRemainingSize();
-				return 0;
-			}
-			if (a2 == (int)jkPar) n->SetParRenameStatus((NzbInfo::EPostRenameStatus)p1);
-			else if (a2 == (int)jkRar) n->SetRarRenameStatus((NzbInfo::EPostRenameStatus)p1);
-		#ifndef DISABLE_PARCHECK
-			if (p2) c->m_postInfo->SetRequestParCheck(true);
-		#endif
-			c->m_postInfo->SetWorking(false);
-			return 0;
-		}
-		default:
-			return 0;
-		}
-	}
-};
-
-class PostRenamerController final : public Thread
-{
-public:
-	static void StartJob(PostInfo* postInfo, bool postUnpack)
-	{
-		PostRenamerController* controller = new (std::nothrow) PostRenamerController();
-		if (!controller)
-		{
-			error("Failed to allocate memory for PostRenamerController");
-			return;
-		}
-		controller->m_postInfo = postInfo;
-		controller->m_postUnpack = postUnpack;
-		controller->SetAutoDestroy(false);
-		postInfo->SetPostThread(controller);
-		controller->Start();
-	}
-
-	void Run() override { nzbget_rs_post_job_exec(3, m_postUnpack ? 1 : 0, 0, &HostCb, this); }
-
-private:
-	PostInfo* m_postInfo = nullptr;
-	bool m_postUnpack = false;
-
-	static uintptr_t HostCb(void* rawCtx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-		const char* s1, const char* s2, int* /*ints*/, int64_t* /*i64s*/, const char** strs)
-	{
-		auto* c = static_cast<PostRenamerController*>(rawCtx);
-		switch (op)
-		{
-		case 0: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			reinterpret_cast<void(*)(uintptr_t, uintptr_t)>(p1)(p2, reinterpret_cast<uintptr_t>((DownloadQueue*)dq));
-			return 0;
-		}
-		case 1: {
-			NzbInfo* n = c->m_postInfo->GetNzbInfo();
-			strs[0] = n->GetMetaName().c_str();
-			strs[1] = n->GetName();
-			strs[2] = n->GetDestDir();
-			strs[3] = g_Options ? g_Options->GetRenameIgnoreExt() : "";
-			return 0;
-		}
-		case 2:
-			if (a1 == 0) return c->IsStopped() ? 1 : 0;
-			if (a1 == 1) { c->m_postInfo->GetNzbInfo()->AddMessage((Message::EKind)a2, s1 ? s1 : ""); return 0; }
-			if (a1 == 2 && c->m_postInfo && c->m_postInfo->GetNzbInfo())
-				c->m_postInfo->GetNzbInfo()->RenameCompletedFile(s1 ? s1 : "", s2 ? s2 : "");
-			return 0;
-		case 3:
-			if (a1) c->m_postInfo->GetNzbInfo()->SetPostUnpackRenamingStatus((NzbInfo::PostUnpackRenamingStatus)a2);
-			else c->m_postInfo->GetNzbInfo()->SetPostDownloadRenamingStatus((NzbInfo::PostDownloadRenamingStatus)a2);
-			c->m_postInfo->SetWorking(false);
-			return 0;
-		default:
-			return 0;
-		}
-	}
-};
-
-class PostScriptController : public Thread
-{
-public:
-	PostScriptController() : m_runner(nzbget_rs_script_runner_new()) {}
-	~PostScriptController() override { nzbget_rs_script_runner_free(m_runner); }
-
-	static void StartJob(PostInfo* postInfo)
-	{
-		if (!postInfo || (postInfo->GetNzbInfo() && postInfo->GetNzbInfo()->GetSkipScriptProcessing()))
-			return;
-		PostScriptController* scriptController = new PostScriptController();
-		scriptController->m_postInfo = postInfo;
-		scriptController->SetAutoDestroy(false);
-		postInfo->SetPostThread(scriptController);
-		scriptController->Start();
-	}
-
-	void Run() override
-	{
-		InitRsBuildEnv();
-		nzbget_rs_post_script_run(m_runner, this, &HostCb);
-	}
-
-	void Stop() override
-	{
-		debug("Stopping post-process-script");
-		Thread::Stop();
-		nzbget_rs_script_runner_terminate(m_runner);
-	}
-
-private:
-	PostInfo* m_postInfo = nullptr;
-	NzbgetRsScriptRunner* m_runner = nullptr;
-
-	static uintptr_t HostCb(void* rawCtx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-		const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs)
-	{
-		auto* c = static_cast<PostScriptController*>(rawCtx);
-		switch (op)
-		{
-		case 0: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			reinterpret_cast<void(*)(uintptr_t, uintptr_t)>(p1)(p2, reinterpret_cast<uintptr_t>((DownloadQueue*)dq));
-			return 0;
-		}
-		case 1: {
-			NzbInfo* n = c->m_postInfo->GetNzbInfo();
-			if (a1 == 0) { n->GetScriptStatuses()->clear(); return n->GetParameters()->size(); }
-			if (a1 == 1)
-			{
-				NzbParameter& p = (*n->GetParameters())[(size_t)a2];
-				strs[0] = p.GetName();
-				strs[1] = p.GetValue();
-				return 0;
-			}
-			c->m_postInfo->SetStage(PostInfo::ptFinished);
-			c->m_postInfo->SetWorking(false);
-			return 0;
-		}
-		case 2:
-			return (a1 == 0 && c->IsStopped()) ? 1 : 0;
-		case 4: {
-			NzbInfo* n = c->m_postInfo->GetNzbInfo();
-			if (a1 == 0)
-			{
-				ints[0] = c->m_postInfo->GetRequestParCheck() ? 1 : 0;
-				strs[0] = n->GetName();
-				return 0;
-			}
-			if (a1 == 1) { c->m_postInfo->SetProgressLabel(s1 ? s1 : ""); return 0; }
-			if (a1 == 3)
-			{
-				BString<1024> st = n->MakeTextStatus(true);
-				reinterpret_cast<void(*)(uintptr_t, const char*)>(p2)(p1, *st);
-				ints[0] = n->GetId();
-				ints[1] = n->CalcHealth();
-				ints[2] = n->CalcCriticalHealth(false);
-				ints[3] = n->GetDupeScore();
-				ints[4] = (int)n->GetDupeMode();
-				ints[5] = (int)n->GetScriptStatuses()->CalcTotalStatus();
-				ints[6] = (int)n->GetParStatus();
-				ints[7] = (int)n->GetUnpackStatus();
-				ints[8] = (int)n->GetDeleteStatus();
-				ints[9] = (int)n->GetMarkStatus();
-				ints[10] = n->GetTotalArticles();
-				ints[11] = n->GetSuccessArticles();
-				ints[12] = (int)n->GetServerStats()->size();
-				ints[13] = (int)n->GetParameters()->size();
-				strs[0] = n->GetName();
-				strs[1] = n->GetDestDir();
-				strs[2] = n->GetFilename();
-				strs[3] = n->GetQueuedFilename();
-				strs[4] = n->GetUrl();
-				strs[5] = n->GetFinalDir();
-				strs[6] = n->GetCategory();
-				strs[7] = n->GetDupeKey();
-				return 0;
-			}
-			if (a1 == 4)
-			{
-				ServerStat& ss = (*n->GetServerStats())[(size_t)a2];
-				ints[0] = ss.GetServerId();
-				ints[1] = ss.GetSuccessArticles();
-				ints[2] = ss.GetFailedArticles();
-				return 0;
-			}
-			if (a1 == 5) return (uintptr_t)n->GetFailedArticles();
-			if (a1 == 9) return (uintptr_t)n->GetParStatus();
-			if (a1 == 10)
-			{
-				if (p1) { c->m_postInfo->SetRequestParCheck(true); c->m_postInfo->SetForceRepair(true); }
-				n->GetScriptStatuses()->emplace_back(s1 ? s1 : "", (ScriptStatus::EStatus)a2);
-			}
-			return 0;
-		}
-		case 5: {
-			NzbInfo* n = c->m_postInfo->GetNzbInfo();
-			if (a1 == 2)
-			{
-				if (a2 == 1) n->SetFinalDir(s1 ? s1 : "");
-				else if (a2 == 2) n->SetDestDir(s1 ? s1 : "");
-				else if (a2 == 3) n->GetParameters()->SetParameter(s1 ? s1 : "", s2 ? s2 : "");
-				return 0;
-			}
-			if (a1 == 3)
-			{
-				n->AddMessage((Message::EKind)a2, s1 ? s1 : "");
-				return 0;
-			}
-			if (a1 == 4)
-			{
-				if (a2 == 1) n->SetMarkStatus(NzbInfo::ksBad);
-				else c->m_postInfo->SetProgressLabel(s1 ? s1 : "");
-				return 0;
-			}
-			if (a1 == 5)
-			{
-				if (!g_WorkState->GetPausePostProcess() || n->GetForcePriority()) return 0;
-				if (i64s)
-				{
-					i64s[0] = (int64_t)c->m_postInfo->GetStageTime();
-					i64s[1] = (int64_t)c->m_postInfo->GetStartTime();
-				}
-				return 1;
-			}
-			if (a1 == 6)
-			{
-				if (i64s[0] > 0) c->m_postInfo->SetStageTime((time_t)i64s[0]);
-				if (i64s[1] > 0) c->m_postInfo->SetStartTime((time_t)i64s[1]);
-			}
-			return 0;
-		}
-		default:
-			return 0;
-		}
-	}
-};
 
 class PrePostProcessor : public Thread, public Observer
 {
@@ -7943,144 +6880,7 @@ private:
 	}
 };
 
-class UrlCoordinator : public Thread, public Debuggable
-{
-public:
-	UrlCoordinator() : m_rs(nzbget_rs_url_coord_new())
-	{
-		InitRsBuildEnv();
-		NzbgetRsUrlCoordEnv env = MakeEnv();
-		nzbget_rs_url_coord_exec(m_rs, 10, &env);
-		m_downloadQueueObserver.m_owner = this;
-		DownloadQueue::Guard()->Attach(&m_downloadQueueObserver);
-	}
-
-	~UrlCoordinator() override
-	{
-		nzbget_rs_url_coord_exec(m_rs, 9, nullptr);
-		nzbget_rs_url_coord_free(m_rs);
-	}
-
-	void Run() override { nzbget_rs_url_coord_exec(m_rs, 0, nullptr); }
-
-	void Stop() override
-	{
-		Thread::Stop();
-		nzbget_rs_url_coord_exec(m_rs, 1, nullptr);
-	}
-
-	bool HasMoreJobs() const { return nzbget_rs_url_coord_exec(m_rs, 7, nullptr) != 0; }
-
-	void AddUrlToQueue(std::unique_ptr<NzbInfo> nzbInfo, bool addFirst)
-	{
-		NzbgetRsUrlCoordEnv env{};
-		env.p1 = reinterpret_cast<uintptr_t>(nzbInfo.get());
-		env.p2 = reinterpret_cast<uintptr_t>(&nzbInfo);
-		env.a1 = addFirst ? 1 : 0;
-		nzbget_rs_url_coord_exec(m_rs, 6, &env);
-	}
-
-protected:
-	void LogDebugInfo() override { nzbget_rs_url_coord_exec(m_rs, 8, nullptr); }
-
-private:
-	class DownloadQueueObserver final : public Observer
-	{
-	public:
-		UrlCoordinator* m_owner;
-		void Update(Subject*, void* aspect) override
-		{
-			NzbgetRsUrlCoordEnv env{};
-			env.a1 = static_cast<int>(static_cast<DownloadQueue::Aspect*>(aspect)->action);
-			nzbget_rs_url_coord_exec(m_owner->m_rs, 2, &env);
-		}
-	};
-
-	NzbgetRsUrlCoord* m_rs;
-	DownloadQueueObserver m_downloadQueueObserver;
-
-	NzbgetRsUrlCoordEnv MakeEnv()
-	{
-		NzbgetRsUrlCoordEnv env{};
-		env.ctx = this;
-		env.with_queue_guard_cb = +[](void*, void* inner, void (*fnCb)(void*, uintptr_t)) {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			fnCb(inner, reinterpret_cast<uintptr_t>(static_cast<DownloadQueue*>(dq)));
-		};
-		env.query_cb = +[](void* raw, int op, uintptr_t ptr, int* outInts, int64_t*, const char** outStrs) -> uintptr_t {
-			if (op == 1) return static_cast<UrlCoordinator*>(raw)->IsStopped() ? 1 : 0;
-			if (op == 3) return reinterpret_cast<DownloadQueue*>(ptr)->GetQueue()->size();
-			if (op == 4)
-			{
-				NzbInfo* n = (*reinterpret_cast<DownloadQueue*>(ptr)->GetQueue())[static_cast<size_t>(outInts[0])].get();
-				outInts[0] = static_cast<int>(n->GetKind());
-				outInts[1] = static_cast<int>(n->GetUrlStatus());
-				outInts[2] = static_cast<int>(n->GetDeleteStatus());
-				outInts[3] = n->GetPriority();
-				outInts[4] = n->GetId();
-				return reinterpret_cast<uintptr_t>(n);
-			}
-			if (op == 6)
-			{
-				auto* n = reinterpret_cast<NzbInfo*>(ptr);
-				outInts[0] = static_cast<int>(n->GetUrlStatus());
-				outInts[1] = static_cast<int>(n->GetDeleteStatus());
-				outInts[2] = n->GetDeleting() ? 1 : 0;
-				outInts[3] = n->GetActiveDownloads();
-				outStrs[0] = n->GetUrl();
-				outStrs[1] = n->GetFilename();
-				outStrs[2] = n->GetCategory();
-				outStrs[3] = n->GetName();
-				return 1;
-			}
-			return 0;
-		};
-		env.action_cb = +[](void*, int op, uintptr_t p1, uintptr_t p2, int a1, int a2, const char* s1, const char* s2, const char* s3) -> uintptr_t {
-			if (op == 2) { reinterpret_cast<NzbInfo*>(p1)->GetParameters()->SetParameter(s1, s2); return 1; }
-			if (op == 3)
-			{
-				auto* n = reinterpret_cast<NzbInfo*>(p1);
-				if (a1 == 0) n->SetActiveDownloads(a2);
-				else if (a1 == 1) n->SetUrlStatus(static_cast<NzbInfo::EUrlStatus>(a2));
-				else if (a1 == 2) n->SetDeleteStatus(static_cast<NzbInfo::EDeleteStatus>(a2));
-				else if (a1 == 3) n->SetDeleting(a2 != 0);
-				else if (a1 == 4) n->SetAvoidHistory(a2 != 0);
-				return 1;
-			}
-			if (op == 4)
-			{
-				auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-				DownloadQueue::Aspect aspect = {static_cast<DownloadQueue::EAspectAction>(a1), dq, reinterpret_cast<NzbInfo*>(p2), nullptr};
-				dq->Notify(&aspect);
-				return 1;
-			}
-			if (op == 5)
-			{
-				auto* n = reinterpret_cast<NzbInfo*>(p1);
-				Scanner::EAddStatus st = a1 != 0
-					? g_Scanner->AddArchive(s1, s2, n->GetAutoCategory(), n->GetPriority(), n->GetDupeKey(), n->GetDupeScore(), n->GetDupeMode(), n->GetParameters(), false, n->GetAddUrlPaused(), n, s3)
-					: g_Scanner->AddExternalFile(s1, s2, n->GetAutoCategory(), n->GetPriority(), n->GetDupeKey(), n->GetDupeScore(), n->GetDupeMode(), n->GetParameters(), false, n->GetAddUrlPaused(), n, s3, nullptr, 0, nullptr);
-				return static_cast<uintptr_t>(st);
-			}
-			if (op == 6) { g_QueueScriptCoordinator->EnqueueScript(reinterpret_cast<NzbInfo*>(p1), QueueScriptCoordinator::qeUrlCompleted); return 1; }
-			if (op == 7)
-			{
-				auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-				if (a1 == 2) dq->Save();
-				else if (a1 != 0)
-				{
-					auto* holder = reinterpret_cast<std::unique_ptr<NzbInfo>*>(p2);
-					if (holder && *holder) dq->GetQueue()->Add(std::move(*holder), a2 != 0);
-				}
-				return 1;
-			}
-			return 0;
-		};
-		return env;
-	}
-};
-
-extern UrlCoordinator* g_UrlCoordinator;
+class UrlCoordinator;
 
 
 #endif /* SCANNER_H */
@@ -8616,6 +7416,19 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 			FileInfo fi(a2);
 			if (g_DiskState->LoadFileState(&fi, true)) g_DiskState->SaveFileState(&fi, true);
 		}
+		if (a1 == 13)
+		{
+			FileInfo fi(a2);
+			if (!g_DiskState->LoadFileState(&fi, true)) return 0;
+			auto pushFn = reinterpret_cast<void(*)(uintptr_t, int, int64_t, int, uint32_t)>(p2);
+			bool any = false;
+			for (ArticleInfo* pa : fi.GetArticles())
+			{
+				pushFn(p1, pa->GetStatus() == ArticleInfo::aiFinished ? 1 : 0, pa->GetSegmentOffset(), pa->GetSegmentSize(), pa->GetCrc());
+				any = true;
+			}
+			return any ? 2 : 1;
+		}
 		return 0;
 	}
 	case 6: {
@@ -8624,7 +7437,7 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		else if (a1 == 2 && g_HistoryCoordinator) g_HistoryCoordinator->HistoryHide(reinterpret_cast<DownloadQueue*>(p1), reinterpret_cast<HistoryInfo*>(p2), a2);
 		else if (a1 == 3 && g_PrePostProcessor) g_PrePostProcessor->CheckDownloadCompleted(reinterpret_cast<DownloadQueue*>(p1), reinterpret_cast<NzbInfo*>(p2));
 		else if (a1 == 4 && g_QueueScriptCoordinator) g_QueueScriptCoordinator->EnqueueScript(reinterpret_cast<NzbInfo*>(p1), (QueueScriptCoordinator::EEvent)a2);
-		else if (a1 == 5) StreamRepairController::StartLive(reinterpret_cast<NzbInfo*>(p1));
+		else if (a1 == 5) PostJobThread::StartLive(reinterpret_cast<NzbInfo*>(p1));
 		else if (a1 == 6) return nzbget_rs_article_dl_exec(nullptr, 23, 0, 0, p1, 0, s1 ? s1 : "", NzbgetCArticleDlHost, nullptr);
 		else if (a1 == 8 && g_HistoryCoordinator) g_HistoryCoordinator->AddToHistory(reinterpret_cast<DownloadQueue*>(p1), reinterpret_cast<NzbInfo*>(p2));
 		else if (a1 == 9)
@@ -8641,7 +7454,7 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 			if (ints && a2 > 0) idList.assign(ints, ints + a2);
 			return g_PrePostProcessor->EditList(reinterpret_cast<DownloadQueue*>(p1), &idList, (DownloadQueue::EEditAction)p2, s1) ? 1 : 0;
 		}
-		else if (a1 == 14 && g_UrlCoordinator)
+		else if (a1 == 14)
 		{
 			auto nzbInfo = std::make_unique<NzbInfo>();
 			nzbInfo->SetKind(NzbInfo::nkUrl);
@@ -8657,7 +7470,14 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 			nzbInfo->SetSize(i64s[0]);
 			nzbInfo->SetMinTime(static_cast<time_t>(i64s[1]));
 			nzbInfo->SetMaxTime(static_cast<time_t>(i64s[1]));
-			g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), false);
+			nzbget_rs_url_coord_add(reinterpret_cast<uintptr_t>(nzbInfo.get()), reinterpret_cast<uintptr_t>(&nzbInfo), 0);
+		}
+		else if (a1 == 15 && g_Scanner)
+		{
+			auto* n = reinterpret_cast<NzbInfo*>(p1);
+			return a2 != 0
+				? (uintptr_t)g_Scanner->AddArchive(s1, s2, n->GetAutoCategory(), n->GetPriority(), n->GetDupeKey(), n->GetDupeScore(), n->GetDupeMode(), n->GetParameters(), false, n->GetAddUrlPaused(), n, strs[0])
+				: (uintptr_t)g_Scanner->AddExternalFile(s1, s2, n->GetAutoCategory(), n->GetPriority(), n->GetDupeKey(), n->GetDupeScore(), n->GetDupeMode(), n->GetParameters(), false, n->GetAddUrlPaused(), n, strs[0], nullptr, 0, nullptr);
 		}
 		return 0;
 	}
@@ -8678,9 +7498,12 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		if (a1 == 2)
 		{
 			auto* up = reinterpret_cast<std::unique_ptr<NzbInfo>*>(p2);
-			auto* urlInfo = reinterpret_cast<NzbInfo*>((uintptr_t)i64s[0]);
-			if (urlInfo) dq->GetQueue()->insert(dq->GetQueue()->Find(urlInfo), std::move(*up));
-			else dq->GetQueue()->Add(std::move(*up), a2 != 0);
+			if (up && *up)
+			{
+				auto* urlInfo = reinterpret_cast<NzbInfo*>((uintptr_t)i64s[0]);
+				if (urlInfo) dq->GetQueue()->insert(dq->GetQueue()->Find(urlInfo), std::move(*up));
+				else dq->GetQueue()->Add(std::move(*up), a2 != 0);
+			}
 			return 0;
 		}
 		if (a1 == 3)
@@ -8785,6 +7608,9 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		ints[63] = (int)n->GetUnpackStatus(); ints[64] = (int)n->GetCleanupStatus(); ints[65] = (int)n->GetMoveStatus();
 		ints[66] = (int)n->GetPostDownloadRenamingStatus(); ints[67] = (int)n->GetPostUnpackRenamingStatus();
 		ints[68] = n->GetUnpackThread() ? 1 : 0; ints[69] = n->GetStreamRepairJobs()->empty() ? 0 : 1;
+		ints[70] = (int)n->GetUrlStatus(); ints[71] = n->GetParSec(); ints[72] = n->GetRepairSec();
+		ints[73] = n->GetUnpackSec(); ints[74] = n->GetReprocess() ? 1 : 0; ints[75] = n->GetExtraParBlocks();
+		ints[76] = n->GetDupeRecoveredHoles(); ints[77] = (int)n->GetScriptStatuses()->CalcTotalStatus();
 		i64s[0] = n->GetSize(); i64s[1] = n->GetRemainingSize(); i64s[2] = n->GetPausedSize();
 		i64s[3] = n->GetSuccessSize(); i64s[4] = n->GetCurrentSuccessSize(); i64s[5] = n->GetFailedSize();
 		i64s[6] = n->GetCurrentFailedSize(); i64s[7] = n->GetParSize(); i64s[8] = n->GetParSuccessSize();
@@ -8793,9 +7619,11 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		i64s[13] = (int64_t)n->GetMinTime(); i64s[14] = (int64_t)n->GetMaxTime();
 		i64s[15] = (int64_t)n->GetFilteredContentHash(); i64s[16] = (int64_t)n->GetDownloadStartTime();
 		i64s[17] = n->GetDupeRecoveredBytes(); i64s[18] = (int64_t)reinterpret_cast<uintptr_t>(pi);
+		i64s[19] = (int64_t)reinterpret_cast<uintptr_t>(n->GetLiveRepairThread());
 		strs[0] = n->GetName(); strs[1] = n->GetFilename(); strs[2] = n->GetDestDir(); strs[3] = n->GetFinalDir();
 		strs[4] = n->GetCategory(); strs[5] = n->GetDupeKey(); strs[6] = n->GetQueuedFilename();
 		strs[7] = a1 != 0 ? n->MakeTextStatus(true) : nullptr;
+		strs[8] = n->GetUrl();
 		return 0;
 	}
 	case 31: {
@@ -8806,6 +7634,12 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		if (a1 == 3) { static thread_local CString s_finalDir; s_finalDir = n->BuildFinalDirName(); strs[0] = s_finalDir.Str(); return 0; }
 		if (a1 == 4) return n->GetDupeBlockedDonors()->count(a2) ? 1 : 0;
 		if (a1 == 5) { n->GetDupeBlockedDonors()->insert(a2); return 1; }
+		if (a1 == 6) { strs[0] = n->GetHardLinkPath().c_str(); return 0; }
+		if (a1 == 7) { strs[0] = n->GetMetaName().c_str(); return 0; }
+		if (a1 == 8) { if (a2 < 0) return n->GetParameters()->size(); NzbParameter& p = n->GetParameters()->at((size_t)a2); strs[0] = p.GetName(); strs[1] = p.GetValue(); return 0; }
+		if (a1 == 9) { if (a2 < 0) return n->GetServerStats()->size(); ServerStat& ss = n->GetServerStats()->at((size_t)a2); ints[0] = ss.GetServerId(); ints[1] = ss.GetSuccessArticles(); ints[2] = ss.GetFailedArticles(); return 0; }
+		if (a1 == 10) { n->GetScriptStatuses()->emplace_back(s1 ? s1 : "", (ScriptStatus::EStatus)a2); return 0; }
+		if (a1 == 11) return n->RenameCompletedFile(s1 ? s1 : "", s2 ? s2 : "") ? 1 : 0;
 		return 0;
 	}
 	case 32: {
@@ -8851,6 +7685,7 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		case 36: n->SetDownloadedSize(i64s[0]); break;
 		case 37: n->SetParSize(i64s[0]); break;
 		case 38: n->SetParFailedSize(i64s[0]); break;
+		case 39: n->SetDupeRecoveredBytes(i64s[0]); break;
 		case 40: n->SetName(s1); break;
 		case 41: n->SetFilename(s1); break;
 		case 42: n->SetCategory(s1); break;
@@ -8858,6 +7693,9 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		case 44: n->SetDupeKey(s1); break;
 		case 45: n->SetQueuedFilename(s1); break;
 		case 46: n->SetHardLinkPath(s1 ? s1 : ""); break;
+		case 47: n->SetFailedSize(i64s[0]); break;
+		case 48: n->SetSuccessSize(i64s[0]); break;
+		case 49: n->SetParSuccessSize(i64s[0]); break;
 		case 50: n->BuildDestDirName(); break;
 		case 51: n->UpdateMinMaxTime(); break;
 		case 52: n->UpdateCompletedStats(reinterpret_cast<FileInfo*>(p2)); break;
@@ -8866,12 +7704,28 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		case 55: n->LeavePostProcess(); break;
 		case 56: n->GetScriptStatuses()->clear(); break;
 		case 57: n->SetUnpackThread(nullptr); n->SetLiveRepairThread(nullptr); break;
+		case 58: n->SetLiveRepairThread(nullptr); break;
+		case 59: n->SetFinalDir(s1 ? s1 : ""); break;
 		case 60: n->SetCleanupDisk(a2 != 0); break;
 		case 61: n->SetDupeMode((EDupeMode)a2); break;
 		case 62: n->SetParStatus((NzbInfo::EParStatus)a2); break;
 		case 63: n->SetUnpackStatus((NzbInfo::EPostUnpackStatus)a2); break;
 		case 64: n->SetDirectUnpackStatus((NzbInfo::EDirectUnpackStatus)a2); break;
 		case 65: n->SetPostTotalSec(a2); break;
+		case 66: n->SetUrlStatus((NzbInfo::EUrlStatus)a2); break;
+		case 67: n->SetParSec(a2); break;
+		case 68: n->SetParFull(a2 != 0); break;
+		case 69: n->SetRepairSec(a2); break;
+		case 70: n->SetExtraParBlocks(a2); break;
+		case 71: n->SetDupeRecoveredHoles(a2); break;
+		case 72: n->SetParRenameStatus((NzbInfo::EPostRenameStatus)a2); break;
+		case 73: n->SetUnpackCleanedUpDisk(a2 != 0); break;
+		case 74: n->SetUnpackSec(a2); break;
+		case 75: n->SetMoveStatus((NzbInfo::EMoveStatus)a2); break;
+		case 76: n->SetCleanupStatus((NzbInfo::ECleanupStatus)a2); break;
+		case 77: n->SetRarRenameStatus((NzbInfo::EPostRenameStatus)a2); break;
+		case 78: n->SetPostDownloadRenamingStatus((NzbInfo::PostDownloadRenamingStatus)a2); break;
+		case 79: n->SetPostUnpackRenamingStatus((NzbInfo::PostUnpackRenamingStatus)a2); break;
 		default: break;
 		}
 		return 0;
@@ -8927,6 +7781,7 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 			if (a2 < 0) return n->GetCompletedFiles()->size();
 			CompletedFile& cf = n->GetCompletedFiles()->at((size_t)a2);
 			ints[0] = cf.GetId(); ints[1] = (int)cf.GetStatus(); ints[2] = cf.GetParFile() ? 1 : 0;
+			ints[3] = (int)cf.GetCrc();
 			strs[0] = cf.GetFilename(); strs[1] = cf.GetOrigname(); strs[2] = cf.GetHash16k(); strs[3] = cf.GetParSetId();
 			return 0;
 		}
@@ -8996,6 +7851,62 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 			i64s[1] = holesTotal;
 			i64s[2] = job.GetFailedSize() + job.GetMissedSize();
 			strs[0] = job.GetFilename();
+			return 0;
+		}
+		if (a1 == 12)
+		{
+			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
+			for (CompletedFile& cf : n->GetCompletedFiles())
+			{
+				if (cf.GetId() == a2)
+				{
+					if (ints[0] == 1 && cf.GetStatus() != CompletedFile::cfSuccess)
+					{
+						cf.SetStatus(CompletedFile::cfSuccess);
+						if (g_DiskState) g_DiskState->DiscardFile(a2, true, true, true);
+					}
+					else if (ints[0] == 2 && cf.GetStatus() == CompletedFile::cfFailure)
+					{
+						cf.SetStatus(CompletedFile::cfPartial);
+					}
+					break;
+				}
+			}
+			return 0;
+		}
+		if (a1 == 13)
+		{
+			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
+			auto* jobs = n->GetStreamRepairJobs();
+			if (ints[0] == 1)
+			{
+				StreamRepairJob& job = jobs->at((size_t)a2);
+				bool prev = job.GetLiveAttempted();
+				job.SetLiveAttempted(true);
+				return prev ? 1 : 0;
+			}
+			if (ints[0] == 2)
+			{
+				jobs->erase(jobs->begin() + a2);
+				if (ints[1] != 0) n->SetChanged(true);
+				return 0;
+			}
+			if (ints[0] == 3)
+			{
+				StreamRepairJob& job = jobs->at((size_t)a2);
+				if (i64s[0] >= 0) job.SetDecodedFileSize(i64s[0]);
+				const auto* ranges = reinterpret_cast<const StreamRange*>(p2);
+				job.SetHoles(ranges && ints[1] > 0 ? StreamRangeList(ranges, ranges + ints[1]) : StreamRangeList());
+				return 0;
+			}
+			StreamRepairJob& job = jobs->at((size_t)a2);
+			ints[0] = job.GetFileId(); ints[1] = job.GetFailedArticles();
+			ints[2] = job.GetParFile() ? 1 : 0; ints[3] = job.GetLiveAttempted() ? 1 : 0;
+			ints[4] = (int)job.GetHoles()->size();
+			i64s[0] = job.GetDecodedFileSize(); i64s[1] = job.GetFailedSize();
+			i64s[2] = job.GetMissedSize(); i64s[3] = (int64_t)job.GetStepsHash();
+			strs[0] = job.GetFilename();
+			strs[1] = job.GetHoles()->empty() ? nullptr : reinterpret_cast<const char*>(job.GetHoles()->data());
 			return 0;
 		}
 		return 0;
@@ -9271,7 +8182,12 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 			ints[6] = pi->GetStreamRepairDone() ? 1 : 0; ints[7] = pi->GetStreamRepairRecovered() ? 1 : 0; ints[8] = pi->GetParCannotCover() ? 1 : 0;
 			ints[9] = pi->GetNeedParCheck() ? 1 : 0; ints[10] = pi->GetNeedUnpack() ? 1 : 0;
 			ints[11] = pt ? 1 : 0; ints[12] = (pt && pt->IsRunning()) ? 1 : 0;
+			ints[13] = pi->GetUnpackTried() ? 1 : 0; ints[14] = pi->GetParRepaired() ? 1 : 0;
+			ints[15] = pi->GetPassListTried() ? 1 : 0; ints[16] = pi->GetLastUnpackStatus();
+			ints[17] = pi->GetExtractedArchives() ? (int)pi->GetExtractedArchives()->size() : 0;
+			ints[18] = (int)pi->GetParredFiles()->size();
 			i64s[0] = (int64_t)pi->GetStartTime(); i64s[1] = (int64_t)reinterpret_cast<uintptr_t>(pi->GetNzbInfo());
+			i64s[2] = (int64_t)pi->GetStageTime();
 			return 0;
 		}
 		if (a1 == 1)
@@ -9285,15 +8201,32 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 			else if (a2 == 5) pi->SetParCannotCover(v != 0);
 			else if (a2 == 6) pi->SetNeedParCheck(v != 0);
 			else if (a2 == 7) pi->SetNeedUnpack(v != 0);
+			else if (a2 == 8) pi->SetForceRepair(v != 0);
+			else if (a2 == 9) pi->SetParRepaired(v != 0);
+			else if (a2 == 10) pi->SetUnpackTried(v != 0);
+			else if (a2 == 11) pi->SetPassListTried(v != 0);
+			else if (a2 == 12) pi->SetLastUnpackStatus(v);
+			else if (a2 == 13) pi->SetFileProgress(v);
+			else if (a2 == 14) pi->SetStageProgress(v);
+			else if (a2 == 15) pi->SetStreamRepairDone(v != 0);
+			else if (a2 == 16) pi->SetStreamRepairRecovered(v != 0);
 			return 0;
 		}
 		if (a1 == 2) { pi->SetStartTime((time_t)i64s[0]); return 0; }
 		if (a1 == 3) { pi->SetStageTime((time_t)i64s[0]); pi->SetStageProgress(0); pi->SetFileProgress(0); pi->SetProgressLabel(""); return 0; }
+		if (a1 == 4) { pi->SetStageTime((time_t)i64s[0]); return 0; }
+		if (a1 == 5) { pi->SetProgressLabel(s1 ? s1 : ""); return 0; }
+		if (a1 == 6) { if (a2 < 0) pi->GetParredFiles()->push_back(s1 ? s1 : ""); else strs[0] = (*pi->GetParredFiles())[(size_t)a2]; return 0; }
+		if (a1 == 7) { if (a2 < 0) { if (pi->GetExtractedArchives()) pi->GetExtractedArchives()->clear(); } else strs[0] = *(*pi->GetExtractedArchives())[(size_t)a2]; return 0; }
 		return 0;
 	}
 	case 61: {
-		PrePostProcessor* pp = reinterpret_cast<PrePostProcessor*>(p1);
-		return (pp && pp->IsStopped()) ? 1 : 0;
+		if (a1 == 0) { PrePostProcessor* pp = reinterpret_cast<PrePostProcessor*>(p1); return (pp && pp->IsStopped()) ? 1 : 0; }
+		Thread* t = reinterpret_cast<Thread*>(p1);
+		if (a1 == 1) return (t && t->IsStopped()) ? 1 : 0;
+		if (a1 == 2 && t) t->Thread::Stop();
+		else if (a1 == 3 && t) t->Thread::Resume();
+		return 0;
 	}
 	case 62: {
 		if (a1 == 0) { PostInfo* pi = reinterpret_cast<PostInfo*>(p1); if (pi && pi->GetPostThread()) pi->GetPostThread()->Stop(); return 0; }
@@ -9317,26 +8250,17 @@ inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p
 		{
 #ifndef DISABLE_PARCHECK
 			PostInfo* pi = reinterpret_cast<PostInfo*>(p1);
-			if (pi && pi->GetPostThread()) return static_cast<RepairController*>(pi->GetPostThread())->AddPar(reinterpret_cast<FileInfo*>(p2), a2 != 0) ? 1 : 0;
+			if (pi && pi->GetPostThread()) return static_cast<PostJobThread*>(pi->GetPostThread())->AddPar(reinterpret_cast<FileInfo*>(p2), a2 != 0) ? 1 : 0;
 #endif
 			return 0;
 		}
 		if (a1 == 12)
 		{
 			PostInfo* pi = reinterpret_cast<PostInfo*>(p1);
-			if (!pi) return 0;
-			if (a2 == 0) RenameController::StartJob(pi, RenameController::jkPar);
-			else if (a2 == 1) RenameController::StartJob(pi, RenameController::jkRar);
-			else if (a2 == 2) StreamRepairController::StartJob(pi);
-#ifndef DISABLE_PARCHECK
-			else if (a2 == 3) RepairController::StartJob(pi);
+#ifdef DISABLE_PARCHECK
+			if (a2 == 3) return 0;
 #endif
-			else if (a2 == 4) UnpackController::StartJob(pi);
-			else if (a2 == 5) CleanupController::StartJob(pi);
-			else if (a2 == 6) MoveController::StartJob(pi);
-			else if (a2 == 7) PostRenamerController::StartJob(pi, false);
-			else if (a2 == 8) PostRenamerController::StartJob(pi, true);
-			else if (a2 == 9) PostScriptController::StartJob(pi);
+			PostJobThread::StartPost(pi, a2);
 			return 0;
 		}
 		return 0;
@@ -9398,7 +8322,7 @@ inline NzbgetRsRpcHost BuildRpcHost()
 					nzbInfo->GetParameters()->CopyFrom(&paramList);
 					int nzbId = nzbInfo->GetId();
 					info("Queue %s", *nzbInfo->MakeNiceUrlName(body ? body : "", s1 ? s1 : ""));
-					g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), addTop);
+					nzbget_rs_url_coord_add(reinterpret_cast<uintptr_t>(nzbInfo.get()), reinterpret_cast<uintptr_t>(&nzbInfo), addTop ? 1 : 0);
 					if (outU32) *outU32 = (uint32_t)nzbId;
 					return 1;
 				}
@@ -9433,7 +8357,7 @@ inline NzbgetRsRpcHost BuildRpcHost()
 				nzbInfo->SetDesiredServerId(a1);
 				nzbInfo->SetSkipScriptProcessing(true);
 				nzbInfo->SetSkipDiskWrite(true);
-				g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), true);
+				nzbget_rs_url_coord_add(reinterpret_cast<uintptr_t>(nzbInfo.get()), reinterpret_cast<uintptr_t>(&nzbInfo), 1);
 				return 1;
 			}
 			default: return 0;
@@ -9675,7 +8599,7 @@ inline NzbgetRsRpcHost BuildRpcHost()
 				nzbInfo->SetDupeKey(s3);
 				nzbInfo->SetDupeScore(a3);
 				nzbInfo->SetDupeMode((EDupeMode)a4);
-				g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), (a1 & 1) != 0);
+				nzbget_rs_url_coord_add(reinterpret_cast<uintptr_t>(nzbInfo.get()), reinterpret_cast<uintptr_t>(&nzbInfo), (a1 & 1) != 0 ? 1 : 0);
 				return 1;
 			}
 			case 6: {

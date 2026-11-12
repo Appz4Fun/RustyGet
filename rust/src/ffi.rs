@@ -5459,39 +5459,6 @@ pub unsafe extern "C" fn nzbget_rs_article_dl_exec(
 
 #[cfg(unix)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_repair_ctrl_new() -> *mut crate::repair::NzbgetRsRepairController
-{
-    Box::into_raw(Box::new(crate::repair::NzbgetRsRepairController::new(
-        crate::articlefetcher::native_nntp_fetch_host,
-    )))
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_repair_ctrl_free(
-    ctrl: *mut crate::repair::NzbgetRsRepairController,
-) {
-    if !ctrl.is_null() {
-        drop(Box::from_raw(ctrl));
-    }
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_repair_ctrl_exec(
-    ctrl: *const crate::repair::NzbgetRsRepairController,
-    op: c_int,
-    a1: c_int,
-    p1: usize,
-    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    let _cancel_guard = PosixCancelGuard::disable();
-    crate::repair::repair_ctrl_exec(ctrl, op, a1, p1, host_cb, ctx)
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_par_checker_new() -> *mut crate::postproc::NzbgetRsParChecker {
     Box::into_raw(Box::new(crate::postproc::NzbgetRsParChecker::new()))
 }
@@ -5518,35 +5485,6 @@ pub unsafe extern "C" fn nzbget_rs_par_checker_exec(
 ) -> c_int {
     let _cancel_guard = PosixCancelGuard::disable();
     crate::postproc::par_checker_exec(ctrl, op, a1, s1, host_cb, ctx)
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_unpack_ctrl_new(
-) -> *mut crate::postproc::NzbgetRsUnpackController {
-    Box::into_raw(Box::new(crate::postproc::NzbgetRsUnpackController::new()))
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_unpack_ctrl_free(
-    ctrl: *mut crate::postproc::NzbgetRsUnpackController,
-) {
-    if !ctrl.is_null() {
-        drop(Box::from_raw(ctrl));
-    }
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_unpack_ctrl_exec(
-    ctrl: *const crate::postproc::NzbgetRsUnpackController,
-    op: c_int,
-    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    let _cancel_guard = PosixCancelGuard::disable();
-    crate::postproc::unpack_ctrl_exec(ctrl, op, host_cb, ctx)
 }
 
 #[cfg(unix)]
@@ -5583,77 +5521,38 @@ pub unsafe extern "C" fn nzbget_rs_direct_unpack_exec(
 
 #[cfg(unix)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_post_job_exec(
-    job: c_int,
-    a1: c_int,
-    a2: c_int,
-    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
-    ctx: *mut c_void,
-) -> c_int {
-    let _cancel_guard = PosixCancelGuard::disable();
-    crate::postproc::post_job_exec(job, a1, a2, host_cb, ctx)
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_post_script_run(
-    runner: *mut crate::script::NzbgetRsScriptRunner,
-    ctx: *mut c_void,
-    host_cb: Option<crate::repair::NzbgetRsRepairCtrlHostFn>,
-) {
-    let _cancel_guard = PosixCancelGuard::disable();
-    let ext_mgr = crate::script::active_ext_mgr();
-    crate::postproc::post_script_run(
-        runner,
-        ext_mgr
-            .as_deref()
-            .map_or(std::ptr::null(), |m| m as *const _),
-        build_parcheck_enabled(),
-        ctx,
-        host_cb,
-        script_host_cb(),
-    );
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_new(
-    live_mode: c_int,
+pub unsafe extern "C" fn nzbget_rs_post_job_new(
+    kind: c_int,
+    thread_ptr: usize,
+    post_ptr: usize,
     nzb_id: c_int,
-    tls_enabled: c_int,
-    debug_enabled: c_int,
-) -> *mut crate::streamrepair_coord::NzbgetRsStreamRepairCtrl {
-    Box::into_raw(Box::new(
-        crate::streamrepair_coord::NzbgetRsStreamRepairCtrl::new(
-            live_mode != 0,
-            nzb_id,
-            crate::articlefetcher::native_nntp_fetch_host,
-            tls_enabled != 0,
-            debug_enabled != 0,
-        ),
-    ))
+) -> *mut crate::postproc::NzbgetRsPostJob {
+    Box::into_raw(Box::new(crate::postproc::NzbgetRsPostJob::new(
+        kind, thread_ptr, post_ptr, nzb_id,
+    )))
 }
 
 #[cfg(unix)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_free(
-    ctrl: *mut crate::streamrepair_coord::NzbgetRsStreamRepairCtrl,
-) {
-    if !ctrl.is_null() {
-        drop(Box::from_raw(ctrl));
+pub unsafe extern "C" fn nzbget_rs_post_job_free(job: *mut crate::postproc::NzbgetRsPostJob) {
+    if !job.is_null() {
+        drop(Box::from_raw(job));
     }
 }
 
 #[cfg(unix)]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_exec(
-    ctrl: *const crate::streamrepair_coord::NzbgetRsStreamRepairCtrl,
+pub unsafe extern "C" fn nzbget_rs_post_job_op(
+    job: *const crate::postproc::NzbgetRsPostJob,
     op: c_int,
-    host_cb: Option<crate::streamrepair_coord::NzbgetRsStreamRepairHostFn>,
-    ctx: *mut c_void,
+    a1: c_int,
+    p1: usize,
 ) -> c_int {
     let _cancel_guard = PosixCancelGuard::disable();
-    crate::streamrepair_coord::stream_repair_ctrl_exec(ctrl, op, host_cb, ctx)
+    match job.as_ref() {
+        Some(j) => j.exec(op, a1, p1),
+        None => 0,
+    }
 }
 
 #[cfg(unix)]

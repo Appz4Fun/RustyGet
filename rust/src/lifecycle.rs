@@ -12,6 +12,12 @@ const SIGINT: c_int = 2;
 #[cfg(unix)]
 const SIGTERM: c_int = 15;
 
+static ACTIVE_UMASK: AtomicU32 = AtomicU32::new(0);
+
+pub(crate) fn active_umask() -> u32 {
+    ACTIVE_UMASK.load(Ordering::Relaxed)
+}
+
 #[cfg(unix)]
 extern "C" {
     fn dlsym(handle: *mut std::ffi::c_void, symbol: *const c_char) -> *mut std::ffi::c_void;
@@ -1395,6 +1401,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             #[cfg(not(unix))]
             let (eff, is_debug) = (0, e.a2 != 0);
 
+            ACTIVE_UMASK.store(eff as u32, Ordering::Relaxed);
             if is_debug {
                 let msg = format!("Using {:o} umask", eff as u32);
                 dm_log(e, 0, msg.as_bytes());
@@ -1683,6 +1690,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 #[cfg(unix)]
                 if e.a1 < 0 {
                     crate::dupesearch_coord::start_daemon_dupesearch();
+                    crate::urlcoord::start_daemon_url_coord();
                     crate::feed::start_daemon_feed_coord();
                     crate::articledl::start_daemon_memory_monitor();
                 }
@@ -1692,6 +1700,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                     #[cfg(unix)]
                     if e.a1 < 0
                         && (crate::dupesearch_coord::is_daemon_dupesearch_running()
+                            || crate::urlcoord::is_daemon_url_coord_running()
                             || crate::feed::is_daemon_feed_coord_running()
                             || crate::articledl::is_daemon_memory_monitor_running())
                     {
@@ -1706,7 +1715,11 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                         dm_trigger_reload(e.reload_cb, e.global_log_cb);
                     }
 
-                    let st_jobs = cb(e.ctx, 5, 1, std::ptr::null(), std::ptr::null());
+                    let mut st_jobs = cb(e.ctx, 5, 1, std::ptr::null(), std::ptr::null());
+                    #[cfg(unix)]
+                    if e.a1 < 0 && crate::urlcoord::daemon_url_coord_has_more_jobs() {
+                        st_jobs |= 2;
+                    }
                     if crate::options::nzbget_should_stop_standalone(
                         server_mode,
                         (st_jobs & 1) != 0,
@@ -1717,6 +1730,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                         #[cfg(unix)]
                         if e.a1 < 0 {
                             crate::dupesearch_coord::stop_daemon_dupesearch();
+                            crate::urlcoord::stop_daemon_url_coord();
                             crate::feed::stop_daemon_feed_coord();
                             crate::articledl::stop_daemon_memory_monitor();
                         }
@@ -1853,6 +1867,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             #[cfg(unix)]
             if e.a2 < 0 && eff_remote_mode == 0 {
                 crate::dupesearch_coord::stop_daemon_dupesearch();
+                crate::urlcoord::stop_daemon_url_coord();
                 crate::feed::stop_daemon_feed_coord();
                 crate::articledl::stop_daemon_memory_monitor();
             }
@@ -1939,9 +1954,11 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 }
                 crate::articledl::shutdown_daemon_memory_monitor();
                 crate::feed::shutdown_daemon_feed_coord();
+                crate::urlcoord::shutdown_daemon_url_coord();
                 crate::twin::shutdown_daemon_twincheck();
                 crate::dupesearch_coord::shutdown_daemon_dupesearch();
                 crate::extension::shutdown_daemon_maintenance();
+                crate::script::shutdown_daemon_ext_mgr();
                 crate::statmeter::shutdown_daemon_statmeter();
                 crate::scheduler::shutdown_daemon_scheduler();
             }
@@ -2069,6 +2086,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 libc::umask(m);
                 m
             } as c_int;
+            ACTIVE_UMASK.store(eff_umask as u32, Ordering::Relaxed);
             if crate::ffi::build_debug_enabled() {
                 dm_emit_active_log(0, format!("Using {:o} umask", eff_umask as u32).as_bytes());
             }

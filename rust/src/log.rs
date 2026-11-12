@@ -180,6 +180,8 @@ impl NzbgetRsLog {
                     crate::statmeter::log_active_statmeter_debug_info();
                 } else if item == 2 {
                     crate::feed::log_active_feed_debug_info();
+                } else if item == 3 {
+                    crate::urlcoord::log_active_url_debug_info();
                 } else if let Some(cb) = self.debug_cb {
                     unsafe { cb(item) };
                 }

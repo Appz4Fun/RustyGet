@@ -73,6 +73,7 @@ pub(crate) const PAR_STATUS_MANUAL: i32 = 5;
 
 pub(crate) const RS_NONE: i32 = 0;
 pub(crate) const US_SKIPPED: i32 = 1;
+pub(crate) const US_SUCCESS: i32 = 3;
 
 pub(crate) const TS_RUNNING: i32 = 1;
 pub(crate) const TS_SUCCESS: i32 = 3;
@@ -144,7 +145,9 @@ pub(crate) const ASPECT_FILE_DELETED: i32 = 6;
 pub(crate) const ASPECT_URL_FOUND: i32 = 7;
 pub(crate) const ASPECT_URL_ADDED: i32 = 8;
 pub(crate) const ASPECT_URL_DELETED: i32 = 9;
+pub(crate) const ASPECT_URL_COMPLETED: i32 = 10;
 pub(crate) const ASPECT_URL_FAILED: i32 = 11;
+pub(crate) const ASPECT_URL_RETURNED: i32 = 12;
 
 // DownloadQueue::EEditAction (eaFileMoveOffset = 1)
 pub(crate) const EA_FILE_MOVE_OFFSET: i32 = 1;
@@ -195,6 +198,7 @@ pub(crate) const MM_REGEX: i32 = 3;
 
 // QueueScriptCoordinator::EEvent
 pub(crate) const QE_FILE_DOWNLOADED: i32 = 0;
+pub(crate) const QE_URL_COMPLETED: i32 = 1;
 pub(crate) const QE_NZB_MARKED: i32 = 2;
 pub(crate) const QE_NZB_ADDED: i32 = 3;
 pub(crate) const QE_NZB_NAMED: i32 = 4;
@@ -242,6 +246,7 @@ pub(crate) const NZB_I64_PAR_CUR_FAILED_SIZE: i32 = 35;
 pub(crate) const NZB_I64_DOWNLOADED_SIZE: i32 = 36;
 pub(crate) const NZB_I64_PAR_SIZE: i32 = 37;
 pub(crate) const NZB_I64_PAR_FAILED_SIZE: i32 = 38;
+pub(crate) const NZB_I64_DUPE_RECOVERED_BYTES: i32 = 39;
 
 pub(crate) const NZB_STR_NAME: i32 = 40;
 pub(crate) const NZB_STR_FILENAME: i32 = 41;
@@ -250,6 +255,9 @@ pub(crate) const NZB_STR_DEST_DIR: i32 = 43;
 pub(crate) const NZB_STR_DUPE_KEY: i32 = 44;
 pub(crate) const NZB_STR_QUEUED_FILENAME: i32 = 45;
 pub(crate) const NZB_STR_HARD_LINK_PATH: i32 = 46;
+pub(crate) const NZB_I64_FAILED_SIZE: i32 = 47;
+pub(crate) const NZB_I64_SUCCESS_SIZE: i32 = 48;
+pub(crate) const NZB_I64_PAR_SUCCESS_SIZE: i32 = 49;
 
 pub(crate) const NZB_ACT_BUILD_DEST_DIR: i32 = 50;
 pub(crate) const NZB_ACT_UPDATE_MIN_MAX_TIME: i32 = 51;
@@ -259,6 +267,8 @@ pub(crate) const NZB_ACT_ENTER_POST_PROCESS: i32 = 54;
 pub(crate) const NZB_ACT_LEAVE_POST_PROCESS: i32 = 55;
 pub(crate) const NZB_ACT_CLEAR_SCRIPT_STATUSES: i32 = 56;
 pub(crate) const NZB_ACT_DISCONNECT_THREADS: i32 = 57;
+pub(crate) const NZB_ACT_CLEAR_LIVE_REPAIR_THREAD: i32 = 58;
+pub(crate) const NZB_STR_FINAL_DIR: i32 = 59;
 
 pub(crate) const NZB_INT_CLEANUP_DISK: i32 = 60;
 pub(crate) const NZB_INT_DUPE_MODE: i32 = 61;
@@ -266,6 +276,20 @@ pub(crate) const NZB_INT_PAR_STATUS: i32 = 62;
 pub(crate) const NZB_INT_UNPACK_STATUS: i32 = 63;
 pub(crate) const NZB_INT_DIRECT_UNPACK_STATUS: i32 = 64;
 pub(crate) const NZB_INT_POST_TOTAL_SEC: i32 = 65;
+pub(crate) const NZB_INT_URL_STATUS: i32 = 66;
+pub(crate) const NZB_INT_PAR_SEC: i32 = 67;
+pub(crate) const NZB_INT_PAR_FULL: i32 = 68;
+pub(crate) const NZB_INT_REPAIR_SEC: i32 = 69;
+pub(crate) const NZB_INT_EXTRA_PAR_BLOCKS: i32 = 70;
+pub(crate) const NZB_INT_DUPE_RECOVERED_HOLES: i32 = 71;
+pub(crate) const NZB_INT_PAR_RENAME_STATUS: i32 = 72;
+pub(crate) const NZB_INT_UNPACK_CLEANED_UP_DISK: i32 = 73;
+pub(crate) const NZB_INT_UNPACK_SEC: i32 = 74;
+pub(crate) const NZB_INT_MOVE_STATUS: i32 = 75;
+pub(crate) const NZB_INT_CLEANUP_STATUS: i32 = 76;
+pub(crate) const NZB_INT_RAR_RENAME_STATUS: i32 = 77;
+pub(crate) const NZB_INT_POST_DOWNLOAD_RENAMING_STATUS: i32 = 78;
+pub(crate) const NZB_INT_POST_UNPACK_RENAMING_STATUS: i32 = 79;
 
 // FileInfo field indices (op = 42)
 pub(crate) const FILE_INT_PAUSED: i32 = 0;
@@ -336,6 +360,15 @@ pub(crate) const POST_INT_FORCE_PAR_FULL: i32 = 4;
 pub(crate) const POST_INT_PAR_CANNOT_COVER: i32 = 5;
 pub(crate) const POST_INT_NEED_PAR_CHECK: i32 = 6;
 pub(crate) const POST_INT_NEED_UNPACK: i32 = 7;
+pub(crate) const POST_INT_FORCE_REPAIR: i32 = 8;
+pub(crate) const POST_INT_PAR_REPAIRED: i32 = 9;
+pub(crate) const POST_INT_UNPACK_TRIED: i32 = 10;
+pub(crate) const POST_INT_PASS_LIST_TRIED: i32 = 11;
+pub(crate) const POST_INT_LAST_UNPACK_STATUS: i32 = 12;
+pub(crate) const POST_INT_FILE_PROGRESS: i32 = 13;
+pub(crate) const POST_INT_STAGE_PROGRESS: i32 = 14;
+pub(crate) const POST_INT_STREAM_REPAIR_DONE: i32 = 15;
+pub(crate) const POST_INT_STREAM_REPAIR_RECOVERED: i32 = 16;
 
 // PostController kinds (op = 62, a1 = 12)
 pub(crate) const CTRL_RENAME_PAR: i32 = 0;
@@ -446,8 +479,17 @@ pub(crate) struct NzbSnap {
     pub post_working: bool,
     pub post_stage: i32,
     pub has_live_repair_thread: bool,
+    pub live_repair_thread_ptr: usize,
     pub has_unpack_thread: bool,
     pub has_stream_repair_jobs: bool,
+    pub url_status: i32,
+    pub par_sec: i32,
+    pub repair_sec: i32,
+    pub unpack_sec: i32,
+    pub reprocess: bool,
+    pub extra_par_blocks: i32,
+    pub dupe_recovered_holes: i32,
+    pub script_total_status: i32,
     pub is_dupe_success: bool,
     pub health: i32,
     pub critical_health_opt: i32,
@@ -513,6 +555,7 @@ pub(crate) struct NzbSnap {
     pub dupe_key: Vec<u8>,
     pub queued_filename: Vec<u8>,
     pub text_status: Vec<u8>,
+    pub url: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -588,6 +631,7 @@ pub(crate) struct CompletedFileSnap {
     pub id: i32,
     pub status: i32,
     pub par_file: bool,
+    pub crc: u32,
     pub filename: Vec<u8>,
     pub origname: Vec<u8>,
     pub hash16k: Vec<u8>,
@@ -601,6 +645,20 @@ pub(crate) struct StreamRepairJobSnap {
     pub holes_total_size: i64,
     pub failed_plus_missed_size: i64,
     pub filename: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StreamRepairJobDetailSnap {
+    pub file_id: i32,
+    pub failed_articles: i32,
+    pub par_file: bool,
+    pub live_attempted: bool,
+    pub decoded_file_size: i64,
+    pub failed_size: i64,
+    pub missed_size: i64,
+    pub steps_hash: u64,
+    pub filename: Vec<u8>,
+    pub holes: Vec<crate::dupefallback::NzbgetRsByteRange>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -620,7 +678,14 @@ pub(crate) struct PostSnap {
     pub need_unpack: bool,
     pub has_post_thread: bool,
     pub post_thread_running: bool,
+    pub unpack_tried: bool,
+    pub par_repaired: bool,
+    pub pass_list_tried: bool,
+    pub last_unpack_status: i32,
+    pub extracted_archives_len: usize,
+    pub parred_files_len: usize,
     pub start_time: i64,
+    pub stage_time: i64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1553,6 +1618,26 @@ impl QueueSubsysHost {
         );
     }
 
+    pub fn disk_load_completed_segments(
+        &self,
+        file_id: i32,
+        push_ctx: usize,
+        push_fn: usize,
+    ) -> usize {
+        self.raw(
+            5,
+            13,
+            file_id,
+            push_ctx,
+            push_fn,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+
     // Subsystems (op = 6)
     pub fn history_delete_disk_files(&self, nzb_ptr: usize) {
         self.raw(
@@ -1839,6 +1924,32 @@ impl QueueSubsysHost {
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         ) != 0
+    }
+
+    pub fn scanner_add_url_file(
+        &self,
+        nzb_ptr: usize,
+        is_archive: bool,
+        eff_name: &[u8],
+        eff_cat: &[u8],
+        out_file: &[u8],
+    ) -> i32 {
+        let c_name = c_bytes(eff_name);
+        let c_cat = c_bytes(eff_cat);
+        let c_out = c_bytes(out_file);
+        let mut strs = [c_out.as_ptr() as *const c_char];
+        self.raw(
+            6,
+            15,
+            i32::from(is_archive),
+            nzb_ptr,
+            0,
+            c_name.as_ptr() as *const c_char,
+            c_cat.as_ptr() as *const c_char,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            strs.as_mut_ptr(),
+        ) as i32
     }
 
     // DownloadQueue & CoordinatorDownloadQueue ops (op = 20..=25)
@@ -2144,7 +2255,13 @@ impl QueueSubsysHost {
         );
         #[cfg(unix)]
         if self.use_active {
-            crate::feed::notify_active_feed_queue_aspect(aspect_action, None);
+            let url_opt = if aspect_action == ASPECT_URL_COMPLETED && nzb_ptr != 0 {
+                Some(self.nzb_snap(nzb_ptr, false).url)
+            } else {
+                None
+            };
+            crate::feed::notify_active_feed_queue_aspect(aspect_action, url_opt.as_deref());
+            crate::urlcoord::notify_active_urlcoord_queue_update(aspect_action);
             if aspect_action == ASPECT_NZB_ADDED
                 && nzb_ptr != 0
                 && !self.nzb_snap(nzb_ptr, false).dupe_key.is_empty()
@@ -2325,9 +2442,9 @@ impl QueueSubsysHost {
         if nzb_ptr == 0 {
             return NzbSnap::default();
         }
-        let mut ints = [0i32; 70];
-        let mut i64s = [0i64; 19];
-        let mut strs = [std::ptr::null(); 8];
+        let mut ints = [0i32; 78];
+        let mut i64s = [0i64; 20];
+        let mut strs = [std::ptr::null(); 9];
         self.raw(
             30,
             i32::from(with_text_status),
@@ -2373,8 +2490,17 @@ impl QueueSubsysHost {
                 post_working: ints[26] != 0,
                 post_stage: ints[27],
                 has_live_repair_thread: ints[28] != 0,
+                live_repair_thread_ptr: i64s[19] as usize,
                 has_unpack_thread: ints[68] != 0,
                 has_stream_repair_jobs: ints[69] != 0,
+                url_status: ints[70],
+                par_sec: ints[71],
+                repair_sec: ints[72],
+                unpack_sec: ints[73],
+                reprocess: ints[74] != 0,
+                extra_par_blocks: ints[75],
+                dupe_recovered_holes: ints[76],
+                script_total_status: ints[77],
                 is_dupe_success: ints[29] != 0,
                 health: ints[30],
                 critical_health_opt: ints[31],
@@ -2440,6 +2566,7 @@ impl QueueSubsysHost {
                 dupe_key: read_cstr(strs[5]),
                 queued_filename: read_cstr(strs[6]),
                 text_status: read_cstr(strs[7]),
+                url: read_cstr(strs[8]),
             }
         }
     }
@@ -2536,6 +2663,154 @@ impl QueueSubsysHost {
             0,
             std::ptr::null(),
             std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
+    }
+
+    pub fn nzb_hard_link_path(&self, nzb_ptr: usize) -> Vec<u8> {
+        if nzb_ptr == 0 {
+            return Vec::new();
+        }
+        let mut strs = [std::ptr::null(); 1];
+        self.raw(
+            31,
+            6,
+            0,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            strs.as_mut_ptr(),
+        );
+        unsafe { read_cstr(strs[0]) }
+    }
+
+    pub fn nzb_meta_name(&self, nzb_ptr: usize) -> Vec<u8> {
+        if nzb_ptr == 0 {
+            return Vec::new();
+        }
+        let mut strs = [std::ptr::null(); 1];
+        self.raw(
+            31,
+            7,
+            0,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            strs.as_mut_ptr(),
+        );
+        unsafe { read_cstr(strs[0]) }
+    }
+
+    pub fn nzb_params_len(&self, nzb_ptr: usize) -> usize {
+        if nzb_ptr == 0 {
+            return 0;
+        }
+        self.raw(
+            31,
+            8,
+            -1,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+
+    pub fn nzb_param_at(&self, nzb_ptr: usize, idx: usize) -> (Vec<u8>, Vec<u8>) {
+        let mut strs = [std::ptr::null(); 2];
+        self.raw(
+            31,
+            8,
+            idx as i32,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            strs.as_mut_ptr(),
+        );
+        unsafe { (read_cstr(strs[0]), read_cstr(strs[1])) }
+    }
+
+    pub fn nzb_server_stats_len(&self, nzb_ptr: usize) -> usize {
+        if nzb_ptr == 0 {
+            return 0;
+        }
+        self.raw(
+            31,
+            9,
+            -1,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+
+    pub fn nzb_server_stat_at(&self, nzb_ptr: usize, idx: usize) -> (i32, i32, i32) {
+        let mut ints = [0i32; 3];
+        self.raw(
+            31,
+            9,
+            idx as i32,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        (ints[0], ints[1], ints[2])
+    }
+
+    pub fn nzb_push_script_status(&self, nzb_ptr: usize, name: &[u8], status: i32) {
+        let cn = c_bytes(name);
+        self.raw(
+            31,
+            10,
+            status,
+            nzb_ptr,
+            0,
+            cn.as_ptr() as *const c_char,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    pub fn nzb_rename_completed_file(
+        &self,
+        nzb_ptr: usize,
+        old_name: &[u8],
+        new_name: &[u8],
+    ) -> bool {
+        let co = c_bytes(old_name);
+        let cn = c_bytes(new_name);
+        self.raw(
+            31,
+            11,
+            0,
+            nzb_ptr,
+            0,
+            co.as_ptr() as *const c_char,
+            cn.as_ptr() as *const c_char,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -2723,6 +2998,7 @@ impl QueueSubsysHost {
         #[cfg(unix)]
         if self.use_active {
             crate::feed::notify_active_feed_queue_aspect(aspect_action, None);
+            crate::urlcoord::notify_active_urlcoord_queue_update(aspect_action);
         }
     }
 
@@ -2757,8 +3033,8 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn nzb_completed_files(&self, nzb_ptr: usize) -> Vec<CompletedFileSnap> {
-        let n = self.raw(
+    pub fn nzb_completed_files_len(&self, nzb_ptr: usize) -> usize {
+        self.raw(
             34,
             5,
             -1,
@@ -2769,34 +3045,43 @@ impl QueueSubsysHost {
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-        );
-        let mut out = Vec::with_capacity(n);
-        let mut ints = [0i32; 3];
+        )
+    }
+
+    pub fn nzb_completed_file_at(&self, nzb_ptr: usize, idx: usize) -> CompletedFileSnap {
+        let mut ints = [0i32; 4];
         let mut strs = [std::ptr::null(); 4];
-        for i in 0..n {
-            self.raw(
-                34,
-                5,
-                i as i32,
-                nzb_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                ints.as_mut_ptr(),
-                std::ptr::null_mut(),
-                strs.as_mut_ptr(),
-            );
-            unsafe {
-                out.push(CompletedFileSnap {
-                    id: ints[0],
-                    status: ints[1],
-                    par_file: ints[2] != 0,
-                    filename: read_cstr(strs[0]),
-                    origname: read_cstr(strs[1]),
-                    hash16k: read_cstr(strs[2]),
-                    par_set_id: read_cstr(strs[3]),
-                });
+        self.raw(
+            34,
+            5,
+            idx as i32,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            strs.as_mut_ptr(),
+        );
+        unsafe {
+            CompletedFileSnap {
+                id: ints[0],
+                status: ints[1],
+                par_file: ints[2] != 0,
+                crc: ints[3] as u32,
+                filename: read_cstr(strs[0]),
+                origname: read_cstr(strs[1]),
+                hash16k: read_cstr(strs[2]),
+                par_set_id: read_cstr(strs[3]),
             }
+        }
+    }
+
+    pub fn nzb_completed_files(&self, nzb_ptr: usize) -> Vec<CompletedFileSnap> {
+        let n = self.nzb_completed_files_len(nzb_ptr);
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            out.push(self.nzb_completed_file_at(nzb_ptr, i));
         }
         out
     }
@@ -2950,6 +3235,142 @@ impl QueueSubsysHost {
             });
         }
         out
+    }
+
+    pub fn nzb_stream_repair_jobs_len(&self, nzb_ptr: usize) -> usize {
+        if nzb_ptr == 0 {
+            return 0;
+        }
+        self.raw(
+            34,
+            11,
+            -1,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+
+    pub fn nzb_stream_repair_update_completed_file(&self, nzb_ptr: usize, file_id: i32, mode: i32) {
+        let mut ints = [mode];
+        self.raw(
+            34,
+            12,
+            file_id,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    pub fn nzb_stream_repair_job_detail(
+        &self,
+        nzb_ptr: usize,
+        idx: usize,
+    ) -> StreamRepairJobDetailSnap {
+        let mut ints = [0i32; 5];
+        let mut i64s = [0i64; 4];
+        let mut strs = [std::ptr::null(); 2];
+        self.raw(
+            34,
+            13,
+            idx as i32,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            i64s.as_mut_ptr(),
+            strs.as_mut_ptr(),
+        );
+        let holes_len = ints[4].max(0) as usize;
+        let holes = if holes_len == 0 || strs[1].is_null() {
+            Vec::new()
+        } else {
+            unsafe {
+                std::slice::from_raw_parts(
+                    strs[1] as *const crate::dupefallback::NzbgetRsByteRange,
+                    holes_len,
+                )
+                .to_vec()
+            }
+        };
+        StreamRepairJobDetailSnap {
+            file_id: ints[0],
+            failed_articles: ints[1],
+            par_file: ints[2] != 0,
+            live_attempted: ints[3] != 0,
+            decoded_file_size: i64s[0],
+            failed_size: i64s[1],
+            missed_size: i64s[2],
+            steps_hash: i64s[3] as u64,
+            filename: unsafe { read_cstr(strs[0]) },
+            holes,
+        }
+    }
+
+    pub fn nzb_stream_repair_mark_live_attempted(&self, nzb_ptr: usize, idx: usize) -> bool {
+        let mut ints = [1i32];
+        self.raw(
+            34,
+            13,
+            idx as i32,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
+    }
+
+    pub fn nzb_stream_repair_erase_job(&self, nzb_ptr: usize, idx: usize, set_changed: bool) {
+        let mut ints = [2i32, i32::from(set_changed)];
+        self.raw(
+            34,
+            13,
+            idx as i32,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    pub fn nzb_stream_repair_update_job_holes(
+        &self,
+        nzb_ptr: usize,
+        idx: usize,
+        new_decoded_size: i64,
+        holes_ptr: usize,
+        holes_len: i32,
+    ) {
+        let mut ints = [3i32, holes_len];
+        let mut i64s = [new_decoded_size];
+        self.raw(
+            34,
+            13,
+            idx as i32,
+            nzb_ptr,
+            holes_ptr,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            i64s.as_mut_ptr(),
+            std::ptr::null_mut(),
+        );
     }
 
     pub fn dup_snap(&self, dup_ptr: usize) -> DupSnap {
@@ -3664,8 +4085,8 @@ impl QueueSubsysHost {
         if post_ptr == 0 {
             return PostSnap::default();
         }
-        let mut ints = [0i32; 13];
-        let mut i64s = [0i64; 2];
+        let mut ints = [0i32; 19];
+        let mut i64s = [0i64; 3];
         self.raw(
             60,
             0,
@@ -3694,7 +4115,14 @@ impl QueueSubsysHost {
             need_unpack: ints[10] != 0,
             has_post_thread: ints[11] != 0,
             post_thread_running: ints[12] != 0,
+            unpack_tried: ints[13] != 0,
+            par_repaired: ints[14] != 0,
+            pass_list_tried: ints[15] != 0,
+            last_unpack_status: ints[16],
+            extracted_archives_len: ints[17].max(0) as usize,
+            parred_files_len: ints[18].max(0) as usize,
             start_time: i64s[0],
+            stage_time: i64s[2],
         }
     }
 
@@ -3754,6 +4182,115 @@ impl QueueSubsysHost {
         );
     }
 
+    pub fn post_set_stage_time(&self, post_ptr: usize, stage_time: i64) {
+        if post_ptr == 0 {
+            return;
+        }
+        let mut i64s = [stage_time];
+        self.raw(
+            60,
+            4,
+            0,
+            post_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            i64s.as_mut_ptr(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    pub fn post_set_progress_label(&self, post_ptr: usize, label: &[u8]) {
+        if post_ptr == 0 {
+            return;
+        }
+        let c = c_bytes(label);
+        self.raw(
+            60,
+            5,
+            0,
+            post_ptr,
+            0,
+            c.as_ptr() as *const c_char,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    pub fn post_push_parred_file(&self, post_ptr: usize, name: &[u8]) {
+        if post_ptr == 0 {
+            return;
+        }
+        let c = c_bytes(name);
+        self.raw(
+            60,
+            6,
+            -1,
+            post_ptr,
+            0,
+            c.as_ptr() as *const c_char,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    pub fn post_parred_file_at(&self, post_ptr: usize, idx: usize) -> Vec<u8> {
+        let mut strs = [std::ptr::null(); 1];
+        self.raw(
+            60,
+            6,
+            idx as i32,
+            post_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            strs.as_mut_ptr(),
+        );
+        unsafe { read_cstr(strs[0]) }
+    }
+
+    pub fn post_clear_extracted_archives(&self, post_ptr: usize) {
+        if post_ptr == 0 {
+            return;
+        }
+        self.raw(
+            60,
+            7,
+            -1,
+            post_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    pub fn post_extracted_archive_at(&self, post_ptr: usize, idx: usize) -> Vec<u8> {
+        let mut strs = [std::ptr::null(); 1];
+        self.raw(
+            60,
+            7,
+            idx as i32,
+            post_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            strs.as_mut_ptr(),
+        );
+        unsafe { read_cstr(strs[0]) }
+    }
+
     pub fn prepost_is_stopped(&self, owner_ptr: usize) -> bool {
         self.raw(
             61,
@@ -3767,6 +4304,51 @@ impl QueueSubsysHost {
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         ) != 0
+    }
+
+    pub fn thread_is_stopped(&self, thread_ptr: usize) -> bool {
+        self.raw(
+            61,
+            1,
+            0,
+            thread_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
+    }
+
+    pub fn thread_stop(&self, thread_ptr: usize) {
+        self.raw(
+            61,
+            2,
+            0,
+            thread_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+
+    pub fn thread_resume(&self, thread_ptr: usize) {
+        self.raw(
+            61,
+            3,
+            0,
+            thread_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
     }
 
     pub fn post_stop_thread(&self, post_ptr: usize) {

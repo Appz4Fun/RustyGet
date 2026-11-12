@@ -1063,11 +1063,6 @@ impl Drop for ScriptRunner {
     }
 }
 
-/// Opaque C handle wrapping `Arc<ScriptRunner>` (used by `PostScriptController`).
-pub struct NzbgetRsScriptRunner {
-    pub(crate) inner: Arc<ScriptRunner>,
-}
-
 /// Background job dispatched through C++ `ScriptJobThread` so `Thread::GetThreadCount()`
 /// tracks active background scripts accurately through daemon shutdown.
 pub enum BackgroundScriptJob {
@@ -1614,12 +1609,41 @@ pub(crate) fn run_maint_info_script(
 
 static ACTIVE_EXT_MGR: std::sync::RwLock<Option<std::sync::Weak<RsExtensionManager>>> =
     std::sync::RwLock::new(None);
+#[cfg(unix)]
+static DAEMON_EXT_MGR: Mutex<Option<Arc<RsExtensionManager>>> = Mutex::new(None);
 
 pub(crate) fn active_ext_mgr() -> Option<Arc<RsExtensionManager>> {
     ACTIVE_EXT_MGR
         .read()
         .ok()
         .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+}
+
+#[cfg(unix)]
+pub(crate) fn create_daemon_ext_mgr() {
+    let arc = Arc::new(RsExtensionManager::new());
+    if let Ok(mut g) = ACTIVE_EXT_MGR.write() {
+        *g = Some(Arc::downgrade(&arc));
+    }
+    if let Ok(mut g) = DAEMON_EXT_MGR.lock() {
+        *g = Some(arc);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn shutdown_daemon_ext_mgr() {
+    let prev = DAEMON_EXT_MGR.lock().ok().and_then(|mut g| g.take());
+    if let Some(arc) = prev {
+        let wk = Arc::downgrade(&arc);
+        if let Ok(mut g) = ACTIVE_EXT_MGR.write() {
+            if g.as_ref()
+                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
+            {
+                *g = None;
+            }
+        }
+        drop(arc);
+    }
 }
 
 #[no_mangle]
@@ -1856,27 +1880,6 @@ pub(crate) fn has_scan_scripts_active() -> bool {
         }
     }
     has
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_script_runner_new() -> *mut NzbgetRsScriptRunner {
-    Box::into_raw(Box::new(NzbgetRsScriptRunner {
-        inner: ScriptRunner::new(true),
-    }))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_script_runner_free(r: *mut NzbgetRsScriptRunner) {
-    if !r.is_null() {
-        drop(Box::from_raw(r));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_script_runner_terminate(r: *mut NzbgetRsScriptRunner) {
-    if let (Some(r_ref), Some(host_cb)) = (r.as_ref(), crate::ffi::script_host_cb()) {
-        r_ref.inner.terminate(ptr::null_mut(), host_cb);
-    }
 }
 
 pub(crate) fn terminate_all_active() {

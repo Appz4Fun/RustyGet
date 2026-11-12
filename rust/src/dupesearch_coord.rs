@@ -242,26 +242,117 @@ fn now_unix_sec() -> i64 {
     }
 }
 
-fn query_host_stopped(host_ctx: *mut c_void, host_cb: DupeHostFn) -> bool {
+fn query_host_stopped(host_ctx: *mut c_void, _host_cb: DupeHostFn) -> bool {
     if host_ctx.is_null() {
         return false;
     }
-    unsafe {
-        host_cb(
-            host_ctx,
-            0,
-            0,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null(),
-            0,
-        ) != 0
+    unsafe { (*host_ctx.cast::<AtomicBool>()).load(Ordering::SeqCst) }
+}
+
+pub(crate) unsafe extern "C" fn native_dupe_host(
+    ctx: *mut c_void,
+    op: c_int,
+    a1: c_int,
+    a2: c_int,
+    p1: usize,
+    p2: usize,
+    s1: *const c_char,
+    s2: *const c_char,
+    _ints: *mut c_int,
+    _i64s: *mut i64,
+    strs: *mut *const c_char,
+    _bytes: *const u8,
+    _len: usize,
+) -> usize {
+    match op {
+        0 => {
+            if ctx.is_null() {
+                0
+            } else {
+                usize::from(unsafe { (*ctx.cast::<AtomicBool>()).load(Ordering::SeqCst) })
+            }
+        }
+        6 => {
+            let Some(qh) = crate::ffi::queue_host() else {
+                return 0;
+            };
+            if a1 == 0 {
+                let s1_b = unsafe { ptr_bytes(s1) };
+                qh.nzb_set_str(p2, crate::queuesubsys_host::NZB_STR_DUPE_KEY, &s1_b);
+                let s2_b = if s2.is_null() {
+                    None
+                } else {
+                    Some(unsafe { CStr::from_ptr(s2).to_bytes() })
+                };
+                qh.nzb_set_param(p2, OWNED_KEY_PARAM, s2_b);
+                if (a2 & 2) != 0 && qh.nzb_snap(p2, false).dupe_score < 1_000_000 {
+                    qh.nzb_set_int(p2, crate::queuesubsys_host::NZB_INT_DUPE_SCORE, 1_000_000);
+                }
+                qh.nzb_set_int(p2, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+                if (a2 & 1) != 0 {
+                    qh.dq_history_changed(p1);
+                    qh.dq_save(p1);
+                } else {
+                    qh.dq_save_changed(p1);
+                }
+                return 0;
+            }
+            if a1 == 1 {
+                let s1_b = unsafe { ptr_bytes(s1) };
+                qh.nzb_add_message(p2, a2, &s1_b);
+                return 0;
+            }
+            if a1 == 2 {
+                let queued = qh.queue_find_by_id(p1, a2) != 0;
+                let action = if queued {
+                    crate::queuesubsys_host::EA_GROUP_FINAL_DELETE
+                } else {
+                    crate::queuesubsys_host::EA_HISTORY_FINAL_DELETE
+                };
+                qh.dq_edit_list_single_id(p1, a2, action, None);
+                return 0;
+            }
+            let h_len = qh.history_len(p1);
+            for idx in 0..h_len {
+                let h = qh.history_at(p1, idx);
+                if h.id == a2 && h.kind == crate::queuesubsys_host::HK_DUP {
+                    return 0;
+                }
+            }
+            let score_arg = if s1.is_null() {
+                None
+            } else {
+                Some(unsafe { CStr::from_ptr(s1).to_bytes() })
+            };
+            let kinds = [
+                (
+                    crate::queuesubsys_host::EA_HISTORY_SET_DUPE_SCORE,
+                    crate::queuesubsys_host::EA_HISTORY_SET_PARAMETER,
+                ),
+                (
+                    crate::queuesubsys_host::EA_GROUP_SET_DUPE_SCORE,
+                    crate::queuesubsys_host::EA_GROUP_SET_PARAMETER,
+                ),
+            ];
+            for (k_score, k_param) in kinds {
+                if qh.dq_edit_list_single_id(p1, a2, k_score, score_arg) {
+                    if !strs.is_null() {
+                        for i in 0..p2 {
+                            let param_ptr = unsafe { *strs.add(i) };
+                            let param_arg = if param_ptr.is_null() {
+                                None
+                            } else {
+                                Some(unsafe { CStr::from_ptr(param_ptr).to_bytes() })
+                            };
+                            qh.dq_edit_list_single_id(p1, a2, k_param, param_arg);
+                        }
+                    }
+                    return 1;
+                }
+            }
+            0
+        }
+        _ => 0,
     }
 }
 
@@ -322,43 +413,16 @@ fn host_log(_host_ctx: *mut c_void, _host_cb: DupeHostFn, kind: c_int, msg: &[u8
 }
 
 fn with_guarded_queue<R, F: FnOnce(usize) -> R>(
-    host_ctx: *mut c_void,
-    host_cb: DupeHostFn,
+    _host_ctx: *mut c_void,
+    _host_cb: DupeHostFn,
     f: F,
 ) -> R {
-    struct GuardCtx<F, R> {
-        f: Option<F>,
-        out: Option<R>,
-    }
-    unsafe extern "C" fn trampoline<F: FnOnce(usize) -> R, R>(raw: *mut c_void, dq_ptr: usize) {
-        let gctx = unsafe { &mut *raw.cast::<GuardCtx<F, R>>() };
-        if let Some(func) = gctx.f.take() {
-            gctx.out = Some(func(dq_ptr));
-        }
-    }
-    let mut gctx = GuardCtx {
-        f: Some(f),
-        out: None,
-    };
-    let fn_ptr = trampoline::<F, R> as unsafe extern "C" fn(*mut c_void, usize) as usize;
-    unsafe {
-        host_cb(
-            host_ctx,
-            4,
-            0,
-            0,
-            (&raw mut gctx) as usize,
-            fn_ptr,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null(),
-            0,
-        );
-    }
-    gctx.out.expect("guarded queue callback did not run")
+    let qh = crate::ffi::queue_host().expect("queue_host not initialized");
+    let mut out = None;
+    qh.with_locked_queue(|dq_ptr| {
+        out = Some(f(dq_ptr));
+    });
+    out.expect("guarded queue callback did not run")
 }
 
 #[derive(Clone, Default)]
@@ -389,165 +453,105 @@ struct NzbSnap {
     owned_key_param: Option<Vec<u8>>,
 }
 
-fn dq_counts(host_ctx: *mut c_void, host_cb: DupeHostFn, dq_ptr: usize) -> (usize, usize) {
-    let mut ints = [0 as c_int; 2];
-    unsafe {
-        host_cb(
-            host_ctx,
-            5,
-            0,
-            0,
-            dq_ptr,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ints.as_mut_ptr(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null(),
-            0,
-        );
-    }
-    (ints[0].max(0) as usize, ints[1].max(0) as usize)
+fn dq_counts(_host_ctx: *mut c_void, _host_cb: DupeHostFn, dq_ptr: usize) -> (usize, usize) {
+    let Some(qh) = crate::ffi::queue_host() else {
+        return (0, 0);
+    };
+    (qh.queue_len(dq_ptr), qh.history_len(dq_ptr))
 }
 
-fn dq_queue_at(host_ctx: *mut c_void, host_cb: DupeHostFn, dq_ptr: usize, idx: usize) -> usize {
-    unsafe {
-        host_cb(
-            host_ctx,
-            5,
-            1,
-            idx as c_int,
-            dq_ptr,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null(),
-            0,
-        )
-    }
+fn dq_queue_at(_host_ctx: *mut c_void, _host_cb: DupeHostFn, dq_ptr: usize, idx: usize) -> usize {
+    let Some(qh) = crate::ffi::queue_host() else {
+        return 0;
+    };
+    qh.queue_at(dq_ptr, idx)
 }
 
 fn dq_history_at(
-    host_ctx: *mut c_void,
-    host_cb: DupeHostFn,
+    _host_ctx: *mut c_void,
+    _host_cb: DupeHostFn,
     dq_ptr: usize,
     idx: usize,
 ) -> (i32, i32, i64, usize) {
-    let mut ints = [0 as c_int; 2];
-    let mut i64s = [0i64; 1];
-    let nzb_ptr = unsafe {
-        host_cb(
-            host_ctx,
-            5,
-            2,
-            idx as c_int,
-            dq_ptr,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ints.as_mut_ptr(),
-            i64s.as_mut_ptr(),
-            ptr::null_mut(),
-            ptr::null(),
-            0,
-        )
+    let Some(qh) = crate::ffi::queue_host() else {
+        return (0, 0, 0, 0);
     };
-    (ints[0], ints[1], i64s[0], nzb_ptr)
+    let h = qh.history_at(dq_ptr, idx);
+    let nzb_ptr = if h.kind == crate::queuesubsys_host::HK_NZB {
+        h.inner_ptr
+    } else {
+        0
+    };
+    (h.id, h.kind, h.time, nzb_ptr)
 }
 
 fn dq_find_nzb(
-    host_ctx: *mut c_void,
-    host_cb: DupeHostFn,
+    _host_ctx: *mut c_void,
+    _host_cb: DupeHostFn,
     dq_ptr: usize,
     nzb_id: i32,
 ) -> Option<(usize, bool)> {
-    let mut ints = [0 as c_int; 1];
-    let ptr = unsafe {
-        host_cb(
-            host_ctx,
-            5,
-            3,
-            nzb_id,
-            dq_ptr,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ints.as_mut_ptr(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null(),
-            0,
-        )
-    };
-    if ptr == 0 {
-        None
-    } else {
-        Some((ptr, ints[0] != 0))
+    let qh = crate::ffi::queue_host()?;
+    let q_ptr = qh.queue_find_by_id(dq_ptr, nzb_id);
+    if q_ptr != 0 {
+        return Some((q_ptr, false));
     }
+    let h_len = qh.history_len(dq_ptr);
+    for idx in 0..h_len {
+        let h = qh.history_at(dq_ptr, idx);
+        if h.kind == crate::queuesubsys_host::HK_NZB
+            && h.inner_ptr != 0
+            && qh.nzb_snap(h.inner_ptr, false).id == nzb_id
+        {
+            return Some((h.inner_ptr, true));
+        }
+    }
+    None
 }
 
 fn inspect_nzb(
-    host_ctx: *mut c_void,
-    host_cb: DupeHostFn,
+    _host_ctx: *mut c_void,
+    _host_cb: DupeHostFn,
     nzb_ptr: usize,
     with_health: bool,
 ) -> NzbSnap {
-    let mut ints = [0 as c_int; 16];
-    let mut strs = [ptr::null::<c_char>(); 8];
-    unsafe {
-        host_cb(
-            host_ctx,
-            5,
-            4,
-            c_int::from(with_health),
-            nzb_ptr,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ints.as_mut_ptr(),
-            ptr::null_mut(),
-            strs.as_mut_ptr(),
-            ptr::null(),
-            0,
-        );
-    }
+    let Some(qh) = crate::ffi::queue_host() else {
+        return NzbSnap::default();
+    };
+    let s = qh.nzb_snap(nzb_ptr, false);
+    let marked_alive = qh.nzb_get_param(nzb_ptr, ALIVE_PARAM);
+    let owned_key_param = qh.nzb_get_param(nzb_ptr, OWNED_KEY_PARAM);
+    let is_donor = marked_alive.is_some() || qh.nzb_get_param(nzb_ptr, DONOR_PARAM).is_some();
+    let has_dupe_fleet = qh.nzb_get_param(nzb_ptr, FLEET_PARAM).is_some();
     NzbSnap {
         ptr: nzb_ptr,
-        id: ints[0],
-        kind: ints[1],
-        deleting: ints[2] != 0,
-        delete_status: ints[3],
-        mark_status: ints[4],
-        dupe_mode: ints[5],
-        dupe_hint: ints[6],
-        dupe_score: ints[7],
-        has_post_info: ints[8] != 0,
-        dupe_success: ints[9] != 0,
-        full_hash: ints[10] as u32,
-        is_donor: ints[12] != 0,
-        has_dupe_fleet: ints[13] != 0,
-        health: ints[14],
-        critical_health: ints[15],
-        name: unsafe { ptr_bytes(strs[0]) },
-        dupe_key: unsafe { ptr_bytes(strs[1]) },
-        category: unsafe { ptr_bytes(strs[2]) },
-        queued_filename: unsafe { ptr_bytes(strs[3]) },
-        final_dir: unsafe { ptr_bytes(strs[4]) },
-        dest_dir: unsafe { ptr_bytes(strs[5]) },
-        marked_alive: if strs[6].is_null() {
-            None
+        id: s.id,
+        kind: s.kind,
+        deleting: s.deleting,
+        delete_status: s.delete_status,
+        mark_status: s.mark_status,
+        dupe_mode: s.dupe_mode,
+        dupe_hint: s.dupe_hint,
+        dupe_score: s.dupe_score,
+        has_post_info: s.has_post_info,
+        dupe_success: s.is_dupe_success,
+        full_hash: s.full_content_hash,
+        is_donor,
+        has_dupe_fleet,
+        health: if with_health { s.health } else { 0 },
+        critical_health: if with_health {
+            s.critical_health_opt
         } else {
-            Some(unsafe { ptr_bytes(strs[6]) })
+            0
         },
-        owned_key_param: if strs[7].is_null() {
-            None
-        } else {
-            Some(unsafe { ptr_bytes(strs[7]) })
-        },
+        name: s.name,
+        dupe_key: s.dupe_key,
+        category: s.category,
+        queued_filename: s.queued_filename,
+        final_dir: s.final_dir,
+        dest_dir: s.dest_dir,
+        marked_alive,
+        owned_key_param,
     }
 }
 
@@ -832,7 +836,7 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
     let mut known = map_mutex.lock().unwrap_or_else(|e| e.into_inner());
     let mut raw_servers: Vec<(i32, i32, i32, i32)> = Vec::new();
     #[cfg(unix)]
-    let used_native = if let Some(pool) = crate::net::active_server_pool() {
+    if let Some(pool) = crate::net::active_server_pool() {
         for s in pool.servers_snapshot() {
             raw_servers.push((
                 s.id,
@@ -840,53 +844,6 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
                 s.max_connections,
                 s.group,
             ));
-        }
-        true
-    } else {
-        false
-    };
-    #[cfg(not(unix))]
-    let used_native = false;
-    if !used_native {
-        let count = unsafe {
-            host_cb(
-                host_ctx,
-                10,
-                -1,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null(),
-                0,
-            )
-        };
-        for idx in 0..count {
-            let mut ints = [0 as c_int; 4];
-            let ok = unsafe {
-                host_cb(
-                    host_ctx,
-                    10,
-                    idx as c_int,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                    0,
-                )
-            };
-            if ok != 0 {
-                raw_servers.push((ints[0], ints[1], ints[2], ints[3]));
-            }
         }
     }
     let mut list = Vec::new();
@@ -1108,222 +1065,9 @@ impl DonorServerExchange for NntpHealthTransportShared {
             return Ok(answers);
         }
 
-        let wait_start = host_now(ctx, host_cb);
-        let mut conn_ptr = 0usize;
-        let mut need_join = false;
-        while conn_ptr == 0 && !http_stopped() && host_now(ctx, host_cb) - wait_start <= 10 {
-            let mut ints = [0 as c_int; 2];
-            conn_ptr = unsafe {
-                host_cb(
-                    ctx,
-                    11,
-                    self.server_id,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                    0,
-                )
-            };
-            if ints[0] == 0 {
-                return Err(DonorExchangeError::default());
-            }
-            need_join = ints[1] != 0;
-            if conn_ptr == 0 {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        }
-        if conn_ptr == 0 {
-            return Err(DonorExchangeError {
-                answers: Vec::new(),
-                busy: true,
-            });
-        }
-
-        struct ConnRelease {
-            conn_ptr: usize,
-            broken: bool,
-            ctx: *mut c_void,
-            host_cb: DupeHostFn,
-        }
-        impl Drop for ConnRelease {
-            fn drop(&mut self) {
-                unsafe {
-                    (self.host_cb)(
-                        self.ctx,
-                        12,
-                        c_int::from(self.broken),
-                        0,
-                        self.conn_ptr,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null(),
-                        0,
-                    );
-                }
-            }
-        }
-        let mut release = ConnRelease {
-            conn_ptr,
-            broken: false,
-            ctx,
-            host_cb,
-        };
-
-        let mut commands = Vec::with_capacity(batch.len() * 48);
-        for req in batch {
-            commands.extend_from_slice(b"STAT ");
-            commands.extend_from_slice(&crate::nntp::nntp_health_format_bracketed_id(
-                req.message_id.as_bytes(),
-            ));
-            commands.extend_from_slice(b"\r\n");
-        }
-
-        let g_vecs: Vec<Vec<u8>> = if need_join && !batch[0].groups.is_empty() {
-            batch[0]
-                .groups
-                .iter()
-                .map(|g| c_bytes(g.as_bytes()))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let mut g_ptrs: Vec<*const c_char> =
-            g_vecs.iter().map(|v| v.as_ptr() as *const c_char).collect();
-        let mut broken_flag = [0 as c_int; 1];
-        let sent_ok = unsafe {
-            host_cb(
-                ctx,
-                13,
-                c_int::from(need_join && !g_ptrs.is_empty()),
-                g_ptrs.len() as c_int,
-                conn_ptr,
-                0,
-                ptr::null(),
-                ptr::null(),
-                broken_flag.as_mut_ptr(),
-                ptr::null_mut(),
-                if g_ptrs.is_empty() {
-                    ptr::null_mut()
-                } else {
-                    g_ptrs.as_mut_ptr()
-                },
-                commands.as_ptr(),
-                commands.len(),
-            )
-        };
-        if sent_ok == 0 {
-            release.broken = broken_flag[0] != 0;
-            return Err(DonorExchangeError::default());
-        }
-
-        let mut answers = Vec::with_capacity(batch.len());
-        for _ in 0..batch.len() {
-            if http_stopped() || donor_stopping() {
-                release.broken = true;
-                return Err(DonorExchangeError {
-                    answers,
-                    busy: false,
-                });
-            }
-            let code = unsafe {
-                host_cb(
-                    ctx,
-                    14,
-                    0,
-                    0,
-                    conn_ptr,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null(),
-                    0,
-                )
-            };
-            if code == 0 {
-                release.broken = true;
-                return Err(DonorExchangeError {
-                    answers,
-                    busy: false,
-                });
-            }
-            answers.push(match code {
-                1 => DonorAnswer::Present,
-                2 => DonorAnswer::Missing,
-                _ => DonorAnswer::Error,
-            });
-        }
-
-        for i in 0..batch.len() {
-            if http_stopped() || donor_stopping() {
-                release.broken = true;
-                for j in i..batch.len() {
-                    if batch[j].gate.is_some() && answers[j] == DonorAnswer::Present {
-                        answers[j] = DonorAnswer::Error;
-                    }
-                }
-                return Err(DonorExchangeError {
-                    answers,
-                    busy: false,
-                });
-            }
-            let Some(gate) = batch[i].gate.as_ref() else {
-                continue;
-            };
-            if answers[i] != DonorAnswer::Present {
-                continue;
-            }
-            let res = gate.body_once_fallible(|| {
-                let bracketed =
-                    crate::nntp::nntp_health_format_bracketed_id(batch[i].message_id.as_bytes());
-                let bg_vecs: Vec<Vec<u8>> = batch[i]
-                    .groups
-                    .iter()
-                    .map(|g| g.as_bytes().to_vec())
-                    .collect();
-                let Some(nntp_host) = get_nntp_fetch_host(ctx, host_cb) else {
-                    return Ok(DonorAnswer::BodyBad);
-                };
-                let art = crate::articlefetcher::ArticleFetcher::new(nntp_host)
-                    .fetch_from_connection(conn_ptr, &bracketed, &bg_vecs);
-                if art.success {
-                    Ok(DonorAnswer::Present)
-                } else if art.transient {
-                    Err(())
-                } else {
-                    Ok(DonorAnswer::BodyBad)
-                }
-            });
-            match res {
-                Ok(ans) => answers[i] = ans,
-                Err(()) => {
-                    release.broken = true;
-                    answers[i] = DonorAnswer::Error;
-                    for j in (i + 1)..batch.len() {
-                        if batch[j].gate.is_some() && answers[j] == DonorAnswer::Present {
-                            answers[j] = DonorAnswer::Error;
-                        }
-                    }
-                    return Err(DonorExchangeError {
-                        answers,
-                        busy: false,
-                    });
-                }
-            }
-        }
-        Ok(answers)
+        #[cfg(not(unix))]
+        let _ = (ctx, host_cb);
+        Err(DonorExchangeError::default())
     }
 }
 
@@ -1332,37 +1076,14 @@ impl DonorServerExchange for NntpHealthTransportShared {
 // ============================================================================
 
 fn get_nntp_fetch_host(
-    host_ctx: *mut c_void,
-    host_cb: DupeHostFn,
+    _host_ctx: *mut c_void,
+    _host_cb: DupeHostFn,
 ) -> Option<crate::articlefetcher::NzbgetRsNntpFetchHostFn> {
     #[cfg(unix)]
     if crate::net::active_server_pool().is_some() {
         return Some(crate::articlefetcher::native_nntp_fetch_host);
     }
-    let raw = unsafe {
-        host_cb(
-            host_ctx,
-            15,
-            0,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null(),
-            0,
-        )
-    };
-    if raw == 0 {
-        None
-    } else {
-        Some(unsafe {
-            std::mem::transmute::<usize, crate::articlefetcher::NzbgetRsNntpFetchHostFn>(raw)
-        })
-    }
+    None
 }
 
 fn fetch_article_via_host(
@@ -4527,6 +4248,128 @@ impl NzbgetRsDupeSearch {
 
         donor_wait_all();
         host_log(host_ctx, host_cb, MK_DEBUG, b"Exiting DupeSearch-loop");
+    }
+}
+
+struct DaemonDupeSearch {
+    ds: Arc<NzbgetRsDupeSearch>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+static DAEMON_DS_RUNNING: AtomicBool = AtomicBool::new(false);
+static DAEMON_DS_STOPPED: AtomicBool = AtomicBool::new(false);
+static DAEMON_DUPESEARCH: Mutex<Option<DaemonDupeSearch>> = Mutex::new(None);
+
+pub(crate) fn create_daemon_dupesearch() {
+    DAEMON_DS_RUNNING.store(false, Ordering::SeqCst);
+    DAEMON_DS_STOPPED.store(false, Ordering::SeqCst);
+    let mut g = DAEMON_DUPESEARCH.lock().unwrap_or_else(|e| e.into_inner());
+    *g = Some(DaemonDupeSearch {
+        ds: Arc::new(NzbgetRsDupeSearch::new()),
+        thread: None,
+    });
+}
+
+pub(crate) fn start_daemon_dupesearch() {
+    let mut g = DAEMON_DUPESEARCH.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(st) = g.as_mut() else {
+        return;
+    };
+    if st.thread.is_some() {
+        return;
+    }
+    DAEMON_DS_STOPPED.store(false, Ordering::SeqCst);
+    DAEMON_DS_RUNNING.store(true, Ordering::SeqCst);
+    let ds = st.ds.clone();
+    if let Ok(h) = std::thread::Builder::new()
+        .name("dupe-search".into())
+        .spawn(move || {
+            struct RunningReset;
+            impl Drop for RunningReset {
+                fn drop(&mut self) {
+                    DAEMON_DS_RUNNING.store(false, Ordering::SeqCst);
+                }
+            }
+            let _reset = RunningReset;
+            let _tg = crate::ffi::RustThreadGuard::enter(&DAEMON_DS_STOPPED);
+            ds.run(
+                (&raw const DAEMON_DS_STOPPED) as *mut c_void,
+                native_dupe_host,
+            );
+        })
+    {
+        st.thread = Some(h);
+    } else {
+        DAEMON_DS_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn stop_daemon_dupesearch() {
+    DAEMON_DS_STOPPED.store(true, Ordering::SeqCst);
+    let ds = DAEMON_DUPESEARCH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|st| st.ds.clone());
+    if let Some(ds) = ds {
+        ds.stop();
+    }
+}
+
+pub(crate) fn is_daemon_dupesearch_running() -> bool {
+    DAEMON_DS_RUNNING.load(Ordering::SeqCst)
+}
+
+pub(crate) fn shutdown_daemon_dupesearch() {
+    stop_daemon_dupesearch();
+    let st = DAEMON_DUPESEARCH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(mut st) = st {
+        if let Some(h) = st.thread.take() {
+            let _ = h.join();
+        }
+        #[cfg(unix)]
+        crate::log::log_active_bytes(MK_DEBUG, b"Destroying DupeSearch");
+        drop(st.ds);
+    }
+    DAEMON_DS_RUNNING.store(false, Ordering::SeqCst);
+}
+
+pub(crate) fn notify_active_dupesearch_name_changed(nzb_id: i32) {
+    let ds = DAEMON_DUPESEARCH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|st| st.ds.clone());
+    if let Some(ds) = ds {
+        ds.notify_name_changed(
+            nzb_id,
+            (&raw const DAEMON_DS_STOPPED) as *mut c_void,
+            native_dupe_host,
+        );
+    }
+}
+
+pub(crate) fn notify_active_dupesearch_queue_update(
+    action_kind: i32,
+    dq_ptr: usize,
+    added_ptr: usize,
+) {
+    let ds = DAEMON_DUPESEARCH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|st| st.ds.clone());
+    if let Some(ds) = ds {
+        ds.download_queue_update(
+            action_kind,
+            dq_ptr,
+            added_ptr,
+            (&raw const DAEMON_DS_STOPPED) as *mut c_void,
+            native_dupe_host,
+        );
     }
 }
 

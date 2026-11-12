@@ -3091,24 +3091,54 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_op(
 }
 
 #[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_coord_exec(
-    op: c_int,
-    a1: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
-) -> usize {
-    let _cancel_guard = PosixCancelGuard::disable();
-    crate::dupecoord::dupe_coord_exec(op, a1, p1, p2, s1, s2, host_cb)
+static ACTIVE_QUEUE_COORD: std::sync::RwLock<
+    Option<(
+        std::sync::Weak<crate::queuecoord::NzbgetRsQueueCoordinator>,
+        usize,
+    )>,
+> = std::sync::RwLock::new(None);
+
+#[cfg(unix)]
+pub(crate) fn queue_host() -> Option<crate::queuesubsys_host::QueueSubsysHost> {
+    let cb = BUILD_ENV
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|e| e.queue_host_cb))?;
+    let ctx = ACTIVE_QUEUE_COORD
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|(_, c)| *c))
+        .unwrap_or(0);
+    Some(crate::queuesubsys_host::QueueSubsysHost::new(
+        ctx as *mut c_void,
+        cb,
+    ))
+}
+
+#[cfg(unix)]
+pub(crate) fn active_queue_coord_and_host() -> Option<(
+    std::sync::Arc<crate::queuecoord::NzbgetRsQueueCoordinator>,
+    crate::queuesubsys_host::QueueSubsysHost,
+)> {
+    let cb = BUILD_ENV
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|e| e.queue_host_cb))?;
+    let (weak, ctx) = ACTIVE_QUEUE_COORD.read().ok().and_then(|g| g.clone())?;
+    let arc = weak.upgrade()?;
+    Some((
+        arc,
+        crate::queuesubsys_host::QueueSubsysHost::new(ctx as *mut c_void, cb),
+    ))
 }
 
 #[cfg(unix)]
 #[no_mangle]
 pub extern "C" fn nzbget_rs_queue_coord_new() -> *mut crate::queuecoord::NzbgetRsQueueCoordinator {
-    Box::into_raw(Box::new(crate::queuecoord::NzbgetRsQueueCoordinator::new()))
+    std::sync::Arc::into_raw(std::sync::Arc::new(
+        crate::queuecoord::NzbgetRsQueueCoordinator::new(),
+    ))
+    .cast_mut()
 }
 
 #[cfg(unix)]
@@ -3117,7 +3147,10 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_free(
     ptr: *mut crate::queuecoord::NzbgetRsQueueCoordinator,
 ) {
     if !ptr.is_null() {
-        drop(Box::from_raw(ptr));
+        if let Ok(mut g) = ACTIVE_QUEUE_COORD.write() {
+            *g = None;
+        }
+        drop(std::sync::Arc::from_raw(ptr));
     }
 }
 
@@ -3141,7 +3174,22 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_exec(
         return 0;
     };
     let _cancel_guard = PosixCancelGuard::disable();
-    coord.exec(op, a1, a2, p1, p2, p3, s1, ints, host_cb, ctx)
+    if op == 0 {
+        std::sync::Arc::increment_strong_count(ptr);
+        let arc = std::sync::Arc::from_raw(ptr);
+        let weak = std::sync::Arc::downgrade(&arc);
+        drop(arc);
+        if let Ok(mut g) = ACTIVE_QUEUE_COORD.write() {
+            *g = Some((weak, ctx as usize));
+        }
+    }
+    let ret = coord.exec(op, a1, a2, p1, p2, p3, s1, ints, host_cb, ctx);
+    if op == 1 {
+        if let Ok(mut g) = ACTIVE_QUEUE_COORD.write() {
+            *g = None;
+        }
+    }
+    ret
 }
 
 // ============================================================================
@@ -3640,6 +3688,7 @@ struct BuildEnvRuntime {
     tls_host_cb: crate::net::NzbgetRsConnHostFn,
     script_host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
     write_stdout_cb: Option<unsafe extern "C" fn(*const c_char, usize, c_int)>,
+    queue_host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
 }
 
 static BUILD_FLAGS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -3650,6 +3699,7 @@ static BUILD_ENV: std::sync::RwLock<Option<BuildEnvRuntime>> = std::sync::RwLock
 
 #[cfg(unix)]
 #[no_mangle]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn nzbget_rs_build_env_init(
     flags: c_int,
     version: *const c_char,
@@ -3658,6 +3708,7 @@ pub unsafe extern "C" fn nzbget_rs_build_env_init(
     tls_host_cb: crate::net::NzbgetRsConnHostFn,
     script_host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
     write_stdout_cb: Option<unsafe extern "C" fn(*const c_char, usize, c_int)>,
+    queue_host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
 ) {
     BUILD_FLAGS.store(flags, std::sync::atomic::Ordering::SeqCst);
     let _ = BUILD_VERSION.set(to_nul_cvec(input(version)));
@@ -3668,6 +3719,7 @@ pub unsafe extern "C" fn nzbget_rs_build_env_init(
             tls_host_cb,
             script_host_cb,
             write_stdout_cb,
+            queue_host_cb,
         });
     }
 }
@@ -3690,6 +3742,10 @@ fn build_ssl_extract_after_space() -> bool {
 
 pub(crate) fn build_parcheck_enabled() -> bool {
     (BUILD_FLAGS.load(std::sync::atomic::Ordering::Relaxed) & 16) == 0
+}
+
+pub(crate) fn build_curses_disabled() -> bool {
+    (BUILD_FLAGS.load(std::sync::atomic::Ordering::Relaxed) & 32) != 0
 }
 
 pub(crate) fn is_queue_loaded() -> bool {
@@ -4002,7 +4058,10 @@ impl NzbgetRsWorkState {
     fn notify(&self) {
         self.wake_waiters();
         #[cfg(unix)]
-        crate::scheduler::wake_active_disk_service();
+        {
+            crate::scheduler::wake_active_disk_service();
+            crate::feed::notify_active_feed_work_state();
+        }
         if let Some(cb) = self.notify_cb {
             unsafe { cb(self.notify_ctx) };
         }
@@ -5259,156 +5318,6 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_exec(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupe_probe_new(
-    nzb_id: c_int,
-    count_all: c_int,
-    recovered_at_start: c_int,
-) -> *mut crate::dupeprobe::NzbgetRsDupeProbe {
-    Box::into_raw(Box::new(crate::dupeprobe::NzbgetRsDupeProbe::new(
-        nzb_id,
-        count_all != 0,
-        recovered_at_start,
-    )))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupe_probe_free(p: *mut crate::dupeprobe::NzbgetRsDupeProbe) {
-    if !p.is_null() {
-        drop(Box::from_raw(p));
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupe_probe_exec(
-    p: *mut crate::dupeprobe::NzbgetRsDupeProbe,
-    op: c_int,
-    n: usize,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    s1: *const c_char,
-    groups: *const *const c_char,
-    out_idx: *mut usize,
-    ctx: *mut c_void,
-    host_cb: Option<crate::dupeprobe::DupeProbeHostFn>,
-) -> c_int {
-    match op {
-        0 => {
-            let idxs = crate::dupeprobe::sample_indexes(n, a1);
-            if !out_idx.is_null() && !idxs.is_empty() {
-                std::slice::from_raw_parts_mut(out_idx, idxs.len()).copy_from_slice(&idxs);
-            }
-            idxs.len() as c_int
-        }
-        1 => {
-            let Some(probe) = p.as_mut() else {
-                return 0;
-            };
-            let msg_id = if s1.is_null() {
-                Vec::new()
-            } else {
-                input(s1).to_vec()
-            };
-            let mut grps = Vec::with_capacity(n);
-            if !groups.is_null() && n > 0 {
-                let slice = std::slice::from_raw_parts(groups, n);
-                for &gp in slice {
-                    if !gp.is_null() {
-                        grps.push(input(gp).to_vec());
-                    }
-                }
-            }
-            probe.add_sample(msg_id, grps);
-            1
-        }
-        2 => {
-            let (Some(probe), Some(cb)) = (p.as_mut(), host_cb) else {
-                return 0;
-            };
-            c_int::from(probe.register(p1, cb))
-        }
-        3 => {
-            let (Some(probe), Some(cb)) = (p.as_mut(), host_cb) else {
-                return 0;
-            };
-            probe.run(ctx, cb);
-            1
-        }
-        4 => {
-            let (Some(probe), Some(cb)) = (p.as_mut(), host_cb) else {
-                return 0;
-            };
-            c_int::from(probe.check(a1, ctx, cb))
-        }
-        5 => {
-            let Some(cb) = host_cb else {
-                return 0;
-            };
-            let (existing, reached) = if !out_idx.is_null() {
-                let ints = out_idx as *const c_int;
-                (*ints, *ints.add(1))
-            } else {
-                (0, 0)
-            };
-            crate::dupeprobe::probe_recheck_locked(p1, a1, a2, existing, reached, ctx, cb);
-            1
-        }
-        6 => {
-            crate::dupeprobe::probe_reset();
-            1
-        }
-        7 => crate::dupeprobe::probe_probing_for(a1),
-        8 => {
-            crate::dupeprobe::probe_stop_all();
-            1
-        }
-        9 => {
-            crate::dupeprobe::probe_wait_all();
-            1
-        }
-        _ => 0,
-    }
-}
-
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_twin_exec(
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    s3: *const c_char,
-    s4: *const c_char,
-    host_cb: Option<crate::twin::NzbgetRsTwinHostFn>,
-    out_buf: *mut RsBuf,
-) -> c_int {
-    let _cancel_guard = PosixCancelGuard::disable();
-    let (rc, bytes) = crate::twin::twin_exec(
-        op,
-        a1,
-        a2,
-        p1,
-        p2,
-        s1,
-        s2,
-        s3,
-        s4,
-        Some(crate::articlefetcher::native_nntp_fetch_host),
-        host_cb,
-    );
-    if let Some(vec) = bytes {
-        if !out_buf.is_null() {
-            *out_buf = into_buf(vec);
-        }
-    }
-    rc
-}
-
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_socket_deadline_wait(
     fd: c_int,
     read: c_int,
@@ -5711,7 +5620,6 @@ pub unsafe extern "C" fn nzbget_rs_post_script_run(
 pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_new(
     live_mode: c_int,
     nzb_id: c_int,
-    probe_host: crate::dupeprobe::DupeProbeHostFn,
     tls_enabled: c_int,
     debug_enabled: c_int,
 ) -> *mut crate::streamrepair_coord::NzbgetRsStreamRepairCtrl {
@@ -5720,7 +5628,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_new(
             live_mode != 0,
             nzb_id,
             crate::articlefetcher::native_nntp_fetch_host,
-            probe_host,
             tls_enabled != 0,
             debug_enabled != 0,
         ),
@@ -5747,69 +5654,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_repair_ctrl_exec(
 ) -> c_int {
     let _cancel_guard = PosixCancelGuard::disable();
     crate::streamrepair_coord::stream_repair_ctrl_exec(ctrl, op, host_cb, ctx)
-}
-
-static DUPESEARCH_HOST_CB: std::sync::RwLock<Option<crate::dupesearch_coord::DupeHostFn>> =
-    std::sync::RwLock::new(None);
-
-fn dupesearch_host_cb() -> Option<crate::dupesearch_coord::DupeHostFn> {
-    DUPESEARCH_HOST_CB.read().ok().and_then(|g| *g)
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_new(
-    host_cb: Option<crate::dupesearch_coord::DupeHostFn>,
-) -> *mut crate::dupesearch_coord::NzbgetRsDupeSearch {
-    if host_cb.is_some() {
-        if let Ok(mut g) = DUPESEARCH_HOST_CB.write() {
-            *g = host_cb;
-        }
-    }
-    Box::into_raw(Box::new(crate::dupesearch_coord::NzbgetRsDupeSearch::new()))
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_free(
-    ptr: *mut crate::dupesearch_coord::NzbgetRsDupeSearch,
-) {
-    if !ptr.is_null() {
-        drop(Box::from_raw(ptr));
-    }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_exec(
-    ptr: *mut crate::dupesearch_coord::NzbgetRsDupeSearch,
-    op: c_int,
-    a1: c_int,
-    p1: usize,
-    p2: usize,
-    host_ctx: *mut c_void,
-    host_cb: Option<crate::dupesearch_coord::DupeHostFn>,
-) {
-    let Some(ds) = ptr.as_ref() else {
-        return;
-    };
-    let eff_cb = host_cb.or_else(dupesearch_host_cb);
-    match op {
-        0 => ds.stop(),
-        1 => {
-            if let Some(cb) = eff_cb {
-                ds.notify_name_changed(a1, host_ctx, cb);
-            }
-        }
-        2 => {
-            if let Some(cb) = eff_cb {
-                ds.download_queue_update(a1, p1, p2, host_ctx, cb);
-            }
-        }
-        3 => {
-            if let Some(cb) = eff_cb {
-                ds.run(host_ctx, cb);
-            }
-        }
-        _ => {}
-    }
 }
 
 #[cfg(unix)]
@@ -6559,23 +6403,18 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 )
             })
         }
-        8 => {
-            let Some(hcb) = dupesearch_host_cb() else {
-                return 0;
-            };
-            crate::dupesearch_coord::fleet_append(
-                std::ptr::null_mut(),
-                hcb,
-                s1,
-                s2,
-                a1,
-                a2,
-                p1.cast(),
-                n1,
-                emit_ctx,
-                emit_cb,
-            )
-        }
+        8 => crate::dupesearch_coord::fleet_append(
+            std::ptr::null_mut(),
+            crate::dupesearch_coord::native_dupe_host,
+            s1,
+            s2,
+            a1,
+            a2,
+            p1.cast(),
+            n1,
+            emit_ctx,
+            emit_cb,
+        ),
         9 => {
             let opts = crate::options::active_options();
             let mut entries: Vec<crate::xmlrpc_format::NzbgetRsRpcConfigItem> = Vec::new();
@@ -7207,39 +7046,122 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn, host: &N
     );
 }
 
-#[repr(C)]
-pub struct NzbgetRsFrontendHost {
-    pub ctx: *mut c_void,
-    pub use_color: c_int,
-    pub action_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int, c_int) -> i64>,
-    pub queue_stats_cb: Option<unsafe extern "C" fn(*mut c_void, *mut c_int, *mut i64)>,
-    pub local_queue_cb: Option<crate::ncurses_format::FrontendLocalQueueFn>,
+#[cfg(unix)]
+pub(crate) struct FrontendHandle {
+    mode: c_int,
+    use_color: bool,
+    exit_cb: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_frontend_op(
-    op: c_int,
-    host: *const NzbgetRsFrontendHost,
-) -> c_int {
-    #[cfg(unix)]
-    let _cancel_guard = PosixCancelGuard::disable();
-
-    if op == 0 || op == 1 {
-        return crate::ncurses_format::frontend_op(op, std::ptr::null());
+#[cfg(unix)]
+impl FrontendHandle {
+    pub(crate) fn new(
+        mode: c_int,
+        exit_cb: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
+        if mode != 3 {
+            crate::log::log_active_bytes(3, b"Creating Frontend");
+        }
+        let use_color = if mode == 2 {
+            unsafe { crate::ncurses_format::frontend_op(0, std::ptr::null()) > 0 }
+        } else {
+            true
+        };
+        Self {
+            mode,
+            use_color,
+            exit_cb,
+            stopped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            handle: std::sync::Mutex::new(None),
+        }
     }
-    if op == 6 {
+
+    pub(crate) fn start(&self) {
+        let mut g = self.handle.lock().unwrap_or_else(|e| e.into_inner());
+        if g.is_some() {
+            return;
+        }
+        self.stopped
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mode = self.mode;
+        let use_color = self.use_color;
+        let exit_cb = self.exit_cb.clone();
+        let stopped = self.stopped.clone();
+        let running = self.running.clone();
+        if let Ok(h) = std::thread::Builder::new()
+            .name("frontend".into())
+            .spawn(move || {
+                struct RunningReset(std::sync::Arc<std::sync::atomic::AtomicBool>);
+                impl Drop for RunningReset {
+                    fn drop(&mut self) {
+                        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                let _reset = RunningReset(running);
+                let _tg = RustThreadGuard::enter(&stopped);
+                run_frontend_thread(mode, use_color, &stopped, exit_cb.as_ref());
+            })
+        {
+            *g = Some(h);
+        } else {
+            self.running
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn stop(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(ws) = active_workstate() {
             ws.wake_waiters();
         }
-        return 0;
     }
-    let Some(h) = host.as_ref() else {
-        return 0;
-    };
-    if !(2..=5).contains(&op) {
-        return 0;
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.running.load(std::sync::atomic::Ordering::SeqCst)
     }
-    let mode = op - 2;
+
+    pub(crate) fn join(&self) {
+        let h = self.handle.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(h) = h {
+            let _ = h.join();
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for FrontendHandle {
+    fn drop(&mut self) {
+        self.stop();
+        self.join();
+        if self.mode == 2 {
+            unsafe {
+                crate::ncurses_format::frontend_op(1, std::ptr::null());
+            }
+            write_stdout_bytes(b"\n", true);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn run_frontend_thread(
+    mode: c_int,
+    use_color: bool,
+    stopped: &std::sync::atomic::AtomicBool,
+    exit_cb: Option<&std::sync::Arc<dyn Fn() + Send + Sync>>,
+) {
+    if mode == 0 || mode == 1 {
+        crate::log::log_active_bytes(3, b"Entering LoggableFrontend-loop");
+    } else if mode == 2 {
+        crate::log::log_active_bytes(3, b"Entering NCursesFrontend-loop");
+    }
+
     let opts = if mode != 3 {
         crate::options::active_options()
     } else {
@@ -7247,8 +7169,9 @@ pub unsafe extern "C" fn nzbget_rs_frontend_op(
     };
 
     struct FeBridgeCtx<'a> {
-        host: &'a NzbgetRsFrontendHost,
         mode: c_int,
+        stopped: &'a std::sync::atomic::AtomicBool,
+        exit_cb: Option<&'a std::sync::Arc<dyn Fn() + Send + Sync>>,
     }
 
     unsafe extern "C" fn fe_stdout_cb(
@@ -7274,6 +7197,7 @@ pub unsafe extern "C" fn nzbget_rs_frontend_op(
     ) -> i64 {
         let br = &*raw.cast::<FeBridgeCtx<'_>>();
         match act_op {
+            0 => i64::from(br.stopped.load(std::sync::atomic::Ordering::SeqCst)),
             1 => {
                 if br.mode != 3 && active_workstate().is_some_and(|w| w.pause_frontend()) {
                     if let Some(ws) = active_workstate() {
@@ -7284,8 +7208,14 @@ pub unsafe extern "C" fn nzbget_rs_frontend_op(
                 }
                 0
             }
+            2 => {
+                br.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Some(ws) = active_workstate() {
+                    ws.wake_waiters();
+                }
+                0
+            }
             3 => {
-                #[cfg(unix)]
                 if a2 != 0 {
                     crate::log::log_active_bytes(
                         0,
@@ -7308,53 +7238,67 @@ pub unsafe extern "C" fn nzbget_rs_frontend_op(
                 }
                 0
             }
-            7 => {
-                #[cfg(unix)]
-                {
-                    libc::time(std::ptr::null_mut()) as i64
-                }
-                #[cfg(not(unix))]
-                {
-                    0
-                }
+            5 => {
+                let Some(qh) = queue_host() else {
+                    return 0;
+                };
+                let arg = a2.to_string();
+                let mut ok = false;
+                qh.with_locked_queue(|dq_ptr| {
+                    if dq_ptr != 0 {
+                        ok = qh.dq_edit_entry(dq_ptr, a3, a1, Some(arg.as_bytes()));
+                    }
+                });
+                i64::from(ok)
             }
-            _ => br
-                .host
-                .action_cb
-                .map_or(0, |cb| cb(br.host.ctx, act_op, a1, a2, a3)),
+            6 => {
+                if let Some(cb) = br.exit_cb {
+                    cb();
+                }
+                0
+            }
+            7 => libc::time(std::ptr::null_mut()) as i64,
+            _ => 0,
         }
     }
 
-    unsafe extern "C" fn fe_summary_cb(raw: *mut c_void, s: *mut crate::binrpc::FrontendSummary) {
+    unsafe extern "C" fn fe_summary_cb(_raw: *mut c_void, s: *mut crate::binrpc::FrontendSummary) {
         if s.is_null() {
             return;
         }
-        let br = &*raw.cast::<FeBridgeCtx<'_>>();
         let out = &mut *s;
-        #[cfg(unix)]
-        {
-            let sm = crate::statmeter::active_statmeter();
-            let ws = active_workstate();
-            let (up_sec, dn_sec, all_bytes, stand_by) = sm
-                .as_deref()
-                .map_or((0, 0, 0, false), |m| m.total_stat_snapshot());
-            out.current_download_speed = sm.as_deref().map_or(0, |m| m.current_download_speed());
-            out.pause_download = c_int::from(ws.as_deref().is_some_and(|w| w.pause_download()));
-            out.download_limit = ws.as_deref().map_or(0, |w| w.speed_limit());
-            out.thread_count = current_thread_count();
-            out.up_time_sec = up_sec;
-            out.dn_time_sec = dn_sec;
-            out.all_bytes = all_bytes;
-            out.stand_by = c_int::from(stand_by);
-        }
+        let sm = crate::statmeter::active_statmeter();
+        let ws = active_workstate();
+        let (up_sec, dn_sec, all_bytes, stand_by) = sm
+            .as_deref()
+            .map_or((0, 0, 0, false), |m| m.total_stat_snapshot());
+        out.current_download_speed = sm.as_deref().map_or(0, |m| m.current_download_speed());
+        out.pause_download = c_int::from(ws.as_deref().is_some_and(|w| w.pause_download()));
+        out.download_limit = ws.as_deref().map_or(0, |w| w.speed_limit());
+        out.thread_count = current_thread_count();
+        out.up_time_sec = up_sec;
+        out.dn_time_sec = dn_sec;
+        out.all_bytes = all_bytes;
+        out.stand_by = c_int::from(stand_by);
         out.post_job_count = 0;
         out.remaining_size = 0;
-        if let Some(qcb) = br.host.queue_stats_cb {
-            qcb(
-                br.host.ctx,
-                &mut out.post_job_count,
-                &mut out.remaining_size,
-            );
+        if let Some(qh) = queue_host() {
+            qh.with_locked_queue(|dq_ptr| {
+                if dq_ptr == 0 {
+                    return;
+                }
+                let q_len = qh.queue_len(dq_ptr);
+                let mut post_jobs = 0;
+                for idx in 0..q_len {
+                    let nzb_ptr = qh.queue_at(dq_ptr, idx);
+                    if nzb_ptr != 0 && qh.nzb_snap(nzb_ptr, false).has_post_info {
+                        post_jobs += 1;
+                    }
+                }
+                out.post_job_count = post_jobs;
+                let (rem, _) = qh.dq_calc_remaining_size(dq_ptr);
+                out.remaining_size = rem;
+            });
         }
     }
 
@@ -7366,42 +7310,87 @@ pub unsafe extern "C" fn nzbget_rs_frontend_op(
         emit_ctx: *mut c_void,
         emit: crate::ncurses_format::FrontendEmitMsgFn,
     ) {
-        #[cfg(unix)]
-        {
-            let lg = crate::log::active_log();
-            crate::log::nzbget_rs_log_collect(
-                0,
-                lg.as_deref().map_or(std::ptr::null(), |l| l as *const _),
-                std::ptr::null(),
-                tail_mode,
-                0,
-                arg,
-                out_skipped,
-                emit_ctx,
-                emit as usize,
-                0,
-            );
-        }
+        let lg = crate::log::active_log();
+        crate::log::nzbget_rs_log_collect(
+            0,
+            lg.as_deref().map_or(std::ptr::null(), |l| l as *const _),
+            std::ptr::null(),
+            tail_mode,
+            0,
+            arg,
+            out_skipped,
+            emit_ctx,
+            emit as usize,
+            0,
+        );
     }
 
     unsafe extern "C" fn fe_queue_cb(
-        raw: *mut c_void,
+        _raw: *mut c_void,
         emit_ctx: *mut c_void,
         emit_nzb: crate::ncurses_format::FrontendEmitNzbFn,
         emit_file: crate::ncurses_format::FrontendEmitFileFn,
     ) {
-        let br = &*raw.cast::<FeBridgeCtx<'_>>();
-        if let Some(qcb) = br.host.local_queue_cb {
-            qcb(br.host.ctx, emit_ctx, emit_nzb, emit_file);
-        }
+        let Some(qh) = queue_host() else {
+            return;
+        };
+        qh.with_locked_queue(|dq_ptr| {
+            if dq_ptr == 0 {
+                return;
+            }
+            let q_len = qh.queue_len(dq_ptr);
+            for idx in 0..q_len {
+                let nzb_ptr = qh.queue_at(dq_ptr, idx);
+                if nzb_ptr == 0 {
+                    continue;
+                }
+                let ns = qh.nzb_snap(nzb_ptr, false);
+                let name_c = to_nul_cvec(&ns.name);
+                emit_nzb(
+                    emit_ctx,
+                    ns.id,
+                    ns.priority,
+                    ns.active_downloads,
+                    ns.size,
+                    ns.remaining_size,
+                    ns.paused_size,
+                    ns.paused_file_count,
+                    ns.remaining_par_count,
+                    name_c.as_ptr(),
+                );
+                let f_len = qh.nzb_file_len(nzb_ptr);
+                for f_idx in 0..f_len {
+                    let f_ptr = qh.nzb_file_at(nzb_ptr, f_idx);
+                    if f_ptr == 0 {
+                        continue;
+                    }
+                    let fs = qh.file_snap(f_ptr);
+                    let fname_c = to_nul_cvec(&fs.filename);
+                    emit_file(
+                        emit_ctx,
+                        idx,
+                        fs.id,
+                        fs.active_downloads,
+                        c_int::from(fs.paused),
+                        fs.size,
+                        fs.remaining_size,
+                        fname_c.as_ptr(),
+                    );
+                }
+            }
+        });
     }
 
-    let mut br = FeBridgeCtx { host: h, mode };
+    let mut br = FeBridgeCtx {
+        mode,
+        stopped,
+        exit_cb,
+    };
     let env = crate::ncurses_format::NzbgetRsFrontendEnv {
         ctx: (&mut br as *mut FeBridgeCtx<'_>).cast(),
         remote_mode: c_int::from(opts.as_deref().is_some_and(|o| o.remote_client_mode())),
         update_interval: opts.as_deref().map_or(100, |o| o.scalars().update_interval),
-        use_color: h.use_color,
+        use_color: c_int::from(use_color),
         show_nzbname: c_int::from(
             opts.as_deref()
                 .is_some_and(|o| o.scalars().curses_nzb_name != 0),
@@ -7435,5 +7424,13 @@ pub unsafe extern "C" fn nzbget_rs_frontend_op(
         local_messages_cb: Some(fe_messages_cb),
         local_queue_cb: Some(fe_queue_cb),
     };
-    crate::ncurses_format::frontend_op(op, &env)
+    unsafe {
+        crate::ncurses_format::frontend_op(2 + mode, &env);
+    }
+
+    if mode == 0 || mode == 1 {
+        crate::log::log_active_bytes(3, b"Exiting LoggableFrontend-loop");
+    } else if mode == 2 {
+        crate::log::log_active_bytes(3, b"Exiting NCursesFrontend-loop");
+    }
 }

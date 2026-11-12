@@ -887,6 +887,15 @@ pub(crate) fn daemon_cmdline_options_inputs() -> Option<(
 }
 
 #[cfg(unix)]
+static DAEMON_FRONTEND: std::sync::Mutex<Option<std::sync::Arc<crate::ffi::FrontendHandle>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(unix)]
+fn daemon_frontend_clone() -> Option<std::sync::Arc<crate::ffi::FrontendHandle>> {
+    DAEMON_FRONTEND.lock().ok().and_then(|g| g.clone())
+}
+
+#[cfg(unix)]
 fn daemon_cmdline_clone() -> Option<crate::cmdline::CmdlineHandle> {
     DAEMON_INSTANCE
         .cmdline
@@ -1594,6 +1603,48 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 return 0;
             };
             #[cfg(unix)]
+            if e.a1 < 0 {
+                if let Some(opts) = crate::options::active_options() {
+                    if !opts.daemon_mode() {
+                        let fe_mode = match opts.scalars().output_mode {
+                            2 if !crate::ffi::build_curses_disabled() => Some(2),
+                            2 | 1 => Some(1),
+                            0 => Some(0),
+                            _ => None,
+                        };
+                        if let Some(m) = fe_mode {
+                            let rcb = e.reload_cb;
+                            let acb = e.action_cb;
+                            let ctx_u = e.ctx as usize;
+                            let exit_fn: std::sync::Arc<dyn Fn() + Send + Sync> =
+                                std::sync::Arc::new(move || unsafe {
+                                    RELOAD_COORDINATOR.cancel_pending();
+                                    signal_state_op(5);
+                                    if let Some(r) = rcb {
+                                        r(3);
+                                    } else if let Some(a) = acb {
+                                        a(
+                                            ctx_u as *mut std::ffi::c_void,
+                                            10,
+                                            0,
+                                            std::ptr::null(),
+                                            std::ptr::null(),
+                                        );
+                                    }
+                                });
+                            let fe = std::sync::Arc::new(crate::ffi::FrontendHandle::new(
+                                m,
+                                Some(exit_fn),
+                            ));
+                            fe.start();
+                            if let Ok(mut g) = DAEMON_FRONTEND.lock() {
+                                *g = Some(fe);
+                            }
+                        }
+                    }
+                }
+            }
+            #[cfg(unix)]
             let cmd_opt = if e.a1 < 0 {
                 daemon_cmdline_clone()
             } else {
@@ -1629,9 +1680,23 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
 
                 dm_log(e, 0, b"Entering main program loop");
                 cb(e.ctx, 4, 0, std::ptr::null(), std::ptr::null());
+                #[cfg(unix)]
+                if e.a1 < 0 {
+                    crate::dupesearch_coord::start_daemon_dupesearch();
+                    crate::feed::start_daemon_feed_coord();
+                    crate::articledl::start_daemon_memory_monitor();
+                }
 
                 loop {
-                    let st_mask = cb(e.ctx, 5, 0, std::ptr::null(), std::ptr::null());
+                    let mut st_mask = cb(e.ctx, 5, 0, std::ptr::null(), std::ptr::null());
+                    #[cfg(unix)]
+                    if e.a1 < 0
+                        && (crate::dupesearch_coord::is_daemon_dupesearch_running()
+                            || crate::feed::is_daemon_feed_coord_running()
+                            || crate::articledl::is_daemon_memory_monitor_running())
+                    {
+                        st_mask |= 1;
+                    }
                     if (st_mask & 1) == 0 {
                         break;
                     }
@@ -1649,6 +1714,12 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                         (st_jobs & 4) != 0,
                     ) {
                         cb(e.ctx, 6, 0, std::ptr::null(), std::ptr::null());
+                        #[cfg(unix)]
+                        if e.a1 < 0 {
+                            crate::dupesearch_coord::stop_daemon_dupesearch();
+                            crate::feed::stop_daemon_feed_coord();
+                            crate::articledl::stop_daemon_memory_monitor();
+                        }
                     }
 
                     std::thread::sleep(Duration::from_millis(100));
@@ -1681,10 +1752,17 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 if signal_state_op(1) != 0 {
                     dm_trigger_exit(e);
                 }
-                while !dm_is_stopped()
-                    && !dm_is_reloading()
-                    && cb(e.ctx, 3, 0, std::ptr::null(), std::ptr::null()) != 0
-                {
+                while !dm_is_stopped() && !dm_is_reloading() && {
+                    #[cfg(unix)]
+                    let running = if e.a1 < 0 {
+                        daemon_frontend_clone().is_some_and(|fe| fe.is_running())
+                    } else {
+                        cb(e.ctx, 3, 0, std::ptr::null(), std::ptr::null()) != 0
+                    };
+                    #[cfg(not(unix))]
+                    let running = cb(e.ctx, 3, 0, std::ptr::null(), std::ptr::null()) != 0;
+                    running
+                } {
                     if signal_state_op(1) != 0 {
                         dm_trigger_exit(e);
                     } else if signal_state_op(2) != 0 {
@@ -1756,6 +1834,13 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 signal_state_op(5);
             }
 
+            #[cfg(unix)]
+            if e.a2 < 0 && eff_remote_mode != 0 {
+                if let Some(fe) = daemon_frontend_clone() {
+                    dm_log(e, 0, b"Stopping Frontend");
+                    fe.stop();
+                }
+            }
             if let Some(cb) = e.action_cb {
                 cb(
                     e.ctx,
@@ -1764,6 +1849,12 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                     std::ptr::null(),
                     std::ptr::null(),
                 );
+            }
+            #[cfg(unix)]
+            if e.a2 < 0 && eff_remote_mode == 0 {
+                crate::dupesearch_coord::stop_daemon_dupesearch();
+                crate::feed::stop_daemon_feed_coord();
+                crate::articledl::stop_daemon_memory_monitor();
             }
 
             let mut wg = DAEMON_INSTANCE
@@ -1801,7 +1892,29 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             if e.a2 < 0 {
                 crate::script::terminate_all_active();
                 crate::net::nzbget_rs_remote_srv_ctl(1, std::ptr::null());
+                if let Some(fe) = daemon_frontend_clone() {
+                    if eff_remote_mode == 0 || dm_is_stopped() {
+                        dm_log(e, 0, b"Stopping Frontend");
+                        fe.stop();
+                    }
+                    while fe.is_running() {
+                        if signal_state_op(1) != 0 {
+                            dm_trigger_exit(e);
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    dm_log(e, 0, b"Frontend stopped");
+                }
+            } else if let Some(cb) = e.action_cb {
+                cb(
+                    e.ctx,
+                    12,
+                    c_int::from(eff_remote_mode == 0 || dm_is_stopped()),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
             }
+            #[cfg(not(unix))]
             if let Some(cb) = e.action_cb {
                 cb(
                     e.ctx,
@@ -1821,6 +1934,13 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 if let Ok(mut g) = DAEMON_INSTANCE.cmdline.lock() {
                     *g = None;
                 }
+                if let Ok(mut g) = DAEMON_FRONTEND.lock() {
+                    let _ = g.take();
+                }
+                crate::articledl::shutdown_daemon_memory_monitor();
+                crate::feed::shutdown_daemon_feed_coord();
+                crate::twin::shutdown_daemon_twincheck();
+                crate::dupesearch_coord::shutdown_daemon_dupesearch();
                 crate::extension::shutdown_daemon_maintenance();
                 crate::statmeter::shutdown_daemon_statmeter();
                 crate::scheduler::shutdown_daemon_scheduler();

@@ -1785,6 +1785,12 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
     if let Some(rt_cb) = env.runtime_cb {
         rt_cb(env.ctx, 0, 0, opt_ptrs.as_ptr(), opt_ptrs.len());
     }
+    #[cfg(unix)]
+    let nserv_frontend = env.conn_cb.is_none().then(|| {
+        let fe = crate::ffi::FrontendHandle::new(3, None);
+        fe.start();
+        fe
+    });
 
     let quit_now = handle.run_post_frontend_setup(|level, msg| {
         if let Some(cb) = env.log_cb {
@@ -1792,6 +1798,13 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
         }
     });
     if quit_now {
+        #[cfg(unix)]
+        if let Some(ref fe) = nserv_frontend {
+            fe.stop();
+            while fe.is_running() {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
         if let Some(rt_cb) = env.runtime_cb {
             rt_cb(env.ctx, 1, 0, std::ptr::null(), 0);
             rt_cb(env.ctx, 2, 20, std::ptr::null(), 0);
@@ -1856,11 +1869,21 @@ pub unsafe extern "C" fn nzbget_rs_nserv_run(
         }
     }
 
+    #[cfg(unix)]
+    if let Some(ref fe) = nserv_frontend {
+        fe.stop();
+    }
     if let Some(rt_cb) = env.runtime_cb {
         rt_cb(env.ctx, 1, 0, std::ptr::null(), 0);
     }
     for th in threads {
         let _ = th.join();
+    }
+    #[cfg(unix)]
+    if let Some(ref fe) = nserv_frontend {
+        while fe.is_running() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
     if let Some(rt_cb) = env.runtime_cb {
         rt_cb(env.ctx, 2, 50, std::ptr::null(), 0);

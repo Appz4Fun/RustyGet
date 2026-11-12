@@ -1423,6 +1423,8 @@ pub struct NzbgetRsFeedCoord {
     state: Mutex<FeedCoordInner>,
     wait_cv: Condvar,
     force: AtomicBool,
+    daemon_stopped: AtomicBool,
+    daemon_running: AtomicBool,
     preview_num: AtomicI32,
     host_env: Mutex<Option<NzbgetRsFeedCoordEnv>>,
     self_weak: Mutex<std::sync::Weak<NzbgetRsFeedCoord>>,
@@ -1738,6 +1740,8 @@ impl NzbgetRsFeedCoord {
             }),
             wait_cv: Condvar::new(),
             force: AtomicBool::new(false),
+            daemon_stopped: AtomicBool::new(false),
+            daemon_running: AtomicBool::new(false),
             preview_num: AtomicI32::new(0),
             host_env: Mutex::new(None),
             self_weak: Mutex::new(std::sync::Weak::new()),
@@ -1790,7 +1794,7 @@ impl NzbgetRsFeedCoord {
 
     fn is_stopped(&self, env: &NzbgetRsFeedCoordEnv) -> bool {
         let Some(q) = env.query_cb else {
-            return true;
+            return self.daemon_stopped.load(Ordering::SeqCst);
         };
         unsafe {
             q(
@@ -1846,23 +1850,6 @@ impl NzbgetRsFeedCoord {
                 force: false,
             });
         }
-    }
-
-    fn add_feed(&self, env: &NzbgetRsFeedCoordEnv) {
-        self.add_feed_direct(
-            env.a1,
-            feed_cstr_bytes(env.s1),
-            feed_cstr_bytes(env.s2),
-            (env.a5 & 1) != 0,
-            env.a2,
-            feed_cstr_bytes(env.s3),
-            (env.a5 & 2) != 0,
-            feed_cstr_bytes(env.s4),
-            env.a3,
-            env.a4,
-            feed_cstr_bytes(env.s5),
-            env.u1,
-        );
     }
 
     fn spawn_downloader(
@@ -2074,27 +2061,33 @@ impl NzbgetRsFeedCoord {
         let mut filter =
             (!cfg.filter.is_empty()).then(|| crate::feedfilter::FeedFilter::new(&cfg.filter));
         let mut calc_dupe = |title: &[u8], dupe_key: &[u8]| -> i32 {
-            let Some(act) = env.action_cb else {
-                return 0;
-            };
-            let t_c = feed_bytes_to_cstr(title);
-            let k_c = feed_bytes_to_cstr(dupe_key);
-            unsafe {
-                act(
-                    env.ctx,
-                    2,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    t_c.as_ptr(),
-                    k_c.as_ptr(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                ) as i32
+            if let Some(act) = env.action_cb {
+                let t_c = feed_bytes_to_cstr(title);
+                let k_c = feed_bytes_to_cstr(dupe_key);
+                return unsafe {
+                    act(
+                        env.ctx,
+                        2,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        t_c.as_ptr(),
+                        k_c.as_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                    ) as i32
+                };
             }
+            #[cfg(unix)]
+            if let Some(qh) = crate::ffi::queue_host() {
+                return qh.with_locked_queue(|dq_ptr| {
+                    crate::dupecoord::get_dupe_status_host(&qh, dq_ptr, title, dupe_key)
+                });
+            }
+            0
         };
 
         for item in items.iter_mut() {
@@ -2135,8 +2128,8 @@ impl NzbgetRsFeedCoord {
                 {
                     break;
                 }
-            } else {
-                return;
+            } else if self.daemon_stopped.load(Ordering::SeqCst) {
+                break;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -2471,6 +2464,25 @@ impl NzbgetRsFeedCoord {
                             );
                         }
                     }
+                } else {
+                    #[cfg(unix)]
+                    if let Some(qh) = crate::ffi::queue_host() {
+                        for created in &added_nzbs {
+                            qh.url_coord_add_feed_item(
+                                created.feed_id,
+                                &created.url,
+                                &created.filename,
+                                &created.category,
+                                created.priority,
+                                created.add_url_paused,
+                                &created.dupe_key,
+                                created.dupe_score,
+                                created.dupe_mode,
+                                created.size,
+                                created.min_time,
+                            );
+                        }
+                    }
                 }
 
                 if let Ok(mut st) = self.state.lock() {
@@ -2482,10 +2494,10 @@ impl NzbgetRsFeedCoord {
         }
     }
 
-    fn on_queue_update(&self, env: &NzbgetRsFeedCoordEnv) {
+    fn on_queue_update_bytes(&self, env: &NzbgetRsFeedCoordEnv, action: i32, url_bytes: &[u8]) {
         feed_emit_log(env, 0, &[b"Notification from URL-Coordinator received"]);
-        if env.a1 == EA_URL_COMPLETED {
-            let url = feed_cstr_bytes(env.s1).to_vec();
+        if action == EA_URL_COMPLETED {
+            let url = url_bytes.to_vec();
             if let Ok(mut st) = self.state.lock() {
                 if let Some(h) = st.history.iter_mut().find(|h| h.url == url) {
                     h.status = HS_FETCHED;
@@ -2854,114 +2866,113 @@ impl NzbgetRsFeedCoord {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_feed_coord_new() -> *mut NzbgetRsFeedCoord {
+static DAEMON_FEED_COORD: std::sync::RwLock<Option<Arc<NzbgetRsFeedCoord>>> =
+    std::sync::RwLock::new(None);
+static DAEMON_FEED_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
+#[cfg(unix)]
+pub(crate) fn create_daemon_feed_coord() {
     let arc = Arc::new(NzbgetRsFeedCoord::new());
     if let Ok(mut w) = arc.self_weak.lock() {
         *w = Arc::downgrade(&arc);
     }
+    if let Some(lg) = crate::log::active_log() {
+        lg.register_debuggable(2);
+    }
     if let Ok(mut g) = ACTIVE_FEED_COORD.write() {
         *g = Some(Arc::downgrade(&arc));
     }
-    Arc::into_raw(arc).cast_mut()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_coord_free(coord: *mut NzbgetRsFeedCoord) {
-    if !coord.is_null() {
-        let arc = Arc::from_raw(coord.cast_const());
-        let wk = Arc::downgrade(&arc);
-        if let Ok(mut g) = ACTIVE_FEED_COORD.write() {
-            if g.as_ref()
-                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
-            {
-                *g = None;
-            }
-        }
-        drop(arc);
+    feed_emit_log(&arc.effective_env(None), 0, &[b"Creating FeedCoordinator"]);
+    if let Ok(mut g) = DAEMON_FEED_COORD.write() {
+        *g = Some(arc);
     }
 }
 
-/// Dispatches `FeedCoordinator` operations:
-/// - `0`: `AddFeed`
-/// - `1`: `Run()`
-/// - `2`: `Stop()`
-/// - `4`: `DownloadQueueUpdate(action, url)`
-/// - `5`: `WorkStateUpdate()`
-/// - `6`: `FetchFeed(id)`
-/// - `7`: `FetchFeedList(feed_list)`
-/// - `8`: `HasActiveDownloads() -> 1/0`
-/// - `9`: `ViewOrPreviewFeed(...) -> 1/0`
-/// - `11`: `LogDebugInfo()`
-/// - `12`: `~FeedCoordinator()` cleanup
-/// - `13`: bind host environment (`ctx`, `query_cb`, `action_cb`)
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_coord_exec(
-    coord: *const NzbgetRsFeedCoord,
-    op: c_int,
-    env: *const NzbgetRsFeedCoordEnv,
-) -> c_int {
-    let Some(coord) = coord.as_ref() else {
-        return 0;
+#[cfg(unix)]
+pub(crate) fn start_daemon_feed_coord() {
+    let Some(fc) = active_feed_coord() else {
+        return;
     };
-    if op == 5 {
-        coord.on_work_state_update();
-        return 1;
+    let mut g = DAEMON_FEED_HANDLE.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_some() {
+        return;
     }
-    if op == 8 {
-        return c_int::from(
-            coord
-                .state
-                .lock()
-                .map(|st| !st.active.is_empty())
-                .unwrap_or(false),
-        );
-    }
-    if op == 13 {
-        if let Some(e) = env.as_ref() {
-            if let Ok(mut g) = coord.host_env.lock() {
-                *g = Some(*e);
+    fc.daemon_stopped.store(false, Ordering::SeqCst);
+    fc.daemon_running.store(true, Ordering::SeqCst);
+    let fc_run = Arc::clone(&fc);
+    if let Ok(h) = std::thread::Builder::new()
+        .name("feed-coord".into())
+        .spawn(move || {
+            struct RunningReset(Arc<NzbgetRsFeedCoord>);
+            impl Drop for RunningReset {
+                fn drop(&mut self) {
+                    self.0.daemon_running.store(false, Ordering::SeqCst);
+                }
             }
-        }
-        return 1;
+            let _reset = RunningReset(Arc::clone(&fc_run));
+            let _tg = crate::ffi::RustThreadGuard::enter(&fc_run.daemon_stopped);
+            let env = fc_run.effective_env(None);
+            fc_run.run_loop(&env);
+        })
+    {
+        *g = Some(h);
+    } else {
+        fc.daemon_running.store(false, Ordering::SeqCst);
     }
-    let caller_ref = env.as_ref();
-    let eff = coord.effective_env(caller_ref);
-    match op {
-        0 => {
-            coord.add_feed(&eff);
-            1
-        }
-        1 => {
-            coord.run_loop(&eff);
-            1
-        }
-        2 => {
-            coord.stop_downloads(&eff);
-            1
-        }
-        4 => {
-            coord.on_queue_update(&eff);
-            1
-        }
-        6 => {
-            coord.fetch_feed(&eff, eff.a1);
-            1
-        }
-        7 => {
-            coord.fetch_feed_list_inner(&eff, feed_cstr_bytes(eff.s1));
-            1
-        }
-        9 => coord.view_or_preview(&eff, caller_ref.map_or(std::ptr::null_mut(), |c| c.ctx)),
-        11 => {
-            coord.log_debug_info(&eff);
-            1
-        }
-        12 => {
-            coord.destroy_remaining(&eff);
-            1
-        }
-        _ => 0,
+}
+
+#[cfg(unix)]
+pub(crate) fn stop_daemon_feed_coord() {
+    if let Some(fc) = active_feed_coord() {
+        fc.daemon_stopped.store(true, Ordering::SeqCst);
+        let env = fc.effective_env(None);
+        fc.stop_downloads(&env);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn is_daemon_feed_coord_running() -> bool {
+    active_feed_coord().is_some_and(|fc| fc.daemon_running.load(Ordering::SeqCst))
+}
+
+#[cfg(unix)]
+pub(crate) fn shutdown_daemon_feed_coord() {
+    stop_daemon_feed_coord();
+    let handle = DAEMON_FEED_HANDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(h) = handle {
+        let _ = h.join();
+    }
+    if let Some(fc) = DAEMON_FEED_COORD.write().ok().and_then(|mut g| g.take()) {
+        let env = fc.effective_env(None);
+        fc.destroy_remaining(&env);
+    }
+    if let Ok(mut g) = ACTIVE_FEED_COORD.write() {
+        *g = None;
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn notify_active_feed_queue_aspect(action: i32, url: Option<&[u8]>) {
+    if let Some(fc) = active_feed_coord() {
+        let env = fc.effective_env(None);
+        fc.on_queue_update_bytes(&env, action, url.unwrap_or(&[]));
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn notify_active_feed_work_state() {
+    if let Some(fc) = active_feed_coord() {
+        fc.on_work_state_update();
+    }
+}
+
+pub(crate) fn log_active_feed_debug_info() {
+    if let Some(fc) = active_feed_coord() {
+        let env = fc.effective_env(None);
+        fc.log_debug_info(&env);
     }
 }
 

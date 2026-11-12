@@ -1505,7 +1505,7 @@ impl ParCheckerHooks for StandaloneParHooks {
         }
         ParCheckerOptions {
             par_buffer_mb: ints[0],
-            has_memory_monitor: ints[1] != 0,
+            has_memory_monitor: ints[1] != 0 || crate::articledl::memory_monitor_active(),
             par_threads: ints[2],
             par_scan: ints[3],
             par_repair: ints[4] != 0,

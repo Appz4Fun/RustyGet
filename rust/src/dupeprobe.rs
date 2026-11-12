@@ -183,7 +183,8 @@ pub fn eval_recheck_outcome(
 }
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{c_char, c_int, c_void, CStr};
+#[cfg(unix)]
+use std::ffi::{c_char, CStr};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -191,19 +192,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const CONNECTION_WAIT_SEC: i64 = 10;
 pub const PROBE_LIMIT_SEC: i32 = 90;
 pub const RECHECK_LIMIT_SEC: i32 = 60;
-
-pub type DupeProbeHostFn = unsafe extern "C" fn(
-    ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    a3: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    ints: *mut c_int,
-    strs: *mut *const c_char,
-) -> usize;
 
 #[derive(Clone, Debug)]
 pub struct ProbeSample {
@@ -253,9 +241,7 @@ struct ActiveProbeEntry {
     count_all: bool,
     started: i64,
     stopped: Arc<AtomicBool>,
-    thread_ptr: usize,
     conn_ptr: usize,
-    host_cb: DupeProbeHostFn,
 }
 
 #[derive(Default)]
@@ -279,6 +265,7 @@ fn now_sec() -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(unix)]
 fn c_buf(bytes: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(bytes.len() + 1);
     for &b in bytes {
@@ -291,6 +278,7 @@ fn c_buf(bytes: &[u8]) -> Vec<u8> {
     v
 }
 
+#[cfg(unix)]
 unsafe fn bytes_from_ptr(p: *const c_char) -> Vec<u8> {
     if p.is_null() {
         Vec::new()
@@ -325,8 +313,6 @@ pub fn probe_stop_all() {
     reg.stopping = true;
     #[cfg(unix)]
     let has_pool = crate::net::active_server_pool().is_some();
-    #[cfg(not(unix))]
-    let has_pool = false;
     for entry in reg.entries.values() {
         entry.stopped.store(true, Ordering::SeqCst);
         #[cfg(unix)]
@@ -336,20 +322,6 @@ pub fn probe_stop_all() {
                 c.set_suppress_errors(true);
                 c.cancel();
             }
-        }
-        unsafe {
-            (entry.host_cb)(
-                std::ptr::null_mut(),
-                10,
-                0,
-                0,
-                0,
-                entry.thread_ptr,
-                if has_pool { 0 } else { entry.conn_ptr },
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
         }
     }
 }
@@ -369,7 +341,6 @@ pub struct NzbgetRsDupeProbe {
     found: Vec<bool>,
     found_on: Vec<u8>,
     stopped: Arc<AtomicBool>,
-    thread_ptr: usize,
     registered: bool,
 }
 
@@ -384,7 +355,6 @@ impl NzbgetRsDupeProbe {
             found: Vec::new(),
             found_on: Vec::new(),
             stopped: Arc::new(AtomicBool::new(false)),
-            thread_ptr: 0,
             registered: false,
         }
     }
@@ -394,14 +364,13 @@ impl NzbgetRsDupeProbe {
         self.found.push(false);
     }
 
-    pub fn register(&mut self, thread_ptr: usize, host_cb: DupeProbeHostFn) -> bool {
+    pub fn register(&mut self) -> bool {
         let Ok(mut reg) = registry().lock() else {
             return false;
         };
         if reg.stopping {
             return false;
         }
-        self.thread_ptr = thread_ptr;
         reg.entries.insert(
             self.id,
             ActiveProbeEntry {
@@ -409,9 +378,7 @@ impl NzbgetRsDupeProbe {
                 count_all: self.count_all,
                 started: now_sec(),
                 stopped: Arc::clone(&self.stopped),
-                thread_ptr,
                 conn_ptr: 0,
-                host_cb,
             },
         );
         PROBE_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -430,6 +397,7 @@ impl NzbgetRsDupeProbe {
         PROBE_COUNT.fetch_sub(1, Ordering::SeqCst);
     }
 
+    #[cfg(unix)]
     fn set_conn(&self, conn_ptr: usize) {
         if let Ok(mut reg) = registry().lock() {
             if let Some(entry) = reg.entries.get_mut(&self.id) {
@@ -438,37 +406,13 @@ impl NzbgetRsDupeProbe {
         }
     }
 
-    fn is_stopped(&self, ctx: *mut c_void, host_cb: DupeProbeHostFn) -> bool {
-        if self.stopped.load(Ordering::SeqCst) {
-            return true;
-        }
-        if self.thread_ptr != 0 {
-            let s = unsafe {
-                host_cb(
-                    ctx,
-                    11,
-                    0,
-                    0,
-                    0,
-                    self.thread_ptr,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            };
-            if s != 0 {
-                return true;
-            }
-        }
-        false
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 
     #[cfg(unix)]
     fn probe_server_native(
         &mut self,
-        ctx: *mut c_void,
-        host_cb: DupeProbeHostFn,
         pool: &crate::net::NzbgetRsServerPool,
         server_id: i32,
         probed: &mut BTreeSet<i32>,
@@ -483,10 +427,7 @@ impl NzbgetRsDupeProbe {
         let mut join_group = false;
         let mut server_name: Vec<u8> = Vec::new();
         let wait_start = now_sec();
-        while conn_ptr == 0
-            && !self.is_stopped(ctx, host_cb)
-            && now_sec() - wait_start <= CONNECTION_WAIT_SEC
-        {
+        while conn_ptr == 0 && !self.is_stopped() && now_sec() - wait_start <= CONNECTION_WAIT_SEC {
             let raw = pool.get_connection_by_server_id(server_id);
             if !raw.is_null() {
                 let c = unsafe { &*raw };
@@ -521,7 +462,7 @@ impl NzbgetRsDupeProbe {
 
             let mut remaining = self.samples.len() as i32;
             for index in 0..self.samples.len() {
-                if self.is_stopped(ctx, host_cb) {
+                if self.is_stopped() {
                     break;
                 }
                 remaining -= 1;
@@ -613,7 +554,7 @@ impl NzbgetRsDupeProbe {
         }
 
         self.set_conn(0);
-        let stopped_flag = self.is_stopped(ctx, host_cb);
+        let stopped_flag = self.is_stopped();
         let conn = unsafe { &*(conn_ptr as *const crate::net::PooledNntpConn) };
         if stopped_flag || conn.is_cancelled() {
             unsafe {
@@ -624,278 +565,24 @@ impl NzbgetRsDupeProbe {
         (probed_server, result)
     }
 
-    fn probe_server(
-        &mut self,
-        ctx: *mut c_void,
-        host_cb: DupeProbeHostFn,
-        server_id: i32,
-        probed: &mut BTreeSet<i32>,
-    ) -> (bool, ServerResult) {
+    fn probe_server(&mut self, server_id: i32, probed: &mut BTreeSet<i32>) -> (bool, ServerResult) {
         #[cfg(unix)]
         if let Some(pool) = crate::net::active_server_pool() {
-            return self.probe_server_native(ctx, host_cb, &pool, server_id, probed);
+            return self.probe_server_native(&pool, server_id, probed);
         }
-        let mut result = ServerResult::default();
-        let exists = unsafe {
-            host_cb(
-                ctx,
-                2,
-                server_id,
-                0,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if exists == 0 {
-            return (false, result);
-        }
-
-        let mut conn_ptr: usize = 0;
-        let mut actual_server_id: i32 = 0;
-        let mut join_group = false;
-        let mut server_name: Vec<u8> = Vec::new();
-        let wait_start = now_sec();
-        while conn_ptr == 0
-            && !self.is_stopped(ctx, host_cb)
-            && now_sec() - wait_start <= CONNECTION_WAIT_SEC
-        {
-            let mut ints = [0i32; 4];
-            let mut strs: [*const c_char; 2] = [std::ptr::null(); 2];
-            conn_ptr = unsafe {
-                host_cb(
-                    ctx,
-                    3,
-                    server_id,
-                    0,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    ints.as_mut_ptr(),
-                    strs.as_mut_ptr(),
-                )
-            };
-            if conn_ptr != 0 {
-                actual_server_id = ints[0];
-                join_group = ints[1] != 0;
-                server_name = unsafe { bytes_from_ptr(strs[0]) };
-            } else {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        }
-
-        if conn_ptr == 0 {
-            let unreach = unsafe {
-                host_cb(
-                    ctx,
-                    4,
-                    server_id,
-                    0,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            };
-            result.unreachable = unreach != 0;
-            return (false, result);
-        }
-
-        let fresh = probed.insert(actual_server_id);
-        let mut probed_server = false;
-        if fresh {
-            self.set_conn(conn_ptr);
-
-            let mut remaining = self.samples.len() as i32;
-            for index in 0..self.samples.len() {
-                if self.is_stopped(ctx, host_cb) {
-                    break;
-                }
-                remaining -= 1;
-                if self.found[index] {
-                    continue;
-                }
-
-                let connected = unsafe {
-                    host_cb(
-                        ctx,
-                        5,
-                        0,
-                        0,
-                        0,
-                        conn_ptr,
-                        0,
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    )
-                };
-                if connected == 0 {
-                    result.unknown += remaining + 1;
-                    result.unreachable = result.exists + result.missing == 0;
-                    break;
-                }
-
-                if join_group {
-                    let mut joined: Option<Vec<u8>> = None;
-                    for group in &self.samples[index].groups {
-                        let g_c = c_buf(group);
-                        let mut strs: [*const c_char; 2] = [std::ptr::null(); 2];
-                        let ok = unsafe {
-                            host_cb(
-                                ctx,
-                                6,
-                                0,
-                                0,
-                                0,
-                                conn_ptr,
-                                0,
-                                g_c.as_ptr() as *const c_char,
-                                std::ptr::null_mut(),
-                                strs.as_mut_ptr(),
-                            )
-                        };
-                        if ok != 0 && !strs[0].is_null() {
-                            let resp = unsafe { bytes_from_ptr(strs[0]) };
-                            let is_2xx = resp.starts_with(b"2");
-                            joined = Some(resp);
-                            if is_2xx {
-                                break;
-                            }
-                        } else {
-                            joined = None;
-                        }
-                    }
-                    let joined_ok = match joined {
-                        Some(ref r) => r.starts_with(b"2"),
-                        None => false,
-                    };
-                    if !joined_ok {
-                        result.unknown += remaining + 1;
-                        if joined.is_none() {
-                            unsafe {
-                                host_cb(
-                                    ctx,
-                                    8,
-                                    0,
-                                    0,
-                                    0,
-                                    conn_ptr,
-                                    0,
-                                    std::ptr::null(),
-                                    std::ptr::null_mut(),
-                                    std::ptr::null_mut(),
-                                );
-                            }
-                        }
-                        break;
-                    }
-                }
-
-                let mut cmd = Vec::with_capacity(self.samples[index].message_id.len() + 8);
-                cmd.extend_from_slice(b"STAT ");
-                cmd.extend_from_slice(&self.samples[index].message_id);
-                cmd.extend_from_slice(b"\r\n");
-                if cmd.len() >= 1024 {
-                    cmd.truncate(1023);
-                }
-                let cmd_c = c_buf(&cmd);
-                let mut strs: [*const c_char; 2] = [std::ptr::null(); 2];
-                let ok = unsafe {
-                    host_cb(
-                        ctx,
-                        7,
-                        0,
-                        0,
-                        0,
-                        conn_ptr,
-                        0,
-                        cmd_c.as_ptr() as *const c_char,
-                        std::ptr::null_mut(),
-                        strs.as_mut_ptr(),
-                    )
-                };
-                if ok == 0 || strs[0].is_null() {
-                    unsafe {
-                        host_cb(
-                            ctx,
-                            8,
-                            0,
-                            0,
-                            0,
-                            conn_ptr,
-                            0,
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                        );
-                    }
-                    result.unknown += remaining + 1;
-                    break;
-                }
-
-                let resp = unsafe { bytes_from_ptr(strs[0]) };
-                match classify(Some(&resp)) {
-                    DUPE_PROBE_EXISTS => {
-                        result.exists += 1;
-                        self.found[index] = true;
-                        if self.found_on.is_empty() {
-                            self.found_on.extend_from_slice(&server_name);
-                            self.found_on.extend_from_slice(b" (");
-                            self.found_on
-                                .extend_from_slice(&self.samples[index].message_id);
-                            self.found_on.push(b')');
-                        }
-                    }
-                    DUPE_PROBE_MISSING => {
-                        result.missing += 1;
-                    }
-                    _ => {
-                        result.unknown += 1;
-                    }
-                }
-
-                let found_count = self.found.iter().filter(|&&b| b).count() as i32;
-                if !self.count_all && found_count >= MIN_ALIVE_SAMPLES {
-                    break;
-                }
-            }
-            probed_server = true;
-        }
-
-        self.set_conn(0);
-        let stopped_flag = i32::from(self.is_stopped(ctx, host_cb));
-        unsafe {
-            host_cb(
-                ctx,
-                9,
-                stopped_flag,
-                0,
-                0,
-                conn_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-        }
-        (probed_server, result)
+        #[cfg(not(unix))]
+        let _ = (server_id, probed);
+        (false, ServerResult::default())
     }
 
-    fn measure(&mut self, ctx: *mut c_void, host_cb: DupeProbeHostFn, limit_sec: i32) -> Verdict {
+    fn measure(&mut self, limit_sec: i32) -> Verdict {
         let mut verdict = Verdict::new();
         let mut active = Vec::new();
         let mut groups = Vec::new();
         let mut norm_levels = Vec::new();
         let mut ids = Vec::new();
         #[cfg(unix)]
-        let used_native = if let Some(pool) = crate::net::active_server_pool() {
+        if let Some(pool) = crate::net::active_server_pool() {
             let srvs = pool.servers_snapshot();
             active.reserve(srvs.len());
             groups.reserve(srvs.len());
@@ -907,52 +594,6 @@ impl NzbgetRsDupeProbe {
                 norm_levels.push(s.norm_level.load(Ordering::SeqCst));
                 ids.push(s.id);
             }
-            true
-        } else {
-            false
-        };
-        #[cfg(not(unix))]
-        let used_native = false;
-        if !used_native {
-            let n_servers = unsafe {
-                host_cb(
-                    ctx,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            };
-            active.reserve(n_servers);
-            groups.reserve(n_servers);
-            norm_levels.reserve(n_servers);
-            ids.reserve(n_servers);
-            for i in 0..n_servers {
-                let mut ints = [0i32; 4];
-                unsafe {
-                    host_cb(
-                        ctx,
-                        1,
-                        i as c_int,
-                        0,
-                        0,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        ints.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                    );
-                }
-                active.push(ints[0] as u8);
-                groups.push(ints[1]);
-                norm_levels.push(ints[2]);
-                ids.push(ints[3]);
-            }
         }
         let order = select_server_order(&active, &groups, &norm_levels, &ids);
         verdict.active_servers = order.len() as i32;
@@ -960,12 +601,12 @@ impl NzbgetRsDupeProbe {
         let mut probed = BTreeSet::new();
         let start = now_sec();
         for server_id in order {
-            if self.is_stopped(ctx, host_cb) || now_sec() - start > i64::from(limit_sec) {
+            if self.is_stopped() || now_sec() - start > i64::from(limit_sec) {
                 verdict.finished = false;
                 break;
             }
 
-            let (reached, result) = self.probe_server(ctx, host_cb, server_id, &mut probed);
+            let (reached, result) = self.probe_server(server_id, &mut probed);
             if result.unreachable {
                 verdict.active_servers -= 1;
                 verdict.unreachable_servers += 1;
@@ -989,45 +630,46 @@ impl NzbgetRsDupeProbe {
                 verdict.missing_servers += 1;
             }
         }
-        if self.is_stopped(ctx, host_cb) {
+        if self.is_stopped() {
             verdict.finished = false;
         }
         verdict
     }
 
-    pub fn run(&mut self, ctx: *mut c_void, host_cb: DupeProbeHostFn) {
+    pub fn run(&mut self) {
         if self.count_all {
-            let verdict = self.measure(ctx, host_cb, RECHECK_LIMIT_SEC);
-            if !self.is_stopped(ctx, host_cb) && verdict.finished {
-                let mut ints = [verdict.existing, verdict.reached_servers, 0, 0];
-                unsafe {
-                    host_cb(
-                        ctx,
-                        13,
-                        self.nzb_id,
-                        self.samples.len() as c_int,
-                        0,
-                        0,
-                        0,
-                        std::ptr::null(),
-                        ints.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                    );
+            let verdict = self.measure(RECHECK_LIMIT_SEC);
+            if !self.is_stopped() && verdict.finished {
+                #[cfg(unix)]
+                if let Some(qh) = crate::ffi::queue_host() {
+                    let sampled = self.samples.len() as i32;
+                    let nzb_id = self.nzb_id;
+                    qh.with_locked_queue(|dq_ptr| {
+                        probe_recheck_host(
+                            &qh,
+                            dq_ptr,
+                            nzb_id,
+                            sampled,
+                            verdict.existing,
+                            verdict.reached_servers,
+                        );
+                    });
                 }
             }
             self.unregister();
             return;
         }
 
-        let verdict = self.measure(ctx, host_cb, PROBE_LIMIT_SEC);
-        if self.is_stopped(ctx, host_cb) {
+        let verdict = self.measure(PROBE_LIMIT_SEC);
+        if self.is_stopped() {
             self.unregister();
             return;
         }
 
+        let sampled = self.samples.len() as i32;
         let (outcome, text) = eval_run_outcome(
             verdict.existing,
-            self.samples.len() as i32,
+            sampled,
             verdict.missing_servers,
             verdict.active_servers,
             verdict.unreachable_servers,
@@ -1035,113 +677,140 @@ impl NzbgetRsDupeProbe {
             verdict.finished,
             &verdict.found_on,
         );
+        #[cfg(unix)]
         if outcome != 0 {
-            let text_c = c_buf(&text);
-            let mut ints = [
-                verdict.missing_servers,
-                verdict.active_servers,
-                self.recovered_at_start,
-                0,
-            ];
-            unsafe {
-                host_cb(
-                    ctx,
-                    12,
-                    outcome,
-                    self.nzb_id,
-                    self.samples.len() as c_int,
-                    0,
-                    0,
-                    text_c.as_ptr() as *const c_char,
-                    ints.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                );
+            if let Some((qc, qh)) = crate::ffi::active_queue_coord_and_host() {
+                let nzb_id = self.nzb_id;
+                if outcome == 3 {
+                    qh.with_locked_queue(|dq_ptr| {
+                        let nzb_ptr = qh.queue_find_by_id(dq_ptr, nzb_id);
+                        if nzb_ptr != 0 {
+                            qh.nzb_set_int(
+                                nzb_ptr,
+                                crate::queuesubsys_host::NZB_INT_DEAD_PICK_PROBED,
+                                0,
+                            );
+                            qh.nzb_print_message(
+                                nzb_ptr,
+                                crate::queuesubsys_host::MK_DETAIL,
+                                &text,
+                            );
+                        }
+                    });
+                } else {
+                    qh.with_locked_queue(|dq_ptr| {
+                        let nzb_ptr = qh.queue_find_by_id(dq_ptr, nzb_id);
+                        if nzb_ptr != 0 {
+                            qh.nzb_print_message(nzb_ptr, crate::queuesubsys_host::MK_INFO, &text);
+                        } else {
+                            let mut d = format!("Dupe probe of download {nzb_id}: ").into_bytes();
+                            d.extend_from_slice(&text);
+                            qh.log(crate::queuesubsys_host::MK_DETAIL, &d);
+                        }
+                    });
+                    if outcome == 1 {
+                        let rec = self.recovered_at_start;
+                        qh.with_locked_queue(|dq_ptr| {
+                            qc.fail_over_dead_pick(
+                                &qh,
+                                dq_ptr,
+                                nzb_id,
+                                sampled,
+                                verdict.missing_servers,
+                                verdict.active_servers,
+                                rec,
+                            );
+                        });
+                    }
+                }
             }
         }
+        #[cfg(not(unix))]
+        let _ = (outcome, text);
         self.unregister();
     }
 
-    pub fn check(&mut self, limit_sec: i32, ctx: *mut c_void, host_cb: DupeProbeHostFn) -> bool {
-        if !self.register(0, host_cb) {
+    pub fn check(&mut self, limit_sec: i32) -> bool {
+        if !self.register() {
             return false;
         }
-        let verdict = self.measure(ctx, host_cb, limit_sec);
+        let verdict = self.measure(limit_sec);
         self.unregister();
         verdict.dead()
     }
 }
 
-pub fn probe_recheck_locked(
+#[cfg(unix)]
+pub(crate) fn launch_probe_rs(mut probe: Box<NzbgetRsDupeProbe>) {
+    if !probe.register() {
+        return;
+    }
+    let stopped = Arc::clone(&probe.stopped);
+    let _ = std::thread::Builder::new()
+        .name("dupe-probe".into())
+        .spawn(move || {
+            let _tg = crate::ffi::RustThreadGuard::enter(&stopped);
+            probe.run();
+        });
+}
+
+#[cfg(unix)]
+pub(crate) fn start_recheck_rs(nzb_id: i32, samples: Vec<ProbeSample>) {
+    let mut probe = Box::new(NzbgetRsDupeProbe::new(nzb_id, true, 0));
+    for s in samples {
+        probe.add_sample(s.message_id, s.groups);
+    }
+    launch_probe_rs(probe);
+}
+
+#[cfg(unix)]
+fn probe_recheck_host(
+    qh: &crate::queuesubsys_host::QueueSubsysHost,
     dq_ptr: usize,
     nzb_id: i32,
     sampled: i32,
     existing: i32,
     reached_servers: i32,
-    ctx: *mut c_void,
-    host_cb: DupeProbeHostFn,
 ) {
-    let mut ints = [0i32; 4];
-    let mut strs: [*const c_char; 2] = [std::ptr::null(); 2];
-    let hist_ptr = unsafe {
-        host_cb(
-            ctx,
-            14,
-            nzb_id,
-            0,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            strs.as_mut_ptr(),
-        )
-    };
-    if hist_ptr == 0 {
-        return;
+    let hist_len = qh.history_len(dq_ptr);
+    let mut found_hi = None;
+    let mut found_nzb = None;
+    for i in 0..hist_len {
+        let hi = qh.history_at(dq_ptr, i);
+        if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
+            let snap = qh.nzb_snap(hi.inner_ptr, false);
+            if snap.id == nzb_id {
+                found_hi = Some(hi);
+                found_nzb = Some(snap);
+                break;
+            }
+        }
     }
-    let queue_len = ints[0].max(0) as usize;
-    let nzb_name = unsafe { bytes_from_ptr(strs[0]) };
-    let nzb_key = unsafe { bytes_from_ptr(strs[1]) };
+    let (Some(hi), Some(nzb)) = (found_hi, found_nzb) else {
+        return;
+    };
     let mut dup_name = Vec::new();
     if reached_servers > 0 && existing.saturating_mul(2) >= sampled {
-        for idx in 0..queue_len {
-            let mut q_strs: [*const c_char; 2] = [std::ptr::null(); 2];
-            unsafe {
-                host_cb(
-                    ctx,
-                    15,
-                    idx as c_int,
-                    0,
-                    0,
-                    dq_ptr,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    q_strs.as_mut_ptr(),
-                );
-            }
-            let q_name = unsafe { bytes_from_ptr(q_strs[0]) };
-            let q_key = unsafe { bytes_from_ptr(q_strs[1]) };
-            if crate::dupecoord::same_name_or_key(&q_name, &q_key, &nzb_name, &nzb_key) {
-                dup_name = q_name;
+        let q_len = qh.queue_len(dq_ptr);
+        for idx in 0..q_len {
+            let q_ptr = qh.queue_at(dq_ptr, idx);
+            let q = qh.nzb_snap(q_ptr, false);
+            if crate::dupecoord::same_name_or_key(&q.name, &q.dupe_key, &nzb.name, &nzb.dupe_key) {
+                dup_name = q.name;
                 break;
             }
         }
     }
     let (action, text) = eval_recheck_outcome(existing, sampled, reached_servers, &dup_name);
-    let text_c = c_buf(&text);
-    unsafe {
-        host_cb(
-            ctx,
-            16,
-            action,
-            0,
-            0,
+    qh.nzb_print_message(hi.inner_ptr, crate::queuesubsys_host::MK_INFO, &text);
+    if action == 1 {
+        qh.nzb_set_param(hi.inner_ptr, b"*DupeRecheck", None);
+    } else if action == 3 {
+        qh.dq_edit_list_single_id(
             dq_ptr,
-            hist_ptr,
-            text_c.as_ptr() as *const c_char,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            hi.id,
+            crate::queuesubsys_host::EA_HISTORY_RETRY_FAILED,
+            None,
         );
     }
 }

@@ -183,6 +183,10 @@ pub(crate) const EA_GROUP_SORT: i32 = 33;
 pub(crate) const EA_GROUP_SORT_FILES: i32 = 34;
 pub(crate) const EA_POST_DELETE: i32 = 35;
 pub(crate) const EA_HISTORY_DELETE: i32 = 36;
+pub(crate) const EA_HISTORY_FINAL_DELETE: i32 = 37;
+pub(crate) const EA_HISTORY_RETRY_FAILED: i32 = 41;
+pub(crate) const EA_HISTORY_SET_PARAMETER: i32 = 42;
+pub(crate) const EA_HISTORY_SET_DUPE_SCORE: i32 = 44;
 pub(crate) const EA_HISTORY_SET_NAME: i32 = 51;
 
 // DownloadQueue::EMatchMode
@@ -633,8 +637,10 @@ pub(crate) struct DupSnap {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct HistEntrySnap {
     pub hi_ptr: usize,
+    pub id: i32,
     pub kind: i32,
     pub inner_ptr: usize,
+    pub time: i64,
     pub name: Vec<u8>,
 }
 
@@ -666,13 +672,18 @@ pub(crate) struct QueueSubsysHost {
     pub use_active: bool,
 }
 
-unsafe extern "C" fn locked_queue_trampoline<F: FnOnce(usize)>(
+struct LockedQueueCall<F, R> {
+    f: Option<F>,
+    out: Option<R>,
+}
+
+unsafe extern "C" fn locked_queue_trampoline<R, F: FnOnce(usize) -> R>(
     closure_ptr: *mut c_void,
     dq_ptr: usize,
 ) {
-    let opt = &mut *(closure_ptr as *mut Option<F>);
-    if let Some(f) = opt.take() {
-        f(dq_ptr);
+    let call = &mut *(closure_ptr as *mut LockedQueueCall<F, R>);
+    if let Some(f) = call.f.take() {
+        call.out = Some(f(dq_ptr));
     }
 }
 
@@ -1649,22 +1660,6 @@ impl QueueSubsysHost {
         ) != 0
     }
 
-    pub fn launch_dupe_probe(&self, probe: Box<crate::dupeprobe::NzbgetRsDupeProbe>) {
-        let raw_ptr = Box::into_raw(probe) as usize;
-        self.raw(
-            6,
-            7,
-            0,
-            raw_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-    }
-
     pub fn history_add_to_history(&self, dq_ptr: usize, nzb_ptr: usize) {
         self.raw(
             6,
@@ -1765,6 +1760,11 @@ impl QueueSubsysHost {
     }
 
     pub fn dupe_search_notify_name_changed(&self, nzb_id: i32) {
+        #[cfg(unix)]
+        if self.use_active {
+            crate::dupesearch_coord::notify_active_dupesearch_name_changed(nzb_id);
+            return;
+        }
         self.raw(
             6,
             12,
@@ -1776,6 +1776,48 @@ impl QueueSubsysHost {
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn url_coord_add_feed_item(
+        &self,
+        feed_id: i32,
+        url: &[u8],
+        filename: &[u8],
+        category: &[u8],
+        priority: i32,
+        add_paused: bool,
+        dupe_key: &[u8],
+        dupe_score: i32,
+        dupe_mode: i32,
+        size: i64,
+        time: i64,
+    ) {
+        let c_url = c_bytes(url);
+        let c_fn = c_bytes(filename);
+        let c_cat = c_bytes(category);
+        let c_dk = c_bytes(dupe_key);
+        let packed_flags = i32::from(add_paused) | ((dupe_mode & 0xff) << 1);
+        let mut ints = [feed_id, packed_flags, priority, dupe_score];
+        let mut i64s = [size, time];
+        let mut strs = [
+            c_url.as_ptr() as *const c_char,
+            c_fn.as_ptr() as *const c_char,
+            c_cat.as_ptr() as *const c_char,
+            c_dk.as_ptr() as *const c_char,
+        ];
+        self.raw(
+            6,
+            14,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            i64s.as_mut_ptr(),
+            strs.as_mut_ptr(),
         );
     }
 
@@ -1800,20 +1842,24 @@ impl QueueSubsysHost {
     }
 
     // DownloadQueue & CoordinatorDownloadQueue ops (op = 20..=25)
-    pub fn with_locked_queue<F: FnOnce(usize)>(&self, f: F) {
-        let mut opt = Some(f);
+    pub fn with_locked_queue<R, F: FnOnce(usize) -> R>(&self, f: F) -> R {
+        let mut call = LockedQueueCall {
+            f: Some(f),
+            out: None,
+        };
         self.raw(
             20,
             0,
             0,
-            locked_queue_trampoline::<F> as *const () as usize,
-            (&mut opt as *mut Option<F>) as usize,
+            locked_queue_trampoline::<R, F> as *const () as usize,
+            (&mut call as *mut LockedQueueCall<F, R>) as usize,
             std::ptr::null(),
             std::ptr::null(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
+        call.out.expect("locked_queue callback did not run")
     }
 
     pub fn queue_len(&self, dq_ptr: usize) -> usize {
@@ -1980,7 +2026,7 @@ impl QueueSubsysHost {
 
     pub fn history_at(&self, dq_ptr: usize, idx: usize) -> HistEntrySnap {
         let mut ints = [0i32; 2];
-        let mut i64s = [0i64; 1];
+        let mut i64s = [0i64; 2];
         let mut strs = [std::ptr::null(); 1];
         let hi_ptr = self.raw(
             23,
@@ -1997,8 +2043,10 @@ impl QueueSubsysHost {
         unsafe {
             HistEntrySnap {
                 hi_ptr,
+                id: ints[1],
                 kind: ints[0],
                 inner_ptr: i64s[0] as usize,
+                time: i64s[1],
                 name: read_cstr(strs[0]),
             }
         }
@@ -2054,6 +2102,32 @@ impl QueueSubsysHost {
         ) != 0
     }
 
+    pub fn dq_edit_list_single_id(
+        &self,
+        dq_ptr: usize,
+        id: i32,
+        action: i32,
+        args: Option<&[u8]>,
+    ) -> bool {
+        let mut ints = [action];
+        let c_args = args.map(c_bytes);
+        let s1 = c_args
+            .as_ref()
+            .map_or(std::ptr::null(), |v| v.as_ptr() as *const c_char);
+        self.raw(
+            24,
+            6,
+            id,
+            dq_ptr,
+            0,
+            s1,
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
+    }
+
     pub fn dq_notify(&self, dq_ptr: usize, aspect_action: i32, nzb_ptr: usize, file_ptr: usize) {
         let mut i64s = [file_ptr as i64];
         self.raw(
@@ -2068,6 +2142,29 @@ impl QueueSubsysHost {
             i64s.as_mut_ptr(),
             std::ptr::null_mut(),
         );
+        #[cfg(unix)]
+        if self.use_active {
+            crate::feed::notify_active_feed_queue_aspect(aspect_action, None);
+            if aspect_action == ASPECT_NZB_ADDED
+                && nzb_ptr != 0
+                && !self.nzb_snap(nzb_ptr, false).dupe_key.is_empty()
+            {
+                crate::twin::nudge_and_wake_active();
+            }
+            if nzb_ptr != 0
+                && (aspect_action == ASPECT_NZB_ADDED || aspect_action == ASPECT_NZB_NAMED)
+            {
+                crate::dupesearch_coord::notify_active_dupesearch_queue_update(
+                    if aspect_action == ASPECT_NZB_ADDED {
+                        1
+                    } else {
+                        2
+                    },
+                    dq_ptr,
+                    nzb_ptr,
+                );
+            }
+        }
     }
 
     pub fn dq_calc_remaining_size(&self, dq_ptr: usize) -> (i64, i64) {
@@ -2623,6 +2720,10 @@ impl QueueSubsysHost {
             i64s.as_mut_ptr(),
             std::ptr::null_mut(),
         );
+        #[cfg(unix)]
+        if self.use_active {
+            crate::feed::notify_active_feed_queue_aspect(aspect_action, None);
+        }
     }
 
     pub fn nzb_transfer_split_file(&self, src_nzb: usize, dest_nzb: usize, file_ptr: usize) {
@@ -2914,8 +3015,10 @@ impl QueueSubsysHost {
         );
         HistEntrySnap {
             hi_ptr,
+            id: ints[1],
             kind: ints[0],
             inner_ptr,
+            time: 0,
             name: unsafe { read_cstr(strs[0]) },
         }
     }

@@ -245,8 +245,11 @@ pub fn prepare_requeued_loaded_file(
 ) -> RequeueFilePrepOutcome {
     let set_recorded_filename =
         !is_temporary_output_name(recorded_name) || current_file_filename.is_empty();
-    let mut output_filename =
-        crate::artwritercore::article_writer_format_dest_file_path(dest_dir, path_sep, recorded_name);
+    let mut output_filename = crate::artwritercore::article_writer_format_dest_file_path(
+        dest_dir,
+        path_sep,
+        recorded_name,
+    );
     if output_filename.len() > 1023 {
         output_filename.truncate(1023);
     }
@@ -591,12 +594,7 @@ unsafe fn hc_log(env: &NzbgetRsHistoryCoordEnv, level: c_int, msg: &[u8]) {
     }
 }
 
-unsafe fn hc_nzb_msg(
-    env: &NzbgetRsHistoryCoordEnv,
-    nzb_ptr: usize,
-    kind: c_int,
-    msg: &[u8],
-) {
+unsafe fn hc_nzb_msg(env: &NzbgetRsHistoryCoordEnv, nzb_ptr: usize, kind: c_int, msg: &[u8]) {
     if let Some(cb) = env.action_cb {
         let c = hc_cbuf(msg);
         cb(
@@ -718,133 +716,100 @@ unsafe fn hc_delete_dest_dir_if_present(
     }
 }
 
-unsafe fn hc_recheck_failed_articles(
-    env: &NzbgetRsHistoryCoordEnv,
-    dq_ptr: usize,
-    nzb_ptr: usize,
+unsafe extern "C" fn hc_emit_failed_sample(
+    ctx: *mut c_void,
+    msg_id: *const c_char,
+    groups_ptr: *const *const c_char,
+    groups_len: usize,
 ) {
+    if ctx.is_null() || msg_id.is_null() {
+        return;
+    }
+    let out = &mut *(ctx as *mut Vec<crate::dupeprobe::ProbeSample>);
+    let mid = hc_cstr_bytes(msg_id).to_vec();
+    if mid.is_empty() {
+        return;
+    }
+    let mut groups = Vec::with_capacity(groups_len);
+    if !groups_ptr.is_null() && groups_len > 0 {
+        let sl = std::slice::from_raw_parts(groups_ptr, groups_len);
+        for &gp in sl {
+            if !gp.is_null() {
+                groups.push(hc_cstr_bytes(gp).to_vec());
+            }
+        }
+    }
+    out.push(crate::dupeprobe::ProbeSample {
+        message_id: mid,
+        groups,
+    });
+}
+
+unsafe fn hc_recheck_failed_articles(env: &NzbgetRsHistoryCoordEnv, dq_ptr: usize, nzb_ptr: usize) {
     let Some(cb) = env.action_cb else {
         return;
     };
-    let mut ints = [0i32; 7];
-    let mut strs: [*const c_char; 2] = [std::ptr::null(); 2];
-    let mut status_buf = [0u8; 64];
-    cb(
-        env.ctx,
-        7,
-        0,
-        0,
-        dq_ptr,
-        nzb_ptr,
-        std::ptr::null(),
-        std::ptr::null(),
-        ints.as_mut_ptr(),
-        std::ptr::null_mut(),
-        strs.as_mut_ptr(),
-        status_buf.as_mut_ptr(),
-        status_buf.len(),
-    );
-    let st_end = status_buf
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(status_buf.len());
-    if !should_recheck_failed_articles(
-        ints[0] == 0,
-        ints[1] == 4,
-        ints[2] == 0,
-        ints[3],
-        &status_buf[..st_end],
-        ints[4] != 0,
-    ) {
-        return;
-    }
-
-    let self_name = hc_cstr_bytes(strs[0]).to_vec();
-    let self_key = hc_cstr_bytes(strs[1]).to_vec();
-    let queue_len = ints[6];
-    for qidx in 0..queue_len {
-        let mut qstrs: [*const c_char; 2] = [std::ptr::null(); 2];
-        cb(
-            env.ctx,
-            8,
-            qidx,
-            0,
-            dq_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            qstrs.as_mut_ptr(),
-            std::ptr::null_mut(),
-            0,
-        );
-        if crate::dupecoord::same_name_or_key(
-            hc_cstr_bytes(qstrs[0]),
-            hc_cstr_bytes(qstrs[1]),
-            &self_name,
-            &self_key,
+    #[cfg(unix)]
+    if let Some(qh) = crate::ffi::queue_host() {
+        let opts = qh.opts();
+        let nzb = qh.nzb_snap(nzb_ptr, true);
+        let has_recheck = qh.nzb_get_param(nzb_ptr, b"*DupeRecheck").is_some();
+        if !should_recheck_failed_articles(
+            opts.dupe_article_fallback == 0,
+            opts.health_check == 4,
+            nzb.kind == 0,
+            nzb.failed_articles,
+            &nzb.text_status,
+            has_recheck,
         ) {
             return;
         }
-    }
-
-    if ints[5] != 0
-        && cb(
+        let q_len = qh.queue_len(dq_ptr);
+        for qidx in 0..q_len {
+            let q = qh.nzb_snap(qh.queue_at(dq_ptr, qidx), false);
+            if crate::dupecoord::same_name_or_key(&q.name, &q.dupe_key, &nzb.name, &nzb.dupe_key) {
+                return;
+            }
+        }
+        if opts.dupe_check
+            && nzb.dupe_mode == crate::queuesubsys_host::DM_SCORE
+            && crate::dupecoord::find_dupe_backup_host(
+                &qh,
+                &opts,
+                dq_ptr,
+                nzb_ptr,
+                &nzb.name,
+                &nzb.dupe_key,
+            )
+            .is_some()
+        {
+            return;
+        }
+        let mut failed: Vec<crate::dupeprobe::ProbeSample> = Vec::new();
+        cb(
             env.ctx,
-            9,
+            10,
             0,
             0,
-            dq_ptr,
+            std::ptr::addr_of_mut!(failed) as usize,
             nzb_ptr,
-            std::ptr::null(),
+            hc_emit_failed_sample as *const c_void as *const c_char,
             std::ptr::null(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             0,
-        ) != 0
-    {
-        return;
+        );
+        if failed.len() < 2 {
+            return;
+        }
+        let idxs = crate::dupeprobe::sample_indexes(failed.len(), 10);
+        let samples: Vec<_> = idxs.into_iter().map(|i| failed[i].clone()).collect();
+        crate::dupeprobe::start_recheck_rs(nzb.id, samples);
     }
-
-    let mut c_ints = [0i32; 1];
-    let vec_ptr = cb(
-        env.ctx,
-        10,
-        0,
-        0,
-        dq_ptr,
-        nzb_ptr,
-        std::ptr::null(),
-        std::ptr::null(),
-        c_ints.as_mut_ptr(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        0,
-    );
-    if vec_ptr == 0 || c_ints[0] < 2 {
-        return;
-    }
-    let idxs = crate::dupeprobe::sample_indexes(c_ints[0] as usize, 10);
-    let mut idx_i32: Vec<c_int> = idxs.into_iter().map(|i| i as c_int).collect();
-    cb(
-        env.ctx,
-        11,
-        0,
-        0,
-        vec_ptr,
-        nzb_ptr,
-        std::ptr::null(),
-        std::ptr::null(),
-        idx_i32.as_mut_ptr(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        idx_i32.len(),
-    );
+    #[cfg(not(unix))]
+    let _ = (cb, dq_ptr, nzb_ptr);
 }
 
 unsafe fn hc_history_hide(
@@ -1037,6 +1002,8 @@ unsafe fn hc_move_to_queue(
             std::ptr::null_mut(),
             0,
         );
+        #[cfg(unix)]
+        crate::feed::notify_active_feed_queue_aspect(4, None);
     }
 }
 
@@ -1069,6 +1036,8 @@ unsafe fn hc_history_redownload(
             std::ptr::null_mut(),
             0,
         );
+        #[cfg(unix)]
+        crate::feed::notify_active_feed_queue_aspect(12, None);
         return;
     }
     if kind != 1 {
@@ -1193,6 +1162,8 @@ unsafe fn hc_history_redownload(
         std::ptr::null_mut(),
         0,
     );
+    #[cfg(unix)]
+    crate::feed::notify_active_feed_queue_aspect(4, None);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1711,7 +1682,7 @@ unsafe fn hc_set_name(
     }
 
     let t_c = hc_cbuf(text);
-    cb(
+    let changed_id = cb(
         env.ctx,
         36,
         2,
@@ -1726,6 +1697,10 @@ unsafe fn hc_set_name(
         std::ptr::null_mut(),
         0,
     );
+    #[cfg(unix)]
+    if changed_id != 0 {
+        crate::dupesearch_coord::notify_active_dupesearch_name_changed(changed_id as i32);
+    }
     true
 }
 
@@ -2382,22 +2357,12 @@ pub unsafe extern "C" fn nzbget_rs_history_coord_exec(
                             e.s1,
                         );
                     }
-                    47..=49 => {
-                        cb(
-                            e.ctx,
-                            19,
-                            action - 46,
-                            0,
-                            e.p1,
-                            hist_ptr,
-                            std::ptr::null(),
-                            std::ptr::null(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                            0,
-                        );
+                    47..=49 =>
+                    {
+                        #[cfg(unix)]
+                        if let Some(qh) = crate::ffi::queue_host() {
+                            crate::dupecoord::history_mark_host(&qh, e.p1, hist_ptr, action - 46);
+                        }
                     }
                     _ => {}
                 }
@@ -2774,7 +2739,8 @@ mod tests {
                 )
             };
             let state_text = String::from_utf8(state_bytes).unwrap();
-            let state_fname = String::from_utf8(diskstate_format_file_state_name(file_id, false)).unwrap();
+            let state_fname =
+                String::from_utf8(diskstate_format_file_state_name(file_id, false)).unwrap();
             std::fs::write(queue_dir.join(&state_fname), &state_text).unwrap();
 
             let lines: Vec<&str> = state_text.lines().collect();

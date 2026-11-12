@@ -31,8 +31,7 @@ inline int NServMain(int argc, char* argv[])
 	{
 		Log* log;
 		std::unique_ptr<Options> options;
-		std::unique_ptr<Frontend> frontend;
-	} ctx{&log, nullptr, nullptr};
+	} ctx{&log, nullptr};
 
 	NzbgetRsNservEnv env{};
 	env.ctx = &ctx;
@@ -46,7 +45,7 @@ inline int NServMain(int argc, char* argv[])
 		else if (level == 3) warn("%s", s);
 		else if (level == 4) error("%s", s);
 	};
-	env.runtime_cb = +[](void* raw, int op, int arg, const char* const* opts, size_t optLen) {
+	env.runtime_cb = +[](void* raw, int op, int, const char* const* opts, size_t optLen) {
 		auto* c = static_cast<NServCtx*>(raw);
 		if (op == 0)
 		{
@@ -59,11 +58,7 @@ inline int NServMain(int argc, char* argv[])
 			TlsSocket::Init();
 #endif
 			signal(SIGPIPE, SIG_IGN);
-			c->frontend = std::make_unique<Frontend>(3);
-			c->frontend->Start();
 		}
-		else if (op == 1) { if (c->frontend) c->frontend->Stop(); }
-		else if (op == 2) { while (c->frontend && c->frontend->IsRunning()) Util::Sleep(arg); }
 		else if (op == 3) { while (getchar()) Util::Sleep(200); }
 	};
 	env.tls_host_cb = &TlsHostCb;
@@ -83,7 +78,6 @@ QueueCoordinator* g_QueueCoordinator;
 UrlCoordinator* g_UrlCoordinator;
 PrePostProcessor* g_PrePostProcessor;
 HistoryCoordinator* g_HistoryCoordinator;
-DupeCoordinator* g_DupeCoordinator;
 DiskState* g_DiskState;
 Scanner* g_Scanner;
 ArticleCache* g_ArticleCache;
@@ -161,24 +155,6 @@ public:
 			const NzbgetRsRpcHost rpcHost = BuildRpcHost();
 			nzbget_rs_remote_srv_ctl(0, &rpcHost);
 		}
-		if (!m_options->GetDaemonMode())
-		{
-			switch (m_options->GetOutputMode())
-			{
-			case Options::omNCurses:
-#ifndef DISABLE_CURSES
-				m_frontend = std::make_unique<Frontend>(2);
-				break;
-#endif
-			case Options::omColored:
-				m_frontend = std::make_unique<Frontend>(1);
-				break;
-			case Options::omLoggable:
-				m_frontend = std::make_unique<Frontend>(0);
-				break;
-			}
-		}
-		if (m_frontend) m_frontend->Start();
 
 		NzbgetRsDaemonEnv env{};
 		env.ctx = this;
@@ -229,20 +205,14 @@ private:
 	std::unique_ptr<ServerPool> m_serverPool;
 	std::unique_ptr<QueueCoordinator> m_queueCoordinator;
 	std::unique_ptr<UrlCoordinator> m_urlCoordinator;
-	std::unique_ptr<DupeSearch> m_dupeSearch;
 	std::unique_ptr<PrePostProcessor> m_prePostProcessor;
 	std::unique_ptr<HistoryCoordinator> m_historyCoordinator;
-	std::unique_ptr<TwinCheck> m_twinCheck;
-	std::unique_ptr<DupeCoordinator> m_dupeCoordinator;
 	std::unique_ptr<DiskState> m_diskState;
 	std::unique_ptr<Scanner> m_scanner;
-	std::unique_ptr<FeedCoordinator> m_feedCoordinator;
 	std::unique_ptr<ArticleCache> m_articleCache;
 	std::unique_ptr<QueueScriptCoordinator> m_queueScriptCoordinator;
 	std::unique_ptr<ServiceCoordinator> m_serviceCoordinator;
 	std::unique_ptr<ExtensionManager::Manager> m_extensionManager;
-	std::unique_ptr<MemoryMonitor> m_memoryMonitor;
-	std::unique_ptr<Thread> m_frontend;
 
 	void CreateGlobals()
 	{
@@ -265,25 +235,13 @@ private:
 		g_PrePostProcessor = m_prePostProcessor.get();
 
 		m_historyCoordinator = std::make_unique<HistoryCoordinator>();
-		m_twinCheck = std::make_unique<TwinCheck>();
 		g_HistoryCoordinator = m_historyCoordinator.get();
-
-		m_dupeCoordinator = std::make_unique<DupeCoordinator>();
-		g_DupeCoordinator = m_dupeCoordinator.get();
 
 		m_urlCoordinator = std::make_unique<UrlCoordinator>();
 		g_UrlCoordinator = m_urlCoordinator.get();
 
-		m_dupeSearch = std::make_unique<DupeSearch>();
-		g_DupeSearch = m_dupeSearch.get();
-
-		m_feedCoordinator = std::make_unique<FeedCoordinator>();
-
 		m_articleCache = std::make_unique<ArticleCache>();
 		g_ArticleCache = m_articleCache.get();
-
-		m_memoryMonitor = std::make_unique<MemoryMonitor>();
-		g_MemoryMonitor = m_memoryMonitor.get();
 
 		m_queueScriptCoordinator = std::make_unique<QueueScriptCoordinator>();
 		g_QueueScriptCoordinator = m_queueScriptCoordinator.get();
@@ -303,25 +261,13 @@ private:
 		nzbget_rs_daemon_exec(12, &env);
 
 		g_UrlCoordinator = nullptr;
-		g_DupeSearch = nullptr;
 		g_PrePostProcessor = nullptr;
 		g_Scanner = nullptr;
 		g_HistoryCoordinator = nullptr;
-		g_DupeCoordinator = nullptr;
 		g_QueueCoordinator = nullptr;
 		g_DiskState = nullptr;
 		g_ServerPool = nullptr;
 		g_ArticleCache = nullptr;
-		if (m_memoryMonitor)
-		{
-			m_memoryMonitor->Stop();
-			while (m_memoryMonitor->IsRunning())
-			{
-				Util::Sleep(10);
-			}
-		}
-		g_MemoryMonitor = nullptr;
-		m_memoryMonitor.reset();
 		g_QueueScriptCoordinator = nullptr;
 	}
 
@@ -330,55 +276,39 @@ private:
 		auto* self = static_cast<RustyGet*>(raw);
 		switch (sub)
 		{
-		case 3:
-			return (self->m_frontend && self->m_frontend->IsRunning()) ? 1 : 0;
 		case 4:
 			self->m_queueCoordinator->Start();
 			self->m_urlCoordinator->Start();
-			self->m_dupeSearch->Start();
 			self->m_prePostProcessor->Start();
-			self->m_feedCoordinator->Start();
 			self->m_serviceCoordinator->Start();
 			if (self->m_options->GetArticleCache() > 0) self->m_articleCache->Start();
-			if (self->m_memoryMonitor) self->m_memoryMonitor->Start();
 			return 0;
 		case 5:
 			if (a2 == 0)
 				return (self->m_queueCoordinator->IsRunning() || self->m_urlCoordinator->IsRunning() ||
-					self->m_dupeSearch->IsRunning() || self->m_prePostProcessor->IsRunning() ||
-					self->m_feedCoordinator->IsRunning() || self->m_serviceCoordinator->IsRunning() ||
-					(self->m_memoryMonitor && self->m_memoryMonitor->IsRunning()) || self->m_articleCache->IsRunning()) ? 1 : 0;
+					self->m_prePostProcessor->IsRunning() || self->m_serviceCoordinator->IsRunning() ||
+					self->m_articleCache->IsRunning()) ? 1 : 0;
 			return (self->m_queueCoordinator->HasMoreJobs() ? 1 : 0) |
 				(self->m_urlCoordinator->HasMoreJobs() ? 2 : 0) |
 				(self->m_prePostProcessor->HasMoreJobs() ? 4 : 0);
 		case 6:
 			if (!self->m_queueCoordinator->IsStopped()) self->m_queueCoordinator->Stop();
 			if (!self->m_urlCoordinator->IsStopped()) self->m_urlCoordinator->Stop();
-			if (!self->m_dupeSearch->IsStopped()) self->m_dupeSearch->Stop();
 			if (!self->m_prePostProcessor->IsStopped()) self->m_prePostProcessor->Stop();
-			if (!self->m_feedCoordinator->IsStopped()) self->m_feedCoordinator->Stop();
 			if (!self->m_articleCache->IsStopped()) self->m_articleCache->Stop();
-			if (self->m_memoryMonitor && !self->m_memoryMonitor->IsStopped()) self->m_memoryMonitor->Stop();
 			if (!self->m_serviceCoordinator->IsStopped()) self->m_serviceCoordinator->Stop();
 			return 0;
 		case 7:
 			return (self->m_prePostProcessor && self->m_prePostProcessor->HasActiveUnpack(false)) ? 1 : 0;
 		case 8:
-			if (a2 != 0)
-			{
-				if (self->m_frontend) { debug("Stopping Frontend"); self->m_frontend->Stop(); }
-			}
-			else if (self->m_queueCoordinator)
+			if (a2 == 0 && self->m_queueCoordinator)
 			{
 				debug("Stopping QueueCoordinator");
 				self->m_serviceCoordinator->Stop();
 				self->m_queueCoordinator->Stop();
 				self->m_urlCoordinator->Stop();
-				self->m_dupeSearch->Stop();
 				self->m_prePostProcessor->Stop();
-				self->m_feedCoordinator->Stop();
 				self->m_articleCache->Stop();
-				if (self->m_memoryMonitor) self->m_memoryMonitor->Stop();
 				self->m_queueScriptCoordinator->Stop();
 			}
 			return 0;
@@ -399,21 +329,6 @@ private:
 			}
 			return 0;
 		}
-		case 12:
-			if (self->m_frontend)
-			{
-				if (a2 != 0) { debug("Stopping Frontend"); self->m_frontend->Stop(); }
-				while (self->m_frontend->IsRunning())
-				{
-					NzbgetRsDaemonEnv q{};
-					q.a1 = 2;
-					q.a2 = 1;
-					if (nzbget_rs_daemon_exec(3, &q)) ExitProc();
-					Util::Sleep(50);
-				}
-				debug("Frontend stopped");
-			}
-			return 0;
 		default:
 			return 0;
 		}

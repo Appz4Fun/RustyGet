@@ -464,7 +464,6 @@ typedef struct {
 } NzbgetRsDiskRepairJob;
 
 typedef struct NzbgetRsOptions NzbgetRsOptions;
-typedef struct NzbgetRsFeedCoord NzbgetRsFeedCoord;
 typedef struct NzbgetRsLog NzbgetRsLog;
 typedef struct NzbgetRsWorkState NzbgetRsWorkState;
 typedef struct NzbgetRsServerPool NzbgetRsServerPool;
@@ -474,11 +473,15 @@ typedef int (*NzbgetRsServiceCoordFn)(void* ctx, void* svc, int op);
 typedef uintptr_t (*NzbgetRsScriptHostFn)(
     void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
     const char* s1, const char* s2, int* ints, const char** strs);
+typedef uintptr_t (*NzbgetRsQueueSubsysHostFn)(
+    void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+    const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
 
 void nzbget_rs_build_env_init(
     int flags, const char* version, const char* ssl_lib_name, const char* ssl_raw_version,
     NzbgetRsConnHostFn tls_host_cb, NzbgetRsScriptHostFn script_host_cb,
-    void (*write_stdout_cb)(const char* ptr, size_t len, int do_flush));
+    void (*write_stdout_cb)(const char* ptr, size_t len, int do_flush),
+    NzbgetRsQueueSubsysHostFn queue_host_cb);
 int nzbget_rs_thread_count_op(int op);
 int nzbget_rs_tls_suppressed(uintptr_t slot);
 
@@ -521,22 +524,6 @@ typedef struct NzbgetRsQueueScriptCoordEnv {
 NzbgetRsQueueScriptCoord* nzbget_rs_queue_script_new(void);
 void nzbget_rs_queue_script_free(NzbgetRsQueueScriptCoord* h);
 int nzbget_rs_queue_script_exec(NzbgetRsQueueScriptCoord* h, int op, const NzbgetRsQueueScriptCoordEnv* env);
-
-/* ============================================================================
- * Feed Subsystem (`rust/src/feed.rs`)
- * ============================================================================ */
-
-typedef struct NzbgetRsFeedCoordEnv {
-    void* ctx; uintptr_t p1; int a1; int a2; int a3; int a4; int a5; int a6; uint32_t u1;
-    const char* s1; const char* s2; const char* s3; const char* s4; const char* s5; const char* s6;
-    void (*log_cb)(void* ctx, int level, const char* msg);
-    uintptr_t (*query_cb)(void* ctx, int op, uintptr_t ptr, int* out_ints, int64_t* out_i64s, const char** out_strs);
-    uintptr_t (*action_cb)(void* ctx, int op, uintptr_t p1, int a1, int a2, int a3, int64_t t1, int64_t t2, const char* s1, const char* s2, const char* s3, const char* s4);
-    void (*rpc_emit_cb)(void* ctx, const NzbgetRsRpcFeedItem* item);
-} NzbgetRsFeedCoordEnv;
-NzbgetRsFeedCoord* nzbget_rs_feed_coord_new(void);
-void nzbget_rs_feed_coord_free(NzbgetRsFeedCoord* coord);
-int nzbget_rs_feed_coord_exec(const NzbgetRsFeedCoord* coord, int op, const NzbgetRsFeedCoordEnv* env);
 
 typedef struct NzbgetRsUrlCoord NzbgetRsUrlCoord;
 typedef struct NzbgetRsUrlCoordEnv {
@@ -889,11 +876,6 @@ typedef struct NzbgetRsDiskStateEnv {
 } NzbgetRsDiskStateEnv;
 
 int nzbget_rs_diskstate_exec(int op, const NzbgetRsDiskStateEnv* env);
-typedef struct NzbgetRsDupeProbe NzbgetRsDupeProbe;
-typedef uintptr_t (*NzbgetRsDupeProbeHostFn)(void*, int, int, int, int, uintptr_t, uintptr_t, const char*, int*, const char**);
-NzbgetRsDupeProbe* nzbget_rs_dupe_probe_new(int nzb_id, int count_all, int recovered_at_start);
-void nzbget_rs_dupe_probe_free(NzbgetRsDupeProbe* p);
-int nzbget_rs_dupe_probe_exec(NzbgetRsDupeProbe* p, int op, size_t n, int a1, int a2, uintptr_t p1, const char* s1, const char* const* groups, size_t* out_idx, void* ctx, NzbgetRsDupeProbeHostFn host_cb);
 typedef struct NzbgetRsHistoryCoordEnv {
     void* ctx; uintptr_t p1; uintptr_t p2;
     int a1; int a2; int a3; int a4; int a5; int a6; int64_t t1;
@@ -902,14 +884,6 @@ typedef struct NzbgetRsHistoryCoordEnv {
     uintptr_t (*action_cb)(void*, int, int, int, uintptr_t, uintptr_t, const char*, const char*, int*, int64_t*, const char**, uint8_t*, size_t);
 } NzbgetRsHistoryCoordEnv;
 int nzbget_rs_history_coord_exec(int op, const NzbgetRsHistoryCoordEnv* env);
-typedef uintptr_t (*NzbgetRsTwinHostFn)(
-    int op, int a1, int a2, uintptr_t p1,
-    const char* s1, const char* s2, const char* s3, const char* s4,
-    int* ints, int64_t* i64s, const char** strs);
-int nzbget_rs_twin_exec(
-    int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-    const char* s1, const char* s2, const char* s3, const char* s4,
-    NzbgetRsTwinHostFn host_cb, NzbgetRsBuf* out_buf);
 int nzbget_rs_socket_deadline_wait(
     int fd, int read, int write, void* ctx, int64_t (*rem_cb)(void*));
 typedef struct NzbgetRsScanner NzbgetRsScanner;
@@ -969,8 +943,7 @@ typedef uintptr_t (*NzbgetRsStreamRepairHostFn)(
     void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
     const char* s1, int* ints, int64_t* i64s, const char** strs);
 NzbgetRsStreamRepairCtrl* nzbget_rs_stream_repair_ctrl_new(
-    int live_mode, int nzb_id,
-    NzbgetRsDupeProbeHostFn probe_host, int tls_enabled, int debug_enabled);
+    int live_mode, int nzb_id, int tls_enabled, int debug_enabled);
 void nzbget_rs_stream_repair_ctrl_free(NzbgetRsStreamRepairCtrl* ctrl);
 int nzbget_rs_stream_repair_ctrl_exec(
     const NzbgetRsStreamRepairCtrl* ctrl, int op,
@@ -1052,45 +1025,10 @@ typedef struct NzbgetRsRpcHost {
 
 void nzbget_rs_remote_srv_ctl(int op, const NzbgetRsRpcHost* host);
 
-typedef struct NzbgetRsFrontendHost {
-    void* ctx;
-    int use_color;
-    int64_t (*action_cb)(void* ctx, int op, int a1, int a2, int a3);
-    void (*queue_stats_cb)(void* ctx, int* out_post_jobs, int64_t* out_rem_size);
-    void (*local_queue_cb)(
-        void* ctx, void* emit_ctx,
-        void (*emit_nzb_cb)(
-            void* emit_ctx, int id, int priority, int active_dl,
-            int64_t size, int64_t rem_size, int64_t paused_size,
-            int paused_files, int rem_pars, const char* name),
-        void (*emit_file_cb)(
-            void* emit_ctx, size_t nzb_idx, int id, int active_dl,
-            int paused, int64_t size, int64_t rem_size, const char* filename));
-} NzbgetRsFrontendHost;
-
-int nzbget_rs_frontend_op(int op, const NzbgetRsFrontendHost* host);
-
-typedef struct NzbgetRsDupeSearch NzbgetRsDupeSearch;
-typedef uintptr_t (*NzbgetRsDupeHostFn)(
-    void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-    const char* s1, const char* s2, int* ints, int64_t* i64s,
-    const char** strs, const uint8_t* bytes, size_t len);
-NzbgetRsDupeSearch* nzbget_rs_dupesearch_new(NzbgetRsDupeHostFn host_cb);
-void nzbget_rs_dupesearch_free(NzbgetRsDupeSearch* ptr);
-void nzbget_rs_dupesearch_exec(
-    NzbgetRsDupeSearch* ptr, int op, int a1, uintptr_t p1, uintptr_t p2,
-    void* host_ctx, NzbgetRsDupeHostFn host_cb);
-
 typedef struct NzbgetRsQueueCoordinator NzbgetRsQueueCoordinator;
 typedef struct NzbgetRsPrePostProcessor NzbgetRsPrePostProcessor;
-typedef uintptr_t (*NzbgetRsQueueSubsysHostFn)(
-    void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-    const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
 int nzbget_rs_dupe_fallback_op(
     int op, int a1, uintptr_t p1, NzbgetRsQueueSubsysHostFn host_cb);
-uintptr_t nzbget_rs_dupe_coord_exec(
-    int op, int a1, uintptr_t p1, uintptr_t p2,
-    const char* s1, const char* s2, NzbgetRsQueueSubsysHostFn host_cb);
 NzbgetRsQueueCoordinator* nzbget_rs_queue_coord_new(void);
 void nzbget_rs_queue_coord_free(NzbgetRsQueueCoordinator* ptr);
 uintptr_t nzbget_rs_queue_coord_exec(

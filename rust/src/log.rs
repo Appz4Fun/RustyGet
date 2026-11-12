@@ -178,6 +178,8 @@ impl NzbgetRsLog {
             for &item in dbg.iter() {
                 if item == 1 {
                     crate::statmeter::log_active_statmeter_debug_info();
+                } else if item == 2 {
+                    crate::feed::log_active_feed_debug_info();
                 } else if let Some(cb) = self.debug_cb {
                     unsafe { cb(item) };
                 }

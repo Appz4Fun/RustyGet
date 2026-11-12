@@ -1769,6 +1769,9 @@ inline uintptr_t ScriptHostCb(
 	void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
 	const char* s1, const char* s2, int* ints, const char** strs);
 
+inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
+
 inline void InitRsBuildEnv()
 {
 	static std::once_flag once;
@@ -1785,6 +1788,9 @@ inline void InitRsBuildEnv()
 #endif
 #ifdef DISABLE_PARCHECK
 		flags |= 16;
+#endif
+#ifdef DISABLE_CURSES
+		flags |= 32;
 #endif
 		const char* sslLib = "";
 		const char* sslVer = "";
@@ -1806,7 +1812,7 @@ inline void InitRsBuildEnv()
 			+[](const char* ptr, size_t len, int doFlush) {
 				if (ptr && len > 0) fwrite(ptr, 1, len, stdout);
 				if (doFlush) fflush(stdout);
-			});
+			}, &NzbgetCQueueHost);
 	});
 }
 
@@ -3637,14 +3643,15 @@ public:
 		}
 	}
 
-protected:
-	DownloadQueue() {}
 	// a reload creates the queue anew: until it is loaded again, threads
 	// waiting for IsLoaded() (the post-processor's queue sanitising, for
 	// one) must not take the previous queue's state for it
 	static void Init(DownloadQueue* globalInstance) { g_DownloadQueue = globalInstance; g_Loaded = false; nzbget_rs_thread_count_op(4); }
 	static void Final() { g_DownloadQueue = nullptr; g_Loaded = false; nzbget_rs_thread_count_op(4); }
 	static void Loaded() { g_Loaded = true; nzbget_rs_thread_count_op(3); }
+
+protected:
+	DownloadQueue() {}
 
 private:
 	NzbList m_queue;
@@ -4950,23 +4957,6 @@ private:
 		const char*, const char*, int*, int64_t*, const char**);
 };
 
-class MemoryMonitor final : public Thread
-{
-public:
-	MemoryMonitor() { nzbget_rs_article_dl_exec(nullptr, 100, 1, 0, 0, 0, nullptr, nullptr, nullptr); }
-
-	~MemoryMonitor() override
-	{
-		if (IsRunning()) Stop();
-		while (IsRunning()) Util::Sleep(10);
-		nzbget_rs_article_dl_exec(nullptr, 107, 0, 0, 0, 0, nullptr, nullptr, nullptr);
-	}
-
-	void Run() override { nzbget_rs_article_dl_exec(nullptr, 101, 0, 0, 0, 0, nullptr, NzbgetCArticleDlHost, this); }
-};
-
-inline MemoryMonitor* g_MemoryMonitor = nullptr;
-
 #endif
 #endif
 
@@ -5216,167 +5206,6 @@ private:
  *
  * All methods must be called within DownloadQueue-lock.
  */
-class TwinCheck : public Service
-{
-public:
-	static constexpr const char* FilesParam = "DupeFiles";
-	static constexpr const char* KindParam = "DupeKind";
-	static constexpr const char* SampledParam = "DupeSampled";
-	static constexpr const char* SampledOfParam = "DupeSampledOf";
-
-	static void StopAll() { nzbget_rs_twin_exec(4, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, &HostCb, nullptr); }
-
-	TwinCheck()
-	{
-		nzbget_rs_twin_exec(6, 0, 0, reinterpret_cast<uintptr_t>(this), 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
-		m_observer.m_owner = this;
-		DownloadQueue::Guard()->Attach(&m_observer);
-	}
-
-	~TwinCheck() override
-	{
-		DownloadQueue::Guard()->Detach(&m_observer);
-		nzbget_rs_twin_exec(7, 0, 0, reinterpret_cast<uintptr_t>(this), 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
-	}
-
-protected:
-	int ServiceInterval() override { return nzbget_rs_twin_exec(9, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr); }
-	void ServiceWork() override { nzbget_rs_twin_exec(10, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, &HostCb, nullptr); }
-
-private:
-	class TwinCheckJob : public Thread
-	{
-	public:
-		explicit TwinCheckJob(uintptr_t token) : m_token(token) {}
-	protected:
-		void Run() override { nzbget_rs_twin_exec(12, 0, 0, m_token, 0, nullptr, nullptr, nullptr, nullptr, &HostCb, nullptr); }
-	private:
-		uintptr_t m_token;
-	};
-
-	static NzbInfo* FindNzbInQueueOrHistory(DownloadQueue* dq, int nzbId)
-	{
-		if (NzbInfo* queued = dq->GetQueue()->Find(nzbId)) return queued;
-		for (std::unique_ptr<HistoryInfo>& h : *dq->GetHistory())
-			if (h->GetKind() == HistoryInfo::hkNzb && h->GetNzbInfo()->GetId() == nzbId) return h->GetNzbInfo();
-		return nullptr;
-	}
-
-	static uintptr_t HostCb(int op, int a1, int a2, uintptr_t p1, const char* s1, const char* s2,
-		const char* s3, const char* s4, int* ints, int64_t* i64s, const char** strs)
-	{
-		switch (op)
-		{
-		case 0:
-			ints[0] = (g_Options && g_Options->GetDupeCheck()) ? 1 : 0;
-			i64s[0] = (int64_t)Util::CurrentTime();
-			strs[0] = (g_Options && !Util::EmptyStr(g_Options->GetQueueDir())) ? g_Options->GetQueueDir() : nullptr;
-			return 0;
-		case 1: reinterpret_cast<TwinCheckJob*>(p1)->Stop(); return 0;
-		case 2: reinterpret_cast<TwinCheck*>(p1)->WakeUp(); return 0;
-		case 3: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			nzbget_rs_twin_exec(11, 0, 0, p1, reinterpret_cast<uintptr_t>((DownloadQueue*)dq), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
-			return 0;
-		}
-		case 4: {
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			ints[0] = (int)dq->GetQueue()->size();
-			ints[1] = (int)dq->GetHistory()->size();
-			ints[2] = (int)NzbInfo::dsDupe;
-			ints[3] = (int)NzbInfo::dsCopy;
-			return 0;
-		}
-		case 5:
-		case 6: {
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			NzbInfo* nzb = nullptr;
-			if (op == 5) nzb = (*dq->GetQueue())[(size_t)a1].get();
-			else { HistoryInfo* h = (*dq->GetHistory())[(size_t)a1].get(); if (h->GetKind() != HistoryInfo::hkNzb) return 0; nzb = h->GetNzbInfo(); }
-			NzbParameter* pFiles = nzb->GetParameters()->Find(FilesParam);
-			NzbParameter* pSampled = nzb->GetParameters()->Find(SampledParam);
-			NzbParameter* pSampledOf = nzb->GetParameters()->Find(SampledOfParam);
-			NzbParameter* pKind = nzb->GetParameters()->Find(KindParam);
-			ints[0] = nzb->GetId();
-			ints[1] = (int)nzb->GetDeleteStatus();
-			ints[2] = nzb->GetDupeScore();
-			ints[3] = (int)(uint32_t)nzb->GetFullContentHash();
-			ints[4] = (nzb->GetParameters()->Find("DupeSameSize") != nullptr || nzb->GetParameters()->Find("DupeSameInner") != nullptr) ? 1 : 0;
-			ints[5] = nzb->GetKind() == NzbInfo::nkNzb ? 1 : 0;
-			ints[6] = (pSampled ? 1 : 0) | (pSampledOf ? 2 : 0);
-			i64s[0] = nzb->GetRemainingSize();
-			i64s[1] = nzb->GetPausedSize();
-			strs[0] = nzb->GetName();
-			strs[1] = nzb->GetDupeKey();
-			strs[2] = nzb->GetQueuedFilename();
-			strs[3] = pFiles ? pFiles->GetValue() : nullptr;
-			strs[4] = pSampled ? pSampled->GetValue() : nullptr;
-			strs[5] = pSampledOf ? pSampledOf->GetValue() : nullptr;
-			strs[6] = pKind ? pKind->GetValue() : nullptr;
-			return reinterpret_cast<uintptr_t>(nzb);
-		}
-		case 7: {
-			auto* nzb = reinterpret_cast<NzbInfo*>(p1);
-			nzb->GetParameters()->SetParameter(KindParam, s1 ? s1 : "");
-			if (s2 && *s2) nzb->PrintMessage(Message::mkInfo, "%s", s2);
-			return 0;
-		}
-		case 8: {
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			dq->HistoryChanged();
-			dq->Save();
-			return 0;
-		}
-		case 9: {
-			auto* job = new TwinCheckJob(p1);
-			job->SetAutoDestroy(true);
-			return reinterpret_cast<uintptr_t>(job);
-		}
-		case 10: reinterpret_cast<TwinCheckJob*>(p1)->Start(); return 0;
-		case 11: return reinterpret_cast<TwinCheckJob*>(p1)->IsStopped() ? 1 : 0;
-		case 12: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			NzbInfo* nzb = FindNzbInQueueOrHistory(dq, a1);
-			if (!nzb) return 0;
-			nzb->GetParameters()->SetParameter(s1, s2);
-			if (s3) nzb->GetParameters()->SetParameter(s3, s4);
-			dq->HistoryChanged();
-			dq->Save();
-			return 1;
-		}
-		case 13: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			NzbInfo* nzb = FindNzbInQueueOrHistory(dq, a1);
-			if (!nzb) return 0;
-			nzb->GetParameters()->SetParameter(FilesParam, s1 ? s1 : "");
-			nzb->PrintMessage(Message::mkDetail, "Fingerprint of %s: %s (%i file(s) in its par2 set)", nzb->GetName(), s1 ? s1 : "", a2);
-			dq->HistoryChanged();
-			dq->Save();
-			return 1;
-		}
-		default: return 0;
-		}
-	}
-
-	class DownloadQueueObserver final : public Observer
-	{
-	public:
-		TwinCheck* m_owner;
-		void Update(Subject*, void* aspect) override
-		{
-			DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
-			if (queueAspect->action == DownloadQueue::eaNzbAdded &&
-				queueAspect->nzbInfo && !Util::EmptyStr(queueAspect->nzbInfo->GetDupeKey()))
-			{
-				nzbget_rs_twin_exec(8, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
-				m_owner->WakeUp();
-			}
-		}
-	};
-
-	DownloadQueueObserver m_observer;
-};
-
 class DupeArticleFallback
 {
 public:
@@ -5499,7 +5328,6 @@ inline uintptr_t NzbgetCArticleDlHost(void* ctx, int op, int a1, int a2, uintptr
 		if (p1 != 0) reinterpret_cast<NzbInfo*>(p1)->PrintMessage((Message::EKind)a1, "%s", s1 ? s1 : "");
 		return 0;
 	case 2: {
-		if (a1 == 1) return static_cast<MemoryMonitor*>(ctx)->IsStopped() ? 1 : 0;
 		if (a1 == 3) return (ctx ? static_cast<ArticleCache*>(ctx) : g_ArticleCache)->IsStopped() ? 1 : 0;
 		if (a1 == 5)
 		{
@@ -5860,127 +5688,8 @@ extern QueueCoordinator* g_QueueCoordinator;
 class HistoryCoordinator;
 extern HistoryCoordinator* g_HistoryCoordinator;
 
-class DupeCoordinator
-{
-public:
-	enum EDupeStatus
-	{
-		dsNone = 0,
-		dsQueued = 1,
-		dsDownloading = 2,
-		dsSuccess = 4,
-		dsWarning = 8,
-		dsFailure = 16
-	};
-
-	HistoryInfo* FindDupeBackup(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* nzbName, const char* dupeKey);
-	void HistoryMark(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, NzbInfo::EMarkStatus markStatus);
-	EDupeStatus GetDupeStatus(DownloadQueue* downloadQueue, const char* name, const char* dupeKey);
-};
-
+class DupeCoordinator {};
 extern DupeCoordinator* g_DupeCoordinator;
-
-class DupeProbe : public Thread
-{
-public:
-	struct Sample { CString MessageId; std::shared_ptr<std::vector<CString>> Groups; };
-
-	static void StartRecheck(int nzbId, std::vector<Sample> samples) { Launch(nzbId, true, 0, samples); }
-
-	static void LaunchRs(NzbgetRsDupeProbe* rs)
-	{
-		auto* probe = new DupeProbe(rs);
-		if (!nzbget_rs_dupe_probe_exec(probe->m_rs, 2, 0, 0, 0, reinterpret_cast<uintptr_t>(probe), nullptr, nullptr, nullptr, nullptr, &HostCb))
-		{
-			delete probe;
-			return;
-		}
-		probe->SetAutoDestroy(true);
-		probe->Thread::Start();
-	}
-
-protected:
-	void Run() override { nzbget_rs_dupe_probe_exec(m_rs, 3, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, &HostCb); }
-
-private:
-	NzbgetRsDupeProbe* m_rs = nullptr;
-	explicit DupeProbe(NzbgetRsDupeProbe* rs) : m_rs(rs) {}
-	~DupeProbe() override { nzbget_rs_dupe_probe_free(m_rs); }
-
-	static void Launch(int nzbId, bool countAll, int recoveredAtStart, const std::vector<Sample>& samples)
-	{
-		NzbgetRsDupeProbe* rs = nzbget_rs_dupe_probe_new(nzbId, countAll ? 1 : 0, recoveredAtStart);
-		std::vector<const char*> grpPtrs;
-		for (const Sample& s : samples)
-		{
-			grpPtrs.clear();
-			if (s.Groups) for (const CString& g : *s.Groups) grpPtrs.push_back(*g);
-			nzbget_rs_dupe_probe_exec(rs, 1, grpPtrs.size(), 0, 0, 0, *s.MessageId, grpPtrs.data(), nullptr, nullptr, nullptr);
-		}
-		LaunchRs(rs);
-	}
-
-	static void Abandon(int nzbId, int sampled, int missingServers, int activeServers, int recoveredAtStart);
-
-public:
-	static uintptr_t HostCb(void* ctx, int op, int a1, int a2, int a3, uintptr_t p1, uintptr_t p2, const char* s1, int* ints, const char** strs)
-	{
-		switch (op)
-		{
-		case 10:
-			if (p1) reinterpret_cast<DupeProbe*>(p1)->Thread::Stop();
-			return 0;
-		case 11: return (p1 && reinterpret_cast<DupeProbe*>(p1)->IsStopped()) ? 1 : 0;
-		case 12: {
-			if (a1 == 3) {
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				if (NzbInfo* n = dq->GetQueue()->Find(a2)) { n->SetDeadPickProbed(false); n->PrintMessage(Message::mkDetail, "%s", s1); }
-				return 0;
-			}
-			{
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				if (NzbInfo* n = dq->GetQueue()->Find(a2)) n->PrintMessage(Message::mkInfo, "%s", s1);
-				else detail("Dupe probe of download %i: %s", a2, s1);
-			}
-			if (a1 == 1) Abandon(a2, a3, ints[0], ints[1], ints[2]);
-			return 0;
-		}
-		case 13: {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			nzbget_rs_dupe_probe_exec(nullptr, 5, 0, a1, a2, reinterpret_cast<uintptr_t>(&*dq), nullptr, nullptr, reinterpret_cast<size_t*>(ints), ctx, &HostCb);
-			return 0;
-		}
-		case 14: {
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			for (HistoryInfo* hi : dq->GetHistory())
-			{
-				if (hi->GetKind() == HistoryInfo::hkNzb && hi->GetNzbInfo()->GetId() == a1)
-				{
-					ints[0] = (int)dq->GetQueue()->size();
-					strs[0] = hi->GetNzbInfo()->GetName(); strs[1] = hi->GetNzbInfo()->GetDupeKey();
-					return reinterpret_cast<uintptr_t>(hi);
-				}
-			}
-			return 0;
-		}
-		case 15: {
-			NzbInfo* q = (*reinterpret_cast<DownloadQueue*>(p1)->GetQueue())[(size_t)a1].get();
-			strs[0] = q->GetName(); strs[1] = q->GetDupeKey();
-			return 0;
-		}
-		case 16: {
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			auto* hi = reinterpret_cast<HistoryInfo*>(p2);
-			NzbInfo* nzb = hi->GetNzbInfo();
-			nzb->PrintMessage(Message::mkInfo, "%s", s1);
-			if (a1 == 1) nzb->GetParameters()->SetParameter("*DupeRecheck", nullptr);
-			else if (a1 == 3) { IdList ids = { hi->GetId() }; dq->EditList(&ids, nullptr, DownloadQueue::mmId, DownloadQueue::eaHistoryRetryFailed, nullptr); }
-			return 0;
-		}
-		default: return 0;
-		}
-	}
-};
 
 class HistoryCoordinator : public Service
 {
@@ -6084,18 +5793,19 @@ public:
 
 	QueueCoordinator() : m_rs(nzbget_rs_queue_coord_new())
 	{
-		nzbget_rs_queue_coord_exec(m_rs, 0, 0, 0, 0, 0, 0, nullptr, nullptr, &HostCb, this);
+		InitRsBuildEnv();
+		nzbget_rs_queue_coord_exec(m_rs, 0, 0, 0, 0, 0, 0, nullptr, nullptr, &NzbgetCQueueHost, this);
 	}
 
 	~QueueCoordinator() override
 	{
-		nzbget_rs_queue_coord_exec(m_rs, 1, 0, 0, 0, 0, 0, nullptr, nullptr, &HostCb, this);
+		nzbget_rs_queue_coord_exec(m_rs, 1, 0, 0, 0, 0, 0, nullptr, nullptr, &NzbgetCQueueHost, this);
 		nzbget_rs_queue_coord_free(m_rs);
 	}
 
 	void Run() override
 	{
-		nzbget_rs_queue_coord_exec(m_rs, 2, 0, 0, 0, 0, 0, nullptr, nullptr, &HostCb, this);
+		nzbget_rs_queue_coord_exec(m_rs, 2, 0, 0, 0, 0, 0, nullptr, nullptr, &NzbgetCQueueHost, this);
 	}
 
 	NzbInfo* AddNzbFileToQueue(std::unique_ptr<NzbInfo> nzbInfo, NzbInfo* urlInfo, bool addFirst)
@@ -6103,20 +5813,19 @@ public:
 		static_assert(sizeof(std::unique_ptr<NzbInfo>) == sizeof(uintptr_t), "unique_ptr layout");
 		return reinterpret_cast<NzbInfo*>(nzbget_rs_queue_coord_exec(m_rs, 3, addFirst ? 1 : 0, 0,
 			reinterpret_cast<uintptr_t>(&nzbInfo), reinterpret_cast<uintptr_t>(urlInfo), 0,
-			nullptr, nullptr, &HostCb, this));
+			nullptr, nullptr, &NzbgetCQueueHost, this));
 	}
 
 	void CheckDupeFileInfos(NzbInfo* nzbInfo)
 	{
 		nzbget_rs_queue_coord_exec(m_rs, 4, 0, 0, reinterpret_cast<uintptr_t>(nzbInfo), 0, 0,
-			nullptr, nullptr, &HostCb, this);
+			nullptr, nullptr, &NzbgetCQueueHost, this);
 	}
 
 	void Stop() override
 	{
 		Thread::Stop();
-		TwinCheck::StopAll();
-		nzbget_rs_queue_coord_exec(m_rs, 5, 0, 0, 0, 0, 0, nullptr, nullptr, &HostCb, this);
+		nzbget_rs_queue_coord_exec(m_rs, 5, 0, 0, 0, 0, 0, nullptr, nullptr, &NzbgetCQueueHost, this);
 		std::lock_guard<std::mutex> guard(m_waitMutex);
 		m_waitCond.notify_all();
 	}
@@ -6137,24 +5846,17 @@ public:
 			ad->GetStatus() == ArticleDownloader::adFatalError)
 		{
 			nzbget_rs_queue_coord_exec(m_rs, 6, 0, 0, reinterpret_cast<uintptr_t>(ad), 0, 0,
-				nullptr, nullptr, &HostCb, this);
+				nullptr, nullptr, &NzbgetCQueueHost, this);
 		}
 	}
 
-	void FailOverDeadPick(DownloadQueue* downloadQueue, int nzbId, int samples, int missingServers, int activeServers, int recoveredAtStart = 0)
-	{
-		int ints[4] = { samples, missingServers, activeServers, recoveredAtStart };
-		nzbget_rs_queue_coord_exec(m_rs, 7, nzbId, 0, reinterpret_cast<uintptr_t>(downloadQueue), 0, 0,
-			nullptr, ints, &HostCb, this);
-	}
-
-	static uintptr_t HostCb(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+	friend uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
 		const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
 
 protected:
 	void LogDebugInfo() override
 	{
-		nzbget_rs_queue_coord_exec(m_rs, 10, 0, 0, 0, 0, 0, nullptr, nullptr, &HostCb, this);
+		nzbget_rs_queue_coord_exec(m_rs, 10, 0, 0, 0, 0, 0, nullptr, nullptr, &NzbgetCQueueHost, this);
 	}
 
 private:
@@ -6168,7 +5870,7 @@ private:
 		{
 			return nzbget_rs_queue_coord_exec(m_owner->m_rs, 8, ID, (int)action,
 				reinterpret_cast<uintptr_t>(&m_owner->m_downloadQueue), 0, 0,
-				args, nullptr, &HostCb, m_owner) != 0;
+				args, nullptr, &NzbgetCQueueHost, m_owner) != 0;
 		}
 
 		bool EditList(IdList* idList, NameList* nameList, EMatchMode matchMode, EEditAction action, const char* args) override
@@ -6191,7 +5893,7 @@ private:
 			int packed = (((int)matchMode & 0xFFFF) << 16) | ((int)action & 0xFFFF);
 			bool ret = nzbget_rs_queue_coord_exec(m_owner->m_rs, 9, namesLen, packed,
 				reinterpret_cast<uintptr_t>(&m_owner->m_downloadQueue), idsLen, namesArg,
-				args, idsPtr, &HostCb, m_owner) != 0;
+				args, idsPtr, &NzbgetCQueueHost, m_owner) != 0;
 			m_massEdit = false;
 			if (m_wantSave) Save();
 			return ret;
@@ -6219,12 +5921,12 @@ private:
 				m_stateChanged = true;
 			}
 		}
+		bool m_stateChanged = false;
 	private:
 		QueueCoordinator* m_owner;
 		bool m_massEdit = false;
 		bool m_wantSave = false;
 		bool m_historyChanged = false;
-		bool m_stateChanged = false;
 		friend class QueueCoordinator;
 	};
 
@@ -6245,12 +5947,6 @@ private:
 	std::condition_variable m_waitCond;
 	bool m_wakeUp = false;
 };
-
-inline void DupeProbe::Abandon(int nzbId, int sampled, int missingServers, int activeServers, int recoveredAtStart)
-{
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	g_QueueCoordinator->FailOverDeadPick(downloadQueue, nzbId, sampled, missingServers, activeServers, recoveredAtStart);
-}
 
 #endif
 
@@ -6599,7 +6295,7 @@ private:
 		{
 		case 0:
 			ints[0] = g_Options ? g_Options->GetParBuffer() : 0;
-			ints[1] = g_MemoryMonitor != nullptr ? 1 : 0;
+			ints[1] = 0;
 			ints[2] = g_Options ? g_Options->GetParThreads() : 1;
 			ints[3] = g_Options ? (int)g_Options->GetParScan() : 0;
 			ints[4] = (g_Options && g_Options->GetParRepair()) ? 1 : 0;
@@ -6704,7 +6400,7 @@ private:
 			ints[5] = pi->GetForceRepair() ? 1 : 0;
 			ints[6] = (int)pi->GetStage();
 			ints[7] = g_Options->GetParBuffer();
-			ints[8] = g_MemoryMonitor != nullptr ? 1 : 0;
+			ints[8] = 0;
 			ints[9] = g_Options->GetParThreads();
 			ints[10] = (int)g_Options->GetParScan();
 			ints[11] = g_Options->GetParRepair() ? 1 : 0;
@@ -6717,7 +6413,7 @@ private:
 		}
 		case 2: {
 			auto* nzb = reinterpret_cast<NzbInfo*>(p1);
-			NzbParameter* tf = nzb->GetParameters()->Find(TwinCheck::FilesParam);
+			NzbParameter* tf = nzb->GetParameters()->Find("DupeFiles");
 			ints[0] = nzb->GetId();
 			ints[1] = (int)nzb->GetKind();
 			ints[2] = (int)NzbInfo::nkNzb;
@@ -6915,8 +6611,7 @@ private:
 	#else
 		constexpr int debugEnabled = 0;
 	#endif
-		m_rs = nzbget_rs_stream_repair_ctrl_new(liveMode ? 1 : 0, nzbId,
-			&DupeProbe::HostCb, tlsEnabled, debugEnabled);
+		m_rs = nzbget_rs_stream_repair_ctrl_new(liveMode ? 1 : 0, nzbId, tlsEnabled, debugEnabled);
 	}
 
 	PostInfo* m_postInfo = nullptr;
@@ -7907,7 +7602,7 @@ class PrePostProcessor : public Thread, public Observer
 public:
 	bool HasMoreJobs()
 	{
-		return nzbget_rs_prepost_exec(m_rs, 2, 0, 0, 0, 0, 0, nullptr, g_QueueCoordinator, &QueueCoordinator::HostCb) != 0;
+		return nzbget_rs_prepost_exec(m_rs, 2, 0, 0, 0, 0, 0, nullptr, g_QueueCoordinator, &NzbgetCQueueHost) != 0;
 	}
 
 	PrePostProcessor() : m_rs(nzbget_rs_prepost_new(reinterpret_cast<uintptr_t>(this)))
@@ -7923,40 +7618,40 @@ public:
 
 	void Run() override
 	{
-		nzbget_rs_prepost_exec(m_rs, 0, 0, 0, 0, 0, 0, nullptr, g_QueueCoordinator, &QueueCoordinator::HostCb);
+		nzbget_rs_prepost_exec(m_rs, 0, 0, 0, 0, 0, 0, nullptr, g_QueueCoordinator, &NzbgetCQueueHost);
 	}
 
 	void Stop() override
 	{
 		Thread::Stop();
-		nzbget_rs_prepost_exec(m_rs, 1, 0, 0, 0, 0, 0, nullptr, g_QueueCoordinator, &QueueCoordinator::HostCb);
+		nzbget_rs_prepost_exec(m_rs, 1, 0, 0, 0, 0, 0, nullptr, g_QueueCoordinator, &NzbgetCQueueHost);
 	}
 
 	bool HasActiveUnpack(bool includeWaitingVolume = true)
 	{
-		return nzbget_rs_prepost_exec(m_rs, 3, includeWaitingVolume ? 1 : 0, 0, 0, 0, 0, nullptr, g_QueueCoordinator, &QueueCoordinator::HostCb) != 0;
+		return nzbget_rs_prepost_exec(m_rs, 3, includeWaitingVolume ? 1 : 0, 0, 0, 0, 0, nullptr, g_QueueCoordinator, &NzbgetCQueueHost) != 0;
 	}
 
 	void NzbAdded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	{
-		nzbget_rs_prepost_exec(m_rs, 4, 0, 0, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo), 0, nullptr, g_QueueCoordinator, &QueueCoordinator::HostCb);
+		nzbget_rs_prepost_exec(m_rs, 4, 0, 0, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo), 0, nullptr, g_QueueCoordinator, &NzbgetCQueueHost);
 	}
 
 	void CheckDownloadCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	{
-		nzbget_rs_prepost_exec(m_rs, 5, 0, 0, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo), 0, nullptr, g_QueueCoordinator, &QueueCoordinator::HostCb);
+		nzbget_rs_prepost_exec(m_rs, 5, 0, 0, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo), 0, nullptr, g_QueueCoordinator, &NzbgetCQueueHost);
 	}
 
 	void NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	{
-		nzbget_rs_prepost_exec(m_rs, 6, 0, 0, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo), 0, nullptr, g_QueueCoordinator, &QueueCoordinator::HostCb);
+		nzbget_rs_prepost_exec(m_rs, 6, 0, 0, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo), 0, nullptr, g_QueueCoordinator, &NzbgetCQueueHost);
 	}
 
 	bool EditList(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action, const char* args)
 	{
 		const int* ptr = (idList && !idList->empty()) ? idList->data() : nullptr;
 		int len = idList ? (int)idList->size() : 0;
-		return nzbget_rs_prepost_exec(m_rs, 7, len, (int)action, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(ptr), 0, args, g_QueueCoordinator, &QueueCoordinator::HostCb) != 0;
+		return nzbget_rs_prepost_exec(m_rs, 7, len, (int)action, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(ptr), 0, args, g_QueueCoordinator, &NzbgetCQueueHost) != 0;
 	}
 
 protected:
@@ -7964,7 +7659,7 @@ protected:
 	{
 		if (!aspect) return;
 		DownloadQueue::Aspect* qa = static_cast<DownloadQueue::Aspect*>(aspect);
-		nzbget_rs_prepost_exec(m_rs, 8, (int)qa->action, 0, reinterpret_cast<uintptr_t>(qa->downloadQueue), reinterpret_cast<uintptr_t>(qa->nzbInfo), reinterpret_cast<uintptr_t>(qa->fileInfo), nullptr, g_QueueCoordinator, &QueueCoordinator::HostCb);
+		nzbget_rs_prepost_exec(m_rs, 8, (int)qa->action, 0, reinterpret_cast<uintptr_t>(qa->downloadQueue), reinterpret_cast<uintptr_t>(qa->nzbInfo), reinterpret_cast<uintptr_t>(qa->fileInfo), nullptr, g_QueueCoordinator, &NzbgetCQueueHost);
 	}
 
 private:
@@ -8433,178 +8128,6 @@ extern UrlCoordinator* g_UrlCoordinator;
  */
 
 
-class DupeSearch final : public Thread
-{
-public:
-	static constexpr const char* OwnedKeyParam = "DupeSearchOwnedKey";
-
-	DupeSearch() : m_rs(nzbget_rs_dupesearch_new(&HostCb))
-	{
-		InitRsBuildEnv();
-		m_observer.m_owner = this;
-		DownloadQueue::Guard()->Attach(&m_observer);
-	}
-
-	~DupeSearch() override
-	{
-		debug("Destroying DupeSearch");
-		DownloadQueue::Guard()->Detach(&m_observer);
-		nzbget_rs_dupesearch_free(m_rs);
-	}
-
-	void Stop() override
-	{
-		Thread::Stop();
-		nzbget_rs_dupesearch_exec(m_rs, 0, 0, 0, 0, this, &HostCb);
-	}
-
-	void NotifyNameChanged(int nzbId)
-	{
-		nzbget_rs_dupesearch_exec(m_rs, 1, nzbId, 0, 0, this, &HostCb);
-	}
-
-	void Run() override
-	{
-		nzbget_rs_dupesearch_exec(m_rs, 3, 0, 0, 0, this, &HostCb);
-	}
-
-	static uintptr_t HostCb(
-		void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
-		const char* s1, const char* s2, int* ints, int64_t* i64s,
-		const char** strs, const uint8_t*, size_t)
-	{
-		auto* self = static_cast<DupeSearch*>(ctx);
-		switch (op)
-		{
-			case 0:
-				return (self && self->IsStopped()) ? 1 : 0;
-			case 4: {
-				GuardedDownloadQueue dq = DownloadQueue::Guard();
-				reinterpret_cast<void(*)(void*, uintptr_t)>(p2)(
-					reinterpret_cast<void*>(p1), uintptr_t((DownloadQueue*)dq));
-				return 0;
-			}
-			case 5: {
-				if (a1 == 0) {
-					auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-					ints[0] = (int)dq->GetQueue()->size();
-					ints[1] = (int)dq->GetHistory()->size();
-					return 0;
-				}
-				if (a1 == 1)
-					return uintptr_t(reinterpret_cast<DownloadQueue*>(p1)->GetQueue()->at((size_t)a2).get());
-				if (a1 == 2) {
-					HistoryInfo* h = reinterpret_cast<DownloadQueue*>(p1)->GetHistory()->at((size_t)a2).get();
-					ints[0] = h->GetId();
-					ints[1] = (int)h->GetKind();
-					i64s[0] = (int64_t)h->GetTime();
-					return h->GetKind() == HistoryInfo::hkNzb ? uintptr_t(h->GetNzbInfo()) : 0;
-				}
-				if (a1 == 3) {
-					auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-					if (NzbInfo* n = dq->GetQueue()->Find(a2)) { ints[0] = 0; return uintptr_t(n); }
-					for (HistoryInfo* h : dq->GetHistory())
-						if (h->GetKind() == HistoryInfo::hkNzb && h->GetNzbInfo()->GetId() == a2)
-							{ ints[0] = 1; return uintptr_t(h->GetNzbInfo()); }
-					return 0;
-				}
-				auto* n = reinterpret_cast<NzbInfo*>(p1);
-				ints[0] = n->GetId();
-				ints[1] = (int)n->GetKind();
-				ints[2] = n->GetDeleting() ? 1 : 0;
-				ints[3] = (int)n->GetDeleteStatus();
-				ints[4] = (int)n->GetMarkStatus();
-				ints[5] = (int)n->GetDupeMode();
-				ints[6] = (int)n->GetDupeHint();
-				ints[7] = n->GetDupeScore();
-				ints[8] = n->GetPostInfo() != nullptr ? 1 : 0;
-				ints[9] = n->IsDupeSuccess() ? 1 : 0;
-				ints[10] = (int)n->GetFullContentHash();
-				ints[11] = 0;
-				ints[12] = (n->GetParameters()->Find("DupeSearch") || n->GetParameters()->Find("DupeAlive")) ? 1 : 0;
-				ints[13] = n->GetParameters()->Find("DupeFleet") != nullptr ? 1 : 0;
-				ints[14] = a2 ? n->CalcHealth() : 0;
-				ints[15] = a2 ? n->CalcCriticalHealth(true) : 0;
-				strs[0] = n->GetName() ? n->GetName() : "";
-				strs[1] = n->GetDupeKey() ? n->GetDupeKey() : "";
-				strs[2] = n->GetCategory() ? n->GetCategory() : "";
-				strs[3] = n->GetQueuedFilename() ? n->GetQueuedFilename() : "";
-				strs[4] = n->GetFinalDir() ? n->GetFinalDir() : "";
-				strs[5] = n->GetDestDir() ? n->GetDestDir() : "";
-				NzbParameter* alive = n->GetParameters()->Find("DupeAlive");
-				NzbParameter* owned = n->GetParameters()->Find(OwnedKeyParam);
-				strs[6] = alive ? alive->GetValue() : nullptr;
-				strs[7] = owned ? owned->GetValue() : nullptr;
-				return 0;
-			}
-			case 6: {
-				auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-				if (a1 == 0) {
-					auto* n = reinterpret_cast<NzbInfo*>(p2);
-					n->SetDupeKey(s1);
-					n->GetParameters()->SetParameter(OwnedKeyParam, s2);
-					if ((a2 & 2) && n->GetDupeScore() < 1000000) n->SetDupeScore(1000000);
-					n->SetChanged(true);
-					if (a2 & 1) { dq->HistoryChanged(); dq->Save(); }
-					else dq->SaveChanged();
-					return 0;
-				}
-				if (a1 == 1) {
-					reinterpret_cast<NzbInfo*>(p2)->AddMessage((Message::EKind)a2, s1);
-					return 0;
-				}
-				if (a1 == 2) {
-					IdList ids{ a2 };
-					bool queued = dq->GetQueue()->Find(a2) != nullptr;
-					dq->EditList(&ids, nullptr, DownloadQueue::mmId,
-						queued ? DownloadQueue::eaGroupFinalDelete : DownloadQueue::eaHistoryFinalDelete, nullptr);
-					return 0;
-				}
-				for (HistoryInfo* h : dq->GetHistory())
-					if (h->GetId() == a2 && h->GetKind() == HistoryInfo::hkDup) return 0;
-				IdList ids{ a2 };
-				const std::pair<DownloadQueue::EEditAction, DownloadQueue::EEditAction> kinds[] = {
-					{ DownloadQueue::eaHistorySetDupeScore, DownloadQueue::eaHistorySetParameter },
-					{ DownloadQueue::eaGroupSetDupeScore, DownloadQueue::eaGroupSetParameter } };
-				for (const auto& k : kinds)
-				{
-					if (dq->EditList(&ids, nullptr, DownloadQueue::mmId, k.first, s1))
-					{
-						for (size_t i = 0; i < (size_t)p2; i++)
-							dq->EditList(&ids, nullptr, DownloadQueue::mmId, k.second, strs[i]);
-						return 1;
-					}
-				}
-				return 0;
-			}
-			default:
-				return 0;
-		}
-	}
-
-private:
-	class DownloadQueueObserver final : public Observer
-	{
-	public:
-		DupeSearch* m_owner = nullptr;
-		void Update(Subject* caller, void* aspect) override
-		{
-			auto* ea = static_cast<DownloadQueue::Aspect*>(aspect);
-			int kind = ea->action == DownloadQueue::eaNzbAdded ? 1
-				: ea->action == DownloadQueue::eaNzbNamed ? 2 : 0;
-			if (kind && ea->nzbInfo)
-				nzbget_rs_dupesearch_exec(
-					m_owner->m_rs, 2, kind, uintptr_t(static_cast<DownloadQueue*>(caller)),
-					uintptr_t(ea->nzbInfo), m_owner, &HostCb);
-		}
-	};
-
-	DownloadQueueObserver m_observer;
-	NzbgetRsDupeSearch* m_rs = nullptr;
-};
-
-inline DupeSearch* g_DupeSearch = nullptr;
-
 inline uintptr_t HistoryCoordinator::ActionCb(
 	void*, int sub, int a1, int a2, uintptr_t p1, uintptr_t p2,
 	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs, uint8_t* bytes, size_t len)
@@ -8676,62 +8199,26 @@ inline uintptr_t HistoryCoordinator::ActionCb(
 		case 6:
 			ParDamage::Forget(reinterpret_cast<NzbInfo*>(p2)->GetId());
 			return 0;
-		case 7: {
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
-			CString ts = nzb->MakeTextStatus(true);
-			snprintf(reinterpret_cast<char*>(bytes), len, "%s", *ts ? *ts : "");
-			ints[0] = static_cast<int>(g_Options->GetDupeArticleFallback());
-			ints[1] = static_cast<int>(g_Options->GetHealthCheck());
-			ints[2] = static_cast<int>(nzb->GetKind());
-			ints[3] = nzb->GetFailedArticles();
-			ints[4] = nzb->GetParameters()->Find("*DupeRecheck") != nullptr ? 1 : 0;
-			ints[5] = (g_Options->GetDupeCheck() && nzb->GetDupeMode() == dmScore) ? 1 : 0;
-			ints[6] = static_cast<int>(dq->GetQueue()->size());
-			strs[0] = nzb->GetName();
-			strs[1] = nzb->GetDupeKey();
-			return 0;
-		}
-		case 8: {
-			NzbInfo* q = (*reinterpret_cast<DownloadQueue*>(p1)->GetQueue())[static_cast<size_t>(a1)].get();
-			strs[0] = q->GetName();
-			strs[1] = q->GetDupeKey();
-			return 0;
-		}
-		case 9: {
-			auto* dq = reinterpret_cast<DownloadQueue*>(p1);
-			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
-			return g_DupeCoordinator->FindDupeBackup(dq, nzb, nzb->GetName(), nzb->GetDupeKey()) ? 1 : 0;
-		}
 		case 10: {
 			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
 			nzb->GetParameters()->SetParameter("*DupeRecheck", "1");
-			auto* failed = new std::vector<DupeProbe::Sample>();
+			auto emit = reinterpret_cast<void(*)(void*, const char*, const char* const*, size_t)>(
+				reinterpret_cast<uintptr_t>(s1));
+			std::vector<const char*> groups;
 			for (CompletedFile& cf : nzb->GetCompletedFiles())
 			{
 				if ((cf.GetStatus() != CompletedFile::cfPartial && cf.GetStatus() != CompletedFile::cfFailure) || cf.GetId() <= 0) continue;
 				bool partial = cf.GetStatus() == CompletedFile::cfPartial;
 				FileInfo fi(cf.GetId());
 				if (!g_DiskState->LoadFile(&fi, false, true) || (partial && !g_DiskState->LoadFileState(&fi, true))) continue;
-				auto groups = std::make_shared<std::vector<CString>>();
-				for (const CString& g : *fi.GetGroups()) groups->emplace_back(*g);
+				groups.clear();
+				for (const CString& g : *fi.GetGroups()) groups.push_back(*g);
 				for (ArticleInfo* art : fi.GetArticles())
 				{
 					if ((!partial || art->GetStatus() == ArticleInfo::aiFailed) && !Util::EmptyStr(art->GetMessageId()))
-						failed->push_back({art->GetMessageId(), groups});
+						emit(reinterpret_cast<void*>(p1), art->GetMessageId(), groups.empty() ? nullptr : groups.data(), groups.size());
 				}
 			}
-			if (failed->size() < 2) { delete failed; ints[0] = 0; return 0; }
-			ints[0] = static_cast<int>(failed->size());
-			return reinterpret_cast<uintptr_t>(failed);
-		}
-		case 11: {
-			auto* failed = reinterpret_cast<std::vector<DupeProbe::Sample>*>(p1);
-			std::vector<DupeProbe::Sample> samples;
-			samples.reserve(len);
-			for (size_t i = 0; i < len; ++i) samples.push_back(std::move((*failed)[static_cast<size_t>(ints[i])]));
-			delete failed;
-			DupeProbe::StartRecheck(reinterpret_cast<NzbInfo*>(p2)->GetId(), std::move(samples));
 			return 0;
 		}
 		case 12: {
@@ -8812,10 +8299,6 @@ inline uintptr_t HistoryCoordinator::ActionCb(
 			strs[1] = nzb ? nzb->GetDestDir() : "";
 			return reinterpret_cast<uintptr_t>(hist);
 		}
-		case 19:
-			g_DupeCoordinator->HistoryMark(reinterpret_cast<DownloadQueue*>(p1),
-				reinterpret_cast<HistoryInfo*>(p2), static_cast<NzbInfo::EMarkStatus>(a1));
-			return 0;
 		case 21: {
 			auto* nzb = reinterpret_cast<NzbInfo*>(p2);
 			if (a1 < 0)
@@ -9070,14 +8553,14 @@ inline uintptr_t HistoryCoordinator::ActionCb(
 				{
 					std::string prev = hist->GetNzbInfo()->GetName();
 					hist->GetNzbInfo()->SetName(s1 ? s1 : "");
-					if (hist->GetKind() == HistoryInfo::hkNzb && g_DupeSearch && prev != hist->GetNzbInfo()->GetName())
-						g_DupeSearch->NotifyNameChanged(hist->GetNzbInfo()->GetId());
+					if (hist->GetKind() == HistoryInfo::hkNzb && prev != hist->GetNzbInfo()->GetName())
+						return static_cast<uintptr_t>(hist->GetNzbInfo()->GetId());
 				}
 				else if (hist->GetKind() == HistoryInfo::hkDup) hist->GetDupInfo()->SetName(s1 ? s1 : "");
 			}
 			else if (a1 == 3)
 			{
-				hist->GetNzbInfo()->GetParameters()->SetParameter(DupeSearch::OwnedKeyParam, nullptr);
+				hist->GetNzbInfo()->GetParameters()->SetParameter("DupeSearchOwnedKey", nullptr);
 				hist->GetNzbInfo()->SetDupeKey(s1 ? s1 : "");
 			}
 			else if (a1 == 4) hist->GetNzbInfo()->SetDupeScore(a2);
@@ -9095,7 +8578,7 @@ inline uintptr_t HistoryCoordinator::ActionCb(
 #endif
 
 
-inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
+inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
 	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs)
 {
 	auto* self = static_cast<QueueCoordinator*>(ctx);
@@ -9143,7 +8626,6 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 		else if (a1 == 4 && g_QueueScriptCoordinator) g_QueueScriptCoordinator->EnqueueScript(reinterpret_cast<NzbInfo*>(p1), (QueueScriptCoordinator::EEvent)a2);
 		else if (a1 == 5) StreamRepairController::StartLive(reinterpret_cast<NzbInfo*>(p1));
 		else if (a1 == 6) return nzbget_rs_article_dl_exec(nullptr, 23, 0, 0, p1, 0, s1 ? s1 : "", NzbgetCArticleDlHost, nullptr);
-		else if (a1 == 7) DupeProbe::LaunchRs(reinterpret_cast<NzbgetRsDupeProbe*>(p1));
 		else if (a1 == 8 && g_HistoryCoordinator) g_HistoryCoordinator->AddToHistory(reinterpret_cast<DownloadQueue*>(p1), reinterpret_cast<NzbInfo*>(p2));
 		else if (a1 == 9)
 		{
@@ -9159,7 +8641,24 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 			if (ints && a2 > 0) idList.assign(ints, ints + a2);
 			return g_PrePostProcessor->EditList(reinterpret_cast<DownloadQueue*>(p1), &idList, (DownloadQueue::EEditAction)p2, s1) ? 1 : 0;
 		}
-		else if (a1 == 12 && g_DupeSearch) g_DupeSearch->NotifyNameChanged(a2);
+		else if (a1 == 14 && g_UrlCoordinator)
+		{
+			auto nzbInfo = std::make_unique<NzbInfo>();
+			nzbInfo->SetKind(NzbInfo::nkUrl);
+			nzbInfo->SetFeedId(ints[0]);
+			nzbInfo->SetUrl(strs[0] ? strs[0] : "");
+			if (strs[1] && *strs[1]) nzbInfo->SetFilename(strs[1]);
+			nzbInfo->SetCategory(strs[2] ? strs[2] : "");
+			nzbInfo->SetPriority(ints[2]);
+			nzbInfo->SetAddUrlPaused((ints[1] & 1) != 0);
+			nzbInfo->SetDupeKey(strs[3] ? strs[3] : "");
+			nzbInfo->SetDupeScore(ints[3]);
+			nzbInfo->SetDupeMode(static_cast<EDupeMode>((ints[1] >> 1) & 0xff));
+			nzbInfo->SetSize(i64s[0]);
+			nzbInfo->SetMinTime(static_cast<time_t>(i64s[1]));
+			nzbInfo->SetMaxTime(static_cast<time_t>(i64s[1]));
+			g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), false);
+		}
 		return 0;
 	}
 	case 20: {
@@ -9218,6 +8717,7 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 		i64s[0] = (h->GetKind() == HistoryInfo::hkNzb || h->GetKind() == HistoryInfo::hkUrl)
 			? (int64_t)reinterpret_cast<uintptr_t>(h->GetNzbInfo())
 			: (h->GetKind() == HistoryInfo::hkDup ? (int64_t)reinterpret_cast<uintptr_t>(h->GetDupInfo()) : 0);
+		i64s[1] = (int64_t)h->GetTime();
 		return reinterpret_cast<uintptr_t>(h);
 	}
 	case 24: {
@@ -9233,14 +8733,15 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 		}
 		else if (a1 == 4) { int64 rem = 0, remF = 0; dq->CalcRemainingSize(&rem, &remF); i64s[0] = rem; i64s[1] = remF; }
 		else if (a1 == 5) dq->HistoryChanged();
+		else if (a1 == 6) { IdList ids{ a2 }; return dq->EditList(&ids, nullptr, DownloadQueue::mmId, (DownloadQueue::EEditAction)ints[0], s1) ? 1 : 0; }
 		return 0;
 	}
 	case 25: {
 		if (!self) return 0;
 		if (a1 == 0) return reinterpret_cast<uintptr_t>(static_cast<DownloadQueue*>(&self->m_downloadQueue));
-		if (a1 == 1) CoordinatorDownloadQueue::Init(&self->m_downloadQueue);
-		else if (a1 == 2) CoordinatorDownloadQueue::Loaded();
-		else if (a1 == 3) CoordinatorDownloadQueue::Final();
+		if (a1 == 1) DownloadQueue::Init(&self->m_downloadQueue);
+		else if (a1 == 2) DownloadQueue::Loaded();
+		else if (a1 == 3) DownloadQueue::Final();
 		else if (a1 == 4) return self->m_downloadQueue.m_stateChanged ? 1 : 0;
 		else if (a1 == 6) self->m_hasMoreJobs = (a2 != 0);
 		else if (a1 == 7) return self->IsStopped() ? 1 : 0;
@@ -9846,283 +9347,16 @@ inline uintptr_t QueueCoordinator::HostCb(void* ctx, int op, int a1, int a2, uin
 
 inline bool DupeArticleFallback::ShouldDeferToPar(NzbInfo* nzbInfo)
 {
-	return nzbget_rs_dupe_fallback_op(1, 0, reinterpret_cast<uintptr_t>(nzbInfo), &QueueCoordinator::HostCb) != 0;
-}
-
-inline HistoryInfo* DupeCoordinator::FindDupeBackup(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* nzbName, const char* dupeKey)
-{
-	return reinterpret_cast<HistoryInfo*>(nzbget_rs_dupe_coord_exec(3, 0,
-		reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo),
-		nzbName, dupeKey, &QueueCoordinator::HostCb));
-}
-
-inline void DupeCoordinator::HistoryMark(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, NzbInfo::EMarkStatus markStatus)
-{
-	nzbget_rs_dupe_coord_exec(4, (int)markStatus, reinterpret_cast<uintptr_t>(downloadQueue),
-		reinterpret_cast<uintptr_t>(historyInfo), nullptr, nullptr, &QueueCoordinator::HostCb);
-}
-
-inline DupeCoordinator::EDupeStatus DupeCoordinator::GetDupeStatus(DownloadQueue* downloadQueue, const char* name, const char* dupeKey)
-{
-	return (EDupeStatus)nzbget_rs_dupe_coord_exec(5, 0, reinterpret_cast<uintptr_t>(downloadQueue),
-		0, name, dupeKey, &QueueCoordinator::HostCb);
+	return nzbget_rs_dupe_fallback_op(1, 0, reinterpret_cast<uintptr_t>(nzbInfo), &NzbgetCQueueHost) != 0;
 }
 #endif
-#endif
 
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2013-2019 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *  Copyright (C) 2024-2026 Denis <denis@nzbget.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-
-#ifndef FEEDCOORDINATOR_H
-#define FEEDCOORDINATOR_H
-
-class FeedCoordinator : public Thread, public Debuggable
-{
-public:
-	FeedCoordinator() : m_rs(nzbget_rs_feed_coord_new())
-	{
-		InitRsBuildEnv();
-		debug("Creating FeedCoordinator");
-		NzbgetRsFeedCoordEnv env = MakeEnv();
-		nzbget_rs_feed_coord_exec(m_rs, 13, &env);
-		m_downloadQueueObserver.m_owner = this;
-		DownloadQueue::Guard()->Attach(&m_downloadQueueObserver);
-		m_workStateObserver.m_owner = this;
-		g_WorkState->Attach(&m_workStateObserver);
-	}
-
-	~FeedCoordinator() override
-	{
-		nzbget_rs_feed_coord_exec(m_rs, 12, nullptr);
-		nzbget_rs_feed_coord_free(m_rs);
-	}
-
-	void Run() override { nzbget_rs_feed_coord_exec(m_rs, 1, nullptr); }
-
-	void Stop() override
-	{
-		Thread::Stop();
-		nzbget_rs_feed_coord_exec(m_rs, 2, nullptr);
-	}
-
-protected:
-	void LogDebugInfo() override { nzbget_rs_feed_coord_exec(m_rs, 11, nullptr); }
-
-private:
-	class DownloadQueueObserver final : public Observer
-	{
-	public:
-		FeedCoordinator* m_owner;
-		void Update(Subject*, void* aspect) override
-		{
-			auto* qa = static_cast<DownloadQueue::Aspect*>(aspect);
-			NzbgetRsFeedCoordEnv env{};
-			env.a1 = static_cast<int>(qa->action);
-			env.s1 = (qa->action == DownloadQueue::eaUrlCompleted && qa->nzbInfo) ? qa->nzbInfo->GetUrl() : nullptr;
-			nzbget_rs_feed_coord_exec(m_owner->m_rs, 4, &env);
-		}
-	};
-
-	class WorkStateObserver final : public Observer
-	{
-	public:
-		FeedCoordinator* m_owner;
-		void Update(Subject*, void*) override { nzbget_rs_feed_coord_exec(m_owner->m_rs, 5, nullptr); }
-	};
-
-	NzbgetRsFeedCoord* m_rs;
-	DownloadQueueObserver m_downloadQueueObserver;
-	WorkStateObserver m_workStateObserver;
-
-	NzbgetRsFeedCoordEnv MakeEnv()
-	{
-		NzbgetRsFeedCoordEnv env{};
-		env.ctx = this;
-		env.query_cb = +[](void* raw, int op, uintptr_t, int*, int64_t*, const char**) -> uintptr_t {
-			if (op == 1) return static_cast<FeedCoordinator*>(raw)->IsStopped() ? 1 : 0;
-			return 0;
-		};
-		env.action_cb = +[](void*, int op, uintptr_t p1, int a1, int a2, int a3, int64_t t1, int64_t t2, const char* s1, const char* s2, const char* s3, const char* s4) -> uintptr_t {
-			if (op == 2) return static_cast<uintptr_t>(g_DupeCoordinator->GetDupeStatus(DownloadQueue::Guard(), s1 ? s1 : "", s2 ? s2 : ""));
-			if (op == 4)
-			{
-				auto nzbInfo = std::make_unique<NzbInfo>();
-				nzbInfo->SetKind(NzbInfo::nkUrl);
-				nzbInfo->SetFeedId(static_cast<int>(p1));
-				nzbInfo->SetUrl(s1 ? s1 : "");
-				if (s2 && *s2) nzbInfo->SetFilename(s2);
-				nzbInfo->SetCategory(s3 ? s3 : "");
-				nzbInfo->SetPriority(a2);
-				nzbInfo->SetAddUrlPaused((a1 & 1) != 0);
-				nzbInfo->SetDupeKey(s4 ? s4 : "");
-				nzbInfo->SetDupeScore(a3);
-				nzbInfo->SetDupeMode(static_cast<EDupeMode>((a1 >> 1) & 0xff));
-				nzbInfo->SetSize(t1);
-				nzbInfo->SetMinTime(static_cast<time_t>(t2));
-				nzbInfo->SetMaxTime(static_cast<time_t>(t2));
-				g_UrlCoordinator->AddUrlToQueue(std::move(nzbInfo), false);
-				return 1;
-			}
-			return 0;
-		};
-		return env;
-	}
-};
-
+class FeedCoordinator;
 namespace SystemHealth { class Service; }
 class Maintenance;
 #include <system_error>
 
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2004 Sven Henkel <sidddy@users.sourceforge.net>
- *  Copyright (C) 2007-2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *  Copyright (C) 2024-2025 Denis <denis@nzbget.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-
-#ifndef FRONTEND_H
-#define FRONTEND_H
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2005 Bo Cordes Petersen <placebodk@users.sourceforge.net>
- *  Copyright (C) 2007-2017 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *  Copyright (C) 2025 Denis <denis@nzbget.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
-
-
 extern void ExitProc();
-
-class Frontend : public Thread
-{
-public:
-	explicit Frontend(int mode) : m_mode(mode)
-	{
-		if (m_mode != 3) debug("Creating Frontend");
-		if (m_mode == 2) m_useColor = nzbget_rs_frontend_op(0, nullptr) > 0;
-	}
-
-	~Frontend() override
-	{
-		if (m_mode == 2)
-		{
-			nzbget_rs_frontend_op(1, nullptr);
-			printf("\n");
-		}
-	}
-
-	void Stop() override
-	{
-		Thread::Stop();
-		nzbget_rs_frontend_op(6, nullptr);
-	}
-
-protected:
-	void Run() override
-	{
-		if (m_mode == 0 || m_mode == 1) debug("Entering LoggableFrontend-loop");
-		else if (m_mode == 2) debug("Entering NCursesFrontend-loop");
-
-		NzbgetRsFrontendHost host{};
-		host.ctx = this;
-		host.use_color = m_useColor ? 1 : 0;
-		host.action_cb = +[](void* raw, int op, int a1, int a2, int a3) -> int64_t {
-			auto* self = static_cast<Frontend*>(raw);
-			if (op == 0) return self->IsStopped() ? 1 : 0;
-			if (op == 2) { self->Stop(); return 0; }
-			if (op == 5)
-			{
-				return DownloadQueue::Guard()->EditEntry(
-					a3, static_cast<DownloadQueue::EEditAction>(a1), BString<100>("%i", a2)) ? 1 : 0;
-			}
-			if (op == 6) ExitProc();
-			return 0;
-		};
-		host.queue_stats_cb = +[](void*, int* outPostJobs, int64_t* outRemSize) {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			int postJobs = 0;
-			for (NzbInfo* n : dq->GetQueue()) postJobs += n->GetPostInfo() ? 1 : 0;
-			*outPostJobs = postJobs;
-			dq->CalcRemainingSize(outRemSize, nullptr);
-		};
-		host.local_queue_cb = +[](void*, void* emitCtx,
-			void (*emitNzb)(void*, int, int, int, int64_t, int64_t, int64_t, int, int, const char*),
-			void (*emitFile)(void*, size_t, int, int, int, int64_t, int64_t, const char*)) {
-			GuardedDownloadQueue dq = DownloadQueue::Guard();
-			size_t idx = 0;
-			for (NzbInfo* n : dq->GetQueue())
-			{
-				emitNzb(emitCtx, n->GetId(), n->GetPriority(), n->GetActiveDownloads(),
-					n->GetSize(), n->GetRemainingSize(), n->GetPausedSize(),
-					n->GetPausedFileCount(), n->GetRemainingParCount(), n->GetName());
-				for (FileInfo* f : n->GetFileList())
-				{
-					emitFile(emitCtx, idx, f->GetId(), f->GetActiveDownloads(), f->GetPaused() ? 1 : 0,
-						f->GetSize(), f->GetRemainingSize(), f->GetFilename());
-				}
-				idx++;
-			}
-		};
-
-		nzbget_rs_frontend_op(2 + m_mode, &host);
-
-		if (m_mode == 0 || m_mode == 1) debug("Exiting LoggableFrontend-loop");
-		else if (m_mode == 2) debug("Exiting NCursesFrontend-loop");
-	}
-
-private:
-	int m_mode;
-	bool m_useColor = true;
-};
-
-#endif
-
 extern void Reload();
 
 inline NzbgetRsRpcHost BuildRpcHost()

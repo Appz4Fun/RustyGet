@@ -573,7 +573,7 @@ fn inspect_ctrl(
         force_repair: ints[5] != 0,
         post_stage: ints[6],
         par_buffer: ints[7],
-        has_memory_monitor: ints[8] != 0,
+        has_memory_monitor: ints[8] != 0 || crate::articledl::memory_monitor_active(),
         par_threads: ints[9],
         par_scan: ints[10],
         par_repair: ints[11] != 0,

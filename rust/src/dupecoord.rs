@@ -27,7 +27,11 @@ pub(crate) fn parse_f64_prefix(bytes: &[u8]) -> Option<f64> {
     }
     let rest = &bytes[i..];
     if rest.len() >= 3 && rest[..3].eq_ignore_ascii_case(b"inf") {
-        return Some(if neg { f64::NEG_INFINITY } else { f64::INFINITY });
+        return Some(if neg {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        });
     }
     if rest.len() >= 3 && rest[..3].eq_ignore_ascii_case(b"nan") {
         return Some(f64::NAN);
@@ -60,7 +64,10 @@ pub(crate) fn parse_f64_prefix(bytes: &[u8]) -> Option<f64> {
             i = exp_i;
         }
     }
-    std::str::from_utf8(&bytes[start..i]).ok()?.parse::<f64>().ok()
+    std::str::from_utf8(&bytes[start..i])
+        .ok()?
+        .parse::<f64>()
+        .ok()
 }
 
 #[inline]
@@ -791,8 +798,7 @@ pub fn resolve_history_mark(
         DUP_STATUS_BAD
     };
     if !dupe_check
-        || ((kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_DUP)
-            && dupe_mode == DUPE_MODE_FORCE)
+        || ((kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_DUP) && dupe_mode == DUPE_MODE_FORCE)
     {
         return (mark_name, dup_status, 0);
     }
@@ -934,9 +940,9 @@ pub(crate) fn no_backup_reason_host(
         nzb.dupe_mode,
         &history_candidates,
         |idx| {
-            queued_filenames
-                .get(idx)
-                .is_some_and(|p| !p.is_empty() && crate::fsops::file_exists(p, &crate::fsops::posix_stat))
+            queued_filenames.get(idx).is_some_and(|p| {
+                !p.is_empty() && crate::fsops::file_exists(p, &crate::fsops::posix_stat)
+            })
         },
     )
 }
@@ -949,7 +955,10 @@ pub(crate) fn find_dupe_backup_host(
     nzb_ptr: usize,
     nzb_name: &[u8],
     dupe_key: &[u8],
-) -> Option<(crate::queuesubsys_host::HistEntrySnap, crate::queuesubsys_host::NzbSnap)> {
+) -> Option<(
+    crate::queuesubsys_host::HistEntrySnap,
+    crate::queuesubsys_host::NzbSnap,
+)> {
     let self_snap = if nzb_ptr != 0 {
         Some(host.nzb_snap(nzb_ptr, false))
     } else {
@@ -990,16 +999,24 @@ pub(crate) fn find_dupe_backup_host(
             c.alive_permille = alive_permille_host(host, item.ptr);
             c.health = item.health;
             c.critical_health = item.critical_health_opt;
-            c.same_name_or_key =
-                i32::from(same_name_or_key(&item.name, &item.dupe_key, nzb_name, dupe_key));
+            c.same_name_or_key = i32::from(same_name_or_key(
+                &item.name,
+                &item.dupe_key,
+                nzb_name,
+                dupe_key,
+            ));
             qfn = item.queued_filename;
         } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
             let dup = host.dup_snap(hi.inner_ptr);
             c.dupe_mode = dup.dupe_mode;
             c.dupe_score = dup.dupe_score;
             c.dup_status = dup.status;
-            c.same_name_or_key =
-                i32::from(same_name_or_key(&dup.name, &dup.dupe_key, nzb_name, dupe_key));
+            c.same_name_or_key = i32::from(same_name_or_key(
+                &dup.name,
+                &dup.dupe_key,
+                nzb_name,
+                dupe_key,
+            ));
         }
         history_entries.push(hi);
         history_candidates.push(c);
@@ -1016,12 +1033,7 @@ pub(crate) fn find_dupe_backup_host(
             is_nzb_kind: i32::from(q.kind == crate::queuesubsys_host::NK_NZB),
             dupe_mode: q.dupe_mode,
             dupe_score: q.dupe_score,
-            same_name_or_key: i32::from(same_name_or_key(
-                &q.name,
-                &q.dupe_key,
-                nzb_name,
-                dupe_key,
-            )),
+            same_name_or_key: i32::from(same_name_or_key(&q.name, &q.dupe_key, nzb_name, dupe_key)),
         });
     }
 
@@ -1032,9 +1044,9 @@ pub(crate) fn find_dupe_backup_host(
         &history_candidates,
         &queue_candidates,
         |idx| {
-            queued_filenames
-                .get(idx)
-                .is_some_and(|p| !p.is_empty() && crate::fsops::file_exists(p, &crate::fsops::posix_stat))
+            queued_filenames.get(idx).is_some_and(|p| {
+                !p.is_empty() && crate::fsops::file_exists(p, &crate::fsops::posix_stat)
+            })
         },
     );
     if winner >= 0 && (winner as usize) < history_entries.len() {
@@ -1723,45 +1735,6 @@ pub(crate) fn list_history_dupes_host(
     out
 }
 
-#[cfg(unix)]
-pub unsafe fn dupe_coord_exec(
-    op: std::ffi::c_int,
-    a1: std::ffi::c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
-) -> usize {
-    let Some(cb) = host_cb else {
-        return 0;
-    };
-    let host = crate::queuesubsys_host::QueueSubsysHost::new(std::ptr::null_mut(), cb);
-    let b1 = if s1.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(s1).to_bytes()
-    };
-    let b2 = if s2.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(s2).to_bytes()
-    };
-    match op {
-        3 => {
-            let opts = host.opts();
-            find_dupe_backup_host(&host, &opts, p1, p2, b1, b2)
-                .map_or(0, |(hi, _)| hi.hi_ptr)
-        }
-        4 => {
-            history_mark_host(&host, p1, p2, a1);
-            0
-        }
-        5 => get_dupe_status_host(&host, p1, b1, b2) as usize,
-        _ => 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1908,7 +1881,12 @@ mod tests {
                 alive_permille: -1,
                 health: 1000,
                 critical_health: 1000,
-                same_name_or_key: i32::from(same_name_or_key(name, key, b"Rel.2026.1080p-A", b"imdb:1")),
+                same_name_or_key: i32::from(same_name_or_key(
+                    name,
+                    key,
+                    b"Rel.2026.1080p-A",
+                    b"imdb:1",
+                )),
             }
         };
 
@@ -1979,8 +1957,18 @@ mod tests {
         assert_eq!(run_find(&history, &queue), -1);
 
         // 5. RustDupeCoordinatorFfiParity
-        assert!(same_name_or_key(b"Movie.A", b"imdb:123", b"Movie.B", b"IMDB:123"));
-        assert!(!same_name_or_key(b"Movie.A", b"imdb:123", b"Movie.A", b"imdb:456"));
+        assert!(same_name_or_key(
+            b"Movie.A",
+            b"imdb:123",
+            b"Movie.B",
+            b"IMDB:123"
+        ));
+        assert!(!same_name_or_key(
+            b"Movie.A",
+            b"imdb:123",
+            b"Movie.A",
+            b"imdb:456"
+        ));
         assert!(same_name_or_key(b"Movie.A", b"", b"movie.a", b""));
         assert!(failover_warranted(1000, 300, 300));
         assert!(!failover_warranted(1000, 300, 299));
@@ -1992,7 +1980,10 @@ mod tests {
         let text = String::from_utf8(format_no_backup_reason(5, 1, 1, 1, 1, 0, 1)).unwrap();
         assert!(text.contains("5 other item(s) of the key in history:"));
         assert_eq!(crate::downloadinfo::calc_health(1000, 0, 100, 0), 900);
-        assert_eq!(crate::downloadinfo::calc_critical_health(1100, 100, 0, true), 900);
+        assert_eq!(
+            crate::downloadinfo::calc_critical_health(1100, 100, 0, true),
+            900
+        );
         assert_eq!(
             crate::artwritercore::calc_write_buffer_size(500, 1024 * 1024),
             500 * 1024
@@ -2020,7 +2011,9 @@ mod tests {
         assert!(same_content_hash(42, 0, 42, 99));
         assert!(same_content_hash(0, 77, 12, 77));
         assert!(!same_content_hash(0, 0, 0, 0));
-        assert!(should_inherit_dupe_props(b"Show.A", b"Show.A", b"imdb:1", 0));
+        assert!(should_inherit_dupe_props(
+            b"Show.A", b"Show.A", b"imdb:1", 0
+        ));
         assert!(!should_inherit_dupe_props(b"Show.A", b"Show.A", b"", 0));
         assert_eq!(
             eval_history_dupe_match(

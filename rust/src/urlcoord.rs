@@ -823,6 +823,7 @@ impl NzbgetRsUrlCoord {
                     std::ptr::null(),
                 );
                 if !retry {
+                    let completed_url = url_cstr_bytes(cur_strs[0]).to_vec();
                     act(
                         env.ctx,
                         4,
@@ -833,6 +834,11 @@ impl NzbgetRsUrlCoord {
                         std::ptr::null(),
                         std::ptr::null(),
                         std::ptr::null(),
+                    );
+                    #[cfg(unix)]
+                    crate::feed::notify_active_feed_queue_aspect(
+                        EA_URL_COMPLETED,
+                        Some(&completed_url),
                     );
                 }
             }
@@ -968,6 +974,8 @@ impl NzbgetRsUrlCoord {
                 std::ptr::null(),
                 std::ptr::null(),
             );
+            #[cfg(unix)]
+            crate::feed::notify_active_feed_queue_aspect(EA_URL_FAILED, None);
         });
     }
 
@@ -1071,6 +1079,8 @@ impl NzbgetRsUrlCoord {
                 std::ptr::null(),
                 std::ptr::null(),
             );
+            #[cfg(unix)]
+            crate::feed::notify_active_feed_queue_aspect(EA_URL_DELETED, None);
         }
         1
     }
@@ -1096,6 +1106,8 @@ impl NzbgetRsUrlCoord {
                 std::ptr::null(),
                 std::ptr::null(),
             );
+            #[cfg(unix)]
+            crate::feed::notify_active_feed_queue_aspect(EA_URL_FOUND, None);
             let mut nzb_ints = [0 as c_int; 4];
             let mut nzb_strs = [std::ptr::null::<c_char>(); 4];
             q(
@@ -1130,6 +1142,8 @@ impl NzbgetRsUrlCoord {
                     std::ptr::null(),
                     std::ptr::null(),
                 );
+                #[cfg(unix)]
+                crate::feed::notify_active_feed_queue_aspect(EA_URL_ADDED, None);
             }
             act(
                 env.ctx,

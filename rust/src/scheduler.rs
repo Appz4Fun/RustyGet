@@ -1477,11 +1477,19 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
         4 => {
             #[cfg(unix)]
             {
+                crate::twin::create_daemon_twincheck();
+                crate::dupesearch_coord::create_daemon_dupesearch();
+                crate::feed::create_daemon_feed_coord();
+                crate::articledl::create_daemon_memory_monitor();
                 crate::statmeter::create_daemon_statmeter();
                 crate::extension::create_daemon_maintenance();
                 let _ = create_daemon_scheduler();
             }
             if let Ok(mut srvs) = sc.services.lock() {
+                srvs.push(ServiceSlot {
+                    ptr: 2,
+                    last_work: 0,
+                });
                 srvs.push(ServiceSlot {
                     ptr: 1,
                     last_work: 0,
@@ -1527,6 +1535,15 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
                         crate::lifecycle::disk_service_interval_active()
                     } else if svc_ptr as usize == 1 {
                         active_scheduler().map_or(-1, |s| s.service_interval_val())
+                    } else if svc_ptr as usize == 2 {
+                        #[cfg(unix)]
+                        {
+                            crate::twin::service_interval_active()
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            -1
+                        }
                     } else {
                         host_cb(ctx, svc_ptr, 1)
                     };
@@ -1540,6 +1557,9 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
                             if let Some(s) = active_scheduler() {
                                 s.service_work_active();
                             }
+                        } else if svc_ptr as usize == 2 {
+                            #[cfg(unix)]
+                            crate::twin::service_work_active();
                         } else {
                             host_cb(ctx, svc_ptr, 2);
                         }
@@ -1572,6 +1592,15 @@ pub unsafe extern "C" fn nzbget_rs_service_coord_ctl(
                         crate::lifecycle::disk_service_interval_active()
                     } else if svc_ptr as usize == 1 {
                         active_scheduler().map_or(-1, |s| s.service_interval_val())
+                    } else if svc_ptr as usize == 2 {
+                        #[cfg(unix)]
+                        {
+                            crate::twin::service_interval_active()
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            -1
+                        }
                     } else {
                         host_cb(ctx, svc_ptr, 1)
                     };

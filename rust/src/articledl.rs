@@ -435,31 +435,71 @@ pub(crate) fn memory_monitor_init_options(reset_state: bool) {
     let _ = memory_monitor_update_state();
 }
 
-fn memory_monitor_run(host: &DlHost) {
-    host.log(MK_DEBUG, b"MemoryMonitor thread started");
-    let is_stopped = || {
-        host.raw(
-            2,
-            1,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
-    };
-    while !is_stopped() {
-        let interval = memory_monitor_update_state();
-        let mut slept = 0;
-        while !is_stopped() && slept < interval {
-            sleep_ms(50);
-            slept += 50;
-        }
+static DAEMON_MEM_RUNNING: AtomicBool = AtomicBool::new(false);
+static DAEMON_MEM_STOPPED: AtomicBool = AtomicBool::new(false);
+static DAEMON_MEM_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
+pub(crate) fn create_daemon_memory_monitor() {
+    DAEMON_MEM_RUNNING.store(false, Ordering::SeqCst);
+    DAEMON_MEM_STOPPED.store(false, Ordering::SeqCst);
+    memory_monitor_init_options(true);
+}
+
+pub(crate) fn start_daemon_memory_monitor() {
+    let mut g = DAEMON_MEM_HANDLE.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_some() {
+        return;
     }
-    host.log(MK_DEBUG, b"MemoryMonitor thread stopped");
+    DAEMON_MEM_STOPPED.store(false, Ordering::SeqCst);
+    DAEMON_MEM_RUNNING.store(true, Ordering::SeqCst);
+    if let Ok(h) = std::thread::Builder::new()
+        .name("memory-monitor".into())
+        .spawn(|| {
+            struct RunningReset;
+            impl Drop for RunningReset {
+                fn drop(&mut self) {
+                    DAEMON_MEM_RUNNING.store(false, Ordering::SeqCst);
+                }
+            }
+            let _reset = RunningReset;
+            let _tg = crate::ffi::RustThreadGuard::enter(&DAEMON_MEM_STOPPED);
+            crate::log::log_active_bytes(MK_DEBUG, b"MemoryMonitor thread started");
+            while !DAEMON_MEM_STOPPED.load(Ordering::SeqCst) {
+                let interval = memory_monitor_update_state();
+                let mut slept = 0;
+                while !DAEMON_MEM_STOPPED.load(Ordering::SeqCst) && slept < interval {
+                    sleep_ms(50);
+                    slept += 50;
+                }
+            }
+            crate::log::log_active_bytes(MK_DEBUG, b"MemoryMonitor thread stopped");
+        })
+    {
+        *g = Some(h);
+    } else {
+        DAEMON_MEM_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn stop_daemon_memory_monitor() {
+    DAEMON_MEM_STOPPED.store(true, Ordering::SeqCst);
+}
+
+pub(crate) fn is_daemon_memory_monitor_running() -> bool {
+    DAEMON_MEM_RUNNING.load(Ordering::SeqCst)
+}
+
+pub(crate) fn shutdown_daemon_memory_monitor() {
+    DAEMON_MEM_STOPPED.store(true, Ordering::SeqCst);
+    let handle = DAEMON_MEM_HANDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(h) = handle {
+        let _ = h.join();
+    }
+    DAEMON_MEM_RUNNING.store(false, Ordering::SeqCst);
+    MEM_ACTIVE.store(false, Ordering::Release);
 }
 
 // ============================================================================
@@ -3306,19 +3346,6 @@ pub fn article_dl_exec(
     let _ = a2;
     // Static ops that require no host callback
     match op {
-        100 => {
-            memory_monitor_init_options(a1 != 0);
-            return 0;
-        }
-        102 => return memory_monitor_tier() as usize,
-        103 => return memory_monitor_tier_name_c() as usize,
-        104 => return memory_monitor_effective_cache_mb() as usize,
-        105 => return memory_monitor_effective_par_buffer_mb(a1) as usize,
-        106 => return memory_monitor_effective_downloads_limit(a1) as usize,
-        107 => {
-            MEM_ACTIVE.store(false, Ordering::Release);
-            return 0;
-        }
         112 => {
             cache_free(p1 as *mut u8, a1);
             return 0;
@@ -3436,10 +3463,6 @@ pub fn article_dl_exec(
             23 => {
                 let old_dir = unsafe { cstr_or_empty(s1) };
                 usize::from(move_completed_files_on_host(&host, p1, &old_dir))
-            }
-            101 => {
-                memory_monitor_run(&host);
-                0
             }
             110 => {
                 article_cache_run(&host);

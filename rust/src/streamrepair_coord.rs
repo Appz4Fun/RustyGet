@@ -16,9 +16,7 @@ use crate::articlefetcher::{
 };
 use crate::dupecoord::same_name_or_key;
 use crate::dupefallback::NzbgetRsByteRange;
-use crate::dupeprobe::{
-    sample_indexes, DupeProbeHostFn, NzbgetRsDupeProbe, MIN_ARTICLES, SAMPLE_COUNT,
-};
+use crate::dupeprobe::{sample_indexes, NzbgetRsDupeProbe, MIN_ARTICLES, SAMPLE_COUNT};
 use crate::nntp::BatchRequest;
 use crate::streamrepair::{
     build_donor_key, classify_remaining_hole_target, compute_positional_rank,
@@ -222,7 +220,6 @@ struct RunCounters {
 }
 
 pub struct NzbgetRsStreamRepairCtrl {
-    probe_host: DupeProbeHostFn,
     live_mode: bool,
     tls_enabled: bool,
     debug_enabled: bool,
@@ -242,12 +239,10 @@ impl NzbgetRsStreamRepairCtrl {
         live_mode: bool,
         _nzb_id: i32,
         nntp_host: NzbgetRsNntpFetchHostFn,
-        probe_host: DupeProbeHostFn,
         tls_enabled: bool,
         debug_enabled: bool,
     ) -> Self {
         Self {
-            probe_host,
             live_mode,
             tls_enabled,
             debug_enabled,
@@ -1079,7 +1074,7 @@ impl NzbgetRsStreamRepairCtrl {
         let mut dead = false;
         if sample_cnt >= MIN_ARTICLES && unsafe { !self.host_is_stopped(ctx, cb) } {
             self.checking_donor.fetch_add(1, Ordering::SeqCst);
-            dead = probe.check(DONOR_CHECK_SEC, ptr::null_mut(), self.probe_host);
+            dead = probe.check(DONOR_CHECK_SEC);
             self.checking_donor.fetch_sub(1, Ordering::SeqCst);
             if dead {
                 let mut msg = b"Skipping duplicate ".to_vec();

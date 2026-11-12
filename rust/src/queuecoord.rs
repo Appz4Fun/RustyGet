@@ -1345,6 +1345,7 @@ impl NzbgetRsQueueCoordinator {
         self.par_loaders_stopped
             .store(true, std::sync::atomic::Ordering::Release);
         crate::dupeprobe::probe_stop_all();
+        crate::twin::stop_all_jobs();
         host.log(
             crate::queuesubsys_host::MK_DEBUG,
             b"Stopping ArticleDownloads",
@@ -4320,7 +4321,12 @@ impl NzbgetRsQueueCoordinator {
         for (msg_id, groups) in samples {
             probe.add_sample(msg_id, groups);
         }
-        host.launch_dupe_probe(probe);
+        #[cfg(unix)]
+        if host.use_active {
+            crate::dupeprobe::launch_probe_rs(probe);
+        }
+        #[cfg(not(unix))]
+        let _ = probe;
     }
 
     fn reset_hanging_downloads(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
@@ -4401,25 +4407,6 @@ impl NzbgetRsQueueCoordinator {
             }
             6 => {
                 self.article_completed(&host, p1);
-                0
-            }
-            7 => {
-                let (samples, missing_servers, active_servers, recovered_at_start) =
-                    if ints.is_null() {
-                        (0, 0, 0, 0)
-                    } else {
-                        let sl = std::slice::from_raw_parts(ints, 4);
-                        (sl[0], sl[1], sl[2], sl[3])
-                    };
-                self.fail_over_dead_pick(
-                    &host,
-                    p1,
-                    a1,
-                    samples,
-                    missing_servers,
-                    active_servers,
-                    recovered_at_start,
-                );
                 0
             }
             8 => usize::from(crate::queueeditor::edit_entry_host(

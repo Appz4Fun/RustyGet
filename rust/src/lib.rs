@@ -46,6 +46,7 @@ pub mod nserv;
 pub mod nzbfile;
 pub mod options;
 pub mod parchecker;
+pub mod liveparlog;
 pub mod pardamage;
 pub mod parparser;
 pub mod parrenamer;

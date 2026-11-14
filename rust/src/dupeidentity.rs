@@ -372,30 +372,6 @@ pub fn same_data(a_bytes: u64, a_files: u32, b_bytes: u64, b_files: u32) -> bool
     a_bytes != 0 && a_bytes == b_bytes && a_files == b_files
 }
 
-/// Decodes the 12-byte inner-identity header from `nzbget_rs_dupe_inner` output
-/// (`DupeIdentity::FromArticle`).
-/// Returns `Some((bytes, ext_len, name_offset, name_len))`.
-pub fn decode_inner_buf(raw: &[u8]) -> Option<(u64, usize, usize, usize)> {
-    if raw.len() < 12 {
-        return None;
-    }
-    let mut bytes = 0u64;
-    for (i, &b) in raw[0..8].iter().enumerate() {
-        bytes |= u64::from(b) << (8 * i);
-    }
-    let mut ext_size = 0usize;
-    for (i, &b) in raw[8..12].iter().enumerate() {
-        ext_size |= usize::from(b) << (8 * i);
-    }
-    if ext_size > 0 && ext_size <= 4 && ext_size <= raw.len() - 12 {
-        let name_offset = 12 + ext_size;
-        let name_len = raw.len() - name_offset;
-        Some((bytes, ext_size, name_offset, name_len))
-    } else {
-        None
-    }
-}
-
 /// Computes the 40% minimum inner file size threshold (`data_bytes * 2 / 5`)
 /// without overflow (`DupeIdentity::Read`).
 pub fn calc_min_inner_bytes(data_bytes: i64) -> u64 {

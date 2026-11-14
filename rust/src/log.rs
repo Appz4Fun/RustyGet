@@ -109,9 +109,6 @@ pub struct NzbgetRsLog {
 }
 
 impl NzbgetRsLog {
-    pub fn new(debug_build: bool) -> Self {
-        Self::with_debug_cb(debug_build, None)
-    }
 
     pub fn with_debug_cb(debug_build: bool, debug_cb: NzbgetRsDebuggableFn) -> Self {
         let extra_debug = if debug_build {

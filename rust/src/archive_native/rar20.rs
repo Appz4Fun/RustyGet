@@ -1,9 +1,8 @@
 //! RAR 2.0's compression (version 20, and 26 for files past 2 GiB), from the front of a file's packed data: LZ
 //! blocks, and audio blocks that predict each channel's next byte. Written from the format as unrar describes it.
 
-use super::lzma::End;
 use super::rar3::adapt;
-use super::rarbits::{Bits, MARGIN, Table};
+use super::rarbits::{Bits, Table};
 
 const NC: usize = 298;
 const DC: usize = 48;
@@ -150,36 +149,6 @@ struct State<'a> {
     /// new tables still allowed: each is work that makes no output, so a stream of nothing else would run as long
     /// as its input
     tables_left: usize,
-}
-
-/// One file's packed data, from the front, to `limit` bytes. `complete`: `data` is all of it, not a cut front.
-pub fn rar20(data: &[u8], size: Option<u64>, limit: usize, complete: bool) -> (Vec<u8>, End) {
-    // a cut stream shorter than the margin has no byte that's safe to decode from
-    if !complete && data.len() < MARGIN {
-        return (Vec::new(), End::Cut);
-    }
-    let target = size.and_then(|s| usize::try_from(s).ok()).unwrap_or(usize::MAX).min(limit);
-    let mut st = State {
-        bits: Bits { data, addr: 0, bit: 0 },
-        safe: if complete { data.len() } else { data.len() - MARGIN },
-        old_table: [0; MC * 4],
-        reps: [0; 4],
-        rep_at: 0,
-        last_dist: 0,
-        last_len: 0,
-        audio: [Audio::default(); 4],
-        channel: 0,
-        channel_delta: 0,
-        // real blocks run far longer than 4 KiB
-        tables_left: 1024 + target / 4096,
-    };
-    let mut out = Vec::new();
-    let end = match run_member(&mut st, None, target, &mut out) {
-        Some(_) if out.len() >= limit => End::Limit,
-        Some(_) => End::Done,
-        None => End::Cut,
-    };
-    (out, end)
 }
 
 fn run_member(

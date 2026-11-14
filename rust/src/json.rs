@@ -23,9 +23,6 @@ pub enum Value {
 }
 
 impl Value {
-    pub fn is_number(&self) -> bool {
-        matches!(self, Value::Int(_) | Value::Uint(_) | Value::Double(_))
-    }
 
     /// value::to_number<double>.
     pub fn to_f64(&self) -> Option<f64> {

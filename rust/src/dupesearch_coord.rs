@@ -51,7 +51,6 @@ pub const FETCH_PARALLEL: usize = 4;
 
 pub const DONOR_PARAM: &[u8] = b"DupeSearch";
 pub const ALIVE_PARAM: &[u8] = b"DupeAlive";
-pub const HEALTH_PARAM: &[u8] = b"DupeHealth";
 pub const OWNED_KEY_PARAM: &[u8] = b"DupeSearchOwnedKey";
 pub const FLEET_PARAM: &[u8] = b"DupeFleet";
 

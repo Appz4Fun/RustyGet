@@ -266,86 +266,6 @@ pub fn dupesearch_classify_search_retry_reason(
     }
 }
 
-/// `DupeSearch::Place`:
-/// Computes the number of fast-placed donors: `min(dupe_fast_donors, live_count)`
-/// clamped to `cap` when `cap > 0`.
-pub fn dupesearch_calc_fast_donor_count(
-    dupe_fast_donors: i32,
-    live_count: usize,
-    cap: i32,
-) -> usize {
-    let fast_opt = dupe_fast_donors.max(0) as usize;
-    let mut fast = fast_opt.min(live_count);
-    if cap > 0 {
-        fast = fast.min(cap as usize);
-    }
-    fast
-}
-
-/// `DupeSearch::Place` / `DupeSearch::AddDonor`:
-/// Converts a `[0.0, 1.0]` alive fraction to rounded percentage, or `-1` when `alive < 0`.
-pub fn dupesearch_alive_to_percent(alive: f64) -> i32 {
-    if alive < 0.0 {
-        -1
-    } else {
-        (100.0 * alive).round() as i32
-    }
-}
-
-/// `DupeSearch::Place`:
-/// Computes the `AliveParam` percentage for a rescored fast donor.
-pub fn dupesearch_fast_donor_alive_param(is_dead: bool, alive: f64) -> i32 {
-    if is_dead {
-        0
-    } else if alive < 0.0 {
-        100
-    } else {
-        (100.0 * alive).round() as i32
-    }
-}
-
-/// In `DupeSearch::Place` (`slotsUsed`), evaluates whether a placed entry occupies a donor slot.
-#[inline]
-pub fn dupesearch_slot_counts_as_used(
-    is_member: bool,
-    is_valid: bool,
-    score: i32,
-    dead_score: i32,
-    id: i32,
-    dry_run: bool,
-    placement_available: bool,
-) -> bool {
-    !is_member
-        && is_valid
-        && score > dead_score
-        && if id < 0 {
-            dry_run
-        } else {
-            placement_available
-        }
-}
-
-/// In `DupeSearch::Place`, evaluates whether a placed entry qualifies as a usable whole backup.
-#[inline]
-pub fn dupesearch_is_usable_whole_backup(
-    is_valid: bool,
-    score: i32,
-    dead_score: i32,
-    alive: f64,
-    id: i32,
-    dry_run: bool,
-    placement_available: bool,
-) -> bool {
-    is_valid
-        && score > dead_score
-        && alive >= 0.999
-        && if id < 0 {
-            dry_run
-        } else {
-            placement_available
-        }
-}
-
 /// In `DupeSearch::Place`, evaluates `(retry_wanted, retry_discovery, rank_incomplete)` after placement.
 #[inline]
 pub fn dupesearch_eval_post_place_retry(
@@ -358,12 +278,6 @@ pub fn dupesearch_eval_post_place_retry(
     let retry_discovery = retry_wanted && !usable_backup;
     let rank_incomplete = rank_only && unchecked_members_len > 0;
     (retry_wanted, retry_discovery, rank_incomplete)
-}
-
-/// In `DupeSearch::AddDonor`, returns `true` when `.nzb` should be appended to a title.
-#[inline]
-pub fn dupesearch_needs_nzb_ext(name: &[u8]) -> bool {
-    name.len() < 4 || !name[name.len() - 4..].eq_ignore_ascii_case(b".nzb")
 }
 
 /// In `DupeSearch::ResumePending`, classifies the persisted `phase` file contents into `(fetched, ranking)`.
@@ -408,35 +322,6 @@ pub fn dupesearch_calc_expand_budget_ms(
     let left_ms = deadline.saturating_sub(now).saturating_mul(1000);
     let chosen = opt_ms.min(left_ms).max(1);
     chosen.clamp(1, i64::from(i32::MAX)) as i32
-}
-
-/// Port of watchdog wait & stop calculation in `HttpGet::Fetch`.
-/// Returns `(should_stop, wait_ms)`.
-pub fn http_get_calc_watchdog_wait(
-    deadline_ms: i64,
-    now_ms: i64,
-    file_size: i64,
-    max_bytes: usize,
-) -> (bool, i64) {
-    let left = if deadline_ms > 0 {
-        deadline_ms.saturating_sub(now_ms)
-    } else {
-        250
-    };
-    if left <= 0 || file_size > (max_bytes as i64) {
-        (true, 0)
-    } else {
-        (false, left.min(250))
-    }
-}
-
-/// Port of `LocalName` in `XmlReader.cpp`.
-/// Returns the byte offset of the local name (after the last `':'`, or `0`).
-pub fn xml_reader_local_name_offset(name: &[u8]) -> usize {
-    match name.iter().rposition(|&b| b == b':') {
-        Some(pos) => pos + 1,
-        None => 0,
-    }
 }
 
 #[repr(C)]
@@ -1321,10 +1206,6 @@ impl DonorServer {
             .store(ms, std::sync::atomic::Ordering::SeqCst);
     }
 
-    pub fn transport(&self) -> &dyn DonorServerExchange {
-        &*self.transport
-    }
-
     pub fn ask<F: Fn() -> bool>(&self, batch: &[DonorRequest], cancelled: F) -> Vec<DonorAnswer> {
         let over = || donor_stopping() || cancelled();
         while self.down_until_ms.load(std::sync::atomic::Ordering::SeqCst) - donor_now_ms() > 0
@@ -1976,14 +1857,6 @@ impl NzbFetcherCore {
             return Err(path);
         }
         Ok(())
-    }
-
-    pub fn save(&self, now: i64) -> Result<(), Vec<u8>> {
-        let map = self
-            .refused_until
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        self.save_locked(&map, now)
     }
 
     fn indexer_lock(&self, indexer: &[u8]) -> std::sync::Arc<std::sync::Mutex<()>> {
@@ -2745,19 +2618,6 @@ pub fn fleet_update_key_score_bounds(
     (new_top, new_lowest, new_running_id, new_running_score)
 }
 
-/// Returns whether a history item is an eligible successful download before
-/// checking `ReleaseName::Readable` and `FilesOnDisk` (`Fleet::Append`).
-pub fn fleet_is_already_downloaded_history_item(
-    has_item: bool,
-    delete_status: i32,
-    ds_none_val: i32,
-    is_dupe_success: bool,
-    mark_status: i32,
-    ks_bad_val: i32,
-) -> bool {
-    has_item && delete_status == ds_none_val && is_dupe_success && mark_status != ks_bad_val
-}
-
 /// Computes the clamped duplicate score for adding a ranked fleet member
 /// (`Fleet::Append`).
 pub fn fleet_calc_member_add_score(
@@ -2773,18 +2633,6 @@ pub fn fleet_calc_member_add_score(
     };
     let raw = base.saturating_sub(i64::from(rank));
     raw.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-}
-
-/// Returns the atomic increment (`0` if busy, `1` otherwise) for `m_errors` on an
-/// exchange error (`DonorHealth::Server::Ask`).
-pub fn donor_health_error_increment(busy: bool) -> i32 {
-    if busy { 0 } else { 1 }
-}
-
-/// Returns whether the server's error counter has reached `server_give_up` and
-/// should trigger a pause and reset (`DonorHealth::Server::Ask`).
-pub fn donor_health_should_pause_server(errors: i32, server_give_up: i32) -> bool {
-    errors >= server_give_up
 }
 
 /// Accumulates an article's final verdict and soft body-bad flag into `Health`
@@ -2833,87 +2681,12 @@ pub fn fleet_visit_pipe_names(names: &[u8], mut visit: impl FnMut(&[u8])) {
     }
 }
 
-/// Accumulates `DonorHealth::Health::operator+=` counters.
-#[allow(clippy::too_many_arguments)]
-pub fn donor_health_accum_health(
-    checked: &mut i32,
-    present: &mut i32,
-    missing: &mut i32,
-    error: &mut i32,
-    body_checked: &mut i32,
-    body_bad: &mut i32,
-    add_checked: i32,
-    add_present: i32,
-    add_missing: i32,
-    add_error: i32,
-    add_body_checked: i32,
-    add_body_bad: i32,
-) {
-    *checked = checked.wrapping_add(add_checked);
-    *present = present.wrapping_add(add_present);
-    *missing = missing.wrapping_add(add_missing);
-    *error = error.wrapping_add(add_error);
-    *body_checked = body_checked.wrapping_add(add_body_checked);
-    *body_bad = body_bad.wrapping_add(add_body_bad);
-}
-
-/// Computes a worker's remaining budget in `DonorHealth::CheckPostings`; returns `false` if the deadline has passed.
-pub fn donor_health_calc_worker_budget_ms(
-    deadline_ms: i64,
-    now_ms: i64,
-    cur_budget_ms: i32,
-    out_budget_ms: &mut i32,
-) -> bool {
-    if deadline_ms > 0 {
-        let left = deadline_ms.saturating_sub(now_ms);
-        if left <= 0 {
-            return false;
-        }
-        *out_budget_ms = i64::from(cur_budget_ms).min(left) as i32;
-    } else {
-        *out_budget_ms = cur_budget_ms;
-    }
-    true
-}
-
-/// Computes the worker thread count for `DonorHealth::CheckPostings`.
-pub fn donor_health_calc_thread_count(postings_len: usize, concurrency: i32) -> usize {
-    postings_len.min(1i32.max(concurrency) as usize)
-}
-
 /// Formats the HTTP fetch error message for `Fleet::Append`.
 pub fn fleet_format_fetch_error(status: i32) -> Vec<u8> {
     if status != 0 {
         format!("the nzb-file could not be fetched (HTTP {status})").into_bytes()
     } else {
         b"the nzb-file could not be fetched (connection failed)".to_vec()
-    }
-}
-
-/// Computes `(sample_maximum, budget_ms, check_deadline_ms)` for `Fleet::Append`.
-pub fn fleet_calc_check_budget_and_deadline(
-    opt_max: i32,
-    fleet_sample_max: i32,
-    deadline_ms: i64,
-    check_start_ms: i64,
-    finish_reserve_ms: i64,
-) -> (i32, i32, i64) {
-    let sample_maximum = opt_max.min(fleet_sample_max);
-    let budget_ms = 1000i64.max(deadline_ms - check_start_ms - finish_reserve_ms) as i32;
-    let check_deadline_ms = check_start_ms + i64::from(budget_ms);
-    (sample_maximum, budget_ms, check_deadline_ms)
-}
-
-/// Computes the candidate tier (`0..=3`) in `Fleet::Append`.
-pub fn fleet_candidate_tier(has_error: bool, dead: bool, alive: i32) -> i32 {
-    if has_error {
-        3
-    } else if dead {
-        2
-    } else if alive < 0 {
-        1
-    } else {
-        0
     }
 }
 
@@ -2937,38 +2710,6 @@ pub fn fleet_format_summary_log(
         out.extend_from_slice(b" (not every posting checked in time)");
     }
     out
-}
-
-/// Evaluates whether `DupeSearch::PrepareNative` generated the download's key (`DupeSearch::PrepareNative`).
-pub fn dupesearch_is_generated_key(
-    dupe_key_empty: bool,
-    has_owner: bool,
-    owner_value: &[u8],
-    nzb_id: i32,
-    key: &[u8],
-) -> bool {
-    if dupe_key_empty {
-        return true;
-    }
-    if !has_owner || !key.starts_with(b"dupes:") {
-        return false;
-    }
-    let mut expected = format!("{nzb_id}:").into_bytes();
-    expected.extend_from_slice(key);
-    owner_value == expected.as_slice()
-}
-
-/// Evaluates whether `DupeSearch::DownloadQueueUpdate` should inspect the queue to schedule
-/// rank-only re-scoring for an existing parent download (`DupeSearch::DownloadQueueUpdate`).
-pub fn dupesearch_should_check_added_for_parent_rank(
-    action: i32,
-    ea_nzb_added: i32,
-    is_donor: bool,
-    dupe_mode: i32,
-    dm_score: i32,
-    has_dupe_fleet_param: bool,
-) -> bool {
-    action == ea_nzb_added && !is_donor && dupe_mode == dm_score && !has_dupe_fleet_param
 }
 
 /// Evaluates whether a queued item is a better parent candidate for rank-only scheduling
@@ -2996,17 +2737,6 @@ pub fn dupesearch_is_better_parent_candidate(
         && same_lower_key
         && item_score > added_score
         && (!has_parent || item_score > parent_score)
-}
-
-/// Evaluates whether another queue/history item should be retained in the peer list
-/// for `DupeSearch::PrepareNative`.
-pub fn dupesearch_should_retain_peer(
-    is_same_item: bool,
-    item_score: i32,
-    pick_score: i32,
-    has_dupe_fleet_param: bool,
-) -> bool {
-    !is_same_item && (item_score > pick_score || has_dupe_fleet_param)
 }
 
 /// Formats comma-separated `"key: count"` rejection entries for `DupeSearch::Place`.
@@ -3064,15 +2794,6 @@ pub fn newznab_format_search_info_name(label: &[u8], page_one_based: i32) -> Vec
     out
 }
 
-/// Formats `"<param_name>=<val>"` for `DupeSearch`.
-pub fn dupesearch_format_key_val_param(param_name: &[u8], val: i32) -> Vec<u8> {
-    let val_str = format!("={val}");
-    let mut out = Vec::with_capacity(param_name.len() + val_str.len());
-    out.extend_from_slice(param_name);
-    out.extend_from_slice(val_str.as_bytes());
-    out
-}
-
 /// Formats `"<queue_dir><sep>dupesearch-pending<sep><nzb_id>"` when `nzb_id > 0`
 /// else `"<queue_dir><sep>dupesearch-pending"` for `DupeSearch::PendingDir`.
 pub fn dupesearch_format_pending_dir(queue_dir: &[u8], sep: u8, nzb_id: i32) -> Vec<u8> {
@@ -3085,21 +2806,6 @@ pub fn dupesearch_format_pending_dir(queue_dir: &[u8], sep: u8, nzb_id: i32) -> 
         out.extend_from_slice(nzb_id.to_string().as_bytes());
     }
     out
-}
-
-/// Formats `"<dir><sep><idx>"` for `DupeSearch::SavePending` and `DupeSearch::ResumePending`.
-pub fn dupesearch_format_indexed_base_path(dir: &[u8], sep: u8, idx: usize) -> Vec<u8> {
-    let suffix = idx.to_string();
-    let mut out = Vec::with_capacity(dir.len() + 1 + suffix.len());
-    out.extend_from_slice(dir);
-    out.push(sep);
-    out.extend_from_slice(suffix.as_bytes());
-    out
-}
-
-/// Formats `idx` as a decimal string for `DupeSearch`.
-pub fn dupesearch_format_usize_str(idx: usize) -> Vec<u8> {
-    idx.to_string().into_bytes()
 }
 
 /// Formats `"HTTP <status>"` for `NzbFetcher::Fetch`.
@@ -3120,19 +2826,6 @@ pub fn http_get_format_temp_path(
     out.push(sep);
     out.extend_from_slice(suffix.as_bytes());
     out
-}
-
-/// Computes `max(0, deadline_ms - now_ms - finish_reserve_ms - 1000)` for `Fleet::Run`.
-pub fn fleet_calc_check_lock_wait_ms(
-    deadline_ms: i64,
-    now_ms: i64,
-    finish_reserve_ms: i64,
-) -> i64 {
-    deadline_ms
-        .saturating_sub(now_ms)
-        .saturating_sub(finish_reserve_ms)
-        .saturating_sub(1000)
-        .max(0)
 }
 
 /// Classifies an XML start element in `Newznab::PageReader::Start`:
@@ -3226,17 +2919,6 @@ pub fn nzb_fetcher_format_parse_err(body: &[u8]) -> Vec<u8> {
     out.extend_from_slice(b"not an nzb-file: ");
     out.extend_from_slice(&masked);
     out
-}
-
-/// Returns the NUL-terminated status suffix for `DupeSearch::PrepareNative` search log message.
-pub fn dupesearch_prepare_status_suffix(rank_only: bool, history: bool) -> &'static [u8] {
-    if rank_only {
-        b": ranking new backups\0"
-    } else if history {
-        b": it failed before its search was due\0"
-    } else {
-        b"\0"
-    }
 }
 
 /// Visits up to 8 non-empty lenient search queries for `DupeSearch::Expand`.

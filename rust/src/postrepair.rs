@@ -36,48 +36,27 @@ pub fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 // ============================================================================
 
 pub const DUPE_MODE_SCORE: i32 = 0;
-pub const DUPE_MODE_ALL: i32 = 1;
 pub const DUPE_MODE_FORCE: i32 = 2;
 
-pub const HEALTH_CHECK_PAUSE: i32 = 0;
-pub const HEALTH_CHECK_DELETE: i32 = 1;
 pub const HEALTH_CHECK_PARK: i32 = 2;
 pub const HEALTH_CHECK_NONE: i32 = 3;
 pub const HEALTH_CHECK_DUPE: i32 = 4;
 
-pub const DELETE_STATUS_NONE: i32 = 0;
 pub const DELETE_STATUS_MANUAL: i32 = 1;
 pub const DELETE_STATUS_HEALTH: i32 = 2;
 pub const DELETE_STATUS_DUPE: i32 = 3;
-pub const DELETE_STATUS_BAD: i32 = 4;
-pub const DELETE_STATUS_GOOD: i32 = 5;
 pub const DELETE_STATUS_COPY: i32 = 6;
-pub const DELETE_STATUS_SCAN: i32 = 7;
 
 pub const MARK_STATUS_NONE: i32 = 0;
 pub const MARK_STATUS_BAD: i32 = 1;
 pub const MARK_STATUS_GOOD: i32 = 2;
-pub const MARK_STATUS_SUCCESS: i32 = 3;
 
-pub const DUP_STATUS_UNDEFINED: i32 = 0;
 pub const DUP_STATUS_SUCCESS: i32 = 1;
-pub const DUP_STATUS_FAILED: i32 = 2;
-pub const DUP_STATUS_DELETED: i32 = 3;
-pub const DUP_STATUS_DUPE: i32 = 4;
-pub const DUP_STATUS_BAD: i32 = 5;
 pub const DUP_STATUS_GOOD: i32 = 6;
 
-pub const HISTORY_KIND_UNKNOWN: i32 = 0;
 pub const HISTORY_KIND_NZB: i32 = 1;
 pub const HISTORY_KIND_URL: i32 = 2;
 pub const HISTORY_KIND_DUP: i32 = 3;
-
-pub const DUPE_STATUS_NONE: i32 = 0;
-pub const DUPE_STATUS_QUEUED: i32 = 1;
-pub const DUPE_STATUS_DOWNLOADING: i32 = 2;
-pub const DUPE_STATUS_SUCCESS: i32 = 4;
-pub const DUPE_STATUS_WARNING: i32 = 8;
-pub const DUPE_STATUS_FAILURE: i32 = 16;
 
 /// `DupeCoordinator::SameNameOrKey`
 pub fn same_name_or_key(name1: &[u8], dupe_key1: &[u8], name2: &[u8], dupe_key2: &[u8]) -> bool {
@@ -107,71 +86,6 @@ pub fn fails_over(dupe_check: bool, dupe_mode: i32, health_check: i32) -> bool {
     dupe_check
         && (dupe_mode == DUPE_MODE_SCORE
             || (dupe_mode == DUPE_MODE_FORCE && health_check == HEALTH_CHECK_DUPE))
-}
-
-/// Classification bucket for `DupeCoordinator::NoBackupReason`:
-/// 0 = rest (scored below queued/successful duplicate or copy of this download)
-/// 1 = notBackup (failed/succeeded/deleted)
-/// 2 = forced
-/// 3 = noFile
-/// 4 = unhealthy
-/// 5 = bad
-/// 6 = dead
-pub fn classify_no_backup_item(
-    delete_status: i32,
-    dupe_mode: i32,
-    file_exists: bool,
-    health: i32,
-    critical_health: i32,
-    mark_status: i32,
-    alive: i32,
-) -> i32 {
-    if delete_status != DELETE_STATUS_DUPE && delete_status != DELETE_STATUS_COPY {
-        1
-    } else if dupe_mode == DUPE_MODE_FORCE {
-        2
-    } else if !file_exists {
-        3
-    } else if health < critical_health {
-        4
-    } else if mark_status == MARK_STATUS_BAD {
-        5
-    } else if alive == 0 {
-        6
-    } else {
-        0
-    }
-}
-
-/// `DupeCoordinator::NoBackupReason` formatter
-pub fn format_no_backup_reason(
-    total: i32,
-    not_backup: i32,
-    forced: i32,
-    no_file: i32,
-    unhealthy: i32,
-    bad: i32,
-    dead: i32,
-) -> Vec<u8> {
-    format!(
-        "{total} other item(s) of the key in history: {not_backup} failed/succeeded/deleted, {forced} forced, \
-{no_file} without nzb-file, {unhealthy} unhealthy, {bad} marked bad, {dead} found dead; the rest scored below a queued or \
-successful duplicate, or were copies of this download"
-    )
-    .into_bytes()
-}
-
-/// `DupeCoordinator::GetDupeStatus` text-status classifier
-pub fn status_from_text(text_status: &[u8]) -> i32 {
-    if strncasecmp_prefix(text_status, b"SUCCESS") {
-        DUPE_STATUS_SUCCESS
-    } else if strncasecmp_prefix(text_status, b"FAILURE") {
-        DUPE_STATUS_FAILURE
-    } else if strncasecmp_prefix(text_status, b"WARNING") {
-        DUPE_STATUS_WARNING
-    } else {
-        DUPE_STATUS_NONE
-    }
 }
 
 #[repr(C)]

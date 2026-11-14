@@ -27,31 +27,6 @@ pub enum Arch {
 }
 
 impl Filter {
-    /// From an xz filter id and its properties. None for one there's no decoder for.
-    pub fn from_xz(id: u64, props: &[u8]) -> Option<Filter> {
-        if id == 0x03 {
-            return match props {
-                [d] => Some(Filter::Delta { dist: usize::from(*d) + 1 }),
-                _ => None,
-            };
-        }
-        let arch = match id {
-            0x04 => Arch::X86,
-            0x05 => Arch::PowerPc,
-            0x06 => Arch::Ia64,
-            0x07 => Arch::Arm,
-            0x08 => Arch::ArmThumb,
-            0x09 => Arch::Sparc,
-            0x0a => Arch::Arm64,
-            _ => return None,
-        };
-        let start = match props {
-            [] => 0,
-            [a, b, c, d] => u32::from_le_bytes([*a, *b, *c, *d]),
-            _ => return None,
-        };
-        Some(Filter::Bcj { arch, start })
-    }
 
     /// Undoes this filter on `buf`, the stream's bytes from its start. Returns how many bytes from the front are
     /// final: the rest are the last few a branch could still start in, which only the stream's end settles.

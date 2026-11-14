@@ -848,17 +848,6 @@ pub fn statvfs_available_bytes(dir: &[u8]) -> Result<u64, String> {
     }
 }
 
-/// `FileSystem::FixExecPermission` (`daemon/util/FileSystem.h`):
-/// Adds execute bits (`0o111`) to `filename` if `stat` succeeds.
-pub fn fix_exec_permission(filename: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
-    let p = path(filename);
-    if let Ok(meta) = std::fs::metadata(p) {
-        let new_mode = meta.permissions().mode() | 0o111;
-        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(new_mode));
-    }
-}
-
 /// `FileSystem::RestorePermissions` (`daemon/util/FileSystem.h`):
 /// Sets permissions of `filename` to `(mode & !umask) & 0o7777`.
 pub fn restore_permissions(filename: &[u8], mode: u32, umask: u32) -> bool {
@@ -1216,16 +1205,6 @@ pub fn get_current_directory() -> Vec<u8> {
         .position(|&b| b == 0)
         .unwrap_or(str_buf.len());
     str_buf[..len].to_vec()
-}
-
-/// Reads the first 8 bytes of `filename` (`DupeArticleFallback::FirstContent`).
-/// Returns `Some([u8; 8])` only if all 8 bytes are read successfully.
-pub fn read_first_8_bytes(filename: &[u8]) -> Option<[u8; 8]> {
-    use std::io::Read;
-    let mut f = std::fs::File::open(path(filename)).ok()?;
-    let mut head = [0u8; 8];
-    f.read_exact(&mut head).ok()?;
-    Some(head)
 }
 
 pub(crate) struct PosixFsOps;

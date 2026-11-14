@@ -21,24 +21,6 @@ impl Bits<'_> {
         (v >> (8 - self.bit)) & 0xffff
     }
 
-    /// The next 32 bits, not consumed.
-    pub fn peek32(&self) -> u32 {
-        let v = (self.byte(self.addr) << 24)
-            | (self.byte(self.addr + 1) << 16)
-            | (self.byte(self.addr + 2) << 8)
-            | self.byte(self.addr + 3);
-        (v << self.bit) | (self.byte(self.addr + 4) >> (8 - self.bit))
-    }
-
-    /// The next 64 bits, not consumed.
-    pub fn peek64(&self) -> u64 {
-        let mut v = 0u64;
-        for i in 0..8 {
-            v = (v << 8) | u64::from(self.byte(self.addr + i));
-        }
-        (v << self.bit) | (u64::from(self.byte(self.addr + 8)) >> (8 - self.bit))
-    }
-
     pub fn skip(&mut self, n: u32) {
         let total = self.bit + n;
         self.addr += (total >> 3) as usize;

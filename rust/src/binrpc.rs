@@ -103,48 +103,6 @@ pub fn trailing_ok(len: i64, max: i64) -> bool {
     !(len < 0 || len > max)
 }
 
-/// One entry of a list response as the remote client reads it (the existing wire layout): `ints.len()` big-endian ints at `at` into
-/// `ints` (host order), and the start of each string, whose length is in
-/// field `fields[k]`, into `starts[k]`. Returns the offset after the entry
-/// (the header and every length in `fields`), or None (outputs untouched)
-/// when the entry or one of its strings, up to its NUL, doesn't fit in
-/// `data`.
-pub fn read_entry(
-    data: &[u8],
-    at: usize,
-    ints: &mut [u32],
-    fields: &[usize],
-    starts: &mut [usize],
-) -> Option<usize> {
-    let header = at.checked_add(ints.len().checked_mul(4)?)?;
-    let raw = data.get(at..header)?;
-    let value = |k: usize| u32::from_be_bytes(raw[4 * k..4 * k + 4].try_into().unwrap()) as usize;
-    let mut next = header;
-    for &field in fields {
-        if field >= ints.len() {
-            return None;
-        }
-        let start = next;
-        // the string ends within the data
-        crate::bytes::find_byte(data.get(start..)?, 0)?;
-        next = next.checked_add(value(field))?;
-    }
-    if next > data.len() {
-        return None;
-    }
-    let mut start = header;
-    for (k, &field) in fields.iter().enumerate() {
-        if let Some(out) = starts.get_mut(k) {
-            *out = start;
-        }
-        start += value(field);
-    }
-    for (k, out) in ints.iter_mut().enumerate() {
-        *out = value(k) as u32;
-    }
-    Some(next)
-}
-
 /// A string of an entry: `len` bytes at `data`, without a NUL (the NUL is
 /// the encoder's). `data` may be null for length 0.
 #[repr(C)]

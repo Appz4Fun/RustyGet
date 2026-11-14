@@ -8,7 +8,6 @@
 //! as the C library's strcasecmp/strncasecmp and numbers parse as its
 //! atof/atoi, in the current locale; regular expressions use the C++ RegEx.
 
-use std::ffi::CStr;
 
 use crate::wildmask::{wild_match, Lower};
 
@@ -777,12 +776,6 @@ impl FeedFilter {
         }
         item.set_match(0, 0);
     }
-}
-
-/// For the C side: the field of a text (a C string) of a term, unused here.
-#[doc(hidden)]
-pub fn field_name_known(name: &CStr) -> bool {
-    field_of(Some(name.to_bytes())).is_some()
 }
 
 #[cfg(test)]

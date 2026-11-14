@@ -2648,10 +2648,6 @@ impl PooledNntpConn {
         (*self.conn.session.get()).core.cert_verif_level = self.server.cert_verif_level;
     }
 
-    pub unsafe fn set_timeout(&self, timeout: i32) {
-        (*self.conn.session.get()).core.timeout = timeout;
-    }
-
     pub unsafe fn connect(&self) -> bool {
         (*self.conn.session.get()).nntp_connect(
             &self.server.user,

@@ -2,10 +2,9 @@
 
 use crate::queuecoord::{
     ARTICLE_FAILED, ARTICLE_FINISHED, ARTICLE_UNDEFINED, DELETE_COPY, DELETE_DUPE, DELETE_GOOD,
-    DELETE_MANUAL, DELETE_NONE, DUP_STATUS_BAD, DUP_STATUS_DELETED, DUP_STATUS_DUPE,
+    DELETE_MANUAL, DUP_STATUS_BAD, DUP_STATUS_DELETED, DUP_STATUS_DUPE,
     DUP_STATUS_FAILED, DUP_STATUS_GOOD, DUP_STATUS_SUCCESS, MARK_BAD, MARK_GOOD, MARK_SUCCESS,
-    PARTIAL_STATE_NONE, PAR_FAILURE, PAR_REPAIR_POSSIBLE, PAR_SUCCESS, UNPACK_FAILURE,
-    UNPACK_PASSWORD, UNPACK_SKIPPED, UNPACK_SPACE, UNPACK_SUCCESS,
+    PARTIAL_STATE_NONE,
 };
 
 /// `HistoryCoordinator::ServiceWork` minimum history retention timestamp (`cur_time - keep_days * 86400`).
@@ -37,32 +36,6 @@ pub fn classify_service_work_item(
     } else {
         0
     }
-}
-
-/// `HistoryCoordinator::AddToHistory` (`HistoryCoordinator.cpp`):
-/// Determines `cleanupParkedFiles`.
-pub fn should_cleanup_parked_files(
-    par_status: i32,
-    unpack_status: i32,
-    failed_size: i64,
-    par_failed_size: i64,
-    delete_status: i32,
-    parking: bool,
-    unpack_cleaned_up_disk: bool,
-) -> bool {
-    let mut cleanup = ((par_status == PAR_SUCCESS || par_status == PAR_REPAIR_POSSIBLE)
-        && unpack_status != UNPACK_FAILURE
-        && unpack_status != UNPACK_SPACE
-        && unpack_status != UNPACK_PASSWORD)
-        || (unpack_status == UNPACK_SUCCESS && par_status != PAR_FAILURE)
-        || (unpack_status <= UNPACK_SKIPPED
-            && par_status != PAR_FAILURE
-            && (failed_size - par_failed_size) == 0)
-        || (delete_status != DELETE_NONE);
-
-    cleanup &= !parking;
-    cleanup |= unpack_cleaned_up_disk;
-    cleanup
 }
 
 /// Decides whether `HistoryCoordinator::RecheckFailedArticles` passes its initial eligibility gate.
@@ -3191,6 +3164,7 @@ pub(crate) fn edit_list_active(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::queuecoord::DELETE_NONE;
     use crate::diskstate_format::{
         calc_staged_fallback, diskstate_format_file_state_name, diskstate_format_staged_part_path,
         diskstate_select_original_or_current_msg_id, eval_article_load_state,

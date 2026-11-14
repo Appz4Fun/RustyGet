@@ -2,8 +2,7 @@
 //! packed data: adaptive codes that reorder themselves by use, with a flags byte choosing literal or match. Written
 //! from the format as unrar describes it.
 
-use super::lzma::End;
-use super::rarbits::{Bits, MARGIN};
+use super::rarbits::Bits;
 
 const DEC_L1: &[u32] = &[0x8000, 0xa000, 0xc000, 0xd000, 0xe000, 0xea00, 0xee00, 0xf000, 0xf200, 0xf200, 0xffff];
 const POS_L1: [u32; 13] = [0, 0, 0, 2, 3, 5, 7, 11, 16, 20, 24, 32, 32];
@@ -63,104 +62,6 @@ struct State<'a> {
     old_dist_ptr: usize,
     last_dist: u32,
     last_len: u32,
-}
-
-/// One file's packed data, from the front, to `limit` bytes. `complete`: `data` is all of it, not a cut front.
-pub fn rar15(data: &[u8], size: Option<u64>, limit: usize, complete: bool) -> (Vec<u8>, End) {
-    // a cut stream shorter than the margin has no byte that's safe to decode from
-    if !complete && data.len() < MARGIN {
-        return (Vec::new(), End::Cut);
-    }
-    let target = size.and_then(|s| usize::try_from(s).ok()).unwrap_or(usize::MAX).min(limit);
-    let mut st = State {
-        bits: Bits { data, addr: 0, bit: 0 },
-        out: Vec::new(),
-        target,
-        ch_set: [0; 256],
-        ch_set_a: [0; 256],
-        ch_set_b: [0; 256],
-        ch_set_c: [0; 256],
-        n_to_pl: [0; 256],
-        n_to_pl_b: [0; 256],
-        n_to_pl_c: [0; 256],
-        avr_plc: 0x3500,
-        avr_plc_b: 0,
-        avr_ln1: 0,
-        avr_ln2: 0,
-        avr_ln3: 0,
-        num_huf: 0,
-        buf60: 0,
-        max_dist3: 0x2001,
-        nhfb: 0x80,
-        nlzb: 0x80,
-        flags_cnt: 0,
-        flag_buf: 0,
-        st_mode: false,
-        l_count: 0,
-        old_dist: [0; 4],
-        old_dist_ptr: 0,
-        last_dist: 0,
-        last_len: 0,
-    };
-    for i in 0..256u16 {
-        st.ch_set[usize::from(i)] = i << 8;
-        st.ch_set_b[usize::from(i)] = i << 8;
-        st.ch_set_a[usize::from(i)] = i;
-        st.ch_set_c[usize::from(i)] = ((256 - i) & 0xff) << 8;
-    }
-    corr_huff(&mut st.ch_set_b, &mut st.n_to_pl_b);
-    let safe = if complete { data.len() } else { data.len() - MARGIN };
-    let mut end = End::Done;
-    if target > 0 {
-        st.get_flags();
-        st.flags_cnt = 8;
-    }
-    while st.out.len() < target {
-        if st.bits.addr > safe || st.bits.past_end() {
-            end = End::Cut;
-            break;
-        }
-        if st.st_mode {
-            st.huff_decode();
-            continue;
-        }
-        st.flags_cnt -= 1;
-        if st.flags_cnt < 0 {
-            st.get_flags();
-            st.flags_cnt = 7;
-        }
-        if st.flag_buf & 0x80 != 0 {
-            st.flag_buf <<= 1;
-            if st.nlzb > st.nhfb {
-                st.long_lz();
-            } else {
-                st.huff_decode();
-            }
-        } else {
-            st.flag_buf <<= 1;
-            st.flags_cnt -= 1;
-            if st.flags_cnt < 0 {
-                st.get_flags();
-                st.flags_cnt = 7;
-            }
-            if st.flag_buf & 0x80 != 0 {
-                st.flag_buf <<= 1;
-                if st.nlzb > st.nhfb {
-                    st.huff_decode();
-                } else {
-                    st.long_lz();
-                }
-            } else {
-                st.flag_buf <<= 1;
-                st.short_lz();
-            }
-        }
-    }
-    if matches!(end, End::Done) && st.out.len() >= limit {
-        end = End::Limit;
-    }
-    st.out.truncate(target);
-    (st.out, end)
 }
 
 #[derive(Clone)]

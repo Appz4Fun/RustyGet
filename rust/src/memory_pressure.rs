@@ -49,10 +49,6 @@ pub fn set_override_tier(tier: i32) {
     OVERRIDE_TIER.store(tier, Ordering::Release);
 }
 
-pub fn get_override_tier() -> i32 {
-    OVERRIDE_TIER.load(Ordering::Acquire)
-}
-
 pub fn get_last_tier() -> PressureTier {
     PressureTier::from_i32(LAST_TIER.load(Ordering::Acquire))
 }

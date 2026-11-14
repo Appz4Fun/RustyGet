@@ -35,8 +35,8 @@ On POSIX systems:
 
 If none of these exists, an NZBGet configuration file is read instead, from
 `<EXE-DIR>/nzbget.conf`, `~/.nzbget` and the same folders as above with the
-name `nzbget.conf`. The log then says so; rename the file to `rustyget.conf`
-to keep using it.
+name `nzbget.conf`. The log then says so and names the new path to rename
+it to (for example `~/.nzbget` to `~/.rustyget`).
 
 If you put the configuration file in other place, you can use command-
 line switch "-c `<filename>`" to point the program to correct location.

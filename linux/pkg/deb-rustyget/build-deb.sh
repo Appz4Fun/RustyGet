@@ -15,7 +15,8 @@ ARCH=$(dpkg --print-architecture)
 BASE=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
 # RG_VERSION overrides (e.g. when building from a copy without .git).
 if [ -z "${RG_VERSION:-}" ] && git rev-parse HEAD >/dev/null 2>&1; then
-    RG_VERSION="${BASE}+git$(git log -1 --format=%cd --date=format:%Y%m%d).$(git rev-parse --short=8 HEAD)"
+    # Commit time (UTC) first so newer commits always sort as upgrades; hash last for identification.
+    RG_VERSION="${BASE}+git$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M%S).$(git rev-parse --short=8 HEAD)"
 fi
 VERSION=${RG_VERSION:-${BASE}}
 
@@ -48,8 +49,17 @@ chmod 0644 "$STAGE/usr/share/rustyget/rustyget.conf"
 SHL=$(mktemp -d)
 mkdir -p "$SHL/debian"
 printf 'Source: rustyget\n\nPackage: rustyget\nArchitecture: any\n' > "$SHL/debian/control"
-DEPS=$(cd "$SHL" && dpkg-shlibdeps -O "$STAGE/usr/bin/rustyget" 2>/dev/null | sed -n 's/^shlibs:Depends=//p')
+if ! SHLIBS=$(cd "$SHL" && dpkg-shlibdeps -O "$STAGE/usr/bin/rustyget"); then
+    rm -rf "$SHL"
+    echo "dpkg-shlibdeps failed; refusing to build a package without library dependencies" >&2
+    exit 1
+fi
 rm -rf "$SHL"
+DEPS=$(printf '%s\n' "$SHLIBS" | sed -n 's/^shlibs:Depends=//p')
+if [ -z "$DEPS" ]; then
+    echo "dpkg-shlibdeps reported no dependencies for rustyget; refusing to build" >&2
+    exit 1
+fi
 DEPENDS="adduser, systemd, ${DEPS}"
 
 sed -e "s|@VERSION@|$VERSION|" -e "s|@ARCH@|$ARCH|" -e "s|@DEPENDS@|$DEPENDS|" \

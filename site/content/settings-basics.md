@@ -29,7 +29,7 @@ Set `MainDir` to a writable folder on the computer or container running the daem
 - `QueueDir` holds the queue and history.
 - `TempDir` holds temporary files.
 
-Extensions go in `ScriptDir`, `${MainDir}/scripts` unless the configuration file sets another folder. The current template doesn't list `ScriptDir`, so Settings doesn't show it, although the picture does.
+The picture also shows `ScriptDir`, a folder for extensions, which RustyGet no longer uses.
 
 Folder values can use variables such as `${MainDir}`. For a container, use folders visible inside that container. Check ownership and free space in the deployment itself.
 
@@ -79,7 +79,7 @@ Key options: [`ControlUsername`](options.md#controlusername), [`ControlPassword`
 
 Create a category for each workflow. Movies and Series are examples. Match its `Name` to the category sent by your media manager. Choose a category-specific destination when needed; an empty destination uses the global setting.
 
-Use `Unpack` to override archive extraction for that category. `Aliases` match names supplied by incoming NZBs. The picture also shows `Extensions`, the category's post-processing extensions; the current template doesn't list it, so set `CategoryN.Extensions` in the configuration file.
+Use `Unpack` to override archive extraction for that category. `Aliases` match names supplied by incoming NZBs. The picture also shows `Extensions`, left over from extension scripts, which RustyGet no longer uses.
 
 Click **Close** after editing to check the summary, then save all changes.
 

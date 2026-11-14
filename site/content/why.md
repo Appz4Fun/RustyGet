@@ -46,7 +46,7 @@ See [Rust port status](rust-port.md) for progress.
 
 ## What this means for you
 
-- **Today,** RustyGet reads NZBGet's configuration, queue, and history, answers NZBGet's API, and runs NZBGet extensions. Media managers and the Kodi add-on connect to it as NZBGet.
+- **Today,** RustyGet reads NZBGet's configuration, queue, and history, and answers NZBGet's API. Media managers and the Kodi add-on connect to it as NZBGet.
 - **Over time,** the API may change where NZBGet's behavior is unsafe or in the way. RustyGet may also add a SABnzbd-compatible API, so clients that only speak SABnzbd can use it. [API and compatibility](api.md) tracks both.
 - **Packages** return once the build workflows are rebuilt for the rewrite. Until then, [build from source](install.md).
 

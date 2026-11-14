@@ -80,9 +80,9 @@ The template differs from NZBGet's in these values:
 
 The built-in values changed too, for an option that the file leaves out: `ArticleCache=500`, `ParBuffer=250`, `WriteBuffer=1024`, `ContinuePartial=yes`, `DirectRename=yes`, `ReorderFiles=yes`, `Unpack=yes`, `DirectUnpack=yes`, `UnpackCleanupDisk=yes`, `NzbCleanupDisk=yes`, `ExtCleanupDisk=.par2, .sfv, _brokenlog.txt`, `InterDir=${MainDir}/inter`, and `ControlUsername=rustyget`. The built-in duplicate-fleet settings stay off, so a configuration file carried over from NZBGet doesn't turn them on.
 
-`UnrarCmd` and `SevenZipCmd` left the template because unpacking is built in. The template also no longer lists the extension options `ScriptDir`, `Extensions`, `ScriptOrder`, `ScriptPauseQueue`, `ShellOverride`, `EventInterval`, and `CategoryN.Extensions`. RustyGet still reads them from the configuration file, and extensions still run, but Settings in the web interface doesn't show them.
+`UnrarCmd` and `SevenZipCmd` left the template because unpacking is built in. The extension options, `ScriptDir`, `Extensions`, `ScriptOrder`, `ScriptPauseQueue`, `ShellOverride`, `EventInterval`, and `CategoryN.Extensions`, left too: RustyGet builds in what NZBGet needed extensions for, such as nested unpacking, permission fixes, and donor search. See [Built in instead of extensions](post-processing.md#built-in-instead-of-extensions).
 
-Option parsing also changed: a `ScriptDir` with several folders creates each folder correctly, and a scheduler task with an unknown command is reported and skipped instead of running as `PauseDownload`.
+Option parsing also changed: a scheduler task with an unknown command is reported and skipped instead of running as `PauseDownload`.
 
 New startup warnings point out risky combinations, such as donor search without `DupeCheck` or with fewer than three article retries.
 
@@ -107,14 +107,13 @@ See [API and compatibility](api.md).
 - A **Repair** badge during live repair, and a **dupe repair** post-processing status.
 - **Recovered from duplicates** in the statistics dialog.
 - History shows `twin` or `alt` instead of `dupe` where known.
-- Escaping of names, categories, messages, and extension text that NZBGet printed as HTML, and `http` or `https` links only.
+- Escaping of names, categories, and messages that NZBGet printed as HTML, and `http` or `https` links only.
 - **Optimize TLS ciphers** in the news-server settings measures the ciphers each encrypted server supports and saves the fastest one for each server.
 - Fixes to keyboard shortcuts, the filter box, upload errors, and size totals.
 
 ## Security and robustness
 
 - `DupeSearchApiKey`, and any option with an API key in its name, is protected like a password: the restricted user and JSON-P see `***`.
-- Extension downloads use generated filenames, closing a path traversal, and a failed update keeps the old version.
 - File cleanup never follows symbolic links.
 - NZB parsing refuses XML entity declarations.
 - The control port limits concurrent connections and keeps running when a thread or a connection fails.

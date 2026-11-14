@@ -23,7 +23,7 @@ pages = ["install", "quick-start"]
 
 [[nav]]
 title = "Settings"
-pages = ["settings", "settings-basics", "settings-downloads", "settings-automation", "settings-processing", "settings-extensions", "settings-maintenance"]
+pages = ["settings", "settings-basics", "settings-downloads", "settings-automation", "settings-processing", "settings-maintenance"]
 
 [[nav]]
 title = "Features"

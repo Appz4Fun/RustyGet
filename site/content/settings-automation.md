@@ -43,7 +43,7 @@ Create one task per timed action. Each row summarizes its time, weekdays, and co
 
 The example pauses downloads at 08:00 and resumes at 20:00 on weekdays. It is demonstration data, not an active schedule. Review `TimeCorrection` when the daemon's clock differs from the intended schedule.
 
-Commands that select servers or feeds can use names or numbered entries. Recheck numbered references after you move or delete entries. `Process` runs an external program; `Script` runs scheduler extensions. Command parameters remain inside the editor.
+Commands that select servers or feeds can use names or numbered entries. Recheck numbered references after you move or delete entries. `Process` runs an external program. Command parameters remain inside the editor.
 
 Key options: [`TaskN.Time`](options.md#taskn-time), [`TaskN.WeekDays`](options.md#taskn-weekdays), [`TaskN.Command`](options.md#taskn-command), [`TaskN.Param`](options.md#taskn-param), [`TimeCorrection`](options.md#timecorrection).
 

@@ -1,7 +1,7 @@
 +++
 title = "Check, repair, and unpack"
 nav_title = "Check, repair, unpack"
-description = "How RustyGet verifies downloads with par2, repairs them on every core, restores obfuscated names, unpacks archives, and runs extension scripts."
+description = "How RustyGet verifies downloads with par2, repairs them on every core, restores obfuscated names, unpacks archives, including nested ones, and fixes file permissions."
 eyebrow = "Features"
 lede = "After the last article arrives, RustyGet checks the files, repairs damage with par2 recovery data, restores obfuscated names, unpacks archives, and cleans up. All of it runs inside the program, with no external par2, unrar, or 7-Zip tool."
 +++
@@ -14,7 +14,7 @@ lede = "After the last article arrives, RustyGet checks the files, repairs damag
 <li><strong>Verify.</strong> Quick verification checks only the files that had download errors.</li>
 <li><strong>Repair.</strong> Multithreaded par2 repair rebuilds damaged files.</li>
 <li><strong>Unpack.</strong> RAR, 7-Zip, ZIP, and tar archives are extracted. Passwords come from the NZB file or from a password file.</li>
-<li><strong>Clean up and run extensions.</strong> Archives and par2 files are deleted, and post-processing extensions run in the order you set.</li>
+<li><strong>Unpack nested archives and clean up.</strong> Archives inside archives are extracted too, permissions are normalized, and archives and par2 files are deleted.</li>
 </ol>
 
 `PostStrategy` controls how many downloads can be in these steps at once: `sequential`, `balanced` (the template's value), `aggressive`, or `rocket`.
@@ -85,15 +85,17 @@ A failed download goes to history, where you can download it again. Besides star
 - An optional news server was unreachable during the first attempt.
 - You added or turned on another news server.
 
-## Post-processing extensions
+## Built in instead of extensions
 
-Extensions are scripts that run at set points, such as after a download finishes. Par check, repair, and unpack are built in; extensions handle everything else, such as deleting samples, sending notifications, or moving files for media managers.
+NZBGet left nested archives, file permissions, and finding more copies to extension scripts. RustyGet does them itself, so there's nothing to install:
 
-- Install extensions from the Extension Manager in the web interface, or put them in `ScriptDir`, which defaults to `${MainDir}/scripts`.
-- RustyGet's configuration template doesn't list the extension options (`ScriptDir`, `Extensions`, `ScriptOrder`, `ScriptPauseQueue`, `ShellOverride`, `EventInterval`, and `CategoryN.Extensions`), so Settings doesn't show them. RustyGet still reads them, so set them in the configuration file.
-- A current extension is a folder with a `manifest.json` and an executable. Older extensions are single script files with an NZBGet header comment block, and they still load. Either way, an extension's options are saved in `nzbget.conf` and passed as `NZBPO_` environment variables.
-- Post-processing extensions read the download's state from `NZBPP_` variables such as `NZBPP_DIRECTORY`, `NZBPP_TOTALSTATUS`, and `NZBPP_STATUS`.
-- Exit with `93` for success, `94` for failure, or `95` to skip. Any other exit code, including `0`, marks the script as failed. Exit `92` to ask for a par check after an extension unpacked the files itself.
-- Print `[NZB] DIRECTORY=<path>` to tell later scripts that the files moved, or `[NZB] FINALDIR=<path>` when you move them into a directory that holds other files.
+Nested archives
+: After unpacking, RustyGet looks for archives inside the extracted files, including obfuscated ones that it recognizes by their RAR or 7-Zip header, and unpacks them too, up to five levels deep. This replaces the Extended Unpacker and Extended Unrar extensions.
 
-The extension interface is inherited from NZBGet, and NZBGet extensions work unchanged today. The [compatibility](api.md#compatibility) policy explains what may change.
+Permissions
+: Unpacked files get mode `0644`, or `0755` when they're executable, and folders get `0755`, never more open than the folder they were unpacked into. This replaces the Permission Fix extension.
+
+More copies
+: [Donor search](dupesearch.md) finds, checks, and queues other postings of a download through NZBHydra2. This replaces the DupeDonors extension.
+
+Code inherited from NZBGet's extension system, such as the Extension Manager in the web interface and the extension API methods, is left over and on its way out.

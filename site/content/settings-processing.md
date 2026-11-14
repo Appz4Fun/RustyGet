@@ -27,7 +27,7 @@ Turn `Unpack` on when you want archive extraction. RustyGet extracts RAR, 7-Zip,
 
 `UnpackCleanupDisk` removes archive files after successful extraction. Choose it according to what you want the completed folder to retain. `UnpackIgnoreExt` lists nonstandard RAR extensions, such as `.cbr`, that should keep their names during RAR renaming. It also suppresses the failure for finding only nonstandard RAR archives with those extensions. Recognized `.rar` and `.7z` archives still follow normal extraction. `UnpackPassFile` supplies a password-list file when needed.
 
-A category can override the global unpack setting. For nested archives, see the optional extension examples in [Extensions](settings-extensions.md).
+A category can override the global unpack setting. Nested archives are unpacked too, up to five levels deep; see [Built in instead of extensions](post-processing.md#built-in-instead-of-extensions).
 
 Key options: [`Unpack`](options.md#unpack), [`DirectUnpack`](options.md#directunpack), [`UseTempUnpackDir`](options.md#usetempunpackdir), [`UnpackCleanupDisk`](options.md#unpackcleanupdisk), [`UnpackIgnoreExt`](options.md#unpackignoreext).
 

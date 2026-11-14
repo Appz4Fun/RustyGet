@@ -106,7 +106,7 @@ On 2026-10-09 the NZBGet maintainers closed it without merging, along with the r
   - **Built-in Parity (`par-rs`):** purpose-built Rust PAR2 verification, repair-while-downloading (`StreamingParSession`), post-download Reed-Solomon repair (`Par2Repairer`), and deobfuscation rename (`ParRenamer`) engine rolled directly into RustyGet (replacing `par2-turbo` and `rust-par2`).
 - **Target platforms.** RustyGet targets macOS (Apple Silicon and Intel) and x86_64 Linux with tuned, zero-warning default settings out of the box.
 - **API compatibility may change.** Today RustyGet answers NZBGet's API, so Sonarr, Radarr, and the Kodi add-on work unchanged. Future versions may break NZBGet API compatibility where the old behavior is unsafe or in the way, and may add a SABnzbd-compatible API.
-- **New name.** The project is RustyGet. During the move, the binary and the configuration file keep NZBGet's names, `nzbget` and `nzbget.conf`, so existing setups keep working.
+- **New name.** The project is RustyGet. The binary is `rustyget`, and it reads `rustyget.conf` or, failing that, an existing `nzbget.conf`, so NZBGet setups keep working. The configuration template in the repository is still named `nzbget.conf`.
 
 ## Build and run
 

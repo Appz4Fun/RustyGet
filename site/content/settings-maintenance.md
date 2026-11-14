@@ -8,7 +8,7 @@ Pictures use an isolated demonstration service and example values. Credentials a
 
 ## Info
 
-Start here for the difference between browser preferences and server configuration. The page links to the first-time setup, extension manager, backups, and community resources.
+Start here for the difference between browser preferences and server configuration. The page links to the first-time setup, backups, and community resources.
 
 Use [Basic setup](settings-basics.md) when configuring a new installation. Use [Settings at a glance](settings.md) for search, help, and the compact list editors.
 

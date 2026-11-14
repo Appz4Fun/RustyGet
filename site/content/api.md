@@ -2,7 +2,7 @@
 title = "API and compatibility"
 description = "RustyGet's JSON-RPC and XML-RPC API: what stays compatible with NZBGet, the new appendfleet method and fields, security changes, and the plan for SABnzbd compatibility."
 eyebrow = "Reference"
-lede = "RustyGet speaks NZBGet's API today, so media managers, the Kodi add-on, and extensions work unchanged. As the rewrite moves on, the API may change, and RustyGet may add a SABnzbd-compatible API next to it."
+lede = "RustyGet speaks NZBGet's API today, so media managers and the Kodi add-on work unchanged. As the rewrite moves on, the API may change, and RustyGet may add a SABnzbd-compatible API next to it."
 +++
 
 ## Compatibility
@@ -15,7 +15,6 @@ lede = "RustyGet speaks NZBGet's API today, so media managers, the Kodi add-on, 
 | NZBGet JSON-RPC and XML-RPC | Every method, with the changes on this page | Kept while clients depend on it. Methods may change where the old behavior is unsafe or in the way of the rewrite. |
 | NZBGet JSON-P | Off unless option `JsonP` turns it on; then the methods that read, with the restricted user's access | Kept as an option for old clients |
 | `appendfleet` | Available | Kept and extended |
-| Extension scripts (`NZBPP_`, `NZBPO_`, `NZBNA_` variables, exit codes) | Unchanged, plus new `NZBPR_` parameters | Kept for now |
 | SABnzbd API | Not available | Under consideration, so that clients that only speak SABnzbd can use RustyGet |
 | `nzbget.conf` | NZBGet's format, plus new options | Kept for now |
 | Queue and history files | NZBGet's formats, plus a trailer that NZBGet ignores | Kept for now |
@@ -56,7 +55,7 @@ This is every method that RustyGet answers. All but `appendfleet` and the three 
 | Pause and speed | `rate`, `pausedownload`, `resumedownload`, `pausepost`, `resumepost`, `pausescan`, `resumescan`, `scheduleresume`, and the older names `pause`, `pausedownload2`, `resume`, and `resumedownload2` |
 | Configuration | `config`, `loadconfig`, `saveconfig`, `configtemplates`, `editserver` |
 | RSS feeds | `fetchfeed`, `viewfeed`, `previewfeed` |
-| Extensions and scripts | `loadextensions`, `downloadextension`, `updateextension`, `deleteextension`, `testextension`, `startscript` |
+| Extensions, left over from NZBGet and being removed | `loadextensions`, `downloadextension`, `updateextension`, `deleteextension`, `testextension`, `startscript` |
 | Updates | `checkupdates`, `startupdate` |
 | Tests and tools | `testserver`, `testserverspeed`, `testdiskspeed`, `testnetworkspeed`, `readurl` |
 | TLS cipher test | `tlscipherstart`, `tlscipherstatus`, `tlsciphercancel`: the **Optimize TLS ciphers** test in the news-server settings, for the control account only |
@@ -119,7 +118,7 @@ The result:
 
 The `listgroups` status and the `postqueue` stage can be `STREAM_REPAIRING`.
 
-RustyGet also stores its findings as NZB parameters, which the API returns in `Parameters` and extensions see as `NZBPR_` variables:
+RustyGet also stores its findings as NZB parameters, which the API returns in `Parameters`:
 
 | Parameter | Meaning |
 |---|---|

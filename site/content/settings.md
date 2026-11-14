@@ -7,7 +7,7 @@ eyebrow = "Settings guide"
 Pictures use an isolated demonstration service and example values. Credentials are blank, folders use variables, and extension defaults are sanitized. These pictures illustrate the controls. Choose values for your installation; the pictured status comes from the demonstration service. Your build and installed extensions can differ.
 
 > [!NOTE] Pictures predate built-in unpacking
-> The pictures were taken before unpacking moved into RustyGet. Settings built from the current configuration template no longer shows `UnrarCmd` and `SevenZipCmd`, `ScriptDir`, the **EXTENSION SCRIPTS** section, or `CategoryN.Extensions`, which the pictures still include.
+> The pictures were taken before unpacking and the former extensions moved into RustyGet. They still show `UnrarCmd`, `SevenZipCmd`, `ScriptDir`, and `CategoryN.Extensions`, which RustyGet no longer uses.
 
 ## Find the section you need
 
@@ -17,7 +17,6 @@ Pictures use an isolated demonstration service and example values. Credentials a
 | Incoming NZBs, Download queue, Connection, Logging | [Downloads and diagnostics](settings-downloads.md) | Intake, duplicate recovery, queue storage, retries, and logs |
 | RSS Feeds, Scheduler | [Feeds and schedules](settings-automation.md) | Feed rules and timed tasks |
 | Check and repair, Unpack | [Repair and unpacking](settings-processing.md) | Article checks, par2, and archive extraction |
-| Extension manager, optional extension pages | [Extensions](settings-extensions.md) | Script hooks, ordering, installation, and extension settings |
 | Info, Status, System, Licenses | [Maintenance](settings-maintenance.md) | Help, service health, backups, reloads, and attribution |
 
 The [configuration reference](options.md) describes every core option, its default, and its accepted values. Numbered entries appear there as `ServerN`, `CategoryN`, `FeedN`, and `TaskN`.

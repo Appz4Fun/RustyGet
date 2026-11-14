@@ -248,3 +248,89 @@
 	#ConfigContent .btn-switch.is-toggle,
 	#ConfigContent .btn-switch.is-toggle::after { transition: none; }
 }
+
+/* ---------------------------------------------------------------- cards */
+
+/* Rows of one section are grouped into titled cards, like the fleet card in the
+   download details panel. Rarely changed options fold away under "Advanced". */
+#ConfigContent .config-card {
+	margin: 0 0 var(--space-4);
+	border: 1px solid var(--separator);
+	border-radius: var(--radius-lg);
+	background: var(--bg-content);
+	overflow: hidden;
+}
+#ConfigContent .config-card__head {
+	padding: 14px var(--space-4) 10px;
+	border-bottom: 1px solid var(--separator);
+	background: var(--fill-quaternary);
+}
+#ConfigContent .config-card__title {
+	margin: 0;
+	font: 600 11.5px/1.4 var(--font-mono);
+	letter-spacing: .08em;
+	text-transform: uppercase;
+	color: var(--accent);
+}
+#ConfigContent .config-card__text {
+	margin: 4px 0 0;
+	max-width: 72ch;
+	font-size: 13.5px;
+	line-height: 1.45;
+	color: var(--label-secondary);
+}
+#ConfigContent .config-card div.config-option-tile,
+#ConfigContent .config-card div.config-option-tile.first-group,
+#ConfigContent .config-card div.config-option-tile.last-group {
+	border: 0;
+	border-top: 1px solid var(--separator);
+	border-radius: 0;
+	background: transparent;
+}
+#ConfigContent .config-card__rows > div.config-option-tile:first-child { border-top: 0; }
+#ConfigContent .config-card__more { border-top: 1px solid var(--separator); }
+#ConfigContent .config-card__more > .config-card__rows > div.config-option-tile:first-child { border-top: 1px solid var(--separator); }
+#ConfigContent .config-card__more-toggle {
+	padding: 10px var(--space-4);
+	font: 600 12px/1.4 var(--font-mono);
+	letter-spacing: .04em;
+	text-transform: uppercase;
+	color: var(--label-secondary);
+	cursor: pointer;
+	list-style: none;
+}
+#ConfigContent .config-card__more-toggle::-webkit-details-marker { display: none; }
+#ConfigContent .config-card__more-toggle::before {
+	content: "+";
+	display: inline-block;
+	width: 1.2em;
+	color: var(--accent);
+}
+#ConfigContent .config-card__more[open] > .config-card__more-toggle::before { content: "\2212"; }
+#ConfigContent .config-card__more-toggle:hover { color: var(--label-primary); }
+#ConfigContent .config-card__more-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+/* search results list rows from many cards; drop the card heads there */
+#ConfigContent.search .config-card__head,
+#ConfigContent.search .config-card__more-toggle { display: none; }
+
+/* ---------------------------------------------------------------- overview */
+
+#ConfigContent .config-overview-tiles {
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: var(--space-3);
+	margin-bottom: var(--space-5);
+}
+#ConfigContent .config-overview-tile { padding: 14px 16px; }
+#ConfigContent .config-overview-tile .details-tile-label .material-icon { margin-left: auto; }
+#ConfigContent .config-about { margin-top: var(--space-2); }
+#ConfigContent .config-about > summary {
+	font: 600 12px/1.4 var(--font-mono);
+	letter-spacing: .06em;
+	text-transform: uppercase;
+	color: var(--label-secondary);
+	cursor: pointer;
+}
+@media (max-width: 768px) {
+	#ConfigContent .config-overview-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+	#ConfigContent .config-card { margin-bottom: var(--space-3); }
+}

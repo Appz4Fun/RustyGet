@@ -747,6 +747,8 @@
   "msg_stopping_reloading": "Zastavování všech aktivit a opětovné načítání...",
   "msg_terminated_waiting": "RustyGet byl ukončen. Čekání na restart...",
   "nav_info": "Info",
+  "nav_overview": "Přehled",
+  "config_overview_about": "O RustyGet",
   "nav_status": "Stav",
   "nav_system": "Systém",
   "not_implemented": "Není implementováno",

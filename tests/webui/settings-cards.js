@@ -1,0 +1,156 @@
+// Settings overview, titled cards, Advanced folds and the Dupe fleets page.
+// Offline: the committed WebUI with its real startup over synthetic RPC replies
+// (details-fixture). saveconfig is intercepted, nothing reaches a daemon.
+// Usage: node tests/webui/settings-cards.js http://127.0.0.1:17999/
+const { chromium } = require('playwright');
+const assert = require('node:assert/strict');
+const { fixtureURL } = require('./workspace-fixture');
+const { installDetailsFixture } = require('./details-fixture');
+
+const DUPE_OPTIONS = ['DupeCheck', 'DupeArticleFallback', 'DupeStreamDecompress', 'DupeStreamTimeout', 'DupeBorrowFirst',
+  'DupeSearch', 'DupeSearchUrl', 'DupeSearchApiKey', 'DupeSearchDelay', 'DupeSearchDryRun', 'DupeSearchMaxDonors',
+  'DupeHealthPercent', 'DupeHealthMin', 'DupeHealthMax', 'DupeBodyChecks', 'DupeHealthBudget', 'DupeMinAlive',
+  'DupeFastDonors', 'DupePrimaryScore', 'DupeSizeTolerance', 'DupeBodyPercent', 'DupeCheckConcurrency',
+  'DupeCheckConnections', 'HealthCheck'];
+
+(async () => {
+  const base = fixtureURL(process.argv[2] || 'http://127.0.0.1:17999/');
+  const browser = await chromium.launch(process.env.NZBGET_CHROME_CHANNEL === 'none' ? {} : { channel: process.env.NZBGET_CHROME_CHANNEL || 'chrome' })
+    .catch(() => chromium.launch());
+  const failures = [];
+  let cases = 0;
+  try {
+    for (const theme of ['light', 'dark']) for (const [width, height] of [[1440, 900], [390, 844]]) {
+      const context = await browser.newContext({ viewport: { width, height } });
+      await context.addInitScript(t => localStorage.setItem('Theme', t), theme);
+      const page = await context.newPage();
+      const errors = [], writes = [];
+      page.on('pageerror', e => errors.push(e.message));
+      await installDetailsFixture(page, base, writes);
+      // health: an error on a folded dupe option and on a NZB folder option, both stored in Incoming NZBs
+      await page.route(/\/jsonrpc(?:\/|$)/, route => {
+        const rpc = route.request().method() === 'POST' ? route.request().postDataJSON() : null;
+        if (!rpc || rpc.method !== 'systemhealth') return route.fallback();
+        return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: { Alerts: [], Sections: [
+          { Name: 'IncomingNzbs', Issues: [], Subsections: [], Options: [
+            { Name: 'DupeCheckConnections', Severity: 'Error', Message: 'Fixture: too many check connections' },
+            { Name: 'NzbDirInterval', Severity: 'Error', Message: 'Fixture: NZB folder notice' }] }] } } });
+      });
+      await page.goto(base.href);
+      await page.locator('#DownloadsTable tbody tr').first().waitFor();
+      await page.evaluate(() => $('a[href="#ConfigTab"]').first().click());
+      await page.waitForFunction(() => document.querySelector('#ConfigNav a[href="#DUPE_FLEETS"]'));
+      const check = async (label, action) => {
+        cases++;
+        try { await action(); } catch (error) { failures.push(`${theme}/${width}/${label}: ${error.message}`); }
+      };
+      const S = name => page.locator('#S_' + name);
+      const row = name => S(name).locator('xpath=ancestor::div[contains(@class,"control-group")][1]');
+
+      await check('overview first', async () => {
+        assert.equal((await page.locator('#ConfigTitle').textContent()).trim(), 'Overview');
+        const nav = await page.locator('#ConfigNav > li').allTextContents();
+        assert.equal(nav[0].trim(), 'Start here');
+        assert.equal(nav[1].trim(), 'Overview');
+        const tiles = page.locator('#ConfigOverview .config-overview-tile');
+        assert.equal(await tiles.count(), 6);
+        const text = await page.locator('#ConfigOverview').innerText();
+        assert.match(text, /2 \/ 2 active[\s\S]*40 connections/i);
+        assert.match(text, /\/mnt\/20tb\/rustyget\/dst/);
+        assert.match(text, /Live repair/);
+        assert.match(text, /While downloading/);
+        assert.match(text, /Unlimited/);
+        await page.locator('#ConfigOverview .config-overview-tile[data-target="DUPE_FLEETS"]').click();
+        await page.waitForFunction(() => Config.currentSectionID === 'DUPE_FLEETS');
+        assert.equal((await page.locator('#ConfigTitle').textContent()).trim(), 'Dupe fleets');
+      });
+
+      await check('dupe fleets page holds every dupe option', async () => {
+        const cards = await page.locator('#ConfigData .config-card.DUPE_FLEETS:visible .config-card__title').allTextContents();
+        assert.deepEqual(cards.map(c => c.toLowerCase()), ['fleet repair', 'health sampling', 'donor ranking', 'indexer search']);
+        for (const name of DUPE_OPTIONS) {
+          assert.equal(await S(name).count(), 1, name + ' exists');
+          assert.equal(await row(name).locator('xpath=ancestor::section[contains(@class,"DUPE_FLEETS")]').count(), 1, name + ' sits on Dupe fleets');
+        }
+        assert.equal((await row('DupeBorrowFirst').locator('.config-label').textContent()).trim(), 'Borrow first');
+        assert(await row('DupeCheck').isVisible());
+        assert.equal(await row('DupeSearchUrl').isVisible(), false, 'Indexer search settings are folded while search is off');
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'No horizontal page scroll');
+      });
+
+      await check('incoming NZBs keeps only its own options', async () => {
+        await page.evaluate(() => Config.showSection('INCOMING_NZBS', false));
+        const keys = await page.locator('#ConfigData .control-group:visible .config-key').allTextContents();
+        assert.deepEqual(keys.map(k => k.trim()).sort(), ['AppendCategoryDir', 'NzbDirArchiveAction', 'NzbDirArchiveScan', 'NzbDirFileAge', 'NzbDirInterval']);
+        await page.evaluate(() => Config.showSection('CHECK_AND_REPAIR', false));
+        assert.equal(await row('HealthCheck').isVisible(), false);
+        assert(await row('ParCheck').isVisible());
+      });
+
+      await check('every option is still on exactly one page', async () => {
+        // sections with a card layout leave no row outside a card
+        const orphans = await page.evaluate(() => ['PATHS', 'SECURITY', 'INCOMING_NZBS', 'DOWNLOAD_QUEUE', 'CONNECTION', 'LOGGING', 'CHECK_AND_REPAIR', 'UNPACK']
+          .flatMap(id => $('#ConfigData > .control-group.' + id).map(function() { return $('.config-key', this).text(); }).get()));
+        assert.deepEqual(orphans, [], 'Ungrouped option rows: ' + orphans.join(', '));
+      });
+
+      await check('health follows the moved option', async () => {
+        const badge = id => page.locator(`#ConfigNav a[href="#${id}"] .config-health-badges .badge`);
+        await page.waitForFunction(() => document.querySelector('#ConfigNav a[href="#DUPE_FLEETS"] .badge'), null, { timeout: 5000 });
+        assert.equal((await badge('DUPE_FLEETS').textContent()).trim(), '1');
+        assert.equal((await badge('INCOMING_NZBS').textContent()).trim(), '1', 'Incoming NZBs counts only its own option');
+        assert.equal(await page.locator('.config-card.DUPE_FLEETS[data-card="health"] details.config-card__more').evaluate(d => d.open), true,
+          'A fold with a health error opens');
+        assert.match(await row('DupeCheckConnections').innerText(), /too many check connections/);
+      });
+
+      await check('advanced fold', async () => {
+        await page.evaluate(() => Config.showSection('DOWNLOAD_QUEUE', false));
+        const fold = page.locator('.config-card.DOWNLOAD_QUEUE[data-card="disk"] details.config-card__more');
+        assert.equal(await fold.evaluate(d => d.open), false);
+        assert.match(await fold.locator('summary').textContent(), /Advanced \(2\)/);
+        assert.equal(await row('RawArticle').isVisible(), false);
+        await fold.locator('summary').click();
+        assert(await row('RawArticle').isVisible());
+        await fold.locator('summary').click();
+      });
+
+      await check('search reaches folded options', async () => {
+        await page.locator('#ConfigTable_filter').fill('DupeSearchDryRun');
+        await page.waitForFunction(() => document.querySelector('#ConfigContent.search'));
+        await page.waitForTimeout(300);
+        assert(await row('DupeSearchDryRun').isVisible(), 'A folded match is shown');
+        assert.equal(await row('DupeSearch').isVisible(), false, 'Non-matching rows in the same card stay hidden');
+        await page.locator('#ConfigTable_clearfilter').click();
+        await page.waitForTimeout(300);
+      });
+
+      await check('a moved option still saves', async () => {
+        await page.evaluate(() => Config.showSection('DUPE_FLEETS', false));
+        await S('DupeStreamTimeout').fill('90');
+        await S('DupeStreamTimeout').dispatchEvent('input');
+        await S('DupeStreamTimeout').dispatchEvent('change');
+        await page.locator('#ConfigSaveBar').waitFor({ state: 'visible' });
+        await page.evaluate(() => Config.saveChanges());
+        await page.waitForFunction(n => n.some(w => w.method === 'saveconfig'), writes, { polling: 100, timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(500);
+        const save = writes.find(w => w.method === 'saveconfig');
+        assert(save, 'saveconfig was sent');
+        const values = Object.fromEntries(save.params[0].map(o => [o.Name, o.Value]));
+        assert.equal(values.DupeStreamTimeout, '90');
+        assert.equal(values.DupeCheck, 'yes');
+        assert.equal(values.NzbDirInterval, '5');
+      });
+
+      if (errors.length) failures.push(`${theme}/${width}: page errors: ${errors.join('; ')}`);
+      await context.close();
+    }
+  } finally {
+    await browser.close();
+  }
+  if (failures.length) {
+    console.error(failures.join('\n'));
+    process.exit(1);
+  }
+  console.log(`settings-cards: ${cases} cases passed`);
+})();

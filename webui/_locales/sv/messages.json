@@ -747,6 +747,8 @@
   "msg_stopping_reloading": "Stoppar alla aktiviteter och laddar om...",
   "msg_terminated_waiting": "RustyGet har avslutats. Väntar på omstart...",
   "nav_info": "Info",
+  "nav_overview": "Översikt",
+  "config_overview_about": "Om RustyGet",
   "nav_status": "Status",
   "nav_system": "System",
   "not_implemented": "Inte implementerat",

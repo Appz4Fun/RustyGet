@@ -747,6 +747,8 @@
   "msg_stopping_reloading": "Διακοπή όλων των δραστηριοτήτων και επαναφόρτωση...",
   "msg_terminated_waiting": "Το RustyGet έχει τερματιστεί. Αναμονή για επανεκκίνηση...",
   "nav_info": "Πληροφορίες",
+  "nav_overview": "Επισκόπηση",
+  "config_overview_about": "Σχετικά με το RustyGet",
   "nav_status": "Κατάσταση",
   "nav_system": "Σύστημα",
   "not_implemented": "Δεν έχει υλοποιηθεί",

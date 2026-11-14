@@ -15,6 +15,7 @@ node tests/webui/settings-phone-navigation.js http://127.0.0.1:17689/
 node tests/webui/settings-titles.js http://127.0.0.1:17689/
 node tests/webui/settings-locales.js http://127.0.0.1:17689/
 node tests/webui/settings-savebar.js http://127.0.0.1:17689/   # offline, no daemon needed
+node tests/webui/settings-cards.js http://127.0.0.1:17999/     # offline, no daemon needed
 node tests/webui/settings-health-startup.js http://127.0.0.1:17689/
 node tests/webui/tls-cipher.js http://127.0.0.1:17689/
 node tests/webui/tls-cipher-settings.js http://127.0.0.1:17689/
@@ -53,6 +54,12 @@ existing `NZBGET_UI_CAPTURE_DIR` convention.
 ```sh
 node tests/webui/dialog-layout.js http://127.0.0.1:17689/
 ```
+
+The cards check runs the whole WebUI offline through `details-fixture.js`. It covers the
+Overview tiles and their links, the Dupe fleets page holding every dupe option (and
+Incoming NZBs keeping only its own), Advanced folds, search reaching folded options,
+and the saved payload after editing a moved option, in both themes at desktop and
+phone widths.
 
 The locale check verifies the server health label exists in all 20 translated
 catalogs and renders translated summaries and help names in German, Spanish and

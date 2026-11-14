@@ -747,6 +747,8 @@
   "msg_stopping_reloading": "Зупинка всіх процесів та перезавантаження...",
   "msg_terminated_waiting": "RustyGet завершив роботу. Очікування перезапуску...",
   "nav_info": "Інформація",
+  "nav_overview": "Огляд",
+  "config_overview_about": "Про RustyGet",
   "nav_status": "Статус",
   "nav_system": "Система",
   "not_implemented": "Не реалізовано",

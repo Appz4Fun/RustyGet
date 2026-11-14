@@ -206,6 +206,254 @@
     "message": "Info",
     "description": "Navigation link to Info section"
   },
+  "nav_overview": {
+    "message": "Overview",
+    "description": "Navigation link to the Settings overview: headline tiles for the main settings"
+  },
+  "config_card_dupe_fleets_repair": {
+    "message": "Fleet repair",
+    "description": "Settings card heading on the dupe_fleets page"
+  },
+  "config_card_dupe_fleets_repair_text": {
+    "message": "How copies of the same release repair each other while they download.",
+    "description": "Settings card explanation on the dupe_fleets page"
+  },
+  "config_card_dupe_fleets_health": {
+    "message": "Health sampling",
+    "description": "Settings card heading on the dupe_fleets page"
+  },
+  "config_card_dupe_fleets_health_text": {
+    "message": "How each copy is sampled before a primary is picked and donors are ranked.",
+    "description": "Settings card explanation on the dupe_fleets page"
+  },
+  "config_card_dupe_fleets_ranking": {
+    "message": "Donor ranking",
+    "description": "Settings card heading on the dupe_fleets page"
+  },
+  "config_card_dupe_fleets_ranking_text": {
+    "message": "Twins come first by health, then borrowable alts, then the rest. These settings break ties.",
+    "description": "Settings card explanation on the dupe_fleets page"
+  },
+  "config_card_dupe_fleets_search": {
+    "message": "Indexer search",
+    "description": "Settings card heading on the dupe_fleets page"
+  },
+  "config_card_dupe_fleets_search_text": {
+    "message": "Off by default: fleets normally arrive from the app that sends them.",
+    "description": "Settings card explanation on the dupe_fleets page"
+  },
+  "config_card_incoming_nzbs_folder": {
+    "message": "NZB folder",
+    "description": "Settings card heading on the incoming_nzbs page"
+  },
+  "config_card_incoming_nzbs_folder_text": {
+    "message": "Files dropped into the NZB folder are picked up and queued.",
+    "description": "Settings card explanation on the incoming_nzbs page"
+  },
+  "config_card_download_queue_queue": {
+    "message": "Queue",
+    "description": "Settings card heading on the download_queue page"
+  },
+  "config_card_download_queue_disk": {
+    "message": "Writing to disk",
+    "description": "Settings card heading on the download_queue page"
+  },
+  "config_card_download_queue_names": {
+    "message": "File names",
+    "description": "Settings card heading on the download_queue page"
+  },
+  "config_card_connection_speed": {
+    "message": "Speed and quotas",
+    "description": "Settings card heading on the connection page"
+  },
+  "config_card_connection_articles": {
+    "message": "Articles",
+    "description": "Settings card heading on the connection page"
+  },
+  "config_card_connection_urls": {
+    "message": "Fetching NZB links",
+    "description": "Settings card heading on the connection page"
+  },
+  "config_card_check_and_repair_par": {
+    "message": "Par check",
+    "description": "Settings card heading on the check_and_repair page"
+  },
+  "config_card_check_and_repair_par_text": {
+    "message": "Used when no twin or alt in the fleet has the missing bytes.",
+    "description": "Settings card explanation on the check_and_repair page"
+  },
+  "config_card_check_and_repair_rename": {
+    "message": "Renaming",
+    "description": "Settings card heading on the check_and_repair page"
+  },
+  "config_card_check_and_repair_links": {
+    "message": "Hard links",
+    "description": "Settings card heading on the check_and_repair page"
+  },
+  "config_card_unpack_unpack": {
+    "message": "Unpack",
+    "description": "Settings card heading on the unpack page"
+  },
+  "config_card_unpack_cleanup": {
+    "message": "Cleanup",
+    "description": "Settings card heading on the unpack page"
+  },
+  "config_card_paths_folders": {
+    "message": "Folders",
+    "description": "Settings card heading on the paths page"
+  },
+  "config_card_security_access": {
+    "message": "Web access",
+    "description": "Settings card heading on the security page"
+  },
+  "config_card_security_users": {
+    "message": "Extra users",
+    "description": "Settings card heading on the security page"
+  },
+  "config_card_security_users_text": {
+    "message": "A restricted user can watch and change the queue but not settings. An add user can only add NZBs.",
+    "description": "Settings card explanation on the security page"
+  },
+  "config_card_security_https": {
+    "message": "HTTPS",
+    "description": "Settings card heading on the security page"
+  },
+  "config_card_security_system": {
+    "message": "System",
+    "description": "Settings card heading on the security page"
+  },
+  "config_card_logging_file": {
+    "message": "Log file",
+    "description": "Settings card heading on the logging page"
+  },
+  "config_card_logging_levels": {
+    "message": "Message levels",
+    "description": "Settings card heading on the logging page"
+  },
+  "config_card_logging_debug": {
+    "message": "Troubleshooting",
+    "description": "Settings card heading on the logging page"
+  },
+  "config_card_more": {
+    "message": "Advanced",
+    "description": "Fold at the bottom of a Settings card that holds rarely changed options"
+  },
+  "config_section_dupe_fleets": {
+    "message": "Dupe fleets",
+    "description": "Settings page with every duplicate fleet option"
+  },
+  "config_overview_servers": {
+    "message": "News servers",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_active": {
+    "message": "active",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_none": {
+    "message": "None yet",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_connections": {
+    "message": "connections",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_dest": {
+    "message": "Downloads go to",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_inter": {
+    "message": "working in",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_off": {
+    "message": "Off",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_live": {
+    "message": "Live repair",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_stream": {
+    "message": "Stream repair",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_article": {
+    "message": "Article swap",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_dupe_only": {
+    "message": "Dupe check only",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_borrow_first": {
+    "message": "borrow before par2",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_search_on": {
+    "message": "indexer search on",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_search_off": {
+    "message": "indexer search off",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_par": {
+    "message": "Par check",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_repair_on": {
+    "message": "repair on",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_repair_off": {
+    "message": "repair off",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_unpack": {
+    "message": "Unpack",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_direct": {
+    "message": "While downloading",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_after": {
+    "message": "After download",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_cleanup": {
+    "message": "archives deleted after",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_keep": {
+    "message": "archives kept",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_speed": {
+    "message": "Speed limit",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_unlimited": {
+    "message": "Unlimited",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_quota": {
+    "message": "quota set",
+    "description": "Settings overview tile text"
+  },
+  "config_overview_no_quota": {
+    "message": "no quota",
+    "description": "Settings overview tile text"
+  },
+  "config_card_dupe_fleets_search_more": {
+    "message": "Search settings",
+    "description": "Fold on the Dupe fleets indexer search card holding the search settings"
+  },
+  "config_overview_about": {
+    "message": "About RustyGet",
+    "description": "Collapsible heading on the Settings overview for the about text"
+  },
   "nav_status": {
     "message": "Status",
     "description": "Navigation link to Status section"

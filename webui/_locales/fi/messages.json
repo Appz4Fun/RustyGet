@@ -747,6 +747,8 @@
   "msg_stopping_reloading": "Pysäytetään kaikki toiminnot ja ladataan uudelleen...",
   "msg_terminated_waiting": "RustyGet on lopetettu. Odotetaan uudelleenkäynnistystä...",
   "nav_info": "Tiedot",
+  "nav_overview": "Yleiskatsaus",
+  "config_overview_about": "Tietoja RustyGetistä",
   "nav_status": "Tila",
   "nav_system": "Järjestelmä",
   "not_implemented": "Ei toteutettu",

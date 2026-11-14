@@ -747,6 +747,8 @@
   "msg_stopping_reloading": "Se opresc toate activitățile și se reîncarcă...",
   "msg_terminated_waiting": "RustyGet a fost oprit. Se așteaptă repornirea...",
   "nav_info": "Informații",
+  "nav_overview": "Prezentare generală",
+  "config_overview_about": "Despre RustyGet",
   "nav_status": "Stare",
   "nav_system": "Sistem",
   "not_implemented": "Neimplementat",

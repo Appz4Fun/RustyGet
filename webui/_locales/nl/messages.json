@@ -747,6 +747,8 @@
   "msg_stopping_reloading": "Alle activiteiten worden gestopt en opnieuw geladen...",
   "msg_terminated_waiting": "RustyGet is beëindigd. Wachten op herstart...",
   "nav_info": "Info",
+  "nav_overview": "Overzicht",
+  "config_overview_about": "Over RustyGet",
   "nav_status": "Status",
   "nav_system": "Systeem",
   "not_implemented": "Niet geïmplementeerd",

@@ -441,11 +441,13 @@ BOOST_AUTO_TEST_CASE(ParFailureWithoutSuccessfulDirectUnpackStillSkipsUnpack)
 			processor.NzbDownloaded(&downloadQueue, info);
 			return true;
 		}));
+		// The unpack status outlives the job: post-processing can finish and drop
+		// its PostInfo before the first poll, so wait on the status alone.
 		BOOST_REQUIRE(WaitFor([&]
 		{
 			return WithNzbInfo(nzbId, [](NzbInfo* info)
 			{
-				return info->GetPostInfo() && info->GetUnpackStatus() != NzbInfo::usNone;
+				return info->GetUnpackStatus() != NzbInfo::usNone;
 			});
 		}));
 		BOOST_CHECK(WithNzbInfo(nzbId, [](NzbInfo* info) { return info->GetUnpackStatus() == NzbInfo::usSkipped; }));

@@ -3268,6 +3268,104 @@ pub fn rpc_save_config_check_global_conflicts(
     0
 }
 
+/// Cross-option checks run when settings are saved. None of them blocks the
+/// save: the daemon handles each combination safely at startup (see
+/// `options.rs`), so refusing the save only kept users from saving anything.
+///
+/// - `ServerN.Cipher` set while `ServerN.Encryption=no`: harmless, the cipher
+///   is ignored without TLS. Kept as entered so it applies again when
+///   encryption is turned back on; warns.
+/// - `DupeSearch=yes` with `HealthCheck=park`: the daemon turns DupeSearch off
+///   at startup. Kept as entered; warns.
+/// - `DirectWrite=yes` with `FlushQueue=no`: the daemon forces FlushQueue on at
+///   startup. Corrected to `FlushQueue=yes` in the saved file so the file says
+///   what actually runs; warns.
+/// - `DirectUnpack=yes` with `UnpackPauseQueue=no`: the daemon serializes
+///   unpacks instead. Kept as entered; warns.
+///
+/// Returns the warnings, in that order.
+pub fn rpc_save_config_soften_conflicts(opt_entries: &mut [(Vec<u8>, Vec<u8>)]) -> Vec<Vec<u8>> {
+    let mut warnings: Vec<Vec<u8>> = Vec::new();
+
+    let names_refs: Vec<&[u8]> = opt_entries.iter().map(|(n, _)| n.as_slice()).collect();
+    let values_refs: Vec<&[u8]> = opt_entries.iter().map(|(_, v)| v.as_slice()).collect();
+    let cipher_server = rpc_save_config_find_cipher_conflict(&names_refs, &values_refs);
+    if cipher_server > 0 {
+        warnings.push(
+            format!(
+                "Settings saved: Server{cipher_server}.Cipher is kept but ignored while Server{cipher_server}.Encryption is disabled."
+            )
+            .into_bytes(),
+        );
+    }
+
+    let opt_val = |target: &[u8]| -> Option<Vec<u8>> {
+        opt_entries
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(target))
+            .map(|(_, v)| v.clone())
+    };
+    let dupe_search = opt_val(b"DupeSearch");
+    let health_check = opt_val(b"HealthCheck");
+    let flush_queue = opt_val(b"FlushQueue");
+    let direct_write = opt_val(b"DirectWrite");
+    let unpack_pause = opt_val(b"UnpackPauseQueue");
+    let direct_unpack = opt_val(b"DirectUnpack");
+
+    if rpc_save_config_check_global_conflicts(
+        dupe_search.as_deref(),
+        health_check.as_deref(),
+        None,
+        None,
+        None,
+        None,
+    ) == 2
+    {
+        warnings.push(
+            b"Settings saved: 'DupeSearch=yes' has no effect while 'HealthCheck=park'; DupeSearch is turned off at startup. Set 'HealthCheck=dupe' to use it.".to_vec(),
+        );
+    }
+
+    if rpc_save_config_check_global_conflicts(
+        None,
+        None,
+        flush_queue.as_deref(),
+        direct_write.as_deref(),
+        None,
+        None,
+    ) == 3
+    {
+        let mut corrected = false;
+        for (name, value) in opt_entries.iter_mut() {
+            if name.eq_ignore_ascii_case(b"FlushQueue") {
+                *value = b"yes".to_vec();
+                corrected = true;
+            }
+        }
+        if corrected {
+            warnings.push(
+                b"Settings saved with 'FlushQueue=yes': 'DirectWrite=yes' needs queue flushing for crash recovery.".to_vec(),
+            );
+        }
+    }
+
+    if rpc_save_config_check_global_conflicts(
+        None,
+        None,
+        None,
+        None,
+        unpack_pause.as_deref(),
+        direct_unpack.as_deref(),
+    ) == 4
+    {
+        warnings.push(
+            b"Settings saved: with 'DirectUnpack=yes' and 'UnpackPauseQueue=no' unpacks run one at a time to limit disk load.".to_vec(),
+        );
+    }
+
+    warnings
+}
+
 fn parse_server_dot_index(after_server: &[u8]) -> Option<i32> {
     let mut i = 0;
     while i < after_server.len()
@@ -3674,67 +3772,7 @@ fn xmlrpc_execute_save_config_cursor(
         );
     }
 
-    let names_refs: Vec<&[u8]> = opt_entries.iter().map(|(n, _)| n.as_slice()).collect();
-    let values_refs: Vec<&[u8]> = opt_entries.iter().map(|(_, v)| v.as_slice()).collect();
-    let cipher_conflict_server = rpc_save_config_find_cipher_conflict(&names_refs, &values_refs);
-    if cipher_conflict_server > 0 {
-        let msg = format!(
-            "Configuration conflict: Server{cipher_conflict_server}.Cipher cannot be configured when Server{cipher_conflict_server}.Encryption is disabled. Clear the cipher suite or enable encryption."
-        );
-        return (
-            cur_off,
-            true,
-            format_error_bytes(is_json, 3, msg.as_bytes()),
-        );
-    }
-
-    let opt_val = |target: &[u8]| -> Option<&[u8]> {
-        opt_entries
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(target))
-            .map(|(_, v)| v.as_slice())
-    };
-    let conflict_rule = rpc_save_config_check_global_conflicts(
-        opt_val(b"DupeSearch"),
-        opt_val(b"HealthCheck"),
-        opt_val(b"FlushQueue"),
-        opt_val(b"DirectWrite"),
-        opt_val(b"UnpackPauseQueue"),
-        opt_val(b"DirectUnpack"),
-    );
-    if conflict_rule == 2 {
-        return (
-            cur_off,
-            true,
-            format_error_bytes(
-                is_json,
-                3,
-                b"Configuration conflict: 'DupeSearch=yes' is incompatible with 'HealthCheck=park'. DupeSearch requires 'HealthCheck=dupe' to fetch alternative donor releases when an NZB fails.",
-            ),
-        );
-    }
-    if conflict_rule == 3 {
-        return (
-            cur_off,
-            true,
-            format_error_bytes(
-                is_json,
-                3,
-                b"Configuration conflict: 'DirectWrite=yes' requires 'FlushQueue=yes'. Disabling queue flushing during direct disk writes causes disk state desynchronization and corruption upon unexpected shutdown.",
-            ),
-        );
-    }
-    if conflict_rule == 4 {
-        return (
-            cur_off,
-            true,
-            format_error_bytes(
-                is_json,
-                3,
-                b"Configuration conflict: 'DirectUnpack=yes' requires 'UnpackPauseQueue=yes'. Disabling queue pause during direct unpack causes concurrent unpack disk thrashing.",
-            ),
-        );
-    }
+    let save_warnings = rpc_save_config_soften_conflicts(&mut opt_entries);
 
     let (ok, conflict) = match config_filename {
         Some(fname) if !fname.is_empty() => {
@@ -3758,6 +3796,11 @@ fn xmlrpc_execute_save_config_cursor(
         );
     }
 
+    if ok {
+        for warning in &save_warnings {
+            crate::log::log_active_bytes(2, warning);
+        }
+    }
     (cur_off, false, format_bool_bytes(is_json, ok))
 }
 
@@ -7022,6 +7065,121 @@ mod remote_xmlrpc_tests {
         );
     }
 
+    fn soften(entries: &[(&str, &str)]) -> (Vec<(Vec<u8>, Vec<u8>)>, Vec<String>) {
+        let mut opts: Vec<(Vec<u8>, Vec<u8>)> = entries
+            .iter()
+            .map(|(n, v)| (n.as_bytes().to_vec(), v.as_bytes().to_vec()))
+            .collect();
+        let warnings = rpc_save_config_soften_conflicts(&mut opts)
+            .into_iter()
+            .map(|w| String::from_utf8(w).unwrap())
+            .collect();
+        (opts, warnings)
+    }
+
+    fn value_of<'a>(opts: &'a [(Vec<u8>, Vec<u8>)], name: &str) -> &'a [u8] {
+        &opts.iter().find(|(n, _)| n == name.as_bytes()).unwrap().1
+    }
+
+    #[test]
+    fn save_config_soften_cipher_without_encryption_kept_with_warning() {
+        let (opts, warnings) = soften(&[
+            ("Server1.Host", "news"),
+            ("Server1.Encryption", "no"),
+            ("Server1.Cipher", "TLS_AES_128_GCM_SHA256"),
+        ]);
+        assert_eq!(value_of(&opts, "Server1.Cipher"), b"TLS_AES_128_GCM_SHA256");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Server1.Cipher is kept but ignored"));
+    }
+
+    #[test]
+    fn save_config_soften_dupesearch_with_park_kept_with_warning() {
+        let (opts, warnings) = soften(&[("DupeSearch", "yes"), ("HealthCheck", "park")]);
+        assert_eq!(value_of(&opts, "DupeSearch"), b"yes");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("HealthCheck=park"));
+    }
+
+    #[test]
+    fn save_config_soften_directwrite_corrects_flushqueue() {
+        let (opts, warnings) = soften(&[("DirectWrite", "yes"), ("FlushQueue", "no")]);
+        assert_eq!(value_of(&opts, "FlushQueue"), b"yes");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("FlushQueue=yes"));
+    }
+
+    #[test]
+    fn save_config_soften_directunpack_without_pause_kept_with_warning() {
+        let (opts, warnings) = soften(&[("DirectUnpack", "yes"), ("UnpackPauseQueue", "no")]);
+        assert_eq!(value_of(&opts, "UnpackPauseQueue"), b"no");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("one at a time"));
+    }
+
+    #[test]
+    fn save_config_soften_consistent_settings_no_warnings() {
+        let (_, warnings) = soften(&[
+            ("Server1.Encryption", "yes"),
+            ("Server1.Cipher", "TLS_AES_128_GCM_SHA256"),
+            ("DupeSearch", "yes"),
+            ("HealthCheck", "dupe"),
+            ("DirectWrite", "yes"),
+            ("FlushQueue", "yes"),
+            ("DirectUnpack", "yes"),
+            ("UnpackPauseQueue", "yes"),
+        ]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn save_config_with_all_soft_conflicts_succeeds_and_writes_corrected_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "rg-saveconfig-soften-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rustyget.conf");
+        std::fs::write(
+            &path,
+            "Server1.Host=news\nServer1.Encryption=no\nServer1.Cipher=\nDupeSearch=no\nHealthCheck=park\nDirectWrite=yes\nFlushQueue=yes\nDirectUnpack=yes\nUnpackPauseQueue=yes\n",
+        )
+        .unwrap();
+        let request = r#"{"method":"saveconfig","params":[[
+            {"Name":"Server1.Host","Value":"news"},
+            {"Name":"Server1.Encryption","Value":"no"},
+            {"Name":"Server1.Cipher","Value":"TLS_AES_128_GCM_SHA256"},
+            {"Name":"DupeSearch","Value":"yes"},
+            {"Name":"HealthCheck","Value":"park"},
+            {"Name":"DirectWrite","Value":"yes"},
+            {"Name":"FlushQueue","Value":"no"},
+            {"Name":"DirectUnpack","Value":"yes"},
+            {"Name":"UnpackPauseQueue","Value":"no"}
+        ]],"id":1}"#;
+        let mut cmd = RustXmlCommand::new(request.as_bytes(), RP_JSON_RPC, HM_POST);
+        cmd.prepare_params();
+        let path_bytes = path.to_str().unwrap().as_bytes().to_vec();
+        let pos = cmd.pos;
+        let (_off, fault, reply) =
+            xmlrpc_execute_save_config(&mut cmd.buf[pos..], false, true, Some(&path_bytes));
+        let reply = String::from_utf8_lossy(&reply).to_string();
+        assert!(!fault, "save refused: {reply}");
+        assert!(reply.contains("true"), "unexpected reply: {reply}");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("FlushQueue=yes"), "{saved}");
+        assert!(saved.contains("UnpackPauseQueue=no"), "{saved}");
+        assert!(saved.contains("DupeSearch=yes"), "{saved}");
+        assert!(
+            saved.contains("Server1.Cipher=TLS_AES_128_GCM_SHA256"),
+            "{saved}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_next_param_as_types_port_from_cpp() {
         {
@@ -7299,66 +7457,23 @@ mod remote_xmlrpc_tests {
     }
 
     #[test]
-    fn save_config_rejects_conflicting_settings_and_boot_reconciliation_port_from_cpp() {
-        // Rule 7.1
-        {
-            let reply = rpc_reply(
-                "/jsonrpc",
-                HM_POST,
-                r#"{"method":"saveconfig","params":[[{"Name":"Server1.Encryption","Value":"no"},{"Name":"Server1.Cipher","Value":"AES128"}]],"id":1}"#,
-                true,
+    fn save_config_accepts_soft_conflicts_and_boot_reconciliation_port_from_cpp() {
+        // The cross-option rules (7.1-7.4) no longer refuse a save; see
+        // `rpc_save_config_soften_conflicts`. None of these may answer with a
+        // configuration conflict.
+        for body in [
+            r#"{"method":"saveconfig","params":[[{"Name":"Server1.Encryption","Value":"no"},{"Name":"Server1.Cipher","Value":"AES128"}]],"id":1}"#,
+            r#"{"method":"saveconfig","params":[[{"Name":"DupeSearch","Value":"yes"},{"Name":"HealthCheck","Value":"park"}]],"id":1}"#,
+            r#"{"method":"saveconfig","params":[[{"Name":"DirectWrite","Value":"yes"},{"Name":"FlushQueue","Value":"no"}]],"id":1}"#,
+            r#"{"method":"saveconfig","params":[[{"Name":"DirectUnpack","Value":"yes"},{"Name":"UnpackPauseQueue","Value":"no"}]],"id":1}"#,
+            r#"{"method":"saveconfig","params":[[{"Name":"FlushQueue","Value":"no"}]],"id":1}"#,
+        ] {
+            let reply = rpc_reply("/jsonrpc", HM_POST, body, true);
+            assert!(!has_error_code(&reply, 3), "{body} -> {reply}");
+            assert!(
+                !reply.contains("Configuration conflict"),
+                "{body} -> {reply}"
             );
-            assert!(has_error_code(&reply, 3));
-            assert!(reply.contains(
-                "Server1.Cipher cannot be configured when Server1.Encryption is disabled"
-            ));
-        }
-        // Rule 7.2
-        {
-            let reply = rpc_reply(
-                "/jsonrpc",
-                HM_POST,
-                r#"{"method":"saveconfig","params":[[{"Name":"DupeSearch","Value":"yes"},{"Name":"HealthCheck","Value":"park"}]],"id":1}"#,
-                true,
-            );
-            assert!(has_error_code(&reply, 3));
-            assert!(reply.contains("DupeSearch=yes"));
-            assert!(reply.contains("HealthCheck=park"));
-        }
-        // Rule 7.3
-        {
-            let reply = rpc_reply(
-                "/jsonrpc",
-                HM_POST,
-                r#"{"method":"saveconfig","params":[[{"Name":"DirectWrite","Value":"yes"},{"Name":"FlushQueue","Value":"no"}]],"id":1}"#,
-                true,
-            );
-            assert!(has_error_code(&reply, 3));
-            assert!(reply.contains("DirectWrite=yes"));
-            assert!(reply.contains("FlushQueue=yes"));
-        }
-        // Rule 7.4
-        {
-            let reply = rpc_reply(
-                "/jsonrpc",
-                HM_POST,
-                r#"{"method":"saveconfig","params":[[{"Name":"DirectUnpack","Value":"yes"},{"Name":"UnpackPauseQueue","Value":"no"}]],"id":1}"#,
-                true,
-            );
-            assert!(has_error_code(&reply, 3));
-            assert!(reply.contains("DirectUnpack=yes"));
-            assert!(reply.contains("UnpackPauseQueue=yes"));
-        }
-        // Omitted DirectWrite defaults to yes
-        {
-            let reply = rpc_reply(
-                "/jsonrpc",
-                HM_POST,
-                r#"{"method":"saveconfig","params":[[{"Name":"FlushQueue","Value":"no"}]],"id":1}"#,
-                true,
-            );
-            assert!(has_error_code(&reply, 3));
-            assert!(reply.contains("DirectWrite=yes"));
         }
 
         // BootTimeConfigReconciliationTest

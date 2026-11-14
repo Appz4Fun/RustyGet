@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build the side-by-side `rustyget` .deb on a Debian/Ubuntu host of the target arch.
-# Needs: build-essential pkg-config libssl-dev python3 just dpkg-dev fakeroot, rustup.
+# Needs: build-essential pkg-config libssl-dev python3 just dpkg-dev, rustup.
 # Usage: linux/pkg/deb-rustyget/build-deb.sh [jobs]   -> build/deb/rustyget_<ver>_<arch>.deb
 set -eu
 
@@ -58,5 +58,5 @@ install -m 0755 "$PKG/DEBIAN/postinst" "$PKG/DEBIAN/prerm" "$PKG/DEBIAN/postrm" 
 
 chmod -R u+rwX,go+rX,go-w "$STAGE/usr" "$STAGE/lib"
 OUT="$ROOT/build/deb/rustyget_${VERSION}_${ARCH}.deb"
-fakeroot dpkg-deb -Zxz --build "$STAGE" "$OUT"
+dpkg-deb --root-owner-group -Zxz --build "$STAGE" "$OUT"
 echo "$OUT"

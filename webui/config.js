@@ -1482,7 +1482,6 @@ var Config = (new function($)
 		{ key: 'config_group_start', label: 'Start here', ids: ['NEWS-SERVERS', 'PATHS', 'CATEGORIES'] },
 		{ key: 'config_group_downloading', label: 'Downloading', ids: ['DOWNLOAD_QUEUE', 'CONNECTION', 'CHECK_AND_REPAIR', 'UNPACK'] },
 		{ key: 'config_group_automation', label: 'Automation', ids: ['RSS_FEEDS', 'INCOMING_NZBS', 'SCHEDULER'] },
-		{ key: 'config_group_extensions', label: 'Extensions', ids: [] },
 		{ key: 'config_group_system', label: 'System', ids: ['SECURITY', 'WEB-INTERFACE', 'LOGGING', 'Config-System', 'Config-SystemInfo', 'Config-Info', 'Config-Licenses'] }
 	];
 
@@ -1505,9 +1504,10 @@ var Config = (new function($)
 		NAV_GROUPS.forEach(function(group)
 		{
 			var members = group.ids.map(function(id) { return items[id]; }).filter(Boolean);
-			if (group.key === 'config_group_extensions')
+			if (group.key === 'config_group_system')
 			{
-				members = extensions;
+				// anything not listed above (nothing today) stays reachable at the end
+				members = extensions.concat(members);
 			}
 			if (members.length === 0)
 			{

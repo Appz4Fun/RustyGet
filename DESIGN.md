@@ -172,7 +172,7 @@ When a token is added to `docs/design-system/tokens.json`, add its mapping to `w
 
 Settings is a list of readable rows, not a grid of config keys (`webui/settings.css`, with the logic in `webui/config.js`).
 
-- **Sidebar.** Sections are grouped by task under mono uppercase labels: Start here (News servers, Paths, Categories), Downloading (Download queue, Connection, Check and repair, Unpack), Automation (RSS feeds, Incoming NZBs, Scheduler), Extensions (each installed extension), and System (Security, Web interface, Logging, System, Status, Info, Licenses). Names are sentence case.
+- **Sidebar.** Sections are grouped by task under mono uppercase labels: Start here (News servers, Paths, Categories), Downloading (Download queue, Connection, Check and repair, Unpack), Automation (RSS feeds, Incoming NZBs, Scheduler), and System (Security, Web interface, Logging, System, Status, Info, Licenses). Names are sentence case.
 - **Page head.** A module path (`rustyget::settings::download_queue`) over a sentence-case title.
 - **Rows.** One card per section, rows divided by `--line`. Left: a readable label (`Article cache`), then the option's own name in 12px mono `--muted` (`ArticleCache`) so it still matches `nzbget.conf`, then the first line of its description. Right: the control. The `?` opens the full help under the row. Search matches the label and the option name.
 - **Labels.** `humanizeOptionName()` splits the option name and applies `LABEL_WORDS` (NZB, TLS, folder for Dir, command for Cmd); `LABEL_OVERRIDES` holds whole names that need real wording. Extension options keep their own display names.

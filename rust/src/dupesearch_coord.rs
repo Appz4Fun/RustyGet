@@ -3659,6 +3659,12 @@ impl NzbgetRsDupeSearch {
                 || snap.delete_status != crate::queuesubsys_host::DS_NONE
                 || snap.has_post_info
                 || snap.dupe_score <= score
+                || crate::dupewatch::swap_nearly_done(
+                    snap.size,
+                    snap.remaining_size,
+                    snap.health,
+                    snap.critical_health_opt,
+                )
             {
                 return false;
             }
@@ -3676,7 +3682,7 @@ impl NzbgetRsDupeSearch {
             );
         } else {
             msg.extend_from_slice(
-                b": dead pick not demoted, it left the queue or is post-processing",
+                b": dead pick not demoted, it left the queue, is post-processing or is mostly downloaded",
             );
         }
         self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
@@ -3761,6 +3767,15 @@ impl NzbgetRsDupeSearch {
         // FORCE, with their nzb-file and health intact.
         let hc_dupe = read_host_opts(host_ctx, host_cb).health_check_mode == 4;
         let eligible = |dq_ptr: usize, id: i32| -> bool {
+            // still a backup of this key and release
+            let same_group = dq_find_nzb(host_ctx, host_cb, dq_ptr, id).is_some_and(|(p, _)| {
+                let b = inspect_nzb(host_ctx, host_cb, p, false);
+                lower_key(&effective_key(&b.dupe_key, &b.name)) == lower_key(&job.dupe_key)
+                    && crate::releasename::same_release(&job.name, &b.name)
+            });
+            if !same_group {
+                return false;
+            }
             let pick_snap = dq_find_nzb(host_ctx, host_cb, dq_ptr, job.nzb_id)
                 .map(|(p, _)| inspect_nzb(host_ctx, host_cb, p, false));
             check_placement_available(

@@ -8,7 +8,7 @@ Pictures use an isolated demonstration service and example values. Credentials a
 
 ## RSS feeds
 
-1. Click **Add Feed** or **Edit** beside an existing feed.
+1. Click **Add another feed**, or **Edit** beside an existing feed.
 2. Give it a name and enter the RSS URL from your indexer.
 3. Set the filter, category, priority, and whether new NZBs start paused.
 4. Use **Preview feed** to inspect the filter's result before relying on it.
@@ -21,12 +21,12 @@ RSS URLs can contain account credentials or API keys. The compact summary shows 
 Key options: [`FeedN.URL`](options.md#feedn-url), [`FeedN.Filter`](options.md#feedn-filter), [`FeedN.Interval`](options.md#feedn-interval), [`FeedN.Backlog`](options.md#feedn-backlog), [`FeedN.PauseNzb`](options.md#feedn-pausenzb), [`FeedN.CategorySource`](options.md#feedn-categorysource).
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/rss-feeds.jpg" aria-label="Open full-size picture: Compact RSS feed list with category, interval, and Edit"><img src="assets/settings/rss-feeds.jpg" width="1280" height="938" loading="lazy" alt="Compact RSS feed list with category, interval, and Edit"></a>
+<a class="settings-shot" href="assets/settings/rss-feeds.jpg" aria-label="Open full-size picture: Compact RSS feed list with category, interval, and Edit"><img src="assets/settings/rss-feeds.jpg" width="1280" height="908" loading="lazy" alt="Compact RSS feed list with category, interval, and Edit"></a>
 <figcaption>Feed URLs stay inside the editor. Open the picture to inspect the full section.</figcaption>
 </figure>
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/feed-edit.jpg" aria-label="Open full-size picture: RSS feed editor with a placeholder URL and filter controls"><img src="assets/settings/feed-edit.jpg" width="1280" height="938" loading="lazy" alt="RSS feed editor with a placeholder URL and filter controls"></a>
+<a class="settings-shot" href="assets/settings/feed-edit.jpg" aria-label="Open full-size picture: RSS feed editor with a placeholder URL and filter controls"><img src="assets/settings/feed-edit.jpg" width="1280" height="1044" loading="lazy" alt="RSS feed editor with a placeholder URL and filter controls"></a>
 <figcaption>The example URL does not connect to an indexer. Open the picture to inspect the full section.</figcaption>
 </figure>
 
@@ -43,16 +43,16 @@ Create one task per timed action. Each row summarizes its time, weekdays, and co
 
 The example pauses downloads at 08:00 and resumes at 20:00 on weekdays. It is demonstration data, not an active schedule. Review `TimeCorrection` when the daemon's clock differs from the intended schedule.
 
-Commands that select servers or feeds can use names or numbered entries. Recheck numbered references after you move or delete entries. `Process` runs an external program; `Script` runs scheduler extensions. Command parameters remain inside the editor.
+Commands that select servers or feeds can use names or numbered entries. Recheck numbered references after you move or delete entries. `Process` runs an external program. Command parameters remain inside the editor.
 
 Key options: [`TaskN.Time`](options.md#taskn-time), [`TaskN.WeekDays`](options.md#taskn-weekdays), [`TaskN.Command`](options.md#taskn-command), [`TaskN.Param`](options.md#taskn-param), [`TimeCorrection`](options.md#timecorrection).
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/scheduler.jpg" aria-label="Open full-size picture: Scheduler list with weekday pause and resume examples"><img src="assets/settings/scheduler.jpg" width="1280" height="938" loading="lazy" alt="Scheduler list with weekday pause and resume examples"></a>
+<a class="settings-shot" href="assets/settings/scheduler.jpg" aria-label="Open full-size picture: Scheduler list with weekday pause and resume examples"><img src="assets/settings/scheduler.jpg" width="1280" height="908" loading="lazy" alt="Scheduler list with weekday pause and resume examples"></a>
 <figcaption>Each timed action has its own Edit control. Open the picture to inspect the full section.</figcaption>
 </figure>
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/task-edit.jpg" aria-label="Open full-size picture: Expanded scheduler editor with time, weekdays, command, and parameter"><img src="assets/settings/task-edit.jpg" width="1280" height="938" loading="lazy" alt="Expanded scheduler editor with time, weekdays, command, and parameter"></a>
+<a class="settings-shot" href="assets/settings/task-edit.jpg" aria-label="Open full-size picture: Expanded scheduler editor with time, weekdays, command, and parameter"><img src="assets/settings/task-edit.jpg" width="1280" height="908" loading="lazy" alt="Expanded scheduler editor with time, weekdays, command, and parameter"></a>
 <figcaption>Read the command help before supplying a parameter. Open the picture to inspect the full section.</figcaption>
 </figure>

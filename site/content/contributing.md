@@ -9,7 +9,7 @@ lede = "RustyGet is rewriting a mature program while people use it every day. Th
 
 Open an issue in the [repository](https://github.com/Appz4Fun/RustyGet/issues). Include:
 
-- The commit you built, from `nzbget -v` or the footer of the web interface.
+- The commit you built, from `rustyget -v` or the footer of the web interface.
 - The settings involved, especially `DupeArticleFallback`, `HealthCheck`, and `DupeSearch`.
 - The download's log from the **History** tab. Remove server names, user names, and NZB names that you don't want to share.
 
@@ -27,18 +27,15 @@ Pull requests are squash-merged into a single signed commit.
 
 ## Port code to Rust
 
-The port follows the rules in [Rust port status](rust-port.md#rules):
+Little C++ is left: the entry point in `daemon/main/rustyget.cpp` and the glue header `daemon/util/Util.h`. [Rust port status](rust-port.md#whats-left) lists what remains. The rules for moving it:
 
-- A port matches the C++ output byte for byte, quirks included. If the C++ has a bug, the port keeps it, and the fix lands as its own commit.
-- Before the switch, a differential test runs the old C++ and the new Rust side by side on the same inputs, including random ones.
-- The C++ version stays behind `NZBGET_USE_RUST` as a fallback for builds without Rust, until those builds go away.
+- A port keeps the behavior of the code it replaces, quirks included. If that code has a bug, the port keeps it, and the fix lands as its own commit.
+- Never move logic back into C++.
 - Measure before and after. Ports of hot paths report their speed-up.
-
-Prefer porting a whole module over a single small function.
 
 ## Tests
 
-The inherited build and test workflows are turned off in the repository's Actions tab while the test suite is rebuilt for the rewrite. Until then, run the tests locally:
+A required `build` check compiles and tests every pull request on Linux and macOS. Run the build and the tests locally before you push, too:
 
 ```bash
 just test

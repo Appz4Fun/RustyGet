@@ -46,10 +46,10 @@ See [Rust port status](rust-port.md) for progress.
 
 ## What this means for you
 
-- **Today,** RustyGet reads NZBGet's configuration, queue, and history, answers NZBGet's API, and runs NZBGet extensions. Media managers and the Kodi add-on connect to it as NZBGet.
+- **Today,** RustyGet reads NZBGet's configuration, queue, and history, and answers NZBGet's API. Media managers and the Kodi add-on connect to it as NZBGet.
 - **Over time,** the API may change where NZBGet's behavior is unsafe or in the way. RustyGet may also add a SABnzbd-compatible API, so clients that only speak SABnzbd can use it. [API and compatibility](api.md) tracks both.
 - **Packages** return once the build workflows are rebuilt for the rewrite. Until then, [build from source](install.md).
 
 ## The name
 
-RustyGet keeps the "Get" of its roots and adds the language it's moving to. During the move, the binary and the configuration file keep NZBGet's names, `nzbget` and `nzbget.conf`, so existing setups and clients keep working.
+RustyGet keeps the "Get" of its roots and adds the language it's moving to. The binary is `rustyget`, and it looks for `rustyget.conf` first and then for `nzbget.conf` in the usual places, so an existing NZBGet setup keeps working. The configuration template in the repository still has its old name, `nzbget.conf`, and installs as `rustyget.conf`.

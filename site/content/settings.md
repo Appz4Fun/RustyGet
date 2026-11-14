@@ -6,6 +6,7 @@ eyebrow = "Settings guide"
 
 Pictures use an isolated demonstration service and example values. Credentials are blank, folders use variables, and extension defaults are sanitized. These pictures illustrate the controls. Choose values for your installation; the pictured status comes from the demonstration service. Your build and installed extensions can differ.
 
+
 ## Find the section you need
 
 | Settings section | Guide | What to configure |
@@ -14,7 +15,6 @@ Pictures use an isolated demonstration service and example values. Credentials a
 | Incoming NZBs, Download queue, Connection, Logging | [Downloads and diagnostics](settings-downloads.md) | Intake, duplicate recovery, queue storage, retries, and logs |
 | RSS Feeds, Scheduler | [Feeds and schedules](settings-automation.md) | Feed rules and timed tasks |
 | Check and repair, Unpack | [Repair and unpacking](settings-processing.md) | Article checks, par2, and archive extraction |
-| Extension scripts, Extension manager, optional extension pages | [Extensions](settings-extensions.md) | Script hooks, ordering, installation, and extension settings |
 | Info, Status, System, Licenses | [Maintenance](settings-maintenance.md) | Help, service health, backups, reloads, and attribution |
 
 The [configuration reference](options.md) describes every core option, its default, and its accepted values. Numbered entries appear there as `ServerN`, `CategoryN`, `FeedN`, and `TaskN`.
@@ -23,12 +23,12 @@ The [configuration reference](options.md) describes every core option, its defau
 
 News servers, categories, feeds, and scheduler tasks start as compact lists. Click **Edit** beside an entry to show its fields and action buttons. Click **Close** to return to its summary. Closing an editor keeps unsaved changes; it does not save them.
 
-**Add** opens a new entry. **Up**, **Down**, and **Delete** appear inside its editor. Reordering changes entry numbers. Review scheduler commands that refer to server or feed numbers after you reorder those lists.
+**Add another server**, **Add another category**, and the other **Add another** buttons below each list open a new entry. **Up**, **Down**, and **Delete** appear inside its editor. Reordering changes entry numbers. Review scheduler commands that refer to server or feed numbers after you reorder those lists.
 
 Health-notice counts remain visible on closed rows. Open the affected entry to read the notices.
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/categories.jpg" aria-label="Open full-size picture: Compact category list with an Edit button for each entry"><img src="assets/settings/categories.jpg" width="1280" height="938" loading="lazy" alt="Compact category list with an Edit button for each entry"></a>
+<a class="settings-shot" href="assets/settings/categories.jpg" aria-label="Open full-size picture: Compact category list with an Edit button for each entry"><img src="assets/settings/categories.jpg" width="1280" height="908" loading="lazy" alt="Compact category list with an Edit button for each entry"></a>
 <figcaption>Category summaries keep the individual fields out of the list until you open an editor. Open the picture to inspect the full section.</figcaption>
 </figure>
 
@@ -39,22 +39,21 @@ Use **Search in settings** to find an option name or description. Select an opti
 Option help starts collapsed. The question-mark button beside a row opens that option's help. The **View** menu can show help for all rows. With a keyboard, use Tab to reach a button and Enter or Space to activate it.
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/option-help.jpg" aria-label="Open full-size picture: option help"><img src="assets/settings/option-help.jpg" width="1280" height="1100" loading="lazy" alt="Expanded help for one browser preference"></a>
+<a class="settings-shot" href="assets/settings/option-help.jpg" aria-label="Open full-size picture: option help"><img src="assets/settings/option-help.jpg" width="1280" height="908" loading="lazy" alt="Expanded help for one browser preference"></a>
 <figcaption>Help opens beside the option you are editing. Open the picture to inspect the full section.</figcaption>
 </figure>
 
 ## Save and reload
 
-1. Finish your edits across the sections you need.
-2. Click **Save all changes** once.
-3. Read the confirmation. Reload the service if it prompts you to apply server configuration.
-4. Check **Status** and the **Messages** tab after the reload.
+1. Finish your edits across the sections you need. A bar at the bottom of the window counts the unsaved changes and names what changed.
+2. Click **Save and reload** in that bar once, or **Discard** to drop the changes.
+3. Check **Status** and the **Messages** tab after the reload.
 
-Web-interface preferences belong to this browser. Server and extension settings belong to the daemon's configuration. See [Maintenance](settings-maintenance.md#system) before backing up or restoring that file.
+Web-interface preferences belong to this browser. Server settings belong to the daemon's configuration. See [Maintenance](settings-maintenance.md#system) before backing up or restoring that file.
 
 ## Use the available desktop width
 
-On desktop, the section menu stays at the left edge while the open section fills the remaining width. Wider windows give lists, editors, and Status panels more room. Statistics also uses the available width.
+On desktop, the section menu stays at the left edge, grouped into **Start here**, **Downloading**, **Automation**, and **System**, while the open section fills the remaining width. Wider windows give lists, editors, and Status panels more room. Statistics also uses the available width.
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/desktop-wide.jpg" aria-label="Open full-size picture: Wide desktop Settings with a left section menu and compact categories"><img src="assets/settings/desktop-wide.jpg" width="1920" height="1080" loading="lazy" alt="Wide desktop Settings with a left section menu and compact categories"></a>

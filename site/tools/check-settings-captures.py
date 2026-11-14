@@ -4,7 +4,7 @@ import hashlib,json,re,struct,sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 ASSETS=ROOT/'site/assets/settings'
-EXPECTED={'info','status','system','web-interface','paths','servers','security','categories','rss-feeds','incoming-nzbs','download-queue','connection','logging','scheduler','check-repair','unpack','extension-scripts','extension-manager','dupe-donors','extended-unpacker','extended-unrar','permission-fix','licenses'}
+EXPECTED={'info','status','system','web-interface','paths','servers','security','categories','rss-feeds','incoming-nzbs','download-queue','connection','logging','scheduler','check-repair','unpack','licenses'}
 def jpeg_size(data):
  assert data.startswith(b'\xff\xd8') and data.endswith(b'\xff\xd9'),'Incomplete JPEG'
  pos=2

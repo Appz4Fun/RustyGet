@@ -12,12 +12,12 @@ Set the scan interval and file age for the watched NZB folder. `AppendCategoryDi
 
 Duplicate handling belongs here too. `DupeCheck` groups backups by duplicate key. `DupeArticleFallback` enables article or live byte recovery from other copies. `DupeSearch` asks your configured indexer for more copies; start with `DupeSearchDryRun` while checking its behavior.
 
-Keep the indexer URL and API key private. Follow [Duplicate fleets](duplicate-fleets.md) and [Indexer search](dupesearch.md) for the complete setup.
+Keep the indexer URL and API key private. Follow [Duplicate fleets](duplicate-fleets.md) and [Donor search](dupesearch.md) for the complete setup.
 
 Key options: [`NzbDirInterval`](options.md#nzbdirinterval), [`NzbDirFileAge`](options.md#nzbdirfileage), [`DupeCheck`](options.md#dupecheck), [`DupeArticleFallback`](options.md#dupearticlefallback), [`DupeSearch`](options.md#dupesearch), [`DupeSearchDryRun`](options.md#dupesearchdryrun).
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/incoming-nzbs.jpg" aria-label="Open full-size picture: Incoming NZB and duplicate-recovery controls with blank indexer credentials"><img src="assets/settings/incoming-nzbs.jpg" width="1280" height="1191" loading="lazy" alt="Incoming NZB and duplicate-recovery controls with blank indexer credentials"></a>
+<a class="settings-shot" href="assets/settings/incoming-nzbs.jpg" aria-label="Open full-size picture: Incoming NZB and duplicate-recovery controls with blank indexer credentials"><img src="assets/settings/incoming-nzbs.jpg" width="1280" height="1690" loading="lazy" alt="Incoming NZB and duplicate-recovery controls with blank indexer credentials"></a>
 <figcaption>Use option help for the recovery and health-check controls. Open the picture to inspect the full section.</figcaption>
 </figure>
 
@@ -32,7 +32,7 @@ Use [Performance](performance.md) for measured tuning guidance. Keep `SkipWrite`
 Key options: [`ContinuePartial`](options.md#continuepartial), [`ArticleCache`](options.md#articlecache), [`WriteBuffer`](options.md#writebuffer), [`DiskSpace`](options.md#diskspace), [`KeepHistory`](options.md#keephistory), [`NzbCleanupDisk`](options.md#nzbcleanupdisk).
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/download-queue.jpg" aria-label="Open full-size picture: Download queue persistence, memory, disk, and cleanup settings"><img src="assets/settings/download-queue.jpg" width="1280" height="1059" loading="lazy" alt="Download queue persistence, memory, disk, and cleanup settings"></a>
+<a class="settings-shot" href="assets/settings/download-queue.jpg" aria-label="Open full-size picture: Download queue persistence, memory, disk, and cleanup settings"><img src="assets/settings/download-queue.jpg" width="1280" height="1410" loading="lazy" alt="Download queue persistence, memory, disk, and cleanup settings"></a>
 <figcaption>Cache and cleanup values depend on the workload and available storage. Open the picture to inspect the full section.</figcaption>
 </figure>
 
@@ -45,7 +45,7 @@ Monthly and daily quotas count download volume. Review quota units and the billi
 Key options: [`ArticleRetries`](options.md#articleretries), [`ArticleTimeout`](options.md#articletimeout), [`UrlRetries`](options.md#urlretries), [`UrlTimeout`](options.md#urltimeout), [`DownloadRate`](options.md#downloadrate), [`MonthlyQuota`](options.md#monthlyquota), [`DailyQuota`](options.md#dailyquota).
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/connection.jpg" aria-label="Open full-size picture: Article and URL connection controls, rate limit, and quotas"><img src="assets/settings/connection.jpg" width="1280" height="938" loading="lazy" alt="Article and URL connection controls, rate limit, and quotas"></a>
+<a class="settings-shot" href="assets/settings/connection.jpg" aria-label="Open full-size picture: Article and URL connection controls, rate limit, and quotas"><img src="assets/settings/connection.jpg" width="1280" height="1107" loading="lazy" alt="Article and URL connection controls, rate limit, and quotas"></a>
 <figcaption>Article and URL downloads have separate controls. Open the picture to inspect the full section.</figcaption>
 </figure>
 
@@ -58,6 +58,6 @@ Use debug output when investigating a specific issue, then return to the level y
 Key options: [`SystemHealthCheck`](options.md#systemhealthcheck), [`WriteLog`](options.md#writelog), [`RotateLog`](options.md#rotatelog), [`LogBuffer`](options.md#logbuffer), [`NzbLog`](options.md#nzblog), [`TimeCorrection`](options.md#timecorrection).
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/logging.jpg" aria-label="Open full-size picture: System health, log targets, rotation, and message-buffer settings"><img src="assets/settings/logging.jpg" width="1280" height="938" loading="lazy" alt="System health, log targets, rotation, and message-buffer settings"></a>
+<a class="settings-shot" href="assets/settings/logging.jpg" aria-label="Open full-size picture: System health, log targets, rotation, and message-buffer settings"><img src="assets/settings/logging.jpg" width="1280" height="1040" loading="lazy" alt="System health, log targets, rotation, and message-buffer settings"></a>
 <figcaption>Health checks and logging serve different diagnostic purposes. Open the picture to inspect the full section.</figcaption>
 </figure>

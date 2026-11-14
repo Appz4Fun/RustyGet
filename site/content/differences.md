@@ -19,11 +19,12 @@ lede = "RustyGet started from NZBGet 27.0 and the work of pull request 850. This
 | Finding more copies | Only what feeds and clients send | `DupeSearch` queries NZBHydra2, checks each copy on your servers, and queues the live ones |
 | Clients sending many copies | One `append` per copy | One `appendfleet` call; RustyGet checks every copy and picks the best |
 | Health of a backup | Unknown until it downloads | Measured, shown with its score, and used to skip dead copies |
-| Configuration | 155 options | 17 more options and a new `HealthCheck` value, all off by default |
-| API | NZBGet API | NZBGet API plus `appendfleet` and new fields; unsafe methods need POST; may diverge later |
+| Configuration | 155 options | 17 more options and a new `HealthCheck` value, off unless the configuration file turns them on; the template that ships with RustyGet turns on live repair and early failover |
+| API | NZBGet API | NZBGet API plus `appendfleet`, the TLS cipher test, and new fields; unsafe methods need POST; may diverge later |
 | Queue files | NZBGet formats | NZBGet formats, with RustyGet's data in a trailer that NZBGet ignores |
 | Bug fixes | | About 100 fixes to inherited bugs, 96 of them reported upstream |
-| Build and test workflows | Builds for every platform on each push | Turned off while the tests are rebuilt; only the documentation deploys |
+| Unpacking | External `unrar` and `7z` programs | Built in: RAR, 7-Zip, ZIP, and tar archives extract in Rust, with no external programs |
+| Build and test workflows | Builds for every platform on each push | Builds and tests on Linux x86-64 and macOS for every pull request and push to `main` |
 
 ## Duplicate fleets
 
@@ -56,9 +57,32 @@ See [Duplicate fleets](duplicate-fleets.md) and [Donor search](dupesearch.md).
 
 ## Options
 
-Sixteen new options are in **INCOMING NZBS**, after `DupeCheck`, and default to NZBGet's behavior: `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, and `DupeFastDonors`. `HealthCheck` gains the value `dupe`. One new option is in **SECURITY**: `JsonP`, off by default, turns on answers to JSON-P requests, which NZBGet always answered. No existing default changed.
+Sixteen new options are in **INCOMING NZBS**, after `DupeCheck`. Left out of the configuration file, they keep NZBGet's behavior: `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, and `DupeFastDonors`. `HealthCheck` gains the value `dupe`. One new option is in **SECURITY**: `JsonP`, off by default, turns on answers to JSON-P requests, which NZBGet always answered.
 
-Option parsing also changed: a `ScriptDir` with several folders creates each folder correctly, and a scheduler task with an unknown command is reported and skipped instead of running as `PauseDownload`.
+### Defaults
+
+A RustyGet setting has two defaults: the value in the configuration template, `nzbget.conf` in the repository, which a new installation starts from, and the built-in value that applies when the file leaves the option out. [Configuration options](options.md) shows the template's values.
+
+The template differs from NZBGet's in these values:
+
+| Option | NZBGet | RustyGet template |
+|---|---|---|
+| `DupeArticleFallback` | | `live` |
+| `DupeStreamDecompress` | | `yes` |
+| `HealthCheck` | `park` | `dupe` |
+| `ArticleCache` | `0` | `500` |
+| `WriteBuffer` | `0` | `1024` |
+| `ParBuffer` | `16` | `500` |
+| `ContinuePartial` | `yes` | `no` |
+| `ControlUsername` | `nzbget` | `rustyget` |
+| `LockFile`, `LogFile` | `nzbget.lock`, `nzbget.log` | `rustyget.lock`, `rustyget.log` |
+| `Server1.Active`, `Server1.Connections` | `yes`, `8` | `no`, `20` |
+
+The built-in values changed too, for an option that the file leaves out: `ArticleCache=500`, `ParBuffer=250`, `WriteBuffer=1024`, `ContinuePartial=yes`, `DirectRename=yes`, `ReorderFiles=yes`, `Unpack=yes`, `DirectUnpack=yes`, `UnpackCleanupDisk=yes`, `NzbCleanupDisk=yes`, `ExtCleanupDisk=.par2, .sfv, _brokenlog.txt`, `InterDir=${MainDir}/inter`, and `ControlUsername=rustyget`. The built-in duplicate-fleet settings stay off, so a configuration file carried over from NZBGet doesn't turn them on.
+
+`UnrarCmd` and `SevenZipCmd` left the template because unpacking is built in. The extension options, `ScriptDir`, `Extensions`, `ScriptOrder`, `ScriptPauseQueue`, `ShellOverride`, `EventInterval`, and `CategoryN.Extensions`, left too: RustyGet builds in what NZBGet needed extensions for, such as nested unpacking, permission fixes, and donor search. See [Built in instead of extensions](post-processing.md#built-in-instead-of-extensions).
+
+Option parsing also changed: a scheduler task with an unknown command is reported and skipped instead of running as `PauseDownload`.
 
 New startup warnings point out risky combinations, such as donor search without `DupeCheck` or with fewer than three article retries.
 
@@ -66,12 +90,13 @@ See [Configuration options](options.md) for every option.
 
 ## API
 
-- New method `appendfleet`, and new fields `DupeRecoveredArticles`, `DupeRecoveredBytesLo`, `DupeRecoveredBytesHi`, `DupeRecoveredHoles`, and `LiveRepairing`.
+- New method `appendfleet`, the TLS cipher test methods `tlscipherstart`, `tlscipherstatus`, and `tlsciphercancel`, and new fields `DupeRecoveredArticles`, `DupeRecoveredBytesLo`, `DupeRecoveredBytesHi`, `DupeRecoveredHoles`, and `LiveRepairing`.
 - New stage `STREAM_REPAIRING`.
 - New NZB parameters, including `DupeKind`, `DupeFiles`, `DupeAlive`, and `DupeFleet`.
 - Methods that change the system or reach out to the network need POST. Plain GET runs only the methods that read.
 - JSON-P is off unless option `JsonP` turns it on. Then it runs only the methods that read, with the restricted user's access, so user names, passwords, and API keys come back as `***`. In NZBGet, JSON-P ran every method with full access, and any web page could read the answers.
 - `system.multicall` respects the caller's access level.
+- Outgoing HTTP requests, such as NZB, RSS, and indexer fetches, identify as `nzbget/26.3` and add the header `UserAgentExtended: RustyGet/0.1`, so indexers that expect NZBGet keep working.
 - Out-of-range numbers are rejected, `saveconfig` refuses malformed input, and several decoding and output bugs are fixed.
 
 See [API and compatibility](api.md).
@@ -83,13 +108,13 @@ See [API and compatibility](api.md).
 - A **Repair** badge during live repair, and a **dupe repair** post-processing status.
 - **Recovered from duplicates** in the statistics dialog.
 - History shows `twin` or `alt` instead of `dupe` where known.
-- Escaping of names, categories, messages, and extension text that NZBGet printed as HTML, and `http` or `https` links only.
+- Escaping of names, categories, and messages that NZBGet printed as HTML, and `http` or `https` links only.
+- **Optimize TLS ciphers** in the news-server settings measures the ciphers each encrypted server supports and saves the fastest one for each server.
 - Fixes to keyboard shortcuts, the filter box, upload errors, and size totals.
 
 ## Security and robustness
 
 - `DupeSearchApiKey`, and any option with an API key in its name, is protected like a password: the restricted user and JSON-P see `***`.
-- Extension downloads use generated filenames, closing a path traversal, and a failed update keeps the old version.
 - File cleanup never follows symbolic links.
 - NZB parsing refuses XML entity declarations.
 - The control port limits concurrent connections and keeps running when a thread or a connection fails.
@@ -111,5 +136,5 @@ RustyGet fixes about 100 inherited bugs. 96 of them are [reported to the NZBGet 
 ## Build
 
 - `rust/rust-toolchain.toml` pins Rust 1.99.0, and `just build` compiles the Rust crate and links the `rustyget` binary.
-- PAR2 verification, streaming repair, post-download repair, and par-renaming use the built-in `par-rs` crate, and archive extraction uses the built-in `zipfast` and `zipview` crates.
-- The inherited GitHub workflows for builds, packages, and tests are turned off in the Actions tab while the tests are rebuilt. Only the documentation workflow runs.
+- PAR2 verification, streaming repair, post-download repair, and par-renaming use the `par-rs` crate, and archive extraction, including decompressed donors for stream repair, uses the `zipfast` and `zipview` crates. RustyGet needs no `par2`, `unrar`, or `7z` program.
+- A required `build` check compiles and tests RustyGet on Linux x86-64 and macOS for every pull request and every push to `main`. The inherited workflows for packages are gone.

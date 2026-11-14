@@ -8,12 +8,12 @@ Pictures use an isolated demonstration service and example values. Credentials a
 
 ## Info
 
-Start here for the difference between browser preferences and server configuration. The page links to the first-time setup, extension manager, backups, and community resources.
+Start here for the difference between browser preferences and server configuration. The page links to the first-time setup, backups, and community resources.
 
 Use [Basic setup](settings-basics.md) when configuring a new installation. Use [Settings at a glance](settings.md) for search, help, and the compact list editors.
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/info.jpg" aria-label="Open full-size picture: Settings information and community resources"><img src="assets/settings/info.jpg" width="1280" height="900" loading="lazy" alt="Settings information and community resources"></a>
+<a class="settings-shot" href="assets/settings/info.jpg" aria-label="Open full-size picture: Settings information and community resources"><img src="assets/settings/info.jpg" width="1280" height="908" loading="lazy" alt="Settings information and community resources"></a>
 <figcaption>The Info page explains where settings are stored. Open the picture to inspect the full section.</figcaption>
 </figure>
 
@@ -26,7 +26,7 @@ The built-in disk and server tests perform work. Run them when you can spare the
 Key options: [`SystemHealthCheck`](options.md#systemhealthcheck), [`WriteBuffer`](options.md#writebuffer), [`ArticleCache`](options.md#articlecache).
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/status.jpg" aria-label="Open full-size picture: Status page with demonstration health and system information"><img src="assets/settings/status.jpg" width="1280" height="1300" loading="lazy" alt="Status page with demonstration health and system information"></a>
+<a class="settings-shot" href="assets/settings/status.jpg" aria-label="Open full-size picture: Status page with demonstration health and system information"><img src="assets/settings/status.jpg" width="1280" height="1316" loading="lazy" alt="Status page with demonstration health and system information"></a>
 <figcaption>These example status values are not a production health report. Open the picture to inspect the full section.</figcaption>
 </figure>
 
@@ -47,7 +47,7 @@ Back up configuration before a substantial change:
 A configuration backup is not a backup of downloaded files, the queue, or history. Preserve those separately for a deployment recovery plan. Reload applies saved server configuration. Shutdown stops the daemon; an external service manager can start it again according to your deployment.
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/system.jpg" aria-label="Open full-size picture: System controls for configuration backup, restore, reload, and shutdown"><img src="assets/settings/system.jpg" width="1280" height="900" loading="lazy" alt="System controls for configuration backup, restore, reload, and shutdown"></a>
+<a class="settings-shot" href="assets/settings/system.jpg" aria-label="Open full-size picture: System controls for configuration backup, restore, reload, and shutdown"><img src="assets/settings/system.jpg" width="1280" height="908" loading="lazy" alt="System controls for configuration backup, restore, reload, and shutdown"></a>
 <figcaption>Review saved changes before reloading the service. Open the picture to inspect the full section.</figcaption>
 </figure>
 
@@ -56,6 +56,6 @@ A configuration backup is not a backup of downloaded files, the queue, or histor
 This page lists the app's license and third-party credits. Follow the linked license texts when reviewing redistribution requirements. The repository includes the app's license in `COPYING`.
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/licenses.jpg" aria-label="Open full-size picture: App license information and third-party credits"><img src="assets/settings/licenses.jpg" width="1280" height="900" loading="lazy" alt="App license information and third-party credits"></a>
+<a class="settings-shot" href="assets/settings/licenses.jpg" aria-label="Open full-size picture: App license information and third-party credits"><img src="assets/settings/licenses.jpg" width="1280" height="908" loading="lazy" alt="App license information and third-party credits"></a>
 <figcaption>License information is separate from configuration. Open the picture to inspect the full section.</figcaption>
 </figure>

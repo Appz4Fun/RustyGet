@@ -128,7 +128,7 @@ void nzbget_rs_build_env_init(
 int nzbget_rs_thread_count_op(int op);
 int nzbget_rs_tls_suppressed(uintptr_t slot);
 
-NzbgetRsWorkState* nzbget_rs_workstate_new(uintptr_t notify_ctx, void (*notify_cb)(uintptr_t));
+NzbgetRsWorkState* nzbget_rs_workstate_new(void);
 void nzbget_rs_workstate_free(NzbgetRsWorkState* ws);
 int64_t nzbget_rs_workstate_ctl(const NzbgetRsWorkState* ws, int id, int write, int64_t val);
 
@@ -368,28 +368,13 @@ int nzbget_rs_script_config_exec(
     int op, const char* p1, size_t n1, const char* p2, size_t n2,
     void* ctx, int (*cancel_cb)(void*), NzbgetRsBuf* out_buf);
 
-typedef struct NzbgetRsQueueCoordinator NzbgetRsQueueCoordinator;
 typedef struct NzbgetRsPrePostProcessor NzbgetRsPrePostProcessor;
-NzbgetRsQueueCoordinator* nzbget_rs_queue_coord_new(void);
-void nzbget_rs_queue_coord_free(NzbgetRsQueueCoordinator* ptr);
-uintptr_t nzbget_rs_queue_coord_exec(
-    const NzbgetRsQueueCoordinator* ptr, int op, int a1, int a2,
-    uintptr_t p1, uintptr_t p2, uintptr_t p3, const char* s1, const int* ints,
-    NzbgetRsQueueSubsysHostFn host_cb, void* ctx);
 NzbgetRsPrePostProcessor* nzbget_rs_prepost_new(uintptr_t owner);
 void nzbget_rs_prepost_free(NzbgetRsPrePostProcessor* ptr);
 uintptr_t nzbget_rs_prepost_exec(
     const NzbgetRsPrePostProcessor* ptr, int op, int a1, int a2,
     uintptr_t p1, uintptr_t p2, uintptr_t p3, const char* s1,
     void* host_ctx, NzbgetRsQueueSubsysHostFn host_cb);
-typedef struct NzbgetRsArticleDownloader NzbgetRsArticleDownloader;
-NzbgetRsArticleDownloader* nzbget_rs_article_dl_new(
-    int has_analyzer, int parcheck_enabled, uintptr_t initial_conn, const char* info_name);
-void nzbget_rs_article_dl_free(NzbgetRsArticleDownloader* ptr);
-uintptr_t nzbget_rs_article_dl_exec(
-    NzbgetRsArticleDownloader* ptr, int op, int a1, int a2,
-    uintptr_t p1, uintptr_t p2, const char* s1,
-    NzbgetRsQueueSubsysHostFn host_cb, void* ctx);
 
 #ifdef __cplusplus
 }

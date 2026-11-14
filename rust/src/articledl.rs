@@ -30,8 +30,8 @@ use crate::nntp::{
     article_dl_should_advance_server_list, TransientRetries,
 };
 use crate::queuesubsys_host::{
-    NzbgetRsQueueSubsysHostFn, AD_FAILED, AD_FATAL_ERROR, AD_FINISHED, AD_RETRY, AD_RUNNING,
-    MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING,
+    ActiveDownloadSnap, QueueSubsysHost, AD_FAILED, AD_FATAL_ERROR, AD_FINISHED, AD_RETRY,
+    AD_RUNNING, MK_DEBUG, MK_DETAIL, MK_ERROR, MK_INFO, MK_WARNING,
 };
 use crate::renameanalyzer::Analyzer;
 
@@ -92,20 +92,20 @@ unsafe fn cstr_or_empty(p: *const c_char) -> Vec<u8> {
     }
 }
 
-struct DlHost {
-    cb: NzbgetRsQueueSubsysHostFn,
-    ctx: *mut c_void,
+struct DlHost<'a> {
+    qh: &'a QueueSubsysHost,
+    file_ptr: usize,
+    article_ptr: usize,
+    stopped: &'a AtomicBool,
 }
 
-impl DlHost {
+impl DlHost<'_> {
     #[inline]
     #[allow(clippy::too_many_arguments)]
-    fn raw(
+    fn op45(
         &self,
-        op: c_int,
         a1: c_int,
         a2: c_int,
-        p1: usize,
         p2: usize,
         s1: *const c_char,
         s2: *const c_char,
@@ -113,7 +113,42 @@ impl DlHost {
         i64s: *mut i64,
         strs: *mut *const c_char,
     ) -> usize {
-        unsafe { (self.cb)(self.ctx, op, a1, a2, p1, p2, s1, s2, ints, i64s, strs) }
+        self.qh
+            .raw(45, a1, a2, self.file_ptr, p2, s1, s2, ints, i64s, strs)
+    }
+
+    fn with_output_guard<R, F: FnOnce() -> R>(&self, always_lock: bool, f: F) -> R {
+        struct GuardCall<F, R> {
+            f: Option<F>,
+            out: Option<R>,
+        }
+        unsafe extern "C" fn tramp<F: FnOnce() -> R, R>(raw: *mut c_void) {
+            let c = &mut *raw.cast::<GuardCall<F, R>>();
+            if let Some(func) = c.f.take() {
+                c.out = Some(func());
+            }
+        }
+        let mut call = GuardCall {
+            f: Some(f),
+            out: None,
+        };
+        let mut i64s = [(&mut call as *mut GuardCall<F, R>) as usize as i64];
+        self.op45(
+            0,
+            c_int::from(always_lock),
+            tramp::<F, R> as *const () as usize,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            i64s.as_mut_ptr(),
+            std::ptr::null_mut(),
+        );
+        call.out.expect("output_guard callback did not run")
+    }
+
+    #[inline]
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 
     #[inline]
@@ -124,21 +159,9 @@ impl DlHost {
     fn log_nzb(&self, nzb_ptr: usize, kind: i32, msg: &[u8]) {
         if nzb_ptr == 0 {
             crate::log::log_active_bytes(kind, msg);
-            return;
+        } else {
+            self.qh.nzb_print_message(nzb_ptr, kind, msg);
         }
-        let c = nul_vec(msg);
-        self.raw(
-            1,
-            kind,
-            0,
-            nzb_ptr,
-            0,
-            c.as_ptr().cast(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
     }
 }
 
@@ -194,6 +217,10 @@ pub fn memory_monitor_effective_cache_mb() -> i32 {
 
 pub(crate) fn cache_file_busy(file_ptr: usize) -> bool {
     file_ptr != 0 && file_ptr == CACHE_FILE_INFO.load(Ordering::SeqCst)
+}
+
+pub(crate) fn cache_free_raw(ptr: *mut u8, cap: i32) {
+    cache_free(ptr, cap);
 }
 
 pub fn memory_monitor_effective_par_buffer_mb(configured_mb: i32) -> i32 {
@@ -744,7 +771,41 @@ fn daemon_article_cache_run() {
 }
 
 #[cfg(test)]
-fn article_cache_check_flush(host: &DlHost, allocated: usize, flush_everything: bool) -> bool {
+struct MockDlHost {
+    cb: crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn,
+    ctx: *mut c_void,
+}
+
+#[cfg(test)]
+impl MockDlHost {
+    #[allow(clippy::too_many_arguments)]
+    fn raw(
+        &self,
+        op: c_int,
+        a1: c_int,
+        a2: c_int,
+        p1: usize,
+        p2: usize,
+        s1: *const c_char,
+        s2: *const c_char,
+        ints: *mut c_int,
+        i64s: *mut i64,
+        strs: *mut *const c_char,
+    ) -> usize {
+        unsafe { (self.cb)(self.ctx, op, a1, a2, p1, p2, s1, s2, ints, i64s, strs) }
+    }
+
+    fn log(&self, kind: i32, msg: &[u8]) {
+        crate::log::log_active_bytes(kind, msg);
+    }
+
+    fn log_nzb(&self, _nzb_ptr: usize, kind: i32, msg: &[u8]) {
+        crate::log::log_active_bytes(kind, msg);
+    }
+}
+
+#[cfg(test)]
+fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everything: bool) -> bool {
     host.log(
         MK_DEBUG,
         format!(
@@ -1165,15 +1226,13 @@ impl RsArticleWriter {
         !self.cached_ptr.is_null()
     }
 
-    fn build_filenames_locked(&mut self, host: &DlHost) {
+    fn build_filenames_locked(&mut self, host: &DlHost<'_>) {
         let mut ints = [0i32; 4];
         let mut strs = [std::ptr::null::<c_char>(); 3];
-        host.raw(
-            4,
-            1,
+        host.op45(
             1,
             0,
-            0,
+            host.article_ptr,
             std::ptr::null(),
             std::ptr::null(),
             ints.as_mut_ptr(),
@@ -1192,6 +1251,8 @@ impl RsArticleWriter {
         let existing_out = unsafe { cstr_or_empty(strs[1]) };
         let file_filename = unsafe { cstr_or_empty(strs[2]) };
 
+        let mut res_c_opt: Option<Vec<u8>> = None;
+        let mut ofn_c_opt: Option<Vec<u8>> = None;
         if let Some(built) = article_writer_build_output_filenames(
             &tmp_dir,
             &dest_dir,
@@ -1205,49 +1266,27 @@ impl RsArticleWriter {
             &file_filename,
             |p| crate::fsops::file_exists(p, &crate::fsops::posix_stat),
         ) {
-            let res_c = nul_vec(&built.result_filename);
-            host.raw(
-                4,
-                18,
-                5,
-                0,
-                0,
-                res_c.as_ptr().cast(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
+            res_c_opt = Some(nul_vec(&built.result_filename));
             self.temp_filename = built.temp_filename;
             if let Some(ofn) = built.output_filename {
                 if built.update_file_info_output_filename {
-                    let ofn_c = nul_vec(&ofn);
-                    host.raw(
-                        4,
-                        18,
-                        6,
-                        0,
-                        0,
-                        ofn_c.as_ptr().cast(),
-                        std::ptr::null(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    );
+                    ofn_c_opt = Some(nul_vec(&ofn));
                 }
                 self.output_filename = ofn;
             }
         }
 
         let mut rstrs = [std::ptr::null::<c_char>(); 1];
-        host.raw(
-            4,
-            1,
+        host.op45(
             2,
             0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
+            host.article_ptr,
+            res_c_opt
+                .as_ref()
+                .map_or(std::ptr::null(), |v| v.as_ptr().cast()),
+            ofn_c_opt
+                .as_ref()
+                .map_or(std::ptr::null(), |v| v.as_ptr().cast()),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             rstrs.as_mut_ptr(),
@@ -1258,7 +1297,7 @@ impl RsArticleWriter {
     #[allow(clippy::too_many_arguments)]
     fn start(
         &mut self,
-        host: &DlHost,
+        host: &DlHost<'_>,
         info_name: &[u8],
         format: Format,
         filename: Option<&[u8]>,
@@ -1269,20 +1308,10 @@ impl RsArticleWriter {
         self.out_file = None;
         self.drop_cached();
 
-        let mut ints = [0i32; 6];
-        let mut strs = [std::ptr::null::<c_char>(); 1];
-        let nzb_ptr = host.raw(
-            4,
-            15,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
-        );
+        let fsnap = host.qh.file_snap(host.file_ptr);
+        let nzb_ptr = fsnap.nzb_ptr;
+        let nzb = host.qh.nzb_snap(nzb_ptr, false);
+        let art = host.qh.article_snap(host.article_ptr);
         let (
             dupe_check,
             direct_write_opt,
@@ -1304,13 +1333,13 @@ impl RsArticleWriter {
             }
             None => (false, false, false, 0, false, 0),
         };
-        let dupe_mode = ints[0];
-        let many_dupe_files = ints[1] != 0;
-        let force_direct_write = ints[2] != 0;
-        let skip_disk_write = ints[3] != 0 || skip_write_opt;
-        let art_info_size = ints[4];
-        let is_dupe_fallback = ints[5] > 0;
-        let dest_dir = unsafe { cstr_or_empty(strs[0]) };
+        let dupe_mode = nzb.dupe_mode;
+        let many_dupe_files = nzb.many_dupe_files;
+        let force_direct_write = fsnap.force_direct_write;
+        let skip_disk_write = nzb.skip_disk_write || skip_write_opt;
+        let art_info_size = art.size;
+        let is_dupe_fallback = art.dupe_fallback_round > 0;
+        let dest_dir = nzb.dest_dir;
 
         self.format = format;
         self.article_offset = article_offset;
@@ -1332,10 +1361,8 @@ impl RsArticleWriter {
                 });
                 let dest_c = dest_file_path.as_deref().map(nul_vec);
                 let mut d_ints = [0i32; 2];
-                host.raw(
-                    4,
-                    16,
-                    0,
+                host.op45(
+                    5,
                     0,
                     0,
                     dest_c
@@ -1359,20 +1386,48 @@ impl RsArticleWriter {
             }
 
             if direct_write_opt && !is_dupe_fallback {
-                let out_c = nul_vec(&self.output_filename);
-                let mut fsz = [file_size];
-                let ok = host.raw(
-                    4,
-                    17,
-                    i32::from(skip_disk_write),
-                    0,
-                    0,
-                    out_c.as_ptr().cast(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    fsz.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                ) != 0;
+                let out_fn_ref = &self.output_filename;
+                let ok = host.with_output_guard(true, || {
+                    let mut cints = [0i32; 4];
+                    let mut cstrs = [std::ptr::null::<c_char>(); 3];
+                    host.op45(
+                        1,
+                        0,
+                        host.article_ptr,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        cints.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                        cstrs.as_mut_ptr(),
+                    );
+                    let cur_init = cints[3] != 0;
+                    if !cur_init
+                        || (!skip_disk_write
+                            && !crate::fsops::file_exists(out_fn_ref, &crate::fsops::posix_stat))
+                    {
+                        if !skip_disk_write {
+                            if let Err(err) =
+                                article_writer_create_output_file(out_fn_ref, file_size)
+                            {
+                                if !err.is_empty() {
+                                    host.log_nzb(nzb_ptr, MK_ERROR, &err);
+                                }
+                                return false;
+                            }
+                        }
+                        host.op45(
+                            6,
+                            0,
+                            0,
+                            std::ptr::null(),
+                            std::ptr::null(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                        );
+                    }
+                    true
+                });
                 if !ok {
                     return false;
                 }
@@ -1471,23 +1526,13 @@ impl RsArticleWriter {
         f.write_bytes(buf) > 0
     }
 
-    fn finish(&mut self, host: &DlHost, success: bool) {
+    fn finish(&mut self, host: &DlHost<'_>, success: bool) {
         self.out_file = None;
 
-        let mut ints = [0i32; 6];
-        let mut strs = [std::ptr::null::<c_char>(); 1];
-        let nzb_ptr = host.raw(
-            4,
-            15,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            ints.as_mut_ptr(),
-            std::ptr::null_mut(),
-            strs.as_mut_ptr(),
-        );
+        let fsnap = host.qh.file_snap(host.file_ptr);
+        let nzb_ptr = fsnap.nzb_ptr;
+        let nzb = host.qh.nzb_snap(nzb_ptr, false);
+        let art = host.qh.article_snap(host.article_ptr);
         let (direct_write_opt, skip_write_opt, raw_article) = match crate::options::active_options()
         {
             Some(opts) => {
@@ -1500,9 +1545,9 @@ impl RsArticleWriter {
             }
             None => (false, false, false),
         };
-        let force_direct_write = ints[2] != 0;
-        let skip_disk_write = ints[3] != 0 || skip_write_opt;
-        let is_dupe_fallback = ints[5] > 0;
+        let force_direct_write = fsnap.force_direct_write;
+        let skip_disk_write = nzb.skip_disk_write || skip_write_opt;
+        let is_dupe_fallback = art.dupe_fallback_round > 0;
         let direct_write = (direct_write_opt || force_direct_write)
             && self.format == Format::Yenc
             && !is_dupe_fallback;
@@ -1524,7 +1569,6 @@ impl RsArticleWriter {
             return;
         }
 
-        let mut off = [self.article_offset];
         if has_cached {
             if self.article_ptr > 0 && self.article_ptr != self.cached_cap {
                 let (np, nc) = cache_realloc(self.cached_ptr, self.cached_cap, self.article_ptr);
@@ -1532,34 +1576,32 @@ impl RsArticleWriter {
                 self.cached_cap = nc;
             }
             let ptr = self.cached_ptr;
-            let mut cap_arr = [self.cached_cap];
-            let seg_len = self.article_ptr as usize;
+            let mut ints_arr = [self.cached_cap, self.article_ptr];
+            let mut i64s_arr = [self.article_offset, ptr as usize as i64];
             self.cached_ptr = std::ptr::null_mut();
             self.cached_cap = 0;
             with_cache_content_lock(|| {
-                host.raw(
-                    4,
-                    18,
-                    2,
-                    ptr as usize,
-                    seg_len,
+                host.op45(
+                    7,
+                    0,
+                    host.article_ptr,
                     std::ptr::null(),
                     std::ptr::null(),
-                    cap_arr.as_mut_ptr(),
-                    off.as_mut_ptr(),
+                    ints_arr.as_mut_ptr(),
+                    i64s_arr.as_mut_ptr(),
                     std::ptr::null_mut(),
                 );
             });
         } else {
-            host.raw(
-                4,
-                18,
-                3,
-                self.article_ptr as usize,
-                0,
+            let mut ints_arr = [self.article_ptr];
+            let mut off = [self.article_offset];
+            host.op45(
+                7,
+                1,
+                host.article_ptr,
                 std::ptr::null(),
                 std::ptr::null(),
-                std::ptr::null_mut(),
+                ints_arr.as_mut_ptr(),
                 off.as_mut_ptr(),
                 std::ptr::null_mut(),
             );
@@ -1567,7 +1609,7 @@ impl RsArticleWriter {
     }
 
     fn report_completion_status(
-        host: &DlHost,
+        host: &DlHost<'_>,
         nzb_ptr: usize,
         total_articles: i32,
         success_articles: i32,
@@ -1608,7 +1650,7 @@ impl RsArticleWriter {
 
     fn cleanup_old_data(
         &self,
-        host: &DlHost,
+        host: &DlHost<'_>,
         nzb_ptr: usize,
         articles_len: usize,
         is_hard_linked: bool,
@@ -1622,12 +1664,10 @@ impl RsArticleWriter {
             let mut ints = [0i32; 5];
             let mut i64s = [0i64; 1];
             let mut strs = [std::ptr::null::<c_char>(); 2];
-            host.raw(
-                4,
-                19,
+            host.op45(
+                9,
                 4,
                 idx,
-                0,
                 std::ptr::null(),
                 std::ptr::null(),
                 ints.as_mut_ptr(),
@@ -1696,10 +1736,8 @@ impl RsArticleWriter {
             host.log(MK_DEBUG, &join_c_slices(&[b"Deleting old dir: ", &del_dir]));
         }
         if res.clear_output_filename {
-            host.raw(
-                4,
-                18,
-                6,
+            host.op45(
+                8,
                 0,
                 0,
                 std::ptr::null(),
@@ -1711,13 +1749,11 @@ impl RsArticleWriter {
         }
     }
 
-    fn process_articles_locked(&mut self, host: &DlHost) {
+    fn process_articles_locked(&mut self, host: &DlHost<'_>) {
         let mut meta_ints = [0i32; 16];
         let mut meta_strs = [std::ptr::null::<c_char>(); 4];
-        let nzb_ptr = host.raw(
-            4,
-            19,
-            0,
+        let nzb_ptr = host.op45(
+            9,
             0,
             0,
             std::ptr::null(),
@@ -1743,12 +1779,10 @@ impl RsArticleWriter {
             let mut ints = [0i32; 5];
             let mut i64s = [0i64; 1];
             let mut strs = [std::ptr::null::<c_char>(); 2];
-            let is_fin = host.raw(
-                4,
-                19,
+            let is_fin = host.op45(
+                9,
                 4,
                 idx,
-                0,
                 std::ptr::null(),
                 std::ptr::null(),
                 ints.as_mut_ptr(),
@@ -1822,12 +1856,10 @@ impl RsArticleWriter {
             },
             |item_idx| {
                 let orig_idx = finished[item_idx].idx;
-                host.raw(
-                    4,
-                    19,
+                host.op45(
+                    9,
                     5,
                     orig_idx,
-                    0,
                     std::ptr::null(),
                     std::ptr::null(),
                     std::ptr::null_mut(),
@@ -1843,12 +1875,10 @@ impl RsArticleWriter {
             self.commit_error = true;
         }
         if failed_delta > 0 {
-            host.raw(
-                4,
-                19,
+            host.op45(
+                9,
                 6,
                 failed_delta as usize,
-                0,
                 std::ptr::null(),
                 std::ptr::null(),
                 std::ptr::null_mut(),
@@ -1858,16 +1888,14 @@ impl RsArticleWriter {
         }
     }
 
-    fn post_process_locked(&mut self, host: &DlHost) {
+    fn post_process_locked(&mut self, host: &DlHost<'_>) {
         let cur_path_c = nul_vec(&self.post_final_path);
         let mut ints = [0i32; 2];
         let mut strs = [std::ptr::null::<c_char>(); 3];
-        let nzb_ptr = host.raw(
-            4,
-            19,
+        let nzb_ptr = host.op45(
+            9,
             8,
             self.post_crc as usize,
-            0,
             cur_path_c.as_ptr().cast(),
             std::ptr::null(),
             ints.as_mut_ptr(),
@@ -1892,10 +1920,8 @@ impl RsArticleWriter {
         );
         if let Some(new_ofn) = updated_ofn {
             let new_c = nul_vec(&new_ofn);
-            host.raw(
-                4,
-                18,
-                6,
+            host.op45(
+                8,
                 0,
                 0,
                 new_c.as_ptr().cast(),
@@ -1906,10 +1932,8 @@ impl RsArticleWriter {
             );
         }
         if clear_and_return {
-            host.raw(
-                4,
-                18,
-                6,
+            host.op45(
+                8,
                 0,
                 0,
                 std::ptr::null(),
@@ -1921,20 +1945,18 @@ impl RsArticleWriter {
             return;
         }
         if c_bytes(&self.post_nzb_dest_dir) != c_bytes(&cur_nzb_dest_dir) {
-            let _ = move_completed_files_on_host(host, nzb_ptr, &self.post_nzb_dest_dir);
+            let _ = move_completed_files_on_qh(host.qh, nzb_ptr, &self.post_nzb_dest_dir);
         }
     }
 
-    fn complete_file_parts(&mut self, host: &DlHost) -> (bool, bool) {
+    fn complete_file_parts(&mut self, host: &DlHost<'_>) -> (bool, bool) {
         host.log(MK_DEBUG, b"Completing file parts");
         self.commit_error = false;
 
         let mut ints = [0i32; 16];
         let mut strs = [std::ptr::null::<c_char>(); 4];
-        let nzb_ptr = host.raw(
-            4,
-            19,
-            0,
+        let nzb_ptr = host.op45(
+            9,
             0,
             0,
             std::ptr::null(),
@@ -1991,10 +2013,8 @@ impl RsArticleWriter {
             has_force_dest,
         );
         if new_init && !cur_output_init {
-            host.raw(
-                4,
-                19,
-                1,
+            host.op45(
+                6,
                 0,
                 0,
                 std::ptr::null(),
@@ -2061,11 +2081,9 @@ impl RsArticleWriter {
                 failed_articles,
                 &full_info_path,
             );
-            host.raw(
-                4,
-                19,
+            host.op45(
+                9,
                 2,
-                0,
                 0,
                 std::ptr::null(),
                 std::ptr::null(),
@@ -2252,10 +2270,8 @@ impl RsArticleWriter {
 
         let mut post_meta = [0i32; 16];
         let mut post_strs = [std::ptr::null::<c_char>(); 4];
-        host.raw(
-            4,
-            19,
-            0,
+        host.op45(
+            9,
             0,
             0,
             std::ptr::null(),
@@ -2282,64 +2298,29 @@ impl RsArticleWriter {
     }
 }
 
-fn move_completed_files_on_host(host: &DlHost, nzb_ptr: usize, old_dest_dir: &[u8]) -> bool {
-    let mut ints = [0i32; 2];
-    let mut strs = [std::ptr::null::<c_char>(); 1];
-    host.raw(
-        5,
-        0,
-        0,
-        nzb_ptr,
-        0,
-        std::ptr::null(),
-        std::ptr::null(),
-        ints.as_mut_ptr(),
-        std::ptr::null_mut(),
-        strs.as_mut_ptr(),
-    );
-    let skip_disk_write = ints[0] != 0;
-    let count = ints[1].max(0) as usize;
-    if skip_disk_write || count == 0 {
+pub(crate) fn move_completed_files_on_qh(
+    qh: &QueueSubsysHost,
+    nzb_ptr: usize,
+    old_dest_dir: &[u8],
+) -> bool {
+    if nzb_ptr == 0 {
         return true;
     }
-    let dest_dir = unsafe { cstr_or_empty(strs[0]) };
-    let mut owned_names = Vec::with_capacity(count);
-    for idx in 0..count {
-        let mut fstrs = [std::ptr::null::<c_char>(); 1];
-        host.raw(
-            5,
-            1,
-            idx as i32,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            fstrs.as_mut_ptr(),
-        );
-        owned_names.push(unsafe { cstr_or_empty(fstrs[0]) });
+    let nzb = qh.nzb_snap(nzb_ptr, false);
+    if nzb.skip_disk_write {
+        return true;
     }
-    let refs: Vec<&[u8]> = owned_names.iter().map(Vec::as_slice).collect();
+    let cfs = qh.nzb_completed_files(nzb_ptr);
+    if cfs.is_empty() {
+        return true;
+    }
+    let refs: Vec<&[u8]> = cfs.iter().map(|c| c.filename.as_slice()).collect();
     article_writer_move_completed_files(
-        &dest_dir,
+        &nzb.dest_dir,
         c_bytes(old_dest_dir),
         &refs,
-        |msg| host.log_nzb(nzb_ptr, MK_ERROR, msg),
-        || {
-            host.raw(
-                5,
-                2,
-                0,
-                nzb_ptr,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ) != 0
-        },
+        |msg| qh.nzb_print_message(nzb_ptr, MK_ERROR, msg),
+        || qh.nzb_has_busy_output_file(nzb_ptr),
     )
 }
 
@@ -2363,6 +2344,9 @@ struct DlWorker {
 const AD_UNDEFINED: i32 = 0;
 
 pub struct NzbgetRsArticleDownloader {
+    pub(crate) file_ptr: usize,
+    pub(crate) article_ptr: usize,
+    pub(crate) stopped: AtomicBool,
     info_name: Vec<u8>,
     status: AtomicI32,
     last_update_time: AtomicI64,
@@ -2370,14 +2354,26 @@ pub struct NzbgetRsArticleDownloader {
     worker: Mutex<DlWorker>,
 }
 
+impl Drop for NzbgetRsArticleDownloader {
+    fn drop(&mut self) {
+        crate::log::log_active_bytes(MK_DEBUG, b"Destroying ArticleDownloader");
+    }
+}
+
 impl NzbgetRsArticleDownloader {
-    pub fn new(
+    pub(crate) fn new_for_queue(
+        file_ptr: usize,
+        article_ptr: usize,
         has_analyzer: bool,
         parcheck_enabled: bool,
         initial_conn: usize,
         info_name: Vec<u8>,
     ) -> Self {
+        crate::log::log_active_bytes(MK_DEBUG, b"Creating ArticleDownloader");
         Self {
+            file_ptr,
+            article_ptr,
+            stopped: AtomicBool::new(false),
             info_name,
             status: AtomicI32::new(AD_UNDEFINED),
             last_update_time: AtomicI64::new(now_sec()),
@@ -2408,6 +2404,136 @@ impl NzbgetRsArticleDownloader {
         }
     }
 
+    pub(crate) fn status(&self) -> i32 {
+        self.status.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn last_update_time(&self) -> i64 {
+        self.last_update_time.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn stop(&self) {
+        crate::log::log_active_bytes(MK_DEBUG, b"Trying to stop ArticleDownloader");
+        self.stopped.store(true, Ordering::SeqCst);
+        let cs = self.conn_state.lock().unwrap_or_else(|e| e.into_inner());
+        if cs.0 != 0 {
+            let conn = unsafe { &*(cs.0 as *const crate::net::PooledNntpConn) };
+            conn.set_suppress_errors(true);
+            conn.cancel();
+        }
+        drop(cs);
+        crate::log::log_active_bytes(MK_DEBUG, b"ArticleDownloader stopped successfully");
+    }
+
+    pub(crate) fn snap_for_coord(&self) -> ActiveDownloadSnap {
+        let w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        let (has_afn, afn) = match w.article_filename_c.as_ref() {
+            Some(v) => (true, c_bytes(v).to_vec()),
+            None => (false, Vec::new()),
+        };
+        ActiveDownloadSnap {
+            file_ptr: self.file_ptr,
+            article_ptr: self.article_ptr,
+            status: self.status.load(Ordering::SeqCst),
+            has_content_analyzer: w.has_analyzer,
+            analyzed_par_file: w.analyzer.as_ref().is_some_and(|ca| ca.par_file),
+            has_article_filename: has_afn,
+            decoded_file_size: w.decoded_file_size,
+            downloaded_size: w.downloaded_size as i64,
+            article_filename: afn,
+        }
+    }
+
+    pub(crate) fn finish_analyzer(&self) -> Option<(bool, Vec<u8>, Vec<u8>)> {
+        let mut w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        if !w.has_analyzer {
+            return None;
+        }
+        let mut par_out = false;
+        if w.parcheck_enabled {
+            if let Some(ref mut ca) = w.analyzer {
+                let h = ca.finish();
+                par_out = ca.par_file;
+                let set_id = ca.par_set_id;
+                w.hash16k_c = h;
+                if let Some(id) = set_id {
+                    w.par_set_id_c = id;
+                }
+            }
+        }
+        Some((
+            par_out,
+            c_bytes(&w.hash16k_c).to_vec(),
+            c_bytes(&w.par_set_id_c).to_vec(),
+        ))
+    }
+
+    pub(crate) fn log_debug(&self) {
+        let st = self.status.load(Ordering::SeqCst);
+        let lut = self.last_update_time.load(Ordering::SeqCst);
+        let mut tbuf = [0u8; 64];
+        crate::util::util_format_time(lut, &mut tbuf);
+        let tslice = c_bytes(&tbuf);
+        let prefix = format!("      Download: status={st}, LastUpdateTime=");
+        crate::log::log_active_bytes(
+            MK_INFO,
+            &join_c_slices(&[prefix.as_bytes(), tslice, b", InfoName=", &self.info_name]),
+        );
+    }
+
+    pub(crate) fn merge_server_stats(&self, qh: &QueueSubsysHost) {
+        let w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        for &(sid, s, f) in &w.server_stats {
+            let mut arr = [sid, s, f];
+            qh.raw(
+                45,
+                10,
+                0,
+                self.file_ptr,
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                arr.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+    }
+
+    pub(crate) fn complete_file_parts(&self, qh: &QueueSubsysHost) -> bool {
+        let host = DlHost {
+            qh,
+            file_ptr: self.file_ptr,
+            article_ptr: self.article_ptr,
+            stopped: &self.stopped,
+        };
+        let (ok, need_post) = {
+            let mut w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+            w.writer.complete_file_parts(&host)
+        };
+        if need_post {
+            qh.with_locked_queue(|_| {
+                let mut w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+                w.writer.post_process_locked(&host);
+            });
+        }
+        ok
+    }
+
+    pub(crate) fn cancel_hanging(&self) {
+        let cname = self.copy_conn_name();
+        crate::log::log_active_bytes(
+            MK_ERROR,
+            &join_c_slices(&[
+                b"Cancelling hanging download ",
+                &self.info_name,
+                b" @ ",
+                &cname,
+            ]),
+        );
+        self.stop();
+    }
+
     fn conn_ptr(&self) -> usize {
         self.conn_state.lock().unwrap_or_else(|e| e.into_inner()).0
     }
@@ -2428,28 +2554,14 @@ impl NzbgetRsArticleDownloader {
             .clone()
     }
 
-    fn set_status(&self, host: &DlHost, st: i32, touch_now: bool, notify: bool) {
+    fn set_status(&self, st: i32, touch_now: bool) {
         if touch_now {
             self.last_update_time.store(now_sec(), Ordering::SeqCst);
         }
         self.status.store(st, Ordering::SeqCst);
-        if notify {
-            host.raw(
-                4,
-                3,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-        }
     }
 
-    fn free_connection(&self, host: &DlHost, downloaded_size: &mut i32, keep_connected: bool) {
+    fn free_connection(&self, host: &DlHost<'_>, downloaded_size: &mut i32, keep_connected: bool) {
         if self.conn_ptr() == 0 {
             return;
         }
@@ -2552,12 +2664,10 @@ impl NzbgetRsArticleDownloader {
 
                     let mut vints = [0i32; 1];
                     let mut vi64s = [0i64; 3];
-                    host.raw(
+                    host.op45(
                         4,
-                        14,
                         0,
-                        0,
-                        0,
+                        host.article_ptr,
                         std::ptr::null(),
                         std::ptr::null(),
                         vints.as_mut_ptr(),
@@ -2695,12 +2805,10 @@ impl NzbgetRsArticleDownloader {
                     } else {
                         w.decoder.expected_crc
                     };
-                    host.raw(
-                        4,
-                        18,
-                        4,
-                        crc as usize,
-                        0,
+                    host.op45(
+                        3,
+                        crc as c_int,
+                        host.article_ptr,
                         std::ptr::null(),
                         std::ptr::null(),
                         std::ptr::null_mut(),
@@ -2781,20 +2889,24 @@ impl NzbgetRsArticleDownloader {
             ca.reset();
         }
 
-        let mut dints = [0i32; 2];
-        let mut dstrs = [std::ptr::null::<c_char>(); 1];
-        host.raw(
-            4,
-            12,
+        host.op45(
+            3,
             0,
-            0,
-            0,
+            host.article_ptr,
             std::ptr::null(),
             std::ptr::null(),
-            dints.as_mut_ptr(),
             std::ptr::null_mut(),
-            dstrs.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
         );
+        let fsnap = host.qh.file_snap(host.file_ptr);
+        let nzb_skip = fsnap.nzb_ptr != 0 && host.qh.nzb_snap(fsnap.nzb_ptr, false).skip_disk_write;
+        let art = host.qh.article_snap(host.article_ptr);
+        let groups = if join_group {
+            host.qh.file_groups(host.file_ptr)
+        } else {
+            Vec::new()
+        };
         let opts = crate::options::active_options();
         let (raw_article, crc_check, read_chunk, opt_skip_write) = match opts.as_deref() {
             Some(o) => {
@@ -2808,49 +2920,19 @@ impl NzbgetRsArticleDownloader {
             }
             None => (false, true, 4096, false),
         };
-        let groups_len = dints[0].max(0) as usize;
-        let skip_disk_write = dints[1] != 0 || opt_skip_write;
-        let message_id = unsafe { cstr_or_empty(dstrs[0]) };
+        let skip_disk_write = nzb_skip || opt_skip_write;
+        let message_id = art.message_id;
 
-        let is_stopped = || {
-            host.raw(
-                4,
-                2,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            ) != 0
-        };
-
-        if join_group && groups_len > 0 {
+        if join_group && !groups.is_empty() {
             let mut last_resp: Option<Vec<u8>> = None;
             let mut auth_err = false;
-            for gidx in 0..groups_len {
-                let mut gstrs = [std::ptr::null::<c_char>(); 1];
-                host.raw(
-                    4,
-                    12,
-                    1,
-                    0,
-                    gidx,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    gstrs.as_mut_ptr(),
-                );
-                if !gstrs[0].is_null() {
-                    let resp_ptr = unsafe { conn.join_group(gstrs[0]) };
-                    auth_err = unsafe { conn.auth_error() };
-                    last_resp = unsafe { opt_cstr(resp_ptr) };
-                    if article_dl_is_join_group_ok(last_resp.as_deref()) {
-                        break;
-                    }
+            for grp in &groups {
+                let grp_c = nul_vec(grp);
+                let resp_ptr = unsafe { conn.join_group(grp_c.as_ptr().cast()) };
+                auth_err = unsafe { conn.auth_error() };
+                last_resp = unsafe { opt_cstr(resp_ptr) };
+                if article_dl_is_join_group_ok(last_resp.as_deref()) {
+                    break;
                 }
             }
             let st = self.check_response(
@@ -2858,7 +2940,7 @@ impl NzbgetRsArticleDownloader {
                 &conn_name,
                 last_resp.as_deref(),
                 auth_err,
-                is_stopped(),
+                host.is_stopped(),
                 b"could not join group",
             );
             if st != AD_FINISHED {
@@ -2876,7 +2958,7 @@ impl NzbgetRsArticleDownloader {
             &conn_name,
             fetch_resp.as_deref(),
             req_auth_err,
-            is_stopped(),
+            host.is_stopped(),
             b"could not fetch article",
         );
         if st != AD_FINISHED {
@@ -2890,8 +2972,8 @@ impl NzbgetRsArticleDownloader {
         let mut status = AD_RUNNING;
         let mut line_buf = vec![0u8; (read_chunk as usize) + 128];
 
-        while !is_stopped() && !w.decoder.eof {
-            if !is_stopped()
+        while !host.is_stopped() && !w.decoder.eof {
+            if !host.is_stopped()
                 && !w.writer.has_cached_buffer()
                 && memory_monitor_tier() == PRESSURE_CRITICAL
                 && CACHE_FLUSHING.load(Ordering::Acquire)
@@ -2899,7 +2981,7 @@ impl NzbgetRsArticleDownloader {
                 sleep_ms(10);
             }
             loop {
-                if is_stopped() {
+                if host.is_stopped() {
                     break;
                 }
                 let limit = crate::ffi::active_workstate().map_or(0, |ws| ws.speed_limit());
@@ -2925,7 +3007,7 @@ impl NzbgetRsArticleDownloader {
                 buf_ptr = line_buf.as_mut_ptr();
             }
             if raw_len <= 0 {
-                if !is_stopped() {
+                if !host.is_stopped() {
                     host.log(
                         MK_DETAIL,
                         &join_c_slices(&[
@@ -2971,7 +3053,7 @@ impl NzbgetRsArticleDownloader {
             }
         }
 
-        if is_stopped() {
+        if host.is_stopped() {
             status = AD_FAILED;
         }
         if status == AD_RUNNING {
@@ -2990,46 +3072,39 @@ impl NzbgetRsArticleDownloader {
         status
     }
 
-    fn run(&self, host: &DlHost) {
+    pub(crate) fn run_with_coord(
+        self: &std::sync::Arc<Self>,
+        qh: &QueueSubsysHost,
+        coord: &crate::queuecoord::NzbgetRsQueueCoordinator,
+    ) {
+        let host = DlHost {
+            qh,
+            file_ptr: self.file_ptr,
+            article_ptr: self.article_ptr,
+            stopped: &self.stopped,
+        };
         host.log(MK_DEBUG, b"Entering ArticleDownloader-loop");
 
-        self.set_status(host, AD_RUNNING, false, false);
+        self.set_status(AD_RUNNING, false);
 
-        host.raw(
-            4,
-            1,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        if self.file_ptr != 0 && self.article_ptr != 0 {
+            host.with_output_guard(false, || {
+                let mut w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+                w.writer.build_filenames_locked(&host);
+            });
+        }
 
         let final_status = {
             let mut w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
 
-            let mut init_ints = [0i32; 4];
-            let mut init_i64s = [0i64; 1];
-            host.raw(
-                4,
-                0,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                init_ints.as_mut_ptr(),
-                init_i64s.as_mut_ptr(),
-                std::ptr::null_mut(),
-            );
-            let force = init_ints[0] != 0;
-            let extra_priority = init_ints[1] != 0;
-            let has_desired_server = init_ints[2] != 0;
-            let dupe_fallback_round = init_ints[3];
-            let file_time = init_i64s[0];
+            let fsnap = qh.file_snap(self.file_ptr);
+            let nzb = qh.nzb_snap(fsnap.nzb_ptr, false);
+            let art = qh.article_snap(self.article_ptr);
+            let force = nzb.force_priority;
+            let extra_priority = fsnap.extra_priority;
+            let has_desired_server = nzb.has_desired_server;
+            let dupe_fallback_round = art.dupe_fallback_round;
+            let file_time = fsnap.time;
 
             let (retries, interval_sec) = match crate::options::active_options().as_deref() {
                 Some(o) => {
@@ -3061,18 +3136,7 @@ impl NzbgetRsArticleDownloader {
             let mut status = AD_FAILED;
 
             let runtime_flags = || {
-                let stopped = host.raw(
-                    4,
-                    2,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                ) != 0;
+                let stopped = host.is_stopped();
                 let (paused_or_quota, dl_held) = match crate::ffi::active_workstate().as_deref() {
                     Some(ws) => (
                         ws.pause_download() || ws.quota_reached(),
@@ -3131,7 +3195,7 @@ impl NzbgetRsArticleDownloader {
                     break;
                 }
                 status = AD_FAILED;
-                self.set_status(host, AD_WAITING, false, false);
+                self.set_status(AD_WAITING, false);
 
                 loop {
                     let (st_now, _, _, cur_gen, _, _, now_t) = runtime_flags();
@@ -3161,7 +3225,7 @@ impl NzbgetRsArticleDownloader {
                     }
                 }
 
-                self.set_status(host, AD_RUNNING, true, false);
+                self.set_status(AD_RUNNING, true);
 
                 let (st_now, paused_or_quota, dl_held, cur_gen, _, _, now_t) = runtime_flags();
                 if st_now
@@ -3213,7 +3277,7 @@ impl NzbgetRsArticleDownloader {
                         ]),
                     );
                     status = AD_FAILED;
-                    self.free_connection(host, &mut w.downloaded_size, true);
+                    self.free_connection(&host, &mut w.downloaded_size, true);
                 }
 
                 let (st_before_conn, _, _, _, _, _, _) = runtime_flags();
@@ -3245,7 +3309,7 @@ impl NzbgetRsArticleDownloader {
 
                 let (st_after_conn, _, _, _, _, _, _) = runtime_flags();
                 if connected && !st_after_conn {
-                    status = self.download_article(&mut w, host, join_group);
+                    status = self.download_article(&mut w, &host, join_group);
                     if status == AD_TRANSIENT_ERROR {
                         if transient_retries.register(last_server, now_sec()) {
                             status = AD_CONNECT_ERROR;
@@ -3301,7 +3365,7 @@ impl NzbgetRsArticleDownloader {
                         remained_retries,
                     );
                 if handled_rej {
-                    self.free_connection(host, &mut w.downloaded_size, false);
+                    self.free_connection(&host, &mut w.downloaded_size, false);
                     status = next_st;
                     if break_rej {
                         break;
@@ -3357,7 +3421,7 @@ impl NzbgetRsArticleDownloader {
                     want_server = last_server;
                 } else {
                     self.free_connection(
-                        host,
+                        &host,
                         &mut w.downloaded_size,
                         status == AD_FINISHED || status == AD_NOT_FOUND,
                     );
@@ -3464,7 +3528,7 @@ impl NzbgetRsArticleDownloader {
                 }
             }
 
-            self.free_connection(host, &mut w.downloaded_size, status == AD_FINISHED);
+            self.free_connection(&host, &mut w.downloaded_size, status == AD_FINISHED);
 
             let (st_final, _, _, _, _, _, _) = runtime_flags();
             status = article_dl_resolve_final_status(
@@ -3500,234 +3564,9 @@ impl NzbgetRsArticleDownloader {
             status
         };
 
-        self.set_status(host, final_status, false, true);
+        self.set_status(final_status, false);
+        coord.on_article_finished(self, qh);
         host.log(MK_DEBUG, b"Exiting ArticleDownloader-loop");
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn article_dl_exec(
-    ptr: *mut NzbgetRsArticleDownloader,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    host_cb: Option<NzbgetRsQueueSubsysHostFn>,
-    ctx: *mut c_void,
-) -> usize {
-    let _ = a2;
-    // Static ops that require no host callback
-    match op {
-        112 => {
-            cache_free(p1 as *mut u8, a1);
-            return 0;
-        }
-        113 => {
-            cache_wakeup_flush();
-            return 0;
-        }
-        114 => return CACHE_ALLOCATED.load(Ordering::SeqCst),
-        115 => {
-            CACHE_FILE_INFO.store(p1, Ordering::SeqCst);
-            return 0;
-        }
-        _ => {}
-    }
-
-    // Instance ops that require no host callback
-    if !ptr.is_null() {
-        let dl = unsafe { &*ptr };
-        match op {
-            10 => {
-                let w = dl.worker.lock().unwrap_or_else(|e| e.into_inner());
-                let ints_out = unsafe { std::slice::from_raw_parts_mut(p1 as *mut c_int, 4) };
-                let i64s_out = unsafe { std::slice::from_raw_parts_mut(p2 as *mut i64, 4) };
-                let strs_out =
-                    unsafe { std::slice::from_raw_parts_mut(s1 as *mut *const c_char, 1) };
-                ints_out[0] = dl.status.load(Ordering::SeqCst);
-                ints_out[1] = i32::from(w.has_analyzer);
-                ints_out[2] = i32::from(w.analyzer.as_ref().is_some_and(|ca| ca.par_file));
-                if let Some(ref afn) = w.article_filename_c {
-                    ints_out[3] = 1;
-                    strs_out[0] = afn.as_ptr().cast();
-                } else {
-                    ints_out[3] = 0;
-                    strs_out[0] = std::ptr::null();
-                }
-                i64s_out[2] = w.decoded_file_size;
-                i64s_out[3] = w.downloaded_size as i64;
-                return 1;
-            }
-            11 => {
-                let mut w = dl.worker.lock().unwrap_or_else(|e| e.into_inner());
-                if !w.has_analyzer {
-                    return 0;
-                }
-                let ints_out = unsafe { std::slice::from_raw_parts_mut(p1 as *mut c_int, 1) };
-                let strs_out =
-                    unsafe { std::slice::from_raw_parts_mut(s1 as *mut *const c_char, 2) };
-                let mut par_out = 0;
-                if w.parcheck_enabled {
-                    if let Some(ref mut ca) = w.analyzer {
-                        let h = ca.finish();
-                        let par_file = ca.par_file;
-                        let set_id = ca.par_set_id;
-                        w.hash16k_c = h;
-                        if let Some(id) = set_id {
-                            w.par_set_id_c = id;
-                        }
-                        par_out = i32::from(par_file);
-                    }
-                }
-                ints_out[0] = par_out;
-                strs_out[0] = w.hash16k_c.as_ptr().cast();
-                strs_out[1] = w.par_set_id_c.as_ptr().cast();
-                return 1;
-            }
-            14 => {
-                let st = dl.status.load(Ordering::SeqCst);
-                let lut = dl.last_update_time.load(Ordering::SeqCst);
-                let mut tbuf = [0u8; 64];
-                crate::util::util_format_time(lut, &mut tbuf);
-                let tslice = c_bytes(&tbuf);
-                let prefix = format!("      Download: status={st}, LastUpdateTime=");
-                crate::log::log_active_bytes(
-                    MK_INFO,
-                    &join_c_slices(&[prefix.as_bytes(), tslice, b", InfoName=", &dl.info_name]),
-                );
-                return 0;
-            }
-            16 => {
-                let cs = dl.conn_state.lock().unwrap_or_else(|e| e.into_inner());
-                if cs.0 != 0 {
-                    let conn = unsafe { &*(cs.0 as *const crate::net::PooledNntpConn) };
-                    conn.set_suppress_errors(true);
-                    conn.cancel();
-                }
-                return 0;
-            }
-            18 => return dl.status.load(Ordering::SeqCst) as usize,
-            19 => return dl.last_update_time.load(Ordering::SeqCst) as usize,
-            _ => {}
-        }
-    }
-
-    let Some(cb) = host_cb else {
-        return 0;
-    };
-    let host = DlHost { cb, ctx };
-
-    // Static subsystem ops (`ptr` is null)
-    if ptr.is_null() {
-        return match op {
-            20 => {
-                let out_fn = unsafe { cstr_or_empty(s1) };
-                match article_writer_create_output_file(&out_fn, p2 as i64) {
-                    Ok(()) => 1,
-                    Err(err) => {
-                        if !err.is_empty() {
-                            host.log_nzb(p1, MK_ERROR, &err);
-                        }
-                        0
-                    }
-                }
-            }
-            23 => {
-                let old_dir = unsafe { cstr_or_empty(s1) };
-                usize::from(move_completed_files_on_host(&host, p1, &old_dir))
-            }
-            _ => 0,
-        };
-    }
-
-    let dl = unsafe { &*ptr };
-    match op {
-        0 => {
-            dl.run(&host);
-            0
-        }
-        12 => {
-            // Merge per-article server_stats into FileInfo & NzbInfo (`case 51, a1 == 3`)
-            let w = dl.worker.lock().unwrap_or_else(|e| e.into_inner());
-            for &(sid, s, f) in &w.server_stats {
-                let mut arr = [sid, s, f];
-                host.raw(
-                    4,
-                    20,
-                    0,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    arr.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-            }
-            0
-        }
-        13 => {
-            let (ok, need_post) = {
-                let mut w = dl.worker.lock().unwrap_or_else(|e| e.into_inner());
-                w.writer.complete_file_parts(&host)
-            };
-            if need_post {
-                host.raw(
-                    4,
-                    19,
-                    7,
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                );
-            }
-            usize::from(ok)
-        }
-        15 => {
-            // CancelHanging (`case 51, a1 == 6`)
-            let cname = dl.copy_conn_name();
-            host.log(
-                MK_ERROR,
-                &join_c_slices(&[
-                    b"Cancelling hanging download ",
-                    &dl.info_name,
-                    b" @ ",
-                    &cname,
-                ]),
-            );
-            host.raw(
-                4,
-                21,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-            0
-        }
-        17 => {
-            // Re-entry while FileInfo::GuardOutputFile is held on C++ stack
-            let mut w = dl.worker.lock().unwrap_or_else(|e| e.into_inner());
-            w.writer.build_filenames_locked(&host);
-            0
-        }
-        22 => {
-            // Re-entry while DownloadQueue::Guard is held on C++ stack
-            let mut w = dl.worker.lock().unwrap_or_else(|e| e.into_inner());
-            w.writer.post_process_locked(&host);
-            0
-        }
-        _ => 0,
     }
 }
 
@@ -3795,17 +3634,7 @@ mod tests {
         ) -> usize {
             if op == 2 && a1 == 5 {
                 let fake_file = 0xdead_beefusize;
-                crate::ffi::nzbget_rs_article_dl_exec(
-                    std::ptr::null_mut(),
-                    115,
-                    0,
-                    0,
-                    fake_file,
-                    0,
-                    std::ptr::null(),
-                    None,
-                    std::ptr::null_mut(),
-                );
+                CACHE_FILE_INFO.store(fake_file, Ordering::SeqCst);
                 // While simulated DownloadQueue::Guard() is still held inside op 2, 5:
                 OBSERVED_UNDER_LOCK.store(cache_file_busy(fake_file), Ordering::SeqCst);
                 if !strs.is_null() {
@@ -3818,7 +3647,7 @@ mod tests {
 
         OBSERVED_UNDER_LOCK.store(false, Ordering::SeqCst);
         CACHE_FILE_INFO.store(0, Ordering::SeqCst);
-        let host = DlHost {
+        let host = MockDlHost {
             cb: mock_host,
             ctx: std::ptr::null_mut(),
         };

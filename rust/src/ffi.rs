@@ -3055,11 +3055,26 @@ mod lifecycle_ffi_tests {
 
 #[cfg(unix)]
 static ACTIVE_QUEUE_COORD: std::sync::RwLock<
-    Option<(
-        std::sync::Weak<crate::queuecoord::NzbgetRsQueueCoordinator>,
-        usize,
-    )>,
+    Option<std::sync::Weak<crate::queuecoord::NzbgetRsQueueCoordinator>>,
 > = std::sync::RwLock::new(None);
+
+#[cfg(unix)]
+pub(crate) fn set_active_queue_coord(
+    opt: Option<std::sync::Weak<crate::queuecoord::NzbgetRsQueueCoordinator>>,
+) {
+    if let Ok(mut g) = ACTIVE_QUEUE_COORD.write() {
+        *g = opt;
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn active_queue_coord(
+) -> Option<std::sync::Arc<crate::queuecoord::NzbgetRsQueueCoordinator>> {
+    ACTIVE_QUEUE_COORD
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(std::sync::Weak::upgrade))
+}
 
 #[cfg(unix)]
 pub(crate) fn queue_host() -> Option<crate::queuesubsys_host::QueueSubsysHost> {
@@ -3067,13 +3082,8 @@ pub(crate) fn queue_host() -> Option<crate::queuesubsys_host::QueueSubsysHost> {
         .read()
         .ok()
         .and_then(|g| g.as_ref().and_then(|e| e.queue_host_cb))?;
-    let ctx = ACTIVE_QUEUE_COORD
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().map(|(_, c)| *c))
-        .unwrap_or(0);
     Some(crate::queuesubsys_host::QueueSubsysHost::new(
-        ctx as *mut c_void,
+        std::ptr::null_mut(),
         cb,
     ))
 }
@@ -3083,16 +3093,9 @@ pub(crate) fn active_queue_coord_and_host() -> Option<(
     std::sync::Arc<crate::queuecoord::NzbgetRsQueueCoordinator>,
     crate::queuesubsys_host::QueueSubsysHost,
 )> {
-    let cb = BUILD_ENV
-        .read()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|e| e.queue_host_cb))?;
-    let (weak, ctx) = ACTIVE_QUEUE_COORD.read().ok().and_then(|g| g.clone())?;
-    let arc = weak.upgrade()?;
-    Some((
-        arc,
-        crate::queuesubsys_host::QueueSubsysHost::new(ctx as *mut c_void, cb),
-    ))
+    let arc = active_queue_coord()?;
+    let qh = queue_host()?;
+    Some((arc, qh))
 }
 
 #[cfg(unix)]
@@ -3100,89 +3103,7 @@ pub(crate) fn log_active_queue_coord_debug_info() {
     let Some((qc, qh)) = active_queue_coord_and_host() else {
         return;
     };
-    unsafe {
-        qc.exec(
-            10,
-            0,
-            0,
-            0,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            Some(qh.cb),
-            qh.ctx,
-        );
-    }
-}
-
-#[cfg(unix)]
-#[no_mangle]
-pub extern "C" fn nzbget_rs_queue_coord_new() -> *mut crate::queuecoord::NzbgetRsQueueCoordinator {
-    std::sync::Arc::into_raw(std::sync::Arc::new(
-        crate::queuecoord::NzbgetRsQueueCoordinator::new(),
-    ))
-    .cast_mut()
-}
-
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_queue_coord_free(
-    ptr: *mut crate::queuecoord::NzbgetRsQueueCoordinator,
-) {
-    if !ptr.is_null() {
-        if let Some(lg) = crate::log::active_log() {
-            lg.unregister_debuggable(5);
-        }
-        if let Ok(mut g) = ACTIVE_QUEUE_COORD.write() {
-            *g = None;
-        }
-        drop(std::sync::Arc::from_raw(ptr));
-    }
-}
-
-#[cfg(unix)]
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_queue_coord_exec(
-    ptr: *const crate::queuecoord::NzbgetRsQueueCoordinator,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    p3: usize,
-    s1: *const c_char,
-    ints: *const c_int,
-    host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
-    ctx: *mut std::ffi::c_void,
-) -> usize {
-    let Some(coord) = ptr.as_ref() else {
-        return 0;
-    };
-    let _cancel_guard = PosixCancelGuard::disable();
-    if op == 0 {
-        std::sync::Arc::increment_strong_count(ptr);
-        let arc = std::sync::Arc::from_raw(ptr);
-        let weak = std::sync::Arc::downgrade(&arc);
-        drop(arc);
-        if let Ok(mut g) = ACTIVE_QUEUE_COORD.write() {
-            *g = Some((weak, ctx as usize));
-        }
-        if let Some(lg) = crate::log::active_log() {
-            lg.register_debuggable(5);
-        }
-    }
-    let ret = coord.exec(op, a1, a2, p1, p2, p3, s1, ints, host_cb, ctx);
-    if op == 1 {
-        if let Some(lg) = crate::log::active_log() {
-            lg.unregister_debuggable(5);
-        }
-        if let Ok(mut g) = ACTIVE_QUEUE_COORD.write() {
-            *g = None;
-        }
-    }
-    ret
+    qc.log_debug_info(&qh);
 }
 
 // ============================================================================
@@ -3845,8 +3766,6 @@ pub struct NzbgetRsWorkState {
     downloading: std::sync::atomic::AtomicBool,
     quota_reached: std::sync::atomic::AtomicBool,
     wait_lock: (std::sync::Mutex<u64>, std::sync::Condvar),
-    notify_ctx: usize,
-    notify_cb: Option<unsafe extern "C" fn(usize)>,
 }
 
 static ACTIVE_WORKSTATE: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsWorkState>>> =
@@ -3866,9 +3785,7 @@ impl NzbgetRsWorkState {
         {
             crate::scheduler::wake_active_disk_service();
             crate::feed::notify_active_feed_work_state();
-        }
-        if let Some(cb) = self.notify_cb {
-            unsafe { cb(self.notify_ctx) };
+            crate::queuecoord::notify_from_workstate();
         }
     }
 
@@ -4012,10 +3929,7 @@ impl NzbgetRsWorkState {
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_workstate_new(
-    notify_ctx: usize,
-    notify_cb: Option<unsafe extern "C" fn(usize)>,
-) -> *mut NzbgetRsWorkState {
+pub extern "C" fn nzbget_rs_workstate_new() -> *mut NzbgetRsWorkState {
     let arc = std::sync::Arc::new(NzbgetRsWorkState {
         resume_time: std::sync::atomic::AtomicI64::new(0),
         local_time_offset: std::sync::atomic::AtomicI32::new(0),
@@ -4030,8 +3944,6 @@ pub extern "C" fn nzbget_rs_workstate_new(
         downloading: std::sync::atomic::AtomicBool::new(false),
         quota_reached: std::sync::atomic::AtomicBool::new(false),
         wait_lock: (std::sync::Mutex::new(0), std::sync::Condvar::new()),
-        notify_ctx,
-        notify_cb,
     });
     if let Ok(mut g) = ACTIVE_WORKSTATE.write() {
         *g = Some(std::sync::Arc::downgrade(&arc));
@@ -5194,55 +5106,6 @@ pub unsafe extern "C" fn nzbget_rs_prepost_exec(
     };
     let _cancel_guard = PosixCancelGuard::disable();
     proc_ref.exec(op, a1, a2, p1, p2, p3, s1, host_ctx, cb)
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_article_dl_new(
-    has_analyzer: c_int,
-    parcheck_enabled: c_int,
-    initial_conn: usize,
-    info_name: *const c_char,
-) -> *mut crate::articledl::NzbgetRsArticleDownloader {
-    let name = if info_name.is_null() {
-        Vec::new()
-    } else {
-        CStr::from_ptr(info_name).to_bytes().to_vec()
-    };
-    Box::into_raw(Box::new(crate::articledl::NzbgetRsArticleDownloader::new(
-        has_analyzer != 0,
-        parcheck_enabled != 0,
-        initial_conn,
-        name,
-    )))
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_article_dl_free(
-    ptr: *mut crate::articledl::NzbgetRsArticleDownloader,
-) {
-    if !ptr.is_null() {
-        drop(Box::from_raw(ptr));
-    }
-}
-
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_article_dl_exec(
-    ptr: *mut crate::articledl::NzbgetRsArticleDownloader,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
-    ctx: *mut c_void,
-) -> usize {
-    let _cancel_guard = PosixCancelGuard::disable();
-    crate::articledl::article_dl_exec(ptr, op, a1, a2, p1, p2, s1, host_cb, ctx)
 }
 
 #[cfg(unix)]

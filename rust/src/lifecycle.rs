@@ -947,7 +947,7 @@ unsafe fn daemon_process_direct(cmd: &crate::cmdline::CmdlineHandle) {
         let in_fn = cmd.last_arg.as_deref().map_or(c"", |c| c);
         let sig_fn = cmd.sig_filename.as_deref().map_or(c"", |c| c);
         let pub_fn = cmd.pub_key_filename.as_deref().map_or(c"", |c| c);
-        let ok = crate::extension::verify_signature_active(
+        let ok = crate::maintenance::verify_signature_active(
             in_fn.to_bytes(),
             sig_fn.to_bytes(),
             pub_fn.to_bytes(),
@@ -1349,7 +1349,6 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
         2 => {
             #[cfg(unix)]
             {
-                crate::log::active_cmd_script_log().reset_all();
                 crate::diskstate_format::reset_active_legacy_queue_read();
             }
             {
@@ -1881,7 +1880,6 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             #[cfg(unix)]
             if e.a2 < 0 && eff_remote_mode == 0 {
                 crate::articledl::stop_daemon_article_cache();
-                crate::extension::stop_active_queue_script();
                 crate::scheduler::stop_daemon_service_coord();
                 crate::dupesearch_coord::stop_daemon_dupesearch();
                 crate::urlcoord::stop_daemon_url_coord();
@@ -1922,7 +1920,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             RELOAD_COORDINATOR.cancel_and_join();
             #[cfg(unix)]
             if e.a2 < 0 {
-                crate::script::terminate_all_active();
+                crate::procrun::terminate_all_active();
                 crate::net::remote_srv_ctl(1);
                 if let Some(fe) = daemon_frontend_clone() {
                     if eff_remote_mode == 0 || dm_is_stopped() {
@@ -1977,9 +1975,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 crate::urlcoord::shutdown_daemon_url_coord();
                 crate::twin::shutdown_daemon_twincheck();
                 crate::dupesearch_coord::shutdown_daemon_dupesearch();
-                crate::extension::shutdown_daemon_maintenance();
-                crate::extension::shutdown_daemon_queue_script();
-                crate::script::shutdown_daemon_ext_mgr();
+                crate::maintenance::shutdown_daemon_maintenance();
                 crate::statmeter::shutdown_daemon_statmeter();
                 crate::scheduler::shutdown_daemon_scheduler();
             }
@@ -2005,7 +2001,6 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
         13 => {
             crate::scheduler::create_daemon_service_coord();
             crate::articledl::create_daemon_article_cache();
-            crate::extension::create_daemon_queue_script();
             dm_emit_active_log(0, b"Parsing command line");
             let (argc, argv) = if e.ctx.is_null() {
                 let (c, v, _) = crate::entrypoint::process_args();
@@ -2101,7 +2096,6 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 None,
                 std::ptr::null_mut(),
             );
-            let _ = crate::script::load_extensions_active();
             if crate::articledl::memory_monitor_active() {
                 crate::articledl::memory_monitor_init_options(false);
             }
@@ -2122,7 +2116,6 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
             if let Some(sc) = crate::scanner::active_scanner() {
                 sc.init_options_active();
             }
-            crate::extension::init_active_queue_script_options();
             eff_umask
         }
         _ => 0,

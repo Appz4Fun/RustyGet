@@ -22,9 +22,8 @@ pub mod dupecoord;
 pub mod dupeprobe;
 pub mod dupesearch_coord;
 pub mod dupesearch_nzb;
+pub mod configfile;
 pub mod escape;
-pub mod extension;
-pub mod extload;
 pub mod feed;
 pub mod feedfilter;
 pub mod ffi;
@@ -36,7 +35,8 @@ pub mod historycoord;
 pub mod json;
 #[cfg(unix)]
 pub mod log;
-pub mod manifest;
+#[cfg(unix)]
+pub mod maintenance;
 #[cfg(unix)]
 pub mod net;
 pub mod nntp;
@@ -53,6 +53,8 @@ pub mod posting;
 #[cfg(unix)]
 pub mod postproc;
 pub mod prepost;
+#[cfg(unix)]
+pub mod procrun;
 pub mod queueeditor;
 pub mod rarreader;
 pub mod rarrenamer;
@@ -63,8 +65,6 @@ pub mod rpcparams;
 pub mod rpcroute;
 pub mod scanner;
 pub mod scheduler;
-#[cfg(unix)]
-pub mod script;
 #[cfg(unix)]
 pub mod socket;
 pub mod statmeter;

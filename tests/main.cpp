@@ -39,11 +39,7 @@ Scanner* g_Scanner;
 FeedCoordinator* g_FeedCoordinator;
 Maintenance* g_Maintenance;
 ArticleCache* g_ArticleCache;
-QueueScriptCoordinator* g_QueueScriptCoordinator;
 ServiceCoordinator* g_ServiceCoordinator;
-ScriptConfig* g_ScriptConfig;
-CommandScriptLog* g_CommandScriptLog;
-ExtensionManager::Manager* g_ExtensionManager;
 System::SystemInfo* g_SystemInfo;
 SystemHealth::Service* g_SystemHealth;
 
@@ -66,7 +62,6 @@ struct InitGlobals
 		g_ServerPool = new ServerPool();
 		g_ServiceCoordinator = new ServiceCoordinator();
 		g_Scanner = new Scanner();
-		g_ExtensionManager = new ExtensionManager::Manager();
 	}
 
 	~InitGlobals()
@@ -78,7 +73,6 @@ struct InitGlobals
 		delete g_DiskState;
 		delete g_Scanner;
 		delete g_ServiceCoordinator;
-		delete g_ExtensionManager;
 	}
 };
 

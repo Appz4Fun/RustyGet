@@ -85,8 +85,8 @@ void nzbget_c_exit_proc(void);
 
 // ============================================================================
 // StatMeter, WebProcessor, UrlCoordinator, DirectRenamer, NzbFile,
-// QueueScript, PostScript, ScanScript, ScriptConfig & ScriptController FFI
-// (`rust/src/statmeter.rs` / `rust/src/extension.rs`)
+// ScriptConfig & ScriptController FFI
+// (`rust/src/statmeter.rs` / `rust/src/configfile.rs` / `rust/src/procrun.rs`)
 // ============================================================================
 
 
@@ -138,7 +138,7 @@ int nzbget_rs_serverpool_probe_tls(
     const NzbgetTlsServer* server, const char* cipher, int expected_ver,
     const char* numeric, uintptr_t deadline_ptr);
 
-/* Extension & Script Subsystem End-to-End C ABI (`rust/src/extension.rs`, `rust/src/script.rs`, `rust/src/options.rs`) */
+/* Options and process runner C ABI (`rust/src/options.rs`, `rust/src/procrun.rs`) */
 
 NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
 

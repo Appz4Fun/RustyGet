@@ -64,7 +64,7 @@ See [testdiskspeed](api/API.md#api-method-testdiskspeed) for the parameters. `fi
 
 - `ParCheck` / `ParRepair` / `ParQuick` control verification and repair; `ParBuffer` and `ParThreads` control their speed (section 3).
 - `DirectUnpack` unpacks files while they are still being downloaded. RAR only (7z and other formats are not supported); requires `Unpack` to be enabled, and works best together with `DirectRename` and `ReorderFiles`.
-- `UnpackPauseQueue`, `ParPauseQueue` and `ScriptPauseQueue` pause the download queue to give the CPU to unpacking, repairing and extension scripts. Useful on slow CPUs.
+- `UnpackPauseQueue` and `ParPauseQueue` pause the download queue to give the CPU to unpacking and repairing. Useful on slow CPUs.
 - `UnpackCleanupDisk` deletes the archive files after a successful unpack; disabling it keeps them and uses more disk space.
 - For unpack-speed tuning see [Optimizing the unpacking speed](UNPACKING.md).
 

@@ -1065,7 +1065,7 @@ impl NzbgetRsPrePostProcessor {
         use crate::queuesubsys_host::{
             DS_NONE, MK_INFO, NK_NZB, NS_NONE, NS_RUNNING, NZB_INT_DIRECT_UNPACK_STATUS,
             PAR_STATUS_SKIPPED, POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE, POST_INT_WORKING,
-            PT_EXECUTING_SCRIPT, PT_FINISHED, PT_QUEUED, QE_NZB_DOWNLOADED,
+            PT_EXECUTING_SCRIPT, PT_FINISHED, PT_QUEUED,
         };
         use std::sync::atomic::Ordering;
 
@@ -1096,7 +1096,6 @@ impl NzbgetRsPrePostProcessor {
                     msg.extend_from_slice(&nzb.name);
                     msg.extend_from_slice(b" completely downloaded");
                     host.nzb_print_message(nzb_ptr, MK_INFO, &msg);
-                    host.queue_script_enqueue(nzb_ptr, QE_NZB_DOWNLOADED);
                     self.nzb_downloaded(host, dq_ptr, nzb_ptr);
                     if host.queue_find_by_id(dq_ptr, nzb_id) != nzb_ptr {
                         continue;
@@ -1169,7 +1168,7 @@ impl NzbgetRsPrePostProcessor {
     ) {
         use crate::queuesubsys_host::{
             DS_COPY, DS_DUPE, DS_GOOD, DS_NONE, DS_SCAN, EA_GROUP_PAUSE_EXTRA_PARS,
-            EA_GROUP_SORT_FILES, MK_INFO, PC_FORCE, QE_NZB_ADDED,
+            EA_GROUP_SORT_FILES, MK_INFO, PC_FORCE,
         };
 
         let opts = host.opts();
@@ -1189,8 +1188,6 @@ impl NzbgetRsPrePostProcessor {
         let nzb = host.nzb_snap(nzb_ptr, false);
         if matches!(nzb.delete_status, DS_DUPE | DS_COPY | DS_GOOD | DS_SCAN) {
             self.nzb_completed(host, dq_ptr, nzb_ptr, false);
-        } else {
-            host.queue_script_enqueue(nzb_ptr, QE_NZB_ADDED);
         }
     }
 
@@ -1200,7 +1197,7 @@ impl NzbgetRsPrePostProcessor {
         dq_ptr: usize,
         nzb_ptr: usize,
     ) {
-        use crate::queuesubsys_host::{DS_NONE, MK_INFO, QE_NZB_DOWNLOADED, TS_SUCCESS};
+        use crate::queuesubsys_host::{DS_NONE, MK_INFO, TS_SUCCESS};
 
         let opts = host.opts();
         let nzb = host.nzb_snap(nzb_ptr, false);
@@ -1222,7 +1219,6 @@ impl NzbgetRsPrePostProcessor {
             msg.extend_from_slice(&nzb.name);
             msg.extend_from_slice(b" completely downloaded");
             host.nzb_print_message(nzb_ptr, MK_INFO, &msg);
-            host.queue_script_enqueue(nzb_ptr, QE_NZB_DOWNLOADED);
             self.nzb_downloaded(host, dq_ptr, nzb_ptr);
         }
     }
@@ -1236,7 +1232,6 @@ impl NzbgetRsPrePostProcessor {
         use crate::queuesubsys_host::{
             DS_HEALTH, MK_INFO, NZB_ACT_ENTER_POST_PROCESS, NZB_INT_CHANGED, NZB_INT_CLEANUP_DISK,
             NZB_INT_PAR_STATUS, PAR_STATUS_NONE, PAR_STATUS_SKIPPED, PC_FORCE, POST_INT_WORKING,
-            QE_NZB_DELETED,
         };
         use std::sync::atomic::Ordering;
 
@@ -1249,7 +1244,7 @@ impl NzbgetRsPrePostProcessor {
         const DS_BAD: i32 = 4;
         const PC_ALWAYS: i32 = 1;
 
-        let (route, enqueue_deleted, set_par_skipped) = classify_nzb_downloaded_entry(
+        let (route, _, set_par_skipped) = classify_nzb_downloaded_entry(
             nzb.skip_script_processing,
             nzb.skip_disk_write,
             opts.skip_write,
@@ -1274,10 +1269,6 @@ impl NzbgetRsPrePostProcessor {
             delete_cleanup_host(host, &opts, &nzb2);
             self.nzb_completed(host, dq_ptr, nzb_ptr, true);
             return;
-        }
-
-        if enqueue_deleted {
-            host.queue_script_enqueue(nzb_ptr, QE_NZB_DELETED);
         }
 
         if route == 2 {
@@ -1347,7 +1338,7 @@ impl NzbgetRsPrePostProcessor {
             ASPECT_FILE_COMPLETED, ASPECT_FILE_DELETED, ASPECT_NZB_ADDED, ASPECT_NZB_DELETED,
             ASPECT_NZB_FOUND, ASPECT_NZB_NAMED, ASPECT_URL_ADDED, ASPECT_URL_DELETED,
             ASPECT_URL_FAILED, ASPECT_URL_FOUND, DM_FORCE, DS_HEALTH, DS_NONE, MK_INFO,
-            PT_LOADING_PARS, PT_VERIFYING_REPAIRED, QE_NZB_DOWNLOADED, QE_NZB_NAMED,
+            PT_LOADING_PARS, PT_VERIFYING_REPAIRED,
         };
 
         if host.prepost_is_stopped(self.owner) {
@@ -1363,7 +1354,6 @@ impl NzbgetRsPrePostProcessor {
         } else if action == ASPECT_NZB_ADDED || action == ASPECT_URL_ADDED {
             self.nzb_added(host, dq_ptr, nzb_ptr);
         } else if action == ASPECT_NZB_NAMED {
-            host.queue_script_enqueue(nzb_ptr, QE_NZB_NAMED);
             self.check_download_completed(host, dq_ptr, nzb_ptr);
         } else if action == ASPECT_NZB_DELETED {
             let nzb = host.nzb_snap(nzb_ptr, false);
@@ -1426,7 +1416,6 @@ impl NzbgetRsPrePostProcessor {
                 msg.extend_from_slice(&nzb.name);
                 msg.extend_from_slice(b" completely downloaded");
                 host.nzb_print_message(nzb_ptr, MK_INFO, &msg);
-                host.queue_script_enqueue(nzb_ptr, QE_NZB_DOWNLOADED);
                 self.nzb_downloaded(host, dq_ptr, nzb_ptr);
             } else if file_act == 2 {
                 let mut msg = b"Collection ".to_vec();
@@ -1483,14 +1472,14 @@ impl NzbgetRsPrePostProcessor {
     ) {
         use crate::queuesubsys_host::{
             DH_REDOWNLOAD_AUTO, DM_FORCE, DS_COPY, DS_HEALTH, DS_NONE, DS_SCAN,
-            NZB_INT_AVOID_HISTORY, QE_NZB_DELETED,
+            NZB_INT_AVOID_HISTORY,
         };
         const DS_BAD: i32 = 4;
 
         let opts = host.opts();
         let nzb = host.nzb_snap(nzb_ptr, false);
         let fails_over = crate::dupecoord::fails_over_snap(&opts, &nzb);
-        let (add_to_history, call_dupe, enq_deleted, need_save) = eval_nzb_completed(
+        let (add_to_history, call_dupe, _, need_save) = eval_nzb_completed(
             nzb.dupe_hint,
             DH_REDOWNLOAD_AUTO,
             opts.keep_history,
@@ -1513,9 +1502,6 @@ impl NzbgetRsPrePostProcessor {
         host.nzb_set_int(nzb_ptr, NZB_INT_AVOID_HISTORY, 0);
         if call_dupe {
             crate::dupecoord::nzb_completed_host(host, dq_ptr, nzb_ptr);
-        }
-        if enq_deleted {
-            host.queue_script_enqueue(nzb_ptr, QE_NZB_DELETED);
         }
         if !add_to_history {
             host.history_delete_disk_files(nzb_ptr);
@@ -1677,7 +1663,7 @@ impl NzbgetRsPrePostProcessor {
             cands.push(RsPostJobCandidate {
                 has_post_info: u8::from(nzb.post_info_ptr != 0),
                 working: u8::from(working),
-                has_queue_script_job: u8::from(host.queue_script_has_job(nzb.id)),
+                has_queue_script_job: 0,
                 direct_unpack_running: u8::from(nzb.direct_unpack_status == NS_RUNNING),
                 has_live_repair_thread: u8::from(nzb.has_live_repair_thread),
                 priority: nzb.priority,
@@ -2174,14 +2160,10 @@ impl NzbgetRsPrePostProcessor {
         nzb_ptr: usize,
         file_ptr: usize,
     ) {
-        use crate::queuesubsys_host::{NS_NONE, NS_RUNNING, QE_FILE_DOWNLOADED, TS_RUNNING};
+        use crate::queuesubsys_host::{NS_NONE, NS_RUNNING, TS_RUNNING};
 
         let opts = host.opts();
         let nzb = host.nzb_snap(nzb_ptr, false);
-        if !nzb.has_post_info {
-            host.queue_script_enqueue(nzb_ptr, QE_FILE_DOWNLOADED);
-        }
-
         let act = classify_file_downloaded_direct_unpack(
             opts.direct_unpack,
             opts.raw_article,

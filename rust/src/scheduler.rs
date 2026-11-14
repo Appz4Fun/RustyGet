@@ -283,8 +283,7 @@ pub fn scheduler_command_name(command: i32) -> &'static [u8] {
         2 => b"Pause Post-processing\0",
         3 => b"Unpause Post-processing\0",
         4 => b"Set download rate\0",
-        5 => b"Execute process\0",
-        6 => b"Execute script\0",
+        6 => b"Execute process\0",
         7 => b"Pause Scan\0",
         8 => b"Unpause Scan\0",
         9 => b"Enable Server\0",
@@ -590,45 +589,30 @@ impl NzbgetRsScheduler {
                 );
                 ws.pause_scan_changed = true;
             }
-            5 | 6 => {
-                // scExtensions | scProcess
+            6 => {
+                // scProcess
                 if exec_proc {
-                    if task.command == 6 {
-                        let words = crate::util::split_command_line(&task.param);
-                        if words.is_empty() {
-                            let mut err = b"Could not execute scheduled process-script, failed to parse command line: ".to_vec();
-                            err.extend_from_slice(&task.param);
-                            emit_sched_log(env, 4, &err);
-                        } else {
-                            let c_words: Vec<Vec<u8>> =
-                                words.iter().map(|w| make_c_buf(w)).collect();
-                            let mut ptrs: Vec<*const c_char> =
-                                Vec::with_capacity(c_words.len() + 1);
-                            ptrs.push(param_c.as_ptr() as *const c_char);
-                            for w in &c_words {
-                                ptrs.push(w.as_ptr() as *const c_char);
-                            }
-                            cb(
-                                env.ctx,
-                                4,
-                                1,
-                                task.id,
-                                ptrs.as_ptr(),
-                                ptrs.len(),
-                                std::ptr::null_mut(),
-                                std::ptr::null_mut(),
-                                std::ptr::null_mut(),
-                            );
-                        }
+                    let words = crate::util::split_command_line(&task.param);
+                    if words.is_empty() {
+                        let mut err = b"Could not execute scheduled process-script, failed to parse command line: ".to_vec();
+                        err.extend_from_slice(&task.param);
+                        emit_sched_log(env, 4, &err);
                     } else {
-                        let ptrs = [param_c.as_ptr() as *const c_char];
+                        let c_words: Vec<Vec<u8>> =
+                            words.iter().map(|w| make_c_buf(w)).collect();
+                        let mut ptrs: Vec<*const c_char> =
+                            Vec::with_capacity(c_words.len() + 1);
+                        ptrs.push(param_c.as_ptr() as *const c_char);
+                        for w in &c_words {
+                            ptrs.push(w.as_ptr() as *const c_char);
+                        }
                         cb(
                             env.ctx,
                             4,
-                            0,
+                            1,
                             task.id,
                             ptrs.as_ptr(),
-                            1,
+                            ptrs.len(),
                             std::ptr::null_mut(),
                             std::ptr::null_mut(),
                             std::ptr::null_mut(),
@@ -1157,20 +1141,13 @@ impl NzbgetRsScheduler {
                     1
                 }
                 4 => {
-                    if !ptrs.is_null() && len > 0 {
-                        let p0 = unsafe { *ptrs };
-                        let words = if len > 1 {
-                            unsafe { ptrs.add(1) }
-                        } else {
-                            std::ptr::null()
-                        };
+                    // ptrs[0] = task param, ptrs[1..] = program and arguments
+                    if a1 != 0 && !ptrs.is_null() && len > 1 {
                         unsafe {
-                            crate::script::scheduler_script_start_active(
-                                p0,
-                                a1 != 0,
+                            crate::procrun::scheduler_process_start_active(
                                 a2,
-                                words,
-                                len.saturating_sub(1),
+                                ptrs.add(1),
+                                len - 1,
                             );
                         }
                     }
@@ -1582,14 +1559,13 @@ pub(crate) fn create_daemon_service_coord() {
         *g = Some(arc);
     }
     crate::scanner::create_daemon_scanner();
-    crate::script::create_daemon_ext_mgr();
     crate::twin::create_daemon_twincheck();
     crate::dupesearch_coord::create_daemon_dupesearch();
     crate::urlcoord::create_daemon_url_coord();
     crate::feed::create_daemon_feed_coord();
     crate::articledl::create_daemon_memory_monitor();
     crate::statmeter::create_daemon_statmeter();
-    crate::extension::create_daemon_maintenance();
+    crate::maintenance::create_daemon_maintenance();
     let _ = create_daemon_scheduler();
 }
 

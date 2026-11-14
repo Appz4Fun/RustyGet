@@ -143,7 +143,7 @@ pub fn format_temp_url_path(temp_dir: &[u8], sep: u8, id: i32) -> Vec<u8> {
 use crate::queuesubsys_host::{
     QueueSubsysHost, ASPECT_URL_ADDED, ASPECT_URL_COMPLETED, ASPECT_URL_DELETED, ASPECT_URL_FAILED,
     ASPECT_URL_FOUND, ASPECT_URL_RETURNED, NZB_INT_ACTIVE_DOWNLOADS, NZB_INT_AVOID_HISTORY,
-    NZB_INT_DELETE_STATUS, NZB_INT_DELETING, NZB_INT_URL_STATUS, QE_URL_COMPLETED,
+    NZB_INT_DELETE_STATUS, NZB_INT_DELETING, NZB_INT_URL_STATUS,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -598,8 +598,6 @@ impl NzbgetRsUrlCoord {
             };
             host.nzb_set_int(nzb_ptr, NZB_INT_URL_STATUS, scan_st);
         }
-
-        host.queue_script_enqueue(nzb_ptr, QE_URL_COMPLETED);
 
         host.with_locked_queue(|dq_ptr| {
             host.nzb_set_int(nzb_ptr, NZB_INT_ACTIVE_DOWNLOADS, 0);

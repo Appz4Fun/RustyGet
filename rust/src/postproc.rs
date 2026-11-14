@@ -1,6 +1,6 @@
 //! End-to-end Rust orchestration for post-processing controllers:
 //! `ParChecker`, `UnpackController`, `DirectUnpack`, `MoveController`,
-//! `CleanupController`, `RenameController`, `PostRenamerController`, and `PostScriptController`.
+//! `CleanupController`, `RenameController`, and `PostRenamerController`.
 
 use crate::parchecker::{
     is_processed_file, ParRepairEvents, ParSegment, QuickInfo, RustParRepairer,
@@ -4045,7 +4045,7 @@ unsafe extern "C" fn direct_unpack_host_cb(
 }
 
 // ============================================================================
-// 4. Move, Cleanup, Rename, PostRenamer & PostScript Controllers
+// 4. Move, Cleanup, Rename & PostRenamer Controllers
 // ============================================================================
 
 fn map_cleanup_kind(kind: crate::cleanup::CleanupLogKind) -> i32 {
@@ -4808,623 +4808,6 @@ fn run_post_renamer_job(ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn, is_
 }
 
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-fn post_script_add_message_inner(
-    ctx: *mut c_void,
-    host_cb: NzbgetRsRepairCtrlHostFn,
-    script_host_cb: crate::script::NzbgetRsScriptHostFn,
-    prefix_len: usize,
-    info_name: &[u8],
-    nzb_name: &[u8],
-    kind: i32,
-    text: &[u8],
-) {
-    let msg_text = &text[prefix_len.min(text.len())..];
-    let cmd = crate::extension::parse_post_script_cmd(msg_text);
-    if cmd.kind != 0 {
-        if msg_text.len() >= 6 {
-            let dbg = [b"Command ", &msg_text[6..], b" detected"].concat();
-            crate::script::host_log(ptr::null_mut(), script_host_cb, MK_DEBUG, &dbg);
-        }
-        match cmd.kind {
-            1 => {
-                let c_val = to_c_buf(&msg_text[cmd.val_offset.min(msg_text.len())..]);
-                with_dq_guard(ctx, host_cb, |_| unsafe {
-                    host_cb(
-                        ctx,
-                        5,
-                        2,
-                        1,
-                        0,
-                        0,
-                        c_val.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                });
-            }
-            2 => {
-                let c_val = to_c_buf(&msg_text[cmd.val_offset.min(msg_text.len())..]);
-                with_dq_guard(ctx, host_cb, |_| unsafe {
-                    host_cb(
-                        ctx,
-                        5,
-                        2,
-                        2,
-                        0,
-                        0,
-                        c_val.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                });
-            }
-            3 => {
-                let k_end = (cmd.key_offset + cmd.key_len).min(msg_text.len());
-                let c_key = to_c_buf(&msg_text[cmd.key_offset.min(k_end)..k_end]);
-                let c_val = to_c_buf(&msg_text[cmd.val_offset.min(msg_text.len())..]);
-                with_dq_guard(ctx, host_cb, |_| unsafe {
-                    host_cb(
-                        ctx,
-                        5,
-                        2,
-                        3,
-                        0,
-                        0,
-                        c_key.as_ptr() as *const c_char,
-                        c_val.as_ptr() as *const c_char,
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                });
-            }
-            4 => {
-                let mark_msg = [b"Marking ", nzb_name, b" as bad"].concat();
-                post_script_add_message_inner(
-                    ctx,
-                    host_cb,
-                    script_host_cb,
-                    0,
-                    info_name,
-                    nzb_name,
-                    MK_WARNING,
-                    &mark_msg,
-                );
-                with_dq_guard(ctx, host_cb, |_| unsafe {
-                    host_cb(
-                        ctx,
-                        5,
-                        4,
-                        1,
-                        0,
-                        0,
-                        ptr::null(),
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                });
-            }
-            _ => {
-                let err_msg = [
-                    b"Invalid command \"",
-                    msg_text,
-                    b"\" received from ",
-                    info_name,
-                ]
-                .concat();
-                let c_err = to_c_buf(&err_msg);
-                unsafe {
-                    host_cb(
-                        ctx,
-                        5,
-                        3,
-                        MK_ERROR,
-                        0,
-                        0,
-                        c_err.as_ptr() as *const c_char,
-                        ptr::null(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                    );
-                }
-            }
-        }
-    } else {
-        let c_txt = to_c_buf(text);
-        unsafe {
-            host_cb(
-                ctx,
-                5,
-                3,
-                kind,
-                0,
-                0,
-                c_txt.as_ptr() as *const c_char,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        }
-        with_dq_guard(ctx, host_cb, |_| unsafe {
-            host_cb(
-                ctx,
-                5,
-                4,
-                0,
-                0,
-                0,
-                c_txt.as_ptr() as *const c_char,
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-        });
-    }
-
-    let mut pause_i64s = [0i64; 2];
-    let is_paused = unsafe {
-        host_cb(
-            ctx,
-            5,
-            5,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            pause_i64s.as_mut_ptr(),
-            ptr::null_mut(),
-        ) != 0
-    };
-    if is_paused {
-        let stage_time = pause_i64s[0];
-        let start_time = pause_i64s[1];
-        let wait_time = current_time_sec();
-
-        loop {
-            let still_paused = unsafe {
-                host_cb(
-                    ctx,
-                    5,
-                    5,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                ) != 0
-            };
-            if !still_paused || job_is_stopped(ctx, host_cb) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-            let delta = current_time_sec() - wait_time;
-            let mut upd = [
-                if stage_time > 0 {
-                    stage_time + delta
-                } else {
-                    0
-                },
-                if start_time > 0 {
-                    start_time + delta
-                } else {
-                    0
-                },
-            ];
-            unsafe {
-                host_cb(
-                    ctx,
-                    5,
-                    6,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    upd.as_mut_ptr(),
-                    ptr::null_mut(),
-                );
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-pub unsafe fn post_script_run(
-    runner: &crate::script::ScriptRunner,
-    ext_mgr_ptr: *const crate::extension::RsExtensionManager,
-    parcheck_enabled: bool,
-    ctx: *mut c_void,
-    host_cb: Option<NzbgetRsRepairCtrlHostFn>,
-    script_host_cb: Option<crate::script::NzbgetRsScriptHostFn>,
-) {
-    let (Some(cb), Some(shcb)) = (host_cb, script_host_cb) else {
-        return;
-    };
-
-    let script_comma_list = with_dq_guard(ctx, cb, |_| {
-        let param_count = unsafe {
-            cb(
-                ctx,
-                1,
-                0,
-                0,
-                0,
-                0,
-                ptr::null(),
-                ptr::null(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-            ) as usize
-        };
-        let mut list = Vec::new();
-        for idx in 0..param_count {
-            let mut strs = [ptr::null() as *const c_char; 2];
-            unsafe {
-                cb(
-                    ctx,
-                    1,
-                    1,
-                    idx as c_int,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                );
-            }
-            let pname = unsafe { ptr_bytes(strs[0]) };
-            let pval = unsafe { ptr_bytes(strs[1]) };
-            if !pname.is_empty()
-                && pname[0] != b'*'
-                && pname[pname.len() - 1] == b':'
-                && (pval.eq_ignore_ascii_case(b"yes")
-                    || pval.eq_ignore_ascii_case(b"on")
-                    || pval == b"1")
-            {
-                list.extend_from_slice(&pname[..pname.len() - 1]);
-                list.push(b',');
-            }
-        }
-        list
-    });
-
-    if let Some(ext_mgr) = ext_mgr_ptr.as_ref() {
-        let mut cfg = crate::script::ScriptExecEnv::new(ptr::null_mut(), shcb);
-
-        ext_mgr.execute_script_list(&script_comma_list, |ext| {
-            if !ext.post_script {
-                return;
-            }
-            let mut ints = [0 as c_int; 1];
-            let mut strs = [ptr::null() as *const c_char; 1];
-            unsafe {
-                cb(
-                    ctx,
-                    4,
-                    0,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ints.as_mut_ptr(),
-                    ptr::null_mut(),
-                    strs.as_mut_ptr(),
-                );
-            }
-            if ints[0] != 0 {
-                return;
-            }
-            let nzb_name = unsafe { ptr_bytes(strs[0]) };
-            let info_name = trunc_1023(
-                [
-                    b"post-process-script ",
-                    ext.name.as_slice(),
-                    b" for ",
-                    nzb_name.as_slice(),
-                ]
-                .concat(),
-            );
-
-            let exec_msg = [
-                b"Executing post-process-script ",
-                ext.name.as_slice(),
-                b" for ",
-                nzb_name.as_slice(),
-            ]
-            .concat();
-            post_script_add_message_inner(
-                ctx, cb, shcb, 0, &info_name, &nzb_name, MK_INFO, &exec_msg,
-            );
-
-            let prog_lbl =
-                trunc_1023([b"Executing post-process-script ", ext.name.as_slice()].concat());
-            let c_prog = to_c_buf(&prog_lbl);
-            with_dq_guard(ctx, cb, |_| unsafe {
-                cb(
-                    ctx,
-                    4,
-                    1,
-                    0,
-                    0,
-                    0,
-                    c_prog.as_ptr() as *const c_char,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            });
-
-            runner.set_info_name(&info_name);
-            cfg.args = vec![ext.entry.clone()];
-            cfg.log_prefix = Some(ext.display_name.clone());
-            let prefix_len = ext.display_name.len() + 2;
-
-            with_dq_guard(ctx, cb, |_| {
-                cfg.reset_env(ptr::null_mut(), shcb);
-                let mut env_ints = [0 as c_int; 14];
-                let mut env_strs = [ptr::null() as *const c_char; 8];
-                let mut status_buf = Vec::new();
-                extern "C" fn set_vec(vec_ptr: usize, s: *const c_char) {
-                    let v = unsafe { &mut *(vec_ptr as *mut Vec<u8>) };
-                    *v = unsafe { ptr_bytes(s) };
-                }
-                unsafe {
-                    cb(
-                        ctx,
-                        4,
-                        3,
-                        0,
-                        (&mut status_buf as *mut Vec<u8>) as usize,
-                        set_vec as *const () as usize,
-                        ptr::null(),
-                        ptr::null(),
-                        env_ints.as_mut_ptr(),
-                        ptr::null_mut(),
-                        env_strs.as_mut_ptr(),
-                    );
-                }
-                let env_owned: [std::ffi::CString; 8] = std::array::from_fn(|idx| {
-                    let p = env_strs[idx];
-                    if p.is_null() {
-                        std::ffi::CString::default()
-                    } else {
-                        unsafe { CStr::from_ptr(p) }.to_owned()
-                    }
-                });
-                let srv_count = env_ints[12].max(0) as usize;
-                let mut srv_ids = Vec::with_capacity(srv_count);
-                let mut srv_succ = Vec::with_capacity(srv_count);
-                let mut srv_fail = Vec::with_capacity(srv_count);
-                for i in 0..srv_count {
-                    let mut si = [0 as c_int; 3];
-                    unsafe {
-                        cb(
-                            ctx,
-                            4,
-                            4,
-                            i as c_int,
-                            0,
-                            0,
-                            ptr::null(),
-                            ptr::null(),
-                            si.as_mut_ptr(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        );
-                    }
-                    srv_ids.push(si[0]);
-                    srv_succ.push(si[1]);
-                    srv_fail.push(si[2]);
-                }
-
-                let param_count = env_ints[13].max(0) as usize;
-                let mut params = Vec::with_capacity(param_count);
-                for idx in 0..param_count {
-                    let mut pstrs = [ptr::null() as *const c_char; 2];
-                    unsafe {
-                        cb(
-                            ctx,
-                            1,
-                            1,
-                            idx as c_int,
-                            0,
-                            0,
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            pstrs.as_mut_ptr(),
-                        );
-                    }
-                    params.push((unsafe { ptr_bytes(pstrs[0]) }, unsafe {
-                        ptr_bytes(pstrs[1])
-                    }));
-                }
-
-                let c_status = to_c_buf(&status_buf);
-                let status_cstr = CStr::from_bytes_with_nul(&c_status).unwrap_or(c"");
-                let inp = crate::extension::PostScriptEnvInput {
-                    nzb_id: env_ints[0],
-                    nzb_name: env_owned[0].as_c_str(),
-                    dest_dir: env_owned[1].as_c_str(),
-                    filename: env_owned[2].as_c_str(),
-                    queued_filename: env_owned[3].as_c_str(),
-                    url: env_owned[4].as_c_str(),
-                    final_dir: env_owned[5].as_c_str(),
-                    category: env_owned[6].as_c_str(),
-                    health: env_ints[1],
-                    critical_health: env_ints[2],
-                    dupe_key: env_owned[7].as_c_str(),
-                    dupe_score: env_ints[3],
-                    dupe_mode: env_ints[4],
-                    status: status_cstr,
-                    script_status: env_ints[5],
-                    par_status: env_ints[6],
-                    unpack_status: env_ints[7],
-                    delete_status: env_ints[8],
-                    mark_status: env_ints[9],
-                    total_articles: env_ints[10],
-                    success_articles: env_ints[11],
-                    failed_articles: unsafe {
-                        cb(
-                            ctx,
-                            4,
-                            5,
-                            0,
-                            0,
-                            0,
-                            ptr::null(),
-                            ptr::null(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                            ptr::null_mut(),
-                        ) as c_int
-                    },
-                    server_ids: &srv_ids,
-                    server_success_articles: &srv_succ,
-                    server_failed_articles: &srv_fail,
-                };
-
-                let cfg_cell = std::cell::RefCell::new(&mut cfg);
-                crate::extension::post_script_prepare_env(
-                    &inp,
-                    |name, val| {
-                        cfg_cell
-                            .borrow_mut()
-                            .set_env_var(name.to_bytes(), val.to_bytes());
-                    },
-                    |name, val| {
-                        cfg_cell.borrow_mut().set_int_env_var(name.to_bytes(), val);
-                    },
-                );
-                cfg.prepare_env_script(Some(&params), &ext.name, ptr::null_mut(), shcb);
-            });
-
-            let exit_code = runner.execute(&mut cfg, ptr::null_mut(), shcb, &mut |kind, text| {
-                let cur_info = runner.get_info_name();
-                post_script_add_message_inner(
-                    ctx, cb, shcb, prefix_len, &cur_info, &nzb_name, kind, text,
-                );
-            });
-            cfg.log_prefix = None;
-
-            let par_status = unsafe {
-                cb(
-                    ctx,
-                    4,
-                    9,
-                    0,
-                    0,
-                    0,
-                    ptr::null(),
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                ) as c_int
-            };
-
-            let mut up_info_name = info_name.clone();
-            if let Some(first) = up_info_name.first_mut() {
-                *first = b'P';
-            }
-
-            let (st, action, req_par) = crate::extension::analyse_post_script_exit_code(
-                exit_code,
-                par_status,
-                1,
-                parcheck_enabled,
-                0,
-                1,
-                2,
-            );
-            let (res_kind, res_msg) = match action {
-                1 => (MK_INFO, [up_info_name.as_slice(), b" successful"].concat()),
-                2 => (MK_ERROR, [up_info_name.as_slice(), b" failed"].concat()),
-                3 => (MK_INFO, [up_info_name.as_slice(), b" skipped"].concat()),
-                4 => (
-                    MK_ERROR,
-                    [
-                        up_info_name.as_slice(),
-                        b" requested par-check/repair, but the collection was already checked",
-                    ]
-                    .concat(),
-                ),
-                5 => (
-                    MK_INFO,
-                    [up_info_name.as_slice(), b" requested par-check/repair"].concat(),
-                ),
-                _ => (
-                    MK_ERROR,
-                    [
-                        up_info_name.as_slice(),
-                        b" failed (terminated with unknown status)",
-                    ]
-                    .concat(),
-                ),
-            };
-            post_script_add_message_inner(
-                ctx, cb, shcb, 0, &info_name, &nzb_name, res_kind, &res_msg,
-            );
-
-            let c_sname = to_c_buf(&ext.name);
-            with_dq_guard(ctx, cb, |_| unsafe {
-                cb(
-                    ctx,
-                    4,
-                    10,
-                    st,
-                    usize::from(req_par),
-                    0,
-                    c_sname.as_ptr() as *const c_char,
-                    ptr::null(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            });
-        });
-    }
-
-    unsafe {
-        cb(
-            ctx,
-            1,
-            2,
-            0,
-            0,
-            0,
-            ptr::null(),
-            ptr::null(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-    }
-}
-
-#[cfg(unix)]
 thread_local! {
     static POST_JOB_ARENA_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static POST_JOB_STR_ARENA: std::cell::RefCell<Vec<std::ffi::CString>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -5502,6 +4885,17 @@ fn arena_ranges(ranges: Vec<crate::dupefallback::NzbgetRsByteRange>) -> *const c
     p
 }
 
+/// Marks the post-processing of `post_ptr` as finished (`PostInfo::ptFinished`).
+#[cfg(unix)]
+fn finish_post_job(post_ptr: usize) {
+    use crate::queuesubsys_host::{POST_INT_STAGE, POST_INT_WORKING, PT_FINISHED};
+    let Some(host) = crate::ffi::queue_host() else {
+        return;
+    };
+    host.post_set_int(post_ptr, POST_INT_STAGE, PT_FINISHED);
+    host.post_set_int(post_ptr, POST_INT_WORKING, 0);
+}
+
 #[cfg(unix)]
 enum PostJobInner {
     Rename(c_int),
@@ -5511,7 +4905,8 @@ enum PostJobInner {
     Cleanup,
     Move,
     PostRenamer(bool),
-    PostScript(Arc<crate::script::ScriptRunner>),
+    /// Last stage: marks post-processing as finished.
+    Finish,
 }
 
 #[cfg(unix)]
@@ -5521,15 +4916,6 @@ pub struct NzbgetRsPostJob {
     post_ptr: usize,
     nzb_id: i32,
     inner: PostJobInner,
-}
-
-#[cfg(unix)]
-impl Drop for NzbgetRsPostJob {
-    fn drop(&mut self) {
-        if let PostJobInner::PostScript(ref runner) = self.inner {
-            runner.unregister_running();
-        }
-    }
 }
 
 #[cfg(unix)]
@@ -5564,7 +4950,7 @@ impl NzbgetRsPostJob {
             5 => PostJobInner::Cleanup,
             6 => PostJobInner::Move,
             7 | 8 => PostJobInner::PostRenamer(kind == 8),
-            9 => PostJobInner::PostScript(crate::script::ScriptRunner::new(true)),
+            9 => PostJobInner::Finish,
             _ => PostJobInner::Cleanup,
         };
         Self {
@@ -5591,12 +4977,6 @@ impl NzbgetRsPostJob {
                 crate::log::log_active_bytes(MK_DEBUG, b"Stopping unpack");
                 ctrl.stop();
             }
-            PostJobInner::PostScript(runner) => {
-                crate::log::log_active_bytes(MK_DEBUG, b"Stopping post-process-script");
-                if let Some(shcb) = crate::ffi::script_host_cb() {
-                    runner.terminate(ptr::null_mut(), shcb);
-                }
-            }
             _ => {}
         }
     }
@@ -5613,20 +4993,12 @@ impl NzbgetRsPostJob {
                 PostJobInner::Unpack(_) => {
                     crate::log::log_active_bytes(MK_DEBUG, b"Stopping unpack");
                 }
-                PostJobInner::PostScript(_) => {
-                    crate::log::log_active_bytes(MK_DEBUG, b"Stopping post-process-script");
-                }
                 _ => {}
             }
             host.thread_stop(self.thread_ptr);
             match &self.inner {
                 PostJobInner::Repair(Some(ctrl)) => ctrl.stop(),
                 PostJobInner::Unpack(ctrl) => ctrl.stop(),
-                PostJobInner::PostScript(runner) => {
-                    if let Some(shcb) = crate::ffi::script_host_cb() {
-                        runner.terminate(ptr::null_mut(), shcb);
-                    }
-                }
                 _ => {}
             }
         }
@@ -5685,16 +5057,8 @@ impl NzbgetRsPostJob {
                         run_post_renamer_job(ctx, post_renamer_job_host_cb, *post_unpack);
                         0
                     }
-                    PostJobInner::PostScript(runner) => {
-                        let ext_mgr = crate::script::active_ext_mgr();
-                        post_script_run(
-                            runner,
-                            ext_mgr.as_deref().map_or(ptr::null(), |m| m as *const _),
-                            crate::ffi::build_parcheck_enabled(),
-                            ctx,
-                            Some(post_script_job_host_cb),
-                            crate::ffi::script_host_cb(),
-                        );
+                    PostJobInner::Finish => {
+                        finish_post_job(self.post_ptr);
                         0
                     }
                 }
@@ -6789,184 +6153,6 @@ unsafe extern "C" fn post_renamer_job_host_cb(
                 host.nzb_set_int(n, NZB_INT_POST_DOWNLOAD_RENAMING_STATUS, a2);
             }
             host.post_set_int(job.post_ptr, POST_INT_WORKING, 0);
-            0
-        }
-        _ => 0,
-    }
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn post_script_job_host_cb(
-    raw_ctx: *mut c_void,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    s1: *const c_char,
-    s2: *const c_char,
-    ints: *mut c_int,
-    i64s: *mut i64,
-    strs: *mut *const c_char,
-) -> usize {
-    use crate::queuesubsys_host::{
-        KS_BAD, NZB_ACT_CLEAR_SCRIPT_STATUSES, NZB_INT_MARK_STATUS, NZB_STR_DEST_DIR,
-        NZB_STR_FINAL_DIR, POST_INT_FORCE_REPAIR, POST_INT_REQUEST_PAR_CHECK, POST_INT_STAGE,
-        POST_INT_WORKING, PT_FINISHED,
-    };
-    if op != 0 {
-        reset_call_arena();
-    }
-    let Some(host) = crate::ffi::queue_host() else {
-        return 0;
-    };
-    let job = unsafe { &*(raw_ctx as *const NzbgetRsPostJob) };
-    match op {
-        0 => {
-            unsafe { invoke_dq_guard_cb(&host, p1, p2) };
-            0
-        }
-        1 => {
-            let pi = job.post_ptr;
-            let n = host.post_snap(pi).nzb_ptr;
-            if a1 == 0 {
-                host.nzb_action(n, NZB_ACT_CLEAR_SCRIPT_STATUSES, 0);
-                return host.nzb_params_len(n);
-            }
-            if a1 == 1 {
-                let (pn, pv) = host.nzb_param_at(n, a2 as usize);
-                let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 2) };
-                str_out[0] = arena_cstr(&pn);
-                str_out[1] = arena_cstr(&pv);
-                return 0;
-            }
-            host.post_set_int(pi, POST_INT_STAGE, PT_FINISHED);
-            host.post_set_int(pi, POST_INT_WORKING, 0);
-            0
-        }
-        2 => usize::from(a1 == 0 && host.thread_is_stopped(job.thread_ptr)),
-        4 => {
-            let pi = job.post_ptr;
-            let ps = host.post_snap(pi);
-            let n = ps.nzb_ptr;
-            if a1 == 0 {
-                let ns = host.nzb_snap(n, false);
-                unsafe { *ints = i32::from(ps.request_par_check) };
-                unsafe { *strs = arena_cstr(&ns.name) };
-                return 0;
-            }
-            if a1 == 1 {
-                host.post_set_progress_label(pi, &unsafe { ptr_bytes(s1) });
-                return 0;
-            }
-            if a1 == 3 {
-                let ns = host.nzb_snap(n, true);
-                let c_st = to_c_buf(&ns.text_status);
-                let cb_fn: extern "C" fn(usize, *const c_char) = unsafe { std::mem::transmute(p2) };
-                cb_fn(p1, c_st.as_ptr() as *const c_char);
-                let ins = unsafe { std::slice::from_raw_parts_mut(ints, 14) };
-                let str_out = unsafe { std::slice::from_raw_parts_mut(strs, 8) };
-                ins[0] = ns.id;
-                ins[1] = ns.health;
-                ins[2] = ns.critical_health_exact;
-                ins[3] = ns.dupe_score;
-                ins[4] = ns.dupe_mode;
-                ins[5] = ns.script_total_status;
-                ins[6] = ns.par_status;
-                ins[7] = ns.unpack_status;
-                ins[8] = ns.delete_status;
-                ins[9] = ns.mark_status;
-                ins[10] = ns.total_articles;
-                ins[11] = ns.success_articles;
-                ins[12] = host.nzb_server_stats_len(n) as c_int;
-                ins[13] = host.nzb_params_len(n) as c_int;
-                str_out[0] = arena_cstr(&ns.name);
-                str_out[1] = arena_cstr(&ns.dest_dir);
-                str_out[2] = arena_cstr(&ns.filename);
-                str_out[3] = arena_cstr(&ns.queued_filename);
-                str_out[4] = arena_cstr(&ns.url);
-                str_out[5] = arena_cstr(&ns.final_dir);
-                str_out[6] = arena_cstr(&ns.category);
-                str_out[7] = arena_cstr(&ns.dupe_key);
-                return 0;
-            }
-            if a1 == 4 {
-                let (sid, succ, fail) = host.nzb_server_stat_at(n, a2 as usize);
-                let ins = unsafe { std::slice::from_raw_parts_mut(ints, 3) };
-                ins[0] = sid;
-                ins[1] = succ;
-                ins[2] = fail;
-                return 0;
-            }
-            if a1 == 5 {
-                return host.nzb_snap(n, false).failed_articles as usize;
-            }
-            if a1 == 9 {
-                return host.nzb_snap(n, false).par_status as usize;
-            }
-            if a1 == 10 {
-                if p1 != 0 {
-                    host.post_set_int(pi, POST_INT_REQUEST_PAR_CHECK, 1);
-                    host.post_set_int(pi, POST_INT_FORCE_REPAIR, 1);
-                }
-                host.nzb_push_script_status(n, &unsafe { ptr_bytes(s1) }, a2);
-            }
-            0
-        }
-        5 => {
-            let pi = job.post_ptr;
-            let ps = host.post_snap(pi);
-            let n = ps.nzb_ptr;
-            if a1 == 2 {
-                if a2 == 1 {
-                    host.nzb_set_str(n, NZB_STR_FINAL_DIR, &unsafe { ptr_bytes(s1) });
-                } else if a2 == 2 {
-                    host.nzb_set_str(n, NZB_STR_DEST_DIR, &unsafe { ptr_bytes(s1) });
-                } else if a2 == 3 {
-                    host.nzb_set_param(
-                        n,
-                        &unsafe { ptr_bytes(s1) },
-                        Some(&unsafe { ptr_bytes(s2) }),
-                    );
-                }
-                return 0;
-            }
-            if a1 == 3 {
-                host.nzb_add_message(n, a2, &unsafe { ptr_bytes(s1) });
-                return 0;
-            }
-            if a1 == 4 {
-                if a2 == 1 {
-                    host.nzb_set_int(n, NZB_INT_MARK_STATUS, KS_BAD);
-                } else {
-                    host.post_set_progress_label(pi, &unsafe { ptr_bytes(s1) });
-                }
-                return 0;
-            }
-            if a1 == 5 {
-                let pause_pp = crate::ffi::active_workstate()
-                    .as_ref()
-                    .is_some_and(|w| w.pause_post_process());
-                let ns = host.nzb_snap(n, false);
-                if !pause_pp || ns.force_priority {
-                    return 0;
-                }
-                if !i64s.is_null() {
-                    let i64_out = unsafe { std::slice::from_raw_parts_mut(i64s, 2) };
-                    i64_out[0] = ps.stage_time;
-                    i64_out[1] = ps.start_time;
-                }
-                return 1;
-            }
-            if a1 == 6 {
-                let i64_in = unsafe { std::slice::from_raw_parts(i64s, 2) };
-                if i64_in[0] > 0 {
-                    host.post_set_stage_time(pi, i64_in[0]);
-                }
-                if i64_in[1] > 0 {
-                    host.post_set_start_time(pi, i64_in[1]);
-                }
-            }
             0
         }
         _ => 0,

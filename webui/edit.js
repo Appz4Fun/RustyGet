@@ -1040,34 +1040,20 @@ var ParamTab = (new function($)
 		return request;
 	}
 
+	// The post-processing switches enabled for a category: just the built-in
+	// *Unpack, following the category's (or the global) Unpack option.
 	function buildCategoryScriptList(category)
 	{
-		var scriptList = [];
-
 		for (var i=0; i < Options.categories.length; i++)
 		{
 			if (category === Options.categories[i])
 			{
-				scriptList = Util.parseCommaList(Options.option('Category' + (i + 1) + '.Extensions'));
-				if (scriptList.length === 0)
-				{
-					scriptList = Util.parseCommaList(Options.option('Extensions'));
-				}
-				if (Options.option('Category' + (i + 1) + '.Unpack') === 'yes')
-				{
-					scriptList.push('*Unpack');
-				}
-				return scriptList;
+				return Options.option('Category' + (i + 1) + '.Unpack') === 'yes' ? ['*Unpack'] : [];
 			}
 		}
 
 		// empty category or category not found
-		scriptList = Util.parseCommaList(Options.option('Extensions'));
-		if (Options.option('Unpack') === 'yes')
-		{
-			scriptList.push('*Unpack');
-		}
-		return scriptList;
+		return Options.option('Unpack') === 'yes' ? ['*Unpack'] : [];
 	}
 
 	this.reassignParams = function(postParams, oldCategory, newCategory)

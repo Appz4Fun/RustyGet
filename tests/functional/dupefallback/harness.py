@@ -466,7 +466,7 @@ class Daemon:
         self.nntp_port = nntp_port
         self.rpc_port = rpc_port
         self.datadir = target.makedirs('data')
-        for d in ('dst', 'inter', 'nzb', 'queue', 'tmp', 'scripts', 'web'):
+        for d in ('dst', 'inter', 'nzb', 'queue', 'tmp', 'web'):
             target.makedirs('main', d)
         self.conf_rel = 'nzbget.conf'
         self.proxy = None
@@ -484,10 +484,9 @@ class Daemon:
             'TempDir=%s' % w('main', 'tmp'),
             'LogFile=%s' % w('nzbget.log'),
             # Pin every path that nzbget would otherwise default to a
-            # compiled-in location (e.g. /downloads/scripts): an uncreatable
-            # ScriptDir/WebDir is a fatal config error that pauses the whole
-            # queue, which cross-compiled (Android) builds trip over.
-            'ScriptDir=%s' % w('main', 'scripts'),
+            # compiled-in location: an uncreatable WebDir is a fatal config
+            # error that pauses the whole queue, which cross-compiled
+            # (Android) builds trip over.
             'WebDir=%s' % w('main', 'web'),
             'LockFile=%s' % w('nzbget.lock'),
             'ConfigTemplate=', 'RequiredDir=',
@@ -5233,21 +5232,6 @@ def scenario_dupesearchlegacyrename(daemon, t):
     return 'dupesearchlegacyrename', ok, detail
 
 
-def scenario_dupesearchwatchscript(daemon, t):
-    """A manual rename wakes native discovery without inventing script events."""
-    ok, detail = _ds_rename_regression(daemon, t)
-    return 'dupesearchwatchscript', ok, detail
-
-
-WATCH_EVENT_EXTENSION = '''#!/usr/bin/env python3
-### NZBGET QUEUE SCRIPT
-# QueueEvents=NZB_ADDED,NZB_NAMED
-### NZBGET QUEUE SCRIPT
-import os
-print('[INFO] WATCH_EVENT=' + os.environ.get('NZBNA_EVENT', 'MISSING'))
-'''
-
-
 def scenario_dupesearchwatchbackup(daemon, t):
     """A failing pick with a healthy existing whole backup does not broaden an
     empty search or retain a retryable stamp. The persisted stamp checks the
@@ -5844,19 +5828,6 @@ def scenario_dupesearchpickdeleted(daemon, t):
     return ('dupesearchpickdeleted', ok, 'donors=%d stopped_logs=%d' % (len(donors), stopped))
 
 
-def scenario_dupesearchpickgoneadd(daemon, t):
-    """B33: the pick is deleted while its first donor is being added (a scan
-    extension, which runs inside the add, deletes it): the donor just added is
-    removed again, and no other donor is added."""
-    api, pick, donors = _ds_interrupt_pick(daemon, t, None)
-    deleted = _grep_log(t, 'deletepick: deleted')
-    removed = _grep_log(t, 'just added: the pick was deleted')
-    pick_left = [g for g in api.listgroups() if g['NZBID'] == pick['NZBID']]
-    ok = deleted == 1 and removed == 1 and not donors and not pick_left
-    return ('dupesearchpickgoneadd', ok, 'deleted_by_extension=%d removed_logs=%d donors=%d pick_queued=%d'
-            % (deleted, removed, len(donors), len(pick_left)))
-
-
 def scenario_dupesearchquickstop(daemon, t):
     """B37: nzbget shuts down during a donor health check (each article takes
     2 s, DupeHealthBudget=120): the check ends with the shutdown instead of
@@ -5889,33 +5860,6 @@ def scenario_dupesearchquickstop(daemon, t):
             % (checking, took, resumes, added))
 
 
-# a scan extension that deletes the pick while the first donor is being added
-DELETE_PICK_EXTENSION = '''#!/usr/bin/env python3
-##############################################################################
-### NZBGET SCAN SCRIPT                                                     ###
-# Deletes the pick while a duplicate search adds its first donor.
-### NZBGET SCAN SCRIPT                                                     ###
-##############################################################################
-import json, os, sys, urllib.request
-
-if int(os.environ.get('NZBNP_DUPESCORE', '0')) == %d:
-    sys.exit(0)
-marker = os.path.join(os.environ['NZBOP_TEMPDIR'], 'deletepick.done')
-if os.path.exists(marker):
-    sys.exit(0)
-open(marker, 'w').close()
-url = 'http://127.0.0.1:%%s/jsonrpc' %% os.environ['NZBOP_CONTROLPORT']
-
-def call(method, *params):
-    body = json.dumps({'method': method, 'params': list(params)}).encode()
-    return json.loads(urllib.request.urlopen(url, body, timeout=10).read())['result']
-
-for group in call('listgroups', 0):
-    if group['DupeScore'] == %d:
-        call('editqueue', 'GroupDelete', '', [group['NZBID']])
-        print('[INFO] deletepick: deleted %%d' %% group['NZBID'])
-sys.exit(0)
-''' % (DS_PICK, DS_PICK)
 
 
 def scenario_dupesearchresubmit(daemon, t):
@@ -6641,44 +6585,6 @@ def scenario_fleetmostlydead(daemon, t):
     return ('fleetmostlydead', ok, 'reply=%s' % reply)
 
 
-SLOW_POST_EXTENSION = '''#!/usr/bin/env python3
-##############################################################################
-### NZBGET POST-PROCESSING SCRIPT                                          ###
-# Keeps a download in post-processing for a while.
-### NZBGET POST-PROCESSING SCRIPT                                          ###
-##############################################################################
-import sys, time
-time.sleep(25)
-sys.exit(93)
-'''
-
-
-def scenario_fleetduringpost(daemon, t):
-    """appendfleet: a fleet sent while another download is in post-processing
-    (production: one sent while an item unpacked came back in 3.7 s with every
-    member unmeasured, the first one queued by chance). Post-processing holds no
-    news-server connection: the fleet is checked and ranked as any other."""
-    daemon.fake_nntp.alive = set(_fleet_ids('qp')) | set(_fleet_ids('qw'))
-    api = daemon.wait_ready()
-    _ds_append(api, 'Post.Busy', _fake_nzb_ids(_fleet_ids('qp'), 400_000).decode(), 'post-key', 100, paused=False)
-    # the slow post-processing script runs (25 s)
-    def in_script():
-        return any(g['NZBName'] == 'Post.Busy' and g['Status'] == 'EXECUTING_SCRIPT' for g in api.listgroups())
-    deadline = time.time() + 60
-    while time.time() < deadline and not in_script():
-        time.sleep(0.3)
-    in_post = in_script()
-    start = time.time()
-    reply = _fleet(daemon, [('Show.S01E01.dead', _fake_nzb_ids(_fleet_ids('qd'), 400_000).decode()),
-                            ('Show.S01E01.whole', _fake_nzb_ids(_fleet_ids('qw'), 410_000).decode())],
-                   key='fleet:post', timeout=20)
-    took = time.time() - start
-    still_post = in_script()
-    byname = {m['Name']: m for m in reply['Members']}
-    ok = (in_post and still_post and reply['Complete'] and all(m['Alive'] >= 0 for m in reply['Members']) and
-          byname['Show.S01E01.whole']['Status'] == 'QUEUED' and byname['Show.S01E01.dead']['Status'] == 'DEAD')
-    return ('fleetduringpost', ok, 'in_post=%s/%s took=%.1f complete=%s reply=%s' % (
-        in_post, still_post, took, reply['Complete'], [(m['Name'], m['Status'], m['Alive']) for m in reply['Members']]))
 
 
 def _rpc(daemon, method, params, timeout=60):
@@ -9048,63 +8954,6 @@ def scenario_connhold(daemon, t):
     return ('connhold', ok, 'status=%s open 2s after=%d 10s after=%d (accepted=%d)' % (
         h['Status'], open_held, open_after, daemon.proxy.accepted))
 
-# a scan extension that marks every nzb it sees
-CATEGORY_SCAN_EXTENSION = '''#!/usr/bin/env python3
-##############################################################################
-### NZBGET SCAN SCRIPT                                                     ###
-# Marks the nzb.
-### NZBGET SCAN SCRIPT                                                     ###
-##############################################################################
-import sys
-print('[NZB] NZBPR_scanmark=yes')
-sys.exit(0)
-'''
-
-
-def scenario_categoryscan(daemon, t):
-    """A scan extension set only in a category's Extensions (none in the
-    global Extensions) never ran: the scanner checked the global list alone
-    to decide whether scan scripts exist. Now it runs for the category's
-    nzbs."""
-    data = _payload(90_000, 8787)
-    pp = _place_copy(t, 'csA', data)
-    api = daemon.wait_ready()
-    daemon.append(api, 'RelCS', build_nzb(pp, 'cat.bin', len(data), 100_000, set()), False, 'cs-key', 100)
-    h = daemon.wait_history(api, 'RelCS', timeout=60)
-    params = {p['Name']: p['Value'] for p in h.get('Parameters', [])}
-    ok = h['Status'].startswith('SUCCESS') and params.get('scanmark') == 'yes'
-    return ('categoryscan', ok, 'status=%s category=%s params=%s' % (h['Status'], h.get('Category'), params))
-
-
-# a scan extension that sends a 3,000-character parameter and dupe key
-LONG_COMMAND_EXTENSION = '''#!/usr/bin/env python3
-##############################################################################
-### NZBGET SCAN SCRIPT                                                     ###
-# Sends long commands.
-### NZBGET SCAN SCRIPT                                                     ###
-##############################################################################
-import sys
-print('[NZB] NZBPR_longmark=' + 'v' * 3000 + 'end')
-print('[NZB] DUPEKEY=' + 'k' * 3000 + 'end')
-sys.exit(0)
-'''
-
-
-def scenario_scanlongcommand(daemon, t):
-    """[NZB] commands from a script longer than about 1,000 characters were
-    cut to fit a 1,024-byte log buffer before they were parsed: a long
-    parameter value or dupe key was silently shortened. Now they arrive
-    whole."""
-    data = _payload(90_000, 8888)
-    pp = _place_copy(t, 'lcA', data)
-    api = daemon.wait_ready()
-    daemon.append(api, 'RelLC', build_nzb(pp, 'long.bin', len(data), 100_000, set()), False, 'lc-key', 100)
-    h = daemon.wait_history(api, 'RelLC', timeout=60)
-    params = {p['Name']: p['Value'] for p in h.get('Parameters', [])}
-    mark = params.get('longmark', '')
-    key = h.get('DupeKey', '')
-    ok = h['Status'].startswith('SUCCESS') and mark == 'v' * 3000 + 'end' and key == 'k' * 3000 + 'end'
-    return ('scanlongcommand', ok, 'status=%s param_len=%d key_len=%d' % (h['Status'], len(mark), len(key)))
 
 
 def _inner_archive_keep(daemon, t, name):
@@ -9205,26 +9054,6 @@ def scenario_tasktypo(daemon, t):
     errors = _grep_log(t, 'Invalid value for option "Task1.Command"')
     ok = resumed and not paused and errors >= 1
     return ('tasktypo', ok, 'resumed=%s paused_after_task_time=%s invalid_logs=%d' % (resumed, paused, errors))
-
-
-def scenario_scriptdirlist(daemon, t):
-    """ScriptDir with two folders (scripts;scripts2, relative to MainDir): the
-    whole value was made absolute and created as one path, a junk folder
-    "scripts;scripts2" in MainDir, and the second folder was taken relative to
-    the working directory. Each folder is resolved and created on its own now,
-    and an extension in the first one still runs."""
-    data = _payload(90_000, 9090)
-    pp = _place_copy(t, 'sdA', data)
-    api = daemon.wait_ready()
-    daemon.append(api, 'RelSD', build_nzb(pp, 'sd.bin', len(data), 100_000, set()), False, 'sd-key', 100)
-    h = daemon.wait_history(api, 'RelSD', timeout=60)
-    params = {p['Name']: p['Value'] for p in h.get('Parameters', [])}
-    main = t.path('main')
-    junk = [d for d in os.listdir(main) if ';' in d or ',' in d]
-    second = os.path.isdir(os.path.join(main, 'scripts2'))
-    errors = _grep_log(t, 'Invalid value for option "ScriptDir"')
-    ok = params.get('scanmark') == 'yes' and not junk and second and errors == 0
-    return ('scriptdirlist', ok, 'scanmark=%s junk=%s scripts2=%s errors=%d' % (params.get('scanmark'), junk, second, errors))
 
 
 def scenario_urlredirects(daemon, t):
@@ -9435,22 +9264,9 @@ def scenario_speedtestnohistory(daemon, t):
     return ('speedtestnohistory', ok, 'reply=%s fetched=%d done=%s alive=%s' % (reply.get('result', reply.get('error')), len(hits), empty, alive))
 
 
-def scenario_errorpercent(daemon, t):
-    """An extension name with % in it (deleteextension "50%s%s%s%s"): the error
-    text, which holds the name, was used as a printf format - garbage in the
-    message, or a crash. The message holds the name as sent now."""
-    daemon.wait_ready()
-    name = '50%s%s%s%s%s%s%s%s'
-    reply = _rpc(daemon, 'deleteextension', [name])
-    message = (reply.get('error') or {}).get('message', '')
-    alive = t.procs[-1].poll() is None and bool(_rpc(daemon, 'version', []).get('result'))
-    ok = alive and name in message
-    return ('errorpercent', ok, 'alive=%s message=%r' % (alive, message[:120]))
-
-
 def scenario_getunsafe(daemon, t):
-    """Commands that change state or reach out (extension download/update/
-    delete, readurl, the speed tests) ran over GET as "safe" methods; they
+    """Commands that change state or reach out (readurl, the speed tests)
+    ran over GET as "safe" methods; they
     need POST now, as every other changing command does. Reading commands
     still work over GET."""
     import json as _json
@@ -9462,11 +9278,11 @@ def scenario_getunsafe(daemon, t):
             return _json.loads(reply.read().decode())
 
     refused = {}
-    for method in ('deleteextension?=nosuch', 'readurl?=http%3A%2F%2F127.0.0.1%3A9%2F&=x', 'testdiskspeed?=/tmp&=1&=1'):
+    for method in ('readurl?=http%3A%2F%2F127.0.0.1%3A9%2F&=x', 'testdiskspeed?=/tmp&=1&=1'):
         err = get(method).get('error') or {}
         refused[method.split('?')[0]] = err.get('code')
     version = get('version').get('result')
-    posted = _rpc(daemon, 'deleteextension', ['nosuch']).get('error', {}).get('code')
+    posted = _rpc(daemon, 'readurl', ['http://127.0.0.1:9/', 'x']).get('error', {}).get('code')
     ok = all(code == 4 for code in refused.values()) and bool(version) and posted not in (None, 4)
     return ('getunsafe', ok, 'get_error_codes=%s version_over_get=%s post_error=%s' % (refused, version, posted))
 
@@ -9543,8 +9359,8 @@ def scenario_volumereset(daemon, t):
 
 
 def scenario_xmlparamdecode(daemon, t):
-    """String parameters of testserver, testserverspeed, testdiskspeed and
-    startscript weren't decoded: over XML-RPC a url with "&" (sent as
+    """String parameters of testserver, testserverspeed and testdiskspeed
+    weren't decoded: over XML-RPC a url with "&" (sent as
     "&amp;") was fetched with "&amp;" in it. And testserver over JSON-P (GET)
     parsed the query string as a JSON body and always answered "Invalid
     JSON"; JSON-P now runs only the reading methods, so testserver, which
@@ -9619,37 +9435,7 @@ def scenario_pathtraversalarticle(daemon, t):
     return _path_traversal(daemon, t, 'pathtraversalarticle')
 
 
-# a post-processing extension that asks for a par-check on its first run
-PARCHECK_POST_EXTENSION = '''#!/usr/bin/env python3
-##############################################################################
-### NZBGET POST-PROCESSING SCRIPT                                          ###
-# Requests a par-check once (exit 92).
-### NZBGET POST-PROCESSING SCRIPT                                          ###
-##############################################################################
-import os, sys
-marker = os.path.join(os.environ['NZBOP_TEMPDIR'], 'askpar.count')
-runs = int(open(marker).read()) if os.path.exists(marker) else 0
-open(marker, 'w').write(str(runs + 1))
-print('[INFO] askpar: run %d, parstatus %s' % (runs + 1, os.environ.get('NZBPP_PARSTATUS')))
-sys.exit(92 if runs == 0 else 93)
-'''
 
-
-def scenario_scriptparcheck(daemon, t):
-    """A post-processing script exits 92 (POSTPROCESS_PARCHECK) for a download
-    whose par-check was skipped: the request was accepted, but the job had
-    finished and went to the history - no par-check, the scripts didn't run
-    again. Now the job starts over: par-check, then the script a second
-    time (it exits 93 then)."""
-    data = _payload(400_000, 9898)
-    pp = _place_copy(t, 'spA', data)
-    api = daemon.wait_ready()
-    daemon.append(api, 'RelSP', build_nzb(pp, 'sp.bin', len(data), 100_000, set()), False, 'sp-key', 100)
-    h = daemon.wait_history(api, 'RelSP', timeout=120)
-    runs = _grep_log(t, 'askpar: run ')
-    requested = _grep_log(t, 'requested par-check/repair')
-    ok = runs == 2 and requested == 1 and h['Status'].startswith('SUCCESS')
-    return ('scriptparcheck', ok, 'status=%s par=%s script_runs=%d requests=%d' % (h['Status'], h.get('ParStatus'), runs, requested))
 
 def scenario_urlschemes(daemon, t):
     """Only http and https are fetched: appendurl with file:// (a local nzb
@@ -9755,31 +9541,6 @@ def _cpu_seconds(pid):
         days, _, clock = out.rpartition('-')
         parts = [float(part) for part in clock.split(':')]
         return sum(part * 60 ** i for i, part in enumerate(reversed(parts))) + float(days or 0) * 86400
-
-
-def scenario_heldidle(daemon, t):
-    """ScriptPauseQueue=yes while a post-processing script runs, with another
-    download queued: the queue is held, its articles can't start, and the
-    coordinator's stand-by wait returned at once because "more jobs" stayed
-    true - a core at 100 % for as long as the script ran. It sleeps now."""
-    a = _payload(90_000, 10303)
-    b = _payload(400_000, 10304)
-    pa = _place_copy(t, 'hiA', a)
-    pb = _place_copy(t, 'hiB', b)
-    api = daemon.wait_ready()
-    daemon.append(api, 'RelHI1', build_nzb(pa, 'hi1.bin', len(a), 100_000, set()), False, 'hi-key1', 100)
-    deadline = time.time() + 60
-    while time.time() < deadline and _grep_log(t, 'Executing post-process-script slowpost for RelHI1') == 0:
-        time.sleep(0.5)
-    daemon.append(api, 'RelHI2', build_nzb(pb, 'hi2.bin', len(b), 100_000, set()), False, 'hi-key2', 100)
-    time.sleep(2)
-    pid = t.procs[-1].pid
-    before = _cpu_seconds(pid)
-    time.sleep(10)
-    used = _cpu_seconds(pid) - before
-    held = any(g['NZBName'] == 'RelHI2' and g.get('DownloadedSizeMB', 0) == 0 for g in api.listgroups())
-    ok = held and used < 2.0
-    return ('heldidle', ok, 'second_held=%s cpu_seconds_in_10s=%.1f' % (held, used))
 
 
 def scenario_filepausepars(daemon, t):
@@ -10184,29 +9945,6 @@ def scenario_damagedhistorykind(daemon, t):
     return ('damagedhistorykind', ok, 'damaged=%s alive=%s set_aside_logs=%d' % (damaged, alive, set_aside))
 
 
-# an extension (V1 header) whose TASK TIME line ends at the signature
-BARE_SIGNATURE_EXTENSION = '''#!/usr/bin/env python3
-##############################################################################
-### NZBGET SCHEDULER SCRIPT                                                ###
-# Bare signature lines.
-### TASK TIME:
-### NZBGET SCHEDULER SCRIPT                                                ###
-##############################################################################
-import sys
-sys.exit(93)
-'''
-
-
-def scenario_extbaresignature(daemon, t):
-    """An extension file in ScriptDir with a line that is a signature alone
-    ("### TASK TIME:"): reading what follows it threw std::out_of_range, and
-    the daemon ended at start. It starts now."""
-    try:
-        daemon.wait_ready()
-        alive = t.procs[-1].poll() is None
-    except Exception:
-        alive = False
-    return ('extbaresignature', alive, 'alive=%s' % alive)
 
 
 def scenario_articledecoyparrestart(daemon, t):
@@ -10665,45 +10403,7 @@ def scenario_daemonlock(daemon, t):
     return ('daemonlock', ok, 'up=%s pid=%r kept=%s removed=%s' % (first_up, pid, kept, removed))
 
 
-ARGCOUNT_EXTENSION = '''#!/bin/sh
-##############################################################################
-### NZBGET POST-PROCESSING SCRIPT                                          ###
-# Reports how many arguments it got.
-### NZBGET POST-PROCESSING SCRIPT                                          ###
-##############################################################################
-echo "[INFO] argcount=$#"
-exit 93
-'''
 
-SELFKILL_EXTENSION = '''#!/bin/sh
-##############################################################################
-### NZBGET POST-PROCESSING SCRIPT                                          ###
-# Dies of a signal.
-### NZBGET POST-PROCESSING SCRIPT                                          ###
-##############################################################################
-kill -9 $$
-'''
-
-
-def scenario_scriptargs(daemon, t):
-    """A script nzbget runs directly, with no interpreter (a shell script
-    named .pl here, or one without an extension), got its own path as its
-    first argument: argv was [script, script]. And a script that died of a
-    signal read as exit code 0; it's logged as killed now and doesn't count
-    as success anywhere an exit code 0 would."""
-    data = _payload(90_000, 12438)
-    pp = _place_copy(t, 'saA', data)
-    api = daemon.wait_ready()
-    daemon.append(api, 'RelSA', build_nzb(pp, 'sa.bin', len(data), 100_000, set()), False, 'sa-key', 100)
-    daemon.wait_history(api, 'RelSA')
-    deadline = time.time() + 30
-    while time.time() < deadline and _grep_log(t, 'selfkill') < 2:
-        time.sleep(0.5)
-    time.sleep(1)
-    argzero = _grep_log(t, 'argcount=0')
-    killed = _grep_log(t, 'was killed by signal 9')
-    ok = argzero == 1 and killed == 1
-    return ('scriptargs', ok, 'argcount0=%d killed=%d' % (argzero, killed))
 
 
 def scenario_urlarchive(daemon, t):
@@ -10862,54 +10562,6 @@ def scenario_extdownloadname(daemon, t):
     return ('extdownloadname', ok, 'escaped=%s left=%s reply=%s' % (escaped, left, str(reply)[:80]))
 
 
-FDLIST_EXTENSION = '''#!/bin/sh
-##############################################################################
-### NZBGET POST-PROCESSING SCRIPT                                          ###
-# Reports the sockets it inherited.
-### NZBGET POST-PROCESSING SCRIPT                                          ###
-##############################################################################
-# fd 0 is nzbget's own stdin (the harness gives it a socket); the rest
-n=0
-files=0
-paths=
-if [ -d /proc/$$/fd ]; then
-  for f in /proc/$$/fd/*; do
-    [ "${f##*/}" = 0 ] && continue
-    case "$(readlink "$f")" in socket:*) n=$((n+1));; esac
-  done
-  for f in /proc/$$/fd/*; do
-    case "$(readlink "$f")" in */nzbget.log|*/queue/*) files=$((files+1)); paths="$paths $(readlink "$f")";; esac
-  done
-else
-  # no /proc (macOS): lsof lists this shell's descriptors with their type
-  n=$(lsof -nP -p $$ -a -d 1-1024 2>/dev/null | awk '$5 == "IPv4" || $5 == "IPv6" || $5 == "unix" { c++ } END { print c + 0 }')
-  paths=$(lsof -nP -p $$ 2>/dev/null | awk '$NF ~ "/nzbget[.]log$|/queue/" { printf " %s", $NF }')
-  files=$(echo $paths | wc -w | tr -d ' ')
-fi
-echo "[INFO] inherited sockets=$n"
-echo "[INFO] inherited state files=$files"
-[ -n "$paths" ] && echo "[INFO] inherited state paths:$paths"
-exit 93
-'''
-
-
-def scenario_scriptsockets(daemon, t):
-    """A script doesn't inherit nzbget's sockets (the control port's listener,
-    client and news server connections) or its open files (log, queue state):
-    one that outlived the program kept the port listening, and copies kept
-    connections from closing."""
-    data = _payload(90_000, 12445)
-    pp = _place_copy(t, 'ssA', data)
-    api = daemon.wait_ready()
-    daemon.append(api, 'RelSS', build_nzb(pp, 'ss.bin', len(data), 100_000, set()), False, 'ss-key', 100)
-    daemon.wait_history(api, 'RelSS')
-    time.sleep(1)
-    log = t.read_file('nzbget.log').decode(errors='replace')
-    m = re.search(r'inherited sockets=(\d+)', log)
-    n = int(m.group(1)) if m else -1
-    m = re.search(r'inherited state files=(\d+)', log)
-    files = int(m.group(1)) if m else -1
-    return ('scriptsockets', n == 0 and files == 0, 'inherited_sockets=%s state_files=%s' % (n, files))
 
 
 def scenario_connectioncap(daemon, t):
@@ -11617,7 +11269,6 @@ SCENARIOS = {
     'dupesearchretiredfleet': scenario_dupesearchretiredfleet,
     'dupesearchvanishedbackup': scenario_dupesearchvanishedbackup,
     'dupesearchlegacyrename': scenario_dupesearchlegacyrename,
-    'dupesearchwatchscript': scenario_dupesearchwatchscript,
     'dupesearchwatchrename': scenario_dupesearchwatchrename,
     'complementary': scenario_complementary,
     'redownloadresetsrecovered': scenario_redownloadresetsrecovered,
@@ -11811,19 +11462,15 @@ SCENARIOS = {
     'yencrangeshort': scenario_yencrangeshort,
     'quotafutureday': scenario_quotafutureday,
     'connhold': scenario_connhold,
-    'categoryscan': scenario_categoryscan,
-    'scanlongcommand': scenario_scanlongcommand,
     'innerarchivekeep': scenario_innerarchivekeep,
     'innerarchivekeepdirect': scenario_innerarchivekeepdirect,
     'feedpreviewparallel': scenario_feedpreviewparallel,
     'tasktypo': scenario_tasktypo,
-    'scriptdirlist': scenario_scriptdirlist,
     'urlredirects': scenario_urlredirects,
     'urlclosed': scenario_urlclosed,
     'urlretrywait': scenario_urlretrywait,
     'historyeditlist': scenario_historyeditlist,
     'speedtestnohistory': scenario_speedtestnohistory,
-    'errorpercent': scenario_errorpercent,
     'getunsafe': scenario_getunsafe,
     'netspeedpause': scenario_netspeedpause,
     'httpedge': scenario_httpedge,
@@ -11831,11 +11478,9 @@ SCENARIOS = {
     'xmlparamdecode': scenario_xmlparamdecode,
     'pathtraversalnzb': scenario_pathtraversalnzb,
     'pathtraversalarticle': scenario_pathtraversalarticle,
-    'scriptparcheck': scenario_scriptparcheck,
     'urlschemes': scenario_urlschemes,
     'nzbentities': scenario_nzbentities,
     'uucache': scenario_uucache,
-    'heldidle': scenario_heldidle,
     'filepausepars': scenario_filepausepars,
     'nntppercent': scenario_nntppercent,
     'joinequalpieces': scenario_joinequalpieces,
@@ -11850,7 +11495,6 @@ SCENARIOS = {
     'longnamedir': scenario_longnamedir,
     'damagedstats': scenario_damagedstats,
     'damagedhistorykind': scenario_damagedhistorykind,
-    'extbaresignature': scenario_extbaresignature,
     'emptyconfigread': scenario_emptyconfigread,
     'damagedfilestate': scenario_damagedfilestate,
     'staletempstate': scenario_staletempstate,
@@ -11863,10 +11507,8 @@ SCENARIOS = {
     'partialnzb': scenario_partialnzb,
     'partialnzbdeclared': scenario_partialnzbdeclared,
     'daemonlock': scenario_daemonlock,
-    'scriptargs': scenario_scriptargs,
     'urlarchive': scenario_urlarchive,
     'extdownloadname': scenario_extdownloadname,
-    'scriptsockets': scenario_scriptsockets,
     'connectioncap': scenario_connectioncap,
     'parvolnames': scenario_parvolnames,
     'pardamagefailover': scenario_pardamagefailover,
@@ -11895,10 +11537,8 @@ SCENARIOS = {
     'idsafterfinaldelete': scenario_idsafterfinaldelete,
     'idsafteremptyqueue': scenario_idsafteremptyqueue,
     'idsafteremptyfinaldelete': scenario_idsafteremptyfinaldelete,
-    'fleetduringpost': scenario_fleetduringpost,
     'fleetslowurl': scenario_fleetslowurl,
     'dupesearchpickdeleted': scenario_dupesearchpickdeleted,
-    'dupesearchpickgoneadd': scenario_dupesearchpickgoneadd,
     'dupesearchresubmit': scenario_dupesearchresubmit,
     'dupesearchquickstop': scenario_dupesearchquickstop,
     'dupesearchkeychanged': scenario_dupesearchkeychanged,
@@ -12017,7 +11657,6 @@ SCENARIO_OPTIONS = {
     'dupesearchretiredfleet': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=1', 'DupeSearchApiKey=k', 'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'dupesearchvanishedbackup': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=4', 'DupeSearchApiKey=k', 'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'dupesearchlegacyrename': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=10', 'DupeSearchApiKey=k', 'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
-    'dupesearchwatchscript': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=1', 'DupeSearchApiKey=k', 'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40', 'Extensions=watchevent'],
     'dupesearchwatchrename': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=1', 'DupeSearchApiKey=k',
                             'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     # JSON-P is off by default; these scenarios call /jsonprpc, and apiformat checks
@@ -12187,8 +11826,6 @@ SCENARIO_OPTIONS = {
     'dupesearchpickdeleted': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k', 'DupeFastDonors=2'],
     'dupesearchquickstop': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k',
                             'DupeFastDonors=0', 'DupeHealthBudget=120'],
-    'dupesearchpickgoneadd': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k', 'DupeFastDonors=2',
-                              'Extensions=deletepick'],
     'dupesearchkeychanged': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k', 'DupeFastDonors=2'],
     'dupesearchgroup': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k', 'DupeFastDonors=2'],
     'dupesearchwarnings': ['DupeSearch=yes', 'DupeSearchUrl=http://127.0.0.1:9/api', 'HealthCheck=none', 'Server1.Connections=2'],
@@ -12238,16 +11875,11 @@ SCENARIO_OPTIONS = {
     'yencrangefar': ['DupeArticleFallback=no', 'DirectWrite=no', 'ArticleRetries=0'],
     'yencrangeshort': ['DupeArticleFallback=no', 'ArticleCache=64', 'ArticleRetries=0'],
     'quotafutureday': ['DailyQuota=100000'],
-    'categoryscan': ['Category1.Name=test', 'Category1.Extensions=catscan'],
     'tasktypo': lambda: _next_minute_task_options(),
     'nntppercent': lambda: _percent_server_options(),
-    'scriptdirlist': ['ScriptDir=scripts;scripts2', 'Extensions=catscan'],
     'uucache': ['DirectWrite=no', 'ArticleCache=64', 'ArticleRetries=0'],
     'directrenamesubdir': ['DirectRename=yes', 'DirectWrite=yes', 'ParCheck=auto'],
     'directrenamesubdirjoin': ['DirectRename=yes', 'DirectWrite=no', 'ParCheck=auto'],
-    'heldidle': ['ScriptPauseQueue=yes', 'Extensions=slowpost'],
-    'scriptargs': ['Extensions=argcount, selfkill'],
-    'scriptsockets': ['Extensions=fdlist'],
     'parvolnames': ['ParCheck=auto'],
     'pardamagefailover': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=no'],
     'pardamageborrow': ['ParCheck=auto', 'HealthCheck=dupe', 'DupeArticleFallback=live'],
@@ -12265,19 +11897,16 @@ SCENARIO_OPTIONS = {
     'parlesstwinpar': ['HealthCheck=dupe', 'DupeArticleFallback=no'],
     'scangrowing': ['NzbDirInterval=1', 'NzbDirFileAge=4'],
     'archiveyoung': ['NzbDirInterval=1', 'NzbDirFileAge=4'],
-    'scriptparcheck': ['ParCheck=auto', 'Extensions=askpar'],
     'pathtraversalnzb': ['Unpack=yes', UNRAR_CMD, 'FileNaming=nzb'],
     'pathtraversalarticle': ['Unpack=yes', UNRAR_CMD, 'FileNaming=article'],
     'urlclosed': ['UrlRetries=1', 'UrlInterval=1'],
     'urlretrywait': ['UrlTimeout=2', 'UrlInterval=20', 'UrlRetries=2'],
     'historyeditlist': ['DupeCheck=yes'],
     'speedtestnohistory': ['KeepHistory=0'],
-    'scanlongcommand': ['Extensions=longscan'],
     'innerarchivekeep': ['InterDir=', 'Unpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, SEVENZIP_CMD, 'UnpackCleanupDisk=yes'],
     'innerarchivekeepdirect': ['InterDir=', 'Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, SEVENZIP_CMD, 'UnpackCleanupDisk=yes'],
     'fleetscoremax': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetmerged': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
-    'fleetduringpost': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'Extensions=slowpost'],
     'addstorm': ['NzbDirInterval=1', 'NzbDirFileAge=60', 'UrlConnections=4', 'UrlForce=yes', 'HealthCheck=dupe', 'DupeArticleFallback=live'],
     'fleetparallel': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'Server1.Connections=2'],
     'fleetslowurl': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
@@ -12415,17 +12044,6 @@ SCENARIO_DELAY_PROXY = {'clientthreads': [(b'ctA/', 3.0)], 'xdecomp_slow': [(b'x
                         'streammaxrun': [(b'capA/', 2.0), (b'capB/', 1.0)]}
 
 # scenarios with a FirstFailNntpProxy in front of Server1: (message-id markers,)
-# extensions a scenario installs into ScriptDir before the daemon starts
-SCENARIO_EXTENSIONS = {'dupesearchwatchscript': {'watchevent.py': WATCH_EVENT_EXTENSION}, 'dupesearchpickgoneadd': {'deletepick.py': DELETE_PICK_EXTENSION},
-                       'fleetduringpost': {'slowpost.py': SLOW_POST_EXTENSION},
-                       'heldidle': {'slowpost.py': SLOW_POST_EXTENSION},
-                       'scriptargs': {'argcount.pl': ARGCOUNT_EXTENSION, 'selfkill.pl': SELFKILL_EXTENSION},
-                       'scriptsockets': {'fdlist.pl': FDLIST_EXTENSION},
-                       'categoryscan': {'catscan.py': CATEGORY_SCAN_EXTENSION},
-                       'extbaresignature': {'bare.py': BARE_SIGNATURE_EXTENSION},
-                       'scriptdirlist': {'catscan.py': CATEGORY_SCAN_EXTENSION},
-                       'scriptparcheck': {'askpar.py': PARCHECK_POST_EXTENSION},
-                       'scanlongcommand': {'longscan.py': LONG_COMMAND_EXTENSION}}
 
 SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
                              'transientretry': ((b'?5=', b'?10=', b'?15='),),
@@ -12433,13 +12051,13 @@ SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
                              'transientotherserver': ((b'?5=', b'?10=', b'?15='), True)}
 
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
-SCENARIO_NEWZNAB = {'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchscript', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'dupesearchbareurl', 'dupesearchgzip', 'dupesearchrestart', 'dupesearchsearch', 'dupesearchfetch', 'dupesearchfetcherror', 'dupesearchfilters', 'dupesearchdonors',
+SCENARIO_NEWZNAB = {'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'dupesearchbareurl', 'dupesearchgzip', 'dupesearchrestart', 'dupesearchsearch', 'dupesearchfetch', 'dupesearchfetcherror', 'dupesearchfilters', 'dupesearchdonors',
                    'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun',
-                   'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchresume', 'dupesearchpickdeleted', 'dupesearchpickgoneadd', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged',
+                   'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchresume', 'dupesearchpickdeleted', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged',
                    'dupesearchresumedeleted'}
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'dupesearchrealindexer', 'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchscript', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetduringpost', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchpickgoneadd', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
+SCENARIO_FAKE_NNTP = {'dupesearchrealindexer', 'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
 
 
 # --------------------------------------------------------------------------- #
@@ -12560,9 +12178,6 @@ def main():
                 options.append('DupeSearchUrl=http://127.0.0.1:%d%s' % (daemon.newznab.port,
                                                                        '' if name == 'dupesearchbareurl' else '/api'))
             daemon.write_config(options)
-            for file_name, text in SCENARIO_EXTENSIONS.get(name, {}).items():
-                target.write_file(os.path.join('main', 'scripts', file_name), text.encode())
-                os.chmod(target.path('main', 'scripts', file_name), 0o755)
             if name in SCENARIO_FAKE_NNTP:
                 daemon.fake_nntp = FakeNntp(nserv_port)
             else:

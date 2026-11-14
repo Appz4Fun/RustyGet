@@ -1055,8 +1055,6 @@ extern WorkState* g_WorkState;
 
 #endif
 
-class ScriptConfig;
-
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
  *
@@ -3657,23 +3655,6 @@ private:
 
 class PrePostProcessor;
 extern PrePostProcessor* g_PrePostProcessor;
-
-#ifndef EXTENSION_MANAGER_H
-#define EXTENSION_MANAGER_H
-
-namespace ExtensionManager { class Manager {}; }
-
-class CommandScriptLog;
-
-#ifndef QUEUESCRIPT_H
-#define QUEUESCRIPT_H
-
-class QueueScriptCoordinator {};
-extern QueueScriptCoordinator* g_QueueScriptCoordinator;
-
-#endif
-
-#endif
 
 class PostJobThread final : public Thread
 {

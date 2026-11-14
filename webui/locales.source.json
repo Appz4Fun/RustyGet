@@ -1226,14 +1226,6 @@
     "message": "First-time setup: check the $1MainDir$2 and configure at least one $3News Server$4.",
     "description": "Description in Info section. 'News Server' refers to a Usenet server. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag"
   },
-  "config_info_extension_manager": {
-    "message": "Extension manager",
-    "description": "Header in Info section"
-  },
-  "config_info_extension_manager_desc": {
-    "message": "The $1extension manager$2 is a built-in utility that serves as a central hub for managing extension scripts, providing a directory of officially supported ones and simplifying their installation. All scripts, whether installed via the manager or added manually through the supported legacy method, are configured in the $3extension scripts$4 section and in individual extension's settings.",
-    "description": "Description in Info section. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag"
-  },
   "config_info_web_interface_settings": {
     "message": "Web-interface settings",
     "description": "Header in Info section"
@@ -1422,10 +1414,6 @@
     "message": "licenses",
     "description": "Section header for licenses"
   },
-  "config_title_extension_manager": {
-    "message": "extension manager",
-    "description": "Section header for extension manager"
-  },
   "btn_move_up": {
     "message": "Up",
     "description": "Button to move item up"
@@ -1501,10 +1489,6 @@
   "config_section_unpack": {
     "message": "Unpack",
     "description": "Configuration section name for settings related to unpacking archived files (e.g., RAR, ZIP)."
-  },
-  "config_section_extension_scripts": {
-    "message": "Extension Scripts",
-    "description": "Configuration section title for managing user-added scripts (Python, Bash, etc.) that extend the app's functionality. Use terms for 'Add-on','Plugin' or 'Extension'. Avoid terms meaning 'File extensions' (like .txt) or 'Movie screenplays'."
   },
   "menu_view_options": {
     "message": "View Options",
@@ -1598,93 +1582,9 @@
     "message": "Boost is licensed under the $1Boost Software License$2.",
     "description": "License terms. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
-  "extman_desc1": {
-    "message": "$1The Extension Manager$2 is a tool for downloading, updating and deleting RustyGet extensions with backwards compatibility with extensions based on header configuration definition.",
-    "description": "Description text in the Extension Manager explaining its purpose and features. Parameters:; $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
-  },
-  "extman_desc2": {
-    "message": "If you want to add support for your extension by the Extension Manager, you can follow this $1instruction$2.",
-    "description": "Information text in the Extension Manager linking to instructions for adding extension support. Parameters:; $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
-  },
   "extman_note": {
     "message": "note:",
     "description": "Prefix used for important notes or warnings within the Extension Manager."
-  },
-  "extman_note1": {
-    "message": "If you delete your extension that is not on this $1list$2, it will be removed without the possibility of reinstalling it.",
-    "description": "Warning note in the Extension Manager about deleting extensions not on the supported list. Parameters:; $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
-  },
-  "extman_note2": {
-    "message": "Extension Manager requires 7-Zip to unpack downloaded extensions. If you are having issues with Extension Manager downloads - please check $1SevenZipCmd$2.",
-    "description": "Note in the Extension Manager indicating the requirement of 7-Zip for unpacking extensions. Parameters:; $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
-  },
-  "extman_col_onoff": {
-    "message": "On/Off",
-    "description": "Table column header in the Extension Manager indicating whether an extension is enabled or disabled."
-  },
-  "extman_col_name": {
-    "message": "Name",
-    "description": "Table column header in the Extension Manager for the name of the extension."
-  },
-  "extman_col_about": {
-    "message": "About",
-    "description": "Table column header in the Extension Manager containing a brief description of the extension."
-  },
-  "extman_col_version": {
-    "message": "Version",
-    "description": "Table column header in the Extension Manager showing the currently installed version of the extension."
-  },
-  "extman_col_homepage": {
-    "message": "Homepage",
-    "description": "Table column header in the Extension Manager linking to the extension's official homepage or repository."
-  },
-  "extman_col_actions": {
-    "message": "Actions",
-    "description": "Table column header in the Extension Manager for action buttons."
-  },
-  "extman_col_order": {
-    "message": "Order",
-    "description": "Table column header in the Extension Manager for the execution order of extensions."
-  },
-  "extman_delete_action": {
-    "message": "Delete",
-    "description": "Label for the action to delete an extension within the Extension Manager."
-  },
-  "extman_delete_with_settings": {
-    "message": "Delete with saved settings",
-    "description": "Option in the Extension Manager to delete an extension along with its associated configuration settings."
-  },
-  "extman_btn_delete": {
-    "message": "Delete",
-    "description": "Button label in the Extension Manager to initiate the deletion of an extension."
-  },
-  "extman_btn_download": {
-    "message": "Download",
-    "description": "Button label in the Extension Manager to download a new extension."
-  },
-  "extman_btn_update": {
-    "message": "Update",
-    "description": "Button label in the Extension Manager to update an existing extension."
-  },
-  "extman_btn_configure": {
-    "message": "Configure",
-    "description": "Button label in the Extension Manager to navigate to the settings of an extension."
-  },
-  "extman_btn_deactivate": {
-    "message": "Deactivate",
-    "description": "Button label in the Extension Manager to deactivate a currently active extension."
-  },
-  "extman_btn_activate": {
-    "message": "Activate for new downloads",
-    "description": "Button label in the Extension Manager to activate an extension so it applies to new downloads."
-  },
-  "extman_tooltip_homepage": {
-    "message": "Homepage",
-    "description": "Tooltip shown when hovering over the homepage link for an extension in the Extension Manager."
-  },
-  "extman_tooltip_order": {
-    "message": "Modify execution order (restart needed)",
-    "description": "Tooltip in the Extension Manager indicating that modifying the execution order of extensions requires a program restart."
   },
   "pager_prev": {
     "message": "Prev",
@@ -2206,14 +2106,6 @@
     "message": "Percent character (%) cannot be part of a filter because it is used as line separator when saving filter into configuration file.",
     "description": "Alert message when user tries to use % in RSS filter"
   },
-  "label_active_cap": {
-    "message": "Active",
-    "description": "Capitalized label indicating an active state."
-  },
-  "label_not_active_cap": {
-    "message": "Not active",
-    "description": "Capitalized label indicating an inactive state."
-  },
   "msg_multiple_records": {
     "message": "Multiple records",
     "description": "Dialog title shown when an action is performed on multiple records."
@@ -2478,18 +2370,6 @@
     "message": "Last reset on $1.",
     "description": "Confirmation text. $1 is a dynamic value/HTML tag"
   },
-  "danger_script_dialog_text1": {
-    "message": "Please confirm execution of the script with command \"$1\".",
-    "description": "Confirmation text. $1 is a dynamic value/HTML tag"
-  },
-  "danger_script_dialog_text2": {
-    "message": "This script command is marked as dangerous and requires a confirmation.",
-    "description": "Confirmation text"
-  },
-  "danger_script_dialog_ok": {
-    "message": "Execute Script",
-    "description": "Dialog button label. Confirmation button text"
-  },
   "purge_history_dialog_title": {
     "message": "Purging history",
     "description": "Dialog title. Title or heading"
@@ -2585,18 +2465,6 @@
   "add_param_password": {
     "message": "Password",
     "description": "Input label. Add dialog text"
-  },
-  "script_list_dialog_title": {
-    "message": "Choose scripts",
-    "description": "Dialog title for choosing extension scripts. Title or heading"
-  },
-  "script_list_dialog_instruction": {
-    "message": "Select extension scripts for option $1.",
-    "description": "Dialog text explaining to select extension scripts. $1 is a dynamic value/HTML tag"
-  },
-  "script_list_dialog_order_info": {
-    "message": "The script execution order is saved globally in the option $1ScriptOrder$2 and affects all categories as well as the order of scripts in the edit download dialog.",
-    "description": "Dialog text. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "col_section": {
     "message": "Section",
@@ -2717,10 +2585,6 @@
   "update_progress_dialog_title": {
     "message": "Updating RustyGet",
     "description": "Dialog title. Title or heading | Update dialog text"
-  },
-  "exec_script_dialog_status": {
-    "message": "You may close this dialog any time, the script remains running in background.",
-    "description": "Dialog status text"
   },
   "notif_not_implemented": {
     "message": "Not yet implemented",
@@ -2973,10 +2837,6 @@
   "alert_dialog_title": {
     "message": "Title",
     "description": "Generic default title used for standard alert dialog boxes."
-  },
-  "exec_script_dialog_title": {
-    "message": "Executing script",
-    "description": "Title for the dialog indicating that an external or extension script is currently executing."
   },
   "pause_dialog_remain_paused": {
     "message": "Will remain paused until $1",
@@ -3322,10 +3182,6 @@
     "message": "Successfully started. Refreshing the page...",
     "description": "Status message after successful restart"
   },
-  "msg_scheduler_script_info": {
-    "message": "This button is to choose scheduler scripts when option TaskX.Command is set to \"Script\".",
-    "description": "Alert message. System message or dialog text"
-  },
   "msg_discard_changes_question": {
     "message": "Discard changes?",
     "description": "Confirmation message when leaving settings with unsaved changes"
@@ -3410,34 +3266,6 @@
     "message": "Duplicate key: $1",
     "description": "Tooltip prefix. Description or subtext. $1 is a dynamic value/HTML tag"
   },
-  "msg_save_config_failed": {
-    "message": "Failed to save the config file",
-    "description": "Error message. System message or dialog text"
-  },
-  "msg_ext_fetch_failed": {
-    "message": "Failed to fetch the list of available extensions",
-    "description": "Error message. System message or dialog text"
-  },
-  "msg_ext_download_failed": {
-    "message": "Failed to download $1",
-    "description": "Error message. System message or dialog text. $1 is a dynamic value/HTML tag"
-  },
-  "msg_ext_update_failed": {
-    "message": "Failed to update $1",
-    "description": "Error message. System message or dialog text. $1 is a dynamic value/HTML tag"
-  },
-  "msg_ext_delete_failed": {
-    "message": "Failed to delete $1",
-    "description": "Error message. System message or dialog text. $1 is a dynamic value/HTML tag"
-  },
-  "msg_ext_executor_failed": {
-    "message": "Failed to find the corresponding executor for $1. The extension may not work",
-    "description": "Error message. System message or dialog text. $1 is a dynamic value/HTML tag"
-  },
-  "msg_no_scripts_found": {
-    "message": "No scripts found. If you just changed option \"ScriptDir\", save settings and reload RustyGet.",
-    "description": "Message when no scripts are found in ScriptListDialog"
-  },
   "btn_show_dev_info": {
     "message": "Show more info for developers",
     "description": "Spoiler button label"
@@ -3478,24 +3306,12 @@
     "message": "Something is wrong with the package configuration file \"package-info.json\".",
     "description": "Error message during update check"
   },
-  "label_executing_script": {
-    "message": "Executing script $1",
-    "description": "Status message. UI Label. $1 is a dynamic value/HTML tag"
-  },
   "msg_error_in_source": {
     "message": "Error in $1 (line $2)",
     "description": "Browser error message. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "btn_remind_later": {
     "message": "Remind Me Later",
-    "description": "Button label. Button label"
-  },
-  "btn_reorder": {
-    "message": "Reorder",
-    "description": "Button label. Button label"
-  },
-  "btn_choose": {
-    "message": "Choose",
     "description": "Button label. Button label"
   },
   "btn_change": {
@@ -3533,14 +3349,6 @@
   "notif_messages_deleted": {
     "message": "Messages have been deleted",
     "description": "Notification message indicating that the selected messages were successfully deleted."
-  },
-  "script_list_reorder_title": {
-    "message": "Reorder extensions",
-    "description": "Title for the dialog used to change the execution order of extensions."
-  },
-  "script_list_reorder_hint": {
-    "message": "Move extensions to reorder them.",
-    "description": "Instructional text in the reorder dialog guiding users to move items to change their order."
   },
   "label_no_records": {
     "message": "No records",
@@ -3734,10 +3542,6 @@
     "message": "Directory with web-interface files.\n\nExample: /usr/local/share/rustyget/webui.\n\nNOTE: To disable web-interface set the option to an empty value.\nThis however doesn't disable the built-in web-server completely because\nit is also used to serve JSON-/XML-RPC requests.",
     "description": "Description for the option WebDir DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
-  "config_desc_scriptdir": {
-    "message": "Directory with post-processing and other scripts.\n\nThis option may contain multiple directories separated with commas or semicolons.\n\nNOTE: For information on writing scripts visit https://rustyget.com/documentation/extension-scripts/.",
-    "description": "Description for the option ScriptDir DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
-  },
   "config_desc_lockfile": {
     "message": "Lock-file for daemon-mode, POSIX only.\n\nWhen started in daemon mode the program creates the lock file and\nwrites process-id (PID) into it. That info can be used in shell\nscripts. If the lock file can not be created or the lock to the file\ncan not be acquired the daemon terminates, preventing unintentional\nstarting of multiple daemons.\n\nSet to empty value to disable the creating of the lock-file and the\ncheck for another running instance (not recommended).",
     "description": "Description for the option LockFile"
@@ -3910,10 +3714,6 @@
     "message": "Unpack downloaded nzb-files.\n\nFor more information see global option <Unpack>.",
     "description": "Description for the option Category1.Unpack DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>)."
   },
-  "config_desc_category_extensions": {
-    "message": "List of extension scripts for this category.\n\nFor more information see global option <Extensions>.",
-    "description": "Description for the option Category1.Extensions DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>)."
-  },
   "config_desc_category_aliases": {
     "message": "List of aliases.\n\nWhen a nzb-file is added from URL, RSS or RPC the category name\nis usually supplied by nzb-site or by application accessing\nRustyGet. Using Aliases you can match their categories with your owns.\n\nSeparate aliases with commas or semicolons. Use wildcard characters\n* and ? for pattern matching.\n\nExample: TV - HD, TV - SD, TV*",
     "description": "Description for the option Category1.Aliases"
@@ -3953,10 +3753,6 @@
   "config_desc_feed_priority": {
     "message": "Priority for added nzb-files.\n\nPriority can be any integer value. The web-interface however operates\nwith only six predefined priorities: -100 (very low priority), -50\n(low priority), 0 (normal priority, default), 50 (high priority),\n100 (very high priority) and 900 (force priority). Downloads with\npriorities equal to or greater than 900 are downloaded and\npost-processed even if the program is in paused state (force mode).",
     "description": "Description for the option Feed1.Priority"
-  },
-  "config_desc_feed_extensions": {
-    "message": "List of rss feed extension scripts to execute for rss content.\n\nThe scripts in the list must be separated with commas or semicolons. All\nscripts must be stored in directory set by option <ScriptDir> and\npaths relative to <ScriptDir> must be entered here.\n\nNOTE: For developer documentation visit https://rustyget.com/documentation/extension-scripts/.",
-    "description": "Description for the option Feed1.Extensions DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_appendcategorydir": {
     "message": "Create subdirectory with category-name in destination-directory.",
@@ -4243,12 +4039,12 @@
     "description": "Description for the option Task1.WeekDays DO NOT translate technical values enclosed in quotes."
   },
   "config_desc_task_command": {
-    "message": "Command to be executed (PauseDownload, UnpauseDownload, PausePostProcess,\nUnpausePostProcess, PauseScan, UnpauseScan, DownloadRate, Script, Process,\nActivateServer, DeactivateServer, FetchFeed).\n\nPossible commands:\n  PauseDownload      - pause download;\n  UnpauseDownload    - resume download;\n  PausePostProcess   - pause post-processing;\n  UnpausePostProcess - resume post-processing;\n  PauseScan          - pause scan of incoming nzb-directory;\n  UnpauseScan        - resume scan of incoming nzb-directory;\n  DownloadRate       - set download rate limit;\n  Script             - execute one or multiple scheduler scripts. The scripts\n                       must be written specially for RustyGet;\n  Process            - execute an external (any) program;\n  ActivateServer     - activate news-server;\n  DeactivateServer   - deactivate news-server;\n  FetchFeed          - fetch RSS feed.\n\nOn start the program checks all tasks and determines current state\nfor download-pause, scan-pause, download-rate and active servers.",
-    "description": "Description for the option Task1.Command If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'. DO NOT translate configuration option values (ActivateServer, DeactivateServer, DownloadRate, FetchFeed, PauseDownload, PausePostProcess, PauseScan, Process, Script, UnpauseDownload, UnpausePostProcess, UnpauseScan) as they are fixed configuration values."
+    "message": "Command to be executed (PauseDownload, UnpauseDownload, PausePostProcess,\nUnpausePostProcess, PauseScan, UnpauseScan, DownloadRate, Process,\nActivateServer, DeactivateServer, FetchFeed).\n\nPossible commands:\n  PauseDownload      - pause download;\n  UnpauseDownload    - resume download;\n  PausePostProcess   - pause post-processing;\n  UnpausePostProcess - resume post-processing;\n  PauseScan          - pause scan of incoming nzb-directory;\n  UnpauseScan        - resume scan of incoming nzb-directory;\n  DownloadRate       - set download rate limit;\n  Process            - execute an external (any) program;\n  ActivateServer     - activate news-server;\n  DeactivateServer   - deactivate news-server;\n  FetchFeed          - fetch RSS feed.\n\nOn start the program checks all tasks and determines current state\nfor download-pause, scan-pause, download-rate and active servers.",
+    "description": "Description for the option Task1.Command If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'. DO NOT translate configuration option values (ActivateServer, DeactivateServer, DownloadRate, FetchFeed, PauseDownload, PausePostProcess, PauseScan, Process, UnpauseDownload, UnpausePostProcess, UnpauseScan) as they are fixed configuration values."
   },
   "config_desc_task_param": {
-    "message": "Parameters for the command if needed.\n\nSome scheduler commands require additional parameters:\n DownloadRate     - download rate limit to be set (kilobytes/sec).\n                    Example: 1000.\n                    NOTE: use value \"0\" to disable download limit (unlimited speed).\n Script           - list of scheduler scripts to execute. The scripts in the\n                    list must be separated with commas or semicolons. All\n                    scripts must be stored in directory set by option\n                    <ScriptDir> and paths relative to <ScriptDir> must be\n                    entered here. For developer documentation visit\n                    https://rustyget.com/documentation/extension-scripts/;\n Process          - path to the program to execute and its parameters.\n                    Example: /home/user/fetch.sh.\n                    If filename or any parameter contains spaces it\n                    must be surrounded with single quotation\n                    marks. If filename/parameter contains single quotation marks,\n                    each of them must be replaced (escaped) with two single quotation\n                    marks and the resulting filename/parameter must be\n                    surrounded with single quotation marks.\n                    Example: '/home/user/download/my scripts/task process.sh' 'world''s fun'.\n                    In this example one parameter (world's fun) is passed\n                    to the script (task process.sh).\n ActivateServer   - comma separated list of news server ids or server names.\n                    Example: 1,3.\n                    Example: my news server 1, my news server 2.\n                    NOTE: server names should not have commas.\n DeactivateServer - see ActivateServer.\n FetchFeed        - comma separated list of RSS feed ids or feed names.\n                    Example: 1,3.\n                    Example: bookmarks feed, another feed.\n                    NOTE: feed names should not have commas.\n                    NOTE: use feed id \"0\" to fetch all feeds.",
-    "description": "Description for the option Task1.Param DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'. DO NOT translate configuration option values (ActivateServer, DeactivateServer, DownloadRate, FetchFeed, Process, Script) as they are fixed configuration values."
+    "message": "Parameters for the command if needed.\n\nSome scheduler commands require additional parameters:\n DownloadRate     - download rate limit to be set (kilobytes/sec).\n                    Example: 1000.\n                    NOTE: use value \"0\" to disable download limit (unlimited speed).\n Process          - path to the program to execute and its parameters.\n                    Example: /home/user/fetch.sh.\n                    If filename or any parameter contains spaces it\n                    must be surrounded with single quotation\n                    marks. If filename/parameter contains single quotation marks,\n                    each of them must be replaced (escaped) with two single quotation\n                    marks and the resulting filename/parameter must be\n                    surrounded with single quotation marks.\n                    Example: '/home/user/download/my scripts/task process.sh' 'world''s fun'.\n                    In this example one parameter (world's fun) is passed\n                    to the script (task process.sh).\n ActivateServer   - comma separated list of news server ids or server names.\n                    Example: 1,3.\n                    Example: my news server 1, my news server 2.\n                    NOTE: server names should not have commas.\n DeactivateServer - see ActivateServer.\n FetchFeed        - comma separated list of RSS feed ids or feed names.\n                    Example: 1,3.\n                    Example: bookmarks feed, another feed.\n                    NOTE: feed names should not have commas.\n                    NOTE: use feed id \"0\" to fetch all feeds.",
+    "description": "Description for the option Task1.Param DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'. DO NOT translate configuration option values (ActivateServer, DeactivateServer, DownloadRate, FetchFeed, Process) as they are fixed configuration values."
   },
   "config_desc_crccheck": {
     "message": "Check CRC of downloaded and decoded articles.\n\nNormally this option should be enabled for better detecting of download\nerrors and for quick par-verification (option <ParQuick>).",
@@ -4353,14 +4149,6 @@
   "config_desc_unpackpassfile": {
     "message": "Path to file containing unpack passwords.\n\nIf the option is set the program will try all passwords from the file\nwhen unpacking the archives. The file must be a text file containing\none password per line.\n\nIf an nzb-file has a defined password (in the post-processing settings)\nthen the password-file is not used for that nzb-file.\n\nNOTE: Trying multiple passwords is a time consuming task. Whenever possible\npasswords should be set per nzb-file in their post-processing settings.",
     "description": "Description for the option UnpackPassFile DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
-  },
-  "config_desc_extensions": {
-    "message": "List of active extension scripts for new downloads.\n\nExtension scripts associated with nzb-files are executed before, during\nor after download as defined by script developer.\n\nEach download (nzb-file) has its own list of extension scripts; the list\ncan be viewed and changed in web-interface in download details dialog or\nvia API. Option <Extensions> sets defaults for new downloads; changes\nto option <Extensions> do not affect downloads which are already in queue.\n\nWhen nzb-file is added to queue it can have a category assigned to it. In this\ncase option <CategoryX.Extensions> (if not empty) have precedence and\ndefines the scripts for that nzb-file; consequently global option <Extensions>\nhas no effect for that nzb-file.\n\nCertain extensions work globally for the whole program instead of\nper-nzb basis. Such extensions are activated once and cannot be overriden\nper category or per nzb.\n\nThe scripts in the list must be separated with commas or semicolons. All\nscripts must be stored in directory set by option <ScriptDir> and\npaths relative to <ScriptDir> must be entered here.\n\nExample: Cleanup.sh, Move.sh, EMail.py.\n\nNOTE: The script execution order is controlled by option <ScriptOrder>, not\nby their order in option <Extensions>.\n\nNOTE: For developer documentation visit https://rustyget.com/documentation/extension-scripts/.",
-    "description": "Description for the option Extensions DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
-  },
-  "config_desc_scriptorder": {
-    "message": "Execution order for extension scripts.\n\nIf you assign multiple scripts to one nzb-file, they are executed in the\norder defined by this option.\n\nThe scripts in the list must be separated with commas or semicolons. All\nscripts must be stored in directory set by option <ScriptDir> and\npaths relative to <ScriptDir> must be entered here.\n\nExample: Cleanup.sh, Move.sh.",
-    "description": "Description for the option ScriptOrder DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>)."
   },
   "config_desc_scriptpausequeue": {
     "message": "Pause download queue during executing of postprocess-script.\n\nEnable the option to give CPU more time for postprocess-script. That helps\nto speed up postprocess on slow CPUs with fast connection (e.g. NAS-devices).\n\nNOTE: See also options <ParPauseQueue> and <UnpackPauseQueue>.",

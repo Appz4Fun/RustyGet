@@ -38,8 +38,7 @@ async function installFixture(page, writes, options = {}) {
       } });
     }
     if (rpc.method === 'readurl') {
-      const catalog = String(rpc.params[0]).endsWith('/extensions.json');
-      const result = catalog ? '[]' : JSON.stringify({ 'stable-version': '26.3', 'testing-version': '26.3' });
+      const result = JSON.stringify({ 'stable-version': '26.3', 'testing-version': '26.3' });
       return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result } });
     }
     if (['listgroups', 'history', 'servervolumes'].includes(rpc.method)) {

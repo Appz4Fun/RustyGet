@@ -1079,7 +1079,6 @@ struct RsFeedConfig {
     url: CString,
     filter: Vec<u8>,
     category: Vec<u8>,
-    extensions: Vec<u8>,
     filter_hash: u32,
     category_source: i32,
     interval: i32,
@@ -1524,7 +1523,6 @@ struct RuntimeOpts {
     path_sep: u8,
     temp_dir: Vec<u8>,
     queue_dir: Vec<u8>,
-    extensions: Vec<u8>,
 }
 
 fn query_runtime_opts(env: &NzbgetRsFeedCoordEnv) -> RuntimeOpts {
@@ -1542,7 +1540,6 @@ fn query_runtime_opts(env: &NzbgetRsFeedCoordEnv) -> RuntimeOpts {
             path_sep: crate::paths::PATH_SEPARATOR as u8,
             temp_dir: opts.str_bytes(5).to_vec(),
             queue_dir: opts.str_bytes(6).to_vec(),
-            extensions: opts.str_bytes(29).to_vec(),
         };
     }
     let mut ints = [0 as c_int; 8];
@@ -1570,7 +1567,6 @@ fn query_runtime_opts(env: &NzbgetRsFeedCoordEnv) -> RuntimeOpts {
         path_sep: ints[7] as u8,
         temp_dir: feed_cstr_bytes(strs[0]).to_vec(),
         queue_dir: feed_cstr_bytes(strs[1]).to_vec(),
-        extensions: feed_cstr_bytes(strs[2]).to_vec(),
     }
 }
 
@@ -1706,7 +1702,6 @@ fn build_feed_config(
     category: &[u8],
     category_source: i32,
     priority: i32,
-    extensions: &[u8],
     cert_verif_level: u32,
 ) -> RsFeedConfig {
     let (def_name, filter_hash) = feed_info_init(id, name, filter);
@@ -1717,7 +1712,6 @@ fn build_feed_config(
         url: feed_bytes_to_cstr(url),
         filter: filter.to_vec(),
         category: category.to_vec(),
-        extensions: extensions.to_vec(),
         filter_hash,
         category_source,
         interval,
@@ -1821,7 +1815,6 @@ impl NzbgetRsFeedCoord {
         category: &[u8],
         category_source: i32,
         priority: i32,
-        extensions: &[u8],
         cert_verif_level: u32,
     ) {
         let cfg = build_feed_config(
@@ -1835,7 +1828,6 @@ impl NzbgetRsFeedCoord {
             category,
             category_source,
             priority,
-            extensions,
             cert_verif_level,
         );
         if let Ok(mut st) = self.state.lock() {
@@ -2343,21 +2335,6 @@ impl NzbgetRsFeedCoord {
                     (fi.cfg.clone(), fi.output_filename.clone())
                 };
 
-                let opts = query_runtime_opts(&env);
-                let eff_ext = if !cfg.extensions.is_empty() {
-                    &cfg.extensions
-                } else {
-                    &opts.extensions
-                };
-                if !crate::script::feed_scripts_exec_active(eff_ext, &feed_out_fn, cfg.id) {
-                    if let Ok(mut st) = self.state.lock() {
-                        if let Some(fi) = st.feeds.get_mut(idx) {
-                            fi.status = FS_FAILED;
-                        }
-                    }
-                    return;
-                }
-
                 let mut parsed_items =
                     Self::parse_feed_items(&feed_out_fn, cfg.name.as_bytes(), &env);
                 if let Some(ref mut items) = parsed_items {
@@ -2646,7 +2623,6 @@ impl NzbgetRsFeedCoord {
                 feed_cstr_bytes(env.s4),
                 env.a3,
                 env.a4,
-                feed_cstr_bytes(env.s5),
                 cert_level,
             );
             (cfg, env.a6, feed_cstr_bytes(env.s6).to_vec())
@@ -2720,18 +2696,6 @@ impl NzbgetRsFeedCoord {
                 .lock()
                 .map(|g| g.clone())
                 .unwrap_or_default();
-            let eff_ext = if !cfg.extensions.is_empty() {
-                &cfg.extensions
-            } else {
-                &opts.extensions
-            };
-            #[cfg(unix)]
-            {
-                let _ = crate::script::feed_scripts_exec_active(eff_ext, &out_fn, cfg.id);
-            }
-            #[cfg(not(unix))]
-            let _ = eff_ext;
-
             let Some(mut parsed_items) = Self::parse_feed_items(&out_fn, cfg.name.as_bytes(), env)
             else {
                 return 0;

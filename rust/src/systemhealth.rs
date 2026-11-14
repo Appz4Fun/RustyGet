@@ -561,7 +561,6 @@ pub struct PathsSectionInput<'a> {
     pub queue_dir: &'a Path,
     pub web_dir: &'a Path,
     pub temp_dir: &'a Path,
-    pub script_dirs: &'a [&'a Path],
     pub config_template: &'a Path,
     pub log_file: &'a Path,
     pub cert_store: &'a Path,
@@ -661,35 +660,6 @@ pub fn validate_paths_section(
         )
     });
     emit_if_not_ok(&mut emit, "TempDir", temp_status);
-
-    let script_status = if input.script_dirs.is_empty() {
-        HealthStatus::ok()
-    } else {
-        let mut status = HealthStatus::ok();
-        for &dir in input.script_dirs {
-            let s = validate_required_writable_dir(b"ScriptDir", dir).and_then(|| {
-                unique_path(
-                    b"ScriptDir",
-                    dir,
-                    &[
-                        (b"MainDir", input.main_dir),
-                        (b"DestDir", input.dest_dir),
-                        (b"InterDir", input.inter_dir),
-                        (b"NzbDir", input.nzb_dir),
-                        (b"QueueDir", input.queue_dir),
-                        (b"WebDir", input.web_dir),
-                        (b"TempDir", input.temp_dir),
-                    ],
-                )
-            });
-            if !s.is_ok() {
-                status = s;
-                break;
-            }
-        }
-        status
-    };
-    emit_if_not_ok(&mut emit, "ScriptDir", script_status);
 
     let log_status = validate_log_file_path(input.log_file, input.write_log).and_then(|| {
         unique_path(
@@ -2159,153 +2129,6 @@ pub fn validate_news_servers_group(
     if !prim.is_ok() {
         emit_issue(prim.severity, &prim.message);
     }
-}
-
-// ============================================================================
-// ExtensionScriptsValidator (`daemon/systemhealth/ExtensionScriptsValidator.cpp`)
-// ============================================================================
-
-fn trim_tokenizer_ws(mut s: &[u8]) -> &[u8] {
-    while let Some(&b) = s.first() {
-        if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
-            s = &s[1..];
-        } else {
-            break;
-        }
-    }
-    while let Some(&b) = s.last() {
-        if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
-            s = &s[..s.len() - 1];
-        } else {
-            break;
-        }
-    }
-    s
-}
-
-fn strip_script_ext(name: &[u8]) -> &[u8] {
-    match name.iter().rposition(|&b| b == b'.') {
-        Some(pos) if pos > 0 => &name[..pos],
-        _ => name,
-    }
-}
-
-pub fn validate_extension_list(
-    extensions_opt: &[u8],
-    known_extensions: &[(&[u8], &Path)],
-) -> HealthStatus {
-    if extensions_opt.is_empty() {
-        return HealthStatus::ok();
-    }
-    let mut message = Vec::new();
-    for raw_tok in extensions_opt.split(|&b| b == b',' || b == b';') {
-        let script_name_raw = trim_tokenizer_ws(raw_tok);
-        if script_name_raw.is_empty() {
-            continue;
-        }
-        let script_name = strip_script_ext(script_name_raw);
-        let found = known_extensions
-            .iter()
-            .find(|&&(ext_name, _)| ext_name == script_name);
-        let Some(&(_, entry_path)) = found else {
-            if !message.is_empty() {
-                message.extend_from_slice(b"; ");
-            }
-            message.push(b'\'');
-            message.extend_from_slice(script_name_raw);
-            message.extend_from_slice(b"' doesn't exist");
-            continue;
-        };
-        let exists = file_exists(entry_path);
-        if !exists.is_ok() {
-            if !message.is_empty() {
-                message.extend_from_slice(b"; ");
-            }
-            message.extend_from_slice(&exists.message);
-            message.push(b' ');
-        }
-    }
-    if message.is_empty() {
-        HealthStatus::ok()
-    } else {
-        HealthStatus::warning(message)
-    }
-}
-
-pub fn validate_shell_override(shell_override: &[u8]) -> HealthStatus {
-    if shell_override.is_empty() {
-        return HealthStatus::ok();
-    }
-    let mut message = Vec::new();
-    for raw_tok in shell_override.split(|&b| b == b',' || b == b';') {
-        let tok = trim_tokenizer_ws(raw_tok);
-        if tok.is_empty() {
-            continue;
-        }
-        if let Some(eq_pos) = tok.iter().position(|&b| b == b'=') {
-            let actual_cmd_bytes = &tok[eq_pos + 1..];
-            let actual_path = bytes_to_path(actual_cmd_bytes);
-            let exists = file_exists(&actual_path);
-            if !exists.is_ok() {
-                if !message.is_empty() {
-                    message.extend_from_slice(b"; ");
-                }
-                message.extend_from_slice(&exists.message);
-                message.push(b' ');
-                continue;
-            }
-            let exe = file_executable(&actual_path);
-            if !exe.is_ok() {
-                if !message.is_empty() {
-                    message.extend_from_slice(b"; ");
-                }
-                message.extend_from_slice(&exe.message);
-                message.push(b' ');
-            }
-        }
-    }
-    if message.is_empty() {
-        HealthStatus::ok()
-    } else {
-        HealthStatus::warning(message)
-    }
-}
-
-pub fn validate_extension_scripts_section(
-    extensions_opt: &[u8],
-    known_extensions: &[(&[u8], &Path)],
-    shell_override: &[u8],
-    event_interval: i32,
-    mut emit: impl FnMut(&str, Severity, &[u8]),
-) {
-    emit_if_not_ok(
-        &mut emit,
-        "Extensions",
-        validate_extension_list(extensions_opt, known_extensions),
-    );
-    emit_if_not_ok(
-        &mut emit,
-        "ShellOverride",
-        validate_shell_override(shell_override),
-    );
-    if event_interval < -1 {
-        emit(
-            "EventInterval",
-            Severity::Error,
-            b"'EventInterval' cannot be less than -1",
-        );
-    }
-}
-
-#[cfg(unix)]
-fn bytes_to_path(bytes: &[u8]) -> std::path::PathBuf {
-    use std::os::unix::ffi::OsStrExt;
-    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
-}
-
-#[cfg(not(unix))]
-fn bytes_to_path(bytes: &[u8]) -> std::path::PathBuf {
-    std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// Formats `"<web_dir><sep>package-info.json"` for `Maintenance::ReadPackageInfoStr`.
@@ -4439,19 +4262,6 @@ mod tests {
             String::from_utf8_lossy(&higher_only.message)
                 .contains("At least one primary server must be active")
         );
-
-        // ExtensionScriptsValidator
-        let existing_script = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        let loaded: [(&[u8], &Path); 2] = [
-            (b"QueueSort", existing_script.as_path()),
-            (b"Completion", existing_script.as_path()),
-        ];
-        assert!(validate_extension_list(b"QueueSort,Completion", &loaded).is_ok());
-        assert!(validate_extension_list(b"QueueSort.py,Completion.py", &loaded).is_ok());
-        assert_eq!(
-            validate_extension_list(b"Missing.py", &loaded).severity,
-            Severity::Warning
-        );
     }
 
     #[test]
@@ -4662,7 +4472,6 @@ mod tests {
                 queue_dir: &queue_dir,
                 web_dir: Path::new(""),
                 temp_dir: &temp_dir,
-                script_dirs: &[],
                 config_template: Path::new(""),
                 log_file: Path::new("/dev/null"),
                 cert_store: Path::new(""),

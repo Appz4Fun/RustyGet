@@ -425,11 +425,6 @@ pub fn match_command(method: &[u8]) -> c_int {
         b"urlqueue" => 28,
         b"config" => 29,
         b"loadconfig" => 30,
-        b"loadextensions" => 31,
-        b"downloadextension" => 32,
-        b"updateextension" => 33,
-        b"deleteextension" => 34,
-        b"testextension" => 35,
         b"saveconfig" => 36,
         b"configtemplates" => 37,
         b"viewfeed" => 38,
@@ -449,8 +444,6 @@ pub fn match_command(method: &[u8]) -> c_int {
         b"testserverspeed" => 52,
         b"testdiskspeed" => 53,
         b"testnetworkspeed" => 54,
-        b"startscript" => 55,
-        b"logscript" => 56,
         _ => 0,
     }
 }
@@ -458,7 +451,7 @@ pub fn match_command(method: &[u8]) -> c_int {
 pub fn is_safe_command(cmd_id: c_int) -> bool {
     matches!(
         cmd_id,
-        5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 17 | 20 | 27 | 28 | 29 | 30 | 31 | 37 | 45 | 46 | 56
+        5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 17 | 20 | 27 | 28 | 29 | 30 | 37 | 45 | 46
     )
 }
 
@@ -2496,7 +2489,9 @@ mod tests {
         assert_eq!(match_command(b"status"), 8);
         assert_eq!(match_command(b"appendfleet"), 16);
         assert_eq!(match_command(b"servervolumes"), 46);
-        assert_eq!(match_command(b"logscript"), 56);
+        assert_eq!(match_command(b"logscript"), 0);
+        assert_eq!(match_command(b"loadextensions"), 0);
+        assert_eq!(match_command(b"startscript"), 0);
         assert_eq!(match_command(b"unknown"), 0);
         assert_eq!(match_command(b""), 0);
         assert!(!is_safe_command(1));
@@ -2504,8 +2499,8 @@ mod tests {
         assert!(is_safe_command(13));
         assert!(is_safe_command(20));
         assert!(is_safe_command(45));
-        assert!(is_safe_command(56));
-        assert!(!is_safe_command(55));
+        assert!(!is_safe_command(31));
+        assert!(!is_safe_command(56));
         assert!(!is_safe_command(0));
     }
 
@@ -3747,7 +3742,7 @@ fn xmlrpc_execute_save_config_cursor(
                 .iter()
                 .map(|(n, v)| (n.as_slice(), v.as_slice()))
                 .collect();
-            crate::extension::script_config_save(fname, &pairs, cipher_baseline.as_deref())
+            crate::configfile::script_config_save(fname, &pairs, cipher_baseline.as_deref())
         }
         _ => (false, false),
     };
@@ -3808,7 +3803,7 @@ pub fn xmlrpc_execute_load_config(
             format_error_bytes(is_json, 3, b"Could not read configuration file"),
         );
     };
-    let Some(loaded) = crate::extension::script_config_load(fname) else {
+    let Some(loaded) = crate::configfile::script_config_load(fname) else {
         return (
             true,
             format_error_bytes(is_json, 3, b"Could not read configuration file"),
@@ -3978,71 +3973,6 @@ pub(crate) unsafe fn xmlrpc_parse_edit_queue_raw(
 ) -> Result<(usize, i32, Vec<u8>, Vec<i32>), (usize, i32, &'static [u8])> {
     let cur = ParamCursor::from_raw(raw, is_get, is_json);
     xmlrpc_parse_edit_queue_cursor(cur, is_json, ea_file_move_offset, ea_group_move_offset)
-}
-
-#[allow(clippy::type_complexity)]
-fn xmlrpc_parse_start_script_cursor(
-    mut cur: ParamCursor<'_>,
-    is_json: bool,
-) -> Option<(usize, Vec<u8>, Vec<u8>, Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)> {
-    let script_off = cur.next_str()?;
-    let cmd_off = cur.next_str()?;
-    let ctx_off = cur.next_str()?;
-    let script = cur.decode_at(script_off, is_json);
-    let command = cur.decode_at(cmd_off, is_json);
-    let context = cur.decode_at(ctx_off, is_json);
-
-    let mut entries = Vec::new();
-    loop {
-        let (name_off, val_off) = if is_json {
-            let Some(_d1) = cur.next_str() else {
-                break;
-            };
-            let Some(n_off) = cur.next_str() else {
-                break;
-            };
-            let Some(_d2) = cur.next_str() else {
-                break;
-            };
-            let Some(v_off) = cur.next_str() else {
-                break;
-            };
-            (n_off, v_off)
-        } else {
-            let Some(n_off) = cur.next_str() else {
-                break;
-            };
-            let Some(v_off) = cur.next_str() else {
-                break;
-            };
-            (n_off, v_off)
-        };
-        let name = cur.decode_at(name_off, is_json);
-        let value = cur.decode_at(val_off, is_json);
-        entries.push((name, value));
-    }
-    Some((cur.cur_off, script, command, context, entries))
-}
-
-/// Parses `StartScriptXmlCommand::Execute` parameters over a NUL-terminated buffer.
-#[allow(clippy::type_complexity)]
-pub fn xmlrpc_parse_start_script(
-    buf: &mut [u8],
-    is_get: bool,
-    is_json: bool,
-) -> Option<(usize, Vec<u8>, Vec<u8>, Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)> {
-    let cur = ParamCursor::from_slice(buf, is_get, is_json)?;
-    xmlrpc_parse_start_script_cursor(cur, is_json)
-}
-
-#[allow(clippy::type_complexity)]
-pub(crate) unsafe fn xmlrpc_parse_start_script_raw(
-    raw: crate::rpcparams::Raw,
-    is_get: bool,
-    is_json: bool,
-) -> Option<(usize, Vec<u8>, Vec<u8>, Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)> {
-    let cur = ParamCursor::from_raw(raw, is_get, is_json);
-    xmlrpc_parse_start_script_cursor(cur, is_json)
 }
 
 fn xmlrpc_parse_test_disk_speed_cursor(
@@ -4735,7 +4665,6 @@ struct XmlRpcHost<'a> {
     debug_build: bool,
     version: &'a [u8],
     config_filename: Option<&'a [u8]>,
-    shell_override: &'a [u8],
     log_cb: Option<NzbgetRsXmlRpcLogFn>,
     action_cb: Option<NzbgetRsXmlRpcActionFn>,
     collect_cb: Option<NzbgetRsXmlRpcCollectFn>,
@@ -4864,7 +4793,7 @@ unsafe extern "C" fn collect_emit_trampoline(
         1 => unsafe {
             write_status(&mut st.out, json, p1.cast(), p2.cast(), n2);
         },
-        // log / loadlog / logupdate / logscript
+        // log / loadlog / logupdate
         2 => unsafe {
             write_log_list(&mut st.out, json, p1.cast(), n1);
         },
@@ -5388,12 +5317,11 @@ unsafe fn execute_xml_command(
                 (false, bytes)
             }
         }
-        // log / loadlog / logupdate / logscript
-        11 | 20 | 45 | 56 => {
+        // log / loadlog / logupdate
+        11 | 20 | 45 => {
             let log_source = match cmd_id {
                 11 => 0,
                 45 => 1,
-                56 => 2,
                 _ => 3,
             };
             let mut nzb_id = 0;
@@ -5840,137 +5768,6 @@ unsafe fn execute_xml_command(
             crate::rpcroute::UA_RESTRICTED,
             host.config_filename,
         ),
-        // loadextensions
-        31 => {
-            let Some(load_from_disk) = cur.next_bool(is_json) else {
-                return err_resp(2, b"Invalid parameter (Load from disk)");
-            };
-            let mut out_buf = RsBuf {
-                data: std::ptr::null_mut(),
-                len: 0,
-                cap: 0,
-            };
-            let ok = unsafe {
-                host.call_action(
-                    14,
-                    c_int::from(load_from_disk),
-                    c_int::from(is_json),
-                    0,
-                    0,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    0,
-                    &[],
-                    &[],
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    &mut out_buf,
-                )
-            };
-            let bytes = unsafe { take_rs_buf(out_buf) };
-            if ok == 0 {
-                err_resp(3, &bytes)
-            } else {
-                (false, bytes)
-            }
-        }
-        // downloadextension / updateextension / deleteextension
-        32 | 33 | 34 => {
-            if cmd_id == 34 {
-                let Some(ext_off) = cur.next_str() else {
-                    return err_resp(2, b"Invalid parameter (Extension name)");
-                };
-                let ext_c = to_c_vec(&cur.decode_at(ext_off, is_json));
-                let mut out_buf = RsBuf {
-                    data: std::ptr::null_mut(),
-                    len: 0,
-                    cap: 0,
-                };
-                let ok = unsafe {
-                    host.call_action(
-                        15,
-                        2,
-                        0,
-                        0,
-                        0,
-                        ext_c.as_ptr().cast(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        0,
-                        &[],
-                        &[],
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        &mut out_buf,
-                    )
-                };
-                let err_bytes = unsafe { take_rs_buf(out_buf) };
-                if ok == 0 {
-                    err_resp(2, &err_bytes)
-                } else {
-                    (false, format_bool_bytes(is_json, true))
-                }
-            } else {
-                let Some(url_off) = cur.next_str() else {
-                    return err_resp(2, b"Invalid parameter (URL)");
-                };
-                let Some(ext_off) = cur.next_str() else {
-                    return err_resp(2, b"Invalid parameter (Extension name)");
-                };
-                let url_c = to_c_vec(&cur.decode_at(url_off, is_json));
-                let ext_c = to_c_vec(&cur.decode_at(ext_off, is_json));
-                let mut out_buf = RsBuf {
-                    data: std::ptr::null_mut(),
-                    len: 0,
-                    cap: 0,
-                };
-                let ok = unsafe {
-                    host.call_action(
-                        15,
-                        if cmd_id == 32 { 0 } else { 1 },
-                        0,
-                        0,
-                        0,
-                        url_c.as_ptr().cast(),
-                        ext_c.as_ptr().cast(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        0,
-                        &[],
-                        &[],
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        &mut out_buf,
-                    )
-                };
-                let err_bytes = unsafe { take_rs_buf(out_buf) };
-                if ok == 0 {
-                    err_resp(3, &err_bytes)
-                } else {
-                    (false, format_bool_bytes(is_json, true))
-                }
-            }
-        }
-        // testextension
-        35 => {
-            let Some(ext_off) = cur.next_str() else {
-                return err_resp(2, b"Invalid parameter (Extension entry file name)");
-            };
-            let ext_entry = cur.decode_at(ext_off, is_json);
-            if crate::util::util_find_executor_program(c_bytes(&ext_entry), host.shell_override)
-                .is_none()
-            {
-                err_resp(2, b"Failed to find the corresponding executor")
-            } else {
-                (false, format_bool_bytes(is_json, true))
-            }
-        }
         // saveconfig
         36 => {
             let (_, fault, out) = unsafe {
@@ -6557,46 +6354,6 @@ unsafe fn execute_xml_command(
                 Ok(speed_mbps) => (false, format_network_speed_bytes(is_json, speed_mbps)),
             }
         }
-        // startscript
-        55 => match unsafe { xmlrpc_parse_start_script_raw(raw_start, is_get, is_json) } {
-            None => err_resp(2, b"Invalid parameter"),
-            Some((_, script, command, _context, entries)) => {
-                let script_c = to_c_vec(&script);
-                let command_c = to_c_vec(&command);
-                let mut entry_vecs: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(entries.len());
-                for (k, v) in &entries {
-                    entry_vecs.push((to_c_vec(k), to_c_vec(v)));
-                }
-                let c_params: Vec<NzbgetRsRpcParamItem> = entry_vecs
-                    .iter()
-                    .map(|(k, v)| NzbgetRsRpcParamItem {
-                        name: k.as_ptr().cast(),
-                        value: v.as_ptr().cast(),
-                    })
-                    .collect();
-                let ok = unsafe {
-                    host.call_action(
-                        26,
-                        0,
-                        0,
-                        0,
-                        0,
-                        script_c.as_ptr().cast(),
-                        command_c.as_ptr().cast(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        0,
-                        &[],
-                        &c_params,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    )
-                };
-                (false, format_bool_bytes(is_json, ok != 0))
-            }
-        },
         _ => err_resp(default_err_code, default_err_text),
     }
 }
@@ -6725,7 +6482,6 @@ pub(crate) unsafe fn serve_xmlrpc(
     url_bytes: &[u8],
     version: &[u8],
     config_filename: Option<&[u8]>,
-    shell_override: &[u8],
     log_cb: Option<NzbgetRsXmlRpcLogFn>,
     action_cb: Option<NzbgetRsXmlRpcActionFn>,
     collect_cb: Option<NzbgetRsXmlRpcCollectFn>,
@@ -6735,7 +6491,6 @@ pub(crate) unsafe fn serve_xmlrpc(
         debug_build,
         version: c_bytes(version),
         config_filename: config_filename.map(c_bytes),
-        shell_override: c_bytes(shell_override),
         log_cb,
         action_cb,
         collect_cb,
@@ -7392,10 +7147,10 @@ mod remote_xmlrpc_tests {
         let mut options = RustOptions::new_no_config(None, None);
         options.config_filename = Some(path_cstr.clone());
 
-        let loaded = crate::extension::script_config_load(path_cstr.to_bytes()).unwrap();
+        let loaded = crate::configfile::script_config_load(path_cstr.to_bytes()).unwrap();
         let names_refs: Vec<&[u8]> = loaded.iter().map(|(n, _)| n.to_bytes()).collect();
         let values_refs: Vec<&[u8]> = loaded.iter().map(|(_, v)| v.to_bytes()).collect();
-        let token_bytes = crate::extension::build_cipher_baseline(&names_refs, &values_refs);
+        let token_bytes = crate::configfile::build_cipher_baseline(&names_refs, &values_refs);
         let mut token_escaped = Vec::new();
         crate::escape::json_encode(&token_bytes, &mut token_escaped);
         let token_json = String::from_utf8(token_escaped).unwrap();
@@ -7408,7 +7163,7 @@ mod remote_xmlrpc_tests {
         assert!(reply1.contains("true"), "unexpected reply1: {reply1}");
 
         let saved_bytes =
-            crate::extension::script_config_read_cipher_snapshot(path_cstr.to_bytes()).unwrap();
+            crate::configfile::script_config_read_cipher_snapshot(path_cstr.to_bytes()).unwrap();
         let saved = String::from_utf8(saved_bytes).unwrap();
         assert!(!saved.contains("_TlsCipherBaseline"));
         assert!(saved.contains("Server1.Cipher=optimized"));
@@ -7417,7 +7172,7 @@ mod remote_xmlrpc_tests {
             rpc_reply_with_options("/jsonrpc", HM_POST, UA_CONTROL, &body, true, Some(&options));
         assert!(has_error_code(&reply2, 3));
         let unchanged = String::from_utf8(
-            crate::extension::script_config_read_cipher_snapshot(path_cstr.to_bytes()).unwrap(),
+            crate::configfile::script_config_read_cipher_snapshot(path_cstr.to_bytes()).unwrap(),
         )
         .unwrap();
         assert_eq!(unchanged, saved);
@@ -7659,17 +7414,6 @@ mod remote_xmlrpc_tests {
         assert_eq!(ids[0], 1);
         assert_eq!(ids[9_999], 10_000);
 
-        // StartScript JSON-RPC POST
-        let script_req = br#"{"method":"startscript","params":["Notify.py","test_cmd","settings",[{"Name":"Opt1","Value":"Val\\1"}]],"id":1}"#;
-        let mut scmd = RustXmlCommand::new(script_req, RP_JSON_RPC, HM_POST);
-        scmd.prepare_params();
-        let (_, script, command, context, entries) =
-            xmlrpc_parse_start_script(&mut scmd.buf[scmd.pos..], false, true).unwrap();
-        assert_eq!(script, b"Notify.py");
-        assert_eq!(command, b"test_cmd");
-        assert_eq!(context, b"settings");
-        assert_eq!(entries, vec![(b"Opt1".to_vec(), b"Val\\1".to_vec())]);
-
         // TestDiskSpeed JSON-RPC POST
         let disk_req = br#"{"method":"testdiskspeed","params":["/tmp/test",1024,1,5],"id":1}"#;
         let mut dcmd = RustXmlCommand::new(disk_req, RP_JSON_RPC, HM_POST);
@@ -7680,20 +7424,6 @@ mod remote_xmlrpc_tests {
         assert_eq!(buf_bytes, 1024 * 1024);
         assert_eq!(max_bytes, 1024 * 1024 * 1024);
         assert_eq!(timeout_sec, 5);
-
-        // Decoded parameter containing embedded NUL (%00) truncates at first NUL
-        let nul_req = b"?a=Notify.py%00extra&b=cmd%00extra&c=settings%00extra&k1=Name&v1=ControlPassword%00suffix&k2=Value&v2=secret%00tail";
-        let mut ncmd = RustXmlCommand::new(nul_req, RP_JSON_RPC, HM_GET);
-        ncmd.prepare_params();
-        let (_, n_script, n_cmd, n_ctx, entries) =
-            xmlrpc_parse_start_script(&mut ncmd.buf[ncmd.pos..], true, true).unwrap();
-        assert_eq!(n_script, b"Notify.py");
-        assert_eq!(n_cmd, b"cmd");
-        assert_eq!(n_ctx, b"settings");
-        assert_eq!(
-            entries,
-            vec![(b"ControlPassword".to_vec(), b"secret".to_vec())]
-        );
 
         // AppendFleet JSON-RPC POST
         let fleet_req = br#"{"method":"appendfleet","params":["dupe1","movies",50,60,"a.nzb","aGVsbG8=","b.nzb","https://example.com/b.nzb"],"id":1}"#;
@@ -7854,7 +7584,6 @@ mod remote_xmlrpc_tests {
                 b"/jsonrpc",
                 b"26.0-testing",
                 None,
-                b"",
                 None,
                 Some(test_action_cb),
                 None,
@@ -7887,7 +7616,6 @@ mod remote_xmlrpc_tests {
                 b"/xmlrpc",
                 b"26.0",
                 None,
-                b"",
                 None,
                 Some(test_action_cb),
                 None,
@@ -7916,7 +7644,6 @@ mod remote_xmlrpc_tests {
                 b"/jsonprpc/version?jsonp=myCb",
                 b"26.0",
                 None,
-                b"",
                 None,
                 Some(test_action_cb),
                 None,
@@ -7937,7 +7664,6 @@ mod remote_xmlrpc_tests {
                 b"/jsonprpc/version?jsonp=myCb",
                 b"26.0",
                 None,
-                b"",
                 None,
                 Some(test_action_cb),
                 None,
@@ -7963,7 +7689,6 @@ mod remote_xmlrpc_tests {
                 b"/jsonrpc",
                 b"26.0",
                 None,
-                b"",
                 None,
                 Some(test_action_cb),
                 None,

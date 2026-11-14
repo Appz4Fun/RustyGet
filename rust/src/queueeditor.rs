@@ -248,43 +248,6 @@ pub fn select_pars_to_pause(
     }
 }
 
-/// `QueueEditor::SetNzbCategory`:
-/// Visits `(param_name, "yes"|"no")` for each script added or removed between `old_ext` and `new_ext`.
-pub fn visit_category_ext_diff<F>(old_ext: &[u8], new_ext: &[u8], mut cb: F)
-where
-    F: FnMut(&[u8], &[u8]),
-{
-    if old_ext.eq_ignore_ascii_case(new_ext) {
-        return;
-    }
-    for new_script in crate::util::tokens(new_ext, b",;") {
-        let found = crate::util::tokens(old_ext, b",;")
-            .any(|old_script| new_script.eq_ignore_ascii_case(old_script));
-        if !found {
-            let mut key = Vec::with_capacity(new_script.len() + 1);
-            key.extend_from_slice(new_script);
-            key.push(b':');
-            if key.len() > 1023 {
-                key.truncate(1023);
-            }
-            cb(&key, b"yes");
-        }
-    }
-    for old_script in crate::util::tokens(old_ext, b",;") {
-        let found = crate::util::tokens(new_ext, b",;")
-            .any(|new_script| old_script.eq_ignore_ascii_case(new_script));
-        if !found {
-            let mut key = Vec::with_capacity(old_script.len() + 1);
-            key.extend_from_slice(old_script);
-            key.push(b':');
-            if key.len() > 1023 {
-                key.truncate(1023);
-            }
-            cb(&key, b"no");
-        }
-    }
-}
-
 /// Resolves `(target_id, before, offset)` when moving groups relative to `target_id`
 /// (`QueueEditor::MoveGroupsTo`).
 pub fn resolve_move_groups_target(
@@ -930,18 +893,14 @@ fn resolve_category_settings(
     host: &crate::queuesubsys_host::QueueSubsysHost,
     opts: &crate::queuesubsys_host::GlobalOptsSnap,
     cat_name: &[u8],
-) -> (bool, Vec<u8>) {
+) -> bool {
     let mut unpack = opts.unpack;
-    let mut extensions = opts.extensions.clone();
     if !cat_name.is_empty() {
-        if let Some((cat_unpack, cat_ext)) = host.find_category(cat_name) {
+        if let Some(cat_unpack) = host.find_category(cat_name) {
             unpack = cat_unpack;
-            if !cat_ext.is_empty() {
-                extensions = cat_ext;
-            }
         }
     }
-    (unpack, extensions)
+    unpack
 }
 
 #[cfg(unix)]
@@ -965,10 +924,10 @@ fn set_nzb_category(
     host.log(MK_DEBUG, &msg);
 
     let opts = host.opts();
-    let (old_unpack, old_ext) = if apply_params {
+    let old_unpack = if apply_params {
         resolve_category_settings(host, &opts, &nzb.category)
     } else {
-        (opts.unpack, opts.extensions.clone())
+        opts.unpack
     };
 
     coord.set_queue_entry_category(host, nzb_ptr, category.unwrap_or(b""));
@@ -978,7 +937,7 @@ fn set_nzb_category(
     }
 
     let nzb_after = host.nzb_snap(nzb_ptr, false);
-    let (new_unpack, new_ext) = resolve_category_settings(host, &opts, &nzb_after.category);
+    let new_unpack = resolve_category_settings(host, &opts, &nzb_after.category);
     if old_unpack != new_unpack {
         host.nzb_set_param(
             nzb_ptr,
@@ -986,9 +945,6 @@ fn set_nzb_category(
             Some(if new_unpack { b"yes" } else { b"no" }),
         );
     }
-    visit_category_ext_diff(&old_ext, &new_ext, |param_name, param_val| {
-        host.nzb_set_param(nzb_ptr, param_name, Some(param_val));
-    });
 }
 
 #[cfg(unix)]

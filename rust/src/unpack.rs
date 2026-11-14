@@ -3512,7 +3512,7 @@ mod tests {
         assert!(!compressed);
         assert!(fname_buf.starts_with(b"zz_movie.mkv\0"));
 
-        // 7. Single-archive extraction (used by ExtensionManager::InstallExtension) preserves bundled nested archives intact
+        // 7. Single-archive extraction preserves bundled nested archives intact
         let ext_dir = work_dir.join("ext_pkg");
         std::fs::create_dir_all(&ext_dir).unwrap();
         let bundled_zip = build_test_zip(&[("inner.txt", b"bundled resource", None, 0, None)]);

@@ -1,4 +1,4 @@
-//! Stateful Rust log engine (`NzbgetRsLog` and `NzbgetRsCmdScriptLog`)
+//! Stateful Rust log engine (`NzbgetRsLog`)
 //! backing `Log` (`daemon/util/Log.h` / `Log.cpp`) and `CommandScriptLog`.
 
 use std::collections::VecDeque;
@@ -471,34 +471,6 @@ fn collect_messages_rpc(
     }
 }
 
-struct CmdScriptLogInner {
-    messages: VecDeque<RsLogMessage>,
-    id_message_gen: i32,
-    id_script_gen: i32,
-}
-
-pub struct NzbgetRsCmdScriptLog {
-    inner: Mutex<CmdScriptLogInner>,
-}
-
-impl Default for NzbgetRsCmdScriptLog {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl NzbgetRsCmdScriptLog {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(CmdScriptLogInner {
-                messages: VecDeque::new(),
-                id_message_gen: 0,
-                id_script_gen: 0,
-            }),
-        }
-    }
-}
-
 static ACTIVE_LOG: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsLog>>> =
     std::sync::RwLock::new(None);
 
@@ -696,51 +668,10 @@ pub(crate) fn clear_active_log() {
     }
 }
 
-pub(crate) fn active_cmd_script_log() -> &'static NzbgetRsCmdScriptLog {
-    static LOG: std::sync::OnceLock<NzbgetRsCmdScriptLog> = std::sync::OnceLock::new();
-    LOG.get_or_init(NzbgetRsCmdScriptLog::new)
-}
-
-impl NzbgetRsCmdScriptLog {
-    pub(crate) fn reset_all(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.messages.clear();
-            inner.id_script_gen = 0;
-            inner.id_message_gen = 0;
-        }
-    }
-
-    pub(crate) fn reset_script(&self) -> c_int {
-        let Ok(mut inner) = self.inner.lock() else {
-            return 0;
-        };
-        inner.messages.clear();
-        inner.id_script_gen = inner.id_script_gen.wrapping_add(1);
-        inner.id_script_gen
-    }
-
-    pub(crate) fn add_message_bytes(&self, script_id: c_int, kind: c_int, bytes: &[u8]) {
-        let Ok(mut inner) = self.inner.lock() else {
-            return;
-        };
-        if script_id == inner.id_script_gen {
-            inner.id_message_gen = inner.id_message_gen.wrapping_add(1);
-            let msg_id = inner.id_message_gen as u32;
-            inner.messages.push_back(RsLogMessage {
-                id: msg_id,
-                kind,
-                time: current_unix_time(),
-                text: cstring_lossless(bytes),
-            });
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn nzbget_rs_log_collect(
     mode: c_int,
     log: *const NzbgetRsLog,
-    cmd_log: *const NzbgetRsCmdScriptLog,
     a1: c_int,
     a2: c_int,
     u1: u32,
@@ -782,16 +713,12 @@ pub(crate) unsafe fn nzbget_rs_log_collect(
             }
         }
         1 => {
-            // XML/JSON-RPC log / commandscriptlog
+            // XML/JSON-RPC log
             if fn1 == 0 {
                 return;
             }
             let emit_cb: NzbgetRsXmlRpcEmitFn = std::mem::transmute(fn1);
-            if let Some(clg) = cmd_log.as_ref() {
-                if let Ok(inner) = clg.inner.lock() {
-                    collect_messages_rpc(&inner.messages, a1, a2, ctx, emit_cb);
-                }
-            } else if let Some(lg) = log.as_ref() {
+            if let Some(lg) = log.as_ref() {
                 if let Ok(inner) = lg.inner.lock() {
                     collect_messages_rpc(&inner.messages, a1, a2, ctx, emit_cb);
                 }
@@ -826,38 +753,6 @@ pub(crate) unsafe fn nzbget_rs_log_collect(
             }
         }
         _ => {}
-    }
-}
-
-#[cfg(test)]
-pub(crate) unsafe fn nzbget_rs_cmd_script_log_op(
-    op: c_int,
-    handle: *mut NzbgetRsCmdScriptLog,
-    script_id: c_int,
-    kind: c_int,
-    text: *const c_char,
-) -> usize {
-    match op {
-        0 => Box::into_raw(Box::new(NzbgetRsCmdScriptLog::new())) as usize,
-        1 => {
-            if !handle.is_null() {
-                drop(Box::from_raw(handle));
-            }
-            0
-        }
-        2 => handle.as_ref().map_or(0, |h| h.reset_script() as usize),
-        3 => {
-            if let Some(h) = handle.as_ref() {
-                let bytes = if text.is_null() {
-                    &[][..]
-                } else {
-                    CStr::from_ptr(text).to_bytes()
-                };
-                h.add_message_bytes(script_id, kind, bytes);
-            }
-            0
-        }
-        _ => 0,
     }
 }
 
@@ -941,7 +836,6 @@ mod tests {
             nzbget_rs_log_collect(
                 0,
                 log,
-                ptr::null(),
                 1,
                 0,
                 0,
@@ -969,7 +863,6 @@ mod tests {
             nzbget_rs_log_collect(
                 0,
                 log,
-                ptr::null(),
                 0,
                 0,
                 0,
@@ -989,27 +882,5 @@ mod tests {
             nzbget_rs_options_free(opts);
         }
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn command_script_log_filters_by_active_script_generation() {
-        unsafe {
-            let h = nzbget_rs_cmd_script_log_op(0, ptr::null_mut(), 0, 0, ptr::null())
-                as *mut NzbgetRsCmdScriptLog;
-            let gen1 = nzbget_rs_cmd_script_log_op(2, h, 0, 0, ptr::null()) as c_int;
-            assert_eq!(gen1, 1);
-            nzbget_rs_cmd_script_log_op(3, h, gen1, 0, c"line1".as_ptr());
-            let gen2 = nzbget_rs_cmd_script_log_op(2, h, 0, 0, ptr::null()) as c_int;
-            assert_eq!(gen2, 2);
-            // Stale script_id message is ignored
-            nzbget_rs_cmd_script_log_op(3, h, gen1, 2, c"stale".as_ptr());
-            nzbget_rs_cmd_script_log_op(3, h, gen2, 0, c"fresh".as_ptr());
-
-            let inner = (*h).inner.lock().unwrap();
-            assert_eq!(inner.messages.len(), 1);
-            assert_eq!(inner.messages[0].text.as_c_str(), c"fresh");
-            drop(inner);
-            nzbget_rs_cmd_script_log_op(1, h, 0, 0, ptr::null());
-        }
     }
 }

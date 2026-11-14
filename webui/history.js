@@ -139,6 +139,8 @@ var History = (new function($)
 		{
 			history = _history;
 			prepare();
+			// the details panel lists a release's copies across queue and history
+			History.items = history;
 		}
 		notifyAll(history);
 		RPC.next();

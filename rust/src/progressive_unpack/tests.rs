@@ -194,6 +194,15 @@ fn complete_single_volume_set_extracts() {
     let s = expect_ok(r, &log);
     assert_eq!(s.files, 1);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+    // Published by zipfast itself (not copied): the archive's mtime is restored.
+    let mtime = std::fs::metadata(t.out().join("movie.mkv"))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(mtime, 1_700_000_000);
     assert!(log.iter().any(|l| l == "Unrar: All OK"), "{log:?}");
     assert!(log.iter().any(|l| l == "Unrar: Extracting  movie.mkv"), "{log:?}");
 }

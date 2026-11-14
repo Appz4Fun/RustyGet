@@ -53,6 +53,11 @@ pub trait VolumeFeed: Send + 'static {
     fn wait_repaired(&mut self, _is_cancelled: &mut dyn FnMut() -> bool) -> bool {
         false
     }
+    /// True when every volume of the set is on disk and will not change: the session can then
+    /// publish verified members itself instead of having them copied into place.
+    fn set_is_final(&self) -> bool {
+        false
+    }
 }
 
 /// Volume bytes at the start and end that hold archive headers. A hole there cannot be read
@@ -102,6 +107,9 @@ impl VolumeFeed for CompleteSet {
         } else {
             VolumeView::Missing
         }
+    }
+    fn set_is_final(&self) -> bool {
+        true
     }
 }
 
@@ -257,12 +265,22 @@ where
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_default();
+    // A set that is complete on disk is declared as protected native files, which lets the
+    // session publish verified members itself. Each volume holds one handle.
+    let protected = feed
+        .set_is_final()
+        .then(|| protect_volumes(req.first_volume))
+        .flatten();
     let feed = Arc::new(Mutex::new(feed));
     let pending: PendingWait = Arc::new(Mutex::new(None));
+    let volume_count = protected
+        .as_ref()
+        .map_or(0, |inv| inv.volumes.len() as u64);
     let provider = FeedProvider {
         dir: dir.clone(),
         feed: feed.clone(),
         pending: pending.clone(),
+        protected,
     };
     let mut opts = ProgressiveOptions::new(
         zipfast::extract::Options {
@@ -280,6 +298,8 @@ where
         },
         first_name,
     );
+    opts.limits.volume_handles = opts.limits.volume_handles.max(2 * volume_count + 16);
+    opts.limits.protection_paths = opts.limits.protection_paths.max(volume_count + 16);
     opts.hole_policy = HolePolicy::PartialStored {
         fill: HoleFill::Sparse,
     };
@@ -793,6 +813,38 @@ struct FeedProvider {
     dir: PathBuf,
     feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
     pending: PendingWait,
+    protected: Option<zipfast::progressive::ProtectionInventory>,
+}
+
+/// The volumes of the set starting at `first`, opened, as a protection inventory. `None` when a
+/// volume cannot be opened.
+fn protect_volumes(first: &Path) -> Option<zipfast::progressive::ProtectionInventory> {
+    use zipfast::progressive::{ProtectedPath, ProtectedVolume, ProtectionInventory, VolumeBacking};
+    let mut volumes = Vec::new();
+    let mut p = first.to_path_buf();
+    while p.is_file() {
+        let file = std::fs::File::open(&p).ok()?;
+        let path = std::path::absolute(&p).ok()?;
+        volumes.push(ProtectedVolume {
+            index: volumes.len() as u32,
+            name: p.file_name()?.to_os_string(),
+            backing: VolumeBacking::Native(vec![ProtectedPath {
+                path,
+                file: Some(Arc::new(file)),
+            }]),
+        });
+        match zipfast::volume::next_volume(&p) {
+            Some(n) if n != p => p = n,
+            _ => break,
+        }
+        if volumes.len() > 4096 {
+            return None;
+        }
+    }
+    (!volumes.is_empty()).then(|| ProtectionInventory {
+        volumes,
+        auxiliary_paths: Vec::new(),
+    })
 }
 
 impl VolumeSource for FeedProvider {
@@ -821,6 +873,16 @@ impl VolumeSource for FeedProvider {
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),
         }
+    }
+
+    fn protection(&mut self) -> ProgressiveResult<zipfast::progressive::ProtectionDeclaration> {
+        Ok(match &self.protected {
+            Some(inventory) => zipfast::progressive::ProtectionDeclaration::Complete {
+                epoch: 1,
+                inventory: inventory.clone(),
+            },
+            None => zipfast::progressive::ProtectionDeclaration::Opaque,
+        })
     }
 }
 

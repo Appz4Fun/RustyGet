@@ -89,6 +89,10 @@ unsafe fn start(t: *mut JobThread) {
     };
     thread.running.store(true, Ordering::SeqCst);
     let addr = t as usize;
+    // Held until the pthread handle is published: a worker that finishes at
+    // once and frees itself must not do so before then (C++ Thread::Start's
+    // m_threadMutex did the same).
+    let start_guard = START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let spawned = std::thread::Builder::new()
         .name(if matches!(thread.work, Some(Work::Unpack(_))) {
             "direct-unpack".into()
@@ -96,6 +100,7 @@ unsafe fn start(t: *mut JobThread) {
             "post-job".into()
         })
         .spawn(move || {
+            drop(START_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
             let t = addr as *mut JobThread;
             let thread = unsafe { &*t };
             {
@@ -124,7 +129,10 @@ unsafe fn start(t: *mut JobThread) {
             }
         }
     }
+    drop(start_guard);
 }
+
+static START_LOCK: Mutex<()> = Mutex::new(());
 
 /// A post-processing job thread (live repair when `kind` is 10).
 ///

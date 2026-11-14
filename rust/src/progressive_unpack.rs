@@ -142,6 +142,23 @@ impl Failure {
             }
             FailureKind::UnsafePath => Failure::UnsafePath(at),
             FailureKind::Canceled => Failure::Canceled,
+            FailureKind::Rar(r) => {
+                use zipfast::error::RarFailure as R;
+                match &**r {
+                    R::PasswordRequired { .. } => Failure::PasswordRequired,
+                    R::WrongPassword { .. } => Failure::WrongPassword,
+                    // RAR4 has no password verifier: a failed check after decryption is either
+                    // a wrong password or damaged data. Both are reported as a checksum failure.
+                    R::Integrity { .. } | R::EncryptedIntegrity { .. } => {
+                        Failure::Checksum(format!("{at} ({r})"))
+                    }
+                    R::MissingVolume { path } => {
+                        Failure::MissingVolume(format!(" {}", path.display()))
+                    }
+                    R::Canceled => Failure::Canceled,
+                    other => Failure::Other(format!("{other}{at}")),
+                }
+            }
             other => Failure::Other(format!("{other:?}{at}")),
         }
     }

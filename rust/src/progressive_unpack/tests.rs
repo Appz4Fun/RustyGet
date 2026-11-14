@@ -232,7 +232,6 @@ fn missing_volume_is_typed() {
 struct Trickle {
     released: Arc<AtomicUsize>,
     names: Vec<PathBuf>,
-    waker: Arc<Mutex<Option<Waker>>>,
     asked: Arc<AtomicUsize>,
 }
 
@@ -260,7 +259,6 @@ fn volumes_arriving_one_at_a_time() {
     let feed = Trickle {
         released: released.clone(),
         names,
-        waker: waker.clone(),
         asked: Arc::new(AtomicUsize::new(0)),
     };
     let rel = released.clone();
@@ -428,4 +426,360 @@ fn orphan_continuation_volume_is_refused() {
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
     assert!(r.is_err(), "an orphan continuation must not extract: {log:?}");
     assert!(!t.out().join("movie.bin").exists());
+}
+
+// ---- RAR4 (RAR 2.9/3.x/4.x) stored fixtures with valid CRCs ----
+
+/// A RAR4 header: CRC16 (low half of CRC32 over everything after the CRC field) + body.
+fn rar4_block(kind: u8, flags: u16, rest: &[u8], add_size: usize) -> Vec<u8> {
+    let mut body = vec![kind];
+    body.extend_from_slice(&flags.to_le_bytes());
+    body.extend_from_slice(&((7 + rest.len()) as u16).to_le_bytes());
+    body.extend_from_slice(rest);
+    let _ = add_size;
+    let crc = (crc32fast::hash(&body) & 0xffff) as u16;
+    let mut out = crc.to_le_bytes().to_vec();
+    out.extend(body);
+    out
+}
+
+const DOS_TIME: u32 = (46 << 25) | (1 << 21) | (1 << 16); // 2026-01-01 00:00
+
+fn rar4_file_header(
+    name: &str,
+    packed: usize,
+    size: usize,
+    crc: u32,
+    before: bool,
+    after: bool,
+    salt: Option<&[u8; 8]>,
+) -> Vec<u8> {
+    let mut flags: u16 = 0x8000; // LONG_BLOCK
+    if before {
+        flags |= 0x0001;
+    }
+    if after {
+        flags |= 0x0002;
+    }
+    if salt.is_some() {
+        flags |= 0x0004 | 0x0400;
+    }
+    let mut rest = Vec::new();
+    rest.extend_from_slice(&(packed as u32).to_le_bytes());
+    rest.extend_from_slice(&(size as u32).to_le_bytes());
+    rest.push(3); // host OS: Unix
+    rest.extend_from_slice(&crc.to_le_bytes());
+    rest.extend_from_slice(&DOS_TIME.to_le_bytes());
+    rest.push(29); // unpack version
+    rest.push(0x30); // stored
+    rest.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    rest.extend_from_slice(&0o100644u32.to_le_bytes());
+    rest.extend_from_slice(name.as_bytes());
+    if let Some(s) = salt {
+        rest.extend_from_slice(s);
+    }
+    rar4_block(0x74, flags, &rest, packed)
+}
+
+fn rar4_volume(header: Vec<u8>, payload: &[u8], more: bool, first: bool) -> Vec<u8> {
+    let mut v = b"Rar!\x1a\x07\x00".to_vec();
+    let mut mflags: u16 = 0x0001; // volume
+    if first {
+        mflags |= 0x0100; // first volume
+    }
+    mflags |= 0x0010; // new numbering
+    v.extend(rar4_block(0x73, mflags, &[0u8; 6], 0));
+    v.extend(header);
+    v.extend_from_slice(payload);
+    let eflags: u16 = if more { 0x0001 } else { 0 };
+    v.extend(rar4_block(0x7b, eflags, &[], 0));
+    v
+}
+
+fn rar4_store_volumes(name: &str, data: &[u8], chunk: usize) -> Vec<Vec<u8>> {
+    let parts: Vec<&[u8]> = data.chunks(chunk).collect();
+    let n = parts.len();
+    parts
+        .iter()
+        .enumerate()
+        .map(|(i, part)| {
+            let last = i + 1 == n;
+            let crc = if last { crc32fast::hash(data) } else { crc32fast::hash(part) };
+            let h = rar4_file_header(name, part.len(), data.len(), crc, i > 0, !last, None);
+            rar4_volume(h, part, !last, i == 0)
+        })
+        .collect()
+}
+
+const RAR4_SALT: [u8; 8] = [0x92, 0x80, 0x37, 0x09, 0x6e, 0x88, 0x92, 0xdb];
+
+/// Salted AES-128 stored member, one CBC stream across all volumes, cut at `chunk` bytes.
+fn rar4_aes_store_volumes(name: &str, data: &[u8], chunk: usize, password: &str) -> Vec<Vec<u8>> {
+    let (key, iv) = zipfast::crypto::derive_rar4_key_iv(password, &RAR4_SALT);
+    let mut padded = data.to_vec();
+    padded.resize(data.len().next_multiple_of(16), 0);
+    let cipher = zipfast::crypto::encrypt_cbc(&key, &iv, &padded).unwrap();
+    let starts: Vec<usize> = (0..data.len()).step_by(chunk).collect();
+    let n = starts.len();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(i, &start)| {
+            let last = i + 1 == n;
+            let end = if last { cipher.len() } else { start + chunk };
+            let part = &cipher[start..end];
+            // Non-final parts carry the CRC of their packed (cipher) bytes, the last one the
+            // whole plaintext CRC.
+            let crc = if last {
+                crc32fast::hash(data)
+            } else {
+                crc32fast::hash(part)
+            };
+            let h = rar4_file_header(name, part.len(), data.len(), crc, i > 0, !last, Some(&RAR4_SALT));
+            rar4_volume(h, part, !last, i == 0)
+        })
+        .collect()
+}
+
+fn run_pw(
+    first: &Path,
+    out: &Path,
+    password: &str,
+    feed: Box<dyn VolumeFeed>,
+) -> (Result<zipfast::extract::Summary, Error>, Vec<String>) {
+    let mut log = Vec::new();
+    let req = Request {
+        first_volume: first,
+        dest: out,
+        password,
+        overwrite: true,
+    };
+    let r = extract(&req, feed, &mut |_, m: &str| log.push(m.to_string()), &mut || false);
+    (r, log)
+}
+
+fn rar4_name(i: usize) -> String {
+    format!("old.part{:02}.rar", i + 1)
+}
+
+fn write_named(dir: &Path, vols: &[Vec<u8>], name: fn(usize) -> String) -> PathBuf {
+    for (i, v) in vols.iter().enumerate() {
+        std::fs::write(dir.join(name(i)), v).unwrap();
+    }
+    dir.join(name(0))
+}
+
+#[test]
+fn rar4_store_multi_volume_extracts() {
+    let t = TestDir::new("rar4s");
+    let data = pattern(250_000);
+    let first = write_named(&t.dl(), &rar4_store_volumes("movie.mkv", &data, 60_000), rar4_name);
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+#[test]
+fn rar4_aes_store_multi_volume_extracts() {
+    let t = TestDir::new("rar4aes");
+    let data = pattern(200_003);
+    let vols = rar4_aes_store_volumes("movie.mkv", &data, 50_001, "secret");
+    let first = write_named(&t.dl(), &vols, rar4_name);
+    let (r, log) = run_pw(&first, &t.out(), "secret", Box::new(CompleteSet));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+#[test]
+fn rar4_aes_wrong_password_is_typed() {
+    let t = TestDir::new("rar4aeswrong");
+    let data = pattern(100_000);
+    let vols = rar4_aes_store_volumes("movie.mkv", &data, 40_000, "secret");
+    let first = write_named(&t.dl(), &vols, rar4_name);
+    let (r, log) = run_pw(&first, &t.out(), "nope", Box::new(CompleteSet));
+    match r {
+        Err(Error::Failed(f)) => assert!(
+            f.is_password() || matches!(f, Failure::Checksum(_)),
+            "RAR4 has no password verifier: wrong password shows as a checksum failure or password failure, got {f:?}"
+        ),
+        _ => panic!("wrong password must fail: {log:?}"),
+    }
+    assert!(!t.out().join("movie.mkv").exists());
+}
+
+fn rar4_payload_offset(vol: &[u8], part_len: usize) -> usize {
+    vol.len() - 7 - part_len
+}
+
+#[test]
+fn rar4_store_holes_patched() {
+    let t = TestDir::new("rar4holes");
+    let data = pattern(400_000);
+    let chunk = 100_000;
+    let vols = rar4_store_volumes("movie.mkv", &data, chunk);
+    let first = write_named(&t.dl(), &vols, rar4_name);
+    let v2 = t.dl().join(rar4_name(1));
+    let p2 = rar4_payload_offset(&vols[1], chunk) as u64;
+    let h2 = vec![(p2 + 30_000, 7_000)];
+    let mut dmg = vols[1].clone();
+    dmg[(p2 + 30_000) as usize..(p2 + 37_000) as usize].fill(0);
+    std::fs::write(&v2, &dmg).unwrap();
+    let feed = Damaged {
+        holes: vec![(v2.clone(), h2)],
+        repair: vec![(v2, vols[1].clone())],
+        handed: false,
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+#[test]
+fn rar4_aes_store_holes_patched() {
+    let t = TestDir::new("rar4aesholes");
+    let data = pattern(300_000);
+    let chunk = 75_001;
+    let vols = rar4_aes_store_volumes("movie.mkv", &data, chunk, "secret");
+    let first = write_named(&t.dl(), &vols, rar4_name);
+    let v2 = t.dl().join(rar4_name(1));
+    let p2 = rar4_payload_offset(&vols[1], chunk) as u64;
+    let h2 = vec![(p2 + 20_005, 3_000)];
+    let mut dmg = vols[1].clone();
+    dmg[(p2 + 20_005) as usize..(p2 + 23_005) as usize].fill(0);
+    std::fs::write(&v2, &dmg).unwrap();
+    let feed = Damaged {
+        holes: vec![(v2.clone(), h2)],
+        repair: vec![(v2, vols[1].clone())],
+        handed: false,
+    };
+    let (r, log) = run_pw(&first, &t.out(), "secret", Box::new(feed));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+// ---- RAR5 with encrypted headers and data (-hp) ----
+
+const RAR5_SALT: [u8; 16] = [3; 16];
+const RAR5_IV: [u8; 16] = [9; 16];
+
+fn rar5_enc_file_header(name: &str, packed: u64, size: u64, crc: u32, before: bool, after: bool) -> Vec<u8> {
+    let mut fields = Vec::new();
+    vint(0x4, &mut fields); // CRC present
+    vint(size, &mut fields);
+    vint(0x20, &mut fields);
+    fields.extend(crc.to_le_bytes());
+    vint(0, &mut fields); // stored
+    vint(0, &mut fields); // Windows host
+    vint(name.len() as u64, &mut fields);
+    fields.extend(name.as_bytes());
+    let mut extra = vec![36, 1, 0, 0, 1]; // size, crypt record, version 0, flags 0, KDF exponent 1
+    extra.extend(RAR5_SALT);
+    extra.extend(RAR5_IV);
+    let mut body = Vec::new();
+    vint(2, &mut body);
+    vint(3 | if before { 8 } else { 0 } | if after { 16 } else { 0 }, &mut body);
+    vint(extra.len() as u64, &mut body);
+    vint(packed, &mut body);
+    body.extend(fields);
+    body.extend(extra);
+    let mut sized = Vec::new();
+    vint(body.len() as u64, &mut sized);
+    sized.extend(body);
+    let mut out = crc32fast::hash(&sized).to_le_bytes().to_vec();
+    out.extend(sized);
+    out
+}
+
+fn rar5_wire(mut h: Vec<u8>, key: &[u8; 32], ordinal: u8) -> Vec<u8> {
+    h.resize(h.len().next_multiple_of(16), 0);
+    let iv = [ordinal + 30; 16];
+    let mut out = iv.to_vec();
+    out.extend(zipfast::crypto::encrypt_cbc(key, &iv, &h).unwrap());
+    out
+}
+
+/// Encrypted headers + encrypted stored data, one CBC stream over all volumes. Returns the
+/// volumes and each volume's payload offset.
+fn rar5_hp_volumes(name: &str, data: &[u8], chunk: usize, password: &str) -> (Vec<Vec<u8>>, Vec<usize>) {
+    let key = zipfast::crypto::derive_rar5_key_and_hash_key(password, 1, &RAR5_SALT, None)
+        .unwrap()
+        .0;
+    let mut padded = data.to_vec();
+    padded.resize(data.len().next_multiple_of(16), 0);
+    let cipher = zipfast::crypto::encrypt_cbc(&key, &RAR5_IV, &padded).unwrap();
+    let parts: Vec<&[u8]> = cipher.chunks(chunk).collect();
+    let n = parts.len();
+    let mut vols = Vec::new();
+    let mut offsets = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        let last = i + 1 == n;
+        let mut v = SIG.to_vec();
+        let mut params = vec![0, 0, 1];
+        params.extend(RAR5_SALT);
+        v.extend(block(4, 0, &params, &[], false));
+        v.extend(rar5_wire(main_block(true, (i > 0).then_some(i as u64)), &key, 0));
+        // Non-final parts carry the CRC of their packed (cipher) bytes, the last one the whole
+        // plaintext CRC.
+        let crc = if last {
+            crc32fast::hash(data)
+        } else {
+            crc32fast::hash(part)
+        };
+        v.extend(rar5_wire(
+            rar5_enc_file_header(name, part.len() as u64, data.len() as u64, crc, i > 0, !last),
+            &key,
+            1,
+        ));
+        offsets.push(v.len());
+        v.extend_from_slice(part);
+        v.extend(rar5_wire(end_block(!last), &key, 2));
+        vols.push(v);
+    }
+    (vols, offsets)
+}
+
+#[test]
+fn rar5_encrypted_headers_extract() {
+    let t = TestDir::new("rar5hp");
+    let data = pattern(250_000);
+    let (vols, _) = rar5_hp_volumes("movie.mkv", &data, 64_000, "pw");
+    let first = write_set(&t.dl(), &vols);
+    let (r, log) = run_pw(&first, &t.out(), "pw", Box::new(CompleteSet));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}
+
+#[test]
+fn rar5_encrypted_headers_missing_password_is_typed() {
+    let t = TestDir::new("rar5hpnopw");
+    let data = pattern(100_000);
+    let (vols, _) = rar5_hp_volumes("movie.mkv", &data, 64_000, "pw");
+    let first = write_set(&t.dl(), &vols);
+    let (r, log) = run_pw(&first, &t.out(), "", Box::new(CompleteSet));
+    match r {
+        Err(Error::Failed(f)) => assert!(f.is_password(), "{f:?} {log:?}"),
+        _ => panic!("expected a password failure: {log:?}"),
+    }
+}
+
+#[test]
+fn rar5_encrypted_store_holes_patched() {
+    let t = TestDir::new("rar5hpholes");
+    let data = pattern(320_000);
+    let (vols, offs) = rar5_hp_volumes("movie.mkv", &data, 80_000, "pw");
+    let first = write_set(&t.dl(), &vols);
+    let v2 = t.dl().join(volume_name(1, vols.len()));
+    let p2 = offs[1] as u64;
+    let h2 = vec![(p2 + 10_007, 2_000)];
+    let mut dmg = vols[1].clone();
+    dmg[(p2 + 10_007) as usize..(p2 + 12_007) as usize].fill(0);
+    std::fs::write(&v2, &dmg).unwrap();
+    let feed = Damaged {
+        holes: vec![(v2.clone(), h2)],
+        repair: vec![(v2, vols[1].clone())],
+        handed: false,
+    };
+    let (r, log) = run_pw(&first, &t.out(), "pw", Box::new(feed));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }

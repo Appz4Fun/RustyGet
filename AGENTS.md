@@ -185,6 +185,29 @@ for researched methods that have not been executed or installed by this work.
   is not native cross-platform execution. Research permission is not execution
   permission, and diagnostic counts are not native latency.
 
+## Twins and alts
+
+These two words have one meaning each in code, logs, tests, and documentation.
+
+- A **twin** is the exact same post uploaded again: the same files, sizes,
+  article counts, and checksums. Twins are proven, never assumed from a
+  matching size or name: par2 file lists must agree, or sampled articles at
+  the same positions must be byte-identical. Only a twin's articles may be
+  swapped in one for one.
+- An **alt** is the same video file in a different container: other volume
+  sizes, another archive format, an archive inside an archive, or another
+  password. Container bytes of alts never match and must never be compared.
+- Matching and borrowing for alts go by the bytes of the video file itself,
+  reached through every stored container around it. The one payload map is
+  `ContentMapper::build_map_with_tls` in `rust/src/streamrepair.rs`. Extend
+  it for a new container or layer; don't build a second map or compare
+  container bytes.
+- A copy with a different video file, such as another encode, is neither. It
+  is a plain backup for failover.
+- Prefer donors in this order: twins, then alts that can donate by range
+  (stored containers, known password), then alts that must be downloaded and
+  extracted whole.
+
 ## Respect execution ownership
 
 Read [the deployment procedures](docs/DEPLOYMENT_AGENT_PROCEDURES.md) for

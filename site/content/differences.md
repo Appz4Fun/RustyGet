@@ -24,7 +24,7 @@ lede = "RustyGet started from NZBGet 27.0 and the work of pull request 850. This
 | Queue files | NZBGet formats | NZBGet formats, with RustyGet's data in a trailer that NZBGet ignores |
 | Bug fixes | | About 100 fixes to inherited bugs, 96 of them reported upstream |
 | Unpacking | External `unrar` and `7z` programs | Built in: RAR, 7-Zip, ZIP, and tar archives extract in Rust, with no external programs |
-| Build and test workflows | Builds for every platform on each push | No build or test workflow yet; the documentation, benchmark, and formatting workflows run |
+| Build and test workflows | Builds for every platform on each push | Builds and tests on Linux x86-64 and macOS for every pull request and push to `main` |
 
 ## Duplicate fleets
 
@@ -96,6 +96,7 @@ See [Configuration options](options.md) for every option.
 - Methods that change the system or reach out to the network need POST. Plain GET runs only the methods that read.
 - JSON-P is off unless option `JsonP` turns it on. Then it runs only the methods that read, with the restricted user's access, so user names, passwords, and API keys come back as `***`. In NZBGet, JSON-P ran every method with full access, and any web page could read the answers.
 - `system.multicall` respects the caller's access level.
+- Outgoing HTTP requests, such as NZB, RSS, and indexer fetches, identify as `nzbget/26.3` and add the header `UserAgentExtended: RustyGet/0.1`, so indexers that expect NZBGet keep working.
 - Out-of-range numbers are rejected, `saveconfig` refuses malformed input, and several decoding and output bugs are fixed.
 
 See [API and compatibility](api.md).
@@ -136,4 +137,4 @@ RustyGet fixes about 100 inherited bugs. 96 of them are [reported to the NZBGet 
 
 - `rust/rust-toolchain.toml` pins Rust 1.99.0, and `just build` compiles the Rust crate and links the `rustyget` binary.
 - PAR2 verification, streaming repair, post-download repair, and par-renaming use the `par-rs` crate, and archive extraction, including decompressed donors for stream repair, uses the `zipfast` and `zipview` crates. RustyGet needs no `par2`, `unrar`, or `7z` program.
-- The inherited GitHub workflows for builds, packages, and tests are gone. The documentation, benchmark, and formatting workflows run, and there is no build workflow yet.
+- A required `build` check compiles and tests RustyGet on Linux x86-64 and macOS for every pull request and every push to `main`. The inherited workflows for packages are gone.

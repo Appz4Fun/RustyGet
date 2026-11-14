@@ -49,7 +49,7 @@ RustyGet is a Usenet downloader that started as a fork of [NZBGet](https://githu
 | Queue and history files | NZBGet formats | NZBGet formats, with RustyGet's data in a trailer that NZBGet ignores |
 | Inherited bugs | | About 100 fixed, 96 of them [reported to NZBGet as its issues 940 to 1046](https://github.com/nzbgetcom/nzbget/issues?q=is%3Aissue+author%3Axbmc4lyfe): downloads, post-processing, queue edits, state files, scripts, feeds, and the web interface |
 | Unpacking | External `unrar` and `7z` programs | Built in, with no external programs |
-| CI workflows | Builds and tests for every platform | No build or test workflow yet; the documentation, benchmark, and formatting workflows run |
+| CI workflows | Builds and tests for every platform | Builds and tests on Linux x86-64 and macOS for every pull request and push to `main` |
 
 The new options are `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, and `DupeFastDonors`, plus `JsonP` in the security settings. The full list of changes is in [Differences from NZBGet](https://appz4fun.github.io/RustyGet/differences.html).
 
@@ -110,7 +110,7 @@ On 2026-10-09 the NZBGet maintainers closed it without merging, along with the r
 
 ## Build and run
 
-RustyGet runs on Linux and macOS, though the current main branch builds on macOS only until a Linux build fix lands. It has no release packages yet, so build it from source with `just`, a C++20 compiler, and Rust. The repository pins Rust 1.99.0, and rustup installs it on the first build.
+RustyGet runs on Linux and macOS. It has no release packages yet, so build it from source with `just`, a C++20 compiler, and Rust. The repository pins Rust 1.99.0, and rustup installs it on the first build.
 
 ```bash
 git clone https://github.com/Appz4Fun/RustyGet.git rustyget

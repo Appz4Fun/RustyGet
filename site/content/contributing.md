@@ -35,7 +35,7 @@ Little C++ is left: the entry point in `daemon/main/rustyget.cpp` and the glue h
 
 ## Tests
 
-The repository has no build or test workflow yet; its workflows build the documentation, check formatting, and handle benchmarks. Run the tests locally before you push:
+A required `build` check compiles and tests every pull request on Linux and macOS. Run the build and the tests locally before you push, too:
 
 ```bash
 just test

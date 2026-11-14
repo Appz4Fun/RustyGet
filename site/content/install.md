@@ -5,9 +5,6 @@ eyebrow = "Get started"
 lede = "RustyGet runs on Linux and macOS, and builds from source with Just, a C++20 compiler, and Rust. Release packages come back once the build workflows are rebuilt for the rewrite."
 +++
 
-> [!WARNING] Linux builds on the main branch
-> The Rust library on the current main branch doesn't compile on Linux, because it uses thread-cancellation constants that the `libc` crate defines only for Apple targets. A fix is on the way. Until it lands, main builds on macOS only.
-
 > [!IMPORTANT] No release packages yet
 > The NZBGet installers, Docker images, and NAS packages install stock NZBGet, not RustyGet. Until RustyGet publishes its own packages, build it from source.
 

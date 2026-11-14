@@ -23,14 +23,14 @@ When a port finds a bug in the old code, the port keeps the bug, and the fix fol
 
 ## What's left
 
-On the main branch, about 210,000 lines of Rust in `rust/src/` do the work. What remains in C++:
+On the main branch, about 219,000 lines of Rust in `rust/src/` do the work. What remains in C++:
 
 | Code | Lines | What it is |
 |---|---|---|
 | `daemon/main/rustyget.cpp` | 320 | The program entry point, which hands over to Rust |
 | `daemon/util/Util.h` | 4,931 | Glue: the C++ classes and callbacks that still wrap Rust objects |
 | `rust/include/*.h` | 472 | C declarations of the Rust interface |
-| `tests/` | 770 | The daemon test runner and its test suites |
+| `tests/` | 772 | The daemon test runner and its test suites |
 | `rust/tests/*.cpp` | | Differential and ownership test harnesses |
 
 So the build still needs a C++20 compiler. Several dependencies are already gone, among them CMake, Boost, PAR2-Turbo, libxml2, zlib, ncurses, and the external `unrar` and `7z` programs. The binary links OpenSSL for TLS, and the Rust `zstd` crate builds the C zstd library. The macOS app in `platforms/macos/` is Objective-C.

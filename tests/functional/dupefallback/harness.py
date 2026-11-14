@@ -12700,7 +12700,8 @@ SCENARIO_OPTIONS = {
     'prodrarwhole': PROD_OPTIONS,
     'prodrarstream': PROD_OPTIONS,
     'skipholetwin': PROD_OPTIONS,
-    'skipholepar': PROD_OPTIONS,
+    # throttled so direct unpack runs while the download (and the par2 files) still arrive
+    'skipholepar': PROD_OPTIONS + ['DownloadRate=1500'],
     'wholefileonly': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'wholefilewrongdonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'wholefilenofirst': ['DupeArticleFallback=stream', 'ParCheck=auto'],

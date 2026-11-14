@@ -515,6 +515,7 @@ class Daemon:
             # The scenarios were written against the old built-in defaults;
             # pin them so each one still sets exactly what it tests.
             'DupeArticleFallback=no', 'DupeStreamDecompress=no', 'ParScan=extended',
+            'DupeWatch=no',
         ] + extra_options
         self.t.write_file(self.conf_rel, ('\n'.join(cfg) + '\n').encode())
 
@@ -6251,11 +6252,12 @@ def scenario_dupesearchfilters(daemon, t):
 def scenario_dupesearchdonors(daemon, t):
     """Donors are scored by wholeness: a pick scored like a client's (23859118)
     with two backups of the client's own, five postings on the indexer: a
-    byte-identical twin 100% alive, another packaging 100%, one 95%, a twin
-    90%, and one that no server holds. The dead one is dropped; the others are
-    added below the backups (the first two at once, after the probe, the rest as
-    their full samples land) and end up scored base + 90, 89, 85, 82 (base is
-    the pick's score minus 1000)."""
+    same-size copy 100% alive, another packaging 100%, one 95%, a same-size
+    copy 90%, and one that no server holds. None has a par2 index, so none is a
+    twin (size alone never makes one) and all rank by wholeness. The dead one is
+    dropped; the others are added below the backups (the first two at once,
+    after the probe, the rest as their full samples land) and end up scored
+    base + 89, 88, 85, 81 (base is the pick's score minus 1000)."""
     n = 40
     ids = lambda p, alive=n: ['%s-%d@x' % (p, i) for i in range(n)]
     postings = {
@@ -6296,7 +6298,7 @@ def scenario_dupesearchdonors(daemon, t):
     summary = _grep_log(t, 'verified=5 added=4 rejected={dead: 1}')
     fast = _grep_log(t, '(fast)')
     checked = _grep_log(t, '(checked)')
-    ok = got == [base + 90, base + 89, base + 85, base + 82] and summary == 1 and fast == 2 and checked == 2
+    ok = got == [base + 89, base + 88, base + 85, base + 81] and summary == 1 and fast == 2 and checked == 2
     return ('dupesearchdonors', ok, 'scores=%s summary=%d fast=%d checked=%d' % ([g - base for g in got], summary, fast, checked))
 
 
@@ -6373,7 +6375,7 @@ def scenario_dupesearchresume(daemon, t):
     are still running. After the restart the saved nzb-files of those two are
     checked and added, the fast donors (in history now) are measured with the
     key's other duplicates, and the final scores are those of an uninterrupted
-    run (dupesearchdonors without the dead posting): 90, 89, 85, 82."""
+    run (dupesearchdonors without the dead posting): 89, 88, 85, 81."""
     n = 40
     ids = lambda p: ['%s-%d@x' % (p, i) for i in range(n)]
     postings = {
@@ -6407,7 +6409,7 @@ def scenario_dupesearchresume(daemon, t):
     searches_after = sum(1 for r in daemon.newznab.requests if r.get('t') in ('search', 'tvsearch', 'movie')) - searches_before
     resumed = _grep_log(t, 'resuming the search of')
     pending_left = t.exists(os.path.join('main', 'queue', 'dupesearch-pending', '1'))
-    ok = (killed_before_summary and got == [90, 89, 85, 82] and grabs_after == 0 and searches_after == 0 and
+    ok = (killed_before_summary and got == [89, 88, 85, 81] and grabs_after == 0 and searches_after == 0 and
           resumed == 1 and not pending_left)
     return ('dupesearchresume', ok, 'killed_before_summary=%s scores=%s grabs_after=%d searches_after=%d resumed=%d '
             'pending_left=%s' % (killed_before_summary, got, grabs_after, searches_after, resumed, pending_left))
@@ -8347,6 +8349,195 @@ def scenario_fleetencryptedlast(daemon, t):
           and kinds.get('Show.S01E01.plainA') == 'twin' and kinds.get('Show.S01E01.enc1') == 'unborrowable'
           and kinds.get('Show.S01E01.enc2') == 'unborrowable')
     return ('fleetencryptedlast', ok, 'order=%s chosen=%s kinds=%s' % (order, chosen, kinds))
+
+
+def _watch_wait(t, needle, timeout=40):
+    deadline = time.time() + timeout
+    while time.time() < deadline and _grep_log(t, needle) == 0:
+        time.sleep(0.25)
+    time.sleep(1)
+    return _grep_log(t, needle)
+
+
+def scenario_watchforcepick(daemon, t):
+    """DupeWatch without DupeSearch: a pick sent in DupeMode FORCE cannot fail
+    over, so it is switched to SCORE, as DupeSearch (and the DupeDonors
+    extension) did. Nothing is searched."""
+    mids = ['wf-pick-%d@x' % i for i in range(40)]
+    daemon.fake_nntp.alive = set(mids)
+    api = daemon.wait_ready()
+    content = base64.standard_b64encode(_fake_nzb_ids(mids, 400_000)).decode()
+    pick_id = api.append(DS_TITLE, content, 'test', 0, False, True, DS_KEY, 100, 'force', [])
+    switched = _watch_wait(t, 'DupeMode FORCE set to SCORE')
+    pick = _ds_group(api, DS_TITLE) or {}
+    searched = _grep_log(t, 'DupeSearch:')
+    ok = pick.get('NZBID') == pick_id and pick.get('DupeMode') == 'SCORE' and switched == 1 and searched == 0
+    return ('watchforcepick', ok, 'mode=%s switched_logs=%d dupesearch_logs=%d' % (pick.get('DupeMode'), switched, searched))
+
+
+def _watch_pick_and_backups(daemon, t, tag, pick_alive, backups):
+    """A paused pick of 40 articles of which <pick_alive> exist, then backups
+    [(name, size, alive_count, score)] of the same key that go to history."""
+    pick_ids = ['%s-pick-%d@x' % (tag, i) for i in range(40)]
+    alive = set(pick_ids[:pick_alive])
+    nzbs = []
+    for n, (name, size, count, score) in enumerate(backups):
+        ids = ['%s-b%d-%d@x' % (tag, n, i) for i in range(40)]
+        alive |= set(ids[:count])
+        nzbs.append((name, _fake_nzb_ids(ids, size).decode(), score))
+    daemon.fake_nntp.alive = alive
+    api = daemon.wait_ready()
+    pick_id = _ds_append(api, DS_TITLE, _fake_nzb_ids(pick_ids, 400_000).decode(), DS_KEY, 100)
+    ids = []
+    for name, nzb, score in nzbs:
+        ids.append(_ds_append(api, name, nzb, DS_KEY, score, paused=False))
+    for name, _, _ in nzbs:
+        daemon.wait_history(api, name, timeout=30)
+    return api, pick_id, ids
+
+
+def _watch_taken_over(api, pick_id, backup_id):
+    """The backup went back to the queue (or already downloaded: fake articles
+    are tiny) and the pick was filed as a duplicate."""
+    deadline = time.time() + 30
+    back, pick_h = [], {}
+    while time.time() < deadline:
+        back = [g for g in api.listgroups() + api.history()
+                if g.get('NZBID') == backup_id and not g.get('Status', '').startswith('DELETED')]
+        pick_h = next((h for h in api.history() if h.get('NZBID') == pick_id), {})
+        if back and pick_h:
+            break
+        time.sleep(0.5)
+    return bool(back), pick_h
+
+
+def scenario_watchdeadpick(daemon, t):
+    """DupeWatch without DupeSearch: a pick with nothing left on any server
+    drops below its backups and the whole backup in history takes its place."""
+    api, pick_id, (backup_id,) = _watch_pick_and_backups(
+        daemon, t, 'wd', 0, [('Show S01E01 1080p WEB H264-GRP', 400_000, 40, 90)])
+    demoted = _watch_wait(t, 'dead pick demoted to score')
+    back, pick_h = _watch_taken_over(api, pick_id, backup_id)
+    ok = demoted == 1 and back and pick_h.get('Status') == 'DELETED/DUPE' and _grep_log(t, 'DupeSearch:') == 0
+    return ('watchdeadpick', ok, 'demoted_logs=%d backup_back=%s pick=%s' % (demoted, back, pick_h.get('Status')))
+
+
+def scenario_watchswap(daemon, t):
+    """DupeWatch without DupeSearch: a pick sampled 70% alive will fail; a whole
+    backup waits in history: it goes back to the queue and the pick is filed
+    as a scored duplicate backup."""
+    api, pick_id, (backup_id,) = _watch_pick_and_backups(
+        daemon, t, 'ws', 28, [('Show S01E01 1080p WEB H264-GRP', 400_000, 40, 90)])
+    swapped = _watch_wait(t, 'sampled 70%% alive and will fail: swapped for backup %d' % backup_id)
+    back, pick_h = _watch_taken_over(api, pick_id, backup_id)
+    params = {p['Name']: p['Value'] for p in pick_h.get('Parameters', [])}
+    ok = swapped == 1 and back and pick_h.get('Status') == 'DELETED/DUPE' and params.get('DupeAlive') == '70'
+    return ('watchswap', ok, 'swapped_logs=%d backup_back=%s pick=%s alive=%s'
+            % (swapped, back, pick_h.get('Status'), params.get('DupeAlive')))
+
+
+def scenario_watchswaptwin(daemon, t):
+    """DupeWatch: the failing pick (70% alive) is swapped for its TWIN (the
+    same post: par2 sets with the same hashes, same article counts) sampled
+    98% alive, not for the whole ALT, though the ALT is wholer and scored
+    higher."""
+    daemon.fake_nntp.alive = set()
+    same = _payload(400_000, 7201)
+    pick = _fleet_copy(daemon, 'wtp', 'c.bin', 400_000, None, same, 28)
+    alt = _fleet_copy(daemon, 'wta', 'e.bin', 380_000, None, _payload(380_000, 7202), 40)
+    twin = _fleet_copy(daemon, 'wtt', 'd.bin', 400_000, None, same, 39)
+    api = daemon.wait_ready()
+    pick_id = _ds_append(api, DS_TITLE, pick, DS_KEY, 100)
+    alt_id = _ds_append(api, 'Show S01E01 1080p WEB H264-GRP', alt, DS_KEY, 90, paused=False)
+    twin_id = _ds_append(api, 'Show_S01E01_1080p_WEB_H264-GRP', twin, DS_KEY, 80, paused=False)
+    for name in ('Show S01E01 1080p WEB H264-GRP', 'Show_S01E01_1080p_WEB_H264-GRP'):
+        daemon.wait_history(api, name, timeout=30)
+    swapped = _watch_wait(t, 'swapped for backup')
+    to_twin = _grep_log(t, 'swapped for backup %d (98%% alive)' % twin_id)
+    back, pick_h = _watch_taken_over(api, pick_id, twin_id)
+    alt_h = next((h for h in api.history() if h.get('NZBID') == alt_id), {})
+    # (the twin lacks one article and has no recovery slices, so it may fail
+    # over to the ALT afterwards: only the swap's choice is checked)
+    ok = swapped == 1 and to_twin == 1 and back
+    return ('watchswaptwin', ok, 'swapped_logs=%d to_twin=%d twin_back=%s alt=%s'
+            % (swapped, to_twin, back, alt_h.get('Status')))
+
+
+def scenario_watchrescue(daemon, t):
+    """DupeWatch without DupeSearch: a pick fails its health check and its only
+    backup is in DupeMode FORCE, which failover skips: the rescue returns the
+    backup, which completes."""
+    primary, backup, data = _probe_fixture(t, 'wr')
+    api = daemon.wait_ready()
+    daemon.append(api, 'Primary', build_multi_nzb(primary), True, 'wr-key', 100)
+    daemon.append(api, 'Backup', backup, False, 'wr-key', 90)
+    bh = daemon.wait_history(api, 'Backup', timeout=60)
+    api.editqueue('HistorySetDupeMode', 0, 'FORCE', [bh['NZBID']])
+    pid = [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'Primary'][0]
+    api.editqueue('GroupResume', 0, '', [pid])
+    hp = daemon.wait_history(api, 'Primary')
+    deadline = time.time() + 120
+    hb = daemon.wait_history(api, 'Backup')
+    while not hb['Status'].startswith('SUCCESS') and time.time() < deadline:
+        time.sleep(0.5)
+        hb = daemon.wait_history(api, 'Backup')
+    rescued = _grep_log(t, 'Rescue: Primary failed its health check with nothing of its key queued: returning backup Backup')
+    ok = hp['Status'] == 'FAILURE/HEALTH' and rescued == 1 and hb['Status'].startswith('SUCCESS') and _verify_output(t, data)
+    return ('watchrescue', ok, 'primary=%s backup=%s rescue_logs=%d' % (hp['Status'], hb['Status'], rescued))
+
+
+def scenario_midwaytwin(daemon, t):
+    """The download loses the last 12 of its 20 articles; its TWIN waits in
+    history as a backup. With the defaults (DupeArticleFallback=live,
+    HealthCheck=dupe) the download is not replaced: from the first missing
+    article on it takes the rest from the twin and finishes, keeping what it
+    had downloaded. The twin is never downloaded as a whole."""
+    size, seg = 10_000_000, 500_000
+    data = _payload(size, 1306)
+    pp = _place_copy(t, 'mwA', data)
+    dp = _place_copy(t, 'mwB', data)
+    primary = build_nzb_with_par2(t, pp, 'MidA.bin', data, seg, set(range(9, 21)))
+    twin = build_nzb(dp, 'obf-mid.bin', size, seg, set())
+    api = daemon.wait_ready()
+    daemon.append(api, 'MidA', primary, True, 'mw-key', 100)
+    daemon.append(api, 'MidTwin', twin, False, 'mw-key', 50)
+    daemon.wait_history(api, 'MidTwin', timeout=60)
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'MidA'])
+    h = daemon.wait_history(api, 'MidA')
+    recov = int(h.get('DupeRecoveredArticles', 0))
+    twin_h = next((x for x in api.history() if x['NZBName'] == 'MidTwin'), {})
+    twin_tried = int(twin_h.get('SuccessArticles', 0)) + int(twin_h.get('FailedArticles', 0))
+    failover = _grep_log(t, 'Failing over') + _grep_log(t, 'Found duplicate')
+    integ = _verify_output(t, data)
+    ok = h['Status'].startswith('SUCCESS') and recov >= 1 and failover == 0 and twin_tried == 0 and integ
+    return ('midwaytwin', ok, 'status=%s recovered=%d failover_logs=%d twin=%s twin_tried=%d integrity=%s'
+            % (h['Status'], recov, failover, twin_h.get('Status'), twin_tried, integ))
+
+
+def scenario_midwayalt(daemon, t):
+    """The download (.mkv in 500 KB articles) loses a block in the middle; an
+    ALT of the same content in 250 KB articles waits in history. Articles
+    cannot be swapped across the two, so stream repair reads the missing bytes
+    from the ALT: the download finishes without being replaced or restarted."""
+    size, seg_primary, seg_alt = 6_000_000, 500_000, 250_000
+    data = _payload(size, 4343)
+    pp = _place_copy(t, 'maA', data, 'file.mkv')
+    ap = _place_copy(t, 'maB', data, 'file.mkv')
+    primary = build_nzb(pp, 'MidAlt.mkv', size, seg_primary, {5, 6, 7})
+    alt = build_nzb(ap, 'obf-midalt.mkv', size, seg_alt, set())
+    api = daemon.wait_ready()
+    daemon.append(api, 'MidAlt', primary, True, 'ma-key', 100)
+    daemon.append(api, 'MidAltB', alt, False, 'ma-key', 50)
+    daemon.wait_history(api, 'MidAltB', timeout=60)
+    api.editqueue('GroupResume', 0, '', [g['NZBID'] for g in api.listgroups() if g['NZBName'] == 'MidAlt'])
+    h = daemon.wait_history(api, 'MidAlt')
+    alt_h = next((x for x in api.history() if x['NZBName'] == 'MidAltB'), {})
+    alt_tried = int(alt_h.get('SuccessArticles', 0)) + int(alt_h.get('FailedArticles', 0))
+    failover = _grep_log(t, 'Failing over') + _grep_log(t, 'Found duplicate')
+    integ = _verify_output(t, data, '.mkv', dirs=(('main', 'dst'), ('main', 'inter')))
+    ok = h['Status'].startswith('SUCCESS') and failover == 0 and alt_tried == 0 and integ
+    return ('midwayalt', ok, 'status=%s failover_logs=%d alt=%s alt_tried=%d integrity=%s'
+            % (h['Status'], failover, alt_h.get('Status'), alt_tried, integ))
 
 
 def scenario_fleetalldead(daemon, t):
@@ -12188,6 +12379,13 @@ SCENARIOS = {
     'fleetnodupecheck': scenario_fleetnodupecheck,
     'fleetkindorder': scenario_fleetkindorder,
     'fleetencryptedlast': scenario_fleetencryptedlast,
+    'watchforcepick': scenario_watchforcepick,
+    'watchdeadpick': scenario_watchdeadpick,
+    'watchswap': scenario_watchswap,
+    'watchswaptwin': scenario_watchswaptwin,
+    'watchrescue': scenario_watchrescue,
+    'midwaytwin': scenario_midwaytwin,
+    'midwayalt': scenario_midwayalt,
     'fleetalldead': scenario_fleetalldead,
     'fleetshutdown': scenario_fleetshutdown,
     'fleetallerror': scenario_fleetallerror,
@@ -12402,6 +12600,13 @@ EXPECTED_HISTORY_STATUS = {
 _SEVENZIP_OPTION = ['SevenZipCmd=%s' % generators.SEVENZIP_PATH] if generators.HAVE_7Z else []
 
 SCENARIO_OPTIONS = {
+    'watchforcepick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeSearchDelay=2', 'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
+    'watchdeadpick': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeSearchDelay=2', 'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
+    'watchswap': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeSearchDelay=2', 'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
+    'watchswaptwin': ['DupeArticleFallback=no', 'DupeWatch=yes', 'DupeSearchDelay=2', 'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
+    'watchrescue': ['DupeArticleFallback=no', 'HealthCheck=delete', 'ArticleRetries=0', 'Server1.Connections=2', 'DupeWatch=yes', 'DupeSearchDelay=3600'],
+    'midwaytwin': ['DupeArticleFallback=live', 'DupeStreamDecompress=yes', 'HealthCheck=dupe', 'ParScan=dupe', 'DupeWatch=yes', 'ParCheck=auto'],
+    'midwayalt': ['DupeArticleFallback=live', 'DupeStreamDecompress=yes', 'HealthCheck=dupe', 'ParScan=dupe', 'DupeWatch=yes', 'ParCheck=auto'],
     'dupesearchwatchfetchrename': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=1', 'DupeSearchApiKey=k',
                                  'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=40', 'DupeHealthMax=40'],
     'dupesearchwatchrestart': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=1', 'DupeSearchApiKey=k',
@@ -12862,7 +13067,7 @@ SCENARIO_NEWZNAB = {'dupesearchforcepick', 'dupesearchdeadpick', 'dupesearchswap
                    'dupesearchresumedeleted'}
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'dupesearchforcepick', 'dupesearchdeadpick', 'dupesearchswap', 'dupesearchswaphealthy', 'dupesearchrealindexer', 'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetencryptedlast', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
+SCENARIO_FAKE_NNTP = {'watchforcepick', 'watchdeadpick', 'watchswap', 'watchswaptwin', 'dupesearchforcepick', 'dupesearchdeadpick', 'dupesearchswap', 'dupesearchswaphealthy', 'dupesearchrealindexer', 'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetencryptedlast', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
 
 
 # --------------------------------------------------------------------------- #

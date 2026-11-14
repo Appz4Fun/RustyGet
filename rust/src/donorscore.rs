@@ -45,10 +45,25 @@ pub struct Entry {
     pub twin: bool,
     pub bytes: i64,
     pub grabs: i32,
+    /// `DonorKind` of a non-twin (`crate::donorkind::DonorKind as u8`:
+    /// 1 borrowable, 2 unknown, 3 unborrowable); a twin is always first.
+    pub kind: u8,
 }
 
-/// The offsets for the live entries once every check is in: most alive first
-/// (whole percent), then twin, closest to `pick_bytes`, most grabbed; strictly
+impl Entry {
+    /// TWINs first, then borrowable, unknown and unborrowable ALTs.
+    fn kind_rank(&self) -> u8 {
+        if self.twin {
+            0
+        } else {
+            self.kind.max(1)
+        }
+    }
+}
+
+/// The offsets for the live entries once every check is in: TWINs first, then
+/// borrowable, unknown and unborrowable ALTs (`Entry::kind`); within each, most
+/// alive first (whole percent), then closest to `pick_bytes`, most grabbed; strictly
 /// falling, each at most its target. Entries scored DEAD (or less) keep their
 /// score. Parallel to `entries`.
 pub fn rerank(entries: &[Entry], pick_bytes: i64) -> Vec<i32> {
@@ -68,9 +83,9 @@ pub fn rerank(entries: &[Entry], pick_bytes: i64) -> Vec<i32> {
     // std::stable_sort with the C++ comparator: a stable sort keeps equal entries in order
     live.sort_by(|&a, &b| {
         let (x, y) = (&entries[a], &entries[b]);
-        percent(y)
-            .cmp(&percent(x))
-            .then_with(|| y.twin.cmp(&x.twin))
+        x.kind_rank()
+            .cmp(&y.kind_rank())
+            .then_with(|| percent(y).cmp(&percent(x)))
             .then_with(|| distance(x).cmp(&distance(y)))
             .then_with(|| y.grabs.cmp(&x.grabs))
     });
@@ -94,6 +109,7 @@ mod tests {
             twin,
             bytes,
             grabs,
+            kind: 2,
         }
     }
 
@@ -143,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn rerank_orders_by_health_then_twin_then_size_then_grabs() {
+    fn rerank_orders_by_kind_then_health_then_size_then_grabs() {
         let entries = [
             e(50, 0.9, false, 100, 0),
             e(50, 1.0, false, 300, 0),
@@ -159,7 +175,17 @@ mod tests {
             e(88, 1.0, true, 1000, 1),
             e(87, 1.0, false, 1200, 1),
         ];
-        assert_eq!(rerank(&wholeness, 1000), vec![82, 85, 90, 89]);
+        // a twin outranks a wholer ALT
+        assert_eq!(rerank(&wholeness, 1000), vec![82, 80, 90, 81]);
+
+        let k = |kind: u8, alive: f64| Entry {
+            kind,
+            ..e(50, alive, false, 1000, 0)
+        };
+        // borrowable, then unknown, then unborrowable, each by health
+        let kinds = [k(3, 1.0), k(2, 1.0), k(1, 0.9), k(1, 1.0), k(0, 1.0)];
+        // kind 0 on a non-twin counts as borrowable
+        assert_eq!(rerank(&kinds, 1000), vec![79, 80, 81, 89, 88]);
 
         let dead_and_falling = [
             e(1, 0.0, false, 1000, 5),

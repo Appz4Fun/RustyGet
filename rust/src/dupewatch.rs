@@ -111,17 +111,20 @@ pub fn swap_nearly_done(size: i64, remaining: i64, health: i32, critical_health:
     size > 0 && (size - remaining.clamp(0, size)) * 10 >= size * 8 && health >= critical_health
 }
 
-/// The wholest backup `(id, alive)` if it is at least `need` alive.
-pub fn swap_backup(candidates: &[(i32, f64)], need: f64) -> Option<(i32, f64)> {
-    let best = candidates
+/// The backup `(id, alive)` a failing pick is swapped for: of those at least
+/// `need` alive, TWINs first, then borrowable, unknown and unborrowable ALTs
+/// (`kind`, a `crate::donorkind::DonorKind` as u8), each the wholest.
+/// Candidates are `(id, alive, kind)`.
+pub fn swap_backup(candidates: &[(i32, f64, u8)], need: f64) -> Option<(i32, f64)> {
+    candidates
         .iter()
         .copied()
-        .filter(|&(_, alive)| alive.is_finite())
-        .fold(None, |best: Option<(i32, f64)>, c| match best {
-            Some(b) if b.1 >= c.1 => Some(b),
+        .filter(|&(_, alive, _)| alive.is_finite() && alive >= need)
+        .fold(None, |best: Option<(i32, f64, u8)>, c| match best {
+            Some(b) if b.2 < c.2 || (b.2 == c.2 && b.1 >= c.1) => Some(b),
             _ => Some(c),
-        })?;
-    (best.1 >= need).then_some(best)
+        })
+        .map(|(id, alive, _)| (id, alive))
 }
 
 /// The DupeMode name for its value (`dmScore = 0, dmAll = 1, dmForce = 2`).
@@ -580,15 +583,27 @@ mod tests {
 
     #[test]
     fn swap_backup_takes_the_wholest() {
-        let c = [(7, 0.93), (8, 0.99), (9, 0.96), (10, f64::NAN)];
+        let c = [(7, 0.93, 2), (8, 0.99, 2), (9, 0.96, 2), (10, f64::NAN, 2)];
         assert_eq!(swap_backup(&c, SWAP_BACKUP_ALIVE), Some((8, 0.99)));
         assert_eq!(swap_backup(&c, PAR_SWAP_BACKUP_ALIVE), None);
-        assert_eq!(swap_backup(&[(7, 0.94)], SWAP_BACKUP_ALIVE), None);
+        assert_eq!(swap_backup(&[(7, 0.94, 2)], SWAP_BACKUP_ALIVE), None);
         assert_eq!(
-            swap_backup(&[(1, 1.0), (2, 1.0)], PAR_SWAP_BACKUP_ALIVE),
+            swap_backup(&[(1, 1.0, 2), (2, 1.0, 2)], PAR_SWAP_BACKUP_ALIVE),
             Some((1, 1.0))
         );
         assert_eq!(swap_backup(&[], SWAP_BACKUP_ALIVE), None);
+    }
+
+    #[test]
+    fn swap_backup_takes_twins_then_borrowable_alts() {
+        // a whole enough twin beats a wholer borrowable ALT, which beats a
+        // wholer unborrowable one
+        let c = [(1, 1.0, 3), (2, 0.99, 1), (3, 0.96, 0), (4, 0.97, 0)];
+        assert_eq!(swap_backup(&c, SWAP_BACKUP_ALIVE), Some((4, 0.97)));
+        assert_eq!(swap_backup(&c[..2], SWAP_BACKUP_ALIVE), Some((2, 0.99)));
+        // a twin not whole enough does not count
+        let low_twin = [(1, 0.9, 0), (2, 0.96, 3)];
+        assert_eq!(swap_backup(&low_twin, SWAP_BACKUP_ALIVE), Some((2, 0.96)));
     }
 
     #[test]

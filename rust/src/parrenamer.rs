@@ -138,15 +138,31 @@ pub struct ParRenamer<'a, E: Env> {
 }
 
 /// ParRenamer::Execute.
-pub fn execute<E: Env>(env: &mut E, state: &mut State, info_name: &[u8], dest_dir: &[u8], sep: u8) -> R<()> {
-    let mut r = ParRenamer { env, state, sep, dest_dir: dest_dir.to_vec(), dir_list: Vec::new(), file_hashes: Vec::new(),
-        par_infos: Vec::new(), bad_pars: Vec::new(), loaded_pars: Vec::new() };
+pub fn execute<E: Env>(
+    env: &mut E,
+    state: &mut State,
+    info_name: &[u8],
+    dest_dir: &[u8],
+    sep: u8,
+) -> R<()> {
+    let mut r = ParRenamer {
+        env,
+        state,
+        sep,
+        dest_dir: dest_dir.to_vec(),
+        dir_list: Vec::new(),
+        file_hashes: Vec::new(),
+        par_infos: Vec::new(),
+        bad_pars: Vec::new(),
+        loaded_pars: Vec::new(),
+    };
     r.run(info_name)
 }
 
 impl<E: Env> ParRenamer<'_, E> {
     fn run(&mut self, info_name: &[u8]) -> R<()> {
-        self.env.progress(&text(&[b"Checking renamed files for ", info_name]), 0)?;
+        self.env
+            .progress(&text(&[b"Checking renamed files for ", info_name]), 0)?;
         let dest_dir = self.env.destination(&self.dest_dir)?;
         self.dir_list = self.env.previous_dirs()?;
         self.build_dir_list(&dest_dir)?;
@@ -209,7 +225,9 @@ impl<E: Env> ParRenamer<'_, E> {
         for name in self.env.list_dir(dir)? {
             let full = join(dir, self.sep, &name);
             if crate::parparser::parse_par_filename(&full, true).is_some()
-                && !self.bad_pars.contains(&full) && !self.loaded_pars.contains(&full) {
+                && !self.bad_pars.contains(&full)
+                && !self.loaded_pars.contains(&full)
+            {
                 self.load_par_file(&full)?;
             }
         }
@@ -218,7 +236,8 @@ impl<E: Env> ParRenamer<'_, E> {
 
     fn load_par_file(&mut self, path: &[u8]) -> R<()> {
         let Some(count) = self.env.load_par(path)? else {
-            self.env.message(Kind::Warning, &text(&[b"Could not load par2-file ", path]))?;
+            self.env
+                .message(Kind::Warning, &text(&[b"Could not load par2-file ", path]))?;
             self.state.has_damaged_par_files = true;
             self.env.state_changed(self.state);
             self.bad_pars.push(path.to_vec());
@@ -226,7 +245,10 @@ impl<E: Env> ParRenamer<'_, E> {
         };
 
         self.loaded_pars.push(path.to_vec());
-        self.env.message(Kind::Info, &text(&[b"Loaded par2-file ", base_name(path), b" for par-rename"]))?;
+        self.env.message(
+            Kind::Info,
+            &text(&[b"Loaded par2-file ", base_name(path), b" for par-rename"]),
+        )?;
 
         // a par2-file missing several description packets is listed (and
         // later renamed to .bad) once
@@ -238,7 +260,10 @@ impl<E: Env> ParRenamer<'_, E> {
             match self.env.par_entry()? {
                 ParEntry::Damaged => {
                     if !damaged {
-                        self.env.message(Kind::Warning, &text(&[b"Damaged par2-file detected: ", base_name(path)]))?;
+                        self.env.message(
+                            Kind::Warning,
+                            &text(&[b"Damaged par2-file detected: ", base_name(path)]),
+                        )?;
                         self.bad_pars.push(path.to_vec());
                         damaged = true;
                     }
@@ -251,7 +276,11 @@ impl<E: Env> ParRenamer<'_, E> {
                     let hash = c(&hash);
                     let (name, hash) = (&name[..name.len() - 1], &hash[..hash.len() - 1]);
                     if !self.file_hashes.iter().any(|f| f.hash == hash) {
-                        self.file_hashes.push(FileHash { filename: name.to_vec(), hash: hash.to_vec(), exists: false });
+                        self.file_hashes.push(FileHash {
+                            filename: name.to_vec(),
+                            hash: hash.to_vec(),
+                            exists: false,
+                        });
                         self.env.register_parred(name)?;
                     }
                 }
@@ -275,7 +304,8 @@ impl<E: Env> ParRenamer<'_, E> {
             } else {
                 1000
             };
-            self.env.progress(&text(&[b"Checking file ", &name]), stage)?;
+            self.env
+                .progress(&text(&[b"Checking file ", &name]), stage)?;
             self.state.cur_file = self.state.cur_file.wrapping_add(1);
             self.env.state_changed(self.state);
 
@@ -295,9 +325,13 @@ impl<E: Env> ParRenamer<'_, E> {
             }
             let name = self.file_hashes[i].filename.clone();
             if self.env.ignored_ext(&name)? {
-                self.env.message(Kind::Info, &text(&[b"File ", &name, b" is missing, ignoring"]))?;
+                self.env.message(
+                    Kind::Info,
+                    &text(&[b"File ", &name, b" is missing, ignoring"]),
+                )?;
             } else {
-                self.env.message(Kind::Info, &text(&[b"File ", &name, b" is missing"]))?;
+                self.env
+                    .message(Kind::Info, &text(&[b"File ", &name, b" is missing"]))?;
                 self.state.has_missed_files = true;
                 self.env.state_changed(self.state);
             }
@@ -310,18 +344,34 @@ impl<E: Env> ParRenamer<'_, E> {
 
         let mut buf = vec![0u8; 16 * 1024];
         let n = match self.env.read(path, &mut buf)? {
-            Read::OpenFailed => return self.env.message(Kind::Error, &text(&[b"Could not open file ", path])),
-            Read::ReadFailed => return self.env.message(Kind::Error, &text(&[b"Could not read file ", path])),
+            Read::OpenFailed => {
+                return self
+                    .env
+                    .message(Kind::Error, &text(&[b"Could not open file ", path]))
+            }
+            Read::ReadFailed => {
+                return self
+                    .env
+                    .message(Kind::Error, &text(&[b"Could not read file ", path]))
+            }
             Read::Bytes(n) => n.min(buf.len()),
         };
         let hash16k = crate::renameanalyzer::print(&Md5::digest(&buf[..n]));
         let hash16k = &hash16k[..32];
 
-        self.env.debug(&text(&[b"file: ", base_name(path), b"; hash16k: ", hash16k]))?;
+        self.env.debug(&text(&[
+            b"file: ",
+            base_name(path),
+            b"; hash16k: ",
+            hash16k,
+        ]))?;
 
-        let Some(i) = self.file_hashes.iter().position(|f| f.hash == hash16k) else { return Ok(()) };
+        let Some(i) = self.file_hashes.iter().position(|f| f.hash == hash16k) else {
+            return Ok(());
+        };
         let correct = self.file_hashes[i].filename.clone();
-        self.env.debug(&text(&[b"Found correct filename: ", &correct]))?;
+        self.env
+            .debug(&text(&[b"Found correct filename: ", &correct]))?;
         self.file_hashes[i].exists = true;
 
         let dst = join(dir, self.sep, &correct);
@@ -332,18 +382,30 @@ impl<E: Env> ParRenamer<'_, E> {
     }
 
     fn check_par_file(&mut self, path: &[u8]) -> R<()> {
-        self.env.debug(&text(&[b"Checking par2-header for ", path]))?;
+        self.env
+            .debug(&text(&[b"Checking par2-header for ", path]))?;
 
         let mut header = [0u8; HEADER];
         match self.env.read(path, &mut header)? {
-            Read::OpenFailed => return self.env.message(Kind::Error, &text(&[b"Could not open file ", path])),
-            Read::ReadFailed => return self.env.message(Kind::Error, &text(&[b"Could not read file ", path])),
+            Read::OpenFailed => {
+                return self
+                    .env
+                    .message(Kind::Error, &text(&[b"Could not open file ", path]))
+            }
+            Read::ReadFailed => {
+                return self
+                    .env
+                    .message(Kind::Error, &text(&[b"Could not read file ", path]))
+            }
             Read::Bytes(_) => {}
         }
 
         let length = u64::from_le_bytes(header[8..16].try_into().unwrap());
-        if &header[..8] != MAGIC || (HEADER as u64) > length || length & 3 != 0
-            || self.env.file_size(path)? < length as u32 as i32 as i64 {
+        if &header[..8] != MAGIC
+            || (HEADER as u64) > length
+            || length & 3 != 0
+            || self.env.file_size(path)? < length as u32 as i32 as i64
+        {
             // not par2-file or damaged header, ignoring the file
             return Ok(());
         }
@@ -353,8 +415,16 @@ impl<E: Env> ParRenamer<'_, E> {
             .map(u8::to_ascii_lowercase)
             .collect();
 
-        self.env.debug(&text(&[b"Storing: ", base_name(path), b"; setid: ", &set_id]))?;
-        self.par_infos.push(ParInfo { filename: path.to_vec(), set_id });
+        self.env.debug(&text(&[
+            b"Storing: ",
+            base_name(path),
+            b"; setid: ",
+            &set_id,
+        ]))?;
+        self.par_infos.push(ParInfo {
+            filename: path.to_vec(),
+            set_id,
+        });
         Ok(())
     }
 
@@ -378,7 +448,9 @@ impl<E: Env> ParRenamer<'_, E> {
         for (i, par1) in self.par_infos.iter().enumerate() {
             let base1 = &c(base_name(&par1.filename));
             let base1 = &base1[..base1.len() - 1];
-            let Some(dot) = base1.iter().rposition(|&b| b == b'.') else { return true };
+            let Some(dot) = base1.iter().rposition(|&b| b == b'.') else {
+                return true;
+            };
             if !base1[dot..].eq_ignore_ascii_case(b".par2") {
                 // file doesn't have "par2" extension
                 return true;
@@ -400,11 +472,24 @@ impl<E: Env> ParRenamer<'_, E> {
     }
 
     fn rename_par_file(&mut self, dir: &[u8], filename: &[u8], set_id: &[u8]) -> R<()> {
-        self.env.debug(&text(&[b"Renaming: ", base_name(filename), b"; setid: ", set_id]))?;
+        self.env.debug(&text(&[
+            b"Renaming: ",
+            base_name(filename),
+            b"; setid: ",
+            set_id,
+        ]))?;
         // the first name, then the next one while the last one exists
         let mut num: i32 = 1;
         loop {
-            let dest = bstring([dir, &[self.sep], set_id, format!(".vol{num:03}+01.PAR2").as_bytes()].concat());
+            let dest = bstring(
+                [
+                    dir,
+                    &[self.sep],
+                    set_id,
+                    format!(".vol{num:03}+01.PAR2").as_bytes(),
+                ]
+                .concat(),
+            );
             num = num.wrapping_add(1);
             if !self.env.file_exists(&dest)? {
                 return self.rename_file(filename, &dest);
@@ -446,9 +531,9 @@ pub fn is_splitted_fragment(filename: &[u8], correct_name: &[u8]) -> bool {
     }
     let digits = &base[base_len + 1..];
     digits.iter().all(u8::is_ascii_digit)
-        && std::str::from_utf8(digits)
-            .ok()
-            .map_or(false, |s| s.is_empty() || s.parse::<u32>().is_ok_and(|n| n <= 1))
+        && std::str::from_utf8(digits).ok().map_or(false, |s| {
+            s.is_empty() || s.parse::<u32>().is_ok_and(|n| n <= 1)
+        })
 }
 
 fn latin1_to_utf8(latin1: &[u8]) -> Vec<u8> {
@@ -637,7 +722,10 @@ fn parse_par2_packets_from_source<S: Par2ByteSource>(mut source: S) -> Option<Ve
                     let file_len = u64::from_le_bytes(body[48..56].try_into().unwrap());
                     if !(file_len <= 16384 && hash16k != hashfull) {
                         let raw_name = &body[56..body_len];
-                        let nul = raw_name.iter().position(|&b| b == 0).unwrap_or(raw_name.len());
+                        let nul = raw_name
+                            .iter()
+                            .position(|&b| b == 0)
+                            .unwrap_or(raw_name.len());
                         let utf8_name = latin1_to_utf8(&raw_name[..nul]);
                         let local_name = translate_filename_from_par2_to_local(&utf8_name);
                         let printed_hash = crate::renameanalyzer::print(hash16k)[..32].to_vec();
@@ -699,7 +787,10 @@ pub fn load_par_entries_from_file(par_filename: &std::path::Path) -> Option<Vec<
 
 /// `ParRenamer::ListParredFiles`: returns base names of all files listed in `par_filename`'s
 /// description packets, or `None` if `par_filename` cannot be read or exceeds `max_index_par_size`.
-pub fn list_parred_files(par_filename: &std::path::Path, max_index_par_size: i64) -> Option<Vec<Vec<u8>>> {
+pub fn list_parred_files(
+    par_filename: &std::path::Path,
+    max_index_par_size: i64,
+) -> Option<Vec<Vec<u8>>> {
     let file = std::fs::File::open(par_filename).ok()?;
     let meta = file.metadata().ok()?;
     if meta.is_dir() || (meta.len() as i64) > max_index_par_size {
@@ -894,7 +985,10 @@ impl Env for FsParRenamerEnv<'_> {
         };
         let (old_path, old_name) = crate::paths::split_path_and_filename(src_c.to_bytes());
         let (new_path, new_name) = crate::paths::split_path_and_filename(dst_c.to_bytes());
-        (self.on_message)(Kind::Info, &text(&[b"Renaming ", old_name, b" to ", new_name]));
+        (self.on_message)(
+            Kind::Info,
+            &text(&[b"Renaming ", old_name, b" to ", new_name]),
+        );
 
         if old_path != new_path {
             let mut errmsg = Vec::new();
@@ -1019,8 +1113,16 @@ mod tests {
             }
         };
 
-        let run_case = |name: &str, src_dir: &std::path::Path, detect_missing: bool, setup: &dyn Fn(&std::path::Path)| -> State {
-            let work_dir = std::env::temp_dir().join(format!("nzbget_rs_parrenamer_{}_{}", std::process::id(), name));
+        let run_case = |name: &str,
+                        src_dir: &std::path::Path,
+                        detect_missing: bool,
+                        setup: &dyn Fn(&std::path::Path)|
+         -> State {
+            let work_dir = std::env::temp_dir().join(format!(
+                "nzbget_rs_parrenamer_{}_{}",
+                std::process::id(),
+                name
+            ));
             copy_dir(src_dir, &work_dir);
             setup(&work_dir);
             let dest_bytes = work_dir.to_string_lossy().as_bytes().to_vec();
@@ -1080,7 +1182,8 @@ mod tests {
         assert!(!st.has_missed_files);
 
         // 7. list_parred_files test
-        let listed = list_parred_files(&parchecker_dir.join("testfile.par2"), 16 * 1024 * 1024).unwrap();
+        let listed =
+            list_parred_files(&parchecker_dir.join("testfile.par2"), 16 * 1024 * 1024).unwrap();
         assert_eq!(listed.len(), 2);
     }
 
@@ -1099,10 +1202,8 @@ mod tests {
         if unsafe { libc_geteuid() } == 0 {
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "nzbget_rs_parrenamer_perm_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("nzbget_rs_parrenamer_perm_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("damaged.par2");
@@ -1122,7 +1223,9 @@ mod tests {
             on_register_parred: &mut |_| {},
             on_register_renamed: &mut |_, _| {},
         };
-        let ok = env.rename(&path_to_bytes(&src), &path_to_bytes(&dst)).unwrap();
+        let ok = env
+            .rename(&path_to_bytes(&src), &path_to_bytes(&dst))
+            .unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!ok);
         assert_eq!(std::fs::read(&dst).unwrap(), b"original-bad-content");

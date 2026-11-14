@@ -131,7 +131,13 @@ pub fn accum_file_data_totals(
             (data_bytes, false)
         };
         let push_data_head = !first_id_empty;
-        (new_files, new_bytes, new_geom, push_parity_head, push_data_head)
+        (
+            new_files,
+            new_bytes,
+            new_geom,
+            push_parity_head,
+            push_data_head,
+        )
     } else {
         let new_geom = if !is_par { false } else { geometry_valid };
         (data_files, data_bytes, new_geom, push_parity_head, false)
@@ -313,11 +319,7 @@ pub fn dupesearch_is_rank_only_queued_member(
 }
 
 /// Computes the bounded health-check budget in milliseconds for `DupeSearch::Expand`.
-pub fn dupesearch_calc_expand_budget_ms(
-    budget_sec: i32,
-    deadline: i64,
-    now: i64,
-) -> i32 {
+pub fn dupesearch_calc_expand_budget_ms(budget_sec: i32, deadline: i64, now: i64) -> i32 {
     let opt_ms = i64::from(budget_sec).saturating_mul(1000);
     let left_ms = deadline.saturating_sub(now).saturating_mul(1000);
     let chosen = opt_ms.min(left_ms).max(1);
@@ -647,7 +649,8 @@ pub fn parse_dupesearch_state_line(
     let Some((t_off, t_len, pos3)) = next_tab_field(pos2) else {
         return RsDupeSearchStateLine::default();
     };
-    let (title_off, title_len, pos4) = next_tab_field(pos3).unwrap_or((line.len(), 0, line.len() + 1));
+    let (title_off, title_len, pos4) =
+        next_tab_field(pos3).unwrap_or((line.len(), 0, line.len() + 1));
     let (retry_off, retry_len, _) = next_tab_field(pos4).unwrap_or((line.len(), 0, line.len() + 1));
 
     let score = c_atoi_bytes(&line[s_off..s_off + s_len]);
@@ -817,12 +820,7 @@ pub fn donor_health_dead_probe(present: i32, missing: i32, min_known: i32) -> bo
 }
 
 /// `DonorHealth::Sample` sample count computation.
-pub fn donor_sample_count(
-    total_ids: usize,
-    percent: i32,
-    minimum: i32,
-    maximum: i32,
-) -> usize {
+pub fn donor_sample_count(total_ids: usize, percent: i32, minimum: i32, maximum: i32) -> usize {
     let wanted = ((total_ids as f64) * (percent as f64) / 100.0).ceil() as usize;
     let min_u = minimum.max(0) as usize;
     let max_u = maximum.max(0) as usize;
@@ -908,7 +906,8 @@ impl Mt19937 {
         const LOWER_MASK: u32 = 0x7FFF_FFFF;
         for i in 0..624 {
             let y = (self.state[i] & UPPER_MASK) | (self.state[(i + 1) % 624] & LOWER_MASK);
-            self.state[i] = self.state[(i + 397) % 624] ^ (y >> 1) ^ if y & 1 != 0 { MATRIX_A } else { 0 };
+            self.state[i] =
+                self.state[(i + 397) % 624] ^ (y >> 1) ^ if y & 1 != 0 { MATRIX_A } else { 0 };
         }
         self.index = 0;
     }
@@ -1058,10 +1057,17 @@ pub fn donor_plan(
 ) -> Vec<DonorItem> {
     let mut rng = Mt19937::new(options.seed.wrapping_add(1));
     let mut bodies = 0;
-    let sampled = donor_sample(ids, options.percent, options.minimum, options.maximum, options.seed);
+    let sampled = donor_sample(
+        ids,
+        options.percent,
+        options.minimum,
+        options.maximum,
+        options.seed,
+    );
     let mut items = Vec::with_capacity(sampled.len());
     for id in sampled {
-        let body = bodies < options.max_body && rng.uniform_percent() < (options.body_percent as f64);
+        let body =
+            bodies < options.max_body && rng.uniform_percent() < (options.body_percent as f64);
         if body {
             bodies += 1;
         }
@@ -1106,8 +1112,10 @@ impl DonorBodyGate {
             return Ok(DonorAnswer::Present);
         }
         let ans = download()?;
-        self.ok
-            .store(ans == DonorAnswer::Present, std::sync::atomic::Ordering::SeqCst);
+        self.ok.store(
+            ans == DonorAnswer::Present,
+            std::sync::atomic::Ordering::SeqCst,
+        );
         Ok(ans)
     }
 }
@@ -1444,9 +1452,7 @@ pub fn donor_check_items_guarded(
             .unwrap_or_else(|e| e.into_inner());
         guard = g;
     }
-    state
-        .stop
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    state.stop.store(true, std::sync::atomic::Ordering::SeqCst);
 
     for i in 0..count {
         if state.final_verdict[i].load(std::sync::atomic::Ordering::SeqCst) == 0 {
@@ -1502,7 +1508,8 @@ pub fn donor_check_posting_guarded(
     };
 
     let deadline = donor_now_ms() + (options.budget_ms as i64);
-    let mut health = donor_check_items_guarded(servers, &first, options.budget_ms, keepalive.clone());
+    let mut health =
+        donor_check_items_guarded(servers, &first, options.budget_ms, keepalive.clone());
     if full && !donor_dead_probe(&health) {
         let probed: std::collections::BTreeSet<&str> =
             first.iter().map(|it| it.message_id.as_str()).collect();
@@ -1553,31 +1560,23 @@ pub fn donor_check_postings_guarded<F>(
     std::thread::scope(|s| {
         for _ in 0..thread_count {
             let ka = keepalive.clone();
-            s.spawn(move || {
-                loop {
-                    let idx = next_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    if idx >= postings.len() {
-                        break;
-                    }
-                    let mut own = *options;
-                    if options.deadline_ms > 0 {
-                        let left = options.deadline_ms - donor_now_ms();
-                        if left <= 0 {
-                            continue;
-                        }
-                        own.budget_ms = own.budget_ms.min(left as i32);
-                    }
-                    let p = &postings[idx];
-                    let h = donor_check_posting_guarded(
-                        servers,
-                        &p.ids,
-                        &p.groups,
-                        &own,
-                        full,
-                        ka.clone(),
-                    );
-                    emit_ref(&p.key, &h);
+            s.spawn(move || loop {
+                let idx = next_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if idx >= postings.len() {
+                    break;
                 }
+                let mut own = *options;
+                if options.deadline_ms > 0 {
+                    let left = options.deadline_ms - donor_now_ms();
+                    if left <= 0 {
+                        continue;
+                    }
+                    own.budget_ms = own.budget_ms.min(left as i32);
+                }
+                let p = &postings[idx];
+                let h =
+                    donor_check_posting_guarded(servers, &p.ids, &p.groups, &own, full, ka.clone());
+                emit_ref(&p.key, &h);
             });
         }
     });
@@ -1822,10 +1821,7 @@ impl NzbFetcherCore {
         let Ok(content) = std::fs::read(dupe_bytes_to_path(&path)) else {
             return;
         };
-        let mut map = self
-            .refused_until
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut map = self.refused_until.lock().unwrap_or_else(|e| e.into_inner());
         for line in content.split(|&b| b == b'\n') {
             if let Some((idx, when)) = parse_cooldown_line(line, now) {
                 map.insert(idx, when);
@@ -1860,10 +1856,7 @@ impl NzbFetcherCore {
     }
 
     fn indexer_lock(&self, indexer: &[u8]) -> std::sync::Arc<std::sync::Mutex<()>> {
-        let mut locks = self
-            .indexer_locks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut locks = self.indexer_locks.lock().unwrap_or_else(|e| e.into_inner());
         locks
             .entry(indexer.to_vec())
             .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
@@ -1871,18 +1864,12 @@ impl NzbFetcherCore {
     }
 
     pub fn is_refused(&self, indexer: &[u8], now: i64) -> bool {
-        let map = self
-            .refused_until
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let map = self.refused_until.lock().unwrap_or_else(|e| e.into_inner());
         map.get(indexer).is_some_and(|&until| until > now)
     }
 
     pub fn refuse(&self, indexer: &[u8], now: i64) -> Result<(), Vec<u8>> {
-        let mut map = self
-            .refused_until
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut map = self.refused_until.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(indexer.to_vec(), now + NZB_FETCHER_COOLDOWN_SEC);
         self.save_locked(&map, now)
     }
@@ -2124,7 +2111,10 @@ pub fn url_encode(text: &[u8]) -> Vec<u8> {
 
 /// `DigitsOnly` in `Newznab.cpp`.
 pub fn digits_only(text: &[u8]) -> Vec<u8> {
-    text.iter().copied().filter(|b| b.is_ascii_digit()).collect()
+    text.iter()
+        .copied()
+        .filter(|b| b.is_ascii_digit())
+        .collect()
 }
 
 /// `DaysFromCivil` in `Newznab.cpp`.
@@ -2620,12 +2610,7 @@ pub fn fleet_update_key_score_bounds(
 
 /// Computes the clamped duplicate score for adding a ranked fleet member
 /// (`Fleet::Append`).
-pub fn fleet_calc_member_add_score(
-    running_id: i32,
-    lowest: i32,
-    top: i64,
-    rank: i32,
-) -> i32 {
+pub fn fleet_calc_member_add_score(running_id: i32, lowest: i32, top: i64, rank: i32) -> i32 {
     let base: i64 = if running_id != 0 {
         i64::from(lowest)
     } else {
@@ -2814,12 +2799,7 @@ pub fn nzb_fetcher_format_http_status_err(status: i32) -> Vec<u8> {
 }
 
 /// Formats `"<temp_dir><sep>dupesearch-<now_sec>-<counter>.tmp"` for `HttpGet::Fetch`.
-pub fn http_get_format_temp_path(
-    temp_dir: &[u8],
-    sep: u8,
-    now_sec: i32,
-    counter: i32,
-) -> Vec<u8> {
+pub fn http_get_format_temp_path(temp_dir: &[u8], sep: u8, now_sec: i32, counter: i32) -> Vec<u8> {
     let suffix = format!("dupesearch-{now_sec}-{counter}.tmp");
     let mut out = Vec::with_capacity(temp_dir.len() + 1 + suffix.len());
     out.extend_from_slice(temp_dir);
@@ -3178,7 +3158,9 @@ fn decode_xml_bytes<'a>(
     if source_enc == XmlSourceEncoding::ByteStream {
         decoder.decode(raw).ok()
     } else {
-        std::str::from_utf8(raw).ok().map(std::borrow::Cow::Borrowed)
+        std::str::from_utf8(raw)
+            .ok()
+            .map(std::borrow::Cow::Borrowed)
     }
 }
 
@@ -3309,7 +3291,11 @@ pub fn parse_newznab_response(xml: &[u8]) -> Option<NewznabPage> {
                     2 => item.link = trim_ascii_slice(&text),
                     3 => element_size = c_atoll_bytes(&text),
                     4 => {
-                        item.size = if attr_size > 0 { attr_size } else { element_size };
+                        item.size = if attr_size > 0 {
+                            attr_size
+                        } else {
+                            element_size
+                        };
                         page.items.push(std::mem::take(&mut item));
                         in_item = false;
                     }
@@ -3326,7 +3312,10 @@ pub fn parse_newznab_response(xml: &[u8]) -> Option<NewznabPage> {
                 let norm = normalize_xml_eol(&decoded);
                 if depth == 0 {
                     let rest = norm.strip_prefix('\u{feff}').unwrap_or(&norm);
-                    if !rest.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
+                    if !rest
+                        .bytes()
+                        .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                    {
                         return None;
                     }
                 } else {
@@ -3380,7 +3369,11 @@ pub fn parse_newznab_response(xml: &[u8]) -> Option<NewznabPage> {
                     2 => item.link = trim_ascii_slice(&text),
                     3 => element_size = c_atoll_bytes(&text),
                     4 => {
-                        item.size = if attr_size > 0 { attr_size } else { element_size };
+                        item.size = if attr_size > 0 {
+                            attr_size
+                        } else {
+                            element_size
+                        };
                         page.items.push(std::mem::take(&mut item));
                         in_item = false;
                     }
@@ -3447,7 +3440,10 @@ impl NzbSummaryData {
 }
 
 fn declared_parts_c_locale(subject: &[u8]) -> i32 {
-    let s = &subject[..subject.iter().position(|&b| b == 0).unwrap_or(subject.len())];
+    let s = &subject[..subject
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(subject.len())];
     let is_sp = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
     let is_dg = |b: u8| b.is_ascii_digit();
     let char_val = |b: u8| (b as std::ffi::c_char) as i32;
@@ -3735,7 +3731,10 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                 let norm = normalize_xml_eol(&decoded);
                 if depth == 0 {
                     let rest = norm.strip_prefix('\u{feff}').unwrap_or(&norm);
-                    if !rest.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
+                    if !rest
+                        .bytes()
+                        .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                    {
                         return None;
                     }
                 } else {
@@ -4117,22 +4116,47 @@ mod tests {
         assert!(!saved_history_backup(true, 100, 6, 100, 3, 6));
 
         let mut order = [0usize; 3];
-        sort_verified_postings(&[1050, 1000, 1000], &[5, 2, 10], &[100, 200, 150], 1000, &mut order);
+        sort_verified_postings(
+            &[1050, 1000, 1000],
+            &[5, 2, 10],
+            &[100, 200, 150],
+            1000,
+            &mut order,
+        );
         assert_eq!(order, [2, 1, 0]);
 
-        assert_eq!(eval_member_rerank(1000, 50, 1, 1020, 0.90, false), (1020, 90, false));
-        assert_eq!(eval_member_rerank(1000, 50, 1, 1020, 1.00, false), (1050, 100, false));
-        assert_eq!(eval_member_rerank(1000, 1, 1, 1020, 0.0, true), (1020, 0, true));
+        assert_eq!(
+            eval_member_rerank(1000, 50, 1, 1020, 0.90, false),
+            (1020, 90, false)
+        );
+        assert_eq!(
+            eval_member_rerank(1000, 50, 1, 1020, 1.00, false),
+            (1050, 100, false)
+        );
+        assert_eq!(
+            eval_member_rerank(1000, 1, 1, 1020, 0.0, true),
+            (1020, 0, true)
+        );
 
         let meta = format_pending_meta(b"Release.A", b"NZBGeek", 42, 9876543210, 1749517805);
         let parsed = parse_pending_meta(&meta);
-        assert_eq!(&meta[parsed.title_offset..parsed.title_offset + parsed.title_len], b"Release.A");
-        assert_eq!(&meta[parsed.indexer_offset..parsed.indexer_offset + parsed.indexer_len], b"NZBGeek");
+        assert_eq!(
+            &meta[parsed.title_offset..parsed.title_offset + parsed.title_len],
+            b"Release.A"
+        );
+        assert_eq!(
+            &meta[parsed.indexer_offset..parsed.indexer_offset + parsed.indexer_len],
+            b"NZBGeek"
+        );
         assert_eq!(parsed.grabs, 42);
         assert_eq!(parsed.size, 9876543210);
         assert_eq!(parsed.date, 1749517805);
 
-        let st = parse_dupesearch_state_line(b"dupes:rel\t1000\t1700000000\trel\t0\t", 1700000100, 86400);
+        let st = parse_dupesearch_state_line(
+            b"dupes:rel\t1000\t1700000000\trel\t0\t",
+            1700000100,
+            86400,
+        );
         assert_eq!(st.valid, 1);
         assert_eq!(st.within_ttl, 1);
         assert_eq!(st.score, 1000);
@@ -4167,10 +4191,22 @@ mod tests {
 
     #[test]
     fn test_newznab_date_url_and_mask() {
-        assert_eq!(parse_newznab_date(b"Tue, 10 Jun 2025 01:10:05 +0000"), 1749517805);
-        assert_eq!(parse_newznab_date(b"Tue, 10 Jun 2025 01:10:05+0000"), 1749517805);
-        assert_eq!(parse_newznab_date(b"10 Jun 2025 01:10:05EST"), 1749517805 + 5 * 3600);
-        assert_eq!(parse_newznab_date(b"10 Jun 2025 01:10:05 EST"), 1749517805 + 5 * 3600);
+        assert_eq!(
+            parse_newznab_date(b"Tue, 10 Jun 2025 01:10:05 +0000"),
+            1749517805
+        );
+        assert_eq!(
+            parse_newznab_date(b"Tue, 10 Jun 2025 01:10:05+0000"),
+            1749517805
+        );
+        assert_eq!(
+            parse_newznab_date(b"10 Jun 2025 01:10:05EST"),
+            1749517805 + 5 * 3600
+        );
+        assert_eq!(
+            parse_newznab_date(b"10 Jun 2025 01:10:05 EST"),
+            1749517805 + 5 * 3600
+        );
         assert_eq!(parse_newznab_date(b"2025-06-10T03:10:05+02:00"), 1749517805);
         assert_eq!(parse_newznab_date(b"10 Jun 2025 01:10:05 XYZ"), 0);
 
@@ -4180,7 +4216,10 @@ mod tests {
             &[b"search", b"show s01e02"],
             b"k&y 1",
         );
-        assert_eq!(url, b"http://h:5076/api?t=search&q=show+s01e02&apikey=k%26y+1");
+        assert_eq!(
+            url,
+            b"http://h:5076/api?t=search&q=show+s01e02&apikey=k%26y+1"
+        );
 
         assert_eq!(
             mask_newznab_text(b"http://u:p@h/api?APIKEY=SECRET&q=x"),
@@ -4308,10 +4347,7 @@ mod tests {
         assert_eq!(parse_newznab_date(b"2025-06-10 01:10:05"), 1749517805);
         assert_eq!(parse_newznab_date(b""), 0);
         assert_eq!(parse_newznab_date(b"yesterday"), 0);
-        assert_eq!(
-            parse_newznab_date(b"Tue, 10 Foo 2025 01:10:05 +0000"),
-            0
-        );
+        assert_eq!(parse_newznab_date(b"Tue, 10 Foo 2025 01:10:05 +0000"), 0);
         assert_eq!(parse_newznab_date(b"Tue, 40 Jun 2025 01:10:05 +0000"), 0);
 
         // NewznabBuildQueriesTest
@@ -4343,10 +4379,7 @@ mod tests {
         let q2 = build_newznab_queries(title, b"tt1234567", b"tvdb-371796");
         assert_eq!(q2.len(), 5);
         assert_eq!(describe(&q2[3]), "t=movie&imdbid=1234567");
-        assert_eq!(
-            describe(&q2[4]),
-            "t=tvsearch&tvdbid=371796&season=2&ep=14"
-        );
+        assert_eq!(describe(&q2[4]), "t=tvsearch&tvdbid=371796&season=2&ep=14");
 
         let q3 = build_newznab_queries(b"Some.Movie.2020", b"", b"55");
         assert_eq!(q3.len(), 1);
@@ -4433,7 +4466,10 @@ mod tests {
             br#"<rss><channel><item><title><![CDATA[Understanding <!ENTITY declarations]]></title><link>http://x/c.nzb</link></item></channel></rss>"#,
         )
         .unwrap();
-        assert_eq!(cdata_ent.items[0].title, b"Understanding <!ENTITY declarations");
+        assert_eq!(
+            cdata_ent.items[0].title,
+            b"Understanding <!ENTITY declarations"
+        );
         let latin1_cdata = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><rss><channel><item><title><![CDATA[Caf\xe9\r\nBeta\rGamma]]></title><link>http://x/c.nzb</link><newznab:attr name=\"hydraIndexerName\" value=\"Idx\tOne\r\nTwo&#9;Tab\"/></item></channel></rss>";
         let page_latin1 = parse_newznab_response(latin1_cdata).unwrap();
         assert_eq!(page_latin1.items[0].title, "Café\nBeta\nGamma".as_bytes());
@@ -4481,24 +4517,20 @@ mod tests {
         );
         assert_eq!(
             info.message_ids,
-            vec![b"a-0-0@x".to_vec(), b"a-0-1@x".to_vec(), b"a-1-0@x".to_vec()]
+            vec![
+                b"a-0-0@x".to_vec(),
+                b"a-0-1@x".to_vec(),
+                b"a-1-0@x".to_vec()
+            ]
         );
         assert_eq!(info.meta.get(b"imdb".as_slice()).unwrap(), b"tt123");
         assert_eq!(info.poster, b"poster@example.com");
 
-        let other = parse_nzb_summary(&make_test_nzb(
-            &[("other", &[1, 2]), ("x", &[3])],
-            "a",
-            "",
-        ))
-        .unwrap();
+        let other =
+            parse_nzb_summary(&make_test_nzb(&[("other", &[1, 2]), ("x", &[3])], "a", "")).unwrap();
         assert_eq!(info.fingerprint(), other.fingerprint());
-        let other_b = parse_nzb_summary(&make_test_nzb(
-            &[("other", &[1, 2]), ("x", &[3])],
-            "b",
-            "",
-        ))
-        .unwrap();
+        let other_b =
+            parse_nzb_summary(&make_test_nzb(&[("other", &[1, 2]), ("x", &[3])], "b", "")).unwrap();
         assert_ne!(info.fingerprint(), other_b.fingerprint());
 
         // NzbReaderMainNameTest
@@ -4689,45 +4721,280 @@ mod tests {
         assert_eq!(info.data_message_ids.len(), 2);
 
         // NativeDeclaredTailGuardTableTest
-        type GuardCase<'a> = (
-            &'a str,
-            Vec<(i64, i64)>,
-            &'a str,
-            bool,
-            u64,
-            u64,
-            i64,
-            bool,
-        );
-        let make_parts = |count: i64| -> Vec<(i64, i64)> { (1..=count).map(|n| (n, 100)).collect() };
+        type GuardCase<'a> = (&'a str, Vec<(i64, i64)>, &'a str, bool, u64, u64, i64, bool);
+        let make_parts =
+            |count: i64| -> Vec<(i64, i64)> { (1..=count).map(|n| (n, 100)).collect() };
         let cases: Vec<GuardCase> = vec![
-            ("true_tail", vec![(1, 100), (2, 100)], "(1/150)", false, 2, 150, 200, true),
-            ("number_gap_without_tail", vec![(1, 100), (3, 100)], "(1/0)", false, 2, 3, 200, true),
-            ("single_segment", vec![(9374, 100)], "(1/10000)", false, 1, 9374, 100, true),
-            ("zero_subject_count", vec![(1, 100), (2, 100)], "(1/0)", false, 2, 2, 200, true),
-            ("max_subject_count", vec![(1, 100), (2, 100)], "(1/200000)", false, 2, 200000, 200, true),
-            ("over_max_subject_count", vec![(1, 100), (2, 100)], "(1/200001)", false, 2, 2, 200, true),
-            ("two_thirds_equal", make_parts(200), "(1/300)", false, 200, 200, 20000, true),
-            ("two_thirds_below", make_parts(199), "(1/300)", false, 199, 300, 19900, true),
-            ("tail_gap_99", vec![(1, 100), (101, 100)], "(1/200)", false, 2, 101, 200, true),
-            ("tail_gap_100", vec![(1, 100), (101, 100)], "(1/201)", false, 2, 201, 200, true),
-            ("zero_part_number", vec![(0, 100), (2, 100)], "(1/1000)", false, 2, 2, 200, true),
-            ("negative_part_number", vec![(-1, 100), (2, 100)], "(1/1000)", false, 2, 2, 200, true),
-            ("invalid_number_suppresses_valid_max", vec![(1, 100), (199999, 100), (200001, 100)], "(1/200000)", false, 3, 3, 300, true),
-            ("maximum_valid_part", vec![(1, 100), (200000, 100)], "(1/200000)", false, 2, 200000, 200, true),
-            ("zero_bytes", vec![(1, 100), (2, 0)], "(1/150)", false, 2, 2, 100, false),
-            ("negative_bytes", vec![(1, 100), (2, -1)], "(1/150)", false, 2, 2, 99, false),
-            ("strict_majority_short_last", vec![(1, 100), (2, 100), (3, 98)], "(1/150)", false, 3, 3, 298, true),
-            ("strict_majority_large_last", vec![(1, 100), (2, 100), (3, 101)], "(1/150)", false, 3, 3, 301, true),
-            ("strict_majority_equal_last", vec![(1, 100), (2, 98), (3, 100)], "(1/150)", false, 3, 150, 298, true),
-            ("median_exact_99_percent", vec![(1, 900), (2, 1000), (3, 1100), (4, 990)], "(1/150)", false, 4, 150, 3990, true),
-            ("median_below_99_percent", vec![(1, 900), (2, 1000), (3, 1100), (4, 989)], "(1/150)", false, 4, 4, 3989, true),
-            ("half_is_not_strict_majority", vec![(1, 99), (2, 100), (3, 99), (4, 100)], "(1/150)", false, 4, 150, 398, true),
-            ("parity_never_infers", vec![(1, 100), (2, 100)], "(1/150)", true, 2, 2, 200, true),
-            ("malformed_tail", vec![(1, 100), (3, 100)], "(x/150)", false, 2, 3, 200, true),
-            ("trailing_subject_whitespace", vec![(1, 100), (2, 100)], "(1/150)  ", false, 2, 150, 200, true),
-            ("unsorted_input", vec![(3, 100), (1, 100), (2, 100)], "(1/150)", false, 3, 150, 300, true),
-            ("duplicate_keeps_last_bytes", vec![(1, 100), (2, 100), (2, 30)], "(1/150)", false, 2, 2, 130, true),
+            (
+                "true_tail",
+                vec![(1, 100), (2, 100)],
+                "(1/150)",
+                false,
+                2,
+                150,
+                200,
+                true,
+            ),
+            (
+                "number_gap_without_tail",
+                vec![(1, 100), (3, 100)],
+                "(1/0)",
+                false,
+                2,
+                3,
+                200,
+                true,
+            ),
+            (
+                "single_segment",
+                vec![(9374, 100)],
+                "(1/10000)",
+                false,
+                1,
+                9374,
+                100,
+                true,
+            ),
+            (
+                "zero_subject_count",
+                vec![(1, 100), (2, 100)],
+                "(1/0)",
+                false,
+                2,
+                2,
+                200,
+                true,
+            ),
+            (
+                "max_subject_count",
+                vec![(1, 100), (2, 100)],
+                "(1/200000)",
+                false,
+                2,
+                200000,
+                200,
+                true,
+            ),
+            (
+                "over_max_subject_count",
+                vec![(1, 100), (2, 100)],
+                "(1/200001)",
+                false,
+                2,
+                2,
+                200,
+                true,
+            ),
+            (
+                "two_thirds_equal",
+                make_parts(200),
+                "(1/300)",
+                false,
+                200,
+                200,
+                20000,
+                true,
+            ),
+            (
+                "two_thirds_below",
+                make_parts(199),
+                "(1/300)",
+                false,
+                199,
+                300,
+                19900,
+                true,
+            ),
+            (
+                "tail_gap_99",
+                vec![(1, 100), (101, 100)],
+                "(1/200)",
+                false,
+                2,
+                101,
+                200,
+                true,
+            ),
+            (
+                "tail_gap_100",
+                vec![(1, 100), (101, 100)],
+                "(1/201)",
+                false,
+                2,
+                201,
+                200,
+                true,
+            ),
+            (
+                "zero_part_number",
+                vec![(0, 100), (2, 100)],
+                "(1/1000)",
+                false,
+                2,
+                2,
+                200,
+                true,
+            ),
+            (
+                "negative_part_number",
+                vec![(-1, 100), (2, 100)],
+                "(1/1000)",
+                false,
+                2,
+                2,
+                200,
+                true,
+            ),
+            (
+                "invalid_number_suppresses_valid_max",
+                vec![(1, 100), (199999, 100), (200001, 100)],
+                "(1/200000)",
+                false,
+                3,
+                3,
+                300,
+                true,
+            ),
+            (
+                "maximum_valid_part",
+                vec![(1, 100), (200000, 100)],
+                "(1/200000)",
+                false,
+                2,
+                200000,
+                200,
+                true,
+            ),
+            (
+                "zero_bytes",
+                vec![(1, 100), (2, 0)],
+                "(1/150)",
+                false,
+                2,
+                2,
+                100,
+                false,
+            ),
+            (
+                "negative_bytes",
+                vec![(1, 100), (2, -1)],
+                "(1/150)",
+                false,
+                2,
+                2,
+                99,
+                false,
+            ),
+            (
+                "strict_majority_short_last",
+                vec![(1, 100), (2, 100), (3, 98)],
+                "(1/150)",
+                false,
+                3,
+                3,
+                298,
+                true,
+            ),
+            (
+                "strict_majority_large_last",
+                vec![(1, 100), (2, 100), (3, 101)],
+                "(1/150)",
+                false,
+                3,
+                3,
+                301,
+                true,
+            ),
+            (
+                "strict_majority_equal_last",
+                vec![(1, 100), (2, 98), (3, 100)],
+                "(1/150)",
+                false,
+                3,
+                150,
+                298,
+                true,
+            ),
+            (
+                "median_exact_99_percent",
+                vec![(1, 900), (2, 1000), (3, 1100), (4, 990)],
+                "(1/150)",
+                false,
+                4,
+                150,
+                3990,
+                true,
+            ),
+            (
+                "median_below_99_percent",
+                vec![(1, 900), (2, 1000), (3, 1100), (4, 989)],
+                "(1/150)",
+                false,
+                4,
+                4,
+                3989,
+                true,
+            ),
+            (
+                "half_is_not_strict_majority",
+                vec![(1, 99), (2, 100), (3, 99), (4, 100)],
+                "(1/150)",
+                false,
+                4,
+                150,
+                398,
+                true,
+            ),
+            (
+                "parity_never_infers",
+                vec![(1, 100), (2, 100)],
+                "(1/150)",
+                true,
+                2,
+                2,
+                200,
+                true,
+            ),
+            (
+                "malformed_tail",
+                vec![(1, 100), (3, 100)],
+                "(x/150)",
+                false,
+                2,
+                3,
+                200,
+                true,
+            ),
+            (
+                "trailing_subject_whitespace",
+                vec![(1, 100), (2, 100)],
+                "(1/150)  ",
+                false,
+                2,
+                150,
+                200,
+                true,
+            ),
+            (
+                "unsorted_input",
+                vec![(3, 100), (1, 100), (2, 100)],
+                "(1/150)",
+                false,
+                3,
+                150,
+                300,
+                true,
+            ),
+            (
+                "duplicate_keeps_last_bytes",
+                vec![(1, 100), (2, 100), (2, 30)],
+                "(1/150)",
+                false,
+                2,
+                2,
+                130,
+                true,
+            ),
         ];
         for (label, parts, tail, parity, listed, declared, bytes, geom) in cases {
             let name = if parity { "guard.par2" } else { "guard.mkv" };
@@ -4776,7 +5043,8 @@ mod tests {
         }
 
         // NativeEmptyFilePartCountsTest, NativeDuplicateSegmentKeepsLastTest, NativeDuplicateSegmentInvalidLastTest
-        let empty = "<file subject='&quot;empty.mkv&quot; yEnc (1/150)'><segments></segments></file>";
+        let empty =
+            "<file subject='&quot;empty.mkv&quot; yEnc (1/150)'><segments></segments></file>";
         assert!(parse_nzb_summary(format!("<nzb>{empty}</nzb>").as_bytes()).is_none());
         let valid = "<file subject='&quot;valid.mkv&quot;'><segments><segment number='1' bytes='100'>valid@x</segment></segments></file>";
         let info = parse_nzb_summary(format!("<nzb>{empty}{valid}</nzb>").as_bytes()).unwrap();
@@ -4852,8 +5120,7 @@ mod tests {
             &bomb[bomb.find("<!DOCTYPE").unwrap()..]
         );
         assert!(parse_nzb_summary(padded.as_bytes()).is_none());
-        let mut standard =
-            String::from_utf8(make_test_nzb(&[("a.mkv", &[5])], "a", "")).unwrap();
+        let mut standard = String::from_utf8(make_test_nzb(&[("a.mkv", &[5])], "a", "")).unwrap();
         let pos = standard.find("<nzb").unwrap();
         standard.insert_str(
             pos,
@@ -4886,7 +5153,10 @@ mod tests {
             assert_eq!(parsed.files, expected_utf8.files);
             assert_eq!(parsed.data_bytes, expected_utf8.data_bytes);
             assert_eq!(parsed.main_name, b"Caf\xc3\xa9.2026.mkv");
-            assert_eq!(parsed.meta.get(&b"title"[..]).map(|v| v.as_slice()), Some(&b"Caf\xc3\xa9.2026"[..]));
+            assert_eq!(
+                parsed.meta.get(&b"title"[..]).map(|v| v.as_slice()),
+                Some(&b"Caf\xc3\xa9.2026"[..])
+            );
             assert_eq!(parsed.data_message_ids, expected_utf8.data_message_ids);
         }
         // Single-byte stream falsely claiming UTF-16 is rejected
@@ -4944,7 +5214,10 @@ mod tests {
         }
 
         impl DonorServerExchange for Arc<FakeTransport> {
-            fn exchange(&self, batch: &[DonorRequest]) -> Result<Vec<DonorAnswer>, DonorExchangeError> {
+            fn exchange(
+                &self,
+                batch: &[DonorRequest],
+            ) -> Result<Vec<DonorAnswer>, DonorExchangeError> {
                 if self.pool_busy.load(Ordering::SeqCst) {
                     self.exchanges.fetch_add(1, Ordering::SeqCst);
                     return Err(DonorExchangeError {
@@ -5124,7 +5397,13 @@ mod tests {
         // 5. DonorHealthDeadProbeAsksEveryServerTest
         let (sa, ta) = make_server(1);
         let (sb, tb) = make_server(1);
-        let h = donor_check_posting(&[sa, sb], &ids("dead", 30), &no_groups(), &everything(0), false);
+        let h = donor_check_posting(
+            &[sa, sb],
+            &ids("dead", 30),
+            &no_groups(),
+            &everything(0),
+            false,
+        );
         assert_eq!(h.checked, 10);
         assert_eq!(h.missing, 10);
         assert_eq!(h.present, 0);
@@ -5226,7 +5505,10 @@ mod tests {
             busy_s.ask(&batch1, || false);
         }
         assert!(!busy_s.paused());
-        assert_eq!(busy_t.exchanges.load(Ordering::SeqCst), DONOR_SERVER_GIVE_UP * 2);
+        assert_eq!(
+            busy_t.exchanges.load(Ordering::SeqCst),
+            DONOR_SERVER_GIVE_UP * 2
+        );
 
         let (paused_s, paused_t) = make_server(1);
         paused_t.auth_fails.store(true, Ordering::SeqCst);
@@ -5351,25 +5633,44 @@ mod tests {
             .collect();
         let done = AtomicI32::new(0);
         let alive = AtomicI32::new(0);
-        donor_check_postings(&[cap_s.clone()], &postings, &everything(0), true, 8, |_, h| {
-            done.fetch_add(1, Ordering::SeqCst);
-            if h.present == 20 {
-                alive.fetch_add(1, Ordering::SeqCst);
-            }
-        });
+        donor_check_postings(
+            &[cap_s.clone()],
+            &postings,
+            &everything(0),
+            true,
+            8,
+            |_, h| {
+                done.fetch_add(1, Ordering::SeqCst);
+                if h.present == 20 {
+                    alive.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        );
         assert_eq!(done.load(Ordering::SeqCst), 15);
         assert_eq!(alive.load(Ordering::SeqCst), 15);
         assert!(cap_s.max_active() <= 4);
 
         let (dead_s, dead_t) = make_server(1);
-        let h = donor_check_posting(&[dead_s], &ids("dead", 500), &no_groups(), &everything(0), true);
+        let h = donor_check_posting(
+            &[dead_s],
+            &ids("dead", 500),
+            &no_groups(),
+            &everything(0),
+            true,
+        );
         assert_eq!(h.checked, 10);
         assert!(donor_dead_probe(&h));
         assert_eq!(dead_t.stats.load(Ordering::SeqCst), 10);
 
         let (live_s, live_t) = make_server(1);
         live_t.has_all.store(true, Ordering::SeqCst);
-        let h = donor_check_posting(&[live_s], &ids("a", 500), &no_groups(), &everything(0), true);
+        let h = donor_check_posting(
+            &[live_s],
+            &ids("a", 500),
+            &no_groups(),
+            &everything(0),
+            true,
+        );
         assert_eq!(h.checked, 500);
         assert_eq!(h.present, 500);
 

@@ -99,13 +99,24 @@ pub fn higher_peer(pick: Snapshot<'_>, other: Snapshot<'_>, include_history: boo
         && other.score > pick.score
         && other.flags & (PRESENT | NZB) == PRESENT | NZB
         && other.flags & (DELETING | DELETE_MANUAL | DELETE_COPY) == 0
-        && if other.flags & HISTORY != 0 { include_history } else { other.flags & DELETE_NONE != 0 }
+        && if other.flags & HISTORY != 0 {
+            include_history
+        } else {
+            other.flags & DELETE_NONE != 0
+        }
         && other.key.eq_ignore_ascii_case(pick.key)
 }
 
-pub fn higher_score(pick: Snapshot<'_>, others: &[Snapshot<'_>], include_history: bool) -> Option<i32> {
-    others.iter().filter(|other| higher_peer(pick, **other, include_history))
-        .map(|other| other.score).max()
+pub fn higher_score(
+    pick: Snapshot<'_>,
+    others: &[Snapshot<'_>],
+    include_history: bool,
+) -> Option<i32> {
+    others
+        .iter()
+        .filter(|other| higher_peer(pick, **other, include_history))
+        .map(|other| other.score)
+        .max()
 }
 
 /// Compare persisted normalized title/key with current normalized title/key.
@@ -273,10 +284,21 @@ pub fn effective_alive(present: i32, missing: i32, error: i32, listed: u64, decl
 }
 
 /// Count structurally absent parts as missing when evaluating an unusable donor.
-pub fn dead_donor(present: i32, missing: i32, error: i32, listed: u64, declared: u64, minimum: i32) -> bool {
+pub fn dead_donor(
+    present: i32,
+    missing: i32,
+    error: i32,
+    listed: u64,
+    declared: u64,
+    minimum: i32,
+) -> bool {
     let alive = effective_alive(present, missing, error, listed, declared);
-    let answered = present.max(0).saturating_add(missing.max(0)).saturating_add(error.max(0));
-    let missing = i64::from(missing.max(0)) + i64::from(unlisted_missing(answered, listed, declared));
+    let answered = present
+        .max(0)
+        .saturating_add(missing.max(0))
+        .saturating_add(error.max(0));
+    let missing =
+        i64::from(missing.max(0)) + i64::from(unlisted_missing(answered, listed, declared));
     alive >= 0.0 && alive * 100.0 < f64::from(minimum) && missing >= 5
 }
 

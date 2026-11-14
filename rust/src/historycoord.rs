@@ -2,9 +2,8 @@
 
 use crate::queuecoord::{
     ARTICLE_FAILED, ARTICLE_FINISHED, ARTICLE_UNDEFINED, DELETE_COPY, DELETE_DUPE, DELETE_GOOD,
-    DELETE_MANUAL, DUP_STATUS_BAD, DUP_STATUS_DELETED, DUP_STATUS_DUPE,
-    DUP_STATUS_FAILED, DUP_STATUS_GOOD, DUP_STATUS_SUCCESS, MARK_BAD, MARK_GOOD, MARK_SUCCESS,
-    PARTIAL_STATE_NONE,
+    DELETE_MANUAL, DUP_STATUS_BAD, DUP_STATUS_DELETED, DUP_STATUS_DUPE, DUP_STATUS_FAILED,
+    DUP_STATUS_GOOD, DUP_STATUS_SUCCESS, MARK_BAD, MARK_GOOD, MARK_SUCCESS, PARTIAL_STATE_NONE,
 };
 
 /// `HistoryCoordinator::ServiceWork` minimum history retention timestamp (`cur_time - keep_days * 86400`).
@@ -3164,7 +3163,6 @@ pub(crate) fn edit_list_active(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::queuecoord::DELETE_NONE;
     use crate::diskstate_format::{
         calc_staged_fallback, diskstate_format_file_state_name, diskstate_format_staged_part_path,
         diskstate_select_original_or_current_msg_id, eval_article_load_state,
@@ -3173,6 +3171,7 @@ mod tests {
         NzbgetRsDiskFileInfoInput, NzbgetRsDiskFileStateInput,
     };
     use crate::downloadinfo::is_download_completed;
+    use crate::queuecoord::DELETE_NONE;
     use crate::queuecoord::PARTIAL_STATE_COMPLETED;
     use std::ffi::CString;
 

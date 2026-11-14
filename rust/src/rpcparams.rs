@@ -115,7 +115,9 @@ pub fn skip_to_params(buf: &mut [u8]) -> usize {
 /// NextParamAsInt: (new read position, value); the position is unchanged
 /// without a value.
 pub fn next_int(buf: &mut [u8], kind: Kind) -> (usize, Option<i32>) {
-    let Some(buf) = terminated(buf) else { return (0, None) };
+    let Some(buf) = terminated(buf) else {
+        return (0, None);
+    };
     next_int_terminated(buf, kind)
 }
 
@@ -163,7 +165,9 @@ pub(crate) fn next_int_terminated(buf: &mut [u8], kind: Kind) -> (usize, Option<
 /// NextParamAsStr: (new read position, offset of the NUL-terminated value).
 /// The position is unchanged without a value.
 pub fn next_str(buf: &mut [u8], kind: Kind) -> (usize, Option<usize>) {
-    let Some(buf) = terminated(buf) else { return (0, None) };
+    let Some(buf) = terminated(buf) else {
+        return (0, None);
+    };
     next_str_terminated(buf, kind)
 }
 
@@ -210,12 +214,18 @@ pub(crate) fn next_str_terminated(buf: &mut [u8], kind: Kind) -> (usize, Option<
 /// NextParamAsBool: (new read position, value). A GET parameter moves the
 /// position even when it isn't a JSON boolean, as the C++ did.
 pub fn next_bool(buf: &mut [u8], kind: Kind, json: bool) -> (usize, Option<bool>) {
-    let Some(buf) = terminated(buf) else { return (0, None) };
+    let Some(buf) = terminated(buf) else {
+        return (0, None);
+    };
     next_bool_terminated(buf, kind, json)
 }
 
 /// next_bool on a buffer that ends with its first NUL.
-pub(crate) fn next_bool_terminated(buf: &mut [u8], kind: Kind, json: bool) -> (usize, Option<bool>) {
+pub(crate) fn next_bool_terminated(
+    buf: &mut [u8],
+    kind: Kind,
+    json: bool,
+) -> (usize, Option<bool>) {
     match kind {
         Kind::Get => {
             let (pos, param) = next_str_terminated(buf, kind);
@@ -233,7 +243,9 @@ pub(crate) fn next_bool_terminated(buf: &mut [u8], kind: Kind, json: bool) -> (u
             (pos, r)
         }
         Kind::Json => {
-            let Some((param, len)) = json_next_value(text(buf)) else { return (0, None) };
+            let Some((param, len)) = json_next_value(text(buf)) else {
+                return (0, None);
+            };
             let value = match &buf[param..param + len] {
                 b"true" => true,
                 b"false" => false,
@@ -242,7 +254,9 @@ pub(crate) fn next_bool_terminated(buf: &mut [u8], kind: Kind, json: bool) -> (u
             (param + len + json_step(buf, param + len), Some(value))
         }
         Kind::Xml => {
-            let Some((param, len)) = xml_next_value(buf, b"boolean") else { return (0, None) };
+            let Some((param, len)) = xml_next_value(buf, b"boolean") else {
+                return (0, None);
+            };
             (param + len + 9, Some(buf[param] == b'1'))
         }
     }
@@ -478,7 +492,9 @@ impl Raw {
                 (pos, r)
             }
             Kind::Json => {
-                let Some((param, len)) = self.json_next_value() else { return (0, None) };
+                let Some((param, len)) = self.json_next_value() else {
+                    return (0, None);
+                };
                 let value = match std::slice::from_raw_parts(self.0.add(param), len) {
                     b"true" => true,
                     b"false" => false,
@@ -517,10 +533,15 @@ pub enum ServerParamsError {
 /// entries: host, port, username, password, encryption, cipher, timeout and
 /// certVerifLevel, as value_to<std::string/int/bool> takes them (strings
 /// whole, NULs included).
-pub fn test_server_params(request: &[u8], limits: crate::json::Limits) -> Result<ServerParams, ServerParamsError> {
+pub fn test_server_params(
+    request: &[u8],
+    limits: crate::json::Limits,
+) -> Result<ServerParams, ServerParamsError> {
     use crate::json::Value;
     let json = crate::json::parse(request, limits).ok_or(ServerParamsError::Json)?;
-    let Some(Value::Array(params)) = json.get(b"params") else { return Err(ServerParamsError::Params) };
+    let Some(Value::Array(params)) = json.get(b"params") else {
+        return Err(ServerParamsError::Params);
+    };
     if params.len() < 8 {
         return Err(ServerParamsError::Params);
     }
@@ -528,16 +549,21 @@ pub fn test_server_params(request: &[u8], limits: crate::json::Limits) -> Result
         Value::String(s) => Some(s.clone()),
         _ => None,
     };
-    let parsed = (|| Some(ServerParams {
-        host: string(&params[0])?,
-        port: params[1].to_i32()?,
-        username: string(&params[2])?,
-        password: string(&params[3])?,
-        encryption: match params[4] { Value::Bool(b) => b, _ => return None },
-        cipher: string(&params[5])?,
-        timeout: params[6].to_i32()?,
-        cert_verif_level: params[7].to_i32()?,
-    }))();
+    let parsed = (|| {
+        Some(ServerParams {
+            host: string(&params[0])?,
+            port: params[1].to_i32()?,
+            username: string(&params[2])?,
+            password: string(&params[3])?,
+            encryption: match params[4] {
+                Value::Bool(b) => b,
+                _ => return None,
+            },
+            cipher: string(&params[5])?,
+            timeout: params[6].to_i32()?,
+            cert_verif_level: params[7].to_i32()?,
+        })
+    })();
     parsed.ok_or(ServerParamsError::Params)
 }
 
@@ -601,14 +627,47 @@ mod tests {
         assert_eq!(i, Some(-7));
         let (_, s) = next_str(&mut b[p1..], Kind::Xml);
         assert_eq!(text(&b[p1 + s.unwrap()..]), b"a&amp;b");
-        assert_eq!(next_int(&mut buf("<value><i4>2147483648</i4></value>"), Kind::Xml).1, None);
+        assert_eq!(
+            next_int(&mut buf("<value><i4>2147483648</i4></value>"), Kind::Xml).1,
+            None
+        );
     }
     #[test]
     fn raw_matches_slices() {
         let mut state = 0x9e3779b97f4a7c15u64;
-        let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
-        const PIECES: &[&[u8]] = &[b"\"", b"\\", b"\\\"", b"a", b"12", b"-3", b"+", b"true", b"false", b",", b"]", b"}", b"[",
-            b" ", b"\t", b"=", b"&", b"%41", b"%", b"x=1", b"\0", b":", b"\"params\"", b"1", b"0"];
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        const PIECES: &[&[u8]] = &[
+            b"\"",
+            b"\\",
+            b"\\\"",
+            b"a",
+            b"12",
+            b"-3",
+            b"+",
+            b"true",
+            b"false",
+            b",",
+            b"]",
+            b"}",
+            b"[",
+            b" ",
+            b"\t",
+            b"=",
+            b"&",
+            b"%41",
+            b"%",
+            b"x=1",
+            b"\0",
+            b":",
+            b"\"params\"",
+            b"1",
+            b"0",
+        ];
         for _ in 0..200_000 {
             let mut buf = Vec::new();
             for _ in 0..next() % 12 {
@@ -620,20 +679,50 @@ mod tests {
             let json = next() % 2 == 0;
             let (mut a, mut b) = (buf.clone(), buf.clone());
             let ra = match what {
-                0 => { let (p, v) = next_int(&mut a, kind); (p, v.map(|v| v as i64)) }
-                1 => { let (p, v) = next_bool(&mut a, kind, json); (p, v.map(|v| v as i64)) }
-                _ => { let (p, v) = next_str(&mut a, kind); (p, v.map(|v| v as i64)) }
+                0 => {
+                    let (p, v) = next_int(&mut a, kind);
+                    (p, v.map(|v| v as i64))
+                }
+                1 => {
+                    let (p, v) = next_bool(&mut a, kind, json);
+                    (p, v.map(|v| v as i64))
+                }
+                _ => {
+                    let (p, v) = next_str(&mut a, kind);
+                    (p, v.map(|v| v as i64))
+                }
             };
             let rb = unsafe {
                 let raw = Raw::new(b.as_mut_ptr());
                 match what {
-                    0 => { let (p, v) = raw.next_int(kind); (p, v.map(|v| v as i64)) }
-                    1 => { let (p, v) = raw.next_bool(kind, json); (p, v.map(|v| v as i64)) }
-                    _ => { let (p, v) = raw.next_str(kind); (p, v.map(|v| v as i64)) }
+                    0 => {
+                        let (p, v) = raw.next_int(kind);
+                        (p, v.map(|v| v as i64))
+                    }
+                    1 => {
+                        let (p, v) = raw.next_bool(kind, json);
+                        (p, v.map(|v| v as i64))
+                    }
+                    _ => {
+                        let (p, v) = raw.next_str(kind);
+                        (p, v.map(|v| v as i64))
+                    }
                 }
             };
-            assert_eq!(ra, rb, "{:?} {what} {:?}", kind, String::from_utf8_lossy(&buf));
-            assert_eq!(a, b, "{:?} {what} {:?}", kind, String::from_utf8_lossy(&buf));
+            assert_eq!(
+                ra,
+                rb,
+                "{:?} {what} {:?}",
+                kind,
+                String::from_utf8_lossy(&buf)
+            );
+            assert_eq!(
+                a,
+                b,
+                "{:?} {what} {:?}",
+                kind,
+                String::from_utf8_lossy(&buf)
+            );
         }
     }
 }

@@ -23,7 +23,9 @@ fn any_name(name: &[u8], names: &[&str]) -> bool {
 
 /// The part after the last '/' or '\\'.
 fn basename(path: &[u8]) -> &[u8] {
-    path.iter().rposition(|&b| b == b'/' || b == b'\\').map_or(path, |k| &path[k + 1..])
+    path.iter()
+        .rposition(|&b| b == b'/' || b == b'\\')
+        .map_or(path, |k| &path[k + 1..])
 }
 
 /// Without the last extension (a name starting with its only '.' stays).
@@ -36,11 +38,18 @@ fn strip_last_ext(name: &[u8]) -> &[u8] {
 
 /// FileSystem::GetFileExtension: from the last '.' on ("" for none).
 pub fn file_extension(name: &[u8]) -> &[u8] {
-    name.iter().rposition(|&b| b == b'.').map_or(&[], |k| &name[k..])
+    name.iter()
+        .rposition(|&b| b == b'.')
+        .map_or(&[], |k| &name[k..])
 }
 
 pub fn is_seven_zip_ext(ext: &[u8]) -> bool {
-    matches_any_ext(ext, &[".7z", ".zip", ".tar", ".gz", ".bz", ".bz2", ".tgz", ".txz", ".xz"])
+    matches_any_ext(
+        ext,
+        &[
+            ".7z", ".zip", ".tar", ".gz", ".bz", ".bz2", ".tgz", ".txz", ".xz",
+        ],
+    )
 }
 
 pub fn is_rar_ext(ext: &[u8]) -> bool {
@@ -68,11 +77,27 @@ pub fn is_archive_ext(ext: &[u8]) -> bool {
 }
 
 pub fn is_disc_structure_ext(ext: &[u8]) -> bool {
-    matches_any_ext(ext, &[".vob", ".bdmv", ".mpls", ".mpl", ".clpi", ".cpi", ".bdm", ".ifo", ".bup", ".mts", ".m2ts", ".aob", ".evo", ".bdjo"])
+    matches_any_ext(
+        ext,
+        &[
+            ".vob", ".bdmv", ".mpls", ".mpl", ".clpi", ".cpi", ".bdm", ".ifo", ".bup", ".mts",
+            ".m2ts", ".aob", ".evo", ".bdjo",
+        ],
+    )
 }
 
 pub fn is_disc_structure_dir(dir: &[u8]) -> bool {
-    any_name(basename(dir), &["BDMV", "VIDEO_TS", "AUDIO_TS", "HVDVD_TS", "AVCHD", "CERTIFICATE"])
+    any_name(
+        basename(dir),
+        &[
+            "BDMV",
+            "VIDEO_TS",
+            "AUDIO_TS",
+            "HVDVD_TS",
+            "AVCHD",
+            "CERTIFICATE",
+        ],
+    )
 }
 
 pub fn is_disc_descriptor_ext(ext: &[u8]) -> bool {
@@ -88,13 +113,26 @@ pub fn is_generic_disc_image_ext(ext: &[u8]) -> bool {
 }
 
 pub fn is_clutter_dir(dir: &[u8]) -> bool {
-    any_name(basename(dir), &["@eaDir", ".AppleDouble", "__MACOSX", ".Spotlight-V100", ".Trashes"])
+    any_name(
+        basename(dir),
+        &[
+            "@eaDir",
+            ".AppleDouble",
+            "__MACOSX",
+            ".Spotlight-V100",
+            ".Trashes",
+        ],
+    )
 }
 
 pub fn is_clutter_file(name: &[u8]) -> bool {
     let bare = basename(name);
     // AppleDouble sidecar files (._Movie.mkv)
-    (bare.len() > 2 && bare[0] == b'.' && bare[1] == b'_') || any_name(bare, &[".DS_Store", "Thumbs.db", "desktop.ini", "ehthumbs.db"])
+    (bare.len() > 2 && bare[0] == b'.' && bare[1] == b'_')
+        || any_name(
+            bare,
+            &[".DS_Store", "Thumbs.db", "desktop.ini", "ehthumbs.db"],
+        )
 }
 
 pub fn is_parity_ext(ext: &[u8]) -> bool {
@@ -102,15 +140,32 @@ pub fn is_parity_ext(ext: &[u8]) -> bool {
 }
 
 pub fn is_video_ext(ext: &[u8]) -> bool {
-    matches_any_ext(ext, &[".mkv", ".mp4", ".avi", ".mov", ".m2ts", ".mts", ".ts", ".m4v", ".webm", ".flv", ".wmv", ".divx", ".xvid"])
+    matches_any_ext(
+        ext,
+        &[
+            ".mkv", ".mp4", ".avi", ".mov", ".m2ts", ".mts", ".ts", ".m4v", ".webm", ".flv",
+            ".wmv", ".divx", ".xvid",
+        ],
+    )
 }
 
 pub fn is_audio_ext(ext: &[u8]) -> bool {
-    matches_any_ext(ext, &[".mp3", ".flac", ".aac", ".ogg", ".wav", ".dts", ".ac3", ".mka", ".opus", ".wma", ".eac3", ".m4a"])
+    matches_any_ext(
+        ext,
+        &[
+            ".mp3", ".flac", ".aac", ".ogg", ".wav", ".dts", ".ac3", ".mka", ".opus", ".wma",
+            ".eac3", ".m4a",
+        ],
+    )
 }
 
 pub fn is_subtitle_ext(ext: &[u8]) -> bool {
-    matches_any_ext(ext, &[".srt", ".sub", ".idx", ".ass", ".ssa", ".smi", ".sup", ".pgs", ".vtt"])
+    matches_any_ext(
+        ext,
+        &[
+            ".srt", ".sub", ".idx", ".ass", ".ssa", ".smi", ".sup", ".pgs", ".vtt",
+        ],
+    )
 }
 
 pub fn is_nfo_ext(ext: &[u8]) -> bool {
@@ -118,11 +173,21 @@ pub fn is_nfo_ext(ext: &[u8]) -> bool {
 }
 
 pub fn is_book_ext(ext: &[u8]) -> bool {
-    matches_any_ext(ext, &[".epub", ".pdf", ".mobi", ".azw3", ".cbr", ".cbz", ".djvu", ".m4b"])
+    matches_any_ext(
+        ext,
+        &[
+            ".epub", ".pdf", ".mobi", ".azw3", ".cbr", ".cbz", ".djvu", ".m4b",
+        ],
+    )
 }
 
 pub fn is_image_ext(ext: &[u8]) -> bool {
-    matches_any_ext(ext, &[".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"])
+    matches_any_ext(
+        ext,
+        &[
+            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff",
+        ],
+    )
 }
 
 pub fn is_sample_stem(stem: &[u8]) -> bool {
@@ -133,7 +198,9 @@ pub fn is_sample_stem(stem: &[u8]) -> bool {
         return false;
     }
     let suffix = &stem[stem.len() - 7..];
-    str_case_eq(suffix, b"-sample") || str_case_eq(suffix, b".sample") || str_case_eq(suffix, b"_sample")
+    str_case_eq(suffix, b"-sample")
+        || str_case_eq(suffix, b".sample")
+        || str_case_eq(suffix, b"_sample")
 }
 
 pub fn is_seven_zip_file(name: &[u8]) -> bool {
@@ -142,7 +209,10 @@ pub fn is_seven_zip_file(name: &[u8]) -> bool {
     if ext.is_empty() {
         return false;
     }
-    if [&b".001"[..], b".gz", b".bz2", b".xz"].iter().any(|e| str_case_eq(ext, e)) {
+    if [&b".001"[..], b".gz", b".bz2", b".xz"]
+        .iter()
+        .any(|e| str_case_eq(ext, e))
+    {
         let inner = file_extension(strip_last_ext(bare));
         if !inner.is_empty() && is_seven_zip_ext(inner) {
             return true;
@@ -208,7 +278,11 @@ pub fn sniff_extension(h: &[u8]) -> &'static CStr {
     }
     // EBML: MKV or WebM
     if at(h, 0, &[0x1a, 0x45, 0xdf, 0xa3]) {
-        return if contains(h, b"webm") { c".webm" } else { c".mkv" };
+        return if contains(h, b"webm") {
+            c".webm"
+        } else {
+            c".mkv"
+        };
     }
     if n >= 8 && at(h, 4, b"ftyp") {
         if n >= 12 {
@@ -256,8 +330,14 @@ pub fn sniff_extension(h: &[u8]) -> &'static CStr {
     }
     // ASF: WMV or WMA by the stream GUID, undecided without one
     if at(h, 0, &[0x30, 0x26, 0xb2, 0x75, 0x8e, 0x66, 0xcf, 0x11]) {
-        const VIDEO: [u8; 16] = [0xc0, 0xef, 0x19, 0xbc, 0x4d, 0x5b, 0xcf, 0x11, 0xa8, 0xfd, 0x00, 0x80, 0x5f, 0x5c, 0x44, 0x2b];
-        const AUDIO: [u8; 16] = [0x40, 0x9e, 0x69, 0xf8, 0x4d, 0x5b, 0xcf, 0x11, 0xa8, 0xfd, 0x00, 0x80, 0x5f, 0x5c, 0x44, 0x2b];
+        const VIDEO: [u8; 16] = [
+            0xc0, 0xef, 0x19, 0xbc, 0x4d, 0x5b, 0xcf, 0x11, 0xa8, 0xfd, 0x00, 0x80, 0x5f, 0x5c,
+            0x44, 0x2b,
+        ];
+        const AUDIO: [u8; 16] = [
+            0x40, 0x9e, 0x69, 0xf8, 0x4d, 0x5b, 0xcf, 0x11, 0xa8, 0xfd, 0x00, 0x80, 0x5f, 0x5c,
+            0x44, 0x2b,
+        ];
         if n >= 16 && contains(h, &VIDEO) {
             return c".wmv";
         }
@@ -276,7 +356,11 @@ pub fn sniff_extension(h: &[u8]) -> &'static CStr {
         return c".ogg";
     }
     if at(h, 0, &[0x50, 0x4b, 0x03, 0x04]) {
-        return if contains(h, b"application/epub+zip") { c".epub" } else { c".zip" };
+        return if contains(h, b"application/epub+zip") {
+            c".epub"
+        } else {
+            c".zip"
+        };
     }
     if n >= 68 && at(h, 60, b"BOOKMOBI") {
         return c".mobi";
@@ -527,18 +611,42 @@ mod tests {
 
         // FileTypesSniffExtensionHeaderTest
         assert_eq!(sniff_extension(b"%PDF-1.7\n"), c".pdf");
-        assert_eq!(sniff_extension(b"\x1a\x45\xdf\xa3\x93\x42\x82\x88matroska"), c".mkv");
-        assert_eq!(sniff_extension(b"\x1a\x45\xdf\xa3\x93\x42\x82\x84webm"), c".webm");
-        assert_eq!(sniff_extension(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00"), c".mp4");
-        assert_eq!(sniff_extension(b"\x00\x00\x00\x18ftypM4V \x00\x00\x00\x00"), c".m4v");
-        assert_eq!(sniff_extension(b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00"), c".m4a");
-        assert_eq!(sniff_extension(b"\x00\x00\x00\x18ftypM4B \x00\x00\x00\x00"), c".m4b");
-        assert_eq!(sniff_extension(b"\x00\x00\x00\x14ftypqt  \x20\x05\x03\x00"), c".mov");
+        assert_eq!(
+            sniff_extension(b"\x1a\x45\xdf\xa3\x93\x42\x82\x88matroska"),
+            c".mkv"
+        );
+        assert_eq!(
+            sniff_extension(b"\x1a\x45\xdf\xa3\x93\x42\x82\x84webm"),
+            c".webm"
+        );
+        assert_eq!(
+            sniff_extension(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00"),
+            c".mp4"
+        );
+        assert_eq!(
+            sniff_extension(b"\x00\x00\x00\x18ftypM4V \x00\x00\x00\x00"),
+            c".m4v"
+        );
+        assert_eq!(
+            sniff_extension(b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00"),
+            c".m4a"
+        );
+        assert_eq!(
+            sniff_extension(b"\x00\x00\x00\x18ftypM4B \x00\x00\x00\x00"),
+            c".m4b"
+        );
+        assert_eq!(
+            sniff_extension(b"\x00\x00\x00\x14ftypqt  \x20\x05\x03\x00"),
+            c".mov"
+        );
         assert_eq!(sniff_extension(b"\x00\x00\x00\x1cmoovlmvhd"), c".mp4");
         assert_eq!(sniff_extension(b"RIFF\x24\x00\x00\x00AVI LIST"), c".avi");
         assert_eq!(sniff_extension(b"RIFF\x24\x00\x00\x00WAVEfmt "), c".wav");
         assert_eq!(sniff_extension(b"RIFF\x24\x00\x00\x00WEBPVP8 "), c".webp");
-        assert_eq!(sniff_extension(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), c".png");
+        assert_eq!(
+            sniff_extension(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"),
+            c".png"
+        );
         assert_eq!(sniff_extension(b"GIF89a\x01\x00\x01\x00"), c".gif");
         assert_eq!(sniff_extension(b"\xff\xd8\xff\xe0\x00\x10JFIF"), c".jpg");
         assert_eq!(
@@ -554,12 +662,13 @@ mod tests {
             c".zip"
         );
         assert_eq!(
-            sniff_extension(
-                b"PK\x03\x04\x14\x00\x00\x00\x00\x00mimetypeapplication/epub+zip"
-            ),
+            sniff_extension(b"PK\x03\x04\x14\x00\x00\x00\x00\x00mimetypeapplication/epub+zip"),
             c".epub"
         );
-        assert_eq!(sniff_extension(b"AT&TFORM\x00\x00\x01\x00DJVUINFO"), c".djvu");
+        assert_eq!(
+            sniff_extension(b"AT&TFORM\x00\x00\x01\x00DJVUINFO"),
+            c".djvu"
+        );
         assert_eq!(sniff_extension(b"Rar!\x1a\x07\x00\xcf\x90"), c".rar");
         assert_eq!(sniff_extension(b"7z\xbc\xaf\x27\x1c\x00\x04"), c".7z");
         assert_eq!(sniff_extension(b"\x1f\x8b\x08\x00\x00\x00\x00\x00"), c".gz");

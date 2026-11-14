@@ -18,24 +18,39 @@ pub struct Url {
 }
 
 fn find(s: &[u8], from: usize, b: u8) -> Option<usize> {
-    s.get(from..)?.iter().position(|&c| c == b).map(|k| from + k)
+    s.get(from..)?
+        .iter()
+        .position(|&c| c == b)
+        .map(|k| from + k)
 }
 
 /// CString::Set(str, len): a length of 0 or less takes the rest of the text.
 fn set(s: &[u8], start: usize, len: isize) -> Part {
-    Some((start, if len <= 0 { s.len() - start } else { len as usize }))
+    Some((
+        start,
+        if len <= 0 {
+            s.len() - start
+        } else {
+            len as usize
+        },
+    ))
 }
 
 pub fn parse_url(address: &CStr) -> Url {
     let s = address.to_bytes();
     let mut url = Url::default();
-    let Some(prot_end) = s.windows(3).position(|w| w == b"://") else { return url };
+    let Some(prot_end) = s.windows(3).position(|w| w == b"://") else {
+        return url;
+    };
     // a scheme is letters, digits, "+", "-" and "."; a "://" further on (a
     // relative "/get?u=https://...") doesn't make an absolute URL
     if prot_end == 0 || !s[0].is_ascii_alphabetic() {
         return url;
     }
-    if !s[..prot_end].iter().all(|&c| c.is_ascii_alphanumeric() || b"+-.".contains(&c)) {
+    if !s[..prot_end]
+        .iter()
+        .all(|&c| c.is_ascii_alphanumeric() || b"+-.".contains(&c))
+    {
         return url;
     }
     url.protocol = Some((0, prot_end));
@@ -88,14 +103,30 @@ mod tests {
         let c = std::ffi::CString::new(a).unwrap();
         let u = parse_url(&c);
         let get = |p: Part| p.map_or("<none>".to_string(), |(s, l)| a[s..s + l].to_string());
-        (u.valid, vec![get(u.protocol), get(u.user), get(u.password), get(u.host), get(u.resource)], u.port)
+        (
+            u.valid,
+            vec![
+                get(u.protocol),
+                get(u.user),
+                get(u.password),
+                get(u.host),
+                get(u.resource),
+            ],
+            u.port,
+        )
     }
 
     #[test]
     fn urls() {
         assert_eq!(
             parts("https://me:pw@example.com:8443/x/y?z"),
-            (true, ["https", "me", "pw", "example.com", "/x/y?z"].map(String::from).to_vec(), 8443)
+            (
+                true,
+                ["https", "me", "pw", "example.com", "/x/y?z"]
+                    .map(String::from)
+                    .to_vec(),
+                8443
+            )
         );
         assert_eq!(parts("http://host").1[3], "host");
         assert_eq!(parts("http://host").1[4], "<none>");

@@ -8,7 +8,6 @@
 //! as the C library's strcasecmp/strncasecmp and numbers parse as its
 //! atof/atoi, in the current locale; regular expressions use the C++ RegEx.
 
-
 use crate::wildmask::{wild_match, Lower};
 
 fn case_eq(a: &[u8], lit: &str) -> bool {
@@ -24,7 +23,10 @@ fn c_atof(b: &[u8]) -> f64 {
         Some(pos) => &b[..pos],
         None => b,
     };
-    let start = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
+    let start = b
+        .iter()
+        .position(|c| !c.is_ascii_whitespace())
+        .unwrap_or(b.len());
     let s = &b[start..];
     if s.is_empty() {
         return 0.0;
@@ -36,11 +38,19 @@ fn c_atof(b: &[u8]) -> f64 {
     let rest = &s[i..];
     if rest.len() >= 8 && rest[..8].eq_ignore_ascii_case(b"infinity") {
         i += 8;
-        return std::str::from_utf8(&s[..i]).ok().and_then(|t| t.parse::<f64>().ok()).unwrap_or(0.0);
+        return std::str::from_utf8(&s[..i])
+            .ok()
+            .and_then(|t| t.parse::<f64>().ok())
+            .unwrap_or(0.0);
     }
-    if rest.len() >= 3 && (rest[..3].eq_ignore_ascii_case(b"inf") || rest[..3].eq_ignore_ascii_case(b"nan")) {
+    if rest.len() >= 3
+        && (rest[..3].eq_ignore_ascii_case(b"inf") || rest[..3].eq_ignore_ascii_case(b"nan"))
+    {
         i += 3;
-        return std::str::from_utf8(&s[..i]).ok().and_then(|t| t.parse::<f64>().ok()).unwrap_or(0.0);
+        return std::str::from_utf8(&s[..i])
+            .ok()
+            .and_then(|t| t.parse::<f64>().ok())
+            .unwrap_or(0.0);
     }
     let mut has_digits = false;
     while i < s.len() && s[i].is_ascii_digit() {
@@ -84,7 +94,9 @@ fn c_atoi(b: &[u8]) -> i32 {
 /// The C cast (int64)double: x86 gives INT64_MIN out of range (and for NaN);
 /// elsewhere (as Rust) the conversion saturates.
 fn to_i64(f: f64) -> i64 {
-    if cfg!(any(target_arch = "x86_64", target_arch = "x86")) && !(f > i64::MIN as f64 && f < -(i64::MIN as f64)) {
+    if cfg!(any(target_arch = "x86_64", target_arch = "x86"))
+        && !(f > i64::MIN as f64 && f < -(i64::MIN as f64))
+    {
         i64::MIN
     } else {
         f as i64
@@ -126,7 +138,9 @@ pub enum Field {
 
 /// GetFieldData's names; None for an unknown one.
 fn field_of(name: Option<&[u8]>) -> Option<Field> {
-    let Some(n) = name else { return Some(Field::Title) };
+    let Some(n) = name else {
+        return Some(Field::Title);
+    };
     let table: &[(&str, Field)] = &[
         ("title", Field::Title),
         ("filename", Field::Filename),
@@ -297,14 +311,31 @@ impl Term {
 
     fn parse_param(&mut self, field: &[u8], param: &[u8]) -> bool {
         if case_eq(field, "size") {
-            self.parse_unit(param, &[("K", 1024.0), ("KB", 1024.0), ("M", 1048576.0), ("MB", 1048576.0), ("G", 1073741824.0), ("GB", 1073741824.0)], 1.0)
+            self.parse_unit(
+                param,
+                &[
+                    ("K", 1024.0),
+                    ("KB", 1024.0),
+                    ("M", 1048576.0),
+                    ("MB", 1048576.0),
+                    ("G", 1073741824.0),
+                    ("GB", 1073741824.0),
+                ],
+                1.0,
+            )
         } else if case_eq(field, "age") {
-            self.parse_unit(param, &[("m", 60.0), ("h", 3600.0), ("d", 86400.0)], 86400.0)
+            self.parse_unit(
+                param,
+                &[("m", 60.0), ("h", 3600.0), ("d", 86400.0)],
+                86400.0,
+            )
         } else if self.cmd >= Cmd::Equal {
             self.float_param = c_atof(param);
             self.int_param = to_i64(self.float_param);
             self.is_float = param.contains(&b'.');
-            param.iter().all(|&b| b.is_ascii_digit() || b == b'.' || b == b'-')
+            param
+                .iter()
+                .all(|&b| b.is_ascii_digit() || b == b'.' || b == b'-')
         } else {
             true
         }
@@ -313,10 +344,17 @@ impl Term {
     /// ParseSizeParam/ParseAgeParam: a number, then a unit (or the default).
     fn parse_unit(&mut self, param: &[u8], units: &[(&str, f64)], default: f64) -> bool {
         let f = c_atof(param);
-        let rest = &param[param.iter().position(|&b| !(b.is_ascii_digit() || b == b'.')).unwrap_or(param.len())..];
+        let rest = &param[param
+            .iter()
+            .position(|&b| !(b.is_ascii_digit() || b == b'.'))
+            .unwrap_or(param.len())..];
         if rest.is_empty() {
             // the C++ multiplied by the factors one after another
-            self.int_param = to_i64(if default == 86400.0 { f * 60.0 * 60.0 * 24.0 } else { f });
+            self.int_param = to_i64(if default == 86400.0 {
+                f * 60.0 * 60.0 * 24.0
+            } else {
+                f
+            });
             return true;
         }
         match units.iter().find(|(u, _)| case_eq(rest, u)) {
@@ -339,7 +377,9 @@ impl Term {
         // GetFieldData resolves the name again at match time. A filter may
         // be matched under a different thread locale than it was compiled
         // in (notably, Turkish changes how uppercase I compares).
-        let Some(field) = field_of(self.field_name.as_deref()) else { return false };
+        let Some(field) = field_of(self.field_name.as_deref()) else {
+            return false;
+        };
         let attr = if field == Field::Attr {
             &self.field_name.as_deref().unwrap_or_default()[5..]
         } else {
@@ -350,7 +390,13 @@ impl Term {
         self.positive == m
     }
 
-    fn match_value(&mut self, item: &mut dyn Item, s: Option<Vec<u8>>, mut int_value: i64, refs: &mut Vec<Vec<u8>>) -> bool {
+    fn match_value(
+        &mut self,
+        item: &mut dyn Item,
+        s: Option<Vec<u8>>,
+        mut int_value: i64,
+        refs: &mut Vec<Vec<u8>>,
+    ) -> bool {
         let mut float_value = int_value as f64;
         let mut s = s;
         if self.cmd < Cmd::Equal && s.is_none() {
@@ -365,11 +411,41 @@ impl Term {
         match self.cmd {
             Cmd::Text => self.match_text(item, s.as_deref().unwrap_or_default(), refs),
             Cmd::Regex => self.match_regex(s.as_deref().unwrap_or_default(), refs),
-            Cmd::Equal => if fl { float_value == fp } else { int_value == ip },
-            Cmd::Less => if fl { float_value < fp } else { int_value < ip },
-            Cmd::LessEqual => if fl { float_value <= fp } else { int_value <= ip },
-            Cmd::Greater => if fl { float_value > fp } else { int_value > ip },
-            Cmd::GreaterEqual => if fl { float_value >= fp } else { int_value >= ip },
+            Cmd::Equal => {
+                if fl {
+                    float_value == fp
+                } else {
+                    int_value == ip
+                }
+            }
+            Cmd::Less => {
+                if fl {
+                    float_value < fp
+                } else {
+                    int_value < ip
+                }
+            }
+            Cmd::LessEqual => {
+                if fl {
+                    float_value <= fp
+                } else {
+                    int_value <= ip
+                }
+            }
+            Cmd::Greater => {
+                if fl {
+                    float_value > fp
+                } else {
+                    int_value > ip
+                }
+            }
+            Cmd::GreaterEqual => {
+                if fl {
+                    float_value >= fp
+                } else {
+                    int_value >= ip
+                }
+            }
             _ => false,
         }
     }
@@ -378,7 +454,9 @@ impl Term {
         let p = &self.param;
         let n = p.len();
         let both = n >= 2 && p[0] == b'*' && p[n - 1] == b'*';
-        let substr = both || p.iter().any(|&ch| WORD_SEPARATORS.contains(&ch) && ch != b'*' && ch != b'?' && ch != b'#');
+        let substr = both
+            || p.iter()
+                .any(|&ch| WORD_SEPARATORS.contains(&ch) && ch != b'*' && ch != b'?' && ch != b'#');
         let want = self.refs;
         let mut positions = Vec::new();
         if !substr {
@@ -403,9 +481,19 @@ impl Term {
             } else {
                 ([b"*", &p[..], b"*"].concat(), 1)
             };
-            let m = wild_match(&Lower::Ascii, &pattern, value, want.then_some(&mut positions));
+            let m = wild_match(
+                &Lower::Ascii,
+                &pattern,
+                value,
+                want.then_some(&mut positions),
+            );
             if m && want {
-                refs.extend(positions.iter().skip(ref_offset).map(|&(s, l)| ref_value(value, s, l)));
+                refs.extend(
+                    positions
+                        .iter()
+                        .skip(ref_offset)
+                        .map(|&(s, l)| ref_value(value, s, l)),
+                );
             }
             m
         }
@@ -472,7 +560,13 @@ struct Rule {
 
 impl Rule {
     fn compile(text: &[u8]) -> Rule {
-        let mut rule = Rule { valid: true, cmd: RuleCmd::Accept, opts: Options::default(), has_pat: [false; 3], terms: Vec::new() };
+        let mut rule = Rule {
+            valid: true,
+            cmd: RuleCmd::Accept,
+            opts: Options::default(),
+            has_pat: [false; 3],
+            terms: Vec::new(),
+        };
         let text = trim(text);
         let Some(terms) = rule.compile_command(text) else {
             rule.valid = false;
@@ -484,7 +578,10 @@ impl Rule {
         let terms = trim(terms);
         let refs = rule.has_pat.iter().any(|&p| p);
         // terms separated by spaces; the last one may be empty (invalid)
-        let mut parts = terms.split(|&b| b == b' ').filter(|t| !t.is_empty()).peekable();
+        let mut parts = terms
+            .split(|&b| b == b' ')
+            .filter(|t| !t.is_empty())
+            .peekable();
         if terms.is_empty() {
             rule.valid = false;
         }
@@ -634,14 +731,31 @@ impl Rule {
                 Cmd::OpeningBrace => b'(',
                 Cmd::ClosingBrace => b')',
                 Cmd::Or => b'|',
-                _ => if term.matches(item, &mut refs) { b'T' } else { b'F' },
+                _ => {
+                    if term.matches(item, &mut refs) {
+                        b'T'
+                    } else {
+                        b'F'
+                    }
+                }
             });
         }
         // reduce the result to one element (longer for a syntax error); no
         // operator priorities: braces group
         const STEPS: [(&[u8], &[u8]); 13] = [
-            (b"TT", b"T"), (b"TF", b"F"), (b"FT", b"F"), (b"FF", b"F"), (b"||", b"|"), (b"(|", b"("), (b"|)", b")"),
-            (b"T|T", b"T"), (b"T|F", b"T"), (b"F|T", b"T"), (b"F|F", b"F"), (b"(T)", b"T"), (b"(F)", b"F"),
+            (b"TT", b"T"),
+            (b"TF", b"F"),
+            (b"FT", b"F"),
+            (b"FF", b"F"),
+            (b"||", b"|"),
+            (b"(|", b"("),
+            (b"|)", b")"),
+            (b"T|T", b"T"),
+            (b"T|F", b"T"),
+            (b"F|T", b"T"),
+            (b"F|F", b"F"),
+            (b"(T)", b"T"),
+            (b"(F)", b"F"),
         ];
         loop {
             let old = expr.len();
@@ -655,7 +769,11 @@ impl Rule {
         if !(expr.len() == 1 && expr[0] == b'T') {
             return false;
         }
-        let pats = [self.opts.pat_category.clone(), self.opts.pat_dupe_key.clone(), self.opts.pat_add_dupe_key.clone()];
+        let pats = [
+            self.opts.pat_category.clone(),
+            self.opts.pat_dupe_key.clone(),
+            self.opts.pat_add_dupe_key.clone(),
+        ];
         for (k, pat) in pats.iter().enumerate() {
             if self.has_pat[k] {
                 let v = expand(item, pat.as_deref(), &refs);
@@ -675,7 +793,10 @@ impl Rule {
 /// before the replacement (same result as from the start).
 fn reduce(s: &mut Vec<u8>, from: &[u8], to: &[u8]) {
     let mut at = 0;
-    while let Some(k) = s.get(at..).and_then(|r| r.windows(from.len()).position(|w| w == from)) {
+    while let Some(k) = s
+        .get(at..)
+        .and_then(|r| r.windows(from.len()).position(|w| w == from))
+    {
         let p = at + k;
         s.splice(p..p + from.len(), to.iter().copied());
         at = (p + 1).saturating_sub(from.len());
@@ -693,11 +814,21 @@ fn expand(item: &mut dyn Item, pat: Option<&[u8]>, refs: &[Vec<u8>]) -> Option<V
         if attempts > 100 {
             break;
         }
-        let Some(end) = cur[dollar..].iter().position(|&b| b == b'}').map(|k| dollar + k) else { break };
+        let Some(end) = cur[dollar..]
+            .iter()
+            .position(|&b| b == b'}')
+            .map(|k| dollar + k)
+        else {
+            break;
+        };
         let varlen = end as isize - dollar as isize - 2;
         // BString<100>::Set(dollar + 2, varlen)
         let after = &cur[dollar + 2..];
-        let take = if varlen > 0 { (varlen as usize).min(99) } else { 99 };
+        let take = if varlen > 0 {
+            (varlen as usize).min(99)
+        } else {
+            99
+        };
         let var = after[..take.min(after.len())].to_vec();
         let value = if case_eq(&var, "season") {
             item.season_episode(false)
@@ -711,7 +842,11 @@ fn expand(item: &mut dyn Item, pat: Option<&[u8]>, refs: &[Vec<u8>]) -> Option<V
         // CString::Replace(dollar, 2 + varlen + 1, value)
         let del = (2 + varlen + 1).max(0) as usize;
         let del_end = (dollar + del).min(cur.len());
-        let value_c = value.iter().position(|&b| b == 0).map_or(&value[..], |n| &value[..n]).to_vec();
+        let value_c = value
+            .iter()
+            .position(|&b| b == 0)
+            .map_or(&value[..], |n| &value[..n])
+            .to_vec();
         cur.splice(dollar..del_end, value_c);
     }
     Some(cur)
@@ -724,7 +859,9 @@ pub struct FeedFilter {
 
 impl FeedFilter {
     pub fn new(filter: &[u8]) -> FeedFilter {
-        FeedFilter { rules: filter.split(|&b| b == b'%').map(Rule::compile).collect() }
+        FeedFilter {
+            rules: filter.split(|&b| b == b'%').map(Rule::compile).collect(),
+        }
     }
 
     /// FeedFilter::Match.
@@ -748,7 +885,10 @@ impl FeedFilter {
                             add_priority: o.add_priority,
                             dupe_score: o.dupe_score,
                             add_dupe_score: o.add_dupe_score,
-                            build_dupe_key: ids.iter().any(|i| i.is_some()).then(|| ids.map(|i| i.as_deref())),
+                            build_dupe_key: ids
+                                .iter()
+                                .any(|i| i.is_some())
+                                .then(|| ids.map(|i| i.as_deref())),
                             dupe_key: o.dupe_key.as_ref().map(|c| c.as_deref()),
                             add_dupe_key: o.add_dupe_key.as_ref().map(|c| c.as_deref()),
                             dupe_mode: o.dupe_mode,

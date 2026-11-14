@@ -119,7 +119,11 @@ mod tests {
             if b.is_empty() {
                 continue;
             }
-            assert_eq!(combine(crc32(a), crc32(b), b.len() as u32), crc32(&data), "split {split}");
+            assert_eq!(
+                combine(crc32(a), crc32(b), b.len() as u32),
+                crc32(&data),
+                "split {split}"
+            );
         }
         assert_eq!(combine(0x1234_5678, 0x9abc_def0, 0), 0x1234_5678);
     }

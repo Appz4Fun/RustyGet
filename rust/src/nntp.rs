@@ -73,7 +73,10 @@ impl std::ops::Deref for BStr {
 }
 
 fn bstring(parts: &[&[u8]]) -> BStr {
-    let mut b = BStr { buf: [0; BSTRING_MAX + 1], len: 0 };
+    let mut b = BStr {
+        buf: [0; BSTRING_MAX + 1],
+        len: 0,
+    };
     for part in parts {
         let n = part.len().min(BSTRING_MAX - b.len);
         b.buf[b.len..b.len + n].copy_from_slice(&part[..n]);
@@ -101,7 +104,10 @@ fn format(fmt: &[u8], args: &[Option<&[u8]>]) -> Vec<u8> {
     let mut i = 0;
     while i < fmt.len() && out.len() < BSTRING_MAX {
         if fmt[i] == b'%' && fmt.get(i + 1) == Some(&b's') {
-            push_capped(&mut out, args.next().copied().flatten().unwrap_or(b"(null)"));
+            push_capped(
+                &mut out,
+                args.next().copied().flatten().unwrap_or(b"(null)"),
+            );
             i += 2;
         } else {
             out.push(fmt[i]);
@@ -118,7 +124,14 @@ unsafe fn answer_bytes<'a>(answer: *mut c_char) -> &'a [u8] {
 
 /// ReportErrorAnswer
 fn report_answer(io: &mut dyn Io, prefix: &[u8], answer: Option<&[u8]>) -> Result<(), Abort> {
-    let text = format(prefix, &[Some(io.name().to_bytes()), Some(io.host().to_bytes()), answer]);
+    let text = format(
+        prefix,
+        &[
+            Some(io.name().to_bytes()),
+            Some(io.host().to_bytes()),
+            answer,
+        ],
+    );
     let msg = bstring(&[&text]);
     io.report_error(c"%s", &msg)
 }
@@ -148,12 +161,23 @@ fn auth_info_pass(io: &mut dyn Io, auth: &mut Auth, mut recur: i32) -> Result<bo
         io.write_line(&line)?;
         let answer = io.read_line()?;
         if answer.is_null() {
-            report_answer(io, b"Authorization failed for %s (%s): Connection closed by remote host", None)?;
+            report_answer(
+                io,
+                b"Authorization failed for %s (%s): Connection closed by remote host",
+                None,
+            )?;
             return Ok(false);
         }
         let bytes = unsafe { answer_bytes(answer) };
         if bytes.starts_with(b"2") {
-            debug!(io, &[b"Authorization for ", io.conn_host().to_bytes(), b" successful"]);
+            debug!(
+                io,
+                &[
+                    b"Authorization for ",
+                    io.conn_host().to_bytes(),
+                    b" successful"
+                ]
+            );
             return Ok(true);
         }
         if bytes.starts_with(b"381") {
@@ -173,12 +197,23 @@ fn auth_info_user(io: &mut dyn Io, auth: &mut Auth, mut recur: i32) -> Result<bo
         io.write_line(&line)?;
         let answer = io.read_line()?;
         if answer.is_null() {
-            report_answer(io, b"Authorization for %s (%s) failed: Connection closed by remote host", None)?;
+            report_answer(
+                io,
+                b"Authorization for %s (%s) failed: Connection closed by remote host",
+                None,
+            )?;
             return Ok(false);
         }
         let bytes = unsafe { answer_bytes(answer) };
         if bytes.starts_with(b"281") {
-            debug!(io, &[b"Authorization for ", io.conn_host().to_bytes(), b" successful"]);
+            debug!(
+                io,
+                &[
+                    b"Authorization for ",
+                    io.conn_host().to_bytes(),
+                    b" successful"
+                ]
+            );
             return Ok(true);
         }
         if bytes.starts_with(b"381") {
@@ -213,7 +248,11 @@ pub fn authenticate(io: &mut dyn Io, auth: &mut Auth) -> Result<bool, Abort> {
 /// # Safety
 /// `req` must remain a valid NUL-terminated string throughout the exchange.
 /// It may point into the line buffer, which reads can overwrite.
-pub unsafe fn request(io: &mut dyn Io, auth: &mut Auth, req: *const c_char) -> Result<*mut c_char, Abort> {
+pub unsafe fn request(
+    io: &mut dyn Io,
+    auth: &mut Auth,
+    req: *const c_char,
+) -> Result<*mut c_char, Abort> {
     *auth = Auth::default();
     // Borrow only during the write: a read may change both contents and length.
     io.write_line(unsafe { CStr::from_ptr(req) })?;
@@ -222,7 +261,10 @@ pub unsafe fn request(io: &mut dyn Io, auth: &mut Auth, req: *const c_char) -> R
         return Ok(answer);
     }
     if unsafe { answer_bytes(answer) }.starts_with(b"480") {
-        debug!(io, &[io.conn_host().to_bytes(), b" requested authorization"]);
+        debug!(
+            io,
+            &[io.conn_host().to_bytes(), b" requested authorization"]
+        );
         if !authenticate(io, auth)? {
             return Ok(std::ptr::null_mut());
         }
@@ -239,7 +281,11 @@ pub unsafe fn request(io: &mut dyn Io, auth: &mut Auth, req: *const c_char) -> R
 pub fn handshake(io: &mut dyn Io, auth: &mut Auth) -> Result<i32, Abort> {
     let answer = io.read_line()?;
     if answer.is_null() {
-        report_answer(io, b"Connection to %s (%s) failed: Connection closed by remote host", None)?;
+        report_answer(
+            io,
+            b"Connection to %s (%s) failed: Connection closed by remote host",
+            None,
+        )?;
         return Ok(1);
     }
     let bytes = unsafe { answer_bytes(answer) };
@@ -250,7 +296,14 @@ pub fn handshake(io: &mut dyn Io, auth: &mut Auth) -> Result<i32, Abort> {
     if !io.user().is_empty() && !io.password().is_empty() && !authenticate(io, auth)? {
         return Ok(2);
     }
-    debug!(io, &[b"Connection to ", io.conn_host().to_bytes(), b" established"]);
+    debug!(
+        io,
+        &[
+            b"Connection to ",
+            io.conn_host().to_bytes(),
+            b" established"
+        ]
+    );
     Ok(0)
 }
 
@@ -260,15 +313,46 @@ pub fn handshake(io: &mut dyn Io, auth: &mut Auth) -> Result<i32, Abort> {
 /// # Safety
 /// `group` must remain a valid NUL-terminated string throughout the exchange.
 /// As in C++, it may point into the line buffer and change during the request.
-pub unsafe fn join_group(io: &mut dyn Io, auth: &mut Auth, group: *const c_char) -> Result<(*mut c_char, bool), Abort> {
-    let req = bstring(&[b"GROUP ", unsafe { CStr::from_ptr(group) }.to_bytes(), b"\r\n"]);
+pub unsafe fn join_group(
+    io: &mut dyn Io,
+    auth: &mut Auth,
+    group: *const c_char,
+) -> Result<(*mut c_char, bool), Abort> {
+    let req = bstring(&[
+        b"GROUP ",
+        unsafe { CStr::from_ptr(group) }.to_bytes(),
+        b"\r\n",
+    ]);
     let answer = unsafe { request(io, auth, req.as_ptr()) }?;
     if !answer.is_null() && unsafe { answer_bytes(answer) }.starts_with(b"2") {
-        debug!(io, &[b"Changed group to ", unsafe { CStr::from_ptr(group) }.to_bytes(), b" on ", io.conn_host().to_bytes()]);
+        debug!(
+            io,
+            &[
+                b"Changed group to ",
+                unsafe { CStr::from_ptr(group) }.to_bytes(),
+                b" on ",
+                io.conn_host().to_bytes()
+            ]
+        );
         return Ok((answer, true));
     }
-    let text = if answer.is_null() { &b"(null)"[..] } else { unsafe { answer_bytes(answer) } };
-    debug!(io, &[b"Error changing group on ", io.conn_host().to_bytes(), b" to ", unsafe { CStr::from_ptr(group) }.to_bytes(), b": ", text, b"."]);
+    let text = if answer.is_null() {
+        &b"(null)"[..]
+    } else {
+        unsafe { answer_bytes(answer) }
+    };
+    debug!(
+        io,
+        &[
+            b"Error changing group on ",
+            io.conn_host().to_bytes(),
+            b" to ",
+            unsafe { CStr::from_ptr(group) }.to_bytes(),
+            b": ",
+            text,
+            b"."
+        ]
+    );
     Ok((answer, false))
 }
 
@@ -700,11 +784,7 @@ pub fn article_batch_should_ensure_workers(worker_count: i32, is_stopped: bool) 
 }
 
 /// Returns true when `Network::SpeedTest::RunTest` should count an iteration as a failure (`elapsed_sec == 0.0 || downloaded < target_size`).
-pub fn speed_test_is_iteration_failed(
-    elapsed_sec: f64,
-    downloaded: u32,
-    target_size: u32,
-) -> bool {
+pub fn speed_test_is_iteration_failed(elapsed_sec: f64, downloaded: u32, target_size: u32) -> bool {
     elapsed_sec == 0.0 || downloaded < target_size
 }
 
@@ -735,7 +815,8 @@ mod tests {
             }
         }
         fn report_error(&mut self, prefix: &CStr, arg: &CStr) -> Result<(), Abort> {
-            self.errors.push([prefix.to_bytes(), b"|", arg.to_bytes()].concat());
+            self.errors
+                .push([prefix.to_bytes(), b"|", arg.to_bytes()].concat());
             Ok(())
         }
         fn debug(&mut self, _: &CStr) -> Result<(), Abort> {
@@ -762,7 +843,12 @@ mod tests {
     }
 
     fn script(answers: &[Option<&[u8]>]) -> Script {
-        Script { answers: answers.iter().map(|a| a.map(<[u8]>::to_vec)).collect(), buf: Vec::new(), written: Vec::new(), errors: Vec::new() }
+        Script {
+            answers: answers.iter().map(|a| a.map(<[u8]>::to_vec)).collect(),
+            buf: Vec::new(),
+            written: Vec::new(),
+            errors: Vec::new(),
+        }
     }
 
     #[test]
@@ -772,16 +858,32 @@ mod tests {
         assert_eq!(s.to_bytes().len(), BSTRING_MAX);
         assert!(s.to_bytes().starts_with(b"GROUP ggg"));
         assert_eq!(format(b"%s (%s)", &[Some(&long), None]).len(), BSTRING_MAX);
-        assert_eq!(format(b"%s (%s): %s", &[Some(b"a"), None, Some(b"c")]), b"a ((null)): c");
+        assert_eq!(
+            format(b"%s (%s): %s", &[Some(b"a"), None, Some(b"c")]),
+            b"a ((null)): c"
+        );
     }
 
     #[test]
     fn relogin() {
-        let mut io = script(&[Some(b"480 auth"), Some(b"381 pass"), Some(b"281 ok"), Some(b"222 body")]);
+        let mut io = script(&[
+            Some(b"480 auth"),
+            Some(b"381 pass"),
+            Some(b"281 ok"),
+            Some(b"222 body"),
+        ]);
         let mut auth = Auth::default();
         let a = unsafe { request(&mut io, &mut auth, c"BODY <x>\r\n".as_ptr()) }.unwrap();
         assert_eq!(unsafe { answer_bytes(a) }, b"222 body");
-        assert_eq!(io.written, [b"BODY <x>\r\n".to_vec(), b"AUTHINFO USER me\r\n".to_vec(), b"AUTHINFO PASS pw\r\n".to_vec(), b"BODY <x>\r\n".to_vec()]);
+        assert_eq!(
+            io.written,
+            [
+                b"BODY <x>\r\n".to_vec(),
+                b"AUTHINFO USER me\r\n".to_vec(),
+                b"AUTHINFO PASS pw\r\n".to_vec(),
+                b"BODY <x>\r\n".to_vec()
+            ]
+        );
     }
 
     #[test]
@@ -790,7 +892,10 @@ mod tests {
         let mut auth = Auth::default();
         assert_eq!(handshake(&mut io, &mut auth), Ok(2));
         assert!(auth.error && auth.rejected);
-        assert_eq!(io.errors, [b"%s|Authorization for news (news.example) failed: 502 no".to_vec()]);
+        assert_eq!(
+            io.errors,
+            [b"%s|Authorization for news (news.example) failed: 502 no".to_vec()]
+        );
     }
 }
 
@@ -1521,7 +1626,10 @@ mod article_fetcher_tests {
     fn article_fetch_limits_suite_port_from_cpp() {
         // 1. ArticleFetchLimitsRejectUnboundedHeader
         let mut raw = 0i64;
-        assert!(article_fetch_add_raw_bytes(&mut raw, ARTICLE_FETCH_MAX_HEADER_BYTES));
+        assert!(article_fetch_add_raw_bytes(
+            &mut raw,
+            ARTICLE_FETCH_MAX_HEADER_BYTES
+        ));
         assert!(article_fetch_header_within_limit(raw, false));
         assert!(article_fetch_add_raw_bytes(&mut raw, 1));
         assert!(!article_fetch_header_within_limit(raw, false));
@@ -1529,7 +1637,10 @@ mod article_fetcher_tests {
 
         // 2. ArticleFetchLimitsRejectUnboundedWireBody
         let mut raw = 0i64;
-        assert!(article_fetch_add_raw_bytes(&mut raw, ARTICLE_FETCH_MAX_RAW_BYTES));
+        assert!(article_fetch_add_raw_bytes(
+            &mut raw,
+            ARTICLE_FETCH_MAX_RAW_BYTES
+        ));
         assert!(!article_fetch_add_raw_bytes(&mut raw, 1));
 
         // 3. ArticleFetchLimitsEnforceDeclaredDecodedRange
@@ -2144,4 +2255,3 @@ mod article_fetcher_tests {
         assert_eq!(retries.remained_retries(server_a), 1);
     }
 }
-

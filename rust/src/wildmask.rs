@@ -26,7 +26,9 @@ impl Lower<'_> {
     fn get(&self, b: u8) -> c_int {
         match *self {
             Lower::Ascii => c_int::from(b.to_ascii_lowercase()),
-            Lower::Table(t, signed) => t[(if signed { b as i8 as i32 } else { b as i32 } + 128) as usize],
+            Lower::Table(t, signed) => {
+                t[(if signed { b as i8 as i32 } else { b as i32 } + 128) as usize]
+            }
             Lower::Fold(f) => f(b),
         }
     }
@@ -45,7 +47,12 @@ fn capture_len(end: usize, start: i32) -> i32 {
 
 /// Matches `text` against `pat`. When `pos` is Some, it receives the
 /// (start, len) of each wildcard match.
-pub fn wild_match(lower: &Lower<'_>, pat: &[u8], text: &[u8], mut pos: Option<&mut Vec<(i32, i32)>>) -> bool {
+pub fn wild_match(
+    lower: &Lower<'_>,
+    pat: &[u8],
+    text: &[u8],
+    mut pos: Option<&mut Vec<(i32, i32)>>,
+) -> bool {
     let want = pos.is_some();
     if let Some(p) = pos.as_deref_mut() {
         p.clear();
@@ -207,7 +214,11 @@ mod tests {
         let mut table = [0i32; 384];
         for (i, slot) in table.iter_mut().enumerate() {
             let c = i as i32 - 128;
-            *slot = if (b'A' as i32..=b'Z' as i32).contains(&c) { c + 32 } else { c };
+            *slot = if (b'A' as i32..=b'Z' as i32).contains(&c) {
+                c + 32
+            } else {
+                c
+            };
         }
         let lower = Lower::Table(&table, true);
         assert!(wild_match(&lower, b"*aBc*", b"xxAbCxx", None));
@@ -225,7 +236,12 @@ mod tests {
     #[test]
     fn positions() {
         let mut v = Vec::new();
-        assert!(wild_match(&lower(), b"S##E*.mkv", b"S01E02.x.mkv", Some(&mut v)));
+        assert!(wild_match(
+            &lower(),
+            b"S##E*.mkv",
+            b"S01E02.x.mkv",
+            Some(&mut v)
+        ));
         assert_eq!(v, vec![(1, 2), (4, 4)]);
     }
 }

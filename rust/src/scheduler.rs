@@ -598,10 +598,8 @@ impl NzbgetRsScheduler {
                         err.extend_from_slice(&task.param);
                         emit_sched_log(env, 4, &err);
                     } else {
-                        let c_words: Vec<Vec<u8>> =
-                            words.iter().map(|w| make_c_buf(w)).collect();
-                        let mut ptrs: Vec<*const c_char> =
-                            Vec::with_capacity(c_words.len() + 1);
+                        let c_words: Vec<Vec<u8>> = words.iter().map(|w| make_c_buf(w)).collect();
+                        let mut ptrs: Vec<*const c_char> = Vec::with_capacity(c_words.len() + 1);
                         ptrs.push(param_c.as_ptr() as *const c_char);
                         for w in &c_words {
                             ptrs.push(w.as_ptr() as *const c_char);

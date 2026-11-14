@@ -230,11 +230,14 @@ fn scan_file_descs(data: &[u8]) -> Vec<FileSig> {
             let id: [u8; 16] = body[0..16].try_into().unwrap();
             let name = &body[56..];
             let name = &name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())];
-            files.insert(id, FileSig {
-                name: String::from_utf8_lossy(name).into_owned(),
-                length: u64::from_le_bytes(body[48..56].try_into().unwrap()),
-                md5: hex(&body[16..32]),
-            });
+            files.insert(
+                id,
+                FileSig {
+                    name: String::from_utf8_lossy(name).into_owned(),
+                    length: u64::from_le_bytes(body[48..56].try_into().unwrap()),
+                    md5: hex(&body[16..32]),
+                },
+            );
         }
         pos += length;
     }

@@ -796,7 +796,6 @@ pub fn build_cipher_baseline(names: &[&[u8]], values: &[&[u8]]) -> Vec<u8> {
     token
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1475,5 +1474,4 @@ mod tests {
             assert_eq!(std::fs::read(&file.path).unwrap(), snapshot);
         }
     }
-
 }

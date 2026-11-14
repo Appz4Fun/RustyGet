@@ -65,13 +65,20 @@ pub fn json_encode(s: &[u8], out: &mut Vec<u8>) {
             b'\r' => out.extend_from_slice(b"\\r"),
             b'\t' => out.extend_from_slice(b"\\t"),
             _ => {
-                let Some((cp, last)) = decode(s, i) else { return };
+                let Some((cp, last)) = decode(s, i) else {
+                    return;
+                };
                 i = last;
                 if cp <= 0xffff {
                     let _ = write!(out, "\\u{:04x}", cp);
                 } else {
                     let c = cp - 0x10000;
-                    let _ = write!(out, "\\u{:04x}\\u{:04x}", 0xd800 + (c >> 10), 0xdc00 + (c & 0x3ff));
+                    let _ = write!(
+                        out,
+                        "\\u{:04x}\\u{:04x}",
+                        0xd800 + (c >> 10),
+                        0xdc00 + (c & 0x3ff)
+                    );
                 }
             }
         }
@@ -103,7 +110,9 @@ pub fn xml_encode(s: &[u8], out: &mut Vec<u8>) {
             b'\'' => out.extend_from_slice(b"&apos;"),
             b'"' => out.extend_from_slice(b"&quot;"),
             _ => {
-                let Some((cp, last)) = decode(s, i) else { return };
+                let Some((cp, last)) = decode(s, i) else {
+                    return;
+                };
                 i = last;
                 // only valid XML 1.0 characters; others become dots
                 if cp == 0x9
@@ -152,7 +161,10 @@ mod tests {
 
     #[test]
     fn xml() {
-        assert_eq!(x(b"<a href='x'>&\"</a>"), "&lt;a href=&apos;x&apos;&gt;&amp;&quot;&lt;/a&gt;");
+        assert_eq!(
+            x(b"<a href='x'>&\"</a>"),
+            "&lt;a href=&apos;x&apos;&gt;&amp;&quot;&lt;/a&gt;"
+        );
         assert_eq!(x("é".as_bytes()), "&#x0000e9;");
         assert_eq!(x(b"\x01"), ".");
         assert_eq!(x(b"\t"), "&#x000009;");

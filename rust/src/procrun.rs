@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-
-
 pub const MK_INFO: c_int = 0;
 pub const MK_WARNING: c_int = 1;
 pub const MK_ERROR: c_int = 2;
@@ -445,9 +443,7 @@ impl ScriptExecEnv {
             }
         }
     }
-
 }
-
 
 /// Thread-safe POSIX child process controller (`ScriptController` in `ScriptController.cpp`).
 pub struct ScriptRunner {

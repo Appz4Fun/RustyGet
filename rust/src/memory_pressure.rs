@@ -306,8 +306,7 @@ fn parse_mountinfo_cgroup_mounts(
         if fs_type == "cgroup2" && v2_mount.is_none() {
             v2_mount = Some((mount_root, mount_point));
         } else if fs_type == "cgroup"
-            && (super_opts.split(',').any(|o| o == "memory")
-                || mount_point.ends_with("/memory"))
+            && (super_opts.split(',').any(|o| o == "memory") || mount_point.ends_with("/memory"))
             && v1_mem_mount.is_none()
         {
             v1_mem_mount = Some((mount_root, mount_point));
@@ -378,8 +377,7 @@ fn build_cgroup_hierarchy_dirs(
 
 fn sample_cgroup_v2_hierarchy(mock_root: Option<&Path>, m: &mut MemoryMetrics) {
     let proc_cg = std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/cgroup")).ok();
-    let mountinfo =
-        std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/mountinfo")).ok();
+    let mountinfo = std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/mountinfo")).ok();
 
     let (v2_cg_path, _) = proc_cg
         .as_deref()
@@ -390,12 +388,8 @@ fn sample_cgroup_v2_hierarchy(mock_root: Option<&Path>, m: &mut MemoryMetrics) {
         .map(parse_mountinfo_cgroup_mounts)
         .unwrap_or((None, None));
 
-    let dirs = build_cgroup_hierarchy_dirs(
-        mock_root,
-        "sys/fs/cgroup",
-        v2_mount,
-        v2_cg_path.as_deref(),
-    );
+    let dirs =
+        build_cgroup_hierarchy_dirs(mock_root, "sys/fs/cgroup", v2_mount, v2_cg_path.as_deref());
 
     let mut leaf_cur: Option<u64> = None;
     let mut max_pct: Option<f64> = None;
@@ -446,8 +440,7 @@ fn sample_cgroup_v2_hierarchy(mock_root: Option<&Path>, m: &mut MemoryMetrics) {
 
 fn sample_cgroup_v1_hierarchy(mock_root: Option<&Path>, m: &mut MemoryMetrics) {
     let proc_cg = std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/cgroup")).ok();
-    let mountinfo =
-        std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/mountinfo")).ok();
+    let mountinfo = std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/mountinfo")).ok();
 
     let (_, v1_cg_path) = proc_cg
         .as_deref()
@@ -907,8 +900,7 @@ mod tests {
     #[test]
     fn test_cgroup_hierarchy_sampling_v2_and_v1() {
         let _guard = MP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp =
-            std::env::temp_dir().join(format!("nzbget_cg_hier_test_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("nzbget_cg_hier_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
 
         // Root cgroup is unbounded ("max"), child service cgroup is unbounded ("max"),
@@ -938,10 +930,26 @@ mod tests {
 
         // Child has 15 MiB headroom (113 MiB / 128 MiB = 88.28%) while parent slice is at 89% (890 MiB / 1000 MiB):
         // min headroom (15 MiB) and max utilization (89.0%) must be aggregated independently -> Critical.
-        std::fs::write(cg_service.join("memory.current"), (113u64 * 1024 * 1024).to_string()).unwrap();
-        std::fs::write(cg_service.join("memory.max"), (128u64 * 1024 * 1024).to_string()).unwrap();
-        std::fs::write(cg_slice.join("memory.current"), (890u64 * 1024 * 1024).to_string()).unwrap();
-        std::fs::write(cg_slice.join("memory.max"), (1000u64 * 1024 * 1024).to_string()).unwrap();
+        std::fs::write(
+            cg_service.join("memory.current"),
+            (113u64 * 1024 * 1024).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            cg_service.join("memory.max"),
+            (128u64 * 1024 * 1024).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            cg_slice.join("memory.current"),
+            (890u64 * 1024 * 1024).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            cg_slice.join("memory.max"),
+            (1000u64 * 1024 * 1024).to_string(),
+        )
+        .unwrap();
 
         let m_nested = sample_system_metrics(Some(&tmp));
         assert_eq!(m_nested.cgroup_utilization_pct, Some(89.0));

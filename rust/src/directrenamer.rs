@@ -18,7 +18,10 @@ pub fn regular_name<'a>(
         return None;
     }
     let (index, (filename, _)) = hashes.enumerate().find(|(_, (_, hash))| *hash == hash16k)?;
-    (!old_name.to_bytes().eq_ignore_ascii_case(filename.to_bytes())).then_some(index)
+    (!old_name
+        .to_bytes()
+        .eq_ignore_ascii_case(filename.to_bytes()))
+    .then_some(index)
 }
 
 /// `ostream << setfill('0') << setw(3) << vol`: padded on the left, also
@@ -43,13 +46,21 @@ pub fn par_name(
     vol: &mut i32,
     exists: &mut dyn FnMut(&[u8]) -> bool,
 ) -> Vec<u8> {
-    par_name_formatted(old_name, dest_dir, set_id, separator, vol, exists, &mut |vol| {
-        let mut name = set_id.to_vec();
-        name.extend_from_slice(b".vol");
-        push_vol(&mut name, vol);
-        name.extend_from_slice(b"+01.PAR2");
-        Some(name)
-    })
+    par_name_formatted(
+        old_name,
+        dest_dir,
+        set_id,
+        separator,
+        vol,
+        exists,
+        &mut |vol| {
+            let mut name = set_id.to_vec();
+            name.extend_from_slice(b".vol");
+            push_vol(&mut name, vol);
+            name.extend_from_slice(b"+01.PAR2");
+            Some(name)
+        },
+    )
 }
 
 /// `BuildNewParName` checking candidate file existence directly on disk.
@@ -91,7 +102,10 @@ pub fn par_name_formatted(
         .map(|i| &old_name[i..]);
     if let Some(suffix) = suffix {
         let extension = &suffix[suffix.iter().rposition(|&b| b == b'.').unwrap_or(0)..];
-        let ext_end = extension.iter().position(|&b| b == 0).unwrap_or(extension.len());
+        let ext_end = extension
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(extension.len());
         if extension[..ext_end].eq_ignore_ascii_case(b".par2") {
             let name = [set_id, suffix].concat();
             if !exists(&full(&name)) {
@@ -500,7 +514,12 @@ fn start_par_loader_host(
     let mut par_files = Vec::new();
     for cf in &completed {
         if cf.par_file {
-            par_files.push(resolve_old_output_path(b"", &nzb.dest_dir, b'/', &cf.filename));
+            par_files.push(resolve_old_output_path(
+                b"",
+                &nzb.dest_dir,
+                b'/',
+                &cf.filename,
+            ));
         }
     }
 
@@ -661,9 +680,7 @@ fn resolve_new_name(
         match regular_name(
             &c_old,
             &c_hash,
-            par_hashes
-                .iter()
-                .map(|(f, h)| (f.as_c_str(), h.as_c_str())),
+            par_hashes.iter().map(|(f, h)| (f.as_c_str(), h.as_c_str())),
         ) {
             Some(idx) => par_hashes[idx].0.as_bytes().to_vec(),
             None => Vec::new(),
@@ -713,7 +730,11 @@ fn try_create_hard_link_host(
     let mut errmsg = Vec::new();
     if crate::fsops::create_hard_link(&c_old, &c_final, &crate::fsops::posix_stat, &mut errmsg) {
         if file_ptr != 0 {
-            host.file_set_str(file_ptr, FILE_STR_HARD_LINK_PATH, Some(&final_output_filename));
+            host.file_set_str(
+                file_ptr,
+                FILE_STR_HARD_LINK_PATH,
+                Some(&final_output_filename),
+            );
             host.nzb_set_str(nzb_ptr, NZB_STR_HARD_LINK_PATH, &nzb_final_dir);
         }
     } else {
@@ -928,26 +949,12 @@ mod tests {
         let mut vol = 1;
         let mut exists = |p: &[u8]| taken.iter().any(|t| t == p);
         assert_eq!(
-            par_name(
-                b"x.vol01+02.PaR2",
-                b"/d",
-                b"T",
-                b'/',
-                &mut vol,
-                &mut exists
-            ),
+            par_name(b"x.vol01+02.PaR2", b"/d", b"T", b'/', &mut vol, &mut exists),
             b"T.vol01+02.PaR2"
         );
         assert_eq!(vol, 1);
         assert_eq!(
-            par_name(
-                b"x.vol01+02.par2",
-                b"/d",
-                b"S",
-                b'/',
-                &mut vol,
-                &mut exists
-            ),
+            par_name(b"x.vol01+02.par2", b"/d", b"S", b'/', &mut vol, &mut exists),
             b"S.vol001+01.PAR2"
         );
         assert_eq!(vol, 2);
@@ -959,25 +966,13 @@ mod tests {
         );
         assert_eq!(vol, 4);
         assert_eq!(
-            par_name(
-                b"a.vol.b.vol1.par2",
-                b"",
-                b"S",
-                b'/',
-                &mut vol,
-                &mut |_| false
-            ),
+            par_name(b"a.vol.b.vol1.par2", b"", b"S", b'/', &mut vol, &mut |_| {
+                false
+            }),
             b"S.vol.b.vol1.par2"
         );
         assert_eq!(
-            par_name(
-                b"a.vol1.par2.x",
-                b"",
-                b"S",
-                b'/',
-                &mut vol,
-                &mut |_| false
-            ),
+            par_name(b"a.vol1.par2.x", b"", b"S", b'/', &mut vol, &mut |_| false),
             b"S.vol004+01.PAR2"
         );
         let mut vol = -5;

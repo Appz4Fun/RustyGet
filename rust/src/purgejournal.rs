@@ -281,7 +281,10 @@ impl Writer {
             return Err(PurgeError::LimitExceeded);
         }
         if !self.measuring {
-            if self.fixed_limit.is_some_and(|limit| self.size > limit || self.size > self.bytes.capacity()) {
+            if self
+                .fixed_limit
+                .is_some_and(|limit| self.size > limit || self.size > self.bytes.capacity())
+            {
                 return Err(PurgeError::LimitExceeded);
             }
             self.bytes.extend_from_slice(b);
@@ -325,7 +328,9 @@ impl<'a> Reader<'a> {
     ) -> Result<T, PurgeError> {
         let old = self.owned_limit;
         self.owned_limit = old.min(
-            self.owned.checked_add(additional).ok_or(PurgeError::LimitExceeded)?,
+            self.owned
+                .checked_add(additional)
+                .ok_or(PurgeError::LimitExceeded)?,
         );
         let result = read(self);
         self.owned_limit = old;
@@ -444,12 +449,19 @@ impl<T: Wire> BoundedWire for Vec<T> {
             n.checked_mul(std::mem::size_of::<T>())
                 .ok_or(PurgeError::LimitExceeded)?,
         )?;
-        if let Some(capacity) = r.held_capacity { capacity.preflight::<T>(n)?; }
+        if let Some(capacity) = r.held_capacity {
+            capacity.preflight::<T>(n)?;
+        }
         let mut out = reserved(n)?;
         if let Some(capacity) = r.held_capacity {
             capacity.admit_vec(n, &out)?;
             // Field-local limits include surplus as well as the held aggregate.
-            r.charge(out.capacity().checked_sub(n).and_then(|n| n.checked_mul(std::mem::size_of::<T>())).ok_or(PurgeError::LimitExceeded)?)?;
+            r.charge(
+                out.capacity()
+                    .checked_sub(n)
+                    .and_then(|n| n.checked_mul(std::mem::size_of::<T>()))
+                    .ok_or(PurgeError::LimitExceeded)?,
+            )?;
         }
         for _ in 0..n {
             out.push(T::get(r)?);
@@ -467,8 +479,12 @@ impl<T: BoundedWire> BoundedWire for Option<T> {
     }
 }
 macro_rules! read_field {
-    ($r:ident, $maximum:expr) => { BoundedWire::get_bounded($r, $maximum) };
-    ($r:ident) => { Wire::get($r) };
+    ($r:ident, $maximum:expr) => {
+        BoundedWire::get_bounded($r, $maximum)
+    };
+    ($r:ident) => {
+        Wire::get($r)
+    };
 }
 macro_rules! fields {
     ($t:ty; $($f:ident $(=> $cap:expr)?),+ $(,)?) => {
@@ -490,19 +506,19 @@ macro_rules! tags {
         fn get(r:&mut Reader<'_>)->Result<Self,PurgeError>{match u32::get(r)? {$($n=>Ok(Self::$v),)*_=>Err(PurgeError::CorruptJournal)}}
     }};
 }
-pub mod subjects;
-pub mod inventory;
 pub mod intake;
-mod source_codec;
+pub mod inventory;
 mod runtime_core;
 #[cfg(test)]
-mod runtime_fixture;
-#[cfg(test)]
 mod runtime_core_contracts;
+#[cfg(test)]
+mod runtime_fixture;
 #[cfg(test)]
 mod runtime_foundation_contracts;
 #[cfg(test)]
 mod runtime_next_contracts;
+mod source_codec;
+pub mod subjects;
 
 tags!(MemberKind;Queue=0,Post=1,History=2,CompactHistory=3);
 tags!(EntryKind;Regular=0,Directory=1,Symlink=2,Unsupported=3);
@@ -659,25 +675,59 @@ fn copy<T: Wire>(value: &T) -> Result<T, PurgeError> {
 }
 // Opt-in held constructor path. Ordinary wire/unwire/copy above are unchanged.
 // The same Wire implementations perform encoding and nested decoding.
-fn reserved_accounted<T>(n: usize, capacity: Option<&subjects::HeldCapacity>) -> Result<Vec<T>, PurgeError> {
-    match capacity { Some(c) => c.reserved(n), None => reserved(n) }
+fn reserved_accounted<T>(
+    n: usize,
+    capacity: Option<&subjects::HeldCapacity>,
+) -> Result<Vec<T>, PurgeError> {
+    match capacity {
+        Some(c) => c.reserved(n),
+        None => reserved(n),
+    }
 }
-fn wire_accounted<T: Wire>(value: &T, capacity: Option<&subjects::HeldCapacity>) -> Result<Vec<u8>, PurgeError> {
-    let Some(capacity) = capacity else { return wire(value); };
+fn wire_accounted<T: Wire>(
+    value: &T,
+    capacity: Option<&subjects::HeldCapacity>,
+) -> Result<Vec<u8>, PurgeError> {
+    let Some(capacity) = capacity else {
+        return wire(value);
+    };
     capacity.retained(|| {
-        let mut measuring = Writer { bytes: Vec::new(), size: 0, measuring: true, fixed_limit: None };
+        let mut measuring = Writer {
+            bytes: Vec::new(),
+            size: 0,
+            measuring: true,
+            fixed_limit: None,
+        };
         value.put(&mut measuring)?;
-        let mut writer = Writer { bytes: capacity.reserved(measuring.size)?, size: 0, measuring: false, fixed_limit: Some(measuring.size) };
+        let mut writer = Writer {
+            bytes: capacity.reserved(measuring.size)?,
+            size: 0,
+            measuring: false,
+            fixed_limit: Some(measuring.size),
+        };
         value.put(&mut writer)?;
         Ok(writer.bytes)
     })
 }
-fn unwire_accounted<T: Wire>(bytes: &[u8], capacity: &subjects::HeldCapacity) -> Result<T, PurgeError> {
+fn unwire_accounted<T: Wire>(
+    bytes: &[u8],
+    capacity: &subjects::HeldCapacity,
+) -> Result<T, PurgeError> {
     capacity.retained(|| {
-        if bytes.len() > MAX_OPERATION_BYTES { return Err(PurgeError::LimitExceeded); }
-        let mut reader = Reader { bytes, offset: 0, owned: std::mem::size_of::<T>(), owned_limit: MAX_OPERATION_BYTES, held_capacity: Some(capacity) };
+        if bytes.len() > MAX_OPERATION_BYTES {
+            return Err(PurgeError::LimitExceeded);
+        }
+        let mut reader = Reader {
+            bytes,
+            offset: 0,
+            owned: std::mem::size_of::<T>(),
+            owned_limit: MAX_OPERATION_BYTES,
+            held_capacity: Some(capacity),
+        };
         let value = T::get(&mut reader)?;
-        if reader.offset != bytes.len() { return Err(PurgeError::CorruptJournal); }
+        if reader.offset != bytes.len() {
+            return Err(PurgeError::CorruptJournal);
+        }
         Ok(value)
     })
 }
@@ -690,13 +740,31 @@ fn copy_accounted<T: Wire>(value: &T, capacity: &subjects::HeldCapacity) -> Resu
         result
     })
 }
-fn wire_identity_accounted<T: Wire>(value: &T, capacity: Option<&subjects::HeldCapacity>) -> Result<[u8;32], PurgeError> {
-    let operation = || { let bytes = wire_accounted(value, capacity)?; Ok(payload_identity(&bytes)) };
-    match capacity { Some(c) => c.scratch(operation), None => operation() }
+fn wire_identity_accounted<T: Wire>(
+    value: &T,
+    capacity: Option<&subjects::HeldCapacity>,
+) -> Result<[u8; 32], PurgeError> {
+    let operation = || {
+        let bytes = wire_accounted(value, capacity)?;
+        Ok(payload_identity(&bytes))
+    };
+    match capacity {
+        Some(c) => c.scratch(operation),
+        None => operation(),
+    }
 }
-fn wire_length_accounted<T: Wire>(value: &T, capacity: Option<&subjects::HeldCapacity>) -> Result<usize, PurgeError> {
-    let operation = || { let bytes = wire_accounted(value, capacity)?; Ok(bytes.len()) };
-    match capacity { Some(c) => c.scratch(operation), None => operation() }
+fn wire_length_accounted<T: Wire>(
+    value: &T,
+    capacity: Option<&subjects::HeldCapacity>,
+) -> Result<usize, PurgeError> {
+    let operation = || {
+        let bytes = wire_accounted(value, capacity)?;
+        Ok(bytes.len())
+    };
+    match capacity {
+        Some(c) => c.scratch(operation),
+        None => operation(),
+    }
 }
 fn checksum(bytes: &[u8]) -> [u8; 16] {
     Md5::digest(bytes).into()
@@ -1378,19 +1446,29 @@ impl Registry {
                 .ok_or(PurgeError::LimitExceeded)?;
         }
         for r in &self.id_reservations {
-            owned = owned.checked_add(owned_size(r)?).ok_or(PurgeError::LimitExceeded)?;
+            owned = owned
+                .checked_add(owned_size(r)?)
+                .ok_or(PurgeError::LimitExceeded)?;
         }
         for r in &self.subjects {
-            owned = owned.checked_add(owned_size(r)?).ok_or(PurgeError::LimitExceeded)?;
+            owned = owned
+                .checked_add(owned_size(r)?)
+                .ok_or(PurgeError::LimitExceeded)?;
         }
         for r in &self.captures {
-            owned = owned.checked_add(owned_size(r)?).ok_or(PurgeError::LimitExceeded)?;
+            owned = owned
+                .checked_add(owned_size(r)?)
+                .ok_or(PurgeError::LimitExceeded)?;
         }
         for r in &self.intake_captures {
-            owned = owned.checked_add(owned_size(r)?).ok_or(PurgeError::LimitExceeded)?;
+            owned = owned
+                .checked_add(owned_size(r)?)
+                .ok_or(PurgeError::LimitExceeded)?;
         }
         for r in &self.intake_associations {
-            owned = owned.checked_add(owned_size(r)?).ok_or(PurgeError::LimitExceeded)?;
+            owned = owned
+                .checked_add(owned_size(r)?)
+                .ok_or(PurgeError::LimitExceeded)?;
         }
         if owned > MAX_OPERATION_BYTES || frames > MAX_FRAMES {
             return Err(PurgeError::LimitExceeded);
@@ -2199,7 +2277,13 @@ impl Registry {
                                 }
                                 r.high_water = c.high_water;
                             }
-                            INVENTORY_TAG | EVENT_TAG | subjects::IDS_TAG | subjects::SUBJECT_TAG | inventory::CAPTURE_TAG | intake::RAW_CAPTURE_TAG | intake::INTAKE_TAG => {
+                            INVENTORY_TAG
+                            | EVENT_TAG
+                            | subjects::IDS_TAG
+                            | subjects::SUBJECT_TAG
+                            | inventory::CAPTURE_TAG
+                            | intake::RAW_CAPTURE_TAG
+                            | intake::INTAKE_TAG => {
                                 if c.high_water != r.high_water {
                                     return Err(PurgeError::CorruptJournal);
                                 }
@@ -2300,7 +2384,9 @@ impl Registry {
                             append(&mut r.operations, plan)?;
                         }
                         intake::RAW_CAPTURE_TAG | intake::INTAKE_TAG => {
-                            if c.request != [0;16] || c.generation != 0 { return Err(PurgeError::CorruptJournal); }
+                            if c.request != [0; 16] || c.generation != 0 {
+                                return Err(PurgeError::CorruptJournal);
+                            }
                             r.recover_intake(c.kind, c.sequence, &p.bytes)?;
                         }
                         inventory::CAPTURE_TAG => {
@@ -2465,8 +2551,12 @@ impl Registry {
         });
         // Standalone legacy retention is not ownership authority. Once a
         // member is active, even an exact replay requires an issued producer.
-        if active && !self.id_reservations.iter().any(|r| r.id_namespace == 2
-            && (r.first..=r.last).contains(&d.producer_ticket)) {
+        if active
+            && !self
+                .id_reservations
+                .iter()
+                .any(|r| r.id_namespace == 2 && (r.first..=r.last).contains(&d.producer_ticket))
+        {
             return Err(PurgeError::Conflict);
         }
         if let Some(old) = self.inventory.iter().find(|f| {

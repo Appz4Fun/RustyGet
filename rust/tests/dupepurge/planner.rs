@@ -1225,7 +1225,8 @@ fn root_alias_outside_claim_rejects_before_recursive_action() {
 #[test]
 fn root_alias_unselected_inventory_rejects_before_recursive_action() {
     let mut s = root_alias_snapshot();
-    s.members.push(member(2, b"Other", b"B", MemberKind::History));
+    s.members
+        .push(member(2, b"Other", b"B", MemberKind::History));
     s.source_validations.push(source(2));
     s.custody_receipts.push(custody(2));
     s.comparisons.push(cmp(1, 2, false, false));
@@ -1255,8 +1256,11 @@ fn zero_receipt_refusal_preserves_independent_state(s: Snapshot) {
     let retained_snapshot = retained.snapshot.clone();
     let retained_token = retained.token.clone();
     let result = prepare(s, [74; 16]);
-    assert_eq!(result.unwrap_err(), PurgeError::InvalidInput,
-        "zero receipt authority must reject before returning an executable plan");
+    assert_eq!(
+        result.unwrap_err(),
+        PurgeError::InvalidInput,
+        "zero receipt authority must reject before returning an executable plan"
+    );
     assert_eq!(retained.snapshot, retained_snapshot);
     assert_eq!(retained.token, retained_token);
     assert_eq!(retained.phase, Phase::Prepared);
@@ -1355,10 +1359,14 @@ fn zero_unreferenced_ownership_authority_reject() {
 #[test]
 fn sparse_nonzero_receipt_ids_preserve_selected_members_actions_and_snapshot() {
     let mut s = zero_receipt_pair_fixture();
-    let mut source_id = [0; 32]; source_id[31] = 1;
-    let mut pair_id = [0; 32]; pair_id[0] = 2;
-    let mut pair_custody_id = [0; 32]; pair_custody_id[15] = 3;
-    let mut ownership_id = [0; 32]; ownership_id[30] = 4;
+    let mut source_id = [0; 32];
+    source_id[31] = 1;
+    let mut pair_id = [0; 32];
+    pair_id[0] = 2;
+    let mut pair_custody_id = [0; 32];
+    pair_custody_id[15] = 3;
+    let mut ownership_id = [0; 32];
+    ownership_id[30] = 4;
     s.source_validations[0].custody_receipt_id = source_id;
     s.custody_receipts[0].id = source_id;
     s.direct_bindings[0].pair_membership_receipt_id = pair_id;
@@ -1371,7 +1379,10 @@ fn sparse_nonzero_receipt_ids_preserve_selected_members_actions_and_snapshot() {
     let p = prepare(s, [0; 16]).unwrap();
     assert_eq!(p.snapshot, expected_snapshot);
     assert_eq!(p.token.members, vec![binding(1), binding(2)]);
-    assert_eq!(p.actions, vec![leaf(2, b"unrelated-payload", EntryKind::Regular)]);
+    assert_eq!(
+        p.actions,
+        vec![leaf(2, b"unrelated-payload", EntryKind::Regular)]
+    );
     assert_eq!(p.token.request, [0; 16]); // Zero binary request is still valid.
     assert_eq!(p.phase, Phase::Prepared);
     assert!(p.journal.is_none());
@@ -1385,8 +1396,15 @@ fn abi_zero_source_custody_aligned_ids_return_invalid_and_no_handle() {
     let no_handle = handle.is_null();
     // The known-bad predecessor can return an owned handle: destroy it before
     // failing the assertion, so the expected RED does not leak its fixture.
-    if !no_handle { unsafe { nzbget_rs_purge_destroy(handle); } }
-    assert_eq!(status, 1, "zero custody IDs must return InvalidInput through public ABI");
+    if !no_handle {
+        unsafe {
+            nzbget_rs_purge_destroy(handle);
+        }
+    }
+    assert_eq!(
+        status, 1,
+        "zero custody IDs must return InvalidInput through public ABI"
+    );
     assert!(no_handle, "invalid receipt must not return a purge handle");
     assert_eq!(f.sources[0].custody_receipt_id, [0; 32]);
     assert_eq!(f.custody[0].id, [0; 32]);

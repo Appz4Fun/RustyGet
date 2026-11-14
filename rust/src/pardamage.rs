@@ -567,7 +567,9 @@ where
                 } else if action == 2 && line.len() >= 14 {
                     last_filename = line[14..].to_vec();
                 } else if action == 3 {
-                    let n = last_filename.len().min(filename_buf.len().saturating_sub(1));
+                    let n = last_filename
+                        .len()
+                        .min(filename_buf.len().saturating_sub(1));
                     filename_buf[..n].copy_from_slice(&last_filename[..n]);
                     if !filename_buf.is_empty() {
                         filename_buf[n] = 0;
@@ -598,9 +600,7 @@ where
                         kill_process_tree(&mut child);
                         break;
                     }
-                    std::thread::sleep(
-                        (deadline - now).min(std::time::Duration::from_millis(10)),
-                    );
+                    std::thread::sleep((deadline - now).min(std::time::Duration::from_millis(10)));
                 }
             }
         }
@@ -749,13 +749,9 @@ where
         let dupe_path = dupe_path_buf.as_path();
 
         let use_dupe = !size_comparison_possible
-            || dupe_matcher_match_dupe_content(
-                dupe_path,
-                unrar_cmd,
-                max_size,
-                compressed,
-                |msg| on_message(3, msg),
-            );
+            || dupe_matcher_match_dupe_content(dupe_path, unrar_cmd, max_size, compressed, |msg| {
+                on_message(3, msg)
+            });
         if use_dupe {
             let mut msg = b"Adding ".to_vec();
             msg.extend_from_slice(base_name);
@@ -778,7 +774,8 @@ mod tests {
 
     #[test]
     fn test_par_damage_end_to_end() {
-        let dir = std::env::temp_dir().join(format!("rustyget_pardamage_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rustyget_pardamage_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -807,14 +804,7 @@ mod tests {
         assert!(has_damage(nzb_id));
 
         // Without par2 packets on disk, Judge returns unknown
-        let v = judge(
-            nzb_id,
-            &dir,
-            20_000,
-            2_000,
-            &[],
-            &[],
-        );
+        let v = judge(nzb_id, &dir, 20_000, 2_000, &[], &[]);
         assert_eq!(v.known, 0);
 
         forget(nzb_id);
@@ -825,7 +815,8 @@ mod tests {
 
     #[test]
     fn test_find_largest_file_and_dupe_match() {
-        let dir = std::env::temp_dir().join(format!("rustyget_dupematcher_test_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rustyget_dupematcher_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -921,9 +912,7 @@ mod tests {
         copy_dir(&testdata_dir.join("parchecker"), &nondupe);
         let _ = std::fs::remove_file(nondupe.join("testfile.dat"));
 
-        let expected_size = std::fs::metadata(dupe1.join("testfile.dat"))
-            .unwrap()
-            .len() as i64;
+        let expected_size = std::fs::metadata(dupe1.join("testfile.dat")).unwrap().len() as i64;
 
         struct RustDupeMatcher<'a> {
             dest_dir: std::path::PathBuf,

@@ -1305,9 +1305,8 @@ impl QueueSubsysHost {
         if self.use_active {
             let c = c_bytes(cat_name);
             let cs = unsafe { std::ffi::CStr::from_ptr(c.as_ptr() as *const c_char) };
-            return crate::options::active_options().and_then(|o| {
-                o.find_category(cs, false).map(|cat| cat.unpack)
-            });
+            return crate::options::active_options()
+                .and_then(|o| o.find_category(cs, false).map(|cat| cat.unpack));
         }
         let c = c_bytes(cat_name);
         let mut ints = [0i32; 1];

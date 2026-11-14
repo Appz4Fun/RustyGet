@@ -767,7 +767,7 @@ fn output_delta() -> OutputDelta {
 fn output_inventory_is_durable_and_tagged_before_cleanup() {
     let mut host = TestHost::default();
     let (mut r, i) = enroll(&mut host);
-    r.reserve_ids(2, [91;16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
+    r.reserve_ids(2, [91; 16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
     r.store_inventory(binding(1), output_delta(), &mut host)
         .unwrap();
     assert_eq!(&host.frames.last().unwrap()[12..16], &3u32.to_le_bytes());
@@ -810,7 +810,7 @@ fn output_inventory_is_durable_and_tagged_before_cleanup() {
 fn inventory_replay_is_exact_and_failed_append_fences_destruction() {
     let mut host = TestHost::default();
     let (mut r, _i) = enroll(&mut host);
-    r.reserve_ids(2, [91;16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
+    r.reserve_ids(2, [91; 16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
     r.store_inventory(binding(1), output_delta(), &mut host)
         .unwrap();
     let n = host.frames.len();
@@ -822,7 +822,7 @@ fn inventory_replay_is_exact_and_failed_append_fences_destruction() {
     assert!(r.store_inventory(binding(1), changed, &mut host).is_err());
     let mut host = TestHost::default();
     let (mut r, i) = enroll(&mut host);
-    r.reserve_ids(2, [91;16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
+    r.reserve_ids(2, [91; 16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
     host.lose_ack = true;
     assert!(r
         .store_inventory(binding(1), output_delta(), &mut host)
@@ -839,7 +839,7 @@ fn inventory_replay_is_exact_and_failed_append_fences_destruction() {
 fn inventory_changes_after_quiescence_are_rejected() {
     let mut host = TestHost::default();
     let (mut r, i) = enroll(&mut host);
-    r.reserve_ids(2, [91;16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
+    r.reserve_ids(2, [91; 16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
     drive(&mut r, i, &mut host, Phase::Quiescent);
     let n = host.frames.len();
     assert!(r
@@ -1480,7 +1480,7 @@ fn genuine_allocation_failures_are_errors_in_codec_registry_recovery_and_tick() 
             let p = plan();
             let bytes = encode(&p).unwrap();
             let (mut r, i) = enroll(&mut h);
-    r.reserve_ids(2, [91;16], 3, &mut h).unwrap(); // actual producer issuance before active inventory
+            r.reserve_ids(2, [91; 16], 3, &mut h).unwrap(); // actual producer issuance before active inventory
             let input = fixture(2, b"other/file");
             let req = request(10, 2);
             let delta = output_delta();
@@ -1699,7 +1699,7 @@ fn abi_rejects_actual_descriptor_context_change_before_cancel_or_publication() {
 fn late_inventory_cannot_acquire_another_operations_lease() {
     let mut host = TestHost::default();
     let (mut registry, first) = enroll(&mut host);
-    registry.reserve_ids(2, [91;16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
+    registry.reserve_ids(2, [91; 16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
     assert_eq!(
         registry
             .reserve(
@@ -1818,7 +1818,7 @@ fn composed_inventory_preserves_receipt_lineage_across_rename_empty_and_retire()
     use nzbget_rs::purgejournal::{MAX_COMPOSED_WORKSPACE, MAX_OPERATION_BYTES};
     let mut host = TestHost::default();
     let (mut r, i) = enroll(&mut host);
-    r.reserve_ids(2, [91;16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
+    r.reserve_ids(2, [91; 16], 3, &mut host).unwrap(); // actual producer issuance before active inventory
     r.store_inventory(binding(1), output_delta(), &mut host)
         .unwrap();
     let before = r
@@ -1973,7 +1973,7 @@ fn composed_inventory_revision_is_global_across_interleaved_members() {
     });
     let mut host = TestHost::default();
     let mut r = Registry::initialize([8; 16], &mut host).unwrap();
-    r.reserve_ids(2, [91;16], 3, &mut host).unwrap(); // actual producer issuance
+    r.reserve_ids(2, [91; 16], 3, &mut host).unwrap(); // actual producer issuance
     assert_eq!(
         r.reserve(request(9, 1), snapshot, &[1, 2], &mut host)
             .unwrap(),
@@ -2056,16 +2056,40 @@ fn malformed_plan_field(case: usize) -> (Vec<u8>, usize) {
     let posting = seed + 4 + 1 + 8;
     assert_eq!(&body[posting + 4..posting + 12], b"source:1");
     let members = posting + 4 + 8;
-    assert_eq!(u32::from_le_bytes(body[members..members + 4].try_into().unwrap()), 1);
-    let path = body.windows(b"release/file\xff".len())
-        .position(|b| b == b"release/file\xff").unwrap() - 4;
+    assert_eq!(
+        u32::from_le_bytes(body[members..members + 4].try_into().unwrap()),
+        1
+    );
+    let path = body
+        .windows(b"release/file\xff".len())
+        .position(|b| b == b"release/file\xff")
+        .unwrap()
+        - 4;
     // First InventoryEntry has id:u64, root_id:u64 before its counted path.
     let entries = path - 16 - 4;
-    assert_eq!(u32::from_le_bytes(body[entries..entries + 4].try_into().unwrap()), 1);
+    assert_eq!(
+        u32::from_le_bytes(body[entries..entries + 4].try_into().unwrap()),
+        1
+    );
     let (offset, count, allocation, old_bytes) = match case {
-        0 => (seeds, 4097, 4097 * std::mem::size_of::<MemberBinding>(), None),
-        1 => (members, 65537, 65537 * std::mem::size_of::<MemberRecord>(), None),
-        2 => (entries, 1_000_001, 1_000_001 * std::mem::size_of::<InventoryEntry>(), None),
+        0 => (
+            seeds,
+            4097,
+            4097 * std::mem::size_of::<MemberBinding>(),
+            None,
+        ),
+        1 => (
+            members,
+            65537,
+            65537 * std::mem::size_of::<MemberRecord>(),
+            None,
+        ),
+        2 => (
+            entries,
+            1_000_001,
+            1_000_001 * std::mem::size_of::<InventoryEntry>(),
+            None,
+        ),
         3 => (posting, 65536, 65536, Some(8)),
         4 => (path, 1024, 1024, Some(b"release/file\xff".len())),
         5 => {
@@ -2074,7 +2098,11 @@ fn malformed_plan_field(case: usize) -> (Vec<u8>, usize) {
             let mut marker = vec![3u8; 32];
             marker.extend_from_slice(&1u32.to_le_bytes());
             marker.extend_from_slice(&[3u8; 32]);
-            let table = body.windows(marker.len()).position(|b| b == marker).unwrap() + 32;
+            let table = body
+                .windows(marker.len())
+                .position(|b| b == marker)
+                .unwrap()
+                + 32;
             let n = MAX_PAYLOAD / std::mem::size_of::<CustodyReceipt>() + 1;
             (table, n, n * std::mem::size_of::<CustodyReceipt>(), None)
         }
@@ -2082,7 +2110,10 @@ fn malformed_plan_field(case: usize) -> (Vec<u8>, usize) {
     };
     body[offset..offset + 4].copy_from_slice(&(count as u32).to_le_bytes());
     if let Some(old) = old_bytes {
-        body.splice(offset + 4..offset + 4 + old, std::iter::repeat_n(b'x', count));
+        body.splice(
+            offset + 4..offset + 4 + old,
+            std::iter::repeat_n(b'x', count),
+        );
     } else {
         // The baseline generic record decoder's MIN is one. Keep sufficient
         // wire after the count so its remaining-input check cannot mask I1.
@@ -2092,16 +2123,23 @@ fn malformed_plan_field(case: usize) -> (Vec<u8>, usize) {
     (body, allocation)
 }
 fn reject_before_field_allocation<T: std::fmt::Debug>(
-    bytes: usize, call: impl FnOnce() -> Result<T, PurgeError>,
+    bytes: usize,
+    call: impl FnOnce() -> Result<T, PurgeError>,
 ) {
     FORBIDDEN_HITS.with(|v| v.set(0));
     FORBIDDEN_SIZE.with(|v| v.set(bytes));
     let result = call();
     FORBIDDEN_SIZE.with(|v| v.set(0));
     let hits = FORBIDDEN_HITS.with(Cell::get);
-    assert_eq!(hits, 0, "schema-invalid field attempted allocation of {bytes} bytes; result {result:?}");
+    assert_eq!(
+        hits, 0,
+        "schema-invalid field attempted allocation of {bytes} bytes; result {result:?}"
+    );
     assert!(result.is_err(), "schema-invalid field accepted");
-    assert!(!matches!(result, Err(PurgeError::AllocationFailure)), "schema rejection must precede allocation failure");
+    assert!(
+        !matches!(result, Err(PurgeError::AllocationFailure)),
+        "schema rejection must precede allocation failure"
+    );
 }
 fn schema_decode_case(case: usize) {
     let (body, allocation) = malformed_plan_field(case);
@@ -2109,15 +2147,25 @@ fn schema_decode_case(case: usize) {
     reject_before_field_allocation(allocation, || decode(&frame));
 }
 #[test]
-fn schema_limits_seed_count_before_allocation() { schema_decode_case(0); }
+fn schema_limits_seed_count_before_allocation() {
+    schema_decode_case(0);
+}
 #[test]
-fn schema_limits_member_count_before_allocation() { schema_decode_case(1); }
+fn schema_limits_member_count_before_allocation() {
+    schema_decode_case(1);
+}
 #[test]
-fn schema_limits_entry_count_before_allocation() { schema_decode_case(2); }
+fn schema_limits_entry_count_before_allocation() {
+    schema_decode_case(2);
+}
 #[test]
-fn schema_limits_posting_identity_before_allocation() { schema_decode_case(3); }
+fn schema_limits_posting_identity_before_allocation() {
+    schema_decode_case(3);
+}
 #[test]
-fn schema_limits_path_before_allocation() { schema_decode_case(4); }
+fn schema_limits_path_before_allocation() {
+    schema_decode_case(4);
+}
 
 // Independent test serializer for the immutable chunk/commit transport. This
 // lets recovery reach a checksum-valid malformed logical image through its
@@ -2161,14 +2209,17 @@ fn schema_recovery_frames(kind: u32, image: &[u8]) -> Vec<Vec<u8>> {
     commit.extend_from_slice(&Md5::digest(image));
     commit.extend_from_slice(&(count as u32).to_le_bytes());
     commit.extend_from_slice(&ids);
-    host.frames.push(checked_test_frame(if kind == 3 { 3 } else { 5 }, &commit));
+    host.frames
+        .push(checked_test_frame(if kind == 3 { 3 } else { 5 }, &commit));
     host.frames
 }
 #[test]
 fn schema_limits_committed_plan_recovery_before_allocation() {
     let (body, allocation) = malformed_plan_field(0);
     let frames = schema_recovery_frames(1, &body);
-    reject_before_field_allocation(allocation, || Registry::recover([8; 16], test_journal_identity(), &frames));
+    reject_before_field_allocation(allocation, || {
+        Registry::recover([8; 16], test_journal_identity(), &frames)
+    });
 }
 #[test]
 fn schema_limits_committed_inventory_recovery_before_allocation() {
@@ -2189,7 +2240,9 @@ fn schema_limits_committed_inventory_recovery_before_allocation() {
     image.extend_from_slice(&0u32.to_le_bytes()); // no changes
     image.push(1); // final
     let frames = schema_recovery_frames(3, &image);
-    reject_before_field_allocation(n, || Registry::recover([8; 16], test_journal_identity(), &frames));
+    reject_before_field_allocation(n, || {
+        Registry::recover([8; 16], test_journal_identity(), &frames)
+    });
 }
 
 #[test]

@@ -271,8 +271,7 @@ pub fn build_dest_dir_name(
     } else {
         let id_suffix = format!(".#{nzb_id}");
         let dir_name = dir_name_of(name, id_suffix.len());
-        let mut out =
-            Vec::with_capacity(inter_dir.len() + 1 + dir_name.len() + id_suffix.len());
+        let mut out = Vec::with_capacity(inter_dir.len() + 1 + dir_name.len() + id_suffix.len());
         out.extend_from_slice(inter_dir);
         out.push(crate::paths::PATH_SEPARATOR);
         out.extend_from_slice(&dir_name);
@@ -553,12 +552,8 @@ pub fn update_current_stats_step(
     }
     if file_par_file {
         acc.remaining_par_count = acc.remaining_par_count.wrapping_add(1);
-        acc.par_current_success_size = acc
-            .par_current_success_size
-            .wrapping_add(file_success_size);
-        acc.par_current_failed_size = acc
-            .par_current_failed_size
-            .wrapping_add(file_failed_size);
+        acc.par_current_success_size = acc.par_current_success_size.wrapping_add(file_success_size);
+        acc.par_current_failed_size = acc.par_current_failed_size.wrapping_add(file_failed_size);
     }
 }
 
@@ -886,10 +881,7 @@ mod tests {
             b"parent/2c0837e5fa42c8cfb5d5e583168a2af4.mkv",
             b"parent/Some.Release.mkv"
         ));
-        assert_eq!(
-            completed_files[0].filename,
-            b"parent/Some.Release.mkv"
-        );
+        assert_eq!(completed_files[0].filename, b"parent/Some.Release.mkv");
         assert_eq!(
             completed_files[0].origname,
             b"parent/2c0837e5fa42c8cfb5d5e583168a2af4.mkv"

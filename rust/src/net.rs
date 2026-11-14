@@ -1385,7 +1385,6 @@ impl NzbgetRsWebDl {
                     sc.url_timeout,
                 )
             });
-        let ver_bytes = crate::ffi::build_version_bytes();
         let tls_disabled = crate::ffi::build_tls_disabled();
         let gzip_disabled = crate::ffi::build_gzip_disabled();
         let initial_url = self
@@ -1399,7 +1398,6 @@ impl NzbgetRsWebDl {
             initial_url: &initial_url,
             output_filename: &out_fn,
             info_name: &info_nm,
-            version: ver_bytes,
             write_buffer_kb,
             url_retries,
             url_interval_sec,

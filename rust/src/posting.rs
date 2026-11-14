@@ -20,7 +20,11 @@ pub fn crc32(data: &[u8]) -> u32 {
             let mut c = i as u32;
             let mut k = 0;
             while k < 8 {
-                c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xedb8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
                 k += 1;
             }
             table[i] = c;
@@ -86,13 +90,18 @@ pub struct Listing<'a> {
 /// date a listing stays alone), groups in (size, date) order.
 pub fn group_listings(results: &[Listing]) -> Vec<Vec<usize>> {
     let mut order: Vec<usize> = (0..results.len()).collect();
-    order.sort_by(|&a, &b| (results[a].size, results[a].date).cmp(&(results[b].size, results[b].date)));
+    order.sort_by(|&a, &b| {
+        (results[a].size, results[a].date).cmp(&(results[b].size, results[b].date))
+    });
     let mut groups: Vec<Vec<usize>> = Vec::new();
     for i in order {
         let r = &results[i];
         if let Some(group) = groups.last_mut() {
             let first = &results[group[0]];
-            if r.size != 0 && r.date != 0 && first.date != 0 && r.size == first.size
+            if r.size != 0
+                && r.date != 0
+                && first.date != 0
+                && r.size == first.size
                 && r.date.wrapping_sub(first.date) <= RELIST_WINDOW_SEC
             {
                 group.push(i);
@@ -106,14 +115,20 @@ pub fn group_listings(results: &[Listing]) -> Vec<Vec<usize>> {
 
 /// ListingMismatch: the nzb-file is more than LISTING_MISMATCH_SHARE off the listed size.
 pub fn listing_mismatch(listing_size: i64, nzb_bytes: i64) -> bool {
-    listing_size > 0 && (nzb_bytes.wrapping_sub(listing_size)).wrapping_abs() as f64 > LISTING_MISMATCH_SHARE * listing_size as f64
+    listing_size > 0
+        && (nzb_bytes.wrapping_sub(listing_size)).wrapping_abs() as f64
+            > LISTING_MISMATCH_SHARE * listing_size as f64
 }
 
 /// OrderPostings: groups of indices into `candidates`, each group's listings by
 /// rank (closest to `pick_bytes`, most grabbed, newest), groups by their first
 /// listing's rank, one posting of each distinct size before the rest, at most
 /// 3 * `max_postings` groups when that is above 0.
-pub fn order_postings(candidates: &[Listing], pick_bytes: i64, max_postings: i32) -> Vec<Vec<usize>> {
+pub fn order_postings(
+    candidates: &[Listing],
+    pick_bytes: i64,
+    max_postings: i32,
+) -> Vec<Vec<usize>> {
     let mut by_rank: Vec<usize> = (0..candidates.len()).collect();
     let dist = |i: usize| candidates[i].size.wrapping_sub(pick_bytes).wrapping_abs();
     by_rank.sort_by(|&a, &b| {
@@ -156,10 +171,8 @@ pub fn order_postings(candidates: &[Listing], pick_bytes: i64, max_postings: i32
     firsts
 }
 
-type SketchCacheMap = std::collections::HashMap<
-    std::path::PathBuf,
-    ((std::time::SystemTime, u64), Vec<u32>),
->;
+type SketchCacheMap =
+    std::collections::HashMap<std::path::PathBuf, ((std::time::SystemTime, u64), Vec<u32>)>;
 
 static SKETCH_CACHE: std::sync::Mutex<Option<SketchCacheMap>> = std::sync::Mutex::new(None);
 
@@ -206,7 +219,12 @@ mod tests {
     use super::*;
 
     fn l(link: &'static [u8], size: i64, grabs: i32, date: i64) -> Listing<'static> {
-        Listing { link, size, grabs, date }
+        Listing {
+            link,
+            size,
+            grabs,
+            date,
+        }
     }
 
     #[test]
@@ -226,11 +244,21 @@ mod tests {
 
     #[test]
     fn groups_relistings_and_orders_by_rank() {
-        let c = [l(b"a", 100, 0, 1000), l(b"b", 100, 5, 1060), l(b"c", 300, 0, 1000), l(b"d", 100, 0, 5000)];
+        let c = [
+            l(b"a", 100, 0, 1000),
+            l(b"b", 100, 5, 1060),
+            l(b"c", 300, 0, 1000),
+            l(b"d", 100, 0, 5000),
+        ];
         assert_eq!(group_listings(&c), vec![vec![0, 1], vec![3], vec![2]]);
-        assert_eq!(order_postings(&c, 100, 0), vec![vec![1, 0], vec![2], vec![3]]);
+        assert_eq!(
+            order_postings(&c, 100, 0),
+            vec![vec![1, 0], vec![2], vec![3]]
+        );
         assert_eq!(order_postings(&c, 100, 1).len(), 3);
-        assert!(listing_mismatch(100, 103) && !listing_mismatch(100, 102) && !listing_mismatch(0, 5));
+        assert!(
+            listing_mismatch(100, 103) && !listing_mismatch(100, 102) && !listing_mismatch(0, 5)
+        );
     }
 
     #[test]

@@ -189,20 +189,33 @@ pub fn http_client_validate_version(http_version: &[u8], stream_ok: bool) -> boo
     stream_ok && http_version.windows(5).any(|w| w == b"HTTP/")
 }
 
+/// `User-Agent` sent on every outbound HTTP request. Indexers and other
+/// services gate on NZBGet's agent string, so RustyGet presents as NZBGet.
+pub const HTTP_USER_AGENT: &[u8] = b"nzbget/26.3";
+
+/// Value of the extra `UserAgentExtended` header, which names RustyGet itself.
+pub const HTTP_USER_AGENT_EXTENDED: &[u8] = b"RustyGet/0.1";
+
+/// The identity header lines (`User-Agent` and `UserAgentExtended`), each
+/// terminated by CRLF, shared by every outbound HTTP request.
+pub fn http_identity_header_lines() -> Vec<u8> {
+    let mut lines = Vec::with_capacity(HTTP_USER_AGENT.len() + HTTP_USER_AGENT_EXTENDED.len() + 40);
+    lines.extend_from_slice(b"User-Agent: ");
+    lines.extend_from_slice(HTTP_USER_AGENT);
+    lines.extend_from_slice(b"\r\nUserAgentExtended: ");
+    lines.extend_from_slice(HTTP_USER_AGENT_EXTENDED);
+    lines.extend_from_slice(b"\r\n");
+    lines
+}
+
 /// Port of `HttpClient::GetHeaders`.
-pub fn http_client_build_headers(
-    method: &[u8],
-    host: &[u8],
-    version: &[u8],
-    include_gzip: bool,
-) -> Vec<u8> {
-    let mut headers = Vec::with_capacity(method.len() + host.len() + version.len() + 112);
+pub fn http_client_build_headers(method: &[u8], host: &[u8], include_gzip: bool) -> Vec<u8> {
+    let mut headers = Vec::with_capacity(method.len() + host.len() + 160);
     headers.extend_from_slice(method);
     headers.extend_from_slice(b" / HTTP/1.1\r\nHost: ");
     headers.extend_from_slice(host);
-    headers.extend_from_slice(b"\r\nUser-Agent: RustyGet/");
-    headers.extend_from_slice(version);
     headers.extend_from_slice(b"\r\n");
+    headers.extend_from_slice(&http_identity_header_lines());
     if include_gzip {
         headers.extend_from_slice(b"Accept-Encoding: gzip\r\n");
     }
@@ -287,7 +300,9 @@ pub fn speed_test_make_request(path: &[u8], query: &[u8], filesize: u32, host: &
     req.extend_from_slice(size_str.as_bytes());
     req.extend_from_slice(b" HTTP/1.1\r\nHost: ");
     req.extend_from_slice(host);
-    req.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+    req.extend_from_slice(b"\r\n");
+    req.extend_from_slice(&http_identity_header_lines());
+    req.extend_from_slice(b"Connection: close\r\n\r\n");
     req
 }
 
@@ -419,7 +434,6 @@ pub struct WebDlConfig<'a> {
     pub initial_url: &'a [u8],
     pub output_filename: &'a [u8],
     pub info_name: &'a [u8],
-    pub version: &'a [u8],
     pub write_buffer_kb: i32,
     pub url_retries: i32,
     pub url_interval_sec: i32,
@@ -620,12 +634,15 @@ pub fn webdl_download<I: WebDlIo>(
         cstring_lossless_truncate(&join_c_slices(&[b"GET ", resource, b" HTTP/1.0\r\n"]));
     io.write_line(&req_line);
 
-    let ua_line = cstring_lossless_truncate(&join_c_slices(&[
-        b"User-Agent: RustyGet/",
-        cfg.version,
+    let ua_line =
+        cstring_lossless_truncate(&join_c_slices(&[b"User-Agent: ", HTTP_USER_AGENT, b"\r\n"]));
+    io.write_line(&ua_line);
+    let ua_ext_line = cstring_lossless_truncate(&join_c_slices(&[
+        b"UserAgentExtended: ",
+        HTTP_USER_AGENT_EXTENDED,
         b"\r\n",
     ]));
-    io.write_line(&ua_line);
+    io.write_line(&ua_ext_line);
 
     let host_line = if raw_port == 0 || (raw_port == 80 && is_http) || (raw_port == 443 && is_https)
     {
@@ -1153,6 +1170,37 @@ mod tests {
     }
 
     #[test]
+    fn identity_headers_present_nzbget_agent() {
+        assert_eq!(HTTP_USER_AGENT, b"nzbget/26.3");
+        assert_eq!(HTTP_USER_AGENT_EXTENDED, b"RustyGet/0.1");
+        assert_eq!(
+            http_identity_header_lines(),
+            b"User-Agent: nzbget/26.3\r\nUserAgentExtended: RustyGet/0.1\r\n"
+        );
+    }
+
+    #[test]
+    fn http_client_headers_carry_identity() {
+        assert_eq!(
+            http_client_build_headers(b"GET", b"ip.nzbget.com", true),
+            b"GET / HTTP/1.1\r\nHost: ip.nzbget.com\r\nUser-Agent: nzbget/26.3\r\nUserAgentExtended: RustyGet/0.1\r\nAccept-Encoding: gzip\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        );
+        let plain = http_client_build_headers(b"GET", b"h", false);
+        assert!(!plain.windows(15).any(|w| w == b"Accept-Encoding"));
+        assert!(plain.ends_with(
+            b"User-Agent: nzbget/26.3\r\nUserAgentExtended: RustyGet/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        ));
+    }
+
+    #[test]
+    fn speed_test_request_carries_identity() {
+        assert_eq!(
+            speed_test_make_request(b"__down", b"?bytes=", 1024, b"speed.cloudflare.com"),
+            b"GET /__down?bytes=1024 HTTP/1.1\r\nHost: speed.cloudflare.com\r\nUser-Agent: nzbget/26.3\r\nUserAgentExtended: RustyGet/0.1\r\nConnection: close\r\n\r\n"
+        );
+    }
+
+    #[test]
     fn test_http_client_parse_response() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n  203.0.113.42\r\n";
         let (status, body) = http_client_parse_response(raw).unwrap();
@@ -1297,7 +1345,6 @@ mod tests {
             initial_url: b"http://indexer.example:8080/get?id=1&apikey=OLDSECRET",
             output_filename: out_path.as_bytes(),
             info_name: b"TestFetch",
-            version: b"24.0",
             write_buffer_kb: 0,
             url_retries: 2,
             url_interval_sec: 1,
@@ -1320,6 +1367,23 @@ mod tests {
             .headers_seen
             .iter()
             .any(|h| h == b"X-DNZB-Category: Movies"));
+        // Every request (initial and after redirect) presents as NZBGet and
+        // names RustyGet in the extended header; the old agent is gone.
+        let ua_count = io
+            .sent_lines
+            .iter()
+            .filter(|l| l.as_slice() == b"User-Agent: nzbget/26.3\r\n")
+            .count();
+        let ext_count = io
+            .sent_lines
+            .iter()
+            .filter(|l| l.as_slice() == b"UserAgentExtended: RustyGet/0.1\r\n")
+            .count();
+        assert_eq!((ua_count, ext_count), (2, 2), "sent: {:?}", io.sent_lines);
+        assert!(!io
+            .sent_lines
+            .iter()
+            .any(|l| l.starts_with(b"User-Agent: RustyGet")));
         // Verify redirect log stripped query secrets!
         assert!(io.logs.iter().any(|(lvl, m)| {
             *lvl == WEBDL_LOG_DETAIL
@@ -1342,7 +1406,6 @@ mod tests {
             initial_url: b"http://127.0.0.1/bad.nzb",
             output_filename: out_path.as_bytes(),
             info_name: b"BadGz",
-            version: b"24.0",
             write_buffer_kb: 4,
             url_retries: 1,
             url_interval_sec: 0,

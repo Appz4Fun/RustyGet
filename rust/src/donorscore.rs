@@ -17,7 +17,13 @@ pub fn base(pick_score: i32) -> i32 {
 /// whole): 9 + 80 * share, one more for a byte-identical twin, at most TOP.
 pub fn target(alive: f64, twin: bool) -> i32 {
     // std::min(1.0, alive): 1.0 unless alive < 1.0 (NaN keeps 1.0)
-    let share = if alive < 0.0 { 1.0 } else if alive < 1.0 { alive } else { 1.0 };
+    let share = if alive < 0.0 {
+        1.0
+    } else if alive < 1.0 {
+        alive
+    } else {
+        1.0
+    };
     TOP.min(9 + (80.0 * share).round_ties_even() as i32 + i32::from(twin))
 }
 
@@ -47,10 +53,17 @@ pub struct Entry {
 /// score. Parallel to `entries`.
 pub fn rerank(entries: &[Entry], pick_bytes: i64) -> Vec<i32> {
     let mut scores: Vec<i32> = entries.iter().map(|e| e.score).collect();
-    let mut live: Vec<usize> = (0..entries.len()).filter(|&i| entries[i].score > DEAD).collect();
-    let percent = |e: &Entry| (100.0 * if e.alive < 0.0 { 1.0 } else { e.alive }).round_ties_even() as i32;
+    let mut live: Vec<usize> = (0..entries.len())
+        .filter(|&i| entries[i].score > DEAD)
+        .collect();
+    let percent =
+        |e: &Entry| (100.0 * if e.alive < 0.0 { 1.0 } else { e.alive }).round_ties_even() as i32;
     let distance = |e: &Entry| {
-        if e.bytes > pick_bytes { e.bytes.wrapping_sub(pick_bytes) } else { pick_bytes.wrapping_sub(e.bytes) }
+        if e.bytes > pick_bytes {
+            e.bytes.wrapping_sub(pick_bytes)
+        } else {
+            pick_bytes.wrapping_sub(e.bytes)
+        }
     };
     // std::stable_sort with the C++ comparator: a stable sort keeps equal entries in order
     live.sort_by(|&a, &b| {
@@ -75,7 +88,13 @@ mod tests {
     use super::*;
 
     fn e(score: i32, alive: f64, twin: bool, bytes: i64, grabs: i32) -> Entry {
-        Entry { score, alive, twin, bytes, grabs }
+        Entry {
+            score,
+            alive,
+            twin,
+            bytes,
+            grabs,
+        }
     }
 
     #[test]
@@ -125,8 +144,13 @@ mod tests {
 
     #[test]
     fn rerank_orders_by_health_then_twin_then_size_then_grabs() {
-        let entries = [e(50, 0.9, false, 100, 0), e(50, 1.0, false, 300, 0), e(1, 1.0, false, 100, 0),
-                       e(50, 1.0, true, 300, 0), e(50, 1.0, false, 100, 5)];
+        let entries = [
+            e(50, 0.9, false, 100, 0),
+            e(50, 1.0, false, 300, 0),
+            e(1, 1.0, false, 100, 0),
+            e(50, 1.0, true, 300, 0),
+            e(50, 1.0, false, 100, 5),
+        ];
         assert_eq!(rerank(&entries, 100), vec![81, 88, 1, 90, 89]);
 
         let wholeness = [

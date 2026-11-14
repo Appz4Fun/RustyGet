@@ -22,9 +22,13 @@ const MAX_FILTERS: usize = 8192;
 /// The VM's memory: no filter's block is bigger
 const VM_MEM: usize = 0x40000;
 
-const LDECODE: [u8; 28] =
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224];
-const LBITS: [u8; 28] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5];
+const LDECODE: [u8; 28] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
+    160, 192, 224,
+];
+const LBITS: [u8; 28] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5,
+];
 const SDDECODE: [u8; 8] = [0, 4, 8, 16, 32, 64, 128, 192];
 const SDBITS: [u8; 8] = [2, 2, 3, 4, 5, 6, 6, 6];
 
@@ -580,13 +584,15 @@ fn run_member_stream(
                     sub.reps.copy_within(0..n, 1);
                     sub.reps[0] = dist;
                     let slot = usize::from(lz.rd.decode(bits)).min(RC - 1);
-                    let len = usize::from(LDECODE[slot]) + 2 + bits.take(u32::from(LBITS[slot])) as usize;
+                    let len =
+                        usize::from(LDECODE[slot]) + 2 + bits.take(u32::from(LBITS[slot])) as usize;
                     sub.last_len = len;
                     copy(out, dist, len, phys_target)?;
                 }
                 _ => {
                     let n = number - 263;
-                    let dist = usize::from(SDDECODE[n]) + 1 + bits.take(u32::from(SDBITS[n])) as usize;
+                    let dist =
+                        usize::from(SDDECODE[n]) + 1 + bits.take(u32::from(SDBITS[n])) as usize;
                     sub.reps = [dist, sub.reps[0], sub.reps[1], sub.reps[2]];
                     sub.last_len = 2;
                     copy(out, dist, 2, phys_target)?;
@@ -692,8 +698,15 @@ fn ppm_step_at(
             }
             // decoding the program is work too, and none of it reaches the output
             st.filters.work = st.filters.work.checked_sub(len).ok_or(Stop::Cut)?;
-            let code = (0..len).map(|_| next()).collect::<Result<Vec<u8>, Stop>>()?;
-            add_vm_code(&mut st.filters, u32::from(first), &code, base_offset + out.len())?;
+            let code = (0..len)
+                .map(|_| next())
+                .collect::<Result<Vec<u8>, Stop>>()?;
+            add_vm_code(
+                &mut st.filters,
+                u32::from(first),
+                &code,
+                base_offset + out.len(),
+            )?;
         }
         4 => {
             let mut dist = 0usize;
@@ -732,7 +745,11 @@ fn read_tables(st: &mut State<'_>) -> Result<Option<Tables>, Stop> {
     let field = bits.peek16();
     if field & 0x8000 != 0 {
         let ppm = st.ppm.get_or_insert_with(Box::default);
-        return if ppm.init(bits, &mut st.esc) { Ok(None) } else { Err(Stop::Cut) };
+        return if ppm.init(bits, &mut st.esc) {
+            Ok(None)
+        } else {
+            Err(Stop::Cut)
+        };
     }
     st.low_dist = 0;
     st.low_reps = 0;
@@ -773,14 +790,24 @@ fn read_tables(st: &mut State<'_>) -> Result<Option<Tables>, Stop> {
                 i += 1;
             }
             16 | 17 => {
-                let times = if n == 16 { bits.take(3) + 3 } else { bits.take(7) + 11 } as usize;
-                let prev = *table.get(i.checked_sub(1).ok_or(Stop::Cut)?).ok_or(Stop::Cut)?;
+                let times = if n == 16 {
+                    bits.take(3) + 3
+                } else {
+                    bits.take(7) + 11
+                } as usize;
+                let prev = *table
+                    .get(i.checked_sub(1).ok_or(Stop::Cut)?)
+                    .ok_or(Stop::Cut)?;
                 let end = (i + times).min(TABLE);
                 table[i..end].fill(prev);
                 i = end;
             }
             _ => {
-                let times = if n == 18 { bits.take(3) + 3 } else { bits.take(7) + 11 } as usize;
+                let times = if n == 18 {
+                    bits.take(3) + 3
+                } else {
+                    bits.take(7) + 11
+                } as usize;
                 let end = (i + times).min(TABLE);
                 table[i..end].fill(0);
                 i = end;
@@ -856,7 +883,11 @@ fn read_vm_code(st: &mut State<'_>, at: usize) -> Result<(), Stop> {
 }
 
 fn add_vm_code(f: &mut Filters, first: u32, code: &[u8], at: usize) -> Result<(), Stop> {
-    let mut bits = Bits { data: code, addr: 0, bit: 0 };
+    let mut bits = Bits {
+        data: code,
+        addr: 0,
+        bit: 0,
+    };
     let mut pos = if first & 0x80 != 0 {
         let n = vm_number(&mut bits) as usize;
         if n == 0 {
@@ -915,7 +946,12 @@ fn add_vm_code(f: &mut Filters, first: u32, code: &[u8], at: usize) -> Result<()
     pos = pos.min(f.kinds.len() - 1);
     f.work = f.work.checked_sub(len as usize).ok_or(Stop::Cut)?;
     f.reach = f.reach.max((at + start).saturating_add(len as usize));
-    f.pending.push(Pending { kind: f.kinds[pos], start: at + start, len: len as usize, regs });
+    f.pending.push(Pending {
+        kind: f.kinds[pos],
+        start: at + start,
+        len: len as usize,
+        regs,
+    });
     Ok(())
 }
 
@@ -988,7 +1024,8 @@ fn filter(f: &Pending, mut data: Vec<u8>, rel_start: usize) -> Option<Vec<u8>> {
                     let addr = u32::from_le_bytes(data[i..i + 4].try_into().ok()?);
                     if addr & 0x8000_0000 != 0 {
                         if addr.wrapping_add(at) & 0x8000_0000 == 0 {
-                            data[i..i + 4].copy_from_slice(&addr.wrapping_add(FILE_SIZE).to_le_bytes());
+                            data[i..i + 4]
+                                .copy_from_slice(&addr.wrapping_add(FILE_SIZE).to_le_bytes());
                         }
                     } else if addr.wrapping_sub(FILE_SIZE) & 0x8000_0000 != 0 {
                         data[i..i + 4].copy_from_slice(&addr.wrapping_sub(at).to_le_bytes());
@@ -1014,7 +1051,12 @@ fn filter(f: &Pending, mut data: Vec<u8>, rel_start: usize) -> Option<Vec<u8>> {
                             let start = slot * 41 + 5;
                             if bundle_bits(&data[at..], start + 37, 4) == 5 {
                                 let v = bundle_bits(&data[at..], start + 13, 20);
-                                set_bundle_bits(&mut data[at..], v.wrapping_sub(file) & 0xfffff, start + 13, 20);
+                                set_bundle_bits(
+                                    &mut data[at..],
+                                    v.wrapping_sub(file) & 0xfffff,
+                                    start + 13,
+                                    20,
+                                );
                             }
                         }
                     }

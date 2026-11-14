@@ -10,17 +10,21 @@ const RC: usize = 28;
 const BC: usize = 19;
 const MC: usize = 257;
 
-const LDECODE: [u8; 28] =
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224];
-const LBITS: [u8; 28] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5];
+const LDECODE: [u8; 28] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
+    160, 192, 224,
+];
+const LBITS: [u8; 28] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5,
+];
 const DDECODE: [u32; DC] = [
-    0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144,
-    8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 327680, 393216, 458752, 524288,
-    589824, 655360, 720896, 786432, 851968, 917504, 983040,
+    0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536,
+    2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608,
+    262144, 327680, 393216, 458752, 524288, 589824, 655360, 720896, 786432, 851968, 917504, 983040,
 ];
 const DBITS: [u8; DC] = [
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15,
-    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13, 14, 14, 15, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
 ];
 const SDDECODE: [u8; 8] = [0, 4, 8, 16, 32, 64, 128, 192];
 const SDBITS: [u8; 8] = [2, 2, 3, 4, 5, 6, 6, 6];
@@ -230,7 +234,8 @@ fn run_member(
         } else if number < 261 {
             let dist = st.reps[(st.rep_at.wrapping_sub(number - 256)) & 3];
             let slot = usize::from(rd.decode(bits)).min(RC - 1);
-            let mut len = usize::from(LDECODE[slot]) + 2 + bits.take(u32::from(LBITS[slot])) as usize;
+            let mut len =
+                usize::from(LDECODE[slot]) + 2 + bits.take(u32::from(LBITS[slot])) as usize;
             if dist >= 0x101 {
                 len += 1;
                 if dist >= 0x2000 {
@@ -243,7 +248,10 @@ fn run_member(
             (len, dist)
         } else {
             let n = number - 261;
-            (2, usize::from(SDDECODE[n]) + 1 + bits.take(u32::from(SDBITS[n])) as usize)
+            (
+                2,
+                usize::from(SDDECODE[n]) + 1 + bits.take(u32::from(SDBITS[n])) as usize,
+            )
         };
         st.last_dist = dist;
         st.reps[st.rep_at] = dist;
@@ -302,7 +310,11 @@ fn read_tables(st: &mut State<'_>) -> Option<Blocks> {
                 i = end;
             }
             _ => {
-                let times = if n == 17 { bits.take(3) + 3 } else { bits.take(7) + 11 } as usize;
+                let times = if n == 17 {
+                    bits.take(3) + 3
+                } else {
+                    bits.take(7) + 11
+                } as usize;
                 let end = (i + times).min(size);
                 table[i..end].fill(0);
                 i = end;
@@ -314,7 +326,10 @@ fn read_tables(st: &mut State<'_>) -> Option<Blocks> {
     }
     st.old_table[..size].copy_from_slice(&table[..size]);
     if audio {
-        let tables = table[..size].chunks(MC).map(Table::new).collect::<Option<Vec<_>>>()?;
+        let tables = table[..size]
+            .chunks(MC)
+            .map(Table::new)
+            .collect::<Option<Vec<_>>>()?;
         Some(Blocks::Audio(tables))
     } else {
         Some(Blocks::Lz(Box::new([

@@ -7,7 +7,9 @@
 /// A code point as UTF-8, as the C++ AppendUtf8 (also in decode.rs): NUL, a
 /// surrogate or a value past Unicode becomes U+FFFD.
 fn push_utf8(code: u32, out: &mut Vec<u8>) {
-    let c = char::from_u32(code).filter(|&c| c != '\0').unwrap_or('\u{fffd}');
+    let c = char::from_u32(code)
+        .filter(|&c| c != '\0')
+        .unwrap_or('\u{fffd}');
     let mut buf = [0u8; 4];
     out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
 }
@@ -32,7 +34,13 @@ pub fn xml_decode(buf: &mut [u8], lower: &dyn Fn(u8) -> i32) -> usize {
             b'&' => {
                 p += 1;
                 let rest = &s[p..];
-                let named: &[(&[u8], u8)] = &[(b"lt;", b'<'), (b"gt;", b'>'), (b"amp;", b'&'), (b"apos;", b'\''), (b"quot;", b'"')];
+                let named: &[(&[u8], u8)] = &[
+                    (b"lt;", b'<'),
+                    (b"gt;", b'>'),
+                    (b"amp;", b'&'),
+                    (b"apos;", b'\''),
+                    (b"quot;", b'"'),
+                ];
                 if let Some(&(lit, c)) = named.iter().find(|(lit, _)| rest.starts_with(lit)) {
                     out.push(c);
                     p += lit.len();
@@ -44,7 +52,11 @@ pub fn xml_decode(buf: &mut [u8], lower: &dyn Fn(u8) -> i32) -> usize {
                     }
                     let mut code: u32 = 0;
                     let mut any = false;
-                    while if hex { at(p).is_ascii_hexdigit() } else { at(p).is_ascii_digit() } {
+                    while if hex {
+                        at(p).is_ascii_hexdigit()
+                    } else {
+                        at(p).is_ascii_digit()
+                    } {
                         // C's digit classes are fixed, but tolower need not map
                         // A-F to a-f in every locale. Preserve the C++ unsigned
                         // arithmetic even when the mapped digit is negative.
@@ -53,7 +65,9 @@ pub fn xml_decode(buf: &mut [u8], lower: &dyn Fn(u8) -> i32) -> usize {
                         } else {
                             lower(at(p)) - i32::from(b'a') + 10
                         };
-                        code = (code * if hex { 16 } else { 10 }).wrapping_add(d as u32).min(0x110000);
+                        code = (code * if hex { 16 } else { 10 })
+                            .wrapping_add(d as u32)
+                            .min(0x110000);
                         any = true;
                         p += 1;
                     }
@@ -86,7 +100,13 @@ pub fn xml_decode(buf: &mut [u8], lower: &dyn Fn(u8) -> i32) -> usize {
 pub fn xml_strip_tags(buf: &mut [u8]) {
     let mut p = 0;
     while let Some(start) = buf[p..].iter().position(|&b| b == b'<').map(|k| p + k) {
-        let Some(end) = buf[start..].iter().position(|&b| b == b'>').map(|k| start + k) else { break };
+        let Some(end) = buf[start..]
+            .iter()
+            .position(|&b| b == b'>')
+            .map(|k| start + k)
+        else {
+            break;
+        };
         buf[start..=end].fill(b' ');
         p = end + 1;
     }
@@ -199,7 +219,10 @@ const LATIN1_PACK: [[u8; 17]; 256] = {
         while i < 8 {
             masks[bits][out] = (2 * i) as u8;
             out += 1;
-            if bits & (1 << i) != 0 { masks[bits][out] = (2 * i + 1) as u8; out += 1; }
+            if bits & (1 << i) != 0 {
+                masks[bits][out] = (2 * i + 1) as u8;
+                out += 1;
+            }
             i += 1;
         }
         masks[bits][16] = out as u8;
@@ -213,10 +236,10 @@ const LATIN1_PACK: [[u8; 17]; 256] = {
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
 #[target_feature(enable = "ssse3")]
 unsafe fn latin1_ssse3(s: &[u8], dst: *mut u8) -> usize {
-    #[cfg(target_arch = "x86_64")]
-    use std::arch::x86_64::*;
     #[cfg(target_arch = "x86")]
     use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
     let (mut i, mut output) = (0, dst);
     while s.len() - i >= 8 {
         // loadl reads exactly eight proven source bytes, including at the end.
@@ -227,10 +250,15 @@ unsafe fn latin1_ssse3(s: &[u8], dst: *mut u8) -> usize {
             _mm_storel_epi64(output.cast(), input);
             output = output.add(8);
         } else {
-            let lead = _mm_or_si128(_mm_set1_epi8(0xc2u8 as i8),
-                _mm_and_si128(_mm_srli_epi16::<6>(input), _mm_set1_epi8(1)));
+            let lead = _mm_or_si128(
+                _mm_set1_epi8(0xc2u8 as i8),
+                _mm_and_si128(_mm_srli_epi16::<6>(input), _mm_set1_epi8(1)),
+            );
             let first = _mm_or_si128(_mm_and_si128(high, lead), _mm_andnot_si128(high, input));
-            let tail = _mm_or_si128(_mm_and_si128(input, _mm_set1_epi8(0x3f)), _mm_set1_epi8(0x80u8 as i8));
+            let tail = _mm_or_si128(
+                _mm_and_si128(input, _mm_set1_epi8(0x3f)),
+                _mm_set1_epi8(0x80u8 as i8),
+            );
             let pairs = _mm_unpacklo_epi8(first, tail);
             let mask = &LATIN1_PACK[bits];
             let packed = _mm_shuffle_epi8(pairs, _mm_loadu_si128(mask.as_ptr().cast()));
@@ -242,8 +270,10 @@ unsafe fn latin1_ssse3(s: &[u8], dst: *mut u8) -> usize {
         i += 8;
     }
     for &c in &s[i..] {
-        if c < 0x80 { *output = c; output = output.add(1); }
-        else {
+        if c < 0x80 {
+            *output = c;
+            output = output.add(1);
+        } else {
             *output = 0xc2 + (c > 0xbf) as u8;
             *output.add(1) = (c & 0x3f) + 0x80;
             output = output.add(2);
@@ -260,7 +290,9 @@ unsafe fn latin1_scalar_cstr(raw: *const u8, dst: *mut u8) -> usize {
     let (mut read, mut write) = (raw, dst);
     loop {
         let c = *read;
-        if c == 0 { break; }
+        if c == 0 {
+            break;
+        }
         *write = c;
         write = write.add(1);
         if c >= 0x80 {
@@ -283,17 +315,25 @@ unsafe fn latin1_scalar_cstr(raw: *const u8, dst: *mut u8) -> usize {
 /// does not overlap the input (including its NUL).
 pub unsafe fn latin1_known_into(s: &[u8], raw: *const u8, dst: *mut u8, cap: usize) -> usize {
     if s.is_empty() {
-        if !dst.is_null() && cap > 0 { *dst = 0; }
+        if !dst.is_null() && cap > 0 {
+            *dst = 0;
+        }
         return 0;
     }
-    let Some(max) = s.len().checked_mul(2) else { return usize::MAX };
+    let Some(max) = s.len().checked_mul(2) else {
+        return usize::MAX;
+    };
     if dst.is_null() || cap <= max {
         let n = s.len() + s.iter().filter(|&&c| c >= 0x80).count();
-        if dst.is_null() || n >= cap { return n; }
+        if dst.is_null() || n >= cap {
+            return n;
+        }
         return latin1_scalar_cstr(raw, dst);
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-    if s.len() >= 8 && std::arch::is_x86_feature_detected!("ssse3") { return latin1_ssse3(s, dst); }
+    if s.len() >= 8 && std::arch::is_x86_feature_detected!("ssse3") {
+        return latin1_ssse3(s, dst);
+    }
     latin1_scalar_cstr(raw, dst)
 }
 
@@ -307,38 +347,83 @@ mod tests {
             let mut source = vec![b'!'; source_offset + input.len() + 1];
             source[source_offset..source_offset + input.len()].copy_from_slice(input);
             source[source_offset + input.len()] = 0;
-            let mut expected = Vec::new(); latin1_to_utf8(input, &mut expected);
+            let mut expected = Vec::new();
+            latin1_to_utf8(input, &mut expected);
             let mut output = vec![std::mem::MaybeUninit::<u8>::uninit(); output_offset + cap + 16];
-            for byte in &mut output[..output_offset] { byte.write(0x55); }
-            for byte in &mut output[output_offset + cap..] { byte.write(0xaa); }
+            for byte in &mut output[..output_offset] {
+                byte.write(0x55);
+            }
+            for byte in &mut output[output_offset + cap..] {
+                byte.write(0xaa);
+            }
             let span = &source[source_offset..source_offset + input.len()];
-            let n = unsafe { latin1_known_into(span, source.as_ptr().add(source_offset), output.as_mut_ptr().add(output_offset).cast(), cap) };
+            let n = unsafe {
+                latin1_known_into(
+                    span,
+                    source.as_ptr().add(source_offset),
+                    output.as_mut_ptr().add(output_offset).cast(),
+                    cap,
+                )
+            };
             assert_eq!(n, expected.len());
             if cap > n {
-                let bytes = unsafe { std::slice::from_raw_parts(output.as_ptr().add(output_offset).cast::<u8>(), n + 1) };
-                assert_eq!(&bytes[..n], expected); assert_eq!(bytes[n], 0);
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        output.as_ptr().add(output_offset).cast::<u8>(),
+                        n + 1,
+                    )
+                };
+                assert_eq!(&bytes[..n], expected);
+                assert_eq!(bytes[n], 0);
             }
             if cap > 2 * input.len() {
-                let n = unsafe { latin1_scalar_cstr(source.as_ptr().add(source_offset), output.as_mut_ptr().add(output_offset).cast()) };
+                let n = unsafe {
+                    latin1_scalar_cstr(
+                        source.as_ptr().add(source_offset),
+                        output.as_mut_ptr().add(output_offset).cast(),
+                    )
+                };
                 assert_eq!(n, expected.len());
-                let bytes = unsafe { std::slice::from_raw_parts(output.as_ptr().add(output_offset).cast::<u8>(), n + 1) };
-                assert_eq!(&bytes[..n], expected); assert_eq!(bytes[n], 0);
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        output.as_ptr().add(output_offset).cast::<u8>(),
+                        n + 1,
+                    )
+                };
+                assert_eq!(&bytes[..n], expected);
+                assert_eq!(bytes[n], 0);
             }
-            assert!(output[..output_offset].iter().all(|b| unsafe { b.assume_init() } == 0x55));
-            assert!(output[output_offset + cap..].iter().all(|b| unsafe { b.assume_init() } == 0xaa));
+            assert!(output[..output_offset]
+                .iter()
+                .all(|b| unsafe { b.assume_init() } == 0x55));
+            assert!(output[output_offset + cap..]
+                .iter()
+                .all(|b| unsafe { b.assume_init() } == 0xaa));
             assert_eq!(&source[source_offset..source_offset + input.len()], input);
         };
         for bits in 0..256 {
-            let input: Vec<u8> = (0..8).map(|i| if bits & (1 << i) == 0 { b'a' + i } else { 0x80 + 17 * i }).collect();
+            let input: Vec<u8> = (0..8)
+                .map(|i| {
+                    if bits & (1 << i) == 0 {
+                        b'a' + i
+                    } else {
+                        0x80 + 17 * i
+                    }
+                })
+                .collect();
             for source_offset in 0..16 {
-                for output_offset in 0..16 { check(&input, source_offset, output_offset, 17); }
+                for output_offset in 0..16 {
+                    check(&input, source_offset, output_offset, 17);
+                }
             }
         }
         for len in [0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33] {
             for byte in 1..=255u8 {
                 let input = vec![byte; len];
                 let required = len * if byte < 0x80 { 1 } else { 2 };
-                for cap in [0, required, required + 1, 2 * len + 1] { check(&input, 3, 5, cap); }
+                for cap in [0, required, required + 1, 2 * len + 1] {
+                    check(&input, 3, 5, cap);
+                }
             }
         }
     }
@@ -352,16 +437,29 @@ mod tests {
 
     #[test]
     fn decoders() {
-        let xml_decode = |b: &mut [u8]| super::xml_decode(b, &|c| i32::from(c.to_ascii_lowercase()));
+        let xml_decode =
+            |b: &mut [u8]| super::xml_decode(b, &|c| i32::from(c.to_ascii_lowercase()));
         assert_eq!(
-            inplace(xml_decode, b"a&lt;b&gt;&amp;&apos;&quot;&#233;&#xe9;&nbsp;<![CDATA[&lt;]]>&"),
+            inplace(
+                xml_decode,
+                b"a&lt;b&gt;&amp;&apos;&quot;&#233;&#xe9;&nbsp;<![CDATA[&lt;]]>&"
+            ),
             "a<b>&'\"\u{e9}\u{e9}&nbsp;&lt;&".as_bytes()
         );
-        assert_eq!(inplace(xml_decode, b"&#0;&#x110000;&#xd800;&#"), "\u{fffd}\u{fffd}\u{fffd}".as_bytes());
+        assert_eq!(
+            inplace(xml_decode, b"&#0;&#x110000;&#xd800;&#"),
+            "\u{fffd}\u{fffd}\u{fffd}".as_bytes()
+        );
         assert_eq!(inplace(http_unquote, b"\"a\\\"b\\\\c\"rest"), b"a\"b\\c");
         assert_eq!(inplace(http_unquote, b"plain"), b"plain");
         assert_eq!(inplace(url_decode, b"a%20b%zz%4"), b"a b\0%4");
-        assert_eq!(inplace(|b| xml_remove_entities(b, &|c| c.is_ascii_alphabetic()), b"x&amp;y&#12;z&nope"), b"x y z&nope");
+        assert_eq!(
+            inplace(
+                |b| xml_remove_entities(b, &|c| c.is_ascii_alphabetic()),
+                b"x&amp;y&#12;z&nope"
+            ),
+            b"x y z&nope"
+        );
         let mut v = b"a<b>c<d".to_vec();
         xml_strip_tags(&mut v);
         assert_eq!(v, b"a   c<d");
@@ -371,7 +469,13 @@ mod tests {
     fn xml_numeric_references_use_locale_case_mapping() {
         // A custom LC_CTYPE can map A to b and leave C uppercase. The latter
         // yields a negative digit, which C++ adds to its unsigned accumulator.
-        let lower = |c| if c == b'A' { i32::from(b'b') } else { i32::from(c) };
+        let lower = |c| {
+            if c == b'A' {
+                i32::from(b'b')
+            } else {
+                i32::from(c)
+            }
+        };
         assert_eq!(
             inplace(|b| xml_decode(b, &lower), b"&#xA;&#xa;&#xC;&#x1C;"),
             "\u{b}\u{a}\u{fffd}\u{fffd}".as_bytes()

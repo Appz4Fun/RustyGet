@@ -139,7 +139,11 @@ fn find2(s: &[u8], a: u8, b: u8) -> Option<usize> {
 /// A code point as UTF-8, as the C++ AppendUtf8: NUL, a surrogate or a value
 /// past Unicode becomes U+FFFD. Returns the number of bytes.
 fn utf8(code: u32, out: &mut [u8; 4]) -> usize {
-    let code = if code == 0 || code > 0x10ffff || (0xd800..=0xdfff).contains(&code) { 0xfffd } else { code };
+    let code = if code == 0 || code > 0x10ffff || (0xd800..=0xdfff).contains(&code) {
+        0xfffd
+    } else {
+        code
+    };
     if code < 0x80 {
         out[0] = code as u8;
         1
@@ -212,7 +216,10 @@ pub fn json_decode(buf: &mut [u8]) -> usize {
                 }
                 Some(mut code) => {
                     p += 4;
-                    if (0xd800..=0xdbff).contains(&code) && buf.get(p + 1) == Some(&b'\\') && buf.get(p + 2) == Some(&b'u') {
+                    if (0xd800..=0xdbff).contains(&code)
+                        && buf.get(p + 1) == Some(&b'\\')
+                        && buf.get(p + 2) == Some(&b'u')
+                    {
                         if let Some(low) = hex4(buf, p + 3) {
                             if (0xdc00..=0xdfff).contains(&low) {
                                 code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00);
@@ -258,7 +265,10 @@ pub fn json_next_value(s: &[u8]) -> Option<(usize, usize)> {
             e += 2;
         }
     }
-    let end = s[e..].iter().position(|b| b" ,]}\r\n\t\x0c".contains(b)).map_or(s.len(), |k| e + k);
+    let end = s[e..]
+        .iter()
+        .position(|b| b" ,]}\r\n\t\x0c".contains(b))
+        .map_or(s.len(), |k| e + k);
     Some((start, end - start))
 }
 
@@ -290,7 +300,10 @@ mod tests {
     #[test]
     fn json_decode_test_port_from_cpp() {
         for (input, expected) in [
-            (&b"Test \\\"quoted\\\" text"[..], &b"Test \"quoted\" text"[..]),
+            (
+                &b"Test \\\"quoted\\\" text"[..],
+                &b"Test \"quoted\" text"[..],
+            ),
             (b"Test \\u0026 ampersand", b"Test & ampersand"),
             (b"Test \\u0026 \\u0026 \\u0026", b"Test & & &"),
             (

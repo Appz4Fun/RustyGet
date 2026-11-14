@@ -24,7 +24,6 @@ pub enum Severity {
 }
 
 impl Severity {
-
     pub fn as_cstr(self) -> &'static CStr {
         match self {
             Self::Ok => c"Ok",
@@ -80,16 +79,16 @@ impl HealthStatus {
     }
 
     pub fn and_then(self, f: impl FnOnce() -> Self) -> Self {
-        if self.is_ok() { f() } else { self }
+        if self.is_ok() {
+            f()
+        } else {
+            self
+        }
     }
 }
 
 /// Helper to emit only non-Ok option statuses into a section report.
-fn emit_if_not_ok(
-    out: &mut impl FnMut(&str, Severity, &[u8]),
-    name: &str,
-    status: HealthStatus,
-) {
+fn emit_if_not_ok(out: &mut impl FnMut(&str, Severity, &[u8]), name: &str, status: HealthStatus) {
     if !status.is_ok() {
         out(name, status.severity, &status.message);
     }
@@ -571,23 +570,15 @@ pub fn validate_paths_section(
     let main_status = validate_required_writable_dir(b"MainDir", input.main_dir);
     emit_if_not_ok(&mut emit, "MainDir", main_status);
 
-    let dest_status = validate_required_writable_dir(b"DestDir", input.dest_dir).and_then(|| {
-        unique_path(
-            b"DestDir",
-            input.dest_dir,
-            &[(b"MainDir", input.main_dir)],
-        )
-    });
+    let dest_status = validate_required_writable_dir(b"DestDir", input.dest_dir)
+        .and_then(|| unique_path(b"DestDir", input.dest_dir, &[(b"MainDir", input.main_dir)]));
     emit_if_not_ok(&mut emit, "DestDir", dest_status);
 
     let inter_status = validate_inter_dir_path(input.inter_dir).and_then(|| {
         unique_path(
             b"InterDir",
             input.inter_dir,
-            &[
-                (b"MainDir", input.main_dir),
-                (b"DestDir", input.dest_dir),
-            ],
+            &[(b"MainDir", input.main_dir), (b"DestDir", input.dest_dir)],
         )
     });
     emit_if_not_ok(&mut emit, "InterDir", inter_status);
@@ -605,18 +596,19 @@ pub fn validate_paths_section(
     });
     emit_if_not_ok(&mut emit, "NzbDir", nzb_status);
 
-    let queue_status = validate_required_writable_dir(b"QueueDir", input.queue_dir).and_then(|| {
-        unique_path(
-            b"QueueDir",
-            input.queue_dir,
-            &[
-                (b"MainDir", input.main_dir),
-                (b"DestDir", input.dest_dir),
-                (b"InterDir", input.inter_dir),
-                (b"NzbDir", input.nzb_dir),
-            ],
-        )
-    });
+    let queue_status =
+        validate_required_writable_dir(b"QueueDir", input.queue_dir).and_then(|| {
+            unique_path(
+                b"QueueDir",
+                input.queue_dir,
+                &[
+                    (b"MainDir", input.main_dir),
+                    (b"DestDir", input.dest_dir),
+                    (b"InterDir", input.inter_dir),
+                    (b"NzbDir", input.nzb_dir),
+                ],
+            )
+        });
     emit_if_not_ok(&mut emit, "QueueDir", queue_status);
 
     let web_status = validate_web_dir_path(input.web_dir).and_then(|| {
@@ -665,41 +657,39 @@ pub fn validate_paths_section(
     });
     emit_if_not_ok(&mut emit, "LogFile", log_status);
 
-    let cert_status =
-        validate_cert_store_path(input.cert_store, input.cert_check).and_then(|| {
-            unique_path(
-                b"CertStore",
-                input.cert_store_path,
-                &[
-                    (b"MainDir", input.main_dir),
-                    (b"DestDir", input.dest_dir),
-                    (b"InterDir", input.inter_dir),
-                    (b"NzbDir", input.nzb_dir),
-                    (b"QueueDir", input.queue_dir),
-                    (b"WebDir", input.web_dir),
-                    (b"TempDir", input.temp_dir),
-                    (b"ConfigTemplate", input.config_template),
-                    (b"LogFile", input.log_file),
-                    (b"ConfigFile", input.config_file),
-                ],
-            )
-        });
+    let cert_status = validate_cert_store_path(input.cert_store, input.cert_check).and_then(|| {
+        unique_path(
+            b"CertStore",
+            input.cert_store_path,
+            &[
+                (b"MainDir", input.main_dir),
+                (b"DestDir", input.dest_dir),
+                (b"InterDir", input.inter_dir),
+                (b"NzbDir", input.nzb_dir),
+                (b"QueueDir", input.queue_dir),
+                (b"WebDir", input.web_dir),
+                (b"TempDir", input.temp_dir),
+                (b"ConfigTemplate", input.config_template),
+                (b"LogFile", input.log_file),
+                (b"ConfigFile", input.config_file),
+            ],
+        )
+    });
     emit_if_not_ok(&mut emit, "CertStore", cert_status);
 
-    let lock_status =
-        validate_lock_file_path(input.lock_file, input.daemon_mode).and_then(|| {
-            unique_path(
-                b"LockFile",
-                input.lock_file,
-                &[
-                    (b"MainDir", input.main_dir),
-                    (b"ConfigTemplate", input.config_template),
-                    (b"LogFile", input.log_file),
-                    (b"CertStore", input.cert_store_path),
-                    (b"ConfigFile", input.config_file),
-                ],
-            )
-        });
+    let lock_status = validate_lock_file_path(input.lock_file, input.daemon_mode).and_then(|| {
+        unique_path(
+            b"LockFile",
+            input.lock_file,
+            &[
+                (b"MainDir", input.main_dir),
+                (b"ConfigTemplate", input.config_template),
+                (b"LogFile", input.log_file),
+                (b"CertStore", input.cert_store_path),
+                (b"ConfigFile", input.config_file),
+            ],
+        )
+    });
     emit_if_not_ok(&mut emit, "LockFile", lock_status);
 }
 
@@ -1886,7 +1876,9 @@ pub fn validate_server_encryption(active: bool, tls: bool) -> HealthStatus {
         return HealthStatus::ok();
     }
     if !tls {
-        HealthStatus::warning("TLS is disabled. Communication with this server will not be encrypted")
+        HealthStatus::warning(
+            "TLS is disabled. Communication with this server will not be encrypted",
+        )
     } else {
         HealthStatus::ok()
     }
@@ -1922,7 +1914,9 @@ pub fn validate_server_connections(
         );
     }
     if max_connections < 8 {
-        return HealthStatus::warning("A low number of connections may impact download performance");
+        return HealthStatus::warning(
+            "A low number of connections may impact download performance",
+        );
     }
     HealthStatus::ok()
 }
@@ -1944,11 +1938,7 @@ pub fn validate_server_retention(active: bool, retention: i32) -> HealthStatus {
     HealthStatus::ok()
 }
 
-pub fn validate_server_cert_verification(
-    active: bool,
-    tls: bool,
-    cert_level: u32,
-) -> HealthStatus {
+pub fn validate_server_cert_verification(active: bool, tls: bool, cert_level: u32) -> HealthStatus {
     if !active || !tls {
         return HealthStatus::ok();
     }
@@ -2004,11 +1994,7 @@ pub fn validate_news_server_section(
     }
 
     if input.active && !(0..=99).contains(&input.level) {
-        emit(
-            "Level",
-            Severity::Error,
-            b"Level must be between 0 and 99",
-        );
+        emit("Level", Severity::Error, b"Level must be between 0 and 99");
     }
 
     emit_if_not_ok(
@@ -2018,11 +2004,7 @@ pub fn validate_news_server_section(
     );
 
     if input.active && !(0..=99).contains(&input.group) {
-        emit(
-            "Group",
-            Severity::Error,
-            b"Group must be between 0 and 99",
-        );
+        emit("Group", Severity::Error, b"Group must be between 0 and 99");
     }
 
     emit_if_not_ok(
@@ -2249,7 +2231,15 @@ pub fn log_format_rotated_path_for_time(
     base_ext: &[u8],
 ) -> Vec<u8> {
     let (year, month, mday) = crate::statmeter::days_to_ymd(cur_time.div_euclid(86_400));
-    log_format_rotated_path(directory, sep, base_name, year as i32, month, mday, base_ext)
+    log_format_rotated_path(
+        directory,
+        sep,
+        base_name,
+        year as i32,
+        month,
+        mday,
+        base_ext,
+    )
 }
 
 /// Executes `Log::RotateLog`: scans the log directory for rotated log files matching
@@ -2284,9 +2274,7 @@ pub fn log_rotate_log_file(
             let m0 = captures.first().map_or(0, |&(s, _)| s.max(0) as usize);
             let m1 = captures.get(1).map_or(0, |&(s, _)| s.max(0) as usize);
             let m2 = captures.get(2).map_or(0, |&(s, _)| s.max(0) as usize);
-            if log_should_delete_rotated_file_by_name(
-                filename, m0, m1, m2, cur_time, rotate_log,
-            ) {
+            if log_should_delete_rotated_file_by_name(filename, m0, m1, m2, cur_time, rotate_log) {
                 let msg = log_format_deleting_old_msg(filename);
                 on_info(&msg);
                 if let Ok(full_cstr) = std::ffi::CString::new(full_filename) {
@@ -2884,16 +2872,46 @@ pub fn system_info_format(
     ];
     let ssl_ver_extracted;
     let mut libraries = vec![
-        SystemLibraryView { name: b"zipfast", version: b"0.1.0" },
-        SystemLibraryView { name: b"zipview", version: b"0.1.0" },
-        SystemLibraryView { name: b"par-rs", version: b"0.2.0" },
-        SystemLibraryView { name: b"nntmux-yenc", version: b"0.1.0 (SIMD)" },
-        SystemLibraryView { name: b"flate2 (zlib-rs)", version: b"1.1.11" },
-        SystemLibraryView { name: b"zstd", version: b"0.14.0" },
-        SystemLibraryView { name: b"bzip2", version: b"0.6.1" },
-        SystemLibraryView { name: b"crc32fast", version: b"1.5.2" },
-        SystemLibraryView { name: b"quick-xml", version: b"0.41.0" },
-        SystemLibraryView { name: b"md-5", version: b"0.11.0" },
+        SystemLibraryView {
+            name: b"zipfast",
+            version: b"0.1.0",
+        },
+        SystemLibraryView {
+            name: b"zipview",
+            version: b"0.1.0",
+        },
+        SystemLibraryView {
+            name: b"par-rs",
+            version: b"0.2.0",
+        },
+        SystemLibraryView {
+            name: b"nntmux-yenc",
+            version: b"0.1.0 (SIMD)",
+        },
+        SystemLibraryView {
+            name: b"flate2 (zlib-rs)",
+            version: b"1.1.11",
+        },
+        SystemLibraryView {
+            name: b"zstd",
+            version: b"0.14.0",
+        },
+        SystemLibraryView {
+            name: b"bzip2",
+            version: b"0.6.1",
+        },
+        SystemLibraryView {
+            name: b"crc32fast",
+            version: b"1.5.2",
+        },
+        SystemLibraryView {
+            name: b"quick-xml",
+            version: b"0.41.0",
+        },
+        SystemLibraryView {
+            name: b"md-5",
+            version: b"0.11.0",
+        },
     ];
     if !ssl_lib_name.is_empty() {
         let ver = if ssl_extract_after_space {
@@ -2932,7 +2950,6 @@ pub fn system_info_fetch_network<F>(
     host: &str,
     use_tls: bool,
     include_gzip: bool,
-    version_revision: &[u8],
     tls_exchange: F,
 ) -> Result<(Vec<u8>, Vec<u8>), String>
 where
@@ -2963,12 +2980,7 @@ where
         .map(|a| a.ip().to_string().into_bytes())
         .unwrap_or_default();
 
-    let req = crate::webdownload::http_client_build_headers(
-        b"GET",
-        host.as_bytes(),
-        version_revision,
-        include_gzip,
-    );
+    let req = crate::webdownload::http_client_build_headers(b"GET", host.as_bytes(), include_gzip);
 
     let raw_resp = if use_tls {
         #[cfg(unix)]
@@ -3123,12 +3135,7 @@ struct HealthSectionEntry {
     subsections: Vec<HealthSubsectionEntry>,
 }
 
-fn push_health_option(
-    options: &mut Vec<HealthOptionEntry>,
-    name: &str,
-    sev: Severity,
-    msg: &[u8],
-) {
+fn push_health_option(options: &mut Vec<HealthOptionEntry>, name: &str, sev: Severity, msg: &[u8]) {
     if sev != Severity::Ok {
         options.push(HealthOptionEntry {
             name: name.to_string(),
@@ -3510,7 +3517,14 @@ where
                 if opt.severity == Severity::Error || opt.severity == Severity::Warning {
                     let mut line = format!("[{}][{}]: ", sec.name, opt.name).into_bytes();
                     line.extend_from_slice(&opt.message);
-                    on_log(if opt.severity == Severity::Error { 2 } else { 1 }, &line);
+                    on_log(
+                        if opt.severity == Severity::Error {
+                            2
+                        } else {
+                            1
+                        },
+                        &line,
+                    );
                 }
             }
             for sub in &sec.subsections {
@@ -3519,7 +3533,14 @@ where
                         let mut line =
                             format!("[{}][{}.{}]: ", sec.name, sub.name, opt.name).into_bytes();
                         line.extend_from_slice(&opt.message);
-                        on_log(if opt.severity == Severity::Error { 2 } else { 1 }, &line);
+                        on_log(
+                            if opt.severity == Severity::Error {
+                                2
+                            } else {
+                                1
+                            },
+                            &line,
+                        );
                     }
                 }
             }
@@ -3605,7 +3626,9 @@ where
             write_xml_node_member(&mut out, b"Message", b"string", &issue.message);
             out.extend_from_slice(b"</struct></value>");
         }
-        out.extend_from_slice(b"</data></array></value></member><member><name>Options</name><value><array><data>");
+        out.extend_from_slice(
+            b"</data></array></value></member><member><name>Options</name><value><array><data>",
+        );
         for opt in &sec.options {
             out.extend_from_slice(b"<value><struct>");
             write_xml_node_member(&mut out, b"Name", b"string", opt.name.as_bytes());
@@ -3618,7 +3641,9 @@ where
             write_xml_node_member(&mut out, b"Message", b"string", &opt.message);
             out.extend_from_slice(b"</struct></value>");
         }
-        out.extend_from_slice(b"</data></array></value></member><member><name>Subsections</name><value><array><data>");
+        out.extend_from_slice(
+            b"</data></array></value></member><member><name>Subsections</name><value><array><data>",
+        );
         for sub in &sec.subsections {
             out.extend_from_slice(b"<value><struct>");
             write_xml_node_member(&mut out, b"Name", b"string", sub.name.as_bytes());
@@ -3645,11 +3670,7 @@ where
 
 /// Classifies an `/etc/os-release` line for `OS::InitOSInfoFromOSRelease`:
 /// `(1, 5)` for `NAME=`, `(2, 11)` for `VERSION_ID=`, `(3, 9)` for `BUILD_ID=`, or `(0, 0)`.
-pub fn os_classify_os_release_line(
-    line: &[u8],
-    has_name: bool,
-    has_version: bool,
-) -> (i32, usize) {
+pub fn os_classify_os_release_line(line: &[u8], has_name: bool, has_version: bool) -> (i32, usize) {
     if !has_name && line.starts_with(b"NAME=") {
         (1, 5)
     } else if !has_version && line.starts_with(b"VERSION_ID=") {
@@ -3795,10 +3816,8 @@ mod tests {
         assert!(unique_path(b"EmptyDir", Path::new(""), &others).is_ok());
         let dup = unique_path(b"InterimDir", Path::new("/data/downloads"), &others);
         assert_eq!(dup.severity, Severity::Warning);
-        assert!(
-            String::from_utf8_lossy(&dup.message)
-                .contains("'InterimDir' and 'DownloadDir' are identical")
-        );
+        assert!(String::from_utf8_lossy(&dup.message)
+            .contains("'InterimDir' and 'DownloadDir' are identical"));
     }
 
     #[test]
@@ -3954,7 +3973,10 @@ mod tests {
         assert!(validate_web_dir_path(&tmp.path.join("noweb")).is_error());
 
         let log_path = tmp.path.join("nzbget.log");
-        assert_eq!(validate_log_file_path(Path::new(""), 1).severity, Severity::Warning);
+        assert_eq!(
+            validate_log_file_path(Path::new(""), 1).severity,
+            Severity::Warning
+        );
         let log_none = validate_log_file_path(Path::new(""), 0);
         assert!(log_none.is_ok());
         assert!(log_none.message.is_empty());
@@ -3980,16 +4002,17 @@ mod tests {
         let lock_path = tmp.path.join("nzbget.lock");
         let lock_empty = validate_lock_file_path(Path::new(""), true);
         assert_eq!(lock_empty.severity, Severity::Warning);
-        assert!(
-            String::from_utf8_lossy(&lock_empty.message)
-                .contains("check for another running instance is disabled")
-        );
+        assert!(String::from_utf8_lossy(&lock_empty.message)
+            .contains("check for another running instance is disabled"));
         assert!(validate_lock_file_path(Path::new(""), false).is_ok());
         assert!(validate_lock_file_path(Path::new("random/path"), false).is_ok());
         assert!(validate_lock_file_path(&tmp.path.join("not_yet_created.lock"), true).is_ok());
         std::fs::write(&lock_path, b"pid").unwrap();
         assert!(validate_lock_file_path(&lock_path, true).is_ok());
-        assert!(validate_lock_file_path(&tmp.path.join("missing_dir").join("nzbget.lock"), true).is_error());
+        assert!(
+            validate_lock_file_path(&tmp.path.join("missing_dir").join("nzbget.lock"), true)
+                .is_error()
+        );
     }
 
     #[test]
@@ -4030,7 +4053,10 @@ mod tests {
         // FeedValidator
         assert!(validate_feed_cert(b"https://my.feed.com", 2).is_ok());
         assert!(validate_feed_cert(b"", 0).is_ok());
-        assert_eq!(validate_feed_cert(b"https://my.feed.com", 0).severity, Severity::Warning);
+        assert_eq!(
+            validate_feed_cert(b"https://my.feed.com", 0).severity,
+            Severity::Warning
+        );
         assert!(validate_feed_cert(b"https://my.feed.com", 1).is_ok());
         assert!(validate_feed_cert(b"http://my.feed.com", 0).is_ok());
 
@@ -4041,9 +4067,15 @@ mod tests {
         assert_eq!(feed_opts, vec![("URL".to_string(), Severity::Warning)]);
 
         feed_opts.clear();
-        validate_feed_section(b"MyFeed", b"https://example.com/rss", 15, 0, |name, sev, _| {
-            feed_opts.push((name.to_string(), sev));
-        });
+        validate_feed_section(
+            b"MyFeed",
+            b"https://example.com/rss",
+            15,
+            0,
+            |name, sev, _| {
+                feed_opts.push((name.to_string(), sev));
+            },
+        );
         assert_eq!(
             feed_opts,
             vec![("CertVerification".to_string(), Severity::Warning)]
@@ -4074,7 +4106,10 @@ mod tests {
 
         // SecurityValidator
         assert!(!validate_control_password(b"").is_ok());
-        assert_eq!(validate_control_password(b"tegbzn6789").severity, Severity::Info);
+        assert_eq!(
+            validate_control_password(b"tegbzn6789").severity,
+            Severity::Info
+        );
         assert!(validate_control_password(b"a-long-password").is_ok());
         assert_eq!(
             validate_form_auth(true, false, false, true, true).severity,
@@ -4107,61 +4142,103 @@ mod tests {
 
         assert!(validate_server_port(true, 563, true).is_ok());
         assert!(validate_server_port(true, 443, true).is_ok());
-        assert_eq!(validate_server_port(true, 9000, true).severity, Severity::Info);
+        assert_eq!(
+            validate_server_port(true, 9000, true).severity,
+            Severity::Info
+        );
         assert!(validate_server_port(true, 119, false).is_ok());
-        assert_eq!(validate_server_port(true, 8080, false).severity, Severity::Info);
+        assert_eq!(
+            validate_server_port(true, 8080, false).severity,
+            Severity::Info
+        );
 
         assert!(validate_server_username(true, b"user").is_ok());
-        assert_eq!(validate_server_username(true, b"").severity, Severity::Warning);
-        assert_eq!(validate_server_password(true, b"pass").severity, Severity::Info);
-        assert_eq!(validate_server_password(true, b"").severity, Severity::Warning);
-        assert_eq!(validate_server_password(true, b"123").severity, Severity::Info);
+        assert_eq!(
+            validate_server_username(true, b"").severity,
+            Severity::Warning
+        );
+        assert_eq!(
+            validate_server_password(true, b"pass").severity,
+            Severity::Info
+        );
+        assert_eq!(
+            validate_server_password(true, b"").severity,
+            Severity::Warning
+        );
+        assert_eq!(
+            validate_server_password(true, b"123").severity,
+            Severity::Info
+        );
 
         assert!(validate_server_connections(true, 50, false).is_ok());
-        assert_eq!(validate_server_connections(true, 4, false).severity, Severity::Warning);
-        assert_eq!(validate_server_connections(true, 0, false).severity, Severity::Warning);
+        assert_eq!(
+            validate_server_connections(true, 4, false).severity,
+            Severity::Warning
+        );
+        assert_eq!(
+            validate_server_connections(true, 0, false).severity,
+            Severity::Warning
+        );
         assert!(validate_server_connections(true, 1000, false).is_error());
-        assert_eq!(validate_server_connections(true, 2, true).severity, Severity::Warning);
+        assert_eq!(
+            validate_server_connections(true, 2, true).severity,
+            Severity::Warning
+        );
 
         assert!(validate_server_encryption(true, true).is_ok());
-        assert_eq!(validate_server_encryption(true, false).severity, Severity::Warning);
+        assert_eq!(
+            validate_server_encryption(true, false).severity,
+            Severity::Warning
+        );
         assert!(validate_server_cipher(true, b"", true).is_ok());
-        assert_eq!(validate_server_cipher(true, b"AES", true).severity, Severity::Info);
-        assert_eq!(validate_server_cipher(true, b"AES", false).severity, Severity::Warning);
+        assert_eq!(
+            validate_server_cipher(true, b"AES", true).severity,
+            Severity::Info
+        );
+        assert_eq!(
+            validate_server_cipher(true, b"AES", false).severity,
+            Severity::Warning
+        );
 
         assert!(validate_server_retention(true, 0).is_ok());
         assert!(validate_server_retention(true, 3000).is_ok());
-        assert_eq!(validate_server_retention(true, 50).severity, Severity::Warning);
-        assert_eq!(validate_server_retention(true, 20000).severity, Severity::Info);
+        assert_eq!(
+            validate_server_retention(true, 50).severity,
+            Severity::Warning
+        );
+        assert_eq!(
+            validate_server_retention(true, 20000).severity,
+            Severity::Info
+        );
 
         assert!(validate_server_optional(true, false, 0).is_ok());
         assert!(validate_server_optional(true, true, 1).is_ok());
-        assert_eq!(validate_server_optional(true, true, 0).severity, Severity::Info);
+        assert_eq!(
+            validate_server_optional(true, true, 0).severity,
+            Severity::Info
+        );
 
         assert!(validate_server_cert_verification(true, true, 2).is_ok());
-        assert_eq!(validate_server_cert_verification(true, true, 0).severity, Severity::Warning);
+        assert_eq!(
+            validate_server_cert_verification(true, true, 0).severity,
+            Severity::Warning
+        );
         assert!(validate_server_cert_verification(true, false, 0).is_ok());
 
         let no_srv = validate_primary_server_exists(&[], &[]);
         assert!(no_srv.is_error());
-        assert!(
-            String::from_utf8_lossy(&no_srv.message)
-                .contains("At least one server must be configured")
-        );
+        assert!(String::from_utf8_lossy(&no_srv.message)
+            .contains("At least one server must be configured"));
         let no_active = validate_primary_server_exists(&[0, 1], &[0, 0]);
         assert!(no_active.is_error());
-        assert!(
-            String::from_utf8_lossy(&no_active.message)
-                .contains("At least one primary server must be active")
-        );
+        assert!(String::from_utf8_lossy(&no_active.message)
+            .contains("At least one primary server must be active"));
         assert!(validate_primary_server_exists(&[0, 1], &[1, 0]).is_ok());
         assert!(validate_primary_server_exists(&[0, 0], &[1, 1]).is_ok());
         let higher_only = validate_primary_server_exists(&[0, 1], &[0, 1]);
         assert!(higher_only.is_error());
-        assert!(
-            String::from_utf8_lossy(&higher_only.message)
-                .contains("At least one primary server must be active")
-        );
+        assert!(String::from_utf8_lossy(&higher_only.message)
+            .contains("At least one primary server must be active"));
     }
 
     #[test]
@@ -4283,7 +4360,8 @@ mod tests {
         assert_eq!(xml_res, expected_xml.as_bytes());
 
         // XmlValueWithAmpersandTest and non-ASCII UTF-8 preservation
-        let xml_amp = xml_serialize_struct_member(b"Path", b"string", "/opt/R&D/café/unrar".as_bytes());
+        let xml_amp =
+            xml_serialize_struct_member(b"Path", b"string", "/opt/R&D/café/unrar".as_bytes());
         assert_eq!(
             std::str::from_utf8(&xml_amp).unwrap(),
             "<struct><member><name>Path</name><value><string>/opt/R&amp;D/café/unrar</string></value></member></struct>"
@@ -4304,9 +4382,13 @@ mod tests {
             libraries: &[],
         };
         let utf8_json = system_info_to_json(&utf8_view);
-        assert!(std::str::from_utf8(&utf8_json).unwrap().contains("\"/opt/café/python3\""));
+        assert!(std::str::from_utf8(&utf8_json)
+            .unwrap()
+            .contains("\"/opt/café/python3\""));
         let utf8_xml = system_info_to_xml(&utf8_view);
-        assert!(std::str::from_utf8(&utf8_xml).unwrap().contains("<string>/opt/café/python3</string>"));
+        assert!(std::str::from_utf8(&utf8_xml)
+            .unwrap()
+            .contains("<string>/opt/café/python3</string>"));
     }
 
     #[test]
@@ -4319,7 +4401,9 @@ mod tests {
         let queue_dir = tmp.path.join("queue");
         let temp_dir = tmp.path.join("temp");
         let cfg_file = tmp.path.join("rustyget.conf");
-        for d in [&main_dir, &dest_dir, &inter_dir, &nzb_dir, &queue_dir, &temp_dir] {
+        for d in [
+            &main_dir, &dest_dir, &inter_dir, &nzb_dir, &queue_dir, &temp_dir,
+        ] {
             std::fs::create_dir_all(d).unwrap();
         }
         std::fs::write(&cfg_file, b"MainDir=/tmp\n").unwrap();
@@ -4477,8 +4561,11 @@ mod tests {
             logs.push((sev, String::from_utf8_lossy(msg).into_owned()));
         });
         assert!(out_log.is_empty());
-        assert!(logs.iter().any(|(sev, m)| *sev == 2 && m.contains("[Scheduler][Task1.Time]: Invalid hour: 25")));
-        assert!(logs.iter().any(|(sev, m)| *sev == 1 && m.contains("[Categories][Category1.Name]: Category name is empty")));
+        assert!(logs
+            .iter()
+            .any(|(sev, m)| *sev == 2 && m.contains("[Scheduler][Task1.Time]: Invalid hour: 25")));
+        assert!(logs.iter().any(|(sev, m)| *sev == 1
+            && m.contains("[Categories][Category1.Name]: Category name is empty")));
 
         let json_out = String::from_utf8(diagnose_system_health(&input, 1, |_, _| {})).unwrap();
         assert!(json_out.starts_with("{\"Alerts\":[],\"Sections\":["));
@@ -4542,13 +4629,18 @@ mod tests {
     fn test_log_rotate_time_helpers() {
         // 2026-03-10 00:00:00 UTC
         let cur_time = crate::util::util_internal_timegm(2026 - 1900, 2, 10, 0, 0, 0);
-        let path = log_format_rotated_path_for_time(b"/var/log", b'/', b"rustyget", cur_time, b".log");
+        let path =
+            log_format_rotated_path_for_time(b"/var/log", b'/', b"rustyget", cur_time, b".log");
         assert_eq!(path, b"/var/log/rustyget-2026-03-10.log");
 
         // rustyget-2026-03-05.log -> 5 days older than 2026-03-10
         let fname = b"rustyget-2026-03-05.log";
-        assert!(log_should_delete_rotated_file_by_name(fname, 9, 14, 17, cur_time, 3));
-        assert!(!log_should_delete_rotated_file_by_name(fname, 9, 14, 17, cur_time, 10));
+        assert!(log_should_delete_rotated_file_by_name(
+            fname, 9, 14, 17, cur_time, 3
+        ));
+        assert!(!log_should_delete_rotated_file_by_name(
+            fname, 9, 14, 17, cur_time, 10
+        ));
 
         #[cfg(unix)]
         {
@@ -4560,21 +4652,23 @@ mod tests {
             std::fs::write(&recent_log, b"recent").unwrap();
             let base_log = tmp.path.join("rustyget.log");
             let mut info_msgs = Vec::new();
-            let rotated = log_rotate_log_file(
-                base_log.as_os_str().as_bytes(),
-                b'/',
-                cur_time,
-                3,
-                |msg| info_msgs.push(msg.to_vec()),
-            );
+            let rotated =
+                log_rotate_log_file(base_log.as_os_str().as_bytes(), b'/', cur_time, 3, |msg| {
+                    info_msgs.push(msg.to_vec())
+                });
             assert_eq!(
                 rotated,
-                tmp.path.join("rustyget-2026-03-10.log").as_os_str().as_bytes()
+                tmp.path
+                    .join("rustyget-2026-03-10.log")
+                    .as_os_str()
+                    .as_bytes()
             );
             assert!(!old_log.exists());
             assert!(recent_log.exists());
-            assert_eq!(info_msgs, vec![b"Deleting old log-file rustyget-2026-03-05.log\n".to_vec()]);
+            assert_eq!(
+                info_msgs,
+                vec![b"Deleting old log-file rustyget-2026-03-05.log\n".to_vec()]
+            );
         }
     }
 }
-

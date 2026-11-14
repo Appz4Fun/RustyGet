@@ -85,10 +85,7 @@ pub fn make_unique_path(target_path: &Path) -> PathBuf {
     }
 
     let base_dir = target_path.parent().unwrap_or_else(|| Path::new(""));
-    let file_name = target_path
-        .file_name()
-        .map(os_str_to_bytes)
-        .unwrap_or(b"");
+    let file_name = target_path.file_name().map(os_str_to_bytes).unwrap_or(b"");
     let (stem, ext) = split_stem_and_ext(file_name);
 
     let mut counter: i32 = 1;
@@ -243,10 +240,7 @@ where
                 }
             }
         } else {
-            let filename_bytes = entry_path
-                .file_name()
-                .map(os_str_to_bytes)
-                .unwrap_or(b"");
+            let filename_bytes = entry_path.file_name().map(os_str_to_bytes).unwrap_or(b"");
             let is_dot_file = filename_bytes.starts_with(b".");
 
             if !is_dot_file {
@@ -424,8 +418,8 @@ where
 
         let full_path = entry.path();
         // A symlink to a directory is not traversed (`DirectoryExists && !IsLink`).
-        let is_link = std::fs::symlink_metadata(&full_path)
-            .is_ok_and(|m| m.file_type().is_symlink());
+        let is_link =
+            std::fs::symlink_metadata(&full_path).is_ok_and(|m| m.file_type().is_symlink());
         let dir_exists = std::fs::metadata(&full_path).is_ok_and(|m| m.is_dir());
         let is_dir = dir_exists && !is_link;
 
@@ -697,7 +691,9 @@ impl crate::collection::Disk for FsCollectionDisk<'_> {
 /// Analyzes a directory recursively (`CollectionAnalyzer::AnalyzeDirectory`), returning the
 /// discovered `crate::collection::Entry` list and `crate::collection::Analysis` (with
 /// `disc_structure` set if a disc structure subdirectory was encountered).
-pub fn analyze_directory(dir: &Path) -> (Vec<crate::collection::Entry>, crate::collection::Analysis) {
+pub fn analyze_directory(
+    dir: &Path,
+) -> (Vec<crate::collection::Entry>, crate::collection::Analysis) {
     let (entries, disc_found) = walk_collection_dir(dir);
     let mut analysis = crate::collection::analyze(&entries);
     if disc_found {
@@ -1041,7 +1037,10 @@ fn dispose_archive<L>(
     L: FnMut(CleanupLogKind, &[u8]),
 {
     let filename_bytes = archive_file.file_name().map(os_str_to_bytes).unwrap_or(b"");
-    let processed_dir_name = processed_dir.file_name().map(os_str_to_bytes).unwrap_or(b"");
+    let processed_dir_name = processed_dir
+        .file_name()
+        .map(os_str_to_bytes)
+        .unwrap_or(b"");
     let dispose_action = archive_decide_dispose_action(config_action, non_nzb_file_count);
 
     if dispose_action == 1 {
@@ -1056,7 +1055,8 @@ fn dispose_archive<L>(
         on_log(CleanupLogKind::Info, &msg);
 
         let _ = std::fs::create_dir_all(processed_dir);
-        let dst = make_unique_path(&processed_dir.join(archive_file.file_name().unwrap_or_default()));
+        let dst =
+            make_unique_path(&processed_dir.join(archive_file.file_name().unwrap_or_default()));
         if let Err(err) = move_single_file(archive_file, &dst) {
             let (err_msg, code) = move_error_msg_and_code(&err);
             let mut warn_msg = Vec::with_capacity(
@@ -1085,8 +1085,7 @@ fn dispose_archive<L>(
             Err(e) if e.kind() != io::ErrorKind::NotFound => {
                 let err_msg = format_io_error(&e);
                 let code = e.raw_os_error().unwrap_or(1);
-                let mut warn_msg =
-                    Vec::with_capacity(80 + filename_bytes.len() + err_msg.len());
+                let mut warn_msg = Vec::with_capacity(80 + filename_bytes.len() + err_msg.len());
                 warn_msg.extend_from_slice(b"ArchiveProcessor: Failed to delete archive '");
                 warn_msg.extend_from_slice(filename_bytes);
                 warn_msg.extend_from_slice(b"': ");
@@ -1108,7 +1107,8 @@ fn dispose_archive<L>(
         on_log(CleanupLogKind::Info, &msg);
 
         let _ = std::fs::create_dir_all(processed_dir);
-        let dst = make_unique_path(&processed_dir.join(archive_file.file_name().unwrap_or_default()));
+        let dst =
+            make_unique_path(&processed_dir.join(archive_file.file_name().unwrap_or_default()));
         if let Err(err) = move_single_file(archive_file, &dst) {
             let (err_msg, code) = move_error_msg_and_code(&err);
             let mut warn_msg = Vec::with_capacity(
@@ -1199,8 +1199,7 @@ pub fn archive_finish_extracted<L, M>(
             }
             Err(err) => {
                 let err_msg = format_move_file_error(&err);
-                let mut err_log =
-                    Vec::with_capacity(48 + from_fname.len() + err_msg.len());
+                let mut err_log = Vec::with_capacity(48 + from_fname.len() + err_msg.len());
                 err_log.extend_from_slice(b"ArchiveProcessor: Failed to move NZB '");
                 err_log.extend_from_slice(from_fname);
                 err_log.extend_from_slice(b"': ");
@@ -1405,12 +1404,10 @@ mod tests {
         std::fs::write(work_dir.join("trash.nfo"), b"nfo").unwrap();
 
         let mut logs = Vec::new();
-        let (outcome, status) = run_cleanup(
-            &work_dir,
-            Path::new(""),
-            b".nfo, .sfv",
-            |kind, msg| logs.push((kind, String::from_utf8_lossy(msg).into_owned())),
-        );
+        let (outcome, status) =
+            run_cleanup(&work_dir, Path::new(""), b".nfo, .sfv", |kind, msg| {
+                logs.push((kind, String::from_utf8_lossy(msg).into_owned()))
+            });
         assert_eq!((outcome, status), (1, 2));
         assert!(work_dir.join("keep.mkv").exists());
         assert!(!work_dir.join("trash.nfo").exists());
@@ -1512,9 +1509,27 @@ mod tests {
 
         // 1. CollectionAnalyzerSingleFeatureDominanceTest
         let files = vec![
-            make_entry("/path/feature.mkv", "feature.mkv", "feature", ".mkv", 4_000_000_000),
-            make_entry("/path/sample.mkv", "sample.mkv", "sample", ".mkv", 50_000_000),
-            make_entry("/path/feature.en.srt", "feature.en.srt", "feature.en", ".srt", 100_000),
+            make_entry(
+                "/path/feature.mkv",
+                "feature.mkv",
+                "feature",
+                ".mkv",
+                4_000_000_000,
+            ),
+            make_entry(
+                "/path/sample.mkv",
+                "sample.mkv",
+                "sample",
+                ".mkv",
+                50_000_000,
+            ),
+            make_entry(
+                "/path/feature.en.srt",
+                "feature.en.srt",
+                "feature.en",
+                ".srt",
+                100_000,
+            ),
         ];
         let res = analyze(&files);
         assert!(res.can_rename(&files));
@@ -1535,8 +1550,20 @@ mod tests {
 
         // 3. CollectionAnalyzerDominantRatioTest
         let files = vec![
-            make_entry("/path/feature.mkv", "feature.mkv", "feature", ".mkv", 4_000_000_000),
-            make_entry("/path/extra.mkv", "extra.mkv", "extra", ".mkv", 1_000_000_000),
+            make_entry(
+                "/path/feature.mkv",
+                "feature.mkv",
+                "feature",
+                ".mkv",
+                4_000_000_000,
+            ),
+            make_entry(
+                "/path/extra.mkv",
+                "extra.mkv",
+                "extra",
+                ".mkv",
+                1_000_000_000,
+            ),
         ];
         let res = analyze(&files);
         assert!(res.can_rename(&files));
@@ -1545,8 +1572,20 @@ mod tests {
 
         // 4. CollectionAnalyzerDiscStructureProtectionTest
         let files = vec![
-            make_entry("/path/BDMV/STREAM/00001.m2ts", "00001.m2ts", "00001", ".m2ts", 20_000_000_000),
-            make_entry("/path/BDMV/PLAYLIST/00001.mpls", "00001.mpls", "00001", ".mpls", 5_000),
+            make_entry(
+                "/path/BDMV/STREAM/00001.m2ts",
+                "00001.m2ts",
+                "00001",
+                ".m2ts",
+                20_000_000_000,
+            ),
+            make_entry(
+                "/path/BDMV/PLAYLIST/00001.mpls",
+                "00001.mpls",
+                "00001",
+                ".mpls",
+                5_000,
+            ),
         ];
         let res = analyze(&files);
         assert!(res.disc_structure);
@@ -1554,8 +1593,20 @@ mod tests {
 
         // 5. CollectionAnalyzerMusicAlbumProtectionTest
         let files = vec![
-            make_entry("/path/01-track.flac", "01-track.flac", "01-track", ".flac", 30_000_000),
-            make_entry("/path/02-track.flac", "02-track.flac", "02-track", ".flac", 35_000_000),
+            make_entry(
+                "/path/01-track.flac",
+                "01-track.flac",
+                "01-track",
+                ".flac",
+                30_000_000,
+            ),
+            make_entry(
+                "/path/02-track.flac",
+                "02-track.flac",
+                "02-track",
+                ".flac",
+                35_000_000,
+            ),
         ];
         let res = analyze(&files);
         assert!(res.has_audio);
@@ -1590,17 +1641,14 @@ mod tests {
         std::fs::create_dir_all(&dupe_dir).unwrap();
         std::fs::write(dupe_dir.join("Feature.mkv"), b"existing").unwrap();
         let dupe_dir_cstr = std::ffi::CString::new(os_str_to_bytes(dupe_dir.as_os_str())).unwrap();
-        let unique_name = crate::fsops::make_unique_filename(
-            &dupe_dir_cstr,
-            c"Feature.mkv",
-            &|p| {
+        let unique_name =
+            crate::fsops::make_unique_filename(&dupe_dir_cstr, c"Feature.mkv", &|p| {
                 if bytes_to_path_buf(p).is_file() {
                     1
                 } else {
                     -2
                 }
-            },
-        );
+            });
         assert!(String::from_utf8_lossy(&unique_name).contains("Feature.duplicate1.mkv"));
 
         // 8. CollectionAnalyzerUtf8PathPreservationTest
@@ -1629,7 +1677,10 @@ mod tests {
         assert!(!plan.ambiguous);
         assert!(!plan.disc_structure);
         assert_eq!(plan.actions.len(), 3);
-        assert!(plan.actions.iter().any(|a| a.new_filename == b"Clean.Movie.2026.mkv"));
+        assert!(plan
+            .actions
+            .iter()
+            .any(|a| a.new_filename == b"Clean.Movie.2026.mkv"));
         assert!(plan
             .actions
             .iter()
@@ -1703,7 +1754,11 @@ mod tests {
         // 14. CollectionAnalyzerCleanVideoSidecarPairingTest
         let sidecar_dir = base_dir.join("clean_video_sidecars");
         std::fs::create_dir_all(&sidecar_dir).unwrap();
-        std::fs::write(sidecar_dir.join("Show.S01E01.720p.mkv"), b"clean video data").unwrap();
+        std::fs::write(
+            sidecar_dir.join("Show.S01E01.720p.mkv"),
+            b"clean video data",
+        )
+        .unwrap();
         std::fs::write(sidecar_dir.join("sub.en.srt"), b"subtitle").unwrap();
         let (_, plan) = build_plan_directory(&sidecar_dir, b"Show.S01E01", b".zip, .rar");
         assert!(plan.can_rename);
@@ -1758,8 +1813,11 @@ mod tests {
             b"1\n00:00:01,000 --> 00:00:02,000\nHello\n",
         )
         .unwrap();
-        let (entries, plan) =
-            build_plan_directory(&extless_vid_dir, b"Release.Title.S01E09.1080p", b".zip, .rar");
+        let (entries, plan) = build_plan_directory(
+            &extless_vid_dir,
+            b"Release.Title.S01E09.1080p",
+            b".zip, .rar",
+        );
         assert!(plan.can_rename);
         assert_eq!(plan.actions.len(), 2);
         assert_eq!(
@@ -1828,9 +1886,27 @@ mod tests {
 
         // 21. CollectionAnalyzerDvdVideoTsTest
         let files = vec![
-            make_entry("/path/VIDEO_TS/VIDEO_TS.BUP", "VIDEO_TS.BUP", "VIDEO_TS", ".BUP", 1024),
-            make_entry("/path/VIDEO_TS/VTS_01_1.VOB", "VTS_01_1.VOB", "VTS_01_1", ".VOB", 1_073_741_824),
-            make_entry("/path/VIDEO_TS/VTS_01_0.IFO", "VTS_01_0.IFO", "VTS_01_0", ".IFO", 2048),
+            make_entry(
+                "/path/VIDEO_TS/VIDEO_TS.BUP",
+                "VIDEO_TS.BUP",
+                "VIDEO_TS",
+                ".BUP",
+                1024,
+            ),
+            make_entry(
+                "/path/VIDEO_TS/VTS_01_1.VOB",
+                "VTS_01_1.VOB",
+                "VTS_01_1",
+                ".VOB",
+                1_073_741_824,
+            ),
+            make_entry(
+                "/path/VIDEO_TS/VTS_01_0.IFO",
+                "VTS_01_0.IFO",
+                "VTS_01_0",
+                ".IFO",
+                2048,
+            ),
         ];
         let res = analyze(&files);
         assert!(res.disc_structure);
@@ -1840,18 +1916,52 @@ mod tests {
         // 22. CollectionAnalyzerDvdAvchdTest
         let avchd_dir = base_dir.join("dvd_avchd");
         std::fs::create_dir_all(avchd_dir.join("AVCHD/BDMV/STREAM")).unwrap();
-        std::fs::write(avchd_dir.join("AVCHD/BDMV/STREAM/00001.m2ts"), b"fake m2ts data").unwrap();
+        std::fs::write(
+            avchd_dir.join("AVCHD/BDMV/STREAM/00001.m2ts"),
+            b"fake m2ts data",
+        )
+        .unwrap();
         let (entries, res) = analyze_directory(&avchd_dir);
         assert!(res.disc_structure);
         assert!(!res.can_rename(&entries));
 
         // 23. CollectionAnalyzerMusicAlbumLargerTest & CollectionAnalyzerMixedAudioVideoTest
         let files = vec![
-            make_entry("/path/01-intro.flac", "01-intro.flac", "01-intro", ".flac", 8_000_000),
-            make_entry("/path/02-main.flac", "02-main.flac", "02-main", ".flac", 45_000_000),
-            make_entry("/path/03-solo.flac", "03-solo.flac", "03-solo", ".flac", 38_000_000),
-            make_entry("/path/04-outro.flac", "04-outro.flac", "04-outro", ".flac", 12_000_000),
-            make_entry("/path/05-bonus.flac", "05-bonus.flac", "05-bonus", ".flac", 25_000_000),
+            make_entry(
+                "/path/01-intro.flac",
+                "01-intro.flac",
+                "01-intro",
+                ".flac",
+                8_000_000,
+            ),
+            make_entry(
+                "/path/02-main.flac",
+                "02-main.flac",
+                "02-main",
+                ".flac",
+                45_000_000,
+            ),
+            make_entry(
+                "/path/03-solo.flac",
+                "03-solo.flac",
+                "03-solo",
+                ".flac",
+                38_000_000,
+            ),
+            make_entry(
+                "/path/04-outro.flac",
+                "04-outro.flac",
+                "04-outro",
+                ".flac",
+                12_000_000,
+            ),
+            make_entry(
+                "/path/05-bonus.flac",
+                "05-bonus.flac",
+                "05-bonus",
+                ".flac",
+                25_000_000,
+            ),
         ];
         let res = analyze(&files);
         assert!(res.has_audio);
@@ -1860,10 +1970,34 @@ mod tests {
         assert!(res.main_video.is_none());
 
         let files = vec![
-            make_entry("/path/feature.mkv", "feature.mkv", "feature", ".mkv", 4_000_000_000),
-            make_entry("/path/commentary.dts", "commentary.dts", "commentary", ".dts", 600_000_000),
-            make_entry("/path/score.flac", "score.flac", "score", ".flac", 80_000_000),
-            make_entry("/path/extras.flac", "extras.flac", "extras", ".flac", 50_000_000),
+            make_entry(
+                "/path/feature.mkv",
+                "feature.mkv",
+                "feature",
+                ".mkv",
+                4_000_000_000,
+            ),
+            make_entry(
+                "/path/commentary.dts",
+                "commentary.dts",
+                "commentary",
+                ".dts",
+                600_000_000,
+            ),
+            make_entry(
+                "/path/score.flac",
+                "score.flac",
+                "score",
+                ".flac",
+                80_000_000,
+            ),
+            make_entry(
+                "/path/extras.flac",
+                "extras.flac",
+                "extras",
+                ".flac",
+                50_000_000,
+            ),
         ];
         let res = analyze(&files);
         assert!(res.has_audio);
@@ -1876,12 +2010,13 @@ mod tests {
         std::fs::create_dir_all(&pdf_dir).unwrap();
         let mut pdf_data = b"%PDF-1.7\0".to_vec();
         pdf_data.extend(std::iter::repeat_n(b'X', 512));
-        std::fs::write(pdf_dir.join("deadbeef0102030405060708deadbeef01"), &pdf_data).unwrap();
-        let (_, plan) = build_plan_directory(
-            &pdf_dir,
-            b"Technical.Reference.Guide.2026",
-            b".zip, .rar",
-        );
+        std::fs::write(
+            pdf_dir.join("deadbeef0102030405060708deadbeef01"),
+            &pdf_data,
+        )
+        .unwrap();
+        let (_, plan) =
+            build_plan_directory(&pdf_dir, b"Technical.Reference.Guide.2026", b".zip, .rar");
         assert!(plan.can_rename);
         assert_eq!(plan.actions.len(), 1);
         assert_eq!(
@@ -1890,8 +2025,20 @@ mod tests {
         );
 
         let files = vec![
-            make_entry("/path/feature.mkv", "feature.mkv", "feature", ".mkv", 4_000_000_000),
-            make_entry("/path/accompanying.epub", "accompanying.epub", "accompanying", ".epub", 500_000),
+            make_entry(
+                "/path/feature.mkv",
+                "feature.mkv",
+                "feature",
+                ".mkv",
+                4_000_000_000,
+            ),
+            make_entry(
+                "/path/accompanying.epub",
+                "accompanying.epub",
+                "accompanying",
+                ".epub",
+                500_000,
+            ),
         ];
         let res = analyze(&files);
         assert!(!res.ambiguous);
@@ -1922,8 +2069,7 @@ mod tests {
         let dots_dir = base_dir.join("clean_dots_extless");
         std::fs::create_dir_all(&dots_dir).unwrap();
         std::fs::write(dots_dir.join("Show.S01E01.1080p"), &mkv_data).unwrap();
-        let (entries, plan) =
-            build_plan_directory(&dots_dir, b"Show.S01E01.1080p", b".zip, .rar");
+        let (entries, plan) = build_plan_directory(&dots_dir, b"Show.S01E01.1080p", b".zip, .rar");
         assert!(plan.can_rename);
         assert_eq!(plan.actions.len(), 1);
         assert_eq!(entries[plan.actions[0].src].filename, b"Show.S01E01.1080p");
@@ -1936,12 +2082,13 @@ mod tests {
             b'V', b'M',
         ];
         djvu_data.extend(std::iter::repeat_n(b'X', 1024));
-        std::fs::write(djvu_dir.join("88f9e0a1b2c3d4e5f60123456789abcd"), &djvu_data).unwrap();
-        let (_, plan) = build_plan_directory(
-            &djvu_dir,
-            b"Vintage.Magazine.Issue.42.1998",
-            b".zip, .rar",
-        );
+        std::fs::write(
+            djvu_dir.join("88f9e0a1b2c3d4e5f60123456789abcd"),
+            &djvu_data,
+        )
+        .unwrap();
+        let (_, plan) =
+            build_plan_directory(&djvu_dir, b"Vintage.Magazine.Issue.42.1998", b".zip, .rar");
         assert!(plan.can_rename);
         assert_eq!(plan.actions.len(), 1);
         assert_eq!(
@@ -2025,7 +2172,10 @@ mod tests {
             |_, _| {},
             |old_r, new_r| renames.push((old_r.to_vec(), new_r.to_vec())),
         ));
-        assert_eq!(std::fs::read(m1_dst.join("video.mkv")).unwrap(), b"old data");
+        assert_eq!(
+            std::fs::read(m1_dst.join("video.mkv")).unwrap(),
+            b"old data"
+        );
         assert_eq!(
             std::fs::read(m1_dst.join("video (1).mkv")).unwrap(),
             b"new data"
@@ -2071,7 +2221,13 @@ mod tests {
         let m5_same = base_dir.join("m5/same");
         std::fs::create_dir_all(&m5_same).unwrap();
         std::fs::write(m5_same.join("video.mkv"), b"keep me safe").unwrap();
-        assert!(move_files(&m5_same, &m5_same, || false, |_, _| {}, |_, _| {}));
+        assert!(move_files(
+            &m5_same,
+            &m5_same,
+            || false,
+            |_, _| {},
+            |_, _| {}
+        ));
         assert_eq!(
             std::fs::read(m5_same.join("video.mkv")).unwrap(),
             b"keep me safe"
@@ -2168,9 +2324,8 @@ mod tests {
                 &broken_dir,
                 0, // Delete
                 |arc, unp| {
-                    let supported = crate::unpack::sevenzip_is_supported(os_str_to_bytes(
-                        arc.as_os_str(),
-                    ));
+                    let supported =
+                        crate::unpack::sevenzip_is_supported(os_str_to_bytes(arc.as_os_str()));
                     if !supported {
                         return (false, false);
                     }
@@ -2218,12 +2373,7 @@ mod tests {
         let archive_path = cat_dir.join("test.nzb.gz");
         let status = std::process::Command::new(&sevenzip_path)
             .current_dir(base_dir.join("cat"))
-            .args([
-                "a",
-                "-tgzip",
-                archive_path.to_str().unwrap(),
-                "test.nzb",
-            ])
+            .args(["a", "-tgzip", archive_path.to_str().unwrap(), "test.nzb"])
             .stdout(std::process::Stdio::null())
             .status()
             .unwrap();
@@ -2243,12 +2393,7 @@ mod tests {
         let archive_path2 = outside_dir.join("test.nzb.gz");
         let status2 = std::process::Command::new(&sevenzip_path)
             .current_dir(&esc_base)
-            .args([
-                "a",
-                "-tgzip",
-                archive_path2.to_str().unwrap(),
-                "test.nzb",
-            ])
+            .args(["a", "-tgzip", archive_path2.to_str().unwrap(), "test.nzb"])
             .stdout(std::process::Stdio::null())
             .status()
             .unwrap();

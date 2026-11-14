@@ -98,10 +98,7 @@ pub fn article_writer_resolve_direct_write_ready(
 
 /// Classifies the output file setup scenario in `ArticleWriter::SetupOutputFile`:
 /// `1` = standard assembly (`.tmp`), `2` = direct write (`omReadWrite`), `3` = raw mode (create dir), `0` = none.
-pub fn article_writer_classify_setup_output_scenario(
-    raw_article: bool,
-    direct_write: bool,
-) -> i32 {
+pub fn article_writer_classify_setup_output_scenario(raw_article: bool, direct_write: bool) -> i32 {
     if !raw_article && !direct_write {
         1
     } else if direct_write {
@@ -141,11 +138,7 @@ pub fn article_cache_can_alloc(
 }
 
 /// Formats `"<dest_dir><sep><filename>"` for `ArticleWriter`.
-pub fn article_writer_format_dest_file_path(
-    dest_dir: &[u8],
-    sep: u8,
-    filename: &[u8],
-) -> Vec<u8> {
+pub fn article_writer_format_dest_file_path(dest_dir: &[u8], sep: u8, filename: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(dest_dir.len() + 1 + filename.len());
     out.extend_from_slice(dest_dir);
     out.push(sep);
@@ -201,11 +194,7 @@ pub fn article_writer_format_info_path(nzb_name: &[u8], sep: u8, filename: &[u8]
 }
 
 /// Computes the parent directory prefix length of `final_path` when `filename` contains `sep` in `ArticleWriter::SetupOutputFile`.
-pub fn article_writer_parent_dir_len(
-    filename: &[u8],
-    final_path: &[u8],
-    sep: u8,
-) -> Option<usize> {
+pub fn article_writer_parent_dir_len(filename: &[u8], final_path: &[u8], sep: u8) -> Option<usize> {
     if !filename.contains(&sep) {
         return None;
     }
@@ -467,20 +456,16 @@ pub fn article_writer_plan_cleanup_old_data(
         let is_same = !final_empty && same_filename(output_filename, final_output_path);
         let out_exists = final_empty && file_exists(output_filename);
         let action = article_writer_classify_direct_final_cleanup(final_empty, is_same, out_exists);
-        let old_dir = if !article_writer_is_within_dest_dir(
-            nzb_dest_dir,
-            output_filename,
-            sep1,
-            sep2,
-        ) {
-            let base_idx = output_filename
-                .iter()
-                .rposition(|&b| b == sep1 || b == sep2)
-                .map_or(0, |k| k + 1);
-            Some(output_filename[..base_idx.min(1023)].to_vec())
-        } else {
-            None
-        };
+        let old_dir =
+            if !article_writer_is_within_dest_dir(nzb_dest_dir, output_filename, sep1, sep2) {
+                let base_idx = output_filename
+                    .iter()
+                    .rposition(|&b| b == sep1 || b == sep2)
+                    .map_or(0, |k| k + 1);
+                Some(output_filename[..base_idx.min(1023)].to_vec())
+            } else {
+                None
+            };
         (action, old_dir)
     } else {
         (0, None)
@@ -926,9 +911,10 @@ pub fn article_writer_process_articles(
                     info_filename,
                 ]);
                 log_err_fn(&msg);
-            } else if let Some(mut infile) = crate::fsops::file_exists(rf, &crate::fsops::posix_stat)
-                .then(|| std::fs::File::open(crate::fsops::path(rf)).ok())
-                .flatten()
+            } else if let Some(mut infile) =
+                crate::fsops::file_exists(rf, &crate::fsops::posix_stat)
+                    .then(|| std::fs::File::open(crate::fsops::path(rf)).ok())
+                    .flatten()
             {
                 if !seek_fn(item.segment_offset) {
                     commit_error = true;
@@ -1076,7 +1062,8 @@ pub fn article_writer_flush_cache(
                     {
                         Ok(f) => direct_file = Some(f),
                         Err(e) => {
-                            let err_msg = crate::fsops::error_message(e.raw_os_error().unwrap_or(0));
+                            let err_msg =
+                                crate::fsops::error_message(e.raw_os_error().unwrap_or(0));
                             let msg = join_c_slices(&[
                                 b"Could not open file ",
                                 output_filename,
@@ -1420,9 +1407,18 @@ mod tests {
             article_writer_resolve_direct_write_ready(true, false, false, true, false),
             (true, true)
         );
-        assert_eq!(article_writer_classify_setup_output_scenario(false, false), 1);
-        assert_eq!(article_writer_classify_setup_output_scenario(false, true), 2);
-        assert_eq!(article_writer_classify_setup_output_scenario(true, false), 3);
+        assert_eq!(
+            article_writer_classify_setup_output_scenario(false, false),
+            1
+        );
+        assert_eq!(
+            article_writer_classify_setup_output_scenario(false, true),
+            2
+        );
+        assert_eq!(
+            article_writer_classify_setup_output_scenario(true, false),
+            3
+        );
         assert!(article_cache_can_flush_file(3, 0, false, false));
         assert!(!article_cache_can_flush_file(3, 1, false, false));
         assert!(article_cache_can_flush_file(3, 1, true, true));
@@ -1554,7 +1550,10 @@ mod tests {
                     #[cfg(not(unix))]
                     let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
                     let res = if read_write {
-                        std::fs::OpenOptions::new().read(true).write(true).open(path)
+                        std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(path)
                     } else {
                         std::fs::OpenOptions::new()
                             .write(true)
@@ -1699,7 +1698,12 @@ mod tests {
                     }
                     #[cfg(not(unix))]
                     {
-                        [d, &[crate::paths::PATH_SEPARATOR], b"part151.duplicate1.rar"].concat()
+                        [
+                            d,
+                            &[crate::paths::PATH_SEPARATOR],
+                            b"part151.duplicate1.rar",
+                        ]
+                        .concat()
                     }
                 },
                 |p| fs_stat(p) == 1,
@@ -1723,7 +1727,10 @@ mod tests {
                     #[cfg(not(unix))]
                     let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
                     let res = if read_write {
-                        std::fs::OpenOptions::new().read(true).write(true).open(path)
+                        std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(path)
                     } else {
                         std::fs::OpenOptions::new()
                             .write(true)
@@ -1758,10 +1765,8 @@ mod tests {
 
     #[test]
     fn create_output_file_move_completed_files_and_process_articles_work() {
-        let dir = std::env::temp_dir().join(format!(
-            "nzbget_awc_batch217_test_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("nzbget_awc_batch217_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1836,10 +1841,8 @@ mod tests {
 
     #[test]
     fn flush_cache_post_process_and_finish_disk_ops_work() {
-        let dir = std::env::temp_dir().join(format!(
-            "nzbget_awc_batch218_test_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("nzbget_awc_batch218_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

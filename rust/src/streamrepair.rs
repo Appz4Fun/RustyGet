@@ -584,9 +584,7 @@ fn parse_member_name(name: &[u8]) -> (Scheme, Vec<u8>, i32) {
         && (extension[0] == b'r' || extension[0] == b's')
         && all_digits(&extension[1..])
     {
-        let vol = 1
-            + parse_c_atoi(&extension[1..])
-            + if extension[0] == b's' { 100 } else { 0 };
+        let vol = 1 + parse_c_atoi(&extension[1..]) + if extension[0] == b's' { 100 } else { 0 };
         return (Scheme::RarOld, stem.to_vec(), vol);
     }
 
@@ -631,21 +629,22 @@ pub fn content_mapper_group_sets(member_names: &[&[u8]]) -> Vec<(i32, Vec<i32>)>
     }
 
     let mut buckets: Vec<(Vec<u8>, SetBucket)> = Vec::new();
-    let bucket_for = |buckets: &mut Vec<(Vec<u8>, SetBucket)>, key: Vec<u8>, format: i32| -> usize {
-        if let Some(pos) = buckets.iter().position(|(k, _)| *k == key) {
-            return pos;
-        }
-        buckets.push((
-            key,
-            SetBucket {
-                format,
-                volumes: Vec::new(),
-                has_final: false,
-                final_member: -1,
-            },
-        ));
-        buckets.len() - 1
-    };
+    let bucket_for =
+        |buckets: &mut Vec<(Vec<u8>, SetBucket)>, key: Vec<u8>, format: i32| -> usize {
+            if let Some(pos) = buckets.iter().position(|(k, _)| *k == key) {
+                return pos;
+            }
+            buckets.push((
+                key,
+                SetBucket {
+                    format,
+                    volumes: Vec::new(),
+                    has_final: false,
+                    final_member: -1,
+                },
+            ));
+            buckets.len() - 1
+        };
 
     let mut consumed = vec![false; member_names.len()];
 
@@ -834,7 +833,11 @@ where
         let mut cursor = 0usize;
         for piece in pieces {
             let len = piece.size as usize;
-            if !read_member(piece.member_index, piece.offset, &mut buf[cursor..cursor + len]) {
+            if !read_member(
+                piece.member_index,
+                piece.offset,
+                &mut buf[cursor..cursor + len],
+            ) {
                 return false;
             }
             cursor += len;
@@ -1012,10 +1015,8 @@ where
     if !logical_read(local_pos, &mut local) || get_le32(&local[0..4]) != 0x04034b50 {
         return Err("corrupt zip local header");
     }
-    let data_pos = local_pos
-        + 30
-        + (get_le16(&local[26..28]) as i64)
-        + (get_le16(&local[28..30]) as i64);
+    let data_pos =
+        local_pos + 30 + (get_le16(&local[26..28]) as i64) + (get_le16(&local[28..30]) as i64);
     if data_pos > total_size || prim.uncomp_size > (total_size - data_pos) as u64 {
         return Err("implausible data run geometry");
     }
@@ -1229,11 +1230,7 @@ fn parse_seven_zip_streams_info(
                 let mut defined = folder_count;
                 if reader.read_byte() == 0 {
                     streams.folder_crc_defined = reader.read_bit_vector(folder_count);
-                    defined = streams
-                        .folder_crc_defined
-                        .iter()
-                        .filter(|&&b| b)
-                        .count() as u64;
+                    defined = streams.folder_crc_defined.iter().filter(|&&b| b).count() as u64;
                 } else {
                     streams.folder_crc_defined = vec![true; folder_count as usize];
                 }
@@ -1347,7 +1344,11 @@ where
         let mut cursor = 0usize;
         for piece in pieces {
             let len = piece.size as usize;
-            if !read_member(piece.member_index, piece.offset, &mut buf[cursor..cursor + len]) {
+            if !read_member(
+                piece.member_index,
+                piece.offset,
+                &mut buf[cursor..cursor + len],
+            ) {
                 return false;
             }
             cursor += len;
@@ -1357,10 +1358,7 @@ where
 
     const SIGNATURE: &[u8; 6] = &[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c];
     let mut sig_hdr = [0u8; 32];
-    if total_size < 32
-        || !logical_read(0, &mut sig_hdr)
-        || &sig_hdr[0..6] != SIGNATURE
-    {
+    if total_size < 32 || !logical_read(0, &mut sig_hdr) || &sig_hdr[0..6] != SIGNATURE {
         return Err("not a 7z archive");
     }
     let next_header_offset = get_le64(&sig_hdr[12..20]);
@@ -1527,8 +1525,7 @@ where
     let mut data_index = 0usize;
     let max_names = (file_count as usize).min(names.len());
     for i in 0..max_names {
-        let has_stream =
-            empty_stream.is_empty() || i >= empty_stream.len() || !empty_stream[i];
+        let has_stream = empty_stream.is_empty() || i >= empty_stream.len() || !empty_stream[i];
         if has_stream && data_index < data_files.len() {
             let base = match names[i].iter().rposition(|&b| b == b'/' || b == b'\\') {
                 Some(pos) => names[i][pos + 1..].to_vec(),
@@ -1901,9 +1898,9 @@ pub fn select_whole_file_donor(
             return idx as i32;
         }
     }
-    if let Some(idx) =
-        unique(&|i| locale_casecmp(donor_filenames[i], target_filename) == std::cmp::Ordering::Equal)
-    {
+    if let Some(idx) = unique(&|i| {
+        locale_casecmp(donor_filenames[i], target_filename) == std::cmp::Ordering::Equal
+    }) {
         return idx as i32;
     }
     let target_key = volume_key(target_filename);
@@ -2127,8 +2124,8 @@ pub fn select_verify_donor_probes(
         let mut pooled: i64 = 0;
         for (overlap, part_index) in overlaps {
             let pc = probe_parts.len() as i32;
-            let pool_stop = pc >= probe_count
-                && (pooled >= base || pc >= probe_count.saturating_mul(2));
+            let pool_stop =
+                pc >= probe_count && (pooled >= base || pc >= probe_count.saturating_mul(2));
             if pool_stop {
                 reserve.push(part_index);
             } else {
@@ -2508,11 +2505,7 @@ where
 
 /// `DupeStreamRepair::SelectExtractedInner`: walks `dir` recursively without following
 /// symlinks, returning `(selected_path, found_symlink)`.
-pub fn select_extracted_inner(
-    dir: &[u8],
-    inner_size: i64,
-    inner_name: &[u8],
-) -> (Vec<u8>, bool) {
+pub fn select_extracted_inner(dir: &[u8], inner_size: i64, inner_name: &[u8]) -> (Vec<u8>, bool) {
     if dir.is_empty() || inner_size < 0 {
         return (Vec::new(), false);
     }
@@ -2634,7 +2627,10 @@ pub fn build_donor_key(
                 && art_idx < article_sizes.len()
                 && art_idx < article_message_ids.len()
             {
-                append(&mut key, article_part_numbers[art_idx].to_string().as_bytes());
+                append(
+                    &mut key,
+                    article_part_numbers[art_idx].to_string().as_bytes(),
+                );
                 append(&mut key, article_sizes[art_idx].to_string().as_bytes());
                 append(&mut key, article_message_ids[art_idx]);
                 art_idx += 1;
@@ -2706,11 +2702,7 @@ pub fn stream_repair_is_intact_proof_member_eligible(
 
 /// Builds the RAR3 KDF seed (`len * 2` bytes of UTF-16LE low-16-bit code units from `wchars`
 /// followed by the 8-byte `salt`). Returns `false` if `wchars` is empty or `out_seed` is too small.
-pub fn streamcrypto_fill_rar3_seed(
-    wchars: &[u32],
-    salt: &[u8; 8],
-    out_seed: &mut [u8],
-) -> bool {
+pub fn streamcrypto_fill_rar3_seed(wchars: &[u32], salt: &[u8; 8], out_seed: &mut [u8]) -> bool {
     if wchars.is_empty() {
         return false;
     }
@@ -2728,10 +2720,7 @@ pub fn streamcrypto_fill_rar3_seed(
 
 /// Computes the RAR5 PBKDF2-HMAC-SHA256 iteration count for `kdf_count` (must be `<= 24`),
 /// optionally adding `32` for `DeriveRar5PswCheck`.
-pub fn streamcrypto_rar5_iterations(
-    kdf_count: u8,
-    add_psw_check_offset: bool,
-) -> Option<i32> {
+pub fn streamcrypto_rar5_iterations(kdf_count: u8, add_psw_check_offset: bool) -> Option<i32> {
     if kdf_count > 24 {
         return None;
     }
@@ -2745,14 +2734,14 @@ pub fn streamcrypto_rar5_iterations(
 
 /// Computes the next batch block count (capped at `1 << 16` blocks = 1 MiB) and byte length
 /// for `RarCryptoContext::Crypt`.
-pub fn streamcrypto_next_batch(
-    done_blocks: i64,
-    total_blocks: i64,
-    block_size: i64,
-) -> (i64, i32) {
+pub fn streamcrypto_next_batch(done_blocks: i64, total_blocks: i64, block_size: i64) -> (i64, i32) {
     const BATCH_BLOCKS: i64 = 1 << 16;
     let rem = total_blocks.saturating_sub(done_blocks);
-    let batch = if rem < BATCH_BLOCKS { rem } else { BATCH_BLOCKS };
+    let batch = if rem < BATCH_BLOCKS {
+        rem
+    } else {
+        BATCH_BLOCKS
+    };
     let len = (batch * block_size) as i32;
     (batch, len)
 }
@@ -2831,11 +2820,7 @@ pub fn donor_check_fetched_part(
 
 /// Resolves the estimated donor part index for `offset` corrected by `drift`
 /// in `DonorMemberSource::PartForOffset` and `DonorMemberSource::Prefetch`.
-pub fn donor_index_for_offset(
-    offset: i64,
-    drift: i64,
-    ranges: &[NzbgetRsByteRange],
-) -> i32 {
+pub fn donor_index_for_offset(offset: i64, drift: i64, ranges: &[NzbgetRsByteRange]) -> i32 {
     let target = offset.saturating_sub(drift);
     let mut index: usize = 0;
     while index + 1 < ranges.len()
@@ -2876,11 +2861,7 @@ pub fn donor_step_part_for_offset(
 }
 
 /// Computes `(first, last)` inclusive prefetch part indices in `DonorMemberSource::Prefetch`.
-pub fn donor_calc_prefetch_bounds(
-    first_est: i32,
-    last_est: i32,
-    ranges_len: usize,
-) -> (i32, i32) {
+pub fn donor_calc_prefetch_bounds(first_est: i32, last_est: i32, ranges_len: usize) -> (i32, i32) {
     let first = (first_est - 1).max(0);
     let max_last = (ranges_len as i32) - 1;
     let last = (last_est + 1).min(max_last);
@@ -3068,11 +3049,7 @@ pub fn is_patch_article_usable(
     data_len: usize,
     fetched_offset: i64,
 ) -> bool {
-    if !success
-        || fetched_file_size != target_decoded_size
-        || data_len == 0
-        || fetched_offset < 0
-    {
+    if !success || fetched_file_size != target_decoded_size || data_len == 0 || fetched_offset < 0 {
         return false;
     }
     match i64::try_from(data_len)
@@ -3526,21 +3503,18 @@ impl Sha1 {
 }
 
 const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-    0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-    0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-    0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 const SHA256_H0: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-    0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 #[inline]
@@ -3742,7 +3716,10 @@ fn pbkdf2_hmac_sha256_32(password: &[u8], salt: &[u8; 16], iterations: usize) ->
 
 /// `StreamCrypto::DeriveRar3`: derives the 16-byte AES-128 key and 16-byte CBC IV from UTF-8 `password` and 8-byte `salt`.
 pub fn streamcrypto_derive_rar3(password: &[u8], salt: &[u8; 8]) -> Option<([u8; 16], [u8; 16])> {
-    let nul_pos = password.iter().position(|&b| b == 0).unwrap_or(password.len());
+    let nul_pos = password
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(password.len());
     let pwd = &password[..nul_pos];
     if pwd.is_empty() {
         return None;
@@ -3783,7 +3760,10 @@ pub fn streamcrypto_derive_rar5(
     salt: &[u8; 16],
 ) -> Option<[u8; 32]> {
     let iterations = streamcrypto_rar5_iterations(kdf_count, false)? as usize;
-    let nul_pos = password.iter().position(|&b| b == 0).unwrap_or(password.len());
+    let nul_pos = password
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(password.len());
     let pwd = &password[..nul_pos];
     Some(pbkdf2_hmac_sha256_32(pwd, salt, iterations))
 }
@@ -3795,7 +3775,10 @@ pub fn streamcrypto_derive_rar5_psw_check(
     salt: &[u8; 16],
 ) -> Option<[u8; 8]> {
     let iterations = streamcrypto_rar5_iterations(kdf_count, true)? as usize;
-    let nul_pos = password.iter().position(|&b| b == 0).unwrap_or(password.len());
+    let nul_pos = password
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(password.len());
     let pwd = &password[..nul_pos];
     let value = pbkdf2_hmac_sha256_32(pwd, salt, iterations);
     let mut check = [0u8; 8];
@@ -3804,50 +3787,46 @@ pub fn streamcrypto_derive_rar5_psw_check(
 }
 
 const AES_SBOX: [u8; 256] = [
-    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab,
-    0x76, 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4,
-    0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71,
-    0xd8, 0x31, 0x15, 0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2,
-    0xeb, 0x27, 0xb2, 0x75, 0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6,
-    0xb3, 0x29, 0xe3, 0x2f, 0x84, 0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb,
-    0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf, 0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45,
-    0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8, 0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5,
-    0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2, 0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44,
-    0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73, 0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a,
-    0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb, 0xe0, 0x32, 0x3a, 0x0a, 0x49,
-    0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79, 0xe7, 0xc8, 0x37, 0x6d,
-    0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08, 0xba, 0x78, 0x25,
-    0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a, 0x70, 0x3e,
-    0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e, 0xe1,
-    0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
-    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb,
-    0x16,
+    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
 ];
 
 const AES_INV_SBOX: [u8; 256] = [
-    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7,
-    0xfb, 0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde,
-    0xe9, 0xcb, 0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42,
-    0xfa, 0xc3, 0x4e, 0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49,
-    0x6d, 0x8b, 0xd1, 0x25, 0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c,
-    0xcc, 0x5d, 0x65, 0xb6, 0x92, 0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15,
-    0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84, 0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7,
-    0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06, 0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02,
-    0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b, 0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc,
-    0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73, 0x96, 0xac, 0x74, 0x22, 0xe7, 0xad,
-    0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e, 0x47, 0xf1, 0x1a, 0x71, 0x1d,
-    0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b, 0xfc, 0x56, 0x3e, 0x4b,
-    0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4, 0x1f, 0xdd, 0xa8,
-    0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f, 0x60, 0x51,
-    0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef, 0xa0,
-    0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
-    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c,
-    0x7d,
+    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
+    0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
+    0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
+    0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49, 0x6d, 0x8b, 0xd1, 0x25,
+    0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c, 0xcc, 0x5d, 0x65, 0xb6, 0x92,
+    0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15, 0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84,
+    0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7, 0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06,
+    0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02, 0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b,
+    0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc, 0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73,
+    0x96, 0xac, 0x74, 0x22, 0xe7, 0xad, 0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e,
+    0x47, 0xf1, 0x1a, 0x71, 0x1d, 0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b,
+    0xfc, 0x56, 0x3e, 0x4b, 0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4,
+    0x1f, 0xdd, 0xa8, 0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f,
+    0x60, 0x51, 0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef,
+    0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
+    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d,
 ];
 
 const AES_RCON: [u32; 10] = [
-    0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000,
-    0x80000000, 0x1b000000, 0x36000000,
+    0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000, 0x80000000,
+    0x1b000000, 0x36000000,
 ];
 
 #[inline]
@@ -4002,12 +3981,9 @@ impl AesRoundKeys {
                 let i = c * 4;
                 let (s0, s1, s2, s3) = (s[i], s[i + 1], s[i + 2], s[i + 3]);
                 s[i] = aes_gmul(s0, 14) ^ aes_gmul(s1, 11) ^ aes_gmul(s2, 13) ^ aes_gmul(s3, 9);
-                s[i + 1] =
-                    aes_gmul(s0, 9) ^ aes_gmul(s1, 14) ^ aes_gmul(s2, 11) ^ aes_gmul(s3, 13);
-                s[i + 2] =
-                    aes_gmul(s0, 13) ^ aes_gmul(s1, 9) ^ aes_gmul(s2, 14) ^ aes_gmul(s3, 11);
-                s[i + 3] =
-                    aes_gmul(s0, 11) ^ aes_gmul(s1, 13) ^ aes_gmul(s2, 9) ^ aes_gmul(s3, 14);
+                s[i + 1] = aes_gmul(s0, 9) ^ aes_gmul(s1, 14) ^ aes_gmul(s2, 11) ^ aes_gmul(s3, 13);
+                s[i + 2] = aes_gmul(s0, 13) ^ aes_gmul(s1, 9) ^ aes_gmul(s2, 14) ^ aes_gmul(s3, 11);
+                s[i + 3] = aes_gmul(s0, 11) ^ aes_gmul(s1, 13) ^ aes_gmul(s2, 9) ^ aes_gmul(s3, 14);
             }
         }
         let t1 = s[13];
@@ -4098,7 +4074,10 @@ impl RarCryptoContext {
     }
 
     pub fn make_rar5(password: &[u8], crypt: &crate::rarreader::Rar5Crypt) -> Option<Self> {
-        let nul_pos = password.iter().position(|&b| b == 0).unwrap_or(password.len());
+        let nul_pos = password
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(password.len());
         if nul_pos == 0 || crypt.version != 0 {
             return None;
         }
@@ -4799,11 +4778,7 @@ impl ContentMap {
             let rel = (inner_pos[0].offset - inner_range.offset) as usize;
             let len = piece.size as usize;
             if rel.saturating_add(len) > data.len()
-                || !target_files.write_file(
-                    piece.member_index,
-                    piece.offset,
-                    &data[rel..rel + len],
-                )
+                || !target_files.write_file(piece.member_index, piece.offset, &data[rel..rel + len])
             {
                 return -1;
             }
@@ -5359,15 +5334,14 @@ impl RepairSetData {
                     size: chunk,
                 };
                 if !donor_map.read_donor_inner(donor_sources, chunk_range, &mut donor_data) {
-                    let (step_action, new_size, new_pos, new_failed) =
-                        patch_donor_set_step_failure(
-                            chunk,
-                            MIN_CHUNK,
-                            size,
-                            pos,
-                            failed_pieces,
-                            MAX_FAILED_PIECES,
-                        );
+                    let (step_action, new_size, new_pos, new_failed) = patch_donor_set_step_failure(
+                        chunk,
+                        MIN_CHUNK,
+                        size,
+                        pos,
+                        failed_pieces,
+                        MAX_FAILED_PIECES,
+                    );
                     size = new_size;
                     pos = new_pos;
                     failed_pieces = new_failed;
@@ -5942,12 +5916,8 @@ pub fn verify_donor_file(
             return true;
         }
 
-        batch = select_probe_replacements(
-            missing,
-            &reserve,
-            DONOR_MAX_PROBE_FETCHES,
-            attempted.len(),
-        );
+        batch =
+            select_probe_replacements(missing, &reserve, DONOR_MAX_PROBE_FETCHES, attempted.len());
         for &part_index in &batch {
             if let Some(pos) = reserve.iter().position(|&p| p == part_index) {
                 reserve.remove(pos);
@@ -6032,12 +6002,9 @@ pub fn patch_from_donor_file(
 
             let mut written = Vec::new();
             for &hole in target_holes.iter() {
-                if let Some((from, to)) = clip_hole_to_fetched(
-                    hole.offset,
-                    hole.size,
-                    fetched.offset,
-                    fetched.data.len(),
-                ) {
+                if let Some((from, to)) =
+                    clip_hole_to_fetched(hole.offset, hole.size, fetched.offset, fetched.data.len())
+                {
                     let rel_start = (from - fetched.offset) as usize;
                     let rel_end = (to - fetched.offset) as usize;
                     if !target_patcher.write_range(from, &fetched.data[rel_start..rel_end]) {
@@ -6177,23 +6144,25 @@ pub fn materialize_donor_set(
         let mut member_holes: Vec<NzbgetRsByteRange> = Vec::new();
         let mut delivered_articles: i32 = 0;
 
-        let report_progress =
-            |client: &mut dyn DonorMaterializeClient, delivered: i32, completed: i64, bytes: i64| {
-                let label = format_materialize_progress(
-                    donor_name,
-                    member_number,
-                    set_member_count,
-                    delivered,
-                    member_article_count,
-                    bytes,
-                );
-                let stage_progress = if total_articles > 0 {
-                    (completed * 1000 / total_articles) as i32
-                } else {
-                    0
-                };
-                client.update_progress(&label, stage_progress);
+        let report_progress = |client: &mut dyn DonorMaterializeClient,
+                               delivered: i32,
+                               completed: i64,
+                               bytes: i64| {
+            let label = format_materialize_progress(
+                donor_name,
+                member_number,
+                set_member_count,
+                delivered,
+                member_article_count,
+                bytes,
+            );
+            let stage_progress = if total_articles > 0 {
+                (completed * 1000 / total_articles) as i32
+            } else {
+                0
             };
+            client.update_progress(&label, stage_progress);
+        };
 
         report_progress(client, delivered_articles, completed_articles, *total_bytes);
         client.begin_member_batch(member_index);
@@ -6324,9 +6293,7 @@ impl ContentMapper {
         match set.format {
             MemberFormat::Bare => Self::build_bare_map(members, set, sources),
             MemberFormat::Split => Self::build_split_map(members, set, sources),
-            MemberFormat::Rar => {
-                Self::build_rar_map(members, set, sources, password, tls_enabled)
-            }
+            MemberFormat::Rar => Self::build_rar_map(members, set, sources, password, tls_enabled),
             MemberFormat::Zip => Self::build_zip_map(set, sources),
             MemberFormat::SevenZip => Self::build_seven_zip_map(set, sources),
         }
@@ -6522,12 +6489,12 @@ impl ContentMapper {
                     return false;
                 };
                 if version == 3 {
-                    crypto_ctx = RarCryptoContext::make_rar3(pw_bytes, &rf.salt)
-                        .map(std::sync::Arc::new);
+                    crypto_ctx =
+                        RarCryptoContext::make_rar3(pw_bytes, &rf.salt).map(std::sync::Arc::new);
                 } else if version == 5 {
                     if let Some(crypt) = &rf.crypt {
-                        crypto_ctx = RarCryptoContext::make_rar5(pw_bytes, crypt)
-                            .map(std::sync::Arc::new);
+                        crypto_ctx =
+                            RarCryptoContext::make_rar5(pw_bytes, crypt).map(std::sync::Arc::new);
                     }
                 }
                 crypto_ctx.is_some()
@@ -6666,11 +6633,8 @@ impl ContentMapper {
                             hole_ranges.push(hole);
                         }
                     }
-                    data.inner_holes = content_mapper_collect_inner_holes(
-                        map.runs(),
-                        &hole_members,
-                        &hole_ranges,
-                    );
+                    data.inner_holes =
+                        content_mapper_collect_inner_holes(map.runs(), &hole_members, &hole_ranges);
                     data.original_inner_holes = data.inner_holes.clone();
                     if data.inner_holes.is_empty() {
                         data.skip_reason =
@@ -6739,9 +6703,7 @@ fn file_size_bytes(path_bytes: &[u8]) -> i64 {
 }
 
 fn write_error_message_bytes(err: &std::io::Error) -> Vec<u8> {
-    let errno = err
-        .raw_os_error()
-        .unwrap_or_else(crate::fsops::last_errno);
+    let errno = err.raw_os_error().unwrap_or_else(crate::fsops::last_errno);
     if errno != 0 {
         let msg = crate::fsops::error_message(errno);
         if !msg.is_empty() {
@@ -6885,7 +6847,11 @@ pub trait CrossPackDonorEnv {
     fn has_batch_fetcher(&self) -> bool {
         true
     }
-    fn fetch_donor_part(&mut self, member_index: i32, part_index: i32) -> Option<FetchedDonorArticle>;
+    fn fetch_donor_part(
+        &mut self,
+        member_index: i32,
+        part_index: i32,
+    ) -> Option<FetchedDonorArticle>;
     fn begin_donor_prefetch(&mut self, member_index: i32, part_indices: &[i32]);
     fn next_donor_prefetch(&mut self) -> Option<FetchedDonorArticle>;
     fn cancel_donor_prefetch(&mut self);
@@ -7037,9 +7003,7 @@ impl ContentSourceSet for DonorSetSources<'_, '_> {
         let slot = cell.get_or_init(|| DonorSetMemberSlot {
             member_index,
             shared: std::rc::Rc::clone(&self.shared),
-            inner: std::cell::RefCell::new(DonorMemberSource::new(
-                self.article_sizes[idx].clone(),
-            )),
+            inner: std::cell::RefCell::new(DonorMemberSource::new(self.article_sizes[idx].clone())),
         });
         Some(slot as &dyn ContentSource)
     }
@@ -7104,15 +7068,13 @@ impl TargetFileSet for DiskTargetFileSetAdapter<'_, '_, '_> {
         let Some(file) = self.files.get_file(self.members, member_index) else {
             return false;
         };
-        let io_res = file
-            .seek(SeekFrom::Start(offset as u64))
-            .and_then(|pos| {
-                if pos != offset as u64 {
-                    Err(std::io::Error::other("seek mismatch"))
-                } else {
-                    file.write_all(data).and_then(|()| file.flush())
-                }
-            });
+        let io_res = file.seek(SeekFrom::Start(offset as u64)).and_then(|pos| {
+            if pos != offset as u64 {
+                Err(std::io::Error::other("seek mismatch"))
+            } else {
+                file.write_all(data).and_then(|()| file.flush())
+            }
+        });
         if let Err(err) = io_res {
             let err_msg = write_error_message_bytes(&err);
             let member_name = self
@@ -7171,9 +7133,7 @@ impl DonorMaterializeClient for MaterializeClientAdapter<'_, '_, '_> {
                 true
             }
             Err(err) => {
-                let errno = err
-                    .raw_os_error()
-                    .unwrap_or_else(crate::fsops::last_errno);
+                let errno = err.raw_os_error().unwrap_or_else(crate::fsops::last_errno);
                 let err_msg = crate::fsops::error_message(errno);
                 let mut msg = b"Could not create ".to_vec();
                 msg.extend_from_slice(&self.current_path);
@@ -7195,15 +7155,13 @@ impl DonorMaterializeClient for MaterializeClientAdapter<'_, '_, '_> {
         let Some(file) = self.current_file.as_mut() else {
             return false;
         };
-        let io_res = file
-            .seek(SeekFrom::Start(offset as u64))
-            .and_then(|pos| {
-                if pos != offset as u64 {
-                    Err(std::io::Error::other("seek mismatch"))
-                } else {
-                    file.write_all(data).and_then(|()| file.flush())
-                }
-            });
+        let io_res = file.seek(SeekFrom::Start(offset as u64)).and_then(|pos| {
+            if pos != offset as u64 {
+                Err(std::io::Error::other("seek mismatch"))
+            } else {
+                file.write_all(data).and_then(|()| file.flush())
+            }
+        });
         if let Err(err) = io_res {
             let err_msg = write_error_message_bytes(&err);
             let mut msg = b"Could not write to ".to_vec();
@@ -7223,9 +7181,7 @@ impl DonorMaterializeClient for MaterializeClientAdapter<'_, '_, '_> {
     }
 
     fn begin_member_batch(&mut self, member_index: i32) {
-        self.env
-            .borrow_mut()
-            .begin_materialize_member(member_index);
+        self.env.borrow_mut().begin_materialize_member(member_index);
     }
 
     fn next_article(&mut self) -> Option<FetchedDonorArticle> {
@@ -7237,9 +7193,7 @@ impl DonorMaterializeClient for MaterializeClientAdapter<'_, '_, '_> {
     }
 
     fn update_progress(&mut self, label: &[u8], stage_progress: i32) {
-        self.env
-            .borrow_mut()
-            .set_progress(label, stage_progress);
+        self.env.borrow_mut().set_progress(label, stage_progress);
     }
 
     fn emit_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]) {
@@ -7468,8 +7422,7 @@ impl CrossPackRepairSession {
                     let can_decompress =
                         allow_decompress && ContentMapper::is_compressible_archive(donor_set);
                     if can_decompress {
-                        let first_donor_name =
-                            &donor_members[donor_set.members[0] as usize].name;
+                        let first_donor_name = &donor_members[donor_set.members[0] as usize].name;
                         let mut key = Vec::with_capacity(
                             donor_queued_filename.len() + 1 + first_donor_name.len(),
                         );
@@ -7550,10 +7503,9 @@ impl CrossPackRepairSession {
                         .map
                         .as_ref()
                         .map_or(&[][..], ContentMap::inner_name_bytes);
-                    let mut msg = format!(
-                        "Recovered {mb:.1} MB ({recovered_parts} donor article(s)) of "
-                    )
-                    .into_bytes();
+                    let mut msg =
+                        format!("Recovered {mb:.1} MB ({recovered_parts} donor article(s)) of ")
+                            .into_bytes();
                     msg.extend_from_slice(inner_name);
                     msg.extend_from_slice(b" from duplicate ");
                     msg.extend_from_slice(donor_info_name);
@@ -8281,9 +8233,7 @@ pub fn repair_whole_file(
     {
         Ok(f) => f,
         Err(err) => {
-            let errno = err
-                .raw_os_error()
-                .unwrap_or_else(crate::fsops::last_errno);
+            let errno = err.raw_os_error().unwrap_or_else(crate::fsops::last_errno);
             let err_msg = crate::fsops::error_message(errno);
             let mut msg = b"Could not open ".to_vec();
             msg.extend_from_slice(&file_path);
@@ -8392,9 +8342,7 @@ pub fn repair_file(
     {
         Ok(f) => f,
         Err(err) => {
-            let errno = err
-                .raw_os_error()
-                .unwrap_or_else(crate::fsops::last_errno);
+            let errno = err.raw_os_error().unwrap_or_else(crate::fsops::last_errno);
             let err_msg = crate::fsops::error_message(errno);
             let mut msg = b"Could not open ".to_vec();
             msg.extend_from_slice(&file_path);
@@ -8762,7 +8710,13 @@ mod tests {
 
         let donor = estimate_donor_ranges(&[100, 100, 100, 100, 100], 1000);
         assert_eq!(donor.len(), 5);
-        assert_eq!(donor[0], NzbgetRsByteRange { offset: 0, size: 200 });
+        assert_eq!(
+            donor[0],
+            NzbgetRsByteRange {
+                offset: 0,
+                size: 200
+            }
+        );
         let rem = subtract_covered(
             &holes,
             NzbgetRsByteRange {
@@ -8907,22 +8861,64 @@ mod tests {
 
         assert_eq!(
             eval_build_repair_job(
-                2, 2, false, false, b"movie.mkv", true, 0, 0, 3, false, false, false, false, 0,
-                1000, 0
+                2,
+                2,
+                false,
+                false,
+                b"movie.mkv",
+                true,
+                0,
+                0,
+                3,
+                false,
+                false,
+                false,
+                false,
+                0,
+                1000,
+                0
             ),
             1
         );
         assert_eq!(
             eval_build_repair_job(
-                2, 2, false, false, b"movie.mkv", true, 0, 0, 3, false, false, false, false, 5,
-                1000, 950
+                2,
+                2,
+                false,
+                false,
+                b"movie.mkv",
+                true,
+                0,
+                0,
+                3,
+                false,
+                false,
+                false,
+                false,
+                5,
+                1000,
+                950
             ),
             2
         );
         assert_eq!(
             eval_build_repair_job(
-                2, 2, false, false, b"movie.par2", true, 0, 0, 3, false, false, false, false, 5,
-                1000, 950
+                2,
+                2,
+                false,
+                false,
+                b"movie.par2",
+                true,
+                0,
+                0,
+                3,
+                false,
+                false,
+                false,
+                false,
+                5,
+                1000,
+                950
             ),
             0
         );
@@ -8930,10 +8926,28 @@ mod tests {
         let mut new_prog = 0i64;
         let mut reset_last = false;
         let reason = watchdog_eval_tick(
-            100, 100, false, 0, 30, 30, 30, 30.0, 30, 4, 120, 4, 0, 0, 1000, &mut new_prog,
+            100,
+            100,
+            false,
+            0,
+            30,
+            30,
+            30,
+            30.0,
+            30,
+            4,
+            120,
+            4,
+            0,
+            0,
+            1000,
+            &mut new_prog,
             &mut reset_last,
         );
-        assert_eq!(reason.as_deref(), Some(&b"nothing recovered for 30 seconds"[..]));
+        assert_eq!(
+            reason.as_deref(),
+            Some(&b"nothing recovered for 30 seconds"[..])
+        );
 
         assert_eq!(
             select_probe_replacements(2, &[10, 20, 30, 40, 50], 8, 4),
@@ -8991,7 +9005,11 @@ mod tests {
     fn parse_rar_bytes(
         bytes: Vec<u8>,
         password: &[u8],
-    ) -> (bool, crate::rarreader::Volume, Vec<crate::rarreader::RarFile>) {
+    ) -> (
+        bool,
+        crate::rarreader::Volume,
+        Vec<crate::rarreader::RarFile>,
+    ) {
         let mut vol = crate::rarreader::Volume {
             has_password: !password.is_empty(),
             ..crate::rarreader::Volume::default()
@@ -9014,12 +9032,7 @@ mod tests {
         }
     }
 
-    fn build_rar3_salt_volume(
-        data: &[u8],
-        name: &[u8],
-        salt: &[u8],
-        trailing: bool,
-    ) -> Vec<u8> {
+    fn build_rar3_salt_volume(data: &[u8], name: &[u8], salt: &[u8], trailing: bool) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(b"Rar!\x1a\x07\x00");
         // MAIN: VOLUME | NEWNUMBERING
@@ -9161,7 +9174,9 @@ mod tests {
     }
 
     fn seed_bytes(n: usize, seed: u8) -> Vec<u8> {
-        (0..n).map(|i| seed.wrapping_add((i as u8).wrapping_mul(3))).collect()
+        (0..n)
+            .map(|i| seed.wrapping_add((i as u8).wrapping_mul(3)))
+            .collect()
     }
 
     #[test]
@@ -9326,9 +9341,11 @@ mod tests {
         let crypt = inner.crypt.unwrap();
         assert!(crypt.has_check);
 
-        let check = streamcrypto_derive_rar5_psw_check(b"123", crypt.kdf_count, &crypt.salt).unwrap();
+        let check =
+            streamcrypto_derive_rar5_psw_check(b"123", crypt.kdf_count, &crypt.salt).unwrap();
         assert_eq!(check, crypt.check_value[..8]);
-        let wrong = streamcrypto_derive_rar5_psw_check(b"456", crypt.kdf_count, &crypt.salt).unwrap();
+        let wrong =
+            streamcrypto_derive_rar5_psw_check(b"456", crypt.kdf_count, &crypt.salt).unwrap();
         assert_ne!(wrong, crypt.check_value[..8]);
         assert!(streamcrypto_derive_rar5_psw_check(b"123", 25, &crypt.salt).is_none());
 
@@ -9372,8 +9389,18 @@ mod tests {
         let wrong3 = RarCryptoContext::make_rar3(b"wrongpw", salt_hdr).unwrap();
         let mut p_right = [0u8; 16];
         let mut p_wrong = [0u8; 16];
-        assert!(ctx3.decrypt_range(None, &r3_bytes[cipher_off..cipher_off + 16], &mut p_right, 1));
-        assert!(wrong3.decrypt_range(None, &r3_bytes[cipher_off..cipher_off + 16], &mut p_wrong, 1));
+        assert!(ctx3.decrypt_range(
+            None,
+            &r3_bytes[cipher_off..cipher_off + 16],
+            &mut p_right,
+            1
+        ));
+        assert!(wrong3.decrypt_range(
+            None,
+            &r3_bytes[cipher_off..cipher_off + 16],
+            &mut p_wrong,
+            1
+        ));
         assert_eq!(p_right[2], 0x74);
         assert_ne!(p_right, p_wrong);
         assert!(RarCryptoContext::make_rar3(b"", salt_hdr).is_none());
@@ -9562,9 +9589,7 @@ mod tests {
         out.push(0x74);
         cm_put_le16(
             &mut out,
-            0x8000
-                | if split_before { 0x0001 } else { 0 }
-                | if split_after { 0x0002 } else { 0 },
+            0x8000 | if split_before { 0x0001 } else { 0 } | if split_after { 0x0002 } else { 0 },
         );
         cm_put_le16(&mut out, 32 + name_len);
         cm_put_le32(&mut out, slice.len() as u32);
@@ -9968,10 +9993,25 @@ mod tests {
                 size: 40,
             });
 
-            let inner = map.map_to_inner(0, NzbgetRsByteRange { offset: 0, size: 30 });
-            assert_eq!(inner, vec![NzbgetRsByteRange { offset: 0, size: 10 }]);
+            let inner = map.map_to_inner(
+                0,
+                NzbgetRsByteRange {
+                    offset: 0,
+                    size: 30,
+                },
+            );
+            assert_eq!(
+                inner,
+                vec![NzbgetRsByteRange {
+                    offset: 0,
+                    size: 10
+                }]
+            );
 
-            let pieces = map.map_from_inner(NzbgetRsByteRange { offset: 50, size: 20 });
+            let pieces = map.map_from_inner(NzbgetRsByteRange {
+                offset: 50,
+                size: 20,
+            });
             assert_eq!(
                 pieces,
                 vec![
@@ -9989,14 +10029,29 @@ mod tests {
             );
 
             assert!(map
-                .map_to_inner(0, NzbgetRsByteRange { offset: 0, size: 20 })
+                .map_to_inner(
+                    0,
+                    NzbgetRsByteRange {
+                        offset: 0,
+                        size: 20
+                    }
+                )
                 .is_empty());
 
             map.exclude_member(0);
             assert!(map
-                .map_to_inner(0, NzbgetRsByteRange { offset: 20, size: 60 })
+                .map_to_inner(
+                    0,
+                    NzbgetRsByteRange {
+                        offset: 20,
+                        size: 60
+                    }
+                )
                 .is_empty());
-            let after = map.map_from_inner(NzbgetRsByteRange { offset: 0, size: 100 });
+            let after = map.map_from_inner(NzbgetRsByteRange {
+                offset: 0,
+                size: 100,
+            });
             assert_eq!(after.len(), 1);
             assert_eq!(after[0].member_index, 1);
         }
@@ -10020,7 +10075,10 @@ mod tests {
 
             assert!(!composite.read(30, &mut buffer[..10]));
 
-            let pieces = composite.to_members(NzbgetRsByteRange { offset: 8, size: 24 });
+            let pieces = composite.to_members(NzbgetRsByteRange {
+                offset: 8,
+                size: 24,
+            });
             assert_eq!(
                 pieces,
                 vec![
@@ -10210,7 +10268,10 @@ mod tests {
             assert_eq!(map.runs().len(), 3);
 
             let mut reassembled = vec![0u8; 100];
-            for piece in map.map_from_inner(NzbgetRsByteRange { offset: 0, size: 100 }) {
+            for piece in map.map_from_inner(NzbgetRsByteRange {
+                offset: 0,
+                size: 100,
+            }) {
                 let source = sources.get_source(piece.member_index).unwrap();
                 let inner_pos = map.map_to_inner(
                     piece.member_index,
@@ -10315,7 +10376,10 @@ mod tests {
                 let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
                 assert_eq!(map.runs().len(), 2);
                 assert!(map
-                    .map_from_inner(NzbgetRsByteRange { offset: 40, size: 40 })
+                    .map_from_inner(NzbgetRsByteRange {
+                        offset: 40,
+                        size: 40
+                    })
                     .is_empty());
                 assert_eq!(map.runs()[1].inner_offset, 80);
             }
@@ -10351,7 +10415,9 @@ mod tests {
                     format: MemberFormat::Rar,
                     members: vec![0],
                 };
-                let err = ContentMapper::build_map(&members, &single, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &single, &sources, None)
+                    .err()
+                    .unwrap();
                 assert!(err.contains("store"));
             }
 
@@ -10371,7 +10437,9 @@ mod tests {
                     format: MemberFormat::Rar,
                     members: vec![0],
                 };
-                let err = ContentMapper::build_map(&members, &single, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &single, &sources, None)
+                    .err()
+                    .unwrap();
                 assert_eq!(err, "inner file is not a media file");
             }
 
@@ -10402,7 +10470,9 @@ mod tests {
                     "inner.mkv",
                     0x30,
                 ));
-                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &set, &sources, None)
+                    .err()
+                    .unwrap();
                 assert!(err.contains("sum"));
             }
 
@@ -10426,7 +10496,9 @@ mod tests {
                     "inner.mkv",
                     0x30,
                 ));
-                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &set, &sources, None)
+                    .err()
+                    .unwrap();
                 assert!(err.contains("exceed"));
             }
 
@@ -10438,7 +10510,9 @@ mod tests {
                     format: MemberFormat::Rar,
                     members: vec![0],
                 };
-                let err = ContentMapper::build_map(&members, &single, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &single, &sources, None)
+                    .err()
+                    .unwrap();
                 assert_eq!(err, "encrypted archive headers");
             }
 
@@ -10454,7 +10528,9 @@ mod tests {
                     format: MemberFormat::Rar,
                     members: vec![0],
                 };
-                let err = ContentMapper::build_map(&members, &single, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &single, &sources, None)
+                    .err()
+                    .unwrap();
                 assert_eq!(err, "encrypted archive data");
             }
 
@@ -10481,7 +10557,9 @@ mod tests {
                     format: MemberFormat::Rar,
                     members: vec![0, 1],
                 };
-                let err = ContentMapper::build_map(&members, &pair, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &pair, &sources, None)
+                    .err()
+                    .unwrap();
                 assert_eq!(err, "inconsistent inner file size across volumes");
             }
         }
@@ -10511,7 +10589,10 @@ mod tests {
                 assert_eq!(map.runs().len(), 1);
                 let mut data = vec![0u8; 90];
                 let run = &map.runs()[0];
-                assert!(sources.get_source(0).unwrap().read(run.member_offset, &mut data));
+                assert!(sources
+                    .get_source(0)
+                    .unwrap()
+                    .read(run.member_offset, &mut data));
                 assert_eq!(data, inner);
             }
 
@@ -10551,7 +10632,10 @@ mod tests {
                 assert_eq!(map.inner_size(), 90);
 
                 let mut reassembled = vec![0u8; 90];
-                for piece in map.map_from_inner(NzbgetRsByteRange { offset: 0, size: 90 }) {
+                for piece in map.map_from_inner(NzbgetRsByteRange {
+                    offset: 0,
+                    size: 90,
+                }) {
                     let inner_pos = map.map_to_inner(
                         piece.member_index,
                         NzbgetRsByteRange {
@@ -10583,7 +10667,9 @@ mod tests {
             {
                 let mut sources = MemorySourceSet::default();
                 sources.push(build_stored_zip(&[("movie.mkv", &inner)], 8, 0));
-                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &set, &sources, None)
+                    .err()
+                    .unwrap();
                 assert!(err.contains("stored"));
             }
 
@@ -10591,7 +10677,9 @@ mod tests {
             {
                 let mut sources = MemorySourceSet::default();
                 sources.push(build_stored_zip(&[("movie.mkv", &inner)], 0, 1));
-                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &set, &sources, None)
+                    .err()
+                    .unwrap();
                 assert!(err.contains("encrypted"));
             }
 
@@ -10599,7 +10687,9 @@ mod tests {
             {
                 let zip_bytes = build_stored_zip(&[("movie.mkv", &inner)], 0, 0);
                 let eocd = zip_bytes.len() - 22;
-                let cd_start = u32::from_le_bytes(zip_bytes[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+                let cd_start =
+                    u32::from_le_bytes(zip_bytes[eocd + 16..eocd + 20].try_into().unwrap())
+                        as usize;
                 let mut rebuilt = zip_bytes[..cd_start].to_vec();
                 let mut entry = zip_bytes[cd_start..eocd].to_vec();
                 entry[20..28].fill(0xff);
@@ -10667,7 +10757,10 @@ mod tests {
                 let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
                 assert_eq!(map.inner_size(), 90);
                 let mut reassembled = vec![0u8; 90];
-                for piece in map.map_from_inner(NzbgetRsByteRange { offset: 0, size: 90 }) {
+                for piece in map.map_from_inner(NzbgetRsByteRange {
+                    offset: 0,
+                    size: 90,
+                }) {
                     let inner_pos = map.map_to_inner(
                         piece.member_index,
                         NzbgetRsByteRange {
@@ -10698,7 +10791,9 @@ mod tests {
             {
                 let mut sources = MemorySourceSet::default();
                 sources.push(build_7z_copy(&[("movie.mkv", &inner)], 0x21));
-                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &set, &sources, None)
+                    .err()
+                    .unwrap();
                 assert!(err.contains("opy"));
             }
             {
@@ -10709,7 +10804,9 @@ mod tests {
             {
                 let mut sources = MemorySourceSet::default();
                 sources.push(build_7z_copy(&[("backup.iso", &inner)], 0x00));
-                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &set, &sources, None)
+                    .err()
+                    .unwrap();
                 assert_eq!(err, "inner file is not a media file");
             }
         }
@@ -10762,7 +10859,9 @@ mod tests {
             {
                 let mut sources = MemorySourceSet::default();
                 sources.push(build_encoded(0x21));
-                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                let err = ContentMapper::build_map(&members, &set, &sources, None)
+                    .err()
+                    .unwrap();
                 assert_eq!(err, "compressed 7z header");
             }
         }
@@ -11078,7 +11177,13 @@ mod tests {
         // 15. HoledSourceTest
         {
             let inner = MemoryContentSource(cm_pattern(100, 17));
-            let holed = HoledSource::new(&inner, vec![NzbgetRsByteRange { offset: 30, size: 10 }]);
+            let holed = HoledSource::new(
+                &inner,
+                vec![NzbgetRsByteRange {
+                    offset: 30,
+                    size: 10,
+                }],
+            );
             let mut buf = [0u8; 100];
             assert!(holed.read(0, &mut buf[..30]));
             assert!(holed.read(40, &mut buf[..60]));
@@ -11117,8 +11222,14 @@ mod tests {
                     offset: data_start + 5,
                     size: 10,
                 }],
-                vec![NzbgetRsByteRange { offset: 0, size: 20 }],
-                vec![NzbgetRsByteRange { offset: 10, size: 5 }],
+                vec![NzbgetRsByteRange {
+                    offset: 0,
+                    size: 20,
+                }],
+                vec![NzbgetRsByteRange {
+                    offset: 10,
+                    size: 5,
+                }],
             ];
             let sources = HoledSourceSet::new(&raw, &member_holes);
             let sets = ContentMapper::build_repair_sets(&members, &member_holes, &sources, None);
@@ -11129,7 +11240,10 @@ mod tests {
             assert_eq!(m0.runs().len(), 2);
             assert_eq!(
                 sets[0].inner_holes,
-                vec![NzbgetRsByteRange { offset: 45, size: 10 }]
+                vec![NzbgetRsByteRange {
+                    offset: 45,
+                    size: 10
+                }]
             );
             assert_eq!(sets[0].original_inner_holes, sets[0].inner_holes);
 
@@ -11137,7 +11251,10 @@ mod tests {
             assert_eq!(m1.inner_size(), 50);
             assert_eq!(
                 sets[1].inner_holes,
-                vec![NzbgetRsByteRange { offset: 10, size: 5 }]
+                vec![NzbgetRsByteRange {
+                    offset: 10,
+                    size: 5
+                }]
             );
             assert_eq!(sets[1].original_inner_holes, sets[1].inner_holes);
 
@@ -11153,10 +11270,17 @@ mod tests {
                     "inner.mkv",
                     0x33,
                 ));
-                let comp_holes = vec![vec![NzbgetRsByteRange { offset: 70, size: 5 }]];
+                let comp_holes = vec![vec![NzbgetRsByteRange {
+                    offset: 70,
+                    size: 5,
+                }]];
                 let comp_sources = HoledSourceSet::new(&comp_raw, &comp_holes);
-                let comp_sets =
-                    ContentMapper::build_repair_sets(&comp_members, &comp_holes, &comp_sources, None);
+                let comp_sets = ContentMapper::build_repair_sets(
+                    &comp_members,
+                    &comp_holes,
+                    &comp_sources,
+                    None,
+                );
                 assert_eq!(comp_sets.len(), 1);
                 assert!(comp_sets[0].map.is_none());
                 assert!(!comp_sets[0].skip_reason.is_empty());
@@ -11166,8 +11290,13 @@ mod tests {
             {
                 let no_holes = vec![vec![]; 4];
                 let clean_sources = HoledSourceSet::new(&raw, &no_holes);
-                assert!(ContentMapper::build_repair_sets(&members, &no_holes, &clean_sources, None)
-                    .is_empty());
+                assert!(ContentMapper::build_repair_sets(
+                    &members,
+                    &no_holes,
+                    &clean_sources,
+                    None
+                )
+                .is_empty());
             }
         }
 
@@ -11179,12 +11308,18 @@ mod tests {
                     offset: 100,
                     size: 10,
                 },
-                NzbgetRsByteRange { offset: 0, size: 10 },
+                NzbgetRsByteRange {
+                    offset: 0,
+                    size: 10,
+                },
             ]);
             assert_eq!(
                 disjoint,
                 vec![
-                    NzbgetRsByteRange { offset: 0, size: 10 },
+                    NzbgetRsByteRange {
+                        offset: 0,
+                        size: 10
+                    },
                     NzbgetRsByteRange {
                         offset: 100,
                         size: 10,
@@ -11192,16 +11327,40 @@ mod tests {
                 ]
             );
             let overlap = ContentMapper::coalesce_ranges(&[
-                NzbgetRsByteRange { offset: 0, size: 20 },
-                NzbgetRsByteRange { offset: 10, size: 30 },
+                NzbgetRsByteRange {
+                    offset: 0,
+                    size: 20,
+                },
+                NzbgetRsByteRange {
+                    offset: 10,
+                    size: 30,
+                },
             ]);
-            assert_eq!(overlap, vec![NzbgetRsByteRange { offset: 0, size: 40 }]);
+            assert_eq!(
+                overlap,
+                vec![NzbgetRsByteRange {
+                    offset: 0,
+                    size: 40
+                }]
+            );
             let adjacent = ContentMapper::coalesce_ranges(&[
-                NzbgetRsByteRange { offset: 0, size: 10 },
-                NzbgetRsByteRange { offset: 10, size: 5 },
+                NzbgetRsByteRange {
+                    offset: 0,
+                    size: 10,
+                },
+                NzbgetRsByteRange {
+                    offset: 10,
+                    size: 5,
+                },
                 NzbgetRsByteRange { offset: 2, size: 3 },
             ]);
-            assert_eq!(adjacent, vec![NzbgetRsByteRange { offset: 0, size: 15 }]);
+            assert_eq!(
+                adjacent,
+                vec![NzbgetRsByteRange {
+                    offset: 0,
+                    size: 15
+                }]
+            );
             let windows = ContentMapper::coalesce_ranges(&[
                 NzbgetRsByteRange {
                     offset: 100000,
@@ -11604,7 +11763,10 @@ mod tests {
 
             let data_off0 = map.runs()[0].member_offset;
             let data_off1 = map.runs()[1].member_offset;
-            let pieces = map.map_cipher_range(NzbgetRsByteRange { offset: 32, size: 32 });
+            let pieces = map.map_cipher_range(NzbgetRsByteRange {
+                offset: 32,
+                size: 32,
+            });
             assert_eq!(
                 pieces,
                 vec![
@@ -11621,29 +11783,56 @@ mod tests {
                 ]
             );
             assert!(map
-                .map_cipher_range(NzbgetRsByteRange { offset: 0, size: 113 })
+                .map_cipher_range(NzbgetRsByteRange {
+                    offset: 0,
+                    size: 113
+                })
                 .is_empty());
             assert!(map
-                .map_cipher_range(NzbgetRsByteRange { offset: 112, size: 16 })
+                .map_cipher_range(NzbgetRsByteRange {
+                    offset: 112,
+                    size: 16
+                })
                 .is_empty());
             assert!(map
-                .map_cipher_range(NzbgetRsByteRange { offset: -1, size: 4 })
+                .map_cipher_range(NzbgetRsByteRange {
+                    offset: -1,
+                    size: 4
+                })
                 .is_empty());
 
             let mut out = vec![0u8; 100];
             assert!(map.read_inner_decrypted(
                 &sources,
-                NzbgetRsByteRange { offset: 0, size: 100 },
+                NzbgetRsByteRange {
+                    offset: 0,
+                    size: 100
+                },
                 &mut out
             ));
             assert_eq!(out, inner);
             for probe in [
-                NzbgetRsByteRange { offset: 40, size: 10 },
-                NzbgetRsByteRange { offset: 80, size: 10 },
-                NzbgetRsByteRange { offset: 95, size: 5 },
+                NzbgetRsByteRange {
+                    offset: 40,
+                    size: 10,
+                },
+                NzbgetRsByteRange {
+                    offset: 80,
+                    size: 10,
+                },
+                NzbgetRsByteRange {
+                    offset: 95,
+                    size: 5,
+                },
                 NzbgetRsByteRange { offset: 0, size: 1 },
-                NzbgetRsByteRange { offset: 99, size: 1 },
-                NzbgetRsByteRange { offset: 44, size: 3 },
+                NzbgetRsByteRange {
+                    offset: 99,
+                    size: 1,
+                },
+                NzbgetRsByteRange {
+                    offset: 44,
+                    size: 3,
+                },
             ] {
                 let mut piece = vec![0u8; probe.size as usize];
                 assert!(map.read_inner_decrypted(&sources, probe, &mut piece));
@@ -11652,17 +11841,26 @@ mod tests {
             }
             assert!(map.read_inner_decrypted(
                 &sources,
-                NzbgetRsByteRange { offset: 50, size: 0 },
+                NzbgetRsByteRange {
+                    offset: 50,
+                    size: 0
+                },
                 &mut out
             ));
             assert!(!map.read_inner_decrypted(
                 &sources,
-                NzbgetRsByteRange { offset: 96, size: 10 },
+                NzbgetRsByteRange {
+                    offset: 96,
+                    size: 10
+                },
                 &mut out
             ));
             assert!(!map.read_inner_decrypted(
                 &sources,
-                NzbgetRsByteRange { offset: -16, size: 16 },
+                NzbgetRsByteRange {
+                    offset: -16,
+                    size: 16
+                },
                 &mut out
             ));
 
@@ -11686,23 +11884,35 @@ mod tests {
             ));
             assert!(map.read_inner_decrypted(
                 &partial,
-                NzbgetRsByteRange { offset: 0, size: 32 },
+                NzbgetRsByteRange {
+                    offset: 0,
+                    size: 32
+                },
                 &mut out
             ));
             assert_eq!(&out[..32], &inner[..32]);
             assert!(!map.read_inner_decrypted(
                 &partial,
-                NzbgetRsByteRange { offset: 50, size: 10 },
+                NzbgetRsByteRange {
+                    offset: 50,
+                    size: 10
+                },
                 &mut out
             ));
             assert!(!map.read_inner_decrypted(
                 &partial,
-                NzbgetRsByteRange { offset: 0, size: 48 },
+                NzbgetRsByteRange {
+                    offset: 0,
+                    size: 48
+                },
                 &mut out
             ));
             assert!(!map.read_inner_decrypted(
                 &partial,
-                NzbgetRsByteRange { offset: 96, size: 4 },
+                NzbgetRsByteRange {
+                    offset: 96,
+                    size: 4
+                },
                 &mut out
             ));
         }
@@ -11775,13 +11985,19 @@ mod tests {
                 let mut out = vec![0u8; 60];
                 assert!(map.read_inner_decrypted(
                     &sources,
-                    NzbgetRsByteRange { offset: 0, size: 60 },
+                    NzbgetRsByteRange {
+                        offset: 0,
+                        size: 60
+                    },
                     &mut out
                 ));
                 assert_eq!(out, inner);
                 assert!(map.read_inner_decrypted(
                     &sources,
-                    NzbgetRsByteRange { offset: 20, size: 10 },
+                    NzbgetRsByteRange {
+                        offset: 20,
+                        size: 10
+                    },
                     &mut out
                 ));
                 assert_eq!(&out[..10], &inner[20..30]);
@@ -11849,7 +12065,10 @@ mod tests {
             assert!(map.encrypted());
             assert_eq!(
                 with[0].inner_holes,
-                vec![NzbgetRsByteRange { offset: 20, size: 10 }]
+                vec![NzbgetRsByteRange {
+                    offset: 20,
+                    size: 10
+                }]
             );
         }
 
@@ -11864,7 +12083,10 @@ mod tests {
             let members = vec![SetMember::new("rel.part01.rar", volume.len() as i64)];
 
             {
-                let member_holes = vec![vec![NzbgetRsByteRange { offset: 30, size: 12 }]];
+                let member_holes = vec![vec![NzbgetRsByteRange {
+                    offset: 30,
+                    size: 12,
+                }]];
                 let mut raw = MemorySourceSet::default();
                 raw.push(volume.clone());
                 let sources = HoledSourceSet::new(&raw, &member_holes);
@@ -11897,7 +12119,10 @@ mod tests {
                 assert!(map.encrypted());
                 assert_eq!(
                     sets[0].inner_holes,
-                    vec![NzbgetRsByteRange { offset: 16, size: 10 }]
+                    vec![NzbgetRsByteRange {
+                        offset: 16,
+                        size: 10
+                    }]
                 );
             }
         }
@@ -11971,7 +12196,10 @@ mod tests {
             );
             assert_eq!(n_comp.len(), 2);
 
-            let holes = [NzbgetRsByteRange { offset: 10, size: 20 }];
+            let holes = [NzbgetRsByteRange {
+                offset: 10,
+                size: 20,
+            }];
             assert!(holed_source_intersects(&holes, 15, 5));
             assert!(!holed_source_intersects(&holes, 0, 10));
 
@@ -11994,7 +12222,14 @@ mod tests {
                 1
             );
             assert_eq!(
-                content_map_from_inner(&runs, NzbgetRsByteRange { offset: 10, size: 20 }).len(),
+                content_map_from_inner(
+                    &runs,
+                    NzbgetRsByteRange {
+                        offset: 10,
+                        size: 20
+                    }
+                )
+                .len(),
                 1
             );
             let c_offs = [100i64];
@@ -12006,7 +12241,10 @@ mod tests {
                     &c_offs,
                     &c_sizes,
                     &has_c,
-                    NzbgetRsByteRange { offset: 0, size: 32 },
+                    NzbgetRsByteRange {
+                        offset: 0,
+                        size: 32
+                    },
                 )
                 .len(),
                 1
@@ -12016,19 +12254,29 @@ mod tests {
             assert_eq!(grouped.len(), 1);
 
             let uncoalesced = [
-                NzbgetRsByteRange { offset: 0, size: 10 },
-                NzbgetRsByteRange { offset: 10, size: 10 },
+                NzbgetRsByteRange {
+                    offset: 0,
+                    size: 10,
+                },
+                NzbgetRsByteRange {
+                    offset: 10,
+                    size: 10,
+                },
             ];
             assert_eq!(content_mapper_coalesce_ranges(&uncoalesced).len(), 1);
 
             let member_idx = [0i32];
             let member_sz = [10i64];
-            assert!(content_mapper_build_zip_map(&member_idx, &member_sz, |_, _, _| false).is_err());
-            assert!(content_mapper_build_seven_zip_map(&member_idx, &member_sz, |_, _, _| false).is_err());
+            assert!(
+                content_mapper_build_zip_map(&member_idx, &member_sz, |_, _, _| false).is_err()
+            );
+            assert!(
+                content_mapper_build_seven_zip_map(&member_idx, &member_sz, |_, _, _| false)
+                    .is_err()
+            );
 
             // Verify on_rar_volume_parsed is invoked for RAR volume mapping diagnostics.
-            let rar_vol =
-                build_rar5_store_volume(&[b'M'; 64], 64, false, false, "movie.mkv", 0);
+            let rar_vol = build_rar5_store_volume(&[b'M'; 64], 64, false, false, "movie.mkv", 0);
             struct RarDiagSourceSet {
                 vol: MemoryContentSource,
                 logged_vols: std::cell::RefCell<Vec<(String, i32, usize, String)>>,
@@ -12062,16 +12310,14 @@ mod tests {
                 format: MemberFormat::Rar,
                 members: vec![0],
             };
-            assert!(
-                ContentMapper::build_map_with_tls(
-                    &rar_members,
-                    &rar_set,
-                    &diag_sources,
-                    None,
-                    true,
-                )
-                .is_ok()
-            );
+            assert!(ContentMapper::build_map_with_tls(
+                &rar_members,
+                &rar_set,
+                &diag_sources,
+                None,
+                true,
+            )
+            .is_ok());
             assert_eq!(
                 diag_sources.logged_vols.into_inner(),
                 vec![("show.rar".to_string(), 5, 1, "movie.mkv".to_string())]
@@ -12080,14 +12326,8 @@ mod tests {
             // Verify FFI CrossPackSession emits RAR volume and file debug diagnostics
             // for both target initialization and donor mapping.
             let inner_payload: Vec<u8> = (0..1024).map(|i| ((i * 37 + 11) & 0xff) as u8).collect();
-            let donor_rar_vol = build_rar5_store_volume(
-                &inner_payload,
-                1024,
-                false,
-                false,
-                "movie.mkv",
-                0,
-            );
+            let donor_rar_vol =
+                build_rar5_store_volume(&inner_payload, 1024, false, false, "movie.mkv", 0);
             let mut target_rar_vol = donor_rar_vol.clone();
             let hole_off = (donor_rar_vol.len() - 512) as i64;
             target_rar_vol[hole_off as usize..hole_off as usize + 128].fill(0);
@@ -12315,8 +12555,7 @@ mod tests {
         }]];
         let mut target_src = MemorySourceSet::default();
         target_src.push(target_disk.clone());
-        let mut repair_sets =
-            ContentMapper::build_repair_sets(&members, &holes, &target_src, None);
+        let mut repair_sets = ContentMapper::build_repair_sets(&members, &holes, &target_src, None);
         assert_eq!(repair_sets.len(), 1);
 
         let donor_members = vec![
@@ -12652,7 +12891,9 @@ mod tests {
     #[test]
     fn m1_verify_and_patch_donor_file_handles_missing_probes_and_drift() {
         let file_size = 100_000usize;
-        let canonical: Vec<u8> = (0..file_size).map(|i| ((i * 73 + 19) & 0xff) as u8).collect();
+        let canonical: Vec<u8> = (0..file_size)
+            .map(|i| ((i * 73 + 19) & 0xff) as u8)
+            .collect();
         let mut damaged = canonical.clone();
         // Hole at [40_000, 50_000)
         damaged[40_000..50_000].fill(0);
@@ -12810,8 +13051,12 @@ mod tests {
         let pr = |offset: i64, size: i64| crate::streampatchparts::Range { offset, size };
         let donor_patch_ranges: Vec<_> = (0..10).map(|i| pr(i * 100, 100)).collect();
         let mut patch_out = vec![0i32; 10];
-        let n_picks =
-            crate::streampatchparts::select(&donor_patch_ranges, &[pr(450, 100)], 1, &mut patch_out);
+        let n_picks = crate::streampatchparts::select(
+            &donor_patch_ranges,
+            &[pr(450, 100)],
+            1,
+            &mut patch_out,
+        );
         assert_eq!(&patch_out[..n_picks], &[3, 4, 5, 6]);
         let n_edge =
             crate::streampatchparts::select(&donor_patch_ranges, &[pr(0, 50)], 2, &mut patch_out);
@@ -12838,36 +13083,40 @@ mod tests {
             br(300, 100),
             br(400, 100),
         ];
-        let boundary_cases: Vec<(Vec<NzbgetRsByteRange>, Vec<NzbgetRsByteRange>, i32, Vec<i32>)> =
-            vec![
-                (vec![], vec![br(0, 100)], 2, vec![]),
-                (vec![br(0, 100)], vec![], 2, vec![0]),
-                (vec![br(0, 100)], vec![br(100, 100)], 2, vec![0]),
-                (vec![br(0, 100)], vec![br(0, 100)], 2, vec![]),
-                (donors5.clone(), vec![], 0, vec![]),
-                (donors5.clone(), vec![], -2, vec![]),
-                (donors5.clone(), vec![], 1, vec![2]),
-                (donors5.clone(), vec![], 2, vec![1, 3]),
-                (donors5.clone(), vec![], 5, vec![0, 1, 2, 3, 4]),
-                (donors5.clone(), vec![], 8, vec![0, 1, 2, 3, 4]),
-                (
-                    donors5.clone(),
-                    vec![br(-100, 100), br(500, 100)],
-                    5,
-                    vec![0, 1, 2, 3, 4],
-                ),
-                (
-                    donors5.clone(),
-                    vec![br(-100, 100), br(0, 50)],
-                    5,
-                    vec![2, 3, 4],
-                ),
-                (donors5.clone(), vec![br(100, 100)], 5, vec![3, 4]),
-                (donors5.clone(), vec![br(0, 150)], 3, vec![3, 4]),
-                (donors5.clone(), vec![br(400, 100)], 5, vec![0, 1, 2]),
-                (donors5.clone(), vec![br(100, 0)], 5, vec![0, 1, 2, 3, 4]),
-                (donors5, vec![br(150, 0)], 5, vec![3, 4]),
-            ];
+        let boundary_cases: Vec<(
+            Vec<NzbgetRsByteRange>,
+            Vec<NzbgetRsByteRange>,
+            i32,
+            Vec<i32>,
+        )> = vec![
+            (vec![], vec![br(0, 100)], 2, vec![]),
+            (vec![br(0, 100)], vec![], 2, vec![0]),
+            (vec![br(0, 100)], vec![br(100, 100)], 2, vec![0]),
+            (vec![br(0, 100)], vec![br(0, 100)], 2, vec![]),
+            (donors5.clone(), vec![], 0, vec![]),
+            (donors5.clone(), vec![], -2, vec![]),
+            (donors5.clone(), vec![], 1, vec![2]),
+            (donors5.clone(), vec![], 2, vec![1, 3]),
+            (donors5.clone(), vec![], 5, vec![0, 1, 2, 3, 4]),
+            (donors5.clone(), vec![], 8, vec![0, 1, 2, 3, 4]),
+            (
+                donors5.clone(),
+                vec![br(-100, 100), br(500, 100)],
+                5,
+                vec![0, 1, 2, 3, 4],
+            ),
+            (
+                donors5.clone(),
+                vec![br(-100, 100), br(0, 50)],
+                5,
+                vec![2, 3, 4],
+            ),
+            (donors5.clone(), vec![br(100, 100)], 5, vec![3, 4]),
+            (donors5.clone(), vec![br(0, 150)], 3, vec![3, 4]),
+            (donors5.clone(), vec![br(400, 100)], 5, vec![0, 1, 2]),
+            (donors5.clone(), vec![br(100, 0)], 5, vec![0, 1, 2, 3, 4]),
+            (donors5, vec![br(150, 0)], 5, vec![3, 4]),
+        ];
         for (donors, holes, count, expected) in boundary_cases {
             assert_eq!(select_probe_parts(&donors, &holes, count), expected);
         }
@@ -12994,7 +13243,11 @@ mod tests {
                 vec![br(start, 0)],
                 vec![0, 1],
             ),
-            (vec![br(start, 1), br(start, -1)], vec![br(start, 1)], vec![]),
+            (
+                vec![br(start, 1), br(start, -1)],
+                vec![br(start, 1)],
+                vec![],
+            ),
         ];
         for (donors, holes, expected) in irregular_cases {
             assert_eq!(
@@ -13036,14 +13289,7 @@ mod tests {
                     )
                 });
             }
-            for probe_count in [
-                0,
-                -1,
-                1,
-                2,
-                donor_count as i32,
-                (donor_count as i32) + 1,
-            ] {
+            for probe_count in [0, -1, 1, 2, donor_count as i32, (donor_count as i32) + 1] {
                 let expected = reference_probe_parts(&donors, &holes, probe_count);
                 let actual = select_probe_parts(&donors, &holes, probe_count);
                 assert_eq!(actual, expected);
@@ -13062,39 +13308,109 @@ mod tests {
         // 13. StreamRepairBuildRepairJobTest & 14. StreamRepairWholeFileJobTest & 20. StreamRepairDoesNotCaptureParFilesTest
         assert_eq!(
             eval_build_repair_job(
-                2, 2, false, false, b"movie.mkv", true, 0, 0, 3, false, false, false, false, 2,
-                1000, 1000
+                2,
+                2,
+                false,
+                false,
+                b"movie.mkv",
+                true,
+                0,
+                0,
+                3,
+                false,
+                false,
+                false,
+                false,
+                2,
+                1000,
+                1000
             ),
             2
         );
         assert_eq!(
             eval_build_repair_job(
-                2, 2, false, false, b"release.r01", true, 0, 0, 3, false, false, false, false, 1,
-                1000, 1000
+                2,
+                2,
+                false,
+                false,
+                b"release.r01",
+                true,
+                0,
+                0,
+                3,
+                false,
+                false,
+                false,
+                false,
+                1,
+                1000,
+                1000
             ),
             2
         );
         // Post-process active -> 0
         assert_eq!(
             eval_build_repair_job(
-                2, 2, false, false, b"late.par2", true, 0, 0, 3, false, false, true, false, 1,
-                1000, 1000
+                2,
+                2,
+                false,
+                false,
+                b"late.par2",
+                true,
+                0,
+                0,
+                3,
+                false,
+                false,
+                true,
+                false,
+                1,
+                1000,
+                1000
             ),
             0
         );
         // Below "stream" mode -> 0
         assert_eq!(
             eval_build_repair_job(
-                0, 2, false, false, b"movie.mkv", true, 0, 0, 3, false, false, false, false, 1,
-                1000, 1000
+                0,
+                2,
+                false,
+                false,
+                b"movie.mkv",
+                true,
+                0,
+                0,
+                3,
+                false,
+                false,
+                false,
+                false,
+                1,
+                1000,
+                1000
             ),
             0
         );
         // Whole-file missing -> 1
         assert_eq!(
             eval_build_repair_job(
-                2, 2, false, false, b"ZGWRiqtR4jt2nswwN.part03.rar", true, 0, 0, 3, false, false,
-                false, false, 0, 2_400_000, 0
+                2,
+                2,
+                false,
+                false,
+                b"ZGWRiqtR4jt2nswwN.part03.rar",
+                true,
+                0,
+                0,
+                3,
+                false,
+                false,
+                false,
+                false,
+                0,
+                2_400_000,
+                0
             ),
             1
         );
@@ -13108,22 +13424,64 @@ mod tests {
         // PAR files (by flag or by confirmed/disk .par2 name) -> 0
         assert_eq!(
             eval_build_repair_job(
-                2, 2, false, true, b"obfuscated.bin", true, 0, 0, 3, false, false, false, false, 1,
-                1000, 1000
+                2,
+                2,
+                false,
+                true,
+                b"obfuscated.bin",
+                true,
+                0,
+                0,
+                3,
+                false,
+                false,
+                false,
+                false,
+                1,
+                1000,
+                1000
             ),
             0
         );
         assert_eq!(
             eval_build_repair_job(
-                2, 2, false, false, b"release.PaR2", true, 0, 0, 3, false, false, false, false, 1,
-                1000, 1000
+                2,
+                2,
+                false,
+                false,
+                b"release.PaR2",
+                true,
+                0,
+                0,
+                3,
+                false,
+                false,
+                false,
+                false,
+                1,
+                1000,
+                1000
             ),
             0
         );
         assert_eq!(
             eval_build_repair_job(
-                2, 2, false, false, b"release.vol01+02.PAR2", true, 0, 0, 3, false, false, false,
-                false, 1, 1000, 1000
+                2,
+                2,
+                false,
+                false,
+                b"release.vol01+02.PAR2",
+                true,
+                0,
+                0,
+                3,
+                false,
+                false,
+                false,
+                false,
+                1,
+                1000,
+                1000
             ),
             0
         );
@@ -13146,9 +13504,8 @@ mod tests {
             769_211, 770_840, 768_392, 771_005, 769_930, 768_777, 770_123, 769_504, 771_288,
             770_100, 769_400, 398_760,
         ];
-        let shifted = |sizes: &[i32], shift: i32| -> Vec<i32> {
-            sizes.iter().map(|&s| s + shift).collect()
-        };
+        let shifted =
+            |sizes: &[i32], shift: i32| -> Vec<i32> { sizes.iter().map(|&s| s + shift).collect() };
         let sum_i64 = |sizes: &[i32]| -> i64 { sizes.iter().map(|&s| s as i64).sum() };
 
         {
@@ -13343,10 +13700,7 @@ mod tests {
         assert_eq!(volume_key(b"x.r00"), b"r0");
         assert_eq!(volume_key(b"Rel.part10.rar"), b"part10.rar");
         assert_eq!(volume_key(b"Movie.x264.mkv"), b"x264.mkv");
-        assert_ne!(
-            volume_key(b"Rel.part10.rar"),
-            volume_key(b"Rel.part01.rar")
-        );
+        assert_ne!(volume_key(b"Rel.part10.rar"), volume_key(b"Rel.part01.rar"));
         assert!(volume_key(b"").is_empty());
 
         // 19. StreamRepairSuffixKeyTest
@@ -13480,49 +13834,19 @@ mod tests {
             let obf_names: &[&[u8]] = &[b"ccc.bin", b"aaa.bin", b"bbb.bin"];
             let obf_sizes = [1000i64; 3];
             let by_rank = select_donor_candidates(
-                b"zz.dat",
-                980,
-                1,
-                3,
-                3,
-                0,
-                obf_names,
-                &obf_sizes,
-                &[0; 3],
-                &[1; 3],
-                &[0; 3],
+                b"zz.dat", 980, 1, 3, 3, 0, obf_names, &obf_sizes, &[0; 3], &[1; 3], &[0; 3],
                 &[0; 3],
             );
             assert_eq!(by_rank[0], 2); // "bbb.bin" is rank 1 in sorted ["aaa.bin", "bbb.bin", "ccc.bin"]
 
             let bad_window = select_donor_candidates(
-                b"zz.dat",
-                980,
-                1,
-                4,
-                3,
-                0,
-                obf_names,
-                &obf_sizes,
-                &[0; 3],
-                &[1; 3],
-                &[0; 3],
+                b"zz.dat", 980, 1, 4, 3, 0, obf_names, &obf_sizes, &[0; 3], &[1; 3], &[0; 3],
                 &[0; 3],
             );
             assert_eq!(bad_window.len(), 3);
 
             let bad_rank = select_donor_candidates(
-                b"zz.dat",
-                980,
-                99,
-                3,
-                3,
-                0,
-                obf_names,
-                &obf_sizes,
-                &[0; 3],
-                &[1; 3],
-                &[0; 3],
+                b"zz.dat", 980, 99, 3, 3, 0, obf_names, &obf_sizes, &[0; 3], &[1; 3], &[0; 3],
                 &[0; 3],
             );
             assert_eq!(bad_rank.len(), 3);
@@ -13803,8 +14127,14 @@ mod tests {
 
         // 26. ParDamageBlocksTouchedTest
         let block = 1000u64;
-        assert_eq!(crate::dupefallback::blocks_touched(&[br(100, 200)], block), 1);
-        assert_eq!(crate::dupefallback::blocks_touched(&[br(900, 200)], block), 2);
+        assert_eq!(
+            crate::dupefallback::blocks_touched(&[br(100, 200)], block),
+            1
+        );
+        assert_eq!(
+            crate::dupefallback::blocks_touched(&[br(900, 200)], block),
+            2
+        );
         assert_eq!(
             crate::dupefallback::blocks_touched(
                 &[br(5300, 10), br(100, 10), br(150, 10), br(5900, 200)],
@@ -13812,8 +14142,14 @@ mod tests {
             ),
             3
         );
-        assert_eq!(crate::dupefallback::blocks_touched(&[br(0, 1000)], block), 1);
-        assert_eq!(crate::dupefallback::blocks_touched(&[br(0, 1001)], block), 2);
+        assert_eq!(
+            crate::dupefallback::blocks_touched(&[br(0, 1000)], block),
+            1
+        );
+        assert_eq!(
+            crate::dupefallback::blocks_touched(&[br(0, 1001)], block),
+            2
+        );
         assert_eq!(
             crate::dupefallback::blocks_touched(&[br(0, 10_000), br(3500, 10)], block),
             10
@@ -13953,10 +14289,8 @@ mod tests {
                     self.queue.clear();
                 }
                 fn update_progress(&mut self, label: &[u8], stage_progress: i32) {
-                    self.progress.push((
-                        String::from_utf8_lossy(label).into_owned(),
-                        stage_progress,
-                    ));
+                    self.progress
+                        .push((String::from_utf8_lossy(label).into_owned(), stage_progress));
                 }
                 fn emit_message_bytes(&mut self, _kind: TargetMessageKind, text: &[u8]) {
                     self.messages
@@ -14041,9 +14375,7 @@ mod tests {
         std::fs::create_dir_all(&temp_root).unwrap();
 
         // Create a 32 KiB inner payload with varied bytes
-        let inner: Vec<u8> = (0..32768)
-            .map(|i| ((i * 73 + 19) & 0xFF) as u8)
-            .collect();
+        let inner: Vec<u8> = (0..32768).map(|i| ((i * 73 + 19) & 0xFF) as u8).collect();
 
         // Write target split archive Show.mkv.001 (16 KiB with a 1 KiB hole at 4096..5120)
         // and Show.mkv.002 (16 KiB intact)

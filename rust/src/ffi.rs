@@ -3709,7 +3709,6 @@ pub(crate) unsafe fn format_system_info_bytes(mode: c_int, with_network: bool) -
             "ip.nzbget.com",
             !build_tls_disabled(),
             !build_gzip_disabled(),
-            build_version_bytes(),
             |fd, host_cstr, req| {
                 let Some(cb) = conn_host_cb else {
                     return Err("TLS callback missing".to_string());

@@ -17,7 +17,9 @@ impl Bits<'_> {
 
     /// The next 16 bits, not consumed.
     pub fn peek16(&self) -> u32 {
-        let v = (self.byte(self.addr) << 16) | (self.byte(self.addr + 1) << 8) | self.byte(self.addr + 2);
+        let v = (self.byte(self.addr) << 16)
+            | (self.byte(self.addr + 1) << 8)
+            | self.byte(self.addr + 2);
         (v >> (8 - self.bit)) & 0xffff
     }
 
@@ -60,7 +62,10 @@ impl Table {
             count[usize::from(l & 15)] += 1;
         }
         count[0] = 0;
-        let mut t = Table { decode_num: vec![0; lengths.len()], ..Table::default() };
+        let mut t = Table {
+            decode_num: vec![0; lengths.len()],
+            ..Table::default()
+        };
         let mut upper = 0u32;
         for i in 1..16 {
             upper += count[i];

@@ -13,8 +13,9 @@ pub const PATH_SEPARATOR: u8 = b'/';
 pub const ALT_PATH_SEPARATOR: u8 = b'\\';
 
 const RESERVED_DEVICE_NAMES: [&[u8]; 22] = [
-    b"CON", b"PRN", b"AUX", b"NUL", b"COM1", b"COM2", b"COM3", b"COM4", b"COM5", b"COM6", b"COM7", b"COM8", b"COM9",
-    b"LPT1", b"LPT2", b"LPT3", b"LPT4", b"LPT5", b"LPT6", b"LPT7", b"LPT8", b"LPT9",
+    b"CON", b"PRN", b"AUX", b"NUL", b"COM1", b"COM2", b"COM3", b"COM4", b"COM5", b"COM6", b"COM7",
+    b"COM8", b"COM9", b"LPT1", b"LPT2", b"LPT3", b"LPT4", b"LPT5", b"LPT6", b"LPT7", b"LPT8",
+    b"LPT9",
 ];
 
 /// FileSystem::NormalizePathSeparators, in place.
@@ -29,7 +30,9 @@ pub fn normalize_path_separators(path: &mut [u8]) {
 /// FileSystem::BaseFileName: the offset of the name after the last
 /// separator of either kind.
 pub fn base_file_name(path: &[u8]) -> usize {
-    path.iter().rposition(|&b| b == PATH_SEPARATOR || b == ALT_PATH_SEPARATOR).map_or(0, |k| k + 1)
+    path.iter()
+        .rposition(|&b| b == PATH_SEPARATOR || b == ALT_PATH_SEPARATOR)
+        .map_or(0, |k| k + 1)
 }
 
 /// FileSystem::SplitPathAndFilename: (path, name) at the last '/' or '\\';
@@ -142,7 +145,10 @@ pub fn sanitize_path_segment(name: &[u8]) -> Vec<u8> {
 /// dropped, joined with the platform's separator.
 pub fn sanitize_relative_path(path: &[u8]) -> Vec<u8> {
     let mut clean = Vec::new();
-    for seg in path.split(|&b| b == b'/' || b == b'\\').filter(|s| !s.is_empty()) {
+    for seg in path
+        .split(|&b| b == b'/' || b == b'\\')
+        .filter(|s| !s.is_empty())
+    {
         let s = sanitize_path_segment(seg);
         if !s.is_empty() {
             if !clean.is_empty() {
@@ -184,7 +190,10 @@ mod tests {
         assert_eq!(make_valid_filename(b"COM1", false), b"_COM1");
         assert_eq!(make_valid_filename(b"console", false), b"console");
         assert_eq!(sanitize_path_segment(b"  ..evil..name.  "), b"_evil_name");
-        assert_eq!(sanitize_relative_path(b"../a//b\\..\\c"), [b'a', PATH_SEPARATOR, b'b', PATH_SEPARATOR, b'c']);
+        assert_eq!(
+            sanitize_relative_path(b"../a//b\\..\\c"),
+            [b'a', PATH_SEPARATOR, b'b', PATH_SEPARATOR, b'c']
+        );
         let cmd = [PATH_SEPARATOR, b'x', b' ', b'-', b'v'];
         assert_eq!(extract_file_path_from_cmd(&cmd), &cmd[..2]);
         assert_eq!(&b"/a/b"[base_file_name(b"/a/b")..], b"b");

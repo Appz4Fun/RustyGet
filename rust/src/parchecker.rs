@@ -1060,9 +1060,11 @@ fn map_repair_error(err: RepairError) -> i32 {
         }
         RepairError::NotEnoughRecovery { .. } => PAR_RESULT_REPAIR_NOT_POSSIBLE,
         RepairError::Io { .. } => PAR_RESULT_FILE_IO_ERROR,
-        RepairError::Cancelled | RepairError::VerificationFailed { .. } | RepairError::Singular => {
-            PAR_RESULT_REPAIR_FAILED
-        }
+        RepairError::Cancelled
+        | RepairError::VerificationFailed { .. }
+        | RepairError::Singular
+        | RepairError::StreamingMemoryLimit { .. }
+        | RepairError::RecoveryMemoryLimit { .. } => PAR_RESULT_REPAIR_FAILED,
         RepairError::NotFinalized | RepairError::WrongSet { .. } | RepairError::UnknownFile(_) => {
             PAR_RESULT_LOGIC_ERROR
         }

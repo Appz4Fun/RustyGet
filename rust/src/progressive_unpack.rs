@@ -39,7 +39,7 @@ pub enum VolumeView {
     /// The volume file is complete on disk. `holes` are byte ranges that never arrived intact
     /// (missing or CRC-failed articles), sorted and disjoint.
     Ready { holes: Vec<(u64, u64)> },
-    /// Not downloaded yet: the session parks until [`VolumeFeed::wait_for_change`]'s waker fires.
+    /// Not downloaded yet: the session parks and asks again shortly.
     NotYet,
     /// Will never arrive.
     Missing,
@@ -48,17 +48,48 @@ pub enum VolumeView {
 /// The download side of a session: which volumes exist and which bytes in them are lost.
 pub trait VolumeFeed: Send + 'static {
     fn volume(&mut self, path: &Path) -> VolumeView;
-    /// Registers `waker` to be woken when any volume's state may have changed.
-    fn wait_for_change(&mut self, waker: &Waker);
     /// Blocks (polling `is_cancelled`) until every damaged volume this feed handed out has been
     /// repaired in place. Returns false when the repair was given up or cancelled.
     fn wait_repaired(&mut self, _is_cancelled: &mut dyn FnMut() -> bool) -> bool {
         false
     }
-    /// True when some volume was handed out with holes.
-    fn handed_out_holes(&self) -> bool {
-        false
+}
+
+/// Volume bytes at the start and end that hold archive headers. A hole there cannot be read
+/// past, so such a volume waits for its repair instead.
+const HEADER_GUARD_HEAD: i64 = 64 * 1024;
+const HEADER_GUARD_TAIL: i64 = 4 * 1024;
+
+/// Converts a damaged volume's lost ranges into holes the session can skip, or an empty list
+/// when extraction should wait for the repair instead (no known ranges, or a range that touches
+/// the volume's headers).
+pub fn skippable_holes(
+    holes: &[crate::dupefallback::NzbgetRsByteRange],
+    file_size: i64,
+) -> Vec<(u64, u64)> {
+    if file_size <= HEADER_GUARD_HEAD + HEADER_GUARD_TAIL {
+        return Vec::new();
     }
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(holes.len());
+    for h in holes {
+        if h.size <= 0 {
+            continue;
+        }
+        if h.offset < HEADER_GUARD_HEAD || h.offset + h.size > file_size - HEADER_GUARD_TAIL {
+            return Vec::new();
+        }
+        out.push((h.offset as u64, h.size as u64));
+    }
+    out.sort_unstable();
+    // Coalesce overlapping or touching ranges.
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(out.len());
+    for (s, l) in out {
+        match merged.last_mut() {
+            Some((ms, ml)) if *ms + *ml >= s => *ml = (*ml).max(s + l - *ms),
+            _ => merged.push((s, l)),
+        }
+    }
+    merged
 }
 
 /// A set whose volumes are all on disk: present volumes are complete, absent ones missing.
@@ -72,7 +103,6 @@ impl VolumeFeed for CompleteSet {
             VolumeView::Missing
         }
     }
-    fn wait_for_change(&mut self, _waker: &Waker) {}
 }
 
 /// Why a session ended without extracting everything. Each kind maps to a typed zipfast failure.
@@ -211,9 +241,11 @@ where
         .map(|n| n.to_os_string())
         .unwrap_or_default();
     let feed = Arc::new(Mutex::new(feed));
+    let pending: PendingWait = Arc::new(Mutex::new(None));
     let provider = FeedProvider {
         dir: dir.clone(),
         feed: feed.clone(),
+        pending: pending.clone(),
     };
     let mut opts = ProgressiveOptions::new(
         zipfast::extract::Options {
@@ -247,7 +279,7 @@ where
             Error::Failed(Failure::from_progressive(&e))
         }
     })?;
-    let mut drive = Driver::new(&mut session);
+    let mut drive = Driver::new(&mut session, feed.clone(), pending);
     let mut summary = zipfast::extract::Summary::default();
     let mut names: std::collections::HashMap<zipfast::progressive::MemberId, Vec<u8>> =
         Default::default();
@@ -649,10 +681,15 @@ fn copy_artifact(
     std::fs::rename(&tmp, target).map_err(io)
 }
 
+/// The volume the session is parked on and the waker that resumes it.
+type PendingWait = Arc<Mutex<Option<(PathBuf, Waker)>>>;
+
 /// Thread-parking driver around `poll_event`.
 struct Driver<'s> {
     session: &'s mut ProgressiveSession,
     parker: Arc<Parker>,
+    feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
+    pending: PendingWait,
 }
 
 struct Parker {
@@ -671,13 +708,39 @@ impl Wake for Parker {
 }
 
 impl<'s> Driver<'s> {
-    fn new(session: &'s mut ProgressiveSession) -> Self {
+    fn new(
+        session: &'s mut ProgressiveSession,
+        feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
+        pending: PendingWait,
+    ) -> Self {
         Self {
             session,
             parker: Arc::new(Parker {
                 thread: std::thread::current(),
                 woken: AtomicBool::new(false),
             }),
+            feed,
+            pending,
+        }
+    }
+
+    /// Wakes the session when the volume it is parked on has changed state.
+    fn recheck_pending(&self) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = match pending.as_ref() {
+            Some((path, _)) => !matches!(
+                self.feed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .volume(path),
+                VolumeView::NotYet
+            ),
+            None => false,
+        };
+        if changed {
+            if let Some((_, waker)) = pending.take() {
+                waker.wake();
+            }
         }
     }
 
@@ -704,6 +767,7 @@ impl<'s> Driver<'s> {
                     if !self.parker.woken.load(Ordering::Acquire) {
                         std::thread::park_timeout(PARK_SLICE);
                     }
+                    self.recheck_pending();
                 }
             }
         }
@@ -714,6 +778,7 @@ impl<'s> Driver<'s> {
 struct FeedProvider {
     dir: PathBuf,
     feed: Arc<Mutex<Box<dyn VolumeFeed>>>,
+    pending: PendingWait,
 }
 
 impl VolumeSource for FeedProvider {
@@ -735,14 +800,11 @@ impl VolumeSource for FeedProvider {
                 })))
             }
             VolumeView::NotYet => {
-                feed.wait_for_change(cx.waker());
-                // The volume may have completed between the check and the registration.
-                if matches!(feed.volume(&path), VolumeView::NotYet) {
-                    Ok(VolumeAnswer::Wait)
-                } else {
-                    cx.waker().wake_by_ref();
-                    Ok(VolumeAnswer::Wait)
-                }
+                // The driver asks the feed again while parked and wakes the session when the
+                // volume's state changes.
+                *self.pending.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((path, cx.waker().clone()));
+                Ok(VolumeAnswer::Wait)
             }
             VolumeView::Missing => Ok(VolumeAnswer::Missing),
         }

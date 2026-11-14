@@ -962,6 +962,105 @@ fn record_extracted_path_from_msg(
     }
 }
 
+
+/// RAR sets go through zipfast's progressive session (see `progressive_unpack`).
+/// `overwrite_mode` 2 (auto-rename) extracts into a private directory first and renames on
+/// conflict while moving into place.
+fn extract_rar_progressive<F>(
+    archive_path: &std::path::Path,
+    output_dir: &std::path::Path,
+    password: &str,
+    overwrite_mode: i32,
+    log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+    rar: RarFeed<'_>,
+) -> Result<zipfast::extract::Summary, crate::progressive_unpack::Error>
+where
+    F: FnMut(i32, &str),
+{
+    use crate::progressive_unpack as pu;
+    let RarFeed { feed, failure } = rar;
+    let feed = feed.unwrap_or_else(|| Box::new(pu::CompleteSet));
+    let staging = (overwrite_mode == 2).then(|| {
+        output_dir.join(format!(".rustyget-unpack-{}", std::process::id()))
+    });
+    let dest = staging.as_deref().unwrap_or(output_dir);
+    let mut volumes = 0u64;
+    let mut cb = |kind: i32, msg: &str| {
+        if msg.starts_with("Unrar: Extracting from ") {
+            volumes += 1;
+        }
+        log_cb(kind, msg);
+    };
+    let req = pu::Request {
+        first_volume: archive_path,
+        dest,
+        password,
+        overwrite: overwrite_mode != 0,
+    };
+    let result = pu::extract(&req, feed, &mut cb, is_cancelled);
+    let result = match (result, staging) {
+        (Ok(summary), Some(staging)) => {
+            let moved = move_auto_rename(&staging, output_dir);
+            let _ = std::fs::remove_dir_all(&staging);
+            moved
+                .map(|()| summary)
+                .map_err(|e| pu::Error::Failed(pu::Failure::Other(e)))
+        }
+        (r, Some(staging)) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            r
+        }
+        (r, None) => r,
+    };
+    match result {
+        Ok(mut summary) => {
+            summary.volumes = summary.volumes.max(volumes);
+            Ok(summary)
+        }
+        Err(pu::Error::Failed(f)) => {
+            if let Some(slot) = failure {
+                *slot = Some(f.clone());
+            }
+            Err(pu::Error::Failed(f))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Moves everything under `from` into `to`, renaming a file whose name is taken.
+fn move_auto_rename(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(from).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            std::fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
+            move_auto_rename(&src, &dst)?;
+            continue;
+        }
+        let mut target = dst.clone();
+        let mut n = 1u32;
+        while target.exists() {
+            let stem = dst
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let ext = dst
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_default();
+            target = to.join(format!("{stem}_{n}{ext}"));
+            n += 1;
+        }
+        std::fs::rename(&src, &target).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn extract_single_archive_in_process<F>(
     archive_path: &std::path::Path,
     output_dir: &std::path::Path,
@@ -970,6 +1069,7 @@ fn extract_single_archive_in_process<F>(
     log_cb: &mut F,
     is_cancelled: &mut dyn FnMut() -> bool,
     extracted_paths: &mut Vec<std::path::PathBuf>,
+    rar: RarFeed<'_>,
 ) -> Result<zipfast::extract::Summary, String>
 where
     F: FnMut(i32, &str),
@@ -1010,7 +1110,9 @@ where
                 is_cancelled,
             );
         }
-        if n >= 7 && &sig[..7] == b"Rar!\x1a\x07\x00" {
+        let rar4 = n >= 7 && &sig[..7] == b"Rar!\x1a\x07\x00";
+        let rar5 = n >= 8 && &sig[..8] == b"Rar!\x1a\x07\x01\x00";
+        if rar4 || rar5 {
             let mut tracking_cb = |kind: i32, msg: &str| {
                 if overwrite_mode != 0 && kind == 4 {
                     record_extracted_path_from_msg(output_dir, msg, extracted_paths);
@@ -1019,6 +1121,29 @@ where
                     log_cb(kind, msg);
                 }
             };
+            match extract_rar_progressive(
+                archive_path,
+                output_dir,
+                password,
+                overwrite_mode,
+                &mut tracking_cb,
+                is_cancelled,
+                rar,
+            ) {
+                Ok(summary) => return Ok(summary),
+                Err(crate::progressive_unpack::Error::Failed(f)) => return Err(f.to_string()),
+                Err(crate::progressive_unpack::Error::Unsupported(why)) if rar4 => {
+                    tracking_cb(
+                        4,
+                        &format!("Unrar: using the RAR 1.5-4.x decoder ({})", why.0),
+                    );
+                }
+                Err(crate::progressive_unpack::Error::Unsupported(why)) => {
+                    let msg = format!("Unrar: unsupported RAR5 archive: {}", why.0);
+                    tracking_cb(1, &msg);
+                    return Err(msg);
+                }
+            }
             return crate::archive_native::extract_rar4_cancellable(
                 archive_path,
                 output_dir,
@@ -1352,8 +1477,45 @@ pub fn extract_archive_with_zipfast_cancellable<F>(
     password: &str,
     overwrite_mode: i32,
     cleanup_disk: bool,
+    log_cb: F,
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<zipfast::extract::Summary, String>
+where
+    F: FnMut(i32, &str),
+{
+    extract_archive_with_feed(
+        archive_path,
+        output_dir,
+        password,
+        overwrite_mode,
+        cleanup_disk,
+        log_cb,
+        is_cancelled,
+        RarFeed::default(),
+    )
+}
+
+/// How the top-level RAR set is read, and where a typed failure goes.
+#[derive(Default)]
+pub struct RarFeed<'a> {
+    /// Volume availability for a set still downloading (direct unpack). `None` reads a set whose
+    /// volumes are all on disk.
+    pub feed: Option<Box<dyn crate::progressive_unpack::VolumeFeed>>,
+    /// Receives the typed reason when the RAR extraction fails.
+    pub failure: Option<&'a mut Option<crate::progressive_unpack::Failure>>,
+}
+
+/// [`extract_archive_with_zipfast_cancellable`] with a volume feed for the top-level RAR set.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_archive_with_feed<F>(
+    archive_path: &std::path::Path,
+    output_dir: &std::path::Path,
+    password: &str,
+    overwrite_mode: i32,
+    cleanup_disk: bool,
     mut log_cb: F,
     is_cancelled: &mut dyn FnMut() -> bool,
+    rar: RarFeed<'_>,
 ) -> Result<zipfast::extract::Summary, String>
 where
     F: FnMut(i32, &str),
@@ -1399,6 +1561,7 @@ where
         &mut log_cb,
         is_cancelled,
         &mut extracted_paths,
+        rar,
     )?;
     mark_extracted_files(&extracted_paths, &mut pre_existing, &mut processed_nested);
 
@@ -1439,6 +1602,7 @@ where
                 &mut log_cb,
                 is_cancelled,
                 &mut sub_extracted,
+                RarFeed::default(),
             )?;
             let consumed_count = (sub_summary.volumes.max(1) as usize).min(volumes.len());
             let consumed_volumes = &volumes[..consumed_count];
@@ -1492,6 +1656,7 @@ where
         &mut log_cb,
         is_cancelled,
         &mut extracted_paths,
+        RarFeed::default(),
     )?;
     log_cb(4, "Unrar: All OK");
     log_cb(4, "7-Zip: Everything is Ok");

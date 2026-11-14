@@ -246,9 +246,6 @@ impl VolumeFeed for Trickle {
             None => VolumeView::Missing,
         }
     }
-    fn wait_for_change(&mut self, waker: &Waker) {
-        *self.waker.lock().unwrap() = Some(waker.clone());
-    }
 }
 
 #[test]
@@ -306,15 +303,11 @@ impl VolumeFeed for Damaged {
         self.handed |= !holes.is_empty();
         VolumeView::Ready { holes }
     }
-    fn wait_for_change(&mut self, _waker: &Waker) {}
     fn wait_repaired(&mut self, _is_cancelled: &mut dyn FnMut() -> bool) -> bool {
         for (p, bytes) in &self.repair {
             std::fs::write(p, bytes).unwrap();
         }
         true
-    }
-    fn handed_out_holes(&self) -> bool {
-        self.handed
     }
 }
 
@@ -376,7 +369,6 @@ fn unrepaired_holes_fail_as_damage() {
                 VolumeView::Missing
             }
         }
-        fn wait_for_change(&mut self, _w: &Waker) {}
     }
     let (r, log) = run(&first, &t.out(), Box::new(NoRepair(v2, p2 + 500)));
     match r {
@@ -420,4 +412,20 @@ fn rar4_compressed_is_reported_unsupported() {
     std::fs::write(&first, &v).unwrap();
     let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
     assert!(matches!(r, Err(Error::Unsupported(_))), "log: {log:?}");
+}
+
+#[test]
+fn orphan_continuation_volume_is_refused() {
+    // Ported from archive_native: a set that starts with a split-before member.
+    let t = TestDir::new("orphan");
+    let payload = b"tail-bytes";
+    let mut v = SIG.to_vec();
+    v.extend(main_block(true, None));
+    v.extend(file_block("movie.bin", payload.len() as u64, payload, crc32fast::hash(payload), true, false));
+    v.extend(end_block(false));
+    let first = t.dl().join("orphan.part2.rar");
+    std::fs::write(&first, &v).unwrap();
+    let (r, log) = run(&first, &t.out(), Box::new(CompleteSet));
+    assert!(r.is_err(), "an orphan continuation must not extract: {log:?}");
+    assert!(!t.out().join("movie.bin").exists());
 }

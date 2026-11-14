@@ -96,7 +96,7 @@ pub struct LayerPick {
     pub want: Option<(Vec<u8>, i64)>,
     /// Leave the choice of what the inner file may be to the caller and fill `files`.
     pub nested: bool,
-    /// Base name and size of every stored, unencrypted file found (when `nested`).
+    /// Base name and size of every stored file found (when `nested`).
     pub files: Vec<(Vec<u8>, i64)>,
     /// What `files` already holds, so listing a big container stays linear.
     seen: std::collections::HashSet<(Vec<u8>, i64)>,
@@ -1984,6 +1984,7 @@ where
             &mut logical_read,
             password,
             headers_were_encrypted,
+            pick,
         );
     }
     if streams.pack_sizes.len() != streams.folder_unpack_sizes.len() {
@@ -2175,6 +2176,7 @@ fn seven_zip_inspect_encrypted(
     logical_read: &mut dyn FnMut(i64, &mut [u8]) -> bool,
     password: Option<&[u8]>,
     password_proven: bool,
+    pick: &mut LayerPick,
 ) -> Result<SevenZipInspect, &'static str> {
     if streams.pack_sizes.len() != streams.folder_unpack_sizes.len()
         || streams.folder_aes.len() != streams.folder_unpack_sizes.len()
@@ -2183,20 +2185,6 @@ fn seven_zip_inspect_encrypted(
     {
         return Err("unsupported 7z structure");
     }
-    // The biggest file, its folder and its number among the files that have data.
-    let mut best: Option<(usize, usize, i64, usize)> = None; // folder, index in folder, size, stream no
-    let mut stream_no = 0usize;
-    for (f, sizes) in streams.substream_sizes.iter().enumerate() {
-        for (i, &sub) in sizes.iter().enumerate() {
-            if best.is_none_or(|b| (sub as i64) > b.2) {
-                best = Some((f, i, sub as i64, stream_no));
-            }
-            stream_no += 1;
-        }
-    }
-    let Some((folder, _, inner_size, best_stream)) = best else {
-        return Err("unsupported 7z structure");
-    };
     let mut names_with_stream: Vec<&[u8]> = Vec::new();
     let max_names = (file_count as usize).min(names.len());
     for (i, name) in names.iter().enumerate().take(max_names) {
@@ -2205,14 +2193,41 @@ fn seven_zip_inspect_encrypted(
             names_with_stream.push(name);
         }
     }
-    let Some(full_name) = names_with_stream.get(best_stream) else {
+    let base_of = |stream_no: usize| -> &[u8] {
+        let full: &[u8] = names_with_stream.get(stream_no).copied().unwrap_or(&[]);
+        match full.iter().rposition(|&b| b == b'/' || b == b'\\') {
+            Some(pos) => &full[pos + 1..],
+            None => full,
+        }
+    };
+    // The biggest file (or the one asked for), its folder and its size.
+    let mut best: Option<(usize, i64, usize)> = None; // folder, size, stream no
+    let mut stream_no = 0usize;
+    for (f, sizes) in streams.substream_sizes.iter().enumerate() {
+        // A file that this function can map: alone in a stored, encrypted folder.
+        let mappable = sizes.len() == 1
+            && streams.folder_coder[f] == SZ_CODER_COPY
+            && streams.folder_aes[f].is_some();
+        for &sub in sizes {
+            if mappable {
+                pick.note(base_of(stream_no), sub as i64);
+            }
+            let better = if pick.want.is_some() {
+                best.is_none() && pick.wants(base_of(stream_no), sub as i64)
+            } else {
+                best.is_none_or(|b| (sub as i64) > b.1)
+            };
+            if better {
+                best = Some((f, sub as i64, stream_no));
+            }
+            stream_no += 1;
+        }
+    }
+    let Some((folder, inner_size, best_stream)) = best else {
         return Err("unsupported 7z structure");
     };
-    let inner_name = match full_name.iter().rposition(|&b| b == b'/' || b == b'\\') {
-        Some(pos) => full_name[pos + 1..].to_vec(),
-        None => full_name.to_vec(),
-    };
-    if inner_name.is_empty() || !is_map_inner_eligible(&inner_name) {
+    let inner_name = base_of(best_stream).to_vec();
+    if inner_name.is_empty() || (pick.checks_name() && !is_map_inner_eligible(&inner_name)) {
         return Err("inner file is not a media file");
     }
     if streams.folder_coder[folder] != SZ_CODER_COPY {
@@ -3038,7 +3053,7 @@ where
             continue;
         }
         for entry in entries.iter().filter(|e| e.volume_index == v as i32) {
-            if entry.stored && !entry.encrypted_data {
+            if entry.stored {
                 pick.note(base_file_name(entry.filename), entry.size);
             }
             if pick.want.is_some() {
@@ -5232,6 +5247,13 @@ pub struct ContentMap {
     inner_size: i64,
     runs: Vec<NzbgetRsContentRun>,
     run_cryptos: Vec<RunCrypto>,
+    /// Encrypted archives the file lies inside of, when it sits in a plain archive that is
+    /// itself stored in an encrypted one: the file's bytes are then plaintext of these
+    /// layers, at no fixed block position, and `runs` only says where their ciphertext is.
+    plain_layers: Vec<std::sync::Arc<ContentMap>>,
+    /// Per run (when `plain_layers` is not empty): the layer it lies in and where in that
+    /// layer's plaintext it starts.
+    run_layers: Vec<(usize, i64)>,
 }
 
 impl ContentMap {
@@ -5427,8 +5449,10 @@ impl ContentMap {
 
     pub fn exclude_member(&mut self, member_index: i32) {
         let parallel = self.run_cryptos.len() == self.runs.len();
+        let layered = self.run_layers.len() == self.runs.len();
         let mut kept_runs = Vec::new();
         let mut kept_cryptos = Vec::new();
+        let mut kept_layers = Vec::new();
         for i in 0..self.runs.len() {
             if self.runs[i].member_index == member_index {
                 continue;
@@ -5437,11 +5461,61 @@ impl ContentMap {
             if parallel {
                 kept_cryptos.push(self.run_cryptos[i].clone());
             }
+            if layered {
+                kept_layers.push(self.run_layers[i]);
+            }
         }
         self.runs = kept_runs;
         if parallel {
             self.run_cryptos = kept_cryptos;
         }
+        if layered {
+            self.run_layers = kept_layers;
+        }
+    }
+
+    /// The file lies in a plain archive that is stored inside an encrypted one. Its bytes
+    /// can be read (decrypting the outer archive) but not written in place.
+    pub fn inside_encrypted(&self) -> bool {
+        !self.plain_layers.is_empty()
+    }
+
+    /// Reads `inner_range` of a file that lies inside encrypted archives, decrypting them.
+    fn read_inner_through_layers(
+        &self,
+        sources: &dyn ContentSourceSet,
+        inner_range: NzbgetRsByteRange,
+        buffer: &mut [u8],
+    ) -> bool {
+        if self.run_layers.len() != self.runs.len() || (buffer.len() as i64) < inner_range.size {
+            return false;
+        }
+        let end = inner_range.offset + inner_range.size;
+        let mut covered: i64 = 0;
+        for (run, &(layer, layer_offset)) in self.runs.iter().zip(&self.run_layers) {
+            let from = run.inner_offset.max(inner_range.offset);
+            let to = (run.inner_offset + run.size).min(end);
+            if from >= to {
+                continue;
+            }
+            let Some(layer) = self.plain_layers.get(layer) else {
+                return false;
+            };
+            let rel = (from - inner_range.offset) as usize;
+            let len = (to - from) as usize;
+            if !layer.read_inner_decrypted(
+                sources,
+                NzbgetRsByteRange {
+                    offset: layer_offset + (from - run.inner_offset),
+                    size: to - from,
+                },
+                &mut buffer[rel..rel + len],
+            ) {
+                return false;
+            }
+            covered += to - from;
+        }
+        covered == inner_range.size
     }
 
     /// Reads donor plaintext for `inner_range` (`StreamRepairController::ReadDonorInner` in `StreamRepair.cpp`),
@@ -5456,6 +5530,9 @@ impl ContentMap {
             return false;
         }
         buffer.resize(inner_range.size as usize, 0);
+        if self.inside_encrypted() {
+            return self.read_inner_through_layers(sources, inner_range, buffer);
+        }
         if self.encrypted() {
             return self.read_inner_decrypted(sources, inner_range, buffer);
         }
@@ -7076,6 +7153,17 @@ impl ContentSource for NestedLayerSource<'_> {
         if buf.is_empty() {
             return true;
         }
+        if self.outer.encrypted() {
+            // The nested archive is the plaintext of an encrypted one.
+            return self.outer.read_inner_decrypted(
+                self.sources,
+                NzbgetRsByteRange {
+                    offset,
+                    size: buf.len() as i64,
+                },
+                buf,
+            );
+        }
         let pieces = self.outer.map_from_inner(NzbgetRsByteRange {
             offset,
             size: buf.len() as i64,
@@ -7280,11 +7368,6 @@ impl ContentMapper {
         if depth >= Self::MAX_NESTED_LAYERS {
             return Err(NOT_MEDIA.to_string());
         }
-        if primary.encrypted() {
-            // The archive inside lies in the plaintext of an encrypted one: its bytes
-            // have no place of their own in the members.
-            return Err("nested archive inside an encrypted archive".to_string());
-        }
         // One entry per name: the mapped file itself where it shares its name with files
         // in other folders of the container, otherwise the biggest of that name.
         let mut files: Vec<(Vec<u8>, i64)> = Vec::new();
@@ -7344,9 +7427,6 @@ impl ContentMapper {
                 };
                 Self::build_layer_map(members, set, &memo, password, tls_enabled, &mut one)?
             };
-            if volume_map.encrypted() {
-                return Err("nested archive inside an encrypted archive".to_string());
-            }
             if volume_map.inner_size() != *size {
                 return Err("nested archive does not lie in mapped data".to_string());
             }
@@ -7388,6 +7468,10 @@ impl ContentMapper {
         let mut map = ContentMap::default();
         map.set_inner_name_bytes(inner.inner_name_bytes());
         map.set_inner_size(inner.inner_size());
+        let outer_encrypted = outers.iter().filter(|o| o.encrypted()).count();
+        if outer_encrypted != 0 {
+            return Self::compose_inside_encrypted(outers, inner, outer_encrypted);
+        }
         let encrypted = inner.encrypted();
         if encrypted && inner.run_cryptos().len() != inner.runs().len() {
             return Err(BROKEN.to_string());
@@ -7434,11 +7518,82 @@ impl ContentMapper {
                         cipher_size: piece.size,
                     });
                 }
+                if let Some(&(layer, layer_offset)) = inner.run_layers.get(i) {
+                    map.run_layers
+                        .push((layer, layer_offset + (inner_offset - run.inner_offset)));
+                }
                 inner_offset += plain;
                 plain_left -= plain;
             }
             if plain_left != 0 {
                 return Err(BROKEN.to_string());
+            }
+        }
+        // Encrypted archives further in keep their place: their own maps move out with
+        // the rest.
+        for layer in &inner.plain_layers {
+            map.plain_layers
+                .push(std::sync::Arc::new(Self::compose_nested(outers, layer)?));
+        }
+        if map.run_layers.len()
+            != if map.plain_layers.is_empty() {
+                0
+            } else {
+                map.runs.len()
+            }
+        {
+            return Err(BROKEN.to_string());
+        }
+        Ok(map)
+    }
+
+    /// [`Self::compose_nested`] when the volumes of the nested archive are encrypted: the
+    /// file's bytes are then plaintext of those volumes. The runs still say where the
+    /// matching ciphertext lies (CBC keeps positions), and each run remembers the volume
+    /// and the place in its plaintext, which is what reading goes by.
+    fn compose_inside_encrypted(
+        outers: &[ContentMap],
+        inner: &ContentMap,
+        outer_encrypted: usize,
+    ) -> Result<ContentMap, String> {
+        const BROKEN: &str = "nested archive does not lie in mapped data";
+        if outer_encrypted != outers.len() {
+            return Err("nested archive volumes are only partly encrypted".to_string());
+        }
+        if inner.encrypted() || inner.inside_encrypted() {
+            return Err("encrypted archive inside an encrypted archive".to_string());
+        }
+        let mut map = ContentMap::default();
+        map.set_inner_name_bytes(inner.inner_name_bytes());
+        map.set_inner_size(inner.inner_size());
+        map.plain_layers = outers
+            .iter()
+            .map(|o| std::sync::Arc::new(o.clone()))
+            .collect();
+        for run in inner.runs() {
+            let Some(layer) = usize::try_from(run.member_index)
+                .ok()
+                .filter(|&m| m < outers.len())
+            else {
+                return Err(BROKEN.to_string());
+            };
+            let pieces = outers[layer].map_from_inner(NzbgetRsByteRange {
+                offset: run.member_offset,
+                size: run.size,
+            });
+            if pieces.iter().map(|p| p.size).sum::<i64>() != run.size {
+                return Err(BROKEN.to_string());
+            }
+            let mut done: i64 = 0;
+            for piece in pieces {
+                map.runs_mut().push(NzbgetRsContentRun {
+                    inner_offset: run.inner_offset + done,
+                    member_index: piece.member_index,
+                    member_offset: piece.offset,
+                    size: piece.size,
+                });
+                map.run_layers.push((layer, run.member_offset + done));
+                done += piece.size;
             }
         }
         Ok(map)
@@ -7817,6 +7972,12 @@ impl ContentMapper {
                 skip_reason: String::new(),
             };
             match Self::build_map_with_tls(members, &set, sources, password, tls_enabled) {
+                Ok(map) if map.inside_encrypted() => {
+                    // Such a file can be read but not patched in place: writing a range
+                    // means re-encrypting blocks that also hold bytes of the archive
+                    // around it.
+                    data.skip_reason = "nested archive inside an encrypted archive".to_string();
+                }
                 Ok(map) => {
                     if sources.aborted() {
                         break;
@@ -10473,6 +10634,109 @@ mod tests {
             .map(|rc| (rc.cipher_data_offset, rc.cipher_size))
             .collect();
         assert_eq!(cipher, vec![(100, 40), (10, 168)]);
+    }
+
+    #[test]
+    fn payload_inside_an_encrypted_archive_reads_as_plaintext() {
+        // An archive of 300 bytes whose bytes 60..260 are the movie, AES-CBC encrypted
+        // (304 cipher bytes) and stored over two members behind 40 and 8 bytes.
+        let archive: Vec<u8> = (0..300u32).map(|i| ((i * 11 + 5) % 253) as u8).collect();
+        let crypto = RarCryptoContext::from_key_iv(&[9u8; 32], [3u8; 16]).unwrap();
+        let mut padded = archive.clone();
+        padded.resize(304, 0);
+        let mut cipher = vec![0u8; 304];
+        assert!(crypto.encrypt_range(None, &padded, &mut cipher, 19));
+        let mut member0 = vec![0xEEu8; 40];
+        member0.extend_from_slice(&cipher[..100]);
+        let mut member1 = vec![0xDDu8; 8];
+        member1.extend_from_slice(&cipher[100..]);
+        let mut sources = MemorySourceSet::default();
+        sources.push(member0);
+        sources.push(member1);
+
+        let crypto = std::sync::Arc::new(crypto);
+        let mut outer = ContentMap::default();
+        outer.set_inner_name_bytes(b"inner.rar");
+        outer.set_inner_size(300);
+        *outer.runs_mut() = vec![run(0, 0, 40, 100), run(100, 1, 8, 200)];
+        for (offset, size) in [(40, 100), (8, 204)] {
+            outer.run_cryptos_mut().push(RunCrypto {
+                crypto: Some(crypto.clone()),
+                cipher_data_offset: offset,
+                cipher_size: size,
+            });
+        }
+        let mut inner = ContentMap::default();
+        inner.set_inner_name_bytes(b"movie.mkv");
+        inner.set_inner_size(200);
+        *inner.runs_mut() = vec![run(0, 0, 60, 200)];
+
+        let map = ContentMapper::compose_nested(std::slice::from_ref(&outer), &inner).unwrap();
+        assert!(map.inside_encrypted());
+        assert!(!map.encrypted());
+        assert_eq!(map.inner_size(), 200);
+        // The runs say where the matching ciphertext lies.
+        assert_eq!(map.runs(), &[run(0, 0, 100, 40), run(40, 1, 8, 160)]);
+        let mut got = Vec::new();
+        assert!(map.read_donor_inner(
+            &sources,
+            NzbgetRsByteRange {
+                offset: 0,
+                size: 200
+            },
+            &mut got
+        ));
+        assert_eq!(got, &archive[60..260]);
+        // A range that starts and ends inside cipher blocks, across the two members.
+        assert!(map.read_donor_inner(
+            &sources,
+            NzbgetRsByteRange {
+                offset: 33,
+                size: 21
+            },
+            &mut got
+        ));
+        assert_eq!(got, &archive[93..114]);
+        assert!(!map.read_donor_inner(
+            &sources,
+            NzbgetRsByteRange {
+                offset: 190,
+                size: 20
+            },
+            &mut got
+        ));
+
+        // The nested archive itself reads as the decrypted outer one.
+        let layer = NestedLayerSource {
+            outer: &outer,
+            sources: &sources,
+        };
+        let mut head = [0u8; 70];
+        assert!(layer.read(0, &mut head));
+        assert_eq!(&head[..], &archive[..70]);
+
+        // Dropping a member drops its runs and their layer notes together.
+        let mut partial = map.clone();
+        partial.exclude_member(0);
+        assert_eq!(partial.runs(), &[run(40, 1, 8, 160)]);
+        assert!(partial.read_donor_inner(
+            &sources,
+            NzbgetRsByteRange {
+                offset: 100,
+                size: 50
+            },
+            &mut got
+        ));
+        assert_eq!(got, &archive[160..210]);
+
+        // An encrypted archive inside an encrypted one is refused.
+        let mut enc_inner = inner.clone();
+        enc_inner.run_cryptos_mut().push(RunCrypto {
+            crypto: Some(crypto),
+            cipher_data_offset: 60,
+            cipher_size: 208,
+        });
+        assert!(ContentMapper::compose_nested(std::slice::from_ref(&outer), &enc_inner).is_err());
     }
 
     #[test]

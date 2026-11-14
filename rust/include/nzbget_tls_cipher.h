@@ -37,6 +37,7 @@ typedef struct
     void (*destroy)(void*);
 } NzbgetTlsBackend;
 
+// A null backend selects the built-in OpenSSL backend (rust/src/tlssock.rs).
 NzbgetRsBuf nzbget_rs_tls_cipher_start(const NzbgetTlsBackend* backend);
 // Returns12/13 for an eligible exact pin, 0 otherwise; flags as in suite emitter.
 int nzbget_rs_tls_cipher_pin(int protocol, unsigned int bits, unsigned int flags);
@@ -44,4 +45,12 @@ NzbgetRsBuf nzbget_rs_tls_cipher_status(const char* id);
 NzbgetRsBuf nzbget_rs_tls_cipher_cancel(const char* id);
 void nzbget_rs_tls_cipher_shutdown(void);
 int nzbget_rs_tls_cipher_resolver(int argc, const char* const* argv);
+
+// OpenSSL library state for connections (was C++ TlsSocket::Init/InitOptions/Final).
+void nzbget_rs_tls_init(void);
+// Loads the CA file used to verify servers; null or empty loads none.
+void nzbget_rs_tls_init_options(const char* cert_store);
+void nzbget_rs_tls_final(void);
+// Frees the calling thread's OpenSSL state (was OpenSSL::StopSSLThread).
+void nzbget_rs_tls_thread_stop(void);
 #endif

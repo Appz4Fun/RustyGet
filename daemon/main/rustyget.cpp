@@ -40,7 +40,7 @@ inline int NServMain(int argc, char* argv[])
 			*outOpts = std::make_unique<Options>(&cmdOpts, nullptr);
 			debug("Initializing global connection data");
 #ifndef DISABLE_TLS
-			TlsSocket::Init();
+			nzbget_rs_tls_init();
 #endif
 			signal(SIGPIPE, SIG_IGN);
 		}
@@ -87,7 +87,7 @@ public:
 		{
 			debug("Initializing global connection data");
 #ifndef DISABLE_TLS
-			TlsSocket::Init();
+			nzbget_rs_tls_init();
 #endif
 		}
 
@@ -102,7 +102,7 @@ public:
 		(void)nzbget_rs_daemon_exec(14, &cenv);
 
 #ifndef DISABLE_TLS
-		TlsSocket::InitOptions(g_Options->GetCertCheck() ? g_Options->GetCertStore() : "");
+		nzbget_rs_tls_init_options(g_Options->GetCertCheck() ? g_Options->GetCertStore() : "");
 #endif
 
 		NzbgetRsDaemonEnv act{};
@@ -136,7 +136,7 @@ public:
 		if (!GetReloading())
 		{
 #ifndef DISABLE_TLS
-			TlsSocket::Final();
+			nzbget_rs_tls_final();
 #endif
 		}
 	}

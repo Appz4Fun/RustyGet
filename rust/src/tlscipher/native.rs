@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 
 pub type Cancel = unsafe extern "C" fn(*mut c_void) -> c_int;
-type Emit = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, c_int, u32, u32) -> c_int;
+pub(crate) type Emit = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, c_int, u32, u32) -> c_int;
 #[repr(C)]
 pub struct NativeServer {
     id: u32, host: *const c_char, port: u16, ip_version: u8, verification: u8,
@@ -28,6 +28,23 @@ pub struct Io {
     probe: unsafe extern "C" fn(*mut c_void, *const NativeServer, *const c_char, c_int, *const c_char, u64, Cancel, *mut c_void) -> c_int,
     commit: unsafe extern "C" fn(*mut c_void, *const u8, usize, *const u8, usize, Cancel, *mut c_void) -> c_int,
     destroy: unsafe extern "C" fn(*mut c_void),
+}
+impl Io {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        context: *mut c_void,
+        snapshot: unsafe extern "C" fn(*mut c_void, *mut *const u8, *mut usize) -> c_int,
+        suites: unsafe extern "C" fn(*mut c_void, Emit, *mut c_void) -> c_int,
+        prepare: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void,
+        prepare_batch: unsafe extern "C" fn(*mut c_void, u64, u32) -> c_int,
+        record: unsafe extern "C" fn(*mut c_void, u64) -> c_int,
+        free_decryptor: unsafe extern "C" fn(*mut c_void),
+        probe: unsafe extern "C" fn(*mut c_void, *const NativeServer, *const c_char, c_int, *const c_char, u64, Cancel, *mut c_void) -> c_int,
+        commit: unsafe extern "C" fn(*mut c_void, *const u8, usize, *const u8, usize, Cancel, *mut c_void) -> c_int,
+        destroy: unsafe extern "C" fn(*mut c_void),
+    ) -> Self {
+        Self { context, snapshot, suites, prepare, prepare_batch, record, free_decryptor, probe, commit, destroy }
+    }
 }
 pub struct Native { io: Io, addresses: Mutex<BTreeMap<String, Vec<String>>> }
 // The ABI context is owned, immutable except for callbacks, and used by exactly

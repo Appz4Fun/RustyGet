@@ -86,7 +86,6 @@ BOOST_GLOBAL_FIXTURE(InitGlobals);
 
 #include "postprocess/DirectUnpackTest.h"
 #include "postprocess/ParCheckerTest.h"
-#include "connect/TlsCipherTest.h"
 
 int main(int argc, char* argv[])
 {

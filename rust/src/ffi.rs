@@ -48,17 +48,20 @@ fn cipher_response(result: Result<String, crate::tlscipher::Error>) -> RsBuf {
 }
 
 /// # Safety
-/// backend points to a complete non-null callback table. Its context transfers
+/// backend is null (built-in backend) or points to a complete callback table. Its context transfers
 /// to Rust exactly once, including rejected/duplicate starts. Callbacks are
 /// thread-safe for the documented single-worker use and must never unwind.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tls_cipher_start(
     backend: *const tls_cipher_native::Io,
 ) -> RsBuf {
-    if backend.is_null() {
-        return cipher_response(Err(crate::tlscipher::Error("Missing TLS backend.")));
-    }
-    cipher_response(tls_cipher_native::start(unsafe { *backend }))
+    // A null table selects the built-in OpenSSL backend.
+    let io = if backend.is_null() {
+        crate::tlssock::cipher::backend()
+    } else {
+        unsafe { *backend }
+    };
+    cipher_response(tls_cipher_native::start(io))
 }
 /// # Safety
 /// id is null or a readable NUL-terminated string; null/empty queries current job.
@@ -3553,8 +3556,16 @@ pub(crate) fn build_version_bytes() -> &'static [u8] {
     build_version_cstr().to_bytes()
 }
 
+/// Connection host callback: TLS, deadlines, stop checks and logging, all in Rust.
 #[cfg(unix)]
 pub(crate) fn tls_host_cb() -> crate::net::NzbgetRsConnHostFn {
+    Some(crate::tlssock::conn_host)
+}
+
+/// The C++ callback registered at start-up. It now answers only operation 2:
+/// whether the current C++ `Thread` was stopped.
+#[cfg(unix)]
+pub(crate) fn cpp_thread_host_cb() -> crate::net::NzbgetRsConnHostFn {
     BUILD_ENV
         .read()
         .ok()
@@ -3562,25 +3573,42 @@ pub(crate) fn tls_host_cb() -> crate::net::NzbgetRsConnHostFn {
 }
 
 #[cfg(unix)]
-pub(crate) fn stop_ssl_thread() {
-    if build_tls_disabled() {
-        return;
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tls_init() {
+    crate::tlssock::init();
+}
+
+/// # Safety
+/// cert_store is null or a NUL-terminated path; empty or null loads no store.
+#[cfg(unix)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tls_init_options(cert_store: *const c_char) {
+    let path = if cert_store.is_null() {
+        &[][..]
+    } else {
+        unsafe { CStr::from_ptr(cert_store) }.to_bytes()
+    };
+    crate::tlssock::init_options(path);
+}
+
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tls_final() {
+    crate::tlssock::final_cleanup();
+}
+
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tls_thread_stop() {
+    if !build_tls_disabled() {
+        crate::tlssock::stop_ssl_thread();
     }
-    if let Some(cb) = tls_host_cb() {
-        unsafe {
-            cb(
-                std::ptr::null_mut(),
-                10,
-                0,
-                0,
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-        }
+}
+
+#[cfg(unix)]
+pub(crate) fn stop_ssl_thread() {
+    if !build_tls_disabled() {
+        crate::tlssock::stop_ssl_thread();
     }
 }
 

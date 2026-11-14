@@ -71,6 +71,8 @@ pub mod statmeter;
 pub mod systemhealth;
 pub mod text;
 pub mod tlscipher;
+#[cfg(unix)]
+pub mod tlssock;
 pub mod twin;
 pub mod unpack;
 pub mod url;

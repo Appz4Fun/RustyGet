@@ -70,7 +70,7 @@
 #ConfigContent div.config-option-tile {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) minmax(160px, 340px) 28px;
-	grid-template-areas: "label control help" "summary control help" "detail detail detail";
+	grid-template-areas: "label control help" "summary control help" "detail detail detail" "check check check";
 	column-gap: var(--space-4);
 	row-gap: 2px;
 	align-items: center;
@@ -109,9 +109,10 @@
 	justify-self: center;
 	color: var(--label-secondary);
 }
+#ConfigContent div.config-option-tile > .controls > .option__check-section { grid-area: check; }
+#ConfigContent div.config-option-tile > .controls > .help-block { grid-area: detail; }
 #ConfigContent div.config-option-tile > .controls > .help-block,
 #ConfigContent div.config-option-tile > .controls > .option__check-section {
-	grid-area: detail;
 	justify-self: stretch;
 	margin-top: var(--space-2);
 }
@@ -227,7 +228,7 @@
 @media (max-width: 768px) {
 	#ConfigContent div.config-option-tile {
 		grid-template-columns: minmax(0, 1fr) auto;
-		grid-template-areas: "label help" "summary summary" "control control" "detail detail";
+		grid-template-areas: "label help" "summary summary" "control control" "detail detail" "check check";
 		row-gap: var(--space-2);
 	}
 	#ConfigContent div.config-option-tile > .controls > * { justify-self: start; }
@@ -235,7 +236,7 @@
 	/* a switch stays on the label's line */
 	#ConfigContent div.config-option-tile:has(.btn-switch.is-toggle) {
 		grid-template-columns: minmax(0, 1fr) auto auto;
-		grid-template-areas: "label control help" "summary summary summary" "detail detail detail";
+		grid-template-areas: "label control help" "summary summary summary" "detail detail detail" "check check check";
 	}
 	#ConfigContent div.config-option-tile:has(.btn-switch.is-toggle) > .controls > .btn-switch { justify-self: end; }
 	.config-savebar__names { display: none; }

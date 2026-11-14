@@ -1061,7 +1061,7 @@ var Config = (new function($)
 		else if (option.select.length > 1)
 		{
 			option.type = 'switch';
-			var isToggle = option.select.length === 2 &&
+			var isToggle = !section.postparam && option.select.length === 2 &&
 				option.select.map(function(v) { return v.toLowerCase(); }).sort().join() === 'no,yes';
 			if (isToggle)
 			{
@@ -1384,6 +1384,7 @@ var Config = (new function($)
 		I18n.translatePage($ConfigNav);
 		I18n.translatePage($ConfigData);
 		groupNav();
+		snapshotShownValues();
 		refreshChangeState();
 		refreshListRows();
 		if (typeof TlsCipherDialog !== 'undefined') TlsCipherDialog.refreshAvailability();
@@ -1525,15 +1526,18 @@ var Config = (new function($)
 		$ConfigNav.append(search);
 	}
 
-	// Options whose control differs from the saved value.
-	function changedOptions()
+	// What each control showed when the page was built: the saved value, or the default
+	// for an option the configuration file doesn't have yet.
+	function snapshotShownValues()
 	{
-		var changed = [];
-		var listChanged = false;
-		if (!config)
+		eachEditableOption(function(option)
 		{
-			return { options: changed, lists: false };
-		}
+			option.shownValue = getOptionValue(option);
+		});
+	}
+
+	function eachEditableOption(callback)
+	{
 		for (var k=0; k < config.length; k++)
 		{
 			var sections = config[k].sections;
@@ -1544,23 +1548,48 @@ var Config = (new function($)
 				{
 					continue;
 				}
-				listChanged = listChanged || !!section.modified;
 				for (var j=0; j < section.options.length; j++)
 				{
 					var option = section.options[j];
-					if (option.template || option.type === 'info' || option.commandopts || option.value === null || !option.formId)
+					if (!option.template && option.type !== 'info' && !option.commandopts && option.formId)
 					{
-						continue;
-					}
-					var current = getOptionValue(option);
-					if (current != null && !isSameOptionValue(option, option.value, current))
-					{
-						changed.push(option);
+						callback(option, section);
 					}
 				}
 			}
 		}
-		return { options: changed, lists: listChanged };
+	}
+
+	// Options whose control differs from the saved value.
+	function changedOptions()
+	{
+		var changed = [];
+		var listChanged = false;
+		if (!config)
+		{
+			return { options: changed, lists: false, restored: false };
+		}
+		for (var k=0; k < config.length; k++)
+		{
+			config[k].sections.forEach(function(section)
+			{
+				listChanged = listChanged || (!section.postparam && !section.hidden && !!section.modified);
+			});
+		}
+		eachEditableOption(function(option)
+		{
+			var baseline = option.value !== null ? option.value : option.shownValue;
+			if (baseline === undefined || baseline === null)
+			{
+				return; // a set added since the page was built: counted as a list change
+			}
+			var current = getOptionValue(option);
+			if (current != null && !isSameOptionValue(option, baseline, current))
+			{
+				changed.push(option);
+			}
+		});
+		return { options: changed, lists: listChanged, restored: restored };
 	}
 
 	var $SaveBar = null;
@@ -1616,7 +1645,7 @@ var Config = (new function($)
 			$(this).attr('aria-checked', toggleIsOn(this) ? 'true' : 'false');
 		});
 		var count = state.options.length;
-		var dirty = count > 0 || state.lists;
+		var dirty = count > 0 || state.lists || state.restored;
 		$SaveBar.prop('hidden', !dirty);
 		$ConfigContent.toggleClass('has-unsaved', dirty);
 		if (dirty)
@@ -1625,7 +1654,8 @@ var Config = (new function($)
 				I18n.defaultValue('config_n_changes', '%1 changes').replace('%1', count);
 			if (count === 0)
 			{
-				countText = I18n.defaultValue('config_list_changes', 'List changes');
+				countText = state.restored ? I18n.defaultValue('config_restored_changes', 'Restored settings') :
+					I18n.defaultValue('config_list_changes', 'List changes');
 			}
 			$('.config-savebar__count', $SaveBar).text(countText);
 			$('.config-savebar__names', $SaveBar).text(state.options.slice(0, 4).map(function(option)
@@ -1636,17 +1666,26 @@ var Config = (new function($)
 	}
 	this.refreshChangeState = refreshChangeState;
 
+	// Discard reloads Settings from RustyGet, which also drops added, deleted or
+	// reordered list entries and a restored backup, then returns to the same section.
 	function discardOptionChanges()
 	{
-		changedOptions().options.forEach(function(option)
-		{
-			setOptionValue(option, option.value);
-			if (option.onchange)
+		var section = Config.currentSectionID;
+		restored = false;
+		Config.hide();
+		Config.show();
+		Options.loadConfig({
+			complete: function(_config)
 			{
-				option.onchange(option);
-			}
+				Config.buildPage(_config);
+				if (section && section !== 'Config-Info' && (/^Config-/.test(section) || findSectionById(section)))
+				{
+					Config.showSection(section, false);
+				}
+			},
+			configError: Config.loadConfigError,
+			serverTemplateError: Config.loadServerTemplateError
 		});
-		refreshChangeState();
 	}
 
 	this.switchClick = function(control)
@@ -1897,6 +1936,7 @@ var Config = (new function($)
 		reformatSection(section, setname);
 
 		section.modified = true;
+		if (typeof refreshChangeState === 'function') refreshChangeState();
 	}
 
 	function reformatSection(section, setname)
@@ -2017,6 +2057,7 @@ var Config = (new function($)
 		}
 
 		section.modified = true;
+		if (typeof refreshChangeState === 'function') refreshChangeState();
 
 		// visualize new multi set
 		var html = buildMultiSetContent(section, multiid);
@@ -2077,6 +2118,7 @@ var Config = (new function($)
 		reformatSet(section, setname, 10000 + id2, id1);
 
 		section.modified = true;
+		if (typeof refreshChangeState === 'function') refreshChangeState();
 		refreshListRows();
 	}
 
@@ -2861,8 +2903,9 @@ var Config = (new function($)
 
 	this.applyReloadedValues = function(values)
 	{
-		Options.reloadConfig(values, Config.buildPage);
 		restored = true;
+		Options.reloadConfig(values, Config.buildPage);
+		refreshChangeState();
 	}
 
 	/*** SHUTDOWN ********************************************************************/

@@ -3694,6 +3694,12 @@ where
         );
     }
 
+    if let Some(result) =
+        extract_encrypted_rar5_whole(archive_path, output_dir, password, overwrite_mode, log_cb)
+    {
+        return result;
+    }
+
     match extract_rar5_cancellable(
         archive_path,
         output_dir,
@@ -3713,6 +3719,87 @@ where
         Err(Rar5ExtractError::Failed(msg)) => Err(msg),
         Ok(summary) => Ok(summary),
     }
+}
+
+/// An encrypted RAR5 set (encrypted headers or encrypted members) whose volumes are all on
+/// disk is extracted by zipfast's own session, which handles the per-volume cipher state of
+/// split, compressed and encrypted members. Returns `None` when this does not apply: no
+/// password, not RAR5, nothing encrypted, or a volume is still missing (direct unpack), in
+/// which case the volume-by-volume path below runs.
+fn extract_encrypted_rar5_whole<F>(
+    archive_path: &Path,
+    output_dir: &Path,
+    password: &str,
+    overwrite_mode: i32,
+    log_cb: &mut F,
+) -> Option<Result<zipfast::extract::Summary, String>>
+where
+    F: FnMut(i32, &str),
+{
+    if password.is_empty() {
+        return None;
+    }
+    let mut sig = [0u8; 8];
+    {
+        use std::io::Read;
+        let mut f = std::fs::File::open(archive_path).ok()?;
+        f.read_exact(&mut sig).ok()?;
+    }
+    if &sig != b"Rar!\x1a\x07\x01\x00" {
+        return None;
+    }
+    // Listing walks every volume: it fails while one is missing and tells whether any member
+    // (or the headers, which then need the password to list at all) is encrypted.
+    let plain_listing = zipfast::extract::list(archive_path);
+    let entries = zipfast::extract::list_with_password(archive_path, Some(password)).ok()?;
+    let encrypted = plain_listing.is_err() || entries.iter().any(|e| e.encrypted);
+    if !encrypted {
+        return None;
+    }
+    if let Some(vol_name) = archive_path.file_name().and_then(|s| s.to_str()) {
+        log_cb(4, &format!("Unrar: Extracting from {vol_name}"));
+    }
+    let opts = zipfast::extract::Options {
+        mode: zipfast::extract::Mode::Extract,
+        dest: output_dir.to_path_buf(),
+        overwrite: if overwrite_mode != 0 {
+            zipfast::extract::Overwrite::Always
+        } else {
+            zipfast::extract::Overwrite::Skip
+        },
+        flatten: false,
+        threads: None,
+        protected_paths: std::collections::HashSet::new(),
+        parallel_min: None,
+    };
+    let result = zipfast::extract::run_with_password(archive_path, &opts, Some(password), |line| {
+        log_cb(4, &format!("Unrar: {line}"));
+    });
+    Some(match result {
+        Ok(summary) if summary.errors.is_empty() => {
+            for e in &entries {
+                if !e.dir {
+                    log_cb(4, &format!("Unrar: Extracting  {}", e.name));
+                }
+            }
+            Ok(summary)
+        }
+        Ok(summary) => {
+            let msg = format!("Unrar: {}", summary.errors.join("; "));
+            log_cb(1, &msg);
+            Err(msg)
+        }
+        Err(zipfast::Error::Encrypted) => {
+            let msg = "Unrar: The specified password is incorrect.".to_string();
+            log_cb(1, &msg);
+            Err(msg)
+        }
+        Err(e) => {
+            let msg = format!("Unrar: {e}");
+            log_cb(1, &msg);
+            Err(msg)
+        }
+    })
 }
 
 enum Rar5ExtractError {

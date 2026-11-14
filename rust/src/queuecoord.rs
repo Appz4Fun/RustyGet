@@ -3266,10 +3266,14 @@ impl NzbgetRsQueueCoordinator {
 
             // Live par2: fetch the recovery volumes for the damage known so far. Checked again
             // when a par2 file completes, because the damage may predate the par2 index.
+            // Both follow the repair settings: nothing is fetched or repaired on its own with
+            // ParRepair=no or ParCheck=manual.
+            let auto_par_repair = opts.par_check != crate::queuesubsys_host::PC_MANUAL
+                && crate::options::active_options().is_some_and(|o| o.scalars().par_repair != 0);
             if completed
                 && !is_side
                 && (is_incomplete || file.par_file)
-                && opts.par_check != crate::queuesubsys_host::PC_MANUAL
+                && auto_par_repair
                 && crate::pardamage::has_damage(nzb.id)
             {
                 let latest_nzb = host.nzb_snap(nzb.ptr, false);
@@ -3280,7 +3284,7 @@ impl NzbgetRsQueueCoordinator {
 
             // Live par2 cutover for a paused direct unpack: repair the held volumes as soon as
             // the recovery blocks on disk cover all damaged and not yet downloaded slices.
-            if completed && crate::postproc::direct_unpack_has_holds(nzb.id) {
+            if completed && auto_par_repair && crate::postproc::direct_unpack_has_holds(nzb.id) {
                 if let Some(st) = crate::parchecker::streaming_session_status(nzb.id) {
                     let mut msg = b"Live par2 for ".to_vec();
                     msg.extend_from_slice(&nzb.name);

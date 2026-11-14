@@ -173,6 +173,33 @@ class Bench:
         print('built %d packings of a %d MB file in %.0f s' % (len(self.packs), args.size_mb, time.time() - t0),
               flush=True)
         self.results = []
+        # Raw evidence is kept apart from the disposable download output: per scenario the
+        # daemon log and configuration, the fixture hashes, and the results, in a directory
+        # that this script never removes.
+        self.evidence = args.evidence or tempfile.mkdtemp(prefix='borrow-matrix-evidence-')
+        os.makedirs(self.evidence, exist_ok=True)
+        with open(args.nzbget, 'rb') as f:
+            binary_sha = hashlib.sha256(f.read()).hexdigest()
+        with open(os.path.join(self.evidence, 'run.json'), 'w') as out:
+            json.dump({'started': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'argv': sys.argv,
+                       'nzbget': os.path.abspath(args.nzbget), 'nzbget_sha256': binary_sha,
+                       'inner_md5': self.md5, 'inner_size': self.size,
+                       'packings': {name: [{'name': n, 'size': len(b), 'sha256': hashlib.sha256(b).hexdigest()}
+                                           for n, b in files]
+                                    for name, (files, _) in self.packs.items()}}, out, indent=1)
+        print('evidence: %s' % self.evidence, flush=True)
+
+    def keep_evidence(self, t, res):
+        slug = '%02d-%s' % (len(self.results) + 1, re.sub(r'[^A-Za-z0-9]+', '-', res['label']).strip('-'))
+        dest = os.path.join(self.evidence, slug)
+        os.makedirs(dest, exist_ok=True)
+        for rel in ('nzbget.log', 'nzbget.conf'):
+            try:
+                shutil.copy2(t.path(rel), os.path.join(dest, rel))
+            except OSError:
+                pass
+        with open(os.path.join(dest, 'result.json'), 'w') as out:
+            json.dump(res, out, indent=1)
 
     def place(self, pack, copy):
         """Write packing `pack` as post `copy` (a distinct set of message-ids) and return
@@ -273,6 +300,7 @@ class Bench:
             res['error'] = repr(e)[:200]
             res['seconds'] = round(time.time() - start, 1) if 'start' in dir() else None
         finally:
+            self.keep_evidence(t, res)
             t.teardown(self.args.keep)
         self.results.append(res)
         print('%-34s %7s s  %-18s ok=%-5s borrowed=%s MB how=%s %s' % (
@@ -293,6 +321,8 @@ def main():
     ap.add_argument('--timeout', type=int, default=1500)
     ap.add_argument('--only')
     ap.add_argument('--json')
+    ap.add_argument('--evidence', help='directory for raw evidence (logs, configs, fixture hashes); '
+                                       'default: a new directory that is never removed')
     ap.add_argument('--keep', action='store_true')
     args = ap.parse_args()
 
@@ -337,6 +367,8 @@ def main():
         # no duplicate at all: what the damage costs without borrowing
         b.run('no alt rar5 (fails)', 'rar5', [], fail=f)
     finally:
+        with open(os.path.join(b.evidence, 'results.json'), 'w') as out:
+            json.dump({'size_mb': args.size_mb, 'rate_kb': args.rate_kb, 'results': b.results}, out, indent=1)
         if args.json:
             with open(args.json, 'w') as out:
                 json.dump({'size_mb': args.size_mb, 'rate_kb': args.rate_kb, 'results': b.results}, out, indent=1)

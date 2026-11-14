@@ -3694,9 +3694,14 @@ where
         );
     }
 
-    if let Some(result) =
-        extract_encrypted_rar5_whole(archive_path, output_dir, password, overwrite_mode, log_cb)
-    {
+    if let Some(result) = extract_encrypted_rar5_whole(
+        archive_path,
+        output_dir,
+        password,
+        overwrite_mode,
+        log_cb,
+        is_cancelled,
+    ) {
         return result;
     }
 
@@ -3722,16 +3727,18 @@ where
 }
 
 /// An encrypted RAR5 set (encrypted headers or encrypted members) whose volumes are all on
-/// disk is extracted by zipfast's own session, which handles the per-volume cipher state of
-/// split, compressed and encrypted members. Returns `None` when this does not apply: no
-/// password, not RAR5, nothing encrypted, or a volume is still missing (direct unpack), in
-/// which case the volume-by-volume path below runs.
+/// disk and readable is extracted member by member through zipfast's selected-entry reader,
+/// which handles the per-volume cipher state of split, compressed and encrypted members.
+/// Returns `None` when this does not apply: no password, not RAR5, nothing encrypted, a volume
+/// still missing or on hold for repair (direct unpack), in which case the volume-by-volume
+/// path below runs.
 fn extract_encrypted_rar5_whole<F>(
     archive_path: &Path,
     output_dir: &Path,
     password: &str,
     overwrite_mode: i32,
     log_cb: &mut F,
+    is_cancelled: &mut dyn FnMut() -> bool,
 ) -> Option<Result<zipfast::extract::Summary, String>>
 where
     F: FnMut(i32, &str),
@@ -3748,6 +3755,18 @@ where
     if &sig != b"Rar!\x1a\x07\x01\x00" {
         return None;
     }
+    // Every volume that is on disk must be readable: one that direct unpack keeps on hold
+    // for repair must not be read here.
+    let mut vol = archive_path.to_path_buf();
+    for _ in 0..4096 {
+        if !volume_ready(&vol) {
+            return None;
+        }
+        match zipfast::volume::next_volume(&vol) {
+            Some(next) if next.exists() => vol = next,
+            _ => break,
+        }
+    }
     // Listing walks every volume: it fails while one is missing and tells whether any member
     // (or the headers, which then need the password to list at all) is encrypted.
     let plain_listing = zipfast::extract::list(archive_path);
@@ -3759,47 +3778,100 @@ where
     if let Some(vol_name) = archive_path.file_name().and_then(|s| s.to_str()) {
         log_cb(4, &format!("Unrar: Extracting from {vol_name}"));
     }
-    let opts = zipfast::extract::Options {
-        mode: zipfast::extract::Mode::Extract,
-        dest: output_dir.to_path_buf(),
-        overwrite: if overwrite_mode != 0 {
-            zipfast::extract::Overwrite::Always
-        } else {
-            zipfast::extract::Overwrite::Skip
-        },
-        flatten: false,
-        threads: None,
-        protected_paths: std::collections::HashSet::new(),
-        parallel_min: None,
+    let fail = |log_cb: &mut F, msg: String| -> Option<Result<zipfast::extract::Summary, String>> {
+        if msg != "Aborted" {
+            log_cb(1, &msg);
+        }
+        Some(Err(msg))
     };
-    let result = zipfast::extract::run_with_password(archive_path, &opts, Some(password), |line| {
-        log_cb(4, &format!("Unrar: {line}"));
-    });
-    Some(match result {
-        Ok(summary) if summary.errors.is_empty() => {
-            for e in &entries {
-                if !e.dir {
-                    log_cb(4, &format!("Unrar: Extracting  {}", e.name));
-                }
+    let cancel = zipfast::extract::Cancellation::default();
+    let mut summary = zipfast::extract::Summary::default();
+    for (index, entry) in entries.iter().enumerate() {
+        if is_cancelled() {
+            return fail(log_cb, "Aborted".to_string());
+        }
+        if entry.link.is_some() {
+            log_cb(1, "ERROR: Dangerous link path was ignored");
+            return fail(log_cb, "archive contains link".to_string());
+        }
+        let rel = match zipfast::path::sanitize(&entry.name, false) {
+            Ok(rel) => rel,
+            Err(e) => return fail(log_cb, format!("Unrar: {}: {e}", entry.name)),
+        };
+        if entry.dir {
+            if let Err(e) = create_dir_all_no_follow(output_dir, &rel) {
+                return fail(log_cb, format!("Unrar: {e}"));
             }
-            Ok(summary)
+            summary.dirs += 1;
+            continue;
         }
-        Ok(summary) => {
-            let msg = format!("Unrar: {}", summary.errors.join("; "));
-            log_cb(1, &msg);
-            Err(msg)
+        let selected = match zipfast::extract::SelectedEntry::open_cancelable(
+            archive_path,
+            index,
+            Some(password),
+            u64::MAX,
+            cancel.clone(),
+        ) {
+            Ok(sel) => sel,
+            Err(zipfast::Error::Encrypted) => {
+                return fail(log_cb, "Unrar: The specified password is incorrect.".to_string());
+            }
+            Err(e) => return fail(log_cb, format!("Unrar: {}: {e}", entry.name)),
+        };
+        let opened = match create_dest_file_with_path_no_follow(output_dir, &rel, overwrite_mode) {
+            Ok(o) => o,
+            Err(e) => return fail(log_cb, format!("Unrar: {e}")),
+        };
+        let Some((mut file, target_path, created_new)) = opened else {
+            summary.skipped += 1;
+            continue;
+        };
+        log_cb(4, &format!("Unrar: Extracting  {}", entry.name));
+        let mut written = 0u64;
+        let mut aborted = false;
+        let result = selected.read(Some(password), |chunk| {
+            use std::io::Write;
+            if is_cancelled() {
+                aborted = true;
+                cancel.cancel();
+                return Err(zipfast::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "Aborted",
+                )));
+            }
+            file.write_all(chunk).map_err(zipfast::Error::Io)?;
+            written += chunk.len() as u64;
+            Ok(())
+        });
+        if result.is_ok() {
+            if let Some(secs) = entry.mtime.filter(|&s| s >= 0) {
+                let _ = file.set_modified(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64),
+                );
+            }
         }
-        Err(zipfast::Error::Encrypted) => {
-            let msg = "Unrar: The specified password is incorrect.".to_string();
-            log_cb(1, &msg);
-            Err(msg)
+        drop(file);
+        if let Err(e) = result {
+            if created_new {
+                let _ = std::fs::remove_file(&target_path);
+            }
+            if aborted {
+                return fail(log_cb, "Aborted".to_string());
+            }
+            return fail(
+                log_cb,
+                match e {
+                    zipfast::Error::Encrypted => {
+                        "Unrar: The specified password is incorrect.".to_string()
+                    }
+                    other => format!("Unrar: {}: {other}", entry.name),
+                },
+            );
         }
-        Err(e) => {
-            let msg = format!("Unrar: {e}");
-            log_cb(1, &msg);
-            Err(msg)
-        }
-    })
+        summary.files += 1;
+        summary.bytes += written;
+    }
+    Some(Ok(summary))
 }
 
 enum Rar5ExtractError {

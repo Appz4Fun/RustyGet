@@ -550,6 +550,84 @@ var Config = (new function($)
 	var leaveTarget;
 	this.currentSectionID = '';
 
+	/*** READABLE LABELS (Oxide settings) ******************************************/
+
+	// Words that keep their own spelling when an option name is turned into a label.
+	var LABEL_WORDS = {
+		nzb: 'NZB', nzbs: 'NZBs', url: 'URL', urls: 'URLs', tls: 'TLS', ssl: 'SSL', ip: 'IP', rss: 'RSS',
+		par: 'par', par2: 'par2', api: 'API', ui: 'UI', id: 'ID', cpu: 'CPU', crc: 'CRC', mb: 'MB', kb: 'KB',
+		ok: 'OK', http: 'HTTP', https: 'HTTPS', cert: 'certificate', dir: 'folder', cmd: 'command',
+		ext: 'extensions', exts: 'extensions', max: 'maximum', min: 'minimum', sec: 'seconds', msec: 'milliseconds',
+		dupe: 'duplicate', nntp: 'NNTP', unrar: 'UnRAR', rustyget: 'RustyGet', nzbget: 'NZBGet', yenc: 'yEnc'
+	};
+
+	// Whole-name labels where splitting the name would read badly.
+	var LABEL_OVERRIDES = {
+		MainDir: 'Main folder', DestDir: 'Completed downloads folder', InterDir: 'Intermediate folder',
+		NzbDir: 'Watch folder for NZB files', QueueDir: 'Queue folder', TempDir: 'Temporary folder',
+		ScriptDir: 'Extensions folder', LogFile: 'Log file', ConfigTemplate: 'Configuration template',
+		ControlIP: 'Listen address', ControlPort: 'Port', SecureControl: 'Use HTTPS',
+		SecurePort: 'HTTPS port', SecureCert: 'HTTPS certificate', SecureKey: 'HTTPS private key',
+		ControlUsername: 'Username', ControlPassword: 'Password', SevenZipCmd: '7-Zip command',
+		UnrarCmd: 'UnRAR command', ParCheck: 'Par check', ParRepair: 'Par repair', ParScan: 'Par scan',
+		ParQuick: 'Quick par verification', ParBuffer: 'Par buffer', ParThreads: 'Par threads',
+		DirectWrite: 'Write directly to the final file', ArticleCache: 'Article cache',
+		ContinuePartial: 'Continue partial downloads', FlushQueue: 'Flush queue to disk',
+		DiskSpace: 'Pause below free disk space', KeepHistory: 'Keep history for',
+		DirectUnpack: 'Unpack while downloading', DupeCheck: 'Duplicate check',
+		CrcCheck: 'CRC check', RawArticle: 'Save raw articles', SkipWrite: 'Skip writing (testing)'
+	};
+
+	function humanizeOptionName(name)
+	{
+		if (LABEL_OVERRIDES.hasOwnProperty(name))
+		{
+			return LABEL_OVERRIDES[name];
+		}
+		var words = name
+			.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+			.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+			.replace(/[_-]+/g, ' ')
+			.split(' ')
+			.filter(function(word) { return word !== ''; })
+			.map(function(word, index)
+			{
+				var lower = word.toLowerCase();
+				if (LABEL_WORDS.hasOwnProperty(lower))
+				{
+					return LABEL_WORDS[lower];
+				}
+				return index === 0 ? word.charAt(0).toUpperCase() + lower.substr(1) : lower;
+			});
+		var label = words.join(' ');
+		return label.charAt(0).toUpperCase() + label.substr(1);
+	}
+	this.humanizeOptionName = humanizeOptionName;
+
+	// "News-Servers" -> "News servers", "Incoming NZBs" stays; acronyms keep their case
+	function sentenceCase(text)
+	{
+		return text.replace(/-/g, ' ').split(' ').filter(function(w) { return w !== ''; }).map(function(word, index)
+		{
+			if (/^[A-Z0-9]{2,}s?$/.test(word))
+			{
+				return word;
+			}
+			return index === 0 ? word.charAt(0).toUpperCase() + word.substr(1).toLowerCase() : word.toLowerCase();
+		}).join(' ');
+	}
+	this.sentenceCase = sentenceCase;
+
+	function optionLabel(option)
+	{
+		if (option.i18nCaption || option.name.indexOf(':') > -1)
+		{
+			return null; // extension options carry their own display names
+		}
+		var shortName = option.name.substr(option.name.indexOf('.') + 1);
+		return humanizeOptionName(shortName);
+	}
+
 	this.init = function(options)
 	{
 		updateTabInfo = options.updateTabInfo;
@@ -892,6 +970,14 @@ var Config = (new function($)
 			caption = '<span class="config-multicaption">' + caption.substring(0, caption.indexOf('.') + 1) + '</span>' + caption.substring(caption.indexOf('.') + 1);
 		}
 
+		// a readable label first, then the option's own name in mono so it still matches nzbget.conf
+		option.label = optionLabel(option);
+		if (option.label)
+		{
+			caption = '<span class="config-label">' + Util.textToHtml(option.label) + '</span>' +
+				'<span class="config-key">' + caption + '</span>';
+		}
+
 		// makeId removes colons, so label: IDs cannot collide with option controls.
 		var i18nCaptionAttr = option.i18nCaption ? 'data-i18n="' + Util.textToAttr(option.i18nCaption) + '" ' : '';
 		var html =
@@ -975,7 +1061,18 @@ var Config = (new function($)
 		else if (option.select.length > 1)
 		{
 			option.type = 'switch';
-			html +=	'<div class="btn-group btn-switch" role="group" aria-labelledby="label:' + option.formId + '" id="' + option.formId + '">';
+			var isToggle = !section.postparam && option.select.length === 2 &&
+				option.select.map(function(v) { return v.toLowerCase(); }).sort().join() === 'no,yes';
+			if (isToggle)
+			{
+				var isOn = !!value && value.toLowerCase() === 'yes';
+				html +=	'<div class="btn-group btn-switch is-toggle" role="switch" tabindex="0" aria-checked="' + isOn +
+					'" aria-labelledby="label:' + option.formId + '" id="' + option.formId + '" onclick="Config.toggleClick(this, event)">';
+			}
+			else
+			{
+				html +=	'<div class="btn-group btn-switch" role="group" aria-labelledby="label:' + option.formId + '" id="' + option.formId + '">';
+			}
 
 			var valfound = false;
 			for (var j=0; j < option.select.length; j++)
@@ -1014,6 +1111,11 @@ var Config = (new function($)
 			}
 
 			html +='</div>';
+			if (isToggle)
+			{
+				var groupStart = html.lastIndexOf('<div class="btn-group btn-switch is-toggle"');
+				html = html.substr(0, groupStart) + html.substr(groupStart).replace(/<input type="button" /g, '<input type="button" tabindex="-1" aria-hidden="true" ');
+			}
 
 		}
 		else if (option.select.length === 1)
@@ -1281,6 +1383,9 @@ var Config = (new function($)
 
 		I18n.translatePage($ConfigNav);
 		I18n.translatePage($ConfigData);
+		groupNav();
+		snapshotShownValues();
+		refreshChangeState();
 		refreshListRows();
 		if (typeof TlsCipherDialog !== 'undefined') TlsCipherDialog.refreshAvailability();
 		$ConfigNav.toggleClass('long-list', $ConfigNav.children().length > 20);
@@ -1358,6 +1463,235 @@ var Config = (new function($)
 			offsetY = 10;
 		}
 		parent.animate({ scrollTop: parent.scrollTop() + element.offset().top - parent.offset().top - offsetY }, { duration: 'slow', easing: 'swing' });
+	}
+
+	this.toggleClick = function(group, event)
+	{
+		// a click on one of the hidden Yes/No buttons has already switched through its own handler
+		var onButton = event && event.target && $(event.target).is('input.btn');
+		var target = $('.btn', group).filter(function() { return !$(this).hasClass('btn-primary'); }).first();
+		if (!onButton && target.length)
+		{
+			Config.switchClick(target[0]);
+		}
+		$(group).attr('aria-checked', toggleIsOn(group) ? 'true' : 'false');
+		refreshChangeState();
+	}
+
+	// Settings sections in task order, under group labels.
+	var NAV_GROUPS = [
+		{ key: 'config_group_start', label: 'Start here', ids: ['NEWS-SERVERS', 'PATHS', 'CATEGORIES'] },
+		{ key: 'config_group_downloading', label: 'Downloading', ids: ['DOWNLOAD_QUEUE', 'CONNECTION', 'CHECK_AND_REPAIR', 'UNPACK'] },
+		{ key: 'config_group_automation', label: 'Automation', ids: ['RSS_FEEDS', 'INCOMING_NZBS', 'SCHEDULER'] },
+		{ key: 'config_group_system', label: 'System', ids: ['SECURITY', 'WEB-INTERFACE', 'LOGGING', 'Config-System', 'Config-SystemInfo', 'Config-Info', 'Config-Licenses'] }
+	];
+
+	function groupNav()
+	{
+		var items = {};
+		var extensions = [];
+		$ConfigNav.children('li.config-nav-group, li.divider').not('.ConfigSearch').remove();
+		$ConfigNav.children('li').not('.ConfigSearch').each(function()
+		{
+			var id = ($('> a', this).attr('href') || '').substr(1);
+			items[id] = this;
+			var known = NAV_GROUPS.some(function(group) { return group.ids.indexOf(id) > -1; });
+			if (!known)
+			{
+				extensions.push(this);
+			}
+		});
+		var search = $ConfigNav.children('li.ConfigSearch').detach();
+		NAV_GROUPS.forEach(function(group)
+		{
+			var members = group.ids.map(function(id) { return items[id]; }).filter(Boolean);
+			if (group.key === 'config_group_system')
+			{
+				// anything not listed above (nothing today) stays reachable at the end
+				members = extensions.concat(members);
+			}
+			if (members.length === 0)
+			{
+				return;
+			}
+			$ConfigNav.append($('<li class="config-nav-group nav-header"></li>').text(I18n.defaultValue(group.key, group.label)));
+			members.forEach(function(item)
+			{
+				$(item).removeClass('list-item--nested');
+				$(item).find('a, a > span').contents().filter(function() { return this.nodeType === 3 && $.trim(this.nodeValue) !== ''; })
+					.each(function() { this.nodeValue = sentenceCase($.trim(this.nodeValue)); });
+				$ConfigNav.append(item);
+			});
+		});
+		$ConfigNav.append(search);
+	}
+
+	// What each control showed when the page was built: the saved value, or the default
+	// for an option the configuration file doesn't have yet.
+	function snapshotShownValues()
+	{
+		eachEditableOption(function(option)
+		{
+			option.shownValue = getOptionValue(option);
+		});
+	}
+
+	function eachEditableOption(callback)
+	{
+		for (var k=0; k < config.length; k++)
+		{
+			var sections = config[k].sections;
+			for (var i=0; i < sections.length; i++)
+			{
+				var section = sections[i];
+				if (section.postparam || section.hidden)
+				{
+					continue;
+				}
+				for (var j=0; j < section.options.length; j++)
+				{
+					var option = section.options[j];
+					if (!option.template && option.type !== 'info' && !option.commandopts && option.formId)
+					{
+						callback(option, section);
+					}
+				}
+			}
+		}
+	}
+
+	// Options whose control differs from the saved value.
+	function changedOptions()
+	{
+		var changed = [];
+		var listChanged = false;
+		if (!config)
+		{
+			return { options: changed, lists: false, restored: false };
+		}
+		for (var k=0; k < config.length; k++)
+		{
+			config[k].sections.forEach(function(section)
+			{
+				listChanged = listChanged || (!section.postparam && !section.hidden && !!section.modified);
+			});
+		}
+		eachEditableOption(function(option)
+		{
+			var baseline = option.value !== null ? option.value : option.shownValue;
+			if (baseline === undefined || baseline === null)
+			{
+				return; // a set added since the page was built: counted as a list change
+			}
+			var current = getOptionValue(option);
+			if (current != null && !isSameOptionValue(option, baseline, current))
+			{
+				changed.push(option);
+			}
+		});
+		return { options: changed, lists: listChanged, restored: restored };
+	}
+
+	var $SaveBar = null;
+	var changeTimer = null;
+
+	function ensureSaveBar()
+	{
+		if ($SaveBar)
+		{
+			return;
+		}
+		$SaveBar = $('<div class="config-savebar" id="ConfigSaveBar" role="region" hidden>' +
+			'<span class="config-savebar__count"></span>' +
+			'<span class="config-savebar__names"></span>' +
+			'<button type="button" class="btn" id="ConfigSaveBar_Discard"></button>' +
+			'<button type="button" class="btn btn-primary" id="ConfigSaveBar_Save"></button>' +
+			'</div>');
+		$SaveBar.attr('aria-label', I18n.defaultValue('config_unsaved_changes', 'Unsaved changes'));
+		$('#ConfigSaveBar_Discard', $SaveBar).text(I18n.defaultValue('btn_discard', 'Discard')).on('click', discardOptionChanges);
+		$('#ConfigSaveBar_Save', $SaveBar).text(I18n.defaultValue('btn_save_and_reload', 'Save and reload')).on('click', function() { Config.saveChanges(); });
+		$('.config__main', $ConfigContent).append($SaveBar);
+		// Listen on the document, not only on #ConfigData: option editors in dialogs (RSS
+		// filter, script lists, list deletes) change controls from outside the page.
+		$(document).on('input change keyup click', function()
+		{
+			if (!config)
+			{
+				return;
+			}
+			clearTimeout(changeTimer);
+			changeTimer = setTimeout(refreshChangeState, 120);
+		});
+		$ConfigData.on('keydown', '.btn-switch.is-toggle', function(e)
+		{
+			if (e.key === ' ' || e.key === 'Enter')
+			{
+				e.preventDefault();
+				Config.toggleClick(this);
+			}
+		});
+	}
+
+	function toggleIsOn(group)
+	{
+		return String(switchGetValue($(group)) || '').toLowerCase() === 'yes';
+	}
+
+	function refreshChangeState()
+	{
+		ensureSaveBar();
+		var state = changedOptions();
+		$ConfigData.find('.control-group.is-changed').removeClass('is-changed');
+		state.options.forEach(function(option)
+		{
+			$('#' + option.formId).closest('.control-group').addClass('is-changed');
+		});
+		$ConfigData.find('.btn-switch.is-toggle').each(function()
+		{
+			$(this).attr('aria-checked', toggleIsOn(this) ? 'true' : 'false');
+		});
+		var count = state.options.length;
+		var dirty = count > 0 || state.lists || state.restored;
+		$SaveBar.prop('hidden', !dirty);
+		$ConfigContent.toggleClass('has-unsaved', dirty);
+		if (dirty)
+		{
+			var countText = count === 1 ? I18n.defaultValue('config_one_change', '1 change') :
+				I18n.defaultValue('config_n_changes', '%1 changes').replace('%1', count);
+			if (count === 0)
+			{
+				countText = state.restored ? I18n.defaultValue('config_restored_changes', 'Restored settings') :
+					I18n.defaultValue('config_list_changes', 'List changes');
+			}
+			$('.config-savebar__count', $SaveBar).text(countText);
+			$('.config-savebar__names', $SaveBar).text(state.options.slice(0, 4).map(function(option)
+			{
+				return option.label || option.caption;
+			}).join(', ') + (count > 4 ? ' \u2026' : ''));
+		}
+	}
+	this.refreshChangeState = refreshChangeState;
+
+	// Discard reloads Settings from RustyGet, which also drops added, deleted or
+	// reordered list entries and a restored backup, then returns to the same section.
+	function discardOptionChanges()
+	{
+		var section = Config.currentSectionID;
+		restored = false;
+		Config.hide();
+		Config.show();
+		Options.loadConfig({
+			complete: function(_config)
+			{
+				Config.buildPage(_config);
+				if (section && section !== 'Config-Info' && (/^Config-/.test(section) || findSectionById(section)))
+				{
+					Config.showSection(section, false);
+				}
+			},
+			configError: Config.loadConfigError,
+			serverTemplateError: Config.loadServerTemplateError
+		});
 	}
 
 	this.switchClick = function(control)
@@ -1562,7 +1896,8 @@ var Config = (new function($)
 		var sectionText = section.caption ? section.caption : section.name;
 		var categoryName = I18n.defaultValue(('config_section_' + section.name.replace(/ /g, '_').replace(/-/g, '_')).toLowerCase(), sectionText);
 		$ConfigTitle.removeAttr('data-i18n').removeData('i18n-last');
-		$ConfigTitle.text(categoryName);
+		$ConfigTitle.text(sentenceCase(categoryName));
+		$ConfigTitle.attr('data-path', 'rustyget::settings::' + sectionId.toLowerCase().replace(/[^a-z0-9]+/g, '_'));
 		I18n.translatePage($ConfigTitle.parent());
 		$ConfigTitleStatus.hide();
 
@@ -1607,6 +1942,7 @@ var Config = (new function($)
 		reformatSection(section, setname);
 
 		section.modified = true;
+		if (typeof refreshChangeState === 'function') refreshChangeState();
 	}
 
 	function reformatSection(section, setname)
@@ -1727,6 +2063,7 @@ var Config = (new function($)
 		}
 
 		section.modified = true;
+		if (typeof refreshChangeState === 'function') refreshChangeState();
 
 		// visualize new multi set
 		var html = buildMultiSetContent(section, multiid);
@@ -1787,6 +2124,7 @@ var Config = (new function($)
 		reformatSet(section, setname, 10000 + id2, id1);
 
 		section.modified = true;
+		if (typeof refreshChangeState === 'function') refreshChangeState();
 		refreshListRows();
 	}
 
@@ -1941,6 +2279,7 @@ var Config = (new function($)
 				{
 					var control = $('#' + option.formId);
 					control.val(filter);
+					refreshChangeState();
 				});
 	}
 
@@ -2480,7 +2819,7 @@ var Config = (new function($)
 
 	function filterOption(option)
 	{
-		return searcher.exec({ name: option.caption, description: option.description, value: (option.value === null ? '' : option.value), _search: ['name', 'description', 'value'] });
+		return searcher.exec({ name: option.caption + (option.label ? ' ' + option.label : ''), description: option.description, value: (option.value === null ? '' : option.value), _search: ['name', 'description', 'value'] });
 	}
 
 	function filterStaticPages()
@@ -2496,8 +2835,10 @@ var Config = (new function($)
 
 	function markLastControlGroup()
 	{
-		$ConfigData.children().removeClass('last-group');
-		$ConfigData.children().filter(':visible').last().addClass('last-group');
+		$ConfigData.children().removeClass('last-group first-group');
+		var visible = $ConfigData.children().filter(':visible');
+		visible.last().addClass('last-group');
+		visible.first().addClass('first-group');
 	}
 
 	/*** RELOAD ********************************************************************/
@@ -2569,8 +2910,9 @@ var Config = (new function($)
 
 	this.applyReloadedValues = function(values)
 	{
-		Options.reloadConfig(values, Config.buildPage);
 		restored = true;
+		Options.reloadConfig(values, Config.buildPage);
+		refreshChangeState();
 	}
 
 	/*** SHUTDOWN ********************************************************************/

@@ -1,0 +1,250 @@
+/* Settings in Oxide: readable rows grouped in a card, a grouped sidebar,
+   switches for Yes/No, and a save bar that appears only when something changed.
+   Loaded after skin.css and oxide.css. See DESIGN.md, "Settings". */
+
+/* ---------------------------------------------------------------- sidebar */
+
+#ConfigNav.nav-list > li.config-nav-group {
+	padding: var(--space-4) 10px var(--space-1);
+	font: 600 11px/1.4 var(--font-mono);
+	letter-spacing: .08em;
+	text-transform: uppercase;
+	color: var(--label-secondary);
+}
+#ConfigNav.nav-list > li.config-nav-group { text-align: left; }
+#ConfigNav.nav-list > li.config-nav-group:first-child { padding-top: var(--space-1); }
+
+#ConfigNav.nav-list > li > a,
+#ConfigNav.nav-list > li > a .text-uppercase,
+#ConfigNav.nav-list.long-list > li > a {
+	text-transform: none;
+	font-family: var(--font-sans);
+	font-size: 14px;
+	letter-spacing: 0;
+	color: var(--label-secondary);
+	border-left: 2px solid transparent;
+	border-radius: var(--radius-md);
+}
+#ConfigNav.nav-list > li > a::first-letter { text-transform: uppercase; }
+#ConfigNav.nav-list > li > a:hover { background: var(--sunken, var(--fill-quaternary)); color: var(--label-primary); }
+#ConfigNav.nav-list > li.active > a,
+#ConfigNav.nav-list > li.active > a:hover,
+#ConfigNav.nav-list > li.active > a:focus {
+	background: var(--accent-soft);
+	color: var(--label-primary);
+	font-weight: 620;
+	border-left-color: var(--accent);
+	border-radius: 0 var(--radius-md) var(--radius-md) 0;
+	box-shadow: none;
+}
+#ConfigNav.nav-list > li.active > a::before { display: none; }
+
+/* ---------------------------------------------------------------- page head */
+
+#ConfigContent .config-title #ConfigTitle {
+	display: block;
+	font: 680 28px/1.2 var(--font-sans);
+	letter-spacing: -.02em;
+	text-transform: none;
+	color: var(--label-primary);
+}
+#ConfigContent .config-title #ConfigTitle::before {
+	content: attr(data-path);
+	display: block;
+	margin-bottom: 6px;
+	font: 400 12.5px/1.4 var(--font-mono);
+	letter-spacing: 0;
+	color: var(--label-secondary);
+}
+
+/* the always-on Save button gives way to the save bar */
+#ConfigContent .config-header-actions .visible-desktop { display: none !important; }
+
+/* ---------------------------------------------------------------- rows */
+
+#ConfigData,
+#ConfigData > .config-set-insertion {
+	display: block;
+}
+
+#ConfigContent div.config-option-tile {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(160px, 340px) 28px;
+	grid-template-areas: "label control help" "summary control help" "detail detail detail" "check check check";
+	column-gap: var(--space-4);
+	row-gap: 2px;
+	align-items: center;
+	padding: 14px var(--space-4);
+	margin: 0;
+	border: 1px solid var(--separator);
+	border-top-width: 0;
+	border-radius: 0;
+	background: var(--bg-content);
+}
+#ConfigContent #ConfigData > div.config-option-tile,
+#ConfigContent #ConfigData > .config-set-insertion > div.config-option-tile { margin: 0; }
+#ConfigContent div.config-option-tile.first-group { border-top-width: 1px; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+#ConfigContent div.config-option-tile.last-group { border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
+#ConfigContent div.config-option-tile.first-group.last-group { border-radius: var(--radius-lg); }
+#ConfigContent div.config-option-tile:hover { background: color-mix(in srgb, var(--bg-content) 96%, var(--label-primary)); }
+
+#ConfigContent div.config-option-tile > .control-label {
+	grid-area: label;
+	padding: 0;
+	align-self: end;
+}
+#ConfigContent div.config-option-tile > .controls,
+#ConfigContent div.config-option-tile.config-has-help > .controls { display: contents; }
+#ConfigContent div.config-option-tile > .controls > * { grid-area: control; justify-self: end; max-width: 100%; }
+#ConfigContent div.config-option-tile > .controls > input[type="text"],
+#ConfigContent div.config-option-tile > .controls > input[type="password"],
+#ConfigContent div.config-option-tile > .controls > textarea,
+#ConfigContent div.config-option-tile > .controls > select,
+#ConfigContent div.config-option-tile > .controls > .input-append { justify-self: stretch; }
+#ConfigContent div.config-option-tile > .controls > .config-help-toggle {
+	grid-area: help;
+	position: static;
+	width: 28px;
+	height: 28px;
+	justify-self: center;
+	color: var(--label-secondary);
+}
+#ConfigContent div.config-option-tile > .controls > .option__check-section { grid-area: check; }
+#ConfigContent div.config-option-tile > .controls > .help-block { grid-area: detail; }
+#ConfigContent div.config-option-tile > .controls > .help-block,
+#ConfigContent div.config-option-tile > .controls > .option__check-section {
+	justify-self: stretch;
+	margin-top: var(--space-2);
+}
+#ConfigContent div.config-option-tile > .config-option-summary {
+	display: block;
+	grid-area: summary;
+	align-self: start;
+	max-width: 64ch;
+	font-size: 13.5px;
+	line-height: 1.45;
+	color: var(--label-secondary);
+}
+
+/* label: readable name, then the config name in mono */
+#ConfigContent .option-name {
+	color: var(--label-primary);
+	text-decoration: none;
+	font: 600 14.5px/1.35 var(--font-sans);
+	letter-spacing: 0;
+	text-transform: none;
+}
+#ConfigContent .option-name .config-key {
+	margin-left: 8px;
+	font: 400 12px var(--font-mono);
+	color: var(--label-secondary);
+}
+#ConfigContent .option-name .config-key .config-multicaption { display: inline; }
+#ConfigContent .control-group.is-changed .config-label::after,
+#ConfigContent .control-group.is-changed .option-name:not(:has(.config-label))::after {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	margin-left: 6px;
+	border-radius: 50%;
+	background: var(--accent);
+	vertical-align: middle;
+}
+
+/* ---------------------------------------------------------------- switch */
+
+#ConfigContent .btn-switch.is-toggle {
+	position: relative;
+	display: inline-block;
+	flex: none;
+	width: 40px;
+	height: 24px;
+	padding: 0;
+	border: 0;
+	border-radius: var(--radius-full);
+	background: var(--rule);
+	box-shadow: none;
+	cursor: pointer;
+	transition: background-color .15s ease;
+}
+#ConfigContent .btn-switch.is-toggle::after {
+	content: "";
+	position: absolute;
+	top: 3px;
+	left: 3px;
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	background: #fff;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, .3);
+	transition: transform .15s ease;
+}
+#ConfigContent .btn-switch.is-toggle[aria-checked="true"] { background: var(--accent-fill); }
+#ConfigContent .btn-switch.is-toggle[aria-checked="true"]::after { transform: translateX(16px); }
+#ConfigContent .btn-switch.is-toggle > .btn {
+	position: absolute;
+	inset: 0;
+	opacity: 0;
+	pointer-events: none;
+}
+#ConfigContent .btn-switch.is-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
+
+/* ---------------------------------------------------------------- save bar */
+
+.config-savebar {
+	position: sticky;
+	bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+	z-index: 20;
+	display: flex;
+	align-items: center;
+	gap: var(--space-3);
+	margin-top: var(--space-5);
+	padding: 10px 12px 10px var(--space-4);
+	border: 1px solid var(--rule);
+	border-radius: var(--radius-lg);
+	background: var(--bg-elevated);
+	box-shadow: var(--shadow-popover);
+}
+.config-savebar[hidden] { display: none; }
+.config-savebar .btn {
+	font: 600 14px/1.2 var(--font-sans);
+	letter-spacing: 0;
+	text-transform: none;
+}
+.config-savebar__count { flex: none; font: 600 13px var(--font-mono); color: var(--accent); }
+.config-savebar__names {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 14px;
+	color: var(--label-secondary);
+}
+
+/* ---------------------------------------------------------------- phones */
+
+@media (max-width: 768px) {
+	#ConfigContent div.config-option-tile {
+		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-areas: "label help" "summary summary" "control control" "detail detail" "check check";
+		row-gap: var(--space-2);
+	}
+	#ConfigContent div.config-option-tile > .controls > * { justify-self: start; }
+	#ConfigContent .option-name .config-key { display: block; margin: 2px 0 0; }
+	/* a switch stays on the label's line */
+	#ConfigContent div.config-option-tile:has(.btn-switch.is-toggle) {
+		grid-template-columns: minmax(0, 1fr) auto auto;
+		grid-template-areas: "label control help" "summary summary summary" "detail detail detail" "check check check";
+	}
+	#ConfigContent div.config-option-tile:has(.btn-switch.is-toggle) > .controls > .btn-switch { justify-self: end; }
+	.config-savebar__names { display: none; }
+	.config-savebar { justify-content: flex-end; }
+	.config-savebar__count { margin-right: auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	#ConfigContent .btn-switch.is-toggle,
+	#ConfigContent .btn-switch.is-toggle::after { transition: none; }
+}

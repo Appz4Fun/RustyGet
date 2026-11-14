@@ -82,7 +82,7 @@ const assert = require('node:assert/strict');
           await route.fulfill({contentType: 'application/json', body: JSON.stringify({result: true, id: req.id})});
         } else await route.continue();
       });
-      await page.locator('#Config_Save:visible').click();
+      await page.locator('#ConfigSaveBar_Save:visible, #Config_Save:visible').first().click();
       await page.waitForTimeout(400);
       for (const [name, value] of expected) assert(saved.some(o => o.Name === name && o.Value === value), 'Closed editors retain unsaved values');
       assert.deepEqual(errors, []);

@@ -2,63 +2,7 @@
 const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
 const { fixtureURL } = require('./workspace-fixture');
-const fs = require('node:fs');
-const path = require('node:path');
-
-async function installOfflineModel(page, base) {
-  const root = path.resolve(__dirname, '../../webui');
-  const template = fs.readFileSync(path.resolve(root, '../nzbget.conf'), 'utf8');
-  const values = new Map(template.split('\n').filter(line => /^[A-Za-z0-9$].*=/.test(line))
-    .map(line => { const eq = line.indexOf('='); return [line.slice(0, eq).trim(), line.slice(eq + 1).trim()]; }));
-  for (const [name, value] of Object.entries({ 'Server1.Host': 'example.invalid', 'Server1.Name': 'Example provider',
-    'Server1.Username': '', 'Server1.Password': '', ControlUsername: '', ControlPassword: '', DestDir: './fixture/dst' })) values.set(name, value);
-  const options = [...values].map(([Name, Value]) => ({ Name, Value }));
-  const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8').replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
-  await page.route('**/*', route => {
-    const url = new URL(route.request().url());
-    if (url.origin !== base.origin) return route.abort();
-    if (url.pathname === '/') return route.fulfill({ contentType: 'text/html', body: html });
-    if (url.pathname === '/jsonrpc') {
-      const rpc = route.request().postDataJSON();
-      const result = { loadconfig: options, config: options, configtemplates: [{ Name: '', Template: template }] }[rpc.method];
-      assert.notEqual(result, undefined, 'Offline fixture must account for every read RPC: ' + rpc.method);
-      return route.fulfill({ contentType: 'application/json', json: { result, id: rpc.id } });
-    }
-    if (url.pathname === '/combined.css') return route.fulfill({ contentType: 'text/css', body:
-      ['lib/bootstrap.css', 'style.css', 'tokens.css', 'ds.css', 'skin.css'].map(file => fs.readFileSync(path.join(root, file), 'utf8')).join('\n') });
-    const file = path.resolve(root, '.' + decodeURIComponent(url.pathname));
-    if (!file.startsWith(root + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return route.abort();
-    return route.fulfill({ path: file });
-  });
-  const boot = async ({ theme, width }) => {
-    for (const file of ['lib/jquery.min.js', 'lib/bootstrap.min.js', 'i18n.js']) await page.addScriptTag({ path: path.join(root, file) });
-    await page.evaluate(() => new Promise(resolve => I18n.whenReady(resolve)));
-    // Keep actual globals/helpers; omit only automatic application startup.
-    const index = fs.readFileSync(path.join(root, 'index.js'), 'utf8');
-    const first = index.indexOf('$(document).ready(function()');
-    const last = index.indexOf('/*** FRONTEND MAIN PAGE', first);
-    assert(first > 0 && last > first);
-    await page.addScriptTag({ content: index.slice(0, first) + index.slice(last) });
-    for (const file of ['util.js', 'fasttable.js', 'config.js', 'tlscipher.js', 'system-health.js']) await page.addScriptTag({ path: path.join(root, file) });
-    await page.evaluate(({ options, theme, width }) => {
-      document.documentElement.setAttribute('data-theme', theme);
-      document.body.classList.toggle('phone', width < 768);
-      UISettings.miniTheme = width < 768;
-      Options.options = options;
-      RPC.rpcUrl = './jsonrpc';
-      Config.init({ updateTabInfo: () => {} });
-      Config.show(); Config.shown();
-      jQuery('#Navbar, #MainTabContent, #ConfigTab').show();
-      jQuery('#ConfigTab').addClass('active');
-    }, { options, theme, width });
-  };
-  boot.setSavedValue = (name, value) => {
-    const option = options.find(option => option.Name === name);
-    if (option) option.Value = value;
-    else options.push({ Name: name, Value: value });
-  };
-  return boot;
-}
+const { installOfflineModel } = require('./settings-offline-fixture');
 
 (async () => {
   const base = fixtureURL(process.argv[2]);
@@ -261,12 +205,12 @@ async function installOfflineModel(page, base) {
       await dialog.waitFor({ state: 'hidden' });
 
       rejectStaleSave = true;
-      await page.locator('#Config_Save:visible').click();
+      await page.locator('#ConfigSaveBar_Save:visible, #Config_Save:visible').first().click();
       assert(await page.evaluate(() => cipherSaveRequests[cipherSaveRequests.length - 1][0]
         .some(option => option.Name === '_TlsCipherBaseline')), 'Ordinary saves must include the saved server baseline');
       await page.waitForFunction(() => document.querySelector('#Notif_Config_CipherPending strong').textContent.includes('another operation'));
       assert.equal(await destination.inputValue(), changedDestination, 'Rejected stale saves retain unrelated edits');
-      assert(await page.locator('#Config_Save:visible').isEnabled());
+      assert(await page.locator('#ConfigSaveBar_Save:visible, #Config_Save:visible').first().isEnabled());
       const rejected = writes.find(rpc => rpc.method === 'saveconfig');
       assert(rejected.params[0].some(option => option.Name === '_TlsCipherBaseline'), 'Actual full-save transport carries CAS metadata');
       const parity = [{ Name: 'Server1.Host', Value: 'h\u00e9' }, { Name: 'Server1.Cipher', Value: 'old' },
@@ -281,7 +225,7 @@ async function installOfflineModel(page, base) {
         if (request.method() !== 'POST' || !request.url().includes('/jsonrpc')) return false;
         return request.postDataJSON().method === 'saveconfig';
       });
-      await page.locator('#Config_Save:visible').click();
+      await page.locator('#ConfigSaveBar_Save:visible, #Config_Save:visible').first().click();
       assert.equal((await (await saved).json()).result, true, 'The retry must actually succeed');
       const save = writes.filter(rpc => rpc.method === 'saveconfig').slice(-1)[0];
       assert(save, 'Actual Settings Save reaches intercepted RPC boundary');
@@ -485,7 +429,7 @@ async function installOfflineModel(page, base) {
         await destination.fill('./fixture/dst/after-refresh');
         const saved = page.waitForResponse(response => response.request().method() === 'POST' &&
           response.request().url().includes('/jsonrpc') && response.request().postDataJSON().method === 'saveconfig');
-        await page.locator('#Config_Save:visible').click();
+        await page.locator('#ConfigSaveBar_Save:visible, #Config_Save:visible').first().click();
         assert.equal((await (await saved).json()).result, true);
         assert.equal(writes.length, 1, 'Reconciliation unlocks the ordinary save without rerunning the optimizer');
         assert(writes[0].params[0].some(option => option.Name === 'Server1.Cipher' && option.Value === selected));

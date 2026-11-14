@@ -766,12 +766,12 @@ var SystemInfo = (new function($)
 				if (newsServer.Active) 
 				{
 					tdActive.text(I18n.translate('label_yes_cap'));
-					tdActive.css('color', '#468847');
+					tdActive.css('color', 'var(--green-text)');
 				}
 				else 
 				{
 					tdActive.text(I18n.translate('label_no_cap'));
-					tdActive.css('color', '#da4f49');
+					tdActive.css('color', 'var(--red-text)');
 				}
 
 				tdTests.append(testConnectionBtn);

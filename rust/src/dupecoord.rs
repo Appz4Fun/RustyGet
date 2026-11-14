@@ -1622,7 +1622,6 @@ pub(crate) fn history_mark_host(
                 crate::queuesubsys_host::NZB_INT_MARK_STATUS,
                 mark_status,
             );
-            host.queue_script_enqueue(hi.inner_ptr, crate::queuesubsys_host::QE_NZB_MARKED);
             (nzb.dupe_mode, nzb.dupe_key, nzb.name)
         } else if hi.kind == crate::queuesubsys_host::HK_DUP && hi.inner_ptr != 0 {
             let dup = host.dup_snap(hi.inner_ptr);

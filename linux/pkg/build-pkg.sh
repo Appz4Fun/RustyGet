@@ -121,7 +121,6 @@ for ARCH in $ARCHS; do
     # tweak nzbget.conf
     sed -i \
         -e "s|^MainDir=.*|MainDir=/var/lib/nzbget/downloads|g" \
-        -e "s|^ScriptDir=.*|ScriptDir=/var/lib/nzbget/scripts|g" \
         -e "s|^WebDir=.*|WebDir=/usr/share/nzbget/webui|g" \
         -e "s|^TempDir=.*|TempDir=/var/lib/nzbget/tmp|g" \
         -e "s|^ConfigTemplate=.*|ConfigTemplate=/usr/share/nzbget/nzbget.conf|g" \

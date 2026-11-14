@@ -175,8 +175,6 @@ pub enum NameCheck {
     Valid = 1,
     /// obsolete, ignored: a warning
     Obsolete = 2,
-    /// an obsolete script option: an error when it has a value
-    ObsoleteScript = 3,
     /// an obsolete log option (use WriteLog): a warning
     ObsoleteLog = 4,
 }
@@ -224,7 +222,6 @@ const SECTIONS: [(&CStr, usize, &[&CStr]); 4] = [
         &[
             c".name",
             c".destdir",
-            c".extensions",
             c".unpack",
             c".aliases",
         ],
@@ -242,7 +239,6 @@ const SECTIONS: [(&CStr, usize, &[&CStr]); 4] = [
             c".category",
             c".categorySource",
             c".priority",
-            c".extensions",
             c".certverification",
         ],
     ),
@@ -303,17 +299,8 @@ pub fn validate_option_name(name: &CStr, predefined: &mut dyn FnMut() -> bool) -
     if OBSOLETE.iter().any(|n| eq(name, n)) {
         return NameCheck::Obsolete;
     }
-    if [c"PostProcess", c"NZBProcess", c"NZBAddedProcess"]
-        .iter()
-        .any(|n| eq(name, n))
-    {
-        return NameCheck::ObsoleteScript;
-    }
-    if [c"ScanScript", c"QueueScript", c"FeedScript"]
-        .iter()
-        .any(|n| eq(name, n))
-    {
-        return NameCheck::Valid;
+    if is_removed_extension_opt(name) {
+        return NameCheck::Obsolete;
     }
     if [c"CreateLog", c"ResetLog"].iter().any(|n| eq(name, n)) {
         return NameCheck::ObsoleteLog;
@@ -321,22 +308,41 @@ pub fn validate_option_name(name: &CStr, predefined: &mut dyn FnMut() -> bool) -
     NameCheck::Invalid
 }
 
-/// CString::Replace(from, to): every case-sensitive occurrence, searching on
-/// after each replacement.
-fn replace_all(s: &mut Vec<u8>, from: &[u8], to: &[u8]) {
-    let mut pos = 0;
-    loop {
-        // CString::Find: nothing at or past the end (except at 0)
-        if pos != 0 && pos >= s.len() {
-            return;
-        }
-        let Some(found) = s[pos..].windows(from.len()).position(|w| w == from) else {
-            return;
-        };
-        let at = pos + found;
-        s.splice(at..at + from.len(), to.iter().copied());
-        pos = at + to.len();
+/// Options of the removed extension scripts feature, still accepted in old
+/// configuration files and ignored with an "obsolete" warning.
+fn is_removed_extension_opt(name: &CStr) -> bool {
+    const GLOBAL: [&CStr; 11] = [
+        c"ScriptDir",
+        c"ScriptOrder",
+        c"Extensions",
+        c"ScanScript",
+        c"QueueScript",
+        c"FeedScript",
+        c"PostProcess",
+        c"NZBProcess",
+        c"NZBAddedProcess",
+        c"DefScript",
+        c"PostScript",
+    ];
+    if GLOBAL.iter().any(|n| eq(name, n)) {
+        return true;
     }
+    for (prefix, len, suffixes) in [
+        (c"category", 8, &[c".extensions", c".defscript", c".postscript"][..]),
+        (c"feed", 4, &[c".extensions", c".feedscript"][..]),
+    ] {
+        if eq_n(name, prefix, len) {
+            let digits = name.to_bytes()[len.min(name.to_bytes().len())..]
+                .iter()
+                .take_while(|c| c.is_ascii_digit())
+                .count();
+            let rest = from(name, len + digits);
+            if suffixes.iter().any(|s| eq(rest, s)) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn cstring(v: Vec<u8>) -> CString {
@@ -367,28 +373,6 @@ pub fn convert_old_option(option: &CStr, value: &CStr) -> (CString, CString) {
     if eq(&option, c"ParScan") && eq(&value, c"auto") {
         value = c"extended".to_owned();
     }
-    if eq(&option, c"DefScript") || eq(&option, c"PostScript") {
-        option = c"Extensions".to_owned();
-    }
-    // The original stores strlen in an int before checking the suffix.
-    let name_len = option.to_bytes().len() as c_int;
-    if eq_n(&option, c"Category", 8)
-        && ((name_len > 10 && eq(from(&option, (name_len - 10) as usize), c".DefScript"))
-            || (name_len > 11 && eq(from(&option, (name_len - 11) as usize), c".PostScript")))
-    {
-        let mut v = option.as_bytes().to_vec();
-        replace_all(&mut v, b".DefScript", b".Extensions");
-        replace_all(&mut v, b".PostScript", b".Extensions");
-        option = cstring(v);
-    }
-    if eq_n(&option, c"Feed", 4)
-        && name_len > 11
-        && eq(from(&option, (name_len - 11) as usize), c".FeedScript")
-    {
-        let mut v = option.as_bytes().to_vec();
-        replace_all(&mut v, b".FeedScript", b".Extensions");
-        option = cstring(v);
-    }
     if eq(&option, c"WriteBufferSize") {
         option = c"WriteBuffer".to_owned();
         // strtol's long cut to an int, as the C++ stored it
@@ -414,25 +398,6 @@ pub fn convert_old_option(option: &CStr, value: &CStr) -> (CString, CString) {
         option = c"LogBuffer".to_owned();
     }
     (option, value)
-}
-
-/// Options::HasScript: `name` is in the `,;`-separated list (as Tokenizer
-/// splits and trims it), compared with strcasecmp.
-pub fn has_script(list: &[u8], name: &CStr) -> bool {
-    let list = &list[..tokenizer_length(list.len())];
-    crate::util::tokens(list, b",;").any(|t| eq(&cstring(t.to_vec()), name))
-}
-
-fn tokenizer_length(len: usize) -> usize {
-    // Tokenizer narrows strlen to int to select its BString<1024>. A long
-    // input whose narrowed length is small/negative takes that path and is
-    // truncated by BString::Set to 1023 bytes. The other path's CString::Set
-    // also narrows strlen before copying the string.
-    if (len as c_int) < 1023 {
-        len.min(1023)
-    } else {
-        len as c_int as usize
-    }
 }
 
 /// Options::ParseCategorySource: 0 Auto, 1 NZBFile (also the default), 2 FeedFile.
@@ -572,74 +537,6 @@ pub fn parse_int_value(val: &CStr, def_val: &CStr, base: i32) -> (bool, i32) {
     }
 }
 
-/// Options::MergeOldScriptOption category extension option name matcher (`category<digits>.extensions`).
-pub fn is_category_extensions_opt(optname: &CStr) -> bool {
-    if !eq_n(optname, c"category", 8) {
-        return false;
-    }
-    let bytes = optname.to_bytes();
-    let mut idx = 8;
-    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
-        idx += 1;
-    }
-    eq(from(optname, idx), c".extensions")
-}
-
-/// Merges `,;`-separated script names from `add_list` into `existing` if not already
-/// present (case-insensitively via `has_script`), matching `Options::MergeOldScriptOption`.
-pub fn merge_script_list(existing: &[u8], add_list: &[u8]) -> Vec<u8> {
-    let mut out = existing.to_vec();
-    for script_name in crate::util::tokens(add_list, b",;") {
-        let mut cbuf = Vec::with_capacity(script_name.len() + 1);
-        cbuf.extend_from_slice(script_name);
-        cbuf.push(0);
-        if let Ok(cstr) = CStr::from_bytes_with_nul(&cbuf) {
-            if !has_script(&out, cstr) {
-                if !out.is_empty() {
-                    out.push(b',');
-                }
-                out.extend_from_slice(script_name);
-            }
-        }
-    }
-    out
-}
-
-/// `Options::ConvertOldOptions`: merges legacy `ScanScript`, `QueueScript`, and `FeedScript`
-/// entries into `Extensions` (and `CategoryN.Extensions` when applicable).
-pub fn convert_old_options(entries: &mut Vec<(CString, CString)>) {
-    for (optname, merge_categories) in [
-        (c"ScanScript", true),
-        (c"QueueScript", true),
-        (c"FeedScript", false),
-    ] {
-        let Some(opt_idx) = entries.iter().position(|(n, _)| eq(n, optname)) else {
-            continue;
-        };
-        let script_list = entries[opt_idx].1.to_bytes().to_vec();
-        if script_list.is_empty() {
-            continue;
-        }
-        let ext_idx = match entries.iter().position(|(n, _)| eq(n, c"Extensions")) {
-            Some(idx) => idx,
-            None => {
-                entries.push((c"Extensions".to_owned(), c"".to_owned()));
-                entries.len() - 1
-            }
-        };
-        let merged = merge_script_list(entries[ext_idx].1.to_bytes(), &script_list);
-        entries[ext_idx].1 = cstring(merged);
-        if merge_categories {
-            for (name, val) in entries.iter_mut() {
-                if is_category_extensions_opt(name) && !val.to_bytes().is_empty() {
-                    let cat_merged = merge_script_list(val.to_bytes(), &script_list);
-                    *val = cstring(cat_merged);
-                }
-            }
-        }
-    }
-}
-
 /// Resolves the fallback `param` source (`0=param, 1=process, 2=downloadRate`) and
 /// `(definition, completed)` flags for `Options::InitScheduler`.
 pub fn options_resolve_scheduler_task_state(
@@ -734,12 +631,6 @@ pub fn options_should_expand_home_value(value: Option<&[u8]>, no_disk_access: bo
     !no_disk_access && value.is_some_and(|v| v.starts_with(b"~/"))
 }
 
-/// Returns `true` when `no_disk_access` is set, `value` is empty, or `value` contains
-/// neither `,` nor `;`, for `Options::CheckScriptDir`.
-pub fn options_should_check_single_script_dir(no_disk_access: bool, value: &[u8]) -> bool {
-    no_disk_access || value.is_empty() || !value.iter().any(|&b| b == b',' || b == b';')
-}
-
 /// Resolves `m_configLine` in `Options::LocateOptionSrcPos`.
 pub fn options_resolve_locate_src_line(found: bool, line_no: i32) -> i32 {
     if found {
@@ -766,20 +657,6 @@ pub fn options_is_every_hour_task(hours: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tokenizer_length_narrowing() {
-        assert_eq!(tokenizer_length(0), 0);
-        assert_eq!(tokenizer_length(1022), 1022);
-        assert_eq!(tokenizer_length(1023), 1023);
-        assert_eq!(tokenizer_length(1024), 1024);
-        assert_eq!(tokenizer_length(c_int::MAX as usize), c_int::MAX as usize);
-        assert_eq!(tokenizer_length(c_int::MAX as usize + 1), 1023);
-        if usize::BITS > 32 {
-            assert_eq!(tokenizer_length(0x1_0000_0000_u64 as usize), 1023);
-            assert_eq!(tokenizer_length(0x1_0000_0400_u64 as usize), 1024);
-        }
-    }
 
     #[test]
     fn times_and_days() {
@@ -827,17 +704,11 @@ mod tests {
 
     #[test]
     fn old_options() {
+        // the removed extension options are not renamed any more
         let (o, v) = convert_old_option(c"Category2.DefScript", c"x");
         assert_eq!(
             (o.as_bytes(), v.as_bytes()),
-            (b"Category2.Extensions".as_slice(), b"x".as_slice())
-        );
-        // matched without case, replaced with case: left as it was
-        assert_eq!(
-            convert_old_option(c"category2.defscript", c"x")
-                .0
-                .as_bytes(),
-            b"category2.defscript"
+            (b"Category2.DefScript".as_slice(), b"x".as_slice())
         );
         let (o, v) = convert_old_option(c"WriteBufferSize", c"-1");
         assert_eq!(
@@ -845,7 +716,6 @@ mod tests {
             (b"WriteBuffer".as_slice(), b"1024".as_slice())
         );
         assert_eq!(convert_old_option(c"Decode", c"NO").1.as_bytes(), b"yes");
-        assert!(has_script(b"a.py, B.sh", c"b.SH"));
         assert_eq!(parse_category_source(Some(c"FeedFile")), 2);
     }
 
@@ -901,7 +771,29 @@ mod tests {
     }
 
     #[test]
-    fn enum_and_int_and_cat_extensions() {
+    fn removed_extension_options_and_script_command() {
+        // the extension scripts feature is gone: its options are accepted as
+        // obsolete and the scheduler "Script" command is unknown
+        for name in [
+            c"ScriptDir",
+            c"extensions",
+            c"PostScript",
+            c"DefScript",
+            c"Category3.Extensions",
+            c"Category1.PostScript",
+            c"Feed2.FeedScript",
+        ] {
+            assert_eq!(validate_option_name(name, &mut || false), NameCheck::Obsolete);
+        }
+        assert_eq!(validate_option_name(c"Category3.Unpack", &mut || false), NameCheck::Valid);
+        assert_eq!(options_lookup_scheduler_command(b"Script"), -1);
+        assert_eq!(options_lookup_scheduler_command(b"process"), 6);
+        assert_eq!(COMMAND_NAMES.len(), COMMAND_VALUES.len());
+        assert!(!COMMAND_NAMES.iter().any(|n| eq(n, c"script")));
+    }
+
+    #[test]
+    fn enum_and_int_values() {
         let names = [c"yes", c"no", c"true", c"false"];
         let vals = [1, 0, 1, 0];
         assert_eq!(
@@ -920,9 +812,6 @@ mod tests {
         assert_eq!(parse_int_value(c"42", c"10", 10), (true, 42));
         assert_eq!(parse_int_value(c"42abc", c"10", 10), (false, 10));
 
-        assert!(is_category_extensions_opt(c"Category12.Extensions"));
-        assert!(is_category_extensions_opt(c"category.extensions"));
-        assert!(!is_category_extensions_opt(c"Category12.Name"));
     }
 }
 
@@ -1297,7 +1186,7 @@ pub fn load_config_file_lines(path: &CStr, mut on_line: impl FnMut(i32, &CStr)) 
     true
 }
 
-const SCHEDULER_COMMAND_MAP: [(&[u8], i32); 27] = [
+const SCHEDULER_COMMAND_MAP: [(&[u8], i32); 26] = [
     (b"pausedownload", 0),
     (b"pause", 0),
     (b"unpausedownload", 1),
@@ -1314,7 +1203,6 @@ const SCHEDULER_COMMAND_MAP: [(&[u8], i32); 27] = [
     (b"setdownloadrate", 4),
     (b"rate", 4),
     (b"speed", 4),
-    (b"script", 5),
     (b"process", 6),
     (b"pausescan", 7),
     (b"unpausescan", 8),
@@ -1459,7 +1347,7 @@ const TARGET_VALUES: [i32; 4] = [1, 2, 3, 0];
 const WRITE_LOG_NAMES: [&CStr; 4] = [c"none", c"append", c"reset", c"rotate"];
 const WRITE_LOG_VALUES: [i32; 4] = [0, 1, 2, 3];
 
-const COMMAND_NAMES: [&CStr; 27] = [
+const COMMAND_NAMES: [&CStr; 26] = [
     c"pausedownload",
     c"pause",
     c"unpausedownload",
@@ -1476,7 +1364,6 @@ const COMMAND_NAMES: [&CStr; 27] = [
     c"setdownloadrate",
     c"rate",
     c"speed",
-    c"script",
     c"process",
     c"pausescan",
     c"unpausescan",
@@ -1488,14 +1375,14 @@ const COMMAND_NAMES: [&CStr; 27] = [
     c"fetchfeed",
     c"fetchfeeds",
 ];
-const COMMAND_VALUES: [i32; 27] = [
-    0, 0, 1, 1, 1, 1, 2, 3, 3, 2, 3, 3, 4, 4, 4, 4, 5, 6, 7, 8, 8, 9, 9, 10, 10, 11, 11,
+const COMMAND_VALUES: [i32; 26] = [
+    0, 0, 1, 1, 1, 1, 2, 3, 3, 2, 3, 3, 4, 4, 4, 4, 6, 7, 8, 8, 9, 9, 10, 10, 11, 11,
 ];
 
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 137] = [
+    let defaults: [(&CStr, &CStr); 134] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1506,7 +1393,6 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"NzbDir", c"${MainDir}/nzb"),
         (c"LockFile", c"${MainDir}/rustyget.lock"),
         (c"LogFile", c"${MainDir}/rustyget.log"),
-        (c"ScriptDir", c"${MainDir}/scripts"),
         (c"RequiredDir", c""),
         (c"WriteLog", c"append"),
         (c"RotateLog", c"3"),
@@ -1585,8 +1471,6 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"DirectRename", c"yes"),
         (c"HardLinking", c"no"),
         (c"HardLinkingIgnoreExt", c".zip, .7z, .rar, *.7z.###, *.r##"),
-        (c"ScriptOrder", c""),
-        (c"Extensions", c""),
         (c"DaemonUsername", c"root"),
         (c"UMask", c"1000"),
         (c"UpdateInterval", c"200"),
@@ -1711,13 +1595,6 @@ pub fn category_alias_list_matches(aliases: &[&[u8]], name: &[u8], _signed_char:
     aliases
         .iter()
         .any(|alias| crate::wildmask::wild_match(&lower, alias, name, None))
-}
-
-/// Tokenizes `script_dir` by `,;` into individual directory paths (`Options::CheckDirs`).
-pub fn split_script_dir_paths(script_dir: &[u8]) -> Vec<CString> {
-    crate::util::tokens(script_dir, b",;")
-        .map(|tok| cstring(tok.to_vec()))
-        .collect()
 }
 
 /// All scalar integer, boolean, and enum fields parsed by `Options::InitOptions` and `Options::CheckOptions`.
@@ -1920,7 +1797,6 @@ pub trait OptionsHost {
         category: Option<&CStr>,
         category_source: i32,
         priority: i32,
-        extensions: Option<&CStr>,
         cert_verif_level: u32,
     );
     fn add_task(
@@ -1937,7 +1813,6 @@ pub trait OptionsHost {
         name: &CStr,
         dest_dir: Option<&CStr>,
         unpack: bool,
-        extensions: Option<&CStr>,
         aliases: &[CString],
     );
 
@@ -2091,37 +1966,6 @@ pub fn check_dir_host<H: OptionsHost + ?Sized>(
     }
 
     Some(dir_cstr)
-}
-
-/// Implements `Options::CheckScriptDir` on top of `OptionsHost`.
-pub fn check_script_dir_host<H: OptionsHost>(
-    host: &mut H,
-    no_disk_access: bool,
-    main_dir: Option<&CStr>,
-) -> Option<CString> {
-    let val_opt = host.get_option(c"ScriptDir");
-    let val_bytes = val_opt.as_ref().map(|c| c.to_bytes()).unwrap_or(&[]);
-    if options_should_check_single_script_dir(no_disk_access, val_bytes) {
-        return check_dir_host(host, no_disk_access, c"ScriptDir", main_dir, true, true);
-    }
-
-    let mut result = Vec::new();
-    for item in crate::util::tokens(val_bytes, b",;") {
-        let item_cstr = cstring(item.to_vec());
-        host.set_option(c"ScriptDir", &item_cstr);
-        if let Some(dir) = check_dir_host(host, no_disk_access, c"ScriptDir", main_dir, true, true)
-        {
-            if !dir.to_bytes().is_empty() {
-                if !result.is_empty() {
-                    result.push(b';');
-                }
-                result.extend_from_slice(dir.to_bytes());
-            }
-        }
-    }
-    let result_cstr = cstring(result);
-    host.set_option(c"ScriptDir", &result_cstr);
-    Some(result_cstr)
 }
 
 /// Parses all scalar options in `Options::InitOptions` in exact historical order.
@@ -2751,11 +2595,6 @@ pub fn init_categories_host<H: OptionsHost>(
             true
         };
 
-        let nextensions = host.get_option(&cstring(options_format_indexed_opt_name(
-            b"Category",
-            n,
-            b"Extensions",
-        )));
         let naliases = host.get_option(&cstring(options_format_indexed_opt_name(
             b"Category",
             n,
@@ -2765,7 +2604,6 @@ pub fn init_categories_host<H: OptionsHost>(
         let definition = nname.is_some()
             || ndestdir.is_some()
             || nunpack.is_some()
-            || nextensions.is_some()
             || naliases.is_some();
         let has_name = nname.as_ref().is_some_and(|s| !s.to_bytes().is_empty());
         let state = options_check_category_or_feed_def(definition, has_name);
@@ -2788,7 +2626,6 @@ pub fn init_categories_host<H: OptionsHost>(
                 nname.as_deref().unwrap_or(c""),
                 resolved_dest_dir.as_deref(),
                 unpack,
-                nextensions.as_deref(),
                 &aliases,
             );
         } else {
@@ -2819,11 +2656,6 @@ pub fn init_feeds_host<H: OptionsHost>(host: &mut H) {
             b"Feed",
             n,
             b"Category",
-        )));
-        let nextensions = host.get_option(&cstring(options_format_indexed_opt_name(
-            b"Feed",
-            n,
-            b"Extensions",
         )));
 
         let backlog_opt = cstring(options_format_indexed_opt_name(b"Feed", n, b"Backlog"));
@@ -2879,8 +2711,7 @@ pub fn init_feeds_host<H: OptionsHost>(host: &mut H) {
             || nbacklog.is_some()
             || npausenzb.is_some()
             || ninterval.is_some()
-            || npriority.is_some()
-            || nextensions.is_some();
+            || npriority.is_some();
         let state = options_check_category_or_feed_def(definition, nurl.is_some());
         if state == 0 {
             break;
@@ -2897,7 +2728,6 @@ pub fn init_feeds_host<H: OptionsHost>(host: &mut H) {
                 ncategory.as_deref(),
                 category_source,
                 c_atoi_or_default(npriority.as_deref(), 0),
-                nextensions.as_deref(),
                 cert_verif_level as u32,
             );
         } else {
@@ -3132,7 +2962,6 @@ pub struct RustCategory {
     pub name: CString,
     pub dest_dir: CString,
     pub unpack: bool,
-    pub extensions: CString,
     pub aliases: Vec<CString>,
 }
 
@@ -3172,7 +3001,6 @@ pub trait RustOptionsExtender {
         category: Option<&CStr>,
         category_source: i32,
         priority: i32,
-        extensions: Option<&CStr>,
         cert_verif_level: u32,
     );
     fn add_task(
@@ -3206,11 +3034,7 @@ pub struct RustOptions<'a> {
     pub nzb_dir: CString,
     pub web_dir: CString,
     pub config_template: CString,
-    pub script_dir: CString,
-    pub script_dir_paths: Vec<CString>,
     pub required_dir: CString,
-    pub script_order: CString,
-    pub extensions: CString,
     pub control_ip: CString,
     pub control_username: CString,
     pub control_password: CString,
@@ -3266,11 +3090,7 @@ impl<'a> RustOptions<'a> {
             nzb_dir: c"".to_owned(),
             web_dir: c"".to_owned(),
             config_template: c"".to_owned(),
-            script_dir: c"".to_owned(),
-            script_dir_paths: Vec::new(),
             required_dir: c"".to_owned(),
-            script_order: c"".to_owned(),
-            extensions: c"".to_owned(),
             control_ip: c"".to_owned(),
             control_username: c"".to_owned(),
             control_password: c"".to_owned(),
@@ -3343,22 +3163,9 @@ impl<'a> RustOptions<'a> {
             return;
         }
 
-        let mut pairs: Vec<(CString, CString)> = self
-            .opt_entries
-            .iter()
-            .map(|e| {
-                (
-                    e.name.clone(),
-                    e.value.clone().unwrap_or_else(|| c"".to_owned()),
-                )
-            })
-            .collect();
-        convert_old_options(&mut pairs);
-        for (idx, (name, val)) in pairs.into_iter().enumerate() {
-            if idx < self.opt_entries.len() {
-                self.opt_entries[idx].value = Some(val);
-            } else {
-                self.opt_entries.push(RustOptEntry::new(&name, Some(&val)));
+        for e in &mut self.opt_entries {
+            if e.value.is_none() {
+                e.value = Some(c"".to_owned());
             }
         }
 
@@ -3414,14 +3221,8 @@ impl<'a> RustOptions<'a> {
             .unwrap_or_else(|| c"".to_owned());
         self.web_dir = check_dir_host(self, no_disk, c"WebDir", None, true, false)
             .unwrap_or_else(|| c"".to_owned());
-        self.script_dir =
-            check_script_dir_host(self, no_disk, Some(&main_dir)).unwrap_or_else(|| c"".to_owned());
         self.nzb_dir = check_dir_host(self, no_disk, c"NzbDir", Some(&main_dir), false, true)
             .unwrap_or_else(|| c"".to_owned());
-        let sd = self
-            .get_option(c"ScriptDir")
-            .unwrap_or_else(|| c"".to_owned());
-        self.script_dir_paths = split_script_dir_paths(sd.to_bytes());
     }
 
     fn init_options(&mut self) {
@@ -3430,12 +3231,6 @@ impl<'a> RustOptions<'a> {
             .unwrap_or_else(|| c"".to_owned());
         self.config_template = self
             .get_option(c"ConfigTemplate")
-            .unwrap_or_else(|| c"".to_owned());
-        self.script_order = self
-            .get_option(c"ScriptOrder")
-            .unwrap_or_else(|| c"".to_owned());
-        self.extensions = self
-            .get_option(c"Extensions")
             .unwrap_or_else(|| c"".to_owned());
         self.control_ip = self
             .get_option(c"ControlIP")
@@ -3545,17 +3340,6 @@ impl<'a> RustOptions<'a> {
                     b"\" is obsolete, ignored",
                 ]);
                 self.config_warn(&msg);
-                true
-            }
-            NameCheck::ObsoleteScript => {
-                if !optvalue.to_bytes().is_empty() {
-                    let msg = format_bytes_msg(&[
-                        b"Option \"",
-                        optname.to_bytes(),
-                        b"\" is obsolete, ignored, use \"ScriptDir\" and \"Extensions\" instead",
-                    ]);
-                    self.config_error(&msg);
-                }
                 true
             }
             NameCheck::ObsoleteLog => {
@@ -3720,7 +3504,6 @@ impl OptionsHost for RustOptions<'_> {
         category: Option<&CStr>,
         category_source: i32,
         priority: i32,
-        extensions: Option<&CStr>,
         cert_verif_level: u32,
     ) {
         if let Some(ext) = self.extender.as_deref_mut() {
@@ -3735,7 +3518,6 @@ impl OptionsHost for RustOptions<'_> {
                 category,
                 category_source,
                 priority,
-                extensions,
                 cert_verif_level,
             );
         }
@@ -3760,14 +3542,12 @@ impl OptionsHost for RustOptions<'_> {
         name: &CStr,
         dest_dir: Option<&CStr>,
         unpack: bool,
-        extensions: Option<&CStr>,
         aliases: &[CString],
     ) {
         self.categories.push(RustCategory {
             name: name.to_owned(),
             dest_dir: dest_dir.unwrap_or(c"").to_owned(),
             unpack,
-            extensions: extensions.unwrap_or(c"").to_owned(),
             aliases: aliases.to_vec(),
         });
     }
@@ -3790,7 +3570,6 @@ pub const OPT_STR_COUNT: usize = 41;
 pub struct NzbgetRsOptions {
     opt_entries: Vec<RustOptEntry>,
     categories: Vec<RustCategory>,
-    script_dir_paths: Vec<CString>,
     strs: [Option<CString>; OPT_STR_COUNT],
     no_disk_access: bool,
     no_config: bool,
@@ -3804,7 +3583,6 @@ pub struct NzbgetRsOptions {
     out_scalars: *mut NzbgetRsParsedOptions,
     cb_ctx: *mut std::ffi::c_void,
     cb_fn: NzbgetRsOptionsHostFn,
-    diag_cb: NzbgetRsOptionsHostFn,
 }
 
 unsafe impl Send for NzbgetRsOptions {}
@@ -3877,10 +3655,6 @@ impl NzbgetRsOptions {
 
     pub(crate) fn categories(&self) -> &[RustCategory] {
         &self.categories
-    }
-
-    pub(crate) fn script_dir_paths(&self) -> &[CString] {
-        &self.script_dir_paths
     }
 
     pub(crate) fn find_category(&self, name: &CStr, search_aliases: bool) -> Option<&RustCategory> {
@@ -4043,27 +3817,9 @@ impl NzbgetRsOptions {
             return;
         }
 
-        let mut pairs: Vec<(CString, CString)> = self
-            .opt_entries
-            .iter()
-            .map(|e| {
-                (
-                    e.name.clone(),
-                    e.value.clone().unwrap_or_else(|| c"".to_owned()),
-                )
-            })
-            .collect();
-        convert_old_options(&mut pairs);
-        for (idx, (name, val)) in pairs.into_iter().enumerate() {
-            if idx < self.opt_entries.len() {
-                self.opt_entries[idx].value = Some(val);
-            } else {
-                self.opt_entries.push(RustOptEntry {
-                    name,
-                    value: Some(val),
-                    def_value: None,
-                    line_no: 0,
-                });
+        for e in &mut self.opt_entries {
+            if e.value.is_none() {
+                e.value = Some(c"".to_owned());
             }
         }
 
@@ -4167,17 +3923,6 @@ impl NzbgetRsOptions {
                 self.config_warn(&msg);
                 true
             }
-            NameCheck::ObsoleteScript => {
-                if !optvalue.to_bytes().is_empty() {
-                    let msg = format_bytes_msg(&[
-                        b"Option \"",
-                        optname.to_bytes(),
-                        b"\" is obsolete, ignored, use \"ScriptDir\" and \"Extensions\" instead",
-                    ]);
-                    self.config_error(&msg);
-                }
-                true
-            }
             NameCheck::ObsoleteLog => {
                 let msg = format_bytes_msg(&[
                     b"Option \"",
@@ -4204,17 +3949,12 @@ impl NzbgetRsOptions {
         self.strs[5] = check_dir_host(self, no_disk, c"TempDir", main_dir.as_deref(), false, true);
         self.strs[6] = check_dir_host(self, no_disk, c"QueueDir", main_dir.as_deref(), false, true);
         self.strs[8] = check_dir_host(self, no_disk, c"WebDir", None, true, false);
-        self.strs[10] = check_script_dir_host(self, no_disk, main_dir.as_deref());
         self.strs[7] = check_dir_host(self, no_disk, c"NzbDir", main_dir.as_deref(), false, true);
-        let sd_bytes = self.strs[10].as_deref().map_or(&[][..], |s| s.to_bytes());
-        self.script_dir_paths = split_script_dir_paths(sd_bytes);
     }
 
     fn init_options_daemon(&mut self) {
         self.strs[11] = self.get_option(c"RequiredDir");
         self.strs[9] = self.get_option(c"ConfigTemplate");
-        self.strs[28] = self.get_option(c"ScriptOrder");
-        self.strs[29] = self.get_option(c"Extensions");
         self.strs[14] = self.get_option(c"ControlIP");
         self.strs[15] = self.get_option(c"ControlUsername");
         self.strs[16] = self.get_option(c"ControlPassword");
@@ -4284,94 +4024,6 @@ impl NzbgetRsOptions {
         self.config_errors.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub(crate) fn create_scheduler_task_active(
-        &self,
-        id: i32,
-        time: Option<&CStr>,
-        week_days: Option<&CStr>,
-        command: i32,
-        param: Option<&CStr>,
-    ) {
-        let line_no = if id == 0 { 0 } else { self.config_line };
-        let emit_err = |msg: &CStr| {
-            let mut trunc = msg.to_bytes().to_vec();
-            if trunc.len() > 1023 {
-                trunc.truncate(1023);
-            }
-            let base: &[u8] = match self.strs[0].as_deref() {
-                Some(cf) => {
-                    let raw = cf.to_bytes();
-                    &raw[crate::paths::base_file_name(raw)..]
-                }
-                None => b"<noconfig>",
-            };
-            let line_s = line_no.to_string();
-            let formatted = format_bytes_msg(&[base, b"(", line_s.as_bytes(), b"): ", &trunc]);
-            let ptrs = [formatted.as_ptr()];
-            if let Some(cb) = self.diag_cb {
-                unsafe { cb(std::ptr::null_mut(), 1, std::ptr::null(), ptrs.as_ptr(), 1) };
-            } else if self.default_diag_sink {
-                Self::emit_default_diag(1, formatted.as_ptr());
-            }
-            self.config_errors
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-        };
-        let emit_task = |hours: i32, minutes: i32, wd_bits: i32| {
-            if let Some(sched) = crate::scheduler::active_scheduler() {
-                sched.add_task(
-                    id,
-                    hours,
-                    minutes,
-                    wd_bits,
-                    command,
-                    param.map_or(&[][..], CStr::to_bytes),
-                );
-            }
-        };
-
-        let mut week_days_val = 0;
-        if let Some(wd) = week_days {
-            if !parse_week_days(wd.to_bytes(), &mut week_days_val) {
-                let id_str = id.to_string();
-                let msg = format_bytes_msg(&[
-                    b"Invalid value for option \"Task",
-                    id_str.as_bytes(),
-                    b".WeekDays\": \"",
-                    wd.to_bytes(),
-                    b"\"",
-                ]);
-                emit_err(&msg);
-                return;
-            }
-        }
-
-        let Some(time_cstr) = time else {
-            return;
-        };
-        for one_time in crate::util::tokens(time_cstr.to_bytes(), b";,") {
-            let one_time_cstr = cstring(one_time.to_vec());
-            let (mut hours, mut minutes) = (0, 0);
-            if !parse_time(&one_time_cstr, &mut hours, &mut minutes) {
-                let id_str = id.to_string();
-                let msg = format_bytes_msg(&[
-                    b"Invalid value for option \"Task",
-                    id_str.as_bytes(),
-                    b".Time\": \"",
-                    one_time_cstr.to_bytes(),
-                    b"\"",
-                ]);
-                emit_err(&msg);
-                return;
-            }
-            if options_is_every_hour_task(hours) {
-                for every_hour in 0..24 {
-                    emit_task(every_hour, minutes, week_days_val);
-                }
-            } else {
-                emit_task(hours, minutes, week_days_val);
-            }
-        }
-    }
 }
 
 impl OptionsHost for NzbgetRsOptions {
@@ -4544,7 +4196,6 @@ impl OptionsHost for NzbgetRsOptions {
         category: Option<&CStr>,
         category_source: i32,
         priority: i32,
-        extensions: Option<&CStr>,
         cert_verif_level: u32,
     ) {
         if self.daemon_subsystems {
@@ -4560,7 +4211,6 @@ impl OptionsHost for NzbgetRsOptions {
                     category.map_or(&[][..], CStr::to_bytes),
                     category_source,
                     priority,
-                    extensions.map_or(&[][..], CStr::to_bytes),
                     cert_verif_level,
                 );
             }
@@ -4580,7 +4230,8 @@ impl OptionsHost for NzbgetRsOptions {
             url.map_or(std::ptr::null(), CStr::as_ptr),
             filter.map_or(std::ptr::null(), CStr::as_ptr),
             category.map_or(std::ptr::null(), CStr::as_ptr),
-            extensions.map_or(std::ptr::null(), CStr::as_ptr),
+            // formerly FeedN.Extensions
+            std::ptr::null(),
         ];
         self.emit_host(8, &ints, &ptrs, 5);
     }
@@ -4617,14 +4268,12 @@ impl OptionsHost for NzbgetRsOptions {
         name: &CStr,
         dest_dir: Option<&CStr>,
         unpack: bool,
-        extensions: Option<&CStr>,
         aliases: &[CString],
     ) {
         self.categories.push(RustCategory {
             name: name.to_owned(),
             dest_dir: dest_dir.unwrap_or(c"").to_owned(),
             unpack,
-            extensions: extensions.unwrap_or(c"").to_owned(),
             aliases: aliases.to_vec(),
         });
     }
@@ -4698,7 +4347,6 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
     let mut opts = NzbgetRsOptions {
         opt_entries: Vec::new(),
         categories: Vec::new(),
-        script_dir_paths: Vec::new(),
         strs: std::array::from_fn(|_| None),
         no_disk_access: no_disk_access != 0,
         no_config: eff_no_config,
@@ -4712,7 +4360,6 @@ pub unsafe extern "C" fn nzbget_rs_options_new(
         out_scalars,
         cb_ctx,
         cb_fn,
-        diag_cb: cb_fn,
     };
     opts.sync_scalars_to_host();
     opts.init_daemon(
@@ -4797,7 +4444,8 @@ pub unsafe extern "C" fn nzbget_rs_options_query(
             if !out_strs.is_null() {
                 *out_strs.add(0) = cat.name.as_ptr();
                 *out_strs.add(1) = cat.dest_dir.as_ptr();
-                *out_strs.add(2) = cat.extensions.as_ptr();
+                // formerly CategoryN.Extensions
+                *out_strs.add(2) = c"".as_ptr();
             }
             1
         }
@@ -4818,23 +4466,12 @@ pub unsafe extern "C" fn nzbget_rs_options_query(
                     f(
                         ctx,
                         cat.name.as_ptr(),
-                        cat.extensions.as_ptr(),
+                        c"".as_ptr(),
                         c_int::from(cat.unpack),
                     );
                 }
             }
             opts.categories.len() as c_int
-        }
-        3 => {
-            if let Some(f) = cb {
-                for p in &opts.script_dir_paths {
-                    f(ctx, p.as_ptr(), c"".as_ptr(), 0);
-                }
-            }
-            if !out_strs.is_null() && a1 >= 0 && (a1 as usize) < opts.script_dir_paths.len() {
-                *out_strs = opts.script_dir_paths[a1 as usize].as_ptr();
-            }
-            opts.script_dir_paths.len() as c_int
         }
         4 => {
             let bit = 1u8 << ((a1 & 3) as u8);
@@ -4902,7 +4539,6 @@ mod options_full_suite_port_from_cpp {
             _category: Option<&CStr>,
             category_source: i32,
             _priority: i32,
-            _extensions: Option<&CStr>,
             cert_verif_level: u32,
         ) {
             self.feeds += 1;
@@ -5104,7 +4740,6 @@ mod options_full_suite_port_from_cpp {
             c"SecureCert=/usr/etc/nzbget/cert.pem",
             c"SecureKey=/usr/etc/nzbget/key.pem",
             c"UnpackPassFile=/usr/etc/nzbget/unpackpass",
-            c"ScriptDir=/usr/etc/nzbget/scripts;/usr/etc/nzbget/scripts2;",
         ];
         let mut extender = OptionsExtenderMock::default();
         let options = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
@@ -5128,15 +4763,6 @@ mod options_full_suite_port_from_cpp {
         assert_eq!(
             options.unpack_pass_file.as_c_str(),
             c"/usr/etc/nzbget/unpackpass"
-        );
-        assert_eq!(options.script_dir_paths.len(), 2);
-        assert_eq!(
-            options.script_dir_paths[0].as_c_str(),
-            c"/usr/etc/nzbget/scripts"
-        );
-        assert_eq!(
-            options.script_dir_paths[1].as_c_str(),
-            c"/usr/etc/nzbget/scripts2"
         );
     }
 
@@ -5257,18 +4883,13 @@ mod options_full_suite_port_from_cpp {
 
         let long_seg = "a".repeat(2500);
         let cat_dest_opt = cstring(format!("Category1.DestDir=/{long_seg}").into_bytes());
-        let script_dir_opt = cstring(format!("ScriptDir=/{long_seg}_1;/{long_seg}_2").into_bytes());
         let opts = [
             c"Category1.Name=movies",
             cat_dest_opt.as_c_str(),
-            script_dir_opt.as_c_str(),
         ];
         let options = RustOptions::new_no_config(Some(&opts), None);
         assert_eq!(options.categories.len(), 1);
         assert_eq!(options.categories[0].dest_dir.to_bytes().len(), 2501);
-        assert_eq!(options.script_dir_paths.len(), 2);
-        assert_eq!(options.script_dir_paths[0].to_bytes().len(), 2503);
-        assert_eq!(options.script_dir_paths[1].to_bytes().len(), 2503);
 
         let long_web_dir = format!("/{long_seg}").into_bytes();
         let default_conf =
@@ -5391,7 +5012,7 @@ mod options_full_suite_port_from_cpp {
     }
 
     #[test]
-    fn options_query_serves_entries_categories_and_script_dirs() {
+    fn options_query_serves_entries_and_categories() {
         assert!(option_restricted(c"Server1.Password", true));
         assert!(!option_restricted(c"Server1.Host", true));
 
@@ -5404,7 +5025,6 @@ mod options_full_suite_port_from_cpp {
             c"Category1.DestDir=/dl/movies".as_ptr(),
             c"Category1.Unpack=no".as_ptr(),
             c"Category1.Aliases=Films*;HD*".as_ptr(),
-            c"ScriptDir=/scripts/a;/scripts/b".as_ptr(),
         ];
         let mut scalars = NzbgetRsParsedOptions::default();
         let mut state_flags: c_int = 0;
@@ -5486,21 +5106,6 @@ mod options_full_suite_port_from_cpp {
                 .iter()
                 .any(|(n, v, r)| n == "Server1.Password" && v == "secret" && *r == 1));
 
-            let mut first_dir = std::ptr::null();
-            assert_eq!(
-                nzbget_rs_options_query(
-                    handle,
-                    3,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null_mut(),
-                    &mut first_dir,
-                    0,
-                    None,
-                ),
-                2
-            );
-            assert_eq!(CStr::from_ptr(first_dir), c"/scripts/a");
             nzbget_rs_options_free(handle);
         }
     }

@@ -1008,14 +1008,10 @@ impl NzbgetRsScanner {
     }
 
     pub(crate) fn init_options_active(&self) {
-        #[cfg(unix)]
-        let has_scan = crate::script::has_scan_scripts_active();
-        #[cfg(not(unix))]
-        let has_scan = false;
         let env = self
             .effective_env(None)
             .unwrap_or_else(|| unsafe { std::mem::zeroed() });
-        self.init_options(has_scan, &env);
+        self.init_options(false, &env);
     }
 
     fn service_interval(&self, opt_nzb_dir_interval: i32) -> i32 {
@@ -1831,17 +1827,19 @@ impl NzbgetRsScanner {
     }
 
     #[cfg(unix)]
-    fn init_work_params_pp(&self, category: &[u8], reset: bool) {
+    fn init_work_params_pp(&self, category: &[u8]) {
         let mut wp = self.work_params.lock().unwrap_or_else(|e| e.into_inner());
-        crate::script::init_pp_params_active(category, reset, |pop, name, val| {
-            if pop == 0 {
-                wp.iter()
-                    .any(|(k, _)| eq_ignore_ascii_case(k.as_bytes(), name.to_bytes()))
+        if !wp
+            .iter()
+            .any(|(k, _)| eq_ignore_ascii_case(k.as_bytes(), b"*Unpack:"))
+        {
+            let v: &[u8] = if category_unpack_enabled(category) {
+                b"yes"
             } else {
-                set_param_list(&mut wp, name.to_bytes(), val.map(CStr::to_bytes));
-                false
-            }
-        });
+                b"no"
+            };
+            set_param_list(&mut wp, b"*Unpack:", Some(v));
+        }
     }
 }
 
@@ -1849,6 +1847,25 @@ impl Default for NzbgetRsScanner {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Whether unpacking is enabled for `category` (the category's `Unpack` option, or
+/// the global `Unpack` option when the category is empty or unknown). Used to
+/// default the `*Unpack:` post-processing parameter of new downloads.
+#[cfg(unix)]
+fn category_unpack_enabled(category: &[u8]) -> bool {
+    let Some(opts) = crate::options::active_options() else {
+        return false;
+    };
+    let mut unpack = opts.scalars().unpack != 0;
+    if !category.is_empty() {
+        if let Ok(cat_c) = CString::new(category) {
+            if let Some(cat) = opts.find_category(&cat_c, false) {
+                unpack = cat.unpack;
+            }
+        }
+    }
+    unpack
 }
 
 #[cfg(unix)]
@@ -1897,166 +1914,8 @@ unsafe extern "C" fn native_work_params_cb(
             };
             set_param_list(&mut wp, cstr_bytes(s1), v);
         }
-        2 => sc.init_work_params_pp(cstr_bytes(s1), false),
-        3 => sc.init_work_params_pp(cstr_bytes(s1), true),
+        2 | 3 => sc.init_work_params_pp(cstr_bytes(s1)),
         _ => {}
-    }
-}
-
-#[cfg(unix)]
-unsafe extern "C" fn native_scan_script_cb(
-    ctx: *mut c_void,
-    full_filename: *const c_char,
-    url_info: *mut c_void,
-    directory: *const c_char,
-    init_name: *const c_char,
-    init_cat: *const c_char,
-    init_key: *const c_char,
-    str_ctx: *mut c_void,
-    set_str: unsafe extern "C" fn(*mut c_void, c_int, *const c_char),
-    priority: *mut c_int,
-    add_top: *mut c_int,
-    add_paused: *mut c_int,
-    dupe_score: *mut c_int,
-    dupe_mode: *mut c_int,
-) {
-    if ctx.is_null() {
-        return;
-    }
-    let scanner = unsafe { &*ctx.cast::<NzbgetRsScanner>() };
-    let url_ptr = url_info as usize;
-    let url_bytes = if url_ptr != 0 {
-        let Some(host) = crate::ffi::queue_host() else {
-            return;
-        };
-        let snap = host.nzb_snap(url_ptr, false);
-        if snap.skip_script_processing {
-            return;
-        }
-        snap.url
-    } else {
-        Vec::new()
-    };
-    let url_c = to_cstr_sanitized(&url_bytes);
-
-    struct ScanCtx<'a> {
-        scanner: &'a NzbgetRsScanner,
-        nzb_name: CString,
-        nzb_cat: CString,
-        dupe_key: CString,
-        priority: *mut c_int,
-        add_top: *mut c_int,
-        add_paused: *mut c_int,
-        dupe_score: *mut c_int,
-        dupe_mode: *mut c_int,
-        param_scratch: (CString, CString),
-    }
-
-    unsafe extern "C" fn scan_step_cb(
-        raw: *mut c_void,
-        op: c_int,
-        a1: c_int,
-        s1: *const c_char,
-        s2: *const c_char,
-        ints: *mut c_int,
-        strs: *mut *const c_char,
-    ) {
-        let s = unsafe { &mut *raw.cast::<ScanCtx<'_>>() };
-        match op {
-            0 => unsafe {
-                *strs.add(0) = s.nzb_name.as_ptr();
-                *strs.add(1) = s.nzb_cat.as_ptr();
-                *strs.add(2) = s.dupe_key.as_ptr();
-                *ints.add(0) = *s.priority;
-                *ints.add(1) = *s.add_top;
-                *ints.add(2) = *s.add_paused;
-                *ints.add(3) = *s.dupe_score;
-                *ints.add(4) = *s.dupe_mode;
-                *ints.add(5) = s
-                    .scanner
-                    .work_params
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .len() as c_int;
-            },
-            1 => {
-                let pair = {
-                    let wp = s
-                        .scanner
-                        .work_params
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    wp.get(a1 as usize)
-                        .cloned()
-                        .unwrap_or_else(|| (CString::default(), CString::default()))
-                };
-                s.param_scratch = pair;
-                unsafe {
-                    *strs.add(0) = s.param_scratch.0.as_ptr();
-                    *strs.add(1) = s.param_scratch.1.as_ptr();
-                }
-            }
-            2 => unsafe {
-                match a1 {
-                    1 => s.nzb_name = to_cstr_sanitized(cstr_bytes(s2)),
-                    2 => {
-                        let b = cstr_bytes(s2);
-                        s.nzb_cat = to_cstr_sanitized(b);
-                        s.scanner.init_work_params_pp(b, true);
-                    }
-                    3 => {
-                        let mut wp = s
-                            .scanner
-                            .work_params
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        set_param_list(&mut wp, cstr_bytes(s1), Some(cstr_bytes(s2)));
-                    }
-                    4 => *s.priority = *ints.add(0),
-                    5 => *s.add_top = c_int::from(*ints.add(0) != 0),
-                    6 => *s.add_paused = c_int::from(*ints.add(0) != 0),
-                    7 => s.dupe_key = to_cstr_sanitized(cstr_bytes(s2)),
-                    8 => *s.dupe_score = *ints.add(0),
-                    9 => {
-                        let iv = *ints.add(0);
-                        *s.dupe_mode = if iv == 0 {
-                            0
-                        } else if iv == 1 {
-                            1
-                        } else {
-                            2
-                        };
-                    }
-                    _ => {}
-                }
-            },
-            _ => {}
-        }
-    }
-
-    let mut sc = ScanCtx {
-        scanner,
-        nzb_name: to_cstr_sanitized(cstr_bytes(init_name)),
-        nzb_cat: to_cstr_sanitized(cstr_bytes(init_cat)),
-        dupe_key: to_cstr_sanitized(cstr_bytes(init_key)),
-        priority,
-        add_top,
-        add_paused,
-        dupe_score,
-        dupe_mode,
-        param_scratch: (CString::default(), CString::default()),
-    };
-    unsafe {
-        crate::script::scan_scripts_exec_active(
-            full_filename,
-            url_c.as_ptr(),
-            directory,
-            (&mut sc as *mut ScanCtx<'_>).cast(),
-            scan_step_cb,
-        );
-        set_str(str_ctx, 0, sc.nzb_name.as_ptr());
-        set_str(str_ctx, 1, sc.nzb_cat.as_ptr());
-        set_str(str_ctx, 2, sc.dupe_key.as_ptr());
     }
 }
 
@@ -2256,7 +2115,6 @@ pub(crate) fn create_daemon_scanner() {
     let mut env: NzbgetRsScannerEnv = unsafe { std::mem::zeroed() };
     env.ctx = (Arc::as_ptr(&scanner) as *mut NzbgetRsScanner).cast();
     env.work_params_cb = Some(native_work_params_cb);
-    env.scan_script_cb = Some(native_scan_script_cb);
     env.parse_nzb_cb = Some(native_parse_nzb_cb);
     env.commit_nzb_cb = Some(native_commit_nzb_cb);
     *scanner.host_env.lock().unwrap_or_else(|e| e.into_inner()) = Some(env);
@@ -2365,14 +2223,14 @@ pub(crate) unsafe fn add_cli_nzb_file_active(
         if !parsed.password.is_empty() {
             host.nzb_set_param(nzb_ptr, b"*Unpack:Password", Some(&parsed.password));
         }
-        crate::script::init_pp_params_active(cat_bytes, false, |pop, name, val| {
-            if pop == 0 {
-                host.nzb_get_param(nzb_ptr, name.to_bytes()).is_some()
+        if host.nzb_get_param(nzb_ptr, b"*Unpack:").is_none() {
+            let v: &[u8] = if category_unpack_enabled(cat_bytes) {
+                b"yes"
             } else {
-                host.nzb_set_param(nzb_ptr, name.to_bytes(), val.map(CStr::to_bytes));
-                false
-            }
-        });
+                b"no"
+            };
+            host.nzb_set_param(nzb_ptr, b"*Unpack:", Some(v));
+        }
         qc.add_nzb_file_to_queue(&qh, parsed.uptr_addr, 0, false);
     }
     true

@@ -170,10 +170,10 @@ class Fixture:
             listener.bind(("127.0.0.1", self.args.port))
             port = listener.getsockname()[1]
         self.url = f"http://127.0.0.1:{port}/"
-        for name in ["queue", "tmp", "dst", "nzb", "scripts"]:
+        for name in ["queue", "tmp", "dst", "nzb"]:
             (self.root / name).mkdir()
         values = {"MainDir": self.root, "DestDir": self.root / "dst", "TempDir": self.root / "tmp",
-                  "QueueDir": self.root / "queue", "NzbDir": self.root / "nzb", "ScriptDir": self.root / "scripts",
+                  "QueueDir": self.root / "queue", "NzbDir": self.root / "nzb",
                   "LogFile": self.root / "daemon.log", "LockFile": self.root / "daemon.lock",
                   "WebDir": self.args.webui, "ConfigTemplate": self.args.template, "ControlIP": "127.0.0.1",
                   "ControlPort": port, "ControlUsername": "", "ControlPassword": "", "AuthorizedIP": "127.0.0.1",

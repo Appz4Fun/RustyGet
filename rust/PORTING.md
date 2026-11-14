@@ -31,8 +31,7 @@ in `rust/include/nzbget_rs.h`.
 | `XmlRpcProcessor` routing (`Execute` protocol, `Dispatch` method/id/params) and `BuildResponse` envelope | `rpcroute` | port only |
 | `Util::SplitCommandLine`, `Trim*`, `SanitizeLine`, `EndsWith`, `FormatBuffer`, `WebUtil::ParseRfc822DateTime` | `util` | port only |
 | `ServerVolume::CalcSlots` and `AddStats` slot clearing (StatMeter) | `statmeter` | port only |
-| `Options::ParseTime`, `ParseWeekDays`, `ValidateOptionName`, `ConvertOldOption`, `HasScript`, `ParseCategorySource` | `options` | port only |
-| `ExtensionLoader::V1` (pre-manifest script headers: kind, about, options, commands, select values) | `extload` | port only |
+| `Options::ParseTime`, `ParseWeekDays`, `ValidateOptionName`, `ConvertOldOption`, `ParseCategorySource` | `options` | port only |
 | `WebDownloader::CheckResponse`, `ProcessHeader`, `ParseRedirect` | `webdownload` | port only |
 | `UrlDownloader::ProcessHeader` (X-DNZB headers), `UrlCoordinator::UrlCompleted` statuses | `urlcoord` | port only |
 | `NntpConnection` protocol: `Request` (480 re-login), `AUTHINFO USER/PASS`, the greeting, `GROUP` (C++ does the I/O) | `nntp` | port only |
@@ -43,7 +42,6 @@ in `rust/include/nzbget_rs.h`.
 | `RarRenamer::RenameFiles` (sets, proper names, main file, new names; the regex, file checks and moves stay C++) | `rarrenamer` | port only |
 | DirectRenamer's `RenameContentAnalyzer` (PAR2 header and set id, MD5 of the first 16 KiB) | `renameanalyzer` | port only |
 | DirectRenamer's new names (`BuildNewRegularName`, `BuildNewParName`, `NeedRenamePars`) | `directrenamer` | port only |
-| `ManifestFile::Load` (an extension's manifest.json; with a Boost.JSON-compatible parser: strict grammar, depth 32, duplicate keys, Boost's imprecise numbers) | `manifest`, `json` | port only |
 | `TestServerXmlCommand`'s JSON body (`Json::Deserialize`, `ParseRequestParams`: value_to<std::string/int/bool>) | `rpcparams`, `json` | port only |
 | `ParRenamer::Execute` (par-rename: par2 files by header and set id, regular files by the MD5 of their first 16 KiB, .bad par2 files, missing files; par2 loading, file IO and moves stay C++) | `parrenamer` | port only |
 | `FileSystem::DeleteDirectory`, `DeleteDirectoryWithContent`, `RenameBak`, `GetFileExtension` (links never followed, first error kept, errno as before; the file system calls stay C++) | `fsdelete` | port only |
@@ -154,8 +152,8 @@ Full raw process pairs and compiler/source provenance are retained in PR #80.
 Restarted searches bind donor proof to the original title, key and posting
 fingerprint; changed/unbound saved state is searched again. Legacy three-field
 stamps refresh once and preserve ambiguous client keys; only an independently
-persisted per-NZB marker proves generated ownership. Manual name edits notify only the watcher,
-while DirectRename retains its queue-script event. Inferred absent parts mark
+persisted per-NZB marker proves generated ownership. Manual name edits notify only the watcher.
+Inferred absent parts mark
 unusable donors dead, including fast additions and existing history members.
 Generated keys and managed score floors persist without client edits.
 

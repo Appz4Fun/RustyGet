@@ -418,21 +418,13 @@ pub fn web_is_safe_url_chars(url: &[u8]) -> bool {
 
 /// Classifies static GET route in `WebProcessor::Dispatch`:
 /// - `0`: invalid URL characters (404 Not Found with warning)
-/// - `1`: `/extensions/` route with invalid subpath (404 Not Found without warning)
-/// - `2`: `/extensions/` route with valid subpath (`ext_offset = 12`)
 /// - `3`: `/combined.` with `?` (multi-file response)
 /// - `4`: single-file response
 pub fn web_classify_get_dispatch(url: &[u8]) -> i32 {
     if !web_is_safe_url_chars(url) {
         return 0;
     }
-    if url.starts_with(b"/extensions/") {
-        let ext_url = &url[12..];
-        match ext_url.iter().position(|&b| b == b'/') {
-            None | Some(0) => 1,
-            Some(_) => 2,
-        }
-    } else if url.starts_with(b"/combined.") && url.contains(&b'?') {
+    if url.starts_with(b"/combined.") && url.contains(&b'?') {
         3
     } else {
         4
@@ -580,7 +572,6 @@ pub struct WebServeConfig<'a> {
     pub remote_addr: &'a [u8],
     pub version: &'a [u8],
     pub web_dir: &'a [u8],
-    pub script_dirs: &'a [&'a [u8]],
     pub credentials: Credentials<'a>,
     pub control_port: i32,
     pub form_auth: bool,
@@ -1013,94 +1004,6 @@ where
         return keep_alive;
     }
 
-    if get_route == 1 || get_route == 2 {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::{OsStrExt, OsStringExt};
-        use std::path::Path;
-
-        if !authorized {
-            send_auth(keep_alive, &mut send_all, &mut log_msg);
-            return keep_alive;
-        }
-        if cfg.script_dirs.is_empty() {
-            send_error(
-                ERR_HTTP_SERVICE_UNAVAILABLE,
-                true,
-                &url,
-                keep_alive,
-                &mut send_all,
-                &mut log_msg,
-            );
-            return keep_alive;
-        }
-        if get_route == 1 {
-            send_error(
-                ERR_HTTP_NOT_FOUND,
-                false,
-                &url,
-                keep_alive,
-                &mut send_all,
-                &mut log_msg,
-            );
-            return keep_alive;
-        }
-
-        let ext_url = &url[12..];
-        let mut found = false;
-        for &dir_bytes in cfg.script_dirs {
-            if dir_bytes.is_empty() {
-                continue;
-            }
-            let script_dir = Path::new(OsStr::from_bytes(dir_bytes));
-            let Ok(resolved_dir) = std::fs::canonicalize(script_dir) else {
-                continue;
-            };
-            let file_path = script_dir.join(OsStr::from_bytes(ext_url));
-            let Ok(resolved_path) = std::fs::canonicalize(&file_path) else {
-                continue;
-            };
-            let Ok(rel) = resolved_path.strip_prefix(&resolved_dir) else {
-                continue;
-            };
-            let rel_bytes = rel.as_os_str().as_bytes();
-            if rel_bytes.is_empty() || rel_bytes[0] == b'.' {
-                continue;
-            }
-            let resolved_bytes = resolved_path.into_os_string().into_vec();
-            if let Some(buf) = load_file_bytes(&resolved_bytes) {
-                let ct = content_type_no_nul(&resolved_bytes);
-                let len = buf.len().saturating_sub(1);
-                emit_body_response(
-                    cfg,
-                    &url,
-                    &old_etag,
-                    &origin,
-                    token_out,
-                    keep_alive,
-                    gzip_req,
-                    &buf[..len],
-                    ct,
-                    true,
-                    &mut send_all,
-                    &mut log_msg,
-                );
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            send_error(
-                ERR_HTTP_NOT_FOUND,
-                false,
-                &url,
-                keep_alive,
-                &mut send_all,
-                &mut log_msg,
-            );
-        }
-        return keep_alive;
-    }
-
     if cfg.web_dir.is_empty() {
         send_error(
             ERR_HTTP_SERVICE_UNAVAILABLE,
@@ -1366,8 +1269,7 @@ mod tests {
     fn test_web_functions() {
         assert!(web_is_safe_url_chars(b"/index.html?a+1_2-3"));
         assert!(!web_is_safe_url_chars(b"/../secret"));
-        assert_eq!(web_classify_get_dispatch(b"/extensions/myext/script.js"), 2);
-        assert_eq!(web_classify_get_dispatch(b"/extensions//bad"), 1);
+        assert_eq!(web_classify_get_dispatch(b"/extensions/myext/script.js"), 4);
         assert_eq!(web_classify_get_dispatch(b"/combined.js?a.js+b.js"), 3);
         assert!(web_is_ignorable_404(b"apple-touch-icon-120x120.png"));
         assert!(!web_is_ignorable_404(b"index.html"));
@@ -1379,7 +1281,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn serve_static_gzip_etag_rpc_and_extensions() {
+    fn serve_static_gzip_etag_and_rpc() {
         use std::io::Read;
         use std::os::unix::ffi::OsStrExt;
 
@@ -1399,31 +1301,21 @@ mod tests {
         let _tmp_guard = TempGuard(tmp_root.clone());
 
         let web_dir = tmp_root.join("webui");
-        let ext_dir = tmp_root.join("scripts");
-        let my_ext = ext_dir.join("myext");
         std::fs::create_dir_all(&web_dir).unwrap();
-        std::fs::create_dir_all(&my_ext).unwrap();
 
         let big_js = "console.log('rustyget');\n".repeat(40);
         std::fs::write(web_dir.join("index.html"), b"<html>ok</html>").unwrap();
         std::fs::write(web_dir.join("a.js"), big_js.as_bytes()).unwrap();
         std::fs::write(web_dir.join("b.js"), b"var x = 1;\n").unwrap();
-        std::fs::write(my_ext.join("ui.js"), b"var ext = 2;\n").unwrap();
-
-        let outside = tmp_root.join("secret.txt");
-        std::fs::write(&outside, b"secret").unwrap();
-        std::os::unix::fs::symlink(&outside, my_ext.join("escape.js")).unwrap();
 
         let run_req = |raw_req: &[u8], gzip_enabled: bool| -> (bool, Vec<u8>) {
             let sig = &raw_req[..4];
             let rest = std::cell::Cell::new(&raw_req[4..]);
-            let script_dirs = [ext_dir.as_os_str().as_bytes()];
             let cfg = WebServeConfig {
                 signature: sig,
                 remote_addr: b"127.0.0.1",
                 version: b"26.0",
                 web_dir: web_dir.as_os_str().as_bytes(),
-                script_dirs: &script_dirs,
                 credentials: Credentials {
                     control_username: Some(b"admin"),
                     control_password: Some(b"pass"),
@@ -1520,17 +1412,12 @@ mod tests {
             format!("{big_js}var x = 1;\n").as_bytes()
         );
 
-        // 4. Extensions: valid file served, symlink escaping script_dir blocked with 404
+        // 4. The removed extension route is an ordinary (missing) static file
         let (_, resp_ext) = run_req(
             b"GET /extensions/myext/ui.js HTTP/1.1\r\nAuthorization: Basic YWRtaW46cGFzcw==\r\n\r\n",
             false,
         );
-        assert!(resp_ext.ends_with(b"\r\n\r\nvar ext = 2;\n"));
-        let (_, resp_esc) = run_req(
-            b"GET /extensions/myext/escape.js HTTP/1.1\r\nAuthorization: Basic YWRtaW46cGFzcw==\r\n\r\n",
-            false,
-        );
-        assert!(resp_esc.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+        assert!(resp_ext.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
 
         // 5. POST JSON-RPC with URL credentials
         let (_, resp_rpc) = run_req(

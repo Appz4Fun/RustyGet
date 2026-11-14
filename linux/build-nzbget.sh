@@ -507,7 +507,6 @@ build_bin()
     sed 's|^DestDir=.*|DestDir=${MainDir}/completed|' -i $CONFTEMPLATE
     sed 's|^InterDir=.*|InterDir=${MainDir}/intermediate|' -i $CONFTEMPLATE
     sed 's|^WebDir=.*|WebDir=${AppDir}/webui|' -i $CONFTEMPLATE
-    sed 's|^ScriptDir=.*|ScriptDir=${AppDir}/scripts|' -i $CONFTEMPLATE
     sed 's|^LogFile=.*|LogFile=${MainDir}/nzbget.log|' -i $CONFTEMPLATE
     sed 's|^ConfigTemplate=.*|ConfigTemplate=${AppDir}/webui/nzbget.conf.template|' -i $CONFTEMPLATE
     sed 's|^AuthorizedIP=.*|AuthorizedIP=127.0.0.1|' -i $CONFTEMPLATE

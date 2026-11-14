@@ -133,8 +133,7 @@ var SystemHealth = (new function ($) {
 		Logging: "LOGGING",
 		CheckAndRepair: "CHECK_AND_REPAIR",
 		Unpack: "UNPACK",
-		Scheduler: "SCHEDULER",
-		ExtensionScripts: "EXTENSION_SCRIPTS"
+		Scheduler: "SCHEDULER"
 	};
 
 	var SYSTEM_HEALTH_CHECK_OPTION = "SystemHealthCheck";

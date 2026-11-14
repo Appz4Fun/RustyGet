@@ -56,7 +56,6 @@ pub(crate) const DS_NONE: i32 = 0;
 pub(crate) const DS_MANUAL: i32 = 1;
 pub(crate) const DS_HEALTH: i32 = 2;
 pub(crate) const DS_DUPE: i32 = 3;
-pub(crate) const DS_BAD: i32 = 4;
 pub(crate) const DS_GOOD: i32 = 5;
 pub(crate) const DS_COPY: i32 = 6;
 pub(crate) const DS_SCAN: i32 = 7;
@@ -216,15 +215,6 @@ pub(crate) const EA_HISTORY_SET_NAME: i32 = 51;
 pub(crate) const MM_NAME: i32 = 2;
 pub(crate) const MM_REGEX: i32 = 3;
 
-// QueueScriptCoordinator::EEvent
-pub(crate) const QE_FILE_DOWNLOADED: i32 = 0;
-pub(crate) const QE_URL_COMPLETED: i32 = 1;
-pub(crate) const QE_NZB_MARKED: i32 = 2;
-pub(crate) const QE_NZB_ADDED: i32 = 3;
-pub(crate) const QE_NZB_NAMED: i32 = 4;
-pub(crate) const QE_NZB_DOWNLOADED: i32 = 5;
-pub(crate) const QE_NZB_DELETED: i32 = 6;
-
 // NzbInfo field indices (op = 32)
 pub(crate) const NZB_INT_ID: i32 = 0;
 pub(crate) const NZB_INT_DELETE_STATUS: i32 = 1;
@@ -335,7 +325,6 @@ pub(crate) const NZB_INT_SUCCESS_ARTICLES: i32 = 101;
 pub(crate) const NZB_I64_SIZE: i32 = 102;
 pub(crate) const NZB_I64_MIN_TIME: i32 = 103;
 pub(crate) const NZB_I64_MAX_TIME: i32 = 104;
-pub(crate) const NZB_I64_QUEUE_SCRIPT_TIME: i32 = 105;
 pub(crate) const NZB_INT_FILE_COUNT: i32 = 106;
 pub(crate) const NZB_INT_MESSAGE_COUNT: i32 = 107;
 pub(crate) const NZB_INT_TOTAL_ARTICLES: i32 = 108;
@@ -503,7 +492,6 @@ pub(crate) struct GlobalOptsSnap {
     pub ext_cleanup_disk: Vec<u8>,
     pub inter_dir: Vec<u8>,
     pub hard_linking_ignore_ext: Vec<u8>,
-    pub extensions: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -617,7 +605,6 @@ pub(crate) struct NzbSnap {
     pub max_time: i64,
     pub download_start_time: i64,
     pub dupe_recovered_bytes: i64,
-    pub queue_script_time: i64,
     pub name: Vec<u8>,
     pub filename: Vec<u8>,
     pub dest_dir: Vec<u8>,
@@ -939,7 +926,6 @@ impl QueueSubsysHost {
                     ext_cleanup_disk: o.str_bytes(32).to_vec(),
                     inter_dir: o.str_bytes(4).to_vec(),
                     hard_linking_ignore_ext: o.str_bytes(37).to_vec(),
-                    extensions: o.str_bytes(29).to_vec(),
                 };
             }
             return GlobalOptsSnap {
@@ -1013,7 +999,6 @@ impl QueueSubsysHost {
                 ext_cleanup_disk: read_cstr(strs[2]),
                 inter_dir: read_cstr(strs[3]),
                 hard_linking_ignore_ext: read_cstr(strs[4]),
-                extensions: read_cstr(strs[5]),
             }
         }
     }
@@ -1315,13 +1300,13 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn find_category(&self, cat_name: &[u8]) -> Option<(bool, Vec<u8>)> {
+    /// Returns the `Unpack` setting of category `cat_name`, if the category exists.
+    pub fn find_category(&self, cat_name: &[u8]) -> Option<bool> {
         if self.use_active {
             let c = c_bytes(cat_name);
             let cs = unsafe { std::ffi::CStr::from_ptr(c.as_ptr() as *const c_char) };
             return crate::options::active_options().and_then(|o| {
-                o.find_category(cs, false)
-                    .map(|cat| (cat.unpack, cat.extensions.to_bytes().to_vec()))
+                o.find_category(cs, false).map(|cat| cat.unpack)
             });
         }
         let c = c_bytes(cat_name);
@@ -1342,7 +1327,7 @@ impl QueueSubsysHost {
         if found == 0 {
             None
         } else {
-            Some((ints[0] != 0, unsafe { read_cstr(strs[0]) }))
+            Some(ints[0] != 0)
         }
     }
 
@@ -1902,26 +1887,6 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn queue_script_enqueue(&self, nzb_ptr: usize, event: i32) {
-        #[cfg(unix)]
-        if self.use_active {
-            crate::extension::enqueue_active_queue_script(self, nzb_ptr, event);
-            return;
-        }
-        self.raw(
-            6,
-            4,
-            event,
-            nzb_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-    }
-
     pub fn stream_repair_start_live(&self, nzb_ptr: usize) {
         if nzb_ptr == 0 {
             return;
@@ -2140,26 +2105,6 @@ impl QueueSubsysHost {
             i64s.as_mut_ptr(),
             strs.as_mut_ptr(),
         );
-    }
-
-    pub fn queue_script_has_job(&self, nzb_id: i32) -> bool {
-        #[cfg(unix)]
-        if self.use_active {
-            let mut active = false;
-            return crate::extension::active_queue_script_has_job(nzb_id, &mut active);
-        }
-        self.raw(
-            6,
-            13,
-            nzb_id,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
     }
 
     pub fn scanner_add_url_file(
@@ -3031,7 +2976,6 @@ impl QueueSubsysHost {
                 max_time: i64s[14],
                 download_start_time: i64s[16],
                 dupe_recovered_bytes: i64s[17],
-                queue_script_time: i64s[20],
                 name: read_cstr(strs[0]),
                 filename: read_cstr(strs[1]),
                 dest_dir: read_cstr(strs[2]),

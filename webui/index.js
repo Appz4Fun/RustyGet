@@ -295,9 +295,7 @@ var Frontend = (new function($)
 		ConfigBackupRestore.init();
 		ConfirmDialog.init();
 		UpdateDialog.init();
-		ExecScriptDialog.init();
 		AlertDialog.init();
-		ScriptListDialog.init();
 		RestoreSettingsDialog.init();
 		LimitDialog.init();
 		SystemInfo.init();
@@ -871,12 +869,10 @@ var Refresher = (new function($)
 			'listfiles',
 			'log', 
 			'loadlog', 
-			'logscript', 
 			'logupdate', 
 			'config', 
 			'loadconfig',
 			'configtemplates', 
-			'loadextensions', 
 			'servervolumes',
 		];
 

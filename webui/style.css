@@ -310,74 +310,6 @@ th {
     }
 }
 
-/* EXTENSION MANAGER */
-#ExtensionManagerTable .extension-manager__td {
-    vertical-align: middle;
-    max-width: 350px;
-    padding: 8px;
-}
-
-#ExtensionManagerTable td.extension-manager__actions-td {
-    padding: 1px;
-}
-
-#ExtensionManagerTable .extension-manager__td.text-center {
-    padding-left: 8px;
-    padding-right: 8px;
-}
-
-#ExtensionManagerTable .btn-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    width: 76px;
-    min-width: 76px;
-    margin: 4px auto;
-    justify-content: center;
-}
-
-#ExtensionManagerTable .btn-toolbar .btn {
-    flex: 0 0 36px;
-    width: 36px;
-    min-width: 36px;
-    height: 30px;
-    padding: 0;
-    margin: 0 !important;
-    display: inline-flex;
-    justify-content: center;
-    align-items: center;
-    box-sizing: border-box;
-}
-
-@media (max-width: 900px) {
-    #ExtensionManagerTable .phone-hide {
-        display: none;
-    }
-
-    #ExtensionManagerTable {
-        width: 100%;
-    }
-
-    #ExtensionManagerTable th,
-    #ExtensionManagerTable td {
-        padding: 4px;
-        word-break: break-word;
-    }
-
-    #ExtensionManagerTable th:nth-child(1),
-    #ExtensionManagerTable td:nth-child(1) {
-        width: 40px;
-    }
-
-    #ExtensionManagerTable th:nth-child(6),
-    #ExtensionManagerTable td:nth-child(6) {
-        width: 82px;
-        min-width: 82px;
-        padding-left: 2px;
-        padding-right: 2px;
-    }
-}
-
 .red-circle {
     border-radius: 50%;
     border: none;
@@ -403,10 +335,6 @@ th {
 .btn--disabled {
     opacity: 0.7 !important;
     pointer-events: none;
-}
-
-.list-item--nested a {
-    padding-left: 25px !important;
 }
 
 /* NAVBAR */
@@ -3210,10 +3138,6 @@ input[type="date"] {
         right: 25px;
     }
 
-    .list-item--nested a {
-        padding-left: 0px !important;
-    }
-    
     .settings-menu-panel {
         width: 225px;
     }

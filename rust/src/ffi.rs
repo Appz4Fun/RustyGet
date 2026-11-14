@@ -3201,8 +3201,8 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_exec(
 
 // ============================================================================
 // StatMeter, WebProcessor, UrlCoordinator, DirectRenamer, NzbFile,
-// QueueScript, PostScript, ScanScript, ScriptConfig & ScriptController FFI
-// (`rust/src/statmeter.rs` / `rust/src/extension.rs`)
+// ScriptConfig & ScriptController FFI
+// (`rust/src/statmeter.rs` / `rust/src/configfile.rs` / `rust/src/procrun.rs`)
 // ============================================================================
 
 // ============================================================================
@@ -3258,12 +3258,6 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
     let queue_p = to_path(opts.str_bytes(6));
     let web_p = to_path(opts.str_bytes(8));
     let temp_p = to_path(opts.str_bytes(5));
-    let script_paths: Vec<std::path::PathBuf> = opts
-        .script_dir_paths()
-        .iter()
-        .map(|s| to_path(s.to_bytes()))
-        .collect();
-    let script_refs: Vec<&std::path::Path> = script_paths.iter().map(|p| p.as_path()).collect();
     let cfg_tpl_p = to_path(opts.str_bytes(9));
     let log_bytes = log
         .as_ref()
@@ -3346,7 +3340,6 @@ pub(crate) fn system_health_diagnose_bytes(format_mode: c_int) -> Vec<u8> {
             queue_dir: &queue_p,
             web_dir: &web_p,
             temp_dir: &temp_p,
-            script_dirs: &script_refs,
             config_template: &cfg_tpl_p,
             log_file: &log_p,
             cert_store: &cert_p,
@@ -3544,8 +3537,8 @@ pub(crate) fn is_queue_loaded() -> bool {
 }
 
 #[cfg(unix)]
-pub(crate) fn script_host_cb() -> Option<crate::script::NzbgetRsScriptHostFn> {
-    Some(crate::script::active_script_host_cb)
+pub(crate) fn script_host_cb() -> Option<crate::procrun::NzbgetRsScriptHostFn> {
+    Some(crate::procrun::active_script_host_cb)
 }
 
 pub(crate) fn build_version_cstr() -> &'static CStr {
@@ -4240,7 +4233,7 @@ pub unsafe extern "C" fn nzbget_rs_script_config_exec(
             if fn_bytes.is_empty() {
                 return 0;
             }
-            match crate::extension::script_config_read_cipher_snapshot(fn_bytes) {
+            match crate::configfile::script_config_read_cipher_snapshot(fn_bytes) {
                 Some(buf) => {
                     *out_buf = into_buf(buf);
                     1
@@ -4258,7 +4251,7 @@ pub unsafe extern "C" fn nzbget_rs_script_config_exec(
             }
             let expected = bytes(p1, n1);
             let replacement = bytes(p2, n2);
-            let commit = crate::extension::script_config_commit_cipher_patch(
+            let commit = crate::configfile::script_config_commit_cipher_patch(
                 fn_bytes,
                 expected,
                 replacement,
@@ -4272,11 +4265,11 @@ pub unsafe extern "C" fn nzbget_rs_script_config_exec(
                 },
             );
             match commit {
-                crate::extension::RsCipherCommit::Saved => 1,
-                crate::extension::RsCipherCommit::Unchanged => 0,
-                crate::extension::RsCipherCommit::Conflict => -2,
-                crate::extension::RsCipherCommit::Cancelled => -3,
-                crate::extension::RsCipherCommit::Failed => -1,
+                crate::configfile::RsCipherCommit::Saved => 1,
+                crate::configfile::RsCipherCommit::Unchanged => 0,
+                crate::configfile::RsCipherCommit::Conflict => -2,
+                crate::configfile::RsCipherCommit::Cancelled => -3,
+                crate::configfile::RsCipherCommit::Failed => -1,
             }
         }
         _ => 0,
@@ -5627,21 +5620,6 @@ unsafe extern "C" fn web_rpc_action_bridge(
             }
             1
         }
-        14 => {
-            if a1 != 0 {
-                if let Err(err) = crate::script::load_extensions_active() {
-                    if !out_buf.is_null() {
-                        *out_buf = into_buf(err);
-                    }
-                    return 0;
-                }
-            }
-            if !out_buf.is_null() {
-                *out_buf = into_buf(crate::script::serialize_extensions_active(a2 != 0));
-            }
-            1
-        }
-        15 => crate::script::rpc_extension_action_active(a1, s1, s2, out_buf),
         16 => {
             if let Some(fc) = crate::feed::active_feed_coord() {
                 fc.fetch_feed_active(a1);
@@ -5685,7 +5663,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
             }
             c_int::from(ok != 0)
         }
-        19 => match crate::extension::check_updates_active() {
+        19 => match crate::maintenance::check_updates_active() {
             Some(info) => {
                 let nul = info.iter().position(|&b| b == 0).unwrap_or(info.len());
                 if !out_buf.is_null() {
@@ -5695,7 +5673,7 @@ unsafe extern "C" fn web_rpc_action_bridge(
             }
             None => 0,
         },
-        20 => c_int::from(crate::extension::start_update_active(a1)),
+        20 => c_int::from(crate::maintenance::start_update_active(a1)),
         21 => {
             let Some(sm) = crate::statmeter::active_statmeter() else {
                 return 0;
@@ -5796,9 +5774,6 @@ unsafe extern "C" fn web_rpc_action_bridge(
             ) as c_int
         }
         25 => crate::net::nzbget_rs_net_speedtest_iter(body, body_len, a1, out_u32, out_f64),
-        26 => {
-            c_int::from(crate::script::command_script_start_active(s1, s2, params, params_len) != 0)
-        }
         _ => 0,
     }
 }
@@ -6124,7 +6099,7 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 server_time: libc::time(std::ptr::null_mut()) as c_int,
                 resume_time: ws.as_deref().map_or(0, |w| w.resume_time() as c_int),
                 feed_active: c_int::from(fc.as_deref().is_some_and(|f| f.has_active_downloads())),
-                queued_scripts: crate::extension::active_queue_script_size(),
+                queued_scripts: 0,
             };
 
             let mut srvs: Vec<crate::xmlrpc_format::NzbgetRsRpcServerStatus> = Vec::new();
@@ -6271,26 +6246,12 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                 return 1;
             }
             if a1 == 1 {
-                crate::extension::collect_maint_messages_active(a3, a4, emit_ctx, emit_cb);
-            } else if a1 == 2 {
-                crate::log::nzbget_rs_log_collect(
-                    1,
-                    std::ptr::null(),
-                    crate::log::active_cmd_script_log(),
-                    a3,
-                    a4,
-                    0,
-                    std::ptr::null_mut(),
-                    emit_ctx,
-                    emit_cb as usize,
-                    0,
-                );
+                crate::maintenance::collect_maint_messages_active(a3, a4, emit_ctx, emit_cb);
             } else {
                 let lg = crate::log::active_log();
                 crate::log::nzbget_rs_log_collect(
                     1,
                     lg.as_deref().map_or(std::ptr::null(), |l| l as *const _),
-                    std::ptr::null(),
                     a3,
                     a4,
                     0,
@@ -6418,16 +6379,10 @@ unsafe extern "C" fn web_rpc_collect_bridge(
                         post_ptr = n.post_info_ptr;
                         let has_post = post_ptr != 0;
                         let post_stage = if has_post { n.post_stage } else { 0 };
-                        let mut flags = (if has_post { 1 } else { 0 })
+                        let flags = (if has_post { 1 } else { 0 })
                             | ((post_stage & 0xff) << 4)
                             | ((n.direct_unpack_status & 0xff) << 12)
                             | ((n.kind & 0xff) << 20);
-                        if has_post && (post_stage & 0xff) == 0 {
-                            let mut qs_act = false;
-                            let has_qs =
-                                crate::extension::active_queue_script_has_job(n.id, &mut qs_act);
-                            flags |= (if has_qs { 2 } else { 0 }) | (if qs_act { 4 } else { 0 });
-                        }
                         emit_cb(
                             emit_ctx,
                             4,
@@ -6764,9 +6719,6 @@ unsafe extern "C" fn web_rpc_collect_bridge(
 pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 4]) -> bool {
     let _cancel_guard = PosixCancelGuard::disable();
     let opts = crate::options::active_options();
-    let script_vec: Vec<&[u8]> = opts.as_deref().map_or_else(Vec::new, |o| {
-        o.script_dir_paths().iter().map(|c| c.to_bytes()).collect()
-    });
     let opt_str = |id: usize| -> Option<&[u8]> {
         opts.as_deref()
             .and_then(|o| o.str_cstr(id).map(CStr::to_bytes))
@@ -6774,7 +6726,6 @@ pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 
     let remote_addr = conn.remote_addr_bytes();
     let version = build_version_bytes();
     let web_dir = opts.as_deref().map_or(&[][..], |o| o.str_bytes(8));
-    let shell_override = opts.as_deref().map_or(&[][..], |o| o.str_bytes(40));
     let control_port = opts.as_deref().map_or(0, |o| o.scalars().control_port);
     let form_auth = opts.as_deref().is_some_and(|o| o.scalars().form_auth != 0);
     let json_p = opts.as_deref().is_some_and(|o| o.scalars().json_p != 0);
@@ -6786,7 +6737,6 @@ pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 
         remote_addr: &remote_addr,
         version: &version,
         web_dir,
-        script_dirs: &script_vec,
         credentials: crate::webserver::Credentials {
             control_username: opt_str(15),
             control_password: opt_str(16),
@@ -6833,7 +6783,6 @@ pub(crate) unsafe fn serve_web_conn(conn: &crate::net::NzbgetRsConn, sig: &[u8; 
                 url_c,
                 &version,
                 opt_str(0),
-                shell_override,
                 Some(web_rpc_log_bridge),
                 Some(web_rpc_action_bridge),
                 Some(web_rpc_collect_bridge),
@@ -7122,7 +7071,6 @@ pub(crate) unsafe fn serve_binrpc_conn(conn: &crate::net::NzbgetRsConn) {
             crate::log::nzbget_rs_log_collect(
                 2,
                 lg.as_deref().map_or(std::ptr::null(), |l| l as *const _),
-                std::ptr::null(),
                 0,
                 0,
                 0,
@@ -7496,7 +7444,6 @@ fn run_frontend_thread(
         crate::log::nzbget_rs_log_collect(
             0,
             lg.as_deref().map_or(std::ptr::null(), |l| l as *const _),
-            std::ptr::null(),
             tail_mode,
             0,
             arg,

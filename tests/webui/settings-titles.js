@@ -11,7 +11,7 @@ const fs=require('node:fs');
   const page=await context.newPage();
   await page.route('**/jsonrpc*',async route=>{const req=route.request().postDataJSON();if(req&&req.method==='readurl')await route.fulfill({json:{result:'[]',error:null}});else await route.continue();});
   await page.goto(base.href);await page.locator('#ConfigNav a[href="#PATHS"]').waitFor({state:'visible'});
-  for(const [section,key] of [['Config-Info','nav_info'],['Config-SystemInfo','nav_status'],['Config-System','nav_system'],['Config-Licenses','config_title_licenses'],['extension-manager','config_title_extension_manager']]) {
+  for(const [section,key] of [['Config-Info','nav_info'],['Config-SystemInfo','nav_status'],['Config-System','nav_system'],['Config-Licenses','config_title_licenses']]) {
    // Prime the translation cache, manually change the title, then return twice.
    for(let repeat=0;repeat<2;repeat++) {
     await page.locator(`#ConfigNav a[href="#${section}"]`).press('Enter');

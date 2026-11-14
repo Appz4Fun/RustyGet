@@ -137,24 +137,6 @@ private:
 	PrePostProcessor m_processor;
 };
 
-class ScopedQueueScriptCoordinator final
-{
-public:
-	ScopedQueueScriptCoordinator() : m_previous(g_QueueScriptCoordinator)
-	{
-		g_QueueScriptCoordinator = &m_coordinator;
-	}
-
-	~ScopedQueueScriptCoordinator()
-	{
-		g_QueueScriptCoordinator = m_previous;
-	}
-
-private:
-	QueueScriptCoordinator* m_previous;
-	QueueScriptCoordinator m_coordinator;
-};
-
 class ScopedPostProcessPause final
 {
 public:
@@ -371,7 +353,6 @@ BOOST_AUTO_TEST_CASE(DirectUnpackParFailureStillFinalizesUnpack)
 	RestoreOptionsGlobal restoreOptions;
 	Options options(&cmdOpts, nullptr);
 	DirectUnpackDownloadQueueMock downloadQueue;
-	ScopedQueueScriptCoordinator queueScripts;
 	ScopedPostProcessPause postProcessPause(true);
 	ScopedPostProcessCoordinators postProcessCoordinators;
 	ScopedTempDir workingDir;
@@ -441,7 +422,6 @@ BOOST_AUTO_TEST_CASE(ParFailureWithoutSuccessfulDirectUnpackStillSkipsUnpack)
 		RestoreOptionsGlobal restoreOptions;
 		Options options(&cmdOpts, nullptr);
 		DirectUnpackDownloadQueueMock downloadQueue;
-		ScopedQueueScriptCoordinator queueScripts;
 		ScopedPostProcessPause postProcessPause;
 		ScopedPostProcessCoordinators postProcessCoordinators;
 		ScopedTempDir workingDir;

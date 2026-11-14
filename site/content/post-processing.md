@@ -70,7 +70,9 @@ The repair module, the `par-rs` crate, has its own threading that works on every
 
 ## Unpack
 
-`Unpack` extracts RAR, 7-Zip, ZIP, and tar archives with the built-in `zipfast` and `zipview` crates, including encrypted and multi-volume archives. It needs no external program, and `UnrarCmd` and `SevenZipCmd` are no longer used. `DirectUnpack` starts extracting while the download is still running, which saves time when the download needs no repair.
+`Unpack` extracts RAR, 7-Zip, ZIP, and tar archives with the built-in `zipfast` and `zipview` crates, including encrypted and multi-volume archives. It needs no external program, and `UnrarCmd` and `SevenZipCmd` are no longer used. `DirectUnpack`, on in the configuration template, starts extracting RAR archives while the download is still running.
+
+A damaged volume doesn't cancel a direct unpack. Extraction pauses in front of that volume and continues once the volume is repaired, by articles or bytes from a duplicate during the download (`DupeBorrowFirst`, `DupeArticleFallback`) or by par repair. RustyGet downloads the recovery volumes that the damage seen so far needs right away, next to the rest of the download, and fetches the par2 index file first. Par2 repair then runs during the download, as soon as the recovery blocks cover the damage, and releases the paused volumes. If the repair fails, the download is unpacked, or fails, during post-processing as usual.
 
 - `UseTempUnpackDir` extracts into a temporary `_unpack` directory and moves the files when done.
 - `UnpackPassFile` points to a file of passwords to try.

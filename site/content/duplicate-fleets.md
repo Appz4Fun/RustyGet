@@ -36,6 +36,7 @@ Each layer handles what the one before it couldn't. Turn them on in this order.
 | par2 from a twin | Automatic | Repairs with a twin's recovery volumes when the download's own par2 falls short. |
 | Stream repair | `DupeArticleFallback=stream` | Patches holes with verified bytes from duplicates after the download, even across different packaging. |
 | Live repair | `DupeArticleFallback=live` | Runs stream repair while the download is still running. |
+| Borrow first | `DupeBorrowFirst=yes` | Uses duplicates before the download's own par2 files. On by default. |
 | Early failover | `HealthCheck=dupe` | Switches to a better backup as soon as the primary can't complete. |
 | Donor search | `DupeSearch=yes` | Finds more copies through NZBHydra2 and queues the live ones as backups. |
 | Fleet submission | `appendfleet` | Lets a client send every copy at once and have RustyGet pick the best. |
@@ -86,15 +87,19 @@ Article fallback needs a donor with the same articles. Stream repair works with 
 
 1. **Same bytes.** The donor file must have the same size, and two probe reads from it must match bytes the primary already has, exactly, before any hole is patched. Each probe compares up to 16 KB, and runs of a single repeated byte don't count as a match.
 2. **Whole files.** A file that received nothing at all is rebuilt from a donor, but only after the donor proved identical on the release's other, intact files.
-3. **Different packaging.** RustyGet maps the media inside both postings, across bare files, raw `.001` splits, store-mode RAR (versions 3 and 5), stored ZIP including ZIP64, and 7-Zip in copy mode. A donor in one form can fill holes in another.
+3. **Different packaging.** RustyGet maps the media inside both postings, across bare files, raw `.001` splits, store-mode RAR (versions 3 and 5), stored ZIP including ZIP64, and 7-Zip in copy mode, or with LZMA2 chunks that the encoder stored uncompressed. A multi-volume RAR target can be repaired where its volumes end damaged. A donor in one form can fill holes in another.
 4. **Different encryption.** For store-mode RAR with the password in the NZB, donor bytes are encrypted with the primary's key and compared and patched in encrypted form. This also works when the two postings use different passwords.
 5. **Compressed donors.** With `DupeStreamDecompress=yes`, RustyGet downloads a compressed donor archive, extracts it with its built-in extractor into a temporary folder, and uses the extracted file. RustyGet rejects archives with symbolic links and caps the size at 16 GiB.
 
 Stream repair only writes inside holes, and only after a donor is verified against this file. par2 still has the final say: when par check runs after a donor write, it's a full check, not the quick one, because download-time checksums don't cover donor data. With `ParCheck=manual`, starting that check is up to you. Live repair doesn't start a check of its own; the check after the download also covers the bytes it wrote. A file whose holes are all filled counts as complete again, so a release without par2 can still finish with `SUCCESS`.
 
-### Your own par2 files first
+### Duplicates or par2 first
 
-When the download's own par2 can repair the damage, stream repair stays out of the way: par repair runs first, and stream repair only takes on what par2 can't fix. If par2 clearly can't cover the damage, RustyGet tries the fleet first and skips a par check that's bound to fail.
+`DupeBorrowFirst` decides which comes first, the fleet or the download's own par2 files.
+
+With `DupeBorrowFirst=yes`, the default, duplicates come first. A missing article is fetched from a duplicate as soon as the download fails on it, and live repair patches damaged files during the download, even when the download has par2 files. The par check after the download then verifies the result and repairs what the duplicates couldn't give. Borrowing a few articles usually costs much less than fetching recovery volumes and running a repair, and it keeps direct unpack going. Light damage is repaired from the fleet instead of replacing the download; with `HealthCheck=dupe`, only a download that fails in bulk fails over while it downloads.
+
+With `DupeBorrowFirst=no`, the download's own par2 comes first: when it can repair the damage, stream repair stays out of the way, par repair runs first, and stream repair only takes on what par2 can't fix. If par2 clearly can't cover the damage, RustyGet tries the fleet first and skips a par check that's bound to fail.
 
 ### Time limits
 
@@ -161,6 +166,8 @@ If the release is already on disk, RustyGet adds nothing and the reply says `ALR
 | `DupeCheck` | `yes` | Fleets are built on duplicate keys. |
 | `HealthCheck` | `dupe` | Fails over early instead of downloading a copy that can't complete. |
 | `DupeArticleFallback` | `live` | Uses every layer. Start with `article` on slow devices. |
+| `DupeBorrowFirst` | `yes` | Repairs from duplicates during the download instead of waiting for par2. |
+| `DirectUnpack` | `yes` | Unpacks during the download, and pauses at a damaged volume until it's repaired. |
 | `DupeStreamDecompress` | `yes` on a fast machine | Costs CPU and temporary disk space; turn it off on slow devices. |
 | `NzbCleanupDisk` | `no` | Keeps backups' NZB files so they can donate. |
 | `ArticleRetries` | `3` or more | Keeps one network error from looking like a missing article. |

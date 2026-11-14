@@ -70,7 +70,7 @@ The search also watches the download it was started for:
 
 - **DupeMode.** A download in DupeMode `FORCE` or `ALL` can't fail over, so RustyGet switches it to `SCORE` when it searches for it. A download without a key, or scored below `DupePrimaryScore`, gets that score.
 - **Dead download.** When none of the download's first ten checked articles exists on any server, its score drops to the dead score, below every live backup, so the first live copy that's queued takes over.
-- **Swap.** RustyGet samples the download as fully as a candidate. When less than 90% of it is alive, or par2 can't cover the damage, it will fail, but RustyGet's own health check counts failures against the whole download and would take hours to notice. If a backup is at least 95% alive (whole, when par2 is the reason), RustyGet sends that backup to the queue and files the download as a scored backup. A download that's 80% downloaded and above its critical health is left to finish.
+- **Swap.** RustyGet samples the download as fully as a candidate. When less than 90% of it is alive, or par2 can't cover the damage, the download is bound to fail, but RustyGet's own health check counts failures against the whole download and would take hours to notice. If a backup is at least 95% alive (whole, when par2 is the reason), RustyGet sends that backup to the queue and files the download as a scored backup. A download that's 80% downloaded and still over its critical health is left to finish.
 - **Rescue.** When a download fails its health check and failover returns nothing, for example because its backups are in DupeMode `FORCE` or were filed as copies, RustyGet sends the wholest live backup back to the queue, unless a download of the key already succeeded.
 
 ## Resume and dry run

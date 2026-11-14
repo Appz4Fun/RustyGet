@@ -1246,21 +1246,6 @@ impl QueueSubsysHost {
         );
     }
 
-    pub fn work_state_attach_self(&self) {
-        self.raw(
-            3,
-            4,
-            1,
-            0,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-    }
-
     pub fn effective_downloads_limit(&self, limit: i32) -> i32 {
         if self.use_active {
             return crate::articledl::memory_monitor_effective_downloads_limit(limit);
@@ -1909,6 +1894,10 @@ impl QueueSubsysHost {
     }
 
     pub fn move_completed_files(&self, nzb_ptr: usize, old_dest_dir: &[u8]) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::articledl::move_completed_files_on_qh(self, nzb_ptr, old_dest_dir);
+        }
         let c = c_bytes(old_dest_dir);
         self.raw(
             6,
@@ -2522,6 +2511,13 @@ impl QueueSubsysHost {
     }
 
     pub fn dq_save(&self, dq_ptr: usize) {
+        #[cfg(unix)]
+        if self.use_active {
+            if let Some(qc) = crate::ffi::active_queue_coord() {
+                qc.dq_save(self, dq_ptr);
+            }
+            return;
+        }
         self.raw(
             24,
             0,
@@ -2537,6 +2533,13 @@ impl QueueSubsysHost {
     }
 
     pub fn dq_save_changed(&self, dq_ptr: usize) {
+        #[cfg(unix)]
+        if self.use_active {
+            if let Some(qc) = crate::ffi::active_queue_coord() {
+                qc.dq_save_changed(self, dq_ptr);
+            }
+            return;
+        }
         self.raw(
             24,
             1,
@@ -2552,6 +2555,11 @@ impl QueueSubsysHost {
     }
 
     pub fn dq_edit_entry(&self, dq_ptr: usize, id: i32, action: i32, args: Option<&[u8]>) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::ffi::active_queue_coord()
+                .is_some_and(|qc| qc.dq_edit_entry(self, dq_ptr, id, action, args));
+        }
         let mut ints = [action];
         let c_args = args.map(c_bytes);
         let s1 = c_args
@@ -2578,6 +2586,13 @@ impl QueueSubsysHost {
         action: i32,
         args: Option<&[u8]>,
     ) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            let ids = [id];
+            return crate::ffi::active_queue_coord().is_some_and(|qc| {
+                qc.dq_edit_list(self, dq_ptr, Some(&ids), None, 1, action, args)
+            });
+        }
         let mut ints = [action];
         let c_args = args.map(c_bytes);
         let s1 = c_args
@@ -2606,6 +2621,12 @@ impl QueueSubsysHost {
         action: i32,
         args: &[u8],
     ) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::ffi::active_queue_coord().is_some_and(|qc| {
+                qc.dq_edit_list(self, dq_ptr, ids, names, match_mode, action, Some(args))
+            });
+        }
         let c_args = c_bytes(args);
         let id_slice = ids.unwrap_or(&[]);
         let name_cvecs: Vec<Vec<u8>> = names.unwrap_or(&[]).iter().map(|n| c_bytes(n)).collect();
@@ -2688,6 +2709,55 @@ impl QueueSubsysHost {
     }
 
     pub fn dq_calc_remaining_size(&self, dq_ptr: usize) -> (i64, i64) {
+        #[cfg(unix)]
+        if self.use_active {
+            let mut rem = 0i64;
+            let mut rem_forced = 0i64;
+            let qlen = self.queue_len(dq_ptr);
+            for i in 0..qlen {
+                let nzb_ptr = self.queue_at(dq_ptr, i);
+                let mut n_ints = [0i32; 88];
+                let mut n_i64s = [0i64; 21];
+                self.raw(
+                    30,
+                    0,
+                    0,
+                    nzb_ptr,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    n_ints.as_mut_ptr(),
+                    n_i64s.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                );
+                let force = n_ints[14] != 0;
+                let flen = self.nzb_file_len(nzb_ptr);
+                for j in 0..flen {
+                    let fp = self.nzb_file_at(nzb_ptr, j);
+                    let mut f_ints = [0i32; 28];
+                    let mut f_i64s = [0i64; 8];
+                    self.raw(
+                        40,
+                        0,
+                        0,
+                        fp,
+                        0,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        f_ints.as_mut_ptr(),
+                        f_i64s.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    );
+                    if f_ints[1] == 0 && f_ints[2] == 0 {
+                        rem += f_i64s[1];
+                        if force {
+                            rem_forced += f_i64s[1];
+                        }
+                    }
+                }
+            }
+            return (rem, rem_forced);
+        }
         let mut i64s = [0i64; 2];
         self.raw(
             24,
@@ -2705,6 +2775,13 @@ impl QueueSubsysHost {
     }
 
     pub fn dq_history_changed(&self, dq_ptr: usize) {
+        #[cfg(unix)]
+        if self.use_active {
+            if let Some(qc) = crate::ffi::active_queue_coord() {
+                qc.dq_history_changed();
+            }
+            return;
+        }
         self.raw(
             24,
             5,
@@ -2781,6 +2858,10 @@ impl QueueSubsysHost {
     }
 
     pub fn coord_dq_state_changed(&self) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::ffi::active_queue_coord().is_some_and(|qc| qc.dq_state_changed());
+        }
         self.raw(
             25,
             4,
@@ -2796,6 +2877,13 @@ impl QueueSubsysHost {
     }
 
     pub fn self_set_has_more_jobs(&self, more: bool) {
+        #[cfg(unix)]
+        if self.use_active {
+            if let Some(qc) = crate::ffi::active_queue_coord() {
+                qc.set_has_more_jobs(more);
+            }
+            return;
+        }
         self.raw(
             25,
             6,
@@ -2811,6 +2899,10 @@ impl QueueSubsysHost {
     }
 
     pub fn self_is_stopped(&self) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::ffi::active_queue_coord().map_or(true, |qc| qc.is_stopped());
+        }
         self.raw(
             25,
             7,
@@ -2826,6 +2918,13 @@ impl QueueSubsysHost {
     }
 
     pub fn self_standby_wait(&self, wait_ms: i32) {
+        #[cfg(unix)]
+        if self.use_active {
+            if let Some(qc) = crate::ffi::active_queue_coord() {
+                qc.standby_wait(wait_ms);
+            }
+            return;
+        }
         self.raw(
             25,
             8,
@@ -3124,6 +3223,24 @@ impl QueueSubsysHost {
             strs.as_mut_ptr(),
         );
         unsafe { read_cstr(strs[0]) }
+    }
+
+    pub fn nzb_has_busy_output_file(&self, nzb_ptr: usize) -> bool {
+        if nzb_ptr == 0 {
+            return false;
+        }
+        self.raw(
+            31,
+            22,
+            0,
+            nzb_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ) != 0
     }
 
     pub fn nzb_params_len(&self, nzb_ptr: usize) -> usize {
@@ -4773,6 +4890,25 @@ impl QueueSubsysHost {
         Self::decode_article_snap(ptr, &ints, &i64s, &strs)
     }
 
+    pub fn article_snap(&self, article_ptr: usize) -> ArticleSnap {
+        let mut ints = [0i32; 12];
+        let mut i64s = [0i64; 1];
+        let mut strs = [std::ptr::null(); 2];
+        let ptr = self.raw(
+            43,
+            1,
+            0,
+            article_ptr,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            ints.as_mut_ptr(),
+            i64s.as_mut_ptr(),
+            strs.as_mut_ptr(),
+        );
+        Self::decode_article_snap(ptr, &ints, &i64s, &strs)
+    }
+
     pub fn file_first_undefined_article(&self, file_ptr: usize) -> Option<(usize, ArticleSnap)> {
         let mut ints = [0i32; 12];
         let mut i64s = [0i64; 1];
@@ -5202,6 +5338,10 @@ impl QueueSubsysHost {
 
     // ActiveDownloads & ArticleDownloader ops (op = 50..=54)
     pub fn active_downloads_len(&self) -> usize {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::ffi::active_queue_coord().map_or(0, |qc| qc.active_downloads_len());
+        }
         self.raw(
             50,
             -1,
@@ -5217,6 +5357,18 @@ impl QueueSubsysHost {
     }
 
     pub fn active_download_at(&self, idx: usize) -> RunningDownloadSnap {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::ffi::active_queue_coord().map_or(
+                RunningDownloadSnap {
+                    ad_ptr: 0,
+                    file_ptr: 0,
+                    status: 0,
+                    last_update_time: 0,
+                },
+                |qc| qc.active_download_at(idx),
+            );
+        }
         let mut ints = [0i32; 1];
         let mut i64s = [0i64; 2];
         let ad_ptr = self.raw(
@@ -5240,6 +5392,11 @@ impl QueueSubsysHost {
     }
 
     pub fn ad_snap(&self, ad_ptr: usize) -> ActiveDownloadSnap {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::ffi::active_queue_coord()
+                .map_or_else(ActiveDownloadSnap::default, |qc| qc.ad_snap(ad_ptr));
+        }
         let mut ints = [0i32; 4];
         let mut i64s = [0i64; 4];
         let mut strs = [std::ptr::null(); 1];
@@ -5271,6 +5428,11 @@ impl QueueSubsysHost {
     }
 
     pub fn ad_action(&self, ad_ptr: usize, action: i32, dq_ptr: usize) -> bool {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::ffi::active_queue_coord()
+                .is_some_and(|qc| qc.ad_action(self, ad_ptr, action));
+        }
         self.raw(
             51,
             action,
@@ -5286,6 +5448,10 @@ impl QueueSubsysHost {
     }
 
     pub fn ad_finish_analyzer(&self, ad_ptr: usize) -> Option<(bool, Vec<u8>, Vec<u8>)> {
+        #[cfg(unix)]
+        if self.use_active {
+            return crate::ffi::active_queue_coord().and_then(|qc| qc.ad_finish_analyzer(ad_ptr));
+        }
         let mut ints = [0i32; 1];
         let mut strs = [std::ptr::null(); 2];
         let ok = self.raw(
@@ -5315,6 +5481,20 @@ impl QueueSubsysHost {
         with_content_analyzer: bool,
         info_name: &[u8],
     ) {
+        #[cfg(unix)]
+        if self.use_active {
+            if let Some(qc) = crate::ffi::active_queue_coord() {
+                qc.spawn_article_download(
+                    self,
+                    file_ptr,
+                    article_ptr,
+                    conn_ptr,
+                    with_content_analyzer,
+                    info_name,
+                );
+            }
+            return;
+        }
         let c = c_bytes(info_name);
         let mut i64s = [conn_ptr as i64];
         self.raw(
@@ -5332,6 +5512,13 @@ impl QueueSubsysHost {
     }
 
     pub fn remove_active_download(&self, ad_ptr: usize) {
+        #[cfg(unix)]
+        if self.use_active {
+            if let Some(qc) = crate::ffi::active_queue_coord() {
+                qc.remove_active_download(ad_ptr);
+            }
+            return;
+        }
         self.raw(
             53,
             0,
@@ -5347,6 +5534,13 @@ impl QueueSubsysHost {
     }
 
     pub fn delete_all_active_downloads(&self) {
+        #[cfg(unix)]
+        if self.use_active {
+            if let Some(qc) = crate::ffi::active_queue_coord() {
+                qc.delete_all_active_downloads();
+            }
+            return;
+        }
         self.raw(
             53,
             1,

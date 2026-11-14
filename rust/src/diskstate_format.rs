@@ -8640,21 +8640,13 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_op(
     s1: *const c_char,
 ) -> c_int {
     match op {
-        0 => {
-            let Some(qh) = crate::ffi::queue_host() else {
-                return 0;
-            };
-            c_int::from(active_disk_save_queue(&qh, p1, a1 != 0))
-        }
-        1 => {
-            let Some(qh) = crate::ffi::queue_host() else {
-                return 0;
-            };
-            c_int::from(active_disk_save_progress(&qh, p1))
-        }
         2 => {
             unsafe { append_active_nzb_message(p1 as i32, a1, s1) };
             1
+        }
+        99 => {
+            crate::articledl::cache_free_raw(p1 as *mut u8, a1);
+            0
         }
         _ => 0,
     }

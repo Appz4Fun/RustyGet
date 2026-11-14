@@ -1693,6 +1693,10 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 }
 
                 dm_log(e, 0, b"Entering main program loop");
+                #[cfg(unix)]
+                if e.a1 < 0 {
+                    crate::queuecoord::start_daemon_queue_coord();
+                }
                 cb(e.ctx, 4, 0, std::ptr::null(), std::ptr::null());
                 #[cfg(unix)]
                 if e.a1 < 0 {
@@ -1708,7 +1712,8 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                     let mut st_mask = cb(e.ctx, 5, 0, std::ptr::null(), std::ptr::null());
                     #[cfg(unix)]
                     if e.a1 < 0
-                        && (crate::articledl::is_daemon_article_cache_running()
+                        && (crate::queuecoord::is_daemon_queue_coord_running()
+                            || crate::articledl::is_daemon_article_cache_running()
                             || crate::scheduler::is_daemon_service_coord_running()
                             || crate::dupesearch_coord::is_daemon_dupesearch_running()
                             || crate::urlcoord::is_daemon_url_coord_running()
@@ -1728,8 +1733,13 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
 
                     let mut st_jobs = cb(e.ctx, 5, 1, std::ptr::null(), std::ptr::null());
                     #[cfg(unix)]
-                    if e.a1 < 0 && crate::urlcoord::daemon_url_coord_has_more_jobs() {
-                        st_jobs |= 2;
+                    if e.a1 < 0 {
+                        if crate::queuecoord::daemon_queue_coord_has_more_jobs() {
+                            st_jobs |= 1;
+                        }
+                        if crate::urlcoord::daemon_url_coord_has_more_jobs() {
+                            st_jobs |= 2;
+                        }
                     }
                     if crate::options::nzbget_should_stop_standalone(
                         server_mode,
@@ -1737,6 +1747,10 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                         (st_jobs & 2) != 0,
                         (st_jobs & 4) != 0,
                     ) {
+                        #[cfg(unix)]
+                        if e.a1 < 0 {
+                            crate::queuecoord::stop_daemon_queue_coord(false);
+                        }
                         cb(e.ctx, 6, 0, std::ptr::null(), std::ptr::null());
                         #[cfg(unix)]
                         if e.a1 < 0 {
@@ -1868,6 +1882,10 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                     fe.stop();
                 }
             }
+            #[cfg(unix)]
+            if e.a2 < 0 && eff_remote_mode == 0 {
+                crate::queuecoord::stop_daemon_queue_coord(true);
+            }
             if let Some(cb) = e.action_cb {
                 cb(
                     e.ctx,
@@ -1978,6 +1996,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
                 crate::maintenance::shutdown_daemon_maintenance();
                 crate::statmeter::shutdown_daemon_statmeter();
                 crate::scheduler::shutdown_daemon_scheduler();
+                crate::queuecoord::shutdown_daemon_queue_coord();
             }
             if e.a1 != 0
                 && !dm_is_reloading()
@@ -2001,6 +2020,7 @@ pub unsafe extern "C" fn nzbget_rs_daemon_exec(op: c_int, env: *const NzbgetRsDa
         13 => {
             crate::scheduler::create_daemon_service_coord();
             crate::articledl::create_daemon_article_cache();
+            crate::queuecoord::create_daemon_queue_coord();
             dm_emit_active_log(0, b"Parsing command line");
             let (argc, argv) = if e.ctx.is_null() {
                 let (c, v, _) = crate::entrypoint::process_args();

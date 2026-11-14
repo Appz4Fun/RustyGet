@@ -1156,6 +1156,16 @@ pub struct NzbgetRsQueueCoordinator {
     donor_cache: std::sync::Mutex<crate::dupefallback::DonorCacheState>,
     par_loaders_stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
     par_loaders: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
+    pub(crate) stopped: std::sync::atomic::AtomicBool,
+    has_more_jobs: std::sync::atomic::AtomicBool,
+    state_changed: std::sync::atomic::AtomicBool,
+    mass_edit: std::sync::atomic::AtomicBool,
+    want_save: std::sync::atomic::AtomicBool,
+    history_changed: std::sync::atomic::AtomicBool,
+    wait_lock: (std::sync::Mutex<bool>, std::sync::Condvar),
+    active_downloads:
+        std::sync::Mutex<Vec<std::sync::Arc<crate::articledl::NzbgetRsArticleDownloader>>>,
+    active_dl_threads: (std::sync::Mutex<usize>, std::sync::Condvar),
 }
 
 #[cfg(unix)]
@@ -1261,6 +1271,15 @@ impl NzbgetRsQueueCoordinator {
             donor_cache: std::sync::Mutex::new(crate::dupefallback::DonorCacheState::default()),
             par_loaders_stopped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             par_loaders: std::sync::Mutex::new(Vec::new()),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+            has_more_jobs: std::sync::atomic::AtomicBool::new(true),
+            state_changed: std::sync::atomic::AtomicBool::new(false),
+            mass_edit: std::sync::atomic::AtomicBool::new(false),
+            want_save: std::sync::atomic::AtomicBool::new(false),
+            history_changed: std::sync::atomic::AtomicBool::new(false),
+            wait_lock: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+            active_downloads: std::sync::Mutex::new(Vec::new()),
+            active_dl_threads: (std::sync::Mutex::new(0), std::sync::Condvar::new()),
         }
     }
 
@@ -1310,7 +1329,6 @@ impl NzbgetRsQueueCoordinator {
             b"Creating QueueCoordinator",
         );
         host.coord_dq_init();
-        host.work_state_attach_self();
         crate::dupeprobe::probe_reset();
         crate::twin::reset_all();
     }
@@ -4360,91 +4378,505 @@ impl NzbgetRsQueueCoordinator {
         discard_direct_rename_host(host, opts, nzb_ptr);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub unsafe fn exec(
-        &self,
-        op: std::ffi::c_int,
-        a1: std::ffi::c_int,
-        a2: std::ffi::c_int,
-        p1: usize,
-        p2: usize,
-        p3: usize,
-        s1: *const c_char,
-        ints: *const std::ffi::c_int,
-        host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
-        ctx: *mut std::ffi::c_void,
-    ) -> usize {
-        let Some(cb) = host_cb else {
-            return 0;
-        };
-        let host = crate::queuesubsys_host::QueueSubsysHost::new(ctx, cb);
-        let args_opt = if s1.is_null() {
-            None
-        } else {
-            Some(CStr::from_ptr(s1).to_bytes())
-        };
-        match op {
-            0 => {
-                self.init(&host);
-                0
-            }
-            1 => {
-                self.destroy(&host);
-                0
-            }
-            2 => {
-                self.run(&host);
-                0
-            }
-            5 => {
-                self.stop(&host);
-                0
-            }
-            6 => {
-                self.article_completed(&host, p1);
-                0
-            }
-            8 => usize::from(crate::queueeditor::edit_entry_host(
-                self, &host, p1, a1, a2, args_opt,
-            )),
-            9 => {
-                let ids_opt = if ints.is_null() {
-                    None
-                } else if p2 == 0 {
-                    Some(&[][..])
-                } else {
-                    Some(std::slice::from_raw_parts(ints, p2))
-                };
-                let mut names_vec: Vec<&[u8]> = Vec::new();
-                let names_opt = if p3 == 0 {
-                    None
-                } else {
-                    let nlen = a1.max(0) as usize;
-                    if nlen > 0 {
-                        let c_ptrs = std::slice::from_raw_parts(p3 as *const *const c_char, nlen);
-                        names_vec.reserve(nlen);
-                        for &cp in c_ptrs {
-                            if cp.is_null() {
-                                names_vec.push(b"");
-                            } else {
-                                names_vec.push(CStr::from_ptr(cp).to_bytes());
-                            }
-                        }
-                    }
-                    Some(names_vec.as_slice())
-                };
-                let match_mode = (a2 >> 16) & 0xFFFF;
-                let action = a2 & 0xFFFF;
-                usize::from(crate::queueeditor::edit_list_host(
-                    self, &host, p1, ids_opt, names_opt, match_mode, action, args_opt,
-                ))
-            }
-            10 => {
-                self.log_debug_info(&host);
-                0
-            }
-            _ => 0,
+    pub(crate) fn wakeup(&self) {
+        crate::log::log_active_bytes(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"Waking up QueueCoordinator",
+        );
+        let mut g = self.wait_lock.0.lock().unwrap_or_else(|e| e.into_inner());
+        self.has_more_jobs
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *g = true;
+        self.wait_lock.1.notify_all();
+    }
+
+    pub(crate) fn standby_wait(&self, wait_ms: i32) {
+        let mut g = self.wait_lock.0.lock().unwrap_or_else(|e| e.into_inner());
+        if !*g && !self.stopped.load(std::sync::atomic::Ordering::SeqCst) && wait_ms > 0 {
+            g = self
+                .wait_lock
+                .1
+                .wait_timeout(g, std::time::Duration::from_millis(wait_ms as u64))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
+        *g = false;
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_has_more_jobs(&self, more: bool) {
+        self.has_more_jobs
+            .store(more, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn has_more_jobs(&self) -> bool {
+        self.has_more_jobs.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn dq_state_changed(&self) -> bool {
+        self.state_changed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn dq_history_changed(&self) {
+        self.history_changed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn dq_save(&self, host: &crate::queuesubsys_host::QueueSubsysHost, dq_ptr: usize) {
+        if self.mass_edit.load(std::sync::atomic::Ordering::SeqCst) {
+            self.want_save
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+        if host.opts().server_mode {
+            let hc = self
+                .history_changed
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let _ = crate::diskstate_format::active_disk_save_queue(host, dq_ptr, hc);
+            self.state_changed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let qlen = host.queue_len(dq_ptr);
+        for i in 0..qlen {
+            let nzb_ptr = host.queue_at(dq_ptr, i);
+            host.nzb_set_int(nzb_ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 0);
+        }
+        self.want_save
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.history_changed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.wakeup();
+    }
+
+    pub(crate) fn dq_save_changed(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+    ) {
+        if host.opts().server_mode {
+            let _ = crate::diskstate_format::active_disk_save_progress(host, dq_ptr);
+            self.state_changed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn dq_edit_entry(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        id: i32,
+        action: i32,
+        args: Option<&[u8]>,
+    ) -> bool {
+        crate::queueeditor::edit_entry_host(self, host, dq_ptr, id, action, args)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dq_edit_list(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        dq_ptr: usize,
+        ids: Option<&[i32]>,
+        names: Option<&[&[u8]]>,
+        match_mode: i32,
+        action: i32,
+        args: Option<&[u8]>,
+    ) -> bool {
+        self.mass_edit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let ret = crate::queueeditor::edit_list_host(
+            self, host, dq_ptr, ids, names, match_mode, action, args,
+        );
+        self.mass_edit
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if self.want_save.load(std::sync::atomic::Ordering::SeqCst) {
+            self.dq_save(host, dq_ptr);
+        }
+        ret
+    }
+
+    fn find_ad(
+        &self,
+        ad_ptr: usize,
+    ) -> Option<std::sync::Arc<crate::articledl::NzbgetRsArticleDownloader>> {
+        let g = self
+            .active_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        g.iter()
+            .find(|a| (std::sync::Arc::as_ptr(a) as usize) == ad_ptr)
+            .cloned()
+    }
+
+    pub(crate) fn active_downloads_len(&self) -> usize {
+        self.active_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    pub(crate) fn active_download_at(
+        &self,
+        idx: usize,
+    ) -> crate::queuesubsys_host::RunningDownloadSnap {
+        let ad_opt = self
+            .active_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(idx)
+            .cloned();
+        match ad_opt {
+            Some(ad) => crate::queuesubsys_host::RunningDownloadSnap {
+                ad_ptr: std::sync::Arc::as_ptr(&ad) as usize,
+                file_ptr: ad.file_ptr,
+                status: ad.status(),
+                last_update_time: ad.last_update_time(),
+            },
+            None => crate::queuesubsys_host::RunningDownloadSnap {
+                ad_ptr: 0,
+                file_ptr: 0,
+                status: 0,
+                last_update_time: 0,
+            },
+        }
+    }
+
+    pub(crate) fn ad_snap(&self, ad_ptr: usize) -> crate::queuesubsys_host::ActiveDownloadSnap {
+        match self.find_ad(ad_ptr) {
+            Some(ad) => ad.snap_for_coord(),
+            None => crate::queuesubsys_host::ActiveDownloadSnap::default(),
+        }
+    }
+
+    pub(crate) fn ad_finish_analyzer(&self, ad_ptr: usize) -> Option<(bool, Vec<u8>, Vec<u8>)> {
+        self.find_ad(ad_ptr).and_then(|ad| ad.finish_analyzer())
+    }
+
+    pub(crate) fn ad_action(
+        &self,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        ad_ptr: usize,
+        action: i32,
+    ) -> bool {
+        let Some(ad) = self.find_ad(ad_ptr) else {
+            return false;
+        };
+        match action {
+            crate::queuesubsys_host::AD_ACT_STOP => {
+                ad.stop();
+                false
+            }
+            crate::queuesubsys_host::AD_ACT_LOG_DEBUG => {
+                ad.log_debug();
+                false
+            }
+            crate::queuesubsys_host::AD_ACT_ADD_SERVER_STATS => {
+                ad.merge_server_stats(host);
+                false
+            }
+            crate::queuesubsys_host::AD_ACT_COMPLETE_FILE_PARTS => ad.complete_file_parts(host),
+            crate::queuesubsys_host::AD_ACT_CANCEL_HANGING => {
+                ad.cancel_hanging();
+                false
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn remove_active_download(&self, ad_ptr: usize) {
+        let mut g = self
+            .active_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = g
+            .iter()
+            .position(|a| (std::sync::Arc::as_ptr(a) as usize) == ad_ptr)
+        {
+            g.remove(pos);
+        }
+    }
+
+    pub(crate) fn delete_all_active_downloads(&self) {
+        let mut cnt = self
+            .active_dl_threads
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        while *cnt > 0 {
+            cnt = self
+                .active_dl_threads
+                .1
+                .wait(cnt)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+        drop(cnt);
+        let drained: Vec<_> = self
+            .active_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect();
+        drop(drained);
+    }
+
+    pub(crate) fn spawn_article_download(
+        self: &std::sync::Arc<Self>,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+        file_ptr: usize,
+        article_ptr: usize,
+        conn_ptr: usize,
+        with_analyzer: bool,
+        info_name: &[u8],
+    ) {
+        let ad = std::sync::Arc::new(crate::articledl::NzbgetRsArticleDownloader::new_for_queue(
+            file_ptr,
+            article_ptr,
+            with_analyzer,
+            crate::ffi::build_parcheck_enabled(),
+            conn_ptr,
+            info_name.to_vec(),
+        ));
+        let ad_ptr = std::sync::Arc::as_ptr(&ad) as usize;
+        host.article_set_int(
+            article_ptr,
+            crate::queuesubsys_host::ART_INT_STATUS,
+            ARTICLE_RUNNING,
+        );
+        let f = host.file_snap(file_ptr);
+        host.file_set_int(
+            file_ptr,
+            crate::queuesubsys_host::FILE_INT_ACTIVE_DOWNLOADS,
+            f.active_downloads + 1,
+        );
+        let n = host.nzb_snap(f.nzb_ptr, false);
+        host.nzb_set_int(
+            f.nzb_ptr,
+            crate::queuesubsys_host::NZB_INT_ACTIVE_DOWNLOADS,
+            n.active_downloads + 1,
+        );
+        self.active_downloads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(std::sync::Arc::clone(&ad));
+        {
+            let mut cnt = self
+                .active_dl_threads
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *cnt += 1;
+        }
+        let coord_cl = std::sync::Arc::clone(self);
+        if std::thread::Builder::new()
+            .name("article-dl".into())
+            .spawn(move || {
+                struct ActiveDlGuard(std::sync::Arc<NzbgetRsQueueCoordinator>);
+                impl Drop for ActiveDlGuard {
+                    fn drop(&mut self) {
+                        let mut cnt = self
+                            .0
+                            .active_dl_threads
+                            .0
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        *cnt = cnt.saturating_sub(1);
+                        self.0.active_dl_threads.1.notify_all();
+                    }
+                }
+                let _cnt_guard = ActiveDlGuard(std::sync::Arc::clone(&coord_cl));
+                {
+                    let _tg = crate::ffi::RustThreadGuard::enter(&ad.stopped);
+                    if let Some(qh) = crate::ffi::queue_host() {
+                        ad.run_with_coord(&qh, &coord_cl);
+                    }
+                }
+                drop(ad);
+                crate::ffi::stop_ssl_thread();
+            })
+            .is_err()
+        {
+            self.remove_active_download(ad_ptr);
+            // The worker never ran, so hand back the connection run() reserved for it.
+            if conn_ptr != 0 {
+                if let Some(pool) = crate::net::active_server_pool() {
+                    pool.free_connection(conn_ptr as *mut crate::net::PooledNntpConn, false);
+                }
+            }
+            host.article_set_int(
+                article_ptr,
+                crate::queuesubsys_host::ART_INT_STATUS,
+                ARTICLE_UNDEFINED,
+            );
+            host.file_set_int(
+                file_ptr,
+                crate::queuesubsys_host::FILE_INT_ACTIVE_DOWNLOADS,
+                f.active_downloads,
+            );
+            host.nzb_set_int(
+                f.nzb_ptr,
+                crate::queuesubsys_host::NZB_INT_ACTIVE_DOWNLOADS,
+                n.active_downloads,
+            );
+            let mut cnt = self
+                .active_dl_threads
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *cnt = cnt.saturating_sub(1);
+            self.active_dl_threads.1.notify_all();
+        }
+    }
+
+    pub(crate) fn on_article_finished(
+        &self,
+        ad: &std::sync::Arc<crate::articledl::NzbgetRsArticleDownloader>,
+        host: &crate::queuesubsys_host::QueueSubsysHost,
+    ) {
+        host.log(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"Notification from ArticleDownloader received",
+        );
+        let st = ad.status();
+        if st == crate::queuesubsys_host::AD_FINISHED
+            || st == crate::queuesubsys_host::AD_FAILED
+            || st == crate::queuesubsys_host::AD_RETRY
+            || st == crate::queuesubsys_host::AD_FATAL_ERROR
+        {
+            self.article_completed(host, std::sync::Arc::as_ptr(ad) as usize);
+        }
+    }
+}
+
+#[cfg(unix)]
+static DAEMON_QC_INST: std::sync::Mutex<Option<std::sync::Arc<NzbgetRsQueueCoordinator>>> =
+    std::sync::Mutex::new(None);
+#[cfg(unix)]
+static DAEMON_QC_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(unix)]
+static DAEMON_QC_HANDLE: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(unix)]
+pub(crate) fn create_daemon_queue_coord() {
+    let qc = std::sync::Arc::new(NzbgetRsQueueCoordinator::new());
+    crate::ffi::set_active_queue_coord(Some(std::sync::Arc::downgrade(&qc)));
+    if let Some(lg) = crate::log::active_log() {
+        lg.register_debuggable(5);
+    }
+    if let Some(qh) = crate::ffi::queue_host() {
+        qc.init(&qh);
+    }
+    if let Ok(mut g) = DAEMON_QC_INST.lock() {
+        *g = Some(qc);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn start_daemon_queue_coord() {
+    let mut hg = DAEMON_QC_HANDLE.lock().unwrap_or_else(|e| e.into_inner());
+    if hg.is_some() {
+        return;
+    }
+    let Some(qc) = DAEMON_QC_INST.lock().ok().and_then(|g| g.clone()) else {
+        return;
+    };
+    qc.stopped.store(false, std::sync::atomic::Ordering::SeqCst);
+    DAEMON_QC_RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(h) = std::thread::Builder::new()
+        .name("queue-coord".into())
+        .spawn(move || {
+            struct RunningReset;
+            impl Drop for RunningReset {
+                fn drop(&mut self) {
+                    DAEMON_QC_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _reset = RunningReset;
+            let _tg = crate::ffi::RustThreadGuard::enter(&qc.stopped);
+            if let Some(qh) = crate::ffi::queue_host() {
+                qc.run(&qh);
+            }
+        })
+    {
+        *hg = Some(h);
+    } else {
+        DAEMON_QC_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn stop_daemon_queue_coord(log_stopping: bool) {
+    let Some(qc) = DAEMON_QC_INST.lock().ok().and_then(|g| g.clone()) else {
+        return;
+    };
+    if log_stopping {
+        crate::log::log_active_bytes(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"Stopping QueueCoordinator",
+        );
+    } else if qc.is_stopped() {
+        return;
+    }
+    qc.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(qh) = crate::ffi::queue_host() {
+        qc.stop(&qh);
+    }
+    let mut g = qc.wait_lock.0.lock().unwrap_or_else(|e| e.into_inner());
+    *g = true;
+    qc.wait_lock.1.notify_all();
+}
+
+#[cfg(unix)]
+pub(crate) fn is_daemon_queue_coord_running() -> bool {
+    DAEMON_QC_RUNNING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+pub(crate) fn daemon_queue_coord_has_more_jobs() -> bool {
+    DAEMON_QC_INST
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .is_some_and(|qc| qc.has_more_jobs())
+}
+
+#[cfg(unix)]
+pub(crate) fn shutdown_daemon_queue_coord() {
+    stop_daemon_queue_coord(false);
+    if let Some(h) = DAEMON_QC_HANDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    {
+        let _ = h.join();
+    }
+    DAEMON_QC_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    let qc_opt = DAEMON_QC_INST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(qc) = qc_opt {
+        if let Some(qh) = crate::ffi::queue_host() {
+            qc.destroy(&qh);
+        }
+        if let Some(lg) = crate::log::active_log() {
+            lg.unregister_debuggable(5);
+        }
+        crate::ffi::set_active_queue_coord(None);
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn notify_from_workstate() {
+    if let Some(qc) = crate::ffi::active_queue_coord() {
+        crate::log::log_active_bytes(
+            crate::queuesubsys_host::MK_DEBUG,
+            b"Notification from WorkState received",
+        );
+        qc.wakeup();
     }
 }
 

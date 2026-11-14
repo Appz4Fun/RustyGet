@@ -55,7 +55,6 @@ Log* g_Log;
 Options* g_Options;
 WorkState* g_WorkState;
 ServerPool* g_ServerPool;
-QueueCoordinator* g_QueueCoordinator;
 PrePostProcessor* g_PrePostProcessor;
 
 static int DaemonReloadCb(int sub);
@@ -97,6 +96,9 @@ public:
 		int rc = nzbget_rs_daemon_exec(13, &cenv);
 		if (rc == -1) throw std::invalid_argument("Invalid command line");
 		if (rc < 0) throw std::runtime_error("Command line parsing failed");
+
+		m_prePostProcessor = std::make_unique<PrePostProcessor>();
+		g_PrePostProcessor = m_prePostProcessor.get();
 
 		m_options = std::make_unique<Options>();
 		(void)nzbget_rs_daemon_exec(14, &cenv);
@@ -162,7 +164,6 @@ private:
 	std::unique_ptr<Options> m_options;
 	std::unique_ptr<WorkState> m_workState;
 	std::unique_ptr<ServerPool> m_serverPool;
-	std::unique_ptr<QueueCoordinator> m_queueCoordinator;
 	std::unique_ptr<PrePostProcessor> m_prePostProcessor;
 
 	void CreateGlobals()
@@ -172,22 +173,17 @@ private:
 
 		m_serverPool = std::make_unique<ServerPool>();
 		g_ServerPool = m_serverPool.get();
-
-		m_queueCoordinator = std::make_unique<QueueCoordinator>();
-		g_QueueCoordinator = m_queueCoordinator.get();
-
-		m_prePostProcessor = std::make_unique<PrePostProcessor>();
-		g_PrePostProcessor = m_prePostProcessor.get();
 	}
 
 	void Cleanup()
 	{
+		m_prePostProcessor.reset();
+		g_PrePostProcessor = nullptr;
+
 		NzbgetRsDaemonEnv env{};
 		env.a1 = m_options ? 1 : 0;
 		nzbget_rs_daemon_exec(12, &env);
 
-		g_PrePostProcessor = nullptr;
-		g_QueueCoordinator = nullptr;
 		g_ServerPool = nullptr;
 	}
 
@@ -197,28 +193,20 @@ private:
 		switch (sub)
 		{
 		case 4:
-			self->m_queueCoordinator->Start();
 			self->m_prePostProcessor->Start();
 			return 0;
 		case 5:
 			if (a2 == 0)
-				return (self->m_queueCoordinator->IsRunning() ||
-					self->m_prePostProcessor->IsRunning()) ? 1 : 0;
-			return (self->m_queueCoordinator->HasMoreJobs() ? 1 : 0) |
-				(self->m_prePostProcessor->HasMoreJobs() ? 4 : 0);
+				return self->m_prePostProcessor->IsRunning() ? 1 : 0;
+			return self->m_prePostProcessor->HasMoreJobs() ? 4 : 0;
 		case 6:
-			if (!self->m_queueCoordinator->IsStopped()) self->m_queueCoordinator->Stop();
 			if (!self->m_prePostProcessor->IsStopped()) self->m_prePostProcessor->Stop();
 			return 0;
 		case 7:
 			return (self->m_prePostProcessor && self->m_prePostProcessor->HasActiveUnpack(false)) ? 1 : 0;
 		case 8:
-			if (a2 == 0 && self->m_queueCoordinator)
-			{
-				debug("Stopping QueueCoordinator");
-				self->m_queueCoordinator->Stop();
+			if (a2 == 0 && self->m_prePostProcessor)
 				self->m_prePostProcessor->Stop();
-			}
 			return 0;
 		case 10:
 			nzbget_c_exit_proc();

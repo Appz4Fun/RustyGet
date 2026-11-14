@@ -1229,16 +1229,24 @@ fn rescue_dupe_host(
     }
     let backup = host.nzb_snap(hi.inner_ptr, false);
     let alive = history_candidates[winner as usize].alive_permille;
+    let dry_run =
+        crate::options::active_options().is_some_and(|o| o.scalars().dupe_search_dry_run != 0);
     let mut msg = b"DupeSearch: ".to_vec();
     msg.extend_from_slice(&nzb.name);
-    msg.extend_from_slice(
-        b" failed its health check with nothing of its key queued: returning backup ",
-    );
+    msg.extend_from_slice(b" failed its health check with nothing of its key queued: ");
+    msg.extend_from_slice(if dry_run {
+        b"dry run, would return backup ".as_slice()
+    } else {
+        b"returning backup ".as_slice()
+    });
     msg.extend_from_slice(&backup.name);
     if alive >= 0 {
         msg.extend_from_slice(format!(" (alive {}.{}%)", alive / 10, alive % 10).as_bytes());
     }
     host.log(crate::queuesubsys_host::MK_INFO, &msg);
+    if dry_run {
+        return;
+    }
     host.nzb_set_int(
         backup.ptr,
         crate::queuesubsys_host::NZB_INT_DUPE_HINT,

@@ -3482,7 +3482,16 @@ impl NzbgetRsDupeSearch {
                 })
                 .map(|item| (item.id, item.entry.alive))
                 .collect();
-            self.swap_if_failing(host_ctx, host_cb, job, pick, &h, &candidates);
+            self.swap_if_failing(
+                host_ctx,
+                host_cb,
+                job,
+                pick,
+                &h,
+                &candidates,
+                &servers,
+                &health_options,
+            );
         }
 
         *rejected.entry(b"dead".to_vec()).or_insert(0) += final_dead;
@@ -3686,6 +3695,8 @@ impl NzbgetRsDupeSearch {
         pick: &NzbSummaryData,
         sample: &DonorHealthResult,
         candidates: &[(i32, f64)],
+        servers: &[Arc<DonorServer>],
+        health_options: &DonorOptions,
     ) {
         if job.failed || job.nzb_id <= 0 || host_stopped(host_ctx, host_cb) {
             return;
@@ -3697,10 +3708,46 @@ impl NzbgetRsDupeSearch {
             pick.listed_parts,
             pick.declared_parts,
         );
+        // Structurally absent parts count as missing, as in `expand`.
+        let missing = (i64::from(sample.missing)
+            + i64::from(unlisted_missing(
+                sample.answered(),
+                pick.listed_parts,
+                pick.declared_parts,
+            )))
+        .min(i64::from(i32::MAX)) as i32;
         let deadline = host_now(host_ctx, host_cb) + 30;
-        let Some(need) = crate::dupewatch::swap_need(alive, sample.missing, || {
-            par_doomed_via_host(host_ctx, host_cb, pick, alive, deadline)
-        }) else {
+        // par2 feasibility is judged on the data files alone: missing
+        // recovery articles do not damage the data.
+        let par_doomed = || {
+            if pick.data_message_ids.is_empty()
+                || pick.par_index.id.is_empty()
+                || pick.recovery_bytes.is_empty()
+                || servers.is_empty()
+            {
+                return false;
+            }
+            let ids = summary_ids_strings(&pick.data_message_ids);
+            let groups = summary_groups_arc(pick);
+            let h = donor_check_posting(servers, &ids, &groups, health_options, true);
+            let data_alive = effective_alive(
+                h.present,
+                h.missing,
+                h.error,
+                pick.data_listed_parts,
+                pick.data_declared_parts,
+            );
+            let data_missing = i64::from(h.missing)
+                + i64::from(unlisted_missing(
+                    h.answered(),
+                    pick.data_listed_parts,
+                    pick.data_declared_parts,
+                ));
+            data_alive >= 0.0
+                && data_missing >= i64::from(DONOR_MIN_KNOWN)
+                && par_doomed_via_host(host_ctx, host_cb, pick, data_alive, deadline)
+        };
+        let Some(need) = crate::dupewatch::swap_need(alive, missing, par_doomed) else {
             return;
         };
         let pct = |a: f64| (100.0 * a).round() as i32;
@@ -3746,6 +3793,13 @@ impl NzbgetRsDupeSearch {
             {
                 return Err(&b"it is already finishing"[..]);
             }
+            // The key or name may have changed during the health checks.
+            if lower_key(&effective_key(&snap.dupe_key, &snap.name)) != lower_key(&job.dupe_key)
+                || crate::releasename::normalize(&snap.name)
+                    != crate::releasename::normalize(&job.name)
+            {
+                return Err(&b"its duplicate key or name changed"[..]);
+            }
             if crate::dupewatch::swap_nearly_done(
                 snap.size,
                 snap.remaining_size,
@@ -3767,6 +3821,9 @@ impl NzbgetRsDupeSearch {
                 crate::queuesubsys_host::DH_REDOWNLOAD_AUTO,
             );
             qh.history_redownload(dq_ptr, hi_ptr);
+            if qh.history_find_by_id(dq_ptr, backup_id) != 0 {
+                return Err(&b"the backup could not be returned to the queue"[..]);
+            }
             let alive_param = format!("{ALIVE_PARAM_STR}={}", pct(alive));
             qh.dq_edit_list_single_id(
                 dq_ptr,

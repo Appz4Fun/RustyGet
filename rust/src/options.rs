@@ -311,7 +311,7 @@ pub fn validate_option_name(name: &CStr, predefined: &mut dyn FnMut() -> bool) -
 /// Options of the removed extension scripts feature, still accepted in old
 /// configuration files and ignored with an "obsolete" warning.
 fn is_removed_extension_opt(name: &CStr) -> bool {
-    const GLOBAL: [&CStr; 10] = [
+    const GLOBAL: [&CStr; 11] = [
         c"ScriptDir",
         c"ScriptOrder",
         c"Extensions",
@@ -322,6 +322,7 @@ fn is_removed_extension_opt(name: &CStr) -> bool {
         c"NZBProcess",
         c"NZBAddedProcess",
         c"DefScript",
+        c"PostScript",
     ];
     if GLOBAL.iter().any(|n| eq(name, n)) {
         return true;
@@ -773,7 +774,15 @@ mod tests {
     fn removed_extension_options_and_script_command() {
         // the extension scripts feature is gone: its options are accepted as
         // obsolete and the scheduler "Script" command is unknown
-        for name in [c"ScriptDir", c"extensions", c"Category3.Extensions", c"Feed2.FeedScript"] {
+        for name in [
+            c"ScriptDir",
+            c"extensions",
+            c"PostScript",
+            c"DefScript",
+            c"Category3.Extensions",
+            c"Category1.PostScript",
+            c"Feed2.FeedScript",
+        ] {
             assert_eq!(validate_option_name(name, &mut || false), NameCheck::Obsolete);
         }
         assert_eq!(validate_option_name(c"Category3.Unpack", &mut || false), NameCheck::Valid);

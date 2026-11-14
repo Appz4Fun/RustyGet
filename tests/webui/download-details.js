@@ -54,6 +54,8 @@ const { installDetailsFixture } = require('./details-fixture');
         assert.match(await page.locator('#DownloadsEdit_Fleet .fleet-members').innerText(), /borrowable/i);
         assert.match(await page.locator('#DownloadsEdit_Fleet .fleet-facts').innerText(), /41 \(29\.4 MB\)[\s\S]*3 holes/);
         assert.equal(await page.locator('#DownloadsEdit_Fleet .fleet-member.is-current').count(), 1);
+        const health = await page.locator('#DownloadsEdit_Fleet .fleet-member-health').allInnerTexts();
+        assert.deepEqual(health, ['97.0%', '99.4%', '88.1%', '97.0%'], 'Sampled DupeHealth/DupeAlive percentages render as percentages');
         for (const row of await page.locator('#DownloadsEdit_Fleet .fleet-member').all()) {
           const b = await row.boundingBox(), p = await panel.boundingBox();
           assert(b.x >= p.x && b.x + b.width <= p.x + p.width + 1, 'Fleet rows stay inside the panel');
@@ -63,6 +65,15 @@ const { installDetailsFixture } = require('./details-fixture');
       if (capture && [1440, 390].includes(width)) {
         await page.screenshot({ path: path.join(capture, `details-download-${theme}-${width}.jpg`), type: 'jpeg', quality: 90 });
       }
+
+      await check('critical health wins over the fixed threshold', async () => {
+        const cls = await page.evaluate(() => {
+          const g = Object.assign({}, Downloads.groups.find(x => x.NZBID === 41), { Health: 970, CriticalHealth: 990 });
+          const div = document.createElement('div'); div.innerHTML = DetailsPanel.summary(g, 'DownloadsEdit');
+          return div.querySelectorAll('.details-tile-value')[2].className;
+        });
+        assert.match(cls, /is-bad/, 'Health below critical is shown as failing');
+      });
 
       await check('switch to twin', async () => {
         await page.locator('#DownloadsEdit_Fleet a.fleet-member[data-fleet-id="42"]').click();

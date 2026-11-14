@@ -51,17 +51,17 @@ function fleetGroups() {
       RemainingFileCount: 11, SuccessArticles: 1544, FailedArticles: 49, Health: 970, DownloadTimeSec: 211,
       DupeRecoveredArticles: 41, ...sizes('DupeRecoveredBytes', 29.4), DupeRecoveredHoles: 3,
       ServerStats: [{ ServerID: 1, SuccessArticles: 1290, FailedArticles: 31 }, { ServerID: 2, SuccessArticles: 254, FailedArticles: 18 }],
-      Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeCopyKind: 'twin', DupeHealth: '970', DupeFleet: '1' })
+      Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeCopyKind: 'twin', DupeHealth: '97', DupeFleet: '1' })
     }),
     group(42, '02', {
       Status: 'PAUSED', ...sizes('PausedSize', 1730), Health: 994,
-      Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeKind: 'twin', DupeCopyKind: 'twin', DupeHealth: '994', DupeFleet: '2' })
+      Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeKind: 'twin', DupeCopyKind: 'twin', DupeHealth: '99.4', DupeFleet: '2' })
     }),
     group(43, '03', {
       NZBName: `${RELEASE.replace('WEBRip', 'WEB-DL')} [NZBDAV copy 03]`, NZBNicename: `${RELEASE.replace('WEBRip', 'WEB-DL')} [NZBDAV copy 03]`,
       Status: 'PAUSED', ...sizes('FileSize', 1702), ...sizes('RemainingSize', 1702), ...sizes('PausedSize', 1702), FileCount: 36,
       RemainingFileCount: 36, TotalArticles: 2431, Health: 881,
-      Parameters: params({ '*Unpack:': 'yes', DupeFiles: 'c07be15a99d2f310-36', DupeKind: 'alt', DupeCopyKind: 'borrowable', DupeHealth: '881', DupeFleet: '3' })
+      Parameters: params({ '*Unpack:': 'yes', DupeFiles: 'c07be15a99d2f310-36', DupeKind: 'alt', DupeCopyKind: 'borrowable', DupeAlive: '88.1', DupeFleet: '3' })
     }),
     group(44, '', {
       NZBName: 'Example.Documentary.2160p', NZBNicename: 'Example.Documentary.2160p', Category: 'Movies',
@@ -77,7 +77,7 @@ function historyItems() {
     Status: 'FAILURE/PAR', ParStatus: 'FAILURE', UnpackStatus: 'NONE', ...sizes('RemainingSize', 0),
     ...sizes('DownloadedSize', 1690), RemainingFileCount: 1, SuccessArticles: 2392, FailedArticles: 74, Health: 970,
     DownloadTimeSec: 402, PostTotalTimeSec: 95, ParTimeSec: 95, DupeRecoveredArticles: 12, ...sizes('DupeRecoveredBytes', 8.6),
-    Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeCopyKind: 'twin', DupeHealth: '970' })
+    Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeCopyKind: 'twin', DupeHealth: '97' })
   });
   failed.NZBName = `${RELEASE} [NZBDAV copy 01]`; failed.NZBNicename = failed.NZBName;
   const done = group(32, '', {

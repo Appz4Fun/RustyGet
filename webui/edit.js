@@ -77,7 +77,9 @@ var DetailsPanel = (new function($)
 	}
 
 	// health in permille: the live value once articles were fetched, otherwise
-	// the health check's sample of a copy that has not started
+	// the health check's sample of a copy that has not started. DupeHealth and
+	// DupeAlive hold percentages, fractions allowed (as parse_alive_permille_bytes
+	// in rust/src/dupecoord.rs reads them).
 	function healthPermille(item)
 	{
 		if (item.SuccessArticles + item.FailedArticles > 0)
@@ -88,18 +90,19 @@ var DetailsPanel = (new function($)
 		var keys = ['DupeHealth', 'DupeAlive'];
 		for (var i = 0; i < keys.length; i++)
 		{
-			var v = parseInt(param(item, keys[i]), 10);
-			if (!isNaN(v) && v > best)
+			var percent = parseFloat(param(item, keys[i]));
+			if (!isNaN(percent))
 			{
-				best = v;
+				best = Math.max(best, Math.round(Math.min(Math.max(percent, 0), 100) * 10));
 			}
 		}
-		return best >= 0 ? Math.min(best, 1000) : item.Health;
+		return best >= 0 ? best : item.Health;
 	}
 
+	// below the critical health a copy cannot be repaired, whatever its value
 	function healthClass(permille, critical)
 	{
-		return permille >= 950 ? 'is-good' : permille >= (critical || 850) ? 'is-warn' : 'is-bad';
+		return permille < (critical || 850) ? 'is-bad' : permille >= 950 ? 'is-good' : 'is-warn';
 	}
 
 	function formatPercent(permille)

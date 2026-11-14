@@ -8,12 +8,6 @@ use std::ffi::CStr;
 
 pub use crate::postrepair::{check_par_time_limit, pick_twin_volume, select_more_pars};
 
-/// Case-insensitive filename equality check (`!strcasecmp(a, b)`),
-/// used by `RepairController::PostParChecker::IsParredFile`, `FindFileCrc`, and `FindFileOrigname`.
-pub fn filename_eq_ignore_case(a: &CStr, b: &CStr) -> bool {
-    a.to_bytes().eq_ignore_ascii_case(b.to_bytes())
-}
-
 /// Evaluates whether `FindFileCrc` should load partial article segment state from disk
 /// (`status == cf_partial && id > 0 && !reprocess`).
 pub fn should_load_partial_segments(

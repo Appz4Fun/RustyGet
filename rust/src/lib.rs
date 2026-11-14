@@ -41,7 +41,6 @@ pub mod maintenance;
 pub mod net;
 pub mod nntp;
 pub mod nserv;
-pub mod nstring;
 pub mod nzbfile;
 pub mod options;
 pub mod parchecker;

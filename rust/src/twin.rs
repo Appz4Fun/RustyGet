@@ -1030,33 +1030,6 @@ pub fn format_identity(files_param: &[u8], posting: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `TwinCheck::PutPar2` (`TwinCheck.cpp`): splits a `"<print>\t<1|0>"` string returned by
-/// `nzbget_rs_twin_put_par2` into `(print_slice, is_complete)`.
-pub fn split_put_par2_result(raw: &[u8]) -> (&[u8], bool) {
-    match raw.iter().position(|&b| b == b'\t') {
-        Some(tab) => (&raw[..tab], &raw[tab + 1..] == b"1"),
-        None => (raw, false),
-    }
-}
-
-/// `TwinCheck::FetchEntry` (`TwinCheck.cpp`): validates a fetched segment part and computes
-/// the required vector size `(is_valid, new_len)`.
-#[inline]
-pub fn is_fetched_entry_part_valid(
-    success: bool,
-    offset: i64,
-    data_len: usize,
-    max_size: i64,
-    cur_data_len: usize,
-) -> (bool, usize) {
-    if !success || offset < 0 || offset.saturating_add(data_len as i64) > max_size {
-        return (false, cur_data_len);
-    }
-    let end_len = (offset as usize).saturating_add(data_len);
-    let new_len = cur_data_len.max(end_len);
-    (true, new_len)
-}
-
 /// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): evaluates whether an item is a duplicate.
 #[inline]
 pub fn is_dupe_item(

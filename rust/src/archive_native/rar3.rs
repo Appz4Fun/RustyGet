@@ -3,9 +3,8 @@
 //! the format as unrar describes it. Every byte decoded is kept, soo the whole output is the dictionary; the limit
 //! bounds it. PPM blocks go through our PPMd variant H.
 
-use super::lzma::End;
 use super::ppmd_h::Ppm;
-use super::rarbits::{Bits, MARGIN, Table};
+use super::rarbits::{Bits, Table};
 
 #[inline]
 fn crc32(data: &[u8]) -> u32 {
@@ -638,37 +637,6 @@ enum Stop {
     Cut,
 }
 
-/// One file's packed data, from the front, to `limit` bytes. `complete`: `data` is all of it, not a cut front.
-pub fn rar29(data: &[u8], size: Option<u64>, limit: usize, complete: bool) -> (Vec<u8>, End) {
-    // a cut stream shorter than the margin has no byte that's safe to decode from
-    if !complete && data.len() < MARGIN {
-        return (Vec::new(), End::Cut);
-    }
-    let size = size.and_then(|s| usize::try_from(s).ok()).unwrap_or(usize::MAX);
-    let mut st = State {
-        bits: Bits { data, addr: 0, bit: 0 },
-        safe: if complete { data.len() } else { data.len() - MARGIN },
-        old_table: [0; TABLE],
-        reps: [0; 4],
-        last_len: 0,
-        low_dist: 0,
-        low_reps: 0,
-        filters: Filters::default(),
-        ppm: None,
-        esc: 2,
-        tables_left: 0,
-    };
-    let mut window = Vec::new();
-    let end = match run_member(&mut st, None, size, limit, &mut window) {
-        Ok(_) if window.len() >= limit => End::Limit,
-        Ok(_) => End::Done,
-        Err(Stop::Cut) => End::Cut,
-    };
-    let mut out = apply_filters_from(&window, &st.filters.pending, 0);
-    out.truncate(limit);
-    (out, end)
-}
-
 fn finish_member_tables(st: &State<'_>, tables: Option<Tables>) -> Option<Option<Tables>> {
     if let Some(lz) = &tables {
         let mut peek = Bits {
@@ -688,136 +656,11 @@ fn finish_member_tables(st: &State<'_>, tables: Option<Tables>) -> Option<Option
     Some(tables)
 }
 
-/// Decodes to `size` or `limit`, and when the limit falls inside a filter's block, on to the block's end, soo
-/// the filter can run on all of it.
-fn run_member(
-    st: &mut State<'_>,
-    init_tables: Option<Option<Tables>>,
-    size: usize,
-    limit: usize,
-    out: &mut Vec<u8>,
-) -> Result<Option<Option<Tables>>, Stop> {
-    let (dbase, dbits) = distances();
-    let goal = size.min(limit);
-    let target = size.min(limit.saturating_add(VM_MEM));
-    st.filters.work = target.saturating_sub(out.len()).saturating_add(VM_MEM);
-    // real blocks run far longer than 4 KiB
-    st.tables_left = 1024 + target.saturating_sub(out.len()) / 4096;
-    let mut tables = match init_tables {
-        Some(t) => t,
-        None => read_tables(st)?,
-    };
-    loop {
-        if out.len() >= target || (out.len() >= goal && out.len() >= st.filters.reach) {
-            return Ok(finish_member_tables(st, tables));
-        }
-        if st.bits.addr > st.safe || st.bits.past_end() {
-            return Err(Stop::Cut);
-        }
-        let Some(lz) = &tables else {
-            match ppm_step(st, out, target)? {
-                PpmStep::Next => {}
-                PpmStep::Tables => tables = read_tables(st)?,
-                PpmStep::FileEnd => return Ok(None),
-            }
-            continue;
-        };
-        let bits = &mut st.bits;
-        let number = usize::from(lz.ld.decode(bits));
-        if number < 256 {
-            out.push(number as u8);
-            continue;
-        }
-        if number >= 271 {
-            let n = number - 271;
-            let mut len = usize::from(LDECODE[n]) + 3 + bits.take(u32::from(LBITS[n])) as usize;
-            let slot = usize::from(lz.dd.decode(bits)).min(DC - 1);
-            let mut dist = dbase[slot] + 1;
-            let b = u32::from(dbits[slot]);
-            if b > 0 {
-                if slot > 9 {
-                    if b > 4 {
-                        dist += (bits.peek16() >> (20 - b)) << 4;
-                        bits.skip(b - 4);
-                    }
-                    if st.low_reps > 0 {
-                        st.low_reps -= 1;
-                        dist += st.low_dist;
-                    } else {
-                        let low = u32::from(lz.ldd.decode(bits));
-                        if low == 16 {
-                            st.low_reps = LOW_DIST_REP - 1;
-                            dist += st.low_dist;
-                        } else {
-                            dist += low;
-                            st.low_dist = low;
-                        }
-                    }
-                } else {
-                    dist += bits.take(b);
-                }
-            }
-            if dist >= 0x2000 {
-                len += 1;
-                if dist >= 0x40000 {
-                    len += 1;
-                }
-            }
-            let dist = dist as usize;
-            st.reps = [dist, st.reps[0], st.reps[1], st.reps[2]];
-            st.last_len = len;
-            copy(out, dist, len, target)?;
-            continue;
-        }
-        match number {
-            256 => {
-                // the end of a block: "1" new tables here, "0x" the file ends
-                let field = bits.peek16();
-                if field & 0x8000 == 0 {
-                    let new_table = (field & 0x4000) != 0;
-                    bits.skip(2);
-                    return Ok(if new_table { None } else { Some(tables) });
-                }
-                bits.skip(1);
-                tables = read_tables(st)?;
-            }
-            257 => read_vm_code(st, out.len())?,
-            258 => {
-                if st.last_len != 0 {
-                    copy(out, st.reps[0], st.last_len, target)?;
-                }
-            }
-            259..=262 => {
-                let n = number - 259;
-                let dist = st.reps[n];
-                st.reps.copy_within(0..n, 1);
-                st.reps[0] = dist;
-                let slot = usize::from(lz.rd.decode(bits)).min(RC - 1);
-                let len = usize::from(LDECODE[slot]) + 2 + bits.take(u32::from(LBITS[slot])) as usize;
-                st.last_len = len;
-                copy(out, dist, len, target)?;
-            }
-            _ => {
-                let n = number - 263;
-                let dist = usize::from(SDDECODE[n]) + 1 + bits.take(u32::from(SDBITS[n])) as usize;
-                st.reps = [dist, st.reps[0], st.reps[1], st.reps[2]];
-                st.last_len = 2;
-                copy(out, dist, 2, target)?;
-            }
-        }
-    }
-}
-
 enum PpmStep {
     Next,
     /// the PPM block ended: new tables follow
     Tables,
     FileEnd,
-}
-
-/// One step of a PPM block: a byte, a match, or a filter, as the escape byte says.
-fn ppm_step(st: &mut State<'_>, out: &mut Vec<u8>, target: usize) -> Result<PpmStep, Stop> {
-    ppm_step_at(st, out, target, 0)
 }
 
 fn ppm_step_at(
@@ -1074,13 +917,6 @@ fn add_vm_code(f: &mut Filters, first: u32, code: &[u8], at: usize) -> Result<()
     f.reach = f.reach.max((at + start).saturating_add(len as usize));
     f.pending.push(Pending { kind: f.kinds[pos], start: at + start, len: len as usize, regs });
     Ok(())
-}
-
-/// The filters run on the decoded bytes, now that they're all here, each on its block as decoded or, when it
-/// follows another on the same block, on what that one made. One that can't be run stops the output where its
-/// block starts.
-fn apply_filters_from(window_slice: &[u8], pending: &[Pending], file_start: usize) -> Vec<u8> {
-    apply_filters_range(window_slice, pending, file_start, file_start)
 }
 
 fn apply_filters_range(

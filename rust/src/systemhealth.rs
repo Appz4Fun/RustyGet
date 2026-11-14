@@ -24,14 +24,6 @@ pub enum Severity {
 }
 
 impl Severity {
-    pub fn from_i32(val: i32) -> Self {
-        match val {
-            1 => Self::Info,
-            2 => Self::Warning,
-            3 => Self::Error,
-            _ => Self::Ok,
-        }
-    }
 
     pub fn as_cstr(self) -> &'static CStr {
         match self {
@@ -2152,29 +2144,6 @@ pub fn maintenance_format_sig_title(base_name: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Formats `"<msg> (<base_filename>:<line_nr>:<funcname>)"` or `"<msg> (<base_filename>:<line_nr>)"` for `debug()`.
-pub fn log_format_debug_line(
-    msg: &[u8],
-    base_filename: &[u8],
-    line_nr: i32,
-    funcname: Option<&[u8]>,
-) -> Vec<u8> {
-    let line_str = format!(":{line_nr}");
-    let mut out = Vec::with_capacity(
-        msg.len() + 3 + base_filename.len() + line_str.len() + funcname.map_or(0, |f| 1 + f.len()),
-    );
-    out.extend_from_slice(msg);
-    out.extend_from_slice(b" (");
-    out.extend_from_slice(base_filename);
-    out.extend_from_slice(line_str.as_bytes());
-    if let Some(fn_bytes) = funcname {
-        out.push(b':');
-        out.extend_from_slice(fn_bytes);
-    }
-    out.push(b')');
-    out
-}
-
 /// Formats `"<base_name>-####-##-##<base_ext>"` for `Log::RotateLog`.
 pub fn log_format_rotate_mask(base_name: &[u8], base_ext: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(base_name.len() + 11 + base_ext.len());
@@ -2215,14 +2184,6 @@ pub fn log_format_rotated_path(
     out
 }
 
-/// Formats `"<major>.<minor>.<patch>"` from a packed 24-bit version integer for `SystemInfo`.
-pub fn sysinfo_format_rapidyenc_version(ver: i32) -> Vec<u8> {
-    let major = (ver >> 16) & 0xFF;
-    let minor = (ver >> 8) & 0xFF;
-    let patch = ver & 0xFF;
-    format!("{major}.{minor}.{patch}").into_bytes()
-}
-
 /// Returns `true` when `username == b"root"` for `NZBGet::Daemonize`.
 pub fn nzbget_is_backward_compat_root_user(username: &[u8]) -> bool {
     username == b"root"
@@ -2234,14 +2195,6 @@ pub fn log_split_basename_and_ext(base_name: &[u8]) -> (Vec<u8>, Vec<u8>) {
         Some(pos) if pos > 0 => (base_name[..pos].to_vec(), base_name[pos..].to_vec()),
         _ => (base_name.to_vec(), Vec::new()),
     }
-}
-
-/// Returns `true` when `line` contains `marker` as a contiguous byte slice for `SystemInfo::GetUnpackerVersion`.
-pub fn sysinfo_line_contains_marker(line: &[u8], marker: &[u8]) -> bool {
-    if marker.is_empty() {
-        return true;
-    }
-    line.windows(marker.len()).any(|w| w == marker)
 }
 
 /// Returns `Some(sig_title.len())` when `line` starts with `sig_title`, or `None` otherwise,
@@ -2354,24 +2307,6 @@ pub fn sysinfo_extract_version_after_space(text: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Classifies an `/etc/os-release` line for `OS::InitOSInfoFromOSRelease`:
-/// `(1, 5)` for `NAME=`, `(2, 11)` for `VERSION_ID=`, `(3, 9)` for `BUILD_ID=`, or `(0, 0)`.
-pub fn os_classify_os_release_line(
-    line: &[u8],
-    has_name: bool,
-    has_version: bool,
-) -> (i32, usize) {
-    if !has_name && line.starts_with(b"NAME=") {
-        (1, 5)
-    } else if !has_version && line.starts_with(b"VERSION_ID=") {
-        (2, 11)
-    } else if !has_version && line.starts_with(b"BUILD_ID=") {
-        (3, 9)
-    } else {
-        (0, 0)
-    }
-}
-
 /// Evaluates a required directory check in `DiskService::CheckRequiredDir`:
 /// returns `(is_missing, should_log_waiting, next_waiting_reported)`.
 pub fn disk_service_eval_missing_required_dir(
@@ -2433,73 +2368,6 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     find_subslice(haystack, needle).is_some()
 }
 
-/// Port of `SystemInfo::GetPythonVersion` string extraction after initial `Util::Trim`.
-/// Given `trimmed_line`, locates `"Python"`, skips `"Python"` + 1 byte (matching
-/// `pos + sizeof("Python")`), trims ASCII whitespace/control bytes (`<= b' '`),
-/// and returns `Some((start_offset, len))`.
-pub fn sys_extract_python_version(trimmed_line: &[u8]) -> Option<(usize, usize)> {
-    const MARKER: &[u8] = b"Python";
-    const SKIP_LEN: usize = MARKER.len() + 1; // sizeof("Python") == 7
-    let pos = find_subslice(trimmed_line, MARKER)?;
-    if pos + SKIP_LEN >= trimmed_line.len() {
-        return Some((trimmed_line.len(), 0));
-    }
-    let mut start = pos + SKIP_LEN;
-    let mut end = trimmed_line.len();
-    while start < end && trimmed_line[start] <= b' ' {
-        start += 1;
-    }
-    while end > start && trimmed_line[end - 1] <= b' ' {
-        end -= 1;
-    }
-    Some((start, end - start))
-}
-
-/// Port of `SystemInfo::ParseUnpackerVersion`.
-/// Finds the first `[0-9]+\.[0-9]+` span in `line` and returns `Some((start, len))`.
-pub fn sys_parse_unpacker_version(line: &[u8]) -> Option<(usize, usize)> {
-    let mut i = 0;
-    let n = line.len();
-    while i < n {
-        if line[i].is_ascii_digit() {
-            let start = i;
-            while i < n && line[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i < n && line[i] == b'.' && i + 1 < n && line[i + 1].is_ascii_digit() {
-                i += 1;
-                while i < n && line[i].is_ascii_digit() {
-                    i += 1;
-                }
-                return Some((start, i - start));
-            }
-        } else {
-            i += 1;
-        }
-    }
-    None
-}
-
-/// Port of `SystemInfo::ParseParVersion`.
-/// Returns the index of the last `' '` byte in `line` (matching `line.find_last_of(" ")`).
-pub fn sys_parse_par_version(line: &[u8]) -> Option<usize> {
-    line.iter().rposition(|&b| b == b' ')
-}
-
-/// Port of `OS::TrimQuotes`.
-/// Strips at most one leading `"` and at most one trailing `"` and returns `(start, len)`.
-pub fn os_trim_quotes(s: &[u8]) -> (usize, usize) {
-    let mut start = 0;
-    let mut end = s.len();
-    if start < end && s[start] == b'"' {
-        start += 1;
-    }
-    if start < end && s[end - 1] == b'"' {
-        end -= 1;
-    }
-    (start, end - start)
-}
-
 /// Port of `OS::Init` (`__APPLE__`) field extraction from `sw_vers` output.
 /// Finds `prefix` in `output` and returns `(val_start, val_len)` up to the next `'\n'`.
 pub fn os_parse_sw_vers_field(output: &[u8], prefix: &[u8]) -> Option<(usize, usize)> {
@@ -2533,22 +2401,6 @@ pub fn cpu_canonical_arch(arch: &[u8]) -> Option<&'static std::ffi::CStr> {
     None
 }
 
-/// Port of `CPU::GetCPUModelFromCPUInfo` line matching.
-/// If `line` contains one of the recognized CPU model keys and a `':'`, returns
-/// `Some(colon_pos + 1)`.
-pub fn cpu_parse_cpuinfo_line(line: &[u8]) -> Option<usize> {
-    let matched = contains_subslice(line, b"model name")
-        || contains_subslice(line, b"Processor")
-        || contains_subslice(line, b"cpu model")
-        || contains_subslice(line, b"Hardware")
-        || contains_subslice(line, b"system type");
-    if !matched {
-        return None;
-    }
-    let colon_pos = line.iter().position(|&b| b == b':')?;
-    Some(colon_pos + 1)
-}
-
 fn trim_ascii_ctrl_ws(mut s: &[u8]) -> &[u8] {
     while let Some(&b) = s.first() {
         if b <= b' ' {
@@ -2565,19 +2417,6 @@ fn trim_ascii_ctrl_ws(mut s: &[u8]) -> &[u8] {
         }
     }
     s
-}
-
-/// Parses `/proc/cpuinfo` bytes and extracts the first non-empty CPU model name.
-pub fn cpu_parse_cpuinfo_bytes(content: &[u8]) -> Option<Vec<u8>> {
-    for line in content.split(|&b| b == b'\n') {
-        if let Some(val_off) = cpu_parse_cpuinfo_line(line) {
-            let trimmed = trim_ascii_ctrl_ws(&line[val_off..]);
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_vec());
-            }
-        }
-    }
-    None
 }
 
 /// Detects `(cpu_model, cpu_arch)` natively in Rust (`daemon/system/CPU.cpp`).
@@ -2678,32 +2517,6 @@ pub fn cpu_detect_info(raw_uts_machine: &[u8]) -> (Vec<u8>, Vec<u8>) {
     }
 
     (model, arch)
-}
-
-/// Parses `/etc/os-release` bytes into `(name, version)` matching `OS::InitOSInfoFromOSRelease`.
-pub fn os_parse_os_release_bytes(content: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    let mut name = Vec::new();
-    let mut version = Vec::new();
-    for raw_line in content.split(|&b| b == b'\n') {
-        if !name.is_empty() && !version.is_empty() {
-            break;
-        }
-        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
-        let (kind, val_off) =
-            os_classify_os_release_line(line, !name.is_empty(), !version.is_empty());
-        if kind == 1 {
-            let trimmed = trim_ascii_ctrl_ws(&line[val_off..]);
-            let (qs, ql) = os_trim_quotes(trimmed);
-            name = trimmed[qs..qs + ql].to_vec();
-        } else if kind == 2 {
-            let trimmed = trim_ascii_ctrl_ws(&line[val_off..]);
-            let (qs, ql) = os_trim_quotes(trimmed);
-            version = trimmed[qs..qs + ql].to_vec();
-        } else if kind == 3 {
-            version = trim_ascii_ctrl_ws(&line[val_off..]).to_vec();
-        }
-    }
-    (name, version)
 }
 
 /// Parses `sw_vers` stdout into `(name, version)` matching `OS::Init` on macOS.
@@ -3828,6 +3641,93 @@ where
     }
     out.extend_from_slice(b"</data></array></value></member></struct></value>");
     out
+}
+
+/// Classifies an `/etc/os-release` line for `OS::InitOSInfoFromOSRelease`:
+/// `(1, 5)` for `NAME=`, `(2, 11)` for `VERSION_ID=`, `(3, 9)` for `BUILD_ID=`, or `(0, 0)`.
+pub fn os_classify_os_release_line(
+    line: &[u8],
+    has_name: bool,
+    has_version: bool,
+) -> (i32, usize) {
+    if !has_name && line.starts_with(b"NAME=") {
+        (1, 5)
+    } else if !has_version && line.starts_with(b"VERSION_ID=") {
+        (2, 11)
+    } else if !has_version && line.starts_with(b"BUILD_ID=") {
+        (3, 9)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Port of `OS::TrimQuotes`.
+/// Strips at most one leading `"` and at most one trailing `"` and returns `(start, len)`.
+pub fn os_trim_quotes(s: &[u8]) -> (usize, usize) {
+    let mut start = 0;
+    let mut end = s.len();
+    if start < end && s[start] == b'"' {
+        start += 1;
+    }
+    if start < end && s[end - 1] == b'"' {
+        end -= 1;
+    }
+    (start, end - start)
+}
+
+/// Port of `CPU::GetCPUModelFromCPUInfo` line matching.
+/// If `line` contains one of the recognized CPU model keys and a `':'`, returns
+/// `Some(colon_pos + 1)`.
+pub fn cpu_parse_cpuinfo_line(line: &[u8]) -> Option<usize> {
+    let matched = contains_subslice(line, b"model name")
+        || contains_subslice(line, b"Processor")
+        || contains_subslice(line, b"cpu model")
+        || contains_subslice(line, b"Hardware")
+        || contains_subslice(line, b"system type");
+    if !matched {
+        return None;
+    }
+    let colon_pos = line.iter().position(|&b| b == b':')?;
+    Some(colon_pos + 1)
+}
+
+/// Parses `/proc/cpuinfo` bytes and extracts the first non-empty CPU model name.
+pub fn cpu_parse_cpuinfo_bytes(content: &[u8]) -> Option<Vec<u8>> {
+    for line in content.split(|&b| b == b'\n') {
+        if let Some(val_off) = cpu_parse_cpuinfo_line(line) {
+            let trimmed = trim_ascii_ctrl_ws(&line[val_off..]);
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_vec());
+            }
+        }
+    }
+    None
+}
+
+/// Parses `/etc/os-release` bytes into `(name, version)` matching `OS::InitOSInfoFromOSRelease`.
+pub fn os_parse_os_release_bytes(content: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut name = Vec::new();
+    let mut version = Vec::new();
+    for raw_line in content.split(|&b| b == b'\n') {
+        if !name.is_empty() && !version.is_empty() {
+            break;
+        }
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        let (kind, val_off) =
+            os_classify_os_release_line(line, !name.is_empty(), !version.is_empty());
+        if kind == 1 {
+            let trimmed = trim_ascii_ctrl_ws(&line[val_off..]);
+            let (qs, ql) = os_trim_quotes(trimmed);
+            name = trimmed[qs..qs + ql].to_vec();
+        } else if kind == 2 {
+            let trimmed = trim_ascii_ctrl_ws(&line[val_off..]);
+            let (qs, ql) = os_trim_quotes(trimmed);
+            version = trimmed[qs..qs + ql].to_vec();
+        } else if kind == 3 {
+            version = trim_ascii_ctrl_ws(&line[val_off..]).to_vec();
+        }
+    }
+    (name, version)
 }
 
 #[cfg(test)]

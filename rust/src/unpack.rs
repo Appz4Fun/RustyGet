@@ -14,35 +14,6 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-#[inline]
-fn c_atoi_bytes(bytes: &[u8]) -> i32 {
-    let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    let mut neg = false;
-    if i < bytes.len() {
-        if bytes[i] == b'-' {
-            neg = true;
-            i += 1;
-        } else if bytes[i] == b'+' {
-            i += 1;
-        }
-    }
-    let mut val: i32 = 0;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        val = val
-            .wrapping_mul(10)
-            .wrapping_add(i32::from(bytes[i] - b'0'));
-        i += 1;
-    }
-    if neg {
-        val.wrapping_neg()
-    } else {
-        val
-    }
-}
-
 /// `RarVolume::DetectRarVersion` and `UnpackController::FileHasRarSignature`:
 /// Given the 8-byte file signature read from disk, returns `3` (RAR3/4), `5` (RAR5), or `0` (not RAR).
 pub fn detect_rar_signature(sig: &[u8]) -> i32 {
@@ -205,52 +176,6 @@ pub fn is_main_archive(filename: &[u8]) -> bool {
         val = val.saturating_mul(10).saturating_add(i64::from(b - b'0'));
     }
     val == 1
-}
-
-/// `DirectUnpack::ReadLine` prompt check.
-pub fn is_insert_disk_prompt(buf: &[u8], i: usize, ch: i32) -> bool {
-    if i <= 35 || ch != i32::from(b' ') {
-        return false;
-    }
-    if !buf.starts_with(b"Insert disk with") {
-        return false;
-    }
-    let needle = b" [C]ontinue, [Q]uit ";
-    buf.windows(needle.len()).any(|w| w == needle)
-}
-
-/// Executes one character step of `DirectUnpack::ReadLine`:
-/// updates `buf` and `backspace`, and returns `(final_i_if_break, should_break)`.
-pub fn direct_unpack_readline_step(
-    buf: &mut [u8],
-    i: usize,
-    ch: i32,
-    backspace: &mut bool,
-) -> (usize, bool) {
-    if i + 1 >= buf.len() {
-        return (i, true);
-    }
-    if ch == i32::from(b'\x08') {
-        *backspace = true;
-        buf[i] = 0;
-    }
-    if !*backspace {
-        buf[i] = ch as u8;
-        buf[i + 1] = 0;
-    }
-    if ch == -1 {
-        return (i, true);
-    }
-    if ch == i32::from(b'\n') {
-        return (i + 1, true);
-    }
-    if i > 35 && ch == i32::from(b' ') {
-        let nul_end = buf[..=i + 1].iter().position(|&b| b == 0).unwrap_or(i + 1);
-        if is_insert_disk_prompt(&buf[..nul_end], i, ch) {
-            return (i + 1, true);
-        }
-    }
-    (i, false)
 }
 
 /// `UnpackController::CheckArchiveFiles` archive filename classification:
@@ -434,75 +359,6 @@ pub fn classify_cleanup_archive_file(
     0
 }
 
-/// Executes one character step of `UnpackController::ReadLine`.
-pub fn unpack_ctrl_readline_step(
-    buf: &mut [u8],
-    idx: &mut usize,
-    ch: i32,
-    printed: &mut bool,
-    last_bs: &mut isize,
-    process_output_len: &mut isize,
-    progress: &mut i32,
-) -> bool {
-    *process_output_len = -1;
-    *progress = -1;
-    let i = *idx;
-    if i + 1 >= buf.len() {
-        return true;
-    }
-    buf[i] = ch as u8;
-    buf[i + 1] = 0;
-    if ch == -1 {
-        return true;
-    }
-    if ch == i32::from(b'\n') {
-        *idx = i + 1;
-        return true;
-    }
-    if buf[i] == b'\x08' {
-        *last_bs = i as isize;
-    } else if buf[i] == 0 {
-        let nul_end = buf[..=i].iter().position(|&b| b == 0).unwrap_or(i + 1);
-        *last_bs = buf[..nul_end]
-            .iter()
-            .rposition(|&b| b == b'\x08')
-            .map(|p| p as isize)
-            .unwrap_or(-1);
-    }
-    if *last_bs >= 0 {
-        let bs_pos = *last_bs as usize;
-        let nul_end = buf[..=i].iter().position(|&b| b == 0).unwrap_or(i + 1);
-        if bs_pos < nul_end {
-            if !*printed {
-                let line = &buf[..nul_end];
-                if !line.starts_with(b"...") {
-                    *process_output_len = bs_pos.min(1023) as isize;
-                }
-                *printed = true;
-            }
-            let bs_slice = &buf[bs_pos..nul_end];
-            if bs_slice.contains(&b'%') {
-                let after_bs = bs_slice.get(1..).unwrap_or(&[]);
-                let percent = c_atoi_bytes(after_bs);
-                *progress = percent.wrapping_mul(10);
-            }
-        }
-    }
-    *idx = i + 1;
-    false
-}
-
-/// Matches the overwrite mode switch in `Unrar::MakeArgs()`:
-/// `0 (Skip) -> "-o-"`, `1 (Overwrite) -> "-o+"`, `2 (AutoRename) -> "-or"`.
-pub fn unrar_overwrite_switch(mode: i32) -> &'static std::ffi::CStr {
-    match mode {
-        0 => c"-o-",
-        1 => c"-o+",
-        2 => c"-or",
-        _ => c"-o-",
-    }
-}
-
 /// Matches the `.part` / `\\.part0*1\\.rar$` check in `Unrar::IsSupported` after
 /// `FileTypes::IsRarExt` has already returned `true`.
 pub fn unrar_is_part1_or_unsplit_rar(filename: &[u8]) -> bool {
@@ -533,53 +389,6 @@ pub fn unrar_is_part1_or_unsplit_rar(filename: &[u8]) -> bool {
     before_rar[i - 5..i].eq_ignore_ascii_case(b".part")
 }
 
-/// Matches `Unrar::DecodeExitCode(ec)`:
-/// Returns `(is_success, known_error_msg)`.
-pub fn unrar_decode_exit_code(ec: i32) -> (bool, &'static std::ffi::CStr) {
-    match ec {
-        0 => (true, c""),
-        1 => (
-            false,
-            c"Extraction finished, but some files might be missing or incomplete",
-        ),
-        2 => (
-            false,
-            c"The process could not start or was interrupted unexpectedly",
-        ),
-        3 => (
-            false,
-            c"The archive is damaged. The extracted files are likely corrupt",
-        ),
-        4 => (
-            false,
-            c"This archive is locked and cannot be modified or unpacked",
-        ),
-        5 => (
-            false,
-            c"Could not write files to the destination. Please check your permissions and disk space",
-        ),
-        6 => (
-            false,
-            c"Couldn't open the archive. The file may be missing or you don't have permission to read it",
-        ),
-        7 => (false, c"An internal program error occurred"),
-        8 => (
-            false,
-            c"Your computer ran out of memory. Please try closing other applications first",
-        ),
-        9 => (
-            false,
-            c"Couldn't create files in the destination folder. Please check your permissions",
-        ),
-        10 => (
-            false,
-            c"There were no files inside the archive to extract",
-        ),
-        11 => (false, c"The password you entered was incorrect"),
-        _ => (false, c""),
-    }
-}
-
 /// Matches the overwrite mode switch in `SevenZip::MakeArgs()`:
 /// `0 (Skip) -> "-aos"`, `1 (Overwrite) -> "-aoa"`, `2 (AutoRename) -> "-aou"`.
 pub fn sevenzip_overwrite_switch(mode: i32) -> &'static std::ffi::CStr {
@@ -591,49 +400,11 @@ pub fn sevenzip_overwrite_switch(mode: i32) -> &'static std::ffi::CStr {
     }
 }
 
-/// Matches `SevenZip::DecodeExitCode(ec)`:
-/// Returns `(is_success, known_error_msg)`.
-pub fn sevenzip_decode_exit_code(ec: i32) -> (bool, &'static std::ffi::CStr) {
-    match ec {
-        0 => (true, c""),
-        1 => (
-            false,
-            c"Completed with warnings. Some files may have been skipped because they were in use",
-        ),
-        2 => (
-            false,
-            c"A fatal error occurred. Check for permission issues, a corrupt archive, password, disk space",
-        ),
-        7 => (false, c"Command line error"),
-        8 => (false, c"Not enough memory for operation"),
-        255 => (false, c"User stopped the process"),
-        _ => (false, c""),
-    }
-}
-
-/// Format `"<prefix> for <name>"` (e.g. `"unpack for MyNzb"`, `"Unpack for MyNzb"`)
-/// for post-processing controllers (`DirectUnpack.cpp`, `UnpackController.cpp`,
-/// `Cleanup.cpp`, `Rename.cpp`).
-pub fn post_format_info_name(prefix: &[u8], name: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(prefix.len() + 5 + name.len());
-    out.extend_from_slice(prefix);
-    out.extend_from_slice(b" for ");
-    out.extend_from_slice(name);
-    out
-}
-
 /// Strips the last `.ext` from `frag_base_name` for `UnpackController::JoinFile`.
 pub fn unpack_ctrl_strip_last_extension(frag_base_name: &[u8]) -> Vec<u8> {
     match frag_base_name.iter().rposition(|&b| b == b'.') {
         Some(idx) => frag_base_name[..idx].to_vec(),
         None => frag_base_name.to_vec(),
-    }
-}
-
-/// Uppercases the first byte of `buf` in-place if it is an ASCII lowercase letter (`a..=z`).
-pub fn post_capitalize_first_ascii(buf: &mut [u8]) {
-    if let Some(first) = buf.first_mut() {
-        *first = first.to_ascii_uppercase();
     }
 }
 
@@ -1465,13 +1236,6 @@ fn find_nested_archives_in_dir(dir: &std::path::Path, out: &mut Vec<std::path::P
             out.push(path);
         }
     }
-}
-
-/// First-class built-in Permission Fixer: normalizes POSIX permissions on all extracted
-/// files (`0o644`, or `0o755` if executable) and directories (`0o755`) inside `dir`.
-#[cfg(unix)]
-pub fn normalize_unpacked_permissions(dir: &std::path::Path) {
-    normalize_unpacked_permissions_excluding(dir, &std::collections::BTreeSet::new(), None);
 }
 
 #[cfg(unix)]

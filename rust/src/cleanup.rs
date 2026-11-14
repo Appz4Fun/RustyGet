@@ -38,11 +38,6 @@ pub fn bytes_to_os_str(b: &[u8]) -> &OsStr {
 }
 
 #[cfg(unix)]
-pub fn bytes_to_path(b: &[u8]) -> &Path {
-    Path::new(bytes_to_os_str(b))
-}
-
-#[cfg(unix)]
 pub fn bytes_to_path_buf(b: &[u8]) -> PathBuf {
     PathBuf::from(bytes_to_os_str(b))
 }

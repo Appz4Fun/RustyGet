@@ -108,11 +108,6 @@ pub fn format_speed(bps: i64) -> Vec<u8> {
     }
 }
 
-/// Util::AlphaNum: only ASCII letters and digits.
-pub fn alpha_num(s: &[u8]) -> bool {
-    s.iter().all(|b| b.is_ascii_alphanumeric())
-}
-
 /// Util::HashBJ96: Bob Jenkins' lookup2 hash.
 pub fn hash_bj96(k: &[u8], init: u32) -> u32 {
     fn mix(a: &mut u32, b: &mut u32, c: &mut u32) {
@@ -788,68 +783,6 @@ pub fn dir_browser_is_dot_or_dotdot(filename: &[u8]) -> i32 {
     i32::from(filename == b"." || filename == b"..")
 }
 
-/// Returns `1` when `opt_name` starts with `strip_prefix` (of length `prefix_len`)
-/// and has at least one character after the prefix (`ScriptController::PrepareEnvOptions`).
-pub fn script_ctrl_matches_env_prefix(
-    opt_name: &[u8],
-    strip_prefix: Option<&[u8]>,
-    prefix_len: i32,
-) -> i32 {
-    let Some(prefix) = strip_prefix else {
-        return 0;
-    };
-    if prefix_len < 0 {
-        return 0;
-    }
-    let plen = prefix_len as usize;
-    let cmp_prefix = if plen <= prefix.len() {
-        &prefix[..plen]
-    } else {
-        prefix
-    };
-    i32::from(
-        opt_name.len() > plen
-            && opt_name.len() >= cmp_prefix.len()
-            && &opt_name[..cmp_prefix.len()] == cmp_prefix,
-    )
-}
-
-/// Returns `1` when the first output line from a child process begins with
-/// `"[ERROR] Could not start "` (`ScriptController::Execute`).
-pub fn script_ctrl_is_fork_start_error_line(first_line: i32, buf: &[u8]) -> i32 {
-    const PREFIX: &[u8] = b"[ERROR] Could not start ";
-    i32::from(first_line != 0 && buf.starts_with(PREFIX))
-}
-
-/// Normalizes a child exit code to `-1` when `exit_code == fork_error_exit_code` and
-/// `start_error != 0` (`ScriptController::Execute`).
-pub fn script_ctrl_normalize_fork_exit_code(
-    exit_code: i32,
-    fork_error_exit_code: i32,
-    start_error: i32,
-) -> i32 {
-    if exit_code == fork_error_exit_code && start_error != 0 {
-        -1
-    } else {
-        exit_code
-    }
-}
-
-/// Computes the shell-convention exit code `128 + term_sig` for a process terminated
-/// by a signal (`ScriptController::WaitProcess`).
-pub fn script_ctrl_calc_signal_exit_code(term_sig: i32) -> i32 {
-    128_i32.wrapping_add(term_sig)
-}
-
-/// Selects the target PID/PGID argument for `kill()` when terminating a child process (`ScriptController::Terminate`).
-pub fn script_ctrl_select_kill_pid(child_pid: i32, child_pgid: i32) -> i32 {
-    if child_pid > 0 && child_pgid == child_pid {
-        child_pid.wrapping_neg()
-    } else {
-        child_pid
-    }
-}
-
 /// `Log::IntervalCheck` & `Log::RotateLog`:
 pub fn log_should_close_idle(cur_time: i64, last_written: i64) -> bool {
     cur_time.wrapping_sub(last_written).saturating_abs() > 1
@@ -857,62 +790,6 @@ pub fn log_should_close_idle(cur_time: i64, last_written: i64) -> bool {
 
 pub fn log_should_delete_old_rotated(file_day: i32, cur_day: i32, rotate_log: i32) -> bool {
     file_day <= cur_day.wrapping_sub(rotate_log)
-}
-
-/// `BString<size>::Set` & `BString<size>::Append`: computes bounded copy length.
-pub fn nstring_bstring_set_len(size: i32, len: i32) -> i32 {
-    let cap = size.saturating_sub(1).max(0);
-    if len > 0 {
-        cap.min(len)
-    } else {
-        cap
-    }
-}
-
-pub fn nstring_bstring_append_len(size: i32, cur_len: i32, str_len: i32) -> i32 {
-    let avail = size.wrapping_sub(cur_len).wrapping_sub(1);
-    avail.min(str_len)
-}
-
-/// `CString::Replace(int pos, int len, const char* str, int strLen)`:
-/// computes `(valid, add_len, del_len, new_len)` where `valid` is `pos <= cur_len`.
-pub fn nstring_cstring_replace_bounds(
-    pos: i32,
-    len: i32,
-    cur_len: i32,
-    raw_str_len: i32,
-    str_len_param: i32,
-) -> (bool, i32, i32, i32) {
-    if pos > cur_len {
-        return (false, 0, 0, 0);
-    }
-    let add_len = if str_len_param > 0 {
-        raw_str_len.min(str_len_param)
-    } else {
-        raw_str_len
-    };
-    let del_len = if pos.wrapping_add(len) <= cur_len {
-        len
-    } else {
-        cur_len.wrapping_sub(pos)
-    };
-    let new_len = cur_len.wrapping_sub(del_len).wrapping_add(add_len);
-    (true, add_len, del_len, new_len)
-}
-
-/// `CString::TrimRight`: returns the length of `s` after stripping trailing
-/// `'\n'`, `'\r'`, `' '`, and `'\t'` bytes.
-pub fn nstring_cstring_trim_right_len(s: &[u8]) -> usize {
-    let mut end = s.len();
-    while end > 0 {
-        let ch = s[end - 1];
-        if ch == b'\n' || ch == b'\r' || ch == b' ' || ch == b'\t' {
-            end -= 1;
-        } else {
-            break;
-        }
-    }
-    end
 }
 
 /// Evaluates whether `Log::Filelog` should rotate the log file on a day boundary.
@@ -964,28 +841,6 @@ pub fn wstring_decode_utf8_to_utf16(utf8: &[u8], out: &mut [u16]) -> usize {
     written
 }
 
-/// Computes the target allocation capacity for `StringBuilder::Reserve(int capacity, bool exact)`.
-pub fn string_builder_calc_reserve_capacity(
-    old_capacity: i32,
-    requested_capacity: i32,
-    exact: bool,
-) -> i32 {
-    if requested_capacity > old_capacity || old_capacity == 0 {
-        let smart_capacity = if exact {
-            0
-        } else {
-            ((old_capacity as f64) * 1.5) as i32
-        };
-        if smart_capacity > requested_capacity {
-            smart_capacity
-        } else {
-            requested_capacity
-        }
-    } else {
-        -1
-    }
-}
-
 /// Formats `"<cur_dir>/<rel_filename>"` for `FileSystem::ExpandFileName`.
 pub fn fs_format_expanded_rel_path(cur_dir: &[u8], rel_filename: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(cur_dir.len() + 1 + rel_filename.len());
@@ -1011,11 +866,6 @@ pub fn fs_extract_parent_dir_path(filename: &[u8], sep: u8) -> Vec<u8> {
         Some(pos) => filename[..pos].to_vec(),
         None => filename.to_vec(),
     }
-}
-
-/// Returns `true` when byte slices `a` and `b` are equal (`strcmp(a, b) == 0`).
-pub fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
-    a == b
 }
 
 /// Returns `true` when byte slices `a` and `b` are equal under `releasename::c_lower` (`strcasecmp(a, b) == 0`)
@@ -1077,24 +927,6 @@ pub fn parse_c_atoi_or_default(text: Option<&[u8]>, default_val: i32) -> i32 {
     match text {
         Some(s) => parse_c_atoi(s),
         None => default_val,
-    }
-}
-
-/// Finds the first occurrence of `needle` in `haystack` starting at `pos` for `CString::Find`.
-pub fn nstring_find_substr_from(haystack: &[u8], needle: &[u8], pos: i32) -> i32 {
-    if pos < 0 || (pos != 0 && (pos as usize) >= haystack.len()) {
-        return -1;
-    }
-    let start = pos as usize;
-    if needle.is_empty() {
-        return pos;
-    }
-    match haystack[start..]
-        .windows(needle.len())
-        .position(|w| w == needle)
-    {
-        Some(rel) => pos + (rel as i32),
-        None => -1,
     }
 }
 

@@ -11,7 +11,6 @@ pub const DUPE_PROBE_UNKNOWN: i32 = 2;
 pub const SAMPLE_COUNT: i32 = 10;
 pub const MIN_ARTICLES: i32 = 4;
 pub const MIN_ALIVE_SAMPLES: i32 = 2;
-pub const RECENT_BLOCK_SEC: i64 = 60;
 
 /// Computes `DupeProbe::SampleIndexes(total, count)`.
 pub fn sample_indexes(total: usize, count: i32) -> Vec<usize> {

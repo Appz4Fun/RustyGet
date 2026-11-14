@@ -184,11 +184,6 @@ pub fn resolve_body_end_status(
     (cur, warn_incomplete)
 }
 
-/// Port of header line colon search in `HttpClient::ReadHeaders`.
-pub fn http_client_find_header_colon(line: &[u8]) -> Option<usize> {
-    line.iter().position(|&b| b == b':')
-}
-
 /// Port of HTTP status-line version validation in `HttpClient::ReadStatusCode`.
 pub fn http_client_validate_version(http_version: &[u8], stream_ok: bool) -> bool {
     stream_ok && http_version.windows(5).any(|w| w == b"HTTP/")

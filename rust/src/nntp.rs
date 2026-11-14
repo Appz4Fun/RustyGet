@@ -612,32 +612,6 @@ pub fn server_pool_eval_block_server(
     (new_block, should_warn)
 }
 
-/// `ArticleFetcher::FetchFromConnection`:
-/// Validates a completed yEnc decode in `ArticleFetcher` and computes
-/// `(valid, offset, file_size, success)`.
-pub fn article_fetcher_eval_decoded_yenc(
-    check_status: i32,
-    ds_finished: i32,
-    format: i32,
-    ef_yenc: i32,
-    begin_pos: i64,
-    end_pos: i64,
-    size: i64,
-    data_len: usize,
-) -> (bool, i64, i64, bool) {
-    if check_status != ds_finished
-        || format != ef_yenc
-        || begin_pos <= 0
-        || end_pos <= 0
-        || data_len == 0
-    {
-        return (false, 0, 0, false);
-    }
-    let offset = begin_pos - 1;
-    let success = (data_len as i64) == end_pos.saturating_sub(begin_pos).saturating_add(1);
-    (true, offset, size, success)
-}
-
 /// `ArticleBatchFetcher::ClaimNext`:
 /// Checks whether a worker can claim the next request in the batch window.
 pub fn article_batch_can_claim_next(
@@ -660,67 +634,6 @@ pub fn article_batch_can_claim_next(
         && buffered_bytes < max_buffered_bytes
 }
 
-/// Classifies an `ArticleFetcher::FetchedArticle` result in `NntpHealthServer::Exchange`
-/// (`(throw_exchange_error, answer_val)`).
-pub fn nntp_health_classify_body_fetch_result(
-    success: bool,
-    transient: bool,
-    ans_present: i32,
-    ans_body_bad: i32,
-) -> (bool, i32) {
-    if success {
-        (false, ans_present)
-    } else if transient {
-        (true, ans_body_bad)
-    } else {
-        (false, ans_body_bad)
-    }
-}
-
-/// Evaluates whether an article fetch server on `level` is eligible to try (`ArticleFetcher::Fetch`).
-pub fn article_fetcher_is_server_eligible_on_level(
-    server_active: bool,
-    server_norm_level: i32,
-    target_level: i32,
-    server_id: i32,
-    server_group: i32,
-    failed_ids: &[i32],
-    failed_groups: &[i32],
-    failed_levels: &[i32],
-) -> bool {
-    if !server_active || server_norm_level != target_level {
-        return false;
-    }
-    let count = failed_ids
-        .len()
-        .min(failed_groups.len())
-        .min(failed_levels.len());
-    for i in 0..count {
-        if failed_ids[i] == server_id
-            || (failed_groups[i] > 0
-                && failed_groups[i] == server_group
-                && failed_levels[i] == server_norm_level)
-        {
-            return false;
-        }
-    }
-    true
-}
-
-/// Formats `port` as a decimal byte string for `Connection::Bind` and `Connection::DoConnect`.
-pub fn conn_format_port_str(port: i32) -> Vec<u8> {
-    format!("{port}").into_bytes()
-}
-
-/// Formats `"BODY <message_id>\r\n"` for `ArticleFetcher::FetchOnConnection`.
-pub fn article_fetcher_format_body_cmd(message_id: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(5 + message_id.len() + 2);
-    out.extend_from_slice(b"BODY ");
-    out.extend_from_slice(message_id);
-    out.extend_from_slice(b"\r\n");
-    out
-}
-
 /// Formats an NNTP message-id in angle brackets (`<id>`) if not already bracketed.
 pub fn nntp_health_format_bracketed_id(message_id: &[u8]) -> Vec<u8> {
     if message_id.first() == Some(&b'<') && message_id.last() == Some(&b'>') {
@@ -732,23 +645,6 @@ pub fn nntp_health_format_bracketed_id(message_id: &[u8]) -> Vec<u8> {
         out.push(b'>');
         out
     }
-}
-
-/// Formats a pipelined batch of `"STAT <id>\r\n"` commands for `NntpHealthServer::Exchange`.
-pub fn nntp_health_format_stat_batch(ids: &[&[u8]]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(ids.len() * 48);
-    for id in ids {
-        out.extend_from_slice(b"STAT ");
-        if id.first() == Some(&b'<') && id.last() == Some(&b'>') {
-            out.extend_from_slice(id);
-        } else {
-            out.push(b'<');
-            out.extend_from_slice(id);
-            out.push(b'>');
-        }
-        out.extend_from_slice(b"\r\n");
-    }
-    out
 }
 
 /// Returns true when `ArticleBatchFetcher::StoreResult` should accept and store the fetched result.
@@ -901,23 +797,6 @@ mod tests {
 // ============================================================================
 // NntpHealthServer, NntpConnection, ServerPool, and Connection Helpers
 // ============================================================================
-
-/// Port of `NntpHealthServer::CapFor`.
-pub fn nntp_health_cap_for(connections: i32, max_cap: i32) -> i32 {
-    1.max(max_cap.min(connections / 2))
-}
-
-/// Port of STAT reply classification in `NntpHealthServer::Exchange`.
-/// Returns `0` (`Answer::Present`), `1` (`Answer::Missing`), or `2` (`Answer::Error`).
-pub fn nntp_health_classify_stat_reply(line: &[u8]) -> i32 {
-    if line.starts_with(b"223") {
-        0
-    } else if line.starts_with(b"430") {
-        1
-    } else {
-        2
-    }
-}
 
 /// Returns whether `ServerPool::GetConnection` can advance past `level` given a server's state.
 pub fn server_pool_can_advance_level(

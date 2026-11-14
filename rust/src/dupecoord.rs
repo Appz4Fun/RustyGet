@@ -459,6 +459,53 @@ where
 }
 
 /// Returns true when `RarLister::FindLargestFile` in `DupeMatcher.cpp` should continue waiting for `unrar` (`is_running && start_time + timeout_sec > cur_time && start_time >= cur_time`).
+/// The history backup to send back to the queue after a download failed its
+/// health check with nothing of its key left in the queue: the wholest live
+/// backup, by its measured `DupeAlive` share and then its score. Unlike
+/// `select_dupe_backup` it takes backups in DupeMode FORCE and backups filed
+/// as copies, which failover skips. `-1` when a download of the key is
+/// queued, one already succeeded, or no backup is alive.
+pub fn select_rescue_backup<F>(
+    history: &[NzbgetRsDupeHistoryCandidate],
+    queue: &[NzbgetRsDupeQueueCandidate],
+    mut file_exists_cb: F,
+) -> i32
+where
+    F: FnMut(usize) -> bool,
+{
+    if queue
+        .iter()
+        .any(|q| q.is_self == 0 && q.is_nzb_kind != 0 && q.same_name_or_key != 0)
+    {
+        return -1;
+    }
+    let succeeded = history.iter().any(|h| {
+        h.same_name_or_key != 0
+            && ((h.kind == HISTORY_KIND_NZB && h.is_dupe_success != 0)
+                || (h.kind == HISTORY_KIND_DUP
+                    && (h.dup_status == DUP_STATUS_SUCCESS || h.dup_status == DUP_STATUS_GOOD)))
+    });
+    if succeeded {
+        return -1;
+    }
+    let mut best: Option<(usize, (i32, i32))> = None;
+    for (idx, h) in history.iter().enumerate() {
+        let rank = (h.alive_permille.max(-1), h.dupe_score);
+        if h.kind == HISTORY_KIND_NZB
+            && h.same_name_or_key != 0
+            && (h.delete_status == DELETE_STATUS_DUPE || h.delete_status == DELETE_STATUS_COPY)
+            && h.alive_permille != 0
+            && h.health >= h.critical_health
+            && h.mark_status != MARK_STATUS_BAD
+            && best.is_none_or(|(_, b)| rank > b)
+            && file_exists_cb(idx)
+        {
+            best = Some((idx, rank));
+        }
+    }
+    best.map_or(-1, |(idx, _)| idx as i32)
+}
+
 pub fn dupematcher_should_wait_rar_lister(
     is_running: bool,
     start_time: i64,
@@ -948,17 +995,24 @@ pub(crate) fn no_backup_reason_host(
 }
 
 #[cfg(unix)]
-pub(crate) fn find_dupe_backup_host(
+struct DupeCandidates {
+    self_snap: Option<crate::queuesubsys_host::NzbSnap>,
+    history_entries: Vec<crate::queuesubsys_host::HistEntrySnap>,
+    history_candidates: Vec<NzbgetRsDupeHistoryCandidate>,
+    queued_filenames: Vec<Vec<u8>>,
+    queue_candidates: Vec<NzbgetRsDupeQueueCandidate>,
+}
+
+/// The history and queue items that `select_dupe_backup` and
+/// `select_rescue_backup` choose from.
+#[cfg(unix)]
+fn collect_dupe_candidates(
     host: &crate::queuesubsys_host::QueueSubsysHost,
-    opts: &crate::queuesubsys_host::GlobalOptsSnap,
     dq_ptr: usize,
     nzb_ptr: usize,
     nzb_name: &[u8],
     dupe_key: &[u8],
-) -> Option<(
-    crate::queuesubsys_host::HistEntrySnap,
-    crate::queuesubsys_host::NzbSnap,
-)> {
+) -> DupeCandidates {
     let self_snap = if nzb_ptr != 0 {
         Some(host.nzb_snap(nzb_ptr, false))
     } else {
@@ -1037,6 +1091,35 @@ pub(crate) fn find_dupe_backup_host(
         });
     }
 
+    DupeCandidates {
+        self_snap,
+        history_entries,
+        history_candidates,
+        queued_filenames,
+        queue_candidates,
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn find_dupe_backup_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    opts: &crate::queuesubsys_host::GlobalOptsSnap,
+    dq_ptr: usize,
+    nzb_ptr: usize,
+    nzb_name: &[u8],
+    dupe_key: &[u8],
+) -> Option<(
+    crate::queuesubsys_host::HistEntrySnap,
+    crate::queuesubsys_host::NzbSnap,
+)> {
+    let DupeCandidates {
+        self_snap,
+        history_entries,
+        history_candidates,
+        queued_filenames,
+        queue_candidates,
+    } = collect_dupe_candidates(host, dq_ptr, nzb_ptr, nzb_name, dupe_key);
+
     let winner = select_dupe_backup(
         self_snap.is_some(),
         self_snap.as_ref().map_or(0, |s| s.full_content_hash),
@@ -1086,6 +1169,90 @@ fn return_best_dupe_host(
         );
         host.history_redownload(dq_ptr, hi.hi_ptr);
     }
+}
+
+/// Rescue (`DupeSearch`): a download failed its health check and failover
+/// returned nothing, so no download of its key is left. Its backups in
+/// DupeMode FORCE and those filed as copies are not failover candidates, so
+/// the wholest live one goes back to the queue here.
+/// Called for every completed download after the duplicate coordinator had
+/// its turn, whatever the DupeMode: failover never runs for a pick in DupeMode
+/// FORCE.
+#[cfg(unix)]
+pub(crate) fn rescue_on_health_failure_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    nzb_ptr: usize,
+) {
+    if dq_ptr == 0 || nzb_ptr == 0 {
+        return;
+    }
+    let nzb = host.nzb_snap(nzb_ptr, false);
+    if !host.opts().dupe_check
+        || nzb.kind != crate::queuesubsys_host::NK_NZB
+        || nzb.is_dupe_success
+        || nzb.delete_status != crate::queuesubsys_host::DS_HEALTH
+        || nzb.dupe_key.is_empty()
+        || !crate::options::active_options().is_some_and(|o| o.scalars().dupe_search != 0)
+    {
+        return;
+    }
+    rescue_dupe_host(host, dq_ptr, &nzb);
+}
+
+#[cfg(unix)]
+fn rescue_dupe_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    dq_ptr: usize,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) {
+    let DupeCandidates {
+        history_entries,
+        history_candidates,
+        queued_filenames,
+        queue_candidates,
+        ..
+    } = collect_dupe_candidates(host, dq_ptr, nzb.ptr, &nzb.name, &nzb.dupe_key);
+    let winner = select_rescue_backup(&history_candidates, &queue_candidates, |idx| {
+        queued_filenames.get(idx).is_some_and(|p| {
+            !p.is_empty() && crate::fsops::file_exists(p, &crate::fsops::posix_stat)
+        })
+    });
+    let Some(hi) = usize::try_from(winner)
+        .ok()
+        .and_then(|i| history_entries.get(i))
+    else {
+        return;
+    };
+    if hi.inner_ptr == 0 {
+        return;
+    }
+    let backup = host.nzb_snap(hi.inner_ptr, false);
+    let alive = history_candidates[winner as usize].alive_permille;
+    let dry_run =
+        crate::options::active_options().is_some_and(|o| o.scalars().dupe_search_dry_run != 0);
+    let mut msg = b"DupeSearch: ".to_vec();
+    msg.extend_from_slice(&nzb.name);
+    msg.extend_from_slice(b" failed its health check with nothing of its key queued: ");
+    msg.extend_from_slice(if dry_run {
+        b"dry run, would return backup ".as_slice()
+    } else {
+        b"returning backup ".as_slice()
+    });
+    msg.extend_from_slice(&backup.name);
+    if alive >= 0 {
+        msg.extend_from_slice(format!(" (alive {}.{}%)", alive / 10, alive % 10).as_bytes());
+    }
+    host.log(crate::queuesubsys_host::MK_INFO, &msg);
+    if dry_run {
+        return;
+    }
+    host.nzb_set_int(
+        backup.ptr,
+        crate::queuesubsys_host::NZB_INT_DUPE_HINT,
+        crate::queuesubsys_host::DH_REDOWNLOAD_AUTO,
+    );
+    host.history_redownload(dq_ptr, hi.hi_ptr);
 }
 
 #[cfg(unix)]
@@ -1738,6 +1905,120 @@ pub(crate) fn list_history_dupes_host(
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    fn rescue_candidate(
+        mode: i32,
+        status: i32,
+        score: i32,
+        alive_permille: i32,
+    ) -> NzbgetRsDupeHistoryCandidate {
+        NzbgetRsDupeHistoryCandidate {
+            kind: HISTORY_KIND_NZB,
+            dupe_mode: mode,
+            dupe_score: score,
+            is_dupe_success: 0,
+            mark_status: MARK_STATUS_NONE,
+            delete_status: status,
+            dup_status: DUP_STATUS_UNDEFINED,
+            full_content_hash: 0,
+            alive_permille,
+            health: 1000,
+            critical_health: 900,
+            same_name_or_key: 1,
+        }
+    }
+
+    fn rescue_self() -> NzbgetRsDupeQueueCandidate {
+        NzbgetRsDupeQueueCandidate {
+            is_self: 1,
+            is_nzb_kind: 1,
+            dupe_mode: DUPE_MODE_FORCE,
+            dupe_score: 1_000_000,
+            same_name_or_key: 1,
+        }
+    }
+
+    #[test]
+    fn rescue_takes_force_backups_and_copies() {
+        let history = [
+            // the failed pick itself
+            rescue_candidate(DUPE_MODE_FORCE, DELETE_STATUS_HEALTH, 1_000_000, 300),
+            rescue_candidate(DUPE_MODE_FORCE, DELETE_STATUS_DUPE, 999_080, 900),
+            rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_COPY, 999_050, 990),
+            rescue_candidate(DUPE_MODE_FORCE, DELETE_STATUS_DUPE, 999_001, 0),
+        ];
+        let queue = [rescue_self()];
+        // failover skips FORCE backups and (without HealthCheck=dupe) copies
+        assert_eq!(
+            select_dupe_backup(true, 0, false, &history, &queue, |_| true),
+            -1
+        );
+        // the rescue takes the wholest one
+        assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
+        // its nzb-file is gone: the next wholest
+        assert_eq!(select_rescue_backup(&history, &queue, |i| i != 2), 1);
+        // a dead backup is never returned
+        assert_eq!(select_rescue_backup(&history[3..], &queue, |_| true), -1);
+    }
+
+    #[test]
+    fn rescue_orders_by_alive_then_score() {
+        let history = [
+            rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_090, -1),
+            rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_020, 500),
+            rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_030, 500),
+        ];
+        let queue = [rescue_self()];
+        assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
+        // unmeasured backups only when nothing measured is alive
+        assert_eq!(select_rescue_backup(&history[..1], &queue, |_| true), 0);
+    }
+
+    #[test]
+    fn rescue_leaves_a_key_that_is_queued_or_done() {
+        let backup = rescue_candidate(DUPE_MODE_FORCE, DELETE_STATUS_DUPE, 999_080, 900);
+        let mut queued = rescue_self();
+        queued.is_self = 0;
+        assert_eq!(
+            select_rescue_backup(&[backup], &[rescue_self(), queued], |_| true),
+            -1
+        );
+        let mut done = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_NONE, 999_000, -1);
+        done.is_dupe_success = 1;
+        assert_eq!(
+            select_rescue_backup(&[backup, done], &[rescue_self()], |_| true),
+            -1
+        );
+        let mut dup = done;
+        dup.kind = HISTORY_KIND_DUP;
+        dup.is_dupe_success = 0;
+        dup.dup_status = DUP_STATUS_SUCCESS;
+        assert_eq!(
+            select_rescue_backup(&[backup, dup], &[rescue_self()], |_| true),
+            -1
+        );
+        // another key's success does not count
+        let mut other = done;
+        other.same_name_or_key = 0;
+        assert_eq!(
+            select_rescue_backup(&[backup, other], &[rescue_self()], |_| true),
+            0
+        );
+    }
+
+    #[test]
+    fn rescue_skips_bad_or_unhealthy_backups() {
+        let mut bad = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_080, 900);
+        bad.mark_status = MARK_STATUS_BAD;
+        let mut sick = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_070, 900);
+        sick.health = 800;
+        let mut manual = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_MANUAL, 999_060, 900);
+        manual.health = 1000;
+        assert_eq!(
+            select_rescue_backup(&[bad, sick, manual], &[rescue_self()], |_| true),
+            -1
+        );
+    }
 
     #[test]
     fn dupe_coord_basics() {

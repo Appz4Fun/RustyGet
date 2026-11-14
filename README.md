@@ -51,7 +51,7 @@ RustyGet is a Usenet downloader that started as a fork of [NZBGet](https://githu
 | Unpacking | External `unrar` and `7z` programs | Built in, with no external programs |
 | CI workflows | Builds and tests for every platform | Builds and tests on Linux x86-64 and macOS for every pull request and push to `main` |
 
-The new options are `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, and `DupeFastDonors`, plus `JsonP` in the security settings. The full list of changes is in [Differences from NZBGet](https://appz4fun.github.io/RustyGet/differences.html).
+The new options are `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeFastDonors`, `DupePrimaryScore`, `DupeSizeTolerance`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`, plus `JsonP` in the security settings. The full list of changes is in [Differences from NZBGet](https://appz4fun.github.io/RustyGet/differences.html).
 
 ## How deduplication works
 

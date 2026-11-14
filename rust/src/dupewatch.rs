@@ -22,6 +22,12 @@ pub const MANAGED_FLEET: u32 = 1 << 16;
 pub const BASE_PICK_SCORE: i32 = 1_000_000;
 pub const SEARCH_WINDOW_SEC: i64 = 6 * 3600;
 
+/// Option `DupePrimaryScore`: the score of a download DupeSearch looks after
+/// (`BASE_PICK_SCORE` before the options are loaded).
+pub fn primary_score() -> i32 {
+    crate::options::active_options().map_or(BASE_PICK_SCORE, |o| o.scalars().dupe_primary_score)
+}
+
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
@@ -75,10 +81,70 @@ pub fn decide(
     Decision::Search
 }
 
+/// A pick whose full sample is less alive than this is sure to fail ...
+pub const SWAP_BELOW: f64 = 0.90;
+/// ... and is swapped for a backup sampled at least this alive.
+pub const SWAP_BACKUP_ALIVE: f64 = 0.95;
+/// A pick swapped because par2 cannot repair it goes only to a whole backup.
+pub const PAR_SWAP_BACKUP_ALIVE: f64 = 0.999;
+/// Missing articles needed in a sample before it can prove a pick fails.
+pub const SWAP_MIN_MISSING: i32 = 5;
+
+/// The share a backup needs before a failing pick is swapped for it, or
+/// `None` when the pick's sample does not prove that it fails. A pick at or
+/// above `SWAP_BELOW` fails only when its par2 blocks cannot cover the
+/// damage; `par_doomed` (a news-server read) is asked only then.
+pub fn swap_need<F: FnOnce() -> bool>(pick_alive: f64, missing: i32, par_doomed: F) -> Option<f64> {
+    if !pick_alive.is_finite() || pick_alive < 0.0 || missing < SWAP_MIN_MISSING {
+        return None;
+    }
+    if pick_alive < SWAP_BELOW {
+        return Some(SWAP_BACKUP_ALIVE);
+    }
+    par_doomed().then_some(PAR_SWAP_BACKUP_ALIVE)
+}
+
+/// A pick that is 80% downloaded and at or above its critical health is left
+/// to finish: repair and failover cover the rest, and a swap would throw
+/// away what it downloaded.
+pub fn swap_nearly_done(size: i64, remaining: i64, health: i32, critical_health: i32) -> bool {
+    size > 0 && (size - remaining.clamp(0, size)) * 10 >= size * 8 && health >= critical_health
+}
+
+/// The wholest backup `(id, alive)` if it is at least `need` alive.
+pub fn swap_backup(candidates: &[(i32, f64)], need: f64) -> Option<(i32, f64)> {
+    let best = candidates
+        .iter()
+        .copied()
+        .filter(|&(_, alive)| alive.is_finite())
+        .fold(None, |best: Option<(i32, f64)>, c| match best {
+            Some(b) if b.1 >= c.1 => Some(b),
+            _ => Some(c),
+        })?;
+    (best.1 >= need).then_some(best)
+}
+
+/// The DupeMode name for its value (`dmScore = 0, dmAll = 1, dmForce = 2`).
+pub fn dupe_mode_name(mode: i32) -> &'static [u8] {
+    match mode {
+        0 => b"SCORE",
+        1 => b"ALL",
+        2 => b"FORCE",
+        _ => b"UNKNOWN",
+    }
+}
+
+/// A pick in DupeMode FORCE or ALL that DupeSearch would look after if it
+/// were in SCORE mode: FORCE and ALL turn off failover, so it is switched.
+/// Donors, auto-redownloads and fleet members keep their mode.
+pub fn wants_score_mode(flags: u32) -> bool {
+    flags & SCORE_MODE == 0 && flags & (DONOR | AUTO_REDOWNLOAD | MANAGED_FLEET) == 0
+}
+
 #[inline]
 pub fn recent_search_suppressed(score: i32, now: i64, previous: Option<SearchStamp>) -> bool {
     previous.is_some_and(|stamp| {
-        stamp.score >= score.max(BASE_PICK_SCORE)
+        stamp.score >= score.max(primary_score())
             && (now < stamp.time
                 || (now as u64).wrapping_sub(stamp.time as u64) < SEARCH_WINDOW_SEC as u64)
     })
@@ -461,6 +527,70 @@ pub fn format_searched_state_line(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn primary_score_defaults_without_options() {
+        assert!(primary_score() >= 1000);
+    }
+
+    #[test]
+    fn score_mode_switch_only_for_plain_picks() {
+        let force = ENABLED | DUPE_CHECK | PRESENT | NZB | DELETE_NONE;
+        assert!(wants_score_mode(force));
+        assert!(!wants_score_mode(force | SCORE_MODE));
+        assert!(!wants_score_mode(force | DONOR));
+        assert!(!wants_score_mode(force | AUTO_REDOWNLOAD));
+        assert!(!wants_score_mode(force | MANAGED_FLEET));
+        // switched, the pick is searched like any SCORE pick
+        assert_eq!(
+            decide(force | SCORE_MODE, BASE_PICK_SCORE, None, 100, None, false),
+            Decision::Search
+        );
+        assert_eq!(
+            decide(force, BASE_PICK_SCORE, None, 100, None, false),
+            Decision::Skip
+        );
+        assert_eq!(dupe_mode_name(0), b"SCORE");
+        assert_eq!(dupe_mode_name(1), b"ALL");
+        assert_eq!(dupe_mode_name(2), b"FORCE");
+    }
+
+    #[test]
+    fn swap_need_follows_the_sample() {
+        let never = || -> bool { panic!("par2 is read only for a mostly whole pick") };
+        assert_eq!(swap_need(0.89, 50, never), Some(SWAP_BACKUP_ALIVE));
+        assert_eq!(swap_need(0.0, 5, never), Some(SWAP_BACKUP_ALIVE));
+        // too few missing articles prove nothing
+        assert_eq!(swap_need(0.5, 4, never), None);
+        assert_eq!(swap_need(-1.0, 50, never), None);
+        assert_eq!(swap_need(f64::NAN, 50, never), None);
+        // mostly whole: only par2 decides
+        assert_eq!(swap_need(0.90, 50, || false), None);
+        assert_eq!(swap_need(0.97, 50, || true), Some(PAR_SWAP_BACKUP_ALIVE));
+    }
+
+    #[test]
+    fn swap_skips_a_nearly_done_pick() {
+        assert!(swap_nearly_done(1000, 200, 950, 900));
+        assert!(swap_nearly_done(1000, 0, 900, 900));
+        assert!(!swap_nearly_done(1000, 201, 950, 900));
+        assert!(!swap_nearly_done(1000, 100, 899, 900));
+        assert!(!swap_nearly_done(0, 0, 1000, 0));
+        assert!(!swap_nearly_done(1000, 2000, 1000, 0));
+    }
+
+    #[test]
+    fn swap_backup_takes_the_wholest() {
+        let c = [(7, 0.93), (8, 0.99), (9, 0.96), (10, f64::NAN)];
+        assert_eq!(swap_backup(&c, SWAP_BACKUP_ALIVE), Some((8, 0.99)));
+        assert_eq!(swap_backup(&c, PAR_SWAP_BACKUP_ALIVE), None);
+        assert_eq!(swap_backup(&[(7, 0.94)], SWAP_BACKUP_ALIVE), None);
+        assert_eq!(
+            swap_backup(&[(1, 1.0), (2, 1.0)], PAR_SWAP_BACKUP_ALIVE),
+            Some((1, 1.0))
+        );
+        assert_eq!(swap_backup(&[], SWAP_BACKUP_ALIVE), None);
+    }
+
     #[test]
     fn inferred_missing_rejects_unusable_partial_donors() {
         assert!(dead_donor(5, 0, 0, 5, 150, 10));

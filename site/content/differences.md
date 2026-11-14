@@ -57,7 +57,7 @@ See [Duplicate fleets](duplicate-fleets.md) and [Donor search](dupesearch.md).
 
 ## Options
 
-Sixteen new options are in **INCOMING NZBS**, after `DupeCheck`. Left out of the configuration file, they keep NZBGet's behavior: `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, and `DupeFastDonors`. `HealthCheck` gains the value `dupe`. One new option is in **SECURITY**: `JsonP`, off by default, turns on answers to JSON-P requests, which NZBGet always answered.
+Twenty-one new options are in **INCOMING NZBS**, after `DupeCheck`. Left out of the configuration file, they keep NZBGet's behavior: `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeFastDonors`, `DupePrimaryScore`, `DupeSizeTolerance`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`. `HealthCheck` gains the value `dupe`. One new option is in **SECURITY**: `JsonP`, off by default, turns on answers to JSON-P requests, which NZBGet always answered.
 
 ### Defaults
 

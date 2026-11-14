@@ -49,8 +49,8 @@ A listing says nothing about whether a posting still exists on your servers, so 
 
 - **Sample.** It checks `DupeHealthPercent` of the posting's articles (5% by default), at least `DupeHealthMin` and at most `DupeHealthMax`.
 - **Existence.** It asks every server about each sampled article with pipelined `STAT` commands.
-- **Content.** Up to `DupeBodyChecks` articles download in full and must pass their yEnc checksum, because a server can claim an article whose body is gone.
-- **Limits.** The check uses at most half of each server's connections and ends after `DupeHealthBudget` seconds. An article counts as missing when every server answered and none of them has it. If the time runs out first, an article that at least half of the servers reported missing counts as missing too.
+- **Content.** `DupeBodyPercent` of the sampled articles, at most `DupeBodyChecks`, download in full and must pass their yEnc checksum, because a server can claim an article whose body is gone.
+- **Limits.** The check uses at most half of each server's connections, and at most `DupeCheckConnections`. It checks `DupeCheckConcurrency` postings at a time and ends after `DupeHealthBudget` seconds. An article counts as missing when every server answered and none of them has it. If the time runs out first, an article that at least half of the servers reported missing counts as missing too.
 
 A first pass checks about ten articles of each candidate. RustyGet queues the best `DupeFastDonors` candidates that pass it right away, before the full check finishes.
 
@@ -63,6 +63,15 @@ RustyGet adds each measured candidate that's at least `DupeMinAlive` percent ali
 - The search also checks the backups the key already holds, including a client's own, and records each one's health as `DupeHealth`. It reorders them with the new copies, but never raises the score of a copy that isn't whole. A backup that turns out dead drops to the lowest score and gets `DupeAlive=0`, so failover never picks it.
 
 Because the score is lower, the duplicate check files each copy in history as a backup. From there it can donate articles and bytes, and take over through failover. `DupeSearchMaxDonors` caps how many copies one download gets.
+
+## Looking after the download itself
+
+The search also watches the download it was started for:
+
+- **DupeMode.** A download in DupeMode `FORCE` or `ALL` can't fail over, so RustyGet switches it to `SCORE` when it searches for it. A download without a key, or scored below `DupePrimaryScore`, gets that score.
+- **Dead download.** When none of the download's first ten checked articles exists on any server, its score drops to the dead score, below every live backup, so the first live copy that's queued takes over.
+- **Swap.** RustyGet samples the download as fully as a candidate. When less than 90% of it is alive, or par2 can't cover the damage, it will fail, but RustyGet's own health check counts failures against the whole download and would take hours to notice. If a backup is at least 95% alive (whole, when par2 is the reason), RustyGet sends that backup to the queue and files the download as a scored backup. A download that's 80% downloaded and above its critical health is left to finish.
+- **Rescue.** When a download fails its health check and failover returns nothing, for example because its backups are in DupeMode `FORCE` or were filed as copies, RustyGet sends the wholest live backup back to the queue, unless a download of the key already succeeded.
 
 ## Resume and dry run
 
@@ -85,5 +94,10 @@ RustyGet saves search progress in the queue directory, so a restart picks up whe
 | `DupeHealthBudget` | `120` | Seconds allowed for checking one posting. |
 | `DupeMinAlive` | `50` | Percent of a posting that must be alive to queue it. |
 | `DupeFastDonors` | `5` | Copies to queue right after the first quick check. |
+| `DupePrimaryScore` | `1000000` | Score given to a download the search looks after. |
+| `DupeSizeTolerance` | `0` | Percent a listing's size may differ from the download's. `0` means size isn't compared. |
+| `DupeBodyPercent` | `20` | Share of the sampled articles to download and verify in full. |
+| `DupeCheckConcurrency` | `10` | Postings checked at the same time. |
+| `DupeCheckConnections` | `20` | Most check connections per server, never more than half of its connections. |
 
 RustyGet warns at startup when DupeSearch is on and `DupeCheck` is off, `HealthCheck` isn't `dupe`, `ArticleRetries` is below 3, or a server has fewer than four connections.

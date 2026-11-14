@@ -3834,6 +3834,26 @@
     "message": "Number of duplicates that are queued right after the first check\n(duplicates).\n\nThe first check of about 10 articles proves a posting alive quickly; this\nmany such postings are queued at once, the rest after their full check.",
     "description": "Description for the option DupeFastDonors DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>)."
   },
+  "config_desc_dupeprimaryscore": {
+    "message": "Score given to a download that DupeSearch looks after.\n\nA download without a duplicate key, or with a lower duplicate score, gets\nthis score when DupeSearch starts looking after it. Duplicates found for\nit are scored just below it.",
+    "description": "Description for the option DupePrimaryScore"
+  },
+  "config_desc_dupesizetolerance": {
+    "message": "Largest size difference of a duplicate, as shown by the indexer.\n\n0 means size is not compared, because postings of one release can differ\nby gigabytes. 20 skips results more than 20% bigger or smaller than the\ndownload.",
+    "description": "Description for the option DupeSizeTolerance"
+  },
+  "config_desc_dupebodypercent": {
+    "message": "Share of the checked articles that are also downloaded.\n\nAt most <DupeBodyChecks> articles per posting are downloaded.",
+    "description": "Description for the option DupeBodyPercent DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>)."
+  },
+  "config_desc_dupecheckconcurrency": {
+    "message": "Number of postings checked at the same time.",
+    "description": "Description for the option DupeCheckConcurrency"
+  },
+  "config_desc_dupecheckconnections": {
+    "message": "Most connections per news server for the checks.\n\nNever more than half of the server's connections (option\n<Server1.Connections>), so downloads always keep the other half.",
+    "description": "Description for the option DupeCheckConnections DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'."
+  },
   "config_desc_flushqueue": {
     "message": "Flush download queue to disk.\n\nImmediately flush file buffers for queue state file. This improves\nsafety for the queue file but may decrease disk performance due to\ndisabling of disk caching for queue state file.\n\nYou can disable this option if it negatively affects disk performance on your\nsystem. You should create backups of queue-directory (option <QueueDir>)\nin that case. Keep the option enabled if your system often crashes.",
     "description": "Description for the option FlushQueue DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>)."

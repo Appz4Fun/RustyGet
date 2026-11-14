@@ -5347,6 +5347,16 @@ pub unsafe extern "C" fn nzbget_rs_post_job_op(
     }
 }
 
+// The `libc` crate exports these only for Apple targets; the values differ per platform.
+#[cfg(all(unix, target_vendor = "apple"))]
+const PTHREAD_CANCEL_ENABLE: c_int = 1;
+#[cfg(all(unix, target_vendor = "apple"))]
+const PTHREAD_CANCEL_DISABLE: c_int = 0;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+const PTHREAD_CANCEL_ENABLE: c_int = 0;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+const PTHREAD_CANCEL_DISABLE: c_int = 1;
+
 #[cfg(unix)]
 pub(crate) struct PosixCancelGuard {
     old_state: c_int,
@@ -5358,8 +5368,8 @@ impl PosixCancelGuard {
         extern "C" {
             fn pthread_setcancelstate(state: c_int, oldstate: *mut c_int) -> c_int;
         }
-        let mut old_state = libc::PTHREAD_CANCEL_ENABLE;
-        pthread_setcancelstate(libc::PTHREAD_CANCEL_DISABLE, &mut old_state);
+        let mut old_state = PTHREAD_CANCEL_ENABLE;
+        pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &mut old_state);
         Self { old_state }
     }
 }

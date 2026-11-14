@@ -1,0 +1,95 @@
+# Required pre-merge check for main. Builds the Rust library and the C++ shim
+# daemon, then runs the Rust unit and integration tests, the daemon tests and a
+# short duplicate-recovery smoke on Linux and macOS. Branch protection requires
+# the aggregate job below, whose check name is exactly `build`.
+# No credentials are used; pull-request code runs with a read-only token.
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev just python3
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install just openssl@3
+
+      # rust/rust-toolchain.toml pins the version; rustup installs it on first use.
+      - name: Install Rust toolchain
+        working-directory: rust
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            rust -> target
+            rust -> ../build/debug/rust
+          # Only main writes the cache; pull requests restore from it.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Rust tests (warnings are errors)
+        working-directory: rust
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --locked --tests
+
+      - name: Build daemon and run daemon tests
+        run: just test-daemon 3
+
+      - name: Duplicate recovery smoke
+        run: |
+          for s in complementary stream liveoverlap xpackzip; do
+            python3 tests/functional/dupefallback/harness.py \
+              --nzbget build/debug/rustyget --target local --scenario "$s"
+          done
+
+  # The single required status check. It passes only when every leg passed,
+  # so a skipped or cancelled leg cannot satisfy branch protection.
+  build:
+    name: build
+    needs: [test]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: All legs passed
+        env:
+          RESULT: ${{ needs.test.result }}
+        run: |
+          echo "test: $RESULT"
+          test "$RESULT" = success

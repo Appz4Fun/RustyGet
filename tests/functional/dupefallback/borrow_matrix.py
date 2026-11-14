@@ -236,7 +236,7 @@ class Bench:
             daemon.start_nserv()
             daemon.start()
             api = daemon.wait_ready()
-            tmem = self.members(target, 'T', fail, 1000 + len(self.results), with_par)
+            tmem = self.members(target, 'T', fail, zlib.crc32(label.encode()), with_par)
             res['missing_articles'] = sum(len(m[4]) for m in tmem)
             res['articles'] = sum((m[2] + self.seg - 1) // self.seg for m in tmem)
             for i, d in enumerate(donors):

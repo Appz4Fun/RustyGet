@@ -5732,6 +5732,31 @@ impl RepairSetData {
     }
 }
 
+/// Turns the end-of-archive block of a middle volume into the one a final volume carries
+/// (the "another volume follows" flag cleared, checksum recomputed). Understands the plain
+/// RAR5 block (CRC32, size 3, type 5, flags 0, end flags) and the plain 7 byte RAR4 block.
+fn final_end_block(middle: &[u8]) -> Option<Vec<u8>> {
+    if middle.len() == 8 && middle[4..7] == [3, 5, 0] && middle[7] & 1 == 1 {
+        let body = [3u8, 5, 0, middle[7] & !1];
+        let mut out = crc32fast::hash(&body).to_le_bytes().to_vec();
+        out.extend_from_slice(&body);
+        return Some(out);
+    }
+    if middle.len() == 7 && middle[2] == 0x7b && middle[5] == 7 && middle[6] == 0 {
+        let flags = u16::from_le_bytes([middle[3], middle[4]]);
+        if flags & 0x0001 == 0 || flags & 0x000e != 0 {
+            // Not a "next volume" block, or it carries per-volume fields.
+            return None;
+        }
+        let mut out = middle.to_vec();
+        out[3..5].copy_from_slice(&(flags & !0x0001).to_le_bytes());
+        let crc = (crc32fast::hash(&out[2..7]) & 0xffff) as u16;
+        out[0..2].copy_from_slice(&crc.to_le_bytes());
+        return Some(out);
+    }
+    None
+}
+
 pub const DONOR_MAX_CACHED_PARTS: usize = 16;
 pub const DONOR_MAX_PREFETCH_PARTS: usize = DONOR_MAX_CACHED_PARTS / 2;
 pub const DONOR_MAX_RESOLVE_STEPS: usize = 6;
@@ -6598,6 +6623,11 @@ impl ContentMapper {
             } else {
                 false
             };
+            // The reader walks every block of a volume and fails when one it cannot read
+            // follows the member data, for instance the end-of-archive block in a missing last
+            // article. The member headers it already checked are all the map needs, so such a
+            // volume still counts as read.
+            let parsed = parsed || (!files.is_empty() && !vol.encrypted);
             if parsed {
                 volumes[i] = Some((vol, files));
                 continue;
@@ -7717,6 +7747,132 @@ impl CrossPackRepairSession {
                         .borrow_mut()
                         .emit_message_bytes(TargetMessageKind::Info, &msg);
                 }
+            }
+        }
+        self.rebuild_container_tails(&env_cell);
+    }
+
+    /// A hole that lies behind a volume's member data covers container bytes only (the
+    /// end-of-archive block): no duplicate in another packing has them. In a volume set those
+    /// trailing bytes are normally the same in every volume but the last, so when two other
+    /// intact volumes agree on them, they are copied into the damaged volume.
+    fn rebuild_container_tails(
+        &mut self,
+        env_cell: &std::cell::RefCell<&mut dyn CrossPackDonorEnv>,
+    ) {
+        for set_idx in 0..self.repair_sets.len() {
+            let Some(map) = self.repair_sets[set_idx].map.clone() else {
+                continue;
+            };
+            if map.encrypted() || !self.repair_sets[set_idx].inner_holes.is_empty() {
+                continue;
+            }
+            let members = self.repair_sets[set_idx].set.members.clone();
+            if members.len() < 3 {
+                continue;
+            }
+            // Where each member's data ends, and which member holds the end of the inner file.
+            let mut data_end = std::collections::BTreeMap::<i32, i64>::new();
+            let mut last_member = -1i32;
+            let mut last_inner = -1i64;
+            for run in map.runs() {
+                let end = run.member_offset + run.size;
+                let e = data_end.entry(run.member_index).or_insert(0);
+                *e = (*e).max(end);
+                if run.inner_offset + run.size > last_inner {
+                    last_inner = run.inner_offset + run.size;
+                    last_member = run.member_index;
+                }
+            }
+            let tail_of = |this: &Self, m: i32| -> Option<(i64, i64)> {
+                let size = this.set_members.get(m as usize)?.size;
+                let end = *data_end.get(&m)?;
+                (size > end && size - end <= 4096).then_some((end, size - end))
+            };
+            let holes_of = |this: &Self, m: i32| -> Vec<NzbgetRsByteRange> {
+                this.member_targets
+                    .get(m as usize)
+                    .filter(|&&t| t >= 0)
+                    .and_then(|&t| this.target_holes.get(t as usize))
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            for &m in &members {
+                let holes = holes_of(self, m);
+                let Some((tail_at, tail_len)) = tail_of(self, m) else {
+                    continue;
+                };
+                if holes.is_empty() || holes.iter().any(|h| h.offset < tail_at) {
+                    continue;
+                }
+                // Two other intact, non-final volumes with the same tail bytes.
+                let mut reference: Option<Vec<u8>> = None;
+                let mut agree = false;
+                for &other in &members {
+                    if other == m || other == last_member || !holes_of(self, other).is_empty() {
+                        continue;
+                    }
+                    let Some((o_at, o_len)) = tail_of(self, other) else {
+                        continue;
+                    };
+                    if o_len != tail_len {
+                        continue;
+                    }
+                    let mut buf = vec![0u8; o_len as usize];
+                    let read = {
+                        let mut adapter = DiskTargetFileSetAdapter {
+                            files: &mut self.target_files,
+                            members: &self.set_members,
+                            env: env_cell,
+                        };
+                        adapter.read_file(other, o_at, &mut buf)
+                    };
+                    if !read {
+                        continue;
+                    }
+                    match &reference {
+                        None => reference = Some(buf),
+                        Some(r) => {
+                            agree = *r == buf;
+                            break;
+                        }
+                    }
+                }
+                let Some(mut tail) = reference.filter(|_| agree) else {
+                    continue;
+                };
+                if m == last_member {
+                    // The final volume's end block says "no volume follows".
+                    match final_end_block(&tail) {
+                        Some(last_tail) => tail = last_tail,
+                        None => continue,
+                    }
+                }
+                let written = {
+                    let mut adapter = DiskTargetFileSetAdapter {
+                        files: &mut self.target_files,
+                        members: &self.set_members,
+                        env: env_cell,
+                    };
+                    adapter.write_file(m, tail_at, &tail)
+                };
+                if !written {
+                    continue;
+                }
+                if let Some(&t) = self.member_targets.get(m as usize) {
+                    if t >= 0 {
+                        if let Some(h) = self.target_holes.get_mut(t as usize) {
+                            h.clear();
+                        }
+                    }
+                }
+                env_cell.borrow_mut().sync_target_holes(&self.target_holes);
+                let mut msg = b"Rebuilt the end block of ".to_vec();
+                msg.extend_from_slice(&self.set_members[m as usize].name);
+                msg.extend_from_slice(b" from its sibling volumes");
+                env_cell
+                    .borrow_mut()
+                    .emit_message_bytes(TargetMessageKind::Info, &msg);
             }
         }
     }
@@ -8891,6 +9047,27 @@ pub fn repair_file(
     }
 }
 
+/// Duplicates found not to be byte-identical file for file, per download directory, so
+/// later repair passes of the same download skip the same-bytes probes for them.
+static M1_NOT_SAME_BYTES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<(Vec<u8>, Vec<u8>)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+fn m1_known_not_same_bytes(dest_dir: &[u8], donor_info_name: &[u8]) -> bool {
+    M1_NOT_SAME_BYTES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&(dest_dir.to_vec(), donor_info_name.to_vec()))
+}
+
+fn m1_mark_not_same_bytes(dest_dir: &[u8], donor_info_name: &[u8]) {
+    let mut set = M1_NOT_SAME_BYTES.lock().unwrap_or_else(|e| e.into_inner());
+    if set.len() > 4096 {
+        set.clear();
+    }
+    set.insert((dest_dir.to_vec(), donor_info_name.to_vec()));
+}
+
 /// Runs the two-round M1 same-bytes donor pass across `targets` for one duplicate posting
 /// (`StreamRepairController::ExecRepair` in `StreamRepair.h`).
 #[allow(clippy::too_many_arguments)]
@@ -8911,6 +9088,12 @@ pub fn process_m1_donor(
         .iter()
         .map(|a| u8::from(!a.is_empty()))
         .collect();
+    if m1_known_not_same_bytes(dest_dir, donor_info_name) {
+        // An earlier pass over this download already found that this duplicate's files are
+        // not byte-identical to ours (a different packing): do not probe them again, the
+        // cross-packing repair uses it.
+        return;
+    }
     let mut claimed = vec![0u8; donor_file_names.len()];
     let mut proven_sets = std::collections::BTreeSet::<(Vec<u8>, Vec<u8>)>::new();
     let mut disproven_sets = std::collections::BTreeSet::<(Vec<u8>, Vec<u8>)>::new();
@@ -9038,6 +9221,9 @@ pub fn process_m1_donor(
             );
             consecutive_failures = new_failures;
             if should_bail {
+                if !donor_proven {
+                    m1_mark_not_same_bytes(dest_dir, donor_info_name);
+                }
                 let mut msg = b"Skipping remaining files for duplicate ".to_vec();
                 msg.extend_from_slice(donor_info_name);
                 msg.extend_from_slice(
@@ -9056,6 +9242,26 @@ pub fn process_m1_donor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_end_block_clears_the_next_volume_flag() {
+        // RAR5: CRC32 over (size, type, header flags, end flags)
+        let mid_body = [3u8, 5, 0, 1];
+        let mut mid = crc32fast::hash(&mid_body).to_le_bytes().to_vec();
+        mid.extend_from_slice(&mid_body);
+        let last = final_end_block(&mid).unwrap();
+        assert_eq!(&last[4..], &[3, 5, 0, 0]);
+        assert_eq!(last[..4], crc32fast::hash(&[3, 5, 0, 0]).to_le_bytes());
+        // RAR4: 16 bit header CRC, type 0x7b, flags, size 7
+        let mut r4 = vec![0u8, 0, 0x7b, 0x01, 0x40, 7, 0];
+        let crc = (crc32fast::hash(&r4[2..]) & 0xffff) as u16;
+        r4[..2].copy_from_slice(&crc.to_le_bytes());
+        let last4 = final_end_block(&r4).unwrap();
+        assert_eq!(&last4[2..], &[0x7b, 0x00, 0x40, 7, 0]);
+        // per-volume fields (volume number, data CRC) are not guessed
+        assert!(final_end_block(&[0, 0, 0x7b, 0x09, 0x40, 7, 0]).is_none());
+        assert!(final_end_block(b"garbage!").is_none());
+    }
 
     #[test]
     fn test_select_whole_and_donor_candidates() {

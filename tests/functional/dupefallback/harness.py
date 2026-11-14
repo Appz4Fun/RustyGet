@@ -12699,8 +12699,8 @@ SCENARIO_OPTIONS = {
     'prodstream': PROD_OPTIONS,
     'prodrarwhole': PROD_OPTIONS,
     'prodrarstream': PROD_OPTIONS,
-    'skipholetwin': PROD_OPTIONS,
-    # throttled so direct unpack runs while the download (and the par2 files) still arrive
+    # throttled so direct unpack reaches the damaged volume before its repair lands
+    'skipholetwin': PROD_OPTIONS + ['DownloadRate=1500'],
     'skipholepar': PROD_OPTIONS + ['DownloadRate=1500'],
     'wholefileonly': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'wholefilewrongdonor': ['DupeArticleFallback=stream', 'ParCheck=auto'],

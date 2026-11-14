@@ -2743,7 +2743,9 @@ def scenario_xdecomp_storetarget(daemon, t):
     donor_members = [(rel, 'Rel.7z', len(archive), 300_000, set())]
 
     h, integ, c = _xpack_run(daemon, t, 'Xds', members, donor_members, payloads)
-    decompressed = _grep_log(t, '(decompressed)')
+    # A 7z whose LZMA2 coder left raw chunks is borrowed from by range, without
+    # extracting the whole duplicate; either path proves the inner-space map.
+    decompressed = _grep_log(t, '(decompressed)') + _grep_log(t, '(7z raw chunks)')
     ok = all(integ.values()) and c['recov'] >= 1 and decompressed >= 1
     return ('xdecomp_storetarget', ok,
             'status=%s recovered=%d decompressed_logs=%d integ=%s'
@@ -2918,21 +2920,25 @@ def scenario_xdecomp_off(daemon, t):
     see SCENARIO_OPTIONS, which deliberately does NOT add it here). The
     decompression path must never run (no `(decompressed)` log) and the
     item must stay unrepaired - M2 already rejected this donor's non-Copy
-    coder, and M4 is off, so nothing else can map it."""
+    coder, and M4 is off, so nothing else can map it. The donor has encrypted
+    headers: a plain LZMA2 7z can be borrowed from by its raw chunks without
+    the decompression step, an encrypted one only by extracting it."""
     if not generators.HAVE_7Z:
         return ('xdecomp_off', None, 'SKIP: 7z not installed')
     size = 4_000_000
     data = _payload(size, 8800)
+    password = 'decomp-off-pw'
     pp = _place_copy(t, 'xdoA', data, 'movie.mkv')
     members = [(pp, 'movie.mkv', size, 500_000, {5, 6})]
     payloads = {'movie.mkv': data}
     with tempfile.TemporaryDirectory(prefix='xdo-') as workdir:
-        archive = generators.seven_zip_lzma([('movie.mkv', data)], workdir)
+        archive = generators.seven_zip_lzma_encrypted([('movie.mkv', data)], workdir, password)
     rel = 'xdoB/rel.7z'
     t.write_file(os.path.join('data', rel), archive)
     donor_members = [(rel, 'Rel.7z', len(archive), 300_000, set())]
 
-    h, integ, c = _xpack_run(daemon, t, 'Xdo', members, donor_members, payloads)
+    h, integ, c = _xpack_run(daemon, t, 'Xdo', members, donor_members, payloads,
+                             donor_password=password)
     decompressed = _grep_log(t, '(decompressed)')
     ok = decompressed == 0 and c['recov'] == 0 and not integ['movie.mkv']
     return ('xdecomp_off', ok,
@@ -10804,7 +10810,8 @@ def scenario_parvolnames(daemon, t):
     api = daemon.wait_ready()
     daemon.append(api, 'RelPV', build_multi_nzb(members), False, 'pv-key', 100)
     h = daemon.wait_history(api, 'RelPV', timeout=240)
-    unpaused = _grep_log(t, 'for par-recovery')
+    # Fetched on the first damaged block while downloading, or by par-check.
+    unpaused = _grep_log(t, 'for par-recovery') + _grep_log(t, 'for live par-recovery')
     ok = h['ParStatus'] == 'SUCCESS' and unpaused >= 1
     return ('parvolnames', ok, 'status=%s par=%s unpaused_logs=%d vols=%d'
             % (h['Status'], h['ParStatus'], unpaused, len(vols)))
@@ -12009,7 +12016,9 @@ SCENARIO_OPTIONS = {
     'projectedworsebackup': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'projectededge': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'projectededgelead': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
-    'parprojection': ['DupeArticleFallback=stream', 'ParCheck=auto'],
+    # The wait for par-check is the behavior under test: with DupeBorrowFirst=yes
+    # (the default) the missing articles are borrowed at once.
+    'parprojection': ['DupeArticleFallback=stream', 'ParCheck=auto', 'DupeBorrowFirst=no'],
     'deaddownloadstray2': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'deaddownloadrestart': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'ContinuePartial=yes'],
     'deadbackupsonly': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'Server1.Connections=2'],

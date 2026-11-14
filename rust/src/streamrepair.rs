@@ -6106,6 +6106,7 @@ pub fn verify_donor_file(
                 let rel_end = rel_start + (range.size as usize);
                 let range_data = &fetched.data[rel_start..rel_end];
                 if !target_reader.compare_range(range.offset, range_data) {
+                    M1_CONFIRMED_MISMATCHES.with(|c| c.set(c.get() + 1));
                     batch_client.cancel_remaining();
                     return false;
                 }
@@ -9053,6 +9054,16 @@ static M1_NOT_SAME_BYTES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<(Vec<u8>, Vec<u8>)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
+thread_local! {
+    /// Probes of the current thread that compared donor bytes against ours and found them
+    /// different: a confirmed mismatch, unlike a probe that could not be fetched.
+    static M1_CONFIRMED_MISMATCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn m1_confirmed_mismatches() -> u64 {
+    M1_CONFIRMED_MISMATCHES.with(|c| c.get())
+}
+
 fn m1_known_not_same_bytes(dest_dir: &[u8], donor_info_name: &[u8]) -> bool {
     M1_NOT_SAME_BYTES
         .lock()
@@ -9099,6 +9110,7 @@ pub fn process_m1_donor(
     let mut disproven_sets = std::collections::BTreeSet::<(Vec<u8>, Vec<u8>)>::new();
     let mut consecutive_failures = 0i32;
     let mut donor_proven = false;
+    let mismatches_before = m1_confirmed_mismatches();
 
     for round in 0..2 {
         for target_idx in 0..targets.len() {
@@ -9221,7 +9233,10 @@ pub fn process_m1_donor(
             );
             consecutive_failures = new_failures;
             if should_bail {
-                if !donor_proven {
+                // Remember the duplicate as a different packing only when a probe really
+                // compared different bytes: probes that could not be fetched prove nothing
+                // and must not exclude it from later passes.
+                if !donor_proven && m1_confirmed_mismatches() > mismatches_before {
                     m1_mark_not_same_bytes(dest_dir, donor_info_name);
                 }
                 let mut msg = b"Skipping remaining files for duplicate ".to_vec();

@@ -2980,11 +2980,46 @@ pub(crate) fn direct_unpack_try_live_par_repair(nzb_id: i32, nzb_name: &[u8]) {
                 st.live_repair_running = false;
             }
         });
-    if spawned.is_err() {
-        if let Some(st) = direct_unpack_holds().get_mut(&nzb_id) {
-            st.live_repair_running = false;
+    match spawned {
+        Ok(handle) => {
+            let previous = LIVE_PAR_HELPERS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(nzb_id, handle);
+            // At most one runs per download, so an earlier handle has already finished.
+            if let Some(previous) = previous {
+                let _ = previous.join();
+            }
+        }
+        Err(_) => {
+            if let Some(st) = direct_unpack_holds().get_mut(&nzb_id) {
+                st.live_repair_running = false;
+            }
         }
     }
+}
+
+/// Helper threads of running live par2 repairs, per download.
+#[cfg(unix)]
+static LIVE_PAR_HELPERS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<i32, std::thread::JoinHandle<()>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Waits for the live par2 repair of download `nzb_id` to end. Called before the download's
+/// files are cleaned up (deletion, shutdown) so no repair write outlives the download.
+pub(crate) fn direct_unpack_join_live_par_repair(nzb_id: i32) {
+    #[cfg(unix)]
+    {
+        let handle = LIVE_PAR_HELPERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&nzb_id);
+        if let Some(handle) = handle {
+            let _ = handle.join();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = nzb_id;
 }
 
 /// Gives up on the held volumes of download `nzb_id` (its repair failed).

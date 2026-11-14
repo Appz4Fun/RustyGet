@@ -3758,10 +3758,12 @@ where
     // Every volume that is on disk must be readable: one that direct unpack keeps on hold
     // for repair must not be read here.
     let mut vol = archive_path.to_path_buf();
+    let mut volumes: Vec<std::path::PathBuf> = Vec::new();
     for _ in 0..4096 {
         if !volume_ready(&vol) {
             return None;
         }
+        volumes.push(vol.clone());
         match zipfast::volume::next_volume(&vol) {
             Some(next) if next.exists() => vol = next,
             _ => break,
@@ -3775,9 +3777,18 @@ where
     if !encrypted {
         return None;
     }
-    if let Some(vol_name) = archive_path.file_name().and_then(|s| s.to_str()) {
-        log_cb(4, &format!("Unrar: Extracting from {vol_name}"));
-    }
+    // One notice per volume, as the volume-by-volume extractor gives: direct unpack records
+    // from them which archives it has consumed, so post-processing does not unpack them again.
+    let mut announced = 0usize;
+    let mut announce = |log_cb: &mut F, upto: usize| {
+        while announced < upto.min(volumes.len()) {
+            if let Some(vol_name) = volumes[announced].file_name().and_then(|s| s.to_str()) {
+                log_cb(4, &format!("Unrar: Extracting from {vol_name}"));
+            }
+            announced += 1;
+        }
+    };
+    announce(log_cb, 1);
     let fail = |log_cb: &mut F, msg: String| -> Option<Result<zipfast::extract::Summary, String>> {
         if msg != "Aborted" {
             log_cb(1, &msg);
@@ -3871,6 +3882,7 @@ where
         summary.files += 1;
         summary.bytes += written;
     }
+    announce(log_cb, usize::MAX);
     Some(Ok(summary))
 }
 

@@ -1189,7 +1189,7 @@ fn with_libc_ctype<R>(f: impl FnOnce(Ctype<'_>) -> R) -> R {
         space: 1,
         digit: 2,
         lower: &lower,
-        char_signed: (0 as c_char).wrapping_sub(1) < 0,
+        char_signed: (c_char::MIN as i32) != 0,
     };
     f(ct)
 }

@@ -732,7 +732,7 @@ mod tests {
             c"Ext:Option",
             c":",
         ] {
-            assert!(option_restricted(name, c_char::MIN < 0), "{name:?}");
+            assert!(option_restricted(name, (c_char::MIN as i32) != 0), "{name:?}");
         }
         for name in [
             c"DupeSearchUrl",
@@ -742,30 +742,30 @@ mod tests {
             c"Server1.Host",
             c"",
         ] {
-            assert!(!option_restricted(name, c_char::MIN < 0), "{name:?}");
+            assert!(!option_restricted(name, (c_char::MIN as i32) != 0), "{name:?}");
         }
         // only the first 1023 bytes are searched for the words; a ':' anywhere counts
         let mut long = vec![b'a'; 1020];
         long.extend_from_slice(b"password");
         assert!(!option_restricted(
             &CString::new(long.clone()).unwrap(),
-            c_char::MIN < 0
+            (c_char::MIN as i32) != 0
         ));
         long.truncate(1015);
         long.extend_from_slice(b"password");
         assert!(option_restricted(
             &CString::new(long.clone()).unwrap(),
-            c_char::MIN < 0
+            (c_char::MIN as i32) != 0
         ));
         long = vec![b'b'; 3023];
         assert!(!option_restricted(
             &CString::new(long.clone()).unwrap(),
-            c_char::MIN < 0
+            (c_char::MIN as i32) != 0
         ));
         long.push(b':');
         assert!(option_restricted(
             &CString::new(long).unwrap(),
-            c_char::MIN < 0
+            (c_char::MIN as i32) != 0
         ));
     }
 
@@ -3015,7 +3015,7 @@ impl RustOptEntry {
     }
 
     pub fn restricted(&self) -> bool {
-        option_restricted(&self.name, c_char::MIN < 0)
+        option_restricted(&self.name, (c_char::MIN as i32) != 0)
     }
 }
 
@@ -3700,7 +3700,7 @@ impl NzbgetRsOptions {
     }
 
     pub(crate) fn for_each_option(&self, mut cb: impl FnMut(&CStr, &CStr, c_int)) {
-        let signed_char = c_char::MIN < 0;
+        let signed_char = (c_char::MIN as i32) != 0;
         for e in &self.opt_entries {
             let val = e.value.as_deref().unwrap_or(c"");
             let restr = c_int::from(option_restricted(&e.name, signed_char));
@@ -3730,7 +3730,7 @@ impl NzbgetRsOptions {
             let name_bytes = name.to_bytes();
             for cat in &self.categories {
                 let alias_slices: Vec<&[u8]> = cat.aliases.iter().map(|a| a.to_bytes()).collect();
-                if category_alias_list_matches(&alias_slices, name_bytes, c_char::MIN < 0) {
+                if category_alias_list_matches(&alias_slices, name_bytes, (c_char::MIN as i32) != 0) {
                     return Some(cat);
                 }
             }
@@ -4513,7 +4513,7 @@ pub unsafe extern "C" fn nzbget_rs_options_query(
         }
         1 => {
             if let Some(f) = cb {
-                let signed_char = c_char::MIN < 0;
+                let signed_char = (c_char::MIN as i32) != 0;
                 for e in &opts.opt_entries {
                     let val = e.value.as_deref().unwrap_or(c"");
                     let restr = c_int::from(option_restricted(&e.name, signed_char));

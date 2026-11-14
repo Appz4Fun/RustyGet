@@ -3815,7 +3815,7 @@ pub fn xmlrpc_execute_load_config(
             (
                 n.to_bytes(),
                 v.to_bytes(),
-                crate::options::option_restricted(n, c_char::MIN < 0),
+                crate::options::option_restricted(n, (c_char::MIN as i32) != 0),
             )
         })
         .collect();

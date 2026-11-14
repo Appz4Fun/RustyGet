@@ -386,7 +386,10 @@ def run_one(binary, name, keep, par_quick='no'):
         options = ['DupeArticleFallback=' + mode,
                    'ParCheck=' + ('force' if name.startswith('deferfailover') else 'auto'),
                    'ParQuick=' + par_quick, 'ParScan=full', 'ParRepair=yes',
-                   'ParCleanupQueue=no', 'DownloadRate=1024']
+                   'ParCleanupQueue=no', 'DownloadRate=1024',
+                   # These scenarios pin the par2-first order; the default
+                   # (DupeBorrowFirst=yes) recovers from duplicates first.
+                   'DupeBorrowFirst=no']
         if name.startswith('deferfailover'):
             options.append('HealthCheck=dupe')
         daemon.write_config(options)

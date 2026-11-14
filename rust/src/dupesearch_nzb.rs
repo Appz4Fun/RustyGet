@@ -708,6 +708,10 @@ pub fn eval_fleet_member_health(
 }
 
 /// `Fleet::Append` candidate ranking and copy interleaving.
+/// Usable members come before unknown, dead and broken ones; among them TWINs
+/// go first, then borrowable ALTs, ALTs of unknown packaging and unborrowable
+/// ALTs (`kind`, a [`crate::donorkind::DonorKind`] as `u8`), each kind ordered
+/// by health and then by closeness to the typical size.
 /// Returns number of ranked indices written to `out_ranked`.
 pub fn rank_fleet_candidates(
     has_error: &[u8],
@@ -715,6 +719,7 @@ pub fn rank_fleet_candidates(
     dead: &[u8],
     alive: &[i32],
     total_bytes: &[i64],
+    kind: &[u8],
     out_ranked: &mut [usize],
 ) -> usize {
     let n = has_error
@@ -722,7 +727,8 @@ pub fn rank_fleet_candidates(
         .min(same_as.len())
         .min(dead.len())
         .min(alive.len())
-        .min(total_bytes.len());
+        .min(total_bytes.len())
+        .min(kind.len());
     let mut sizes: Vec<i64> = Vec::with_capacity(n);
     for i in 0..n {
         if has_error[i] == 0 {
@@ -753,6 +759,7 @@ pub fn rank_fleet_candidates(
     order.sort_by(|&a, &b| {
         tier(a)
             .cmp(&tier(b))
+            .then_with(|| kind[a].cmp(&kind[b]))
             .then_with(|| alive[b].cmp(&alive[a]))
             .then_with(|| distance(a).cmp(&distance(b)))
     });
@@ -4208,10 +4215,26 @@ mod tests {
             &[0, 0, 0],
             &[90, 90, 100],
             &[1000, 1000, 1000],
+            &[2, 2, 2],
             &mut ranked,
         );
         assert_eq!(count, 3);
         assert_eq!(ranked, [2, 0, 1]);
+
+        // TWINs by health, then borrowable, then unborrowable ALTs; a dead or
+        // unchecked member stays behind every usable one whatever its kind
+        let mut ranked = [0usize; 6];
+        let count = rank_fleet_candidates(
+            &[0, 0, 0, 0, 0, 0],
+            &[-1, -1, -1, -1, -1, -1],
+            &[0, 0, 0, 0, 1, 0],
+            &[100, 70, 90, 99, 80, -1],
+            &[1000, 1000, 1000, 1000, 1000, 1000],
+            &[3, 0, 0, 1, 0, 0],
+            &mut ranked,
+        );
+        assert_eq!(count, 6);
+        assert_eq!(ranked, [2, 1, 3, 0, 5, 4]);
 
         assert_eq!(donor_sample_count(5000, 2, 20, 300), 100);
         assert_eq!(adjust_pipeline_depth(4, 500, 32), 8);

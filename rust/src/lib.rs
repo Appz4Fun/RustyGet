@@ -86,6 +86,7 @@ pub mod wildmask;
 
 pub mod artwritercore;
 pub mod diskstate_format;
+pub mod donorkind;
 pub mod dupefallback;
 pub mod dupeidentity;
 pub mod ncurses_format;

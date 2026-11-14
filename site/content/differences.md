@@ -58,7 +58,7 @@ See [Duplicate fleets](duplicate-fleets.md) and [Donor search](dupesearch.md).
 
 ## Options
 
-Twenty-two new options are in **INCOMING NZBS**, after `DupeCheck`. Left out of the configuration file, they keep NZBGet's behavior: `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeBorrowFirst`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeFastDonors`, `DupePrimaryScore`, `DupeSizeTolerance`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`. `DupeBorrowFirst` is on by default, but it only acts once `DupeArticleFallback` is on. `HealthCheck` gains the value `dupe`. One new option is in **SECURITY**: `JsonP`, off by default, turns on answers to JSON-P requests, which NZBGet always answered.
+Twenty-two new options are in **INCOMING NZBS**, after `DupeCheck`: `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeBorrowFirst`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeFastDonors`, `DupePrimaryScore`, `DupeSizeTolerance`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`. Repair from duplicates is on by default, in the configuration file and when an option is left out of it: `DupeArticleFallback=live`, `DupeStreamDecompress=yes` and `DupeBorrowFirst=yes`. `HealthCheck` gains the value `dupe`, now its default, and `ParScan=dupe`, `DirectUnpack=yes` and `DirectRename=yes` are the defaults too. `DupeSearch` stays off by default. A fleet ranks its copies TWINs first (by health), then ALTs whose packaging the byte-level repair can read, then the rest, and duplicates are asked for missing data in the same order. One new option is in **SECURITY**: `JsonP`, off by default, turns on answers to JSON-P requests, which NZBGet always answered.
 
 ### Defaults
 
@@ -95,7 +95,7 @@ See [Configuration options](options.md) for every option.
 
 - New method `appendfleet`, the TLS cipher test methods `tlscipherstart`, `tlscipherstatus`, and `tlsciphercancel`, and new fields `DupeRecoveredArticles`, `DupeRecoveredBytesLo`, `DupeRecoveredBytesHi`, `DupeRecoveredHoles`, and `LiveRepairing`.
 - New stage `STREAM_REPAIRING`.
-- New NZB parameters, including `DupeKind`, `DupeFiles`, `DupeAlive`, and `DupeFleet`.
+- New NZB parameters, including `DupeKind`, `DupeCopyKind`, `DupeFiles`, `DupeAlive`, and `DupeFleet`.
 - Methods that change the system or reach out to the network need POST. Plain GET runs only the methods that read.
 - JSON-P is off unless option `JsonP` turns it on. Then it runs only the methods that read, with the restricted user's access, so user names, passwords, and API keys come back as `***`. In NZBGet, JSON-P ran every method with full access, and any web page could read the answers.
 - `system.multicall` respects the caller's access level.

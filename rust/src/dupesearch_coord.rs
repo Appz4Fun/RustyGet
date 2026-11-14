@@ -24,16 +24,15 @@ use crate::dupesearch_nzb::{
     eval_fleet_member_health, eval_fleet_outcome_reason, eval_member_rerank, eval_pick_gone,
     fleet_calc_member_add_score, fleet_clamp_timeout_sec, fleet_ensure_nzb_ext,
     fleet_format_fetch_error, fleet_format_summary_log, fleet_member_skip_reason,
-    fleet_update_key_score_bounds,
-    fleet_visit_pipe_names, http_get_format_temp_path, http_get_read_and_delete, lower_key,
-    mark_searching_pending, mask_newznab_text, newznab_format_query_label,
-    newznab_format_search_info_name, parse_atoi_bytes, parse_dupesearch_state_line,
-    parse_newznab_response, parse_nzb_summary, parse_pending_meta, placement_available,
-    rank_fleet_candidates, save_pending_finish, save_pending_header, save_pending_item,
-    saved_history_backup, sort_verified_postings, DonorAnswer, DonorExchangeError,
-    DonorHealthResult, DonorOptions, DonorPosting, DonorRequest, DonorSampleOptions, DonorServer,
-    DonorServerExchange, FetchedArticleResult, NewznabResult, NzbFetchReason, NzbFetched,
-    NzbFetcherCore, NzbFetcherStats, NzbSummaryData, DONOR_MIN_KNOWN,
+    fleet_update_key_score_bounds, fleet_visit_pipe_names, http_get_format_temp_path,
+    http_get_read_and_delete, lower_key, mark_searching_pending, mask_newznab_text,
+    newznab_format_query_label, newznab_format_search_info_name, parse_atoi_bytes,
+    parse_dupesearch_state_line, parse_newznab_response, parse_nzb_summary, parse_pending_meta,
+    placement_available, rank_fleet_candidates, save_pending_finish, save_pending_header,
+    save_pending_item, saved_history_backup, sort_verified_postings, DonorAnswer,
+    DonorExchangeError, DonorHealthResult, DonorOptions, DonorPosting, DonorRequest,
+    DonorSampleOptions, DonorServer, DonorServerExchange, FetchedArticleResult, NewznabResult,
+    NzbFetchReason, NzbFetched, NzbFetcherCore, NzbFetcherStats, NzbSummaryData, DONOR_MIN_KNOWN,
 };
 use crate::dupewatch::{
     build_item_flags, dead_donor, decide, effective_alive, format_searched_state_line, higher_peer,
@@ -1187,6 +1186,99 @@ fn par_doomed_via_host(
         alive,
         block,
     )
+}
+
+/// Longest a fleet spends reading par2 lists and archive headers to tell its
+/// TWINs and borrowable ALTs apart.
+const FLEET_KIND_PROBE_MAX_SEC: i64 = 20;
+const FLEET_KIND_PROBE_PARALLEL: usize = 8;
+
+fn summary_password_known(info: &NzbSummaryData) -> bool {
+    info.meta
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case(b"password") && !v.trim_ascii().is_empty())
+}
+
+/// The [`crate::donorkind::DonorKind`] of each usable fleet member: TWIN when
+/// another member is its twin, else by the packaging of its largest data file.
+/// One member alone needs no ranking, so nothing is fetched for it. Reads the
+/// par2 index and the largest file's first article of every member, until
+/// `deadline` (unix seconds); what was not read counts as unknown.
+fn fleet_member_kinds(
+    host_ctx: *mut c_void,
+    host_cb: DupeHostFn,
+    summaries: &[&NzbSummaryData],
+    deadline: i64,
+) -> Vec<crate::donorkind::DonorKind> {
+    use crate::donorkind::{DonorKind, Packing};
+    let n = summaries.len();
+    if n < 2 {
+        return vec![DonorKind::Unknown; n];
+    }
+    let slots: Vec<Mutex<(crate::twin::Listed, Packing)>> = (0..n)
+        .map(|_| Mutex::new((crate::twin::Listed::default(), Packing::Unknown)))
+        .collect();
+    let ctx_addr = host_ctx as usize;
+    for chunk in (0..n).collect::<Vec<_>>().chunks(FLEET_KIND_PROBE_PARALLEL) {
+        if now_unix_sec() >= deadline || donor_stopping() || http_stopped() {
+            break;
+        }
+        std::thread::scope(|s| {
+            for &i in chunk {
+                let info = summaries[i];
+                let slot = &slots[i];
+                s.spawn(move || {
+                    let ctx = ctx_addr as *mut c_void;
+                    let groups = summary_groups_arc(info);
+                    let mut listed = crate::twin::Listed::default();
+                    if !info.par_index.id.is_empty() {
+                        let art = fetch_article_via_host(
+                            ctx,
+                            host_cb,
+                            &info.par_index.id,
+                            &groups,
+                            deadline,
+                        );
+                        if art.success {
+                            let (sigs, complete) = crate::twin::par2_set(&art.data);
+                            listed.sigs = sigs;
+                            listed.complete = complete;
+                        }
+                    }
+                    let mut packing = Packing::Unknown;
+                    if let Some(head) = info.heads.iter().max_by_key(|h| h.bytes) {
+                        let art = fetch_article_via_host(ctx, host_cb, &head.id, &groups, deadline);
+                        if art.success {
+                            packing = crate::donorkind::packing_of_head(
+                                &art.data,
+                                &head.name,
+                                summary_password_known(info),
+                            );
+                        }
+                    }
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = (listed, packing);
+                });
+            }
+        });
+    }
+    let probed: Vec<(crate::twin::Listed, Packing)> = slots
+        .into_iter()
+        .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
+        .collect();
+    (0..n)
+        .map(|i| {
+            let has_twin = (0..n).any(|j| {
+                j != i
+                    && crate::donorkind::twins(
+                        &probed[i].0,
+                        &probed[j].0,
+                        (summaries[i].data_bytes, summaries[i].data_files),
+                        (summaries[j].data_bytes, summaries[j].data_files),
+                    )
+            });
+            DonorKind::of(has_twin, probed[i].1)
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -4953,6 +5045,7 @@ pub unsafe fn fleet_append(
         same_as: i32,
         existing_id: i32,
         error: Vec<u8>,
+        kind: crate::donorkind::DonorKind,
     }
 
     let mut candidates: Vec<FleetCandidate> = Vec::with_capacity(members.len());
@@ -4967,6 +5060,7 @@ pub unsafe fn fleet_append(
             same_as: -1,
             existing_id: 0,
             error: Vec::new(),
+            kind: crate::donorkind::DonorKind::Unknown,
         };
         if !members[i].url.is_empty() {
             let (ok, status, body) = slot.into_inner().unwrap_or_else(|e| e.into_inner());
@@ -5241,17 +5335,38 @@ pub unsafe fn fleet_append(
         }
     }
 
+    // TWINs first, then ALTs by how well stream repair can borrow from them.
+    {
+        let usable: Vec<usize> = (0..candidates.len())
+            .filter(|&i| {
+                let c = &candidates[i];
+                c.error.is_empty() && c.same_as < 0 && !c.dead
+            })
+            .collect();
+        let remaining_sec = (deadline_ms - donor_now_ms() - FINISH_RESERVE_MS).max(0) / 1000;
+        let probe_deadline = now_unix_sec() + remaining_sec.min(FLEET_KIND_PROBE_MAX_SEC);
+        let summaries: Vec<&NzbSummaryData> =
+            usable.iter().map(|&i| &candidates[i].summary).collect();
+        let kinds = fleet_member_kinds(host_ctx, host_cb, &summaries, probe_deadline);
+        for (&i, kind) in usable.iter().zip(kinds) {
+            candidates[i].kind = kind;
+        }
+    }
+
     let mut cand_err = vec![0u8; candidates.len()];
     let mut cand_dead = vec![0u8; candidates.len()];
     let mut cand_same_as = vec![0i32; candidates.len()];
     let mut cand_alive = vec![0i32; candidates.len()];
     let mut cand_bytes = vec![0i64; candidates.len()];
+    let mut cand_kind = vec![0u8; candidates.len()];
     for i in 0..candidates.len() {
         if candidates[i].same_as >= 0 {
             let orig = candidates[i].same_as as usize;
             candidates[i].alive = candidates[orig].alive;
             candidates[i].dead = candidates[orig].dead;
+            candidates[i].kind = candidates[orig].kind;
         }
+        cand_kind[i] = candidates[i].kind as u8;
         cand_err[i] = u8::from(!candidates[i].error.is_empty());
         cand_same_as[i] = candidates[i].same_as;
         cand_dead[i] = u8::from(candidates[i].dead);
@@ -5266,6 +5381,7 @@ pub unsafe fn fleet_append(
         &cand_dead,
         &cand_alive,
         &cand_bytes,
+        &cand_kind,
         &mut ranked_idx,
     );
     ranked_idx.truncate(ranked_count);
@@ -5357,7 +5473,10 @@ pub unsafe fn fleet_append(
             } else {
                 None
             };
-            let mut params: Vec<(&[u8], &[u8])> = vec![(FLEET_PARAM, &rank_str)];
+            let mut params: Vec<(&[u8], &[u8])> = vec![
+                (FLEET_PARAM, &rank_str),
+                (crate::donorkind::KIND_PARAM, cand.kind.param()),
+            ];
             if let Some(av) = alive_str.as_deref() {
                 params.push((ALIVE_PARAM, av));
             }

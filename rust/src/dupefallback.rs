@@ -1446,6 +1446,36 @@ pub fn compare_donors(
     id1 < id2
 }
 
+/// What orders the duplicates asked for missing articles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DonorRank {
+    /// a TWIN of the download being repaired (its articles swap one for one)
+    pub twin: bool,
+    /// the kind its fleet gave it (unknown when no fleet added it)
+    pub kind: crate::donorkind::DonorKind,
+    /// share of its articles found alive when it was checked, `-1` unknown
+    pub alive_permille: i32,
+    pub score: i32,
+    pub id: i32,
+}
+
+/// TWINs of the download first, healthiest first; then borrowable ALTs, ALTs
+/// of unknown packaging and unborrowable ALTs; within a kind by duplicate score
+/// (a fleet scores its members by its own ranking) and then by id.
+pub fn compare_donor_ranks(a: &DonorRank, b: &DonorRank) -> std::cmp::Ordering {
+    b.twin
+        .cmp(&a.twin)
+        .then_with(|| {
+            if a.twin {
+                b.alive_permille.cmp(&a.alive_permille)
+            } else {
+                a.kind.cmp(&b.kind)
+            }
+        })
+        .then_with(|| b.score.cmp(&a.score))
+        .then_with(|| a.id.cmp(&b.id))
+}
+
 /// `DupeArticleFallback::PinSources`:
 /// Checks whether a non-twin lead donor should be reset when `twin_only` is active.
 pub fn should_reset_non_twin_lead(
@@ -2636,21 +2666,23 @@ pub(crate) fn collect_donors_host(
         }
     }
 
-    donors.sort_by(|d1, d2| {
-        let t1 = twin_ptrs.contains(&d1.ptr);
-        let t2 = twin_ptrs.contains(&d2.ptr);
-        if t1 != t2 {
-            return if t1 {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Greater
+    let ranks: std::collections::HashMap<usize, DonorRank> = donors
+        .iter()
+        .map(|d| {
+            let rank = DonorRank {
+                twin: twin_ptrs.contains(&d.ptr),
+                kind: crate::donorkind::DonorKind::from_param(
+                    host.nzb_get_param(d.ptr, crate::donorkind::KIND_PARAM)
+                        .as_deref(),
+                ),
+                alive_permille: crate::dupecoord::alive_permille_host(host, d.ptr),
+                score: d.dupe_score,
+                id: d.id,
             };
-        }
-        if d1.dupe_score != d2.dupe_score {
-            return d2.dupe_score.cmp(&d1.dupe_score);
-        }
-        d1.id.cmp(&d2.id)
-    });
+            (d.ptr, rank)
+        })
+        .collect();
+    donors.sort_by(|d1, d2| compare_donor_ranks(&ranks[&d1.ptr], &ranks[&d2.ptr]));
 
     donors
 }
@@ -3651,6 +3683,53 @@ mod tests {
         assert!(is_twin_kind(b"fp1", b"fp2", b"twin 16/18"));
         assert!(!is_twin_kind(b"fp1", b"fp2", b"alt"));
         assert!(compare_donors(true, 10, 5, false, 100, 1));
+        {
+            use crate::donorkind::DonorKind as K;
+            use std::cmp::Ordering::{Greater, Less};
+            let r = |twin, kind, alive_permille, score, id| DonorRank {
+                twin,
+                kind,
+                alive_permille,
+                score,
+                id,
+            };
+            // a twin beats a better-scored borrowable alt
+            assert_eq!(
+                compare_donor_ranks(
+                    &r(true, K::Unknown, 500, 1, 9),
+                    &r(false, K::Borrowable, 1000, 99, 1)
+                ),
+                Less
+            );
+            // twins by health before score
+            assert_eq!(
+                compare_donor_ranks(&r(true, K::Twin, 900, 1, 1), &r(true, K::Twin, 990, 0, 2)),
+                Greater
+            );
+            // alts by kind before score
+            assert_eq!(
+                compare_donor_ranks(
+                    &r(false, K::Borrowable, -1, 1, 1),
+                    &r(false, K::Unborrowable, 1000, 99, 2)
+                ),
+                Less
+            );
+            assert_eq!(
+                compare_donor_ranks(
+                    &r(false, K::Unknown, -1, 1, 1),
+                    &r(false, K::Unborrowable, -1, 99, 2)
+                ),
+                Less
+            );
+            // same kind: score, then id
+            assert_eq!(
+                compare_donor_ranks(
+                    &r(false, K::Unknown, -1, 5, 2),
+                    &r(false, K::Unknown, -1, 5, 1)
+                ),
+                Greater
+            );
+        }
         assert!(should_reset_non_twin_lead(true, 3, b"fp1", b"fp2", b"alt"));
         assert!(is_bad_donor_in_cooldown(105, 100, 30));
         assert!(!is_bad_donor_in_cooldown(130, 100, 30));

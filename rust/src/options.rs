@@ -732,7 +732,10 @@ mod tests {
             c"Ext:Option",
             c":",
         ] {
-            assert!(option_restricted(name, (c_char::MIN as i32) != 0), "{name:?}");
+            assert!(
+                option_restricted(name, (c_char::MIN as i32) != 0),
+                "{name:?}"
+            );
         }
         for name in [
             c"DupeSearchUrl",
@@ -742,7 +745,10 @@ mod tests {
             c"Server1.Host",
             c"",
         ] {
-            assert!(!option_restricted(name, (c_char::MIN as i32) != 0), "{name:?}");
+            assert!(
+                !option_restricted(name, (c_char::MIN as i32) != 0),
+                "{name:?}"
+            );
         }
         // only the first 1023 bytes are searched for the words; a ':' anywhere counts
         let mut long = vec![b'a'; 1020];
@@ -1421,8 +1427,8 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"AppendCategoryDir", c"yes"),
         (c"OutputMode", output_mode),
         (c"DupeCheck", c"yes"),
-        (c"DupeArticleFallback", c"no"),
-        (c"DupeStreamDecompress", c"no"),
+        (c"DupeArticleFallback", c"live"),
+        (c"DupeStreamDecompress", c"yes"),
         (c"DupeStreamTimeout", c"60"),
         (c"DupeBorrowFirst", c"yes"),
         (c"DupeSearch", c"no"),
@@ -1484,7 +1490,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"DetailTarget", c"both"),
         (c"ParCheck", c"auto"),
         (c"ParRepair", c"yes"),
-        (c"ParScan", c"extended"),
+        (c"ParScan", c"dupe"),
         (c"ParQuick", c"yes"),
         (c"PostStrategy", c"sequential"),
         (c"FileNaming", c"article"),
@@ -1495,7 +1501,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"ParBuffer", c"250"),
         (c"ParThreads", c"0"),
         (c"RarRename", c"yes"),
-        (c"HealthCheck", c"none"),
+        (c"HealthCheck", c"dupe"),
         (c"DirectRename", c"yes"),
         (c"HardLinking", c"no"),
         (c"HardLinkingIgnoreExt", c".zip, .7z, .rar, *.7z.###, *.r##"),
@@ -3730,7 +3736,8 @@ impl NzbgetRsOptions {
             let name_bytes = name.to_bytes();
             for cat in &self.categories {
                 let alias_slices: Vec<&[u8]> = cat.aliases.iter().map(|a| a.to_bytes()).collect();
-                if category_alias_list_matches(&alias_slices, name_bytes, (c_char::MIN as i32) != 0) {
+                if category_alias_list_matches(&alias_slices, name_bytes, (c_char::MIN as i32) != 0)
+                {
                     return Some(cat);
                 }
             }
@@ -4897,6 +4904,10 @@ mod options_full_suite_port_from_cpp {
     fn dupe_article_fallback_option_test() {
         {
             let options = RustOptions::new_no_config(Some(&[]), None);
+            assert_eq!(options.scalars.dupe_article_fallback, 3); // dafLive (default)
+        }
+        {
+            let options = RustOptions::new_no_config(Some(&[c"DupeArticleFallback=no"]), None);
             assert_eq!(options.scalars.dupe_article_fallback, 0); // dafNone
         }
         {
@@ -4916,6 +4927,14 @@ mod options_full_suite_port_from_cpp {
     #[test]
     fn health_check_dupe_option_test() {
         {
+            let options = RustOptions::new_no_config(Some(&[]), None);
+            assert_eq!(options.scalars.health_check, 4); // hcDupe (default)
+            assert_eq!(options.scalars.par_scan, 3); // psDupe (default)
+            assert_eq!(options.scalars.direct_unpack, 1);
+            assert_eq!(options.scalars.dupe_check, 1);
+            assert_eq!(options.scalars.dupe_search, 0);
+        }
+        {
             let options = RustOptions::new_no_config(Some(&[c"HealthCheck=dupe"]), None);
             assert_eq!(options.scalars.health_check, 4); // hcDupe
         }
@@ -4929,6 +4948,10 @@ mod options_full_suite_port_from_cpp {
     fn dupe_stream_decompress_option_test() {
         {
             let options = RustOptions::new_no_config(Some(&[]), None);
+            assert_eq!(options.scalars.dupe_stream_decompress, 1);
+        }
+        {
+            let options = RustOptions::new_no_config(Some(&[c"DupeStreamDecompress=no"]), None);
             assert_eq!(options.scalars.dupe_stream_decompress, 0);
         }
         {

@@ -460,8 +460,10 @@ where
 
 /// Returns true when `RarLister::FindLargestFile` in `DupeMatcher.cpp` should continue waiting for `unrar` (`is_running && start_time + timeout_sec > cur_time && start_time >= cur_time`).
 /// The history backup to send back to the queue after a download failed its
-/// health check with nothing of its key left in the queue: the wholest live
-/// backup, by its measured `DupeAlive` share and then its score. Unlike
+/// health check with nothing of its key left in the queue: TWINs first, then
+/// borrowable, unknown and unborrowable ALTs (`DupeCopyKind`, see
+/// [`crate::donorkind`]), each the wholest live backup by its measured
+/// `DupeAlive` share and then its score. Unlike
 /// `select_dupe_backup` it takes backups in DupeMode FORCE and backups filed
 /// as copies, which failover skips. `-1` when a download of the key is
 /// queued, one already succeeded, or no backup is alive.
@@ -488,9 +490,11 @@ where
     if succeeded {
         return -1;
     }
-    let mut best: Option<(usize, (i32, i32))> = None;
+    let mut best: Option<(usize, (i32, i32, i32))> = None;
     for (idx, h) in history.iter().enumerate() {
-        let rank = (h.alive_permille.max(-1), h.dupe_score);
+        // TWINs first, then borrowable, unknown and unborrowable ALTs; each by
+        // its measured health and then its score
+        let rank = (-h.donor_kind, h.alive_permille.max(-1), h.dupe_score);
         if h.kind == HISTORY_KIND_NZB
             && h.same_name_or_key != 0
             && (h.delete_status == DELETE_STATUS_DUPE || h.delete_status == DELETE_STATUS_COPY)
@@ -963,6 +967,7 @@ pub(crate) fn no_backup_reason_host(
             health: 0,
             critical_health: 0,
             same_name_or_key: 0,
+            donor_kind: 2,
         };
         let mut qfn = Vec::new();
         if hi.kind == crate::queuesubsys_host::HK_NZB && hi.inner_ptr != 0 {
@@ -971,6 +976,10 @@ pub(crate) fn no_backup_reason_host(
             c.mark_status = item.mark_status;
             c.delete_status = item.delete_status;
             c.alive_permille = alive_permille_host(host, item.ptr);
+            c.donor_kind = crate::donorkind::DonorKind::from_param(
+                host.nzb_get_param(item.ptr, crate::donorkind::KIND_PARAM)
+                    .as_deref(),
+            ) as i32;
             c.health = item.health;
             c.critical_health = item.critical_health_opt;
             c.same_name_or_key = i32::from(
@@ -1037,6 +1046,7 @@ fn collect_dupe_candidates(
             health: 0,
             critical_health: 0,
             same_name_or_key: 0,
+            donor_kind: 2,
         };
         let mut qfn = Vec::new();
         if (hi.kind == crate::queuesubsys_host::HK_NZB
@@ -1051,6 +1061,10 @@ fn collect_dupe_candidates(
             c.delete_status = item.delete_status;
             c.full_content_hash = item.full_content_hash;
             c.alive_permille = alive_permille_host(host, item.ptr);
+            c.donor_kind = crate::donorkind::DonorKind::from_param(
+                host.nzb_get_param(item.ptr, crate::donorkind::KIND_PARAM)
+                    .as_deref(),
+            ) as i32;
             c.health = item.health;
             c.critical_health = item.critical_health_opt;
             c.same_name_or_key = i32::from(same_name_or_key(
@@ -1925,6 +1939,7 @@ mod tests {
             health: 1000,
             critical_health: 900,
             same_name_or_key: 1,
+            donor_kind: 2,
         }
     }
 
@@ -1972,6 +1987,20 @@ mod tests {
         assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
         // unmeasured backups only when nothing measured is alive
         assert_eq!(select_rescue_backup(&history[..1], &queue, |_| true), 0);
+    }
+
+    #[test]
+    fn rescue_orders_twins_then_borrowable_alts() {
+        let mut twin = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_010, 700);
+        twin.donor_kind = crate::donorkind::DonorKind::Twin as i32;
+        let mut borrowable = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_090, 990);
+        borrowable.donor_kind = crate::donorkind::DonorKind::Borrowable as i32;
+        let mut unborrowable = rescue_candidate(DUPE_MODE_SCORE, DELETE_STATUS_DUPE, 999_095, 1000);
+        unborrowable.donor_kind = crate::donorkind::DonorKind::Unborrowable as i32;
+        let queue = [rescue_self()];
+        let history = [unborrowable, borrowable, twin];
+        assert_eq!(select_rescue_backup(&history, &queue, |_| true), 2);
+        assert_eq!(select_rescue_backup(&history[..2], &queue, |_| true), 1);
     }
 
     #[test]
@@ -2167,6 +2196,7 @@ mod tests {
                     b"Rel.2026.1080p-A",
                     b"imdb:1",
                 )),
+                donor_kind: 2,
             }
         };
 

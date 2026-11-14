@@ -926,6 +926,14 @@ impl NzbgetRsParChecker {
             hooks,
         };
         let res = repairer.process(do_repair, &ev);
+        if !do_repair {
+            let files = repairer.source_files();
+            let quick = files.iter().filter(|file| file.quick_verified).count();
+            hooks.print_message(MK_DETAIL, format!(
+                "PAR verification metrics {{\"source_files\":{},\"quick_verified_files\":{},\"repair_needed\":{}}}",
+                files.len(), quick, repairer.repairer.verify_result().repair_needed,
+            ).as_bytes());
+        }
         self.source_file_count
             .store(repairer.source_files().len(), Ordering::Release);
         hooks.global_log(
@@ -2829,6 +2837,7 @@ struct DirectUnpackHoldState {
     abandoned: bool,
     /// A live par2 repair of the held volumes is running on its helper thread.
     live_repair_running: bool,
+    live_repair_generation: Option<crate::parlive::SessionGeneration>,
     /// Lost byte ranges of held volumes, by full path. A held volume with known ranges is
     /// handed to the extraction session with those ranges as holes instead of pausing it.
     holes: std::collections::HashMap<Vec<u8>, Vec<(u64, u64)>>,
@@ -2999,98 +3008,224 @@ pub(crate) fn direct_unpack_release_all(nzb_id: i32) {
     }
 }
 
-/// Live par2 repair for a paused direct unpack: when the recovery blocks already downloaded
-/// cover everything that is damaged or has not arrived yet, the held volumes are repaired on
-/// a helper thread before the download finishes and released, so extraction continues.
-/// Cheap to call often; at most one repair runs per download.
-#[cfg(unix)]
-pub(crate) fn direct_unpack_try_live_par_repair(nzb_id: i32, nzb_name: &[u8]) {
-    let held: Vec<Vec<u8>> = {
-        let mut map = direct_unpack_holds();
-        let Some(st) = map.get_mut(&nzb_id) else {
-            return;
-        };
-        if st.held.is_empty() || st.live_repair_running {
+struct LiveHoldRun {
+    nzb_id: i32,
+    generation: crate::parlive::SessionGeneration,
+    active: bool,
+}
+impl LiveHoldRun {
+    fn finish(&mut self) {
+        if !self.active {
             return;
         }
-        if !crate::parchecker::streaming_session_status(nzb_id)
-            .is_some_and(|status| status.early_cutover_possible)
+        self.active = false;
+        if let Some(state) = direct_unpack_holds().get_mut(&self.nzb_id) {
+            if state.live_repair_generation == Some(self.generation) {
+                state.live_repair_running = false;
+                state.live_repair_generation = None;
+            }
+        }
+    }
+}
+impl Drop for LiveHoldRun {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+struct LivePublication {
+    targets: Vec<(i32, Vec<u8>)>,
+    _admission: std::sync::Arc<crate::parlive::ControlLease>,
+}
+fn begin_live_hold_run(
+    nzb_id: i32,
+    generation: crate::parlive::SessionGeneration,
+) -> Option<LiveHoldRun> {
+    let mut map = direct_unpack_holds();
+    let state = map.get_mut(&nzb_id)?;
+    if state.held.is_empty() || state.abandoned || state.live_repair_running {
+        return None;
+    }
+    state.live_repair_running = true;
+    state.live_repair_generation = Some(generation);
+    Some(LiveHoldRun {
+        nzb_id,
+        generation,
+        active: true,
+    })
+}
+fn publish_live_holds(
+    nzb_id: i32,
+    generation: crate::parlive::SessionGeneration,
+    targets: &[(i32, Vec<u8>)],
+    verified: &[i32],
+) -> usize {
+    let mut map = direct_unpack_holds();
+    let Some(state) = map.get_mut(&nzb_id) else {
+        return 0;
+    };
+    if state.abandoned
+        || !state.live_repair_running
+        || state.live_repair_generation != Some(generation)
+    {
+        return 0;
+    }
+    let mut released = 0;
+    for (id, path) in targets {
+        if !verified.contains(id) {
+            continue;
+        }
+        if let Some(index) = state.held.iter().position(|held| held == path) {
+            let path = state.held.remove(index);
+            state.released.push(hold_path_filename(&path).to_vec());
+            released += 1;
+        }
+    }
+    if state.held.is_empty() {
+        state.awaiting_repair = false;
+    }
+    released
+}
+
+/// Capture only completed targets while the caller owns the queue. The helper never takes it.
+#[cfg(unix)]
+fn live_repair_may_start(nzb: &crate::queuesubsys_host::NzbSnap) -> bool {
+    // Ordinary postprocessing owns all mutation once its queued stage is taken.
+    !nzb.has_post_info
+        || (!nzb.post_working && nzb.post_stage == crate::queuesubsys_host::PT_QUEUED)
+}
+
+#[cfg(unix)]
+pub(crate) fn direct_unpack_try_live_par_repair(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) {
+    let nzb_id = nzb.id;
+    if host.self_is_stopped()
+        || nzb.deleting
+        || nzb.delete_status != 0
+        || !live_repair_may_start(nzb)
+        || host.opts().par_check == crate::queuesubsys_host::PC_MANUAL
+        || !crate::options::active_options()
+            .is_some_and(|options| options.scalars().par_repair != 0)
+        || !crate::parchecker::streaming_session_can_schedule_repair(nzb_id)
+    {
+        return;
+    }
+    let bytes = {
+        let map = direct_unpack_holds();
+        let Some(state) = map.get(&nzb_id) else {
+            return;
+        };
+        if state.held.is_empty()
+            || state.held.len() > 512
+            || state.live_repair_running
+            || state.abandoned
         {
             return;
         }
-        st.live_repair_running = true;
-        st.held.clone()
+        state.held.iter().try_fold(4096u64, |total, path| {
+            total.checked_add((path.len() as u64).checked_mul(4)?.checked_add(512)?)
+        })
     };
-    let nzb_name = nzb_name.to_vec();
-    let spawned = std::thread::Builder::new()
-        .name("live-par-repair".to_string())
-        .spawn(move || {
-            let names: Vec<Vec<u8>> = held
-                .iter()
-                .map(|p| hold_path_filename(p).to_vec())
-                .collect();
-            let started = std::time::Instant::now();
-            let outcome = crate::parchecker::streaming_session_early_repair(nzb_id, &names);
-            let mut msg = b"Live par-repair for ".to_vec();
-            msg.extend_from_slice(&nzb_name);
-            let kind = match outcome {
-                Some(Ok((report, done))) => {
-                    let mut released = 0usize;
-                    for (name, ok) in &done {
-                        if !*ok {
-                            continue;
-                        }
-                        if let Some(path) = held.iter().find(|p| hold_path_filename(p) == name.as_slice())
-                        {
-                            if direct_unpack_release_path(path) {
-                                released += 1;
-                            }
-                        }
-                    }
-                    msg.extend_from_slice(
-                        format!(
-                            ": repaired {} block(s) with {} recovery block(s) in {:.1} s while downloading, {} of {} paused volume(s) released",
-                            report.repaired_slices.len(),
-                            report.recovery_used,
-                            started.elapsed().as_secs_f64(),
-                            released,
-                            done.len()
-                        )
-                        .as_bytes(),
-                    );
-                    MK_INFO
-                }
-                Some(Err(err)) => {
-                    msg.extend_from_slice(
-                        format!(" not possible yet ({err}); left to par-check").as_bytes(),
-                    );
-                    MK_DETAIL
-                }
-                None => {
-                    msg.extend_from_slice(b" not possible yet; left to par-check");
-                    MK_DETAIL
-                }
-            };
-            crate::log::log_active_bytes(kind, &msg);
-            if let Some(st) = direct_unpack_holds().get_mut(&nzb_id) {
-                st.live_repair_running = false;
-            }
+    let Some(bytes) = bytes else {
+        return;
+    };
+    let Ok(charge) = crate::parlive::reserve_control(
+        nzb_id,
+        bytes,
+        crate::parchecker::effective_live_pool_bytes(),
+    ) else {
+        return;
+    };
+    let charge = std::sync::Arc::new(charge);
+    let held = {
+        let map = direct_unpack_holds();
+        let Some(state) = map.get(&nzb_id) else {
+            return;
+        };
+        let actual = state.held.iter().try_fold(4096u64, |total, path| {
+            total.checked_add((path.len() as u64).checked_mul(4)?.checked_add(512)?)
         });
-    match spawned {
-        Ok(handle) => {
-            let previous = LIVE_PAR_HELPERS
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(nzb_id, handle);
-            // At most one runs per download, so an earlier handle has already finished.
-            if let Some(previous) = previous {
-                let _ = previous.join();
+        if actual.is_none_or(|actual| actual > bytes)
+            || state.live_repair_running
+            || state.held.len() > 512
+        {
+            return;
+        }
+        state.held.clone()
+    };
+    let mut targets = Vec::with_capacity(held.len());
+    let mut publication = Vec::with_capacity(held.len());
+    for path in held {
+        let name = hold_path_filename(&path);
+        let mut queue_id = None;
+        for index in 0..host.nzb_completed_files_len(nzb.ptr) {
+            let file = host.nzb_completed_file_at(nzb.ptr, index);
+            if file.filename == name && !file.par_file {
+                queue_id = Some(file.id);
+                break;
             }
         }
-        Err(_) => {
-            if let Some(st) = direct_unpack_holds().get_mut(&nzb_id) {
-                st.live_repair_running = false;
+        let Some(file_id) = queue_id else {
+            return;
+        };
+        let expected = crate::fsops::path(&nzb.dest_dir).join(crate::fsops::path(name));
+        if expected != crate::fsops::path(&path) {
+            return;
+        }
+        targets.push(crate::parlive::WriterTarget {
+            file_id,
+            path: expected,
+        });
+        publication.push((file_id, path));
+    }
+    let Ok(request) = crate::parchecker::streaming_session_prepare_repair(
+        nzb_id,
+        targets,
+        std::sync::Arc::clone(&charge),
+    ) else {
+        return;
+    };
+    let publication = LivePublication {
+        targets: publication,
+        _admission: request.admission_hold(),
+    };
+    let generation = request.generation();
+    let Some(run) = begin_live_hold_run(nzb_id, generation) else {
+        return;
+    };
+    let nzb_name = nzb.name.clone();
+    let spawned = std::thread::Builder::new().name("live-par-repair".to_string()).spawn(move || {
+        let mut run = run; // Every exit, including unwind, returns to ordinary repair.
+        let started = std::time::Instant::now();
+        let outcome = match request.acquire() {
+            Ok(lease) => lease.repair_and_publish(
+                |verified| publish_live_holds(nzb_id, generation, &publication.targets, verified),
+                || run.finish(),
+            ),
+            Err(error) => { run.finish(); Err(error) }
+        };
+        let mut message = b"Live par-repair for ".to_vec();
+        message.extend_from_slice(&nzb_name);
+        let kind = match outcome {
+            Ok((report, released)) => {
+                message.extend_from_slice(format!(": repaired {} block(s) with {} recovery block(s) in {:.1} s while downloading, {} paused volume(s) released", report.repaired_slices.len(), report.recovery_used, started.elapsed().as_secs_f64(), released).as_bytes());
+                MK_INFO
             }
+            Err(error) => {
+                message.extend_from_slice(format!(" not possible yet ({error}); left to par-check").as_bytes());
+                MK_DETAIL
+            }
+        };
+        crate::log::log_active_bytes(kind, &message);
+    });
+    if let Ok(handle) = spawned {
+        let previous = LIVE_PAR_HELPERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(nzb_id, handle);
+        if let Some(previous) = previous {
+            let _ = previous.join();
         }
     }
 }
@@ -3104,6 +3239,7 @@ static LIVE_PAR_HELPERS: std::sync::LazyLock<
 /// Waits for the live par2 repair of download `nzb_id` to end. Called before the download's
 /// files are cleaned up (deletion, shutdown) so no repair write outlives the download.
 pub(crate) fn direct_unpack_join_live_par_repair(nzb_id: i32) {
+    crate::parchecker::streaming_session_cancel(nzb_id);
     #[cfg(unix)]
     {
         let handle = LIVE_PAR_HELPERS
@@ -6776,5 +6912,91 @@ mod post_job_arena_tests {
         drop(guard);
         assert_eq!(POST_JOB_STR_ARENA.with(|a| a.borrow().len()), 0);
         assert_eq!(POST_JOB_RANGE_ARENA.with(|a| a.borrow().len()), 0);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod live_hold_tests {
+    use super::*;
+    #[test]
+    fn live_hold_publication_is_scoped_to_its_generation_and_download() {
+        let id = -1900240;
+        let other = -1900241;
+        direct_unpack_hold(id, b"/fixture/part40.rar");
+        direct_unpack_hold(other, b"/fixture/part40.rar");
+        direct_unpack_set_awaiting_repair(id);
+        let old = begin_live_hold_run(id, crate::parlive::SessionGeneration(1)).unwrap();
+        assert_eq!(
+            publish_live_holds(
+                id,
+                crate::parlive::SessionGeneration(2),
+                &[(40, b"/fixture/part40.rar".to_vec())],
+                &[40]
+            ),
+            0
+        );
+        assert!(direct_unpack_has_holds(id));
+        assert_eq!(
+            publish_live_holds(
+                id,
+                crate::parlive::SessionGeneration(1),
+                &[(40, b"/fixture/part40.rar".to_vec())],
+                &[40]
+            ),
+            1
+        );
+        assert!(!direct_unpack_has_holds(id));
+        assert!(direct_unpack_has_holds(other));
+        drop(old);
+        direct_unpack_forget_holds(id);
+        direct_unpack_forget_holds(other);
+    }
+    #[test]
+    fn finished_run_cannot_clear_a_new_run_in_the_same_generation() {
+        let id = -1900243;
+        direct_unpack_hold(id, b"/fixture/part40.rar");
+        direct_unpack_set_awaiting_repair(id);
+        let generation = crate::parlive::SessionGeneration(4);
+        let mut first = begin_live_hold_run(id, generation).unwrap();
+        first.finish();
+        let second = begin_live_hold_run(id, generation).unwrap();
+        drop(first);
+        assert!(
+            !direct_unpack_awaiting_repair(id),
+            "old finished guard reset the next helper"
+        );
+        drop(second);
+        assert!(direct_unpack_awaiting_repair(id));
+        direct_unpack_forget_holds(id);
+    }
+
+    #[test]
+    fn normal_postprocessing_takeover_prevents_a_late_live_retry() {
+        use crate::queuesubsys_host::{NzbSnap, PT_LOADING_PARS, PT_QUEUED, PT_UNPACKING};
+        let mut nzb = NzbSnap::default();
+        assert!(live_repair_may_start(&nzb));
+        nzb.has_post_info = true;
+        nzb.post_stage = PT_QUEUED;
+        assert!(live_repair_may_start(&nzb));
+        nzb.post_working = true;
+        assert!(!live_repair_may_start(&nzb));
+        nzb.post_working = false;
+        nzb.post_stage = PT_LOADING_PARS;
+        assert!(!live_repair_may_start(&nzb));
+        nzb.post_stage = PT_UNPACKING;
+        assert!(!live_repair_may_start(&nzb));
+    }
+
+    #[test]
+    fn failed_live_helper_keeps_normal_repair_available() {
+        let id = -1900242;
+        direct_unpack_hold(id, b"/fixture/part40.rar");
+        direct_unpack_set_awaiting_repair(id);
+        let run = begin_live_hold_run(id, crate::parlive::SessionGeneration(3)).unwrap();
+        assert!(!direct_unpack_awaiting_repair(id));
+        drop(run); // failure, spawn refusal or unwind
+        assert!(direct_unpack_has_holds(id));
+        assert!(direct_unpack_awaiting_repair(id));
+        direct_unpack_forget_holds(id);
     }
 }

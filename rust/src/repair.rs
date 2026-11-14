@@ -1392,13 +1392,31 @@ impl NzbgetRsRepairController {
                 }
                 let cf_name = unsafe { ptr_bytes(c_strs[0]) };
                 if cf_name.eq_ignore_ascii_case(filename) {
-                    return Some((c_ints[0], c_ints[1], c_ints[2] as u32, nzb.reprocess));
+                    return Some((
+                        c_ints[0],
+                        c_ints[1],
+                        c_ints[2] as u32,
+                        nzb.reprocess,
+                        nzb.id,
+                        nzb.dest_dir,
+                    ));
                 }
             }
             None
         });
 
-        let (id, status, crc, reprocess) = found?;
+        let (id, status, crc, reprocess, nzb_id, dest_dir) = found?;
+
+        if !reprocess {
+            if let Some(crc) = crate::parchecker::streaming_session_verified_target_crc(
+                nzb_id,
+                crate::fsops::path(&dest_dir),
+                id,
+                filename,
+            ) {
+                return Some(crate::parchecker::QuickInfo::Success { crc });
+            }
+        }
 
         let mut dbg = b"Found completed file: ".to_vec();
         dbg.extend_from_slice(filename);

@@ -8146,10 +8146,29 @@ impl ContentSourceSet for DiskSourceSet<'_> {
     }
 }
 
+fn guarded_donor_write(
+    file: &mut std::fs::File,
+    context: &crate::parlive::SourceWriteContext,
+    offset: i64,
+    data: &[u8],
+) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let offset = u64::try_from(offset).map_err(|_| std::io::ErrorKind::InvalidInput)?;
+    context.perform_io(|| {
+        file.seek(SeekFrom::Start(offset)).and_then(|position| {
+            if position != offset {
+                return Err(std::io::Error::other("seek mismatch"));
+            }
+            file.write_all(data).and_then(|()| file.flush())
+        })
+    })
+}
+
 /// Target member files in `dest_dir` opened read-write on demand for verify and patch
 /// (`TargetSetFiles` in `StreamRepair.h`).
 pub struct DiskTargetFileSet {
     dest_dir: Vec<u8>,
+    write_root: Option<crate::parlive::SourceWriteContext>,
     files: std::collections::BTreeMap<i32, Option<std::fs::File>>,
 }
 
@@ -8157,6 +8176,11 @@ impl DiskTargetFileSet {
     pub fn new(dest_dir: &[u8]) -> Self {
         Self {
             dest_dir: dest_dir.to_vec(),
+            write_root: crate::parlive::donor_write_context(
+                crate::fsops::path(dest_dir),
+                crate::fsops::path(dest_dir),
+            )
+            .ok(),
             files: std::collections::BTreeMap::new(),
         }
     }
@@ -8426,20 +8450,28 @@ impl TargetFileSet for DiskTargetFileSetAdapter<'_, '_, '_> {
     }
 
     fn write_file(&mut self, member_index: i32, offset: i64, data: &[u8]) -> bool {
-        use std::io::{Seek, SeekFrom, Write};
-        if offset < 0 {
+        if offset < 0 || self.env.borrow_mut().is_stopped() {
             return false;
         }
+        let Some(member) = usize::try_from(member_index)
+            .ok()
+            .and_then(|index| self.members.get(index))
+        else {
+            return false;
+        };
+        let path = crate::fsops::path(&self.files.dest_dir).join(crate::fsops::path(&member.name));
+        let Some(context) = self
+            .files
+            .write_root
+            .as_ref()
+            .map(|root| root.for_path(&path))
+        else {
+            return false;
+        };
         let Some(file) = self.files.get_file(self.members, member_index) else {
             return false;
         };
-        let io_res = file.seek(SeekFrom::Start(offset as u64)).and_then(|pos| {
-            if pos != offset as u64 {
-                Err(std::io::Error::other("seek mismatch"))
-            } else {
-                file.write_all(data).and_then(|()| file.flush())
-            }
-        });
+        let io_res = guarded_donor_write(file, &context, offset, data);
         if let Err(err) = io_res {
             let err_msg = write_error_message_bytes(&err);
             let member_name = self
@@ -9673,6 +9705,7 @@ const M1_UNPROVEN_DONOR_BAIL: i32 = 2;
 fn patch_disk_file_from_donor(
     file: &mut std::fs::File,
     target_filename: &[u8],
+    write_context: &crate::parlive::SourceWriteContext,
     target_decoded_size: i64,
     target_holes: &mut Vec<NzbgetRsByteRange>,
     donor_file_index: i32,
@@ -9704,24 +9737,15 @@ fn patch_disk_file_from_donor(
     struct DiskPatcherAdapter<'a, 'b, 'e> {
         file: &'a mut std::fs::File,
         target_filename: &'a [u8],
+        write_context: &'a crate::parlive::SourceWriteContext,
         env: &'a std::cell::RefCell<&'b mut (dyn M1DonorEnv + 'e)>,
     }
     impl TargetFilePatcher for DiskPatcherAdapter<'_, '_, '_> {
         fn write_range(&mut self, offset: i64, data: &[u8]) -> bool {
-            use std::io::{Seek, SeekFrom, Write};
-            if offset < 0 {
+            if offset < 0 || self.env.borrow().is_stopped() {
                 return false;
             }
-            let io_res = self
-                .file
-                .seek(SeekFrom::Start(offset as u64))
-                .and_then(|pos| {
-                    if pos != offset as u64 {
-                        Err(std::io::Error::other("seek mismatch"))
-                    } else {
-                        self.file.write_all(data).and_then(|()| self.file.flush())
-                    }
-                });
+            let io_res = guarded_donor_write(self.file, self.write_context, offset, data);
             if let Err(err) = io_res {
                 let err_msg = write_error_message_bytes(&err);
                 let mut msg = b"Could not write to ".to_vec();
@@ -9753,6 +9777,7 @@ fn patch_disk_file_from_donor(
     let mut patcher = DiskPatcherAdapter {
         file,
         target_filename,
+        write_context,
         env: &env_cell,
     };
     let res = patch_from_donor_file(
@@ -9901,6 +9926,52 @@ pub fn repair_whole_file(
     donor_proven: bool,
     env: &mut dyn M1DonorEnv,
 ) -> M1RepairOutcome {
+    if env.is_stopped() {
+        return M1RepairOutcome::NoCost;
+    }
+    let root = crate::fsops::path(dest_dir);
+    let Ok(write_context) = crate::parlive::donor_write_context(root, root) else {
+        return M1RepairOutcome::NoCost;
+    };
+
+    repair_whole_file_with_context(
+        dest_dir,
+        target,
+        donor_name,
+        donor_file_names,
+        donor_file_sizes,
+        donor_file_is_par,
+        donor_has_articles,
+        donor_steps_hashes,
+        donor_article_sizes,
+        claimed,
+        donor_proven,
+        env,
+        &write_context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn repair_whole_file_with_context(
+    dest_dir: &[u8],
+    target: &mut M1RepairTarget,
+    donor_name: &[u8],
+    donor_file_names: &[&[u8]],
+    donor_file_sizes: &[i64],
+    donor_file_is_par: &[u8],
+    donor_has_articles: &[u8],
+    donor_steps_hashes: &[u64],
+    donor_article_sizes: &[Vec<i32>],
+    claimed: &mut [u8],
+    donor_proven: bool,
+    env: &mut dyn M1DonorEnv,
+    write_root: &crate::parlive::SourceWriteContext,
+) -> M1RepairOutcome {
+    if env.is_stopped() {
+        return M1RepairOutcome::NoCost;
+    }
+    let write_context = write_root;
+
     if !donor_proven {
         return M1RepairOutcome::NoCost;
     }
@@ -9955,6 +10026,7 @@ pub fn repair_whole_file(
         &target.filename,
     );
     let os_path = crate::fsops::path(&file_path);
+    let write_context = write_context.for_path(os_path);
     if std::fs::metadata(os_path).is_ok() {
         let existing = file_size_bytes(&file_path);
         if existing != decoded_file_size && existing != 0 {
@@ -9968,15 +10040,31 @@ pub fn repair_whole_file(
         msg.extend_from_slice(&file_path);
         msg.extend_from_slice(b" again: an earlier recreation was cut short");
         env.emit_message_bytes(TargetMessageKind::Info, &msg);
-        let _ = std::fs::remove_file(os_path);
+        if write_context
+            .perform_io(|| std::fs::remove_file(os_path))
+            .is_err()
+        {
+            return M1RepairOutcome::NoCost;
+        }
     }
 
     let mut c_path_buf = file_path.clone();
     c_path_buf.push(0);
     let mut errmsg = Vec::new();
-    let alloc_ok = std::ffi::CStr::from_bytes_with_nul(&c_path_buf)
-        .ok()
-        .is_some_and(|c_path| crate::fsops::allocate_file(c_path, decoded_file_size, &mut errmsg));
+    let alloc_ok = write_context
+        .perform_io(|| {
+            if std::ffi::CStr::from_bytes_with_nul(&c_path_buf)
+                .ok()
+                .is_some_and(|path| {
+                    crate::fsops::allocate_file(path, decoded_file_size, &mut errmsg)
+                })
+            {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        })
+        .is_ok();
     if !alloc_ok {
         let mut msg = b"Could not recreate ".to_vec();
         msg.extend_from_slice(&file_path);
@@ -10000,7 +10088,7 @@ pub fn repair_whole_file(
             msg.extend_from_slice(b" for stream repair: ");
             msg.extend_from_slice(&err_msg);
             env.emit_message_bytes(TargetMessageKind::Warning, &msg);
-            let _ = std::fs::remove_file(os_path);
+            let _ = write_context.perform_io(|| std::fs::remove_file(os_path));
             return M1RepairOutcome::NoCost;
         }
     };
@@ -10026,6 +10114,7 @@ pub fn repair_whole_file(
     let recovered_parts = patch_disk_file_from_donor(
         &mut file,
         &target.filename,
+        &write_context,
         decoded_file_size,
         &mut target.holes,
         donor_idx,
@@ -10036,7 +10125,7 @@ pub fn repair_whole_file(
     drop(file);
 
     if recovered_parts == 0 {
-        let _ = std::fs::remove_file(os_path);
+        let _ = write_context.perform_io(|| std::fs::remove_file(os_path));
         target.decoded_file_size = 0;
         target.holes.clear();
         return M1RepairOutcome::Unproductive;
@@ -10065,8 +10154,60 @@ pub fn repair_file(
     donor_proven: bool,
     env: &mut dyn M1DonorEnv,
 ) -> M1RepairOutcome {
+    if env.is_stopped() {
+        return M1RepairOutcome::NoCost;
+    }
+    let root = crate::fsops::path(dest_dir);
+    let Ok(write_context) = crate::parlive::donor_write_context(root, root) else {
+        return M1RepairOutcome::NoCost;
+    };
+
+    repair_file_with_context(
+        dest_dir,
+        live_mode,
+        target_idx,
+        targets,
+        donor_name,
+        donor_file_names,
+        donor_file_sizes,
+        donor_file_is_par,
+        donor_has_articles,
+        donor_steps_hashes,
+        donor_article_sizes,
+        claimed,
+        verified,
+        donor_proven,
+        env,
+        &write_context,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn repair_file_with_context(
+    dest_dir: &[u8],
+    live_mode: bool,
+    target_idx: usize,
+    targets: &mut [M1RepairTarget],
+    donor_name: &[u8],
+    donor_file_names: &[&[u8]],
+    donor_file_sizes: &[i64],
+    donor_file_is_par: &[u8],
+    donor_has_articles: &[u8],
+    donor_steps_hashes: &[u64],
+    donor_article_sizes: &[Vec<i32>],
+    claimed: &mut [u8],
+    verified: &mut bool,
+    donor_proven: bool,
+    env: &mut dyn M1DonorEnv,
+    write_root: &crate::parlive::SourceWriteContext,
+) -> M1RepairOutcome {
+    if env.is_stopped() {
+        return M1RepairOutcome::NoCost;
+    }
+    let write_context = write_root;
+
     if targets[target_idx].decoded_file_size <= 0 {
-        return repair_whole_file(
+        return repair_whole_file_with_context(
             dest_dir,
             &mut targets[target_idx],
             donor_name,
@@ -10079,6 +10220,7 @@ pub fn repair_file(
             claimed,
             donor_proven,
             env,
+            write_root,
         );
     }
 
@@ -10190,6 +10332,7 @@ pub fn repair_file(
         let recovered_parts = patch_disk_file_from_donor(
             &mut file,
             &target.filename,
+            &write_context.for_path(crate::fsops::path(&file_path)),
             target.decoded_file_size,
             &mut target.holes,
             cand_idx,
@@ -10256,6 +10399,14 @@ pub fn process_m1_donor(
     donor_article_sizes: &[Vec<i32>],
     env: &mut dyn M1DonorEnv,
 ) {
+    if env.is_stopped() {
+        return;
+    }
+    let root = crate::fsops::path(dest_dir);
+    let Ok(write_root) = crate::parlive::donor_write_context(root, root) else {
+        return;
+    };
+
     let donor_has_articles: Vec<u8> = donor_article_sizes
         .iter()
         .map(|a| u8::from(!a.is_empty()))
@@ -10352,7 +10503,7 @@ pub fn process_m1_donor(
 
             let claimed_before = claimed.clone();
             let mut verified = false;
-            let outcome = repair_file(
+            let outcome = repair_file_with_context(
                 dest_dir,
                 live_mode,
                 target_idx,
@@ -10368,6 +10519,7 @@ pub fn process_m1_donor(
                 &mut verified,
                 set_proven,
                 env,
+                &write_root,
             );
             donor_proven |= verified;
             if verified {
@@ -16665,5 +16817,72 @@ mod tests {
         assert_eq!(repaired_part1, &inner[..16384]);
 
         let _ = std::fs::remove_dir_all(&temp_root);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod live_donor_writer_tests {
+    use super::*;
+    use std::os::unix::ffi::OsStrExt;
+    #[test]
+    fn live_donor_patch_cannot_overwrite_certified_bytes_through_an_old_descriptor() {
+        let dir =
+            std::env::temp_dir().join(format!("rustyget-donor-sealed-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("part40.rar");
+        std::fs::write(&path, b"original").unwrap();
+        let context = crate::parlive::donor_write_context(&dir, &path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let gate = crate::parlive::download_writes(-1900250, &dir).unwrap();
+        let generation = crate::parlive::SessionGeneration(1);
+        gate.advance_generation(generation).unwrap();
+        gate.begin_repair(
+            generation,
+            vec![crate::parlive::WriterTarget {
+                file_id: 40,
+                path: path.clone(),
+            }],
+            crate::parlive::reserve_control(-1900250, 4096, 500 << 20).unwrap(),
+        )
+        .unwrap()
+        .publish(&[(40, 0)], || std::fs::write(&path, b"repaired").unwrap())
+        .unwrap();
+        assert!(guarded_donor_write(&mut file, &context, 0, b"late-old").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"repaired");
+        assert!(gate.is_current_generation(generation));
+        // A context captured by the old donor must stay closed after cleanup/new startup.
+        crate::parlive::forget_download_writes(-1900250);
+        let _new = crate::parlive::source_write_context(
+            -1900250,
+            40,
+            &dir,
+            path.file_name().unwrap().as_bytes(),
+        )
+        .unwrap();
+        assert!(guarded_donor_write(&mut file, &context, 0, b"late-old").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"repaired");
+        crate::parlive::forget_download_writes(-1900250);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn live_donor_io_failure_invalidates_the_same_root_cohort() {
+        let dir = std::env::temp_dir().join(format!("rustyget-donor-error-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("part40.rar");
+        std::fs::write(&path, b"original").unwrap();
+        let context = crate::parlive::donor_write_context(&dir, &path).unwrap();
+        let gate = crate::parlive::download_writes(-1900251, &dir).unwrap();
+        let generation = crate::parlive::SessionGeneration(2);
+        gate.advance_generation(generation).unwrap();
+        let mut file = std::fs::File::open(&path).unwrap();
+        assert!(guarded_donor_write(&mut file, &context, 0, b"new-data").is_err());
+        assert!(!gate.is_current_generation(generation));
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        crate::parlive::forget_download_writes(-1900251);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

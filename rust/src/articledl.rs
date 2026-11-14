@@ -10,9 +10,9 @@ use std::sync::{Condvar, Mutex};
 use crate::artwritercore::{
     article_cache_should_flush, article_dl_format_connection_name, article_dl_format_fetch_command,
     article_writer_advance_and_check_range, article_writer_build_output_filenames,
-    article_writer_classify_completion_status, article_writer_create_output_file,
+    article_writer_classify_completion_status, article_writer_create_output_file_guarded,
     article_writer_execute_cleanup_old_data, article_writer_execute_setup_output_file,
-    article_writer_finish_disk_ops, article_writer_flush_cache,
+    article_writer_finish_disk_ops, article_writer_flush_cache_guarded,
     article_writer_format_dest_file_path, article_writer_format_info_path,
     article_writer_move_completed_files, article_writer_post_process_rename_and_hardlink,
     article_writer_process_articles, article_writer_resolve_direct_write_ready,
@@ -274,6 +274,18 @@ fn cache_unlock_flush() {
     let mut locked = CACHE_FLUSH_LOCK.0.lock().unwrap_or_else(|e| e.into_inner());
     *locked = false;
     CACHE_FLUSH_LOCK.1.notify_one();
+}
+
+pub(crate) fn with_live_cache_fence<T>(action: impl FnOnce() -> T) -> T {
+    struct Fence;
+    impl Drop for Fence {
+        fn drop(&mut self) {
+            cache_unlock_flush();
+        }
+    }
+    cache_lock_flush();
+    let _fence = Fence;
+    action()
 }
 
 fn cache_effective_limit() -> usize {
@@ -629,20 +641,28 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
                 let fp = qh.nzb_file_at(nzb_ptr, fi);
                 let f = qh.file_snap(fp);
                 if f.cached_articles > 0 && (f.active_downloads == 0 || flush_everything) {
+                    let Ok(write_context) = crate::parlive::source_write_context(
+                        nzb.id,
+                        f.id,
+                        &crate::fsops::path(&nzb.dest_dir),
+                        &f.filename,
+                    ) else {
+                        continue;
+                    };
                     CACHE_FILE_INFO.store(fp, Ordering::SeqCst);
                     let info_name = article_writer_format_info_path(
                         &nzb.name,
                         crate::paths::PATH_SEPARATOR,
                         &f.filename,
                     );
-                    return Some((fp, info_name));
+                    return Some((fp, info_name, write_context));
                 }
             }
         }
         None
     });
 
-    let Some((file_ptr, info_name)) = selected else {
+    let Some((file_ptr, info_name, write_context)) = selected else {
         CACHE_FILE_INFO.store(0, Ordering::SeqCst);
         crate::log::log_active_bytes(MK_DEBUG, b"Checking cache... nothing to flush");
         return false;
@@ -685,11 +705,12 @@ fn daemon_article_cache_check_flush(allocated: usize, flush_everything: bool) ->
         })
         .collect();
 
-    let (flushed_articles, flushed_size) = article_writer_flush_cache(
+    let (flushed_articles, flushed_size) = article_writer_flush_cache_guarded(
         &items,
         direct_write,
         skip_disk_write,
         &output_filename,
+        &write_context,
         || qh.file_cache_is_deleted_unparked(file_ptr),
         |idx| qh.file_cache_discard_article_segment(file_ptr, metas[idx].0),
         |msg| {
@@ -930,7 +951,7 @@ fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everythi
             })
             .collect();
 
-        let (flushed_articles, flushed_size) = article_writer_flush_cache(
+        let (flushed_articles, flushed_size) = crate::artwritercore::article_writer_flush_cache(
             &items,
             direct_write,
             skip_disk_write,
@@ -1001,6 +1022,7 @@ fn article_cache_check_flush(host: &MockDlHost, allocated: usize, flush_everythi
 // ============================================================================
 
 struct BufferedDiskFile {
+    write_context: Option<crate::parlive::SourceWriteContext>,
     file: Option<std::fs::File>,
     buf: Vec<u8>,
     cap: usize,
@@ -1008,12 +1030,44 @@ struct BufferedDiskFile {
 }
 
 impl BufferedDiskFile {
+    #[cfg(test)]
     fn open(
         path: &[u8],
         read_write: bool,
         write_buffer_kb: i32,
         rec_size: i32,
     ) -> Result<Self, i32> {
+        Self::open_inner(path, read_write, write_buffer_kb, rec_size, None)
+    }
+
+    fn open_guarded(
+        path: &[u8],
+        read_write: bool,
+        write_buffer_kb: i32,
+        rec_size: i32,
+        write_context: crate::parlive::SourceWriteContext,
+    ) -> Result<Self, i32> {
+        Self::open_inner(
+            path,
+            read_write,
+            write_buffer_kb,
+            rec_size,
+            Some(write_context),
+        )
+    }
+
+    fn open_inner(
+        path: &[u8],
+        read_write: bool,
+        write_buffer_kb: i32,
+        rec_size: i32,
+        write_context: Option<crate::parlive::SourceWriteContext>,
+    ) -> Result<Self, i32> {
+        let _permit = write_context
+            .as_ref()
+            .map(|context| context.permit())
+            .transpose()
+            .map_err(|_| libc::ECANCELED)?;
         let clean = c_bytes(path);
         let Ok(c_path) = CString::new(clean) else {
             return Err(libc::EINVAL);
@@ -1021,12 +1075,17 @@ impl BufferedDiskFile {
         let mode = if read_write { 1 } else { 2 };
         let fd = crate::fsops::open_cloexec_fd(&c_path, mode, 0, 1, 2);
         if fd < 0 {
+            if let Some(context) = &write_context {
+                context.invalidate();
+            }
             return Err(crate::fsops::last_errno());
         }
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         let calc = calc_write_buffer_size(write_buffer_kb, rec_size);
         let cap = if calc > 0 { calc as usize } else { 8192 };
+        drop(_permit);
         Ok(Self {
+            write_context,
             file: Some(file),
             buf: Vec::with_capacity(cap.min(64 * 1024)),
             cap,
@@ -1038,17 +1097,35 @@ impl BufferedDiskFile {
         self.pos
     }
 
-    fn write_all_fd(file: &mut std::fs::File, mut data: &[u8]) -> (usize, bool) {
+    fn write_all_fd(
+        file: &mut std::fs::File,
+        mut data: &[u8],
+        context: Option<&crate::parlive::SourceWriteContext>,
+    ) -> (usize, bool) {
+        let _permit = match context.map(|context| context.permit()).transpose() {
+            Ok(permit) => permit,
+            Err(_) => return (0, false),
+        };
         let mut written = 0usize;
         while !data.is_empty() {
             match file.write(data) {
-                Ok(0) => return (written, false),
+                Ok(0) => {
+                    if let Some(context) = context {
+                        context.invalidate();
+                    }
+                    return (written, false);
+                }
                 Ok(n) => {
                     written += n;
                     data = &data[n..];
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return (written, false),
+                Err(_) => {
+                    if let Some(context) = context {
+                        context.invalidate();
+                    }
+                    return (written, false);
+                }
             }
         }
         (written, true)
@@ -1062,7 +1139,7 @@ impl BufferedDiskFile {
             self.buf.clear();
             return false;
         };
-        let (_, ok) = Self::write_all_fd(file, &self.buf);
+        let (_, ok) = Self::write_all_fd(file, &self.buf, self.write_context.as_ref());
         self.buf.clear();
         ok
     }
@@ -1082,7 +1159,12 @@ impl BufferedDiskFile {
                 self.pos = offset;
                 true
             }
-            Err(_) => false,
+            Err(_) => {
+                if let Some(context) = &self.write_context {
+                    context.invalidate();
+                }
+                false
+            }
         }
     }
 
@@ -1105,7 +1187,7 @@ impl BufferedDiskFile {
             return 0;
         };
         if data.len() >= self.cap {
-            let (written, _) = Self::write_all_fd(file, data);
+            let (written, _) = Self::write_all_fd(file, data, self.write_context.as_ref());
             self.pos = self.pos.saturating_add(written as i64);
             written as i64
         } else {
@@ -1121,6 +1203,11 @@ impl BufferedDiskFile {
             Some(file) => close_fn(file.into_raw_fd()) == 0,
             None => true,
         };
+        if !closed {
+            if let Some(context) = &self.write_context {
+                context.invalidate();
+            }
+        }
         flushed && closed
     }
 
@@ -1140,6 +1227,7 @@ impl Drop for BufferedDiskFile {
 // ============================================================================
 
 struct RsArticleWriter {
+    write_context: Option<crate::parlive::SourceWriteContext>,
     temp_filename: Vec<u8>,
     output_filename: Vec<u8>,
     result_filename: Vec<u8>,
@@ -1182,6 +1270,7 @@ impl Drop for RsArticleWriter {
 impl Default for RsArticleWriter {
     fn default() -> Self {
         Self {
+            write_context: None,
             temp_filename: Vec::new(),
             output_filename: Vec::new(),
             result_filename: Vec::new(),
@@ -1310,11 +1399,26 @@ impl RsArticleWriter {
 
         // Snapshots copy strings out of the queue; hold its lock so a concurrent
         // edit (for example a new dupe key) cannot free them mid-copy.
-        let (fsnap, nzb, art) = host.qh.with_locked_queue(|_| {
+        let (fsnap, nzb, art, write_context) = host.qh.with_locked_queue(|_| {
             let fsnap = host.qh.file_snap(host.file_ptr);
             let nzb = host.qh.nzb_snap(fsnap.nzb_ptr, false);
-            (fsnap, nzb, host.qh.article_snap(host.article_ptr))
+            let context = if fsnap.deleted || nzb.deleting {
+                None
+            } else {
+                crate::parlive::source_write_context(
+                    nzb.id,
+                    fsnap.id,
+                    crate::fsops::path(&nzb.dest_dir),
+                    &fsnap.filename,
+                )
+                .ok()
+            };
+            (fsnap, nzb, host.qh.article_snap(host.article_ptr), context)
         });
+        self.write_context = write_context;
+        if self.write_context.is_none() {
+            return false;
+        }
         let nzb_ptr = fsnap.nzb_ptr;
         let (
             dupe_check,
@@ -1410,9 +1514,11 @@ impl RsArticleWriter {
                             && !crate::fsops::file_exists(out_fn_ref, &crate::fsops::posix_stat))
                     {
                         if !skip_disk_write {
-                            if let Err(err) =
-                                article_writer_create_output_file(out_fn_ref, file_size)
-                            {
+                            if let Err(err) = article_writer_create_output_file_guarded(
+                                out_fn_ref,
+                                file_size,
+                                self.write_context.as_ref().unwrap(),
+                            ) {
                                 if !err.is_empty() {
                                     host.log_nzb(nzb_ptr, MK_ERROR, &err);
                                 }
@@ -1475,8 +1581,13 @@ impl RsArticleWriter {
             } else {
                 &self.temp_filename
             };
-            match BufferedDiskFile::open(out_filename, direct_write, write_buffer_kb, art_info_size)
-            {
+            match BufferedDiskFile::open_guarded(
+                out_filename,
+                direct_write,
+                write_buffer_kb,
+                art_info_size,
+                self.write_context.as_ref().unwrap().clone(),
+            ) {
                 Ok(mut f) => {
                     if direct_write {
                         let _ = f.seek(self.article_offset);
@@ -1578,6 +1689,14 @@ impl RsArticleWriter {
         }
 
         if has_cached {
+            let Some(context) = self.write_context.as_ref() else {
+                self.drop_cached();
+                return;
+            };
+            let Ok(_permit) = context.permit() else {
+                self.drop_cached();
+                return;
+            };
             if self.article_ptr > 0 && self.article_ptr != self.cached_cap {
                 let (np, nc) = cache_realloc(self.cached_ptr, self.cached_cap, self.article_ptr);
                 self.cached_ptr = np;
@@ -1667,6 +1786,9 @@ impl RsArticleWriter {
         nzb_dest_dir: &[u8],
         final_output_path: &[u8],
     ) {
+        let Some(context) = self.write_context.as_ref() else {
+            return;
+        };
         let mut raw_articles = Vec::with_capacity(articles_len);
         for idx in 0..articles_len {
             let mut ints = [0i32; 5];
@@ -1702,13 +1824,26 @@ impl RsArticleWriter {
             &refs,
             |a, b| c_bytes(a) == c_bytes(b),
             |p| crate::fsops::file_exists(p, &crate::fsops::posix_stat),
-            |p| CString::new(c_bytes(p)).is_ok_and(|c| unsafe { libc::unlink(c.as_ptr()) == 0 }),
+            |p| {
+                context
+                    .perform_io(|| std::fs::remove_file(crate::fsops::path(c_bytes(p))))
+                    .is_ok()
+            },
             |from_b, to_b| {
                 let (Ok(cf), Ok(ct)) = (CString::new(c_bytes(from_b)), CString::new(c_bytes(to_b)))
                 else {
                     return false;
                 };
-                if crate::fsops::move_file(&cf, &ct) {
+                if context
+                    .perform_io(|| {
+                        if crate::fsops::move_file(&cf, &ct) {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::last_os_error())
+                        }
+                    })
+                    .is_ok()
+                {
                     true
                 } else {
                     move_error = crate::fsops::error_message(crate::fsops::last_errno());
@@ -1720,7 +1855,11 @@ impl RsArticleWriter {
                 let mut browser = crate::fsops::PosixDirBrowser::new(c_dir.as_deref(), true);
                 browser.next_ptr().is_null()
             },
-            |dir_b| CString::new(c_bytes(dir_b)).is_ok_and(|c| crate::fsops::remove_directory(&c)),
+            |dir_b| {
+                context
+                    .perform_io(|| std::fs::remove_dir(crate::fsops::path(c_bytes(dir_b))))
+                    .is_ok()
+            },
         );
 
         if res.move_failed {
@@ -1896,7 +2035,15 @@ impl RsArticleWriter {
         }
     }
 
-    fn post_process_locked(&mut self, host: &DlHost<'_>) {
+    fn post_process_locked(
+        &mut self,
+        host: &DlHost<'_>,
+    ) -> Result<(), crate::parlive::WriteBlocked> {
+        let context = self
+            .write_context
+            .as_ref()
+            .ok_or(crate::parlive::WriteBlocked::Closed)?;
+        let _permit = context.try_permit()?;
         let cur_path_c = nul_vec(&self.post_final_path);
         let mut ints = [0i32; 2];
         let mut strs = [std::ptr::null::<c_char>(); 3];
@@ -1950,16 +2097,34 @@ impl RsArticleWriter {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
             );
-            return;
+            return Ok(());
         }
         if c_bytes(&self.post_nzb_dest_dir) != c_bytes(&cur_nzb_dest_dir) {
             let _ = move_completed_files_on_qh(host.qh, nzb_ptr, &self.post_nzb_dest_dir);
         }
+        Ok(())
     }
 
     fn complete_file_parts(&mut self, host: &DlHost<'_>) -> (bool, bool) {
         host.log(MK_DEBUG, b"Completing file parts");
         self.commit_error = false;
+        self.write_context = host.qh.with_locked_queue(|_| {
+            let file = host.qh.file_snap(host.file_ptr);
+            let nzb = host.qh.nzb_snap(file.nzb_ptr, false);
+            if file.deleted || nzb.deleting {
+                return None;
+            }
+            crate::parlive::source_write_context(
+                nzb.id,
+                file.id,
+                crate::fsops::path(&nzb.dest_dir),
+                &file.filename,
+            )
+            .ok()
+        });
+        if self.write_context.is_none() {
+            return (false, false);
+        }
 
         let mut ints = [0i32; 16];
         let mut strs = [std::ptr::null::<c_char>(); 4];
@@ -2134,8 +2299,20 @@ impl RsArticleWriter {
             },
             |p| crate::fsops::file_exists(p, &crate::fsops::posix_stat),
             |p| crate::fsops::force_directories(p, &mut force_dirs_err, &crate::fsops::posix_stat),
-            |p| CString::new(c_bytes(p)).is_ok_and(|c| unsafe { libc::unlink(c.as_ptr()) == 0 }),
-            |p, rw| match BufferedDiskFile::open(p, rw, write_buffer_kb, 0) {
+            |p| {
+                self.write_context
+                    .as_ref()
+                    .unwrap()
+                    .perform_io(|| std::fs::remove_file(crate::fsops::path(c_bytes(p))))
+                    .is_ok()
+            },
+            |p, rw| match BufferedDiskFile::open_guarded(
+                p,
+                rw,
+                write_buffer_kb,
+                0,
+                self.write_context.as_ref().unwrap().clone(),
+            ) {
                 Ok(f) => {
                     opened_outfile = Some(f);
                     true
@@ -2243,13 +2420,24 @@ impl RsArticleWriter {
                 return (false, false);
             }
             if !direct_write {
-                let moved = match (
-                    CString::new(c_bytes(&temp_dest_path)),
-                    CString::new(c_bytes(&final_output_path)),
-                ) {
-                    (Ok(cs), Ok(cd)) => crate::fsops::move_file(&cs, &cd),
-                    _ => false,
-                };
+                let moved = self
+                    .write_context
+                    .as_ref()
+                    .unwrap()
+                    .perform_io(|| {
+                        match (
+                            CString::new(c_bytes(&temp_dest_path)),
+                            CString::new(c_bytes(&final_output_path)),
+                        ) {
+                            (Ok(source), Ok(target))
+                                if crate::fsops::move_file(&source, &target) =>
+                            {
+                                Ok(())
+                            }
+                            _ => Err(std::io::Error::last_os_error()),
+                        }
+                    })
+                    .is_ok();
                 if !moved {
                     let err_msg = crate::fsops::error_message(crate::fsops::last_errno());
                     let msg = join_c_slices(&[
@@ -2317,6 +2505,11 @@ pub(crate) fn move_completed_files_on_qh(
     let nzb = qh.nzb_snap(nzb_ptr, false);
     if nzb.skip_disk_write {
         return true;
+    }
+    if c_bytes(old_dest_dir) != c_bytes(&nzb.dest_dir) {
+        crate::parlive::forget_download_writes(nzb.id);
+        crate::postproc::direct_unpack_join_live_par_repair(nzb.id);
+        crate::parchecker::streaming_session_forget(nzb.id);
     }
     let cfs = qh.nzb_completed_files(nzb_ptr);
     if cfs.is_empty() {
@@ -2520,10 +2713,29 @@ impl NzbgetRsArticleDownloader {
             w.writer.complete_file_parts(&host)
         };
         if need_post {
-            qh.with_locked_queue(|_| {
-                let mut w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
-                w.writer.post_process_locked(&host);
-            });
+            loop {
+                let result = qh.with_locked_queue(|_| {
+                    let mut w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+                    w.writer.post_process_locked(&host)
+                });
+                if !matches!(result, Err(crate::parlive::WriteBlocked::Busy)) {
+                    break;
+                }
+                // Wait outside the queue, then take fresh postprocessing snapshots.
+                let context = self
+                    .worker
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .writer
+                    .write_context
+                    .clone();
+                let Some(context) = context else {
+                    break;
+                };
+                if context.permit().is_err() {
+                    break;
+                }
+            }
         }
         ok
     }
@@ -3588,6 +3800,76 @@ impl NzbgetRsArticleDownloader {
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn live_buffered_file_rejects_a_late_flush_after_verified_repair() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-live-buffer-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("part40.rar");
+        std::fs::write(&path, b"original").unwrap();
+        let context =
+            crate::parlive::source_write_context(-1900220, 40, &dir, b"part40.rar").unwrap();
+        let mut file =
+            BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), true, 64, 0, context)
+                .unwrap();
+        assert_eq!(file.write_bytes(b"late-old"), 8);
+        let gate = crate::parlive::download_writes(-1900220, &dir).unwrap();
+        gate.advance_generation(crate::parlive::SessionGeneration(1))
+            .unwrap();
+        let lease = gate
+            .begin_repair(
+                crate::parlive::SessionGeneration(1),
+                vec![crate::parlive::WriterTarget {
+                    file_id: 40,
+                    path: path.clone(),
+                }],
+                crate::parlive::reserve_control(-1900220, 4096, 500 << 20).unwrap(),
+            )
+            .unwrap();
+        std::fs::write(&path, b"repaired").unwrap();
+        lease.publish(&[(40, 0)], || ()).unwrap();
+        assert!(!file.flush_and_close());
+        assert_eq!(std::fs::read(&path).unwrap(), b"repaired");
+        crate::parlive::forget_download_writes(-1900220);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_buffered_file_io_failure_invalidates_its_cohort() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-live-buffer-error-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("part40.rar");
+        std::fs::write(&path, b"original").unwrap();
+        let context =
+            crate::parlive::source_write_context(-1900221, 40, &dir, b"part40.rar").unwrap();
+        let mut file =
+            BufferedDiskFile::open_guarded(path.as_os_str().as_bytes(), true, 64, 0, context)
+                .unwrap();
+        assert_eq!(file.write_bytes(b"new-data"), 8);
+        file.file = Some(std::fs::File::open(&path).unwrap()); // a real read-only descriptor
+        let gate = crate::parlive::download_writes(-1900221, &dir).unwrap();
+        gate.advance_generation(crate::parlive::SessionGeneration(2))
+            .unwrap();
+        assert!(!file.flush_and_close());
+        assert!(!gate.is_current_generation(crate::parlive::SessionGeneration(2)));
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        crate::parlive::forget_download_writes(-1900221);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn buffered_disk_file_flush_and_close_propagates_close_error() {

@@ -1,8 +1,10 @@
 //! Admission for download-time PAR2 state. Reservations cover owned component
 //! ceilings; they are not a process-wide RSS measurement.
 
+use par_rs::repairer::RepairError;
 use par_rs::streaming::SessionOptions;
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 const MIB: u64 = 1024 * 1024;
 const JOB_CEILING: u64 = 128 * MIB;
@@ -109,6 +111,98 @@ impl SessionBudgetLease {
     }
 }
 
+pub(crate) static LIVE_BUDGET: LazyLock<Arc<BudgetPool>> =
+    LazyLock::new(|| Arc::new(BudgetPool::default()));
+
+#[derive(Default)]
+struct ControlAccounting {
+    bytes: u64,
+    jobs: HashMap<i32, u64>,
+}
+static CONTROL_ACCOUNTING: LazyLock<Mutex<ControlAccounting>> =
+    LazyLock::new(|| Mutex::new(ControlAccounting::default()));
+
+pub(crate) struct ControlLease {
+    nzb_id: i32,
+    bytes: u64,
+    _budget: SessionBudgetLease,
+}
+impl ControlLease {
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+impl Drop for ControlLease {
+    fn drop(&mut self) {
+        let mut used = CONTROL_ACCOUNTING.lock().unwrap_or_else(|e| e.into_inner());
+        used.bytes -= self.bytes;
+        if let Some(job) = used.jobs.get_mut(&self.nzb_id) {
+            *job -= self.bytes;
+            if *job == 0 {
+                used.jobs.remove(&self.nzb_id);
+            }
+        }
+    }
+}
+
+pub(crate) fn reserve_control(
+    nzb_id: i32,
+    bytes: u64,
+    pool_limit: u64,
+) -> Result<ControlLease, RepairError> {
+    let limit_error = |context, required, limit| RepairError::StreamingMemoryLimit {
+        context,
+        required_bytes: required,
+        limit_bytes: limit,
+    };
+    if !(256..=MIB).contains(&bytes) {
+        return Err(limit_error("live control context", bytes, MIB));
+    }
+    let mut used = CONTROL_ACCOUNTING.lock().unwrap_or_else(|e| e.into_inner());
+    let total = used.bytes.checked_add(bytes);
+    let job = used
+        .jobs
+        .get(&nzb_id)
+        .copied()
+        .unwrap_or(0)
+        .checked_add(bytes);
+    if total.is_none_or(|n| n > 8 * MIB) {
+        return Err(limit_error(
+            "live control queue",
+            total.unwrap_or(u64::MAX),
+            8 * MIB,
+        ));
+    }
+    if job.is_none_or(|n| n > MIB) {
+        return Err(limit_error(
+            "live job control context",
+            job.unwrap_or(u64::MAX),
+            MIB,
+        ));
+    }
+    let budget = LIVE_BUDGET
+        .acquire(bytes, pool_limit)
+        .ok_or_else(|| limit_error("shared live PAR reservation", bytes, pool_limit))?;
+    used.bytes = total.unwrap();
+    used.jobs.insert(nzb_id, job.unwrap());
+    Ok(ControlLease {
+        nzb_id,
+        bytes,
+        _budget: budget,
+    })
+}
+
+mod write_control;
+pub(crate) use write_control::{
+    RepairWriteLease, WriteBlocked, WriteCoordinator, WriterIdentity, WriterTarget,
+};
+
+mod write_registry;
+pub(crate) use write_registry::{
+    donor_write_context, download_writes, forget_download_writes, source_write_context,
+    SourceWriteContext,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,8 +285,10 @@ mod tests {
     #[test]
     fn completion_context_has_headroom_at_the_syndrome_boundary() {
         let r = resources(64 * 1024, 500 * MIB).unwrap();
-        assert!(r.reservation_bytes + MIB <= 128 * MIB,
-            "the completion context and session must share the per-job ceiling");
+        assert!(
+            r.reservation_bytes + MIB <= 128 * MIB,
+            "the completion context and session must share the per-job ceiling"
+        );
     }
 
     #[test]
@@ -232,3 +328,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod write_tests;

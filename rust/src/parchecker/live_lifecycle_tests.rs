@@ -2,6 +2,8 @@ use super::*;
 use crate::parlive::{resources, BudgetPool};
 use std::sync::Arc;
 
+static NEXT_FIXTURE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -10,8 +12,9 @@ impl Fixture {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "rustyget-live-registry-{}-{nonce}",
-            std::process::id()
+            "rustyget-live-registry-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT_FIXTURE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&dir).unwrap();
         for f in std::fs::read_dir(
@@ -44,8 +47,15 @@ fn live_registry_lease_survives_forget_until_inflight_owner_drops() {
     let bytes = r.reservation_bytes;
     let pool = Arc::new(BudgetPool::default());
     let lease = pool.acquire(bytes, bytes).unwrap();
-    let entry = build_streaming_session(&set, &fx.0, r.options, lease).unwrap();
-    install_streaming_session(-1900101, entry);
+    let entry = build_streaming_session(
+        &set,
+        &fx.0,
+        r.options,
+        lease,
+        crate::parlive::download_writes(-1900101, &fx.0).unwrap(),
+    )
+    .unwrap();
+    install_streaming_session(-1900101, entry).unwrap();
     let operation = active_streaming_session(-1900101).unwrap();
     streaming_session_forget(-1900101);
     assert!(operation.session.is_cancelled());
@@ -64,12 +74,19 @@ fn live_registry_replacement_invalidates_old_generation() {
         let lease = pool
             .acquire(r.reservation_bytes, 500 * 1024 * 1024)
             .unwrap();
-        build_streaming_session(&set, &fx.0, r.options, lease).unwrap()
+        build_streaming_session(
+            &set,
+            &fx.0,
+            r.options,
+            lease,
+            crate::parlive::download_writes(-1900102, &fx.0).unwrap(),
+        )
+        .unwrap()
     };
     let old = create();
-    install_streaming_session(-1900102, Arc::clone(&old));
+    install_streaming_session(-1900102, Arc::clone(&old)).unwrap();
     let current = create();
-    install_streaming_session(-1900102, Arc::clone(&current));
+    install_streaming_session(-1900102, Arc::clone(&current)).unwrap();
     assert_ne!(old.generation, current.generation);
     assert!(old.session.is_cancelled());
     assert!(ensure_current_generation(-1900102, &old).is_err());
@@ -501,4 +518,520 @@ fn live_completion_replay_has_one_owner_per_download() {
     drop(owner);
     assert!(streaming_session_claim_completion_drain(-1900114).is_some());
     drop(other);
+}
+
+#[test]
+fn closed_startup_ticket_cannot_install_a_session_after_cleanup() {
+    let fx = Fixture::new();
+    let id = -1900116;
+    let par = LiveCompletedFile {
+        nzb_id: id,
+        base_dir: fx.0.clone(),
+        path: fx.0.join("testfile.par2"),
+        name: b"testfile.par2".to_vec(),
+        hash16k: Vec::new(),
+        par_file: true,
+        successful: true,
+        accepted: Vec::new(),
+        queued_id: Some(1),
+    };
+    streaming_session_queue_completed_file(id, 4096, || Ok(par)).unwrap();
+    crate::parlive::forget_download_writes(id);
+    assert!(matches!(
+        streaming_session_process_completed_file(id, |_| Ok(())),
+        Some(Err(RepairError::Cancelled))
+    ));
+    assert!(!streaming_session_has_session(id));
+    streaming_session_forget(id);
+}
+
+#[test]
+fn live_target_lease_repairs_real_bytes_and_seals_the_same_queue_file() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900140;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.vol00+1.PAR2"), &fx.0, 500 << 20)
+        .unwrap();
+    let first = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let ss = set.main.as_ref().unwrap().slice_size;
+    let desc = &set.file_descs[&first];
+    let target = fx.0.join(desc.local_name());
+    let original = std::fs::read(&target).unwrap();
+    for fid in &set.main.as_ref().unwrap().recoverable_file_ids {
+        let file = &set.file_descs[fid];
+        let start = if *fid == first {
+            ss.min(file.file_length)
+        } else {
+            0
+        };
+        streaming_session_reconcile_file(
+            id,
+            *fid,
+            &fx.0.join(file.local_name()),
+            &[ByteRange::new(
+                start as i64,
+                (file.file_length - start) as i64,
+            )],
+        )
+        .unwrap()
+        .unwrap();
+    }
+    use std::io::{Seek, SeekFrom, Write};
+    let mut disk = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .unwrap();
+    disk.seek(SeekFrom::Start(0)).unwrap();
+    disk.write_all(&vec![0; (ss as usize).min(original.len())])
+        .unwrap();
+    drop(disk);
+    assert!(streaming_session_status(id).unwrap().early_cutover_possible);
+    let request = streaming_session_prepare_repair(
+        id,
+        vec![crate::parlive::WriterTarget {
+            file_id: 40,
+            path: target.clone(),
+        }],
+        reserve_control(id, 4096, 500 << 20).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        request.generation(),
+        active_streaming_session(id).unwrap().generation
+    );
+    let lease = request.acquire().unwrap();
+    assert!(streaming_session_verified_target_crc(id, &fx.0, 40, &desc.name).is_none());
+    let (report, released) = lease
+        .repair_and_publish(
+            |verified| {
+                assert_eq!(verified, &[40]);
+                1
+            },
+            || (),
+        )
+        .unwrap();
+    assert!(!report.repaired_slices.is_empty());
+    assert_eq!(released, 1);
+    let metrics = streaming_session_metrics(id).unwrap();
+    assert_eq!(metrics.repair.attempts, 1);
+    assert_eq!(metrics.repair.completed, 1);
+    assert_eq!(
+        metrics.repair.target_bytes_written,
+        ss.min(original.len() as u64)
+    );
+    assert!(metrics.repair.decode_ns > 0 && metrics.repair.target_verification_ns > 0);
+    assert!(metrics.count_ready_to_handoff_ns.is_some());
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    assert_eq!(
+        streaming_session_verified_target_crc(id, &fx.0, 40, &desc.name),
+        Some(crc32fast::hash(&original))
+    );
+    assert!(streaming_session_verified_target_crc(id, &fx.0, 41, &desc.name).is_none());
+    assert!(
+        streaming_session_verified_target_crc(id, &fx.0.join("other"), 40, &desc.name).is_none()
+    );
+    let source = crate::parlive::source_write_context(id, 40, &fx.0, &desc.name).unwrap();
+    assert!(matches!(
+        source.permit(),
+        Err(crate::parlive::WriteBlocked::Certified)
+    ));
+    streaming_session_cancel(id);
+    assert!(streaming_session_verified_target_crc(id, &fx.0, 40, &desc.name).is_none());
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn cancelled_target_lease_never_publishes_a_hold_release() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900141;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let fid = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let target = fx.0.join(set.file_descs[&fid].local_name());
+    let request = streaming_session_prepare_repair(
+        id,
+        vec![crate::parlive::WriterTarget {
+            file_id: 40,
+            path: target,
+        }],
+        reserve_control(id, 4096, 500 << 20).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        request.generation(),
+        active_streaming_session(id).unwrap().generation
+    );
+    let lease = request.acquire().unwrap();
+    streaming_session_cancel(id);
+    assert!(matches!(
+        lease.repair_and_publish(|_| panic!("cancelled repair released a hold"), || ()),
+        Err(RepairError::Cancelled)
+    ));
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn live_cancellation_and_hold_publication_share_one_fence() {
+    let fx = Fixture::new();
+    let id = -1900142;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let entry = active_streaming_session(id).unwrap();
+    let gate = Arc::clone(&entry.writers);
+    let ownership = gate
+        .begin_repair(
+            entry.generation,
+            vec![crate::parlive::WriterTarget {
+                file_id: 40,
+                path: fx.0.join("testfile.dat"),
+            }],
+            reserve_control(id, 4096, 500 << 20).unwrap(),
+        )
+        .unwrap();
+    let (inside_tx, inside_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let publication = std::thread::spawn(move || {
+        ownership.publish(&[(40, 0)], || {
+            inside_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        })
+    });
+    inside_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let cancellation = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        streaming_session_cancel(id);
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    while !entry.session.is_cancelled() && std::time::Instant::now() < until {
+        std::thread::yield_now();
+    }
+    let cancelled_inside_publication = entry.session.is_cancelled();
+    release_tx.send(()).unwrap();
+    publication.join().unwrap().unwrap();
+    cancellation.join().unwrap();
+    assert!(
+        !cancelled_inside_publication,
+        "library cancellation raced an already-owned hold publication"
+    );
+    assert!(entry.session.is_cancelled());
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn forgotten_completion_drops_metadata_admission_and_cannot_restart() {
+    let fx = Fixture::new();
+    let id = -1900143;
+    let par = LiveCompletedFile {
+        nzb_id: id,
+        base_dir: fx.0.clone(),
+        path: fx.0.join("testfile.par2"),
+        name: b"testfile.par2".to_vec(),
+        hash16k: Vec::new(),
+        par_file: true,
+        successful: true,
+        accepted: Vec::new(),
+        queued_id: Some(1),
+    };
+    streaming_session_queue_completed_file(id, 4096, || Ok(par)).unwrap();
+    streaming_session_forget(id);
+    assert!(
+        !streaming_session_pending_completed_jobs().contains(&id),
+        "forgotten completion metadata still owns a startup ticket"
+    );
+    assert!(
+        streaming_session_process_completed_file(id, |_| panic!("forgotten ticket ran")).is_none()
+    );
+    assert!(!streaming_session_has_session(id));
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn live_metrics_distinguish_network_capture_from_committed_replay() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900144;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let files = &set.main.as_ref().unwrap().recoverable_file_ids;
+    assert_eq!(files.len(), 2);
+    let first = &set.file_descs[&files[0]];
+    let bytes = std::fs::read(fx.0.join(first.local_name())).unwrap();
+    let accepted = bytes.len() as u64;
+    streaming_session_defer_article(
+        id,
+        (&first.name, &[]),
+        0,
+        accepted,
+        crc32fast::hash(&bytes),
+        || Some(bytes),
+    )
+    .unwrap()
+    .unwrap();
+    streaming_session_drain_articles(id).unwrap().unwrap();
+    let before = streaming_session_metrics(id).unwrap();
+    assert_eq!(before.captured_articles, 1);
+    assert_eq!(before.captured_bytes, accepted);
+    assert_eq!(before.committed_replay_bytes, 0);
+    assert!(before.count_ready_at.is_none());
+    let second = &set.file_descs[&files[1]];
+    let replay_start = std::time::Instant::now();
+    streaming_session_reconcile_file(
+        id,
+        files[1],
+        &fx.0.join(second.local_name()),
+        &[ByteRange::new(0, second.file_length as i64)],
+    )
+    .unwrap()
+    .unwrap();
+    let replay_end = std::time::Instant::now();
+    let after = streaming_session_metrics(id).unwrap();
+    assert_eq!(after.captured_articles, 1);
+    assert_eq!(after.captured_bytes, accepted);
+    assert_eq!(after.committed_replay_bytes, second.file_length);
+    assert_eq!(after.io.ram_bytes_verified, accepted + second.file_length);
+    assert_eq!(after.repair.attempts, 0);
+    assert!(after
+        .count_ready_at
+        .is_some_and(|time| time >= replay_start && time <= replay_end));
+    let line = after.log_line(id, "test\"event");
+    let json = crate::json::parse(
+        &line[b"Live PAR metrics ".len()..],
+        crate::json::TEST_LIMITS,
+    )
+    .unwrap();
+    assert_eq!(
+        json.get(b"event"),
+        Some(&crate::json::Value::String(b"test\"event".to_vec()))
+    );
+    assert_eq!(
+        json.get(b"count_ready_to_handoff_ns"),
+        Some(&crate::json::Value::Null)
+    );
+    assert_eq!(
+        json.get(b"captured_bytes").unwrap().to_f64(),
+        Some(accepted as f64)
+    );
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn live_metrics_do_not_count_unavailable_cache_as_network_capture() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900145;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let desc = &set.file_descs[&set.main.as_ref().unwrap().recoverable_file_ids[0]];
+    assert!(
+        streaming_session_defer_article(id, (&desc.name, &[]), 0, desc.file_length, 0, || None)
+            .unwrap()
+            .is_err()
+    );
+    let metrics = streaming_session_metrics(id).unwrap();
+    assert_eq!(metrics.captured_articles, 0);
+    assert_eq!(metrics.captured_bytes, 0);
+    assert_eq!(metrics.cache_misses, 1);
+    assert_eq!(metrics.capture_refusals, 1);
+    assert_eq!(metrics.io.ram_bytes_verified, 0);
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn live_target_lease_consumes_the_final_owned_article_before_postprocessing() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900146;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.vol00+1.PAR2"), &fx.0, 500 << 20)
+        .unwrap();
+    let files = &set.main.as_ref().unwrap().recoverable_file_ids;
+    let target_id = *files
+        .iter()
+        .max_by_key(|fid| set.file_descs[fid].file_length)
+        .unwrap();
+    let last_id = *files.iter().find(|fid| **fid != target_id).unwrap();
+    let target_desc = &set.file_descs[&target_id];
+    let target = fx.0.join(target_desc.local_name());
+    let original = std::fs::read(&target).unwrap();
+    let ss = set.main.as_ref().unwrap().slice_size;
+    streaming_session_reconcile_file(
+        id,
+        target_id,
+        &target,
+        &[ByteRange::new(
+            ss as i64,
+            (target_desc.file_length - ss) as i64,
+        )],
+    )
+    .unwrap()
+    .unwrap();
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .unwrap()
+        .write_all(&vec![0; ss as usize])
+        .unwrap();
+    let last = &set.file_descs[&last_id];
+    let bytes = std::fs::read(fx.0.join(last.local_name())).unwrap();
+    streaming_session_defer_article(
+        id,
+        (&last.name, &[]),
+        0,
+        bytes.len() as u64,
+        crc32fast::hash(&bytes),
+        || Some(bytes),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        !streaming_session_status(id).unwrap().early_cutover_possible,
+        "the queue callback observes pre-fold state"
+    );
+    assert!(streaming_session_can_schedule_repair(id));
+    let request = streaming_session_prepare_repair(
+        id,
+        vec![crate::parlive::WriterTarget {
+            file_id: 40,
+            path: target.clone(),
+        }],
+        reserve_control(id, 4096, 500 << 20).unwrap(),
+    )
+    .unwrap();
+    let (_, released) = request
+        .acquire()
+        .unwrap()
+        .repair_and_publish(
+            |verified| {
+                assert_eq!(verified, &[40]);
+                1
+            },
+            || (),
+        )
+        .unwrap();
+    assert_eq!(released, 1);
+    assert_eq!(std::fs::read(target).unwrap(), original);
+    assert_eq!(
+        streaming_session_metrics(id).unwrap().captured_bytes,
+        last.file_length
+    );
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn refused_helper_finishes_before_article_drainers_can_take_the_operation() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900147;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let fid = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let request = streaming_session_prepare_repair(
+        id,
+        vec![crate::parlive::WriterTarget {
+            file_id: 40,
+            path: fx.0.join(set.file_descs[&fid].local_name()),
+        }],
+        reserve_control(id, 4096, 500 << 20).unwrap(),
+    )
+    .unwrap();
+    let entry = active_streaming_session(id).unwrap();
+    let finished = std::sync::atomic::AtomicBool::new(false);
+    let outcome = request.acquire().unwrap().repair_and_publish(
+        |_| panic!("unsolvable target published"),
+        || {
+            assert!(matches!(
+                entry.operation.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            finished.store(true, Ordering::SeqCst);
+        },
+    );
+    assert!(matches!(
+        outcome,
+        Err(RepairError::NotEnoughRecovery { .. })
+    ));
+    assert!(finished.load(Ordering::SeqCst));
+    assert!(entry.operation.try_lock().is_ok());
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn repair_control_admission_survives_until_the_publisher_metadata_drops() {
+    let fx = Fixture::new();
+    let set = fx.set();
+    let id = -1900148;
+    streaming_session_start_bounded(id, &fx.0.join("testfile.par2"), &fx.0, 500 << 20).unwrap();
+    let fid = set.main.as_ref().unwrap().recoverable_file_ids[0];
+    let request = streaming_session_prepare_repair(
+        id,
+        vec![crate::parlive::WriterTarget {
+            file_id: 40,
+            path: fx.0.join(set.file_descs[&fid].local_name()),
+        }],
+        reserve_control(id, 1 << 20, 500 << 20).unwrap(),
+    )
+    .unwrap();
+    let publisher = request.admission_hold();
+    streaming_session_cancel(id);
+    assert!(request.acquire().is_err());
+    assert!(
+        reserve_control(id, 256, 500 << 20).is_err(),
+        "publisher metadata became uncharged after repair refusal"
+    );
+    drop(publisher);
+    assert!(reserve_control(id, 256, 500 << 20).is_ok());
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
+}
+
+#[test]
+fn first_recovery_file_stamps_readiness_before_any_repair() {
+    let fx = Fixture::new();
+    let dir = fx.0.join("seeded-ready");
+    std::fs::create_dir(&dir).unwrap();
+    let source = dir.join("only.rar");
+    std::fs::write(&source, [0x63; 512]).unwrap();
+    let options = par_rs::create::CreateOptions {
+        slice_size: 512,
+        recovery_blocks: 1,
+        volumes: par_rs::create::VolumeScheme::Uniform(1),
+        engine: par_rs::EngineConfig {
+            num_threads: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let created = par_rs::create::create(
+        &[par_rs::create::SourceFile::new(source)],
+        &dir,
+        "ready",
+        &options,
+        None,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    let id = -1900149;
+    let started = std::time::Instant::now();
+    streaming_session_start_bounded(id, &created.files[1], &dir, 500 << 20).unwrap();
+    let finished = std::time::Instant::now();
+    let metrics = streaming_session_metrics(id).unwrap();
+    assert!(metrics.status.early_cutover_possible);
+    assert_eq!(metrics.repair.attempts, 0);
+    assert!(
+        metrics
+            .count_ready_at
+            .is_some_and(|time| time >= started && time <= finished),
+        "initial recovery readiness was not observed until after solve"
+    );
+    streaming_session_forget(id);
+    crate::parlive::forget_download_writes(id);
 }

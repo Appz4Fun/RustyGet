@@ -1369,6 +1369,7 @@ impl NzbgetRsQueueCoordinator {
         crate::dupeprobe::probe_wait_all();
         crate::twin::wait_all();
         host.delete_all_active_downloads();
+        crate::parchecker::streaming_sessions_forget_all();
         host.coord_dq_final();
         host.log(
             crate::queuesubsys_host::MK_DEBUG,
@@ -1377,6 +1378,7 @@ impl NzbgetRsQueueCoordinator {
     }
 
     pub(crate) fn stop(&self, host: &crate::queuesubsys_host::QueueSubsysHost) {
+        crate::parchecker::streaming_sessions_cancel_all();
         self.par_loaders_stopped
             .store(true, std::sync::atomic::Ordering::Release);
         crate::dupeprobe::probe_stop_all();
@@ -1949,6 +1951,8 @@ impl NzbgetRsQueueCoordinator {
             return false;
         }
 
+        crate::postproc::direct_unpack_join_live_par_repair(dest.id);
+        crate::postproc::direct_unpack_join_live_par_repair(src.id);
         let old_dest_dir = src.dest_dir.clone();
         host.nzb_set_str(
             src_ptr,
@@ -2038,6 +2042,7 @@ impl NzbgetRsQueueCoordinator {
         }
 
         let src_snap = host.nzb_snap(src_nzb_ptr, false);
+        crate::postproc::direct_unpack_join_live_par_repair(src_snap.id);
         let (uptr_addr, new_nzb_ptr) = host.alloc_new_nzb_uptr();
 
         host.nzb_set_str(
@@ -2568,6 +2573,17 @@ impl NzbgetRsQueueCoordinator {
                     Err(error) => Self::report_live_completion_error(host, id, &error),
                 }
             }
+            if !self.stopped.load(std::sync::atomic::Ordering::Acquire) {
+                host.with_locked_queue(|dq| {
+                    let ptr = host.queue_find_by_id(dq, id);
+                    if ptr != 0 {
+                        crate::postproc::direct_unpack_try_live_par_repair(
+                            host,
+                            &host.nzb_snap(ptr, false),
+                        );
+                    }
+                });
+            }
         }
     }
 
@@ -2839,6 +2855,7 @@ impl NzbgetRsQueueCoordinator {
                     Self::report_live_par_warning(host, ptr, id);
                 }
                 Self::unpause_streaming_par_volumes(host, ptr, id);
+                crate::postproc::direct_unpack_try_live_par_repair(host, &nzb);
             });
         }
     }
@@ -3727,7 +3744,10 @@ impl NzbgetRsQueueCoordinator {
                         host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
                     }
                 }
-                crate::postproc::direct_unpack_try_live_par_repair(nzb.id, &nzb.name);
+                crate::postproc::direct_unpack_try_live_par_repair(
+                    host,
+                    &host.nzb_snap(nzb.ptr, false),
+                );
             }
         }
 

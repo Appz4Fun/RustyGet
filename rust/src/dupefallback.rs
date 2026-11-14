@@ -2186,6 +2186,8 @@ pub(crate) fn unpause_pars_for_damage_host(
 
 #[cfg(unix)]
 pub(crate) fn par_damage_forget_all(nzb_id: i32) {
+    crate::parlive::forget_download_writes(nzb_id);
+    crate::postproc::direct_unpack_join_live_par_repair(nzb_id);
     crate::pardamage::forget(nzb_id);
     crate::parchecker::streaming_session_forget(nzb_id);
 }

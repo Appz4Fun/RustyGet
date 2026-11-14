@@ -1,0 +1,150 @@
+//! Measurements from the owned caller boundary, separate from RAM-only engine input.
+use super::*;
+use std::time::{Duration, Instant};
+
+pub(super) fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+#[derive(Default)]
+pub(super) struct LiveMetricCounters {
+    pub captured_articles: AtomicU64,
+    pub captured_bytes: AtomicU64,
+    pub capture_refusals: AtomicU64,
+    pub cache_misses: AtomicU64,
+    pub writer_wait_ns: AtomicU64,
+    pub operation_wait_ns: AtomicU64,
+    count_ready_at: Mutex<Option<Instant>>,
+    count_ready_to_handoff_ns: Mutex<Option<u64>>,
+}
+
+pub(crate) struct LiveCallerMetrics {
+    pub generation: SessionGeneration,
+    pub captured_articles: u64,
+    pub captured_bytes: u64,
+    pub capture_refusals: u64,
+    pub cache_misses: u64,
+    pub committed_replay_bytes: u64,
+    pub io: LiveIoStats,
+    pub repair: par_rs::streaming::RepairPhaseStats,
+    pub count_ready_at: Option<Instant>,
+    pub count_ready_to_handoff_ns: Option<u64>,
+    pub writer_wait_ns: u64,
+    pub operation_wait_ns: u64,
+    pub status: LiveStatus,
+}
+
+impl ActiveStreamingSession {
+    pub(super) fn observe_count_readiness(&self) {
+        if self.session.status().early_cutover_possible {
+            let mut ready = self
+                .metrics
+                .count_ready_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            ready.get_or_insert_with(Instant::now);
+        }
+    }
+    pub(super) fn record_live_handoff(&self) {
+        let ready = *self
+            .metrics
+            .count_ready_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(ready) = ready {
+            *self
+                .metrics
+                .count_ready_to_handoff_ns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(nanos(ready.elapsed()));
+        }
+    }
+    fn live_metrics(&self) -> LiveCallerMetrics {
+        LiveCallerMetrics {
+            generation: self.generation,
+            captured_articles: self.metrics.captured_articles.load(Ordering::Relaxed),
+            captured_bytes: self.metrics.captured_bytes.load(Ordering::Relaxed),
+            capture_refusals: self.metrics.capture_refusals.load(Ordering::Relaxed),
+            cache_misses: self.metrics.cache_misses.load(Ordering::Relaxed),
+            committed_replay_bytes: self.catchup_source_bytes.load(Ordering::Relaxed),
+            io: self.session.io_stats(),
+            repair: self.session.repair_phase_stats(),
+            count_ready_at: *self
+                .metrics
+                .count_ready_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            count_ready_to_handoff_ns: *self
+                .metrics
+                .count_ready_to_handoff_ns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            writer_wait_ns: self.metrics.writer_wait_ns.load(Ordering::Relaxed),
+            operation_wait_ns: self.metrics.operation_wait_ns.load(Ordering::Relaxed),
+            status: self.session.status(),
+        }
+    }
+    pub(super) fn emit_live_metrics(&self, nzb_id: i32, event: &str) {
+        let line = self.live_metrics().log_line(nzb_id, event);
+        crate::log::log_active_bytes(crate::queuesubsys_host::MK_DETAIL, &line);
+    }
+}
+
+impl LiveCallerMetrics {
+    pub(super) fn log_line(&self, nzb_id: i32, event: &str) -> Vec<u8> {
+        use std::io::Write;
+        let io = self.io;
+        let repair = self.repair;
+        let mut line = Vec::with_capacity(2048);
+        line.extend_from_slice(b"Live PAR metrics {\"event\":\"");
+        crate::escape::json_encode(event.as_bytes(), &mut line);
+        let _ = write!(&mut line, "\",\"nzb_id\":{nzb_id}");
+        for (key, value) in [
+            ("generation", self.generation.0),
+            ("captured_articles", self.captured_articles),
+            ("captured_bytes", self.captured_bytes),
+            ("capture_refusals", self.capture_refusals),
+            ("cache_misses", self.cache_misses),
+            ("committed_replay_bytes", self.committed_replay_bytes),
+            ("ram_bytes_verified", io.ram_bytes_verified),
+            ("source_bytes_read", io.source_bytes_read),
+            ("backfill_bytes_read", io.backfill_bytes_read),
+            ("recovery_bytes_read", io.recovery_bytes_read),
+            (
+                "target_verification_bytes_read",
+                io.target_verification_bytes_read,
+            ),
+            ("tracked_exponents", self.status.syndrome_slots as u64),
+            ("ready_recovery", self.status.ready_recovery as u64),
+            ("pending_folds", self.status.pending_folds as u64),
+            ("verified_slices", self.status.verified as u64),
+            ("total_slices", self.status.total as u64),
+            ("writer_wait_ns", self.writer_wait_ns),
+            ("operation_wait_ns", self.operation_wait_ns),
+            ("repair_attempts", repair.attempts),
+            ("repair_completed_calls", repair.completed),
+            ("target_bytes_written", repair.target_bytes_written),
+            ("payload_wait_ns", repair.payload_wait_ns),
+            ("slot_backfill_ns", repair.backfill_ns),
+            ("matrix_ns", repair.matrix_ns),
+            ("decode_ns", repair.decode_ns),
+            ("target_write_ns", repair.target_write_ns),
+            ("target_sync_ns", repair.target_sync_ns),
+            ("refold_ns", repair.refold_ns),
+            ("target_verification_ns", repair.target_verification_ns),
+            ("repair_call_ns", repair.total_ns),
+        ] {
+            let _ = write!(&mut line, ",\"{key}\":{value}");
+        }
+        let handoff = self
+            .count_ready_to_handoff_ns
+            .map_or_else(|| "null".to_owned(), |value| value.to_string());
+        let _ = write!(&mut line, ",\"count_ready_observed\":{},\"count_ready_to_handoff_ns\":{handoff},\"decode_includes_writes\":true,\"refold_includes_queued_completion\":false,\"logical_io\":true}}", self.count_ready_at.is_some());
+        line
+    }
+}
+
+#[cfg(test)]
+pub(super) fn streaming_session_metrics(nzb_id: i32) -> Option<LiveCallerMetrics> {
+    Some(active_streaming_session(nzb_id)?.live_metrics())
+}

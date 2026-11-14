@@ -10,7 +10,10 @@
 //! 3. Post-download verification, escalation (more volumes, split fragments, extra/dupe files,
 //!    twin sets), and Reed-Solomon repair (`par_rs::repairer::Par2Repairer`).
 
-use crate::parlive::{resources, BudgetPool, SessionBudgetLease, SessionGeneration};
+use crate::parlive::{
+    download_writes, reserve_control, resources, ControlLease, SessionBudgetLease,
+    SessionGeneration, WriteCoordinator, LIVE_BUDGET,
+};
 use crate::postrepair::{strncasecmp_prefix, NzbgetRsParSegment};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom};
@@ -20,6 +23,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 #[cfg(test)]
 mod live_lifecycle_tests;
+mod live_metrics;
+#[cfg(test)]
+use live_metrics::streaming_session_metrics;
 
 pub use par_rs::damage::{
     blocks_touched, compute_holes, normalize_ranges, par_cannot_cover, presumed_valid_blocks,
@@ -101,13 +107,17 @@ pub fn load_par2_set_bytes(bytes: &[u8]) -> Result<PacketSet, std::io::Error> {
 struct ActiveStreamingSession {
     session: StreamingParSession,
     generation: SessionGeneration,
+    writers: Arc<WriteCoordinator>,
     operation: Mutex<()>,
     articles: Mutex<DeferredArticles>,
     article_byte_limit: u64,
     pending_unpause_ids: Mutex<Vec<u64>>,
     file_lengths: HashMap<FileId, u64>,
+    target_names: HashMap<FileId, PathBuf>,
+    base_dir: PathBuf,
     par_name: Mutex<Vec<u8>>,
     catchup_source_bytes: AtomicU64,
+    metrics: live_metrics::LiveMetricCounters,
     last_error: Mutex<Option<String>>,
     warning_reported: AtomicBool,
     // Drop last, after the session, queue and all owned metadata.
@@ -131,7 +141,6 @@ struct DeferredArticles {
 
 static STREAMING_SESSIONS: LazyLock<Mutex<HashMap<i32, Arc<ActiveStreamingSession>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static LIVE_BUDGET: LazyLock<Arc<BudgetPool>> = LazyLock::new(|| Arc::new(BudgetPool::default()));
 static NEXT_LIVE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn live_error(context: &str, message: &str) -> RepairError {
@@ -141,7 +150,7 @@ fn live_error(context: &str, message: &str) -> RepairError {
     }
 }
 
-fn effective_live_pool_bytes() -> u64 {
+pub(crate) fn effective_live_pool_bytes() -> u64 {
     let configured = crate::options::active_options().map_or(500, |o| o.scalars().par_buffer);
     crate::articledl::memory_monitor_effective_par_buffer_mb(configured).max(0) as u64 * 1024 * 1024
 }
@@ -161,9 +170,11 @@ fn build_streaming_session(
     base_dir: &Path,
     options: SessionOptions,
     budget: SessionBudgetLease,
+    writers: Arc<WriteCoordinator>,
 ) -> Result<Arc<ActiveStreamingSession>, RepairError> {
     let main = set.main.as_ref().ok_or(RepairError::NoMainPacket)?;
     let mut lengths = HashMap::new();
+    let mut target_names = HashMap::new();
     for id in &main.recoverable_file_ids {
         let desc = set
             .file_descs
@@ -175,6 +186,7 @@ fn build_streaming_session(
             return Err(live_error("live PAR metadata", "missing slice checksums"));
         }
         lengths.insert(*id, desc.file_length);
+        target_names.insert(*id, PathBuf::from(desc.local_name()));
     }
     let generation = NEXT_LIVE_GENERATION
         .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -185,14 +197,18 @@ fn build_streaming_session(
     Ok(Arc::new(ActiveStreamingSession {
         session: StreamingParSession::new(set, base_dir, options)?,
         generation: SessionGeneration(generation),
+        writers,
         _budget: budget,
         operation: Mutex::new(()),
         articles: Mutex::new(DeferredArticles::default()),
         article_byte_limit,
         pending_unpause_ids: Mutex::new(Vec::new()),
         file_lengths: lengths,
+        target_names,
+        base_dir: base_dir.to_path_buf(),
         par_name: Mutex::new(Vec::new()),
         catchup_source_bytes: AtomicU64::new(0),
+        metrics: live_metrics::LiveMetricCounters::default(),
         last_error: Mutex::new(None),
         warning_reported: AtomicBool::new(false),
     }))
@@ -206,17 +222,39 @@ fn active_streaming_session(nzb_id: i32) -> Option<Arc<ActiveStreamingSession>> 
         .cloned()
 }
 
-fn install_streaming_session(nzb_id: i32, entry: Arc<ActiveStreamingSession>) {
-    let old = STREAMING_SESSIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(nzb_id, entry);
+fn install_streaming_session(
+    nzb_id: i32,
+    entry: Arc<ActiveStreamingSession>,
+) -> Result<(), RepairError> {
+    let old = entry
+        .writers
+        .bind_generation(entry.generation, || {
+            STREAMING_SESSIONS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(nzb_id, Arc::clone(&entry))
+        })
+        .map_err(|_| RepairError::Cancelled)?;
     if let Some(old) = old {
         old.session.cancel();
+        old.writers.cancel_generation(old.generation);
     }
+    entry.observe_count_readiness();
+    entry.emit_live_metrics(nzb_id, "started");
+    Ok(())
 }
 
 fn ensure_current_generation(
+    nzb_id: i32,
+    entry: &ActiveStreamingSession,
+) -> Result<(), RepairError> {
+    if !entry.writers.is_current_generation(entry.generation) {
+        return Err(RepairError::Cancelled);
+    }
+    ensure_registry_generation(nzb_id, entry)
+}
+
+fn ensure_registry_generation(
     nzb_id: i32,
     entry: &ActiveStreamingSession,
 ) -> Result<(), RepairError> {
@@ -233,6 +271,8 @@ impl ActiveStreamingSession {
     fn record<T>(&self, result: Result<T, RepairError>) -> Result<T, RepairError> {
         if let Err(error) = &result {
             *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
+        } else {
+            self.observe_count_readiness();
         }
         result
     }
@@ -284,7 +324,7 @@ pub(crate) fn streaming_session_defer_article(
     snapshot: impl FnOnce() -> Option<Vec<u8>>,
 ) -> Option<Result<(), RepairError>> {
     let entry = active_streaming_session(nzb_id)?;
-    Some(entry.record((|| {
+    let result = (|| {
         ensure_current_generation(nzb_id, &entry)?;
         let id = live_source_id(&entry, identity.0, identity.1)?;
         let length = entry.file_lengths[&id];
@@ -304,6 +344,7 @@ pub(crate) fn streaming_session_defer_article(
             });
         }
         let bytes = snapshot().ok_or_else(|| {
+            entry.metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
             live_error(
                 "live article cache",
                 "cache bytes unavailable; committed replay required",
@@ -324,8 +365,23 @@ pub(crate) fn streaming_session_defer_article(
             size,
             bytes: Some(bytes),
         });
+        entry
+            .metrics
+            .captured_articles
+            .fetch_add(1, Ordering::Relaxed);
+        entry
+            .metrics
+            .captured_bytes
+            .fetch_add(size, Ordering::Relaxed);
         Ok(())
-    })()))
+    })();
+    if result.is_err() {
+        entry
+            .metrics
+            .capture_refusals
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    Some(entry.record(result))
 }
 
 /// Capture a permanent failure without waiting for a hash/fold operation.
@@ -395,10 +451,17 @@ pub(crate) fn streaming_session_drain_articles(nzb_id: i32) -> Option<Result<usi
         Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => return Some(Ok(0)),
     };
-    Some(entry.record((|| {
+    Some(drain_live_articles_locked(nzb_id, &entry))
+}
+
+fn drain_live_articles_locked(
+    nzb_id: i32,
+    entry: &Arc<ActiveStreamingSession>,
+) -> Result<usize, RepairError> {
+    entry.record((|| {
         let mut count = 0;
         loop {
-            ensure_current_generation(nzb_id, &entry)?;
+            ensure_current_generation(nzb_id, entry)?;
             let Some(article) = entry
                 .articles
                 .lock()
@@ -428,11 +491,11 @@ pub(crate) fn streaming_session_drain_articles(nzb_id: i32) -> Option<Result<usi
                 .unwrap_or_else(|e| e.into_inner())
                 .bytes -= bytes;
             let outcome = result?;
-            ensure_current_generation(nzb_id, &entry)?;
+            ensure_current_generation(nzb_id, entry)?;
             entry.unpause(outcome.unpause.as_ref());
             count += 1;
         }
-    })()))
+    })())
 }
 
 /// Jobs with queued work, copied under the registry lock without doing repair work.
@@ -480,13 +543,6 @@ pub(crate) struct LiveCompletedFile {
     pub queued_id: Option<u64>,
 }
 
-#[derive(Default)]
-struct CompletionAccounting {
-    bytes: u64,
-    jobs: HashMap<i32, u64>,
-}
-static COMPLETION_ACCOUNTING: LazyLock<Mutex<CompletionAccounting>> =
-    LazyLock::new(|| Mutex::new(CompletionAccounting::default()));
 static COMPLETED_LIVE_FILES: LazyLock<Mutex<VecDeque<PendingCompletedFile>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
 static COMPLETION_DRAINERS: LazyLock<Mutex<HashSet<i32>>> =
@@ -514,29 +570,11 @@ pub(crate) fn streaming_session_claim_completion_drain(
 
 static STARTING_LIVE_SESSION: Mutex<()> = Mutex::new(());
 
-struct CompletionCharge {
-    nzb_id: i32,
-    bytes: u64,
-    _budget: SessionBudgetLease,
-}
-impl Drop for CompletionCharge {
-    fn drop(&mut self) {
-        let mut used = COMPLETION_ACCOUNTING
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        used.bytes -= self.bytes;
-        if let Some(job) = used.jobs.get_mut(&self.nzb_id) {
-            *job -= self.bytes;
-            if *job == 0 {
-                used.jobs.remove(&self.nzb_id);
-            }
-        }
-    }
-}
 struct PendingCompletedFile {
     file: LiveCompletedFile,
     generation: Option<SessionGeneration>,
-    _charge: CompletionCharge,
+    writers: Arc<WriteCoordinator>,
+    _charge: ControlLease,
 }
 
 pub(crate) fn streaming_session_queue_completed_file(
@@ -544,37 +582,7 @@ pub(crate) fn streaming_session_queue_completed_file(
     bytes: u64,
     capture: impl FnOnce() -> Result<LiveCompletedFile, RepairError>,
 ) -> Result<(), RepairError> {
-    if !(256..=1 << 20).contains(&bytes) {
-        return Err(live_error(
-            "live completion capture",
-            "context is outside its byte allowance",
-        ));
-    }
-    let mut used = COMPLETION_ACCOUNTING
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let total = used.bytes.checked_add(bytes);
-    let job = used
-        .jobs
-        .get(&nzb_id)
-        .copied()
-        .unwrap_or(0)
-        .checked_add(bytes);
-    if total.is_none_or(|n| n > 8 << 20) || job.is_none_or(|n| n > 1 << 20) {
-        return Err(live_error(
-            "live completion capture",
-            "context queue is full; ordinary repair required",
-        ));
-    }
-    let budget = acquire_session_budget(bytes, effective_live_pool_bytes())?;
-    used.bytes = total.unwrap();
-    used.jobs.insert(nzb_id, job.unwrap());
-    drop(used);
-    let charge = CompletionCharge {
-        nzb_id,
-        bytes,
-        _budget: budget,
-    };
+    let charge = reserve_control(nzb_id, bytes, effective_live_pool_bytes())?;
     let file = capture()?;
     let actual = file.name.capacity()
         + file.hash16k.capacity()
@@ -588,6 +596,7 @@ pub(crate) fn streaming_session_queue_completed_file(
             "completion facts exceed admission",
         ));
     }
+    let writers = download_writes(nzb_id, &file.base_dir).map_err(|_| RepairError::Cancelled)?;
     let generation = active_streaming_session(nzb_id).map(|entry| entry.generation);
     COMPLETED_LIVE_FILES
         .lock()
@@ -595,6 +604,7 @@ pub(crate) fn streaming_session_queue_completed_file(
         .push_back(PendingCompletedFile {
             file,
             generation,
+            writers,
             _charge: charge,
         });
     Ok(())
@@ -664,7 +674,7 @@ pub(crate) fn streaming_session_process_completed_file(
             + file.path.capacity()
             + file.accepted.capacity() * std::mem::size_of::<ByteRange>()
             + 512;
-        if actual as u64 > item._charge.bytes {
+        if actual as u64 > item._charge.bytes() {
             return Err(live_error(
                 "live completion refresh",
                 "renamed context exceeds admission",
@@ -685,11 +695,12 @@ pub(crate) fn streaming_session_process_completed_file(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             if active_streaming_session(nzb_id).is_none() {
-                streaming_session_start_bounded(
+                streaming_session_start_bounded_with_context(
                     nzb_id,
                     &file.path,
                     &file.base_dir,
                     effective_live_pool_bytes(),
+                    Arc::clone(&item.writers),
                 )?;
                 return Ok(true);
             }
@@ -864,6 +875,23 @@ pub fn streaming_session_start_bounded(
     base_dir: &Path,
     effective_pool_bytes: u64,
 ) -> Result<(), RepairError> {
+    let writers = download_writes(nzb_id, base_dir).map_err(|_| RepairError::Cancelled)?;
+    streaming_session_start_bounded_with_context(
+        nzb_id,
+        par2_path,
+        base_dir,
+        effective_pool_bytes,
+        writers,
+    )
+}
+
+fn streaming_session_start_bounded_with_context(
+    nzb_id: i32,
+    par2_path: &Path,
+    base_dir: &Path,
+    effective_pool_bytes: u64,
+    writers: Arc<WriteCoordinator>,
+) -> Result<(), RepairError> {
     let mut budget = acquire_session_budget(LIVE_METADATA_BYTES, effective_pool_bytes)?;
     let set = load_bounded_live_metadata(par2_path)?;
     let slice_size = set
@@ -884,14 +912,13 @@ pub fn streaming_session_start_bounded(
             limit_bytes: effective_pool_bytes,
         });
     }
-    let entry = build_streaming_session(&set, base_dir, limits.options, budget)?;
+    let entry = build_streaming_session(&set, base_dir, limits.options, budget, writers)?;
     entry.session.on_recovery_volume_arrived(par2_path, None)?;
     *entry.par_name.lock().unwrap_or_else(|e| e.into_inner()) = par2_path
         .file_name()
         .map(par_rs::filenames::os_str_bytes)
         .unwrap_or_default();
-    install_streaming_session(nzb_id, entry);
-    Ok(())
+    install_streaming_session(nzb_id, entry)
 }
 
 fn options_reservation(options: &SessionOptions) -> Result<u64, RepairError> {
@@ -914,15 +941,15 @@ pub fn streaming_session_start(
 ) -> Result<(), RepairError> {
     let budget =
         acquire_session_budget(options_reservation(&options)?, effective_live_pool_bytes())?;
+    let writers = download_writes(nzb_id, base_dir).map_err(|_| RepairError::Cancelled)?;
     let set = load_par2_set(par2_path)?;
-    let entry = build_streaming_session(&set, base_dir, options, budget)?;
+    let entry = build_streaming_session(&set, base_dir, options, budget, writers)?;
     entry.session.on_recovery_volume_arrived(par2_path, None)?;
     *entry.par_name.lock().unwrap_or_else(|e| e.into_inner()) = par2_path
         .file_name()
         .map(par_rs::filenames::os_str_bytes)
         .unwrap_or_default();
-    install_streaming_session(nzb_id, entry);
-    Ok(())
+    install_streaming_session(nzb_id, entry)
 }
 
 /// Starts a session from metadata bytes, charged to the shared PAR pool.
@@ -934,20 +961,49 @@ pub fn streaming_session_start_bytes(
 ) -> Result<(), RepairError> {
     let budget =
         acquire_session_budget(options_reservation(&options)?, effective_live_pool_bytes())?;
+    let writers = download_writes(nzb_id, base_dir).map_err(|_| RepairError::Cancelled)?;
     let set = load_par2_set_bytes(par2_bytes).map_err(|source| RepairError::Io {
         context: "loading in-memory par2 bytes".to_owned(),
         source,
     })?;
-    let entry = build_streaming_session(&set, base_dir, options, budget)?;
-    install_streaming_session(nzb_id, entry);
-    Ok(())
+    let entry = build_streaming_session(&set, base_dir, options, budget, writers)?;
+    install_streaming_session(nzb_id, entry)
 }
 
 /// Cancels the current generation permanently; in-flight owners retain their reservation.
 pub fn streaming_session_cancel(nzb_id: i32) {
     if let Some(entry) = active_streaming_session(nzb_id) {
-        entry.session.cancel();
+        entry
+            .writers
+            .cancel_generation_with(entry.generation, || entry.session.cancel());
     }
+}
+
+pub(crate) fn streaming_sessions_cancel_all() {
+    let entries: Vec<_> = STREAMING_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .keys()
+        .copied()
+        .collect();
+    for id in entries {
+        streaming_session_cancel(id);
+    }
+}
+pub(crate) fn streaming_sessions_forget_all() {
+    let entries: Vec<_> = STREAMING_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .keys()
+        .copied()
+        .collect();
+    for id in entries {
+        streaming_session_forget(id);
+    }
+    COMPLETED_LIVE_FILES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 /// Last operation failure for the current generation.
@@ -1246,6 +1302,254 @@ pub fn streaming_session_status(nzb_id: i32) -> Option<LiveStatus> {
     Some(active_streaming_session(nzb_id)?.session.status())
 }
 
+/// A target CRC is reusable only while its original publication remains fenced.
+/// Used by the ordinary quick verifier; full/reprocess checks bypass this path.
+pub(crate) fn streaming_session_verified_target_crc(
+    nzb_id: i32,
+    base_dir: &Path,
+    queue_id: i32,
+    filename: &[u8],
+) -> Option<u32> {
+    let entry = active_streaming_session(nzb_id)?;
+    if entry.base_dir != base_dir || entry.session.is_cancelled() {
+        return None;
+    }
+    entry.writers.certified_crc(
+        entry.generation,
+        queue_id,
+        &base_dir.join(crate::fsops::path(filename)),
+    )
+}
+
+/// A bounded count upper bound only: the helper must authenticate queued RAM and
+/// validate actual recovery rank before patching. This function performs no GF or I/O.
+pub(crate) fn streaming_session_can_schedule_repair(nzb_id: i32) -> bool {
+    let Some(entry) = active_streaming_session(nzb_id) else {
+        return false;
+    };
+    if ensure_current_generation(nzb_id, &entry).is_err() {
+        return false;
+    }
+    let status = entry.session.status();
+    if status.early_cutover_possible {
+        return true;
+    }
+    let size = entry.session.slice_size();
+    let queued_upper_bound = entry
+        .articles
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pending
+        .iter()
+        .filter(|article| article.bytes.is_some())
+        .fold(0u64, |sum, article| {
+            sum.saturating_add(
+                (article.offset % size)
+                    .saturating_add(article.size)
+                    .div_ceil(size),
+            )
+        });
+    let unknown = status.unarrived + status.partially_arrived + status.damaged;
+    unknown as u64 <= (status.ready_recovery as u64).saturating_add(queued_upper_bound)
+}
+
+/// Captured under the queue lock; it owns the original session and admitted metadata.
+pub(crate) struct LiveRepairRequest {
+    nzb_id: i32,
+    entry: Arc<ActiveStreamingSession>,
+    ids: Vec<(i32, FileId)>,
+    targets: Vec<crate::parlive::WriterTarget>,
+    charge: Arc<ControlLease>,
+}
+struct RepairTargetAdmission {
+    targets: Vec<crate::parlive::WriterTarget>,
+    charge: Arc<ControlLease>,
+}
+struct RepairFinished<F: FnOnce()> {
+    finished: Option<F>,
+}
+impl<F: FnOnce()> Drop for RepairFinished<F> {
+    fn drop(&mut self) {
+        if let Some(finished) = self.finished.take() {
+            finished();
+        }
+    }
+}
+pub(crate) struct TargetWriteLease {
+    nzb_id: i32,
+    ids: Vec<(i32, FileId)>,
+    ownership: crate::parlive::RepairWriteLease,
+    writer_wait_ns: u64,
+    // Retain all live session resources until actual I/O and publication finish.
+    entry: Arc<ActiveStreamingSession>,
+}
+
+pub(crate) fn streaming_session_prepare_repair(
+    nzb_id: i32,
+    targets: Vec<crate::parlive::WriterTarget>,
+    charge: impl Into<Arc<ControlLease>>,
+) -> Result<LiveRepairRequest, RepairError> {
+    let admission = RepairTargetAdmission {
+        targets,
+        charge: charge.into(),
+    };
+    let targets = &admission.targets;
+    let entry = active_streaming_session(nzb_id).ok_or(RepairError::Cancelled)?;
+    ensure_current_generation(nzb_id, &entry)?;
+    let bytes = targets
+        .capacity()
+        .checked_mul(std::mem::size_of::<crate::parlive::WriterTarget>())
+        .and_then(|bytes| {
+            targets.iter().try_fold(bytes, |total, target| {
+                total.checked_add(target.path.capacity())
+            })
+        })
+        .and_then(|bytes| bytes.checked_add(targets.len().checked_mul(128)?))
+        .and_then(|bytes| bytes.checked_add(1024));
+    if targets.is_empty()
+        || targets.len() > 512
+        || bytes.is_none_or(|bytes| bytes as u64 > admission.charge.bytes())
+    {
+        return Err(live_error(
+            "live target admission",
+            "target metadata exceeds reservation",
+        ));
+    }
+    let mut ids = Vec::with_capacity(targets.len());
+    for target in targets {
+        let name = target
+            .path
+            .file_name()
+            .ok_or_else(|| live_error("live target admission", "target has no filename"))?;
+        let id = entry
+            .session
+            .file_id_by_name(&par_rs::filenames::os_str_bytes(name))
+            .ok_or_else(|| live_error("live target admission", "target is not in this PAR set"))?;
+        if entry.base_dir.join(&entry.target_names[&id]) != target.path {
+            return Err(live_error(
+                "live target admission",
+                "target path differs from repair destination",
+            ));
+        }
+        ids.push((target.file_id, id));
+    }
+    Ok(LiveRepairRequest {
+        nzb_id,
+        entry,
+        ids,
+        targets: admission.targets,
+        charge: admission.charge,
+    })
+}
+impl LiveRepairRequest {
+    pub(crate) fn admission_hold(&self) -> Arc<ControlLease> {
+        Arc::clone(&self.charge)
+    }
+    pub(crate) fn generation(&self) -> SessionGeneration {
+        self.entry.generation
+    }
+    pub(crate) fn acquire(self) -> Result<TargetWriteLease, RepairError> {
+        // Fence native cache flushing before installing a pending barrier. No queue lock here.
+        let waited = std::time::Instant::now();
+        let ownership = crate::articledl::with_live_cache_fence(|| {
+            self.entry
+                .writers
+                .begin_repair(self.entry.generation, self.targets, self.charge)
+        })
+        .map_err(|_| RepairError::Cancelled)?;
+        Ok(TargetWriteLease {
+            nzb_id: self.nzb_id,
+            ids: self.ids,
+            ownership,
+            writer_wait_ns: live_metrics::nanos(waited.elapsed()),
+            entry: self.entry,
+        })
+    }
+}
+impl TargetWriteLease {
+    pub(crate) fn repair_and_publish(
+        self,
+        publish: impl FnOnce(&[i32]) -> usize,
+        finished: impl FnOnce(),
+    ) -> Result<(EarlyRepairReport, usize), RepairError> {
+        let Self {
+            nzb_id,
+            ids,
+            ownership,
+            writer_wait_ns,
+            entry,
+        } = self;
+        entry
+            .metrics
+            .writer_wait_ns
+            .fetch_add(writer_wait_ns, Ordering::Relaxed);
+        let waited = std::time::Instant::now();
+        let _operation = entry.operation.lock().unwrap_or_else(|e| e.into_inner());
+        // Reset helper state before an article drainer can acquire this operation.
+        // The callback is metadata-only and must never reacquire the daemon queue.
+        let _finished = RepairFinished {
+            finished: Some(finished),
+        };
+        entry
+            .metrics
+            .operation_wait_ns
+            .fetch_add(live_metrics::nanos(waited.elapsed()), Ordering::Relaxed);
+        ensure_current_generation(nzb_id, &entry)?;
+        // The final queue callback can precede its deferred RAM fold. Consume the
+        // admitted snapshots here before ordinary postprocessing may take over.
+        drain_live_articles_locked(nzb_id, &entry)?;
+        let par_ids: Vec<_> = ids.iter().map(|(_, id)| *id).collect();
+        let (report, hashes) = entry.record(
+            entry
+                .session
+                .repair_available_targets_with_hashes_now(&par_ids),
+        )?;
+        ensure_current_generation(nzb_id, &entry)?;
+        // The library checks both the whole-file MD5 and actual file length under our lease.
+        let verified: Vec<_> = ids
+            .iter()
+            .filter(|(_, id)| {
+                report.files.iter().any(|(fid, status, ok)| {
+                    fid == id && *ok && *status == VolumeStatus::CompleteAndVerified
+                })
+            })
+            .map(|(queue_id, _)| *queue_id)
+            .collect();
+        let crcs: Vec<_> = ids
+            .iter()
+            .filter_map(|(queue_id, par_id)| {
+                verified
+                    .contains(queue_id)
+                    .then(|| {
+                        hashes
+                            .iter()
+                            .find(|(file_id, _)| file_id == par_id)
+                            .map(|(_, hash)| (*queue_id, hash.crc32))
+                    })
+                    .flatten()
+            })
+            .collect();
+        if crcs.len() != verified.len() {
+            return Err(live_error(
+                "live verification",
+                "verified target hash missing",
+            ));
+        }
+        let released = ownership
+            .publish(&crcs, || {
+                ensure_registry_generation(nzb_id, &entry)?;
+                let released = publish(&verified);
+                if released > 0 {
+                    entry.record_live_handoff();
+                }
+                Ok(released)
+            })
+            .map_err(|_| RepairError::Cancelled)??;
+        entry.emit_live_metrics(nzb_id, "repair_complete");
+        Ok((report, released))
+    }
+}
+
 /// Live par2 cutover: when every slice that is damaged or has not arrived yet is covered by
 /// the recovery blocks already downloaded, repairs the named target files in place right now,
 /// before the download finishes. Returns `None` when there is no session, the cutover is not
@@ -1372,13 +1676,22 @@ pub fn streaming_session_has_session(nzb_id: i32) -> bool {
 
 /// Drops the [`StreamingParSession`] for `nzb_id`.
 pub fn streaming_session_forget(nzb_id: i32) {
-    let old = STREAMING_SESSIONS
+    if let Some(old) = active_streaming_session(nzb_id) {
+        old.writers.cancel_generation_with(old.generation, || {
+            old.session.cancel();
+            let mut sessions = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+            if sessions
+                .get(&nzb_id)
+                .is_some_and(|entry| entry.generation == old.generation)
+            {
+                sessions.remove(&nzb_id);
+            }
+        });
+    }
+    COMPLETED_LIVE_FILES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(&nzb_id);
-    if let Some(old) = old {
-        old.session.cancel();
-    }
+        .retain(|item| item.file.nzb_id != nzb_id);
 }
 
 // =============================================================================================

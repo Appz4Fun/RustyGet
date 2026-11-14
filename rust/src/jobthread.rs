@@ -82,10 +82,12 @@ impl Drop for JobThread {
 }
 
 /// Starts the thread. It frees the [`JobThread`] itself when it finishes if
-/// it was created with `auto_destroy`; otherwise the owner frees it.
-unsafe fn start(t: *mut JobThread) {
+/// it was created with `auto_destroy`; otherwise the owner frees it. Returns
+/// false when no thread could be created; the caller then still owns `t` and
+/// must clear any handle it stored before freeing it.
+unsafe fn start(t: *mut JobThread) -> bool {
     let Some(thread) = (unsafe { t.as_ref() }) else {
-        return;
+        return false;
     };
     thread.running.store(true, Ordering::SeqCst);
     let addr = t as usize;
@@ -114,22 +116,22 @@ unsafe fn start(t: *mut JobThread) {
                 drop(unsafe { Box::from_raw(t) });
             }
         });
-    match spawned {
+    let started = match spawned {
         Ok(handle) => {
             use std::os::unix::thread::JoinHandleExt;
             thread
                 .pthread
                 .store(handle.as_pthread_t() as usize, Ordering::SeqCst);
             drop(handle);
+            true
         }
         Err(_) => {
             thread.running.store(false, Ordering::SeqCst);
-            if thread.auto_destroy {
-                drop(unsafe { Box::from_raw(t) });
-            }
+            false
         }
-    }
+    };
     drop(start_guard);
+    started
 }
 
 static START_LOCK: Mutex<()> = Mutex::new(());
@@ -161,11 +163,14 @@ pub extern "C" fn nzbget_rs_job_new_unpack(nzb_id: c_int) -> *mut JobThread {
     t
 }
 
+/// Returns 1 when the thread runs, 0 when it could not be created (the caller
+/// then clears its handle and frees `t` with `nzbget_rs_job_free`).
+///
 /// # Safety
 /// `t` comes from `nzbget_rs_job_new_*` and has not been started.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_job_start(t: *mut JobThread) {
-    unsafe { start(t) };
+pub unsafe extern "C" fn nzbget_rs_job_start(t: *mut JobThread) -> c_int {
+    c_int::from(unsafe { start(t) })
 }
 
 /// Thread operations on a live job thread:
@@ -220,11 +225,11 @@ pub unsafe extern "C" fn nzbget_rs_job_op(
     }
 }
 
-/// Frees a job thread that is not auto-destroying. With `kill`, the thread is
-/// cancelled first (was `Thread::Kill`).
+/// Frees a job thread that is not auto-destroying, or one whose start failed.
+/// With `kill`, the thread is cancelled first (was `Thread::Kill`).
 ///
 /// # Safety
-/// `t` is null or a live, non-auto-destroying job thread no one else frees.
+/// `t` is null or a job thread no one else frees and no running thread uses.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nzbget_rs_job_free(t: *mut JobThread, kill: c_int) {
     if t.is_null() {

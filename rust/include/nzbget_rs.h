@@ -363,7 +363,8 @@ int nzbget_rs_par_checker_exec(
 typedef struct JobThread JobThread;
 JobThread* nzbget_rs_job_new_post(int kind, uintptr_t post_ptr, int nzb_id, int auto_destroy);
 JobThread* nzbget_rs_job_new_unpack(int nzb_id);
-void nzbget_rs_job_start(JobThread* t);
+// 1 started; 0 no thread created (clear any stored handle, then nzbget_rs_job_free).
+int nzbget_rs_job_start(JobThread* t);
 // 0 stop, 1 is stopped, 2 set stop flag, 3 clear stop flag, 4 is running,
 // 5 add par (p1 file, a1 deleted), 10+n direct-unpack op n (p1, p2).
 int nzbget_rs_job_op(const JobThread* t, int op, int a1, uintptr_t p1, uintptr_t p2);

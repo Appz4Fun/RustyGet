@@ -3017,7 +3017,7 @@ inline void StartPostJob(PostInfo* postInfo, int kind)
 		return;
 	JobThread* job = nzbget_rs_job_new_post(kind, reinterpret_cast<uintptr_t>(postInfo), 0, 0);
 	postInfo->SetPostThread(job);
-	nzbget_rs_job_start(job);
+	if (!nzbget_rs_job_start(job)) { postInfo->SetPostThread(nullptr); nzbget_rs_job_free(job, 0); }
 }
 
 inline void StartLiveRepairJob(NzbInfo* nzbInfo)
@@ -3025,7 +3025,7 @@ inline void StartLiveRepairJob(NzbInfo* nzbInfo)
 	if (!nzbInfo) return;
 	JobThread* job = nzbget_rs_job_new_post(10, 0, nzbInfo->GetId(), 1);
 	nzbInfo->SetLiveRepairThread(job);
-	nzbget_rs_job_start(job);
+	if (!nzbget_rs_job_start(job)) { nzbInfo->SetLiveRepairThread(nullptr); nzbget_rs_job_free(job, 0); }
 }
 
 inline void StartDirectUnpackJob(NzbInfo* nzbInfo)
@@ -3033,7 +3033,12 @@ inline void StartDirectUnpackJob(NzbInfo* nzbInfo)
 	JobThread* job = nzbget_rs_job_new_unpack(nzbInfo->GetId());
 	nzbInfo->SetUnpackThread(job);
 	nzbInfo->SetDirectUnpackStatus(NzbInfo::nsRunning);
-	nzbget_rs_job_start(job);
+	if (!nzbget_rs_job_start(job))
+	{
+		nzbInfo->SetUnpackThread(nullptr);
+		nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
+		nzbget_rs_job_free(job, 0);
+	}
 }
 #endif
 

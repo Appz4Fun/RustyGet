@@ -55,7 +55,9 @@ public:
 	void SaveChanged() {}
 };
 
-bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 5000)
+// Generous default: shared CI runners (macOS in particular) can stall a debug
+// build for several seconds. A passing wait returns as soon as it holds.
+bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 30000)
 {
 	for (int elapsed = 0; elapsed < timeoutMs; elapsed += 20)
 	{

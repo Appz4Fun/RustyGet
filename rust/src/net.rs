@@ -2954,7 +2954,7 @@ impl NzbgetRsServerPool {
         want_srv: Option<&RsNewsServer>,
         ignore_srvs: &[&RsNewsServer],
     ) -> *mut PooledNntpConn {
-        let conn = self.select_connection(level, want_srv, ignore_srvs);
+        let conn = self.select_connection(level, want_srv, ignore_srvs, false);
         if conn.is_null() && level >= 0 {
             self.download_starved_at_ms
                 .store(pool_now_ms(), Ordering::SeqCst);
@@ -2966,22 +2966,8 @@ impl NzbgetRsServerPool {
     /// idle connection, but downloads come first: beyond one per server, none is
     /// handed out while a download was recently refused one.
     pub fn get_check_connection(&self, srv: &RsNewsServer) -> *mut PooledNntpConn {
-        if !check_connection_allowed(
-            srv.check_in_use.load(Ordering::SeqCst),
-            self.download_starved_at_ms.load(Ordering::SeqCst),
-            pool_now_ms(),
-        ) {
-            return ptr::null_mut();
-        }
         let nl = srv.norm_level.load(Ordering::SeqCst);
-        let conn = self.select_connection(nl, Some(srv), &[]);
-        if !conn.is_null() {
-            let c = unsafe { &*conn };
-            if !c.check.swap(true, Ordering::SeqCst) {
-                c.server.check_in_use.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        conn
+        self.select_connection(nl, Some(srv), &[], true)
     }
 
     /// [`Self::get_check_connection`] by server id.
@@ -2992,11 +2978,16 @@ impl NzbgetRsServerPool {
         self.get_check_connection(&srv)
     }
 
+    /// Picks a free connection under the pool lock. `for_check`: the admission
+    /// rule of [`check_connection_allowed`] is applied to the server that
+    /// actually supplies the connection (a group sibling may), and the check
+    /// occupancy is reserved in the same critical section.
     fn select_connection(
         &self,
         level: i32,
         want_srv: Option<&RsNewsServer>,
         ignore_srvs: &[&RsNewsServer],
+        for_check: bool,
     ) -> *mut PooledNntpConn {
         if level < 0 {
             return ptr::null_mut();
@@ -3072,9 +3063,24 @@ impl NzbgetRsServerPool {
             g.sorted_servers[idx].block_time.store(0, Ordering::SeqCst);
         }
         if let Some((chosen_conn, chosen_level)) = found {
+            if for_check
+                && !check_connection_allowed(
+                    g.connections[chosen_conn]
+                        .server
+                        .check_in_use
+                        .load(Ordering::SeqCst),
+                    self.download_starved_at_ms.load(Ordering::SeqCst),
+                    pool_now_ms(),
+                )
+            {
+                return ptr::null_mut();
+            }
             g.levels[chosen_level as usize] -= 1;
             let c = &mut g.connections[chosen_conn];
             c.in_use.store(true, Ordering::SeqCst);
+            if for_check && !c.check.swap(true, Ordering::SeqCst) {
+                c.server.check_in_use.fetch_add(1, Ordering::SeqCst);
+            }
             (&mut **c) as *mut PooledNntpConn
         } else {
             ptr::null_mut()
@@ -3941,6 +3947,36 @@ mod tests {
             pool.free_connection(c, true);
         }
         assert_eq!(srv.check_in_use.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn concurrent_checks_respect_backoff_atomically() {
+        let (pool, srv) = check_test_pool(8);
+        // downloads waiting before any check holds a connection
+        let dl: Vec<_> = (0..8).map(|_| pool.get_connection(0, None, &[])).collect();
+        assert!(dl.iter().all(|c| !c.is_null()));
+        assert!(pool.get_connection(0, None, &[]).is_null());
+        for c in dl {
+            pool.free_connection(c, true);
+        }
+        let pool = Arc::new(pool);
+        let got: Vec<usize> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..8)
+                .map(|_| {
+                    let pool = Arc::clone(&pool);
+                    let srv = Arc::clone(&srv);
+                    sc.spawn(move || pool.get_check_connection(&srv) as usize)
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let taken: Vec<usize> = got.into_iter().filter(|&c| c != 0).collect();
+        // only the one-per-server floor while downloads are starved
+        assert_eq!(taken.len(), 1);
+        assert_eq!(srv.check_in_use.load(Ordering::SeqCst), 1);
+        for c in taken {
+            pool.free_connection(c as *mut PooledNntpConn, true);
+        }
     }
 
     #[test]

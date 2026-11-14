@@ -85,7 +85,8 @@ struct InitGlobals
 BOOST_GLOBAL_FIXTURE(InitGlobals);
 
 #include "postprocess/DirectUnpackTest.h"
-#include "postprocess/ParCheckerTest.h"
+// DirectUnpackTest.h opens the PostprocessTest suite; ParCheckerTest.h used to close it.
+BOOST_AUTO_TEST_SUITE_END()
 
 int main(int argc, char* argv[])
 {

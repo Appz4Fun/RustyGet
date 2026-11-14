@@ -185,11 +185,6 @@ public:
 		m_observers.push_back(observer);
 	}
 
-	void Detach(Observer* observer)
-	{
-		m_observers.erase(std::remove(m_observers.begin(), m_observers.end(), observer), m_observers.end());
-	}
-
 	void Notify(void* aspect)
 	{
 		for (Observer* observer : m_observers)
@@ -660,40 +655,6 @@ protected:
 /*
 Plain char-buffer for I/O operations.
  */
-class CharBuffer
-{
-public:
-	CharBuffer() {}
-	CharBuffer(int size) { Reserve(size); }
-	CharBuffer(CharBuffer& other) : m_data(other.m_data), m_size(other.m_size) { other.m_data = nullptr; other.m_size = 0; }
-	~CharBuffer() { Clear(); }
-	CharBuffer& operator=(CharBuffer&& other) = delete;
-	int Size() { return m_size; }
-	void Reserve(int size)
-	{
-		if (size <= 0)
-		{
-			return;
-		}
-		char* data = static_cast<char*>(realloc(m_data, static_cast<size_t>(size)));
-		if (data)
-		{
-			m_data = data;
-			m_size = size;
-		}
-	}
-	void Clear()
-	{
-		free(m_data);
-		m_data = nullptr;
-		m_size = 0;
-	}
-	operator char*() const { return m_data; }
-
-protected:
-	char* m_data = nullptr;
-	int m_size = 0;
-};
 
 #endif
 
@@ -746,18 +707,6 @@ inline void Util::Init()
 	CurrentTicks();
 	InitRsBuildEnv();
 }
-
-class Crc32
-{
-public:
-	Crc32() { Reset(); }
-	void Reset() { m_state = 0; }
-	void Append(uchar* block, uint32 length) { m_state = nzbget_rs_crc32_append(block, length, m_state); }
-	uint32 Finish() { return m_state; }
-
-private:
-	uint32 m_state = 0;
-};
 
 #ifndef FILESYSTEM_H
 #define FILESYSTEM_H
@@ -920,48 +869,18 @@ public:
 
 	const char* GetDestDir() const { return Str(3); }
 	const char* GetInterDir() const { return Str(4); }
-	const char* GetTempDir() const { return Str(5); }
-	const char* GetQueueDir() const { return Str(6); }
 	bool GetNzbLog() const { return m_scalars.nzb_log != 0; }
 	bool GetRawArticle() const { return m_scalars.raw_article != 0; }
 	bool GetSkipWrite() const { return m_scalars.skip_write != 0; }
 	bool GetAppendCategoryDir() const { return m_scalars.append_category_dir != 0; }
-	bool GetContinuePartial() const { return m_scalars.continue_partial != 0; }
-	bool GetFlushQueue() const { return m_scalars.flush_queue != 0; }
-	bool GetDupeCheck() const { return m_scalars.dupe_check != 0; }
-	EDupeArticleFallback GetDupeArticleFallback() const { return (EDupeArticleFallback)m_scalars.dupe_article_fallback; }
 	const char* GetCertStore() const { return Str(23); }
 	bool GetCertCheck() const { return m_scalars.cert_check != 0; }
-	EOutputMode GetOutputMode() const { return (EOutputMode)m_scalars.output_mode; }
 	int GetLogBuffer() const { return m_scalars.log_buffer; }
-	EParCheck GetParCheck() const { return (EParCheck)m_scalars.par_check; }
-	bool GetParRepair() const { return m_scalars.par_repair != 0; }
-	EParScan GetParScan() const { return (EParScan)m_scalars.par_scan; }
-	bool GetParQuick() const { return m_scalars.par_quick != 0; }
-	bool GetParRename() const { return m_scalars.par_rename != 0; }
-	int GetParBuffer() const { return m_scalars.par_buffer; }
-	int GetParThreads() const { return m_scalars.par_threads; }
 	EHealthCheck GetHealthCheck() const { return (EHealthCheck)m_scalars.health_check; }
 	bool GetDirectWrite() const { return m_scalars.direct_write != 0; }
 	int GetWriteBuffer() const { return m_scalars.write_buffer; }
-	bool GetNzbCleanupDisk() const { return m_scalars.nzb_cleanup_disk != 0; }
-	int GetParTimeLimit() const { return m_scalars.par_time_limit; }
-	int GetKeepHistory() const { return m_scalars.keep_history; }
-	bool GetUseTempUnpackDir() const { return m_scalars.use_temp_unpack_dir != 0; }
-	bool GetUnpackCleanupDisk() const { return m_scalars.unpack_cleanup_disk != 0; }
-	const char* GetUnrarCmd() const { return Str(30); }
-	const char* GetUnpackPassFile() const { return Str(31); }
-	const char* GetExtCleanupDisk() const { return Str(32); }
-	const char* GetParIgnoreExt() const { return Str(33); }
-	const char* GetRenameIgnoreExt() const { return Str(34); }
-	const char* GetUnpackIgnoreExt() const { return Str(35); }
-	int GetTimeCorrection() const { return m_scalars.time_correction; }
-	int GetArticleCache() const { return m_scalars.article_cache; }
 
 	bool GetServerMode() const { return Mode(0); }
-	bool GetDaemonMode() const { return Mode(1); }
-	bool GetRemoteClientMode() const { return Mode(2); }
-	bool GetDirectClientMode() const { return Mode(3); }
 
 private:
 	NzbgetRsOptions* m_rs = nullptr;
@@ -3751,126 +3670,6 @@ class CommandScriptLog;
 
 class QueueScriptCoordinator {};
 extern QueueScriptCoordinator* g_QueueScriptCoordinator;
-
-#endif
-
-#endif
-
-#ifndef DISABLE_PARCHECK
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2007-2019 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *  Copyright (C) 2024 Denis <denis@nzbget.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
-
-#ifndef PARCHECKER_H
-#define PARCHECKER_H
-
-#ifndef DISABLE_PARCHECK
-
-class ParChecker
-{
-public:
-	ParChecker() : m_rs(nzbget_rs_par_checker_new()) {}
-	virtual ~ParChecker() { nzbget_rs_par_checker_free(m_rs); }
-
-	enum EStatus
-	{
-		psFailed,
-		psRepairPossible,
-		psRepaired,
-		psRepairNotNeeded
-	};
-
-	void SetDestDir(const char* destDir) { nzbget_rs_par_checker_exec(m_rs, 1, 0, destDir ? destDir : "", nullptr, nullptr); }
-	void SetParQuick(bool parQuick) { nzbget_rs_par_checker_exec(m_rs, 2, parQuick ? 1 : 0, nullptr, nullptr, nullptr); }
-	bool GetParFull() { return nzbget_rs_par_checker_exec(m_rs, 3, 0, nullptr, nullptr, nullptr) != 0; }
-	EStatus GetStatus() { return (EStatus)nzbget_rs_par_checker_exec(m_rs, 4, 0, nullptr, nullptr, nullptr); }
-	void Execute() { nzbget_rs_par_checker_exec(m_rs, 0, 0, nullptr, &HostCb, this); }
-
-protected:
-	struct Segment
-	{
-		bool m_success;
-		int64 m_offset;
-		int m_size;
-		uint32 m_crc;
-	};
-	typedef std::deque<Segment> SegmentList;
-
-	enum EFileStatus
-	{
-		fsUnknown,
-		fsSuccess,
-		fsPartial,
-		fsFailure
-	};
-
-	virtual bool RequestMorePars(int blockNeeded, int* blockFound) = 0;
-	virtual EFileStatus FindFileCrc(const char* /*filename*/, uint32* /*crc*/, SegmentList* /*segments*/) { return fsUnknown; }
-	virtual void RegisterVerifiedFile(const char* /*filename*/) {}
-
-private:
-	NzbgetRsParChecker* m_rs = nullptr;
-
-	static uintptr_t HostCb(void* rawCtx, int op, int a1, int /*a2*/, uintptr_t p1, uintptr_t p2,
-		const char* s1, const char* s2, int* ints, int64_t* /*i64s*/, const char** strs)
-	{
-		auto* c = static_cast<ParChecker*>(rawCtx);
-		switch (op)
-		{
-		case 0:
-			ints[0] = g_Options ? g_Options->GetParBuffer() : 0;
-			ints[1] = 0;
-			ints[2] = g_Options ? g_Options->GetParThreads() : 1;
-			ints[3] = g_Options ? (int)g_Options->GetParScan() : 0;
-			ints[4] = (g_Options && g_Options->GetParRepair()) ? 1 : 0;
-			strs[0] = g_Options ? g_Options->GetParIgnoreExt() : "";
-			return 0;
-		case 1: {
-			int found = 0;
-			bool ok = c->RequestMorePars(a1, &found);
-			ints[0] = found;
-			return ok ? 1 : 0;
-		}
-		case 2:
-			c->RegisterVerifiedFile(s1 ? s1 : "");
-			return 0;
-		case 3: {
-			SegmentList segs;
-			EFileStatus st = c->FindFileCrc(s1 ? s1 : "", reinterpret_cast<uint32*>(p1), &segs);
-			auto pushFn = reinterpret_cast<void(*)(uintptr_t, int, int64_t, int, uint32_t)>(reinterpret_cast<uintptr_t>(s2));
-			for (const Segment& seg : segs)
-				pushFn(p2, seg.m_success ? 1 : 0, seg.m_offset, seg.m_size, seg.m_crc);
-			return (uintptr_t)st;
-		}
-		case 4:
-			if (a1 == 0) info("%s", s1 ? s1 : "");
-			else if (a1 == 3) debug("%s", s1 ? s1 : "");
-			else if (a1 == 4) detail("%s", s1 ? s1 : "");
-			return 0;
-		default:
-			return 0;
-		}
-	}
-};
-
-#endif
 
 #endif
 

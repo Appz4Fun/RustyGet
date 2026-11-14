@@ -500,6 +500,9 @@ class Daemon:
             'HealthCheck=none', 'ArticleRetries=1', 'ParCheck=manual',
             'ParRename=no', 'RarRename=no', 'Unpack=no', 'DirectUnpack=no',
             'DirectRename=no', 'UpdateCheck=none',
+            # The scenarios were written against the old built-in defaults;
+            # pin them so each one still sets exactly what it tests.
+            'DupeArticleFallback=no', 'DupeStreamDecompress=no', 'ParScan=extended',
         ] + extra_options
         self.t.write_file(self.conf_rel, ('\n'.join(cfg) + '\n').encode())
 
@@ -7793,6 +7796,62 @@ def scenario_fleetnodupecheck(daemon, t):
         [(m['Name'], m['Status'], m['NZBID']) for m in reply['Members']], added, h['Status']))
 
 
+def _yenc_part(data, name='a.rar'):
+    """A one-part yEnc article holding ``data``."""
+    enc = bytearray()
+    for b in data:
+        c = (b + 42) & 255
+        if c in (0, 10, 13, 61, 46):
+            enc += b'=' + bytes([(c + 64) & 255])
+        else:
+            enc.append(c)
+    lines = b'\r\n'.join(bytes(enc[i:i + 128]) for i in range(0, len(enc), 128))
+    crc = zlib.crc32(data) & 0xffffffff
+    return (b'=ybegin part=1 total=1 line=128 size=%d name=%s\r\n=ypart begin=1 end=%d\r\n' % (len(data), name.encode(), len(data))
+            + lines + b'\r\n=yend size=%d part=1 pcrc32=%08x\r\n' % (len(data), crc))
+
+
+def _rar4_head(method):
+    """The start of a rar4 volume holding "movie.mkv" packed with ``method``
+    (0x30 store, 0x33 normal compression)."""
+    import struct
+    name = b'movie.mkv'
+    main = struct.pack('<HBHH', 0, 0x73, 0, 13) + b'\0' * 6
+    head = struct.pack('<HBHH', 0, 0x74, 0x8000, 32 + len(name)) + struct.pack(
+        '<IIBIIBBHI', 1_000_000, 1_000_000, 3, 0, 0, 29, method, len(name), 0) + name
+    return b'Rar!\x1a\x07\x00' + main + head + b'\xaa' * 256
+
+
+def scenario_fleetkindorder(daemon, t):
+    """appendfleet orders copies by kind before health: TWINs first (the two
+    copies with the same data size, the healthier one queued), then the ALT in
+    store-mode rar (borrowable), then the ALT in compressed rar (unborrowable),
+    although both ALTs are healthier than either twin. Each added copy keeps
+    its kind in DupeKind."""
+    alive = set(_fleet_ids('ta')[:30]) | set(_fleet_ids('tb')[:36]) | set(_fleet_ids('as')) | set(_fleet_ids('ac'))
+    daemon.fake_nntp.alive = alive
+    daemon.fake_nntp.bodies_by_id[_fleet_ids('as')[0]] = _yenc_part(_rar4_head(0x30))
+    daemon.fake_nntp.bodies_by_id[_fleet_ids('ac')[0]] = _yenc_part(_rar4_head(0x33))
+    api = daemon.wait_ready()
+    reply = _fleet(daemon, [
+        ('Show.S01E01.compressed', _fake_nzb_ids(_fleet_ids('ac'), 420_000, 'a.rar').decode()),
+        ('Show.S01E01.store', _fake_nzb_ids(_fleet_ids('as'), 410_000, 'b.rar').decode()),
+        ('Show.S01E01.twinA', _fake_nzb_ids(_fleet_ids('ta'), 400_000, 'c.bin').decode()),
+        ('Show.S01E01.twinB', _fake_nzb_ids(_fleet_ids('tb'), 400_000, 'd.bin').decode())])
+    order = [m['Name'] for m in sorted(reply['Members'], key=lambda m: m['Rank'])]
+    items = {g['NZBName']: g for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet-key'}
+    kinds = {}
+    for name, g in items.items():
+        params = {p['Name']: p['Value'] for p in g.get('Parameters', [])}
+        kinds[name] = params.get('*DupeKind', params.get('DupeKind'))
+    chosen = next((m['Name'] for m in reply['Members'] if m['Status'] == 'QUEUED'), None)
+    ok = (order == ['Show.S01E01.twinB', 'Show.S01E01.twinA', 'Show.S01E01.store', 'Show.S01E01.compressed']
+          and chosen == 'Show.S01E01.twinB'
+          and kinds.get('Show.S01E01.twinA') == 'twin' and kinds.get('Show.S01E01.store') == 'borrowable'
+          and kinds.get('Show.S01E01.compressed') == 'unborrowable')
+    return ('fleetkindorder', ok, 'order=%s chosen=%s kinds=%s' % (order, chosen, kinds))
+
+
 def scenario_fleetalldead(daemon, t):
     """appendfleet: every member is dead: nothing is queued, the reply says ALL_DEAD."""
     daemon.fake_nntp.alive = set()
@@ -11618,6 +11677,7 @@ SCENARIOS = {
     'fleettimeout': scenario_fleettimeout,
     'fleetone': scenario_fleetone,
     'fleetnodupecheck': scenario_fleetnodupecheck,
+    'fleetkindorder': scenario_fleetkindorder,
     'fleetalldead': scenario_fleetalldead,
     'fleetshutdown': scenario_fleetshutdown,
     'fleetallerror': scenario_fleetallerror,
@@ -12271,7 +12331,7 @@ SCENARIO_NEWZNAB = {'dupesearchforcepick', 'dupesearchdeadpick', 'dupesearchswap
                    'dupesearchresumedeleted'}
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'dupesearchforcepick', 'dupesearchdeadpick', 'dupesearchswap', 'dupesearchswaphealthy', 'dupesearchrealindexer', 'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
+SCENARIO_FAKE_NNTP = {'dupesearchforcepick', 'dupesearchdeadpick', 'dupesearchswap', 'dupesearchswaphealthy', 'dupesearchrealindexer', 'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetkindorder', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
 
 
 # --------------------------------------------------------------------------- #

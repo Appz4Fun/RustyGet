@@ -1308,10 +1308,14 @@ impl RsArticleWriter {
         self.out_file = None;
         self.drop_cached();
 
-        let fsnap = host.qh.file_snap(host.file_ptr);
+        // Snapshots copy strings out of the queue; hold its lock so a concurrent
+        // edit (for example a new dupe key) cannot free them mid-copy.
+        let (fsnap, nzb, art) = host.qh.with_locked_queue(|_| {
+            let fsnap = host.qh.file_snap(host.file_ptr);
+            let nzb = host.qh.nzb_snap(fsnap.nzb_ptr, false);
+            (fsnap, nzb, host.qh.article_snap(host.article_ptr))
+        });
         let nzb_ptr = fsnap.nzb_ptr;
-        let nzb = host.qh.nzb_snap(nzb_ptr, false);
-        let art = host.qh.article_snap(host.article_ptr);
         let (
             dupe_check,
             direct_write_opt,
@@ -1529,10 +1533,14 @@ impl RsArticleWriter {
     fn finish(&mut self, host: &DlHost<'_>, success: bool) {
         self.out_file = None;
 
-        let fsnap = host.qh.file_snap(host.file_ptr);
+        // Snapshots copy strings out of the queue; hold its lock so a concurrent
+        // edit (for example a new dupe key) cannot free them mid-copy.
+        let (fsnap, nzb, art) = host.qh.with_locked_queue(|_| {
+            let fsnap = host.qh.file_snap(host.file_ptr);
+            let nzb = host.qh.nzb_snap(fsnap.nzb_ptr, false);
+            (fsnap, nzb, host.qh.article_snap(host.article_ptr))
+        });
         let nzb_ptr = fsnap.nzb_ptr;
-        let nzb = host.qh.nzb_snap(nzb_ptr, false);
-        let art = host.qh.article_snap(host.article_ptr);
         let (direct_write_opt, skip_write_opt, raw_article) = match crate::options::active_options()
         {
             Some(opts) => {
@@ -2899,9 +2907,12 @@ impl NzbgetRsArticleDownloader {
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         );
-        let fsnap = host.qh.file_snap(host.file_ptr);
-        let nzb_skip = fsnap.nzb_ptr != 0 && host.qh.nzb_snap(fsnap.nzb_ptr, false).skip_disk_write;
-        let art = host.qh.article_snap(host.article_ptr);
+        let (nzb_skip, art) = host.qh.with_locked_queue(|_| {
+            let fsnap = host.qh.file_snap(host.file_ptr);
+            let nzb_skip =
+                fsnap.nzb_ptr != 0 && host.qh.nzb_snap(fsnap.nzb_ptr, false).skip_disk_write;
+            (nzb_skip, host.qh.article_snap(host.article_ptr))
+        });
         let groups = if join_group {
             host.qh.file_groups(host.file_ptr)
         } else {
@@ -3097,9 +3108,12 @@ impl NzbgetRsArticleDownloader {
         let final_status = {
             let mut w = self.worker.lock().unwrap_or_else(|e| e.into_inner());
 
-            let fsnap = qh.file_snap(self.file_ptr);
-            let nzb = qh.nzb_snap(fsnap.nzb_ptr, false);
-            let art = qh.article_snap(self.article_ptr);
+            // Copy the queue state under the queue lock (see Writer::start).
+            let (fsnap, nzb, art) = qh.with_locked_queue(|_| {
+                let fsnap = qh.file_snap(self.file_ptr);
+                let nzb = qh.nzb_snap(fsnap.nzb_ptr, false);
+                (fsnap, nzb, qh.article_snap(self.article_ptr))
+            });
             let force = nzb.force_priority;
             let extra_priority = fsnap.extra_priority;
             let has_desired_server = nzb.has_desired_server;

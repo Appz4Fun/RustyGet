@@ -4699,6 +4699,12 @@ impl NzbgetRsQueueCoordinator {
             .is_err()
         {
             self.remove_active_download(ad_ptr);
+            // The worker never ran, so hand back the connection run() reserved for it.
+            if conn_ptr != 0 {
+                if let Some(pool) = crate::net::active_server_pool() {
+                    pool.free_connection(conn_ptr as *mut crate::net::PooledNntpConn, false);
+                }
+            }
             host.article_set_int(
                 article_ptr,
                 crate::queuesubsys_host::ART_INT_STATUS,

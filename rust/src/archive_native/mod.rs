@@ -3796,6 +3796,28 @@ where
         Some(Err(msg))
     };
     let cancel = zipfast::extract::Cancellation::default();
+    // Unix modes of the members, for the executable bit the volume-by-volume extractor
+    // restores too; the listing above does not carry them.
+    let unix_modes: std::collections::HashMap<String, u32> =
+        zipfast::rar5::session::RarSession::open(
+            archive_path,
+            Some(password),
+            zipfast::rar5::session::RarSessionOptions {
+                limits: zipfast::rar5::session::RarCatalogueLimits {
+                    volumes: 4096,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .map(|session| {
+            session
+                .entries()
+                .filter(|m| m.host_os() == 1 && !m.is_directory())
+                .map(|m| (m.name().to_string(), m.attributes() as u32))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut summary = zipfast::extract::Summary::default();
     for (index, entry) in entries.iter().enumerate() {
         if is_cancelled() {
@@ -3859,6 +3881,9 @@ where
                 let _ = file.set_modified(
                     std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64),
                 );
+            }
+            if let Some(&mode) = unix_modes.get(&entry.name) {
+                apply_unix_executable_mode(&file, mode);
             }
         }
         drop(file);

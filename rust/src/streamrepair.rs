@@ -7650,7 +7650,10 @@ impl CrossPackRepairSession {
                             donor_info_name,
                             &env_cell,
                         )
+                        && self.repair_sets[repair_set_idx].inner_holes.is_empty()
                     {
+                        // Everything is filled. Holes the raw chunks did not reach (stretches
+                        // the coder compressed) are left to the decompression step below.
                         continue;
                     }
                     let can_decompress =
@@ -7785,6 +7788,9 @@ impl CrossPackRepairSession {
                     last_member = run.member_index;
                 }
             }
+            // The archive's last volume is the last member of the set (they are in data
+            // order), which is not where the mapped file ends when other files follow it.
+            let final_member = *members.last().unwrap_or(&-1);
             let tail_of = |this: &Self, m: i32| -> Option<(i64, i64)> {
                 let size = this.set_members.get(m as usize)?.size;
                 let end = *data_end.get(&m)?;
@@ -7806,11 +7812,20 @@ impl CrossPackRepairSession {
                 if holes.is_empty() || holes.iter().any(|h| h.offset < tail_at) {
                     continue;
                 }
+                if m == last_member && m != final_member {
+                    // More of the archive follows the mapped file in this volume or a later
+                    // one: what trails its data here is not just an end block.
+                    continue;
+                }
                 // Two other intact, non-final volumes with the same tail bytes.
                 let mut reference: Option<Vec<u8>> = None;
                 let mut agree = false;
                 for &other in &members {
-                    if other == m || other == last_member || !holes_of(self, other).is_empty() {
+                    if other == m
+                        || other == last_member
+                        || other == final_member
+                        || !holes_of(self, other).is_empty()
+                    {
                         continue;
                     }
                     let Some((o_at, o_len)) = tail_of(self, other) else {
@@ -7842,7 +7857,7 @@ impl CrossPackRepairSession {
                 let Some(mut tail) = reference.filter(|_| agree) else {
                     continue;
                 };
-                if m == last_member {
+                if m == final_member {
                     // The final volume's end block says "no volume follows".
                     match final_end_block(&tail) {
                         Some(last_tail) => tail = last_tail,

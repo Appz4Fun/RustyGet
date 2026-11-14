@@ -176,8 +176,13 @@ class Bench:
         # Raw evidence is kept apart from the disposable download output: per scenario the
         # daemon log and configuration, the fixture hashes, and the results, in a directory
         # that this script never removes.
-        self.evidence = args.evidence or tempfile.mkdtemp(prefix='borrow-matrix-evidence-')
-        os.makedirs(self.evidence, exist_ok=True)
+        # Every run gets a directory of its own, so a second run with the same --evidence
+        # never overwrites what an earlier one kept.
+        if args.evidence:
+            os.makedirs(args.evidence, exist_ok=True)
+            self.evidence = tempfile.mkdtemp(prefix=time.strftime('run-%Y%m%dT%H%M%S-'), dir=args.evidence)
+        else:
+            self.evidence = tempfile.mkdtemp(prefix='borrow-matrix-evidence-')
         with open(args.nzbget, 'rb') as f:
             binary_sha = hashlib.sha256(f.read()).hexdigest()
         with open(os.path.join(self.evidence, 'run.json'), 'w') as out:
@@ -192,7 +197,7 @@ class Bench:
     def keep_evidence(self, t, res):
         slug = '%02d-%s' % (len(self.results) + 1, re.sub(r'[^A-Za-z0-9]+', '-', res['label']).strip('-'))
         dest = os.path.join(self.evidence, slug)
-        os.makedirs(dest, exist_ok=True)
+        os.makedirs(dest)
         for rel in ('nzbget.log', 'nzbget.conf'):
             try:
                 shutil.copy2(t.path(rel), os.path.join(dest, rel))
@@ -321,8 +326,9 @@ def main():
     ap.add_argument('--timeout', type=int, default=1500)
     ap.add_argument('--only')
     ap.add_argument('--json')
-    ap.add_argument('--evidence', help='directory for raw evidence (logs, configs, fixture hashes); '
-                                       'default: a new directory that is never removed')
+    ap.add_argument('--evidence', help='directory for raw evidence (logs, configs, fixture hashes): each '
+                                       'run keeps its own new subdirectory there; default: a new '
+                                       'directory that is never removed')
     ap.add_argument('--keep', action='store_true')
     args = ap.parse_args()
 

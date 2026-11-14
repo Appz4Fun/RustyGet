@@ -158,13 +158,10 @@ fn rar_packing(data: &[u8], password_known: bool) -> Packing {
     // stops there; the file header it read before that is what counts.
     crate::rarreader::read_from(&mut volume, &mut MemSource(data), &mut NoCipher, &mut files);
     if volume.encrypted {
-        // encrypted headers: nothing about the content can be read without the
-        // password, and the repair needs it to map the archive
-        return if password_known {
-            Packing::Unknown
-        } else {
-            Packing::Unborrowable
-        };
+        // encrypted headers: nothing about the content can be read here, so
+        // it is never taken before a copy that is proven borrowable or
+        // simply plain (encryption keeps a penalty even with the password)
+        return Packing::Unborrowable;
     }
     // the media file decides; a small nfo or sample in front of it says
     // nothing about how the movie is packed
@@ -173,6 +170,10 @@ fn rar_packing(data: &[u8], password_known: bool) -> Packing {
     };
     if !file.stored || (file.encrypted_data && !password_known) {
         Packing::Unborrowable
+    } else if file.encrypted_data {
+        // stored but encrypted, password known: the repair can decrypt it, at
+        // a cost, so it comes after the plain borrowable copies
+        Packing::Unknown
     } else {
         Packing::Borrowable
     }
@@ -301,23 +302,24 @@ mod tests {
             packing_of_head(&rar4_with_file(0x33, 0, 0), b"a.rar", false),
             Packing::Unborrowable
         );
-        // encrypted file data, store mode: borrowable only with the password
+        // encrypted file data, store mode: usable only with the password, and
+        // then still after the plain borrowable copies
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0x04, 0), b"a.rar", false),
             Packing::Unborrowable
         );
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0x04, 0), b"a.rar", true),
-            Packing::Borrowable
+            Packing::Unknown
         );
-        // encrypted headers
+        // encrypted headers: last, password or not
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", false),
             Packing::Unborrowable
         );
         assert_eq!(
             packing_of_head(&rar4_with_file(0x30, 0, 0x80), b"a.rar", true),
-            Packing::Unknown
+            Packing::Unborrowable
         );
         // a header cut short tells nothing
         assert_eq!(

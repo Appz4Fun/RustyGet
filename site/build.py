@@ -3,7 +3,7 @@
 
 Reads Markdown pages from site/content, renders them with the Jinja templates
 in site/templates, and writes a static site that GitHub Pages can serve.
-The configuration reference is generated from the repository's nzbget.conf,
+The configuration reference is generated from the repository's rustyget.conf,
 and the Rust port status from rust/PORTING.md.
 
     python3 site/build.py --out build/site
@@ -214,7 +214,7 @@ def section_title(header: str) -> str:
 
 
 def parse_conf(path: Path, upstream: dict[str, str]) -> list[dict]:
-    """Parse nzbget.conf into sections of documented options.
+    """Parse rustyget.conf into sections of documented options.
 
     A comment block directly above an option line documents that option.
     Its first line is the summary, which may end with the allowed values in
@@ -321,7 +321,7 @@ def options_page(conf: Path, upstream_file: Path) -> tuple[str, list, list]:
         f'<p class="lede-sm">{total} options in {len(sections)} sections. '
         f'<span class="tag tag-new">new</span> marks the {new} options that NZBGet doesn\'t have, and '
         f'<span class="tag tag-ref">changed</span> marks the {changed} option{"s" if changed != 1 else ""} whose values or meaning differ from NZBGet. '
-        "This page is generated from <code>nzbget.conf</code> on every build, "
+        "This page is generated from <code>rustyget.conf</code> on every build, "
         "so it always matches the code.</p>"
     )
     parts.append(
@@ -428,7 +428,7 @@ def build(out: Path) -> None:
 
     for page in pages.values():
         if page.meta.get("generated") == "options":
-            body, toc, conf_sections = options_page(ROOT / "nzbget.conf", SITE / "data" / "upstream-options.txt")
+            body, toc, conf_sections = options_page(ROOT / "rustyget.conf", SITE / "data" / "upstream-options.txt")
             render(md, page)
             page.sections = search_sections(page) + options_search(conf_sections, page.url, page.title)
             page.body = page.body + body

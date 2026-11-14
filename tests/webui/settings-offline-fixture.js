@@ -1,12 +1,12 @@
 // Offline Settings model: real Config, Options, controls and RPC transport over the
-// committed nzbget.conf template, with synthetic read replies. No daemon needed.
+// committed rustyget.conf template, with synthetic read replies. No daemon needed.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
 async function installOfflineModel(page, base) {
   const root = path.resolve(__dirname, '../../webui');
-  const template = fs.readFileSync(path.resolve(root, '../nzbget.conf'), 'utf8');
+  const template = fs.readFileSync(path.resolve(root, '../rustyget.conf'), 'utf8');
   const values = new Map(template.split('\n').filter(line => /^[A-Za-z0-9$].*=/.test(line))
     .map(line => { const eq = line.indexOf('='); return [line.slice(0, eq).trim(), line.slice(eq + 1).trim()]; }));
   for (const [name, value] of Object.entries({ 'Server1.Host': 'example.invalid', 'Server1.Name': 'Example provider',

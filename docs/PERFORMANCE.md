@@ -41,7 +41,7 @@ See [testdiskspeed](api/API.md#api-method-testdiskspeed) for the parameters. `fi
 
 ## 3. Memory
 
-| Option | Default in `nzbget.conf` | Notes |
+| Option | Default in `rustyget.conf` | Notes |
 |---|---|---|
 | `ArticleCache` | 0 | Cache for downloaded articles (MB). With `DirectWrite` enabled, 50 MB is enough to reduce disk fragmentation. Without `DirectWrite` the cache should hold a complete file (typically up to 200 MB, sometimes 500 MB), otherwise articles go to the temporary directory and performance drops. |
 | `DirectWrite` | yes | Writes articles directly into the destination file using sparse files, instead of writing them to a temporary file and copying them later. Recommended. |

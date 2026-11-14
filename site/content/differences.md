@@ -62,7 +62,7 @@ Twenty-two new options are in **INCOMING NZBS**, after `DupeCheck`: `DupeArticle
 
 ### Defaults
 
-A RustyGet setting has two defaults: the value in the configuration template, `nzbget.conf` in the repository, which a new installation starts from, and the built-in value that applies when the file leaves the option out. [Configuration options](options.md) shows the template's values.
+A RustyGet setting has two defaults: the value in the configuration template, `rustyget.conf` in the repository, which a new installation starts from, and the built-in value that applies when the file leaves the option out. [Configuration options](options.md) shows the template's values.
 
 The template differs from NZBGet's in these values:
 

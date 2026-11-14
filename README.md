@@ -116,11 +116,11 @@ RustyGet runs on Linux and macOS. It has no release packages yet, so build it fr
 git clone https://github.com/Appz4Fun/RustyGet.git rustyget
 cd rustyget
 just build
-[ -e ~/.rustyget ] || install -m 600 nzbget.conf ~/.rustyget
-build/release/rustyget -c ~/.rustyget -o WebDir="$PWD/webui" -o ConfigTemplate="$PWD/nzbget.conf" -D
+[ -e ~/.rustyget ] || install -m 600 rustyget.conf ~/.rustyget
+build/release/rustyget -c ~/.rustyget -o WebDir="$PWD/webui" -o ConfigTemplate="$PWD/rustyget.conf" -D
 ```
 
-The configuration template in the repository still has NZBGet's filename, `nzbget.conf`. `~/.rustyget` is where RustyGet saves your configuration, and the web interface writes your settings there. The test keeps an existing copy when you run these steps again to upgrade. Then open `http://<host>:6789`. The default login is `rustyget` with the password `tegbzn6789`. Change it first. See [Install and build](https://appz4fun.github.io/RustyGet/install.html) for the libraries each platform needs, and [Quick start](https://appz4fun.github.io/RustyGet/quick-start.html) for the first settings.
+The configuration template in the repository is `rustyget.conf`. `~/.rustyget` is where RustyGet saves your configuration, and the web interface writes your settings there. The test keeps an existing copy when you run these steps again to upgrade. Then open `http://<host>:6789`. The default login is `rustyget` with the password `tegbzn6789`. Change it first. See [Install and build](https://appz4fun.github.io/RustyGet/install.html) for the libraries each platform needs, and [Quick start](https://appz4fun.github.io/RustyGet/quick-start.html) for the first settings.
 
 To move from NZBGet, stop it, back up the queue directory and `nzbget.conf`, and start RustyGet with the same configuration file.
 
@@ -136,7 +136,7 @@ The **[documentation site](https://appz4fun.github.io/RustyGet/)** covers:
 - [Feature highlights](https://appz4fun.github.io/RustyGet/features.html) and [Differences from NZBGet](https://appz4fun.github.io/RustyGet/differences.html)
 - [Duplicate handling](https://appz4fun.github.io/RustyGet/duplicates.html) and [Duplicate fleets](https://appz4fun.github.io/RustyGet/duplicate-fleets.html)
 - [Check, repair, and unpack](https://appz4fun.github.io/RustyGet/post-processing.html), [Servers, RSS, and scheduling](https://appz4fun.github.io/RustyGet/automation.html), and [Performance tuning](https://appz4fun.github.io/RustyGet/performance.html)
-- [Configuration options](https://appz4fun.github.io/RustyGet/options.html), generated from `nzbget.conf`
+- [Configuration options](https://appz4fun.github.io/RustyGet/options.html), generated from `rustyget.conf`
 - [API and compatibility](https://appz4fun.github.io/RustyGet/api.html) and the [Design system](https://appz4fun.github.io/RustyGet/design-system.html)
 - [Offline benchmark viewer and evidence](benchmarks/nanobench-poc.tar.gz), a fixture-only proof of concept with its production performance hold unchanged. Unpack it and open `nanobench-poc/index.html`.
 

@@ -151,14 +151,14 @@ the optimizer deliberately includes disabled encrypted backup servers.
 
 Run this only in the runtime stage assigned under the repository evidence and
 worker procedures. Use absolute paths for the candidate executable, current
-WebUI, `nzbget.conf` template, assigned OpenSSL executable and a **new** output
+WebUI, `rustyget.conf` template, assigned OpenSSL executable and a **new** output
 directory. The output directory must not already exist.
 
 ```sh
 python3 -B tests/functional/tlscipher/fixture.py \
   --binary /absolute/candidate/nzbget \
   --webui /absolute/source/webui \
-  --template /absolute/source/nzbget.conf \
+  --template /absolute/source/rustyget.conf \
   --openssl /absolute/assigned/openssl \
   --root /absolute/new/exclusive-output
 ```

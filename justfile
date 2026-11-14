@@ -355,7 +355,7 @@ fmt:
 package dest=(env_var("HOME") / "Documents/rustyget") jobs="3": (release jobs)
     mkdir -p "{{dest}}"
     cp "{{root_dir}}/build/release/rustyget" "{{dest}}/rustyget"
-    cp "{{root_dir}}/nzbget.conf" "{{dest}}/rustyget.conf.template"
+    cp "{{root_dir}}/rustyget.conf" "{{dest}}/rustyget.conf.template"
     rsync -a --delete "{{root_dir}}/webui/" "{{dest}}/webui/"
     cp "{{root_dir}}/README.md" "{{dest}}/README.md"
 
@@ -367,7 +367,7 @@ install prefix="/usr/local" jobs="3": (release jobs)
     install -m 0644 "{{root_dir}}/ChangeLog.md" "{{root_dir}}/COPYING" "{{prefix}}/share/{{package}}/doc/"
     sed -e "s|^WebDir=.*|WebDir={{prefix}}/share/{{package}}/webui|" \
         -e "s|^ConfigTemplate=.*|ConfigTemplate={{prefix}}/share/{{package}}/rustyget.conf|" \
-        "{{root_dir}}/nzbget.conf" > "{{prefix}}/share/{{package}}/rustyget.conf"
+        "{{root_dir}}/rustyget.conf" > "{{prefix}}/share/{{package}}/rustyget.conf"
 
 # Uninstall rustyget binary, webui, and docs from `prefix`
 uninstall prefix="/usr/local":
@@ -379,7 +379,7 @@ install-conf prefix="/usr/local":
     mkdir -p "{{prefix}}/etc"
     sed -e "s|^WebDir=.*|WebDir={{prefix}}/share/{{package}}/webui|" \
         -e "s|^ConfigTemplate=.*|ConfigTemplate={{prefix}}/share/{{package}}/rustyget.conf|" \
-        "{{root_dir}}/nzbget.conf" > "{{prefix}}/etc/rustyget.conf"
+        "{{root_dir}}/rustyget.conf" > "{{prefix}}/etc/rustyget.conf"
 
 # Remove rustyget.conf from `prefix/etc`
 uninstall-conf prefix="/usr/local":

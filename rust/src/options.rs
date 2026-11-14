@@ -572,14 +572,65 @@ pub fn options_split_option_string(option: &[u8]) -> Option<(&[u8], &[u8])> {
         .map(|eq| (&option[..eq], &option[eq + 1..]))
 }
 
-/// Formats `"<dir><sep>nzbget.conf"` for `Options::InitOptFile` and `Options::CheckOptions`.
-pub fn options_format_default_conf_path(dir: &[u8], sep: u8) -> Vec<u8> {
-    const SUFFIX: &[u8] = b"nzbget.conf";
-    let mut out = Vec::with_capacity(dir.len() + 1 + SUFFIX.len());
+/// The configuration file name.
+pub const CONFIG_FILE_NAME: &[u8] = b"rustyget.conf";
+/// The name NZBGet used; still read when no `rustyget.conf` is found.
+pub const LEGACY_CONFIG_FILE_NAME: &[u8] = b"nzbget.conf";
+
+fn join_conf_name(dir: &[u8], sep: u8, name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dir.len() + 1 + name.len());
     out.extend_from_slice(dir);
     out.push(sep);
-    out.extend_from_slice(SUFFIX);
+    out.extend_from_slice(name);
     out
+}
+
+/// Formats `"<dir><sep>rustyget.conf"` for `Options::InitOptFile` and `Options::CheckOptions`.
+pub fn options_format_default_conf_path(dir: &[u8], sep: u8) -> Vec<u8> {
+    join_conf_name(dir, sep, CONFIG_FILE_NAME)
+}
+
+/// Formats `"<dir><sep>nzbget.conf"`, the fallback when `rustyget.conf` is missing.
+pub fn options_format_legacy_conf_path(dir: &[u8], sep: u8) -> Vec<u8> {
+    join_conf_name(dir, sep, LEGACY_CONFIG_FILE_NAME)
+}
+
+/// Where a legacy configuration file found by the search should be renamed to
+/// so that the search finds it again: `~/.nzbget` -> `~/.rustyget`,
+/// `~/.config/nzbget/nzbget.conf` -> `~/.config/rustyget/rustyget.conf`,
+/// otherwise `rustyget.conf` in the same folder (also next to a binary that
+/// lives in a folder named `nzbget`).
+pub fn legacy_config_rename_target(path: &[u8]) -> Vec<u8> {
+    const DOT: &[u8] = b".nzbget";
+    const NESTED: &[u8] = b"/.config/nzbget/nzbget.conf";
+    if path.ends_with(DOT) {
+        return [&path[..path.len() - DOT.len()], b".rustyget".as_slice()].concat();
+    }
+    if path.ends_with(NESTED) {
+        return [
+            &path[..path.len() - NESTED.len()],
+            b"/.config/rustyget/rustyget.conf".as_slice(),
+        ]
+        .concat();
+    }
+    if path.ends_with(LEGACY_CONFIG_FILE_NAME) {
+        return [
+            &path[..path.len() - LEGACY_CONFIG_FILE_NAME.len()],
+            CONFIG_FILE_NAME,
+        ]
+        .concat();
+    }
+    path.to_vec()
+}
+
+/// Whether `path` is an NZBGet-named configuration file (`nzbget.conf` or `~/.nzbget`),
+/// found only because no `rustyget.conf` exists.
+pub fn is_legacy_config_path(path: &[u8]) -> bool {
+    let name = path
+        .rsplit(|&b| b == b'/' || b == b'\\')
+        .next()
+        .unwrap_or(path);
+    name == LEGACY_CONFIG_FILE_NAME || name == b".nzbget"
 }
 
 /// Returns the byte length of `dir` after stripping a single trailing `sep` for `Options::CheckDir`.
@@ -1164,12 +1215,24 @@ pub fn find_default_config_file(
         return Some(first);
     }
 
-    for &alt in POSSIBLE_CONFIG_LOCATIONS {
-        let alt_c = cstring(alt.to_vec());
-        let expanded = crate::fsops::expand_home_path_auto(Some(&alt_c));
-        let exp_c = cstring(expanded.clone());
-        if file_exists(&exp_c) {
-            return Some(expanded);
+    // rustyget.conf everywhere first, then NZBGet's name in the same places
+    let (current, legacy): (Vec<&[u8]>, Vec<&[u8]>) = POSSIBLE_CONFIG_LOCATIONS
+        .iter()
+        .copied()
+        .partition(|loc| !is_legacy_config_path(loc));
+    let expand = |loc: &[u8]| -> Vec<u8> {
+        crate::fsops::expand_home_path_auto(Some(&cstring(loc.to_vec())))
+    };
+    let candidates = current
+        .into_iter()
+        .map(expand)
+        .chain(std::iter::once(options_format_legacy_conf_path(
+            app_dir, sep,
+        )))
+        .chain(legacy.into_iter().map(expand));
+    for path in candidates {
+        if file_exists(&cstring(path.clone())) {
+            return Some(path);
         }
     }
     None
@@ -2311,8 +2374,14 @@ pub fn check_options_host<H: OptionsHost>(
     if ct_empty && !no_disk_access && !web_dir.is_empty() {
         let candidate = options_format_default_conf_path(web_dir, crate::paths::PATH_SEPARATOR);
         let candidate_cstr = cstring(candidate);
+        let legacy_cstr = cstring(options_format_legacy_conf_path(
+            web_dir,
+            crate::paths::PATH_SEPARATOR,
+        ));
         if host.file_exists(&candidate_cstr) {
             *config_template = Some(candidate_cstr);
+        } else if host.file_exists(&legacy_cstr) {
+            *config_template = Some(legacy_cstr);
         } else {
             *config_template = Some(c"".to_owned());
         }
@@ -3936,6 +4005,7 @@ impl NzbgetRsOptions {
     }
 
     fn init_opt_file(&mut self) {
+        let mut found_by_search = false;
         if self.strs[0].is_none() && !self.no_config {
             let app_dir_bytes = self.strs[1]
                 .as_deref()
@@ -3944,6 +4014,7 @@ impl NzbgetRsOptions {
                 find_default_config_file(&app_dir_bytes, b'/', |p| self.file_exists(p))
             {
                 self.strs[0] = Some(cstring(found));
+                found_by_search = true;
             }
         }
 
@@ -3953,6 +4024,19 @@ impl NzbgetRsOptions {
             self.strs[0] = Some(exp2.clone());
             self.set_option(c"ConfigFile", &exp2);
             self.load_config_file(&exp2);
+            if found_by_search && is_legacy_config_path(exp2.to_bytes()) {
+                let msg = cstring(
+                    [
+                        b"No rustyget.conf found; using ".as_slice(),
+                        exp2.to_bytes(),
+                        b". Rename it to ",
+                        legacy_config_rename_target(exp2.to_bytes()).as_slice(),
+                        b" so RustyGet keeps finding it.",
+                    ]
+                    .concat(),
+                );
+                self.config_warn(&msg);
+            }
         }
     }
 
@@ -5001,7 +5085,97 @@ mod options_full_suite_port_from_cpp {
         let long_web_dir = format!("/{long_seg}").into_bytes();
         let default_conf =
             options_format_default_conf_path(&long_web_dir, crate::paths::PATH_SEPARATOR);
-        assert_eq!(default_conf.len(), 2501 + "/nzbget.conf".len());
+        assert_eq!(default_conf.len(), 2501 + "/rustyget.conf".len());
+    }
+
+    #[test]
+    fn default_config_prefers_rustyget_conf_and_falls_back_to_nzbget_conf() {
+        // rustyget.conf next to the binary wins over everything
+        let found = find_default_config_file(b"/opt/app", b'/', |p| {
+            matches!(
+                p.to_bytes(),
+                b"/opt/app/rustyget.conf" | b"/opt/app/nzbget.conf" | b"/etc/rustyget.conf"
+            )
+        });
+        assert_eq!(found.as_deref(), Some(b"/opt/app/rustyget.conf".as_slice()));
+
+        // a rustyget.conf in a system location wins over nzbget.conf next to the binary
+        let found = find_default_config_file(b"/opt/app", b'/', |p| {
+            matches!(
+                p.to_bytes(),
+                b"/opt/app/nzbget.conf" | b"/etc/rustyget.conf"
+            )
+        });
+        assert_eq!(found.as_deref(), Some(b"/etc/rustyget.conf".as_slice()));
+
+        // with no rustyget.conf anywhere, nzbget.conf next to the binary is read
+        let found = find_default_config_file(b"/opt/app", b'/', |p| {
+            matches!(p.to_bytes(), b"/opt/app/nzbget.conf" | b"/etc/nzbget.conf")
+        });
+        assert_eq!(found.as_deref(), Some(b"/opt/app/nzbget.conf".as_slice()));
+
+        // then the old system locations
+        let found =
+            find_default_config_file(b"/opt/app", b'/', |p| p.to_bytes() == b"/etc/nzbget.conf");
+        assert_eq!(found.as_deref(), Some(b"/etc/nzbget.conf".as_slice()));
+
+        assert!(find_default_config_file(b"/opt/app", b'/', |_| false).is_none());
+    }
+
+    #[test]
+    fn legacy_config_rename_target_is_on_the_search_path() {
+        assert_eq!(
+            legacy_config_rename_target(b"/home/u/.nzbget"),
+            b"/home/u/.rustyget"
+        );
+        assert_eq!(
+            legacy_config_rename_target(b"/home/u/.config/nzbget/nzbget.conf"),
+            b"/home/u/.config/rustyget/rustyget.conf"
+        );
+        assert_eq!(
+            legacy_config_rename_target(b"/home/u/.config/nzbget.conf"),
+            b"/home/u/.config/rustyget.conf"
+        );
+        assert_eq!(
+            legacy_config_rename_target(b"/etc/nzbget.conf"),
+            b"/etc/rustyget.conf"
+        );
+        assert_eq!(
+            legacy_config_rename_target(b"/opt/app/nzbget.conf"),
+            b"/opt/app/rustyget.conf"
+        );
+        // a binary in a folder named nzbget keeps its config beside it
+        assert_eq!(
+            legacy_config_rename_target(b"/opt/nzbget/nzbget.conf"),
+            b"/opt/nzbget/rustyget.conf"
+        );
+        // every advertised target for a searched legacy location is itself searched
+        for loc in POSSIBLE_CONFIG_LOCATIONS
+            .iter()
+            .filter(|l| is_legacy_config_path(l))
+        {
+            let target = legacy_config_rename_target(loc);
+            assert!(
+                POSSIBLE_CONFIG_LOCATIONS.contains(&target.as_slice()),
+                "{} -> {} not searched",
+                String::from_utf8_lossy(loc),
+                String::from_utf8_lossy(&target)
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_config_path_detection() {
+        assert!(is_legacy_config_path(b"/etc/nzbget.conf"));
+        assert!(is_legacy_config_path(b"/home/u/.nzbget"));
+        assert!(is_legacy_config_path(b"C:\\RustyGet\\nzbget.conf"));
+        assert!(!is_legacy_config_path(b"/etc/rustyget.conf"));
+        assert!(!is_legacy_config_path(b"/home/u/.rustyget"));
+        assert!(!is_legacy_config_path(b"/srv/my-nzbget.conf"));
+        assert_eq!(
+            options_format_default_conf_path(b"/opt/app", b'/'),
+            b"/opt/app/rustyget.conf"
+        );
     }
 
     #[test]

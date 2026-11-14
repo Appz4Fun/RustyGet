@@ -21,7 +21,7 @@
 generate_locales.py - Generate translation entries for NZBGet config options or extensions.
 
 Purpose:
-  Reads either nzbget.conf or an extension's manifest.json and generates or updates
+  Reads either rustyget.conf or an extension's manifest.json and generates or updates
   locales.source.json with translatable strings for the WebUI i18n system.
 
 Usage:
@@ -29,7 +29,7 @@ Usage:
 
 Examples:
   # Core config options:
-  python3 scripts/generate_locales.py nzbget.conf webui/locales.source.json
+  python3 scripts/generate_locales.py rustyget.conf webui/locales.source.json
 
   # Extension options:
   python3 scripts/generate_locales.py path/to/manifest.json
@@ -260,7 +260,7 @@ def handle_config(conf_file, merge_file, fresh_mode):
             sys.exit(1)
         existing_keys = {k for k in locales if k.startswith("config_desc_")}
 
-    # Parse nzbget.conf
+    # Parse rustyget.conf
     with open(conf_file, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
@@ -495,7 +495,7 @@ def main():
 
     if len(args) < 2:
         print(f"Usage: {sys.argv[0]} <input_file> [output_file] [--fresh]", file=sys.stderr)
-        print("  <input_file> can be either nzbget.conf or manifest.json", file=sys.stderr)
+        print("  <input_file> can be either rustyget.conf or manifest.json", file=sys.stderr)
         sys.exit(1)
 
     input_file = args[1]
@@ -509,11 +509,11 @@ def main():
     base_name = os.path.basename(input_file).lower()
     if base_name == "manifest.json" or input_file.endswith(".json"):
         handle_extension(input_file, output_file, fresh_mode)
-    elif base_name == "nzbget.conf" or input_file.endswith(".conf"):
+    elif base_name == "rustyget.conf" or input_file.endswith(".conf"):
         handle_config(input_file, output_file, fresh_mode)
     else:
         print(f"Error: Unrecognized input file type for {input_file}.", file=sys.stderr)
-        print("Please provide either a .conf file (e.g., nzbget.conf) or a .json file (e.g., manifest.json).", file=sys.stderr)
+        print("Please provide either a .conf file (e.g., rustyget.conf) or a .json file (e.g., manifest.json).", file=sys.stderr)
         sys.exit(1)
 
 

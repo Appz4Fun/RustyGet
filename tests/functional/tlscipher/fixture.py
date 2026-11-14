@@ -188,7 +188,7 @@ class Fixture:
             values.update({f"Server{index}.{name}": value for name, value in fields.items()})
         values.update({"Server5.Host": "plain.example.invalid", "Server5.Port": 119, "Server5.Connections": 1,
                        "Server5.Encryption": "no", "Server5.Active": "no", "Server5.Cipher": "UNCHANGED_PLAIN"})
-        self.config = self.root / "nzbget.conf"
+        self.config = self.root / "rustyget.conf"
         self.config.write_text("# Sanitized isolated TLS fixture\n" + "".join(f"{name}={value}\n" for name, value in values.items()))
         self.config.chmod(0o600)
         write_json(self.root / "initial-config-pin.json", pin(self.config))

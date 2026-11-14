@@ -16,7 +16,7 @@ lede = "RustyGet speaks NZBGet's API today, so media managers and the Kodi add-o
 | NZBGet JSON-P | Off unless option `JsonP` turns it on; then the methods that read, with the restricted user's access | Kept as an option for old clients |
 | `appendfleet` | Available | Kept and extended |
 | SABnzbd API | Not available | Under consideration, so that clients that only speak SABnzbd can use RustyGet |
-| `nzbget.conf` | NZBGet's format, plus new options | Kept for now |
+| `rustyget.conf` (`nzbget.conf` still read) | NZBGet's format, plus new options | Kept |
 | Queue and history files | NZBGet's formats, plus a trailer that NZBGet ignores | Kept for now |
 
 ## Connecting

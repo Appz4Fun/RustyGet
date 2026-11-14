@@ -475,7 +475,7 @@ class Daemon:
         self.datadir = target.makedirs('data')
         for d in ('dst', 'inter', 'nzb', 'queue', 'tmp', 'web'):
             target.makedirs('main', d)
-        self.conf_rel = 'nzbget.conf'
+        self.conf_rel = 'rustyget.conf'
         self.proxy = None
         self.newznab = None
         self.fake_nntp = None

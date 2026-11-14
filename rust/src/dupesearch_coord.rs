@@ -1267,15 +1267,8 @@ fn fleet_member_kinds(
         .collect();
     (0..n)
         .map(|i| {
-            let has_twin = (0..n).any(|j| {
-                j != i
-                    && crate::donorkind::twins(
-                        &probed[i].0,
-                        &probed[j].0,
-                        (summaries[i].data_bytes, summaries[i].data_files),
-                        (summaries[j].data_bytes, summaries[j].data_files),
-                    )
-            });
+            let has_twin =
+                (0..n).any(|j| j != i && crate::donorkind::twins(&probed[i].0, &probed[j].0));
             DonorKind::of(has_twin, probed[i].1)
         })
         .collect()

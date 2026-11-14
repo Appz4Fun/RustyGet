@@ -229,30 +229,14 @@ pub fn packing_of_head(data: &[u8], name: &[u8], password_known: bool) -> Packin
     Packing::Unknown
 }
 
-/// Whether two copies are TWINs: their par2 sets list the same files (by MD5
-/// and length; a near-twin sharing most files counts too, as for article
-/// borrowing), or, when either has no complete par2 list, they hold the same
-/// number of data files with the same total size.
-pub fn twins(
-    a: &crate::twin::Listed,
-    b: &crate::twin::Listed,
-    a_data: (i64, i32),
-    b_data: (i64, i32),
-) -> bool {
-    if a.complete && b.complete {
-        return crate::twin::kind(a, b).starts_with("twin")
-            || crate::twin::kind(b, a).starts_with("twin");
-    }
-    let (a_bytes, a_files) = a_data;
-    let (b_bytes, b_files) = b_data;
-    a_bytes > 0
-        && a_files > 0
-        && crate::dupeidentity::same_data(
-            a_bytes as u64,
-            a_files as u32,
-            b_bytes as u64,
-            b_files as u32,
-        )
+/// Whether two copies are TWINs: their par2 sets list the same files by MD5
+/// and length (a near-twin sharing most of a complete list counts too, as for
+/// article borrowing). Size alone never makes a twin: a re-upload, or a copy
+/// with encrypted headers (a fresh salt every time), has the same file count
+/// and total size but different bytes. Without par2 lists two copies are not
+/// TWINs.
+pub fn twins(a: &crate::twin::Listed, b: &crate::twin::Listed) -> bool {
+    crate::twin::kind(a, b).starts_with("twin") || crate::twin::kind(b, a).starts_with("twin")
 }
 
 #[cfg(test)]
@@ -417,17 +401,29 @@ mod tests {
     }
 
     #[test]
-    fn twins_by_par2_or_size() {
+    fn twins_need_matching_par2() {
         let a = listed(&[("a.r00", 10, "m1"), ("a.r01", 10, "m2")], true);
         let b = listed(&[("b.r00", 10, "m1"), ("b.r01", 10, "m2")], true);
         let c = listed(&[("c.r00", 10, "x1"), ("c.r01", 10, "x2")], true);
-        assert!(twins(&a, &b, (20, 2), (20, 2)));
-        // complete lists that differ win over equal sizes
-        assert!(!twins(&a, &c, (20, 2), (20, 2)));
-        // without a complete list, equal data geometry decides
+        assert!(twins(&a, &b));
+        // same names and sizes, other bytes (a re-upload with encrypted
+        // headers): not twins
+        assert!(!twins(&a, &c));
+        // a partial list sharing most files of a complete one: a near-twin
+        let three = listed(
+            &[
+                ("t.r00", 10, "m1"),
+                ("t.r01", 10, "m2"),
+                ("t.r02", 10, "m3"),
+            ],
+            true,
+        );
+        let part = listed(&[("p.r00", 10, "m1"), ("p.r01", 10, "m2")], false);
+        assert!(twins(&three, &part));
+        assert!(twins(&part, &three));
+        // without par2 lists nothing is a twin, whatever the sizes
         let none = listed(&[], false);
-        assert!(twins(&none, &c, (20, 2), (20, 2)));
-        assert!(!twins(&none, &c, (20, 2), (21, 2)));
-        assert!(!twins(&none, &none, (0, 0), (0, 0)));
+        assert!(!twins(&none, &c));
+        assert!(!twins(&none, &none));
     }
 }

@@ -7725,6 +7725,28 @@ def scenario_fleetone(daemon, t):
     return ('fleetone', ok, 'reply=%s status=%s' % (reply, h['Status']))
 
 
+def scenario_fleetnodupecheck(daemon, t):
+    """appendfleet with DupeCheck=no: nothing would park the backups, so only
+    the best copy is added and the others are reported SKIPPED (not added).
+    Before, all three were added to the queue and downloaded side by side, and
+    the others kept downloading after the first one succeeded."""
+    daemon.fake_nntp.alive = set(_fleet_ids('na')) | set(_fleet_ids('nb')) | set(_fleet_ids('nc'))
+    api = daemon.wait_ready()
+    reply = _fleet(daemon, [('Show.S01E01.na', _fake_nzb_ids(_fleet_ids('na'), 400_000).decode()),
+                            ('Show.S01E01.nb', _fake_nzb_ids(_fleet_ids('nb'), 410_000).decode()),
+                            ('Show.S01E01.nc', _fake_nzb_ids(_fleet_ids('nc'), 420_000).decode())])
+    added = [g['NZBName'] for g in api.listgroups() + api.history() if g.get('DupeKey') == 'fleet-key']
+    statuses = sorted(m['Status'] for m in reply['Members'])
+    chosen = next((m for m in reply['Members'] if m['Status'] == 'QUEUED'), {})
+    h = daemon.wait_history(api, chosen.get('Name', '?'), timeout=120) if chosen else {'Status': 'NONE'}
+    ok = (reply['Chosen'] > 0 and chosen.get('NZBID') == reply['Chosen'] and
+          statuses == ['QUEUED', 'SKIPPED', 'SKIPPED'] and
+          all(m['NZBID'] == 0 for m in reply['Members'] if m['Status'] == 'SKIPPED') and
+          len(added) == 1 and h['Status'].startswith('SUCCESS'))
+    return ('fleetnodupecheck', ok, 'members=%s added=%s status=%s' % (
+        [(m['Name'], m['Status'], m['NZBID']) for m in reply['Members']], added, h['Status']))
+
+
 def scenario_fleetalldead(daemon, t):
     """appendfleet: every member is dead: nothing is queued, the reply says ALL_DEAD."""
     daemon.fake_nntp.alive = set()
@@ -11547,6 +11569,7 @@ SCENARIOS = {
     'fleettwins': scenario_fleettwins,
     'fleettimeout': scenario_fleettimeout,
     'fleetone': scenario_fleetone,
+    'fleetnodupecheck': scenario_fleetnodupecheck,
     'fleetalldead': scenario_fleetalldead,
     'fleetshutdown': scenario_fleetshutdown,
     'fleetallerror': scenario_fleetallerror,
@@ -11978,6 +12001,7 @@ SCENARIO_OPTIONS = {
     'fleettwins': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleettimeout': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetone': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
+    'fleetnodupecheck': ['DupeArticleFallback=no', 'HealthCheck=park', 'DupeCheck=no'],
     'fleetalldead': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetshutdown': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetallerror': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
@@ -12196,7 +12220,7 @@ SCENARIO_NEWZNAB = {'dupesearchforcepick', 'dupesearchdeadpick', 'dupesearchswap
                    'dupesearchresumedeleted'}
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'dupesearchforcepick', 'dupesearchdeadpick', 'dupesearchswap', 'dupesearchswaphealthy', 'dupesearchrealindexer', 'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
+SCENARIO_FAKE_NNTP = {'dupesearchforcepick', 'dupesearchdeadpick', 'dupesearchswap', 'dupesearchswaphealthy', 'dupesearchrealindexer', 'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetnodupecheck', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
 
 
 # --------------------------------------------------------------------------- #

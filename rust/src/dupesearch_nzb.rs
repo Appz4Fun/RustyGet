@@ -2675,6 +2675,29 @@ pub fn fleet_format_fetch_error(status: i32) -> Vec<u8> {
     }
 }
 
+/// Why `Fleet::Append` must not add a member, or `None` to add it.
+///
+/// A fleet parks its backups through the duplicate check: every member is added
+/// with a lower score and option DupeCheck moves it to history. With DupeCheck
+/// off nothing parks them, so each added member downloads in parallel and
+/// nothing stops the rest after one succeeds. Then only the best usable member
+/// is added, and none at all while a download of the key is already running.
+pub fn fleet_member_skip_reason(
+    dupe_check: bool,
+    running_id: i32,
+    already_added: bool,
+) -> Option<&'static [u8]> {
+    if dupe_check {
+        None
+    } else if running_id != 0 {
+        Some(b"DupeCheck is off: a download of the key is already running, a backup would download alongside it")
+    } else if already_added {
+        Some(b"DupeCheck is off: a backup would download alongside the chosen copy")
+    } else {
+        None
+    }
+}
+
 /// Formats the final `Fleet of ...` summary log message in `Fleet::Append`.
 pub fn fleet_format_summary_log(
     members_count: i32,
@@ -4161,6 +4184,16 @@ mod tests {
         assert_eq!(st.within_ttl, 1);
         assert_eq!(st.score, 1000);
         assert_eq!(st.retryable, 0);
+    }
+
+    #[test]
+    fn fleet_member_skip_reason_parks_nothing_without_dupecheck() {
+        assert!(fleet_member_skip_reason(true, 0, false).is_none());
+        assert!(fleet_member_skip_reason(true, 0, true).is_none());
+        assert!(fleet_member_skip_reason(true, 7, true).is_none());
+        assert!(fleet_member_skip_reason(false, 0, false).is_none());
+        assert!(fleet_member_skip_reason(false, 0, true).is_some());
+        assert!(fleet_member_skip_reason(false, 7, false).is_some());
     }
 
     #[test]

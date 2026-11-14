@@ -38,7 +38,10 @@ pub fn xml_find_tag(xml: &[u8], tag: &[u8]) -> Option<(usize, i64)> {
     }
     let pstart = pstart?;
     let pend = pstart + find(&xml[pstart..], &close)?;
-    Some((pstart + open.len(), pend as i64 - pstart as i64 - open.len() as i64))
+    Some((
+        pstart + open.len(),
+        pend as i64 - pstart as i64 - open.len() as i64,
+    ))
 }
 
 /// WebUtil::JsonFindField: the value after `"field"` (as JsonNextValue).
@@ -134,7 +137,12 @@ pub fn content_disposition_filename(cd: &[u8], lower: &Lower<'_>) -> Option<Vec<
         } else if case_eq(lower, name, b"filename*") {
             // ext-value = charset "'" [ language ] "'" value-chars (RFC 5987)
             let apo1 = value.iter().position(|&b| b == b'\'');
-            let apo2 = apo1.and_then(|a| value[a + 1..].iter().position(|&b| b == b'\'').map(|k| a + 1 + k));
+            let apo2 = apo1.and_then(|a| {
+                value[a + 1..]
+                    .iter()
+                    .position(|&b| b == b'\'')
+                    .map(|k| a + 1 + k)
+            });
             if let (Some(a1), Some(a2)) = (apo1, apo2) {
                 if a2 + 1 < value.len() {
                     let mut e = value[a2 + 1..].to_vec();
@@ -194,10 +202,22 @@ mod tests {
     fn content_disposition() {
         let l = Lower::Fold(&ascii);
         let f = |s: &[u8]| content_disposition_filename(s, &l);
-        assert_eq!(f(b"attachment; filename=\"a \\\"b\\\".nzb\""), Some(b"a \"b\".nzb".to_vec()));
-        assert_eq!(f(b"attachment;FILENAME=x.nzb ; filename*=UTF-8''y%20z.nzb"), Some(b"y z.nzb".to_vec()));
-        assert_eq!(f(b"attachment; filename*=ISO-8859-1''caf%E9.nzb"), Some("caf\u{e9}.nzb".as_bytes().to_vec()));
+        assert_eq!(
+            f(b"attachment; filename=\"a \\\"b\\\".nzb\""),
+            Some(b"a \"b\".nzb".to_vec())
+        );
+        assert_eq!(
+            f(b"attachment;FILENAME=x.nzb ; filename*=UTF-8''y%20z.nzb"),
+            Some(b"y z.nzb".to_vec())
+        );
+        assert_eq!(
+            f(b"attachment; filename*=ISO-8859-1''caf%E9.nzb"),
+            Some("caf\u{e9}.nzb".as_bytes().to_vec())
+        );
         assert_eq!(f(b"attachment"), None);
-        assert_eq!(f(b"attachment; filename*=UTF-8''%00x; filename=k"), Some(b"k".to_vec()));
+        assert_eq!(
+            f(b"attachment; filename*=UTF-8''%00x; filename=k"),
+            Some(b"k".to_vec())
+        );
     }
 }

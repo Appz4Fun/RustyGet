@@ -17,7 +17,11 @@ impl Props {
             return None;
         }
         let b = u32::from(b);
-        Some(Props { lc: b % 9, lp: (b / 9) % 5, pb: b / 45 })
+        Some(Props {
+            lc: b % 9,
+            lp: (b / 9) % 5,
+            pb: b / 45,
+        })
     }
 }
 
@@ -33,7 +37,10 @@ pub enum End {
 }
 
 enum RcSource<'a> {
-    Slice { data: &'a [u8], pos: usize },
+    Slice {
+        data: &'a [u8],
+        pos: usize,
+    },
     Reader {
         reader: &'a mut dyn std::io::Read,
         buf: Box<[u8; 8192]>,
@@ -195,7 +202,13 @@ struct LenDecoder {
 
 impl LenDecoder {
     fn new() -> LenDecoder {
-        LenDecoder { choice: INIT, choice2: INIT, low: [[INIT; 8]; 16], mid: [[INIT; 8]; 16], high: [INIT; 256] }
+        LenDecoder {
+            choice: INIT,
+            choice2: INIT,
+            low: [[INIT; 8]; 16],
+            mid: [[INIT; 8]; 16],
+            high: [INIT; 256],
+        }
     }
 
     fn decode(&mut self, rc: &mut Rc<'_>, pos_state: usize) -> Option<u32> {
@@ -268,7 +281,14 @@ impl Decoder {
 
     /// Decodes into `out` until it holds `target` bytes, the stream's end marker, or `limit`. Distances reach back
     /// no further than `dict_start`, where LZMA2 last emptied the dictionary.
-    fn run(&mut self, rc: &mut Rc<'_>, out: &mut Vec<u8>, dict_start: usize, target: usize, limit: usize) -> End {
+    fn run(
+        &mut self,
+        rc: &mut Rc<'_>,
+        out: &mut Vec<u8>,
+        dict_start: usize,
+        target: usize,
+        limit: usize,
+    ) -> End {
         let stop = target.min(limit);
         let pb_mask = (1usize << self.props.pb) - 1;
         let lp_mask = (1usize << self.props.lp) - 1;
@@ -280,7 +300,11 @@ impl Decoder {
                 None => return End::Cut,
             }
         }
-        if out.len() >= target { End::Done } else { End::Limit }
+        if out.len() >= target {
+            End::Done
+        } else {
+            End::Limit
+        }
     }
 
     /// One literal or match. Some(false): the end marker.
@@ -299,13 +323,23 @@ impl Decoder {
         let pos_state = pos & pb_mask;
         let s = self.state;
         if rc.bit(&mut self.is_match[(s << 4) + pos_state])? == 0 {
-            let prev = if pos > 0 { u32::from(out[out.len() - 1]) } else { 0 };
+            let prev = if pos > 0 {
+                u32::from(out[out.len() - 1])
+            } else {
+                0
+            };
             let lit_state = ((pos & lp_mask) << lc) + (prev >> (8 - lc)) as usize;
-            let probs = self.literal.get_mut(0x300 * lit_state..0x300 * (lit_state + 1))?;
+            let probs = self
+                .literal
+                .get_mut(0x300 * lit_state..0x300 * (lit_state + 1))?;
             let mut symbol = 1usize;
             if s >= 7 {
                 let back = self.reps[0] as usize + 1;
-                let mut match_byte = if back <= pos { u32::from(out[out.len() - back]) } else { 0 };
+                let mut match_byte = if back <= pos {
+                    u32::from(out[out.len() - back])
+                } else {
+                    0
+                };
                 while symbol < 0x100 {
                     let match_bit = ((match_byte >> 7) & 1) as usize;
                     match_byte <<= 1;
@@ -385,8 +419,12 @@ fn copy(out: &mut Vec<u8>, dict_start: usize, dist: u32, count: usize) -> Option
 /// A raw LZMA stream, as 7z, zip, `.lzma` and lzip hold it. `size` is the unpacked size, when known.
 pub fn lzma(data: &[u8], props: Props, size: Option<u64>, limit: usize) -> (Vec<u8>, End) {
     let mut out = Vec::new();
-    let Some(mut rc) = Rc::new(data) else { return (out, End::Cut) };
-    let target = size.and_then(|s| usize::try_from(s).ok()).unwrap_or(usize::MAX);
+    let Some(mut rc) = Rc::new(data) else {
+        return (out, End::Cut);
+    };
+    let target = size
+        .and_then(|s| usize::try_from(s).ok())
+        .unwrap_or(usize::MAX);
     if props.lc + props.lp > 12 {
         return (out, End::Cut);
     }
@@ -406,12 +444,16 @@ pub fn lzma2(data: &[u8], limit: usize) -> (Vec<u8>, End) {
             out.truncate(limit);
             return (out, End::Limit);
         }
-        let Some(&control) = data.get(p) else { return (out, End::Cut) };
+        let Some(&control) = data.get(p) else {
+            return (out, End::Cut);
+        };
         p += 1;
         match control {
             0 => return (out, End::Done),
             1 | 2 => {
-                let Some(size) = be16(data, p) else { return (out, End::Cut) };
+                let Some(size) = be16(data, p) else {
+                    return (out, End::Cut);
+                };
                 p += 2;
                 if control == 1 {
                     dict_start = out.len();
@@ -420,34 +462,48 @@ pub fn lzma2(data: &[u8], limit: usize) -> (Vec<u8>, End) {
                 let take = size.min(data.len() - p).min(limit - out.len());
                 out.extend_from_slice(&data[p..p + take]);
                 if take < size {
-                    let end = if out.len() >= limit { End::Limit } else { End::Cut };
+                    let end = if out.len() >= limit {
+                        End::Limit
+                    } else {
+                        End::Cut
+                    };
                     return (out, end);
                 }
                 p += size;
             }
             0x80..=0xff => {
-                let (Some(low), Some(packed)) = (be16(data, p), be16(data, p + 2)) else { return (out, End::Cut) };
+                let (Some(low), Some(packed)) = (be16(data, p), be16(data, p + 2)) else {
+                    return (out, End::Cut);
+                };
                 p += 4;
                 let unpacked = ((usize::from(control & 0x1f)) << 16) + usize::from(low) + 1;
                 let packed = usize::from(packed) + 1;
                 let mode = (control >> 5) & 3;
                 if mode >= 2 {
-                    let Some(props) = data.get(p).and_then(|b| Props::from_byte(*b)) else { return (out, End::Cut) };
+                    let Some(props) = data.get(p).and_then(|b| Props::from_byte(*b)) else {
+                        return (out, End::Cut);
+                    };
                     p += 1;
                     if props.lc + props.lp > 4 {
                         return (out, End::Cut);
                     }
                     dec = Some(Decoder::new(props));
                 } else if mode == 1 {
-                    let Some(props) = dec.as_ref().map(|d| d.props) else { return (out, End::Cut) };
+                    let Some(props) = dec.as_ref().map(|d| d.props) else {
+                        return (out, End::Cut);
+                    };
                     dec = Some(Decoder::new(props));
                 }
                 if mode == 3 {
                     dict_start = out.len();
                 }
-                let Some(d) = dec.as_mut() else { return (out, End::Cut) };
+                let Some(d) = dec.as_mut() else {
+                    return (out, End::Cut);
+                };
                 let chunk = &data[p.min(data.len())..(p + packed).min(data.len())];
-                let Some(mut rc) = Rc::new(chunk) else { return (out, End::Cut) };
+                let Some(mut rc) = Rc::new(chunk) else {
+                    return (out, End::Cut);
+                };
                 let target = out.len() + unpacked;
                 match d.run(&mut rc, &mut out, dict_start, target, limit) {
                     End::Done if out.len() == target => {}
@@ -614,8 +670,8 @@ pub fn lzma2_from_reader<R: std::io::Read>(
                     .read_exact(&mut chunk_buf)
                     .map_err(|e| format!("corrupt LZMA2 chunk payload: {e}"))?;
                 comp_bytes += packed as u64;
-                let mut rc =
-                    Rc::new(&chunk_buf).ok_or_else(|| "corrupt LZMA2 range coder init".to_string())?;
+                let mut rc = Rc::new(&chunk_buf)
+                    .ok_or_else(|| "corrupt LZMA2 range coder init".to_string())?;
                 let prev_len = out.len();
                 let target = prev_len + unpacked;
                 match d.run(&mut rc, &mut out, 0, target, target) {
@@ -646,10 +702,23 @@ mod tests {
             let data: Vec<u8> = (0..(n % 300))
                 .map(|i| {
                     seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
-                    if i == 0 { 0 } else { (seed >> 16) as u8 }
+                    if i == 0 {
+                        0
+                    } else {
+                        (seed >> 16) as u8
+                    }
                 })
                 .collect();
-            let _ = lzma(&data, Props { lc: 3, lp: 0, pb: 2 }, None, 1 << 16);
+            let _ = lzma(
+                &data,
+                Props {
+                    lc: 3,
+                    lp: 0,
+                    pb: 2,
+                },
+                None,
+                1 << 16,
+            );
             let _ = lzma2(&data, 1 << 16);
         }
     }
@@ -657,12 +726,12 @@ mod tests {
     #[test]
     fn lzma_from_reader_preserves_matches_crossing_chunk_boundaries() {
         let raw: &[u8] = &[
-            0, 32, 239, 251, 191, 254, 163, 177, 94, 229, 248, 63, 178, 170, 38, 85, 248, 104,
-            112, 65, 112, 21, 15, 141, 253, 30, 76, 27, 138, 66, 183, 25, 244, 105, 24, 113, 174,
-            102, 35, 138, 138, 77, 47, 163, 13, 217, 127, 166, 227, 140, 35, 17, 83, 224, 89, 24,
-            197, 117, 138, 226, 119, 248, 182, 148, 127, 12, 106, 192, 222, 116, 73, 100, 226,
-            233, 92, 83, 178, 4, 216, 247, 68, 12, 171, 95, 13, 109, 70, 233, 229, 195, 118, 136,
-            183, 127, 63, 238, 38, 207, 255, 255, 250, 63, 0, 0,
+            0, 32, 239, 251, 191, 254, 163, 177, 94, 229, 248, 63, 178, 170, 38, 85, 248, 104, 112,
+            65, 112, 21, 15, 141, 253, 30, 76, 27, 138, 66, 183, 25, 244, 105, 24, 113, 174, 102,
+            35, 138, 138, 77, 47, 163, 13, 217, 127, 166, 227, 140, 35, 17, 83, 224, 89, 24, 197,
+            117, 138, 226, 119, 248, 182, 148, 127, 12, 106, 192, 222, 116, 73, 100, 226, 233, 92,
+            83, 178, 4, 216, 247, 68, 12, 171, 95, 13, 109, 70, 233, 229, 195, 118, 136, 183, 127,
+            63, 238, 38, 207, 255, 255, 250, 63, 0, 0,
         ];
         let props = Props::from_byte(93).unwrap();
         let (expected, end) = lzma(raw, props, Some(200_000), 200_000);

@@ -23,7 +23,6 @@ pub enum Value {
 }
 
 impl Value {
-
     /// value::to_number<double>.
     pub fn to_f64(&self) -> Option<f64> {
         match *self {
@@ -39,7 +38,10 @@ impl Value {
         match *self {
             Value::Int(i) => i32::try_from(i).ok(),
             Value::Uint(u) => i32::try_from(u).ok(),
-            Value::Double(d) => (d >= i32::MIN as f64 && d <= i32::MAX as f64 && d == (d as i32) as f64).then_some(d as i32),
+            Value::Double(d) => {
+                (d >= i32::MIN as f64 && d <= i32::MAX as f64 && d == (d as i32) as f64)
+                    .then_some(d as i32)
+            }
             _ => None,
         }
     }
@@ -66,11 +68,20 @@ pub struct Limits {
 }
 
 #[cfg(test)]
-pub const TEST_LIMITS: Limits = Limits { string: 0x7ffffffe, array: 0x7ffffffe, object: 0x7ffffffe };
+pub const TEST_LIMITS: Limits = Limits {
+    string: 0x7ffffffe,
+    array: 0x7ffffffe,
+    object: 0x7ffffffe,
+};
 
 /// The value, or None for any parse error.
 pub fn parse(s: &[u8], limits: Limits) -> Option<Value> {
-    let mut p = Parser { s, i: 0, depth: 0, limits };
+    let mut p = Parser {
+        s,
+        i: 0,
+        depth: 0,
+        limits,
+    };
     p.ws();
     let v = p.value()?;
     p.ws();
@@ -135,7 +146,9 @@ impl Parser<'_> {
         self.ws();
         if self.eat(b']').is_none() {
             loop {
-                if items.len() == self.limits.array { return None; }
+                if items.len() == self.limits.array {
+                    return None;
+                }
                 items.push(self.value()?);
                 self.ws();
                 match self.peek()? {
@@ -168,7 +181,9 @@ impl Parser<'_> {
                 if self.peek()? != b'"' {
                     return None;
                 }
-                if count == self.limits.object { return None; }
+                if count == self.limits.object {
+                    return None;
+                }
                 count += 1;
                 let key = self.string()?;
                 self.ws();
@@ -222,7 +237,9 @@ impl Parser<'_> {
                 self.i += 1;
             }
             let run = &self.s[start..self.i];
-            if run.len() > self.limits.string - out.len() { return None; }
+            if run.len() > self.limits.string - out.len() {
+                return None;
+            }
             std::str::from_utf8(run).ok()?;
             out.extend_from_slice(run);
             match self.peek()? {
@@ -264,7 +281,9 @@ impl Parser<'_> {
                     };
                     let mut buf = [0; 4];
                     let encoded = ch.encode_utf8(&mut buf).as_bytes();
-                    if encoded.len() > self.limits.string - out.len() { return None; }
+                    if encoded.len() > self.limits.string - out.len() {
+                        return None;
+                    }
                     out.extend_from_slice(encoded);
                 }
                 _ => return None,
@@ -282,7 +301,11 @@ fn pow10(exp: i32) -> f64 {
     if exp < -308 {
         return 0.0;
     }
-    let table = TABLE.get_or_init(|| (-308..=308).map(|k| format!("1e{k}").parse().unwrap()).collect());
+    let table = TABLE.get_or_init(|| {
+        (-308..=308)
+            .map(|k| format!("1e{k}").parse().unwrap())
+            .collect()
+    });
     table[(exp + 308) as usize]
 }
 
@@ -310,7 +333,17 @@ fn digit(c: Option<u8>) -> Option<u64> {
 /// input: the value and the index after it.
 fn number(s: &[u8], start: usize) -> Option<(Value, usize)> {
     #[derive(Clone, Copy)]
-    enum St { Num2, Num3, Num5, Num6, Num7, Num8, Exp1, Int, Dub }
+    enum St {
+        Num2,
+        Num3,
+        Num5,
+        Num6,
+        Num7,
+        Num8,
+        Exp1,
+        Int,
+        Dub,
+    }
     let neg = s[start] == b'-';
     let zero_first = s[start] == b'0';
     let nonzero_first = !neg && !zero_first;
@@ -324,7 +357,12 @@ fn number(s: &[u8], start: usize) -> Option<(Value, usize)> {
     let mut st;
     if s.len() - i >= 16 + 1 + 16 {
         // the fast path
-        let count = |i: usize| s[i..i + 16].iter().take_while(|c| c.is_ascii_digit()).count();
+        let count = |i: usize| {
+            s[i..i + 16]
+                .iter()
+                .take_while(|c| c.is_ascii_digit())
+                .count()
+        };
         let n1;
         if nonzero_first || (neg && s[i] != b'0') {
             n1 = count(i);
@@ -392,7 +430,11 @@ fn number(s: &[u8], start: usize) -> Option<(Value, usize)> {
     loop {
         st = match st {
             St::Num2 => {
-                let (limit, last) = if neg { (922337203685477580, b'8') } else { (1844674407370955161, b'5') };
+                let (limit, last) = if neg {
+                    (922337203685477580, b'8')
+                } else {
+                    (1844674407370955161, b'5')
+                };
                 loop {
                     match at(i) {
                         None => break St::Int,
@@ -490,7 +532,11 @@ fn number(s: &[u8], start: usize) -> Option<(Value, usize)> {
                 exp = digit(at(i))? as i32;
                 i += 1;
                 while let Some(d) = digit(at(i)) {
-                    exp = if exp > 214748364 || (exp == 214748364 && d > 7) { i32::MAX } else { 10 * exp + d as i32 };
+                    exp = if exp > 214748364 || (exp == 214748364 && d > 7) {
+                        i32::MAX
+                    } else {
+                        10 * exp + d as i32
+                    };
                     i += 1;
                 }
                 if frac {
@@ -532,47 +578,131 @@ fn number(s: &[u8], start: usize) -> Option<(Value, usize)> {
 mod tests {
     use super::*;
 
-    fn parse(s: &[u8]) -> Option<Value> { super::parse(s, TEST_LIMITS) }
+    fn parse(s: &[u8]) -> Option<Value> {
+        super::parse(s, TEST_LIMITS)
+    }
 
     #[test]
     fn handler_limits() {
-        let limited = |s: &[u8]| super::parse(s, Limits { string: 4, array: 2, object: 2 });
-        for s in [b"[0,0]".as_slice(), br#"{"a":0,"a":1}"#, br#""abcd""#, br#""\ud83d\ude00""#] {
+        let limited = |s: &[u8]| {
+            super::parse(
+                s,
+                Limits {
+                    string: 4,
+                    array: 2,
+                    object: 2,
+                },
+            )
+        };
+        for s in [
+            b"[0,0]".as_slice(),
+            br#"{"a":0,"a":1}"#,
+            br#""abcd""#,
+            br#""\ud83d\ude00""#,
+        ] {
             assert!(limited(s).is_some());
         }
-        for s in [b"[0,0,0]".as_slice(), br#"{"a":0,"a":1,"a":2}"#, br#""abcde""#,
-            br#""a\ud83d\ude00""#, br#""\ud83d\ude00a""#, br#"{"abcde":0}"#] {
+        for s in [
+            b"[0,0,0]".as_slice(),
+            br#"{"a":0,"a":1,"a":2}"#,
+            br#""abcde""#,
+            br#""a\ud83d\ude00""#,
+            br#""\ud83d\ude00a""#,
+            br#"{"abcde":0}"#,
+        ] {
             assert!(limited(s).is_none());
         }
     }
 
     #[test]
     fn grammar() {
-        for ok in [&b"{}"[..], b" \t\r\n[1, 2]", b"\"\\ud83d\\ude00\"", b"\"\x7f\"", b"-0", b"[1E5]", b"true", b"null"] {
+        for ok in [
+            &b"{}"[..],
+            b" \t\r\n[1, 2]",
+            b"\"\\ud83d\\ude00\"",
+            b"\"\x7f\"",
+            b"-0",
+            b"[1E5]",
+            b"true",
+            b"null",
+        ] {
             assert!(parse(ok).is_some(), "{:?}", String::from_utf8_lossy(ok));
         }
-        for bad in [&b""[..], b" ", b"\x0c{}", b"[1,]", b"{\"a\":1/*c*/}", b"\"\\ud800\"", b"\"\\udc00\"", b"\"\xff\"",
-                    b"\"\xc0\x80\"", b"\"\xed\xa0\x80\"", b"\"\xf4\x90\x80\x80\"", b"\xef\xbb\xbf{}", b"{} x", b"01", b"1.",
-                    b"[1e]", b"[.5]", b"[+1]", b"[NaN]", b"[-]", b"[-01]", b"tru", b"nullx", b"\"\t\"", b"\"\\a\"",
-                    b"\"\\u12\"", b"\"\\ud800\\u0041\"", b"{1:2}", b"{\"a\" 1}"] {
+        for bad in [
+            &b""[..],
+            b" ",
+            b"\x0c{}",
+            b"[1,]",
+            b"{\"a\":1/*c*/}",
+            b"\"\\ud800\"",
+            b"\"\\udc00\"",
+            b"\"\xff\"",
+            b"\"\xc0\x80\"",
+            b"\"\xed\xa0\x80\"",
+            b"\"\xf4\x90\x80\x80\"",
+            b"\xef\xbb\xbf{}",
+            b"{} x",
+            b"01",
+            b"1.",
+            b"[1e]",
+            b"[.5]",
+            b"[+1]",
+            b"[NaN]",
+            b"[-]",
+            b"[-01]",
+            b"tru",
+            b"nullx",
+            b"\"\t\"",
+            b"\"\\a\"",
+            b"\"\\u12\"",
+            b"\"\\ud800\\u0041\"",
+            b"{1:2}",
+            b"{\"a\" 1}",
+        ] {
             assert!(parse(bad).is_none(), "{:?}", String::from_utf8_lossy(bad));
         }
         let deep = |d: usize| [vec![b'['; d], b"1".to_vec(), vec![b']'; d]].concat();
         assert!(parse(&deep(32)).is_some());
         assert!(parse(&deep(33)).is_none());
-        assert_eq!(parse(b"{\"a\":1,\"b\":3,\"a\":2}"),
-            Some(Value::Object(vec![(b"a".to_vec(), Value::Int(2)), (b"b".to_vec(), Value::Int(3))])));
-        assert_eq!(parse(b"\"a\\u0000b\""), Some(Value::String(b"a\0b".to_vec())));
+        assert_eq!(
+            parse(b"{\"a\":1,\"b\":3,\"a\":2}"),
+            Some(Value::Object(vec![
+                (b"a".to_vec(), Value::Int(2)),
+                (b"b".to_vec(), Value::Int(3))
+            ]))
+        );
+        assert_eq!(
+            parse(b"\"a\\u0000b\""),
+            Some(Value::String(b"a\0b".to_vec()))
+        );
     }
 
     #[test]
     fn to_i32_is_value_to_int() {
         let i = |s: &str| parse(s.as_bytes()).unwrap().to_i32();
-        for (s, v) in [("1", Some(1)), ("-1", Some(-1)), ("2147483647", Some(i32::MAX)), ("2147483648", None),
-                       ("-2147483648", Some(i32::MIN)), ("-2147483649", None), ("1.0", Some(1)), ("1.5", None), ("1e2", Some(100)),
-                       ("1e10", None), ("-0.0", Some(0)), ("18446744073709551615", None), ("1e-300", None),
-                       ("2147483647.0", Some(i32::MAX)), ("2147483648.0", None), ("-2147483648.0", Some(i32::MIN)),
-                       ("2147483647.5", None), ("true", None), ("\"1\"", None), ("null", None), ("1e400", None)] {
+        for (s, v) in [
+            ("1", Some(1)),
+            ("-1", Some(-1)),
+            ("2147483647", Some(i32::MAX)),
+            ("2147483648", None),
+            ("-2147483648", Some(i32::MIN)),
+            ("-2147483649", None),
+            ("1.0", Some(1)),
+            ("1.5", None),
+            ("1e2", Some(100)),
+            ("1e10", None),
+            ("-0.0", Some(0)),
+            ("18446744073709551615", None),
+            ("1e-300", None),
+            ("2147483647.0", Some(i32::MAX)),
+            ("2147483648.0", None),
+            ("-2147483648.0", Some(i32::MIN)),
+            ("2147483647.5", None),
+            ("true", None),
+            ("\"1\"", None),
+            ("null", None),
+            ("1e400", None),
+        ] {
             assert_eq!(i(s), v, "{s}");
         }
     }
@@ -584,11 +714,17 @@ mod tests {
         assert_eq!(n("18446744073709551615"), Value::Uint(u64::MAX));
         assert_eq!(n("9223372036854775807"), Value::Int(i64::MAX));
         assert_eq!(n("-9223372036854775808"), Value::Int(i64::MIN));
-        assert_eq!(n("18446744073709551616"), Value::Double(1.8446744073709552e19));
+        assert_eq!(
+            n("18446744073709551616"),
+            Value::Double(1.8446744073709552e19)
+        );
         assert_eq!(n("1e400"), Value::Double(f64::INFINITY));
         assert_eq!(n("0.1e1"), Value::Double(1.0));
         // Boost's imprecise result, one ulp off the correctly rounded value
-        assert_eq!(n("2.2250738585072011e-308"), Value::Double(2.2250738585072014e-308));
+        assert_eq!(
+            n("2.2250738585072011e-308"),
+            Value::Double(2.2250738585072014e-308)
+        );
         assert_eq!(n("1e99999999999"), Value::Double(f64::INFINITY));
         assert_eq!(n("1e-99999999999"), Value::Double(0.0));
     }

@@ -3,7 +3,10 @@
 //! structure) and how to rename them to the release name.
 
 use crate::deobfuscation::is_excessively_obfuscated;
-use crate::filetypes::{is_audio_ext, is_book_ext, is_disc_descriptor_ext, is_disc_structure_ext, is_nfo_ext, is_sample_stem, is_subtitle_ext, is_video_ext};
+use crate::filetypes::{
+    is_audio_ext, is_book_ext, is_disc_descriptor_ext, is_disc_structure_ext, is_nfo_ext,
+    is_sample_stem, is_subtitle_ext, is_video_ext,
+};
 use crate::paths::sanitize_path_segment;
 
 /// A file of the download (FileEntry).
@@ -151,7 +154,10 @@ pub trait Disk {
     /// fs::u8string(fs::u8path(path).stem()): the stem as the platform's path
     /// has it (on Windows the UTF-8 conversion may change bytes).
     fn stem(&mut self, path: &[u8]) -> Vec<u8> {
-        let name = path.iter().rposition(|&b| b == b'/' || b == b'\\').map_or(path, |k| &path[k + 1..]);
+        let name = path
+            .iter()
+            .rposition(|&b| b == b'/' || b == b'\\')
+            .map_or(path, |k| &path[k + 1..]);
         stem_ext(name).0.to_vec()
     }
 }
@@ -159,7 +165,12 @@ pub trait Disk {
 /// CollectionAnalyzer::BuildPlan for the files of the directory (in the
 /// order the C++ walk gave them) and whether it found a disc structure
 /// directory.
-pub fn build_plan(files: &[Entry], disc_dir: bool, target_name: &[u8], disk: &mut dyn Disk) -> Plan {
+pub fn build_plan(
+    files: &[Entry],
+    disc_dir: bool,
+    target_name: &[u8],
+    disk: &mut dyn Disk,
+) -> Plan {
     let mut analysis = analyze(files);
     if disc_dir {
         analysis.disc_structure = true;
@@ -188,7 +199,9 @@ pub fn build_plan(files: &[Entry], disc_dir: bool, target_name: &[u8], disk: &mu
         if disk.ignored(&dst) {
             return entry.stem.clone();
         }
-        let collides = |disk: &mut dyn Disk, used: &[Vec<u8>], p: &[u8]| disk.exists(p) || used.iter().any(|u| str_case_eq(u, p));
+        let collides = |disk: &mut dyn Disk, used: &[Vec<u8>], p: &[u8]| {
+            disk.exists(p) || used.iter().any(|u| str_case_eq(u, p))
+        };
         if collides(disk, &used, &dst) {
             let (stem, ext) = stem_ext(&clean);
             let mut n = 0;
@@ -206,20 +219,33 @@ pub fn build_plan(files: &[Entry], disc_dir: bool, target_name: &[u8], disk: &mu
         // C++ planner derived it
         let final_stem = disk.stem(&dst);
         used.push(dst.clone());
-        plan.actions.push(Action { src: k, dst_path: dst, new_filename: name });
+        plan.actions.push(Action {
+            src: k,
+            dst_path: dst,
+            new_filename: name,
+        });
         final_stem
     };
 
     let clean_target = sanitize_path_segment(target_name);
-    let can_use_target = !clean_target.is_empty() && clean_target != b"nzb" && !is_excessively_obfuscated(&clean_target);
+    let can_use_target = !clean_target.is_empty()
+        && clean_target != b"nzb"
+        && !is_excessively_obfuscated(&clean_target);
 
     // the main video, or else the main book
     let main = analysis
         .main_video
         .filter(|&k| !files[k].filename.is_empty())
         .map(|k| (k, true))
-        .or_else(|| analysis.main_book.filter(|&k| !files[k].filename.is_empty()).map(|k| (k, false)));
-    let Some((main, is_video)) = main else { return plan };
+        .or_else(|| {
+            analysis
+                .main_book
+                .filter(|&k| !files[k].filename.is_empty())
+                .map(|k| (k, false))
+        });
+    let Some((main, is_video)) = main else {
+        return plan;
+    };
     let f = &files[main];
     let base = if is_excessively_obfuscated(&f.filename) {
         if can_use_target {
@@ -235,7 +261,10 @@ pub fn build_plan(files: &[Entry], disc_dir: bool, target_name: &[u8], disk: &mu
     };
     plan.effective_base_name = base.clone();
     if is_video && !base.is_empty() && !is_excessively_obfuscated(&base) {
-        if let Some(s) = analysis.sample_video.filter(|&k| !files[k].filename.is_empty()) {
+        if let Some(s) = analysis
+            .sample_video
+            .filter(|&k| !files[k].filename.is_empty())
+        {
             let name = resolve_sample_name(&base, &files[s].ext);
             rename(&mut plan, s, &name);
         }
@@ -249,7 +278,8 @@ pub fn build_plan(files: &[Entry], disc_dir: bool, target_name: &[u8], disk: &mu
 
 /// Util::EndsWith(str, suffix, false).
 fn ends_with_case(s: &[u8], suffix: &[u8]) -> bool {
-    suffix.is_empty() || (s.len() >= suffix.len() && str_case_eq(&s[s.len() - suffix.len()..], suffix))
+    suffix.is_empty()
+        || (s.len() >= suffix.len() && str_case_eq(&s[s.len() - suffix.len()..], suffix))
 }
 
 /// CollectionAnalyzer::ResolveTargetName.
@@ -288,7 +318,14 @@ mod tests {
         let split = path.rfind('/').map_or(0, |k| k + 1);
         let name = path.as_bytes()[split..].to_vec();
         let (stem, ext) = stem_ext(&name);
-        Entry { path: path.into(), rename_prefix: path.as_bytes()[..split].to_vec(), filename: name.clone(), stem: stem.to_vec(), ext: ext.to_vec(), size }
+        Entry {
+            path: path.into(),
+            rename_prefix: path.as_bytes()[..split].to_vec(),
+            filename: name.clone(),
+            stem: stem.to_vec(),
+            ext: ext.to_vec(),
+            size,
+        }
     }
 
     struct NoDisk;
@@ -303,7 +340,11 @@ mod tests {
 
     #[test]
     fn plan() {
-        let files = [entry("/d/a8f7s6d5f4g3h2j1k0l9.mkv", 1000), entry("/d/a8f7s6d5f4g3h2j1k0l9.en.srt", 1), entry("/d/x-sample.mkv", 10)];
+        let files = [
+            entry("/d/a8f7s6d5f4g3h2j1k0l9.mkv", 1000),
+            entry("/d/a8f7s6d5f4g3h2j1k0l9.en.srt", 1),
+            entry("/d/x-sample.mkv", 10),
+        ];
         let p = build_plan(&files, false, b"Show.S01E01.1080p", &mut NoDisk);
         assert!(p.can_rename);
         assert_eq!(p.actions[0].new_filename, b"Show.S01E01.1080p.mkv");
@@ -315,7 +356,16 @@ mod tests {
     fn platform_path_prefixes() {
         // The C++ library owns path spelling: libc++ preserves root runs,
         // libstdc++ collapses them; Windows also has drive-relative paths.
-        for prefix in [&b"/"[..], b"///", b"/d/", b"C:", b"C:\\", b"C:/", b"\\\\server\\share\\", b""] {
+        for prefix in [
+            &b"/"[..],
+            b"///",
+            b"/d/",
+            b"C:",
+            b"C:\\",
+            b"C:/",
+            b"\\\\server\\share\\",
+            b"",
+        ] {
             let mut f = entry("abc.mkv", 1);
             f.rename_prefix = prefix.to_vec();
             let p = build_plan(&[f], false, b"Movie.2026", &mut NoDisk);

@@ -141,14 +141,23 @@ mod tests {
     #[test]
     fn names() {
         assert_eq!(parse_par_filename(b"Movie.par2", true), Some((5, 0)));
-        assert_eq!(parse_par_filename(b"Movie.vol07+08.PAR2", true), Some((5, 8)));
-        assert_eq!(parse_par_filename(b"Movie.vol-06.par2", true), Some((5, -1)));
+        assert_eq!(
+            parse_par_filename(b"Movie.vol07+08.PAR2", true),
+            Some((5, 8))
+        );
+        assert_eq!(
+            parse_par_filename(b"Movie.vol-06.par2", true),
+            Some((5, -1))
+        );
         assert_eq!(parse_par_filename(b"Movie.par2.1", true), None);
         assert_eq!(parse_par_filename(b"Movie.par2.1", false), Some((5, 0)));
         assert_eq!(parse_par_filename(b".par2", true), None);
         assert!(same_par_collection(b"A.vol00+01.par2", b"a.par2", true));
         assert!(!same_par_collection(b"A.par2", b"B.par2", true));
         assert_eq!(parse_par_filename(b"a\xffpar2", false), None);
-        assert_eq!(parse_par_filename(b"a.par2\0ignored.par2", true), Some((1, 0)));
+        assert_eq!(
+            parse_par_filename(b"a.par2\0ignored.par2", true),
+            Some((1, 0))
+        );
     }
 }

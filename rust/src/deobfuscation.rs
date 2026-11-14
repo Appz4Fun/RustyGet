@@ -4,7 +4,9 @@
 //! locale) and the regular expressions, written out by hand, the ASCII ones
 //! std::regex used (classic locale).
 
-use crate::filetypes::{file_extension, is_parity_ext, is_rar_ext, is_rar_volume_ext, is_seven_zip_ext};
+use crate::filetypes::{
+    file_extension, is_parity_ext, is_rar_ext, is_rar_volume_ext, is_seven_zip_ext,
+};
 
 fn alpha(b: u8) -> bool {
     b.is_ascii_alphabetic()
@@ -44,18 +46,25 @@ fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if needle.is_empty() {
         return Some(from);
     }
-    hay[from..].windows(needle.len()).position(|w| w == needle).map(|k| from + k)
+    hay[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|k| from + k)
 }
 
 fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.len() > hay.len() {
         return None;
     }
-    (0..=hay.len() - needle.len()).rev().find(|&k| &hay[k..k + needle.len()] == needle)
+    (0..=hay.len() - needle.len())
+        .rev()
+        .find(|&k| &hay[k..k + needle.len()] == needle)
 }
 
 fn strip_one_extension(s: &[u8]) -> &[u8] {
-    let Some(dot) = s.iter().rposition(|&b| b == b'.') else { return s };
+    let Some(dot) = s.iter().rposition(|&b| b == b'.') else {
+        return s;
+    };
     let ext = &s[dot + 1..];
     if ext.is_empty() || ext.len() > MAX_PLAUSIBLE_EXT_LEN || !ext.iter().any(|&c| alpha(c)) {
         return s;
@@ -95,8 +104,9 @@ fn looks_like_camel_case_title(tok: &[u8]) -> bool {
     }
     const CONNECTORS: [&[u8]; 7] = [b"On", b"In", b"To", b"Of", b"At", b"By", b"No"];
     const ROMAN: [&[u8]; 24] = [
-        b"XXX", b"XXIII", b"XXII", b"XXI", b"XX", b"XIX", b"XVIII", b"XVII", b"XVI", b"XV", b"XIV", b"XIII", b"XII", b"XI",
-        b"X", b"IX", b"VIII", b"VII", b"VI", b"V", b"IV", b"III", b"II", b"I",
+        b"XXX", b"XXIII", b"XXII", b"XXI", b"XX", b"XIX", b"XVIII", b"XVII", b"XVI", b"XV", b"XIV",
+        b"XIII", b"XII", b"XI", b"X", b"IX", b"VIII", b"VII", b"VI", b"V", b"IV", b"III", b"II",
+        b"I",
     ];
     const MAX_PRODUCT_PREFIX_LEN: usize = 3;
     const MIN_ACRONYM_SUFFIX_LEN: usize = 2;
@@ -149,12 +159,16 @@ fn looks_like_camel_case_title(tok: &[u8]) -> bool {
     } else if lower(tok[0]) {
         // short lowerCamelCase product prefixes ("i" of "iPhone", "e" of "eBay", "mac" of "macOS")
         let prefix = tok.iter().take_while(|&&c| lower(c)).count();
-        if (1..=MAX_PRODUCT_PREFIX_LEN).contains(&prefix) && (prefix == 1 || count_vowels(&tok[..prefix]) > 0) {
+        if (1..=MAX_PRODUCT_PREFIX_LEN).contains(&prefix)
+            && (prefix == 1 || count_vowels(&tok[..prefix]) > 0)
+        {
             pos = prefix;
         }
     }
     // the title starts with a capitalized word, preposition or acronym
-    let Some(mut pos) = match_segment(pos) else { return false };
+    let Some(mut pos) = match_segment(pos) else {
+        return false;
+    };
     while pos < tok.len() {
         let mut next = pos;
         while next < tok.len() && digit(tok[next]) {
@@ -181,7 +195,8 @@ fn looks_like_camel_case_title(tok: &[u8]) -> bool {
     if ROMAN.contains(&tail) {
         return true;
     }
-    (MIN_ACRONYM_SUFFIX_LEN..=MAX_ACRONYM_SUFFIX_LEN).contains(&tail.len()) && tail.iter().all(|&c| upper(c))
+    (MIN_ACRONYM_SUFFIX_LEN..=MAX_ACRONYM_SUFFIX_LEN).contains(&tail.len())
+        && tail.iter().all(|&c| upper(c))
 }
 
 fn looks_like_hash_blob(tok: &[u8]) -> bool {
@@ -210,10 +225,18 @@ fn looks_like_hash_blob(tok: &[u8]) -> bool {
     // 1. an alphanumeric token: 8+ characters starting lowercase-then-uppercase
     //    with 2+ capitals, 10+ mixed-case, or 12+ single-case
     if alnum_only {
-        if n >= MIN_CAPS_HASH_LEN && lower(tok[0]) && upper(tok[1]) && uppers >= MIN_INTERIOR_CAPS_COUNT {
+        if n >= MIN_CAPS_HASH_LEN
+            && lower(tok[0])
+            && upper(tok[1])
+            && uppers >= MIN_INTERIOR_CAPS_COUNT
+        {
             return true;
         }
-        let min_len = if lowers > 0 && uppers > 0 { MIN_MIXED_ALNUM_HASH_LEN } else { MIN_ALNUM_HASH_LEN };
+        let min_len = if lowers > 0 && uppers > 0 {
+            MIN_MIXED_ALNUM_HASH_LEN
+        } else {
+            MIN_ALNUM_HASH_LEN
+        };
         if n >= min_len {
             return true;
         }
@@ -221,7 +244,10 @@ fn looks_like_hash_blob(tok: &[u8]) -> bool {
     // 2. 10+ alphanumeric characters alternating often between letters and digits
     //    (a4f9c2e1b8; hevc10bit, x264Hi10P, S01E01E02 have <= 5 transitions)
     if n >= MIN_MIXED_ALNUM_HASH_LEN && alnum_only {
-        let transitions = tok.windows(2).filter(|w| digit(w[0]) != digit(w[1])).count();
+        let transitions = tok
+            .windows(2)
+            .filter(|w| digit(w[0]) != digit(w[1]))
+            .count();
         if transitions >= MIN_ALNUM_ALTERNATIONS_FOR_HASH {
             return true;
         }
@@ -231,7 +257,12 @@ fn looks_like_hash_blob(tok: &[u8]) -> bool {
         return true;
     }
     // 4. short all-caps titles with plausible vowels
-    if n <= MAX_MOVIE_TITLE_LEN && alphas > 0 && digits == 0 && uppers == alphas && (n <= 3 || count_vowels(tok) * 5 >= n) {
+    if n <= MAX_MOVIE_TITLE_LEN
+        && alphas > 0
+        && digits == 0
+        && uppers == alphas
+        && (n <= 3 || count_vowels(tok) * 5 >= n)
+    {
         return false;
     }
     // 5. interior caps (MQHeRbSCIoPs, xKRTvErc, aBcDeFgH) or an all-caps consonant string
@@ -242,7 +273,10 @@ fn looks_like_hash_blob(tok: &[u8]) -> bool {
                 return true;
             }
         } else {
-            let transitions = tok.windows(2).filter(|w| upper(w[0]) != upper(w[1])).count();
+            let transitions = tok
+                .windows(2)
+                .filter(|w| upper(w[0]) != upper(w[1]))
+                .count();
             if transitions >= MIN_CASE_TRANSITIONS_FOR_HASH {
                 return true;
             }
@@ -277,14 +311,23 @@ fn hashed_release(s: &[u8]) -> bool {
         || s == b"123"
         || ci(s, b"b00bs")
         || backup_release(s)
-        || (n == 9 && all(&s[..6], |c| c.is_ascii_digit()) && s[6] == b'_' && all(&s[7..], |c| c.is_ascii_digit()))
-        || (n == 14 && all(&s[..11], |c| c.is_ascii_uppercase()) && all(&s[11..], |c| c.is_ascii_digit()))
-        || (n == 15 && all(&s[..12], |c| c.is_ascii_lowercase()) && all(&s[12..], |c| c.is_ascii_digit()))
+        || (n == 9
+            && all(&s[..6], |c| c.is_ascii_digit())
+            && s[6] == b'_'
+            && all(&s[7..], |c| c.is_ascii_digit()))
+        || (n == 14
+            && all(&s[..11], |c| c.is_ascii_uppercase())
+            && all(&s[11..], |c| c.is_ascii_digit()))
+        || (n == 15
+            && all(&s[..12], |c| c.is_ascii_lowercase())
+            && all(&s[12..], |c| c.is_ascii_digit()))
 }
 
 /// ^Backup_[0-9]{5,256}S[0-9]{2}-[0-9]{2}$
 fn backup_release(s: &[u8]) -> bool {
-    let Some(rest) = s.strip_prefix(b"Backup_") else { return false };
+    let Some(rest) = s.strip_prefix(b"Backup_") else {
+        return false;
+    };
     let digits = rest.iter().take_while(|c| c.is_ascii_digit()).count();
     // the digits run then "S##-##": backtracking can't change where S is
     (5..=256).contains(&digits)
@@ -344,7 +387,10 @@ pub fn is_excessively_obfuscated(s: &[u8]) -> bool {
         }
         // single-part archives and parity files stay as they are
         if (16..=256).contains(&max_run)
-            && (is_seven_zip_ext(&real) || is_rar_ext(&real) || is_rar_volume_ext(&real) || is_parity_ext(&real))
+            && (is_seven_zip_ext(&real)
+                || is_rar_ext(&real)
+                || is_rar_volume_ext(&real)
+                || is_parity_ext(&real))
         {
             return false;
         }
@@ -364,11 +410,19 @@ pub fn is_excessively_obfuscated(s: &[u8]) -> bool {
         uppers > 0 && lowers > 0 && !(uppers == 1 && upper(t[0]))
     };
     let mut prev: &[u8] = &[];
-    for tok in stem.split(|c| b"._- []()".contains(c)).filter(|t| !t.is_empty()) {
+    for tok in stem
+        .split(|c| b"._- []()".contains(c))
+        .filter(|t| !t.is_empty())
+    {
         if looks_like_hash_blob(tok) {
             return true;
         }
-        if !prev.is_empty() && stem.len() <= MAX_TITLE_LEN && mixed(prev) && mixed(tok) && looks_like_hash_blob(&[prev, tok].concat()) {
+        if !prev.is_empty()
+            && stem.len() <= MAX_TITLE_LEN
+            && mixed(prev)
+            && mixed(tok)
+            && looks_like_hash_blob(&[prev, tok].concat())
+        {
             return true;
         }
         prev = tok;
@@ -382,7 +436,9 @@ fn parse_without_quotes(sv: &[u8]) -> &[u8] {
             return sv;
         }
         // find_last_of(' ', end - 1)
-        let Some(start) = sv[..end].iter().rposition(|&b| b == b' ') else { return &sv[..end] };
+        let Some(start) = sv[..end].iter().rposition(|&b| b == b' ') else {
+            return &sv[..end];
+        };
         let start = start + 1;
         return if start < end { &sv[start..end] } else { sv };
     }
@@ -403,8 +459,12 @@ fn parse_without_quotes(sv: &[u8]) -> &[u8] {
 
 fn parse_private_nzb(sv: &[u8]) -> Vec<u8> {
     const SIGNATURE: &[u8] = b"[PRiVATE]-[";
-    let Some(begin) = find(sv, SIGNATURE, 0) else { return sv.to_vec() };
-    let Some(begin) = find(sv, b"]-[", begin + SIGNATURE.len()) else { return sv.to_vec() };
+    let Some(begin) = find(sv, SIGNATURE, 0) else {
+        return sv.to_vec();
+    };
+    let Some(begin) = find(sv, b"]-[", begin + SIGNATURE.len()) else {
+        return sv.to_vec();
+    };
     let begin = begin + 2;
     let end = match rfind(sv, b" - \"\"") {
         Some(e) if e >= begin => e,
@@ -453,11 +513,17 @@ pub fn deobfuscate(s: &[u8]) -> Vec<u8> {
     if s.len() < MIN_DEOBFUSCATE_SIZE {
         return s.to_vec();
     }
-    let Some(first) = s.iter().position(|&b| b == b'"') else { return parse_without_quotes(s).to_vec() };
+    let Some(first) = s.iter().position(|&b| b == b'"') else {
+        return parse_without_quotes(s).to_vec();
+    };
     if first + 1 >= s.len() {
         return s[first + 1..].to_vec();
     }
-    let Some(second) = s[first + 1..].iter().position(|&b| b == b'"').map(|k| first + 1 + k) else {
+    let Some(second) = s[first + 1..]
+        .iter()
+        .position(|&b| b == b'"')
+        .map(|k| first + 1 + k)
+    else {
         return s[first + 1..].to_vec();
     };
     if second == first + 1 {
@@ -473,22 +539,33 @@ mod tests {
 
     #[test]
     fn subjects() {
-        assert_eq!(deobfuscate(b"[1/10] - \"show.s01e01.mkv\" yEnc (1/50)"), b"show.s01e01.mkv");
+        assert_eq!(
+            deobfuscate(b"[1/10] - \"show.s01e01.mkv\" yEnc (1/50)"),
+            b"show.s01e01.mkv"
+        );
         assert_eq!(deobfuscate(b"some file.rar yEnc (1/3)"), b"file.rar");
         assert_eq!(deobfuscate(b"Re: x.nzb (1/2)"), b"x.nzb");
     }
 
     #[test]
     fn obfuscation() {
-        assert!(is_excessively_obfuscated(b"5KzdcWdGVGUG83Q9jv8KXht4O2k57w.mkv"));
+        assert!(is_excessively_obfuscated(
+            b"5KzdcWdGVGUG83Q9jv8KXht4O2k57w.mkv"
+        ));
         assert!(!is_excessively_obfuscated(b"Interstellar.2014.1080p.mkv"));
-        assert!(!is_excessively_obfuscated(b"abcdef0123456789abcd.part01.rar"));
+        assert!(!is_excessively_obfuscated(
+            b"abcdef0123456789abcd.part01.rar"
+        ));
         assert!(is_excessively_obfuscated(b"abc"));
     }
 
     fn obfuscated(names: &[&str], expected: bool) {
         for name in names {
-            assert_eq!(is_excessively_obfuscated(name.as_bytes()), expected, "{name}");
+            assert_eq!(
+                is_excessively_obfuscated(name.as_bytes()),
+                expected,
+                "{name}"
+            );
         }
     }
 
@@ -496,13 +573,27 @@ mod tests {
     fn short_mixed_hashes_and_brackets() {
         obfuscated(&["xK1RT5Ervcw.mkv", "xK1RT5Er.mkv"], true);
         // brackets and parentheses around obfuscated tokens
-        obfuscated(&["[xK1RT5Ervcw].mkv", "(xK1RT5Ervcw).mkv", "Release.[deadbeefcafe1234].mkv"], true);
+        obfuscated(
+            &[
+                "[xK1RT5Ervcw].mkv",
+                "(xK1RT5Ervcw).mkv",
+                "Release.[deadbeefcafe1234].mkv",
+            ],
+            true,
+        );
         // frequent alpha-digit alternations
         obfuscated(&["a4f9c2e1b8.mkv", "k3m9p2x7q1.mkv"], true);
         // pure-alpha tokens with random case transitions, starting lowercase
         obfuscated(&["xKRTvErc.mkv", "aBcDeFgH.mkv"], true);
         // consonant-only tokens and low-vowel runs
-        obfuscated(&["bcdfghjklmnpq.mkv", "qwrtypsdfghjklzxc.mkv", "qwrtypsdfghjklzxcvbnmqwerty.mkv"], true);
+        obfuscated(
+            &[
+                "bcdfghjklmnpq.mkv",
+                "qwrtypsdfghjklzxc.mkv",
+                "qwrtypsdfghjklzxcvbnmqwerty.mkv",
+            ],
+            true,
+        );
     }
 
     #[test]
@@ -519,16 +610,52 @@ mod tests {
             false,
         );
         // product names with case or digits
-        obfuscated(&["iPhone13Pro.mkv", "iPhoneSE.mkv", "macOSVentura.mkv", "eBayPlus.mkv"], false);
+        obfuscated(
+            &[
+                "iPhone13Pro.mkv",
+                "iPhoneSE.mkv",
+                "macOSVentura.mkv",
+                "eBayPlus.mkv",
+            ],
+            false,
+        );
         // release tags and compact episode identifiers
         obfuscated(
-            &["Show.x264Hi10P.mkv", "Show.S01E01E02.mkv", "Show.S01E01v2.mkv", "Movie.1080p60fps.mkv", "Movie.1080p10bit.mkv"],
+            &[
+                "Show.x264Hi10P.mkv",
+                "Show.S01E01E02.mkv",
+                "Show.S01E01v2.mkv",
+                "Movie.1080p60fps.mkv",
+                "Movie.1080p10bit.mkv",
+            ],
             false,
         );
         // compound German words
-        obfuscated(&["Doku.schlittschuhschritt.mkv", "Doku.kraftfahrzeugpflicht.mkv"], false);
-        obfuscated(&["LIGHTSWITCH.mkv", "BLACKKNIGHTS.mkv", "PSYCHOPATHS.mkv", "INTERSTELLAR.mkv"], false);
-        obfuscated(&["The.Show.Name.mkv", "StarTrekIntoDarkness", "SpiderManNoWayHome.mkv", "MissionImpossibleIII.mkv"], false);
+        obfuscated(
+            &[
+                "Doku.schlittschuhschritt.mkv",
+                "Doku.kraftfahrzeugpflicht.mkv",
+            ],
+            false,
+        );
+        obfuscated(
+            &[
+                "LIGHTSWITCH.mkv",
+                "BLACKKNIGHTS.mkv",
+                "PSYCHOPATHS.mkv",
+                "INTERSTELLAR.mkv",
+            ],
+            false,
+        );
+        obfuscated(
+            &[
+                "The.Show.Name.mkv",
+                "StarTrekIntoDarkness",
+                "SpiderManNoWayHome.mkv",
+                "MissionImpossibleIII.mkv",
+            ],
+            false,
+        );
     }
 
     #[test]

@@ -173,19 +173,17 @@ pub fn map_group_to_file_action(action: i32) -> i32 {
         4 | 16 => 4,                // eaFilePause / eaGroupPause -> eaFilePause
         5 | 17 => 5,                // eaFileResume / eaGroupResume -> eaFileResume
         6 | 18 | 19 | 20 | 21 => 6, // eaFileDelete / eaGroup*Delete -> eaFileDelete
-        7 | 22 => 7,                // eaFilePauseAllPars / eaGroupPauseAllPars -> eaFilePauseAllPars
-        8 | 23 => 8,                // eaFilePauseExtraPars / eaGroupPauseExtraPars -> eaFilePauseExtraPars
-        9 => 9,                     // eaFileReorder
-        10 => 10,                   // eaFileSplit
+        7 | 22 => 7, // eaFilePauseAllPars / eaGroupPauseAllPars -> eaFilePauseAllPars
+        8 | 23 => 8, // eaFilePauseExtraPars / eaGroupPauseExtraPars -> eaFilePauseExtraPars
+        9 => 9,      // eaFileReorder
+        10 => 10,    // eaFileSplit
         _ => 0,
     }
 }
 
 /// Checks case-insensitively whether `filename` contains `".vol"` for `QueueEditor::PausePars`.
 pub fn filename_has_vol(filename: &[u8]) -> bool {
-    filename
-        .windows(4)
-        .any(|w| w.eq_ignore_ascii_case(b".vol"))
+    filename.windows(4).any(|w| w.eq_ignore_ascii_case(b".vol"))
 }
 
 /// `QueueEditor::PausePars` (`QueueEditor.cpp`):
@@ -372,10 +370,7 @@ pub fn parse_dupe_mode(text: &[u8]) -> Option<i32> {
 
 /// Panic-free stable merge sort (`left` wins ties: `!is_less(&right[j], &left[i])`).
 /// Safe even when `is_less` is not a strict weak ordering (e.g. `GroupSorter` with unselected items).
-pub fn stable_merge_sort_by<T: Clone, F: FnMut(&T, &T) -> bool>(
-    slice: &mut [T],
-    is_less: &mut F,
-) {
+pub fn stable_merge_sort_by<T: Clone, F: FnMut(&T, &T) -> bool>(slice: &mut [T], is_less: &mut F) {
     fn sort_rec<T: Clone, F: FnMut(&T, &T) -> bool>(
         slice: &mut [T],
         buf: &mut [T],
@@ -486,7 +481,8 @@ pub(crate) fn edit_list_host(
     let built_ids: Vec<i32>;
     let eff_ids = if let Some(name_list) = names {
         let mut out_ids = Vec::new();
-        ok = build_id_list_from_name_list(host, dq_ptr, &mut out_ids, name_list, match_mode, action);
+        ok =
+            build_id_list_from_name_list(host, dq_ptr, &mut out_ids, name_list, match_mode, action);
         built_ids = out_ids;
         Some(built_ids.as_slice())
     } else {
@@ -748,11 +744,7 @@ fn prepare_list(
 }
 
 #[cfg(unix)]
-fn move_entry(
-    host: &crate::queuesubsys_host::QueueSubsysHost,
-    file_ptr: usize,
-    offset: i32,
-) {
+fn move_entry(host: &crate::queuesubsys_host::QueueSubsysHost, file_ptr: usize, offset: i32) {
     let nzb_ptr = host.file_snap(file_ptr).nzb_ptr;
     let n = host.nzb_file_len(nzb_ptr);
     if n == 0 {
@@ -1237,7 +1229,8 @@ fn move_groups_to(
         let queue_ids: Vec<i32> = (0..qlen)
             .map(|i| host.nzb_snap(host.queue_at(dq_ptr, i), false).id)
             .collect();
-        offset = calc_move_groups_to_offset(&queue_ids, target_id, moved_ids[0], before, items.len());
+        offset =
+            calc_move_groups_to_offset(&queue_ids, target_id, moved_ids[0], before, items.len());
     }
 
     let off_str = offset.to_string();
@@ -1456,8 +1449,8 @@ fn intern_edit_list(
         EA_GROUP_MOVE_BOTTOM, EA_GROUP_MOVE_OFFSET, EA_GROUP_MOVE_TOP, EA_GROUP_PARK_DELETE,
         EA_GROUP_PAUSE, EA_GROUP_PAUSE_ALL_PARS, EA_GROUP_PAUSE_EXTRA_PARS, EA_GROUP_RESUME,
         EA_GROUP_SET_CATEGORY, EA_GROUP_SET_DUPE_KEY, EA_GROUP_SET_DUPE_MODE,
-        EA_GROUP_SET_DUPE_SCORE, EA_GROUP_SET_NAME, EA_GROUP_SET_PARAMETER,
-        EA_GROUP_SET_PRIORITY, EA_GROUP_SORT, EA_GROUP_SORT_FILES, FILE_INT_PAUSED, NK_URL,
+        EA_GROUP_SET_DUPE_SCORE, EA_GROUP_SET_NAME, EA_GROUP_SET_PARAMETER, EA_GROUP_SET_PRIORITY,
+        EA_GROUP_SORT, EA_GROUP_SORT_FILES, FILE_INT_PAUSED, NK_URL,
     };
 
     let unique_ids = id_list_opt.map(dedup_id_list);

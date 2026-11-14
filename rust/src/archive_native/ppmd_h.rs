@@ -19,7 +19,9 @@ const BOT: u32 = 1 << 15;
 /// The model's memory is 1 to 256 MiB, as the stream asks
 const MAX_MB: u32 = 256;
 const EXP_ESCAPE: [u8; 16] = [25, 14, 9, 7, 5, 5, 4, 4, 4, 3, 3, 3, 2, 2, 2, 2];
-const INIT_BIN_ESC: [u32; 8] = [0x3CDD, 0x1F3F, 0x59BF, 0x48F3, 0x64A1, 0x5ABC, 0x6632, 0x6051];
+const INIT_BIN_ESC: [u32; 8] = [
+    0x3CDD, 0x1F3F, 0x59BF, 0x48F3, 0x64A1, 0x5ABC, 0x6632, 0x6051,
+];
 
 /// A secondary escape estimate.
 #[derive(Clone, Copy, Default)]
@@ -252,7 +254,11 @@ impl Ppm {
         self.set_d(s + 2, v);
     }
     fn state(&self, s: u32) -> State {
-        State { sym: self.b(s) as u8, freq: self.b(s + 1) as u8, succ: self.d(s + 2) }
+        State {
+            sym: self.b(s) as u8,
+            freq: self.b(s + 1) as u8,
+            succ: self.d(s + 2),
+        }
     }
     fn set_state(&mut self, s: u32, v: State) {
         self.set_b(s, u32::from(v.sym));
@@ -600,12 +606,20 @@ impl Ppm {
                 self.bin_decoded = false;
                 return;
             }
-            self.code = self.code.wrapping_sub(self.range.wrapping_mul(self.lo_count));
-            self.range = self.range.wrapping_mul(self.hi_count.wrapping_sub(self.lo_count));
+            self.code = self
+                .code
+                .wrapping_sub(self.range.wrapping_mul(self.lo_count));
+            self.range = self
+                .range
+                .wrapping_mul(self.hi_count.wrapping_sub(self.lo_count));
             return;
         }
-        self.low = self.low.wrapping_add(self.range.wrapping_mul(self.lo_count));
-        self.range = self.range.wrapping_mul(self.hi_count.wrapping_sub(self.lo_count));
+        self.low = self
+            .low
+            .wrapping_add(self.range.wrapping_mul(self.lo_count));
+        self.range = self
+            .range
+            .wrapping_mul(self.hi_count.wrapping_sub(self.lo_count));
     }
 
     // ---- the model
@@ -639,7 +653,14 @@ impl Ppm {
         self.run_length = self.init_rl;
         self.prev_success = 0;
         for i in 0..256u32 {
-            self.set_state(stats + 6 * i, State { sym: i as u8, freq: 1, succ: 0 });
+            self.set_state(
+                stats + 6 * i,
+                State {
+                    sym: i as u8,
+                    freq: 1,
+                    succ: 0,
+                },
+            );
         }
         for (i, row) in self.bin_summ.iter_mut().enumerate() {
             for (j, b) in row.iter_mut().enumerate() {
@@ -769,7 +790,9 @@ impl Ppm {
     /// The state for `sym` among a context's stats, or None when it isn't there.
     fn find(&self, ctx: u32, sym: u32) -> Option<u32> {
         let stats = self.stats(ctx);
-        (0..self.ns(ctx)).map(|i| stats + 6 * i).find(|p| self.sym(*p) == sym)
+        (0..self.ns(ctx))
+            .map(|i| stats + 6 * i)
+            .find(|p| self.sym(*p) == sym)
     }
 
     fn create_successors(&mut self, skip: bool, p1: u32) -> u32 {
@@ -793,7 +816,9 @@ impl Ppm {
                     p = p1;
                     entry = false;
                 } else if self.ns(pc) != 1 {
-                    let Some(found) = self.find(pc, fsym) else { return 0 };
+                    let Some(found) = self.find(pc, fsym) else {
+                        return 0;
+                    };
                     p = found;
                 } else {
                     p = pc + 2;
@@ -820,20 +845,31 @@ impl Ppm {
             if pc <= self.p_text {
                 return 0;
             }
-            let Some(p) = self.find(pc, up_sym) else { return 0 };
+            let Some(p) = self.find(pc, up_sym) else {
+                return 0;
+            };
             let cf = self.freq(p).wrapping_sub(1);
             let s0 = self.summ(pc).wrapping_sub(self.ns(pc)).wrapping_sub(cf);
             if cf.wrapping_mul(2) <= s0 {
                 1 + u32::from(cf.wrapping_mul(5) > s0)
             } else {
-                let top = cf.wrapping_mul(2).wrapping_add(s0.wrapping_mul(3)).wrapping_sub(1);
-                let Some(q) = top.checked_div(s0.wrapping_mul(2)) else { return 0 };
+                let top = cf
+                    .wrapping_mul(2)
+                    .wrapping_add(s0.wrapping_mul(3))
+                    .wrapping_sub(1);
+                let Some(q) = top.checked_div(s0.wrapping_mul(2)) else {
+                    return 0;
+                };
                 1u32.wrapping_add(q)
             }
         } else {
             self.freq(pc + 2)
         };
-        let up = State { sym: up_sym as u8, freq: up_freq as u8, succ: up_succ };
+        let up = State {
+            sym: up_sym as u8,
+            freq: up_freq as u8,
+            succ: up_succ,
+        };
         while let Some(p) = ps.pop() {
             pc = self.create_child(pc, p, up);
             if pc == 0 {
@@ -859,7 +895,9 @@ impl Ppm {
             if self.ns(pc) != 1 {
                 p = self.stats(pc);
                 if self.sym(p) != u32::from(fs.sym) {
-                    let Some(found) = self.find(pc, u32::from(fs.sym)) else { return false };
+                    let Some(found) = self.find(pc, u32::from(fs.sym)) else {
+                        return false;
+                    };
                     p = found;
                     if self.freq(p) >= self.freq(p - 6) {
                         self.swap(p, p - 6);
@@ -907,7 +945,10 @@ impl Ppm {
             fs.succ = self.min_ctx;
         }
         let ns = self.ns(self.min_ctx);
-        let s0 = self.summ(self.min_ctx).wrapping_sub(ns).wrapping_sub(u32::from(fs.freq).wrapping_sub(1));
+        let s0 = self
+            .summ(self.min_ctx)
+            .wrapping_sub(ns)
+            .wrapping_sub(u32::from(fs.freq).wrapping_sub(1));
         let mut pc = self.max_ctx;
         let mut guard = 0;
         while pc != self.min_ctx {
@@ -924,7 +965,8 @@ impl Ppm {
                         return false;
                     }
                 }
-                let add = u32::from(2 * ns1 < ns) + 2 * u32::from((4 * ns1 <= ns) & (self.summ(pc) <= 8 * ns1));
+                let add = u32::from(2 * ns1 < ns)
+                    + 2 * u32::from((4 * ns1 <= ns) & (self.summ(pc) <= 8 * ns1));
                 self.set_summ(pc, self.summ(pc) + add);
             } else {
                 let p = self.alloc_units(1);
@@ -954,7 +996,14 @@ impl Ppm {
                 self.set_summ(pc, self.summ(pc) + cf);
             }
             let p = self.stats(pc) + 6 * ns1;
-            self.set_state(p, State { sym: fs.sym, freq: cf as u8, succ: successor });
+            self.set_state(
+                p,
+                State {
+                    sym: fs.sym,
+                    freq: cf as u8,
+                    succ: successor,
+                },
+            );
             self.set_ns(pc, ns1 + 1);
             pc = self.suffix(pc);
         }
@@ -968,7 +1017,9 @@ impl Ppm {
         self.hi_bits_flag = self.hb2flag[self.sym(self.found) as usize];
         let i = (self.freq(rs) as usize).checked_sub(1)?.min(127);
         let j = usize::from(self.prev_success)
-            + usize::from(self.ns2bsindx[(self.ns(self.suffix(ctx)) as usize).wrapping_sub(1) & 0xff])
+            + usize::from(
+                self.ns2bsindx[(self.ns(self.suffix(ctx)) as usize).wrapping_sub(1) & 0xff],
+            )
             + usize::from(self.hi_bits_flag)
             + 2 * usize::from(self.hb2flag[self.sym(rs) as usize])
             + ((self.run_length >> 26) & 0x20) as usize;
@@ -1274,8 +1325,17 @@ impl Ppm {
 }
 
 /// Decodes a 7-Zip PPMd (`[0x03, 0x04, 0x01]`) stream of `target` bytes.
-pub fn decode_7z_ppmd(data: &[u8], order: u8, mem_size: u32, target: usize) -> Result<Vec<u8>, String> {
-    let mut bits = Bits { data, addr: 0, bit: 0 };
+pub fn decode_7z_ppmd(
+    data: &[u8],
+    order: u8,
+    mem_size: u32,
+    target: usize,
+) -> Result<Vec<u8>, String> {
+    let mut bits = Bits {
+        data,
+        addr: 0,
+        bit: 0,
+    };
     let mut ppm = Box::<Ppm>::default();
     if !ppm.init_7z(&mut bits, order, mem_size) {
         return Err("7-Zip: Invalid PPMd stream or properties".to_string());
@@ -1296,7 +1356,11 @@ mod tests {
 
     #[test]
     fn see_estimates_stay_unsigned_past_0x7fff() {
-        let mut see = See2 { summ: 38766, shift: 7, count: 1 };
+        let mut see = See2 {
+            summ: 38766,
+            shift: 7,
+            count: 1,
+        };
         assert_eq!(see.mean(), 302);
         assert_eq!(see.summ, 38766 - 302);
     }
@@ -1307,7 +1371,11 @@ mod tests {
         // allocator glues free blocks, takes units from the text area, and restarts
         for order in [3u8, 15] {
             let data = [0x20 | order, 0, 0, 0, 0, 0];
-            let mut bits = Bits { data: &data, addr: 0, bit: 0 };
+            let mut bits = Bits {
+                data: &data,
+                addr: 0,
+                bit: 0,
+            };
             let mut ppm = Ppm::default();
             let mut esc = 2;
             assert!(ppm.init(&mut bits, &mut esc));
@@ -1317,7 +1385,11 @@ mod tests {
                 n += 1;
             }
             assert!(n == 300_000, "order {order}: {n} bytes");
-            assert!(ppm.seen.0 > 2 && ppm.seen.1 > 0, "order {order}: restarts and glues {:?}", ppm.seen);
+            assert!(
+                ppm.seen.0 > 2 && ppm.seen.1 > 0,
+                "order {order}: restarts and glues {:?}",
+                ppm.seen
+            );
         }
     }
 }

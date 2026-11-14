@@ -88,10 +88,8 @@ pub fn format_status_bar(spec: &NcursesStatusSpec) -> Vec<u8> {
         });
     }
 
-    let pause_suffix = frontend_select_pause_status_suffix(
-        spec.pause_download != 0,
-        spec.stand_by != 0,
-    );
+    let pause_suffix =
+        frontend_select_pause_status_suffix(spec.pause_download != 0, spec.stand_by != 0);
     out.extend_from_slice(pause_suffix.to_bytes());
 
     if spec.download_limit > 0 {
@@ -160,10 +158,7 @@ pub fn format_colored_status_bar(
         });
     }
 
-    let pause_suffix = frontend_select_pause_status_suffix(
-        pause_download != 0,
-        stand_by != 0,
-    );
+    let pause_suffix = frontend_select_pause_status_suffix(pause_download != 0, stand_by != 0);
     out.extend_from_slice(pause_suffix.to_bytes());
 
     if download_limit > 0 {
@@ -211,7 +206,12 @@ pub fn format_log_message_line(colored: bool, kind: i32, text: &[u8]) -> Vec<u8>
 }
 
 /// Format the top header bar with right-aligned uptime or download-time (`NCursesFrontend::PrintTopHeader`).
-pub fn format_top_header(header: &[u8], screen_width: i32, up_time: bool, time_sec: i32) -> Vec<u8> {
+pub fn format_top_header(
+    header: &[u8],
+    screen_width: i32,
+    up_time: bool,
+    time_sec: i32,
+) -> Vec<u8> {
     let width = screen_width.max(0) as usize;
     let mut buffer = Vec::with_capacity(width.max(header.len()).min(BSTRING_1024_CAP));
     buffer.extend_from_slice(header);
@@ -260,12 +260,8 @@ pub fn format_top_header(header: &[u8], screen_width: i32, up_time: bool, time_s
     let short_cap_len = short_cap.len() as i32;
     let long_cap_len = long_cap.len() as i32;
 
-    let cap_mode = ncurses_select_top_header_caption(
-        chars_left,
-        time_len,
-        long_cap_len,
-        short_cap_len,
-    );
+    let cap_mode =
+        ncurses_select_top_header_caption(chars_left, time_len, long_cap_len, short_cap_len);
 
     let write_suffix = |buf: &mut Vec<u8>, start: i32, cap: &[u8], t: &[u8]| {
         if start < 0 {
@@ -441,10 +437,8 @@ pub fn format_file_row(spec: &NcursesFileRowSpec) -> (Vec<u8>, i32) {
     out.extend_from_slice(b" (");
     crate::util::format_size_into(&mut out, spec.size);
 
-    let completed_pct = crate::binrpc::remote_client_calc_file_completed_pct(
-        spec.remaining_size,
-        spec.size,
-    );
+    let completed_pct =
+        crate::binrpc::remote_client_calc_file_completed_pct(spec.remaining_size, spec.size);
     if completed_pct >= 0 {
         out.extend_from_slice(b", ");
         out.extend_from_slice(completed_pct.to_string().as_bytes());
@@ -548,13 +542,11 @@ pub fn format_group_row(
             crate::util::format_size_into(&mut remaining, spec.remaining_size);
         } else {
             crate::util::format_size_into(&mut remaining, unpaused_rem);
-            if let Some((h, m, s)) =
-                ncurses_calc_group_remain_hms_capped(
-                    unpaused_rem,
-                    cur_speed,
-                    spec.pause_download != 0,
-                )
-            {
+            if let Some((h, m, s)) = ncurses_calc_group_remain_hms_capped(
+                unpaused_rem,
+                cur_speed,
+                spec.pause_download != 0,
+            ) {
                 push_hms(&mut time, h, m, s);
             }
         }
@@ -849,13 +841,24 @@ fn ansi_color_pair_escape(color_pair: i32) -> &'static [u8] {
 }
 
 /// Appends positioned, colored text to the frame buffer, sanitizing control bytes in `text`.
-pub fn term_plot_text(text: &[u8], row: i32, col: i32, use_color: bool, color_pair: i32, blink: bool) {
+pub fn term_plot_text(
+    text: &[u8],
+    row: i32,
+    col: i32,
+    use_color: bool,
+    color_pair: i32,
+    blink: bool,
+) {
     let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let r = (row.max(0) + 1) as u32;
     let c = (col.max(0) + 1) as u32;
-    guard.frame_buf.extend_from_slice(format!("\x1b[{r};{c}H").as_bytes());
+    guard
+        .frame_buf
+        .extend_from_slice(format!("\x1b[{r};{c}H").as_bytes());
     if use_color {
-        guard.frame_buf.extend_from_slice(ansi_color_pair_escape(color_pair));
+        guard
+            .frame_buf
+            .extend_from_slice(ansi_color_pair_escape(color_pair));
         if blink {
             guard.frame_buf.extend_from_slice(b"\x1b[5m");
         }
@@ -875,7 +878,9 @@ pub fn term_refresh(row: i32, col: i32) {
     let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
     let r = (row.max(0) + 1) as u32;
     let c = (col.max(0) + 1) as u32;
-    guard.frame_buf.extend_from_slice(format!("\x1b[{r};{c}H").as_bytes());
+    guard
+        .frame_buf
+        .extend_from_slice(format!("\x1b[{r};{c}H").as_bytes());
     if !guard.frame_buf.is_empty() {
         unsafe {
             let _ = libc::write(
@@ -1242,7 +1247,14 @@ pub fn term_plot_line(
     if (w as i32) + 1 > rem && rem < MAX_SCREEN_WIDTH as i32 {
         target_len = rem.clamp(0, w as i32) as usize;
     }
-    term_plot_text(&line_buf[..target_len], row, pos, use_color, color_pair, false);
+    term_plot_text(
+        &line_buf[..target_len],
+        row,
+        pos,
+        use_color,
+        color_pair,
+        false,
+    );
 }
 
 /// `NCursesFrontend::CalcWindowSizes` (`NCursesFrontend.cpp`).
@@ -1403,7 +1415,14 @@ pub fn ncurses_print_key_input_bar(
         2 => {
             let msg = format!("Download rate: {input_value}");
             term_plot_line(msg.as_bytes(), input_bar_row, 0, screen_width, use_color, 8);
-            term_plot_text(b" ", input_bar_row, 15 + input_number_index, use_color, 11, true);
+            term_plot_text(
+                b" ",
+                input_bar_row,
+                15 + input_number_index,
+                use_color,
+                11,
+                true,
+            );
         }
         _ => {}
     }
@@ -1460,13 +1479,8 @@ pub type FrontendActionFn = unsafe extern "C" fn(
 ) -> i64;
 pub type FrontendLocalSummaryFn =
     unsafe extern "C" fn(*mut std::ffi::c_void, *mut crate::binrpc::FrontendSummary);
-pub type FrontendEmitMsgFn = unsafe extern "C" fn(
-    *mut std::ffi::c_void,
-    u32,
-    std::ffi::c_int,
-    i64,
-    *const std::ffi::c_char,
-);
+pub type FrontendEmitMsgFn =
+    unsafe extern "C" fn(*mut std::ffi::c_void, u32, std::ffi::c_int, i64, *const std::ffi::c_char);
 pub type FrontendLocalMessagesFn = unsafe extern "C" fn(
     *mut std::ffi::c_void,
     std::ffi::c_int,
@@ -1975,13 +1989,15 @@ fn run_loggable(mode: i32, env: &NzbgetRsFrontendEnv) {
         if env.remote_mode != 0 {
             if !remote_messages.is_empty() {
                 let first_id = remote_messages[0].id;
-                let mut start = needed_log_first_id
-                    .wrapping_sub(first_id)
-                    .wrapping_add(1) as i32;
+                let mut start = needed_log_first_id.wrapping_sub(first_id).wrapping_add(1) as i32;
                 if start < 0 {
                     fe_write_stdout(
                         env,
-                        if colored { b".....\x1b[K\n" } else { b".....\n" },
+                        if colored {
+                            b".....\x1b[K\n"
+                        } else {
+                            b".....\n"
+                        },
                         false,
                     );
                     start = 0;
@@ -1999,7 +2015,11 @@ fn run_loggable(mode: i32, env: &NzbgetRsFrontendEnv) {
             if skipped {
                 fe_write_stdout(
                     env,
-                    if colored { b".....\x1b[K\n" } else { b".....\n" },
+                    if colored {
+                        b".....\x1b[K\n"
+                    } else {
+                        b".....\n"
+                    },
                     false,
                 );
             }
@@ -2172,7 +2192,14 @@ fn run_ncurses(
                             let hdr = format_group_queue_header(use_color, 0, 0, 0);
                             let top =
                                 format_top_header(&hdr, screen_width, false, summary.dn_time_sec);
-                            term_plot_line(&top, line_nr, 0, screen_width, use_color, COLOR_INFOLINE);
+                            term_plot_line(
+                                &top,
+                                line_nr,
+                                0,
+                                screen_width,
+                                use_color,
+                                COLOR_INFOLINE,
+                            );
                             line_nr += 1;
                             term_plot_line(
                                 b"Ready to receive nzb-job",

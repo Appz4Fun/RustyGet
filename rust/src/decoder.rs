@@ -9,7 +9,12 @@ use std::ffi::{c_int, c_ulong, c_void, CStr};
 
 /// rapidyenc_decode_incremental: returns 0 (no end), 1 ("\r\n=y" found,
 /// `src` after the 'y') or 2 ("\r\n.\r\n" found, `src` after it).
-pub type DecodeFn = unsafe extern "C" fn(src: *mut *const c_void, dst: *mut *mut c_void, len: usize, state: *mut c_int) -> c_int;
+pub type DecodeFn = unsafe extern "C" fn(
+    src: *mut *const c_void,
+    dst: *mut *mut c_void,
+    len: usize,
+    state: *mut c_int,
+) -> c_int;
 /// rapidyenc_crc.
 pub type CrcFn = unsafe extern "C" fn(src: *const c_void, len: usize, init: u32) -> u32;
 
@@ -449,7 +454,10 @@ fn strtoul_hex(s: &[u8]) -> u32 {
     let mut acc: c_ulong = 0;
     let mut overflow = false;
     while let Some(d) = (at(i) as char).to_digit(16) {
-        if let Some(next) = acc.checked_mul(16).and_then(|v| v.checked_add(d as c_ulong)) {
+        if let Some(next) = acc
+            .checked_mul(16)
+            .and_then(|v| v.checked_add(d as c_ulong))
+        {
             acc = next;
         } else {
             overflow = true;
@@ -572,7 +580,11 @@ impl Decoder {
 
         let mut line = 0usize;
         // strchr(line, '\n') stops at the first newline or NUL.
-        while let Some(nl) = self.line_buf.data[line..].iter().position(|&b| b == 0 || b == b'\n').map(|k| line + k) {
+        while let Some(nl) = self.line_buf.data[line..]
+            .iter()
+            .position(|&b| b == 0 || b == b'\n')
+            .map(|k| line + k)
+        {
             if self.line_buf.data[nl] == 0 {
                 break;
             }
@@ -590,7 +602,10 @@ impl Decoder {
                 // Only control lines use strstr, which looked past the newline.
                 // Ordinary lines must not scan/copy the whole remaining article.
                 let text = &self.line_buf.data[line..];
-                if text.starts_with(b"=ybegin ") || text.starts_with(b"=ypart ") || text.starts_with(b"=yend ") {
+                if text.starts_with(b"=ybegin ")
+                    || text.starts_with(b"=ypart ")
+                    || text.starts_with(b"=yend ")
+                {
                     // the line's C string runs on past its newline (strstr looked there);
                     // read it in place instead of copying the rest of the piece
                     let end = self.line_buf.len.max(line);
@@ -657,7 +672,11 @@ impl Decoder {
             }
             pe += 1;
         }
-        let name = if pe > pb { &full[pb..pe] } else { &full[pb.min(full.len())..] };
+        let name = if pe > pb {
+            &full[pb..pe]
+        } else {
+            &full[pb.min(full.len())..]
+        };
         let name = &name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())];
         let mut out = Vec::new();
         crate::text::latin1_to_utf8(name, &mut out);
@@ -685,7 +704,11 @@ impl Decoder {
             self.parse_ypart(cs);
         } else if len >= 6 && line.starts_with(b"=yend ") {
             self.end = true;
-            let (key, offset): (&[u8], usize) = if self.part { (b" pcrc32=", 8) } else { (b" crc32=", 7) };
+            let (key, offset): (&[u8], usize) = if self.part {
+                (b" pcrc32=", 8)
+            } else {
+                (b" crc32=", 7)
+            };
             if let Some(k) = cfind(cs, key).filter(|&k| k + offset < len) {
                 self.crc = true;
                 self.expected_crc = strtoul_hex(&cs[k + offset..]);
@@ -705,9 +728,14 @@ impl Decoder {
         let written = d as usize - out as usize;
         if endseq != 0 {
             let consumed = s as usize - src as usize;
-            let rest = if len > consumed { std::slice::from_raw_parts(s as *const u8, len - consumed).to_vec() } else { Vec::new() };
+            let rest = if len > consumed {
+                std::slice::from_raw_parts(s as *const u8, len - consumed).to_vec()
+            } else {
+                Vec::new()
+            };
             self.line_buf.set_len(0);
-            self.line_buf.append(if endseq == 1 { b"=y" } else { b".\r\n" });
+            self.line_buf
+                .append(if endseq == 1 { b"=y" } else { b".\r\n" });
             if !rest.is_empty() {
                 self.line_buf.append(&rest);
             }
@@ -735,7 +763,11 @@ impl Decoder {
                     pe += 1;
                 }
                 // an empty name was CString(pb, 0): the rest of the C string
-                let name = if pe > pb { line.get(pb..pe).unwrap_or_default() } else { line.get(pb..).unwrap_or_default() };
+                let name = if pe > pb {
+                    line.get(pb..pe).unwrap_or_default()
+                } else {
+                    line.get(pb..).unwrap_or_default()
+                };
                 let name = &name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())];
                 let mut outn = Vec::new();
                 crate::text::latin1_to_utf8(name, &mut outn);
@@ -836,7 +868,9 @@ impl Decoder {
 
     /// GetArticleFilename: the name as a C string.
     pub fn filename_c(&mut self) -> *const u8 {
-        if self.filename_c.len() != self.article_filename.len() + 1 || self.filename_c[..self.article_filename.len()] != self.article_filename[..] {
+        if self.filename_c.len() != self.article_filename.len() + 1
+            || self.filename_c[..self.article_filename.len()] != self.article_filename[..]
+        {
             self.filename_c = self.article_filename.clone();
             self.filename_c.push(0);
         }
@@ -852,7 +886,9 @@ impl Decoder {
                     Status::NoBinaryData
                 } else if !self.end {
                     Status::ArticleIncomplete
-                } else if (!self.part && self.size != self.end_size) || self.end_size != self.out_size {
+                } else if (!self.part && self.size != self.end_size)
+                    || self.end_size != self.out_size
+                {
                     Status::InvalidSize
                 } else if self.crc_check && self.crc && self.expected_crc != self.calculated_crc {
                     Status::CrcError
@@ -860,7 +896,13 @@ impl Decoder {
                     Status::Finished
                 }
             }
-            Format::Ux => if self.body { Status::Finished } else { Status::NoBinaryData },
+            Format::Ux => {
+                if self.body {
+                    Status::Finished
+                } else {
+                    Status::NoBinaryData
+                }
+            }
             Format::Unknown => Status::UnknownError,
         }
     }
@@ -892,18 +934,33 @@ fn detect_format(line: &[u8], len: usize) -> Format {
 mod tests {
     use super::*;
 
-    unsafe extern "C" fn decode(src: *mut *const c_void, dst: *mut *mut c_void, len: usize, _state: *mut c_int) -> c_int {
+    unsafe extern "C" fn decode(
+        src: *mut *const c_void,
+        dst: *mut *mut c_void,
+        len: usize,
+        _state: *mut c_int,
+    ) -> c_int {
         std::ptr::copy(*src as *const u8, *dst as *mut u8, len);
         *src = (*src).byte_add(len);
         *dst = (*dst).byte_add(len);
         0
     }
 
-    unsafe extern "C" fn crc(_src: *const c_void, _len: usize, init: u32) -> u32 { init }
+    unsafe extern "C" fn crc(_src: *const c_void, _len: usize, init: u32) -> u32 {
+        init
+    }
 
     #[test]
     fn control_key_search_matches_strstr() {
-        for key in [b" size=".as_slice(), b" part=", b" name=", b" begin=", b" end=", b" crc32=", b" pcrc32="] {
+        for key in [
+            b" size=".as_slice(),
+            b" part=",
+            b" name=",
+            b" begin=",
+            b" end=",
+            b" crc32=",
+            b" pcrc32=",
+        ] {
             let text = [b"=ybegin x".as_slice(), key, b"1\r\n", key, b"2"].concat();
             for len in 0..=text.len() {
                 for nul in 0..=len {
@@ -912,7 +969,11 @@ mod tests {
                     s[nul] = 0;
                     let c_slice = &s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())];
                     let expected = c_slice.windows(key.len()).position(|w| w == key);
-                    assert_eq!(cfind(&s[..len], key), expected, "len={len}, NUL={nul}, key={key:?}");
+                    assert_eq!(
+                        cfind(&s[..len], key),
+                        expected,
+                        "len={len}, NUL={nul}, key={key:?}"
+                    );
                 }
             }
         }
@@ -983,7 +1044,10 @@ mod tests {
         let mut buffer = vec![0x5a; 32 + chunk.len() + 128 + 32];
         buffer[32..32 + chunk.len()].copy_from_slice(chunk);
         let before = buffer.clone();
-        assert_eq!(unsafe { d.decode_buffer(buffer.as_mut_ptr().add(32), chunk.len()) }, chunk.len());
+        assert_eq!(
+            unsafe { d.decode_buffer(buffer.as_mut_ptr().add(32), chunk.len()) },
+            chunk.len()
+        );
         assert_eq!(buffer, before);
         assert_eq!(d.eof, eof, "chunk={chunk:?}");
     }
@@ -1020,7 +1084,11 @@ mod tests {
         d.raw_mode = true;
         let mut offset = 0;
         for len in [1, 6, 17, 17, 17, 17, 17, 17, 15, 1, 1, 1, 1] {
-            check_raw_chunk(&mut d, &wire[offset..offset + len], offset + len == wire.len());
+            check_raw_chunk(
+                &mut d,
+                &wire[offset..offset + len],
+                offset + len == wire.len(),
+            );
             offset += len;
         }
         assert_eq!(offset, wire.len());
@@ -1059,8 +1127,13 @@ mod tests {
     #[test]
     fn raw_near_miss() {
         let wires: &[&[u8]] = &[
-            b"\r\n..\r\n", b"\n.\r\n", b"\r\n.\n", b"\r.\r\n",
-            b"\r\n.x\r\n", b"\r\n.\rX", b"\0\r\n.\0\r\n",
+            b"\r\n..\r\n",
+            b"\n.\r\n",
+            b"\r\n.\n",
+            b"\r.\r\n",
+            b"\r\n.x\r\n",
+            b"\r\n.\rX",
+            b"\0\r\n.\0\r\n",
         ];
         for wire in wires {
             let mut d = Decoder::new(decode, crc);
@@ -1094,7 +1167,10 @@ mod tests {
         for prefix in 1..=4 {
             let mut d = Decoder::new(decode, crc);
             let mut header = b"begin 644 f.bin\r\n".to_vec();
-            assert_eq!(unsafe { d.decode_buffer(header.as_mut_ptr(), header.len()) }, 0);
+            assert_eq!(
+                unsafe { d.decode_buffer(header.as_mut_ptr(), header.len()) },
+                0
+            );
             assert_eq!(d.format, Format::Ux);
             d.raw_mode = true;
             check_raw_chunk(&mut d, &marker[..prefix], false);
@@ -1122,9 +1198,17 @@ mod tests {
     #[test]
     fn raw_legacy_eof_policy() {
         let sequences: &[(&[&[u8]], &[bool], &[c_int])] = &[
-            (&[b"\r\n.\r\nx", b"more", b"\r", b"x"], &[true, true, true, false], &[0, 0, 1, 0]),
+            (
+                &[b"\r\n.\r\nx", b"more", b"\r", b"x"],
+                &[true, true, true, false],
+                &[0, 0, 1, 0],
+            ),
             (&[b"\r\n.\r", b"\n", b"x"], &[false, true, true], &[4, 0, 0]),
-            (&[b"\r\n.", b"\r\n", b"x"], &[false, true, false], &[3, 2, 0]),
+            (
+                &[b"\r\n.", b"\r\n", b"x"],
+                &[false, true, false],
+                &[3, 2, 0],
+            ),
         ];
         for &(chunks, expected, states) in sequences {
             let mut d = Decoder::new(decode, crc);
@@ -1153,7 +1237,14 @@ mod tests {
         assert_eq!(strtoul_hex(b"-10000000000000000"), u32::MAX);
         assert_eq!(strtoul_hex(b"-fffffffffffffffff"), u32::MAX);
         assert_eq!(strtoul_hex(b" \t-0x1\r\n"), u32::MAX);
-        assert_eq!(strtoul_hex(b"100000000"), if std::mem::size_of::<c_ulong>() == 4 { u32::MAX } else { 0 });
+        assert_eq!(
+            strtoul_hex(b"100000000"),
+            if std::mem::size_of::<c_ulong>() == 4 {
+                u32::MAX
+            } else {
+                0
+            }
+        );
         assert_eq!(atoll(b" \t\x0b-123rest"), -123);
     }
 
@@ -1227,11 +1318,7 @@ mod tests {
             let encoded = yenc_encode(data);
             let mut msg = Vec::new();
             msg.extend_from_slice(
-                format!(
-                    "=ybegin line=128 size={} name=name.dat\r\n",
-                    data.len()
-                )
-                .as_bytes(),
+                format!("=ybegin line=128 size={} name=name.dat\r\n", data.len()).as_bytes(),
             );
             msg.extend_from_slice(&encoded);
             msg.extend_from_slice(
@@ -1268,11 +1355,7 @@ mod tests {
             );
             msg1.extend_from_slice(&enc1);
             msg1.extend_from_slice(
-                format!(
-                    "\r\n=yend size={} pcrc32=cb64ae30\r\n.\r\n",
-                    data1.len()
-                )
-                .as_bytes(),
+                format!("\r\n=yend size={} pcrc32=cb64ae30\r\n.\r\n", data1.len()).as_bytes(),
             );
 
             let mut msg2 = Vec::new();

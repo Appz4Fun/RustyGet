@@ -219,12 +219,7 @@ const SECTIONS: [(&CStr, usize, &[&CStr]); 4] = [
     (
         c"category",
         8,
-        &[
-            c".name",
-            c".destdir",
-            c".unpack",
-            c".aliases",
-        ],
+        &[c".name", c".destdir", c".unpack", c".aliases"],
     ),
     (
         c"feed",
@@ -328,7 +323,11 @@ fn is_removed_extension_opt(name: &CStr) -> bool {
         return true;
     }
     for (prefix, len, suffixes) in [
-        (c"category", 8, &[c".extensions", c".defscript", c".postscript"][..]),
+        (
+            c"category",
+            8,
+            &[c".extensions", c".defscript", c".postscript"][..],
+        ),
         (c"feed", 4, &[c".extensions", c".feedscript"][..]),
     ] {
         if eq_n(name, prefix, len) {
@@ -783,9 +782,15 @@ mod tests {
             c"Category1.PostScript",
             c"Feed2.FeedScript",
         ] {
-            assert_eq!(validate_option_name(name, &mut || false), NameCheck::Obsolete);
+            assert_eq!(
+                validate_option_name(name, &mut || false),
+                NameCheck::Obsolete
+            );
         }
-        assert_eq!(validate_option_name(c"Category3.Unpack", &mut || false), NameCheck::Valid);
+        assert_eq!(
+            validate_option_name(c"Category3.Unpack", &mut || false),
+            NameCheck::Valid
+        );
         assert_eq!(options_lookup_scheduler_command(b"Script"), -1);
         assert_eq!(options_lookup_scheduler_command(b"process"), 6);
         assert_eq!(COMMAND_NAMES.len(), COMMAND_VALUES.len());
@@ -811,7 +816,6 @@ mod tests {
 
         assert_eq!(parse_int_value(c"42", c"10", 10), (true, 42));
         assert_eq!(parse_int_value(c"42abc", c"10", 10), (false, 10));
-
     }
 }
 
@@ -2601,10 +2605,8 @@ pub fn init_categories_host<H: OptionsHost>(
             b"Aliases",
         )));
 
-        let definition = nname.is_some()
-            || ndestdir.is_some()
-            || nunpack.is_some()
-            || naliases.is_some();
+        let definition =
+            nname.is_some() || ndestdir.is_some() || nunpack.is_some() || naliases.is_some();
         let has_name = nname.as_ref().is_some_and(|s| !s.to_bytes().is_empty());
         let state = options_check_category_or_feed_def(definition, has_name);
         if state == 0 {
@@ -4023,7 +4025,6 @@ impl NzbgetRsOptions {
     pub(crate) fn has_config_errors(&self) -> bool {
         self.config_errors.load(std::sync::atomic::Ordering::SeqCst)
     }
-
 }
 
 impl OptionsHost for NzbgetRsOptions {
@@ -4883,10 +4884,7 @@ mod options_full_suite_port_from_cpp {
 
         let long_seg = "a".repeat(2500);
         let cat_dest_opt = cstring(format!("Category1.DestDir=/{long_seg}").into_bytes());
-        let opts = [
-            c"Category1.Name=movies",
-            cat_dest_opt.as_c_str(),
-        ];
+        let opts = [c"Category1.Name=movies", cat_dest_opt.as_c_str()];
         let options = RustOptions::new_no_config(Some(&opts), None);
         assert_eq!(options.categories.len(), 1);
         assert_eq!(options.categories[0].dest_dir.to_bytes().len(), 2501);

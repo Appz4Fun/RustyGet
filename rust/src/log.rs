@@ -109,7 +109,6 @@ pub struct NzbgetRsLog {
 }
 
 impl NzbgetRsLog {
-
     pub fn with_debug_cb(debug_build: bool, debug_cb: NzbgetRsDebuggableFn) -> Self {
         let extra_debug = if debug_build {
             crate::fsops::file_exists(b"extradebug", &crate::fsops::posix_stat)

@@ -45,7 +45,9 @@ pub(crate) fn posix_stat(p: &[u8]) -> i32 {
 
 pub(crate) fn list_dir_entries(dir: &[u8]) -> Vec<Vec<u8>> {
     let mut entries = Vec::new();
-    let Ok(rd) = std::fs::read_dir(path(dir)) else { return entries };
+    let Ok(rd) = std::fs::read_dir(path(dir)) else {
+        return entries;
+    };
     for entry in rd.flatten() {
         entries.push(entry.file_name().as_bytes().to_vec());
     }
@@ -58,7 +60,9 @@ pub fn error_message(errnum: i32) -> Vec<u8> {
     // The C++ passes msg.Capacity(), 1023 including the terminator, rather
     // than sizeof(msg). Keep that cut, including on ERANGE or unknown errors.
     unsafe { strerror_r(errnum, buf.as_mut_ptr().cast(), BSTRING_MAX) };
-    CStr::from_bytes_until_nul(&buf).map(|c| c.to_bytes().to_vec()).unwrap_or_default()
+    CStr::from_bytes_until_nul(&buf)
+        .map(|c| c.to_bytes().to_vec())
+        .unwrap_or_default()
 }
 
 /// A native stat callback returns -errno on failure, 1 for a regular file,
@@ -97,7 +101,14 @@ pub fn force_directories(orig: &[u8], errmsg: &mut Vec<u8>, stat: &Stat<'_>) -> 
     match st {
         e if e < 0 && e != -ENOENT => {
             let e = -e;
-            *errmsg = cat(&[b"could not read information for directory ", &norm, b": errno ", e.to_string().as_bytes(), b", ", &error_message(e)]);
+            *errmsg = cat(&[
+                b"could not read information for directory ",
+                &norm,
+                b": errno ",
+                e.to_string().as_bytes(),
+                b", ",
+                &error_message(e),
+            ]);
             return false;
         }
         kind if kind >= 0 && kind != 2 => {
@@ -116,14 +127,24 @@ pub fn force_directories(orig: &[u8], errmsg: &mut Vec<u8>, stat: &Stat<'_>) -> 
         if let Err(e) = std::fs::DirBuilder::new().mode(0o777).create(path(&norm)) {
             let e = e.raw_os_error().unwrap_or(0);
             if e != EEXIST {
-                *errmsg = cat(&[b"could not create directory ", &norm, b": ", &error_message(e)]);
+                *errmsg = cat(&[
+                    b"could not create directory ",
+                    &norm,
+                    b": ",
+                    &error_message(e),
+                ]);
                 return false;
             }
         }
         match stat(&norm) {
             e if e < 0 => {
                 let e = -e;
-                *errmsg = cat(&[b"could not read information for directory ", &norm, b": ", &error_message(e)]);
+                *errmsg = cat(&[
+                    b"could not read information for directory ",
+                    &norm,
+                    b": ",
+                    &error_message(e),
+                ]);
                 return false;
             }
             kind if kind >= 0 && kind != 2 => {
@@ -162,10 +183,23 @@ pub fn make_unique_filename(dir: &CStr, basename: &CStr, stat: &Stat<'_>) -> Vec
                         }
                     }
                 }
-                result = cat(&[dir.to_bytes(), b"/", &without, b".duplicate", n.to_string().as_bytes(), ext]);
+                result = cat(&[
+                    dir.to_bytes(),
+                    b"/",
+                    &without,
+                    b".duplicate",
+                    n.to_string().as_bytes(),
+                    ext,
+                ]);
             }
             None => {
-                result = cat(&[dir.to_bytes(), b"/", base, b".duplicate", n.to_string().as_bytes()]);
+                result = cat(&[
+                    dir.to_bytes(),
+                    b"/",
+                    base,
+                    b".duplicate",
+                    n.to_string().as_bytes(),
+                ]);
             }
         }
     }
@@ -179,7 +213,11 @@ pub fn expand_home_path(filename: Option<&CStr>, home: Option<&[u8]>) -> Vec<u8>
     let b = f.to_bytes();
     if b.starts_with(b"~/") {
         let Some(home) = home else { return b.to_vec() };
-        let sep: &[u8] = if home.last() == Some(&b'/') { b"" } else { b"/" };
+        let sep: &[u8] = if home.last() == Some(&b'/') {
+            b""
+        } else {
+            b"/"
+        };
         return cat(&[home, sep, &b[2..]]);
     }
     b.to_vec()
@@ -578,9 +616,8 @@ pub fn copy_file(src_filename: &CStr, dst_filename: &CStr) -> bool {
         let mut off = 0usize;
         let mut write_failed = false;
         while off < cnt as usize {
-            let w = unsafe {
-                sys::write(out_fd, buffer[off..].as_ptr().cast(), (cnt as usize) - off)
-            };
+            let w =
+                unsafe { sys::write(out_fd, buffer[off..].as_ptr().cast(), (cnt as usize) - off) };
             if w < 0 {
                 let err = last_errno();
                 if err == libc::EINTR {
@@ -674,12 +711,7 @@ pub(crate) fn move_file_no_overwrite_exdev(
     let src_size = src_meta.size() as i64;
     let src_mode = (src_meta.mode() & 0o7777) as libc::mode_t;
 
-    let in_fd = unsafe {
-        libc::open(
-            src_filename.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC,
-        )
-    };
+    let in_fd = unsafe { libc::open(src_filename.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     if in_fd == -1 {
         let e = last_errno();
         let open_err = if e == 0 { sys::EIO } else { e };
@@ -1092,12 +1124,7 @@ pub fn make_unique_path(target_path: &[u8]) -> Vec<u8> {
 /// `FileSystem::CreateHardLink` (`daemon/util/FileSystem.h`):
 /// Ensures the parent directory of `to` exists via `force_directories`, then creates
 /// a hard link via `libc::link(from, to)`.
-pub fn create_hard_link(
-    from: &CStr,
-    to: &CStr,
-    stat: &Stat<'_>,
-    errmsg: &mut Vec<u8>,
-) -> bool {
+pub fn create_hard_link(from: &CStr, to: &CStr, stat: &Stat<'_>, errmsg: &mut Vec<u8>) -> bool {
     let (new_path, _) = crate::paths::split_path_and_filename(to.to_bytes());
     if !force_directories(new_path, errmsg, stat) {
         return false;
@@ -1243,7 +1270,11 @@ impl crate::fsdelete::Ops for PosixFsOps {
         };
         Ok(delete_file(&c))
     }
-    fn delete_link(&mut self, p: &[u8], _kind: crate::fsdelete::PathType) -> crate::fsdelete::R<bool> {
+    fn delete_link(
+        &mut self,
+        p: &[u8],
+        _kind: crate::fsdelete::PathType,
+    ) -> crate::fsdelete::R<bool> {
         self.delete_file(p)
     }
     fn list(&mut self, dir: &[u8]) -> crate::fsdelete::R<Vec<Vec<u8>>> {
@@ -1359,12 +1390,22 @@ impl Drop for PosixDirBrowser {
 mod tests {
     use super::*;
     use crate::fsdelete::{delete_directory, delete_directory_with_content};
-    use crate::paths::{escape_path_for_shell, extract_file_path_from_cmd, split_path_and_filename};
+    use crate::paths::{
+        escape_path_for_shell, extract_file_path_from_cmd, split_path_and_filename,
+    };
     use std::ffi::CString;
 
     fn stat(p: &[u8]) -> i32 {
         match std::fs::metadata(path(p)) {
-            Ok(m) => if m.is_file() { 1 } else if m.is_dir() { 2 } else { 0 },
+            Ok(m) => {
+                if m.is_file() {
+                    1
+                } else if m.is_dir() {
+                    2
+                } else {
+                    0
+                }
+            }
             Err(e) => -e.raw_os_error().unwrap(),
         }
     }
@@ -1427,12 +1468,19 @@ mod tests {
         let mut msg = Vec::new();
         let mut sub = dir.as_os_str().as_bytes().to_vec();
         sub.extend_from_slice(b"/x/y/z");
-        assert!(force_directories(&sub, &mut msg, &stat), "{}", String::from_utf8_lossy(&msg));
+        assert!(
+            force_directories(&sub, &mut msg, &stat),
+            "{}",
+            String::from_utf8_lossy(&msg)
+        );
         assert!(directory_exists(&sub, &stat));
         assert!(!force_directories(&f, &mut msg, &stat));
         assert!(msg.ends_with(b"is not a directory"));
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(expand_home_path(Some(c"~/x"), Some(b"/home/u")), b"/home/u/x");
+        assert_eq!(
+            expand_home_path(Some(c"~/x"), Some(b"/home/u")),
+            b"/home/u/x"
+        );
         assert_eq!(expand_home_path(Some(c"~/x"), Some(b"/")), b"/x");
     }
 
@@ -1638,7 +1686,11 @@ mod tests {
             };
             check_split(b"/path/to/filename.txt", b"/path/to", b"filename.txt");
             check_split(b"/path/to/", b"/path/to", b"");
-            check_split(b"C:\\path\\to\\filename.txt", b"C:\\path\\to", b"filename.txt");
+            check_split(
+                b"C:\\path\\to\\filename.txt",
+                b"C:\\path\\to",
+                b"filename.txt",
+            );
             check_split(b"C:\\path\\to\\", b"C:\\path\\to", b"");
             check_split(b"/path\\to/filename.txt", b"/path\\to", b"filename.txt");
             check_split(b"", b"", b"");
@@ -1661,10 +1713,9 @@ mod tests {
             let state = get_disk_state(&utf8_dir_c).expect("get_disk_state should succeed");
             assert!(state.0 > 0);
             assert!(state.1 > 0);
-            let sat_state = get_disk_state_with(&utf8_dir_c, &|_| {
-                Some((u64::MAX / 2, u64::MAX, 4096))
-            })
-            .unwrap();
+            let sat_state =
+                get_disk_state_with(&utf8_dir_c, &|_| Some((u64::MAX / 2, u64::MAX, 4096)))
+                    .unwrap();
             assert_eq!(sat_state, (i64::MAX, i64::MAX));
 
             let utf8_file = utf8_dir.join("\u{4f60}\u{597d}_l\u{00e4}.bin");

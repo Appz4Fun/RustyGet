@@ -4,15 +4,25 @@
 
 use super::rarbits::Bits;
 
-const DEC_L1: &[u32] = &[0x8000, 0xa000, 0xc000, 0xd000, 0xe000, 0xea00, 0xee00, 0xf000, 0xf200, 0xf200, 0xffff];
+const DEC_L1: &[u32] = &[
+    0x8000, 0xa000, 0xc000, 0xd000, 0xe000, 0xea00, 0xee00, 0xf000, 0xf200, 0xf200, 0xffff,
+];
 const POS_L1: [u32; 13] = [0, 0, 0, 2, 3, 5, 7, 11, 16, 20, 24, 32, 32];
-const DEC_L2: &[u32] = &[0xa000, 0xc000, 0xd000, 0xe000, 0xea00, 0xee00, 0xf000, 0xf200, 0xf240, 0xffff];
+const DEC_L2: &[u32] = &[
+    0xa000, 0xc000, 0xd000, 0xe000, 0xea00, 0xee00, 0xf000, 0xf200, 0xf240, 0xffff,
+];
 const POS_L2: [u32; 13] = [0, 0, 0, 0, 5, 7, 9, 13, 18, 22, 26, 34, 36];
-const DEC_HF0: &[u32] = &[0x8000, 0xc000, 0xe000, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xffff];
+const DEC_HF0: &[u32] = &[
+    0x8000, 0xc000, 0xe000, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xffff,
+];
 const POS_HF0: [u32; 13] = [0, 0, 0, 0, 0, 8, 16, 24, 33, 33, 33, 33, 33];
-const DEC_HF1: &[u32] = &[0x2000, 0xc000, 0xe000, 0xf000, 0xf200, 0xf200, 0xf7e0, 0xffff];
+const DEC_HF1: &[u32] = &[
+    0x2000, 0xc000, 0xe000, 0xf000, 0xf200, 0xf200, 0xf7e0, 0xffff,
+];
 const POS_HF1: [u32; 13] = [0, 0, 0, 0, 0, 0, 4, 44, 60, 76, 80, 80, 127];
-const DEC_HF2: &[u32] = &[0x1000, 0x2400, 0x8000, 0xc000, 0xfa00, 0xffff, 0xffff, 0xffff];
+const DEC_HF2: &[u32] = &[
+    0x1000, 0x2400, 0x8000, 0xc000, 0xfa00, 0xffff, 0xffff, 0xffff,
+];
 const POS_HF2: [u32; 13] = [0, 0, 0, 0, 0, 0, 2, 7, 53, 117, 233, 0, 0];
 const DEC_HF3: &[u32] = &[0x800, 0x2400, 0xee00, 0xfe80, 0xffff, 0xffff, 0xffff];
 const POS_HF3: [u32; 13] = [0, 0, 0, 0, 0, 0, 0, 2, 16, 218, 251, 0, 0];
@@ -29,9 +39,13 @@ const HF3: Code = (6, DEC_HF3, &POS_HF3);
 const HF4: Code = (8, DEC_HF4, &POS_HF4);
 
 const SHORT_LEN1: [u32; 16] = [1, 3, 4, 4, 5, 6, 7, 8, 8, 4, 4, 5, 6, 6, 4, 0];
-const SHORT_XOR1: [u32; 15] = [0, 0xa0, 0xd0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, 0xff, 0xc0, 0x80, 0x90, 0x98, 0x9c, 0xb0];
+const SHORT_XOR1: [u32; 15] = [
+    0, 0xa0, 0xd0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, 0xff, 0xc0, 0x80, 0x90, 0x98, 0x9c, 0xb0,
+];
 const SHORT_LEN2: [u32; 16] = [2, 3, 3, 3, 4, 4, 5, 6, 6, 4, 4, 5, 6, 6, 4, 0];
-const SHORT_XOR2: [u32; 15] = [0, 0x40, 0x60, 0xa0, 0xd0, 0xe0, 0xf0, 0xf8, 0xfc, 0xc0, 0x80, 0x90, 0x98, 0x9c, 0xb0];
+const SHORT_XOR2: [u32; 15] = [
+    0, 0x40, 0x60, 0xa0, 0xd0, 0xe0, 0xf0, 0xf8, 0xfc, 0xc0, 0x80, 0x90, 0x98, 0x9c, 0xb0,
+];
 
 struct State<'a> {
     bits: Bits<'a>,
@@ -319,11 +333,23 @@ impl State<'_> {
             self.l_count = 0;
         }
         let field = (field >> 8) & 0xff;
-        let (lens, xors) = if self.avr_ln1 < 37 { (SHORT_LEN1, SHORT_XOR1) } else { (SHORT_LEN2, SHORT_XOR2) };
+        let (lens, xors) = if self.avr_ln1 < 37 {
+            (SHORT_LEN1, SHORT_XOR1)
+        } else {
+            (SHORT_LEN2, SHORT_XOR2)
+        };
         let special = if self.avr_ln1 < 37 { 1 } else { 3 };
-        let len_of = |i: usize| if i == special { self.buf60 + 3 } else { lens[i] };
+        let len_of = |i: usize| {
+            if i == special {
+                self.buf60 + 3
+            } else {
+                lens[i]
+            }
+        };
         let mut length = 0usize;
-        while length < xors.len() && ((field ^ xors[length]) & !(0xff >> len_of(length)) & 0xff) != 0 {
+        while length < xors.len()
+            && ((field ^ xors[length]) & !(0xff >> len_of(length)) & 0xff) != 0
+        {
             length += 1;
         }
         if length == xors.len() {
@@ -454,7 +480,11 @@ impl State<'_> {
         if dist <= 256 {
             length += 8;
         }
-        self.max_dist3 = if old_avr3 > 0xb0 || (self.avr_plc >= 0x2a00 && old_avr2 < 0x40) { 0x7f00 } else { 0x2001 };
+        self.max_dist3 = if old_avr3 > 0xb0 || (self.avr_plc >= 0x2a00 && old_avr2 < 0x40) {
+            0x7f00
+        } else {
+            0x2001
+        };
         self.remember(dist, length);
         self.copy(dist, length);
     }

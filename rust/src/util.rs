@@ -21,7 +21,12 @@ fn decimal(value: f64, precision: c_int, suffix: &[u8]) -> Vec<u8> {
 
 /// A byte Vec's amortized doubling would exceed its allocation limit.
 /// Only a growth request needs intervention; existing spare capacity is used.
-pub(crate) fn byte_vec_needs_exact_growth(capacity: usize, len: usize, additional: usize, limit: usize) -> bool {
+pub(crate) fn byte_vec_needs_exact_growth(
+    capacity: usize,
+    len: usize,
+    additional: usize,
+    limit: usize,
+) -> bool {
     additional > capacity.saturating_sub(len) && capacity > limit / 2
 }
 
@@ -170,7 +175,9 @@ pub unsafe fn reduce_str(s: *mut c_char, from: *const c_char, to: *const c_char)
         if pattern.is_empty() {
             return;
         }
-        let Some(p) = text.windows(pattern.len()).position(|w| w == pattern) else { return };
+        let Some(p) = text.windows(pattern.len()).position(|w| w == pattern) else {
+            return;
+        };
         // Aliasing can change either operand's length. The C++ still uses
         // their initial lengths to locate the tail, even past the current
         // NUL. Bound access by the original allocation's known string span.
@@ -184,14 +191,18 @@ pub unsafe fn reduce_str(s: *mut c_char, from: *const c_char, to: *const c_char)
             *s.add(p + i) = byte;
             // A forward-overlapping copy that overwrote its own terminator
             // would run off the allocation in C++; stop before doing that.
-            if i == replacement_len && byte != 0 { return; }
+            if i == replacement_len && byte != 0 {
+                return;
+            }
         }
         let mut dest = p + replacement_len;
         let mut source = dest + shift;
         loop {
             let byte = *s.add(source);
             *s.add(dest) = byte;
-            if byte == 0 { break; }
+            if byte == 0 {
+                break;
+            }
             dest += 1;
             source += 1;
         }
@@ -213,10 +224,19 @@ pub fn tokens<'a>(s: &'a [u8], separators: &'a [u8]) -> impl Iterator<Item = &'a
 /// `list` (strcasecmp, folding through `case_lower`, unsigned bytes) or matches
 /// one with '*' or '?' as a WildMask (folding through `mask_lower`, as the C++
 /// char).
-pub fn match_file_ext(filename: &[u8], list: &[u8], separators: &[u8], case_lower: &Lower<'_>, mask_lower: &Lower<'_>) -> bool {
+pub fn match_file_ext(
+    filename: &[u8],
+    list: &[u8],
+    separators: &[u8],
+    case_lower: &Lower<'_>,
+    mask_lower: &Lower<'_>,
+) -> bool {
     tokens(list, separators).any(|ext| {
         (filename.len() >= ext.len()
-            && filename[filename.len() - ext.len()..].iter().zip(ext).all(|(&a, &b)| case_lower.eq(a, b)))
+            && filename[filename.len() - ext.len()..]
+                .iter()
+                .zip(ext)
+                .all(|(&a, &b)| case_lower.eq(a, b)))
             || (ext.iter().any(|&b| b == b'*' || b == b'?')
                 && crate::wildmask::wild_match(mask_lower, ext, filename, None))
     })
@@ -314,8 +334,17 @@ pub fn trim_line(s: &[u8]) -> (usize, usize) {
 }
 
 /// Util::Trim(std::string&): (start, end) without ASCII whitespace around.
-pub fn trim_string(s: &[u8], left: bool, right: bool, right_space: impl Fn(u8) -> bool) -> (usize, usize) {
-    let start = if left { s.iter().take_while(|&&c| c_is_space(c)).count() } else { 0 };
+pub fn trim_string(
+    s: &[u8],
+    left: bool,
+    right: bool,
+    right_space: impl Fn(u8) -> bool,
+) -> (usize, usize) {
+    let start = if left {
+        s.iter().take_while(|&&c| c_is_space(c)).count()
+    } else {
+        0
+    };
     let mut end = s.len();
     if right {
         while end > start && right_space(s[end - 1]) {
@@ -372,10 +401,19 @@ fn timegm_c(year: i32, mon: i32, mday: i32, hour: i32, min: i32, sec: i32) -> i6
     ];
     let leap = year % 400 == 0 || (year % 100 != 0 && year % 4 == 0);
     let y = year.wrapping_sub(1);
-    let days_from_0 = 365i32.wrapping_mul(y).wrapping_add(y / 400).wrapping_sub(y / 100).wrapping_add(y / 4);
-    let day_of_year = DAYS[leap as usize][mon as usize].wrapping_add(mday).wrapping_sub(1);
+    let days_from_0 = 365i32
+        .wrapping_mul(y)
+        .wrapping_add(y / 400)
+        .wrapping_sub(y / 100)
+        .wrapping_add(y / 4);
+    let day_of_year = DAYS[leap as usize][mon as usize]
+        .wrapping_add(mday)
+        .wrapping_sub(1);
     let days = days_from_0.wrapping_sub(719162).wrapping_add(day_of_year);
-    86400i64 * days as i64 + 3600i32.wrapping_mul(hour) as i64 + 60i32.wrapping_mul(min) as i64 + sec as i64
+    86400i64 * days as i64
+        + 3600i32.wrapping_mul(hour) as i64
+        + 60i32.wrapping_mul(min) as i64
+        + sec as i64
 }
 
 fn scan_signed_i32(bytes: &[u8], mut p: usize) -> Option<(i32, usize)> {
@@ -405,7 +443,11 @@ fn scan_signed_i32(bytes: &[u8], mut p: usize) -> Option<(i32, usize)> {
     }
     let val = if neg {
         let max_neg = (i64::MAX as u64) + 1;
-        let v = if acc >= max_neg { i64::MIN } else { -(acc as i64) };
+        let v = if acc >= max_neg {
+            i64::MIN
+        } else {
+            -(acc as i64)
+        };
         v as i32
     } else {
         (acc.min(i64::MAX as u64) as i64) as i32
@@ -478,17 +520,32 @@ pub fn parse_rfc822_date_time(s: &CStr) -> i64 {
         }
     } else {
         const ZONES: [(&[u8], i32); 8] = [
-            (b"EST", -5), (b"EDT", -4), (b"CST", -6), (b"CDT", -5),
-            (b"MST", -7), (b"MDT", -6), (b"PST", -8), (b"PDT", -7),
+            (b"EST", -5),
+            (b"EDT", -4),
+            (b"CST", -6),
+            (b"CDT", -5),
+            (b"MST", -7),
+            (b"MDT", -6),
+            (b"PST", -8),
+            (b"PDT", -7),
         ];
         if p + 3 <= bytes.len() {
-            if let Some((_, hours)) = ZONES.iter().find(|(name, _)| bytes[p..p + 3].eq_ignore_ascii_case(name)) {
+            if let Some((_, hours)) = ZONES
+                .iter()
+                .find(|(name, _)| bytes[p..p + 3].eq_ignore_ascii_case(name))
+            {
                 zone_offset = hours * 60;
             }
         }
     }
-    const MONTHS: [&[u8]; 12] = [b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec"];
-    let mon = MONTHS.iter().position(|m| month.eq_ignore_ascii_case(m)).unwrap_or(0) as i32;
+    const MONTHS: [&[u8]; 12] = [
+        b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov",
+        b"Dec",
+    ];
+    let mon = MONTHS
+        .iter()
+        .position(|m| month.eq_ignore_ascii_case(m))
+        .unwrap_or(0) as i32;
     timegm_c(year, mon, day, hours, minutes, seconds) - zone_offset.wrapping_mul(60) as i64
 }
 
@@ -952,10 +1009,7 @@ pub fn util_classify_executor_ext(filename: &[u8]) -> (i32, usize) {
 /// Finds the next non-empty trimmed token `(tok_start, tok_end, next_pos)` in `s`
 /// separated by any byte in `separators` and trimmed of bytes `<= b' '`,
 /// for `Tokenizer::Next`.
-pub fn tokenizer_find_next_token(
-    s: &[u8],
-    separators: &[u8],
-) -> Option<(usize, usize, usize)> {
+pub fn tokenizer_find_next_token(s: &[u8], separators: &[u8]) -> Option<(usize, usize, usize)> {
     let mut pos = 0;
     while pos < s.len() {
         while pos < s.len() && separators.contains(&s[pos]) {
@@ -1126,9 +1180,8 @@ pub fn disk_benchmark_run_bytes(
     let mut result = DiskBenchmarkResult::default();
 
     {
-        let file = std::fs::File::create(&file_path).map_err(|_| {
-            DiskBenchmarkError::Runtime("Failed to create test file".to_string())
-        })?;
+        let file = std::fs::File::create(&file_path)
+            .map_err(|_| DiskBenchmarkError::Runtime("Failed to create test file".to_string()))?;
         let mut writer = BufWriter::new(file);
         let start = Instant::now();
         while result.write_bytes < max_bytes && start.elapsed() < timeout {
@@ -1430,7 +1483,10 @@ impl PosixRegEx {
 
     #[cfg(unix)]
     pub fn match_cstr(&mut self, text: &CStr) -> bool {
-        let Some(ctx_ptr) = self.raw_ctx.as_ref().map(|b| b.as_ref() as *const libc::regex_t)
+        let Some(ctx_ptr) = self
+            .raw_ctx
+            .as_ref()
+            .map(|b| b.as_ref() as *const libc::regex_t)
         else {
             return false;
         };
@@ -1510,7 +1566,9 @@ mod tests {
     fn hash() {
         // the init value and every byte count in the tail change the hash
         // (rust/tests/util_differential.py compares it with the C++)
-        let h: Vec<u32> = (0..=24).map(|n| hash_bj96(&b"Four score and seven years ago"[..n], 0)).collect();
+        let h: Vec<u32> = (0..=24)
+            .map(|n| hash_bj96(&b"Four score and seven years ago"[..n], 0))
+            .collect();
         assert!(h.windows(2).all(|w| w[0] != w[1]));
         assert_ne!(hash_bj96(b"x", 0), hash_bj96(b"x", 1));
     }
@@ -1527,24 +1585,38 @@ mod tests {
                 assert_eq!(b, expected);
             }
             let mut b = *b"ababX\0";
-            reduce_str(b.as_mut_ptr().cast(), c"ab".as_ptr(), b.as_ptr().add(4).cast());
+            reduce_str(
+                b.as_mut_ptr().cast(),
+                c"ab".as_ptr(),
+                b.as_ptr().add(4).cast(),
+            );
             assert_eq!(&b, b"XbX\0\0\0");
             // Initially equal operands are not a no-op: the first copy
             // truncates the aliased replacement, so the next deletes 'a'.
             let mut b = *b"aa\0";
-            reduce_str(b.as_mut_ptr().cast(), c"a".as_ptr(), b.as_ptr().add(1).cast());
+            reduce_str(
+                b.as_mut_ptr().cast(),
+                c"a".as_ptr(),
+                b.as_ptr().add(1).cast(),
+            );
             assert_eq!(&b, b"\0\0\0");
         }
     }
 
     #[test]
     fn command_line_and_trims() {
-        assert_eq!(split_command_line(b"a 'b c' 'd''e' f"), [b"a" as &[u8], b"b c", b"d'e", b"f"]);
+        assert_eq!(
+            split_command_line(b"a 'b c' 'd''e' f"),
+            [b"a" as &[u8], b"b c", b"d'e", b"f"]
+        );
         assert_eq!(trim_line(b" \tx y\r\n"), (2, 5));
         assert!(ends_with(b"file.NZB", b".nzb", false));
         assert!(!ends_with(b"file.NZB", b".nzb", true));
         assert_eq!(format_buffer(b"\x00\xff"), b"00 ff ");
-        assert_eq!(parse_rfc822_date_time(c"Wed, 26 Jun 2013 01:02:54 -0600"), 1372230174);
+        assert_eq!(
+            parse_rfc822_date_time(c"Wed, 26 Jun 2013 01:02:54 -0600"),
+            1372230174
+        );
         assert_eq!(parse_rfc822_date_time(c"26 Jun 2013 01:02 GMT"), 1372208520);
         assert_eq!(parse_rfc822_date_time(c"junk"), 0);
     }
@@ -1559,7 +1631,10 @@ mod tests {
         assert!(m(b"a.NZB", b".zip, .nzb"));
         assert!(m(b"x.r01", b"*.r??"));
         assert!(!m(b"a.nzb", b".zip"));
-        assert_eq!(tokens(b" a ,, b\t;", b",;").collect::<Vec<_>>(), [b"a" as &[u8], b"b"]);
+        assert_eq!(
+            tokens(b" a ,, b\t;", b",;").collect::<Vec<_>>(),
+            [b"a" as &[u8], b"b"]
+        );
     }
 
     #[test]
@@ -1713,14 +1788,8 @@ mod tests {
 
         // 8. BenchmarkOddBlockSizeTest
         let dir = BenchTempDir::new("nzbget_bench_odd_");
-        let res = disk_benchmark_run(
-            &dir.str(),
-            1000,
-            10000,
-            Duration::from_secs(5),
-            plenty,
-        )
-        .unwrap();
+        let res =
+            disk_benchmark_run(&dir.str(), 1000, 10000, Duration::from_secs(5), plenty).unwrap();
         assert_eq!(res.write_bytes, 10000);
         assert_eq!(res.read_bytes, 10000);
 
@@ -1831,12 +1900,24 @@ mod tests {
 
         // 7. ParseRfc822DateTimeTest
         let t = 1372208574i64;
-        assert_eq!(parse_rfc822_date_time(c"Wed, 26 Jun 2013 01:02:54 +0000"), t);
+        assert_eq!(
+            parse_rfc822_date_time(c"Wed, 26 Jun 2013 01:02:54 +0000"),
+            t
+        );
         assert_eq!(parse_rfc822_date_time(c"Wed, 26 Jun 2013 01:02:54 GMT"), t);
         assert_eq!(parse_rfc822_date_time(c"26 Jun 2013 01:02:54 +0000"), t);
-        assert_eq!(parse_rfc822_date_time(c"Wed, 26 Jun 2013 03:02:54 +0200"), t);
-        assert_eq!(parse_rfc822_date_time(c"Tue, 25 Jun 2013 19:02:54 -0600"), t);
-        assert_eq!(parse_rfc822_date_time(c"Wed, 26 Jun 2013 00:32:54 -0030"), t);
+        assert_eq!(
+            parse_rfc822_date_time(c"Wed, 26 Jun 2013 03:02:54 +0200"),
+            t
+        );
+        assert_eq!(
+            parse_rfc822_date_time(c"Tue, 25 Jun 2013 19:02:54 -0600"),
+            t
+        );
+        assert_eq!(
+            parse_rfc822_date_time(c"Wed, 26 Jun 2013 00:32:54 -0030"),
+            t
+        );
         assert_eq!(parse_rfc822_date_time(c"Tue, 25 Jun 2013 21:02:54 EDT"), t);
         assert_eq!(parse_rfc822_date_time(c"26 Jun 2013 01:02 +0000"), t - 54);
         assert_eq!(parse_rfc822_date_time(c"not a date"), 0);
@@ -1846,9 +1927,18 @@ mod tests {
         let cd = |hdr: &[u8]| {
             crate::webutil::content_disposition_filename(hdr, &lower).unwrap_or_default()
         };
-        assert_eq!(cd(b"Content-Disposition: attachment; filename=\"fname.ext\""), b"fname.ext");
-        assert_eq!(cd(b"Content-Disposition: attachement;filename=fname.ext"), b"fname.ext");
-        assert_eq!(cd(b"Content-Disposition: attachement;filename=fname.ext;"), b"fname.ext");
+        assert_eq!(
+            cd(b"Content-Disposition: attachment; filename=\"fname.ext\""),
+            b"fname.ext"
+        );
+        assert_eq!(
+            cd(b"Content-Disposition: attachement;filename=fname.ext"),
+            b"fname.ext"
+        );
+        assert_eq!(
+            cd(b"Content-Disposition: attachement;filename=fname.ext;"),
+            b"fname.ext"
+        );
         assert_eq!(
             cd(b"Content-Disposition: attachment; filename=1313961.nzb; filename*=UTF-8''1313961.nzb"),
             b"1313961.nzb"
@@ -1885,22 +1975,51 @@ mod tests {
         );
 
         // 9. WildMaskTest & WildMaskCaptureBacktrackingTest
-        assert!(!crate::wildmask::wild_match(&lower, b"*.par2", b"Debian V7 6 64 bit OS.nzb", None));
-        assert!(!crate::wildmask::wild_match(&lower, b"*.par2", b"Debian V7 6 64 bit OS.par2.nzb", None));
-        assert!(crate::wildmask::wild_match(&lower, b"*.par2", b"Debian V7 6 64 bit OS.par2", None));
-        assert!(crate::wildmask::wild_match(&lower, b"*.par2", b".par2", None));
-        assert!(!crate::wildmask::wild_match(&lower, b"*.par2", b"par2", None));
+        assert!(!crate::wildmask::wild_match(
+            &lower,
+            b"*.par2",
+            b"Debian V7 6 64 bit OS.nzb",
+            None
+        ));
+        assert!(!crate::wildmask::wild_match(
+            &lower,
+            b"*.par2",
+            b"Debian V7 6 64 bit OS.par2.nzb",
+            None
+        ));
+        assert!(crate::wildmask::wild_match(
+            &lower,
+            b"*.par2",
+            b"Debian V7 6 64 bit OS.par2",
+            None
+        ));
+        assert!(crate::wildmask::wild_match(
+            &lower, b"*.par2", b".par2", None
+        ));
+        assert!(!crate::wildmask::wild_match(
+            &lower, b"*.par2", b"par2", None
+        ));
 
         let mut text = vec![b'a'; 200];
         text.push(b'b');
         let mut caps = Vec::new();
-        assert!(crate::wildmask::wild_match(&lower, b"*?ab", &text, Some(&mut caps)));
+        assert!(crate::wildmask::wild_match(
+            &lower,
+            b"*?ab",
+            &text,
+            Some(&mut caps)
+        ));
         assert_eq!(caps.len(), 200);
         assert_eq!(caps[0], (0, 0));
         assert_eq!(caps[199], (198, 2));
 
         let mut failed_caps = Vec::new();
-        assert!(!crate::wildmask::wild_match(&lower, b"?x", b"ay", Some(&mut failed_caps)));
+        assert!(!crate::wildmask::wild_match(
+            &lower,
+            b"?x",
+            b"ay",
+            Some(&mut failed_caps)
+        ));
         assert_eq!(failed_caps, vec![(0, 1)]);
 
         // 10. RegExTest (PosixRegEx)
@@ -1997,8 +2116,14 @@ mod tests {
         let i32_max = i32::MAX as i64;
         assert_eq!(util_safe_int_cast_i64_to_i64(i64::MAX, i32_min, i32_max), 0);
         assert_eq!(util_safe_int_cast_i64_to_i64(i64::MIN, i32_min, i32_max), 0);
-        assert_eq!(util_safe_int_cast_i64_to_i64(i32_max, i32_min, i32_max), i32_max);
-        assert_eq!(util_safe_int_cast_i64_to_i64(i32_min, i32_min, i32_max), i32_min);
+        assert_eq!(
+            util_safe_int_cast_i64_to_i64(i32_max, i32_min, i32_max),
+            i32_max
+        );
+        assert_eq!(
+            util_safe_int_cast_i64_to_i64(i32_min, i32_min, i32_max),
+            i32_min
+        );
         assert_eq!(util_safe_int_cast_u64_to_i64(u64::MAX, i32::MAX as u64), 0);
         assert_eq!(util_safe_int_cast_u64_to_i64(0, i32::MAX as u64), 0);
         assert_eq!(
@@ -2027,7 +2152,10 @@ mod tests {
             ("\r\n\t  hello  \r\n", "hello"),
             ("TV\r\nHD", "TV  HD"),
             ("Movies\t4K", "Movies 4K"),
-            ("\r\n  S\u{00e9}ries / Vid\u{00e9}o  \n", "S\u{00e9}ries / Vid\u{00e9}o"),
+            (
+                "\r\n  S\u{00e9}ries / Vid\u{00e9}o  \n",
+                "S\u{00e9}ries / Vid\u{00e9}o",
+            ),
             ("M\u{00e4}dchen\r\n4K", "M\u{00e4}dchen  4K"),
         ] {
             let mut s = raw.as_bytes().to_vec();
@@ -2061,7 +2189,10 @@ mod tests {
 
         // 16. FindExecutorProgram & FormatTime
         assert_eq!(
-            util_find_shell_overridden_executor(b".py", b".sh=/bin/zsh; .py=/opt/py3 , .js=/usr/bin/node"),
+            util_find_shell_overridden_executor(
+                b".py",
+                b".sh=/bin/zsh; .py=/opt/py3 , .js=/usr/bin/node"
+            ),
             Some(b"/opt/py3".to_vec())
         );
         assert_eq!(

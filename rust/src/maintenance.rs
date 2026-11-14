@@ -1129,7 +1129,6 @@ pub(crate) unsafe fn nzbget_rs_maintenance_exec(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

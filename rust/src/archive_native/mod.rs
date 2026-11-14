@@ -24,17 +24,23 @@ fn crc32(data: &[u8]) -> u32 {
 
 #[inline]
 fn le16(b: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(b.get(at..at.checked_add(2)?)?.try_into().ok()?))
+    Some(u16::from_le_bytes(
+        b.get(at..at.checked_add(2)?)?.try_into().ok()?,
+    ))
 }
 
 #[inline]
 fn le32(b: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(b.get(at..at.checked_add(4)?)?.try_into().ok()?))
+    Some(u32::from_le_bytes(
+        b.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
 }
 
 #[inline]
 fn le64(b: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(b.get(at..at.checked_add(8)?)?.try_into().ok()?))
+    Some(u64::from_le_bytes(
+        b.get(at..at.checked_add(8)?)?.try_into().ok()?,
+    ))
 }
 
 #[derive(Default)]
@@ -117,7 +123,9 @@ fn unicode4(name: &[u8], enc: &[u8]) -> Option<String> {
                 out.push(u16::from(b) | high);
             }
             2 => {
-                let (Some(a), Some(b)) = (bytes.next(), bytes.next()) else { break };
+                let (Some(a), Some(b)) = (bytes.next(), bytes.next()) else {
+                    break;
+                };
                 out.push(u16::from_le_bytes([a, b]));
             }
             _ => {
@@ -129,7 +137,9 @@ fn unicode4(name: &[u8], enc: &[u8]) -> Option<String> {
                     None
                 };
                 for _ in 0..usize::from(len & 0x7f) + 2 {
-                    let Some(c) = name.get(out.len()).copied() else { break };
+                    let Some(c) = name.get(out.len()).copied() else {
+                        break;
+                    };
                     out.push(match correction {
                         Some(k) => u16::from(c.wrapping_add(k)) | high,
                         None => u16::from(c),
@@ -159,12 +169,7 @@ fn name4(raw: &[u8], flags: u16) -> (String, Option<Vec<u8>>) {
 }
 
 fn sanitize_rar4_rel_path_bytes(raw_name: &[u8], windows_names: bool) -> Result<PathBuf, String> {
-    let unsafe_err = || {
-        format!(
-            "unsafe archive path: {}",
-            String::from_utf8_lossy(raw_name)
-        )
-    };
+    let unsafe_err = || format!("unsafe archive path: {}", String::from_utf8_lossy(raw_name));
     let mut out = PathBuf::new();
     let is_sep = |b: u8| b == b'/' || (windows_names && b == b'\\');
     for (i, part) in raw_name.split(|&b| is_sep(b)).enumerate() {
@@ -613,9 +618,7 @@ impl<'a> Rar4ChunkStreamReader<'a> {
         if self.raw_buf.len() % 16 != 0 {
             return Err("Unrar: Encrypted stream not aligned to AES block size".to_string());
         }
-        let next_iv: [u8; 16] = self.raw_buf[self.raw_buf.len() - 16..]
-            .try_into()
-            .unwrap();
+        let next_iv: [u8; 16] = self.raw_buf[self.raw_buf.len() - 16..].try_into().unwrap();
         let Some(dec) = zipfast::crypto::decrypt_cbc(&self.cur_key, &self.cur_iv, &self.raw_buf)
         else {
             return Err("Unrar: Failed to decrypt block".to_string());
@@ -724,7 +727,10 @@ fn encode_os_str_injective_utf8(part: &std::ffi::OsStr) -> std::ffi::OsString {
     part.to_os_string()
 }
 
-pub(crate) fn create_dir_all_no_follow(output_dir: &Path, sanitized_rel: &Path) -> Result<PathBuf, String> {
+pub(crate) fn create_dir_all_no_follow(
+    output_dir: &Path,
+    sanitized_rel: &Path,
+) -> Result<PathBuf, String> {
     if let Ok(meta) = std::fs::symlink_metadata(output_dir) {
         if meta.file_type().is_symlink() {
             return Err(format!(
@@ -950,13 +956,12 @@ where
             return Err("archive contains link".to_string());
         }
         let rel = match first.raw_name_bytes {
-            Some(ref raw_bytes) => {
-                sanitize_rar4_rel_path_bytes(raw_bytes, first.windows_names).map_err(|e| {
+            Some(ref raw_bytes) => sanitize_rar4_rel_path_bytes(raw_bytes, first.windows_names)
+                .map_err(|e| {
                     let msg = format!("Unrar: {e}");
                     log_cb(1, &msg);
                     msg
-                })?
-            }
+                })?,
             None => zipfast::path::sanitize(&first.name, first.windows_names).map_err(|e| {
                 let msg = format!("Unrar: {e}");
                 log_cb(1, &msg);
@@ -987,18 +992,12 @@ where
         let mut member_chunks = vec![first.clone()];
         while member_chunks.last().unwrap().continues {
             let Some(next_chunk) = pending.pop_front() else {
-                let msg = format!(
-                    "Unrar: {} : packed data CRC failed in volume",
-                    first.name
-                );
+                let msg = format!("Unrar: {} : packed data CRC failed in volume", first.name);
                 log_cb(1, &msg);
                 return Err(msg);
             };
             if !next_chunk.split_before {
-                let msg = format!(
-                    "Unrar: {} : packed data CRC failed in volume",
-                    first.name
-                );
+                let msg = format!("Unrar: {} : packed data CRC failed in volume", first.name);
                 log_cb(1, &msg);
                 return Err(msg);
             }
@@ -1011,8 +1010,8 @@ where
             return Err("Unpack cancelled".to_string());
         }
 
-        let mut dest =
-            create_dest_file_with_path_no_follow(output_dir, &rel, overwrite_mode).map_err(|e| {
+        let mut dest = create_dest_file_with_path_no_follow(output_dir, &rel, overwrite_mode)
+            .map_err(|e| {
                 let msg = format!("Unrar: {e}");
                 log_cb(1, &msg);
                 msg
@@ -1642,8 +1641,8 @@ impl Sha256State {
     pub(crate) fn new() -> Self {
         Self {
             h: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
             ],
             buf: [0u8; 64],
             buf_len: 0,
@@ -1943,10 +1942,17 @@ fn sz_decode_bcj2(
         return Err("7-Zip: Folder exceeds maximum unpacked size".to_string());
     }
     let mut out = Vec::with_capacity(target.min(16 * 1024 * 1024));
-    sz_decode_bcj2_streaming(main_buf, call_buf, jump_buf, range_buf, unpack_size, &mut |s| {
-        out.extend_from_slice(s);
-        Ok(())
-    })?;
+    sz_decode_bcj2_streaming(
+        main_buf,
+        call_buf,
+        jump_buf,
+        range_buf,
+        unpack_size,
+        &mut |s| {
+            out.extend_from_slice(s);
+            Ok(())
+        },
+    )?;
     Ok(out)
 }
 
@@ -2225,11 +2231,7 @@ fn sz_decode_folder_streaming(
     let mut done = vec![false; folder.coders.len()];
 
     let can_resolve_input = |in_idx: usize, out_bufs: &[Option<Vec<u8>>]| -> bool {
-        if let Some(&(_, out_idx)) = folder
-            .bind_pairs
-            .iter()
-            .find(|&&(i, _)| i == in_idx as u64)
-        {
+        if let Some(&(_, out_idx)) = folder.bind_pairs.iter().find(|&&(i, _)| i == in_idx as u64) {
             return out_bufs.get(out_idx as usize).is_some_and(Option::is_some);
         }
         if let Some(p_idx) = folder
@@ -2246,11 +2248,7 @@ fn sz_decode_folder_streaming(
     };
 
     let take_input = |in_idx: usize, out_bufs: &mut [Option<Vec<u8>>]| -> Option<Vec<u8>> {
-        if let Some(&(_, out_idx)) = folder
-            .bind_pairs
-            .iter()
-            .find(|&&(i, _)| i == in_idx as u64)
-        {
+        if let Some(&(_, out_idx)) = folder.bind_pairs.iter().find(|&&(i, _)| i == in_idx as u64) {
             return out_bufs.get_mut(out_idx as usize)?.take();
         }
         if let Some(p_idx) = folder
@@ -2388,7 +2386,11 @@ fn sz_decode_folder(
 
 fn sz_read_names(data: &[u8], count: u64) -> Option<Vec<String>> {
     let mut out = Vec::with_capacity(usize::try_from(count).ok()?);
-    let mut units = data.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c));
+    let mut units = data
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c));
     for _ in 0..count {
         let mut name = Vec::new();
         loop {
@@ -2477,7 +2479,8 @@ impl SzVolumeSet {
                 .find(|(_, p)| offset >= p.start_offset && offset < p.start_offset + p.len)
                 .map(|(i, p)| (i, p.start_offset, p.len))
                 .ok_or_else(|| "7-Zip: Unexpected EOF".to_string())?;
-            let need_open = !matches!(&self.cached_file, Some((cached_idx, _)) if *cached_idx == idx);
+            let need_open =
+                !matches!(&self.cached_file, Some((cached_idx, _)) if *cached_idx == idx);
             if need_open {
                 let f = std::fs::File::open(&self.parts[idx].path).map_err(|e| e.to_string())?;
                 self.cached_file = Some((idx, f));
@@ -2644,7 +2647,10 @@ fn sz_try_stream_linear_folder(
 
     if folder.coders.is_empty()
         || folder.packed_streams.len() > 1
-        || folder.coders.iter().any(|c| c.num_in != 1 || c.num_out != 1)
+        || folder
+            .coders
+            .iter()
+            .any(|c| c.num_in != 1 || c.num_out != 1)
     {
         return Ok(false);
     }
@@ -2763,7 +2769,9 @@ fn sz_try_stream_linear_folder(
             std::mem::swap(&mut stage_a, &mut stage_b);
         }
         let rem = final_target.saturating_sub(total_final);
-        let take_n = stage_a.len().min(usize::try_from(rem).unwrap_or(usize::MAX));
+        let take_n = stage_a
+            .len()
+            .min(usize::try_from(rem).unwrap_or(usize::MAX));
         if take_n > 0 {
             if let Some(h) = folder_crc_hasher.as_mut() {
                 h.update(&stage_a[..take_n]);
@@ -2916,7 +2924,9 @@ fn sz_try_stream_linear_folder(
             std::mem::swap(&mut stage_a, &mut stage_b);
         }
         let rem = final_target.saturating_sub(total_final);
-        let take_n = stage_a.len().min(usize::try_from(rem).unwrap_or(usize::MAX));
+        let take_n = stage_a
+            .len()
+            .min(usize::try_from(rem).unwrap_or(usize::MAX));
         if take_n > 0 {
             if let Some(h) = folder_crc_hasher.as_mut() {
                 h.update(&stage_a[..take_n]);
@@ -3058,13 +3068,11 @@ where
                     e
                 })?;
                 let slice_refs: Vec<&[u8]> = packed_vecs.iter().map(Vec::as_slice).collect();
-                hdr_bytes =
-                    sz_decode_folder(&enc_streams.folders[0], &slice_refs, password).map_err(
-                        |e| {
-                            log_cb(1, &e);
-                            e
-                        },
-                    )?;
+                hdr_bytes = sz_decode_folder(&enc_streams.folders[0], &slice_refs, password)
+                    .map_err(|e| {
+                        log_cb(1, &e);
+                        e
+                    })?;
             }
             _ => {
                 let msg = "7-Zip: Unexpected header marker".to_string();
@@ -3418,63 +3426,62 @@ where
         let mut sub_idx = 0usize;
         let mut active: Option<ActiveSubstream> = None;
 
-        let open_or_advance_substreams =
-            |sub_idx: &mut usize,
-             active: &mut Option<ActiveSubstream>,
-             summary: &mut zipfast::extract::Summary,
-             log_cb: &mut F|
-             -> Result<(), String> {
-                while active.is_none() && *sub_idx < sub_targets.len() {
-                    let idx = *sub_idx;
-                    let t = &sub_targets[idx];
-                    log_cb(4, &format!("7-Zip: Extracting  {}", t.name));
-                    let opened =
-                        create_dest_file_with_path_no_follow(output_dir, &t.rel, overwrite_mode)
-                            .map_err(|e| format!("7-Zip: {e}"))?;
-                    if t.size == 0 {
-                        if let Some(crc) = t.expected_crc {
-                            if crc != 0 {
-                                if let Some((f, p, c)) = opened {
-                                    drop(f);
-                                    if c {
-                                        let _ = std::fs::remove_file(p);
-                                    }
+        let open_or_advance_substreams = |sub_idx: &mut usize,
+                                          active: &mut Option<ActiveSubstream>,
+                                          summary: &mut zipfast::extract::Summary,
+                                          log_cb: &mut F|
+         -> Result<(), String> {
+            while active.is_none() && *sub_idx < sub_targets.len() {
+                let idx = *sub_idx;
+                let t = &sub_targets[idx];
+                log_cb(4, &format!("7-Zip: Extracting  {}", t.name));
+                let opened =
+                    create_dest_file_with_path_no_follow(output_dir, &t.rel, overwrite_mode)
+                        .map_err(|e| format!("7-Zip: {e}"))?;
+                if t.size == 0 {
+                    if let Some(crc) = t.expected_crc {
+                        if crc != 0 {
+                            if let Some((f, p, c)) = opened {
+                                drop(f);
+                                if c {
+                                    let _ = std::fs::remove_file(p);
                                 }
-                                return Err(format!("7-Zip: {} - CRC failed", t.name));
                             }
+                            return Err(format!("7-Zip: {} - CRC failed", t.name));
                         }
-                        match opened {
-                            Some((f, _, _)) => {
-                                if t.unix_mode != 0 {
-                                    apply_unix_executable_mode(&f, t.unix_mode);
-                                }
-                                if let Some((secs, nanos)) = t.mtime {
-                                    set_file_mtime(&f, Some(secs), nanos);
-                                }
-                                summary.files += 1;
-                            }
-                            None => {
-                                summary.skipped += 1;
-                            }
-                        }
-                        *sub_idx += 1;
-                    } else {
-                        let (file, target_path, created_new) = match opened {
-                            Some((f, p, c)) => (Some(f), Some(p), c),
-                            None => (None, None, false),
-                        };
-                        *active = Some(ActiveSubstream {
-                            target_idx: idx,
-                            rem: t.size,
-                            hasher: crc32fast::Hasher::new(),
-                            file,
-                            target_path,
-                            created_new,
-                        });
                     }
+                    match opened {
+                        Some((f, _, _)) => {
+                            if t.unix_mode != 0 {
+                                apply_unix_executable_mode(&f, t.unix_mode);
+                            }
+                            if let Some((secs, nanos)) = t.mtime {
+                                set_file_mtime(&f, Some(secs), nanos);
+                            }
+                            summary.files += 1;
+                        }
+                        None => {
+                            summary.skipped += 1;
+                        }
+                    }
+                    *sub_idx += 1;
+                } else {
+                    let (file, target_path, created_new) = match opened {
+                        Some((f, p, c)) => (Some(f), Some(p), c),
+                        None => (None, None, false),
+                    };
+                    *active = Some(ActiveSubstream {
+                        target_idx: idx,
+                        rem: t.size,
+                        hasher: crc32fast::Hasher::new(),
+                        file,
+                        target_path,
+                        created_new,
+                    });
                 }
-                Ok(())
-            };
+            }
+            Ok(())
+        };
 
         let folder_res = (|| -> Result<(), String> {
             open_or_advance_substreams(&mut sub_idx, &mut active, &mut summary, log_cb)?;
@@ -3790,7 +3797,7 @@ where
     F: FnMut(i32, &str),
 {
     use zipfast::rar5::reader::{Block, Volume};
-    use zipfast::rar5::unpack::{Unpacker, window_for};
+    use zipfast::rar5::unpack::{window_for, Unpacker};
 
     let pw_opt = (!password.is_empty()).then_some(password);
     let mut summary = zipfast::extract::Summary::default();
@@ -3800,21 +3807,19 @@ where
     let mut path = archive_path.to_path_buf();
     let mut volumes = 0u64;
 
-    let fail_abort_or = |pending: &mut Option<Rar5PendingFile>,
-                         log_cb: &mut F,
-                         msg: String|
-     -> Rar5ExtractError {
-        if let Some(mut p) = pending.take() {
-            p.discard();
-        }
-        if msg != "Aborted" {
-            if msg.contains("wrong password") || msg.contains("encrypted") {
-                log_cb(1, "Unrar: The specified password is incorrect.");
+    let fail_abort_or =
+        |pending: &mut Option<Rar5PendingFile>, log_cb: &mut F, msg: String| -> Rar5ExtractError {
+            if let Some(mut p) = pending.take() {
+                p.discard();
             }
-            log_cb(1, &msg);
-        }
-        Rar5ExtractError::Failed(msg)
-    };
+            if msg != "Aborted" {
+                if msg.contains("wrong password") || msg.contains("encrypted") {
+                    log_cb(1, "Unrar: The specified password is incorrect.");
+                }
+                log_cb(1, &msg);
+            }
+            Rar5ExtractError::Failed(msg)
+        };
 
     loop {
         if is_cancelled() {
@@ -3952,15 +3957,14 @@ where
                                 continue;
                             }
                         } else {
-                            let rel = zipfast::path::sanitize(&h.name, !h.is_unix()).map_err(
-                                |e| {
+                            let rel =
+                                zipfast::path::sanitize(&h.name, !h.is_unix()).map_err(|e| {
                                     fail_abort_or(
                                         &mut pending,
                                         log_cb,
                                         format!("Unrar: {}: {e}", h.name),
                                     )
-                                },
-                            )?;
+                                })?;
                             if h.name.contains(['\u{FFFE}', '\u{FFFD}']) {
                                 return Err(fail_abort_or(
                                     &mut pending,
@@ -3998,14 +4002,12 @@ where
                             let cipher = if h.encrypted {
                                 let pw = pw_opt.unwrap_or_default();
                                 let cp = h.crypt.as_ref().unwrap();
-                                let Some((key, hk)) =
-                                    zipfast::crypto::derive_rar5_key_and_hash_key(
-                                        pw,
-                                        cp.kdf_count,
-                                        &cp.salt,
-                                        cp.check,
-                                    )
-                                else {
+                                let Some((key, hk)) = zipfast::crypto::derive_rar5_key_and_hash_key(
+                                    pw,
+                                    cp.kdf_count,
+                                    &cp.salt,
+                                    cp.check,
+                                ) else {
                                     return Err(fail_abort_or(
                                         &mut pending,
                                         log_cb,
@@ -4083,9 +4085,7 @@ where
                                     u.next_file(size);
                                     Ok(())
                                 }
-                                _ => Err(
-                                    "needs earlier files in solid archive".to_string(),
-                                ),
+                                _ => Err("needs earlier files in solid archive".to_string()),
                             }
                         } else {
                             match window_for(h.dictionary, size, solid_archive) {
@@ -4124,61 +4124,57 @@ where
                         .map(|_| zipfast::blake2sp::Blake2sp::new());
 
                     vol.read_fast(false);
-                    let read_res = vol.read_data_shared(h.data_at, h.packed_size, |piece, range| {
-                        if is_cancelled() {
-                            return Err(zipfast::Error::Io(std::io::Error::new(
-                                std::io::ErrorKind::Interrupted,
-                                "Aborted",
-                            )));
-                        }
-                        let chunk = &piece.bytes()[range.clone()];
-                        if split_after {
-                            part_crc.update(chunk);
-                            if let Some(b) = part_blake.as_mut() {
-                                b.update(chunk);
+                    let read_res =
+                        vol.read_data_shared(h.data_at, h.packed_size, |piece, range| {
+                            if is_cancelled() {
+                                return Err(zipfast::Error::Io(std::io::Error::new(
+                                    std::io::ErrorKind::Interrupted,
+                                    "Aborted",
+                                )));
                             }
-                        }
-                        if cur_p.cipher.is_some() {
-                            let to_feed = {
-                                let Rar5PendingCipher { aes, iv, rem, .. } =
-                                    cur_p.cipher.as_mut().unwrap();
-                                if !rem.is_empty() || !chunk.len().is_multiple_of(16) {
-                                    rem.extend_from_slice(chunk);
-                                    let aligned = rem.len() & !15;
-                                    if aligned == 0 {
-                                        return Ok(());
-                                    }
-                                    let mut dec_buf = rem.drain(..aligned).collect::<Vec<u8>>();
-                                    aes.decrypt_cbc_in_place(iv, &mut dec_buf);
-                                    dec_buf
-                                } else {
-                                    let mut dec_buf = chunk.to_vec();
-                                    aes.decrypt_cbc_in_place(iv, &mut dec_buf);
-                                    dec_buf
+                            let chunk = &piece.bytes()[range.clone()];
+                            if split_after {
+                                part_crc.update(chunk);
+                                if let Some(b) = part_blake.as_mut() {
+                                    b.update(chunk);
                                 }
-                            };
-                            match stream.as_mut().filter(|_| cur_p.compressed) {
-                                Some(u) => u.feed(
-                                    &to_feed,
-                                    &mut |bytes: &[u8]| {
-                                        cur_p.write_decoded_chunk(bytes, is_cancelled)
-                                    },
-                                ),
-                                None => cur_p.write_decoded_chunk(&to_feed, is_cancelled),
                             }
-                        } else {
-                            match stream.as_mut().filter(|_| cur_p.compressed) {
-                                Some(u) => u.feed_shared(
-                                    piece,
-                                    range,
-                                    &mut |bytes: &[u8]| {
+                            if cur_p.cipher.is_some() {
+                                let to_feed = {
+                                    let Rar5PendingCipher { aes, iv, rem, .. } =
+                                        cur_p.cipher.as_mut().unwrap();
+                                    if !rem.is_empty() || !chunk.len().is_multiple_of(16) {
+                                        rem.extend_from_slice(chunk);
+                                        let aligned = rem.len() & !15;
+                                        if aligned == 0 {
+                                            return Ok(());
+                                        }
+                                        let mut dec_buf = rem.drain(..aligned).collect::<Vec<u8>>();
+                                        aes.decrypt_cbc_in_place(iv, &mut dec_buf);
+                                        dec_buf
+                                    } else {
+                                        let mut dec_buf = chunk.to_vec();
+                                        aes.decrypt_cbc_in_place(iv, &mut dec_buf);
+                                        dec_buf
+                                    }
+                                };
+                                match stream.as_mut().filter(|_| cur_p.compressed) {
+                                    Some(u) => u.feed(&to_feed, &mut |bytes: &[u8]| {
                                         cur_p.write_decoded_chunk(bytes, is_cancelled)
-                                    },
-                                ),
-                                None => cur_p.write_decoded_chunk(chunk, is_cancelled),
+                                    }),
+                                    None => cur_p.write_decoded_chunk(&to_feed, is_cancelled),
+                                }
+                            } else {
+                                match stream.as_mut().filter(|_| cur_p.compressed) {
+                                    Some(u) => {
+                                        u.feed_shared(piece, range, &mut |bytes: &[u8]| {
+                                            cur_p.write_decoded_chunk(bytes, is_cancelled)
+                                        })
+                                    }
+                                    None => cur_p.write_decoded_chunk(chunk, is_cancelled),
+                                }
                             }
-                        }
-                    });
+                        });
 
                     let decoded_res = match read_res {
                         Ok(()) if !split_after => {
@@ -4391,7 +4387,10 @@ where
         }
         let eff_method = e.effective_method();
         if !matches!(eff_method, 0 | 8 | 12 | 14 | 93 | 95) {
-            let msg = format!("{}: compression method {eff_method} is not supported", e.name);
+            let msg = format!(
+                "{}: compression method {eff_method} is not supported",
+                e.name
+            );
             log_cb(1, &msg);
             return Err(msg);
         }
@@ -5081,7 +5080,10 @@ fn extract_single_zip_entry(
     let name_len = u64::from(le16(&local_head, 26).unwrap_or(0));
     let extra_len = u64::from(le16(&local_head, 28).unwrap_or(0));
     let data_at = e.local_at + 30 + name_len + extra_len;
-    if data_at.checked_add(e.packed).is_none_or(|end| end > file_len) {
+    if data_at
+        .checked_add(e.packed)
+        .is_none_or(|end| end > file_len)
+    {
         return Err(format!("{}: truncated entry data", e.name));
     }
     file.seek(SeekFrom::Start(data_at))
@@ -5135,8 +5137,7 @@ fn extract_single_zip_entry(
                 return Err(format!("{}: truncated ZipCrypto header", e.name));
             }
             let mut hdr12 = [0u8; 12];
-            file.read_exact(&mut hdr12)
-                .map_err(|err| err.to_string())?;
+            file.read_exact(&mut hdr12).map_err(|err| err.to_string())?;
             let mut keys = [0x1234_5678u32, 0x2345_6789, 0x3456_7890];
             for &b in password.as_bytes() {
                 zipcrypto_update(&mut keys, b);
@@ -5549,9 +5550,7 @@ where
                 if is_cancelled() {
                     return Err("Aborted".to_string());
                 }
-                dest_file
-                    .write_all(&first)
-                    .map_err(|e| e.to_string())?;
+                dest_file.write_all(&first).map_err(|e| e.to_string())?;
                 total += first.len() as u64;
             }
             loop {
@@ -5758,7 +5757,11 @@ where
 
         let is_dir = matches!(kind, b'5' | b'D')
             || (matches!(kind, b'0' | 0 | b'7') && name_bytes.ends_with(b"/"));
-        if is_dir && name_bytes.split(|&b| b == b'/' || b == b'\\').all(|p| p.is_empty() || p == b".") {
+        if is_dir
+            && name_bytes
+                .split(|&b| b == b'/' || b == b'\\')
+                .all(|p| p.is_empty() || p == b".")
+        {
             continue;
         }
         let rel = sanitize_tar_rel_path_bytes(&name_bytes)?;
@@ -6122,15 +6125,9 @@ mod tests {
         let out_dir = dir.path().join("out_xz95");
         std::fs::write(&zip_path, &zip_bytes).unwrap();
 
-        let summary = extract_zip_cancellable(
-            &zip_path,
-            &out_dir,
-            "",
-            0,
-            &mut |_, _| {},
-            &mut || false,
-        )
-        .unwrap();
+        let summary =
+            extract_zip_cancellable(&zip_path, &out_dir, "", 0, &mut |_, _| {}, &mut || false)
+                .unwrap();
         assert_eq!(summary.files, 1);
         assert_eq!(std::fs::read(out_dir.join("hello.xz.txt")).unwrap(), plain);
 
@@ -6147,7 +6144,10 @@ mod tests {
         bad_xz.extend_from_slice(&bad_blk_hdr);
         let mut bad_cursor = std::io::Cursor::new(&bad_xz);
         let err = decode_xz_stream_from_reader(&mut bad_cursor, &mut |_| Ok(())).unwrap_err();
-        assert!(err.contains("truncated xz filter properties"), "unexpected: {err}");
+        assert!(
+            err.contains("truncated xz filter properties"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
@@ -6201,15 +6201,9 @@ mod tests {
         std::fs::write(&stale_vol2, b"corrupt leftover volume from old download").unwrap();
 
         let out_dir = dir.path().join("out");
-        let summary = extract_rar4_cancellable(
-            &vol1,
-            &out_dir,
-            "",
-            1,
-            &mut |_, _| {},
-            &mut || false,
-        )
-        .unwrap();
+        let summary =
+            extract_rar4_cancellable(&vol1, &out_dir, "", 1, &mut |_, _| {}, &mut || false)
+                .unwrap();
         assert_eq!(summary.files, 1);
         assert_eq!(std::fs::read(out_dir.join("hello.txt")).unwrap(), payload);
     }
@@ -6372,21 +6366,25 @@ mod tests {
         let gnu_path = dir.path().join("gnu_sparse.tar");
         let gnu_out = dir.path().join("gnu_out");
         std::fs::write(&gnu_path, &gnu_tar).unwrap();
-        let err = extract_tar_or_stream_cancellable(
-            &gnu_path,
-            &gnu_out,
-            0,
-            &mut |_, _| {},
-            &mut || false,
-        )
-        .unwrap_err();
-        assert!(err.contains("sparse files are not supported"), "unexpected: {err}");
+        let err =
+            extract_tar_or_stream_cancellable(&gnu_path, &gnu_out, 0, &mut |_, _| {}, &mut || {
+                false
+            })
+            .unwrap_err();
+        assert!(
+            err.contains("sparse files are not supported"),
+            "unexpected: {err}"
+        );
         assert!(!gnu_out.join("sparse.bin").exists());
 
         // 2. PAX sparse member (typeflag == b'x' with GNU.sparse.major=1 followed by regular b'0')
         let pax_rec = b"22 GNU.sparse.major=1\n";
         let mut pax_tar = Vec::new();
-        pax_tar.extend_from_slice(&make_tar_header("PaxHeader/sparse2.bin", pax_rec.len() as u64, b'x'));
+        pax_tar.extend_from_slice(&make_tar_header(
+            "PaxHeader/sparse2.bin",
+            pax_rec.len() as u64,
+            b'x',
+        ));
         let mut pax_blk = [0u8; 512];
         pax_blk[..pax_rec.len()].copy_from_slice(pax_rec);
         pax_tar.extend_from_slice(&pax_blk);
@@ -6397,15 +6395,15 @@ mod tests {
         let pax_path = dir.path().join("pax_sparse.tar");
         let pax_out = dir.path().join("pax_out");
         std::fs::write(&pax_path, &pax_tar).unwrap();
-        let err2 = extract_tar_or_stream_cancellable(
-            &pax_path,
-            &pax_out,
-            0,
-            &mut |_, _| {},
-            &mut || false,
-        )
-        .unwrap_err();
-        assert!(err2.contains("sparse files are not supported"), "unexpected: {err2}");
+        let err2 =
+            extract_tar_or_stream_cancellable(&pax_path, &pax_out, 0, &mut |_, _| {}, &mut || {
+                false
+            })
+            .unwrap_err();
+        assert!(
+            err2.contains("sparse files are not supported"),
+            "unexpected: {err2}"
+        );
         assert!(!pax_out.join("sparse2.bin").exists());
     }
 
@@ -6448,14 +6446,11 @@ mod tests {
         let bad_path = dir.path().join("bad.tar.gz");
         let bad_out = dir.path().join("bad_out");
         std::fs::write(&bad_path, &bad_gz).unwrap();
-        let err = extract_tar_or_stream_cancellable(
-            &bad_path,
-            &bad_out,
-            0,
-            &mut |_, _| {},
-            &mut || false,
-        )
-        .unwrap_err();
+        let err =
+            extract_tar_or_stream_cancellable(&bad_path, &bad_out, 0, &mut |_, _| {}, &mut || {
+                false
+            })
+            .unwrap_err();
         assert!(
             err.contains("Corrupt compressed tar trailer"),
             "unexpected error: {err}"
@@ -6487,12 +6482,7 @@ mod tests {
                 }
             }
         }
-        fn make_rar5_block(
-            block_type: u64,
-            block_flags: u64,
-            body: &[u8],
-            data: &[u8],
-        ) -> Vec<u8> {
+        fn make_rar5_block(block_type: u64, block_flags: u64, body: &[u8], data: &[u8]) -> Vec<u8> {
             let mut inner = Vec::new();
             write_vint(&mut inner, block_type);
             let flags = if !data.is_empty() {
@@ -6549,14 +6539,8 @@ mod tests {
         let out_dir = dir.path().join("out");
         std::fs::write(&rar_path, &archive).unwrap();
 
-        let res = extract_rar5_cancellable(
-            &rar_path,
-            &out_dir,
-            "",
-            1,
-            &mut |_, _| {},
-            &mut || false,
-        );
+        let res =
+            extract_rar5_cancellable(&rar_path, &out_dir, "", 1, &mut |_, _| {}, &mut || false);
         match res {
             Err(Rar5ExtractError::Failed(msg)) => {
                 assert!(
@@ -6588,7 +6572,7 @@ mod tests {
         let mut hdr = Vec::new();
         hdr.push(0x01); // Header
         hdr.push(0x04); // MainStreamsInfo
-        // PackInfo (0x06)
+                        // PackInfo (0x06)
         hdr.push(0x06);
         hdr.push(0x00); // pack_pos = 0
         hdr.push(0x01); // num_pack_streams = 1
@@ -6662,15 +6646,9 @@ mod tests {
         let out_dir = dir.path().join("out");
         std::fs::write(&sz_path, &archive).unwrap();
 
-        let summary = extract_7z_cancellable(
-            &sz_path,
-            &out_dir,
-            "",
-            1,
-            &mut |_, _| {},
-            &mut || false,
-        )
-        .unwrap();
+        let summary =
+            extract_7z_cancellable(&sz_path, &out_dir, "", 1, &mut |_, _| {}, &mut || false)
+                .unwrap();
         assert_eq!(summary.files, 2);
         assert_eq!(std::fs::read(out_dir.join("alpha.txt")).unwrap(), file1);
         assert_eq!(std::fs::read(out_dir.join("beta.txt")).unwrap(), file2);
@@ -6691,7 +6669,7 @@ mod tests {
         raw.extend_from_slice(&[0x03, 0x03, 0x01, 0x1b]); // coder 2: BCJ2
         raw.push(0x04); // 4 in
         raw.push(0x01); // 1 out
-        // pairs = out_total - 1 = 2; bind both in=2 and in=3 to out=0 (duplicate out_idx!)
+                        // pairs = out_total - 1 = 2; bind both in=2 and in=3 to out=0 (duplicate out_idx!)
         raw.extend_from_slice(&[2, 0, 3, 0]);
         raw.extend_from_slice(&[0, 1, 4, 5]);
         let mut r = SzReader { b: &raw, p: 0 };
@@ -6721,7 +6699,8 @@ mod tests {
             out_streams: 2,
         };
         let slices: [&[u8]; 3] = [b"abcd", b"efgh", b"ijkl"];
-        let err = sz_decode_folder_streaming(&bad_folder, &slices, "", &mut |_| Ok(())).unwrap_err();
+        let err =
+            sz_decode_folder_streaming(&bad_folder, &slices, "", &mut |_| Ok(())).unwrap_err();
         assert!(
             err.contains("Corrupt or duplicate coder input binding")
                 || err.contains("Unresolvable"),
@@ -6779,15 +6758,9 @@ mod tests {
         archive.extend_from_slice(&end_hdr);
 
         std::fs::write(&rar_path, &archive).unwrap();
-        let summary = extract_rar4_cancellable(
-            &rar_path,
-            &out_dir,
-            "",
-            1,
-            &mut |_, _| {},
-            &mut || false,
-        )
-        .unwrap();
+        let summary =
+            extract_rar4_cancellable(&rar_path, &out_dir, "", 1, &mut |_, _| {}, &mut || false)
+                .unwrap();
         assert_eq!(summary.files, 1);
         let extracted = out_dir.join("dated.txt");
         assert_eq!(std::fs::read(&extracted).unwrap(), payload);

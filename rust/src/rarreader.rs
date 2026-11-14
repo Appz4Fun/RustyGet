@@ -138,7 +138,10 @@ impl Cursor<'_> {
         if available <= 0 {
             return 0;
         }
-        if !self.source.read(self.position, &mut buf[..available as usize]) {
+        if !self
+            .source
+            .read(self.position, &mut buf[..available as usize])
+        {
             return 0;
         }
         self.position = self.position.wrapping_add(available);
@@ -339,7 +342,10 @@ impl Parser<'_, '_> {
         let mut block = Block::default();
         if self.v.encrypted {
             let mut salt = [0u8; 8];
-            if !(self.file.read(&mut salt) == 8 && self.cipher.rar3_prepare(&salt) && self.cipher.init(128, None)) {
+            if !(self.file.read(&mut salt) == 8
+                && self.cipher.rar3_prepare(&salt)
+                && self.cipher.init(128, None))
+            {
                 return None;
             }
         }
@@ -369,7 +375,11 @@ impl Parser<'_, '_> {
             // Header and packed data together can exceed the low 32-bit size.
             // Retain the native-size subtraction for undersized headers.
             let total = blocksize as u64 + block.addsize;
-            block.trailsize = if total >= 11 { total - 11 } else { (total as usize).wrapping_sub(11) as u64 };
+            block.trailsize = if total >= 11 {
+                total - 11
+            } else {
+                (total as usize).wrapping_sub(11) as u64
+            };
         }
         // a zero type ends the parse (as the C++'s empty block)
         (block.kind != 0).then_some(block)
@@ -380,12 +390,16 @@ impl Parser<'_, '_> {
         f.split_after = block.flags & RAR3_FILE_SPLITAFTER != 0;
         f.packed_size = block.addsize as i64;
         f.encrypted_data = block.flags & RAR3_FILE_PASSWORD != 0;
-        let Some(size) = self.read32(Some(block)) else { return false };
+        let Some(size) = self.read32(Some(block)) else {
+            return false;
+        };
         f.size = size as i64;
         if !self.skip(block, 1) || !self.skip(block, 4) {
             return false;
         }
-        let Some(time) = self.read32(Some(block)) else { return false };
+        let Some(time) = self.read32(Some(block)) else {
+            return false;
+        };
         f.time = time;
         let mut b = [0u8; 1];
         if !self.read(Some(block), &mut b) {
@@ -396,14 +410,22 @@ impl Parser<'_, '_> {
         }
         f.method = b[0] as u32;
         f.stored = b[0] == 0x30;
-        let Some(namelen) = self.read16(Some(block)) else { return false };
-        let Some(attr) = self.read32(Some(block)) else { return false };
+        let Some(namelen) = self.read16(Some(block)) else {
+            return false;
+        };
+        let Some(attr) = self.read32(Some(block)) else {
+            return false;
+        };
         f.attr = attr;
         if block.flags & RAR3_FILE_ADDSIZE != 0 {
-            let Some(high) = self.read32(Some(block)) else { return false };
+            let Some(high) = self.read32(Some(block)) else {
+                return false;
+            };
             block.trailsize = block.trailsize.wrapping_add((high as u64) << 32);
             f.packed_size = f.packed_size.wrapping_add(((high as u64) << 32) as i64);
-            let Some(high) = self.read32(Some(block)) else { return false };
+            let Some(high) = self.read32(Some(block)) else {
+                return false;
+            };
             f.size = f.size.wrapping_add(((high as u64) << 32) as i64);
         }
         if namelen > 8192 {
@@ -435,7 +457,11 @@ impl Parser<'_, '_> {
             skip = skip.wrapping_sub((16i32 - self.v.decrypt_pos as i32) as u64);
             if rar5 {
                 if self.v.decrypt_pos < 16 {
-                    skip = skip.wrapping_add(if !skip.is_multiple_of(16) { 16 - skip % 16 } else { 0 });
+                    skip = skip.wrapping_add(if !skip.is_multiple_of(16) {
+                        16 - skip % 16
+                    } else {
+                        0
+                    });
                     self.v.decrypt_pos = 16;
                 }
             } else {
@@ -449,7 +475,9 @@ impl Parser<'_, '_> {
     fn rar3_volume(&mut self) -> bool {
         while !self.file.eof {
             let start = self.file.position;
-            let Some(mut block) = self.rar3_block() else { return false };
+            let Some(mut block) = self.rar3_block() else {
+                return false;
+            };
             let mut file_block = false;
             if block.kind == RAR3_BLOCK_MAIN {
                 if block.flags & RAR3_MAIN_PASSWORD != 0 {
@@ -475,7 +503,9 @@ impl Parser<'_, '_> {
                     return false;
                 }
                 if block.flags & RAR3_ENDARC_VOLNUMBER != 0 {
-                    let Some(no) = self.read32(Some(&mut block)) else { return false };
+                    let Some(no) = self.read32(Some(&mut block)) else {
+                        return false;
+                    };
                     self.v.volume_no = no;
                     self.v.has_next_volume = block.flags & RAR3_ENDARC_NEXTVOL != 0;
                 }
@@ -522,9 +552,13 @@ impl Parser<'_, '_> {
     fn rar5_crypt(&mut self, block: &mut Block, f: &mut RarFile, content_len: u64) -> bool {
         let mut avail = content_len;
         let mut crypt = Rar5Crypt::default();
-        let Some(version) = self.read_v_limited(block, &mut avail) else { return true };
+        let Some(version) = self.read_v_limited(block, &mut avail) else {
+            return true;
+        };
         crypt.version = version;
-        let Some(flags) = self.read_v_limited(block, &mut avail) else { return true };
+        let Some(flags) = self.read_v_limited(block, &mut avail) else {
+            return true;
+        };
         crypt.flags = flags;
         if avail < 1 + 16 + 16 {
             return true;
@@ -560,25 +594,37 @@ impl Parser<'_, '_> {
         f.split_before = block.flags & RAR5_BLOCK_SPLITBEFORE != 0;
         f.split_after = block.flags & RAR5_BLOCK_SPLITAFTER != 0;
         f.packed_size = block.datasize as i64;
-        let Some(fileflags) = self.read_v(Some(block)) else { return false };
-        let Some(size) = self.read_v(Some(block)) else { return false };
+        let Some(fileflags) = self.read_v(Some(block)) else {
+            return false;
+        };
+        let Some(size) = self.read_v(Some(block)) else {
+            return false;
+        };
         f.size = size as i64;
-        let Some(attr) = self.read_v(Some(block)) else { return false };
+        let Some(attr) = self.read_v(Some(block)) else {
+            return false;
+        };
         f.attr = attr as u32;
         if fileflags & RAR5_FILE_TIME != 0 {
-            let Some(t) = self.read32(Some(block)) else { return false };
+            let Some(t) = self.read32(Some(block)) else {
+                return false;
+            };
             f.time = t;
         }
         if fileflags & RAR5_FILE_CRC != 0 && !self.skip(block, 4) {
             return false;
         }
-        let Some(comp) = self.read_v(Some(block)) else { return false };
+        let Some(comp) = self.read_v(Some(block)) else {
+            return false;
+        };
         f.method = ((comp >> 7) & 7) as u32;
         f.stored = f.method == 0;
         if self.read_v(Some(block)).is_none() {
             return false;
         }
-        let Some(namelen) = self.read_v(Some(block)) else { return false };
+        let Some(namelen) = self.read_v(Some(block)) else {
+            return false;
+        };
         if namelen > 8192 {
             return false;
         }
@@ -592,10 +638,15 @@ impl Parser<'_, '_> {
             let mut remsize = block.addsize;
             while remsize > 0 {
                 let mut trailsize = block.trailsize;
-                let Some(mut len) = self.read_v(Some(block)) else { return false };
-                remsize = remsize.wrapping_sub(trailsize.wrapping_sub(block.trailsize).wrapping_add(len));
+                let Some(mut len) = self.read_v(Some(block)) else {
+                    return false;
+                };
+                remsize =
+                    remsize.wrapping_sub(trailsize.wrapping_sub(block.trailsize).wrapping_add(len));
                 trailsize = block.trailsize;
-                let Some(kind) = self.read_v(Some(block)) else { return false };
+                let Some(kind) = self.read_v(Some(block)) else {
+                    return false;
+                };
                 if kind == RAR5_FILE_EXTRACRYPT {
                     f.encrypted_data = true;
                     let type_bytes = trailsize.wrapping_sub(block.trailsize);
@@ -605,15 +656,24 @@ impl Parser<'_, '_> {
                     }
                 }
                 if kind == RAR5_FILE_EXTRATIME {
-                    let Some(flags) = self.read_v(Some(block)) else { return false };
+                    let Some(flags) = self.read_v(Some(block)) else {
+                        return false;
+                    };
                     if flags & RAR5_FILE_EXTRATIMEUNIXFORMAT != 0 {
-                        let Some(t) = self.read32(Some(block)) else { return false };
+                        let Some(t) = self.read32(Some(block)) else {
+                            return false;
+                        };
                         f.time = t;
                     } else {
-                        let Some(low) = self.read32(Some(block)) else { return false };
-                        let Some(high) = self.read32(Some(block)) else { return false };
+                        let Some(low) = self.read32(Some(block)) else {
+                            return false;
+                        };
+                        let Some(high) = self.read32(Some(block)) else {
+                            return false;
+                        };
                         let wintime = ((high as u64) << 32).wrapping_add(low as u64);
-                        f.time = ((wintime / 10_000_000) as i64).wrapping_sub(11_644_473_600) as u32;
+                        f.time =
+                            ((wintime / 10_000_000) as i64).wrapping_sub(11_644_473_600) as u32;
                     }
                 }
                 len = len.wrapping_sub(trailsize.wrapping_sub(block.trailsize));
@@ -629,12 +689,18 @@ impl Parser<'_, '_> {
         self.file.seek(8, SO_SET);
         while !self.file.eof {
             let start = self.file.position;
-            let Some(mut block) = self.rar5_block() else { return false };
+            let Some(mut block) = self.rar5_block() else {
+                return false;
+            };
             let mut file_block = false;
             if block.kind == RAR5_BLOCK_MAIN {
-                let Some(arcflags) = self.read_v(Some(&mut block)) else { return false };
+                let Some(arcflags) = self.read_v(Some(&mut block)) else {
+                    return false;
+                };
                 if arcflags & RAR5_MAIN_VOLNR != 0 {
-                    let Some(volnr) = self.read_v(Some(&mut block)) else { return false };
+                    let Some(volnr) = self.read_v(Some(&mut block)) else {
+                        return false;
+                    };
                     self.v.volume_no = volnr as u32;
                 }
                 self.v.new_naming = true;
@@ -669,7 +735,9 @@ impl Parser<'_, '_> {
                 }
                 file_block = true;
             } else if block.kind == RAR5_BLOCK_ENDARC {
-                let Some(endflags) = self.read_v(Some(&mut block)) else { return false };
+                let Some(endflags) = self.read_v(Some(&mut block)) else {
+                    return false;
+                };
                 self.v.has_next_volume = endflags & RAR5_ENDARC_NEXTVOL != 0;
                 break;
             } else if block.kind > 5 {
@@ -688,8 +756,22 @@ impl Parser<'_, '_> {
 
 /// RarVolume::ReadFrom: parses `source` into `volume`; true when the volume
 /// was read to its end.
-pub fn read_from(volume: &mut Volume, source: &mut dyn Source, cipher: &mut dyn Cipher, files: &mut dyn Files) -> bool {
-    let mut p = Parser { v: volume, file: Cursor { source, position: 0, eof: false }, cipher, files };
+pub fn read_from(
+    volume: &mut Volume,
+    source: &mut dyn Source,
+    cipher: &mut dyn Cipher,
+    files: &mut dyn Files,
+) -> bool {
+    let mut p = Parser {
+        v: volume,
+        file: Cursor {
+            source,
+            position: 0,
+            eof: false,
+        },
+        cipher,
+        files,
+    };
     p.v.version = p.detect_version();
     p.file.seek(0, SO_SET);
     let ok = match p.v.version {
@@ -800,16 +882,28 @@ impl Source for FileSource {
 pub struct DisabledCipher;
 
 impl Cipher for DisabledCipher {
-    fn rar3_prepare(&mut self, _: &[u8; 8]) -> bool { false }
-    fn rar5_prepare(&mut self, _: u8, _: &[u8; 16]) -> bool { false }
-    fn init(&mut self, _: i32, _: Option<&[u8; 16]>) -> bool { false }
-    fn decrypt(&mut self, _: &[u8; 16], _: &mut [u8; 16]) -> bool { false }
+    fn rar3_prepare(&mut self, _: &[u8; 8]) -> bool {
+        false
+    }
+    fn rar5_prepare(&mut self, _: u8, _: &[u8; 16]) -> bool {
+        false
+    }
+    fn init(&mut self, _: i32, _: Option<&[u8; 16]>) -> bool {
+        false
+    }
+    fn decrypt(&mut self, _: &[u8; 16], _: &mut [u8; 16]) -> bool {
+        false
+    }
     fn free(&mut self) {}
 }
 
 /// `RarVolume::Read` (`RarReader.cpp`): opens `path`, sizes through the open handle,
 /// and parses RAR3/RAR5 headers using `NativeRarCipher` when `tls_enabled` is true.
-pub fn read_volume_file(path: &[u8], password: &[u8], tls_enabled: bool) -> (bool, Volume, Vec<RarFile>) {
+pub fn read_volume_file(
+    path: &[u8],
+    password: &[u8],
+    tls_enabled: bool,
+) -> (bool, Volume, Vec<RarFile>) {
     let mut vol = Volume {
         has_password: !password.is_empty(),
         ..Volume::default()
@@ -834,20 +928,34 @@ mod tests {
 
     struct Bytes(Vec<u8>);
     impl Source for Bytes {
-        fn size(&mut self) -> i64 { self.0.len() as i64 }
+        fn size(&mut self) -> i64 {
+            self.0.len() as i64
+        }
         fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
-            let Some(bytes) = self.0.get(offset as usize..offset as usize + buf.len()) else { return false };
+            let Some(bytes) = self.0.get(offset as usize..offset as usize + buf.len()) else {
+                return false;
+            };
             buf.copy_from_slice(bytes);
             true
         }
     }
 
     #[derive(Default)]
-    struct TestCipher { fail: bool, blocks: usize, frees: usize }
+    struct TestCipher {
+        fail: bool,
+        blocks: usize,
+        frees: usize,
+    }
     impl Cipher for TestCipher {
-        fn rar3_prepare(&mut self, _: &[u8; 8]) -> bool { true }
-        fn rar5_prepare(&mut self, _: u8, _: &[u8; 16]) -> bool { true }
-        fn init(&mut self, _: i32, _: Option<&[u8; 16]>) -> bool { true }
+        fn rar3_prepare(&mut self, _: &[u8; 8]) -> bool {
+            true
+        }
+        fn rar5_prepare(&mut self, _: u8, _: &[u8; 16]) -> bool {
+            true
+        }
+        fn init(&mut self, _: i32, _: Option<&[u8; 16]>) -> bool {
+            true
+        }
         fn decrypt(&mut self, input: &[u8; 16], out: &mut [u8; 16]) -> bool {
             self.blocks += 1;
             if self.fail {
@@ -857,7 +965,9 @@ mod tests {
             *out = *input;
             true
         }
-        fn free(&mut self) { self.frees += 1; }
+        fn free(&mut self) {
+            self.frees += 1;
+        }
     }
 
     #[test]
@@ -871,14 +981,31 @@ mod tests {
             (7, Some(u32::MAX), (1u64 << 32) - 5),
             (u16::MAX, Some(u32::MAX), (1u64 << 32) + 65523),
         ] {
-            let mut bytes = vec![0, 0, RAR3_BLOCK_FILE, 0, if add.is_some() { 0x80 } else { 0 }];
+            let mut bytes = vec![
+                0,
+                0,
+                RAR3_BLOCK_FILE,
+                0,
+                if add.is_some() { 0x80 } else { 0 },
+            ];
             bytes.extend(size.to_le_bytes());
-            if let Some(add) = add { bytes.extend(add.to_le_bytes()); }
+            if let Some(add) = add {
+                bytes.extend(add.to_le_bytes());
+            }
             let mut source = Bytes(bytes);
             let mut volume = Volume::default();
             let mut cipher = TestCipher::default();
             let mut files = Vec::new();
-            let mut p = Parser { v: &mut volume, file: Cursor { source: &mut source, position: 0, eof: false }, cipher: &mut cipher, files: &mut files };
+            let mut p = Parser {
+                v: &mut volume,
+                file: Cursor {
+                    source: &mut source,
+                    position: 0,
+                    eof: false,
+                },
+                cipher: &mut cipher,
+                files: &mut files,
+            };
             let block = p.rar3_block().unwrap();
             assert_eq!(block.trailsize, expected);
             assert_eq!(block.addsize, add.unwrap_or(0) as u64);
@@ -892,7 +1019,9 @@ mod tests {
             end: i64,
         }
         impl Source for Sparse {
-            fn size(&mut self) -> i64 { self.end + 7 }
+            fn size(&mut self) -> i64 {
+                self.end + 7
+            }
             fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
                 let tail = [0, 0, RAR3_BLOCK_ENDARC, 0, 0, 7, 0];
                 let bytes = if offset >= self.end {
@@ -900,21 +1029,30 @@ mod tests {
                 } else {
                     self.prefix.get(offset as usize..)
                 };
-                let Some(bytes) = bytes.and_then(|b| b.get(..buf.len())) else { return false };
+                let Some(bytes) = bytes.and_then(|b| b.get(..buf.len())) else {
+                    return false;
+                };
                 buf.copy_from_slice(bytes);
                 true
             }
         }
         for large in [false, true] {
             let header_size = if large { 41u16 } else { 33 };
-            for packed in [(1u64 << 32) - header_size as u64 - 1,
-                           (1u64 << 32) - header_size as u64,
-                           (1u64 << 32) - header_size as u64 + 1,
-                           u32::MAX as u64, (1u64 << 32) + 7] {
-                if !large && packed > u32::MAX as u64 { continue; }
+            for packed in [
+                (1u64 << 32) - header_size as u64 - 1,
+                (1u64 << 32) - header_size as u64,
+                (1u64 << 32) - header_size as u64 + 1,
+                u32::MAX as u64,
+                (1u64 << 32) + 7,
+            ] {
+                if !large && packed > u32::MAX as u64 {
+                    continue;
+                }
                 let mut prefix = b"Rar!\x1a\x07\0\0\0\x73\0\0\x0d\0\0\0\0\0\0\0".to_vec();
                 prefix.extend([0, 0, RAR3_BLOCK_FILE]);
-                prefix.extend((RAR3_BLOCK_ADDSIZE | if large { RAR3_FILE_ADDSIZE } else { 0 }).to_le_bytes());
+                prefix.extend(
+                    (RAR3_BLOCK_ADDSIZE | if large { RAR3_FILE_ADDSIZE } else { 0 }).to_le_bytes(),
+                );
                 prefix.extend(header_size.to_le_bytes());
                 prefix.extend((packed as u32).to_le_bytes());
                 prefix.extend((packed as u32).to_le_bytes());
@@ -950,13 +1088,28 @@ mod tests {
             data.extend(u32::MAX.to_le_bytes());
             data.resize(24, 0);
             let mut source = Bytes(data);
-            let mut volume = Volume { encrypted: true, ..Volume::default() };
+            let mut volume = Volume {
+                encrypted: true,
+                ..Volume::default()
+            };
             let mut cipher = TestCipher::default();
             let mut files = Vec::new();
-            let mut p = Parser { v: &mut volume, file: Cursor { source: &mut source, position: 0, eof: false }, cipher: &mut cipher, files: &mut files };
+            let mut p = Parser {
+                v: &mut volume,
+                file: Cursor {
+                    source: &mut source,
+                    position: 0,
+                    eof: false,
+                },
+                cipher: &mut cipher,
+                files: &mut files,
+            };
             let block = p.rar3_block().unwrap();
             assert!(p.skip_to_next(&block, false, 0));
-            assert_eq!(p.file.position, 8 + ((size as i64 + 15) & !15) + u32::MAX as i64);
+            assert_eq!(
+                p.file.position,
+                8 + ((size as i64 + 15) & !15) + u32::MAX as i64
+            );
             assert_eq!(p.v.decrypt_pos, 16);
         }
     }
@@ -964,10 +1117,22 @@ mod tests {
     #[test]
     fn decrypt_cache_partial_reads_and_failed_output() {
         let mut source = Bytes((0..48).collect());
-        let mut volume = Volume { encrypted: true, ..Volume::default() };
+        let mut volume = Volume {
+            encrypted: true,
+            ..Volume::default()
+        };
         let mut cipher = TestCipher::default();
         let mut files = Vec::new();
-        let mut p = Parser { v: &mut volume, file: Cursor { source: &mut source, position: 0, eof: false }, cipher: &mut cipher, files: &mut files };
+        let mut p = Parser {
+            v: &mut volume,
+            file: Cursor {
+                source: &mut source,
+                position: 0,
+                eof: false,
+            },
+            cipher: &mut cipher,
+            files: &mut files,
+        };
         let mut first = [0; 7];
         assert!(p.decrypt_read(&mut first));
         assert_eq!(first, [0, 1, 2, 3, 4, 5, 6]);
@@ -978,14 +1143,33 @@ mod tests {
         assert_eq!(second, [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]);
         assert_eq!(p.file.position, 32);
         assert_eq!(p.v.decrypt_pos, 3);
-        assert!(p.skip_to_next(&Block { trailsize: 13, ..Block::default() }, true, 0));
+        assert!(p.skip_to_next(
+            &Block {
+                trailsize: 13,
+                ..Block::default()
+            },
+            true,
+            0
+        ));
         assert_eq!(p.file.position, 32);
         assert_eq!(p.v.decrypt_pos, 16);
         cipher.fail = true;
-        let mut p = Parser { v: &mut volume, file: Cursor { source: &mut source, position: 32, eof: false }, cipher: &mut cipher, files: &mut files };
+        let mut p = Parser {
+            v: &mut volume,
+            file: Cursor {
+                source: &mut source,
+                position: 32,
+                eof: false,
+            },
+            cipher: &mut cipher,
+            files: &mut files,
+        };
         assert!(!p.decrypt_read(&mut first));
         assert_eq!(p.v.decrypt_pos, 0);
-        assert_eq!(p.v.decrypt_buf, [32, 33, 34, 35, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]);
+        assert_eq!(
+            p.v.decrypt_buf,
+            [32, 33, 34, 35, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+        );
         assert_eq!(p.file.position, 48);
         p.v.decrypt_pos = 16;
         assert!(!p.decrypt_read(&mut first));
@@ -999,9 +1183,18 @@ mod tests {
     fn a_block_must_advance() {
         let mut source = Bytes(b"Rar!\x1a\x07\x00\x00\x00\x73\x00\x00\x00\x00".to_vec());
         let mut volume = Volume::default();
-        let mut cipher = TestCipher { fail: false, blocks: 0, frees: 0 };
+        let mut cipher = TestCipher {
+            fail: false,
+            blocks: 0,
+            frees: 0,
+        };
         let mut files: Vec<RarFile> = Vec::new();
-        assert!(!read_from(&mut volume, &mut source, &mut cipher, &mut files));
+        assert!(!read_from(
+            &mut volume,
+            &mut source,
+            &mut cipher,
+            &mut files
+        ));
         assert_eq!(volume.version, 3);
     }
 
@@ -1011,15 +1204,34 @@ mod tests {
             for encrypted in [false, true] {
                 for (trailsize, expected) in [(0u64.wrapping_sub(16), false), (0, true)] {
                     let mut source = Bytes(vec![0; 64]);
-                    let mut volume = Volume { encrypted, decrypt_pos: 7, ..Volume::default() };
+                    let mut volume = Volume {
+                        encrypted,
+                        decrypt_pos: 7,
+                        ..Volume::default()
+                    };
                     let mut cipher = TestCipher::default();
                     let mut files = Vec::new();
                     let mut p = Parser {
                         v: &mut volume,
-                        file: Cursor { source: &mut source, position: 32, eof: false },
-                        cipher: &mut cipher, files: &mut files,
+                        file: Cursor {
+                            source: &mut source,
+                            position: 32,
+                            eof: false,
+                        },
+                        cipher: &mut cipher,
+                        files: &mut files,
                     };
-                    assert_eq!(p.skip_to_next(&Block { trailsize, ..Block::default() }, rar5, 16), expected);
+                    assert_eq!(
+                        p.skip_to_next(
+                            &Block {
+                                trailsize,
+                                ..Block::default()
+                            },
+                            rar5,
+                            16
+                        ),
+                        expected
+                    );
                 }
             }
         }
@@ -1040,7 +1252,12 @@ mod tests {
             let mut volume = Volume::default();
             let mut cipher = TestCipher::default();
             let mut files = Vec::new();
-            assert!(!read_from(&mut volume, &mut source, &mut cipher, &mut files));
+            assert!(!read_from(
+                &mut volume,
+                &mut source,
+                &mut cipher,
+                &mut files
+            ));
             assert_eq!(volume.version, 5);
         }
     }
@@ -1062,7 +1279,10 @@ mod tests {
     #[test]
     fn rar_reader_full_suite_port_from_cpp() {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let testdata_dir = manifest_dir.parent().unwrap().join("tests/testdata/rarrenamer");
+        let testdata_dir = manifest_dir
+            .parent()
+            .unwrap()
+            .join("tests/testdata/rarrenamer");
 
         let read_vol = |name: &str, password: Option<&[u8]>| -> (bool, Volume, Vec<RarFile>, i64) {
             let path = testdata_dir.join(name);
@@ -1080,7 +1300,14 @@ mod tests {
         };
 
         // 1. Rar3Test
-        for (i, name) in ["testfile3.part01.rar", "testfile3.part02.rar", "testfile3.part03.rar"].iter().enumerate() {
+        for (i, name) in [
+            "testfile3.part01.rar",
+            "testfile3.part02.rar",
+            "testfile3.part03.rar",
+        ]
+        .iter()
+        .enumerate()
+        {
             let (ok, vol, _, _) = read_vol(name, None);
             assert!(ok);
             assert_eq!(vol.version, 3);
@@ -1104,7 +1331,9 @@ mod tests {
 
         // 3. Rar3ZeroAdvanceTest
         {
-            let bytes = vec![b'R', b'a', b'r', b'!', 0x1a, 0x07, 0x00, 0x00, 0x00, 0x73, 0x00, 0x00, 0x00, 0x00];
+            let bytes = vec![
+                b'R', b'a', b'r', b'!', 0x1a, 0x07, 0x00, 0x00, 0x00, 0x73, 0x00, 0x00, 0x00, 0x00,
+            ];
             let mut source = Bytes(bytes);
             let mut vol = Volume::default();
             let mut cipher = crate::streamrepair::NativeRarCipher::new(b"");
@@ -1113,7 +1342,14 @@ mod tests {
         }
 
         // 4. Rar5Test
-        for (i, name) in ["testfile5.part01.rar", "testfile5.part02.rar", "testfile5.part03.rar"].iter().enumerate() {
+        for (i, name) in [
+            "testfile5.part01.rar",
+            "testfile5.part02.rar",
+            "testfile5.part03.rar",
+        ]
+        .iter()
+        .enumerate()
+        {
             let (ok, vol, _, _) = read_vol(name, None);
             assert!(ok);
             assert_eq!(vol.version, 5);
@@ -1123,7 +1359,14 @@ mod tests {
         }
 
         // 5. Rar3OldNamingTest
-        for (i, name) in ["testfile3oldnam.rar", "testfile3oldnam.r00", "testfile3oldnam.r01"].iter().enumerate() {
+        for (i, name) in [
+            "testfile3oldnam.rar",
+            "testfile3oldnam.r00",
+            "testfile3oldnam.r01",
+        ]
+        .iter()
+        .enumerate()
+        {
             let (ok, vol, _, _) = read_vol(name, None);
             assert!(ok);
             assert_eq!(vol.version, 3);
@@ -1133,7 +1376,14 @@ mod tests {
         }
 
         // 6. Rar3EncryptedDataTest
-        for (i, name) in ["testfile3encdata.part01.rar", "testfile3encdata.part02.rar", "testfile3encdata.part03.rar"].iter().enumerate() {
+        for (i, name) in [
+            "testfile3encdata.part01.rar",
+            "testfile3encdata.part02.rar",
+            "testfile3encdata.part03.rar",
+        ]
+        .iter()
+        .enumerate()
+        {
             let (ok, vol, _, _) = read_vol(name, None);
             assert!(ok);
             assert_eq!(vol.version, 3);
@@ -1143,7 +1393,14 @@ mod tests {
         }
 
         // 7. Rar5EncryptedDataTest
-        for (i, name) in ["testfile5encdata.part01.rar", "testfile5encdata.part02.rar", "testfile5encdata.part03.rar"].iter().enumerate() {
+        for (i, name) in [
+            "testfile5encdata.part01.rar",
+            "testfile5encdata.part02.rar",
+            "testfile5encdata.part03.rar",
+        ]
+        .iter()
+        .enumerate()
+        {
             let (ok, vol, _, _) = read_vol(name, None);
             assert!(ok);
             assert_eq!(vol.version, 5);
@@ -1161,7 +1418,14 @@ mod tests {
         }
 
         // 9. Rar3EncryptedNamesKdfTest (with password "123")
-        for (i, name) in ["testfile3encnam.part01.rar", "testfile3encnam.part02.rar", "testfile3encnam.part03.rar"].iter().enumerate() {
+        for (i, name) in [
+            "testfile3encnam.part01.rar",
+            "testfile3encnam.part02.rar",
+            "testfile3encnam.part03.rar",
+        ]
+        .iter()
+        .enumerate()
+        {
             let (ok, vol, files, _) = read_vol(name, Some(b"123"));
             assert!(ok);
             assert_eq!(vol.version, 3);
@@ -1174,7 +1438,14 @@ mod tests {
         }
 
         // 10. Rar5EncryptedNamesKdfTest (with password "123" and without password)
-        for (i, name) in ["testfile5encnam.part01.rar", "testfile5encnam.part02.rar", "testfile5encnam.part03.rar"].iter().enumerate() {
+        for (i, name) in [
+            "testfile5encnam.part01.rar",
+            "testfile5encnam.part02.rar",
+            "testfile5encnam.part03.rar",
+        ]
+        .iter()
+        .enumerate()
+        {
             let (ok, vol, files, _) = read_vol(name, Some(b"123"));
             assert!(ok);
             assert_eq!(vol.version, 5);
@@ -1226,7 +1497,11 @@ mod tests {
         // 12. RarCursorWrappingSeekTest & RarCursorWrappingReadTest
         {
             let mut source = Bytes(vec![0u8; 8]);
-            let mut cursor = Cursor { source: &mut source, position: 0, eof: false };
+            let mut cursor = Cursor {
+                source: &mut source,
+                position: 0,
+                eof: false,
+            };
             assert!(cursor.seek(i64::MAX, SO_SET));
             assert!(!cursor.seek(1, SO_CUR));
             assert_eq!(cursor.position, i64::MAX);
@@ -1236,7 +1511,9 @@ mod tests {
         {
             struct WrappingSource;
             impl Source for WrappingSource {
-                fn size(&mut self) -> i64 { i64::MIN }
+                fn size(&mut self) -> i64 {
+                    i64::MIN
+                }
                 fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
                     if offset != i64::MAX || buf.len() != 1 {
                         return false;
@@ -1246,7 +1523,11 @@ mod tests {
                 }
             }
             let mut source = WrappingSource;
-            let mut cursor = Cursor { source: &mut source, position: 0, eof: false };
+            let mut cursor = Cursor {
+                source: &mut source,
+                position: 0,
+                eof: false,
+            };
             assert!(cursor.seek(i64::MAX, SO_SET));
             let mut byte = [0u8; 1];
             assert_eq!(cursor.read(&mut byte), 1);
@@ -1282,7 +1563,8 @@ mod tests {
                         self.failed = true;
                         return false;
                     }
-                    let Some(s) = self.data.get(offset as usize..offset as usize + buf.len()) else {
+                    let Some(s) = self.data.get(offset as usize..offset as usize + buf.len())
+                    else {
                         self.sig_read = true;
                         return false;
                     };
@@ -1300,7 +1582,14 @@ mod tests {
             let mut vol = Volume::default();
             let mut files = Vec::new();
             let mut cipher = TestCipher::default();
-            let mut src1 = FailingSource { data: data.clone(), fail_at: 12, size_fails: false, reads: 0, failed: false, sig_read: false };
+            let mut src1 = FailingSource {
+                data: data.clone(),
+                fail_at: 12,
+                size_fails: false,
+                reads: 0,
+                failed: false,
+                sig_read: false,
+            };
             assert!(!read_from(&mut vol, &mut src1, &mut cipher, &mut files));
             assert!(src1.failed);
             assert_eq!(vol.version, 5);
@@ -1309,7 +1598,14 @@ mod tests {
             assert_eq!(files[0].data_offset, 22);
 
             let prev_version = vol.version;
-            let mut src2 = FailingSource { data: data.clone(), fail_at: 0, size_fails: false, reads: 0, failed: false, sig_read: false };
+            let mut src2 = FailingSource {
+                data: data.clone(),
+                fail_at: 0,
+                size_fails: false,
+                reads: 0,
+                failed: false,
+                sig_read: false,
+            };
             assert!(!read_from(&mut vol, &mut src2, &mut cipher, &mut files));
             if src2.failed && !src2.sig_read {
                 vol.version = prev_version;
@@ -1318,7 +1614,14 @@ mod tests {
             assert_eq!(files.len(), 1);
 
             let prev_version = vol.version;
-            let mut src3 = FailingSource { data, fail_at: -1, size_fails: true, reads: 0, failed: false, sig_read: false };
+            let mut src3 = FailingSource {
+                data,
+                fail_at: -1,
+                size_fails: true,
+                reads: 0,
+                failed: false,
+                sig_read: false,
+            };
             assert!(!read_from(&mut vol, &mut src3, &mut cipher, &mut files));
             if src3.failed && !src3.sig_read {
                 vol.version = prev_version;

@@ -43,7 +43,10 @@ pub fn match_part_regex(name: &[u8]) -> Option<(usize, usize)> {
         return None;
     }
     let stem = &s[..s.len() - 4];
-    let digit_start = stem.iter().rposition(|b| !b.is_ascii_digit()).map_or(0, |p| p + 1);
+    let digit_start = stem
+        .iter()
+        .rposition(|b| !b.is_ascii_digit())
+        .map_or(0, |p| p + 1);
     if digit_start == stem.len() || digit_start < 5 {
         return None;
     }
@@ -89,7 +92,8 @@ pub fn execute_all(
         dir_list.push(c(dir).to_vec());
         for filename in crate::fsops::list_dir_entries(dir) {
             if !cb.stopped()? {
-                let full = cut(&[c(dir), &[crate::paths::PATH_SEPARATOR], c(&filename)].concat()).to_vec();
+                let full =
+                    cut(&[c(dir), &[crate::paths::PATH_SEPARATOR], c(&filename)].concat()).to_vec();
                 if crate::fsops::directory_exists(&full, &crate::fsops::posix_stat) {
                     build_dir_list(&full, dir_list, file_count, cb)?;
                 } else {
@@ -109,7 +113,8 @@ pub fn execute_all(
         let mut volumes: Vec<Volume> = Vec::new();
         for filename in crate::fsops::list_dir_entries(&dir) {
             if !cb.stopped()? {
-                let full = cut(&[c(&dir), &[crate::paths::PATH_SEPARATOR], c(&filename)].concat()).to_vec();
+                let full = cut(&[c(&dir), &[crate::paths::PATH_SEPARATOR], c(&filename)].concat())
+                    .to_vec();
                 if !crate::fsops::directory_exists(&full, &crate::fsops::posix_stat) {
                     let label = cut(&[b"Checking file ", c(&filename)].concat()).to_vec();
                     let stage = if file_count > 0 {
@@ -122,7 +127,13 @@ pub fn execute_all(
 
                     let ascii_fold = crate::wildmask::Lower::Ascii;
                     if !ignore_c.is_empty()
-                        && crate::util::match_file_ext(base_name(&full), ignore_c, b",;", &ascii_fold, &ascii_fold)
+                        && crate::util::match_file_ext(
+                            base_name(&full),
+                            ignore_c,
+                            b",;",
+                            &ascii_fold,
+                            &ascii_fold,
+                        )
                     {
                         continue;
                     }
@@ -178,7 +189,8 @@ pub fn execute_all(
                         return;
                     }
                     let src = &self.volumes[index].filename;
-                    let info_msg = [b"Renaming ", base_name(src), b" to ", base_name(dest)].concat();
+                    let info_msg =
+                        [b"Renaming ", base_name(src), b" to ", base_name(dest)].concat();
                     if self.cb.message(0, &info_msg).is_err() {
                         self.aborted = true;
                         return;
@@ -187,14 +199,19 @@ pub fn execute_all(
                     let dst_c = std::ffi::CString::new(c(dest)).unwrap_or_default();
                     if !crate::fsops::move_file(&src_c, &dst_c) {
                         let err = crate::fsops::error_message(crate::fsops::last_errno());
-                        let err_msg = [b"Could not rename ", c(src), b" to ", c(dest), b": ", &err].concat();
+                        let err_msg =
+                            [b"Could not rename ", c(src), b" to ", c(dest), b": ", &err].concat();
                         if self.cb.message(2, &err_msg).is_err() {
                             self.aborted = true;
                         }
                         return;
                     }
                     *self.renamed_count = self.renamed_count.wrapping_add(1);
-                    if self.cb.register_renamed(base_name(src), base_name(dest)).is_err() {
+                    if self
+                        .cb
+                        .register_renamed(base_name(src), base_name(dest))
+                        .is_err()
+                    {
                         self.aborted = true;
                     }
                 }
@@ -271,7 +288,11 @@ pub fn old_extension(volume_no: i32) -> Vec<u8> {
 
 fn new_volume_filename(dir: &[u8], base: &[u8], v: &Volume) -> Vec<u8> {
     // the C++ passed the uint32 volume number as an int
-    let ext = if v.new_naming { new_extension(v.volume_no as i32) } else { old_extension(v.volume_no as i32) };
+    let ext = if v.new_naming {
+        new_extension(v.volume_no as i32)
+    } else {
+        old_extension(v.volume_no as i32)
+    };
     [c(dir), &[crate::paths::PATH_SEPARATOR], c(base), b".", &ext].concat()
 }
 
@@ -281,7 +302,9 @@ pub fn same_archive_name(f1: &[u8], f2: &[u8], new_naming: bool) -> bool {
     if f1.len() != f2.len() {
         return false;
     }
-    let (Some(e1), Some(e2)) = (rfind(f1, b'.'), rfind(f2, b'.')) else { return false };
+    let (Some(e1), Some(e2)) = (rfind(f1, b'.'), rfind(f2, b'.')) else {
+        return false;
+    };
     if f1.len() - e1 != f2.len() - e2 {
         return false;
     }
@@ -291,7 +314,9 @@ pub fn same_archive_name(f1: &[u8], f2: &[u8], new_naming: bool) -> bool {
         }
         let n1 = cut(&f1[..e1]);
         let n2 = cut(&f2[..e2]);
-        let (Some(x1), Some(x2)) = (rfind(n1, b'.'), rfind(n2, b'.')) else { return false };
+        let (Some(x1), Some(x2)) = (rfind(n1, b'.'), rfind(n2, b'.')) else {
+            return false;
+        };
         n1.len() - x1 == n2.len() - x2
             && n1[x1..].starts_with(b".part")
             && n2[x2..].starts_with(b".part")
@@ -324,17 +349,21 @@ pub fn make_sets(volumes: &[Volume]) -> Vec<Vec<usize>> {
                         && ((v.files[0].split_before
                             && last.files.last().is_some_and(|f| f.split_after)
                             && c(&v.files[0].name) == c(&last.files.last().expect("checked").name))
-                            || (!v.files[0].split_before && !last.files.last().is_some_and(|f| f.split_after)))
+                            || (!v.files[0].split_before
+                                && !last.files.last().is_some_and(|f| f.split_after)))
                 })
                 .map(|(i, _)| i)
                 .collect();
             let mut next = None;
             if candidates.len() > 1 {
                 let first = &volumes[set[0]];
-                next = candidates
-                    .iter()
-                    .copied()
-                    .find(|&i| same_archive_name(base_name(&first.filename), base_name(&volumes[i].filename), first.new_naming));
+                next = candidates.iter().copied().find(|&i| {
+                    same_archive_name(
+                        base_name(&first.filename),
+                        base_name(&volumes[i].filename),
+                        first.new_naming,
+                    )
+                });
             }
             if next.is_none() {
                 next = candidates.first().copied();
@@ -362,19 +391,28 @@ fn properly_named(volumes: &[Volume], set: &[usize], env: &mut dyn Env) -> bool 
             return false;
         }
         if v.new_naming {
-            let Some((start, _len)) = env.match_part(name) else { return false };
+            let Some((start, _len)) = env.match_part(name) else {
+                return false;
+            };
             let part = cut(&name[start.min(name.len())..]);
             if set_part_len == 0 {
                 set_part_len = part.len();
             }
             let plen = part.len();
             let number = crate::feed::c_atoi_bytes(part) as u32;
-            if !(number == v.volume_no.wrapping_add(1) && plen == set_part_len && strncmp_eq(set_base, name, start)) {
+            if !(number == v.volume_no.wrapping_add(1)
+                && plen == set_part_len
+                && strncmp_eq(set_base, name, start))
+            {
                 return false;
             }
         } else {
-            let Some(dot) = rfind(name, b'.') else { return false };
-            if name[dot + 1..] != old_extension(v.volume_no as i32)[..] || !strncmp_eq(set_base, name, dot) {
+            let Some(dot) = rfind(name, b'.') else {
+                return false;
+            };
+            if name[dot + 1..] != old_extension(v.volume_no as i32)[..]
+                || !strncmp_eq(set_base, name, dot)
+            {
                 return false;
             }
         }
@@ -403,7 +441,9 @@ pub fn rename_files(dir: &[u8], volumes: &[Volume], env: &mut dyn Env) {
             continue;
         }
         // a set starts with a volume that has files: there is a main file
-        let Some(main) = main_file(volumes, &set) else { continue };
+        let Some(main) = main_file(volumes, &set) else {
+            continue;
+        };
         let mut main_base = cut(base_name(&main.name)).to_vec();
         if let Some(dot) = rfind(&main_base, b'.') {
             // strip a three-character extension
@@ -415,7 +455,8 @@ pub fn rename_files(dir: &[u8], volumes: &[Volume], env: &mut dyn Env) {
         let mut num = 0;
         loop {
             if num > 0 {
-                new_base = cut(&[&main_base[..], b"-", (num + 1).to_string().as_bytes()].concat()).to_vec();
+                new_base = cut(&[&main_base[..], b"-", (num + 1).to_string().as_bytes()].concat())
+                    .to_vec();
             }
             num += 1;
             let overwrite = set.iter().any(|&i| {
@@ -457,21 +498,54 @@ mod tests {
         assert_eq!(old_extension(-1), b"r-2");
         assert_eq!(old_extension(14_201), b""); // the %c byte wraps to NUL
         assert_eq!(old_extension(14_301), b"\x0100");
-        let v = Volume { volume_no: u32::MAX, new_naming: true, ..Volume::default() };
-        assert_eq!(new_volume_filename(b"dir", b"movie", &v),
-            [b"dir".as_slice(), &[crate::paths::PATH_SEPARATOR], b"movie.part0000.rar"].concat());
+        let v = Volume {
+            volume_no: u32::MAX,
+            new_naming: true,
+            ..Volume::default()
+        };
+        assert_eq!(
+            new_volume_filename(b"dir", b"movie", &v),
+            [
+                b"dir".as_slice(),
+                &[crate::paths::PATH_SEPARATOR],
+                b"movie.part0000.rar"
+            ]
+            .concat()
+        );
     }
 
     #[test]
     fn candidate_preference_and_shared_volumes() {
-        let file = File { name: b"movie.mkv".to_vec(), ..File::default() };
-        let first = Volume { filename: b"a.part01.rar".to_vec(), has_next_volume: true,
-            multi_volume: true, new_naming: true, files: vec![file.clone()], ..Volume::default() };
-        let second = Volume { filename: b"a.part02.rar".to_vec(), volume_no: 1,
-            has_next_volume: false, ..first.clone() };
-        let decoy = Volume { filename: b"b.part02.rar".to_vec(), ..second.clone() };
-        let twin = Volume { filename: b"z.part01.rar".to_vec(), ..first.clone() };
-        assert_eq!(make_sets(&[first, decoy, second, twin]), vec![vec![0, 2], vec![3, 1]]);
+        let file = File {
+            name: b"movie.mkv".to_vec(),
+            ..File::default()
+        };
+        let first = Volume {
+            filename: b"a.part01.rar".to_vec(),
+            has_next_volume: true,
+            multi_volume: true,
+            new_naming: true,
+            files: vec![file.clone()],
+            ..Volume::default()
+        };
+        let second = Volume {
+            filename: b"a.part02.rar".to_vec(),
+            volume_no: 1,
+            has_next_volume: false,
+            ..first.clone()
+        };
+        let decoy = Volume {
+            filename: b"b.part02.rar".to_vec(),
+            ..second.clone()
+        };
+        let twin = Volume {
+            filename: b"z.part01.rar".to_vec(),
+            ..first.clone()
+        };
+        assert_eq!(
+            make_sets(&[first, decoy, second, twin]),
+            vec![vec![0, 2], vec![3, 1]]
+        );
     }
 
     #[test]
@@ -495,7 +569,8 @@ mod tests {
                 Ok(())
             }
             fn register_renamed(&mut self, old_base: &[u8], new_base: &[u8]) -> Result<(), ()> {
-                self.renamed_pairs.push((old_base.to_vec(), new_base.to_vec()));
+                self.renamed_pairs
+                    .push((old_base.to_vec(), new_base.to_vec()));
                 Ok(())
             }
         }
@@ -517,10 +592,20 @@ mod tests {
         }
 
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let testdata_dir = manifest_dir.parent().unwrap().join("tests/testdata/rarrenamer");
+        let testdata_dir = manifest_dir
+            .parent()
+            .unwrap()
+            .join("tests/testdata/rarrenamer");
 
-        let run_case = |name: &str, pwd: Option<&[u8]>, setup: &dyn Fn(&std::path::Path), verify: &dyn Fn(&std::path::Path, i32, i32)| {
-            let work_dir = std::env::temp_dir().join(format!("nzbget_rs_rarrenamer_{}_{}", std::process::id(), name));
+        let run_case = |name: &str,
+                        pwd: Option<&[u8]>,
+                        setup: &dyn Fn(&std::path::Path),
+                        verify: &dyn Fn(&std::path::Path, i32, i32)| {
+            let work_dir = std::env::temp_dir().join(format!(
+                "nzbget_rs_rarrenamer_{}_{}",
+                std::process::id(),
+                name
+            ));
             let _ = std::fs::remove_dir_all(&work_dir);
             std::fs::create_dir_all(&work_dir).unwrap();
             for entry in std::fs::read_dir(&testdata_dir).unwrap() {
@@ -534,7 +619,9 @@ mod tests {
         };
 
         // 1. RarRenameNotNeededTest
-        run_case("RarRenameNotNeededTest", None, &|_| {}, &|_, renamed, _| assert_eq!(renamed, 0));
+        run_case("RarRenameNotNeededTest", None, &|_| {}, &|_, renamed, _| {
+            assert_eq!(renamed, 0)
+        });
 
         // 2. RarRenameNotNeeded2Test
         run_case(
@@ -542,7 +629,11 @@ mod tests {
             None,
             &|w| {
                 std::fs::copy(w.join("testfile5.part02.rar"), w.join("12348")).unwrap();
-                std::fs::copy(w.join("testfile3oldnam.r00"), w.join("testfile3oldnamB.r00")).unwrap();
+                std::fs::copy(
+                    w.join("testfile3oldnam.r00"),
+                    w.join("testfile3oldnamB.r00"),
+                )
+                .unwrap();
             },
             &|_, renamed, _| assert_eq!(renamed, 0),
         );
@@ -588,8 +679,16 @@ mod tests {
             "RenameRar3BadNamingTest",
             None,
             &|w| {
-                std::fs::rename(w.join("testfile3.part01.rar"), w.join("testfile3.part04.rar")).unwrap();
-                std::fs::rename(w.join("testfile3.part02.rar"), w.join("testfile3.part01.rar")).unwrap();
+                std::fs::rename(
+                    w.join("testfile3.part01.rar"),
+                    w.join("testfile3.part04.rar"),
+                )
+                .unwrap();
+                std::fs::rename(
+                    w.join("testfile3.part02.rar"),
+                    w.join("testfile3.part01.rar"),
+                )
+                .unwrap();
             },
             &|_, renamed, _| assert_eq!(renamed, 3),
         );
@@ -599,7 +698,11 @@ mod tests {
             "Rar3BadNaming2",
             None,
             &|w| {
-                std::fs::rename(w.join("testfile3.part02.rar"), w.join("testfile3.part2.rar")).unwrap();
+                std::fs::rename(
+                    w.join("testfile3.part02.rar"),
+                    w.join("testfile3.part2.rar"),
+                )
+                .unwrap();
             },
             &|_, renamed, _| assert_eq!(renamed, 3),
         );
@@ -609,7 +712,11 @@ mod tests {
             "RenameRar3BadNaming3Test",
             None,
             &|w| {
-                std::fs::rename(w.join("testfile3.part02.rar"), w.join("testfile3-1.part02.rar")).unwrap();
+                std::fs::rename(
+                    w.join("testfile3.part02.rar"),
+                    w.join("testfile3-1.part02.rar"),
+                )
+                .unwrap();
             },
             &|_, renamed, _| assert_eq!(renamed, 3),
         );
@@ -619,7 +726,11 @@ mod tests {
             "RenameRar3BadNaming4Test",
             None,
             &|w| {
-                std::fs::rename(w.join("testfile3.part02.rar"), w.join("testfil-3.part02.rar")).unwrap();
+                std::fs::rename(
+                    w.join("testfile3.part02.rar"),
+                    w.join("testfil-3.part02.rar"),
+                )
+                .unwrap();
             },
             &|_, renamed, _| assert_eq!(renamed, 3),
         );
@@ -629,7 +740,11 @@ mod tests {
             "RenameRar3BadNaming5Test",
             None,
             &|w| {
-                std::fs::rename(w.join("testfile3oldnam.rar"), w.join("testfile3oldnamA.rar")).unwrap();
+                std::fs::rename(
+                    w.join("testfile3oldnam.rar"),
+                    w.join("testfile3oldnamA.rar"),
+                )
+                .unwrap();
             },
             &|_, renamed, _| assert_eq!(renamed, 1),
         );
@@ -639,9 +754,21 @@ mod tests {
             "RenameRar3BadNaming6Test",
             None,
             &|w| {
-                std::fs::rename(w.join("testfile3oldnam.rar"), w.join("testfile3oldnamA.rar")).unwrap();
-                std::fs::rename(w.join("testfile3oldnam.r00"), w.join("testfile3oldnamB.r00")).unwrap();
-                std::fs::rename(w.join("testfile3oldnam.r01"), w.join("testfile3oldnamA.r01")).unwrap();
+                std::fs::rename(
+                    w.join("testfile3oldnam.rar"),
+                    w.join("testfile3oldnamA.rar"),
+                )
+                .unwrap();
+                std::fs::rename(
+                    w.join("testfile3oldnam.r00"),
+                    w.join("testfile3oldnamB.r00"),
+                )
+                .unwrap();
+                std::fs::rename(
+                    w.join("testfile3oldnam.r01"),
+                    w.join("testfile3oldnamA.r01"),
+                )
+                .unwrap();
             },
             &|_, renamed, _| assert_eq!(renamed, 3),
         );
@@ -669,7 +796,11 @@ mod tests {
                 std::fs::rename(w.join("testfile3.part01.rar"), w.join("12345")).unwrap();
                 std::fs::rename(w.join("testfile3.part02.rar"), w.join("12342")).unwrap();
                 std::fs::rename(w.join("testfile3.part03.rar"), w.join("12346")).unwrap();
-                std::fs::rename(w.join("testfile5.part01.rar"), w.join("testfile3.dat.part0001.rar")).unwrap();
+                std::fs::rename(
+                    w.join("testfile5.part01.rar"),
+                    w.join("testfile3.dat.part0001.rar"),
+                )
+                .unwrap();
                 std::fs::remove_file(w.join("testfile5.part02.rar")).unwrap();
                 std::fs::remove_file(w.join("testfile5.part03.rar")).unwrap();
             },
@@ -709,10 +840,22 @@ mod tests {
                 std::fs::create_dir(&sub).unwrap();
                 let names = ["12348", "12342", "12346"];
                 for (i, name) in names.iter().enumerate() {
-                    std::fs::copy(w.join(format!("testfile3.part0{}.rar", i + 1)), w.join(name)).unwrap();
-                    std::fs::copy(w.join(format!("testfile5.part0{}.rar", i + 1)), sub.join(name)).unwrap();
+                    std::fs::copy(
+                        w.join(format!("testfile3.part0{}.rar", i + 1)),
+                        w.join(name),
+                    )
+                    .unwrap();
+                    std::fs::copy(
+                        w.join(format!("testfile5.part0{}.rar", i + 1)),
+                        sub.join(name),
+                    )
+                    .unwrap();
                 }
-                for orig in ["testfile3.part01.rar", "testfile3.part02.rar", "testfile3.part03.rar"] {
+                for orig in [
+                    "testfile3.part01.rar",
+                    "testfile3.part02.rar",
+                    "testfile3.part03.rar",
+                ] {
                     std::fs::remove_file(w.join(orig)).unwrap();
                 }
             },
@@ -747,7 +890,8 @@ mod tests {
             }
             fn rename(&mut self, index: usize, dest: &[u8]) {
                 let src = c(&self.volumes[index].filename);
-                self.trace.push([b"rename:".as_slice(), src, b">", c(dest)].concat());
+                self.trace
+                    .push([b"rename:".as_slice(), src, b">", c(dest)].concat());
             }
         }
 
@@ -759,7 +903,10 @@ mod tests {
         assert_eq!(match_part_regex(b"a.part1.rar\n"), None);
         assert_eq!(match_part_regex(b"a\n.part1.rar"), Some((7, 1)));
         assert_eq!(match_part_regex(b"a.part4294967297.rar"), Some((6, 10)));
-        assert_eq!(match_part_regex(b"a.part9999999999999999999999.rar"), Some((6, 22)));
+        assert_eq!(
+            match_part_regex(b"a.part9999999999999999999999.rar"),
+            Some((6, 22))
+        );
 
         let run_probe = |vols: &[Volume], collisions: i32| -> Vec<Vec<u8>> {
             let mut env = ProbeEnv {
@@ -784,7 +931,12 @@ mod tests {
                     multi_volume: true,
                     has_next_volume: false,
                     new_naming: true,
-                    files: vec![File { name, size: 100, split_before: false, split_after: false }],
+                    files: vec![File {
+                        name,
+                        size: 100,
+                        split_before: false,
+                        split_after: false,
+                    }],
                 };
                 let trace = run_probe(&[v], 3);
                 assert_eq!(trace.len(), 6); // match, 4 exists checks (3 collisions + 1 free), 1 rename

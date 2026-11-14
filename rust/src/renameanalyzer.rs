@@ -4,9 +4,9 @@
 //! the header on the piece that completes it, before QueueCoordinator reads
 //! the PAR flag. Reset keeps the identity already found, as in C++.
 
-use md5::{Digest, Md5};
 use md5::block_api::Md5Core;
 use md5::digest::{block_api::CoreProxy, common::hazmat::SerializableState};
+use md5::{Digest, Md5};
 
 const HEADER: usize = 64;
 const MAGIC: &[u8; 8] = b"PAR2\0PKT";
@@ -16,7 +16,12 @@ const LIMIT: i32 = 16 * 1024;
 pub(crate) fn print(hash: &[u8]) -> [u8; 33] {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = [0; 33];
-    for (pair, b) in out[..32].as_chunks_mut::<2>().0.iter_mut().zip(hash.iter().rev()) {
+    for (pair, b) in out[..32]
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(hash.iter().rev())
+    {
         pair[0] = HEX[(b >> 4) as usize];
         pair[1] = HEX[(b & 15) as usize];
     }
@@ -33,7 +38,13 @@ pub struct Analyzer {
 
 impl Default for Analyzer {
     fn default() -> Self {
-        Analyzer { md5: Md5::new(), signature: [0; HEADER], data_size: 0, par_file: false, par_set_id: None }
+        Analyzer {
+            md5: Md5::new(),
+            signature: [0; HEADER],
+            data_size: 0,
+            par_file: false,
+            par_set_id: None,
+        }
     }
 }
 
@@ -87,7 +98,10 @@ impl Analyzer {
         for word in state[..16].as_chunks_mut::<4>().0 {
             word.reverse();
         }
-        self.md5 = Md5::compose(Md5Core::deserialize(&state).expect("valid MD5 core state"), buffer);
+        self.md5 = Md5::compose(
+            Md5Core::deserialize(&state).expect("valid MD5 core state"),
+            buffer,
+        );
         print(&hash)
     }
 }
@@ -107,7 +121,10 @@ mod tests {
         assert!(a.append(&header));
         assert!(a.par_file);
         assert!(a.append(b"more"));
-        assert_eq!(a.par_set_id.as_ref(), Some(b"0F0E0D0C0B0A09080706050403020100\0"));
+        assert_eq!(
+            a.par_set_id.as_ref(),
+            Some(b"0F0E0D0C0B0A09080706050403020100\0")
+        );
         let mut b = Analyzer::default();
         b.append(b"");
         // MD5("") = d41d8cd98f00b204e9800998ecf8427e, printed backwards
@@ -116,7 +133,10 @@ mod tests {
 
     #[test]
     fn size_wrap_keeps_legacy_md5_window() {
-        let mut a = Analyzer { data_size: i32::MAX, ..Analyzer::default() };
+        let mut a = Analyzer {
+            data_size: i32::MAX,
+            ..Analyzer::default()
+        };
         a.append(b"x");
         assert_eq!(a.data_size, i32::MIN);
         a.append(&[b'y'; 16 * 1024]);
@@ -140,43 +160,66 @@ mod tests {
         }
         assert!(a.append(&header));
         assert!(a.append(b""));
-        assert_eq!(a.par_set_id.as_ref(), Some(b"0F0E0D0C0B0A09080706050403020100\0"));
+        assert_eq!(
+            a.par_set_id.as_ref(),
+            Some(b"0F0E0D0C0B0A09080706050403020100\0")
+        );
         a.reset();
         assert!(a.par_file);
-        assert_eq!(a.par_set_id.as_ref(), Some(b"0F0E0D0C0B0A09080706050403020100\0"));
+        assert_eq!(
+            a.par_set_id.as_ref(),
+            Some(b"0F0E0D0C0B0A09080706050403020100\0")
+        );
     }
 
     #[test]
     fn complete_par_header_is_recognized_in_its_first_piece() {
         for size in [HEADER, 2472] {
-            let mut bytes=vec![0u8;size];bytes[..8].copy_from_slice(MAGIC);
-            for (i,b) in bytes[32..48].iter_mut().enumerate() {*b=i as u8;}
-            let mut a=Analyzer::default();
-            assert!(a.append(&bytes), "complete PAR2 header in one piece must be visible immediately");
+            let mut bytes = vec![0u8; size];
+            bytes[..8].copy_from_slice(MAGIC);
+            for (i, b) in bytes[32..48].iter_mut().enumerate() {
+                *b = i as u8;
+            }
+            let mut a = Analyzer::default();
+            assert!(
+                a.append(&bytes),
+                "complete PAR2 header in one piece must be visible immediately"
+            );
             assert!(a.par_file);
-            assert_eq!(a.par_set_id.as_ref(),Some(b"0F0E0D0C0B0A09080706050403020100\0"));
-            assert_eq!(a.finish(),print(&Md5::digest(&bytes)));
+            assert_eq!(
+                a.par_set_id.as_ref(),
+                Some(b"0F0E0D0C0B0A09080706050403020100\0")
+            );
+            assert_eq!(a.finish(), print(&Md5::digest(&bytes)));
         }
     }
 
     #[test]
     fn split_header_is_recognized_when_the_last_header_byte_arrives() {
-        let mut header=[0u8;HEADER];header[..8].copy_from_slice(MAGIC);
-        for split in [HEADER-1,47] {
-            let mut a=Analyzer::default();
-            assert!(!a.append(&header[..split]));assert!(!a.par_file);
-            assert!(a.append(&header[split..]));assert!(a.par_file);
-            assert_eq!(a.finish(),print(&Md5::digest(header)));
+        let mut header = [0u8; HEADER];
+        header[..8].copy_from_slice(MAGIC);
+        for split in [HEADER - 1, 47] {
+            let mut a = Analyzer::default();
+            assert!(!a.append(&header[..split]));
+            assert!(!a.par_file);
+            assert!(a.append(&header[split..]));
+            assert!(a.par_file);
+            assert_eq!(a.finish(), print(&Md5::digest(header)));
         }
     }
 
     #[test]
     fn partial_or_nonpar_first_piece_remains_unrecognized() {
-        let mut header=[0u8;HEADER];header[..8].copy_from_slice(MAGIC);
+        let mut header = [0u8; HEADER];
+        header[..8].copy_from_slice(MAGIC);
         for length in 0..HEADER {
-            let mut a=Analyzer::default();assert!(!a.append(&header[..length]));assert!(!a.par_file);
+            let mut a = Analyzer::default();
+            assert!(!a.append(&header[..length]));
+            assert!(!a.par_file);
         }
-        let mut a=Analyzer::default();assert!(!a.append(&[b'x';2472]));assert!(!a.par_file);
+        let mut a = Analyzer::default();
+        assert!(!a.append(&[b'x'; 2472]));
+        assert!(!a.par_file);
     }
 
     #[test]

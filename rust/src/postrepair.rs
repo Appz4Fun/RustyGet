@@ -26,9 +26,7 @@ pub fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if haystack.len() < needle.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 // ============================================================================
@@ -417,8 +415,8 @@ pub struct NzbgetRsParSegment {
 
 pub use crate::parchecker::{
     calc_stage_progress, classify_streambuf_line, compute_valid_blocks, maybe_splitted_fragment,
-    smart_calc_range_crc, PAR_STAGE_LOADING_PARS, PAR_STAGE_REPAIRING, PAR_STAGE_VERIFYING_REPAIRED,
-    PAR_STAGE_VERIFYING_SOURCES,
+    smart_calc_range_crc, PAR_STAGE_LOADING_PARS, PAR_STAGE_REPAIRING,
+    PAR_STAGE_VERIFYING_REPAIRED, PAR_STAGE_VERIFYING_SOURCES,
 };
 
 // ============================================================================
@@ -531,7 +529,8 @@ pub fn parse_unpack_message(
         info.reset_stage_time = 1;
     }
 
-    if !is_seven_zip && (info.strip_extracting_dir != 0 || text.starts_with(b"Unrar: Extracting ")) {
+    if !is_seven_zip && (info.strip_extracting_dir != 0 || text.starts_with(b"Unrar: Extracting "))
+    {
         info.has_extracting_progress = 1;
     }
 
@@ -698,17 +697,35 @@ mod tests {
         let l3 = CString::new(" Compression: RAR 5.0(v50) -m3").unwrap();
         unsafe {
             assert_eq!(
-                parse_rar_lister_line_cstr(l1.as_ptr(), 950, &mut max_size, &mut compressed, &mut last_size_max),
+                parse_rar_lister_line_cstr(
+                    l1.as_ptr(),
+                    950,
+                    &mut max_size,
+                    &mut compressed,
+                    &mut last_size_max
+                ),
                 RAR_LISTER_NAME
             );
             assert_eq!(
-                parse_rar_lister_line_cstr(l2.as_ptr(), 950, &mut max_size, &mut compressed, &mut last_size_max),
+                parse_rar_lister_line_cstr(
+                    l2.as_ptr(),
+                    950,
+                    &mut max_size,
+                    &mut compressed,
+                    &mut last_size_max
+                ),
                 RAR_LISTER_SIZE_NEW_MAX
             );
             assert_eq!(max_size, 1000);
             assert_eq!(last_size_max, 1);
             assert_eq!(
-                parse_rar_lister_line_cstr(l3.as_ptr(), 950, &mut max_size, &mut compressed, &mut last_size_max),
+                parse_rar_lister_line_cstr(
+                    l3.as_ptr(),
+                    950,
+                    &mut max_size,
+                    &mut compressed,
+                    &mut last_size_max
+                ),
                 RAR_LISTER_COMPRESSION_TERMINATE
             );
             assert_eq!(compressed, 1);
@@ -723,10 +740,7 @@ mod tests {
         }
         let mut key = [0u8; 16];
         rar3_swizzle_key(&digest, &mut key);
-        assert_eq!(
-            key,
-            [3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12]
-        );
+        assert_eq!(key, [3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12]);
 
         let mut val = [0u8; 32];
         val[0] = 0xAA;
@@ -798,7 +812,10 @@ mod tests {
             false,
         );
         assert_eq!(info.strip_extracting_dir, 1);
-        assert_eq!(&b"Unrar: Extracting  /dst/_unpack/video.mkv"[info.stripped_suffix_offset..], b"video.mkv");
+        assert_eq!(
+            &b"Unrar: Extracting  /dst/_unpack/video.mkv"[info.stripped_suffix_offset..],
+            b"video.mkv"
+        );
         assert_eq!(info.has_extracting_progress, 1);
     }
 }

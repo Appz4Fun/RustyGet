@@ -11,7 +11,9 @@ struct CountingAllocator;
 
 fn count() {
     let _ = ALLOCATIONS.try_with(|n| {
-        if let Some(value) = n.get() { n.set(Some(value + 1)); }
+        if let Some(value) = n.get() {
+            n.set(Some(value + 1));
+        }
     });
 }
 

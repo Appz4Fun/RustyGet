@@ -40,7 +40,10 @@ pub fn trim<'a>(text: &'a [u8], chars: &[u8]) -> &'a [u8] {
     match text.iter().position(|b| !chars.contains(b)) {
         None => &[],
         Some(begin) => {
-            let end = text.iter().rposition(|b| !chars.contains(b)).unwrap_or(begin);
+            let end = text
+                .iter()
+                .rposition(|b| !chars.contains(b))
+                .unwrap_or(begin);
             &text[begin..=end]
         }
     }
@@ -65,8 +68,10 @@ fn eq_icase(text: &[u8], pos: usize, word: &[u8]) -> bool {
 /// (`(part\d+\.rar|vol\d+\+\d+\.par2|7z\.\d{3}|r\d{2}|z\d{2}|nzb|...)$`, icase)?
 fn extension_tail(text: &[u8], pos: usize) -> bool {
     let rest = &text[pos..];
-    let words: [&[u8]; 19] = [b"nzb", b"mkv", b"mp4", b"m4v", b"avi", b"ts", b"rar", b"par2", b"7z", b"zip",
-                              b"nfo", b"sfv", b"srr", b"srt", b"sub", b"idx", b"jpg", b"png", b"txt"];
+    let words: [&[u8]; 19] = [
+        b"nzb", b"mkv", b"mp4", b"m4v", b"avi", b"ts", b"rar", b"par2", b"7z", b"zip", b"nfo",
+        b"sfv", b"srr", b"srt", b"sub", b"idx", b"jpg", b"png", b"txt",
+    ];
     let digits = |s: &[u8]| s.iter().take_while(|&&b| ascii_digit(b)).count();
     // part\d+\.rar
     if eq_icase(rest, 0, b"part") {
@@ -90,10 +95,16 @@ fn extension_tail(text: &[u8], pos: usize) -> bool {
         return true;
     }
     // r\d{2}, z\d{2}
-    if rest.len() == 3 && (rest[0] | 0x20 == b'r' || rest[0] | 0x20 == b'z') && ascii_digit(rest[1]) && ascii_digit(rest[2]) {
+    if rest.len() == 3
+        && (rest[0] | 0x20 == b'r' || rest[0] | 0x20 == b'z')
+        && ascii_digit(rest[1])
+        && ascii_digit(rest[2])
+    {
         return true;
     }
-    words.iter().any(|w| rest.len() == w.len() && rest.eq_ignore_ascii_case(w))
+    words
+        .iter()
+        .any(|w| rest.len() == w.len() && rest.eq_ignore_ascii_case(w))
 }
 
 /// regex_search for `\.(alternation)$`: the leftmost '.' after which an
@@ -102,8 +113,20 @@ fn find_extension(text: &[u8]) -> Option<usize> {
     (0..text.len()).find(|&i| text[i] == b'.' && extension_tail(text, i + 1))
 }
 
-const JUNK: [&[u8]; 12] = [b"xpost", b"postbot", b"obfuscated", b"scrambled", b"asrequested", b"rp", b"rakuv",
-                           b"buymore", b"chamele0n", b"sample", b"repost", b""];
+const JUNK: [&[u8]; 12] = [
+    b"xpost",
+    b"postbot",
+    b"obfuscated",
+    b"scrambled",
+    b"asrequested",
+    b"rp",
+    b"rakuv",
+    b"buymore",
+    b"chamele0n",
+    b"sample",
+    b"repost",
+    b"",
+];
 
 /// Can `([.\-_ ](xpost|...|rakuv\w*|...))+$` (icase) match from `pos` to the end?
 fn junk_from(text: &[u8], pos: usize) -> bool {
@@ -248,7 +271,9 @@ fn is_year_token(tok: &[u8]) -> bool {
 /// `^(\d{3,4})[pi]$|^4k$|^uhd$|^fhd$`
 fn is_resolution_token(tok: &[u8]) -> bool {
     let n = tok.len();
-    (n == 4 || n == 5) && tok[..n - 1].iter().all(|&b| ascii_digit(b)) && matches!(tok[n - 1], b'p' | b'i')
+    (n == 4 || n == 5)
+        && tok[..n - 1].iter().all(|&b| ascii_digit(b))
+        && matches!(tok[n - 1], b'p' | b'i')
         || tok == b"4k"
         || tok == b"uhd"
         || tok == b"fhd"
@@ -272,7 +297,9 @@ pub fn short_query(title: &[u8]) -> Vec<u8> {
     // ^(\d{3,4}p|4k|uhd)$
     let resolution = |t: &[u8]| {
         let n = t.len();
-        (n == 4 || n == 5) && t[..n - 1].iter().all(|&b| ascii_digit(b)) && t[n - 1] == b'p' || t == b"4k" || t == b"uhd"
+        (n == 4 || n == 5) && t[..n - 1].iter().all(|&b| ascii_digit(b)) && t[n - 1] == b'p'
+            || t == b"4k"
+            || t == b"uhd"
     };
     if let Some(t) = tokens[cut + 1..].iter().find(|t| resolution(t)) {
         query.push(b' ');
@@ -318,7 +345,12 @@ fn episode_range_at(s: &[u8], start: usize) -> Option<RangeMatch> {
     if !matches!(s.get(start), Some(b's') | Some(b'S')) {
         return None;
     }
-    let run = |p: usize| s[p.min(s.len())..].iter().take_while(|&&b| ascii_digit(b)).count();
+    let run = |p: usize| {
+        s[p.min(s.len())..]
+            .iter()
+            .take_while(|&&b| ascii_digit(b))
+            .count()
+    };
     let is_e = |p: usize| matches!(s.get(p), Some(b'e') | Some(b'E'));
     // after the final [eE](\d{1,4}) group: -[eE]?(\d{1,4})(?![0-9A-Za-z])
     let tail = |g1_end: usize| -> Option<((usize, usize), usize)> {
@@ -342,7 +374,12 @@ fn episode_range_at(s: &[u8], start: usize) -> Option<RangeMatch> {
         None
     };
     // (?:[eE]\d{1,4})* greedily, then [eE](\d{1,4}) and the tail: backtracking order
-    fn groups(p: usize, run: &dyn Fn(usize) -> usize, is_e: &dyn Fn(usize) -> bool, tail: Tail) -> Option<RangeMatch> {
+    fn groups(
+        p: usize,
+        run: &dyn Fn(usize) -> usize,
+        is_e: &dyn Fn(usize) -> bool,
+        tail: Tail,
+    ) -> Option<RangeMatch> {
         if is_e(p) {
             let n = run(p + 1).min(4);
             // one more repetition first (greedy), digits greedy
@@ -377,7 +414,9 @@ fn rewrite_episode_ranges(clean: &[u8]) -> Vec<u8> {
     let mut pos = 0;
     while pos <= clean.len() {
         let found = (pos..clean.len()).find_map(|i| episode_range_at(clean, i).map(|m| (i, m)));
-        let Some((start, (g1_end, g2, g3, end))) = found else { break };
+        let Some((start, (g1_end, g2, g3, end))) = found else {
+            break;
+        };
         let first = atoi(&clean[g2.0..g2.1]);
         let last = atoi(&clean[g3.0..g3.1]);
         out.extend_from_slice(&clean[rest..start]);
@@ -401,18 +440,23 @@ fn rewrite_episode_ranges(clean: &[u8]) -> Vec<u8> {
 }
 
 fn not_a_group(word: &[u8]) -> bool {
-    const WORDS: [&[u8]; 15] = [b"hd", b"ma", b"dl", b"rip", b"ray", b"dts", b"hdr", b"dv", b"ac3", b"eac3", b"dd",
-                                b"ddp", b"x", b"e", b"es"];
+    const WORDS: [&[u8]; 15] = [
+        b"hd", b"ma", b"dl", b"rip", b"ray", b"dts", b"hdr", b"dv", b"ac3", b"eac3", b"dd", b"ddp",
+        b"x", b"e", b"es",
+    ];
     word.len() < 2 && !c_alpha(word[0]) || WORDS.contains(&word)
 }
 
 /// `^(ddpa|ddp|dd|eac3|ac3|aac|dtshd|dtsx|dtses|dts|truehd|flac|opus|mp3|lpcm|pcm)(\d?)$`: (kind, digit).
 fn audio(tok: &[u8]) -> Option<(&[u8], &[u8])> {
-    const KINDS: [&[u8]; 16] = [b"ddpa", b"ddp", b"dd", b"eac3", b"ac3", b"aac", b"dtshd", b"dtsx", b"dtses", b"dts",
-                                b"truehd", b"flac", b"opus", b"mp3", b"lpcm", b"pcm"];
+    const KINDS: [&[u8]; 16] = [
+        b"ddpa", b"ddp", b"dd", b"eac3", b"ac3", b"aac", b"dtshd", b"dtsx", b"dtses", b"dts",
+        b"truehd", b"flac", b"opus", b"mp3", b"lpcm", b"pcm",
+    ];
     KINDS.iter().find_map(|k| {
         let rest = tok.strip_prefix(*k)?;
-        (rest.is_empty() || rest.len() == 1 && ascii_digit(rest[0])).then_some((&tok[..k.len()], rest))
+        (rest.is_empty() || rest.len() == 1 && ascii_digit(rest[0]))
+            .then_some((&tok[..k.len()], rest))
     })
 }
 
@@ -426,7 +470,10 @@ pub fn parse(name: &[u8]) -> Attrs {
     if let Some(hyphen) = clean.iter().rposition(|&b| b == b'-') {
         let tail = trim(&clean[hyphen + 1..], b"\"' ");
         let lower_tail = lower(tail);
-        if !tail.is_empty() && !tail.iter().any(|b| b" .\"'".contains(b)) && !not_a_group(&lower_tail) {
+        if !tail.is_empty()
+            && !tail.iter().any(|b| b" .\"'".contains(b))
+            && !not_a_group(&lower_tail)
+        {
             attrs.group = lower_tail;
             body = &clean[..hyphen];
         } else if tail.is_empty() {
@@ -436,28 +483,63 @@ pub fn parse(name: &[u8]) -> Attrs {
 
     // spellings that contain separators become one word
     let mut text = lower(body);
-    const JOINS: [(&[u8], &[u8]); 19] = [(b"hdr10+", b"hdr10plus"), (b"dd+", b"ddp"), (b"e-ac-3", b"eac3"),
-        (b"e-ac3", b"eac3"), (b"blu-ray", b"bluray"), (b"web-dl", b"webdl"), (b"dts-hd", b"dtshd"), (b"dts-x", b"dtsx"),
-        (b"dts-es", b"dtses"), (b"ac-3", b"ac3"), (b"dolby vision", b"dovi"), (b"dolby.vision", b"dovi"),
-        (b"dolby-vision", b"dovi"), (b"dolby_vision", b"dovi"), (b"dolbyvision", b"dovi"), (b"hdr 10", b"hdr10"),
-        (b"web dl", b"webdl"), (b"dts hd", b"dtshd"), (b"blu ray", b"bluray")];
+    const JOINS: [(&[u8], &[u8]); 19] = [
+        (b"hdr10+", b"hdr10plus"),
+        (b"dd+", b"ddp"),
+        (b"e-ac-3", b"eac3"),
+        (b"e-ac3", b"eac3"),
+        (b"blu-ray", b"bluray"),
+        (b"web-dl", b"webdl"),
+        (b"dts-hd", b"dtshd"),
+        (b"dts-x", b"dtsx"),
+        (b"dts-es", b"dtses"),
+        (b"ac-3", b"ac3"),
+        (b"dolby vision", b"dovi"),
+        (b"dolby.vision", b"dovi"),
+        (b"dolby-vision", b"dovi"),
+        (b"dolby_vision", b"dovi"),
+        (b"dolbyvision", b"dovi"),
+        (b"hdr 10", b"hdr10"),
+        (b"web dl", b"webdl"),
+        (b"dts hd", b"dtshd"),
+        (b"blu ray", b"bluray"),
+    ];
     for (from, to) in JOINS {
         let mut pos = crate::bytes::find(&text, from);
         while let Some(p) = pos {
             text.splice(p..p + from.len(), to.iter().copied());
             let next = p + to.len();
-            pos = if next <= text.len() { crate::bytes::find(&text[next..], from).map(|q| q + next) } else { None };
+            pos = if next <= text.len() {
+                crate::bytes::find(&text[next..], from).map(|q| q + next)
+            } else {
+                None
+            };
         }
     }
 
-    let tokens: Vec<&[u8]> = text.split(|&b| !c_alnum(b)).filter(|t| !t.is_empty()).collect();
+    let tokens: Vec<&[u8]> = text
+        .split(|&b| !c_alnum(b))
+        .filter(|t| !t.is_empty())
+        .collect();
     let set = |s: &mut BTreeSet<Vec<u8>>, v: &[u8]| {
         s.insert(v.to_vec());
     };
-    const NETWORKS: [&[u8]; 22] = [b"amzn", b"nf", b"max", b"atvp", b"dsnp", b"hulu", b"pcok", b"pmtp", b"cr", b"stan",
-        b"itv", b"bbc", b"red", b"sho", b"hbo", b"pmnt", b"ctv", b"crav", b"nbc", b"abc", b"cbs", b"ifc"];
-    const EDITIONS: [&[u8]; 9] = [b"extended", b"unrated", b"uncut", b"remastered", b"theatrical", b"imax",
-                                  b"criterion", b"hybrid", b"dc"];
+    const NETWORKS: [&[u8]; 22] = [
+        b"amzn", b"nf", b"max", b"atvp", b"dsnp", b"hulu", b"pcok", b"pmtp", b"cr", b"stan",
+        b"itv", b"bbc", b"red", b"sho", b"hbo", b"pmnt", b"ctv", b"crav", b"nbc", b"abc", b"cbs",
+        b"ifc",
+    ];
+    const EDITIONS: [&[u8]; 9] = [
+        b"extended",
+        b"unrated",
+        b"uncut",
+        b"remastered",
+        b"theatrical",
+        b"imax",
+        b"criterion",
+        b"hybrid",
+        b"dc",
+    ];
 
     let mut title_done = false;
     let mut title: Vec<u8> = Vec::new();
@@ -505,7 +587,10 @@ pub fn parse(name: &[u8]) -> Attrs {
         } else if matches!(tok, b"x264" | b"h264" | b"avc") {
             set(&mut attrs.codec, b"avc");
         } else if (tok == b"h" || tok == b"x") && (next == b"265" || next == b"264") {
-            set(&mut attrs.codec, if next == b"265" { b"hevc" } else { b"avc" });
+            set(
+                &mut attrs.codec,
+                if next == b"265" { b"hevc" } else { b"avc" },
+            );
             i += 1;
         } else if matches!(tok, b"av1" | b"xvid" | b"vc1" | b"mpeg2") {
             set(&mut attrs.codec, tok);
@@ -539,7 +624,10 @@ pub fn parse(name: &[u8]) -> Attrs {
         } else if tok == b"hd" && i as i64 - last_audio <= 1 {
             set(&mut attrs.audio, b"hd");
             last_audio = i as i64;
-        } else if matches!(tok, b"5" | b"7" | b"2" | b"6" | b"1") && (next == b"1" || next == b"0") && i as i64 - last_audio <= 3 {
+        } else if matches!(tok, b"5" | b"7" | b"2" | b"6" | b"1")
+            && (next == b"1" || next == b"0")
+            && i as i64 - last_audio <= 3
+        {
             attrs.channels.insert([tok, b".", next].concat());
             i += 1;
         } else if tok.len() == 3 && tok[1] == b'c' && tok[2] == b'h' && c_digit(tok[0]) {
@@ -588,7 +676,9 @@ pub fn parse(name: &[u8]) -> Attrs {
 fn alt_episode(tok: &[u8]) -> Option<(&[u8], &[u8])> {
     let x = tok.iter().position(|&b| b == b'x')?;
     let (s, e) = (&tok[..x], &tok[x + 1..]);
-    ((1..=2).contains(&s.len()) && s.iter().all(|&b| ascii_digit(b)) && (2..=3).contains(&e.len())
+    ((1..=2).contains(&s.len())
+        && s.iter().all(|&b| ascii_digit(b))
+        && (2..=3).contains(&e.len())
         && e.iter().all(|&b| ascii_digit(b)))
     .then_some((s, e))
 }
@@ -606,7 +696,8 @@ fn bit_depth(tok: &[u8]) -> Option<Vec<u8>> {
 /// `^(w1|w2)\d?$`
 fn word_digit(tok: &[u8], words: &[&[u8]]) -> bool {
     words.iter().any(|w| {
-        tok.strip_prefix(*w).is_some_and(|rest| rest.is_empty() || rest.len() == 1 && ascii_digit(rest[0]))
+        tok.strip_prefix(*w)
+            .is_some_and(|rest| rest.is_empty() || rest.len() == 1 && ascii_digit(rest[0]))
     })
 }
 
@@ -627,17 +718,26 @@ pub fn same_release(a_name: &[u8], b_name: &[u8]) -> bool {
     if a.group.is_empty() {
         return normalize(a_name) == normalize(b_name); // nothing to anchor on
     }
-    if a.title != b.title || a.group != b.group || a.seasons != b.seasons || a.episodes != b.episodes
-        || a.repack != b.repack || a.proper != b.proper || a.hdr != b.hdr
+    if a.title != b.title
+        || a.group != b.group
+        || a.seasons != b.seasons
+        || a.episodes != b.episodes
+        || a.repack != b.repack
+        || a.proper != b.proper
+        || a.hdr != b.hdr
     {
         return false;
     }
     if a.year != 0 && b.year != 0 && a.year != b.year {
         return false;
     }
-    compatible(&a.resolution, &b.resolution) && compatible(&a.quality, &b.quality) && compatible(&a.codec, &b.codec)
-        && compatible(&a.bit_depth, &b.bit_depth) && compatible(&a.audio, &b.audio)
-        && compatible(&a.channels, &b.channels) && compatible(&a.network, &b.network)
+    compatible(&a.resolution, &b.resolution)
+        && compatible(&a.quality, &b.quality)
+        && compatible(&a.codec, &b.codec)
+        && compatible(&a.bit_depth, &b.bit_depth)
+        && compatible(&a.audio, &b.audio)
+        && compatible(&a.channels, &b.channels)
+        && compatible(&a.network, &b.network)
         && compatible(&a.edition, &b.edition)
 }
 
@@ -651,7 +751,17 @@ pub fn encode(a: &Attrs) -> Vec<u8> {
         out.extend_from_slice(&(s.len() as u32).to_le_bytes());
         out.extend_from_slice(s);
     };
-    for set in [&a.resolution, &a.quality, &a.codec, &a.bit_depth, &a.audio, &a.channels, &a.network, &a.edition, &a.hdr] {
+    for set in [
+        &a.resolution,
+        &a.quality,
+        &a.codec,
+        &a.bit_depth,
+        &a.audio,
+        &a.channels,
+        &a.network,
+        &a.edition,
+        &a.hdr,
+    ] {
         n(&mut out, set.len());
         for v in set {
             string(&mut out, v);
@@ -677,10 +787,22 @@ mod tests {
 
     #[test]
     fn cleans_extensions_tags_and_junk() {
-        assert_eq!(clean(b"[01/17] \"Show.S01E02.1080p.WEB-GRP.part01.rar\" yEnc"), b"\"Show.S01E02.1080p.WEB-GRP.part01.rar\" yEnc".to_vec());
-        assert_eq!(clean(b"Show.S01E02.1080p.WEB-GRP.mkv"), b"Show.S01E02.1080p.WEB-GRP".to_vec());
-        assert_eq!(clean(b"Show.S01E02.H.265-GRP-xpost"), b"Show.S01E02.H.265-GRP".to_vec());
-        assert_eq!(clean(b"Show.S01E02-GRP.7z.001"), b"Show.S01E02-GRP".to_vec());
+        assert_eq!(
+            clean(b"[01/17] \"Show.S01E02.1080p.WEB-GRP.part01.rar\" yEnc"),
+            b"\"Show.S01E02.1080p.WEB-GRP.part01.rar\" yEnc".to_vec()
+        );
+        assert_eq!(
+            clean(b"Show.S01E02.1080p.WEB-GRP.mkv"),
+            b"Show.S01E02.1080p.WEB-GRP".to_vec()
+        );
+        assert_eq!(
+            clean(b"Show.S01E02.H.265-GRP-xpost"),
+            b"Show.S01E02.H.265-GRP".to_vec()
+        );
+        assert_eq!(
+            clean(b"Show.S01E02-GRP.7z.001"),
+            b"Show.S01E02-GRP".to_vec()
+        );
         assert_eq!(clean(b"Show-GRP-rakuvFIN_sample"), b"Show-GRP".to_vec());
     }
 
@@ -702,11 +824,23 @@ mod tests {
 
     #[test]
     fn short_query_and_same_release() {
-        assert_eq!(short_query(b"Lucifer.S02E14.Candy.Morningstar.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeST"), b"lucifer s02e14 1080p".to_vec());
-        assert_eq!(short_query(b"Some.Movie.2020.Extended.2160p.UHD-GRP"), b"some movie 2020 2160p".to_vec());
+        assert_eq!(
+            short_query(b"Lucifer.S02E14.Candy.Morningstar.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeST"),
+            b"lucifer s02e14 1080p".to_vec()
+        );
+        assert_eq!(
+            short_query(b"Some.Movie.2020.Extended.2160p.UHD-GRP"),
+            b"some movie 2020 2160p".to_vec()
+        );
         assert_eq!(short_query(b"NoMarkers-GRP"), b"".to_vec());
-        assert!(same_release(b"Show.S01E02.1080p.WEB.H264-GRP", b"Show S01E02 1080p WEB-DL x264-GRP"));
-        assert!(!same_release(b"Show.S01E02.1080p.WEB.H264-GRP", b"Show.S01E02.1080p.WEB.H264-OTHER"));
+        assert!(same_release(
+            b"Show.S01E02.1080p.WEB.H264-GRP",
+            b"Show S01E02 1080p WEB-DL x264-GRP"
+        ));
+        assert!(!same_release(
+            b"Show.S01E02.1080p.WEB.H264-GRP",
+            b"Show.S01E02.1080p.WEB.H264-OTHER"
+        ));
 
         let short_tsv = include_str!("../../tests/testdata/dupesearch/short_query.tsv");
         for line in short_tsv.lines() {
@@ -749,11 +883,26 @@ mod tests {
             luc.as_bytes(),
             b"lucifer.s02e14.candy.morningstar.1080p.dts-hd.ma.5.1.avc.remux-framestor.mkv"
         ));
-        assert!(!same_release(luc.as_bytes(), luc.replacen("FraMeSToR", "EPSiLON", 1).as_bytes()));
-        assert!(!same_release(luc.as_bytes(), luc.replacen("1080p", "2160p", 1).as_bytes()));
-        assert!(!same_release(luc.as_bytes(), luc.replacen("S02E14", "S02E15", 1).as_bytes()));
-        assert!(!same_release(luc.as_bytes(), luc.replacen("1080p", "REPACK.1080p", 1).as_bytes()));
-        assert!(!same_release(luc.as_bytes(), luc.replacen("DTS-HD.MA.5.1", "DDP5.1", 1).as_bytes()));
+        assert!(!same_release(
+            luc.as_bytes(),
+            luc.replacen("FraMeSToR", "EPSiLON", 1).as_bytes()
+        ));
+        assert!(!same_release(
+            luc.as_bytes(),
+            luc.replacen("1080p", "2160p", 1).as_bytes()
+        ));
+        assert!(!same_release(
+            luc.as_bytes(),
+            luc.replacen("S02E14", "S02E15", 1).as_bytes()
+        ));
+        assert!(!same_release(
+            luc.as_bytes(),
+            luc.replacen("1080p", "REPACK.1080p", 1).as_bytes()
+        ));
+        assert!(!same_release(
+            luc.as_bytes(),
+            luc.replacen("DTS-HD.MA.5.1", "DDP5.1", 1).as_bytes()
+        ));
         assert!(!same_release(
             b"Movie.2020.1080p.BluRay.x264-GRP",
             b"Movie.2021.1080p.BluRay.x264-GRP"
@@ -762,7 +911,10 @@ mod tests {
             b"Show.S01E01.1080p.NF.WEB-DL.DDP5.1.H.264-GRP",
             b"Show.S01E01.1080p.AMZN.WEB-DL.DDP5.1.H.264-GRP"
         ));
-        assert!(same_release(luc.as_bytes(), b"Lucifer.S02E14.1080p.BluRay.REMUX.AVC-FraMeSToR"));
+        assert!(same_release(
+            luc.as_bytes(),
+            b"Lucifer.S02E14.1080p.BluRay.REMUX.AVC-FraMeSToR"
+        ));
         assert!(!same_release(luc.as_bytes(), b"Lucifer.S02E14.1080p.REMUX"));
 
         let hdr_a = b"Shrinking.S02E06.2160p.ATVP.WEB-DL.DDPA5.1.HDR.DV.HEVC-NTb";
@@ -783,28 +935,61 @@ mod tests {
             b"Shrinking S01E10 Closure 2160p ATVP WEB-DL DDP5 1 DV H 265-NTb"
         ));
 
-        assert!(!same_release(b"Movie.2020.1080p.WEB.DDP5.1.H.264", b"Movie.2020.1080p.WEB.DDP5.1.H.265"));
-        assert!(!same_release(b"Movie.2020.1080p.WEB.DDP5.1.H.264-GRP", b"Movie.2020.1080p.WEB.DDP5.1.H.265-GRP"));
-        assert!(same_release(b"Movie.2020.1080p.WEB.DDP5.1.H.265-GRP", b"Movie 2020 1080p WEB DDP5 1 x265-GRP"));
+        assert!(!same_release(
+            b"Movie.2020.1080p.WEB.DDP5.1.H.264",
+            b"Movie.2020.1080p.WEB.DDP5.1.H.265"
+        ));
+        assert!(!same_release(
+            b"Movie.2020.1080p.WEB.DDP5.1.H.264-GRP",
+            b"Movie.2020.1080p.WEB.DDP5.1.H.265-GRP"
+        ));
+        assert!(same_release(
+            b"Movie.2020.1080p.WEB.DDP5.1.H.265-GRP",
+            b"Movie 2020 1080p WEB DDP5 1 x265-GRP"
+        ));
 
         assert!(readable(b"Lucifer.S02E14.1080p.WEB.H264-GRP.mkv"));
         assert!(!readable(b"53a9sd8antphskzkulcik6yrrktj1qft.7z.001"));
         assert!(!readable(b"e630b420289687dc3c66cc3274207902.part01.rar"));
 
-        assert_eq!(parse(b"Show.S01E01-E02.1080p.WEB.h264-GRP").episodes, vec![1, 2]);
-        assert_eq!(parse(b"Show.S01E01-02.1080p.WEB.h264-GRP").episodes, vec![1, 2]);
-        assert!(!same_release(b"Show.S01E01-E02.1080p.WEB.h264-GRP", b"Show.S01E01.1080p.WEB.h264-GRP"));
-        assert!(same_release(b"Show.S01E01-E02.1080p.WEB.h264-GRP", b"Show.S01E01E02.1080p.WEB.h264-GRP"));
+        assert_eq!(
+            parse(b"Show.S01E01-E02.1080p.WEB.h264-GRP").episodes,
+            vec![1, 2]
+        );
+        assert_eq!(
+            parse(b"Show.S01E01-02.1080p.WEB.h264-GRP").episodes,
+            vec![1, 2]
+        );
+        assert!(!same_release(
+            b"Show.S01E01-E02.1080p.WEB.h264-GRP",
+            b"Show.S01E01.1080p.WEB.h264-GRP"
+        ));
+        assert!(same_release(
+            b"Show.S01E01-E02.1080p.WEB.h264-GRP",
+            b"Show.S01E01E02.1080p.WEB.h264-GRP"
+        ));
         let yr = parse(b"Show.S01E01-2023.1080p.WEB.h264-GRP");
         assert_eq!((yr.episodes, yr.year), (vec![1], 2023));
-        assert_eq!(parse(b"Show.S01E05-03.1080p.WEB.h264-GRP").episodes, vec![5]);
+        assert_eq!(
+            parse(b"Show.S01E05-03.1080p.WEB.h264-GRP").episodes,
+            vec![5]
+        );
         assert_eq!(parse(b"Show.S01E01-E02").episodes, vec![1, 2]);
         assert_eq!(parse(b"Show.S01E01-E02.1080p").episodes, vec![1, 2]);
 
-        assert!(!same_release(b"Show.S01E01.REPACK2.1080p.WEB.h264-GRP", b"Show.S01E01.1080p.WEB.h264-GRP"));
-        assert!(!same_release(b"Show.S01E01.PROPER2.1080p.WEB.h264-GRP", b"Show.S01E01.1080p.WEB.h264-GRP"));
+        assert!(!same_release(
+            b"Show.S01E01.REPACK2.1080p.WEB.h264-GRP",
+            b"Show.S01E01.1080p.WEB.h264-GRP"
+        ));
+        assert!(!same_release(
+            b"Show.S01E01.PROPER2.1080p.WEB.h264-GRP",
+            b"Show.S01E01.1080p.WEB.h264-GRP"
+        ));
         assert!(parse(b"Show.S01E01.RERIP3.1080p.WEB.h264-GRP").repack);
-        assert!(same_release(b"Show.S01E01.REPACK2.1080p.WEB.h264-GRP", b"Show S01E01 REPACK2 1080p WEB h264-GRP"));
+        assert!(same_release(
+            b"Show.S01E01.REPACK2.1080p.WEB.h264-GRP",
+            b"Show S01E01 REPACK2 1080p WEB h264-GRP"
+        ));
 
         for name in [
             b"Movie.2020.2160p.DolbyVision.WEB.h265-GRP".as_slice(),
@@ -822,17 +1007,29 @@ mod tests {
             b"2001.Maniacs.2005.1080p.BluRay.x264-GRP"
         ));
         let odyssey = parse(b"2001.A.Space.Odyssey.1968.1080p.BluRay.x264-GRP");
-        assert_eq!((odyssey.title, odyssey.year), (b"2001aspaceodyssey".to_vec(), 1968));
+        assert_eq!(
+            (odyssey.title, odyssey.year),
+            (b"2001aspaceodyssey".to_vec(), 1968)
+        );
         let war = parse(b"1917.2019.1080p.BluRay.x264-GRP");
         assert_eq!((war.title, war.year), (b"1917".to_vec(), 2019));
         assert_eq!(parse(b"2012.1080p.BluRay.x264-GRP").title, b"2012");
         assert!(readable(b"1917.2019.1080p.BluRay.x264-GRP.mkv"));
-        assert!(!same_release(b"1917.2019.1080p.BluRay.x264-GRP", b"2012.2009.1080p.BluRay.x264-GRP"));
+        assert!(!same_release(
+            b"1917.2019.1080p.BluRay.x264-GRP",
+            b"2012.2009.1080p.BluRay.x264-GRP"
+        ));
         let show = parse(b"The.Paper.2025.S01E01.1080p.WEB.h264-GRP");
         assert_eq!((show.title, show.year), (b"thepaper".to_vec(), 2025));
 
-        assert!(!same_release(b"Show.S01E01.1080i.HDTV.h264-GRP", b"Show.S01E01.1080p.HDTV.h264-GRP"));
-        assert!(same_release(b"Show.S01E01.1080i.HDTV.h264-GRP", b"Show S01E01 1080i HDTV h264-GRP"));
+        assert!(!same_release(
+            b"Show.S01E01.1080i.HDTV.h264-GRP",
+            b"Show.S01E01.1080p.HDTV.h264-GRP"
+        ));
+        assert!(same_release(
+            b"Show.S01E01.1080i.HDTV.h264-GRP",
+            b"Show S01E01 1080i HDTV h264-GRP"
+        ));
 
         let matching_tsv = include_str!("../../tests/testdata/dupesearch/release_matching.tsv");
         let lines: Vec<&str> = matching_tsv.lines().collect();

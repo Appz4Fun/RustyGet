@@ -104,7 +104,12 @@ pub fn route(url: &[u8], request: &[u8], get: bool, protocol: i32) -> Route {
 }
 
 /// BuildResponse: the text before and after a command's response.
-pub fn envelope(protocol: i32, fault: bool, callback: Option<&[u8]>, id: Option<&[u8]>) -> (Vec<u8>, Vec<u8>) {
+pub fn envelope(
+    protocol: i32,
+    fault: bool,
+    callback: Option<&[u8]>,
+    id: Option<&[u8]>,
+) -> (Vec<u8>, Vec<u8>) {
     let xml = protocol == RP_XML_RPC;
     let jsonp = protocol == RP_JSONP_RPC;
     let mut head = Vec::new();
@@ -114,7 +119,11 @@ pub fn envelope(protocol: i32, fault: bool, callback: Option<&[u8]>, id: Option<
     if jsonp {
         head.push(b'(');
     }
-    head.extend_from_slice(if xml { b"<?xml version=\"1.0\"?>\n<methodResponse>\n" } else { b"{\n\"version\" : \"1.1\",\n" });
+    head.extend_from_slice(if xml {
+        b"<?xml version=\"1.0\"?>\n<methodResponse>\n"
+    } else {
+        b"{\n\"version\" : \"1.1\",\n"
+    });
     if let Some(id) = id.filter(|id| !xml && !id.is_empty()) {
         head.extend_from_slice(b"\"id\" : ");
         head.extend_from_slice(id);
@@ -132,7 +141,11 @@ pub fn envelope(protocol: i32, fault: bool, callback: Option<&[u8]>, id: Option<
         (false, true) => b"</value></param></params>\n",
         _ => b"",
     });
-    tail.extend_from_slice(if xml { b"</methodResponse>".as_slice() } else { b"\n}" });
+    tail.extend_from_slice(if xml {
+        b"</methodResponse>".as_slice()
+    } else {
+        b"\n}"
+    });
     if jsonp {
         tail.push(b')');
     }
@@ -172,15 +185,35 @@ pub struct Decision {
 /// POST or an error command runs; any other method answers error 4, through
 /// the callback for JSON-P.
 pub fn decide(protocol: i32, http_method: i32, safe: bool, error: bool, jsonp: bool) -> Decision {
-    let refuse = |dispatch, code, text| Decision { dispatch, code, text: Some(text) };
+    let refuse = |dispatch, code, text| Decision {
+        dispatch,
+        code,
+        text: Some(text),
+    };
     if protocol == RP_JSONP_RPC && !jsonp {
-        refuse(DP_REFUSE_IN_CALLBACK, 403, c"JSON-P is turned off (option JsonP). Use JSON-RPC or XML-RPC instead")
+        refuse(
+            DP_REFUSE_IN_CALLBACK,
+            403,
+            c"JSON-P is turned off (option JsonP). Use JSON-RPC or XML-RPC instead",
+        )
     } else if safe || http_method == HM_POST || error {
-        Decision { dispatch: DP_EXECUTE, code: 0, text: None }
+        Decision {
+            dispatch: DP_EXECUTE,
+            code: 0,
+            text: None,
+        }
     } else if protocol == RP_JSONP_RPC {
-        refuse(DP_REFUSE_IN_CALLBACK, 4, c"Not safe procedure for JSON-P. Use JSON-RPC or XML-RPC with HTTP-Method POST instead")
+        refuse(
+            DP_REFUSE_IN_CALLBACK,
+            4,
+            c"Not safe procedure for JSON-P. Use JSON-RPC or XML-RPC with HTTP-Method POST instead",
+        )
     } else {
-        refuse(DP_REFUSE, 4, c"Not safe procedure for HTTP-Method GET. Use Method POST instead")
+        refuse(
+            DP_REFUSE,
+            4,
+            c"Not safe procedure for HTTP-Method GET. Use Method POST instead",
+        )
     }
 }
 
@@ -208,7 +241,10 @@ mod tests {
     #[test]
     fn routes() {
         let r = route(b"/jsonrpc/log?IDFrom=0", b"", true, RP_JSON_RPC);
-        assert_eq!((r.method.as_slice(), r.params), (b"log".as_slice(), Some(13)));
+        assert_eq!(
+            (r.method.as_slice(), r.params),
+            (b"log".as_slice(), Some(13))
+        );
         let r = route(b"/jsonrpc", b"", true, RP_JSON_RPC);
         assert_eq!((r.method.as_slice(), r.params), (b"".as_slice(), Some(1)));
         let r = route(b"/jsonrpc/?abc", b"", true, RP_JSON_RPC);
@@ -218,7 +254,12 @@ mod tests {
         assert_eq!(r.method, b"status");
         let (s, l) = r.id.unwrap();
         assert_eq!(&req[s..s + l as usize], b"7");
-        let r = route(b"/xmlrpc", b"<methodName>version</methodName>", false, RP_XML_RPC);
+        let r = route(
+            b"/xmlrpc",
+            b"<methodName>version</methodName>",
+            false,
+            RP_XML_RPC,
+        );
         assert_eq!(r.method, b"version");
     }
 
@@ -233,8 +274,16 @@ mod tests {
     fn access_of_jsonp() {
         for protocol in [RP_UNDEFINED, RP_XML_RPC, RP_JSON_RPC, RP_JSONP_RPC, -1, 4] {
             for user in [UA_CONTROL, UA_RESTRICTED, 2, -1, 3] {
-                let expected = if protocol == RP_JSONP_RPC && user == UA_CONTROL { UA_RESTRICTED } else { user };
-                assert_eq!(access(protocol, user), expected, "protocol {protocol} access {user}");
+                let expected = if protocol == RP_JSONP_RPC && user == UA_CONTROL {
+                    UA_RESTRICTED
+                } else {
+                    user
+                };
+                assert_eq!(
+                    access(protocol, user),
+                    expected,
+                    "protocol {protocol} access {user}"
+                );
             }
         }
     }
@@ -251,15 +300,34 @@ mod tests {
                     if protocol == RP_JSONP_RPC && !jsonp {
                         assert_eq!((d.dispatch, d.code), (DP_REFUSE_IN_CALLBACK, 403));
                     } else if runs {
-                        assert_eq!(d, Decision { dispatch: DP_EXECUTE, code: 0, text: None });
+                        assert_eq!(
+                            d,
+                            Decision {
+                                dispatch: DP_EXECUTE,
+                                code: 0,
+                                text: None
+                            }
+                        );
                     } else {
                         let callback = protocol == RP_JSONP_RPC;
-                        assert_eq!((d.dispatch, d.code), (if callback { DP_REFUSE_IN_CALLBACK } else { DP_REFUSE }, 4));
+                        assert_eq!(
+                            (d.dispatch, d.code),
+                            (
+                                if callback {
+                                    DP_REFUSE_IN_CALLBACK
+                                } else {
+                                    DP_REFUSE
+                                },
+                                4
+                            )
+                        );
                     }
                 }
             }
         }
-        assert_eq!(decide(RP_JSON_RPC, 1, false, false, false).text,
-            Some(c"Not safe procedure for HTTP-Method GET. Use Method POST instead"));
+        assert_eq!(
+            decide(RP_JSON_RPC, 1, false, false, false).text,
+            Some(c"Not safe procedure for HTTP-Method GET. Use Method POST instead")
+        );
     }
 }

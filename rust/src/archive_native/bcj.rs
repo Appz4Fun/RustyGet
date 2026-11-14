@@ -27,7 +27,6 @@ pub enum Arch {
 }
 
 impl Filter {
-
     /// Undoes this filter on `buf`, the stream's bytes from its start. Returns how many bytes from the front are
     /// final: the rest are the last few a branch could still start in, which only the stream's end settles.
     pub fn undo(self, buf: &mut [u8]) -> usize {
@@ -213,8 +212,10 @@ fn powerpc(buf: &mut [u8], now: u32) -> usize {
 }
 
 fn ia64(buf: &mut [u8], now: u32) -> usize {
-    const BRANCH: [u32; 32] =
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 6, 6, 0, 0, 7, 7, 4, 4, 0, 0, 4, 4, 0, 0];
+    const BRANCH: [u32; 32] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 6, 6, 0, 0, 7, 7, 4, 4, 0, 0, 4, 4,
+        0, 0,
+    ];
     let mut i = 0;
     while i + 16 <= buf.len() {
         let mask = BRANCH[usize::from(buf[i] & 0x1f)];
@@ -286,10 +287,14 @@ fn arm_thumb(buf: &mut [u8], now: u32) -> usize {
 fn sparc(buf: &mut [u8], now: u32) -> usize {
     let mut i = 0;
     while i + 4 <= buf.len() {
-        if (buf[i] == 0x40 && buf[i + 1] & 0xc0 == 0) || (buf[i] == 0x7f && buf[i + 1] & 0xc0 == 0xc0) {
+        if (buf[i] == 0x40 && buf[i + 1] & 0xc0 == 0)
+            || (buf[i] == 0x7f && buf[i + 1] & 0xc0 == 0xc0)
+        {
             let src = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) << 2;
             let mut dest = src.wrapping_sub(now.wrapping_add(i as u32)) >> 2;
-            dest = ((0u32.wrapping_sub((dest >> 22) & 1) << 22) & 0x3fff_ffff) | (dest & 0x3f_ffff) | 0x4000_0000;
+            dest = ((0u32.wrapping_sub((dest >> 22) & 1) << 22) & 0x3fff_ffff)
+                | (dest & 0x3f_ffff)
+                | 0x4000_0000;
             buf[i..i + 4].copy_from_slice(&dest.to_be_bytes());
         }
         i += 4;
@@ -345,13 +350,34 @@ mod tests {
         let filters = [
             Filter::Delta { dist: 1 },
             Filter::Delta { dist: 4 },
-            Filter::Bcj { arch: Arch::X86, start: 0 },
-            Filter::Bcj { arch: Arch::PowerPc, start: 0 },
-            Filter::Bcj { arch: Arch::Ia64, start: 0 },
-            Filter::Bcj { arch: Arch::Arm, start: 0 },
-            Filter::Bcj { arch: Arch::ArmThumb, start: 0 },
-            Filter::Bcj { arch: Arch::Sparc, start: 0 },
-            Filter::Bcj { arch: Arch::Arm64, start: 0 },
+            Filter::Bcj {
+                arch: Arch::X86,
+                start: 0,
+            },
+            Filter::Bcj {
+                arch: Arch::PowerPc,
+                start: 0,
+            },
+            Filter::Bcj {
+                arch: Arch::Ia64,
+                start: 0,
+            },
+            Filter::Bcj {
+                arch: Arch::Arm,
+                start: 0,
+            },
+            Filter::Bcj {
+                arch: Arch::ArmThumb,
+                start: 0,
+            },
+            Filter::Bcj {
+                arch: Arch::Sparc,
+                start: 0,
+            },
+            Filter::Bcj {
+                arch: Arch::Arm64,
+                start: 0,
+            },
         ];
 
         for f in filters {

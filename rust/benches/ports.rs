@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 
 use md5::{Digest, Md5};
 use nzbget_rs::{
-    binrpc, bytes, crc, decode, deobfuscation, escape, json, nzbfile, paths, text, twin, urlcoord, util, webutil,
+    binrpc, bytes, crc, decode, deobfuscation, escape, json, nzbfile, paths, text, twin, urlcoord,
+    util, webutil,
 };
 
 struct Sample {
@@ -30,7 +31,11 @@ struct Sample {
 /// Times `f` (one operation per call): the call count is raised until a
 /// sample takes at least `target`, then `samples` samples are taken.
 fn measure(mut f: impl FnMut(), quick: bool) -> Sample {
-    let (target, samples) = if quick { (Duration::from_millis(1), 3) } else { (Duration::from_millis(20), 21) };
+    let (target, samples) = if quick {
+        (Duration::from_millis(1), 3)
+    } else {
+        (Duration::from_millis(20), 21)
+    };
     let mut calls: u64 = 1;
     loop {
         let start = Instant::now();
@@ -52,7 +57,11 @@ fn measure(mut f: impl FnMut(), quick: bool) -> Sample {
         })
         .collect();
     times.sort_by(f64::total_cmp);
-    Sample { median: times[times.len() / 2], fastest: times[0], p90: times[(times.len() * 9 / 10).min(times.len() - 1)] }
+    Sample {
+        median: times[times.len() / 2],
+        fastest: times[0],
+        p90: times[(times.len() * 9 / 10).min(times.len() - 1)],
+    }
 }
 
 struct Rng(u64);
@@ -72,10 +81,13 @@ fn c_locale() -> (Vec<u16>, Vec<i32>) {
     let classes = (0..256u32)
         .map(|b| {
             let b = b as u8;
-            (matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) as u16) | ((b.is_ascii_digit() as u16) << 1)
+            (matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) as u16)
+                | ((b.is_ascii_digit() as u16) << 1)
         })
         .collect();
-    let lower = (-128..256).map(|c: i32| if (65..=90).contains(&c) { c + 32 } else { c }).collect();
+    let lower = (-128..256)
+        .map(|c: i32| if (65..=90).contains(&c) { c + 32 } else { c })
+        .collect();
     (classes, lower)
 }
 
@@ -104,7 +116,9 @@ fn par2_set(files: u8, recovery: usize, slice: usize) -> Vec<u8> {
         let mut body = vec![id; 16];
         body.extend((0..32).map(|_| rng.next() as u8));
         body.extend_from_slice(&(rng.next() >> 24).to_le_bytes());
-        body.extend_from_slice(format!("Release.Name.2026.1080p.WEB.h264-GROUP.part{id:02}.rar").as_bytes());
+        body.extend_from_slice(
+            format!("Release.Name.2026.1080p.WEB.h264-GROUP.part{id:02}.rar").as_bytes(),
+        );
         body.resize(body.len().div_ceil(4) * 4, 0);
         set.extend(par2_packet(b"PAR 2.0\0FileDesc", &body));
         let mut ifsc = vec![id; 16];
@@ -135,7 +149,10 @@ fn json_document(items: usize) -> Vec<u8> {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with("--")).collect();
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| !a.starts_with("--"))
+        .collect();
     let filter = args.first().cloned().unwrap_or_default();
     let quick = std::env::var_os("BENCH_QUICK").is_some();
     let mut results: BTreeMap<String, Sample> = BTreeMap::new();
@@ -144,36 +161,64 @@ fn main() {
             return;
         }
         let sample = measure(f, quick);
-        eprintln!("{name}: {:.0} ns (fastest {:.0}, p90 {:.0})", sample.median, sample.fastest, sample.p90);
+        eprintln!(
+            "{name}: {:.0} ns (fastest {:.0}, p90 {:.0})",
+            sample.median, sample.fastest, sample.p90
+        );
         results.insert(name.to_string(), sample);
     };
 
     let mut rng = Rng(0x2545F4914F6CDD1D);
     let (classes, lower_table) = c_locale();
-    let ct = nzbfile::Ctype { classes: &classes, space: 1, digit: 2, lower: &lower_table, char_signed: true };
+    let ct = nzbfile::Ctype {
+        classes: &classes,
+        space: 1,
+        digit: 2,
+        lower: &lower_table,
+        char_signed: true,
+    };
 
-    for (n, step, label) in [(8, 4, "small"), (20000, 2000, "sparse"), (20000, 10, "dense")] {
-        let donors: Vec<_> = (0..n).map(|i| nzbget_rs::streampatchparts::Range {
-            offset: i * 700000, size: 700000,
-        }).collect();
-        let holes: Vec<_> = (0..n).step_by(step).map(|i| nzbget_rs::streampatchparts::Range {
-            offset: i * 700000 + 100, size: 20,
-        }).collect();
+    for (n, step, label) in [
+        (8, 4, "small"),
+        (20000, 2000, "sparse"),
+        (20000, 10, "dense"),
+    ] {
+        let donors: Vec<_> = (0..n)
+            .map(|i| nzbget_rs::streampatchparts::Range {
+                offset: i * 700000,
+                size: 700000,
+            })
+            .collect();
+        let holes: Vec<_> = (0..n)
+            .step_by(step)
+            .map(|i| nzbget_rs::streampatchparts::Range {
+                offset: i * 700000 + 100,
+                size: 20,
+            })
+            .collect();
         bench(&format!("streampatchparts/{label} {n} donors"), &mut || {
             let mut output = vec![0; donors.len()];
             let len = nzbget_rs::streampatchparts::select(
-                black_box(&donors), black_box(&holes), 2, &mut output);
+                black_box(&donors),
+                black_box(&holes),
+                2,
+                &mut output,
+            );
             output.truncate(len);
             black_box(output);
         });
     }
 
     // text and search helpers
-    let haystack: Vec<u8> = (0..1 << 20).map(|_| b'a' + (rng.next() % 20) as u8).collect();
+    let haystack: Vec<u8> = (0..1 << 20)
+        .map(|_| b'a' + (rng.next() % 20) as u8)
+        .collect();
     bench("bytes/find a miss in 1 MiB", &mut || {
         black_box(bytes::find(black_box(&haystack), b"zyxwvuts"));
     });
-    let escaped: Vec<u8> = (0..65536u32).map(|i| [b'a', b'"', b'\\', b'\n', 0xc3, 0xa9, b'<', b'&'][(i % 8) as usize]).collect();
+    let escaped: Vec<u8> = (0..65536u32)
+        .map(|i| [b'a', b'"', b'\\', b'\n', 0xc3, 0xa9, b'<', b'&'][(i % 8) as usize])
+        .collect();
     bench("escape/json_encode 64 KiB", &mut || {
         let mut out = Vec::with_capacity(escaped.len() * 2);
         escape::json_encode(black_box(&escaped), &mut out);
@@ -184,7 +229,12 @@ fn main() {
         escape::xml_encode(black_box(&escaped), &mut out);
         black_box(out);
     });
-    let encoded: Vec<u8> = b"Show%20Name%2Fpart%5B1%5D+%C3%A9%26".iter().copied().cycle().take(8192).collect();
+    let encoded: Vec<u8> = b"Show%20Name%2Fpart%5B1%5D+%C3%A9%26"
+        .iter()
+        .copied()
+        .cycle()
+        .take(8192)
+        .collect();
     bench("text/url_decode 8 KiB", &mut || {
         let mut buf = encoded.clone();
         black_box(text::url_decode(&mut buf));
@@ -194,51 +244,84 @@ fn main() {
         text::url_encode(black_box(&encoded), &mut out);
         black_box(out);
     });
-    let markup: Vec<u8> = b"<p>Some <b>bold</b> text &amp; &lt;more&gt; &#233;</p>\n".iter().copied().cycle().take(16384).collect();
+    let markup: Vec<u8> = b"<p>Some <b>bold</b> text &amp; &lt;more&gt; &#233;</p>\n"
+        .iter()
+        .copied()
+        .cycle()
+        .take(16384)
+        .collect();
     bench("text/xml_strip_tags 16 KiB", &mut || {
         let mut buf = markup.clone();
         text::xml_strip_tags(&mut buf);
         black_box(buf);
     });
-    let xml = [b"<rss><channel>".as_slice(), &vec![b' '; 256 * 1024], b"<title>found</title></channel></rss>"].concat();
+    let xml = [
+        b"<rss><channel>".as_slice(),
+        &vec![b' '; 256 * 1024],
+        b"<title>found</title></channel></rss>",
+    ]
+    .concat();
     bench("webutil/xml_find_tag in 256 KiB", &mut || {
         black_box(webutil::xml_find_tag(black_box(&xml), b"title"));
     });
     let names: Vec<&[u8]> = vec![
-        b"Show.Name.S01E02.1080p.WEB.h264-GROUP.mkv", b"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", b"movie (2026) [1080p].mkv",
-        b"abc.xyz.1e5a1fd4ba3d4c3a98d8a7d1d4d3a2b1.mkv", b"Some.Release.Name-GROUP", b"x", b"1234567890abcdef1234567890abcdef.rar",
+        b"Show.Name.S01E02.1080p.WEB.h264-GROUP.mkv",
+        b"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+        b"movie (2026) [1080p].mkv",
+        b"abc.xyz.1e5a1fd4ba3d4c3a98d8a7d1d4d3a2b1.mkv",
+        b"Some.Release.Name-GROUP",
+        b"x",
+        b"1234567890abcdef1234567890abcdef.rar",
     ];
     bench("deobfuscation/deobfuscate 7 names", &mut || {
         for n in &names {
             black_box(deobfuscation::deobfuscate(black_box(n)));
         }
     });
-    bench("deobfuscation/is_excessively_obfuscated 7 names", &mut || {
-        for n in &names {
-            black_box(deobfuscation::is_excessively_obfuscated(black_box(n)));
-        }
-    });
+    bench(
+        "deobfuscation/is_excessively_obfuscated 7 names",
+        &mut || {
+            for n in &names {
+                black_box(deobfuscation::is_excessively_obfuscated(black_box(n)));
+            }
+        },
+    );
     bench("paths/make_valid_filename 7 names", &mut || {
         for n in &names {
             black_box(paths::make_valid_filename(black_box(n), false));
         }
     });
     bench("util/format_size 6 sizes", &mut || {
-        for s in [0i64, 999, 123_456, 98_765_432, 5_000_000_000, 123_456_789_012] {
+        for s in [
+            0i64,
+            999,
+            123_456,
+            98_765_432,
+            5_000_000_000,
+            123_456_789_012,
+        ] {
             black_box(util::format_size(black_box(s)));
         }
     });
     bench("crc/combine x1000", &mut || {
         let mut c = 0u32;
         for i in 0..1000u32 {
-            c = crc::combine(black_box(c), black_box(i.wrapping_mul(2654435761)), black_box(716800));
+            c = crc::combine(
+                black_box(c),
+                black_box(i.wrapping_mul(2654435761)),
+                black_box(716800),
+            );
         }
         black_box(c);
     });
 
     // JSON
     let doc = json_document(2000);
-    let limits = json::Limits { string: 0x7ffffffe, array: 0x7ffffffe, object: 0x7ffffffe };
+    let limits = json::Limits {
+        string: 0x7ffffffe,
+        array: 0x7ffffffe,
+        object: 0x7ffffffe,
+    };
     bench("json/parse 2,000 objects", &mut || {
         black_box(json::parse(black_box(&doc), limits));
     });
@@ -252,13 +335,29 @@ fn main() {
 
     // NzbFile
     let parts: Vec<i32> = (1..=3709).collect();
-    let sizes: Vec<i64> = (0..3709).map(|i| if i == 3708 { 300_000 } else { 716_800 }).collect();
+    let sizes: Vec<i64> = (0..3709)
+        .map(|i| if i == 3708 { 300_000 } else { 716_800 })
+        .collect();
     bench("nzbfile/file_totals 3,709 segments", &mut || {
-        black_box(nzbfile::file_totals(b"[1/30] - \"a.part01.rar\" yEnc (1/3709)", black_box(&parts), black_box(&sizes), &ct));
+        black_box(nzbfile::file_totals(
+            b"[1/30] - \"a.part01.rar\" yEnc (1/3709)",
+            black_box(&parts),
+            black_box(&sizes),
+            &ct,
+        ));
     });
-    let file_names: Vec<String> = (0..5000).map(|i| format!("Release.Name.2026.1080p.WEB.h264-GRP.part{i:05}.rar")).collect();
-    let subjects: Vec<String> = file_names.iter().map(|n| format!("[1/5000] - \"{n}\" yEnc (1/2)")).collect();
-    let files: Vec<(&[u8], &[u8])> = file_names.iter().zip(&subjects).map(|(n, s)| (n.as_bytes(), s.as_bytes())).collect();
+    let file_names: Vec<String> = (0..5000)
+        .map(|i| format!("Release.Name.2026.1080p.WEB.h264-GRP.part{i:05}.rar"))
+        .collect();
+    let subjects: Vec<String> = file_names
+        .iter()
+        .map(|n| format!("[1/5000] - \"{n}\" yEnc (1/2)"))
+        .collect();
+    let files: Vec<(&[u8], &[u8])> = file_names
+        .iter()
+        .zip(&subjects)
+        .map(|(n, s)| (n.as_bytes(), s.as_bytes()))
+        .collect();
     bench("nzbfile/has_duplicate_filenames 5,000 files", &mut || {
         black_box(nzbfile::has_duplicate_filenames(black_box(&files)));
     });
@@ -280,32 +379,58 @@ fn main() {
         black_box(twin::fingerprint(black_box(&sigs)));
     });
     bench("twin/volume_blocks 4 names", &mut || {
-        for n in ["x.vol03+04.par2", "X.VOL00+128.PAR2", "x.par2", "movie.vol-08.par2"] {
+        for n in [
+            "x.vol03+04.par2",
+            "X.VOL00+128.PAR2",
+            "x.par2",
+            "movie.vol-08.par2",
+        ] {
             black_box(twin::volume_blocks(black_box(n)));
         }
     });
 
     // BinRpc's batched response encoders, with caller scratch and an owned buffer.
     let log_text = b"A log line of typical length, with a few words in it.";
-    let logs: Vec<binrpc::LogEntry> = (0..1000u32).map(|id| binrpc::LogEntry {
-        id, kind: 2, time: 1_700_000_000, texts: [binrpc::Text::new(log_text)],
-    }).collect();
+    let logs: Vec<binrpc::LogEntry> = (0..1000u32)
+        .map(|id| binrpc::LogEntry {
+            id,
+            kind: 2,
+            time: 1_700_000_000,
+            texts: [binrpc::Text::new(log_text)],
+        })
+        .collect();
     let mut log_scratch = [std::mem::MaybeUninit::<u8>::uninit(); 16 * 1024];
-    bench("binrpc/encode_log_into 10 log entries (caller scratch)", &mut || {
-        // The entries and text outlive the call; scratch is separate writable
-        // storage and includes room for the response's final NUL.
-        let response = unsafe { nzbget_rs::ffi::nzbget_rs_binrpc_encode_log_into(
-            black_box(logs.as_ptr()), 10, black_box(log_scratch.as_mut_ptr()).cast(), log_scratch.len()) };
-        assert_eq!(response.owned_capacity, 0);
-        black_box(response);
-        black_box(&log_scratch);
-    });
-    bench("binrpc/encode_log 1,000 log entries (owned allocation)", &mut || {
-        // The large-response fallback uses the same owned response builder.
-        let response = unsafe { nzbget_rs::ffi::nzbget_rs_binrpc_encode_log(black_box(logs.as_ptr()), logs.len()) };
-        black_box(&response);
-        unsafe { nzbget_rs::ffi::nzbget_rs_free(response); }
-    });
+    bench(
+        "binrpc/encode_log_into 10 log entries (caller scratch)",
+        &mut || {
+            // The entries and text outlive the call; scratch is separate writable
+            // storage and includes room for the response's final NUL.
+            let response = unsafe {
+                nzbget_rs::ffi::nzbget_rs_binrpc_encode_log_into(
+                    black_box(logs.as_ptr()),
+                    10,
+                    black_box(log_scratch.as_mut_ptr()).cast(),
+                    log_scratch.len(),
+                )
+            };
+            assert_eq!(response.owned_capacity, 0);
+            black_box(response);
+            black_box(&log_scratch);
+        },
+    );
+    bench(
+        "binrpc/encode_log 1,000 log entries (owned allocation)",
+        &mut || {
+            // The large-response fallback uses the same owned response builder.
+            let response = unsafe {
+                nzbget_rs::ffi::nzbget_rs_binrpc_encode_log(black_box(logs.as_ptr()), logs.len())
+            };
+            black_box(&response);
+            unsafe {
+                nzbget_rs::ffi::nzbget_rs_free(response);
+            }
+        },
+    );
     bench("urlcoord/dnzb_header 3 lines", &mut || {
         for line in [
             &b"X-DNZB-Category: TV > HD\r\n"[..],
@@ -317,34 +442,83 @@ fn main() {
     });
 
     bench("dupeidentity/bare-media identity", &mut || {
-        black_box(nzbget_rs::dupeidentity::inner_entry(black_box(b"decoded-video"),
-            black_box(b"Show.S01E01.1080p.WEB.H264-GRP.mkv"), 5_000_000_000, 1_000_000_000));
+        black_box(nzbget_rs::dupeidentity::inner_entry(
+            black_box(b"decoded-video"),
+            black_box(b"Show.S01E01.1080p.WEB.H264-GRP.mkv"),
+            5_000_000_000,
+            1_000_000_000,
+        ));
     });
 
     bench("dupewatch/queue decision", &mut || {
         use nzbget_rs::dupewatch as w;
-        let flags=w::ENABLED|w::DUPE_CHECK|w::PRESENT|w::NZB|w::DELETE_NONE|w::SCORE_MODE;
-        black_box(w::decide(black_box(flags),1000000,None,1000000,None,false));
+        let flags =
+            w::ENABLED | w::DUPE_CHECK | w::PRESENT | w::NZB | w::DELETE_NONE | w::SCORE_MODE;
+        black_box(w::decide(
+            black_box(flags),
+            1000000,
+            None,
+            1000000,
+            None,
+            false,
+        ));
     });
     bench("dupewatch/lenient queries", &mut || {
-        black_box(nzbget_rs::dupewatch::lenient_queries(black_box(b"Show.S01E01.2025.1080p.WEB.H264-GRP")));
+        black_box(nzbget_rs::dupewatch::lenient_queries(black_box(
+            b"Show.S01E01.2025.1080p.WEB.H264-GRP",
+        )));
     });
     bench("dupewatch/partial health", &mut || {
-        black_box(nzbget_rs::dupewatch::effective_alive(black_box(13),0,0,3,10));
+        black_box(nzbget_rs::dupewatch::effective_alive(
+            black_box(13),
+            0,
+            0,
+            3,
+            10,
+        ));
     });
 
     // Stream comparison floor: regression metrics; end-to-end C++ caller qualification
     // is in rust/tests/streamcompare_differential.py, including fair C++ controls.
     use nzbget_rs::streamcompare::{required_compare_floor, Range as CompareRange};
-    let donors = [CompareRange { offset: 0, size: 1024 * 1024 }, CompareRange { offset: 1024 * 1024, size: 1024 * 1024 }];
-    let sparse: Vec<CompareRange> = (0..1024).map(|i| CompareRange { offset: i * 2048, size: 16 }).collect();
-    bench("streamcompare/empty", &mut || { black_box(required_compare_floor(black_box(100000), &[], &[], &[])); });
-    bench("streamcompare/two probes sparse 1024 holes", &mut || {
-        black_box(required_compare_floor(black_box(2 * 1024 * 1024), black_box(&sparse), black_box(&donors), black_box(&[0, 1])));
+    let donors = [
+        CompareRange {
+            offset: 0,
+            size: 1024 * 1024,
+        },
+        CompareRange {
+            offset: 1024 * 1024,
+            size: 1024 * 1024,
+        },
+    ];
+    let sparse: Vec<CompareRange> = (0..1024)
+        .map(|i| CompareRange {
+            offset: i * 2048,
+            size: 16,
+        })
+        .collect();
+    bench("streamcompare/empty", &mut || {
+        black_box(required_compare_floor(black_box(100000), &[], &[], &[]));
     });
-    let reversed = [CompareRange { offset: 500, size: -100 }];
+    bench("streamcompare/two probes sparse 1024 holes", &mut || {
+        black_box(required_compare_floor(
+            black_box(2 * 1024 * 1024),
+            black_box(&sparse),
+            black_box(&donors),
+            black_box(&[0, 1]),
+        ));
+    });
+    let reversed = [CompareRange {
+        offset: 500,
+        size: -100,
+    }];
     bench("streamcompare/reversed hole", &mut || {
-        black_box(required_compare_floor(black_box(100000), black_box(&reversed), black_box(&donors), black_box(&[0, 0])));
+        black_box(required_compare_floor(
+            black_box(100000),
+            black_box(&reversed),
+            black_box(&donors),
+            black_box(&[0, 0]),
+        ));
     });
 
     // Bencher Metric Format

@@ -3757,8 +3757,30 @@ impl NzbgetRsDupeSearch {
         if alive >= crate::dupewatch::SWAP_BELOW {
             msg.extend_from_slice(b", but par2 cannot repair it");
         }
-        let Some((backup_id, backup_alive)) = crate::dupewatch::swap_backup(candidates, need)
-        else {
+        // Only backups failover could use: not marked bad, not in DupeMode
+        // FORCE, with their nzb-file and health intact.
+        let hc_dupe = read_host_opts(host_ctx, host_cb).health_check_mode == 4;
+        let eligible = |dq_ptr: usize, id: i32| -> bool {
+            let pick_snap = dq_find_nzb(host_ctx, host_cb, dq_ptr, job.nzb_id)
+                .map(|(p, _)| inspect_nzb(host_ctx, host_cb, p, false));
+            check_placement_available(
+                host_ctx,
+                host_cb,
+                dq_ptr,
+                pick_snap.as_ref(),
+                id,
+                true,
+                hc_dupe,
+            )
+        };
+        let usable: Vec<(i32, f64)> = with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+            candidates
+                .iter()
+                .copied()
+                .filter(|&(id, _)| eligible(dq_ptr, id))
+                .collect()
+        });
+        let Some((backup_id, backup_alive)) = crate::dupewatch::swap_backup(&usable, need) else {
             msg.extend_from_slice(
                 b" and will likely fail, but no backup is whole enough to swap in",
             );
@@ -3807,6 +3829,9 @@ impl NzbgetRsDupeSearch {
                 snap.critical_health_opt,
             ) {
                 return Err(&b"it is mostly downloaded and above its critical health"[..]);
+            }
+            if !eligible(dq_ptr, backup_id) {
+                return Err(&b"the backup is no longer usable"[..]);
             }
             let hi_ptr = qh.history_find_by_id(dq_ptr, backup_id);
             let backup = (0..qh.history_len(dq_ptr))

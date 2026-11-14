@@ -54,6 +54,22 @@ this project. Human instructions and current coordination ownership take priorit
   the owning chat until delivery is verified or the human explicitly accepts a
   handoff or an undeployed outcome.
 
+## Build and test before every push
+
+- Before pushing any branch, run on the machine you are on, and paste the
+  pass/fail lines into the PR description:
+  `(cd rust && CARGO_BUILD_JOBS=3 RUSTFLAGS="-D warnings" cargo test --tests -- --test-threads=3)`,
+  `CARGO_BUILD_JOBS=3 just test-daemon 3`, and the functional scenarios that
+  cover what you touched (`tests/functional/dupefallback/harness.py`).
+- A change must also build and pass on Linux. macOS-only validation is not
+  enough: `libc` constants, `c_char` signedness and linker flags differ. Build
+  and test in a Linux machine (for example an OrbStack VM with a copy of the
+  tree) or wait for the `build` workflow, which builds and tests on Linux
+  x86_64, Linux arm64 and macOS for every pull request and push to `main`.
+- Reviewers and review agents: do not approve a head whose `build` workflow is
+  not green on all three platforms, or whose PR description lacks the local
+  test results above. Ask for them instead of assuming.
+
 ## Capture evidence before interpreting it
 
 - Freeze the question, baseline, fixtures, controls, analysis, and stopping rule

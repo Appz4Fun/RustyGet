@@ -732,7 +732,7 @@ mod tests {
             c"Ext:Option",
             c":",
         ] {
-            assert!(option_restricted(name, c_char::MIN < 0), "{name:?}");
+            assert!(option_restricted(name, (c_char::MIN as i32) != 0), "{name:?}");
         }
         for name in [
             c"DupeSearchUrl",
@@ -742,30 +742,30 @@ mod tests {
             c"Server1.Host",
             c"",
         ] {
-            assert!(!option_restricted(name, c_char::MIN < 0), "{name:?}");
+            assert!(!option_restricted(name, (c_char::MIN as i32) != 0), "{name:?}");
         }
         // only the first 1023 bytes are searched for the words; a ':' anywhere counts
         let mut long = vec![b'a'; 1020];
         long.extend_from_slice(b"password");
         assert!(!option_restricted(
             &CString::new(long.clone()).unwrap(),
-            c_char::MIN < 0
+            (c_char::MIN as i32) != 0
         ));
         long.truncate(1015);
         long.extend_from_slice(b"password");
         assert!(option_restricted(
             &CString::new(long.clone()).unwrap(),
-            c_char::MIN < 0
+            (c_char::MIN as i32) != 0
         ));
         long = vec![b'b'; 3023];
         assert!(!option_restricted(
             &CString::new(long.clone()).unwrap(),
-            c_char::MIN < 0
+            (c_char::MIN as i32) != 0
         ));
         long.push(b':');
         assert!(option_restricted(
             &CString::new(long).unwrap(),
-            c_char::MIN < 0
+            (c_char::MIN as i32) != 0
         ));
     }
 
@@ -1404,7 +1404,7 @@ const COMMAND_VALUES: [i32; 26] = [
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 139] = [
+    let defaults: [(&CStr, &CStr); 140] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1424,6 +1424,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"DupeArticleFallback", c"no"),
         (c"DupeStreamDecompress", c"no"),
         (c"DupeStreamTimeout", c"60"),
+        (c"DupeBorrowFirst", c"yes"),
         (c"DupeSearch", c"no"),
         (c"DupeSearchDryRun", c"no"),
         (c"DupeSearchUrl", c""),
@@ -1625,6 +1626,16 @@ pub fn category_alias_list_matches(aliases: &[&[u8]], name: &[u8], _signed_char:
 }
 
 /// All scalar integer, boolean, and enum fields parsed by `Options::InitOptions` and `Options::CheckOptions`.
+/// Option `DupeBorrowFirst`: recover missing articles from duplicates before relying on the
+/// download's own par2 recovery data (Rust-only option, not part of the C scalars block).
+pub static DUPE_BORROW_FIRST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Current value of option `DupeBorrowFirst`.
+pub fn dupe_borrow_first() -> bool {
+    DUPE_BORROW_FIRST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NzbgetRsParsedOptions {
@@ -2114,6 +2125,10 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     );
     s.dupe_stream_decompress = i32::from(host.parse_bool_value(c"DupeStreamDecompress"));
     let raw_stream_timeout = host.parse_int_value(c"DupeStreamTimeout", 10);
+    DUPE_BORROW_FIRST.store(
+        host.parse_bool_value(c"DupeBorrowFirst"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     s.dupe_search = i32::from(host.parse_bool_value(c"DupeSearch"));
     s.dupe_search_dry_run = i32::from(host.parse_bool_value(c"DupeSearchDryRun"));
     *out_dupe_search_url = host.get_option(c"DupeSearchUrl");
@@ -3000,7 +3015,7 @@ impl RustOptEntry {
     }
 
     pub fn restricted(&self) -> bool {
-        option_restricted(&self.name, c_char::MIN < 0)
+        option_restricted(&self.name, (c_char::MIN as i32) != 0)
     }
 }
 
@@ -3685,7 +3700,7 @@ impl NzbgetRsOptions {
     }
 
     pub(crate) fn for_each_option(&self, mut cb: impl FnMut(&CStr, &CStr, c_int)) {
-        let signed_char = c_char::MIN < 0;
+        let signed_char = (c_char::MIN as i32) != 0;
         for e in &self.opt_entries {
             let val = e.value.as_deref().unwrap_or(c"");
             let restr = c_int::from(option_restricted(&e.name, signed_char));
@@ -3715,7 +3730,7 @@ impl NzbgetRsOptions {
             let name_bytes = name.to_bytes();
             for cat in &self.categories {
                 let alias_slices: Vec<&[u8]> = cat.aliases.iter().map(|a| a.to_bytes()).collect();
-                if category_alias_list_matches(&alias_slices, name_bytes, c_char::MIN < 0) {
+                if category_alias_list_matches(&alias_slices, name_bytes, (c_char::MIN as i32) != 0) {
                     return Some(cat);
                 }
             }
@@ -4498,7 +4513,7 @@ pub unsafe extern "C" fn nzbget_rs_options_query(
         }
         1 => {
             if let Some(f) = cb {
-                let signed_char = c_char::MIN < 0;
+                let signed_char = (c_char::MIN as i32) != 0;
                 for e in &opts.opt_entries {
                     let val = e.value.as_deref().unwrap_or(c"");
                     let restr = c_int::from(option_restricted(&e.name, signed_char));

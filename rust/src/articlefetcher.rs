@@ -1119,7 +1119,7 @@ pub fn parse_donor_nzb_file(
         space: 1,
         digit: 2,
         lower: &lower,
-        char_signed: c_char::MIN < 0,
+        char_signed: (c_char::MIN as i32) != 0,
     };
 
     let mut parser = NzbFileParser::new(queued_filename);

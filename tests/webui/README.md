@@ -100,3 +100,18 @@ intercepted download and history saves exercise the real pending indicator timer
 and verify disabled buttons remain readable without spinner overlap. Offline sanitized replies retain the real renderers; tested mutations
 are intercepted. Both checks reject non-loopback targets. Optional JPEG captures
 use an existing `NZBGET_UI_CAPTURE_DIR`; use a fresh directory for each attempt.
+
+The download details check needs no daemon. `details-fixture.js` serves the
+committed WebUI with its real startup and answers every RPC with a dupe fleet
+(a downloading primary, a twin and a borrowable alt in the queue, a failed copy
+in history); writes are intercepted. It checks, in both themes at 1440, 1280,
+768, 390 and 320 pixels, that details open as a side panel spanning the window
+height, fit without scrolling on a 900-pixel desktop window, list the fleet in
+donor priority, switch to another copy (queue or history) from the fleet card,
+widen for the Files page and restore on Back, save the shown copy's name, and
+resume list updates on close. Optional JPEGs use `NZBGET_UI_CAPTURE_DIR`.
+Set `NZBGET_CHROME_CHANNEL=none` to use Playwright's bundled Chromium.
+
+```sh
+node tests/webui/download-details.js http://127.0.0.1:17999/
+```

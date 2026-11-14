@@ -3604,3 +3604,420 @@ body.phone,
   #TlsCipherDialog { position: fixed; top: 12px; right: auto; }
   #TlsCipherDialog .modal-body { max-height: calc(100dvh - 180px); padding: 12px; }
 }
+
+/* ---------------------------------------------------------------------------
+   Download and history details: a side panel next to the list instead of a
+   centred dialog. It spans the window's height, so the summary, the dupe
+   fleet and the fields fit without scrolling; the pages behind it (files,
+   log, server statistics) open in the same panel, widened where they need it.
+   Phones get the whole screen.
+   --------------------------------------------------------------------------- */
+
+.modal.modal-drawer {
+	position: fixed;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	left: auto;
+	width: min(560px, 100vw);
+	max-width: 100vw;
+	margin: 0;
+	overflow: hidden;
+	border-width: 0 0 0 1px;
+	border-radius: var(--radius-xl) 0 0 var(--radius-xl);
+	box-shadow: var(--shadow-sheet);
+}
+
+.modal.modal-drawer.in {
+	display: flex !important;
+	flex-direction: column;
+	animation: details-slide-in 180ms ease-out;
+}
+
+.modal.modal-drawer.modal-drawer-wide {
+	width: min(1180px, calc(100vw - 48px));
+}
+
+@keyframes details-slide-in {
+	from { transform: translateX(32px); opacity: 0; }
+	to { transform: none; opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.modal.modal-drawer.in { animation: none; }
+}
+
+/* the list stays readable behind the panel */
+body:has(.modal-drawer.in) .modal-backdrop {
+	background: color-mix(in srgb, var(--scrim) 45%, transparent);
+	-webkit-backdrop-filter: none;
+	backdrop-filter: none;
+}
+
+.modal-drawer .modal-header {
+	flex: none;
+	align-items: flex-start;
+	padding: 16px 20px 12px;
+}
+
+.modal-drawer .modal-header h3 {
+	font-size: 15px;
+	line-height: 22px;
+}
+
+.modal-drawer .modal-body {
+	flex: 1 1 auto;
+	min-height: 0;
+	max-height: none !important;
+	height: auto !important;
+	padding: 16px 20px;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+
+.modal-drawer .modal-footer {
+	flex: none;
+	border-radius: 0 0 0 var(--radius-xl);
+}
+
+.modal-drawer .modal-inner-scroll {
+	position: static;
+	padding-right: 0;
+}
+
+.modal-drawer .modal-tab {
+	width: auto !important;
+}
+
+.modal-drawer .modal-bottom-toolbar.details-nav {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-2);
+	margin: 0;
+}
+
+.modal-drawer .details-nav .btn {
+	margin: 0;
+}
+
+.details-status:empty,
+.details-summary:empty,
+.details-fleet:empty {
+	display: none;
+}
+
+.details-status {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--space-1) var(--space-2);
+	margin-bottom: var(--space-3);
+}
+
+.details-status .label {
+	margin: 0;
+}
+
+/* headline numbers */
+.details-summary {
+	margin-bottom: var(--space-4);
+}
+
+.details-tiles {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: var(--space-2);
+}
+
+.details-tile {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-width: 0;
+	padding: 10px 12px;
+	border: 1px solid var(--separator);
+	border-radius: var(--radius-md);
+	background: var(--bg-elevated);
+	color: var(--label-primary);
+}
+
+a.details-tile-link,
+a.details-tile-link:hover,
+a.details-tile-link:focus {
+	color: var(--label-primary);
+	text-decoration: none;
+}
+
+a.details-tile-link:hover {
+	border-color: var(--rule);
+}
+
+.details-tile-label {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	font-family: var(--font-mono);
+	font-size: 0.68rem;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	line-height: 1.4;
+	text-transform: uppercase;
+	color: var(--label-secondary);
+	white-space: nowrap;
+}
+
+.details-tile-label .material-icon {
+	font-size: 14px;
+	line-height: 1;
+	height: 1em;
+	color: var(--accent);
+}
+
+.details-tile-value {
+	font-size: 1.15rem;
+	font-weight: 650;
+	line-height: 1.3;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.details-tile-sub {
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--label-secondary);
+	overflow-wrap: anywhere;
+}
+
+.details-tile-value.is-good,
+.fleet-member-health.is-good { color: var(--green-text); }
+.details-tile-value.is-warn,
+.fleet-member-health.is-warn { color: var(--yellow-text); }
+.details-tile-value.is-bad,
+.fleet-member-health.is-bad { color: var(--red-text); }
+
+.details-progress {
+	height: 4px;
+	margin-top: var(--space-2);
+	border-radius: var(--radius-full);
+	background: var(--fill-secondary);
+	overflow: hidden;
+}
+
+.details-progress > span {
+	display: block;
+	height: 100%;
+	border-radius: inherit;
+	background: var(--green);
+}
+
+/* the dupe fleet: every copy of the release, in donor priority */
+.details-fleet {
+	margin-bottom: var(--space-4);
+	padding: 12px;
+	border: 1px solid var(--separator);
+	border-radius: var(--radius-md);
+	background: var(--fill-quaternary);
+}
+
+.fleet-head {
+	display: flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: var(--space-1) var(--space-2);
+	margin-bottom: var(--space-2);
+}
+
+.fleet-title {
+	font-family: var(--font-mono);
+	font-size: 0.74rem;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--accent);
+}
+
+.fleet-key {
+	padding: 0 6px;
+	border: 0;
+	border-radius: var(--radius-xs);
+	background: var(--fill-secondary);
+	color: var(--label-primary);
+	font-size: 12px;
+	overflow-wrap: anywhere;
+}
+
+.fleet-count {
+	margin-left: auto;
+	font-size: 12px;
+	color: var(--label-secondary);
+}
+
+.fleet-facts {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-1) var(--space-3);
+	font-size: 13px;
+}
+
+.fleet-fact-label {
+	color: var(--label-secondary);
+}
+
+.fleet-live {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	color: var(--cyan-text);
+}
+
+.fleet-live .material-icon {
+	font-size: 15px;
+}
+
+.fleet-role {
+	display: inline-block;
+	padding: 0 6px;
+	border-radius: var(--radius-xs);
+	font-family: var(--font-mono);
+	font-size: 0.68rem;
+	font-weight: 600;
+	letter-spacing: 0.03em;
+	line-height: 1.6;
+	text-transform: uppercase;
+	white-space: nowrap;
+	background: var(--fill-secondary);
+	color: var(--label-secondary);
+}
+
+.fleet-role-primary { background: var(--accent-soft); color: var(--accent); }
+.fleet-role-twin { background: var(--green-soft); color: var(--green-text); }
+.fleet-role-borrowable,
+.fleet-role-alt { background: var(--cyan-soft); color: var(--cyan-text); }
+.fleet-role-unborrowable { background: var(--yellow-soft); color: var(--yellow-text); }
+
+.fleet-copy {
+	font-size: 12px;
+	color: var(--label-secondary);
+	white-space: nowrap;
+}
+
+.fleet-members {
+	margin: var(--space-3) 0 0;
+	padding: 0;
+	list-style: none;
+	border-top: 1px solid var(--separator);
+}
+
+.fleet-member {
+	display: grid;
+	grid-template-columns: 5.5rem minmax(0, 1fr) auto;
+	grid-template-areas: "role name health" "role status status";
+	align-items: center;
+	column-gap: var(--space-3);
+	padding: 7px 8px;
+	border-bottom: 1px solid var(--separator);
+	color: var(--label-primary);
+	font-size: 13px;
+	line-height: 1.4;
+}
+
+.fleet-members > li:last-child > .fleet-member,
+.fleet-members > li.fleet-member:last-child {
+	border-bottom: 0;
+}
+
+a.fleet-member,
+a.fleet-member:hover,
+a.fleet-member:focus {
+	color: var(--label-primary);
+	text-decoration: none;
+}
+
+a.fleet-member:hover {
+	background: var(--fill-tertiary);
+}
+
+.fleet-member.is-current {
+	background: var(--fill-secondary);
+	box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.fleet-member-role { grid-area: role; }
+
+.fleet-member-name {
+	grid-area: name;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.fleet-member-health {
+	grid-area: health;
+	font-family: var(--font-mono);
+	font-size: 12px;
+	font-weight: 600;
+	text-align: right;
+}
+
+.fleet-member-status {
+	grid-area: status;
+	font-size: 12px;
+	color: var(--label-secondary);
+}
+
+/* fields take the panel's width */
+.modal-drawer .form-horizontal input[type="text"],
+.modal-drawer .form-horizontal select {
+	width: 100%;
+}
+
+@media (max-width: 359px) {
+	.details-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 767px) {
+	.modal.modal-drawer,
+	.phone .modal.modal-drawer {
+		position: fixed;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		left: 0;
+		width: 100vw;
+		height: 100dvh;
+		border-width: 0;
+		border-radius: 0;
+	}
+
+	.modal-drawer .modal-header { padding: 12px 16px 10px; }
+	.modal-drawer .modal-body { padding: 12px 16px; }
+	.modal-drawer .modal-footer { border-radius: 0; }
+
+	.details-tiles { gap: 6px; }
+	.details-tile { padding: 8px; }
+	.details-tile-label { font-size: 0.62rem; letter-spacing: 0.03em; }
+	.details-tile-value { font-size: 0.98rem; }
+	.details-tile-sub { font-size: 11px; }
+	.details-fleet { padding: 10px; }
+
+	.fleet-member {
+		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-areas: "role health" "name name" "status status";
+		row-gap: 2px;
+	}
+}
+
+.fleet-member-role .fleet-role {
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	vertical-align: middle;
+}
+
+.modal-drawer.is-saving a.fleet-member {
+	pointer-events: none;
+	opacity: 0.6;
+}

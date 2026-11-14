@@ -587,6 +587,7 @@ var TabDialog = (new function($)
 	function restoreTab()
 	{
 		var dialog = this;
+		dialog.removeClass('modal-drawer-wide');
 		var body = $('.modal-body', dialog);
 		var footer = $('.modal-footer', dialog);
 		dialog.css({margin: '', left: '', top: '', bottom: '', right: '', width: '', height: ''});
@@ -597,6 +598,21 @@ var TabDialog = (new function($)
 	function switchTab(fromTab, toTab, duration, options)
 	{
 		var dialog = this;
+
+		// a side panel already spans the window's height: swap the pages in
+		// place, widening the panel for the pages that want the full screen
+		if (dialog.hasClass('modal-drawer'))
+		{
+			fromTab.hide();
+			toTab.show();
+			dialog.toggleClass('modal-drawer-wide', !!options.fullscreen && !options.back);
+			if (options.complete)
+			{
+				options.complete();
+			}
+			return;
+		}
+
 		var sign = options.back ? -1 : 1;
 		var fullscreen = options.fullscreen && !options.back;
 		var bodyPadding = 15;

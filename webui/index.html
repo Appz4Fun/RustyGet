@@ -1400,7 +1400,7 @@
 
 <!-- *** EDIT DOWNLOAD DIALOG ************************************************************ -->
 
-<div class="modal hide" id="DownloadsEditDialog">
+<div class="modal modal-drawer hide" id="DownloadsEditDialog" role="dialog" aria-labelledby="DownloadsEdit_Title">
 	<div class="modal-header">
 		<a class="close" href='#' data-dismiss="modal" data-i18n-title="btn_close"><i class="material-icon">close</i></a>
 		<a class="back" id="DownloadsEdit_Back" href="#" data-i18n-title="btn_back_title"><i class="material-icon">arrow_left_alt</i></a>
@@ -1412,6 +1412,9 @@
 
 		<div>
 			<div class="modal-tab" id="DownloadsEdit_GeneralTab">
+				<div class="details-status" id="DownloadsEdit_Status"></div>
+				<div class="details-summary" id="DownloadsEdit_Summary"></div>
+				<div class="details-fleet" id="DownloadsEdit_Fleet"></div>
 				<div class="form-horizontal">
 					<form>
 					<fieldset>
@@ -1447,19 +1450,9 @@
 							</div>
 						</div>
 
-						<div class="control-group control-group-last workspace-field-wide" id="DownloadsEdit_StatisticsGroup">
-							<label class="control-label" for="DownloadsEdit_Statistics" data-i18n="edit_statistics"></label>
-							<div class="controls">
-							<table class="table table-striped table-bordered data-statistics">
-								<tbody id="DownloadsEdit_Statistics">
-								</tbody>
-							</table>
-							</div>
-						</div>
-
 						<div class="control-group workspace-field-wide">
 							<div class="controls">
-								<div class="modal-bottom-toolbar">
+								<div class="modal-bottom-toolbar details-nav">
 									<button class="btn btn-default" data-tab="DownloadsEdit_FileTab" data-fullscreen="true" id="DownloadsEdit_File" data-i18n-title="edit_btn_files"><span data-i18n="edit_btn_files"></span> <i class="material-icon" style="opacity:0.6;">arrow_right_alt</i></button>
 									<button class="btn btn-default" data-tab="DownloadsEdit_ParamTab" id="DownloadsEdit_Param" data-i18n-title="edit_btn_postprocess"><span data-i18n="edit_btn_postprocess"></span> <i class="material-icon" style="opacity:0.6;">arrow_right_alt</i></button>
 									<button class="btn btn-default" data-tab="DownloadsEdit_DupeTab" id="DownloadsEdit_Dupe" data-i18n-title="edit_btn_dupe"><span data-i18n="edit_btn_dupe"></span> <i class="material-icon" style="opacity:0.6;">arrow_right_alt</i></button>
@@ -1822,7 +1815,7 @@
 
 <!-- *** HISTORY EDIT DIALOG ************************************************************ -->
 
-<div class="modal hide" id="HistoryEditDialog">
+<div class="modal modal-drawer hide" id="HistoryEditDialog" role="dialog" aria-labelledby="HistoryEdit_Title">
 	<div class="modal-header">
 		<a class="close" href='#' data-dismiss="modal" data-i18n-title="btn_close"><i class="material-icon">close</i></a>
 		<a class="back" id="HistoryEdit_Back" href="#" data-i18n-title="btn_back_title"><i class="material-icon">arrow_left_alt</i></a>
@@ -1833,16 +1826,12 @@
 	<div class="modal-body">
 		<div>
 			<div class="modal-tab" id="HistoryEdit_GeneralTab">
+				<div class="details-status" id="HistoryEdit_Status"></div>
+				<div class="details-summary" id="HistoryEdit_Summary"></div>
+				<div class="details-fleet" id="HistoryEdit_Fleet"></div>
 				<div class="form-horizontal">
 					<form>
 					<fieldset>
-
-						<div class="control-group">
-							<label class="control-label" for="HistoryEdit_Status" data-i18n="col_status"></label>
-							<div class="controls" style="margin-top: 4px;">
-								<span id="HistoryEdit_Status"></span>
-							</div>
-						</div>
 
 						<div class="control-group workspace-field-wide">
 							<label class="control-label" for="HistoryEdit_NZBNameGroup" data-i18n="edit_nzb_name"></label>
@@ -1873,23 +1862,13 @@
 							</div>
 						</div>
 
-						<div class="control-group control-group-last workspace-field-wide" id="HistoryEdit_StatisticsGroup">
-							<label class="control-label" for="HistoryEdit_Statistics" data-i18n="edit_statistics"></label>
-							<div class="controls">
-							<table class="table table-striped table-bordered data-statistics">
-								<tbody id="HistoryEdit_Statistics">
-								</tbody>
-							</table>
-							</div>
-						</div>
-
 						<div class="control-group control-group-last" id="HistoryEdit_DupGroup">
 							<div class="controls" data-i18n="edit_hidden_history_desc"></div>
 						</div>
 
 						<div class="control-group workspace-field-wide">
 							<div class="controls">
-								<div class="modal-bottom-toolbar">
+								<div class="modal-bottom-toolbar details-nav">
 									<button class="btn btn-default" data-tab="HistoryEdit_ParamTab" id="HistoryEdit_Param" data-i18n-title="edit_btn_postprocess"><span data-i18n="edit_btn_postprocess"></span> <i class="material-icon" style="opacity:0.6;">arrow_right_alt</i></button>
 									<button class="btn btn-default" data-tab="HistoryEdit_DupeTab" id="HistoryEdit_Dupe" data-i18n-title="edit_btn_dupe"><span data-i18n="edit_btn_dupe"></span> <i class="material-icon" style="opacity:0.6;">arrow_right_alt</i></button>
 									<button class="btn btn-default" data-tab="HistoryEdit_LogTab" data-fullscreen="true" id="HistoryEdit_Log" data-i18n-title="edit_btn_log"><span data-i18n="edit_btn_log"></span> <i class="material-icon" style="opacity:0.6;">arrow_right_alt</i></button>

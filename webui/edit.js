@@ -24,8 +24,333 @@
  *   2) Download multi edit dialog (edit multiple items);
  *   3) Download merge dialog;
  *   4) Download split dialog;
- *   5) History edit dialog.
+ *   5) History edit dialog;
+ *   6) Details panel: summary tiles and dupe fleet shared by 1) and 5).
  */
+
+/*** DETAILS PANEL: SUMMARY TILES AND DUPE FLEET ************************************/
+
+// The edit dialogs of a download and of a history item open as a side panel next
+// to the list. This module renders what both share: the headline numbers as
+// tiles (replacing the tall statistics table) and the item's dupe fleet - every
+// copy of the release in the queue and in history, its role (primary, twin,
+// alt), health and status - with each copy one click away.
+var DetailsPanel = (new function($)
+{
+	'use strict';
+
+	// donor priority, lower first: the primary, twins, then borrowable alts,
+	// alts whose packaging is unknown, and alts that cannot be borrowed from
+	var ROLE_ORDER = { primary: 0, twin: 1, borrowable: 2, alt: 3, unborrowable: 4, '': 5 };
+
+	function param(item, name)
+	{
+		return DownloadsUI.parameterValue(item.Parameters, name);
+	}
+
+	// role of a copy within its fleet: { kind, label, copy } or null
+	this.role = function(item)
+	{
+		if (item.Kind !== 'NZB')
+		{
+			return null;
+		}
+		var kind = param(item, 'DupeKind');
+		var copy = param(item, 'DupeCopyKind');
+		var copyLabel = copy === 'borrowable' ? I18n.translate('fleet_copy_borrowable') :
+			copy === 'unborrowable' ? I18n.translate('fleet_copy_unborrowable') : '';
+		var near = /^twin:(\d+\/\d+)$/.exec(kind);
+		if (kind === 'twin' || near)
+		{
+			return { kind: 'twin', label: I18n.translate('fleet_role_twin') + (near ? ' ' + near[1] : ''), copy: '' };
+		}
+		if (kind === 'alt')
+		{
+			return { kind: copy === 'borrowable' || copy === 'unborrowable' ? copy : 'alt',
+				label: I18n.translate('fleet_role_alt'), copy: copyLabel };
+		}
+		if (/^[0-9a-f]{16}-[0-9]+$/.test(param(item, 'DupeFiles')))
+		{
+			return { kind: 'primary', label: I18n.translate('fleet_role_primary'), copy: '' };
+		}
+		return null;
+	}
+
+	// health in permille: the live value once articles were fetched, otherwise
+	// the health check's sample of a copy that has not started. DupeHealth and
+	// DupeAlive hold percentages, fractions allowed (as parse_alive_permille_bytes
+	// in rust/src/dupecoord.rs reads them).
+	function healthPermille(item)
+	{
+		if (item.SuccessArticles + item.FailedArticles > 0)
+		{
+			return item.Health;
+		}
+		var best = -1;
+		var keys = ['DupeHealth', 'DupeAlive'];
+		for (var i = 0; i < keys.length; i++)
+		{
+			var percent = parseFloat(param(item, keys[i]));
+			if (!isNaN(percent))
+			{
+				best = Math.max(best, Math.round(Math.min(Math.max(percent, 0), 100) * 10));
+			}
+		}
+		return best >= 0 ? best : item.Health;
+	}
+
+	// below the critical health a copy cannot be repaired, whatever its value
+	function healthClass(permille, critical)
+	{
+		return permille < (critical || 850) ? 'is-bad' : permille >= 950 ? 'is-good' : 'is-warn';
+	}
+
+	function formatPercent(permille)
+	{
+		var percent = Math.floor(permille) / 10;
+		return (percent === 100 ? '100' : percent.toFixed(1)) + '%';
+	}
+
+	function tile(label, value, sub, valueClass, link)
+	{
+		var open = link ? '<a href="#" class="details-tile details-tile-link" id="' + link.id + '" data-tab="' + link.tab +
+			'" title="' + Util.textToAttr(link.title) + '">' : '<div class="details-tile">';
+		return open +
+			'<span class="details-tile-label">' + Util.textToHtml(label) +
+			(link ? ' <i class="material-icon" aria-hidden="true">arrow_right_alt</i>' : '') + '</span>' +
+			'<span class="details-tile-value ' + (valueClass || '') + '">' + Util.textToHtml(value) + '</span>' +
+			'<span class="details-tile-sub">' + Util.textToHtml(sub) + '</span>' +
+			(link ? '</a>' : '</div>');
+	}
+
+	function completion(item)
+	{
+		var done = item.SuccessArticles + item.FailedArticles;
+		if (done === 0)
+		{
+			return '--';
+		}
+		var value = Util.round0(item.SuccessArticles * 100.0 / done);
+		return (item.FailedArticles > 0 && value == 100 ? '99.9' : value) + '%';
+	}
+
+	// headline numbers of a queued download (prefix 'DownloadsEdit') or of a
+	// history item (prefix 'HistoryEdit')
+	this.summary = function(item, prefix)
+	{
+		var history = prefix === 'HistoryEdit';
+		var html = '';
+		var sub;
+		if (history)
+		{
+			sub = I18n.translate('details_total_time', Util.formatTimeHMS(item.DownloadTimeSec + item.PostTotalTimeSec));
+			html += tile(I18n.translate('label_total'), Util.formatSizeMB(item.FileSizeMB, item.FileSizeLo), sub, '',
+				{ id: 'HistoryEdit_TimeStats', tab: 'HistoryEdit_TimeStatsTab', title: I18n.translate('tooltip_history_total_stats') });
+			html += tile(I18n.translate('details_files'), String(item.FileCount),
+				I18n.translate('details_left', String(item.RemainingFileCount)));
+		}
+		else
+		{
+			var left = Util.formatSizeMB(item.RemainingSizeMB - item.PausedSizeMB, item.RemainingSizeLo - item.PausedSizeLo);
+			sub = I18n.translate('details_left', left);
+			if (item.PausedSizeMB > 0 || item.PausedSizeLo > 0)
+			{
+				sub += ' · ' + I18n.translate('details_paused', Util.formatSizeMB(item.PausedSizeMB, item.PausedSizeLo));
+			}
+			html += tile(I18n.translate('label_total'), Util.formatSizeMB(item.FileSizeMB, item.FileSizeLo), sub);
+			html += tile(I18n.translate('details_files'), String(item.FileCount),
+				I18n.translate('details_files_left', String(item.RemainingFileCount), String(item.RemainingParCount)));
+		}
+		html += tile(I18n.translate('details_health'), formatPercent(item.Health),
+			I18n.translate('details_critical', formatPercent(item.CriticalHealth)), healthClass(item.Health, item.CriticalHealth));
+		html += tile(I18n.translate('details_articles'), String(item.TotalArticles),
+			I18n.translate('details_complete', completion(item)), '',
+			item.ServerStats.length > 0 ? { id: prefix + '_ServStats', tab: prefix + '_ServStatsTab',
+				title: I18n.translate(history ? 'tooltip_history_server_stats' : 'tooltip_per_server_stats') } : null);
+
+		var bar = '';
+		if (!history && item.FileSizeMB > 0)
+		{
+			var percent = Math.max(0, Math.min(100, Math.round((item.FileSizeMB - item.RemainingSizeMB) * 100 / item.FileSizeMB)));
+			bar = '<div class="details-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + percent +
+				'"><span style="width:' + percent + '%"></span></div>';
+		}
+		return '<div class="details-tiles">' + html + '</div>' + bar;
+	}
+
+	// every copy sharing the item's dupe key, the queue first, in donor priority
+	this.members = function(item)
+	{
+		var members = [];
+		if (!item.DupeKey)
+		{
+			return members;
+		}
+		// the daemon matches dupe keys ignoring ASCII case (eq_ignore_ascii_case)
+		var key = item.DupeKey.toLowerCase();
+		function collect(list, source)
+		{
+			for (var i = 0; list && i < list.length; i++)
+			{
+				var other = list[i];
+				if (other.Kind === 'NZB' && other.DupeKey.toLowerCase() === key)
+				{
+					members.push({ item: other, source: source, role: DetailsPanel.role(other) });
+				}
+			}
+		}
+		collect(Downloads.groups, 'queue');
+		collect(History.items, 'history');
+		members.sort(function(a, b)
+		{
+			if (a.source !== b.source)
+			{
+				return a.source === 'queue' ? -1 : 1;
+			}
+			var ra = ROLE_ORDER[a.role ? a.role.kind : ''], rb = ROLE_ORDER[b.role ? b.role.kind : ''];
+			return ra !== rb ? ra - rb : healthPermille(b.item) - healthPermille(a.item);
+		});
+		return members;
+	}
+
+	function roleTag(role, withCopy)
+	{
+		if (!role)
+		{
+			return '<span class="fleet-role fleet-role-none">' + Util.textToHtml(I18n.translate('fleet_role_copy')) + '</span>';
+		}
+		return '<span class="fleet-role fleet-role-' + role.kind + '">' + Util.textToHtml(role.label) + '</span>' +
+			(withCopy && role.copy ? ' <span class="fleet-copy">' + Util.textToHtml(role.copy) + '</span>' : '');
+	}
+
+	// length of the prefix all names share, cut back to a word start; 0 when
+	// it is too short to be worth hiding
+	function commonPrefixAtWord(names)
+	{
+		if (names.length < 2)
+		{
+			return 0;
+		}
+		var len = names[0].length;
+		for (var i = 1; i < names.length; i++)
+		{
+			var k = 0;
+			while (k < len && k < names[i].length && names[i][k] === names[0][k])
+			{
+				k++;
+			}
+			len = k;
+		}
+		var cut = names[0].lastIndexOf(' ', len) + 1;
+		return cut >= 16 ? cut : 0;
+	}
+
+	// the fleet card; empty when the item has no other copy and nothing was
+	// recovered from duplicates
+	this.fleet = function(item, source)
+	{
+		var members = this.members(item);
+		var recovered = (item.DupeRecoveredArticles || 0) > 0 || (item.DupeRecoveredBytesLo || 0) > 0 || (item.DupeRecoveredBytesHi || 0) > 0;
+		if (members.length < 2 && !recovered && !item.LiveRepairing)
+		{
+			return '';
+		}
+
+		var facts = [];
+		facts.push('<span class="fleet-fact">' + roleTag(this.role(item), true) + '</span>');
+		if (recovered || Util.showDupeRecovered(item))
+		{
+			var holes = item.DupeRecoveredHoles || 0;
+			facts.push('<span class="fleet-fact"><span class="fleet-fact-label">' + Util.textToHtml(I18n.translate('fleet_recovered')) +
+				'</span> ' + Util.textToHtml(Util.formatDupeRecovered(item)) +
+				(holes > 0 ? ' · ' + Util.textToHtml(I18n.translate('fleet_holes', String(holes))) : '') + '</span>');
+		}
+		if (item.LiveRepairing)
+		{
+			facts.push('<span class="fleet-fact fleet-live" title="' + Util.textToAttr(I18n.translate('label_live_repair_hint')) + '">' +
+				'<i class="material-icon" aria-hidden="true">build</i> ' + Util.textToHtml(I18n.translate('fleet_live_repair')) + '</span>');
+		}
+
+		// copies of a release share most of their name: show where they differ
+		var names = [];
+		for (var j = 0; j < members.length; j++)
+		{
+			names.push(Util.formatNZBName(members[j].item.NZBName));
+		}
+		var common = commonPrefixAtWord(names);
+
+		var rows = '';
+		for (var i = 0; i < members.length; i++)
+		{
+			var m = members[i];
+			var self = m.item.NZBID === item.NZBID && m.source === source;
+			var health = healthPermille(m.item);
+			var status = m.source === 'queue' ? DownloadsUI.buildStatusText(m.item) : HistoryUI.buildStatusText(m.item);
+			var name = names[i];
+			var shown = common > 0 && name.length > common ? '\u2026' + name.substring(common) : name;
+			var cells = '<span class="fleet-member-role">' + roleTag(m.role) + '</span>' +
+				'<span class="fleet-member-name" title="' + Util.textToAttr(name) + '">' + Util.textToHtml(shown) + '</span>' +
+				'<span class="fleet-member-health ' + healthClass(health, m.item.CriticalHealth) + '">' + formatPercent(health) + '</span>' +
+				'<span class="fleet-member-status">' + Util.textToHtml(status) +
+				(m.role && m.role.copy ? ' · ' + Util.textToHtml(m.role.copy) : '') +
+				(m.source === 'history' ? ' · ' + Util.textToHtml(I18n.translate('fleet_in_history')) : '') + '</span>';
+			rows += self ?
+				'<li class="fleet-member is-current" aria-current="true">' + cells + '</li>' :
+				'<li><a href="#" class="fleet-member" data-fleet-source="' + m.source + '" data-fleet-id="' + m.item.NZBID + '">' + cells + '</a></li>';
+		}
+
+		return '<div class="fleet-head"><span class="fleet-title">' + Util.textToHtml(I18n.translate('fleet_title')) + '</span>' +
+			(item.DupeKey ? '<code class="fleet-key" title="' + Util.textToAttr(I18n.translate('edit_dupe_key')) + '">' + Util.textToHtml(item.DupeKey) + '</code>' : '') +
+			(members.length > 1 ? '<span class="fleet-count">' + Util.textToHtml(I18n.translate('fleet_copies', String(members.length))) + '</span>' : '') +
+			'</div>' +
+			'<div class="fleet-facts">' + facts.join('') + '</div>' +
+			(members.length > 1 ? '<ul class="fleet-members">' + rows + '</ul>' : '');
+	}
+
+	// switch the panel to another copy of the fleet
+	this.open = function(source, id)
+	{
+		if (source === 'queue')
+		{
+			if ($('#HistoryEditDialog').hasClass('in'))
+			{
+				$('#HistoryEditDialog').modal('hide');
+			}
+			DownloadsEditDialog.showModal(id, Downloads.groups);
+		}
+		else
+		{
+			for (var i = 0; History.items && i < History.items.length; i++)
+			{
+				if (History.items[i].NZBID == id)
+				{
+					if ($('#DownloadsEditDialog').hasClass('in'))
+					{
+						$('#DownloadsEditDialog').modal('hide');
+					}
+					HistoryEditDialog.showModal(History.items[i]);
+					return;
+				}
+			}
+		}
+	}
+
+	this.bindFleet = function($container)
+	{
+		$container.on('click', 'a.fleet-member', function(e)
+		{
+			e.preventDefault();
+			// a save in flight sends its remaining edits to the shown copy:
+			// stay on it until the save completes
+			if ($container.closest('.modal').hasClass('is-saving'))
+			{
+				return;
+			}
+			DetailsPanel.open($(this).attr('data-fleet-source'), parseInt($(this).attr('data-fleet-id'), 10));
+		});
+	}
+}(jQuery));
+
 
 /*** DOWNLOAD EDIT DIALOG ************************************************************/
 
@@ -96,6 +421,7 @@ var DownloadsEditDialog = (new function($)
 		});
 
 		TabDialog.extend($DownloadsEditDialog);
+		DetailsPanel.bindFleet($('#DownloadsEdit_Fleet'));
 
 		if (UISettings.setFocus)
 		{
@@ -150,42 +476,18 @@ var DownloadsEditDialog = (new function($)
 			return;
 		}
 
-		Refresher.pause();
+		// the panel is already open on another copy of the fleet: switch over
+		var switching = $DownloadsEditDialog.hasClass('in');
+		if (!switching)
+		{
+			Refresher.pause();
+		}
 
 		curGroup = group;
 
-		var size = Util.formatSizeMB(group.FileSizeMB, group.FileSizeLo);
-		var remaining = Util.formatSizeMB(group.RemainingSizeMB-group.PausedSizeMB, group.RemainingSizeLo-group.PausedSizeLo);
-		var pausedSize = Util.formatSizeMB(group.PausedSizeMB, group.PausedSizeLo);
-		var completion = group.SuccessArticles + group.FailedArticles > 0 ? Util.round0(group.SuccessArticles * 100.0 / (group.SuccessArticles +  group.FailedArticles)) + '%' : '--';
-		if (group.FailedArticles > 0 && completion === '100%')
-		{
-			completion = '99.9%';
-		}
-
-		var table = '';
-		//table += '<tr><td>Age</td><td class="text-right">' + age + '</td></tr>';
-		table += '<tr><td>' + I18n.translate('label_total') + '</td><td class="text-right">' + size + '</td></tr>';
-		table += '<tr><td>' + I18n.translate('label_paused') + '</td><td class="text-right">' + pausedSize + '</td></tr>';
-		table += '<tr><td>' + I18n.translate('label_unpaused') + '</td><td class="text-right">' + remaining + '</td></tr>';
-		//table += '<tr><td>Size (total/remaining/paused)</td><td class="text-right">4.10 / 4.10 / 0.00 GB</td></tr>';
-		//table += '<tr><td>Active downloads</td><td class="text-right">' + group.ActiveDownloads + '</td></tr>';
-		//table += '<tr><td>Estimated time</td><td class="text-right">' + estimated + '</td></tr>';
-		table += '<tr><td>' + I18n.translate('label_health_critical_current') + '</td><td class="text-right">' +
-			Math.floor(group.CriticalHealth / 10) + '% / ' + Math.floor(group.Health / 10) + '%</td></tr>';
-		table += '<tr><td>' + I18n.translate('label_files_total_remaining_pars') + '</td><td class="text-right">' + group.FileCount + ' / ' +
-			group.RemainingFileCount + ' / ' + group.RemainingParCount + '</td></tr>';
-		table += '<tr><td>' +
-			(group.ServerStats.length > 0 ? '<a href="#" id="DownloadsEdit_ServStats" data-tab="DownloadsEdit_ServStatsTab" title="' + I18n.translate('tooltip_per_server_stats') + '">' : '') +
-			I18n.translate('label_articles_total_completion') +
-			(group.ServerStats.length > 0 ? ' <i class="material-icon" style="opacity:0.6;">arrow_right_alt</i></a>' : '') +
-			'</td><td class="text-right">' + group.TotalArticles + ' / ' + completion + '</td></tr>';
-		if (Util.showDupeRecovered(group))
-		{
-			table += '<tr><td>' + I18n.translate('label_recovered_from_duplicates') + '</td><td class="text-right">' + Util.formatDupeRecovered(group) + '</td></tr>';
-		}
-		$('#DownloadsEdit_Statistics').html(table);
-
+		$('#DownloadsEdit_Status').html(DownloadsUI.buildStatus(group));
+		$('#DownloadsEdit_Summary').html(group.Kind === 'NZB' ? DetailsPanel.summary(group, 'DownloadsEdit') : '');
+		$('#DownloadsEdit_Fleet').html(group.Kind === 'NZB' ? DetailsPanel.fleet(group, 'queue') : '');
 		$('#DownloadsEdit_ServStats').click(tabClick);
 		EditUI.fillServStats($ServStatsTable, group);
 		$ServStatsTable.fasttable('setCurPage', 1);
@@ -227,7 +529,7 @@ var DownloadsEditDialog = (new function($)
 
 		Util.show('#DownloadsEdit_NZBNameReadonly', group.postprocess);
 		Util.show('#DownloadsEdit_Save', !group.postprocess);
-		Util.show('#DownloadsEdit_StatisticsGroup', group.Kind === 'NZB');
+		Util.show('#DownloadsEdit_Summary, #DownloadsEdit_Fleet', group.Kind === 'NZB');
 		Util.show('#DownloadsEdit_File', group.Kind === 'NZB');
 		Util.show('#DownloadsEdit_URLGroup', group.Kind === 'URL');
 		$('#DownloadsEdit_CategoryGroup').toggleClass('control-group-last', group.Kind === 'URL');
@@ -291,7 +593,10 @@ var DownloadsEditDialog = (new function($)
 		}
 		showing = false;
 
-		$DownloadsEditDialog.modal({backdrop: 'static'});
+		if (!switching)
+		{
+			$DownloadsEditDialog.modal({backdrop: 'static'});
+		}
 	}
 
 	function completed()
@@ -382,6 +687,7 @@ var DownloadsEditDialog = (new function($)
 	function disableAllButtons()
 	{
 		$('#DownloadsEditDialog .modal-footer .btn').attr('disabled', 'disabled');
+		$('#DownloadsEditDialog').addClass('is-saving');
 		setTimeout(function()
 		{
 			$('#DownloadsEdit_Transmit').show();
@@ -391,6 +697,7 @@ var DownloadsEditDialog = (new function($)
 	function enableAllButtons()
 	{
 		$('#DownloadsEditDialog .modal-footer .btn').removeAttr('disabled');
+		$('#DownloadsEditDialog').removeClass('is-saving');
 		$('#DownloadsEdit_Transmit').hide();
 	}
 
@@ -1602,6 +1909,7 @@ var HistoryEditDialog = (new function($)
 		});
 
 		TabDialog.extend($HistoryEditDialog);
+		DetailsPanel.bindFleet($('#HistoryEdit_Fleet'));
 
 		I18n.subscribe(function()
 		{
@@ -1614,7 +1922,12 @@ var HistoryEditDialog = (new function($)
 
 	this.showModal = function(hist, area)
 	{
-		Refresher.pause();
+		// the panel is already open on another copy of the fleet: switch over
+		var switching = $HistoryEditDialog.hasClass('in');
+		if (!switching)
+		{
+			Refresher.pause();
+		}
 
 		curHist = hist;
 
@@ -1703,29 +2016,7 @@ var HistoryEditDialog = (new function($)
 		if (hist.Kind === 'NZB')
 		{
 			$('#HistoryEdit_Path').val(hist.FinalDir !== '' ? hist.FinalDir : hist.DestDir);
-
-			var size = Util.formatSizeMB(hist.FileSizeMB, hist.FileSizeLo);
-			var completion = hist.SuccessArticles + hist.FailedArticles > 0 ? Util.round0(hist.SuccessArticles * 100.0 / (hist.SuccessArticles +  hist.FailedArticles)) + '%' : '--';
-			if (hist.FailedArticles > 0 && completion === '100%')
-			{
-				completion = '99.9%';
-			}
-
-			var table = '';
-			table += '<tr><td><a href="#" id="HistoryEdit_TimeStats" data-tab="HistoryEdit_TimeStatsTab" title="' + I18n.translate('tooltip_history_total_stats') + '">' + I18n.translate('label_total') + ' ' +
-				'<i class="material-icon" style="opacity:0.6;">arrow_right_alt</i></a>' +
-				'</td><td class="text-center">' + size + '</td></tr>';
-			table += '<tr><td>' + I18n.translate('label_files_total_remaining') + '</td><td class="text-center">' + hist.FileCount + ' / ' + hist.RemainingFileCount + '</td></tr>';
-			table += '<tr><td>' +
-				(hist.ServerStats.length > 0 ? '<a href="#" id="HistoryEdit_ServStats" data-tab="HistoryEdit_ServStatsTab" title="' + I18n.translate('tooltip_history_server_stats') + '">' : '') +
-				I18n.translate('label_articles_total_completion') +
-				(hist.ServerStats.length > 0 ? '  <i class="material-icon" style="opacity:0.6;">arrow_right_alt</i></a>' : '') +
-				'</td><td class="text-center">' + hist.TotalArticles + ' / ' + completion + '</td></tr>';
-			if (Util.showDupeRecovered(hist))
-			{
-				table += '<tr><td>' + I18n.translate('label_recovered_from_duplicates') + '</td><td class="text-center">' + Util.formatDupeRecovered(hist) + '</td></tr>';
-			}
-			$('#HistoryEdit_Statistics').html(table);
+			$('#HistoryEdit_Summary').html(DetailsPanel.summary(hist, 'HistoryEdit'));
 
 			$('#HistoryEdit_ServStats').click(tabClick);
 			EditUI.fillServStats($ServStatsTable, hist);
@@ -1743,7 +2034,8 @@ var HistoryEditDialog = (new function($)
 		Util.show($('#HistoryEdit_DupeBackup').closest('.control-group'), hist.Kind === 'NZB');
 		$('#HistoryEdit_DupeMode').closest('.control-group').toggleClass('last-group', hist.Kind !== 'NZB');
 
-		Util.show('#HistoryEdit_PathGroup, #HistoryEdit_StatisticsGroup', hist.Kind === 'NZB');
+		$('#HistoryEdit_Fleet').html(hist.Kind === 'NZB' ? DetailsPanel.fleet(hist, 'history') : '');
+		Util.show('#HistoryEdit_PathGroup, #HistoryEdit_Summary, #HistoryEdit_Fleet', hist.Kind === 'NZB');
 		Util.show('#HistoryEdit_CategoryGroup', hist.Kind !== 'DUP');
 		Util.show('#HistoryEdit_DupGroup', hist.Kind === 'DUP');
 		var dupeCheck = Options.option('DupeCheck') === 'yes';
@@ -1790,7 +2082,10 @@ var HistoryEditDialog = (new function($)
 		}
 		showing = false;
 
-		$HistoryEditDialog.modal({backdrop: 'static'});
+		if (!switching)
+		{
+			$HistoryEditDialog.modal({backdrop: 'static'});
+		}
 	}
 
 	function buildStatus(status, prefix)
@@ -1898,6 +2193,7 @@ var HistoryEditDialog = (new function($)
 	function disableAllButtons()
 	{
 		$('#HistoryEditDialog .modal-footer .btn').attr('disabled', 'disabled');
+		$('#HistoryEditDialog').addClass('is-saving');
 		setTimeout(function()
 		{
 			$('#HistoryEdit_Transmit').show();
@@ -1907,6 +2203,7 @@ var HistoryEditDialog = (new function($)
 	function enableAllButtons()
 	{
 		$('#HistoryEditDialog .modal-footer .btn').removeAttr('disabled');
+		$('#HistoryEditDialog').removeClass('is-saving');
 		$('#HistoryEdit_Transmit').hide();
 	}
 

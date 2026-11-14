@@ -1754,6 +1754,25 @@ pub(crate) fn file_is_par_snap(f: &crate::queuesubsys_host::FileSnap) -> bool {
     )
 }
 
+/// Downloads the par2 files that are not paused (the index) ahead of the data files. The
+/// checks that rely on the par2 checksums when a data file completes (borrowed articles from
+/// duplicates, live par2 damage tracking) need the index on disk by then, and the file sort
+/// alone does not guarantee that with several connections.
+#[cfg(unix)]
+pub(crate) fn prioritize_par_index_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb_ptr: usize,
+) {
+    let flen = host.nzb_file_len(nzb_ptr);
+    for i in 0..flen {
+        let fp = host.nzb_file_at(nzb_ptr, i);
+        let f = host.file_snap(fp);
+        if !f.deleted && !f.paused && !f.extra_priority && file_is_par_snap(&f) {
+            host.file_set_int(fp, crate::queuesubsys_host::FILE_INT_EXTRA_PRIORITY, 1);
+        }
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn completed_file_is_par2_snap(cf: &crate::queuesubsys_host::CompletedFileSnap) -> bool {
     is_par_file(cf.par_file, 0, 1, true, &cf.filename)

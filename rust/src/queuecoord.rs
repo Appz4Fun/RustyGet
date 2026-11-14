@@ -4985,6 +4985,7 @@ pub(crate) fn direct_rename_completed_host(
             None,
         );
     }
+    crate::dupefallback::prioritize_par_index_host(host, nzb_ptr);
 
     host.nzb_set_int(nzb_ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
     host.dq_save_changed(dq_ptr);

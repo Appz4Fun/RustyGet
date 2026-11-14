@@ -1184,6 +1184,10 @@ impl NzbgetRsPrePostProcessor {
             host.nzb_print_message(nzb_ptr, MK_INFO, &msg);
             host.dq_edit_entry(dq_ptr, nzb.id, EA_GROUP_SORT_FILES, None);
         }
+        #[cfg(unix)]
+        if nzb.delete_status == DS_NONE {
+            crate::dupefallback::prioritize_par_index_host(host, nzb_ptr);
+        }
 
         let nzb = host.nzb_snap(nzb_ptr, false);
         if matches!(nzb.delete_status, DS_DUPE | DS_COPY | DS_GOOD | DS_SCAN) {

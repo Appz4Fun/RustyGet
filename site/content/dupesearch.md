@@ -50,7 +50,7 @@ A listing says nothing about whether a posting still exists on your servers, so 
 - **Sample.** It checks `DupeHealthPercent` of the posting's articles (5% by default), at least `DupeHealthMin` and at most `DupeHealthMax`.
 - **Existence.** It asks every server about each sampled article with pipelined `STAT` commands.
 - **Content.** `DupeBodyPercent` of the sampled articles, at most `DupeBodyChecks`, download in full and must pass their yEnc checksum, because a server can claim an article whose body is gone.
-- **Limits.** The check uses at most half of each server's connections, and at most `DupeCheckConnections`. It checks `DupeCheckConcurrency` postings at a time and ends after `DupeHealthBudget` seconds. An article counts as missing when every server answered and none of them has it. If the time runs out first, an article that at least half of the servers reported missing counts as missing too.
+- **Limits.** By default the check uses every connection a server has free (`DupeCheckConnections=0`), or at most `DupeCheckConnections`. Downloads come first: once a download finds no free connection, the check stops taking more beyond one per server and hands the rest back as its current article checks finish. It checks `DupeCheckConcurrency` postings at a time and ends after `DupeHealthBudget` seconds. An article counts as missing when every server answered and none of them has it. If the time runs out first, an article that at least half of the servers reported missing counts as missing too.
 
 A first pass checks about ten articles of each candidate. RustyGet queues the best `DupeFastDonors` candidates that pass it right away, before the full check finishes.
 
@@ -97,7 +97,7 @@ RustyGet saves search progress in the queue directory, so a restart picks up whe
 | `DupePrimaryScore` | `1000000` | Score given to a download the search looks after. |
 | `DupeSizeTolerance` | `0` | Percent a listing's size may differ from the download's. `0` means size isn't compared. |
 | `DupeBodyPercent` | `20` | Share of the sampled articles to download and verify in full. |
-| `DupeCheckConcurrency` | `10` | Postings checked at the same time. |
-| `DupeCheckConnections` | `20` | Most check connections per server, never more than half of its connections. |
+| `DupeCheckConcurrency` | `20` | Postings checked at the same time. |
+| `DupeCheckConnections` | `0` | Most check connections per server. `0` uses every connection downloads aren't using. |
 
 RustyGet warns at startup when DupeSearch is on and `DupeCheck` is off, `HealthCheck` isn't `dupe`, `ArticleRetries` is below 3, or a server has fewer than four connections.

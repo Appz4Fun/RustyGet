@@ -103,7 +103,7 @@ function status() {
 }
 
 function configOptions() {
-  const template = fs.readFileSync(path.resolve(root, '../nzbget.conf'), 'utf8');
+  const template = fs.readFileSync(path.resolve(root, '../rustyget.conf'), 'utf8');
   const values = new Map(template.split('\n').filter(line => /^[A-Za-z0-9$].*=/.test(line))
     .map(line => { const eq = line.indexOf('='); return [line.slice(0, eq).trim(), line.slice(eq + 1).trim()]; }));
   for (const [name, value] of Object.entries({

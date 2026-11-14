@@ -97,6 +97,10 @@ article "missing" on the active server, so no real Usenet access is needed):
 * xcrypt_encplain  - M3 password-assisted cross-packing: an ENCRYPTED
   store-rar target (its own password known via its NZB) with a data hole,
   repaired from a BARE unencrypted donor; asserts byte-identical ciphertext.
+* xcrypt_enc7ztarget - a stored 7z target with encrypted headers and data
+  (password in its NZB), split in volumes, repaired from a BARE donor.
+* xcrypt_enc7zdonor - a BARE target repaired by range from a stored 7z donor
+  with encrypted headers and data, without the decompression step.
 * xcrypt_plainenc  - reverse direction: a BARE target repaired from an
   ENCRYPTED store-rar donor whose password travels via the donor's NZB.
 * xcrypt_diffpass  - both sides encrypted under DIFFERENT passwords; proves
@@ -135,7 +139,7 @@ article "missing" on the active server, so no real Usenet access is needed):
 
 Usage:
     harness.py --nzbget /path/to/nzbget [--target local|adb]
-               [--scenario all|complementary|cutover|leadswitch|cutovertruth|manydonors|stream|liveoverlap|livegate|livelastfile|repost|repostrenamed|repostobfuscated|repostdonorgaps|xpackbare|xpackrar|xpackrar2rar|xpack2sets|xpackzip|xpack7z|xpacksplit|xpackcompressed|xpackneg|xcrypt_encplain|xcrypt_plainenc|xcrypt_diffpass|xcrypt_wrongpass|xdecomp_zip|xdecomp_7z|xdecomp_storetarget|xdecomp_enc7z|xdecomp_enctarget|xdecomp_neg|xdecomp_symlink|xdecomp_off]
+               [--scenario all|complementary|cutover|leadswitch|cutovertruth|manydonors|stream|liveoverlap|livegate|livelastfile|repost|repostrenamed|repostobfuscated|repostdonorgaps|xpackbare|xpackrar|xpackrar2rar|xpack2sets|xpackzip|xpack7z|xpacksplit|xpackcompressed|xpackneg|xcrypt_encplain|xcrypt_enc7ztarget|xcrypt_enc7zdonor|xcrypt_plainenc|xcrypt_diffpass|xcrypt_wrongpass|xdecomp_zip|xdecomp_7z|xdecomp_storetarget|xdecomp_enc7z|xdecomp_enctarget|xdecomp_neg|xdecomp_symlink|xdecomp_off]
                [--serial NNN] [--keep]
 """
 
@@ -2557,6 +2561,74 @@ def scenario_xcrypt_encplain(daemon, t):
     return ('xcrypt_encplain', ok,
             'status=%s recovered=%d xpack=%d repaired=%d integ=%s'
             % (h['Status'], c['recov'], c['xpack'], c['repaired'], all(integ.values())))
+
+
+def scenario_xcrypt_enc7ztarget(daemon, t):
+    """The TARGET is a stored 7z with encrypted headers and data, cut into
+    .7z.001-.003 volumes; its password travels in its own NZB. A data hole
+    sits in the middle volume (the start header in the first volume and the
+    encrypted headers at the end of the last one stay intact). The donor is
+    the same movie posted bare. The headers are decrypted with the password,
+    the packed stream maps as one AES-256-CBC stream over the movie, and the
+    hole is filled with donor plaintext re-encrypted in place: byte-identical
+    encrypted volumes afterwards prove it."""
+    if not generators.HAVE_7Z:
+        return ('xcrypt_enc7ztarget', None, 'SKIP: 7z not installed')
+    size = 6_000_000
+    data = _payload(size, 7400)
+    password = 'target-7z-pw'
+    with tempfile.TemporaryDirectory(prefix='xc7t-') as workdir:
+        archive = generators.seven_zip_copy_encrypted([('movie.mkv', data)], workdir, password)
+    pieces = generators.split_bytes(archive, [2_000_003, 2_000_003])
+    payloads, members = {}, []
+    missing = [set(), {2}, set()]
+    for i, (piece, miss) in enumerate(zip(pieces, missing), 1):
+        rel = 'xc7tA/rel.7z.%03d' % i
+        name = 'Rel.7z.%03d' % i
+        t.write_file(os.path.join('data', rel), piece)
+        payloads[name] = piece
+        members.append((rel, name, len(piece), 500_000, miss))
+    dp = _place_copy(t, 'xc7tB', data, 'movie.mkv')
+    donor_members = [(dp, 'movie.mkv', size, 300_000, set())]
+
+    h, integ, c = _xpack_run(daemon, t, 'Xc7t', members, donor_members, payloads,
+                             primary_password=password)
+    ok = all(integ.values()) and c['recov'] >= 1 and c['xpack'] >= 1 and c['repaired'] >= 1
+    return ('xcrypt_enc7ztarget', ok,
+            'status=%s recovered=%d xpack=%d repaired=%d integ=%s'
+            % (h['Status'], c['recov'], c['xpack'], c['repaired'], all(integ.values())))
+
+
+def scenario_xcrypt_enc7zdonor(daemon, t):
+    """The DONOR is a stored 7z with encrypted headers and data; the target is
+    the same movie posted bare with two missing articles. With the donor's
+    password (from its NZB) the donor maps like any stored archive, so only
+    the articles around the holes are fetched and decrypted: no
+    decompression step runs (DupeStreamDecompress is off here) and the donor
+    is not downloaded whole."""
+    if not generators.HAVE_7Z:
+        return ('xcrypt_enc7zdonor', None, 'SKIP: 7z not installed')
+    size = 6_000_000
+    data = _payload(size, 7500)
+    password = 'donor-7z-pw'
+    pp = _place_copy(t, 'xc7dA', data, 'movie.mkv')
+    members = [(pp, 'movie.mkv', size, 500_000, {5, 6})]
+    payloads = {'movie.mkv': data}
+    with tempfile.TemporaryDirectory(prefix='xc7d-') as workdir:
+        archive = generators.seven_zip_copy_encrypted([('movie.mkv', data)], workdir, password)
+    donor_members = []
+    for i, piece in enumerate(generators.split_bytes(archive, [2_500_000, 2_500_000]), 1):
+        rel = 'xc7dB/rel.7z.%03d' % i
+        t.write_file(os.path.join('data', rel), piece)
+        donor_members.append((rel, 'Rel.7z.%03d' % i, len(piece), 300_000, set()))
+
+    h, integ, c = _xpack_run(daemon, t, 'Xc7d', members, donor_members, payloads,
+                             donor_password=password)
+    decompressed = _grep_log(t, '(decompressed)')
+    ok = integ['movie.mkv'] and c['recov'] >= 1 and c['repaired'] >= 1 and decompressed == 0
+    return ('xcrypt_enc7zdonor', ok,
+            'status=%s recovered=%d repaired=%d decompressed_logs=%d integrity=%s'
+            % (h['Status'], c['recov'], c['repaired'], decompressed, integ['movie.mkv']))
 
 
 def scenario_xcrypt_plainenc(daemon, t):
@@ -11518,6 +11590,8 @@ SCENARIOS = {
     'xpackcompressed': scenario_xpackcompressed,
     'xpackneg': scenario_xpackneg,
     'xcrypt_encplain': scenario_xcrypt_encplain,
+    'xcrypt_enc7ztarget': scenario_xcrypt_enc7ztarget,
+    'xcrypt_enc7zdonor': scenario_xcrypt_enc7zdonor,
     'xcrypt_plainenc': scenario_xcrypt_plainenc,
     'xcrypt_diffpass': scenario_xcrypt_diffpass,
     'xcrypt_wrongpass': scenario_xcrypt_wrongpass,
@@ -11801,6 +11875,7 @@ EXPECTED_HISTORY_STATUS = {
     'xpackzip': 'SUCCESS/HEALTH', 'xpack7z': 'SUCCESS/HEALTH', 'xpack7zlzma2': 'SUCCESS/HEALTH',
     'xpacksplit': 'SUCCESS/HEALTH', 'xpackcompressed': 'SUCCESS/HEALTH',
     'xpackneg': 'FAILURE/HEALTH', 'xcrypt_encplain': 'SUCCESS/HEALTH',
+    'xcrypt_enc7ztarget': 'SUCCESS/HEALTH', 'xcrypt_enc7zdonor': 'SUCCESS/HEALTH',
     'xcrypt_plainenc': 'SUCCESS/HEALTH', 'xcrypt_diffpass': 'SUCCESS/HEALTH',
     'xcrypt_wrongpass': 'FAILURE/HEALTH', 'xdecomp_zip': 'SUCCESS/HEALTH',
     'xdecomp_7z': 'SUCCESS/HEALTH', 'xdecomp_storetarget': 'SUCCESS/HEALTH',
@@ -11930,6 +12005,8 @@ SCENARIO_OPTIONS = {
     # outright (no daemon options matter) when the cryptography module is
     # not installed - see generators.HAVE_CRYPTO.
     'xcrypt_encplain': ['DupeArticleFallback=stream', 'ParCheck=auto'],
+    'xcrypt_enc7ztarget': ['DupeArticleFallback=stream', 'ParCheck=auto'] + _SEVENZIP_OPTION,
+    'xcrypt_enc7zdonor': ['DupeArticleFallback=stream', 'ParCheck=auto'] + _SEVENZIP_OPTION,
     'xcrypt_plainenc': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xcrypt_diffpass': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xcrypt_wrongpass': ['DupeArticleFallback=stream', 'ParCheck=auto'],

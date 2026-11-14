@@ -1,0 +1,17 @@
+[Unit]
+Description=RustyGet Daemon
+Documentation=https://github.com/Appz4Fun/RustyGet
+After=network.target
+
+[Service]
+Type=simple
+User=nzbget
+Group=nzbget
+WorkingDirectory=/var/lib/rustyget
+ExecStart=/usr/bin/rustyget -s -c /var/lib/rustyget/rustyget.conf -o OutputMode=log -o WriteLog=none
+ExecReload=/usr/bin/rustyget -O -c /var/lib/rustyget/rustyget.conf
+ExecStop=/usr/bin/rustyget -Q -c /var/lib/rustyget/rustyget.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

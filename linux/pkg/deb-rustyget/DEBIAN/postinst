@@ -1,0 +1,35 @@
+#!/bin/sh
+# Touches only rustyget paths. Never enables, starts or restarts any service.
+set -e
+
+RG_HOME=/var/lib/rustyget
+RG_USER=nzbget
+RG_GROUP=nzbget
+
+if [ "$1" = "configure" ]; then
+    if ! getent group "$RG_GROUP" >/dev/null; then
+        addgroup --quiet --system "$RG_GROUP"
+    fi
+    if ! getent passwd "$RG_USER" >/dev/null; then
+        adduser --quiet --system --ingroup "$RG_GROUP" --no-create-home \
+                --home "$RG_HOME" --disabled-password "$RG_USER"
+    fi
+
+    if [ ! -d "$RG_HOME" ]; then
+        mkdir -p "$RG_HOME"
+        chown "$RG_USER:$RG_GROUP" "$RG_HOME"
+        chmod 2750 "$RG_HOME"
+    fi
+
+    if [ ! -f "$RG_HOME/rustyget.conf" ]; then
+        cp /usr/share/rustyget/rustyget.conf "$RG_HOME/rustyget.conf"
+        chown "$RG_USER:$RG_GROUP" "$RG_HOME/rustyget.conf"
+        chmod 0640 "$RG_HOME/rustyget.conf"
+    fi
+fi
+
+if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ]; then
+    systemctl --system daemon-reload >/dev/null 2>&1 || true
+fi
+
+exit 0

@@ -597,18 +597,19 @@ pub fn options_format_legacy_conf_path(dir: &[u8], sep: u8) -> Vec<u8> {
 
 /// Where a legacy configuration file found by the search should be renamed to
 /// so that the search finds it again: `~/.nzbget` -> `~/.rustyget`,
-/// `.../nzbget/nzbget.conf` -> `.../rustyget/rustyget.conf`, otherwise
-/// `rustyget.conf` in the same folder.
+/// `~/.config/nzbget/nzbget.conf` -> `~/.config/rustyget/rustyget.conf`,
+/// otherwise `rustyget.conf` in the same folder (also next to a binary that
+/// lives in a folder named `nzbget`).
 pub fn legacy_config_rename_target(path: &[u8]) -> Vec<u8> {
     const DOT: &[u8] = b".nzbget";
-    const NESTED: &[u8] = b"nzbget/nzbget.conf";
+    const NESTED: &[u8] = b"/.config/nzbget/nzbget.conf";
     if path.ends_with(DOT) {
         return [&path[..path.len() - DOT.len()], b".rustyget".as_slice()].concat();
     }
     if path.ends_with(NESTED) {
         return [
             &path[..path.len() - NESTED.len()],
-            b"rustyget/rustyget.conf".as_slice(),
+            b"/.config/rustyget/rustyget.conf".as_slice(),
         ]
         .concat();
     }
@@ -5142,6 +5143,11 @@ mod options_full_suite_port_from_cpp {
         assert_eq!(
             legacy_config_rename_target(b"/opt/app/nzbget.conf"),
             b"/opt/app/rustyget.conf"
+        );
+        // a binary in a folder named nzbget keeps its config beside it
+        assert_eq!(
+            legacy_config_rename_target(b"/opt/nzbget/nzbget.conf"),
+            b"/opt/nzbget/rustyget.conf"
         );
         // every advertised target for a searched legacy location is itself searched
         for loc in POSSIBLE_CONFIG_LOCATIONS

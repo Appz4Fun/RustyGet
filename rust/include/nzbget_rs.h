@@ -233,6 +233,11 @@ typedef struct NzbgetRsParsedOptions {
     int32_t dupe_health_budget;
     int32_t dupe_min_alive;
     int32_t dupe_fast_donors;
+    int32_t dupe_primary_score;
+    int32_t dupe_size_tolerance;
+    int32_t dupe_body_percent;
+    int32_t dupe_check_concurrency;
+    int32_t dupe_check_connections;
     int32_t post_strategy;
     int32_t file_naming;
     int32_t health_check;

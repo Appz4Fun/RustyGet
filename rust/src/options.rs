@@ -890,6 +890,24 @@ pub fn options_normalize_dupe_and_mem_options(
     )
 }
 
+/// Normalized `DupePrimaryScore`, `DupeSizeTolerance`, `DupeBodyPercent`,
+/// `DupeCheckConcurrency` and `DupeCheckConnections`.
+pub fn options_normalize_dupe_check_options(
+    primary_score: i32,
+    size_tolerance: i32,
+    body_percent: i32,
+    check_concurrency: i32,
+    check_connections: i32,
+) -> (i32, i32, i32, i32, i32) {
+    (
+        primary_score.max(1000),
+        size_tolerance.clamp(0, 1000),
+        body_percent.clamp(0, 100),
+        check_concurrency.clamp(1, 100),
+        check_connections.clamp(1, 1000),
+    )
+}
+
 /// `Options::InitServers`: classifies server option definition completeness.
 pub fn options_check_server_def(
     has_any_field: bool,
@@ -1386,7 +1404,7 @@ const COMMAND_VALUES: [i32; 26] = [
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 134] = [
+    let defaults: [(&CStr, &CStr); 139] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1419,6 +1437,11 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"DupeHealthBudget", c"120"),
         (c"DupeMinAlive", c"50"),
         (c"DupeFastDonors", c"5"),
+        (c"DupePrimaryScore", c"1000000"),
+        (c"DupeSizeTolerance", c"0"),
+        (c"DupeBodyPercent", c"20"),
+        (c"DupeCheckConcurrency", c"10"),
+        (c"DupeCheckConnections", c"20"),
         (c"DownloadRate", c"0"),
         (c"ControlIP", c"0.0.0.0"),
         (c"ControlUsername", c"rustyget"),
@@ -1695,6 +1718,11 @@ pub struct NzbgetRsParsedOptions {
     pub dupe_health_budget: i32,
     pub dupe_min_alive: i32,
     pub dupe_fast_donors: i32,
+    pub dupe_primary_score: i32,
+    pub dupe_size_tolerance: i32,
+    pub dupe_body_percent: i32,
+    pub dupe_check_concurrency: i32,
+    pub dupe_check_connections: i32,
     pub post_strategy: i32,
     pub file_naming: i32,
     pub health_check: i32,
@@ -1728,6 +1756,11 @@ impl NzbgetRsParsedOptions {
             dupe_health_budget: 120,
             dupe_min_alive: 50,
             dupe_fast_donors: 5,
+            dupe_primary_score: 1_000_000,
+            dupe_size_tolerance: 0,
+            dupe_body_percent: 20,
+            dupe_check_concurrency: 10,
+            dupe_check_connections: 20,
             output_mode: 0,
             write_log: 1,
             par_check: 3,
@@ -2131,6 +2164,19 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     s.dupe_health_budget = norm_health_budget;
     s.dupe_min_alive = norm_min_alive;
     s.dupe_fast_donors = norm_fast_donors;
+    (
+        s.dupe_primary_score,
+        s.dupe_size_tolerance,
+        s.dupe_body_percent,
+        s.dupe_check_concurrency,
+        s.dupe_check_connections,
+    ) = options_normalize_dupe_check_options(
+        host.parse_int_value(c"DupePrimaryScore", 10),
+        host.parse_int_value(c"DupeSizeTolerance", 10),
+        host.parse_int_value(c"DupeBodyPercent", 10),
+        host.parse_int_value(c"DupeCheckConcurrency", 10),
+        host.parse_int_value(c"DupeCheckConnections", 10),
+    );
 
     let url_empty = out_dupe_search_url
         .as_ref()
@@ -4618,6 +4664,11 @@ mod options_full_suite_port_from_cpp {
         assert_eq!(options.scalars.dupe_health_budget, 120);
         assert_eq!(options.scalars.dupe_min_alive, 50);
         assert_eq!(options.scalars.dupe_fast_donors, 5);
+        assert_eq!(options.scalars.dupe_primary_score, 1_000_000);
+        assert_eq!(options.scalars.dupe_size_tolerance, 0);
+        assert_eq!(options.scalars.dupe_body_percent, 20);
+        assert_eq!(options.scalars.dupe_check_concurrency, 10);
+        assert_eq!(options.scalars.dupe_check_connections, 20);
     }
 
     #[test]
@@ -4635,6 +4686,11 @@ mod options_full_suite_port_from_cpp {
             c"DupeHealthBudget=60",
             c"DupeMinAlive=70",
             c"DupeFastDonors=2",
+            c"DupePrimaryScore=500000",
+            c"DupeSizeTolerance=20",
+            c"DupeBodyPercent=5",
+            c"DupeCheckConcurrency=3",
+            c"DupeCheckConnections=8",
         ];
         let mut extender = OptionsExtenderMock::default();
         let options = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
@@ -4654,6 +4710,11 @@ mod options_full_suite_port_from_cpp {
         assert_eq!(options.scalars.dupe_health_budget, 60);
         assert_eq!(options.scalars.dupe_min_alive, 70);
         assert_eq!(options.scalars.dupe_fast_donors, 2);
+        assert_eq!(options.scalars.dupe_primary_score, 500_000);
+        assert_eq!(options.scalars.dupe_size_tolerance, 20);
+        assert_eq!(options.scalars.dupe_body_percent, 5);
+        assert_eq!(options.scalars.dupe_check_concurrency, 3);
+        assert_eq!(options.scalars.dupe_check_connections, 8);
     }
 
     #[test]
@@ -4670,6 +4731,11 @@ mod options_full_suite_port_from_cpp {
             c"DupeHealthBudget=1",
             c"DupeMinAlive=150",
             c"DupeFastDonors=-2",
+            c"DupePrimaryScore=5",
+            c"DupeSizeTolerance=-1",
+            c"DupeBodyPercent=400",
+            c"DupeCheckConcurrency=0",
+            c"DupeCheckConnections=0",
         ];
         let mut extender = OptionsExtenderMock::default();
         let options = RustOptions::new_no_config(Some(&cmd_opts), Some(&mut extender));
@@ -4683,6 +4749,11 @@ mod options_full_suite_port_from_cpp {
         assert_eq!(options.scalars.dupe_health_budget, 5);
         assert_eq!(options.scalars.dupe_min_alive, 100);
         assert_eq!(options.scalars.dupe_fast_donors, 0);
+        assert_eq!(options.scalars.dupe_primary_score, 1000);
+        assert_eq!(options.scalars.dupe_size_tolerance, 0);
+        assert_eq!(options.scalars.dupe_body_percent, 100);
+        assert_eq!(options.scalars.dupe_check_concurrency, 1);
+        assert_eq!(options.scalars.dupe_check_connections, 1);
 
         let cmd_opts2 = [c"DupeHealthMin=300", c"DupeHealthMax=100"];
         let options2 = RustOptions::new_no_config(Some(&cmd_opts2), Some(&mut extender));

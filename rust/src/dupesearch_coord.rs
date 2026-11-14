@@ -51,6 +51,7 @@ pub const FETCH_PARALLEL: usize = 4;
 
 pub const DONOR_PARAM: &[u8] = b"DupeSearch";
 pub const ALIVE_PARAM: &[u8] = b"DupeAlive";
+const ALIVE_PARAM_STR: &str = "DupeAlive";
 pub const OWNED_KEY_PARAM: &[u8] = b"DupeSearchOwnedKey";
 pub const FLEET_PARAM: &[u8] = b"DupeFleet";
 
@@ -219,6 +220,10 @@ struct HostOpts {
     body_checks: i32,
     health_budget_sec: i32,
     health_check_mode: i32,
+    primary_score: i32,
+    size_tolerance: i32,
+    body_percent: i32,
+    check_concurrency: i32,
     queue_loaded: bool,
     stopped: bool,
     sep: u8,
@@ -284,8 +289,9 @@ pub(crate) unsafe extern "C" fn native_dupe_host(
                     Some(unsafe { CStr::from_ptr(s2).to_bytes() })
                 };
                 qh.nzb_set_param(p2, OWNED_KEY_PARAM, s2_b);
-                if (a2 & 2) != 0 && qh.nzb_snap(p2, false).dupe_score < 1_000_000 {
-                    qh.nzb_set_int(p2, crate::queuesubsys_host::NZB_INT_DUPE_SCORE, 1_000_000);
+                let primary = crate::dupewatch::primary_score();
+                if (a2 & 2) != 0 && qh.nzb_snap(p2, false).dupe_score < primary {
+                    qh.nzb_set_int(p2, crate::queuesubsys_host::NZB_INT_DUPE_SCORE, primary);
                 }
                 qh.nzb_set_int(p2, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
                 if (a2 & 1) != 0 {
@@ -372,6 +378,10 @@ fn read_host_opts(host_ctx: *mut c_void, host_cb: DupeHostFn) -> HostOpts {
         body_checks: sc.map_or(0, |s| s.dupe_body_checks),
         health_budget_sec: sc.map_or(0, |s| s.dupe_health_budget),
         health_check_mode: sc.map_or(0, |s| s.health_check),
+        primary_score: sc.map_or(BASE_PICK_SCORE, |s| s.dupe_primary_score),
+        size_tolerance: sc.map_or(0, |s| s.dupe_size_tolerance),
+        body_percent: sc.map_or(20, |s| s.dupe_body_percent),
+        check_concurrency: sc.map_or(10, |s| s.dupe_check_concurrency),
         queue_loaded: crate::ffi::is_queue_loaded(),
         stopped: query_host_stopped(host_ctx, host_cb),
         sep: crate::paths::PATH_SEPARATOR as u8,
@@ -845,6 +855,8 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
             ));
         }
     }
+    let check_connections =
+        crate::options::active_options().map_or(20, |o| o.scalars().dupe_check_connections);
     let mut list = Vec::new();
     let mut groups = BTreeSet::new();
     for (server_id, active, max_conns, group) in raw_servers {
@@ -854,7 +866,7 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
         if group > 0 && !groups.insert(group) {
             continue;
         }
-        let wanted_cap = (max_conns / 2).clamp(1, 20);
+        let wanted_cap = dupe_check_server_cap(max_conns, check_connections);
         let key = (server_id, host_cb as usize);
         let recreate = match known.get(&key) {
             Some((srv, ctx_cell)) => {
@@ -878,6 +890,12 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
         }
     }
     list
+}
+
+/// Check connections per news server: at most half of its connections, so
+/// downloads keep the other half, and at most `DupeCheckConnections`.
+fn dupe_check_server_cap(server_connections: i32, check_connections: i32) -> i32 {
+    (server_connections / 2).min(check_connections).max(1)
 }
 
 struct NntpHealthTransportShared {
@@ -1773,6 +1791,12 @@ impl NzbgetRsDupeSearch {
         };
 
         let mut pick_flags = flags_of(&pick, history);
+        // DupeMode FORCE or ALL turns off failover: a pick DupeSearch looks
+        // after is switched to SCORE once it is searched.
+        let switch_to_score = crate::dupewatch::wants_score_mode(pick_flags);
+        if switch_to_score {
+            pick_flags |= crate::dupewatch::SCORE_MODE;
+        }
         let now = host_now(host_ctx, host_cb);
         let preliminary_flags = pick_flags;
         let mut preliminary: Option<Decision> = None;
@@ -1900,7 +1924,7 @@ impl NzbgetRsDupeSearch {
             return false;
         }
 
-        let score = pick.dupe_score.max(BASE_PICK_SCORE);
+        let score = pick.dupe_score.max(opts.primary_score);
         if !rank_only {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             g.record_search(
@@ -1916,6 +1940,36 @@ impl NzbgetRsDupeSearch {
         }
         if !opts.dry_run && !rank_only {
             let _ = self.save_state(host_ctx, host_cb);
+        }
+        if switch_to_score {
+            let mode = crate::dupewatch::dupe_mode_name(pick.dupe_mode);
+            let mut msg = b"DupeSearch: ".to_vec();
+            push_c_slice(&mut msg, &pick.name);
+            if opts.dry_run {
+                msg.extend_from_slice(b": dry run, would set DupeMode ");
+                msg.extend_from_slice(mode);
+                msg.extend_from_slice(b" to SCORE");
+            } else {
+                msg.extend_from_slice(b": DupeMode ");
+                msg.extend_from_slice(mode);
+                msg.extend_from_slice(b" set to SCORE, so it can fail over to a backup");
+                if let Some(qh) = crate::ffi::queue_host() {
+                    qh.nzb_set_int(
+                        pick.ptr,
+                        crate::queuesubsys_host::NZB_INT_DUPE_MODE,
+                        crate::queuesubsys_host::DM_SCORE,
+                    );
+                    qh.nzb_set_int(pick.ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+                    if history {
+                        qh.dq_history_changed(dq_ptr);
+                        qh.dq_save(dq_ptr);
+                    } else {
+                        qh.dq_save_changed(dq_ptr);
+                    }
+                }
+                pick.dupe_mode = crate::queuesubsys_host::DM_SCORE;
+            }
+            host_log(host_ctx, host_cb, MK_INFO, &msg);
         }
         if !opts.dry_run && !history {
             let key_c = c_bytes(&key);
@@ -1946,8 +2000,8 @@ impl NzbgetRsDupeSearch {
                 );
             }
             pick.dupe_key = key.clone();
-            if pick.dupe_score < BASE_PICK_SCORE {
-                pick.dupe_score = BASE_PICK_SCORE;
+            if pick.dupe_score < opts.primary_score {
+                pick.dupe_score = opts.primary_score;
             }
         }
 
@@ -2023,7 +2077,7 @@ impl NzbgetRsDupeSearch {
                     percent: cur.health_percent,
                     minimum: cur.health_min,
                     maximum: cur.health_max,
-                    body_percent: 20,
+                    body_percent: cur.body_percent,
                     max_body: cur.body_checks,
                     seed: 0,
                 },
@@ -2238,7 +2292,7 @@ impl NzbgetRsDupeSearch {
                         bytes.max(0) as u64,
                         &r.title,
                         r.size.max(0) as u64,
-                        0.0,
+                        f64::from(opts.size_tolerance) / 100.0,
                         true,
                     )
             })
@@ -2417,9 +2471,20 @@ impl NzbgetRsDupeSearch {
             deadline,
         );
 
+        let pick_bytes = summary_whole_bytes_i64(&pick).max(0) as u64;
+        let tolerance = f64::from(opts.size_tolerance) / 100.0;
         let candidates: Vec<NewznabResult> = results
             .iter()
-            .filter(|r| crate::releasename::same_release(&job.name, &r.title))
+            .filter(|r| {
+                crate::dupeidentity::candidate_ok(
+                    &job.name,
+                    pick_bytes,
+                    &r.title,
+                    r.size.max(0) as u64,
+                    tolerance,
+                    false,
+                )
+            })
             .cloned()
             .collect();
 
@@ -2690,7 +2755,7 @@ impl NzbgetRsDupeSearch {
                 percent: init_opts.health_percent,
                 minimum: init_opts.health_min,
                 maximum: init_opts.health_max,
-                body_percent: 20,
+                body_percent: init_opts.body_percent,
                 max_body: init_opts.body_checks,
                 seed: 0,
             },
@@ -2799,6 +2864,7 @@ impl NzbgetRsDupeSearch {
         let mut final_added = 0i32;
         let mut final_placed: BTreeMap<usize, PlacedItem> = BTreeMap::new();
         let mut unchecked_members: BTreeSet<usize> = BTreeSet::new();
+        let mut final_pick_sample: Option<DonorHealthResult> = None;
 
         std::thread::scope(|place_scope| {
             let servers_ref = &servers;
@@ -2831,10 +2897,14 @@ impl NzbgetRsDupeSearch {
                         );
                         self.note(ctx_addr as *mut c_void, host_cb, job.nzb_id, MK_INFO, &msg);
                     }
+                    Some(h)
                 }))
             } else {
                 None
             };
+            // `pick_check` holds the pick's probe until the first donors are
+            // placed, then its full sample, which decides the swap.
+            let mut pick_sampled = false;
 
             let probe_mutex = Mutex::new(BTreeMap::<usize, DonorHealthResult>::new());
             if !servers.is_empty() && !verified.is_empty() {
@@ -2852,7 +2922,7 @@ impl NzbgetRsDupeSearch {
                     &list,
                     &health_options,
                     false,
-                    FETCH_PARALLEL as i32,
+                    init_opts.check_concurrency,
                     |key, h| {
                         if let Ok(idx) = key.parse::<usize>() {
                             probe_mutex
@@ -2952,6 +3022,32 @@ impl NzbgetRsDupeSearch {
                 self.note(ctx, host_cb, job.nzb_id, MK_INFO, &msg);
             };
 
+            if let Some(probe_handle) = pick_check.take() {
+                match probe_handle.join().ok().flatten() {
+                    Some(h) if donor_dead_probe(&h) => {
+                        self.demote_dead_pick(host_ctx, host_cb, job);
+                        // A dead pick fails for sure: a whole backup already
+                        // held for it takes over through the swap.
+                        final_pick_sample = Some(h);
+                    }
+                    Some(_) if !job.failed && !host_stopped(host_ctx, host_cb) => {
+                        let pick_ids = summary_ids_strings(&pick.message_ids);
+                        let pick_groups = summary_groups_arc(pick);
+                        pick_sampled = true;
+                        pick_check = Some(place_scope.spawn(move || {
+                            Some(donor_check_posting(
+                                servers_ref,
+                                &pick_ids,
+                                &pick_groups,
+                                &health_options,
+                                true,
+                            ))
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+
             let cur_fast_opt = read_host_opts(host_ctx, host_cb).fast_donors;
             let mut fast = (cur_fast_opt.max(0) as usize).min(live.len());
             if cap > 0 {
@@ -2982,7 +3078,7 @@ impl NzbgetRsDupeSearch {
                         &list,
                         &health_options,
                         true,
-                        FETCH_PARALLEL as i32,
+                        read_host_opts(host_ctx, host_cb).check_concurrency,
                         |key, health| {
                             let Ok(i) = key.parse::<usize>() else {
                                 return;
@@ -3112,22 +3208,24 @@ impl NzbgetRsDupeSearch {
 
             let mut state = state_mutex.into_inner().unwrap_or_else(|e| e.into_inner());
 
-            let check_interrupted =
-                |pc: &mut Option<std::thread::ScopedJoinHandle<'_, ()>>| -> bool {
-                    if !host_stopped(host_ctx, host_cb) {
-                        return false;
-                    }
-                    if let Some(h) = pc.take() {
-                        let _ = h.join();
-                    }
-                    let mut msg = b"DupeSearch: ".to_vec();
-                    push_c_slice(&mut msg, &job.name);
-                    msg.extend_from_slice(
-                        b": RustyGet shuts down, the search resumes after the restart",
-                    );
-                    self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
-                    true
-                };
+            let check_interrupted = |pc: &mut Option<
+                std::thread::ScopedJoinHandle<'_, Option<DonorHealthResult>>,
+            >|
+             -> bool {
+                if !host_stopped(host_ctx, host_cb) {
+                    return false;
+                }
+                if let Some(h) = pc.take() {
+                    let _ = h.join();
+                }
+                let mut msg = b"DupeSearch: ".to_vec();
+                push_c_slice(&mut msg, &job.name);
+                msg.extend_from_slice(
+                    b": RustyGet shuts down, the search resumes after the restart",
+                );
+                self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
+                true
+            };
 
             if check_interrupted(&mut pick_check) {
                 interrupted_early = true;
@@ -3197,7 +3295,7 @@ impl NzbgetRsDupeSearch {
                         &list,
                         &health_options,
                         true,
-                        FETCH_PARALLEL as i32,
+                        read_host_opts(host_ctx, host_cb).check_concurrency,
                         |key, h| {
                             if let Ok(m_idx) = key.parse::<usize>() {
                                 measured_mutex
@@ -3360,7 +3458,10 @@ impl NzbgetRsDupeSearch {
             final_over_cap += state.deferred.len() as i32;
 
             if let Some(h) = pick_check.take() {
-                let _ = h.join();
+                let sample = h.join().ok().flatten();
+                if pick_sampled {
+                    final_pick_sample = sample;
+                }
             }
 
             final_dead = state.dead;
@@ -3371,6 +3472,17 @@ impl NzbgetRsDupeSearch {
 
         if interrupted_early {
             return;
+        }
+
+        if let Some(h) = final_pick_sample {
+            let candidates: Vec<(i32, f64)> = final_placed
+                .values()
+                .filter(|item| {
+                    item.valid && item.id > 0 && item.entry.score > crate::donorscore::DEAD
+                })
+                .map(|item| (item.id, item.entry.alive))
+                .collect();
+            self.swap_if_failing(host_ctx, host_cb, job, pick, &h, &candidates);
         }
 
         *rejected.entry(b"dead".to_vec()).or_insert(0) += final_dead;
@@ -3507,6 +3619,189 @@ impl NzbgetRsDupeSearch {
                 }
             });
         }
+    }
+
+    /// A pick with nothing left on any server gets the dead score, below
+    /// every live backup, so the first live backup placed takes its place.
+    fn demote_dead_pick(&self, host_ctx: *mut c_void, host_cb: DupeHostFn, job: &SearchJob) {
+        if job.failed || job.nzb_id <= 0 {
+            return;
+        }
+        let score = crate::donorscore::base(job.score) + crate::donorscore::DEAD;
+        let mut msg = b"DupeSearch: ".to_vec();
+        push_c_slice(&mut msg, &job.name);
+        if read_host_opts(host_ctx, host_cb).dry_run {
+            msg.extend_from_slice(
+                format!(": dry run, would demote the dead pick to score {score}").as_bytes(),
+            );
+            self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
+            return;
+        }
+        let demoted = with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+            let Some(qh) = crate::ffi::queue_host() else {
+                return false;
+            };
+            let ptr = qh.queue_find_by_id(dq_ptr, job.nzb_id);
+            if ptr == 0 {
+                return false;
+            }
+            let snap = qh.nzb_snap(ptr, false);
+            if snap.deleting
+                || snap.delete_status != crate::queuesubsys_host::DS_NONE
+                || snap.has_post_info
+                || snap.dupe_score <= score
+            {
+                return false;
+            }
+            qh.dq_edit_list_single_id(
+                dq_ptr,
+                job.nzb_id,
+                crate::queuesubsys_host::EA_GROUP_SET_DUPE_SCORE,
+                Some(score.to_string().as_bytes()),
+            )
+        });
+        if demoted {
+            msg.extend_from_slice(
+                format!(": dead pick demoted to score {score}, the healthiest backup takes over")
+                    .as_bytes(),
+            );
+        } else {
+            msg.extend_from_slice(
+                b": dead pick not demoted, it left the queue or is post-processing",
+            );
+        }
+        self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
+    }
+
+    /// Swap: a pick whose full sample shows it will fail (RustyGet's own
+    /// health check only counts failures against the whole download, so it
+    /// would crawl on for hours first) is swapped for the wholest backup, if
+    /// that one is whole enough. The backup goes back to the queue and the
+    /// pick is filed as a duplicate backup scored by its sample.
+    fn swap_if_failing(
+        &self,
+        host_ctx: *mut c_void,
+        host_cb: DupeHostFn,
+        job: &SearchJob,
+        pick: &NzbSummaryData,
+        sample: &DonorHealthResult,
+        candidates: &[(i32, f64)],
+    ) {
+        if job.failed || job.nzb_id <= 0 || host_stopped(host_ctx, host_cb) {
+            return;
+        }
+        let alive = effective_alive(
+            sample.present,
+            sample.missing,
+            sample.error,
+            pick.listed_parts,
+            pick.declared_parts,
+        );
+        let deadline = host_now(host_ctx, host_cb) + 30;
+        let Some(need) = crate::dupewatch::swap_need(alive, sample.missing, || {
+            par_doomed_via_host(host_ctx, host_cb, pick, alive, deadline)
+        }) else {
+            return;
+        };
+        let pct = |a: f64| (100.0 * a).round() as i32;
+        let mut msg = b"DupeSearch: ".to_vec();
+        push_c_slice(&mut msg, &job.name);
+        msg.extend_from_slice(format!(": the pick sampled {}% alive", pct(alive)).as_bytes());
+        if alive >= crate::dupewatch::SWAP_BELOW {
+            msg.extend_from_slice(b", but par2 cannot repair it");
+        }
+        let Some((backup_id, backup_alive)) = crate::dupewatch::swap_backup(candidates, need)
+        else {
+            msg.extend_from_slice(
+                b" and will likely fail, but no backup is whole enough to swap in",
+            );
+            self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
+            return;
+        };
+        if read_host_opts(host_ctx, host_cb).dry_run {
+            msg.extend_from_slice(
+                format!(
+                    ": dry run, would swap it for backup {backup_id} ({}% alive)",
+                    pct(backup_alive)
+                )
+                .as_bytes(),
+            );
+            self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
+            return;
+        }
+        let pick_score =
+            crate::donorscore::base(job.score) + crate::donorscore::target(alive, false);
+        let outcome = with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+            let Some(qh) = crate::ffi::queue_host() else {
+                return Err(&b"the queue is not available"[..]);
+            };
+            let pick_ptr = qh.queue_find_by_id(dq_ptr, job.nzb_id);
+            if pick_ptr == 0 {
+                return Err(&b"it already left the queue"[..]);
+            }
+            let snap = qh.nzb_snap(pick_ptr, false);
+            if snap.deleting
+                || snap.delete_status != crate::queuesubsys_host::DS_NONE
+                || snap.has_post_info
+            {
+                return Err(&b"it is already finishing"[..]);
+            }
+            if crate::dupewatch::swap_nearly_done(
+                snap.size,
+                snap.remaining_size,
+                snap.health,
+                snap.critical_health_opt,
+            ) {
+                return Err(&b"it is mostly downloaded and above its critical health"[..]);
+            }
+            let hi_ptr = qh.history_find_by_id(dq_ptr, backup_id);
+            let backup = (0..qh.history_len(dq_ptr))
+                .map(|i| qh.history_at(dq_ptr, i))
+                .find(|h| h.hi_ptr == hi_ptr && h.inner_ptr != 0);
+            let Some(backup) = backup.filter(|_| hi_ptr != 0) else {
+                return Err(&b"the backup is not in the history"[..]);
+            };
+            qh.nzb_set_int(
+                backup.inner_ptr,
+                crate::queuesubsys_host::NZB_INT_DUPE_HINT,
+                crate::queuesubsys_host::DH_REDOWNLOAD_AUTO,
+            );
+            qh.history_redownload(dq_ptr, hi_ptr);
+            let alive_param = format!("{ALIVE_PARAM_STR}={}", pct(alive));
+            qh.dq_edit_list_single_id(
+                dq_ptr,
+                job.nzb_id,
+                crate::queuesubsys_host::EA_GROUP_SET_DUPE_SCORE,
+                Some(pick_score.to_string().as_bytes()),
+            );
+            qh.dq_edit_list_single_id(
+                dq_ptr,
+                job.nzb_id,
+                crate::queuesubsys_host::EA_GROUP_SET_PARAMETER,
+                Some(alive_param.as_bytes()),
+            );
+            qh.dq_edit_list_single_id(
+                dq_ptr,
+                job.nzb_id,
+                crate::queuesubsys_host::EA_GROUP_DUPE_DELETE,
+                None,
+            );
+            Ok(())
+        });
+        match outcome {
+            Ok(()) => msg.extend_from_slice(
+                format!(
+                    " and will fail: swapped for backup {backup_id} ({}% alive)",
+                    pct(backup_alive)
+                )
+                .as_bytes(),
+            ),
+            Err(why) => {
+                msg.extend_from_slice(b", no swap: ");
+                msg.extend_from_slice(why);
+            }
+        }
+        self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);
     }
 
     fn pick_gone(&self, host_ctx: *mut c_void, host_cb: DupeHostFn, job: &SearchJob) -> Vec<u8> {
@@ -3886,7 +4181,9 @@ impl NzbgetRsDupeSearch {
                 let snap = inspect_nzb(host_ctx, host_cb, nzb_ptr, false);
                 if fetched {
                     self.collect(host_ctx, host_cb, dq_ptr, &snap, &mut job);
-                    job.score = snap.dupe_score.max(BASE_PICK_SCORE);
+                    job.score = snap
+                        .dupe_score
+                        .max(read_host_opts(host_ctx, host_cb).primary_score);
                 } else if ranking {
                     let key = dupe_read_all_bytes(&path_join(&dir, opts.sep, b"pick-key"));
                     let title = dupe_read_all_bytes(&path_join(&dir, opts.sep, b"pick-title"));
@@ -4602,7 +4899,7 @@ pub unsafe fn fleet_append(
     }
 
     let (top, running_id, lowest, existing) = with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
-        let mut top = i64::from(BASE_PICK_SCORE);
+        let mut top = i64::from(crate::dupewatch::primary_score());
         let mut running_id = 0i32;
         let mut running_score = 0i32;
         let mut lowest = 0i32;
@@ -4778,7 +5075,7 @@ pub unsafe fn fleet_append(
                 percent: cur.health_percent,
                 minimum: cur.health_min,
                 maximum: cur.health_max.min(FLEET_SAMPLE_MAX),
-                body_percent: 20,
+                body_percent: cur.body_percent,
                 max_body: cur.body_checks,
                 seed: 0,
             },
@@ -5048,6 +5345,15 @@ pub unsafe fn fleet_append(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_server_cap_keeps_half_for_downloads() {
+        assert_eq!(dupe_check_server_cap(50, 20), 20);
+        assert_eq!(dupe_check_server_cap(30, 20), 15);
+        assert_eq!(dupe_check_server_cap(8, 20), 4);
+        assert_eq!(dupe_check_server_cap(1, 20), 1);
+        assert_eq!(dupe_check_server_cap(100, 5), 5);
+    }
 
     #[test]
     fn timed_mutex_locks_and_times_out() {

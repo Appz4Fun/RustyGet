@@ -3659,6 +3659,9 @@ impl NzbgetRsDupeSearch {
                 || snap.delete_status != crate::queuesubsys_host::DS_NONE
                 || snap.has_post_info
                 || snap.dupe_score <= score
+                || lower_key(&effective_key(&snap.dupe_key, &snap.name)) != lower_key(&job.dupe_key)
+                || crate::releasename::normalize(&snap.name)
+                    != crate::releasename::normalize(&job.name)
                 || crate::dupewatch::swap_nearly_done(
                     snap.size,
                     snap.remaining_size,
@@ -3682,7 +3685,7 @@ impl NzbgetRsDupeSearch {
             );
         } else {
             msg.extend_from_slice(
-                b": dead pick not demoted, it left the queue, is post-processing or is mostly downloaded",
+                b": dead pick not demoted, it left the queue, changed its key or name, is post-processing or is mostly downloaded",
             );
         }
         self.note(host_ctx, host_cb, job.nzb_id, MK_INFO, &msg);

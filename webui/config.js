@@ -979,7 +979,7 @@ var Config = (new function($)
 			caption = '<span class="config-multicaption">' + caption.substring(0, caption.indexOf('.') + 1) + '</span>' + caption.substring(caption.indexOf('.') + 1);
 		}
 
-		// a readable label first, then the option's own name in mono so it still matches nzbget.conf
+		// a readable label first, then the option's own name in mono so it still matches rustyget.conf
 		option.label = optionLabel(option);
 		if (option.label)
 		{

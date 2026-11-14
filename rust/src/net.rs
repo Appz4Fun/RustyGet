@@ -2491,6 +2491,9 @@ pub struct RsNewsServer {
     pub optional: bool,
     pub block_time: AtomicI64,
     pub cert_verif_level: u32,
+    /// Connections of this server currently held by duplicate health checks
+    /// (`NzbgetRsServerPool::get_check_connection`).
+    pub check_in_use: AtomicUsize,
 }
 
 impl RsNewsServer {
@@ -2539,6 +2542,7 @@ impl RsNewsServer {
             group,
             optional,
             block_time: AtomicI64::new(0),
+            check_in_use: AtomicUsize::new(0),
             cert_verif_level,
         }
     }
@@ -2568,6 +2572,8 @@ pub struct PooledNntpConn {
     pub conn: NzbgetRsConn,
     pub in_use: AtomicBool,
     pub free_time: AtomicI64,
+    /// Checked out by a duplicate health check, not a download.
+    pub check: AtomicBool,
 }
 
 impl PooledNntpConn {
@@ -2602,6 +2608,7 @@ impl PooledNntpConn {
             conn,
             in_use: AtomicBool::new(false),
             free_time: AtomicI64::new(0),
+            check: AtomicBool::new(false),
         }
     }
 
@@ -2727,6 +2734,28 @@ pub struct NzbgetRsServerPool {
     timeout: AtomicI32,
     retry_interval: AtomicI32,
     conn_host_cb: NzbgetRsConnHostFn,
+    /// Last time (ms since an arbitrary epoch) a download asked for a connection
+    /// and none was free. Duplicate health checks back off while this is recent.
+    download_starved_at_ms: AtomicI64,
+}
+
+/// How long a download's failed connection request keeps duplicate health checks
+/// from taking more connections.
+pub const DOWNLOAD_STARVED_WINDOW_MS: i64 = 3000;
+
+fn pool_now_ms() -> i64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(Instant::now);
+    i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX) + 1
+}
+
+/// Whether a duplicate health check may take one more connection of a server:
+/// always its first one (checks keep making progress), any further one only
+/// while no download has been refused a connection within the window.
+pub fn check_connection_allowed(check_in_use: usize, starved_at_ms: i64, now_ms: i64) -> bool {
+    check_in_use == 0
+        || starved_at_ms == 0
+        || now_ms.saturating_sub(starved_at_ms) > DOWNLOAD_STARVED_WINDOW_MS
 }
 
 static ACTIVE_SERVER_POOL: std::sync::RwLock<Option<std::sync::Weak<NzbgetRsServerPool>>> =
@@ -2753,6 +2782,7 @@ impl NzbgetRsServerPool {
             timeout: AtomicI32::new(60),
             retry_interval: AtomicI32::new(0),
             conn_host_cb,
+            download_starved_at_ms: AtomicI64::new(0),
         }
     }
 
@@ -2915,11 +2945,49 @@ impl NzbgetRsServerPool {
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// A connection for a download. When none is free, duplicate health checks
+    /// stop taking more connections for a while, so the ones they hold come
+    /// back to downloads as their current probes finish.
     pub fn get_connection(
         &self,
         level: i32,
         want_srv: Option<&RsNewsServer>,
         ignore_srvs: &[&RsNewsServer],
+    ) -> *mut PooledNntpConn {
+        let conn = self.select_connection(level, want_srv, ignore_srvs, false);
+        if conn.is_null() && level >= 0 {
+            self.download_starved_at_ms
+                .store(pool_now_ms(), Ordering::SeqCst);
+        }
+        conn
+    }
+
+    /// A connection of `srv` for a duplicate health check. Checks may use every
+    /// idle connection, but downloads come first: beyond one per server, none is
+    /// handed out while a download was recently refused one.
+    pub fn get_check_connection(&self, srv: &RsNewsServer) -> *mut PooledNntpConn {
+        let nl = srv.norm_level.load(Ordering::SeqCst);
+        self.select_connection(nl, Some(srv), &[], true)
+    }
+
+    /// [`Self::get_check_connection`] by server id.
+    pub fn get_check_connection_by_server_id(&self, server_id: i32) -> *mut PooledNntpConn {
+        let Some(srv) = self.server_by_id(server_id) else {
+            return ptr::null_mut();
+        };
+        self.get_check_connection(&srv)
+    }
+
+    /// Picks a free connection under the pool lock. `for_check`: the admission
+    /// rule of [`check_connection_allowed`] is applied to the server that
+    /// actually supplies the connection (a group sibling may), and the check
+    /// occupancy is reserved in the same critical section.
+    fn select_connection(
+        &self,
+        level: i32,
+        want_srv: Option<&RsNewsServer>,
+        ignore_srvs: &[&RsNewsServer],
+        for_check: bool,
     ) -> *mut PooledNntpConn {
         if level < 0 {
             return ptr::null_mut();
@@ -2995,9 +3063,24 @@ impl NzbgetRsServerPool {
             g.sorted_servers[idx].block_time.store(0, Ordering::SeqCst);
         }
         if let Some((chosen_conn, chosen_level)) = found {
+            if for_check
+                && !check_connection_allowed(
+                    g.connections[chosen_conn]
+                        .server
+                        .check_in_use
+                        .load(Ordering::SeqCst),
+                    self.download_starved_at_ms.load(Ordering::SeqCst),
+                    pool_now_ms(),
+                )
+            {
+                return ptr::null_mut();
+            }
             g.levels[chosen_level as usize] -= 1;
             let c = &mut g.connections[chosen_conn];
             c.in_use.store(true, Ordering::SeqCst);
+            if for_check && !c.check.swap(true, Ordering::SeqCst) {
+                c.server.check_in_use.fetch_add(1, Ordering::SeqCst);
+            }
             (&mut **c) as *mut PooledNntpConn
         } else {
             ptr::null_mut()
@@ -3023,6 +3106,10 @@ impl NzbgetRsServerPool {
             return;
         };
         let c = unsafe { &*conn_ptr };
+        if c.check.swap(false, Ordering::SeqCst) {
+            // paired with the increment in get_check_connection
+            c.server.check_in_use.fetch_sub(1, Ordering::SeqCst);
+        }
         c.in_use.store(false, Ordering::SeqCst);
         if used {
             c.free_time.store(now_unix_sec(), Ordering::SeqCst);
@@ -3803,6 +3890,127 @@ pub(crate) unsafe fn nzbget_rs_net_speedtest_iter(
 
 #[cfg(test)]
 mod tests {
+    fn check_test_pool(connections: i32) -> (NzbgetRsServerPool, Arc<RsNewsServer>) {
+        let pool = NzbgetRsServerPool::new(crate::ffi::tls_host_cb());
+        let srv = Arc::new(RsNewsServer::new(
+            1,
+            true,
+            b"s1",
+            b"127.0.0.1",
+            1,
+            0,
+            b"",
+            b"",
+            false,
+            false,
+            b"",
+            connections,
+            0,
+            0,
+            0,
+            false,
+            0,
+        ));
+        pool.add_server(Arc::clone(&srv));
+        pool.init_connections();
+        (pool, srv)
+    }
+
+    #[test]
+    fn check_connection_allowed_rules() {
+        // first check connection of a server is always allowed
+        assert!(check_connection_allowed(0, 1000, 1001));
+        // further ones while no download was refused
+        assert!(check_connection_allowed(5, 0, 1001));
+        // not while a download was refused recently
+        assert!(!check_connection_allowed(
+            5,
+            1000,
+            1000 + DOWNLOAD_STARVED_WINDOW_MS
+        ));
+        // again once the window has passed
+        assert!(check_connection_allowed(
+            5,
+            1000,
+            1001 + DOWNLOAD_STARVED_WINDOW_MS
+        ));
+    }
+
+    #[test]
+    fn checks_use_every_idle_connection() {
+        let (pool, srv) = check_test_pool(4);
+        let held: Vec<_> = (0..4).map(|_| pool.get_check_connection(&srv)).collect();
+        assert!(held.iter().all(|c| !c.is_null()));
+        assert_eq!(srv.check_in_use.load(Ordering::SeqCst), 4);
+        assert!(pool.get_check_connection(&srv).is_null());
+        for c in held {
+            pool.free_connection(c, true);
+        }
+        assert_eq!(srv.check_in_use.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn concurrent_checks_respect_backoff_atomically() {
+        let (pool, srv) = check_test_pool(8);
+        // downloads waiting before any check holds a connection
+        let dl: Vec<_> = (0..8).map(|_| pool.get_connection(0, None, &[])).collect();
+        assert!(dl.iter().all(|c| !c.is_null()));
+        assert!(pool.get_connection(0, None, &[]).is_null());
+        for c in dl {
+            pool.free_connection(c, true);
+        }
+        let pool = Arc::new(pool);
+        let got: Vec<usize> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..8)
+                .map(|_| {
+                    let pool = Arc::clone(&pool);
+                    let srv = Arc::clone(&srv);
+                    sc.spawn(move || pool.get_check_connection(&srv) as usize)
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let taken: Vec<usize> = got.into_iter().filter(|&c| c != 0).collect();
+        // only the one-per-server floor while downloads are starved
+        assert_eq!(taken.len(), 1);
+        assert_eq!(srv.check_in_use.load(Ordering::SeqCst), 1);
+        for c in taken {
+            pool.free_connection(c as *mut PooledNntpConn, true);
+        }
+    }
+
+    #[test]
+    fn downloads_preempt_check_connections() {
+        let (pool, srv) = check_test_pool(3);
+        let held: Vec<_> = (0..3).map(|_| pool.get_check_connection(&srv)).collect();
+        assert!(held.iter().all(|c| !c.is_null()));
+
+        // a download finds nothing free: from now on checks yield
+        assert!(pool.get_connection(0, None, &[]).is_null());
+
+        // a check finishes its probe and frees a connection: the next check may
+        // not take it, the waiting download does
+        pool.free_connection(held[0], true);
+        assert!(pool.get_check_connection(&srv).is_null());
+        let dl = pool.get_connection(0, None, &[]);
+        assert!(!dl.is_null());
+        assert!(!unsafe { &*dl }.check.load(Ordering::SeqCst));
+        assert_eq!(srv.check_in_use.load(Ordering::SeqCst), 2);
+
+        // checks keep one connection per server even while downloads wait
+        pool.free_connection(held[1], true);
+        pool.free_connection(held[2], true);
+        assert_eq!(srv.check_in_use.load(Ordering::SeqCst), 0);
+        let first = pool.get_check_connection(&srv);
+        assert!(!first.is_null());
+        assert!(pool.get_check_connection(&srv).is_null());
+
+        // a download connection freed never counts as a check connection
+        pool.free_connection(dl, true);
+        pool.free_connection(first, true);
+        assert_eq!(srv.check_in_use.load(Ordering::SeqCst), 0);
+    }
+
     use super::*;
 
     #[test]

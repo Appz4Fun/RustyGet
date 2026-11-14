@@ -2,7 +2,7 @@
 
 NZBGet needs a configuration file. 
 
-An example configuration file is provided in "nzbget.conf", which
+An example configuration file is provided in "rustyget.conf", which
 is installed into "`<prefix>`/share/nzbget" (where `<prefix>` depends on
 system configuration and configure options - typically "/usr/local",
 "/usr" or "/opt"). The installer adjusts the file according to your
@@ -22,16 +22,21 @@ locations (in this order):
 
 On POSIX systems:
 ```
-<EXE-DIR>/nzbget.conf
-~/.nzbget
-~/.config/nzbget.conf
-~/.config/nzbget/nzbget.conf
-/etc/nzbget.conf
-/usr/etc/nzbget.conf
-/usr/local/etc/nzbget.conf
-/opt/etc/nzbget.conf
-~/usr/etc/nzbget.conf
+<EXE-DIR>/rustyget.conf
+~/.rustyget
+~/.config/rustyget.conf
+~/.config/rustyget/rustyget.conf
+/etc/rustyget.conf
+/usr/etc/rustyget.conf
+/usr/local/etc/rustyget.conf
+/opt/etc/rustyget.conf
+~/usr/etc/rustyget.conf
 ```
+
+If none of these exists, an NZBGet configuration file is read instead, from
+`<EXE-DIR>/nzbget.conf`, `~/.nzbget` and the same folders as above with the
+name `nzbget.conf`. The log then says so and names the new path to rename
+it to (for example `~/.nzbget` to `~/.rustyget`).
 
 If you put the configuration file in other place, you can use command-
 line switch "-c `<filename>`" to point the program to correct location.
@@ -193,7 +198,7 @@ sudo systemctl start nzbget
 Since nzbget communicates via TCP/IP it's possible to have a server running on
 one computer and adding downloads via a client on another computer.
 
-Do this by setting the "ControlIP" option in the nzbget.conf file to point to the
+Do this by setting the "ControlIP" option in the rustyget.conf file to point to the
 IP of the server (default is localhost which means client and server runs on 
 same computer)
 

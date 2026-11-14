@@ -856,7 +856,7 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
         }
     }
     let check_connections =
-        crate::options::active_options().map_or(20, |o| o.scalars().dupe_check_connections);
+        crate::options::active_options().map_or(0, |o| o.scalars().dupe_check_connections);
     let mut list = Vec::new();
     let mut groups = BTreeSet::new();
     for (server_id, active, max_conns, group) in raw_servers {
@@ -892,10 +892,15 @@ pub fn nntp_health_servers(host_ctx: *mut c_void, host_cb: DupeHostFn) -> Vec<Ar
     list
 }
 
-/// Check connections per news server: at most half of its connections, so
-/// downloads keep the other half, and at most `DupeCheckConnections`.
+/// Check connections per news server: all of its connections when
+/// `DupeCheckConnections` is 0, else at most that many. Downloads keep first
+/// claim through `NzbgetRsServerPool::get_check_connection`.
 fn dupe_check_server_cap(server_connections: i32, check_connections: i32) -> i32 {
-    (server_connections / 2).min(check_connections).max(1)
+    if check_connections <= 0 {
+        server_connections.max(1)
+    } else {
+        server_connections.min(check_connections).max(1)
+    }
 }
 
 struct NntpHealthTransportShared {
@@ -922,8 +927,7 @@ impl DonorServerExchange for NntpHealthTransportShared {
                     return Err(DonorExchangeError::default());
                 };
                 need_join = srv.join_group;
-                let nl = srv.norm_level.load(Ordering::SeqCst);
-                let raw = pool.get_connection(nl, Some(&srv), &[]);
+                let raw = pool.get_check_connection(&srv);
                 if !raw.is_null() {
                     conn_ptr = raw as usize;
                 } else {
@@ -5588,10 +5592,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn check_server_cap_keeps_half_for_downloads() {
+    fn check_server_cap_all_connections_or_explicit_limit() {
+        // 0: every connection of the server; downloads keep priority in the pool
+        assert_eq!(dupe_check_server_cap(60, 0), 60);
+        assert_eq!(dupe_check_server_cap(1, 0), 1);
+        // positive: an explicit limit, never above the server's connections
         assert_eq!(dupe_check_server_cap(50, 20), 20);
-        assert_eq!(dupe_check_server_cap(30, 20), 15);
-        assert_eq!(dupe_check_server_cap(8, 20), 4);
+        assert_eq!(dupe_check_server_cap(8, 20), 8);
         assert_eq!(dupe_check_server_cap(1, 20), 1);
         assert_eq!(dupe_check_server_cap(100, 5), 5);
     }

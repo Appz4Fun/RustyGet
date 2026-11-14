@@ -427,7 +427,7 @@ impl NzbgetRsDupeProbe {
         let mut server_name: Vec<u8> = Vec::new();
         let wait_start = now_sec();
         while conn_ptr == 0 && !self.is_stopped() && now_sec() - wait_start <= CONNECTION_WAIT_SEC {
-            let raw = pool.get_connection_by_server_id(server_id);
+            let raw = pool.get_check_connection_by_server_id(server_id);
             if !raw.is_null() {
                 let c = unsafe { &*raw };
                 conn_ptr = raw as usize;

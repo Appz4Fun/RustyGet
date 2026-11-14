@@ -44,14 +44,14 @@ RustyGet is a Usenet downloader that started as a fork of [NZBGet](https://githu
 | A download that can't complete | Runs to the end, then fails over | `HealthCheck=dupe` fails over within seconds, and a probe parks dead copies before they download |
 | Finding more copies | Only what feeds and clients send | `DupeSearch` queries NZBHydra2, checks each copy on your servers, and queues the live ones as backups |
 | Clients with many copies | One `append` per copy | One `appendfleet` call: RustyGet checks every copy and downloads the most complete one |
-| Configuration | 155 options | 17 new options and a new `HealthCheck` value, off unless the configuration file turns them on; RustyGet's configuration template turns on live repair and early failover |
+| Configuration | 155 options | 23 new options and a new `HealthCheck` value, off unless the configuration file turns them on; RustyGet's configuration template turns on live repair and early failover |
 | API | NZBGet API | NZBGet API, plus `appendfleet`, new fields, POST for every method that changes something (plain GET runs only the methods that read), JSON-P off unless option `JsonP` turns it on, and access checks in multicalls |
 | Queue and history files | NZBGet formats | NZBGet formats, with RustyGet's data in a trailer that NZBGet ignores |
 | Inherited bugs | | About 100 fixed, 96 of them [reported to NZBGet as its issues 940 to 1046](https://github.com/nzbgetcom/nzbget/issues?q=is%3Aissue+author%3Axbmc4lyfe): downloads, post-processing, queue edits, state files, scripts, feeds, and the web interface |
 | Unpacking | External `unrar` and `7z` programs | Built in, with no external programs |
 | CI workflows | Builds and tests for every platform | Builds and tests on Linux x86-64 and macOS for every pull request and push to `main` |
 
-The new options are `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeFastDonors`, `DupePrimaryScore`, `DupeSizeTolerance`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`, plus `JsonP` in the security settings. The full list of changes is in [Differences from NZBGet](https://appz4fun.github.io/RustyGet/differences.html).
+The new options are `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeBorrowFirst`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeFastDonors`, `DupePrimaryScore`, `DupeSizeTolerance`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`, plus `JsonP` in the security settings. The full list of changes is in [Differences from NZBGet](https://appz4fun.github.io/RustyGet/differences.html).
 
 ## How deduplication works
 

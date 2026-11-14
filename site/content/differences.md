@@ -19,7 +19,7 @@ lede = "RustyGet started from NZBGet 27.0 and the work of pull request 850. This
 | Finding more copies | Only what feeds and clients send | `DupeSearch` queries NZBHydra2, checks each copy on your servers, and queues the live ones |
 | Clients sending many copies | One `append` per copy | One `appendfleet` call; RustyGet checks every copy and picks the best |
 | Health of a backup | Unknown until it downloads | Measured, shown with its score, and used to skip dead copies |
-| Configuration | 155 options | 17 more options and a new `HealthCheck` value, off unless the configuration file turns them on; the template that ships with RustyGet turns on live repair and early failover |
+| Configuration | 155 options | 23 more options and a new `HealthCheck` value, off unless the configuration file turns them on; the template that ships with RustyGet turns on live repair and early failover |
 | API | NZBGet API | NZBGet API plus `appendfleet`, the TLS cipher test, and new fields; unsafe methods need POST; may diverge later |
 | Queue files | NZBGet formats | NZBGet formats, with RustyGet's data in a trailer that NZBGet ignores |
 | Bug fixes | | About 100 fixes to inherited bugs, 96 of them reported upstream |
@@ -36,6 +36,7 @@ lede = "RustyGet started from NZBGet 27.0 and the work of pull request 850. This
 | par2 from a twin | Automatic | When recovery blocks run short, RustyGet fetches and uses the fewest twin recovery volumes that cover the damage. |
 | Stream repair | `DupeArticleFallback=stream` | Byte-level repair from duplicates after the download, with same-byte, whole-file, cross-packaging, and cross-encryption methods. |
 | Live repair | `DupeArticleFallback=live` | Stream repair during the download. |
+| Borrow first | `DupeBorrowFirst=yes` | Duplicates repair missing articles and damaged files during the download, before the download's own par2 files; par2 then checks the result and repairs the rest. |
 | Compressed donors | `DupeStreamDecompress=yes` | Extracts a compressed duplicate to repair from its contents. |
 | Repair time limit | `DupeStreamTimeout` | Stops a stream repair that stalls, or that would take longer than downloading again. |
 | Early failover | `HealthCheck=dupe` | Fails over as soon as a download can't complete, by failure counts, projected health, or par2 block damage. |
@@ -57,7 +58,7 @@ See [Duplicate fleets](duplicate-fleets.md) and [Donor search](dupesearch.md).
 
 ## Options
 
-Twenty-one new options are in **INCOMING NZBS**, after `DupeCheck`. Left out of the configuration file, they keep NZBGet's behavior: `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeFastDonors`, `DupePrimaryScore`, `DupeSizeTolerance`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`. `HealthCheck` gains the value `dupe`. One new option is in **SECURITY**: `JsonP`, off by default, turns on answers to JSON-P requests, which NZBGet always answered.
+Twenty-two new options are in **INCOMING NZBS**, after `DupeCheck`. Left out of the configuration file, they keep NZBGet's behavior: `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeBorrowFirst`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, `DupeFastDonors`, `DupePrimaryScore`, `DupeSizeTolerance`, `DupeBodyPercent`, `DupeCheckConcurrency`, and `DupeCheckConnections`. `DupeBorrowFirst` is on by default, but it only acts once `DupeArticleFallback` is on. `HealthCheck` gains the value `dupe`. One new option is in **SECURITY**: `JsonP`, off by default, turns on answers to JSON-P requests, which NZBGet always answered.
 
 ### Defaults
 
@@ -69,6 +70,8 @@ The template differs from NZBGet's in these values:
 |---|---|---|
 | `DupeArticleFallback` | | `live` |
 | `DupeStreamDecompress` | | `yes` |
+| `DupeBorrowFirst` | | `yes` |
+| `DirectUnpack` | `no` | `yes` |
 | `HealthCheck` | `park` | `dupe` |
 | `ArticleCache` | `0` | `500` |
 | `WriteBuffer` | `0` | `1024` |

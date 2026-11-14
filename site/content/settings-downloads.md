@@ -17,7 +17,7 @@ Keep the indexer URL and API key private. Follow [Duplicate fleets](duplicate-fl
 Key options: [`NzbDirInterval`](options.md#nzbdirinterval), [`NzbDirFileAge`](options.md#nzbdirfileage), [`DupeCheck`](options.md#dupecheck), [`DupeArticleFallback`](options.md#dupearticlefallback), [`DupeSearch`](options.md#dupesearch), [`DupeSearchDryRun`](options.md#dupesearchdryrun).
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/incoming-nzbs.jpg" aria-label="Open full-size picture: Incoming NZB and duplicate-recovery controls with blank indexer credentials"><img src="assets/settings/incoming-nzbs.jpg" width="1280" height="1690" loading="lazy" alt="Incoming NZB and duplicate-recovery controls with blank indexer credentials"></a>
+<a class="settings-shot" href="assets/settings/incoming-nzbs.jpg" aria-label="Open full-size picture: Incoming NZB and duplicate-recovery controls with blank indexer credentials"><img src="assets/settings/incoming-nzbs.jpg" width="1280" height="2093" loading="lazy" alt="Incoming NZB and duplicate-recovery controls with blank indexer credentials"></a>
 <figcaption>Use option help for the recovery and health-check controls. Open the picture to inspect the full section.</figcaption>
 </figure>
 

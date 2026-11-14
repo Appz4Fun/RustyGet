@@ -23,7 +23,7 @@ Key options: [`CrcCheck`](options.md#crccheck), [`ParCheck`](options.md#parcheck
 
 ## Unpack
 
-Turn `Unpack` on when you want archive extraction. RustyGet extracts RAR, 7-Zip, ZIP, and tar archives itself, so it needs no external tools. `DirectUnpack` can extract supported archives while articles arrive; `UseTempUnpackDir` controls temporary extraction folders.
+Turn `Unpack` on when you want archive extraction. RustyGet extracts RAR, 7-Zip, ZIP, and tar archives itself, so it needs no external tools. `DirectUnpack` extracts RAR archives while articles arrive and pauses at a damaged volume until it's repaired; `UseTempUnpackDir` controls temporary extraction folders.
 
 `UnpackCleanupDisk` removes archive files after successful extraction. Choose it according to what you want the completed folder to retain. `UnpackIgnoreExt` lists nonstandard RAR extensions, such as `.cbr`, that should keep their names during RAR renaming. It also suppresses the failure for finding only nonstandard RAR archives with those extensions. Recognized `.rar` and `.7z` archives still follow normal extraction. `UnpackPassFile` supplies a password-list file when needed.
 

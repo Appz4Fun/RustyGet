@@ -1,10 +1,10 @@
 {
   "capture_date": "2026-11-14",
-  "source_base": "7a2c4773",
+  "source_base": "f7a9657a",
   "environment": "Isolated loopback demonstration service; no production data; example values, blank credentials, and documentation IP addresses and folders in place of the capture machine's.",
   "theme": "Light except categories-dark, desktop-wide and status-wide",
   "ui_source_sha256": {
-    "nzbget.conf": "77d9485c5608c106ec96819447684f9980319a44138f129d3236e6c8b9e84f32",
+    "nzbget.conf": "83fead93458082ea6b005614201566be9ad606997e35ccf9d3710c9c38d962f9",
     "webui/_locales/cs/messages.json": "9afdd9fd92900cf2a28a2beccbece426cc9e2b141ca98f68e4bc83c2d265ac3a",
     "webui/_locales/da/messages.json": "5345301c10d952a91c19363c2f17abc01a93eb2f7caf36ee852833549845910c",
     "webui/_locales/de/messages.json": "21938065e9907b412c233f184205f95691274bf780ddad208a9a31689910226e",
@@ -70,7 +70,7 @@
     "webui/lib/material-symbols-rounded.ttf": "c0657b35908cb1db71fb3d1c9570eba1c28a3e2307e0e511e552cb5d01447423",
     "webui/lib/raphael.js": "1d6b44f4ef0c7ce01a6635784e6f09063c08057586344726741e59535a565d13",
     "webui/lib/raphael.min.js": "10106f7cddd4c33b9b9c7c2013e6d35d6a9c12f417697271d99d8d97f1a45ce6",
-    "webui/locales.source.json": "7fde302abbbbf6857e39a4426e809fb7958266789b1fc46a9acaeaa00a2a8690",
+    "webui/locales.source.json": "c3c5b6e2428b849c2a9b211364a27726fc0974a27d34ea690936fd80486657b5",
     "webui/messages.js": "15b6ff9091d4cece284c2e95b490e921dc9f3e9c27e645b4839b54f09e33f1c4",
     "webui/oxide.css": "f25bba40ea282c885c88a12df89ba6b337d1a8c6c31446e7be0d1874f57b9771",
     "webui/settings.css": "62d5bd346d2dc8ab9a38d32cad5c95758372478d0ebfbe619b501aa8b11517db",
@@ -96,7 +96,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "9bcd8b4613142ff1f988436212153bc4bb7aede6ededdb7866f90105deef09ed",
+      "sha256": "7d14fd79ec12104d8f2dbc7c868f193f3b73f13b56dc857716333bf826be151b",
       "capture_ready": "Selected heading verified after navigation; Status waited for loaded system information."
     },
     {
@@ -109,7 +109,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "502286d439ab87fc6fc520ceb55a5cd6f45eb9ab79c92fa27d97a9a7aea326c3",
+      "sha256": "6e895adf6da7eea8cf3ae582634dd89b89c8bbc4ea2c7ae1b6c2e1ce4bdc1fa6",
       "capture_ready": "Selected heading verified after navigation; Status waited for loaded system information."
     },
     {
@@ -122,7 +122,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "45eba72e5f31b43582ad31720692211d93ea98ad4fb785f505fd08585b93f00a",
+      "sha256": "585b2eeeecdc590f2666ebaa7ab4f35b7e43ef1d23f7a1b9ac37d087ad4f4d0c",
       "capture_ready": "Selected heading verified after navigation; Status waited for loaded system information."
     },
     {
@@ -145,7 +145,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "14dacbc4ac968cccdc81670433e19f4367ea8ac30e0b28b24839172163e90506"
+      "sha256": "ded13fb7ea7d2063fde175dd9b9eab4df2cc0333bceaec636b7bb23df2610609"
     },
     {
       "section": "PATHS",
@@ -170,7 +170,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "de386c699bbdc4724243c05cd0c62cdfb209f9cb3d4e19a1088413476409f17a"
+      "sha256": "fd859edc72187406d47ee9fd28dd17104923be6a7e95fce51380d0218394e2e2"
     },
     {
       "section": "NEWS-SERVERS",
@@ -182,7 +182,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "816ab809bcc11b058afb12eb4bfadf468658d103d0bde4b3d88ac9acdec24def"
+      "sha256": "73a90c97018a9f9d0407d2bb1e6b6cac60f0b7f173bad1cc906a3defb6ef7e3b"
     },
     {
       "section": "SECURITY",
@@ -214,7 +214,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "206b1d7f43abc0b8c2bfc48a70c230f33624960c1624839f8e3932ffb606ffcd"
+      "sha256": "c85417924cd0a844fa9de4d48bb32654e50757344c435d5af153a619660ce6ed"
     },
     {
       "section": "CATEGORIES",
@@ -226,7 +226,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "609d3b47bb5da3d17fb551a34fb2bbbf78d49a05c5dd38ebcc9a1260ae5d60e3"
+      "sha256": "50dc35eb1bc0067dd888541f24d40e5d4492c77f71146a4d18d41649d3823471"
     },
     {
       "section": "RSS_FEEDS",
@@ -238,7 +238,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "68819bbd796a119bdd560aa12a7df5653b255da0898fe89cda90f1be14e84a2a"
+      "sha256": "2166ccc8982dd3b2696f22101a6d47053816f5c8c549f9ebcf18668f649b927f"
     },
     {
       "section": "INCOMING_NZBS",
@@ -254,6 +254,7 @@
         "Duplicate article fallbackDupeArticleFallback",
         "Duplicate stream decompressDupeStreamDecompress",
         "Duplicate stream timeoutDupeStreamTimeout",
+        "Duplicate borrow firstDupeBorrowFirst",
         "Duplicate searchDupeSearch",
         "Duplicate search URLDupeSearchUrl",
         "Duplicate search API keyDupeSearchApiKey",
@@ -266,14 +267,19 @@
         "Duplicate body checksDupeBodyChecks",
         "Duplicate health budgetDupeHealthBudget",
         "Duplicate minimum aliveDupeMinAlive",
-        "Duplicate fast donorsDupeFastDonors"
+        "Duplicate fast donorsDupeFastDonors",
+        "Duplicate primary scoreDupePrimaryScore",
+        "Duplicate size toleranceDupeSizeTolerance",
+        "Duplicate body percentDupeBodyPercent",
+        "Duplicate check concurrencyDupeCheckConcurrency",
+        "Duplicate check connectionsDupeCheckConnections"
       ],
-      "height": 1690,
+      "height": 2093,
       "overflow": false,
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "71fe154d1e845ef702055bc87c9a0059b46c4e053e4a33524ca4a5e87dd5ad2f"
+      "sha256": "cadb457ecef4fa91e246447256602b035200e714ac31c08bfc7353dba62e199f"
     },
     {
       "section": "DOWNLOAD_QUEUE",
@@ -304,7 +310,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "f7592f812a179d3fc35f82b6cc081bac5fe96bd00fb7234520c8d9b51b724272"
+      "sha256": "3fe0815ac44b33e2b3cb8559a5fb4f3ac0772213560093d79f19af8f46ba18b0"
     },
     {
       "section": "CONNECTION",
@@ -331,7 +337,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "157ccffe75b8facabb8ac8346717dc055a3953c73de7553fb688311082581670"
+      "sha256": "9f2cdbffc5ff4cb7096e91c2ebef753684ef3bf31b6152daf781a5965f2514be"
     },
     {
       "section": "LOGGING",
@@ -357,7 +363,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "b8cfd60721e5dde450592906f401db25acfcbe1d9a9cc511ee7d43b20583eeee"
+      "sha256": "aa8b068bdd28160e27cdc7f5e71c9d0659ea2c3a8b45a2c539288c9f7c4bc4f1"
     },
     {
       "section": "SCHEDULER",
@@ -369,7 +375,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "d3b6791cee1ad3f15ce92ffede03c8e21d3e0a25bca9ccb421b3ac9dad58ede9"
+      "sha256": "0c9e278f32c4fccdbfb5c91f3fe7b7dbe241c7006914d251eeb4a795dad1ed51"
     },
     {
       "section": "CHECK_AND_REPAIR",
@@ -398,7 +404,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "f7bd23493e31f007e4a04e92285ad8abbf411c9fda24a6c459b5b188c8848535"
+      "sha256": "e8f8e5f80c82c2d0bcb201291eeb6bf1789eb3d16fdb744819feed7e54780031"
     },
     {
       "section": "UNPACK",
@@ -419,7 +425,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "478ae967bd4ab9efc70241565de7cade452db2f1651915bc0f95b0b95ddb7e4d"
+      "sha256": "8360131c88ef205e53a143e04990825c209cffa3e2f57db8106b81f11b8d1a11"
     },
     {
       "section": "Config-Licenses",
@@ -431,7 +437,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "section",
-      "sha256": "28b3b56da7fae6cfe8fe458ccfa30e6afcc1a5dffd3750c1bcb55cfc71c5e32c",
+      "sha256": "235f2045f91e2ceb240ba2b8df1b8e2f94fb6c3844db5ba34881c715d7beaf63",
       "capture_ready": "Selected heading verified after navigation; Status waited for loaded system information."
     },
     {
@@ -462,7 +468,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "example",
-      "sha256": "067b82fe3391c217971df2072f1ae08c2217c2ad938ad4822ab7031fd773e3e3"
+      "sha256": "fa1aa384a67a9e265825343363ededd48dcc76376720cf8a5bd231308c522738"
     },
     {
       "section": "CATEGORIES",
@@ -479,7 +485,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "example",
-      "sha256": "2d9a4ea6fe08d114de403c70c0ac96daad366e801dedd35ee1b90a45f2ac839d"
+      "sha256": "f9a8103166aa8e8bddda6d0e42b5caf5b7a2bf3a066518d7ad539ef39ec1387f"
     },
     {
       "section": "RSS_FEEDS",
@@ -502,7 +508,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "example",
-      "sha256": "f649405f075c3d94056f71980aa59422ccae336bd66d57bd6a3e29b5002be447"
+      "sha256": "79cdb519bbd56fc87bdb8eeced6d1d5fbad29715d0a8b2009d92e3cb9184f5f7"
     },
     {
       "section": "SCHEDULER",
@@ -519,7 +525,7 @@
       "textSafe": true,
       "unsafe": [],
       "kind": "example",
-      "sha256": "8c49766018cce8d18f1ee7c79ebe964dbd259a5efc571646d14d4e032582ccda"
+      "sha256": "a64957cbd49b290cca45ae4290b18fdf576be28c44b9097a06408fca7c016cdc"
     },
     {
       "file": "categories-phone",
@@ -531,7 +537,7 @@
       "fields": [],
       "height": 945,
       "kind": "example",
-      "sha256": "fa84c788cdeb2155f66e7f9684a14f860453e3b8b48d3e8fc363a4b8325fe769"
+      "sha256": "948e661ccd62fb5ba2d42ae0a9c4d65b72a68afec962da88b3a14645d42158bc"
     },
     {
       "file": "option-help",
@@ -553,7 +559,7 @@
       ],
       "height": 908,
       "kind": "example",
-      "sha256": "bbaf9304c4dbe8ba78cbf25b1247a75495ef3cd83536096ed7cb17961fe27784"
+      "sha256": "00db6f16fe0b7221b593f006c175405764535769167ed3a88c273413544ff3b0"
     },
     {
       "file": "categories-dark",
@@ -565,7 +571,7 @@
       "fields": [],
       "height": 1000,
       "kind": "example",
-      "sha256": "394f53893c1ed46fb10cc564523f35f00d6296fa3665e50e32085d16bf1419e6"
+      "sha256": "681f87a794ba5d35babfe6c4b9050c5c6c45f1c496cae8ab491e17d34ad9a554"
     },
     {
       "file": "desktop-wide",
@@ -578,7 +584,7 @@
       "overflow": false,
       "fields": [],
       "capture_ready": "Selected heading verified after navigation; Status waited for loaded system information.",
-      "sha256": "674982bf195aeb13f04514c4fe1c6edb257b79d33065db58db39b0ed285ef13a"
+      "sha256": "8a967da1878ff49ca70d9cc3106a501119cff7953541b4777f526b1fe47f8ba7"
     },
     {
       "file": "status-wide",
@@ -591,7 +597,7 @@
       "overflow": false,
       "fields": [],
       "capture_ready": "Selected heading verified after navigation; Status waited for loaded system information.",
-      "sha256": "3ec77baad9691a32cc0f36e5aac0922576ad61e1522512b4d68071272a20956a"
+      "sha256": "317e4a618082efcbe4f9950678d1f58d5817b485af4be6913e1873743a4b55e0"
     }
   ]
 }

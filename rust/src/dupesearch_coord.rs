@@ -5294,6 +5294,20 @@ pub unsafe fn fleet_append(
     let mut out_entries: Vec<FleetOutEntry> = Vec::with_capacity(ranked_idx.len());
     // Without DupeCheck nothing parks the backups (see fleet_member_skip_reason).
     let dupe_check = read_host_opts(host_ctx, host_cb).dupe_check;
+    // running_id was read before the health checks: a download of the key that
+    // has left the queue since must not block the whole fleet.
+    let running_now = if !dupe_check && running_id != 0 {
+        let still_queued = with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+            dq_find_nzb(host_ctx, host_cb, dq_ptr, running_id).is_some_and(|(_, in_hist)| !in_hist)
+        });
+        if still_queued {
+            running_id
+        } else {
+            0
+        }
+    } else {
+        running_id
+    };
     let mut any_added = false;
     for (rank_zero, &idx) in ranked_idx.iter().enumerate() {
         let cand = &candidates[idx];
@@ -5329,7 +5343,7 @@ pub unsafe fn fleet_append(
             }
         } else if !any_alive {
             entry.status = b"DEAD".to_vec();
-        } else if let Some(why) = fleet_member_skip_reason(dupe_check, running_id, any_added) {
+        } else if let Some(why) = fleet_member_skip_reason(dupe_check, running_now, any_added) {
             entry.status = b"SKIPPED".to_vec();
             entry.reason = why.to_vec();
         } else {

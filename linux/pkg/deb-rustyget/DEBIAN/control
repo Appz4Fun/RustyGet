@@ -1,0 +1,14 @@
+Package: rustyget
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: xbmc4lyfe <273732874+xbmc4lyfe@users.noreply.github.com>
+Depends: @DEPENDS@
+Recommends: 7zip, unrar
+Section: net
+Priority: optional
+Homepage: https://github.com/Appz4Fun/RustyGet
+Description: Usenet NZB downloader (RustyGet, Rust port of NZBGet)
+ RustyGet downloads NZB files with live repair from duplicate postings
+ and par2, and direct unpack. Installs side by side with the nzbget
+ package: own binary, data directory, config and systemd unit.
+ The service is installed but not enabled or started.

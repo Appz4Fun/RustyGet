@@ -3287,18 +3287,22 @@ impl NzbgetRsQueueCoordinator {
             // the recovery blocks on disk cover all damaged and not yet downloaded slices.
             if completed && auto_par_repair && crate::postproc::direct_unpack_has_holds(nzb.id) {
                 if let Some(st) = crate::parchecker::streaming_session_status(nzb.id) {
-                    let mut msg = b"Live par2 for ".to_vec();
-                    msg.extend_from_slice(&nzb.name);
-                    let tail = format!(
-                        ": {} verified, {} damaged, {} not arrived of {} slice(s), {} recovery block(s) ready",
-                        st.verified,
-                        st.damaged,
-                        st.unarrived + st.partially_arrived,
-                        st.total,
-                        st.ready_recovery
-                    );
-                    msg.extend_from_slice(tail.as_bytes());
-                    host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+                    let snapshot = crate::liveparlog::Snapshot {
+                        verified: st.verified,
+                        damaged: st.damaged,
+                        not_arrived: st.unarrived + st.partially_arrived,
+                        total: st.total,
+                        recovery_ready: st.ready_recovery,
+                        recovery_in_flight: st.unpaused_in_flight,
+                        recovery_needed: st.needed_recovery_blocks,
+                        repair_possible: st.early_cutover_possible,
+                    };
+                    if let Some(tail) = crate::liveparlog::line_if_due(nzb.id, snapshot) {
+                        let mut msg = b"Live par2 for ".to_vec();
+                        msg.extend_from_slice(&nzb.name);
+                        msg.extend_from_slice(tail.as_bytes());
+                        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+                    }
                 }
                 crate::postproc::direct_unpack_try_live_par_repair(nzb.id, &nzb.name);
             }

@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  site:
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -74,7 +74,7 @@ jobs:
           path: ${{ runner.temp }}/site
 
   deploy:
-    needs: build
+    needs: site
     if: github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
     permissions:

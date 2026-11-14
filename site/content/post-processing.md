@@ -3,7 +3,7 @@ title = "Check, repair, and unpack"
 nav_title = "Check, repair, unpack"
 description = "How RustyGet verifies downloads with par2, repairs them on every core, restores obfuscated names, unpacks archives, and runs extension scripts."
 eyebrow = "Features"
-lede = "After the last article arrives, RustyGet checks the files, repairs damage with par2 recovery data, restores obfuscated names, unpacks archives, and cleans up. Everything except unpacking runs inside the program, with no external par2 tool."
+lede = "After the last article arrives, RustyGet checks the files, repairs damage with par2 recovery data, restores obfuscated names, unpacks archives, and cleans up. All of it runs inside the program, with no external par2, unrar, or 7-Zip tool."
 +++
 
 ## The pipeline
@@ -13,11 +13,11 @@ lede = "After the last article arrives, RustyGet checks the files, repairs damag
 <li><strong>Rename.</strong> Par-rename and RAR-rename restore the real filenames of obfuscated postings.</li>
 <li><strong>Verify.</strong> Quick verification checks only the files that had download errors.</li>
 <li><strong>Repair.</strong> Multithreaded par2 repair rebuilds damaged files.</li>
-<li><strong>Unpack.</strong> RAR and 7-Zip archives are extracted. Passwords come from the NZB file or from a password file.</li>
+<li><strong>Unpack.</strong> RAR, 7-Zip, ZIP, and tar archives are extracted. Passwords come from the NZB file or from a password file.</li>
 <li><strong>Clean up and run extensions.</strong> Archives and par2 files are deleted, and post-processing extensions run in the order you set.</li>
 </ol>
 
-`PostStrategy` controls how many downloads can be in these steps at once: `sequential`, `balanced` (the default), `aggressive`, or `rocket`.
+`PostStrategy` controls how many downloads can be in these steps at once: `sequential`, `balanced` (the template's value), `aggressive`, or `rocket`.
 
 ## Health check
 
@@ -27,11 +27,11 @@ When health drops below critical health, `HealthCheck` decides what happens:
 
 | Value | Effect |
 |---|---|
-| `park` | Default. Moves the download to history with its files kept, so you can add more par2 files or retry later. |
+| `park` | NZBGet's default. Moves the download to history with its files kept, so you can add more par2 files or retry later. |
 | `delete` | Deletes the download and moves it to history. With duplicate checks on, the best backup of the title starts. |
 | `pause` | Pauses the download. You start a backup yourself. |
-| `none` | Keeps downloading. Use it when you plan to repair by hand. |
-| `dupe` <span class="tag tag-new">new</span> | Waits for a duplicate first. If a better copy of the same title waits in history, the download fails over to it; if article fallback can borrow the missing articles, the download keeps going. See [Duplicate fleets](duplicate-fleets.md). |
+| `none` | Keeps downloading. Use it when you plan to repair by hand. This is the built-in value when the configuration file leaves `HealthCheck` out. |
+| `dupe` <span class="tag tag-new">new</span> | The value in RustyGet's configuration template. Waits for a duplicate first. If a better copy of the same title waits in history, the download fails over to it; if article fallback can borrow the missing articles, the download keeps going. See [Duplicate fleets](duplicate-fleets.md). |
 
 ## Renaming obfuscated files
 
@@ -63,14 +63,14 @@ RustyGet doesn't need that pass. It records which files had download errors and 
 
 par2cmdline predates multicore CPUs and uses one core. A popular multicore fork depends on an Intel library and runs only on Intel-compatible CPUs, which leaves out the ARM chips in most NAS boxes and media players.
 
-The repair module has its own threading that works on every platform and CPU. On a four-core ARM device it repairs two to three times faster than par2cmdline. Set the thread count with `ParThreads` and the memory with `ParBuffer`.
+The repair module, the `par-rs` crate, has its own threading that works on every platform and CPU. Set the thread count with `ParThreads` and the memory with `ParBuffer`.
 
 > [!NOTE] Repair from a twin
 > When a download is short of recovery blocks, RustyGet can use the par2 volumes of a twin: a duplicate posting whose files are byte-identical, proven by par2 checksums. See [Duplicate fleets](duplicate-fleets.md#repair-with-a-twins-par2-files).
 
 ## Unpack
 
-`Unpack` extracts RAR archives with `UnrarCmd` and 7-Zip archives with `SevenZipCmd`. `DirectUnpack` starts extracting while the download is still running, which saves time when the download needs no repair.
+`Unpack` extracts RAR, 7-Zip, ZIP, and tar archives with the built-in `zipfast` and `zipview` crates, including encrypted and multi-volume archives. It needs no external program, and `UnrarCmd` and `SevenZipCmd` are no longer used. `DirectUnpack` starts extracting while the download is still running, which saves time when the download needs no repair.
 
 - `UseTempUnpackDir` extracts into a temporary `_unpack` directory and moves the files when done.
 - `UnpackPassFile` points to a file of passwords to try.
@@ -89,7 +89,8 @@ A failed download goes to history, where you can download it again. Besides star
 
 Extensions are scripts that run at set points, such as after a download finishes. Par check, repair, and unpack are built in; extensions handle everything else, such as deleting samples, sending notifications, or moving files for media managers.
 
-- Install extensions from the Extension Manager in the web interface, or put them in `ScriptDir`.
+- Install extensions from the Extension Manager in the web interface, or put them in `ScriptDir`, which defaults to `${MainDir}/scripts`.
+- RustyGet's configuration template doesn't list the extension options (`ScriptDir`, `Extensions`, `ScriptOrder`, `ScriptPauseQueue`, `ShellOverride`, `EventInterval`, and `CategoryN.Extensions`), so Settings doesn't show them. RustyGet still reads them, so set them in the configuration file.
 - A current extension is a folder with a `manifest.json` and an executable. Older extensions are single script files with an NZBGet header comment block, and they still load. Either way, an extension's options are saved in `nzbget.conf` and passed as `NZBPO_` environment variables.
 - Post-processing extensions read the download's state from `NZBPP_` variables such as `NZBPP_DIRECTORY`, `NZBPP_TOTALSTATUS`, and `NZBPP_STATUS`.
 - Exit with `93` for success, `94` for failure, or `95` to skip. Any other exit code, including `0`, marks the script as failed. Exit `92` to ask for a par check after an extension unpacked the files itself.

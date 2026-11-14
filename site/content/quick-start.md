@@ -2,7 +2,7 @@
 title = "Quick start"
 description = "Secure the web interface, add news servers, set paths and categories, and download your first NZB with RustyGet."
 eyebrow = "Get started"
-lede = "Five settings get RustyGet downloading. Three more turn on the duplicate fleet features that set it apart."
+lede = "Five settings get RustyGet downloading. A few more set up the duplicate fleet features that set it apart."
 +++
 
 Open the web interface at `http://<host>:6789` and go to **Settings**. Finish your edits, click **Save all changes**, then reload when prompted. The [illustrated Settings guides](settings.md) cover every section.
@@ -11,10 +11,10 @@ Open the web interface at `http://<host>:6789` and go to **Settings**. Finish yo
 
 <ol class="steps">
 <li><p><strong>Secure the interface.</strong> In <strong>SECURITY</strong>, set <code>ControlUsername</code> and <code>ControlPassword</code>. Give other programs their own accounts: <code>RestrictedUsername</code> can do everything except change settings, which suits media managers, and <code>AddUsername</code> can only add downloads.</p></li>
-<li><p><strong>Add your news servers.</strong> In <strong>NEWS-SERVERS</strong>, enter the host, port, user name, password, and connection count from your provider. Keep encryption on. Click <strong>Test connection</strong>. Add block accounts as fill servers at level 1. See <a href="automation.html#news-servers">News servers</a>.</p></li>
+<li><p><strong>Add your news servers.</strong> In <strong>NEWS-SERVERS</strong>, enter the host, port, user name, password, and connection count from your provider, and set <code>Active</code> to yes, because the template's first server starts inactive. Keep encryption on. Click <strong>Test connection</strong>. Add block accounts as fill servers at level 1. See <a href="automation.html#news-servers">News servers</a>.</p></li>
 <li><p><strong>Choose your folders.</strong> In <strong>PATHS</strong>, set <code>MainDir</code>. The other paths default to folders inside it: <code>DestDir</code> for finished files, <code>InterDir</code> for downloads in progress, <code>NzbDir</code> for incoming NZB files, and <code>QueueDir</code> for the queue and history.</p></li>
 <li><p><strong>Add categories.</strong> In <strong>CATEGORIES</strong>, add one per kind of download, such as Movies and TV, each with its own <code>DestDir</code>. Media managers and the Kodi add-on send a category with each download.</p></li>
-<li><p><strong>Check unpacking.</strong> In <strong>UNPACK</strong>, make sure <code>UnrarCmd</code> and <code>SevenZipCmd</code> point to working programs.</p></li>
+<li><p><strong>Check unpacking.</strong> In <strong>UNPACK</strong>, keep <code>Unpack</code> on. RustyGet extracts RAR, 7-Zip, ZIP, and tar archives itself, so it needs no unpacking programs.</p></li>
 </ol>
 
 ## Add a download
@@ -31,13 +31,13 @@ Watch the download in the **Downloads** tab. When it finishes, the **History** t
 
 ## Turn on duplicate fleets
 
-These settings live in **INCOMING NZBS**, **DOWNLOAD QUEUE**, and **CHECK AND REPAIR**. Each defaults to NZBGet's behavior, so turn them on in this order and watch a few downloads after each step.
+These settings live in **INCOMING NZBS**, **DOWNLOAD QUEUE**, and **CHECK AND REPAIR**. A new installation starts from RustyGet's configuration template, which already sets `HealthCheck=dupe` and `DupeArticleFallback=live`. A configuration file carried over from NZBGet has both off. In that case, turn them on in this order and watch a few downloads after each step.
 
 | Step | Setting | Section | Effect |
 |---|---|---|---|
 | 1 | [`DupeCheck=yes`](options.md#dupecheck) | INCOMING NZBS | Groups copies of the same title by duplicate key and keeps backups in history. On by default. |
-| 2 | [`HealthCheck=dupe`](options.md#healthcheck) | CHECK AND REPAIR | Fails over early to a better copy when a download can't complete. |
-| 3 | [`DupeArticleFallback=article`](options.md#dupearticlefallback) | INCOMING NZBS | Fetches articles that no server has from duplicate postings. Use `live` to also repair bytes while downloading. |
+| 2 | [`HealthCheck=dupe`](options.md#healthcheck) | CHECK AND REPAIR | Fails over early to a better copy when a download can't complete. Set in the template. |
+| 3 | [`DupeArticleFallback=article`](options.md#dupearticlefallback) | INCOMING NZBS | Fetches articles that no server has from duplicate postings. `live`, the template's value, also repairs bytes while downloading. |
 | 4 | [`NzbCleanupDisk=no`](options.md#nzbcleanupdisk) | DOWNLOAD QUEUE | Keeps the NZB files of history items, so they can still serve as sources. |
 | 5 | [`DupeSearch=yes`](options.md#dupesearch) | INCOMING NZBS | Searches NZBHydra2 for more copies of each new download. Start with `DupeSearchDryRun=yes`. |
 

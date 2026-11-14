@@ -8,9 +8,12 @@ Pictures use an isolated demonstration service and example values. Credentials a
 
 ## Extension scripts
 
-Choose the global `Extensions` list and review `ScriptOrder`. Extensions can run at different hooks; the available hooks depend on the installed extension. A category can choose its own post-processing extension list.
+The pictured **EXTENSION SCRIPTS** section came from an older configuration template. The current template leaves it out, so Settings doesn't show it. RustyGet still reads these options from the configuration file, so set them there:
 
-`ScriptPauseQueue` controls queue behavior during script work. `ShellOverride` selects interpreters for scripts that need them. Read the extension's requirements before changing those controls.
+- `Extensions` is the global list of extensions, and `ScriptOrder` sets the order they run in. A category can choose its own post-processing list with `CategoryN.Extensions`.
+- `ScriptPauseQueue` pauses the queue while scripts run. `ShellOverride` selects interpreters for scripts that need them. `EventInterval` limits how often queue events run.
+
+Extensions can run at different hooks; the available hooks depend on the installed extension. Read the extension's requirements before changing those options.
 
 Key options: `Extensions`, `ScriptOrder`, `ScriptPauseQueue`, `ShellOverride`, `EventInterval`.
 
@@ -34,7 +37,7 @@ Installing an extension does not mean every workflow uses it. Check the global o
 
 This optional extension adds health-checked duplicate postings as backup NZBs. Its controls include an indexer URL and API key, donor limits, health sampling, concurrency, and `DryRun`.
 
-Read the installed version's help, configure its indexer credentials locally, and use its dry-run mode while checking the intended behavior. Keep its workflow distinct from the built-in duplicate-search controls described in [Indexer search](dupesearch.md). Numeric values in the picture are sanitized examples, not tuning recommendations.
+Read the installed version's help, configure its indexer credentials locally, and use its dry-run mode while checking the intended behavior. Keep its workflow distinct from the built-in duplicate-search controls described in [Donor search](dupesearch.md). Numeric values in the picture are sanitized examples, not tuning recommendations.
 
 <figure class="settings-figure">
 <a class="settings-shot" href="assets/settings/dupe-donors.jpg" aria-label="Open full-size picture: DupeDonors example options with blank indexer credentials"><img src="assets/settings/dupe-donors.jpg" width="1280" height="1067" loading="lazy" alt="DupeDonors example options with blank indexer credentials"></a>

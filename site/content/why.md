@@ -52,4 +52,4 @@ See [Rust port status](rust-port.md) for progress.
 
 ## The name
 
-RustyGet keeps the "Get" of its roots and adds the language it's moving to. During the move, the binary and the configuration file keep NZBGet's names, `nzbget` and `nzbget.conf`, so existing setups and clients keep working.
+RustyGet keeps the "Get" of its roots and adds the language it's moving to. The binary is `rustyget`, and it looks for `rustyget.conf` first and then for `nzbget.conf` in the usual places, so an existing NZBGet setup keeps working. The configuration template in the repository still has its old name, `nzbget.conf`, and installs as `rustyget.conf`.

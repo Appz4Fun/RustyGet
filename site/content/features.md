@@ -53,7 +53,7 @@ RustyGet doesn't call an external par2 tool. The par2 code is part of the progra
 
 par2cmdline is older than multicore CPUs and uses one core. A multicore fork exists, but it depends on an Intel library and runs only on Intel-compatible CPUs. Most NAS boxes and media players have multicore ARM CPUs, so they can't use it and are stuck on one core.
 
-RustyGet's par2 module has its own threading that works on every platform and CPU. On a four-core ARM device, it repairs two to three times faster than par2cmdline. MIPS, PowerPC, and x86 devices gain too.
+RustyGet's par2 module, the `par-rs` crate, has its own threading that works on every platform and CPU, so ARM devices use every core too.
 
 ## Retry failed articles
 

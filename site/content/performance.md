@@ -11,7 +11,7 @@ lede = "RustyGet runs well on small NAS boxes, routers, and media players, and i
 ## When the CPU is the limit
 
 Encryption
-: TLS costs more CPU than anything else in a download. If your device is slow, try another cipher with `ServerN.Cipher`; a fast cipher can raise throughput a lot. Keep encryption on unless you trust the network path.
+: TLS costs more CPU than anything else in a download. If your device is slow, try another cipher with `ServerN.Cipher`; a fast cipher can raise throughput a lot. **Optimize TLS ciphers** in the news-server settings measures the ciphers each encrypted server supports on your machine and saves the fastest one for each server. Keep encryption on unless you trust the network path.
 
 Connections
 : Each connection is a thread. For servers at level 0 (`ServerN.Level=0`), use the fewest connections that still fill your link. More connections make a small device less responsive. Give fill servers (level 1 and higher) the same count as your main servers when you can.
@@ -67,6 +67,6 @@ The fleet features add work, so size them for your hardware:
 
 - Health checks of duplicates (`DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`) use your news-server connections. Each check is bounded by `DupeHealthBudget`.
 - Stream repair (`DupeArticleFallback=stream`) downloads and decodes parts of other postings. `DupeStreamTimeout` stops a repair that goes 60 seconds without progress, and also stops one that would take more than three times as long as downloading the release again.
-- `DupeStreamDecompress` unpacks parts of compressed duplicates and needs CPU and an extractor.
+- `DupeStreamDecompress` unpacks compressed duplicates into a temporary folder, which costs CPU and disk space.
 
 See [Duplicate fleets](duplicate-fleets.md) for what each feature does.

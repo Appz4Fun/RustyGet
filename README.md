@@ -44,11 +44,12 @@ RustyGet is a Usenet downloader that started as a fork of [NZBGet](https://githu
 | A download that can't complete | Runs to the end, then fails over | `HealthCheck=dupe` fails over within seconds, and a probe parks dead copies before they download |
 | Finding more copies | Only what feeds and clients send | `DupeSearch` queries NZBHydra2, checks each copy on your servers, and queues the live ones as backups |
 | Clients with many copies | One `append` per copy | One `appendfleet` call: RustyGet checks every copy and downloads the most complete one |
-| Configuration | 155 options | 17 new options and a new `HealthCheck` value, all off by default |
+| Configuration | 155 options | 17 new options and a new `HealthCheck` value, off unless the configuration file turns them on; RustyGet's configuration template turns on live repair and early failover |
 | API | NZBGet API | NZBGet API, plus `appendfleet`, new fields, POST for every method that changes something (plain GET runs only the methods that read), JSON-P off unless option `JsonP` turns it on, and access checks in multicalls |
 | Queue and history files | NZBGet formats | NZBGet formats, with RustyGet's data in a trailer that NZBGet ignores |
 | Inherited bugs | | About 100 fixed, 96 of them [reported to NZBGet as its issues 940 to 1046](https://github.com/nzbgetcom/nzbget/issues?q=is%3Aissue+author%3Axbmc4lyfe): downloads, post-processing, queue edits, state files, scripts, feeds, and the web interface |
-| CI workflows | Builds and tests for every platform | Turned off in the Actions tab while the tests are rebuilt; only the documentation workflow runs |
+| Unpacking | External `unrar` and `7z` programs | Built in, with no external programs |
+| CI workflows | Builds and tests for every platform | No build or test workflow yet; the documentation, benchmark, and formatting workflows run |
 
 The new options are `DupeArticleFallback`, `DupeStreamDecompress`, `DupeStreamTimeout`, `DupeSearch`, `DupeSearchUrl`, `DupeSearchApiKey`, `DupeSearchDelay`, `DupeSearchDryRun`, `DupeSearchMaxDonors`, `DupeHealthPercent`, `DupeHealthMin`, `DupeHealthMax`, `DupeBodyChecks`, `DupeHealthBudget`, `DupeMinAlive`, and `DupeFastDonors`, plus `JsonP` in the security settings. The full list of changes is in [Differences from NZBGet](https://appz4fun.github.io/RustyGet/differences.html).
 
@@ -109,17 +110,17 @@ On 2026-10-09 the NZBGet maintainers closed it without merging, along with the r
 
 ## Build and run
 
-RustyGet runs on Linux and macOS. It has no release packages yet, so build it from source with `just`, a C++20 compiler, and Rust. The repository pins Rust 1.99.0, and rustup installs it on the first build.
+RustyGet runs on Linux and macOS, though the current main branch builds on macOS only until a Linux build fix lands. It has no release packages yet, so build it from source with `just`, a C++20 compiler, and Rust. The repository pins Rust 1.99.0, and rustup installs it on the first build.
 
 ```bash
 git clone https://github.com/Appz4Fun/RustyGet.git rustyget
 cd rustyget
 just build
-[ -e ~/.rustyget ] || install -m 600 rustyget.conf ~/.rustyget
-build/release/rustyget -c ~/.rustyget -o WebDir="$PWD/webui" -o ConfigTemplate="$PWD/rustyget.conf" -D
+[ -e ~/.rustyget ] || install -m 600 nzbget.conf ~/.rustyget
+build/release/rustyget -c ~/.rustyget -o WebDir="$PWD/webui" -o ConfigTemplate="$PWD/nzbget.conf" -D
 ```
 
-`~/.rustyget` is where RustyGet saves your configuration, and the web interface writes your settings there. The test keeps an existing copy when you run these steps again to upgrade. Then open `http://<host>:6789`. The default login is `rustyget` with the password `tegbzn6789`. Change it first. See [Install and build](https://appz4fun.github.io/RustyGet/install.html) for the libraries each platform needs, and [Quick start](https://appz4fun.github.io/RustyGet/quick-start.html) for the first settings.
+The configuration template in the repository still has NZBGet's filename, `nzbget.conf`. `~/.rustyget` is where RustyGet saves your configuration, and the web interface writes your settings there. The test keeps an existing copy when you run these steps again to upgrade. Then open `http://<host>:6789`. The default login is `rustyget` with the password `tegbzn6789`. Change it first. See [Install and build](https://appz4fun.github.io/RustyGet/install.html) for the libraries each platform needs, and [Quick start](https://appz4fun.github.io/RustyGet/quick-start.html) for the first settings.
 
 To move from NZBGet, stop it, back up the queue directory and `nzbget.conf`, and start RustyGet with the same configuration file.
 

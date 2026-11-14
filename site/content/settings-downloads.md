@@ -12,7 +12,7 @@ Set the scan interval and file age for the watched NZB folder. `AppendCategoryDi
 
 Duplicate handling belongs here too. `DupeCheck` groups backups by duplicate key. `DupeArticleFallback` enables article or live byte recovery from other copies. `DupeSearch` asks your configured indexer for more copies; start with `DupeSearchDryRun` while checking its behavior.
 
-Keep the indexer URL and API key private. Follow [Duplicate fleets](duplicate-fleets.md) and [Indexer search](dupesearch.md) for the complete setup.
+Keep the indexer URL and API key private. Follow [Duplicate fleets](duplicate-fleets.md) and [Donor search](dupesearch.md) for the complete setup.
 
 Key options: [`NzbDirInterval`](options.md#nzbdirinterval), [`NzbDirFileAge`](options.md#nzbdirfileage), [`DupeCheck`](options.md#dupecheck), [`DupeArticleFallback`](options.md#dupearticlefallback), [`DupeSearch`](options.md#dupesearch), [`DupeSearchDryRun`](options.md#dupesearchdryrun).
 

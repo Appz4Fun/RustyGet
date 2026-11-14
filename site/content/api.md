@@ -35,7 +35,7 @@ Send credentials with HTTP basic authentication, or as the first part of the pat
 | Account | Options | Access |
 |---|---|---|
 | Control | `ControlUsername`, `ControlPassword` | Everything |
-| Restricted | `RestrictedUsername`, `RestrictedPassword` | The web interface, but no changes to settings and no passwords |
+| Restricted | `RestrictedUsername`, `RestrictedPassword` | The web interface, but no changes to settings, no TLS cipher test, and no passwords |
 | Add | `AddUsername`, `AddPassword` | `append`, `appendurl`, `appendfleet`, and `version` only |
 
 > [!WARNING] Use HTTPS on untrusted networks
@@ -45,7 +45,7 @@ JSON-RPC takes positional parameters only: names are ignored, and the order matt
 
 ## Methods
 
-This is every method that RustyGet answers. All but `appendfleet` are inherited from NZBGet, and the repository's [API reference](https://github.com/Appz4Fun/RustyGet/blob/HEAD/docs/api/API.md) documents most of them in detail.
+This is every method that RustyGet answers. All but `appendfleet` and the three `tlscipher` methods are inherited from NZBGet, and the repository's [API reference](https://github.com/Appz4Fun/RustyGet/blob/HEAD/docs/api/API.md) documents most of them in detail.
 
 | Area | Methods |
 |---|---|
@@ -59,6 +59,7 @@ This is every method that RustyGet answers. All but `appendfleet` are inherited 
 | Extensions and scripts | `loadextensions`, `downloadextension`, `updateextension`, `deleteextension`, `testextension`, `startscript` |
 | Updates | `checkupdates`, `startupdate` |
 | Tests and tools | `testserver`, `testserverspeed`, `testdiskspeed`, `testnetworkspeed`, `readurl` |
+| TLS cipher test | `tlscipherstart`, `tlscipherstatus`, `tlsciphercancel`: the **Optimize TLS ciphers** test in the news-server settings, for the control account only |
 | XML-RPC only | `system.multicall` |
 
 ## appendfleet

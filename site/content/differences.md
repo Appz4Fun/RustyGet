@@ -95,7 +95,7 @@ See [Configuration options](options.md) for every option.
 
 - New method `appendfleet`, the TLS cipher test methods `tlscipherstart`, `tlscipherstatus`, and `tlsciphercancel`, and new fields `DupeRecoveredArticles`, `DupeRecoveredBytesLo`, `DupeRecoveredBytesHi`, `DupeRecoveredHoles`, and `LiveRepairing`.
 - New stage `STREAM_REPAIRING`.
-- New NZB parameters, including `DupeKind`, `DupeFiles`, `DupeAlive`, and `DupeFleet`.
+- New NZB parameters, including `DupeKind`, `DupeCopyKind`, `DupeFiles`, `DupeAlive`, and `DupeFleet`.
 - Methods that change the system or reach out to the network need POST. Plain GET runs only the methods that read.
 - JSON-P is off unless option `JsonP` turns it on. Then it runs only the methods that read, with the restricted user's access, so user names, passwords, and API keys come back as `***`. In NZBGet, JSON-P ran every method with full access, and any web page could read the answers.
 - `system.multicall` respects the caller's access level.

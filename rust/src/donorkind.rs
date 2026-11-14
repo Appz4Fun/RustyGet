@@ -7,12 +7,13 @@
 //! two kinds of ALT.
 //!
 //! The kind a fleet worked out for a member is kept on the queued item in the
-//! nzb parameter [`KIND_PARAM`], so the orderings that pick a duplicate later
+//! nzb parameter [`KIND_PARAM`] (not `DupeKind`, which TwinCheck owns for its
+//! twin/alt label against the primary), so the orderings that pick a duplicate later
 //! (article borrowing, stream repair, the rescue of a failed download) agree
 //! with the fleet's.
 
 /// The nzb parameter holding a fleet member's [`DonorKind`].
-pub const KIND_PARAM: &[u8] = b"DupeKind";
+pub const KIND_PARAM: &[u8] = b"DupeCopyKind";
 
 /// How the posted bytes of a copy relate to its inner media file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +83,11 @@ fn extension(name: &[u8]) -> Vec<u8> {
         Some(dot) => name[dot + 1..].to_ascii_lowercase(),
         None => Vec::new(),
     }
+}
+
+/// A media file's name (not a sample).
+fn is_media_name(name: &[u8]) -> bool {
+    crate::dupeidentity::is_media(name)
 }
 
 /// The name of a raw split's piece without its numeric extension
@@ -160,7 +166,9 @@ fn rar_packing(data: &[u8], password_known: bool) -> Packing {
             Packing::Unborrowable
         };
     }
-    let Some(file) = files.first() else {
+    // the media file decides; a small nfo or sample in front of it says
+    // nothing about how the movie is packed
+    let Some(file) = files.iter().find(|f| is_media_name(&f.filename)) else {
         return Packing::Unknown;
     };
     if !file.stored || (file.encrypted_data && !password_known) {
@@ -170,13 +178,26 @@ fn rar_packing(data: &[u8], password_known: bool) -> Packing {
     }
 }
 
-fn zip_packing(data: &[u8], password_known: bool) -> Packing {
-    let (Some(flags), Some(method)) = (data.get(6..8), data.get(8..10)) else {
+fn le16_at(data: &[u8], pos: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(data.get(pos..pos + 2)?.try_into().ok()?))
+}
+
+/// Only the first local entry is in the article: it decides when it is the
+/// media file, else the packing stays unknown. Stream repair never maps an
+/// encrypted zip entry (it takes no password for zip), so one is unborrowable.
+fn zip_packing(data: &[u8]) -> Packing {
+    let (Some(flags), Some(method), Some(name_len)) =
+        (le16_at(data, 6), le16_at(data, 8), le16_at(data, 26))
+    else {
         return Packing::Unknown;
     };
-    let flags = u16::from_le_bytes([flags[0], flags[1]]);
-    let method = u16::from_le_bytes([method[0], method[1]]);
-    if method != 0 || (flags & 1 != 0 && !password_known) {
+    let Some(name) = data.get(30..30 + usize::from(name_len)) else {
+        return Packing::Unknown;
+    };
+    if !is_media_name(name) {
+        return Packing::Unknown;
+    }
+    if method != 0 || flags & 1 != 0 {
         Packing::Unborrowable
     } else {
         Packing::Borrowable
@@ -191,7 +212,7 @@ pub fn packing_of_head(data: &[u8], name: &[u8], password_known: bool) -> Packin
         return rar_packing(data, password_known);
     }
     if data.starts_with(b"PK\x03\x04") {
-        return zip_packing(data, password_known);
+        return zip_packing(data);
     }
     if data.starts_with(&[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c]) {
         return Packing::Unknown;
@@ -239,14 +260,13 @@ mod tests {
     use super::*;
     use crate::twin::{FileSig, Listed};
 
-    fn rar4_with_file(method: u8, file_flags: u16, main_flags: u16) -> Vec<u8> {
+    fn rar4_named(name: &[u8], method: u8, file_flags: u16, main_flags: u16) -> Vec<u8> {
         let mut v = b"Rar!\x1a\x07\x00".to_vec();
         // main header: crc, type 0x73, flags, size 13
         v.extend_from_slice(&[0, 0, 0x73]);
         v.extend_from_slice(&main_flags.to_le_bytes());
         v.extend_from_slice(&13u16.to_le_bytes());
         v.extend_from_slice(&[0; 6]);
-        let name = b"movie.mkv";
         let size = 32 + name.len() as u16;
         v.extend_from_slice(&[0, 0, 0x74]);
         v.extend_from_slice(&(file_flags | 0x8000).to_le_bytes());
@@ -263,6 +283,18 @@ mod tests {
         v.extend_from_slice(name);
         v.extend_from_slice(&[0xaa; 64]); // start of the packed data
         v
+    }
+
+    fn rar4_with_file(method: u8, file_flags: u16, main_flags: u16) -> Vec<u8> {
+        rar4_named(b"movie.mkv", method, file_flags, main_flags)
+    }
+
+    #[test]
+    fn rar_without_media_entry_is_unknown() {
+        assert_eq!(
+            packing_of_head(&rar4_named(b"info.nfo", 0x30, 0, 0), b"a.rar", false),
+            Packing::Unknown
+        );
     }
 
     #[test]
@@ -302,21 +334,29 @@ mod tests {
 
     #[test]
     fn zip_7z_and_bare() {
-        let mut zip = b"PK\x03\x04\x14\x00\x00\x00\x00\x00".to_vec();
-        zip.extend_from_slice(&[0; 20]);
-        assert_eq!(packing_of_head(&zip, b"a.zip", false), Packing::Borrowable);
-        zip[8] = 8; // deflate
-        assert_eq!(
-            packing_of_head(&zip, b"a.zip", false),
-            Packing::Unborrowable
-        );
-        zip[8] = 0;
-        zip[6] = 1; // encrypted
-        assert_eq!(
-            packing_of_head(&zip, b"a.zip", false),
-            Packing::Unborrowable
-        );
-        assert_eq!(packing_of_head(&zip, b"a.zip", true), Packing::Borrowable);
+        let zip_entry = |name: &[u8], flags: u8, method: u8| {
+            let mut z = b"PK\x03\x04\x14\x00".to_vec();
+            z.extend_from_slice(&[flags, 0, method, 0]);
+            z.extend_from_slice(&[0; 16]); // time, date, crc, sizes
+            z.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            z.extend_from_slice(&[0, 0]); // extra length
+            z.extend_from_slice(name);
+            z.extend_from_slice(&[0xaa; 32]);
+            z
+        };
+        let z = zip_entry(b"movie.mkv", 0, 0);
+        assert_eq!(packing_of_head(&z, b"a.zip", false), Packing::Borrowable);
+        let z = zip_entry(b"movie.mkv", 0, 8); // deflate
+        assert_eq!(packing_of_head(&z, b"a.zip", false), Packing::Unborrowable);
+        // encrypted entries are never mapped, password or not
+        let z = zip_entry(b"movie.mkv", 1, 0);
+        assert_eq!(packing_of_head(&z, b"a.zip", false), Packing::Unborrowable);
+        assert_eq!(packing_of_head(&z, b"a.zip", true), Packing::Unborrowable);
+        // a stored nfo first says nothing about the movie behind it
+        let z = zip_entry(b"info.nfo", 0, 0);
+        assert_eq!(packing_of_head(&z, b"a.zip", false), Packing::Unknown);
+        let z = zip_entry(b"movie-sample.mkv", 0, 0);
+        assert_eq!(packing_of_head(&z, b"a.zip", false), Packing::Unknown);
         assert_eq!(
             packing_of_head(&[b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c, 0, 4], b"a.7z", false),
             Packing::Unknown

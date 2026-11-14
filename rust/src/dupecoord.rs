@@ -461,7 +461,7 @@ where
 /// Returns true when `RarLister::FindLargestFile` in `DupeMatcher.cpp` should continue waiting for `unrar` (`is_running && start_time + timeout_sec > cur_time && start_time >= cur_time`).
 /// The history backup to send back to the queue after a download failed its
 /// health check with nothing of its key left in the queue: TWINs first, then
-/// borrowable, unknown and unborrowable ALTs (`DupeKind`, see
+/// borrowable, unknown and unborrowable ALTs (`DupeCopyKind`, see
 /// [`crate::donorkind`]), each the wholest live backup by its measured
 /// `DupeAlive` share and then its score. Unlike
 /// `select_dupe_backup` it takes backups in DupeMode FORCE and backups filed

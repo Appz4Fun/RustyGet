@@ -7827,7 +7827,7 @@ def scenario_fleetkindorder(daemon, t):
     copies with the same data size, the healthier one queued), then the ALT in
     store-mode rar (borrowable), then the ALT in compressed rar (unborrowable),
     although both ALTs are healthier than either twin. Each added copy keeps
-    its kind in DupeKind."""
+    its kind in DupeCopyKind."""
     alive = set(_fleet_ids('ta')[:30]) | set(_fleet_ids('tb')[:36]) | set(_fleet_ids('as')) | set(_fleet_ids('ac'))
     daemon.fake_nntp.alive = alive
     daemon.fake_nntp.bodies_by_id[_fleet_ids('as')[0]] = _yenc_part(_rar4_head(0x30))
@@ -7843,7 +7843,7 @@ def scenario_fleetkindorder(daemon, t):
     kinds = {}
     for name, g in items.items():
         params = {p['Name']: p['Value'] for p in g.get('Parameters', [])}
-        kinds[name] = params.get('*DupeKind', params.get('DupeKind'))
+        kinds[name] = params.get('DupeCopyKind')
     chosen = next((m['Name'] for m in reply['Members'] if m['Status'] == 'QUEUED'), None)
     ok = (order == ['Show.S01E01.twinB', 'Show.S01E01.twinA', 'Show.S01E01.store', 'Show.S01E01.compressed']
           and chosen == 'Show.S01E01.twinB'

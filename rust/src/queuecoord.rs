@@ -1975,6 +1975,7 @@ impl NzbgetRsQueueCoordinator {
         for param in [
             b"DupeFiles".as_slice(),
             b"DupeKind".as_slice(),
+            crate::donorkind::KIND_PARAM,
             b"DupeSampled".as_slice(),
             b"DupeSampledOf".as_slice(),
         ] {

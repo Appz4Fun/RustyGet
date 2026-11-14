@@ -3847,7 +3847,10 @@ where
         ) {
             Ok(sel) => sel,
             Err(zipfast::Error::Encrypted) => {
-                return fail(log_cb, "Unrar: The specified password is incorrect.".to_string());
+                return fail(
+                    log_cb,
+                    "Unrar: The specified password is incorrect.".to_string(),
+                );
             }
             Err(e) => return fail(log_cb, format!("Unrar: {}: {e}", entry.name)),
         };

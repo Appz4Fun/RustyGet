@@ -604,15 +604,13 @@ dependencies = [
 [[package]]
 name = "par-rs"
 version = "0.2.0"
-source = "git+https://github.com/xbmc4lyfe/par-rs?branch=main#97fe5b66eac32d98d7b62c3125b02e457485b602"
+source = "git+https://github.com/xbmc4lyfe/par-rs?rev=4b55bdfb47228eca0636665191344ea828e4ba81#4b55bdfb47228eca0636665191344ea828e4ba81"
 dependencies = [
  "crc32fast",
  "md-5 0.10.6",
  "memchr",
  "memmap2",
  "rayon",
- "regex",
- "sha1",
  "thiserror",
 ]
 
@@ -768,17 +766,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "sha1"
-version = "0.10.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest 0.10.7",
 ]
 
 [[package]]

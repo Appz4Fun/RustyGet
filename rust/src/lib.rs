@@ -48,6 +48,7 @@ pub mod options;
 pub mod parchecker;
 pub mod liveparlog;
 pub mod pardamage;
+mod parlive;
 pub mod parparser;
 pub mod parrenamer;
 pub mod paths;

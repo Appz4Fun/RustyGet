@@ -10,10 +10,16 @@
 //! 3. Post-download verification, escalation (more volumes, split fragments, extra/dupe files,
 //!    twin sets), and Reed-Solomon repair (`par_rs::repairer::Par2Repairer`).
 
+use crate::parlive::{resources, BudgetPool, SessionBudgetLease, SessionGeneration};
 use crate::postrepair::{strncasecmp_prefix, NzbgetRsParSegment};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+
+#[cfg(test)]
+mod live_lifecycle_tests;
 
 pub use par_rs::damage::{
     blocks_touched, compute_holes, normalize_ranges, par_cannot_cover, presumed_valid_blocks,
@@ -45,8 +51,8 @@ pub use par_rs::stream::{
     SyndromeBank,
 };
 pub use par_rs::streaming::{
-    ArticleOutcome, EarlyRepairReport, LiveStatus, QueuedVolume, SessionOptions, SliceEvent,
-    SliceState, StreamingParSession, UnpauseAction, VolumeStatus,
+    ArticleOutcome, EarlyRepairReport, LiveIoStats, LiveStatus, QueuedVolume, SessionOptions,
+    SliceEvent, SliceState, StreamingParSession, UnpauseAction, VolumeStatus,
 };
 pub use par_rs::twin::{
     block_size as twin_block_size, block_size_of_set, compare_twin_par2_data, compare_twin_sets,
@@ -94,53 +100,1026 @@ pub fn load_par2_set_bytes(bytes: &[u8]) -> Result<PacketSet, std::io::Error> {
 
 struct ActiveStreamingSession {
     session: StreamingParSession,
-    pending_unpause_ids: Vec<u64>,
+    generation: SessionGeneration,
+    operation: Mutex<()>,
+    articles: Mutex<DeferredArticles>,
+    article_byte_limit: u64,
+    pending_unpause_ids: Mutex<Vec<u64>>,
+    file_lengths: HashMap<FileId, u64>,
+    par_name: Mutex<Vec<u8>>,
+    catchup_source_bytes: AtomicU64,
+    last_error: Mutex<Option<String>>,
+    warning_reported: AtomicBool,
+    // Drop last, after the session, queue and all owned metadata.
+    _budget: SessionBudgetLease,
 }
 
-static STREAMING_SESSIONS: LazyLock<Mutex<HashMap<i32, ActiveStreamingSession>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+struct DeferredArticle {
+    file_id: FileId,
+    offset: u64,
+    crc32: u32,
+    size: u64,
+    bytes: Option<Vec<u8>>,
+}
 
-/// Starts or replaces a live [`StreamingParSession`] for `nzb_id` from a `.par2` file on disk.
+#[derive(Default)]
+struct DeferredArticles {
+    pending: VecDeque<DeferredArticle>,
+    // Includes the item currently being folded, until its owned bytes drop.
+    bytes: u64,
+}
+
+static STREAMING_SESSIONS: LazyLock<Mutex<HashMap<i32, Arc<ActiveStreamingSession>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static LIVE_BUDGET: LazyLock<Arc<BudgetPool>> = LazyLock::new(|| Arc::new(BudgetPool::default()));
+static NEXT_LIVE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn live_error(context: &str, message: &str) -> RepairError {
+    RepairError::Io {
+        context: context.to_owned(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, message),
+    }
+}
+
+fn effective_live_pool_bytes() -> u64 {
+    let configured = crate::options::active_options().map_or(500, |o| o.scalars().par_buffer);
+    crate::articledl::memory_monitor_effective_par_buffer_mb(configured).max(0) as u64 * 1024 * 1024
+}
+
+fn acquire_session_budget(bytes: u64, limit: u64) -> Result<SessionBudgetLease, RepairError> {
+    LIVE_BUDGET
+        .acquire(bytes, limit)
+        .ok_or(RepairError::StreamingMemoryLimit {
+            context: "shared live PAR reservation",
+            required_bytes: bytes,
+            limit_bytes: limit,
+        })
+}
+
+fn build_streaming_session(
+    set: &PacketSet,
+    base_dir: &Path,
+    options: SessionOptions,
+    budget: SessionBudgetLease,
+) -> Result<Arc<ActiveStreamingSession>, RepairError> {
+    let main = set.main.as_ref().ok_or(RepairError::NoMainPacket)?;
+    let mut lengths = HashMap::new();
+    for id in &main.recoverable_file_ids {
+        let desc = set
+            .file_descs
+            .get(id)
+            .ok_or_else(|| RepairError::IncompleteMetadata {
+                missing_descriptions: vec![*id],
+            })?;
+        if !set.ifscs.contains_key(id) {
+            return Err(live_error("live PAR metadata", "missing slice checksums"));
+        }
+        lengths.insert(*id, desc.file_length);
+    }
+    let generation = NEXT_LIVE_GENERATION
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| live_error("live PAR generation", "exhausted"))?;
+    let article_byte_limit = options.max_working_bytes;
+    Ok(Arc::new(ActiveStreamingSession {
+        session: StreamingParSession::new(set, base_dir, options)?,
+        generation: SessionGeneration(generation),
+        _budget: budget,
+        operation: Mutex::new(()),
+        articles: Mutex::new(DeferredArticles::default()),
+        article_byte_limit,
+        pending_unpause_ids: Mutex::new(Vec::new()),
+        file_lengths: lengths,
+        par_name: Mutex::new(Vec::new()),
+        catchup_source_bytes: AtomicU64::new(0),
+        last_error: Mutex::new(None),
+        warning_reported: AtomicBool::new(false),
+    }))
+}
+
+fn active_streaming_session(nzb_id: i32) -> Option<Arc<ActiveStreamingSession>> {
+    STREAMING_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&nzb_id)
+        .cloned()
+}
+
+fn install_streaming_session(nzb_id: i32, entry: Arc<ActiveStreamingSession>) {
+    let old = STREAMING_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(nzb_id, entry);
+    if let Some(old) = old {
+        old.session.cancel();
+    }
+}
+
+fn ensure_current_generation(
+    nzb_id: i32,
+    entry: &ActiveStreamingSession,
+) -> Result<(), RepairError> {
+    if entry.session.is_cancelled()
+        || active_streaming_session(nzb_id)
+            .is_none_or(|current| current.generation != entry.generation)
+    {
+        return Err(RepairError::Cancelled);
+    }
+    Ok(())
+}
+
+impl ActiveStreamingSession {
+    fn record<T>(&self, result: Result<T, RepairError>) -> Result<T, RepairError> {
+        if let Err(error) = &result {
+            *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
+        }
+        result
+    }
+    fn unpause(&self, action: Option<&UnpauseAction>) {
+        if let Some(action) = action {
+            let mut ids = self
+                .pending_unpause_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for id in &action.volume_ids_to_unpause {
+                if !ids.contains(id) {
+                    ids.push(*id);
+                }
+            }
+        }
+    }
+}
+
+fn with_live_session<T>(
+    nzb_id: i32,
+    f: impl FnOnce(&ActiveStreamingSession) -> Result<T, RepairError>,
+) -> Option<Result<T, RepairError>> {
+    let entry = active_streaming_session(nzb_id)?;
+    Some(with_live_entry(nzb_id, &entry, f))
+}
+
+fn with_live_entry<T>(
+    nzb_id: i32,
+    entry: &Arc<ActiveStreamingSession>,
+    f: impl FnOnce(&ActiveStreamingSession) -> Result<T, RepairError>,
+) -> Result<T, RepairError> {
+    let _operation = entry.operation.lock().unwrap_or_else(|e| e.into_inner());
+    entry.record((|| {
+        ensure_current_generation(nzb_id, entry)?;
+        let result = f(entry)?;
+        ensure_current_generation(nzb_id, entry)?;
+        Ok(result)
+    })())
+}
+
+/// Reserve before taking an owned snapshot. This capture path performs no source I/O,
+/// hashing or GF work and may be called while the daemon queue is locked.
+pub(crate) fn streaming_session_defer_article(
+    nzb_id: i32,
+    identity: (&[u8], &[u8]),
+    offset: u64,
+    size: u64,
+    crc32: u32,
+    snapshot: impl FnOnce() -> Option<Vec<u8>>,
+) -> Option<Result<(), RepairError>> {
+    let entry = active_streaming_session(nzb_id)?;
+    Some(entry.record((|| {
+        ensure_current_generation(nzb_id, &entry)?;
+        let id = live_source_id(&entry, identity.0, identity.1)?;
+        let length = entry.file_lengths[&id];
+        if size == 0 || offset.checked_add(size).is_none_or(|end| end > length) {
+            return Err(live_error(
+                "live article snapshot",
+                "invalid accepted range",
+            ));
+        }
+        let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
+        let next = queue.bytes.checked_add(size);
+        if queue.pending.len() >= 4096 || next.is_none_or(|n| n > entry.article_byte_limit) {
+            return Err(RepairError::StreamingMemoryLimit {
+                context: "live article snapshots",
+                required_bytes: next.unwrap_or(u64::MAX),
+                limit_bytes: entry.article_byte_limit,
+            });
+        }
+        let bytes = snapshot().ok_or_else(|| {
+            live_error(
+                "live article cache",
+                "cache bytes unavailable; committed replay required",
+            )
+        })?;
+        if bytes.len() as u64 != size || bytes.capacity() as u64 > size {
+            return Err(live_error(
+                "live article snapshot",
+                "snapshot size differs from admitted payload",
+            ));
+        }
+        ensure_current_generation(nzb_id, &entry)?;
+        queue.bytes = next.unwrap();
+        queue.pending.push_back(DeferredArticle {
+            file_id: id,
+            offset,
+            crc32,
+            size,
+            bytes: Some(bytes),
+        });
+        Ok(())
+    })()))
+}
+
+/// Capture a permanent failure without waiting for a hash/fold operation.
+pub(crate) fn streaming_session_defer_failure(
+    nzb_id: i32,
+    identity: (&[u8], &[u8]),
+    offset: u64,
+    size: u64,
+) -> Option<Result<(), RepairError>> {
+    let entry = active_streaming_session(nzb_id)?;
+    Some(entry.record((|| {
+        ensure_current_generation(nzb_id, &entry)?;
+        let id = live_source_id(&entry, identity.0, identity.1)?;
+        if size == 0
+            || offset
+                .checked_add(size)
+                .is_none_or(|end| end > entry.file_lengths[&id])
+        {
+            return Err(live_error(
+                "live failure snapshot",
+                "invalid accepted range",
+            ));
+        }
+        let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
+        if queue.pending.len() >= 4096 {
+            return Err(live_error(
+                "live failure snapshot",
+                "event limit reached; committed replay required",
+            ));
+        }
+        queue.pending.push_back(DeferredArticle {
+            file_id: id,
+            offset,
+            size,
+            crc32: 0,
+            bytes: None,
+        });
+        Ok(())
+    })()))
+}
+
+/// Surface one fallback warning per generation rather than flooding the log for
+/// each cache miss. The detailed last error remains available separately.
+pub(crate) fn streaming_session_take_warning(nzb_id: i32) -> Option<String> {
+    let entry = active_streaming_session(nzb_id)?;
+    if entry.session.is_cancelled() {
+        return None;
+    }
+    let warning = entry
+        .last_error
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()?;
+    entry
+        .warning_reported
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .ok()
+        .map(|_| warning)
+}
+
+/// Consume owned snapshots outside the daemon queue lock. Another active drain
+/// retains ownership; the coordinator will retry on its next tick.
+pub(crate) fn streaming_session_drain_articles(nzb_id: i32) -> Option<Result<usize, RepairError>> {
+    let entry = active_streaming_session(nzb_id)?;
+    let _operation = match entry.operation.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Some(Ok(0)),
+    };
+    Some(entry.record((|| {
+        let mut count = 0;
+        loop {
+            ensure_current_generation(nzb_id, &entry)?;
+            let Some(article) = entry
+                .articles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending
+                .pop_front()
+            else {
+                return Ok(count);
+            };
+            let bytes = article.bytes.as_ref().map_or(0, |data| data.len() as u64);
+            let result = match &article.bytes {
+                Some(data) => entry.session.on_article_finished_memory_only(
+                    &article.file_id,
+                    article.offset,
+                    data,
+                    article.crc32,
+                ),
+                None => entry
+                    .session
+                    .on_article_failed_permanently(&article.file_id, article.offset, article.size)
+                    .map(|(events, unpause)| ArticleOutcome { events, unpause }),
+            };
+            drop(article);
+            entry
+                .articles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .bytes -= bytes;
+            let outcome = result?;
+            ensure_current_generation(nzb_id, &entry)?;
+            entry.unpause(outcome.unpause.as_ref());
+            count += 1;
+        }
+    })()))
+}
+
+/// Jobs with queued work, copied under the registry lock without doing repair work.
+pub(crate) fn streaming_session_pending_article_jobs() -> Vec<i32> {
+    let entries: Vec<_> = STREAMING_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(&id, entry)| (id, Arc::clone(entry)))
+        .collect();
+    entries
+        .into_iter()
+        .filter_map(|(id, entry)| {
+            if entry.session.is_cancelled() {
+                return None;
+            }
+            let queued = !entry
+                .articles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending
+                .is_empty();
+            let warning = !entry.warning_reported.load(Ordering::Relaxed)
+                && entry
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some();
+            (queued || warning).then_some(id)
+        })
+        .collect()
+}
+
+/// Owned completion facts, captured only after the downloader's assembly/flush
+/// barrier. No queue pointers are retained beyond that lock.
+pub(crate) struct LiveCompletedFile {
+    pub nzb_id: i32,
+    pub base_dir: PathBuf,
+    pub path: PathBuf,
+    pub name: Vec<u8>,
+    pub hash16k: Vec<u8>,
+    pub par_file: bool,
+    pub successful: bool,
+    pub accepted: Vec<ByteRange>,
+    pub queued_id: Option<u64>,
+}
+
+#[derive(Default)]
+struct CompletionAccounting {
+    bytes: u64,
+    jobs: HashMap<i32, u64>,
+}
+static COMPLETION_ACCOUNTING: LazyLock<Mutex<CompletionAccounting>> =
+    LazyLock::new(|| Mutex::new(CompletionAccounting::default()));
+static COMPLETED_LIVE_FILES: LazyLock<Mutex<VecDeque<PendingCompletedFile>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+static COMPLETION_DRAINERS: LazyLock<Mutex<HashSet<i32>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+pub(crate) struct CompletionDrainLease {
+    nzb_id: i32,
+}
+impl Drop for CompletionDrainLease {
+    fn drop(&mut self) {
+        COMPLETION_DRAINERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.nzb_id);
+    }
+}
+pub(crate) fn streaming_session_claim_completion_drain(
+    nzb_id: i32,
+) -> Option<CompletionDrainLease> {
+    let admitted = COMPLETION_DRAINERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(nzb_id);
+    admitted.then(|| CompletionDrainLease { nzb_id })
+}
+
+static STARTING_LIVE_SESSION: Mutex<()> = Mutex::new(());
+
+struct CompletionCharge {
+    nzb_id: i32,
+    bytes: u64,
+    _budget: SessionBudgetLease,
+}
+impl Drop for CompletionCharge {
+    fn drop(&mut self) {
+        let mut used = COMPLETION_ACCOUNTING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        used.bytes -= self.bytes;
+        if let Some(job) = used.jobs.get_mut(&self.nzb_id) {
+            *job -= self.bytes;
+            if *job == 0 {
+                used.jobs.remove(&self.nzb_id);
+            }
+        }
+    }
+}
+struct PendingCompletedFile {
+    file: LiveCompletedFile,
+    generation: Option<SessionGeneration>,
+    _charge: CompletionCharge,
+}
+
+pub(crate) fn streaming_session_queue_completed_file(
+    nzb_id: i32,
+    bytes: u64,
+    capture: impl FnOnce() -> Result<LiveCompletedFile, RepairError>,
+) -> Result<(), RepairError> {
+    if !(256..=1 << 20).contains(&bytes) {
+        return Err(live_error(
+            "live completion capture",
+            "context is outside its byte allowance",
+        ));
+    }
+    let mut used = COMPLETION_ACCOUNTING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let total = used.bytes.checked_add(bytes);
+    let job = used
+        .jobs
+        .get(&nzb_id)
+        .copied()
+        .unwrap_or(0)
+        .checked_add(bytes);
+    if total.is_none_or(|n| n > 8 << 20) || job.is_none_or(|n| n > 1 << 20) {
+        return Err(live_error(
+            "live completion capture",
+            "context queue is full; ordinary repair required",
+        ));
+    }
+    let budget = acquire_session_budget(bytes, effective_live_pool_bytes())?;
+    used.bytes = total.unwrap();
+    used.jobs.insert(nzb_id, job.unwrap());
+    drop(used);
+    let charge = CompletionCharge {
+        nzb_id,
+        bytes,
+        _budget: budget,
+    };
+    let file = capture()?;
+    let actual = file.name.capacity()
+        + file.hash16k.capacity()
+        + file.base_dir.capacity()
+        + file.path.capacity()
+        + file.accepted.capacity() * std::mem::size_of::<ByteRange>()
+        + 512;
+    if file.nzb_id != nzb_id || actual as u64 > bytes || file.accepted.len() > 4096 {
+        return Err(live_error(
+            "live completion capture",
+            "completion facts exceed admission",
+        ));
+    }
+    let generation = active_streaming_session(nzb_id).map(|entry| entry.generation);
+    COMPLETED_LIVE_FILES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push_back(PendingCompletedFile {
+            file,
+            generation,
+            _charge: charge,
+        });
+    Ok(())
+}
+
+pub(crate) fn streaming_session_pending_completed_jobs() -> Vec<i32> {
+    let pending = COMPLETED_LIVE_FILES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut ids = Vec::new();
+    for item in pending.iter() {
+        if !ids.contains(&item.file.nzb_id) {
+            ids.push(item.file.nzb_id);
+        }
+    }
+    ids
+}
+
+fn live_source_id(
+    entry: &ActiveStreamingSession,
+    name: &[u8],
+    hash16k: &[u8],
+) -> Result<FileId, RepairError> {
+    entry
+        .session
+        .file_id_by_name(name)
+        .or_else(|| live_hash16k(hash16k).and_then(|hash| entry.session.file_id_by_hash16k(&hash)))
+        .ok_or(RepairError::UnknownFile(FileId([0; 16])))
+}
+
+fn live_hash16k(bytes: &[u8]) -> Option<[u8; 16]> {
+    fn digit(n: u8) -> Option<u8> {
+        match n {
+            b'0'..=b'9' => Some(n - b'0'),
+            b'a'..=b'f' => Some(n - b'a' + 10),
+            b'A'..=b'F' => Some(n - b'A' + 10),
+            _ => None,
+        }
+    }
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut hash = [0; 16];
+    for (i, pair) in bytes.chunks_exact(2).enumerate() {
+        hash[i] = digit(pair[0])? * 16 + digit(pair[1])?;
+    }
+    Some(hash)
+}
+
+pub(crate) fn streaming_session_process_completed_file(
+    nzb_id: i32,
+    resolve: impl FnOnce(&mut LiveCompletedFile) -> Result<(), RepairError>,
+) -> Option<Result<bool, RepairError>> {
+    let mut item = {
+        let mut pending = COMPLETED_LIVE_FILES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let index = pending.iter().position(|item| item.file.nzb_id == nzb_id)?;
+        pending.remove(index)?
+    };
+    Some((|| {
+        resolve(&mut item.file)?;
+        let file = &item.file;
+        let actual = file.name.capacity()
+            + file.hash16k.capacity()
+            + file.base_dir.capacity()
+            + file.path.capacity()
+            + file.accepted.capacity() * std::mem::size_of::<ByteRange>()
+            + 512;
+        if actual as u64 > item._charge.bytes {
+            return Err(live_error(
+                "live completion refresh",
+                "renamed context exceeds admission",
+            ));
+        }
+        if let Some(generation) = item.generation {
+            if active_streaming_session(nzb_id).is_none_or(|entry| entry.generation != generation) {
+                return Err(RepairError::Cancelled);
+            }
+        }
+        let file = &item.file;
+        if file.par_file {
+            if !file.successful {
+                return Ok(false);
+            }
+            // Only initialization is serialized; all source I/O happens after this guard drops.
+            let _starting = STARTING_LIVE_SESSION
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if active_streaming_session(nzb_id).is_none() {
+                streaming_session_start_bounded(
+                    nzb_id,
+                    &file.path,
+                    &file.base_dir,
+                    effective_live_pool_bytes(),
+                )?;
+                return Ok(true);
+            }
+            streaming_session_on_recovery_volume_arrived(nzb_id, &file.path, file.queued_id)
+                .ok_or(RepairError::Cancelled)??;
+            return Ok(false);
+        }
+        let Some(entry) = active_streaming_session(nzb_id) else {
+            return Ok(false);
+        };
+        let id = entry
+            .session
+            .file_id_by_name(&file.name)
+            .or_else(|| {
+                live_hash16k(&file.hash16k).and_then(|hash| entry.session.file_id_by_hash16k(&hash))
+            })
+            .ok_or(RepairError::UnknownFile(FileId([0; 16])))?;
+        let length = entry.file_lengths[&id];
+        if length > i64::MAX as u64 {
+            return Err(live_error(
+                "live completed source",
+                "file length exceeds range geometry",
+            ));
+        }
+        let accepted = if file.successful {
+            vec![ByteRange::new(0, length as i64)]
+        } else {
+            file.accepted.clone()
+        };
+        for range in &accepted {
+            if range.offset < 0
+                || range.size < 0
+                || range
+                    .offset
+                    .checked_add(range.size)
+                    .is_none_or(|end| end as u64 > length)
+            {
+                return Err(live_error(
+                    "live completed source",
+                    "invalid accepted range",
+                ));
+            }
+        }
+        let accepted = normalize_ranges(&accepted);
+        with_live_entry(nzb_id, &entry, |entry| {
+            let mut end = 0;
+            for range in &accepted {
+                if range.offset > end {
+                    let (_, action) = entry.session.on_article_failed_permanently(
+                        &id,
+                        end as u64,
+                        (range.offset - end) as u64,
+                    )?;
+                    entry.unpause(action.as_ref());
+                }
+                end = range.end();
+            }
+            if end < length as i64 {
+                let (_, action) = entry.session.on_article_failed_permanently(
+                    &id,
+                    end as u64,
+                    length - end as u64,
+                )?;
+                entry.unpause(action.as_ref());
+            }
+            Ok(())
+        })?;
+        // Replay one slice at a time and prioritize incoming snapshots between
+        // slices, so a late index's prefix cannot monopolize the operation gate.
+        for range in accepted {
+            let size = entry.session.slice_size();
+            let mut offset = (range.offset as u64).div_ceil(size) * size;
+            while offset < range.end() as u64 {
+                let end = (offset + size).min(length);
+                // Permanently missing bytes make this whole PAR slice an
+                // erasure. Reading its good prefix cannot contribute a row.
+                if end > range.end() as u64 {
+                    break;
+                }
+                if let Some(Err(error)) = streaming_session_drain_articles(nzb_id) {
+                    if matches!(error, RepairError::Cancelled) {
+                        return Err(error);
+                    }
+                }
+                with_live_entry(nzb_id, &entry, |entry| {
+                    reconcile_live_file(
+                        nzb_id,
+                        entry,
+                        id,
+                        &file.path,
+                        &[ByteRange::new(offset as i64, (end - offset) as i64)],
+                    )
+                })?;
+                offset = end;
+            }
+        }
+        Ok(false)
+    })())
+}
+
+const LIVE_METADATA_BYTES: u64 = 8 << 20;
+
+fn live_metadata_charge(
+    total: &mut u64,
+    raw: &par_rs::packet::RawPacket,
+) -> Result<(), RepairError> {
+    use par_rs::packet::PacketType;
+    // Charge owned strings/maps/checksum vectors conservatively, including
+    // duplicate framing. Recovery payloads remain on disk, but their refs count.
+    let payload = match raw.header.kind() {
+        PacketType::RecoverySlice | PacketType::Unknown => 0,
+        _ => raw.header.length,
+    };
+    let next = payload
+        .checked_mul(4)
+        .and_then(|n| n.checked_add(256))
+        .and_then(|n| total.checked_add(n));
+    if next.is_none_or(|bytes| bytes > LIVE_METADATA_BYTES) {
+        return Err(RepairError::StreamingMemoryLimit {
+            context: "live PAR metadata",
+            required_bytes: next.unwrap_or(u64::MAX),
+            limit_bytes: LIVE_METADATA_BYTES,
+        });
+    }
+    *total = next.unwrap();
+    Ok(())
+}
+
+fn load_bounded_live_metadata(path: &Path) -> Result<PacketSet, RepairError> {
+    use par_rs::packet::{parse_packet, FileSource, Packet, PacketIter};
+    let io = |source| RepairError::Io {
+        context: format!("loading bounded PAR metadata {}", path.display()),
+        source,
+    };
+    let source = FileSource::open(path).map_err(io)?;
+    let mut charge = 0;
+    // Inspect framing before authenticating or allocating metadata. Conservative
+    // rejection of malformed framing is safe: ordinary repair remains available.
+    for raw in PacketIter::new(&source, ScanOptions::UNVERIFIED) {
+        live_metadata_charge(&mut charge, &raw.map_err(io)?)?;
+    }
+    let mut set = PacketSet::new();
+    charge = 0;
+    for raw in PacketIter::new(&source, ScanOptions::METADATA) {
+        let raw = raw.map_err(io)?;
+        live_metadata_charge(&mut charge, &raw)?;
+        if raw.header.kind() == par_rs::packet::PacketType::Main {
+            if let Ok(Packet::Main(main)) = parse_packet(&source, &raw, 0).map_err(io)? {
+                set.add(raw.header.set_id, Packet::Main(main));
+                break;
+            }
+        }
+    }
+    if set.main.is_none() {
+        return Err(RepairError::NoMainPacket);
+    }
+    charge = 0;
+    for raw in PacketIter::new(&source, ScanOptions::METADATA) {
+        let raw = raw.map_err(io)?;
+        live_metadata_charge(&mut charge, &raw)?;
+        if let Ok(packet) = parse_packet(&source, &raw, 0).map_err(io)? {
+            set.add(raw.header.set_id, packet);
+        }
+    }
+    Ok(set)
+}
+
+/// Starts bounded download-time accumulation. Insufficient admission leaves normal repair available.
+pub fn streaming_session_start_bounded(
+    nzb_id: i32,
+    par2_path: &Path,
+    base_dir: &Path,
+    effective_pool_bytes: u64,
+) -> Result<(), RepairError> {
+    let mut budget = acquire_session_budget(LIVE_METADATA_BYTES, effective_pool_bytes)?;
+    let set = load_bounded_live_metadata(par2_path)?;
+    let slice_size = set
+        .main
+        .as_ref()
+        .ok_or(RepairError::NoMainPacket)?
+        .slice_size;
+    let limits =
+        resources(slice_size, effective_pool_bytes).ok_or(RepairError::StreamingMemoryLimit {
+            context: "bounded live PAR startup",
+            required_bytes: slice_size,
+            limit_bytes: effective_pool_bytes.min(128 * 1024 * 1024),
+        })?;
+    if !budget.resize(limits.reservation_bytes, effective_pool_bytes) {
+        return Err(RepairError::StreamingMemoryLimit {
+            context: "shared live PAR reservation",
+            required_bytes: limits.reservation_bytes,
+            limit_bytes: effective_pool_bytes,
+        });
+    }
+    let entry = build_streaming_session(&set, base_dir, limits.options, budget)?;
+    entry.session.on_recovery_volume_arrived(par2_path, None)?;
+    *entry.par_name.lock().unwrap_or_else(|e| e.into_inner()) = par2_path
+        .file_name()
+        .map(par_rs::filenames::os_str_bytes)
+        .unwrap_or_default();
+    install_streaming_session(nzb_id, entry);
+    Ok(())
+}
+
+fn options_reservation(options: &SessionOptions) -> Result<u64, RepairError> {
+    options
+        .max_syndrome_bytes
+        .checked_mul(2)
+        .and_then(|n| options.max_working_bytes.checked_mul(5)?.checked_add(n))
+        .and_then(|n| n.checked_add(options.max_staging_bytes))
+        .and_then(|n| n.checked_add(options.solve_mem_limit_bytes.max(16 << 20).checked_mul(2)?))
+        .and_then(|n| n.checked_add(8 << 20))
+        .ok_or_else(|| live_error("live PAR reservation", "byte count overflow"))
+}
+
+/// Starts or replaces a session with explicit limits, charged to the shared PAR pool.
 pub fn streaming_session_start(
     nzb_id: i32,
     par2_path: &Path,
     base_dir: &Path,
     options: SessionOptions,
 ) -> Result<(), RepairError> {
+    let budget =
+        acquire_session_budget(options_reservation(&options)?, effective_live_pool_bytes())?;
     let set = load_par2_set(par2_path)?;
-    let session = StreamingParSession::new(&set, base_dir, options)?;
-    let mut map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    map.insert(
-        nzb_id,
-        ActiveStreamingSession {
-            session,
-            pending_unpause_ids: Vec::new(),
-        },
-    );
+    let entry = build_streaming_session(&set, base_dir, options, budget)?;
+    entry.session.on_recovery_volume_arrived(par2_path, None)?;
+    *entry.par_name.lock().unwrap_or_else(|e| e.into_inner()) = par2_path
+        .file_name()
+        .map(par_rs::filenames::os_str_bytes)
+        .unwrap_or_default();
+    install_streaming_session(nzb_id, entry);
     Ok(())
 }
 
-/// Starts or replaces a live [`StreamingParSession`] for `nzb_id` from in-memory `.par2` bytes.
+/// Starts a session from metadata bytes, charged to the shared PAR pool.
 pub fn streaming_session_start_bytes(
     nzb_id: i32,
     par2_bytes: &[u8],
     base_dir: &Path,
     options: SessionOptions,
 ) -> Result<(), RepairError> {
+    let budget =
+        acquire_session_budget(options_reservation(&options)?, effective_live_pool_bytes())?;
     let set = load_par2_set_bytes(par2_bytes).map_err(|source| RepairError::Io {
-        context: "loading in-memory par2 bytes".to_string(),
+        context: "loading in-memory par2 bytes".to_owned(),
         source,
     })?;
-    let session = StreamingParSession::new(&set, base_dir, options)?;
-    let mut map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    map.insert(
-        nzb_id,
-        ActiveStreamingSession {
-            session,
-            pending_unpause_ids: Vec::new(),
-        },
-    );
+    let entry = build_streaming_session(&set, base_dir, options, budget)?;
+    install_streaming_session(nzb_id, entry);
     Ok(())
+}
+
+/// Cancels the current generation permanently; in-flight owners retain their reservation.
+pub fn streaming_session_cancel(nzb_id: i32) {
+    if let Some(entry) = active_streaming_session(nzb_id) {
+        entry.session.cancel();
+    }
+}
+
+/// Last operation failure for the current generation.
+pub fn streaming_session_last_error(nzb_id: i32) -> Option<String> {
+    active_streaming_session(nzb_id)?
+        .last_error
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+pub(crate) fn streaming_session_par_filename(nzb_id: i32) -> Option<Vec<u8>> {
+    let entry = active_streaming_session(nzb_id)?;
+    let name = entry
+        .par_name
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    Some(name)
+}
+
+pub(crate) fn streaming_session_source_length(
+    nzb_id: i32,
+    name: &[u8],
+    hash16k: &[u8],
+) -> Option<u64> {
+    let entry = active_streaming_session(nzb_id)?;
+    let id = entry.session.file_id_by_name(name).or_else(|| {
+        live_hash16k(hash16k).and_then(|hash| entry.session.file_id_by_hash16k(&hash))
+    })?;
+    entry.file_lengths.get(&id).copied()
+}
+
+/// Logical successful I/O, including bounded source reads made by caller catch-up.
+pub fn streaming_session_io_stats(nzb_id: i32) -> Option<LiveIoStats> {
+    let entry = active_streaming_session(nzb_id)?;
+    let mut stats = entry.session.io_stats();
+    stats.source_bytes_read = stats
+        .source_bytes_read
+        .saturating_add(entry.catchup_source_bytes.load(Ordering::Relaxed));
+    Some(stats)
+}
+
+/// Replays only accepted, committed ranges. The caller must first establish its flush barrier.
+/// Already verified slices are skipped; neither sparse holes nor preallocated bytes are accepted.
+pub fn streaming_session_reconcile_file(
+    nzb_id: i32,
+    file_id: FileId,
+    source_path: &Path,
+    accepted: &[ByteRange],
+) -> Option<Result<ArticleOutcome, RepairError>> {
+    with_live_session(nzb_id, |entry| {
+        reconcile_live_file(nzb_id, entry, file_id, source_path, accepted)
+    })
+}
+
+struct CallerPayloadCharge<'a> {
+    entry: &'a ActiveStreamingSession,
+    bytes: u64,
+}
+impl<'a> CallerPayloadCharge<'a> {
+    fn acquire(entry: &'a ActiveStreamingSession, bytes: u64) -> Result<Self, RepairError> {
+        let mut queue = entry.articles.lock().unwrap_or_else(|e| e.into_inner());
+        let next = queue.bytes.checked_add(bytes);
+        if next.is_none_or(|n| n > entry.article_byte_limit) {
+            return Err(RepairError::StreamingMemoryLimit {
+                context: "live replay payload",
+                required_bytes: next.unwrap_or(u64::MAX),
+                limit_bytes: entry.article_byte_limit,
+            });
+        }
+        queue.bytes = next.unwrap();
+        Ok(Self { entry, bytes })
+    }
+}
+impl Drop for CallerPayloadCharge<'_> {
+    fn drop(&mut self) {
+        self.entry
+            .articles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .bytes -= self.bytes;
+    }
+}
+
+fn reconcile_live_file(
+    nzb_id: i32,
+    entry: &ActiveStreamingSession,
+    file_id: FileId,
+    source_path: &Path,
+    accepted: &[ByteRange],
+) -> Result<ArticleOutcome, RepairError> {
+    let length = *entry
+        .file_lengths
+        .get(&file_id)
+        .ok_or(RepairError::UnknownFile(file_id))?;
+    for range in accepted {
+        if range.offset < 0
+            || range.size < 0
+            || range
+                .offset
+                .checked_add(range.size)
+                .is_none_or(|end| end as u64 > length)
+        {
+            return Err(live_error("live PAR catch-up", "invalid accepted range"));
+        }
+    }
+    let mut source = std::fs::File::open(source_path).map_err(|source| RepairError::Io {
+        context: format!("opening live catch-up {}", source_path.display()),
+        source,
+    })?;
+    let mut outcome = ArticleOutcome::default();
+    let slice_size = entry.session.slice_size();
+    for range in accepted {
+        let mut offset = range.offset as u64;
+        let end = offset + range.size as u64;
+        while offset < end {
+            ensure_current_generation(nzb_id, entry)?;
+            let slice = offset / slice_size;
+            let slice_end = ((slice + 1) * slice_size).min(length);
+            let chunk_end = slice_end.min(end);
+            if matches!(
+                entry.session.slice_state(&file_id, slice as usize)?,
+                SliceState::VerifiedGood
+            ) {
+                offset = chunk_end;
+                continue;
+            }
+            let count = (chunk_end - offset) as usize;
+            let _charge = CallerPayloadCharge::acquire(entry, count as u64)?;
+            let mut buffer = vec![0u8; count];
+            source
+                .seek(SeekFrom::Start(offset))
+                .map_err(|source| RepairError::Io {
+                    context: "seeking live catch-up".to_owned(),
+                    source,
+                })?;
+            let mut read = 0;
+            while read < count {
+                ensure_current_generation(nzb_id, entry)?;
+                let n = source
+                    .read(&mut buffer[read..count.min(read + 64 * 1024)])
+                    .map_err(|source| RepairError::Io {
+                        context: "reading live catch-up".to_owned(),
+                        source,
+                    })?;
+                if n == 0 {
+                    return Err(live_error(
+                        "live PAR catch-up",
+                        "unexpected end of committed source",
+                    ));
+                }
+                entry
+                    .catchup_source_bytes
+                    .fetch_add(n as u64, Ordering::Relaxed);
+                read += n;
+            }
+            let next = entry.session.on_article_finished_memory_only(
+                &file_id,
+                offset,
+                &buffer,
+                crc32fast::hash(&buffer),
+            )?;
+            entry.unpause(next.unpause.as_ref());
+            outcome.events.extend(next.events);
+            if next.unpause.is_some() {
+                outcome.unpause = next.unpause;
+            }
+            offset += count as u64;
+        }
+    }
+    Ok(outcome)
 }
 
 /// Registers a queued `.vol*.par2` volume with the active [`StreamingParSession`] for `nzb_id`.
@@ -150,8 +1129,7 @@ pub fn streaming_session_register_queued_volume(
     blocks: i32,
     paused: bool,
 ) -> bool {
-    let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(entry) = map.get(&nzb_id) else {
+    let Some(entry) = active_streaming_session(nzb_id) else {
         return false;
     };
     entry.session.register_queued_volume(QueuedVolume {
@@ -164,14 +1142,16 @@ pub fn streaming_session_register_queued_volume(
 
 /// Resolves a PAR2 [`FileId`] by local filename in the active [`StreamingParSession`].
 pub fn streaming_session_file_id_by_name(nzb_id: i32, name: &[u8]) -> Option<FileId> {
-    let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    map.get(&nzb_id)?.session.file_id_by_name(name)
+    active_streaming_session(nzb_id)?
+        .session
+        .file_id_by_name(name)
 }
 
 /// Resolves a PAR2 [`FileId`] by 16 KiB MD5 hash in the active [`StreamingParSession`].
 pub fn streaming_session_file_id_by_hash16k(nzb_id: i32, hash_16k: &[u8; 16]) -> Option<FileId> {
-    let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    map.get(&nzb_id)?.session.file_id_by_hash16k(hash_16k)
+    active_streaming_session(nzb_id)?
+        .session
+        .file_id_by_hash16k(hash_16k)
 }
 
 /// Feeds a completed article by [`FileId`] into the active [`StreamingParSession`].
@@ -183,24 +1163,16 @@ pub fn streaming_session_on_article_finished(
     crc32: u32,
     bytes: Option<&[u8]>,
 ) -> Option<Result<ArticleOutcome, RepairError>> {
-    let mut map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = map.get_mut(&nzb_id)?;
-    let res = entry
-        .session
-        .on_article_finished(file_id, offset, size, crc32, bytes);
-    if let Ok(ref outcome) = res {
-        if let Some(ref act) = outcome.unpause {
-            for &vid in &act.volume_ids_to_unpause {
-                if !entry.pending_unpause_ids.contains(&vid) {
-                    entry.pending_unpause_ids.push(vid);
-                }
-            }
-        }
-    }
-    Some(res)
+    with_live_session(nzb_id, |entry| {
+        let outcome = entry
+            .session
+            .on_article_finished(file_id, offset, size, crc32, bytes)?;
+        entry.unpause(outcome.unpause.as_ref());
+        Ok(outcome)
+    })
 }
 
-/// Feeds a completed article by filename into the active [`StreamingParSession`].
+/// Feeds a completed article by filename.
 pub fn streaming_session_on_article_finished_by_name(
     nzb_id: i32,
     name: &[u8],
@@ -209,65 +1181,45 @@ pub fn streaming_session_on_article_finished_by_name(
     crc32: u32,
     bytes: Option<&[u8]>,
 ) -> Option<Result<ArticleOutcome, RepairError>> {
-    let mut map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = map.get_mut(&nzb_id)?;
-    let res = entry
-        .session
-        .on_article_finished_by_name(name, offset, size, crc32, bytes);
-    if let Ok(ref outcome) = res {
-        if let Some(ref act) = outcome.unpause {
-            for &vid in &act.volume_ids_to_unpause {
-                if !entry.pending_unpause_ids.contains(&vid) {
-                    entry.pending_unpause_ids.push(vid);
-                }
-            }
-        }
-    }
-    Some(res)
+    with_live_session(nzb_id, |entry| {
+        let outcome = entry
+            .session
+            .on_article_finished_by_name(name, offset, size, crc32, bytes)?;
+        entry.unpause(outcome.unpause.as_ref());
+        Ok(outcome)
+    })
 }
 
-/// Marks an article permanently failed by [`FileId`] and returns `(events, unpause_action)`.
+/// Marks a permanently failed article by file ID.
 pub fn streaming_session_on_article_failed_permanently(
     nzb_id: i32,
     file_id: &FileId,
     offset: u64,
     size: u64,
 ) -> Option<Result<(Vec<SliceEvent>, Option<UnpauseAction>), RepairError>> {
-    let mut map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = map.get_mut(&nzb_id)?;
-    let res = entry
-        .session
-        .on_article_failed_permanently(file_id, offset, size);
-    if let Ok((_, Some(ref act))) = res {
-        for &vid in &act.volume_ids_to_unpause {
-            if !entry.pending_unpause_ids.contains(&vid) {
-                entry.pending_unpause_ids.push(vid);
-            }
-        }
-    }
-    Some(res)
+    with_live_session(nzb_id, |entry| {
+        let outcome = entry
+            .session
+            .on_article_failed_permanently(file_id, offset, size)?;
+        entry.unpause(outcome.1.as_ref());
+        Ok(outcome)
+    })
 }
 
-/// Marks an article permanently failed by filename and returns `(events, unpause_action)`.
+/// Marks a permanently failed article by filename.
 pub fn streaming_session_on_article_failed_permanently_by_name(
     nzb_id: i32,
     name: &[u8],
     offset: u64,
     size: u64,
 ) -> Option<Result<(Vec<SliceEvent>, Option<UnpauseAction>), RepairError>> {
-    let mut map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = map.get_mut(&nzb_id)?;
-    let res = entry
-        .session
-        .on_article_failed_permanently_by_name(name, offset, size);
-    if let Ok((_, Some(ref act))) = res {
-        for &vid in &act.volume_ids_to_unpause {
-            if !entry.pending_unpause_ids.contains(&vid) {
-                entry.pending_unpause_ids.push(vid);
-            }
-        }
-    }
-    Some(res)
+    with_live_session(nzb_id, |entry| {
+        let outcome = entry
+            .session
+            .on_article_failed_permanently_by_name(name, offset, size)?;
+        entry.unpause(outcome.1.as_ref());
+        Ok(outcome)
+    })
 }
 
 /// Registers a newly downloaded `.vol*.par2` recovery volume with the active [`StreamingParSession`].
@@ -276,18 +1228,22 @@ pub fn streaming_session_on_recovery_volume_arrived(
     path: &Path,
     queued_id: Option<u64>,
 ) -> Option<Result<usize, RepairError>> {
-    let mut map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = map.get_mut(&nzb_id)?;
-    if let Some(id) = queued_id {
-        entry.pending_unpause_ids.retain(|&x| x != id);
-    }
-    Some(entry.session.on_recovery_volume_arrived(path, queued_id))
+    with_live_session(nzb_id, |entry| {
+        let count = entry.session.on_recovery_volume_arrived(path, queued_id)?;
+        if let Some(id) = queued_id {
+            entry
+                .pending_unpause_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|&x| x != id);
+        }
+        Ok(count)
+    })
 }
 
 /// Polls the live status of the [`StreamingParSession`] for `nzb_id`.
 pub fn streaming_session_status(nzb_id: i32) -> Option<LiveStatus> {
-    let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    Some(map.get(&nzb_id)?.session.status())
+    Some(active_streaming_session(nzb_id)?.session.status())
 }
 
 /// Live par2 cutover: when every slice that is damaged or has not arrived yet is covered by
@@ -299,11 +1255,12 @@ pub fn streaming_session_early_repair(
     nzb_id: i32,
     target_names: &[Vec<u8>],
 ) -> Option<Result<(EarlyRepairReport, Vec<(Vec<u8>, bool)>), RepairError>> {
-    // Clone the session out of the registry: the solve must not block article feeding.
-    let session = {
-        let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-        map.get(&nzb_id)?.session.clone()
-    };
+    let entry = active_streaming_session(nzb_id)?;
+    let _operation = entry.operation.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(error) = ensure_current_generation(nzb_id, &entry) {
+        return Some(Err(error));
+    }
+    let session = &entry.session;
     if !session.status().early_cutover_possible {
         return None;
     }
@@ -318,25 +1275,38 @@ pub fn streaming_session_early_repair(
     if ids.is_empty() {
         return None;
     }
-    Some(session.repair_available_targets_now(&ids).map(|report| {
-        let done = names
-            .into_iter()
-            .zip(ids.iter())
-            .map(|(name, id)| {
-                let ok = report.files.iter().any(|(fid, st, md5_ok)| {
-                    fid == id && *md5_ok && matches!(st, VolumeStatus::CompleteAndVerified)
-                });
-                (name, ok)
-            })
-            .collect();
-        (report, done)
-    }))
+    Some(
+        entry.record(
+            session
+                .repair_available_targets_now(&ids)
+                .and_then(|report| {
+                    ensure_current_generation(nzb_id, &entry)?;
+                    let done = names
+                        .into_iter()
+                        .zip(ids.iter())
+                        .map(|(name, id)| {
+                            let ok = report.files.iter().any(|(fid, st, md5_ok)| {
+                                fid == id
+                                    && *md5_ok
+                                    && matches!(st, VolumeStatus::CompleteAndVerified)
+                            });
+                            (name, ok)
+                        })
+                        .collect();
+                    Ok((report, done))
+                }),
+        ),
+    )
 }
 
 /// Returns `blocks_needed_now` (`status().needed_recovery_blocks`) for the active [`StreamingParSession`].
 pub fn streaming_session_blocks_needed_now(nzb_id: i32) -> Option<i64> {
-    let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    Some(map.get(&nzb_id)?.session.status().needed_recovery_blocks)
+    Some(
+        active_streaming_session(nzb_id)?
+            .session
+            .status()
+            .needed_recovery_blocks,
+    )
 }
 
 /// Returns the [`VolumeStatus`] of `file_id` in the active [`StreamingParSession`].
@@ -344,8 +1314,7 @@ pub fn streaming_session_volume_status(
     nzb_id: i32,
     file_id: &FileId,
 ) -> Option<Result<VolumeStatus, RepairError>> {
-    let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    Some(map.get(&nzb_id)?.session.volume_status(file_id))
+    with_live_session(nzb_id, |entry| entry.session.volume_status(file_id))
 }
 
 /// Repairs the specified target files immediately using streamed syndromes (`early_cutover_possible`).
@@ -353,9 +1322,9 @@ pub fn streaming_session_repair_available_targets_now(
     nzb_id: i32,
     target_file_ids: &[FileId],
 ) -> Option<Result<EarlyRepairReport, RepairError>> {
-    let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = map.get(&nzb_id)?;
-    Some(entry.session.repair_available_targets_now(target_file_ids))
+    with_live_session(nzb_id, |entry| {
+        entry.session.repair_available_targets_now(target_file_ids)
+    })
 }
 
 /// Splices candidate bytes into `hole_range` of `disk_file` for `DirectUnpack` and returns verified slice indices.
@@ -366,13 +1335,11 @@ pub fn streaming_session_try_splice_live_slice(
     candidate_bytes: &[u8],
     disk_file: &Path,
 ) -> Option<Result<Vec<usize>, RepairError>> {
-    let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = map.get(&nzb_id)?;
-    Some(
+    with_live_session(nzb_id, |entry| {
         entry
             .session
-            .try_splice_live_slice(file_id, hole_range, candidate_bytes, disk_file),
-    )
+            .try_splice_live_slice(file_id, hole_range, candidate_bytes, disk_file)
+    })
 }
 
 /// Takes up to `max_ids` pending volume IDs recommended for unpausing by
@@ -381,12 +1348,15 @@ pub fn streaming_session_take_unpause_ids_bounded(nzb_id: i32, max_ids: usize) -
     if max_ids == 0 {
         return Vec::new();
     }
-    let mut map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(entry) = map.get_mut(&nzb_id) else {
+    let Some(entry) = active_streaming_session(nzb_id) else {
         return Vec::new();
     };
-    let take_count = entry.pending_unpause_ids.len().min(max_ids);
-    entry.pending_unpause_ids.drain(..take_count).collect()
+    let mut pending = entry
+        .pending_unpause_ids
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let take_count = pending.len().min(max_ids);
+    pending.drain(..take_count).collect()
 }
 
 /// Takes any pending volume IDs recommended for unpausing by `on_article_failed_permanently`.
@@ -402,8 +1372,13 @@ pub fn streaming_session_has_session(nzb_id: i32) -> bool {
 
 /// Drops the [`StreamingParSession`] for `nzb_id`.
 pub fn streaming_session_forget(nzb_id: i32) {
-    let mut map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    map.remove(&nzb_id);
+    let old = STREAMING_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&nzb_id);
+    if let Some(old) = old {
+        old.session.cancel();
+    }
 }
 
 // =============================================================================================

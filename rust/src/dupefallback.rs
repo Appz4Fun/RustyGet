@@ -2005,11 +2005,54 @@ pub(crate) fn par_damage_file_completed_host(
         &holes,
     );
 
+    if !is_par
+        && !filename.is_empty()
+        && decoded_size > 0
+        && crate::parchecker::streaming_session_has_session(nzb.id)
+    {
+        // The file is complete on disk now: let the live par2 session verify the slices it
+        // has not seen in memory (articles fetched before the session started, slices that
+        // left the article cache) and mark the holes as damaged, so it knows exactly how
+        // many recovery blocks the collection needs.
+        for a in articles {
+            if a.status == crate::queuesubsys_host::AI_FINISHED
+                && a.segment_size > 0
+                && a.segment_offset >= 0
+            {
+                let _ = crate::parchecker::streaming_session_on_article_finished_by_name(
+                    nzb.id,
+                    filename,
+                    a.segment_offset as u64,
+                    a.segment_size as u64,
+                    a.crc,
+                    None,
+                );
+            }
+        }
+        for h in &holes {
+            if h.size > 0 && h.offset >= 0 {
+                let _ = crate::parchecker::streaming_session_on_article_failed_permanently_by_name(
+                    nzb.id,
+                    filename,
+                    h.offset as u64,
+                    h.size as u64,
+                );
+            }
+        }
+    }
+
     if is_par && failed_plus_missed == 0 && !filename.is_empty() {
+        // `filename` is relative to the download's directory.
+        let par_full = [
+            nzb.dest_dir.as_slice(),
+            &[crate::paths::PATH_SEPARATOR],
+            filename,
+        ]
+        .concat();
         if !crate::parchecker::streaming_session_has_session(nzb.id) {
             if crate::parchecker::streaming_session_start(
                 nzb.id,
-                crate::fsops::path(filename),
+                crate::fsops::path(&par_full),
                 crate::fsops::path(&nzb.dest_dir),
                 crate::parchecker::SessionOptions::default(),
             )
@@ -2048,7 +2091,7 @@ pub(crate) fn par_damage_file_completed_host(
         } else {
             let _ = crate::parchecker::streaming_session_on_recovery_volume_arrived(
                 nzb.id,
-                crate::fsops::path(filename),
+                crate::fsops::path(&par_full),
                 Some(file.id as u64),
             );
         }
@@ -2101,6 +2144,84 @@ pub(crate) fn par_damage_judge_host(
         total_bytes: raw.total_bytes,
         projected_blocks: raw.projected_blocks,
     }
+}
+
+/// Live par2: as soon as a completed file is known to be damaged, the recovery volumes that
+/// cover the damage seen so far are unpaused, so they download next to the rest of the
+/// collection instead of after it. Returns the number of volumes unpaused.
+#[cfg(unix)]
+pub(crate) fn unpause_pars_for_damage_host(
+    host: &crate::queuesubsys_host::QueueSubsysHost,
+    nzb: &crate::queuesubsys_host::NzbSnap,
+) -> usize {
+    let verdict = par_damage_judge_host(host, nzb);
+    if !verdict.known || verdict.damaged_blocks <= 0 || verdict.block_size == 0 {
+        return 0;
+    }
+    let mut have: i64 = 0;
+    let mut paused: Vec<(usize, i32, Vec<u8>)> = Vec::new();
+    let flen = host.nzb_file_len(nzb.ptr);
+    for i in 0..flen {
+        let f = host.file_snap(host.nzb_file_at(nzb.ptr, i));
+        if f.deleted {
+            continue;
+        }
+        let Some((_, parsed)) =
+            crate::parparser::parse_par_filename(&f.filename, f.filename_confirmed)
+        else {
+            continue;
+        };
+        let blocks =
+            crate::pardamage::calc_queued_volume_blocks(parsed, f.size, verdict.block_size);
+        if blocks <= 0 {
+            continue;
+        }
+        if f.paused {
+            paused.push((f.ptr, blocks, f.filename.clone()));
+        } else {
+            have += i64::from(blocks);
+        }
+    }
+    for cf in host.nzb_completed_files(nzb.ptr) {
+        if cf.status == crate::queuesubsys_host::CF_FAILURE {
+            continue;
+        }
+        if let Some((_, blocks)) = crate::parparser::parse_par_filename(&cf.filename, true) {
+            if blocks > 0 {
+                have += i64::from(blocks);
+            }
+        }
+    }
+    let need = i64::from(verdict.damaged_blocks) - have;
+    if need <= 0 || paused.is_empty() {
+        return 0;
+    }
+    paused.sort_by_key(|p| p.1);
+    let counts: Vec<i32> = paused.iter().map(|p| p.1).collect();
+    let total: i64 = counts.iter().map(|&c| i64::from(c)).sum();
+    let selected: Vec<usize> = if total <= need {
+        (0..paused.len()).collect()
+    } else {
+        crate::postrepair::select_more_pars(&counts, need as i32).0
+    };
+    for &idx in &selected {
+        let (ptr, blocks, ref name) = paused[idx];
+        host.file_set_int(ptr, crate::queuesubsys_host::FILE_INT_PAUSED, 0);
+        host.file_set_int(ptr, crate::queuesubsys_host::FILE_INT_EXTRA_PRIORITY, 1);
+        let mut msg = b"Unpausing ".to_vec();
+        msg.extend_from_slice(&nzb.name);
+        msg.push(crate::paths::PATH_SEPARATOR);
+        msg.extend_from_slice(name);
+        msg.extend_from_slice(
+            format!(
+                " for live par-recovery ({blocks} block(s), {} damaged so far)",
+                verdict.damaged_blocks
+            )
+            .as_bytes(),
+        );
+        host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_INFO, &msg);
+    }
+    selected.len()
 }
 
 #[cfg(unix)]

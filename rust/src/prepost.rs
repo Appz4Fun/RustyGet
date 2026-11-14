@@ -1771,6 +1771,12 @@ impl NzbgetRsPrePostProcessor {
         let ps = host.post_snap(post_ptr);
         let nzb = host.nzb_snap(ps.nzb_ptr, false);
 
+        if !nzb.has_unpack_thread {
+            // No direct unpack is paused on this download: its damaged volumes are repaired
+            // and unpacked by the stages below, nothing may stay on hold.
+            crate::postproc::direct_unpack_forget_holds(nzb.id);
+        }
+
         if ps.start_time == 0 {
             host.post_set_start_time(post_ptr, opts.cur_time);
         }

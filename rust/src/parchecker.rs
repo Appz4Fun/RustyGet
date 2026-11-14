@@ -290,6 +290,49 @@ pub fn streaming_session_status(nzb_id: i32) -> Option<LiveStatus> {
     Some(map.get(&nzb_id)?.session.status())
 }
 
+/// Live par2 cutover: when every slice that is damaged or has not arrived yet is covered by
+/// the recovery blocks already downloaded, repairs the named target files in place right now,
+/// before the download finishes. Returns `None` when there is no session, the cutover is not
+/// possible yet, or none of the names belongs to the set. The result lists, per target name,
+/// whether the file is complete and verified afterwards.
+pub fn streaming_session_early_repair(
+    nzb_id: i32,
+    target_names: &[Vec<u8>],
+) -> Option<Result<(EarlyRepairReport, Vec<(Vec<u8>, bool)>), RepairError>> {
+    // Clone the session out of the registry: the solve must not block article feeding.
+    let session = {
+        let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&nzb_id)?.session.clone()
+    };
+    if !session.status().early_cutover_possible {
+        return None;
+    }
+    let mut ids = Vec::new();
+    let mut names = Vec::new();
+    for name in target_names {
+        if let Some(id) = session.file_id_by_name(name) {
+            ids.push(id);
+            names.push(name.clone());
+        }
+    }
+    if ids.is_empty() {
+        return None;
+    }
+    Some(session.repair_available_targets_now(&ids).map(|report| {
+        let done = names
+            .into_iter()
+            .zip(ids.iter())
+            .map(|(name, id)| {
+                let ok = report.files.iter().any(|(fid, st, md5_ok)| {
+                    fid == id && *md5_ok && matches!(st, VolumeStatus::CompleteAndVerified)
+                });
+                (name, ok)
+            })
+            .collect();
+        (report, done)
+    }))
+}
+
 /// Returns `blocks_needed_now` (`status().needed_recovery_blocks`) for the active [`StreamingParSession`].
 pub fn streaming_session_blocks_needed_now(nzb_id: i32) -> Option<i64> {
     let map = STREAMING_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());

@@ -268,6 +268,17 @@ pub const PROJECTED_FAILURE_SAMPLE: i32 = 200;
 pub const SLOW_PROBE_SEC: i32 = 10;
 pub const PARK_BELOW_CRITICAL_SAMPLE: i32 = 1000;
 
+/// A download is failing in bulk: at least `DUPE_MASS_FAILURE_MIN` articles and
+/// `DUPE_MASS_FAILURE_PERCENT` percent of the collection could not be fetched. Below that,
+/// option DupeBorrowFirst repairs from duplicates instead of failing over.
+pub const DUPE_MASS_FAILURE_MIN: i32 = 20;
+pub const DUPE_MASS_FAILURE_PERCENT: i64 = 2;
+
+pub fn dupe_mass_failure(total_articles: i32, failed_articles: i32) -> bool {
+    failed_articles >= DUPE_MASS_FAILURE_MIN
+        && (failed_articles as i64) * 100 >= (total_articles as i64) * DUPE_MASS_FAILURE_PERCENT
+}
+
 /// `QueueCoordinator::DownloadHopeless` (`QueueCoordinator.cpp`).
 pub fn download_hopeless(total: i32, current_success: i32, current_failed: i32) -> bool {
     let tried = current_success + current_failed;
@@ -3252,6 +3263,40 @@ impl NzbgetRsQueueCoordinator {
                 0
             };
             host.nzb_push_completed_file(nzb.ptr, file.ptr, &filename, file_status, file_crc);
+
+            // Live par2: fetch the recovery volumes for the damage known so far. Checked again
+            // when a par2 file completes, because the damage may predate the par2 index.
+            if completed
+                && !is_side
+                && (is_incomplete || file.par_file)
+                && opts.par_check != crate::queuesubsys_host::PC_MANUAL
+                && crate::pardamage::has_damage(nzb.id)
+            {
+                let latest_nzb = host.nzb_snap(nzb.ptr, false);
+                if crate::dupefallback::unpause_pars_for_damage_host(host, &latest_nzb) > 0 {
+                    host.nzb_set_int(nzb.ptr, crate::queuesubsys_host::NZB_INT_CHANGED, 1);
+                }
+            }
+
+            // Live par2 cutover for a paused direct unpack: repair the held volumes as soon as
+            // the recovery blocks on disk cover all damaged and not yet downloaded slices.
+            if completed && crate::postproc::direct_unpack_has_holds(nzb.id) {
+                if let Some(st) = crate::parchecker::streaming_session_status(nzb.id) {
+                    let mut msg = b"Live par2 for ".to_vec();
+                    msg.extend_from_slice(&nzb.name);
+                    let tail = format!(
+                        ": {} verified, {} damaged, {} not arrived of {} slice(s), {} recovery block(s) ready",
+                        st.verified,
+                        st.damaged,
+                        st.unarrived + st.partially_arrived,
+                        st.total,
+                        st.ready_recovery
+                    );
+                    msg.extend_from_slice(tail.as_bytes());
+                    host.nzb_print_message(nzb.ptr, crate::queuesubsys_host::MK_DETAIL, &msg);
+                }
+                crate::postproc::direct_unpack_try_live_par_repair(nzb.id, &nzb.name);
+            }
         }
 
         if opts.direct_rename {
@@ -3870,12 +3915,21 @@ impl NzbgetRsQueueCoordinator {
             nzb.health
         };
 
+        // Option DupeBorrowFirst: light damage is repaired from the duplicates (live stream
+        // repair, then post-processing) instead of replacing the download. Only a download
+        // that is failing in bulk is replaced while it downloads.
+        let light_damage = crate::options::dupe_borrow_first()
+            && opts.dupe_article_fallback >= crate::queuesubsys_host::DAF_STREAM
+            && !dupe_mass_failure(nzb.total_articles, failed);
+
         if let Some((_, backup_nzb)) = backup {
-            if crate::dupecoord::dupe_failover_warranted_inline(
-                nzb.dupe_score,
-                effective_failover_health,
-                backup_nzb.dupe_score,
-            ) {
+            if !light_damage
+                && crate::dupecoord::dupe_failover_warranted_inline(
+                    nzb.dupe_score,
+                    effective_failover_health,
+                    backup_nzb.dupe_score,
+                )
+            {
                 let mut msg = b"Failing over ".to_vec();
                 msg.extend_from_slice(&nzb.name);
                 msg.extend_from_slice(b" to duplicate ");
@@ -5198,6 +5252,16 @@ fn save_partial_state_host(host: &crate::queuesubsys_host::QueueSubsysHost, file
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dupe_mass_failure_thresholds() {
+        assert!(!dupe_mass_failure(1000, 3));
+        assert!(!dupe_mass_failure(1000, 19));
+        assert!(dupe_mass_failure(1000, 20));
+        assert!(!dupe_mass_failure(100_000, 500));
+        assert!(dupe_mass_failure(100_000, 2000));
+        assert!(!dupe_mass_failure(10, 5));
+    }
+
     use super::*;
 
     #[test]

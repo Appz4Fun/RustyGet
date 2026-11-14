@@ -2827,6 +2827,8 @@ struct DirectUnpackHoldState {
     awaiting_repair: bool,
     /// The repair failed: the unpack thread gives up.
     abandoned: bool,
+    /// A live par2 repair of the held volumes is running on its helper thread.
+    live_repair_running: bool,
 }
 
 static DIRECT_UNPACK_HOLDS: std::sync::LazyLock<
@@ -2901,6 +2903,90 @@ pub(crate) fn direct_unpack_release_all(nzb_id: i32) {
     }
 }
 
+/// Live par2 repair for a paused direct unpack: when the recovery blocks already downloaded
+/// cover everything that is damaged or has not arrived yet, the held volumes are repaired on
+/// a helper thread before the download finishes and released, so extraction continues.
+/// Cheap to call often; at most one repair runs per download.
+#[cfg(unix)]
+pub(crate) fn direct_unpack_try_live_par_repair(nzb_id: i32, nzb_name: &[u8]) {
+    let held: Vec<Vec<u8>> = {
+        let mut map = direct_unpack_holds();
+        let Some(st) = map.get_mut(&nzb_id) else {
+            return;
+        };
+        if st.held.is_empty() || st.live_repair_running {
+            return;
+        }
+        if !crate::parchecker::streaming_session_status(nzb_id)
+            .is_some_and(|status| status.early_cutover_possible)
+        {
+            return;
+        }
+        st.live_repair_running = true;
+        st.held.clone()
+    };
+    let nzb_name = nzb_name.to_vec();
+    let spawned = std::thread::Builder::new()
+        .name("live-par-repair".to_string())
+        .spawn(move || {
+            let names: Vec<Vec<u8>> = held
+                .iter()
+                .map(|p| hold_path_filename(p).to_vec())
+                .collect();
+            let started = std::time::Instant::now();
+            let outcome = crate::parchecker::streaming_session_early_repair(nzb_id, &names);
+            let mut msg = b"Live par-repair for ".to_vec();
+            msg.extend_from_slice(&nzb_name);
+            let kind = match outcome {
+                Some(Ok((report, done))) => {
+                    let mut released = 0usize;
+                    for (name, ok) in &done {
+                        if !*ok {
+                            continue;
+                        }
+                        if let Some(path) = held.iter().find(|p| hold_path_filename(p) == name.as_slice())
+                        {
+                            if direct_unpack_release_path(path) {
+                                released += 1;
+                            }
+                        }
+                    }
+                    msg.extend_from_slice(
+                        format!(
+                            ": repaired {} block(s) with {} recovery block(s) in {:.1} s while downloading, {} of {} paused volume(s) released",
+                            report.repaired_slices.len(),
+                            report.recovery_used,
+                            started.elapsed().as_secs_f64(),
+                            released,
+                            done.len()
+                        )
+                        .as_bytes(),
+                    );
+                    MK_INFO
+                }
+                Some(Err(err)) => {
+                    msg.extend_from_slice(
+                        format!(" not possible yet ({err}); left to par-check").as_bytes(),
+                    );
+                    MK_DETAIL
+                }
+                None => {
+                    msg.extend_from_slice(b" not possible yet; left to par-check");
+                    MK_DETAIL
+                }
+            };
+            crate::log::log_active_bytes(kind, &msg);
+            if let Some(st) = direct_unpack_holds().get_mut(&nzb_id) {
+                st.live_repair_running = false;
+            }
+        });
+    if spawned.is_err() {
+        if let Some(st) = direct_unpack_holds().get_mut(&nzb_id) {
+            st.live_repair_running = false;
+        }
+    }
+}
+
 /// Gives up on the held volumes of download `nzb_id` (its repair failed).
 pub(crate) fn direct_unpack_abandon(nzb_id: i32) {
     let mut map = direct_unpack_holds();
@@ -2912,10 +2998,12 @@ pub(crate) fn direct_unpack_abandon(nzb_id: i32) {
 }
 
 /// True when the unpack thread of `nzb_id` is parked until post-processing repaired the download.
+/// Not while a live par2 repair of the held volumes is running: post-processing must not
+/// repair the same files at the same time.
 pub(crate) fn direct_unpack_awaiting_repair(nzb_id: i32) -> bool {
     direct_unpack_holds()
         .get(&nzb_id)
-        .is_some_and(|st| st.awaiting_repair)
+        .is_some_and(|st| st.awaiting_repair && !st.live_repair_running)
 }
 
 fn direct_unpack_set_awaiting_repair(nzb_id: i32) -> bool {

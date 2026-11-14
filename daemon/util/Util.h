@@ -3017,7 +3017,13 @@ inline void StartPostJob(PostInfo* postInfo, int kind)
 		return;
 	JobThread* job = nzbget_rs_job_new_post(kind, reinterpret_cast<uintptr_t>(postInfo), 0, 0);
 	postInfo->SetPostThread(job);
-	if (!nzbget_rs_job_start(job)) { postInfo->SetPostThread(nullptr); nzbget_rs_job_free(job, 0); }
+	if (!nzbget_rs_job_start(job))
+	{
+		// no worker will finish this stage: let the scheduler clean up and retry it
+		postInfo->SetPostThread(nullptr);
+		postInfo->SetWorking(false);
+		nzbget_rs_job_free(job, 0);
+	}
 }
 
 inline void StartLiveRepairJob(NzbInfo* nzbInfo)

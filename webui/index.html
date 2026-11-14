@@ -31,7 +31,7 @@
 	<meta name="apple-mobile-web-app-capable" content="yes" />
 	<meta name="mobile-web-app-capable" content="yes">
 	<meta name="apple-mobile-web-app-status-bar-style" content="black" />
-	<meta name="theme-color" content="#0a0a0e" />
+	<meta name="theme-color" content="#12100e" />
 
 	<!-- Theme: set data-theme before any stylesheet loads, so the page never flashes the other theme -->
 	<script language="javascript" type="text/javascript">
@@ -42,8 +42,8 @@
 				theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 			}
 			document.documentElement.setAttribute('data-theme', theme);
-			// browser and PWA chrome follow the theme (bg-window of each theme)
-			document.querySelector('meta[name="theme-color"]').setAttribute('content', theme === 'light' ? '#f7f7fa' : '#0a0a0e');
+			// browser and PWA chrome follow the theme (Oxide --paper of each theme)
+			document.querySelector('meta[name="theme-color"]').setAttribute('content', theme === 'light' ? '#f7f4ef' : '#12100e');
 		})();
 	</script>
 
@@ -88,10 +88,12 @@
 	<link rel="stylesheet" type="text/css" href="tokens.css" />
 	<link rel="stylesheet" type="text/css" href="ds.css" />
 	<link rel="stylesheet" type="text/css" href="skin.css" />
+	<link rel="stylesheet" type="text/css" href="oxide.css" />
+	<link rel="stylesheet" type="text/css" href="settings.css" />
 	%end% -->
 	<!-- Loading all css files from libraries and NZBGet in one request -->
 	<!-- %if-not-debug% -->
-	<link rel="stylesheet" type="text/css" href="combined.css?lib/bootstrap.css+style.css+tokens.css+ds.css+skin.css" />
+	<link rel="stylesheet" type="text/css" href="combined.css?lib/bootstrap.css+style.css+tokens.css+ds.css+skin.css+oxide.css+settings.css" />
 	<!-- %end% -->
 
 	<!-- fav and touch icons -->

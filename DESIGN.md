@@ -164,9 +164,21 @@ The web UI's components (`ds.css`, `skin.css`) read semantic names from `webui/t
 | `--font-sans`, `--font-mono` | the Oxide stacks |
 | `--shadow-glow` | none (Oxide doesn't glow) |
 
-To switch the web UI over, add `oxide.css` after `skin.css` in both the debug and the combined stylesheet lists in `webui/index.html`, and change the two `theme-color` values in its theme script to `--paper`. Until then the file is unused, and the UI keeps its current look.
+`webui/index.html` loads `oxide.css` and then `settings.css` after `skin.css`, in both the debug list and the combined stylesheet, and its theme script sets the browser `theme-color` to `--paper`.
 
 When a token is added to `docs/design-system/tokens.json`, add its mapping to `webui` in `oxide.json`; `--check` fails until it has one.
+
+## Settings
+
+Settings is a list of readable rows, not a grid of config keys (`webui/settings.css`, with the logic in `webui/config.js`).
+
+- **Sidebar.** Sections are grouped by task under mono uppercase labels: Start here (News servers, Paths, Categories), Downloading (Download queue, Connection, Check and repair, Unpack), Automation (RSS feeds, Incoming NZBs, Scheduler), Extensions (each installed extension), and System (Security, Web interface, Logging, System, Status, Info, Licenses). Names are sentence case.
+- **Page head.** A module path (`rustyget::settings::download_queue`) over a sentence-case title.
+- **Rows.** One card per section, rows divided by `--line`. Left: a readable label (`Article cache`), then the option's own name in 12px mono `--muted` (`ArticleCache`) so it still matches `nzbget.conf`, then the first line of its description. Right: the control. The `?` opens the full help under the row. Search matches the label and the option name.
+- **Labels.** `humanizeOptionName()` splits the option name and applies `LABEL_WORDS` (NZB, TLS, folder for Dir, command for Cmd); `LABEL_OVERRIDES` holds whole names that need real wording. Extension options keep their own display names.
+- **Controls.** Yes/No options are switches (`role="switch"`, Space and Enter toggle, rust when on). Other short choices stay segmented. Numbers keep their unit suffix.
+- **Changes.** A changed row shows a 6px rust dot after its label. A save bar slides up only when something differs from the saved value: the count in rust mono, the changed names, Discard (puts the saved values back) and Save and reload. It replaces the old always-visible "Save all changes" button on desktop.
+- **Phones.** Rows stack: label and option name, description, then the control; a switch stays on the label's line.
 
 ## Voice
 

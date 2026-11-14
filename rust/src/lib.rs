@@ -55,6 +55,7 @@ pub mod posting;
 #[cfg(unix)]
 pub mod postproc;
 pub mod prepost;
+pub mod progressive_unpack;
 #[cfg(unix)]
 pub mod procrun;
 pub mod queueeditor;

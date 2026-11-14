@@ -5,7 +5,7 @@
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
-PKG="$ROOT/linux/pkg/rustyget"
+PKG=$(cd "$(dirname "$0")" && pwd)
 JOBS=${1:-3}
 cd "$ROOT"
 

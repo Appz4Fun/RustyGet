@@ -816,3 +816,37 @@ fn hole_longer_than_a_read_is_answered_in_pieces() {
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }
+
+/// A download feed (not a finished set): outputs are copied into place.
+struct Growing;
+impl VolumeFeed for Growing {
+    fn volume(&mut self, path: &Path) -> VolumeView {
+        if path.is_file() {
+            VolumeView::Ready { holes: Vec::new() }
+        } else {
+            VolumeView::Missing
+        }
+    }
+}
+
+#[test]
+fn many_members_while_downloading_do_not_exhaust_artifact_slots() {
+    let t = TestDir::new("many");
+    let files: Vec<(String, Vec<u8>)> = (0..40)
+        .map(|i| (format!("dir/f{i:02}.bin"), pattern(1_000 + i * 37)))
+        .collect();
+    let mut v = SIG.to_vec();
+    v.extend(main_block(false, None));
+    for (name, data) in &files {
+        v.extend(file_block(name, data.len() as u64, data, crc32fast::hash(data), false, false));
+    }
+    v.extend(end_block(false));
+    let first = t.dl().join("many.rar");
+    std::fs::write(&first, &v).unwrap();
+    let (r, log) = run(&first, &t.out(), Box::new(Growing));
+    let s = expect_ok(r, &log);
+    assert_eq!(s.files, 40);
+    for (name, data) in &files {
+        assert_eq!(&std::fs::read(t.out().join(name)).unwrap(), data, "{name}");
+    }
+}

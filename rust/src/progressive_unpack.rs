@@ -359,7 +359,21 @@ where
                     MemberOutcome::Directory { .. } => summary.dirs += 1,
                     MemberOutcome::Skipped(_) => summary.skipped += 1,
                     MemberOutcome::Tested(_) => {}
-                    MemberOutcome::Provisional(a) => provisional.push((name, a)),
+                    MemberOutcome::Provisional(mut a) => {
+                        // Already verified by the session: move it into place now, so the file
+                        // is available while later members extract and its slot is freed.
+                        if matches!(a.evidence(), ArtifactEvidence::Verified(_)) {
+                            match publish_copy(drive.session, &mut a, req, &name) {
+                                Ok(()) => summary.files += 1,
+                                Err(f) => {
+                                    log_cb(1, &unrar_error_line(&f, &name));
+                                    first_failure.get_or_insert(f);
+                                }
+                            }
+                        } else {
+                            provisional.push((name, a));
+                        }
+                    }
                     MemberOutcome::Partial(a) => partial.push((name, a)),
                     MemberOutcome::PublishedWithFailure { failure, .. } => {
                         summary.files += 1;

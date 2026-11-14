@@ -961,7 +961,7 @@ pub fn options_normalize_dupe_check_options(
         size_tolerance.clamp(0, 1000),
         body_percent.clamp(0, 100),
         check_concurrency.clamp(1, 100),
-        check_connections.clamp(1, 1000),
+        check_connections.clamp(0, 1000),
     )
 }
 
@@ -1510,8 +1510,8 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"DupePrimaryScore", c"1000000"),
         (c"DupeSizeTolerance", c"0"),
         (c"DupeBodyPercent", c"20"),
-        (c"DupeCheckConcurrency", c"10"),
-        (c"DupeCheckConnections", c"20"),
+        (c"DupeCheckConcurrency", c"20"),
+        (c"DupeCheckConnections", c"0"),
         (c"DownloadRate", c"0"),
         (c"ControlIP", c"0.0.0.0"),
         (c"ControlUsername", c"rustyget"),
@@ -1839,8 +1839,8 @@ impl NzbgetRsParsedOptions {
             dupe_primary_score: 1_000_000,
             dupe_size_tolerance: 0,
             dupe_body_percent: 20,
-            dupe_check_concurrency: 10,
-            dupe_check_connections: 20,
+            dupe_check_concurrency: 20,
+            dupe_check_connections: 0,
             output_mode: 0,
             write_log: 1,
             par_check: 3,
@@ -4773,8 +4773,8 @@ mod options_full_suite_port_from_cpp {
         assert_eq!(options.scalars.dupe_primary_score, 1_000_000);
         assert_eq!(options.scalars.dupe_size_tolerance, 0);
         assert_eq!(options.scalars.dupe_body_percent, 20);
-        assert_eq!(options.scalars.dupe_check_concurrency, 10);
-        assert_eq!(options.scalars.dupe_check_connections, 20);
+        assert_eq!(options.scalars.dupe_check_concurrency, 20);
+        assert_eq!(options.scalars.dupe_check_connections, 0);
     }
 
     #[test]
@@ -4859,7 +4859,8 @@ mod options_full_suite_port_from_cpp {
         assert_eq!(options.scalars.dupe_size_tolerance, 0);
         assert_eq!(options.scalars.dupe_body_percent, 100);
         assert_eq!(options.scalars.dupe_check_concurrency, 1);
-        assert_eq!(options.scalars.dupe_check_connections, 1);
+        // 0 = every free connection
+        assert_eq!(options.scalars.dupe_check_connections, 0);
 
         let cmd_opts2 = [c"DupeHealthMin=300", c"DupeHealthMax=100"];
         let options2 = RustOptions::new_no_config(Some(&cmd_opts2), Some(&mut extender));

@@ -5992,7 +5992,11 @@ unsafe extern "C" fn stream_repair_job_host_cb(
             }
             host.nzb_action(p2, NZB_ACT_CLEAR_LIVE_REPAIR_THREAD, 0);
             let ns = host.nzb_snap(p2, false);
-            if ns.post_info_ptr != 0 && !ns.has_unpack_thread {
+            // A direct unpack parked on damaged volumes waits for post-processing itself, so
+            // it will not release the job: the ending live repair has to.
+            if ns.post_info_ptr != 0
+                && (!ns.has_unpack_thread || direct_unpack_awaiting_repair(ns.id))
+            {
                 host.post_set_int(ns.post_info_ptr, POST_INT_WORKING, 0);
             }
             host.dq_save(p1);

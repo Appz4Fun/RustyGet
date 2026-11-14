@@ -76,6 +76,43 @@ def rar5_store_volumes(inner_name, data, volume_size):
     return vols
 
 
+def rar5_encrypted_headers(inner_name, data, password, lg=15):
+    """One RAR5 store-mode volume with encrypted headers and data, as `rar a -hp` writes it.
+    Returns None without the cryptography module."""
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    except ImportError:
+        return None
+
+    def cbc(key, iv, plain):
+        plain = plain + b'\0' * ((-len(plain)) % 16)
+        enc = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+        return enc.update(plain) + enc.finalize()
+
+    salt = os.urandom(16)
+    key = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 1 << lg, 32)
+
+    def enc_hdr(body):
+        iv = os.urandom(16)
+        return iv + cbc(key, iv, rar5_block(body))
+
+    out = b'Rar!\x1a\x07\x01\x00'
+    out += rar5_block(vint(4) + vint(0) + vint(0) + vint(0) + bytes([lg]) + salt)
+    out += enc_hdr(vint(1) + vint(0) + vint(0))
+    fsalt, fiv = os.urandom(16), os.urandom(16)
+    fkey = hashlib.pbkdf2_hmac('sha256', password.encode(), fsalt, 1 << lg, 32)
+    rec = vint(1) + vint(0) + vint(0) + bytes([lg]) + fsalt + fiv
+    extra = vint(len(rec)) + rec
+    packed = cbc(fkey, fiv, data)
+    name = inner_name.encode()
+    fh = vint(2) + vint(0x0003) + vint(len(extra)) + vint(len(packed))
+    fh += vint(0x0004) + vint(len(data)) + vint(0x20) + struct.pack('<I', zlib.crc32(data) & 0xffffffff)
+    fh += vint(0) + vint(1) + vint(len(name)) + name + extra
+    out += enc_hdr(fh) + packed
+    out += enc_hdr(vint(5) + vint(0) + vint(0))
+    return out
+
+
 def seven_zip(files, extra):
     seven = generators.SEVENZIP_PATH
     with tempfile.TemporaryDirectory(prefix='bm7z-') as work:
@@ -103,6 +140,9 @@ def build_packings(data, vol):
                       for i, v in enumerate(generators.rar3_store_volumes_valid(INNER, data, vol))], None)
     packs['rar5'] = ([('rel.part%02d.rar' % (i + 1), v)
                       for i, v in enumerate(rar5_store_volumes(INNER, data, vol))], None)
+    r5e = rar5_encrypted_headers(INNER, data, PASSWORD)
+    if r5e:
+        packs['rar5enc'] = ([('rel.rar', r5e)], PASSWORD)
     if generators.HAVE_7Z:
         packs['7zcopy'] = (split(seven_zip([(INNER, data)], ['-m0=Copy']), vol, 'rel.7z.%03d'), None)
         packs['7zlzma2'] = (split(seven_zip([(INNER, data)], ['-m0=LZMA2', '-mx=5']), vol, 'rel.7z.%03d'), None)
@@ -283,6 +323,14 @@ def main():
             b.run('alt rar5 <- 7zenc', 'rar5', ['7zenc'], fail=f)
             b.run('alt 7zenc <- rar5', '7zenc', ['rar5'], fail=f)
             b.run('twin 7zenc (no par2)', '7zenc', ['7zenc'], fail=f)
+        if 'rar5enc' in b.packs:
+            b.run('clean rar5enc', 'rar5enc')
+            b.run('alt rar5 <- rar5enc', 'rar5', ['rar5enc'], fail=f)
+            b.run('alt bare <- rar5enc', 'bare', ['rar5enc'], fail=f)
+            b.run('alt rar5enc <- rar5', 'rar5enc', ['rar5'], fail=f)
+            b.run('alt rar5enc <- 7zenc', 'rar5enc', ['7zenc'], fail=f)
+            b.run('twin rar5enc (no par2)', 'rar5enc', ['rar5enc'], fail=f)
+            b.run('twin rar5enc (par2)', 'rar5enc', ['rar5enc'], fail=f, with_par=True)
         # nested archive as target and as donor
         if 'nested' in b.packs:
             b.run('alt rar5 <- nested', 'rar5', ['nested'], fail=f)

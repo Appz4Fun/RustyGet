@@ -1611,8 +1611,14 @@ var Config = (new function($)
 		$('#ConfigSaveBar_Discard', $SaveBar).text(I18n.defaultValue('btn_discard', 'Discard')).on('click', discardOptionChanges);
 		$('#ConfigSaveBar_Save', $SaveBar).text(I18n.defaultValue('btn_save_and_reload', 'Save and reload')).on('click', function() { Config.saveChanges(); });
 		$('.config__main', $ConfigContent).append($SaveBar);
-		$ConfigData.on('input change keyup click', function()
+		// Listen on the document, not only on #ConfigData: option editors in dialogs (RSS
+		// filter, script lists, list deletes) change controls from outside the page.
+		$(document).on('input change keyup click', function()
 		{
+			if (!config)
+			{
+				return;
+			}
 			clearTimeout(changeTimer);
 			changeTimer = setTimeout(refreshChangeState, 120);
 		});
@@ -2273,6 +2279,7 @@ var Config = (new function($)
 				{
 					var control = $('#' + option.formId);
 					control.val(filter);
+					refreshChangeState();
 				});
 	}
 

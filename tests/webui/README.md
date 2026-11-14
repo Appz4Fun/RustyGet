@@ -14,7 +14,7 @@ node tests/webui/settings-list-health.js http://127.0.0.1:17689/
 node tests/webui/settings-phone-navigation.js http://127.0.0.1:17689/
 node tests/webui/settings-titles.js http://127.0.0.1:17689/
 node tests/webui/settings-locales.js http://127.0.0.1:17689/
-node tests/webui/settings-compact-tiles.js http://127.0.0.1:17689/
+node tests/webui/settings-savebar.js http://127.0.0.1:17689/   (offline: no daemon needed)
 node tests/webui/settings-health-startup.js http://127.0.0.1:17689/
 node tests/webui/tls-cipher.js http://127.0.0.1:17689/
 node tests/webui/tls-cipher-settings.js http://127.0.0.1:17689/

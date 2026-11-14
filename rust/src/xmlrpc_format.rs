@@ -3798,7 +3798,8 @@ fn xmlrpc_execute_save_config_cursor(
 
     if ok {
         for warning in &save_warnings {
-            crate::log::log_active_bytes(2, warning);
+            // kind 1 = WARNING (log.rs MESSAGE_PREFIXES)
+            crate::log::log_active_bytes(1, warning);
         }
     }
     (cur_off, false, format_bool_bytes(is_json, ok))

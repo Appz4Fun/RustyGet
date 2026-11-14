@@ -2810,6 +2810,137 @@ pub unsafe fn unpack_ctrl_exec(
 // 3. DirectUnpack (`daemon/postprocess/DirectUnpack.cpp`)
 // ============================================================================
 
+// ---------------------------------------------------------------------------
+// Direct-unpack holds: a damaged archive volume pauses extraction instead of
+// cancelling it. The volume is released once it has been repaired (borrowed
+// articles, stream repair from a duplicate, or par-repair), and extraction
+// continues from where it stopped.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct DirectUnpackHoldState {
+    /// Full paths of damaged volumes extraction must not read yet.
+    held: Vec<Vec<u8>>,
+    /// File names released since the unpack thread last looked.
+    released: Vec<Vec<u8>>,
+    /// The download finished with volumes still held: post-processing repairs first.
+    awaiting_repair: bool,
+    /// The repair failed: the unpack thread gives up.
+    abandoned: bool,
+}
+
+static DIRECT_UNPACK_HOLDS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<i32, DirectUnpackHoldState>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+fn direct_unpack_holds(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<i32, DirectUnpackHoldState>> {
+    DIRECT_UNPACK_HOLDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+fn hold_path_filename(path: &[u8]) -> &[u8] {
+    match path
+        .iter()
+        .rposition(|&b| b == crate::paths::PATH_SEPARATOR)
+    {
+        Some(i) => &path[i + 1..],
+        None => path,
+    }
+}
+
+/// Marks `full_path` (a damaged volume of download `nzb_id`) as not readable by direct unpack.
+pub(crate) fn direct_unpack_hold(nzb_id: i32, full_path: &[u8]) {
+    let mut map = direct_unpack_holds();
+    let st = map.entry(nzb_id).or_default();
+    if !st.held.iter().any(|p| p == full_path) {
+        st.held.push(full_path.to_vec());
+    }
+}
+
+/// True while `full_path` is a damaged volume waiting for its repair.
+pub(crate) fn direct_unpack_is_held_path(full_path: &[u8]) -> bool {
+    direct_unpack_holds()
+        .values()
+        .any(|st| st.held.iter().any(|p| p == full_path))
+}
+
+/// True when download `nzb_id` has volumes on hold.
+pub(crate) fn direct_unpack_has_holds(nzb_id: i32) -> bool {
+    direct_unpack_holds()
+        .get(&nzb_id)
+        .is_some_and(|st| !st.held.is_empty())
+}
+
+/// Releases one repaired volume by path. Returns true when it was on hold.
+pub(crate) fn direct_unpack_release_path(full_path: &[u8]) -> bool {
+    let mut map = direct_unpack_holds();
+    for st in map.values_mut() {
+        if let Some(i) = st.held.iter().position(|p| p == full_path) {
+            let path = st.held.remove(i);
+            st.released.push(hold_path_filename(&path).to_vec());
+            if st.held.is_empty() {
+                st.awaiting_repair = false;
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Releases every held volume of download `nzb_id` (its repair succeeded).
+pub(crate) fn direct_unpack_release_all(nzb_id: i32) {
+    let mut map = direct_unpack_holds();
+    if let Some(st) = map.get_mut(&nzb_id) {
+        let held = std::mem::take(&mut st.held);
+        for path in held {
+            st.released.push(hold_path_filename(&path).to_vec());
+        }
+        st.awaiting_repair = false;
+    }
+}
+
+/// Gives up on the held volumes of download `nzb_id` (its repair failed).
+pub(crate) fn direct_unpack_abandon(nzb_id: i32) {
+    let mut map = direct_unpack_holds();
+    if let Some(st) = map.get_mut(&nzb_id) {
+        st.held.clear();
+        st.awaiting_repair = false;
+        st.abandoned = true;
+    }
+}
+
+/// True when the unpack thread of `nzb_id` is parked until post-processing repaired the download.
+pub(crate) fn direct_unpack_awaiting_repair(nzb_id: i32) -> bool {
+    direct_unpack_holds()
+        .get(&nzb_id)
+        .is_some_and(|st| st.awaiting_repair)
+}
+
+fn direct_unpack_set_awaiting_repair(nzb_id: i32) -> bool {
+    let mut map = direct_unpack_holds();
+    match map.get_mut(&nzb_id) {
+        Some(st) if !st.held.is_empty() => {
+            st.awaiting_repair = true;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn direct_unpack_take_released(nzb_id: i32) -> (Vec<Vec<u8>>, bool) {
+    let mut map = direct_unpack_holds();
+    match map.get_mut(&nzb_id) {
+        Some(st) => (std::mem::take(&mut st.released), st.abandoned),
+        None => (Vec::new(), false),
+    }
+}
+
+pub(crate) fn direct_unpack_forget_holds(nzb_id: i32) {
+    direct_unpack_holds().remove(&nzb_id);
+}
+
 #[derive(Default)]
 struct DirectUnpackVolumeState {
     archives: VecDeque<Vec<u8>>,
@@ -3036,6 +3167,56 @@ impl NzbgetRsDirectUnpack {
         }
     }
 
+    /// Picks up volumes released by a repair: a released volume the extractor is waiting for
+    /// ends the wait, a released first volume is queued for extraction. A failed repair stops
+    /// the thread.
+    fn apply_releases(&self, ctx: *mut c_void, host_cb: NzbgetRsRepairCtrlHostFn) {
+        let (released, abandoned) = direct_unpack_take_released(self.nzb_id);
+        if abandoned && !self.cancelled.swap(true, Ordering::AcqRel) {
+            unsafe {
+                host_cb(
+                    ctx,
+                    2,
+                    1,
+                    0,
+                    0,
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+            if self.unpacking.load(Ordering::Acquire) {
+                self.terminated.store(true, Ordering::Release);
+            }
+            return;
+        }
+        if released.is_empty() {
+            return;
+        }
+        let mut v = self.lock_vol();
+        for filename in released {
+            Self::global_log(
+                ctx,
+                host_cb,
+                MK_DEBUG,
+                &[b"Released repaired volume ".as_slice(), filename.as_slice()].concat(),
+            );
+            if v.waiting_file
+                .as_ref()
+                .is_some_and(|wf| wf.eq_ignore_ascii_case(&filename))
+            {
+                v.waiting_file = None;
+                self.waiting_volume.store(false, Ordering::Release);
+            }
+            if crate::unpack::direct_unpack_is_main_archive(&filename) {
+                v.archives.push_back(filename);
+            }
+        }
+    }
+
     pub fn file_downloaded(
         &self,
         ctx: *mut c_void,
@@ -3077,7 +3258,47 @@ impl NzbgetRsDirectUnpack {
         );
 
         if crate::filetypes::is_rar_file(&filename) && failed_articles > 0 {
-            self.stop_with_nzb(ctx, host_cb, nzb_ptr);
+            // A damaged volume pauses extraction until it is repaired; nothing is cancelled.
+            let dest_dir = if nzb_ptr != 0 {
+                crate::ffi::queue_host().map(|host| host.nzb_snap(nzb_ptr, false).dest_dir)
+            } else {
+                None
+            };
+            let Some(dest_dir) = dest_dir else {
+                self.stop_with_nzb(ctx, host_cb, nzb_ptr);
+                return;
+            };
+            let full = [
+                dest_dir.as_slice(),
+                &[crate::paths::PATH_SEPARATOR],
+                filename.as_slice(),
+            ]
+            .concat();
+            direct_unpack_hold(self.nzb_id, &full);
+            let msg = trunc_1023(
+                [
+                    b"Pausing direct unpack at ".as_slice(),
+                    filename.as_slice(),
+                    b" until it is repaired",
+                ]
+                .concat(),
+            );
+            let c_msg = to_c_buf(&msg);
+            unsafe {
+                host_cb(
+                    ctx,
+                    1,
+                    3,
+                    MK_INFO,
+                    nzb_ptr,
+                    0,
+                    c_msg.as_ptr() as *const c_char,
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
             return;
         }
 
@@ -3129,6 +3350,37 @@ impl NzbgetRsDirectUnpack {
         let (waiting_missing, progress_label) = {
             let mut v = self.lock_vol();
             v.nzb_completed = true;
+            if direct_unpack_set_awaiting_repair(self.nzb_id) {
+                drop(v);
+                // Volumes are still on hold: post-processing repairs the download first, then
+                // releases them and extraction continues where it paused.
+                let msg = trunc_1023(
+                    [
+                        b"Direct unpack for ".as_slice(),
+                        nzb_name.as_slice(),
+                        b" waits for the repair of its damaged volumes",
+                    ]
+                    .concat(),
+                );
+                let c_msg = to_c_buf(&msg);
+                unsafe {
+                    host_cb(
+                        ctx,
+                        1,
+                        3,
+                        MK_INFO,
+                        nzb_ptr,
+                        0,
+                        c_msg.as_ptr() as *const c_char,
+                        ptr::null(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    );
+                }
+                self.add_extra_time(ctx, host_cb, nzb_ptr, true);
+                return;
+            }
             if let Some(ref wf) = v.waiting_file {
                 (Some(wf.clone()), Vec::new())
             } else {
@@ -3431,7 +3683,8 @@ impl NzbgetRsDirectUnpack {
 
         let sep = crate::paths::PATH_SEPARATOR;
         let full_filename = [local.dest_dir.as_slice(), &[sep], filename].concat();
-        if crate::fsops::file_exists(&full_filename, &crate::fsops::posix_stat) {
+        let on_hold = direct_unpack_is_held_path(&full_filename);
+        if !on_hold && crate::fsops::file_exists(&full_filename, &crate::fsops::posix_stat) {
             self.waiting_volume.store(false, Ordering::Release);
         } else {
             let nzb_completed = {
@@ -3440,7 +3693,7 @@ impl NzbgetRsDirectUnpack {
                 self.waiting_volume.store(true, Ordering::Release);
                 v.nzb_completed
             };
-            if nzb_completed {
+            if nzb_completed && !on_hold {
                 let msg = [b"Could not find volume ", filename].concat();
                 self.add_message(ctx, host_cb, MK_WARNING, &msg, local);
                 with_dq_guard(ctx, host_cb, |dq_ptr| {
@@ -3587,6 +3840,7 @@ impl NzbgetRsDirectUnpack {
                     && !self.is_stopped_or_terminated(ctx, host_cb)
                 {
                     std::thread::sleep(Duration::from_millis(20));
+                    self.apply_releases(ctx, host_cb);
                 }
             },
             &mut || self.is_stopped_or_terminated(ctx, host_cb),
@@ -3684,7 +3938,15 @@ impl NzbgetRsDirectUnpack {
             let mut v = self.lock_vol();
             v.info_name = local.info_name.clone();
             for arch in crate::unpack::direct_unpack_find_archive_files(&local.dest_dir) {
-                v.archives.push_back(arch);
+                let full = [
+                    local.dest_dir.as_slice(),
+                    &[crate::paths::PATH_SEPARATOR],
+                    arch.as_slice(),
+                ]
+                .concat();
+                if !direct_unpack_is_held_path(&full) {
+                    v.archives.push_back(arch);
+                }
             }
         }
 
@@ -3707,11 +3969,18 @@ impl NzbgetRsDirectUnpack {
                     break;
                 }
             } else {
-                if self.lock_vol().nzb_completed {
-                    break;
+                if self.lock_vol().nzb_completed && !direct_unpack_has_holds(self.nzb_id) {
+                    // Nothing queued, nothing on hold: one last look for a volume released
+                    // right now, then done.
+                    self.apply_releases(ctx, host_cb);
+                    if self.lock_vol().archives.is_empty() {
+                        break;
+                    }
+                    continue;
                 }
                 self.waiting_volume.store(true, Ordering::Release);
                 std::thread::sleep(Duration::from_millis(100));
+                self.apply_releases(ctx, host_cb);
             }
         }
 
@@ -3841,6 +4110,7 @@ impl NzbgetRsDirectUnpack {
             return;
         }
 
+        direct_unpack_forget_holds(self.nzb_id);
         Self::global_log(
             ctx,
             host_cb,

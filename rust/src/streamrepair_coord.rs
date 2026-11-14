@@ -2167,6 +2167,17 @@ impl NzbgetRsStreamRepairCtrl {
         }
 
         unsafe { self.repair_completed_live(ctx, cb, &targets, &counters) };
+        // A volume the live repair completed can be read by a paused direct unpack again.
+        #[cfg(unix)]
+        for t in targets.iter().filter(|t| !t.needs_repair()) {
+            let full = [
+                dest_dir.as_slice(),
+                &[crate::paths::PATH_SEPARATOR],
+                t.filename.as_slice(),
+            ]
+            .concat();
+            crate::postproc::direct_unpack_release_path(&full);
+        }
     }
 }
 

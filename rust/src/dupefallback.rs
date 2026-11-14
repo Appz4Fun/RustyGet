@@ -1791,6 +1791,11 @@ pub(crate) fn should_defer_to_par_host(
         return false;
     }
     let nzb = host.nzb_snap(nzb_ptr, false);
+    if crate::options::dupe_borrow_first() {
+        // Live donor recovery runs alongside the par2 set; it only waits while direct rename
+        // still identifies obfuscated files.
+        return nzb.direct_rename_status == crate::queuesubsys_host::TS_RUNNING && !nzb.all_first;
+    }
     should_defer_to_par_snap(host, &nzb)
 }
 
@@ -2926,7 +2931,13 @@ pub(crate) fn try_fallback_host(
         } else {
             ParDamageVerdict::default()
         };
+        // Option DupeBorrowFirst: a missing article is fetched from a duplicate right away
+        // (a few MB, no repair pass); the par2 set stays the final check. Names are still
+        // unknown while direct rename runs, so that case keeps deferring.
+        let rename_pending =
+            nzb.direct_rename_status == crate::queuesubsys_host::TS_RUNNING && !nzb.all_first;
         defer = par_defer
+            && (rename_pending || !crate::options::dupe_borrow_first())
             && art.part_number != 1
             && nzb.dupe_par_defer_state != crate::queuesubsys_host::DP_LIFTED
             && !par_cannot_cover_snap(nzb, true)

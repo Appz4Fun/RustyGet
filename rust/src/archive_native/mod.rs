@@ -1153,6 +1153,23 @@ where
 }
 
 /// Extracts a RAR 1.5–4.x single or multi-volume archive into `output_dir`.
+/// A following volume can be read: it exists and is not a damaged file that direct unpack
+/// keeps on hold until its repair finished.
+fn volume_ready(path: &std::path::Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        !crate::postproc::direct_unpack_is_held_path(path.as_os_str().as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 pub fn extract_rar4<F>(
     archive_path: &Path,
     output_dir: &Path,
@@ -1241,8 +1258,8 @@ where
             reached_final_volume = true;
             break;
         };
-        if !next_vol.exists() {
-            if parsed.has_next_volume {
+        if !volume_ready(&next_vol) {
+            if parsed.has_next_volume || next_vol.exists() {
                 let next_name = next_vol
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -1251,7 +1268,7 @@ where
                     4,
                     &format!("Unrar: Insert disk with {next_name} [C]ontinue, [Q]uit"),
                 );
-                if !next_vol.exists() {
+                if !volume_ready(&next_vol) {
                     let msg = format!("Unrar: Cannot find volume {next_name}");
                     log_cb(1, &msg);
                     return Err(msg);
@@ -4288,7 +4305,7 @@ where
             }
             break;
         };
-        if !next.exists() {
+        if !volume_ready(&next) {
             if let Some(next_name) = next.file_name().and_then(|s| s.to_str()) {
                 log_cb(
                     4,
@@ -4298,7 +4315,7 @@ where
             if is_cancelled() {
                 return Err(fail_abort_or(&mut pending, log_cb, "Aborted".to_string()));
             }
-            if !next.exists() {
+            if !volume_ready(&next) {
                 if saw_end {
                     return Err(fail_abort_or(
                         &mut pending,

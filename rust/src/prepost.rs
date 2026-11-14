@@ -1478,6 +1478,9 @@ impl NzbgetRsPrePostProcessor {
 
         let opts = host.opts();
         let nzb = host.nzb_snap(nzb_ptr, false);
+        if !nzb.has_unpack_thread {
+            crate::postproc::direct_unpack_forget_holds(nzb.id);
+        }
         let fails_over = crate::dupecoord::fails_over_snap(&opts, &nzb);
         let (add_to_history, call_dupe, _, need_save) = eval_nzb_completed(
             nzb.dupe_hint,
@@ -1665,7 +1668,10 @@ impl NzbgetRsPrePostProcessor {
                 has_post_info: u8::from(nzb.post_info_ptr != 0),
                 working: u8::from(working),
                 has_queue_script_job: 0,
-                direct_unpack_running: u8::from(nzb.direct_unpack_status == NS_RUNNING),
+                direct_unpack_running: u8::from(
+                    nzb.direct_unpack_status == NS_RUNNING
+                        && !crate::postproc::direct_unpack_awaiting_repair(nzb.id),
+                ),
                 has_live_repair_thread: u8::from(nzb.has_live_repair_thread),
                 priority: nzb.priority,
                 force_priority: u8::from(nzb.force_priority),
@@ -1782,6 +1788,7 @@ impl NzbgetRsPrePostProcessor {
 
         if stream_repair
             && !ps.stream_repair_done
+            && !crate::options::dupe_borrow_first()
             && opts.health_check == HC_DUPE
             && crate::dupecoord::fails_over_snap(&opts, &nzb)
             && crate::dupecoord::find_dupe_backup_host(
@@ -1956,6 +1963,36 @@ impl NzbgetRsPrePostProcessor {
         {
             self.enter_stage(host, post_ptr, PT_STREAM_REPAIRING);
             host.post_controller_start_job(post_ptr, CTRL_STREAM_REPAIR);
+            return;
+        }
+
+        if crate::postproc::direct_unpack_awaiting_repair(nzb.id) {
+            // Direct unpack paused at a damaged volume and the repair stages are over: let it
+            // continue from where it stopped (or give up when the repair failed), then come back.
+            const PAR_STATUS_SUCCESS: i32 = 3;
+            let repaired = nzb.par_status == PAR_STATUS_SUCCESS
+                || (nzb.health >= 1000
+                    && nzb.par_status != PAR_STATUS_FAILURE
+                    && nzb.par_status != PAR_STATUS_REPAIR_POSSIBLE
+                    && nzb.par_status != PAR_STATUS_MANUAL);
+            let mut msg = if repaired {
+                b"Resuming direct unpack for ".to_vec()
+            } else {
+                b"Not resuming direct unpack for ".to_vec()
+            };
+            msg.extend_from_slice(&nzb.name);
+            msg.extend_from_slice(if repaired {
+                b" after repair"
+            } else {
+                b": its damaged volumes were not repaired"
+            });
+            host.nzb_print_message(nzb.ptr, MK_INFO, &msg);
+            host.post_set_int(post_ptr, crate::queuesubsys_host::POST_INT_WORKING, 1);
+            if repaired {
+                crate::postproc::direct_unpack_release_all(nzb.id);
+            } else {
+                crate::postproc::direct_unpack_abandon(nzb.id);
+            }
             return;
         }
 
@@ -2165,6 +2202,21 @@ impl NzbgetRsPrePostProcessor {
 
         let opts = host.opts();
         let nzb = host.nzb_snap(nzb_ptr, false);
+        if opts.direct_unpack {
+            // A damaged archive volume is put on hold: direct unpack pauses in front of it
+            // until a repair releases it, instead of being cancelled.
+            let file = host.file_snap(file_ptr);
+            if file.failed_articles > 0 && crate::filetypes::is_rar_file(&file.filename) {
+                let full = [
+                    nzb.dest_dir.as_slice(),
+                    &[crate::paths::PATH_SEPARATOR],
+                    file.filename.as_slice(),
+                ]
+                .concat();
+                crate::postproc::direct_unpack_hold(nzb.id, &full);
+            }
+        }
+
         let act = classify_file_downloaded_direct_unpack(
             opts.direct_unpack,
             opts.raw_article,
@@ -2187,7 +2239,7 @@ impl NzbgetRsPrePostProcessor {
                 let want_unpack = unpack_param
                     .as_ref()
                     .map_or(true, |v| v.eq_ignore_ascii_case(b"yes"));
-                if want_unpack && nzb.failed_articles == 0 {
+                if want_unpack {
                     host.direct_unpack_start_job(nzb_ptr);
                 }
             }

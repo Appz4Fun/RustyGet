@@ -1404,7 +1404,7 @@ const COMMAND_VALUES: [i32; 26] = [
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 139] = [
+    let defaults: [(&CStr, &CStr); 140] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1424,6 +1424,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"DupeArticleFallback", c"no"),
         (c"DupeStreamDecompress", c"no"),
         (c"DupeStreamTimeout", c"60"),
+        (c"DupeBorrowFirst", c"yes"),
         (c"DupeSearch", c"no"),
         (c"DupeSearchDryRun", c"no"),
         (c"DupeSearchUrl", c""),
@@ -1625,6 +1626,16 @@ pub fn category_alias_list_matches(aliases: &[&[u8]], name: &[u8], _signed_char:
 }
 
 /// All scalar integer, boolean, and enum fields parsed by `Options::InitOptions` and `Options::CheckOptions`.
+/// Option `DupeBorrowFirst`: recover missing articles from duplicates before relying on the
+/// download's own par2 recovery data (Rust-only option, not part of the C scalars block).
+pub static DUPE_BORROW_FIRST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Current value of option `DupeBorrowFirst`.
+pub fn dupe_borrow_first() -> bool {
+    DUPE_BORROW_FIRST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NzbgetRsParsedOptions {
@@ -2114,6 +2125,10 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     );
     s.dupe_stream_decompress = i32::from(host.parse_bool_value(c"DupeStreamDecompress"));
     let raw_stream_timeout = host.parse_int_value(c"DupeStreamTimeout", 10);
+    DUPE_BORROW_FIRST.store(
+        host.parse_bool_value(c"DupeBorrowFirst"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     s.dupe_search = i32::from(host.parse_bool_value(c"DupeSearch"));
     s.dupe_search_dry_run = i32::from(host.parse_bool_value(c"DupeSearchDryRun"));
     *out_dupe_search_url = host.get_option(c"DupeSearchUrl");

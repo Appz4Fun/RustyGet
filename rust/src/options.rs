@@ -1473,7 +1473,7 @@ const COMMAND_VALUES: [i32; 26] = [
 /// Emits all default option `(name, value)` pairs for `Options::InitDefaults`.
 pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &CStr)) {
     let output_mode = if disable_curses { c"color" } else { c"curses" };
-    let defaults: [(&CStr, &CStr); 140] = [
+    let defaults: [(&CStr, &CStr); 141] = [
         (c"MainDir", c"~/downloads"),
         (c"WebDir", c""),
         (c"ConfigTemplate", c""),
@@ -1494,6 +1494,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"DupeStreamDecompress", c"yes"),
         (c"DupeStreamTimeout", c"60"),
         (c"DupeBorrowFirst", c"yes"),
+        (c"DupeWatch", c"yes"),
         (c"DupeSearch", c"no"),
         (c"DupeSearchDryRun", c"no"),
         (c"DupeSearchUrl", c""),
@@ -1703,6 +1704,16 @@ pub static DUPE_BORROW_FIRST: std::sync::atomic::AtomicBool =
 /// Current value of option `DupeBorrowFirst`.
 pub fn dupe_borrow_first() -> bool {
     DUPE_BORROW_FIRST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Option `DupeWatch`: look after the queued and history backups of a download
+/// without `DupeSearch` (DupeMode FORCE to SCORE, dead pick, swap, rescue).
+/// Rust-only option, not part of the C scalars block.
+pub static DUPE_WATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Current value of option `DupeWatch`.
+pub fn dupe_watch() -> bool {
+    DUPE_WATCH.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[repr(C)]
@@ -2196,6 +2207,10 @@ pub fn init_scalar_options_host<H: OptionsHost>(
     let raw_stream_timeout = host.parse_int_value(c"DupeStreamTimeout", 10);
     DUPE_BORROW_FIRST.store(
         host.parse_bool_value(c"DupeBorrowFirst"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    DUPE_WATCH.store(
+        host.parse_bool_value(c"DupeWatch"),
         std::sync::atomic::Ordering::Relaxed,
     );
     s.dupe_search = i32::from(host.parse_bool_value(c"DupeSearch"));

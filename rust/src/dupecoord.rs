@@ -1185,8 +1185,8 @@ fn return_best_dupe_host(
     }
 }
 
-/// Rescue (`DupeSearch`): a download failed its health check and failover
-/// returned nothing, so no download of its key is left. Its backups in
+/// Rescue (option `DupeWatch` or `DupeSearch`): a download failed its health
+/// check and failover returned nothing, so no download of its key is left. Its backups in
 /// DupeMode FORCE and those filed as copies are not failover candidates, so
 /// the wholest live one goes back to the queue here.
 /// Called for every completed download after the duplicate coordinator had
@@ -1207,7 +1207,8 @@ pub(crate) fn rescue_on_health_failure_host(
         || nzb.is_dupe_success
         || nzb.delete_status != crate::queuesubsys_host::DS_HEALTH
         || nzb.dupe_key.is_empty()
-        || !crate::options::active_options().is_some_and(|o| o.scalars().dupe_search != 0)
+        || !(crate::options::dupe_watch()
+            || crate::options::active_options().is_some_and(|o| o.scalars().dupe_search != 0))
     {
         return;
     }
@@ -1243,9 +1244,10 @@ fn rescue_dupe_host(
     }
     let backup = host.nzb_snap(hi.inner_ptr, false);
     let alive = history_candidates[winner as usize].alive_permille;
-    let dry_run =
-        crate::options::active_options().is_some_and(|o| o.scalars().dupe_search_dry_run != 0);
-    let mut msg = b"DupeSearch: ".to_vec();
+    // DupeSearchDryRun only covers what DupeSearch itself would do.
+    let dry_run = crate::options::active_options()
+        .is_some_and(|o| o.scalars().dupe_search != 0 && o.scalars().dupe_search_dry_run != 0);
+    let mut msg = b"Rescue: ".to_vec();
     msg.extend_from_slice(&nzb.name);
     msg.extend_from_slice(b" failed its health check with nothing of its key queued: ");
     msg.extend_from_slice(if dry_run {

@@ -40,6 +40,7 @@ Each layer handles what the one before it couldn't. Turn them on in this order.
 | Live repair | `DupeArticleFallback=live` | Runs stream repair while the download is still running. |
 | Borrow first | `DupeBorrowFirst=yes` | Uses duplicates before the download's own par2 files. On by default. |
 | Early failover | `HealthCheck=dupe` | Switches to a better backup as soon as the primary can't complete. |
+| Look after backups | `DupeWatch=yes` | Without searching: switches a DupeMode FORCE download to SCORE, drops a dead download below its backups, swaps a failing one for a whole backup (TWINs first), and returns the best backup when a download fails with nothing of its key queued. On by default. |
 | Donor search | `DupeSearch=yes` | Finds more copies through NZBHydra2 and queues the live ones as backups. |
 | Fleet submission | `appendfleet` | Lets a client send every copy at once and have RustyGet pick the best. |
 
@@ -169,6 +170,7 @@ If the release is already on disk, RustyGet adds nothing and the reply says `ALR
 | `HealthCheck` | `dupe` | Fails over early instead of downloading a copy that can't complete. |
 | `DupeArticleFallback` | `live` | Uses every layer. Start with `article` on slow devices. |
 | `DupeBorrowFirst` | `yes` | Repairs from duplicates during the download instead of waiting for par2. |
+| `DupeWatch` | `yes` | Looks after a download's backups without DupeSearch: FORCE to SCORE, dead download, swap, rescue. |
 | `DirectUnpack` | `yes` | Unpacks during the download, and pauses at a damaged volume until it's repaired. |
 | `DupeStreamDecompress` | `yes` on a fast machine | Costs CPU and temporary disk space; turn it off on slow devices. |
 | `NzbCleanupDisk` | `no` | Keeps backups' NZB files so they can donate. |

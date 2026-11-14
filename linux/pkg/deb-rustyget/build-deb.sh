@@ -13,8 +13,11 @@ just release "$JOBS"
 
 ARCH=$(dpkg --print-architecture)
 BASE=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
-REV=$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
-VERSION="${BASE}+git$(git log -1 --format=%cd --date=format:%Y%m%d 2>/dev/null || date +%Y%m%d).${REV}"
+# RG_VERSION overrides (e.g. when building from a copy without .git).
+if [ -z "${RG_VERSION:-}" ] && git rev-parse HEAD >/dev/null 2>&1; then
+    RG_VERSION="${BASE}+git$(git log -1 --format=%cd --date=format:%Y%m%d).$(git rev-parse --short=8 HEAD)"
+fi
+VERSION=${RG_VERSION:-${BASE}}
 
 STAGE="$ROOT/build/deb/stage"
 rm -rf "$STAGE"

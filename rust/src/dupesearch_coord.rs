@@ -23,7 +23,8 @@ use crate::dupesearch_nzb::{
     dupesearch_is_rank_only_queued_member, dupesearch_parse_pending_dir_id,
     eval_fleet_member_health, eval_fleet_outcome_reason, eval_member_rerank, eval_pick_gone,
     fleet_calc_member_add_score, fleet_clamp_timeout_sec, fleet_ensure_nzb_ext,
-    fleet_format_fetch_error, fleet_format_summary_log, fleet_update_key_score_bounds,
+    fleet_format_fetch_error, fleet_format_summary_log, fleet_member_skip_reason,
+    fleet_update_key_score_bounds,
     fleet_visit_pipe_names, http_get_format_temp_path, http_get_read_and_delete, lower_key,
     mark_searching_pending, mask_newznab_text, newznab_format_query_label,
     newznab_format_search_info_name, parse_atoi_bytes, parse_dupesearch_state_line,
@@ -5291,6 +5292,23 @@ pub unsafe fn fleet_append(
 
     let mut added = vec![0i32; candidates.len()];
     let mut out_entries: Vec<FleetOutEntry> = Vec::with_capacity(ranked_idx.len());
+    // Without DupeCheck nothing parks the backups (see fleet_member_skip_reason).
+    let dupe_check = read_host_opts(host_ctx, host_cb).dupe_check;
+    // running_id was read before the health checks: a download of the key that
+    // has left the queue since must not block the whole fleet.
+    let running_now = if !dupe_check && running_id != 0 {
+        let still_queued = with_guarded_queue(host_ctx, host_cb, |dq_ptr| {
+            dq_find_nzb(host_ctx, host_cb, dq_ptr, running_id).is_some_and(|(_, in_hist)| !in_hist)
+        });
+        if still_queued {
+            running_id
+        } else {
+            0
+        }
+    } else {
+        running_id
+    };
+    let mut any_added = false;
     for (rank_zero, &idx) in ranked_idx.iter().enumerate() {
         let cand = &candidates[idx];
         let member = &members[cand.index];
@@ -5325,6 +5343,9 @@ pub unsafe fn fleet_append(
             }
         } else if !any_alive {
             entry.status = b"DEAD".to_vec();
+        } else if let Some(why) = fleet_member_skip_reason(dupe_check, running_now, any_added) {
+            entry.status = b"SKIPPED".to_vec();
+            entry.reason = why.to_vec();
         } else {
             let rank_str = rank.to_string().into_bytes();
             let alive_str = if cand.alive >= 0 {
@@ -5354,6 +5375,7 @@ pub unsafe fn fleet_append(
                 &member.data,
             );
             added[cand.index] = entry.nzb_id;
+            any_added |= entry.nzb_id != 0;
             if entry.nzb_id == 0 {
                 entry.status = b"ERROR".to_vec();
                 entry.reason = b"RustyGet could not add the nzb-file".to_vec();

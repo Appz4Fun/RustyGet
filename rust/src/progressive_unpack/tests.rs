@@ -783,3 +783,27 @@ fn rar5_encrypted_store_holes_patched() {
     expect_ok(r, &log);
     assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
 }
+
+#[test]
+fn hole_longer_than_a_read_is_answered_in_pieces() {
+    // Two lost 1 MiB articles: longer than zipfast's 1 MiB read chunk.
+    let t = TestDir::new("bighole");
+    let data = pattern(6_000_000);
+    let chunk = 3_000_000;
+    let vols = rar5_volumes("movie.mkv", &data, chunk);
+    let first = write_set(&t.dl(), &vols);
+    let v1 = t.dl().join(volume_name(0, vols.len()));
+    let p1 = payload_offset(&vols[0], chunk) as u64;
+    let h1 = vec![(p1 + 500_000, 2 * 1_048_576)];
+    let mut dmg = vols[0].clone();
+    dmg[(p1 + 500_000) as usize..(p1 + 500_000 + 2 * 1_048_576) as usize].fill(0);
+    std::fs::write(&v1, &dmg).unwrap();
+    let feed = Damaged {
+        holes: vec![(v1.clone(), h1)],
+        repair: vec![(v1, vols[0].clone())],
+        handed: false,
+    };
+    let (r, log) = run(&first, &t.out(), Box::new(feed));
+    expect_ok(r, &log);
+    assert_eq!(std::fs::read(t.out().join("movie.mkv")).unwrap(), data);
+}

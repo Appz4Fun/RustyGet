@@ -850,8 +850,9 @@ impl RangeSource for HoledVolume {
             .iter()
             .find(|&&(s, l)| s <= offset && offset < s + l)
         {
+            // A hole answer may not be longer than the read it answers.
             return Ok(RangeRead::Hole {
-                len: start + len - offset,
+                len: (start + len - offset).min(buf.len() as u64),
             });
         }
         let mut n = buf.len();

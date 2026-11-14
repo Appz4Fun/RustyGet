@@ -5771,63 +5771,23 @@ impl QueueSubsysHost {
     }
 
     pub fn prepost_is_stopped(&self, owner_ptr: usize) -> bool {
-        self.raw(
-            61,
-            0,
-            0,
-            owner_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        let _ = self;
+        crate::jobthread::owner_stopped(owner_ptr)
     }
 
     pub fn thread_is_stopped(&self, thread_ptr: usize) -> bool {
-        self.raw(
-            61,
-            1,
-            0,
-            thread_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) != 0
+        let _ = self;
+        unsafe { crate::jobthread::nzbget_rs_job_op(thread_ptr as *const _, 1, 0, 0, 0) != 0 }
     }
 
     pub fn thread_stop(&self, thread_ptr: usize) {
-        self.raw(
-            61,
-            2,
-            0,
-            thread_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        let _ = self;
+        unsafe { crate::jobthread::nzbget_rs_job_op(thread_ptr as *const _, 2, 0, 0, 0) };
     }
 
     pub fn thread_resume(&self, thread_ptr: usize) {
-        self.raw(
-            61,
-            3,
-            0,
-            thread_ptr,
-            0,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
+        let _ = self;
+        unsafe { crate::jobthread::nzbget_rs_job_op(thread_ptr as *const _, 3, 0, 0, 0) };
     }
 
     pub fn post_stop_thread(&self, post_ptr: usize) {

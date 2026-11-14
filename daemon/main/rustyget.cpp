@@ -55,7 +55,13 @@ Log* g_Log;
 Options* g_Options;
 WorkState* g_WorkState;
 ServerPool* g_ServerPool;
-PrePostProcessor* g_PrePostProcessor;
+// The daemon's pre/post-processor thread (rust/src/jobthread.rs).
+static const PrePostRunner* g_PrePost = nullptr;
+
+static bool PrePostHasActiveUnpack()
+{
+	return g_PrePost && nzbget_rs_prepost_runner_op(g_PrePost, 5, 0, 0, 0, 0) != 0;
+}
 
 static int DaemonReloadCb(int sub);
 
@@ -97,8 +103,7 @@ public:
 		if (rc == -1) throw std::invalid_argument("Invalid command line");
 		if (rc < 0) throw std::runtime_error("Command line parsing failed");
 
-		m_prePostProcessor = std::make_unique<PrePostProcessor>();
-		g_PrePostProcessor = m_prePostProcessor.get();
+		g_PrePost = nzbget_rs_prepost_runner_new();
 
 		m_options = std::make_unique<Options>();
 		(void)nzbget_rs_daemon_exec(14, &cenv);
@@ -145,7 +150,7 @@ public:
 
 	bool HasActiveUnpack() const
 	{
-		return m_prePostProcessor ? m_prePostProcessor->HasActiveUnpack(false) : false;
+		return PrePostHasActiveUnpack();
 	}
 
 	void Stop(bool reload)
@@ -164,7 +169,6 @@ private:
 	std::unique_ptr<Options> m_options;
 	std::unique_ptr<WorkState> m_workState;
 	std::unique_ptr<ServerPool> m_serverPool;
-	std::unique_ptr<PrePostProcessor> m_prePostProcessor;
 
 	void CreateGlobals()
 	{
@@ -177,8 +181,8 @@ private:
 
 	void Cleanup()
 	{
-		m_prePostProcessor.reset();
-		g_PrePostProcessor = nullptr;
+		nzbget_rs_prepost_runner_free(g_PrePost);
+		g_PrePost = nullptr;
 
 		NzbgetRsDaemonEnv env{};
 		env.a1 = m_options ? 1 : 0;
@@ -193,20 +197,20 @@ private:
 		switch (sub)
 		{
 		case 4:
-			self->m_prePostProcessor->Start();
+			nzbget_rs_prepost_runner_op(g_PrePost, 0, 0, 0, 0, 0);
 			return 0;
 		case 5:
 			if (a2 == 0)
-				return self->m_prePostProcessor->IsRunning() ? 1 : 0;
-			return self->m_prePostProcessor->HasMoreJobs() ? 4 : 0;
+				return nzbget_rs_prepost_runner_op(g_PrePost, 2, 0, 0, 0, 0) ? 1 : 0;
+			return nzbget_rs_prepost_runner_op(g_PrePost, 4, 0, 0, 0, 0) ? 4 : 0;
 		case 6:
-			if (!self->m_prePostProcessor->IsStopped()) self->m_prePostProcessor->Stop();
+			if (!nzbget_rs_prepost_runner_op(g_PrePost, 3, 0, 0, 0, 0)) nzbget_rs_prepost_runner_op(g_PrePost, 1, 0, 0, 0, 0);
 			return 0;
 		case 7:
-			return (self->m_prePostProcessor && self->m_prePostProcessor->HasActiveUnpack(false)) ? 1 : 0;
+			return PrePostHasActiveUnpack() ? 1 : 0;
 		case 8:
-			if (a2 == 0 && self->m_prePostProcessor)
-				self->m_prePostProcessor->Stop();
+			if (a2 == 0 && g_PrePost)
+				nzbget_rs_prepost_runner_op(g_PrePost, 1, 0, 0, 0, 0);
 			return 0;
 		case 10:
 			nzbget_c_exit_proc();
@@ -221,7 +225,7 @@ std::unique_ptr<RustyGet> g_RustyGet;
 
 static int DaemonReloadCb(int sub)
 {
-	if (sub == 0) return (g_RustyGet ? 1 : 0) | ((g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack(false)) ? 2 : 0);
+	if (sub == 0) return (g_RustyGet ? 1 : 0) | (PrePostHasActiveUnpack() ? 2 : 0);
 	if (sub == 1 && g_RustyGet) g_RustyGet->Stop(true);
 	else if (sub == 3 && g_RustyGet) g_RustyGet->Stop(false);
 	return 0;
@@ -274,7 +278,7 @@ void nzbget_c_phase4_shutdown(bool reloading)
 
 bool nzbget_c_has_active_unpack(void)
 {
-	return g_RustyGet ? g_RustyGet->HasActiveUnpack() : (g_PrePostProcessor ? g_PrePostProcessor->HasActiveUnpack(false) : false);
+	return g_RustyGet ? g_RustyGet->HasActiveUnpack() : PrePostHasActiveUnpack();
 }
 
 bool nzbget_c_is_reloading(void)

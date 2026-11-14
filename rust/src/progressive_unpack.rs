@@ -804,15 +804,14 @@ impl VolumeSource for FeedProvider {
         let path = self.dir.join(&request.expected);
         let mut feed = self.feed.lock().unwrap_or_else(|e| e.into_inner());
         match feed.volume(&path) {
-            VolumeView::Ready { holes } => {
-                let native = zipfast::progressive::ImmutableFileSource::open(&path)?;
-                let info = native.info();
-                Ok(VolumeAnswer::Ready(Box::new(HoledVolume {
-                    native,
-                    info,
-                    holes,
-                })))
-            }
+            VolumeView::Ready { holes } => Ok(VolumeAnswer::Ready(Box::new(
+                HoledVolume::open(&path, holes).map_err(|cause| {
+                    ProgressiveFailure::new(FailureKind::Input {
+                        operation: zipfast::progressive::InputOperation::Open,
+                        cause,
+                    })
+                })?,
+            ))),
             VolumeView::NotYet => {
                 // The driver asks the feed again while parked and wakes the session when the
                 // volume's state changes.
@@ -826,10 +825,45 @@ impl VolumeSource for FeedProvider {
 }
 
 /// A complete volume file whose lost ranges read as permanent holes.
+///
+/// The repair of a damaged volume writes the lost ranges into the file while the session may
+/// still be reading it. Those ranges are holes for the session and are never read, so the
+/// file's identity and length are taken once at open and the bytes are read directly rather
+/// than through zipfast's immutable-file source, which treats any write as a change.
 struct HoledVolume {
-    native: zipfast::progressive::ImmutableFileSource,
+    file: std::fs::File,
     info: SourceInfo,
     holes: Vec<(u64, u64)>,
+}
+
+impl HoledVolume {
+    fn open(path: &Path, holes: Vec<(u64, u64)>) -> std::io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let meta = file.metadata()?;
+        #[cfg(unix)]
+        let id = {
+            use std::os::unix::fs::MetadataExt;
+            (u128::from(meta.dev()) << 64) | u128::from(meta.ino())
+        };
+        #[cfg(not(unix))]
+        let id = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            path.hash(&mut h);
+            u128::from(h.finish())
+        };
+        let len = meta.len();
+        Ok(Self {
+            file,
+            info: SourceInfo {
+                id: zipfast::progressive::SourceId(id),
+                generation: 0,
+                extent: len,
+                length: zipfast::progressive::SourceLength::Final(len),
+            },
+            holes,
+        })
+    }
 }
 
 impl RangeSource for HoledVolume {
@@ -837,13 +871,13 @@ impl RangeSource for HoledVolume {
         self.info
     }
     fn backing_files(&self) -> &[std::fs::File] {
-        self.native.backing_files()
+        std::slice::from_ref(&self.file)
     }
     fn read_at(
         &mut self,
         offset: u64,
         buf: &mut [u8],
-        cx: &mut Context<'_>,
+        _cx: &mut Context<'_>,
     ) -> ProgressiveResult<RangeRead> {
         if let Some(&(start, len)) = self
             .holes
@@ -855,12 +889,41 @@ impl RangeSource for HoledVolume {
                 len: (start + len - offset).min(buf.len() as u64),
             });
         }
-        let mut n = buf.len();
+        let mut n = buf.len().min(self.info.extent.saturating_sub(offset) as usize);
         if let Some(&(start, _)) = self.holes.iter().find(|&&(s, _)| s > offset) {
             n = n.min((start - offset) as usize);
         }
-        self.native.read_at(offset, &mut buf[..n], cx)
+        let read = read_at(&self.file, &mut buf[..n], offset);
+        match read {
+            Ok(0) if n > 0 => Err(ProgressiveFailure::new(FailureKind::Truncated)),
+            Ok(count) => Ok(RangeRead::Filled { count }),
+            Err(cause) => {
+                let mut e = ProgressiveFailure::new(FailureKind::Input {
+                    operation: zipfast::progressive::InputOperation::Read,
+                    cause,
+                });
+                e.context.packed_offset = Some(offset);
+                Err(e)
+            }
+        }
     }
+}
+
+#[cfg(unix)]
+fn read_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    loop {
+        match file.read_at(buf, offset) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            r => return r,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn read_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    file.seek_read(buf, offset)
 }
 
 #[cfg(test)]

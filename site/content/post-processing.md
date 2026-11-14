@@ -98,4 +98,4 @@ Permissions
 More copies
 : [Donor search](dupesearch.md) finds, checks, and queues other postings of a download through NZBHydra2. This replaces the DupeDonors extension.
 
-Code inherited from NZBGet's extension system, such as the Extension Manager in the web interface and the extension API methods, is left over and on its way out.
+RustyGet doesn't run extension scripts. The Extension Manager, the extension options, and the extension API methods that came from NZBGet are gone.

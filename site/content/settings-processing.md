@@ -17,13 +17,13 @@ Review `ParBuffer` and `ParThreads` against available memory and CPU capacity. `
 Key options: [`CrcCheck`](options.md#crccheck), [`ParCheck`](options.md#parcheck), [`ParRepair`](options.md#parrepair), [`ParQuick`](options.md#parquick), [`HealthCheck`](options.md#healthcheck), [`ParBuffer`](options.md#parbuffer), [`ParThreads`](options.md#parthreads).
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/check-repair.jpg" aria-label="Open full-size picture: Checksum, par2, rename, and health-check settings"><img src="assets/settings/check-repair.jpg" width="1280" height="975" loading="lazy" alt="Checksum, par2, rename, and health-check settings"></a>
+<a class="settings-shot" href="assets/settings/check-repair.jpg" aria-label="Open full-size picture: Checksum, par2, rename, and health-check settings"><img src="assets/settings/check-repair.jpg" width="1280" height="1244" loading="lazy" alt="Checksum, par2, rename, and health-check settings"></a>
 <figcaption>Verification, repair, and duplicate failover are separate controls. Open the picture to inspect the full section.</figcaption>
 </figure>
 
 ## Unpack
 
-Turn `Unpack` on when you want archive extraction. RustyGet extracts RAR, 7-Zip, ZIP, and tar archives itself, so it needs no external tools; the `UnrarCmd` and `SevenZipCmd` fields in the picture are gone from the current template. `DirectUnpack` can extract supported archives while articles arrive; `UseTempUnpackDir` controls temporary extraction folders.
+Turn `Unpack` on when you want archive extraction. RustyGet extracts RAR, 7-Zip, ZIP, and tar archives itself, so it needs no external tools. `DirectUnpack` can extract supported archives while articles arrive; `UseTempUnpackDir` controls temporary extraction folders.
 
 `UnpackCleanupDisk` removes archive files after successful extraction. Choose it according to what you want the completed folder to retain. `UnpackIgnoreExt` lists nonstandard RAR extensions, such as `.cbr`, that should keep their names during RAR renaming. It also suppresses the failure for finding only nonstandard RAR archives with those extensions. Recognized `.rar` and `.7z` archives still follow normal extraction. `UnpackPassFile` supplies a password-list file when needed.
 
@@ -32,6 +32,6 @@ A category can override the global unpack setting. Nested archives are unpacked 
 Key options: [`Unpack`](options.md#unpack), [`DirectUnpack`](options.md#directunpack), [`UseTempUnpackDir`](options.md#usetempunpackdir), [`UnpackCleanupDisk`](options.md#unpackcleanupdisk), [`UnpackIgnoreExt`](options.md#unpackignoreext).
 
 <figure class="settings-figure">
-<a class="settings-shot" href="assets/settings/unpack.jpg" aria-label="Open full-size picture: Archive extraction and cleanup settings"><img src="assets/settings/unpack.jpg" width="1280" height="938" loading="lazy" alt="Archive extraction and cleanup settings"></a>
+<a class="settings-shot" href="assets/settings/unpack.jpg" aria-label="Open full-size picture: Archive extraction and cleanup settings"><img src="assets/settings/unpack.jpg" width="1280" height="908" loading="lazy" alt="Archive extraction and cleanup settings"></a>
 <figcaption>These controls choose extraction behavior and retained files. Open the picture to inspect the full section.</figcaption>
 </figure>

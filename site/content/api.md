@@ -51,11 +51,10 @@ This is every method that RustyGet answers. All but `appendfleet` and the three 
 | Program | `version`, `shutdown`, `reload`, `dump` |
 | Queue | `listgroups`, `listfiles`, `postqueue`, `urlqueue`, `append`, `appendurl`, `appendfleet`, `editqueue`, `scan` |
 | History | `history` |
-| Status and logs | `status`, `sysinfo`, `systemhealth`, `log`, `clearlog`, `writelog`, `loadlog`, `logscript`, `logupdate`, `servervolumes`, `resetservervolume` |
+| Status and logs | `status`, `sysinfo`, `systemhealth`, `log`, `clearlog`, `writelog`, `loadlog`, `logupdate`, `servervolumes`, `resetservervolume` |
 | Pause and speed | `rate`, `pausedownload`, `resumedownload`, `pausepost`, `resumepost`, `pausescan`, `resumescan`, `scheduleresume`, and the older names `pause`, `pausedownload2`, `resume`, and `resumedownload2` |
 | Configuration | `config`, `loadconfig`, `saveconfig`, `configtemplates`, `editserver` |
 | RSS feeds | `fetchfeed`, `viewfeed`, `previewfeed` |
-| Extensions, left over from NZBGet and being removed | `loadextensions`, `downloadextension`, `updateextension`, `deleteextension`, `testextension`, `startscript` |
 | Updates | `checkupdates`, `startupdate` |
 | Tests and tools | `testserver`, `testserverspeed`, `testdiskspeed`, `testnetworkspeed`, `readurl` |
 | TLS cipher test | `tlscipherstart`, `tlscipherstatus`, `tlsciphercancel`: the **Optimize TLS ciphers** test in the news-server settings, for the control account only |
@@ -135,7 +134,7 @@ RustyGet also stores its findings as NZB parameters, which the API returns in `P
 RustyGet fixes several problems in NZBGet's API. Clients that rely on the old behavior may need changes:
 
 - **JSON-P off by default.** Any web page can make a browser send a JSON-P request, with the login the browser keeps, and read the answer. RustyGet answers JSON-P only with option `JsonP=yes`, and then with the restricted user's access, so user names, passwords, and API keys come back as `***`. Otherwise every JSON-P request answers error 403. NZBGet answered JSON-P with full access.
-- **POST for methods that change something.** Plain GET and JSON-P run only the methods that read: `config`, `configtemplates`, `dump`, `history`, `listfiles`, `listgroups`, `loadconfig`, `loadextensions`, `loadlog`, `log`, `logscript`, `logupdate`, `postqueue`, `servervolumes`, `status`, `sysinfo`, `systemhealth`, `urlqueue`, and `version`. Every other method answers error 4 there. `downloadextension`, `updateextension`, `deleteextension`, `testextension`, `readurl`, `testserverspeed`, `testdiskspeed`, and `testnetworkspeed` joined the methods that need POST. In NZBGet, JSON-P ran every method, so a `<script>` tag on any web page could edit the queue, change settings, or shut NZBGet down with the browser's saved login.
+- **POST for methods that change something.** Plain GET and JSON-P run only the methods that read: `config`, `configtemplates`, `dump`, `history`, `listfiles`, `listgroups`, `loadconfig`, `loadlog`, `log`, `logupdate`, `postqueue`, `servervolumes`, `status`, `sysinfo`, `systemhealth`, `urlqueue`, and `version`. Every other method answers error 4 there. `readurl`, `testserverspeed`, `testdiskspeed`, and `testnetworkspeed` joined the methods that need POST. In NZBGet, JSON-P ran every method, so a `<script>` tag on any web page could edit the queue, change settings, or shut NZBGet down with the browser's saved login.
 - **Access checks in multicalls.** The XML-RPC `system.multicall` method runs each call with the caller's access level. In NZBGet, a restricted account could read passwords through it.
 - **Range checks.** Integers outside the 32-bit range are rejected instead of wrapping around. `editqueue` checks scores, priorities, parameters, and duplicate modes.
 - **Safe configuration saves.** `saveconfig` refuses an empty or malformed option list instead of truncating the file.

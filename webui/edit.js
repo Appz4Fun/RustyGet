@@ -186,12 +186,14 @@ var DetailsPanel = (new function($)
 		{
 			return members;
 		}
+		// the daemon matches dupe keys ignoring ASCII case (eq_ignore_ascii_case)
+		var key = item.DupeKey.toLowerCase();
 		function collect(list, source)
 		{
 			for (var i = 0; list && i < list.length; i++)
 			{
 				var other = list[i];
-				if (other.Kind === 'NZB' && other.DupeKey === item.DupeKey)
+				if (other.Kind === 'NZB' && other.DupeKey.toLowerCase() === key)
 				{
 					members.push({ item: other, source: source, role: DetailsPanel.role(other) });
 				}
@@ -338,6 +340,12 @@ var DetailsPanel = (new function($)
 		$container.on('click', 'a.fleet-member', function(e)
 		{
 			e.preventDefault();
+			// a save in flight sends its remaining edits to the shown copy:
+			// stay on it until the save completes
+			if ($container.closest('.modal').hasClass('is-saving'))
+			{
+				return;
+			}
 			DetailsPanel.open($(this).attr('data-fleet-source'), parseInt($(this).attr('data-fleet-id'), 10));
 		});
 	}
@@ -587,7 +595,7 @@ var DownloadsEditDialog = (new function($)
 
 		if (!switching)
 		{
-			$DownloadsEditDialog.modal({backdrop: true});
+			$DownloadsEditDialog.modal({backdrop: 'static'});
 		}
 	}
 
@@ -679,6 +687,7 @@ var DownloadsEditDialog = (new function($)
 	function disableAllButtons()
 	{
 		$('#DownloadsEditDialog .modal-footer .btn').attr('disabled', 'disabled');
+		$('#DownloadsEditDialog').addClass('is-saving');
 		setTimeout(function()
 		{
 			$('#DownloadsEdit_Transmit').show();
@@ -688,6 +697,7 @@ var DownloadsEditDialog = (new function($)
 	function enableAllButtons()
 	{
 		$('#DownloadsEditDialog .modal-footer .btn').removeAttr('disabled');
+		$('#DownloadsEditDialog').removeClass('is-saving');
 		$('#DownloadsEdit_Transmit').hide();
 	}
 
@@ -2074,7 +2084,7 @@ var HistoryEditDialog = (new function($)
 
 		if (!switching)
 		{
-			$HistoryEditDialog.modal({backdrop: true});
+			$HistoryEditDialog.modal({backdrop: 'static'});
 		}
 	}
 
@@ -2183,6 +2193,7 @@ var HistoryEditDialog = (new function($)
 	function disableAllButtons()
 	{
 		$('#HistoryEditDialog .modal-footer .btn').attr('disabled', 'disabled');
+		$('#HistoryEditDialog').addClass('is-saving');
 		setTimeout(function()
 		{
 			$('#HistoryEdit_Transmit').show();
@@ -2192,6 +2203,7 @@ var HistoryEditDialog = (new function($)
 	function enableAllButtons()
 	{
 		$('#HistoryEditDialog .modal-footer .btn').removeAttr('disabled');
+		$('#HistoryEditDialog').removeClass('is-saving');
 		$('#HistoryEdit_Transmit').hide();
 	}
 

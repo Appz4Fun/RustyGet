@@ -19,8 +19,9 @@ const { installDetailsFixture } = require('./details-fixture');
       await context.addInitScript(t => localStorage.setItem('Theme', t), theme);
       const page = await context.newPage();
       const errors = [], writes = [];
+      const fixture = {};
       page.on('pageerror', e => errors.push(e.message));
-      await installDetailsFixture(page, base, writes);
+      await installDetailsFixture(page, base, writes, fixture);
       await page.goto(base.href);
       await page.locator('#DownloadsTable tbody tr').first().waitFor();
       const check = async (label, action) => {
@@ -91,6 +92,25 @@ const { installDetailsFixture } = require('./details-fixture');
         await page.locator('#DownloadsEdit_Back').click();
         await page.locator('#DownloadsEdit_GeneralTab').waitFor({ state: 'visible' });
         assert(Math.abs((await panel.boundingBox()).width - before) <= 1, 'Back restores the panel width');
+      });
+
+      await check('fleet stays on the copy while its save is in flight', async () => {
+        let release;
+        fixture.holdMutation = () => new Promise(resolve => { release = resolve; });
+        try {
+          await page.locator('#DownloadsEdit_NZBName').fill('Held copy 02');
+          await page.locator('#DownloadsEdit_Save').click();
+          await page.waitForFunction(() => document.getElementById('DownloadsEditDialog').classList.contains('is-saving'));
+          await page.locator('#DownloadsEdit_Fleet a.fleet-member[data-fleet-id="43"]').dispatchEvent('click');
+          assert.match(await page.locator('#DownloadsEdit_Title').innerText(), /copy 02/, 'No switch while saving');
+        } finally {
+          fixture.holdMutation = undefined;
+          if (release) release();
+        }
+        await panel.waitFor({ state: 'hidden' });
+        assert(writes.every(w => w.method !== 'editqueue' || w.params[2][0] === 42), 'Every edit went to the copy being saved');
+        await page.locator('#DownloadsTable tbody a[data-nzbid="42"]').first().click();
+        await panel.waitFor({ state: 'visible' });
       });
 
       await check('save still edits the shown copy', async () => {

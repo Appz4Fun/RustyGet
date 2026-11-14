@@ -80,6 +80,7 @@ function historyItems() {
     Parameters: params({ '*Unpack:': 'yes', DupeFiles: PRINT, DupeCopyKind: 'twin', DupeHealth: '97' })
   });
   failed.NZBName = `${RELEASE} [NZBDAV copy 01]`; failed.NZBNicename = failed.NZBName;
+  failed.DupeKey = 'TVDB=355730-s02e02'; // the daemon matches dupe keys ignoring ASCII case
   const done = group(32, '', {
     NZBName: 'Example.Completed.Release', NZBNicename: 'Example.Completed.Release', Category: 'Movies', DupeKey: '',
     Status: 'SUCCESS/ALL', ParStatus: 'SUCCESS', UnpackStatus: 'SUCCESS', ...sizes('RemainingSize', 0), RemainingFileCount: 0,
@@ -115,7 +116,7 @@ function configOptions() {
 }
 
 // Route every request of `page` to committed files and synthetic RPC replies.
-async function installDetailsFixture(page, base, writes = []) {
+async function installDetailsFixture(page, base, writes = [], hooks = {}) {
   const { template, options } = configOptions();
   const groups = fleetGroups();
   const history = historyItems();
@@ -125,7 +126,7 @@ async function installDetailsFixture(page, base, writes = []) {
     version: '26.3', sysinfo: {}, systemhealth: { Alerts: [], Sections: [] }, tlscipherstatus: {},
     readurl: JSON.stringify({ 'stable-version': '26.3', 'testing-version': '26.3' }), listfiles: [], viewfeed: []
   };
-  await page.route('**/*', route => {
+  await page.route('**/*', async route => {
     const request = route.request();
     const url = new URL(request.url());
     if (url.origin !== base.origin) return route.abort();
@@ -136,6 +137,7 @@ async function installDetailsFixture(page, base, writes = []) {
       const rpc = request.method() === 'POST' ? request.postDataJSON() : { id: 1, method: url.pathname.split('/').pop() };
       if (['editqueue', 'saveconfig', 'append', 'writelog', 'pausedownload', 'resumedownload', 'scan', 'rate'].includes(rpc.method)) {
         writes.push({ method: rpc.method, params: rpc.params });
+        if (hooks.holdMutation) await hooks.holdMutation(rpc);
         return route.fulfill({ contentType: 'application/json', json: { id: rpc.id, result: true } });
       }
       const result = replies[rpc.method];

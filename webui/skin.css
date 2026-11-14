@@ -4016,3 +4016,8 @@ a.fleet-member:hover {
 	text-overflow: ellipsis;
 	vertical-align: middle;
 }
+
+.modal-drawer.is-saving a.fleet-member {
+	pointer-events: none;
+	opacity: 0.6;
+}

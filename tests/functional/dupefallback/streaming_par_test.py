@@ -186,9 +186,32 @@ def run_case(binary, par2, case):
             assert recovery_requests, 'recovery slice never fetched'
         else:
             assert not events, 'manual/repair-off created a live session'
-            assert not recovery_requests, 'disabled repair fetched a recovery volume'
+            if case == 'manual':
+                # Preserve incumbent manual postprocessing: it downloads the
+                # remaining PAR files for the user's later manual check.
+                manual = log.find('Downloading all remaining files for manual par-check for ' + name)
+                first_recovery = log.find('Downloading ' + name + '/rel.vol')
+                assert recovery_requests and 0 <= manual < first_recovery, \
+                    'manual recovery was fetched before the ordinary manual stage'
+                assert history.get('ParStatus') == 'MANUAL', history
+            else:
+                # ParRepair=no still permits the ordinary checker to establish
+                # repairability; it must not fetch through a live session.
+                checking = log.find('Checking pars for ' + name)
+                first_recovery = log.find('Downloading ' + name + '/rel.vol')
+                assert recovery_requests and 0 <= checking < first_recovery, \
+                    'repair-off recovery was fetched before the ordinary checker'
+                assert history.get('Status') == 'WARNING/REPAIRABLE', history
+                assert history.get('ParStatus') == 'REPAIR_POSSIBLE', history
+                assert 'Repair possible for ' + name + '/rel' in log, \
+                    'ordinary checker did not establish repairability'
             assert 'paused volume(s) released' not in log, 'disabled repair released a live hold'
             assert not history.get('Status', '').startswith('SUCCESS'), history
+            damaged = [path for path in target.find_files('main', 'dst')
+                       if os.path.basename(path) == 'rel.part040.rar']
+            assert len(damaged) == 1, 'disabled repair lost or duplicated the damaged source'
+            assert target.read_file(damaged[0]) != golden['rel.part040.rar'], \
+                'disabled repair healed the damaged source'
         result['passed'] = True
     except Exception as error:
         result['error'] = repr(error)
@@ -196,6 +219,14 @@ def run_case(binary, par2, case):
         if proxy:
             proxy.close()
         target.teardown(True)
+        result['native_children'] = []
+        for process in target.procs:
+            try:
+                code = process.wait(timeout=10)
+                result['native_children'].append({'pid': process.pid, 'exit_code': code})
+            except subprocess.TimeoutExpired:
+                result['passed'] = False
+                result['cleanup_error'] = 'owned native child did not terminate'
         Path(target.path('result.json')).write_text(json.dumps(result, indent=2) + '\n')
         print(json.dumps(result, sort_keys=True), flush=True)
         print('Artifacts: ' + work, flush=True)

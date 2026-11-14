@@ -74,6 +74,23 @@ pub fn is_stream_eligible(filename: &[u8]) -> bool {
     MEDIA_EXTS.iter().any(|&m| ext.as_slice() == m)
 }
 
+/// A stored archive that may itself hold the media file: `ContentMapper` maps through it
+/// (a file in a RAR in a 7z, and so on) to reach the payload.
+pub fn is_nested_container_name(filename: &[u8]) -> bool {
+    let Some(dot) = filename.iter().rposition(|&b| b == b'.') else {
+        return false;
+    };
+    let ext = c_lower_bytes(&filename[dot..]);
+    const CONTAINER_EXTS: &[&[u8]] = &[b".rar", b".7z", b".zip"];
+    CONTAINER_EXTS.iter().any(|&m| ext.as_slice() == m)
+}
+
+/// What a one-layer content map may name as its inner file: the media file, or a stored
+/// archive that is mapped through in turn.
+fn is_map_inner_eligible(filename: &[u8]) -> bool {
+    is_stream_eligible(filename) || is_nested_container_name(filename)
+}
+
 /// `DupeStreamRepair::ComputeHoles`: computes the missing `[offset, size)` ranges in `[0, file_size)`
 /// given the finished article ranges.
 pub fn compute_holes(covered: &[NzbgetRsByteRange], file_size: i64) -> Vec<NzbgetRsByteRange> {
@@ -1003,7 +1020,7 @@ where
     if prim.comp_size != prim.uncomp_size {
         return Err("stored entry sizes disagree");
     }
-    if !is_stream_eligible(&inner_name) {
+    if !is_map_inner_eligible(&inner_name) {
         return Err("inner file is not a media file");
     }
     if (prim.disk as usize) >= disk_bases.len() {
@@ -1995,7 +2012,7 @@ where
     if prim.name.is_empty() {
         return Err("unsupported 7z structure");
     }
-    if !is_stream_eligible(&prim.name) {
+    if !is_map_inner_eligible(&prim.name) {
         return Err("inner file is not a media file");
     }
     if prim.data_pos.saturating_add(prim.size) > total_size {
@@ -2083,7 +2100,7 @@ fn seven_zip_inspect_encrypted(
         Some(pos) => full_name[pos + 1..].to_vec(),
         None => full_name.to_vec(),
     };
-    if inner_name.is_empty() || !is_stream_eligible(&inner_name) {
+    if inner_name.is_empty() || !is_map_inner_eligible(&inner_name) {
         return Err("inner file is not a media file");
     }
     if streams.folder_coder[folder] != SZ_CODER_COPY {
@@ -2887,7 +2904,7 @@ where
 
     let inner_name = base_file_name(primary.filename).to_vec();
     let inner_size = primary.size;
-    if !is_stream_eligible(&inner_name) {
+    if !is_map_inner_eligible(&inner_name) {
         return Err("inner file is not a media file");
     }
 
@@ -6882,6 +6899,59 @@ pub fn materialize_donor_set(
     true
 }
 
+/// A stored archive inside another one, read through the outer archive's content map
+/// (see [`ContentMapper::build_map_with_tls`]).
+struct NestedLayerSource<'a> {
+    outer: &'a ContentMap,
+    sources: &'a dyn ContentSourceSet,
+}
+
+impl ContentSource for NestedLayerSource<'_> {
+    fn size(&self) -> i64 {
+        self.outer.inner_size()
+    }
+
+    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+        if buf.is_empty() {
+            return true;
+        }
+        let pieces = self.outer.map_from_inner(NzbgetRsByteRange {
+            offset,
+            size: buf.len() as i64,
+        });
+        if pieces.iter().map(|p| p.size).sum::<i64>() != buf.len() as i64 {
+            return false;
+        }
+        let mut filled = 0usize;
+        for piece in pieces {
+            let Some(source) = self.sources.get_source(piece.member_index) else {
+                return false;
+            };
+            let len = piece.size as usize;
+            if !source.read(piece.offset, &mut buf[filled..filled + len]) {
+                return false;
+            }
+            filled += len;
+        }
+        true
+    }
+}
+
+/// The one-member source set of a nested archive.
+struct NestedLayerSources<'a> {
+    source: NestedLayerSource<'a>,
+}
+
+impl ContentSourceSet for NestedLayerSources<'_> {
+    fn get_source(&self, member_index: i32) -> Option<&dyn ContentSource> {
+        (member_index == 0).then_some(&self.source as &dyn ContentSource)
+    }
+
+    fn aborted(&self) -> bool {
+        self.source.sources.aborted()
+    }
+}
+
 /// Pure-Rust `ContentMapper` mirroring `daemon/postprocess/ContentMap.h`.
 pub struct ContentMapper;
 
@@ -6915,7 +6985,116 @@ impl ContentMapper {
         Self::build_map_with_tls(members, set, sources, password.map(str::as_bytes), true)
     }
 
+    /// Maps the media file of a member set to the bytes of its members, through every
+    /// stored container around it: when the file a container holds is itself a stored
+    /// archive (a RAR in a 7z, and so on), that archive is read through the map so far and
+    /// mapped in turn, and the result addresses the media file directly. The payload is
+    /// what duplicates share; the containers around it differ from post to post.
     pub fn build_map_with_tls(
+        members: &[SetMember],
+        set: &MemberSet,
+        sources: &dyn ContentSourceSet,
+        password: Option<&[u8]>,
+        tls_enabled: bool,
+    ) -> Result<ContentMap, String> {
+        let mut map = Self::build_layer_map(members, set, sources, password, tls_enabled)?;
+        let mut depth = 0;
+        // Only a stored archive is followed further; any other name is what the layer
+        // builders accepted before (a media file, or an extensionless bare file).
+        while is_nested_container_name(map.inner_name_bytes()) {
+            if depth >= Self::MAX_NESTED_LAYERS {
+                return Err("inner file is not a media file".to_string());
+            }
+            if map.encrypted() {
+                // The archive inside lies in the plaintext of an encrypted one: its bytes
+                // have no place of their own in the members.
+                return Err("nested archive inside an encrypted archive".to_string());
+            }
+            if sources.aborted() {
+                return Err("member unreadable".to_string());
+            }
+            depth += 1;
+            let nested_members = [SetMember::new(map.inner_name_bytes(), map.inner_size())];
+            let Some(nested_set) = Self::group_sets(&nested_members)
+                .into_iter()
+                .find(|s| s.members == [0])
+            else {
+                return Err("inner file is not a media file".to_string());
+            };
+            let layer = NestedLayerSources {
+                source: NestedLayerSource {
+                    outer: &map,
+                    sources,
+                },
+            };
+            let inner =
+                Self::build_layer_map(&nested_members, &nested_set, &layer, password, tls_enabled)?;
+            map = Self::compose_nested(&map, &inner)?;
+        }
+        Ok(map)
+    }
+
+    /// How many stored archives may sit between the members and the media file.
+    const MAX_NESTED_LAYERS: usize = 4;
+
+    /// `inner` maps a file to ranges of the archive that `outer` maps to the members:
+    /// the composition maps the file straight to the members.
+    fn compose_nested(outer: &ContentMap, inner: &ContentMap) -> Result<ContentMap, String> {
+        const BROKEN: &str = "nested archive does not lie in mapped data";
+        let mut map = ContentMap::default();
+        map.set_inner_name_bytes(inner.inner_name_bytes());
+        map.set_inner_size(inner.inner_size());
+        let encrypted = inner.encrypted();
+        if encrypted && inner.run_cryptos().len() != inner.runs().len() {
+            return Err(BROKEN.to_string());
+        }
+        for (i, run) in inner.runs().iter().enumerate() {
+            // The bytes of this run inside the nested archive: its cipher bytes when the
+            // nested archive is encrypted (they may run past the plaintext by the padding).
+            let (from, len, crypto) = if encrypted {
+                let rc = &inner.run_cryptos()[i];
+                (rc.cipher_data_offset, rc.cipher_size, rc.crypto.clone())
+            } else {
+                (run.member_offset, run.size, None)
+            };
+            let pieces = outer.map_from_inner(NzbgetRsByteRange {
+                offset: from,
+                size: len,
+            });
+            if pieces.iter().map(|p| p.size).sum::<i64>() != len {
+                return Err(BROKEN.to_string());
+            }
+            let mut inner_offset = run.inner_offset;
+            let mut plain_left = run.size;
+            for piece in pieces {
+                let plain = piece.size.min(plain_left);
+                if plain <= 0 {
+                    return Err(BROKEN.to_string());
+                }
+                map.runs_mut().push(NzbgetRsContentRun {
+                    inner_offset,
+                    member_index: piece.member_index,
+                    member_offset: piece.offset,
+                    size: plain,
+                });
+                if encrypted {
+                    map.run_cryptos_mut().push(RunCrypto {
+                        crypto: crypto.clone(),
+                        cipher_data_offset: piece.offset,
+                        cipher_size: piece.size,
+                    });
+                }
+                inner_offset += plain;
+                plain_left -= plain;
+            }
+            if plain_left != 0 {
+                return Err(BROKEN.to_string());
+            }
+        }
+        Ok(map)
+    }
+
+    fn build_layer_map(
         members: &[SetMember],
         set: &MemberSet,
         sources: &dyn ContentSourceSet,
@@ -9818,6 +9997,72 @@ mod tests {
             sz_map(&[sz_unhex(SZ_EVEN)], Some(b"Secret1")).err(),
             Some("archive password cannot be checked")
         );
+    }
+
+    fn run(
+        inner_offset: i64,
+        member_index: i32,
+        member_offset: i64,
+        size: i64,
+    ) -> NzbgetRsContentRun {
+        NzbgetRsContentRun {
+            inner_offset,
+            member_index,
+            member_offset,
+            size,
+        }
+    }
+
+    #[test]
+    fn nested_maps_compose_to_the_payload() {
+        assert!(is_nested_container_name(b"inner.RAR"));
+        assert!(is_nested_container_name(b"a.7z"));
+        assert!(is_nested_container_name(b"a.zip"));
+        assert!(!is_nested_container_name(b"a.mkv"));
+        assert!(!is_nested_container_name(b"a.r00"));
+        assert!(!is_nested_container_name(b"noext"));
+
+        // Outer: a 300-byte archive file stored over two members, behind 40 and 10 bytes
+        // of container. Inner: a 200-byte movie stored at offset 60 of that archive.
+        let mut outer = ContentMap::default();
+        outer.set_inner_name_bytes(b"inner.rar");
+        outer.set_inner_size(300);
+        *outer.runs_mut() = vec![run(0, 0, 40, 100), run(100, 1, 10, 200)];
+        let mut inner = ContentMap::default();
+        inner.set_inner_name_bytes(b"movie.mkv");
+        inner.set_inner_size(200);
+        *inner.runs_mut() = vec![run(0, 0, 60, 200)];
+
+        let map = ContentMapper::compose_nested(&outer, &inner).unwrap();
+        assert_eq!(map.inner_name_bytes(), b"movie.mkv");
+        assert_eq!(map.inner_size(), 200);
+        assert!(!map.encrypted());
+        // Archive bytes 60..100 are member 0 at 100..140, bytes 100..260 member 1 at 10..170.
+        assert_eq!(map.runs(), &[run(0, 0, 100, 40), run(40, 1, 10, 160)]);
+
+        // A nested archive that claims bytes the outer one does not hold is refused.
+        *inner.runs_mut() = vec![run(0, 0, 60, 400)];
+        assert!(ContentMapper::compose_nested(&outer, &inner).is_err());
+
+        // An encrypted inner archive: 200 bytes of movie in 208 bytes of cipher at 60.
+        let crypto =
+            std::sync::Arc::new(RarCryptoContext::from_key_iv(&[7u8; 32], [1u8; 16]).unwrap());
+        *inner.runs_mut() = vec![run(0, 0, 60, 200)];
+        inner.run_cryptos_mut().push(RunCrypto {
+            crypto: Some(crypto),
+            cipher_data_offset: 60,
+            cipher_size: 208,
+        });
+        let enc = ContentMapper::compose_nested(&outer, &inner).unwrap();
+        assert!(enc.encrypted());
+        assert_eq!(enc.runs(), &[run(0, 0, 100, 40), run(40, 1, 10, 160)]);
+        assert_eq!(enc.cipher_stream_size(), 208);
+        let cipher: Vec<(i64, i64)> = enc
+            .run_cryptos()
+            .iter()
+            .map(|rc| (rc.cipher_data_offset, rc.cipher_size))
+            .collect();
+        assert_eq!(cipher, vec![(100, 40), (10, 168)]);
     }
 
     #[test]

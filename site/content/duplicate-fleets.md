@@ -14,10 +14,12 @@ Primary
 : The copy that's downloading. The web interface tags it <span class="tag tag-primary">PRIMARY</span>.
 
 Twin
-: A backup whose files are byte-identical to the primary's, proven by the checksums in the two postings' par2 files: the full MD5, the MD5 of the first 16 KB, and the length of every file. A twin's articles and par2 volumes can be used freely. Tagged <span class="tag tag-twin">TWIN</span>, or `TWIN N/M` when more than half of the files match.
+: The exact same post as the primary, uploaded again: the same files with the same sizes, article counts, and checksums. The par2 files of the two postings prove it: the full MD5, the MD5 of the first 16 KB, and the length of every file. Because the posts are identical, a twin's articles can be swapped in one for one, and its par2 volumes can be used freely. Tagged <span class="tag tag-twin">TWIN</span>, or `TWIN N/M` when more than half of the files match.
 
 Alt
-: The same release from another encode, so the bytes differ. An alt is a failover backup. Article fallback borrows only from files that match the primary's, so it finds little or nothing to borrow in an alt, unless the two share a file unchanged. Tagged <span class="tag tag-alt">ALT</span>.
+: The same video file in a different container. The movie inside is byte-identical, but it's packed another way: other volume sizes, RAR instead of 7-Zip, stored inside a further archive, or encrypted with another password. The container bytes of two alts never match, so articles can't be swapped. RustyGet instead compares and borrows the bytes of the video file itself, through a map of where that file lies inside each container. An alt whose containers are stored, not compressed, and whose password is known can donate any missing range. A compressed alt has to be downloaded and extracted first, or serves as a failover backup. Tagged <span class="tag tag-alt">ALT</span>.
+
+A copy with a different video file, such as another encode, is neither a twin nor an alt. It's a plain backup that RustyGet can only fail over to.
 
 Same posting
 : Two NZB files that point to the same Usenet articles, such as one posting listed by two indexers. They can't back each other up, because they share every missing article. RustyGet recognizes them by their Message-IDs and keeps one.

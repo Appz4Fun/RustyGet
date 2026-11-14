@@ -122,7 +122,7 @@ The mark is a hex nut with a download arrow: hardware for a tool that builds fil
 - Follow the [Google developer documentation style guide](https://developers.google.com/style). Vale checks every page and the README on each build.
 - Use second person and present tense. Describe what the software does now, not plans for later.
 - Use sentence case for headings.
-- Use the project's words consistently: **fleet** for all postings of one title, **primary** for the copy being downloaded, **twin** for a byte-identical copy proven by par2 checksums, and **alt** for the same release in another encode.
+- Use the project's words consistently: **fleet** for all postings of one title, **primary** for the copy being downloaded, **twin** for the exact same post proven by par2 checksums, and **alt** for the same video file in a different container.
 - Never claim a feature that the code doesn't have. Mark planned work as planned.
 
 ## Use in other surfaces

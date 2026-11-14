@@ -370,6 +370,9 @@ def main():
         # nested archive as target and as donor
         if 'nested' in b.packs:
             b.run('alt rar5 <- nested', 'rar5', ['nested'], fail=f)
+            b.run('alt bare <- nested', 'bare', ['nested'], fail=f)
+            b.run('alt nested <- rar5', 'nested', ['rar5'], fail=f)
+            b.run('alt nested <- 7zenc', 'nested', ['7zenc'], fail=f)
         # no duplicate at all: what the damage costs without borrowing
         b.run('no alt rar5 (fails)', 'rar5', [], fail=f)
     finally:

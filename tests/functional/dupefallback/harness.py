@@ -2403,6 +2403,44 @@ def scenario_xpack7z(daemon, t):
             % (h['Status'], c['recov'], c['repaired'], integ['movie.mkv']))
 
 
+def scenario_xpack7zlzma2(daemon, t):
+    """Bare target repaired from a real 7-Zip LZMA2 donor (.7z.001/.002) whose
+    data did not compress: LZMA2 stored it as raw chunks, and only the articles
+    around the holes are borrowed. DupeStreamDecompress is off, so the donor is
+    never fetched whole and extracted. Needs the 7z binary to make the donor."""
+    import shutil
+    import subprocess
+    import tempfile
+    seven = shutil.which('7z') or shutil.which('7zz') or shutil.which('7za')
+    if not seven:
+        return ('xpack7zlzma2', True, 'skipped: no 7z binary to build the donor')
+    size = 6_000_000
+    data = _payload(size, 6450)
+    pp = _place_copy(t, 'xl2A', data, 'movie.mkv')
+    members = [(pp, 'movie.mkv', size, 500_000, {5, 6})]
+    payloads = {'movie.mkv': data}
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, 'movie.mkv'), 'wb') as f:
+            f.write(data)
+        subprocess.run([seven, 'a', '-bso0', '-bsp0', '-m0=lzma2', '-mx=5',
+                        os.path.join(tmp, 'rel.7z'), 'movie.mkv'], cwd=tmp, check=True)
+        with open(os.path.join(tmp, 'rel.7z'), 'rb') as f:
+            archive = f.read()
+    raw_stored = len(archive) >= size
+    pieces = generators.split_bytes(archive, [3_000_100])
+    donor_members = []
+    for i, piece in enumerate(pieces, 1):
+        rel = 'xl2B/rel.7z.%03d' % i
+        t.write_file(os.path.join('data', rel), piece)
+        donor_members.append((rel, 'Rel.7z.%03d' % i, len(piece), 300_000, set()))
+
+    h, integ, c = _xpack_run(daemon, t, 'Xl2', members, donor_members, payloads)
+    raw_logs = _grep_log(t, '(7z raw chunks)')
+    ok = raw_stored and integ['movie.mkv'] and raw_logs >= 1
+    return ('xpack7zlzma2', ok, 'status=%s raw_stored=%s raw_chunk_logs=%d integrity=%s'
+            % (h['Status'], raw_stored, raw_logs, integ['movie.mkv']))
+
+
 def scenario_xpacksplit(daemon, t):
     """Store-rar target repaired from RAW SPLITS (movie.mkv.001/.002/.003)."""
     size = 6_000_000
@@ -2659,7 +2697,9 @@ def scenario_xdecomp_7z(daemon, t):
     if not generators.HAVE_7Z:
         return ('xdecomp_7z', None, 'SKIP: 7z not installed')
     size = 4_000_000
-    data = _payload(size, 8300)
+    # Repeating content, so LZMA2 really compresses it. Data it cannot compress
+    # is stored as raw chunks and borrowed without decompression (xpack7zlzma2).
+    data = (_payload(200_000, 8300) * 20)[:size]
     pp = _place_copy(t, 'xd7A', data, 'movie.mkv')
     members = [(pp, 'movie.mkv', size, 500_000, {5, 6})]
     payloads = {'movie.mkv': data}
@@ -11466,6 +11506,7 @@ SCENARIOS = {
     'xpack2sets': scenario_xpack2sets,
     'xpackzip': scenario_xpackzip,
     'xpack7z': scenario_xpack7z,
+    'xpack7zlzma2': scenario_xpack7zlzma2,
     'xpacksplit': scenario_xpacksplit,
     'xpackcompressed': scenario_xpackcompressed,
     'xpackneg': scenario_xpackneg,
@@ -11750,7 +11791,7 @@ EXPECTED_HISTORY_STATUS = {
     'xpackbare': 'SUCCESS/HEALTH',
     'xpackrar': 'FAILURE/HEALTH', 'xpackrar2rar': 'SUCCESS/HEALTH',
     'xpack2sets': 'SUCCESS/HEALTH',
-    'xpackzip': 'SUCCESS/HEALTH', 'xpack7z': 'SUCCESS/HEALTH',
+    'xpackzip': 'SUCCESS/HEALTH', 'xpack7z': 'SUCCESS/HEALTH', 'xpack7zlzma2': 'SUCCESS/HEALTH',
     'xpacksplit': 'SUCCESS/HEALTH', 'xpackcompressed': 'SUCCESS/HEALTH',
     'xpackneg': 'FAILURE/HEALTH', 'xcrypt_encplain': 'SUCCESS/HEALTH',
     'xcrypt_plainenc': 'SUCCESS/HEALTH', 'xcrypt_diffpass': 'SUCCESS/HEALTH',
@@ -11873,6 +11914,7 @@ SCENARIO_OPTIONS = {
     'xpack2sets': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xpackzip': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xpack7z': ['DupeArticleFallback=stream', 'ParCheck=auto'],
+    'xpack7zlzma2': ['DupeArticleFallback=stream', 'ParCheck=auto', 'DupeStreamDecompress=no'],
     'xpacksplit': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xpackcompressed': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xpackneg': ['DupeArticleFallback=stream', 'ParCheck=auto'],

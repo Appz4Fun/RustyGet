@@ -90,6 +90,7 @@ pub mod ncurses_format;
 pub mod postrepair;
 pub mod queuecoord;
 pub(crate) mod queuesubsys_host;
+pub mod sevenzraw;
 pub mod streamrepair;
 #[cfg(unix)]
 pub mod streamrepair_coord;

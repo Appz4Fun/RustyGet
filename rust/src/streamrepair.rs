@@ -1129,7 +1129,17 @@ struct SevenZipStreams {
     folder_crc_defined: Vec<bool>,
     substream_sizes: Vec<Vec<u64>>,
     copy_only: bool,
+    /// Per folder: `SZ_CODER_COPY`, `SZ_CODER_LZMA2`, `SZ_CODER_LZMA` for a single-coder
+    /// folder of that method, `SZ_CODER_OTHER` for anything else.
+    folder_coder: Vec<u8>,
+    /// Per folder: the properties of its (single) coder.
+    folder_props: Vec<Vec<u8>>,
 }
+
+const SZ_CODER_COPY: u8 = 0;
+const SZ_CODER_LZMA2: u8 = 1;
+const SZ_CODER_LZMA: u8 = 2;
+const SZ_CODER_OTHER: u8 = 0xff;
 
 impl Default for SevenZipStreams {
     fn default() -> Self {
@@ -1140,6 +1150,8 @@ impl Default for SevenZipStreams {
             folder_crc_defined: Vec::new(),
             substream_sizes: Vec::new(),
             copy_only: true,
+            folder_coder: Vec::new(),
+            folder_props: Vec::new(),
         }
     }
 }
@@ -1188,6 +1200,8 @@ fn parse_seven_zip_streams_info(
             }
             let coder_count = reader.read_number();
             streams.copy_only &= coder_count == 1;
+            let mut folder_kind = SZ_CODER_OTHER;
+            let mut folder_props = Vec::new();
             for _ in 0..coder_count {
                 if !reader.ok {
                     break;
@@ -1196,8 +1210,12 @@ fn parse_seven_zip_streams_info(
                 let id_size = flags & 0x0f;
                 let mut copy_coder = id_size == 1 && (flags & 0x30) == 0;
                 let mut coder_id: u8 = 0xff;
-                for _ in 0..id_size {
+                let mut id_bytes = [0u8; 4];
+                for i in 0..id_size {
                     coder_id = reader.read_byte();
+                    if (i as usize) < id_bytes.len() {
+                        id_bytes[i as usize] = coder_id;
+                    }
                 }
                 copy_coder &= coder_count == 1 && coder_id == 0x00;
                 streams.copy_only &= copy_coder;
@@ -1205,11 +1223,27 @@ fn parse_seven_zip_streams_info(
                     reader.read_number();
                     reader.read_number();
                 }
+                let mut props: &[u8] = &[];
                 if (flags & 0x20) != 0 {
                     let attr_len = reader.read_number();
+                    let start = reader.pos;
                     reader.skip(attr_len);
+                    if reader.ok {
+                        props = &reader.buf[start..reader.pos];
+                    }
+                }
+                if coder_count == 1 && (flags & 0x10) == 0 {
+                    folder_kind = match (id_size, id_bytes) {
+                        (1, [0x00, ..]) => SZ_CODER_COPY,
+                        (1, [0x21, ..]) => SZ_CODER_LZMA2,
+                        (3, [0x03, 0x01, 0x01, _]) => SZ_CODER_LZMA,
+                        _ => SZ_CODER_OTHER,
+                    };
+                    folder_props = props.to_vec();
                 }
             }
+            streams.folder_coder.push(folder_kind);
+            streams.folder_props.push(folder_props);
         }
         if reader.read_number() != 0x0c {
             return false;
@@ -1309,13 +1343,66 @@ fn parse_seven_zip_streams_info(
     reader.ok && record_id == 0x00
 }
 
+/// Where the biggest file of a 7z set lives when its folder is a single LZMA2 coder: the
+/// folder's packed stream (offsets in the concatenated volume set) and the file's place in
+/// the folder's unpacked stream. Used to borrow bytes from LZMA2 that stored its chunks raw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SevenZipLzma2Layout {
+    pub inner_name: Vec<u8>,
+    pub inner_size: i64,
+    /// Offset of the file's first byte in the folder's unpacked stream.
+    pub inner_offset_in_folder: i64,
+    pub folder_unpack_size: i64,
+    /// Offset of the folder's packed stream in the concatenated volume set.
+    pub pack_offset: i64,
+    pub pack_size: i64,
+    /// LZMA2 dictionary size property byte.
+    pub dict_prop: u8,
+}
+
+enum SevenZipInspect {
+    CopyRuns(Vec<u8>, i64, Vec<NzbgetRsContentRun>),
+    Lzma2(SevenZipLzma2Layout),
+}
+
 /// `ContentMapper::BuildSevenZipMap`: builds the inner-content map for a Copy-mode 7z set.
 /// Returns `Ok((inner_name, inner_size, runs))` or `Err(skip_reason)`.
 pub fn content_mapper_build_seven_zip_map<F>(
     member_indexes: &[i32],
     member_sizes: &[i64],
-    mut read_member: F,
+    read_member: F,
 ) -> Result<(Vec<u8>, i64, Vec<NzbgetRsContentRun>), &'static str>
+where
+    F: FnMut(i32, i64, &mut [u8]) -> bool,
+{
+    match seven_zip_inspect(member_indexes, member_sizes, read_member, false)? {
+        SevenZipInspect::CopyRuns(name, size, runs) => Ok((name, size, runs)),
+        SevenZipInspect::Lzma2(_) => Err("non-Copy 7z coder (only copy mode maps)"),
+    }
+}
+
+/// Reads the headers of a 7z set whose biggest file sits in an LZMA2 folder and returns its
+/// layout, or `Err(skip_reason)` (a Copy-mode set answers "copy-mode 7z").
+pub fn content_mapper_probe_seven_zip_lzma2<F>(
+    member_indexes: &[i32],
+    member_sizes: &[i64],
+    read_member: F,
+) -> Result<SevenZipLzma2Layout, &'static str>
+where
+    F: FnMut(i32, i64, &mut [u8]) -> bool,
+{
+    match seven_zip_inspect(member_indexes, member_sizes, read_member, true)? {
+        SevenZipInspect::Lzma2(layout) => Ok(layout),
+        SevenZipInspect::CopyRuns(..) => Err("copy-mode 7z"),
+    }
+}
+
+fn seven_zip_inspect<F>(
+    member_indexes: &[i32],
+    member_sizes: &[i64],
+    mut read_member: F,
+    want_lzma2: bool,
+) -> Result<SevenZipInspect, &'static str>
 where
     F: FnMut(i32, i64, &mut [u8]) -> bool,
 {
@@ -1385,10 +1472,18 @@ where
     if header_id == 0x17 {
         let mut header_streams = SevenZipStreams::default();
         if !parse_seven_zip_streams_info(&mut reader, &mut header_streams)
-            || !header_streams.copy_only
             || header_streams.pack_sizes.len() != 1
+            || header_streams.folder_coder.len() != 1
         {
             return Err("compressed 7z header");
+        }
+        let header_coder = header_streams.folder_coder[0];
+        if header_coder != SZ_CODER_COPY && header_coder != SZ_CODER_LZMA {
+            return Err(if header_coder == SZ_CODER_OTHER {
+                ContentMapper::SKIP_ENCRYPTED_HEADERS
+            } else {
+                "compressed 7z header"
+            });
         }
         let pack_sz = header_streams.pack_sizes[0];
         if pack_sz == 0
@@ -1404,6 +1499,34 @@ where
         unpacked_header.resize(pack_sz as usize, 0);
         if !logical_read(32 + (header_streams.pack_pos as i64), &mut unpacked_header) {
             return Err("archive header unreadable");
+        }
+        if header_coder == SZ_CODER_LZMA {
+            // 7-Zip packs the header with LZMA by default, whatever the data method is.
+            let props = &header_streams.folder_props[0];
+            let unpack_size = header_streams
+                .folder_unpack_sizes
+                .first()
+                .copied()
+                .unwrap_or(0);
+            let lzma_props = props
+                .first()
+                .and_then(|&b| crate::archive_native::lzma::Props::from_byte(b));
+            let Some(lzma_props) = lzma_props else {
+                return Err("compressed 7z header");
+            };
+            if props.len() != 5 || unpack_size == 0 || unpack_size > 64 * 1024 * 1024 {
+                return Err("compressed 7z header");
+            }
+            let (plain, _) = crate::archive_native::lzma::lzma(
+                &unpacked_header,
+                lzma_props,
+                Some(unpack_size),
+                unpack_size as usize,
+            );
+            if plain.len() as u64 != unpack_size {
+                return Err("compressed 7z header");
+            }
+            unpacked_header = plain;
         }
         reader = SevenZipReader::new(&unpacked_header);
         header_id = reader.read_number();
@@ -1477,11 +1600,72 @@ where
     if !reader.ok || streams.folder_unpack_sizes.is_empty() {
         return Err("unsupported 7z structure");
     }
-    if !streams.copy_only {
-        return Err("non-Copy 7z coder (only copy mode maps)");
-    }
     if streams.pack_sizes.len() != streams.folder_unpack_sizes.len() {
-        return Err("unsupported 7z structure");
+        return Err(if streams.copy_only {
+            "unsupported 7z structure"
+        } else {
+            "non-Copy 7z coder (only copy mode maps)"
+        });
+    }
+    if !streams.copy_only {
+        if !want_lzma2 {
+            return Err("non-Copy 7z coder (only copy mode maps)");
+        }
+        // The biggest file, its folder and its place in that folder's unpacked stream.
+        let mut names_with_stream: Vec<&[u8]> = Vec::new();
+        let max_names = (file_count as usize).min(names.len());
+        for (i, name) in names.iter().enumerate().take(max_names) {
+            let has_stream = empty_stream.is_empty() || i >= empty_stream.len() || !empty_stream[i];
+            if has_stream {
+                names_with_stream.push(name);
+            }
+        }
+        let mut best: Option<(usize, i64, i64, usize)> = None; // folder, offset, size, stream no
+        let mut stream_no = 0usize;
+        for (f, sizes) in streams.substream_sizes.iter().enumerate() {
+            let mut off: i64 = 0;
+            for &sub in sizes {
+                if best.is_none_or(|b| (sub as i64) > b.2) {
+                    best = Some((f, off, sub as i64, stream_no));
+                }
+                off = off.saturating_add(sub as i64);
+                stream_no += 1;
+            }
+        }
+        let Some((folder, inner_offset_in_folder, inner_size, best_stream)) = best else {
+            return Err("unsupported 7z structure");
+        };
+        if folder >= streams.folder_coder.len() || streams.folder_coder[folder] != SZ_CODER_LZMA2 {
+            return Err("7z data is not LZMA2 (no raw chunks to borrow)");
+        }
+        let Some(full_name) = names_with_stream.get(best_stream) else {
+            return Err("unsupported 7z structure");
+        };
+        let inner_name = match full_name.iter().rposition(|&b| b == b'/' || b == b'\\') {
+            Some(pos) => full_name[pos + 1..].to_vec(),
+            None => full_name.to_vec(),
+        };
+        if inner_name.is_empty() || !is_stream_eligible(&inner_name) {
+            return Err("inner file is not a media file");
+        }
+        let mut pack_offset = 32i64.saturating_add(streams.pack_pos as i64);
+        for &ps in &streams.pack_sizes[..folder] {
+            pack_offset = pack_offset.saturating_add(ps as i64);
+        }
+        let pack_size = streams.pack_sizes[folder] as i64;
+        if pack_offset < 32 || pack_size <= 0 || pack_offset.saturating_add(pack_size) > total_size
+        {
+            return Err("implausible data run geometry");
+        }
+        return Ok(SevenZipInspect::Lzma2(SevenZipLzma2Layout {
+            inner_name,
+            inner_size,
+            inner_offset_in_folder,
+            folder_unpack_size: streams.folder_unpack_sizes[folder] as i64,
+            pack_offset,
+            pack_size,
+            dict_prop: streams.folder_props[folder].first().copied().unwrap_or(0),
+        }));
     }
     for f in 0..streams.pack_sizes.len() {
         if streams.pack_sizes[f] != streams.folder_unpack_sizes[f] {
@@ -1576,7 +1760,11 @@ where
         inner_offset += piece.size;
     }
 
-    Ok((prim.name.clone(), prim.size, runs))
+    Ok(SevenZipInspect::CopyRuns(
+        prim.name.clone(),
+        prim.size,
+        runs,
+    ))
 }
 
 /// `ContentMap::ReadInnerDecrypted` (`ContentMap.cpp`): computes the 16-byte AES-CBC
@@ -7419,6 +7607,21 @@ impl CrossPackRepairSession {
                     .as_ref()
                     .is_some_and(|dm| dm.inner_size() == target_inner_size);
                 if !size_matches {
+                    // A 7z whose LZMA2 coder stored the data in raw chunks holds the inner
+                    // bytes in plain form: borrow just the articles around each hole.
+                    if donor_set.format == MemberFormat::SevenZip
+                        && set_maps[set_index].is_none()
+                        && self.exec_lzma2_raw_repair(
+                            repair_set_idx,
+                            &donor_members,
+                            donor_set,
+                            &donor_sources,
+                            donor_info_name,
+                            &env_cell,
+                        )
+                    {
+                        continue;
+                    }
                     let can_decompress =
                         allow_decompress && ContentMapper::is_compressible_archive(donor_set);
                     if can_decompress {
@@ -7516,6 +7719,245 @@ impl CrossPackRepairSession {
                 }
             }
         }
+    }
+
+    /// Repairs the target's inner holes from a 7z duplicate whose LZMA2 coder stored its
+    /// chunks raw (see `sevenzraw`). Returns true when the donor was verified and used.
+    fn exec_lzma2_raw_repair(
+        &mut self,
+        repair_set_idx: usize,
+        donor_members: &[SetMember],
+        donor_set: &MemberSet,
+        donor_sources: &DonorSetSources<'_, '_>,
+        donor_info_name: &[u8],
+        env_cell: &std::cell::RefCell<&mut dyn CrossPackDonorEnv>,
+    ) -> bool {
+        let Some(target_map) = self.repair_sets[repair_set_idx].map.clone() else {
+            return false;
+        };
+        if target_map.encrypted() {
+            return false;
+        }
+        let first_donor_name = &donor_members[donor_set.members[0] as usize].name;
+        let skip = |env: &std::cell::RefCell<&mut dyn CrossPackDonorEnv>, reason: &[u8]| {
+            let mut msg = b"Not borrowing from 7z ".to_vec();
+            msg.extend_from_slice(first_donor_name);
+            msg.extend_from_slice(b" of duplicate ");
+            msg.extend_from_slice(donor_info_name);
+            msg.extend_from_slice(b": ");
+            msg.extend_from_slice(reason);
+            env.borrow_mut()
+                .emit_message_bytes(TargetMessageKind::Info, &msg);
+        };
+
+        let mut member_sizes = Vec::with_capacity(donor_set.members.len());
+        let mut member_bases = Vec::with_capacity(donor_set.members.len());
+        let mut total: i64 = 0;
+        for &member_index in &donor_set.members {
+            let size = donor_sources
+                .get_source(member_index)
+                .map_or(0, ContentSource::size);
+            if size <= 0 {
+                return false;
+            }
+            member_bases.push(total);
+            member_sizes.push(size);
+            total += size;
+        }
+        donor_sources.set_fetch_budget(Some(8 + (donor_set.members.len() as i32) * 4));
+        let layout = content_mapper_probe_seven_zip_lzma2(
+            &donor_set.members,
+            &member_sizes,
+            |member_index, offset, buf| {
+                donor_sources
+                    .get_source(member_index)
+                    .is_some_and(|src| src.read(offset, buf))
+            },
+        );
+        donor_sources.set_fetch_budget(None);
+        let layout = match layout {
+            Ok(layout) => layout,
+            Err(reason) => {
+                if reason != "copy-mode 7z" {
+                    skip(env_cell, reason.as_bytes());
+                }
+                return false;
+            }
+        };
+        if layout.inner_size != target_map.inner_size() {
+            skip(env_cell, b"its inner file has a different size");
+            return false;
+        }
+        let raw_layout = crate::sevenzraw::Lzma2RawLayout {
+            inner_size: layout.inner_size,
+            inner_offset_in_folder: layout.inner_offset_in_folder,
+            folder_unpack_size: layout.folder_unpack_size,
+            pack_size: layout.pack_size,
+        };
+        if !raw_layout.looks_raw() {
+            skip(
+                env_cell,
+                b"its LZMA2 data is compressed throughout (no raw chunks to borrow)",
+            );
+            return false;
+        }
+
+        let pack_offset = layout.pack_offset;
+        let members = &donor_set.members;
+        let source = crate::sevenzraw::Lzma2RawSource::new(
+            raw_layout,
+            Box::new(move |offset: i64, buf: &mut [u8]| {
+                let pieces = composite_to_members(
+                    members,
+                    &member_bases,
+                    &member_sizes,
+                    NzbgetRsByteRange {
+                        offset: pack_offset + offset,
+                        size: buf.len() as i64,
+                    },
+                );
+                let mut cursor = 0usize;
+                for piece in pieces {
+                    let len = piece.size as usize;
+                    if cursor + len > buf.len()
+                        || !donor_sources
+                            .get_source(piece.member_index)
+                            .is_some_and(|src| {
+                                src.read(piece.offset, &mut buf[cursor..cursor + len])
+                            })
+                    {
+                        return false;
+                    }
+                    cursor += len;
+                }
+                cursor == buf.len()
+            }),
+        );
+
+        // Fix the alignment in front of every hole, using the bytes the target already has.
+        let holes = self.repair_sets[repair_set_idx].inner_holes.clone();
+        let original_holes = self.repair_sets[repair_set_idx]
+            .original_inner_holes
+            .clone();
+        let target_valid = |offset: i64, len: i64| {
+            !original_holes
+                .iter()
+                .any(|h| offset < h.offset + h.size && h.offset < offset + len)
+        };
+        let mut synced = 0usize;
+        for hole in &holes {
+            if env_cell.borrow_mut().is_stopped() {
+                return false;
+            }
+            let mut read_target = |offset: i64, buf: &mut [u8]| -> bool {
+                let mut adapter = DiskTargetFileSetAdapter {
+                    files: &mut self.target_files,
+                    members: &self.set_members,
+                    env: env_cell,
+                };
+                buf.fill(0);
+                let window = NzbgetRsByteRange {
+                    offset,
+                    size: buf.len() as i64,
+                };
+                for piece in target_map.map_from_inner(window) {
+                    let inner_pos = target_map.map_to_inner(
+                        piece.member_index,
+                        NzbgetRsByteRange {
+                            offset: piece.offset,
+                            size: piece.size,
+                        },
+                    );
+                    if inner_pos.len() != 1 || inner_pos[0].offset < offset {
+                        return false;
+                    }
+                    let rel = (inner_pos[0].offset - offset) as usize;
+                    let len = piece.size as usize;
+                    if rel + len > buf.len() {
+                        return false;
+                    }
+                    // A piece that cannot be read stays zero; `target_valid` keeps holes out.
+                    let _ = adapter.read_file(
+                        piece.member_index,
+                        piece.offset,
+                        &mut buf[rel..rel + len],
+                    );
+                }
+                true
+            };
+            if source.sync_before(hole.offset, &mut read_target, &target_valid) {
+                synced += 1;
+            }
+        }
+        if synced == 0 {
+            skip(
+                env_cell,
+                b"no chunk of it matches this release near the damage (different content, or compressed there)",
+            );
+            return false;
+        }
+
+        struct InnerSource<'s, 'a>(&'s crate::sevenzraw::Lzma2RawSource<'a>);
+        impl ContentSource for InnerSource<'_, '_> {
+            fn size(&self) -> i64 {
+                self.0.inner_size()
+            }
+            fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+                self.0.read_inner(offset, buf)
+            }
+        }
+        let inner_source = InnerSource(&source);
+
+        let verified = {
+            let mut target_adapter = DiskTargetFileSetAdapter {
+                files: &mut self.target_files,
+                members: &self.set_members,
+                env: env_cell,
+            };
+            self.repair_sets[repair_set_idx].verify_donor_inner(
+                &inner_source,
+                layout.inner_size,
+                &mut target_adapter,
+            )
+        };
+        if !verified {
+            skip(env_cell, b"content identity not confirmed");
+            return false;
+        }
+        donor_sources.take_served_parts();
+
+        let donor_info_str = std::str::from_utf8(donor_info_name).unwrap_or("duplicate");
+        let (written, holes_filled, credit_recovery) = {
+            let mut target_adapter = DiskTargetFileSetAdapter {
+                files: &mut self.target_files,
+                members: &self.set_members,
+                env: env_cell,
+            };
+            self.repair_sets[repair_set_idx].patch_from_donor_inner(
+                &inner_source,
+                &mut target_adapter,
+                &mut self.target_holes,
+                &self.member_targets,
+                &self.set_members,
+                &donor_info_str,
+            )
+        };
+        env_cell.borrow_mut().sync_target_holes(&self.target_holes);
+        if credit_recovery && written > 0 {
+            let recovered_parts = donor_sources.take_served_parts();
+            env_cell.borrow_mut().add_recovered(written, holes_filled);
+            let mb = stream_repair_bytes_to_mb(written);
+            let mut msg = format!("Recovered {mb:.1} MB ({recovered_parts} donor article(s)) of ")
+                .into_bytes();
+            msg.extend_from_slice(target_map.inner_name_bytes());
+            msg.extend_from_slice(b" from duplicate ");
+            msg.extend_from_slice(donor_info_name);
+            msg.extend_from_slice(b" (7z raw chunks)");
+            env_cell
+                .borrow_mut()
+                .emit_message_bytes(TargetMessageKind::Info, &msg);
+        }
+        written > 0
     }
 
     #[allow(clippy::too_many_arguments)]

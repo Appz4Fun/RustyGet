@@ -1134,12 +1134,93 @@ struct SevenZipStreams {
     folder_coder: Vec<u8>,
     /// Per folder: the properties of its (single) coder.
     folder_props: Vec<Vec<u8>>,
+    /// Per folder: the AES parameters when the packed stream is 7zAES-encrypted, either as
+    /// the only coder (a stored, encrypted folder) or in front of the one data coder.
+    folder_aes: Vec<Option<SevenZipAes>>,
+    /// Per folder: the size of the decrypted stream (the AES coder's output).
+    folder_aes_out_sizes: Vec<u64>,
 }
 
 const SZ_CODER_COPY: u8 = 0;
 const SZ_CODER_LZMA2: u8 = 1;
 const SZ_CODER_LZMA: u8 = 2;
+const SZ_CODER_AES: u8 = 3;
 const SZ_CODER_OTHER: u8 = 0xff;
+
+/// The properties of a 7zAES coder (AES-256-CBC, key from SHA-256 over salt and password).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SevenZipAes {
+    cycles_power: u8,
+    salt: Vec<u8>,
+    iv: [u8; 16],
+}
+
+impl SevenZipAes {
+    fn parse(props: &[u8]) -> Option<Self> {
+        let first = *props.first()?;
+        let cycles_power = first & 0x3f;
+        if first & 0xc0 == 0 {
+            return Some(Self {
+                cycles_power,
+                salt: Vec::new(),
+                iv: [0u8; 16],
+            });
+        }
+        let second = *props.get(1)?;
+        let salt_size = (((first >> 7) & 1) + (second >> 4)) as usize;
+        let iv_size = (((first >> 6) & 1) + (second & 0x0f)) as usize;
+        if iv_size > 16 || props.len() < 2 + salt_size + iv_size {
+            return None;
+        }
+        let mut iv = [0u8; 16];
+        iv[..iv_size].copy_from_slice(&props[2 + salt_size..2 + salt_size + iv_size]);
+        Some(Self {
+            cycles_power,
+            salt: props[2..2 + salt_size].to_vec(),
+            iv,
+        })
+    }
+
+    /// The AES-256 key for `password` (UTF-8, taken as UTF-16LE by the format).
+    fn derive_key(&self, password: &[u8]) -> Option<[u8; 32]> {
+        let nul_pos = password
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(password.len());
+        let text = std::str::from_utf8(&password[..nul_pos]).ok()?;
+        let mut pw16 = Vec::with_capacity(text.len() * 2);
+        for unit in text.encode_utf16() {
+            pw16.extend_from_slice(&unit.to_le_bytes());
+        }
+        if self.cycles_power == 0x3f {
+            let mut key = [0u8; 32];
+            let mut pos = 0usize;
+            for &b in self.salt.iter().chain(pw16.iter()) {
+                if pos == 32 {
+                    break;
+                }
+                key[pos] = b;
+                pos += 1;
+            }
+            return Some(key);
+        }
+        if self.cycles_power > 24 {
+            return None;
+        }
+        let mut sha = Sha256::new();
+        let rounds = 1u64 << self.cycles_power;
+        for counter in 0..rounds {
+            sha.update(&self.salt);
+            sha.update(&pw16);
+            sha.update(&counter.to_le_bytes());
+        }
+        Some(sha.finalize())
+    }
+
+    fn context(&self, password: &[u8]) -> Option<RarCryptoContext> {
+        RarCryptoContext::from_key_iv(&self.derive_key(password)?, self.iv)
+    }
+}
 
 impl Default for SevenZipStreams {
     fn default() -> Self {
@@ -1152,6 +1233,8 @@ impl Default for SevenZipStreams {
             copy_only: true,
             folder_coder: Vec::new(),
             folder_props: Vec::new(),
+            folder_aes: Vec::new(),
+            folder_aes_out_sizes: Vec::new(),
         }
     }
 }
@@ -1194,6 +1277,7 @@ fn parse_seven_zip_streams_info(
         if reader.read_byte() != 0 {
             return false;
         }
+        let mut folder_outs: Vec<(u64, u64, u64)> = Vec::new();
         for _ in 0..folder_count {
             if !reader.ok {
                 break;
@@ -1202,6 +1286,10 @@ fn parse_seven_zip_streams_info(
             streams.copy_only &= coder_count == 1;
             let mut folder_kind = SZ_CODER_OTHER;
             let mut folder_props = Vec::new();
+            // (kind, properties, simple) of every coder, for the two-coder AES chain below.
+            let mut coders: Vec<(u8, Vec<u8>, bool)> = Vec::new();
+            let mut total_in: u64 = 0;
+            let mut total_out: u64 = 0;
             for _ in 0..coder_count {
                 if !reader.ok {
                     break;
@@ -1220,8 +1308,11 @@ fn parse_seven_zip_streams_info(
                 copy_coder &= coder_count == 1 && coder_id == 0x00;
                 streams.copy_only &= copy_coder;
                 if (flags & 0x10) != 0 {
-                    reader.read_number();
-                    reader.read_number();
+                    total_in = total_in.saturating_add(reader.read_number());
+                    total_out = total_out.saturating_add(reader.read_number());
+                } else {
+                    total_in += 1;
+                    total_out += 1;
                 }
                 let mut props: &[u8] = &[];
                 if (flags & 0x20) != 0 {
@@ -1232,27 +1323,101 @@ fn parse_seven_zip_streams_info(
                         props = &reader.buf[start..reader.pos];
                     }
                 }
-                if coder_count == 1 && (flags & 0x10) == 0 {
-                    folder_kind = match (id_size, id_bytes) {
-                        (1, [0x00, ..]) => SZ_CODER_COPY,
-                        (1, [0x21, ..]) => SZ_CODER_LZMA2,
-                        (3, [0x03, 0x01, 0x01, _]) => SZ_CODER_LZMA,
-                        _ => SZ_CODER_OTHER,
+                let kind = match (id_size, id_bytes) {
+                    (1, [0x00, ..]) => SZ_CODER_COPY,
+                    (1, [0x21, ..]) => SZ_CODER_LZMA2,
+                    (3, [0x03, 0x01, 0x01, _]) => SZ_CODER_LZMA,
+                    (4, [0x06, 0xf1, 0x07, 0x01]) => SZ_CODER_AES,
+                    _ => SZ_CODER_OTHER,
+                };
+                coders.push((kind, props.to_vec(), (flags & 0x10) == 0));
+            }
+            if total_in > 64 || total_out > 64 || total_out == 0 {
+                return false;
+            }
+            // Bind pairs (which coder output feeds which coder input) and, when a folder
+            // has several packed streams, their indexes.
+            let bind_pairs = total_out - 1;
+            let mut bound_out: Vec<u64> = Vec::new();
+            let mut bound_in: Vec<u64> = Vec::new();
+            for _ in 0..bind_pairs {
+                bound_in.push(reader.read_number());
+                bound_out.push(reader.read_number());
+            }
+            let packed_streams = total_in.saturating_sub(bind_pairs);
+            if packed_streams > 1 {
+                for _ in 0..packed_streams {
+                    reader.read_number();
+                }
+            }
+            let all_simple = coders.iter().all(|c| c.2);
+            let mut aes: Option<SevenZipAes> = None;
+            // Index of the coder output that is the folder's unpacked stream, and of the
+            // AES coder's output.
+            let mut main_out: u64 = 0;
+            let mut aes_out: u64 = 0;
+            if coders.len() == 1 && all_simple {
+                if coders[0].0 == SZ_CODER_AES {
+                    // Stored and encrypted: the decrypted stream is the data.
+                    aes = SevenZipAes::parse(&coders[0].1);
+                    folder_kind = if aes.is_some() {
+                        SZ_CODER_COPY
+                    } else {
+                        SZ_CODER_OTHER
                     };
-                    folder_props = props.to_vec();
+                } else {
+                    folder_kind = coders[0].0;
+                    folder_props = coders[0].1.clone();
+                }
+            } else if coders.len() == 2 && all_simple && packed_streams == 1 {
+                let aes_idx = coders.iter().position(|c| c.0 == SZ_CODER_AES);
+                if let Some(aes_idx) = aes_idx {
+                    let data_idx = 1 - aes_idx;
+                    let chained = bound_in.first() == Some(&(data_idx as u64))
+                        && bound_out.first() == Some(&(aes_idx as u64));
+                    let data_kind = coders[data_idx].0;
+                    if chained
+                        && matches!(data_kind, SZ_CODER_COPY | SZ_CODER_LZMA | SZ_CODER_LZMA2)
+                    {
+                        aes = SevenZipAes::parse(&coders[aes_idx].1);
+                        if aes.is_some() {
+                            folder_kind = data_kind;
+                            folder_props = coders[data_idx].1.clone();
+                            main_out = data_idx as u64;
+                            aes_out = aes_idx as u64;
+                        }
+                    }
                 }
             }
             streams.folder_coder.push(folder_kind);
             streams.folder_props.push(folder_props);
+            streams.folder_aes.push(aes);
+            // Remembered until the unpack sizes are read: (outputs, main output, AES output).
+            streams.folder_aes_out_sizes.push(0);
+            folder_outs.push((total_out, main_out, aes_out));
         }
         if reader.read_number() != 0x0c {
             return false;
         }
-        for _ in 0..folder_count {
-            if !reader.ok {
-                break;
+        for (f, &(outs, main_out, aes_out)) in folder_outs.iter().enumerate() {
+            let mut main_size = 0u64;
+            let mut aes_size = 0u64;
+            for out in 0..outs {
+                if !reader.ok {
+                    break;
+                }
+                let size = reader.read_number();
+                if out == main_out {
+                    main_size = size;
+                }
+                if out == aes_out {
+                    aes_size = size;
+                }
             }
-            streams.folder_unpack_sizes.push(reader.read_number());
+            streams.folder_unpack_sizes.push(main_size);
+            if let Some(slot) = streams.folder_aes_out_sizes.get_mut(f) {
+                *slot = aes_size;
+            }
         }
         streams.folder_crc_defined = vec![false; folder_count as usize];
         loop {
@@ -1362,7 +1527,26 @@ pub struct SevenZipLzma2Layout {
 
 enum SevenZipInspect {
     CopyRuns(Vec<u8>, i64, Vec<NzbgetRsContentRun>),
+    /// A stored, 7zAES-encrypted file: its runs, the cipher bytes of each run (offset in
+    /// the member and size) and the AES-CBC context of the stream.
+    EncryptedCopyRuns(SevenZipEncryptedMap),
     Lzma2(SevenZipLzma2Layout),
+}
+
+/// The inner-content map of a stored, encrypted 7z set (`SevenZipInspect::EncryptedCopyRuns`).
+pub struct SevenZipEncryptedMap {
+    pub inner_name: Vec<u8>,
+    pub inner_size: i64,
+    pub runs: Vec<NzbgetRsContentRun>,
+    pub cipher_data_offsets: Vec<i64>,
+    pub cipher_sizes: Vec<i64>,
+    pub crypto: RarCryptoContext,
+}
+
+/// The result of mapping a Copy-mode 7z set: plain runs, or the encrypted form.
+pub enum SevenZipMap {
+    Plain(Vec<u8>, i64, Vec<NzbgetRsContentRun>),
+    Encrypted(SevenZipEncryptedMap),
 }
 
 /// `ContentMapper::BuildSevenZipMap`: builds the inner-content map for a Copy-mode 7z set.
@@ -1375,8 +1559,27 @@ pub fn content_mapper_build_seven_zip_map<F>(
 where
     F: FnMut(i32, i64, &mut [u8]) -> bool,
 {
-    match seven_zip_inspect(member_indexes, member_sizes, read_member, false)? {
+    match seven_zip_inspect(member_indexes, member_sizes, read_member, false, None)? {
         SevenZipInspect::CopyRuns(name, size, runs) => Ok((name, size, runs)),
+        SevenZipInspect::EncryptedCopyRuns(_) => Err(ContentMapper::SKIP_ENCRYPTED_DATA),
+        SevenZipInspect::Lzma2(_) => Err("non-Copy 7z coder (only copy mode maps)"),
+    }
+}
+
+/// Like [`content_mapper_build_seven_zip_map`], with the archive password: a set whose
+/// headers or data are 7zAES-encrypted maps too when it is stored (copy mode).
+pub fn content_mapper_build_seven_zip_map_with_password<F>(
+    member_indexes: &[i32],
+    member_sizes: &[i64],
+    read_member: F,
+    password: Option<&[u8]>,
+) -> Result<SevenZipMap, &'static str>
+where
+    F: FnMut(i32, i64, &mut [u8]) -> bool,
+{
+    match seven_zip_inspect(member_indexes, member_sizes, read_member, false, password)? {
+        SevenZipInspect::CopyRuns(name, size, runs) => Ok(SevenZipMap::Plain(name, size, runs)),
+        SevenZipInspect::EncryptedCopyRuns(map) => Ok(SevenZipMap::Encrypted(map)),
         SevenZipInspect::Lzma2(_) => Err("non-Copy 7z coder (only copy mode maps)"),
     }
 }
@@ -1391,9 +1594,11 @@ pub fn content_mapper_probe_seven_zip_lzma2<F>(
 where
     F: FnMut(i32, i64, &mut [u8]) -> bool,
 {
-    match seven_zip_inspect(member_indexes, member_sizes, read_member, true)? {
+    match seven_zip_inspect(member_indexes, member_sizes, read_member, true, None)? {
         SevenZipInspect::Lzma2(layout) => Ok(layout),
-        SevenZipInspect::CopyRuns(..) => Err("copy-mode 7z"),
+        SevenZipInspect::CopyRuns(..) | SevenZipInspect::EncryptedCopyRuns(_) => {
+            Err("copy-mode 7z")
+        }
     }
 }
 
@@ -1402,6 +1607,7 @@ fn seven_zip_inspect<F>(
     member_sizes: &[i64],
     mut read_member: F,
     want_lzma2: bool,
+    password: Option<&[u8]>,
 ) -> Result<SevenZipInspect, &'static str>
 where
     F: FnMut(i32, i64, &mut [u8]) -> bool,
@@ -1468,6 +1674,8 @@ where
     let mut unpacked_header = Vec::new();
     let mut reader = SevenZipReader::new(&header_bytes);
     let mut header_id = reader.read_number();
+    // Set once the password has decrypted the headers into something readable.
+    let mut headers_were_encrypted = false;
 
     if header_id == 0x17 {
         let mut header_streams = SevenZipStreams::default();
@@ -1478,6 +1686,7 @@ where
             return Err("compressed 7z header");
         }
         let header_coder = header_streams.folder_coder[0];
+        let header_aes = header_streams.folder_aes.first().cloned().flatten();
         if header_coder != SZ_CODER_COPY && header_coder != SZ_CODER_LZMA {
             return Err(if header_coder == SZ_CODER_OTHER {
                 ContentMapper::SKIP_ENCRYPTED_HEADERS
@@ -1485,6 +1694,18 @@ where
                 "compressed 7z header"
             });
         }
+        let header_crypto = match &header_aes {
+            None => None,
+            Some(aes) => {
+                let Some(pw) = password.filter(|p| !p.is_empty()) else {
+                    return Err(ContentMapper::SKIP_ENCRYPTED_HEADERS);
+                };
+                match aes.context(pw) {
+                    Some(ctx) => Some(ctx),
+                    None => return Err("archive password rejected"),
+                }
+            }
+        };
         let pack_sz = header_streams.pack_sizes[0];
         if pack_sz == 0
             || pack_sz > 16 * 1024 * 1024
@@ -1499,6 +1720,22 @@ where
         unpacked_header.resize(pack_sz as usize, 0);
         if !logical_read(32 + (header_streams.pack_pos as i64), &mut unpacked_header) {
             return Err("archive header unreadable");
+        }
+        if let Some(crypto) = &header_crypto {
+            let plain_size = header_streams
+                .folder_aes_out_sizes
+                .first()
+                .copied()
+                .unwrap_or(0);
+            if pack_sz % 16 != 0 || plain_size == 0 || plain_size > pack_sz {
+                return Err("implausible 7z header");
+            }
+            let mut plain = vec![0u8; pack_sz as usize];
+            if !crypto.decrypt_range(None, &unpacked_header, &mut plain, (pack_sz / 16) as i64) {
+                return Err("archive password rejected");
+            }
+            plain.truncate(plain_size as usize);
+            unpacked_header = plain;
         }
         if header_coder == SZ_CODER_LZMA {
             // 7-Zip packs the header with LZMA by default, whatever the data method is.
@@ -1524,12 +1761,23 @@ where
                 unpack_size as usize,
             );
             if plain.len() as u64 != unpack_size {
-                return Err("compressed 7z header");
+                return Err(if header_crypto.is_some() {
+                    "archive password rejected"
+                } else {
+                    "compressed 7z header"
+                });
             }
             unpacked_header = plain;
         }
         reader = SevenZipReader::new(&unpacked_header);
         header_id = reader.read_number();
+        if header_crypto.is_some() {
+            if header_id != 0x01 {
+                // A wrong password decrypts to noise.
+                return Err("archive password rejected");
+            }
+            headers_were_encrypted = true;
+        }
     }
     if header_id != 0x01 {
         return Err("unsupported 7z structure");
@@ -1599,6 +1847,21 @@ where
 
     if !reader.ok || streams.folder_unpack_sizes.is_empty() {
         return Err("unsupported 7z structure");
+    }
+    if streams.folder_aes.iter().any(Option::is_some) {
+        return seven_zip_inspect_encrypted(
+            &streams,
+            &names,
+            &empty_stream,
+            file_count,
+            &member_indexes[..n],
+            &disk_bases,
+            &member_sizes[..n],
+            total_size,
+            &mut logical_read,
+            password,
+            headers_were_encrypted,
+        );
     }
     if streams.pack_sizes.len() != streams.folder_unpack_sizes.len() {
         return Err(if streams.copy_only {
@@ -1765,6 +2028,161 @@ where
         prim.size,
         runs,
     ))
+}
+
+/// The data side of [`seven_zip_inspect`] for a set with 7zAES folders: maps the biggest
+/// file when its folder is stored (Copy) behind AES and holds only that file. The packed
+/// stream is then one AES-256-CBC stream over the file, padded to 16 bytes.
+#[allow(clippy::too_many_arguments)]
+fn seven_zip_inspect_encrypted(
+    streams: &SevenZipStreams,
+    names: &[Vec<u8>],
+    empty_stream: &[bool],
+    file_count: u64,
+    member_indexes: &[i32],
+    disk_bases: &[i64],
+    member_sizes: &[i64],
+    total_size: i64,
+    logical_read: &mut dyn FnMut(i64, &mut [u8]) -> bool,
+    password: Option<&[u8]>,
+    password_proven: bool,
+) -> Result<SevenZipInspect, &'static str> {
+    if streams.pack_sizes.len() != streams.folder_unpack_sizes.len()
+        || streams.folder_aes.len() != streams.folder_unpack_sizes.len()
+        || streams.folder_coder.len() != streams.folder_unpack_sizes.len()
+        || streams.substream_sizes.len() != streams.folder_unpack_sizes.len()
+    {
+        return Err("unsupported 7z structure");
+    }
+    // The biggest file, its folder and its number among the files that have data.
+    let mut best: Option<(usize, usize, i64, usize)> = None; // folder, index in folder, size, stream no
+    let mut stream_no = 0usize;
+    for (f, sizes) in streams.substream_sizes.iter().enumerate() {
+        for (i, &sub) in sizes.iter().enumerate() {
+            if best.is_none_or(|b| (sub as i64) > b.2) {
+                best = Some((f, i, sub as i64, stream_no));
+            }
+            stream_no += 1;
+        }
+    }
+    let Some((folder, _, inner_size, best_stream)) = best else {
+        return Err("unsupported 7z structure");
+    };
+    let mut names_with_stream: Vec<&[u8]> = Vec::new();
+    let max_names = (file_count as usize).min(names.len());
+    for (i, name) in names.iter().enumerate().take(max_names) {
+        let has_stream = empty_stream.is_empty() || i >= empty_stream.len() || !empty_stream[i];
+        if has_stream {
+            names_with_stream.push(name);
+        }
+    }
+    let Some(full_name) = names_with_stream.get(best_stream) else {
+        return Err("unsupported 7z structure");
+    };
+    let inner_name = match full_name.iter().rposition(|&b| b == b'/' || b == b'\\') {
+        Some(pos) => full_name[pos + 1..].to_vec(),
+        None => full_name.to_vec(),
+    };
+    if inner_name.is_empty() || !is_stream_eligible(&inner_name) {
+        return Err("inner file is not a media file");
+    }
+    if streams.folder_coder[folder] != SZ_CODER_COPY {
+        return Err("non-Copy 7z coder (only copy mode maps)");
+    }
+    let Some(aes) = &streams.folder_aes[folder] else {
+        // The biggest file is stored in the clear next to encrypted ones: not a layout
+        // 7-Zip writes for one archive, leave it alone.
+        return Err("unsupported 7z structure");
+    };
+    if streams.substream_sizes[folder].len() != 1 {
+        return Err("encrypted 7z folder with several files");
+    }
+    let Some(pw) = password.filter(|p| !p.is_empty()) else {
+        return Err(ContentMapper::SKIP_ENCRYPTED_DATA);
+    };
+    let mut pack_offset = 32i64.saturating_add(streams.pack_pos as i64);
+    for &ps in &streams.pack_sizes[..folder] {
+        pack_offset = pack_offset.saturating_add(ps as i64);
+    }
+    let cipher_size = streams.pack_sizes[folder] as i64;
+    if inner_size <= 0
+        || cipher_size % 16 != 0
+        || cipher_size != (inner_size + 15) / 16 * 16
+        || (streams.folder_aes_out_sizes[folder] as i64 != inner_size
+            && streams.folder_aes_out_sizes[folder] as i64 != cipher_size)
+        || pack_offset < 32
+        || pack_offset.saturating_add(cipher_size) > total_size
+    {
+        return Err("implausible data run geometry");
+    }
+    let Some(crypto) = aes.context(pw) else {
+        return Err("archive password rejected");
+    };
+    if !password_proven {
+        // Nothing has checked the password yet (the headers were readable without it): the
+        // zero padding of the last block does, when the file does not end on a block.
+        let pad = (cipher_size - inner_size) as usize;
+        let mut tail = [0u8; 32];
+        let have_prev = cipher_size >= 32;
+        let from = if have_prev {
+            cipher_size - 32
+        } else {
+            cipher_size - 16
+        };
+        let len = if have_prev { 32 } else { 16 };
+        if pad == 0 || !logical_read(pack_offset + from, &mut tail[..len]) {
+            return Err("archive password cannot be checked");
+        }
+        let mut plain = [0u8; 16];
+        let ok = if have_prev {
+            let prev: [u8; 16] = tail[..16].try_into().unwrap_or([0u8; 16]);
+            crypto.decrypt_range(Some(&prev), &tail[16..32], &mut plain, 1)
+        } else {
+            crypto.decrypt_range(None, &tail[..16], &mut plain, 1)
+        };
+        if !ok || plain[16 - pad..].iter().any(|&b| b != 0) {
+            return Err("archive password rejected");
+        }
+    }
+
+    let pieces = composite_to_members(
+        member_indexes,
+        disk_bases,
+        member_sizes,
+        NzbgetRsByteRange {
+            offset: pack_offset,
+            size: cipher_size,
+        },
+    );
+    let mut runs = Vec::with_capacity(pieces.len());
+    let mut cipher_data_offsets = Vec::with_capacity(pieces.len());
+    let mut cipher_sizes = Vec::with_capacity(pieces.len());
+    let mut inner_offset: i64 = 0;
+    for piece in pieces {
+        let plain = piece.size.min(inner_size - inner_offset);
+        if plain <= 0 {
+            // Only padding of the last block lies in this member: it belongs to the
+            // previous run's cipher bytes, which must stay contiguous, so give up.
+            return Err("implausible data run geometry");
+        }
+        runs.push(NzbgetRsContentRun {
+            inner_offset,
+            member_index: piece.member_index,
+            member_offset: piece.offset,
+            size: plain,
+        });
+        cipher_data_offsets.push(piece.offset);
+        cipher_sizes.push(piece.size);
+        inner_offset += plain;
+    }
+    Ok(SevenZipInspect::EncryptedCopyRuns(SevenZipEncryptedMap {
+        inner_name,
+        inner_size,
+        runs,
+        cipher_data_offsets,
+        cipher_sizes,
+        crypto,
+    }))
 }
 
 /// `ContentMap::ReadInnerDecrypted` (`ContentMap.cpp`): computes the 16-byte AES-CBC
@@ -6509,7 +6927,9 @@ impl ContentMapper {
             MemberFormat::Split => Self::build_split_map(members, set, sources),
             MemberFormat::Rar => Self::build_rar_map(members, set, sources, password, tls_enabled),
             MemberFormat::Zip => Self::build_zip_map(set, sources),
-            MemberFormat::SevenZip => Self::build_seven_zip_map(set, sources),
+            MemberFormat::SevenZip => {
+                Self::build_seven_zip_map(set, sources, password.filter(|_| tls_enabled))
+            }
         }
     }
 
@@ -6772,6 +7192,7 @@ impl ContentMapper {
     fn build_seven_zip_map(
         set: &MemberSet,
         sources: &dyn ContentSourceSet,
+        password: Option<&[u8]>,
     ) -> Result<ContentMap, String> {
         let mut member_sizes = Vec::with_capacity(set.members.len());
         for &member_index in &set.members {
@@ -6784,7 +7205,7 @@ impl ContentMapper {
             }
             member_sizes.push(sz);
         }
-        let (inner_name, inner_size, runs) = content_mapper_build_seven_zip_map(
+        let mapped = content_mapper_build_seven_zip_map_with_password(
             &set.members,
             &member_sizes,
             |member_index, offset, buf| {
@@ -6792,12 +7213,30 @@ impl ContentMapper {
                     .get_source(member_index)
                     .is_some_and(|s| s.read(offset, buf))
             },
+            password,
         )
         .map_err(str::to_string)?;
         let mut map = ContentMap::default();
-        map.set_inner_name_bytes(&inner_name);
-        map.set_inner_size(inner_size);
-        *map.runs_mut() = runs;
+        match mapped {
+            SevenZipMap::Plain(inner_name, inner_size, runs) => {
+                map.set_inner_name_bytes(&inner_name);
+                map.set_inner_size(inner_size);
+                *map.runs_mut() = runs;
+            }
+            SevenZipMap::Encrypted(enc) => {
+                map.set_inner_name_bytes(&enc.inner_name);
+                map.set_inner_size(enc.inner_size);
+                let crypto = std::sync::Arc::new(enc.crypto);
+                for (i, run) in enc.runs.into_iter().enumerate() {
+                    map.runs_mut().push(run);
+                    map.run_cryptos_mut().push(RunCrypto {
+                        crypto: Some(crypto.clone()),
+                        cipher_data_offset: enc.cipher_data_offsets[i],
+                        cipher_size: enc.cipher_sizes[i],
+                    });
+                }
+            }
+        }
         Ok(map)
     }
 
@@ -9272,6 +9711,136 @@ pub fn process_m1_donor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Archives written by 7-Zip 23.01 with `-m0=Copy -pSecret1`: `he` also with `-mhe=on`.
+    const SZ_HE: &str = "377abcaf271c0004b6f2d43ab0000000000000002e00000000000000cb975426041ccf24954be508b54a6c3b949c3d9d8c78b7284e30cd97d67a61e0675bc3d25598c57a696320fb1f934ec8321442c118a6df7927424d4505e4eb332355ad20e6d69418d4d6a36f501ac368154e9433c1009cb91344c44fad3fb385b8afaae0c4d50d7bddd1f8e0c278d5f1a4532aa2be5a02b8bf471ebccdf19f6e4783ce78b16aa1f1752e8c89b4a1ce30b7ead0de0f6640f29f781c45d22e51e09442f96a4573a7343de8f10f74e231f665a8b5e917064001097000070b0100012406f1070112530fa36177ed75b5c1f9aab2f5b0143fbd650c6a0a01022eb6280000";
+    const SZ_DATA: &str = "377abcaf271c00042be7c0c240000000000000006a00000000000000e36627d27b2fedbcd27e1f170a2725d1240202c9a2dc1c8c816972debc167e0a94ec5a7e89788623b6be42fc18f136b753907df4ebc164be0b9411aa901503d9a16b3e520104060001094000070b0100022406f1070112530f03ebd43d4eb77d163944619ceb8aab85010001000c353500080a01e2524d3e0000050119030000001115006d006f007600690065002e006d006b0076000000140a010037bf87cc7a74dd01150601002080a4810000";
+    const SZ_EVEN: &str = "377abcaf271c000493f47ed130000000000000006a00000000000000cd0a16875a413a24c7f0de4fa48282bbcf0a8ea169ae0b08f02c3cc6d7705f5334d3e587db7b5a075f7d044ae28ebd5b05f0d00c0104060001093000070b0100022406f1070112530f7f9efbfccbbc9233ba0daa734b94232a010001000c303000080a01d89dc93b0000050119030000001113006500760065006e002e006d006b00760000001900140a0100febf87cc7a74dd01150601002080a4810000";
+
+    fn sz_unhex(hex: &str) -> Vec<u8> {
+        (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn sz_map(parts: &[Vec<u8>], password: Option<&[u8]>) -> Result<SevenZipMap, &'static str> {
+        let idx: Vec<i32> = (0..parts.len() as i32).collect();
+        let sizes: Vec<i64> = parts.iter().map(|p| p.len() as i64).collect();
+        content_mapper_build_seven_zip_map_with_password(
+            &idx,
+            &sizes,
+            |m, off, buf| {
+                let part = &parts[m as usize];
+                let off = off as usize;
+                if off + buf.len() > part.len() {
+                    return false;
+                }
+                buf.copy_from_slice(&part[off..off + buf.len()]);
+                true
+            },
+            password,
+        )
+    }
+
+    fn sz_decrypt(parts: &[Vec<u8>], enc: &SevenZipEncryptedMap) -> Vec<u8> {
+        let mut cipher = Vec::new();
+        for (i, run) in enc.runs.iter().enumerate() {
+            let from = enc.cipher_data_offsets[i] as usize;
+            let part = &parts[run.member_index as usize];
+            cipher.extend_from_slice(&part[from..from + enc.cipher_sizes[i] as usize]);
+        }
+        let mut plain = vec![0u8; cipher.len()];
+        assert!(enc
+            .crypto
+            .decrypt_range(None, &cipher, &mut plain, (cipher.len() / 16) as i64));
+        plain.truncate(enc.inner_size as usize);
+        plain
+    }
+
+    #[test]
+    fn seven_zip_encrypted_copy_maps_with_the_password() {
+        let movie: Vec<u8> = (0..53u32).map(|i| ((i * 7 + 3) % 251) as u8).collect();
+        for hex in [SZ_HE, SZ_DATA] {
+            let whole = vec![sz_unhex(hex)];
+            let Ok(SevenZipMap::Encrypted(enc)) = sz_map(&whole, Some(b"Secret1")) else {
+                panic!("an encrypted stored 7z maps with its password");
+            };
+            assert_eq!(enc.inner_name, b"movie.mkv");
+            assert_eq!(enc.inner_size, 53);
+            assert_eq!(enc.runs.len(), 1);
+            assert_eq!(enc.runs[0].member_offset, 32);
+            assert_eq!(enc.runs[0].size, 53);
+            assert_eq!(enc.cipher_sizes, vec![64]);
+            assert_eq!(sz_decrypt(&whole, &enc), movie);
+            assert_eq!(
+                sz_map(&whole, Some(b"Secret2")).err(),
+                Some("archive password rejected")
+            );
+
+            // The same archive as a volume set cut inside the data.
+            let bytes = sz_unhex(hex);
+            let split = vec![bytes[..50].to_vec(), bytes[50..].to_vec()];
+            let Ok(SevenZipMap::Encrypted(enc2)) = sz_map(&split, Some(b"Secret1")) else {
+                panic!("a split encrypted stored 7z maps with its password");
+            };
+            assert_eq!(enc2.runs.len(), 2);
+            assert_eq!(enc2.cipher_sizes, vec![18, 46]);
+            assert_eq!(
+                (
+                    enc2.runs[0].size,
+                    enc2.runs[1].size,
+                    enc2.runs[1].inner_offset
+                ),
+                (18, 35, 18)
+            );
+            assert_eq!(enc2.cipher_data_offsets, vec![32, 0]);
+            assert_eq!(sz_decrypt(&split, &enc2), movie);
+        }
+        // Without the password the reason says which part is encrypted.
+        assert_eq!(
+            sz_map(&[sz_unhex(SZ_HE)], None).err(),
+            Some(ContentMapper::SKIP_ENCRYPTED_HEADERS)
+        );
+        assert_eq!(
+            sz_map(&[sz_unhex(SZ_DATA)], None).err(),
+            Some(ContentMapper::SKIP_ENCRYPTED_DATA)
+        );
+        assert!(
+            content_mapper_build_seven_zip_map(&[0], &[254], |_, off, buf| {
+                let bytes = sz_unhex(SZ_HE);
+                buf.copy_from_slice(&bytes[off as usize..off as usize + buf.len()]);
+                true
+            })
+            .is_err()
+        );
+        // Readable headers and a file that ends on a block: nothing proves the password.
+        assert_eq!(
+            sz_map(&[sz_unhex(SZ_EVEN)], Some(b"Secret1")).err(),
+            Some("archive password cannot be checked")
+        );
+    }
+
+    #[test]
+    fn seven_zip_aes_properties_and_key() {
+        let aes = SevenZipAes::parse(&sz_unhex("530f03ebd43d4eb77d163944619ceb8aab85")).unwrap();
+        assert_eq!(aes.cycles_power, 19);
+        assert!(aes.salt.is_empty());
+        assert_eq!(
+            aes.iv.to_vec(),
+            sz_unhex("03ebd43d4eb77d163944619ceb8aab85")
+        );
+        assert!(SevenZipAes::parse(&[]).is_none());
+        assert!(SevenZipAes::parse(&[0x53, 0x0f, 1, 2]).is_none());
+        // No salt, no iv, no hashing rounds: the key is the UTF-16LE password itself.
+        let raw = SevenZipAes::parse(&[0x3f]).unwrap();
+        let key = raw.derive_key(b"ab").unwrap();
+        assert_eq!(&key[..4], &[b'a', 0, b'b', 0]);
+        assert!(key[4..].iter().all(|&b| b == 0));
+        assert!(SevenZipAes::parse(&[30])
+            .unwrap()
+            .derive_key(b"x")
+            .is_none());
+    }
 
     #[test]
     fn final_end_block_clears_the_next_volume_flag() {

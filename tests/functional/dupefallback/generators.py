@@ -309,7 +309,7 @@ def zip_deflated_with_symlink(files, link_name, link_target):
     return buf.getvalue()
 
 
-def _seven_zip_pack(files, workdir, out_name, extra_args):
+def _seven_zip_pack(files, workdir, out_name, extra_args, method='LZMA2'):
     if not HAVE_7Z:
         raise RuntimeError('7z is not installed')
     names = []
@@ -320,7 +320,7 @@ def _seven_zip_pack(files, workdir, out_name, extra_args):
             f.write(data)
         names.append(name)
     out = os.path.join(workdir, out_name)
-    subprocess.run([SEVENZIP_PATH, 'a', '-bd', '-m0=LZMA2'] + extra_args + [out] + names,
+    subprocess.run([SEVENZIP_PATH, 'a', '-bd', '-m0=' + method] + extra_args + [out] + names,
                    cwd=workdir, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with open(out, 'rb') as f:
@@ -348,6 +348,15 @@ def seven_zip_lzma_encrypted(files, workdir, password):
     donor password travels identically on both sides of the fixture."""
     return _seven_zip_pack(files, workdir, 'out_enc.7z',
                             ['-mhe=on', '-p' + password])
+
+
+def seven_zip_copy_encrypted(files, workdir, password):
+    """A stored (Copy) 7z archive with encrypted headers and data
+    (-m0=Copy -mhe=on -p<password>), holding ``files`` = [(name, bytes), ...].
+    Its packed stream is one AES-256-CBC stream over the file, so with the
+    password its content maps without extracting anything."""
+    return _seven_zip_pack(files, workdir, 'out_copy_enc.7z',
+                            ['-mhe=on', '-p' + password], method='Copy')
 
 
 def split_bytes(data, sizes):

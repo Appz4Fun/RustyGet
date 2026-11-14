@@ -3459,6 +3459,9 @@ pub struct NzbSummaryData {
     pub data_declared_parts: u64,
     pub article_bytes: u64,
     pub geometry_valid: bool,
+    /// Article count of each data file, sorted: a TWIN (the same post) has
+    /// the same counts.
+    pub data_layout: Vec<u32>,
 }
 
 impl NzbSummaryData {
@@ -3673,6 +3676,7 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
                     if !is_par {
                         data_listed_parts = data_listed_parts.wrapping_add(m_valid_parts as u64);
                         data_declared_parts = data_declared_parts.wrapping_add(file_total);
+                        out.data_layout.push(m_valid_parts as u32);
                     }
                     let (new_df, new_db, new_geom2, push_par_head, push_data_head) =
                         accum_file_data_totals(
@@ -3903,6 +3907,7 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
         out.main_name = std::mem::take(&mut size_names[chosen_idx as usize]);
     }
 
+    out.data_layout.sort_unstable();
     out.geometry_valid = geometry_valid;
     if out.geometry_valid {
         out.data_files = data_files;

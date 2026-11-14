@@ -229,14 +229,24 @@ pub fn packing_of_head(data: &[u8], name: &[u8], password_known: bool) -> Packin
     Packing::Unknown
 }
 
-/// Whether two copies are TWINs: their par2 sets list the same files by MD5
-/// and length (a near-twin sharing most of a complete list counts too, as for
-/// article borrowing). Size alone never makes a twin: a re-upload, or a copy
-/// with encrypted headers (a fresh salt every time), has the same file count
-/// and total size but different bytes. Without par2 lists two copies are not
-/// TWINs.
-pub fn twins(a: &crate::twin::Listed, b: &crate::twin::Listed) -> bool {
-    crate::twin::kind(a, b).starts_with("twin") || crate::twin::kind(b, a).starts_with("twin")
+/// Whether two copies are TWINs, the same post: their par2 sets list the
+/// same files by MD5 and length (a near-twin sharing most of a complete list
+/// counts too, as for article borrowing) and their data files are split into
+/// the same numbers of articles (`a_layout`, `b_layout`: the article count of
+/// each data file, sorted), so articles swap one for one. Size alone never
+/// makes a twin: a re-upload, or a copy with encrypted headers (a fresh salt
+/// every time), has the same file count and total size but different bytes.
+/// Without par2 lists two copies are not TWINs.
+pub fn twins(
+    a: &crate::twin::Listed,
+    b: &crate::twin::Listed,
+    a_layout: &[u32],
+    b_layout: &[u32],
+) -> bool {
+    !a_layout.is_empty()
+        && a_layout == b_layout
+        && (crate::twin::kind(a, b).starts_with("twin")
+            || crate::twin::kind(b, a).starts_with("twin"))
 }
 
 #[cfg(test)]
@@ -401,14 +411,18 @@ mod tests {
     }
 
     #[test]
-    fn twins_need_matching_par2() {
+    fn twins_need_matching_par2_and_articles() {
         let a = listed(&[("a.r00", 10, "m1"), ("a.r01", 10, "m2")], true);
         let b = listed(&[("b.r00", 10, "m1"), ("b.r01", 10, "m2")], true);
         let c = listed(&[("c.r00", 10, "x1"), ("c.r01", 10, "x2")], true);
-        assert!(twins(&a, &b));
+        let l = [3u32, 3];
+        assert!(twins(&a, &b, &l, &l));
+        // same par2 hashes, other article split: an ALT, not swappable
+        assert!(!twins(&a, &b, &l, &[2, 4]));
+        assert!(!twins(&a, &b, &[], &[]));
         // same names and sizes, other bytes (a re-upload with encrypted
         // headers): not twins
-        assert!(!twins(&a, &c));
+        assert!(!twins(&a, &c, &l, &l));
         // a partial list sharing most files of a complete one: a near-twin
         let three = listed(
             &[
@@ -419,11 +433,11 @@ mod tests {
             true,
         );
         let part = listed(&[("p.r00", 10, "m1"), ("p.r01", 10, "m2")], false);
-        assert!(twins(&three, &part));
-        assert!(twins(&part, &three));
+        assert!(twins(&three, &part, &l, &l));
+        assert!(twins(&part, &three, &l, &l));
         // without par2 lists nothing is a twin, whatever the sizes
         let none = listed(&[], false);
-        assert!(!twins(&none, &c));
-        assert!(!twins(&none, &none));
+        assert!(!twins(&none, &c, &l, &l));
+        assert!(!twins(&none, &none, &l, &l));
     }
 }

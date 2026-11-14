@@ -569,10 +569,7 @@ fn patch_from_repaired_volumes(
 fn rar_set_members(first: &Path) -> Vec<crate::streamrepair::SetMember> {
     let mut out = Vec::new();
     let mut p = first.to_path_buf();
-    loop {
-        let Ok(meta) = std::fs::metadata(&p) else {
-            break;
-        };
+    while let Ok(meta) = std::fs::metadata(&p) {
         let name = p
             .file_name()
             .map(|n| path_bytes(Path::new(n)))

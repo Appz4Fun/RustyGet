@@ -42,7 +42,7 @@ sed -e 's|^MainDir=.*|MainDir=/var/lib/rustyget/downloads|' \
     -e 's|^AuthorizedIP=.*|AuthorizedIP=127.0.0.1|' \
     -e 's|^UpdateCheck=.*|UpdateCheck=none|' \
     -e 's|^UMask=.*|UMask=0002|' \
-    nzbget.conf > "$STAGE/usr/share/rustyget/rustyget.conf"
+    rustyget.conf > "$STAGE/usr/share/rustyget/rustyget.conf"
 chmod 0644 "$STAGE/usr/share/rustyget/rustyget.conf"
 
 # Shared-library dependencies from the binary itself.

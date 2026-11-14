@@ -54,7 +54,7 @@ just build
 
 The release binary is `build/release/rustyget`.
 
-The configuration template is `nzbget.conf` in the repository; it keeps NZBGet's filename for now and installs as `rustyget.conf`.
+The configuration template is `rustyget.conf` in the repository.
 
 To install RustyGet system-wide into `/usr/local/bin`, with the web interface and the configuration template in `/usr/local/share/rustyget`, run these commands from the repository. The `sed` command points the template's `WebDir` and `ConfigTemplate` at the installed files, as `just install` does:
 
@@ -64,7 +64,7 @@ sudo install -m 755 build/release/rustyget /usr/local/bin/rustyget
 sudo cp -R webui /usr/local/share/rustyget/
 sed -e 's|^WebDir=.*|WebDir=/usr/local/share/rustyget/webui|' \
     -e 's|^ConfigTemplate=.*|ConfigTemplate=/usr/local/share/rustyget/rustyget.conf|' \
-    nzbget.conf | sudo tee /usr/local/share/rustyget/rustyget.conf > /dev/null
+    rustyget.conf | sudo tee /usr/local/share/rustyget/rustyget.conf > /dev/null
 [ -e /usr/local/etc/rustyget.conf ] || sudo install -m 600 /usr/local/share/rustyget/rustyget.conf /usr/local/etc/rustyget.conf
 ```
 
@@ -80,7 +80,7 @@ just package
 To run RustyGet as your own user with a private configuration file:
 
 ```bash
-[ -e ~/.rustyget ] || install -m 600 nzbget.conf ~/.rustyget
+[ -e ~/.rustyget ] || install -m 600 rustyget.conf ~/.rustyget
 ```
 
 The test keeps an existing `~/.rustyget` when you run the steps again for an upgrade.
@@ -103,8 +103,8 @@ The test keeps an existing `~/.rustyget` when you run the steps again for an upg
 Copy the default configuration, then start RustyGet in the foreground from the source tree to check it:
 
 ```bash
-[ -e ~/rustyget.conf ] || install -m 600 nzbget.conf ~/rustyget.conf
-build/release/rustyget -c ~/rustyget.conf -o WebDir="$PWD/webui" -o ConfigTemplate="$PWD/nzbget.conf" -s
+[ -e ~/rustyget.conf ] || install -m 600 rustyget.conf ~/rustyget.conf
+build/release/rustyget -c ~/rustyget.conf -o WebDir="$PWD/webui" -o ConfigTemplate="$PWD/rustyget.conf" -s
 ```
 
 Downloads go under `~/downloads` until you change `MainDir`. The template ships with `Server1.Active=no`, so nothing downloads until you add and turn on a news server.
@@ -155,7 +155,7 @@ RustyGet reads NZBGet's configuration file, queue, and history, so you can point
 
 1. Stop NZBGet.
 2. Back up the queue directory (`QueueDir`) and `nzbget.conf`.
-3. Start RustyGet with the same configuration file.
+3. Start RustyGet with the same configuration file, or rename it to `rustyget.conf`. Without `-c`, RustyGet reads `nzbget.conf` only when it finds no `rustyget.conf`, and logs a notice when it does.
 
 RustyGet writes the queue in NZBGet's format and keeps its own extra data in a trailer that NZBGet ignores, so NZBGet can still read the queue afterward. Some RustyGet-only state is lost if you go back.
 

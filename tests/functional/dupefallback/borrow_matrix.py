@@ -198,7 +198,7 @@ class Bench:
         slug = '%02d-%s' % (len(self.results) + 1, re.sub(r'[^A-Za-z0-9]+', '-', res['label']).strip('-'))
         dest = os.path.join(self.evidence, slug)
         os.makedirs(dest)
-        for rel in ('nzbget.log', 'nzbget.conf'):
+        for rel in ('nzbget.log', 'rustyget.conf'):
             try:
                 shutil.copy2(t.path(rel), os.path.join(dest, rel))
             except OSError:

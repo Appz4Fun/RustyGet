@@ -8,7 +8,7 @@ from xmlrpc.client import ServerProxy
 
 nzbget_srcdir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 nzbget_maindir = nzbget_srcdir + '/tests/testdata/nzbget.temp'
-nzbget_configfile = nzbget_maindir + '/nzbget.conf'
+nzbget_configfile = nzbget_maindir + '/rustyget.conf'
 nzbget_rpcurl = 'http://127.0.0.1:6789/xmlrpc';
 
 exe_ext = '.exe' if os.name == 'nt' else ''
@@ -51,7 +51,7 @@ def check_config(request):
 	global nzbget_maindir
 	nzbget_maindir = request.config.getini('nzbget_maindir')
 	global nzbget_configfile
-	nzbget_configfile = nzbget_maindir + '/nzbget.conf'
+	nzbget_configfile = nzbget_maindir + '/rustyget.conf'
 
 class NServ:
 
@@ -131,7 +131,7 @@ class Nzbget:
 		config.write('NzbDirInterval=0\n')
 		config.write('FlushQueue=no\n')
 		config.write('WebDir=' + nzbget_srcdir + '/webui\n')
-		config.write('ConfigTemplate=' + nzbget_srcdir + '/nzbget.conf\n')
+		config.write('ConfigTemplate=' + nzbget_srcdir + '/rustyget.conf\n')
 		config.write('ControlUsername=\n')
 		config.write('ControlPassword=\n')
 		config.write('ControlIP=127.0.0.1\n')

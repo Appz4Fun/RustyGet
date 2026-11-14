@@ -19,10 +19,10 @@ RUN \
   install -v -m755 /rustyget/build/release/rustyget /app/rustyget/rustyget && \
   ln -sf /app/rustyget/rustyget /app/rustyget/nzbget && \
   cp -r /rustyget/webui /app/rustyget/webui && \
-  cp /rustyget/nzbget.conf /app/rustyget/webui/rustyget.conf.template && \
-  cp /rustyget/nzbget.conf /app/rustyget/webui/nzbget.conf.template && \
+  cp /rustyget/rustyget.conf /app/rustyget/webui/rustyget.conf.template && \
+  cp /rustyget/rustyget.conf /app/rustyget/webui/nzbget.conf.template && \
   mkdir -p /app/rustyget/share/rustyget && \
-  cp /rustyget/nzbget.conf /app/rustyget/share/rustyget/rustyget.conf && \
+  cp /rustyget/rustyget.conf /app/rustyget/share/rustyget/rustyget.conf && \
   cp /rustyget/pubkey.pem /app/rustyget/pubkey.pem && \
   curl -o /app/rustyget/cacert.pem -L "https://curl.se/ca/cacert.pem"
 

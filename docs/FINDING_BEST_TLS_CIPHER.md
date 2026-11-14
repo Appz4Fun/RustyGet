@@ -31,7 +31,7 @@ failure leaves that server's setting unchanged. Cancel stops further testing.
 A server whose **ServerX.CertVerification** is Minimal or Strict can only be
 tested with **CertCheck** enabled and **CertStore** set. Otherwise the test reports
 a certificate failure for that server and leaves its cipher unchanged. **CertCheck**
-is off in the source tree's `nzbget.conf`; packaged builds turn it on.
+is off in the source tree's `rustyget.conf`; packaged builds turn it on.
 
 A **ServerX.Cipher** written as a reference to another setting, such as
 `${Server1.Cipher}`, stops the test before any server is probed, because a change

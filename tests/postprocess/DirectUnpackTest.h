@@ -120,23 +120,27 @@ private:
 class ScopedPrePostProcessor final
 {
 public:
-	ScopedPrePostProcessor()
+	ScopedPrePostProcessor() : m_runner(nzbget_rs_prepost_runner_new())
 	{
-		m_processor.Start();
+		nzbget_rs_prepost_runner_op(m_runner, 0, 0, 0, 0, 0);
 	}
 
 	~ScopedPrePostProcessor()
 	{
-		m_processor.Stop();
-		const bool stopped = WaitFor([this] { return !m_processor.IsRunning(); }, 12000);
+		nzbget_rs_prepost_runner_op(m_runner, 1, 0, 0, 0, 0);
+		const bool stopped = WaitFor([this] { return !nzbget_rs_prepost_runner_op(m_runner, 2, 0, 0, 0, 0); }, 12000);
 		BOOST_CHECK_MESSAGE(stopped,
 			"PrePostProcessor did not stop within the bounded wait");
+		nzbget_rs_prepost_runner_free(m_runner);
 	}
 
-	PrePostProcessor* Get() { return &m_processor; }
+	void NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
+	{
+		nzbget_rs_prepost_runner_op(m_runner, 6, 0, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo), 0);
+	}
 
 private:
-	PrePostProcessor m_processor;
+	const PrePostRunner* m_runner;
 };
 
 class ScopedPostProcessPause final
@@ -255,15 +259,15 @@ BOOST_AUTO_TEST_CASE(DirectUnpackSimpleTest)
 	nzbInfo->SetDestDir(WORKING_DIR.string().c_str());
 	downloadQueue.GetQueue()->Add(std::move(nzbInfo), false);
 
-	DirectUnpack::StartJob(nzbPtr);
+	StartDirectUnpackJob(nzbPtr);
 
 	while (true)
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 		if (nzbPtr->GetUnpackThread())
 		{
-			DirectUnpack* directUnpack = static_cast<DirectUnpack*>(nzbPtr->GetUnpackThread());
-			directUnpack->NzbDownloaded(downloadQueue, nzbPtr);
+			nzbget_rs_job_op(nzbPtr->GetUnpackThread(), 13, 0,
+				reinterpret_cast<uintptr_t>(static_cast<DownloadQueue*>(downloadQueue)), reinterpret_cast<uintptr_t>(nzbPtr));
 			break;
 		}
 		Util::Sleep(50);
@@ -322,15 +326,15 @@ BOOST_AUTO_TEST_CASE(DirectUnpackTwoArchives)
 	nzbInfo->SetDestDir(WORKING_DIR.string().c_str());
 	downloadQueue.GetQueue()->Add(std::move(nzbInfo), false);
 
-	DirectUnpack::StartJob(nzbPtr);
+	StartDirectUnpackJob(nzbPtr);
 
 	while (true)
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 		if (nzbPtr->GetUnpackThread())
 		{
-			DirectUnpack* directUnpack = static_cast<DirectUnpack*>(nzbPtr->GetUnpackThread());
-			directUnpack->NzbDownloaded(downloadQueue, nzbPtr);
+			nzbget_rs_job_op(nzbPtr->GetUnpackThread(), 13, 0,
+				reinterpret_cast<uintptr_t>(static_cast<DownloadQueue*>(downloadQueue)), reinterpret_cast<uintptr_t>(nzbPtr));
 			break;
 		}
 		Util::Sleep(50);
@@ -368,7 +372,7 @@ BOOST_AUTO_TEST_CASE(DirectUnpackParFailureStillFinalizesUnpack)
 
 	BOOST_REQUIRE(WithNzbInfo(nzbId, [](NzbInfo* info)
 	{
-		DirectUnpack::StartJob(info);
+		StartDirectUnpackJob(info);
 		return true;
 	}));
 	BOOST_REQUIRE(WaitFor([&]
@@ -384,7 +388,7 @@ BOOST_AUTO_TEST_CASE(DirectUnpackParFailureStillFinalizesUnpack)
 		ScopedPrePostProcessor processor;
 		BOOST_REQUIRE(WithNzbInfo(nzbId, [&](NzbInfo* info)
 		{
-			processor.Get()->NzbDownloaded(&downloadQueue, info);
+			processor.NzbDownloaded(&downloadQueue, info);
 			return true;
 		}));
 
@@ -434,7 +438,7 @@ BOOST_AUTO_TEST_CASE(ParFailureWithoutSuccessfulDirectUnpackStillSkipsUnpack)
 		ScopedPrePostProcessor processor;
 		BOOST_REQUIRE(WithNzbInfo(nzbId, [&](NzbInfo* info)
 		{
-			processor.Get()->NzbDownloaded(&downloadQueue, info);
+			processor.NzbDownloaded(&downloadQueue, info);
 			return true;
 		}));
 		BOOST_REQUIRE(WaitFor([&]

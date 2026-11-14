@@ -31,7 +31,6 @@ ServerPool* g_ServerPool;
 QueueCoordinator* g_QueueCoordinator;
 UrlCoordinator* g_UrlCoordinator;
 StatMeter* g_StatMeter;
-PrePostProcessor* g_PrePostProcessor;
 HistoryCoordinator* g_HistoryCoordinator;
 DupeCoordinator* g_DupeCoordinator;
 DiskState* g_DiskState;

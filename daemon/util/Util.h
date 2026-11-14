@@ -165,39 +165,6 @@ typedef unsigned char uchar;
 #define PRINTF_SYNTAX(strindex)
 #endif
 
-#ifndef OBSERVER_H
-#define OBSERVER_H
-
-class Subject;
-
-class Observer
-{
-protected:
-	virtual void Update(Subject* caller, void* aspect) = 0;
-	friend class Subject;
-};
-
-class Subject
-{
-public:
-	void Attach(Observer* observer)
-	{
-		m_observers.push_back(observer);
-	}
-
-	void Notify(void* aspect)
-	{
-		for (Observer* observer : m_observers)
-		{
-			observer->Update(this, aspect);
-		}
-	}
-
-private:
-	std::vector<Observer*> m_observers;
-};
-
-#endif
 
 #ifndef CONTAINER_H
 #define CONTAINER_H
@@ -344,104 +311,6 @@ private:
 
 #include "nzbget_rs.h"
 
-class Thread
-{
-public:
-	Thread() = default;
-	Thread(const Thread&) = delete;
-	virtual ~Thread() = default;
-
-	virtual void Start()
-	{
-		m_running = true;
-
-		// NOTE: "m_threadMutex" ensures that "t" lives until the very end of the function
-		std::lock_guard<std::mutex> guard(m_threadMutex);
-
-		// start the new thread
-		std::thread t([&]{
-			{
-				// trying to lock "m_threadMutex", this will wait until function "Start()" is completed
-				// and "t" is detached.
-				std::lock_guard<std::mutex> threadGuard(m_threadMutex);
-			}
-
-			thread_handler();
-		});
-
-		// save the native handle to be able to cancel (Kill) the thread and then detach
-		m_threadObj = t.native_handle();
-		t.detach();
-	}
-
-	virtual void Stop()
-	{
-		m_stopped = true;
-	}
-
-	virtual void Resume()
-	{
-		m_stopped = false;
-	}
-
-	bool Kill()
-	{
-		std::lock_guard<std::mutex> guard(m_threadMutex);
-		m_stopped = true;
-
-		bool terminated = pthread_cancel(m_threadObj) == 0;
-
-		if (terminated)
-		{
-			nzbget_rs_thread_count_op(-1);
-		}
-		return terminated;
-	}
-
-	bool IsStopped() { return m_stopped; };
-	bool IsRunning() const { return m_running; }
-	void SetAutoDestroy(bool autoDestroy) { m_autoDestroy = autoDestroy; }
-	static bool IsCurrentThreadStopped()
-	{
-		return (m_currentThread && m_currentThread->IsStopped()) || nzbget_rs_thread_count_op(2) != 0;
-	}
-
-protected:
-	virtual void Run() {} // Virtual function - override in derivatives
-
-private:
-	inline static std::mutex m_threadMutex;
-	inline static thread_local Thread* m_currentThread = nullptr;
-	std::thread::native_handle_type m_threadObj = 0;
-	std::atomic<bool> m_running{false};
-	std::atomic<bool> m_stopped{false};
-	std::atomic<bool> m_autoDestroy{false};
-
-	void thread_handler()
-	{
-		nzbget_rs_thread_count_op(1);
-		struct CurrentGuard
-		{
-			CurrentGuard(Thread* t) { m_currentThread = t; }
-			~CurrentGuard() { m_currentThread = nullptr; }
-		} currentGuard(this);
-
-		Run();
-
-		// read before m_running goes false: an owner waiting for that may destroy
-		// the object right away
-		const bool autoDestroy = m_autoDestroy;
-
-		nzbget_rs_thread_count_op(-1);
-
-		m_running = false;
-
-		if (autoDestroy)
-		{
-			delete this;
-		}
-	}
-};
 
 #endif
 
@@ -1101,12 +970,6 @@ extern WorkState* g_WorkState;
 
 
 
-// Connections use the Rust host callback (rust/src/tlssock.rs). C++ only answers
-// operation 2: whether the current C++ Thread was asked to stop.
-inline intptr_t TlsHostCb(void*, int op, int, int, uintptr_t, const char*, const char*, const char*, char*, int*)
-{
-	return (op == 2 && Thread::IsCurrentThreadStopped()) ? 1 : 0;
-}
 
 inline uintptr_t NzbgetCQueueHost(void* ctx, int op, int a1, int a2, uintptr_t p1, uintptr_t p2,
 	const char* s1, const char* s2, int* ints, int64_t* i64s, const char** strs);
@@ -1147,7 +1010,7 @@ inline void InitRsBuildEnv()
 		flags |= 8;
 #endif
 #endif
-		nzbget_rs_build_env_init(flags, Util::VersionRevision(), sslLib, sslVer, &TlsHostCb,
+		nzbget_rs_build_env_init(flags, Util::VersionRevision(), sslLib, sslVer, nullptr,
 			+[](const char* ptr, size_t len, int doFlush) {
 				if (ptr && len > 0) fwrite(ptr, 1, len, stdout);
 				if (doFlush) fflush(stdout);
@@ -2387,8 +2250,8 @@ public:
 		void SetNeedParCheck(bool needParCheck) { m_needParCheck = needParCheck; }
 		bool GetNeedUnpack() const { return m_needUnpack; }
 		void SetNeedUnpack(bool needUnpack) { m_needUnpack = needUnpack; }
-		Thread* GetPostThread() { return m_postThread; }
-		void SetPostThread(Thread* postThread) { m_postThread = postThread; }
+		JobThread* GetPostThread() { return m_postThread; }
+		void SetPostThread(JobThread* postThread) { m_postThread = postThread; }
 		ParredFiles* GetParredFiles() { return &m_parredFiles; }
 		ExtractedArchives* GetExtractedArchives() { return m_nzbInfo ? m_nzbInfo->GetExtractedArchives() : &m_extractedArchives; }
 
@@ -2416,7 +2279,7 @@ public:
 		std::atomic<int> m_stageProgress{0};
 		time_t m_startTime = 0;
 		time_t m_stageTime = 0;
-		Thread* m_postThread = nullptr;
+		JobThread* m_postThread = nullptr;
 		ParredFiles m_parredFiles;
 		ExtractedArchives m_extractedArchives;
 	};
@@ -2477,10 +2340,10 @@ public:
 	void SetWaitingPar(bool waitingPar) { m_waitingPar = waitingPar; }
 	bool GetLoadingPar() { return m_loadingPar; }
 	void SetLoadingPar(bool loadingPar) { m_loadingPar = loadingPar; }
-	Thread* GetUnpackThread() { return m_unpackThread; }
-	void SetUnpackThread(Thread* unpackThread) { m_unpackThread = unpackThread; }
-	Thread* GetLiveRepairThread() { return m_liveRepairThread; }
-	void SetLiveRepairThread(Thread* liveRepairThread) { m_liveRepairThread = liveRepairThread; }
+	JobThread* GetUnpackThread() { return m_unpackThread; }
+	void SetUnpackThread(JobThread* unpackThread) { m_unpackThread = unpackThread; }
+	JobThread* GetLiveRepairThread() { return m_liveRepairThread; }
+	void SetLiveRepairThread(JobThread* liveRepairThread) { m_liveRepairThread = liveRepairThread; }
 	void UpdateCurrentStats()
 	{
 		RsDownloadCurrentStatsAcc acc{};
@@ -2689,10 +2552,10 @@ private:
 	bool m_allFirst = false;
 	bool m_waitingPar = false;
 	bool m_loadingPar = false;
-	Thread* m_unpackThread = nullptr;
+	JobThread* m_unpackThread = nullptr;
 	// download-concurrent stream repair for completed-with-holes files (see
 	// option <DupeArticleFallback> value "live"; not persisted)
-	Thread* m_liveRepairThread = nullptr;
+	JobThread* m_liveRepairThread = nullptr;
 	int m_desiredServerId = 0;
 	bool m_skipScriptProcessing = false;
 	bool m_skipDiskWrite = false;
@@ -2859,7 +2722,7 @@ typedef UniqueDeque<HistoryInfo> HistoryList;
 
 typedef GuardedPtr<DownloadQueue> GuardedDownloadQueue;
 
-class DownloadQueue : public Subject
+class DownloadQueue
 {
 public:
 	enum EAspectAction
@@ -2886,6 +2749,13 @@ public:
 		NzbInfo* nzbInfo;
 		FileInfo* fileInfo;
 	};
+
+	// tells the pre/post-processor about a queue change (rust/src/jobthread.rs)
+	void Notify(Aspect* aspect)
+	{
+		nzbget_rs_prepost_queue_changed((int)aspect->action, reinterpret_cast<uintptr_t>(aspect->downloadQueue),
+			reinterpret_cast<uintptr_t>(aspect->nzbInfo), reinterpret_cast<uintptr_t>(aspect->fileInfo));
+	}
 
 	enum EEditAction
 	{
@@ -3140,149 +3010,42 @@ extern DupeCoordinator* g_DupeCoordinator;
 #ifndef PREPOSTPROCESSOR_H
 #define PREPOSTPROCESSOR_H
 
-class PrePostProcessor;
-extern PrePostProcessor* g_PrePostProcessor;
-
-class PostJobThread final : public Thread
+// Job threads live in Rust (rust/src/jobthread.rs); the queue model keeps their handles.
+inline void StartPostJob(PostInfo* postInfo, int kind)
 {
-public:
-	PostJobThread(int kind, PostInfo* postInfo, int nzbId) : m_kind(kind)
+	if (!postInfo || (kind == 9 && postInfo->GetNzbInfo() && postInfo->GetNzbInfo()->GetSkipScriptProcessing()))
+		return;
+	JobThread* job = nzbget_rs_job_new_post(kind, reinterpret_cast<uintptr_t>(postInfo), 0, 0);
+	postInfo->SetPostThread(job);
+	if (!nzbget_rs_job_start(job))
 	{
-		static_assert(sizeof(StreamRange) == 16, "StreamRange ABI match");
-		InitRsBuildEnv();
-		m_rs = nzbget_rs_post_job_new(kind, reinterpret_cast<uintptr_t>(static_cast<Thread*>(this)),
-			reinterpret_cast<uintptr_t>(postInfo), nzbId);
+		// no worker will finish this stage: let the scheduler clean up and retry it
+		postInfo->SetPostThread(nullptr);
+		postInfo->SetWorking(false);
+		nzbget_rs_job_free(job, 0);
 	}
+}
 
-	~PostJobThread() override
-	{
-		nzbget_rs_post_job_free(m_rs);
-#ifndef DISABLE_TLS
-		if (m_kind == 4) OpenSSL::StopSSLThread();
-#endif
-	}
-
-	static void StartPost(PostInfo* postInfo, int kind)
-	{
-		if (!postInfo || (kind == 9 && postInfo->GetNzbInfo() && postInfo->GetNzbInfo()->GetSkipScriptProcessing()))
-			return;
-		PostJobThread* job = new PostJobThread(kind, postInfo, 0);
-		job->SetAutoDestroy(false);
-		postInfo->SetPostThread(job);
-		job->Start();
-	}
-
-	static void StartLive(NzbInfo* nzbInfo)
-	{
-		if (!nzbInfo) return;
-		PostJobThread* job = new PostJobThread(10, nullptr, nzbInfo->GetId());
-		job->SetAutoDestroy(true);
-		nzbInfo->SetLiveRepairThread(job);
-		job->Start();
-	}
-
-	void Run() override { nzbget_rs_post_job_op(m_rs, 1, 0, 0); }
-
-	void Stop() override
-	{
-		Thread::Stop();
-		nzbget_rs_post_job_op(m_rs, 0, 0, 0);
-	}
-
-	bool AddPar(FileInfo* fileInfo, bool deleted)
-	{
-		return nzbget_rs_post_job_op(m_rs, 2, deleted ? 1 : 0, reinterpret_cast<uintptr_t>(fileInfo)) != 0;
-	}
-
-private:
-	int m_kind = 0;
-	NzbgetRsPostJob* m_rs = nullptr;
-};
-
-#ifndef DIRECTUNPACK_H
-#define DIRECTUNPACK_H
-
-class DirectUnpack final : public Thread
+inline void StartLiveRepairJob(NzbInfo* nzbInfo)
 {
-public:
-	explicit DirectUnpack(int nzbId) : m_rs(nzbget_rs_direct_unpack_new(nzbId, reinterpret_cast<uintptr_t>(static_cast<Thread*>(this)))) { InitRsBuildEnv(); }
-	~DirectUnpack() override { nzbget_rs_direct_unpack_free(m_rs); }
+	if (!nzbInfo) return;
+	JobThread* job = nzbget_rs_job_new_post(10, 0, nzbInfo->GetId(), 1);
+	nzbInfo->SetLiveRepairThread(job);
+	if (!nzbget_rs_job_start(job)) { nzbInfo->SetLiveRepairThread(nullptr); nzbget_rs_job_free(job, 0); }
+}
 
-	static void StartJob(NzbInfo* nzbInfo)
-	{
-		DirectUnpack* directUnpack = new DirectUnpack(nzbInfo->GetId());
-		directUnpack->SetAutoDestroy(true);
-		nzbInfo->SetUnpackThread(directUnpack);
-		nzbInfo->SetDirectUnpackStatus(NzbInfo::nsRunning);
-		directUnpack->Start();
-	}
-
-	bool IsUnpacking() const { return nzbget_rs_direct_unpack_exec(m_rs, 5, 0, 0) != 0; }
-	bool IsWaitingVolume() const { return nzbget_rs_direct_unpack_exec(m_rs, 6, 0, 0) != 0; }
-	void Run() override { nzbget_rs_direct_unpack_exec(m_rs, 0, 0, 0); }
-	void Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo) { nzbget_rs_direct_unpack_exec(m_rs, 1, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo)); }
-	void FileDownloaded(DownloadQueue* downloadQueue, FileInfo* fileInfo) { nzbget_rs_direct_unpack_exec(m_rs, 2, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(fileInfo)); }
-	void NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo) { nzbget_rs_direct_unpack_exec(m_rs, 3, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo)); }
-	void NzbDeleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo) { nzbget_rs_direct_unpack_exec(m_rs, 4, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo)); }
-
-private:
-	NzbgetRsDirectUnpack* m_rs = nullptr;
-};
-
-#endif
-
-class PrePostProcessor : public Thread, public Observer
+inline void StartDirectUnpackJob(NzbInfo* nzbInfo)
 {
-public:
-	bool HasMoreJobs()
+	JobThread* job = nzbget_rs_job_new_unpack(nzbInfo->GetId());
+	nzbInfo->SetUnpackThread(job);
+	nzbInfo->SetDirectUnpackStatus(NzbInfo::nsRunning);
+	if (!nzbget_rs_job_start(job))
 	{
-		return nzbget_rs_prepost_exec(m_rs, 2, 0, 0, 0, 0, 0, nullptr, nullptr, &NzbgetCQueueHost) != 0;
+		nzbInfo->SetUnpackThread(nullptr);
+		nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
+		nzbget_rs_job_free(job, 0);
 	}
-
-	PrePostProcessor() : m_rs(nzbget_rs_prepost_new(reinterpret_cast<uintptr_t>(this)))
-	{
-		InitRsBuildEnv();
-		debug("Creating PrePostProcessor");
-		DownloadQueue::Guard()->Attach(this);
-	}
-
-	~PrePostProcessor() override
-	{
-		nzbget_rs_prepost_free(m_rs);
-	}
-
-	void Run() override
-	{
-		nzbget_rs_prepost_exec(m_rs, 0, 0, 0, 0, 0, 0, nullptr, nullptr, &NzbgetCQueueHost);
-	}
-
-	void Stop() override
-	{
-		Thread::Stop();
-		nzbget_rs_prepost_exec(m_rs, 1, 0, 0, 0, 0, 0, nullptr, nullptr, &NzbgetCQueueHost);
-	}
-
-	bool HasActiveUnpack(bool includeWaitingVolume = true)
-	{
-		return nzbget_rs_prepost_exec(m_rs, 3, includeWaitingVolume ? 1 : 0, 0, 0, 0, 0, nullptr, nullptr, &NzbgetCQueueHost) != 0;
-	}
-
-	void NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
-	{
-		nzbget_rs_prepost_exec(m_rs, 6, 0, 0, reinterpret_cast<uintptr_t>(downloadQueue), reinterpret_cast<uintptr_t>(nzbInfo), 0, nullptr, nullptr, &NzbgetCQueueHost);
-	}
-
-protected:
-	void Update(Subject*, void* aspect) override
-	{
-		if (!aspect) return;
-		DownloadQueue::Aspect* qa = static_cast<DownloadQueue::Aspect*>(aspect);
-		nzbget_rs_prepost_exec(m_rs, 8, (int)qa->action, 0, reinterpret_cast<uintptr_t>(qa->downloadQueue), reinterpret_cast<uintptr_t>(qa->nzbInfo), reinterpret_cast<uintptr_t>(qa->fileInfo), nullptr, nullptr, &NzbgetCQueueHost);
-	}
-
-private:
-	NzbgetRsPrePostProcessor* m_rs = nullptr;
-};
+}
 #endif
 
 class Scanner {};
@@ -3313,7 +3076,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		return 0;
 	}
 	case 6: {
-		if (a1 == 5) PostJobThread::StartLive(reinterpret_cast<NzbInfo*>(p1));
+		if (a1 == 5) StartLiveRepairJob(reinterpret_cast<NzbInfo*>(p1));
 		return 0;
 	}
 	case 7: {
@@ -4355,12 +4118,12 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		if (!pi) return 0;
 		if (a1 == 0)
 		{
-			Thread* pt = pi->GetPostThread();
+			JobThread* pt = pi->GetPostThread();
 			ints[0] = (int)pi->GetStage(); ints[1] = pi->GetWorking() ? 1 : 0; ints[2] = pi->GetDeleted() ? 1 : 0;
 			ints[3] = pi->GetRequestParCheck() ? 1 : 0; ints[4] = pi->GetForceParFull() ? 1 : 0; ints[5] = pi->GetForceRepair() ? 1 : 0;
 			ints[6] = pi->GetStreamRepairDone() ? 1 : 0; ints[7] = pi->GetStreamRepairRecovered() ? 1 : 0; ints[8] = pi->GetParCannotCover() ? 1 : 0;
 			ints[9] = pi->GetNeedParCheck() ? 1 : 0; ints[10] = pi->GetNeedUnpack() ? 1 : 0;
-			ints[11] = pt ? 1 : 0; ints[12] = (pt && pt->IsRunning()) ? 1 : 0;
+			ints[11] = pt ? 1 : 0; ints[12] = (pt && nzbget_rs_job_op(pt, 4, 0, 0, 0)) ? 1 : 0;
 			ints[13] = pi->GetUnpackTried() ? 1 : 0; ints[14] = pi->GetParRepaired() ? 1 : 0;
 			ints[15] = pi->GetPassListTried() ? 1 : 0; ints[16] = pi->GetLastUnpackStatus();
 			ints[17] = pi->GetExtractedArchives() ? (int)pi->GetExtractedArchives()->size() : 0;
@@ -4401,37 +4164,39 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 		if (a1 == 7) { if (a2 < 0) { if (pi->GetExtractedArchives()) pi->GetExtractedArchives()->clear(); } else strs[0] = *(*pi->GetExtractedArchives())[(size_t)a2]; return 0; }
 		return 0;
 	}
-	case 61: {
-		if (a1 == 0) { PrePostProcessor* pp = reinterpret_cast<PrePostProcessor*>(p1); return (pp && pp->IsStopped()) ? 1 : 0; }
-		Thread* t = reinterpret_cast<Thread*>(p1);
-		if (a1 == 1) return (t && t->IsStopped()) ? 1 : 0;
-		if (a1 == 2 && t) t->Thread::Stop();
-		else if (a1 == 3 && t) t->Thread::Resume();
-		return 0;
-	}
 	case 62: {
-		if (a1 == 0) { PostInfo* pi = reinterpret_cast<PostInfo*>(p1); if (pi && pi->GetPostThread()) pi->GetPostThread()->Stop(); return 0; }
-		if (a1 == 1) { PostInfo* pi = reinterpret_cast<PostInfo*>(p1); if (pi && pi->GetPostThread()) { delete pi->GetPostThread(); pi->SetPostThread(nullptr); } return 0; }
-		if (a1 == 2) { PostInfo* pi = reinterpret_cast<PostInfo*>(p1); if (pi && pi->GetPostThread()) { Thread* t = pi->GetPostThread(); pi->SetPostThread(nullptr); t->Kill(); delete t; } return 0; }
+		if (a1 == 0) { PostInfo* pi = reinterpret_cast<PostInfo*>(p1); if (pi && pi->GetPostThread()) nzbget_rs_job_op(pi->GetPostThread(), 0, 0, 0, 0); return 0; }
+		if (a1 == 1 || a1 == 2)
+		{
+			PostInfo* pi = reinterpret_cast<PostInfo*>(p1);
+			if (pi && pi->GetPostThread()) { JobThread* t = pi->GetPostThread(); pi->SetPostThread(nullptr); nzbget_rs_job_free(t, a1 == 2 ? 1 : 0); }
+			return 0;
+		}
 		if (a1 == 3)
 		{
 			NzbInfo* n = reinterpret_cast<NzbInfo*>(p1);
 			if (!n || !n->GetUnpackThread()) return 0;
-			DirectUnpack* du = static_cast<DirectUnpack*>(n->GetUnpackThread());
-			return (a2 != 0 || (du->IsUnpacking() && !du->IsWaitingVolume())) ? 1 : 0;
+			JobThread* du = n->GetUnpackThread();
+			return (a2 != 0 || (nzbget_rs_job_op(du, 15, 0, 0, 0) && !nzbget_rs_job_op(du, 16, 0, 0, 0))) ? 1 : 0;
 		}
-		if (a1 == 4) { NzbInfo* n = reinterpret_cast<NzbInfo*>(p2); if (n && n->GetUnpackThread()) static_cast<DirectUnpack*>(n->GetUnpackThread())->Stop(reinterpret_cast<DownloadQueue*>(p1), n); return 0; }
-		if (a1 == 5) { NzbInfo* n = reinterpret_cast<NzbInfo*>(p2); if (n && n->GetUnpackThread()) static_cast<DirectUnpack*>(n->GetUnpackThread())->NzbDownloaded(reinterpret_cast<DownloadQueue*>(p1), n); return 0; }
-		if (a1 == 6) { NzbInfo* n = reinterpret_cast<NzbInfo*>(p2); if (n && n->GetUnpackThread()) static_cast<DirectUnpack*>(n->GetUnpackThread())->NzbDeleted(reinterpret_cast<DownloadQueue*>(p1), n); return 0; }
-		if (a1 == 7) { NzbInfo* n = reinterpret_cast<NzbInfo*>(p2); if (n && n->GetUnpackThread()) static_cast<DirectUnpack*>(n->GetUnpackThread())->FileDownloaded(reinterpret_cast<DownloadQueue*>(p1), reinterpret_cast<FileInfo*>((uintptr_t)i64s[0])); return 0; }
-		if (a1 == 8) { DirectUnpack::StartJob(reinterpret_cast<NzbInfo*>(p1)); return 0; }
-		if (a1 == 9) { NzbInfo* n = reinterpret_cast<NzbInfo*>(p1); if (n && n->GetLiveRepairThread()) n->GetLiveRepairThread()->Stop(); return 0; }
-		if (a1 == 10) { NzbInfo* n = reinterpret_cast<NzbInfo*>(p1); if (n && n->GetLiveRepairThread()) { Thread* t = n->GetLiveRepairThread(); n->SetLiveRepairThread(nullptr); t->Stop(); } return 0; }
+		if (a1 >= 4 && a1 <= 7)
+		{
+			NzbInfo* n = reinterpret_cast<NzbInfo*>(p2);
+			if (!n || !n->GetUnpackThread()) return 0;
+			// direct-unpack ops: 4 stop, 5 collection downloaded, 6 deleted, 7 file downloaded
+			static const int du_op[] = {11, 13, 14, 12};
+			uintptr_t arg = a1 == 7 ? (uintptr_t)i64s[0] : p2;
+			nzbget_rs_job_op(n->GetUnpackThread(), du_op[a1 - 4], 0, p1, arg);
+			return 0;
+		}
+		if (a1 == 8) { StartDirectUnpackJob(reinterpret_cast<NzbInfo*>(p1)); return 0; }
+		if (a1 == 9) { NzbInfo* n = reinterpret_cast<NzbInfo*>(p1); if (n && n->GetLiveRepairThread()) nzbget_rs_job_op(n->GetLiveRepairThread(), 0, 0, 0, 0); return 0; }
+		if (a1 == 10) { NzbInfo* n = reinterpret_cast<NzbInfo*>(p1); if (n && n->GetLiveRepairThread()) { JobThread* t = n->GetLiveRepairThread(); n->SetLiveRepairThread(nullptr); nzbget_rs_job_op(t, 0, 0, 0, 0); } return 0; }
 		if (a1 == 11)
 		{
 #ifndef DISABLE_PARCHECK
 			PostInfo* pi = reinterpret_cast<PostInfo*>(p1);
-			if (pi && pi->GetPostThread()) return static_cast<PostJobThread*>(pi->GetPostThread())->AddPar(reinterpret_cast<FileInfo*>(p2), a2 != 0) ? 1 : 0;
+			if (pi && pi->GetPostThread()) return nzbget_rs_job_op(pi->GetPostThread(), 5, a2 != 0 ? 1 : 0, p2, 0) ? 1 : 0;
 #endif
 			return 0;
 		}
@@ -4441,7 +4206,7 @@ inline uintptr_t NzbgetCQueueHost(void*, int op, int a1, int a2, uintptr_t p1, u
 #ifdef DISABLE_PARCHECK
 			if (a2 == 3) return 0;
 #endif
-			PostJobThread::StartPost(pi, a2);
+			StartPostJob(pi, a2);
 			return 0;
 		}
 		return 0;

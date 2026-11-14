@@ -5056,56 +5056,20 @@ pub(crate) fn active_prepost() -> Option<std::sync::Arc<crate::prepost::NzbgetRs
 }
 
 #[cfg(unix)]
-#[unsafe(no_mangle)]
-pub extern "C" fn nzbget_rs_prepost_new(
-    owner: usize,
-) -> *mut crate::prepost::NzbgetRsPrePostProcessor {
-    let arc = std::sync::Arc::new(crate::prepost::NzbgetRsPrePostProcessor::new(owner));
+pub(crate) fn set_active_prepost(pp: &std::sync::Arc<crate::prepost::NzbgetRsPrePostProcessor>) {
     if let Ok(mut g) = ACTIVE_PREPOST.write() {
-        *g = Some(std::sync::Arc::downgrade(&arc));
+        *g = Some(std::sync::Arc::downgrade(pp));
     }
-    std::sync::Arc::into_raw(arc).cast_mut()
 }
 
 #[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_prepost_free(
-    ptr: *mut crate::prepost::NzbgetRsPrePostProcessor,
-) {
-    if !ptr.is_null() {
-        let arc = std::sync::Arc::from_raw(ptr.cast_const());
-        let wk = std::sync::Arc::downgrade(&arc);
-        if let Ok(mut g) = ACTIVE_PREPOST.write() {
-            if g.as_ref()
-                .is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk))
-            {
-                *g = None;
-            }
+pub(crate) fn clear_active_prepost(pp: &std::sync::Arc<crate::prepost::NzbgetRsPrePostProcessor>) {
+    let wk = std::sync::Arc::downgrade(pp);
+    if let Ok(mut g) = ACTIVE_PREPOST.write() {
+        if g.as_ref().is_some_and(|cur| std::sync::Weak::ptr_eq(cur, &wk)) {
+            *g = None;
         }
-        drop(arc);
     }
-}
-
-#[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_prepost_exec(
-    ptr: *const crate::prepost::NzbgetRsPrePostProcessor,
-    op: c_int,
-    a1: c_int,
-    a2: c_int,
-    p1: usize,
-    p2: usize,
-    p3: usize,
-    s1: *const c_char,
-    host_ctx: *mut c_void,
-    host_cb: Option<crate::queuesubsys_host::NzbgetRsQueueSubsysHostFn>,
-) -> usize {
-    let (Some(proc_ref), Some(cb)) = (ptr.as_ref(), host_cb) else {
-        return 0;
-    };
-    let _cancel_guard = PosixCancelGuard::disable();
-    proc_ref.exec(op, a1, a2, p1, p2, p3, s1, host_ctx, cb)
 }
 
 #[cfg(unix)]
@@ -5136,78 +5100,6 @@ pub unsafe extern "C" fn nzbget_rs_par_checker_exec(
 ) -> c_int {
     let _cancel_guard = PosixCancelGuard::disable();
     crate::postproc::par_checker_exec(ctrl, op, a1, s1, host_cb, ctx)
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_direct_unpack_new(
-    nzb_id: c_int,
-    thread_ptr: usize,
-) -> *mut crate::postproc::NzbgetRsDirectUnpack {
-    Box::into_raw(Box::new(crate::postproc::NzbgetRsDirectUnpack::new(
-        nzb_id, thread_ptr,
-    )))
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_direct_unpack_free(
-    ctrl: *mut crate::postproc::NzbgetRsDirectUnpack,
-) {
-    if !ctrl.is_null() {
-        drop(Box::from_raw(ctrl));
-    }
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_direct_unpack_exec(
-    ctrl: *const crate::postproc::NzbgetRsDirectUnpack,
-    op: c_int,
-    p1: usize,
-    p2: usize,
-) -> c_int {
-    let Some(c) = ctrl.as_ref() else {
-        return 0;
-    };
-    let _cancel_guard = PosixCancelGuard::disable();
-    c.exec_active(op, p1, p2)
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_post_job_new(
-    kind: c_int,
-    thread_ptr: usize,
-    post_ptr: usize,
-    nzb_id: c_int,
-) -> *mut crate::postproc::NzbgetRsPostJob {
-    Box::into_raw(Box::new(crate::postproc::NzbgetRsPostJob::new(
-        kind, thread_ptr, post_ptr, nzb_id,
-    )))
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_post_job_free(job: *mut crate::postproc::NzbgetRsPostJob) {
-    if !job.is_null() {
-        drop(Box::from_raw(job));
-    }
-}
-
-#[cfg(unix)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn nzbget_rs_post_job_op(
-    job: *const crate::postproc::NzbgetRsPostJob,
-    op: c_int,
-    a1: c_int,
-    p1: usize,
-) -> c_int {
-    let _cancel_guard = PosixCancelGuard::disable();
-    match job.as_ref() {
-        Some(j) => j.exec(op, a1, p1),
-        None => 0,
-    }
 }
 
 // The `libc` crate exports these only for Apple targets; the values differ per platform.

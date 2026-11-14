@@ -359,27 +359,30 @@ void nzbget_rs_par_checker_free(NzbgetRsParChecker* ctrl);
 int nzbget_rs_par_checker_exec(
     const NzbgetRsParChecker* ctrl, int op, int a1, const char* s1,
     NzbgetRsRepairCtrlHostFn host_cb, void* ctx);
-typedef struct NzbgetRsDirectUnpack NzbgetRsDirectUnpack;
-NzbgetRsDirectUnpack* nzbget_rs_direct_unpack_new(int nzb_id, uintptr_t thread_ptr);
-void nzbget_rs_direct_unpack_free(NzbgetRsDirectUnpack* ctrl);
-int nzbget_rs_direct_unpack_exec(
-    const NzbgetRsDirectUnpack* ctrl, int op, uintptr_t p1, uintptr_t p2);
-typedef struct NzbgetRsPostJob NzbgetRsPostJob;
-NzbgetRsPostJob* nzbget_rs_post_job_new(int kind, uintptr_t thread_ptr, uintptr_t post_ptr, int nzb_id);
-void nzbget_rs_post_job_free(NzbgetRsPostJob* job);
-int nzbget_rs_post_job_op(const NzbgetRsPostJob* job, int op, int a1, uintptr_t p1);
+// Job threads for post-processing, live repair and direct unpack (rust/src/jobthread.rs).
+typedef struct JobThread JobThread;
+JobThread* nzbget_rs_job_new_post(int kind, uintptr_t post_ptr, int nzb_id, int auto_destroy);
+JobThread* nzbget_rs_job_new_unpack(int nzb_id);
+// 1 started; 0 no thread created (clear any stored handle, then nzbget_rs_job_free).
+int nzbget_rs_job_start(JobThread* t);
+// 0 stop, 1 is stopped, 2 set stop flag, 3 clear stop flag, 4 is running,
+// 5 add par (p1 file, a1 deleted), 10+n direct-unpack op n (p1, p2).
+int nzbget_rs_job_op(const JobThread* t, int op, int a1, uintptr_t p1, uintptr_t p2);
+void nzbget_rs_job_free(JobThread* t, int kill);
 
 int nzbget_rs_script_config_exec(
     int op, const char* p1, size_t n1, const char* p2, size_t n2,
     void* ctx, int (*cancel_cb)(void*), NzbgetRsBuf* out_buf);
 
-typedef struct NzbgetRsPrePostProcessor NzbgetRsPrePostProcessor;
-NzbgetRsPrePostProcessor* nzbget_rs_prepost_new(uintptr_t owner);
-void nzbget_rs_prepost_free(NzbgetRsPrePostProcessor* ptr);
-uintptr_t nzbget_rs_prepost_exec(
-    const NzbgetRsPrePostProcessor* ptr, int op, int a1, int a2,
-    uintptr_t p1, uintptr_t p2, uintptr_t p3, const char* s1,
-    void* host_ctx, NzbgetRsQueueSubsysHostFn host_cb);
+// The daemon's pre/post-processor thread (rust/src/jobthread.rs).
+typedef struct PrePostRunner PrePostRunner;
+const PrePostRunner* nzbget_rs_prepost_runner_new(void);
+// 0 start, 1 stop, 2 is running, 3 is stopped, 4 has more jobs,
+// 5 has active unpack (a1 includes waiting volumes), 6 collection downloaded
+// (p1 queue, p2 collection), 8 queue change (a1 action, p1 queue, p2 nzb, p3 file).
+int nzbget_rs_prepost_runner_op(const PrePostRunner* r, int op, int a1, uintptr_t p1, uintptr_t p2, uintptr_t p3);
+void nzbget_rs_prepost_runner_free(const PrePostRunner* r);
+void nzbget_rs_prepost_queue_changed(int action, uintptr_t dq, uintptr_t nzb, uintptr_t file);
 
 #ifdef __cplusplus
 }

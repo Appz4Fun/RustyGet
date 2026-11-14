@@ -32,6 +32,8 @@ pub mod fsdelete;
 #[cfg(unix)]
 pub mod fsops;
 pub mod historycoord;
+#[cfg(unix)]
+pub mod jobthread;
 pub mod json;
 #[cfg(unix)]
 pub mod log;
